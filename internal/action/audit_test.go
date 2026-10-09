@@ -22,14 +22,22 @@ import (
 )
 
 func TestAuditIssueAndPullRequest(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("audit validators require node")
+	}
 	for _, tt := range []struct {
-		name, subject, wantError            string
-		failCodex, missingReport, movedHead bool
+		name, subject, wantError                                                                                      string
+		failCodex, missingReport, reportOnly, incomplete, wrongSourceRef, badFindings, movedHead, unresolvedCandidate bool
 	}{
 		{name: "issue default branch", subject: "Issue"},
 		{name: "pull request head", subject: "PullRequest"},
 		{name: "Codex failure", subject: "Issue", failCodex: true, wantError: "Codex unavailable"},
 		{name: "missing report", subject: "PullRequest", missingReport: true, wantError: "REPORT.md"},
+		{name: "report without audit artifacts", subject: "PullRequest", reportOnly: true, wantError: "run-metadata.json"},
+		{name: "incomplete run", subject: "Issue", incomplete: true, wantError: "complete standard run"},
+		{name: "wrong audited commit", subject: "Issue", wrongSourceRef: true, wantError: "complete standard run"},
+		{name: "validator failure", subject: "Issue", badFindings: true, wantError: "validate-findings.cjs"},
+		{name: "unresolved candidate", subject: "Issue", unresolvedCandidate: true, wantError: "unvalidated candidate"},
 		{name: "moved pull request", subject: "PullRequest", movedHead: true, wantError: "pull request head changed"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -72,6 +80,11 @@ func TestAuditIssueAndPullRequest(t *testing.T) {
 					if _, err := fmt.Fprint(w, `[]`); err != nil {
 						t.Error(err)
 					}
+				case r.Method == http.MethodPost && r.URL.Path == "/graphql":
+					if len(comments) != 1 {
+						t.Fatalf("provenance requested before audit comment: %+v", comments)
+					}
+					_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"node": map[string]any{"body": comments[0].Body, "author": map[string]string{"login": "linkdataminion"}}}})
 				case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/issues/7/comments":
 					usageRecords, err := usage.ReadAll(usageStore.Dir)
 					if err != nil || len(usageRecords) != 1 || usageRecords[0].Tokens.Total() != 120 || !usageRecords[0].UsageComplete {
@@ -83,10 +96,10 @@ func TestAuditIssueAndPullRequest(t *testing.T) {
 					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 						t.Error(err)
 					}
-					if !strings.Contains(payload.Body, expected) || !strings.Contains(payload.Body, "Audit summary") || !strings.Contains(payload.Body, job.Marker()) {
-						t.Errorf("missing audit result, commit, or marker: %s", payload.Body)
+					if !strings.Contains(payload.Body, expected) || !strings.Contains(payload.Body, "Verified audit report") || !strings.Contains(payload.Body, job.Marker()) || strings.Contains(payload.Body, "Untrusted final answer") {
+						t.Errorf("comment did not use verified report: %s", payload.Body)
 					}
-					comments = append(comments, github.Comment{Body: payload.Body, User: github.User{Login: "linkdataminion"}})
+					comments = append(comments, github.Comment{NodeID: "audit-comment-1", Body: payload.Body, User: github.User{Login: "linkdataminion"}})
 					w.WriteHeader(http.StatusCreated)
 					if _, err := fmt.Fprint(w, `{"id":1}`); err != nil {
 						t.Error(err)
@@ -99,7 +112,16 @@ func TestAuditIssueAndPullRequest(t *testing.T) {
 			defer server.Close()
 			client := github.New("test-token")
 			client.BaseURL, client.HTTPClient = server.URL, server.Client()
-			skill := filepath.Join(t.TempDir(), "security-audit", "SKILL.md")
+			skillDir := filepath.Join(t.TempDir(), "security-audit")
+			if err := os.Mkdir(skillDir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			skill := filepath.Join(skillDir, "SKILL.md")
+			for _, name := range []string{"validate-findings.cjs", "validate-coverage-ledger.cjs"} {
+				if err := os.WriteFile(filepath.Join(skillDir, name), []byte(`const fs = require('fs'); if (!Array.isArray(JSON.parse(fs.readFileSync(process.argv[2], 'utf8')))) process.exit(1);`), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
 			var calls int
 			var sourceDir, reportsDir string
 			e := &Executor{
@@ -131,12 +153,45 @@ func TestAuditIssueAndPullRequest(t *testing.T) {
 					if tt.failCodex {
 						return codexcli.Result{Tokens: usage.Tokens{Input: 10, CachedInput: 8, Output: 2}}, errors.New("Codex unavailable")
 					}
+					write := func(name, content string) error {
+						return os.WriteFile(filepath.Join(outputDir, name), []byte(content), 0600)
+					}
+					if !tt.reportOnly {
+						status := "complete"
+						if tt.incomplete {
+							status = "incomplete"
+						}
+						sourceRef := expected
+						if tt.wrongSourceRef {
+							sourceRef = strings.Repeat("f", 40)
+						}
+						metadata := fmt.Sprintf(`{"run_id":"test-run","repo":"o/r","target":%q,"source_ref":%q,"profile":"standard","scope_paths":["."],"budget":null,"selected_companion_files":[],"prior_run_paths":[],"shared_file_owners":%s,"execution_policy":"sandboxed-source-and-local-only","run_status":%q}`, dir, sourceRef, auditTestOwners, status)
+						ledger := `[{"status":"covered"}]`
+						if tt.unresolvedCandidate {
+							ledger = `[{"status":"candidate","result_fingerprints":["F"],"unresolved":["validation_budget_exhausted"]}]`
+						}
+						for name, content := range map[string]string{
+							"run-metadata.json":    metadata,
+							"architecture.md":      "Architecture\n",
+							"coverage-ledger.json": ledger,
+							"findings.json":        "[]",
+							"FINDINGS-DETAIL.md":   "No detailed findings.\n",
+							"NEEDS-VALIDATION.md":  "No validation leads.\n",
+						} {
+							if tt.badFindings && name == "findings.json" {
+								content = "not JSON"
+							}
+							if err := write(name, content); err != nil {
+								return codexcli.Result{}, err
+							}
+						}
+					}
 					if !tt.missingReport {
-						if err := os.WriteFile(filepath.Join(outputDir, "REPORT.md"), []byte("Audit report\n"), 0600); err != nil {
+						if err := write("REPORT.md", "Verified audit report\n"); err != nil {
 							return codexcli.Result{}, err
 						}
 					}
-					return codexcli.Result{Answer: "Audit summary", Tokens: usage.Tokens{Input: 100, CachedInput: 80, Output: 20}, UsageComplete: true}, nil
+					return codexcli.Result{Answer: "Untrusted final answer", Tokens: usage.Tokens{Input: 100, CachedInput: 80, Output: 20}, UsageComplete: true}, nil
 				},
 			}
 			err := e.Execute(context.Background(), job)
@@ -197,6 +252,94 @@ func TestAuditIssueAndPullRequest(t *testing.T) {
 			}
 		})
 	}
+}
+
+const auditTestOwners = `{"run-metadata.json":"parent","architecture.md":"parent","coverage-ledger.json":"parent","findings.json":"parent","REPORT.md":"parent","FINDINGS-DETAIL.md":"parent","NEEDS-VALIDATION.md":"parent"}`
+
+func TestValidateAuditOutput(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("audit validators require node")
+	}
+	root := t.TempDir()
+	skillDir := filepath.Join(t.TempDir(), "security-audit")
+	if err := os.Mkdir(skillDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"validate-findings.cjs", "validate-coverage-ledger.cjs"} {
+		if err := os.WriteFile(filepath.Join(skillDir, name), []byte(`JSON.parse(require('fs').readFileSync(process.argv[2], 'utf8'));`), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write := func(name, content string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	head := strings.Repeat("a", 40)
+	target := filepath.Join(t.TempDir(), "source")
+	metadata := fmt.Sprintf(`{"run_id":"test-run","repo":"o/r","target":%q,"source_ref":%q,"profile":"standard","scope_paths":["."],"budget":null,"selected_companion_files":[],"prior_run_paths":[],"shared_file_owners":%s,"execution_policy":"sandboxed-source-and-local-only","run_status":"complete"}`, target, head, auditTestOwners)
+	write("run-metadata.json", metadata)
+	write("architecture.md", "Architecture\n")
+	write("coverage-ledger.json", `[{"status":"covered"}]`)
+	write("findings.json", "[]")
+	write("REPORT.md", "Verified audit report\n")
+	write("FINDINGS-DETAIL.md", "")
+	write("NEEDS-VALIDATION.md", "")
+	validate := func(wantError string) {
+		t.Helper()
+		report, err := validateAuditOutput(context.Background(), root, filepath.Join(skillDir, "SKILL.md"), "o/r", target, head)
+		if wantError == "" {
+			if err != nil || report != "Verified audit report\n" {
+				t.Fatalf("valid audit output = %q, %v", report, err)
+			}
+		} else if err == nil || !strings.Contains(err.Error(), wantError) {
+			t.Fatalf("audit output error = %v, want %q", err, wantError)
+		}
+	}
+	validate("")
+	if err := os.Remove(filepath.Join(root, "run-metadata.json")); err != nil {
+		t.Fatal(err)
+	}
+	validate("run-metadata.json")
+	write("run-metadata.json", strings.Replace(metadata, `"complete"`, `"incomplete"`, 1))
+	validate("complete standard run")
+	write("run-metadata.json", metadata)
+	write("run-metadata.json", strings.Replace(metadata, `"budget":null,`, "", 1))
+	validate("complete standard run")
+	write("run-metadata.json", strings.Replace(metadata, `"run-metadata.json":"parent",`, "", 1))
+	validate("lacks parent ownership")
+	write("run-metadata.json", metadata)
+	write("findings.json", "not JSON")
+	validate("validate-findings.cjs")
+	write("findings.json", "[]")
+	write("coverage-ledger.json", "[]")
+	validate("no coverage units")
+	write("coverage-ledger.json", `[{"status":"planned"}]`)
+	validate("unfinished planned unit")
+	write("coverage-ledger.json", `[{"status":"blocked"}]`)
+	validate("")
+	write("coverage-ledger.json", `[{"status":"deferred"}]`)
+	validate("unfinished deferred unit")
+	write("coverage-ledger.json", `[{"status":"candidate","result_fingerprints":["F"],"unresolved":["validation_budget_exhausted"]}]`)
+	validate("unvalidated candidate")
+	write("coverage-ledger.json", `[{"status":"candidate","result_fingerprints":[],"unresolved":[]}]`)
+	validate("candidate without fingerprint")
+	write("coverage-ledger.json", `[{"status":"candidate","result_fingerprints":["F"],"unresolved":[]}]`)
+	validate("without final finding")
+	write("findings.json", `[{"fingerprint":"F"}]`)
+	validate("")
+	write("coverage-ledger.json", `[{"status":"candidate","result_fingerprints":["F"],"unresolved":["validation_budget_exhausted"]}]`)
+	validate("unvalidated candidate")
+	write("coverage-ledger.json", `[{"status":"covered"}]`)
+	validate("finding F without candidate")
+	write("coverage-ledger.json", `[{"status":"covered","attempts":[{"status":"candidate","result_fingerprints":["F"]}]}]`)
+	validate("")
+	write("findings.json", "[]")
+	validate("without final finding")
+	write("findings.json", `[{"fingerprint":"F"}]`)
+	write("coverage-ledger.json", `[{"status":"covered","attempts":[{"status":"candidate","result_fingerprints":["F"],"unresolved":["validation_budget_exhausted"]}]}]`)
+	validate("unvalidated candidate")
 }
 
 func auditGitFixture(t *testing.T) (base, head string) {
