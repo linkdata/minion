@@ -19,8 +19,49 @@ type Item struct {
 	NodeID    string
 	Body      string
 	Author    User
+	Editor    User
+	Edited    bool
 	UpdatedAt time.Time
 	HTMLURL   string
+}
+
+// CurrentItem reads the body and edit provenance together. REST comment
+// responses identify the original author but not the person who edited them.
+func (c *Client) CurrentItem(ctx context.Context, item Item) (Item, error) {
+	if item.NodeID == "" {
+		return Item{}, errors.New("GitHub item has no node ID")
+	}
+	var result struct {
+		Data struct {
+			Node *struct {
+				Body         string     `json:"body"`
+				Author       User       `json:"author"`
+				Editor       User       `json:"editor"`
+				LastEditedAt *time.Time `json:"lastEditedAt"`
+			} `json:"node"`
+		} `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	_, _, err := c.request(ctx, http.MethodPost, "/graphql", map[string]any{
+		"query":     `query($id: ID!) { node(id: $id) { ... on Comment { body author { login } editor { login } lastEditedAt } } }`,
+		"variables": map[string]string{"id": item.NodeID},
+	}, &result, nil, http.StatusOK)
+	if err != nil {
+		return Item{}, err
+	}
+	if len(result.Errors) != 0 {
+		return Item{}, fmt.Errorf("GitHub item provenance: %s", result.Errors[0].Message)
+	}
+	if result.Data.Node == nil || result.Data.Node.Author.Login == "" {
+		return Item{}, errors.New("GitHub item provenance is unavailable")
+	}
+	item.Body = result.Data.Node.Body
+	item.Author = result.Data.Node.Author
+	item.Editor = result.Data.Node.Editor
+	item.Edited = result.Data.Node.LastEditedAt != nil || item.Editor.Login != ""
+	return item, nil
 }
 
 type Issue struct {

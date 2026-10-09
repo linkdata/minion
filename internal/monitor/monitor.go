@@ -24,6 +24,7 @@ type GitHub interface {
 	ListRepositoryInvitations(context.Context) ([]github.Invitation, error)
 	AcceptRepositoryInvitation(context.Context, int64) error
 	ThreadItems(context.Context, string, string, int, time.Time) ([]github.Item, error)
+	CurrentItem(context.Context, github.Item) (github.Item, error)
 	Permission(context.Context, string, string) (github.Permission, error)
 	ReactEyes(context.Context, string) error
 }
@@ -137,6 +138,22 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			if strings.EqualFold(item.Author.Login, m.Config.BotLogin) || item.Author.Login == "" {
 				continue
 			}
+			_, err := command.ParseForLogin(item.Body, m.Config.BotLogin)
+			if errors.Is(err, command.ErrNoCommand) {
+				continue
+			}
+			if err != nil {
+				m.logf("skip command in %s: %v", item.HTMLURL, err)
+				continue
+			}
+			item, err = m.GitHub.CurrentItem(ctx, item)
+			if err != nil {
+				failures = append(failures, fmt.Errorf("verify command in %s: %w", item.HTMLURL, err))
+				continue
+			}
+			if strings.EqualFold(item.Author.Login, m.Config.BotLogin) || item.Author.Login == "" {
+				continue
+			}
 			cmd, err := command.ParseForLogin(item.Body, m.Config.BotLogin)
 			if errors.Is(err, command.ErrNoCommand) {
 				continue
@@ -154,6 +171,16 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				ID:          jobID(item.Key, cmd.Key),
 			}
 			if _, done := store.Data.Processed[job.ID]; done {
+				continue
+			}
+			if item.Edited {
+				// The latest editor may not be the actor who introduced a
+				// retained command. Do not run commands from edited content.
+				m.logf("ignore edited command in %s (last editor @%s)", item.HTMLURL, item.Editor.Login)
+				store.Data.Processed[job.ID] = started
+				if err := store.Save(); err != nil {
+					return next, err
+				}
 				continue
 			}
 			if !repo.AllowsAction(string(cmd.Action)) || !repo.AllowsActor(item.Author.Login) {
@@ -188,6 +215,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			}
 			store.Data.Processed[job.ID] = started
 			delete(store.Data.PendingFixes, job.ID)
+			delete(store.Data.PendingReleases, job.ID)
 			if err := store.Save(); err != nil {
 				return next, err
 			}

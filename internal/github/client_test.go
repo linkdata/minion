@@ -62,6 +62,47 @@ func TestReactEyesUsesExactNodeAndChecksGraphQLErrors(t *testing.T) {
 	}
 }
 
+func TestCurrentItemUsesLiveBodyAndEditProvenance(t *testing.T) {
+	response := `{"data":{"node":{"body":"@linkdataminion review","author":{"login":"allowed"},"editor":{"login":"excluded"},"lastEditedAt":"2026-10-09T08:00:00Z"}}}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/graphql" {
+			t.Errorf("unexpected provenance request: %s %s", r.Method, r.URL.Path)
+		}
+		var input struct {
+			Query     string            `json:"query"`
+			Variables map[string]string `json:"variables"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			t.Error(err)
+		}
+		if input.Variables["id"] != "comment-node" || !strings.Contains(input.Query, "lastEditedAt") || !strings.Contains(input.Query, "editor { login }") {
+			t.Errorf("provenance query omitted edit metadata: %+v", input)
+		}
+		if _, err := fmt.Fprint(w, response); err != nil {
+			t.Error(err)
+		}
+	}))
+	defer server.Close()
+	client := testClient(server)
+	item := Item{NodeID: "comment-node", Body: "stale body", Author: User{Login: "allowed"}}
+	current, err := client.CurrentItem(context.Background(), item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Body != "@linkdataminion review" || !current.Edited || current.Editor.Login != "excluded" || current.Author.Login != "allowed" {
+		t.Fatalf("lost live body or editor: %+v", current)
+	}
+	response = `{"data":{"node":{"body":"@linkdataminion review","author":{"login":"allowed"},"editor":null,"lastEditedAt":null}}}`
+	current, err = client.CurrentItem(context.Background(), item)
+	if err != nil || current.Edited {
+		t.Fatalf("unedited original command rejected: item=%+v err=%v", current, err)
+	}
+	response = `{"errors":[{"message":"Resource not accessible"}]}`
+	if _, err := client.CurrentItem(context.Background(), item); err == nil {
+		t.Fatal("GraphQL provenance failure did not fail closed")
+	}
+}
+
 func TestListNotificationsPaginatesAndRepeatsAfterFailedAction(t *testing.T) {
 	var calls []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -418,7 +459,7 @@ func TestRecoveryLookups(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/repos/o/r/pulls":
-			if r.URL.Query().Get("head") != "o:bot-branch" || r.URL.Query().Get("state") != "all" {
+			if r.URL.Query().Get("head") != "o:bot-branch" || r.URL.Query().Get("base") != "main" || r.URL.Query().Get("state") != "open" {
 				t.Errorf("wrong PR recovery filter: %s", r.URL.RawQuery)
 			}
 			if _, err := fmt.Fprint(w, `[{"number":3,"title":"recovered"}]`); err != nil {
@@ -444,7 +485,7 @@ func TestRecoveryLookups(t *testing.T) {
 	}))
 	defer server.Close()
 	c := testClient(server)
-	pull, err := c.FindPullRequestByHead(context.Background(), "o/r", "bot-branch")
+	pull, err := c.FindPullRequestByHead(context.Background(), "o/r", "main", "bot-branch")
 	if err != nil || pull == nil || pull.Number != 3 {
 		t.Fatalf("recover PR: %+v, %v", pull, err)
 	}
@@ -456,5 +497,68 @@ func TestRecoveryLookups(t *testing.T) {
 	var status *StatusError
 	if !errors.As(err, &status) || status.StatusCode != 404 {
 		t.Fatalf("missing release should return typed 404, got %v", err)
+	}
+}
+
+func TestProtectedReleaseTagsRequiresVisibleCompleteRuleset(t *testing.T) {
+	good := `{"id":42,"target":"tag","enforcement":"active","bypass_actors":[],"conditions":{"ref_name":{"include":["~ALL"],"exclude":[]}},"rules":[{"type":"update"},{"type":"deletion"}]}`
+	for _, tt := range []struct {
+		name   string
+		list   string
+		detail string
+		status int
+		want   bool
+	}{
+		{name: "complete ruleset", list: `[{"id":42}]`, detail: good, want: true},
+		{name: "no rulesets", list: `[]`},
+		{name: "hidden bypass list", list: `[{"id":42}]`, detail: strings.Replace(good, `"bypass_actors":[],`, "", 1)},
+		{name: "null bypass list", list: `[{"id":42}]`, detail: strings.Replace(good, `"bypass_actors":[]`, `"bypass_actors":null`, 1)},
+		{name: "bypass actor", list: `[{"id":42}]`, detail: strings.Replace(good, `"bypass_actors":[]`, `"bypass_actors":[{"actor_type":"RepositoryRole","actor_id":5}]`, 1)},
+		{name: "branch target", list: `[{"id":42}]`, detail: strings.Replace(good, `"target":"tag"`, `"target":"branch"`, 1)},
+		{name: "disabled", list: `[{"id":42}]`, detail: strings.Replace(good, `"enforcement":"active"`, `"enforcement":"disabled"`, 1)},
+		{name: "partial coverage", list: `[{"id":42}]`, detail: strings.Replace(good, `"~ALL"`, `"refs/tags/v*"`, 1)},
+		{name: "excluded tag", list: `[{"id":42}]`, detail: strings.Replace(good, `"exclude":[]`, `"exclude":["refs/tags/test"]`, 1)},
+		{name: "no update rule", list: `[{"id":42}]`, detail: strings.Replace(good, `{"type":"update"},`, "", 1)},
+		{name: "plan blocks rulesets", status: http.StatusForbidden},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet {
+					t.Errorf("unexpected method: %s", r.Method)
+				}
+				switch r.URL.Path {
+				case "/repos/o/r/rulesets":
+					if r.URL.Query().Get("targets") != "tag" || r.URL.Query().Get("includes_parents") != "true" || r.URL.Query().Get("per_page") != "100" {
+						t.Errorf("wrong ruleset query: %s", r.URL.RawQuery)
+					}
+					if tt.status != 0 {
+						w.WriteHeader(tt.status)
+						_, _ = fmt.Fprint(w, `{"message":"rulesets unavailable"}`)
+						return
+					}
+					_, _ = fmt.Fprint(w, tt.list)
+				case "/repos/o/r/rulesets/42":
+					if r.URL.Query().Get("includes_parents") != "true" {
+						t.Errorf("parent rulesets omitted: %s", r.URL.RawQuery)
+					}
+					_, _ = fmt.Fprint(w, tt.detail)
+				default:
+					t.Errorf("unexpected request: %s", r.URL)
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+			protected, err := testClient(server).ProtectedReleaseTags(context.Background(), "o/r")
+			if tt.status != 0 {
+				var status *StatusError
+				if !errors.As(err, &status) || status.StatusCode != tt.status {
+					t.Fatalf("error = %v, want HTTP %d", err, tt.status)
+				}
+				return
+			}
+			if err != nil || protected != tt.want {
+				t.Fatalf("protected = %v, error = %v, want %v", protected, err, tt.want)
+			}
+		})
 	}
 }

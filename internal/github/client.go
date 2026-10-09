@@ -116,6 +116,7 @@ type PullRequest struct {
 	Head      PullRequestRef `json:"head"`
 	Base      PullRequestRef `json:"base"`
 	Draft     bool           `json:"draft"`
+	State     string         `json:"state"`
 }
 
 type BranchCommit struct {
@@ -125,6 +126,30 @@ type BranchCommit struct {
 type Branch struct {
 	Name   string       `json:"name"`
 	Commit BranchCommit `json:"commit"`
+}
+
+type GitReference struct {
+	Ref    string `json:"ref"`
+	Object struct {
+		Type string `json:"type"`
+		SHA  string `json:"sha"`
+	} `json:"object"`
+}
+
+type repositoryRuleset struct {
+	ID           int64              `json:"id"`
+	Target       string             `json:"target"`
+	Enforcement  string             `json:"enforcement"`
+	BypassActors *[]json.RawMessage `json:"bypass_actors"`
+	Conditions   struct {
+		RefName struct {
+			Include []string `json:"include"`
+			Exclude []string `json:"exclude"`
+		} `json:"ref_name"`
+	} `json:"conditions"`
+	Rules []struct {
+		Type string `json:"type"`
+	} `json:"rules"`
 }
 
 type Review struct {
@@ -145,6 +170,7 @@ type Release struct {
 	Body            string `json:"body"`
 	Draft           bool   `json:"draft"`
 	HTMLURL         string `json:"html_url"`
+	Author          User   `json:"author"`
 }
 
 // StatusError preserves the HTTP status so callers can distinguish missing
@@ -425,6 +451,92 @@ func (c *Client) Branch(ctx context.Context, repo, branch string) (Branch, error
 	return details, err
 }
 
+func (c *Client) TagReference(ctx context.Context, repo, tag string) (GitReference, error) {
+	path, err := repoPath(repo)
+	if err != nil {
+		return GitReference{}, err
+	}
+	if strings.TrimSpace(tag) == "" {
+		return GitReference{}, errors.New("tag is required")
+	}
+	var ref GitReference
+	_, _, err = c.request(ctx, http.MethodGet, path+"/git/ref/tags/"+url.PathEscape(tag), nil, &ref, nil, http.StatusOK)
+	return ref, err
+}
+
+func (c *Client) CreateTagReference(ctx context.Context, repo, tag, sha string) error {
+	path, err := repoPath(repo)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(tag) == "" || strings.TrimSpace(sha) == "" {
+		return errors.New("tag and SHA are required")
+	}
+	_, _, err = c.request(ctx, http.MethodPost, path+"/git/refs", map[string]string{
+		"ref": "refs/tags/" + tag,
+		"sha": sha,
+	}, nil, nil, http.StatusCreated)
+	return err
+}
+
+// ProtectedReleaseTags verifies a single active ruleset that covers every tag,
+// blocks updates and deletions, and exposes an empty bypass list. GitHub omits
+// bypass_actors for tokens without ruleset write access; omission is not proof
+// that no actor can bypass protection.
+func (c *Client) ProtectedReleaseTags(ctx context.Context, repo string) (bool, error) {
+	path, err := repoPath(repo)
+	if err != nil {
+		return false, err
+	}
+	q := url.Values{"per_page": {"100"}, "targets": {"tag"}, "includes_parents": {"true"}}
+	for page := 1; page <= 1000; page++ {
+		q.Set("page", strconv.Itoa(page))
+		var summaries []struct {
+			ID int64 `json:"id"`
+		}
+		header, _, err := c.request(ctx, http.MethodGet, withQuery(path+"/rulesets", q), nil, &summaries, nil, http.StatusOK)
+		if err != nil {
+			return false, err
+		}
+		for _, summary := range summaries {
+			if summary.ID <= 0 {
+				return false, errors.New("GitHub returned a ruleset without a valid ID")
+			}
+			var detail repositoryRuleset
+			_, _, err := c.request(ctx, http.MethodGet, path+"/rulesets/"+strconv.FormatInt(summary.ID, 10)+"?includes_parents=true", nil, &detail, nil, http.StatusOK)
+			if err != nil {
+				return false, err
+			}
+			if detail.ID != summary.ID || detail.Target != "tag" || detail.Enforcement != "active" ||
+				detail.BypassActors == nil || len(*detail.BypassActors) != 0 || len(detail.Conditions.RefName.Exclude) != 0 ||
+				!containsString(detail.Conditions.RefName.Include, "~ALL") {
+				continue
+			}
+			var updates, deletions bool
+			for _, rule := range detail.Rules {
+				updates = updates || rule.Type == "update"
+				deletions = deletions || rule.Type == "deletion"
+			}
+			if updates && deletions {
+				return true, nil
+			}
+		}
+		if !hasNextPage(header.Get("Link")) {
+			return false, nil
+		}
+	}
+	return false, errors.New("too many GitHub ruleset pages")
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *Client) IssueDetails(ctx context.Context, repo string, number int) (Issue, error) {
 	path, err := repoPath(repo)
 	if err != nil {
@@ -438,20 +550,20 @@ func (c *Client) IssueDetails(ctx context.Context, repo string, number int) (Iss
 	return issue, err
 }
 
-// FindPullRequestByHead searches open and closed pull requests. A bare branch
-// name is qualified with the repository owner, as required by GitHub's filter.
-func (c *Client) FindPullRequestByHead(ctx context.Context, repo, head string) (*PullRequest, error) {
+// FindPullRequestByHead finds the open draft candidate for one base and head.
+// A bare head branch is qualified with the repository owner.
+func (c *Client) FindPullRequestByHead(ctx context.Context, repo, base, head string) (*PullRequest, error) {
 	path, err := repoPath(repo)
 	if err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(head) == "" {
-		return nil, errors.New("pull request head is required")
+	if strings.TrimSpace(base) == "" || strings.TrimSpace(head) == "" {
+		return nil, errors.New("pull request base and head are required")
 	}
 	if !strings.Contains(head, ":") {
 		head = strings.Split(repo, "/")[0] + ":" + head
 	}
-	q := url.Values{"head": {head}, "state": {"all"}, "per_page": {"100"}}
+	q := url.Values{"base": {base}, "head": {head}, "state": {"open"}, "per_page": {"100"}}
 	var pulls []PullRequest
 	_, _, err = c.request(ctx, http.MethodGet, withQuery(path+"/pulls", q), nil, &pulls, nil, http.StatusOK)
 	if err != nil {
@@ -459,6 +571,9 @@ func (c *Client) FindPullRequestByHead(ctx context.Context, repo, head string) (
 	}
 	if len(pulls) == 0 {
 		return nil, nil
+	}
+	if len(pulls) != 1 {
+		return nil, fmt.Errorf("multiple open pull requests for %s to %s", head, base)
 	}
 	return &pulls[0], nil
 }
