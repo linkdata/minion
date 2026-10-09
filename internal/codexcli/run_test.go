@@ -2,6 +2,7 @@ package codexcli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -253,6 +254,41 @@ func TestJSONLOutputCapturesUsageAndHelpers(t *testing.T) {
 			t.Fatalf("invalid usage accepted: %s", invalid)
 		}
 	}
+}
+
+func TestJSONLOutputStopsAtCardinalityLimits(t *testing.T) {
+	t.Run("events", func(t *testing.T) {
+		cancelled := false
+		output := jsonlOutput{cancel: func() { cancelled = true }}
+		_, _ = output.Write([]byte(strings.Repeat("{\"type\":\"noop\"}\n", maxCodexEvents+1)))
+		if !cancelled || !output.failed || output.events != maxCodexEvents+1 || !strings.Contains(output.failureReason, "event count") {
+			t.Fatalf("unbounded events: cancelled=%t events=%d reason=%q", cancelled, output.events, output.failureReason)
+		}
+	})
+	t.Run("children", func(t *testing.T) {
+		cancelled := false
+		output := jsonlOutput{cancel: func() { cancelled = true }}
+		ids := make([]string, maxCodexChildren+1)
+		for i := range ids {
+			ids[i] = strconv.Itoa(i)
+		}
+		line, err := json.Marshal(map[string]any{"item": map[string]any{"type": "collab_tool_call", "receiver_thread_ids": ids}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = output.Write(append(line, '\n'))
+		if !cancelled || !output.failed || len(output.children) != 0 || !strings.Contains(output.failureReason, "child agent") {
+			t.Fatalf("unbounded children: cancelled=%t children=%d reason=%q", cancelled, len(output.children), output.failureReason)
+		}
+	})
+	t.Run("bytes", func(t *testing.T) {
+		cancelled := false
+		output := jsonlOutput{cancel: func() { cancelled = true }, bytes: maxCodexOutputBytes - 1}
+		_, _ = output.Write([]byte("xx"))
+		if !cancelled || !output.failed || !strings.Contains(output.failureReason, "size limit") {
+			t.Fatalf("unbounded output bytes: cancelled=%t reason=%q", cancelled, output.failureReason)
+		}
+	})
 }
 
 func TestRunRetainsFallbackUsageOnFailure(t *testing.T) {

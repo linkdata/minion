@@ -2,7 +2,9 @@ package codexcli
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -10,6 +12,15 @@ import (
 	"time"
 
 	"github.com/linkdata/minion/internal/usage"
+)
+
+const (
+	maxUsageWalkEntries  = 100000
+	maxUsageFiles        = 1024
+	maxUsageAgents       = 257
+	maxUsageHeaderBytes  = 64 << 10
+	maxUsageRolloutBytes = 16 << 20
+	maxUsageScanBytes    = 64 << 20
 )
 
 type rolloutMeta struct {
@@ -29,9 +40,9 @@ type rolloutEvent struct {
 
 // collectUsage reads only new rollout headers until it has identified this
 // action's agent tree. Full transcripts of unrelated sessions are never read.
-func collectUsage(home, rootID string, started time.Time, fallback *usage.Tokens, expectedChildren []string) (usage.Tokens, bool) {
+func collectUsage(ctx context.Context, home, rootID string, started time.Time, fallback *usage.Tokens, expectedChildren []string) (usage.Tokens, bool) {
 	var total usage.Tokens
-	if rootID == "" || home == "" {
+	if rootID == "" || home == "" || ctx.Err() != nil {
 		if fallback != nil {
 			total = *fallback
 		}
@@ -39,10 +50,15 @@ func collectUsage(home, rootID string, started time.Time, fallback *usage.Tokens
 	}
 	complete := true
 	files := map[string]rolloutMeta{}
-	err := filepath.WalkDir(filepath.Join(home, "sessions"), func(path string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
+	entries, candidates := 0, 0
+	err := walkUsageFiles(ctx, filepath.Join(home, "sessions"), func(path string, entry fs.DirEntry) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		entries++
+		if entries > maxUsageWalkEntries {
 			complete = false
-			return nil
+			return fs.SkipAll
 		}
 		if !entry.Type().IsRegular() || !strings.HasSuffix(entry.Name(), ".jsonl") {
 			return nil
@@ -55,15 +71,21 @@ func collectUsage(home, rootID string, started time.Time, fallback *usage.Tokens
 		if info.ModTime().Before(started.Add(-time.Minute)) {
 			return nil
 		}
+		candidates++
+		if candidates > maxUsageFiles {
+			complete = false
+			return fs.SkipAll
+		}
 		f, err := os.Open(path)
 		if err != nil {
 			complete = false
 			return nil
 		}
-		scanner := rolloutScanner(f, nil)
+		scanner := rolloutScanner(io.LimitReader(f, maxUsageHeaderBytes+1), nil)
 		var event rolloutEvent
 		var meta rolloutMeta
-		ok := scanner.Scan() && json.Unmarshal(scanner.Bytes(), &event) == nil && event.Type == "session_meta" && json.Unmarshal(event.Payload, &meta) == nil && meta.ID != ""
+		ok := scanner.Scan() && len(scanner.Bytes()) <= maxUsageHeaderBytes && json.Unmarshal(scanner.Bytes(), &event) == nil && event.Type == "session_meta" && json.Unmarshal(event.Payload, &meta) == nil && meta.ID != ""
+		ok = ok && scanner.Err() == nil
 		if err := f.Close(); err != nil {
 			complete = false
 		}
@@ -94,6 +116,12 @@ func collectUsage(home, rootID string, started time.Time, fallback *usage.Tokens
 	if err != nil {
 		complete = false
 	}
+	if ctx.Err() != nil {
+		if fallback != nil {
+			return *fallback, false
+		}
+		return total, false
+	}
 	selected := map[string]bool{rootID: true}
 	for changed := true; changed; {
 		changed = false
@@ -103,12 +131,27 @@ func collectUsage(home, rootID string, started time.Time, fallback *usage.Tokens
 			}
 		}
 	}
+	if len(selected) > maxUsageAgents || len(expectedChildren) > maxUsageAgents {
+		if fallback != nil {
+			return *fallback, false
+		}
+		return total, false
+	}
 	for _, id := range expectedChildren {
 		if !selected[id] {
 			complete = false
 		}
 	}
+	budget := int64(maxUsageScanBytes)
+	rootCounted := false
 	for id := range selected {
+		if ctx.Err() != nil {
+			complete = false
+			break
+		}
+		if id == rootID {
+			rootCounted = true
+		}
 		meta, exists := files[id]
 		if !exists {
 			complete = false
@@ -117,7 +160,7 @@ func collectUsage(home, rootID string, started time.Time, fallback *usage.Tokens
 			}
 			continue
 		}
-		tokens, ok, children := readRolloutUsage(meta, rootID)
+		tokens, ok, children := readRolloutUsage(ctx, meta, rootID, &budget)
 		for _, child := range children {
 			if _, exists := files[child]; !exists || !selected[child] {
 				ok = false
@@ -132,11 +175,64 @@ func collectUsage(home, rootID string, started time.Time, fallback *usage.Tokens
 		total.Add(tokens)
 		complete = complete && ok
 	}
-	return total, complete
+	if ctx.Err() != nil && !rootCounted && fallback != nil {
+		total.Add(*fallback)
+	}
+	return total, complete && ctx.Err() == nil
 }
 
-func rolloutScanner(f *os.File, complete *bool) *bufio.Scanner {
-	scanner := bufio.NewScanner(f)
+// ReadDir with a positive count keeps a single large directory from being
+// loaded into memory before the entry limit can stop the scan.
+func walkUsageFiles(ctx context.Context, root string, visit func(string, fs.DirEntry) error) error {
+	pending := []string{root}
+	for len(pending) != 0 {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		last := len(pending) - 1
+		dir := pending[last]
+		pending = pending[:last]
+		children, err := readUsageDir(ctx, dir, visit)
+		if err != nil {
+			return err
+		}
+		pending = append(pending, children...)
+	}
+	return nil
+}
+
+func readUsageDir(ctx context.Context, path string, visit func(string, fs.DirEntry) error) ([]string, error) {
+	dir, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer dir.Close()
+	var children []string
+	for {
+		entries, err := dir.ReadDir(256)
+		for _, entry := range entries {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			name := filepath.Join(path, entry.Name())
+			if err := visit(name, entry); err != nil {
+				return nil, err
+			}
+			if entry.IsDir() {
+				children = append(children, name)
+			}
+		}
+		if err == io.EOF {
+			return children, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+}
+
+func rolloutScanner(r io.Reader, complete *bool) *bufio.Scanner {
+	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 64<<10), maxEventBytes)
 	scanner.Split(func(data []byte, atEOF bool) (int, []byte, error) {
 		if complete != nil && atEOF && len(data) != 0 && data[len(data)-1] != '\n' {
@@ -163,20 +259,41 @@ func rolloutTokens(raw json.RawMessage) (usage.Tokens, bool) {
 	return *tokens, true
 }
 
-func readRolloutUsage(meta rolloutMeta, rootID string) (usage.Tokens, bool, []string) {
+func readRolloutUsage(ctx context.Context, meta rolloutMeta, rootID string, budget *int64) (usage.Tokens, bool, []string) {
+	if ctx.Err() != nil || *budget <= 0 {
+		return usage.Tokens{}, false, nil
+	}
 	f, err := os.Open(meta.path)
 	if err != nil {
 		return usage.Tokens{}, false, nil
 	}
+	limit := int64(maxUsageRolloutBytes)
+	if *budget < limit {
+		limit = *budget
+	}
+	reader := &io.LimitedReader{R: f, N: limit + 1}
 	complete := true
-	scanner := rolloutScanner(f, &complete)
+	scanner := rolloutScanner(reader, &complete)
 	var total, latest, inherited usage.Tokens
 	seenRecord, seenSnapshot := false, false
 	responses := map[string]usage.Tokens{}
 	turns := map[string]bool{}
 	ownedTurns := map[string]bool{}
 	var children []string
+	tooManyChildren := false
+	appendChildren := func(ids ...string) {
+		if len(ids) > maxUsageAgents-len(children) {
+			tooManyChildren = true
+			complete = false
+			return
+		}
+		children = append(children, ids...)
+	}
 	for scanner.Scan() {
+		if ctx.Err() != nil {
+			complete = false
+			break
+		}
 		var event rolloutEvent
 		if json.Unmarshal(scanner.Bytes(), &event) != nil {
 			complete = false
@@ -240,18 +357,18 @@ func readRolloutUsage(meta rolloutMeta, rootID string) (usage.Tokens, bool, []st
 			own := meta.ID == rootID || (meta.HistoryStart != nil && event.Ordinal > *meta.HistoryStart)
 			if own && (payload.ThreadID == "" || payload.ThreadID == meta.ID) {
 				if payload.Type == "collab_agent_spawn_end" && payload.NewThreadID != "" {
-					children = append(children, payload.NewThreadID)
+					appendChildren(payload.NewThreadID)
 				}
 				if payload.Type == "item_completed" && payload.Item != nil {
 					if payload.Item.Type == "SubAgentActivity" {
 						if payload.Item.AgentID == "" {
 							complete = false
 						} else {
-							children = append(children, payload.Item.AgentID)
+							appendChildren(payload.Item.AgentID)
 						}
 					}
 					if payload.Item.Type == "CollabAgentToolCall" && payload.Item.Tool == "spawn_agent" && payload.Item.Status == "completed" {
-						children = append(children, payload.Item.ReceiverID...)
+						appendChildren(payload.Item.ReceiverID...)
 					}
 				}
 			}
@@ -279,7 +396,16 @@ func readRolloutUsage(meta rolloutMeta, rootID string) (usage.Tokens, bool, []st
 				}
 			}
 		}
+		if tooManyChildren {
+			break
+		}
 	}
+	consumed := limit + 1 - reader.N
+	if consumed > limit {
+		complete = false
+		consumed = limit
+	}
+	*budget -= consumed
 	if err := f.Close(); err != nil {
 		complete = false
 	}
