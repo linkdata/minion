@@ -1,0 +1,365 @@
+package action
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log"
+	"regexp"
+	"strings"
+	"time"
+
+	"github.com/linkdata/minion/internal/codexcli"
+	"github.com/linkdata/minion/internal/command"
+	"github.com/linkdata/minion/internal/config"
+	"github.com/linkdata/minion/internal/github"
+	"github.com/linkdata/minion/internal/gitwork"
+	"github.com/linkdata/minion/internal/monitor"
+	"github.com/linkdata/minion/internal/state"
+	"github.com/linkdata/minion/internal/usage"
+)
+
+const (
+	maxContextBytes = 32 << 10
+	maxOutputBytes  = 58 << 10
+)
+
+var tagPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$`)
+
+type Executor struct {
+	GitHub   *github.Client
+	BotLogin string
+	Store    *state.Store
+	Usage    *usage.Store
+	WorkRoot string
+	Timeout  time.Duration
+	Codex    config.CodexConfig
+	Logger   *log.Logger
+	RunCodex func(context.Context, string, string, bool, string) (codexcli.Result, error)
+}
+
+func (e *Executor) logf(format string, args ...any) {
+	if e.Logger != nil {
+		e.Logger.Printf(format, args...)
+	}
+}
+
+func (e *Executor) closeCheckout(checkout *gitwork.Checkout) {
+	// Cleanup failures must not retry an action already published to GitHub.
+	if err := checkout.Close(); err != nil {
+		e.logf("close checkout: %v", err)
+	}
+}
+
+func (e *Executor) runCodex(ctx context.Context, dir, prompt string, writable bool, outputDir string) (string, error) {
+	var result codexcli.Result
+	var err error
+	if e.RunCodex != nil {
+		result, err = e.RunCodex(ctx, dir, prompt, writable, outputDir)
+	} else {
+		result, err = codexcli.Run(ctx, dir, prompt, writable, outputDir, e.Codex)
+	}
+	return result.Answer, err
+}
+
+func (e *Executor) Execute(ctx context.Context, job monitor.Job) (resultErr error) {
+	if e.GitHub == nil {
+		return errors.New("GitHub client is missing")
+	}
+	timeout := e.Timeout
+	if timeout == 0 {
+		timeout = 30 * time.Minute
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	done, err := e.alreadyAcknowledged(ctx, job)
+	if err != nil {
+		return err
+	}
+	if done {
+		e.logf("already completed %s", job.ID)
+		return nil
+	}
+	// A panic leaves the last running checkpoint instead of claiming success.
+	returned := false
+	if e.Usage != nil {
+		tracked, finish, err := e.trackUsage(job)
+		if err != nil {
+			return err
+		}
+		e = tracked
+		defer func() {
+			if returned {
+				resultErr = finish(resultErr)
+			}
+		}()
+	}
+	switch job.Command.Action {
+	case command.Review:
+		resultErr = e.review(ctx, job)
+	case command.Audit:
+		resultErr = e.audit(ctx, job)
+	case command.Fix:
+		resultErr = e.fix(ctx, job)
+	case command.Release:
+		resultErr = e.release(ctx, job)
+	default:
+		resultErr = fmt.Errorf("unsupported action %q", job.Command.Action)
+	}
+	returned = true
+	return resultErr
+}
+
+func (e *Executor) alreadyAcknowledged(ctx context.Context, job monitor.Job) (bool, error) {
+	items, err := e.GitHub.ThreadItems(ctx, job.Repository.Name, job.SubjectType, job.Number, time.Time{})
+	if err != nil {
+		return false, fmt.Errorf("check existing bot replies: %w", err)
+	}
+	for _, item := range items {
+		if strings.EqualFold(item.Author.Login, e.BotLogin) && strings.Contains(item.Body, job.Marker()) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (e *Executor) review(ctx context.Context, job monitor.Job) error {
+	if job.SubjectType != "PullRequest" {
+		return e.acknowledge(ctx, job, "`review` applies to pull requests.")
+	}
+	if _, err := e.GitHub.Repository(ctx, job.Repository.Name); err != nil {
+		return err
+	}
+	pull, err := e.GitHub.PullRequestDetails(ctx, job.Repository.Name, job.Number)
+	if err != nil {
+		return err
+	}
+	if pull.Base.Ref == "" || pull.Head.SHA == "" {
+		return errors.New("pull request is missing base ref or head SHA")
+	}
+	checkout, err := gitwork.Clone(ctx, e.WorkRoot, job.Repository.Name, pull.Base.Ref)
+	if err != nil {
+		return err
+	}
+	defer e.closeCheckout(checkout)
+	if err := checkout.CheckoutPullRequest(ctx, job.Number, pull.Base.Ref, pull.Head.SHA); err != nil {
+		return err
+	}
+	prompt := fmt.Sprintf(`Review pull request #%d in %s, requested by @%s.
+
+The checkout is at the exact pull request head %s. Compare refs/remotes/minion/base...HEAD. Report actionable correctness, security, and regression findings with file and line references. If there are no findings, say so plainly. Do not edit files, run network commands, or publish anything.
+
+Pull request title: %s
+Pull request description:
+%s
+
+Request comment (%s):
+%s`, job.Number, job.Repository.Name, job.Source.Author.Login, pull.Head.SHA, pull.Title, bounded(pull.Body, maxContextBytes), sourceURL(job), bounded(job.Source.Body, maxContextBytes))
+	result, err := e.runCodex(ctx, checkout.Path(), prompt, false, "")
+	if err != nil {
+		return err
+	}
+	body := fmt.Sprintf("Automated review requested by @%s:\n\n%s\n\n%s", job.Source.Author.Login, bounded(result, maxOutputBytes), job.Marker())
+	_, err = e.GitHub.CreatePullRequestReview(ctx, job.Repository.Name, job.Number, body, pull.Head.SHA)
+	return err
+}
+
+func (e *Executor) fix(ctx context.Context, job monitor.Job) error {
+	if job.SubjectType != "Issue" {
+		return e.acknowledge(ctx, job, "`fix` currently applies to issue threads. It opens a draft pull request from the repository's default branch.")
+	}
+	issue, err := e.GitHub.IssueDetails(ctx, job.Repository.Name, job.Number)
+	if err != nil {
+		return err
+	}
+	repo, err := e.GitHub.Repository(ctx, job.Repository.Name)
+	if err != nil {
+		return err
+	}
+	if repo.Archived || repo.DefaultBranch == "" {
+		return fmt.Errorf("repository %s is archived or has no default branch", repo.FullName)
+	}
+	if len(job.ID) < 12 || e.Store == nil {
+		return errors.New("fix job has no durable state or valid ID")
+	}
+	branch := fmt.Sprintf("minion/fix-%d-%s", job.Number, job.ID[:12])
+	existing, err := e.GitHub.FindPullRequestByHead(ctx, repo.FullName, branch)
+	if err != nil {
+		return err
+	}
+	if existing != nil {
+		if !strings.Contains(existing.Body, job.Marker()) {
+			return fmt.Errorf("branch %s already has an unrelated pull request", branch)
+		}
+		e.bestEffortAcknowledge(ctx, job, "Draft fix: "+existing.HTMLURL)
+		return nil
+	}
+	remoteBranch, err := e.GitHub.Branch(ctx, repo.FullName, branch)
+	var result string
+	if isNotFound(err) {
+		checkout, err := gitwork.Clone(ctx, e.WorkRoot, repo.FullName, repo.DefaultBranch)
+		if err != nil {
+			return err
+		}
+		defer e.closeCheckout(checkout)
+		if err := checkout.NewBranch(ctx, branch); err != nil {
+			return err
+		}
+		prompt := fmt.Sprintf(`Implement a focused fix for issue #%d in %s. The request came from an authorized repository committer @%s.
+
+Read the code, make the smallest correct change, and run relevant local tests. Do not commit, push, open a pull request, create a release, or run network commands. Summarize the change and tests in Markdown when done.
+
+Issue title: %s
+Issue description:
+%s
+
+Request comment (%s):
+%s`, job.Number, repo.FullName, job.Source.Author.Login, issue.Title, bounded(issue.Body, maxContextBytes), sourceURL(job), bounded(job.Source.Body, maxContextBytes))
+		result, err = e.runCodex(ctx, checkout.Path(), prompt, true, "")
+		if err != nil {
+			return err
+		}
+		changed, err := checkout.HasChanges(ctx)
+		if err != nil {
+			return err
+		}
+		if !changed {
+			return e.acknowledge(ctx, job, "Codex completed the request without changing files.\n\n"+bounded(result, maxOutputBytes))
+		}
+		err = checkout.CommitAndPush(ctx, branch, e.BotLogin, fmt.Sprintf("Fix #%d via %s", job.Number, e.BotLogin), func(sha string) error {
+			e.Store.Data.PendingFixes[job.ID] = sha
+			return e.Store.Save()
+		})
+		if err != nil {
+			return err
+		}
+	} else if err != nil {
+		return err
+	} else {
+		expected := e.Store.Data.PendingFixes[job.ID]
+		if remoteBranch.Name != branch || expected == "" || !strings.EqualFold(remoteBranch.Commit.SHA, expected) {
+			return fmt.Errorf("branch %s exists without a matching recorded bot commit; refusing to reuse it", branch)
+		}
+		result = fmt.Sprintf("Recovered previously pushed bot commit `%s` after interrupted pull request creation. Review the changes before merging.", expected)
+	}
+	title := fmt.Sprintf("Fix #%d: %s", job.Number, issue.Title)
+	if len(title) > 180 {
+		title = title[:180]
+	}
+	body := fmt.Sprintf("Requested by @%s in %s.\n\n%s\n\n%s", job.Source.Author.Login, sourceURL(job), bounded(result, maxOutputBytes), job.Marker())
+	pull, err := e.GitHub.CreatePullRequest(ctx, repo.FullName, repo.DefaultBranch, branch, title, body, true)
+	if err != nil {
+		return err
+	}
+	e.bestEffortAcknowledge(ctx, job, "Draft fix: "+pull.HTMLURL)
+	return nil
+}
+
+func (e *Executor) release(ctx context.Context, job monitor.Job) error {
+	tag := job.Command.Args
+	if !validTag(tag) {
+		return e.acknowledge(ctx, job, "Invalid release tag. Use a simple Git tag such as `v1.2.3`.")
+	}
+	repo, err := e.GitHub.Repository(ctx, job.Repository.Name)
+	if err != nil {
+		return err
+	}
+	if repo.Archived || repo.DefaultBranch == "" {
+		return fmt.Errorf("repository %s is archived or has no default branch", repo.FullName)
+	}
+	existing, err := e.GitHub.ReleaseByTag(ctx, repo.FullName, tag)
+	if err != nil && !isNotFound(err) {
+		return err
+	}
+	if err == nil {
+		if !existing.Draft || !strings.Contains(existing.Body, job.Marker()) {
+			return fmt.Errorf("tag %s already has an unrelated or published release", tag)
+		}
+		e.bestEffortAcknowledge(ctx, job, "Draft release: "+existing.HTMLURL)
+		return nil
+	}
+	checkout, err := gitwork.Clone(ctx, e.WorkRoot, repo.FullName, repo.DefaultBranch)
+	if err != nil {
+		return err
+	}
+	defer e.closeCheckout(checkout)
+	tagExists, err := checkout.HasTag(ctx, tag)
+	if err != nil {
+		return err
+	}
+	if tagExists {
+		return e.acknowledge(ctx, job, fmt.Sprintf("Tag `%s` already exists. No draft release was created.", tag))
+	}
+	target, err := checkout.Head(ctx)
+	if err != nil {
+		return err
+	}
+	prompt := fmt.Sprintf(`Prepare GitHub release notes for proposed tag %s in %s at commit %s. Inspect the repository tags and history locally. Describe user-visible changes since the previous release, any known compatibility changes, and test coverage. Do not invent facts. Return Markdown release notes only. Do not edit files, create tags or releases, or run network commands.
+
+Requested by @%s in %s. Request text:
+%s`, tag, repo.FullName, target, job.Source.Author.Login, sourceURL(job), bounded(job.Source.Body, maxContextBytes))
+	result, err := e.runCodex(ctx, checkout.Path(), prompt, false, "")
+	if err != nil {
+		return err
+	}
+	if _, err := checkout.Head(ctx); err != nil {
+		return err
+	}
+	body := bounded(result, maxOutputBytes) + "\n\n" + job.Marker()
+	release, err := e.GitHub.CreateDraftRelease(ctx, repo.FullName, tag, target, tag, body)
+	if err != nil {
+		return err
+	}
+	e.bestEffortAcknowledge(ctx, job, "Draft release: "+release.HTMLURL)
+	return nil
+}
+
+func (e *Executor) acknowledge(ctx context.Context, job monitor.Job, message string) error {
+	body := message + "\n\n" + job.Marker()
+	switch job.SubjectType {
+	case "Issue", "PullRequest":
+		_, err := e.GitHub.CreateIssueComment(ctx, job.Repository.Name, job.Number, body)
+		return err
+	default:
+		return fmt.Errorf("cannot reply to %s", job.SubjectType)
+	}
+}
+
+func (e *Executor) bestEffortAcknowledge(ctx context.Context, job monitor.Job, message string) {
+	if err := e.acknowledge(ctx, job, message); err != nil {
+		e.logf("could not post completion reply for %s: %v", job.ID, err)
+	}
+}
+
+func sourceURL(job monitor.Job) string {
+	if job.Source.HTMLURL != "" {
+		return job.Source.HTMLURL
+	}
+	kind := map[string]string{"Issue": "issues", "PullRequest": "pull"}[job.SubjectType]
+	return fmt.Sprintf("https://github.com/%s/%s/%d", job.Repository.Name, kind, job.Number)
+}
+
+func validTag(tag string) bool {
+	if !tagPattern.MatchString(tag) || strings.Contains(tag, "..") || strings.Contains(tag, "//") || strings.HasSuffix(tag, "/") || strings.HasSuffix(tag, ".") {
+		return false
+	}
+	for _, component := range strings.Split(tag, "/") {
+		if strings.HasPrefix(component, ".") || strings.HasSuffix(component, ".lock") {
+			return false
+		}
+	}
+	return true
+}
+
+func bounded(s string, max int) string {
+	s = strings.TrimSpace(s)
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "\n\n[truncated]"
+}
+
+func isNotFound(err error) bool {
+	var status *github.StatusError
+	return errors.As(err, &status) && status.StatusCode == 404
+}

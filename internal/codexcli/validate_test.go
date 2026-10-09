@@ -1,0 +1,167 @@
+package codexcli
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/linkdata/minion/internal/config"
+)
+
+const catalogueScript = `#!/bin/sh
+printf '%s\n' "$@" > "$CAPTURE_ARGS"
+printf '%s,%s\n' "${GH_TOKEN-absent}" "${GITHUB_TOKEN-absent}" > "$CAPTURE_ENV"
+IFS= read -r request
+printf '%s\n' "$request" >> "$CAPTURE_REQUESTS"
+printf '%s\n' '{"id":1,"result":{}}'
+IFS= read -r request
+printf '%s\n' "$request" >> "$CAPTURE_REQUESTS"
+IFS= read -r request
+printf '%s\n' "$request" >> "$CAPTURE_REQUESTS"
+printf '%s\n' '{"method":"test/notification","params":{}}' "$CATALOGUE_PAGE1"
+if [ -n "$CATALOGUE_PAGE2" ]; then
+  IFS= read -r request
+  printf '%s\n' "$request" >> "$CAPTURE_REQUESTS"
+  printf '%s\n' "$CATALOGUE_PAGE2"
+fi
+cat >/dev/null
+`
+
+func TestValidateModelAndEffortAgainstInstalledCatalogue(t *testing.T) {
+	for _, tt := range []struct {
+		name, model, effort, wantModel, wantEffort, wantError string
+	}{
+		{name: "explicit model on second page", model: "gpt-6-sol", effort: "ultra", wantModel: "gpt-6-sol", wantEffort: "ultra"},
+		{name: "defaults pinned", wantModel: "gpt-6-luna", wantEffort: "medium"},
+		{name: "model default effort", model: "gpt-6-sol", wantModel: "gpt-6-sol", wantEffort: "medium"},
+		{name: "effort on default model", effort: "high", wantModel: "gpt-6-luna", wantEffort: "high"},
+		{name: "removed model", model: "removed-model", effort: "ultra", wantError: `codex.model "removed-model" is not recognized`},
+		{name: "removed effort", model: "gpt-6-sol", effort: "removed-effort", wantError: `supported efforts: medium, ultra`},
+		{name: "effort belongs to another model", model: "gpt-6-luna", effort: "ultra", wantError: `codex.reasoning_effort "ultra" is not supported for model "gpt-6-luna"`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			installFakeCodex(t, catalogueScript)
+			t.Setenv("CAPTURE_ARGS", filepath.Join(dir, "args"))
+			t.Setenv("CAPTURE_ENV", filepath.Join(dir, "env"))
+			t.Setenv("CAPTURE_REQUESTS", filepath.Join(dir, "requests"))
+			t.Setenv("GH_TOKEN", "secret")
+			t.Setenv("GITHUB_TOKEN", "secret")
+			t.Setenv("CATALOGUE_PAGE1", `{"id":2,"result":{"data":[{"model":"gpt-6-luna","isDefault":true,"defaultReasoningEffort":"medium","supportedReasoningEfforts":[{"reasoningEffort":"medium"},{"reasoningEffort":"high"}]}],"nextCursor":"second"}}`)
+			t.Setenv("CATALOGUE_PAGE2", `{"id":3,"result":{"data":[{"model":"gpt-6-sol","hidden":true,"defaultReasoningEffort":"medium","supportedReasoningEfforts":[{"reasoningEffort":"medium"},{"reasoningEffort":"ultra"}]}],"nextCursor":null}}`)
+			settings, err := Validate(context.Background(), config.CodexConfig{Model: tt.model, ReasoningEffort: tt.effort, Skills: []string{"/example/SKILL.md"}})
+			if tt.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+					t.Fatalf("Validate() error = %v, want %q", err, tt.wantError)
+				}
+			} else if err != nil || settings.Model != tt.wantModel || settings.ReasoningEffort != tt.wantEffort || len(settings.Skills) != 1 {
+				t.Fatalf("Validate() = %+v, %v", settings, err)
+			}
+			args, err := os.ReadFile(filepath.Join(dir, "args"))
+			if err != nil || !strings.HasPrefix(string(args), "app-server\n") || !strings.Contains(string(args), `model_provider="openai"`) {
+				t.Fatalf("wrong discovery command: %s, %v", args, err)
+			}
+			env, err := os.ReadFile(filepath.Join(dir, "env"))
+			if err != nil || strings.TrimSpace(string(env)) != "absent,absent" {
+				t.Fatalf("GitHub credentials reached model discovery: %s, %v", env, err)
+			}
+			requests, err := os.ReadFile(filepath.Join(dir, "requests"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			lines := strings.Split(strings.TrimSpace(string(requests)), "\n")
+			if len(lines) != 4 {
+				t.Fatalf("expected handshake and two catalogue pages, got %s", requests)
+			}
+			var last struct {
+				Method string `json:"method"`
+				Params struct {
+					Cursor        string `json:"cursor"`
+					IncludeHidden bool   `json:"includeHidden"`
+				} `json:"params"`
+			}
+			if err := json.Unmarshal([]byte(lines[3]), &last); err != nil || last.Method != "model/list" || last.Params.Cursor != "second" || !last.Params.IncludeHidden {
+				t.Fatalf("wrong catalogue pagination: %+v, %v", last, err)
+			}
+		})
+	}
+}
+
+func TestValidateFailsWhenCodexCannotSupplyCatalogue(t *testing.T) {
+	for _, response := range []string{
+		`{"id":2,"error":{"message":"Unknown method model/list"}}`,
+		`{"id":2,"result":{"data":[]}}`,
+		`{"id":2,"result":null}`,
+		`{"id":2,"result":{"data":[{"model":"gpt-6-sol"}]}}`,
+		`{"id":2,"result":{"data":[{"unexpectedNewField":"gpt-6-sol"}]}}`,
+		`not-json`,
+	} {
+		t.Run(response, func(t *testing.T) {
+			dir := t.TempDir()
+			installFakeCodex(t, catalogueScript)
+			t.Setenv("CAPTURE_ARGS", filepath.Join(dir, "args"))
+			t.Setenv("CAPTURE_ENV", filepath.Join(dir, "env"))
+			t.Setenv("CAPTURE_REQUESTS", filepath.Join(dir, "requests"))
+			t.Setenv("CATALOGUE_PAGE1", response)
+			t.Setenv("CATALOGUE_PAGE2", "")
+			if _, err := Validate(context.Background(), config.CodexConfig{Model: "gpt-6-sol", ReasoningEffort: "ultra"}); err == nil {
+				t.Fatalf("accepted unvalidated settings after response %s", response)
+			}
+		})
+	}
+}
+
+func TestValidateReportsCLIExitAndHonorsTimeout(t *testing.T) {
+	t.Run("unsupported CLI flag", func(t *testing.T) {
+		installFakeCodex(t, "#!/bin/sh\nprintf '%s\\n' 'unsupported flag' >&2\nexit 2\n")
+		if _, err := Validate(context.Background(), config.CodexConfig{}); err == nil || !strings.Contains(err.Error(), "unsupported flag") {
+			t.Fatalf("missing CLI failure: %v", err)
+		}
+	})
+	t.Run("timeout", func(t *testing.T) {
+		installFakeCodex(t, "#!/bin/sh\nexec sleep 10\n")
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+		started := time.Now()
+		if _, err := Validate(ctx, config.CodexConfig{}); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("expected deadline exceeded, got %v", err)
+		}
+		if time.Since(started) > 3*time.Second {
+			t.Fatal("model discovery did not stop after timeout")
+		}
+	})
+}
+
+func TestValidateReportsCleanupFailure(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions")
+	}
+	dir := t.TempDir()
+	t.Setenv("TMPDIR", dir)
+	installFakeCodex(t, strings.Replace(catalogueScript, "IFS= read -r request", "mkdir locked\ntouch locked/file\nchmod 000 locked\nIFS= read -r request", 1))
+	t.Setenv("CAPTURE_ARGS", filepath.Join(dir, "args"))
+	t.Setenv("CAPTURE_ENV", filepath.Join(dir, "env"))
+	t.Setenv("CAPTURE_REQUESTS", filepath.Join(dir, "requests"))
+	t.Setenv("CATALOGUE_PAGE1", `{"id":2,"result":{"data":[{"model":"test","isDefault":true,"defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high"}]}]}}`)
+	t.Setenv("CATALOGUE_PAGE2", "")
+	t.Cleanup(func() {
+		paths, err := filepath.Glob(filepath.Join(dir, "minion-codex-check-*", "locked"))
+		if err != nil {
+			t.Error(err)
+		}
+		for _, path := range paths {
+			if err := os.Chmod(path, 0700); err != nil {
+				t.Error(err)
+			}
+		}
+	})
+	// Go 1.23 predates testing.T.Context.
+	if _, err := Validate(context.Background(), config.CodexConfig{}); !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("Validate() = %v; want cleanup permission error", err)
+	}
+}

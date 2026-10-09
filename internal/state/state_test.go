@@ -1,0 +1,110 @@
+package state
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+)
+
+func TestStoreLocksAndPersistsCompletedCommands(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nested", "state.json")
+	initial := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	store, err := Open(path, initial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(path, initial); !errors.Is(err, ErrLocked) {
+		t.Fatalf("second writer got %v, want ErrLocked", err)
+	}
+	store.Data.Processed["job"] = initial
+	store.Data.NextInviteCheckAt = initial.Add(time.Hour)
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(path, initial.Add(24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := reopened.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	if _, ok := reopened.Data.Processed["job"]; !ok || !reopened.Data.Cursor.Equal(initial) || !reopened.Data.NextInviteCheckAt.Equal(initial.Add(time.Hour)) {
+		t.Fatalf("lost persisted state: %+v", reopened.Data)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Fatalf("state mode %o, want 0600", info.Mode().Perm())
+	}
+}
+
+func TestOpenFailureReleasesLock(t *testing.T) {
+	for name, content := range map[string]string{
+		"malformed":      "{",
+		"trailing data":  `{"cursor":"2026-10-09T08:00:00Z"} {}`,
+		"missing cursor": `{}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "state.json")
+			if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if store, err := Open(path, time.Now()); err == nil || store != nil {
+				t.Fatalf("Open() = %v, %v; want failure", store, err)
+			}
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			store, err := Open(path, time.Now())
+			if err != nil {
+				t.Fatalf("state lock retained after failure: %v", err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestSaveEncodingFailurePreservesStateAndCleansTemporaryFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	store, err := Open(path, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := store.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.Data.Cursor = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
+	var marshalErr *json.MarshalerError
+	if err := store.Save(); !errors.As(err, &marshalErr) {
+		t.Fatalf("Save() = %v; want JSON encoding error", err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatalf("failed save changed state: %s, %v", after, err)
+	}
+	files, err := os.ReadDir(dir)
+	if err != nil || len(files) != 2 {
+		t.Fatalf("temporary state file retained: %v, %v", files, err)
+	}
+}

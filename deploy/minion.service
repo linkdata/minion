@@ -1,0 +1,14 @@
+[Unit]
+Description=linkdataminion GitHub mention monitor
+
+[Service]
+Type=simple
+WorkingDirectory=/path/to/minion
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=/path/to/minion/bin/minion -config /path/to/minion/config.local.json -loop
+Restart=always
+RestartSec=30s
+UMask=0077
+
+[Install]
+WantedBy=default.target

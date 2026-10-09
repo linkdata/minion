@@ -1,0 +1,14 @@
+{
+  "bot_login": "example-bot",
+  "poll_interval_seconds": 60,
+  "job_timeout_minutes": 30,
+  "state_path": "var/state.json",
+  "work_root": "var/work",
+  "invitation_owners": [],
+  "repositories": [
+    {
+      "name": "example-owner/example-repo",
+      "actions": ["review", "fix", "release"]
+    }
+  ]
+}

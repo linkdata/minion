@@ -1,0 +1,295 @@
+package usage
+
+import (
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+)
+
+func testRecord() Record {
+	started := time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
+	finished := started.Add(time.Minute)
+	return Record{
+		ID: "0123456789abcdef0123456789abcdef", JobID: "github:123", Repo: "linkdata/minion", User: "example",
+		Action: "review", Number: 1, Model: "example-model", StartedAt: started, FinishedAt: &finished,
+		Status: "succeeded", CodexCalls: 1, Tokens: Tokens{Input: 100, CachedInput: 80, Output: 20}, UsageComplete: true,
+	}
+}
+
+func TestStoreAtomicUpdates(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "usage")
+	store := Store{Dir: dir}
+	record := testRecord()
+	record.Status, record.FinishedAt = "running", nil
+	record.CodexCalls, record.Tokens = 0, Tokens{}
+	if err := store.Save(record); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(filepath.Join(dir, record.ID+".json"))
+	if err != nil || info.Mode().Perm() != 0600 {
+		t.Fatalf("record permissions: info=%v err=%v", info, err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".usage-interrupted"), []byte("partial"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		for i := 1; i <= 30; i++ {
+			record.CodexCalls = i
+			record.Tokens = Tokens{Input: int64(i), CachedInput: int64(i / 2), Output: int64(i * 2)}
+			if err := store.Save(record); err != nil {
+				done <- err
+				return
+			}
+		}
+		done <- nil
+	}()
+	for {
+		records, err := ReadAll(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(records) != 1 || records[0].Tokens.Input != int64(records[0].CodexCalls) || records[0].Tokens.Output != 2*records[0].Tokens.Input {
+			t.Fatalf("partial or duplicate record: %+v", records)
+		}
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+			records, err := ReadAll(dir)
+			if err != nil || len(records) != 1 || records[0].CodexCalls != 30 {
+				t.Fatalf("final record=%+v err=%v", records, err)
+			}
+			return
+		default:
+		}
+	}
+}
+
+func TestReadAllMissingDirectory(t *testing.T) {
+	records, err := ReadAll(filepath.Join(t.TempDir(), "missing"))
+	if err != nil || records == nil || len(records) != 0 {
+		t.Fatalf("records=%v err=%v", records, err)
+	}
+}
+
+func TestSaveFailureCleansTemporaryFile(t *testing.T) {
+	for _, failure := range []string{"encoding", "rename"} {
+		t.Run(failure, func(t *testing.T) {
+			dir := t.TempDir()
+			record := testRecord()
+			wantFiles := 0
+			if failure == "encoding" {
+				record.StartedAt = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
+				record.Status, record.FinishedAt = "running", nil
+			} else {
+				if err := os.Mkdir(filepath.Join(dir, record.ID+".json"), 0700); err != nil {
+					t.Fatal(err)
+				}
+				wantFiles = 1
+			}
+			err := (Store{Dir: dir}).Save(record)
+			var marshalErr *json.MarshalerError
+			var renameErr *os.LinkError
+			if failure == "encoding" && !errors.As(err, &marshalErr) || failure == "rename" && !errors.As(err, &renameErr) {
+				t.Fatalf("Save() = %v; want %s error", err, failure)
+			}
+			files, err := os.ReadDir(dir)
+			if err != nil || len(files) != wantFiles {
+				t.Fatalf("temporary usage file retained: %v, %v", files, err)
+			}
+		})
+	}
+}
+
+func TestSaveRejectsInvalidRecords(t *testing.T) {
+	for name, modify := range map[string]func(*Record){
+		"unsafe ID":        func(r *Record) { r.ID = "../elsewhere" },
+		"uppercase ID":     func(r *Record) { r.ID = strings.ToUpper(r.ID) },
+		"missing metadata": func(r *Record) { r.User = "" },
+		"missing start":    func(r *Record) { r.StartedAt = time.Time{} },
+		"invalid status":   func(r *Record) { r.Status = "complete" },
+		"missing finish":   func(r *Record) { r.FinishedAt = nil },
+		"early finish": func(r *Record) {
+			finish := r.StartedAt.Add(-time.Second)
+			r.FinishedAt = &finish
+		},
+		"running finish":      func(r *Record) { r.Status = "running" },
+		"negative calls":      func(r *Record) { r.CodexCalls = -1 },
+		"negative input":      func(r *Record) { r.Tokens.Input = -1 },
+		"negative cache":      func(r *Record) { r.Tokens.CachedInput = -1 },
+		"negative output":     func(r *Record) { r.Tokens.Output = -1 },
+		"cache exceeds input": func(r *Record) { r.Tokens.CachedInput = r.Tokens.Input + 1 },
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "usage")
+			record := testRecord()
+			modify(&record)
+			if err := (Store{Dir: dir}).Save(record); err == nil {
+				t.Fatal("expected validation failure")
+			}
+			if _, err := os.Stat(dir); !os.IsNotExist(err) {
+				t.Fatalf("invalid record created directory: %v", err)
+			}
+		})
+	}
+}
+
+func TestReadAllRejectsMalformedRecords(t *testing.T) {
+	record := testRecord()
+	valid, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range map[string]string{
+		"bad JSON":         "{",
+		"missing fields":   "{}",
+		"trailing data":    string(valid) + " {}",
+		"unknown field":    strings.TrimSuffix(string(valid), "}") + `,"typo":1}`,
+		"wrong ID":         strings.ReplaceAll(string(valid), record.ID, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+		"invalid counters": strings.Replace(string(valid), `"input_tokens":100`, `"input_tokens":-1`, 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, record.ID+".json"), []byte(content), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := ReadAll(dir); err == nil {
+				t.Fatal("expected error instead of incomplete report")
+			}
+		})
+	}
+	for _, name := range []string{"wrong-name.json", record.ID + ".json"} {
+		t.Run("invalid file "+name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.Mkdir(filepath.Join(dir, name), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := ReadAll(dir); err == nil {
+				t.Fatal("expected invalid file error")
+			}
+		})
+	}
+}
+
+func TestReadAllSortsChronologically(t *testing.T) {
+	dir := t.TempDir()
+	first := testRecord()
+	second := testRecord()
+	second.ID = "00000000000000000000000000000000"
+	second.StartedAt = first.StartedAt.Add(time.Second)
+	for _, record := range []Record{first, second} {
+		if err := (Store{Dir: dir}).Save(record); err != nil {
+			t.Fatal(err)
+		}
+	}
+	records, err := ReadAll(dir)
+	if err != nil || len(records) != 2 || records[0].ID != first.ID {
+		t.Fatalf("records=%+v err=%v", records, err)
+	}
+}
+
+func TestFilter(t *testing.T) {
+	record := testRecord()
+	for name, test := range map[string]struct {
+		filter Filter
+		want   bool
+	}{
+		"no constraints":   {Filter{}, true},
+		"case insensitive": {Filter{Repo: "LINKDATA/MINION", User: "EXAMPLE"}, true},
+		"wrong repository": {Filter{Repo: "elsewhere/minion"}, false},
+		"wrong user":       {Filter{User: "another-user"}, false},
+		"since inclusive":  {Filter{Since: record.StartedAt}, true},
+		"before since":     {Filter{Since: record.StartedAt.Add(time.Nanosecond)}, false},
+		"until exclusive":  {Filter{Until: record.StartedAt}, false},
+		"before until":     {Filter{Until: record.StartedAt.Add(time.Nanosecond)}, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := test.filter.Match(record); got != test.want {
+				t.Fatalf("Match=%v want=%v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestSummarize(t *testing.T) {
+	first := testRecord()
+	second := first
+	second.Repo, second.User = "LINKDATA/MINION", "EXAMPLE"
+	second.Status, second.UsageComplete = "failed", false
+	third := first
+	third.Status, third.FinishedAt = "running", nil
+	fourth := first
+	fourth.Repo, fourth.User, fourth.Action = "another-owner/other", "another-user", "audit"
+	fourth.StartedAt = time.Date(2026, 11, 1, 0, 30, 0, 0, time.FixedZone("UTC+2", 2*60*60))
+	records := []Record{first, second, third, fourth}
+	groups, err := Summarize(records, Filter{}, []string{"repo", "user"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups) != 2 || groups[0].Repo != fourth.Repo || groups[1].Repo != first.Repo {
+		t.Fatalf("incorrect order or grouping: %+v", groups)
+	}
+	got := groups[1]
+	want := Summary{Repo: first.Repo, User: first.User, Attempts: 3, Succeeded: 1, Failed: 1, Running: 1, CodexCalls: 3,
+		IncompleteUsage: 2, Tokens: Tokens{Input: 300, CachedInput: 240, Output: 60}, TotalTokens: 360}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("summary=%+v want=%+v", got, want)
+	}
+	groups, err = Summarize(records, Filter{User: "ANOTHER-USER"}, []string{"action", "day", "month"})
+	if err != nil || len(groups) != 1 || groups[0].Day != "2026-10-31" || groups[0].Month != "2026-10" || groups[0].Action != "audit" {
+		t.Fatalf("UTC grouping/filter: summary=%+v err=%v", groups, err)
+	}
+	groups, err = Summarize(records, Filter{}, nil)
+	if err != nil || len(groups) != 1 || groups[0].Attempts != 4 || groups[0].TotalTokens != 480 || groups[0].Repo != "" {
+		t.Fatalf("grand total=%+v err=%v", groups, err)
+	}
+	groups, err = Summarize(nil, Filter{}, nil)
+	if err != nil || groups == nil || len(groups) != 0 {
+		t.Fatalf("empty summary=%+v err=%v", groups, err)
+	}
+}
+
+func TestSummarizeUsesRequestedSortOrder(t *testing.T) {
+	first := testRecord()
+	first.Repo, first.User = "a/repo", "z-user"
+	second := testRecord()
+	second.Repo, second.User = "z/repo", "a-user"
+	groups, err := Summarize([]Record{first, second}, Filter{}, []string{"user", "repo"})
+	if err != nil || len(groups) != 2 || groups[0].User != "a-user" {
+		t.Fatalf("groups=%+v err=%v", groups, err)
+	}
+}
+
+func TestSummarizeRejectsInvalidOptions(t *testing.T) {
+	for _, groups := range [][]string{{"unknown"}, {"repo", "repo"}, {"none"}} {
+		if _, err := Summarize(nil, Filter{}, groups); err == nil {
+			t.Fatalf("groups=%v accepted", groups)
+		}
+	}
+	now := time.Now()
+	for _, until := range []time.Time{now, now.Add(-time.Second)} {
+		if _, err := Summarize(nil, Filter{Since: now, Until: until}, nil); err == nil {
+			t.Fatal("invalid date range accepted")
+		}
+	}
+	record := testRecord()
+	record.Status = "unknown"
+	if _, err := Summarize([]Record{record}, Filter{}, nil); err == nil {
+		t.Fatal("unknown status accepted")
+	}
+}
+
+func TestTokensCachedInputIsNotDoubleCounted(t *testing.T) {
+	tokens := Tokens{Input: 100, CachedInput: 80, Output: 20}
+	tokens.Add(Tokens{Input: 50, CachedInput: 10, Output: 30})
+	if tokens != (Tokens{Input: 150, CachedInput: 90, Output: 50}) || tokens.Total() != 200 {
+		t.Fatalf("tokens=%+v total=%d", tokens, tokens.Total())
+	}
+}

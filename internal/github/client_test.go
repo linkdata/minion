@@ -1,0 +1,460 @@
+package github
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+)
+
+func testClient(server *httptest.Server) *Client {
+	c := New("test-token")
+	c.BaseURL = server.URL
+	c.HTTPClient = server.Client()
+	return c
+}
+
+func TestReactEyesUsesExactNodeAndChecksGraphQLErrors(t *testing.T) {
+	var calls int
+	response := `{"data":{"addReaction":{"subject":{"reactions":{"viewerHasReacted":true}}}}}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.Method != http.MethodPost || r.URL.Path != "/graphql" || r.Header.Get("Authorization") != "Bearer test-token" {
+			t.Errorf("unexpected reaction request: %s %s", r.Method, r.URL.Path)
+		}
+		var input struct {
+			Query     string            `json:"query"`
+			Variables map[string]string `json:"variables"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			t.Errorf("decode reaction request: %v", err)
+		}
+		if input.Variables["id"] != "review-node-14" || !strings.Contains(input.Query, "content: EYES") {
+			t.Errorf("wrong reaction target or type: %+v", input)
+		}
+		if _, err := fmt.Fprint(w, response); err != nil {
+			t.Error(err)
+		}
+	}))
+	defer server.Close()
+	c := testClient(server)
+	if err := c.ReactEyes(context.Background(), ""); err == nil || calls != 0 {
+		t.Fatalf("missing node ID accepted or sent: %v, calls=%d", err, calls)
+	}
+	for range 2 {
+		if err := c.ReactEyes(context.Background(), "review-node-14"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	response = `{"errors":[{"message":"Resource not accessible"}]}`
+	if err := c.ReactEyes(context.Background(), "review-node-14"); err == nil || !strings.Contains(err.Error(), "Resource not accessible") {
+		t.Fatalf("GraphQL error ignored: %v", err)
+	}
+	response = `{"data":{"addReaction":{"subject":{"reactions":{"viewerHasReacted":false}}}}}`
+	if err := c.ReactEyes(context.Background(), "review-node-14"); err == nil {
+		t.Fatal("unconfirmed reaction accepted")
+	}
+}
+
+func TestListNotificationsPaginatesAndRepeatsAfterFailedAction(t *testing.T) {
+	var calls []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer test-token" {
+			t.Errorf("authorization header missing")
+		}
+		calls = append(calls, r.URL.RawQuery)
+		if r.URL.Query().Get("all") != "true" || r.URL.Query().Get("participating") != "true" {
+			t.Errorf("notification filters missing: %s", r.URL.RawQuery)
+		}
+		if got := r.URL.Query().Get("since"); got != "2026-10-09T06:59:59Z" {
+			t.Errorf("notification cursor must overlap exclusive, second-precision filter: %q", got)
+		}
+		w.Header().Set("X-Poll-Interval", "90")
+		if got := r.Header.Get("If-Modified-Since"); got != "" {
+			t.Errorf("conditional request could hide a failed command: %q", got)
+		}
+		if r.URL.Query().Get("page") == "1" {
+			w.Header().Set("Link", `<https://api.github.com/notifications?page=2>; rel="next"`)
+			if _, err := fmt.Fprint(w, `[ {"id":"first"} ]`); err != nil {
+				t.Error(err)
+			}
+			return
+		}
+		if _, err := fmt.Fprint(w, `[ {"id":"second"} ]`); err != nil {
+			t.Error(err)
+		}
+	}))
+	defer server.Close()
+	c := testClient(server)
+	since := time.Date(2026, 10, 9, 7, 0, 0, 500_000_000, time.UTC)
+	rows, interval, err := c.ListNotifications(context.Background(), since)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if interval != 90*time.Second || len(rows) != 2 || rows[0].ID != "first" || rows[1].ID != "second" {
+		t.Fatalf("unexpected first response: rows=%v interval=%s", rows, interval)
+	}
+	rows, interval, err = c.ListNotifications(context.Background(), since)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 || interval != 90*time.Second {
+		t.Fatalf("retry lost notifications: rows=%v interval=%s", rows, interval)
+	}
+	if len(calls) != 4 {
+		t.Fatalf("expected two pages on each poll, got %d calls", len(calls))
+	}
+}
+
+func TestPermissionSurfacesForbidden(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		if _, err := fmt.Fprint(w, `{"message":"Resource not accessible by integration"}`); err != nil {
+			t.Error(err)
+		}
+	}))
+	defer server.Close()
+	_, err := testClient(server).Permission(context.Background(), "example-owner/example-repo", "alice")
+	var status *StatusError
+	if !errors.As(err, &status) || status.StatusCode != http.StatusForbidden || !strings.Contains(err.Error(), "Resource not accessible") {
+		t.Fatalf("expected a clear 403 status error, got %v", err)
+	}
+}
+
+func TestRepositoryNeverFollowsRedirectOutsideWhitelist(t *testing.T) {
+	redirected := false
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		redirected = true
+		if _, err := fmt.Fprint(w, `{"full_name":"other/repo"}`); err != nil {
+			t.Error(err)
+		}
+	}))
+	defer target.Close()
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", target.URL+"/repos/other/repo")
+		w.WriteHeader(http.StatusTemporaryRedirect)
+	}))
+	defer source.Close()
+	if _, err := testClient(source).Repository(context.Background(), "example-owner/example-repo"); err == nil || redirected {
+		t.Fatalf("redirect followed or ignored: err=%v, redirected=%v", err, redirected)
+	}
+}
+
+func TestRepositoryRejectsMismatchedIdentity(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, err := fmt.Fprint(w, `{"full_name":"other/repo"}`); err != nil {
+			t.Error(err)
+		}
+	}))
+	defer server.Close()
+	if _, err := testClient(server).Repository(context.Background(), "example-owner/example-repo"); err == nil {
+		t.Fatal("accepted a different repository under whitelisted URL")
+	}
+}
+
+func TestRepositoryInvitationsListAndAccept(t *testing.T) {
+	var accepted int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/user/repository_invitations":
+			if r.URL.Query().Get("per_page") != "100" {
+				t.Errorf("invitation list must request 100 per page: %s", r.URL.RawQuery)
+			}
+			if r.URL.Query().Get("page") == "1" {
+				w.Header().Set("Link", `<https://api.github.com/user/repository_invitations?page=2>; rel="next"`)
+				if _, err := fmt.Fprint(w, `[{"id":17,"repository":{"full_name":"o/allowed","owner":{"login":"o"}},"invitee":{"login":"linkdataminion"},"inviter":{"login":"alice"},"permissions":"write","created_at":"2026-10-09T08:00:00Z","expired":false,"html_url":"https://github.com/o/allowed/invitations"}]`); err != nil {
+					t.Error(err)
+				}
+				return
+			}
+			if _, err := fmt.Fprint(w, `[{"id":18,"repository":{"full_name":"o/unlisted"},"invitee":{"login":"linkdataminion"},"permissions":"read","expired":true}]`); err != nil {
+				t.Error(err)
+			}
+		case r.Method == http.MethodPatch && r.URL.Path == "/user/repository_invitations/17":
+			accepted++
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	c := testClient(server)
+	invitations, err := c.ListRepositoryInvitations(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(invitations) != 2 || invitations[0].ID != 17 || invitations[0].Repository.FullName != "o/allowed" || invitations[0].Repository.Owner.Login != "o" || invitations[0].Permissions != "write" || invitations[0].Invitee.Login != "linkdataminion" || invitations[0].Inviter.Login != "alice" || invitations[0].CreatedAt.IsZero() || invitations[1].Repository.FullName != "o/unlisted" || !invitations[1].Expired {
+		t.Fatalf("wrong invitation metadata or pagination: %+v", invitations)
+	}
+	if err := c.AcceptRepositoryInvitation(context.Background(), invitations[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if accepted != 1 {
+		t.Fatalf("expected one acceptance, got %d", accepted)
+	}
+	if err := c.AcceptRepositoryInvitation(context.Background(), 0); err == nil {
+		t.Fatal("expected invalid invitation ID to fail")
+	}
+}
+
+func TestAcceptRepositoryInvitationSurfacesForbidden(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		if _, err := fmt.Fprint(w, `{"message":"Resource not accessible"}`); err != nil {
+			t.Error(err)
+		}
+	}))
+	defer server.Close()
+	err := testClient(server).AcceptRepositoryInvitation(context.Background(), 17)
+	var status *StatusError
+	if !errors.As(err, &status) || status.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected typed 403, got %v", err)
+	}
+}
+
+func TestPullRequestItemsCoverEveryCommentSurface(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/repos/o/r/") {
+			t.Errorf("unexpected path %s", r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		switch r.URL.Path {
+		case "/repos/o/r/pulls/7":
+			if _, err := fmt.Fprint(w, `{"number":7,"node_id":"pull-node-7","title":"PR title","body":"old command","user":{"login":"alice"},"created_at":"2026-10-08T08:00:00Z","updated_at":"2026-10-09T08:00:05Z","html_url":"https://github.com/o/r/pull/7","head":{"ref":"feature","sha":"abc"},"base":{"ref":"main","sha":"def"}}`); err != nil {
+				t.Error(err)
+			}
+		case "/repos/o/r/issues/7/comments":
+			if since := r.URL.Query().Get("since"); since != "" && since != "2026-10-09T07:59:59Z" {
+				t.Errorf("missing overlap for issue comments: %s", r.URL.RawQuery)
+			}
+			if r.URL.Query().Get("page") == "1" {
+				w.Header().Set("Link", `<https://api.github.com/repos/o/r/issues/7/comments?page=2>; rel="next"`)
+				if _, err := fmt.Fprint(w, `[{"id":11,"node_id":"issue-comment-node-11","body":"first issue comment","user":{"login":"bob"},"updated_at":"2026-10-09T08:00:01Z"}]`); err != nil {
+					t.Error(err)
+				}
+			} else {
+				if _, err := fmt.Fprint(w, `[{"id":12,"node_id":"issue-comment-node-12","body":"second issue comment","user":{"login":"carol"},"updated_at":"2026-10-09T08:00:02Z"}]`); err != nil {
+					t.Error(err)
+				}
+			}
+		case "/repos/o/r/pulls/7/comments":
+			if _, err := fmt.Fprint(w, `[{"id":13,"node_id":"review-comment-node-13","body":"diff comment","user":{"login":"dave"},"updated_at":"2026-10-09T08:00:03Z"}]`); err != nil {
+				t.Error(err)
+			}
+		case "/repos/o/r/pulls/7/reviews":
+			if _, err := fmt.Fprint(w, `[{"id":14,"node_id":"review-node-14","body":"review body","user":{"login":"erin"},"state":"COMMENTED","submitted_at":"2026-10-09T08:00:04Z"},{"id":15,"body":"unsubmitted","state":"PENDING"}]`); err != nil {
+				t.Error(err)
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	c := testClient(server)
+	since := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	items, err := c.ThreadItems(context.Background(), "o/r", "PullRequest", 7, since)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var keys []string
+	for _, item := range items {
+		keys = append(keys, item.Key)
+	}
+	want := []string{"o/r#issue-comment:11", "o/r#issue-comment:12", "o/r#review-comment:13", "o/r#review:14"}
+	if !reflect.DeepEqual(keys, want) {
+		t.Fatalf("wrong surfaces or order: got %v, want %v", keys, want)
+	}
+	if items[0].Author.Login != "bob" || items[3].Author.Login != "erin" {
+		t.Fatalf("wrong authors: %+v", items)
+	}
+	for i, want := range []string{"issue-comment-node-11", "issue-comment-node-12", "review-comment-node-13", "review-node-14"} {
+		if items[i].NodeID != want {
+			t.Fatalf("item %d missing reaction node ID: %+v", i, items[i])
+		}
+	}
+	pull, err := c.PullRequestDetails(context.Background(), "o/r", 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pull.Base.Ref != "main" || pull.Head.SHA != "abc" || pull.Title != "PR title" {
+		t.Fatalf("missing pull request details: %+v", pull)
+	}
+	items, err = c.ThreadItems(context.Background(), "o/r", "PullRequest", 7, time.Time{})
+	if err != nil || len(items) != 5 || items[0].NodeID != "pull-node-7" {
+		t.Fatalf("pull request body missing reaction node ID: %+v, %v", items, err)
+	}
+}
+
+func TestBranchLookup(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.EscapedPath() {
+		case "/repos/o/r/branches/minion%2Ffix-2":
+			if _, err := fmt.Fprint(w, `{"name":"minion/fix-2","commit":{"sha":"abc123"}}`); err != nil {
+				t.Error(err)
+			}
+		case "/repos/o/r/branches/missing":
+			w.WriteHeader(http.StatusNotFound)
+			if _, err := fmt.Fprint(w, `{"message":"Not Found"}`); err != nil {
+				t.Error(err)
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	c := testClient(server)
+	branch, err := c.Branch(context.Background(), "o/r", "minion/fix-2")
+	if err != nil || branch.Name != "minion/fix-2" || branch.Commit.SHA != "abc123" {
+		t.Fatalf("branch lookup: %+v, %v", branch, err)
+	}
+	_, err = c.Branch(context.Background(), "o/r", "missing")
+	var status *StatusError
+	if !errors.As(err, &status) || status.StatusCode != http.StatusNotFound {
+		t.Fatalf("missing branch should return typed 404, got %v", err)
+	}
+	if _, err := c.Branch(context.Background(), "o/r", "bad*"); err == nil {
+		t.Fatal("branch lookup must reject wildcard names")
+	}
+}
+
+func TestIssueBodyDoesNotReappearWhenOnlyCommentsChange(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/o/r/issues/2":
+			if _, err := fmt.Fprint(w, `{"number":2,"node_id":"issue-node-2","title":"Issue title","body":"old command","user":{"login":"alice"},"created_at":"2026-10-08T08:00:00Z","updated_at":"2026-10-09T08:00:00Z","html_url":"https://github.com/o/r/issues/2"}`); err != nil {
+				t.Error(err)
+			}
+		case "/repos/o/r/issues/2/comments":
+			if _, err := fmt.Fprint(w, `[]`); err != nil {
+				t.Error(err)
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	c := testClient(server)
+	issue, err := c.IssueDetails(context.Background(), "o/r", 2)
+	if err != nil || issue.Title != "Issue title" {
+		t.Fatalf("issue details: %+v, %v", issue, err)
+	}
+	items, err := c.ThreadItems(context.Background(), "o/r", "Issue", 2, time.Date(2026, 10, 9, 7, 0, 0, 0, time.UTC))
+	if err != nil || len(items) != 0 {
+		t.Fatalf("old body reappeared after unrelated update: %+v, %v", items, err)
+	}
+	items, err = c.ThreadItems(context.Background(), "o/r", "Issue", 2, time.Time{})
+	if err != nil || len(items) != 1 || items[0].Body != "old command" || items[0].NodeID != "issue-node-2" {
+		t.Fatalf("initial body missing: %+v, %v", items, err)
+	}
+}
+
+func TestWritesUseSafeGitHubModes(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode write body: %v", err)
+		}
+		switch r.URL.Path {
+		case "/repos/o/r/issues/2/comments":
+			w.WriteHeader(http.StatusCreated)
+			if _, err := fmt.Fprint(w, `{"id":1}`); err != nil {
+				t.Error(err)
+			}
+		case "/repos/o/r/pulls":
+			if body["draft"] != true {
+				t.Errorf("pull request not draft: %v", body)
+			}
+			w.WriteHeader(http.StatusCreated)
+			if _, err := fmt.Fprint(w, `{"number":3}`); err != nil {
+				t.Error(err)
+			}
+		case "/repos/o/r/pulls/3/reviews":
+			if body["event"] != "COMMENT" || body["commit_id"] != "abc123" {
+				t.Errorf("review missing explicit commit or changes review state: %v", body)
+			}
+			if _, err := fmt.Fprint(w, `{"id":4}`); err != nil {
+				t.Error(err)
+			}
+		case "/repos/o/r/releases":
+			if body["draft"] != true || body["tag_name"] != "v1.0.0" || body["target_commitish"] != strings.Repeat("a", 40) {
+				t.Errorf("release not draft or not pinned to commit: %v", body)
+			}
+			w.WriteHeader(http.StatusCreated)
+			if _, err := fmt.Fprint(w, `{"id":5}`); err != nil {
+				t.Error(err)
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	c := testClient(server)
+	ctx := context.Background()
+	if _, err := c.CreateIssueComment(ctx, "o/r", 2, "done"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.CreatePullRequest(ctx, "o/r", "main", "feature", "Fix", "body", true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.CreatePullRequestReview(ctx, "o/r", 3, "review notes", "abc123"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.CreatePullRequestReview(ctx, "o/r", 3, "review notes", ""); err == nil {
+		t.Fatal("review without explicit commit SHA must fail")
+	}
+	if _, err := c.CreateDraftRelease(ctx, "o/r", "v1.0.0", strings.Repeat("a", 40), "v1.0.0", "notes"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRecoveryLookups(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/o/r/pulls":
+			if r.URL.Query().Get("head") != "o:bot-branch" || r.URL.Query().Get("state") != "all" {
+				t.Errorf("wrong PR recovery filter: %s", r.URL.RawQuery)
+			}
+			if _, err := fmt.Fprint(w, `[{"number":3,"title":"recovered"}]`); err != nil {
+				t.Error(err)
+			}
+		case "/repos/o/r/releases":
+			if r.URL.Query().Get("per_page") != "100" {
+				t.Errorf("release lookup did not request 100 per page: %s", r.URL.RawQuery)
+			}
+			if r.URL.Query().Get("page") == "1" {
+				w.Header().Set("Link", `<https://api.github.com/repos/o/r/releases?page=2>; rel="next"`)
+				if _, err := fmt.Fprint(w, `[{"id":8,"tag_name":"older","draft":false}]`); err != nil {
+					t.Error(err)
+				}
+				return
+			}
+			if _, err := fmt.Fprint(w, `[{"id":9,"tag_name":"v1.0.0","draft":true}]`); err != nil {
+				t.Error(err)
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	c := testClient(server)
+	pull, err := c.FindPullRequestByHead(context.Background(), "o/r", "bot-branch")
+	if err != nil || pull == nil || pull.Number != 3 {
+		t.Fatalf("recover PR: %+v, %v", pull, err)
+	}
+	release, err := c.ReleaseByTag(context.Background(), "o/r", "v1.0.0")
+	if err != nil || release.ID != 9 || !release.Draft {
+		t.Fatalf("recover release: %+v, %v", release, err)
+	}
+	_, err = c.ReleaseByTag(context.Background(), "o/r", "missing")
+	var status *StatusError
+	if !errors.As(err, &status) || status.StatusCode != 404 {
+		t.Fatalf("missing release should return typed 404, got %v", err)
+	}
+}
