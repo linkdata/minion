@@ -19,9 +19,10 @@ var (
 
 // Repository is an explicit boundary for both observation and actions.
 type Repository struct {
-	Name          string   `json:"name"`
-	Actions       []string `json:"actions"`
-	AllowedActors []string `json:"allowed_actors,omitempty"`
+	Name                 string   `json:"name"`
+	Actions              []string `json:"actions"`
+	AllowedActors        []string `json:"allowed_actors,omitempty"`
+	ProtectedReleaseTags bool     `json:"protected_release_tags,omitempty"`
 }
 
 type CodexConfig struct {

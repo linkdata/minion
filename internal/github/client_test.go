@@ -418,7 +418,7 @@ func TestRecoveryLookups(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/repos/o/r/pulls":
-			if r.URL.Query().Get("head") != "o:bot-branch" || r.URL.Query().Get("state") != "all" {
+			if r.URL.Query().Get("head") != "o:bot-branch" || r.URL.Query().Get("base") != "main" || r.URL.Query().Get("state") != "open" {
 				t.Errorf("wrong PR recovery filter: %s", r.URL.RawQuery)
 			}
 			if _, err := fmt.Fprint(w, `[{"number":3,"title":"recovered"}]`); err != nil {
@@ -444,7 +444,7 @@ func TestRecoveryLookups(t *testing.T) {
 	}))
 	defer server.Close()
 	c := testClient(server)
-	pull, err := c.FindPullRequestByHead(context.Background(), "o/r", "bot-branch")
+	pull, err := c.FindPullRequestByHead(context.Background(), "o/r", "main", "bot-branch")
 	if err != nil || pull == nil || pull.Number != 3 {
 		t.Fatalf("recover PR: %+v, %v", pull, err)
 	}

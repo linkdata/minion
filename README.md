@@ -13,6 +13,10 @@ Put one command on its own line in an issue or pull request body or comment. The
 | `@linkdataminion fix` | On an issue, Codex edits a fresh checkout of the default branch. The bot pushes a deterministic branch and opens a **draft pull request**. Optional text may follow `fix` on the same line. |
 | `@linkdataminion release v1.2.3` | Codex drafts release notes from local Git history. The bot creates a **draft GitHub release** for the new tag, pinned to the checked-out commit. It never publishes the release. |
 
+Release drafts require `protected_release_tags: true` on the repository entry. Leave it unset until an active GitHub tag ruleset covers **all tags**, including names containing `/`, restricts both updates and deletions, and grants no bypass to writers. This setting is the operator's confirmation; Minion cannot verify hidden ruleset bypass permissions with a normal write token. Without it, release requests receive a refusal and can be sent again after protection is configured. Minion reserves the tag at the inspected commit before creating the draft.
+
+Fix drafts record their expected head commit in the pull request body and verify GitHub's returned head before acknowledgement. The branch remains mutable afterward; protect `minion/fix-*` from updates by other writers and compare the current head with the recorded commit before merging.
+
 Each request must come from an account with effective repository `write`, `maintain`, or `admin` permission. An optional `allowed_actors` list narrows that group. Commands in quotations, code fences, HTML comments, and comments with multiple commands are ignored. The bot checks the whitelist and author permission again before every action.
 
 After accepting an authorized command, the bot adds a 👀 reaction to the exact issue, pull request, comment, or review that contains it, before starting Codex. If the reaction fails, it retries the command on the next poll.

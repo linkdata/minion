@@ -188,6 +188,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			}
 			store.Data.Processed[job.ID] = started
 			delete(store.Data.PendingFixes, job.ID)
+			delete(store.Data.PendingReleases, job.ID)
 			if err := store.Save(); err != nil {
 				return next, err
 			}
