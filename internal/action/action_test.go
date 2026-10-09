@@ -210,7 +210,7 @@ func TestReviewEchoDoesNotSuppressAuditInMonitor(t *testing.T) {
 			}
 			auditRuns++
 			for name, content := range map[string]string{
-				"run-metadata.json": fmt.Sprintf(`{"run_id":"test-run","repo":"o/r","target":%q,"source_ref":%q,"profile":"standard","scope_paths":["."],"execution_policy":"sandboxed-source-and-local-only","run_status":"complete"}`, dir, head),
+				"run-metadata.json": fmt.Sprintf(`{"run_id":"test-run","repo":"o/r","target":%q,"source_ref":%q,"profile":"standard","scope_paths":["."],"budget":null,"selected_companion_files":[],"prior_run_paths":[],"shared_file_owners":%s,"execution_policy":"sandboxed-source-and-local-only","run_status":"complete"}`, dir, head, auditTestOwners),
 				"architecture.md":   "Architecture\n", "coverage-ledger.json": `[{"status":"covered"}]`, "findings.json": "[]",
 				"REPORT.md": "Verified audit report\n", "FINDINGS-DETAIL.md": "", "NEEDS-VALIDATION.md": "",
 			} {
