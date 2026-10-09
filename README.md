@@ -1,5 +1,8 @@
 # linkdataminion
 
+[![build](https://github.com/linkdata/minion/actions/workflows/build.yml/badge.svg)](https://github.com/linkdata/minion/actions/workflows/build.yml)
+[![coverage](/../gitcoverage/main/badge.svg)](https://github.com/linkdata/minion/tree/gitcoverage/main)
+
 A small Go service that watches a bot account's GitHub notifications for commands in an explicit repository whitelist. It invokes the authenticated Codex CLI for the work and uses the GitHub API for publication. The checked-in [config.json](config.json) contains sample settings; copy it to the ignored `config.local.json` for a real deployment.
 
 ## What it does
