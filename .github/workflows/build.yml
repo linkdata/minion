@@ -11,6 +11,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      coverage: ${{ steps.coverage.outputs.coverage }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
@@ -38,7 +40,29 @@ jobs:
         run: go test -race -coverprofile=coverage.out ./...
 
       - name: Coverage
-        run: go tool cover -func=coverage.out | tail -n 1
+        id: coverage
+        run: |
+          coverage="$(go tool cover -func=coverage.out | tail -n 1 | awk '{ print $3 }')"
+          test -n "$coverage"
+          echo "coverage=$coverage" >> "$GITHUB_OUTPUT"
+          echo "Total coverage: $coverage"
 
       - name: Build
         run: go build -buildvcs=false -o "$RUNNER_TEMP/minion" ./cmd/minion
+
+  coverage:
+    needs: build
+    if: github.event_name == 'push' && github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+
+      - name: Publish coverage badge
+        uses: linkdata/gitcoverage@03383ad3a6ff45e117a50d29d21c3a95c2d5d12a # v11
+        with:
+          coverage: ${{ needs.build.outputs.coverage }}
+          token: ${{ github.token }}
