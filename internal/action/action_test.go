@@ -213,6 +213,8 @@ func TestReleaseReservesTagAndRecoversOnlyBotDraft(t *testing.T) {
 		existingAuthor string
 		tamperedBody   bool
 		unprotected    bool
+		lostAfterCodex bool
+		lostAfterTag   bool
 		wantError      string
 		wantDrafts     int
 		wantComments   int
@@ -226,6 +228,8 @@ func TestReleaseReservesTagAndRecoversOnlyBotDraft(t *testing.T) {
 		{name: "bot draft recovery", existingAuthor: "linkdataminion", wantComments: 1},
 		{name: "tampered bot draft", existingAuthor: "linkdataminion", tamperedBody: true, wantError: "without matching bot provenance"},
 		{name: "unprotected tags", unprotected: true, wantComments: 1},
+		{name: "protection lost after notes", lostAfterCodex: true, wantError: "tag protection changed", wantCodex: 1},
+		{name: "protection lost after tag", lostAfterTag: true, wantError: "tag protection changed", wantCodex: 1},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			if tt.saveFailure && os.Geteuid() == 0 {
@@ -238,7 +242,7 @@ func TestReleaseReservesTagAndRecoversOnlyBotDraft(t *testing.T) {
 				return strings.TrimSpace(string(out)), err
 			}
 			job := monitor.Job{
-				Repository: config.Repository{Name: "o/r", Actions: []string{"release"}, ProtectedReleaseTags: !tt.unprotected}, SubjectType: "Issue", Number: 7,
+				Repository: config.Repository{Name: "o/r", Actions: []string{"release"}}, SubjectType: "Issue", Number: 7,
 				ID: strings.Repeat("a", 64), Source: github.Item{Author: github.User{Login: "writer"}},
 				Command: command.Command{Action: command.Release, Args: "v1.0.0"},
 			}
@@ -260,11 +264,20 @@ func TestReleaseReservesTagAndRecoversOnlyBotDraft(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			var codexCalls, draftPosts, draftSuccess, comments int
+			var codexCalls, draftPosts, draftSuccess, comments, protectionCalls int
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch {
 				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
 					_, _ = fmt.Fprint(w, `{"full_name":"o/r","default_branch":"main"}`)
+				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/rulesets":
+					protectionCalls++
+					if tt.unprotected || tt.lostAfterCodex && protectionCalls >= 2 || tt.lostAfterTag && protectionCalls >= 3 {
+						_, _ = fmt.Fprint(w, `[]`)
+					} else {
+						_, _ = fmt.Fprint(w, `[{"id":42}]`)
+					}
+				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/rulesets/42":
+					_, _ = fmt.Fprint(w, `{"id":42,"target":"tag","enforcement":"active","bypass_actors":[],"conditions":{"ref_name":{"include":["~ALL"],"exclude":[]}},"rules":[{"type":"update"},{"type":"deletion"}]}`)
 				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/releases":
 					if tt.existingAuthor != "" {
 						body := "notes\n\n" + job.Marker()

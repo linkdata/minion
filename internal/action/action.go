@@ -269,9 +269,6 @@ func (e *Executor) release(ctx context.Context, job monitor.Job) error {
 	if !validTag(tag) {
 		return e.acknowledge(ctx, job, "Invalid release tag. Use a simple Git tag such as `v1.2.3`.")
 	}
-	if !job.Repository.ProtectedReleaseTags {
-		return e.acknowledge(ctx, job, "Release drafts are disabled until tag updates and deletions are protected. Configure the tag ruleset, then set `protected_release_tags` for this repository and send a new release command.")
-	}
 	if e.Store == nil || job.ID == "" {
 		return errors.New("release job has no durable state or valid ID")
 	}
@@ -281,6 +278,17 @@ func (e *Executor) release(ctx context.Context, job monitor.Job) error {
 	}
 	if repo.Archived || repo.DefaultBranch == "" {
 		return fmt.Errorf("repository %s is archived or has no default branch", repo.FullName)
+	}
+	protected, err := e.GitHub.ProtectedReleaseTags(ctx, repo.FullName)
+	if err != nil {
+		var status *github.StatusError
+		if errors.As(err, &status) && (status.StatusCode == 403 || status.StatusCode == 404) {
+			return e.acknowledge(ctx, job, "Release drafts are disabled because GitHub does not allow this repository's tag rulesets to be verified. Configure an active all-tag ruleset and send a new release command when it can be checked.")
+		}
+		return fmt.Errorf("check tag protection: %w", err)
+	}
+	if !protected {
+		return e.acknowledge(ctx, job, "Release drafts are disabled until an active GitHub ruleset covers all tags, blocks updates and deletions, and exposes an empty bypass list to the bot. Configure the ruleset and send a new release command.")
 	}
 	pending, recovering := e.Store.Data.PendingReleases[job.ID]
 	if recovering && (pending.Tag != tag || pending.Target == "" || pending.Notes == "") {
@@ -340,6 +348,13 @@ Requested by @%s in %s. Request text:
 			return err
 		}
 	}
+	protected, err = e.GitHub.ProtectedReleaseTags(ctx, repo.FullName)
+	if err != nil {
+		return fmt.Errorf("recheck tag protection: %w", err)
+	}
+	if !protected {
+		return errors.New("tag protection changed during release; retry after restoring the ruleset")
+	}
 	if err := e.GitHub.CreateTagReference(ctx, repo.FullName, tag, pending.Target); err != nil {
 		var status *github.StatusError
 		if !recovering || !errors.As(err, &status) || (status.StatusCode != 409 && status.StatusCode != 422) {
@@ -348,6 +363,13 @@ Requested by @%s in %s. Request text:
 	}
 	if err := e.verifyTagReference(ctx, repo.FullName, tag, pending.Target); err != nil {
 		return err
+	}
+	protected, err = e.GitHub.ProtectedReleaseTags(ctx, repo.FullName)
+	if err != nil {
+		return fmt.Errorf("recheck tag protection: %w", err)
+	}
+	if !protected {
+		return errors.New("tag protection changed during release; retry after restoring the ruleset")
 	}
 	body := pending.Notes + "\n\n" + job.Marker()
 	release, err := e.GitHub.CreateDraftRelease(ctx, repo.FullName, tag, pending.Target, tag, body)
