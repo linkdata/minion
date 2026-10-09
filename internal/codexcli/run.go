@@ -18,8 +18,11 @@ import (
 )
 
 const (
-	maxEventBytes      = 4 << 20
-	maxDiagnosticBytes = 8 << 10
+	maxEventBytes       = 4 << 20
+	maxCodexOutputBytes = 64 << 20
+	maxCodexEvents      = 10000
+	maxCodexChildren    = 256
+	maxDiagnosticBytes  = 8 << 10
 )
 
 type Result struct {
@@ -141,14 +144,16 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 		prompt = instructions.String() + "\n" + prompt
 	}
 	args = append(args, "--", "-")
-	cmd := exec.CommandContext(ctx, binary, args...)
+	runCtx, cancelRun := context.WithCancel(ctx)
+	defer cancelRun()
+	cmd := exec.CommandContext(runCtx, binary, args...)
 	cmd.Dir = workspace
 	cmd.Env = childEnvironment(os.Environ(), runtimeDir, cacheDir)
 	cmd.Stdin = strings.NewReader(prompt)
 	cmd.WaitDelay = 2 * time.Second
 	configureCancellation(cmd)
 
-	var output jsonlOutput
+	output := jsonlOutput{cancel: cancelRun}
 	var stderr tailBuffer
 	cmd.Stdout = &output
 	cmd.Stderr = &stderr
@@ -162,7 +167,7 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 			codexHome = filepath.Join(home, ".codex")
 		}
 	}
-	result.Tokens, result.UsageComplete = collectUsage(codexHome, output.threadID, started, output.tokens, output.children)
+	result.Tokens, result.UsageComplete = collectUsage(runCtx, codexHome, output.threadID, started, output.tokens, output.children)
 	if runErr != nil || ctx.Err() != nil || output.failed || output.parseErr != nil || output.oversizedLines > 0 {
 		result.UsageComplete = false
 	}
@@ -259,9 +264,13 @@ type codexEvent struct {
 }
 
 type jsonlOutput struct {
+	cancel         context.CancelFunc
 	threadID       string
 	tokens         *usage.Tokens
 	children       []string
+	bytes          int64
+	events         int
+	stopped        bool
 	line           []byte
 	dropping       bool
 	oversizedLines int
@@ -274,6 +283,14 @@ type jsonlOutput struct {
 
 func (o *jsonlOutput) Write(p []byte) (int, error) {
 	n := len(p)
+	if o.stopped {
+		return n, nil
+	}
+	if int64(n) > maxCodexOutputBytes-o.bytes {
+		o.stop("Codex JSONL output exceeded the size limit")
+		return n, nil
+	}
+	o.bytes += int64(n)
 	for len(p) > 0 {
 		end := bytes.IndexByte(p, '\n')
 		if end < 0 {
@@ -283,8 +300,24 @@ func (o *jsonlOutput) Write(p []byte) (int, error) {
 		o.appendFragment(p[:end])
 		o.finishLine()
 		p = p[end+1:]
+		if o.stopped {
+			break
+		}
 	}
 	return n, nil
+}
+
+func (o *jsonlOutput) stop(reason string) {
+	if o.stopped {
+		return
+	}
+	o.stopped = true
+	o.failed = true
+	o.failureReason = reason
+	o.parseErr = errors.New(reason)
+	if o.cancel != nil {
+		o.cancel()
+	}
 }
 
 func (o *jsonlOutput) appendFragment(p []byte) {
@@ -306,6 +339,10 @@ func (o *jsonlOutput) finish() {
 }
 
 func (o *jsonlOutput) finishLine() {
+	if o.stopped {
+		o.line = nil
+		return
+	}
 	if o.dropping {
 		o.oversizedLines++
 		o.dropping = false
@@ -314,6 +351,11 @@ func (o *jsonlOutput) finishLine() {
 	}
 	line := bytes.TrimSpace(o.line)
 	if len(line) > 0 {
+		o.events++
+		if o.events > maxCodexEvents {
+			o.stop("Codex JSONL event count exceeded the limit")
+			return
+		}
 		var event codexEvent
 		if err := json.Unmarshal(line, &event); err != nil {
 			if o.parseErr == nil {
@@ -328,6 +370,10 @@ func (o *jsonlOutput) finishLine() {
 
 func (o *jsonlOutput) accept(event codexEvent) {
 	if event.Item != nil && event.Item.Type == "collab_tool_call" {
+		if len(event.Item.ReceiverThreadIDs) > maxCodexChildren-len(o.children) {
+			o.stop("Codex child agent count exceeded the limit")
+			return
+		}
 		o.children = append(o.children, event.Item.ReceiverThreadIDs...)
 	}
 	switch event.Type {
