@@ -343,6 +343,11 @@ func TestValidateAuditOutput(t *testing.T) {
 }
 
 func auditGitFixture(t *testing.T) (base, head string) {
+	base, head, _ = auditGitFixtureRemote(t)
+	return base, head
+}
+
+func auditGitFixtureRemote(t *testing.T) (base, head, remote string) {
 	t.Helper()
 	realGit, err := exec.LookPath("git")
 	if err != nil {
@@ -376,5 +381,5 @@ func auditGitFixture(t *testing.T) (base, head string) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	return base, head
+	return base, head, remote
 }

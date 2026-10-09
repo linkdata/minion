@@ -14,11 +14,18 @@ import (
 var ErrLocked = errors.New("another minion process holds the state lock")
 
 type Data struct {
-	Cursor            time.Time            `json:"cursor"`
-	NextPollAt        time.Time            `json:"next_poll_at,omitempty"`
-	NextInviteCheckAt time.Time            `json:"next_invite_check_at,omitempty"`
-	Processed         map[string]time.Time `json:"processed"`
-	PendingFixes      map[string]string    `json:"pending_fixes,omitempty"`
+	Cursor            time.Time                 `json:"cursor"`
+	NextPollAt        time.Time                 `json:"next_poll_at,omitempty"`
+	NextInviteCheckAt time.Time                 `json:"next_invite_check_at,omitempty"`
+	Processed         map[string]time.Time      `json:"processed"`
+	PendingFixes      map[string]string         `json:"pending_fixes,omitempty"`
+	PendingReleases   map[string]PendingRelease `json:"pending_releases,omitempty"`
+}
+
+type PendingRelease struct {
+	Tag    string `json:"tag"`
+	Target string `json:"target"`
+	Notes  string `json:"notes"`
 }
 
 type Store struct {
@@ -47,7 +54,7 @@ func Open(path string, initialCursor time.Time) (*Store, error) {
 	store := &Store{path: path, lock: lock}
 	f, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
-		store.Data = Data{Cursor: initialCursor.UTC(), Processed: map[string]time.Time{}, PendingFixes: map[string]string{}}
+		store.Data = Data{Cursor: initialCursor.UTC(), Processed: map[string]time.Time{}, PendingFixes: map[string]string{}, PendingReleases: map[string]PendingRelease{}}
 		if err := store.Save(); err != nil {
 			return nil, errors.Join(err, store.Close())
 		}
@@ -79,6 +86,9 @@ func Open(path string, initialCursor time.Time) (*Store, error) {
 	}
 	if store.Data.PendingFixes == nil {
 		store.Data.PendingFixes = map[string]string{}
+	}
+	if store.Data.PendingReleases == nil {
+		store.Data.PendingReleases = map[string]PendingRelease{}
 	}
 	return store, nil
 }
