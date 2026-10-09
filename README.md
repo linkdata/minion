@@ -22,6 +22,8 @@ Fix drafts record their expected head commit in the pull request body and verify
 
 Each request must come from an account with effective repository `write`, `maintain`, or `admin` permission. An optional `allowed_actors` list narrows that group. Commands in quotations, code fences, HTML comments, and comments with multiple commands are ignored. The bot checks the whitelist and author permission again before every action.
 
+Edited command sources are ignored. Post a new comment to request work after editing text.
+
 After accepting an authorized command, the bot adds a 👀 reaction to the exact issue, pull request, comment, or review that contains it, before starting Codex. If the reaction fails, it retries the command on the next poll.
 
 `review` is limited to pull requests, and `fix` to issues. The bot replies when those commands are used in the other supported thread type. `audit` and `release` can be requested in an issue or pull request. Existing tags are refused so a draft cannot silently point at a different commit.

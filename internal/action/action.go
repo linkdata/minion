@@ -116,7 +116,14 @@ func (e *Executor) alreadyAcknowledged(ctx context.Context, job monitor.Job) (bo
 		return false, fmt.Errorf("check existing bot replies: %w", err)
 	}
 	for _, item := range items {
-		if strings.EqualFold(item.Author.Login, e.BotLogin) && strings.Contains(item.Body, job.Marker()) {
+		if !strings.EqualFold(item.Author.Login, e.BotLogin) || !strings.HasSuffix(strings.TrimSpace(item.Body), "\n\n"+job.Marker()) {
+			continue
+		}
+		current, err := e.GitHub.CurrentItem(ctx, item)
+		if err != nil {
+			return false, fmt.Errorf("check bot reply provenance: %w", err)
+		}
+		if !current.Edited && strings.EqualFold(current.Author.Login, e.BotLogin) && strings.HasSuffix(strings.TrimSpace(current.Body), "\n\n"+job.Marker()) {
 			return true, nil
 		}
 	}

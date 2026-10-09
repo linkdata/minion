@@ -62,6 +62,47 @@ func TestReactEyesUsesExactNodeAndChecksGraphQLErrors(t *testing.T) {
 	}
 }
 
+func TestCurrentItemUsesLiveBodyAndEditProvenance(t *testing.T) {
+	response := `{"data":{"node":{"body":"@linkdataminion review","author":{"login":"allowed"},"editor":{"login":"excluded"},"lastEditedAt":"2026-10-09T08:00:00Z"}}}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/graphql" {
+			t.Errorf("unexpected provenance request: %s %s", r.Method, r.URL.Path)
+		}
+		var input struct {
+			Query     string            `json:"query"`
+			Variables map[string]string `json:"variables"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			t.Error(err)
+		}
+		if input.Variables["id"] != "comment-node" || !strings.Contains(input.Query, "lastEditedAt") || !strings.Contains(input.Query, "editor { login }") {
+			t.Errorf("provenance query omitted edit metadata: %+v", input)
+		}
+		if _, err := fmt.Fprint(w, response); err != nil {
+			t.Error(err)
+		}
+	}))
+	defer server.Close()
+	client := testClient(server)
+	item := Item{NodeID: "comment-node", Body: "stale body", Author: User{Login: "allowed"}}
+	current, err := client.CurrentItem(context.Background(), item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Body != "@linkdataminion review" || !current.Edited || current.Editor.Login != "excluded" || current.Author.Login != "allowed" {
+		t.Fatalf("lost live body or editor: %+v", current)
+	}
+	response = `{"data":{"node":{"body":"@linkdataminion review","author":{"login":"allowed"},"editor":null,"lastEditedAt":null}}}`
+	current, err = client.CurrentItem(context.Background(), item)
+	if err != nil || current.Edited {
+		t.Fatalf("unedited original command rejected: item=%+v err=%v", current, err)
+	}
+	response = `{"errors":[{"message":"Resource not accessible"}]}`
+	if _, err := client.CurrentItem(context.Background(), item); err == nil {
+		t.Fatal("GraphQL provenance failure did not fail closed")
+	}
+}
+
 func TestListNotificationsPaginatesAndRepeatsAfterFailedAction(t *testing.T) {
 	var calls []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

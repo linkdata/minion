@@ -28,6 +28,7 @@ type fakeGitHub struct {
 	accepted      []int64
 	reactions     []string
 	checks        int
+	currentItem   func(github.Item) (github.Item, error)
 }
 
 func (f *fakeGitHub) ListNotifications(context.Context, time.Time) ([]github.Notification, time.Duration, error) {
@@ -48,6 +49,13 @@ func (f *fakeGitHub) AcceptRepositoryInvitation(_ context.Context, id int64) err
 
 func (f *fakeGitHub) ThreadItems(context.Context, string, string, int, time.Time) ([]github.Item, error) {
 	return f.items, nil
+}
+
+func (f *fakeGitHub) CurrentItem(_ context.Context, item github.Item) (github.Item, error) {
+	if f.currentItem != nil {
+		return f.currentItem(item)
+	}
+	return item, nil
 }
 
 func (f *fakeGitHub) Permission(context.Context, string, string) (github.Permission, error) {
@@ -203,6 +211,49 @@ func TestAllowedActorsCannotBypassWritePermission(t *testing.T) {
 	}
 	if gh.checks != 1 || len(executor.jobs) != 0 || len(gh.reactions) != 0 {
 		t.Fatalf("allowlisted reader ran command: checks=%d jobs=%d reactions=%d", gh.checks, len(executor.jobs), len(gh.reactions))
+	}
+}
+
+func TestEditedCommentCannotUseOriginalAuthorAuthorization(t *testing.T) {
+	first := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	gh := &fakeGitHub{
+		notifications: []github.Notification{testNotification(first)},
+		items: []github.Item{{
+			Key: "comment:1", NodeID: "comment-node-1", Body: "No command yet", Author: github.User{Login: "allowed"}, UpdatedAt: first,
+		}},
+		permission: github.Permission{Permission: "write"},
+	}
+	executor := &fakeExecutor{}
+	config := testConfig()
+	config.Repositories[0].AllowedActors = []string{"allowed"}
+	store := openState(t, first.Add(-time.Minute))
+	clock := first
+	m := &Monitor{Config: config, GitHub: gh, Executor: executor, Logger: log.New(io.Discard, "", 0), Now: func() time.Time { return clock }}
+	if _, err := m.RunOnce(context.Background(), store); err != nil {
+		t.Fatal(err)
+	}
+	if len(executor.jobs) != 0 {
+		t.Fatal("plain comment started a job")
+	}
+
+	clock = clock.Add(time.Minute)
+	gh.notifications = []github.Notification{testNotification(clock)}
+	gh.items = []github.Item{
+		{Key: "comment:1", NodeID: "comment-node-1", Body: "@linkdataminion review", Author: github.User{Login: "allowed"}, UpdatedAt: clock},
+		{Key: "comment:2", NodeID: "comment-node-2", Body: "@linkdataminion review", Author: github.User{Login: "allowed"}, UpdatedAt: clock},
+	}
+	gh.currentItem = func(item github.Item) (github.Item, error) {
+		if item.NodeID == "comment-node-1" {
+			item.Edited = true
+			item.Editor = github.User{Login: "excluded"}
+		}
+		return item, nil
+	}
+	if _, err := m.RunOnce(context.Background(), store); err != nil {
+		t.Fatal(err)
+	}
+	if len(executor.jobs) != 1 || executor.jobs[0].Source.NodeID != "comment-node-2" || gh.checks != 1 || len(gh.reactions) != 1 {
+		t.Fatalf("edited command ran or original command failed: jobs=%+v checks=%d reactions=%v", executor.jobs, gh.checks, gh.reactions)
 	}
 }
 
