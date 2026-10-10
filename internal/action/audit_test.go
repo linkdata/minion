@@ -72,6 +72,8 @@ func TestAuditIssueAndPullRequest(t *testing.T) {
 					if _, err := fmt.Fprintf(w, `{"title":"Audit request","body":"Check authorization.","base":{"ref":"main"},"head":{"sha":%q}}`, apiHead); err != nil {
 						t.Error(err)
 					}
+				case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/o/r/git/trees/"):
+					_, _ = fmt.Fprintf(w, `{"sha":%q,"truncated":false,"tree":[{"path":"README.md","type":"blob","size":8}]}`, strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/"))
 				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7/comments":
 					if err := json.NewEncoder(w).Encode(comments); err != nil {
 						t.Error(err)
@@ -96,7 +98,7 @@ func TestAuditIssueAndPullRequest(t *testing.T) {
 					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 						t.Error(err)
 					}
-					if !strings.Contains(payload.Body, expected) || !strings.Contains(payload.Body, "Verified audit report") || !strings.Contains(payload.Body, job.Marker()) || strings.Contains(payload.Body, "Untrusted final answer") {
+					if !strings.Contains(payload.Body, expected) || !strings.Contains(payload.Body, inertModelOutput("Verified audit report")) || !strings.Contains(payload.Body, job.Marker()) || strings.Contains(payload.Body, "Untrusted final answer") {
 						t.Errorf("comment did not use verified report: %s", payload.Body)
 					}
 					comments = append(comments, github.Comment{NodeID: "audit-comment-1", Body: payload.Body, User: github.User{Login: "linkdataminion"}})

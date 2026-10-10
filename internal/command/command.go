@@ -51,9 +51,9 @@ func Parse(markdown string) (Command, error) {
 //	@<login> fix [text]
 //	@<login> release <tag>
 //
-// It ignores quoted lines, indented code, fenced code, HTML comments, prose,
-// unknown verbs, and malformed directives. Multiple valid directives fail
-// closed with [ErrAmbiguous], even when they are identical.
+// The directive must be the first non-blank line. This makes it unambiguous
+// to the requester even when later Markdown is quoted, fenced, or hidden.
+// Another directive-shaped line anywhere in the body fails closed.
 func ParseForLogin(markdown, login string) (Command, error) {
 	if !validLogin(login) {
 		return Command{}, ErrInvalidLogin
@@ -62,56 +62,22 @@ func ParseForLogin(markdown, login string) (Command, error) {
 	markdown = strings.ReplaceAll(markdown, "\r\n", "\n")
 	markdown = strings.ReplaceAll(markdown, "\r", "\n")
 
-	var found Command
-	var hasCommand bool
-	var fence fenceState
-	var inComment bool
-
-	for _, line := range strings.Split(markdown, "\n") {
-		if fence.marker != 0 {
-			if fence.closes(line) {
-				fence = fenceState{}
-			}
-			continue
-		}
-
-		// A comment can begin in prose on the preceding line. Skip an entire
-		// line containing comment markup so invisible text cannot become a
-		// command after either delimiter.
-		if inComment {
-			end := strings.Index(line, "-->")
-			if end < 0 {
-				continue
-			}
-			inComment = false
-			line = line[end+3:]
-		}
-		if isQuoted(line) || isIndentedCode(line) {
-			continue
-		}
-		if opening, ok := openFence(line); ok {
-			fence = opening
-			continue
-		}
-		if start := strings.Index(line, "<!--"); start >= 0 {
-			if !strings.Contains(line[start+4:], "-->") {
-				inComment = true
-			}
-			continue
-		}
-
-		candidate, ok := parseLine(line, handle)
-		if !ok {
-			continue
-		}
-		if hasCommand {
+	lines := strings.Split(markdown, "\n")
+	first := 0
+	for first < len(lines) && strings.TrimSpace(lines[first]) == "" {
+		first++
+	}
+	if first == len(lines) || isIndentedCode(lines[first]) {
+		return Command{}, ErrNoCommand
+	}
+	found, ok := parseLine(lines[first], handle)
+	if !ok {
+		return Command{}, ErrNoCommand
+	}
+	for _, line := range lines[first+1:] {
+		if _, ok := parseLine(line, handle); ok {
 			return Command{}, ErrAmbiguous
 		}
-		found, hasCommand = candidate, true
-	}
-
-	if !hasCommand {
-		return Command{}, ErrNoCommand
 	}
 	return found, nil
 }
@@ -189,10 +155,6 @@ func splitFirst(s string) (string, string) {
 	return s, ""
 }
 
-func isQuoted(line string) bool {
-	return strings.HasPrefix(strings.TrimLeft(line, " \t"), ">")
-}
-
 func isIndentedCode(line string) bool {
 	columns := 0
 	for _, r := range line {
@@ -209,56 +171,4 @@ func isIndentedCode(line string) bool {
 		}
 	}
 	return false
-}
-
-type fenceState struct {
-	marker byte
-	length int
-}
-
-func openFence(line string) (fenceState, bool) {
-	start := len(line) - len(strings.TrimLeft(line, " "))
-	if start > 3 {
-		return fenceState{}, false
-	}
-	line = line[start:]
-	line = afterListMarker(line)
-	if len(line) < 3 || (line[0] != '`' && line[0] != '~') {
-		return fenceState{}, false
-	}
-	marker := line[0]
-	i := 0
-	for i < len(line) && line[i] == marker {
-		i++
-	}
-	if i < 3 {
-		return fenceState{}, false
-	}
-	return fenceState{marker: marker, length: i}, true
-}
-
-func afterListMarker(line string) string {
-	if len(line) >= 2 && strings.ContainsRune("-+*", rune(line[0])) && (line[1] == ' ' || line[1] == '\t') {
-		return strings.TrimLeft(line[2:], " \t")
-	}
-	i := 0
-	for i < len(line) && i < 9 && line[i] >= '0' && line[i] <= '9' {
-		i++
-	}
-	if i > 0 && i+1 < len(line) && (line[i] == '.' || line[i] == ')') && (line[i+1] == ' ' || line[i+1] == '\t') {
-		return strings.TrimLeft(line[i+2:], " \t")
-	}
-	return line
-}
-
-func (f fenceState) closes(line string) bool {
-	line = strings.TrimLeft(line, " \t")
-	if len(line) < f.length {
-		return false
-	}
-	i := 0
-	for i < len(line) && line[i] == f.marker {
-		i++
-	}
-	return i >= f.length && strings.TrimSpace(line[i:]) == ""
 }
