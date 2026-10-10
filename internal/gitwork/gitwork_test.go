@@ -111,6 +111,64 @@ func TestCheckoutPullRequestVerifiesHead(t *testing.T) {
 	}
 }
 
+func TestCheckoutPullRequestBoundsAliasedTrees(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		width     int
+		depth     int
+		blobBytes int
+		blocked   bool
+	}{
+		{name: "small tree", width: 4, depth: 2, blobBytes: 1024},
+		{name: "expanded bytes", width: 8, depth: 2, blobBytes: maxCheckoutBytes/64 + 1, blocked: true},
+		{name: "expanded paths", width: 11, depth: 4, blobBytes: 1, blocked: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			fixture := newFixture(t)
+			blobPath := filepath.Join(fixture.source, "aliased-blob")
+			writeFile(t, blobPath, strings.Repeat("x", tt.blobBytes))
+			blob := fixture.git(fixture.source, "hash-object", "-w", blobPath)
+			if err := os.Remove(blobPath); err != nil {
+				t.Fatal(err)
+			}
+			tree := fixture.gitInput(fixture.source, fmt.Sprintf("100644 blob %s\tpayload\n", blob), "mktree")
+			for level := 0; level < tt.depth; level++ {
+				var entries strings.Builder
+				for i := 0; i < tt.width; i++ {
+					fmt.Fprintf(&entries, "040000 tree %s\td%02d\n", tree, i)
+				}
+				tree = fixture.gitInput(fixture.source, entries.String(), "mktree")
+			}
+			head := fixture.gitInput(fixture.source, "aliased PR head\n", "commit-tree", tree, "-p", fixture.base)
+			fixture.git(fixture.source, "push", fixture.remote, head+":refs/pull/7/head")
+
+			err := fixture.checkout.CheckoutPullRequest(context.Background(), 7, "main", head)
+			if tt.blocked {
+				if !errors.Is(err, ErrCheckoutTooLarge) {
+					t.Fatalf("CheckoutPullRequest() error = %v, want checkout limit", err)
+				}
+				if got := fixture.git(fixture.checkout.Path(), "rev-parse", "HEAD"); got != fixture.base {
+					t.Fatalf("oversized tree checked out: HEAD = %s, want %s", got, fixture.base)
+				}
+			} else if err != nil {
+				t.Fatalf("CheckoutPullRequest() error = %v", err)
+			}
+			path := fixture.checkout.Path()
+			for level := 0; level < tt.depth; level++ {
+				path = filepath.Join(path, "d00")
+			}
+			info, statErr := os.Stat(filepath.Join(path, "payload"))
+			if tt.blocked {
+				if !errors.Is(statErr, os.ErrNotExist) {
+					t.Fatalf("oversized tree materialized: %v", statErr)
+				}
+			} else if statErr != nil || info.Size() != int64(tt.blobBytes) {
+				t.Fatalf("small tree checkout: size = %v, error = %v", info, statErr)
+			}
+		})
+	}
+}
+
 func TestCommitAndPushUsesTrustedURLAndSkipsHooks(t *testing.T) {
 	fixture := newFixture(t)
 	ctx := context.Background()
@@ -301,9 +359,14 @@ func newFixture(t *testing.T) gitFixture {
 }
 
 func (f gitFixture) git(dir string, args ...string) string {
+	return f.gitInput(dir, "", args...)
+}
+
+func (f gitFixture) gitInput(dir, input string, args ...string) string {
 	f.t.Helper()
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
+	cmd.Stdin = strings.NewReader(input)
 	cmd.Env = append(os.Environ(),
 		"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null",
 		"GIT_AUTHOR_NAME=Test", "GIT_AUTHOR_EMAIL=test@example.invalid",

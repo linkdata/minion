@@ -21,6 +21,9 @@ const (
 	maxChangedFileSize = 1 << 20
 	maxPathListBytes   = 1 << 20
 	maxGitDiagnostic   = 8 << 10
+	maxCheckoutFiles   = 10_000
+	maxCheckoutBytes   = 64 << 20
+	maxTreeEntryBytes  = 1 << 20
 )
 
 var (
@@ -29,6 +32,7 @@ var (
 	ErrDiffTooLarge     = errors.New("staged diff exceeds size limit")
 	ErrChangedFileLarge = errors.New("changed file exceeds size limit")
 	ErrHeadMoved        = errors.New("pull request head changed")
+	ErrCheckoutTooLarge = errors.New("pull request tree exceeds checkout limits")
 )
 
 // Checkout owns a temporary clone. Git operations are deliberately kept here,
@@ -193,12 +197,99 @@ func (c *Checkout) CheckoutPullRequest(ctx context.Context, number int, baseRef,
 	if !strings.EqualFold(head, expectedHeadSHA) {
 		return fmt.Errorf("%w: expected %s, fetched %s", ErrHeadMoved, expectedHeadSHA, head)
 	}
+	if err := c.checkPullRequestTree(ctx, head); err != nil {
+		return err
+	}
 	if _, err := runGit(ctx, c.path, "checkout", "--detach", head); err != nil {
 		return err
 	}
 	c.expectedHead = strings.ToLower(head)
 	c.branch = ""
 	return c.recordConfig()
+}
+
+// Check expanded paths and blob bytes, including repeated tree/blob references,
+// before Git writes the untrusted PR head into work_root.
+func (c *Checkout) checkPullRequestTree(ctx context.Context, head string) error {
+	checkCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	w := checkoutTreeWriter{cancel: cancel}
+	err := runGitTo(checkCtx, c.path, &w, "ls-tree", "-r", "-l", "-z", "--full-tree", head)
+	if w.limitErr != nil {
+		return w.limitErr
+	}
+	if err != nil {
+		return err
+	}
+	if len(w.entry) != 0 {
+		return errors.New("incomplete Git tree listing")
+	}
+	return nil
+}
+
+type checkoutTreeWriter struct {
+	entry    []byte
+	files    int
+	bytes    int64
+	limitErr error
+	cancel   context.CancelFunc
+}
+
+func (w *checkoutTreeWriter) Write(p []byte) (int, error) {
+	n := len(p)
+	for len(p) != 0 && w.limitErr == nil {
+		end := bytes.IndexByte(p, 0)
+		if end < 0 {
+			end = len(p)
+		}
+		if end > maxTreeEntryBytes-len(w.entry) {
+			w.limitErr = fmt.Errorf("%w: tree entry is too long", ErrCheckoutTooLarge)
+			w.cancel()
+			break
+		}
+		w.entry = append(w.entry, p[:end]...)
+		if end == len(p) {
+			break
+		}
+		if err := w.recordEntry(); err != nil {
+			w.limitErr = err
+			w.cancel()
+			break
+		}
+		w.entry = w.entry[:0]
+		p = p[end+1:]
+	}
+	return n, nil
+}
+
+func (w *checkoutTreeWriter) recordEntry() error {
+	metadata, path, ok := bytes.Cut(w.entry, []byte{'\t'})
+	fields := bytes.Fields(metadata)
+	if !ok || len(path) == 0 || len(fields) != 4 {
+		return errors.New("invalid Git tree listing")
+	}
+	w.files++
+	if w.files > maxCheckoutFiles {
+		return fmt.Errorf("%w: more than %d paths", ErrCheckoutTooLarge, maxCheckoutFiles)
+	}
+	switch string(fields[1]) {
+	case "blob":
+		size, err := strconv.ParseInt(string(fields[3]), 10, 64)
+		if err != nil || size < 0 {
+			return errors.New("invalid Git blob size")
+		}
+		if size > maxCheckoutBytes-w.bytes {
+			return fmt.Errorf("%w: more than %d bytes", ErrCheckoutTooLarge, maxCheckoutBytes)
+		}
+		w.bytes += size
+	case "commit": // A submodule gitlink writes no blob into the checkout.
+		if string(fields[3]) != "-" {
+			return errors.New("invalid Git tree listing")
+		}
+	default:
+		return errors.New("invalid Git tree listing")
+	}
+	return nil
 }
 
 // NewBranch creates a branch at the current, verified checkout commit.
