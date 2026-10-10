@@ -437,7 +437,7 @@ func TestFixDoesNotPutModelOutputInPullRequestBody(t *testing.T) {
 	_, _, remote := auditGitFixtureRemote(t)
 	job := monitor.Job{
 		Repository: config.Repository{Name: "o/r", Actions: []string{"fix"}}, SubjectType: "Issue", Number: 7,
-		ID: strings.Repeat("a", 64), Source: github.Item{Author: github.User{Login: "writer"}, HTMLURL: "https://github.com/o/r/issues/7#issuecomment-1"},
+		ID: strings.Repeat("a", 64), Source: github.Item{Author: github.User{Login: "writer"}, HTMLURL: "https://github.com/o/r/issues/7#issuecomment-1", UpdatedAt: time.Now()},
 		Command: command.Command{Action: command.Fix},
 	}
 	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"), time.Now())
@@ -450,7 +450,9 @@ func TestFixDoesNotPutModelOutputInPullRequestBody(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7":
-			_, _ = fmt.Fprint(w, `{"title":"Bug","body":"Details"}`)
+			_, _ = fmt.Fprint(w, `{"node_id":"issue-node","title":"Bug","body":"Details"}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/graphql":
+			_, _ = fmt.Fprint(w, `{"data":{"node":{"title":"Bug","bodyText":"Details"}}}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
 			_, _ = fmt.Fprint(w, `{"full_name":"o/r","default_branch":"main"}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/pulls":
