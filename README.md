@@ -24,6 +24,8 @@ Each request must come from an account with effective repository `write`, `maint
 
 Edited command sources are ignored. Post a new comment to request work after editing text.
 
+For `fix`, Minion reads GitHub's rendered issue text and checks the issue's edit time against the request. If the issue changed at or after the request, it refuses the fix; review the current issue and post a new `fix` comment.
+
 After accepting an authorized command, the bot adds a 👀 reaction to the exact issue, pull request, comment, or review that contains it, before starting Codex. If the reaction fails, it retries the command on the next poll.
 
 `review` is limited to pull requests, and `fix` to issues. The bot replies when those commands are used in the other supported thread type. `audit` and `release` can be requested in an issue or pull request. Existing tags are refused so a draft cannot silently point at a different commit.
