@@ -562,3 +562,39 @@ func TestProtectedReleaseTagsRequiresVisibleCompleteRuleset(t *testing.T) {
 		})
 	}
 }
+
+func TestProtectedReleaseTagsChecksCreationRulesAfterIntegrityRule(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		creation string
+		want     bool
+	}{
+		{"active creation rule", `{"id":43,"target":"tag","enforcement":"active","conditions":{"ref_name":{"include":["refs/tags/v*"]}},"rules":[{"type":"creation"}]}`, false},
+		{"disabled creation rule", `{"id":43,"target":"tag","enforcement":"disabled","rules":[{"type":"creation"}]}`, true},
+		{"branch creation rule", `{"id":43,"target":"branch","enforcement":"active","rules":[{"type":"creation"}]}`, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var details int
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/repos/o/r/rulesets":
+					_, _ = fmt.Fprint(w, `[{"id":42},{"id":43}]`)
+				case "/repos/o/r/rulesets/42":
+					details++
+					_, _ = fmt.Fprint(w, `{"id":42,"target":"tag","enforcement":"active","bypass_actors":[],"conditions":{"ref_name":{"include":["~ALL"],"exclude":[]}},"rules":[{"type":"update"},{"type":"deletion"}]}`)
+				case "/repos/o/r/rulesets/43":
+					details++
+					_, _ = fmt.Fprint(w, tt.creation)
+				default:
+					t.Errorf("unexpected request: %s", r.URL)
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+			protected, err := testClient(server).ProtectedReleaseTags(context.Background(), "o/r")
+			if err != nil || protected != tt.want || details != 2 {
+				t.Fatalf("protected = %v, error = %v, details = %d; want %v, nil, 2", protected, err, details, tt.want)
+			}
+		})
+	}
+}

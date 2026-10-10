@@ -479,16 +479,18 @@ func (c *Client) CreateTagReference(ctx context.Context, repo, tag, sha string) 
 	return err
 }
 
-// ProtectedReleaseTags verifies a single active ruleset that covers every tag,
-// blocks updates and deletions, and exposes an empty bypass list. GitHub omits
-// bypass_actors for tokens without ruleset write access; omission is not proof
-// that no actor can bypass protection.
+// ProtectedReleaseTags verifies an active all-tag integrity ruleset and refuses
+// release creation while any active tag ruleset restricts creation. The latter
+// is conservative: the bot must not create a tag by bypassing a restriction
+// that applies to the requester. GitHub omits bypass_actors for tokens without
+// ruleset write access; omission is not proof that no actor can bypass.
 func (c *Client) ProtectedReleaseTags(ctx context.Context, repo string) (bool, error) {
 	path, err := repoPath(repo)
 	if err != nil {
 		return false, err
 	}
 	q := url.Values{"per_page": {"100"}, "targets": {"tag"}, "includes_parents": {"true"}}
+	protected := false
 	for page := 1; page <= 1000; page++ {
 		q.Set("page", strconv.Itoa(page))
 		var summaries []struct {
@@ -507,22 +509,25 @@ func (c *Client) ProtectedReleaseTags(ctx context.Context, repo string) (bool, e
 			if err != nil {
 				return false, err
 			}
-			if detail.ID != summary.ID || detail.Target != "tag" || detail.Enforcement != "active" ||
-				detail.BypassActors == nil || len(*detail.BypassActors) != 0 || len(detail.Conditions.RefName.Exclude) != 0 ||
-				!containsString(detail.Conditions.RefName.Include, "~ALL") {
+			if detail.ID != summary.ID {
+				return false, errors.New("GitHub returned mismatched ruleset details")
+			}
+			if detail.Target != "tag" || detail.Enforcement != "active" {
 				continue
 			}
 			var updates, deletions bool
 			for _, rule := range detail.Rules {
+				if rule.Type == "creation" {
+					return false, nil
+				}
 				updates = updates || rule.Type == "update"
 				deletions = deletions || rule.Type == "deletion"
 			}
-			if updates && deletions {
-				return true, nil
-			}
+			protected = protected || updates && deletions && detail.BypassActors != nil && len(*detail.BypassActors) == 0 &&
+				len(detail.Conditions.RefName.Exclude) == 0 && containsString(detail.Conditions.RefName.Include, "~ALL")
 		}
 		if !hasNextPage(header.Get("Link")) {
-			return false, nil
+			return protected, nil
 		}
 	}
 	return false, errors.New("too many GitHub ruleset pages")

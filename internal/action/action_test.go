@@ -395,6 +395,7 @@ func TestReleaseReservesTagAndRecoversOnlyBotDraft(t *testing.T) {
 		existingAuthor string
 		tamperedBody   bool
 		unprotected    bool
+		creationRule   bool
 		lostAfterCodex bool
 		lostAfterTag   bool
 		wantError      string
@@ -410,6 +411,7 @@ func TestReleaseReservesTagAndRecoversOnlyBotDraft(t *testing.T) {
 		{name: "bot draft recovery", existingAuthor: "linkdataminion", wantComments: 1},
 		{name: "tampered bot draft", existingAuthor: "linkdataminion", tamperedBody: true, wantError: "without matching bot provenance"},
 		{name: "unprotected tags", unprotected: true, wantComments: 1},
+		{name: "tag creation restricted", creationRule: true, wantComments: 1},
 		{name: "protection lost after notes", lostAfterCodex: true, wantError: "tag protection changed", wantCodex: 1},
 		{name: "protection lost after tag", lostAfterTag: true, wantError: "tag protection changed", wantCodex: 1},
 	} {
@@ -456,10 +458,16 @@ func TestReleaseReservesTagAndRecoversOnlyBotDraft(t *testing.T) {
 					if tt.unprotected || tt.lostAfterCodex && protectionCalls >= 2 || tt.lostAfterTag && protectionCalls >= 3 {
 						_, _ = fmt.Fprint(w, `[]`)
 					} else {
-						_, _ = fmt.Fprint(w, `[{"id":42}]`)
+						if tt.creationRule {
+							_, _ = fmt.Fprint(w, `[{"id":42},{"id":43}]`)
+						} else {
+							_, _ = fmt.Fprint(w, `[{"id":42}]`)
+						}
 					}
 				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/rulesets/42":
 					_, _ = fmt.Fprint(w, `{"id":42,"target":"tag","enforcement":"active","bypass_actors":[],"conditions":{"ref_name":{"include":["~ALL"],"exclude":[]}},"rules":[{"type":"update"},{"type":"deletion"}]}`)
+				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/rulesets/43":
+					_, _ = fmt.Fprint(w, `{"id":43,"target":"tag","enforcement":"active","bypass_actors":[{"actor_type":"RepositoryRole","actor_id":5}],"conditions":{"ref_name":{"include":["refs/tags/v*"]}},"rules":[{"type":"creation"}]}`)
 				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/releases":
 					if tt.existingAuthor != "" {
 						body := "notes\n\n" + job.Marker()
