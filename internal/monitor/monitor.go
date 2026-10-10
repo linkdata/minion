@@ -74,7 +74,8 @@ func (m *Monitor) logf(format string, args ...any) {
 
 // RunOnce polls the account's notifications, inspects new content in the
 // whitelisted repositories, and persists each completed command before moving
-// the cursor. Any transient failure leaves the cursor in place for a retry.
+// the cursor. Failed threads are persisted for later retries without holding
+// back unrelated notifications.
 func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, error) {
 	now := time.Now
 	if m.Now != nil {
@@ -122,34 +123,78 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		return next, fmt.Errorf("list notifications: %w", err)
 	}
 
-	sort.SliceStable(notifications, func(i, j int) bool {
-		return notifications[i].UpdatedAt.Before(notifications[j].UpdatedAt)
+	type scan struct {
+		notification github.Notification
+		since        time.Time
+		key          string
+	}
+	var scans []scan
+	seen := make(map[string]bool, len(notifications))
+	for _, notification := range notifications {
+		key := notificationKey(notification)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		scanSince := since
+		if pending, ok := store.Data.PendingNotifications[key]; ok {
+			if started.Before(pending.RetryAt) && !notification.UpdatedAt.After(pending.UpdatedAt) {
+				continue
+			}
+			scanSince = pending.Since
+		}
+		scans = append(scans, scan{notification, scanSince, key})
+	}
+	for key, pending := range store.Data.PendingNotifications {
+		if seen[key] || started.Before(pending.RetryAt) {
+			continue
+		}
+		scans = append(scans, scan{github.Notification{
+			ID:         key,
+			Repository: github.Repository{FullName: pending.Repository},
+			Subject:    github.Subject{Type: pending.SubjectType, URL: pending.SubjectURL},
+			UpdatedAt:  pending.UpdatedAt,
+		}, pending.Since, key})
+	}
+	sort.SliceStable(scans, func(i, j int) bool {
+		if scans[i].notification.UpdatedAt.Equal(scans[j].notification.UpdatedAt) {
+			return scans[i].key < scans[j].key
+		}
+		return scans[i].notification.UpdatedAt.Before(scans[j].notification.UpdatedAt)
 	})
 	var failures []error
-	for _, notification := range notifications {
+	for _, entry := range scans {
+		notification := entry.notification
 		repo, ok := m.Config.Repository(notification.Repository.FullName)
 		if !ok {
+			delete(store.Data.PendingNotifications, entry.key)
 			continue
 		}
 		if notification.Subject.Type != "Issue" && notification.Subject.Type != "PullRequest" {
 			m.logf("skip %s notification %s: unsupported subject %q", repo.Name, notification.ID, notification.Subject.Type)
+			delete(store.Data.PendingNotifications, entry.key)
 			continue
 		}
 		number, err := subjectNumber(notification.Subject.URL, repo.Name, notification.Subject.Type)
 		if err != nil {
 			m.logf("skip %s notification %s: %v", repo.Name, notification.ID, err)
+			delete(store.Data.PendingNotifications, entry.key)
 			continue
 		}
-		items, err := m.GitHub.ThreadItems(ctx, repo.Name, notification.Subject.Type, number, since)
+		firstFailure := len(failures)
+		items, err := m.GitHub.ThreadItems(ctx, repo.Name, notification.Subject.Type, number, entry.since)
 		if err != nil {
 			failures = append(failures, fmt.Errorf("%s %s #%d: %w", repo.Name, notification.Subject.Type, number, err))
+			if err := m.deferNotification(store, entry.key, notification, entry.since, started); err != nil {
+				return next, err
+			}
 			continue
 		}
 		for _, item := range items {
 			if strings.EqualFold(item.Author.Login, m.Config.BotLogin) || item.Author.Login == "" {
 				continue
 			}
-			_, err := command.ParseForLogin(item.Body, m.Config.BotLogin)
+			preliminary, err := command.ParseForLogin(item.Body, m.Config.BotLogin)
 			if errors.Is(err, command.ErrNoCommand) {
 				continue
 			}
@@ -157,11 +202,15 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				m.logf("skip command in %s: %v", item.HTMLURL, err)
 				continue
 			}
-			item, err = m.GitHub.CurrentItem(ctx, item)
-			if err != nil {
-				failures = append(failures, fmt.Errorf("verify command in %s: %w", item.HTMLURL, err))
+			if _, done := store.Data.Processed[jobID(item.Key, preliminary.Key)]; done {
 				continue
 			}
+			current, err := m.GitHub.CurrentItem(ctx, item)
+			if err != nil {
+				failures = append(failures, fmt.Errorf("verify command in %s: %w", itemLocation(item), err))
+				continue
+			}
+			item = current
 			if strings.EqualFold(item.Author.Login, m.Config.BotLogin) || item.Author.Login == "" {
 				continue
 			}
@@ -262,9 +311,16 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				return next, err
 			}
 		}
-	}
-	if len(failures) != 0 {
-		return next, errors.Join(failures...)
+		if len(failures) != firstFailure {
+			if err := m.deferNotification(store, entry.key, notification, entry.since, started); err != nil {
+				return next, err
+			}
+		} else if _, pending := store.Data.PendingNotifications[entry.key]; pending {
+			delete(store.Data.PendingNotifications, entry.key)
+			if err := store.Save(); err != nil {
+				return next, err
+			}
+		}
 	}
 	// GitHub timestamps have second precision. Keep a two-second overlap so an
 	// update racing with this poll cannot fall on the exclusive since boundary.
@@ -275,7 +331,39 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 	if err := store.Save(); err != nil {
 		return next, err
 	}
-	return next, nil
+	return next, errors.Join(failures...)
+}
+
+func notificationKey(notification github.Notification) string {
+	return jobID(strings.ToLower(notification.Repository.FullName), notification.Subject.Type+"\x00"+notification.Subject.URL)
+}
+
+func itemLocation(item github.Item) string {
+	if item.HTMLURL != "" {
+		return item.HTMLURL
+	}
+	return item.Key
+}
+
+func (m *Monitor) deferNotification(store *state.Store, key string, notification github.Notification, since, now time.Time) error {
+	pending := store.Data.PendingNotifications[key]
+	if pending.Failures < 7 {
+		pending.Failures++
+	}
+	pending.Repository = notification.Repository.FullName
+	pending.SubjectType = notification.Subject.Type
+	pending.SubjectURL = notification.Subject.URL
+	pending.Since = since
+	if notification.UpdatedAt.After(pending.UpdatedAt) {
+		pending.UpdatedAt = notification.UpdatedAt
+	}
+	pending.RetryAt = now.Add(time.Minute << (pending.Failures - 1))
+	store.Data.PendingNotifications[key] = pending
+	if err := store.Save(); err != nil {
+		return err
+	}
+	m.logf("retry %s %s after %s (failure %d)", pending.Repository, pending.SubjectURL, pending.RetryAt.Format(time.RFC3339), pending.Failures)
+	return nil
 }
 
 func infrastructureFailure(err error) bool {
