@@ -25,6 +25,9 @@ const (
 	maxDiagnosticBytes  = 8 << 10
 )
 
+// ErrOutputLimit means a bounded Codex run cannot complete with this output.
+var ErrOutputLimit = errors.New("Codex output limit exceeded")
+
 type Result struct {
 	Answer        string
 	Tokens        usage.Tokens
@@ -118,8 +121,16 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	filesystemRule := "permissions.minion.filesystem={" + strings.Join(filesystemRules, ",") + "}"
 
 	// Persist sessions so accounting includes helper agents and interrupted turns.
-	args := []string{"exec",
-		"--json", "--ignore-user-config", "--strict-config",
+	args := []string{"exec", "--json", "--ignore-user-config", "--ignore-rules", "--strict-config"}
+	// Untrusted jobs must not inherit connected tools, plugins, rules, or a login-shell snapshot.
+	for _, feature := range []string{
+		"apps", "browser_use", "browser_use_external", "browser_use_full_cdp_access",
+		"computer_use", "image_generation", "plugins", "remote_plugin",
+		"shell_snapshot", "skill_mcp_dependency_install",
+	} {
+		args = append(args, "--disable", feature)
+	}
+	args = append(args,
 		"-c", "approval_policy=never",
 		"-c", `web_search="disabled"`,
 		"-c", "shell_environment_policy.ignore_default_excludes=false",
@@ -128,7 +139,7 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 		"-c", fmt.Sprintf("permissions.minion.extends=%q", parentProfile),
 		"-c", filesystemRule,
 		"-c", "permissions.minion.network.enabled=false",
-	}
+	)
 	if settings.Model != "" {
 		args = append(args, "--model", settings.Model)
 	}
@@ -174,6 +185,9 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	if err := ctx.Err(); err != nil {
 		return result, fmt.Errorf("codex exec: %w", err)
 	}
+	if output.stopped {
+		return result, fmt.Errorf("codex exec: %w: %s", ErrOutputLimit, output.failureReason)
+	}
 	if runErr != nil || output.failed {
 		reason := output.failureReason
 		if reason == "" {
@@ -193,7 +207,7 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	if !output.completed {
 		reason := output.failureReason
 		if reason == "" && output.oversizedLines > 0 {
-			reason = "JSONL event exceeded the output size limit"
+			return result, fmt.Errorf("codex exec: %w: JSONL event exceeded the output size limit", ErrOutputLimit)
 		}
 		if reason == "" {
 			reason = strings.TrimSpace(stderr.String())
@@ -210,27 +224,25 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	return result, nil
 }
 
-// The runner holds GitHub credentials; the Codex process does not need them.
+// The runner holds GitHub and other service credentials; Codex only needs its
+// own authentication and ordinary process/network settings.
 func childEnvironment(env []string, runtimeDir, cacheDir string) []string {
+	allowed := map[string]bool{
+		"PATH": true, "HOME": true, "LANG": true, "LC_ALL": true, "LC_CTYPE": true, "TERM": true,
+		"CODEX_HOME": true, "CODEX_API_KEY": true, "CODEX_ACCESS_TOKEN": true,
+		"XDG_RUNTIME_DIR": true, "DBUS_SESSION_BUS_ADDRESS": true,
+		"CODEX_CA_CERTIFICATE": true, "SSL_CERT_FILE": true, "SSL_CERT_DIR": true,
+		"HTTP_PROXY": true, "HTTPS_PROXY": true, "ALL_PROXY": true, "NO_PROXY": true,
+	}
 	clean := make([]string, 0, len(env))
 	for _, entry := range env {
 		key, _, ok := strings.Cut(entry, "=")
 		if !ok {
 			continue
 		}
-		upper := strings.ToUpper(key)
-		if strings.HasPrefix(upper, "GH_") || strings.HasPrefix(upper, "GITHUB_") {
-			continue
+		if allowed[strings.ToUpper(key)] {
+			clean = append(clean, entry)
 		}
-		// A nested CLI must not inherit another session's identity, permissions,
-		// or app connections. Keep only its explicit authentication settings.
-		if strings.HasPrefix(upper, "CODEX_") && upper != "CODEX_HOME" && upper != "CODEX_API_KEY" {
-			continue
-		}
-		if upper == "TMPDIR" || upper == "GOCACHE" || upper == "TMP" || upper == "TEMP" {
-			continue
-		}
-		clean = append(clean, entry)
 	}
 	clean = append(clean, "TMPDIR="+runtimeDir, "TMP="+runtimeDir, "TEMP="+runtimeDir, "GOCACHE="+cacheDir)
 	return clean

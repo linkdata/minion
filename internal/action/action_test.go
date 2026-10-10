@@ -136,6 +136,9 @@ func (f *actionMonitorGitHub) Permission(context.Context, string, string) (githu
 	return github.Permission{Permission: "write"}, nil
 }
 func (f *actionMonitorGitHub) ReactEyes(context.Context, string) error { return nil }
+func (f *actionMonitorGitHub) CreateIssueComment(context.Context, string, int, string) (github.Comment, error) {
+	return github.Comment{}, nil
+}
 
 func TestReviewEchoDoesNotSuppressAuditInMonitor(t *testing.T) {
 	if _, err := exec.LookPath("node"); err != nil {
@@ -164,6 +167,8 @@ func TestReviewEchoDoesNotSuppressAuditInMonitor(t *testing.T) {
 			_, _ = fmt.Fprint(w, `{"full_name":"o/r","default_branch":"main"}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/pulls/7":
 			_, _ = fmt.Fprintf(w, `{"title":"PR","base":{"ref":"main"},"head":{"sha":%q}}`, head)
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/o/r/git/trees/"):
+			_, _ = fmt.Fprintf(w, `{"sha":%q,"truncated":false,"tree":[{"path":"README.md","type":"blob","size":8}]}`, strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/"))
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7/comments":
 			_ = json.NewEncoder(w).Encode(comments)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/pulls/7/comments":
@@ -240,6 +245,57 @@ func TestReviewEchoDoesNotSuppressAuditInMonitor(t *testing.T) {
 	}
 	if _, err := command.ParseForLogin(reviews[0].Body, "secondbot"); !errors.Is(err, command.ErrNoCommand) {
 		t.Fatalf("review relayed a live second-bot command: %v", err)
+	}
+}
+
+func TestFixRefusesIssueEditedAfterRequest(t *testing.T) {
+	requestAt := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	job := monitor.Job{
+		Repository: config.Repository{Name: "o/r"}, SubjectType: "Issue", Number: 7,
+		ID: strings.Repeat("a", 64), Source: github.Item{
+			Body: "@linkdataminion fix", Author: github.User{Login: "writer"}, UpdatedAt: requestAt,
+		},
+		Command: command.Command{Action: command.Fix},
+	}
+	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"), requestAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	var comments int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
+			_, _ = fmt.Fprint(w, `{"full_name":"o/r","default_branch":"main"}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/pulls":
+			_, _ = fmt.Fprint(w, `[]`)
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/branches/minion/fix-7-aaaaaaaaaaaa":
+			http.NotFound(w, r)
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7":
+			_, _ = fmt.Fprint(w, `{"node_id":"issue-node","title":"Original title","body":"Visible <!--hidden request-->"}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/graphql":
+			_, _ = fmt.Fprint(w, `{"data":{"node":{"title":"Edited title","bodyText":"Edited body","lastEditedAt":"2026-10-09T08:00:01Z"}}}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/issues/7/comments":
+			comments++
+			w.WriteHeader(http.StatusCreated)
+			_, _ = fmt.Fprint(w, `{"id":1}`)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	client := github.New("test-token")
+	client.BaseURL, client.HTTPClient = server.URL, server.Client()
+	executor := &Executor{GitHub: client, BotLogin: "linkdataminion", Store: store, RunCodex: func(context.Context, string, string, bool, string) (codexcli.Result, error) {
+		t.Fatal("Codex ran on an issue edited after the request")
+		return codexcli.Result{}, nil
+	}}
+	if err := executor.fix(context.Background(), job); err != nil {
+		t.Fatal(err)
+	}
+	if comments != 1 || len(store.Data.PendingFixes) != 0 {
+		t.Fatalf("edited issue created fix state or missed refusal: comments=%d pending=%v", comments, store.Data.PendingFixes)
 	}
 }
 
@@ -379,7 +435,7 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 	_, _, remote := auditGitFixtureRemote(t)
 	job := monitor.Job{
 		Repository: config.Repository{Name: "o/r", Actions: []string{"fix"}}, SubjectType: "Issue", Number: 7,
-		ID: strings.Repeat("a", 64), Source: github.Item{Author: github.User{ID: 7, Login: "writer"}},
+		ID: strings.Repeat("a", 64), Source: github.Item{Author: github.User{ID: 7, Login: "writer"}, HTMLURL: "https://github.com/o/r/issues/7#issuecomment-1", UpdatedAt: time.Now()},
 		Command: command.Command{Action: command.Fix},
 	}
 	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"), time.Now())
@@ -391,7 +447,9 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7":
-			_, _ = fmt.Fprint(w, `{"title":"Bug","body":"Details"}`)
+			_, _ = fmt.Fprint(w, `{"node_id":"issue-node","title":"Bug","body":"Details"}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/graphql":
+			_, _ = fmt.Fprint(w, `{"data":{"node":{"title":"Bug","bodyText":"Details"}}}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
 			_, _ = fmt.Fprint(w, `{"full_name":"o/r","default_branch":"main"}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/pulls":
@@ -466,6 +524,7 @@ func TestReleaseReservesTagAndRecoversOnlyBotDraft(t *testing.T) {
 		existingAuthor string
 		tamperedBody   bool
 		unprotected    bool
+		creationRule   bool
 		lostAfterCodex bool
 		lostAfterTag   bool
 		wantError      string
@@ -481,6 +540,7 @@ func TestReleaseReservesTagAndRecoversOnlyBotDraft(t *testing.T) {
 		{name: "bot draft recovery", existingAuthor: "linkdataminion", wantComments: 1},
 		{name: "tampered bot draft", existingAuthor: "linkdataminion", tamperedBody: true, wantError: "without matching bot provenance"},
 		{name: "unprotected tags", unprotected: true, wantComments: 1},
+		{name: "tag creation restricted", creationRule: true, wantComments: 1},
 		{name: "protection lost after notes", lostAfterCodex: true, wantError: "tag protection changed", wantCodex: 1},
 		{name: "protection lost after tag", lostAfterTag: true, wantError: "tag protection changed", wantCodex: 1},
 	} {
@@ -527,10 +587,16 @@ func TestReleaseReservesTagAndRecoversOnlyBotDraft(t *testing.T) {
 					if tt.unprotected || tt.lostAfterCodex && protectionCalls >= 2 || tt.lostAfterTag && protectionCalls >= 3 {
 						_, _ = fmt.Fprint(w, `[]`)
 					} else {
-						_, _ = fmt.Fprint(w, `[{"id":42}]`)
+						if tt.creationRule {
+							_, _ = fmt.Fprint(w, `[{"id":42},{"id":43}]`)
+						} else {
+							_, _ = fmt.Fprint(w, `[{"id":42}]`)
+						}
 					}
 				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/rulesets/42":
 					_, _ = fmt.Fprint(w, `{"id":42,"target":"tag","enforcement":"active","bypass_actors":[],"conditions":{"ref_name":{"include":["~ALL"],"exclude":[]}},"rules":[{"type":"update"},{"type":"deletion"}]}`)
+				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/rulesets/43":
+					_, _ = fmt.Fprint(w, `{"id":43,"target":"tag","enforcement":"active","bypass_actors":[{"actor_type":"RepositoryRole","actor_id":5}],"conditions":{"ref_name":{"include":["refs/tags/v*"]}},"rules":[{"type":"creation"}]}`)
 				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/releases":
 					if tt.existingAuthor != "" {
 						body := inertModelOutput("notes") + "\n\n" + job.Marker()

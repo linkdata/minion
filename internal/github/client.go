@@ -4,6 +4,7 @@ package github
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +17,8 @@ import (
 )
 
 const defaultBaseURL = "https://api.github.com"
+
+const maxTreeResponseBytes = 8 << 20
 
 // Client calls GitHub with a user token. BaseURL and HTTPClient may be changed
 // before the first request, which also makes the client usable with httptest.
@@ -136,6 +139,19 @@ type GitReference struct {
 	} `json:"object"`
 }
 
+// GitTree is GitHub's recursive listing of a content-addressed tree.
+type GitTree struct {
+	SHA       string
+	Truncated *bool
+	Tree      []GitTreeEntry
+}
+
+type GitTreeEntry struct {
+	Path string
+	Type string
+	Size *int64
+}
+
 type repositoryRuleset struct {
 	ID           int64              `json:"id"`
 	Target       string             `json:"target"`
@@ -190,6 +206,10 @@ func (e *StatusError) Error() string {
 }
 
 func (c *Client) request(ctx context.Context, method, path string, input, output any, extra http.Header, expected ...int) (http.Header, int, error) {
+	return c.requestBounded(ctx, method, path, input, output, extra, 0, expected...)
+}
+
+func (c *Client) requestBounded(ctx context.Context, method, path string, input, output any, extra http.Header, maxBytes int64, expected ...int) (http.Header, int, error) {
 	if c == nil {
 		return nil, 0, errors.New("nil GitHub client")
 	}
@@ -239,7 +259,18 @@ func (c *Client) request(ctx context.Context, method, path string, input, output
 	for _, code := range expected {
 		if resp.StatusCode == code {
 			if output != nil && resp.StatusCode != http.StatusNotModified {
-				if err := json.NewDecoder(resp.Body).Decode(output); err != nil {
+				if maxBytes > 0 {
+					data, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
+					if err != nil {
+						return resp.Header, resp.StatusCode, fmt.Errorf("read GitHub %s %s response: %w", method, path, err)
+					}
+					if int64(len(data)) > maxBytes {
+						return resp.Header, resp.StatusCode, fmt.Errorf("GitHub %s %s response exceeds %d bytes", method, path, maxBytes)
+					}
+					if err := json.Unmarshal(data, output); err != nil {
+						return resp.Header, resp.StatusCode, fmt.Errorf("decode GitHub %s %s response: %w", method, path, err)
+					}
+				} else if err := json.NewDecoder(resp.Body).Decode(output); err != nil {
 					return resp.Header, resp.StatusCode, fmt.Errorf("decode GitHub %s %s response: %w", method, path, err)
 				}
 			}
@@ -255,6 +286,23 @@ func (c *Client) request(ctx context.Context, method, path string, input, output
 		message = ghErr.Message
 	}
 	return resp.Header, resp.StatusCode, &StatusError{Method: method, Path: path, StatusCode: resp.StatusCode, Message: message}
+}
+
+// GitTree returns bounded size metadata without downloading blob contents.
+func (c *Client) GitTree(ctx context.Context, repo, treeSHA string) (GitTree, error) {
+	var tree GitTree
+	path, err := repoPath(repo)
+	if err != nil {
+		return tree, err
+	}
+	if len(treeSHA) != 40 {
+		return tree, errors.New("invalid Git tree SHA")
+	}
+	if _, err := hex.DecodeString(treeSHA); err != nil {
+		return tree, errors.New("invalid Git tree SHA")
+	}
+	_, _, err = c.requestBounded(ctx, http.MethodGet, path+"/git/trees/"+treeSHA+"?recursive=1", nil, &tree, nil, maxTreeResponseBytes, http.StatusOK)
+	return tree, err
 }
 
 // ReactEyes acknowledges the exact GitHub item containing a command. GraphQL
@@ -479,16 +527,18 @@ func (c *Client) CreateTagReference(ctx context.Context, repo, tag, sha string) 
 	return err
 }
 
-// ProtectedReleaseTags verifies a single active ruleset that covers every tag,
-// blocks updates and deletions, and exposes an empty bypass list. GitHub omits
-// bypass_actors for tokens without ruleset write access; omission is not proof
-// that no actor can bypass protection.
+// ProtectedReleaseTags verifies an active all-tag integrity ruleset and refuses
+// release creation while any active tag ruleset restricts creation. The latter
+// is conservative: the bot must not create a tag by bypassing a restriction
+// that applies to the requester. GitHub omits bypass_actors for tokens without
+// ruleset write access; omission is not proof that no actor can bypass.
 func (c *Client) ProtectedReleaseTags(ctx context.Context, repo string) (bool, error) {
 	path, err := repoPath(repo)
 	if err != nil {
 		return false, err
 	}
 	q := url.Values{"per_page": {"100"}, "targets": {"tag"}, "includes_parents": {"true"}}
+	protected := false
 	for page := 1; page <= 1000; page++ {
 		q.Set("page", strconv.Itoa(page))
 		var summaries []struct {
@@ -507,22 +557,25 @@ func (c *Client) ProtectedReleaseTags(ctx context.Context, repo string) (bool, e
 			if err != nil {
 				return false, err
 			}
-			if detail.ID != summary.ID || detail.Target != "tag" || detail.Enforcement != "active" ||
-				detail.BypassActors == nil || len(*detail.BypassActors) != 0 || len(detail.Conditions.RefName.Exclude) != 0 ||
-				!containsString(detail.Conditions.RefName.Include, "~ALL") {
+			if detail.ID != summary.ID {
+				return false, errors.New("GitHub returned mismatched ruleset details")
+			}
+			if detail.Target != "tag" || detail.Enforcement != "active" {
 				continue
 			}
 			var updates, deletions bool
 			for _, rule := range detail.Rules {
+				if rule.Type == "creation" {
+					return false, nil
+				}
 				updates = updates || rule.Type == "update"
 				deletions = deletions || rule.Type == "deletion"
 			}
-			if updates && deletions {
-				return true, nil
-			}
+			protected = protected || updates && deletions && detail.BypassActors != nil && len(*detail.BypassActors) == 0 &&
+				len(detail.Conditions.RefName.Exclude) == 0 && containsString(detail.Conditions.RefName.Include, "~ALL")
 		}
 		if !hasNextPage(header.Get("Link")) {
-			return false, nil
+			return protected, nil
 		}
 	}
 	return false, errors.New("too many GitHub ruleset pages")

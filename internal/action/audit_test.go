@@ -72,6 +72,8 @@ func TestAuditIssueAndPullRequest(t *testing.T) {
 					if _, err := fmt.Fprintf(w, `{"title":"Audit request","body":"Check authorization.","base":{"ref":"main"},"head":{"sha":%q}}`, apiHead); err != nil {
 						t.Error(err)
 					}
+				case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/o/r/git/trees/"):
+					_, _ = fmt.Fprintf(w, `{"sha":%q,"truncated":false,"tree":[{"path":"README.md","type":"blob","size":8}]}`, strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/"))
 				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7/comments":
 					if err := json.NewEncoder(w).Encode(comments); err != nil {
 						t.Error(err)
@@ -198,6 +200,9 @@ func TestAuditIssueAndPullRequest(t *testing.T) {
 			if tt.wantError != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantError) || len(comments) != 0 {
 					t.Fatalf("error=%v comments=%d, want %q and no comment", err, len(comments), tt.wantError)
+				}
+				if tt.incomplete && !errors.Is(err, monitor.ErrTerminalJob) {
+					t.Fatalf("incomplete audit error = %v, want terminal failure", err)
 				}
 				if tt.movedHead && calls != 0 {
 					t.Fatal("Codex ran on changed PR head")

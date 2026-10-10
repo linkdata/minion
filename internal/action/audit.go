@@ -56,7 +56,7 @@ func (e *Executor) audit(ctx context.Context, job monitor.Job) error {
 	}
 	defer e.closeCheckout(checkout)
 	if job.SubjectType == "PullRequest" {
-		if err := checkout.CheckoutPullRequest(ctx, job.Number, branch, head); err != nil {
+		if err := e.checkoutPullRequest(ctx, checkout, job.Repository.Name, job.Number, branch, head); err != nil {
 			return err
 		}
 	}
@@ -106,7 +106,7 @@ Request comment (%s):
 	}
 	report, err := validateAuditOutput(ctx, outputDir, skill, repo.FullName, checkout.Path(), head)
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
 	}
 	return e.acknowledge(ctx, job, fmt.Sprintf("Security audit requested by @%s at commit `%s`:\n\n%s", job.Source.Author.Login, head, inertModelOutput(report)))
 }
