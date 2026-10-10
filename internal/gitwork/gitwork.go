@@ -26,6 +26,7 @@ const (
 	maxCheckoutFiles   = 10_000
 	maxCheckoutBytes   = 64 << 20
 	maxTreeEntryBytes  = 1 << 20
+	checkoutAttributes = "* -text -ident -filter -working-tree-encoding\n"
 )
 
 var (
@@ -213,6 +214,11 @@ func (c *Checkout) CheckoutPullRequest(ctx context.Context, number int, baseRef,
 	if err := checkPullRequestTree(tree, treeSHA); err != nil {
 		return err
 	}
+	// Repository attributes cannot expand blobs or run a checkout filter.
+	// info/attributes takes precedence over every in-tree .gitattributes.
+	if err := os.WriteFile(filepath.Join(c.path, ".git", "info", "attributes"), []byte(checkoutAttributes), 0600); err != nil {
+		return fmt.Errorf("set pull request checkout attributes: %w", err)
+	}
 	if _, err := runGit(ctx, c.path, "checkout", "--detach", head); err != nil {
 		return err
 	}
@@ -224,7 +230,7 @@ func (c *Checkout) CheckoutPullRequest(ctx context.Context, number int, baseRef,
 // Check every expanded blob and gitlink, including repeated object references,
 // against GitHub metadata for the exact tree fetched from the PR head.
 func checkPullRequestTree(tree github.GitTree, expectedSHA string) error {
-	if !strings.EqualFold(tree.SHA, expectedSHA) || !validSHA(tree.SHA) || tree.Truncated || tree.Tree == nil {
+	if !strings.EqualFold(tree.SHA, expectedSHA) || !validSHA(tree.SHA) || tree.Truncated == nil || *tree.Truncated || tree.Tree == nil {
 		return fmt.Errorf("%w: incomplete or mismatched tree metadata", ErrCheckoutTooLarge)
 	}
 	var files int

@@ -149,7 +149,7 @@ func TestCheckoutPullRequestBoundsAliasedTrees(t *testing.T) {
 				entries *= tt.width
 			}
 			lookup := func(_ context.Context, sha string) (github.GitTree, error) {
-				tree := github.GitTree{SHA: sha}
+				tree := completeTree(sha, make([]github.GitTreeEntry, 0, entries))
 				for i := 0; i < entries; i++ {
 					size := int64(tt.blobBytes)
 					tree.Tree = append(tree.Tree, github.GitTreeEntry{Path: fmt.Sprintf("p%d", i), Type: "blob", Size: &size})
@@ -185,18 +185,26 @@ func TestCheckoutPullRequestBoundsAliasedTrees(t *testing.T) {
 
 func smallTree(_ context.Context, sha string) (github.GitTree, error) {
 	size := int64(32)
-	return github.GitTree{SHA: sha, Tree: []github.GitTreeEntry{{Path: "change.txt", Type: "blob", Size: &size}}}, nil
+	return completeTree(sha, []github.GitTreeEntry{{Path: "change.txt", Type: "blob", Size: &size}}), nil
+}
+
+func completeTree(sha string, entries []github.GitTreeEntry) github.GitTree {
+	truncated := false
+	return github.GitTree{SHA: sha, Truncated: &truncated, Tree: entries}
 }
 
 func TestCheckoutPullRequestRejectsIncompleteTreeMetadata(t *testing.T) {
 	sha := strings.Repeat("a", 40)
 	size := int64(1)
+	truncated := true
 	for _, tree := range []github.GitTree{
 		{SHA: strings.Repeat("b", 40)},
-		{SHA: sha, Truncated: true},
+		{SHA: sha, Truncated: &truncated},
 		{SHA: sha},
-		{SHA: sha, Tree: []github.GitTreeEntry{{Path: "x", Type: "blob"}}},
-		{SHA: sha, Tree: []github.GitTreeEntry{{Path: "x", Type: "blob", Size: &size}, {Path: "y", Type: "unknown"}}},
+		{SHA: sha, Tree: []github.GitTreeEntry{}},
+		completeTree(sha, nil),
+		completeTree(sha, []github.GitTreeEntry{{Path: "x", Type: "blob"}}),
+		completeTree(sha, []github.GitTreeEntry{{Path: "x", Type: "blob", Size: &size}, {Path: "y", Type: "unknown"}}),
 	} {
 		if err := checkPullRequestTree(tree, sha); !errors.Is(err, ErrCheckoutTooLarge) {
 			t.Fatalf("metadata %+v: error = %v, want checkout refusal", tree, err)
@@ -229,7 +237,7 @@ func TestCheckoutPullRequestPreflightDoesNotFetchMissingBlob(t *testing.T) {
 	}
 	oversized := func(_ context.Context, sha string) (github.GitTree, error) {
 		size := int64(maxCheckoutBytes + 1)
-		return github.GitTree{SHA: sha, Tree: []github.GitTreeEntry{{Path: "new.dat", Type: "blob", Size: &size}}}, nil
+		return completeTree(sha, []github.GitTreeEntry{{Path: "new.dat", Type: "blob", Size: &size}}), nil
 	}
 	if err := checkout.CheckoutPullRequest(context.Background(), 7, "main", head, oversized); !errors.Is(err, ErrCheckoutTooLarge) {
 		t.Fatalf("oversized PR error = %v, want checkout limit", err)
@@ -242,13 +250,49 @@ func TestCheckoutPullRequestPreflightDoesNotFetchMissingBlob(t *testing.T) {
 	}
 	small := func(_ context.Context, sha string) (github.GitTree, error) {
 		size := int64(blobBytes)
-		return github.GitTree{SHA: sha, Tree: []github.GitTreeEntry{{Path: "new.dat", Type: "blob", Size: &size}}}, nil
+		return completeTree(sha, []github.GitTreeEntry{{Path: "new.dat", Type: "blob", Size: &size}}), nil
 	}
 	if err := checkout.CheckoutPullRequest(context.Background(), 7, "main", head, small); err != nil {
 		t.Fatalf("bounded PR checkout: %v", err)
 	}
 	if info, err := os.Stat(filepath.Join(checkout.Path(), "new.dat")); err != nil || info.Size() != blobBytes {
 		t.Fatalf("bounded PR file size = %v, error = %v", info, err)
+	}
+}
+
+func TestCheckoutPullRequestDisablesRepositoryTransforms(t *testing.T) {
+	fixture := newFixture(t)
+	attributes := "payload.txt ident text eol=crlf working-tree-encoding=UTF-16LE\n"
+	payload := strings.Repeat("$Id$\n", 1024)
+	writeFile(t, filepath.Join(fixture.source, "payload.txt"), payload)
+	fixture.git(fixture.source, "add", "payload.txt")
+	writeFile(t, filepath.Join(fixture.source, ".gitattributes"), attributes)
+	fixture.git(fixture.source, "add", ".gitattributes")
+	fixture.git(fixture.source, "commit", "-m", "force checkout transformations")
+	head := fixture.git(fixture.source, "rev-parse", "HEAD")
+	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/pull/7/head")
+
+	checkout, err := cloneFromURL(context.Background(), t.TempDir(), fixture.remote, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer checkout.Close()
+	lookup := func(_ context.Context, sha string) (github.GitTree, error) {
+		attributesSize, payloadSize := int64(len(attributes)), int64(len(payload))
+		return completeTree(sha, []github.GitTreeEntry{
+			{Path: ".gitattributes", Type: "blob", Size: &attributesSize},
+			{Path: "payload.txt", Type: "blob", Size: &payloadSize},
+		}), nil
+	}
+	if err := checkout.CheckoutPullRequest(context.Background(), 7, "main", head, lookup); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(checkout.Path(), "payload.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != payload {
+		t.Fatalf("checkout transformed %d blob bytes into %d worktree bytes", len(payload), len(got))
 	}
 }
 

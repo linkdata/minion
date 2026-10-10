@@ -142,7 +142,7 @@ type GitReference struct {
 // GitTree is GitHub's recursive listing of a content-addressed tree.
 type GitTree struct {
 	SHA       string
-	Truncated bool
+	Truncated *bool
 	Tree      []GitTreeEntry
 }
 
