@@ -98,7 +98,7 @@ func TestAuditIssueAndPullRequest(t *testing.T) {
 					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 						t.Error(err)
 					}
-					if !strings.Contains(payload.Body, expected) || !strings.Contains(payload.Body, "Verified audit report") || !strings.Contains(payload.Body, job.Marker()) || strings.Contains(payload.Body, "Untrusted final answer") {
+					if !strings.Contains(payload.Body, expected) || !strings.Contains(payload.Body, inertModelOutput("Verified audit report")) || !strings.Contains(payload.Body, job.Marker()) || strings.Contains(payload.Body, "Untrusted final answer") {
 						t.Errorf("comment did not use verified report: %s", payload.Body)
 					}
 					comments = append(comments, github.Comment{NodeID: "audit-comment-1", Body: payload.Body, User: github.User{Login: "linkdataminion"}})
