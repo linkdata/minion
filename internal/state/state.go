@@ -14,13 +14,25 @@ import (
 var ErrLocked = errors.New("another minion process holds the state lock")
 
 type Data struct {
-	Cursor            time.Time                 `json:"cursor"`
-	NextPollAt        time.Time                 `json:"next_poll_at,omitempty"`
-	NextInviteCheckAt time.Time                 `json:"next_invite_check_at,omitempty"`
-	Processed         map[string]time.Time      `json:"processed"`
-	JobFailures       map[string]JobFailure     `json:"job_failures,omitempty"`
-	PendingFixes      map[string]string         `json:"pending_fixes,omitempty"`
-	PendingReleases   map[string]PendingRelease `json:"pending_releases,omitempty"`
+	Cursor               time.Time                      `json:"cursor"`
+	NextPollAt           time.Time                      `json:"next_poll_at,omitempty"`
+	NextInviteCheckAt    time.Time                      `json:"next_invite_check_at,omitempty"`
+	Processed            map[string]time.Time           `json:"processed"`
+	JobFailures          map[string]JobFailure          `json:"job_failures,omitempty"`
+	PendingNotifications map[string]PendingNotification `json:"pending_notifications,omitempty"`
+	PendingFixes         map[string]string              `json:"pending_fixes,omitempty"`
+	PendingReleases      map[string]PendingRelease      `json:"pending_releases,omitempty"`
+}
+
+// PendingNotification retains a failed thread after the global cursor advances.
+type PendingNotification struct {
+	Repository  string    `json:"repository"`
+	SubjectType string    `json:"subject_type"`
+	SubjectURL  string    `json:"subject_url"`
+	Since       time.Time `json:"since"`
+	UpdatedAt   time.Time `json:"updated_at"`
+	RetryAt     time.Time `json:"retry_at"`
+	Failures    int       `json:"failures"`
 }
 
 type JobFailure struct {
@@ -60,7 +72,7 @@ func Open(path string, initialCursor time.Time) (*Store, error) {
 	store := &Store{path: path, lock: lock}
 	f, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
-		store.Data = Data{Cursor: initialCursor.UTC(), Processed: map[string]time.Time{}, JobFailures: map[string]JobFailure{}, PendingFixes: map[string]string{}, PendingReleases: map[string]PendingRelease{}}
+		store.Data = Data{Cursor: initialCursor.UTC(), Processed: map[string]time.Time{}, JobFailures: map[string]JobFailure{}, PendingNotifications: map[string]PendingNotification{}, PendingFixes: map[string]string{}, PendingReleases: map[string]PendingRelease{}}
 		if err := store.Save(); err != nil {
 			return nil, errors.Join(err, store.Close())
 		}
@@ -92,6 +104,9 @@ func Open(path string, initialCursor time.Time) (*Store, error) {
 	}
 	if store.Data.JobFailures == nil {
 		store.Data.JobFailures = map[string]JobFailure{}
+	}
+	if store.Data.PendingNotifications == nil {
+		store.Data.PendingNotifications = map[string]PendingNotification{}
 	}
 	if store.Data.PendingFixes == nil {
 		store.Data.PendingFixes = map[string]string{}
