@@ -51,6 +51,12 @@ func (e *Executor) closeCheckout(checkout *gitwork.Checkout) {
 	}
 }
 
+func (e *Executor) checkoutPullRequest(ctx context.Context, checkout *gitwork.Checkout, repo string, number int, baseRef, headSHA string) error {
+	return checkout.CheckoutPullRequest(ctx, number, baseRef, headSHA, func(ctx context.Context, treeSHA string) (github.GitTree, error) {
+		return e.GitHub.GitTree(ctx, repo, treeSHA)
+	})
+}
+
 func (e *Executor) runCodex(ctx context.Context, dir, prompt string, writable bool, outputDir string) (string, error) {
 	var result codexcli.Result
 	var err error
@@ -149,7 +155,7 @@ func (e *Executor) review(ctx context.Context, job monitor.Job) error {
 		return err
 	}
 	defer e.closeCheckout(checkout)
-	if err := checkout.CheckoutPullRequest(ctx, job.Number, pull.Base.Ref, pull.Head.SHA); err != nil {
+	if err := e.checkoutPullRequest(ctx, checkout, job.Repository.Name, job.Number, pull.Base.Ref, pull.Head.SHA); err != nil {
 		return err
 	}
 	prompt := fmt.Sprintf(`Review pull request #%d in %s, requested by @%s.
