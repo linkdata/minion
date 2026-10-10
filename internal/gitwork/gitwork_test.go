@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/linkdata/minion/internal/github"
 )
@@ -293,6 +294,119 @@ func TestCheckoutPullRequestDisablesRepositoryTransforms(t *testing.T) {
 	}
 	if string(got) != payload {
 		t.Fatalf("checkout transformed %d blob bytes into %d worktree bytes", len(payload), len(got))
+	}
+}
+
+func TestNestedGitMetadataCannotRunFilter(t *testing.T) {
+	t.Setenv("GH_TOKEN", "DUMMY_CANARY")
+	t.Setenv("GITHUB_TOKEN", "DUMMY_CANARY")
+	fixture := newFixture(t)
+	child := filepath.Join(t.TempDir(), "child")
+	fixture.git("", "init", "--initial-branch=main", child)
+	writeFile(t, filepath.Join(child, ".gitattributes"), "*.txt filter=probe\n")
+	writeFile(t, filepath.Join(child, "payload.txt"), "original\n")
+	fixture.git(child, "add", ".")
+	fixture.git(child, "commit", "-m", "child")
+	childHead := fixture.git(child, "rev-parse", "HEAD")
+	fixture.git(fixture.source, "update-index", "--add", "--cacheinfo", "160000,"+childHead+",sub")
+	fixture.git(fixture.source, "commit", "-m", "add gitlink")
+	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/heads/main")
+
+	ctx := context.Background()
+	checkout, err := cloneFromURL(ctx, t.TempDir(), fixture.remote, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer checkout.Close()
+	if changed, err := checkout.HasChanges(ctx); err != nil || changed {
+		t.Fatalf("clean gitlink HasChanges() = (%t, %v)", changed, err)
+	}
+	const branch = "minion/fix-nested-git"
+	if err := checkout.NewBranch(ctx, branch); err != nil {
+		t.Fatal(err)
+	}
+	sub := filepath.Join(checkout.Path(), "sub")
+	fixture.git(sub, "init", "--initial-branch=main")
+	filter := filepath.Join(t.TempDir(), "filter.sh")
+	marker := filepath.Join(t.TempDir(), "filter-ran")
+	writeFile(t, filter, "#!/bin/sh\ncat\nprintf x >> \"$1\"\n")
+	if err := os.Chmod(filter, 0700); err != nil {
+		t.Fatal(err)
+	}
+	fixture.git(sub, "config", "filter.probe.clean", filter+" "+marker)
+	writeFile(t, filepath.Join(sub, ".gitattributes"), "*.txt filter=probe\n")
+	writeFile(t, filepath.Join(sub, "payload.txt"), "original\n")
+	fixture.git(sub, "add", ".")
+	writeFile(t, filepath.Join(sub, "payload.txt"), "altered!\n") // Same size forces Git to clean the file.
+	when := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(filepath.Join(sub, "payload.txt"), when, when); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(marker, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := checkout.HasChanges(ctx); err == nil || !strings.Contains(err.Error(), "nested Git metadata") {
+		t.Fatalf("HasChanges() error = %v, want nested Git refusal", err)
+	}
+	if err := checkout.CommitAndPush(ctx, branch, "bot", "fix", func(string) error { return nil }); err == nil || !strings.Contains(err.Error(), "nested Git metadata") {
+		t.Fatalf("CommitAndPush() error = %v, want nested Git refusal", err)
+	}
+	data, err := os.ReadFile(marker)
+	if err != nil || len(data) != 0 {
+		t.Fatalf("nested filter ran: marker = %q, error = %v", data, err)
+	}
+
+	cleanCheckout, err := cloneFromURL(ctx, t.TempDir(), fixture.remote, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanCheckout.Close()
+	cleanSub := filepath.Join(cleanCheckout.Path(), "sub")
+	fixture.git("", "clone", child, cleanSub) // Its HEAD matches the tracked gitlink.
+	fixture.git(cleanSub, "config", "filter.probe.clean", filter+" "+marker)
+	when = time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(filepath.Join(cleanSub, "payload.txt"), when, when); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(marker, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cleanCheckout.HasChanges(ctx); err == nil || !strings.Contains(err.Error(), "nested Git metadata") {
+		t.Fatalf("clean nested repo HasChanges() error = %v, want refusal", err)
+	}
+	data, err = os.ReadFile(marker)
+	if err != nil || len(data) != 0 {
+		t.Fatalf("clean nested filter ran: marker = %q, error = %v", data, err)
+	}
+}
+
+func TestNestedGitScanBoundsAndDoesNotFollowSymlinks(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, ".git"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	if err := os.Mkdir(filepath.Join(outside, ".git"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "link")); err != nil {
+		t.Fatal(err)
+	}
+	if err := rejectNestedGitMetadata(context.Background(), root, 1); err != nil {
+		t.Fatalf("root Git metadata or symlink target was scanned: %v", err)
+	}
+	writeFile(t, filepath.Join(root, "second"), "x")
+	if err := rejectNestedGitMetadata(context.Background(), root, 1); err == nil || !strings.Contains(err.Error(), "scan exceeds") {
+		t.Fatalf("bounded scan error = %v, want entry limit", err)
+	}
+	nested := filepath.Join(root, "nested")
+	if err := os.Mkdir(nested, 0700); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(nested, ".git"), "gitdir: elsewhere\n")
+	if err := rejectNestedGitMetadata(context.Background(), root, 10); err == nil || !strings.Contains(err.Error(), "nested Git metadata") {
+		t.Fatalf("Git metadata file error = %v, want refusal", err)
 	}
 }
 
