@@ -23,6 +23,7 @@ const (
 	maxChangedFileSize = 1 << 20
 	maxPathListBytes   = 1 << 20
 	maxGitDiagnostic   = 8 << 10
+	maxWorktreeEntries = 100_000
 	maxCheckoutFiles   = 10_000
 	maxCheckoutBytes   = 64 << 20
 	maxTreeEntryBytes  = 1 << 20
@@ -285,6 +286,9 @@ func (c *Checkout) HasChanges(ctx context.Context) (bool, error) {
 	if err := c.ready(); err != nil {
 		return false, err
 	}
+	if err := rejectNestedGitMetadata(ctx, c.path, maxWorktreeEntries); err != nil {
+		return false, err
+	}
 	var presence presenceWriter
 	if err := runGitTo(ctx, c.path, &presence, "status", "--porcelain=v1", "-z", "--untracked-files=all"); err != nil {
 		return false, err
@@ -299,6 +303,9 @@ func (c *Checkout) HasChanges(ctx context.Context) (bool, error) {
 // beforePush must persist the new commit SHA for later recovery.
 func (c *Checkout) CommitAndPush(ctx context.Context, branch, botLogin, message string, beforePush func(string) error) error {
 	if err := c.ready(); err != nil {
+		return err
+	}
+	if err := rejectNestedGitMetadata(ctx, c.path, maxWorktreeEntries); err != nil {
 		return err
 	}
 	if beforePush == nil {
@@ -362,6 +369,61 @@ func (c *Checkout) CommitAndPush(ctx context.Context, branch, botLogin, message 
 		return err
 	}
 	return c.recordConfig()
+}
+
+// Reject nested Git metadata before invoking credentialed Git on a workspace
+// that Codex could write. ReadDir batches bound the scan even for wide trees;
+// Info reports symlinks themselves, so they are never traversed.
+func rejectNestedGitMetadata(ctx context.Context, root string, limit int) error {
+	dirs := []string{root}
+	entries := 0
+	for len(dirs) > 0 {
+		dir := dirs[len(dirs)-1]
+		dirs = dirs[:len(dirs)-1]
+		err := func() error {
+			f, err := os.Open(dir)
+			if err != nil {
+				return err
+			}
+			defer f.Close()
+			for {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				batch, readErr := f.ReadDir(128)
+				if readErr != nil && !errors.Is(readErr, io.EOF) {
+					return readErr
+				}
+				for _, entry := range batch {
+					if dir == root && entry.Name() == ".git" {
+						continue
+					}
+					entries++
+					if entries > limit {
+						return fmt.Errorf("checkout scan exceeds %d entries", limit)
+					}
+					path := filepath.Join(dir, entry.Name())
+					if strings.EqualFold(entry.Name(), ".git") {
+						return fmt.Errorf("nested Git metadata at %q", path)
+					}
+					info, err := entry.Info()
+					if err != nil {
+						return err
+					}
+					if info.IsDir() {
+						dirs = append(dirs, path)
+					}
+				}
+				if errors.Is(readErr, io.EOF) {
+					return nil
+				}
+			}
+		}()
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (c *Checkout) stagedPaths(ctx context.Context) ([]string, error) {
