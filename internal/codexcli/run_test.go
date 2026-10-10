@@ -29,12 +29,12 @@ func TestRunInvokesCodexAndReturnsFinalMessage(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
 			fakeCodex := installFakeCodex(t, `#!/bin/sh
-printf '%s\n' "$@" > "$CAPTURE_ARGS"
-pwd > "$CAPTURE_DIR"
-printf '%s,%s\n' "${GH_TOKEN-absent}" "${GITHUB_TOKEN-absent}" > "$CAPTURE_ENV"
-printf '%s\n' "$TMPDIR" > "$CAPTURE_TMPDIR"
-printf '%s\n' "$GOCACHE" > "$CAPTURE_GOCACHE"
-cat > "$CAPTURE_PROMPT"
+printf '%s\n' "$@" > args
+pwd > cwd
+printf '%s,%s\n' "${GH_TOKEN-absent}" "${GITHUB_TOKEN-absent}" > env
+printf '%s\n' "$TMPDIR" > tmpdir
+printf '%s\n' "$GOCACHE" > gocache
+cat > prompt
 printf '%s\n' '{"type":"thread.started","thread_id":"test"}' '{"type":"item.completed","item":{"type":"agent_message","text":"first"}}' '{"type":"item.completed","item":{"type":"agent_message","text":"final answer"}}' '{"type":"turn.completed"}'
 `)
 			argsFile := filepath.Join(dir, "args")
@@ -43,12 +43,6 @@ printf '%s\n' '{"type":"thread.started","thread_id":"test"}' '{"type":"item.comp
 			tmpFile := filepath.Join(dir, "tmpdir")
 			cacheFile := filepath.Join(dir, "gocache")
 			promptFile := filepath.Join(dir, "prompt")
-			t.Setenv("CAPTURE_ARGS", argsFile)
-			t.Setenv("CAPTURE_DIR", cwdFile)
-			t.Setenv("CAPTURE_ENV", envFile)
-			t.Setenv("CAPTURE_TMPDIR", tmpFile)
-			t.Setenv("CAPTURE_GOCACHE", cacheFile)
-			t.Setenv("CAPTURE_PROMPT", promptFile)
 			t.Setenv("GH_TOKEN", "secret")
 			t.Setenv("GITHUB_TOKEN", "secret")
 
@@ -65,7 +59,11 @@ printf '%s\n' '{"type":"thread.started","thread_id":"test"}' '{"type":"item.comp
 			}
 			got := strings.Split(strings.TrimSuffix(string(args), "\n"), "\n")
 			want := []string{
-				"exec", "--json", "--ignore-user-config", "--strict-config",
+				"exec", "--json", "--ignore-user-config", "--ignore-rules", "--strict-config",
+				"--disable", "apps", "--disable", "browser_use", "--disable", "browser_use_external",
+				"--disable", "browser_use_full_cdp_access", "--disable", "computer_use",
+				"--disable", "image_generation", "--disable", "plugins", "--disable", "remote_plugin",
+				"--disable", "shell_snapshot", "--disable", "skill_mcp_dependency_install",
 				"-c", "approval_policy=never",
 				"-c", `web_search="disabled"`,
 				"-c", "shell_environment_policy.ignore_default_excludes=false",
@@ -129,14 +127,12 @@ func TestRunPassesConfiguredModelEffortAndSkills(t *testing.T) {
 		t.Fatal(err)
 	}
 	installFakeCodex(t, `#!/bin/sh
-printf '%s\n' "$@" > "$CAPTURE_ARGS"
-cat > "$CAPTURE_PROMPT"
+printf '%s\n' "$@" > args
+cat > prompt
 printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}' '{"type":"turn.completed"}'
 `)
 	argsFile := filepath.Join(dir, "args")
 	promptFile := filepath.Join(dir, "prompt")
-	t.Setenv("CAPTURE_ARGS", argsFile)
-	t.Setenv("CAPTURE_PROMPT", promptFile)
 	settings := config.CodexConfig{Model: "gpt-6-sol", ReasoningEffort: "ultra", Skills: []string{skillPath}}
 	if _, err := Run(context.Background(), dir, "Handle mention", false, "", settings); err != nil {
 		t.Fatal(err)
@@ -165,10 +161,9 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
 func TestRunAllowsSeparateAuditReportsWithoutSourceWrites(t *testing.T) {
 	workspace := t.TempDir()
 	output := t.TempDir()
-	argsFile := filepath.Join(t.TempDir(), "args")
-	t.Setenv("CAPTURE_ARGS", argsFile)
+	argsFile := filepath.Join(workspace, "args")
 	installFakeCodex(t, `#!/bin/sh
-printf '%s\n' "$@" > "$CAPTURE_ARGS"
+printf '%s\n' "$@" > args
 cat >/dev/null
 printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"audit done"}}' '{"type":"turn.completed"}'
 `)
@@ -205,15 +200,18 @@ func TestChildEnvironmentIsolatesCodexSessionButKeepsAuthentication(t *testing.T
 	env := childEnvironment([]string{
 		"CODEX_PERMISSION_PROFILE=unsafe-parent-profile", "CODEX_THREAD_ID=parent", "CODEX_SESSION_ID=parent",
 		"CODEX_APP_TOOLS_PIPE_PATH=parent-app", "CODEX_SANDBOX_NETWORK_DISABLED=1",
-		"CODEX_HOME=/trusted/codex", "CODEX_API_KEY=test-key", "GH_TOKEN=secret", "PATH=/usr/bin",
+		"CODEX_HOME=/trusted/codex", "CODEX_API_KEY=test-key", "CODEX_ACCESS_TOKEN=test-access-token",
+		"GH_TOKEN=secret", "GITHUB_TOKEN=secret", "OPENAI_API_KEY=secret", "PGPASSWORD=secret",
+		"PATH=/usr/bin", "HOME=/trusted/home", "HTTPS_PROXY=http://proxy", "SSL_CERT_FILE=/cert",
+		"TMPDIR=/host-tmp", "GOCACHE=/host-cache",
 	}, "/runtime", "/cache")
 	joined := strings.Join(env, "\n")
-	for _, denied := range []string{"unsafe-parent-profile", "parent", "GH_TOKEN", "CODEX_SANDBOX_NETWORK_DISABLED"} {
+	for _, denied := range []string{"unsafe-parent-profile", "CODEX_THREAD_ID", "CODEX_SESSION_ID", "CODEX_APP_TOOLS_PIPE_PATH", "CODEX_SANDBOX_NETWORK_DISABLED", "GH_TOKEN", "GITHUB_TOKEN", "OPENAI_API_KEY", "PGPASSWORD", "/host-tmp", "/host-cache"} {
 		if strings.Contains(joined, denied) {
 			t.Fatalf("inherited parent session state: %s", joined)
 		}
 	}
-	for _, kept := range []string{"CODEX_HOME=/trusted/codex", "CODEX_API_KEY=test-key", "PATH=/usr/bin"} {
+	for _, kept := range []string{"CODEX_HOME=/trusted/codex", "CODEX_API_KEY=test-key", "CODEX_ACCESS_TOKEN=test-access-token", "PATH=/usr/bin", "HOME=/trusted/home", "HTTPS_PROXY=http://proxy", "SSL_CERT_FILE=/cert", "TMPDIR=/runtime", "GOCACHE=/cache"} {
 		if !strings.Contains(joined, kept) {
 			t.Fatalf("required environment setting missing: %s", kept)
 		}

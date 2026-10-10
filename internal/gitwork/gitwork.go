@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/linkdata/minion/internal/github"
 )
 
 const (
@@ -21,6 +23,10 @@ const (
 	maxChangedFileSize = 1 << 20
 	maxPathListBytes   = 1 << 20
 	maxGitDiagnostic   = 8 << 10
+	maxCheckoutFiles   = 10_000
+	maxCheckoutBytes   = 64 << 20
+	maxTreeEntryBytes  = 1 << 20
+	checkoutAttributes = "* -text -ident -filter -working-tree-encoding\n"
 )
 
 var (
@@ -29,6 +35,7 @@ var (
 	ErrDiffTooLarge     = errors.New("staged diff exceeds size limit")
 	ErrChangedFileLarge = errors.New("changed file exceeds size limit")
 	ErrHeadMoved        = errors.New("pull request head changed")
+	ErrCheckoutTooLarge = errors.New("pull request tree exceeds checkout limits")
 )
 
 // Checkout owns a temporary clone. Git operations are deliberately kept here,
@@ -160,7 +167,7 @@ func (c *Checkout) Close() error {
 // CheckoutPullRequest fetches the base branch and GitHub's PR head ref from the
 // trusted repository URL. The fetched head must match the SHA observed through
 // the GitHub API, preventing a changed PR from being reviewed as another commit.
-func (c *Checkout) CheckoutPullRequest(ctx context.Context, number int, baseRef, expectedHeadSHA string) error {
+func (c *Checkout) CheckoutPullRequest(ctx context.Context, number int, baseRef, expectedHeadSHA string, lookupTree func(context.Context, string) (github.GitTree, error)) error {
 	if err := c.ready(); err != nil {
 		return err
 	}
@@ -172,6 +179,9 @@ func (c *Checkout) CheckoutPullRequest(ctx context.Context, number int, baseRef,
 	}
 	if !validSHA(expectedHeadSHA) {
 		return fmt.Errorf("invalid expected pull request SHA %q", expectedHeadSHA)
+	}
+	if lookupTree == nil {
+		return errors.New("pull request tree metadata lookup is missing")
 	}
 	const baseDest = "refs/remotes/minion/base"
 	const headDest = "refs/remotes/minion/pr-head"
@@ -193,12 +203,63 @@ func (c *Checkout) CheckoutPullRequest(ctx context.Context, number int, baseRef,
 	if !strings.EqualFold(head, expectedHeadSHA) {
 		return fmt.Errorf("%w: expected %s, fetched %s", ErrHeadMoved, expectedHeadSHA, head)
 	}
+	treeSHA, err := runGit(ctx, c.path, "rev-parse", "--verify", head+"^{tree}")
+	if err != nil {
+		return err
+	}
+	tree, err := lookupTree(ctx, treeSHA)
+	if err != nil {
+		return fmt.Errorf("load pull request tree metadata: %w", err)
+	}
+	if err := checkPullRequestTree(tree, treeSHA); err != nil {
+		return err
+	}
+	// Repository attributes cannot expand blobs or run a checkout filter.
+	// info/attributes takes precedence over every in-tree .gitattributes.
+	if err := os.WriteFile(filepath.Join(c.path, ".git", "info", "attributes"), []byte(checkoutAttributes), 0600); err != nil {
+		return fmt.Errorf("set pull request checkout attributes: %w", err)
+	}
 	if _, err := runGit(ctx, c.path, "checkout", "--detach", head); err != nil {
 		return err
 	}
 	c.expectedHead = strings.ToLower(head)
 	c.branch = ""
 	return c.recordConfig()
+}
+
+// Check every expanded blob and gitlink, including repeated object references,
+// against GitHub metadata for the exact tree fetched from the PR head.
+func checkPullRequestTree(tree github.GitTree, expectedSHA string) error {
+	if !strings.EqualFold(tree.SHA, expectedSHA) || !validSHA(tree.SHA) || tree.Truncated == nil || *tree.Truncated || tree.Tree == nil {
+		return fmt.Errorf("%w: incomplete or mismatched tree metadata", ErrCheckoutTooLarge)
+	}
+	var files int
+	var total int64
+	for _, entry := range tree.Tree {
+		if entry.Path == "" || len(entry.Path) > maxTreeEntryBytes {
+			return fmt.Errorf("%w: invalid or oversized tree path", ErrCheckoutTooLarge)
+		}
+		switch entry.Type {
+		case "tree":
+			continue
+		case "commit": // A submodule gitlink writes no blob into the checkout.
+		case "blob":
+			if entry.Size == nil || *entry.Size < 0 {
+				return fmt.Errorf("%w: blob size is unavailable", ErrCheckoutTooLarge)
+			}
+			if *entry.Size > maxCheckoutBytes-total {
+				return fmt.Errorf("%w: more than %d bytes", ErrCheckoutTooLarge, maxCheckoutBytes)
+			}
+			total += *entry.Size
+		default:
+			return fmt.Errorf("%w: unknown Git tree entry type %q", ErrCheckoutTooLarge, entry.Type)
+		}
+		files++
+		if files > maxCheckoutFiles {
+			return fmt.Errorf("%w: more than %d paths", ErrCheckoutTooLarge, maxCheckoutFiles)
+		}
+	}
+	return nil
 }
 
 // NewBranch creates a branch at the current, verified checkout commit.

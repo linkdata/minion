@@ -20,6 +20,30 @@ func testClient(server *httptest.Server) *Client {
 	return c
 }
 
+func TestGitTreeUsesExactSHAAndBoundsResponse(t *testing.T) {
+	sha := strings.Repeat("a", 40)
+	response := fmt.Sprintf(`{"sha":%q,"truncated":false,"tree":[{"path":"file","type":"blob","size":23}]}`, sha)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/repos/o/r/git/trees/"+sha || r.URL.Query().Get("recursive") != "1" {
+			t.Errorf("unexpected tree request: %s %s", r.Method, r.URL.String())
+		}
+		_, _ = fmt.Fprint(w, response)
+	}))
+	defer server.Close()
+	client := testClient(server)
+	tree, err := client.GitTree(context.Background(), "o/r", sha)
+	if err != nil || tree.SHA != sha || len(tree.Tree) != 1 || tree.Tree[0].Size == nil || *tree.Tree[0].Size != 23 {
+		t.Fatalf("GitTree() = (%+v, %v)", tree, err)
+	}
+	if _, err := client.GitTree(context.Background(), "o/r", strings.Repeat("/", 40)); err == nil {
+		t.Fatal("invalid tree SHA accepted")
+	}
+	response = fmt.Sprintf(`{"sha":%q,"truncated":false,"tree":[]}`, sha) + strings.Repeat(" ", maxTreeResponseBytes)
+	if _, err := client.GitTree(context.Background(), "o/r", sha); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("oversized tree response error = %v", err)
+	}
+}
+
 func TestReactEyesUsesExactNodeAndChecksGraphQLErrors(t *testing.T) {
 	var calls int
 	response := `{"data":{"addReaction":{"subject":{"reactions":{"viewerHasReacted":true}}}}}`
@@ -100,6 +124,39 @@ func TestCurrentItemUsesLiveBodyAndEditProvenance(t *testing.T) {
 	response = `{"errors":[{"message":"Resource not accessible"}]}`
 	if _, err := client.CurrentItem(context.Background(), item); err == nil {
 		t.Fatal("GraphQL provenance failure did not fail closed")
+	}
+}
+
+func TestCurrentIssueContentUsesRenderedTextAndEditTime(t *testing.T) {
+	response := `{"data":{"node":{"title":"Issue title","bodyText":"Visible request","lastEditedAt":"2026-10-09T08:00:00Z"}}}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/graphql" {
+			t.Errorf("unexpected issue request: %s %s", r.Method, r.URL.Path)
+		}
+		var input struct {
+			Query     string            `json:"query"`
+			Variables map[string]string `json:"variables"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			t.Error(err)
+		}
+		if input.Variables["id"] != "issue-node" || !strings.Contains(input.Query, "bodyText") || !strings.Contains(input.Query, "lastEditedAt") {
+			t.Errorf("issue query omitted rendered text or edit time: %+v", input)
+		}
+		_, _ = fmt.Fprint(w, response)
+	}))
+	defer server.Close()
+	client := testClient(server)
+	if _, err := client.CurrentIssueContent(context.Background(), ""); err == nil {
+		t.Fatal("missing issue node ID accepted")
+	}
+	content, err := client.CurrentIssueContent(context.Background(), "issue-node")
+	if err != nil || content.Title != "Issue title" || content.BodyText != "Visible request" || content.LastEditedAt == nil {
+		t.Fatalf("content = %+v, error = %v", content, err)
+	}
+	response = `{"errors":[{"message":"Resource not accessible"}]}`
+	if _, err := client.CurrentIssueContent(context.Background(), "issue-node"); err == nil {
+		t.Fatal("GraphQL error did not fail closed")
 	}
 }
 
@@ -558,6 +615,42 @@ func TestProtectedReleaseTagsRequiresVisibleCompleteRuleset(t *testing.T) {
 			}
 			if err != nil || protected != tt.want {
 				t.Fatalf("protected = %v, error = %v, want %v", protected, err, tt.want)
+			}
+		})
+	}
+}
+
+func TestProtectedReleaseTagsChecksCreationRulesAfterIntegrityRule(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		creation string
+		want     bool
+	}{
+		{"active creation rule", `{"id":43,"target":"tag","enforcement":"active","conditions":{"ref_name":{"include":["refs/tags/v*"]}},"rules":[{"type":"creation"}]}`, false},
+		{"disabled creation rule", `{"id":43,"target":"tag","enforcement":"disabled","rules":[{"type":"creation"}]}`, true},
+		{"branch creation rule", `{"id":43,"target":"branch","enforcement":"active","rules":[{"type":"creation"}]}`, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var details int
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/repos/o/r/rulesets":
+					_, _ = fmt.Fprint(w, `[{"id":42},{"id":43}]`)
+				case "/repos/o/r/rulesets/42":
+					details++
+					_, _ = fmt.Fprint(w, `{"id":42,"target":"tag","enforcement":"active","bypass_actors":[],"conditions":{"ref_name":{"include":["~ALL"],"exclude":[]}},"rules":[{"type":"update"},{"type":"deletion"}]}`)
+				case "/repos/o/r/rulesets/43":
+					details++
+					_, _ = fmt.Fprint(w, tt.creation)
+				default:
+					t.Errorf("unexpected request: %s", r.URL)
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+			protected, err := testClient(server).ProtectedReleaseTags(context.Background(), "o/r")
+			if err != nil || protected != tt.want || details != 2 {
+				t.Fatalf("protected = %v, error = %v, details = %d; want %v, nil, 2", protected, err, details, tt.want)
 			}
 		})
 	}

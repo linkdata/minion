@@ -76,6 +76,47 @@ type Issue struct {
 	HTMLURL   string    `json:"html_url"`
 }
 
+// IssueContent reads the issue text and edit timestamp in one response. The
+// rendered text excludes Markdown that the requester cannot see, such as HTML
+// comments, unlike the raw REST body.
+type IssueContent struct {
+	Title        string
+	BodyText     string
+	LastEditedAt *time.Time
+}
+
+func (c *Client) CurrentIssueContent(ctx context.Context, nodeID string) (IssueContent, error) {
+	if nodeID == "" {
+		return IssueContent{}, errors.New("GitHub issue has no node ID")
+	}
+	var result struct {
+		Data struct {
+			Node *struct {
+				Title        string     `json:"title"`
+				BodyText     string     `json:"bodyText"`
+				LastEditedAt *time.Time `json:"lastEditedAt"`
+			} `json:"node"`
+		} `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	_, _, err := c.request(ctx, http.MethodPost, "/graphql", map[string]any{
+		"query":     `query($id: ID!) { node(id: $id) { ... on Issue { title bodyText lastEditedAt } } }`,
+		"variables": map[string]string{"id": nodeID},
+	}, &result, nil, http.StatusOK)
+	if err != nil {
+		return IssueContent{}, err
+	}
+	if len(result.Errors) != 0 {
+		return IssueContent{}, fmt.Errorf("GitHub issue content: %s", result.Errors[0].Message)
+	}
+	if result.Data.Node == nil || result.Data.Node.Title == "" {
+		return IssueContent{}, errors.New("GitHub issue content is unavailable")
+	}
+	return IssueContent{Title: result.Data.Node.Title, BodyText: result.Data.Node.BodyText, LastEditedAt: result.Data.Node.LastEditedAt}, nil
+}
+
 // ThreadItems fetches the thread's original body and every comment surface.
 // Issue and pull request numbers are repository-local. Since is an inclusive
 // lower bound with a one-second overlap to avoid timestamp precision gaps;

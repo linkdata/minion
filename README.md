@@ -7,7 +7,7 @@ A small Go service that watches a bot account's GitHub notifications for command
 
 ## What it does
 
-Put one command on its own line in an issue or pull request body or comment. These examples use `@linkdataminion`; substitute the configured `bot_login`:
+Put one command on the **first nonblank line** of an issue or pull request body or comment. These examples use `@linkdataminion`; substitute the configured `bot_login`:
 
 | Command | Result |
 | --- | --- |
@@ -16,13 +16,15 @@ Put one command on its own line in an issue or pull request body or comment. The
 | `@linkdataminion fix` | On an issue, Codex edits a fresh checkout of the default branch. The bot pushes a deterministic branch and opens a **draft pull request**. Optional text may follow `fix` on the same line. |
 | `@linkdataminion release v1.2.3` | Codex drafts release notes from local Git history. The bot creates a **draft GitHub release** for the new tag, pinned to the checked-out commit. It never publishes the release. |
 
-Release drafts require an active GitHub tag ruleset covering **all tags** (`~ALL` with no exclusions), restricting both updates and deletions, and granting no bypass. Minion checks the ruleset through GitHub's API before reserving the tag and creating the draft. The bot token must be able to see the ruleset's bypass list; GitHub hides it from tokens without ruleset write access. An unavailable API, hidden bypass list, or insufficient repository plan causes release requests to be refused. Send a new command after protection is available. Minion reserves the tag at the inspected commit before creating the draft. An administrator can change the ruleset later; verify the tag before publishing a draft.
+Release drafts require an active GitHub tag ruleset covering **all tags** (`~ALL` with no exclusions), restricting both updates and deletions, and granting no bypass. Minion checks all active tag rulesets through GitHub's API before reserving the tag and creating the draft; any active tag creation restriction causes refusal, even if it targets a different tag pattern, so the bot cannot bypass a restriction on the requester. The bot token must be able to see the integrity ruleset's bypass list; GitHub hides it from tokens without ruleset write access. An unavailable API, hidden bypass list, or insufficient repository plan causes release requests to be refused. Send a new command after protection is available. Minion reserves the tag at the inspected commit before creating the draft. An administrator can change the ruleset later; verify the tag before publishing a draft.
 
 Fix drafts record their expected head commit in the pull request body and verify GitHub's returned head before acknowledgement. The branch remains mutable afterward; protect `minion/fix-*` from updates by other writers and compare the current head with the recorded commit before merging.
 
-Each request must come from an account with effective repository `write`, `maintain`, or `admin` permission. An optional `allowed_actors` list narrows that group. Commands in quotations, code fences, HTML comments, and comments with multiple commands are ignored. The bot checks the whitelist and author permission again before every action.
+Each request must come from an account with effective repository `write`, `maintain`, or `admin` permission. An optional `allowed_actors` list narrows that group. A command in a quotation, code fence, HTML comment, or later body line is ignored. A second full-line directive makes the request ambiguous and is refused. The bot checks the whitelist and author permission again before every action.
 
 Edited command sources are ignored. Post a new comment to request work after editing text.
+
+For `fix`, Minion reads GitHub's rendered issue text and checks the issue's edit time against the request. If the issue changed at or after the request, it refuses the fix; review the current issue and post a new `fix` comment.
 
 After accepting an authorized command, the bot adds a 👀 reaction to the exact issue, pull request, comment, or review that contains it, before starting Codex. If the reaction fails, it retries the command on the next poll.
 
