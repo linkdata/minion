@@ -25,6 +25,9 @@ const (
 	maxDiagnosticBytes  = 8 << 10
 )
 
+// ErrOutputLimit means a bounded Codex run cannot complete with this output.
+var ErrOutputLimit = errors.New("Codex output limit exceeded")
+
 type Result struct {
 	Answer        string
 	Tokens        usage.Tokens
@@ -174,6 +177,9 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	if err := ctx.Err(); err != nil {
 		return result, fmt.Errorf("codex exec: %w", err)
 	}
+	if output.stopped {
+		return result, fmt.Errorf("codex exec: %w: %s", ErrOutputLimit, output.failureReason)
+	}
 	if runErr != nil || output.failed {
 		reason := output.failureReason
 		if reason == "" {
@@ -193,7 +199,7 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	if !output.completed {
 		reason := output.failureReason
 		if reason == "" && output.oversizedLines > 0 {
-			reason = "JSONL event exceeded the output size limit"
+			return result, fmt.Errorf("codex exec: %w: JSONL event exceeded the output size limit", ErrOutputLimit)
 		}
 		if reason == "" {
 			reason = strings.TrimSpace(stderr.String())

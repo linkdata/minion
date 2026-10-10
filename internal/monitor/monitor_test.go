@@ -6,8 +6,10 @@ import (
 	"errors"
 	"io"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -29,6 +31,9 @@ type fakeGitHub struct {
 	reactions     []string
 	checks        int
 	currentItem   func(github.Item) (github.Item, error)
+	commentErr    error
+	commentCalls  int
+	comments      []github.Comment
 }
 
 func (f *fakeGitHub) ListNotifications(context.Context, time.Time) ([]github.Notification, time.Duration, error) {
@@ -68,9 +73,24 @@ func (f *fakeGitHub) ReactEyes(_ context.Context, nodeID string) error {
 	return f.reactionErr
 }
 
+func (f *fakeGitHub) CreateIssueComment(ctx context.Context, _ string, _ int, body string) (github.Comment, error) {
+	f.commentCalls++
+	if err := ctx.Err(); err != nil {
+		return github.Comment{}, err
+	}
+	if f.commentErr != nil {
+		return github.Comment{}, f.commentErr
+	}
+	comment := github.Comment{Body: body, User: github.User{Login: "linkdataminion"}}
+	f.comments = append(f.comments, comment)
+	f.items = append(f.items, github.Item{Body: body, Author: comment.User})
+	return comment, nil
+}
+
 type fakeExecutor struct {
-	jobs      []Job
-	onExecute func()
+	jobs       []Job
+	onExecute  func()
+	executeErr error
 }
 
 func (f *fakeExecutor) Execute(_ context.Context, job Job) error {
@@ -78,7 +98,7 @@ func (f *fakeExecutor) Execute(_ context.Context, job Job) error {
 		f.onExecute()
 	}
 	f.jobs = append(f.jobs, job)
-	return nil
+	return f.executeErr
 }
 
 func testConfig() config.Config {
@@ -141,6 +161,119 @@ func TestRunOnceChecksPermissionAndDeduplicates(t *testing.T) {
 	}
 	if len(executor.jobs) != 1 || gh.checks != 1 || len(gh.reactions) != 1 {
 		t.Fatalf("duplicate command handled: %d jobs, %d permission checks, %d reactions", len(executor.jobs), gh.checks, len(gh.reactions))
+	}
+}
+
+func TestRunOnceBoundsFailedExecutions(t *testing.T) {
+	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	item := github.Item{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}, HTMLURL: "https://github.com/example-owner/example-repo/pull/7#issuecomment-1"}
+	gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}, items: []github.Item{item}, permission: github.Permission{Permission: "write"}}
+	executor := &fakeExecutor{executeErr: errors.New("always fails")}
+	store := openState(t, now.Add(-time.Minute))
+	executor.onExecute = func() {
+		if len(store.Data.JobFailures) != 1 {
+			t.Fatalf("execution began before a durable attempt was recorded: %+v", store.Data.JobFailures)
+		}
+		for _, failure := range store.Data.JobFailures {
+			if failure.Attempts != len(executor.jobs)+1 {
+				t.Fatalf("execution attempt was not recorded first: %+v", failure)
+			}
+		}
+	}
+	clock := now
+	m := &Monitor{Config: testConfig(), GitHub: gh, Executor: executor, Now: func() time.Time { return clock }}
+	for attempt := 1; attempt <= maxJobAttempts; attempt++ {
+		_, err := m.RunOnce(context.Background(), store)
+		if (err != nil) != (attempt < maxJobAttempts) {
+			t.Fatalf("attempt %d error = %v", attempt, err)
+		}
+		if len(executor.jobs) != attempt {
+			t.Fatalf("attempt %d executed %d jobs", attempt, len(executor.jobs))
+		}
+		clock = clock.Add(time.Minute)
+	}
+	if len(gh.comments) != 1 || !strings.HasSuffix(gh.comments[0].Body, "\n\n"+executor.jobs[0].Marker()) {
+		t.Fatalf("failure reply missing job marker: %+v", gh.comments)
+	}
+	if len(store.Data.Processed) != 1 || len(store.Data.JobFailures) != 0 || !store.Data.Cursor.After(now.Add(-time.Minute)) {
+		t.Fatalf("job did not finish after retry limit: %+v", store.Data)
+	}
+	if _, err := m.RunOnce(context.Background(), store); err != nil || len(executor.jobs) != maxJobAttempts || len(gh.comments) != 1 {
+		t.Fatalf("processed job reran: err=%v jobs=%d replies=%d", err, len(executor.jobs), len(gh.comments))
+	}
+}
+
+func TestRunOnceDoesNotExhaustJobsDuringGitHubOutage(t *testing.T) {
+	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	item := github.Item{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}, HTMLURL: "https://github.com/example-owner/example-repo/pull/7#issuecomment-1"}
+	gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}, items: []github.Item{item}, permission: github.Permission{Permission: "write"}}
+	executor := &fakeExecutor{executeErr: &github.StatusError{StatusCode: http.StatusTooManyRequests}}
+	store := openState(t, now.Add(-time.Minute))
+	clock := now
+	m := &Monitor{Config: testConfig(), GitHub: gh, Executor: executor, Now: func() time.Time { return clock }}
+	for attempt := 1; attempt <= maxJobAttempts+1; attempt++ {
+		if _, err := m.RunOnce(context.Background(), store); err == nil {
+			t.Fatal("GitHub outage was not surfaced")
+		}
+		clock = clock.Add(time.Minute)
+	}
+	if len(executor.jobs) != maxJobAttempts+1 || len(gh.comments) != 0 || len(store.Data.Processed) != 0 || store.Data.JobFailures[executor.jobs[0].ID].Attempts != 0 {
+		t.Fatalf("temporary outage consumed retry limit: jobs=%d comments=%d state=%+v", len(executor.jobs), len(gh.comments), store.Data)
+	}
+}
+
+func TestRunOnceTerminalFailureRepliesWithFreshContext(t *testing.T) {
+	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	item := github.Item{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}, HTMLURL: "https://github.com/example-owner/example-repo/pull/7#issuecomment-1"}
+	gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}, items: []github.Item{item}, permission: github.Permission{Permission: "write"}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	executor := &fakeExecutor{onExecute: cancel, executeErr: errors.Join(ErrTerminalJob, context.DeadlineExceeded)}
+	store := openState(t, now.Add(-time.Minute))
+	m := &Monitor{Config: testConfig(), GitHub: gh, Executor: executor, Now: func() time.Time { return now }}
+	if _, err := m.RunOnce(ctx, store); err != nil {
+		t.Fatal(err)
+	}
+	if len(executor.jobs) != 1 || len(gh.comments) != 1 || len(store.Data.Processed) != 1 || len(store.Data.JobFailures) != 0 {
+		t.Fatalf("terminal job was not handled: jobs=%d comments=%d state=%+v", len(executor.jobs), len(gh.comments), store.Data)
+	}
+	// A reply may succeed just before saving completion fails. Its marker must
+	// prevent a duplicate reply after restart.
+	id := executor.jobs[0].ID
+	delete(store.Data.Processed, id)
+	store.Data.JobFailures[id] = state.JobFailure{Attempts: maxJobAttempts}
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	m.Now = func() time.Time { return now.Add(time.Minute) }
+	if _, err := m.RunOnce(context.Background(), store); err != nil || gh.commentCalls != 1 || len(executor.jobs) != 1 || len(store.Data.Processed) != 1 {
+		t.Fatalf("failure reply duplicated after interrupted save: err=%v replies=%d jobs=%d state=%+v", err, gh.commentCalls, len(executor.jobs), store.Data)
+	}
+}
+
+func TestRunOnceStopsAfterFailedReplyAttempts(t *testing.T) {
+	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	item := github.Item{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}, HTMLURL: "https://github.com/example-owner/example-repo/pull/7#issuecomment-1"}
+	gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}, items: []github.Item{item}, permission: github.Permission{Permission: "write"}, commentErr: errors.New("comment service unavailable")}
+	executor := &fakeExecutor{executeErr: ErrTerminalJob}
+	store := openState(t, now.Add(-time.Minute))
+	clock := now
+	m := &Monitor{Config: testConfig(), GitHub: gh, Executor: executor, Now: func() time.Time { return clock }}
+	for attempt := 1; attempt <= maxFailureReplyAttempts; attempt++ {
+		_, err := m.RunOnce(context.Background(), store)
+		if (err != nil) != (attempt < maxFailureReplyAttempts) {
+			t.Fatalf("reply attempt %d error = %v", attempt, err)
+		}
+		if attempt < maxFailureReplyAttempts {
+			failure := store.Data.JobFailures[executor.jobs[0].ID]
+			if failure.Attempts != maxJobAttempts || failure.ReplyAttempts != attempt {
+				t.Fatalf("failure disposition was not saved: %+v", failure)
+			}
+		}
+		clock = clock.Add(time.Minute)
+	}
+	if len(executor.jobs) != 1 || gh.commentCalls != maxFailureReplyAttempts || len(store.Data.Processed) != 1 || !store.Data.Cursor.After(now.Add(-time.Minute)) {
+		t.Fatalf("failed reply pinned job: jobs=%d replies=%d state=%+v", len(executor.jobs), gh.commentCalls, store.Data)
 	}
 }
 

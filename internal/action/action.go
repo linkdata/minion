@@ -106,6 +106,11 @@ func (e *Executor) Execute(ctx context.Context, job monitor.Job) (resultErr erro
 	default:
 		resultErr = fmt.Errorf("unsupported action %q", job.Command.Action)
 	}
+	if resultErr != nil && (errors.Is(ctx.Err(), context.DeadlineExceeded) ||
+		errors.Is(resultErr, gitwork.ErrTooManyFiles) || errors.Is(resultErr, gitwork.ErrChangedFileLarge) ||
+		errors.Is(resultErr, gitwork.ErrDiffTooLarge) || errors.Is(resultErr, codexcli.ErrOutputLimit)) {
+		resultErr = fmt.Errorf("%w: %w", monitor.ErrTerminalJob, resultErr)
+	}
 	returned = true
 	return resultErr
 }
