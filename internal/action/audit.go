@@ -56,7 +56,7 @@ func (e *Executor) audit(ctx context.Context, job monitor.Job) error {
 	}
 	defer e.closeCheckout(checkout)
 	if job.SubjectType == "PullRequest" {
-		if err := checkout.CheckoutPullRequest(ctx, job.Number, branch, head); err != nil {
+		if err := e.checkoutPullRequest(ctx, checkout, job.Repository.Name, job.Number, branch, head); err != nil {
 			return err
 		}
 	}

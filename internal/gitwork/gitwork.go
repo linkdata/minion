@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/linkdata/minion/internal/github"
 )
 
 const (
@@ -164,7 +166,7 @@ func (c *Checkout) Close() error {
 // CheckoutPullRequest fetches the base branch and GitHub's PR head ref from the
 // trusted repository URL. The fetched head must match the SHA observed through
 // the GitHub API, preventing a changed PR from being reviewed as another commit.
-func (c *Checkout) CheckoutPullRequest(ctx context.Context, number int, baseRef, expectedHeadSHA string) error {
+func (c *Checkout) CheckoutPullRequest(ctx context.Context, number int, baseRef, expectedHeadSHA string, lookupTree func(context.Context, string) (github.GitTree, error)) error {
 	if err := c.ready(); err != nil {
 		return err
 	}
@@ -176,6 +178,9 @@ func (c *Checkout) CheckoutPullRequest(ctx context.Context, number int, baseRef,
 	}
 	if !validSHA(expectedHeadSHA) {
 		return fmt.Errorf("invalid expected pull request SHA %q", expectedHeadSHA)
+	}
+	if lookupTree == nil {
+		return errors.New("pull request tree metadata lookup is missing")
 	}
 	const baseDest = "refs/remotes/minion/base"
 	const headDest = "refs/remotes/minion/pr-head"
@@ -197,7 +202,15 @@ func (c *Checkout) CheckoutPullRequest(ctx context.Context, number int, baseRef,
 	if !strings.EqualFold(head, expectedHeadSHA) {
 		return fmt.Errorf("%w: expected %s, fetched %s", ErrHeadMoved, expectedHeadSHA, head)
 	}
-	if err := c.checkPullRequestTree(ctx, head); err != nil {
+	treeSHA, err := runGit(ctx, c.path, "rev-parse", "--verify", head+"^{tree}")
+	if err != nil {
+		return err
+	}
+	tree, err := lookupTree(ctx, treeSHA)
+	if err != nil {
+		return fmt.Errorf("load pull request tree metadata: %w", err)
+	}
+	if err := checkPullRequestTree(tree, treeSHA); err != nil {
 		return err
 	}
 	if _, err := runGit(ctx, c.path, "checkout", "--detach", head); err != nil {
@@ -208,86 +221,37 @@ func (c *Checkout) CheckoutPullRequest(ctx context.Context, number int, baseRef,
 	return c.recordConfig()
 }
 
-// Check expanded paths and blob bytes, including repeated tree/blob references,
-// before Git writes the untrusted PR head into work_root.
-func (c *Checkout) checkPullRequestTree(ctx context.Context, head string) error {
-	checkCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	w := checkoutTreeWriter{cancel: cancel}
-	err := runGitTo(checkCtx, c.path, &w, "ls-tree", "-r", "-l", "-z", "--full-tree", head)
-	if w.limitErr != nil {
-		return w.limitErr
+// Check every expanded blob and gitlink, including repeated object references,
+// against GitHub metadata for the exact tree fetched from the PR head.
+func checkPullRequestTree(tree github.GitTree, expectedSHA string) error {
+	if !strings.EqualFold(tree.SHA, expectedSHA) || !validSHA(tree.SHA) || tree.Truncated || tree.Tree == nil {
+		return fmt.Errorf("%w: incomplete or mismatched tree metadata", ErrCheckoutTooLarge)
 	}
-	if err != nil {
-		return err
-	}
-	if len(w.entry) != 0 {
-		return errors.New("incomplete Git tree listing")
-	}
-	return nil
-}
-
-type checkoutTreeWriter struct {
-	entry    []byte
-	files    int
-	bytes    int64
-	limitErr error
-	cancel   context.CancelFunc
-}
-
-func (w *checkoutTreeWriter) Write(p []byte) (int, error) {
-	n := len(p)
-	for len(p) != 0 && w.limitErr == nil {
-		end := bytes.IndexByte(p, 0)
-		if end < 0 {
-			end = len(p)
+	var files int
+	var total int64
+	for _, entry := range tree.Tree {
+		if entry.Path == "" || len(entry.Path) > maxTreeEntryBytes {
+			return fmt.Errorf("%w: invalid or oversized tree path", ErrCheckoutTooLarge)
 		}
-		if end > maxTreeEntryBytes-len(w.entry) {
-			w.limitErr = fmt.Errorf("%w: tree entry is too long", ErrCheckoutTooLarge)
-			w.cancel()
-			break
+		switch entry.Type {
+		case "tree":
+			continue
+		case "commit": // A submodule gitlink writes no blob into the checkout.
+		case "blob":
+			if entry.Size == nil || *entry.Size < 0 {
+				return fmt.Errorf("%w: blob size is unavailable", ErrCheckoutTooLarge)
+			}
+			if *entry.Size > maxCheckoutBytes-total {
+				return fmt.Errorf("%w: more than %d bytes", ErrCheckoutTooLarge, maxCheckoutBytes)
+			}
+			total += *entry.Size
+		default:
+			return fmt.Errorf("%w: unknown Git tree entry type %q", ErrCheckoutTooLarge, entry.Type)
 		}
-		w.entry = append(w.entry, p[:end]...)
-		if end == len(p) {
-			break
+		files++
+		if files > maxCheckoutFiles {
+			return fmt.Errorf("%w: more than %d paths", ErrCheckoutTooLarge, maxCheckoutFiles)
 		}
-		if err := w.recordEntry(); err != nil {
-			w.limitErr = err
-			w.cancel()
-			break
-		}
-		w.entry = w.entry[:0]
-		p = p[end+1:]
-	}
-	return n, nil
-}
-
-func (w *checkoutTreeWriter) recordEntry() error {
-	metadata, path, ok := bytes.Cut(w.entry, []byte{'\t'})
-	fields := bytes.Fields(metadata)
-	if !ok || len(path) == 0 || len(fields) != 4 {
-		return errors.New("invalid Git tree listing")
-	}
-	w.files++
-	if w.files > maxCheckoutFiles {
-		return fmt.Errorf("%w: more than %d paths", ErrCheckoutTooLarge, maxCheckoutFiles)
-	}
-	switch string(fields[1]) {
-	case "blob":
-		size, err := strconv.ParseInt(string(fields[3]), 10, 64)
-		if err != nil || size < 0 {
-			return errors.New("invalid Git blob size")
-		}
-		if size > maxCheckoutBytes-w.bytes {
-			return fmt.Errorf("%w: more than %d bytes", ErrCheckoutTooLarge, maxCheckoutBytes)
-		}
-		w.bytes += size
-	case "commit": // A submodule gitlink writes no blob into the checkout.
-		if string(fields[3]) != "-" {
-			return errors.New("invalid Git tree listing")
-		}
-	default:
-		return errors.New("invalid Git tree listing")
 	}
 	return nil
 }
