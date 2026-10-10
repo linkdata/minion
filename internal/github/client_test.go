@@ -63,7 +63,7 @@ func TestReactEyesUsesExactNodeAndChecksGraphQLErrors(t *testing.T) {
 }
 
 func TestCurrentItemUsesLiveBodyAndEditProvenance(t *testing.T) {
-	response := `{"data":{"node":{"body":"@linkdataminion review","author":{"login":"allowed"},"editor":{"login":"excluded"},"lastEditedAt":"2026-10-09T08:00:00Z"}}}`
+	response := `{"data":{"node":{"body":"@linkdataminion review","author":{"login":"allowed","id":7},"editor":{"login":"excluded"},"lastEditedAt":"2026-10-09T08:00:00Z"}}}`
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/graphql" {
 			t.Errorf("unexpected provenance request: %s %s", r.Method, r.URL.Path)
@@ -75,7 +75,7 @@ func TestCurrentItemUsesLiveBodyAndEditProvenance(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 			t.Error(err)
 		}
-		if input.Variables["id"] != "comment-node" || !strings.Contains(input.Query, "lastEditedAt") || !strings.Contains(input.Query, "editor { login }") {
+		if input.Variables["id"] != "comment-node" || !strings.Contains(input.Query, "lastEditedAt") || !strings.Contains(input.Query, "editor { login }") || !strings.Contains(input.Query, "id: databaseId") {
 			t.Errorf("provenance query omitted edit metadata: %+v", input)
 		}
 		if _, err := fmt.Fprint(w, response); err != nil {
@@ -89,7 +89,7 @@ func TestCurrentItemUsesLiveBodyAndEditProvenance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if current.Body != "@linkdataminion review" || !current.Edited || current.Editor.Login != "excluded" || current.Author.Login != "allowed" {
+	if current.Body != "@linkdataminion review" || !current.Edited || current.Editor.Login != "excluded" || current.Author.Login != "allowed" || current.Author.ID != 7 {
 		t.Fatalf("lost live body or editor: %+v", current)
 	}
 	response = `{"data":{"node":{"body":"@linkdataminion review","author":{"login":"allowed"},"editor":null,"lastEditedAt":null}}}`

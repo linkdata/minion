@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -180,7 +181,7 @@ Request comment (%s):
 
 func (e *Executor) fix(ctx context.Context, job monitor.Job) error {
 	if job.SubjectType != "Issue" {
-		return e.acknowledge(ctx, job, "`fix` currently applies to issue threads. It opens a draft pull request from the repository's default branch.")
+		return e.acknowledge(ctx, job, "`fix` currently applies to issue threads. It pushes a branch for the requester to open a pull request.")
 	}
 	issue, err := e.GitHub.IssueDetails(ctx, job.Repository.Name, job.Number)
 	if err != nil {
@@ -202,19 +203,11 @@ func (e *Executor) fix(ctx context.Context, job monitor.Job) error {
 		return err
 	}
 	expected := e.Store.Data.PendingFixes[job.ID]
-	if existing != nil {
-		if expected == "" || !existing.Draft || existing.State != "open" || !strings.EqualFold(existing.User.Login, e.BotLogin) ||
-			existing.Head.Ref != branch || existing.Head.Repo == nil || !strings.EqualFold(existing.Head.Repo.FullName, repo.FullName) ||
-			!strings.EqualFold(existing.Head.SHA, expected) || existing.Base.Ref != repo.DefaultBranch ||
-			!strings.HasSuffix(strings.TrimSpace(existing.Body), "\n\n"+job.Marker()) {
-			return fmt.Errorf("branch %s has a pull request without matching bot provenance and recorded head", branch)
-		}
-		e.bestEffortAcknowledge(ctx, job, "Draft fix: "+existing.HTMLURL)
-		return nil
-	}
 	remoteBranch, err := e.GitHub.Branch(ctx, repo.FullName, branch)
-	var result string
 	if isNotFound(err) {
+		if existing != nil {
+			return fmt.Errorf("branch %s has a pull request but no remote branch", branch)
+		}
 		checkout, err := gitwork.Clone(ctx, e.WorkRoot, repo.FullName, repo.DefaultBranch)
 		if err != nil {
 			return err
@@ -233,7 +226,7 @@ Issue description:
 
 Request comment (%s):
 %s`, job.Number, repo.FullName, job.Source.Author.Login, issue.Title, bounded(issue.Body, maxContextBytes), sourceURL(job), bounded(job.Source.Body, maxContextBytes))
-		result, err = e.runCodex(ctx, checkout.Path(), prompt, true, "")
+		result, err := e.runCodex(ctx, checkout.Path(), prompt, true, "")
 		if err != nil {
 			return err
 		}
@@ -257,27 +250,18 @@ Request comment (%s):
 		if remoteBranch.Name != branch || expected == "" || !strings.EqualFold(remoteBranch.Commit.SHA, expected) {
 			return fmt.Errorf("branch %s exists without a matching recorded bot commit; refusing to reuse it", branch)
 		}
-		result = fmt.Sprintf("Recovered previously pushed bot commit `%s` after interrupted pull request creation. Review the changes before merging.", expected)
 	}
 	expected = e.Store.Data.PendingFixes[job.ID]
-	title := fmt.Sprintf("Fix #%d: %s", job.Number, issue.Title)
-	if len(title) > 180 {
-		title = title[:180]
+	if existing != nil {
+		if existing.State != "open" || job.Source.Author.ID == 0 || existing.User.ID != job.Source.Author.ID ||
+			existing.Head.Ref != branch || existing.Head.Repo == nil || !strings.EqualFold(existing.Head.Repo.FullName, repo.FullName) ||
+			!strings.EqualFold(existing.Head.SHA, expected) || existing.Base.Ref != repo.DefaultBranch {
+			return fmt.Errorf("branch %s has a pull request without matching requester authorship and recorded head", branch)
+		}
+		return e.acknowledge(ctx, job, fmt.Sprintf("Fix branch `%s` at `%s` has a pull request opened by @%s: %s", branch, expected, existing.User.Login, existing.HTMLURL))
 	}
-	// Only trusted template text belongs in the PR body: GitHub acts on
-	// closing keywords there when the PR merges into the default branch.
-	body := fmt.Sprintf("Requested by @%s in %s.\n\nExpected head: `%s`.\n\n%s", job.Source.Author.Login, sourceURL(job), expected, job.Marker())
-	pull, err := e.GitHub.CreatePullRequest(ctx, repo.FullName, repo.DefaultBranch, branch, title, body, true)
-	if err != nil {
-		return err
-	}
-	if !pull.Draft || pull.State != "open" || !strings.EqualFold(pull.User.Login, e.BotLogin) || pull.Head.Ref != branch ||
-		pull.Head.Repo == nil || !strings.EqualFold(pull.Head.Repo.FullName, repo.FullName) ||
-		!strings.EqualFold(pull.Head.SHA, expected) || pull.Base.Ref != repo.DefaultBranch {
-		return fmt.Errorf("draft pull request %s does not match recorded bot commit %s", pull.HTMLURL, expected)
-	}
-	e.bestEffortAcknowledge(ctx, job, "Draft fix: "+pull.HTMLURL+"\n\n"+inertModelOutput(result))
-	return nil
+	compare := fmt.Sprintf("https://github.com/%s/compare/%s...%s?expand=1", repo.FullName, url.PathEscape(repo.DefaultBranch), url.PathEscape(branch))
+	return e.acknowledge(ctx, job, fmt.Sprintf("Fix branch `%s` is ready at `%s`. @%s, [open the pull request yourself](%s) after reviewing the diff. Repository review rules, when enabled, can then evaluate your authorship.", branch, expected, job.Source.Author.Login, compare))
 }
 
 func (e *Executor) release(ctx context.Context, job monitor.Job) error {

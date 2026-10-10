@@ -45,7 +45,7 @@ func (c *Client) CurrentItem(ctx context.Context, item Item) (Item, error) {
 		} `json:"errors"`
 	}
 	_, _, err := c.request(ctx, http.MethodPost, "/graphql", map[string]any{
-		"query":     `query($id: ID!) { node(id: $id) { ... on Comment { body author { login } editor { login } lastEditedAt } } }`,
+		"query":     `query($id: ID!) { node(id: $id) { ... on Comment { body author { login ... on User { id: databaseId } } editor { login } lastEditedAt } } }`,
 		"variables": map[string]string{"id": item.NodeID},
 	}, &result, nil, http.StatusOK)
 	if err != nil {
