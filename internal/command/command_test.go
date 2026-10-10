@@ -13,17 +13,14 @@ func TestParseCommands(t *testing.T) {
 		action Action
 		args   string
 	}{
-		{"review", "Please take a look.\n@linkdataminion review\nThanks.", Review, ""},
+		{"review", "@linkdataminion review\nPlease take a look.", Review, ""},
 		{"audit", "@linkdataminion audit", Audit, ""},
 		{"audit case", "  @LinkDataMinion\tAUDIT  ", Audit, ""},
 		{"fix with text", "  @LinkDataMinion\tFIX\t  update the docs  \t", Fix, "update the docs"},
 		{"fix without text", "@linkdataminion fix", Fix, ""},
 		{"release", "@linkdataminion release v1.2.3", Release, "v1.2.3"},
-		{"CRLF", "```\r\n@linkdataminion review\r\n```\r\n@linkdataminion fix now", Fix, "now"},
-		{"ignored examples", "```go\n@linkdataminion review\n```\n~~~\n@linkdataminion release v0\n~~~\n> @linkdataminion fix quoted\n@linkdataminion review", Review, ""},
-		{"long fence", "````sh\n@linkdataminion fix hidden\n```\n@linkdataminion review\n````\n@linkdataminion release v2", Release, "v2"},
-		{"list fence", "- ```\n  @linkdataminion review\n  ```\n@linkdataminion fix visible", Fix, "visible"},
-		{"HTML comment", "Text <!--\n@linkdataminion review\n-->\n@linkdataminion fix visible", Fix, "visible"},
+		{"CRLF", "\r\n@linkdataminion fix now\r\nDetails follow.", Fix, "now"},
+		{"leading blanks", " \t\n\n@linkdataminion release v2\nDetails follow.", Release, "v2"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -51,6 +48,7 @@ func TestParseIgnoresNonCommands(t *testing.T) {
 	}{
 		{"no mention", "Please review this change."},
 		{"mention in prose", "Could @linkdataminion review this?"},
+		{"command after prose", "Please take a look.\n@linkdataminion review"},
 		{"lookalike handle", "@linkdataminion2 review"},
 		{"handle suffix", "@linkdataminion-review"},
 		{"non ASCII at sign", "＠linkdataminion review"},
@@ -66,6 +64,17 @@ func TestParseIgnoresNonCommands(t *testing.T) {
 		{"indented code", "    @linkdataminion review\n\t@linkdataminion fix\n   \t@linkdataminion review"},
 		{"fenced code", "```\n@linkdataminion review\n```"},
 		{"HTML comment", "<!--\n@linkdataminion review\n-->"},
+		{"lazy quote", "> An outsider wrote:\n@linkdataminion fix planted"},
+		{"indented fence close", "```\nignored\n    ```\n@linkdataminion review"},
+		{"tab fence close", "```\nignored\n\t```\n@linkdataminion review"},
+		{"nonbreaking fence close", "```\nignored\n```\u00a0\n@linkdataminion review"},
+		{"backtick in fence info", "```bad`info\n@linkdataminion review"},
+		{"HTML block swallows fence", "<script>\n```\n</script>\n@linkdataminion review"},
+		{"reference title", "[link]: /path \"title\n@linkdataminion review\n\""},
+		{"link title", "[link](url \"title\n@linkdataminion review\n\")"},
+		{"processing instruction", "<?hidden\n@linkdataminion review\n?>"},
+		{"CDATA", "<![CDATA[\n@linkdataminion review\n]]>"},
+		{"script", "<script>\n@linkdataminion review\n</script>"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -85,6 +94,7 @@ func TestParseRejectsMultipleCommands(t *testing.T) {
 		"@linkdataminion review\n@linkdataminion fix update tests",
 		"@linkdataminion review\n@linkdataminion review",
 		"@linkdataminion audit\n@linkdataminion fix",
+		"@linkdataminion review\n```\n@linkdataminion fix hidden\n```",
 	} {
 		got, err := Parse(body)
 		if !errors.Is(err, ErrAmbiguous) {
@@ -127,7 +137,7 @@ func TestParseForLogin(t *testing.T) {
 	}{
 		{"custom login", "my-bot", "@MY-BOT fix update docs", Fix, "update docs"},
 		{"bot suffix", "github-actions[bot]", "@GitHub-Actions[Bot] review", Review, ""},
-		{"ignores other bot", "my-bot", "@linkdataminion review\n@my-bot release v2", Release, "v2"},
+		{"ignores other bot", "my-bot", "@my-bot release v2\n@linkdataminion review", Release, "v2"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
