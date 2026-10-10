@@ -21,6 +21,7 @@ func TestStoreLocksAndPersistsCompletedCommands(t *testing.T) {
 		t.Fatalf("second writer got %v, want ErrLocked", err)
 	}
 	store.Data.Processed["job"] = initial
+	store.Data.JobFailures["failed"] = JobFailure{Attempts: 2, ReplyAttempts: 1}
 	store.Data.NextInviteCheckAt = initial.Add(time.Hour)
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
@@ -38,7 +39,7 @@ func TestStoreLocksAndPersistsCompletedCommands(t *testing.T) {
 			t.Error(err)
 		}
 	}()
-	if _, ok := reopened.Data.Processed["job"]; !ok || !reopened.Data.Cursor.Equal(initial) || !reopened.Data.NextInviteCheckAt.Equal(initial.Add(time.Hour)) {
+	if _, ok := reopened.Data.Processed["job"]; !ok || reopened.Data.JobFailures["failed"] != (JobFailure{Attempts: 2, ReplyAttempts: 1}) || !reopened.Data.Cursor.Equal(initial) || !reopened.Data.NextInviteCheckAt.Equal(initial.Add(time.Hour)) {
 		t.Fatalf("lost persisted state: %+v", reopened.Data)
 	}
 	info, err := os.Stat(path)

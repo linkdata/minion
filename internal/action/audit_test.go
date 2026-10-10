@@ -201,6 +201,9 @@ func TestAuditIssueAndPullRequest(t *testing.T) {
 				if err == nil || !strings.Contains(err.Error(), tt.wantError) || len(comments) != 0 {
 					t.Fatalf("error=%v comments=%d, want %q and no comment", err, len(comments), tt.wantError)
 				}
+				if tt.incomplete && !errors.Is(err, monitor.ErrTerminalJob) {
+					t.Fatalf("incomplete audit error = %v, want terminal failure", err)
+				}
 				if tt.movedHead && calls != 0 {
 					t.Fatal("Codex ran on changed PR head")
 				}

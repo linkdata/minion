@@ -136,6 +136,9 @@ func (f *actionMonitorGitHub) Permission(context.Context, string, string) (githu
 	return github.Permission{Permission: "write"}, nil
 }
 func (f *actionMonitorGitHub) ReactEyes(context.Context, string) error { return nil }
+func (f *actionMonitorGitHub) CreateIssueComment(context.Context, string, int, string) (github.Comment, error) {
+	return github.Comment{}, nil
+}
 
 func TestReviewEchoDoesNotSuppressAuditInMonitor(t *testing.T) {
 	if _, err := exec.LookPath("node"); err != nil {

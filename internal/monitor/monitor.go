@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"net/url"
 	"sort"
 	"strconv"
@@ -27,7 +28,17 @@ type GitHub interface {
 	CurrentItem(context.Context, github.Item) (github.Item, error)
 	Permission(context.Context, string, string) (github.Permission, error)
 	ReactEyes(context.Context, string) error
+	CreateIssueComment(context.Context, string, int, string) (github.Comment, error)
 }
+
+// ErrTerminalJob marks a failed execution that cannot succeed by rerunning Codex.
+var ErrTerminalJob = errors.New("terminal job failure")
+
+const (
+	maxJobAttempts          = 3
+	maxFailureReplyAttempts = 3
+	failureReply            = "Minion could not complete this request. No further automatic attempts will run. Check the service log and post a new command after the cause is fixed."
+)
 
 type Executor interface {
 	Execute(context.Context, Job) error
@@ -204,16 +215,47 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				}
 				continue
 			}
+			jobFailure := store.Data.JobFailures[job.ID]
+			if jobFailure.Attempts >= maxJobAttempts {
+				if err := m.finishFailedJob(ctx, store, job, items, started, jobFailure); err != nil {
+					failures = append(failures, err)
+				}
+				continue
+			}
 			if err := m.GitHub.ReactEyes(ctx, item.NodeID); err != nil {
 				failures = append(failures, fmt.Errorf("react to %s: %w", item.HTMLURL, err))
 				continue
 			}
+			// Count an interrupted execution before starting it, so a crash cannot
+			// restart an expensive job forever without consuming an attempt.
+			jobFailure.Attempts++
+			store.Data.JobFailures[job.ID] = jobFailure
+			if err := store.Save(); err != nil {
+				return next, err
+			}
 			m.logf("run %s from @%s in %s #%d", cmd.Action, item.Author.Login, repo.Name, number)
 			if err := m.Executor.Execute(ctx, job); err != nil {
+				if errors.Is(err, ErrTerminalJob) {
+					jobFailure.Attempts = maxJobAttempts
+				} else if infrastructureFailure(err) {
+					jobFailure.Attempts--
+				}
+				store.Data.JobFailures[job.ID] = jobFailure
+				if saveErr := store.Save(); saveErr != nil {
+					return next, errors.Join(err, saveErr)
+				}
+				m.logf("%s from %s failed (attempt %d/%d): %v", cmd.Action, item.HTMLURL, jobFailure.Attempts, maxJobAttempts, err)
+				if jobFailure.Attempts >= maxJobAttempts {
+					if replyErr := m.finishFailedJob(ctx, store, job, items, started, jobFailure); replyErr != nil {
+						failures = append(failures, replyErr)
+					}
+					continue
+				}
 				failures = append(failures, fmt.Errorf("%s from %s: %w", cmd.Action, item.HTMLURL, err))
 				continue
 			}
 			store.Data.Processed[job.ID] = started
+			delete(store.Data.JobFailures, job.ID)
 			delete(store.Data.PendingFixes, job.ID)
 			delete(store.Data.PendingReleases, job.ID)
 			if err := store.Save(); err != nil {
@@ -234,6 +276,50 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		return next, err
 	}
 	return next, nil
+}
+
+func infrastructureFailure(err error) bool {
+	if errors.Is(err, context.Canceled) {
+		return true
+	}
+	var status *github.StatusError
+	if errors.As(err, &status) && (status.StatusCode == http.StatusUnauthorized || status.StatusCode == http.StatusForbidden ||
+		status.StatusCode == http.StatusRequestTimeout || status.StatusCode == http.StatusTooManyRequests || status.StatusCode >= http.StatusInternalServerError) {
+		return true
+	}
+	var network *url.Error
+	return errors.As(err, &network)
+}
+
+func (m *Monitor) finishFailedJob(ctx context.Context, store *state.Store, job Job, items []github.Item, at time.Time, failure state.JobFailure) error {
+	marker := job.Marker()
+	replied := false
+	for _, item := range items {
+		if strings.EqualFold(item.Author.Login, m.Config.BotLogin) && strings.HasSuffix(strings.TrimSpace(item.Body), "\n\n"+marker) {
+			replied = true
+			break
+		}
+	}
+	if !replied {
+		replyCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		_, err := m.GitHub.CreateIssueComment(replyCtx, job.Repository.Name, job.Number, failureReply+"\n\n"+marker)
+		cancel()
+		if err != nil {
+			failure.ReplyAttempts++
+			if failure.ReplyAttempts < maxFailureReplyAttempts {
+				store.Data.JobFailures[job.ID] = failure
+				if saveErr := store.Save(); saveErr != nil {
+					return errors.Join(err, saveErr)
+				}
+				return fmt.Errorf("post failure reply to %s: %w", job.Source.HTMLURL, err)
+			}
+			m.logf("could not post failure reply to %s after %d attempts: %v", job.Source.HTMLURL, failure.ReplyAttempts, err)
+		}
+	}
+	m.logf("stop retrying failed %s from %s", job.Command.Action, job.Source.HTMLURL)
+	store.Data.Processed[job.ID] = at
+	delete(store.Data.JobFailures, job.ID)
+	return store.Save()
 }
 
 func (m *Monitor) acceptWhitelistedInvitations(ctx context.Context) error {
