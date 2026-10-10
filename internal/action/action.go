@@ -295,7 +295,7 @@ func (e *Executor) release(ctx context.Context, job monitor.Job) error {
 		return fmt.Errorf("check tag protection: %w", err)
 	}
 	if !protected {
-		return e.acknowledge(ctx, job, "Release drafts are disabled until an active GitHub ruleset covers all tags, blocks updates and deletions, and exposes an empty bypass list to the bot. Configure the ruleset and send a new release command.")
+		return e.acknowledge(ctx, job, "Release drafts are disabled until an active GitHub ruleset covers all tags, blocks updates and deletions, exposes an empty bypass list to the bot, and no active tag ruleset restricts creation. Configure the rulesets and send a new release command.")
 	}
 	pending, recovering := e.Store.Data.PendingReleases[job.ID]
 	if recovering && (pending.Tag != tag || pending.Target == "" || pending.Notes == "") {
