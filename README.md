@@ -7,7 +7,7 @@ A small Go service that watches a bot account's GitHub notifications for command
 
 ## What it does
 
-Put one command on its own line in an issue or pull request body or comment. These examples use `@linkdataminion`; substitute the configured `bot_login`:
+Put one command on the **first nonblank line** of an issue or pull request body or comment. These examples use `@linkdataminion`; substitute the configured `bot_login`:
 
 | Command | Result |
 | --- | --- |
@@ -20,7 +20,7 @@ Release drafts require an active GitHub tag ruleset covering **all tags** (`~ALL
 
 Fix drafts record their expected head commit in the pull request body and verify GitHub's returned head before acknowledgement. The branch remains mutable afterward; protect `minion/fix-*` from updates by other writers and compare the current head with the recorded commit before merging.
 
-Each request must come from an account with effective repository `write`, `maintain`, or `admin` permission. An optional `allowed_actors` list narrows that group. Commands in quotations, code fences, HTML comments, and comments with multiple commands are ignored. The bot checks the whitelist and author permission again before every action.
+Each request must come from an account with effective repository `write`, `maintain`, or `admin` permission. An optional `allowed_actors` list narrows that group. A command in a quotation, code fence, HTML comment, or later body line is ignored. A second full-line directive makes the request ambiguous and is refused. The bot checks the whitelist and author permission again before every action.
 
 Edited command sources are ignored. Post a new comment to request work after editing text.
 
