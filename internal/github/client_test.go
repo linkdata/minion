@@ -103,6 +103,39 @@ func TestCurrentItemUsesLiveBodyAndEditProvenance(t *testing.T) {
 	}
 }
 
+func TestCurrentIssueContentUsesRenderedTextAndEditTime(t *testing.T) {
+	response := `{"data":{"node":{"title":"Issue title","bodyText":"Visible request","lastEditedAt":"2026-10-09T08:00:00Z"}}}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/graphql" {
+			t.Errorf("unexpected issue request: %s %s", r.Method, r.URL.Path)
+		}
+		var input struct {
+			Query     string            `json:"query"`
+			Variables map[string]string `json:"variables"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			t.Error(err)
+		}
+		if input.Variables["id"] != "issue-node" || !strings.Contains(input.Query, "bodyText") || !strings.Contains(input.Query, "lastEditedAt") {
+			t.Errorf("issue query omitted rendered text or edit time: %+v", input)
+		}
+		_, _ = fmt.Fprint(w, response)
+	}))
+	defer server.Close()
+	client := testClient(server)
+	if _, err := client.CurrentIssueContent(context.Background(), ""); err == nil {
+		t.Fatal("missing issue node ID accepted")
+	}
+	content, err := client.CurrentIssueContent(context.Background(), "issue-node")
+	if err != nil || content.Title != "Issue title" || content.BodyText != "Visible request" || content.LastEditedAt == nil {
+		t.Fatalf("content = %+v, error = %v", content, err)
+	}
+	response = `{"errors":[{"message":"Resource not accessible"}]}`
+	if _, err := client.CurrentIssueContent(context.Background(), "issue-node"); err == nil {
+		t.Fatal("GraphQL error did not fail closed")
+	}
+}
+
 func TestListNotificationsPaginatesAndRepeatsAfterFailedAction(t *testing.T) {
 	var calls []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

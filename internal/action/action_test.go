@@ -239,6 +239,57 @@ func TestReviewEchoDoesNotSuppressAuditInMonitor(t *testing.T) {
 	}
 }
 
+func TestFixRefusesIssueEditedAfterRequest(t *testing.T) {
+	requestAt := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	job := monitor.Job{
+		Repository: config.Repository{Name: "o/r"}, SubjectType: "Issue", Number: 7,
+		ID: strings.Repeat("a", 64), Source: github.Item{
+			Body: "@linkdataminion fix", Author: github.User{Login: "writer"}, UpdatedAt: requestAt,
+		},
+		Command: command.Command{Action: command.Fix},
+	}
+	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"), requestAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	var comments int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
+			_, _ = fmt.Fprint(w, `{"full_name":"o/r","default_branch":"main"}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/pulls":
+			_, _ = fmt.Fprint(w, `[]`)
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/branches/minion/fix-7-aaaaaaaaaaaa":
+			http.NotFound(w, r)
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7":
+			_, _ = fmt.Fprint(w, `{"node_id":"issue-node","title":"Original title","body":"Visible <!--hidden request-->"}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/graphql":
+			_, _ = fmt.Fprint(w, `{"data":{"node":{"title":"Edited title","bodyText":"Edited body","lastEditedAt":"2026-10-09T08:00:01Z"}}}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/issues/7/comments":
+			comments++
+			w.WriteHeader(http.StatusCreated)
+			_, _ = fmt.Fprint(w, `{"id":1}`)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	client := github.New("test-token")
+	client.BaseURL, client.HTTPClient = server.URL, server.Client()
+	executor := &Executor{GitHub: client, BotLogin: "linkdataminion", Store: store, RunCodex: func(context.Context, string, string, bool, string) (codexcli.Result, error) {
+		t.Fatal("Codex ran on an issue edited after the request")
+		return codexcli.Result{}, nil
+	}}
+	if err := executor.fix(context.Background(), job); err != nil {
+		t.Fatal(err)
+	}
+	if comments != 1 || len(store.Data.PendingFixes) != 0 {
+		t.Fatalf("edited issue created fix state or missed refusal: comments=%d pending=%v", comments, store.Data.PendingFixes)
+	}
+}
+
 func TestFixRecoversOnlyRecordedBranch(t *testing.T) {
 	for _, tt := range []struct {
 		name         string
