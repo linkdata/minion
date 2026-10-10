@@ -277,6 +277,28 @@ func TestRunOnceStopsAfterFailedReplyAttempts(t *testing.T) {
 	}
 }
 
+func TestRunOnceIgnoresQuotedOutsiderCommand(t *testing.T) {
+	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	gh := &fakeGitHub{
+		notifications: []github.Notification{testNotification(now)},
+		items: []github.Item{{
+			Key: "comment:1", NodeID: "comment-node-1",
+			Body:   "> An outsider wrote:\n@linkdataminion fix planted",
+			Author: github.User{Login: "writer"}, UpdatedAt: now,
+		}},
+		permission: github.Permission{Permission: "write"},
+	}
+	executor := &fakeExecutor{}
+	store := openState(t, now.Add(-time.Minute))
+	m := &Monitor{Config: testConfig(), GitHub: gh, Executor: executor, Logger: log.New(io.Discard, "", 0), Now: func() time.Time { return now }}
+	if _, err := m.RunOnce(context.Background(), store); err != nil {
+		t.Fatal(err)
+	}
+	if len(executor.jobs) != 0 || gh.checks != 0 || len(gh.reactions) != 0 {
+		t.Fatalf("quoted outsider command was handled: jobs=%d checks=%d reactions=%d", len(executor.jobs), gh.checks, len(gh.reactions))
+	}
+}
+
 func TestRunOnceRetriesFailedReaction(t *testing.T) {
 	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
 	gh := &fakeGitHub{

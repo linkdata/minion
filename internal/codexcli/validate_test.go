@@ -14,23 +14,34 @@ import (
 )
 
 const catalogueScript = `#!/bin/sh
-printf '%s\n' "$@" > "$CAPTURE_ARGS"
-printf '%s,%s\n' "${GH_TOKEN-absent}" "${GITHUB_TOKEN-absent}" > "$CAPTURE_ENV"
+printf '%s\n' "$@" > @ARGS@
+printf '%s,%s\n' "${GH_TOKEN-absent}" "${GITHUB_TOKEN-absent}" > @ENV@
 IFS= read -r request
-printf '%s\n' "$request" >> "$CAPTURE_REQUESTS"
+printf '%s\n' "$request" >> @REQUESTS@
 printf '%s\n' '{"id":1,"result":{}}'
 IFS= read -r request
-printf '%s\n' "$request" >> "$CAPTURE_REQUESTS"
+printf '%s\n' "$request" >> @REQUESTS@
 IFS= read -r request
-printf '%s\n' "$request" >> "$CAPTURE_REQUESTS"
-printf '%s\n' '{"method":"test/notification","params":{}}' "$CATALOGUE_PAGE1"
-if [ -n "$CATALOGUE_PAGE2" ]; then
+printf '%s\n' "$request" >> @REQUESTS@
+printf '%s\n' '{"method":"test/notification","params":{}}' @PAGE1@
+if [ -n @PAGE2@ ]; then
   IFS= read -r request
-  printf '%s\n' "$request" >> "$CAPTURE_REQUESTS"
-  printf '%s\n' "$CATALOGUE_PAGE2"
+  printf '%s\n' "$request" >> @REQUESTS@
+  printf '%s\n' @PAGE2@
 fi
 cat >/dev/null
 `
+
+func catalogueScriptFor(dir, page1, page2 string) string {
+	quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }
+	return strings.NewReplacer(
+		"@ARGS@", quote(filepath.Join(dir, "args")),
+		"@ENV@", quote(filepath.Join(dir, "env")),
+		"@REQUESTS@", quote(filepath.Join(dir, "requests")),
+		"@PAGE1@", quote(page1),
+		"@PAGE2@", quote(page2),
+	).Replace(catalogueScript)
+}
 
 func TestValidateModelAndEffortAgainstInstalledCatalogue(t *testing.T) {
 	for _, tt := range []struct {
@@ -46,14 +57,11 @@ func TestValidateModelAndEffortAgainstInstalledCatalogue(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
-			installFakeCodex(t, catalogueScript)
-			t.Setenv("CAPTURE_ARGS", filepath.Join(dir, "args"))
-			t.Setenv("CAPTURE_ENV", filepath.Join(dir, "env"))
-			t.Setenv("CAPTURE_REQUESTS", filepath.Join(dir, "requests"))
+			page1 := `{"id":2,"result":{"data":[{"model":"gpt-6-luna","isDefault":true,"defaultReasoningEffort":"medium","supportedReasoningEfforts":[{"reasoningEffort":"medium"},{"reasoningEffort":"high"}]}],"nextCursor":"second"}}`
+			page2 := `{"id":3,"result":{"data":[{"model":"gpt-6-sol","hidden":true,"defaultReasoningEffort":"medium","supportedReasoningEfforts":[{"reasoningEffort":"medium"},{"reasoningEffort":"ultra"}]}],"nextCursor":null}}`
+			installFakeCodex(t, catalogueScriptFor(dir, page1, page2))
 			t.Setenv("GH_TOKEN", "secret")
 			t.Setenv("GITHUB_TOKEN", "secret")
-			t.Setenv("CATALOGUE_PAGE1", `{"id":2,"result":{"data":[{"model":"gpt-6-luna","isDefault":true,"defaultReasoningEffort":"medium","supportedReasoningEfforts":[{"reasoningEffort":"medium"},{"reasoningEffort":"high"}]}],"nextCursor":"second"}}`)
-			t.Setenv("CATALOGUE_PAGE2", `{"id":3,"result":{"data":[{"model":"gpt-6-sol","hidden":true,"defaultReasoningEffort":"medium","supportedReasoningEfforts":[{"reasoningEffort":"medium"},{"reasoningEffort":"ultra"}]}],"nextCursor":null}}`)
 			settings, err := Validate(context.Background(), config.CodexConfig{Model: tt.model, ReasoningEffort: tt.effort, Skills: []string{"/example/SKILL.md"}})
 			if tt.wantError != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantError) {
@@ -103,12 +111,7 @@ func TestValidateFailsWhenCodexCannotSupplyCatalogue(t *testing.T) {
 	} {
 		t.Run(response, func(t *testing.T) {
 			dir := t.TempDir()
-			installFakeCodex(t, catalogueScript)
-			t.Setenv("CAPTURE_ARGS", filepath.Join(dir, "args"))
-			t.Setenv("CAPTURE_ENV", filepath.Join(dir, "env"))
-			t.Setenv("CAPTURE_REQUESTS", filepath.Join(dir, "requests"))
-			t.Setenv("CATALOGUE_PAGE1", response)
-			t.Setenv("CATALOGUE_PAGE2", "")
+			installFakeCodex(t, catalogueScriptFor(dir, response, ""))
 			if _, err := Validate(context.Background(), config.CodexConfig{Model: "gpt-6-sol", ReasoningEffort: "ultra"}); err == nil {
 				t.Fatalf("accepted unvalidated settings after response %s", response)
 			}
@@ -143,12 +146,9 @@ func TestValidateReportsCleanupFailure(t *testing.T) {
 	}
 	dir := t.TempDir()
 	t.Setenv("TMPDIR", dir)
-	installFakeCodex(t, strings.Replace(catalogueScript, "IFS= read -r request", "mkdir locked\ntouch locked/file\nchmod 000 locked\nIFS= read -r request", 1))
-	t.Setenv("CAPTURE_ARGS", filepath.Join(dir, "args"))
-	t.Setenv("CAPTURE_ENV", filepath.Join(dir, "env"))
-	t.Setenv("CAPTURE_REQUESTS", filepath.Join(dir, "requests"))
-	t.Setenv("CATALOGUE_PAGE1", `{"id":2,"result":{"data":[{"model":"test","isDefault":true,"defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high"}]}]}}`)
-	t.Setenv("CATALOGUE_PAGE2", "")
+	page1 := `{"id":2,"result":{"data":[{"model":"test","isDefault":true,"defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high"}]}]}}`
+	script := catalogueScriptFor(dir, page1, "")
+	installFakeCodex(t, strings.Replace(script, "IFS= read -r request", "mkdir locked\ntouch locked/file\nchmod 000 locked\nIFS= read -r request", 1))
 	t.Cleanup(func() {
 		paths, err := filepath.Glob(filepath.Join(dir, "minion-codex-check-*", "locked"))
 		if err != nil {
