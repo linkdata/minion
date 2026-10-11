@@ -8,6 +8,9 @@ import (
 	"syscall"
 )
 
+// Go 1.23's syscall package does not expose this Linux open flag.
+const oPath = 0x200000
+
 // RemoveAll restores owner access to directories before removing a completed job tree.
 func RemoveAll(path string) error {
 	entry, err := os.Lstat(path)
@@ -36,7 +39,7 @@ func restoreDirs(dir *os.File) {
 		return
 	}
 	for _, entry := range entries {
-		fd, err := syscall.Openat(int(dir.Fd()), entry.Name(), syscall.O_PATH|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+		fd, err := syscall.Openat(int(dir.Fd()), entry.Name(), oPath|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
 		if err != nil {
 			continue
 		}
