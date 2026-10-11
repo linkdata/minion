@@ -9,7 +9,10 @@ import (
 	"syscall"
 )
 
-const DefaultMaxBytes int64 = 8 << 30
+const (
+	DefaultMaxBytes int64 = 8 << 30
+	minFreeBytes    int64 = 64 << 20
+)
 
 var ErrUnsafe = errors.New("work_root is not a bounded, separate filesystem")
 
@@ -24,7 +27,7 @@ func Check(workRoot, statePath string, maxBytes int64) error {
 	if err != nil {
 		return fmt.Errorf("%w: resolve work_root: %v", ErrUnsafe, err)
 	}
-	stateDir, err := filepath.EvalSymlinks(filepath.Dir(statePath))
+	stateDir, err := existingStateDir(filepath.Dir(statePath))
 	if err != nil {
 		return fmt.Errorf("%w: resolve state directory: %v", ErrUnsafe, err)
 	}
@@ -50,7 +53,29 @@ func Check(workRoot, statePath string, maxBytes int64) error {
 	if err := validateCapacity(stat.Blocks, stat.Bsize, maxBytes); err != nil {
 		return fmt.Errorf("%w: %s exceeds work_root_max_bytes (%d bytes) or has unknown capacity", ErrUnsafe, workRoot, maxBytes)
 	}
+	if err := validateFreeSpace(stat.Bavail, stat.Bsize); err != nil {
+		return fmt.Errorf("%w: %s has less than %d bytes free", ErrUnsafe, workRoot, minFreeBytes)
+	}
 	return nil
+}
+
+// The state directory may not exist before the first run; state.Open creates it.
+// Resolve the nearest existing ancestor to find the filesystem it will use.
+func existingStateDir(dir string) (string, error) {
+	for {
+		resolved, err := filepath.EvalSymlinks(dir)
+		if err == nil {
+			return resolved, nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", err
+		}
+		dir = parent
+	}
 }
 
 func filesystemDevice(path string) (uint64, error) {
@@ -80,6 +105,20 @@ func validateDevices(work, parent, state uint64) error {
 
 func validateCapacity(blocks uint64, blockSize, maxBytes int64) error {
 	if blockSize <= 0 || blocks == 0 || maxBytes <= 0 || blocks > uint64(maxBytes)/uint64(blockSize) {
+		return ErrUnsafe
+	}
+	return nil
+}
+
+func validateFreeSpace(available uint64, blockSize int64) error {
+	if blockSize <= 0 {
+		return ErrUnsafe
+	}
+	required := uint64(minFreeBytes) / uint64(blockSize)
+	if uint64(minFreeBytes)%uint64(blockSize) != 0 {
+		required++
+	}
+	if available < required {
 		return ErrUnsafe
 	}
 	return nil

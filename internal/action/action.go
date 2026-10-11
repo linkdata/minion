@@ -82,6 +82,13 @@ func (e *Executor) Execute(ctx context.Context, job monitor.Job) (resultErr erro
 		if err := e.CheckWorkRoot(); err != nil {
 			return err
 		}
+		defer func() {
+			if resultErr != nil {
+				if err := e.CheckWorkRoot(); err != nil {
+					resultErr = errors.Join(resultErr, err)
+				}
+			}
+		}()
 	}
 	if e.GitHub == nil {
 		return errors.New("GitHub client is missing")

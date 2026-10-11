@@ -16,8 +16,26 @@ func TestCheckRefusesUnboundedDefaultLayout(t *testing.T) {
 	if err := Check(work, filepath.Join(root, "state.json"), DefaultMaxBytes); !errors.Is(err, ErrUnsafe) {
 		t.Fatalf("same-filesystem work root accepted: %v", err)
 	}
+	if err := Check(work, filepath.Join(root, "new", "nested", "state.json"), DefaultMaxBytes); !errors.Is(err, ErrUnsafe) {
+		t.Fatalf("missing state directory bypassed same-filesystem check: %v", err)
+	}
 	if err := Check(filepath.Join(root, "missing"), filepath.Join(root, "state.json"), DefaultMaxBytes); !errors.Is(err, ErrUnsafe) {
 		t.Fatalf("missing work mount accepted: %v", err)
+	}
+}
+
+func TestExistingStateDirResolvesMissingChildrenAndSymlinks(t *testing.T) {
+	root := t.TempDir()
+	link := filepath.Join(root, "state-link")
+	if err := os.Symlink(root, link); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := existingStateDir(filepath.Join(link, "new", "nested"))
+	if err != nil || resolved != root {
+		t.Fatalf("state filesystem ancestor = %q, %v; want %q", resolved, err, root)
+	}
+	if _, err := os.Stat(filepath.Join(root, "new")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("preflight created state directory: %v", err)
 	}
 }
 
@@ -44,5 +62,19 @@ func TestDeviceAndCapacityRequirements(t *testing.T) {
 				t.Fatalf("validation = %v, want pass=%v", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestFreeSpaceRequirement(t *testing.T) {
+	const blockSize = 4096
+	required := uint64(minFreeBytes / blockSize)
+	if err := validateFreeSpace(required, blockSize); err != nil {
+		t.Fatalf("64 MiB free was refused: %v", err)
+	}
+	if err := validateFreeSpace(required-1, blockSize); !errors.Is(err, ErrUnsafe) {
+		t.Fatalf("less than 64 MiB free was accepted: %v", err)
+	}
+	if err := validateFreeSpace(0, blockSize); !errors.Is(err, ErrUnsafe) {
+		t.Fatalf("full filesystem was accepted: %v", err)
 	}
 }
