@@ -174,6 +174,10 @@ func checkRepositories(ctx context.Context, client *github.Client, cfg config.Co
 			problems = append(problems, fmt.Errorf("%s: %w", repo.Name, err))
 			continue
 		}
+		if !repo.MatchesIdentity(details.ID, details.Owner.ID) {
+			problems = append(problems, fmt.Errorf("%s: repository ID or owner ID differs from config", repo.Name))
+			continue
+		}
 		if details.Archived {
 			problems = append(problems, fmt.Errorf("%s is archived", repo.Name))
 			continue

@@ -60,7 +60,7 @@ func TestCloseCheckoutLogsCleanupFailure(t *testing.T) {
 }
 
 func TestAlreadyAcknowledgedRequiresOwnTrailingMarker(t *testing.T) {
-	job := monitor.Job{Repository: config.Repository{Name: "o/r"}, SubjectType: "PullRequest", Number: 7, ID: strings.Repeat("a", 64)}
+	job := monitor.Job{Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2}, SubjectType: "PullRequest", Number: 7, ID: strings.Repeat("a", 64)}
 	reviewMarker := "<!-- linkdataminion:" + strings.Repeat("b", 64) + " -->"
 	for _, tt := range []struct {
 		name, body, author, liveBody string
@@ -114,26 +114,64 @@ func TestAlreadyAcknowledgedRequiresOwnTrailingMarker(t *testing.T) {
 	}
 }
 
+func TestVerifiedRepositoryRejectsReclaimedName(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/repos/o/r" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = fmt.Fprint(w, `{"id":9,"full_name":"o/r","owner":{"id":2,"login":"o"}}`)
+	}))
+	defer server.Close()
+	client := github.New("token")
+	client.BaseURL, client.HTTPClient = server.URL, server.Client()
+	executor := &Executor{GitHub: client}
+	job := monitor.Job{Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2}}
+	if _, err := executor.verifiedRepository(context.Background(), job); err == nil {
+		t.Fatal("accepted a replacement repository under the same name")
+	}
+	job.Repository.ID = 9
+	job.Repository.OwnerID = 3
+	if _, err := executor.verifiedRepository(context.Background(), job); err == nil {
+		t.Fatal("accepted a replacement owner under the same name")
+	}
+	job.Repository.OwnerID = 2
+	if _, err := executor.verifiedRepository(context.Background(), job); err != nil {
+		t.Fatalf("rejected pinned repository: %v", err)
+	}
+}
+
 type actionMonitorGitHub struct {
 	items        []github.Item
 	notification github.Notification
 }
 
 func (f *actionMonitorGitHub) ListNotifications(context.Context, time.Time) ([]github.Notification, time.Duration, error) {
-	return []github.Notification{f.notification}, time.Minute, nil
+	notification := f.notification
+	notification.Repository.ID = 1
+	notification.Repository.Owner.ID = 2
+	return []github.Notification{notification}, time.Minute, nil
+}
+func (f *actionMonitorGitHub) Repository(_ context.Context, name string) (github.Repository, error) {
+	return github.Repository{ID: 1, FullName: name, Owner: github.User{ID: 2}}, nil
 }
 func (f *actionMonitorGitHub) ListRepositoryInvitations(context.Context) ([]github.Invitation, error) {
 	return nil, nil
 }
 func (f *actionMonitorGitHub) AcceptRepositoryInvitation(context.Context, int64) error { return nil }
 func (f *actionMonitorGitHub) ThreadItems(context.Context, string, string, int, time.Time) ([]github.Item, error) {
-	return f.items, nil
+	items := append([]github.Item(nil), f.items...)
+	for i := range items {
+		items[i].Author.ID = 7
+	}
+	return items, nil
 }
 func (f *actionMonitorGitHub) CurrentItem(_ context.Context, item github.Item) (github.Item, error) {
 	return item, nil
 }
-func (f *actionMonitorGitHub) Permission(context.Context, string, string) (github.Permission, error) {
-	return github.Permission{Permission: "write"}, nil
+func (f *actionMonitorGitHub) Permission(_ context.Context, _, login string) (github.Permission, error) {
+	return github.Permission{Permission: "write", User: github.User{ID: 7, Login: login}}, nil
 }
 func (f *actionMonitorGitHub) ReactEyes(context.Context, string) error { return nil }
 func (f *actionMonitorGitHub) CreateIssueComment(context.Context, string, int, string) (github.Comment, error) {
@@ -164,7 +202,7 @@ func TestReviewEchoDoesNotSuppressAuditInMonitor(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
-			_, _ = fmt.Fprint(w, `{"full_name":"o/r","default_branch":"main"}`)
+			_, _ = fmt.Fprint(w, `{"id":1,"full_name":"o/r","owner":{"id":2,"login":"o"},"default_branch":"main"}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/pulls/7":
 			_, _ = fmt.Fprintf(w, `{"title":"PR","base":{"ref":"main"},"head":{"sha":%q}}`, head)
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/o/r/git/trees/"):
@@ -233,7 +271,7 @@ func TestReviewEchoDoesNotSuppressAuditInMonitor(t *testing.T) {
 	}
 	defer store.Close()
 	m := monitor.Monitor{Config: config.Config{BotLogin: "linkdataminion", PollIntervalSeconds: 60,
-		Repositories: []config.Repository{{Name: "o/r", Actions: []string{"review", "audit"}, AllowedActors: []string{"writer"}}}},
+		Repositories: []config.Repository{{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"review", "audit"}, AllowedActors: []string{"writer"}, AllowedActorIDs: map[string]int64{"writer": 7}}}},
 		GitHub: monitorGitHub, Executor: executor, Now: func() time.Time { return now.Add(time.Minute) }}
 	if _, err := m.RunOnce(context.Background(), store); err != nil {
 		t.Fatal(err)
@@ -251,7 +289,7 @@ func TestReviewEchoDoesNotSuppressAuditInMonitor(t *testing.T) {
 func TestFixRefusesIssueEditedAfterRequest(t *testing.T) {
 	requestAt := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
 	job := monitor.Job{
-		Repository: config.Repository{Name: "o/r"}, SubjectType: "Issue", Number: 7,
+		Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2}, SubjectType: "Issue", Number: 7,
 		ID: strings.Repeat("a", 64), Source: github.Item{
 			Body: "@linkdataminion fix", Author: github.User{Login: "writer"}, UpdatedAt: requestAt,
 		},
@@ -266,7 +304,7 @@ func TestFixRefusesIssueEditedAfterRequest(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
-			_, _ = fmt.Fprint(w, `{"full_name":"o/r","default_branch":"main"}`)
+			_, _ = fmt.Fprint(w, `{"id":1,"full_name":"o/r","owner":{"id":2,"login":"o"},"default_branch":"main"}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/pulls":
 			_, _ = fmt.Fprint(w, `[]`)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/branches/minion/fix-7-aaaaaaaaaaaa":
@@ -319,7 +357,7 @@ func TestFixRecoversOnlyRecordedBranch(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			job := monitor.Job{
-				Repository:  config.Repository{Name: "o/r", Actions: []string{"fix"}},
+				Repository:  config.Repository{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"fix"}},
 				SubjectType: "Issue",
 				Number:      7,
 				ID:          strings.Repeat("a", 64),
@@ -357,7 +395,7 @@ func TestFixRecoversOnlyRecordedBranch(t *testing.T) {
 						t.Error(err)
 					}
 				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
-					if _, err := fmt.Fprint(w, `{"full_name":"o/r","default_branch":"main"}`); err != nil {
+					if _, err := fmt.Fprint(w, `{"id":1,"full_name":"o/r","owner":{"id":2,"login":"o"},"default_branch":"main"}`); err != nil {
 						t.Error(err)
 					}
 				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/pulls":
@@ -434,7 +472,7 @@ func TestFixRecoversOnlyRecordedBranch(t *testing.T) {
 func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 	_, _, remote := auditGitFixtureRemote(t)
 	job := monitor.Job{
-		Repository: config.Repository{Name: "o/r", Actions: []string{"fix"}}, SubjectType: "Issue", Number: 7,
+		Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"fix"}}, SubjectType: "Issue", Number: 7,
 		ID: strings.Repeat("a", 64), Source: github.Item{Author: github.User{ID: 7, Login: "writer"}, HTMLURL: "https://github.com/o/r/issues/7#issuecomment-1", UpdatedAt: time.Now()},
 		Command: command.Command{Action: command.Fix},
 	}
@@ -451,7 +489,7 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 		case r.Method == http.MethodPost && r.URL.Path == "/graphql":
 			_, _ = fmt.Fprint(w, `{"data":{"node":{"title":"Bug","bodyText":"Details"}}}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
-			_, _ = fmt.Fprint(w, `{"full_name":"o/r","default_branch":"main"}`)
+			_, _ = fmt.Fprint(w, `{"id":1,"full_name":"o/r","owner":{"id":2,"login":"o"},"default_branch":"main"}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/pulls":
 			_, _ = fmt.Fprint(w, `[]`)
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/o/r/branches/minion/"):
@@ -555,7 +593,7 @@ func TestReleaseReservesTagAndRecoversOnlyBotDraft(t *testing.T) {
 				return strings.TrimSpace(string(out)), err
 			}
 			job := monitor.Job{
-				Repository: config.Repository{Name: "o/r", Actions: []string{"release"}}, SubjectType: "Issue", Number: 7,
+				Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"release"}}, SubjectType: "Issue", Number: 7,
 				ID: strings.Repeat("a", 64), Source: github.Item{Author: github.User{Login: "writer"}},
 				Command: command.Command{Action: command.Release, Args: "v1.0.0"},
 			}
@@ -581,7 +619,7 @@ func TestReleaseReservesTagAndRecoversOnlyBotDraft(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch {
 				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
-					_, _ = fmt.Fprint(w, `{"full_name":"o/r","default_branch":"main"}`)
+					_, _ = fmt.Fprint(w, `{"id":1,"full_name":"o/r","owner":{"id":2,"login":"o"},"default_branch":"main"}`)
 				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/rulesets":
 					protectionCalls++
 					if tt.unprotected || tt.lostAfterCodex && protectionCalls >= 2 || tt.lostAfterTag && protectionCalls >= 3 {

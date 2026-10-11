@@ -8,6 +8,8 @@
   "repositories": [
     {
       "name": "example-owner/example-repo",
+      "id": 123456,
+      "owner_id": 78910,
       "actions": ["review", "fix", "release"]
     }
   ]

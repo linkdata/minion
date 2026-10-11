@@ -22,7 +22,7 @@ func TestCheckedInConfigIsSample(t *testing.T) {
 func TestLoadValidatesWhitelistAndResolvesPaths(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
-	data := `{"bot_login":"linkdataminion","repositories":[{"name":"example-owner/example-repo","actions":["review","fix","release"]}]}`
+	data := `{"bot_login":"linkdataminion","repositories":[{"name":"example-owner/example-repo","id":1,"owner_id":2,"actions":["review","fix","release"]}]}`
 	if err := os.WriteFile(path, []byte(data), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -32,6 +32,13 @@ func TestLoadValidatesWhitelistAndResolvesPaths(t *testing.T) {
 	}
 	if config.PollIntervalSeconds != 60 || config.StatePath != filepath.Join(dir, "var/state.json") {
 		t.Fatalf("unexpected defaults: %+v", config)
+	}
+	legacy := strings.Replace(data, `"id":1,"owner_id":2,`, "", 1)
+	if err := os.WriteFile(path, []byte(legacy), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("accepted migrated config without repository ID pins")
 	}
 	bad := strings.Replace(data, "example-owner/example-repo", "example-owner/../other", 1)
 	if err := os.WriteFile(path, []byte(bad), 0600); err != nil {
@@ -52,9 +59,10 @@ func TestLoadValidatesWhitelistAndResolvesPaths(t *testing.T) {
 }
 
 func TestInvitationOwnersAreNormalizedAndValidated(t *testing.T) {
-	base := Config{BotLogin: "linkdataminion", Repositories: []Repository{{Name: "example-owner/example-repo", Actions: []string{"review"}}}}
+	base := Config{BotLogin: "linkdataminion", Repositories: []Repository{{Name: "example-owner/example-repo", ID: 1, OwnerID: 2, Actions: []string{"review"}}}}
 	config := base
 	config.InvitationOwners = []string{"Example-Owner", "another-owner"}
+	config.InvitationOwnerIDs = map[string]int64{"example-owner": 2, "another-owner": 3}
 	if err := config.Validate(t.TempDir()); err != nil {
 		t.Fatal(err)
 	}
@@ -64,9 +72,43 @@ func TestInvitationOwnersAreNormalizedAndValidated(t *testing.T) {
 	for _, owners := range [][]string{{"example-owner", "EXAMPLE-OWNER"}, {"example-owner/other"}, {"-bad"}, {"bad-"}, {""}} {
 		config := base
 		config.InvitationOwners = owners
+		config.InvitationOwnerIDs = map[string]int64{"example-owner": 2}
 		if err := config.Validate(t.TempDir()); err == nil {
 			t.Errorf("accepted invalid invitation owners %v", owners)
 		}
+	}
+}
+
+func TestValidateRequiresExactIdentityPins(t *testing.T) {
+	base := Config{BotLogin: "bot", InvitationOwners: []string{"owner"}, InvitationOwnerIDs: map[string]int64{"owner": 2}, Repositories: []Repository{{
+		Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"review"},
+		AllowedActors: []string{"writer"}, AllowedActorIDs: map[string]int64{"writer": 7},
+	}}}
+	if err := base.Validate(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	for _, change := range []struct {
+		name string
+		edit func(*Config)
+	}{
+		{"missing repository ID", func(c *Config) { c.Repositories[0].ID = 0 }},
+		{"missing repository owner ID", func(c *Config) { c.Repositories[0].OwnerID = 0 }},
+		{"missing invitation owner pin", func(c *Config) { c.InvitationOwnerIDs = nil }},
+		{"extra invitation owner pin", func(c *Config) { c.InvitationOwnerIDs = map[string]int64{"owner": 2, "other": 3} }},
+		{"nonpositive invitation owner pin", func(c *Config) { c.InvitationOwnerIDs = map[string]int64{"owner": -1} }},
+		{"conflicting owner pins", func(c *Config) { c.Repositories[0].OwnerID = 3 }},
+		{"missing actor pin", func(c *Config) { c.Repositories[0].AllowedActorIDs = nil }},
+		{"extra actor pin", func(c *Config) { c.Repositories[0].AllowedActorIDs = map[string]int64{"writer": 7, "other": 8} }},
+		{"nonpositive actor pin", func(c *Config) { c.Repositories[0].AllowedActorIDs = map[string]int64{"writer": -1} }},
+	} {
+		t.Run(change.name, func(t *testing.T) {
+			cfg := base
+			cfg.Repositories = append([]Repository(nil), base.Repositories...)
+			change.edit(&cfg)
+			if err := cfg.Validate(t.TempDir()); err == nil {
+				t.Fatal("accepted missing or mismatched identity pin")
+			}
+		})
 	}
 }
 
@@ -79,7 +121,7 @@ func TestCodexSettingsResolveAndValidateSkillPaths(t *testing.T) {
 	if err := os.WriteFile(skill, []byte("---\nname: example\n---\nUse this skill."), 0600); err != nil {
 		t.Fatal(err)
 	}
-	base := Config{BotLogin: "linkdataminion", Repositories: []Repository{{Name: "example-owner/example-repo", Actions: []string{"review"}}}}
+	base := Config{BotLogin: "linkdataminion", Repositories: []Repository{{Name: "example-owner/example-repo", ID: 1, OwnerID: 2, Actions: []string{"review"}}}}
 	config := base
 	config.Codex = CodexConfig{Model: " gpt-6-sol ", ReasoningEffort: " ultra ", Skills: []string{"skills/example/SKILL.md"}}
 	if err := config.Validate(dir); err != nil {
@@ -107,7 +149,7 @@ func TestCodexSettingsResolveAndValidateSkillPaths(t *testing.T) {
 
 func TestAuditRequiresConfiguredSecurityAuditSkill(t *testing.T) {
 	dir := t.TempDir()
-	cfg := Config{BotLogin: "linkdataminion", Repositories: []Repository{{Name: "example-owner/example-repo", Actions: []string{"audit"}}}}
+	cfg := Config{BotLogin: "linkdataminion", Repositories: []Repository{{Name: "example-owner/example-repo", ID: 1, OwnerID: 2, Actions: []string{"audit"}}}}
 	if err := cfg.Validate(dir); err == nil || !strings.Contains(err.Error(), "audit requires") {
 		t.Fatalf("audit accepted without its skill: %v", err)
 	}
