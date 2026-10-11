@@ -60,7 +60,7 @@ func TestCloseCheckoutLogsCleanupFailure(t *testing.T) {
 }
 
 func TestAlreadyAcknowledgedRequiresOwnTrailingMarker(t *testing.T) {
-	job := monitor.Job{Repository: config.Repository{Name: "o/r"}, SubjectType: "PullRequest", Number: 7, ID: strings.Repeat("a", 64)}
+	job := monitor.Job{Repository: config.Repository{Name: "o/r"}, SubjectType: "PullRequest", Number: 7, ID: strings.Repeat("a", 64), Command: command.Command{Action: command.Review}}
 	reviewMarker := "<!-- linkdataminion:" + strings.Repeat("b", 64) + " -->"
 	for _, tt := range []struct {
 		name, body, author, liveBody string
@@ -111,6 +111,27 @@ func TestAlreadyAcknowledgedRequiresOwnTrailingMarker(t *testing.T) {
 				t.Fatalf("provenance checks = %d for %q", provenanceCalls, tt.name)
 			}
 		})
+	}
+}
+
+func TestPrecheckDeadlineStopsJobBeforeCodex(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/o/r/issues/7/comments" {
+			t.Errorf("unexpected request: %s", r.URL)
+		}
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+	client := github.New("test-token")
+	client.BaseURL, client.HTTPClient = server.URL, server.Client()
+	executor := &Executor{GitHub: client, BotLogin: "linkdataminion", Timeout: 20 * time.Millisecond,
+		RunCodex: func(context.Context, string, string, bool, string) (codexcli.Result, error) {
+			t.Fatal("Codex ran after precheck deadline")
+			return codexcli.Result{}, nil
+		}}
+	job := monitor.Job{Repository: config.Repository{Name: "o/r"}, SubjectType: "Issue", Number: 7, ID: strings.Repeat("a", 64)}
+	if err := executor.Execute(context.Background(), job); !errors.Is(err, monitor.ErrTerminalJob) {
+		t.Fatalf("precheck deadline was refundable: %v", err)
 	}
 }
 

@@ -390,6 +390,35 @@ func TestPullRequestItemsCoverEveryCommentSurface(t *testing.T) {
 	}
 }
 
+func TestHasVerifiedBotReplyUsesCommandTimeAndStopsAtMatch(t *testing.T) {
+	since := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	marker := "<!-- linkdataminion:job -->"
+	var pages, provenance int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/o/r/issues/7/comments":
+			pages++
+			if r.URL.Query().Get("since") != "2026-10-09T07:59:59Z" || r.URL.Query().Get("page") != "1" {
+				t.Errorf("precheck did not start at command time: %s", r.URL.RawQuery)
+			}
+			w.Header().Set("Link", `<https://api.github.com/repos/o/r/issues/7/comments?page=2>; rel="next"`)
+			_, _ = fmt.Fprintf(w, `[{"id":1,"body":"old","user":{"login":"linkdataminion"},"updated_at":"2026-10-09T07:59:58Z"},{"id":2,"node_id":"reply-node","body":%q,"user":{"login":"linkdataminion"},"updated_at":"2026-10-09T08:00:01Z"}]`, "done\n\n"+marker)
+		case "/graphql":
+			provenance++
+			_, _ = fmt.Fprintf(w, `{"data":{"node":{"body":%q,"author":{"login":"linkdataminion"}}}}`, "done\n\n"+marker)
+		default:
+			t.Errorf("unexpected precheck request: %s %s", r.Method, r.URL)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	client := testClient(server)
+	found, err := client.HasVerifiedBotReply(context.Background(), "o/r", 7, since, "linkdataminion", marker, false)
+	if err != nil || !found || pages != 1 || provenance != 1 {
+		t.Fatalf("reply lookup: found=%t err=%v pages=%d provenance=%d", found, err, pages, provenance)
+	}
+}
+
 func TestBranchLookup(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.EscapedPath() {

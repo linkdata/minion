@@ -253,6 +253,81 @@ func eligible(updated, since time.Time) bool {
 	return since.IsZero() || updated.IsZero() || !updated.Before(since.Add(-time.Second))
 }
 
+// HasVerifiedBotReply scans only reply surfaces, one page at a time. A bot
+// reply cannot predate the command that caused it, so since excludes older
+// issue comments; reviews have no REST since parameter.
+func (c *Client) HasVerifiedBotReply(ctx context.Context, repo string, number int, since time.Time, botLogin, marker string, includeReviews bool) (bool, error) {
+	path, err := repoPath(repo)
+	if err != nil {
+		return false, err
+	}
+	if number <= 0 {
+		return false, fmt.Errorf("invalid thread number %d", number)
+	}
+	match := func(item Item) (bool, error) {
+		if !strings.EqualFold(item.Author.Login, botLogin) || !strings.HasSuffix(strings.TrimSpace(item.Body), "\n\n"+marker) {
+			return false, nil
+		}
+		current, err := c.CurrentItem(ctx, item)
+		if err != nil {
+			return false, fmt.Errorf("check bot reply provenance: %w", err)
+		}
+		return !current.Edited && strings.EqualFold(current.Author.Login, botLogin) && strings.HasSuffix(strings.TrimSpace(current.Body), "\n\n"+marker), nil
+	}
+
+	q := sinceQuery(since)
+	for page := 1; ; page++ {
+		if page > 1000 {
+			return false, errors.New("too many GitHub comment pages")
+		}
+		q.Set("page", strconv.Itoa(page))
+		var batch []Comment
+		header, _, err := c.request(ctx, http.MethodGet, withQuery(path+"/issues/"+strconv.Itoa(number)+"/comments", q), nil, &batch, nil, http.StatusOK)
+		if err != nil {
+			return false, err
+		}
+		for _, comment := range batch {
+			if !eligible(nonzeroTime(comment.UpdatedAt, comment.CreatedAt), since) {
+				continue
+			}
+			if found, err := match(commentItem(repo, "issue-comment", comment)); found || err != nil {
+				return found, err
+			}
+		}
+		if !hasNextPage(header.Get("Link")) {
+			break
+		}
+	}
+	if !includeReviews {
+		return false, nil
+	}
+	q = url.Values{"per_page": {"100"}}
+	for page := 1; ; page++ {
+		if page > 1000 {
+			return false, errors.New("too many GitHub review pages")
+		}
+		q.Set("page", strconv.Itoa(page))
+		var batch []Review
+		header, _, err := c.request(ctx, http.MethodGet, withQuery(path+"/pulls/"+strconv.Itoa(number)+"/reviews", q), nil, &batch, nil, http.StatusOK)
+		if err != nil {
+			return false, err
+		}
+		for _, review := range batch {
+			if review.State == "PENDING" || !eligible(review.SubmittedAt, since) {
+				continue
+			}
+			item := Item{Key: fmt.Sprintf("%s#review:%d", strings.ToLower(repo), review.ID), NodeID: review.NodeID,
+				Body: review.Body, Author: review.User, UpdatedAt: review.SubmittedAt, HTMLURL: review.HTMLURL}
+			if found, err := match(item); found || err != nil {
+				return found, err
+			}
+		}
+		if !hasNextPage(header.Get("Link")) {
+			return false, nil
+		}
+	}
+}
+
 func sinceQuery(since time.Time) url.Values {
 	q := url.Values{"per_page": {"100"}}
 	if !since.IsZero() {
