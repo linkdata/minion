@@ -149,6 +149,7 @@ type GitTree struct {
 type GitTreeEntry struct {
 	Path string
 	Type string
+	Mode string
 	Size *int64
 }
 

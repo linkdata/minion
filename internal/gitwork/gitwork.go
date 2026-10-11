@@ -242,9 +242,20 @@ func checkPullRequestTree(tree github.GitTree, expectedSHA string) error {
 		}
 		switch entry.Type {
 		case "tree":
+			if entry.Mode != "040000" {
+				return fmt.Errorf("%w: unsupported tree mode %q at %q", ErrCheckoutTooLarge, entry.Mode, entry.Path)
+			}
 			continue
 		case "commit": // A submodule gitlink writes no blob into the checkout.
+			if entry.Mode != "160000" {
+				return fmt.Errorf("%w: unsupported gitlink mode %q at %q", ErrCheckoutTooLarge, entry.Mode, entry.Path)
+			}
 		case "blob":
+			// A symlink can redirect Codex's unsandboxed skill discovery to
+			// files outside the checkout. Refuse every non-file blob mode.
+			if entry.Mode != "100644" && entry.Mode != "100755" {
+				return fmt.Errorf("%w: unsupported blob mode %q at %q", ErrCheckoutTooLarge, entry.Mode, entry.Path)
+			}
 			if entry.Size == nil || *entry.Size < 0 {
 				return fmt.Errorf("%w: blob size is unavailable", ErrCheckoutTooLarge)
 			}

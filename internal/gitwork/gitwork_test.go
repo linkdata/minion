@@ -153,7 +153,7 @@ func TestCheckoutPullRequestBoundsAliasedTrees(t *testing.T) {
 				tree := completeTree(sha, make([]github.GitTreeEntry, 0, entries))
 				for i := 0; i < entries; i++ {
 					size := int64(tt.blobBytes)
-					tree.Tree = append(tree.Tree, github.GitTreeEntry{Path: fmt.Sprintf("p%d", i), Type: "blob", Size: &size})
+					tree.Tree = append(tree.Tree, github.GitTreeEntry{Path: fmt.Sprintf("p%d", i), Type: "blob", Mode: "100644", Size: &size})
 				}
 				return tree, nil
 			}
@@ -186,7 +186,7 @@ func TestCheckoutPullRequestBoundsAliasedTrees(t *testing.T) {
 
 func smallTree(_ context.Context, sha string) (github.GitTree, error) {
 	size := int64(32)
-	return completeTree(sha, []github.GitTreeEntry{{Path: "change.txt", Type: "blob", Size: &size}}), nil
+	return completeTree(sha, []github.GitTreeEntry{{Path: "change.txt", Type: "blob", Mode: "100644", Size: &size}}), nil
 }
 
 func completeTree(sha string, entries []github.GitTreeEntry) github.GitTree {
@@ -204,12 +204,68 @@ func TestCheckoutPullRequestRejectsIncompleteTreeMetadata(t *testing.T) {
 		{SHA: sha},
 		{SHA: sha, Tree: []github.GitTreeEntry{}},
 		completeTree(sha, nil),
-		completeTree(sha, []github.GitTreeEntry{{Path: "x", Type: "blob"}}),
-		completeTree(sha, []github.GitTreeEntry{{Path: "x", Type: "blob", Size: &size}, {Path: "y", Type: "unknown"}}),
+		completeTree(sha, []github.GitTreeEntry{{Path: "x", Type: "blob", Mode: "100644"}}),
+		completeTree(sha, []github.GitTreeEntry{{Path: "x", Type: "blob", Mode: "100644", Size: &size}, {Path: "y", Type: "unknown"}}),
 	} {
 		if err := checkPullRequestTree(tree, sha); !errors.Is(err, ErrCheckoutTooLarge) {
 			t.Fatalf("metadata %+v: error = %v, want checkout refusal", tree, err)
 		}
+	}
+}
+
+func TestPullRequestTreeRejectsSymlinks(t *testing.T) {
+	sha := strings.Repeat("a", 40)
+	size := int64(len("../../../private"))
+	for _, entry := range []github.GitTreeEntry{
+		{Path: ".agents/skills/escape", Type: "blob", Mode: "120000", Size: &size},
+		{Path: "missing-mode", Type: "blob", Size: &size},
+		{Path: "unknown-mode", Type: "blob", Mode: "100664", Size: &size},
+		{Path: "wrong-tree-mode", Type: "tree", Mode: "120000"},
+		{Path: "wrong-gitlink-mode", Type: "commit", Mode: "100644"},
+	} {
+		tree := completeTree(sha, []github.GitTreeEntry{entry})
+		if err := checkPullRequestTree(tree, sha); !errors.Is(err, ErrCheckoutTooLarge) {
+			t.Errorf("entry %+v: error = %v, want checkout refusal", entry, err)
+		}
+	}
+	for _, entry := range []github.GitTreeEntry{
+		{Path: "ordinary", Type: "blob", Mode: "100644", Size: &size},
+		{Path: "executable", Type: "blob", Mode: "100755", Size: &size},
+		{Path: "directory", Type: "tree", Mode: "040000"},
+		{Path: "submodule", Type: "commit", Mode: "160000"},
+	} {
+		tree := completeTree(sha, []github.GitTreeEntry{entry})
+		if err := checkPullRequestTree(tree, sha); err != nil {
+			t.Errorf("entry %+v: unexpected error: %v", entry, err)
+		}
+	}
+}
+
+func TestPullRequestSymlinkRejectedBeforeCheckout(t *testing.T) {
+	fixture := newFixture(t)
+	linkDir := filepath.Join(fixture.source, ".agents", "skills")
+	if err := os.MkdirAll(linkDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../../../../private", filepath.Join(linkDir, "escape")); err != nil {
+		t.Fatal(err)
+	}
+	fixture.git(fixture.source, "add", ".agents")
+	fixture.git(fixture.source, "commit", "-m", "add skill link")
+	head := fixture.git(fixture.source, "rev-parse", "HEAD")
+	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/pull/7/head")
+	lookup := func(_ context.Context, sha string) (github.GitTree, error) {
+		size := int64(len("../../../../private"))
+		return completeTree(sha, []github.GitTreeEntry{{Path: ".agents/skills/escape", Type: "blob", Mode: "120000", Size: &size}}), nil
+	}
+	if err := fixture.checkout.CheckoutPullRequest(context.Background(), 7, "main", head, lookup); !errors.Is(err, ErrCheckoutTooLarge) {
+		t.Fatalf("symlink PR error = %v, want checkout refusal", err)
+	}
+	if got := fixture.git(fixture.checkout.Path(), "rev-parse", "HEAD"); got != fixture.base {
+		t.Fatalf("refused PR changed checkout HEAD to %s", got)
+	}
+	if _, err := os.Lstat(filepath.Join(fixture.checkout.Path(), ".agents")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("refused PR materialized skill directory: %v", err)
 	}
 }
 
@@ -238,7 +294,7 @@ func TestCheckoutPullRequestPreflightDoesNotFetchMissingBlob(t *testing.T) {
 	}
 	oversized := func(_ context.Context, sha string) (github.GitTree, error) {
 		size := int64(maxCheckoutBytes + 1)
-		return completeTree(sha, []github.GitTreeEntry{{Path: "new.dat", Type: "blob", Size: &size}}), nil
+		return completeTree(sha, []github.GitTreeEntry{{Path: "new.dat", Type: "blob", Mode: "100644", Size: &size}}), nil
 	}
 	if err := checkout.CheckoutPullRequest(context.Background(), 7, "main", head, oversized); !errors.Is(err, ErrCheckoutTooLarge) {
 		t.Fatalf("oversized PR error = %v, want checkout limit", err)
@@ -251,7 +307,7 @@ func TestCheckoutPullRequestPreflightDoesNotFetchMissingBlob(t *testing.T) {
 	}
 	small := func(_ context.Context, sha string) (github.GitTree, error) {
 		size := int64(blobBytes)
-		return completeTree(sha, []github.GitTreeEntry{{Path: "new.dat", Type: "blob", Size: &size}}), nil
+		return completeTree(sha, []github.GitTreeEntry{{Path: "new.dat", Type: "blob", Mode: "100644", Size: &size}}), nil
 	}
 	if err := checkout.CheckoutPullRequest(context.Background(), 7, "main", head, small); err != nil {
 		t.Fatalf("bounded PR checkout: %v", err)
@@ -281,8 +337,8 @@ func TestCheckoutPullRequestDisablesRepositoryTransforms(t *testing.T) {
 	lookup := func(_ context.Context, sha string) (github.GitTree, error) {
 		attributesSize, payloadSize := int64(len(attributes)), int64(len(payload))
 		return completeTree(sha, []github.GitTreeEntry{
-			{Path: ".gitattributes", Type: "blob", Size: &attributesSize},
-			{Path: "payload.txt", Type: "blob", Size: &payloadSize},
+			{Path: ".gitattributes", Type: "blob", Mode: "100644", Size: &attributesSize},
+			{Path: "payload.txt", Type: "blob", Mode: "100644", Size: &payloadSize},
 		}), nil
 	}
 	if err := checkout.CheckoutPullRequest(context.Background(), 7, "main", head, lookup); err != nil {
