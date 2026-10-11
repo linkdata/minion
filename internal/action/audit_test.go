@@ -381,7 +381,7 @@ func auditGitFixtureRemote(t *testing.T) (base, head, remote string) {
 	if err := os.Mkdir(bin, 0700); err != nil {
 		t.Fatal(err)
 	}
-	wrapper := fmt.Sprintf("#!/bin/sh\nexec %q -c %q \"$@\"\n", realGit, "url."+remote+".insteadOf=https://github.com/o/r.git")
+	wrapper := fmt.Sprintf("#!/bin/sh\nGIT_ALLOW_PROTOCOL=file exec %q -c %q \"$@\"\n", realGit, "url."+remote+".insteadOf=https://github.com/o/r.git")
 	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(wrapper), 0700); err != nil {
 		t.Fatal(err)
 	}
