@@ -14,6 +14,57 @@ import (
 	"github.com/linkdata/minion/internal/github"
 )
 
+func TestGitCredentialHelperIgnoresCheckoutRelativePath(t *testing.T) {
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git is unavailable")
+	}
+	checkout := t.TempDir()
+	trustedBin := filepath.Join(t.TempDir(), "trusted' bin")
+	if err := os.Mkdir(trustedBin, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(checkout, "tools"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	for path, username := range map[string]string{
+		filepath.Join(trustedBin, "gh"):        "trusted",
+		filepath.Join(checkout, "gh"):          "planted",
+		filepath.Join(checkout, "tools", "gh"): "planted",
+	} {
+		content := "#!/bin/sh\nprintf 'username=" + username + "\\npassword=test\\n'\n"
+		if err := os.WriteFile(path, []byte(content), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, path := range map[string]string{
+		"empty entry":            ":" + trustedBin,
+		"empty PATH":             "",
+		"relative entry":         "tools:" + trustedBin,
+		"all relative":           ".:tools",
+		"absolute checkout path": checkout + ":" + trustedBin,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("PATH", path)
+			cmd := exec.Command(realGit, "-c", "credential.helper=", "-c", credentialHelperConfig(filepath.Join(trustedBin, "gh")), "credential", "fill")
+			cmd.Dir = checkout
+			cmd.Env = cleanGitEnvironment()
+			validPath := false
+			for _, entry := range cmd.Env {
+				validPath = validPath || strings.HasPrefix(entry, "PATH=") && entry != "PATH="
+			}
+			if !validPath {
+				t.Fatal("clean Git environment has no usable PATH")
+			}
+			cmd.Stdin = strings.NewReader("protocol=https\nhost=github.com\n\n")
+			output, err := cmd.CombinedOutput()
+			if err != nil || !strings.Contains(string(output), "username=trusted") || strings.Contains(string(output), "planted") {
+				t.Fatalf("credential helper resolved through %q: %s: %v", path, output, err)
+			}
+		})
+	}
+}
+
 func TestRepositoryAndRefValidation(t *testing.T) {
 	url, err := repositoryURL("Acme/project.name")
 	if err != nil || url != "https://github.com/Acme/project.name.git" {
