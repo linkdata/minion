@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/linkdata/minion/internal/cleanup"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/usage"
 )
@@ -59,7 +60,7 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 		return result, fmt.Errorf("codex exec: create temporary directory: %w", err)
 	}
 	defer func() {
-		if err := os.RemoveAll(runtimeDir); err != nil {
+		if err := cleanup.RemoveAll(runtimeDir); err != nil {
 			result.Answer = ""
 			runError = errors.Join(runError, fmt.Errorf("codex exec: remove temporary directory: %w", err))
 		}

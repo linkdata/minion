@@ -26,7 +26,7 @@ import (
 	"github.com/linkdata/minion/internal/state"
 )
 
-func TestCloseCheckoutLogsCleanupFailure(t *testing.T) {
+func TestCloseCheckoutRemovesRestrictedDirectory(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root bypasses directory permissions")
 	}
@@ -36,6 +36,7 @@ func TestCloseCheckoutLogsCleanupFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	path := checkout.Path()
 	locked := filepath.Join(checkout.Path(), "locked")
 	if err := os.Mkdir(locked, 0700); err != nil {
 		t.Fatal(err)
@@ -44,7 +45,7 @@ func TestCloseCheckoutLogsCleanupFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		if err := os.Chmod(locked, 0700); err != nil {
+		if err := os.Chmod(locked, 0700); err != nil && !errors.Is(err, os.ErrNotExist) {
 			t.Error(err)
 		}
 	})
@@ -54,8 +55,11 @@ func TestCloseCheckoutLogsCleanupFailure(t *testing.T) {
 	var output bytes.Buffer
 	executor := Executor{Logger: log.New(&output, "", 0)}
 	executor.closeCheckout(checkout)
-	if !strings.Contains(output.String(), "close checkout: remove checkout:") {
-		t.Fatalf("cleanup error not logged: %s", &output)
+	if output.Len() != 0 {
+		t.Fatalf("cleanup failed: %s", &output)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("checkout still exists: %v", err)
 	}
 }
 
