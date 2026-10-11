@@ -187,7 +187,10 @@ Request comment (%s):
 	}
 	body := fmt.Sprintf("Automated review requested by @%s:\n\n%s\n\n%s", job.Source.Author.Login, inertModelOutput(result), job.Marker())
 	_, err = e.GitHub.CreatePullRequestReview(ctx, job.Repository.Name, job.Number, body, pull.Head.SHA)
-	return err
+	if err != nil {
+		return fmt.Errorf("%w: %w", monitor.ErrPostCodexPublication, err)
+	}
+	return nil
 }
 
 func (e *Executor) fix(ctx context.Context, job monitor.Job) error {
@@ -253,7 +256,10 @@ Request comment (%s):
 			return err
 		}
 		if !changed {
-			return e.acknowledge(ctx, job, "Codex completed the request without changing files.\n\n"+inertModelOutput(result))
+			if err := e.acknowledge(ctx, job, "Codex completed the request without changing files.\n\n"+inertModelOutput(result)); err != nil {
+				return fmt.Errorf("%w: %w", monitor.ErrPostCodexPublication, err)
+			}
+			return nil
 		}
 		err = checkout.CommitAndPush(ctx, branch, e.BotLogin, fmt.Sprintf("Fix #%d via %s", job.Number, e.BotLogin), func(sha string) error {
 			e.Store.Data.PendingFixes[job.ID] = sha
