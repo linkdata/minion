@@ -3,61 +3,57 @@
 package cleanup
 
 import (
-	"errors"
 	"os"
+	"path/filepath"
+	"strconv"
 	"syscall"
 )
 
 // Go 1.23's syscall package does not expose this Linux open flag.
 const oPath = 0x200000
 
-// RemoveAll restores owner access to directories before removing a completed job tree.
+// RemoveAll restores owner access if a completed job left locked directories.
 func RemoveAll(path string) error {
-	entry, err := os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) {
+	if err := os.RemoveAll(path); err == nil {
 		return nil
 	}
-	if err != nil {
-		return err
-	}
-	if entry.IsDir() {
-		if err := os.Chmod(path, 0700); err == nil {
-			if root, err := os.Open(path); err == nil {
-				restoreDirs(root)
-				_ = root.Close()
-			}
-		}
+	if parent, err := os.Open(filepath.Dir(path)); err == nil {
+		restoreDir(int(parent.Fd()), filepath.Base(path))
+		_ = parent.Close()
 	}
 	return os.RemoveAll(path)
 }
 
-// Use directory descriptors so nested paths can exceed PATH_MAX. Do not follow
-// symlinks into directories outside the job tree.
-func restoreDirs(dir *os.File) {
-	entries, err := dir.ReadDir(-1)
+// Use directory descriptors to reach paths beyond PATH_MAX. The O_PATH fd pins
+// the inode while chmod runs, so a replaced entry cannot redirect the chmod.
+func restoreDir(parent int, name string) {
+	fd, err := syscall.Openat(parent, name, oPath|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
 	if err != nil {
 		return
 	}
-	for _, entry := range entries {
-		fd, err := syscall.Openat(int(dir.Fd()), entry.Name(), oPath|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
-		if err != nil {
-			continue
-		}
-		var stat syscall.Stat_t
-		statErr := syscall.Fstat(fd, &stat)
+	var stat syscall.Stat_t
+	if err := syscall.Fstat(fd, &stat); err != nil || stat.Mode&syscall.S_IFMT != syscall.S_IFDIR {
 		_ = syscall.Close(fd)
-		if statErr != nil || stat.Mode&syscall.S_IFMT != syscall.S_IFDIR {
-			continue
+		return
+	}
+	if err := os.Chmod("/proc/self/fd/"+strconv.Itoa(fd), 0700); err != nil {
+		_ = syscall.Close(fd)
+		return
+	}
+	dirFD, err := syscall.Openat(fd, ".", syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_CLOEXEC, 0)
+	_ = syscall.Close(fd)
+	if err != nil {
+		return
+	}
+	dir := os.NewFile(uintptr(dirFD), name)
+	defer dir.Close()
+	for {
+		names, err := dir.Readdirnames(1024)
+		for _, name := range names {
+			restoreDir(int(dir.Fd()), name)
 		}
-		if err := syscall.Fchmodat(int(dir.Fd()), entry.Name(), 0700, 0); err != nil {
-			continue
-		}
-		fd, err = syscall.Openat(int(dir.Fd()), entry.Name(), syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
 		if err != nil {
-			continue
+			return
 		}
-		child := os.NewFile(uintptr(fd), entry.Name())
-		restoreDirs(child)
-		_ = child.Close()
 	}
 }

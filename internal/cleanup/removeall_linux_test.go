@@ -23,6 +23,7 @@ func TestRemoveAllDeepRestrictedTree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var lockedParent *os.File
 	for i := 0; i < 26; i++ {
 		name := strings.Repeat("d", 180)
 		if err := syscall.Mkdirat(int(dir.Fd()), name, 0700); err != nil {
@@ -34,10 +35,19 @@ func TestRemoveAllDeepRestrictedTree(t *testing.T) {
 		}
 		_ = dir.Close()
 		dir = os.NewFile(uintptr(fd), name)
+		if i == 22 {
+			copyFD, err := syscall.Dup(fd)
+			if err != nil {
+				t.Fatal(err)
+			}
+			lockedParent = os.NewFile(uintptr(copyFD), name)
+		}
 	}
 	t.Cleanup(func() {
 		_ = dir.Chmod(0700)
 		_ = dir.Close()
+		_ = lockedParent.Chmod(0700)
+		_ = lockedParent.Close()
 		_ = os.RemoveAll(root)
 	})
 	fd, err := syscall.Openat(int(dir.Fd()), "file", syscall.O_WRONLY|syscall.O_CREAT, 0600)
@@ -47,6 +57,12 @@ func TestRemoveAllDeepRestrictedTree(t *testing.T) {
 	_ = syscall.Close(fd)
 	if err := dir.Chmod(0000); err != nil {
 		t.Fatal(err)
+	}
+	if err := lockedParent.Chmod(0000); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(root); err == nil {
+		t.Skip("plain RemoveAll bypassed directory permissions")
 	}
 	if err := RemoveAll(root); err != nil {
 		t.Fatalf("RemoveAll() = %v", err)
