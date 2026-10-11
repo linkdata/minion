@@ -80,9 +80,22 @@ func TestAlreadyAcknowledgedRequiresOwnTrailingMarker(t *testing.T) {
 					_, _ = fmt.Fprint(w, `{}`)
 				case "/repos/o/r/issues/7/comments", "/repos/o/r/pulls/7/comments":
 					_, _ = fmt.Fprint(w, `[]`)
-				case "/repos/o/r/pulls/7/reviews":
-					_ = json.NewEncoder(w).Encode([]map[string]any{{"id": 1, "node_id": "review-node-1", "body": tt.body, "user": map[string]string{"login": tt.author}, "state": "COMMENTED"}})
 				case "/graphql":
+					var input struct {
+						Query string `json:"query"`
+					}
+					if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+						t.Error(err)
+						return
+					}
+					if strings.Contains(input.Query, "timelineItems") {
+						_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"repository": map[string]any{
+							"pullRequest": map[string]any{"timelineItems": map[string]any{
+								"nodes": []map[string]any{{"id": "review-node-1", "fullDatabaseId": "1", "body": tt.body,
+									"author": map[string]string{"login": tt.author}, "state": "COMMENTED", "submittedAt": "2026-10-09T08:00:00Z"}},
+								"pageInfo": map[string]any{"hasNextPage": false}}}}}})
+						return
+					}
 					provenanceCalls++
 					liveBody := tt.body
 					if tt.liveBody != "" {
@@ -194,8 +207,15 @@ func TestReviewEchoDoesNotSuppressAuditInMonitor(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(comments)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/pulls/7/comments":
 			_, _ = fmt.Fprint(w, `[]`)
-		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/pulls/7/reviews":
-			_ = json.NewEncoder(w).Encode(reviews)
+		case r.Method == http.MethodPost && r.URL.Path == "/graphql":
+			nodes := make([]map[string]any, 0, len(reviews))
+			for _, review := range reviews {
+				nodes = append(nodes, map[string]any{"id": review.NodeID, "fullDatabaseId": fmt.Sprint(review.ID),
+					"body": review.Body, "author": map[string]string{"login": review.User.Login}, "state": review.State,
+					"submittedAt": now})
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"repository": map[string]any{
+				"pullRequest": map[string]any{"timelineItems": map[string]any{"nodes": nodes, "pageInfo": map[string]any{"hasNextPage": false}}}}}})
 		case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/pulls/7/reviews":
 			var payload struct{ Body string }
 			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
