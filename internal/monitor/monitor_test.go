@@ -29,6 +29,7 @@ type fakeGitHub struct {
 	permissionErr     error
 	reactionErr       error
 	acceptErr         error
+	declineErr        error
 	beforeAccept      func()
 	accepted          []int64
 	declined          []int64
@@ -108,7 +109,7 @@ func (f *fakeGitHub) AcceptRepositoryInvitation(_ context.Context, id int64) err
 
 func (f *fakeGitHub) DeclineRepositoryInvitation(_ context.Context, id int64) error {
 	f.declined = append(f.declined, id)
-	return nil
+	return f.declineErr
 }
 
 func (f *fakeGitHub) ThreadItems(_ context.Context, repo, _ string, number int, since time.Time) ([]github.Item, error) {
@@ -615,7 +616,7 @@ func TestEditedCommentCannotUseOriginalAuthorAuthorization(t *testing.T) {
 
 func TestAcceptOnlyWhitelistedInvitations(t *testing.T) {
 	gh := &fakeGitHub{invitations: []github.Invitation{
-		{ID: 2, Repository: github.Repository{FullName: "other/project", Owner: github.User{Login: "other"}}, Invitee: github.User{Login: "linkdataminion"}, Inviter: github.User{Login: "example-owner"}, Permissions: "admin"},
+		{ID: 2, Repository: github.Repository{ID: 22, FullName: "other/project", Owner: github.User{Login: "other"}}, Invitee: github.User{Login: "linkdataminion"}, Inviter: github.User{Login: "example-owner"}, Permissions: "admin"},
 		{ID: 1, Repository: github.Repository{FullName: "example-owner/example-repo", Owner: github.User{Login: "example-owner"}}, Invitee: github.User{Login: "linkdataminion"}, Permissions: "write"},
 		{ID: 3, Repository: github.Repository{FullName: "example-owner/example-repo", Owner: github.User{Login: "example-owner"}}, Invitee: github.User{Login: "someone-else"}, Permissions: "write"},
 		{ID: 4, Repository: github.Repository{FullName: "example-owner/example-repo", Owner: github.User{Login: "example-owner"}}, Invitee: github.User{Login: "linkdataminion"}, Permissions: "write", Expired: true},
@@ -624,7 +625,9 @@ func TestAcceptOnlyWhitelistedInvitations(t *testing.T) {
 		{ID: 7, Repository: github.Repository{FullName: "example-owner/mismatch", Owner: github.User{Login: "other"}}, Invitee: github.User{Login: "linkdataminion"}, Permissions: "write"},
 		{ID: 8, Repository: github.Repository{FullName: "other/mismatch", Owner: github.User{Login: "example-owner"}}, Invitee: github.User{Login: "linkdataminion"}, Permissions: "write"},
 		{ID: 9, Repository: github.Repository{FullName: "example-owner/ownerless"}, Invitee: github.User{Login: "linkdataminion"}, Permissions: "write"},
-		{ID: 10, Repository: github.Repository{FullName: "example-owner/reclaimed", Owner: github.User{Login: "example-owner", ID: 99}}, Invitee: github.User{Login: "linkdataminion"}, Permissions: "write"},
+		{ID: 10, Repository: github.Repository{ID: 10, FullName: "example-owner/reclaimed", Owner: github.User{Login: "example-owner", ID: 99}}, Invitee: github.User{Login: "linkdataminion"}, Permissions: "write"},
+		{ID: 11, Repository: github.Repository{ID: 11, FullName: "renamed-owner/project", Owner: github.User{Login: "renamed-owner", ID: 2}}, Invitee: github.User{Login: "linkdataminion"}, Permissions: "write"},
+		{ID: 12, Repository: github.Repository{ID: 1, FullName: "renamed-repo/project", Owner: github.User{Login: "renamed-repo", ID: 99}}, Invitee: github.User{Login: "linkdataminion"}, Permissions: "write"},
 	}}
 	gh.beforeAccept = func() {
 		if len(gh.declined) != 0 {
@@ -651,7 +654,7 @@ func TestInvitationListingErrorKeepsPartialWorkAndPollsAfterLongCheck(t *testing
 	gh := &fakeGitHub{
 		invitations: []github.Invitation{
 			{ID: 1, Repository: github.Repository{FullName: "example-owner/example-repo", Owner: github.User{Login: "example-owner"}}, Permissions: "write"},
-			{ID: 2, Repository: github.Repository{FullName: "outsider/repo", Owner: github.User{Login: "outsider"}}, Permissions: "write"},
+			{ID: 2, Repository: github.Repository{ID: 22, FullName: "outsider/repo", Owner: github.User{Login: "outsider", ID: 4}}, Permissions: "write"},
 		},
 		inviteErr:  errors.New("later page failed"),
 		beforeList: func() { now = now.Add(time.Hour) },
@@ -666,6 +669,23 @@ func TestInvitationListingErrorKeepsPartialWorkAndPollsAfterLongCheck(t *testing
 	}
 	if gh.notificationCalls != 1 || !store.Data.NextInviteCheckAt.Equal(now.Add(15*time.Minute)) {
 		t.Fatalf("notification calls=%d, next invitation check=%v, now=%v", gh.notificationCalls, store.Data.NextInviteCheckAt, now)
+	}
+}
+
+func TestInvitationRateLimitStopsDeclines(t *testing.T) {
+	gh := &fakeGitHub{
+		invitations: []github.Invitation{
+			{ID: 1, Repository: github.Repository{ID: 21, FullName: "other/one", Owner: github.User{Login: "other", ID: 4}}, Permissions: "write"},
+			{ID: 2, Repository: github.Repository{ID: 22, FullName: "other/two", Owner: github.User{Login: "other", ID: 4}}, Permissions: "write"},
+		},
+		declineErr: &github.StatusError{StatusCode: http.StatusForbidden, Message: "secondary rate limit"},
+	}
+	m := &Monitor{Config: testConfig(), GitHub: gh}
+	if err := m.acceptWhitelistedInvitations(context.Background()); err == nil {
+		t.Fatal("expected rate-limit error")
+	}
+	if len(gh.declined) != 1 || gh.declined[0] != 1 {
+		t.Fatalf("declines continued after rate limit: %v", gh.declined)
 	}
 }
 
