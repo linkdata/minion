@@ -297,6 +297,25 @@ func TestCheckoutPullRequestDisablesRepositoryTransforms(t *testing.T) {
 	}
 }
 
+func TestNewBranchRejectsTrackedGitlink(t *testing.T) {
+	fixture := newFixture(t)
+	fixture.git(fixture.source, "update-index", "--add", "--cacheinfo", "160000,"+fixture.base+",sub")
+	fixture.git(fixture.source, "commit", "-m", "add gitlink")
+	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/heads/main")
+
+	checkout, err := cloneFromURL(context.Background(), t.TempDir(), fixture.remote, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer checkout.Close()
+	if err := checkout.NewBranch(context.Background(), "minion/fix-gitlink"); err == nil || !strings.Contains(err.Error(), "gitlink") {
+		t.Fatalf("NewBranch() error = %v, want gitlink refusal", err)
+	}
+	if got := fixture.git(checkout.Path(), "branch", "--list", "minion/fix-gitlink"); got != "" {
+		t.Fatalf("NewBranch() created branch despite gitlink: %q", got)
+	}
+}
+
 func TestNestedGitMetadataCannotRunFilter(t *testing.T) {
 	t.Setenv("GH_TOKEN", "DUMMY_CANARY")
 	t.Setenv("GITHUB_TOKEN", "DUMMY_CANARY")
@@ -322,7 +341,10 @@ func TestNestedGitMetadataCannotRunFilter(t *testing.T) {
 		t.Fatalf("clean gitlink HasChanges() = (%t, %v)", changed, err)
 	}
 	const branch = "minion/fix-nested-git"
-	if err := checkout.NewBranch(ctx, branch); err != nil {
+	// Bypass NewBranch's preflight to test the post-run metadata guard independently.
+	fixture.git(checkout.Path(), "switch", "--create", branch)
+	checkout.branch = branch
+	if err := checkout.recordConfig(); err != nil {
 		t.Fatal(err)
 	}
 	sub := filepath.Join(checkout.Path(), "sub")
