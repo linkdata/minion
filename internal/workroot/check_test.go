@@ -37,6 +37,13 @@ func TestExistingStateDirResolvesMissingChildrenAndSymlinks(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, "new")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("preflight created state directory: %v", err)
 	}
+	dangling := filepath.Join(root, "dangling")
+	if err := os.Symlink(filepath.Join(root, "missing"), dangling); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := existingStateDir(filepath.Join(dangling, "nested")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("dangling state directory symlink was accepted: %v", err)
+	}
 }
 
 func TestDeviceAndCapacityRequirements(t *testing.T) {

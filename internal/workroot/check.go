@@ -63,9 +63,9 @@ func Check(workRoot, statePath string, maxBytes int64) error {
 // Resolve the nearest existing ancestor to find the filesystem it will use.
 func existingStateDir(dir string) (string, error) {
 	for {
-		resolved, err := filepath.EvalSymlinks(dir)
+		_, err := os.Lstat(dir)
 		if err == nil {
-			return resolved, nil
+			return filepath.EvalSymlinks(dir)
 		}
 		if !errors.Is(err, os.ErrNotExist) {
 			return "", err
