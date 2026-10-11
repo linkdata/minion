@@ -18,6 +18,7 @@ import (
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/state"
+	"github.com/linkdata/minion/internal/workroot"
 )
 
 type GitHub interface {
@@ -367,6 +368,9 @@ func (m *Monitor) deferNotification(store *state.Store, key string, notification
 }
 
 func infrastructureFailure(err error) bool {
+	if errors.Is(err, workroot.ErrUnsafe) {
+		return true
+	}
 	if errors.Is(err, context.Canceled) {
 		return true
 	}

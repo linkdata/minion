@@ -35,15 +35,16 @@ var modelLineBreaks = strings.NewReplacer(
 )
 
 type Executor struct {
-	GitHub   *github.Client
-	BotLogin string
-	Store    *state.Store
-	Usage    *usage.Store
-	WorkRoot string
-	Timeout  time.Duration
-	Codex    config.CodexConfig
-	Logger   *log.Logger
-	RunCodex func(context.Context, string, string, bool, string) (codexcli.Result, error)
+	GitHub        *github.Client
+	BotLogin      string
+	Store         *state.Store
+	Usage         *usage.Store
+	WorkRoot      string
+	CheckWorkRoot func() error
+	Timeout       time.Duration
+	Codex         config.CodexConfig
+	Logger        *log.Logger
+	RunCodex      func(context.Context, string, string, bool, string) (codexcli.Result, error)
 }
 
 func (e *Executor) logf(format string, args ...any) {
@@ -77,6 +78,11 @@ func (e *Executor) runCodex(ctx context.Context, dir, prompt string, writable bo
 }
 
 func (e *Executor) Execute(ctx context.Context, job monitor.Job) (resultErr error) {
+	if e.CheckWorkRoot != nil {
+		if err := e.CheckWorkRoot(); err != nil {
+			return err
+		}
+	}
 	if e.GitHub == nil {
 		return errors.New("GitHub client is missing")
 	}

@@ -10,6 +10,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/linkdata/minion/internal/workroot"
 )
 
 var (
@@ -46,6 +48,7 @@ type Config struct {
 	JobTimeoutMinutes   int          `json:"job_timeout_minutes,omitempty"`
 	StatePath           string       `json:"state_path,omitempty"`
 	WorkRoot            string       `json:"work_root,omitempty"`
+	WorkRootMaxBytes    int64        `json:"work_root_max_bytes,omitempty"`
 	StartAt             string       `json:"start_at,omitempty"`
 	InvitationOwners    []string     `json:"invitation_owners,omitempty"`
 	Repositories        []Repository `json:"repositories"`
@@ -151,6 +154,12 @@ func (c *Config) Validate(configDir string) error {
 	}
 	if c.WorkRoot == "" {
 		c.WorkRoot = "var/work"
+	}
+	if c.WorkRootMaxBytes == 0 {
+		c.WorkRootMaxBytes = workroot.DefaultMaxBytes
+	}
+	if c.WorkRootMaxBytes < 0 {
+		return fmt.Errorf("work_root_max_bytes must be positive")
 	}
 	if !filepath.IsAbs(c.StatePath) {
 		c.StatePath = filepath.Join(configDir, c.StatePath)
