@@ -274,7 +274,7 @@ func (c *Checkout) NewBranch(ctx context.Context, name string) error {
 	if err := c.assertHead(ctx); err != nil {
 		return err
 	}
-	entries, err := runGit(ctx, c.path, "ls-files", "--stage", "-z")
+	entries, err := runGit(ctx, c.path, "ls-tree", "-r", "-z", "HEAD")
 	if err != nil {
 		return err
 	}
