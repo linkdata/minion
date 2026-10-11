@@ -198,10 +198,11 @@ func (e *Executor) fix(ctx context.Context, job monitor.Job) error {
 	if err != nil {
 		return err
 	}
-	repo, forkRepo, err := e.fixFork(ctx, job.Repository.Name)
+	repo, fork, err := e.fixFork(ctx, job.Repository.Name)
 	if err != nil {
 		return err
 	}
+	forkRepo := fork.FullName
 	if len(job.ID) < 12 || e.Store == nil {
 		return errors.New("fix job has no durable state or valid ID")
 	}
@@ -269,7 +270,7 @@ Request comment (%s):
 		if err != nil {
 			return err
 		}
-		if currentRepo.ID != repo.ID || currentRepo.DefaultBranch != repo.DefaultBranch || currentRepo.Private != repo.Private || currentRepo.Visibility != repo.Visibility || !strings.EqualFold(currentFork, forkRepo) {
+		if currentRepo.ID != repo.ID || currentRepo.DefaultBranch != repo.DefaultBranch || currentRepo.Private != repo.Private || currentRepo.Visibility != repo.Visibility || currentFork.ID != fork.ID || !strings.EqualFold(currentFork.FullName, forkRepo) {
 			return errors.New("repository or fork changed during fix; refusing to push")
 		}
 		if err := checkout.SetPushRepository(forkRepo); err != nil {
@@ -302,41 +303,66 @@ Request comment (%s):
 	return e.acknowledge(ctx, job, fmt.Sprintf("Fix branch `%s` is ready in `%s` at `%s`. @%s, [open the pull request yourself](%s) after reviewing the diff. Repository review rules, when enabled, can then evaluate your authorship.", branch, forkRepo, expected, job.Source.Author.Login, compare))
 }
 
-func (e *Executor) fixFork(ctx context.Context, baseName string) (github.Repository, string, error) {
+func (e *Executor) fixFork(ctx context.Context, baseName string) (github.Repository, github.Repository, error) {
 	base, err := e.GitHub.Repository(ctx, baseName)
 	if err != nil {
-		return github.Repository{}, "", err
+		return github.Repository{}, github.Repository{}, err
 	}
 	if base.Archived || base.DefaultBranch == "" {
-		return github.Repository{}, "", fmt.Errorf("repository %s is archived or has no default branch", base.FullName)
+		return github.Repository{}, github.Repository{}, fmt.Errorf("repository %s is archived or has no default branch", base.FullName)
 	}
 	parts := strings.Split(base.FullName, "/")
 	if len(parts) != 2 || strings.EqualFold(parts[0], e.BotLogin) {
-		return github.Repository{}, "", errors.New("fix requires a separate bot-owned fork")
+		return github.Repository{}, github.Repository{}, errors.New("fix requires a separate bot-owned fork")
 	}
 	forkName := e.BotLogin + "/" + parts[1]
 	fork, err := e.GitHub.Repository(ctx, forkName)
 	if err != nil {
-		return github.Repository{}, "", fmt.Errorf("bot-owned fork %s is unavailable: %w", forkName, err)
+		return github.Repository{}, github.Repository{}, fmt.Errorf("bot-owned fork %s is unavailable: %w", forkName, err)
 	}
-	if !fork.Fork || fork.Parent == nil || base.ID <= 0 || fork.Parent.ID != base.ID ||
+	root := base
+	if base.Fork {
+		if base.Source == nil || base.Source.ID <= 0 || base.Source.FullName == "" {
+			return github.Repository{}, github.Repository{}, fmt.Errorf("root repository for %s is unavailable", base.FullName)
+		}
+		root = *base.Source
+		currentRoot, err := e.GitHub.Repository(ctx, root.FullName)
+		if err != nil {
+			return github.Repository{}, github.Repository{}, fmt.Errorf("verify root repository for %s: %w", base.FullName, err)
+		}
+		if currentRoot.ID != root.ID || currentRoot.Fork {
+			return github.Repository{}, github.Repository{}, fmt.Errorf("root repository for %s changed", base.FullName)
+		}
+		root = currentRoot
+	}
+	if !fork.Fork || !strings.EqualFold(fork.FullName, forkName) || fork.Parent == nil || base.ID <= 0 || fork.Parent.ID != base.ID ||
+		fork.ID <= 0 || fork.Source == nil || fork.Source.ID != root.ID || !strings.EqualFold(fork.Source.FullName, root.FullName) ||
 		!strings.EqualFold(fork.Parent.FullName, base.FullName) || base.Visibility == "" || fork.Visibility != base.Visibility ||
 		fork.Private != base.Private || fork.Archived {
-		return github.Repository{}, "", fmt.Errorf("%s is not an active fork of %s with matching visibility", forkName, base.FullName)
+		return github.Repository{}, github.Repository{}, fmt.Errorf("%s is not an active fork of %s with matching visibility", forkName, base.FullName)
 	}
 	enabled, err := e.GitHub.ActionsEnabled(ctx, forkName)
 	if err != nil {
-		return github.Repository{}, "", fmt.Errorf("inspect bot fork Actions policy: %w", err)
+		return github.Repository{}, github.Repository{}, fmt.Errorf("inspect bot fork Actions policy: %w", err)
 	}
 	if enabled {
-		return github.Repository{}, "", fmt.Errorf("GitHub Actions must be disabled on bot fork %s", forkName)
+		return github.Repository{}, github.Repository{}, fmt.Errorf("GitHub Actions must be disabled on bot fork %s", forkName)
 	}
 	if base.Private {
 		if err := e.GitHub.SafePrivateForkWorkflows(ctx, base.FullName); err != nil {
-			return github.Repository{}, "", fmt.Errorf("unsafe private fork PR workflows for %s: %w", base.FullName, err)
+			return github.Repository{}, github.Repository{}, fmt.Errorf("unsafe private fork PR workflows for %s: %w", base.FullName, err)
 		}
 	}
-	return base, forkName, nil
+	names := []string{base.FullName, forkName}
+	if !strings.EqualFold(root.FullName, base.FullName) {
+		names = append([]string{root.FullName}, names...)
+	}
+	for _, name := range names {
+		if err := e.GitHub.SafeFixPushRules(ctx, name); err != nil {
+			return github.Repository{}, github.Repository{}, fmt.Errorf("inspect push rulesets for %s: %w", name, err)
+		}
+	}
+	return base, fork, nil
 }
 
 // CheckFixFork verifies the publication destination during operator preflight.

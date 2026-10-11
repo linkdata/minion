@@ -620,6 +620,107 @@ func TestProtectedReleaseTagsRequiresVisibleCompleteRuleset(t *testing.T) {
 	}
 }
 
+func TestSafeFixPushRules(t *testing.T) {
+	good := `{"id":42,"target":"push","enforcement":"active","bypass_actors":[],"rules":[{"type":"file_path_restriction"}]}`
+	for _, tt := range []struct {
+		name, list, detail, want string
+		status                   int
+	}{
+		{name: "no rulesets", list: `[]`},
+		{name: "active rule without bypass", list: `[{"id":42}]`, detail: good},
+		{name: "disabled rule with bypass", list: `[{"id":42}]`, detail: strings.Replace(good, `"enforcement":"active","bypass_actors":[]`, `"enforcement":"disabled","bypass_actors":[{"actor_type":"RepositoryRole","actor_id":5}]`, 1)},
+		{name: "bypass actor", list: `[{"id":42}]`, detail: strings.Replace(good, `"bypass_actors":[]`, `"bypass_actors":[{"actor_type":"RepositoryRole","actor_id":5}]`, 1), want: "can be bypassed"},
+		{name: "hidden bypass list", list: `[{"id":42}]`, detail: strings.Replace(good, `"bypass_actors":[],`, "", 1), want: "unreadable bypass list"},
+		{name: "null bypass list", list: `[{"id":42}]`, detail: strings.Replace(good, `"bypass_actors":[]`, `"bypass_actors":null`, 1), want: "unreadable bypass list"},
+		{name: "wrong target", list: `[{"id":42}]`, detail: strings.Replace(good, `"target":"push"`, `"target":"branch"`, 1), want: "mismatched"},
+		{name: "unknown enforcement", list: `[{"id":42}]`, detail: strings.Replace(good, `"enforcement":"active"`, `"enforcement":"unknown"`, 1), want: "unknown enforcement"},
+		{name: "null list", list: `null`, want: "incomplete"},
+		{name: "plan rejects rulesets", status: http.StatusForbidden, want: "403"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/repos/o/r/rulesets":
+					if r.URL.Query().Get("targets") != "push" || r.URL.Query().Get("includes_parents") != "true" || r.URL.Query().Get("per_page") != "100" || r.URL.Query().Get("page") != "1" {
+						t.Errorf("wrong push ruleset query: %s", r.URL.RawQuery)
+					}
+					if tt.status != 0 {
+						w.WriteHeader(tt.status)
+						_, _ = fmt.Fprint(w, `{"message":"rulesets unavailable"}`)
+						return
+					}
+					_, _ = fmt.Fprint(w, tt.list)
+				case "/repos/o/r/rulesets/42":
+					if r.URL.Query().Get("includes_parents") != "true" {
+						t.Error("parent rulesets omitted")
+					}
+					_, _ = fmt.Fprint(w, tt.detail)
+				default:
+					t.Errorf("unexpected request: %s", r.URL)
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+			err := testClient(server).SafeFixPushRules(context.Background(), "o/r")
+			if tt.want == "" && err != nil || tt.want != "" && (err == nil || !strings.Contains(err.Error(), tt.want)) {
+				t.Fatalf("SafeFixPushRules() = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestSafeFixPushRulesRequiresCompletePagination(t *testing.T) {
+	for _, tt := range []struct {
+		name, link string
+		full       bool
+		badSecond  bool
+		want       string
+	}{
+		{name: "two pages", link: `<https://api.github.test/repos/o/r/rulesets?page=2>; rel="next"`},
+		{name: "unsafe second page", link: `<https://api.github.test/repos/o/r/rulesets?page=2>; rel="next"`, badSecond: true, want: "can be bypassed"},
+		{name: "missing continuation", full: true, want: "pagination is incomplete"},
+		{name: "empty continuation", link: `<https://api.github.test/repos/o/r/rulesets?page=2>; rel="next"`, want: "empty page"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/repos/o/r/rulesets":
+					if r.URL.Query().Get("page") == "1" {
+						w.Header().Set("Link", tt.link)
+						if tt.full {
+							_, _ = fmt.Fprintf(w, "[%s]", strings.TrimSuffix(strings.Repeat(`{"id":42},`, 100), ","))
+						} else {
+							_, _ = fmt.Fprint(w, `[{"id":42}]`)
+						}
+					} else if tt.want == "empty page" {
+						_, _ = fmt.Fprint(w, `[]`)
+					} else {
+						_, _ = fmt.Fprint(w, `[{"id":43}]`)
+					}
+				case "/repos/o/r/rulesets/42", "/repos/o/r/rulesets/43":
+					id := 42
+					if strings.HasSuffix(r.URL.Path, "/43") {
+						id = 43
+					}
+					if id == 43 && tt.badSecond {
+						_, _ = fmt.Fprintf(w, `{"id":%d,"target":"push","enforcement":"active","bypass_actors":[{"actor_type":"RepositoryRole","actor_id":5}]}`, id)
+					} else {
+						_, _ = fmt.Fprintf(w, `{"id":%d,"target":"push","enforcement":"active","bypass_actors":[]}`, id)
+					}
+				default:
+					t.Errorf("unexpected request: %s", r.URL)
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+			err := testClient(server).SafeFixPushRules(context.Background(), "o/r")
+			if tt.want == "" && err != nil || tt.want != "" && (err == nil || !strings.Contains(err.Error(), tt.want)) {
+				t.Fatalf("SafeFixPushRules() = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
 func TestProtectedReleaseTagsChecksCreationRulesAfterIntegrityRule(t *testing.T) {
 	for _, tt := range []struct {
 		name     string

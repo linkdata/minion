@@ -54,6 +54,7 @@ type Repository struct {
 	Archived      bool        `json:"archived"`
 	Fork          bool        `json:"fork"`
 	Parent        *Repository `json:"parent"`
+	Source        *Repository `json:"source"`
 	Owner         User        `json:"owner"`
 }
 
@@ -624,6 +625,66 @@ func (c *Client) ProtectedReleaseTags(ctx context.Context, repo string) (bool, e
 		}
 	}
 	return false, errors.New("too many GitHub ruleset pages")
+}
+
+// SafeFixPushRules ensures a bot push cannot bypass restrictions inherited by
+// the destination fork that would apply to another fork in the same network.
+func (c *Client) SafeFixPushRules(ctx context.Context, repo string) error {
+	path, err := repoPath(repo)
+	if err != nil {
+		return err
+	}
+	q := url.Values{"per_page": {"100"}, "targets": {"push"}, "includes_parents": {"true"}}
+	for page := 1; page <= 1000; page++ {
+		q.Set("page", strconv.Itoa(page))
+		var summaries []struct {
+			ID int64 `json:"id"`
+		}
+		header, _, err := c.request(ctx, http.MethodGet, withQuery(path+"/rulesets", q), nil, &summaries, nil, http.StatusOK)
+		if err != nil {
+			return err
+		}
+		if summaries == nil {
+			return errors.New("GitHub push ruleset list is incomplete")
+		}
+		next := hasNextPage(header.Get("Link"))
+		if len(summaries) == 0 && (page > 1 || next) {
+			return errors.New("GitHub push ruleset pagination returned an empty page before the end")
+		}
+		for _, summary := range summaries {
+			if summary.ID <= 0 {
+				return errors.New("GitHub returned a push ruleset without a valid ID")
+			}
+			var detail repositoryRuleset
+			_, _, err := c.request(ctx, http.MethodGet, path+"/rulesets/"+strconv.FormatInt(summary.ID, 10)+"?includes_parents=true", nil, &detail, nil, http.StatusOK)
+			if err != nil {
+				return err
+			}
+			if detail.ID != summary.ID || detail.Target != "push" {
+				return errors.New("GitHub returned mismatched push ruleset details")
+			}
+			switch detail.Enforcement {
+			case "disabled", "evaluate":
+				continue
+			case "active":
+				if detail.BypassActors == nil {
+					return fmt.Errorf("active push ruleset %d has an unreadable bypass list", summary.ID)
+				}
+				if len(*detail.BypassActors) != 0 {
+					return fmt.Errorf("active push ruleset %d can be bypassed", summary.ID)
+				}
+			default:
+				return fmt.Errorf("push ruleset %d has unknown enforcement %q", summary.ID, detail.Enforcement)
+			}
+		}
+		if !next {
+			if len(summaries) >= 100 {
+				return errors.New("GitHub push ruleset pagination is incomplete")
+			}
+			return nil
+		}
+	}
+	return errors.New("too many GitHub push ruleset pages")
 }
 
 func containsString(values []string, want string) bool {
