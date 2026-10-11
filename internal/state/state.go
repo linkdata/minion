@@ -15,6 +15,7 @@ var ErrLocked = errors.New("another minion process holds the state lock")
 
 type Data struct {
 	Cursor               time.Time                      `json:"cursor"`
+	RepositoryCursors    map[string]time.Time           `json:"repository_cursors,omitempty"`
 	NextPollAt           time.Time                      `json:"next_poll_at,omitempty"`
 	NextInviteCheckAt    time.Time                      `json:"next_invite_check_at,omitempty"`
 	Processed            map[string]time.Time           `json:"processed"`
@@ -24,7 +25,7 @@ type Data struct {
 	PendingReleases      map[string]PendingRelease      `json:"pending_releases,omitempty"`
 }
 
-// PendingNotification retains a failed thread after the global cursor advances.
+// PendingNotification retains a failed thread after its repository cursor advances.
 type PendingNotification struct {
 	Repository  string    `json:"repository"`
 	SubjectType string    `json:"subject_type"`
@@ -72,7 +73,7 @@ func Open(path string, initialCursor time.Time) (*Store, error) {
 	store := &Store{path: path, lock: lock}
 	f, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
-		store.Data = Data{Cursor: initialCursor.UTC(), Processed: map[string]time.Time{}, JobFailures: map[string]JobFailure{}, PendingNotifications: map[string]PendingNotification{}, PendingFixes: map[string]string{}, PendingReleases: map[string]PendingRelease{}}
+		store.Data = Data{Cursor: initialCursor.UTC(), RepositoryCursors: map[string]time.Time{}, Processed: map[string]time.Time{}, JobFailures: map[string]JobFailure{}, PendingNotifications: map[string]PendingNotification{}, PendingFixes: map[string]string{}, PendingReleases: map[string]PendingRelease{}}
 		if err := store.Save(); err != nil {
 			return nil, errors.Join(err, store.Close())
 		}
@@ -101,6 +102,9 @@ func Open(path string, initialCursor time.Time) (*Store, error) {
 	}
 	if store.Data.Processed == nil {
 		store.Data.Processed = map[string]time.Time{}
+	}
+	if store.Data.RepositoryCursors == nil {
+		store.Data.RepositoryCursors = map[string]time.Time{}
 	}
 	if store.Data.JobFailures == nil {
 		store.Data.JobFailures = map[string]JobFailure{}

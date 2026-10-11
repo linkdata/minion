@@ -160,13 +160,16 @@ func TestCurrentIssueContentUsesRenderedTextAndEditTime(t *testing.T) {
 	}
 }
 
-func TestListNotificationsPaginatesAndRepeatsAfterFailedAction(t *testing.T) {
+func TestListRepositoryNotificationsPaginatesAndRepeatsAfterFailedAction(t *testing.T) {
 	var calls []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer test-token" {
 			t.Errorf("authorization header missing")
 		}
 		calls = append(calls, r.URL.RawQuery)
+		if r.URL.Path != "/repos/example-owner/example-repo/notifications" || r.URL.Query().Get("per_page") != "100" {
+			t.Errorf("notification request must be scoped to repository: %s", r.URL)
+		}
 		if r.URL.Query().Get("all") != "true" || r.URL.Query().Get("participating") != "true" {
 			t.Errorf("notification filters missing: %s", r.URL.RawQuery)
 		}
@@ -191,14 +194,14 @@ func TestListNotificationsPaginatesAndRepeatsAfterFailedAction(t *testing.T) {
 	defer server.Close()
 	c := testClient(server)
 	since := time.Date(2026, 10, 9, 7, 0, 0, 500_000_000, time.UTC)
-	rows, interval, err := c.ListNotifications(context.Background(), since)
+	rows, interval, err := c.ListRepositoryNotifications(context.Background(), "example-owner/example-repo", since)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if interval != 90*time.Second || len(rows) != 2 || rows[0].ID != "first" || rows[1].ID != "second" {
 		t.Fatalf("unexpected first response: rows=%v interval=%s", rows, interval)
 	}
-	rows, interval, err = c.ListNotifications(context.Background(), since)
+	rows, interval, err = c.ListRepositoryNotifications(context.Background(), "example-owner/example-repo", since)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,6 +210,20 @@ func TestListNotificationsPaginatesAndRepeatsAfterFailedAction(t *testing.T) {
 	}
 	if len(calls) != 4 {
 		t.Fatalf("expected two pages on each poll, got %d calls", len(calls))
+	}
+}
+
+func TestListRepositoryNotificationsFailsClosedAfterPageLimit(t *testing.T) {
+	pages := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pages++
+		w.Header().Set("Link", `<https://api.github.com/repos/o/r/notifications?page=21>; rel="next"`)
+		_, _ = fmt.Fprint(w, `[{"id":"repeat"}]`)
+	}))
+	defer server.Close()
+	rows, _, err := testClient(server).ListRepositoryNotifications(context.Background(), "o/r", time.Now())
+	if err == nil || !strings.Contains(err.Error(), "o/r") || rows != nil || pages != 20 {
+		t.Fatalf("page limit did not preserve cursor window: rows=%v pages=%d err=%v", rows, pages, err)
 	}
 }
 

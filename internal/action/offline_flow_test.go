@@ -62,7 +62,7 @@ func TestOfflineReviewPollRecoversAfterPublication(t *testing.T) {
 			return
 		}
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/notifications":
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/notifications":
 			since, err := time.Parse(time.RFC3339, r.URL.Query().Get("since"))
 			if err != nil {
 				t.Errorf("notification since: %v", err)

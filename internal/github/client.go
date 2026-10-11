@@ -377,12 +377,16 @@ func pollInterval(header http.Header) time.Duration {
 	return time.Duration(seconds) * time.Second
 }
 
-// ListNotifications includes read notifications, so another inbox client
-// marking a thread read does not remove it from the bot's scan. It returns the
-// server's minimum poll interval. The durable cursor makes conditional requests
-// unsafe: a later action may fail and need the same notification again.
-func (c *Client) ListNotifications(ctx context.Context, since time.Time) ([]Notification, time.Duration, error) {
-	query := url.Values{"all": {"true"}, "participating": {"true"}, "per_page": {"50"}}
+// ListRepositoryNotifications includes read notifications, so another inbox
+// client marking a thread read does not remove it from the bot's scan. It returns
+// the server's minimum poll interval. A failed page leaves the repository cursor
+// unchanged, allowing the whole window to be retried without losing commands.
+func (c *Client) ListRepositoryNotifications(ctx context.Context, repo string, since time.Time) ([]Notification, time.Duration, error) {
+	path, err := repoPath(repo)
+	if err != nil {
+		return nil, 0, err
+	}
+	query := url.Values{"all": {"true"}, "participating": {"true"}, "per_page": {"100"}}
 	if !since.IsZero() {
 		query.Set("since", since.Add(-time.Second).UTC().Format(time.RFC3339))
 	}
@@ -390,12 +394,12 @@ func (c *Client) ListNotifications(ctx context.Context, since time.Time) ([]Noti
 	var all []Notification
 	var interval = time.Minute
 	for page := 1; ; page++ {
-		if page > 1000 {
-			return nil, interval, errors.New("too many GitHub notification pages")
+		if page > 20 {
+			return nil, interval, fmt.Errorf("too many GitHub notification pages for %s", repo)
 		}
 		query.Set("page", strconv.Itoa(page))
 		var batch []Notification
-		header, _, err := c.request(ctx, http.MethodGet, withQuery("/notifications", query), nil, &batch, nil, http.StatusOK)
+		header, _, err := c.request(ctx, http.MethodGet, withQuery(path+"/notifications", query), nil, &batch, nil, http.StatusOK)
 		if err != nil {
 			return nil, interval, err
 		}

@@ -165,10 +165,10 @@ func checkCodexCLI(ctx context.Context) error {
 
 func checkRepositories(ctx context.Context, client *github.Client, cfg config.Config, logger *log.Logger) error {
 	var problems []error
-	if _, _, err := client.ListNotifications(ctx, time.Now().UTC()); err != nil {
-		problems = append(problems, fmt.Errorf("cannot read account notifications: %w", err))
-	}
 	for _, repo := range cfg.Repositories {
+		if _, _, err := client.ListRepositoryNotifications(ctx, repo.Name, time.Now().UTC()); err != nil {
+			problems = append(problems, fmt.Errorf("%s: cannot read repository notifications: %w", repo.Name, err))
+		}
 		details, err := client.Repository(ctx, repo.Name)
 		if err != nil {
 			problems = append(problems, fmt.Errorf("%s: %w", repo.Name, err))

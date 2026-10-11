@@ -21,7 +21,7 @@ import (
 )
 
 type GitHub interface {
-	ListNotifications(context.Context, time.Time) ([]github.Notification, time.Duration, error)
+	ListRepositoryNotifications(context.Context, string, time.Time) ([]github.Notification, time.Duration, error)
 	ListRepositoryInvitations(context.Context) ([]github.Invitation, error)
 	AcceptRepositoryInvitation(context.Context, int64) error
 	ThreadItems(context.Context, string, string, int, time.Time) ([]github.Item, error)
@@ -72,10 +72,9 @@ func (m *Monitor) logf(format string, args ...any) {
 	}
 }
 
-// RunOnce polls the account's notifications, inspects new content in the
-// whitelisted repositories, and persists each completed command before moving
-// the cursor. Failed threads are persisted for later retries without holding
-// back unrelated notifications.
+// RunOnce polls each whitelisted repository's notifications and persists each
+// completed command before moving that repository's cursor. Failed threads are
+// persisted for later retries without holding back unrelated notifications.
 func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, error) {
 	now := time.Now
 	if m.Now != nil {
@@ -105,22 +104,17 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 	}
 	next := started.Add(minInterval)
 	store.Data.NextPollAt = next
-	if err := store.Save(); err != nil {
-		return next, err
+	if store.Data.RepositoryCursors == nil {
+		store.Data.RepositoryCursors = make(map[string]time.Time)
 	}
-
-	since := store.Data.Cursor
-	notifications, githubInterval, err := m.GitHub.ListNotifications(ctx, since)
-	if githubInterval > minInterval {
-		minInterval = githubInterval
-		next = started.Add(minInterval)
-		store.Data.NextPollAt = next
-		if saveErr := store.Save(); saveErr != nil {
-			return next, saveErr
+	for _, repo := range m.Config.Repositories {
+		if _, ok := store.Data.RepositoryCursors[repo.Name]; !ok {
+			// Migrate the old account cursor before any repository poll can fail.
+			store.Data.RepositoryCursors[repo.Name] = store.Data.Cursor
 		}
 	}
-	if err != nil {
-		return next, fmt.Errorf("list notifications: %w", err)
+	if err := store.Save(); err != nil {
+		return next, err
 	}
 
 	type scan struct {
@@ -129,21 +123,40 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		key          string
 	}
 	var scans []scan
-	seen := make(map[string]bool, len(notifications))
-	for _, notification := range notifications {
-		key := notificationKey(notification)
-		if seen[key] {
+	seen := make(map[string]bool)
+	var failures []error
+	var polled []string
+	for _, repo := range m.Config.Repositories {
+		since := store.Data.RepositoryCursors[repo.Name]
+		notifications, githubInterval, err := m.GitHub.ListRepositoryNotifications(ctx, repo.Name, since)
+		if githubInterval > minInterval {
+			minInterval = githubInterval
+			next = started.Add(minInterval)
+			store.Data.NextPollAt = next
+			if err := store.Save(); err != nil {
+				return next, err
+			}
+		}
+		if err != nil {
+			failures = append(failures, fmt.Errorf("list %s notifications: %w", repo.Name, err))
 			continue
 		}
-		seen[key] = true
-		scanSince := since
-		if pending, ok := store.Data.PendingNotifications[key]; ok {
-			if started.Before(pending.RetryAt) && !notification.UpdatedAt.After(pending.UpdatedAt) {
+		polled = append(polled, repo.Name)
+		for _, notification := range notifications {
+			key := notificationKey(notification)
+			if seen[key] {
 				continue
 			}
-			scanSince = pending.Since
+			seen[key] = true
+			scanSince := since
+			if pending, ok := store.Data.PendingNotifications[key]; ok {
+				if started.Before(pending.RetryAt) && !notification.UpdatedAt.After(pending.UpdatedAt) {
+					continue
+				}
+				scanSince = pending.Since
+			}
+			scans = append(scans, scan{notification, scanSince, key})
 		}
-		scans = append(scans, scan{notification, scanSince, key})
 	}
 	for key, pending := range store.Data.PendingNotifications {
 		if seen[key] || started.Before(pending.RetryAt) {
@@ -162,7 +175,6 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		}
 		return scans[i].notification.UpdatedAt.Before(scans[j].notification.UpdatedAt)
 	})
-	var failures []error
 	for _, entry := range scans {
 		notification := entry.notification
 		repo, ok := m.Config.Repository(notification.Repository.FullName)
@@ -325,6 +337,11 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 	// GitHub timestamps have second precision. Keep a two-second overlap so an
 	// update racing with this poll cannot fall on the exclusive since boundary.
 	newCursor := started.Add(-2 * time.Second)
+	for _, repo := range polled {
+		if newCursor.After(store.Data.RepositoryCursors[repo]) {
+			store.Data.RepositoryCursors[repo] = newCursor
+		}
+	}
 	if newCursor.After(store.Data.Cursor) {
 		store.Data.Cursor = newCursor
 	}
