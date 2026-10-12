@@ -262,7 +262,7 @@ func validateAuditOutput(ctx context.Context, outputDir, skill, repo, target, he
 	return string(reportBytes), nil
 }
 
-func readAuditArtifact(path string, limit int64, allowEmpty bool) ([]byte, error) {
+func readAuditArtifact(path string, limit int64, allowEmpty bool) (data []byte, err error) {
 	entry, err := os.Lstat(path)
 	if err != nil {
 		return nil, err
@@ -274,12 +274,17 @@ func readAuditArtifact(path string, limit int64, allowEmpty bool) ([]byte, error
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() {
+		if closeErr := f.Close(); closeErr != nil {
+			data = nil
+			err = errors.Join(err, closeErr)
+		}
+	}()
 	opened, err := f.Stat()
 	if err != nil || !opened.Mode().IsRegular() || !os.SameFile(entry, opened) {
 		return nil, errors.New("audit artifact changed before reading")
 	}
-	data, err := io.ReadAll(io.LimitReader(f, limit+1))
+	data, err = io.ReadAll(io.LimitReader(f, limit+1))
 	if err != nil {
 		return nil, err
 	}

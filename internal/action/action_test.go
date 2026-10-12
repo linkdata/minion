@@ -231,7 +231,11 @@ func TestReviewEchoDoesNotSuppressAuditInMonitor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() {
+		if err := store.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
 	m := monitor.Monitor{Config: config.Config{BotLogin: "linkdataminion", PollIntervalSeconds: 60,
 		Repositories: []config.Repository{{Name: "o/r", Actions: []string{"review", "audit"}, AllowedActors: []string{"writer"}}}},
 		GitHub: monitorGitHub, Executor: executor, Now: func() time.Time { return now.Add(time.Minute) }}
@@ -442,7 +446,11 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() {
+		if err := store.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
 	var commentBody string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
