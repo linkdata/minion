@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"io/fs"
 	"os"
@@ -201,13 +202,16 @@ func walkUsageFiles(ctx context.Context, root string, visit func(string, fs.DirE
 	return nil
 }
 
-func readUsageDir(ctx context.Context, path string, visit func(string, fs.DirEntry) error) ([]string, error) {
+func readUsageDir(ctx context.Context, path string, visit func(string, fs.DirEntry) error) (children []string, err error) {
 	dir, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
-	defer dir.Close()
-	var children []string
+	defer func() {
+		if closeErr := dir.Close(); closeErr != nil {
+			err = errors.Join(err, closeErr)
+		}
+	}()
 	for {
 		entries, err := dir.ReadDir(256)
 		for _, entry := range entries {

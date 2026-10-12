@@ -168,7 +168,7 @@ func TestReviewEchoDoesNotSuppressAuditInMonitor(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/pulls/7":
 			_, _ = fmt.Fprintf(w, `{"title":"PR","base":{"ref":"main"},"head":{"sha":%q}}`, head)
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/o/r/git/trees/"):
-			_, _ = fmt.Fprintf(w, `{"sha":%q,"truncated":false,"tree":[{"path":"README.md","type":"blob","size":8}]}`, strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/"))
+			_, _ = fmt.Fprintf(w, `{"sha":%q,"truncated":false,"tree":[{"path":"README.md","type":"blob","mode":"100644","size":8}]}`, strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/"))
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7/comments":
 			_ = json.NewEncoder(w).Encode(comments)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/pulls/7/comments":
@@ -231,7 +231,11 @@ func TestReviewEchoDoesNotSuppressAuditInMonitor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() {
+		if err := store.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
 	m := monitor.Monitor{Config: config.Config{BotLogin: "linkdataminion", PollIntervalSeconds: 60,
 		Repositories: []config.Repository{{Name: "o/r", Actions: []string{"review", "audit"}, AllowedActors: []string{"writer"}}}},
 		GitHub: monitorGitHub, Executor: executor, Now: func() time.Time { return now.Add(time.Minute) }}
@@ -442,7 +446,11 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() {
+		if err := store.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
 	var commentBody string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
