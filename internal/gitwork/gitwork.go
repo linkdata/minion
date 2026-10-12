@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/linkdata/minion/internal/cleanup"
 	"github.com/linkdata/minion/internal/github"
 )
 
@@ -159,7 +160,7 @@ func (c *Checkout) Close() error {
 	c.closed = true
 	path := c.path
 	c.path = ""
-	if err := os.RemoveAll(path); err != nil {
+	if err := cleanup.RemoveAll(path); err != nil {
 		return fmt.Errorf("remove checkout: %w", err)
 	}
 	return nil
