@@ -380,12 +380,16 @@ func rejectNestedGitMetadata(ctx context.Context, root string, limit int) error 
 	for len(dirs) > 0 {
 		dir := dirs[len(dirs)-1]
 		dirs = dirs[:len(dirs)-1]
-		err := func() error {
+		err := func() (err error) {
 			f, err := os.Open(dir)
 			if err != nil {
 				return err
 			}
-			defer f.Close()
+			defer func() {
+				if closeErr := f.Close(); closeErr != nil {
+					err = errors.Join(err, closeErr)
+				}
+			}()
 			for {
 				if err := ctx.Err(); err != nil {
 					return err

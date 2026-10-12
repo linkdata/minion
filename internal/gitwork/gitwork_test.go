@@ -227,7 +227,11 @@ func TestCheckoutPullRequestPreflightDoesNotFetchMissingBlob(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer checkout.Close()
+	defer func() {
+		if err := checkout.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
 	missing := func() bool {
 		cmd := exec.Command("git", "-C", checkout.Path(), "cat-file", "-e", blob)
 		cmd.Env = append(os.Environ(), "GIT_NO_LAZY_FETCH=1")
@@ -277,7 +281,11 @@ func TestCheckoutPullRequestDisablesRepositoryTransforms(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer checkout.Close()
+	defer func() {
+		if err := checkout.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
 	lookup := func(_ context.Context, sha string) (github.GitTree, error) {
 		attributesSize, payloadSize := int64(len(attributes)), int64(len(payload))
 		return completeTree(sha, []github.GitTreeEntry{
@@ -317,7 +325,11 @@ func TestNestedGitMetadataCannotRunFilter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer checkout.Close()
+	defer func() {
+		if err := checkout.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
 	if changed, err := checkout.HasChanges(ctx); err != nil || changed {
 		t.Fatalf("clean gitlink HasChanges() = (%t, %v)", changed, err)
 	}
@@ -361,7 +373,11 @@ func TestNestedGitMetadataCannotRunFilter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer cleanCheckout.Close()
+	defer func() {
+		if err := cleanCheckout.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
 	cleanSub := filepath.Join(cleanCheckout.Path(), "sub")
 	fixture.git("", "clone", child, cleanSub) // Its HEAD matches the tracked gitlink.
 	fixture.git(cleanSub, "config", "filter.probe.clean", filter+" "+marker)
