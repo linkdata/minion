@@ -24,6 +24,8 @@ var (
 	ErrNoCommand = errors.New("no bot command")
 	// ErrAmbiguous means the body contains more than one actionable directive.
 	ErrAmbiguous = errors.New("multiple bot commands")
+	// ErrExtraText means a directive body contains other nonblank text.
+	ErrExtraText = errors.New("bot command has extra text")
 	// ErrInvalidLogin means the configured GitHub login is malformed.
 	ErrInvalidLogin = errors.New("invalid bot login")
 )
@@ -44,16 +46,15 @@ func Parse(markdown string) (Command, error) {
 
 // ParseForLogin finds exactly one directive for login.
 //
-// It accepts these full-line forms (ASCII case-insensitively):
+// It accepts these standalone forms (ASCII case-insensitively):
 //
 //	@<login> review
 //	@<login> audit
-//	@<login> fix [text]
+//	@<login> fix
 //	@<login> release <tag>
 //
-// The directive must be the first non-blank line. This makes it unambiguous
-// to the requester even when later Markdown is quoted, fenced, or hidden.
-// Another directive-shaped line anywhere in the body fails closed.
+// Blank lines may surround the directive. Any other text in the body is
+// rejected; a second directive returns [ErrAmbiguous].
 func ParseForLogin(markdown, login string) (Command, error) {
 	if !validLogin(login) {
 		return Command{}, ErrInvalidLogin
@@ -74,10 +75,17 @@ func ParseForLogin(markdown, login string) (Command, error) {
 	if !ok {
 		return Command{}, ErrNoCommand
 	}
+	extraText := false
 	for _, line := range lines[first+1:] {
 		if _, ok := parseLine(line, handle); ok {
 			return Command{}, ErrAmbiguous
 		}
+		if strings.TrimSpace(line) != "" {
+			extraText = true
+		}
+	}
+	if extraText {
+		return Command{}, ErrExtraText
 	}
 	return found, nil
 }
@@ -99,7 +107,7 @@ func parseLine(line, handle string) (Command, bool) {
 		action = Review
 	case equalASCIIFold(verb, string(Audit)) && args == "":
 		action = Audit
-	case equalASCIIFold(verb, string(Fix)):
+	case equalASCIIFold(verb, string(Fix)) && args == "":
 		action = Fix
 	case equalASCIIFold(verb, string(Release)) && args != "" && strings.IndexFunc(args, unicode.IsSpace) < 0:
 		action = Release

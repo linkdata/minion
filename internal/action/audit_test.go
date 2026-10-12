@@ -148,6 +148,9 @@ func TestAuditIssueAndPullRequest(t *testing.T) {
 							t.Fatalf("audit prompt missing %q", want)
 						}
 					}
+					if strings.Contains(prompt, job.Source.Body) {
+						t.Errorf("audit prompt included command-source text: %q", prompt)
+					}
 					got, err := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "HEAD").Output()
 					if err != nil || strings.TrimSpace(string(got)) != expected {
 						t.Fatalf("auditing wrong commit: %s, %v", got, err)

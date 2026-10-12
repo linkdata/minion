@@ -557,7 +557,7 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 	}
 	job := monitor.Job{
 		Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"fix"}}, SubjectType: "Issue", Number: 7,
-		ID: strings.Repeat("a", 64), Source: github.Item{Author: github.User{ID: 7, Login: "writer"}, HTMLURL: "https://github.com/o/r/issues/7#issuecomment-1", UpdatedAt: time.Now()},
+		ID: strings.Repeat("a", 64), Source: github.Item{Author: github.User{ID: 7, Login: "writer"}, Body: "@linkdataminion fix", HTMLURL: "https://github.com/o/r/issues/7#issuecomment-1", UpdatedAt: time.Now()},
 		Command: command.Command{Action: command.Fix},
 	}
 	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"), time.Now())
@@ -622,6 +622,9 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 			if strings.Contains(prompt, "RENAMED TITLE SENTINEL") || !strings.Contains(prompt, "Issue description: \"Details\"") {
 				t.Errorf("fix prompt included a mutable title or lost the rendered description: %q", prompt)
 			}
+			if strings.Contains(prompt, job.Source.Body) {
+				t.Errorf("fix prompt included command-source text: %q", prompt)
+			}
 			if err := os.WriteFile(filepath.Join(dir, "fix.txt"), []byte("fixed\n"), 0600); err != nil {
 				return codexcli.Result{}, err
 			}
@@ -656,7 +659,7 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 func TestReviewMarksOnlyPostCodexPublicationFailure(t *testing.T) {
 	_, head := auditGitFixture(t)
 	job := monitor.Job{Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2}, SubjectType: "PullRequest", Number: 7,
-		ID: strings.Repeat("a", 64), Source: github.Item{Author: github.User{Login: "writer"}}}
+		ID: strings.Repeat("a", 64), Source: github.Item{Author: github.User{Login: "writer"}, Body: "@linkdataminion review"}}
 	repoFail := true
 	var codexRuns, postCalls int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -684,8 +687,11 @@ func TestReviewMarksOnlyPostCodexPublicationFailure(t *testing.T) {
 	client := github.New("test-token")
 	client.BaseURL, client.HTTPClient = server.URL, server.Client()
 	executor := &Executor{GitHub: client, BotLogin: "linkdataminion", WorkRoot: t.TempDir(),
-		RunCodex: func(context.Context, string, string, bool, string) (codexcli.Result, error) {
+		RunCodex: func(_ context.Context, _ string, prompt string, _ bool, _ string) (codexcli.Result, error) {
 			codexRuns++
+			if strings.Contains(prompt, job.Source.Body) {
+				t.Errorf("review prompt included command-source text: %q", prompt)
+			}
 			return codexcli.Result{Answer: "No findings."}, nil
 		}}
 	err := executor.review(context.Background(), job)
@@ -862,7 +868,7 @@ func TestReleaseReservesTagAndRecoversOnlyBotDraft(t *testing.T) {
 			}
 			job := monitor.Job{
 				Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"release"}}, SubjectType: "Issue", Number: 7,
-				ID: strings.Repeat("a", 64), Source: github.Item{Author: github.User{Login: "writer"}},
+				ID: strings.Repeat("a", 64), Source: github.Item{Author: github.User{Login: "writer"}, Body: "@linkdataminion release v1.0.0"},
 				Command: command.Command{Action: command.Release, Args: "v1.0.0"},
 			}
 			stateDir := t.TempDir()
@@ -964,8 +970,11 @@ func TestReleaseReservesTagAndRecoversOnlyBotDraft(t *testing.T) {
 			defer server.Close()
 			client := github.New("test-token")
 			client.BaseURL, client.HTTPClient = server.URL, server.Client()
-			executor := &Executor{GitHub: client, BotLogin: "linkdataminion", Store: store, WorkRoot: t.TempDir(), RunCodex: func(context.Context, string, string, bool, string) (codexcli.Result, error) {
+			executor := &Executor{GitHub: client, BotLogin: "linkdataminion", Store: store, WorkRoot: t.TempDir(), RunCodex: func(_ context.Context, _ string, prompt string, _ bool, _ string) (codexcli.Result, error) {
 				codexCalls++
+				if strings.Contains(prompt, job.Source.Body) {
+					t.Errorf("release prompt included command-source text: %q", prompt)
+				}
 				if tt.saveFailure && codexCalls == 1 {
 					if err := os.Chmod(stateDir, 0500); err != nil {
 						t.Fatal(err)
