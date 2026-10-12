@@ -54,6 +54,7 @@ type Repository struct {
 	Archived      bool        `json:"archived"`
 	Fork          bool        `json:"fork"`
 	Parent        *Repository `json:"parent"`
+	Source        *Repository `json:"source"`
 	Owner         User        `json:"owner"`
 }
 
@@ -645,6 +646,54 @@ func (c *Client) ProtectedReleaseTags(ctx context.Context, repo string) (bool, e
 		}
 	}
 	return false, errors.New("too many GitHub ruleset pages")
+}
+
+// SafeFixPushRules checks effective push rules for bot publication.
+//
+// It refuses active rules with bypass actors or unreadable bypass lists, and incomplete responses.
+func (c *Client) SafeFixPushRules(ctx context.Context, repo string) error {
+	path, err := repoPath(repo)
+	if err != nil {
+		return err
+	}
+	q := url.Values{"per_page": {"100"}, "page": {"1"}, "targets": {"push"}, "includes_parents": {"true"}}
+	var summaries []struct {
+		ID int64 `json:"id"`
+	}
+	header, _, err := c.request(ctx, http.MethodGet, withQuery(path+"/rulesets", q), nil, &summaries, nil, http.StatusOK)
+	if err != nil {
+		return err
+	}
+	if summaries == nil || header.Get("Link") != "" || len(summaries) >= 100 {
+		return errors.New("GitHub push ruleset list is incomplete")
+	}
+	for _, summary := range summaries {
+		if summary.ID <= 0 {
+			return errors.New("GitHub returned a push ruleset without a valid ID")
+		}
+		var detail repositoryRuleset
+		_, _, err := c.request(ctx, http.MethodGet, path+"/rulesets/"+strconv.FormatInt(summary.ID, 10)+"?includes_parents=true", nil, &detail, nil, http.StatusOK)
+		if err != nil {
+			return err
+		}
+		if detail.ID != summary.ID || detail.Target != "push" {
+			return errors.New("GitHub returned mismatched push ruleset details")
+		}
+		switch detail.Enforcement {
+		case "disabled", "evaluate":
+			continue
+		case "active":
+			if detail.BypassActors == nil {
+				return fmt.Errorf("active push ruleset %d has an unreadable bypass list", summary.ID)
+			}
+			if len(*detail.BypassActors) != 0 {
+				return fmt.Errorf("active push ruleset %d can be bypassed", summary.ID)
+			}
+		default:
+			return fmt.Errorf("push ruleset %d has unknown enforcement %q", summary.ID, detail.Enforcement)
+		}
+	}
+	return nil
 }
 
 func containsString(values []string, want string) bool {
