@@ -35,6 +35,7 @@ type GitHub interface {
 var ErrTerminalJob = errors.New("terminal job failure")
 
 // ErrPostCodexPublication marks a failed GitHub write after Codex completed.
+//
 // Retrying it must consume a job attempt even when the write error is transient.
 var ErrPostCodexPublication = errors.New("post-Codex publication failure")
 
