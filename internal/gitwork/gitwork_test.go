@@ -14,6 +14,35 @@ import (
 	"github.com/linkdata/minion/internal/github"
 )
 
+func TestResolveCredentialHelperPreservesSymlinkName(t *testing.T) {
+	gitPath, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git is unavailable")
+	}
+	bin := t.TempDir()
+	launcher := filepath.Join(bin, "launcher")
+	if err := os.WriteFile(launcher, []byte("#!/bin/sh\n[ \"${0##*/}\" = gh ] || exit 9\nprintf 'username=trusted\\npassword=test\\n'\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	ghPath := filepath.Join(bin, "gh")
+	if err := os.Symlink(launcher, ghPath); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	got := resolveCredentialHelperGH()
+	if got != ghPath {
+		t.Fatalf("credential helper = %q, want symlink path %q", got, ghPath)
+	}
+	cmd := exec.Command(gitPath, "-c", "credential.helper=", "-c", credentialHelperConfig(got), "credential", "fill")
+	cmd.Dir = t.TempDir()
+	cmd.Env = cleanGitEnvironment()
+	cmd.Stdin = strings.NewReader("protocol=https\nhost=github.com\n\n")
+	output, err := cmd.CombinedOutput()
+	if err != nil || !strings.Contains(string(output), "username=trusted") {
+		t.Fatalf("symlinked credential helper failed: %s: %v", output, err)
+	}
+}
+
 func TestGitCredentialHelperIgnoresCheckoutRelativePath(t *testing.T) {
 	realGit, err := exec.LookPath("git")
 	if err != nil {

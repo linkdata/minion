@@ -45,10 +45,10 @@ func resolveCredentialHelperGH() string {
 	if err != nil {
 		return "/bin/false"
 	}
-	path, err = filepath.EvalSymlinks(path)
-	if err != nil || !filepath.IsAbs(path) {
+	if !filepath.IsAbs(path) {
 		return "/bin/false"
 	}
+	// Multicall launchers can select an app from the symlink name in argv[0].
 	return path
 }
 
