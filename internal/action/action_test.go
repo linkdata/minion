@@ -144,7 +144,7 @@ type actionMonitorGitHub struct {
 	notification github.Notification
 }
 
-func (f *actionMonitorGitHub) ListNotifications(context.Context, time.Time) ([]github.Notification, time.Duration, error) {
+func (f *actionMonitorGitHub) ListRepositoryNotifications(context.Context, string, time.Time) ([]github.Notification, time.Duration, error) {
 	return []github.Notification{f.notification}, time.Minute, nil
 }
 func (f *actionMonitorGitHub) ListRepositoryInvitations(context.Context) ([]github.Invitation, error) {

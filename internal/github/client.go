@@ -378,25 +378,29 @@ func pollInterval(header http.Header) time.Duration {
 	return time.Duration(seconds) * time.Second
 }
 
-// ListNotifications includes read notifications, so another inbox client
-// marking a thread read does not remove it from the bot's scan. It returns the
-// server's minimum poll interval. The durable cursor makes conditional requests
-// unsafe: a later action may fail and need the same notification again.
-func (c *Client) ListNotifications(ctx context.Context, since time.Time) ([]Notification, time.Duration, error) {
-	query := url.Values{"all": {"true"}, "participating": {"true"}, "per_page": {"50"}}
+// ListRepositoryNotifications lists a repository's read and unread notifications.
+//
+// It returns GitHub's minimum poll interval and discards partial results if a
+// page fails. Marking a thread read in another client does not hide it.
+func (c *Client) ListRepositoryNotifications(ctx context.Context, repo string, since time.Time) ([]Notification, time.Duration, error) {
+	path, err := repoPath(repo)
+	if err != nil {
+		return nil, 0, err
+	}
+	query := url.Values{"all": {"true"}, "participating": {"true"}, "per_page": {"100"}}
 	if !since.IsZero() {
 		query.Set("since", since.Add(-time.Second).UTC().Format(time.RFC3339))
 	}
 	query.Set("page", "1")
 	var all []Notification
-	var interval = time.Minute
+	interval := time.Minute
 	for page := 1; ; page++ {
-		if page > 1000 {
-			return nil, interval, errors.New("too many GitHub notification pages")
+		if page > 20 {
+			return nil, interval, fmt.Errorf("too many GitHub notification pages for %s", repo)
 		}
 		query.Set("page", strconv.Itoa(page))
 		var batch []Notification
-		header, _, err := c.request(ctx, http.MethodGet, withQuery("/notifications", query), nil, &batch, nil, http.StatusOK)
+		header, _, err := c.request(ctx, http.MethodGet, withQuery(path+"/notifications", query), nil, &batch, nil, http.StatusOK)
 		if err != nil {
 			return nil, interval, err
 		}
