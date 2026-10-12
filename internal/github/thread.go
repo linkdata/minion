@@ -253,9 +253,11 @@ func eligible(updated, since time.Time) bool {
 	return since.IsZero() || updated.IsZero() || !updated.Before(since.Add(-time.Second))
 }
 
-// HasVerifiedBotReply scans only reply surfaces, one page at a time. A bot
-// reply cannot predate the command that caused it, so since excludes older
-// issue comments; reviews have no REST since parameter.
+// HasVerifiedBotReply reports whether a verified bot reply exists.
+//
+// It scans issue comments and, when includeReviews is true, pull request
+// reviews. The since bound applies to comments and filters reviews by
+// submission time.
 func (c *Client) HasVerifiedBotReply(ctx context.Context, repo string, number int, since time.Time, botLogin, marker string, includeReviews bool) (bool, error) {
 	path, err := repoPath(repo)
 	if err != nil {
@@ -275,6 +277,7 @@ func (c *Client) HasVerifiedBotReply(ctx context.Context, repo string, number in
 		return !current.Edited && strings.EqualFold(current.Author.Login, botLogin) && strings.HasSuffix(strings.TrimSpace(current.Body), "\n\n"+marker), nil
 	}
 
+	// A reply cannot predate its command, so older comments need no scan.
 	q := sinceQuery(since)
 	for page := 1; ; page++ {
 		if page > 1000 {
