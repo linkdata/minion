@@ -88,6 +88,9 @@ func (e *Executor) Execute(ctx context.Context, job monitor.Job) (resultErr erro
 	defer cancel()
 	done, err := e.alreadyAcknowledged(ctx, job)
 	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
+		}
 		return err
 	}
 	if done {
@@ -130,23 +133,12 @@ func (e *Executor) Execute(ctx context.Context, job monitor.Job) (resultErr erro
 }
 
 func (e *Executor) alreadyAcknowledged(ctx context.Context, job monitor.Job) (bool, error) {
-	items, err := e.GitHub.ThreadItems(ctx, job.Repository.Name, job.SubjectType, job.Number, time.Time{})
+	includeReviews := job.SubjectType == "PullRequest" && job.Command.Action == command.Review
+	found, err := e.GitHub.HasVerifiedBotReply(ctx, job.Repository.Name, job.Number, job.Source.UpdatedAt, e.BotLogin, job.Marker(), includeReviews)
 	if err != nil {
 		return false, fmt.Errorf("check existing bot replies: %w", err)
 	}
-	for _, item := range items {
-		if !strings.EqualFold(item.Author.Login, e.BotLogin) || !strings.HasSuffix(strings.TrimSpace(item.Body), "\n\n"+job.Marker()) {
-			continue
-		}
-		current, err := e.GitHub.CurrentItem(ctx, item)
-		if err != nil {
-			return false, fmt.Errorf("check bot reply provenance: %w", err)
-		}
-		if !current.Edited && strings.EqualFold(current.Author.Login, e.BotLogin) && strings.HasSuffix(strings.TrimSpace(current.Body), "\n\n"+job.Marker()) {
-			return true, nil
-		}
-	}
-	return false, nil
+	return found, nil
 }
 
 func (e *Executor) review(ctx context.Context, job monitor.Job) error {
