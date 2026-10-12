@@ -51,7 +51,7 @@ func TestAuditIssueAndPullRequest(t *testing.T) {
 				apiHead = strings.Repeat("f", 40)
 			}
 			job := monitor.Job{
-				Repository:  config.Repository{Name: "o/r", Actions: []string{"audit"}},
+				Repository:  config.Repository{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"audit"}},
 				SubjectType: tt.subject, Number: 7, ID: strings.Repeat("a", 64),
 				Source:  github.Item{Author: github.User{Login: "writer"}, Body: "@linkdataminion audit"},
 				Command: command.Command{Action: command.Audit},
@@ -61,7 +61,7 @@ func TestAuditIssueAndPullRequest(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch {
 				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
-					if _, err := fmt.Fprint(w, `{"full_name":"o/r","default_branch":"main"}`); err != nil {
+					if _, err := fmt.Fprint(w, `{"id":1,"full_name":"o/r","owner":{"id":2,"login":"o"},"default_branch":"main"}`); err != nil {
 						t.Error(err)
 					}
 				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7":
@@ -73,7 +73,7 @@ func TestAuditIssueAndPullRequest(t *testing.T) {
 						t.Error(err)
 					}
 				case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/o/r/git/trees/"):
-					_, _ = fmt.Fprintf(w, `{"sha":%q,"truncated":false,"tree":[{"path":"README.md","type":"blob","size":8}]}`, strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/"))
+					_, _ = fmt.Fprintf(w, `{"sha":%q,"truncated":false,"tree":[{"path":"README.md","type":"blob","mode":"100644","size":8}]}`, strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/"))
 				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7/comments":
 					if err := json.NewEncoder(w).Encode(comments); err != nil {
 						t.Error(err)

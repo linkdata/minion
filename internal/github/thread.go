@@ -211,22 +211,11 @@ func (c *Client) pullRequestItems(ctx context.Context, repo, path string, number
 	for _, comment := range reviewComments {
 		items = append(items, commentItem(repo, "review-comment", comment))
 	}
-	reviews, err := c.listReviews(ctx, path+"/pulls/"+strconv.Itoa(number)+"/reviews")
-	if err != nil {
+	if err := c.forEachReview(ctx, repo, number, since, func(item Item) (bool, error) {
+		items = append(items, item)
+		return false, nil
+	}); err != nil {
 		return nil, err
-	}
-	for _, review := range reviews {
-		if review.State == "PENDING" || !eligible(review.SubmittedAt, since) {
-			continue
-		}
-		items = append(items, Item{
-			Key:       fmt.Sprintf("%s#review:%d", strings.ToLower(repo), review.ID),
-			NodeID:    review.NodeID,
-			Body:      review.Body,
-			Author:    review.User,
-			UpdatedAt: review.SubmittedAt,
-			HTMLURL:   review.HTMLURL,
-		})
 	}
 	return items, nil
 }
@@ -251,6 +240,66 @@ func nonzeroTime(primary, fallback time.Time) time.Time {
 
 func eligible(updated, since time.Time) bool {
 	return since.IsZero() || updated.IsZero() || !updated.Before(since.Add(-time.Second))
+}
+
+// HasVerifiedBotReply reports whether a verified bot reply exists.
+//
+// It scans issue comments and, when includeReviews is true, pull request
+// reviews. The since bound applies to comments and filters reviews by
+// submission time.
+func (c *Client) HasVerifiedBotReply(ctx context.Context, repo string, number int, since time.Time, botLogin, marker string, includeReviews bool) (bool, error) {
+	path, err := repoPath(repo)
+	if err != nil {
+		return false, err
+	}
+	if number <= 0 {
+		return false, fmt.Errorf("invalid thread number %d", number)
+	}
+	match := func(item Item) (bool, error) {
+		if !strings.EqualFold(item.Author.Login, botLogin) || !strings.HasSuffix(strings.TrimSpace(item.Body), "\n\n"+marker) {
+			return false, nil
+		}
+		current, err := c.CurrentItem(ctx, item)
+		if err != nil {
+			return false, fmt.Errorf("check bot reply provenance: %w", err)
+		}
+		return !current.Edited && strings.EqualFold(current.Author.Login, botLogin) && strings.HasSuffix(strings.TrimSpace(current.Body), "\n\n"+marker), nil
+	}
+
+	// A reply cannot predate its command, so older comments need no scan.
+	q := sinceQuery(since)
+	for page := 1; ; page++ {
+		if page > 1000 {
+			return false, errors.New("too many GitHub comment pages")
+		}
+		q.Set("page", strconv.Itoa(page))
+		var batch []Comment
+		header, _, err := c.request(ctx, http.MethodGet, withQuery(path+"/issues/"+strconv.Itoa(number)+"/comments", q), nil, &batch, nil, http.StatusOK)
+		if err != nil {
+			return false, err
+		}
+		for _, comment := range batch {
+			if !eligible(nonzeroTime(comment.UpdatedAt, comment.CreatedAt), since) {
+				continue
+			}
+			if found, err := match(commentItem(repo, "issue-comment", comment)); found || err != nil {
+				return found, err
+			}
+		}
+		if !hasNextPage(header.Get("Link")) {
+			break
+		}
+	}
+	if !includeReviews {
+		return false, nil
+	}
+	var found bool
+	err = c.forEachReview(ctx, repo, number, since, func(item Item) (bool, error) {
+		var err error
+		found, err = match(item)
+		return found, err
+	})
+	return found, err
 }
 
 func sinceQuery(since time.Time) url.Values {
@@ -285,22 +334,102 @@ func (c *Client) listComments(ctx context.Context, path string, since time.Time)
 	}
 }
 
-func (c *Client) listReviews(ctx context.Context, path string) ([]Review, error) {
-	q := url.Values{"per_page": {"100"}}
-	var all []Review
-	for page := 1; ; page++ {
-		if page > 1000 {
-			return nil, errors.New("too many GitHub review pages")
-		}
-		q.Set("page", strconv.Itoa(page))
-		var batch []Review
-		header, _, err := c.request(ctx, http.MethodGet, withQuery(path, q), nil, &batch, nil, http.StatusOK)
-		if err != nil {
-			return nil, err
-		}
-		all = append(all, batch...)
-		if !hasNextPage(header.Get("Link")) {
-			return all, nil
-		}
+// forEachReview queries the PR timeline by submission time. A review created
+// as PENDING before since is still returned when it is submitted afterward.
+func (c *Client) forEachReview(ctx context.Context, repo string, number int, since time.Time, visit func(Item) (bool, error)) error {
+	owner, name, _ := strings.Cut(repo, "/") // callers already validated repoPath
+	var sinceValue any
+	if !since.IsZero() {
+		sinceValue = since.Add(-time.Second).UTC().Format(time.RFC3339)
 	}
+	const query = `query($owner: String!, $name: String!, $number: Int!, $since: DateTime, $after: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      timelineItems(first: 100, after: $after, since: $since, itemTypes: [PULL_REQUEST_REVIEW]) {
+        nodes { ... on PullRequestReview {
+          id fullDatabaseId body state submittedAt url
+          author { login ... on User { id: databaseId } }
+        } }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}`
+	var cursor string
+	for page := 1; page <= 20; page++ {
+		var result struct {
+			Data struct {
+				Repository *struct {
+					PullRequest *struct {
+						TimelineItems *struct {
+							Nodes []struct {
+								ID             string    `json:"id"`
+								FullDatabaseID string    `json:"fullDatabaseId"`
+								Body           string    `json:"body"`
+								State          string    `json:"state"`
+								SubmittedAt    time.Time `json:"submittedAt"`
+								URL            string    `json:"url"`
+								Author         User      `json:"author"`
+							} `json:"nodes"`
+							PageInfo *struct {
+								HasNextPage bool   `json:"hasNextPage"`
+								EndCursor   string `json:"endCursor"`
+							} `json:"pageInfo"`
+						} `json:"timelineItems"`
+					} `json:"pullRequest"`
+				} `json:"repository"`
+			} `json:"data"`
+			Errors []struct {
+				Message string `json:"message"`
+			} `json:"errors"`
+		}
+		_, _, err := c.request(ctx, http.MethodPost, "/graphql", map[string]any{
+			"query":     query,
+			"variables": map[string]any{"owner": owner, "name": name, "number": number, "since": sinceValue, "after": cursor},
+		}, &result, nil, http.StatusOK)
+		if err != nil {
+			return err
+		}
+		if len(result.Errors) != 0 {
+			return fmt.Errorf("GitHub review timeline: %s", result.Errors[0].Message)
+		}
+		if result.Data.Repository == nil || result.Data.Repository.PullRequest == nil {
+			return errors.New("GitHub pull request review timeline is unavailable")
+		}
+		timeline := result.Data.Repository.PullRequest.TimelineItems
+		if timeline == nil || timeline.PageInfo == nil {
+			return errors.New("GitHub review timeline is incomplete")
+		}
+		for _, review := range timeline.Nodes {
+			if review.ID == "" {
+				return errors.New("GitHub review timeline contains an unknown item")
+			}
+			if review.State == "PENDING" || review.SubmittedAt.IsZero() || !eligible(review.SubmittedAt, since) {
+				continue
+			}
+			id, err := strconv.ParseInt(review.FullDatabaseID, 10, 64)
+			if err != nil || id <= 0 {
+				return fmt.Errorf("GitHub review has invalid ID %q", review.FullDatabaseID)
+			}
+			stop, err := visit(Item{
+				Key:       fmt.Sprintf("%s#review:%d", strings.ToLower(repo), id),
+				NodeID:    review.ID,
+				Body:      review.Body,
+				Author:    review.Author,
+				UpdatedAt: review.SubmittedAt,
+				HTMLURL:   review.URL,
+			})
+			if stop || err != nil {
+				return err
+			}
+		}
+		if !timeline.PageInfo.HasNextPage {
+			return nil
+		}
+		if timeline.PageInfo.EndCursor == "" || timeline.PageInfo.EndCursor == cursor {
+			return errors.New("GitHub review timeline did not advance")
+		}
+		cursor = timeline.PageInfo.EndCursor
+	}
+	return errors.New("too many recent GitHub review pages")
 }

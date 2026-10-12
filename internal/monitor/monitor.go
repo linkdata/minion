@@ -18,12 +18,16 @@ import (
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/state"
+	"github.com/linkdata/minion/internal/workroot"
 )
 
+// GitHub provides the API operations used by Monitor.
 type GitHub interface {
-	ListNotifications(context.Context, time.Time) ([]github.Notification, time.Duration, error)
+	ListRepositoryNotifications(context.Context, string, time.Time) ([]github.Notification, time.Duration, error)
+	Repository(context.Context, string) (github.Repository, error)
 	ListRepositoryInvitations(context.Context) ([]github.Invitation, error)
 	AcceptRepositoryInvitation(context.Context, int64) error
+	DeclineRepositoryInvitation(context.Context, int64) error
 	ThreadItems(context.Context, string, string, int, time.Time) ([]github.Item, error)
 	CurrentItem(context.Context, github.Item) (github.Item, error)
 	Permission(context.Context, string, string) (github.Permission, error)
@@ -33,6 +37,11 @@ type GitHub interface {
 
 // ErrTerminalJob marks a failed execution that cannot succeed by rerunning Codex.
 var ErrTerminalJob = errors.New("terminal job failure")
+
+// ErrPostCodexPublication marks a failed GitHub write after Codex completed.
+//
+// Retrying it must consume a job attempt even when the write error is transient.
+var ErrPostCodexPublication = errors.New("post-Codex publication failure")
 
 const (
 	maxJobAttempts          = 3
@@ -72,25 +81,22 @@ func (m *Monitor) logf(format string, args ...any) {
 	}
 }
 
-// RunOnce polls the account's notifications, inspects new content in the
-// whitelisted repositories, and persists each completed command before moving
-// the cursor. Failed threads are persisted for later retries without holding
-// back unrelated notifications.
+// RunOnce processes new notifications in whitelisted repositories.
+//
+// It persists each completed command before advancing that repository's cursor.
+// Failed threads remain queued for retries without blocking other repositories.
 func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, error) {
 	now := time.Now
 	if m.Now != nil {
 		now = m.Now
 	}
-	inviteCheck := now().UTC()
-	if !inviteCheck.Before(store.Data.NextInviteCheckAt) {
+	if !now().UTC().Before(store.Data.NextInviteCheckAt) {
 		if err := m.acceptWhitelistedInvitations(ctx); err != nil {
 			// Invitation failures should be visible, but should not stop scans of
 			// repositories for which this account already has access.
 			m.logf("invitation check: %v", err)
-			store.Data.NextInviteCheckAt = inviteCheck.Add(5 * time.Minute)
-		} else {
-			store.Data.NextInviteCheckAt = inviteCheck.Add(15 * time.Minute)
 		}
+		store.Data.NextInviteCheckAt = now().UTC().Add(15 * time.Minute)
 		if err := store.Save(); err != nil {
 			return store.Data.NextPollAt, err
 		}
@@ -105,22 +111,17 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 	}
 	next := started.Add(minInterval)
 	store.Data.NextPollAt = next
-	if err := store.Save(); err != nil {
-		return next, err
+	if store.Data.RepositoryCursors == nil {
+		store.Data.RepositoryCursors = make(map[string]time.Time)
 	}
-
-	since := store.Data.Cursor
-	notifications, githubInterval, err := m.GitHub.ListNotifications(ctx, since)
-	if githubInterval > minInterval {
-		minInterval = githubInterval
-		next = started.Add(minInterval)
-		store.Data.NextPollAt = next
-		if saveErr := store.Save(); saveErr != nil {
-			return next, saveErr
+	for _, repo := range m.Config.Repositories {
+		if _, ok := store.Data.RepositoryCursors[repo.Name]; !ok {
+			// Migrate the old account cursor before any repository poll can fail.
+			store.Data.RepositoryCursors[repo.Name] = store.Data.Cursor
 		}
 	}
-	if err != nil {
-		return next, fmt.Errorf("list notifications: %w", err)
+	if err := store.Save(); err != nil {
+		return next, err
 	}
 
 	type scan struct {
@@ -129,21 +130,44 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		key          string
 	}
 	var scans []scan
-	seen := make(map[string]bool, len(notifications))
-	for _, notification := range notifications {
-		key := notificationKey(notification)
-		if seen[key] {
+	seen := make(map[string]bool)
+	var failures []error
+	var polled []string
+	for _, repo := range m.Config.Repositories {
+		since := store.Data.RepositoryCursors[repo.Name]
+		notifications, githubInterval, err := m.GitHub.ListRepositoryNotifications(ctx, repo.Name, since)
+		if githubInterval > minInterval {
+			minInterval = githubInterval
+			next = started.Add(minInterval)
+			store.Data.NextPollAt = next
+			if err := store.Save(); err != nil {
+				return next, err
+			}
+		}
+		if err != nil {
+			failures = append(failures, fmt.Errorf("list %s notifications: %w", repo.Name, err))
 			continue
 		}
-		seen[key] = true
-		scanSince := since
-		if pending, ok := store.Data.PendingNotifications[key]; ok {
-			if started.Before(pending.RetryAt) && !notification.UpdatedAt.After(pending.UpdatedAt) {
+		polled = append(polled, repo.Name)
+		for _, notification := range notifications {
+			key := notificationKey(notification)
+			if seen[key] {
 				continue
 			}
-			scanSince = pending.Since
+			seen[key] = true
+			scanSince := since
+			if pending, ok := store.Data.PendingNotifications[key]; ok {
+				if pending.RepositoryID != notification.Repository.ID || pending.OwnerID != notification.Repository.Owner.ID {
+					delete(store.Data.PendingNotifications, key)
+				} else {
+					if started.Before(pending.RetryAt) && !notification.UpdatedAt.After(pending.UpdatedAt) {
+						continue
+					}
+					scanSince = pending.Since
+				}
+			}
+			scans = append(scans, scan{notification, scanSince, key})
 		}
-		scans = append(scans, scan{notification, scanSince, key})
 	}
 	for key, pending := range store.Data.PendingNotifications {
 		if seen[key] || started.Before(pending.RetryAt) {
@@ -151,7 +175,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		}
 		scans = append(scans, scan{github.Notification{
 			ID:         key,
-			Repository: github.Repository{FullName: pending.Repository},
+			Repository: github.Repository{ID: pending.RepositoryID, FullName: pending.Repository, Owner: github.User{ID: pending.OwnerID}},
 			Subject:    github.Subject{Type: pending.SubjectType, URL: pending.SubjectURL},
 			UpdatedAt:  pending.UpdatedAt,
 		}, pending.Since, key})
@@ -162,11 +186,28 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		}
 		return scans[i].notification.UpdatedAt.Before(scans[j].notification.UpdatedAt)
 	})
-	var failures []error
 	for _, entry := range scans {
 		notification := entry.notification
 		repo, ok := m.Config.Repository(notification.Repository.FullName)
 		if !ok {
+			delete(store.Data.PendingNotifications, entry.key)
+			continue
+		}
+		if !repo.MatchesIdentity(notification.Repository.ID, notification.Repository.Owner.ID) {
+			m.logf("skip %s notification %s: repository identity differs from configured IDs", repo.Name, notification.ID)
+			delete(store.Data.PendingNotifications, entry.key)
+			continue
+		}
+		liveRepo, err := m.GitHub.Repository(ctx, repo.Name)
+		if err != nil {
+			failures = append(failures, fmt.Errorf("verify %s repository identity: %w", repo.Name, err))
+			if err := m.deferNotification(store, entry.key, notification, entry.since, started); err != nil {
+				return next, err
+			}
+			continue
+		}
+		if !repo.MatchesIdentity(liveRepo.ID, liveRepo.Owner.ID) {
+			m.logf("skip %s notification %s: live repository identity differs from configured IDs", repo.Name, notification.ID)
 			delete(store.Data.PendingNotifications, entry.key)
 			continue
 		}
@@ -210,6 +251,10 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				failures = append(failures, fmt.Errorf("verify command in %s: %w", itemLocation(item), err))
 				continue
 			}
+			if item.Author.ID <= 0 || current.Author.ID != item.Author.ID || !strings.EqualFold(current.Author.Login, item.Author.Login) {
+				m.logf("ignore command in %s: author identity changed or is missing", itemLocation(item))
+				continue
+			}
 			item = current
 			if strings.EqualFold(item.Author.Login, m.Config.BotLogin) || item.Author.Login == "" {
 				continue
@@ -243,7 +288,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				}
 				continue
 			}
-			if !repo.AllowsAction(string(cmd.Action)) || !repo.AllowsActor(item.Author.Login) {
+			if !repo.AllowsAction(string(cmd.Action)) || !repo.AllowsActor(item.Author.Login, item.Author.ID) {
 				m.logf("ignore %s from @%s in %s: disabled action or actor", cmd.Action, item.Author.Login, repo.Name)
 				store.Data.Processed[job.ID] = started
 				if err := store.Save(); err != nil {
@@ -254,6 +299,14 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			permission, err := m.GitHub.Permission(ctx, repo.Name, item.Author.Login)
 			if err != nil {
 				failures = append(failures, fmt.Errorf("check @%s permission in %s: %w", item.Author.Login, repo.Name, err))
+				continue
+			}
+			if permission.User.ID != item.Author.ID || !strings.EqualFold(permission.User.Login, item.Author.Login) {
+				m.logf("ignore %s from @%s in %s: permission identity differs", cmd.Action, item.Author.Login, repo.Name)
+				store.Data.Processed[job.ID] = started
+				if err := store.Save(); err != nil {
+					return next, err
+				}
 				continue
 			}
 			if permission.Permission != "write" && permission.Permission != "admin" && permission.Permission != "maintain" {
@@ -286,7 +339,9 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			if err := m.Executor.Execute(ctx, job); err != nil {
 				if errors.Is(err, ErrTerminalJob) {
 					jobFailure.Attempts = maxJobAttempts
-				} else if infrastructureFailure(err) {
+				} else if errors.Is(err, workroot.ErrUnsafe) && !errors.Is(err, ErrPostCodexPublication) {
+					jobFailure.Attempts--
+				} else if !errors.Is(err, ErrPostCodexPublication) && infrastructureFailure(err) {
 					jobFailure.Attempts--
 				}
 				store.Data.JobFailures[job.ID] = jobFailure
@@ -325,6 +380,11 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 	// GitHub timestamps have second precision. Keep a two-second overlap so an
 	// update racing with this poll cannot fall on the exclusive since boundary.
 	newCursor := started.Add(-2 * time.Second)
+	for _, repo := range polled {
+		if newCursor.After(store.Data.RepositoryCursors[repo]) {
+			store.Data.RepositoryCursors[repo] = newCursor
+		}
+	}
 	if newCursor.After(store.Data.Cursor) {
 		store.Data.Cursor = newCursor
 	}
@@ -351,6 +411,8 @@ func (m *Monitor) deferNotification(store *state.Store, key string, notification
 		pending.Failures++
 	}
 	pending.Repository = notification.Repository.FullName
+	pending.RepositoryID = notification.Repository.ID
+	pending.OwnerID = notification.Repository.Owner.ID
 	pending.SubjectType = notification.Subject.Type
 	pending.SubjectURL = notification.Subject.URL
 	pending.Since = since
@@ -389,8 +451,15 @@ func (m *Monitor) finishFailedJob(ctx context.Context, store *state.Store, job J
 		}
 	}
 	if !replied {
+		repo, err := m.GitHub.Repository(ctx, job.Repository.Name)
+		if err != nil {
+			return fmt.Errorf("verify %s before failure reply: %w", job.Repository.Name, err)
+		}
+		if !job.Repository.MatchesIdentity(repo.ID, repo.Owner.ID) {
+			return fmt.Errorf("%s identity changed before failure reply", job.Repository.Name)
+		}
 		replyCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-		_, err := m.GitHub.CreateIssueComment(replyCtx, job.Repository.Name, job.Number, failureReply+"\n\n"+marker)
+		_, err = m.GitHub.CreateIssueComment(replyCtx, job.Repository.Name, job.Number, failureReply+"\n\n"+marker)
 		cancel()
 		if err != nil {
 			failure.ReplyAttempts++
@@ -411,30 +480,60 @@ func (m *Monitor) finishFailedJob(ctx context.Context, store *state.Store, job J
 }
 
 func (m *Monitor) acceptWhitelistedInvitations(ctx context.Context) error {
-	invitations, err := m.GitHub.ListRepositoryInvitations(ctx)
-	if err != nil {
-		return err
+	listCtx, cancelList := context.WithTimeout(ctx, 30*time.Second)
+	invitations, listErr := m.GitHub.ListRepositoryInvitations(listCtx)
+	cancelList()
+	if invitationActionsBlocked(listErr) {
+		return listErr
 	}
+	actionCtx, cancelActions := context.WithTimeout(ctx, 30*time.Second)
+	defer cancelActions()
 	var failures []error
+	if listErr != nil {
+		failures = append(failures, listErr)
+	}
+	var outsiders []github.Invitation
 	for _, invite := range invitations {
+		if err := actionCtx.Err(); err != nil {
+			failures = append(failures, err)
+			return errors.Join(failures...)
+		}
 		fullName := invite.Repository.FullName
 		owner, name, ok := strings.Cut(fullName, "/")
 		if !ok || owner == "" || name == "" || strings.Contains(name, "/") ||
 			invite.Repository.Owner.Login == "" || !strings.EqualFold(owner, invite.Repository.Owner.Login) || invite.Expired {
 			continue
 		}
-		_, monitored := m.Config.Repository(fullName)
+		monitoredRepo, monitored := m.Config.Repository(fullName)
+		if invite.Repository.ID <= 0 || invite.Repository.Owner.ID <= 0 ||
+			(monitored && !monitoredRepo.MatchesIdentity(invite.Repository.ID, invite.Repository.Owner.ID)) {
+			continue
+		}
 		allowed := monitored
+		ownerListed := false
 		for _, allowedOwner := range m.Config.InvitationOwners {
 			if strings.EqualFold(owner, allowedOwner) {
-				allowed = true
+				ownerListed = true
+				if m.Config.InvitationOwnerIDs[allowedOwner] == invite.Repository.Owner.ID {
+					allowed = true
+				}
 				break
 			}
 		}
-		if !allowed {
+		if invite.Invitee.Login != "" && !strings.EqualFold(invite.Invitee.Login, m.Config.BotLogin) {
 			continue
 		}
-		if invite.Invitee.Login != "" && !strings.EqualFold(invite.Invitee.Login, m.Config.BotLogin) {
+		if !allowed {
+			knownIdentity := ownerListed
+			for _, id := range m.Config.InvitationOwnerIDs {
+				knownIdentity = knownIdentity || id == invite.Repository.Owner.ID
+			}
+			for _, repo := range m.Config.Repositories {
+				knownIdentity = knownIdentity || repo.ID == invite.Repository.ID || repo.OwnerID == invite.Repository.Owner.ID
+			}
+			if !knownIdentity {
+				outsiders = append(outsiders, invite)
+			}
 			continue
 		}
 		switch invite.Permissions {
@@ -453,16 +552,23 @@ func (m *Monitor) acceptWhitelistedInvitations(ctx context.Context) error {
 				actions = append(actions, "audit")
 			}
 			// Persist first: an accepted invitation disappears and cannot recover a failed config write.
-			repo, err := config.AddRepository(m.ConfigPath, config.Repository{Name: fullName, Actions: actions})
+			repo, err := config.AddRepository(m.ConfigPath, config.Repository{Name: fullName, ID: invite.Repository.ID, OwnerID: invite.Repository.Owner.ID, Actions: actions})
 			if err != nil {
 				failures = append(failures, fmt.Errorf("register %s invitation: %w", fullName, err))
+				continue
+			}
+			if !repo.MatchesIdentity(invite.Repository.ID, invite.Repository.Owner.ID) {
+				failures = append(failures, fmt.Errorf("%s identity changed while registering invitation", fullName))
 				continue
 			}
 			m.Config.Repositories = append(m.Config.Repositories, repo)
 			m.logf("added %s to monitored repositories in %s", repo.Name, m.ConfigPath)
 		}
-		if err := m.GitHub.AcceptRepositoryInvitation(ctx, invite.ID); err != nil {
+		if err := m.GitHub.AcceptRepositoryInvitation(actionCtx, invite.ID); err != nil {
 			failures = append(failures, fmt.Errorf("accept %s invitation: %w", fullName, err))
+			if invitationActionsBlocked(err) {
+				return errors.Join(failures...)
+			}
 			continue
 		}
 		m.logf("accepted repository invitation for %s (%s)", fullName, invite.Permissions)
@@ -470,7 +576,25 @@ func (m *Monitor) acceptWhitelistedInvitations(ctx context.Context) error {
 			m.logf("%s is not monitored: commands require write access", fullName)
 		}
 	}
+	for _, invite := range outsiders {
+		if err := actionCtx.Err(); err != nil {
+			failures = append(failures, err)
+			break
+		}
+		if err := m.GitHub.DeclineRepositoryInvitation(actionCtx, invite.ID); err != nil {
+			failures = append(failures, fmt.Errorf("decline %s invitation: %w", invite.Repository.FullName, err))
+			if invitationActionsBlocked(err) {
+				break
+			}
+		}
+	}
 	return errors.Join(failures...)
+}
+
+func invitationActionsBlocked(err error) bool {
+	var status *github.StatusError
+	return errors.As(err, &status) &&
+		(status.StatusCode == http.StatusForbidden || status.StatusCode == http.StatusTooManyRequests)
 }
 
 func jobID(itemKey, commandKey string) string {

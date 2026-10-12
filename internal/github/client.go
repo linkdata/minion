@@ -153,6 +153,7 @@ type GitTree struct {
 type GitTreeEntry struct {
 	Path string
 	Type string
+	Mode string
 	Size *int64
 }
 
@@ -381,25 +382,29 @@ func pollInterval(header http.Header) time.Duration {
 	return time.Duration(seconds) * time.Second
 }
 
-// ListNotifications includes read notifications, so another inbox client
-// marking a thread read does not remove it from the bot's scan. It returns the
-// server's minimum poll interval. The durable cursor makes conditional requests
-// unsafe: a later action may fail and need the same notification again.
-func (c *Client) ListNotifications(ctx context.Context, since time.Time) ([]Notification, time.Duration, error) {
-	query := url.Values{"all": {"true"}, "participating": {"true"}, "per_page": {"50"}}
+// ListRepositoryNotifications lists a repository's read and unread notifications.
+//
+// It returns GitHub's minimum poll interval and discards partial results if a
+// page fails. Marking a thread read in another client does not hide it.
+func (c *Client) ListRepositoryNotifications(ctx context.Context, repo string, since time.Time) ([]Notification, time.Duration, error) {
+	path, err := repoPath(repo)
+	if err != nil {
+		return nil, 0, err
+	}
+	query := url.Values{"all": {"true"}, "participating": {"true"}, "per_page": {"100"}}
 	if !since.IsZero() {
 		query.Set("since", since.Add(-time.Second).UTC().Format(time.RFC3339))
 	}
 	query.Set("page", "1")
 	var all []Notification
-	var interval = time.Minute
+	interval := time.Minute
 	for page := 1; ; page++ {
-		if page > 1000 {
-			return nil, interval, errors.New("too many GitHub notification pages")
+		if page > 20 {
+			return nil, interval, fmt.Errorf("too many GitHub notification pages for %s", repo)
 		}
 		query.Set("page", strconv.Itoa(page))
 		var batch []Notification
-		header, _, err := c.request(ctx, http.MethodGet, withQuery("/notifications", query), nil, &batch, nil, http.StatusOK)
+		header, _, err := c.request(ctx, http.MethodGet, withQuery(path+"/notifications", query), nil, &batch, nil, http.StatusOK)
 		if err != nil {
 			return nil, interval, err
 		}
@@ -420,20 +425,21 @@ func (c *Client) AuthenticatedUser(ctx context.Context) (User, error) {
 	return user, err
 }
 
-// ListRepositoryInvitations lists all currently open invitations for the
-// authenticated user. The caller decides whether an invitation is allowed.
+// ListRepositoryInvitations lists open invitations for the authenticated user.
+//
+// It reads at most ten pages and returns fetched invitations if a later page fails.
 func (c *Client) ListRepositoryInvitations(ctx context.Context) ([]Invitation, error) {
 	q := url.Values{"per_page": {"100"}}
 	var invitations []Invitation
 	for page := 1; ; page++ {
-		if page > 1000 {
-			return nil, errors.New("too many GitHub repository invitation pages")
+		if page > 10 {
+			return invitations, errors.New("more than ten GitHub repository invitation pages")
 		}
 		q.Set("page", strconv.Itoa(page))
 		var batch []Invitation
 		header, _, err := c.request(ctx, http.MethodGet, withQuery("/user/repository_invitations", q), nil, &batch, nil, http.StatusOK)
 		if err != nil {
-			return nil, err
+			return invitations, err
 		}
 		invitations = append(invitations, batch...)
 		if !hasNextPage(header.Get("Link")) {
@@ -448,6 +454,15 @@ func (c *Client) AcceptRepositoryInvitation(ctx context.Context, id int64) error
 		return fmt.Errorf("invalid repository invitation id %d", id)
 	}
 	_, _, err := c.request(ctx, http.MethodPatch, "/user/repository_invitations/"+strconv.FormatInt(id, 10), nil, nil, nil, http.StatusNoContent)
+	return err
+}
+
+// DeclineRepositoryInvitation removes an invitation from the authenticated account.
+func (c *Client) DeclineRepositoryInvitation(ctx context.Context, id int64) error {
+	if id <= 0 {
+		return fmt.Errorf("invalid repository invitation id %d", id)
+	}
+	_, _, err := c.request(ctx, http.MethodDelete, "/user/repository_invitations/"+strconv.FormatInt(id, 10), nil, nil, nil, http.StatusNoContent)
 	return err
 }
 
@@ -573,11 +588,13 @@ func (c *Client) CreateTagReference(ctx context.Context, repo, tag, sha string) 
 	return err
 }
 
-// ProtectedReleaseTags verifies an active all-tag integrity ruleset and refuses
-// release creation while any active tag ruleset restricts creation. The latter
-// is conservative: the bot must not create a tag by bypassing a restriction
-// that applies to the requester. GitHub omits bypass_actors for tokens without
-// ruleset write access; omission is not proof that no actor can bypass.
+// ProtectedReleaseTags checks whether draft release tags are protected.
+//
+// It requires an active all-tag integrity ruleset and refuses release creation
+// unless every active tag rule is limited to update, deletion, or non-fast-forward
+// protection. The bot must not create a tag by bypassing a restriction that
+// applies to the requester. GitHub omits bypass_actors for tokens without
+// ruleset write access; omission is not proof of no bypass.
 func (c *Client) ProtectedReleaseTags(ctx context.Context, repo string) (bool, error) {
 	path, err := repoPath(repo)
 	if err != nil {
@@ -611,11 +628,15 @@ func (c *Client) ProtectedReleaseTags(ctx context.Context, repo string) (bool, e
 			}
 			var updates, deletions bool
 			for _, rule := range detail.Rules {
-				if rule.Type == "creation" {
+				switch rule.Type {
+				case "update":
+					updates = true
+				case "deletion":
+					deletions = true
+				case "non_fast_forward":
+				default:
 					return false, nil
 				}
-				updates = updates || rule.Type == "update"
-				deletions = deletions || rule.Type == "deletion"
 			}
 			protected = protected || updates && deletions && detail.BypassActors != nil && len(*detail.BypassActors) == 0 &&
 				len(detail.Conditions.RefName.Exclude) == 0 && containsString(detail.Conditions.RefName.Include, "~ALL")
@@ -627,8 +648,9 @@ func (c *Client) ProtectedReleaseTags(ctx context.Context, repo string) (bool, e
 	return false, errors.New("too many GitHub ruleset pages")
 }
 
-// SafeFixPushRules ensures a bot push cannot bypass restrictions inherited by
-// the destination fork that would apply to another fork in the same network.
+// SafeFixPushRules checks effective push rules for bot publication.
+//
+// It refuses active rules with bypass actors or unreadable bypass lists, and incomplete responses.
 func (c *Client) SafeFixPushRules(ctx context.Context, repo string) error {
 	path, err := repoPath(repo)
 	if err != nil {

@@ -11,11 +11,11 @@ import (
 func TestAddRepositoryPreservesSettingsAndExistingRestrictions(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
-	data := []byte(`{"bot_login":"linkdataminion","codex":{"model":"user-model","reasoning_effort":"user-effort"},"state_path":"relative/state.json","repositories":[{"name":"example-owner/example-repo","actions":["review"],"allowed_actors":["alice"]}]}`)
+	data := []byte(`{"bot_login":"linkdataminion","codex":{"model":"user-model","reasoning_effort":"user-effort"},"state_path":"relative/state.json","repositories":[{"name":"example-owner/example-repo","id":1,"owner_id":2,"actions":["review"],"allowed_actors":["alice"],"allowed_actor_ids":{"alice":7}}]}`)
 	if err := os.WriteFile(path, data, 0640); err != nil {
 		t.Fatal(err)
 	}
-	repo := Repository{Name: "Example-Owner/Second-Repo", Actions: []string{"review", "fix", "release"}}
+	repo := Repository{Name: "Example-Owner/Second-Repo", ID: 3, OwnerID: 2, Actions: []string{"review", "fix", "release"}}
 	added, err := AddRepository(path, repo)
 	if err != nil || added.Name != "example-owner/second-repo" {
 		t.Fatalf("add repository: %+v, %v", added, err)
