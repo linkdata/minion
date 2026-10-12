@@ -22,7 +22,7 @@ func testClient(server *httptest.Server) *Client {
 
 func TestGitTreeUsesExactSHAAndBoundsResponse(t *testing.T) {
 	sha := strings.Repeat("a", 40)
-	response := fmt.Sprintf(`{"sha":%q,"truncated":false,"tree":[{"path":"file","type":"blob","size":23}]}`, sha)
+	response := fmt.Sprintf(`{"sha":%q,"truncated":false,"tree":[{"path":"file","type":"blob","mode":"100644","size":23}]}`, sha)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.Path != "/repos/o/r/git/trees/"+sha || r.URL.Query().Get("recursive") != "1" {
 			t.Errorf("unexpected tree request: %s %s", r.Method, r.URL.String())
@@ -32,7 +32,7 @@ func TestGitTreeUsesExactSHAAndBoundsResponse(t *testing.T) {
 	defer server.Close()
 	client := testClient(server)
 	tree, err := client.GitTree(context.Background(), "o/r", sha)
-	if err != nil || tree.SHA != sha || len(tree.Tree) != 1 || tree.Tree[0].Size == nil || *tree.Tree[0].Size != 23 {
+	if err != nil || tree.SHA != sha || len(tree.Tree) != 1 || tree.Tree[0].Mode != "100644" || tree.Tree[0].Size == nil || *tree.Tree[0].Size != 23 {
 		t.Fatalf("GitTree() = (%+v, %v)", tree, err)
 	}
 	if _, err := client.GitTree(context.Background(), "o/r", strings.Repeat("/", 40)); err == nil {
@@ -773,13 +773,18 @@ func TestProtectedReleaseTagsRequiresVisibleCompleteRuleset(t *testing.T) {
 	}
 }
 
-func TestProtectedReleaseTagsChecksCreationRulesAfterIntegrityRule(t *testing.T) {
+func TestProtectedReleaseTagsRejectsCreationConstraintsAfterIntegrityRule(t *testing.T) {
 	for _, tt := range []struct {
-		name     string
-		creation string
-		want     bool
+		name   string
+		detail string
+		want   bool
 	}{
 		{"active creation rule", `{"id":43,"target":"tag","enforcement":"active","conditions":{"ref_name":{"include":["refs/tags/v*"]}},"rules":[{"type":"creation"}]}`, false},
+		{"active tag name restriction", `{"id":43,"target":"tag","enforcement":"active","rules":[{"type":"tag_name_pattern","parameters":{"operator":"starts_with","pattern":"release-","negate":true}}]}`, false},
+		{"allowed rule followed by tag restriction", `{"id":43,"target":"tag","enforcement":"active","rules":[{"type":"non_fast_forward"},{"type":"tag_name_pattern"}]}`, false},
+		{"active commit metadata restriction", `{"id":43,"target":"tag","enforcement":"active","rules":[{"type":"commit_message_pattern"}]}`, false},
+		{"unknown active tag rule", `{"id":43,"target":"tag","enforcement":"active","rules":[{"type":"future_rule"}]}`, false},
+		{"non-fast-forward rule", `{"id":43,"target":"tag","enforcement":"active","rules":[{"type":"non_fast_forward"}]}`, true},
 		{"disabled creation rule", `{"id":43,"target":"tag","enforcement":"disabled","rules":[{"type":"creation"}]}`, true},
 		{"branch creation rule", `{"id":43,"target":"branch","enforcement":"active","rules":[{"type":"creation"}]}`, true},
 	} {
@@ -794,7 +799,7 @@ func TestProtectedReleaseTagsChecksCreationRulesAfterIntegrityRule(t *testing.T)
 					_, _ = fmt.Fprint(w, `{"id":42,"target":"tag","enforcement":"active","bypass_actors":[],"conditions":{"ref_name":{"include":["~ALL"],"exclude":[]}},"rules":[{"type":"update"},{"type":"deletion"}]}`)
 				case "/repos/o/r/rulesets/43":
 					details++
-					_, _ = fmt.Fprint(w, tt.creation)
+					_, _ = fmt.Fprint(w, tt.detail)
 				default:
 					t.Errorf("unexpected request: %s", r.URL)
 					http.NotFound(w, r)
