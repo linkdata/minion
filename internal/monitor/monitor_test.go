@@ -888,13 +888,15 @@ func TestInvitationListingErrorKeepsPartialWorkAndPollsAfterLongCheck(t *testing
 	}
 }
 
-func TestInvitationListingRateLimitDefersActions(t *testing.T) {
+func TestInvitationListingBlockedDefersActions(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		err  *github.StatusError
 	}{
 		{name: "HTTP 429", err: &github.StatusError{StatusCode: http.StatusTooManyRequests, Message: "rate limit"}},
 		{name: "secondary rate limit", err: &github.StatusError{StatusCode: http.StatusForbidden, Message: "secondary rate limit"}},
+		{name: "abuse detection", err: &github.StatusError{StatusCode: http.StatusForbidden, Message: "You have triggered an abuse detection mechanism and have been temporarily blocked from content creation. Please retry your request again later."}},
+		{name: "forbidden", err: &github.StatusError{StatusCode: http.StatusForbidden, Message: "Resource not accessible by integration"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			gh := &fakeGitHub{
@@ -906,10 +908,10 @@ func TestInvitationListingRateLimitDefersActions(t *testing.T) {
 			}
 			m := &Monitor{Config: testConfig(), GitHub: gh}
 			if err := m.acceptWhitelistedInvitations(context.Background()); !errors.Is(err, tc.err) {
-				t.Fatalf("invitation listing error = %v, want rate limit", err)
+				t.Fatalf("invitation listing error = %v, want blocked error", err)
 			}
 			if len(gh.accepted) != 0 || len(gh.declined) != 0 {
-				t.Fatalf("invitation actions continued after listing rate limit: accepted=%v declined=%v", gh.accepted, gh.declined)
+				t.Fatalf("invitation actions continued after blocked listing: accepted=%v declined=%v", gh.accepted, gh.declined)
 			}
 		})
 	}

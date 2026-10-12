@@ -483,7 +483,7 @@ func (m *Monitor) acceptWhitelistedInvitations(ctx context.Context) error {
 	listCtx, cancelList := context.WithTimeout(ctx, 30*time.Second)
 	invitations, listErr := m.GitHub.ListRepositoryInvitations(listCtx)
 	cancelList()
-	if invitationRateLimited(listErr) {
+	if invitationActionsBlocked(listErr) {
 		return listErr
 	}
 	actionCtx, cancelActions := context.WithTimeout(ctx, 30*time.Second)
@@ -566,7 +566,7 @@ func (m *Monitor) acceptWhitelistedInvitations(ctx context.Context) error {
 		}
 		if err := m.GitHub.AcceptRepositoryInvitation(actionCtx, invite.ID); err != nil {
 			failures = append(failures, fmt.Errorf("accept %s invitation: %w", fullName, err))
-			if invitationRateLimited(err) {
+			if invitationActionsBlocked(err) {
 				return errors.Join(failures...)
 			}
 			continue
@@ -583,7 +583,7 @@ func (m *Monitor) acceptWhitelistedInvitations(ctx context.Context) error {
 		}
 		if err := m.GitHub.DeclineRepositoryInvitation(actionCtx, invite.ID); err != nil {
 			failures = append(failures, fmt.Errorf("decline %s invitation: %w", invite.Repository.FullName, err))
-			if invitationRateLimited(err) {
+			if invitationActionsBlocked(err) {
 				break
 			}
 		}
@@ -591,10 +591,10 @@ func (m *Monitor) acceptWhitelistedInvitations(ctx context.Context) error {
 	return errors.Join(failures...)
 }
 
-func invitationRateLimited(err error) bool {
+func invitationActionsBlocked(err error) bool {
 	var status *github.StatusError
-	return errors.As(err, &status) && (status.StatusCode == http.StatusTooManyRequests ||
-		(status.StatusCode == http.StatusForbidden && strings.Contains(strings.ToLower(status.Message), "rate limit")))
+	return errors.As(err, &status) &&
+		(status.StatusCode == http.StatusForbidden || status.StatusCode == http.StatusTooManyRequests)
 }
 
 func jobID(itemKey, commandKey string) string {
