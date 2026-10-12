@@ -293,14 +293,33 @@ func TestLiveBotWriteLifecycle(t *testing.T) {
 	t.Cleanup(func() { liveRemoveArtifacts(t, owner, cfg, artifacts) })
 
 	body := "Minion live write test at " + time.Now().UTC().Format(time.RFC3339Nano) + "."
-	artifacts.commentBody = body
+	artifacts.comments = append(artifacts.comments, liveCommentArtifact{author: cfg.BotLogin, body: body})
 	comment, err := bot.CreateIssueComment(ctx, cfg.Repo, cfg.IssueNumber, body)
 	if err != nil || comment.ID <= 0 || comment.NodeID == "" || comment.User.Login != cfg.BotLogin || comment.Body != body {
 		t.Fatalf("bot issue comment was not confirmed: id=%d: %v", comment.ID, err)
 	}
-	artifacts.commentID = comment.ID
+	artifacts.comments[0].id = comment.ID
 	t.Logf("issue comment: %s", comment.HTMLURL)
-	if err := bot.ReactEyes(ctx, comment.NodeID); err != nil {
+	editedBody := body + " Edited by the bot."
+	artifacts.comments[0].editedBody = editedBody
+	var edited Comment
+	_, _, err = bot.request(ctx, http.MethodPatch, liveWriteRepoPath+"/issues/comments/"+strconv.FormatInt(comment.ID, 10), map[string]string{"body": editedBody}, &edited, nil, http.StatusOK)
+	if err != nil || edited.Body != editedBody {
+		t.Fatalf("bot issue comment edit was not confirmed: %v", err)
+	}
+	current, err := bot.CurrentItem(ctx, Item{NodeID: comment.NodeID})
+	if err != nil || current.Body != editedBody || !strings.EqualFold(current.Author.Login, cfg.BotLogin) || !strings.EqualFold(current.Editor.Login, cfg.BotLogin) || !current.Edited {
+		t.Fatalf("edited bot comment provenance = %+v, %v", current, err)
+	}
+
+	ownerBody := "Minion live reaction fixture at " + time.Now().UTC().Format(time.RFC3339Nano) + "."
+	artifacts.comments = append(artifacts.comments, liveCommentArtifact{author: cfg.OwnerLogin, body: ownerBody})
+	ownerComment, err := owner.CreateIssueComment(ctx, cfg.Repo, cfg.IssueNumber, ownerBody)
+	if err != nil || ownerComment.ID <= 0 || ownerComment.NodeID == "" || ownerComment.User.Login != cfg.OwnerLogin || ownerComment.Body != ownerBody {
+		t.Fatalf("owner reaction fixture was not confirmed: id=%d: %v", ownerComment.ID, err)
+	}
+	artifacts.comments[1].id = ownerComment.ID
+	if err := bot.ReactEyes(ctx, ownerComment.NodeID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -362,8 +381,7 @@ func TestLiveBotWriteLifecycle(t *testing.T) {
 
 type liveWriteArtifacts struct {
 	issueNumber      int
-	commentID        int64
-	commentBody      string
+	comments         []liveCommentArtifact
 	tag              string
 	tagSHA           string
 	releaseAttempted bool
@@ -373,6 +391,17 @@ type liveWriteArtifacts struct {
 	branchSHA        string
 	pullAttempted    bool
 	pullNumber       int
+}
+
+type liveCommentArtifact struct {
+	id         int64
+	author     string
+	body       string
+	editedBody string
+}
+
+func (artifact liveCommentArtifact) matches(body string) bool {
+	return artifact.body != "" && (body == artifact.body || artifact.editedBody != "" && body == artifact.editedBody)
 }
 
 func livePushDraftPullRequest(t *testing.T, ctx context.Context, cfg liveTestConfig, bot *Client, artifacts *liveWriteArtifacts, id string) {
@@ -537,39 +566,45 @@ func liveRemoveArtifacts(t *testing.T, owner *Client, cfg liveTestConfig, artifa
 		}
 	}
 
-	if artifacts.commentBody != "" {
-		commentID := artifacts.commentID
-		if commentID == 0 {
-			items, err := owner.ThreadItems(ctx, cfg.Repo, "Issue", artifacts.issueNumber, time.Time{})
-			if err != nil {
-				t.Errorf("find test comment for cleanup: %v", err)
-			} else {
-				for _, item := range items {
-					if item.Body == artifacts.commentBody && item.Author.Login == cfg.BotLogin {
-						if suffix, ok := strings.CutPrefix(item.Key, strings.ToLower(cfg.Repo)+"#issue-comment:"); ok {
-							if id, err := strconv.ParseInt(suffix, 10, 64); err == nil {
-								commentID = id
-							}
+	for _, comment := range artifacts.comments {
+		liveRemoveComment(t, ctx, owner, cfg, path, artifacts.issueNumber, comment)
+	}
+}
+
+func liveRemoveComment(t *testing.T, ctx context.Context, owner *Client, cfg liveTestConfig, path string, issueNumber int, artifact liveCommentArtifact) {
+	t.Helper()
+	commentID := artifact.id
+	if commentID == 0 {
+		items, err := owner.ThreadItems(ctx, cfg.Repo, "Issue", issueNumber, time.Time{})
+		if err != nil {
+			t.Errorf("find test comment for cleanup: %v", err)
+		} else {
+			for _, item := range items {
+				if artifact.matches(item.Body) && strings.EqualFold(item.Author.Login, artifact.author) {
+					if suffix, ok := strings.CutPrefix(item.Key, strings.ToLower(cfg.Repo)+"#issue-comment:"); ok {
+						if id, err := strconv.ParseInt(suffix, 10, 64); err == nil {
+							commentID = id
 						}
 					}
 				}
 			}
 		}
-		if commentID > 0 {
-			commentPath := path + "/issues/comments/" + strconv.FormatInt(commentID, 10)
-			var comment Comment
-			_, status, err := owner.request(ctx, http.MethodGet, commentPath, nil, &comment, nil, http.StatusOK, http.StatusNotFound)
-			if err != nil {
-				t.Errorf("read test comment for cleanup: %v", err)
-			} else if status == http.StatusOK {
-				if comment.User.Login != cfg.BotLogin || comment.Body != artifacts.commentBody {
-					t.Errorf("refuse to delete changed test comment %d", commentID)
-				} else if _, _, err := owner.request(ctx, http.MethodDelete, commentPath, nil, nil, nil, http.StatusNoContent, http.StatusNotFound); err != nil {
-					t.Errorf("delete test comment and reaction %d: %v", commentID, err)
-				} else if _, status, err := owner.request(ctx, http.MethodGet, commentPath, nil, nil, nil, http.StatusOK, http.StatusNotFound); err != nil || status != http.StatusNotFound {
-					t.Errorf("test comment %d remains after cleanup: HTTP %d: %v", commentID, status, err)
-				}
-			}
+	}
+	if commentID <= 0 {
+		return
+	}
+	commentPath := path + "/issues/comments/" + strconv.FormatInt(commentID, 10)
+	var comment Comment
+	_, status, err := owner.request(ctx, http.MethodGet, commentPath, nil, &comment, nil, http.StatusOK, http.StatusNotFound)
+	if err != nil {
+		t.Errorf("read test comment for cleanup: %v", err)
+	} else if status == http.StatusOK {
+		if !strings.EqualFold(comment.User.Login, artifact.author) || !artifact.matches(comment.Body) {
+			t.Errorf("refuse to delete changed test comment %d", commentID)
+		} else if _, _, err := owner.request(ctx, http.MethodDelete, commentPath, nil, nil, nil, http.StatusNoContent, http.StatusNotFound); err != nil {
+			t.Errorf("delete test comment and reaction %d: %v", commentID, err)
+		} else if _, status, err := owner.request(ctx, http.MethodGet, commentPath, nil, nil, nil, http.StatusOK, http.StatusNotFound); err != nil || status != http.StatusNotFound {
+			t.Errorf("test comment %d remains after cleanup: HTTP %d: %v", commentID, status, err)
 		}
 	}
 }

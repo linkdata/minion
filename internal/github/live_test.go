@@ -117,9 +117,9 @@ func loadLiveTestConfig(t *testing.T) liveTestConfig {
 	return cfg
 }
 
-func liveClient(t *testing.T, ctx context.Context, cfg liveTestConfig) *Client {
+func liveClient(t *testing.T, ctx context.Context, login string) *Client {
 	t.Helper()
-	token, err := liveAccountToken(ctx, cfg.OwnerLogin)
+	token, err := liveAccountToken(ctx, login)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +130,7 @@ func liveClient(t *testing.T, ctx context.Context, cfg liveTestConfig) *Client {
 
 func liveAccountToken(ctx context.Context, login string) (string, error) {
 	cmd := exec.CommandContext(ctx, "gh", "auth", "token", "--hostname", "github.com", "--user", login)
-	cmd.Env = append(os.Environ(), "GH_PROMPT_DISABLED=1")
+	cmd.Env = liveGHAuthEnv()
 	output, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("gh auth token for %s: %w", login, err)
@@ -139,6 +139,16 @@ func liveAccountToken(ctx context.Context, login string) (string, error) {
 		return token, nil
 	}
 	return "", fmt.Errorf("gh auth token for %s is empty", login)
+}
+
+func liveGHAuthEnv() []string {
+	var env []string
+	for _, entry := range os.Environ() {
+		if !strings.HasPrefix(entry, "GH_TOKEN=") && !strings.HasPrefix(entry, "GITHUB_TOKEN=") {
+			env = append(env, entry)
+		}
+	}
+	return append(env, "GH_PROMPT_DISABLED=1")
 }
 
 func TestLiveSmoke(t *testing.T) {
@@ -162,14 +172,14 @@ func TestLiveSmoke(t *testing.T) {
 	})
 }
 
-func liveAPIField(t *testing.T, ctx context.Context, ownerLogin, endpoint, field string) string {
+func liveAPIField(t *testing.T, ctx context.Context, login, endpoint, field string) string {
 	t.Helper()
-	token, err := liveAccountToken(ctx, ownerLogin)
+	token, err := liveAccountToken(ctx, login)
 	if err != nil {
 		t.Fatal(err)
 	}
 	cmd := exec.CommandContext(ctx, "gh", "api", "--hostname", "github.com", "--method", "GET", endpoint, "--jq", field)
-	cmd.Env = append(os.Environ(), "GH_PROMPT_DISABLED=1", "GH_TOKEN="+token)
+	cmd.Env = append(liveGHAuthEnv(), "GH_TOKEN="+token)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("gh api %s: %v: %s", endpoint, err, strings.TrimSpace(string(output)))
