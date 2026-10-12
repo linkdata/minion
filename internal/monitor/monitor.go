@@ -304,10 +304,10 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			}
 			m.logf("run %s from @%s in %s #%d", cmd.Action, item.Author.Login, repo.Name, number)
 			if err := m.Executor.Execute(ctx, job); err != nil {
-				if errors.Is(err, workroot.ErrUnsafe) && !errors.Is(err, ErrPostCodexPublication) {
-					jobFailure.Attempts--
-				} else if errors.Is(err, ErrTerminalJob) {
+				if errors.Is(err, ErrTerminalJob) {
 					jobFailure.Attempts = maxJobAttempts
+				} else if errors.Is(err, workroot.ErrUnsafe) && !errors.Is(err, ErrPostCodexPublication) {
+					jobFailure.Attempts--
 				} else if !errors.Is(err, ErrPostCodexPublication) && infrastructureFailure(err) {
 					jobFailure.Attempts--
 				}

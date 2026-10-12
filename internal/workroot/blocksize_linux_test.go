@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func TestFilesystemBlockSize(t *testing.T) {
+func TestFilesystemStats(t *testing.T) {
 	for _, tt := range []struct {
 		name string
 		stat syscall.Statfs_t
@@ -19,7 +19,8 @@ func TestFilesystemBlockSize(t *testing.T) {
 		{"invalid fragment size", syscall.Statfs_t{Bsize: 4096, Frsize: -1}, -1},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := filesystemBlockSize(tt.stat); got != tt.want {
+			_, _, got := filesystemStats(tt.stat)
+			if got != tt.want {
 				t.Fatalf("filesystem block size = %d, want %d", got, tt.want)
 			}
 		})

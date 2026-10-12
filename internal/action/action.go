@@ -35,11 +35,14 @@ var modelLineBreaks = strings.NewReplacer(
 )
 
 type Executor struct {
-	GitHub        *github.Client
-	BotLogin      string
-	Store         *state.Store
-	Usage         *usage.Store
-	WorkRoot      string
+	GitHub   *github.Client
+	BotLogin string
+	Store    *state.Store
+	Usage    *usage.Store
+	WorkRoot string
+	// CheckWorkRoot verifies the work filesystem before a job and after failure.
+	//
+	// A nil function disables these checks.
 	CheckWorkRoot func() error
 	Timeout       time.Duration
 	Codex         config.CodexConfig

@@ -52,11 +52,11 @@ func Check(workRoot, statePath string, maxBytes int64) error {
 	if err := syscall.Statfs(workRoot, &stat); err != nil {
 		return fmt.Errorf("%w: statfs work_root: %v", ErrUnsafe, err)
 	}
-	blockSize := filesystemBlockSize(stat)
-	if err := validateCapacity(stat.Blocks, blockSize, maxBytes); err != nil {
+	blocks, available, blockSize := filesystemStats(stat)
+	if err := validateCapacity(blocks, blockSize, maxBytes); err != nil {
 		return fmt.Errorf("%w: %s exceeds work_root_max_bytes (%d bytes) or has unknown capacity", ErrUnsafe, workRoot, maxBytes)
 	}
-	if err := validateFreeSpace(stat.Bavail, blockSize); err != nil {
+	if err := validateFreeSpace(available, blockSize); err != nil {
 		return fmt.Errorf("%w: %s has less than %d bytes free", ErrUnsafe, workRoot, minFreeBytes)
 	}
 	return nil

@@ -369,7 +369,7 @@ func TestRunOnceDoesNotExhaustJobsWhenWorkRootFills(t *testing.T) {
 	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
 	item := github.Item{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}, HTMLURL: "https://github.com/example-owner/example-repo/pull/7#issuecomment-1"}
 	gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}, items: []github.Item{item}, permission: github.Permission{Permission: "write"}}
-	executor := &fakeExecutor{executeErr: errors.Join(ErrTerminalJob, workroot.ErrUnsafe)}
+	executor := &fakeExecutor{executeErr: workroot.ErrUnsafe}
 	store := openState(t, now.Add(-time.Minute))
 	clock := now
 	m := &Monitor{Config: testConfig(), GitHub: gh, Executor: executor, Now: func() time.Time { return clock }}
@@ -384,6 +384,25 @@ func TestRunOnceDoesNotExhaustJobsWhenWorkRootFills(t *testing.T) {
 	}
 	if len(executor.jobs) != maxJobAttempts+1 || len(gh.comments) != 0 || store.Data.JobFailures[executor.jobs[0].ID].Attempts != 0 {
 		t.Fatalf("full work root consumed retry limit: jobs=%d comments=%d state=%+v", len(executor.jobs), len(gh.comments), store.Data)
+	}
+}
+
+func TestRunOnceKeepsTerminalFailureWhenWorkRootFills(t *testing.T) {
+	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	item := github.Item{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}, HTMLURL: "https://github.com/example-owner/example-repo/pull/7#issuecomment-1"}
+	gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}, items: []github.Item{item}, permission: github.Permission{Permission: "write"}}
+	executor := &fakeExecutor{executeErr: errors.Join(ErrTerminalJob, workroot.ErrUnsafe)}
+	store := openState(t, now.Add(-time.Minute))
+	m := &Monitor{Config: testConfig(), GitHub: gh, Executor: executor, Now: func() time.Time { return now }}
+	if _, err := m.RunOnce(context.Background(), store); err != nil {
+		t.Fatal(err)
+	}
+	if len(executor.jobs) != 1 || len(gh.comments) != 1 || len(store.Data.Processed) != 1 {
+		t.Fatalf("terminal job reran or lacked a failure reply: jobs=%d replies=%d state=%+v", len(executor.jobs), len(gh.comments), store.Data)
+	}
+	m.Now = func() time.Time { return now.Add(time.Minute) }
+	if _, err := m.RunOnce(context.Background(), store); err != nil || len(executor.jobs) != 1 || len(gh.comments) != 1 {
+		t.Fatalf("terminal job retried after completion: err=%v jobs=%d replies=%d", err, len(executor.jobs), len(gh.comments))
 	}
 }
 

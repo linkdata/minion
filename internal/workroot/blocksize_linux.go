@@ -4,10 +4,12 @@ package workroot
 
 import "syscall"
 
-func filesystemBlockSize(stat syscall.Statfs_t) int64 {
+func filesystemStats(stat syscall.Statfs_t) (blocks, available uint64, blockSize int64) {
 	// Linux counts blocks in Frsize units; older kernels may leave it zero.
 	if stat.Frsize != 0 {
-		return int64(stat.Frsize)
+		blockSize = int64(stat.Frsize)
+	} else {
+		blockSize = int64(stat.Bsize)
 	}
-	return int64(stat.Bsize)
+	return stat.Blocks, stat.Bavail, blockSize
 }
