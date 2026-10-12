@@ -9,16 +9,18 @@ import (
 	"syscall"
 )
 
-const (
-	DefaultMaxBytes int64 = 8 << 30
-	minFreeBytes    int64 = 64 << 20
-)
+// DefaultMaxBytes is the default capacity limit for the work filesystem.
+const DefaultMaxBytes int64 = 8 << 30
 
+const minFreeBytes int64 = 64 << 20
+
+// ErrUnsafe indicates that the work filesystem fails a safety check.
 var ErrUnsafe = errors.New("work_root is not a bounded, separate filesystem")
 
-// Check requires an existing mount at workRoot whose total capacity is within
-// maxBytes. The state directory must be on another filesystem. Call before
-// startup and each job so a missing mount cannot spill writes onto its parent.
+// Check verifies that workRoot is bounded and separate from statePath.
+//
+// The mount must exist, have capacity at most maxBytes, and have at least
+// 64 MiB free. It returns an error matching [ErrUnsafe] if any check fails.
 func Check(workRoot, statePath string, maxBytes int64) error {
 	if maxBytes <= 0 {
 		return fmt.Errorf("%w: work_root_max_bytes must be positive", ErrUnsafe)
@@ -50,10 +52,11 @@ func Check(workRoot, statePath string, maxBytes int64) error {
 	if err := syscall.Statfs(workRoot, &stat); err != nil {
 		return fmt.Errorf("%w: statfs work_root: %v", ErrUnsafe, err)
 	}
-	if err := validateCapacity(stat.Blocks, stat.Bsize, maxBytes); err != nil {
+	blockSize := filesystemBlockSize(stat)
+	if err := validateCapacity(stat.Blocks, blockSize, maxBytes); err != nil {
 		return fmt.Errorf("%w: %s exceeds work_root_max_bytes (%d bytes) or has unknown capacity", ErrUnsafe, workRoot, maxBytes)
 	}
-	if err := validateFreeSpace(stat.Bavail, stat.Bsize); err != nil {
+	if err := validateFreeSpace(stat.Bavail, blockSize); err != nil {
 		return fmt.Errorf("%w: %s has less than %d bytes free", ErrUnsafe, workRoot, minFreeBytes)
 	}
 	return nil
