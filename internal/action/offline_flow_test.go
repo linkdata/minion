@@ -201,7 +201,11 @@ func TestOfflineReviewPollRecoversAfterPublication(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() {
+		if err := store.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
 	if len(store.Data.Processed) != 0 {
 		t.Fatalf("crash simulation retained completion checkpoint: %v", store.Data.Processed)
 	}

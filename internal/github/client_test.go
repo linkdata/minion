@@ -22,7 +22,7 @@ func testClient(server *httptest.Server) *Client {
 
 func TestGitTreeUsesExactSHAAndBoundsResponse(t *testing.T) {
 	sha := strings.Repeat("a", 40)
-	response := fmt.Sprintf(`{"sha":%q,"truncated":false,"tree":[{"path":"file","type":"blob","size":23}]}`, sha)
+	response := fmt.Sprintf(`{"sha":%q,"truncated":false,"tree":[{"path":"file","type":"blob","mode":"100644","size":23}]}`, sha)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.Path != "/repos/o/r/git/trees/"+sha || r.URL.Query().Get("recursive") != "1" {
 			t.Errorf("unexpected tree request: %s %s", r.Method, r.URL.String())
@@ -32,7 +32,7 @@ func TestGitTreeUsesExactSHAAndBoundsResponse(t *testing.T) {
 	defer server.Close()
 	client := testClient(server)
 	tree, err := client.GitTree(context.Background(), "o/r", sha)
-	if err != nil || tree.SHA != sha || len(tree.Tree) != 1 || tree.Tree[0].Size == nil || *tree.Tree[0].Size != 23 {
+	if err != nil || tree.SHA != sha || len(tree.Tree) != 1 || tree.Tree[0].Mode != "100644" || tree.Tree[0].Size == nil || *tree.Tree[0].Size != 23 {
 		t.Fatalf("GitTree() = (%+v, %v)", tree, err)
 	}
 	if _, err := client.GitTree(context.Background(), "o/r", strings.Repeat("/", 40)); err == nil {

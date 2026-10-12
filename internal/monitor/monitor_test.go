@@ -132,7 +132,11 @@ func openState(t *testing.T, initial time.Time) *state.Store {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = s.Close() })
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 	return s
 }
 
@@ -416,7 +420,11 @@ func TestRunOnceRetriesFailedThreadAfterCursorAdvances(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() {
+		if err := store.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
 	gh.notifications = nil
 	clock = clock.Add(time.Minute)
 	if _, err := m.RunOnce(context.Background(), store); err == nil {

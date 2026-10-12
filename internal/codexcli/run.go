@@ -26,7 +26,7 @@ const (
 )
 
 // ErrOutputLimit means a bounded Codex run cannot complete with this output.
-var ErrOutputLimit = errors.New("Codex output limit exceeded")
+var ErrOutputLimit = errors.New("codex output limit exceeded")
 
 type Result struct {
 	Answer        string
