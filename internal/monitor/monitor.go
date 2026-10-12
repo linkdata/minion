@@ -134,6 +134,11 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 	var failures []error
 	var polled []string
 	for _, repo := range m.Config.Repositories {
+		owner, _, _ := strings.Cut(repo.Name, "/")
+		if !m.Config.AllowsOwner(owner, repo.OwnerID) {
+			m.logf("skip %s notifications: owner differs from allowed_owner_ids pin", repo.Name)
+			continue
+		}
 		since := store.Data.RepositoryCursors[repo.Name]
 		notifications, githubInterval, err := m.GitHub.ListRepositoryNotifications(ctx, repo.Name, since)
 		if githubInterval > minInterval {
@@ -190,6 +195,12 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		notification := entry.notification
 		repo, ok := m.Config.Repository(notification.Repository.FullName)
 		if !ok {
+			delete(store.Data.PendingNotifications, entry.key)
+			continue
+		}
+		owner, _, _ := strings.Cut(repo.Name, "/")
+		if !m.Config.AllowsOwner(owner, repo.OwnerID) {
+			m.logf("skip %s notification %s: owner differs from allowed_owner_ids pin", repo.Name, notification.ID)
 			delete(store.Data.PendingNotifications, entry.key)
 			continue
 		}
@@ -509,12 +520,13 @@ func (m *Monitor) acceptWhitelistedInvitations(ctx context.Context) error {
 			(monitored && !monitoredRepo.MatchesIdentity(invite.Repository.ID, invite.Repository.Owner.ID)) {
 			continue
 		}
-		allowed := monitored
+		ownerAllowed := m.Config.AllowsOwner(owner, invite.Repository.Owner.ID)
+		allowed := monitored && ownerAllowed
 		ownerListed := false
 		for _, allowedOwner := range m.Config.InvitationOwners {
 			if strings.EqualFold(owner, allowedOwner) {
 				ownerListed = true
-				if m.Config.InvitationOwnerIDs[allowedOwner] == invite.Repository.Owner.ID {
+				if ownerAllowed && m.Config.InvitationOwnerIDs[allowedOwner] == invite.Repository.Owner.ID {
 					allowed = true
 				}
 				break
@@ -525,6 +537,9 @@ func (m *Monitor) acceptWhitelistedInvitations(ctx context.Context) error {
 		}
 		if !allowed {
 			knownIdentity := ownerListed
+			for _, id := range m.Config.AllowedOwnerIDs {
+				knownIdentity = knownIdentity || id == invite.Repository.Owner.ID
+			}
 			for _, id := range m.Config.InvitationOwnerIDs {
 				knownIdentity = knownIdentity || id == invite.Repository.Owner.ID
 			}

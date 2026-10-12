@@ -210,6 +210,7 @@ func testConfig() config.Config {
 	return config.Config{
 		BotLogin:            "linkdataminion",
 		PollIntervalSeconds: 60,
+		AllowedOwnerIDs:     map[string]int64{"example-owner": 2},
 		Repositories: []config.Repository{{
 			Name: "example-owner/example-repo", ID: 1, OwnerID: 2, Actions: []string{"review", "fix", "release"},
 		}},
@@ -276,6 +277,7 @@ func TestRunOnceKeepsFailedRepositoryWindowAndRetriesPendingThreads(t *testing.T
 		},
 	}
 	cfg := testConfig()
+	cfg.AllowedOwnerIDs = map[string]int64{"a": 2, "b": 2}
 	cfg.Repositories = []config.Repository{{Name: "a/one", ID: 1, OwnerID: 2, Actions: []string{"review"}}, {Name: "b/two", ID: 1, OwnerID: 2, Actions: []string{"review"}}}
 	executor := &fakeExecutor{}
 	clock := now
@@ -328,6 +330,7 @@ func TestRunOnceSeedsNewRepositoryFromCurrentCursor(t *testing.T) {
 		t.Fatalf("cursor did not advance: %s", advanced)
 	}
 	m.Config.Repositories = append(m.Config.Repositories, config.Repository{Name: "b/two", ID: 1, OwnerID: 2, Actions: []string{"review"}})
+	m.Config.AllowedOwnerIDs["b"] = 2
 	gh.notifications = []github.Notification{{
 		Repository: github.Repository{FullName: "b/two"},
 		Subject:    github.Subject{Type: "Issue", URL: "https://api.github.com/repos/b/two/issues/9"},
@@ -688,6 +691,7 @@ func TestRunOnceRetriesFailedThreadAfterCursorAdvances(t *testing.T) {
 		},
 	}
 	cfg := testConfig()
+	cfg.AllowedOwnerIDs["other"] = 4
 	cfg.Repositories = append(cfg.Repositories, config.Repository{Name: "other/repo", ID: 1, OwnerID: 4, Actions: []string{"review"}})
 	var logs bytes.Buffer
 	path := filepath.Join(t.TempDir(), "state.json")
@@ -851,6 +855,7 @@ func TestAcceptOnlyWhitelistedInvitations(t *testing.T) {
 		}
 	}
 	config := testConfig()
+	config.AllowedOwnerIDs["another-owner"] = 3
 	config.InvitationOwners = []string{"example-owner", "another-owner"}
 	config.InvitationOwnerIDs = map[string]int64{"example-owner": 2, "another-owner": 3}
 	m := &Monitor{Config: config, GitHub: gh}
@@ -941,6 +946,7 @@ func TestMonitoredRepositoryStillRequiresWriteInvitation(t *testing.T) {
 		{ID: 3, Repository: github.Repository{FullName: "another-owner/unknown-role", Owner: github.User{Login: "another-owner"}}, Permissions: "superadmin"},
 	}}
 	config := testConfig()
+	config.AllowedOwnerIDs["another-owner"] = 3
 	config.InvitationOwners = []string{"example-owner", "another-owner"}
 	config.InvitationOwnerIDs = map[string]int64{"example-owner": 2, "another-owner": 3}
 	m := &Monitor{Config: config, GitHub: gh}
@@ -963,6 +969,7 @@ func TestInvitationOwnerDoesNotAuthorizeCommands(t *testing.T) {
 		items: []github.Item{{Key: "comment:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}}},
 	}
 	config := testConfig()
+	config.AllowedOwnerIDs["another-owner"] = 3
 	config.InvitationOwners = []string{"example-owner", "another-owner"}
 	config.InvitationOwnerIDs = map[string]int64{"example-owner": 2, "another-owner": 3}
 	executor := &fakeExecutor{}
@@ -1132,6 +1139,62 @@ func TestReclaimedRepositoryCannotTriggerCommandOrRetry(t *testing.T) {
 				t.Fatalf("untrusted repository reached command path: threads=%d checks=%d reactions=%v jobs=%v pending=%v", gh.threadCalls, gh.checks, gh.reactions, executor.jobs, store.Data.PendingNotifications)
 			}
 		})
+	}
+}
+
+func TestDisallowedOwnerCannotPollOrRunCommand(t *testing.T) {
+	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	for _, ownerIDs := range []map[string]int64{nil, {"example-owner": 9}} {
+		gh := &fakeGitHub{
+			notifications: []github.Notification{testNotification(now)},
+			items:         []github.Item{{Key: "comment:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}}},
+			permission:    github.Permission{Permission: "write"},
+		}
+		cfg := testConfig()
+		cfg.AllowedOwnerIDs = ownerIDs
+		executor := &fakeExecutor{}
+		m := &Monitor{Config: cfg, GitHub: gh, Executor: executor, Now: func() time.Time { return now }}
+		if _, err := m.RunOnce(context.Background(), openState(t, now.Add(-time.Minute))); err != nil {
+			t.Fatal(err)
+		}
+		if len(gh.notificationCalls) != 0 || gh.threadCalls != 0 || gh.checks != 0 || len(gh.reactions) != 0 || len(executor.jobs) != 0 {
+			t.Fatalf("disallowed owner reached command path: polls=%v threads=%d checks=%d reactions=%v jobs=%v", gh.notificationCalls, gh.threadCalls, gh.checks, gh.reactions, executor.jobs)
+		}
+	}
+}
+
+func TestDisallowedOwnerCannotAcceptInvitation(t *testing.T) {
+	for _, ownerIDs := range []map[string]int64{nil, {"example-owner": 9}} {
+		cfg := testConfig()
+		cfg.AllowedOwnerIDs = ownerIDs
+		cfg.InvitationOwners = []string{"example-owner"}
+		cfg.InvitationOwnerIDs = map[string]int64{"example-owner": 2}
+		gh := &fakeGitHub{invitations: []github.Invitation{
+			{ID: 1, Repository: github.Repository{FullName: "example-owner/example-repo", Owner: github.User{Login: "example-owner"}}, Permissions: "write"},
+			{ID: 2, Repository: github.Repository{FullName: "example-owner/new-repo", Owner: github.User{Login: "example-owner"}}, Permissions: "write"},
+		}}
+		m := &Monitor{Config: cfg, GitHub: gh}
+		if err := m.acceptWhitelistedInvitations(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if len(gh.accepted) != 0 || len(gh.declined) != 0 || len(m.Config.Repositories) != 1 {
+			t.Fatalf("disallowed owner invitation changed: accepted=%v declined=%v repos=%v", gh.accepted, gh.declined, m.Config.Repositories)
+		}
+	}
+}
+
+func TestAllowedOwnerWithoutInvitationOptInStaysPending(t *testing.T) {
+	cfg := testConfig()
+	cfg.AllowedOwnerIDs["trusted"] = 5
+	gh := &fakeGitHub{invitations: []github.Invitation{{
+		ID: 7, Repository: github.Repository{ID: 50, FullName: "trusted/new", Owner: github.User{ID: 5, Login: "trusted"}}, Permissions: "write",
+	}}}
+	m := &Monitor{Config: cfg, GitHub: gh}
+	if err := m.acceptWhitelistedInvitations(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(gh.accepted) != 0 || len(gh.declined) != 0 || len(m.Config.Repositories) != 1 {
+		t.Fatalf("unlisted trusted-owner invitation was handled: accepted=%v declined=%v repos=%v", gh.accepted, gh.declined, m.Config.Repositories)
 	}
 }
 

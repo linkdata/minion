@@ -44,18 +44,22 @@ func (c CodexConfig) SecurityAuditSkill() string {
 	return ""
 }
 
+// Config describes the bot, selected repositories, and identity pins.
 type Config struct {
-	BotLogin            string           `json:"bot_login"`
-	Codex               CodexConfig      `json:"codex,omitempty"`
-	PollIntervalSeconds int              `json:"poll_interval_seconds,omitempty"`
-	JobTimeoutMinutes   int              `json:"job_timeout_minutes,omitempty"`
-	StatePath           string           `json:"state_path,omitempty"`
-	WorkRoot            string           `json:"work_root,omitempty"`
-	WorkRootMaxBytes    int64            `json:"work_root_max_bytes,omitempty"`
-	StartAt             string           `json:"start_at,omitempty"`
-	InvitationOwners    []string         `json:"invitation_owners,omitempty"`
-	InvitationOwnerIDs  map[string]int64 `json:"invitation_owner_ids,omitempty"`
-	Repositories        []Repository     `json:"repositories"`
+	BotLogin            string      `json:"bot_login"`
+	Codex               CodexConfig `json:"codex,omitempty"`
+	PollIntervalSeconds int         `json:"poll_interval_seconds,omitempty"`
+	JobTimeoutMinutes   int         `json:"job_timeout_minutes,omitempty"`
+	StatePath           string      `json:"state_path,omitempty"`
+	WorkRoot            string      `json:"work_root,omitempty"`
+	WorkRootMaxBytes    int64       `json:"work_root_max_bytes,omitempty"`
+	StartAt             string      `json:"start_at,omitempty"`
+	// AllowedOwnerIDs maps trusted owner logins to immutable GitHub IDs.
+	// An empty map denies all owners.
+	AllowedOwnerIDs    map[string]int64 `json:"allowed_owner_ids"`
+	InvitationOwners   []string         `json:"invitation_owners,omitempty"`
+	InvitationOwnerIDs map[string]int64 `json:"invitation_owner_ids,omitempty"`
+	Repositories       []Repository     `json:"repositories"`
 }
 
 // Load reads and validates configuration.
@@ -99,7 +103,8 @@ func decode(r io.Reader) (Config, error) {
 
 // Validate checks configuration and resolves paths relative to configDir.
 //
-// It normalizes repository names, account logins, and identity pin keys.
+// It normalizes repository names, account logins, and identity pin keys. Every
+// selected repository and invitation owner must match an [Config.AllowedOwnerIDs] pin.
 func (c *Config) Validate(configDir string) error {
 	if c.BotLogin == "" {
 		return fmt.Errorf("bot_login is required")
@@ -182,6 +187,19 @@ func (c *Config) Validate(configDir string) error {
 	if len(c.Repositories) == 0 {
 		return fmt.Errorf("repositories must contain at least one repository")
 	}
+	allowedOwnerIDs, err := normalizeIDPins(c.AllowedOwnerIDs)
+	if err != nil {
+		return fmt.Errorf("allowed_owner_ids: %w", err)
+	}
+	if len(allowedOwnerIDs) == 0 {
+		return fmt.Errorf("allowed_owner_ids is required: pin each trusted repository owner before starting")
+	}
+	for owner, id := range allowedOwnerIDs {
+		if len(owner) > 39 || !ownerNamePattern.MatchString(owner) || id <= 0 {
+			return fmt.Errorf("allowed_owner_ids: %q requires a valid GitHub login and positive ID", owner)
+		}
+	}
+	c.AllowedOwnerIDs = allowedOwnerIDs
 	ownerIDs, err := normalizeIDPins(c.InvitationOwnerIDs)
 	if err != nil {
 		return fmt.Errorf("invitation_owner_ids: %w", err)
@@ -201,6 +219,9 @@ func (c *Config) Validate(configDir string) error {
 		if c.InvitationOwnerIDs[owner] <= 0 {
 			return fmt.Errorf("invitation owner %q requires a positive invitation_owner_ids pin", owner)
 		}
+		if !c.AllowsOwner(owner, c.InvitationOwnerIDs[owner]) {
+			return fmt.Errorf("invitation owner %q must match an allowed_owner_ids pin", owner)
+		}
 	}
 	if len(c.InvitationOwnerIDs) != len(c.InvitationOwners) {
 		return fmt.Errorf("invitation_owner_ids must match invitation_owners exactly")
@@ -217,8 +238,8 @@ func (c *Config) Validate(configDir string) error {
 			return fmt.Errorf("%s: id and owner_id must be positive GitHub IDs", repo.Name)
 		}
 		owner, _, _ := strings.Cut(repo.Name, "/")
-		if pinned, ok := c.InvitationOwnerIDs[owner]; ok && pinned != repo.OwnerID {
-			return fmt.Errorf("%s: owner_id conflicts with invitation_owner_ids pin for %s", repo.Name, owner)
+		if !c.AllowsOwner(owner, repo.OwnerID) {
+			return fmt.Errorf("%s: owner_id must match an allowed_owner_ids pin for %s", repo.Name, owner)
 		}
 		if seen[repo.Name] {
 			return fmt.Errorf("duplicate repository %q", repo.Name)
@@ -272,6 +293,13 @@ func normalizeIDPins(pins map[string]int64) (map[string]int64, error) {
 		normalized[login] = id
 	}
 	return normalized, nil
+}
+
+// AllowsOwner reports whether a GitHub owner login and ID match the configured pin.
+//
+// It returns false when no positive pin matches.
+func (c Config) AllowsOwner(login string, id int64) bool {
+	return id > 0 && c.AllowedOwnerIDs[strings.ToLower(login)] == id
 }
 
 func (c Config) Repository(name string) (Repository, bool) {

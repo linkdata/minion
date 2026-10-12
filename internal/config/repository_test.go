@@ -11,7 +11,7 @@ import (
 func TestAddRepositoryPreservesSettingsAndExistingRestrictions(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
-	data := []byte(`{"bot_login":"linkdataminion","codex":{"model":"user-model","reasoning_effort":"user-effort"},"state_path":"relative/state.json","repositories":[{"name":"example-owner/example-repo","id":1,"owner_id":2,"actions":["review"],"allowed_actors":["alice"],"allowed_actor_ids":{"alice":7}}]}`)
+	data := []byte(`{"bot_login":"linkdataminion","allowed_owner_ids":{"example-owner":2},"codex":{"model":"user-model","reasoning_effort":"user-effort"},"state_path":"relative/state.json","repositories":[{"name":"example-owner/example-repo","id":1,"owner_id":2,"actions":["review"],"allowed_actors":["alice"],"allowed_actor_ids":{"alice":7}}]}`)
 	if err := os.WriteFile(path, data, 0640); err != nil {
 		t.Fatal(err)
 	}
@@ -49,6 +49,9 @@ func TestAddRepositoryPreservesSettingsAndExistingRestrictions(t *testing.T) {
 	}
 	if _, err := AddRepository(path, Repository{Name: "example-owner/../bad", Actions: []string{"fix"}}); err == nil {
 		t.Fatal("accepted invalid repository")
+	}
+	if _, err := AddRepository(path, Repository{Name: "outsider/repo", ID: 4, OwnerID: 5, Actions: []string{"review"}}); err == nil {
+		t.Fatal("registered a repository outside allowed_owner_ids")
 	}
 	after, err = os.ReadFile(path)
 	if err != nil || !bytes.Equal(updated, after) {

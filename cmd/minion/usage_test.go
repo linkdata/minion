@@ -113,7 +113,7 @@ func TestUsageDetailsAndTables(t *testing.T) {
 func TestUsageConfigAndEmptyDirectory(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
-	if err := os.WriteFile(path, []byte(`{"bot_login":"test","state_path":"custom/state.json","repositories":[{"name":"example-owner/example-repo","id":1,"owner_id":2,"actions":["review"]}]}`), 0600); err != nil {
+	if err := os.WriteFile(path, []byte(`{"bot_login":"test","state_path":"custom/state.json","allowed_owner_ids":{"example-owner":2},"repositories":[{"name":"example-owner/example-repo","id":1,"owner_id":2,"actions":["review"]}]}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	output := reportJSON(t, "-config", path)
@@ -149,7 +149,7 @@ func TestUsageDefaultsToLocalConfig(t *testing.T) {
 	if err := os.WriteFile("config.json", []byte("sample cannot be used as live config"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile("config.local.json", []byte(`{"bot_login":"example-bot","repositories":[{"name":"example-owner/example-repo","id":1,"owner_id":2,"actions":["review"]}]}`), 0600); err != nil {
+	if err := os.WriteFile("config.local.json", []byte(`{"bot_login":"example-bot","allowed_owner_ids":{"example-owner":2},"repositories":[{"name":"example-owner/example-repo","id":1,"owner_id":2,"actions":["review"]}]}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if output := reportJSON(t); output.Totals.Attempts != 0 {

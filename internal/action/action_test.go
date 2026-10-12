@@ -321,7 +321,8 @@ func TestReviewEchoDoesNotSuppressAuditInMonitor(t *testing.T) {
 		}
 	}()
 	m := monitor.Monitor{Config: config.Config{BotLogin: "linkdataminion", PollIntervalSeconds: 60,
-		Repositories: []config.Repository{{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"review", "audit"}, AllowedActors: []string{"writer"}, AllowedActorIDs: map[string]int64{"writer": 7}}}},
+		AllowedOwnerIDs: map[string]int64{"o": 2},
+		Repositories:    []config.Repository{{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"review", "audit"}, AllowedActors: []string{"writer"}, AllowedActorIDs: map[string]int64{"writer": 7}}}},
 		GitHub: monitorGitHub, Executor: executor, Now: func() time.Time { return now.Add(time.Minute) }}
 	if _, err := m.RunOnce(context.Background(), store); err != nil {
 		t.Fatal(err)
