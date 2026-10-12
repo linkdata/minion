@@ -168,7 +168,7 @@ func TestReviewEchoDoesNotSuppressAuditInMonitor(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/pulls/7":
 			_, _ = fmt.Fprintf(w, `{"title":"PR","base":{"ref":"main"},"head":{"sha":%q}}`, head)
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/o/r/git/trees/"):
-			_, _ = fmt.Fprintf(w, `{"sha":%q,"truncated":false,"tree":[{"path":"README.md","type":"blob","size":8}]}`, strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/"))
+			_, _ = fmt.Fprintf(w, `{"sha":%q,"truncated":false,"tree":[{"path":"README.md","type":"blob","mode":"100644","size":8}]}`, strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/"))
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7/comments":
 			_ = json.NewEncoder(w).Encode(comments)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/pulls/7/comments":
