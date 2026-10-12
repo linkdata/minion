@@ -19,8 +19,21 @@ import (
 )
 
 const (
-	liveCommentQuery = `query($id: ID!) { node(id: $id) { ... on Comment { body author { login ... on User { id: databaseId } } editor { login } lastEditedAt } } }`
-	liveIssueQuery   = `query($id: ID!) { node(id: $id) { ... on Issue { title bodyText lastEditedAt } } }`
+	liveCommentQuery        = `query($id: ID!) { node(id: $id) { ... on Comment { body author { login ... on User { id: databaseId } } editor { login } lastEditedAt } } }`
+	liveIssueQuery          = `query($id: ID!) { node(id: $id) { ... on Issue { title bodyText lastEditedAt } } }`
+	liveReviewTimelineQuery = `query($owner: String!, $name: String!, $number: Int!, $since: DateTime, $after: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      timelineItems(first: 100, after: $after, since: $since, itemTypes: [PULL_REQUEST_REVIEW]) {
+        nodes { ... on PullRequestReview {
+          id fullDatabaseId body state submittedAt url
+          author { login ... on User { id: databaseId } }
+        } }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}`
 )
 
 type liveReadOnlyTransport struct {
@@ -61,7 +74,7 @@ func (transport liveReadOnlyTransport) RoundTrip(request *http.Request) (*http.R
 		return nil, fmt.Errorf("live test blocked invalid GraphQL request: %w", err)
 	}
 	switch input.Query {
-	case liveCommentQuery, liveIssueQuery:
+	case liveCommentQuery, liveIssueQuery, liveReviewTimelineQuery:
 	default:
 		return nil, errors.New("live test blocked unapproved GraphQL operation")
 	}
@@ -198,6 +211,7 @@ func TestReadOnlyTransportGuard(t *testing.T) {
 		{"REST read", http.MethodGet, "https://api.github.com/user", "", true},
 		{"comment query", http.MethodPost, "https://api.github.com/graphql", `{"query":` + strconv.Quote(liveCommentQuery) + `}`, true},
 		{"issue query", http.MethodPost, "https://api.github.com/graphql", `{"query":` + strconv.Quote(liveIssueQuery) + `}`, true},
+		{"review timeline query", http.MethodPost, "https://api.github.com/graphql", `{"query":` + strconv.Quote(liveReviewTimelineQuery) + `}`, true},
 		{"REST write", http.MethodPost, "https://api.github.com/repos/o/r/issues", `{}`, false},
 		{"GraphQL mutation", http.MethodPost, "https://api.github.com/graphql", `{"query":"mutation { deleteRepository(input: {}) { clientMutationId } }"}`, false},
 		{"GraphQL query parameters", http.MethodPost, "https://api.github.com/graphql?operationName=Delete", `{"query":` + strconv.Quote(liveIssueQuery) + `}`, false},
