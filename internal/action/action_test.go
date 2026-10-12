@@ -513,6 +513,52 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 	}
 }
 
+func TestReviewMarksOnlyPostCodexPublicationFailure(t *testing.T) {
+	_, head := auditGitFixture(t)
+	job := monitor.Job{Repository: config.Repository{Name: "o/r"}, SubjectType: "PullRequest", Number: 7,
+		ID: strings.Repeat("a", 64), Source: github.Item{Author: github.User{Login: "writer"}}}
+	repoFail := true
+	var codexRuns, postCalls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
+			if repoFail {
+				http.Error(w, "unavailable", http.StatusBadGateway)
+				return
+			}
+			_, _ = fmt.Fprint(w, `{"full_name":"o/r","default_branch":"main"}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/pulls/7":
+			_, _ = fmt.Fprintf(w, `{"base":{"ref":"main"},"head":{"sha":%q}}`, head)
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/o/r/git/trees/"):
+			sha := strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/")
+			_, _ = fmt.Fprintf(w, `{"sha":%q,"truncated":false,"tree":[]}`, sha)
+		case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/pulls/7/reviews":
+			postCalls++
+			http.Error(w, "unavailable", http.StatusBadGateway)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	client := github.New("test-token")
+	client.BaseURL, client.HTTPClient = server.URL, server.Client()
+	executor := &Executor{GitHub: client, BotLogin: "linkdataminion", WorkRoot: t.TempDir(),
+		RunCodex: func(context.Context, string, string, bool, string) (codexcli.Result, error) {
+			codexRuns++
+			return codexcli.Result{Answer: "No findings."}, nil
+		}}
+	err := executor.review(context.Background(), job)
+	if err == nil || errors.Is(err, monitor.ErrPostCodexPublication) || codexRuns != 0 {
+		t.Fatalf("pre-Codex outage: err=%v runs=%d", err, codexRuns)
+	}
+	repoFail = false
+	err = executor.review(context.Background(), job)
+	if !errors.Is(err, monitor.ErrPostCodexPublication) || codexRuns != 1 || postCalls != 1 {
+		t.Fatalf("post-Codex outage: err=%v runs=%d posts=%d", err, codexRuns, postCalls)
+	}
+}
+
 func TestValidTagRejectsUnsafeGitRefs(t *testing.T) {
 	for _, tag := range []string{"v1.2.3", "release/v2"} {
 		if !validTag(tag) {
