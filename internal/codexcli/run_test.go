@@ -120,6 +120,58 @@ printf '%s\n' '{"type":"thread.started","thread_id":"test"}' '{"type":"item.comp
 	}
 }
 
+func TestRunRemovesRestrictedRuntimeDirectories(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions")
+	}
+	root := t.TempDir()
+	workspace := filepath.Join(root, "repo")
+	if err := os.Mkdir(workspace, 0700); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(root, "outside")
+	if err := os.Mkdir(outside, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "keep"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(outside, 0500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(outside, 0700) })
+	installFakeCodex(t, `#!/bin/sh
+mkdir "$TMPDIR/locked-000" "$TMPDIR/locked-500"
+touch "$TMPDIR/locked-000/file" "$TMPDIR/locked-500/file"
+chmod 000 "$TMPDIR/locked-000"
+chmod 500 "$TMPDIR/locked-500"
+ln -s ../outside "$TMPDIR/outside-link"
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}' '{"type":"turn.completed"}'
+`)
+	t.Cleanup(func() {
+		leftovers, _ := filepath.Glob(filepath.Join(root, ".minion-codex-*"))
+		for _, path := range leftovers {
+			_ = os.Chmod(filepath.Join(path, "locked-000"), 0700)
+			_ = os.Chmod(filepath.Join(path, "locked-500"), 0700)
+			_ = os.RemoveAll(path)
+		}
+	})
+	result, err := Run(context.Background(), workspace, "Review", false, "", config.CodexConfig{})
+	if err != nil || result.Answer != "done" {
+		t.Fatalf("Run() = %+v, %v; want the answer and successful cleanup", result, err)
+	}
+	leftovers, err := filepath.Glob(filepath.Join(root, ".minion-codex-*"))
+	if err != nil || len(leftovers) != 0 {
+		t.Fatalf("runtime directories remain: %v, %v", leftovers, err)
+	}
+	if info, err := os.Stat(outside); err != nil || info.Mode().Perm() != 0500 {
+		t.Fatalf("outside symlink target changed: %v, %v", info, err)
+	}
+	if _, err := os.Stat(filepath.Join(outside, "keep")); err != nil {
+		t.Fatalf("outside symlink target was removed: %v", err)
+	}
+}
+
 func TestRunPassesConfiguredModelEffortAndSkills(t *testing.T) {
 	dir := t.TempDir()
 	skillPath := filepath.Join(t.TempDir(), "SKILL.md")

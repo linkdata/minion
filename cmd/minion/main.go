@@ -21,6 +21,7 @@ import (
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/state"
 	"github.com/linkdata/minion/internal/usage"
+	"github.com/linkdata/minion/internal/workroot"
 )
 
 func main() {
@@ -40,6 +41,13 @@ func run() int {
 	if err != nil {
 		logger.Printf("config: %v", err)
 		return 2
+	}
+	checkWorkRoot := func() error {
+		return workroot.Check(cfg.WorkRoot, cfg.StatePath, cfg.WorkRootMaxBytes)
+	}
+	if err := checkWorkRoot(); err != nil {
+		logger.Printf("work root: %v", err)
+		return 1
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -97,14 +105,15 @@ func run() int {
 	}()
 
 	executor := &action.Executor{
-		GitHub:   client,
-		BotLogin: cfg.BotLogin,
-		Store:    store,
-		Usage:    &usage.Store{Dir: filepath.Join(filepath.Dir(cfg.StatePath), "usage")},
-		WorkRoot: cfg.WorkRoot,
-		Timeout:  time.Duration(cfg.JobTimeoutMinutes) * time.Minute,
-		Codex:    cfg.Codex,
-		Logger:   logger,
+		GitHub:        client,
+		BotLogin:      cfg.BotLogin,
+		Store:         store,
+		Usage:         &usage.Store{Dir: filepath.Join(filepath.Dir(cfg.StatePath), "usage")},
+		WorkRoot:      cfg.WorkRoot,
+		CheckWorkRoot: checkWorkRoot,
+		Timeout:       time.Duration(cfg.JobTimeoutMinutes) * time.Minute,
+		Codex:         cfg.Codex,
+		Logger:        logger,
 	}
 	watcher := &monitor.Monitor{Config: cfg, ConfigPath: *configPath, GitHub: client, Executor: executor, Logger: logger}
 	for {
@@ -165,10 +174,10 @@ func checkCodexCLI(ctx context.Context) error {
 
 func checkRepositories(ctx context.Context, client *github.Client, cfg config.Config, logger *log.Logger) error {
 	var problems []error
-	if _, _, err := client.ListNotifications(ctx, time.Now().UTC()); err != nil {
-		problems = append(problems, fmt.Errorf("cannot read account notifications: %w", err))
-	}
 	for _, repo := range cfg.Repositories {
+		if _, _, err := client.ListRepositoryNotifications(ctx, repo.Name, time.Now().UTC()); err != nil {
+			problems = append(problems, fmt.Errorf("%s: cannot read repository notifications: %w", repo.Name, err))
+		}
 		details, err := client.Repository(ctx, repo.Name)
 		if err != nil {
 			problems = append(problems, fmt.Errorf("%s: %w", repo.Name, err))

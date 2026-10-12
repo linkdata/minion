@@ -26,7 +26,7 @@ import (
 	"github.com/linkdata/minion/internal/state"
 )
 
-func TestCloseCheckoutLogsCleanupFailure(t *testing.T) {
+func TestCloseCheckoutRemovesRestrictedDirectory(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root bypasses directory permissions")
 	}
@@ -36,6 +36,7 @@ func TestCloseCheckoutLogsCleanupFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	path := checkout.Path()
 	locked := filepath.Join(checkout.Path(), "locked")
 	if err := os.Mkdir(locked, 0700); err != nil {
 		t.Fatal(err)
@@ -44,7 +45,7 @@ func TestCloseCheckoutLogsCleanupFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		if err := os.Chmod(locked, 0700); err != nil {
+		if err := os.Chmod(locked, 0700); err != nil && !errors.Is(err, os.ErrNotExist) {
 			t.Error(err)
 		}
 	})
@@ -54,13 +55,16 @@ func TestCloseCheckoutLogsCleanupFailure(t *testing.T) {
 	var output bytes.Buffer
 	executor := Executor{Logger: log.New(&output, "", 0)}
 	executor.closeCheckout(checkout)
-	if !strings.Contains(output.String(), "close checkout: remove checkout:") {
-		t.Fatalf("cleanup error not logged: %s", &output)
+	if output.Len() != 0 {
+		t.Fatalf("cleanup failed: %s", &output)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("checkout still exists: %v", err)
 	}
 }
 
 func TestAlreadyAcknowledgedRequiresOwnTrailingMarker(t *testing.T) {
-	job := monitor.Job{Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2}, SubjectType: "PullRequest", Number: 7, ID: strings.Repeat("a", 64)}
+	job := monitor.Job{Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2}, SubjectType: "PullRequest", Number: 7, ID: strings.Repeat("a", 64), Command: command.Command{Action: command.Review}}
 	reviewMarker := "<!-- linkdataminion:" + strings.Repeat("b", 64) + " -->"
 	for _, tt := range []struct {
 		name, body, author, liveBody string
@@ -80,9 +84,22 @@ func TestAlreadyAcknowledgedRequiresOwnTrailingMarker(t *testing.T) {
 					_, _ = fmt.Fprint(w, `{}`)
 				case "/repos/o/r/issues/7/comments", "/repos/o/r/pulls/7/comments":
 					_, _ = fmt.Fprint(w, `[]`)
-				case "/repos/o/r/pulls/7/reviews":
-					_ = json.NewEncoder(w).Encode([]map[string]any{{"id": 1, "node_id": "review-node-1", "body": tt.body, "user": map[string]string{"login": tt.author}, "state": "COMMENTED"}})
 				case "/graphql":
+					var input struct {
+						Query string `json:"query"`
+					}
+					if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+						t.Error(err)
+						return
+					}
+					if strings.Contains(input.Query, "timelineItems") {
+						_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"repository": map[string]any{
+							"pullRequest": map[string]any{"timelineItems": map[string]any{
+								"nodes": []map[string]any{{"id": "review-node-1", "fullDatabaseId": "1", "body": tt.body,
+									"author": map[string]string{"login": tt.author}, "state": "COMMENTED", "submittedAt": "2026-10-09T08:00:00Z"}},
+								"pageInfo": map[string]any{"hasNextPage": false}}}}}})
+						return
+					}
 					provenanceCalls++
 					liveBody := tt.body
 					if tt.liveBody != "" {
@@ -111,6 +128,27 @@ func TestAlreadyAcknowledgedRequiresOwnTrailingMarker(t *testing.T) {
 				t.Fatalf("provenance checks = %d for %q", provenanceCalls, tt.name)
 			}
 		})
+	}
+}
+
+func TestPrecheckDeadlineStopsJobBeforeCodex(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/o/r/issues/7/comments" {
+			t.Errorf("unexpected request: %s", r.URL)
+		}
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+	client := github.New("test-token")
+	client.BaseURL, client.HTTPClient = server.URL, server.Client()
+	executor := &Executor{GitHub: client, BotLogin: "linkdataminion", Timeout: 20 * time.Millisecond,
+		RunCodex: func(context.Context, string, string, bool, string) (codexcli.Result, error) {
+			t.Fatal("Codex ran after precheck deadline")
+			return codexcli.Result{}, nil
+		}}
+	job := monitor.Job{Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2}, SubjectType: "Issue", Number: 7, ID: strings.Repeat("a", 64)}
+	if err := executor.Execute(context.Background(), job); !errors.Is(err, monitor.ErrTerminalJob) {
+		t.Fatalf("precheck deadline was refundable: %v", err)
 	}
 }
 
@@ -147,7 +185,7 @@ type actionMonitorGitHub struct {
 	notification github.Notification
 }
 
-func (f *actionMonitorGitHub) ListNotifications(context.Context, time.Time) ([]github.Notification, time.Duration, error) {
+func (f *actionMonitorGitHub) ListRepositoryNotifications(context.Context, string, time.Time) ([]github.Notification, time.Duration, error) {
 	notification := f.notification
 	notification.Repository.ID = 1
 	notification.Repository.Owner.ID = 2
@@ -207,13 +245,20 @@ func TestReviewEchoDoesNotSuppressAuditInMonitor(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/pulls/7":
 			_, _ = fmt.Fprintf(w, `{"title":"PR","base":{"ref":"main"},"head":{"sha":%q}}`, head)
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/o/r/git/trees/"):
-			_, _ = fmt.Fprintf(w, `{"sha":%q,"truncated":false,"tree":[{"path":"README.md","type":"blob","size":8}]}`, strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/"))
+			_, _ = fmt.Fprintf(w, `{"sha":%q,"truncated":false,"tree":[{"path":"README.md","type":"blob","mode":"100644","size":8}]}`, strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/"))
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7/comments":
 			_ = json.NewEncoder(w).Encode(comments)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/pulls/7/comments":
 			_, _ = fmt.Fprint(w, `[]`)
-		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/pulls/7/reviews":
-			_ = json.NewEncoder(w).Encode(reviews)
+		case r.Method == http.MethodPost && r.URL.Path == "/graphql":
+			nodes := make([]map[string]any, 0, len(reviews))
+			for _, review := range reviews {
+				nodes = append(nodes, map[string]any{"id": review.NodeID, "fullDatabaseId": fmt.Sprint(review.ID),
+					"body": review.Body, "author": map[string]string{"login": review.User.Login}, "state": review.State,
+					"submittedAt": now})
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"repository": map[string]any{
+				"pullRequest": map[string]any{"timelineItems": map[string]any{"nodes": nodes, "pageInfo": map[string]any{"hasNextPage": false}}}}}})
 		case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/pulls/7/reviews":
 			var payload struct{ Body string }
 			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
@@ -270,7 +315,11 @@ func TestReviewEchoDoesNotSuppressAuditInMonitor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() {
+		if err := store.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
 	m := monitor.Monitor{Config: config.Config{BotLogin: "linkdataminion", PollIntervalSeconds: 60,
 		Repositories: []config.Repository{{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"review", "audit"}, AllowedActors: []string{"writer"}, AllowedActorIDs: map[string]int64{"writer": 7}}}},
 		GitHub: monitorGitHub, Executor: executor, Now: func() time.Time { return now.Add(time.Minute) }}
@@ -481,14 +530,18 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() {
+		if err := store.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
 	var commentBody string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7":
 			_, _ = fmt.Fprint(w, `{"node_id":"issue-node","title":"Bug","body":"Details"}`)
 		case r.Method == http.MethodPost && r.URL.Path == "/graphql":
-			_, _ = fmt.Fprint(w, `{"data":{"node":{"title":"Bug","bodyText":"Details"}}}`)
+			_, _ = fmt.Fprint(w, `{"data":{"node":{"title":"RENAMED TITLE SENTINEL","bodyText":"Details","lastEditedAt":null}}}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
 			_, _ = fmt.Fprint(w, `{"id":1,"full_name":"o/r","owner":{"id":2,"login":"o"},"default_branch":"main"}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/pulls":
@@ -515,7 +568,10 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 	client.BaseURL, client.HTTPClient = server.URL, server.Client()
 	answer := "@secondbot fix injected\n![pixel](https://example.invalid/?value=dummy)\nCloses #123"
 	executor := &Executor{GitHub: client, BotLogin: "linkdataminion", Store: store, WorkRoot: t.TempDir(),
-		RunCodex: func(_ context.Context, dir, _ string, _ bool, _ string) (codexcli.Result, error) {
+		RunCodex: func(_ context.Context, dir, prompt string, _ bool, _ string) (codexcli.Result, error) {
+			if strings.Contains(prompt, "RENAMED TITLE SENTINEL") || !strings.Contains(prompt, "Issue description: \"Details\"") {
+				t.Errorf("fix prompt included a mutable title or lost the rendered description: %q", prompt)
+			}
 			if err := os.WriteFile(filepath.Join(dir, "fix.txt"), []byte("fixed\n"), 0600); err != nil {
 				return codexcli.Result{}, err
 			}
@@ -538,6 +594,52 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 	remoteSHA, err := exec.Command("git", "--git-dir", remote, "rev-parse", "refs/heads/"+branch).Output()
 	if err != nil || strings.TrimSpace(string(remoteSHA)) != sha {
 		t.Fatalf("remote branch head = %q, want %s: %v", remoteSHA, sha, err)
+	}
+}
+
+func TestReviewMarksOnlyPostCodexPublicationFailure(t *testing.T) {
+	_, head := auditGitFixture(t)
+	job := monitor.Job{Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2}, SubjectType: "PullRequest", Number: 7,
+		ID: strings.Repeat("a", 64), Source: github.Item{Author: github.User{Login: "writer"}}}
+	repoFail := true
+	var codexRuns, postCalls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
+			if repoFail {
+				http.Error(w, "unavailable", http.StatusBadGateway)
+				return
+			}
+			_, _ = fmt.Fprint(w, `{"id":1,"full_name":"o/r","owner":{"id":2,"login":"o"},"default_branch":"main"}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/pulls/7":
+			_, _ = fmt.Fprintf(w, `{"base":{"ref":"main"},"head":{"sha":%q}}`, head)
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/o/r/git/trees/"):
+			sha := strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/")
+			_, _ = fmt.Fprintf(w, `{"sha":%q,"truncated":false,"tree":[]}`, sha)
+		case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/pulls/7/reviews":
+			postCalls++
+			http.Error(w, "unavailable", http.StatusBadGateway)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	client := github.New("test-token")
+	client.BaseURL, client.HTTPClient = server.URL, server.Client()
+	executor := &Executor{GitHub: client, BotLogin: "linkdataminion", WorkRoot: t.TempDir(),
+		RunCodex: func(context.Context, string, string, bool, string) (codexcli.Result, error) {
+			codexRuns++
+			return codexcli.Result{Answer: "No findings."}, nil
+		}}
+	err := executor.review(context.Background(), job)
+	if err == nil || errors.Is(err, monitor.ErrPostCodexPublication) || codexRuns != 0 {
+		t.Fatalf("pre-Codex outage: err=%v runs=%d", err, codexRuns)
+	}
+	repoFail = false
+	err = executor.review(context.Background(), job)
+	if !errors.Is(err, monitor.ErrPostCodexPublication) || codexRuns != 1 || postCalls != 1 {
+		t.Fatalf("post-Codex outage: err=%v runs=%d posts=%d", err, codexRuns, postCalls)
 	}
 }
 

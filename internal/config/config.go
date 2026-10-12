@@ -10,6 +10,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/linkdata/minion/internal/workroot"
 )
 
 var (
@@ -49,6 +51,7 @@ type Config struct {
 	JobTimeoutMinutes   int              `json:"job_timeout_minutes,omitempty"`
 	StatePath           string           `json:"state_path,omitempty"`
 	WorkRoot            string           `json:"work_root,omitempty"`
+	WorkRootMaxBytes    int64            `json:"work_root_max_bytes,omitempty"`
 	StartAt             string           `json:"start_at,omitempty"`
 	InvitationOwners    []string         `json:"invitation_owners,omitempty"`
 	InvitationOwnerIDs  map[string]int64 `json:"invitation_owner_ids,omitempty"`
@@ -94,6 +97,9 @@ func decode(r io.Reader) (Config, error) {
 	return cfg, nil
 }
 
+// Validate checks configuration and resolves paths relative to configDir.
+//
+// It normalizes repository names, account logins, and identity pin keys.
 func (c *Config) Validate(configDir string) error {
 	if c.BotLogin == "" {
 		return fmt.Errorf("bot_login is required")
@@ -156,6 +162,12 @@ func (c *Config) Validate(configDir string) error {
 	if c.WorkRoot == "" {
 		c.WorkRoot = "var/work"
 	}
+	if c.WorkRootMaxBytes == 0 {
+		c.WorkRootMaxBytes = workroot.DefaultMaxBytes
+	}
+	if c.WorkRootMaxBytes < 0 {
+		return fmt.Errorf("work_root_max_bytes must be positive")
+	}
 	if !filepath.IsAbs(c.StatePath) {
 		c.StatePath = filepath.Join(configDir, c.StatePath)
 	}
@@ -170,6 +182,11 @@ func (c *Config) Validate(configDir string) error {
 	if len(c.Repositories) == 0 {
 		return fmt.Errorf("repositories must contain at least one repository")
 	}
+	ownerIDs, err := normalizeIDPins(c.InvitationOwnerIDs)
+	if err != nil {
+		return fmt.Errorf("invitation_owner_ids: %w", err)
+	}
+	c.InvitationOwnerIDs = ownerIDs
 	seenOwners := map[string]bool{}
 	for i, owner := range c.InvitationOwners {
 		if len(owner) > 39 || !ownerNamePattern.MatchString(owner) {
@@ -207,6 +224,11 @@ func (c *Config) Validate(configDir string) error {
 			return fmt.Errorf("duplicate repository %q", repo.Name)
 		}
 		seen[repo.Name] = true
+		actorIDs, err := normalizeIDPins(repo.AllowedActorIDs)
+		if err != nil {
+			return fmt.Errorf("%s: allowed_actor_ids: %w", repo.Name, err)
+		}
+		repo.AllowedActorIDs = actorIDs
 		for j := range repo.AllowedActors {
 			actor := strings.ToLower(strings.TrimSpace(repo.AllowedActors[j]))
 			if actor == "" || strings.ContainsAny(actor, " /\\@") {
@@ -240,6 +262,18 @@ func (c *Config) Validate(configDir string) error {
 	return nil
 }
 
+func normalizeIDPins(pins map[string]int64) (map[string]int64, error) {
+	normalized := make(map[string]int64, len(pins))
+	for login, id := range pins {
+		login = strings.ToLower(strings.TrimSpace(login))
+		if _, exists := normalized[login]; exists {
+			return nil, fmt.Errorf("duplicate ID pin for %q", login)
+		}
+		normalized[login] = id
+	}
+	return normalized, nil
+}
+
 func (c Config) Repository(name string) (Repository, bool) {
 	for _, repo := range c.Repositories {
 		if repo.Name == strings.ToLower(name) {
@@ -258,10 +292,14 @@ func (r Repository) AllowsAction(action string) bool {
 	return false
 }
 
+// MatchesIdentity reports whether GitHub's repository and owner IDs match the configured pins.
 func (r Repository) MatchesIdentity(id, ownerID int64) bool {
 	return r.ID > 0 && r.OwnerID > 0 && r.ID == id && r.OwnerID == ownerID
 }
 
+// AllowsActor reports whether a GitHub account is allowed to run commands.
+//
+// An empty AllowedActors list permits any account with a positive ID.
 func (r Repository) AllowsActor(login string, id int64) bool {
 	if id <= 0 {
 		return false
