@@ -94,6 +94,9 @@ func decode(r io.Reader) (Config, error) {
 	return cfg, nil
 }
 
+// Validate checks configuration and resolves paths relative to configDir.
+//
+// It normalizes repository names, account logins, and identity pin keys.
 func (c *Config) Validate(configDir string) error {
 	if c.BotLogin == "" {
 		return fmt.Errorf("bot_login is required")
@@ -170,6 +173,11 @@ func (c *Config) Validate(configDir string) error {
 	if len(c.Repositories) == 0 {
 		return fmt.Errorf("repositories must contain at least one repository")
 	}
+	ownerIDs, err := normalizeIDPins(c.InvitationOwnerIDs)
+	if err != nil {
+		return fmt.Errorf("invitation_owner_ids: %w", err)
+	}
+	c.InvitationOwnerIDs = ownerIDs
 	seenOwners := map[string]bool{}
 	for i, owner := range c.InvitationOwners {
 		if len(owner) > 39 || !ownerNamePattern.MatchString(owner) {
@@ -207,6 +215,11 @@ func (c *Config) Validate(configDir string) error {
 			return fmt.Errorf("duplicate repository %q", repo.Name)
 		}
 		seen[repo.Name] = true
+		actorIDs, err := normalizeIDPins(repo.AllowedActorIDs)
+		if err != nil {
+			return fmt.Errorf("%s: allowed_actor_ids: %w", repo.Name, err)
+		}
+		repo.AllowedActorIDs = actorIDs
 		for j := range repo.AllowedActors {
 			actor := strings.ToLower(strings.TrimSpace(repo.AllowedActors[j]))
 			if actor == "" || strings.ContainsAny(actor, " /\\@") {
@@ -238,6 +251,18 @@ func (c *Config) Validate(configDir string) error {
 		}
 	}
 	return nil
+}
+
+func normalizeIDPins(pins map[string]int64) (map[string]int64, error) {
+	normalized := make(map[string]int64, len(pins))
+	for login, id := range pins {
+		login = strings.ToLower(strings.TrimSpace(login))
+		if _, exists := normalized[login]; exists {
+			return nil, fmt.Errorf("duplicate ID pin for %q", login)
+		}
+		normalized[login] = id
+	}
+	return normalized, nil
 }
 
 func (c Config) Repository(name string) (Repository, bool) {

@@ -112,6 +112,41 @@ func TestValidateRequiresExactIdentityPins(t *testing.T) {
 	}
 }
 
+func TestValidateNormalizesIdentityPinLogins(t *testing.T) {
+	cfg := Config{BotLogin: "bot", InvitationOwners: []string{"Owner"}, InvitationOwnerIDs: map[string]int64{"OWNER": 2}, Repositories: []Repository{{
+		Name: "Owner/Repo", ID: 1, OwnerID: 2, Actions: []string{"review"},
+		AllowedActors: []string{"Writer"}, AllowedActorIDs: map[string]int64{"WRITER": 7},
+	}}}
+	if err := cfg.Validate(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.InvitationOwnerIDs["owner"] != 2 || cfg.Repositories[0].AllowedActorIDs["writer"] != 7 ||
+		!cfg.Repositories[0].AllowsActor("writer", 7) {
+		t.Fatalf("login pins were not normalized: owners=%v actors=%v", cfg.InvitationOwnerIDs, cfg.Repositories[0].AllowedActorIDs)
+	}
+	for _, tc := range []struct {
+		name  string
+		pins  map[string]int64
+		owner bool
+	}{
+		{"duplicate owner casing", map[string]int64{"Owner": 2, "owner": 2}, true},
+		{"duplicate actor casing", map[string]int64{"Writer": 7, "writer": 7}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			copy := cfg
+			copy.Repositories = append([]Repository(nil), cfg.Repositories...)
+			if tc.owner {
+				copy.InvitationOwnerIDs = tc.pins
+			} else {
+				copy.Repositories[0].AllowedActorIDs = tc.pins
+			}
+			if err := copy.Validate(t.TempDir()); err == nil {
+				t.Fatal("accepted duplicate case-insensitive ID pins")
+			}
+		})
+	}
+}
+
 func TestCodexSettingsResolveAndValidateSkillPaths(t *testing.T) {
 	dir := t.TempDir()
 	skill := filepath.Join(dir, "skills", "example", "SKILL.md")
