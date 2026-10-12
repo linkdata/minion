@@ -62,7 +62,7 @@ func TestLiveReleaseRefusesUnprotectedTags(t *testing.T) {
 		}
 	})
 	job := monitor.Job{
-		Repository:  config.Repository{Name: liveFixRepository, Actions: []string{"release"}},
+		Repository:  config.Repository{Name: liveFixRepository, ID: fixture.repo.ID, OwnerID: fixture.repo.Owner.ID, Actions: []string{"release"}},
 		SubjectType: "Issue",
 		Number:      fixture.cfg.IssueNumber,
 		ID:          id,

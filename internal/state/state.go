@@ -31,13 +31,15 @@ type Data struct {
 
 // PendingNotification retains a failed thread after its repository cursor advances.
 type PendingNotification struct {
-	Repository  string    `json:"repository"`
-	SubjectType string    `json:"subject_type"`
-	SubjectURL  string    `json:"subject_url"`
-	Since       time.Time `json:"since"`
-	UpdatedAt   time.Time `json:"updated_at"`
-	RetryAt     time.Time `json:"retry_at"`
-	Failures    int       `json:"failures"`
+	Repository   string    `json:"repository"`
+	RepositoryID int64     `json:"repository_id"`
+	OwnerID      int64     `json:"owner_id"`
+	SubjectType  string    `json:"subject_type"`
+	SubjectURL   string    `json:"subject_url"`
+	Since        time.Time `json:"since"`
+	UpdatedAt    time.Time `json:"updated_at"`
+	RetryAt      time.Time `json:"retry_at"`
+	Failures     int       `json:"failures"`
 }
 
 type JobFailure struct {

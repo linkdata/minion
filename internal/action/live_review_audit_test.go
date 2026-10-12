@@ -30,7 +30,7 @@ func TestLiveReviewAction(t *testing.T) {
 	fixture := liveActionSetup(t, ctx)
 	t.Setenv("GH_TOKEN", fixture.botToken)
 	pull := liveReviewAuditPull(t, ctx, fixture.owner, fixture.cfg)
-	job := liveReviewAuditJob(t, fixture.cfg, fixture.ownerUser, command.Review, "PullRequest", pull.Number, pull.HTMLURL)
+	job := liveReviewAuditJob(t, fixture.cfg, fixture.repo, fixture.ownerUser, command.Review, "PullRequest", pull.Number, pull.HTMLURL)
 	var calls int
 	executor := &Executor{
 		GitHub: fixture.bot, BotLogin: fixture.cfg.BotLogin, WorkRoot: t.TempDir(),
@@ -92,7 +92,7 @@ func TestLiveAuditAction(t *testing.T) {
 		{"pull request", "PullRequest", pull.HTMLURL, pull.Head.SHA, pull.Number},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			job := liveReviewAuditJob(t, fixture.cfg, fixture.ownerUser, command.Audit, test.subject, test.number, test.url)
+			job := liveReviewAuditJob(t, fixture.cfg, fixture.repo, fixture.ownerUser, command.Audit, test.subject, test.number, test.url)
 			t.Cleanup(func() {
 				cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), time.Minute)
 				defer cleanupCancel()
@@ -160,14 +160,14 @@ func TestLiveAuditAction(t *testing.T) {
 	}
 }
 
-func liveReviewAuditJob(t *testing.T, cfg liveFixConfig, actor github.User, action command.Action, subject string, number int, url string) monitor.Job {
+func liveReviewAuditJob(t *testing.T, cfg liveFixConfig, repo github.Repository, actor github.User, action command.Action, subject string, number int, url string) monitor.Job {
 	t.Helper()
 	var randomID [32]byte
 	if _, err := rand.Read(randomID[:]); err != nil {
 		t.Fatal(err)
 	}
 	return monitor.Job{
-		Repository:  config.Repository{Name: liveFixRepository, Actions: []string{string(action)}},
+		Repository:  config.Repository{Name: liveFixRepository, ID: repo.ID, OwnerID: repo.Owner.ID, Actions: []string{string(action)}},
 		SubjectType: subject, Number: number, ID: hex.EncodeToString(randomID[:]),
 		Source:  github.Item{Body: "@" + cfg.BotLogin + " " + string(action), Author: actor, HTMLURL: url, UpdatedAt: time.Now()},
 		Command: command.Command{Action: action},

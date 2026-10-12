@@ -39,7 +39,7 @@ func TestOfflineReviewPollRecoversAfterPublication(t *testing.T) {
 	marker := fmt.Sprintf("<!-- linkdataminion:%x -->", jobID)
 	request := github.Comment{
 		ID: 42, NodeID: "request-node", Body: requestBody,
-		User: github.User{Login: "writer"}, CreatedAt: requestAt, UpdatedAt: requestAt,
+		User: github.User{ID: 7, Login: "writer"}, CreatedAt: requestAt, UpdatedAt: requestAt,
 		HTMLURL: "https://github.com/o/r/pull/7#issuecomment-42",
 	}
 
@@ -75,7 +75,7 @@ func TestOfflineReviewPollRecoversAfterPublication(t *testing.T) {
 				return
 			}
 			_ = json.NewEncoder(w).Encode([]github.Notification{{
-				ID: "notification-7", Repository: github.Repository{FullName: "o/r", Private: true},
+				ID: "notification-7", Repository: github.Repository{ID: 1, FullName: "o/r", Owner: github.User{ID: 2, Login: "o"}, Private: true},
 				Subject:   github.Subject{Type: "PullRequest", URL: "https://api.github.com/repos/o/r/pulls/7"},
 				UpdatedAt: requestAt,
 			}})
@@ -113,7 +113,7 @@ func TestOfflineReviewPollRecoversAfterPublication(t *testing.T) {
 				_, _ = fmt.Fprint(w, `{"data":{"addReaction":{"subject":{"reactions":{"viewerHasReacted":true}}}}}`)
 			case strings.Contains(input.Query, "... on Comment") && input.Variables.ID == request.NodeID:
 				record("verify request")
-				_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"node": map[string]any{"body": requestBody, "author": map[string]string{"login": "writer"}}}})
+				_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"node": map[string]any{"body": requestBody, "author": map[string]any{"login": "writer", "id": 7}}}})
 			case strings.Contains(input.Query, "... on Comment") && input.Variables.ID == "review-node":
 				_, current := snapshot()
 				if len(current) != 1 {
@@ -129,9 +129,9 @@ func TestOfflineReviewPollRecoversAfterPublication(t *testing.T) {
 			}
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/collaborators/writer/permission":
 			record("permission")
-			_, _ = fmt.Fprint(w, `{"permission":"write"}`)
+			_, _ = fmt.Fprint(w, `{"permission":"write","user":{"login":"writer","id":7}}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
-			_, _ = fmt.Fprint(w, `{"full_name":"o/r","default_branch":"main","private":true}`)
+			_, _ = fmt.Fprint(w, `{"id":1,"full_name":"o/r","owner":{"id":2,"login":"o"},"default_branch":"main","private":true}`)
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/o/r/git/trees/"):
 			sha := strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/")
 			_, _ = fmt.Fprintf(w, `{"sha":%q,"truncated":false,"tree":[]}`, sha)
@@ -185,7 +185,7 @@ func TestOfflineReviewPollRecoversAfterPublication(t *testing.T) {
 			},
 		}
 		m := monitor.Monitor{Config: config.Config{BotLogin: "linkdataminion", PollIntervalSeconds: 60,
-			Repositories: []config.Repository{{Name: "o/r", Actions: []string{"review"}, AllowedActors: []string{"writer"}}}},
+			Repositories: []config.Repository{{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"review"}, AllowedActors: []string{"writer"}, AllowedActorIDs: map[string]int64{"writer": 7}}}},
 			GitHub: client, Executor: executor, Now: func() time.Time { return at }}
 		if _, err := m.RunOnce(context.Background(), store); err != nil {
 			t.Fatal(err)

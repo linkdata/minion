@@ -46,6 +46,9 @@ type fakeGitHub struct {
 	commentCalls       int
 	comments           []github.Comment
 	threadItems        func(string, int, time.Time) ([]github.Item, error)
+	threadCalls        int
+	rawIDs             bool
+	liveRepo           *github.Repository
 }
 
 func (f *fakeGitHub) ListRepositoryNotifications(_ context.Context, repo string, since time.Time) ([]github.Notification, time.Duration, error) {
@@ -59,11 +62,50 @@ func (f *fakeGitHub) ListRepositoryNotifications(_ context.Context, repo string,
 			notifications = append(notifications, notification)
 		}
 	}
+	if !f.rawIDs {
+		for i := range notifications {
+			notifications[i].Repository = fixtureRepository(notifications[i].Repository)
+		}
+	}
 	return notifications, time.Minute, nil
 }
 
+func fixtureRepository(repo github.Repository) github.Repository {
+	if repo.ID == 0 {
+		repo.ID = 1
+	}
+	if repo.Owner.ID == 0 {
+		owner := repo.Owner.Login
+		if owner == "" {
+			owner, _, _ = strings.Cut(repo.FullName, "/")
+		}
+		switch owner {
+		case "another-owner":
+			repo.Owner.ID = 3
+		case "other":
+			repo.Owner.ID = 4
+		default:
+			repo.Owner.ID = 2
+		}
+	}
+	return repo
+}
+
+func (f *fakeGitHub) Repository(_ context.Context, name string) (github.Repository, error) {
+	if f.liveRepo != nil {
+		return *f.liveRepo, nil
+	}
+	return fixtureRepository(github.Repository{FullName: name}), nil
+}
+
 func (f *fakeGitHub) ListRepositoryInvitations(context.Context) ([]github.Invitation, error) {
-	return f.invitations, nil
+	invitations := append([]github.Invitation(nil), f.invitations...)
+	if !f.rawIDs {
+		for i := range invitations {
+			invitations[i].Repository = fixtureRepository(invitations[i].Repository)
+		}
+	}
+	return invitations, nil
 }
 
 func (f *fakeGitHub) AcceptRepositoryInvitation(_ context.Context, id int64) error {
@@ -75,10 +117,26 @@ func (f *fakeGitHub) AcceptRepositoryInvitation(_ context.Context, id int64) err
 }
 
 func (f *fakeGitHub) ThreadItems(_ context.Context, repo, _ string, number int, since time.Time) ([]github.Item, error) {
+	f.threadCalls++
+	var items []github.Item
 	if f.threadItems != nil {
-		return f.threadItems(repo, number, since)
+		var err error
+		items, err = f.threadItems(repo, number, since)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		items = f.items
 	}
-	return f.items, nil
+	items = append([]github.Item(nil), items...)
+	if !f.rawIDs {
+		for i := range items {
+			if items[i].Author.ID == 0 {
+				items[i].Author.ID = 7
+			}
+		}
+	}
+	return items, nil
 }
 
 func (f *fakeGitHub) CurrentItem(_ context.Context, item github.Item) (github.Item, error) {
@@ -89,9 +147,18 @@ func (f *fakeGitHub) CurrentItem(_ context.Context, item github.Item) (github.It
 	return item, nil
 }
 
-func (f *fakeGitHub) Permission(context.Context, string, string) (github.Permission, error) {
+func (f *fakeGitHub) Permission(_ context.Context, _, login string) (github.Permission, error) {
 	f.checks++
-	return f.permission, f.permissionErr
+	permission := f.permission
+	if !f.rawIDs {
+		if permission.User.ID == 0 {
+			permission.User.ID = 7
+		}
+		if permission.User.Login == "" {
+			permission.User.Login = login
+		}
+	}
+	return permission, f.permissionErr
 }
 
 func (f *fakeGitHub) ReactEyes(_ context.Context, nodeID string) error {
@@ -132,7 +199,7 @@ func testConfig() config.Config {
 		BotLogin:            "linkdataminion",
 		PollIntervalSeconds: 60,
 		Repositories: []config.Repository{{
-			Name: "example-owner/example-repo", Actions: []string{"review", "fix", "release"},
+			Name: "example-owner/example-repo", ID: 1, OwnerID: 2, Actions: []string{"review", "fix", "release"},
 		}},
 	}
 }
@@ -178,7 +245,7 @@ func TestRunOnceKeepsFailedRepositoryWindowAndRetriesPendingThreads(t *testing.T
 	}
 	pending := notification("a/one", 7, now.Add(-time.Minute))
 	store.Data.PendingNotifications[notificationKey(pending)] = state.PendingNotification{
-		Repository: pending.Repository.FullName, SubjectType: pending.Subject.Type,
+		Repository: pending.Repository.FullName, RepositoryID: 1, OwnerID: 2, SubjectType: pending.Subject.Type,
 		SubjectURL: pending.Subject.URL, Since: initial,
 		UpdatedAt: pending.UpdatedAt, RetryAt: now.Add(-time.Second),
 	}
@@ -197,7 +264,7 @@ func TestRunOnceKeepsFailedRepositoryWindowAndRetriesPendingThreads(t *testing.T
 		},
 	}
 	cfg := testConfig()
-	cfg.Repositories = []config.Repository{{Name: "a/one", Actions: []string{"review"}}, {Name: "b/two", Actions: []string{"review"}}}
+	cfg.Repositories = []config.Repository{{Name: "a/one", ID: 1, OwnerID: 2, Actions: []string{"review"}}, {Name: "b/two", ID: 1, OwnerID: 2, Actions: []string{"review"}}}
 	executor := &fakeExecutor{}
 	clock := now
 	m := &Monitor{Config: cfg, GitHub: gh, Executor: executor, Now: func() time.Time { return clock }}
@@ -248,7 +315,7 @@ func TestRunOnceSeedsNewRepositoryFromCurrentCursor(t *testing.T) {
 	if !advanced.After(initial) {
 		t.Fatalf("cursor did not advance: %s", advanced)
 	}
-	m.Config.Repositories = append(m.Config.Repositories, config.Repository{Name: "b/two", Actions: []string{"review"}})
+	m.Config.Repositories = append(m.Config.Repositories, config.Repository{Name: "b/two", ID: 1, OwnerID: 2, Actions: []string{"review"}})
 	gh.notifications = []github.Notification{{
 		Repository: github.Repository{FullName: "b/two"},
 		Subject:    github.Subject{Type: "Issue", URL: "https://api.github.com/repos/b/two/issues/9"},
@@ -609,7 +676,7 @@ func TestRunOnceRetriesFailedThreadAfterCursorAdvances(t *testing.T) {
 		},
 	}
 	cfg := testConfig()
-	cfg.Repositories = append(cfg.Repositories, config.Repository{Name: "other/repo", Actions: []string{"review"}})
+	cfg.Repositories = append(cfg.Repositories, config.Repository{Name: "other/repo", ID: 1, OwnerID: 4, Actions: []string{"review"}})
 	var logs bytes.Buffer
 	path := filepath.Join(t.TempDir(), "state.json")
 	store, err := state.Open(path, initial)
@@ -695,6 +762,7 @@ func TestAllowedActorsCannotBypassWritePermission(t *testing.T) {
 	}
 	config := testConfig()
 	config.Repositories[0].AllowedActors = []string{"writer"}
+	config.Repositories[0].AllowedActorIDs = map[string]int64{"writer": 7}
 	executor := &fakeExecutor{}
 	store := openState(t, now.Add(-time.Minute))
 	m := &Monitor{Config: config, GitHub: gh, Executor: executor, Logger: log.New(io.Discard, "", 0), Now: func() time.Time { return now }}
@@ -718,6 +786,7 @@ func TestEditedCommentCannotUseOriginalAuthorAuthorization(t *testing.T) {
 	executor := &fakeExecutor{}
 	config := testConfig()
 	config.Repositories[0].AllowedActors = []string{"allowed"}
+	config.Repositories[0].AllowedActorIDs = map[string]int64{"allowed": 7}
 	store := openState(t, first.Add(-time.Minute))
 	clock := first
 	m := &Monitor{Config: config, GitHub: gh, Executor: executor, Logger: log.New(io.Discard, "", 0), Now: func() time.Time { return clock }}
@@ -763,6 +832,7 @@ func TestAcceptOnlyWhitelistedInvitations(t *testing.T) {
 	}}
 	config := testConfig()
 	config.InvitationOwners = []string{"example-owner", "another-owner"}
+	config.InvitationOwnerIDs = map[string]int64{"example-owner": 2, "another-owner": 3}
 	m := &Monitor{Config: config, GitHub: gh}
 	if err := m.acceptWhitelistedInvitations(context.Background()); err != nil {
 		t.Fatal(err)
@@ -780,6 +850,7 @@ func TestMonitoredRepositoryStillRequiresWriteInvitation(t *testing.T) {
 	}}
 	config := testConfig()
 	config.InvitationOwners = []string{"example-owner", "another-owner"}
+	config.InvitationOwnerIDs = map[string]int64{"example-owner": 2, "another-owner": 3}
 	m := &Monitor{Config: config, GitHub: gh}
 	if err := m.acceptWhitelistedInvitations(context.Background()); err == nil {
 		t.Fatal("read-only invitation to monitored repository should fail")
@@ -801,6 +872,7 @@ func TestInvitationOwnerDoesNotAuthorizeCommands(t *testing.T) {
 	}
 	config := testConfig()
 	config.InvitationOwners = []string{"example-owner", "another-owner"}
+	config.InvitationOwnerIDs = map[string]int64{"example-owner": 2, "another-owner": 3}
 	executor := &fakeExecutor{}
 	store := openState(t, now.Add(-time.Minute))
 	m := &Monitor{Config: config, GitHub: gh, Executor: executor, Now: func() time.Time { return now }}
@@ -818,6 +890,7 @@ func TestInvitationRegistersRepositoryBeforeAcceptanceAndMonitorsImmediately(t *
 			now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
 			cfg := testConfig()
 			cfg.InvitationOwners = []string{"example-owner"}
+			cfg.InvitationOwnerIDs = map[string]int64{"example-owner": 2}
 			skillDir := filepath.Join(t.TempDir(), "security-audit")
 			if err := os.Mkdir(skillDir, 0700); err != nil {
 				t.Fatal(err)
@@ -870,6 +943,7 @@ func TestInvitationRegistersRepositoryBeforeAcceptanceAndMonitorsImmediately(t *
 func TestInvitationRegistrationRetriesWithoutLosingOrDuplicatingRepository(t *testing.T) {
 	cfg := testConfig()
 	cfg.InvitationOwners = []string{"example-owner"}
+	cfg.InvitationOwnerIDs = map[string]int64{"example-owner": 2}
 	path := filepath.Join(t.TempDir(), "config.json")
 	gh := &fakeGitHub{invitations: []github.Invitation{{ID: 1, Repository: github.Repository{FullName: "example-owner/second-repo", Owner: github.User{Login: "example-owner"}}, Permissions: "write"}}}
 	m := &Monitor{Config: cfg, ConfigPath: path, GitHub: gh}
@@ -911,5 +985,109 @@ func TestSubjectNumberVerifiesRepository(t *testing.T) {
 	}
 	if _, err := subjectNumber("https://api.github.com/repos/other/project/pulls/17", "example-owner/example-repo", "PullRequest"); err == nil {
 		t.Fatal("accepted URL for other repository")
+	}
+}
+
+func TestReclaimedRepositoryCannotTriggerCommandOrRetry(t *testing.T) {
+	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name    string
+		prepare func(*fakeGitHub, *state.Store)
+	}{
+		{"notification repository ID", func(gh *fakeGitHub, _ *state.Store) { gh.notifications[0].Repository.ID = 9 }},
+		{"notification owner ID", func(gh *fakeGitHub, _ *state.Store) { gh.notifications[0].Repository.Owner.ID = 9 }},
+		{"live repository ID", func(gh *fakeGitHub, _ *state.Store) {
+			gh.liveRepo = &github.Repository{ID: 9, Owner: github.User{ID: 2}}
+		}},
+		{"live owner ID", func(gh *fakeGitHub, _ *state.Store) {
+			gh.liveRepo = &github.Repository{ID: 1, Owner: github.User{ID: 9}}
+		}},
+		{"legacy pending retry", func(gh *fakeGitHub, store *state.Store) {
+			gh.notifications = nil
+			notification := testNotification(now)
+			store.Data.PendingNotifications[notificationKey(notification)] = state.PendingNotification{
+				Repository: notification.Repository.FullName, SubjectType: notification.Subject.Type,
+				SubjectURL: notification.Subject.URL, Since: now.Add(-time.Minute), UpdatedAt: now, RetryAt: now,
+			}
+		}},
+		{"retry after live replacement", func(gh *fakeGitHub, store *state.Store) {
+			gh.notifications = nil
+			gh.liveRepo = &github.Repository{ID: 9, Owner: github.User{ID: 2}}
+			notification := testNotification(now)
+			store.Data.PendingNotifications[notificationKey(notification)] = state.PendingNotification{
+				Repository: notification.Repository.FullName, RepositoryID: 1, OwnerID: 2,
+				SubjectType: notification.Subject.Type, SubjectURL: notification.Subject.URL,
+				Since: now.Add(-time.Minute), UpdatedAt: now, RetryAt: now,
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gh := &fakeGitHub{rawIDs: true, notifications: []github.Notification{testNotification(now)},
+				items:      []github.Item{{Key: "comment:1", Body: "@linkdataminion review", Author: github.User{ID: 7, Login: "writer"}}},
+				permission: github.Permission{Permission: "write", User: github.User{ID: 7, Login: "writer"}}}
+			gh.notifications[0].Repository = fixtureRepository(gh.notifications[0].Repository)
+			store := openState(t, now.Add(-time.Minute))
+			tc.prepare(gh, store)
+			if err := store.Save(); err != nil {
+				t.Fatal(err)
+			}
+			executor := &fakeExecutor{}
+			m := &Monitor{Config: testConfig(), GitHub: gh, Executor: executor, Now: func() time.Time { return now }}
+			if _, err := m.RunOnce(context.Background(), store); err != nil {
+				t.Fatal(err)
+			}
+			if gh.threadCalls != 0 || gh.checks != 0 || len(gh.reactions) != 0 || len(executor.jobs) != 0 || len(store.Data.PendingNotifications) != 0 {
+				t.Fatalf("untrusted repository reached command path: threads=%d checks=%d reactions=%v jobs=%v pending=%v", gh.threadCalls, gh.checks, gh.reactions, executor.jobs, store.Data.PendingNotifications)
+			}
+		})
+	}
+}
+
+func TestReclaimedLoginCannotAuthorizeCommand(t *testing.T) {
+	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name    string
+		prepare func(*fakeGitHub, *config.Config)
+	}{
+		{"allowed actor ID", func(_ *fakeGitHub, cfg *config.Config) { cfg.Repositories[0].AllowedActorIDs["writer"] = 8 }},
+		{"REST and GraphQL author IDs", func(gh *fakeGitHub, _ *config.Config) {
+			gh.currentItem = func(item github.Item) (github.Item, error) { item.Author.ID = 8; return item, nil }
+		}},
+		{"permission user ID", func(gh *fakeGitHub, _ *config.Config) { gh.permission.User.ID = 8 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)},
+				items:      []github.Item{{Key: "comment:1", Body: "@linkdataminion review", Author: github.User{ID: 7, Login: "writer"}}},
+				permission: github.Permission{Permission: "write", User: github.User{ID: 7, Login: "writer"}}}
+			cfg := testConfig()
+			cfg.Repositories[0].AllowedActors = []string{"writer"}
+			cfg.Repositories[0].AllowedActorIDs = map[string]int64{"writer": 7}
+			tc.prepare(gh, &cfg)
+			executor := &fakeExecutor{}
+			m := &Monitor{Config: cfg, GitHub: gh, Executor: executor, Now: func() time.Time { return now }}
+			if _, err := m.RunOnce(context.Background(), openState(t, now.Add(-time.Minute))); err != nil {
+				t.Fatal(err)
+			}
+			if len(gh.reactions) != 0 || len(executor.jobs) != 0 {
+				t.Fatalf("reclaimed login executed: reactions=%v jobs=%v", gh.reactions, executor.jobs)
+			}
+		})
+	}
+}
+
+func TestReclaimedInvitationOwnerCannotRegisterOrAccept(t *testing.T) {
+	cfg := testConfig()
+	cfg.InvitationOwners = []string{"example-owner"}
+	cfg.InvitationOwnerIDs = map[string]int64{"example-owner": 2}
+	gh := &fakeGitHub{rawIDs: true, invitations: []github.Invitation{
+		{ID: 1, Repository: github.Repository{ID: 9, FullName: "example-owner/example-repo", Owner: github.User{ID: 2, Login: "example-owner"}}, Permissions: "write"},
+		{ID: 2, Repository: github.Repository{ID: 10, FullName: "example-owner/new-repo", Owner: github.User{ID: 99, Login: "example-owner"}}, Permissions: "write"},
+	}}
+	m := &Monitor{Config: cfg, GitHub: gh}
+	if err := m.acceptWhitelistedInvitations(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(gh.accepted) != 0 || len(m.Config.Repositories) != 1 {
+		t.Fatalf("accepted reclaimed identity: accepted=%v repos=%v", gh.accepted, m.Config.Repositories)
 	}
 }

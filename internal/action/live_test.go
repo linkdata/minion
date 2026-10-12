@@ -82,7 +82,7 @@ func TestLiveFixPublishesBranch(t *testing.T) {
 		}
 	})
 	job := monitor.Job{
-		Repository:  config.Repository{Name: liveFixRepository, Actions: []string{"fix"}},
+		Repository:  config.Repository{Name: liveFixRepository, ID: repo.ID, OwnerID: repo.Owner.ID, Actions: []string{"fix"}},
 		SubjectType: "Issue",
 		Number:      cfg.IssueNumber,
 		ID:          id,

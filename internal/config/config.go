@@ -21,9 +21,12 @@ var (
 
 // Repository is an explicit boundary for both observation and actions.
 type Repository struct {
-	Name          string   `json:"name"`
-	Actions       []string `json:"actions"`
-	AllowedActors []string `json:"allowed_actors,omitempty"`
+	Name            string           `json:"name"`
+	ID              int64            `json:"id"`
+	OwnerID         int64            `json:"owner_id"`
+	Actions         []string         `json:"actions"`
+	AllowedActors   []string         `json:"allowed_actors,omitempty"`
+	AllowedActorIDs map[string]int64 `json:"allowed_actor_ids,omitempty"`
 }
 
 type CodexConfig struct {
@@ -42,16 +45,17 @@ func (c CodexConfig) SecurityAuditSkill() string {
 }
 
 type Config struct {
-	BotLogin            string       `json:"bot_login"`
-	Codex               CodexConfig  `json:"codex,omitempty"`
-	PollIntervalSeconds int          `json:"poll_interval_seconds,omitempty"`
-	JobTimeoutMinutes   int          `json:"job_timeout_minutes,omitempty"`
-	StatePath           string       `json:"state_path,omitempty"`
-	WorkRoot            string       `json:"work_root,omitempty"`
-	WorkRootMaxBytes    int64        `json:"work_root_max_bytes,omitempty"`
-	StartAt             string       `json:"start_at,omitempty"`
-	InvitationOwners    []string     `json:"invitation_owners,omitempty"`
-	Repositories        []Repository `json:"repositories"`
+	BotLogin            string           `json:"bot_login"`
+	Codex               CodexConfig      `json:"codex,omitempty"`
+	PollIntervalSeconds int              `json:"poll_interval_seconds,omitempty"`
+	JobTimeoutMinutes   int              `json:"job_timeout_minutes,omitempty"`
+	StatePath           string           `json:"state_path,omitempty"`
+	WorkRoot            string           `json:"work_root,omitempty"`
+	WorkRootMaxBytes    int64            `json:"work_root_max_bytes,omitempty"`
+	StartAt             string           `json:"start_at,omitempty"`
+	InvitationOwners    []string         `json:"invitation_owners,omitempty"`
+	InvitationOwnerIDs  map[string]int64 `json:"invitation_owner_ids,omitempty"`
+	Repositories        []Repository     `json:"repositories"`
 }
 
 // Load reads and validates configuration.
@@ -93,6 +97,9 @@ func decode(r io.Reader) (Config, error) {
 	return cfg, nil
 }
 
+// Validate checks configuration and resolves paths relative to configDir.
+//
+// It normalizes repository names, account logins, and identity pin keys.
 func (c *Config) Validate(configDir string) error {
 	if c.BotLogin == "" {
 		return fmt.Errorf("bot_login is required")
@@ -175,6 +182,11 @@ func (c *Config) Validate(configDir string) error {
 	if len(c.Repositories) == 0 {
 		return fmt.Errorf("repositories must contain at least one repository")
 	}
+	ownerIDs, err := normalizeIDPins(c.InvitationOwnerIDs)
+	if err != nil {
+		return fmt.Errorf("invitation_owner_ids: %w", err)
+	}
+	c.InvitationOwnerIDs = ownerIDs
 	seenOwners := map[string]bool{}
 	for i, owner := range c.InvitationOwners {
 		if len(owner) > 39 || !ownerNamePattern.MatchString(owner) {
@@ -186,6 +198,12 @@ func (c *Config) Validate(configDir string) error {
 		}
 		seenOwners[owner] = true
 		c.InvitationOwners[i] = owner
+		if c.InvitationOwnerIDs[owner] <= 0 {
+			return fmt.Errorf("invitation owner %q requires a positive invitation_owner_ids pin", owner)
+		}
+	}
+	if len(c.InvitationOwnerIDs) != len(c.InvitationOwners) {
+		return fmt.Errorf("invitation_owner_ids must match invitation_owners exactly")
 	}
 	seen := map[string]bool{}
 	for i := range c.Repositories {
@@ -195,16 +213,34 @@ func (c *Config) Validate(configDir string) error {
 			return fmt.Errorf("invalid repository name %q (use owner/repo)", repo.Name)
 		}
 		repo.Name = strings.ToLower(repo.Name)
+		if repo.ID <= 0 || repo.OwnerID <= 0 {
+			return fmt.Errorf("%s: id and owner_id must be positive GitHub IDs", repo.Name)
+		}
+		owner, _, _ := strings.Cut(repo.Name, "/")
+		if pinned, ok := c.InvitationOwnerIDs[owner]; ok && pinned != repo.OwnerID {
+			return fmt.Errorf("%s: owner_id conflicts with invitation_owner_ids pin for %s", repo.Name, owner)
+		}
 		if seen[repo.Name] {
 			return fmt.Errorf("duplicate repository %q", repo.Name)
 		}
 		seen[repo.Name] = true
+		actorIDs, err := normalizeIDPins(repo.AllowedActorIDs)
+		if err != nil {
+			return fmt.Errorf("%s: allowed_actor_ids: %w", repo.Name, err)
+		}
+		repo.AllowedActorIDs = actorIDs
 		for j := range repo.AllowedActors {
 			actor := strings.ToLower(strings.TrimSpace(repo.AllowedActors[j]))
 			if actor == "" || strings.ContainsAny(actor, " /\\@") {
 				return fmt.Errorf("%s: invalid allowed actor %q", repo.Name, repo.AllowedActors[j])
 			}
 			repo.AllowedActors[j] = actor
+			if repo.AllowedActorIDs[actor] <= 0 {
+				return fmt.Errorf("%s: allowed actor %q requires a positive allowed_actor_ids pin", repo.Name, actor)
+			}
+		}
+		if len(repo.AllowedActorIDs) != len(repo.AllowedActors) {
+			return fmt.Errorf("%s: allowed_actor_ids must match allowed_actors exactly", repo.Name)
 		}
 		if len(repo.Actions) == 0 {
 			return fmt.Errorf("%s: actions must not be empty", repo.Name)
@@ -226,6 +262,18 @@ func (c *Config) Validate(configDir string) error {
 	return nil
 }
 
+func normalizeIDPins(pins map[string]int64) (map[string]int64, error) {
+	normalized := make(map[string]int64, len(pins))
+	for login, id := range pins {
+		login = strings.ToLower(strings.TrimSpace(login))
+		if _, exists := normalized[login]; exists {
+			return nil, fmt.Errorf("duplicate ID pin for %q", login)
+		}
+		normalized[login] = id
+	}
+	return normalized, nil
+}
+
 func (c Config) Repository(name string) (Repository, bool) {
 	for _, repo := range c.Repositories {
 		if repo.Name == strings.ToLower(name) {
@@ -244,12 +292,23 @@ func (r Repository) AllowsAction(action string) bool {
 	return false
 }
 
-func (r Repository) AllowsActor(login string) bool {
+// MatchesIdentity reports whether GitHub's repository and owner IDs match the configured pins.
+func (r Repository) MatchesIdentity(id, ownerID int64) bool {
+	return r.ID > 0 && r.OwnerID > 0 && r.ID == id && r.OwnerID == ownerID
+}
+
+// AllowsActor reports whether a GitHub account is allowed to run commands.
+//
+// An empty AllowedActors list permits any account with a positive ID.
+func (r Repository) AllowsActor(login string, id int64) bool {
+	if id <= 0 {
+		return false
+	}
 	if len(r.AllowedActors) == 0 {
 		return true
 	}
 	for _, actor := range r.AllowedActors {
-		if strings.EqualFold(actor, login) {
+		if strings.EqualFold(actor, login) && r.AllowedActorIDs[actor] == id {
 			return true
 		}
 	}

@@ -22,7 +22,7 @@ import (
 
 func usageJob() monitor.Job {
 	return monitor.Job{
-		ID: strings.Repeat("a", 64), Repository: config.Repository{Name: "o/r"}, SubjectType: "Issue", Number: 7,
+		ID: strings.Repeat("a", 64), Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2}, SubjectType: "Issue", Number: 7,
 		Source: github.Item{Author: github.User{Login: "writer"}}, Command: command.Command{Action: command.Review},
 	}
 }
@@ -126,6 +126,8 @@ func TestExecuteRecordsNoCodexAndSkipsAcknowledged(t *testing.T) {
 			var comments []github.Comment
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
+					_, _ = fmt.Fprint(w, `{"id":1,"full_name":"o/r","owner":{"id":2,"login":"o"}}`)
 				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7":
 					if _, err := fmt.Fprint(w, `{"title":"Request"}`); err != nil {
 						t.Error(err)

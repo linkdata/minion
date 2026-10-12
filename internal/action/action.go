@@ -157,11 +157,22 @@ func (e *Executor) alreadyAcknowledged(ctx context.Context, job monitor.Job) (bo
 	return found, nil
 }
 
+func (e *Executor) verifiedRepository(ctx context.Context, job monitor.Job) (github.Repository, error) {
+	repo, err := e.GitHub.Repository(ctx, job.Repository.Name)
+	if err != nil {
+		return github.Repository{}, err
+	}
+	if !job.Repository.MatchesIdentity(repo.ID, repo.Owner.ID) {
+		return github.Repository{}, fmt.Errorf("%s repository ID or owner ID differs from config", job.Repository.Name)
+	}
+	return repo, nil
+}
+
 func (e *Executor) review(ctx context.Context, job monitor.Job) error {
 	if job.SubjectType != "PullRequest" {
 		return e.acknowledge(ctx, job, "`review` applies to pull requests.")
 	}
-	if _, err := e.GitHub.Repository(ctx, job.Repository.Name); err != nil {
+	if _, err := e.verifiedRepository(ctx, job); err != nil {
 		return err
 	}
 	pull, err := e.GitHub.PullRequestDetails(ctx, job.Repository.Name, job.Number)
@@ -209,7 +220,7 @@ func (e *Executor) fix(ctx context.Context, job monitor.Job) error {
 	if err != nil {
 		return err
 	}
-	repo, err := e.GitHub.Repository(ctx, job.Repository.Name)
+	repo, err := e.verifiedRepository(ctx, job)
 	if err != nil {
 		return err
 	}
@@ -303,7 +314,7 @@ func (e *Executor) release(ctx context.Context, job monitor.Job) error {
 	if e.Store == nil || job.ID == "" {
 		return errors.New("release job has no durable state or valid ID")
 	}
-	repo, err := e.GitHub.Repository(ctx, job.Repository.Name)
+	repo, err := e.verifiedRepository(ctx, job)
 	if err != nil {
 		return err
 	}
@@ -432,6 +443,9 @@ func (e *Executor) acknowledge(ctx context.Context, job monitor.Job, message str
 	body := message + "\n\n" + job.Marker()
 	switch job.SubjectType {
 	case "Issue", "PullRequest":
+		if _, err := e.verifiedRepository(ctx, job); err != nil {
+			return err
+		}
 		_, err := e.GitHub.CreateIssueComment(ctx, job.Repository.Name, job.Number, body)
 		return err
 	default:

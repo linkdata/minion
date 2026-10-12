@@ -24,6 +24,7 @@ import (
 // GitHub provides the API operations used by Monitor.
 type GitHub interface {
 	ListRepositoryNotifications(context.Context, string, time.Time) ([]github.Notification, time.Duration, error)
+	Repository(context.Context, string) (github.Repository, error)
 	ListRepositoryInvitations(context.Context) ([]github.Invitation, error)
 	AcceptRepositoryInvitation(context.Context, int64) error
 	ThreadItems(context.Context, string, string, int, time.Time) ([]github.Item, error)
@@ -158,10 +159,14 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			seen[key] = true
 			scanSince := since
 			if pending, ok := store.Data.PendingNotifications[key]; ok {
-				if started.Before(pending.RetryAt) && !notification.UpdatedAt.After(pending.UpdatedAt) {
-					continue
+				if pending.RepositoryID != notification.Repository.ID || pending.OwnerID != notification.Repository.Owner.ID {
+					delete(store.Data.PendingNotifications, key)
+				} else {
+					if started.Before(pending.RetryAt) && !notification.UpdatedAt.After(pending.UpdatedAt) {
+						continue
+					}
+					scanSince = pending.Since
 				}
-				scanSince = pending.Since
 			}
 			scans = append(scans, scan{notification, scanSince, key})
 		}
@@ -172,7 +177,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		}
 		scans = append(scans, scan{github.Notification{
 			ID:         key,
-			Repository: github.Repository{FullName: pending.Repository},
+			Repository: github.Repository{ID: pending.RepositoryID, FullName: pending.Repository, Owner: github.User{ID: pending.OwnerID}},
 			Subject:    github.Subject{Type: pending.SubjectType, URL: pending.SubjectURL},
 			UpdatedAt:  pending.UpdatedAt,
 		}, pending.Since, key})
@@ -187,6 +192,24 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		notification := entry.notification
 		repo, ok := m.Config.Repository(notification.Repository.FullName)
 		if !ok {
+			delete(store.Data.PendingNotifications, entry.key)
+			continue
+		}
+		if !repo.MatchesIdentity(notification.Repository.ID, notification.Repository.Owner.ID) {
+			m.logf("skip %s notification %s: repository identity differs from configured IDs", repo.Name, notification.ID)
+			delete(store.Data.PendingNotifications, entry.key)
+			continue
+		}
+		liveRepo, err := m.GitHub.Repository(ctx, repo.Name)
+		if err != nil {
+			failures = append(failures, fmt.Errorf("verify %s repository identity: %w", repo.Name, err))
+			if err := m.deferNotification(store, entry.key, notification, entry.since, started); err != nil {
+				return next, err
+			}
+			continue
+		}
+		if !repo.MatchesIdentity(liveRepo.ID, liveRepo.Owner.ID) {
+			m.logf("skip %s notification %s: live repository identity differs from configured IDs", repo.Name, notification.ID)
 			delete(store.Data.PendingNotifications, entry.key)
 			continue
 		}
@@ -230,6 +253,10 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				failures = append(failures, fmt.Errorf("verify command in %s: %w", itemLocation(item), err))
 				continue
 			}
+			if item.Author.ID <= 0 || current.Author.ID != item.Author.ID || !strings.EqualFold(current.Author.Login, item.Author.Login) {
+				m.logf("ignore command in %s: author identity changed or is missing", itemLocation(item))
+				continue
+			}
 			item = current
 			if strings.EqualFold(item.Author.Login, m.Config.BotLogin) || item.Author.Login == "" {
 				continue
@@ -263,7 +290,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				}
 				continue
 			}
-			if !repo.AllowsAction(string(cmd.Action)) || !repo.AllowsActor(item.Author.Login) {
+			if !repo.AllowsAction(string(cmd.Action)) || !repo.AllowsActor(item.Author.Login, item.Author.ID) {
 				m.logf("ignore %s from @%s in %s: disabled action or actor", cmd.Action, item.Author.Login, repo.Name)
 				store.Data.Processed[job.ID] = started
 				if err := store.Save(); err != nil {
@@ -274,6 +301,14 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			permission, err := m.GitHub.Permission(ctx, repo.Name, item.Author.Login)
 			if err != nil {
 				failures = append(failures, fmt.Errorf("check @%s permission in %s: %w", item.Author.Login, repo.Name, err))
+				continue
+			}
+			if permission.User.ID != item.Author.ID || !strings.EqualFold(permission.User.Login, item.Author.Login) {
+				m.logf("ignore %s from @%s in %s: permission identity differs", cmd.Action, item.Author.Login, repo.Name)
+				store.Data.Processed[job.ID] = started
+				if err := store.Save(); err != nil {
+					return next, err
+				}
 				continue
 			}
 			if permission.Permission != "write" && permission.Permission != "admin" && permission.Permission != "maintain" {
@@ -378,6 +413,8 @@ func (m *Monitor) deferNotification(store *state.Store, key string, notification
 		pending.Failures++
 	}
 	pending.Repository = notification.Repository.FullName
+	pending.RepositoryID = notification.Repository.ID
+	pending.OwnerID = notification.Repository.Owner.ID
 	pending.SubjectType = notification.Subject.Type
 	pending.SubjectURL = notification.Subject.URL
 	pending.Since = since
@@ -416,8 +453,15 @@ func (m *Monitor) finishFailedJob(ctx context.Context, store *state.Store, job J
 		}
 	}
 	if !replied {
+		repo, err := m.GitHub.Repository(ctx, job.Repository.Name)
+		if err != nil {
+			return fmt.Errorf("verify %s before failure reply: %w", job.Repository.Name, err)
+		}
+		if !job.Repository.MatchesIdentity(repo.ID, repo.Owner.ID) {
+			return fmt.Errorf("%s identity changed before failure reply", job.Repository.Name)
+		}
 		replyCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-		_, err := m.GitHub.CreateIssueComment(replyCtx, job.Repository.Name, job.Number, failureReply+"\n\n"+marker)
+		_, err = m.GitHub.CreateIssueComment(replyCtx, job.Repository.Name, job.Number, failureReply+"\n\n"+marker)
 		cancel()
 		if err != nil {
 			failure.ReplyAttempts++
@@ -450,10 +494,14 @@ func (m *Monitor) acceptWhitelistedInvitations(ctx context.Context) error {
 			invite.Repository.Owner.Login == "" || !strings.EqualFold(owner, invite.Repository.Owner.Login) || invite.Expired {
 			continue
 		}
-		_, monitored := m.Config.Repository(fullName)
+		monitoredRepo, monitored := m.Config.Repository(fullName)
+		if invite.Repository.ID <= 0 || invite.Repository.Owner.ID <= 0 ||
+			(monitored && !monitoredRepo.MatchesIdentity(invite.Repository.ID, invite.Repository.Owner.ID)) {
+			continue
+		}
 		allowed := monitored
 		for _, allowedOwner := range m.Config.InvitationOwners {
-			if strings.EqualFold(owner, allowedOwner) {
+			if strings.EqualFold(owner, allowedOwner) && m.Config.InvitationOwnerIDs[allowedOwner] == invite.Repository.Owner.ID {
 				allowed = true
 				break
 			}
@@ -480,9 +528,13 @@ func (m *Monitor) acceptWhitelistedInvitations(ctx context.Context) error {
 				actions = append(actions, "audit")
 			}
 			// Persist first: an accepted invitation disappears and cannot recover a failed config write.
-			repo, err := config.AddRepository(m.ConfigPath, config.Repository{Name: fullName, Actions: actions})
+			repo, err := config.AddRepository(m.ConfigPath, config.Repository{Name: fullName, ID: invite.Repository.ID, OwnerID: invite.Repository.Owner.ID, Actions: actions})
 			if err != nil {
 				failures = append(failures, fmt.Errorf("register %s invitation: %w", fullName, err))
+				continue
+			}
+			if !repo.MatchesIdentity(invite.Repository.ID, invite.Repository.Owner.ID) {
+				failures = append(failures, fmt.Errorf("%s identity changed while registering invitation", fullName))
 				continue
 			}
 			m.Config.Repositories = append(m.Config.Repositories, repo)
