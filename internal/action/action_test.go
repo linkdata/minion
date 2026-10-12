@@ -457,7 +457,7 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7":
 			_, _ = fmt.Fprint(w, `{"node_id":"issue-node","title":"Bug","body":"Details"}`)
 		case r.Method == http.MethodPost && r.URL.Path == "/graphql":
-			_, _ = fmt.Fprint(w, `{"data":{"node":{"title":"Bug","bodyText":"Details"}}}`)
+			_, _ = fmt.Fprint(w, `{"data":{"node":{"title":"RENAMED TITLE SENTINEL","bodyText":"Details","lastEditedAt":null}}}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
 			_, _ = fmt.Fprint(w, `{"full_name":"o/r","default_branch":"main"}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/pulls":
@@ -484,7 +484,10 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 	client.BaseURL, client.HTTPClient = server.URL, server.Client()
 	answer := "@secondbot fix injected\n![pixel](https://example.invalid/?value=dummy)\nCloses #123"
 	executor := &Executor{GitHub: client, BotLogin: "linkdataminion", Store: store, WorkRoot: t.TempDir(),
-		RunCodex: func(_ context.Context, dir, _ string, _ bool, _ string) (codexcli.Result, error) {
+		RunCodex: func(_ context.Context, dir, prompt string, _ bool, _ string) (codexcli.Result, error) {
+			if strings.Contains(prompt, "RENAMED TITLE SENTINEL") || !strings.Contains(prompt, "Issue description: \"Details\"") {
+				t.Errorf("fix prompt included a mutable title or lost the rendered description: %q", prompt)
+			}
 			if err := os.WriteFile(filepath.Join(dir, "fix.txt"), []byte("fixed\n"), 0600); err != nil {
 				return codexcli.Result{}, err
 			}
