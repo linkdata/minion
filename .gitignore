@@ -1,3 +1,4 @@
 /bin/
 /var/
 /config.local.json
+/live-tests.local.json

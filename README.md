@@ -80,6 +80,20 @@ State and job checkouts live under `var/`. Keep `work_root` outside `/tmp`, whic
 
 Every 15 minutes, the service checks [pending repository invitations](https://docs.github.com/en/rest/collaborators/invitations?apiVersion=2022-11-28). It accepts nonexpired invitations addressed to the configured bot when the repository owner is listed in `invitation_owners` or the repository is explicitly monitored. The owner in GitHub's repository record must match its full name. Invitations to monitored repositories still need `write`, `maintain`, or `admin` access; invitations to other allowed-owner repositories may grant any standard role. Read and triage invitations are accepted without enabling commands. Other invitations stay untouched. New writable repositories are saved atomically to the config before acceptance, so a failed config write leaves the invitation pending for retry. An acceptance failure can leave the entry in the config while acceptance retries. The config file and its directory must be writable; stop the service before editing config to avoid concurrent updates. Invitations accepted before automatic registration was installed need a manual repository entry. This automates the invited account's acceptance step; a repository owner must still send the invitation.
 
+## Live smoke test
+
+Create the ignored `live-tests.local.json` in the repository root to enable the smoke test. Without it, the test skips:
+
+```json
+{
+  "owner_login": "example-owner",
+  "bot_login": "example-bot",
+  "repository_url": "https://github.com/example-owner/example-repo"
+}
+```
+
+Replace the sample values with two GitHub accounts and a repository the active `gh` credential can see. Run `go test -race ./internal/github -run '^TestLiveSmoke$' -count=1` to check that both accounts and the repository exist through three read-only `gh api` requests. Keep `-count=1` so Go does not reuse a cached result. This smoke test does not authenticate as both named accounts or change GitHub state. Do not put tokens in the file.
+
 ## Usage reports
 
 The service records token usage for each action attempt, including failures and retries. Reports are local and need no GitHub or Codex authentication or network access. They can run while the service is running:
