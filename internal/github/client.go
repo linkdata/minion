@@ -528,11 +528,13 @@ func (c *Client) CreateTagReference(ctx context.Context, repo, tag, sha string) 
 	return err
 }
 
-// ProtectedReleaseTags verifies an active all-tag integrity ruleset and refuses
-// release creation while any active tag ruleset restricts creation. The latter
-// is conservative: the bot must not create a tag by bypassing a restriction
-// that applies to the requester. GitHub omits bypass_actors for tokens without
-// ruleset write access; omission is not proof that no actor can bypass.
+// ProtectedReleaseTags checks whether draft release tags are protected.
+//
+// It requires an active all-tag integrity ruleset and refuses release creation
+// unless every active tag rule is limited to update, deletion, or non-fast-forward
+// protection. The bot must not create a tag by bypassing a restriction that
+// applies to the requester. GitHub omits bypass_actors for tokens without
+// ruleset write access; omission is not proof of no bypass.
 func (c *Client) ProtectedReleaseTags(ctx context.Context, repo string) (bool, error) {
 	path, err := repoPath(repo)
 	if err != nil {
@@ -566,11 +568,15 @@ func (c *Client) ProtectedReleaseTags(ctx context.Context, repo string) (bool, e
 			}
 			var updates, deletions bool
 			for _, rule := range detail.Rules {
-				if rule.Type == "creation" {
+				switch rule.Type {
+				case "update":
+					updates = true
+				case "deletion":
+					deletions = true
+				case "non_fast_forward":
+				default:
 					return false, nil
 				}
-				updates = updates || rule.Type == "update"
-				deletions = deletions || rule.Type == "deletion"
 			}
 			protected = protected || updates && deletions && detail.BypassActors != nil && len(*detail.BypassActors) == 0 &&
 				len(detail.Conditions.RefName.Exclude) == 0 && containsString(detail.Conditions.RefName.Include, "~ALL")
