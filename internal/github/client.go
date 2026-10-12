@@ -421,20 +421,21 @@ func (c *Client) AuthenticatedUser(ctx context.Context) (User, error) {
 	return user, err
 }
 
-// ListRepositoryInvitations lists all currently open invitations for the
-// authenticated user. The caller decides whether an invitation is allowed.
+// ListRepositoryInvitations lists open invitations for the authenticated user.
+//
+// It reads at most ten pages and returns fetched invitations if a later page fails.
 func (c *Client) ListRepositoryInvitations(ctx context.Context) ([]Invitation, error) {
 	q := url.Values{"per_page": {"100"}}
 	var invitations []Invitation
 	for page := 1; ; page++ {
-		if page > 1000 {
-			return nil, errors.New("too many GitHub repository invitation pages")
+		if page > 10 {
+			return invitations, errors.New("more than ten GitHub repository invitation pages")
 		}
 		q.Set("page", strconv.Itoa(page))
 		var batch []Invitation
 		header, _, err := c.request(ctx, http.MethodGet, withQuery("/user/repository_invitations", q), nil, &batch, nil, http.StatusOK)
 		if err != nil {
-			return nil, err
+			return invitations, err
 		}
 		invitations = append(invitations, batch...)
 		if !hasNextPage(header.Get("Link")) {
@@ -449,6 +450,15 @@ func (c *Client) AcceptRepositoryInvitation(ctx context.Context, id int64) error
 		return fmt.Errorf("invalid repository invitation id %d", id)
 	}
 	_, _, err := c.request(ctx, http.MethodPatch, "/user/repository_invitations/"+strconv.FormatInt(id, 10), nil, nil, nil, http.StatusNoContent)
+	return err
+}
+
+// DeclineRepositoryInvitation removes an invitation from the authenticated account.
+func (c *Client) DeclineRepositoryInvitation(ctx context.Context, id int64) error {
+	if id <= 0 {
+		return fmt.Errorf("invalid repository invitation id %d", id)
+	}
+	_, _, err := c.request(ctx, http.MethodDelete, "/user/repository_invitations/"+strconv.FormatInt(id, 10), nil, nil, nil, http.StatusNoContent)
 	return err
 }
 

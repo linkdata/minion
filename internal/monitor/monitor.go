@@ -27,6 +27,7 @@ type GitHub interface {
 	Repository(context.Context, string) (github.Repository, error)
 	ListRepositoryInvitations(context.Context) ([]github.Invitation, error)
 	AcceptRepositoryInvitation(context.Context, int64) error
+	DeclineRepositoryInvitation(context.Context, int64) error
 	ThreadItems(context.Context, string, string, int, time.Time) ([]github.Item, error)
 	CurrentItem(context.Context, github.Item) (github.Item, error)
 	Permission(context.Context, string, string) (github.Permission, error)
@@ -89,16 +90,13 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 	if m.Now != nil {
 		now = m.Now
 	}
-	inviteCheck := now().UTC()
-	if !inviteCheck.Before(store.Data.NextInviteCheckAt) {
+	if !now().UTC().Before(store.Data.NextInviteCheckAt) {
 		if err := m.acceptWhitelistedInvitations(ctx); err != nil {
 			// Invitation failures should be visible, but should not stop scans of
 			// repositories for which this account already has access.
 			m.logf("invitation check: %v", err)
-			store.Data.NextInviteCheckAt = inviteCheck.Add(5 * time.Minute)
-		} else {
-			store.Data.NextInviteCheckAt = inviteCheck.Add(15 * time.Minute)
 		}
+		store.Data.NextInviteCheckAt = now().UTC().Add(15 * time.Minute)
 		if err := store.Save(); err != nil {
 			return store.Data.NextPollAt, err
 		}
@@ -482,12 +480,24 @@ func (m *Monitor) finishFailedJob(ctx context.Context, store *state.Store, job J
 }
 
 func (m *Monitor) acceptWhitelistedInvitations(ctx context.Context) error {
-	invitations, err := m.GitHub.ListRepositoryInvitations(ctx)
-	if err != nil {
-		return err
+	listCtx, cancelList := context.WithTimeout(ctx, 30*time.Second)
+	invitations, listErr := m.GitHub.ListRepositoryInvitations(listCtx)
+	cancelList()
+	if invitationActionsBlocked(listErr) {
+		return listErr
 	}
+	actionCtx, cancelActions := context.WithTimeout(ctx, 30*time.Second)
+	defer cancelActions()
 	var failures []error
+	if listErr != nil {
+		failures = append(failures, listErr)
+	}
+	var outsiders []github.Invitation
 	for _, invite := range invitations {
+		if err := actionCtx.Err(); err != nil {
+			failures = append(failures, err)
+			return errors.Join(failures...)
+		}
 		fullName := invite.Repository.FullName
 		owner, name, ok := strings.Cut(fullName, "/")
 		if !ok || owner == "" || name == "" || strings.Contains(name, "/") ||
@@ -500,16 +510,30 @@ func (m *Monitor) acceptWhitelistedInvitations(ctx context.Context) error {
 			continue
 		}
 		allowed := monitored
+		ownerListed := false
 		for _, allowedOwner := range m.Config.InvitationOwners {
-			if strings.EqualFold(owner, allowedOwner) && m.Config.InvitationOwnerIDs[allowedOwner] == invite.Repository.Owner.ID {
-				allowed = true
+			if strings.EqualFold(owner, allowedOwner) {
+				ownerListed = true
+				if m.Config.InvitationOwnerIDs[allowedOwner] == invite.Repository.Owner.ID {
+					allowed = true
+				}
 				break
 			}
 		}
-		if !allowed {
+		if invite.Invitee.Login != "" && !strings.EqualFold(invite.Invitee.Login, m.Config.BotLogin) {
 			continue
 		}
-		if invite.Invitee.Login != "" && !strings.EqualFold(invite.Invitee.Login, m.Config.BotLogin) {
+		if !allowed {
+			knownIdentity := ownerListed
+			for _, id := range m.Config.InvitationOwnerIDs {
+				knownIdentity = knownIdentity || id == invite.Repository.Owner.ID
+			}
+			for _, repo := range m.Config.Repositories {
+				knownIdentity = knownIdentity || repo.ID == invite.Repository.ID || repo.OwnerID == invite.Repository.Owner.ID
+			}
+			if !knownIdentity {
+				outsiders = append(outsiders, invite)
+			}
 			continue
 		}
 		switch invite.Permissions {
@@ -540,8 +564,11 @@ func (m *Monitor) acceptWhitelistedInvitations(ctx context.Context) error {
 			m.Config.Repositories = append(m.Config.Repositories, repo)
 			m.logf("added %s to monitored repositories in %s", repo.Name, m.ConfigPath)
 		}
-		if err := m.GitHub.AcceptRepositoryInvitation(ctx, invite.ID); err != nil {
+		if err := m.GitHub.AcceptRepositoryInvitation(actionCtx, invite.ID); err != nil {
 			failures = append(failures, fmt.Errorf("accept %s invitation: %w", fullName, err))
+			if invitationActionsBlocked(err) {
+				return errors.Join(failures...)
+			}
 			continue
 		}
 		m.logf("accepted repository invitation for %s (%s)", fullName, invite.Permissions)
@@ -549,7 +576,25 @@ func (m *Monitor) acceptWhitelistedInvitations(ctx context.Context) error {
 			m.logf("%s is not monitored: commands require write access", fullName)
 		}
 	}
+	for _, invite := range outsiders {
+		if err := actionCtx.Err(); err != nil {
+			failures = append(failures, err)
+			break
+		}
+		if err := m.GitHub.DeclineRepositoryInvitation(actionCtx, invite.ID); err != nil {
+			failures = append(failures, fmt.Errorf("decline %s invitation: %w", invite.Repository.FullName, err))
+			if invitationActionsBlocked(err) {
+				break
+			}
+		}
+	}
 	return errors.Join(failures...)
+}
+
+func invitationActionsBlocked(err error) bool {
+	var status *github.StatusError
+	return errors.As(err, &status) &&
+		(status.StatusCode == http.StatusForbidden || status.StatusCode == http.StatusTooManyRequests)
 }
 
 func jobID(itemKey, commandKey string) string {

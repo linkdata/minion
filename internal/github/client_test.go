@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -274,7 +275,7 @@ func TestRepositoryRejectsMismatchedIdentity(t *testing.T) {
 }
 
 func TestRepositoryInvitationsListAndAccept(t *testing.T) {
-	var accepted int
+	var accepted, declined int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/user/repository_invitations":
@@ -293,6 +294,9 @@ func TestRepositoryInvitationsListAndAccept(t *testing.T) {
 			}
 		case r.Method == http.MethodPatch && r.URL.Path == "/user/repository_invitations/17":
 			accepted++
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodDelete && r.URL.Path == "/user/repository_invitations/18":
+			declined++
 			w.WriteHeader(http.StatusNoContent)
 		default:
 			http.NotFound(w, r)
@@ -313,8 +317,56 @@ func TestRepositoryInvitationsListAndAccept(t *testing.T) {
 	if accepted != 1 {
 		t.Fatalf("expected one acceptance, got %d", accepted)
 	}
+	if err := c.DeclineRepositoryInvitation(context.Background(), invitations[1].ID); err != nil {
+		t.Fatal(err)
+	}
+	if declined != 1 {
+		t.Fatalf("expected one decline, got %d", declined)
+	}
 	if err := c.AcceptRepositoryInvitation(context.Background(), 0); err == nil {
 		t.Fatal("expected invalid invitation ID to fail")
+	}
+	if err := c.DeclineRepositoryInvitation(context.Background(), 0); err == nil {
+		t.Fatal("expected invalid invitation ID to fail")
+	}
+}
+
+func TestListRepositoryInvitationsKeepsFetchedPagesOnErrorAndLimit(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		failPage  int
+		lastPage  int
+		wantPages int
+		wantCalls int
+		wantError bool
+	}{
+		{name: "later page fails", failPage: 2, wantPages: 1, wantCalls: 2, wantError: true},
+		{name: "page limit", wantPages: 10, wantCalls: 10, wantError: true},
+		{name: "exactly ten pages", lastPage: 10, wantPages: 10, wantCalls: 10},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requests := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				page, err := strconv.Atoi(r.URL.Query().Get("page"))
+				if err != nil || page != requests || r.URL.Path != "/user/repository_invitations" {
+					t.Errorf("unexpected invitation page: %s", r.URL)
+				}
+				if page == tc.failPage {
+					w.WriteHeader(http.StatusBadGateway)
+					return
+				}
+				if page != tc.lastPage {
+					w.Header().Set("Link", `<https://api.github.com/user/repository_invitations?page=2>; rel="next"`)
+				}
+				_, _ = fmt.Fprintf(w, `[{"id":%d}]`, page)
+			}))
+			defer server.Close()
+			invitations, err := testClient(server).ListRepositoryInvitations(context.Background())
+			if (err != nil) != tc.wantError || len(invitations) != tc.wantPages || requests != tc.wantCalls {
+				t.Fatalf("invitations=%d, requests=%d, error=%v", len(invitations), requests, err)
+			}
+		})
 	}
 }
 

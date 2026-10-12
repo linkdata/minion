@@ -197,7 +197,8 @@ func (f *actionMonitorGitHub) Repository(_ context.Context, name string) (github
 func (f *actionMonitorGitHub) ListRepositoryInvitations(context.Context) ([]github.Invitation, error) {
 	return nil, nil
 }
-func (f *actionMonitorGitHub) AcceptRepositoryInvitation(context.Context, int64) error { return nil }
+func (f *actionMonitorGitHub) AcceptRepositoryInvitation(context.Context, int64) error  { return nil }
+func (f *actionMonitorGitHub) DeclineRepositoryInvitation(context.Context, int64) error { return nil }
 func (f *actionMonitorGitHub) ThreadItems(context.Context, string, string, int, time.Time) ([]github.Item, error) {
 	items := append([]github.Item(nil), f.items...)
 	for i := range items {
