@@ -116,7 +116,7 @@ The fix test publishes a temporary bot branch and issue reply, checks a repeat e
 
 To exercise the production review action, run `MINION_LIVE_WRITE=1 MINION_LIVE_REVIEW=1 go test -race ./internal/action -run '^TestLiveReviewAction$' -count=1`. It reviews the configured owner-authored draft pull request at its exact head, submits a comment review, and checks that a repeat execution does not submit another. GitHub retains the submitted review.
 
-If a write test is interrupted before cleanup, inspect `linkdata/miniontesting` for its temporary `minion/live-*`, `minion/live-gitwork-*`, and `minion/fix-*` branches, `minion-live-*` tags and drafts, and bot replies carrying its job marker. Remove only artifacts created by that run. Notification delivery and the monitor's invitation handling depend on GitHub account settings and are covered by offline integration tests; the live suite checks the notifications API.
+If a write test is interrupted before cleanup, inspect `linkdata/miniontesting` for its temporary `minion/live-*`, `minion/live-gitwork-*`, and `minion/fix-*` branches, `minion-live-*` tags and drafts, and bot replies carrying its job marker. Remove only artifacts created by that run. Notification delivery and the monitor's invitation handling depend on GitHub account settings and are covered by offline integration tests; the live suite checks the repository notifications API.
 
 The invitation and revocation lifecycle has a separate opt-in test. Run it only when explicitly requested, with `MINION_LIVE_WRITE` unset and `linkdataminion` lacking collaborator access or a pending invitation; it removes the access it grants:
 

@@ -20,6 +20,7 @@ import (
 	"github.com/linkdata/minion/internal/state"
 )
 
+// GitHub provides the API operations used by Monitor.
 type GitHub interface {
 	ListRepositoryNotifications(context.Context, string, time.Time) ([]github.Notification, time.Duration, error)
 	ListRepositoryInvitations(context.Context) ([]github.Invitation, error)
@@ -77,9 +78,10 @@ func (m *Monitor) logf(format string, args ...any) {
 	}
 }
 
-// RunOnce polls each whitelisted repository's notifications and persists each
-// completed command before moving that repository's cursor. Failed threads are
-// persisted for later retries without holding back unrelated notifications.
+// RunOnce processes new notifications in whitelisted repositories.
+//
+// It persists each completed command before advancing that repository's cursor.
+// Failed threads remain queued for retries without blocking other repositories.
 func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, error) {
 	now := time.Now
 	if m.Now != nil {

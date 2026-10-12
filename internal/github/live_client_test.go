@@ -73,7 +73,7 @@ func TestLiveClientReadOnly(t *testing.T) {
 	}
 
 	t.Run("notifications", func(t *testing.T) {
-		notifications, interval, err := bot.ListNotifications(ctx, time.Time{})
+		notifications, interval, err := bot.ListRepositoryNotifications(ctx, cfg.Repo, time.Time{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -81,7 +81,7 @@ func TestLiveClientReadOnly(t *testing.T) {
 			t.Fatalf("notification poll interval = %s", interval)
 		}
 		for _, notification := range notifications {
-			if notification.ID == "" || notification.Repository.FullName == "" || notification.Subject.Type == "" || notification.UpdatedAt.IsZero() {
+			if notification.ID == "" || !strings.EqualFold(notification.Repository.FullName, cfg.Repo) || notification.Subject.Type == "" || notification.UpdatedAt.IsZero() {
 				t.Fatalf("incomplete notification = %+v", notification)
 			}
 			if notification.Subject.Type == "Issue" || notification.Subject.Type == "PullRequest" {

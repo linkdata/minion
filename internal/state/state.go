@@ -13,8 +13,12 @@ import (
 
 var ErrLocked = errors.New("another minion process holds the state lock")
 
+// Data holds durable monitor state.
 type Data struct {
-	Cursor               time.Time                      `json:"cursor"`
+	// Cursor seeds repositories without a saved cursor.
+	Cursor time.Time `json:"cursor"`
+	// RepositoryCursors tracks each repository's durable notification cursor.
+	// Missing entries start at Cursor when that repository is first polled.
 	RepositoryCursors    map[string]time.Time           `json:"repository_cursors,omitempty"`
 	NextPollAt           time.Time                      `json:"next_poll_at,omitempty"`
 	NextInviteCheckAt    time.Time                      `json:"next_invite_check_at,omitempty"`
@@ -57,10 +61,10 @@ type Store struct {
 //
 // The lock prevents overlapping cron invocations from executing the same command.
 func Open(path string, initialCursor time.Time) (*Store, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
-	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0600)
+	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, err
 	}
@@ -136,7 +140,7 @@ func (s *Store) Save() (err error) {
 	}()
 	encoder := json.NewEncoder(f)
 	encoder.SetIndent("", "  ")
-	err = f.Chmod(0600)
+	err = f.Chmod(0o600)
 	if err == nil {
 		err = encoder.Encode(s.Data)
 	}

@@ -378,10 +378,10 @@ func pollInterval(header http.Header) time.Duration {
 	return time.Duration(seconds) * time.Second
 }
 
-// ListRepositoryNotifications includes read notifications, so another inbox
-// client marking a thread read does not remove it from the bot's scan. It returns
-// the server's minimum poll interval. A failed page leaves the repository cursor
-// unchanged, allowing the whole window to be retried without losing commands.
+// ListRepositoryNotifications lists a repository's read and unread notifications.
+//
+// It returns GitHub's minimum poll interval and discards partial results if a
+// page fails. Marking a thread read in another client does not hide it.
 func (c *Client) ListRepositoryNotifications(ctx context.Context, repo string, since time.Time) ([]Notification, time.Duration, error) {
 	path, err := repoPath(repo)
 	if err != nil {
@@ -393,7 +393,7 @@ func (c *Client) ListRepositoryNotifications(ctx context.Context, repo string, s
 	}
 	query.Set("page", "1")
 	var all []Notification
-	var interval = time.Minute
+	interval := time.Minute
 	for page := 1; ; page++ {
 		if page > 20 {
 			return nil, interval, fmt.Errorf("too many GitHub notification pages for %s", repo)
