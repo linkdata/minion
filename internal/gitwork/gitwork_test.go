@@ -307,7 +307,11 @@ func TestNewBranchRejectsTrackedGitlink(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer checkout.Close()
+	t.Cleanup(func() {
+		if err := checkout.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 	if err := checkout.NewBranch(context.Background(), "minion/fix-gitlink"); err == nil || !strings.Contains(err.Error(), "gitlink") {
 		t.Fatalf("NewBranch() error = %v, want gitlink refusal", err)
 	}
