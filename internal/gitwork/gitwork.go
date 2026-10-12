@@ -285,6 +285,13 @@ func (c *Checkout) NewBranch(ctx context.Context, name string) error {
 	if err := c.assertHead(ctx); err != nil {
 		return err
 	}
+	entries, err := runGit(ctx, c.path, "ls-tree", "-r", "-z", "HEAD")
+	if err != nil {
+		return err
+	}
+	if strings.HasPrefix(entries, "160000 ") || strings.Contains(entries, "\x00160000 ") {
+		return errors.New("cannot create a writable branch with tracked gitlinks")
+	}
 	if _, err := runGit(ctx, c.path, "switch", "--create", name); err != nil {
 		return err
 	}
