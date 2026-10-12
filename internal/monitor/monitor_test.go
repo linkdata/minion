@@ -672,6 +672,33 @@ func TestInvitationListingErrorKeepsPartialWorkAndPollsAfterLongCheck(t *testing
 	}
 }
 
+func TestInvitationListingRateLimitDefersActions(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  *github.StatusError
+	}{
+		{name: "HTTP 429", err: &github.StatusError{StatusCode: http.StatusTooManyRequests, Message: "rate limit"}},
+		{name: "secondary rate limit", err: &github.StatusError{StatusCode: http.StatusForbidden, Message: "secondary rate limit"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gh := &fakeGitHub{
+				invitations: []github.Invitation{
+					{ID: 1, Repository: github.Repository{FullName: "example-owner/example-repo", Owner: github.User{Login: "example-owner"}}, Permissions: "write"},
+					{ID: 2, Repository: github.Repository{ID: 22, FullName: "outsider/repo", Owner: github.User{Login: "outsider", ID: 4}}, Permissions: "write"},
+				},
+				inviteErr: tc.err,
+			}
+			m := &Monitor{Config: testConfig(), GitHub: gh}
+			if err := m.acceptWhitelistedInvitations(context.Background()); !errors.Is(err, tc.err) {
+				t.Fatalf("invitation listing error = %v, want rate limit", err)
+			}
+			if len(gh.accepted) != 0 || len(gh.declined) != 0 {
+				t.Fatalf("invitation actions continued after listing rate limit: accepted=%v declined=%v", gh.accepted, gh.declined)
+			}
+		})
+	}
+}
+
 func TestInvitationRateLimitStopsDeclines(t *testing.T) {
 	gh := &fakeGitHub{
 		invitations: []github.Invitation{

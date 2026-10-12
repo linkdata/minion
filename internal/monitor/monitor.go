@@ -456,6 +456,9 @@ func (m *Monitor) acceptWhitelistedInvitations(ctx context.Context) error {
 	listCtx, cancelList := context.WithTimeout(ctx, 30*time.Second)
 	invitations, listErr := m.GitHub.ListRepositoryInvitations(listCtx)
 	cancelList()
+	if invitationRateLimited(listErr) {
+		return listErr
+	}
 	actionCtx, cancelActions := context.WithTimeout(ctx, 30*time.Second)
 	defer cancelActions()
 	var failures []error
