@@ -46,7 +46,7 @@ func restoreDir(parent int, name string) {
 		return
 	}
 	dir := os.NewFile(uintptr(dirFD), name)
-	defer dir.Close()
+	defer func() { _ = dir.Close() }()
 	for {
 		names, err := dir.Readdirnames(1024)
 		for _, name := range names {
