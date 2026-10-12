@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -62,7 +63,7 @@ func TestOfflineReviewPollRecoversAfterPublication(t *testing.T) {
 			return
 		}
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/notifications":
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/notifications":
 			since, err := time.Parse(time.RFC3339, r.URL.Query().Get("since"))
 			if err != nil {
 				t.Errorf("notification since: %v", err)
@@ -84,9 +85,6 @@ func TestOfflineReviewPollRecoversAfterPublication(t *testing.T) {
 			_ = json.NewEncoder(w).Encode([]github.Comment{request})
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/pulls/7/comments":
 			_, _ = fmt.Fprint(w, `[]`)
-		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/pulls/7/reviews":
-			_, current := snapshot()
-			_ = json.NewEncoder(w).Encode(current)
 		case r.Method == http.MethodPost && r.URL.Path == "/graphql":
 			var input struct {
 				Query     string `json:"query"`
@@ -100,6 +98,16 @@ func TestOfflineReviewPollRecoversAfterPublication(t *testing.T) {
 				return
 			}
 			switch {
+			case strings.Contains(input.Query, "timelineItems"):
+				_, current := snapshot()
+				nodes := make([]map[string]any, 0, len(current))
+				for _, review := range current {
+					nodes = append(nodes, map[string]any{"id": review.NodeID, "fullDatabaseId": strconv.FormatInt(review.ID, 10),
+						"body": review.Body, "author": map[string]string{"login": review.User.Login}, "state": review.State,
+						"submittedAt": review.SubmittedAt})
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"repository": map[string]any{
+					"pullRequest": map[string]any{"timelineItems": map[string]any{"nodes": nodes, "pageInfo": map[string]any{"hasNextPage": false}}}}}})
 			case strings.Contains(input.Query, "addReaction") && input.Variables.ID == request.NodeID:
 				record("reaction")
 				_, _ = fmt.Fprint(w, `{"data":{"addReaction":{"subject":{"reactions":{"viewerHasReacted":true}}}}}`)

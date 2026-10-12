@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -20,28 +21,45 @@ import (
 	"github.com/linkdata/minion/internal/workroot"
 )
 
-type fakeGitHub struct {
-	notifications []github.Notification
-	items         []github.Item
-	invitations   []github.Invitation
-	permission    github.Permission
-	permissionErr error
-	reactionErr   error
-	acceptErr     error
-	beforeAccept  func()
-	accepted      []int64
-	reactions     []string
-	checks        int
-	currentChecks int
-	currentItem   func(github.Item) (github.Item, error)
-	commentErr    error
-	commentCalls  int
-	comments      []github.Comment
-	threadItems   func(string, int, time.Time) ([]github.Item, error)
+type notificationCall struct {
+	repo  string
+	since time.Time
 }
 
-func (f *fakeGitHub) ListNotifications(context.Context, time.Time) ([]github.Notification, time.Duration, error) {
-	return f.notifications, time.Minute, nil
+type fakeGitHub struct {
+	notifications      []github.Notification
+	notificationErrors map[string]error
+	notificationCalls  []notificationCall
+	items              []github.Item
+	invitations        []github.Invitation
+	permission         github.Permission
+	permissionErr      error
+	reactionErr        error
+	acceptErr          error
+	beforeAccept       func()
+	accepted           []int64
+	reactions          []string
+	checks             int
+	currentChecks      int
+	currentItem        func(github.Item) (github.Item, error)
+	commentErr         error
+	commentCalls       int
+	comments           []github.Comment
+	threadItems        func(string, int, time.Time) ([]github.Item, error)
+}
+
+func (f *fakeGitHub) ListRepositoryNotifications(_ context.Context, repo string, since time.Time) ([]github.Notification, time.Duration, error) {
+	f.notificationCalls = append(f.notificationCalls, notificationCall{repo, since})
+	if err := f.notificationErrors[repo]; err != nil {
+		return nil, time.Minute, err
+	}
+	var notifications []github.Notification
+	for _, notification := range f.notifications {
+		if notification.Repository.FullName == repo {
+			notifications = append(notifications, notification)
+		}
+	}
+	return notifications, time.Minute, nil
 }
 
 func (f *fakeGitHub) ListRepositoryInvitations(context.Context) ([]github.Invitation, error) {
@@ -139,6 +157,113 @@ func openState(t *testing.T, initial time.Time) *state.Store {
 		}
 	})
 	return s
+}
+
+func TestRunOnceKeepsFailedRepositoryWindowAndRetriesPendingThreads(t *testing.T) {
+	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	initial := now.Add(-time.Minute)
+	path := filepath.Join(t.TempDir(), "state.json")
+	store, err := state.Open(path, initial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	notification := func(repo string, number int, at time.Time) github.Notification {
+		return github.Notification{
+			Repository: github.Repository{FullName: repo},
+			Subject:    github.Subject{Type: "Issue", URL: fmt.Sprintf("https://api.github.com/repos/%s/issues/%d", repo, number)},
+			UpdatedAt:  at,
+		}
+	}
+	pending := notification("a/one", 7, now.Add(-time.Minute))
+	store.Data.PendingNotifications[notificationKey(pending)] = state.PendingNotification{
+		Repository: pending.Repository.FullName, SubjectType: pending.Subject.Type,
+		SubjectURL: pending.Subject.URL, Since: initial,
+		UpdatedAt: pending.UpdatedAt, RetryAt: now.Add(-time.Second),
+	}
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	gh := &fakeGitHub{
+		notifications:      []github.Notification{notification("b/two", 8, now)},
+		notificationErrors: map[string]error{"a/one": errors.New("temporary outage")},
+		permission:         github.Permission{Permission: "write"},
+		threadItems: func(repo string, number int, since time.Time) ([]github.Item, error) {
+			if repo == "a/one" && number == 7 && !since.Equal(initial) {
+				t.Fatalf("pending thread lost original scan window: %s", since)
+			}
+			return []github.Item{{Key: fmt.Sprintf("%s#comment:%d", repo, number), NodeID: fmt.Sprintf("node-%d", number), Body: "@linkdataminion review", Author: github.User{Login: "writer"}}}, nil
+		},
+	}
+	cfg := testConfig()
+	cfg.Repositories = []config.Repository{{Name: "a/one", Actions: []string{"review"}}, {Name: "b/two", Actions: []string{"review"}}}
+	executor := &fakeExecutor{}
+	clock := now
+	m := &Monitor{Config: cfg, GitHub: gh, Executor: executor, Now: func() time.Time { return clock }}
+	if _, err := m.RunOnce(context.Background(), store); err == nil || !strings.Contains(err.Error(), "a/one") {
+		t.Fatalf("failed repository poll was not reported: %v", err)
+	}
+	if len(executor.jobs) != 2 || len(store.Data.PendingNotifications) != 0 {
+		t.Fatalf("other repository or pending retry stalled: jobs=%+v pending=%+v", executor.jobs, store.Data.PendingNotifications)
+	}
+	if !store.Data.RepositoryCursors["a/one"].Equal(initial) || !store.Data.RepositoryCursors["b/two"].After(initial) {
+		t.Fatalf("repository cursors after partial failure: %+v", store.Data.RepositoryCursors)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = state.Open(path, initial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gh.notificationErrors = nil
+	gh.notifications = append(gh.notifications, notification("a/one", 9, now.Add(30*time.Second)))
+	clock = now.Add(time.Minute)
+	if _, err := m.RunOnce(context.Background(), store); err != nil {
+		t.Fatal(err)
+	}
+	if len(executor.jobs) != 3 || executor.jobs[2].Repository.Name != "a/one" || executor.jobs[2].Number != 9 {
+		t.Fatalf("recovered repository notification was lost or duplicate ran: %+v", executor.jobs)
+	}
+	if len(gh.notificationCalls) != 4 || !gh.notificationCalls[2].since.Equal(initial) || !gh.notificationCalls[3].since.After(initial) {
+		t.Fatalf("repository cursors not independently restored: %+v", gh.notificationCalls)
+	}
+}
+
+func TestRunOnceSeedsNewRepositoryFromCurrentCursor(t *testing.T) {
+	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	initial := now.Add(-time.Hour)
+	store := openState(t, initial)
+	gh := &fakeGitHub{permission: github.Permission{Permission: "write"}, items: []github.Item{{
+		Key: "b/two#comment:9", NodeID: "node-9", Body: "@linkdataminion review", Author: github.User{Login: "writer"},
+	}}}
+	clock := now
+	executor := &fakeExecutor{}
+	m := &Monitor{Config: testConfig(), GitHub: gh, Executor: executor, Now: func() time.Time { return clock }}
+	if _, err := m.RunOnce(context.Background(), store); err != nil {
+		t.Fatal(err)
+	}
+	advanced := store.Data.Cursor
+	if !advanced.After(initial) {
+		t.Fatalf("cursor did not advance: %s", advanced)
+	}
+	m.Config.Repositories = append(m.Config.Repositories, config.Repository{Name: "b/two", Actions: []string{"review"}})
+	gh.notifications = []github.Notification{{
+		Repository: github.Repository{FullName: "b/two"},
+		Subject:    github.Subject{Type: "Issue", URL: "https://api.github.com/repos/b/two/issues/9"},
+		UpdatedAt:  now.Add(30 * time.Second),
+	}}
+	clock = now.Add(time.Minute)
+	if _, err := m.RunOnce(context.Background(), store); err != nil {
+		t.Fatal(err)
+	}
+	if len(gh.notificationCalls) != 3 || gh.notificationCalls[2].repo != "b/two" || !gh.notificationCalls[2].since.Equal(advanced) {
+		t.Fatalf("new repository did not inherit current cursor: %+v", gh.notificationCalls)
+	}
+	if len(executor.jobs) != 1 || executor.jobs[0].Repository.Name != "b/two" {
+		t.Fatalf("new repository notification was not processed: %+v", executor.jobs)
+	}
 }
 
 func TestRunOnceChecksPermissionAndDeduplicates(t *testing.T) {

@@ -64,7 +64,7 @@ func TestCloseCheckoutRemovesRestrictedDirectory(t *testing.T) {
 }
 
 func TestAlreadyAcknowledgedRequiresOwnTrailingMarker(t *testing.T) {
-	job := monitor.Job{Repository: config.Repository{Name: "o/r"}, SubjectType: "PullRequest", Number: 7, ID: strings.Repeat("a", 64)}
+	job := monitor.Job{Repository: config.Repository{Name: "o/r"}, SubjectType: "PullRequest", Number: 7, ID: strings.Repeat("a", 64), Command: command.Command{Action: command.Review}}
 	reviewMarker := "<!-- linkdataminion:" + strings.Repeat("b", 64) + " -->"
 	for _, tt := range []struct {
 		name, body, author, liveBody string
@@ -84,9 +84,22 @@ func TestAlreadyAcknowledgedRequiresOwnTrailingMarker(t *testing.T) {
 					_, _ = fmt.Fprint(w, `{}`)
 				case "/repos/o/r/issues/7/comments", "/repos/o/r/pulls/7/comments":
 					_, _ = fmt.Fprint(w, `[]`)
-				case "/repos/o/r/pulls/7/reviews":
-					_ = json.NewEncoder(w).Encode([]map[string]any{{"id": 1, "node_id": "review-node-1", "body": tt.body, "user": map[string]string{"login": tt.author}, "state": "COMMENTED"}})
 				case "/graphql":
+					var input struct {
+						Query string `json:"query"`
+					}
+					if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+						t.Error(err)
+						return
+					}
+					if strings.Contains(input.Query, "timelineItems") {
+						_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"repository": map[string]any{
+							"pullRequest": map[string]any{"timelineItems": map[string]any{
+								"nodes": []map[string]any{{"id": "review-node-1", "fullDatabaseId": "1", "body": tt.body,
+									"author": map[string]string{"login": tt.author}, "state": "COMMENTED", "submittedAt": "2026-10-09T08:00:00Z"}},
+								"pageInfo": map[string]any{"hasNextPage": false}}}}}})
+						return
+					}
 					provenanceCalls++
 					liveBody := tt.body
 					if tt.liveBody != "" {
@@ -118,12 +131,33 @@ func TestAlreadyAcknowledgedRequiresOwnTrailingMarker(t *testing.T) {
 	}
 }
 
+func TestPrecheckDeadlineStopsJobBeforeCodex(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/o/r/issues/7/comments" {
+			t.Errorf("unexpected request: %s", r.URL)
+		}
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+	client := github.New("test-token")
+	client.BaseURL, client.HTTPClient = server.URL, server.Client()
+	executor := &Executor{GitHub: client, BotLogin: "linkdataminion", Timeout: 20 * time.Millisecond,
+		RunCodex: func(context.Context, string, string, bool, string) (codexcli.Result, error) {
+			t.Fatal("Codex ran after precheck deadline")
+			return codexcli.Result{}, nil
+		}}
+	job := monitor.Job{Repository: config.Repository{Name: "o/r"}, SubjectType: "Issue", Number: 7, ID: strings.Repeat("a", 64)}
+	if err := executor.Execute(context.Background(), job); !errors.Is(err, monitor.ErrTerminalJob) {
+		t.Fatalf("precheck deadline was refundable: %v", err)
+	}
+}
+
 type actionMonitorGitHub struct {
 	items        []github.Item
 	notification github.Notification
 }
 
-func (f *actionMonitorGitHub) ListNotifications(context.Context, time.Time) ([]github.Notification, time.Duration, error) {
+func (f *actionMonitorGitHub) ListRepositoryNotifications(context.Context, string, time.Time) ([]github.Notification, time.Duration, error) {
 	return []github.Notification{f.notification}, time.Minute, nil
 }
 func (f *actionMonitorGitHub) ListRepositoryInvitations(context.Context) ([]github.Invitation, error) {
@@ -177,8 +211,15 @@ func TestReviewEchoDoesNotSuppressAuditInMonitor(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(comments)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/pulls/7/comments":
 			_, _ = fmt.Fprint(w, `[]`)
-		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/pulls/7/reviews":
-			_ = json.NewEncoder(w).Encode(reviews)
+		case r.Method == http.MethodPost && r.URL.Path == "/graphql":
+			nodes := make([]map[string]any, 0, len(reviews))
+			for _, review := range reviews {
+				nodes = append(nodes, map[string]any{"id": review.NodeID, "fullDatabaseId": fmt.Sprint(review.ID),
+					"body": review.Body, "author": map[string]string{"login": review.User.Login}, "state": review.State,
+					"submittedAt": now})
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"repository": map[string]any{
+				"pullRequest": map[string]any{"timelineItems": map[string]any{"nodes": nodes, "pageInfo": map[string]any{"hasNextPage": false}}}}}})
 		case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/pulls/7/reviews":
 			var payload struct{ Body string }
 			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {

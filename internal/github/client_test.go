@@ -160,13 +160,16 @@ func TestCurrentIssueContentUsesRenderedTextAndEditTime(t *testing.T) {
 	}
 }
 
-func TestListNotificationsPaginatesAndRepeatsAfterFailedAction(t *testing.T) {
+func TestListRepositoryNotificationsPaginatesAndRepeatsAfterFailedAction(t *testing.T) {
 	var calls []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer test-token" {
 			t.Errorf("authorization header missing")
 		}
 		calls = append(calls, r.URL.RawQuery)
+		if r.URL.Path != "/repos/example-owner/example-repo/notifications" || r.URL.Query().Get("per_page") != "100" {
+			t.Errorf("notification request must be scoped to repository: %s", r.URL)
+		}
 		if r.URL.Query().Get("all") != "true" || r.URL.Query().Get("participating") != "true" {
 			t.Errorf("notification filters missing: %s", r.URL.RawQuery)
 		}
@@ -191,14 +194,14 @@ func TestListNotificationsPaginatesAndRepeatsAfterFailedAction(t *testing.T) {
 	defer server.Close()
 	c := testClient(server)
 	since := time.Date(2026, 10, 9, 7, 0, 0, 500_000_000, time.UTC)
-	rows, interval, err := c.ListNotifications(context.Background(), since)
+	rows, interval, err := c.ListRepositoryNotifications(context.Background(), "example-owner/example-repo", since)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if interval != 90*time.Second || len(rows) != 2 || rows[0].ID != "first" || rows[1].ID != "second" {
 		t.Fatalf("unexpected first response: rows=%v interval=%s", rows, interval)
 	}
-	rows, interval, err = c.ListNotifications(context.Background(), since)
+	rows, interval, err = c.ListRepositoryNotifications(context.Background(), "example-owner/example-repo", since)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,6 +210,20 @@ func TestListNotificationsPaginatesAndRepeatsAfterFailedAction(t *testing.T) {
 	}
 	if len(calls) != 4 {
 		t.Fatalf("expected two pages on each poll, got %d calls", len(calls))
+	}
+}
+
+func TestListRepositoryNotificationsFailsClosedAfterPageLimit(t *testing.T) {
+	pages := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pages++
+		w.Header().Set("Link", `<https://api.github.com/repos/o/r/notifications?page=21>; rel="next"`)
+		_, _ = fmt.Fprint(w, `[{"id":"repeat"}]`)
+	}))
+	defer server.Close()
+	rows, _, err := testClient(server).ListRepositoryNotifications(context.Background(), "o/r", time.Now())
+	if err == nil || !strings.Contains(err.Error(), "o/r") || rows != nil || pages != 20 {
+		t.Fatalf("page limit did not preserve cursor window: rows=%v pages=%d err=%v", rows, pages, err)
 	}
 }
 
@@ -318,7 +335,7 @@ func TestAcceptRepositoryInvitationSurfacesForbidden(t *testing.T) {
 
 func TestPullRequestItemsCoverEveryCommentSurface(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasPrefix(r.URL.Path, "/repos/o/r/") {
+		if !strings.HasPrefix(r.URL.Path, "/repos/o/r/") && r.URL.Path != "/graphql" {
 			t.Errorf("unexpected path %s", r.URL.Path)
 			http.NotFound(w, r)
 			return
@@ -346,8 +363,22 @@ func TestPullRequestItemsCoverEveryCommentSurface(t *testing.T) {
 			if _, err := fmt.Fprint(w, `[{"id":13,"node_id":"review-comment-node-13","body":"diff comment","user":{"login":"dave"},"updated_at":"2026-10-09T08:00:03Z"}]`); err != nil {
 				t.Error(err)
 			}
-		case "/repos/o/r/pulls/7/reviews":
-			if _, err := fmt.Fprint(w, `[{"id":14,"node_id":"review-node-14","body":"review body","user":{"login":"erin"},"state":"COMMENTED","submitted_at":"2026-10-09T08:00:04Z"},{"id":15,"body":"unsubmitted","state":"PENDING"}]`); err != nil {
+		case "/graphql":
+			var input struct {
+				Query     string         `json:"query"`
+				Variables map[string]any `json:"variables"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+				t.Error(err)
+			}
+			if !strings.Contains(input.Query, "itemTypes: [PULL_REQUEST_REVIEW]") ||
+				!strings.Contains(input.Query, "since: $since") || input.Variables["owner"] != "o" || input.Variables["name"] != "r" {
+				t.Errorf("review timeline query omitted filtering: %+v", input)
+			}
+			if got := input.Variables["since"]; got != nil && got != "2026-10-09T07:59:59Z" {
+				t.Errorf("review timeline since = %v", got)
+			}
+			if _, err := fmt.Fprint(w, `{"data":{"repository":{"pullRequest":{"timelineItems":{"nodes":[{"id":"review-node-14","fullDatabaseId":"14","body":"review body","author":{"login":"erin"},"state":"COMMENTED","submittedAt":"2026-10-09T08:00:04Z"},{"id":"review-node-15","fullDatabaseId":"15","body":"unsubmitted","state":"PENDING","submittedAt":null}],"pageInfo":{"hasNextPage":false}}}}}}`); err != nil {
 				t.Error(err)
 			}
 		default:
@@ -387,6 +418,145 @@ func TestPullRequestItemsCoverEveryCommentSurface(t *testing.T) {
 	items, err = c.ThreadItems(context.Background(), "o/r", "PullRequest", 7, time.Time{})
 	if err != nil || len(items) != 5 || items[0].NodeID != "pull-node-7" {
 		t.Fatalf("pull request body missing reaction node ID: %+v, %v", items, err)
+	}
+}
+
+func TestHasVerifiedBotReplyUsesCommandTimeAndStopsAtMatch(t *testing.T) {
+	since := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	marker := "<!-- linkdataminion:job -->"
+	var pages, provenance int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/o/r/issues/7/comments":
+			pages++
+			if r.URL.Query().Get("since") != "2026-10-09T07:59:59Z" || r.URL.Query().Get("page") != "1" {
+				t.Errorf("precheck did not start at command time: %s", r.URL.RawQuery)
+			}
+			w.Header().Set("Link", `<https://api.github.com/repos/o/r/issues/7/comments?page=2>; rel="next"`)
+			_, _ = fmt.Fprintf(w, `[{"id":1,"body":"old","user":{"login":"linkdataminion"},"updated_at":"2026-10-09T07:59:58Z"},{"id":2,"node_id":"reply-node","body":%q,"user":{"login":"linkdataminion"},"updated_at":"2026-10-09T08:00:01Z"}]`, "done\n\n"+marker)
+		case "/graphql":
+			provenance++
+			_, _ = fmt.Fprintf(w, `{"data":{"node":{"body":%q,"author":{"login":"linkdataminion"}}}}`, "done\n\n"+marker)
+		default:
+			t.Errorf("unexpected precheck request: %s %s", r.Method, r.URL)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	client := testClient(server)
+	found, err := client.HasVerifiedBotReply(context.Background(), "o/r", 7, since, "linkdataminion", marker, false)
+	if err != nil || !found || pages != 1 || provenance != 1 {
+		t.Fatalf("reply lookup: found=%t err=%v pages=%d provenance=%d", found, err, pages, provenance)
+	}
+}
+
+func TestReviewTimelineFiltersOldAndPaginatesSubmittedReviews(t *testing.T) {
+	since := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.Method != http.MethodPost || r.URL.Path != "/graphql" {
+			t.Errorf("unexpected review request: %s %s", r.Method, r.URL)
+		}
+		var input struct {
+			Query     string         `json:"query"`
+			Variables map[string]any `json:"variables"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			t.Error(err)
+			return
+		}
+		if !strings.Contains(input.Query, "itemTypes: [PULL_REQUEST_REVIEW]") || input.Variables["since"] != "2026-10-09T07:59:59Z" {
+			t.Errorf("missing incremental review filter: %+v", input)
+		}
+		switch calls {
+		case 1:
+			if input.Variables["after"] != "" {
+				t.Errorf("first page cursor = %v", input.Variables["after"])
+			}
+			_, _ = fmt.Fprint(w, `{"data":{"repository":{"pullRequest":{"timelineItems":{"nodes":[{"id":"old","fullDatabaseId":"1","state":"COMMENTED","submittedAt":"2026-10-09T07:00:00Z"},{"id":"pending","fullDatabaseId":"2","state":"PENDING"},{"id":"submitted","fullDatabaseId":"3","body":"new command","author":{"login":"alice","id":7},"state":"COMMENTED","submittedAt":"2026-10-09T08:01:00Z"}],"pageInfo":{"hasNextPage":true,"endCursor":"next"}}}}}}`)
+		case 2:
+			if input.Variables["after"] != "next" {
+				t.Errorf("second page cursor = %v", input.Variables["after"])
+			}
+			_, _ = fmt.Fprint(w, `{"data":{"repository":{"pullRequest":{"timelineItems":{"nodes":[{"id":"later","fullDatabaseId":"4","body":"later command","author":{"login":"bob","id":8},"state":"APPROVED","submittedAt":"2026-10-09T08:02:00Z"}],"pageInfo":{"hasNextPage":false}}}}}}`)
+		default:
+			t.Errorf("unexpected review page %d", calls)
+		}
+	}))
+	defer server.Close()
+	var items []Item
+	err := testClient(server).forEachReview(context.Background(), "o/r", 7, since, func(item Item) (bool, error) {
+		items = append(items, item)
+		return false, nil
+	})
+	if err != nil || calls != 2 || len(items) != 2 || items[0].Key != "o/r#review:3" || items[1].Key != "o/r#review:4" || items[0].Author.ID != 7 {
+		t.Fatalf("filtered reviews: items=%+v calls=%d err=%v", items, calls, err)
+	}
+}
+
+func TestReviewTimelineCapsRecentPages(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		_, _ = fmt.Fprintf(w, `{"data":{"repository":{"pullRequest":{"timelineItems":{"nodes":[],"pageInfo":{"hasNextPage":true,"endCursor":%q}}}}}}`, fmt.Sprint(calls))
+	}))
+	defer server.Close()
+	err := testClient(server).forEachReview(context.Background(), "o/r", 7, time.Time{}, func(Item) (bool, error) { return false, nil })
+	if err == nil || !strings.Contains(err.Error(), "too many recent") || calls != 20 {
+		t.Fatalf("review page cap: calls=%d err=%v", calls, err)
+	}
+}
+
+func TestReviewTimelineRejectsIncompleteResponse(t *testing.T) {
+	for _, response := range []string{
+		`{"data":{"repository":{"pullRequest":{"timelineItems":{"nodes":[]}}}}}}`,
+		`{"data":{"repository":{"pullRequest":{"timelineItems":{"nodes":[],"pageInfo":{"hasNextPage":false}}}}},"errors":[{"message":"partial failure"}]}`,
+		`{"data":{"repository":{"pullRequest":{"timelineItems":{"nodes":[null],"pageInfo":{"hasNextPage":false}}}}}}`,
+	} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = fmt.Fprint(w, response)
+		}))
+		err := testClient(server).forEachReview(context.Background(), "o/r", 7, time.Time{}, func(Item) (bool, error) { return false, nil })
+		server.Close()
+		if err == nil {
+			t.Fatalf("incomplete review timeline accepted: %s", response)
+		}
+	}
+}
+
+func TestHasVerifiedBotReplyStopsAtReviewMatch(t *testing.T) {
+	marker := "<!-- linkdataminion:job -->"
+	var timelineCalls, provenanceCalls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/o/r/issues/7/comments":
+			_, _ = fmt.Fprint(w, `[]`)
+		case "/graphql":
+			var input struct {
+				Query string `json:"query"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+				t.Error(err)
+				return
+			}
+			if strings.Contains(input.Query, "timelineItems") {
+				timelineCalls++
+				_, _ = fmt.Fprintf(w, `{"data":{"repository":{"pullRequest":{"timelineItems":{"nodes":[{"id":"bot-review","fullDatabaseId":"5","body":%q,"author":{"login":"linkdataminion"},"state":"COMMENTED","submittedAt":"2026-10-09T08:01:00Z"}],"pageInfo":{"hasNextPage":true,"endCursor":"next"}}}}}}`, "done\n\n"+marker)
+				return
+			}
+			provenanceCalls++
+			_, _ = fmt.Fprintf(w, `{"data":{"node":{"body":%q,"author":{"login":"linkdataminion"}}}}`, "done\n\n"+marker)
+		default:
+			t.Errorf("unexpected request %s", r.URL)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	since := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	found, err := testClient(server).HasVerifiedBotReply(context.Background(), "o/r", 7, since, "linkdataminion", marker, true)
+	if err != nil || !found || timelineCalls != 1 || provenanceCalls != 1 {
+		t.Fatalf("review precheck: found=%t err=%v timeline=%d provenance=%d", found, err, timelineCalls, provenanceCalls)
 	}
 }
 
