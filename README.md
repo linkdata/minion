@@ -80,6 +80,50 @@ State and job checkouts live under `var/`. Keep `work_root` outside `/tmp`, whic
 
 Every 15 minutes, the service checks [pending repository invitations](https://docs.github.com/en/rest/collaborators/invitations?apiVersion=2022-11-28). It accepts nonexpired invitations addressed to the configured bot when the repository owner is listed in `invitation_owners` or the repository is explicitly monitored. The owner in GitHub's repository record must match its full name. Invitations to monitored repositories still need `write`, `maintain`, or `admin` access; invitations to other allowed-owner repositories may grant any standard role. Read and triage invitations are accepted without enabling commands. Other invitations stay untouched. New writable repositories are saved atomically to the config before acceptance, so a failed config write leaves the invitation pending for retry. An acceptance failure can leave the entry in the config while acceptance retries. The config file and its directory must be writable; stop the service before editing config to avoid concurrent updates. Invitations accepted before automatic registration was installed need a manual repository entry. This automates the invited account's acceptance step; a repository owner must still send the invitation.
 
+## Live tests
+
+Create the ignored `live-tests.local.json` in the repository root to enable live tests. Without it, they skip:
+
+```json
+{
+  "owner_login": "example-owner",
+  "bot_login": "example-bot",
+  "repository_url": "https://github.com/example-owner/example-repo"
+}
+```
+
+Replace the sample values with two accounts authenticated in `gh` and a repository they can read. Optional `issue_number` selects an owner-authored issue with an owner comment; `pull_request_number` selects an open owner-authored draft pull request with an owner comment; `release_tag` selects an existing tag and draft release. The `linkdata/miniontesting` pull request fixture also needs a bot-authored inline review comment and submitted review with a non-empty body. Optional `bot_ssh_key` is an absolute path to the bot's SSH private key or a path relative to the repository root; it enables SSH identity and repository read checks. Put no token or key contents in this file.
+
+Run `go test -race ./internal/github ./internal/gitwork -run '^(TestLiveSmoke|TestLiveClientReadOnly|TestLiveBotGitAccess|TestLiveCloneAndPullRequest)$' -count=1`. Keep `-count=1` so Go does not reuse a cached result. These tests read GitHub through REST, read-only GraphQL queries, SSH authentication, and Git fetches without changing GitHub state. They verify both accounts' `gh` credentials and, when configured, the bot's SSH key. The Git checkout test uses only `linkdata/miniontesting` and skips for other repositories.
+
+Stop any running minion service before a write run so it cannot accept the test invitation or act on test events. The write run uses both accounts' `gh` credentials and the dedicated `linkdata/miniontesting` repository:
+
+```sh
+MINION_LIVE_WRITE=1 go test -race ./internal/github -run '^TestLiveBotWriteLifecycle$' -count=1
+```
+
+The write test reuses `linkdataminion`'s write access, accepts a suitable pending invitation, or invites it when neither exists. It keeps the resulting access for later runs. The test posts and edits a bot issue comment, reacts to a temporary owner comment, creates a temporary tag and draft release, and, when `bot_ssh_key` is set, pushes a temporary branch and opens a draft pull request. Set `MINION_LIVE_REVIEW=1` as well to post a comment review on the configured fixture pull request. Cleanup deletes both comments and the reaction, draft release, tag, and temporary branch and closes the temporary pull request. GitHub retains submitted reviews and closed pull request records. Cancel an expired bot invitation in Collaborators settings before another write run.
+
+After bot write access is established, exercise the production Git publishing path with `MINION_LIVE_WRITE=1 go test -race ./internal/gitwork -run '^TestLiveCommitAndPush$' -count=1`. It creates one branch, verifies its commit and bot identity, and deletes the branch after checking its exact SHA.
+
+Exercise the production actions with stub Codex results:
+
+```sh
+MINION_LIVE_WRITE=1 go test -race ./internal/action -run '^(TestLiveFixPublishesBranch|TestLiveAuditAction|TestLiveReleaseRefusesUnprotectedTags)$' -count=1
+```
+
+The fix test publishes a temporary bot branch and issue reply, checks a repeat execution, then removes both after identity checks. The audit test checks both issue and draft pull request heads, validates its report, checks a repeat execution, and removes its replies. The release test verifies that the unprotected test repository refuses to create a tag or draft and acknowledges the request once. A successful production release remains covered offline because the required all-tag protection would prevent this live suite from removing its temporary tag. Replies can leave GitHub notifications after cleanup.
+
+To exercise the production review action, run `MINION_LIVE_WRITE=1 MINION_LIVE_REVIEW=1 go test -race ./internal/action -run '^TestLiveReviewAction$' -count=1`. It reviews the configured owner-authored draft pull request at its exact head, submits a comment review, and checks that a repeat execution does not submit another. GitHub retains the submitted review.
+
+If a write test is interrupted before cleanup, inspect `linkdata/miniontesting` for its temporary `minion/live-*`, `minion/live-gitwork-*`, and `minion/fix-*` branches, `minion-live-*` tags and drafts, and bot replies carrying its job marker. Remove only artifacts created by that run. Notification delivery and the monitor's invitation handling depend on GitHub account settings and are covered by offline integration tests; the live suite checks the notifications API.
+
+The invitation and revocation lifecycle has a separate opt-in test. Run it only when explicitly requested, with `MINION_LIVE_WRITE` unset and `linkdataminion` lacking collaborator access or a pending invitation; it removes the access it grants:
+
+```sh
+MINION_LIVE_COLLABORATION=1 go test -race ./internal/github -run '^TestLiveBotCollaborationLifecycle$' -count=1
+```
+
 ## Usage reports
 
 The service records token usage for each action attempt, including failures and retries. Reports are local and need no GitHub or Codex authentication or network access. They can run while the service is running:
