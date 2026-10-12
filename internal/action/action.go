@@ -40,10 +40,14 @@ type Executor struct {
 	Store    *state.Store
 	Usage    *usage.Store
 	WorkRoot string
-	Timeout  time.Duration
-	Codex    config.CodexConfig
-	Logger   *log.Logger
-	RunCodex func(context.Context, string, string, bool, string) (codexcli.Result, error)
+	// CheckWorkRoot verifies the work filesystem before a job and after failure.
+	//
+	// A nil function disables these checks.
+	CheckWorkRoot func() error
+	Timeout       time.Duration
+	Codex         config.CodexConfig
+	Logger        *log.Logger
+	RunCodex      func(context.Context, string, string, bool, string) (codexcli.Result, error)
 }
 
 func (e *Executor) logf(format string, args ...any) {
@@ -77,6 +81,18 @@ func (e *Executor) runCodex(ctx context.Context, dir, prompt string, writable bo
 }
 
 func (e *Executor) Execute(ctx context.Context, job monitor.Job) (resultErr error) {
+	if e.CheckWorkRoot != nil {
+		if err := e.CheckWorkRoot(); err != nil {
+			return err
+		}
+		defer func() {
+			if resultErr != nil {
+				if err := e.CheckWorkRoot(); err != nil {
+					resultErr = errors.Join(resultErr, err)
+				}
+			}
+		}()
+	}
 	if e.GitHub == nil {
 		return errors.New("GitHub client is missing")
 	}

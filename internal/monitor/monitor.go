@@ -18,6 +18,7 @@ import (
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/state"
+	"github.com/linkdata/minion/internal/workroot"
 )
 
 // GitHub provides the API operations used by Monitor.
@@ -305,6 +306,8 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			if err := m.Executor.Execute(ctx, job); err != nil {
 				if errors.Is(err, ErrTerminalJob) {
 					jobFailure.Attempts = maxJobAttempts
+				} else if errors.Is(err, workroot.ErrUnsafe) && !errors.Is(err, ErrPostCodexPublication) {
+					jobFailure.Attempts--
 				} else if !errors.Is(err, ErrPostCodexPublication) && infrastructureFailure(err) {
 					jobFailure.Attempts--
 				}

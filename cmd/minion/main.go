@@ -21,6 +21,7 @@ import (
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/state"
 	"github.com/linkdata/minion/internal/usage"
+	"github.com/linkdata/minion/internal/workroot"
 )
 
 func main() {
@@ -40,6 +41,13 @@ func run() int {
 	if err != nil {
 		logger.Printf("config: %v", err)
 		return 2
+	}
+	checkWorkRoot := func() error {
+		return workroot.Check(cfg.WorkRoot, cfg.StatePath, cfg.WorkRootMaxBytes)
+	}
+	if err := checkWorkRoot(); err != nil {
+		logger.Printf("work root: %v", err)
+		return 1
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -97,14 +105,15 @@ func run() int {
 	}()
 
 	executor := &action.Executor{
-		GitHub:   client,
-		BotLogin: cfg.BotLogin,
-		Store:    store,
-		Usage:    &usage.Store{Dir: filepath.Join(filepath.Dir(cfg.StatePath), "usage")},
-		WorkRoot: cfg.WorkRoot,
-		Timeout:  time.Duration(cfg.JobTimeoutMinutes) * time.Minute,
-		Codex:    cfg.Codex,
-		Logger:   logger,
+		GitHub:        client,
+		BotLogin:      cfg.BotLogin,
+		Store:         store,
+		Usage:         &usage.Store{Dir: filepath.Join(filepath.Dir(cfg.StatePath), "usage")},
+		WorkRoot:      cfg.WorkRoot,
+		CheckWorkRoot: checkWorkRoot,
+		Timeout:       time.Duration(cfg.JobTimeoutMinutes) * time.Minute,
+		Codex:         cfg.Codex,
+		Logger:        logger,
 	}
 	watcher := &monitor.Monitor{Config: cfg, ConfigPath: *configPath, GitHub: client, Executor: executor, Logger: logger}
 	for {
