@@ -166,16 +166,16 @@ func TestVerifiedRepositoryRejectsReclaimedName(t *testing.T) {
 	client.BaseURL, client.HTTPClient = server.URL, server.Client()
 	executor := &Executor{GitHub: client}
 	job := monitor.Job{Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2}}
-	if _, err := executor.verifiedRepository(context.Background(), job); err == nil {
+	if _, err := executor.verifiedRepository(context.Background(), job.Repository); err == nil {
 		t.Fatal("accepted a replacement repository under the same name")
 	}
 	job.Repository.ID = 9
 	job.Repository.OwnerID = 3
-	if _, err := executor.verifiedRepository(context.Background(), job); err == nil {
+	if _, err := executor.verifiedRepository(context.Background(), job.Repository); err == nil {
 		t.Fatal("accepted a replacement owner under the same name")
 	}
 	job.Repository.OwnerID = 2
-	if _, err := executor.verifiedRepository(context.Background(), job); err != nil {
+	if _, err := executor.verifiedRepository(context.Background(), job.Repository); err != nil {
 		t.Fatalf("rejected pinned repository: %v", err)
 	}
 }
@@ -354,10 +354,16 @@ func TestFixRefusesIssueEditedAfterRequest(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
-			_, _ = fmt.Fprint(w, `{"id":1,"full_name":"o/r","owner":{"id":2,"login":"o"},"default_branch":"main"}`)
+			_, _ = fmt.Fprint(w, `{"id":1,"full_name":"o/r","owner":{"id":2,"login":"o"},"default_branch":"main","private":true,"visibility":"private"}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/linkdataminion/r":
+			_, _ = fmt.Fprint(w, `{"id":2,"full_name":"linkdataminion/r","fork":true,"parent":{"id":1,"full_name":"o/r"},"private":true,"visibility":"private"}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/linkdataminion/r/actions/permissions":
+			_, _ = fmt.Fprint(w, `{"enabled":false}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/actions/permissions/fork-pr-workflows-private-repos":
+			_, _ = fmt.Fprint(w, `{"send_write_tokens_to_workflows":false,"send_secrets_and_variables":false}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/pulls":
 			_, _ = fmt.Fprint(w, `[]`)
-		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/branches/minion/fix-7-aaaaaaaaaaaa":
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/linkdataminion/r/branches/minion/fix-7-aaaaaaaaaaaa":
 			http.NotFound(w, r)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7":
 			_, _ = fmt.Fprint(w, `{"node_id":"issue-node","title":"Original title","body":"Visible <!--hidden request-->"}`)
@@ -397,6 +403,7 @@ func TestFixRecoversOnlyRecordedBranch(t *testing.T) {
 		wantComment  bool
 		wantError    string
 	}{
+		{name: "legacy base branch", wantError: "legacy base branch"},
 		{name: "recorded commit", remoteSHA: strings.Repeat("a", 40), wantComment: true},
 		{name: "changed branch", remoteSHA: strings.Repeat("b", 40), wantError: "without a matching recorded bot commit"},
 		{name: "other PR creator", remoteSHA: strings.Repeat("a", 40), existingUser: "other-writer", existingID: 8, existingSHA: strings.Repeat("a", 40), wantError: "without matching requester authorship"},
@@ -445,11 +452,17 @@ func TestFixRecoversOnlyRecordedBranch(t *testing.T) {
 						t.Error(err)
 					}
 				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
-					if _, err := fmt.Fprint(w, `{"id":1,"full_name":"o/r","owner":{"id":2,"login":"o"},"default_branch":"main"}`); err != nil {
+					if _, err := fmt.Fprint(w, `{"id":1,"full_name":"o/r","owner":{"id":2,"login":"o"},"default_branch":"main","private":true,"visibility":"private"}`); err != nil {
 						t.Error(err)
 					}
+				case r.Method == http.MethodGet && r.URL.Path == "/repos/linkdataminion/r":
+					_, _ = fmt.Fprint(w, `{"id":2,"full_name":"linkdataminion/r","fork":true,"parent":{"id":1,"full_name":"o/r"},"private":true,"visibility":"private"}`)
+				case r.Method == http.MethodGet && r.URL.Path == "/repos/linkdataminion/r/actions/permissions":
+					_, _ = fmt.Fprint(w, `{"enabled":false}`)
+				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/actions/permissions/fork-pr-workflows-private-repos":
+					_, _ = fmt.Fprint(w, `{"send_write_tokens_to_workflows":false,"send_secrets_and_variables":false}`)
 				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/pulls":
-					if r.URL.Query().Get("head") != "o:"+branch || r.URL.Query().Get("base") != "main" || r.URL.Query().Get("state") != "open" {
+					if r.URL.Query().Get("head") != "linkdataminion:"+branch || r.URL.Query().Get("base") != "main" || r.URL.Query().Get("state") != "open" {
 						t.Errorf("unexpected PR head filter: %s", r.URL.RawQuery)
 					}
 					if tt.existingUser == "" {
@@ -457,14 +470,18 @@ func TestFixRecoversOnlyRecordedBranch(t *testing.T) {
 							t.Error(err)
 						}
 					} else {
-						if _, err := fmt.Fprintf(w, `[{"html_url":"https://github.com/o/r/pull/9","body":"requester wrote this","state":"open","draft":false,"user":{"login":%q,"id":%d},"head":{"ref":%q,"sha":%q,"repo":{"full_name":"o/r"}},"base":{"ref":"main"}}]`, tt.existingUser, tt.existingID, branch, tt.existingSHA); err != nil {
+						if _, err := fmt.Fprintf(w, `[{"html_url":"https://github.com/o/r/pull/9","body":"requester wrote this","state":"open","draft":false,"user":{"login":%q,"id":%d},"head":{"ref":%q,"sha":%q,"repo":{"full_name":"linkdataminion/r"}},"base":{"ref":"main"}}]`, tt.existingUser, tt.existingID, branch, tt.existingSHA); err != nil {
 							t.Error(err)
 						}
 					}
-				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/branches/"+branch:
-					if _, err := fmt.Fprintf(w, `{"name":%q,"commit":{"sha":%q}}`, branch, tt.remoteSHA); err != nil {
+				case r.Method == http.MethodGet && r.URL.Path == "/repos/linkdataminion/r/branches/"+branch:
+					if tt.remoteSHA == "" {
+						http.NotFound(w, r)
+					} else if _, err := fmt.Fprintf(w, `{"name":%q,"commit":{"sha":%q}}`, branch, tt.remoteSHA); err != nil {
 						t.Error(err)
 					}
+				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/branches/"+branch:
+					_, _ = fmt.Fprintf(w, `{"name":%q,"commit":{"sha":%q}}`, branch, strings.Repeat("a", 40))
 				case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/issues/7/comments":
 					var payload struct {
 						Body string `json:"body"`
@@ -508,7 +525,7 @@ func TestFixRecoversOnlyRecordedBranch(t *testing.T) {
 				if !strings.Contains(commentBody, branch) || !strings.Contains(commentBody, strings.Repeat("a", 40)) || !strings.HasSuffix(commentBody, job.Marker()) {
 					t.Fatalf("acknowledgement lacks verified branch, head, or marker: %q", commentBody)
 				}
-				if tt.existingUser == "" && !strings.Contains(commentBody, "https://github.com/o/r/compare/main...minion%2Ffix-7-aaaaaaaaaaaa?expand=1") {
+				if tt.existingUser == "" && !strings.Contains(commentBody, "https://github.com/o/r/compare/main...linkdataminion:minion%2Ffix-7-aaaaaaaaaaaa?expand=1") {
 					t.Fatalf("acknowledgement lacks compare link: %q", commentBody)
 				}
 				if tt.existingUser != "" && !strings.Contains(commentBody, "https://github.com/o/r/pull/9") {
@@ -521,6 +538,19 @@ func TestFixRecoversOnlyRecordedBranch(t *testing.T) {
 
 func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 	_, _, remote := auditGitFixtureRemote(t)
+	forkRemote := filepath.Join(filepath.Dir(remote), "fork.git")
+	if output, err := exec.Command("git", "clone", "--bare", remote, forkRemote).CombinedOutput(); err != nil {
+		t.Fatalf("create fork fixture: %v: %s", err, output)
+	}
+	gitWrapper := filepath.Join(filepath.Dir(remote), "bin", "git")
+	baseWrapper := filepath.Join(filepath.Dir(remote), "bin", "git-base")
+	if err := os.Rename(gitWrapper, baseWrapper); err != nil {
+		t.Fatal(err)
+	}
+	wrapper := fmt.Sprintf("#!/bin/sh\nexec %q -c %q \"$@\"\n", baseWrapper, "url."+forkRemote+".insteadOf=https://github.com/linkdataminion/r.git")
+	if err := os.WriteFile(gitWrapper, []byte(wrapper), 0700); err != nil {
+		t.Fatal(err)
+	}
 	job := monitor.Job{
 		Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"fix"}}, SubjectType: "Issue", Number: 7,
 		ID: strings.Repeat("a", 64), Source: github.Item{Author: github.User{ID: 7, Login: "writer"}, HTMLURL: "https://github.com/o/r/issues/7#issuecomment-1", UpdatedAt: time.Now()},
@@ -535,6 +565,10 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 			t.Error(err)
 		}
 	}()
+	store.Data.PendingFixes[job.ID] = strings.Repeat("f", 40) // Simulate a recorded commit whose fork push failed.
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
 	var commentBody string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -543,9 +577,17 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 		case r.Method == http.MethodPost && r.URL.Path == "/graphql":
 			_, _ = fmt.Fprint(w, `{"data":{"node":{"title":"RENAMED TITLE SENTINEL","bodyText":"Details","lastEditedAt":null}}}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
-			_, _ = fmt.Fprint(w, `{"id":1,"full_name":"o/r","owner":{"id":2,"login":"o"},"default_branch":"main"}`)
+			_, _ = fmt.Fprint(w, `{"id":1,"full_name":"o/r","owner":{"id":2,"login":"o"},"default_branch":"main","private":true,"visibility":"private"}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/linkdataminion/r":
+			_, _ = fmt.Fprint(w, `{"id":2,"full_name":"linkdataminion/r","fork":true,"parent":{"id":1,"full_name":"o/r"},"private":true,"visibility":"private"}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/linkdataminion/r/actions/permissions":
+			_, _ = fmt.Fprint(w, `{"enabled":false}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/actions/permissions/fork-pr-workflows-private-repos":
+			_, _ = fmt.Fprint(w, `{"send_write_tokens_to_workflows":false,"send_secrets_and_variables":false}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/pulls":
 			_, _ = fmt.Fprint(w, `[]`)
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/linkdataminion/r/branches/minion/"):
+			http.NotFound(w, r)
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/o/r/branches/minion/"):
 			http.NotFound(w, r)
 		case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/issues/7/comments":
@@ -584,14 +626,17 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 	branch := "minion/fix-7-aaaaaaaaaaaa"
 	sha := store.Data.PendingFixes[job.ID]
 	if len(sha) != 40 || !strings.Contains(commentBody, branch) || !strings.Contains(commentBody, sha) ||
-		!strings.Contains(commentBody, "https://github.com/o/r/compare/main...minion%2Ffix-7-aaaaaaaaaaaa?expand=1") ||
+		!strings.Contains(commentBody, "https://github.com/o/r/compare/main...linkdataminion:minion%2Ffix-7-aaaaaaaaaaaa?expand=1") ||
 		!strings.HasSuffix(commentBody, job.Marker()) {
 		t.Fatalf("missing branch, recorded head, compare link, or marker: %q", commentBody)
 	}
 	if strings.Contains(commentBody, "@secondbot") || strings.Contains(commentBody, "![pixel]") || strings.Contains(commentBody, "Closes #123") {
 		t.Fatalf("branch reply published model output: %q", commentBody)
 	}
-	remoteSHA, err := exec.Command("git", "--git-dir", remote, "rev-parse", "refs/heads/"+branch).Output()
+	if output, err := exec.Command("git", "--git-dir", remote, "rev-parse", "refs/heads/"+branch).CombinedOutput(); err == nil {
+		t.Fatalf("base repository received a pre-review branch: %s", output)
+	}
+	remoteSHA, err := exec.Command("git", "--git-dir", forkRemote, "rev-parse", "refs/heads/"+branch).Output()
 	if err != nil || strings.TrimSpace(string(remoteSHA)) != sha {
 		t.Fatalf("remote branch head = %q, want %s: %v", remoteSHA, sha, err)
 	}
@@ -640,6 +685,57 @@ func TestReviewMarksOnlyPostCodexPublicationFailure(t *testing.T) {
 	err = executor.review(context.Background(), job)
 	if !errors.Is(err, monitor.ErrPostCodexPublication) || codexRuns != 1 || postCalls != 1 {
 		t.Fatalf("post-Codex outage: err=%v runs=%d posts=%d", err, codexRuns, postCalls)
+	}
+}
+
+func TestFixForkRefusesUnsafePublication(t *testing.T) {
+	for _, tt := range []struct {
+		name, fork, actions, policy, want string
+		baseID                            int64
+	}{
+		{name: "reclaimed base name", baseID: 9, want: "repository ID or owner ID"},
+		{name: "missing fork", want: "bot-owned fork"},
+		{name: "unrelated repository", fork: `{"id":2,"full_name":"linkdataminion/r","private":true,"visibility":"private"}`, want: "not an active fork"},
+		{name: "different parent ID", fork: `{"id":2,"full_name":"linkdataminion/r","fork":true,"parent":{"id":3,"full_name":"o/r"},"private":true,"visibility":"private"}`, want: "not an active fork"},
+		{name: "public fork of private base", fork: `{"id":2,"full_name":"linkdataminion/r","fork":true,"parent":{"id":1,"full_name":"o/r"},"visibility":"public"}`, want: "matching visibility"},
+		{name: "fork Actions enabled", fork: `{"id":2,"full_name":"linkdataminion/r","fork":true,"parent":{"id":1,"full_name":"o/r"},"private":true,"visibility":"private"}`, actions: `{"enabled":true}`, want: "must be disabled"},
+		{name: "fork Actions status absent", fork: `{"id":2,"full_name":"linkdataminion/r","fork":true,"parent":{"id":1,"full_name":"o/r"},"private":true,"visibility":"private"}`, actions: `{}`, want: "omitted enabled"},
+		{name: "private PR gets secrets", fork: `{"id":2,"full_name":"linkdataminion/r","fork":true,"parent":{"id":1,"full_name":"o/r"},"private":true,"visibility":"private"}`, actions: `{"enabled":false}`, policy: `{"send_write_tokens_to_workflows":false,"send_secrets_and_variables":true}`, want: "secrets or write tokens"},
+		{name: "private PR gets write token", fork: `{"id":2,"full_name":"linkdataminion/r","fork":true,"parent":{"id":1,"full_name":"o/r"},"private":true,"visibility":"private"}`, actions: `{"enabled":false}`, policy: `{"send_write_tokens_to_workflows":true,"send_secrets_and_variables":false}`, want: "secrets or write tokens"},
+		{name: "private PR policy incomplete", fork: `{"id":2,"full_name":"linkdataminion/r","fork":true,"parent":{"id":1,"full_name":"o/r"},"private":true,"visibility":"private"}`, actions: `{"enabled":false}`, policy: `{}`, want: "incomplete"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/repos/o/r":
+					baseID := tt.baseID
+					if baseID == 0 {
+						baseID = 1
+					}
+					_, _ = fmt.Fprintf(w, `{"id":%d,"full_name":"o/r","owner":{"id":2,"login":"o"},"default_branch":"main","private":true,"visibility":"private"}`, baseID)
+				case "/repos/linkdataminion/r":
+					if tt.fork == "" {
+						http.NotFound(w, r)
+					} else {
+						_, _ = fmt.Fprint(w, tt.fork)
+					}
+				case "/repos/linkdataminion/r/actions/permissions":
+					_, _ = fmt.Fprint(w, tt.actions)
+				case "/repos/o/r/actions/permissions/fork-pr-workflows-private-repos":
+					_, _ = fmt.Fprint(w, tt.policy)
+				default:
+					t.Errorf("unexpected request: %s", r.URL.Path)
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+			client := github.New("test-token")
+			client.BaseURL, client.HTTPClient = server.URL, server.Client()
+			executor := &Executor{GitHub: client, BotLogin: "linkdataminion"}
+			if _, _, err := executor.fixFork(context.Background(), config.Repository{Name: "o/r", ID: 1, OwnerID: 2}); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("fixFork() = %v, want %q", err, tt.want)
+			}
+		})
 	}
 }
 

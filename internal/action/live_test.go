@@ -24,7 +24,10 @@ import (
 	"github.com/linkdata/minion/internal/state"
 )
 
-const liveFixRepository = "linkdata/miniontesting"
+const (
+	liveFixRepository = "linkdata/miniontesting"
+	liveFixFork       = "linkdataminion/miniontesting"
+)
 
 type liveFixConfig struct {
 	OwnerLogin        string `json:"owner_login"`
@@ -66,10 +69,10 @@ func TestLiveFixPublishesBranch(t *testing.T) {
 	}
 	id := hex.EncodeToString(randomID[:])
 	branch := fmt.Sprintf("minion/fix-%d-%s", cfg.IssueNumber, id[:12])
-	if _, err := owner.Branch(ctx, liveFixRepository, branch); !liveFixNotFound(err) {
+	if _, err := bot.Branch(ctx, liveFixFork, branch); !liveFixNotFound(err) {
 		t.Fatalf("test branch %s already exists or cannot be checked: %v", branch, err)
 	}
-	if pull, err := owner.FindPullRequestByHead(ctx, liveFixRepository, repo.DefaultBranch, branch); err != nil || pull != nil {
+	if pull, err := owner.FindPullRequestByHead(ctx, liveFixRepository, repo.DefaultBranch, cfg.BotLogin+":"+branch); err != nil || pull != nil {
 		t.Fatalf("test branch %s has an existing pull request or lookup failed: %v", branch, err)
 	}
 	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"), time.Now())
@@ -94,7 +97,7 @@ func TestLiveFixPublishesBranch(t *testing.T) {
 		},
 		Command: command.Command{Action: command.Fix},
 	}
-	t.Cleanup(func() { liveFixCleanup(t, owner, fixture.ownerToken, cfg, job, branch, store) })
+	t.Cleanup(func() { liveFixCleanup(t, owner, bot, fixture.ownerToken, fixture.botToken, cfg, job, branch, store) })
 	t.Setenv("GH_TOKEN", fixture.botToken)
 	codexCalls := 0
 	executor := &Executor{
@@ -109,6 +112,9 @@ func TestLiveFixPublishesBranch(t *testing.T) {
 			return codexcli.Result{Answer: "Live fix fixture created."}, err
 		},
 	}
+	if err := executor.CheckFixFork(ctx, job.Repository); err != nil {
+		t.Fatal(err)
+	}
 	if err := executor.Execute(ctx, job); err != nil {
 		t.Fatal(err)
 	}
@@ -119,15 +125,18 @@ func TestLiveFixPublishesBranch(t *testing.T) {
 	if len(sha) != 40 {
 		t.Fatalf("fix did not record a commit SHA: %q", sha)
 	}
-	remote, err := owner.Branch(ctx, liveFixRepository, branch)
+	remote, err := bot.Branch(ctx, liveFixFork, branch)
 	if err != nil || remote.Name != branch || !strings.EqualFold(remote.Commit.SHA, sha) {
 		t.Fatalf("live fix branch does not match recorded SHA: %v", err)
 	}
+	if _, err := owner.Branch(ctx, liveFixRepository, branch); !liveFixNotFound(err) {
+		t.Fatalf("base repository unexpectedly received a fix branch: %v", err)
+	}
 	commentID, reply, err := liveActionReply(ctx, owner, cfg, job)
-	if err != nil || commentID == 0 || !strings.Contains(reply.Body, branch) || !strings.Contains(reply.Body, sha) {
+	if err != nil || commentID == 0 || !strings.Contains(reply.Body, liveFixFork) || !strings.Contains(reply.Body, branch) || !strings.Contains(reply.Body, sha) {
 		t.Fatalf("live fix acknowledgement lacks branch or recorded SHA: %v", err)
 	}
-	if pull, err := owner.FindPullRequestByHead(ctx, liveFixRepository, repo.DefaultBranch, branch); err != nil || pull != nil {
+	if pull, err := owner.FindPullRequestByHead(ctx, liveFixRepository, repo.DefaultBranch, cfg.BotLogin+":"+branch); err != nil || pull != nil {
 		t.Fatalf("fix unexpectedly opened a pull request: %v", err)
 	}
 	if err := executor.Execute(ctx, job); err != nil {
@@ -229,13 +238,13 @@ func liveActionReply(ctx context.Context, owner *github.Client, cfg liveFixConfi
 	return id, reply, nil
 }
 
-func liveFixCleanup(t *testing.T, owner *github.Client, ownerToken string, cfg liveFixConfig, job monitor.Job, branch string, store *state.Store) {
+func liveFixCleanup(t *testing.T, owner, bot *github.Client, ownerToken, botToken string, cfg liveFixConfig, job monitor.Job, branch string, store *state.Store) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	liveActionReplyCleanup(t, ctx, owner, ownerToken, cfg, job)
 
-	remote, err := owner.Branch(ctx, liveFixRepository, branch)
+	remote, err := bot.Branch(ctx, liveFixFork, branch)
 	if liveFixNotFound(err) {
 		return
 	}
@@ -249,11 +258,11 @@ func liveFixCleanup(t *testing.T, owner *github.Client, ownerToken string, cfg l
 		return
 	}
 	path := "/git/refs/heads/" + branch
-	if status, err := liveFixAPI(ctx, ownerToken, http.MethodDelete, path, nil); err != nil || status != http.StatusNoContent {
+	if status, err := liveFixAPIRepo(ctx, botToken, liveFixFork, http.MethodDelete, path, nil); err != nil || status != http.StatusNoContent {
 		t.Errorf("delete live fix branch %s: HTTP %d: %v", branch, status, err)
 		return
 	}
-	if _, err := owner.Branch(ctx, liveFixRepository, branch); !liveFixNotFound(err) {
+	if _, err := bot.Branch(ctx, liveFixFork, branch); !liveFixNotFound(err) {
 		t.Errorf("live fix branch %s remains after cleanup: %v", branch, err)
 	}
 }
@@ -292,7 +301,11 @@ func liveActionDeleteReply(t *testing.T, ctx context.Context, ownerToken string,
 }
 
 func liveFixAPI(ctx context.Context, token, method, path string, output any) (status int, err error) {
-	request, err := http.NewRequestWithContext(ctx, method, "https://api.github.com/repos/"+liveFixRepository+path, nil)
+	return liveFixAPIRepo(ctx, token, liveFixRepository, method, path, output)
+}
+
+func liveFixAPIRepo(ctx context.Context, token, repo, method, path string, output any) (status int, err error) {
+	request, err := http.NewRequestWithContext(ctx, method, "https://api.github.com/repos/"+repo+path, nil)
 	if err != nil {
 		return 0, err
 	}

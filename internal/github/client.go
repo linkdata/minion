@@ -44,14 +44,17 @@ type User struct {
 }
 
 type Repository struct {
-	ID            int64  `json:"id"`
-	Name          string `json:"name"`
-	FullName      string `json:"full_name"`
-	DefaultBranch string `json:"default_branch"`
-	HTMLURL       string `json:"html_url"`
-	Private       bool   `json:"private"`
-	Archived      bool   `json:"archived"`
-	Owner         User   `json:"owner"`
+	ID            int64       `json:"id"`
+	Name          string      `json:"name"`
+	FullName      string      `json:"full_name"`
+	DefaultBranch string      `json:"default_branch"`
+	HTMLURL       string      `json:"html_url"`
+	Private       bool        `json:"private"`
+	Visibility    string      `json:"visibility"`
+	Archived      bool        `json:"archived"`
+	Fork          bool        `json:"fork"`
+	Parent        *Repository `json:"parent"`
+	Owner         User        `json:"owner"`
 }
 
 type Subject struct {
@@ -473,6 +476,48 @@ func (c *Client) Repository(ctx context.Context, repo string) (Repository, error
 		return Repository{}, fmt.Errorf("repository identity changed: requested %s, got %s", repo, details.FullName)
 	}
 	return details, err
+}
+
+// ActionsEnabled reports whether a repository can run GitHub Actions.
+func (c *Client) ActionsEnabled(ctx context.Context, repo string) (bool, error) {
+	path, err := repoPath(repo)
+	if err != nil {
+		return false, err
+	}
+	var policy struct {
+		Enabled *bool `json:"enabled"`
+	}
+	_, _, err = c.request(ctx, http.MethodGet, path+"/actions/permissions", nil, &policy, nil, http.StatusOK)
+	if err != nil {
+		return false, err
+	}
+	if policy.Enabled == nil {
+		return false, errors.New("GitHub Actions policy omitted enabled state")
+	}
+	return *policy.Enabled, nil
+}
+
+// SafePrivateForkWorkflows refuses private fork PRs with base secrets or write tokens.
+func (c *Client) SafePrivateForkWorkflows(ctx context.Context, repo string) error {
+	path, err := repoPath(repo)
+	if err != nil {
+		return err
+	}
+	var policy struct {
+		SendWriteTokens *bool `json:"send_write_tokens_to_workflows"`
+		SendSecrets     *bool `json:"send_secrets_and_variables"`
+	}
+	_, _, err = c.request(ctx, http.MethodGet, path+"/actions/permissions/fork-pr-workflows-private-repos", nil, &policy, nil, http.StatusOK)
+	if err != nil {
+		return err
+	}
+	if policy.SendWriteTokens == nil || policy.SendSecrets == nil {
+		return errors.New("private fork PR workflow policy is incomplete")
+	}
+	if *policy.SendWriteTokens || *policy.SendSecrets {
+		return errors.New("private fork PR workflows receive secrets or write tokens")
+	}
+	return nil
 }
 
 func (c *Client) Permission(ctx context.Context, repo, login string) (Permission, error) {

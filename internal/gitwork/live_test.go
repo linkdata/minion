@@ -122,6 +122,7 @@ func TestLiveCommitAndPush(t *testing.T) {
 		t.Fatal(err)
 	}
 	const repoName = "linkdata/miniontesting"
+	const forkName = "linkdataminion/miniontesting"
 	if cfg.RepositoryURL != "https://github.com/"+repoName || cfg.OwnerLogin != "linkdata" || cfg.BotLogin != "linkdataminion" {
 		t.Fatal("live Gitwork write test is restricted to linkdata/miniontesting and linkdataminion")
 	}
@@ -143,6 +144,13 @@ func TestLiveCommitAndPush(t *testing.T) {
 	if err != nil || repo.FullName != repoName || repo.Archived || repo.DefaultBranch == "" {
 		t.Fatalf("unsafe write-test repository %s: %v", repo.FullName, err)
 	}
+	fork, err := bot.Repository(ctx, forkName)
+	if err != nil || !fork.Fork || fork.Parent == nil || fork.Parent.ID != repo.ID || fork.Archived {
+		t.Fatalf("unsafe write-test fork %s: %v", forkName, err)
+	}
+	if enabled, err := bot.ActionsEnabled(ctx, forkName); err != nil || enabled {
+		t.Fatalf("write-test fork Actions must be disabled: enabled=%t: %v", enabled, err)
+	}
 	permission, err := owner.Permission(ctx, repoName, cfg.BotLogin)
 	if err != nil || (permission.Permission != "write" && permission.Permission != "maintain" && permission.Permission != "admin") {
 		t.Fatalf("%s needs write access to %s; run TestLiveBotWriteLifecycle first if invitation is needed: %v", cfg.BotLogin, repoName, err)
@@ -150,8 +158,8 @@ func TestLiveCommitAndPush(t *testing.T) {
 
 	id := strconv.FormatInt(time.Now().UnixNano(), 36)
 	branch := "minion/live-gitwork-" + id
-	t.Logf("test branch: https://github.com/%s/tree/%s", repoName, branch)
-	if _, err := owner.Branch(ctx, repoName, branch); !liveGitworkNotFound(err) {
+	t.Logf("test branch: https://github.com/%s/tree/%s", forkName, branch)
+	if _, err := bot.Branch(ctx, forkName, branch); !liveGitworkNotFound(err) {
 		t.Fatalf("test branch already exists or cannot be checked: %v", err)
 	}
 	var recordedHead string
@@ -161,7 +169,7 @@ func TestLiveCommitAndPush(t *testing.T) {
 		}
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), time.Minute)
 		defer cleanupCancel()
-		remote, err := owner.Branch(cleanupCtx, repoName, branch)
+		remote, err := bot.Branch(cleanupCtx, forkName, branch)
 		if liveGitworkNotFound(err) {
 			return
 		}
@@ -169,13 +177,13 @@ func TestLiveCommitAndPush(t *testing.T) {
 			t.Errorf("refuse to delete test branch %s at unexpected HEAD: %v", branch, err)
 			return
 		}
-		cmd := exec.CommandContext(cleanupCtx, "gh", "api", "--hostname", "github.com", "--method", "DELETE", "repos/"+repoName+"/git/refs/heads/"+branch)
-		cmd.Env = append(liveGitworkEnv(), "GH_TOKEN="+ownerToken)
+		cmd := exec.CommandContext(cleanupCtx, "gh", "api", "--hostname", "github.com", "--method", "DELETE", "repos/"+forkName+"/git/refs/heads/"+branch)
+		cmd.Env = append(liveGitworkEnv(), "GH_TOKEN="+botToken)
 		if output, err := cmd.CombinedOutput(); err != nil {
 			t.Errorf("delete test branch %s: %v: %s", branch, err, strings.TrimSpace(string(output)))
 			return
 		}
-		if _, err := owner.Branch(cleanupCtx, repoName, branch); !liveGitworkNotFound(err) {
+		if _, err := bot.Branch(cleanupCtx, forkName, branch); !liveGitworkNotFound(err) {
 			t.Errorf("test branch %s remains after cleanup: %v", branch, err)
 		}
 	})
@@ -194,6 +202,9 @@ func TestLiveCommitAndPush(t *testing.T) {
 		t.Fatalf("cloned default-branch HEAD = %q: %v", base, err)
 	}
 	if err := checkout.NewBranch(ctx, branch); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkout.SetPushRepository(forkName); err != nil {
 		t.Fatal(err)
 	}
 	changed, err := checkout.HasChanges(ctx)
@@ -221,9 +232,12 @@ func TestLiveCommitAndPush(t *testing.T) {
 	if err != nil || changed {
 		t.Fatalf("committed branch HasChanges = %t, %v; want false", changed, err)
 	}
-	remote, err := owner.Branch(ctx, repoName, branch)
+	remote, err := bot.Branch(ctx, forkName, branch)
 	if err != nil || remote.Commit.SHA != recordedHead {
 		t.Fatalf("pushed branch HEAD = %q, recorded = %q: %v", remote.Commit.SHA, recordedHead, err)
+	}
+	if _, err := owner.Branch(ctx, repoName, branch); !liveGitworkNotFound(err) {
+		t.Fatalf("base repository unexpectedly received a test branch: %v", err)
 	}
 	identity, err := runGit(ctx, checkout.Path(), "show", "-s", "--format=%an <%ae>|%cn <%ce>", "HEAD")
 	wantIdentity := cfg.BotLogin + " <" + cfg.BotLogin + "@users.noreply.github.com>"

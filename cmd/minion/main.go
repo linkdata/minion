@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -199,6 +200,12 @@ func checkRepositories(ctx context.Context, client *github.Client, cfg config.Co
 		}
 		if permission.Permission != "write" && permission.Permission != "admin" && permission.Permission != "maintain" {
 			problems = append(problems, fmt.Errorf("%s: @%s needs write access for configured actions (currently %q)", repo.Name, cfg.BotLogin, permission.Permission))
+		}
+		if slices.Contains(repo.Actions, "fix") {
+			executor := action.Executor{GitHub: client, BotLogin: cfg.BotLogin}
+			if err := executor.CheckFixFork(ctx, repo); err != nil {
+				problems = append(problems, fmt.Errorf("%s: fix fork preflight: %w", repo.Name, err))
+			}
 		}
 	}
 	return errors.Join(problems...)

@@ -21,7 +21,7 @@ func (e *Executor) audit(ctx context.Context, job monitor.Job) error {
 	if skill == "" {
 		return errors.New("audit requires security-audit/SKILL.md in codex.skills")
 	}
-	repo, err := e.verifiedRepository(ctx, job)
+	repo, err := e.verifiedRepository(ctx, job.Repository)
 	if err != nil {
 		return err
 	}

@@ -770,7 +770,7 @@ func newFixture(t *testing.T) gitFixture {
 	path := filepath.Join(root, "checkout")
 	fixture.git("", "clone", "--no-checkout", "--branch", "main", fixture.remote, path)
 	fixture.git(path, "checkout", "--detach", "refs/remotes/origin/main")
-	fixture.checkout = &Checkout{path: path, url: fixture.remote, expectedHead: fixture.base}
+	fixture.checkout = &Checkout{path: path, url: fixture.remote, pushURL: fixture.remote, expectedHead: fixture.base}
 	if err := fixture.checkout.recordConfig(); err != nil {
 		t.Fatal(err)
 	}

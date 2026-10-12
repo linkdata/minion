@@ -157,13 +157,13 @@ func (e *Executor) alreadyAcknowledged(ctx context.Context, job monitor.Job) (bo
 	return found, nil
 }
 
-func (e *Executor) verifiedRepository(ctx context.Context, job monitor.Job) (github.Repository, error) {
-	repo, err := e.GitHub.Repository(ctx, job.Repository.Name)
+func (e *Executor) verifiedRepository(ctx context.Context, configured config.Repository) (github.Repository, error) {
+	repo, err := e.GitHub.Repository(ctx, configured.Name)
 	if err != nil {
 		return github.Repository{}, err
 	}
-	if !job.Repository.MatchesIdentity(repo.ID, repo.Owner.ID) {
-		return github.Repository{}, fmt.Errorf("%s repository ID or owner ID differs from config", job.Repository.Name)
+	if !configured.MatchesIdentity(repo.ID, repo.Owner.ID) {
+		return github.Repository{}, fmt.Errorf("%s repository ID or owner ID differs from config", configured.Name)
 	}
 	return repo, nil
 }
@@ -172,7 +172,7 @@ func (e *Executor) review(ctx context.Context, job monitor.Job) error {
 	if job.SubjectType != "PullRequest" {
 		return e.acknowledge(ctx, job, "`review` applies to pull requests.")
 	}
-	if _, err := e.verifiedRepository(ctx, job); err != nil {
+	if _, err := e.verifiedRepository(ctx, job.Repository); err != nil {
 		return err
 	}
 	pull, err := e.GitHub.PullRequestDetails(ctx, job.Repository.Name, job.Number)
@@ -220,26 +220,36 @@ func (e *Executor) fix(ctx context.Context, job monitor.Job) error {
 	if err != nil {
 		return err
 	}
-	repo, err := e.verifiedRepository(ctx, job)
+	repo, forkRepo, err := e.fixFork(ctx, job.Repository)
 	if err != nil {
 		return err
-	}
-	if repo.Archived || repo.DefaultBranch == "" {
-		return fmt.Errorf("repository %s is archived or has no default branch", repo.FullName)
 	}
 	if len(job.ID) < 12 || e.Store == nil {
 		return errors.New("fix job has no durable state or valid ID")
 	}
 	branch := fmt.Sprintf("minion/fix-%d-%s", job.Number, job.ID[:12])
-	existing, err := e.GitHub.FindPullRequestByHead(ctx, repo.FullName, repo.DefaultBranch, branch)
+	existing, err := e.GitHub.FindPullRequestByHead(ctx, repo.FullName, repo.DefaultBranch, e.BotLogin+":"+branch)
 	if err != nil {
 		return err
 	}
 	expected := e.Store.Data.PendingFixes[job.ID]
-	remoteBranch, err := e.GitHub.Branch(ctx, repo.FullName, branch)
+	remoteBranch, err := e.GitHub.Branch(ctx, forkRepo, branch)
 	if isNotFound(err) {
 		if existing != nil {
 			return fmt.Errorf("branch %s has a pull request but no remote branch", branch)
+		}
+		if expected != "" {
+			_, err := e.GitHub.Branch(ctx, repo.FullName, branch)
+			if err != nil && !isNotFound(err) {
+				return fmt.Errorf("check legacy base branch: %w", err)
+			}
+			if err == nil {
+				return fmt.Errorf("legacy base branch %s exists; review and retire it before a new fix request", branch)
+			}
+			delete(e.Store.Data.PendingFixes, job.ID)
+			if err := e.Store.Save(); err != nil {
+				return fmt.Errorf("clear failed fork push checkpoint: %w", err)
+			}
 		}
 		content, err := e.GitHub.CurrentIssueContent(ctx, issue.NodeID)
 		if err != nil {
@@ -279,6 +289,16 @@ Request comment (%s):
 			}
 			return nil
 		}
+		currentRepo, currentFork, err := e.fixFork(ctx, job.Repository)
+		if err != nil {
+			return err
+		}
+		if currentRepo.ID != repo.ID || currentRepo.DefaultBranch != repo.DefaultBranch || currentRepo.Private != repo.Private || currentRepo.Visibility != repo.Visibility || !strings.EqualFold(currentFork, forkRepo) {
+			return errors.New("repository or fork changed during fix; refusing to push")
+		}
+		if err := checkout.SetPushRepository(forkRepo); err != nil {
+			return err
+		}
 		err = checkout.CommitAndPush(ctx, branch, e.BotLogin, fmt.Sprintf("Fix #%d via %s", job.Number, e.BotLogin), func(sha string) error {
 			e.Store.Data.PendingFixes[job.ID] = sha
 			return e.Store.Save()
@@ -296,14 +316,57 @@ Request comment (%s):
 	expected = e.Store.Data.PendingFixes[job.ID]
 	if existing != nil {
 		if existing.State != "open" || job.Source.Author.ID == 0 || existing.User.ID != job.Source.Author.ID ||
-			existing.Head.Ref != branch || existing.Head.Repo == nil || !strings.EqualFold(existing.Head.Repo.FullName, repo.FullName) ||
+			existing.Head.Ref != branch || existing.Head.Repo == nil || !strings.EqualFold(existing.Head.Repo.FullName, forkRepo) ||
 			!strings.EqualFold(existing.Head.SHA, expected) || existing.Base.Ref != repo.DefaultBranch {
 			return fmt.Errorf("branch %s has a pull request without matching requester authorship and recorded head", branch)
 		}
 		return e.acknowledge(ctx, job, fmt.Sprintf("Fix branch `%s` at `%s` has a pull request opened by @%s: %s", branch, expected, existing.User.Login, existing.HTMLURL))
 	}
-	compare := fmt.Sprintf("https://github.com/%s/compare/%s...%s?expand=1", repo.FullName, url.PathEscape(repo.DefaultBranch), url.PathEscape(branch))
-	return e.acknowledge(ctx, job, fmt.Sprintf("Fix branch `%s` is ready at `%s`. @%s, [open the pull request yourself](%s) after reviewing the diff. Repository review rules, when enabled, can then evaluate your authorship.", branch, expected, job.Source.Author.Login, compare))
+	compare := fmt.Sprintf("https://github.com/%s/compare/%s...%s?expand=1", repo.FullName, url.PathEscape(repo.DefaultBranch), url.PathEscape(e.BotLogin+":"+branch))
+	return e.acknowledge(ctx, job, fmt.Sprintf("Fix branch `%s` is ready in `%s` at `%s`. @%s, [open the pull request yourself](%s) after reviewing the diff. Repository review rules, when enabled, can then evaluate your authorship.", branch, forkRepo, expected, job.Source.Author.Login, compare))
+}
+
+func (e *Executor) fixFork(ctx context.Context, configured config.Repository) (github.Repository, string, error) {
+	base, err := e.verifiedRepository(ctx, configured)
+	if err != nil {
+		return github.Repository{}, "", err
+	}
+	if base.Archived || base.DefaultBranch == "" {
+		return github.Repository{}, "", fmt.Errorf("repository %s is archived or has no default branch", base.FullName)
+	}
+	parts := strings.Split(base.FullName, "/")
+	if len(parts) != 2 || strings.EqualFold(parts[0], e.BotLogin) {
+		return github.Repository{}, "", errors.New("fix requires a separate bot-owned fork")
+	}
+	forkName := e.BotLogin + "/" + parts[1]
+	fork, err := e.GitHub.Repository(ctx, forkName)
+	if err != nil {
+		return github.Repository{}, "", fmt.Errorf("bot-owned fork %s is unavailable: %w", forkName, err)
+	}
+	if !fork.Fork || fork.Parent == nil || base.ID <= 0 || fork.Parent.ID != base.ID ||
+		!strings.EqualFold(fork.Parent.FullName, base.FullName) || base.Visibility == "" || fork.Visibility != base.Visibility ||
+		fork.Private != base.Private || fork.Archived {
+		return github.Repository{}, "", fmt.Errorf("%s is not an active fork of %s with matching visibility", forkName, base.FullName)
+	}
+	enabled, err := e.GitHub.ActionsEnabled(ctx, forkName)
+	if err != nil {
+		return github.Repository{}, "", fmt.Errorf("inspect bot fork Actions policy: %w", err)
+	}
+	if enabled {
+		return github.Repository{}, "", fmt.Errorf("GitHub Actions must be disabled on bot fork %s", forkName)
+	}
+	if base.Private {
+		if err := e.GitHub.SafePrivateForkWorkflows(ctx, base.FullName); err != nil {
+			return github.Repository{}, "", fmt.Errorf("unsafe private fork PR workflows for %s: %w", base.FullName, err)
+		}
+	}
+	return base, forkName, nil
+}
+
+// CheckFixFork verifies the publication destination during operator preflight.
+func (e *Executor) CheckFixFork(ctx context.Context, configured config.Repository) error {
+	_, _, err := e.fixFork(ctx, configured)
+	return err
 }
 
 func (e *Executor) release(ctx context.Context, job monitor.Job) error {
@@ -314,7 +377,7 @@ func (e *Executor) release(ctx context.Context, job monitor.Job) error {
 	if e.Store == nil || job.ID == "" {
 		return errors.New("release job has no durable state or valid ID")
 	}
-	repo, err := e.verifiedRepository(ctx, job)
+	repo, err := e.verifiedRepository(ctx, job.Repository)
 	if err != nil {
 		return err
 	}
@@ -443,7 +506,7 @@ func (e *Executor) acknowledge(ctx context.Context, job monitor.Job, message str
 	body := message + "\n\n" + job.Marker()
 	switch job.SubjectType {
 	case "Issue", "PullRequest":
-		if _, err := e.verifiedRepository(ctx, job); err != nil {
+		if _, err := e.verifiedRepository(ctx, job.Repository); err != nil {
 			return err
 		}
 		_, err := e.GitHub.CreateIssueComment(ctx, job.Repository.Name, job.Number, body)
