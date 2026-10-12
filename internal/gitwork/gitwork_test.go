@@ -14,6 +14,86 @@ import (
 	"github.com/linkdata/minion/internal/github"
 )
 
+func TestResolveCredentialHelperPreservesSymlinkName(t *testing.T) {
+	gitPath, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git is unavailable")
+	}
+	bin := t.TempDir()
+	launcher := filepath.Join(bin, "launcher")
+	if err := os.WriteFile(launcher, []byte("#!/bin/sh\n[ \"${0##*/}\" = gh ] || exit 9\nprintf 'username=trusted\\npassword=test\\n'\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	ghPath := filepath.Join(bin, "gh")
+	if err := os.Symlink(launcher, ghPath); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	got := resolveCredentialHelperGH()
+	if got != ghPath {
+		t.Fatalf("credential helper = %q, want symlink path %q", got, ghPath)
+	}
+	cmd := exec.Command(gitPath, "-c", "credential.helper=", "-c", credentialHelperConfig(got), "credential", "fill")
+	cmd.Dir = t.TempDir()
+	cmd.Env = cleanGitEnvironment()
+	cmd.Stdin = strings.NewReader("protocol=https\nhost=github.com\n\n")
+	output, err := cmd.CombinedOutput()
+	if err != nil || !strings.Contains(string(output), "username=trusted") {
+		t.Fatalf("symlinked credential helper failed: %s: %v", output, err)
+	}
+}
+
+func TestGitCredentialHelperIgnoresCheckoutRelativePath(t *testing.T) {
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git is unavailable")
+	}
+	checkout := t.TempDir()
+	trustedBin := filepath.Join(t.TempDir(), "trusted' bin")
+	if err := os.Mkdir(trustedBin, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(checkout, "tools"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	for path, username := range map[string]string{
+		filepath.Join(trustedBin, "gh"):        "trusted",
+		filepath.Join(checkout, "gh"):          "planted",
+		filepath.Join(checkout, "tools", "gh"): "planted",
+	} {
+		content := "#!/bin/sh\nprintf 'username=" + username + "\\npassword=test\\n'\n"
+		if err := os.WriteFile(path, []byte(content), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, path := range map[string]string{
+		"empty entry":            ":" + trustedBin,
+		"empty PATH":             "",
+		"relative entry":         "tools:" + trustedBin,
+		"all relative":           ".:tools",
+		"absolute checkout path": checkout + ":" + trustedBin,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("PATH", path)
+			cmd := exec.Command(realGit, "-c", "credential.helper=", "-c", credentialHelperConfig(filepath.Join(trustedBin, "gh")), "credential", "fill")
+			cmd.Dir = checkout
+			cmd.Env = cleanGitEnvironment()
+			validPath := false
+			for _, entry := range cmd.Env {
+				validPath = validPath || strings.HasPrefix(entry, "PATH=") && entry != "PATH="
+			}
+			if !validPath {
+				t.Fatal("clean Git environment has no usable PATH")
+			}
+			cmd.Stdin = strings.NewReader("protocol=https\nhost=github.com\n\n")
+			output, err := cmd.CombinedOutput()
+			if err != nil || !strings.Contains(string(output), "username=trusted") || strings.Contains(string(output), "planted") {
+				t.Fatalf("credential helper resolved through %q: %s: %v", path, output, err)
+			}
+		})
+	}
+}
+
 func TestRepositoryAndRefValidation(t *testing.T) {
 	url, err := repositoryURL("Acme/project.name")
 	if err != nil || url != "https://github.com/Acme/project.name.git" {
@@ -361,6 +441,29 @@ func TestCheckoutPullRequestDisablesRepositoryTransforms(t *testing.T) {
 	}
 }
 
+func TestNewBranchRejectsTrackedGitlink(t *testing.T) {
+	fixture := newFixture(t)
+	fixture.git(fixture.source, "update-index", "--add", "--cacheinfo", "160000,"+fixture.base+",sub")
+	fixture.git(fixture.source, "commit", "-m", "add gitlink")
+	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/heads/main")
+
+	checkout, err := cloneFromURL(context.Background(), t.TempDir(), fixture.remote, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := checkout.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	if err := checkout.NewBranch(context.Background(), "minion/fix-gitlink"); err == nil || !strings.Contains(err.Error(), "gitlink") {
+		t.Fatalf("NewBranch() error = %v, want gitlink refusal", err)
+	}
+	if got := fixture.git(checkout.Path(), "branch", "--list", "minion/fix-gitlink"); got != "" {
+		t.Fatalf("NewBranch() created branch despite gitlink: %q", got)
+	}
+}
+
 func TestNestedGitMetadataCannotRunFilter(t *testing.T) {
 	t.Setenv("GH_TOKEN", "DUMMY_CANARY")
 	t.Setenv("GITHUB_TOKEN", "DUMMY_CANARY")
@@ -390,7 +493,10 @@ func TestNestedGitMetadataCannotRunFilter(t *testing.T) {
 		t.Fatalf("clean gitlink HasChanges() = (%t, %v)", changed, err)
 	}
 	const branch = "minion/fix-nested-git"
-	if err := checkout.NewBranch(ctx, branch); err != nil {
+	// Bypass NewBranch's preflight to test the post-run metadata guard independently.
+	fixture.git(checkout.Path(), "switch", "--create", branch)
+	checkout.branch = branch
+	if err := checkout.recordConfig(); err != nil {
 		t.Fatal(err)
 	}
 	sub := filepath.Join(checkout.Path(), "sub")

@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/linkdata/minion/internal/cleanup"
 	"github.com/linkdata/minion/internal/github"
 )
 
@@ -37,7 +38,20 @@ var (
 	ErrChangedFileLarge = errors.New("changed file exceeds size limit")
 	ErrHeadMoved        = errors.New("pull request head changed")
 	ErrCheckoutTooLarge = errors.New("pull request tree exceeds checkout limits")
+	credentialHelperGH  = resolveCredentialHelperGH()
 )
+
+func resolveCredentialHelperGH() string {
+	path, err := exec.LookPath("gh")
+	if err != nil {
+		return "/bin/false"
+	}
+	if !filepath.IsAbs(path) {
+		return "/bin/false"
+	}
+	// Multicall launchers can select an app from the symlink name in argv[0].
+	return path
+}
 
 // Checkout owns a temporary clone. Git operations are deliberately kept here,
 // outside the Codex process, which receives only Path().
@@ -159,7 +173,7 @@ func (c *Checkout) Close() error {
 	c.closed = true
 	path := c.path
 	c.path = ""
-	if err := os.RemoveAll(path); err != nil {
+	if err := cleanup.RemoveAll(path); err != nil {
 		return fmt.Errorf("remove checkout: %w", err)
 	}
 	return nil
@@ -284,6 +298,13 @@ func (c *Checkout) NewBranch(ctx context.Context, name string) error {
 	}
 	if err := c.assertHead(ctx); err != nil {
 		return err
+	}
+	entries, err := runGit(ctx, c.path, "ls-tree", "-r", "-z", "HEAD")
+	if err != nil {
+		return err
+	}
+	if strings.HasPrefix(entries, "160000 ") || strings.Contains(entries, "\x00160000 ") {
+		return errors.New("cannot create a writable branch with tracked gitlinks")
 	}
 	if _, err := runGit(ctx, c.path, "switch", "--create", name); err != nil {
 		return err
@@ -591,7 +612,7 @@ func runGit(ctx context.Context, dir string, args ...string) (string, error) {
 func runGitTo(ctx context.Context, dir string, stdout io.Writer, args ...string) error {
 	gitArgs := []string{
 		"-c", "credential.helper=",
-		"-c", "credential.helper=!gh auth git-credential",
+		"-c", credentialHelperConfig(credentialHelperGH),
 		"-c", "core.hooksPath=/dev/null",
 		"-c", "core.fsmonitor=false",
 		"-c", "commit.gpgsign=false",
@@ -619,14 +640,38 @@ func runGitTo(ctx context.Context, dir string, stdout io.Writer, args ...string)
 	return nil
 }
 
+func credentialHelperConfig(path string) string {
+	return "credential.helper=!'" + strings.ReplaceAll(path, "'", "'\\''") + "' auth git-credential"
+}
+
 func cleanGitEnvironment() []string {
 	env := make([]string, 0, len(os.Environ())+6)
+	hasPath := false
 	for _, entry := range os.Environ() {
-		key, _, ok := strings.Cut(entry, "=")
+		key, value, ok := strings.Cut(entry, "=")
 		if !ok || strings.HasPrefix(key, "GIT_") || key == "GCM_INTERACTIVE" || key == "GH_PROMPT_DISABLED" {
 			continue
 		}
+		if key == "PATH" {
+			hasPath = true
+			// Git runs its credential helper through a shell in the checkout.
+			// Relative or empty entries could resolve model-written commands there.
+			var absolute []string
+			for _, dir := range filepath.SplitList(value) {
+				if filepath.IsAbs(dir) {
+					absolute = append(absolute, dir)
+				}
+			}
+			if len(absolute) == 0 {
+				entry = "PATH=/usr/local/bin:/usr/bin:/bin"
+			} else {
+				entry = "PATH=" + strings.Join(absolute, string(os.PathListSeparator))
+			}
+		}
 		env = append(env, entry)
+	}
+	if !hasPath {
+		env = append(env, "PATH=/usr/local/bin:/usr/bin:/bin")
 	}
 	return append(env,
 		"GIT_TERMINAL_PROMPT=0",

@@ -262,6 +262,50 @@ func TestRunOnceDoesNotExhaustJobsWhenWorkRootFills(t *testing.T) {
 	}
 }
 
+func TestRunOnceCountsPublicationFailureWhenWorkRootFills(t *testing.T) {
+	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	item := github.Item{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}, HTMLURL: "https://github.com/example-owner/example-repo/pull/7#issuecomment-1"}
+	gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}, items: []github.Item{item}, permission: github.Permission{Permission: "write"}}
+	executor := &fakeExecutor{executeErr: errors.Join(ErrPostCodexPublication, workroot.ErrUnsafe, &github.StatusError{StatusCode: http.StatusBadGateway})}
+	store := openState(t, now.Add(-time.Minute))
+	m := &Monitor{Config: testConfig(), GitHub: gh, Executor: executor, Now: func() time.Time { return now }}
+	if _, err := m.RunOnce(context.Background(), store); err == nil || len(executor.jobs) != 1 {
+		t.Fatalf("publication failure = %v, jobs = %d", err, len(executor.jobs))
+	}
+	if failure := store.Data.JobFailures[executor.jobs[0].ID]; failure.Attempts != 1 {
+		t.Fatalf("publication failure was refunded when work root filled: %+v", failure)
+	}
+}
+
+func TestRunOnceBoundsPublicationFailuresAfterCodex(t *testing.T) {
+	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	item := github.Item{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}, HTMLURL: "https://github.com/example-owner/example-repo/pull/7#issuecomment-1"}
+	gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}, items: []github.Item{item}, permission: github.Permission{Permission: "write"}}
+	executor := &fakeExecutor{executeErr: errors.Join(ErrPostCodexPublication, &github.StatusError{StatusCode: http.StatusBadGateway})}
+	store := openState(t, now.Add(-time.Minute))
+	clock := now
+	m := &Monitor{Config: testConfig(), GitHub: gh, Executor: executor, Now: func() time.Time { return clock }}
+	for attempt := 1; attempt <= maxJobAttempts; attempt++ {
+		_, err := m.RunOnce(context.Background(), store)
+		if (err != nil) != (attempt < maxJobAttempts) || len(executor.jobs) != attempt {
+			t.Fatalf("attempt %d: err=%v jobs=%d", attempt, err, len(executor.jobs))
+		}
+		if attempt < maxJobAttempts && store.Data.JobFailures[executor.jobs[0].ID].Attempts != attempt {
+			t.Fatalf("publication failure refunded attempt %d: %+v", attempt, store.Data.JobFailures)
+		}
+		clock = clock.Add(time.Minute)
+		for _, pending := range store.Data.PendingNotifications {
+			clock = pending.RetryAt
+		}
+	}
+	if len(gh.comments) != 1 || len(store.Data.Processed) != 1 {
+		t.Fatalf("publication failure did not finish: comments=%d state=%+v", len(gh.comments), store.Data)
+	}
+	if _, err := m.RunOnce(context.Background(), store); err != nil || len(executor.jobs) != maxJobAttempts {
+		t.Fatalf("finished job reran: err=%v jobs=%d", err, len(executor.jobs))
+	}
+}
+
 func TestRunOnceTerminalFailureRepliesWithFreshContext(t *testing.T) {
 	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
 	item := github.Item{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}, HTMLURL: "https://github.com/example-owner/example-repo/pull/7#issuecomment-1"}

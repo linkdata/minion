@@ -26,7 +26,7 @@ import (
 	"github.com/linkdata/minion/internal/state"
 )
 
-func TestCloseCheckoutLogsCleanupFailure(t *testing.T) {
+func TestCloseCheckoutRemovesRestrictedDirectory(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root bypasses directory permissions")
 	}
@@ -36,6 +36,7 @@ func TestCloseCheckoutLogsCleanupFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	path := checkout.Path()
 	locked := filepath.Join(checkout.Path(), "locked")
 	if err := os.Mkdir(locked, 0700); err != nil {
 		t.Fatal(err)
@@ -44,7 +45,7 @@ func TestCloseCheckoutLogsCleanupFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		if err := os.Chmod(locked, 0700); err != nil {
+		if err := os.Chmod(locked, 0700); err != nil && !errors.Is(err, os.ErrNotExist) {
 			t.Error(err)
 		}
 	})
@@ -54,8 +55,11 @@ func TestCloseCheckoutLogsCleanupFailure(t *testing.T) {
 	var output bytes.Buffer
 	executor := Executor{Logger: log.New(&output, "", 0)}
 	executor.closeCheckout(checkout)
-	if !strings.Contains(output.String(), "close checkout: remove checkout:") {
-		t.Fatalf("cleanup error not logged: %s", &output)
+	if output.Len() != 0 {
+		t.Fatalf("cleanup failed: %s", &output)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("checkout still exists: %v", err)
 	}
 }
 
@@ -457,7 +461,7 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7":
 			_, _ = fmt.Fprint(w, `{"node_id":"issue-node","title":"Bug","body":"Details"}`)
 		case r.Method == http.MethodPost && r.URL.Path == "/graphql":
-			_, _ = fmt.Fprint(w, `{"data":{"node":{"title":"Bug","bodyText":"Details"}}}`)
+			_, _ = fmt.Fprint(w, `{"data":{"node":{"title":"RENAMED TITLE SENTINEL","bodyText":"Details","lastEditedAt":null}}}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
 			_, _ = fmt.Fprint(w, `{"full_name":"o/r","default_branch":"main"}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/pulls":
@@ -484,7 +488,10 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 	client.BaseURL, client.HTTPClient = server.URL, server.Client()
 	answer := "@secondbot fix injected\n![pixel](https://example.invalid/?value=dummy)\nCloses #123"
 	executor := &Executor{GitHub: client, BotLogin: "linkdataminion", Store: store, WorkRoot: t.TempDir(),
-		RunCodex: func(_ context.Context, dir, _ string, _ bool, _ string) (codexcli.Result, error) {
+		RunCodex: func(_ context.Context, dir, prompt string, _ bool, _ string) (codexcli.Result, error) {
+			if strings.Contains(prompt, "RENAMED TITLE SENTINEL") || !strings.Contains(prompt, "Issue description: \"Details\"") {
+				t.Errorf("fix prompt included a mutable title or lost the rendered description: %q", prompt)
+			}
 			if err := os.WriteFile(filepath.Join(dir, "fix.txt"), []byte("fixed\n"), 0600); err != nil {
 				return codexcli.Result{}, err
 			}
@@ -507,6 +514,52 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 	remoteSHA, err := exec.Command("git", "--git-dir", remote, "rev-parse", "refs/heads/"+branch).Output()
 	if err != nil || strings.TrimSpace(string(remoteSHA)) != sha {
 		t.Fatalf("remote branch head = %q, want %s: %v", remoteSHA, sha, err)
+	}
+}
+
+func TestReviewMarksOnlyPostCodexPublicationFailure(t *testing.T) {
+	_, head := auditGitFixture(t)
+	job := monitor.Job{Repository: config.Repository{Name: "o/r"}, SubjectType: "PullRequest", Number: 7,
+		ID: strings.Repeat("a", 64), Source: github.Item{Author: github.User{Login: "writer"}}}
+	repoFail := true
+	var codexRuns, postCalls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
+			if repoFail {
+				http.Error(w, "unavailable", http.StatusBadGateway)
+				return
+			}
+			_, _ = fmt.Fprint(w, `{"full_name":"o/r","default_branch":"main"}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/pulls/7":
+			_, _ = fmt.Fprintf(w, `{"base":{"ref":"main"},"head":{"sha":%q}}`, head)
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/o/r/git/trees/"):
+			sha := strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/")
+			_, _ = fmt.Fprintf(w, `{"sha":%q,"truncated":false,"tree":[]}`, sha)
+		case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/pulls/7/reviews":
+			postCalls++
+			http.Error(w, "unavailable", http.StatusBadGateway)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	client := github.New("test-token")
+	client.BaseURL, client.HTTPClient = server.URL, server.Client()
+	executor := &Executor{GitHub: client, BotLogin: "linkdataminion", WorkRoot: t.TempDir(),
+		RunCodex: func(context.Context, string, string, bool, string) (codexcli.Result, error) {
+			codexRuns++
+			return codexcli.Result{Answer: "No findings."}, nil
+		}}
+	err := executor.review(context.Background(), job)
+	if err == nil || errors.Is(err, monitor.ErrPostCodexPublication) || codexRuns != 0 {
+		t.Fatalf("pre-Codex outage: err=%v runs=%d", err, codexRuns)
+	}
+	repoFail = false
+	err = executor.review(context.Background(), job)
+	if !errors.Is(err, monitor.ErrPostCodexPublication) || codexRuns != 1 || postCalls != 1 {
+		t.Fatalf("post-Codex outage: err=%v runs=%d posts=%d", err, codexRuns, postCalls)
 	}
 }
 

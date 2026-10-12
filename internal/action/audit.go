@@ -108,7 +108,10 @@ Request comment (%s):
 	if err != nil {
 		return fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
 	}
-	return e.acknowledge(ctx, job, fmt.Sprintf("Security audit requested by @%s at commit `%s`:\n\n%s", job.Source.Author.Login, head, inertModelOutput(report)))
+	if err := e.acknowledge(ctx, job, fmt.Sprintf("Security audit requested by @%s at commit `%s`:\n\n%s", job.Source.Author.Login, head, inertModelOutput(report))); err != nil {
+		return fmt.Errorf("%w: %w", monitor.ErrPostCodexPublication, err)
+	}
+	return nil
 }
 
 func validateAuditOutput(ctx context.Context, outputDir, skill, repo, target, head string) (report string, resultErr error) {
