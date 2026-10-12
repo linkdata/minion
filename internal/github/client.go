@@ -416,8 +416,9 @@ func (c *Client) AuthenticatedUser(ctx context.Context) (User, error) {
 	return user, err
 }
 
-// ListRepositoryInvitations lists up to ten pages of open invitations for the
-// authenticated user. Fetched invitations are retained if a later page fails.
+// ListRepositoryInvitations lists open invitations for the authenticated user.
+//
+// It reads at most ten pages and returns fetched invitations if a later page fails.
 func (c *Client) ListRepositoryInvitations(ctx context.Context) ([]Invitation, error) {
 	q := url.Values{"per_page": {"100"}}
 	var invitations []Invitation
