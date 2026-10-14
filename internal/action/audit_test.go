@@ -53,7 +53,7 @@ func TestAuditIssueAndPullRequest(t *testing.T) {
 			job := monitor.Job{
 				Repository:  config.Repository{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"audit"}},
 				SubjectType: tt.subject, Number: 7, ID: strings.Repeat("a", 64),
-				Source:  github.Item{Author: github.User{Login: "writer"}, Body: "@linkdataminion audit"},
+				Source:  github.Item{Author: github.User{Login: "writer"}, Body: "@linkdataminion audit\n\nInspect authorization boundaries."},
 				Command: command.Command{Action: command.Audit},
 			}
 			var comments []github.Comment
@@ -148,9 +148,7 @@ func TestAuditIssueAndPullRequest(t *testing.T) {
 							t.Fatalf("audit prompt missing %q", want)
 						}
 					}
-					if strings.Contains(prompt, job.Source.Body) {
-						t.Errorf("audit prompt included command-source text: %q", prompt)
-					}
+					assertRequesterNotesPrompt(t, prompt, job.Source.Body, "Inspect authorization boundaries.")
 					got, err := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "HEAD").Output()
 					if err != nil || strings.TrimSpace(string(got)) != expected {
 						t.Fatalf("auditing wrong commit: %s, %v", got, err)

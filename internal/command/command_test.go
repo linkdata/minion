@@ -89,18 +89,24 @@ func TestParseIgnoresNonCommands(t *testing.T) {
 	}
 }
 
-func TestParseRejectsExtraText(t *testing.T) {
-	for _, body := range []string{
-		"@linkdataminion review\nPlease take a look.",
-		"@linkdataminion audit\nCheck authorization.",
-		"@linkdataminion fix\nChange unrelated files.",
-		"@linkdataminion release v1.2.3\nUse these notes.",
-		"@linkdataminion review\n@otherbot review",
-		"@linkdataminion review\n```\ntext\n```",
+func TestParseAcceptsTrailingNotes(t *testing.T) {
+	for _, tt := range []struct {
+		command string
+		notes   string
+	}{
+		{"@linkdataminion review", "Please check the locking change."},
+		{"@linkdataminion audit", "Check authorization boundaries."},
+		{"@linkdataminion fix", "The test fails on Windows."},
+		{"@linkdataminion release v1.2.3", "Mention the migration steps."},
+		{"@linkdataminion review", "@otherbot review\n```\nExample text\n```"},
 	} {
-		got, err := Parse(body)
-		if !errors.Is(err, ErrExtraText) || got != (Command{}) {
-			t.Fatalf("Parse(%q) = (%#v, %v), want ErrExtraText", body, got, err)
+		plain, err := Parse(tt.command)
+		if err != nil {
+			t.Fatal(err)
+		}
+		withNotes, err := Parse(tt.command + "\n\n" + tt.notes)
+		if err != nil || withNotes != plain {
+			t.Fatalf("Parse(%q) = (%#v, %v), want %#v", tt.command+"\n\n"+tt.notes, withNotes, err, plain)
 		}
 	}
 }
