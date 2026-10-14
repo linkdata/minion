@@ -11,11 +11,11 @@ Minion should start one AI-assisted action from a fixed command, without free-fo
 
 Current gaps are tracked in [owner allowlisting](https://github.com/linkdata/minion/issues/76) and [repository instruction discovery](https://github.com/linkdata/minion/issues/78). [Deployment isolation validation](https://github.com/linkdata/minion/issues/7) is also open before public release.
 
-GitHub titles and descriptions are quoted as untrusted task data in Codex prompts. These boundaries reduce prompt spoofing, but model behavior still needs human review. Repository instruction discovery remains an open gap.
+GitHub titles and descriptions are quoted as untrusted task data in Codex prompts. These boundaries reduce prompt spoofing, but model behavior still needs human review.
 
 ## What it does
 
-Put one command in an issue or pull request body or comment, with no other nonblank text. Blank lines may surround the command. These examples use `@linkdataminion`; substitute the configured `bot_login`:
+Put one command on the first nonblank line of an issue or pull request body or comment. You may add task notes on later lines; the command itself accepts no free-text arguments. These examples use `@linkdataminion`; substitute the configured `bot_login`:
 
 | Command | Result |
 | --- | --- |
@@ -32,7 +32,7 @@ The requester must open the pull request from their own account after reviewing 
 
 Before generating or pushing a fix, Minion reads effective push rulesets on the fork, monitored repository, and fork-network root. It allows active push rules only when GitHub exposes an explicitly empty bypass list, so the bot cannot bypass a restriction another fork would enforce. An unreadable or incomplete ruleset response refuses `fix`. GitHub currently returns HTTP 403 for this private repository's rulesets on its plan, so `fix` remains unavailable even after the bot fork is provisioned until GitHub exposes a trustworthy result. Branch rulesets on a base repository do not apply to its forks; push rulesets and their root bypass permissions do.
 
-Each request must come from an account with effective repository `write`, `maintain`, or `admin` permission. An optional `allowed_actors` list narrows that group. A command in a quotation, code fence, HTML comment, or later body line is ignored. Text after a valid command is refused, and a second full-line directive makes the request ambiguous. Put task details in the issue description and post a separate `fix` command comment. The bot checks the whitelist and author permission again before every action.
+Each request must come from an account with effective repository `write`, `maintain`, or `admin` permission. An optional `allowed_actors` list narrows that group. Only the first nonblank line can start a command; quoted, fenced, hidden, or later directives cannot start one. A second full-line Minion directive refuses the request as ambiguous. Notes after an authorized command reach Codex as quoted task guidance within the selected action; they cannot change the bot's application-enforced limits. A review also includes the pull request title and description as untrusted context, even when the pull request author cannot run Minion. Fixes and audits use relevant thread descriptions as untrusted context. The bot checks the whitelist and command author's permission again before every action.
 
 Edited command sources are ignored. Post a new comment to request work after editing text.
 
