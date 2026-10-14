@@ -48,8 +48,16 @@ func TestConfiguredCommandsPreserveKeysAndUseNames(t *testing.T) {
 			t.Fatalf("accepted %q: %v", body, err)
 		}
 	}
-	if _, err := ParseForLoginCommands("@linkdataminion review\n@linkdataminion fix", "linkdataminion", map[string]Action{"review": Review}); !errors.Is(err, ErrExtraText) {
-		t.Fatalf("accepted extra disabled directive: %v", err)
+	withNotes, err := ParseForLoginCommands("@linkdataminion review\n@linkdataminion fix", "linkdataminion", map[string]Action{"review": Review})
+	if err != nil || withNotes.Name != "review" {
+		t.Fatalf("disabled directive in notes = (%#v, %v), want review", withNotes, err)
+	}
+	if _, err := ParseForLoginCommands("@linkdataminion review\n@linkdataminion inspect", "linkdataminion", actions); !errors.Is(err, ErrAmbiguous) {
+		t.Fatalf("accepted second configured directive: %v", err)
+	}
+	releaseWithNotes, err := ParseForLoginCommands("@linkdataminion release v1\nMention the migration steps.", "linkdataminion", actions)
+	if err != nil || releaseWithNotes.Action != Release || releaseWithNotes.Args != "v1" {
+		t.Fatalf("release with notes = (%#v, %v)", releaseWithNotes, err)
 	}
 	if _, err := ParseForLoginCommands("@linkdataminion review", "linkdataminion", nil); !errors.Is(err, ErrNoCommand) {
 		t.Fatalf("accepted command with no mappings: %v", err)
@@ -140,18 +148,23 @@ func TestParseIgnoresNonCommands(t *testing.T) {
 	}
 }
 
-func TestParseRejectsExtraText(t *testing.T) {
-	for _, body := range []string{
-		"@linkdataminion review\nPlease take a look.",
-		"@linkdataminion audit\nCheck authorization.",
-		"@linkdataminion fix\nChange unrelated files.",
-		"@linkdataminion security-audit\nUse these notes.",
-		"@linkdataminion review\n@otherbot review",
-		"@linkdataminion review\n```\ntext\n```",
+func TestParseAcceptsTrailingNotes(t *testing.T) {
+	for _, tt := range []struct {
+		command string
+		notes   string
+	}{
+		{"@linkdataminion review", "Please check the locking change."},
+		{"@linkdataminion audit", "Check authorization boundaries."},
+		{"@linkdataminion fix", "The test fails on Windows."},
+		{"@linkdataminion review", "@otherbot review\n```\nExample text\n```"},
 	} {
-		got, err := Parse(body)
-		if !errors.Is(err, ErrExtraText) || got != (Command{}) {
-			t.Fatalf("Parse(%q) = (%#v, %v), want ErrExtraText", body, got, err)
+		plain, err := Parse(tt.command)
+		if err != nil {
+			t.Fatal(err)
+		}
+		withNotes, err := Parse(tt.command + "\n\n" + tt.notes)
+		if err != nil || withNotes != plain {
+			t.Fatalf("Parse(%q) = (%#v, %v), want %#v", tt.command+"\n\n"+tt.notes, withNotes, err, plain)
 		}
 	}
 }

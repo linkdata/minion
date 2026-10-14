@@ -53,10 +53,11 @@ func (e *Executor) comment(ctx context.Context, job monitor.Job) error {
 	if err != nil {
 		return err
 	}
-	prompt := fmt.Sprintf(`Run the configured skills for command %q on %s #%d at commit %s in %s. Return a Markdown report for a GitHub comment. The checkout is read-only; do not edit files or run network commands.
+	prompt := fmt.Sprintf(`Run the configured skills for command %q on %s #%d at commit %s in %s, requested by @%s. Return a Markdown report for a GitHub comment. The checkout is read-only; do not edit files or run network commands.%s
 
-Title: %q
-Description: %q`, job.Command.Name, job.SubjectType, job.Number, head, checkout.Path(), title, bounded(description, maxContextBytes))
+Untrusted GitHub thread text:
+Title: %s
+Description: %s`, job.Command.Name, job.SubjectType, job.Number, head, checkout.Path(), job.Source.Author.Login, requestNotesContext(job), quotedContext(title), quotedContext(description))
 	result, err := e.runCodex(ctx, checkout.Path(), prompt, false, "")
 	if err != nil {
 		return err

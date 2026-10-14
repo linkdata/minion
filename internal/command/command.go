@@ -30,8 +30,6 @@ var (
 	ErrNoCommand = errors.New("no bot command")
 	// ErrAmbiguous means the body contains more than one actionable directive.
 	ErrAmbiguous = errors.New("multiple bot commands")
-	// ErrExtraText means a directive body contains other nonblank text.
-	ErrExtraText = errors.New("bot command has extra text")
 	// ErrInvalidLogin means the configured GitHub login is malformed.
 	ErrInvalidLogin = errors.New("invalid bot login")
 )
@@ -61,8 +59,9 @@ func Parse(markdown string) (Command, error) {
 //	@<login> fix
 //	@<login> security-audit
 //
-// Blank lines may surround the directive. Any other text in the body is
-// rejected; a second directive returns [ErrAmbiguous].
+// The directive must be the first nonblank line. Later text is not a command
+// argument; callers may use it as task context after authorization. A second
+// configured directive returns [ErrAmbiguous].
 func ParseForLogin(markdown, login string) (Command, error) {
 	return ParseForLoginCommands(markdown, login, map[string]Action{
 		"review": Review, "fix": Fix, "audit": Comment, "security-audit": SecurityAudit,
@@ -71,7 +70,9 @@ func ParseForLogin(markdown, login string) (Command, error) {
 
 // ParseForLoginCommands finds exactly one configured standalone directive for login.
 //
-// Configured commands take no arguments except release actions, which take one tag.
+// The directive must be the first nonblank line. Later text may be used as
+// task context after authorization; a second configured directive returns
+// [ErrAmbiguous]. Only [Release] actions take an argument, which is one tag.
 func ParseForLoginCommands(markdown, login string, actions map[string]Action) (Command, error) {
 	if !validLogin(login) {
 		return Command{}, ErrInvalidLogin
@@ -92,17 +93,10 @@ func ParseForLoginCommands(markdown, login string, actions map[string]Action) (C
 	if !ok {
 		return Command{}, ErrNoCommand
 	}
-	extraText := false
 	for _, line := range lines[first+1:] {
 		if _, ok := parseLine(line, handle, actions); ok {
 			return Command{}, ErrAmbiguous
 		}
-		if strings.TrimSpace(line) != "" {
-			extraText = true
-		}
-	}
-	if extraText {
-		return Command{}, ErrExtraText
 	}
 	return found, nil
 }

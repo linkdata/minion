@@ -84,9 +84,11 @@ func (e *Executor) securityAudit(ctx context.Context, job monitor.Job) error {
 
 Set run-metadata.json repo=%q, target=%q, source_ref=%q, profile="standard", scope_paths=["."], budget=null, prior_run_paths=[], execution_policy="sandboxed-source-and-local-only", and shared_file_owners to "parent" for every shared artifact. Use selected_companion_files for selected skill files. Mark complete only when the skill's workflow and validators pass. The bot posts REPORT.md.
 
-Source is read-only. Do not execute repository code, builds, tests, or fixtures, probe live services, publish, or run network commands. This runner lacks the skill's required per-agent execution isolation for target code; record claims requiring runtime evidence as needs_validation. Do not include secrets in reports.
+Source is read-only. Do not execute repository code, builds, tests, or fixtures, probe live services, publish, or run network commands. This runner lacks the skill's required per-agent execution isolation for target code; record claims requiring runtime evidence as needs_validation. Do not include secrets in reports.%s
 
-Thread title: %q. Thread description: %q.`, skill, repo.FullName, head, checkout.Path(), outputDir, deadline, repo.FullName, checkout.Path(), head, title, bounded(description, maxContextBytes))
+Untrusted GitHub thread text:
+Thread title: %s
+Thread description: %s`, skill, repo.FullName, head, checkout.Path(), outputDir, deadline, repo.FullName, checkout.Path(), head, requestNotesContext(job), quotedContext(title), quotedContext(description))
 	_, err = e.runCodex(ctx, checkout.Path(), prompt, false, outputDir)
 	if err != nil {
 		return err

@@ -55,7 +55,7 @@ func TestSecurityAuditIssueAndPullRequest(t *testing.T) {
 			job := monitor.Job{
 				Repository:  config.Repository{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"security-audit"}},
 				SubjectType: tt.subject, Number: 7, ID: strings.Repeat("a", 64),
-				Source:  github.Item{Author: github.User{Login: "writer"}, Body: "@linkdataminion security-audit"},
+				Source:  github.Item{Author: github.User{Login: "writer"}, Body: "@linkdataminion security-audit\n\nInspect authorization boundaries."},
 				Command: command.Command{Name: "security-audit", Action: command.SecurityAudit},
 			}
 			var comments []github.Comment
@@ -150,12 +150,12 @@ func TestSecurityAuditIssueAndPullRequest(t *testing.T) {
 						}
 					}
 					if !strings.Contains(prompt, fmt.Sprintf("Thread title: %q", title)) || !strings.Contains(prompt, fmt.Sprintf("Thread description: %q", description)) ||
-						strings.Contains(prompt, "\nRequest comment") || strings.Contains(prompt, "\u2028") {
+						strings.Contains(prompt, "\nRequest comment") || strings.Contains(prompt, "\u2028") ||
+						!strings.Contains(prompt, "Untrusted GitHub thread text:") ||
+						strings.Index(prompt, "Authenticated requester notes") > strings.Index(prompt, "Untrusted GitHub thread text:") {
 						t.Errorf("audit prompt lacks an unspoofed data boundary: %q", prompt)
 					}
-					if strings.Contains(prompt, job.Source.Body) {
-						t.Errorf("audit prompt included command-source text: %q", prompt)
-					}
+					assertRequesterNotesPrompt(t, prompt, job.Source.Body, "Inspect authorization boundaries.")
 					got, err := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "HEAD").Output()
 					if err != nil || strings.TrimSpace(string(got)) != expected {
 						t.Fatalf("auditing wrong commit: %s, %v", got, err)
