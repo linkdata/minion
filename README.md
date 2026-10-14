@@ -7,9 +7,9 @@ A small Go service that watches a bot account's GitHub notifications in an expli
 
 ## Goal
 
-Minion should start one AI-assisted action from a fixed command, without free-form instructions in the command. Only collaborators with write or stronger access should be able to request work, and only in repositories owned by explicitly allowed GitHub accounts. GitHub text and repository files are untrusted input; prompt boundaries should reduce injection. AI-assisted work should run in sandboxes. Application logic, rather than AI instructions, should choose and limit GitHub operations, destinations, and publication states.
+Minion should start one AI-assisted action from a fixed command, without free-form instructions in the command. Only collaborators with write or stronger access should be able to request work, and only in repositories explicitly selected by the operator or automatically registered from invitations by pinned owners. GitHub text and repository files are untrusted input; prompt boundaries should reduce injection. AI-assisted work should run in sandboxes. Application logic, rather than AI instructions, should choose and limit GitHub operations, destinations, and publication states.
 
-Current gaps are tracked in [fixed commands](https://github.com/linkdata/minion/issues/75), [owner allowlisting](https://github.com/linkdata/minion/issues/76), [prompt boundaries](https://github.com/linkdata/minion/issues/77), and [repository instruction discovery](https://github.com/linkdata/minion/issues/78). [Deployment isolation validation](https://github.com/linkdata/minion/issues/7) is also open before public release.
+Current gaps are tracked in [fixed commands](https://github.com/linkdata/minion/issues/75), [prompt boundaries](https://github.com/linkdata/minion/issues/77), and [repository instruction discovery](https://github.com/linkdata/minion/issues/78). [Deployment isolation validation](https://github.com/linkdata/minion/issues/7) is also open before public release.
 
 ## What it does
 
