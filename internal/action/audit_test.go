@@ -269,6 +269,29 @@ func TestSecurityAuditIssueAndPullRequest(t *testing.T) {
 
 const auditTestOwners = `{"run-metadata.json":"parent","architecture.md":"parent","coverage-ledger.json":"parent","findings.json":"parent","REPORT.md":"parent","FINDINGS-DETAIL.md":"parent","NEEDS-VALIDATION.md":"parent"}`
 
+func TestAuditNodePermissionFlag(t *testing.T) {
+	for _, tt := range []struct {
+		name, script, want string
+		wantError          bool
+	}{
+		{name: "stable", script: "exit 0", want: "--permission"},
+		{name: "legacy", script: `test "$1" = "--experimental-permission"`, want: "--experimental-permission"},
+		{name: "unavailable", script: "exit 1", wantError: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "node"), []byte("#!/bin/sh\n"+tt.script+"\n"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			got, err := auditNodePermissionFlag(context.Background(), dir)
+			if got != tt.want || (err != nil) != tt.wantError {
+				t.Fatalf("auditNodePermissionFlag() = %q, %v; want %q, error=%t", got, err, tt.want, tt.wantError)
+			}
+		})
+	}
+}
+
 func TestValidateAuditOutput(t *testing.T) {
 	if _, err := exec.LookPath("node"); err != nil {
 		t.Skip("audit validators require node")

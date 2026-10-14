@@ -30,20 +30,21 @@ func TestRunInvokesCodexAndReturnsFinalMessage(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
 			fakeCodex := installFakeCodex(t, `#!/bin/sh
-printf '%s\n' "$@" > args
-pwd > cwd
-printf '%s,%s\n' "${GH_TOKEN-absent}" "${GITHUB_TOKEN-absent}" > env
-printf '%s\n' "$TMPDIR" > tmpdir
-printf '%s\n' "$GOCACHE" > gocache
-cat > prompt
+printf '%s\n' "$@" > "$0.args"
+pwd > "$0.cwd"
+printf '%s,%s\n' "${GH_TOKEN-absent}" "${GITHUB_TOKEN-absent}" > "$0.env"
+printf '%s\n' "$TMPDIR" > "$0.tmpdir"
+printf '%s\n' "$GOCACHE" > "$0.gocache"
+test -f "$PWD/.minion-codex-root" && printf 'present\n' > "$0.marker"
+cat > "$0.prompt"
 printf '%s\n' '{"type":"thread.started","thread_id":"test"}' '{"type":"item.completed","item":{"type":"agent_message","text":"first"}}' '{"type":"item.completed","item":{"type":"agent_message","text":"final answer"}}' '{"type":"turn.completed"}'
 `)
-			argsFile := filepath.Join(dir, "args")
-			cwdFile := filepath.Join(dir, "cwd")
-			envFile := filepath.Join(dir, "env")
-			tmpFile := filepath.Join(dir, "tmpdir")
-			cacheFile := filepath.Join(dir, "gocache")
-			promptFile := filepath.Join(dir, "prompt")
+			argsFile := fakeCodex + ".args"
+			cwdFile := fakeCodex + ".cwd"
+			envFile := fakeCodex + ".env"
+			tmpFile := fakeCodex + ".tmpdir"
+			cacheFile := fakeCodex + ".gocache"
+			promptFile := fakeCodex + ".prompt"
 			t.Setenv("GH_TOKEN", "secret")
 			t.Setenv("GITHUB_TOKEN", "secret")
 
@@ -60,18 +61,21 @@ printf '%s\n' '{"type":"thread.started","thread_id":"test"}' '{"type":"item.comp
 			}
 			got := strings.Split(strings.TrimSuffix(string(args), "\n"), "\n")
 			want := []string{
-				"exec", "--json", "--ignore-user-config", "--ignore-rules", "--strict-config",
+				"exec", "--json", "--ignore-user-config", "--ignore-rules", "--strict-config", "--skip-git-repo-check",
 				"--disable", "apps", "--disable", "browser_use", "--disable", "browser_use_external",
 				"--disable", "browser_use_full_cdp_access", "--disable", "computer_use",
 				"--disable", "image_generation", "--disable", "plugins", "--disable", "remote_plugin",
 				"--disable", "shell_snapshot", "--disable", "skill_mcp_dependency_install",
+				"-c", "project_doc_max_bytes=0",
+				"-c", `project_root_markers=[".minion-codex-root"]`,
+				"-c", "skills.include_instructions=false",
 				"-c", "approval_policy=never",
 				"-c", `web_search="disabled"`,
 				"-c", "shell_environment_policy.ignore_default_excludes=false",
 				"-c", `shell_environment_policy.filters={"PATH"="include","HOME"="include","TMPDIR"="include","TMP"="include","TEMP"="include","GOCACHE"="include","LANG"="include","LC_ALL"="include","LC_CTYPE"="include","TERM"="include"}`,
 				"-c", `default_permissions="minion"`,
 				"-c", fmt.Sprintf("permissions.minion.extends=%q", tt.parent),
-				"-c", fmt.Sprintf(`permissions.minion.filesystem={":root"="deny",":minimal"="read",":tmpdir"="write",":slash_tmp"="deny",%s=%q,%s="read"}`, strconv.Quote(dir), tt.access, strconv.Quote(fakeCodex)),
+				"-c", fmt.Sprintf(`permissions.minion.filesystem={":root"="deny",":minimal"="read",":tmpdir"="write",":slash_tmp"="deny",%s=%q,%s="read",%s="read",%s="read",%s="read"}`, strconv.Quote(dir), tt.access, strconv.Quote(filepath.Join(dir, ".git")), strconv.Quote(filepath.Join(dir, ".agents")), strconv.Quote(filepath.Join(dir, ".codex")), strconv.Quote(fakeCodex)),
 				"-c", "permissions.minion.network.enabled=false",
 				"--", "-",
 			}
@@ -81,9 +85,6 @@ printf '%s\n' '{"type":"thread.started","thread_id":"test"}' '{"type":"item.comp
 			cwd, err := os.ReadFile(cwdFile)
 			if err != nil {
 				t.Fatal(err)
-			}
-			if strings.TrimSpace(string(cwd)) != dir {
-				t.Fatalf("working directory = %q, want %q", strings.TrimSpace(string(cwd)), dir)
 			}
 			creds, err := os.ReadFile(envFile)
 			if err != nil {
@@ -96,14 +97,20 @@ printf '%s\n' '{"type":"thread.started","thread_id":"test"}' '{"type":"item.comp
 			if err != nil {
 				t.Fatal(err)
 			}
-			if string(gotPrompt) != "Handle mention" {
-				t.Fatalf("stdin prompt = %q", gotPrompt)
+			if !strings.Contains(string(gotPrompt), strconv.Quote(dir)) || !strings.HasSuffix(string(gotPrompt), "Handle mention") {
+				t.Fatalf("stdin prompt lacks checkout location or original request: %q", gotPrompt)
 			}
 			tmp, err := os.ReadFile(tmpFile)
 			if err != nil {
 				t.Fatal(err)
 			}
 			runtimeDir := strings.TrimSpace(string(tmp))
+			if strings.TrimSpace(string(cwd)) != runtimeDir {
+				t.Fatalf("working directory = %q, want %q", strings.TrimSpace(string(cwd)), runtimeDir)
+			}
+			if marker, err := os.ReadFile(fakeCodex + ".marker"); err != nil || string(marker) != "present\n" {
+				t.Fatalf("isolated project root marker missing during run: %q, %v", marker, err)
+			}
 			if filepath.Dir(runtimeDir) != filepath.Dir(dir) {
 				t.Fatalf("runtime directory %q is not a checkout sibling", runtimeDir)
 			}
@@ -179,13 +186,13 @@ func TestRunPassesConfiguredModelEffortAndSkills(t *testing.T) {
 	if err := os.WriteFile(skillPath, []byte("---\nname: test\n---\nUse this skill."), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	installFakeCodex(t, `#!/bin/sh
-printf '%s\n' "$@" > args
-cat > prompt
+	fakeCodex := installFakeCodex(t, `#!/bin/sh
+printf '%s\n' "$@" > "$0.args"
+cat > "$0.prompt"
 printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}' '{"type":"turn.completed"}'
 `)
-	argsFile := filepath.Join(dir, "args")
-	promptFile := filepath.Join(dir, "prompt")
+	argsFile := fakeCodex + ".args"
+	promptFile := fakeCodex + ".prompt"
 	settings := config.CodexConfig{Model: "gpt-6-sol", ReasoningEffort: "ultra", Skills: []string{skillPath}}
 	if _, err := Run(context.Background(), dir, "Handle mention", false, "", settings); err != nil {
 		t.Fatal(err)
@@ -214,14 +221,14 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
 func TestRunUsesEmbeddedSkillWithoutInstallation(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", t.TempDir())
-	installFakeCodex(t, `#!/bin/sh
+	fakeCodex := installFakeCodex(t, `#!/bin/sh
 set -eu
-printf '%s\n' "$@" > args
-printf '%s\n' "$TMPDIR" > tmpdir
-cat > prompt
+printf '%s\n' "$@" > "$0.args"
+printf '%s\n' "$TMPDIR" > "$0.tmpdir"
+cat > "$0.prompt"
 for skill in ../.minion-skills-*/anti-prompt-injection/SKILL.md; do
-  printf '%s\n' "$skill" > skillpath
-  cat "$skill" > skill-copy
+  printf '%s\n' "$skill" > "$0.skillpath"
+  cat "$skill" > "$0.skill-copy"
 done
 printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}' '{"type":"turn.completed"}'
 `)
@@ -229,12 +236,12 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
 	if _, err := Run(context.Background(), dir, "Handle mention", false, "", settings); err != nil {
 		t.Fatal(err)
 	}
-	runtimeData, err := os.ReadFile(filepath.Join(dir, "tmpdir"))
+	runtimeData, err := os.ReadFile(fakeCodex + ".tmpdir")
 	if err != nil {
 		t.Fatal(err)
 	}
 	runtimeDir := strings.TrimSpace(string(runtimeData))
-	skillData, err := os.ReadFile(filepath.Join(dir, "skillpath"))
+	skillData, err := os.ReadFile(fakeCodex + ".skillpath")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,14 +253,14 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
 	if filepath.Dir(skillRoot) != filepath.Dir(runtimeDir) || skillRoot == runtimeDir {
 		t.Fatalf("embedded skill root %q is not outside writable TMPDIR %q", skillRoot, runtimeDir)
 	}
-	args, err := os.ReadFile(filepath.Join(dir, "args"))
+	args, err := os.ReadFile(fakeCodex + ".args")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(args), strconv.Quote(filepath.Dir(skillPath))+`="read"`) {
 		t.Fatalf("embedded skill read permission missing: %s", args)
 	}
-	prompt, err := os.ReadFile(filepath.Join(dir, "prompt"))
+	prompt, err := os.ReadFile(fakeCodex + ".prompt")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -261,7 +268,7 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
 		t.Fatalf("embedded skill not materialized into prompt: %s", prompt)
 	}
 	want, _ := skills.BuiltinContent(skills.BuiltinAntiPromptInjection)
-	got, err := os.ReadFile(filepath.Join(dir, "skill-copy"))
+	got, err := os.ReadFile(fakeCodex + ".skill-copy")
 	if err != nil || string(got) != string(want) {
 		t.Fatalf("embedded skill seen by Codex = %q, %v", got, err)
 	}
@@ -276,12 +283,12 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
 func TestRunAllowsSeparateAuditReportsWithoutSourceWrites(t *testing.T) {
 	workspace := t.TempDir()
 	output := t.TempDir()
-	argsFile := filepath.Join(workspace, "args")
-	installFakeCodex(t, `#!/bin/sh
-printf '%s\n' "$@" > args
+	fakeCodex := installFakeCodex(t, `#!/bin/sh
+printf '%s\n' "$@" > "$0.args"
 cat >/dev/null
 printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"audit done"}}' '{"type":"turn.completed"}'
 `)
+	argsFile := fakeCodex + ".args"
 	if _, err := Run(context.Background(), workspace, "Audit source", false, output, config.CodexConfig{}); err != nil {
 		t.Fatal(err)
 	}

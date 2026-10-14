@@ -79,6 +79,10 @@ func run() int {
 		logger.Printf("Codex CLI: %v", err)
 		return 1
 	}
+	if err := codexcli.ValidateInstructionBoundary(ctx); err != nil {
+		logger.Printf("Codex instruction boundary: %v", err)
+		return 1
+	}
 	cfg.Codex, err = codexcli.Validate(ctx, cfg.Codex)
 	if err != nil {
 		logger.Printf("Codex settings: %v", err)

@@ -207,6 +207,60 @@ func TestSkillSourceNamesDoNotConflict(t *testing.T) {
 	}
 }
 
+func TestSkillSourceURLsNormalizeTrailingSlash(t *testing.T) {
+	url := "https://github.com/example/skills/tree/main/skills/review"
+	cfg := Config{
+		BotLogin: "bot",
+		Commands: map[string]CommandMapping{
+			"review":  {Action: "review", Skills: []string{url}},
+			"inspect": {Action: "comment", Skills: []string{url + "/"}},
+		},
+		AlwaysOnSkills: []string{url + "/"},
+		Repositories:   []Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"review", "inspect"}}},
+	}
+	if err := cfg.Validate(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	for _, got := range []string{cfg.Commands["review"].Skills[0], cfg.Commands["inspect"].Skills[0], cfg.AlwaysOnSkills[0]} {
+		if got != url {
+			t.Errorf("normalized skill URL = %q, want %q", got, url)
+		}
+	}
+}
+
+func TestSkillSourceNamesRejectCaseCollisions(t *testing.T) {
+	url := "https://github.com/example/skills/tree/main/skills/review"
+	upper := "https://github.com/example/skills/tree/main/skills/Review"
+	for _, tt := range []struct {
+		name   string
+		change func(*Config)
+		want   string
+	}{
+		{"across commands", func(c *Config) {
+			c.Commands["inspect"] = CommandMapping{Action: "comment", Skills: []string{upper}}
+		}, "collide on case-insensitive filesystems"},
+		{"command and always-on", func(c *Config) {
+			c.AlwaysOnSkills = []string{upper}
+		}, "collide on case-insensitive filesystems"},
+		{"within command", func(c *Config) {
+			c.Commands["review"] = CommandMapping{Action: "review", Skills: []string{url, upper}}
+		}, "duplicate skill"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Config{
+				BotLogin:       "bot",
+				Commands:       map[string]CommandMapping{"review": {Action: "review", Skills: []string{url}}},
+				AlwaysOnSkills: []string{},
+				Repositories:   []Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"review"}}},
+			}
+			tt.change(&cfg)
+			if err := cfg.Validate(t.TempDir()); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Validate() = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
 func TestBuiltinSkillCanEnableCommandWithoutInstallation(t *testing.T) {
 	cfg := Config{
 		BotLogin:       "bot",

@@ -64,7 +64,7 @@ type CodexConfig struct {
 	Skills []string `json:"-"`
 }
 
-// SecurityAuditSkill returns the installed security-audit skill path for this job.
+// SecurityAuditSkill returns the selected security-audit skill path for this job.
 func (c CodexConfig) SecurityAuditSkill() string {
 	for _, path := range c.Skills {
 		if filepath.Base(filepath.Dir(path)) == "security-audit" {
@@ -134,7 +134,7 @@ func decode(r io.Reader) (Config, error) {
 
 // Validate checks configuration and resolves paths relative to configDir.
 //
-// It normalizes repository names, account logins, and identity pin keys.
+// It normalizes repository names, account logins, identity pin keys, and skill URLs.
 func (c *Config) Validate(configDir string) error {
 	if c.BotLogin == "" {
 		return fmt.Errorf("bot_login is required")
@@ -184,22 +184,32 @@ func (c *Config) Validate(configDir string) error {
 	if err := validateSkillURLs(c.AlwaysOnSkills); err != nil {
 		return fmt.Errorf("always_on_skills: %w", err)
 	}
-	sourceByName := make(map[string]string)
-	for _, mapping := range c.Commands {
-		for _, rawURL := range mapping.Skills {
-			name, _ := skills.Name(rawURL)
-			if prior, exists := sourceByName[name]; exists && prior != rawURL {
+	sourceByName := make(map[string]struct{ name, url string })
+	addSkill := func(rawURL string) error {
+		name, _ := skills.Name(rawURL)
+		key := strings.ToLower(name)
+		if prior, exists := sourceByName[key]; exists {
+			if prior.name != name {
+				return fmt.Errorf("skill names %q and %q collide on case-insensitive filesystems", prior.name, name)
+			}
+			if prior.url != rawURL {
 				return fmt.Errorf("skill %q has conflicting source URLs", name)
 			}
-			sourceByName[name] = rawURL
+		}
+		sourceByName[key] = struct{ name, url string }{name, rawURL}
+		return nil
+	}
+	for _, mapping := range c.Commands {
+		for _, rawURL := range mapping.Skills {
+			if err := addSkill(rawURL); err != nil {
+				return err
+			}
 		}
 	}
 	for _, rawURL := range c.AlwaysOnSkills {
-		name, _ := skills.Name(rawURL)
-		if prior, exists := sourceByName[name]; exists && prior != rawURL {
-			return fmt.Errorf("skill %q has conflicting source URLs", name)
+		if err := addSkill(rawURL); err != nil {
+			return err
 		}
-		sourceByName[name] = rawURL
 	}
 	if c.PollIntervalSeconds == 0 {
 		c.PollIntervalSeconds = 60
@@ -317,18 +327,18 @@ func (c *Config) Validate(configDir string) error {
 }
 
 func validateSkillURLs(urls []string) error {
-	seenURLs := make(map[string]bool, len(urls))
 	seenNames := make(map[string]bool, len(urls))
-	for _, rawURL := range urls {
+	for i, rawURL := range urls {
 		name, err := skills.Name(rawURL)
 		if err != nil {
 			return fmt.Errorf("invalid skill URL %q: %w", rawURL, err)
 		}
-		if seenURLs[rawURL] || seenNames[name] {
+		key := strings.ToLower(name)
+		if seenNames[key] {
 			return fmt.Errorf("duplicate skill %q", name)
 		}
-		seenURLs[rawURL] = true
-		seenNames[name] = true
+		seenNames[key] = true
+		urls[i] = strings.TrimSuffix(rawURL, "/")
 	}
 	return nil
 }

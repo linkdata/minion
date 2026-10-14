@@ -181,13 +181,17 @@ func validateAuditOutput(ctx context.Context, outputDir, skill, repo, target, he
 			return "", fmt.Errorf("copy audit %s for validation: %w", name, err)
 		}
 	}
+	permissionFlag, err := auditNodePermissionFlag(ctx, validationDir)
+	if err != nil {
+		return "", err
+	}
 	for _, validator := range []struct{ script, artifact string }{
 		{"validate-findings.cjs", "findings.json"},
 		{"validate-coverage-ledger.cjs", "coverage-ledger.json"},
 	} {
 		script := filepath.Join(filepath.Dir(skill), validator.script)
 		// #nosec G204 -- the installed skill path and validation directory are checked paths; arguments bypass a shell.
-		cmd := exec.CommandContext(ctx, "node", "--experimental-permission",
+		cmd := exec.CommandContext(ctx, "node", permissionFlag,
 			"--allow-fs-read="+filepath.Dir(skill), "--allow-fs-read="+validationDir,
 			script, filepath.Join(validationDir, validator.artifact))
 		cmd.Dir = validationDir
@@ -260,6 +264,23 @@ func validateAuditOutput(ctx context.Context, outputDir, skill, repo, target, he
 		}
 	}
 	return string(reportBytes), nil
+}
+
+func auditNodePermissionFlag(ctx context.Context, dir string) (string, error) {
+	// Prefer the stable flag; Node 20 requires the experimental spelling.
+	for _, flag := range []string{"--permission", "--experimental-permission"} {
+		// #nosec G204 -- the flags and probe program are fixed strings, passed without a shell.
+		cmd := exec.CommandContext(ctx, "node", flag, "-e", `if (!process.permission || process.permission.has('fs.read', '/etc/passwd')) process.exit(1)`)
+		cmd.Dir = dir
+		cmd.Env = []string{"HOME=" + dir, "PATH=/usr/bin:/bin"}
+		if err := cmd.Run(); err == nil {
+			return flag, nil
+		}
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+	}
+	return "", errors.New("node permission model is unavailable")
 }
 
 func readAuditArtifact(path string, limit int64, allowEmpty bool) (data []byte, err error) {
