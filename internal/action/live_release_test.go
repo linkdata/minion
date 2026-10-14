@@ -27,6 +27,7 @@ func TestLiveReleaseRefusesUnprotectedTags(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	fixture := liveActionSetup(t, ctx)
+	installActionTestSkills(t, testReleaseSkillURL)
 	if fixture.cfg.IssueNumber <= 0 {
 		t.Fatal("live release test requires an issue_number")
 	}
@@ -71,7 +72,7 @@ func TestLiveReleaseRefusesUnprotectedTags(t *testing.T) {
 			Author:  fixture.ownerUser,
 			HTMLURL: issue.HTMLURL,
 		},
-		Command: command.Command{Action: command.Release, Args: tag},
+		Command: command.Command{Name: "release", Action: command.Release, Args: tag},
 	}
 	t.Cleanup(func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), time.Minute)
@@ -82,6 +83,7 @@ func TestLiveReleaseRefusesUnprotectedTags(t *testing.T) {
 	codexCalls := 0
 	executor := &Executor{
 		GitHub: fixture.bot, BotLogin: fixture.cfg.BotLogin, Store: store, WorkRoot: t.TempDir(),
+		Commands: map[string]config.CommandMapping{"release": {Action: "release", Skills: []string{testReleaseSkillURL}}},
 		RunCodex: func(context.Context, string, string, bool, string) (codexcli.Result, error) {
 			codexCalls++
 			return codexcli.Result{}, nil

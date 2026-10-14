@@ -15,6 +15,7 @@ import (
 
 	"github.com/linkdata/minion/internal/cleanup"
 	"github.com/linkdata/minion/internal/config"
+	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/usage"
 )
 
@@ -113,10 +114,39 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 		}
 		filesystemRules = append(filesystemRules, fmt.Sprintf(`%s="write"`, strconv.Quote(outputDir)))
 	}
+	skillPaths := make([]string, 0, len(settings.Skills))
+	var embeddedDir string
 	for _, skill := range settings.Skills {
+		if content, builtin := skills.BuiltinContent(skill); builtin {
+			name, err := skills.Name(skill)
+			if err != nil {
+				return result, fmt.Errorf("codex exec: resolve embedded skill: %w", err)
+			}
+			if embeddedDir == "" {
+				embeddedDir, err = os.MkdirTemp(filepath.Dir(workspace), ".minion-skills-")
+				if err != nil {
+					return result, fmt.Errorf("codex exec: create embedded skill root: %w", err)
+				}
+				defer func() {
+					if err := cleanup.RemoveAll(embeddedDir); err != nil {
+						result.Answer = ""
+						runError = errors.Join(runError, fmt.Errorf("codex exec: remove embedded skill root: %w", err))
+					}
+				}()
+			}
+			skillDir := filepath.Join(embeddedDir, name)
+			if err := os.MkdirAll(skillDir, 0o700); err != nil {
+				return result, fmt.Errorf("codex exec: create embedded skill directory: %w", err)
+			}
+			skill = filepath.Join(skillDir, "SKILL.md")
+			if err := os.WriteFile(skill, content, 0o600); err != nil {
+				return result, fmt.Errorf("codex exec: write embedded skill: %w", err)
+			}
+		}
 		if !filepath.IsAbs(skill) || filepath.Base(skill) != "SKILL.md" {
 			return result, fmt.Errorf("codex skill %q must be an absolute SKILL.md path", skill)
 		}
+		skillPaths = append(skillPaths, skill)
 		filesystemRules = append(filesystemRules, fmt.Sprintf(`%s="read"`, strconv.Quote(filepath.Dir(skill))))
 	}
 	filesystemRule := "permissions.minion.filesystem={" + strings.Join(filesystemRules, ",") + "}"
@@ -131,7 +161,8 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	} {
 		args = append(args, "--disable", feature)
 	}
-	args = append(args,
+	args = append(
+		args,
 		"-c", "approval_policy=never",
 		"-c", `web_search="disabled"`,
 		"-c", "shell_environment_policy.ignore_default_excludes=false",
@@ -147,10 +178,10 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	if settings.ReasoningEffort != "" {
 		args = append(args, "-c", "model_reasoning_effort="+strconv.Quote(settings.ReasoningEffort))
 	}
-	if len(settings.Skills) != 0 {
+	if len(skillPaths) != 0 {
 		var instructions strings.Builder
 		instructions.WriteString("Use these configured skills for this task. Read each SKILL.md before work and follow its instructions:\n")
-		for _, skill := range settings.Skills {
+		for _, skill := range skillPaths {
 			fmt.Fprintf(&instructions, "- %q\n", skill)
 		}
 		prompt = instructions.String() + "\n" + prompt
@@ -158,6 +189,7 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	args = append(args, "--", "-")
 	runCtx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
+	// #nosec G204 -- the executable is resolved from the operator's PATH, and arguments are passed without a shell.
 	cmd := exec.CommandContext(runCtx, binary, args...)
 	cmd.Dir = workspace
 	cmd.Env = childEnvironment(os.Environ(), runtimeDir, cacheDir)

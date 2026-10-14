@@ -28,12 +28,14 @@ func TestLiveReviewAction(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	fixture := liveActionSetup(t, ctx)
+	installActionTestSkills(t, testReviewSkillURL)
 	t.Setenv("GH_TOKEN", fixture.botToken)
 	pull := liveReviewAuditPull(t, ctx, fixture.owner, fixture.cfg)
 	job := liveReviewAuditJob(t, fixture.cfg, fixture.repo, fixture.ownerUser, command.Review, "PullRequest", pull.Number, pull.HTMLURL)
 	var calls int
 	executor := &Executor{
 		GitHub: fixture.bot, BotLogin: fixture.cfg.BotLogin, WorkRoot: t.TempDir(),
+		Commands: map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{testReviewSkillURL}}},
 		RunCodex: func(ctx context.Context, dir, prompt string, writable bool, outputDir string) (codexcli.Result, error) {
 			calls++
 			if writable || outputDir != "" || !strings.Contains(prompt, pull.Head.SHA) {
@@ -61,7 +63,7 @@ func TestLiveReviewAction(t *testing.T) {
 	t.Logf("submitted review remains: %s", review.HTMLURL)
 }
 
-func TestLiveAuditAction(t *testing.T) {
+func TestLiveSecurityAuditAction(t *testing.T) {
 	if os.Getenv("MINION_LIVE_WRITE") != "1" {
 		t.Skip("set MINION_LIVE_WRITE=1 to post temporary live audit replies")
 	}
@@ -71,6 +73,7 @@ func TestLiveAuditAction(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	fixture := liveActionSetup(t, ctx)
+	installActionTestSkills(t, testAuditSkillURL)
 	t.Setenv("GH_TOKEN", fixture.botToken)
 	if fixture.cfg.IssueNumber <= 0 {
 		t.Fatal("live audit requires an issue_number fixture")
@@ -92,16 +95,13 @@ func TestLiveAuditAction(t *testing.T) {
 		{"pull request", "PullRequest", pull.HTMLURL, pull.Head.SHA, pull.Number},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			job := liveReviewAuditJob(t, fixture.cfg, fixture.repo, fixture.ownerUser, command.Audit, test.subject, test.number, test.url)
+			job := liveReviewAuditJob(t, fixture.cfg, fixture.repo, fixture.ownerUser, command.SecurityAudit, test.subject, test.number, test.url)
 			t.Cleanup(func() {
 				cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), time.Minute)
 				defer cleanupCancel()
 				liveActionReplyCleanup(t, cleanupCtx, fixture.owner, fixture.ownerToken, fixture.cfg, job)
 			})
-			skillDir := filepath.Join(t.TempDir(), "security-audit")
-			if err := os.Mkdir(skillDir, 0o700); err != nil {
-				t.Fatal(err)
-			}
+			skillDir := filepath.Join(os.Getenv("HOME"), ".agents", "skills", "security-audit")
 			skill := filepath.Join(skillDir, "SKILL.md")
 			if err := os.WriteFile(skill, []byte("# Live audit test validator fixture\n"), 0o600); err != nil {
 				t.Fatal(err)
@@ -115,7 +115,8 @@ func TestLiveAuditAction(t *testing.T) {
 			var calls int
 			executor := &Executor{
 				GitHub: fixture.bot, BotLogin: fixture.cfg.BotLogin, WorkRoot: t.TempDir(),
-				Codex: config.CodexConfig{Skills: []string{skill}},
+				Codex:    config.CodexConfig{Skills: []string{skill}},
+				Commands: map[string]config.CommandMapping{"security-audit": {Action: "security-audit", Skills: []string{testAuditSkillURL}}},
 				RunCodex: func(ctx context.Context, dir, prompt string, writable bool, outputDir string) (codexcli.Result, error) {
 					calls++
 					if writable || outputDir == "" || strings.HasPrefix(outputDir, dir+string(os.PathSeparator)) || !strings.Contains(prompt, test.head) {
@@ -170,7 +171,7 @@ func liveReviewAuditJob(t *testing.T, cfg liveFixConfig, repo github.Repository,
 		Repository:  config.Repository{Name: liveFixRepository, ID: repo.ID, OwnerID: repo.Owner.ID, Actions: []string{string(action)}},
 		SubjectType: subject, Number: number, ID: hex.EncodeToString(randomID[:]),
 		Source:  github.Item{Body: "@" + cfg.BotLogin + " " + string(action), Author: actor, HTMLURL: url, UpdatedAt: time.Now()},
-		Command: command.Command{Action: action},
+		Command: command.Command{Name: string(action), Action: action},
 	}
 }
 

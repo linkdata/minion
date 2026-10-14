@@ -1,5 +1,27 @@
 {
   "bot_login": "example-bot",
+  "commands": {
+    "review": {
+      "action": "review",
+      "skills": ["https://github.com/DietrichGebert/ponytail/tree/main/skills/ponytail-review"]
+    },
+    "fix": {
+      "action": "fix",
+      "skills": ["https://github.com/DietrichGebert/ponytail/tree/main/skills/ponytail"]
+    },
+    "audit": {
+      "action": "comment",
+      "skills": ["https://github.com/DietrichGebert/ponytail/tree/main/skills/ponytail-audit"]
+    },
+    "security-audit": {
+      "action": "security-audit",
+      "skills": ["https://github.com/cloudflare/security-audit-skill/tree/main/skills/security-audit"]
+    }
+  },
+  "always_on_skills": [
+    "builtin://anti-prompt-injection",
+    "https://github.com/JuliusBrussee/caveman/tree/main/skills/caveman"
+  ],
   "poll_interval_seconds": 60,
   "job_timeout_minutes": 30,
   "state_path": "var/state.json",
@@ -11,7 +33,7 @@
       "name": "example-owner/example-repo",
       "id": 123456,
       "owner_id": 78910,
-      "actions": ["review", "fix", "release"]
+      "actions": ["review", "fix", "audit", "security-audit"]
     }
   ]
 }

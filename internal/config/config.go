@@ -8,16 +8,43 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
+	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/workroot"
 )
 
 var (
 	repoNamePattern  = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
 	ownerNamePattern = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$`)
+	commandPattern   = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
 )
+
+const (
+	defaultReviewSkill        = "https://github.com/DietrichGebert/ponytail/tree/main/skills/ponytail-review"
+	defaultFixSkill           = "https://github.com/DietrichGebert/ponytail/tree/main/skills/ponytail"
+	defaultAuditSkill         = "https://github.com/DietrichGebert/ponytail/tree/main/skills/ponytail-audit"
+	defaultSecurityAuditSkill = "https://github.com/cloudflare/security-audit-skill/tree/main/skills/security-audit"
+	defaultAntiInjectionSkill = skills.BuiltinAntiPromptInjection
+	defaultCavemanSkill       = "https://github.com/JuliusBrussee/caveman/tree/main/skills/caveman"
+)
+
+// CommandMapping selects the application action and required AI skills for a command.
+type CommandMapping struct {
+	Action string   `json:"action"`
+	Skills []string `json:"skills"`
+}
+
+func defaultCommands() map[string]CommandMapping {
+	return map[string]CommandMapping{
+		"review":         {Action: "review", Skills: []string{defaultReviewSkill}},
+		"fix":            {Action: "fix", Skills: []string{defaultFixSkill}},
+		"audit":          {Action: "comment", Skills: []string{defaultAuditSkill}},
+		"security-audit": {Action: "security-audit", Skills: []string{defaultSecurityAuditSkill}},
+	}
+}
 
 // Repository is an explicit boundary for both observation and actions.
 type Repository struct {
@@ -29,12 +56,15 @@ type Repository struct {
 	AllowedActorIDs map[string]int64 `json:"allowed_actor_ids,omitempty"`
 }
 
+// CodexConfig contains model settings and skill paths selected for one job.
 type CodexConfig struct {
-	Model           string   `json:"model,omitempty"`
-	ReasoningEffort string   `json:"reasoning_effort,omitempty"`
-	Skills          []string `json:"skills,omitempty"`
+	Model           string `json:"model,omitempty"`
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	// Skills contains installed paths selected by the application, not config JSON.
+	Skills []string `json:"-"`
 }
 
+// SecurityAuditSkill returns the installed security-audit skill path for this job.
 func (c CodexConfig) SecurityAuditSkill() string {
 	for _, path := range c.Skills {
 		if filepath.Base(filepath.Dir(path)) == "security-audit" {
@@ -44,9 +74,14 @@ func (c CodexConfig) SecurityAuditSkill() string {
 	return ""
 }
 
+// Config defines monitored repositories and the commands they accept.
 type Config struct {
-	BotLogin            string           `json:"bot_login"`
-	Codex               CodexConfig      `json:"codex,omitempty"`
+	BotLogin string      `json:"bot_login"`
+	Codex    CodexConfig `json:"codex,omitempty"`
+	// Nil Commands selects defaults; an empty map disables all commands.
+	Commands map[string]CommandMapping `json:"commands"`
+	// Nil AlwaysOnSkills selects anti-prompt-injection and caveman; an empty list disables always-on skills.
+	AlwaysOnSkills      []string         `json:"always_on_skills"`
 	PollIntervalSeconds int              `json:"poll_interval_seconds,omitempty"`
 	JobTimeoutMinutes   int              `json:"job_timeout_minutes,omitempty"`
 	StatePath           string           `json:"state_path,omitempty"`
@@ -112,37 +147,59 @@ func (c *Config) Validate(configDir string) error {
 	if strings.ContainsAny(c.Codex.Model, " \t\r\n") || strings.ContainsAny(c.Codex.ReasoningEffort, " \t\r\n") {
 		return fmt.Errorf("codex model and reasoning_effort must not contain whitespace")
 	}
-	seenSkills := map[string]bool{}
-	for i, skill := range c.Codex.Skills {
-		if filepath.Base(skill) != "SKILL.md" {
-			return fmt.Errorf("codex skill %q must name a SKILL.md file", skill)
+	if c.Commands == nil {
+		c.Commands = defaultCommands()
+	}
+	for name, mapping := range c.Commands {
+		if !commandPattern.MatchString(name) {
+			return fmt.Errorf("invalid command name %q", name)
 		}
-		if !filepath.IsAbs(skill) {
-			skill = filepath.Join(configDir, skill)
+		switch mapping.Action {
+		case "review", "fix", "comment", "security-audit", "release":
+		default:
+			return fmt.Errorf("command %q has unsupported action %q", name, mapping.Action)
 		}
-		resolved, err := filepath.EvalSymlinks(skill)
-		if err != nil {
-			return fmt.Errorf("codex skill %q: %w", skill, err)
+		if len(mapping.Skills) == 0 {
+			return fmt.Errorf("command %q must have at least one skill", name)
 		}
-		info, err := os.Stat(resolved)
-		if err != nil || !info.Mode().IsRegular() {
-			return fmt.Errorf("codex skill %q must be a regular file", skill)
+		if err := validateSkillURLs(mapping.Skills); err != nil {
+			return fmt.Errorf("command %q: %w", name, err)
 		}
-		content, err := os.ReadFile(resolved)
-		if err != nil {
-			return fmt.Errorf("read codex skill %q: %w", skill, err)
+		if mapping.Action == "security-audit" {
+			found := false
+			for _, rawURL := range mapping.Skills {
+				skillName, _ := skills.Name(rawURL)
+				if skillName == "security-audit" {
+					found = true
+				}
+			}
+			if !found {
+				return fmt.Errorf("command %q requires a security-audit skill", name)
+			}
 		}
-		if strings.TrimSpace(string(content)) == "" {
-			return fmt.Errorf("codex skill %q is empty", skill)
+	}
+	if c.AlwaysOnSkills == nil {
+		c.AlwaysOnSkills = []string{defaultAntiInjectionSkill, defaultCavemanSkill}
+	}
+	if err := validateSkillURLs(c.AlwaysOnSkills); err != nil {
+		return fmt.Errorf("always_on_skills: %w", err)
+	}
+	sourceByName := make(map[string]string)
+	for _, mapping := range c.Commands {
+		for _, rawURL := range mapping.Skills {
+			name, _ := skills.Name(rawURL)
+			if prior, exists := sourceByName[name]; exists && prior != rawURL {
+				return fmt.Errorf("skill %q has conflicting source URLs", name)
+			}
+			sourceByName[name] = rawURL
 		}
-		if filepath.Base(resolved) != "SKILL.md" {
-			return fmt.Errorf("codex skill %q must resolve to a SKILL.md file", skill)
+	}
+	for _, rawURL := range c.AlwaysOnSkills {
+		name, _ := skills.Name(rawURL)
+		if prior, exists := sourceByName[name]; exists && prior != rawURL {
+			return fmt.Errorf("skill %q has conflicting source URLs", name)
 		}
-		if seenSkills[resolved] {
-			return fmt.Errorf("duplicate codex skill %q", skill)
-		}
-		seenSkills[resolved] = true
-		c.Codex.Skills[i] = resolved
+		sourceByName[name] = rawURL
 	}
 	if c.PollIntervalSeconds == 0 {
 		c.PollIntervalSeconds = 60
@@ -242,16 +299,13 @@ func (c *Config) Validate(configDir string) error {
 		if len(repo.AllowedActorIDs) != len(repo.AllowedActors) {
 			return fmt.Errorf("%s: allowed_actor_ids must match allowed_actors exactly", repo.Name)
 		}
-		if len(repo.Actions) == 0 {
+		if len(repo.Actions) == 0 && len(c.Commands) != 0 {
 			return fmt.Errorf("%s: actions must not be empty", repo.Name)
 		}
 		actions := map[string]bool{}
 		for _, action := range repo.Actions {
-			if action != "review" && action != "audit" && action != "fix" && action != "release" {
+			if _, ok := c.Commands[action]; !ok {
 				return fmt.Errorf("%s: unsupported action %q", repo.Name, action)
-			}
-			if action == "audit" && c.Codex.SecurityAuditSkill() == "" {
-				return fmt.Errorf("%s: audit requires a security-audit/SKILL.md entry in codex.skills", repo.Name)
 			}
 			if actions[action] {
 				return fmt.Errorf("%s: duplicate action %q", repo.Name, action)
@@ -260,6 +314,48 @@ func (c *Config) Validate(configDir string) error {
 		}
 	}
 	return nil
+}
+
+func validateSkillURLs(urls []string) error {
+	seenURLs := make(map[string]bool, len(urls))
+	seenNames := make(map[string]bool, len(urls))
+	for _, rawURL := range urls {
+		name, err := skills.Name(rawURL)
+		if err != nil {
+			return fmt.Errorf("invalid skill URL %q: %w", rawURL, err)
+		}
+		if seenURLs[rawURL] || seenNames[name] {
+			return fmt.Errorf("duplicate skill %q", name)
+		}
+		seenURLs[rawURL] = true
+		seenNames[name] = true
+	}
+	return nil
+}
+
+// CommandNames returns configured command names in stable order.
+func (c Config) CommandNames() []string {
+	names := make([]string, 0, len(c.Commands))
+	for name := range c.Commands {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	return names
+}
+
+// CommandInstalled reports whether every skill mapped to name is installed for Codex.
+func (c Config) CommandInstalled(name string) (bool, error) {
+	mapping, ok := c.Commands[name]
+	if !ok || len(mapping.Skills) == 0 {
+		return false, nil
+	}
+	for _, rawURL := range mapping.Skills {
+		_, installed, err := skills.InstalledPath(rawURL)
+		if err != nil || !installed {
+			return false, err
+		}
+	}
+	return true, nil
 }
 
 func normalizeIDPins(pins map[string]int64) (map[string]int64, error) {

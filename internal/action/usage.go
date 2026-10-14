@@ -19,9 +19,13 @@ func (e *Executor) trackUsage(job monitor.Job) (*Executor, func(error) error, er
 	if _, err := rand.Read(id[:]); err != nil {
 		return nil, nil, fmt.Errorf("create usage ID: %w", err)
 	}
+	name := job.Command.Name
+	if name == "" {
+		name = string(job.Command.Action)
+	}
 	record := usage.Record{
 		ID: hex.EncodeToString(id[:]), JobID: job.ID, Repo: job.Repository.Name,
-		User: job.Source.Author.Login, Action: string(job.Command.Action), Number: job.Number,
+		User: job.Source.Author.Login, Action: name, Number: job.Number,
 		SourceURL: sourceURL(job), Model: e.Codex.Model, Effort: e.Codex.ReasoningEffort,
 		StartedAt: time.Now().UTC(), Status: "running", UsageComplete: true,
 	}

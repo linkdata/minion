@@ -15,7 +15,7 @@ func TestAddRepositoryPreservesSettingsAndExistingRestrictions(t *testing.T) {
 	if err := os.WriteFile(path, data, 0640); err != nil {
 		t.Fatal(err)
 	}
-	repo := Repository{Name: "Example-Owner/Second-Repo", ID: 3, OwnerID: 2, Actions: []string{"review", "fix", "release"}}
+	repo := Repository{Name: "Example-Owner/Second-Repo", ID: 3, OwnerID: 2, Actions: []string{"review", "fix", "audit"}}
 	added, err := AddRepository(path, repo)
 	if err != nil || added.Name != "example-owner/second-repo" {
 		t.Fatalf("add repository: %+v, %v", added, err)

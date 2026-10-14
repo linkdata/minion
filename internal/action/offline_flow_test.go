@@ -171,11 +171,13 @@ func TestOfflineReviewPollRecoversAfterPublication(t *testing.T) {
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}
+	installActionTestSkills(t, testReviewSkillURL)
+	commands := map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{testReviewSkillURL}}}
 	run := func(at time.Time, store *state.Store) {
 		t.Helper()
 		client := github.New("offline-token")
 		client.BaseURL, client.HTTPClient = server.URL, server.Client()
-		executor := &Executor{GitHub: client, BotLogin: "linkdataminion", Store: store, WorkRoot: t.TempDir(),
+		executor := &Executor{GitHub: client, BotLogin: "linkdataminion", Store: store, WorkRoot: t.TempDir(), Commands: commands,
 			RunCodex: func(_ context.Context, dir, prompt string, writable bool, outputDir string) (codexcli.Result, error) {
 				if _, err := os.Stat(dir); err != nil || writable || outputDir != "" || !strings.Contains(prompt, head) {
 					return codexcli.Result{}, fmt.Errorf("unexpected Codex invocation: dir=%q writable=%t output=%q stat=%v", dir, writable, outputDir, err)
@@ -184,7 +186,7 @@ func TestOfflineReviewPollRecoversAfterPublication(t *testing.T) {
 				return codexcli.Result{Answer: "No findings."}, nil
 			},
 		}
-		m := monitor.Monitor{Config: config.Config{BotLogin: "linkdataminion", PollIntervalSeconds: 60,
+		m := monitor.Monitor{Config: config.Config{BotLogin: "linkdataminion", PollIntervalSeconds: 60, Commands: commands,
 			Repositories: []config.Repository{{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"review"}, AllowedActors: []string{"writer"}, AllowedActorIDs: map[string]int64{"writer": 7}}}},
 			GitHub: client, Executor: executor, Now: func() time.Time { return at }}
 		if _, err := m.RunOnce(context.Background(), store); err != nil {

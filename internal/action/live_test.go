@@ -54,6 +54,7 @@ func TestLiveFixPublishesBranch(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	fixture := liveActionSetup(t, ctx)
+	installActionTestSkills(t, testFixSkillURL)
 	cfg, owner, bot, repo := fixture.cfg, fixture.owner, fixture.bot, fixture.repo
 	if cfg.IssueNumber <= 0 {
 		t.Fatal("live fix test requires an issue_number")
@@ -95,13 +96,14 @@ func TestLiveFixPublishesBranch(t *testing.T) {
 			UpdatedAt: time.Now(),
 			HTMLURL:   issue.HTMLURL,
 		},
-		Command: command.Command{Action: command.Fix},
+		Command: command.Command{Name: "fix", Action: command.Fix},
 	}
 	t.Cleanup(func() { liveFixCleanup(t, owner, bot, fixture.ownerToken, fixture.botToken, cfg, job, branch, store) })
 	t.Setenv("GH_TOKEN", fixture.botToken)
 	codexCalls := 0
 	executor := &Executor{
 		GitHub: bot, BotLogin: cfg.BotLogin, Store: store, WorkRoot: t.TempDir(),
+		Commands: map[string]config.CommandMapping{"fix": {Action: "fix", Skills: []string{testFixSkillURL}}},
 		RunCodex: func(_ context.Context, dir, _ string, writable bool, outputDir string) (codexcli.Result, error) {
 			codexCalls++
 			if !writable || outputDir != "" {

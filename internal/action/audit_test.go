@@ -21,7 +21,7 @@ import (
 	"github.com/linkdata/minion/internal/usage"
 )
 
-func TestAuditIssueAndPullRequest(t *testing.T) {
+func TestSecurityAuditIssueAndPullRequest(t *testing.T) {
 	if _, err := exec.LookPath("node"); err != nil {
 		t.Skip("audit validators require node")
 	}
@@ -53,10 +53,10 @@ func TestAuditIssueAndPullRequest(t *testing.T) {
 				apiHead = strings.Repeat("f", 40)
 			}
 			job := monitor.Job{
-				Repository:  config.Repository{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"audit"}},
+				Repository:  config.Repository{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"security-audit"}},
 				SubjectType: tt.subject, Number: 7, ID: strings.Repeat("a", 64),
-				Source:  github.Item{Author: github.User{Login: "writer"}, Body: "@linkdataminion audit"},
-				Command: command.Command{Action: command.Audit},
+				Source:  github.Item{Author: github.User{Login: "writer"}, Body: "@linkdataminion security-audit"},
+				Command: command.Command{Name: "security-audit", Action: command.SecurityAudit},
 			}
 			var comments []github.Comment
 			usageStore := &usage.Store{Dir: filepath.Join(t.TempDir(), "usage")}
@@ -116,10 +116,8 @@ func TestAuditIssueAndPullRequest(t *testing.T) {
 			defer server.Close()
 			client := github.New("test-token")
 			client.BaseURL, client.HTTPClient = server.URL, server.Client()
-			skillDir := filepath.Join(t.TempDir(), "security-audit")
-			if err := os.Mkdir(skillDir, 0700); err != nil {
-				t.Fatal(err)
-			}
+			installActionTestSkills(t, testAuditSkillURL)
+			skillDir := filepath.Join(os.Getenv("HOME"), ".agents", "skills", "security-audit")
 			skill := filepath.Join(skillDir, "SKILL.md")
 			for _, name := range []string{"validate-findings.cjs", "validate-coverage-ledger.cjs"} {
 				if err := os.WriteFile(filepath.Join(skillDir, name), []byte(`const fs = require('fs'); if (!Array.isArray(JSON.parse(fs.readFileSync(process.argv[2], 'utf8')))) process.exit(1);`), 0600); err != nil {
@@ -130,7 +128,8 @@ func TestAuditIssueAndPullRequest(t *testing.T) {
 			var sourceDir, reportsDir string
 			e := &Executor{
 				GitHub: client, BotLogin: "linkdataminion", WorkRoot: t.TempDir(), Usage: usageStore,
-				Codex: config.CodexConfig{Model: "test-model", ReasoningEffort: "high", Skills: []string{skill}},
+				Codex:    config.CodexConfig{Model: "test-model", ReasoningEffort: "high", Skills: []string{skill}},
+				Commands: map[string]config.CommandMapping{"security-audit": {Action: "security-audit", Skills: []string{testAuditSkillURL}}},
 				RunCodex: func(ctx context.Context, dir, prompt string, writable bool, outputDir string) (codexcli.Result, error) {
 					calls++
 					records, err := usage.ReadAll(usageStore.Dir)
@@ -145,13 +144,13 @@ func TestAuditIssueAndPullRequest(t *testing.T) {
 					if writable || outputDir == "" || strings.HasPrefix(outputDir, dir+string(os.PathSeparator)) {
 						t.Fatalf("audit source writable or reports not separate: writable=%v output=%q source=%q", writable, outputDir, dir)
 					}
-					for _, want := range []string{skill, expected, outputDir, "full six-phase workflow", "independent agents", "needs_validation", "Check authorization."} {
+					for _, want := range []string{skill, expected, outputDir, "full-audit mode", "standard profile", "needs_validation", "Check authorization."} {
 						if !strings.Contains(prompt, want) {
 							t.Fatalf("audit prompt missing %q", want)
 						}
 					}
 					if !strings.Contains(prompt, fmt.Sprintf("Thread title: %q", title)) || !strings.Contains(prompt, fmt.Sprintf("Thread description: %q", description)) ||
-						strings.Contains(prompt, "\nRequest comment") || strings.Contains(prompt, "\u2028") || !strings.Contains(prompt, "untrusted task data") {
+						strings.Contains(prompt, "\nRequest comment") || strings.Contains(prompt, "\u2028") {
 						t.Errorf("audit prompt lacks an unspoofed data boundary: %q", prompt)
 					}
 					if strings.Contains(prompt, job.Source.Body) {
@@ -255,7 +254,7 @@ func TestAuditIssueAndPullRequest(t *testing.T) {
 				if record.Status != wantStatus || record.FinishedAt == nil || record.CodexCalls != wantCalls || record.Tokens.Total() != wantTokens || record.UsageComplete == tt.failCodex {
 					t.Fatalf("unexpected final usage: %+v", record)
 				}
-				if record.JobID != job.ID || record.Repo != "o/r" || record.User != "writer" || record.Action != "audit" || record.Model != "test-model" || record.Effort != "high" {
+				if record.JobID != job.ID || record.Repo != "o/r" || record.User != "writer" || record.Action != "security-audit" || record.Model != "test-model" || record.Effort != "high" {
 					t.Fatalf("missing usage attribution: %+v", record)
 				}
 			}
@@ -274,13 +273,20 @@ func TestValidateAuditOutput(t *testing.T) {
 	if _, err := exec.LookPath("node"); err != nil {
 		t.Skip("audit validators require node")
 	}
+	t.Setenv("GH_TOKEN", "validator-must-not-see-this")
 	root := t.TempDir()
 	skillDir := filepath.Join(t.TempDir(), "security-audit")
 	if err := os.Mkdir(skillDir, 0700); err != nil {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"validate-findings.cjs", "validate-coverage-ledger.cjs"} {
-		if err := os.WriteFile(filepath.Join(skillDir, name), []byte(`JSON.parse(require('fs').readFileSync(process.argv[2], 'utf8'));`), 0600); err != nil {
+		if err := os.WriteFile(filepath.Join(skillDir, name), []byte(`
+if (process.env.GH_TOKEN) process.exit(10);
+const fs = require('fs');
+try { fs.readFileSync('/etc/passwd'); process.exit(11); }
+catch (error) { if (error.code !== 'ERR_ACCESS_DENIED') throw error; }
+JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+`), 0600); err != nil {
 			t.Fatal(err)
 		}
 	}
