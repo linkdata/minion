@@ -44,16 +44,16 @@ func Parse(markdown string) (Command, error) {
 
 // ParseForLogin finds exactly one directive for login.
 //
-// It accepts these full-line forms (ASCII case-insensitively):
+// It accepts these standalone forms (ASCII case-insensitively):
 //
 //	@<login> review
 //	@<login> audit
-//	@<login> fix [text]
+//	@<login> fix
 //	@<login> release <tag>
 //
-// The directive must be the first non-blank line. This makes it unambiguous
-// to the requester even when later Markdown is quoted, fenced, or hidden.
-// Another directive-shaped line anywhere in the body fails closed.
+// The directive must be the first nonblank line. Later text is not a command
+// argument; callers may use it as task context after authorization. A second
+// directive returns [ErrAmbiguous].
 func ParseForLogin(markdown, login string) (Command, error) {
 	if !validLogin(login) {
 		return Command{}, ErrInvalidLogin
@@ -99,7 +99,7 @@ func parseLine(line, handle string) (Command, bool) {
 		action = Review
 	case equalASCIIFold(verb, string(Audit)) && args == "":
 		action = Audit
-	case equalASCIIFold(verb, string(Fix)):
+	case equalASCIIFold(verb, string(Fix)) && args == "":
 		action = Fix
 	case equalASCIIFold(verb, string(Release)) && args != "" && strings.IndexFunc(args, unicode.IsSpace) < 0:
 		action = Release

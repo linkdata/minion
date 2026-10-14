@@ -13,14 +13,13 @@ func TestParseCommands(t *testing.T) {
 		action Action
 		args   string
 	}{
-		{"review", "@linkdataminion review\nPlease take a look.", Review, ""},
+		{"review", "@linkdataminion review", Review, ""},
 		{"audit", "@linkdataminion audit", Audit, ""},
 		{"audit case", "  @LinkDataMinion\tAUDIT  ", Audit, ""},
-		{"fix with text", "  @LinkDataMinion\tFIX\t  update the docs  \t", Fix, "update the docs"},
-		{"fix without text", "@linkdataminion fix", Fix, ""},
+		{"fix", "  @LinkDataMinion\tFIX  \t", Fix, ""},
 		{"release", "@linkdataminion release v1.2.3", Release, "v1.2.3"},
-		{"CRLF", "\r\n@linkdataminion fix now\r\nDetails follow.", Fix, "now"},
-		{"leading blanks", " \t\n\n@linkdataminion release v2\nDetails follow.", Release, "v2"},
+		{"CRLF", "\r\n@linkdataminion fix\r\n", Fix, ""},
+		{"surrounding blanks", " \t\n\n@linkdataminion release v2\n\t", Release, "v2"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -55,6 +54,7 @@ func TestParseIgnoresNonCommands(t *testing.T) {
 		{"unknown verb", "@linkdataminion deploy"},
 		{"review argument", "@linkdataminion review now"},
 		{"audit argument", "@linkdataminion audit now"},
+		{"fix argument", "@linkdataminion fix update docs"},
 		{"quoted audit", "> @linkdataminion audit"},
 		{"fenced audit", "```\n@linkdataminion audit\n```"},
 		{"missing release tag", "@linkdataminion release"},
@@ -89,12 +89,34 @@ func TestParseIgnoresNonCommands(t *testing.T) {
 	}
 }
 
+func TestParseAcceptsTrailingNotes(t *testing.T) {
+	for _, tt := range []struct {
+		command string
+		notes   string
+	}{
+		{"@linkdataminion review", "Please check the locking change."},
+		{"@linkdataminion audit", "Check authorization boundaries."},
+		{"@linkdataminion fix", "The test fails on Windows."},
+		{"@linkdataminion release v1.2.3", "Mention the migration steps."},
+		{"@linkdataminion review", "@otherbot review\n```\nExample text\n```"},
+	} {
+		plain, err := Parse(tt.command)
+		if err != nil {
+			t.Fatal(err)
+		}
+		withNotes, err := Parse(tt.command + "\n\n" + tt.notes)
+		if err != nil || withNotes != plain {
+			t.Fatalf("Parse(%q) = (%#v, %v), want %#v", tt.command+"\n\n"+tt.notes, withNotes, err, plain)
+		}
+	}
+}
+
 func TestParseRejectsMultipleCommands(t *testing.T) {
 	for _, body := range []string{
-		"@linkdataminion review\n@linkdataminion fix update tests",
+		"@linkdataminion review\n@linkdataminion fix",
 		"@linkdataminion review\n@linkdataminion review",
 		"@linkdataminion audit\n@linkdataminion fix",
-		"@linkdataminion review\n```\n@linkdataminion fix hidden\n```",
+		"@linkdataminion review\n```\n@linkdataminion fix\n```",
 	} {
 		got, err := Parse(body)
 		if !errors.Is(err, ErrAmbiguous) {
@@ -107,15 +129,15 @@ func TestParseRejectsMultipleCommands(t *testing.T) {
 }
 
 func TestCommandKeyIsStableAndSensitiveToArguments(t *testing.T) {
-	a, err := Parse("@LINKDATAMINION\tFIX\t update the docs \t")
+	a, err := Parse("@LINKDATAMINION\tRELEASE\t v1.2.3 \t")
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := Parse("  @linkdataminion fix update the docs")
+	b, err := Parse("  @linkdataminion release v1.2.3")
 	if err != nil {
 		t.Fatal(err)
 	}
-	c, err := Parse("@linkdataminion fix update the tests")
+	c, err := Parse("@linkdataminion release v1.2.4")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,9 +157,9 @@ func TestParseForLogin(t *testing.T) {
 		action Action
 		args   string
 	}{
-		{"custom login", "my-bot", "@MY-BOT fix update docs", Fix, "update docs"},
+		{"custom login", "my-bot", "@MY-BOT fix", Fix, ""},
 		{"bot suffix", "github-actions[bot]", "@GitHub-Actions[Bot] review", Review, ""},
-		{"ignores other bot", "my-bot", "@my-bot release v2\n@linkdataminion review", Release, "v2"},
+		{"ignores other bot", "my-bot", "@my-bot release v2", Release, "v2"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
