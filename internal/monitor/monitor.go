@@ -123,6 +123,10 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 	if err := store.Save(); err != nil {
 		return next, err
 	}
+	commandSets := make(map[string]map[string]command.Action, len(m.Config.Repositories))
+	for _, repo := range m.Config.Repositories {
+		commandSets[repo.Name] = m.availableCommands(repo)
+	}
 
 	type scan struct {
 		notification github.Notification
@@ -235,7 +239,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			if strings.EqualFold(item.Author.Login, m.Config.BotLogin) || item.Author.Login == "" {
 				continue
 			}
-			preliminary, err := command.ParseForLogin(item.Body, m.Config.BotLogin)
+			preliminary, err := command.ParseForLoginCommands(item.Body, m.Config.BotLogin, commandSets[repo.Name])
 			if errors.Is(err, command.ErrNoCommand) {
 				continue
 			}
@@ -259,7 +263,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			if strings.EqualFold(item.Author.Login, m.Config.BotLogin) || item.Author.Login == "" {
 				continue
 			}
-			cmd, err := command.ParseForLogin(item.Body, m.Config.BotLogin)
+			cmd, err := command.ParseForLoginCommands(item.Body, m.Config.BotLogin, commandSets[repo.Name])
 			if errors.Is(err, command.ErrNoCommand) {
 				continue
 			}
@@ -288,7 +292,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				}
 				continue
 			}
-			if !repo.AllowsAction(string(cmd.Action)) || !repo.AllowsActor(item.Author.Login, item.Author.ID) {
+			if !repo.AllowsAction(cmd.Name) || !repo.AllowsActor(item.Author.Login, item.Author.ID) {
 				m.logf("ignore %s from @%s in %s: disabled action or actor", cmd.Action, item.Author.Login, repo.Name)
 				store.Data.Processed[job.ID] = started
 				if err := store.Save(); err != nil {
@@ -392,6 +396,25 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		return next, err
 	}
 	return next, errors.Join(failures...)
+}
+
+func (m *Monitor) availableCommands(repo config.Repository) map[string]command.Action {
+	available := make(map[string]command.Action, len(repo.Actions))
+	for _, name := range repo.Actions {
+		mapping, ok := m.Config.Commands[name]
+		if !ok {
+			continue
+		}
+		installed, err := m.Config.CommandInstalled(name)
+		if err != nil {
+			m.logf("disable %s in %s: skill unavailable: %v", name, repo.Name, err)
+			continue
+		}
+		if installed {
+			available[name] = command.Action(mapping.Action)
+		}
+	}
+	return available
 }
 
 func notificationKey(notification github.Notification) string {
@@ -547,10 +570,7 @@ func (m *Monitor) acceptWhitelistedInvitations(ctx context.Context) error {
 			continue
 		}
 		if !monitored && (invite.Permissions == "write" || invite.Permissions == "maintain" || invite.Permissions == "admin") {
-			actions := []string{"review", "fix", "release"}
-			if m.Config.Codex.SecurityAuditSkill() != "" {
-				actions = append(actions, "audit")
-			}
+			actions := m.Config.CommandNames()
 			// Persist first: an accepted invitation disappears and cannot recover a failed config write.
 			repo, err := config.AddRepository(m.ConfigPath, config.Repository{Name: fullName, ID: invite.Repository.ID, OwnerID: invite.Repository.Owner.ID, Actions: actions})
 			if err != nil {

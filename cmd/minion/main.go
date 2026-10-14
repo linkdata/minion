@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -20,6 +19,7 @@ import (
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/monitor"
+	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/state"
 	"github.com/linkdata/minion/internal/usage"
 	"github.com/linkdata/minion/internal/workroot"
@@ -36,13 +36,38 @@ func run() int {
 	configPath := flag.String("config", "config.local.json", "path to JSON configuration")
 	loop := flag.Bool("loop", false, "poll continuously; default is one cron-friendly pass")
 	check := flag.Bool("check", false, "verify Codex settings, authentication, and repository access, then exit")
+	installSkills := flag.Bool("install-skills", false, "download configured skills for Codex and Claude, then exit")
 	flag.Parse()
 	logger := log.New(os.Stderr, "minion: ", log.LstdFlags|log.LUTC)
+	if flag.NArg() != 0 {
+		logger.Printf("unexpected positional arguments; use flags")
+		return 2
+	}
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		logger.Printf("config: %v", err)
 		return 2
 	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if *installSkills {
+		if *loop || *check {
+			logger.Printf("-install-skills cannot be combined with -loop or -check")
+			return 2
+		}
+		var urls []string
+		for _, mapping := range cfg.Commands {
+			urls = append(urls, mapping.Skills...)
+		}
+		urls = append(urls, cfg.AlwaysOnSkills...)
+		if err := skills.Install(ctx, urls); err != nil {
+			logger.Printf("install skills: %v", err)
+			return 1
+		}
+		logger.Printf("configured skills installed for Codex and Claude")
+		return 0
+	}
+	logCommandSkills(cfg, logger)
 	checkWorkRoot := func() error {
 		return workroot.Check(cfg.WorkRoot, cfg.StatePath, cfg.WorkRootMaxBytes)
 	}
@@ -50,8 +75,6 @@ func run() int {
 		logger.Printf("work root: %v", err)
 		return 1
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	if err := checkCodexCLI(ctx); err != nil {
 		logger.Printf("Codex CLI: %v", err)
 		return 1
@@ -65,7 +88,7 @@ func run() int {
 		logger.Printf("Codex settings: %v", err)
 		return 1
 	}
-	logger.Printf("Codex settings: model=%s reasoning_effort=%s skills=%d", cfg.Codex.Model, cfg.Codex.ReasoningEffort, len(cfg.Codex.Skills))
+	logger.Printf("Codex settings: model=%s reasoning_effort=%s configured_commands=%d configured_always_on_skills=%d", cfg.Codex.Model, cfg.Codex.ReasoningEffort, len(cfg.Commands), len(cfg.AlwaysOnSkills))
 	token, err := githubToken(ctx)
 	if err != nil {
 		logger.Printf("GitHub authentication: %v", err)
@@ -110,15 +133,17 @@ func run() int {
 	}()
 
 	executor := &action.Executor{
-		GitHub:        client,
-		BotLogin:      cfg.BotLogin,
-		Store:         store,
-		Usage:         &usage.Store{Dir: filepath.Join(filepath.Dir(cfg.StatePath), "usage")},
-		WorkRoot:      cfg.WorkRoot,
-		CheckWorkRoot: checkWorkRoot,
-		Timeout:       time.Duration(cfg.JobTimeoutMinutes) * time.Minute,
-		Codex:         cfg.Codex,
-		Logger:        logger,
+		GitHub:         client,
+		BotLogin:       cfg.BotLogin,
+		Store:          store,
+		Usage:          &usage.Store{Dir: filepath.Join(filepath.Dir(cfg.StatePath), "usage")},
+		WorkRoot:       cfg.WorkRoot,
+		CheckWorkRoot:  checkWorkRoot,
+		Timeout:        time.Duration(cfg.JobTimeoutMinutes) * time.Minute,
+		Codex:          cfg.Codex,
+		Commands:       cfg.Commands,
+		AlwaysOnSkills: cfg.AlwaysOnSkills,
+		Logger:         logger,
 	}
 	watcher := &monitor.Monitor{Config: cfg, ConfigPath: *configPath, GitHub: client, Executor: executor, Logger: logger}
 	for {
@@ -142,6 +167,30 @@ func run() int {
 			timer.Stop()
 			return 0
 		case <-timer.C:
+		}
+	}
+}
+
+func logCommandSkills(cfg config.Config, logger *log.Logger) {
+	for _, command := range cfg.CommandNames() {
+		var missing []string
+		for _, source := range cfg.Commands[command].Skills {
+			name, err := skills.Name(source)
+			if err != nil {
+				missing = append(missing, source)
+				continue
+			}
+			_, installed, err := skills.InstalledPath(source)
+			if err != nil {
+				missing = append(missing, fmt.Sprintf("%s (%v)", name, err))
+			} else if !installed {
+				missing = append(missing, name)
+			}
+		}
+		if len(missing) != 0 {
+			logger.Printf("command %s disabled: missing or invalid skills: %s", command, strings.Join(missing, ", "))
+		} else {
+			logger.Printf("command %s: skills installed", command)
 		}
 	}
 }
@@ -205,7 +254,14 @@ func checkRepositories(ctx context.Context, client *github.Client, cfg config.Co
 		if permission.Permission != "write" && permission.Permission != "admin" && permission.Permission != "maintain" {
 			problems = append(problems, fmt.Errorf("%s: @%s needs write access for configured actions (currently %q)", repo.Name, cfg.BotLogin, permission.Permission))
 		}
-		if slices.Contains(repo.Actions, "fix") {
+		needsFixFork := false
+		for _, name := range repo.Actions {
+			if cfg.Commands[name].Action == "fix" {
+				needsFixFork = true
+				break
+			}
+		}
+		if needsFixFork {
 			executor := action.Executor{GitHub: client, BotLogin: cfg.BotLogin}
 			if err := executor.CheckFixFork(ctx, repo); err != nil {
 				problems = append(problems, fmt.Errorf("%s: fix fork preflight: %w", repo.Name, err))

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/linkdata/minion/internal/config"
+	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/usage"
 )
 
@@ -133,20 +134,20 @@ func TestRunRemovesRestrictedRuntimeDirectories(t *testing.T) {
 	}
 	root := t.TempDir()
 	workspace := filepath.Join(root, "repo")
-	if err := os.Mkdir(workspace, 0700); err != nil {
+	if err := os.Mkdir(workspace, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	outside := filepath.Join(root, "outside")
-	if err := os.Mkdir(outside, 0700); err != nil {
+	if err := os.Mkdir(outside, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(outside, "keep"), nil, 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(outside, "keep"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(outside, 0500); err != nil {
+	if err := os.Chmod(outside, 0o500); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(outside, 0700) })
+	t.Cleanup(func() { _ = os.Chmod(outside, 0o700) })
 	installFakeCodex(t, `#!/bin/sh
 mkdir "$TMPDIR/locked-000" "$TMPDIR/locked-500"
 touch "$TMPDIR/locked-000/file" "$TMPDIR/locked-500/file"
@@ -158,8 +159,8 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
 	t.Cleanup(func() {
 		leftovers, _ := filepath.Glob(filepath.Join(root, ".minion-codex-*"))
 		for _, path := range leftovers {
-			_ = os.Chmod(filepath.Join(path, "locked-000"), 0700)
-			_ = os.Chmod(filepath.Join(path, "locked-500"), 0700)
+			_ = os.Chmod(filepath.Join(path, "locked-000"), 0o700)
+			_ = os.Chmod(filepath.Join(path, "locked-500"), 0o700)
 			_ = os.RemoveAll(path)
 		}
 	})
@@ -171,7 +172,7 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
 	if err != nil || len(leftovers) != 0 {
 		t.Fatalf("runtime directories remain: %v, %v", leftovers, err)
 	}
-	if info, err := os.Stat(outside); err != nil || info.Mode().Perm() != 0500 {
+	if info, err := os.Stat(outside); err != nil || info.Mode().Perm() != 0o500 {
 		t.Fatalf("outside symlink target changed: %v, %v", info, err)
 	}
 	if _, err := os.Stat(filepath.Join(outside, "keep")); err != nil {
@@ -182,7 +183,7 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
 func TestRunPassesConfiguredModelEffortAndSkills(t *testing.T) {
 	dir := t.TempDir()
 	skillPath := filepath.Join(t.TempDir(), "SKILL.md")
-	if err := os.WriteFile(skillPath, []byte("---\nname: test\n---\nUse this skill."), 0600); err != nil {
+	if err := os.WriteFile(skillPath, []byte("---\nname: test\n---\nUse this skill."), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	fakeCodex := installFakeCodex(t, `#!/bin/sh
@@ -217,6 +218,68 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
 	}
 }
 
+func TestRunUsesEmbeddedSkillWithoutInstallation(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	fakeCodex := installFakeCodex(t, `#!/bin/sh
+set -eu
+printf '%s\n' "$@" > "$0.args"
+printf '%s\n' "$TMPDIR" > "$0.tmpdir"
+cat > "$0.prompt"
+for skill in ../.minion-skills-*/anti-prompt-injection/SKILL.md; do
+  printf '%s\n' "$skill" > "$0.skillpath"
+  cat "$skill" > "$0.skill-copy"
+done
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}' '{"type":"turn.completed"}'
+`)
+	settings := config.CodexConfig{Skills: []string{skills.BuiltinAntiPromptInjection}}
+	if _, err := Run(context.Background(), dir, "Handle mention", false, "", settings); err != nil {
+		t.Fatal(err)
+	}
+	runtimeData, err := os.ReadFile(fakeCodex + ".tmpdir")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeDir := strings.TrimSpace(string(runtimeData))
+	skillData, err := os.ReadFile(fakeCodex + ".skillpath")
+	if err != nil {
+		t.Fatal(err)
+	}
+	skillPath, err := filepath.Abs(filepath.Join(dir, strings.TrimSpace(string(skillData))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	skillRoot := filepath.Dir(filepath.Dir(skillPath))
+	if filepath.Dir(skillRoot) != filepath.Dir(runtimeDir) || skillRoot == runtimeDir {
+		t.Fatalf("embedded skill root %q is not outside writable TMPDIR %q", skillRoot, runtimeDir)
+	}
+	args, err := os.ReadFile(fakeCodex + ".args")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(args), strconv.Quote(filepath.Dir(skillPath))+`="read"`) {
+		t.Fatalf("embedded skill read permission missing: %s", args)
+	}
+	prompt, err := os.ReadFile(fakeCodex + ".prompt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(prompt), strconv.Quote(skillPath)) || strings.Contains(string(prompt), skills.BuiltinAntiPromptInjection) {
+		t.Fatalf("embedded skill not materialized into prompt: %s", prompt)
+	}
+	want, _ := skills.BuiltinContent(skills.BuiltinAntiPromptInjection)
+	got, err := os.ReadFile(fakeCodex + ".skill-copy")
+	if err != nil || string(got) != string(want) {
+		t.Fatalf("embedded skill seen by Codex = %q, %v", got, err)
+	}
+	if _, err := os.Stat(runtimeDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("embedded skill runtime directory remains: %v", err)
+	}
+	if _, err := os.Stat(skillRoot); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("embedded skill root remains: %v", err)
+	}
+}
+
 func TestRunAllowsSeparateAuditReportsWithoutSourceWrites(t *testing.T) {
 	workspace := t.TempDir()
 	output := t.TempDir()
@@ -245,7 +308,7 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"a
 		t.Fatalf("removed persistent reports directory: %v", err)
 	}
 	inside := filepath.Join(workspace, "reports")
-	if err := os.Mkdir(inside, 0700); err != nil {
+	if err := os.Mkdir(inside, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	for _, unsafe := range []string{workspace, inside, filepath.Dir(workspace), "/"} {

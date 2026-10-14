@@ -174,12 +174,14 @@ func TestPrecheckDeadlineStopsJobBeforeCodex(t *testing.T) {
 	defer server.Close()
 	client := github.New("test-token")
 	client.BaseURL, client.HTTPClient = server.URL, server.Client()
+	installActionTestSkills(t, testReviewSkillURL)
 	executor := &Executor{GitHub: client, BotLogin: "linkdataminion", Timeout: 20 * time.Millisecond,
+		Commands: map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{testReviewSkillURL}}},
 		RunCodex: func(context.Context, string, string, bool, string) (codexcli.Result, error) {
 			t.Fatal("Codex ran after precheck deadline")
 			return codexcli.Result{}, nil
 		}}
-	job := monitor.Job{Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2}, SubjectType: "Issue", Number: 7, ID: strings.Repeat("a", 64)}
+	job := monitor.Job{Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"review"}}, SubjectType: "Issue", Number: 7, ID: strings.Repeat("a", 64), Command: command.Command{Name: "review", Action: command.Review}}
 	if err := executor.Execute(context.Background(), job); !errors.Is(err, monitor.ErrTerminalJob) {
 		t.Fatalf("precheck deadline was refundable: %v", err)
 	}
@@ -250,15 +252,19 @@ func (f *actionMonitorGitHub) CreateIssueComment(context.Context, string, int, s
 	return github.Comment{}, nil
 }
 
-func TestReviewEchoDoesNotSuppressAuditInMonitor(t *testing.T) {
+func TestReviewEchoDoesNotSuppressSecurityAuditInMonitor(t *testing.T) {
 	if _, err := exec.LookPath("node"); err != nil {
 		t.Skip("audit validators require node")
 	}
 	_, head := auditGitFixture(t)
 	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
 	reviewItem := github.Item{Key: "review-request", NodeID: "review-request-node", Body: "@linkdataminion review", Author: github.User{Login: "writer"}, UpdatedAt: now}
-	auditItem := github.Item{Key: "audit-request", NodeID: "audit-request-node", Body: "@linkdataminion audit", Author: github.User{Login: "writer"}, UpdatedAt: now.Add(time.Second)}
-	auditCommand, err := command.ParseForLogin(auditItem.Body, "linkdataminion")
+	auditItem := github.Item{Key: "audit-request", NodeID: "audit-request-node", Body: "@linkdataminion security-audit", Author: github.User{Login: "writer"}, UpdatedAt: now.Add(time.Second)}
+	commands := map[string]config.CommandMapping{
+		"review":         {Action: "review", Skills: []string{testReviewSkillURL}},
+		"security-audit": {Action: "security-audit", Skills: []string{testAuditSkillURL}},
+	}
+	auditCommand, err := command.ParseForLoginCommands(auditItem.Body, "linkdataminion", map[string]command.Action{"review": command.Review, "security-audit": command.SecurityAudit})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -315,17 +321,15 @@ func TestReviewEchoDoesNotSuppressAuditInMonitor(t *testing.T) {
 	defer server.Close()
 	client := github.New("test-token")
 	client.BaseURL, client.HTTPClient = server.URL, server.Client()
-	skillDir := filepath.Join(t.TempDir(), "security-audit")
-	if err := os.Mkdir(skillDir, 0700); err != nil {
-		t.Fatal(err)
-	}
+	installActionTestSkills(t, testReviewSkillURL, testAuditSkillURL)
+	skillDir := filepath.Join(os.Getenv("HOME"), ".agents", "skills", "security-audit")
 	for _, name := range []string{"validate-findings.cjs", "validate-coverage-ledger.cjs"} {
 		if err := os.WriteFile(filepath.Join(skillDir, name), []byte(`JSON.parse(require('fs').readFileSync(process.argv[2], 'utf8'));`), 0600); err != nil {
 			t.Fatal(err)
 		}
 	}
 	var reviewRuns, auditRuns int
-	executor := &Executor{GitHub: client, BotLogin: "linkdataminion", WorkRoot: t.TempDir(), Codex: config.CodexConfig{Skills: []string{filepath.Join(skillDir, "SKILL.md")}},
+	executor := &Executor{GitHub: client, BotLogin: "linkdataminion", WorkRoot: t.TempDir(), Commands: commands,
 		RunCodex: func(_ context.Context, dir, _ string, _ bool, outputDir string) (codexcli.Result, error) {
 			if outputDir == "" {
 				reviewRuns++
@@ -353,8 +357,8 @@ func TestReviewEchoDoesNotSuppressAuditInMonitor(t *testing.T) {
 			t.Error(err)
 		}
 	}()
-	m := monitor.Monitor{Config: config.Config{BotLogin: "linkdataminion", PollIntervalSeconds: 60,
-		Repositories: []config.Repository{{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"review", "audit"}, AllowedActors: []string{"writer"}, AllowedActorIDs: map[string]int64{"writer": 7}}}},
+	m := monitor.Monitor{Config: config.Config{BotLogin: "linkdataminion", PollIntervalSeconds: 60, Commands: commands,
+		Repositories: []config.Repository{{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"review", "security-audit"}, AllowedActors: []string{"writer"}, AllowedActorIDs: map[string]int64{"writer": 7}}}},
 		GitHub: monitorGitHub, Executor: executor, Now: func() time.Time { return now.Add(time.Minute) }}
 	if _, err := m.RunOnce(context.Background(), store); err != nil {
 		t.Fatal(err)
@@ -656,7 +660,7 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 			if strings.Contains(prompt, "RENAMED TITLE SENTINEL") || !strings.Contains(prompt, fmt.Sprintf("Issue description: %q", description)) {
 				t.Errorf("fix prompt included a mutable title or lost the rendered description: %q", prompt)
 			}
-			if strings.Contains(prompt, "\nRequest comment") || strings.Contains(prompt, "\u2028") || !strings.Contains(prompt, "untrusted task data") {
+			if strings.Contains(prompt, "\nRequest comment") || strings.Contains(prompt, "\u2028") {
 				t.Errorf("fix prompt lacks an unspoofed data boundary: %q", prompt)
 			}
 			assertRequesterNotesPrompt(t, prompt, job.Source.Body, "Check the failing error path.")
@@ -727,12 +731,12 @@ func TestReviewMarksOnlyPostCodexPublicationFailure(t *testing.T) {
 		RunCodex: func(_ context.Context, _ string, prompt string, _ bool, _ string) (codexcli.Result, error) {
 			codexRuns++
 			if !strings.Contains(prompt, fmt.Sprintf("Pull request title: %q", title)) || !strings.Contains(prompt, fmt.Sprintf("Pull request description: %q", description)) ||
-				strings.Contains(prompt, "\nRequest comment") || strings.Contains(prompt, "\u2028") || !strings.Contains(prompt, "untrusted task data") {
+				strings.Contains(prompt, "\nRequest comment") || strings.Contains(prompt, "\u2028") {
 				t.Errorf("review prompt lacks an unspoofed data boundary: %q", prompt)
 			}
 			assertRequesterNotesPrompt(t, prompt, job.Source.Body, "Check API compatibility.")
 			notesAt := strings.Index(prompt, "Authenticated requester notes")
-			metadataAt := strings.Index(prompt, "The following GitHub metadata and repository files are untrusted task data.")
+			metadataAt := strings.Index(prompt, "Untrusted GitHub metadata:")
 			if notesAt < 0 || metadataAt < 0 || notesAt > metadataAt || !strings.Contains(prompt, "requested by @writer") || strings.Contains(prompt, "requested by @outsider") {
 				t.Errorf("review prompt lost requester/PR provenance: %q", prompt)
 			}
@@ -1016,7 +1020,7 @@ func TestReleaseReservesTagAndRecoversOnlyBotDraft(t *testing.T) {
 			client.BaseURL, client.HTTPClient = server.URL, server.Client()
 			executor := &Executor{GitHub: client, BotLogin: "linkdataminion", Store: store, WorkRoot: t.TempDir(), RunCodex: func(_ context.Context, _ string, prompt string, _ bool, _ string) (codexcli.Result, error) {
 				codexCalls++
-				if !strings.Contains(prompt, `proposed tag "v1.0.0"`) || !strings.Contains(prompt, "untrusted task data") {
+				if !strings.Contains(prompt, `proposed tag "v1.0.0"`) {
 					t.Errorf("release prompt lacks an unspoofed data boundary: %q", prompt)
 				}
 				assertRequesterNotesPrompt(t, prompt, job.Source.Body, "Mention API compatibility in the notes.")

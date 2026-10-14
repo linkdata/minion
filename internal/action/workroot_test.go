@@ -48,7 +48,7 @@ func TestExecuteRechecksWorkRootAfterActionError(t *testing.T) {
 	}}
 	job := monitor.Job{Repository: config.Repository{Name: "o/r"}, SubjectType: "Issue", Number: 1, Command: command.Command{Action: "unsupported"}}
 	err := e.Execute(context.Background(), job)
-	if checks != 2 || !errors.Is(err, workroot.ErrUnsafe) || !strings.Contains(err.Error(), "unsupported action") {
+	if checks != 2 || !errors.Is(err, workroot.ErrUnsafe) || !strings.Contains(err.Error(), "is not enabled") {
 		t.Fatalf("action failure after root filled = %v, checks=%d", err, checks)
 	}
 }

@@ -1,10 +1,68 @@
 package command
 
 import (
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"testing"
 )
+
+func TestConfiguredCommandsPreserveKeysAndUseNames(t *testing.T) {
+	actions := map[string]Action{
+		"review": Review, "fix": Fix, "audit": Comment,
+		"security-audit": SecurityAudit, "release": Release,
+		"inspect": Comment,
+	}
+	for _, tt := range []struct {
+		name   string
+		args   string
+		action Action
+	}{
+		{"review", "", Review},
+		{"fix", "", Fix},
+		{"audit", "", Comment},
+		{"security-audit", "", SecurityAudit},
+		{"release", "v1", Release},
+		{"inspect", "", Comment},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			body := "@linkdataminion " + tt.name
+			if tt.args != "" {
+				body += " " + tt.args
+			}
+			got, err := ParseForLoginCommands(body, "linkdataminion", actions)
+			if err != nil {
+				t.Fatal(err)
+			}
+			oldDigest := sha256.Sum256([]byte(tt.name + "\x00" + tt.args))
+			if got.Key != hex.EncodeToString(oldDigest[:]) || got.Name != tt.name || got.Action != tt.action || got.Args != tt.args {
+				t.Fatalf("command = %+v", got)
+			}
+		})
+	}
+	for _, body := range []string{
+		"@linkdataminion unknown", "@linkdataminion fix extra text", "@linkdataminion inspect now",
+		"@linkdataminion release", "@linkdataminion release v1 v2",
+	} {
+		if _, err := ParseForLoginCommands(body, "linkdataminion", actions); !errors.Is(err, ErrNoCommand) {
+			t.Fatalf("accepted %q: %v", body, err)
+		}
+	}
+	withNotes, err := ParseForLoginCommands("@linkdataminion review\n@linkdataminion fix", "linkdataminion", map[string]Action{"review": Review})
+	if err != nil || withNotes.Name != "review" {
+		t.Fatalf("disabled directive in notes = (%#v, %v), want review", withNotes, err)
+	}
+	if _, err := ParseForLoginCommands("@linkdataminion review\n@linkdataminion inspect", "linkdataminion", actions); !errors.Is(err, ErrAmbiguous) {
+		t.Fatalf("accepted second configured directive: %v", err)
+	}
+	releaseWithNotes, err := ParseForLoginCommands("@linkdataminion release v1\nMention the migration steps.", "linkdataminion", actions)
+	if err != nil || releaseWithNotes.Action != Release || releaseWithNotes.Args != "v1" {
+		t.Fatalf("release with notes = (%#v, %v)", releaseWithNotes, err)
+	}
+	if _, err := ParseForLoginCommands("@linkdataminion review", "linkdataminion", nil); !errors.Is(err, ErrNoCommand) {
+		t.Fatalf("accepted command with no mappings: %v", err)
+	}
+}
 
 func TestParseCommands(t *testing.T) {
 	tests := []struct {
@@ -14,12 +72,12 @@ func TestParseCommands(t *testing.T) {
 		args   string
 	}{
 		{"review", "@linkdataminion review", Review, ""},
-		{"audit", "@linkdataminion audit", Audit, ""},
-		{"audit case", "  @LinkDataMinion\tAUDIT  ", Audit, ""},
+		{"audit", "@linkdataminion audit", Comment, ""},
+		{"audit case", "  @LinkDataMinion\tAUDIT  ", Comment, ""},
 		{"fix", "  @LinkDataMinion\tFIX  \t", Fix, ""},
-		{"release", "@linkdataminion release v1.2.3", Release, "v1.2.3"},
+		{"security audit", "@linkdataminion security-audit", SecurityAudit, ""},
 		{"CRLF", "\r\n@linkdataminion fix\r\n", Fix, ""},
-		{"surrounding blanks", " \t\n\n@linkdataminion release v2\n\t", Release, "v2"},
+		{"surrounding blanks", " \t\n\n@linkdataminion security-audit\n\t", SecurityAudit, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -58,6 +116,7 @@ func TestParseIgnoresNonCommands(t *testing.T) {
 		{"quoted audit", "> @linkdataminion audit"},
 		{"fenced audit", "```\n@linkdataminion audit\n```"},
 		{"missing release tag", "@linkdataminion release"},
+		{"release disabled by default", "@linkdataminion release v1"},
 		{"multiple release arguments", "@linkdataminion release v1 v2"},
 		{"Unicode space in tag", "@linkdataminion release v1\u00a0v2"},
 		{"quote", "> @linkdataminion review"},
@@ -97,7 +156,6 @@ func TestParseAcceptsTrailingNotes(t *testing.T) {
 		{"@linkdataminion review", "Please check the locking change."},
 		{"@linkdataminion audit", "Check authorization boundaries."},
 		{"@linkdataminion fix", "The test fails on Windows."},
-		{"@linkdataminion release v1.2.3", "Mention the migration steps."},
 		{"@linkdataminion review", "@otherbot review\n```\nExample text\n```"},
 	} {
 		plain, err := Parse(tt.command)
@@ -129,15 +187,16 @@ func TestParseRejectsMultipleCommands(t *testing.T) {
 }
 
 func TestCommandKeyIsStableAndSensitiveToArguments(t *testing.T) {
-	a, err := Parse("@LINKDATAMINION\tRELEASE\t v1.2.3 \t")
+	release := map[string]Action{"release": Release}
+	a, err := ParseForLoginCommands("@LINKDATAMINION\tRELEASE\t v1.2.3 \t", "linkdataminion", release)
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := Parse("  @linkdataminion release v1.2.3")
+	b, err := ParseForLoginCommands("  @linkdataminion release v1.2.3", "linkdataminion", release)
 	if err != nil {
 		t.Fatal(err)
 	}
-	c, err := Parse("@linkdataminion release v1.2.4")
+	c, err := ParseForLoginCommands("@linkdataminion release v1.2.4", "linkdataminion", release)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,7 +218,7 @@ func TestParseForLogin(t *testing.T) {
 	}{
 		{"custom login", "my-bot", "@MY-BOT fix", Fix, ""},
 		{"bot suffix", "github-actions[bot]", "@GitHub-Actions[Bot] review", Review, ""},
-		{"ignores other bot", "my-bot", "@my-bot release v2", Release, "v2"},
+		{"custom security audit", "my-bot", "@my-bot security-audit", SecurityAudit, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

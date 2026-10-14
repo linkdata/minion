@@ -14,7 +14,9 @@ func TestCheckedInConfigIsSample(t *testing.T) {
 	}
 	if cfg.BotLogin != "example-bot" || len(cfg.InvitationOwners) != 0 ||
 		len(cfg.Repositories) != 1 || cfg.Repositories[0].Name != "example-owner/example-repo" ||
-		cfg.Codex.Model != "" || cfg.Codex.ReasoningEffort != "" || len(cfg.Codex.Skills) != 0 {
+		cfg.Codex.Model != "" || cfg.Codex.ReasoningEffort != "" ||
+		len(cfg.Commands) != 4 || len(cfg.AlwaysOnSkills) != 2 ||
+		cfg.AlwaysOnSkills[0] != defaultAntiInjectionSkill || cfg.AlwaysOnSkills[1] != defaultCavemanSkill {
 		t.Fatalf("checked-in configuration has operational settings: %+v", cfg)
 	}
 }
@@ -22,7 +24,7 @@ func TestCheckedInConfigIsSample(t *testing.T) {
 func TestLoadValidatesWhitelistAndResolvesPaths(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
-	data := `{"bot_login":"linkdataminion","repositories":[{"name":"example-owner/example-repo","id":1,"owner_id":2,"actions":["review","fix","release"]}]}`
+	data := `{"bot_login":"linkdataminion","repositories":[{"name":"example-owner/example-repo","id":1,"owner_id":2,"actions":["review","fix"]}]}`
 	if err := os.WriteFile(path, []byte(data), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -147,56 +149,169 @@ func TestValidateNormalizesIdentityPinLogins(t *testing.T) {
 	}
 }
 
-func TestCodexSettingsResolveAndValidateSkillPaths(t *testing.T) {
-	dir := t.TempDir()
-	skill := filepath.Join(dir, "skills", "example", "SKILL.md")
-	if err := os.MkdirAll(filepath.Dir(skill), 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(skill, []byte("---\nname: example\n---\nUse this skill."), 0600); err != nil {
-		t.Fatal(err)
-	}
+func TestCommandMappingsValidateWithoutInstalledSkills(t *testing.T) {
 	base := Config{BotLogin: "linkdataminion", Repositories: []Repository{{Name: "example-owner/example-repo", ID: 1, OwnerID: 2, Actions: []string{"review"}}}}
-	config := base
-	config.Codex = CodexConfig{Model: " gpt-6-sol ", ReasoningEffort: " ultra ", Skills: []string{"skills/example/SKILL.md"}}
-	if err := config.Validate(dir); err != nil {
+	cfg := base
+	cfg.Codex = CodexConfig{Model: " gpt-6-sol ", ReasoningEffort: " ultra "}
+	if err := cfg.Validate(t.TempDir()); err != nil {
 		t.Fatal(err)
 	}
-	if config.Codex.Model != "gpt-6-sol" || config.Codex.ReasoningEffort != "ultra" || config.Codex.Skills[0] != skill {
-		t.Fatalf("Codex settings not normalized: %+v", config.Codex)
+	if cfg.Codex.Model != "gpt-6-sol" || cfg.Codex.ReasoningEffort != "ultra" ||
+		len(cfg.Commands) != 4 || cfg.Commands["audit"].Action != "comment" ||
+		cfg.Commands["security-audit"].Action != "security-audit" ||
+		len(cfg.AlwaysOnSkills) != 2 || cfg.AlwaysOnSkills[0] != defaultAntiInjectionSkill ||
+		cfg.AlwaysOnSkills[1] != defaultCavemanSkill {
+		t.Fatalf("unexpected defaults: %+v", cfg)
 	}
-	for _, skills := range [][]string{{"missing/SKILL.md"}, {"skills/example/notes.md"}, {"skills/example/SKILL.md", skill}} {
-		config := base
-		config.Codex.Skills = skills
-		if err := config.Validate(dir); err == nil {
-			t.Errorf("accepted invalid skills %v", skills)
-		}
+	if names := cfg.CommandNames(); strings.Join(names, ",") != "audit,fix,review,security-audit" {
+		t.Fatalf("command names = %v", names)
 	}
-	if err := os.WriteFile(skill, []byte(" \n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	config = base
-	config.Codex.Skills = []string{skill}
-	if err := config.Validate(dir); err == nil || !strings.Contains(err.Error(), "is empty") {
-		t.Fatalf("empty skill was not rejected at startup: %v", err)
+	for _, tt := range []struct {
+		name    string
+		mapping map[string]CommandMapping
+	}{
+		{"bad name", map[string]CommandMapping{"Review": {Action: "review", Skills: []string{defaultReviewSkill}}}},
+		{"bad action", map[string]CommandMapping{"review": {Action: "publish", Skills: []string{defaultReviewSkill}}}},
+		{"missing skill", map[string]CommandMapping{"review": {Action: "review"}}},
+		{"bad URL", map[string]CommandMapping{"review": {Action: "review", Skills: []string{"https://evil.invalid/SKILL.md"}}}},
+		{"duplicate skill", map[string]CommandMapping{"review": {Action: "review", Skills: []string{defaultReviewSkill, defaultReviewSkill}}}},
+		{"security audit without validator skill", map[string]CommandMapping{"security-audit": {Action: "security-audit", Skills: []string{defaultReviewSkill}}}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			copy := base
+			copy.Commands = tt.mapping
+			if err := copy.Validate(t.TempDir()); err == nil {
+				t.Fatal("accepted invalid command mapping")
+			}
+		})
 	}
 }
 
-func TestAuditRequiresConfiguredSecurityAuditSkill(t *testing.T) {
-	dir := t.TempDir()
-	cfg := Config{BotLogin: "linkdataminion", Repositories: []Repository{{Name: "example-owner/example-repo", ID: 1, OwnerID: 2, Actions: []string{"audit"}}}}
-	if err := cfg.Validate(dir); err == nil || !strings.Contains(err.Error(), "audit requires") {
-		t.Fatalf("audit accepted without its skill: %v", err)
-	}
-	skillDir := filepath.Join(dir, "security-audit")
-	if err := os.Mkdir(skillDir, 0700); err != nil {
+func TestExplicitEmptyCommandsAndAlwaysOnSkills(t *testing.T) {
+	cfg := Config{BotLogin: "bot", Commands: map[string]CommandMapping{}, AlwaysOnSkills: []string{}, Repositories: []Repository{{Name: "owner/repo", ID: 1, OwnerID: 2}}}
+	if err := cfg.Validate(t.TempDir()); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("Perform a security audit."), 0600); err != nil {
+	if cfg.Commands == nil || len(cfg.Commands) != 0 || cfg.AlwaysOnSkills == nil || len(cfg.AlwaysOnSkills) != 0 {
+		t.Fatalf("explicit disable was replaced by defaults: %+v", cfg)
+	}
+}
+
+func TestSkillSourceNamesDoNotConflict(t *testing.T) {
+	cfg := Config{BotLogin: "bot", Commands: map[string]CommandMapping{
+		"review":  {Action: "review", Skills: []string{defaultReviewSkill}},
+		"inspect": {Action: "comment", Skills: []string{"https://github.com/example/fork/tree/main/skills/ponytail-review"}},
+	}, AlwaysOnSkills: []string{}, Repositories: []Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"review"}}}}
+	if err := cfg.Validate(t.TempDir()); err == nil || !strings.Contains(err.Error(), "conflicting source URLs") {
+		t.Fatalf("accepted conflicting skill sources: %v", err)
+	}
+}
+
+func TestSkillSourceURLsNormalizeTrailingSlash(t *testing.T) {
+	url := "https://github.com/example/skills/tree/main/skills/review"
+	cfg := Config{
+		BotLogin: "bot",
+		Commands: map[string]CommandMapping{
+			"review":  {Action: "review", Skills: []string{url}},
+			"inspect": {Action: "comment", Skills: []string{url + "/"}},
+		},
+		AlwaysOnSkills: []string{url + "/"},
+		Repositories:   []Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"review", "inspect"}}},
+	}
+	if err := cfg.Validate(t.TempDir()); err != nil {
 		t.Fatal(err)
 	}
-	cfg.Codex.Skills = []string{"security-audit/SKILL.md"}
-	if err := cfg.Validate(dir); err != nil {
+	for _, got := range []string{cfg.Commands["review"].Skills[0], cfg.Commands["inspect"].Skills[0], cfg.AlwaysOnSkills[0]} {
+		if got != url {
+			t.Errorf("normalized skill URL = %q, want %q", got, url)
+		}
+	}
+}
+
+func TestSkillSourceNamesRejectCaseCollisions(t *testing.T) {
+	url := "https://github.com/example/skills/tree/main/skills/review"
+	upper := "https://github.com/example/skills/tree/main/skills/Review"
+	for _, tt := range []struct {
+		name   string
+		change func(*Config)
+		want   string
+	}{
+		{"across commands", func(c *Config) {
+			c.Commands["inspect"] = CommandMapping{Action: "comment", Skills: []string{upper}}
+		}, "collide on case-insensitive filesystems"},
+		{"command and always-on", func(c *Config) {
+			c.AlwaysOnSkills = []string{upper}
+		}, "collide on case-insensitive filesystems"},
+		{"within command", func(c *Config) {
+			c.Commands["review"] = CommandMapping{Action: "review", Skills: []string{url, upper}}
+		}, "duplicate skill"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Config{
+				BotLogin:       "bot",
+				Commands:       map[string]CommandMapping{"review": {Action: "review", Skills: []string{url}}},
+				AlwaysOnSkills: []string{},
+				Repositories:   []Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"review"}}},
+			}
+			tt.change(&cfg)
+			if err := cfg.Validate(t.TempDir()); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Validate() = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestBuiltinSkillCanEnableCommandWithoutInstallation(t *testing.T) {
+	cfg := Config{
+		BotLogin:       "bot",
+		Commands:       map[string]CommandMapping{"inspect": {Action: "comment", Skills: []string{defaultAntiInjectionSkill}}},
+		AlwaysOnSkills: []string{},
+		Repositories:   []Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"inspect"}}},
+	}
+	if err := cfg.Validate(t.TempDir()); err != nil {
 		t.Fatal(err)
+	}
+	installed, err := cfg.CommandInstalled("inspect")
+	if err != nil || !installed {
+		t.Fatalf("builtin skill unavailable: installed=%v, err=%v", installed, err)
+	}
+}
+
+func TestBuiltinNameConflictsWithOtherSource(t *testing.T) {
+	cfg := Config{
+		BotLogin: "bot",
+		Commands: map[string]CommandMapping{
+			"inspect": {Action: "comment", Skills: []string{"https://github.com/example/skills/tree/main/skills/anti-prompt-injection"}},
+		},
+		Repositories: []Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"inspect"}}},
+	}
+	if err := cfg.Validate(t.TempDir()); err == nil || !strings.Contains(err.Error(), "conflicting source URLs") {
+		t.Fatalf("accepted conflicting built-in skill source: %v", err)
+	}
+}
+
+func TestConfiguredRepositoryActionMustExist(t *testing.T) {
+	cfg := Config{BotLogin: "bot", Repositories: []Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"release"}}}}
+	if err := cfg.Validate(t.TempDir()); err == nil || !strings.Contains(err.Error(), "unsupported action") {
+		t.Fatalf("accepted action without command mapping: %v", err)
+	}
+}
+
+func TestCommandInstalledRequiresAtLeastOneSkill(t *testing.T) {
+	cfg := Config{Commands: map[string]CommandMapping{"review": {Action: "review"}}}
+	installed, err := cfg.CommandInstalled("review")
+	if err != nil || installed {
+		t.Fatalf("command without required skills is installed: %v, %v", installed, err)
+	}
+}
+
+func TestLoadRejectsLegacyCodexSkills(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	data := `{"bot_login":"bot","codex":{"skills":["skills/review/SKILL.md"]},"repositories":[{"name":"owner/repo","id":1,"owner_id":2,"actions":["review"]}]}`
+	if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("accepted legacy codex.skills: %v", err)
 	}
 }

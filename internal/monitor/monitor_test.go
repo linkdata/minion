@@ -206,13 +206,90 @@ func (f *fakeExecutor) Execute(_ context.Context, job Job) error {
 	return f.executeErr
 }
 
-func testConfig() config.Config {
+func testConfig(t *testing.T) config.Config {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	urls := map[string]string{
+		"review":         "https://github.com/example/skills/tree/main/skills/review",
+		"fix":            "https://github.com/example/skills/tree/main/skills/fix",
+		"audit":          "https://github.com/example/skills/tree/main/skills/audit",
+		"security-audit": "https://github.com/example/skills/tree/main/skills/security-audit",
+		"release":        "https://github.com/example/skills/tree/main/skills/release",
+	}
+	for name, rawURL := range urls {
+		dir := filepath.Join(home, ".agents", "skills", name)
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("Use this test skill.\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		marker := fmt.Sprintf(`{"url":%q,"commit":%q}`, rawURL, strings.Repeat("a", 40))
+		if err := os.WriteFile(filepath.Join(dir, ".minion-install.json"), []byte(marker), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	return config.Config{
 		BotLogin:            "linkdataminion",
 		PollIntervalSeconds: 60,
+		Commands: map[string]config.CommandMapping{
+			"review":         {Action: "review", Skills: []string{urls["review"]}},
+			"fix":            {Action: "fix", Skills: []string{urls["fix"]}},
+			"audit":          {Action: "comment", Skills: []string{urls["audit"]}},
+			"security-audit": {Action: "security-audit", Skills: []string{urls["security-audit"]}},
+			"release":        {Action: "release", Skills: []string{urls["release"]}},
+		},
+		AlwaysOnSkills: []string{},
 		Repositories: []config.Repository{{
 			Name: "example-owner/example-repo", ID: 1, OwnerID: 2, Actions: []string{"review", "fix", "release"},
 		}},
+	}
+}
+
+func TestAvailableCommandsRequireInstalledSkills(t *testing.T) {
+	cfg := testConfig(t)
+	m := &Monitor{Config: cfg}
+	if got := m.availableCommands(cfg.Repositories[0]); len(got) != 3 {
+		t.Fatalf("installed commands = %v", got)
+	}
+	home := os.Getenv("HOME")
+	if err := os.Remove(filepath.Join(home, ".agents", "skills", "fix", "SKILL.md")); err != nil {
+		t.Fatal(err)
+	}
+	got := m.availableCommands(cfg.Repositories[0])
+	if len(got) != 2 || got["review"] != "review" || got["release"] != "release" {
+		t.Fatalf("missing fix skill affected other commands: %v", got)
+	}
+	if _, ok := got["fix"]; ok {
+		t.Fatalf("fix enabled without its skill: %v", got)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".agents", "skills", "release", ".minion-install.json"), []byte("{}"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	got = m.availableCommands(cfg.Repositories[0])
+	if len(got) != 1 || got["review"] != "review" {
+		t.Fatalf("corrupt release installation affected another command: %v", got)
+	}
+}
+
+func TestRunOnceIgnoresCommandWithoutInstalledSkill(t *testing.T) {
+	cfg := testConfig(t)
+	if err := os.Remove(filepath.Join(os.Getenv("HOME"), ".agents", "skills", "review", "SKILL.md")); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	gh := &fakeGitHub{
+		notifications: []github.Notification{testNotification(now)},
+		items:         []github.Item{{Key: "comment:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}}},
+	}
+	executor := &fakeExecutor{}
+	m := &Monitor{Config: cfg, GitHub: gh, Executor: executor, Now: func() time.Time { return now }}
+	if _, err := m.RunOnce(context.Background(), openState(t, now.Add(-time.Minute))); err != nil {
+		t.Fatal(err)
+	}
+	if len(executor.jobs) != 0 || gh.currentChecks != 0 {
+		t.Fatalf("uninstalled command reached execution: jobs=%v item checks=%d", executor.jobs, gh.currentChecks)
 	}
 }
 
@@ -275,7 +352,7 @@ func TestRunOnceKeepsFailedRepositoryWindowAndRetriesPendingThreads(t *testing.T
 			return []github.Item{{Key: fmt.Sprintf("%s#comment:%d", repo, number), NodeID: fmt.Sprintf("node-%d", number), Body: "@linkdataminion review", Author: github.User{Login: "writer"}}}, nil
 		},
 	}
-	cfg := testConfig()
+	cfg := testConfig(t)
 	cfg.Repositories = []config.Repository{{Name: "a/one", ID: 1, OwnerID: 2, Actions: []string{"review"}}, {Name: "b/two", ID: 1, OwnerID: 2, Actions: []string{"review"}}}
 	executor := &fakeExecutor{}
 	clock := now
@@ -319,7 +396,7 @@ func TestRunOnceSeedsNewRepositoryFromCurrentCursor(t *testing.T) {
 	}}}
 	clock := now
 	executor := &fakeExecutor{}
-	m := &Monitor{Config: testConfig(), GitHub: gh, Executor: executor, Now: func() time.Time { return clock }}
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Executor: executor, Now: func() time.Time { return clock }}
 	if _, err := m.RunOnce(context.Background(), store); err != nil {
 		t.Fatal(err)
 	}
@@ -361,7 +438,7 @@ func TestRunOnceChecksPermissionAndDeduplicates(t *testing.T) {
 	}}
 	store := openState(t, first.Add(-time.Minute))
 	clock := first
-	m := &Monitor{Config: testConfig(), GitHub: gh, Executor: executor, Logger: log.New(io.Discard, "", 0), Now: func() time.Time { return clock }}
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Executor: executor, Logger: log.New(io.Discard, "", 0), Now: func() time.Time { return clock }}
 	if _, err := m.RunOnce(context.Background(), store); err != nil {
 		t.Fatal(err)
 	}
@@ -397,7 +474,7 @@ func TestRunOnceBoundsFailedExecutions(t *testing.T) {
 		}
 	}
 	clock := now
-	m := &Monitor{Config: testConfig(), GitHub: gh, Executor: executor, Now: func() time.Time { return clock }}
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Executor: executor, Now: func() time.Time { return clock }}
 	for attempt := 1; attempt <= maxJobAttempts; attempt++ {
 		_, err := m.RunOnce(context.Background(), store)
 		if (err != nil) != (attempt < maxJobAttempts) {
@@ -429,7 +506,7 @@ func TestRunOnceDoesNotExhaustJobsDuringGitHubOutage(t *testing.T) {
 	executor := &fakeExecutor{executeErr: &github.StatusError{StatusCode: http.StatusTooManyRequests}}
 	store := openState(t, now.Add(-time.Minute))
 	clock := now
-	m := &Monitor{Config: testConfig(), GitHub: gh, Executor: executor, Now: func() time.Time { return clock }}
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Executor: executor, Now: func() time.Time { return clock }}
 	for attempt := 1; attempt <= maxJobAttempts+1; attempt++ {
 		if _, err := m.RunOnce(context.Background(), store); err == nil {
 			t.Fatal("GitHub outage was not surfaced")
@@ -451,7 +528,7 @@ func TestRunOnceDoesNotExhaustJobsWhenWorkRootFills(t *testing.T) {
 	executor := &fakeExecutor{executeErr: workroot.ErrUnsafe}
 	store := openState(t, now.Add(-time.Minute))
 	clock := now
-	m := &Monitor{Config: testConfig(), GitHub: gh, Executor: executor, Now: func() time.Time { return clock }}
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Executor: executor, Now: func() time.Time { return clock }}
 	for attempt := 1; attempt <= maxJobAttempts+1; attempt++ {
 		if _, err := m.RunOnce(context.Background(), store); err == nil {
 			t.Fatal("full work root was not surfaced")
@@ -472,7 +549,7 @@ func TestRunOnceKeepsTerminalFailureWhenWorkRootFills(t *testing.T) {
 	gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}, items: []github.Item{item}, permission: github.Permission{Permission: "write"}}
 	executor := &fakeExecutor{executeErr: errors.Join(ErrTerminalJob, workroot.ErrUnsafe)}
 	store := openState(t, now.Add(-time.Minute))
-	m := &Monitor{Config: testConfig(), GitHub: gh, Executor: executor, Now: func() time.Time { return now }}
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Executor: executor, Now: func() time.Time { return now }}
 	if _, err := m.RunOnce(context.Background(), store); err != nil {
 		t.Fatal(err)
 	}
@@ -491,7 +568,7 @@ func TestRunOnceCountsPublicationFailureWhenWorkRootFills(t *testing.T) {
 	gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}, items: []github.Item{item}, permission: github.Permission{Permission: "write"}}
 	executor := &fakeExecutor{executeErr: errors.Join(ErrPostCodexPublication, workroot.ErrUnsafe, &github.StatusError{StatusCode: http.StatusBadGateway})}
 	store := openState(t, now.Add(-time.Minute))
-	m := &Monitor{Config: testConfig(), GitHub: gh, Executor: executor, Now: func() time.Time { return now }}
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Executor: executor, Now: func() time.Time { return now }}
 	if _, err := m.RunOnce(context.Background(), store); err == nil || len(executor.jobs) != 1 {
 		t.Fatalf("publication failure = %v, jobs = %d", err, len(executor.jobs))
 	}
@@ -507,7 +584,7 @@ func TestRunOnceBoundsPublicationFailuresAfterCodex(t *testing.T) {
 	executor := &fakeExecutor{executeErr: errors.Join(ErrPostCodexPublication, &github.StatusError{StatusCode: http.StatusBadGateway})}
 	store := openState(t, now.Add(-time.Minute))
 	clock := now
-	m := &Monitor{Config: testConfig(), GitHub: gh, Executor: executor, Now: func() time.Time { return clock }}
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Executor: executor, Now: func() time.Time { return clock }}
 	for attempt := 1; attempt <= maxJobAttempts; attempt++ {
 		_, err := m.RunOnce(context.Background(), store)
 		if (err != nil) != (attempt < maxJobAttempts) || len(executor.jobs) != attempt {
@@ -537,7 +614,7 @@ func TestRunOnceTerminalFailureRepliesWithFreshContext(t *testing.T) {
 	defer cancel()
 	executor := &fakeExecutor{onExecute: cancel, executeErr: errors.Join(ErrTerminalJob, context.DeadlineExceeded)}
 	store := openState(t, now.Add(-time.Minute))
-	m := &Monitor{Config: testConfig(), GitHub: gh, Executor: executor, Now: func() time.Time { return now }}
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Executor: executor, Now: func() time.Time { return now }}
 	if _, err := m.RunOnce(ctx, store); err != nil {
 		t.Fatal(err)
 	}
@@ -565,7 +642,7 @@ func TestRunOnceStopsAfterFailedReplyAttempts(t *testing.T) {
 	executor := &fakeExecutor{executeErr: ErrTerminalJob}
 	store := openState(t, now.Add(-time.Minute))
 	clock := now
-	m := &Monitor{Config: testConfig(), GitHub: gh, Executor: executor, Now: func() time.Time { return clock }}
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Executor: executor, Now: func() time.Time { return clock }}
 	for attempt := 1; attempt <= maxFailureReplyAttempts; attempt++ {
 		_, err := m.RunOnce(context.Background(), store)
 		if (err != nil) != (attempt < maxFailureReplyAttempts) {
@@ -600,7 +677,7 @@ func TestRunOnceIgnoresQuotedOutsiderCommand(t *testing.T) {
 	}
 	executor := &fakeExecutor{}
 	store := openState(t, now.Add(-time.Minute))
-	m := &Monitor{Config: testConfig(), GitHub: gh, Executor: executor, Logger: log.New(io.Discard, "", 0), Now: func() time.Time { return now }}
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Executor: executor, Logger: log.New(io.Discard, "", 0), Now: func() time.Time { return now }}
 	if _, err := m.RunOnce(context.Background(), store); err != nil {
 		t.Fatal(err)
 	}
@@ -623,7 +700,7 @@ func TestRunOnceRetriesFailedReaction(t *testing.T) {
 	store := openState(t, now.Add(-time.Minute))
 	initial := store.Data.Cursor
 	clock := now
-	m := &Monitor{Config: testConfig(), GitHub: gh, Executor: executor, Logger: log.New(io.Discard, "", 0), Now: func() time.Time { return clock }}
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Executor: executor, Logger: log.New(io.Discard, "", 0), Now: func() time.Time { return clock }}
 	if _, err := m.RunOnce(context.Background(), store); err == nil {
 		t.Fatal("expected reaction failure")
 	}
@@ -650,7 +727,7 @@ func TestRunOncePersistsPermissionFailureWithoutPinningCursor(t *testing.T) {
 	executor := &fakeExecutor{}
 	store := openState(t, now.Add(-time.Minute))
 	initial := store.Data.Cursor
-	m := &Monitor{Config: testConfig(), GitHub: gh, Executor: executor, Logger: log.New(io.Discard, "", 0), Now: func() time.Time { return now }}
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Executor: executor, Logger: log.New(io.Discard, "", 0), Now: func() time.Time { return now }}
 	if _, err := m.RunOnce(context.Background(), store); err == nil {
 		t.Fatal("expected permission failure")
 	}
@@ -687,7 +764,7 @@ func TestRunOnceRetriesFailedThreadAfterCursorAdvances(t *testing.T) {
 			return item, nil
 		},
 	}
-	cfg := testConfig()
+	cfg := testConfig(t)
 	cfg.Repositories = append(cfg.Repositories, config.Repository{Name: "other/repo", ID: 1, OwnerID: 4, Actions: []string{"review"}})
 	var logs bytes.Buffer
 	path := filepath.Join(t.TempDir(), "state.json")
@@ -751,7 +828,7 @@ func TestRunOnceRetriesThreadFetchWithoutNewNotification(t *testing.T) {
 	}
 	store := openState(t, initial)
 	clock := now
-	m := &Monitor{Config: testConfig(), GitHub: gh, Executor: &fakeExecutor{}, Now: func() time.Time { return clock }}
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Executor: &fakeExecutor{}, Now: func() time.Time { return clock }}
 	if _, err := m.RunOnce(context.Background(), store); err == nil || !store.Data.Cursor.After(initial) {
 		t.Fatalf("failure did not advance global cursor: %v, %+v", err, store.Data)
 	}
@@ -772,7 +849,7 @@ func TestAllowedActorsCannotBypassWritePermission(t *testing.T) {
 		items:         []github.Item{{Key: "comment:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}, UpdatedAt: now}},
 		permission:    github.Permission{Permission: "read"},
 	}
-	config := testConfig()
+	config := testConfig(t)
 	config.Repositories[0].AllowedActors = []string{"writer"}
 	config.Repositories[0].AllowedActorIDs = map[string]int64{"writer": 7}
 	executor := &fakeExecutor{}
@@ -796,7 +873,7 @@ func TestEditedCommentCannotUseOriginalAuthorAuthorization(t *testing.T) {
 		permission: github.Permission{Permission: "write"},
 	}
 	executor := &fakeExecutor{}
-	config := testConfig()
+	config := testConfig(t)
 	config.Repositories[0].AllowedActors = []string{"allowed"}
 	config.Repositories[0].AllowedActorIDs = map[string]int64{"allowed": 7}
 	store := openState(t, first.Add(-time.Minute))
@@ -850,7 +927,7 @@ func TestAcceptOnlyWhitelistedInvitations(t *testing.T) {
 			t.Fatal("outsider invitation declined before allowed invitations were accepted")
 		}
 	}
-	config := testConfig()
+	config := testConfig(t)
 	config.InvitationOwners = []string{"example-owner", "another-owner"}
 	config.InvitationOwnerIDs = map[string]int64{"example-owner": 2, "another-owner": 3}
 	m := &Monitor{Config: config, GitHub: gh}
@@ -876,7 +953,7 @@ func TestInvitationListingErrorKeepsPartialWorkAndPollsAfterLongCheck(t *testing
 		beforeList: func() { now = now.Add(time.Hour) },
 	}
 	store := openState(t, now.Add(-time.Minute))
-	m := &Monitor{Config: testConfig(), GitHub: gh, Now: func() time.Time { return now }}
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Now: func() time.Time { return now }}
 	if _, err := m.RunOnce(context.Background(), store); err != nil {
 		t.Fatal(err)
 	}
@@ -906,7 +983,7 @@ func TestInvitationListingBlockedDefersActions(t *testing.T) {
 				},
 				inviteErr: tc.err,
 			}
-			m := &Monitor{Config: testConfig(), GitHub: gh}
+			m := &Monitor{Config: testConfig(t), GitHub: gh}
 			if err := m.acceptWhitelistedInvitations(context.Background()); !errors.Is(err, tc.err) {
 				t.Fatalf("invitation listing error = %v, want blocked error", err)
 			}
@@ -925,7 +1002,7 @@ func TestInvitationRateLimitStopsDeclines(t *testing.T) {
 		},
 		declineErr: &github.StatusError{StatusCode: http.StatusForbidden, Message: "secondary rate limit"},
 	}
-	m := &Monitor{Config: testConfig(), GitHub: gh}
+	m := &Monitor{Config: testConfig(t), GitHub: gh}
 	if err := m.acceptWhitelistedInvitations(context.Background()); err == nil {
 		t.Fatal("expected rate-limit error")
 	}
@@ -940,7 +1017,7 @@ func TestMonitoredRepositoryStillRequiresWriteInvitation(t *testing.T) {
 		{ID: 2, Repository: github.Repository{FullName: "example-owner/other", Owner: github.User{Login: "example-owner"}}, Permissions: "read"},
 		{ID: 3, Repository: github.Repository{FullName: "another-owner/unknown-role", Owner: github.User{Login: "another-owner"}}, Permissions: "superadmin"},
 	}}
-	config := testConfig()
+	config := testConfig(t)
 	config.InvitationOwners = []string{"example-owner", "another-owner"}
 	config.InvitationOwnerIDs = map[string]int64{"example-owner": 2, "another-owner": 3}
 	m := &Monitor{Config: config, GitHub: gh}
@@ -962,7 +1039,7 @@ func TestInvitationOwnerDoesNotAuthorizeCommands(t *testing.T) {
 		}},
 		items: []github.Item{{Key: "comment:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}}},
 	}
-	config := testConfig()
+	config := testConfig(t)
 	config.InvitationOwners = []string{"example-owner", "another-owner"}
 	config.InvitationOwnerIDs = map[string]int64{"example-owner": 2, "another-owner": 3}
 	executor := &fakeExecutor{}
@@ -980,18 +1057,9 @@ func TestInvitationRegistersRepositoryBeforeAcceptanceAndMonitorsImmediately(t *
 	for _, role := range []string{"write", "maintain", "admin"} {
 		t.Run(role, func(t *testing.T) {
 			now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
-			cfg := testConfig()
+			cfg := testConfig(t)
 			cfg.InvitationOwners = []string{"example-owner"}
 			cfg.InvitationOwnerIDs = map[string]int64{"example-owner": 2}
-			skillDir := filepath.Join(t.TempDir(), "security-audit")
-			if err := os.Mkdir(skillDir, 0700); err != nil {
-				t.Fatal(err)
-			}
-			skill := filepath.Join(skillDir, "SKILL.md")
-			if err := os.WriteFile(skill, []byte("Audit source."), 0600); err != nil {
-				t.Fatal(err)
-			}
-			cfg.Codex.Skills = []string{skill}
 			path := filepath.Join(t.TempDir(), "config.json")
 			data, err := json.Marshal(cfg)
 			if err != nil {
@@ -1015,7 +1083,7 @@ func TestInvitationRegistersRepositoryBeforeAcceptanceAndMonitorsImmediately(t *
 						t.Fatal(err)
 					}
 					repo, ok := saved.Repository("example-owner/second-repo")
-					if !ok || !repo.AllowsAction("review") || !repo.AllowsAction("audit") || !repo.AllowsAction("fix") || !repo.AllowsAction("release") {
+					if !ok || !repo.AllowsAction("review") || !repo.AllowsAction("audit") || !repo.AllowsAction("security-audit") || !repo.AllowsAction("fix") || !repo.AllowsAction("release") {
 						t.Fatalf("repository not persisted before accepting invitation: %+v", saved.Repositories)
 					}
 				},
@@ -1033,7 +1101,7 @@ func TestInvitationRegistersRepositoryBeforeAcceptanceAndMonitorsImmediately(t *
 }
 
 func TestInvitationRegistrationRetriesWithoutLosingOrDuplicatingRepository(t *testing.T) {
-	cfg := testConfig()
+	cfg := testConfig(t)
 	cfg.InvitationOwners = []string{"example-owner"}
 	cfg.InvitationOwnerIDs = map[string]int64{"example-owner": 2}
 	path := filepath.Join(t.TempDir(), "config.json")
@@ -1067,6 +1135,37 @@ func TestInvitationRegistrationRetriesWithoutLosingOrDuplicatingRepository(t *te
 	}
 	if len(gh.accepted) != 2 || len(m.Config.Repositories) != 2 {
 		t.Fatalf("retry failed or duplicated repository: accepted=%v config=%+v", gh.accepted, m.Config.Repositories)
+	}
+}
+
+func TestInvitationWithCommandsDisabledRegistersNoActions(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.Commands = map[string]config.CommandMapping{}
+	cfg.Repositories[0].Actions = nil
+	cfg.InvitationOwners = []string{"example-owner"}
+	cfg.InvitationOwnerIDs = map[string]int64{"example-owner": 2}
+	path := filepath.Join(t.TempDir(), "config.json")
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	gh := &fakeGitHub{invitations: []github.Invitation{{
+		ID: 1, Repository: github.Repository{FullName: "example-owner/second-repo", Owner: github.User{Login: "example-owner"}}, Permissions: "write",
+	}}}
+	m := &Monitor{Config: cfg, ConfigPath: path, GitHub: gh}
+	if err := m.acceptWhitelistedInvitations(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo, ok := saved.Repository("example-owner/second-repo")
+	if !ok || len(repo.Actions) != 0 || len(gh.accepted) != 1 {
+		t.Fatalf("disabled commands produced actions: repo=%+v accepted=%v", repo, gh.accepted)
 	}
 }
 
@@ -1124,7 +1223,7 @@ func TestReclaimedRepositoryCannotTriggerCommandOrRetry(t *testing.T) {
 				t.Fatal(err)
 			}
 			executor := &fakeExecutor{}
-			m := &Monitor{Config: testConfig(), GitHub: gh, Executor: executor, Now: func() time.Time { return now }}
+			m := &Monitor{Config: testConfig(t), GitHub: gh, Executor: executor, Now: func() time.Time { return now }}
 			if _, err := m.RunOnce(context.Background(), store); err != nil {
 				t.Fatal(err)
 			}
@@ -1151,7 +1250,7 @@ func TestReclaimedLoginCannotAuthorizeCommand(t *testing.T) {
 			gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)},
 				items:      []github.Item{{Key: "comment:1", Body: "@linkdataminion review", Author: github.User{ID: 7, Login: "writer"}}},
 				permission: github.Permission{Permission: "write", User: github.User{ID: 7, Login: "writer"}}}
-			cfg := testConfig()
+			cfg := testConfig(t)
 			cfg.Repositories[0].AllowedActors = []string{"writer"}
 			cfg.Repositories[0].AllowedActorIDs = map[string]int64{"writer": 7}
 			tc.prepare(gh, &cfg)
@@ -1168,7 +1267,7 @@ func TestReclaimedLoginCannotAuthorizeCommand(t *testing.T) {
 }
 
 func TestReclaimedInvitationOwnerCannotRegisterOrAccept(t *testing.T) {
-	cfg := testConfig()
+	cfg := testConfig(t)
 	cfg.InvitationOwners = []string{"example-owner"}
 	cfg.InvitationOwnerIDs = map[string]int64{"example-owner": 2}
 	gh := &fakeGitHub{rawIDs: true, invitations: []github.Invitation{

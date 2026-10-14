@@ -13,10 +13,16 @@ import (
 type Action string
 
 const (
-	Review  Action = "review"
-	Audit   Action = "audit"
-	Fix     Action = "fix"
+	// Review selects the pull-request review action.
+	Review Action = "review"
+	// Fix selects the issue fix action.
+	Fix Action = "fix"
+	// Release selects the draft-release action.
 	Release Action = "release"
+	// Comment selects a read-only report posted to the requesting thread.
+	Comment Action = "comment"
+	// SecurityAudit selects the structured security-audit action.
+	SecurityAudit Action = "security-audit"
 )
 
 var (
@@ -28,11 +34,13 @@ var (
 	ErrInvalidLogin = errors.New("invalid bot login")
 )
 
-// Command is a directive on its own Markdown line. Key is a deterministic
-// SHA-256 digest of the action and argument; callers should include the GitHub
-// item's identity when using it as an idempotency key.
+// Command is a directive on its own Markdown line.
+//
+// Key is a deterministic SHA-256 digest of the name and argument; callers
+// should include the GitHub item's identity when using it as an idempotency key.
 type Command struct {
 	Key    string
+	Name   string
 	Action Action
 	Args   string
 }
@@ -44,17 +52,28 @@ func Parse(markdown string) (Command, error) {
 
 // ParseForLogin finds exactly one directive for login.
 //
-// It accepts these standalone forms (ASCII case-insensitively):
+// It accepts these default standalone forms (ASCII case-insensitively):
 //
 //	@<login> review
 //	@<login> audit
 //	@<login> fix
-//	@<login> release <tag>
+//	@<login> security-audit
 //
 // The directive must be the first nonblank line. Later text is not a command
 // argument; callers may use it as task context after authorization. A second
-// directive returns [ErrAmbiguous].
+// configured directive returns [ErrAmbiguous].
 func ParseForLogin(markdown, login string) (Command, error) {
+	return ParseForLoginCommands(markdown, login, map[string]Action{
+		"review": Review, "fix": Fix, "audit": Comment, "security-audit": SecurityAudit,
+	})
+}
+
+// ParseForLoginCommands finds exactly one configured standalone directive for login.
+//
+// The directive must be the first nonblank line. Later text may be used as
+// task context after authorization; a second configured directive returns
+// [ErrAmbiguous]. Only [Release] actions take an argument, which is one tag.
+func ParseForLoginCommands(markdown, login string, actions map[string]Action) (Command, error) {
 	if !validLogin(login) {
 		return Command{}, ErrInvalidLogin
 	}
@@ -70,19 +89,19 @@ func ParseForLogin(markdown, login string) (Command, error) {
 	if first == len(lines) || isIndentedCode(lines[first]) {
 		return Command{}, ErrNoCommand
 	}
-	found, ok := parseLine(lines[first], handle)
+	found, ok := parseLine(lines[first], handle, actions)
 	if !ok {
 		return Command{}, ErrNoCommand
 	}
 	for _, line := range lines[first+1:] {
-		if _, ok := parseLine(line, handle); ok {
+		if _, ok := parseLine(line, handle, actions); ok {
 			return Command{}, ErrAmbiguous
 		}
 	}
 	return found, nil
 }
 
-func parseLine(line, handle string) (Command, bool) {
+func parseLine(line, handle string, actions map[string]Action) (Command, bool) {
 	line = strings.Trim(line, " \t")
 	if len(line) <= len(handle) || !equalASCIIFold(line[:len(handle)], handle) {
 		return Command{}, false
@@ -93,22 +112,21 @@ func parseLine(line, handle string) (Command, bool) {
 
 	verb, args := splitFirst(strings.Trim(line[len(handle):], " \t"))
 	args = strings.Trim(args, " \t")
-	var action Action
-	switch {
-	case equalASCIIFold(verb, string(Review)) && args == "":
-		action = Review
-	case equalASCIIFold(verb, string(Audit)) && args == "":
-		action = Audit
-	case equalASCIIFold(verb, string(Fix)) && args == "":
-		action = Fix
-	case equalASCIIFold(verb, string(Release)) && args != "" && strings.IndexFunc(args, unicode.IsSpace) < 0:
-		action = Release
-	default:
+	name := strings.ToLower(verb)
+	action, ok := actions[name]
+	if !ok || !equalASCIIFold(verb, name) {
+		return Command{}, false
+	}
+	if action == Release {
+		if args == "" || strings.IndexFunc(args, unicode.IsSpace) >= 0 {
+			return Command{}, false
+		}
+	} else if args != "" {
 		return Command{}, false
 	}
 
-	keyBytes := sha256.Sum256([]byte(string(action) + "\x00" + args))
-	return Command{Key: hex.EncodeToString(keyBytes[:]), Action: action, Args: args}, true
+	keyBytes := sha256.Sum256([]byte(name + "\x00" + args))
+	return Command{Key: hex.EncodeToString(keyBytes[:]), Name: name, Action: action, Args: args}, true
 }
 
 func validLogin(login string) bool {

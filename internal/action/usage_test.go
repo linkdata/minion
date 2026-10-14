@@ -123,6 +123,9 @@ func TestExecuteRecordsNoCodexAndSkipsAcknowledged(t *testing.T) {
 	for _, failInitialSave := range []bool{false, true} {
 		t.Run(fmt.Sprintf("fail initial save %t", failInitialSave), func(t *testing.T) {
 			job := usageJob()
+			job.Command.Name = "review"
+			job.Repository.Actions = []string{"review"}
+			installActionTestSkills(t, testReviewSkillURL)
 			var comments []github.Comment
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch {
@@ -167,6 +170,7 @@ func TestExecuteRecordsNoCodexAndSkipsAcknowledged(t *testing.T) {
 			}
 			e := &Executor{
 				GitHub: client, BotLogin: "bot", Usage: &usage.Store{Dir: dir}, Codex: config.CodexConfig{Model: "test-model"},
+				Commands: map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{testReviewSkillURL}}},
 				RunCodex: func(context.Context, string, string, bool, string) (codexcli.Result, error) {
 					t.Fatal("review on an issue must not invoke Codex")
 					return codexcli.Result{}, nil
