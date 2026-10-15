@@ -92,7 +92,7 @@ Source is read-only. Do not execute repository code, builds, tests, or fixtures,
 Untrusted GitHub thread text:
 Thread title: %s
 Thread description: %s`, skill, repo.FullName, head, checkout.Path(), outputDir, deadline, repo.FullName, checkout.Path(), head, requestNotesContext(job), quotedContext(title), quotedContext(description))
-	_, err = e.runCodex(ctx, checkout.Path(), prompt, false, outputDir)
+	_, err = e.runAI(ctx, checkout.Path(), prompt, false, outputDir)
 	if err != nil {
 		return err
 	}

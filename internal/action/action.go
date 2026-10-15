@@ -12,6 +12,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/codexcli"
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
@@ -48,7 +49,13 @@ type Executor struct {
 	// A nil function disables these checks.
 	CheckWorkRoot func() error
 	Timeout       time.Duration
-	Codex         config.CodexConfig
+	// Main selects codex (the zero value) or claude. Adversarial optionally selects the other CLI.
+	Main        string
+	Adversarial string
+	// CriticMaxRounds bounds main/critic pairs; zero selects three.
+	CriticMaxRounds int
+	Codex           config.CodexConfig
+	Claude          config.ClaudeConfig
 	// MaxGitHubContextBytes limits combined GitHub text.
 	//
 	// Nonpositive values use [config.DefaultMaxGitHubContextBytes].
@@ -57,6 +64,8 @@ type Executor struct {
 	AlwaysOnSkills        []string
 	Logger                *log.Logger
 	RunCodex              func(context.Context, string, string, bool, string) (codexcli.Result, error)
+	RunClaude             func(context.Context, string, string, bool, string) (aicli.Result, error)
+	runModel              func(context.Context, modelRun) (aicli.Result, error)
 }
 
 func (e *Executor) logf(format string, args ...any) {
@@ -76,17 +85,6 @@ func (e *Executor) checkoutPullRequest(ctx context.Context, checkout *gitwork.Ch
 	return checkout.CheckoutPullRequest(ctx, number, baseRef, headSHA, func(ctx context.Context, treeSHA string) (github.GitTree, error) {
 		return e.GitHub.GitTree(ctx, repo, treeSHA)
 	})
-}
-
-func (e *Executor) runCodex(ctx context.Context, dir, prompt string, writable bool, outputDir string) (string, error) {
-	var result codexcli.Result
-	var err error
-	if e.RunCodex != nil {
-		result, err = e.RunCodex(ctx, dir, prompt, writable, outputDir)
-	} else {
-		result, err = codexcli.Run(ctx, dir, prompt, writable, outputDir, e.Codex)
-	}
-	return result.Answer, err
 }
 
 func (e *Executor) Execute(ctx context.Context, job monitor.Job) (resultErr error) {
@@ -177,36 +175,55 @@ func (e *Executor) forCommand(job monitor.Job) (*Executor, error) {
 	if !ok || mapping.Action != string(job.Command.Action) || len(mapping.Skills) == 0 || !job.Repository.AllowsAction(job.Command.Name) {
 		return nil, fmt.Errorf("command %q is not enabled for %s", job.Command.Name, job.Repository.Name)
 	}
-	settings := e.Codex
-	settings.Skills = nil
+	if !mapping.SupportsProvider(e.mainProvider()) {
+		return nil, fmt.Errorf("%w: action %q is not supported with %s as main", monitor.ErrTerminalJob, mapping.Action, e.mainProvider())
+	}
+	configured := *e
+	mainSkills, err := e.selectedSkills(e.mainProvider(), mapping.Skills)
+	if err != nil {
+		return nil, fmt.Errorf("command %q: %w", job.Command.Name, err)
+	}
+	var criticSkills []string
+	if e.Adversarial != "" {
+		if criticSkills, err = e.selectedSkills(e.Adversarial, nil); err != nil {
+			return nil, err
+		}
+	}
+	if e.mainProvider() == "claude" {
+		configured.Claude.Skills, configured.Codex.Skills = mainSkills, criticSkills
+	} else {
+		configured.Codex.Skills, configured.Claude.Skills = mainSkills, criticSkills
+	}
+	return &configured, nil
+}
+
+func (e *Executor) selectedSkills(provider string, required []string) (selected []string, err error) {
 	seen := map[string]bool{}
-	for _, source := range mapping.Skills {
-		path, installed, err := skills.InstalledPath(source)
+	for _, source := range required {
+		path, installed, err := skills.InstalledPathFor(source, provider)
 		if err != nil {
-			return nil, fmt.Errorf("command %q skill: %w", job.Command.Name, err)
+			return nil, fmt.Errorf("%s skill: %w", provider, err)
 		}
 		if !installed {
-			return nil, fmt.Errorf("command %q skill is not installed: %s", job.Command.Name, source)
+			return nil, fmt.Errorf("%s skill is not installed: %s", provider, source)
 		}
 		if !seen[path] {
-			settings.Skills = append(settings.Skills, path)
+			selected = append(selected, path)
 			seen[path] = true
 		}
 	}
 	for _, source := range e.AlwaysOnSkills {
-		path, installed, err := skills.InstalledPath(source)
+		path, installed, err := skills.InstalledPathFor(source, provider)
 		if err != nil {
-			e.logf("skip unavailable always-on skill %s: %v", source, err)
+			e.logf("skip unavailable %s always-on skill %s: %v", provider, source, err)
 			continue
 		}
 		if installed && !seen[path] {
-			settings.Skills = append(settings.Skills, path)
+			selected = append(selected, path)
 			seen[path] = true
 		}
 	}
-	configured := *e
-	configured.Codex = settings
-	return &configured, nil
+	return
 }
 
 func (e *Executor) alreadyAcknowledged(ctx context.Context, job monitor.Job) (bool, error) {
@@ -261,7 +278,7 @@ The checkout is at the exact pull request head %s. Compare refs/remotes/minion/b
 Untrusted GitHub metadata:
 Pull request title: %s
 Pull request description: %s`, job.Number, job.Repository.Name, job.Source.Author.Login, pull.Head.SHA, requestNotesContext(job), quotedContext(pull.Title), quotedContext(pull.Body))
-	result, err := e.runCodex(ctx, checkout.Path(), prompt, false, "")
+	result, err := e.runAI(ctx, checkout.Path(), prompt, false, "")
 	if err != nil {
 		return err
 	}
@@ -337,7 +354,7 @@ Read the code, make the needed change, and run relevant local tests. Do not comm
 
 Untrusted GitHub issue text:
 Issue description: %s`, job.Number, repo.FullName, job.Source.Author.Login, requestNotesContext(job), quotedContext(content.BodyText))
-		result, err := e.runCodex(ctx, checkout.Path(), prompt, true, "")
+		result, err := e.runAI(ctx, checkout.Path(), prompt, true, "")
 		if err != nil {
 			return err
 		}
@@ -346,7 +363,7 @@ Issue description: %s`, job.Number, repo.FullName, job.Source.Author.Login, requ
 			return err
 		}
 		if !changed {
-			if err := e.acknowledge(ctx, job, "Codex completed the request without changing files.\n\n"+inertModelOutput(result)); err != nil {
+			if err := e.acknowledge(ctx, job, "AI completed the request without changing files.\n\n"+inertModelOutput(result)); err != nil {
 				return fmt.Errorf("%w: %w", monitor.ErrPostCodexPublication, err)
 			}
 			return nil
@@ -523,7 +540,7 @@ func (e *Executor) release(ctx context.Context, job monitor.Job) error {
 			return err
 		}
 		prompt := fmt.Sprintf(`Prepare GitHub release notes for proposed tag %q in %s at commit %s. Inspect the repository tags and history locally. Describe user-visible changes since the previous release, any known compatibility changes, and test coverage. Do not invent facts. Return Markdown release notes only. Do not edit files, create tags or releases, or run network commands.%s`, tag, repo.FullName, target, requestNotesContext(job))
-		result, err := e.runCodex(ctx, checkout.Path(), prompt, false, "")
+		result, err := e.runAI(ctx, checkout.Path(), prompt, false, "")
 		if err != nil {
 			return err
 		}

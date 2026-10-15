@@ -120,12 +120,15 @@ func TestSaveRejectsInvalidRecords(t *testing.T) {
 			finish := r.StartedAt.Add(-time.Second)
 			r.FinishedAt = &finish
 		},
-		"running finish":      func(r *Record) { r.Status = "running" },
-		"negative calls":      func(r *Record) { r.CodexCalls = -1 },
-		"negative input":      func(r *Record) { r.Tokens.Input = -1 },
-		"negative cache":      func(r *Record) { r.Tokens.CachedInput = -1 },
-		"negative output":     func(r *Record) { r.Tokens.Output = -1 },
-		"cache exceeds input": func(r *Record) { r.Tokens.CachedInput = r.Tokens.Input + 1 },
+		"running finish":          func(r *Record) { r.Status = "running" },
+		"negative calls":          func(r *Record) { r.CodexCalls = -1 },
+		"negative Claude calls":   func(r *Record) { r.ClaudeCalls = -1 },
+		"invalid main provider":   func(r *Record) { r.Provider = "unknown" },
+		"invalid critic provider": func(r *Record) { r.CriticProvider = "unknown" },
+		"negative input":          func(r *Record) { r.Tokens.Input = -1 },
+		"negative cache":          func(r *Record) { r.Tokens.CachedInput = -1 },
+		"negative output":         func(r *Record) { r.Tokens.Output = -1 },
+		"cache exceeds input":     func(r *Record) { r.Tokens.CachedInput = r.Tokens.Input + 1 },
 	} {
 		t.Run(name, func(t *testing.T) {
 			dir := filepath.Join(t.TempDir(), "usage")
@@ -138,6 +141,36 @@ func TestSaveRejectsInvalidRecords(t *testing.T) {
 				t.Fatalf("invalid record created directory: %v", err)
 			}
 		})
+	}
+}
+
+func TestStoreProviderMetadata(t *testing.T) {
+	for _, dual := range []bool{false, true} {
+		record := testRecord()
+		if dual {
+			record.Provider, record.Model, record.Effort = "claude", "default", "medium"
+			record.CriticProvider, record.CriticModel, record.CriticEffort = "codex", "critic-model", "high"
+			record.ClaudeCalls = 2
+		}
+		dir := t.TempDir()
+		if err := (Store{Dir: dir}).Save(record); err != nil {
+			t.Fatal(err)
+		}
+		if !dual {
+			data, err := os.ReadFile(filepath.Join(dir, record.ID+".json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, field := range []string{"provider", "critic_provider", "critic_model", "critic_effort", "claude_calls"} {
+				if strings.Contains(string(data), `"`+field+`"`) {
+					t.Fatalf("legacy record contains unexpected field %s: %s", field, data)
+				}
+			}
+		}
+		records, err := ReadAll(dir)
+		if err != nil || len(records) != 1 || !reflect.DeepEqual(records[0], record) {
+			t.Fatalf("provider metadata changed: got=%+v want=%+v err=%v", records, record, err)
+		}
 	}
 }
 
@@ -223,6 +256,7 @@ func TestSummarize(t *testing.T) {
 	second := first
 	second.Repo, second.User = "LINKDATA/MINION", "EXAMPLE"
 	second.Status, second.UsageComplete = "failed", false
+	second.CodexCalls, second.ClaudeCalls = 0, 2
 	third := first
 	third.Status, third.FinishedAt = "running", nil
 	fourth := first
@@ -237,7 +271,7 @@ func TestSummarize(t *testing.T) {
 		t.Fatalf("incorrect order or grouping: %+v", groups)
 	}
 	got := groups[1]
-	want := Summary{Repo: first.Repo, User: first.User, Attempts: 3, Succeeded: 1, Failed: 1, Running: 1, CodexCalls: 3,
+	want := Summary{Repo: first.Repo, User: first.User, Attempts: 3, Succeeded: 1, Failed: 1, Running: 1, CodexCalls: 2, ClaudeCalls: 2,
 		IncompleteUsage: 2, Tokens: Tokens{Input: 300, CachedInput: 240, Output: 60}, TotalTokens: 360}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("summary=%+v want=%+v", got, want)
@@ -247,7 +281,7 @@ func TestSummarize(t *testing.T) {
 		t.Fatalf("UTC grouping/filter: summary=%+v err=%v", groups, err)
 	}
 	groups, err = Summarize(records, Filter{}, nil)
-	if err != nil || len(groups) != 1 || groups[0].Attempts != 4 || groups[0].TotalTokens != 480 || groups[0].Repo != "" {
+	if err != nil || len(groups) != 1 || groups[0].Attempts != 4 || groups[0].CodexCalls != 3 || groups[0].ClaudeCalls != 2 || groups[0].TotalTokens != 480 || groups[0].Repo != "" {
 		t.Fatalf("grand total=%+v err=%v", groups, err)
 	}
 	groups, err = Summarize(nil, Filter{}, nil)

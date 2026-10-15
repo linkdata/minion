@@ -163,8 +163,16 @@ func writeUsageTable(stdout io.Writer, output usageOutput, details bool) error {
 	var buffer bytes.Buffer
 	w := tabwriter.NewWriter(&buffer, 0, 4, 2, ' ', 0)
 	if details {
-		fmt.Fprintln(w, "STARTED (UTC)\tREPO\tUSER\tACTION\tSTATUS\tCALLS\tINPUT\tCACHED\tOUTPUT\tTOTAL\tUSAGE\tATTEMPT") //nolint:errcheck // -- The tabwriter writes to an infallible bytes.Buffer.
+		fmt.Fprintln(w, "STARTED (UTC)\tREPO\tUSER\tACTION\tSTATUS\tMAIN\tCRITIC\tCODEX CALLS\tCLAUDE CALLS\tINPUT\tCACHED\tOUTPUT\tTOTAL\tUSAGE\tATTEMPT") //nolint:errcheck // -- The tabwriter writes to an infallible bytes.Buffer.
 		for _, attempt := range output.Attempts {
+			provider := attempt.Provider
+			if provider == "" {
+				provider = "codex"
+			}
+			critic := attempt.CriticProvider
+			if critic == "" {
+				critic = "-"
+			}
 			coverage := "complete"
 			if !attempt.UsageComplete || attempt.Status == "running" {
 				coverage = "unknown"
@@ -172,26 +180,26 @@ func writeUsageTable(stdout io.Writer, output usageOutput, details bool) error {
 					coverage = "partial"
 				}
 			}
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%d\t%d\t%s\t%s\n", attempt.StartedAt.UTC().Format(time.RFC3339), attempt.Repo, attempt.User, attempt.Action, attempt.Status, attempt.CodexCalls, attempt.Tokens.Input, attempt.Tokens.CachedInput, attempt.Tokens.Output, attempt.TotalTokens, coverage, attempt.ID) //nolint:errcheck // -- The tabwriter writes to an infallible bytes.Buffer.
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%d\t%d\t%d\t%s\t%s\n", attempt.StartedAt.UTC().Format(time.RFC3339), attempt.Repo, attempt.User, attempt.Action, attempt.Status, provider, critic, attempt.CodexCalls, attempt.ClaudeCalls, attempt.Tokens.Input, attempt.Tokens.CachedInput, attempt.Tokens.Output, attempt.TotalTokens, coverage, attempt.ID) //nolint:errcheck // -- The tabwriter writes to an infallible bytes.Buffer.
 		}
 	} else {
 		for _, group := range output.GroupBy {
 			fmt.Fprintf(w, "%s\t", strings.ToUpper(group)) //nolint:errcheck // -- The tabwriter writes to an infallible bytes.Buffer.
 		}
-		fmt.Fprintln(w, "ATTEMPTS\tSUCCEEDED\tFAILED\tRUNNING\tCALLS\tINPUT\tCACHED\tOUTPUT\tTOTAL\tINCOMPLETE") //nolint:errcheck // -- The tabwriter writes to an infallible bytes.Buffer.
+		fmt.Fprintln(w, "ATTEMPTS\tSUCCEEDED\tFAILED\tRUNNING\tCODEX CALLS\tCLAUDE CALLS\tINPUT\tCACHED\tOUTPUT\tTOTAL\tINCOMPLETE") //nolint:errcheck // -- The tabwriter writes to an infallible bytes.Buffer.
 		for _, summary := range output.Groups {
 			values := map[string]string{"repo": summary.Repo, "user": summary.User, "action": summary.Action, "day": summary.Day, "month": summary.Month}
 			for _, group := range output.GroupBy {
 				fmt.Fprintf(w, "%s\t", values[group]) //nolint:errcheck // -- The tabwriter writes to an infallible bytes.Buffer.
 			}
-			fmt.Fprintf(w, "%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n", summary.Attempts, summary.Succeeded, summary.Failed, summary.Running, summary.CodexCalls, summary.Tokens.Input, summary.Tokens.CachedInput, summary.Tokens.Output, summary.TotalTokens, summary.IncompleteUsage) //nolint:errcheck // -- The tabwriter writes to an infallible bytes.Buffer.
+			fmt.Fprintf(w, "%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n", summary.Attempts, summary.Succeeded, summary.Failed, summary.Running, summary.CodexCalls, summary.ClaudeCalls, summary.Tokens.Input, summary.Tokens.CachedInput, summary.Tokens.Output, summary.TotalTokens, summary.IncompleteUsage) //nolint:errcheck // -- The tabwriter writes to an infallible bytes.Buffer.
 		}
 	}
 	if err := w.Flush(); err != nil {
 		return err
 	}
 	t := output.Totals
-	fmt.Fprintf(&buffer, "\nTotals: %d attempts; %d succeeded, %d failed, %d running; %d Codex calls.\n", t.Attempts, t.Succeeded, t.Failed, t.Running, t.CodexCalls)
+	fmt.Fprintf(&buffer, "\nTotals: %d attempts; %d succeeded, %d failed, %d running; %d Codex calls, %d Claude calls.\n", t.Attempts, t.Succeeded, t.Failed, t.Running, t.CodexCalls, t.ClaudeCalls)
 	fmt.Fprintf(&buffer, "Tokens: %d input, %d cached input, %d output, %d total; %d attempts with incomplete usage.\n", t.Tokens.Input, t.Tokens.CachedInput, t.Tokens.Output, t.TotalTokens, t.IncompleteUsage)
 	fmt.Fprintln(&buffer, usageTokenNote)
 	if t.Running != 0 {

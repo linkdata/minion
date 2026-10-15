@@ -1,5 +1,8 @@
 {
   "bot_login": "example-bot",
+  "main": "codex",
+  "adversarial": "",
+  "critic_max_rounds": 3,
   "commands": {
     "review": {
       "action": "review",

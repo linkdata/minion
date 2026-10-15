@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/linkdata/minion/internal/codexcli"
+	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/usage"
 )
@@ -23,11 +23,25 @@ func (e *Executor) trackUsage(job monitor.Job) (*Executor, func(error) error, er
 	if name == "" {
 		name = string(job.Command.Action)
 	}
+	modelSettings := func(provider string) (model, effort string) {
+		model, effort = e.Codex.Model, e.Codex.ReasoningEffort
+		if provider == "claude" {
+			model, effort = e.Claude.Model, e.Claude.Effort
+		}
+		if model == "" {
+			model = "default"
+		}
+		return
+	}
 	record := usage.Record{
 		ID: hex.EncodeToString(id[:]), JobID: job.ID, Repo: job.Repository.Name,
 		User: job.Source.Author.Login, Action: name, Number: job.Number,
-		SourceURL: sourceURL(job), Model: e.Codex.Model, Effort: e.Codex.ReasoningEffort,
+		SourceURL: sourceURL(job), Provider: e.mainProvider(), CriticProvider: e.Adversarial,
 		StartedAt: time.Now().UTC(), Status: "running", UsageComplete: true,
+	}
+	record.Model, record.Effort = modelSettings(record.Provider)
+	if record.CriticProvider != "" {
+		record.CriticModel, record.CriticEffort = modelSettings(record.CriticProvider)
 	}
 	save := func() error {
 		if err := e.Usage.Save(record); err != nil {
@@ -38,23 +52,21 @@ func (e *Executor) trackUsage(job monitor.Job) (*Executor, func(error) error, er
 	if err := save(); err != nil {
 		return nil, nil, err
 	}
-	run := e.RunCodex
-	if run == nil {
-		run = func(ctx context.Context, dir, prompt string, writable bool, outputDir string) (codexcli.Result, error) {
-			return codexcli.Run(ctx, dir, prompt, writable, outputDir, e.Codex)
-		}
-	}
 	tracked := *e
-	tracked.RunCodex = func(ctx context.Context, dir, prompt string, writable bool, outputDir string) (codexcli.Result, error) {
+	tracked.runModel = func(ctx context.Context, request modelRun) (aicli.Result, error) {
+		calls := &record.CodexCalls
+		if request.provider == "claude" {
+			calls = &record.ClaudeCalls
+		}
 		complete := record.UsageComplete
-		record.CodexCalls++
+		*calls++
 		record.UsageComplete = false
 		if err := save(); err != nil {
-			record.CodexCalls--
+			*calls--
 			record.UsageComplete = complete
-			return codexcli.Result{}, err
+			return aicli.Result{}, err
 		}
-		result, err := run(ctx, dir, prompt, writable, outputDir)
+		result, err := e.runOnce(ctx, request)
 		record.Tokens.Add(result.Tokens)
 		record.UsageComplete = complete && result.UsageComplete
 		return result, errors.Join(err, save())

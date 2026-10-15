@@ -11,7 +11,7 @@ import (
 func TestAddRepositoryPreservesSettingsAndExistingRestrictions(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
-	data := []byte(`{"bot_login":"linkdataminion","codex":{"model":"user-model","reasoning_effort":"user-effort"},"state_path":"relative/state.json","repositories":[{"name":"example-owner/example-repo","id":1,"owner_id":2,"actions":["review"],"allowed_actors":["alice"],"allowed_actor_ids":{"alice":7}}]}`)
+	data := []byte(`{"bot_login":"linkdataminion","main":"claude","adversarial":"codex","critic_max_rounds":4,"codex":{"model":"user-model","reasoning_effort":"user-effort"},"claude":{"model":"sonnet","effort":"high"},"state_path":"relative/state.json","repositories":[{"name":"example-owner/example-repo","id":1,"owner_id":2,"actions":["review"],"allowed_actors":["alice"],"allowed_actor_ids":{"alice":7}}]}`)
 	if err := os.WriteFile(path, data, 0640); err != nil {
 		t.Fatal(err)
 	}
@@ -30,6 +30,9 @@ func TestAddRepositoryPreservesSettingsAndExistingRestrictions(t *testing.T) {
 	}
 	if raw.Codex.Model != "user-model" || raw.Codex.ReasoningEffort != "user-effort" || raw.StatePath != "relative/state.json" || raw.WorkRoot != "" || raw.PollIntervalSeconds != 0 {
 		t.Fatalf("rewrote unrelated settings or defaults: %+v", raw)
+	}
+	if raw.Main != "claude" || raw.Adversarial != "codex" || raw.CriticMaxRounds != 4 || raw.Claude.Model != "sonnet" || raw.Claude.Effort != "high" {
+		t.Fatalf("changed model or critic settings: %+v", raw)
 	}
 	if len(raw.Repositories) != 2 || len(raw.Repositories[0].Actions) != 1 || raw.Repositories[0].AllowedActors[0] != "alice" {
 		t.Fatalf("changed repository restrictions: %+v", raw.Repositories)
