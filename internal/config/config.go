@@ -23,6 +23,9 @@ var (
 )
 
 const (
+	// DefaultMaxGitHubContextBytes is the default GitHub text budget for a Codex action.
+	DefaultMaxGitHubContextBytes = 32 << 10
+
 	defaultReviewSkill        = "https://github.com/DietrichGebert/ponytail/tree/main/skills/ponytail-review"
 	defaultFixSkill           = "https://github.com/DietrichGebert/ponytail/tree/main/skills/ponytail"
 	defaultAuditSkill         = "https://github.com/DietrichGebert/ponytail/tree/main/skills/ponytail-audit"
@@ -81,16 +84,20 @@ type Config struct {
 	// Nil Commands selects defaults; an empty map disables all commands.
 	Commands map[string]CommandMapping `json:"commands"`
 	// Nil AlwaysOnSkills selects anti-prompt-injection and caveman; an empty list disables always-on skills.
-	AlwaysOnSkills      []string         `json:"always_on_skills"`
-	PollIntervalSeconds int              `json:"poll_interval_seconds,omitempty"`
-	JobTimeoutMinutes   int              `json:"job_timeout_minutes,omitempty"`
-	StatePath           string           `json:"state_path,omitempty"`
-	WorkRoot            string           `json:"work_root,omitempty"`
-	WorkRootMaxBytes    int64            `json:"work_root_max_bytes,omitempty"`
-	StartAt             string           `json:"start_at,omitempty"`
-	InvitationOwners    []string         `json:"invitation_owners,omitempty"`
-	InvitationOwnerIDs  map[string]int64 `json:"invitation_owner_ids,omitempty"`
-	Repositories        []Repository     `json:"repositories"`
+	AlwaysOnSkills      []string `json:"always_on_skills"`
+	PollIntervalSeconds int      `json:"poll_interval_seconds,omitempty"`
+	JobTimeoutMinutes   int      `json:"job_timeout_minutes,omitempty"`
+	// MaxGitHubContextBytes limits the combined UTF-8 bytes of trimmed GitHub text in one action.
+	//
+	// Zero selects [DefaultMaxGitHubContextBytes].
+	MaxGitHubContextBytes int              `json:"max_github_context_bytes,omitempty"`
+	StatePath             string           `json:"state_path,omitempty"`
+	WorkRoot              string           `json:"work_root,omitempty"`
+	WorkRootMaxBytes      int64            `json:"work_root_max_bytes,omitempty"`
+	StartAt               string           `json:"start_at,omitempty"`
+	InvitationOwners      []string         `json:"invitation_owners,omitempty"`
+	InvitationOwnerIDs    map[string]int64 `json:"invitation_owner_ids,omitempty"`
+	Repositories          []Repository     `json:"repositories"`
 }
 
 // Load reads and validates configuration.
@@ -222,6 +229,12 @@ func (c *Config) Validate(configDir string) error {
 	}
 	if c.JobTimeoutMinutes < 1 || c.JobTimeoutMinutes > 240 {
 		return fmt.Errorf("job_timeout_minutes must be between 1 and 240")
+	}
+	if c.MaxGitHubContextBytes == 0 {
+		c.MaxGitHubContextBytes = DefaultMaxGitHubContextBytes
+	}
+	if c.MaxGitHubContextBytes < 0 {
+		return fmt.Errorf("max_github_context_bytes must be positive")
 	}
 	if c.StatePath == "" {
 		c.StatePath = "var/state.json"

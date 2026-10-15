@@ -133,17 +133,18 @@ func run() int {
 	}()
 
 	executor := &action.Executor{
-		GitHub:         client,
-		BotLogin:       cfg.BotLogin,
-		Store:          store,
-		Usage:          &usage.Store{Dir: filepath.Join(filepath.Dir(cfg.StatePath), "usage")},
-		WorkRoot:       cfg.WorkRoot,
-		CheckWorkRoot:  checkWorkRoot,
-		Timeout:        time.Duration(cfg.JobTimeoutMinutes) * time.Minute,
-		Codex:          cfg.Codex,
-		Commands:       cfg.Commands,
-		AlwaysOnSkills: cfg.AlwaysOnSkills,
-		Logger:         logger,
+		GitHub:                client,
+		BotLogin:              cfg.BotLogin,
+		Store:                 store,
+		Usage:                 &usage.Store{Dir: filepath.Join(filepath.Dir(cfg.StatePath), "usage")},
+		WorkRoot:              cfg.WorkRoot,
+		CheckWorkRoot:         checkWorkRoot,
+		Timeout:               time.Duration(cfg.JobTimeoutMinutes) * time.Minute,
+		Codex:                 cfg.Codex,
+		MaxGitHubContextBytes: cfg.MaxGitHubContextBytes,
+		Commands:              cfg.Commands,
+		AlwaysOnSkills:        cfg.AlwaysOnSkills,
+		Logger:                logger,
 	}
 	watcher := &monitor.Monitor{Config: cfg, ConfigPath: *configPath, GitHub: client, Executor: executor, Logger: logger}
 	for {

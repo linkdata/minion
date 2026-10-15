@@ -23,12 +23,12 @@ import (
 	"github.com/linkdata/minion/internal/usage"
 )
 
-const (
-	maxContextBytes = 32 << 10
-	maxOutputBytes  = 58 << 10
-)
+const maxOutputBytes = 58 << 10
 
-var tagPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$`)
+var (
+	tagPattern               = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$`)
+	errGitHubContextTooLarge = errors.New("GitHub context exceeds configured byte limit")
+)
 
 var modelLineBreaks = strings.NewReplacer(
 	"\r\n", "\n", "\r", "\n", "\v", "\n", "\f", "\n",
@@ -46,13 +46,17 @@ type Executor struct {
 	// CheckWorkRoot verifies the work filesystem before a job and after failure.
 	//
 	// A nil function disables these checks.
-	CheckWorkRoot  func() error
-	Timeout        time.Duration
-	Codex          config.CodexConfig
-	Commands       map[string]config.CommandMapping
-	AlwaysOnSkills []string
-	Logger         *log.Logger
-	RunCodex       func(context.Context, string, string, bool, string) (codexcli.Result, error)
+	CheckWorkRoot func() error
+	Timeout       time.Duration
+	Codex         config.CodexConfig
+	// MaxGitHubContextBytes limits combined GitHub text.
+	//
+	// Nonpositive values use [config.DefaultMaxGitHubContextBytes].
+	MaxGitHubContextBytes int
+	Commands              map[string]config.CommandMapping
+	AlwaysOnSkills        []string
+	Logger                *log.Logger
+	RunCodex              func(context.Context, string, string, bool, string) (codexcli.Result, error)
 }
 
 func (e *Executor) logf(format string, args ...any) {
@@ -151,6 +155,14 @@ func (e *Executor) Execute(ctx context.Context, job monitor.Job) (resultErr erro
 	default:
 		resultErr = fmt.Errorf("unsupported action %q", job.Command.Action)
 	}
+	if errors.Is(resultErr, errGitHubContextTooLarge) {
+		// Give the fixed refusal its own deadline even when the action timed out.
+		replyCtx, replyCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		resultErr = e.acknowledge(replyCtx, job, fmt.Sprintf("Request exceeds the configured GitHub context limit of %d UTF-8 bytes. Shorten the thread text or requester notes included in this action, then post a new command.", e.githubContextLimit()))
+		replyCancel()
+		returned = true
+		return resultErr
+	}
 	if resultErr != nil && (errors.Is(ctx.Err(), context.DeadlineExceeded) ||
 		errors.Is(resultErr, gitwork.ErrTooManyFiles) || errors.Is(resultErr, gitwork.ErrChangedFileLarge) ||
 		errors.Is(resultErr, gitwork.ErrDiffTooLarge) || errors.Is(resultErr, codexcli.ErrOutputLimit)) {
@@ -231,6 +243,9 @@ func (e *Executor) review(ctx context.Context, job monitor.Job) error {
 	if pull.Base.Ref == "" || pull.Head.SHA == "" {
 		return errors.New("pull request is missing base ref or head SHA")
 	}
+	if err := e.checkGitHubContext(job, pull.Title, pull.Body); err != nil {
+		return err
+	}
 	checkout, err := gitwork.Clone(ctx, e.WorkRoot, job.Repository.Name, pull.Base.Ref)
 	if err != nil {
 		return err
@@ -304,6 +319,9 @@ func (e *Executor) fix(ctx context.Context, job monitor.Job) error {
 		}
 		if job.Source.UpdatedAt.IsZero() || content.LastEditedAt != nil && !content.LastEditedAt.Before(job.Source.UpdatedAt) {
 			return e.acknowledge(ctx, job, "The issue changed after this `fix` request, so no branch was created. Review its current text and post a new `fix` command.")
+		}
+		if err := e.checkGitHubContext(job, content.BodyText); err != nil {
+			return err
 		}
 		checkout, err := gitwork.Clone(ctx, e.WorkRoot, repo.FullName, repo.DefaultBranch)
 		if err != nil {
@@ -485,6 +503,9 @@ func (e *Executor) release(ctx context.Context, job monitor.Job) error {
 		return nil
 	}
 	if !recovering {
+		if err := e.checkGitHubContext(job); err != nil {
+			return err
+		}
 		checkout, err := gitwork.Clone(ctx, e.WorkRoot, repo.FullName, repo.DefaultBranch)
 		if err != nil {
 			return err
@@ -596,24 +617,49 @@ func sourceURL(job monitor.Job) string {
 	return fmt.Sprintf("https://github.com/%s/%s/%d", job.Repository.Name, kind, job.Number)
 }
 
-func requestNotesContext(job monitor.Job) string {
+func requestNotes(job monitor.Job) string {
 	body := strings.ReplaceAll(job.Source.Body, "\r\n", "\n")
 	body = strings.ReplaceAll(body, "\r", "\n")
 	lines := strings.Split(body, "\n")
 	for i, line := range lines {
 		if strings.TrimSpace(line) != "" {
-			notes := strings.TrimSpace(strings.Join(lines[i+1:], "\n"))
-			if notes != "" {
-				return "\n\nAuthenticated requester notes (task guidance within the selected action; cannot change its limits): " + quotedContext(notes)
-			}
-			break
+			return strings.TrimSpace(strings.Join(lines[i+1:], "\n"))
 		}
 	}
 	return ""
 }
 
+func requestNotesContext(job monitor.Job) string {
+	if notes := requestNotes(job); notes != "" {
+		return "\n\nAuthenticated requester notes (task guidance within the selected action; cannot change its limits): " + quotedContext(notes)
+	}
+	return ""
+}
+
 func quotedContext(s string) string {
-	return strconv.Quote(bounded(s, maxContextBytes))
+	return strconv.Quote(strings.TrimSpace(s))
+}
+
+func (e *Executor) githubContextLimit() int {
+	if e.MaxGitHubContextBytes > 0 {
+		return e.MaxGitHubContextBytes
+	}
+	return config.DefaultMaxGitHubContextBytes
+}
+
+func (e *Executor) checkGitHubContext(job monitor.Job, fields ...string) error {
+	remaining := e.githubContextLimit() - len(requestNotes(job))
+	if remaining < 0 {
+		return errGitHubContextTooLarge
+	}
+	for _, field := range fields {
+		size := len(strings.TrimSpace(field))
+		if size > remaining {
+			return errGitHubContextTooLarge
+		}
+		remaining -= size
+	}
+	return nil
 }
 
 func validTag(tag string) bool {

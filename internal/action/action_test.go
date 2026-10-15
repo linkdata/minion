@@ -434,16 +434,18 @@ func TestFixRefusesIssueEditedAfterRequest(t *testing.T) {
 
 func TestFixRecoversOnlyRecordedBranch(t *testing.T) {
 	for _, tt := range []struct {
-		name         string
-		remoteSHA    string
-		existingUser string
-		existingID   int64
-		existingSHA  string
-		wantComment  bool
-		wantError    string
+		name           string
+		remoteSHA      string
+		existingUser   string
+		existingID     int64
+		existingSHA    string
+		oversizedNotes bool
+		wantComment    bool
+		wantError      string
 	}{
 		{name: "legacy base branch", wantError: "legacy base branch"},
 		{name: "recorded commit", remoteSHA: strings.Repeat("a", 40), wantComment: true},
+		{name: "recorded commit with oversized notes", remoteSHA: strings.Repeat("a", 40), oversizedNotes: true, wantComment: true},
 		{name: "changed branch", remoteSHA: strings.Repeat("b", 40), wantError: "without a matching recorded bot commit"},
 		{name: "other PR creator", remoteSHA: strings.Repeat("a", 40), existingUser: "other-writer", existingID: 8, existingSHA: strings.Repeat("a", 40), wantError: "without matching requester authorship"},
 		{name: "changed PR head", remoteSHA: strings.Repeat("a", 40), existingUser: "writer", existingID: 7, existingSHA: strings.Repeat("b", 40), wantError: "without matching requester authorship"},
@@ -550,6 +552,10 @@ func TestFixRecoversOnlyRecordedBranch(t *testing.T) {
 					t.Fatal("Codex ran during branch recovery")
 					return codexcli.Result{}, nil
 				},
+			}
+			if tt.oversizedNotes {
+				job.Source.Body = "@linkdataminion fix\nOversized notes"
+				executor.MaxGitHubContextBytes = 1
 			}
 			err = executor.fix(context.Background(), job)
 			if tt.wantError != "" {
@@ -887,17 +893,22 @@ func TestReleaseReservesTagAndRecoversOnlyBotDraft(t *testing.T) {
 		creationRule   bool
 		lostAfterCodex bool
 		lostAfterTag   bool
+		oversizedNotes bool
+		exactNotes     bool
 		wantError      string
 		wantDrafts     int
 		wantComments   int
 		wantCodex      int
 	}{
 		{name: "reserve and draft", wantDrafts: 1, wantComments: 1, wantCodex: 1},
+		{name: "exact-limit notes", exactNotes: true, wantDrafts: 1, wantComments: 1, wantCodex: 1},
 		{name: "competing tag at another commit", competingTag: true, wantError: "reserve tag", wantCodex: 1},
 		{name: "recover after failed draft", firstPostFail: true, wantDrafts: 1, wantComments: 1, wantCodex: 1},
 		{name: "retry after failed checkpoint", saveFailure: true, wantDrafts: 1, wantComments: 1, wantCodex: 2},
 		{name: "forged draft", existingAuthor: "other-writer", wantError: "without matching bot provenance"},
 		{name: "bot draft recovery", existingAuthor: "linkdataminion", wantComments: 1},
+		{name: "bot draft recovery with oversized notes", existingAuthor: "linkdataminion", oversizedNotes: true, wantComments: 1},
+		{name: "oversized notes", oversizedNotes: true, wantError: "GitHub context exceeds configured byte limit"},
 		{name: "tampered bot draft", existingAuthor: "linkdataminion", tamperedBody: true, wantError: "without matching bot provenance"},
 		{name: "unprotected tags", unprotected: true, wantComments: 1},
 		{name: "tag creation restricted", creationRule: true, wantComments: 1},
@@ -1036,6 +1047,12 @@ func TestReleaseReservesTagAndRecoversOnlyBotDraft(t *testing.T) {
 				}
 				return codexcli.Result{Answer: "notes"}, nil
 			}}
+			if tt.oversizedNotes {
+				executor.MaxGitHubContextBytes = 10
+			}
+			if tt.exactNotes {
+				executor.MaxGitHubContextBytes = len(requestNotes(job))
+			}
 			err = executor.release(context.Background(), job)
 			if tt.saveFailure {
 				if err == nil {

@@ -9,9 +9,9 @@ A small Go service that watches a bot account's GitHub notifications in an expli
 
 Minion should start one AI-assisted action from a configured command, without free-form instructions in the command. Only collaborators with write or stronger access should be able to request work, and only in repositories explicitly selected by the operator or automatically registered from invitations by pinned owners. GitHub text and repository files are untrusted input; the default anti-prompt-injection skill should help Codex keep them separate from operator instructions. AI-assisted work should run in sandboxes. Application logic, rather than AI instructions, should choose and limit GitHub operations, destinations, and publication states.
 
-Public-release follow-ups include [oversized input rejection](https://github.com/linkdata/minion/issues/85), [input screening evaluation](https://github.com/linkdata/minion/issues/86), and [deployment isolation validation](https://github.com/linkdata/minion/issues/7).
+Public-release follow-ups include [input screening evaluation](https://github.com/linkdata/minion/issues/86) and [deployment isolation validation](https://github.com/linkdata/minion/issues/7).
 
-The embedded `builtin://anti-prompt-injection` skill is enabled by default for every Codex job. GitHub titles and descriptions are quoted as untrusted task data in Codex prompts. These boundaries reduce prompt spoofing, but cannot guarantee model behavior. [OWASP's prompt-injection guidance](https://cheatsheetseries.owasp.org/cheatsheets/LLM_Prompt_Injection_Prevention_Cheat_Sheet.html) recommends layered controls. Its [AISVS research chapter](https://github.com/OWASP/AISVS/blob/main/1.0/research/chapters/C02-User-Input-Validation/C02-01-Prompt-Injection-Defense.md) also calls for application-side input screening and rejection of oversized model input; those controls are tracked separately above.
+The embedded `builtin://anti-prompt-injection` skill is enabled by default for every Codex job. GitHub titles and descriptions are quoted as untrusted task data in Codex prompts. These boundaries reduce prompt spoofing, but cannot guarantee model behavior. [OWASP's prompt-injection guidance](https://cheatsheetseries.owasp.org/cheatsheets/LLM_Prompt_Injection_Prevention_Cheat_Sheet.html) recommends layered controls. Its [AISVS research chapter](https://github.com/OWASP/AISVS/blob/main/1.0/research/chapters/C02-User-Input-Validation/C02-01-Prompt-Injection-Defense.md) also calls for application-side input screening and rejection of oversized model input; Minion limits direct GitHub context as described below.
 
 ## What it does
 
@@ -36,13 +36,15 @@ Before generating or pushing a fix, Minion reads effective push rulesets on the 
 
 Each request must come from an account with effective repository `write`, `maintain`, or `admin` permission. An optional `allowed_actors` list narrows that group. Only the first nonblank line can start a command; quoted, fenced, hidden, or later directives cannot start one. A second full-line configured command refuses the request as ambiguous. Notes after an authorized command reach Codex as quoted task guidance within the selected action; they cannot change the bot's application-enforced limits. A review also includes the pull request title and description as untrusted context, even when the pull request author cannot run Minion. Fixes and audits use relevant thread descriptions as untrusted context. The bot checks the whitelist and command author's permission again before every action.
 
+`max_github_context_bytes` limits the combined UTF-8 bytes of trimmed title, description, and requester notes included in an action (32 KiB by default). It counts these fields before prompt quoting, not the complete Codex prompt or repository files. Text at the limit passes this check; a larger total gets a fixed refusal before Codex starts. Shorten the text and post a new command.
+
 Edited command sources are ignored. Post a new comment to request work after editing text.
 
 For `fix`, Minion reads GitHub's rendered issue text and checks the issue's edit time against the request. If the issue changed at or after the request, it refuses the fix; review the current issue and post a new `fix` comment.
 
 After accepting an authorized command, the bot adds a 👀 reaction to the exact issue, pull request, comment, or review that contains it, before starting Codex. If the reaction fails, it retries the command on the next poll.
 
-Jobs with execution failures run at most three times, except GitHub authentication, rate-limit, server, and network failures, which retry on later polls. Timeouts, invalid audit output, Codex output limits, and oversized fixes stop after one run. Minion posts a fixed failure reply; if GitHub rejects that reply three times, it logs the request URL and moves on. Post a new command after fixing the cause.
+Jobs with execution failures run at most three times, except GitHub authentication, rate-limit, server, and network failures, which retry on later polls. Timeouts, invalid audit output, Codex output limits, and oversized fix changes stop after one run. Minion posts a fixed failure reply; if GitHub rejects that reply three times, it logs the request URL and moves on. Post a new command after fixing the cause.
 
 The `review` action is limited to pull requests, and `fix` to issues. The bot replies when those commands are used in the other supported thread type. `comment`, `security-audit`, and optional `release` actions can be requested in an issue or pull request. Existing tags are refused so a draft cannot silently point at a different commit.
 
