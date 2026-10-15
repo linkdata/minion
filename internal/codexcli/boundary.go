@@ -79,7 +79,7 @@ func ValidateInstructionBoundary(ctx context.Context) (resultErr error) {
 		// #nosec G204 -- Codex receives only fixed config flags and an inert prompt.
 		cmd := exec.CommandContext(ctx, "codex", args...)
 		cmd.Dir = check.dir
-		cmd.Env = childEnvironment([]string{"PATH=" + os.Getenv("PATH"), "HOME=" + probeHome, "CODEX_HOME=" + probeHome}, runtimeDir, runtimeDir)
+		cmd.Env = childEnvironment([]string{"PATH=" + os.Getenv("PATH"), "HOME=" + probeHome, "CODEX_HOME=" + probeHome}, runtimeDir, runtimeDir, false)
 		cmd.WaitDelay = 2 * time.Second
 		configureCancellation(cmd)
 		output, err := cmd.Output()

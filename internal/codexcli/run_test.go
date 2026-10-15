@@ -75,7 +75,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"test"}' '{"type":"item.comp
 				"-c", `shell_environment_policy.filters={"PATH"="include","HOME"="include","TMPDIR"="include","TMP"="include","TEMP"="include","GOCACHE"="include","LANG"="include","LC_ALL"="include","LC_CTYPE"="include","TERM"="include"}`,
 				"-c", `default_permissions="minion"`,
 				"-c", fmt.Sprintf("permissions.minion.extends=%q", tt.parent),
-				"-c", fmt.Sprintf(`permissions.minion.filesystem={":root"="deny",":minimal"="read",":tmpdir"="write",":slash_tmp"="deny",%s=%q,%s="read",%s="read",%s="read",%s="read"}`, strconv.Quote(dir), tt.access, strconv.Quote(filepath.Join(dir, ".git")), strconv.Quote(filepath.Join(dir, ".agents")), strconv.Quote(filepath.Join(dir, ".codex")), strconv.Quote(fakeCodex)),
+				"-c", fmt.Sprintf(`permissions.minion.filesystem={":root"="deny",":minimal"="read",":tmpdir"="write",":slash_tmp"="deny",%s=%q,%s="read",%s="read",%s="read",%s="read",%s="read"}`, strconv.Quote(dir), tt.access, strconv.Quote(filepath.Join(dir, ".git")), strconv.Quote(filepath.Join(dir, ".agents")), strconv.Quote(filepath.Join(dir, ".codex")), strconv.Quote(filepath.Join(dir, ".claude")), strconv.Quote(fakeCodex)),
 				"-c", "permissions.minion.network.enabled=false",
 				"--", "-",
 			}
@@ -218,6 +218,46 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
 	}
 }
 
+func TestRunUsesOutputSchema(t *testing.T) {
+	fakeCodex := installFakeCodex(t, `#!/bin/sh
+set -eu
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = '--output-schema' ]; then
+    printf '%s\n' "$2" > "$0.schema-path"
+    cp "$2" "$0.schema"
+    break
+  fi
+  shift
+done
+cat > /dev/null
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"approved\":true,\"feedback\":\"\"}"}}' '{"type":"turn.completed"}'
+`)
+	const schema = `{"type":"object","properties":{"approved":{"type":"boolean"},"feedback":{"type":"string"}},"required":["approved","feedback"],"additionalProperties":false}`
+	result, err := Run(context.Background(), t.TempDir(), "Review candidate", false, "", config.CodexConfig{OutputSchema: schema})
+	if err != nil || result.Answer != `{"approved":true,"feedback":""}` {
+		t.Fatalf("structured result = %q, %v", result.Answer, err)
+	}
+	content, err := os.ReadFile(fakeCodex + ".schema")
+	if err != nil || string(content) != schema {
+		t.Fatalf("schema passed to Codex = %q, %v", content, err)
+	}
+	info, err := os.Stat(fakeCodex + ".schema")
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("copied schema permissions = %v, %v", info, err)
+	}
+	pathData, err := os.ReadFile(fakeCodex + ".schema-path")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := strings.TrimSpace(string(pathData))
+	if !filepath.IsAbs(path) || !strings.HasPrefix(filepath.Base(filepath.Dir(path)), ".minion-codex-") {
+		t.Fatalf("schema is not in the isolated runtime: %q", path)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("schema file retained after run: %v", err)
+	}
+}
+
 func TestRunUsesEmbeddedSkillWithoutInstallation(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", t.TempDir())
@@ -318,6 +358,38 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"a
 	}
 }
 
+func TestRunAllowsCriticToReadReportsWithoutWriting(t *testing.T) {
+	root := t.TempDir()
+	workspace, reports := filepath.Join(root, "repo"), filepath.Join(root, "reports")
+	for _, dir := range []string{workspace, reports} {
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	binary := installFakeCodex(t, `#!/bin/sh
+printf '%s\n' "$@" > "$0.args"
+cat >/dev/null
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"approved"}}' '{"type":"turn.completed"}'
+`)
+	if _, err := Run(context.Background(), workspace, "Critique reports", false, "", config.CodexConfig{ReadOnlyDirs: []string{reports}}); err != nil {
+		t.Fatal(err)
+	}
+	args, err := os.ReadFile(binary + ".args")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{workspace, reports} {
+		if !strings.Contains(string(args), strconv.Quote(dir)+`="read"`) || strings.Contains(string(args), strconv.Quote(dir)+`="write"`) {
+			t.Fatalf("critic lacks read-only access to %s: %s", dir, args)
+		}
+	}
+	for _, dir := range []string{root, workspace, string(os.PathSeparator), filepath.Join(root, "missing")} {
+		if _, err := Run(context.Background(), workspace, "Critique reports", false, "", config.CodexConfig{ReadOnlyDirs: []string{dir}}); err == nil {
+			t.Fatalf("accepted unsafe or missing report directory %s", dir)
+		}
+	}
+}
+
 func TestChildEnvironmentIsolatesCodexSessionButKeepsAuthentication(t *testing.T) {
 	env := childEnvironment([]string{
 		"CODEX_PERMISSION_PROFILE=unsafe-parent-profile", "CODEX_THREAD_ID=parent", "CODEX_SESSION_ID=parent",
@@ -326,7 +398,7 @@ func TestChildEnvironmentIsolatesCodexSessionButKeepsAuthentication(t *testing.T
 		"GH_TOKEN=secret", "GITHUB_TOKEN=secret", "OPENAI_API_KEY=secret", "PGPASSWORD=secret",
 		"PATH=/usr/bin", "HOME=/trusted/home", "HTTPS_PROXY=http://proxy", "SSL_CERT_FILE=/cert",
 		"TMPDIR=/host-tmp", "GOCACHE=/host-cache",
-	}, "/runtime", "/cache")
+	}, "/runtime", "/cache", false)
 	joined := strings.Join(env, "\n")
 	for _, denied := range []string{"unsafe-parent-profile", "CODEX_THREAD_ID", "CODEX_SESSION_ID", "CODEX_APP_TOOLS_PIPE_PATH", "CODEX_SANDBOX_NETWORK_DISABLED", "GH_TOKEN", "GITHUB_TOKEN", "OPENAI_API_KEY", "PGPASSWORD", "/host-tmp", "/host-cache"} {
 		if strings.Contains(joined, denied) {
@@ -337,6 +409,66 @@ func TestChildEnvironmentIsolatesCodexSessionButKeepsAuthentication(t *testing.T
 		if !strings.Contains(joined, kept) {
 			t.Fatalf("required environment setting missing: %s", kept)
 		}
+	}
+}
+
+func TestRunConfiguredAPIKeyOverridesEnvironment(t *testing.T) {
+	for _, configured := range []bool{false, true} {
+		t.Run(fmt.Sprint(configured), func(t *testing.T) {
+			fake := installFakeCodex(t, `#!/bin/sh
+printf '%s\n' "$@" > "$0.args"
+printf '%s,%s,%s\n' "${CODEX_API_KEY-absent}" "${CODEX_ACCESS_TOKEN-absent}" "${OPENAI_API_KEY-absent}" > "$0.auth"
+cat > "$0.prompt"
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}' '{"type":"turn.completed"}'
+`)
+			t.Setenv("CODEX_API_KEY", "dummy-environment-key")
+			t.Setenv("CODEX_ACCESS_TOKEN", "dummy-environment-access-token")
+			t.Setenv("OPENAI_API_KEY", "dummy-unrelated-key")
+			settings := config.CodexConfig{}
+			want := "dummy-environment-key,dummy-environment-access-token,absent\n"
+			if configured {
+				settings.APIKey = "dummy-configured-key"
+				want = "dummy-configured-key,absent,absent\n"
+			}
+			if _, err := Run(context.Background(), t.TempDir(), "Review this checkout", false, "", settings); err != nil {
+				t.Fatal(err)
+			}
+			auth, err := os.ReadFile(fake + ".auth")
+			if err != nil || string(auth) != want {
+				t.Fatalf("child authentication = %q, %v; want %q", auth, err, want)
+			}
+			for _, suffix := range []string{".args", ".prompt"} {
+				data, err := os.ReadFile(fake + suffix)
+				if err != nil || strings.Contains(string(data), "dummy-configured-key") {
+					t.Fatalf("configured API key reached %s: %v", suffix, err)
+				}
+			}
+		})
+	}
+}
+
+func TestRunRedactsConfiguredAPIKey(t *testing.T) {
+	for _, test := range []struct {
+		name, output string
+		wantError    bool
+	}{
+		{name: "answer", output: `printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"dummy-configured-key"}}' '{"type":"turn.completed"}'`},
+		{name: "event error", output: `printf '%s\n' '{"type":"turn.failed","error":{"message":"dummy-configured-key"}}'`, wantError: true},
+		{name: "stderr", output: `printf '%s\n' 'dummy-configured-key' >&2; exit 1`, wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			installFakeCodex(t, "#!/bin/sh\ncat >/dev/null\n"+test.output+"\n")
+			result, err := Run(context.Background(), t.TempDir(), "Review this checkout", false, "", config.CodexConfig{APIKey: "dummy-configured-key"})
+			if (err != nil) != test.wantError {
+				t.Fatalf("unexpected Run error: %v", err)
+			}
+			if strings.Contains(result.Answer, "dummy-configured-key") || err != nil && strings.Contains(err.Error(), "dummy-configured-key") {
+				t.Fatal("configured API key escaped redaction")
+			}
+			if !test.wantError && result.Answer != "[redacted]" {
+				t.Fatalf("answer = %q", result.Answer)
+			}
+		})
 	}
 }
 

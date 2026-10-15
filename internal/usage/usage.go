@@ -28,22 +28,31 @@ func (t *Tokens) Add(other Tokens) {
 	t.Output += other.Output
 }
 
+// Record contains the usage reported by all model calls in one action attempt.
+//
+// Model and Effort describe the main model. An empty Provider denotes Codex;
+// the model name "default" denotes the provider CLI's selected default.
 type Record struct {
-	ID            string     `json:"id"`
-	JobID         string     `json:"job_id"`
-	Repo          string     `json:"repo"`
-	User          string     `json:"user"`
-	Action        string     `json:"action"`
-	Number        int        `json:"number"`
-	SourceURL     string     `json:"source_url,omitempty"`
-	Model         string     `json:"model"`
-	Effort        string     `json:"reasoning_effort,omitempty"`
-	StartedAt     time.Time  `json:"started_at"`
-	FinishedAt    *time.Time `json:"finished_at,omitempty"`
-	Status        string     `json:"status"`
-	CodexCalls    int        `json:"codex_calls"`
-	Tokens        Tokens     `json:"tokens"`
-	UsageComplete bool       `json:"usage_complete"`
+	ID             string     `json:"id"`
+	JobID          string     `json:"job_id"`
+	Repo           string     `json:"repo"`
+	User           string     `json:"user"`
+	Action         string     `json:"action"`
+	Number         int        `json:"number"`
+	SourceURL      string     `json:"source_url,omitempty"`
+	Provider       string     `json:"provider,omitempty"`
+	Model          string     `json:"model"`
+	Effort         string     `json:"reasoning_effort,omitempty"`
+	CriticProvider string     `json:"critic_provider,omitempty"`
+	CriticModel    string     `json:"critic_model,omitempty"`
+	CriticEffort   string     `json:"critic_effort,omitempty"`
+	StartedAt      time.Time  `json:"started_at"`
+	FinishedAt     *time.Time `json:"finished_at,omitempty"`
+	Status         string     `json:"status"`
+	CodexCalls     int        `json:"codex_calls"`
+	ClaudeCalls    int        `json:"claude_calls,omitempty"`
+	Tokens         Tokens     `json:"tokens"`
+	UsageComplete  bool       `json:"usage_complete"`
 }
 
 var validID = regexp.MustCompile(`^[0-9a-f]{32}$`)
@@ -54,6 +63,11 @@ func (r Record) validate() error {
 	}
 	if r.JobID == "" || r.Repo == "" || r.User == "" || r.Action == "" || r.Model == "" || r.StartedAt.IsZero() {
 		return fmt.Errorf("usage record %s is missing required metadata", r.ID)
+	}
+	for _, provider := range []string{r.Provider, r.CriticProvider} {
+		if provider != "" && provider != "codex" && provider != "claude" {
+			return fmt.Errorf("usage record %s has invalid provider %q", r.ID, provider)
+		}
 	}
 	switch r.Status {
 	case "running":
@@ -67,7 +81,7 @@ func (r Record) validate() error {
 	default:
 		return fmt.Errorf("usage record %s has invalid status %q", r.ID, r.Status)
 	}
-	if r.CodexCalls < 0 || r.Tokens.Input < 0 || r.Tokens.CachedInput < 0 || r.Tokens.Output < 0 || r.Tokens.CachedInput > r.Tokens.Input {
+	if r.CodexCalls < 0 || r.ClaudeCalls < 0 || r.Tokens.Input < 0 || r.Tokens.CachedInput < 0 || r.Tokens.Output < 0 || r.Tokens.CachedInput > r.Tokens.Input {
 		return fmt.Errorf("usage record %s has invalid counts", r.ID)
 	}
 	return nil
@@ -180,6 +194,7 @@ func (f Filter) Match(record Record) bool {
 		(f.Until.IsZero() || record.StartedAt.Before(f.Until))
 }
 
+// Summary aggregates action attempts and token usage across both providers.
 type Summary struct {
 	Repo            string `json:"repo,omitempty"`
 	User            string `json:"user,omitempty"`
@@ -191,6 +206,7 @@ type Summary struct {
 	Failed          int    `json:"failed"`
 	Running         int    `json:"running"`
 	CodexCalls      int    `json:"codex_calls"`
+	ClaudeCalls     int    `json:"claude_calls,omitempty"`
 	IncompleteUsage int    `json:"incomplete_usage"`
 	Tokens          Tokens `json:"tokens"`
 	TotalTokens     int64  `json:"total_tokens"`
@@ -242,6 +258,7 @@ func Summarize(records []Record, filter Filter, groupBy []string) ([]Summary, er
 			return nil, fmt.Errorf("usage record %s has invalid status %q", record.ID, record.Status)
 		}
 		summary.CodexCalls += record.CodexCalls
+		summary.ClaudeCalls += record.ClaudeCalls
 		if !record.UsageComplete || record.Status == "running" {
 			summary.IncompleteUsage++
 		}

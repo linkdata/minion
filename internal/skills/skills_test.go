@@ -62,39 +62,64 @@ func TestBuiltinAvailableWithoutInstallation(t *testing.T) {
 }
 
 func TestInstalledPathRequiresMatchingSafeInstallation(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	if path, installed, err := InstalledPath(testURL); err != nil || installed || path != "" {
-		t.Fatalf("missing skill = %q, %t, %v", path, installed, err)
+	for _, tt := range []struct {
+		name, parent string
+		lookup       func(string) (string, bool, error)
+	}{
+		{name: "default", parent: ".agents", lookup: InstalledPath},
+		{name: "codex", parent: ".agents", lookup: func(url string) (string, bool, error) { return InstalledPathFor(url, "codex") }},
+		{name: "claude", parent: ".claude", lookup: func(url string) (string, bool, error) { return InstalledPathFor(url, "claude") }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			if path, installed, err := tt.lookup(testURL); err != nil || installed || path != "" {
+				t.Fatalf("missing skill = %q, %t, %v", path, installed, err)
+			}
+			dir := filepath.Join(home, tt.parent, "skills", "review")
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if _, installed, err := tt.lookup(testURL); err == nil || installed {
+				t.Fatalf("skill directory without SKILL.md = %t, %v", installed, err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("---\nname: review\n---\nReview code.\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, installed, err := tt.lookup(testURL); err != nil || installed {
+				t.Fatalf("unmarked skill = %t, %v", installed, err)
+			}
+			metadata := []byte(`{"url":"` + testURL + `","commit":"` + testSHA + `"}`)
+			if err := os.WriteFile(filepath.Join(dir, installMetadataName), metadata, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if path, installed, err := tt.lookup(testURL); err != nil || !installed || path != filepath.Join(dir, "SKILL.md") {
+				t.Fatalf("installed skill = %q, %t, %v", path, installed, err)
+			}
+			if _, installed, err := tt.lookup("https://github.com/other/skills/tree/main/skills/review"); err == nil || installed {
+				t.Fatalf("mismatched source = %t, %v", installed, err)
+			}
+			if err := os.Symlink(t.TempDir(), filepath.Join(dir, "outside")); err != nil {
+				t.Fatal(err)
+			}
+			if _, installed, err := tt.lookup(testURL); err == nil || installed {
+				t.Fatalf("symlink in skill = %t, %v", installed, err)
+			}
+		})
 	}
-	dir := filepath.Join(home, ".agents", "skills", "review")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if _, installed, err := InstalledPath(testURL); err == nil || installed {
-		t.Fatalf("skill directory without SKILL.md = %t, %v", installed, err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("---\nname: review\n---\nReview code.\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, installed, err := InstalledPath(testURL); err != nil || installed {
-		t.Fatalf("unmarked skill = %t, %v", installed, err)
-	}
-	metadata := []byte(`{"url":"` + testURL + `","commit":"` + testSHA + `"}`)
-	if err := os.WriteFile(filepath.Join(dir, installMetadataName), metadata, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if path, installed, err := InstalledPath(testURL); err != nil || !installed || path != filepath.Join(dir, "SKILL.md") {
-		t.Fatalf("installed skill = %q, %t, %v", path, installed, err)
-	}
-	if _, installed, err := InstalledPath("https://github.com/other/skills/tree/main/skills/review"); err == nil || installed {
-		t.Fatalf("mismatched source = %t, %v", installed, err)
-	}
-	if err := os.Symlink(t.TempDir(), filepath.Join(dir, "outside")); err != nil {
-		t.Fatal(err)
-	}
-	if _, installed, err := InstalledPath(testURL); err == nil || installed {
-		t.Fatalf("symlink in skill = %t, %v", installed, err)
+}
+
+func TestInstalledPathForBuiltinAndUnsupportedProvider(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	for _, provider := range []string{"codex", "claude", "", "other"} {
+		path, installed, err := InstalledPathFor(BuiltinAntiPromptInjection, provider)
+		if provider == "codex" || provider == "claude" {
+			if err != nil || !installed || path != BuiltinAntiPromptInjection {
+				t.Fatalf("embedded skill for %s = %q, %t, %v", provider, path, installed, err)
+			}
+		} else if err == nil || installed || path != "" {
+			t.Fatalf("unsupported provider %q = %q, %t, %v", provider, path, installed, err)
+		}
 	}
 }
 

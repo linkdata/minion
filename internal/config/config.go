@@ -23,7 +23,7 @@ var (
 )
 
 const (
-	// DefaultMaxGitHubContextBytes is the default GitHub text budget for a Codex action.
+	// DefaultMaxGitHubContextBytes is the default GitHub text budget for an AI action.
 	DefaultMaxGitHubContextBytes = 32 << 10
 
 	defaultReviewSkill        = "https://github.com/DietrichGebert/ponytail/tree/main/skills/ponytail-review"
@@ -38,6 +38,14 @@ const (
 type CommandMapping struct {
 	Action string   `json:"action"`
 	Skills []string `json:"skills"`
+}
+
+// SupportsProvider reports whether a CLI can execute the action's workflow.
+//
+// An empty provider selects Codex. Claude's Bash-only tool set cannot run the
+// independent subagents required by the security-audit action.
+func (m CommandMapping) SupportsProvider(provider string) bool {
+	return provider == "" || provider == "codex" || provider == "claude" && m.Action != "security-audit"
 }
 
 func defaultCommands() map[string]CommandMapping {
@@ -59,12 +67,35 @@ type Repository struct {
 	AllowedActorIDs map[string]int64 `json:"allowed_actor_ids,omitempty"`
 }
 
-// CodexConfig contains model settings and skill paths selected for one job.
+// CodexConfig contains authentication, model settings, and job skill paths.
 type CodexConfig struct {
 	Model           string `json:"model,omitempty"`
 	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	// APIKey overrides environment credentials and stored login when nonempty.
+	APIKey string `json:"api_key,omitempty"`
 	// Skills contains installed paths selected by the application, not config JSON.
 	Skills []string `json:"-"`
+	// ReadOnlyDirs grants read access to additional application-selected directories.
+	ReadOnlyDirs []string `json:"-"`
+	// OutputSchema constrains the final response using application-selected JSON Schema.
+	OutputSchema string `json:"-"`
+}
+
+// ClaudeConfig contains authentication, model settings, and job skill paths.
+type ClaudeConfig struct {
+	Model  string `json:"model,omitempty"`
+	Effort string `json:"effort,omitempty"`
+	// APIKey overrides environment credentials and stored login when nonempty.
+	APIKey string `json:"api_key,omitempty"`
+	// AllowAllUnixSockets disables Unix-socket filtering to work around Claude's
+	// sandbox startup failure on affected Linux hosts. Nil selects true.
+	AllowAllUnixSockets *bool `json:"allow_all_unix_sockets,omitempty"`
+	// Skills contains installed paths selected by the application, not config JSON.
+	Skills []string `json:"-"`
+	// ReadOnlyDirs grants read access to additional application-selected directories.
+	ReadOnlyDirs []string `json:"-"`
+	// OutputSchema constrains the final response using application-selected JSON Schema.
+	OutputSchema string `json:"-"`
 }
 
 // SecurityAuditSkill returns the selected security-audit skill path for this job.
@@ -79,8 +110,15 @@ func (c CodexConfig) SecurityAuditSkill() string {
 
 // Config defines monitored repositories and the commands they accept.
 type Config struct {
-	BotLogin string      `json:"bot_login"`
-	Codex    CodexConfig `json:"codex,omitempty"`
+	BotLogin string `json:"bot_login"`
+	// Main selects codex or claude; an empty value selects codex.
+	Main string `json:"main,omitempty"`
+	// Adversarial optionally selects the other provider as a read-only critic.
+	Adversarial string `json:"adversarial,omitempty"`
+	// CriticMaxRounds limits critic reviews; zero selects three rounds.
+	CriticMaxRounds int          `json:"critic_max_rounds,omitempty"`
+	Codex           CodexConfig  `json:"codex,omitempty"`
+	Claude          ClaudeConfig `json:"claude,omitempty"`
 	// Nil Commands selects defaults; an empty map disables all commands.
 	Commands map[string]CommandMapping `json:"commands"`
 	// Nil AlwaysOnSkills selects anti-prompt-injection and caveman; an empty list disables always-on skills.
@@ -149,10 +187,38 @@ func (c *Config) Validate(configDir string) error {
 	if strings.ContainsAny(c.BotLogin, " /\\@") {
 		return fmt.Errorf("invalid bot_login %q", c.BotLogin)
 	}
+	c.Main = strings.TrimSpace(c.Main)
+	if c.Main == "" {
+		c.Main = "codex"
+	}
+	if c.Main != "codex" && c.Main != "claude" {
+		return fmt.Errorf("main must be codex or claude")
+	}
+	c.Adversarial = strings.TrimSpace(c.Adversarial)
+	if c.Adversarial != "" && c.Adversarial != "codex" && c.Adversarial != "claude" {
+		return fmt.Errorf("adversarial must be codex or claude")
+	}
+	if c.Adversarial == c.Main {
+		return fmt.Errorf("adversarial must differ from main")
+	}
+	if c.CriticMaxRounds == 0 {
+		c.CriticMaxRounds = 3
+	}
+	if c.CriticMaxRounds < 1 || c.CriticMaxRounds > 10 {
+		return fmt.Errorf("critic_max_rounds must be between 1 and 10")
+	}
+	if strings.ContainsAny(c.Codex.APIKey, " \t\r\n\x00") || strings.ContainsAny(c.Claude.APIKey, " \t\r\n\x00") {
+		return fmt.Errorf("provider api_key must not contain whitespace or NUL")
+	}
 	c.Codex.Model = strings.TrimSpace(c.Codex.Model)
 	c.Codex.ReasoningEffort = strings.TrimSpace(c.Codex.ReasoningEffort)
 	if strings.ContainsAny(c.Codex.Model, " \t\r\n") || strings.ContainsAny(c.Codex.ReasoningEffort, " \t\r\n") {
 		return fmt.Errorf("codex model and reasoning_effort must not contain whitespace")
+	}
+	c.Claude.Model = strings.TrimSpace(c.Claude.Model)
+	c.Claude.Effort = strings.TrimSpace(c.Claude.Effort)
+	if strings.ContainsAny(c.Claude.Model, " \t\r\n") || strings.ContainsAny(c.Claude.Effort, " \t\r\n") {
+		return fmt.Errorf("claude model and effort must not contain whitespace")
 	}
 	if c.Commands == nil {
 		c.Commands = defaultCommands()
@@ -366,14 +432,20 @@ func (c Config) CommandNames() []string {
 	return names
 }
 
-// CommandInstalled reports whether every skill mapped to name is installed for Codex.
+// CommandInstalled reports whether a command is available.
+//
+// The main provider must support its action and have all required skills installed.
 func (c Config) CommandInstalled(name string) (bool, error) {
 	mapping, ok := c.Commands[name]
-	if !ok || len(mapping.Skills) == 0 {
+	if !ok || len(mapping.Skills) == 0 || !mapping.SupportsProvider(c.Main) {
 		return false, nil
 	}
+	provider := c.Main
+	if provider == "" {
+		provider = "codex"
+	}
 	for _, rawURL := range mapping.Skills {
-		_, installed, err := skills.InstalledPath(rawURL)
+		_, installed, err := skills.InstalledPathFor(rawURL, provider)
 		if err != nil || !installed {
 			return false, err
 		}

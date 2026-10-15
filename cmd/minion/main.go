@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/linkdata/minion/internal/action"
+	"github.com/linkdata/minion/internal/claudecli"
 	"github.com/linkdata/minion/internal/codexcli"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/github"
@@ -35,7 +36,7 @@ func main() {
 func run() int {
 	configPath := flag.String("config", "config.local.json", "path to JSON configuration")
 	loop := flag.Bool("loop", false, "poll continuously; default is one cron-friendly pass")
-	check := flag.Bool("check", false, "verify Codex settings, authentication, and repository access, then exit")
+	check := flag.Bool("check", false, "verify AI settings, authentication, and repository access, then exit")
 	installSkills := flag.Bool("install-skills", false, "download configured skills for Codex and Claude, then exit")
 	flag.Parse()
 	logger := log.New(os.Stderr, "minion: ", log.LstdFlags|log.LUTC)
@@ -75,20 +76,10 @@ func run() int {
 		logger.Printf("work root: %v", err)
 		return 1
 	}
-	if err := checkCodexCLI(ctx); err != nil {
-		logger.Printf("Codex CLI: %v", err)
+	if err := checkModels(ctx, &cfg, logger); err != nil {
+		logger.Printf("AI preflight: %v", err)
 		return 1
 	}
-	if err := codexcli.ValidateInstructionBoundary(ctx); err != nil {
-		logger.Printf("Codex instruction boundary: %v", err)
-		return 1
-	}
-	cfg.Codex, err = codexcli.Validate(ctx, cfg.Codex)
-	if err != nil {
-		logger.Printf("Codex settings: %v", err)
-		return 1
-	}
-	logger.Printf("Codex settings: model=%s reasoning_effort=%s configured_commands=%d configured_always_on_skills=%d", cfg.Codex.Model, cfg.Codex.ReasoningEffort, len(cfg.Commands), len(cfg.AlwaysOnSkills))
 	token, err := githubToken(ctx)
 	if err != nil {
 		logger.Printf("GitHub authentication: %v", err)
@@ -140,7 +131,11 @@ func run() int {
 		WorkRoot:              cfg.WorkRoot,
 		CheckWorkRoot:         checkWorkRoot,
 		Timeout:               time.Duration(cfg.JobTimeoutMinutes) * time.Minute,
+		Main:                  cfg.Main,
+		Adversarial:           cfg.Adversarial,
+		CriticMaxRounds:       cfg.CriticMaxRounds,
 		Codex:                 cfg.Codex,
+		Claude:                cfg.Claude,
 		MaxGitHubContextBytes: cfg.MaxGitHubContextBytes,
 		Commands:              cfg.Commands,
 		AlwaysOnSkills:        cfg.AlwaysOnSkills,
@@ -174,6 +169,10 @@ func run() int {
 
 func logCommandSkills(cfg config.Config, logger *log.Logger) {
 	for _, command := range cfg.CommandNames() {
+		if !cfg.Commands[command].SupportsProvider(cfg.Main) {
+			logger.Printf("command %s disabled: action %s is unsupported with %s as main", command, cfg.Commands[command].Action, cfg.Main)
+			continue
+		}
 		var missing []string
 		for _, source := range cfg.Commands[command].Skills {
 			name, err := skills.Name(source)
@@ -181,7 +180,7 @@ func logCommandSkills(cfg config.Config, logger *log.Logger) {
 				missing = append(missing, source)
 				continue
 			}
-			_, installed, err := skills.InstalledPath(source)
+			_, installed, err := skills.InstalledPathFor(source, cfg.Main)
 			if err != nil {
 				missing = append(missing, fmt.Sprintf("%s (%v)", name, err))
 			} else if !installed {
@@ -215,9 +214,43 @@ func githubToken(ctx context.Context) (string, error) {
 	return token, nil
 }
 
-func checkCodexCLI(ctx context.Context) error {
+func checkModels(ctx context.Context, cfg *config.Config, logger *log.Logger) (err error) {
+	for _, provider := range []string{cfg.Main, cfg.Adversarial} {
+		switch provider {
+		case "codex":
+			if err = checkCodexCLI(ctx, cfg.Codex); err == nil {
+				if err = codexcli.ValidateInstructionBoundary(ctx); err == nil {
+					cfg.Codex, err = codexcli.Validate(ctx, cfg.Codex)
+				}
+			}
+			if err != nil {
+				//lint:ignore ST1005 Codex is a proper noun.
+				return fmt.Errorf("Codex: %w", err) //nolint:staticcheck // -- Codex is a proper noun.
+			}
+			logger.Printf("Codex settings: model=%s reasoning_effort=%s", cfg.Codex.Model, cfg.Codex.ReasoningEffort)
+		case "claude":
+			if cfg.Claude, err = claudecli.Validate(ctx, cfg.Claude); err != nil {
+				//lint:ignore ST1005 Claude is a proper noun.
+				return fmt.Errorf("Claude: %w", err) //nolint:staticcheck // -- Claude is a proper noun.
+			}
+			logger.Printf("Claude settings: model=%s effort=%s", cfg.Claude.Model, cfg.Claude.Effort)
+		case "":
+		default:
+			return fmt.Errorf("unsupported AI provider %q", provider)
+		}
+	}
+	logger.Printf("AI roles: main=%s adversarial=%s critic_max_rounds=%d", cfg.Main, cfg.Adversarial, cfg.CriticMaxRounds)
+	return
+}
+
+func checkCodexCLI(ctx context.Context, settings config.CodexConfig) error {
 	if _, err := exec.LookPath("codex"); err != nil {
 		return err
+	}
+	if settings.APIKey != "" {
+		// Model discovery authenticates with the configured key. An ambient
+		// login status cannot validate that credential.
+		return nil
 	}
 	cmd := exec.CommandContext(ctx, "codex", "login", "status")
 	output, err := cmd.CombinedOutput()

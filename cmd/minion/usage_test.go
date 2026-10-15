@@ -32,6 +32,8 @@ func saveReportFixture(t *testing.T, dir string) {
 		case 1:
 			record.Tokens = usage.Tokens{Input: 50, CachedInput: 10, Output: 5}
 			record.CodexCalls, record.UsageComplete = 2, false
+			record.Provider, record.CriticProvider, record.CriticModel = "claude", "codex", "critic-model"
+			record.ClaudeCalls = 3
 		case 2:
 			record.Repo, record.User = "example-owner/second-repo", "bob"
 			record.FinishedAt = nil // A crash after a call can leave running usage marked complete.
@@ -68,7 +70,7 @@ func TestUsageJSONFiltersAndTotals(t *testing.T) {
 	if strings.Join(output.GroupBy, ",") != "repo,user,action" || len(output.Groups) != 4 {
 		t.Fatalf("unexpected groups: %+v", output)
 	}
-	want := usage.Summary{Attempts: 4, Succeeded: 2, Failed: 1, Running: 1, CodexCalls: 4, IncompleteUsage: 2, Tokens: usage.Tokens{Input: 150, CachedInput: 50, Output: 25}, TotalTokens: 175}
+	want := usage.Summary{Attempts: 4, Succeeded: 2, Failed: 1, Running: 1, CodexCalls: 4, ClaudeCalls: 3, IncompleteUsage: 2, Tokens: usage.Tokens{Input: 150, CachedInput: 50, Output: 25}, TotalTokens: 175}
 	if output.Totals != want {
 		t.Fatalf("totals = %+v, want %+v", output.Totals, want)
 	}
@@ -88,18 +90,21 @@ func TestUsageDetailsAndTables(t *testing.T) {
 	if len(output.Groups) != 0 || len(output.GroupBy) != 0 || len(output.Attempts) != 4 || output.Attempts[0].TotalTokens != 120 || output.Attempts[1].UsageComplete || output.Attempts[2].UsageComplete {
 		t.Fatalf("wrong detail report: %+v", output)
 	}
+	if attempt := output.Attempts[1]; attempt.Provider != "claude" || attempt.CriticProvider != "codex" || attempt.CriticModel != "critic-model" || attempt.ClaudeCalls != 3 {
+		t.Fatalf("details lost model roles: %+v", attempt)
+	}
 	for _, grouping := range []string{"repo,month", "none"} {
 		var stdout, stderr bytes.Buffer
 		if code := runUsageWithOutput([]string{"-dir", dir, "-group-by", grouping}, &stdout, &stderr); code != 0 {
 			t.Fatalf("exit %d: %s", code, &stderr)
 		}
-		for _, text := range []string{"example-owner/example-repo", "175 total", "2 attempts with incomplete usage", "included in input", "lower bounds"} {
+		for _, text := range []string{"example-owner/example-repo", "175 total", "2 attempts with incomplete usage", "included in input", "lower bounds", "CODEX CALLS", "CLAUDE CALLS", "4 Codex calls, 3 Claude calls"} {
 			if !strings.Contains(stdout.String(), text) {
 				t.Errorf("%q output lacks %q: %s", grouping, text, &stdout)
 			}
 		}
 		if grouping == "none" {
-			for _, text := range []string{"succeeded", "failed", "running", "partial", "unknown", "complete", "stale after an interruption"} {
+			for _, text := range []string{"succeeded", "failed", "running", "partial", "unknown", "complete", "stale after an interruption", "MAIN", "CRITIC", "claude", "codex"} {
 				if !strings.Contains(stdout.String(), text) {
 					t.Errorf("details lack %q: %s", text, &stdout)
 				}

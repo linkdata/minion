@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/config"
 )
 
@@ -28,7 +29,10 @@ type modelInfo struct {
 //
 // Omitted settings are resolved and pinned for this process. Discovery does not
 // start an inference turn. Temporary-directory cleanup failures return an error.
-func Validate(ctx context.Context, settings config.CodexConfig) (config.CodexConfig, error) {
+// A nonempty APIKey in settings selects API authentication for discovery without
+// changing the stored CLI login.
+func Validate(ctx context.Context, settings config.CodexConfig) (resolved config.CodexConfig, resultErr error) {
+	defer func() { resultErr = aicli.RedactError(resultErr, settings.APIKey) }()
 	models, err := listModels(ctx, settings)
 	if err != nil {
 		return settings, fmt.Errorf("cannot validate Codex settings: %w", err)
@@ -80,6 +84,9 @@ func listModels(ctx context.Context, settings config.CodexConfig) (models []mode
 	// app-server has no --ignore-user-config flag. Select exec's built-in
 	// provider explicitly and avoid repository config by using a temporary cwd.
 	args := []string{"app-server", "--strict-config", "--listen", "stdio://", "-c", `model_provider="openai"`}
+	if settings.APIKey != "" {
+		args = append(args, "-c", `cli_auth_credentials_store="ephemeral"`, "-c", `forced_login_method="api"`)
+	}
 	if settings.Model != "" {
 		args = append(args, "-c", "model="+strconv.Quote(settings.Model))
 	}
@@ -88,7 +95,7 @@ func listModels(ctx context.Context, settings config.CodexConfig) (models []mode
 	}
 	cmd := exec.CommandContext(ctx, "codex", args...)
 	cmd.Dir = dir
-	cmd.Env = childEnvironment(os.Environ(), dir, dir)
+	cmd.Env = childEnvironment(os.Environ(), dir, dir, settings.APIKey != "")
 	cmd.WaitDelay = 2 * time.Second
 	configureCancellation(cmd)
 	var diagnostics tailBuffer
@@ -167,6 +174,17 @@ func listModels(ctx context.Context, settings config.CodexConfig) (models []mode
 	}
 	if err := encoder.Encode(map[string]any{"method": "initialized", "params": map[string]any{}}); err != nil {
 		return nil, err
+	}
+	if settings.APIKey != "" {
+		var result struct {
+			Type string `json:"type"`
+		}
+		if err := call(0, "account/login/start", map[string]string{"type": "apiKey", "apiKey": settings.APIKey}, &result); err != nil {
+			return nil, err
+		}
+		if result.Type != "apiKey" {
+			return nil, errors.New("codex did not select configured API key authentication")
+		}
 	}
 	cursor := ""
 	for page := 0; page < 100; page++ {

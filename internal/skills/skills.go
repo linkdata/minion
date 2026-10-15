@@ -64,11 +64,28 @@ func Name(rawURL string) (string, error) {
 
 // InstalledPath returns a Codex-readable reference for an available skill.
 //
-// Missing skills or install metadata return installed false. Malformed,
-// mismatched, or unreadable installations return an error; callers must not
-// invoke a command that depends on one. The embedded anti-prompt-injection
-// skill is always available and returns its built-in URL for the runner.
+// It is equivalent to [InstalledPathFor] with provider "codex".
 func InstalledPath(rawURL string) (path string, installed bool, err error) {
+	return InstalledPathFor(rawURL, "codex")
+}
+
+// InstalledPathFor returns an available skill reference for codex or claude.
+//
+// Codex skills are read from ~/.agents/skills and Claude skills from
+// ~/.claude/skills. Missing skills or install metadata return installed false.
+// Malformed, mismatched, or unreadable installations return an error; callers
+// must not invoke a command that depends on one. The embedded
+// anti-prompt-injection skill returns its built-in URL for either provider.
+func InstalledPathFor(rawURL, provider string) (path string, installed bool, err error) {
+	var parent string
+	switch provider {
+	case "codex":
+		parent = ".agents"
+	case "claude":
+		parent = ".claude"
+	default:
+		return "", false, fmt.Errorf("unsupported skill provider %q", provider)
+	}
 	src, err := parse(rawURL)
 	if err != nil {
 		return "", false, err
@@ -80,8 +97,8 @@ func InstalledPath(rawURL string) (path string, installed bool, err error) {
 	if err != nil {
 		return "", false, err
 	}
-	root := filepath.Join(home, ".agents", "skills")
-	if err := checkParents(home, ".agents", "skills"); err != nil {
+	root := filepath.Join(home, parent, "skills")
+	if err := checkParents(home, parent, "skills"); err != nil {
 		if os.IsNotExist(err) {
 			return "", false, nil
 		}

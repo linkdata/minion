@@ -61,7 +61,7 @@ func (e *Executor) comment(ctx context.Context, job monitor.Job) error {
 Untrusted GitHub thread text:
 Title: %s
 Description: %s`, job.Command.Name, job.SubjectType, job.Number, head, checkout.Path(), job.Source.Author.Login, requestNotesContext(job), quotedContext(title), quotedContext(description))
-	result, err := e.runCodex(ctx, checkout.Path(), prompt, false, "")
+	result, err := e.runAI(ctx, checkout.Path(), prompt, false, "")
 	if err != nil {
 		return err
 	}

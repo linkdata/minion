@@ -15,6 +15,8 @@ func TestCheckedInConfigIsSample(t *testing.T) {
 	if cfg.BotLogin != "example-bot" || len(cfg.InvitationOwners) != 0 ||
 		len(cfg.Repositories) != 1 || cfg.Repositories[0].Name != "example-owner/example-repo" ||
 		cfg.Codex.Model != "" || cfg.Codex.ReasoningEffort != "" ||
+		cfg.Claude.Model != "" || cfg.Claude.Effort != "" ||
+		cfg.Main != "codex" || cfg.Adversarial != "" || cfg.CriticMaxRounds != 3 ||
 		len(cfg.Commands) != 4 || len(cfg.AlwaysOnSkills) != 2 ||
 		cfg.MaxGitHubContextBytes != DefaultMaxGitHubContextBytes ||
 		cfg.AlwaysOnSkills[0] != defaultAntiInjectionSkill || cfg.AlwaysOnSkills[1] != defaultCavemanSkill {

@@ -119,6 +119,65 @@ func TestValidateFailsWhenCodexCannotSupplyCatalogue(t *testing.T) {
 	}
 }
 
+func TestValidateUsesConfiguredAPIKeyWithoutPersistingLogin(t *testing.T) {
+	dir := t.TempDir()
+	page := `{"id":2,"result":{"data":[{"model":"test","isDefault":true,"defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high"}]}]}}`
+	script := strings.Replace(catalogueScriptFor(dir, page, ""), "printf '%s\\n' '{\"method\":\"test/notification\",\"params\":{}}'", `printf '%s,%s\n' "${CODEX_API_KEY-absent}" "${CODEX_ACCESS_TOKEN-absent}" > "$0.auth"
+printf '%s\n' '{"id":0,"result":{"type":"apiKey"}}'
+IFS= read -r request
+printf '%s\n' "$request" >> "$0.model-request"
+printf '%s\n' '{"method":"test/notification","params":{}}'`, 1)
+	fake := installFakeCodex(t, script)
+	t.Setenv("CODEX_API_KEY", "dummy-environment-key")
+	t.Setenv("CODEX_ACCESS_TOKEN", "dummy-environment-access-token")
+	settings, err := Validate(context.Background(), config.CodexConfig{APIKey: "dummy-configured-key"})
+	if err != nil || settings.Model != "test" || settings.APIKey != "dummy-configured-key" {
+		t.Fatalf("Validate() failed to preserve configured authentication: %v", err)
+	}
+	args, err := os.ReadFile(filepath.Join(dir, "args"))
+	if err != nil || !strings.Contains(string(args), `cli_auth_credentials_store="ephemeral"`) || !strings.Contains(string(args), `forced_login_method="api"`) || strings.Contains(string(args), settings.APIKey) {
+		t.Fatalf("wrong configured authentication arguments: %v", err)
+	}
+	auth, err := os.ReadFile(fake + ".auth")
+	if err != nil || string(auth) != "absent,absent\n" {
+		t.Fatalf("ambient credentials reached discovery: %q, %v", auth, err)
+	}
+	requests, err := os.ReadFile(filepath.Join(dir, "requests"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(requests)), "\n")
+	var login struct {
+		Method string `json:"method"`
+		Params struct {
+			Type   string `json:"type"`
+			APIKey string `json:"apiKey"`
+		} `json:"params"`
+	}
+	if len(lines) != 3 {
+		t.Fatalf("expected handshake and login; got %d requests", len(lines))
+	}
+	if err := json.Unmarshal([]byte(lines[2]), &login); err != nil || login.Method != "account/login/start" || login.Params.Type != "apiKey" || login.Params.APIKey != settings.APIKey {
+		t.Fatalf("wrong configured login request: %v", err)
+	}
+}
+
+func TestValidateRejectsFailedConfiguredLogin(t *testing.T) {
+	for _, response := range []string{
+		`{"id":0,"error":{"message":"dummy-configured-key"}}`,
+		`{"id":0,"result":{"type":"chatgpt"}}`,
+	} {
+		t.Run(response, func(t *testing.T) {
+			dir := t.TempDir()
+			installFakeCodex(t, catalogueScriptFor(dir, response, ""))
+			_, err := Validate(context.Background(), config.CodexConfig{APIKey: "dummy-configured-key"})
+			if err == nil || strings.Contains(err.Error(), "dummy-configured-key") {
+				t.Fatalf("configured login must fail without exposing the key: %v", err)
+			}
+		})
+	}
+}
+
 func TestValidateReportsCLIExitAndHonorsTimeout(t *testing.T) {
 	t.Run("unsupported CLI flag", func(t *testing.T) {
 		installFakeCodex(t, "#!/bin/sh\nprintf '%s\\n' 'unsupported flag' >&2\nexit 2\n")
@@ -155,7 +214,7 @@ func TestValidateReportsCleanupFailure(t *testing.T) {
 			t.Error(err)
 		}
 		for _, path := range paths {
-			if err := os.Chmod(path, 0700); err != nil {
+			if err := os.Chmod(path, 0o700); err != nil {
 				t.Error(err)
 			}
 		}
