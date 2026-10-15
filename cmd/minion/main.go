@@ -218,7 +218,7 @@ func checkModels(ctx context.Context, cfg *config.Config, logger *log.Logger) (e
 	for _, provider := range []string{cfg.Main, cfg.Adversarial} {
 		switch provider {
 		case "codex":
-			if err = checkCodexCLI(ctx); err == nil {
+			if err = checkCodexCLI(ctx, cfg.Codex); err == nil {
 				if err = codexcli.ValidateInstructionBoundary(ctx); err == nil {
 					cfg.Codex, err = codexcli.Validate(ctx, cfg.Codex)
 				}
@@ -243,9 +243,14 @@ func checkModels(ctx context.Context, cfg *config.Config, logger *log.Logger) (e
 	return
 }
 
-func checkCodexCLI(ctx context.Context) error {
+func checkCodexCLI(ctx context.Context, settings config.CodexConfig) error {
 	if _, err := exec.LookPath("codex"); err != nil {
 		return err
+	}
+	if settings.APIKey != "" {
+		// Model discovery authenticates with the configured key. An ambient
+		// login status cannot validate that credential.
+		return nil
 	}
 	cmd := exec.CommandContext(ctx, "codex", "login", "status")
 	output, err := cmd.CombinedOutput()

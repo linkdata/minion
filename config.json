@@ -3,6 +3,13 @@
   "main": "codex",
   "adversarial": "",
   "critic_max_rounds": 3,
+  "codex": {
+    "api_key": ""
+  },
+  "claude": {
+    "api_key": "",
+    "allow_all_unix_sockets": true
+  },
   "commands": {
     "review": {
       "action": "review",

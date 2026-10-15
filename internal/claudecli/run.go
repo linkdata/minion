@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,12 +21,24 @@ import (
 
 // Run executes one Claude task with sandboxed shell tools.
 //
-// The CLI retains API network access. Model-generated commands cannot access
-// the network or host files outside the explicit read grants. A writable run
-// may edit the checkout; outputDir grants a separate report directory write
+// The CLI retains API network access. Model-generated commands have no allowed
+// network destinations; Unix sockets remain available when AllowAllUnixSockets
+// is nil or true. Host file access is limited to explicit read grants. A writable
+// run may edit the checkout; outputDir grants a separate report directory write
 // access. ReadOnlyDirs and configured skills remain read-only. When OutputSchema
 // is set, the answer contains the CLI's structured JSON result.
+//
+// APIKey overrides environment credentials and stored CLI login through a
+// temporary, tool-inaccessible key helper. Without APIKey, use Claude's stored
+// CLI login; environment API/OAuth tokens are rejected. Authenticated proxies
+// are rejected in either mode.
 func Run(ctx context.Context, dir, prompt string, writable bool, outputDir string, settings config.ClaudeConfig) (result aicli.Result, runError error) {
+	defer func() {
+		runError = aicli.RedactError(runError, settings.APIKey)
+		if settings.APIKey != "" {
+			result.Answer = strings.ReplaceAll(result.Answer, settings.APIKey, "[redacted]")
+		}
+	}()
 	if strings.TrimSpace(prompt) == "" {
 		return result, errors.New("claude: prompt is empty")
 	}
@@ -47,6 +60,18 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 			runError = errors.Join(runError, fmt.Errorf("claude cleanup: %w", err))
 		}
 	}()
+	authDir, err := authentication(filepath.Dir(workspace), settings.APIKey)
+	if err != nil {
+		return result, err
+	}
+	if authDir != "" {
+		defer func() {
+			if err := cleanup.RemoveAll(authDir); err != nil {
+				result.Answer = ""
+				runError = errors.Join(runError, fmt.Errorf("claude credential cleanup: %w", err))
+			}
+		}()
+	}
 	cacheDir := filepath.Join(runtimeDir, "go-build")
 	if err := os.Mkdir(cacheDir, 0o700); err != nil {
 		return result, err
@@ -93,7 +118,7 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 		}
 		skillPaths = append(skillPaths, resolved)
 	}
-	policy, err := sandboxSettings(workspace, runtimeDir, writable, outputDir, settings.ReadOnlyDirs, skillPaths)
+	policy, err := sandboxSettings(workspace, runtimeDir, writable, outputDir, settings, skillPaths, authDir)
 	if err != nil {
 		return result, err
 	}
@@ -132,7 +157,10 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	// #nosec G204 -- The resolved executable is outside the checkout; arguments do not pass through a shell.
 	cmd := exec.CommandContext(runCtx, binary, args...)
 	cmd.Dir = runtimeDir
-	cmd.Env = childEnvironment(os.Environ(), runtimeDir, cacheDir)
+	cmd.Env, err = childEnvironment(os.Environ(), runtimeDir, cacheDir, authDir)
+	if err != nil {
+		return result, err
+	}
 	cmd.Stdin = strings.NewReader(instructions.String())
 	cmd.WaitDelay = 2 * time.Second
 	configureCancellation(cmd)
@@ -170,7 +198,7 @@ func arguments(policy string) []string {
 	}
 }
 
-func sandboxSettings(workspace, runtimeDir string, writable bool, outputDir string, readOnlyDirs, skillPaths []string) (string, error) {
+func sandboxSettings(workspace, runtimeDir string, writable bool, outputDir string, settings config.ClaudeConfig, skillPaths []string, authDir string) (string, error) {
 	reads := []string{"/usr", "/bin", "/lib", "/lib64", "/etc/ld.so.cache", "/etc/ld.so.conf", "/etc/ld.so.conf.d", "/etc/localtime", "/etc/nsswitch.conf", "/etc/ssl/certs", workspace, runtimeDir}
 	writes := []string{runtimeDir}
 	deniedWrites := []string{}
@@ -194,7 +222,7 @@ func sandboxSettings(workspace, runtimeDir string, writable bool, outputDir stri
 		writes = append(writes, resolved)
 		outputDir = resolved
 	}
-	for _, path := range readOnlyDirs {
+	for _, path := range settings.ReadOnlyDirs {
 		resolved, err := directory(path)
 		if err != nil {
 			return "", err
@@ -217,8 +245,19 @@ func sandboxSettings(workspace, runtimeDir string, writable bool, outputDir stri
 			"enableWeakerNestedSandbox": false, "enableWeakerNetworkIsolation": false,
 			"credentials": map[string]any{"envVars": credentialDenials()},
 			"filesystem":  map[string]any{"disabled": false, "denyRead": []string{"/"}, "allowRead": reads, "allowWrite": writes, "denyWrite": deniedWrites},
-			"network":     map[string]any{"allowedDomains": []string{}, "strictAllowlist": true, "allowAllUnixSockets": false, "allowLocalBinding": false},
+			"network": map[string]any{
+				"allowedDomains": []string{}, "strictAllowlist": true, "allowLocalBinding": false,
+				"allowAllUnixSockets": settings.AllowAllUnixSockets == nil || *settings.AllowAllUnixSockets,
+			},
 		},
+	}
+	if authDir != "" {
+		for _, grant := range append(reads, writes...) {
+			if within(grant, authDir) || within(authDir, grant) {
+				return "", errors.New("claude API key directory overlaps a sandbox grant")
+			}
+		}
+		policy["apiKeyHelper"] = apiKeyHelper(authDir)
 	}
 	data, err := json.Marshal(policy)
 	return string(data), err
@@ -271,25 +310,49 @@ func executable(name, workspace string) (string, error) {
 	return path, err
 }
 
-func childEnvironment(env []string, runtimeDir, cacheDir string) []string {
+func childEnvironment(env []string, runtimeDir, cacheDir, authDir string) ([]string, error) {
 	allowed := map[string]bool{
 		"PATH": true, "HOME": true, "LANG": true, "LC_ALL": true, "LC_CTYPE": true, "TERM": true,
-		"CLAUDE_CONFIG_DIR": true, "CLAUDE_CODE_OAUTH_TOKEN": true, "ANTHROPIC_API_KEY": true,
-		"SSL_CERT_FILE": true, "SSL_CERT_DIR": true, "NODE_EXTRA_CA_CERTS": true,
+		"CLAUDE_CONFIG_DIR": true,
+		"SSL_CERT_FILE":     true, "SSL_CERT_DIR": true, "NODE_EXTRA_CA_CERTS": true,
 		"HTTP_PROXY": true, "HTTPS_PROXY": true, "ALL_PROXY": true, "NO_PROXY": true,
 	}
 	clean := make([]string, 0, len(env))
 	for _, entry := range env {
-		key, _, ok := strings.Cut(entry, "=")
+		key, value, ok := strings.Cut(entry, "=")
+		if authDir != "" && (key == "ANTHROPIC_API_KEY" || key == "CLAUDE_CODE_OAUTH_TOKEN" || key == "CLAUDE_CONFIG_DIR") {
+			continue
+		}
+		// Native credential denial removes values from the shell environment,
+		// but the bubblewrap supervisor retains them in /proc/1/environ.
+		switch key {
+		case "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN":
+			if value != "" {
+				return nil, fmt.Errorf("claude sandbox cannot protect environment %s; set claude.api_key or use claude auth login", key)
+			}
+		case "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY":
+			if value != "" {
+				raw := value
+				if !strings.Contains(raw, "://") {
+					raw = "//" + raw
+				}
+				proxy, err := url.Parse(raw)
+				if err != nil || proxy.Host == "" || proxy.User != nil || strings.Contains(value, "@") {
+					return nil, fmt.Errorf("claude requires %s to be a proxy URL without credentials", key)
+				}
+			}
+		}
 		if ok && allowed[key] {
 			clean = append(clean, entry)
 		}
 	}
-	// The only model tool is Bash. Its strict sandbox provides PID isolation
-	// and removes the explicit credentials before launching a command.
+	if authDir != "" {
+		clean = append(clean, "CLAUDE_CONFIG_DIR="+authDir)
+	}
+	// Keep runtime and cache paths inside the sandbox write grants.
 	return append(
 		clean,
 		"CLAUDE_CODE_TMPDIR="+filepath.Join(runtimeDir, "tmp"),
 		"TMPDIR="+runtimeDir, "TMP="+runtimeDir, "TEMP="+runtimeDir, "GOCACHE="+cacheDir,
-	)
+	), nil
 }

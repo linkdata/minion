@@ -67,10 +67,12 @@ type Repository struct {
 	AllowedActorIDs map[string]int64 `json:"allowed_actor_ids,omitempty"`
 }
 
-// CodexConfig contains model settings and skill paths selected for one job.
+// CodexConfig contains authentication, model settings, and job skill paths.
 type CodexConfig struct {
 	Model           string `json:"model,omitempty"`
 	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	// APIKey overrides environment credentials and stored login when nonempty.
+	APIKey string `json:"api_key,omitempty"`
 	// Skills contains installed paths selected by the application, not config JSON.
 	Skills []string `json:"-"`
 	// ReadOnlyDirs grants read access to additional application-selected directories.
@@ -79,10 +81,15 @@ type CodexConfig struct {
 	OutputSchema string `json:"-"`
 }
 
-// ClaudeConfig contains model settings and skill paths selected for one job.
+// ClaudeConfig contains authentication, model settings, and job skill paths.
 type ClaudeConfig struct {
 	Model  string `json:"model,omitempty"`
 	Effort string `json:"effort,omitempty"`
+	// APIKey overrides environment credentials and stored login when nonempty.
+	APIKey string `json:"api_key,omitempty"`
+	// AllowAllUnixSockets disables Unix-socket filtering to work around Claude's
+	// sandbox startup failure on affected Linux hosts. Nil selects true.
+	AllowAllUnixSockets *bool `json:"allow_all_unix_sockets,omitempty"`
 	// Skills contains installed paths selected by the application, not config JSON.
 	Skills []string `json:"-"`
 	// ReadOnlyDirs grants read access to additional application-selected directories.
@@ -199,6 +206,9 @@ func (c *Config) Validate(configDir string) error {
 	}
 	if c.CriticMaxRounds < 1 || c.CriticMaxRounds > 10 {
 		return fmt.Errorf("critic_max_rounds must be between 1 and 10")
+	}
+	if strings.ContainsAny(c.Codex.APIKey, " \t\r\n\x00") || strings.ContainsAny(c.Claude.APIKey, " \t\r\n\x00") {
+		return fmt.Errorf("provider api_key must not contain whitespace or NUL")
 	}
 	c.Codex.Model = strings.TrimSpace(c.Codex.Model)
 	c.Codex.ReasoningEffort = strings.TrimSpace(c.Codex.ReasoningEffort)

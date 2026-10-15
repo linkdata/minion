@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -23,7 +24,11 @@ import (
 // bubblewrap, and socat. Model discovery uses the CLI's initialization protocol
 // without an inference turn. These checks do not execute a sandboxed command;
 // deployments must validate runtime isolation.
+//
+// APIKey overrides environment credentials and stored login. Without it,
+// environment API/OAuth tokens are rejected. Authenticated proxies are rejected.
 func Validate(ctx context.Context, settings config.ClaudeConfig) (validated config.ClaudeConfig, resultErr error) {
+	defer func() { resultErr = aicli.RedactError(resultErr, settings.APIKey) }()
 	validated = settings
 	if runtime.GOOS != "linux" {
 		return validated, errors.New("claude isolation currently requires Linux")
@@ -35,11 +40,21 @@ func Validate(ctx context.Context, settings config.ClaudeConfig) (validated conf
 		return validated, err
 	}
 	defer func() { resultErr = errors.Join(resultErr, os.RemoveAll(dir)) }()
+	authDir, err := authentication(filepath.Dir(dir), settings.APIKey)
+	if err != nil {
+		return validated, err
+	}
+	if authDir != "" {
+		defer func() { resultErr = errors.Join(resultErr, os.RemoveAll(authDir)) }()
+	}
 	binary, err := executable("claude", "")
 	if err != nil {
 		return validated, err
 	}
-	env := childEnvironment(os.Environ(), dir, dir)
+	env, err := childEnvironment(os.Environ(), dir, dir, authDir)
+	if err != nil {
+		return validated, err
+	}
 	version, err := probe(ctx, binary, []string{"--version"}, dir, env, "")
 	if err != nil {
 		return validated, err
@@ -52,7 +67,15 @@ func Validate(ctx context.Context, settings config.ClaudeConfig) (validated conf
 			return validated, fmt.Errorf("claude sandbox dependency %s: %w", name, err)
 		}
 	}
-	auth, err := probe(ctx, binary, []string{"--safe-mode", "--setting-sources", "", "auth", "status", "--json"}, dir, env, "")
+	policy, err := sandboxSettings(dir, dir, false, "", settings, nil, authDir)
+	if err != nil {
+		return validated, err
+	}
+	authArgs := []string{"--safe-mode", "--setting-sources", ""}
+	if authDir != "" {
+		authArgs = append(authArgs, "--settings", policy)
+	}
+	auth, err := probe(ctx, binary, append(authArgs, "auth", "status", "--json"), dir, env, "")
 	if err != nil {
 		return validated, fmt.Errorf("claude authentication: %w", err)
 	}
@@ -60,11 +83,7 @@ func Validate(ctx context.Context, settings config.ClaudeConfig) (validated conf
 		LoggedIn bool `json:"loggedIn"`
 	}
 	if json.Unmarshal(auth, &status) != nil || !status.LoggedIn {
-		return validated, errors.New("claude is not authenticated; run claude auth login")
-	}
-	policy, err := sandboxSettings(dir, dir, false, "", nil, nil)
-	if err != nil {
-		return validated, err
+		return validated, errors.New("claude is not authenticated; configure claude.api_key or run claude auth login")
 	}
 	args := append(arguments(policy), "--input-format", "stream-json")
 	data, err := probe(ctx, binary, args, dir, env, "{\"type\":\"control_request\",\"request_id\":\"minion-initialize\",\"request\":{\"subtype\":\"initialize\"}}\n")

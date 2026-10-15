@@ -43,7 +43,17 @@ type Result = aicli.Result
 // the final response to that JSON Schema when set. Codex starts in a separate
 // project root and reads the checkout through its absolute path. Model-generated
 // commands have no network access.
+//
+// A nonempty APIKey in settings overrides environment credentials and stored
+// login for this run. It is excluded from model-command environments and
+// redacted from the returned answer and error text.
 func Run(ctx context.Context, dir, prompt string, writable bool, outputDir string, settings config.CodexConfig) (result Result, runError error) {
+	defer func() {
+		if settings.APIKey != "" {
+			result.Answer = strings.ReplaceAll(result.Answer, settings.APIKey, "[redacted]")
+			runError = aicli.RedactError(runError, settings.APIKey)
+		}
+	}()
 	result.UsageComplete = true
 	if strings.TrimSpace(dir) == "" {
 		return result, errors.New("codex exec: repository directory is empty")
@@ -230,7 +240,10 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	// #nosec G204 -- The resolved executable is outside the checkout, and arguments do not pass through a shell.
 	cmd := exec.CommandContext(runCtx, binary, args...)
 	cmd.Dir = runtimeDir
-	cmd.Env = childEnvironment(os.Environ(), runtimeDir, cacheDir)
+	cmd.Env = childEnvironment(os.Environ(), runtimeDir, cacheDir, settings.APIKey != "")
+	if settings.APIKey != "" {
+		cmd.Env = append(cmd.Env, "CODEX_API_KEY="+settings.APIKey)
+	}
 	cmd.Stdin = strings.NewReader(prompt)
 	cmd.WaitDelay = 2 * time.Second
 	configureCancellation(cmd)
@@ -296,8 +309,9 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 }
 
 // The runner holds GitHub and other service credentials; Codex only needs its
-// own authentication and ordinary process/network settings.
-func childEnvironment(env []string, runtimeDir, cacheDir string) []string {
+// own authentication and ordinary process/network settings. Configured
+// authentication removes inherited credentials before the caller supplies it.
+func childEnvironment(env []string, runtimeDir, cacheDir string, configuredAuth bool) []string {
 	allowed := map[string]bool{
 		"PATH": true, "HOME": true, "LANG": true, "LC_ALL": true, "LC_CTYPE": true, "TERM": true,
 		"CODEX_HOME": true, "CODEX_API_KEY": true, "CODEX_ACCESS_TOKEN": true,
@@ -309,6 +323,9 @@ func childEnvironment(env []string, runtimeDir, cacheDir string) []string {
 	for _, entry := range env {
 		key, _, ok := strings.Cut(entry, "=")
 		if !ok {
+			continue
+		}
+		if configuredAuth && (strings.EqualFold(key, "CODEX_API_KEY") || strings.EqualFold(key, "CODEX_ACCESS_TOKEN")) {
 			continue
 		}
 		if allowed[strings.ToUpper(key)] {

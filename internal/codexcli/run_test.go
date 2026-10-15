@@ -398,7 +398,7 @@ func TestChildEnvironmentIsolatesCodexSessionButKeepsAuthentication(t *testing.T
 		"GH_TOKEN=secret", "GITHUB_TOKEN=secret", "OPENAI_API_KEY=secret", "PGPASSWORD=secret",
 		"PATH=/usr/bin", "HOME=/trusted/home", "HTTPS_PROXY=http://proxy", "SSL_CERT_FILE=/cert",
 		"TMPDIR=/host-tmp", "GOCACHE=/host-cache",
-	}, "/runtime", "/cache")
+	}, "/runtime", "/cache", false)
 	joined := strings.Join(env, "\n")
 	for _, denied := range []string{"unsafe-parent-profile", "CODEX_THREAD_ID", "CODEX_SESSION_ID", "CODEX_APP_TOOLS_PIPE_PATH", "CODEX_SANDBOX_NETWORK_DISABLED", "GH_TOKEN", "GITHUB_TOKEN", "OPENAI_API_KEY", "PGPASSWORD", "/host-tmp", "/host-cache"} {
 		if strings.Contains(joined, denied) {
@@ -409,6 +409,66 @@ func TestChildEnvironmentIsolatesCodexSessionButKeepsAuthentication(t *testing.T
 		if !strings.Contains(joined, kept) {
 			t.Fatalf("required environment setting missing: %s", kept)
 		}
+	}
+}
+
+func TestRunConfiguredAPIKeyOverridesEnvironment(t *testing.T) {
+	for _, configured := range []bool{false, true} {
+		t.Run(fmt.Sprint(configured), func(t *testing.T) {
+			fake := installFakeCodex(t, `#!/bin/sh
+printf '%s\n' "$@" > "$0.args"
+printf '%s,%s,%s\n' "${CODEX_API_KEY-absent}" "${CODEX_ACCESS_TOKEN-absent}" "${OPENAI_API_KEY-absent}" > "$0.auth"
+cat > "$0.prompt"
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}' '{"type":"turn.completed"}'
+`)
+			t.Setenv("CODEX_API_KEY", "dummy-environment-key")
+			t.Setenv("CODEX_ACCESS_TOKEN", "dummy-environment-access-token")
+			t.Setenv("OPENAI_API_KEY", "dummy-unrelated-key")
+			settings := config.CodexConfig{}
+			want := "dummy-environment-key,dummy-environment-access-token,absent\n"
+			if configured {
+				settings.APIKey = "dummy-configured-key"
+				want = "dummy-configured-key,absent,absent\n"
+			}
+			if _, err := Run(context.Background(), t.TempDir(), "Review this checkout", false, "", settings); err != nil {
+				t.Fatal(err)
+			}
+			auth, err := os.ReadFile(fake + ".auth")
+			if err != nil || string(auth) != want {
+				t.Fatalf("child authentication = %q, %v; want %q", auth, err, want)
+			}
+			for _, suffix := range []string{".args", ".prompt"} {
+				data, err := os.ReadFile(fake + suffix)
+				if err != nil || strings.Contains(string(data), "dummy-configured-key") {
+					t.Fatalf("configured API key reached %s: %v", suffix, err)
+				}
+			}
+		})
+	}
+}
+
+func TestRunRedactsConfiguredAPIKey(t *testing.T) {
+	for _, test := range []struct {
+		name, output string
+		wantError    bool
+	}{
+		{name: "answer", output: `printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"dummy-configured-key"}}' '{"type":"turn.completed"}'`},
+		{name: "event error", output: `printf '%s\n' '{"type":"turn.failed","error":{"message":"dummy-configured-key"}}'`, wantError: true},
+		{name: "stderr", output: `printf '%s\n' 'dummy-configured-key' >&2; exit 1`, wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			installFakeCodex(t, "#!/bin/sh\ncat >/dev/null\n"+test.output+"\n")
+			result, err := Run(context.Background(), t.TempDir(), "Review this checkout", false, "", config.CodexConfig{APIKey: "dummy-configured-key"})
+			if (err != nil) != test.wantError {
+				t.Fatalf("unexpected Run error: %v", err)
+			}
+			if strings.Contains(result.Answer, "dummy-configured-key") || err != nil && strings.Contains(err.Error(), "dummy-configured-key") {
+				t.Fatal("configured API key escaped redaction")
+			}
+			if !test.wantError && result.Answer != "[redacted]" {
+				t.Fatalf("answer = %q", result.Answer)
+			}
+		})
 	}
 }
 

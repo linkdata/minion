@@ -18,6 +18,11 @@ const successfulResult = `{"type":"result","subtype":"success","is_error":false,
 
 func fakeExecutable(t *testing.T, name, script string) string {
 	t.Helper()
+	if name == "claude" {
+		for _, key := range []string{"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"} {
+			t.Setenv(key, "")
+		}
+	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, name)
 	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+script), 0o700); err != nil {
@@ -34,6 +39,79 @@ func readFile(t *testing.T, path string) string {
 		t.Fatal(err)
 	}
 	return string(data)
+}
+
+func TestUnixSocketWorkaround(t *testing.T) {
+	for _, tc := range []struct {
+		name, fields string
+		want         bool
+	}{
+		{name: "omitted claude", want: true},
+		{name: "empty claude", fields: `,"claude":{}`, want: true},
+		{name: "null", fields: `,"claude":{"allow_all_unix_sockets":null}`, want: true},
+		{name: "enabled", fields: `,"claude":{"allow_all_unix_sockets":true}`, want: true},
+		{name: "disabled", fields: `,"claude":{"allow_all_unix_sockets":false}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.json")
+			data := `{"bot_login":"bot","repositories":[{"name":"owner/repo","id":1,"owner_id":2,"actions":["review"]}]` + tc.fields + `}`
+			if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := config.Load(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fakeExecutable(t, "bwrap", "exit 99\n")
+			fakeExecutable(t, "socat", "exit 99\n")
+			binary := fakeExecutable(t, "claude", `printf '%s\n' "$@" > "$0.args"
+if [ "$1" = '--version' ]; then
+  printf '%s\n' '2.1.295 (Claude Code)'
+elif [ "$4" = 'auth' ]; then
+  printf '%s\n' '{"loggedIn":true}'
+else
+  input=$(cat)
+  case "$input" in
+    *minion-initialize*) printf '%s\n' '`+modelCatalogue+`' ;;
+    *) printf '%s\n' '`+successfulResult+`' ;;
+  esac
+fi
+`)
+			settings, err := Validate(context.Background(), cfg.Claude)
+			if err != nil {
+				t.Fatal(err)
+			}
+			checkUnixSocketPolicy(t, binary, tc.want)
+			if _, err := Run(context.Background(), t.TempDir(), "task", false, "", settings); err != nil {
+				t.Fatal(err)
+			}
+			checkUnixSocketPolicy(t, binary, tc.want)
+		})
+	}
+}
+
+func checkUnixSocketPolicy(t *testing.T, binary string, want bool) {
+	t.Helper()
+	args := strings.Split(strings.TrimSpace(readFile(t, binary+".args")), "\n")
+	for i, arg := range args[:len(args)-1] {
+		if arg == "--settings" {
+			var settings struct {
+				Sandbox struct {
+					Network struct {
+						AllowAllUnixSockets *bool `json:"allowAllUnixSockets"`
+					} `json:"network"`
+				} `json:"sandbox"`
+			}
+			if err := json.Unmarshal([]byte(args[i+1]), &settings); err != nil {
+				t.Fatal(err)
+			}
+			if got := settings.Sandbox.Network.AllowAllUnixSockets; got == nil || *got != want {
+				t.Fatalf("allowAllUnixSockets = %v, want %t", got, want)
+			}
+			return
+		}
+	}
+	t.Fatal("missing sandbox settings")
 }
 
 func TestRun(t *testing.T) {
@@ -208,14 +286,17 @@ func TestRunCancelled(t *testing.T) {
 }
 
 func TestChildEnvironment(t *testing.T) {
-	got := childEnvironment([]string{"HOME=/home/operator", "PATH=/bin", "ANTHROPIC_API_KEY=dummy", "anthropic_api_key=dummy", "GH_TOKEN=dummy", "GITHUB_TOKEN=dummy", "NODE_OPTIONS=dummy", "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=0", "BASH_ENV=bad", "HTTPS_PROXY=dummy", "invalid"}, "/run", "/cache")
+	got, err := childEnvironment([]string{"HOME=/home/operator", "PATH=/bin", "CLAUDE_CONFIG_DIR=/home/operator/.claude", "ANTHROPIC_API_KEY=", "anthropic_api_key=dummy", "GH_TOKEN=dummy", "GITHUB_TOKEN=dummy", "NODE_OPTIONS=dummy", "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=0", "BASH_ENV=bad", "HTTPS_PROXY=http://proxy.example:8080", "invalid"}, "/run", "/cache", "")
+	if err != nil {
+		t.Fatal(err)
+	}
 	joined := strings.Join(got, "\n")
-	for _, key := range []string{"anthropic_api_key", "GH_TOKEN", "GITHUB_TOKEN", "NODE_OPTIONS", "SUBPROCESS_ENV_SCRUB", "BASH_ENV"} {
+	for _, key := range []string{"ANTHROPIC_API_KEY", "anthropic_api_key", "GH_TOKEN", "GITHUB_TOKEN", "NODE_OPTIONS", "SUBPROCESS_ENV_SCRUB", "BASH_ENV"} {
 		if strings.Contains(joined, key+"=") {
 			t.Fatalf("unsafe environment key %s", key)
 		}
 	}
-	if !strings.Contains(joined, "ANTHROPIC_API_KEY=dummy") || !strings.Contains(joined, "GOCACHE=/cache") {
+	if !strings.Contains(joined, "CLAUDE_CONFIG_DIR=/home/operator/.claude") || !strings.Contains(joined, "GOCACHE=/cache") || !strings.Contains(joined, "HTTPS_PROXY=http://proxy.example:8080") {
 		t.Fatalf("missing CLI configuration: %q", got)
 	}
 	for _, key := range []string{"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "HTTPS_PROXY"} {
@@ -228,5 +309,45 @@ func TestChildEnvironment(t *testing.T) {
 		if !found {
 			t.Fatalf("credential %s is not denied to Bash", key)
 		}
+	}
+}
+
+func TestChildEnvironmentRejectsCredentials(t *testing.T) {
+	for _, tc := range []struct {
+		name, value string
+	}{
+		{"ANTHROPIC_API_KEY", "dummy-secret"},
+		{"CLAUDE_CODE_OAUTH_TOKEN", "dummy-secret"},
+		{"HTTP_PROXY", "http://user:dummy-secret@proxy.example:8080"},
+		{"HTTPS_PROXY", "user:dummy-secret@proxy.example:8080"},
+		{"ALL_PROXY", "socks5://dummy-secret@proxy.example:1080"},
+		{"HTTPS_PROXY", "http://dummy-secret%"},
+		{"HTTP_PROXY", "/dummy-secret"},
+		{"HTTPS_PROXY", "http:/user:dummy-secret@proxy.example:8080"},
+		{"HTTP_PROXY", "http:user:dummy-secret@proxy.example:8080"},
+	} {
+		t.Run(tc.name+"/"+tc.value, func(t *testing.T) {
+			env, err := childEnvironment([]string{tc.name + "=" + tc.value}, "/run", "/cache", "")
+			if env != nil || err == nil || !strings.Contains(err.Error(), tc.name) || strings.Contains(err.Error(), "dummy-secret") {
+				t.Fatalf("credential environment accepted or exposed in error: %v, %v", env, err)
+			}
+		})
+	}
+}
+
+func TestCredentialEnvironmentStopsCLI(t *testing.T) {
+	binary := fakeExecutable(t, "claude", "touch \"$0.called\"\nexit 99\n")
+	t.Setenv("ANTHROPIC_API_KEY", "dummy-secret")
+	for _, enabled := range []bool{false, true} {
+		settings := config.ClaudeConfig{AllowAllUnixSockets: &enabled}
+		if _, err := Validate(context.Background(), settings); err == nil || !strings.Contains(err.Error(), "ANTHROPIC_API_KEY") {
+			t.Fatalf("Validate accepted environment credentials: %v", err)
+		}
+		if _, err := Run(context.Background(), t.TempDir(), "task", false, "", settings); err == nil || !strings.Contains(err.Error(), "ANTHROPIC_API_KEY") {
+			t.Fatalf("Run accepted environment credentials: %v", err)
+		}
+	}
+	if _, err := os.Stat(binary + ".called"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("CLI launched with credentials: %v", err)
 	}
 }

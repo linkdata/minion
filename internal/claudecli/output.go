@@ -200,7 +200,7 @@ func toolSandboxFailure(content json.RawMessage) bool {
 
 func sandboxFailure(text string) bool {
 	for _, line := range bytes.Split([]byte(text), []byte{'\n'}) {
-		if bytes.HasPrefix(line, []byte("apply-seccomp:")) || bytes.HasPrefix(line, []byte("bwrap:")) {
+		if bytes.HasPrefix(line, []byte("apply-seccomp:")) || bytes.HasPrefix(line, []byte("bwrap:")) || bytes.HasPrefix(line, []byte("Sandbox is required but failed to initialize:")) {
 			return true
 		}
 	}

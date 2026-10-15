@@ -60,6 +60,7 @@ func TestSandboxStartupFailureAborts(t *testing.T) {
 	}{
 		{"seccomp", "Exit code 1\napply-seccomp: write /proc/self/setgroups: Permission denied", true},
 		{"bubblewrap", "Exit code 1\nbwrap: No permissions to create a new namespace", true},
+		{"initialization", "Sandbox is required but failed to initialize: Failed to create bridge sockets after 5 attempts.", true},
 		{"test failure", "Exit code 1\nFAIL expected 2, got 1", false},
 		{"text blocks", []map[string]string{{"type": "text", "text": "Exit code 1"}, {"type": "text", "text": "apply-seccomp: namespace unavailable"}}, true},
 		{"test failure blocks", []map[string]string{{"type": "text", "text": "Exit code 1\nFAIL expected 2, got 1"}}, false},

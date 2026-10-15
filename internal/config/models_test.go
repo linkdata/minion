@@ -70,6 +70,31 @@ func TestValidateTrimsClaudeSettings(t *testing.T) {
 	}
 }
 
+func TestLoadProviderAPIKeys(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	data := `{"bot_login":"bot","codex":{"api_key":"dummy-codex-key"},"claude":{"api_key":"dummy-claude-key"},"repositories":[{"name":"owner/repo","id":1,"owner_id":2,"actions":["review"]}]}`
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil || cfg.Codex.APIKey != "dummy-codex-key" || cfg.Claude.APIKey != "dummy-claude-key" {
+		t.Fatalf("API keys not loaded: %v", err)
+	}
+	for _, bad := range []string{"dummy secret", "dummy\tsecret", "dummy\rsecret", "dummy\nsecret", "dummy\x00secret"} {
+		for _, provider := range []string{"codex", "claude"} {
+			invalid := cfg
+			if provider == "codex" {
+				invalid.Codex.APIKey = bad
+			} else {
+				invalid.Claude.APIKey = bad
+			}
+			if err := invalid.Validate(t.TempDir()); err == nil || strings.Contains(err.Error(), "dummy") {
+				t.Fatalf("invalid key accepted or exposed: %v", err)
+			}
+		}
+	}
+}
+
 func TestCommandInstalledUsesMainProvider(t *testing.T) {
 	for _, tt := range []struct {
 		main, installedRoot, adversarial string
