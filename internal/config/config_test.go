@@ -16,8 +16,40 @@ func TestCheckedInConfigIsSample(t *testing.T) {
 		len(cfg.Repositories) != 1 || cfg.Repositories[0].Name != "example-owner/example-repo" ||
 		cfg.Codex.Model != "" || cfg.Codex.ReasoningEffort != "" ||
 		len(cfg.Commands) != 4 || len(cfg.AlwaysOnSkills) != 2 ||
+		cfg.MaxGitHubContextBytes != DefaultMaxGitHubContextBytes ||
 		cfg.AlwaysOnSkills[0] != defaultAntiInjectionSkill || cfg.AlwaysOnSkills[1] != defaultCavemanSkill {
 		t.Fatalf("checked-in configuration has operational settings: %+v", cfg)
+	}
+}
+
+func TestLoadMaxGitHubContextBytes(t *testing.T) {
+	for _, tt := range []struct {
+		name, field string
+		want        int
+		wantError   bool
+	}{
+		{name: "default", want: DefaultMaxGitHubContextBytes},
+		{name: "custom", field: `,"max_github_context_bytes":12345`, want: 12345},
+		{name: "explicit zero", field: `,"max_github_context_bytes":0`, want: DefaultMaxGitHubContextBytes},
+		{name: "negative", field: `,"max_github_context_bytes":-1`, wantError: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.json")
+			data := `{"bot_login":"bot","repositories":[{"name":"owner/repo","id":1,"owner_id":2,"actions":["review"]}]` + tt.field + `}`
+			if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := Load(path)
+			if tt.wantError {
+				if err == nil || !strings.Contains(err.Error(), "max_github_context_bytes") {
+					t.Fatalf("Load() error = %v, want size validation error", err)
+				}
+				return
+			}
+			if err != nil || cfg.MaxGitHubContextBytes != tt.want {
+				t.Fatalf("Load() = (%d, %v), want (%d, nil)", cfg.MaxGitHubContextBytes, err, tt.want)
+			}
+		})
 	}
 }
 

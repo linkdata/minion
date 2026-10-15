@@ -39,6 +39,9 @@ func (e *Executor) comment(ctx context.Context, job monitor.Job) error {
 	default:
 		return fmt.Errorf("cannot run %s from %s", job.Command.Name, job.SubjectType)
 	}
+	if err := e.checkGitHubContext(job, title, description); err != nil {
+		return err
+	}
 	checkout, err := gitwork.Clone(ctx, e.WorkRoot, repo.FullName, branch)
 	if err != nil {
 		return err

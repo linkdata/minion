@@ -24,6 +24,7 @@
   ],
   "poll_interval_seconds": 60,
   "job_timeout_minutes": 30,
+  "max_github_context_bytes": 32768,
   "state_path": "var/state.json",
   "work_root": "var/work",
   "work_root_max_bytes": 8589934592,

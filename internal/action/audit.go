@@ -50,6 +50,9 @@ func (e *Executor) securityAudit(ctx context.Context, job monitor.Job) error {
 	default:
 		return fmt.Errorf("cannot audit from %s", job.SubjectType)
 	}
+	if err := e.checkGitHubContext(job, title, description); err != nil {
+		return err
+	}
 	checkout, err := gitwork.Clone(ctx, e.WorkRoot, repo.FullName, branch)
 	if err != nil {
 		return err
