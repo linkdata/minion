@@ -4,10 +4,14 @@ package workspace
 
 import (
 	"context"
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func TestCollectionRefusesSymlinkParents(t *testing.T) {
@@ -108,5 +112,74 @@ func TestReadChangesUsesOnlySelectedRegularPaths(t *testing.T) {
 		if _, err := ReadChanges(context.Background(), root, selected); err == nil {
 			t.Fatalf("accepted unsafe selection %+v", selected)
 		}
+	}
+}
+
+func TestCollectionRefusesRootSymlinksEvenForDeleteOnlySelections(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "link")
+	outside := privateRoot(t)
+	base := []File{{Path: "file", Mode: Regular, Data: []byte("outside")}}
+	if err := Materialize(outside, base); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, root); err != nil {
+		t.Fatal(err)
+	}
+	for _, check := range []func() error{
+		func() error { return CheckRoot(root) },
+		func() error { _, err := Changes(context.Background(), root, base); return err },
+		func() error { _, err := ReadChanges(context.Background(), root, nil); return err },
+		func() error {
+			_, err := ReadChanges(context.Background(), root, []Change{{Path: "file", Delete: true}})
+			return err
+		},
+	} {
+		if err := check(); !errors.Is(err, syscall.ENOTDIR) && !errors.Is(err, syscall.ELOOP) {
+			t.Fatalf("root symlink was not refused by anchored open: %v", err)
+		}
+	}
+	if err := Apply(root, []Change{{Path: "file", Delete: true}}); err == nil || !strings.Contains(err.Error(), "workspace root") {
+		t.Fatalf("Apply accepted a symlinked workspace root: %v", err)
+	}
+	if data, err := os.ReadFile(filepath.Join(outside, "file")); err != nil || string(data) != "outside" {
+		t.Fatalf("symlink-root deletion changed outside file=%q,%v", data, err)
+	}
+}
+
+func TestReadRegularRefusesFIFOWithoutBlocking(t *testing.T) {
+	name := filepath.Join(t.TempDir(), "fifo")
+	if err := syscall.Mkfifo(name, 0600); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := ReadRegular(name, MaxBytes)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "not regular") {
+			t.Fatalf("FIFO validation=%v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("opening FIFO blocked waiting for a writer")
+	}
+}
+
+func TestApplyRefusesDeletionThroughSymlinkedParent(t *testing.T) {
+	root, outside := privateRoot(t), privateRoot(t)
+	name := filepath.Join(outside, "file")
+	if err := os.WriteFile(name, []byte("outside"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "parent")); err != nil {
+		t.Fatal(err)
+	}
+	err := Apply(root, []Change{{Path: "parent/file", Delete: true}})
+	if err == nil || !strings.Contains(err.Error(), "not a directory") {
+		t.Fatalf("symlinked deletion parent validation=%v", err)
+	}
+	if data, err := os.ReadFile(name); err != nil || string(data) != "outside" {
+		t.Fatalf("outside file changed=%q,%v", data, err)
 	}
 }

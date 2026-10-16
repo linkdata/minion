@@ -24,9 +24,9 @@ func (e *Orchestrator) trackUsage(job monitor.Job) (*Orchestrator, func(error) e
 		name = string(job.Command.Action)
 	}
 	modelSettings := func(provider string) (model, effort string) {
-		model, effort = e.Codex.Model, e.Codex.ReasoningEffort
+		model, effort = e.CodexModel, e.CodexEffort
 		if provider == "claude" {
-			model, effort = e.Claude.Model, e.Claude.Effort
+			model, effort = e.ClaudeModel, e.ClaudeEffort
 		}
 		if model == "" {
 			model = "default"
@@ -53,7 +53,17 @@ func (e *Orchestrator) trackUsage(job monitor.Job) (*Orchestrator, func(error) e
 		return nil, nil, err
 	}
 	tracked := *e
-	tracked.aroundModel = func(ctx context.Context, request modelRun, next modelCall) (aicli.Result, error) {
+	observe := tracked.Runner.aroundModel
+	tracked.Runner.aroundModel = func(ctx context.Context, request modelRun, next modelCall) (aicli.Result, error) {
+		model := request.model
+		if model == "" {
+			model = "default"
+		}
+		if request.role == "main" {
+			record.Provider, record.Model, record.Effort = request.provider, model, request.effort
+		} else if request.role == "critic" {
+			record.CriticProvider, record.CriticModel, record.CriticEffort = request.provider, model, request.effort
+		}
 		calls := &record.CodexCalls
 		if request.provider == "claude" {
 			calls = &record.ClaudeCalls
@@ -66,7 +76,13 @@ func (e *Orchestrator) trackUsage(job monitor.Job) (*Orchestrator, func(error) e
 			record.UsageComplete = complete
 			return aicli.Result{}, err
 		}
-		result, err := next(ctx, request)
+		var result aicli.Result
+		var err error
+		if observe != nil {
+			result, err = observe(ctx, request, next)
+		} else {
+			result, err = next(ctx, request)
+		}
 		record.Tokens.Add(result.Tokens)
 		record.UsageComplete = complete && result.UsageComplete
 		return result, errors.Join(err, save())

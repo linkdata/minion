@@ -149,14 +149,6 @@ func cloneFromURL(ctx context.Context, workRoot, url, defaultBranch string, look
 	return c, nil
 }
 
-// Path is the orchestration checkout directory. It becomes empty after Close.
-func (c *Checkout) Path() string {
-	if c == nil || c.closed {
-		return ""
-	}
-	return c.path
-}
-
 // Head returns the checkout commit only while Git config and HEAD still match
 // the values verified during clone or pull request checkout.
 func (c *Checkout) Head(ctx context.Context) (string, error) {
@@ -286,13 +278,6 @@ func (c *Checkout) NewBranch(ctx context.Context, name string) error {
 	if err := c.assertHead(ctx); err != nil {
 		return err
 	}
-	entries, err := runGit(ctx, c.path, "ls-tree", "-r", "-z", "HEAD")
-	if err != nil {
-		return err
-	}
-	if strings.HasPrefix(entries, "160000 ") || strings.Contains(entries, "\x00160000 ") {
-		return errors.New("cannot create a writable branch with tracked gitlinks")
-	}
 	if _, err := runGit(ctx, c.path, "switch", "--create", name); err != nil {
 		return err
 	}
@@ -371,7 +356,8 @@ func (c *Checkout) CommitAndPush(ctx context.Context, branch, botLogin, message 
 }
 
 func (c *Checkout) stagedPaths(ctx context.Context) ([]string, error) {
-	data, truncated, err := c.boundedGit(ctx, maxPathListBytes, true, "diff", "--cached", "--name-only", "-z", "--no-renames", "--no-ext-diff")
+	const limit = (workspace.MaxChanges + 1) * (workspace.MaxPathBytes + 128)
+	data, truncated, err := c.boundedGit(ctx, limit, true, "diff", "--cached", "--name-only", "-z", "--no-renames", "--no-ext-diff")
 	if err != nil {
 		return nil, err
 	}
@@ -493,6 +479,10 @@ func runGit(ctx context.Context, dir string, args ...string) (string, error) {
 }
 
 func runGitTo(ctx context.Context, dir string, stdout io.Writer, args ...string) error {
+	return runGitInputTo(ctx, dir, nil, stdout, args...)
+}
+
+func runGitInputTo(ctx context.Context, dir string, stdin io.Reader, stdout io.Writer, args ...string) error {
 	gitArgs := []string{
 		"-c", "credential.helper=",
 		"-c", credentialHelperConfig(credentialHelperGH),
@@ -509,6 +499,7 @@ func runGitTo(ctx context.Context, dir string, stdout io.Writer, args ...string)
 	cmd := exec.CommandContext(ctx, "git", append(gitArgs, args...)...)
 	cmd.Dir = dir
 	cmd.Env = cleanGitEnvironment()
+	cmd.Stdin = stdin
 	cmd.Stdout = stdout
 	var diagnostic cappedBuffer
 	diagnostic.limit = maxGitDiagnostic

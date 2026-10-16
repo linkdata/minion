@@ -1,6 +1,7 @@
 package action
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -31,11 +32,16 @@ var modelLineBreaks = strings.NewReplacer(
 
 // Orchestrator prepares portable actions and publishes results through trusted Git/GitHub access.
 type Orchestrator struct {
-	Runner
-	GitHub   *github.Client
-	BotLogin string
-	Store    *state.Store
-	Usage    *usage.Store
+	Runner                    Runner
+	Main, Adversarial         string
+	CriticMaxRounds           int
+	AlwaysOnSkills            []string
+	CodexModel, CodexEffort   string
+	ClaudeModel, ClaudeEffort string
+	GitHub                    *github.Client
+	BotLogin                  string
+	Store                     *state.Store
+	Usage                     *usage.Store
 	// CheckWorkRoot verifies the work filesystem before a job and after failure.
 	//
 	// A nil function disables these checks.
@@ -67,10 +73,7 @@ func (e *Orchestrator) Execute(ctx context.Context, job monitor.Job) (resultErr 
 	if err := e.validateCommand(job); err != nil {
 		return err
 	}
-	timeout := e.Timeout
-	if timeout == 0 {
-		timeout = config.DefaultJobTimeout
-	}
+	timeout := cmp.Or(e.Timeout, config.DefaultJobTimeout)
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	done, err := e.alreadyAcknowledged(ctx, job)
@@ -124,8 +127,15 @@ func (e *Orchestrator) validateCommand(job monitor.Job) error {
 	if !mapping.SupportsProvider(e.mainProvider()) {
 		return fmt.Errorf("%w: action %q is not supported with %s as main", monitor.ErrTerminalJob, mapping.Action, e.mainProvider())
 	}
+	if _, err := e.Runner.selectedSkills(e.mainProvider(), mapping.Skills, e.AlwaysOnSkills); err != nil {
+		return err
+	}
 	return nil
 }
+
+func (e *Orchestrator) mainProvider() string { return cmp.Or(e.Main, "codex") }
+
+func (e *Orchestrator) logf(format string, args ...any) { e.Runner.logf(format, args...) }
 
 func (e *Orchestrator) alreadyAcknowledged(ctx context.Context, job monitor.Job) (bool, error) {
 	includeReviews := job.SubjectType == "PullRequest" && job.Command.Action == command.Review

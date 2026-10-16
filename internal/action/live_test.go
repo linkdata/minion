@@ -108,7 +108,6 @@ func TestLiveFixPublishesBranch(t *testing.T) {
 		Commands: map[string]config.CommandMapping{"fix": {Action: "fix", Skills: []string{testFixSkillURL}}},
 		Runner: Runner{
 			WorkRoot: t.TempDir(),
-
 			RunCodex: func(_ context.Context, dir, _ string, writable bool, outputDir string) (codexcli.Result, error) {
 				codexCalls++
 				if !writable || outputDir != "" {

@@ -54,8 +54,7 @@ func TestPreparedActionRejectsForeignResultBeforePublication(t *testing.T) {
 		Commands: map[string]config.CommandMapping{"audit": {Action: "comment", Skills: []string{testReviewSkillURL}}},
 		Runner: Runner{
 			WorkRoot: t.TempDir(),
-
-			Codex: config.CodexConfig{APIKey: "model-secret"},
+			Codex:    config.CodexConfig{APIKey: "model-secret"},
 			RunCodex: func(_ context.Context, dir, prompt string, _ bool, _ string) (codexcli.Result, error) {
 				assertPortableSource(t, dir)
 				if !strings.Contains(prompt, base) {
@@ -74,7 +73,7 @@ func TestPreparedActionRejectsForeignResultBeforePublication(t *testing.T) {
 	defer cancel()
 	installedHome := os.Getenv("HOME")
 	t.Setenv("HOME", t.TempDir())
-	prepared, err := e.Prepare(ctx, request)
+	prepared, err := e.prepare(ctx, request)
 	t.Setenv("HOME", installedHome)
 	if err != nil {
 		t.Fatal(err)
@@ -88,7 +87,7 @@ func TestPreparedActionRejectsForeignResultBeforePublication(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(data), "secret") || strings.Contains(string(data), e.WorkRoot) {
+	if strings.Contains(string(data), "secret") || strings.Contains(string(data), e.Runner.WorkRoot) {
 		t.Fatal("portable job contains credentials or host paths")
 	}
 	var portable Job
@@ -151,16 +150,17 @@ func TestFailedAuditRetainsLabelledPartialArtifactsWithoutPublication(t *testing
 	failure := errors.New("private provider failure detail")
 	const report = "Private incomplete findings requiring validation."
 	var sourceDir, reportDir string
-	e := &Orchestrator{GitHub: client, Commands: map[string]config.CommandMapping{"security-audit": {Action: "security-audit", Skills: []string{testAuditSkillURL}}}, Runner: Runner{
-		WorkRoot: t.TempDir(), Logger: log.New(&journal, "", 0),
-		RunCodex: func(_ context.Context, dir, _ string, _ bool, output string) (codexcli.Result, error) {
-			sourceDir, reportDir = dir, output
-			if err := os.WriteFile(filepath.Join(output, "REPORT.md"), []byte(report), 0600); err != nil {
-				t.Fatal(err)
-			}
-			return codexcli.Result{}, failure
-		},
-	}}
+	e := &Orchestrator{GitHub: client, Commands: map[string]config.CommandMapping{"security-audit": {Action: "security-audit", Skills: []string{testAuditSkillURL}}},
+		Runner: Runner{
+			WorkRoot: t.TempDir(), Logger: log.New(&journal, "", 0),
+			RunCodex: func(_ context.Context, dir, _ string, _ bool, output string) (codexcli.Result, error) {
+				sourceDir, reportDir = dir, output
+				if err := os.WriteFile(filepath.Join(output, "REPORT.md"), []byte(report), 0600); err != nil {
+					t.Fatal(err)
+				}
+				return codexcli.Result{}, failure
+			},
+		}}
 	request := monitor.Job{ID: strings.Repeat("a", 64), SubjectType: "Issue", Number: 7,
 		Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"security-audit"}},
 		Source:     github.Item{Author: github.User{ID: 3, Login: "writer"}}, Command: command.Command{Name: "security-audit", Action: command.SecurityAudit}}
@@ -172,7 +172,7 @@ func TestFailedAuditRetainsLabelledPartialArtifactsWithoutPublication(t *testing
 	if writes != 0 {
 		t.Fatalf("publication writes=%d", writes)
 	}
-	dirs, err := filepath.Glob(filepath.Join(e.WorkRoot, "audits", "incomplete-*"))
+	dirs, err := filepath.Glob(filepath.Join(e.Runner.WorkRoot, "audits", "incomplete-*"))
 	if err != nil || len(dirs) != 1 {
 		t.Fatalf("incomplete audit directories=%v,%v", dirs, err)
 	}
@@ -256,7 +256,7 @@ func TestPreparedReplyNeedsNoExecution(t *testing.T) {
 		Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"review"}},
 		Command:    command.Command{Name: "review", Action: command.Review},
 	}
-	prepared, err := e.Prepare(context.Background(), request)
+	prepared, err := e.prepare(context.Background(), request)
 	if err != nil {
 		t.Fatal(err)
 	}

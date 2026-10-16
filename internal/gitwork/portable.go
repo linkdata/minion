@@ -21,10 +21,11 @@ type sourceEntry struct {
 	omitted bool
 }
 
+const maxBatchHeaderBytes = 128
+
 // sourceTree checks API metadata before any partial-clone blob is requested.
 func (c *Checkout) sourceTree(ctx context.Context, ref string) ([]sourceEntry, error) {
-	key := strings.ToLower(ref)
-	if entries, ok := c.sourceTrees[key]; ok {
+	if entries, ok := c.sourceTrees[ref]; ok {
 		return entries, nil
 	}
 	if c.lookupTree == nil {
@@ -45,7 +46,7 @@ func (c *Checkout) sourceTree(ctx context.Context, ref string) ([]sourceEntry, e
 	if c.sourceTrees == nil {
 		c.sourceTrees = make(map[string][]sourceEntry)
 	}
-	c.sourceTrees[key] = entries
+	c.sourceTrees[ref] = entries
 	return entries, nil
 }
 
@@ -116,25 +117,71 @@ func (c *Checkout) sourceEntries(ctx context.Context, ref string, tree github.Gi
 	return entries, nil
 }
 
-func (c *Checkout) sourceFiles(ctx context.Context, entries []sourceEntry, selected map[string]bool) (files []workspace.File, omitted []string, err error) {
+func (c *Checkout) sourceFiles(ctx context.Context, entries []sourceEntry) (files []workspace.File, omitted []string, err error) {
+	var requested []sourceEntry
+	var input strings.Builder
+	var size int64
+	seen := map[string]bool{}
 	for _, entry := range entries {
-		if selected != nil && !selected[entry.file.Path] {
-			continue
-		}
 		if entry.omitted {
-			omitted = append(omitted, entry.file.Path)
+			if !seen[entry.file.Path] {
+				omitted = append(omitted, entry.file.Path)
+				seen[entry.file.Path] = true
+			}
 			continue
 		}
-		entry.file.Data, _, err = c.boundedGit(ctx, int(entry.size), false, "cat-file", "blob", entry.sha)
-		if err != nil {
-			return nil, nil, err
-		}
-		if int64(len(entry.file.Data)) != entry.size {
-			return nil, nil, fmt.Errorf("%w: Git blob size differs from tree metadata", ErrUnsupportedSource)
-		}
-		files = append(files, entry.file)
+		requested = append(requested, entry)
+		size += entry.size
+		input.WriteString(entry.sha + "\n")
 	}
-	return files, omitted, nil
+	if len(omitted) > workspace.MaxFiles {
+		return nil, nil, ErrCheckoutTooLarge
+	}
+	if len(requested) == 0 {
+		return nil, omitted, nil
+	}
+	readCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	// Content bounds were checked against API metadata before requesting blobs.
+	// Leave room for each bounded cat-file header and its content terminator.
+	output := boundedGitWriter{buffer: cappedBuffer{limit: int(size) + (maxBatchHeaderBytes+2)*len(requested)}, cancel: cancel}
+	err = runGitInputTo(readCtx, c.path, strings.NewReader(input.String()), &output, "cat-file", "--batch")
+	if ctx.Err() != nil {
+		return nil, nil, ctx.Err()
+	}
+	if output.buffer.exceeded {
+		return nil, nil, fmt.Errorf("%w: Git blobs exceed API-declared sizes", ErrUnsupportedSource)
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	files, err = readBatchBlobs(output.buffer.Bytes(), requested)
+	return files, omitted, err
+}
+
+func readBatchBlobs(data []byte, entries []sourceEntry) ([]workspace.File, error) {
+	files := make([]workspace.File, 0, len(entries))
+	for _, entry := range entries {
+		header, rest, ok := bytes.Cut(data, []byte{'\n'})
+		if !ok || len(header) > maxBatchHeaderBytes {
+			return nil, fmt.Errorf("%w: invalid Git batch blob header", ErrUnsupportedSource)
+		}
+		fields := bytes.Fields(header)
+		if len(fields) != 3 || string(fields[0]) != entry.sha || string(fields[1]) != "blob" {
+			return nil, fmt.Errorf("%w: invalid Git batch blob header", ErrUnsupportedSource)
+		}
+		size, err := strconv.ParseInt(string(fields[2]), 10, 64)
+		if err != nil || size < 0 || size != entry.size || size >= int64(len(rest)) || rest[size] != '\n' {
+			return nil, fmt.Errorf("%w: Git blob size differs from tree metadata", ErrUnsupportedSource)
+		}
+		entry.file.Data = rest[:size:size]
+		files = append(files, entry.file)
+		data = rest[size+1:]
+	}
+	if len(data) != 0 {
+		return nil, fmt.Errorf("%w: unexpected Git batch blob output", ErrUnsupportedSource)
+	}
+	return files, nil
 }
 
 // Snapshot exports pinned source and optional comparison/history data, never Git configuration.
@@ -173,16 +220,25 @@ func (c *Checkout) Snapshot(ctx context.Context, history, pull bool) (s workspac
 				s.ChangedPaths = append(s.ChangedPaths, string(name))
 			}
 		}
+		if len(s.ChangedPaths) > workspace.MaxFiles {
+			return s, ErrCheckoutTooLarge
+		}
 	}
 	var total int64
+	headFiles := 0
+	allEntries := append([]sourceEntry(nil), entries...)
 	for _, entry := range entries {
 		if !entry.omitted {
 			total += entry.size
+			headFiles++
 		}
 	}
 	for _, entry := range baseEntries {
-		if selected[entry.file.Path] && !entry.omitted {
-			total += entry.size
+		if selected[entry.file.Path] {
+			allEntries = append(allEntries, entry)
+			if !entry.omitted {
+				total += entry.size
+			}
 		}
 	}
 	if total > workspace.MaxBytes {
@@ -196,27 +252,13 @@ func (c *Checkout) Snapshot(ctx context.Context, history, pull bool) (s workspac
 			s.Diff = nil
 		}
 	}
-	if s.Files, s.Omitted, err = c.sourceFiles(ctx, entries, nil); err != nil {
+	files, omitted, err := c.sourceFiles(ctx, allEntries)
+	if err != nil {
 		return s, err
 	}
-	if pull {
-		var omitted []string
-		if s.BaseFiles, omitted, err = c.sourceFiles(ctx, baseEntries, selected); err != nil {
-			return s, err
-		}
-		seen := map[string]bool{}
-		for _, name := range s.Omitted {
-			seen[name] = true
-		}
-		for _, name := range omitted {
-			if !seen[name] {
-				s.Omitted = append(s.Omitted, name)
-				seen[name] = true
-			}
-		}
-	}
+	s.Files, s.BaseFiles, s.Omitted = files[:headFiles], files[headFiles:], omitted
 	if history {
-		count, err := runGit(ctx, c.path, "rev-list", "--count", s.Head)
+		count, err := runGit(ctx, c.path, "rev-list", "--count", "--max-count=101", s.Head)
 		if err != nil {
 			return s, err
 		}
@@ -238,9 +280,6 @@ func (c *Checkout) Snapshot(ctx context.Context, history, pull bool) (s workspac
 	if err := c.ready(); err != nil {
 		return s, err
 	}
-	if len(s.Omitted) > workspace.MaxFiles || len(s.ChangedPaths) > workspace.MaxFiles {
-		return s, ErrCheckoutTooLarge
-	}
 	if err := workspace.ValidateSnapshot(s); err != nil {
 		return s, fmt.Errorf("%w: %w", ErrUnsupportedSource, err)
 	}
@@ -258,7 +297,16 @@ func (c *Checkout) Import(ctx context.Context, expectedHead string, changes []wo
 	if err := c.assertHead(ctx); err != nil {
 		return err
 	}
-	return workspace.Apply(c.path, changes)
+	if err := workspace.Apply(c.path, changes); err != nil {
+		return err
+	}
+	if _, err := runGit(ctx, c.path, "add", "--all", "--", "."); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fmt.Errorf("%w: stage imported changes: %w", ErrUnsupportedSource, err)
+	}
+	return nil
 }
 
 func (c *Checkout) disableAttributes() error {

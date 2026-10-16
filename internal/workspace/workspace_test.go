@@ -3,6 +3,7 @@ package workspace
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -355,5 +356,103 @@ func TestChangesDetectsSameSizeContentWithPreservedMtime(t *testing.T) {
 	changes, err := Changes(context.Background(), root, base)
 	if err != nil || len(changes) != 1 || string(changes[0].Data) != "after!" {
 		t.Fatalf("hidden content mutation=%+v,%v", changes, err)
+	}
+}
+
+func TestUnicodeFoldCollisionsInFixLayouts(t *testing.T) {
+	for _, pair := range [][2]string{{"ſ", "s"}, {"µ", "μ"}, {"ς", "σ"}, {"ϐ", "β"}, {"K", "k"}} {
+		t.Run(pair[0]+pair[1], func(t *testing.T) {
+			if FoldPath(pair[0]) != FoldPath(pair[1]) {
+				t.Fatalf("case-fold equivalents have different keys: %q,%q", pair[0], pair[1])
+			}
+			for _, names := range [][2]string{pair, {pair[0] + "/a", pair[1] + "/b"}} {
+				files := []File{{Path: names[0], Mode: Regular}, {Path: names[1], Mode: Regular}}
+				if err := ValidateSnapshot(Snapshot{Head: strings.Repeat("a", 40), Files: files}); err != nil {
+					t.Fatalf("rejected exact source names: %v", err)
+				}
+				if err := ValidateFixPaths(files); err == nil {
+					t.Fatalf("accepted folded fix source collision: %q", names)
+				}
+				changes := []Change{{Path: names[0], Mode: Regular}, {Path: names[1], Mode: Regular}}
+				if err := ValidateChanges(changes); err == nil {
+					t.Fatalf("accepted folded result collision: %q", names)
+				}
+				if err := ValidateChangedPaths(files[:1], changes[1:]); err == nil {
+					t.Fatalf("accepted folded unchanged-source collision: %q", names)
+				}
+			}
+		})
+	}
+	if FoldPath("I") == FoldPath("ı") || FoldPath("I") == FoldPath("İ") {
+		t.Fatal("folding conflated distinct dotted/dotless-I classes")
+	}
+}
+
+func TestValidateFixPathsUsesSourceLimits(t *testing.T) {
+	files := make([]File, MaxChanges+1)
+	for i := range files {
+		files[i] = File{Path: fmt.Sprintf("source/%d", i), Mode: Regular}
+	}
+	if err := ValidateFixPaths(files); err != nil {
+		t.Fatalf("applied change-count limit to complete fix source: %v", err)
+	}
+	if err := ValidateFixPaths([]File{{Path: "literal\\backslash", Mode: Regular}}); err == nil || !strings.Contains(err.Error(), "unsafe fix source path") {
+		t.Fatalf("accepted non-portable fix source: %v", err)
+	}
+}
+
+func TestPathLimitReservesTerminatingNUL(t *testing.T) {
+	name := strings.Repeat("a/", MaxPathBytes/2-1) + "a"
+	if len(name) != MaxPathBytes-1 || !ValidSourcePath(name) || !ValidPath(name) {
+		t.Fatalf("rejected path below byte boundary: %d", len(name))
+	}
+	if ValidSourcePath(name+"b") || ValidPath(name+"b") {
+		t.Fatal("accepted PATH_MAX bytes without room for terminating NUL")
+	}
+}
+
+func TestSnapshotCombinedHeadAndBaseByteLimit(t *testing.T) {
+	data := make([]byte, MaxBytes+1)
+	snapshot := Snapshot{
+		Head: strings.Repeat("a", 40), Base: strings.Repeat("b", 40), MergeBase: strings.Repeat("b", 40),
+		Files:     []File{{Path: "head", Mode: Regular, Data: data[:MaxBytes/2]}},
+		BaseFiles: []File{{Path: "base", Mode: Regular, Data: data[MaxBytes/2:]}},
+	}
+	if err := ValidateSnapshot(snapshot); err == nil || !strings.Contains(err.Error(), "snapshot files exceed byte limit") {
+		t.Fatalf("combined source overflow validation=%v", err)
+	}
+	snapshot.BaseFiles[0].Data = snapshot.BaseFiles[0].Data[:MaxBytes/2]
+	if err := ValidateSnapshot(snapshot); err != nil {
+		t.Fatalf("rejected source exactly at combined limit: %v", err)
+	}
+}
+
+func TestChangesUseOwnerExecutableBitLikeGit(t *testing.T) {
+	for _, mode := range []os.FileMode{0644, 0654, 0645, 0744, 0755} {
+		t.Run(fmt.Sprintf("%o", mode), func(t *testing.T) {
+			root := privateRoot(t)
+			base := []File{{Path: "file", Mode: Regular, Data: []byte("before")}}
+			if err := Materialize(root, base); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(filepath.Join(root, "file"), mode); err != nil {
+				t.Fatal(err)
+			}
+			wantMode, wantChanges := Regular, 0
+			if mode&0100 != 0 {
+				wantMode, wantChanges = Executable, 1
+			}
+			changes, err := Changes(context.Background(), root, base)
+			if err != nil || len(changes) != wantChanges || (len(changes) != 0 && changes[0].Mode != wantMode) {
+				t.Fatalf("mode-only changes=%+v,%v, want mode=%o", changes, err, wantMode)
+			}
+			if err := os.WriteFile(filepath.Join(root, "file"), []byte("after"), mode); err != nil {
+				t.Fatal(err)
+			}
+			changes, err = ReadChanges(context.Background(), root, []Change{{Path: "file", Mode: wantMode}})
+			if err != nil || len(changes) != 1 || changes[0].Mode != wantMode || string(changes[0].Data) != "after" {
+				t.Fatalf("edited file=%+v,%v, want mode=%o", changes, err, wantMode)
+			}
+		})
 	}
 }

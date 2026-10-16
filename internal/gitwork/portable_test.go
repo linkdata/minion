@@ -37,8 +37,8 @@ func TestBoundedGitClassifiesLimitsAndCancellation(t *testing.T) {
 
 func TestSnapshotUsesPinnedBlobsAndBoundedHistory(t *testing.T) {
 	fixture := newFixture(t)
-	writeFile(t, filepath.Join(fixture.checkout.Path(), "README.md"), "untrusted working tree")
-	writeFile(t, filepath.Join(fixture.checkout.Path(), "untracked"), "not source")
+	writeFile(t, filepath.Join(fixture.checkout.path, "README.md"), "untrusted working tree")
+	writeFile(t, filepath.Join(fixture.checkout.path, "untracked"), "not source")
 	snapshot, err := fixture.checkout.Snapshot(context.Background(), false, false)
 	if err != nil {
 		t.Fatal(err)
@@ -54,9 +54,9 @@ func TestSnapshotUsesPinnedBlobsAndBoundedHistory(t *testing.T) {
 		t.Fatalf("history=%q complete=%v", withHistory.History, withHistory.HistoryComplete)
 	}
 	for i := 0; i < 101; i++ {
-		fixture.git(fixture.checkout.Path(), "commit", "--allow-empty", "-m", "more history")
+		fixture.git(fixture.checkout.path, "commit", "--allow-empty", "-m", "more history")
 	}
-	fixture.checkout.expectedHead = fixture.git(fixture.checkout.Path(), "rev-parse", "HEAD")
+	fixture.checkout.expectedHead = fixture.git(fixture.checkout.path, "rev-parse", "HEAD")
 	withHistory, err = fixture.checkout.Snapshot(context.Background(), true, false)
 	if err != nil {
 		t.Fatal(err)
@@ -120,12 +120,12 @@ func TestSnapshotPreservesPRDeletedBinaryAndModeContext(t *testing.T) {
 
 func TestSnapshotReportsOmittedGitlinksAndTruncatedHistory(t *testing.T) {
 	fixture := newFixture(t)
-	fixture.git(fixture.checkout.Path(), "update-index", "--add", "--cacheinfo", "160000,"+fixture.base+",dependency")
-	writeFile(t, filepath.Join(fixture.checkout.Path(), "large"), "small source")
-	fixture.git(fixture.checkout.Path(), "add", "large")
-	fixture.git(fixture.checkout.Path(), "commit", "-m", "bounded context")
-	fixture.gitInput(fixture.checkout.Path(), strings.Repeat("m", workspace.MaxContextBytes+256), "commit", "--allow-empty", "-F", "-")
-	fixture.checkout.expectedHead = fixture.git(fixture.checkout.Path(), "rev-parse", "HEAD")
+	fixture.git(fixture.checkout.path, "update-index", "--add", "--cacheinfo", "160000,"+fixture.base+",dependency")
+	writeFile(t, filepath.Join(fixture.checkout.path, "large"), "small source")
+	fixture.git(fixture.checkout.path, "add", "large")
+	fixture.git(fixture.checkout.path, "commit", "-m", "bounded context")
+	fixture.gitInput(fixture.checkout.path, strings.Repeat("m", workspace.MaxContextBytes+256), "commit", "--allow-empty", "-F", "-")
+	fixture.checkout.expectedHead = fixture.git(fixture.checkout.path, "rev-parse", "HEAD")
 	snapshot, err := fixture.checkout.Snapshot(context.Background(), true, false)
 	if err != nil {
 		t.Fatal(err)
@@ -156,7 +156,7 @@ func TestCloneDefaultBranchDisablesRepositoryTransforms(t *testing.T) {
 			t.Error(err)
 		}
 	}()
-	data, err := os.ReadFile(filepath.Join(checkout.Path(), "payload"))
+	data, err := os.ReadFile(filepath.Join(checkout.path, "payload"))
 	if err != nil || string(data) != payload {
 		t.Fatalf("transformed default source: %q,%v", data, err)
 	}
@@ -175,11 +175,11 @@ func TestImportRejectsIdentityAndMetadataAndPreservesBytes(t *testing.T) {
 	if err := fixture.checkout.Import(ctx, fixture.base, changes); err != nil {
 		t.Fatal(err)
 	}
-	data, err := os.ReadFile(filepath.Join(fixture.checkout.Path(), "binary"))
+	data, err := os.ReadFile(filepath.Join(fixture.checkout.path, "binary"))
 	if err != nil || !bytes.Equal(data, changes[1].Data) {
 		t.Fatalf("binary=%v,%v", data, err)
 	}
-	if _, err := os.Stat(filepath.Join(fixture.checkout.Path(), "README.md")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(fixture.checkout.path, "README.md")); !os.IsNotExist(err) {
 		t.Fatalf("deleted source=%v", err)
 	}
 }
@@ -292,7 +292,7 @@ func TestPublishIgnoresDefaultGlobalExcludesAndAttributes(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	fixture := newFixture(t)
 	ctx := context.Background()
-	attributes, err := runGit(ctx, fixture.checkout.Path(), "check-attr", "filter", "diff", "--", "notes.local")
+	attributes, err := runGit(ctx, fixture.checkout.path, "check-attr", "filter", "diff", "--", "notes.local")
 	if err != nil || attributes != "notes.local: filter: unset\nnotes.local: diff: unspecified" {
 		t.Fatalf("global attributes replaced controlled attributes: %q error=%v", attributes, err)
 	}
@@ -344,11 +344,11 @@ func TestControlledGitRejectsPortableMetadataVariants(t *testing.T) {
 
 func TestSnapshotHistoryIgnoresUntrustedMailmap(t *testing.T) {
 	fixture := newFixture(t)
-	writeFile(t, filepath.Join(fixture.checkout.Path(), ".mailmap"), "Forged <forged@example.invalid> Test <test@example.invalid>\n")
-	fixture.git(fixture.checkout.Path(), "add", ".mailmap")
-	fixture.git(fixture.checkout.Path(), "commit", "-m", "untrusted author mapping")
-	fixture.git(fixture.checkout.Path(), "config", "log.mailmap", "true")
-	fixture.checkout.expectedHead = fixture.git(fixture.checkout.Path(), "rev-parse", "HEAD")
+	writeFile(t, filepath.Join(fixture.checkout.path, ".mailmap"), "Forged <forged@example.invalid> Test <test@example.invalid>\n")
+	fixture.git(fixture.checkout.path, "add", ".mailmap")
+	fixture.git(fixture.checkout.path, "commit", "-m", "untrusted author mapping")
+	fixture.git(fixture.checkout.path, "config", "log.mailmap", "true")
+	fixture.checkout.expectedHead = fixture.git(fixture.checkout.path, "rev-parse", "HEAD")
 	if err := fixture.checkout.recordConfig(); err != nil {
 		t.Fatal(err)
 	}
@@ -365,14 +365,14 @@ func TestSnapshotPreservesGitLegalSourceNames(t *testing.T) {
 	fixture := newFixture(t)
 	names := []string{"include/xt_connmark.h", "include/xt_CONNMARK.h", "Docs/a.md", "docs/b.md", `back\slash`}
 	for _, name := range names {
-		if err := os.MkdirAll(filepath.Dir(filepath.Join(fixture.checkout.Path(), name)), 0700); err != nil {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(fixture.checkout.path, name)), 0700); err != nil {
 			t.Fatal(err)
 		}
-		writeFile(t, filepath.Join(fixture.checkout.Path(), name), name)
+		writeFile(t, filepath.Join(fixture.checkout.path, name), name)
 	}
-	fixture.git(fixture.checkout.Path(), "add", ".")
-	fixture.git(fixture.checkout.Path(), "commit", "-m", "Git-legal source names")
-	fixture.checkout.expectedHead = fixture.git(fixture.checkout.Path(), "rev-parse", "HEAD")
+	fixture.git(fixture.checkout.path, "add", ".")
+	fixture.git(fixture.checkout.path, "commit", "-m", "Git-legal source names")
+	fixture.checkout.expectedHead = fixture.git(fixture.checkout.path, "rev-parse", "HEAD")
 	snapshot, err := fixture.checkout.Snapshot(context.Background(), false, false)
 	if err != nil {
 		t.Fatal(err)

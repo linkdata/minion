@@ -39,7 +39,6 @@ func TestLiveReviewAction(t *testing.T) {
 		Commands: map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{testReviewSkillURL}}},
 		Runner: Runner{
 			WorkRoot: t.TempDir(),
-
 			RunCodex: func(ctx context.Context, dir, prompt string, writable bool, outputDir string) (codexcli.Result, error) {
 				calls++
 				if writable || outputDir != "" || !strings.Contains(prompt, pull.Head.SHA) {
@@ -123,7 +122,6 @@ func TestLiveSecurityAuditAction(t *testing.T) {
 				Commands: map[string]config.CommandMapping{"security-audit": {Action: "security-audit", Skills: []string{testAuditSkillURL}}},
 				Runner: Runner{
 					WorkRoot: t.TempDir(),
-
 					RunCodex: func(ctx context.Context, dir, prompt string, writable bool, outputDir string) (codexcli.Result, error) {
 						calls++
 						if writable || outputDir == "" || strings.HasPrefix(outputDir, dir+string(os.PathSeparator)) || !strings.Contains(prompt, test.head) {

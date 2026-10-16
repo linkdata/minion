@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/linkdata/minion/internal/command"
@@ -114,8 +115,12 @@ func TestReviewSnapshotFreezesRawAuditArtifactsAndAbsence(t *testing.T) {
 			if err != nil || string(data) != "reviewed report" {
 				t.Fatalf("background work changed frozen report=%q,%v", data, err)
 			}
-			if err := snapshot.verify(context.Background(), job, source, output, nil); err == nil {
-				t.Fatalf("accepted %s during review", mutation)
+			wantCause := "candidate reports changed"
+			if mutation == "source" {
+				wantCause = "read-only action modified"
+			}
+			if err := snapshot.verify(context.Background(), job, source, output, nil); err == nil || !strings.Contains(err.Error(), wantCause) {
+				t.Fatalf("mutation %s: want %s, got %v", mutation, wantCause, err)
 			}
 			if err := snapshot.close(); err != nil {
 				t.Fatal(err)
@@ -149,7 +154,11 @@ func TestReviewSnapshotRejectsUnsafeOrOversizedReportsAndCleansUp(t *testing.T) 
 					t.Fatal(err)
 				}
 			}
-			if snapshot, err := freezeReviewSnapshot(context.Background(), workRoot, job, source, output, nil); err == nil || snapshot != nil {
+			wantCause := "limit"
+			if invalid == "symlink" {
+				wantCause = "symbolic links"
+			}
+			if snapshot, err := freezeReviewSnapshot(context.Background(), workRoot, job, source, output, nil); err == nil || snapshot != nil || (invalid == "symlink" && !errors.Is(err, syscall.ELOOP)) || (invalid != "symlink" && !strings.Contains(err.Error(), wantCause)) {
 				t.Fatalf("accepted unsafe reports: %+v,%v", snapshot, err)
 			}
 			entries, err := os.ReadDir(workRoot)

@@ -603,7 +603,7 @@ func TestRunOnceCountsPublicationFailureWhenWorkRootFills(t *testing.T) {
 	}
 }
 
-func TestRunOnceBoundsPublicationFailuresAfterCodex(t *testing.T) {
+func TestRunOnceBoundsPublicationFailuresAfterModel(t *testing.T) {
 	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
 	item := github.Item{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}, HTMLURL: "https://github.com/example-owner/example-repo/pull/7#issuecomment-1"}
 	gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}, items: []github.Item{item}, permission: github.Permission{Permission: "write"}}
@@ -1306,5 +1306,29 @@ func TestReclaimedInvitationOwnerCannotRegisterOrAccept(t *testing.T) {
 	}
 	if len(gh.accepted) != 0 || len(m.Config.Repositories) != 1 {
 		t.Fatalf("accepted reclaimed identity: accepted=%v repos=%v", gh.accepted, m.Config.Repositories)
+	}
+}
+
+func TestRunOnceRefundsCanceledTerminalExecution(t *testing.T) {
+	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	item := github.Item{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}, HTMLURL: "https://github.com/example-owner/example-repo/pull/7#issuecomment-1"}
+	gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}, items: []github.Item{item}, permission: github.Permission{Permission: "write"}}
+	executor := &fakeExecutor{executeErr: errors.Join(ErrTerminalJob, context.Canceled)}
+	store := openState(t, now.Add(-time.Minute))
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Executor: executor, Now: func() time.Time { return now }}
+	if _, err := m.RunOnce(context.Background(), store); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled execution=%v", err)
+	}
+	if len(executor.jobs) != 1 || len(gh.comments) != 0 || len(store.Data.Processed) != 0 {
+		t.Fatalf("cancellation consumed job: jobs=%d comments=%d state=%+v", len(executor.jobs), len(gh.comments), store.Data)
+	}
+	id := executor.jobs[0].ID
+	if got := store.Data.JobFailures[id].Attempts; got != 0 {
+		t.Fatalf("cancellation consumed %d attempts", got)
+	}
+	executor.executeErr = nil
+	m.Now = func() time.Time { return now.Add(time.Minute) }
+	if _, err := m.RunOnce(context.Background(), store); err != nil || len(executor.jobs) != 2 || len(store.Data.Processed) != 1 {
+		t.Fatalf("canceled job did not resume: err=%v jobs=%d state=%+v", err, len(executor.jobs), store.Data)
 	}
 }

@@ -238,7 +238,6 @@ func TestGitHubContextLimitAcrossActions(t *testing.T) {
 					Commands:              map[string]config.CommandMapping{job.Command.Name: {Action: string(tt.action), Skills: []string{tt.skill}}},
 					Runner: Runner{
 						WorkRoot: t.TempDir(),
-
 						RunCodex: func(_ context.Context, _, prompt string, _ bool, _ string) (codexcli.Result, error) {
 							codexCalls++
 							if !strings.Contains(prompt, strconv.Quote(description)) || !strings.Contains(prompt, strconv.Quote(requestNotes)) ||

@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -61,9 +62,22 @@ func ValidPath(name string) bool {
 	return ValidSourcePath(name) && !strings.Contains(name, "\\") && filepath.IsLocal(name)
 }
 
+// FoldPath returns the same key for Unicode simple-case-fold equivalents.
+func FoldPath(name string) string {
+	return strings.Map(func(r rune) rune {
+		key := r
+		for folded := unicode.SimpleFold(r); folded != r; folded = unicode.SimpleFold(folded) {
+			if folded < key {
+				key = folded
+			}
+		}
+		return key
+	}, name)
+}
+
 // ValidSourcePath accepts Git's case-sensitive slash paths, including literal backslashes.
 func ValidSourcePath(name string) bool {
-	if name == "" || name == "." || name == ".." || len(name) > MaxPathBytes || !utf8.ValidString(name) || strings.ContainsRune(name, '\x00') || path.Clean(name) != name || path.IsAbs(name) || strings.HasPrefix(name, "../") {
+	if name == "" || name == "." || name == ".." || len(name) >= MaxPathBytes || !utf8.ValidString(name) || strings.ContainsRune(name, '\x00') || path.Clean(name) != name || path.IsAbs(name) || strings.HasPrefix(name, "../") {
 		return false
 	}
 	for _, part := range strings.Split(name, "/") {
@@ -75,15 +89,7 @@ func ValidSourcePath(name string) bool {
 }
 
 func ValidSHA(value string) bool {
-	if len(value) != 40 && len(value) != 64 {
-		return false
-	}
-	for _, c := range value {
-		if !strings.ContainsRune("0123456789abcdefABCDEF", c) {
-			return false
-		}
-	}
-	return true
+	return (len(value) == 40 || len(value) == 64) && strings.Trim(value, "0123456789abcdefABCDEF") == ""
 }
 
 func ValidateSnapshot(s Snapshot) error {
@@ -124,7 +130,7 @@ func ValidateSnapshot(s Snapshot) error {
 			paths = append(paths, file.Path)
 		}
 		paths = append(paths, s.Omitted...)
-		if err := validateSourcePaths(paths); err != nil {
+		if err := validatePaths(paths, nil); err != nil {
 			return err
 		}
 	}
@@ -157,50 +163,62 @@ func validateFiles(files []File) error {
 		}
 		total += len(file.Data)
 	}
-	return validateSourcePaths(paths)
+	return validatePaths(paths, nil)
 }
 
-func validateSourcePaths(paths []string) error {
-	seen := make(map[string]bool, len(paths))
-	for _, name := range paths {
-		if seen[name] {
-			return fmt.Errorf("duplicate source path %q", name)
-		}
-		seen[name] = true
+func validatePaths(paths []string, key func(string) string) error {
+	folded := key != nil
+	if key == nil {
+		key = func(name string) string { return name }
 	}
-	for _, name := range paths {
-		for parent := path.Dir(name); parent != "."; parent = path.Dir(parent) {
-			if seen[parent] {
-				return fmt.Errorf("source file/directory collision at %q", name)
-			}
-		}
-	}
-	return nil
-}
-
-func validatePaths(paths []string) error {
 	seen := make(map[string]bool, len(paths))
 	directories := make(map[string]string)
 	for _, name := range paths {
-		key := strings.ToLower(name)
-		if seen[key] {
+		nameKey := key(name)
+		if seen[nameKey] {
 			return fmt.Errorf("duplicate source path %q", name)
 		}
-		seen[key] = true
+		seen[nameKey] = true
 	}
 	for _, name := range paths {
 		for parent := path.Dir(name); parent != "."; parent = path.Dir(parent) {
-			key := strings.ToLower(parent)
-			if seen[key] {
+			parentKey := key(parent)
+			if seen[parentKey] {
 				return fmt.Errorf("source file/directory collision at %q", name)
 			}
-			if spelling, exists := directories[key]; exists && spelling != parent {
-				return fmt.Errorf("source directory spelling collision at %q", name)
+			if folded {
+				if spelling, exists := directories[parentKey]; exists && spelling != parent {
+					return fmt.Errorf("source directory spelling collision at %q", name)
+				}
+				directories[parentKey] = parent
 			}
-			directories[key] = parent
 		}
 	}
 	return nil
+}
+
+// ValidateFixPaths checks a complete source layout before running a writable action.
+func ValidateFixPaths(files []File) error {
+	if err := validateFiles(files); err != nil {
+		return err
+	}
+	paths := make([]string, len(files))
+	for i, file := range files {
+		if !ValidPath(file.Path) {
+			return fmt.Errorf("unsafe fix source path %q", file.Path)
+		}
+		paths[i] = file.Path
+	}
+	return validatePaths(paths, FoldPath)
+}
+
+// CheckRoot verifies that safe, anchored collection is available before a model runs.
+func CheckRoot(root string) error {
+	dir, err := openDirectory(root)
+	if err != nil {
+		return err
+	}
+	return dir.Close()
 }
 
 func checkRoot(root string, private bool) error {
@@ -226,8 +244,10 @@ func Materialize(root string, files []File) error {
 		return err
 	}
 	entries, readErr := dir.ReadDir(1)
-	err = errors.Join(readErr, dir.Close())
-	if err != nil && !errors.Is(err, io.EOF) {
+	if errors.Is(readErr, io.EOF) {
+		readErr = nil
+	}
+	if err := errors.Join(readErr, dir.Close()); err != nil {
 		return err
 	}
 	if len(entries) != 0 {
@@ -266,9 +286,6 @@ func Changes(ctx context.Context, root string, base []File) ([]Change, error) {
 	if err := validateFiles(base); err != nil {
 		return nil, err
 	}
-	if err := checkRoot(root, false); err != nil {
-		return nil, err
-	}
 	prior := make(map[string]File, len(base))
 	for _, file := range base {
 		prior[file.Path] = file
@@ -298,7 +315,7 @@ func Changes(ctx context.Context, root string, base []File) ([]Change, error) {
 		}
 		total += len(data)
 		mode := Regular
-		if info.Mode().Perm()&0111 != 0 {
+		if info.Mode().Perm()&0100 != 0 {
 			mode = Executable
 		}
 		old, exists := prior[rel]
@@ -311,7 +328,7 @@ func Changes(ctx context.Context, root string, base []File) ([]Change, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := validateSourcePaths(paths); err != nil {
+	if err := validatePaths(paths, nil); err != nil {
 		return nil, err
 	}
 	for name := range prior {
@@ -336,11 +353,7 @@ func ReadChanges(ctx context.Context, root string, selected []Change) ([]Change,
 	if err := ValidateChanges(checked); err != nil {
 		return nil, err
 	}
-	dir, err := openDirectory(root)
-	if err != nil {
-		return nil, err
-	}
-	if err := dir.Close(); err != nil {
+	if err := CheckRoot(root); err != nil {
 		return nil, err
 	}
 	changes := make([]Change, 0, len(selected))
@@ -359,7 +372,7 @@ func ReadChanges(ctx context.Context, root string, selected []Change) ([]Change,
 			return nil, err
 		}
 		mode := Regular
-		if info.Mode().Perm()&0111 != 0 {
+		if info.Mode().Perm()&0100 != 0 {
 			mode = Executable
 		}
 		if selection.Mode != 0 && selection.Mode != mode {
@@ -426,7 +439,7 @@ func ValidateChanges(changes []Change) error {
 	var paths []string
 	total := 0
 	for _, change := range changes {
-		key := strings.ToLower(change.Path)
+		key := FoldPath(change.Path)
 		prior := seen[key]
 		if !ValidPath(change.Path) || len(prior) > 1 || (len(prior) == 1 && (prior[0].Path == change.Path || prior[0].Delete == change.Delete)) {
 			return fmt.Errorf("unsafe or duplicate changed path %q", change.Path)
@@ -447,7 +460,7 @@ func ValidateChanges(changes []Change) error {
 			total += len(change.Data)
 		}
 	}
-	return validatePaths(paths)
+	return validatePaths(paths, FoldPath)
 }
 
 // ValidateChangedPaths checks the final layout of an already validated base and changes.
@@ -473,7 +486,7 @@ func ValidateChangedPaths(base []File, changes []Change) error {
 	for name := range files {
 		paths = append(paths, name)
 	}
-	return validatePaths(paths)
+	return validatePaths(paths, FoldPath)
 }
 
 func safeParents(root, name string) error {

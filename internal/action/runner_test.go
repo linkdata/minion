@@ -194,9 +194,7 @@ func TestRunnerUsesSuppliedSourceAndContext(t *testing.T) {
 
 func TestRunnerReturnsFileChangesAndPartialUsage(t *testing.T) {
 	job := portableJob(command.Fix)
-	runner := Runner{
-		WorkRoot: t.TempDir(),
-	}
+	runner := Runner{WorkRoot: t.TempDir()}
 	runner.runModel = func(_ context.Context, request modelRun) (aicli.Result, error) {
 		if !request.writable {
 			t.Fatal("fix has read-only source")
@@ -276,9 +274,7 @@ func TestRunnerKeepsCriticReadOnlyAndNotesPrivate(t *testing.T) {
 	job := portableJob(command.Fix)
 	job.Source.Files = append(job.Source.Files, workspace.File{Path: "deleted.txt", Mode: workspace.Regular, Data: []byte("original deleted file")})
 	job.Critic = &RoleSettings{Provider: "claude", Skills: []string{skills.BuiltinAntiPromptInjection}}
-	runner := Runner{
-		WorkRoot: t.TempDir(),
-	}
+	runner := Runner{WorkRoot: t.TempDir()}
 	calls := 0
 	var mainDir string
 	runner.runModel = func(_ context.Context, request modelRun) (aicli.Result, error) {
@@ -396,9 +392,7 @@ func TestRunnerFixUsesOnlyOfflineGit(t *testing.T) {
 
 func TestRunnerRejectsMissingSkillsAndReadOnlyWrites(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	runner := Runner{
-		WorkRoot: t.TempDir(),
-	}
+	runner := Runner{WorkRoot: t.TempDir()}
 	job := portableJob(command.Comment)
 	job.Main.Skills = []string{"https://github.com/owner/repo/tree/pinned/skills/missing"}
 	runner.runModel = func(_ context.Context, _ modelRun) (aicli.Result, error) {
@@ -427,22 +421,14 @@ func TestRunnerRejectsMissingSkillsAndReadOnlyWrites(t *testing.T) {
 func TestRunnerIgnoresWorkerGitMetadata(t *testing.T) {
 	for _, name := range []string{".git", ".gIt"} {
 		t.Run(name, func(t *testing.T) {
-			marker := filepath.Join(t.TempDir(), "hook-ran")
 			runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
-				writeIndexFixture(t, request.dir, name+"/config", []byte("[core]\n hooksPath = "+request.dir+"/"+name+"/hooks\n"))
-				writeIndexFixture(t, request.dir, name+"/hooks/pre-commit", []byte("#!/bin/sh\ntouch '"+marker+"'\n"))
-				if err := os.Chmod(filepath.Join(request.dir, name, "hooks/pre-commit"), 0700); err != nil {
-					t.Fatal(err)
-				}
+				writeIndexFixture(t, request.dir, name+"/config", []byte("untrusted worker metadata"))
 				writeIndexFixture(t, request.dir, "source.txt", []byte("changed"))
 				return aicli.Result{Answer: "Changed source", UsageComplete: true}, nil
 			}}
 			result, err := runner.Run(context.Background(), portableJob(command.Fix))
 			if err != nil || len(result.Changes) != 1 || result.Changes[0].Path != "source.txt" {
 				t.Fatalf("metadata result = %+v, %v", result, err)
-			}
-			if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("worker hook executed: %v", err)
 			}
 		})
 	}

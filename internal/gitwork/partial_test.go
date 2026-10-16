@@ -83,18 +83,18 @@ func TestPartialSnapshotPreflightsMergeBaseAndHistoryDoesNotFetchOldBlobs(t *tes
 			t.Error(err)
 		}
 	}()
-	if !blobMissing(t, checkout.Path(), blob) {
+	if !blobMissing(t, checkout.path, blob) {
 		t.Fatal("partial clone fetched deleted historical content")
 	}
 	snapshot, err := checkout.Snapshot(context.Background(), true, false)
-	if err != nil || !snapshot.HistoryComplete || !strings.Contains(string(snapshot.History), "historical blob") || !blobMissing(t, checkout.Path(), blob) {
+	if err != nil || !snapshot.HistoryComplete || !strings.Contains(string(snapshot.History), "historical blob") || !blobMissing(t, checkout.path, blob) {
 		t.Fatalf("metadata history fetched old contents or lost coverage: complete=%v err=%v", snapshot.HistoryComplete, err)
 	}
-	fixture.git(checkout.Path(), "update-ref", "refs/remotes/minion/base", base)
+	fixture.git(checkout.path, "update-ref", "refs/remotes/minion/base", base)
 	checkout.lookupTree = func(ctx context.Context, sha string) (github.GitTree, error) {
 		tree, err := lookup(ctx, sha)
 		if sha == baseTree && err == nil {
-			if !blobMissing(t, checkout.Path(), blob) {
+			if !blobMissing(t, checkout.path, blob) {
 				t.Fatal("merge-base blob fetched before metadata check")
 			}
 			oversized := int64(workspace.MaxBytes + 1)
@@ -102,7 +102,7 @@ func TestPartialSnapshotPreflightsMergeBaseAndHistoryDoesNotFetchOldBlobs(t *tes
 		}
 		return tree, err
 	}
-	if _, err := checkout.Snapshot(context.Background(), false, true); !errors.Is(err, ErrCheckoutTooLarge) || !blobMissing(t, checkout.Path(), blob) {
+	if _, err := checkout.Snapshot(context.Background(), false, true); !errors.Is(err, ErrCheckoutTooLarge) || !blobMissing(t, checkout.path, blob) {
 		t.Fatalf("merge-base preflight fetched blob: %v", err)
 	}
 }

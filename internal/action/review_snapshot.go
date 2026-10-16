@@ -32,7 +32,7 @@ func freezeReviewSnapshot(ctx context.Context, workRoot string, job Job, source,
 	if snapshot.changes, err = reviewChanges(ctx, job, source, index); err != nil {
 		return snapshot, err
 	}
-	if snapshot.source, err = os.MkdirTemp(workRoot, "review-"); err != nil {
+	if snapshot.source, err = os.MkdirTemp(workRoot, "minion-review-"); err != nil {
 		return snapshot, err
 	}
 	if err := workspace.Materialize(snapshot.source, job.Source.Files); err != nil {
@@ -45,7 +45,7 @@ func freezeReviewSnapshot(ctx context.Context, workRoot string, job Job, source,
 		if snapshot.artifacts, err = readReviewArtifacts(outputDir); err != nil {
 			return snapshot, err
 		}
-		if snapshot.outputDir, err = os.MkdirTemp(workRoot, ".review-reports-"); err != nil {
+		if snapshot.outputDir, err = os.MkdirTemp(workRoot, ".minion-review-reports-"); err != nil {
 			return snapshot, err
 		}
 		if err := workspace.Materialize(snapshot.outputDir, snapshot.artifacts); err != nil {
@@ -94,7 +94,7 @@ func reviewChanges(ctx context.Context, job Job, source string, index *fixIndex)
 		if err != nil {
 			return nil, err
 		}
-		if err := workspace.ValidateChangedPaths(job.Source.Files, changes); err != nil {
+		if err := job.validateChanges(changes); err != nil {
 			return nil, err
 		}
 		return changes, nil
@@ -104,7 +104,7 @@ func reviewChanges(ctx context.Context, job Job, source string, index *fixIndex)
 		return nil, err
 	}
 	if len(changes) != 0 {
-		return nil, errors.New("read-only action modified supplied source before critic review")
+		return nil, errors.New("read-only action modified supplied source")
 	}
 	return nil, nil
 }
@@ -112,7 +112,7 @@ func reviewChanges(ctx context.Context, job Job, source string, index *fixIndex)
 func readReviewArtifacts(outputDir string) ([]workspace.File, error) {
 	var files []workspace.File
 	for _, name := range auditArtifacts {
-		data, err := readAuditArtifact(filepath.Join(outputDir, name), auditArtifactLimit(name), true)
+		data, err := readAuditArtifact(filepath.Join(outputDir, name), auditArtifactLimit(name), auditArtifactMayBeEmpty(name))
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}

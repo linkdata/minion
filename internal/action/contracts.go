@@ -112,6 +112,7 @@ type Status struct {
 	State            StatusState   `json:"state"`
 	Phase            StatusPhase   `json:"phase"`
 	Round            int           `json:"round"`
+	ReviewPhase      string        `json:"review_phase,omitempty"`
 	ProgressSequence uint64        `json:"progress_sequence"`
 	LogSequence      uint64        `json:"log_sequence"`
 	ProgressAge      time.Duration `json:"progress_age_ns"`
@@ -214,8 +215,13 @@ func (j Job) Validate() error {
 	if err := workspace.ValidateSnapshot(j.Source); err != nil {
 		return err
 	}
+	if j.Action == command.Fix {
+		return workspace.ValidateFixPaths(j.Source.Files)
+	}
 	return nil
 }
+
+func (j Job) rounds() int { return cmp.Or(j.CriticMaxRounds, config.DefaultCriticMaxRounds) }
 
 func sourceIdentity(j Job) string { return j.Identity.Repository + "@" + j.Source.Head }
 
@@ -234,22 +240,7 @@ func (r Result) validate(j Job, complete bool) error {
 	if j.Action != command.Fix && len(r.Changes) != 0 {
 		return errors.New("read-only action returned source changes")
 	}
-	if err := workspace.ValidateChanges(r.Changes); err != nil {
-		return err
-	}
-	omittedPaths := make([]string, len(j.Source.Omitted))
-	for i, name := range j.Source.Omitted {
-		omittedPaths[i] = strings.ToLower(name)
-	}
-	for _, change := range r.Changes {
-		name := strings.ToLower(change.Path)
-		for i, path := range omittedPaths {
-			if name == path || strings.HasPrefix(name, path+"/") || strings.HasPrefix(path, name+"/") {
-				return fmt.Errorf("action change %q overlaps omitted source path %q", change.Path, j.Source.Omitted[i])
-			}
-		}
-	}
-	if err := workspace.ValidateChangedPaths(j.Source.Files, r.Changes); err != nil {
+	if err := j.validateChanges(r.Changes); err != nil {
 		return err
 	}
 	if j.Action != command.SecurityAudit && len(r.Artifacts) != 0 {
@@ -258,14 +249,7 @@ func (r Result) validate(j Job, complete bool) error {
 	if err := validateResultArtifacts(j, r.Artifacts, complete); err != nil {
 		return err
 	}
-	rounds := cmp.Or(j.CriticMaxRounds, config.DefaultCriticMaxRounds)
-	maxCalls := 3*rounds - 1
-	if j.Critic == nil {
-		maxCalls = 1
-	}
-	if len(r.Calls) > maxCalls {
-		return errors.New("action result has too many model calls")
-	}
+	rounds := j.rounds()
 	for i, call := range r.Calls {
 		role := j.Main
 		if call.Role == "critic" && j.Critic != nil {
@@ -292,7 +276,10 @@ func (r Result) validate(j Job, complete bool) error {
 			return errors.New("invalid model call usage")
 		}
 	}
-	if complete && j.Critic != nil && len(r.Calls) != 0 {
+	if complete && j.Critic != nil {
+		if len(r.Calls) == 0 {
+			return errors.New("action result lacks a final full review")
+		}
 		last := r.Calls[len(r.Calls)-1]
 		if last.Role != "critic" || last.ReviewPhase != "full" {
 			return errors.New("action result lacks a final full review")
@@ -307,6 +294,25 @@ func (r Result) validate(j Job, complete bool) error {
 		}
 	}
 	return nil
+}
+
+func (j Job) validateChanges(changes []workspace.Change) error {
+	if err := workspace.ValidateChanges(changes); err != nil {
+		return err
+	}
+	omittedPaths := make([]string, len(j.Source.Omitted))
+	for i, name := range j.Source.Omitted {
+		omittedPaths[i] = workspace.FoldPath(name)
+	}
+	for _, change := range changes {
+		name := workspace.FoldPath(change.Path)
+		for i, path := range omittedPaths {
+			if name == path || strings.HasPrefix(name, path+"/") || strings.HasPrefix(path, name+"/") {
+				return fmt.Errorf("action change %q overlaps omitted source path %q", change.Path, j.Source.Omitted[i])
+			}
+		}
+	}
+	return workspace.ValidateChangedPaths(j.Source.Files, changes)
 }
 
 var auditArtifacts = []string{"run-metadata.json", "architecture.md", "coverage-ledger.json", "findings.json", "REPORT.md", "FINDINGS-DETAIL.md", "NEEDS-VALIDATION.md"}
@@ -331,6 +337,9 @@ func validateResultArtifacts(j Job, files []workspace.File, complete bool) error
 		_, duplicate := seen[file.Path]
 		if !allowed || duplicate || file.Mode != workspace.Regular || len(file.Data) > maxAuditArtifactBytes {
 			return errors.New("invalid action report artifact")
+		}
+		if complete && len(file.Data) == 0 && !auditArtifactMayBeEmpty(file.Path) {
+			return fmt.Errorf("empty action report artifact %q", file.Path)
 		}
 		seen[file.Path] = file.Data
 		total += len(file.Data)
@@ -375,7 +384,14 @@ func (s Status) Validate(j Job) error {
 	default:
 		return errors.New("invalid action status phase")
 	}
-	rounds := cmp.Or(j.CriticMaxRounds, config.DefaultCriticMaxRounds)
+	if s.Phase == PhaseCritic {
+		if j.Critic == nil || s.Round < 1 || (s.ReviewPhase != "full" && s.ReviewPhase != "verification") || (s.ReviewPhase == "verification" && s.Round == 1) {
+			return errors.New("invalid action status review phase")
+		}
+	} else if s.ReviewPhase != "" {
+		return errors.New("unexpected action status review phase")
+	}
+	rounds := j.rounds()
 	if j.Critic == nil {
 		rounds = 1
 	}

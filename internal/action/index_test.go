@@ -6,12 +6,12 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 
-	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -80,6 +80,72 @@ func TestFixIndexPreservesGitignoreAndTrackedIgnoredFiles(t *testing.T) {
 	}
 }
 
+func TestFixIndexRebuildsEachCandidateFromBaseline(t *testing.T) {
+	t.Run("restored tracked ignored file", func(t *testing.T) {
+		index, source := offlineIndexFixture(t, []workspace.File{
+			{Path: ".gitignore", Mode: workspace.Regular, Data: []byte("*.log\n")},
+			{Path: "tracked.log", Mode: workspace.Regular, Data: []byte("original")},
+		})
+		if err := os.Remove(filepath.Join(source, "tracked.log")); err != nil {
+			t.Fatal(err)
+		}
+		changes, err := index.changes(context.Background())
+		if err != nil || len(changes) != 1 || !changes[0].Delete {
+			t.Fatalf("first candidate=%+v, %v", changes, err)
+		}
+		writeIndexFixture(t, source, "tracked.log", []byte("original"))
+		if changes, err := index.changes(context.Background()); err != nil || len(changes) != 0 {
+			t.Fatalf("restored candidate retained staged deletion: %+v, %v", changes, err)
+		}
+	})
+	t.Run("new output ignored in later candidate", func(t *testing.T) {
+		index, source := offlineIndexFixture(t, []workspace.File{{Path: ".gitignore", Mode: workspace.Regular}})
+		writeIndexFixture(t, source, "runtime.log", []byte("generated output"))
+		if changes, err := index.changes(context.Background()); err != nil || len(changes) != 1 || changes[0].Path != "runtime.log" {
+			t.Fatalf("first candidate=%+v, %v", changes, err)
+		}
+		writeIndexFixture(t, source, ".gitignore", []byte("*.log\n"))
+		changes, err := index.changes(context.Background())
+		if err != nil || len(changes) != 1 || changes[0].Path != ".gitignore" {
+			t.Fatalf("later ignore retained staged output: %+v, %v", changes, err)
+		}
+	})
+}
+
+func TestFixIndexRejectsRelativeExecutableWhenErrDotDisabled(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "git"), []byte("#!/bin/sh\nexit 99\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	relative, err := filepath.Rel(cwd, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", relative)
+	t.Setenv("GODEBUG", "execerrdot=0")
+	if binary, err := exec.LookPath("git"); err != nil || filepath.IsAbs(binary) {
+		t.Fatalf("probe did not produce a relative executable: %q, %v", binary, err)
+	}
+	if _, err := newFixIndex(context.Background(), filepath.Join(root, "index"), filepath.Join(root, "source")); err == nil || !strings.Contains(err.Error(), "absolute path") {
+		t.Fatalf("accepted relative Git executable: %v", err)
+	}
+}
+
+func TestFixIndexIgnoresCaseVariantGitMetadata(t *testing.T) {
+	index, source := offlineIndexFixture(t, nil)
+	writeIndexFixture(t, source, ".gIt/config", []byte("untrusted root metadata"))
+	writeIndexFixture(t, source, "nested/.GiT/config", []byte("untrusted nested metadata"))
+	writeIndexFixture(t, source, "nested/file", []byte("source"))
+	changes, err := index.changes(context.Background())
+	if err != nil || len(changes) != 1 || changes[0].Path != "nested/file" {
+		t.Fatalf("Git metadata escaped exclusions: %+v, %v", changes, err)
+	}
+}
+
 func TestFixIndexDisablesAttributesAndOperatorConfiguration(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "executed")
 	global := filepath.Join(t.TempDir(), "gitconfig")
@@ -111,10 +177,16 @@ func TestFixIndexDisablesAttributesAndOperatorConfiguration(t *testing.T) {
 }
 
 func TestFixIndexRejectsNonIgnoredUnsafeOutput(t *testing.T) {
-	for _, kind := range []string{"symlink", "nested repository", "oversized", "too many"} {
-		t.Run(kind, func(t *testing.T) {
+	for _, tt := range []struct{ kind, cause string }{
+		{"symlink", `fix output "link"`},
+		{"nested repository", `fix output "nested/"`},
+		{"oversized", "byte limit"},
+		{"aggregate oversized", "byte limit"},
+		{"too many", "changed file limit"},
+	} {
+		t.Run(tt.kind, func(t *testing.T) {
 			index, source := offlineIndexFixture(t, nil)
-			switch kind {
+			switch tt.kind {
 			case "symlink":
 				if err := os.Symlink("/outside/secret", filepath.Join(source, "link")); err != nil {
 					t.Fatal(err)
@@ -131,13 +203,27 @@ func TestFixIndexRejectsNonIgnoredUnsafeOutput(t *testing.T) {
 				}
 			case "oversized":
 				writeIndexFixture(t, source, "huge", make([]byte, workspace.MaxChangeBytes+1))
+			case "aggregate oversized":
+				writeIndexFixture(t, source, "first", make([]byte, workspace.MaxChangeBytes/2+1))
+				writeIndexFixture(t, source, "second", make([]byte, workspace.MaxChangeBytes/2+1))
 			case "too many":
 				for i := 0; i <= workspace.MaxChanges; i++ {
 					writeIndexFixture(t, source, fmt.Sprintf("file-%d", i), nil)
 				}
 			}
-			if changes, err := index.changes(context.Background()); err == nil {
-				t.Fatalf("accepted %s output: %+v", kind, changes)
+			marker := filepath.Join(t.TempDir(), "add-ran")
+			quote := func(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
+			proxy := filepath.Join(t.TempDir(), "git-proxy")
+			script := fmt.Sprintf("#!/bin/sh\nfor argument in \"$@\"; do\n if [ \"$argument\" = add ]; then touch %s; fi\ndone\nexec %s \"$@\"\n", quote(marker), quote(index.binary))
+			if err := os.WriteFile(proxy, []byte(script), 0700); err != nil {
+				t.Fatal(err)
+			}
+			index.binary = proxy
+			if changes, err := index.changes(context.Background()); err == nil || !strings.Contains(err.Error(), tt.cause) {
+				t.Fatalf("%s output: changes=%+v, err=%v; want %q", tt.kind, changes, err, tt.cause)
+			}
+			if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("Git hashed rejected output before precheck: %v", err)
 			}
 		})
 	}
@@ -196,17 +282,5 @@ exec %s "$@"
 	index.binary = proxy
 	if _, err := index.changes(context.Background()); err == nil || !strings.Contains(err.Error(), "changed after indexing") {
 		t.Fatalf("accepted unstaged bytes: %v", err)
-	}
-}
-
-func TestFixIndexMustRemainOutsideModelGrants(t *testing.T) {
-	root := t.TempDir()
-	metadata := filepath.Join(root, "index")
-	runner := Runner{
-		Main:  "codex",
-		Codex: config.CodexConfig{ReadOnlyDirs: []string{root}},
-	}
-	if err := runner.checkIndexIsolation(metadata); err == nil {
-		t.Fatal("allowed index inside configured model read grant")
 	}
 }

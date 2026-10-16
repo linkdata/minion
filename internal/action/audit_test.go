@@ -131,7 +131,9 @@ func TestSecurityAuditIssueAndPullRequest(t *testing.T) {
 				BotLogin: "linkdataminion",
 				Usage:    usageStore,
 
-				Commands: map[string]config.CommandMapping{"security-audit": {Action: "security-audit", Skills: []string{testAuditSkillURL}}},
+				Commands:    map[string]config.CommandMapping{"security-audit": {Action: "security-audit", Skills: []string{testAuditSkillURL}}},
+				CodexModel:  "test-model",
+				CodexEffort: "high",
 				Runner: Runner{
 					WorkRoot: t.TempDir(),
 					Codex:    config.CodexConfig{Model: "test-model", ReasoningEffort: "high"},
@@ -228,7 +230,7 @@ func TestSecurityAuditIssueAndPullRequest(t *testing.T) {
 				if err != nil || calls != 1 || len(comments) != 1 {
 					t.Fatalf("audit failed: err=%v calls=%d comments=%d", err, calls, len(comments))
 				}
-				retained, err := filepath.Glob(filepath.Join(e.WorkRoot, "audits", "*", "REPORT.md"))
+				retained, err := filepath.Glob(filepath.Join(e.Runner.WorkRoot, "audits", "*", "REPORT.md"))
 				if err != nil || len(retained) != 1 {
 					t.Fatalf("reports not retained: %v, %v", retained, err)
 				}

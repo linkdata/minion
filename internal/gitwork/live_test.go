@@ -201,7 +201,7 @@ func TestLiveCommitAndPush(t *testing.T) {
 		t.Fatalf("unchanged branch=%v", err)
 	}
 	name := "minion-live-gitwork-" + id + ".txt"
-	if err := os.WriteFile(filepath.Join(checkout.Path(), name), []byte("Minion live Gitwork test.\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(checkout.path, name), []byte("Minion live Gitwork test.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := checkout.CommitAndPush(ctx, branch, cfg.BotLogin, "test: Gitwork live publish "+id, func(sha string) error {
@@ -223,7 +223,7 @@ func TestLiveCommitAndPush(t *testing.T) {
 	if _, err := owner.Branch(ctx, repoName, branch); !liveGitworkNotFound(err) {
 		t.Fatalf("base repository unexpectedly received a test branch: %v", err)
 	}
-	identity, err := runGit(ctx, checkout.Path(), "show", "-s", "--format=%an <%ae>|%cn <%ce>", "HEAD")
+	identity, err := runGit(ctx, checkout.path, "show", "-s", "--format=%an <%ae>|%cn <%ce>", "HEAD")
 	wantIdentity := cfg.BotLogin + " <" + cfg.BotLogin + "@users.noreply.github.com>"
 	if err != nil || identity != wantIdentity+"|"+wantIdentity {
 		t.Fatalf("committed identity = %q, want %q: %v", identity, wantIdentity+"|"+wantIdentity, err)

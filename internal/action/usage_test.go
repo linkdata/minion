@@ -33,7 +33,8 @@ func TestUsageAccumulatesPartialResults(t *testing.T) {
 	runErr := errors.New("model interrupted")
 	var calls int
 	e := &Orchestrator{
-		Usage: store,
+		Usage:      store,
+		CodexModel: "test-model",
 		Runner: Runner{
 			Codex: config.CodexConfig{Model: "test-model"},
 			RunCodex: func(context.Context, string, string, bool, string) (codexcli.Result, error) {
@@ -50,7 +51,7 @@ func TestUsageAccumulatesPartialResults(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := 1; i <= 3; i++ {
-		answer, err := tracked.Runner.runAI(context.Background(), "dir", "prompt", false, "")
+		answer, err := tracked.Runner.runAI(context.Background(), usageModelJob(tracked), "dir", "prompt", false, "")
 		if i == 2 {
 			if !errors.Is(err, runErr) {
 				t.Fatalf("lost model error: %v", err)
@@ -94,14 +95,18 @@ func TestUsageTracksBothModelRoles(t *testing.T) {
 				}
 			}
 			e := &Orchestrator{
-				Usage: store,
+				Usage:        store,
+				Main:         main,
+				Adversarial:  critic,
+				CodexModel:   "codex-model",
+				CodexEffort:  "high",
+				ClaudeEffort: "medium",
 				Runner: Runner{
-					Main:        main,
-					Adversarial: critic,
-					Codex:       config.CodexConfig{Model: "codex-model", ReasoningEffort: "high"},
-					Claude:      config.ClaudeConfig{Effort: "medium"},
-					RunCodex:    runner("codex"),
-					RunClaude:   runner("claude"),
+
+					Codex:     config.CodexConfig{Model: "codex-model", ReasoningEffort: "high"},
+					Claude:    config.ClaudeConfig{Effort: "medium"},
+					RunCodex:  runner("codex"),
+					RunClaude: runner("claude"),
 				},
 			}
 			tracked, finish, err := e.trackUsage(usageJob())
@@ -145,9 +150,11 @@ func TestUsageAccumulatesCriticRevisions(t *testing.T) {
 	var critiques int
 	e := &Orchestrator{
 		Usage: store,
+
+		Main:        "claude",
+		Adversarial: "codex",
 		Runner: Runner{
-			Main:        "claude",
-			Adversarial: "codex",
+
 			RunClaude: func(context.Context, string, string, bool, string) (aicli.Result, error) {
 				return aicli.Result{Answer: proposalJSON("proposal", "Private evidence"), Tokens: usage.Tokens{Input: 100, Output: 20}, UsageComplete: true}, nil
 			},
@@ -165,7 +172,7 @@ func TestUsageAccumulatesCriticRevisions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	answer, err := tracked.Runner.runAI(context.Background(), "dir", "prompt", false, "")
+	answer, err := tracked.Runner.runAI(context.Background(), usageModelJob(tracked), "dir", "prompt", false, "")
 	if err != nil || answer != "proposal" {
 		t.Fatalf("answer=%q err=%v", answer, err)
 	}
@@ -203,8 +210,11 @@ func TestUsagePersistenceFailureStopsModelsOrPublication(t *testing.T) {
 					}
 					e := &Orchestrator{
 						Usage: store,
+
+						Main:       provider,
+						CodexModel: "test-model",
 						Runner: Runner{
-							Main:      provider,
+
 							Codex:     config.CodexConfig{Model: "test-model"},
 							RunCodex:  run,
 							RunClaude: run,
@@ -217,7 +227,7 @@ func TestUsagePersistenceFailureStopsModelsOrPublication(t *testing.T) {
 					if stage == "before call" {
 						store.Dir = blocked
 					}
-					_, err = tracked.Runner.runAI(context.Background(), "dir", "prompt", false, "")
+					_, err = tracked.Runner.runAI(context.Background(), usageModelJob(tracked), "dir", "prompt", false, "")
 					if err == nil || !strings.Contains(err.Error(), "save action usage") {
 						t.Fatalf("storage failure not returned: %v", err)
 					}
@@ -293,10 +303,11 @@ func TestExecuteRecordsNoCodexAndSkipsAcknowledged(t *testing.T) {
 				}
 			}
 			e := &Orchestrator{
-				GitHub:   client,
-				BotLogin: "bot",
-				Usage:    &usage.Store{Dir: dir},
-				Commands: map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{testReviewSkillURL}}},
+				GitHub:     client,
+				BotLogin:   "bot",
+				Usage:      &usage.Store{Dir: dir},
+				Commands:   map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{testReviewSkillURL}}},
+				CodexModel: "test-model",
 				Runner: Runner{
 					Codex: config.CodexConfig{Model: "test-model"},
 
@@ -347,7 +358,8 @@ printf '%%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"
 	t.Setenv("PATH", root+string(os.PathListSeparator)+os.Getenv("PATH"))
 	store := &usage.Store{Dir: filepath.Join(root, "usage")}
 	executor := &Orchestrator{
-		Usage: store,
+		Usage:      store,
+		CodexModel: "stale-host-model",
 		Runner: Runner{
 			WorkRoot: filepath.Join(root, "work"),
 			Codex:    config.CodexConfig{Model: "stale-host-model"},
@@ -380,7 +392,46 @@ printf '%%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"
 		t.Fatalf("usage wrapper lost worker settings: args=%s prompt=%s", args, prompt)
 	}
 	records, err := usage.ReadAll(store.Dir)
-	if err != nil || len(records) != 1 || records[0].CodexCalls != 1 || records[0].Tokens.Total() != 5 || len(result.Calls) != 1 {
+	if err != nil || len(records) != 1 || records[0].Model != "portable-model" || records[0].CodexCalls != 1 || records[0].Tokens.Total() != 5 || len(result.Calls) != 1 {
 		t.Fatalf("usage counted dispatch incorrectly: records=%+v calls=%+v err=%v", records, result.Calls, err)
+	}
+}
+
+func usageModelJob(e *Orchestrator) Job {
+	role := func(provider string) RoleSettings {
+		model, effort := e.CodexModel, e.CodexEffort
+		if provider == "claude" {
+			model, effort = e.ClaudeModel, e.ClaudeEffort
+		}
+		return RoleSettings{Provider: provider, Model: model, Effort: effort}
+	}
+	job := Job{Main: role(e.mainProvider()),
+		CriticMaxRounds: e.CriticMaxRounds}
+	if e.Adversarial != "" {
+		critic := role(e.Adversarial)
+		job.Critic = &critic
+	}
+	return job
+}
+
+func TestRunnerDoesNotRecordUndispatchedUsageCall(t *testing.T) {
+	root := t.TempDir()
+	blocked := filepath.Join(root, "blocked")
+	if err := os.WriteFile(blocked, []byte("file"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	store := &usage.Store{Dir: filepath.Join(root, "usage")}
+	executor := &Orchestrator{Usage: store, Runner: Runner{WorkRoot: filepath.Join(root, "work"), runModel: func(context.Context, modelRun) (aicli.Result, error) {
+		t.Fatal("model ran without durable checkpoint")
+		return aicli.Result{}, nil
+	}}}
+	tracked, _, err := executor.trackUsage(usageJob())
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.Dir = blocked
+	result, err := tracked.Runner.Run(context.Background(), portableJob(command.Comment))
+	if err == nil || !strings.Contains(err.Error(), "save action usage") || len(result.Calls) != 0 {
+		t.Fatalf("undispatched calls=%+v err=%v", result.Calls, err)
 	}
 }

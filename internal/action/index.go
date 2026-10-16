@@ -28,6 +28,7 @@ func newFixIndex(ctx context.Context, dir, source string) (*fixIndex, error) {
 	if err != nil {
 		return nil, fmt.Errorf("offline fix index requires git: %w", err)
 	}
+	// execerrdot=0 can make LookPath return a relative executable without an error.
 	if !filepath.IsAbs(binary) {
 		return nil, errors.New("offline git binary must have an absolute path")
 	}
@@ -68,14 +69,46 @@ func newFixIndex(ctx context.Context, dir, source string) (*fixIndex, error) {
 }
 
 func (index *fixIndex) changes(ctx context.Context) ([]workspace.Change, error) {
-	if _, err := index.run(ctx, 1024, "add", "--all", "--", ".", ":(exclude,icase,glob)**/.git", ":(exclude,icase,glob)**/.git/**"); err != nil {
+	if _, err := index.run(ctx, 1024, "read-tree", "HEAD"); err != nil {
 		return nil, err
 	}
-	raw, err := index.run(ctx, (workspace.MaxChanges+1)*(4096+128), "diff", "--cached", "--raw", "-z", "--no-abbrev", "--no-renames", "--no-ext-diff", "--no-textconv", "HEAD", "--")
+	// Bound new output before Git hashes it; ignored files and metadata remain excluded.
+	untracked, err := index.run(ctx, (workspace.MaxChanges+1)*(workspace.MaxPathBytes+1), "ls-files", "-z", "--others", "--exclude-standard", "--", ".", ":(exclude,icase,glob)**/.git", ":(exclude,icase,glob)**/.git/**")
 	if err != nil {
 		return nil, err
 	}
-	selected, objects, err := parseIndexChanges(raw, workspace.MaxChanges)
+	if len(untracked) != 0 {
+		if untracked[len(untracked)-1] != 0 {
+			return nil, errors.New("invalid offline git untracked paths")
+		}
+		paths := bytes.Split(untracked[:len(untracked)-1], []byte{0})
+		if len(paths) > workspace.MaxChanges {
+			return nil, errors.New("fix result exceeds changed file limit")
+		}
+		total := 0
+		for _, path := range paths {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			name := string(path)
+			if !workspace.ValidPath(name) {
+				return nil, fmt.Errorf("fix output %q is not a portable regular-file path", name)
+			}
+			data, err := workspace.ReadRegular(filepath.Join(index.source, filepath.FromSlash(name)), int64(workspace.MaxChangeBytes-total))
+			if err != nil {
+				return nil, fmt.Errorf("fix output %q: %w", name, err)
+			}
+			total += len(data)
+		}
+	}
+	if _, err := index.run(ctx, 1024, "add", "--all", "--", ".", ":(exclude,icase,glob)**/.git", ":(exclude,icase,glob)**/.git/**"); err != nil {
+		return nil, err
+	}
+	raw, err := index.run(ctx, (workspace.MaxChanges+1)*(workspace.MaxPathBytes+128), "diff", "--cached", "--raw", "-z", "--no-abbrev", "--no-renames", "--no-ext-diff", "--no-textconv", "HEAD", "--")
+	if err != nil {
+		return nil, err
+	}
+	selected, objects, err := parseIndexChanges(raw)
 	if err != nil {
 		return nil, err
 	}
@@ -95,7 +128,7 @@ func (index *fixIndex) changes(ctx context.Context) ([]workspace.Change, error) 
 	return changes, nil
 }
 
-func parseIndexChanges(raw []byte, limit int) ([]workspace.Change, []string, error) {
+func parseIndexChanges(raw []byte) ([]workspace.Change, []string, error) {
 	if len(raw) == 0 {
 		return nil, nil, nil
 	}
@@ -103,7 +136,7 @@ func parseIndexChanges(raw []byte, limit int) ([]workspace.Change, []string, err
 		return nil, nil, errors.New("invalid offline git diff")
 	}
 	parts := bytes.Split(raw[:len(raw)-1], []byte{0})
-	if len(parts)%2 != 0 || len(parts)/2 > limit {
+	if len(parts)%2 != 0 || len(parts)/2 > workspace.MaxChanges {
 		return nil, nil, errors.New("fix result exceeds changed file limit")
 	}
 	changes, objects := make([]workspace.Change, 0, len(parts)/2), make([]string, 0, len(parts)/2)
@@ -122,10 +155,10 @@ func parseIndexChanges(raw []byte, limit int) ([]workspace.Change, []string, err
 			change.Delete, change.Mode = true, 0
 		case "A", "M", "T":
 			if change.Mode != workspace.Regular && change.Mode != workspace.Executable {
-				return nil, nil, errors.New("fix changed a non-regular file")
+				return nil, nil, fmt.Errorf("fix changed a non-regular file %q", change.Path)
 			}
 		default:
-			return nil, nil, errors.New("unsupported offline git change")
+			return nil, nil, fmt.Errorf("unsupported offline git change at %q", change.Path)
 		}
 		changes, objects = append(changes, change), append(objects, fields[3])
 	}
@@ -192,7 +225,7 @@ func (index *fixIndex) environment() []string {
 		paths = []string{"/usr/bin", "/bin"}
 	}
 	return []string{"PATH=" + strings.Join(paths, string(os.PathListSeparator)), "HOME=" + index.dir, "TMPDIR=" + index.dir, "LC_ALL=C",
-		"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=/bin/false", "GIT_NO_REPLACE_OBJECTS=1",
+		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=/bin/false", "GIT_NO_REPLACE_OBJECTS=1",
 		"GIT_AUTHOR_NAME=source", "GIT_AUTHOR_EMAIL=source@localhost", "GIT_COMMITTER_NAME=source", "GIT_COMMITTER_EMAIL=source@localhost",
 		"GIT_AUTHOR_DATE=2000-01-01T00:00:00Z", "GIT_COMMITTER_DATE=2000-01-01T00:00:00Z"}
 }

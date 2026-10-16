@@ -198,8 +198,13 @@ func arguments(policy string) []string {
 	}
 }
 
+// SystemReadPaths are the fixed host paths visible to sandboxed commands.
+func SystemReadPaths() []string {
+	return []string{"/usr", "/bin", "/lib", "/lib64", "/etc/ld.so.cache", "/etc/ld.so.conf", "/etc/ld.so.conf.d", "/etc/localtime", "/etc/nsswitch.conf", "/etc/ssl/certs"}
+}
+
 func sandboxSettings(workspace, runtimeDir string, writable bool, outputDir string, settings config.ClaudeConfig, skillPaths []string, authDir string) (string, error) {
-	reads := []string{"/usr", "/bin", "/lib", "/lib64", "/etc/ld.so.cache", "/etc/ld.so.conf", "/etc/ld.so.conf.d", "/etc/localtime", "/etc/nsswitch.conf", "/etc/ssl/certs", workspace, runtimeDir}
+	reads := append(SystemReadPaths(), workspace, runtimeDir)
 	writes := []string{runtimeDir}
 	deniedWrites := []string{}
 	if writable {

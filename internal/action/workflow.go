@@ -1,6 +1,7 @@
 package action
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -42,14 +43,6 @@ func (p *Prepared) Close() error {
 		return nil
 	}
 	return p.checkout.Close()
-}
-
-// Prepare authorizes the configured command and prepares self-contained inputs.
-func (e *Orchestrator) Prepare(ctx context.Context, request monitor.Job) (*Prepared, error) {
-	if err := e.validateCommand(request); err != nil {
-		return nil, err
-	}
-	return e.prepare(ctx, request)
 }
 
 func (e *Orchestrator) perform(ctx context.Context, request monitor.Job) error {
@@ -126,7 +119,7 @@ func (e *Orchestrator) prepare(ctx context.Context, request monitor.Job) (prepar
 	if err := e.checkGitHubContext(request, title, description); err != nil {
 		return nil, err
 	}
-	p.checkout, err = gitwork.Clone(ctx, e.WorkRoot, repo.FullName, branch, func(ctx context.Context, sha string) (github.GitTree, error) {
+	p.checkout, err = gitwork.Clone(ctx, e.Runner.WorkRoot, repo.FullName, branch, func(ctx context.Context, sha string) (github.GitTree, error) {
 		return e.GitHub.GitTree(ctx, repo.FullName, sha)
 	})
 	if err != nil {
@@ -153,18 +146,15 @@ func (e *Orchestrator) portableJob(ctx context.Context, p *Prepared, title, desc
 	if _, err := rand.Read(attempt[:]); err != nil {
 		return Job{}, fmt.Errorf("create action attempt: %w", err)
 	}
-	budget := e.Timeout
-	if budget <= 0 {
-		budget = config.DefaultJobTimeout
-	}
+	budget := cmp.Or(e.Timeout, config.DefaultJobTimeout)
 	if deadline, ok := ctx.Deadline(); ok {
 		budget = min(budget, time.Until(deadline))
 	}
 	settings := func(provider string, required []string) RoleSettings {
 		role := RoleSettings{Provider: provider, Skills: required, AlwaysOnSkills: e.AlwaysOnSkills}
-		role.Model, role.Effort = e.Codex.Model, e.Codex.ReasoningEffort
+		role.Model, role.Effort = e.CodexModel, e.CodexEffort
 		if provider == "claude" {
-			role.Model, role.Effort = e.Claude.Model, e.Claude.Effort
+			role.Model, role.Effort = e.ClaudeModel, e.ClaudeEffort
 		}
 		return role
 	}
@@ -185,7 +175,10 @@ func (e *Orchestrator) portableJob(ctx context.Context, p *Prepared, title, desc
 		critic := settings(e.Adversarial, nil)
 		job.Critic = &critic
 	}
-	return job, job.Validate()
+	if err := job.Validate(); err != nil {
+		return job, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
+	}
+	return job, nil
 }
 
 // Publish validates a worker result before applying data or issuing GitHub writes.
@@ -249,7 +242,7 @@ func (e *Orchestrator) logDiagnostics(result Result) {
 }
 
 func (e *Orchestrator) retainAudit(p *Prepared, result Result, complete bool) error {
-	root := filepath.Join(e.WorkRoot, "audits")
+	root := filepath.Join(e.Runner.WorkRoot, "audits")
 	if err := os.MkdirAll(root, 0700); err != nil {
 		return err
 	}
@@ -332,7 +325,7 @@ func (e *Orchestrator) prepareFix(ctx context.Context, p *Prepared) (*Prepared, 
 	if err := e.checkGitHubContext(request, "", content.BodyText); err != nil {
 		return nil, err
 	}
-	p.checkout, err = gitwork.Clone(ctx, e.WorkRoot, repo.FullName, repo.DefaultBranch, func(ctx context.Context, sha string) (github.GitTree, error) {
+	p.checkout, err = gitwork.Clone(ctx, e.Runner.WorkRoot, repo.FullName, repo.DefaultBranch, func(ctx context.Context, sha string) (github.GitTree, error) {
 		return e.GitHub.GitTree(ctx, repo.FullName, sha)
 	})
 	if err != nil {

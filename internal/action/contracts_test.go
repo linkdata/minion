@@ -24,13 +24,63 @@ func TestStatusUsesConfiguredRoundBudget(t *testing.T) {
 		if rounds == 0 {
 			rounds = config.DefaultCriticMaxRounds
 		}
-		status := Status{Version: ProtocolVersion, Identity: job.Identity, State: StatusRunning, Phase: PhaseCritic, Round: rounds}
+		status := Status{Version: ProtocolVersion, Identity: job.Identity, State: StatusRunning, Phase: PhaseCritic, Round: rounds, ReviewPhase: "full"}
 		if err := status.Validate(job); err != nil {
 			t.Fatalf("valid round %d: %v", rounds, err)
 		}
 		status.Round++
 		if err := status.Validate(job); err == nil {
 			t.Fatal("accepted status beyond configured rounds")
+		}
+	}
+}
+
+func TestStatusDistinguishesReviewPhases(t *testing.T) {
+	job := portableJob(command.Comment)
+	job.Critic = &RoleSettings{Provider: "claude"}
+	for _, tt := range []struct {
+		name        string
+		phase       StatusPhase
+		round       int
+		reviewPhase string
+		valid       bool
+	}{
+		{"initial full", PhaseCritic, 1, "full", true},
+		{"revised full", PhaseCritic, 2, "full", true},
+		{"finding verification", PhaseCritic, 2, "verification", true},
+		{"main", PhaseMain, 1, "", true},
+		{"missing critic phase", PhaseCritic, 1, "", false},
+		{"unknown critic phase", PhaseCritic, 1, "focused", false},
+		{"initial verification", PhaseCritic, 1, "verification", false},
+		{"unstarted review", PhaseCritic, 0, "full", false},
+		{"review phase on main", PhaseMain, 1, "full", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			status := Status{Version: ProtocolVersion, Identity: job.Identity, State: StatusRunning, Phase: tt.phase, Round: tt.round, ReviewPhase: tt.reviewPhase}
+			if err := status.Validate(job); (err == nil) != tt.valid {
+				t.Fatalf("status validation=%v; want valid=%v", err, tt.valid)
+			}
+		})
+	}
+	job.Critic = nil
+	status := Status{Version: ProtocolVersion, Identity: job.Identity, State: StatusRunning, Phase: PhaseCritic, Round: 1, ReviewPhase: "full"}
+	if err := status.Validate(job); err == nil || !strings.Contains(err.Error(), "review phase") {
+		t.Fatalf("allowed critic status without a critic: %v", err)
+	}
+}
+
+func TestFixJobRejectsUnsupportedLayoutBeforeExecution(t *testing.T) {
+	for _, paths := range [][]string{{"Docs/a", "docs/b"}, {"ſ", "s"}, {"µ/a", "μ/b"}, {`back\slash`}} {
+		job := portableJob(command.Fix)
+		for _, name := range paths {
+			job.Source.Files = append(job.Source.Files, workspace.File{Path: name, Mode: workspace.Regular})
+		}
+		if err := job.Validate(); err == nil {
+			t.Fatalf("accepted unsupported writable source paths %q", paths)
+		}
+		job.Action = command.Comment
+		if err := job.Validate(); err != nil {
+			t.Fatalf("read-only source paths %q should remain supported: %v", paths, err)
 		}
 	}
 }
@@ -46,6 +96,17 @@ func TestResultRejectsChangesOverlappingOmittedSource(t *testing.T) {
 				t.Fatalf("change %q validation=%v", name, err)
 			}
 		})
+	}
+}
+
+func TestJobChangeValidationFoldsOmittedUnicodePaths(t *testing.T) {
+	for _, pair := range [][2]string{{"ſ", "s"}, {"µ", "μ"}, {"ς", "σ"}, {"ϐ", "β"}, {"K", "k"}} {
+		job := portableJob(command.Fix)
+		job.Source.Omitted = []string{pair[0] + "/link"}
+		changes := []workspace.Change{{Path: pair[1] + "/link/file", Mode: workspace.Regular}}
+		if err := job.validateChanges(changes); err == nil || !strings.Contains(err.Error(), "omitted source path") {
+			t.Fatalf("omitted %q vs changed %q: %v", pair[0], pair[1], err)
+		}
 	}
 }
 
@@ -99,6 +160,7 @@ func TestResultCallUsageRequiresOrderedReviewPhases(t *testing.T) {
 		calls             []CallUsage
 		complete, partial bool
 	}{
+		{"no review calls", nil, false, true},
 		{"first full review", []CallUsage{main(1), critic(1, "full")}, true, true},
 		{"revised full review", []CallUsage{main(1), critic(1, "full"), main(2), critic(2, "verification"), critic(2, "full")}, true, true},
 		{"rejected verification then revision", []CallUsage{main(1), critic(1, "full"), main(2), critic(2, "verification"), main(3), critic(3, "verification"), critic(3, "full")}, true, true},
@@ -116,7 +178,7 @@ func TestResultCallUsageRequiresOrderedReviewPhases(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Answer.", Calls: test.calls}
-			if err := result.Validate(job); (err == nil) != test.complete {
+			if err := result.Validate(job); (err == nil) != test.complete || (len(test.calls) == 0 && !strings.Contains(err.Error(), "final full review")) {
 				t.Fatalf("complete validation=%v, want valid=%v", err, test.complete)
 			}
 			if err := result.validate(job, false); (err == nil) != test.partial {
@@ -145,15 +207,12 @@ func TestResultCallUsageRequiresOrderedReviewPhases(t *testing.T) {
 }
 
 func TestResultCallUsageHonorsConfiguredAndDefaultRoundLimits(t *testing.T) {
-	if config.DefaultCriticMaxRounds != 5 || config.MaxCriticMaxRounds != 20 {
-		t.Fatalf("critic configuration changed: default=%d max=%d", config.DefaultCriticMaxRounds, config.MaxCriticMaxRounds)
-	}
 	for _, test := range []struct {
 		name   string
 		limit  int
 		rounds int
 	}{
-		{"explicit", 2, 2}, {"default", 0, 5}, {"maximum", 20, 20},
+		{"explicit", 2, 2}, {"default", 0, config.DefaultCriticMaxRounds}, {"maximum", config.MaxCriticMaxRounds, config.MaxCriticMaxRounds},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			job := portableJob(command.Comment)
@@ -176,6 +235,29 @@ func TestResultCallUsageHonorsConfiguredAndDefaultRoundLimits(t *testing.T) {
 		job.CriticMaxRounds = invalid
 		if err := job.Validate(); err == nil {
 			t.Fatalf("accepted invalid critic round limit %d", invalid)
+		}
+	}
+}
+
+func TestCompleteAuditRequiresNonemptyCoreArtifacts(t *testing.T) {
+	job := portableJob(command.SecurityAudit)
+	for _, empty := range auditArtifacts {
+		if auditArtifactMayBeEmpty(empty) {
+			continue
+		}
+		var files []workspace.File
+		for _, name := range auditArtifacts {
+			data := []byte("placeholder")
+			if name == empty {
+				data = nil
+			}
+			files = append(files, workspace.File{Path: name, Mode: workspace.Regular, Data: data})
+		}
+		if err := validateResultArtifacts(job, files, true); err == nil || !strings.Contains(err.Error(), "empty action report artifact") {
+			t.Fatalf("empty %s=%v", empty, err)
+		}
+		if err := validateResultArtifacts(job, files, false); err != nil {
+			t.Fatalf("partial %s=%v", empty, err)
 		}
 	}
 }
