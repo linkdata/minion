@@ -83,7 +83,7 @@ func privateRoot(t *testing.T) string {
 }
 
 func TestRejectUnsafeFilesAndChanges(t *testing.T) {
-	for i, name := range []string{"", ".", "..", "../outside", "/absolute", "a/../b", "a//b", "a\\b", ".git/config", "a/.GiT/hooks/x", "nul\x00file", strings.Repeat("x", 256)} {
+	for i, name := range []string{"", ".", "..", "../outside", "/absolute", "a/../b", "a//b", ".git/config", "a/.GiT/hooks/x", "nul\x00file", strings.Repeat("x", 256)} {
 		t.Run("path-"+strconv.Itoa(i), func(t *testing.T) {
 			if err := Materialize(t.TempDir(), []File{{Path: name, Mode: Regular}}); err == nil {
 				t.Fatalf("accepted path %q", name)
@@ -95,7 +95,6 @@ func TestRejectUnsafeFilesAndChanges(t *testing.T) {
 	}
 	for _, files := range [][]File{
 		{{Path: "a", Mode: Regular}, {Path: "a", Mode: Regular}},
-		{{Path: "a", Mode: Regular}, {Path: "A", Mode: Regular}},
 		{{Path: "a", Mode: Regular}, {Path: "a/b", Mode: Regular}},
 		{{Path: "link", Mode: 0120000}},
 		{{Path: "permissions", Mode: 0644}},
@@ -105,6 +104,8 @@ func TestRejectUnsafeFilesAndChanges(t *testing.T) {
 		}
 	}
 	for _, changes := range [][]Change{
+		{{Path: "a\\b", Mode: Regular}},
+		{{Path: "a", Mode: Regular}, {Path: "A", Mode: Regular}},
 		{{Path: "deleted", Mode: Regular, Delete: true}},
 		{{Path: "deleted", Data: []byte("content"), Delete: true}},
 		{{Path: "a", Mode: Regular}, {Path: "a/b", Mode: Regular}},
@@ -116,7 +117,7 @@ func TestRejectUnsafeFilesAndChanges(t *testing.T) {
 	}
 }
 
-func TestRejectDirectorySpellingCollisions(t *testing.T) {
+func TestSourceAllowsDirectorySpellingsButChangesRejectCollisions(t *testing.T) {
 	for i, paths := range [][]string{
 		{"Foo/a", "foo/b"},
 		{"Foo/Bar/a", "Foo/bar/b"},
@@ -124,8 +125,8 @@ func TestRejectDirectorySpellingCollisions(t *testing.T) {
 	} {
 		t.Run("case-"+strconv.Itoa(i), func(t *testing.T) {
 			files := []File{{Path: paths[0], Mode: Regular}, {Path: paths[1], Mode: Regular}}
-			if err := ValidateSnapshot(Snapshot{Head: strings.Repeat("a", 40), Files: files}); err == nil {
-				t.Fatalf("accepted source directory spelling collision: %v", paths)
+			if err := ValidateSnapshot(Snapshot{Head: strings.Repeat("a", 40), Files: files}); err != nil {
+				t.Fatalf("rejected case-distinct source directories: %v,%v", paths, err)
 			}
 			changes := []Change{{Path: paths[0], Mode: Regular}, {Path: paths[1], Mode: Regular}}
 			if err := ValidateChanges(changes); err == nil {
@@ -164,7 +165,7 @@ func TestChangedPathsChecksFinalSourceLayout(t *testing.T) {
 
 func TestDefaultSnapshotRejectsOmittedFileOverlap(t *testing.T) {
 	for i, test := range []struct{ file, omitted string }{
-		{"file", "file"}, {"File", "file"}, {"dir/file", "dir"}, {"dir", "dir/file"}, {"Foo/a", "foo/b"},
+		{"file", "file"}, {"dir/file", "dir"}, {"dir", "dir/file"},
 	} {
 		t.Run("overlap-"+strconv.Itoa(i), func(t *testing.T) {
 			snapshot := Snapshot{Head: strings.Repeat("a", 40), Files: []File{{Path: test.file, Mode: Regular}}, Omitted: []string{test.omitted}}
@@ -177,8 +178,44 @@ func TestDefaultSnapshotRejectsOmittedFileOverlap(t *testing.T) {
 			}
 		})
 	}
-	if err := ValidateSnapshot(Snapshot{Head: strings.Repeat("a", 40), Files: []File{{Path: "Foo/a", Mode: Regular}}, Omitted: []string{"Foo/b"}}); err != nil {
-		t.Fatalf("rejected disjoint default omission: %v", err)
+	for _, test := range []struct{ file, omitted string }{
+		{"Foo/a", "Foo/b"}, {"File", "file"}, {"Foo/a", "foo/b"}, {"back\\slash", "Back\\Slash"},
+	} {
+		if err := ValidateSnapshot(Snapshot{Head: strings.Repeat("a", 40), Files: []File{{Path: test.file, Mode: Regular}}, Omitted: []string{test.omitted}}); err != nil {
+			t.Fatalf("rejected disjoint default omission: %+v,%v", test, err)
+		}
+	}
+}
+
+func TestSourcePreservesGitLegalCaseAndBackslashPaths(t *testing.T) {
+	files := []File{
+		{Path: "include/xt_connmark.h", Mode: Regular, Data: []byte("lowercase")},
+		{Path: "include/xt_CONNMARK.h", Mode: Regular, Data: []byte("uppercase")},
+		{Path: "Docs/a.md", Mode: Regular, Data: []byte("upper directory")},
+		{Path: "docs/b.md", Mode: Regular, Data: []byte("lower directory")},
+		{Path: "literal\\backslash", Mode: Regular, Data: []byte("backslash")},
+	}
+	snapshot := Snapshot{
+		Head: strings.Repeat("a", 40), Base: strings.Repeat("b", 40), MergeBase: strings.Repeat("b", 40),
+		Files: files, ChangedPaths: []string{"Docs/a.md", "docs/b.md", "literal\\backslash"},
+		Omitted: []string{"Link", "link", "literal\\omission"},
+	}
+	if err := ValidateSnapshot(snapshot); err != nil {
+		t.Fatal(err)
+	}
+	root := privateRoot(t)
+	if err := Materialize(root, files); err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range files {
+		data, err := ReadRegular(filepath.Join(root, file.Path), MaxBytes)
+		if err != nil || !bytes.Equal(data, file.Data) {
+			t.Fatalf("source path %q=%q,%v", file.Path, data, err)
+		}
+	}
+	changes, err := Changes(context.Background(), root, files)
+	if err != nil || len(changes) != 0 {
+		t.Fatalf("unchanged Git-legal source=%+v,%v", changes, err)
 	}
 }
 

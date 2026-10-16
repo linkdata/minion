@@ -69,7 +69,7 @@ func (e *Orchestrator) Execute(ctx context.Context, job monitor.Job) (resultErr 
 	}
 	timeout := e.Timeout
 	if timeout == 0 {
-		timeout = 30 * time.Minute
+		timeout = config.DefaultJobTimeout
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -109,7 +109,7 @@ func (e *Orchestrator) Execute(ctx context.Context, job monitor.Job) (resultErr 
 	}
 	if resultErr != nil && (errors.Is(ctx.Err(), context.DeadlineExceeded) ||
 		errors.Is(resultErr, gitwork.ErrTooManyFiles) || errors.Is(resultErr, gitwork.ErrChangedFileLarge) ||
-		errors.Is(resultErr, gitwork.ErrDiffTooLarge) || errors.Is(resultErr, gitwork.ErrCheckoutTooLarge) || errors.Is(resultErr, codexcli.ErrOutputLimit)) {
+		errors.Is(resultErr, gitwork.ErrDiffTooLarge) || errors.Is(resultErr, gitwork.ErrCheckoutTooLarge) || errors.Is(resultErr, gitwork.ErrUnsupportedSource) || errors.Is(resultErr, codexcli.ErrOutputLimit)) {
 		resultErr = fmt.Errorf("%w: %w", monitor.ErrTerminalJob, resultErr)
 	}
 	returned = true

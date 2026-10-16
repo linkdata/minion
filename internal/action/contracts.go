@@ -61,13 +61,14 @@ type Job struct {
 }
 
 type CallUsage struct {
-	Provider string       `json:"provider"`
-	Role     string       `json:"role"`
-	Round    int          `json:"round"`
-	Model    string       `json:"model,omitempty"`
-	Effort   string       `json:"effort,omitempty"`
-	Tokens   usage.Tokens `json:"tokens"`
-	Complete bool         `json:"complete"`
+	Provider    string       `json:"provider"`
+	Role        string       `json:"role"`
+	Round       int          `json:"round"`
+	ReviewPhase string       `json:"review_phase,omitempty"`
+	Model       string       `json:"model,omitempty"`
+	Effort      string       `json:"effort,omitempty"`
+	Tokens      usage.Tokens `json:"tokens"`
+	Complete    bool         `json:"complete"`
 }
 
 type Diagnostic struct {
@@ -174,7 +175,7 @@ func (j Job) Validate() error {
 	if !identitySegment(j.Command) {
 		return errors.New("invalid action command")
 	}
-	if j.RuntimeBudget <= 0 || j.RuntimeBudget > 240*time.Minute {
+	if j.RuntimeBudget <= 0 || j.RuntimeBudget > config.MaxJobTimeout {
 		return errors.New("invalid action runtime budget")
 	}
 	switch j.Action {
@@ -207,7 +208,7 @@ func (j Job) Validate() error {
 			return errors.New("main and critic currently require different providers")
 		}
 	}
-	if j.CriticMaxRounds < 0 || j.CriticMaxRounds > 10 {
+	if j.CriticMaxRounds < 0 || j.CriticMaxRounds > config.MaxCriticMaxRounds {
 		return errors.New("invalid critic round limit")
 	}
 	if err := workspace.ValidateSnapshot(j.Source); err != nil {
@@ -257,11 +258,10 @@ func (r Result) validate(j Job, complete bool) error {
 	if err := validateResultArtifacts(j, r.Artifacts, complete); err != nil {
 		return err
 	}
-	maxCalls := cmp.Or(j.CriticMaxRounds, defaultCriticRounds)
+	rounds := cmp.Or(j.CriticMaxRounds, config.DefaultCriticMaxRounds)
+	maxCalls := 3*rounds - 1
 	if j.Critic == nil {
 		maxCalls = 1
-	} else {
-		maxCalls *= 2
 	}
 	if len(r.Calls) > maxCalls {
 		return errors.New("action result has too many model calls")
@@ -273,15 +273,29 @@ func (r Result) validate(j Job, complete bool) error {
 		} else if call.Role != "main" {
 			return errors.New("invalid model call role")
 		}
-		expectedRole, expectedRound := "main", 1
-		if j.Critic != nil {
-			expectedRound = i/2 + 1
-			if i%2 != 0 {
-				expectedRole = "critic"
+		validOrder := i == 0 && call.Role == "main" && call.Round == 1 && call.ReviewPhase == ""
+		if i > 0 && j.Critic != nil {
+			previous := r.Calls[i-1]
+			if call.Role == "main" {
+				validOrder = previous.Role == "critic" && call.Round == previous.Round+1 && call.ReviewPhase == ""
+			} else if previous.Role == "main" {
+				phase := "verification"
+				if call.Round == 1 {
+					phase = "full"
+				}
+				validOrder = call.Round == previous.Round && call.ReviewPhase == phase
+			} else {
+				validOrder = previous.ReviewPhase == "verification" && call.Round == previous.Round && call.ReviewPhase == "full"
 			}
 		}
-		if call.Role != expectedRole || call.Round != expectedRound || call.Provider != role.Provider || call.Model != role.Model || call.Effort != role.Effort || call.Tokens.Input < 0 || call.Tokens.CachedInput < 0 || call.Tokens.Output < 0 || call.Tokens.CachedInput > call.Tokens.Input {
+		if !validOrder || call.Round > rounds || call.Provider != role.Provider || call.Model != role.Model || call.Effort != role.Effort || call.Tokens.Input < 0 || call.Tokens.CachedInput < 0 || call.Tokens.Output < 0 || call.Tokens.CachedInput > call.Tokens.Input {
 			return errors.New("invalid model call usage")
+		}
+	}
+	if complete && j.Critic != nil && len(r.Calls) != 0 {
+		last := r.Calls[len(r.Calls)-1]
+		if last.Role != "critic" || last.ReviewPhase != "full" {
+			return errors.New("action result lacks a final full review")
 		}
 	}
 	if len(r.Diagnostics) > 100 {
@@ -361,7 +375,11 @@ func (s Status) Validate(j Job) error {
 	default:
 		return errors.New("invalid action status phase")
 	}
-	if s.Round < 0 || s.Round > 10 || s.ProgressAge < 0 || len(s.Diagnostics) > 100 {
+	rounds := cmp.Or(j.CriticMaxRounds, config.DefaultCriticMaxRounds)
+	if j.Critic == nil {
+		rounds = 1
+	}
+	if s.Round < 0 || s.Round > rounds || s.ProgressAge < 0 || len(s.Diagnostics) > 100 {
 		return errors.New("invalid action status")
 	}
 	for _, diagnostic := range s.Diagnostics {

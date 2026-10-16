@@ -53,17 +53,16 @@ func (c *Checkout) sourceEntries(ctx context.Context, ref string, tree github.Gi
 	if err := checkSourceTree(tree, treeSHA); err != nil {
 		return nil, err
 	}
-	if len(tree.Tree) > maxWorktreeEntries {
+	if len(tree.Tree) > workspace.MaxEntries {
 		return nil, ErrCheckoutTooLarge
 	}
 	metadata := map[string]github.GitTreeEntry{}
 	seen := map[string]bool{}
 	for _, entry := range tree.Tree {
-		key := strings.ToLower(entry.Path)
-		if !workspace.ValidPath(entry.Path) || seen[key] {
-			return nil, fmt.Errorf("%w: unsafe or duplicate source path %q", ErrCheckoutTooLarge, entry.Path)
+		if seen[entry.Path] {
+			return nil, fmt.Errorf("%w: unsafe or duplicate source path %q", ErrUnsupportedSource, entry.Path)
 		}
-		seen[key] = true
+		seen[entry.Path] = true
 		if entry.Type != "tree" {
 			metadata[entry.Path] = entry
 		}
@@ -74,29 +73,29 @@ func (c *Checkout) sourceEntries(ctx context.Context, ref string, tree github.Gi
 	}
 	if len(output) == 0 {
 		if len(metadata) != 0 {
-			return nil, fmt.Errorf("%w: API tree differs from Git tree", ErrCheckoutTooLarge)
+			return nil, fmt.Errorf("%w: API tree differs from Git tree", ErrUnsupportedSource)
 		}
 		return nil, nil
 	}
 	if output[len(output)-1] != 0 {
-		return nil, fmt.Errorf("%w: invalid Git tree listing", ErrCheckoutTooLarge)
+		return nil, fmt.Errorf("%w: invalid Git tree listing", ErrUnsupportedSource)
 	}
 	var entries []sourceEntry
 	var validation []workspace.File
 	for _, line := range bytes.Split(output[:len(output)-1], []byte{0}) {
 		fieldsRaw, name, ok := bytes.Cut(line, []byte{'\t'})
 		fields := strings.Fields(string(fieldsRaw))
-		if !ok || len(fields) != 3 || !validSHA(fields[2]) {
-			return nil, fmt.Errorf("%w: invalid Git source entry", ErrCheckoutTooLarge)
+		if !ok || len(fields) != 3 || !workspace.ValidSHA(fields[2]) {
+			return nil, fmt.Errorf("%w: invalid Git source entry", ErrUnsupportedSource)
 		}
 		entry, exists := metadata[string(name)]
 		if !exists || entry.Mode != fields[0] || entry.Type != fields[1] {
-			return nil, fmt.Errorf("%w: API tree differs from Git tree at %q", ErrCheckoutTooLarge, name)
+			return nil, fmt.Errorf("%w: API tree differs from Git tree at %q", ErrUnsupportedSource, name)
 		}
 		delete(metadata, string(name))
 		mode, err := strconv.ParseUint(entry.Mode, 8, 32)
 		if err != nil {
-			return nil, fmt.Errorf("%w: invalid source mode", ErrCheckoutTooLarge)
+			return nil, fmt.Errorf("%w: invalid source mode", ErrUnsupportedSource)
 		}
 		source := sourceEntry{file: workspace.File{Path: entry.Path, Mode: uint32(mode)}, sha: fields[2], omitted: entry.Type == "commit" || entry.Mode == "120000"}
 		file := source.file
@@ -109,10 +108,10 @@ func (c *Checkout) sourceEntries(ctx context.Context, ref string, tree github.Gi
 		entries = append(entries, source)
 	}
 	if len(metadata) != 0 {
-		return nil, fmt.Errorf("%w: API tree has unmatched entries", ErrCheckoutTooLarge)
+		return nil, fmt.Errorf("%w: API tree has unmatched entries", ErrUnsupportedSource)
 	}
 	if err := workspace.ValidateSnapshot(workspace.Snapshot{Head: ref, Files: validation}); err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrCheckoutTooLarge, err)
+		return nil, fmt.Errorf("%w: %w", ErrUnsupportedSource, err)
 	}
 	return entries, nil
 }
@@ -131,7 +130,7 @@ func (c *Checkout) sourceFiles(ctx context.Context, entries []sourceEntry, selec
 			return nil, nil, err
 		}
 		if int64(len(entry.file.Data)) != entry.size {
-			return nil, nil, fmt.Errorf("%w: Git blob size differs from tree metadata", ErrCheckoutTooLarge)
+			return nil, nil, fmt.Errorf("%w: Git blob size differs from tree metadata", ErrUnsupportedSource)
 		}
 		files = append(files, entry.file)
 	}
@@ -157,8 +156,8 @@ func (c *Checkout) Snapshot(ctx context.Context, history, pull bool) (s workspac
 		if s.MergeBase, err = runGit(ctx, c.path, "merge-base", s.Base, s.Head); err != nil {
 			return s, err
 		}
-		if !validSHA(s.Base) || !validSHA(s.MergeBase) {
-			return s, fmt.Errorf("%w: invalid comparison commits", ErrCheckoutTooLarge)
+		if !workspace.ValidSHA(s.Base) || !workspace.ValidSHA(s.MergeBase) {
+			return s, fmt.Errorf("%w: invalid comparison commits", ErrUnsupportedSource)
 		}
 		if baseEntries, err = c.sourceTree(ctx, s.MergeBase); err != nil {
 			return s, err
@@ -207,13 +206,12 @@ func (c *Checkout) Snapshot(ctx context.Context, history, pull bool) (s workspac
 		}
 		seen := map[string]bool{}
 		for _, name := range s.Omitted {
-			seen[strings.ToLower(name)] = true
+			seen[name] = true
 		}
 		for _, name := range omitted {
-			key := strings.ToLower(name)
-			if !seen[key] {
+			if !seen[name] {
 				s.Omitted = append(s.Omitted, name)
-				seen[key] = true
+				seen[name] = true
 			}
 		}
 	}
@@ -227,7 +225,7 @@ func (c *Checkout) Snapshot(ctx context.Context, history, pull bool) (s workspac
 			return s, errors.New("invalid history commit count")
 		}
 		var truncated bool
-		s.History, truncated, err = c.boundedGit(ctx, workspace.MaxContextBytes, true, "log", "--max-count=100", "--format=fuller", "--date=iso-strict", "--no-decorate", "--no-show-signature", s.Head, "--")
+		s.History, truncated, err = c.boundedGit(ctx, workspace.MaxContextBytes, true, "log", "--no-mailmap", "--max-count=100", "--format=fuller", "--date=iso-strict", "--no-decorate", "--no-show-signature", s.Head, "--")
 		if err != nil {
 			return s, err
 		}
@@ -240,8 +238,11 @@ func (c *Checkout) Snapshot(ctx context.Context, history, pull bool) (s workspac
 	if err := c.ready(); err != nil {
 		return s, err
 	}
+	if len(s.Omitted) > workspace.MaxFiles || len(s.ChangedPaths) > workspace.MaxFiles {
+		return s, ErrCheckoutTooLarge
+	}
 	if err := workspace.ValidateSnapshot(s); err != nil {
-		return s, fmt.Errorf("%w: %w", ErrCheckoutTooLarge, err)
+		return s, fmt.Errorf("%w: %w", ErrUnsupportedSource, err)
 	}
 	return s, nil
 }
@@ -251,16 +252,10 @@ func (c *Checkout) Import(ctx context.Context, expectedHead string, changes []wo
 	if err := c.ready(); err != nil {
 		return err
 	}
-	if !validSHA(expectedHead) || !strings.EqualFold(expectedHead, c.expectedHead) {
+	if !workspace.ValidSHA(expectedHead) || !strings.EqualFold(expectedHead, c.expectedHead) {
 		return errors.New("result source commit does not match checkout")
 	}
 	if err := c.assertHead(ctx); err != nil {
-		return err
-	}
-	if err := workspace.ValidateChanges(changes); err != nil {
-		return err
-	}
-	if err := c.disableAttributes(); err != nil {
 		return err
 	}
 	return workspace.Apply(c.path, changes)

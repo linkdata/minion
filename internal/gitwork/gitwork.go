@@ -20,25 +20,19 @@ import (
 )
 
 const (
-	maxChangedFiles    = workspace.MaxChanges
-	maxPatchBytes      = workspace.MaxContextBytes
-	maxChangedFileSize = workspace.MaxChangeBytes
-	maxPathListBytes   = workspace.MaxFiles * (workspace.MaxPathBytes + 128)
-	maxGitDiagnostic   = 8 << 10
-	maxWorktreeEntries = workspace.MaxEntries
-	maxCheckoutFiles   = workspace.MaxFiles
-	maxCheckoutBytes   = workspace.MaxBytes
-	maxTreeEntryBytes  = 1 << 20
+	maxPathListBytes = workspace.MaxFiles * (workspace.MaxPathBytes + 128)
+	maxGitDiagnostic = 8 << 10
 )
 
 var (
-	ErrNoChanges        = errors.New("no changes to commit")
-	ErrTooManyFiles     = errors.New("too many changed files")
-	ErrDiffTooLarge     = errors.New("staged diff exceeds size limit")
-	ErrChangedFileLarge = errors.New("changed file exceeds size limit")
-	ErrHeadMoved        = errors.New("pull request head changed")
-	ErrCheckoutTooLarge = errors.New("source tree exceeds checkout limits")
-	credentialHelperGH  = resolveCredentialHelperGH()
+	ErrNoChanges         = errors.New("no changes to commit")
+	ErrTooManyFiles      = errors.New("too many changed files")
+	ErrDiffTooLarge      = errors.New("staged diff exceeds size limit")
+	ErrChangedFileLarge  = errors.New("changed file exceeds size limit")
+	ErrHeadMoved         = errors.New("pull request head changed")
+	ErrCheckoutTooLarge  = errors.New("source tree exceeds checkout limits")
+	ErrUnsupportedSource = errors.New("source tree is unsupported")
+	credentialHelperGH   = resolveCredentialHelperGH()
 )
 
 func resolveCredentialHelperGH() string {
@@ -202,7 +196,7 @@ func (c *Checkout) CheckoutPullRequest(ctx context.Context, number int, baseRef,
 	if err := validateBranch(baseRef); err != nil {
 		return fmt.Errorf("pull request base: %w", err)
 	}
-	if !validSHA(expectedHeadSHA) {
+	if !workspace.ValidSHA(expectedHeadSHA) {
 		return fmt.Errorf("invalid expected pull request SHA %q", expectedHeadSHA)
 	}
 	const baseDest = "refs/remotes/minion/base"
@@ -228,9 +222,6 @@ func (c *Checkout) CheckoutPullRequest(ctx context.Context, number int, baseRef,
 	if _, err := c.sourceTree(ctx, head); err != nil {
 		return err
 	}
-	if err := c.disableAttributes(); err != nil {
-		return err
-	}
 	if _, err := runGit(ctx, c.path, "checkout", "--detach", head); err != nil {
 		return err
 	}
@@ -242,43 +233,43 @@ func (c *Checkout) CheckoutPullRequest(ctx context.Context, number int, baseRef,
 // Check expanded blobs and gitlinks, including repeated object references,
 // against GitHub metadata before fetching source contents.
 func checkSourceTree(tree github.GitTree, expectedSHA string) error {
-	if !strings.EqualFold(tree.SHA, expectedSHA) || !validSHA(tree.SHA) || tree.Truncated == nil || *tree.Truncated || tree.Tree == nil {
-		return fmt.Errorf("%w: incomplete or mismatched tree metadata", ErrCheckoutTooLarge)
+	if !strings.EqualFold(tree.SHA, expectedSHA) || !workspace.ValidSHA(tree.SHA) || tree.Truncated == nil || *tree.Truncated || tree.Tree == nil {
+		return fmt.Errorf("%w: incomplete or mismatched tree metadata", ErrUnsupportedSource)
 	}
 	var files int
 	var total int64
 	for _, entry := range tree.Tree {
-		if entry.Path == "" || len(entry.Path) > maxTreeEntryBytes {
-			return fmt.Errorf("%w: invalid or oversized tree path", ErrCheckoutTooLarge)
+		if !workspace.ValidSourcePath(entry.Path) {
+			return fmt.Errorf("%w: unsafe source path %q", ErrUnsupportedSource, entry.Path)
 		}
 		switch entry.Type {
 		case "tree":
 			if entry.Mode != "040000" {
-				return fmt.Errorf("%w: unsupported tree mode %q at %q", ErrCheckoutTooLarge, entry.Mode, entry.Path)
+				return fmt.Errorf("%w: unsupported tree mode %q at %q", ErrUnsupportedSource, entry.Mode, entry.Path)
 			}
 			continue
 		case "commit": // A submodule gitlink writes no blob into the checkout.
 			if entry.Mode != "160000" {
-				return fmt.Errorf("%w: unsupported gitlink mode %q at %q", ErrCheckoutTooLarge, entry.Mode, entry.Path)
+				return fmt.Errorf("%w: unsupported gitlink mode %q at %q", ErrUnsupportedSource, entry.Mode, entry.Path)
 			}
 		case "blob":
 			// Snapshots declare symlinks as omitted and never follow their targets.
 			if entry.Mode != "100644" && entry.Mode != "100755" && entry.Mode != "120000" {
-				return fmt.Errorf("%w: unsupported blob mode %q at %q", ErrCheckoutTooLarge, entry.Mode, entry.Path)
+				return fmt.Errorf("%w: unsupported blob mode %q at %q", ErrUnsupportedSource, entry.Mode, entry.Path)
 			}
 			if entry.Size == nil || *entry.Size < 0 {
-				return fmt.Errorf("%w: blob size is unavailable", ErrCheckoutTooLarge)
+				return fmt.Errorf("%w: blob size is unavailable", ErrUnsupportedSource)
 			}
-			if *entry.Size > maxCheckoutBytes-total {
-				return fmt.Errorf("%w: more than %d bytes", ErrCheckoutTooLarge, maxCheckoutBytes)
+			if *entry.Size > workspace.MaxBytes-total {
+				return fmt.Errorf("%w: more than %d bytes", ErrCheckoutTooLarge, workspace.MaxBytes)
 			}
 			total += *entry.Size
 		default:
-			return fmt.Errorf("%w: unknown Git tree entry type %q", ErrCheckoutTooLarge, entry.Type)
+			return fmt.Errorf("%w: unknown Git tree entry type %q", ErrUnsupportedSource, entry.Type)
 		}
 		files++
-		if files > maxCheckoutFiles {
-			return fmt.Errorf("%w: more than %d paths", ErrCheckoutTooLarge, maxCheckoutFiles)
+		if files > workspace.MaxFiles {
+			return fmt.Errorf("%w: more than %d paths", ErrCheckoutTooLarge, workspace.MaxFiles)
 		}
 	}
 	return nil
@@ -354,8 +345,8 @@ func (c *Checkout) CommitAndPush(ctx context.Context, branch, botLogin, message 
 	if len(paths) == 0 {
 		return ErrNoChanges
 	}
-	if len(paths) > maxChangedFiles {
-		return fmt.Errorf("%w: %d > %d", ErrTooManyFiles, len(paths), maxChangedFiles)
+	if len(paths) > workspace.MaxChanges {
+		return fmt.Errorf("%w: %d > %d", ErrTooManyFiles, len(paths), workspace.MaxChanges)
 	}
 	if err := c.checkChangedFileSizes(paths); err != nil {
 		return err
@@ -380,15 +371,13 @@ func (c *Checkout) CommitAndPush(ctx context.Context, branch, botLogin, message 
 }
 
 func (c *Checkout) stagedPaths(ctx context.Context) ([]string, error) {
-	var output cappedBuffer
-	output.limit = maxPathListBytes
-	if err := runGitTo(ctx, c.path, &output, "diff", "--cached", "--name-only", "-z", "--no-renames", "--no-ext-diff"); err != nil {
+	data, truncated, err := c.boundedGit(ctx, maxPathListBytes, true, "diff", "--cached", "--name-only", "-z", "--no-renames", "--no-ext-diff")
+	if err != nil {
 		return nil, err
 	}
-	if output.exceeded {
+	if truncated {
 		return nil, ErrTooManyFiles
 	}
-	data := output.Bytes()
 	if len(data) == 0 {
 		return nil, nil
 	}
@@ -420,7 +409,7 @@ func (c *Checkout) checkChangedFileSizes(paths []string) error {
 			return fmt.Errorf("changed path %q is a directory or submodule", path)
 		}
 		total += info.Size()
-		if info.Size() > maxChangedFileSize || total > maxChangedFileSize {
+		if info.Size() > workspace.MaxChangeBytes || total > workspace.MaxChangeBytes {
 			return fmt.Errorf("%w: %q (%d bytes; %d bytes total)", ErrChangedFileLarge, path, info.Size(), total)
 		}
 	}
@@ -428,11 +417,8 @@ func (c *Checkout) checkChangedFileSizes(paths []string) error {
 }
 
 func (c *Checkout) checkPatchSize(ctx context.Context) error {
-	diffCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	counter := &byteLimitWriter{limit: maxPatchBytes, cancel: cancel}
-	err := runGitTo(diffCtx, c.path, counter, "diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv", "--no-renames", "--no-color", "--submodule=short")
-	if counter.exceeded {
+	_, truncated, err := c.boundedGit(ctx, workspace.MaxContextBytes, true, "diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv", "--no-renames", "--no-color", "--submodule=short")
+	if truncated {
 		return ErrDiffTooLarge
 	}
 	return err
@@ -498,22 +484,6 @@ func (w *cappedBuffer) ReadFrom(r io.Reader) (int64, error) {
 	return io.Copy(struct{ io.Writer }{w}, r)
 }
 
-type byteLimitWriter struct {
-	bytes    int64
-	limit    int64
-	exceeded bool
-	cancel   context.CancelFunc
-}
-
-func (w *byteLimitWriter) Write(p []byte) (int, error) {
-	w.bytes += int64(len(p))
-	if w.bytes > w.limit && !w.exceeded {
-		w.exceeded = true
-		w.cancel()
-	}
-	return len(p), nil
-}
-
 func runGit(ctx context.Context, dir string, args ...string) (string, error) {
 	var output bytes.Buffer
 	if err := runGitTo(ctx, dir, &output, args...); err != nil {
@@ -528,6 +498,8 @@ func runGitTo(ctx context.Context, dir string, stdout io.Writer, args ...string)
 		"-c", credentialHelperConfig(credentialHelperGH),
 		"-c", "core.hooksPath=/dev/null",
 		"-c", "core.fsmonitor=false",
+		"-c", "core.protectHFS=true",
+		"-c", "core.protectNTFS=true",
 		"-c", "core.excludesFile=/dev/null",
 		"-c", "core.attributesFile=/dev/null",
 		"-c", "commit.gpgsign=false",

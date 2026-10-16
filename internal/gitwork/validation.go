@@ -2,7 +2,6 @@ package gitwork
 
 import (
 	"fmt"
-	"github.com/linkdata/minion/internal/workspace"
 	"strings"
 )
 
@@ -49,5 +48,3 @@ func validateBranch(branch string) error {
 	}
 	return nil
 }
-
-func validSHA(s string) bool { return workspace.ValidSHA(s) }

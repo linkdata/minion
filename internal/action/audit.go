@@ -16,17 +16,20 @@ import (
 func readAuditFiles(outputDir string) ([]workspace.File, error) {
 	files := make([]workspace.File, 0, len(auditArtifacts))
 	for _, name := range auditArtifacts {
-		limit := int64(maxAuditArtifactBytes)
-		if name == "REPORT.md" {
-			limit = maxOutputBytes
-		}
-		data, err := readAuditArtifact(filepath.Join(outputDir, name), limit, name == "FINDINGS-DETAIL.md" || name == "NEEDS-VALIDATION.md")
+		data, err := readAuditArtifact(filepath.Join(outputDir, name), auditArtifactLimit(name), name == "FINDINGS-DETAIL.md" || name == "NEEDS-VALIDATION.md")
 		if err != nil {
 			return nil, fmt.Errorf("invalid audit %s: %w", name, err)
 		}
 		files = append(files, workspace.File{Path: name, Mode: workspace.Regular, Data: data})
 	}
 	return files, nil
+}
+
+func auditArtifactLimit(name string) int64 {
+	if name == "REPORT.md" {
+		return maxOutputBytes
+	}
+	return maxAuditArtifactBytes
 }
 
 func validateAuditFiles(ctx context.Context, files []workspace.File, validationRoot, skill, repo, target, head string) (report string, resultErr error) {

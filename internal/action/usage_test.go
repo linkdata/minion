@@ -177,7 +177,7 @@ func TestUsageAccumulatesCriticRevisions(t *testing.T) {
 		t.Fatalf("records=%+v err=%v", records, err)
 	}
 	got := records[0]
-	if got.CodexCalls != 2 || got.ClaudeCalls != 2 || got.Status != "succeeded" || !got.UsageComplete || got.Tokens != (usage.Tokens{Input: 220, Output: 44}) {
+	if got.CodexCalls != 3 || got.ClaudeCalls != 2 || got.Status != "succeeded" || !got.UsageComplete || got.Tokens != (usage.Tokens{Input: 230, Output: 46}) {
 		t.Fatalf("revision usage not accumulated: %+v", got)
 	}
 }

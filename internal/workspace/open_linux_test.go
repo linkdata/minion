@@ -26,7 +26,7 @@ func TestCollectionRefusesSymlinkParents(t *testing.T) {
 		t.Fatalf("read outside source through parent: %q", data)
 	}
 	visited := false
-	if err := Walk(context.Background(), parent, MaxEntries, func(string, fs.DirEntry) error { visited = true; return nil }); err == nil || visited {
+	if err := walk(context.Background(), parent, func(string, fs.DirEntry) error { visited = true; return nil }); err == nil || visited {
 		t.Fatalf("walk followed root symlink: visited=%v error=%v", visited, err)
 	}
 }
@@ -41,7 +41,7 @@ func TestWalkRefusesDirectoryReplacedAfterQueueing(t *testing.T) {
 		t.Fatal(err)
 	}
 	visitedOutside := false
-	err := Walk(context.Background(), root, MaxEntries, func(name string, entry fs.DirEntry) error {
+	err := walk(context.Background(), root, func(name string, entry fs.DirEntry) error {
 		if name == parent {
 			if err := os.Rename(parent, filepath.Join(root, "original")); err != nil {
 				return err
@@ -55,6 +55,34 @@ func TestWalkRefusesDirectoryReplacedAfterQueueing(t *testing.T) {
 	})
 	if err == nil || visitedOutside {
 		t.Fatalf("queued directory followed replacement symlink: visited=%v error=%v", visitedOutside, err)
+	}
+}
+
+func TestCollectionTraversesExecuteOnlyParents(t *testing.T) {
+	parent := filepath.Join(t.TempDir(), "traverse")
+	root := filepath.Join(parent, "source")
+	if err := os.MkdirAll(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	base := []File{{Path: "file", Mode: Regular, Data: []byte("contents")}}
+	if err := Materialize(root, base); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(parent, 0111); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(parent, 0700); err != nil {
+			t.Error(err)
+		}
+	})
+	data, err := ReadRegular(filepath.Join(root, "file"), MaxBytes)
+	if err != nil || string(data) != "contents" {
+		t.Fatalf("read through execute-only parent=%q,%v", data, err)
+	}
+	changes, err := Changes(context.Background(), root, base)
+	if err != nil || len(changes) != 0 {
+		t.Fatalf("scan below execute-only parent=%+v,%v", changes, err)
 	}
 }
 

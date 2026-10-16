@@ -58,7 +58,12 @@ type Snapshot struct {
 }
 
 func ValidPath(name string) bool {
-	if name == "" || name == "." || len(name) > MaxPathBytes || !utf8.ValidString(name) || strings.ContainsAny(name, "\\\x00") || path.Clean(name) != name || !filepath.IsLocal(name) {
+	return ValidSourcePath(name) && !strings.Contains(name, "\\") && filepath.IsLocal(name)
+}
+
+// ValidSourcePath accepts Git's case-sensitive slash paths, including literal backslashes.
+func ValidSourcePath(name string) bool {
+	if name == "" || name == "." || name == ".." || len(name) > MaxPathBytes || !utf8.ValidString(name) || strings.ContainsRune(name, '\x00') || path.Clean(name) != name || path.IsAbs(name) || strings.HasPrefix(name, "../") {
 		return false
 	}
 	for _, part := range strings.Split(name, "/") {
@@ -108,11 +113,10 @@ func ValidateSnapshot(s Snapshot) error {
 	}
 	seen := map[string]bool{}
 	for _, name := range s.Omitted {
-		key := strings.ToLower(name)
-		if !ValidPath(name) || seen[key] {
+		if !ValidSourcePath(name) || seen[name] {
 			return fmt.Errorf("invalid omitted source path %q", name)
 		}
-		seen[key] = true
+		seen[name] = true
 	}
 	if s.Base == "" && len(s.Omitted) != 0 {
 		paths := make([]string, 0, len(s.Files)+len(s.Omitted))
@@ -120,7 +124,7 @@ func ValidateSnapshot(s Snapshot) error {
 			paths = append(paths, file.Path)
 		}
 		paths = append(paths, s.Omitted...)
-		if err := validatePaths(paths); err != nil {
+		if err := validateSourcePaths(paths); err != nil {
 			return err
 		}
 	}
@@ -129,7 +133,7 @@ func ValidateSnapshot(s Snapshot) error {
 	}
 	seen = map[string]bool{}
 	for _, name := range s.ChangedPaths {
-		if !ValidPath(name) || seen[name] {
+		if !ValidSourcePath(name) || seen[name] {
 			return errors.New("snapshot changed path is unsafe or duplicated")
 		}
 		seen[name] = true
@@ -144,7 +148,7 @@ func validateFiles(files []File) error {
 	paths := make([]string, len(files))
 	total := 0
 	for i, file := range files {
-		if !ValidPath(file.Path) || (file.Mode != Regular && file.Mode != Executable) {
+		if !ValidSourcePath(file.Path) || (file.Mode != Regular && file.Mode != Executable) {
 			return fmt.Errorf("invalid source file %q", file.Path)
 		}
 		paths[i] = file.Path
@@ -153,7 +157,25 @@ func validateFiles(files []File) error {
 		}
 		total += len(file.Data)
 	}
-	return validatePaths(paths)
+	return validateSourcePaths(paths)
+}
+
+func validateSourcePaths(paths []string) error {
+	seen := make(map[string]bool, len(paths))
+	for _, name := range paths {
+		if seen[name] {
+			return fmt.Errorf("duplicate source path %q", name)
+		}
+		seen[name] = true
+	}
+	for _, name := range paths {
+		for parent := path.Dir(name); parent != "."; parent = path.Dir(parent) {
+			if seen[parent] {
+				return fmt.Errorf("source file/directory collision at %q", name)
+			}
+		}
+	}
+	return nil
 }
 
 func validatePaths(paths []string) error {
@@ -211,12 +233,25 @@ func Materialize(root string, files []File) error {
 	if len(entries) != 0 {
 		return errors.New("workspace root is not empty")
 	}
+	directories := map[string]bool{".": true}
 	for _, file := range files {
 		name := filepath.Join(root, filepath.FromSlash(file.Path))
-		if err := os.MkdirAll(filepath.Dir(name), 0700); err != nil {
+		parent := "."
+		for _, part := range strings.Split(path.Dir(file.Path), "/") {
+			parent = path.Join(parent, part)
+			if !directories[parent] {
+				if err := os.Mkdir(filepath.Join(root, filepath.FromSlash(parent)), 0700); err != nil {
+					return err
+				}
+				directories[parent] = true
+			}
+		}
+		f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, fs.FileMode(file.Mode&0777))
+		if err != nil {
 			return err
 		}
-		if err := os.WriteFile(name, file.Data, fs.FileMode(file.Mode&0777)); err != nil {
+		_, writeErr := f.Write(file.Data)
+		if err := errors.Join(writeErr, f.Close()); err != nil {
 			return err
 		}
 		if err := os.Chmod(name, fs.FileMode(file.Mode&0777)); err != nil {
@@ -241,13 +276,13 @@ func Changes(ctx context.Context, root string, base []File) ([]Change, error) {
 	var changes []Change
 	var paths []string
 	total := 0
-	err := Walk(ctx, root, MaxEntries, func(name string, entry fs.DirEntry) error {
+	err := walk(ctx, root, func(name string, entry fs.DirEntry) error {
 		rel, err := filepath.Rel(root, name)
 		if err != nil {
 			return err
 		}
 		rel = filepath.ToSlash(rel)
-		if !ValidPath(rel) {
+		if !ValidSourcePath(rel) {
 			return fmt.Errorf("unsafe workspace path %q", rel)
 		}
 		if entry.IsDir() {
@@ -276,7 +311,7 @@ func Changes(ctx context.Context, root string, base []File) ([]Change, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := validatePaths(paths); err != nil {
+	if err := validateSourcePaths(paths); err != nil {
 		return nil, err
 	}
 	for name := range prior {
@@ -336,13 +371,9 @@ func ReadChanges(ctx context.Context, root string, selected []Change) ([]Change,
 	return changes, ValidateChanges(changes)
 }
 
-// Walk visits bounded entries without following directory symlinks.
-// Returning fs.SkipDir skips an entry and its descendants.
-func Walk(ctx context.Context, root string, limit int, visit func(string, fs.DirEntry) error) error {
+// walk visits bounded entries without following directory symlinks.
+func walk(ctx context.Context, root string, visit func(string, fs.DirEntry) error) error {
 	root = filepath.Clean(root)
-	if limit < 1 || limit > MaxEntries {
-		return errors.New("invalid workspace entry limit")
-	}
 	dirs := []string{root}
 	entries := 0
 	for len(dirs) > 0 {
@@ -364,14 +395,11 @@ func Walk(ctx context.Context, root string, limit int, visit func(string, fs.Dir
 				}
 				for _, entry := range batch {
 					entries++
-					if entries > limit {
+					if entries > MaxEntries {
 						return errors.New("workspace scan exceeds entry limit")
 					}
 					name := filepath.Join(dir, entry.Name())
 					if err := visit(name, entry); err != nil {
-						if errors.Is(err, fs.SkipDir) {
-							continue
-						}
 						return err
 					}
 					if entry.IsDir() {

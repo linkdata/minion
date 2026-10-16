@@ -25,6 +25,14 @@ var (
 const (
 	// DefaultMaxGitHubContextBytes is the default GitHub text budget for an AI action.
 	DefaultMaxGitHubContextBytes = 32 << 10
+	// DefaultJobTimeout is the total runtime budget for an action.
+	DefaultJobTimeout = 4 * time.Hour
+	// MaxJobTimeout is the largest configurable action runtime budget.
+	MaxJobTimeout = 24 * time.Hour
+	// DefaultCriticMaxRounds is the default proposal/revision round limit.
+	DefaultCriticMaxRounds = 5
+	// MaxCriticMaxRounds is the largest configurable proposal/revision round limit.
+	MaxCriticMaxRounds = 20
 
 	defaultReviewSkill        = "https://github.com/DietrichGebert/ponytail/tree/main/skills/ponytail-review"
 	defaultFixSkill           = "https://github.com/DietrichGebert/ponytail/tree/main/skills/ponytail"
@@ -115,7 +123,7 @@ type Config struct {
 	Main string `json:"main,omitempty"`
 	// Adversarial optionally selects the other provider as a read-only critic.
 	Adversarial string `json:"adversarial,omitempty"`
-	// CriticMaxRounds limits critic reviews; zero selects three rounds.
+	// CriticMaxRounds limits proposal/revision rounds; zero selects five rounds.
 	CriticMaxRounds int          `json:"critic_max_rounds,omitempty"`
 	Codex           CodexConfig  `json:"codex,omitempty"`
 	Claude          ClaudeConfig `json:"claude,omitempty"`
@@ -202,10 +210,10 @@ func (c *Config) Validate(configDir string) error {
 		return fmt.Errorf("adversarial must differ from main")
 	}
 	if c.CriticMaxRounds == 0 {
-		c.CriticMaxRounds = 3
+		c.CriticMaxRounds = DefaultCriticMaxRounds
 	}
-	if c.CriticMaxRounds < 1 || c.CriticMaxRounds > 10 {
-		return fmt.Errorf("critic_max_rounds must be between 1 and 10")
+	if c.CriticMaxRounds < 1 || c.CriticMaxRounds > MaxCriticMaxRounds {
+		return fmt.Errorf("critic_max_rounds must be between 1 and %d", MaxCriticMaxRounds)
 	}
 	if strings.ContainsAny(c.Codex.APIKey, " \t\r\n\x00") || strings.ContainsAny(c.Claude.APIKey, " \t\r\n\x00") {
 		return fmt.Errorf("provider api_key must not contain whitespace or NUL")
@@ -291,10 +299,10 @@ func (c *Config) Validate(configDir string) error {
 		return fmt.Errorf("poll_interval_seconds must be at least 60")
 	}
 	if c.JobTimeoutMinutes == 0 {
-		c.JobTimeoutMinutes = 30
+		c.JobTimeoutMinutes = int(DefaultJobTimeout / time.Minute)
 	}
-	if c.JobTimeoutMinutes < 1 || c.JobTimeoutMinutes > 240 {
-		return fmt.Errorf("job_timeout_minutes must be between 1 and 240")
+	if c.JobTimeoutMinutes < 1 || c.JobTimeoutMinutes > int(MaxJobTimeout/time.Minute) {
+		return fmt.Errorf("job_timeout_minutes must be between 1 and %d", int(MaxJobTimeout/time.Minute))
 	}
 	if c.MaxGitHubContextBytes == 0 {
 		c.MaxGitHubContextBytes = DefaultMaxGitHubContextBytes

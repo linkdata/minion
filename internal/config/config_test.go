@@ -16,7 +16,7 @@ func TestCheckedInConfigIsSample(t *testing.T) {
 		len(cfg.Repositories) != 1 || cfg.Repositories[0].Name != "example-owner/example-repo" ||
 		cfg.Codex.Model != "" || cfg.Codex.ReasoningEffort != "" ||
 		cfg.Claude.Model != "" || cfg.Claude.Effort != "" ||
-		cfg.Main != "codex" || cfg.Adversarial != "" || cfg.CriticMaxRounds != 3 ||
+		cfg.Main != "codex" || cfg.Adversarial != "" || cfg.CriticMaxRounds != 5 || cfg.JobTimeoutMinutes != 240 ||
 		len(cfg.Commands) != 4 || len(cfg.AlwaysOnSkills) != 2 ||
 		cfg.MaxGitHubContextBytes != DefaultMaxGitHubContextBytes ||
 		cfg.AlwaysOnSkills[0] != defaultAntiInjectionSkill || cfg.AlwaysOnSkills[1] != defaultCavemanSkill {
@@ -360,5 +360,36 @@ func TestLoadRejectsLegacyCodexSkills(t *testing.T) {
 	}
 	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "unknown field") {
 		t.Fatalf("accepted legacy codex.skills: %v", err)
+	}
+}
+
+func TestValidateJobTimeoutMinutes(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		minutes   int
+		want      int
+		wantError bool
+	}{
+		{name: "default", want: 240},
+		{name: "minimum", minutes: 1, want: 1},
+		{name: "custom", minutes: 360, want: 360},
+		{name: "maximum", minutes: 1440, want: 1440},
+		{name: "negative", minutes: -1, wantError: true},
+		{name: "above maximum", minutes: 1441, wantError: true},
+		{name: "large", minutes: 1 << 30, wantError: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Config{BotLogin: "bot", JobTimeoutMinutes: tt.minutes, Repositories: []Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"review"}}}}
+			err := cfg.Validate(t.TempDir())
+			if tt.wantError {
+				if err == nil || !strings.Contains(err.Error(), "job_timeout_minutes") {
+					t.Fatalf("Validate() error=%v, want runtime validation error", err)
+				}
+				return
+			}
+			if err != nil || cfg.JobTimeoutMinutes != tt.want {
+				t.Fatalf("Validate() timeout=%d, error=%v; want %d", cfg.JobTimeoutMinutes, err, tt.want)
+			}
+		})
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/linkdata/minion/internal/command"
+	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/gitwork"
 	"github.com/linkdata/minion/internal/monitor"
@@ -154,10 +155,10 @@ func (e *Orchestrator) portableJob(ctx context.Context, p *Prepared, title, desc
 	}
 	budget := e.Timeout
 	if budget <= 0 {
-		budget = 30 * time.Minute
+		budget = config.DefaultJobTimeout
 	}
 	if deadline, ok := ctx.Deadline(); ok {
-		budget = time.Until(deadline)
+		budget = min(budget, time.Until(deadline))
 	}
 	settings := func(provider string, required []string) RoleSettings {
 		role := RoleSettings{Provider: provider, Skills: required, AlwaysOnSkills: e.AlwaysOnSkills}
@@ -220,8 +221,8 @@ func (e *Orchestrator) Publish(ctx context.Context, p *Prepared, result Result) 
 	var err error
 	switch request.Command.Action {
 	case command.Review:
-		if _, err := e.verifiedRepository(ctx, request.Repository); err != nil {
-			return err
+		if _, err = e.verifiedRepository(ctx, request.Repository); err != nil {
+			break
 		}
 		body := fmt.Sprintf("Automated review requested by @%s:\n\n%s\n\n%s", request.Source.Author.Login, inertModelOutput(result.Answer), request.Marker())
 		_, err = e.GitHub.CreatePullRequestReview(ctx, request.Repository.Name, request.Number, body, p.Job.Source.Head)

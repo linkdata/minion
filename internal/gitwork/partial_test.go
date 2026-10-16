@@ -50,7 +50,7 @@ func TestPartialClonePreflightsMetadataBeforeAnyBlobFetch(t *testing.T) {
 		checked = true
 		tree, err := localTreeMetadata(t, fixture.source)(ctx, sha)
 		if err == nil {
-			oversized := int64(maxCheckoutBytes + 1)
+			oversized := int64(workspace.MaxBytes + 1)
 			tree.Tree[0].Size = &oversized
 		}
 		return tree, err
@@ -97,7 +97,7 @@ func TestPartialSnapshotPreflightsMergeBaseAndHistoryDoesNotFetchOldBlobs(t *tes
 			if !blobMissing(t, checkout.Path(), blob) {
 				t.Fatal("merge-base blob fetched before metadata check")
 			}
-			oversized := int64(maxCheckoutBytes + 1)
+			oversized := int64(workspace.MaxBytes + 1)
 			tree.Tree[0].Size = &oversized
 		}
 		return tree, err

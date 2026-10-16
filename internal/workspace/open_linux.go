@@ -25,7 +25,14 @@ func openPath(name string, directory bool) (*os.File, error) {
 		return nil, err
 	}
 	flags := syscall.O_RDONLY | syscall.O_NOFOLLOW | syscall.O_NONBLOCK | syscall.O_CLOEXEC
-	fd, err := syscall.Open("/", flags|syscall.O_DIRECTORY, 0)
+	// syscall omits O_PATH on amd64; Linux uses this value on every supported architecture.
+	const oPath = 0x200000
+	parentFlags := oPath | syscall.O_DIRECTORY | syscall.O_NOFOLLOW | syscall.O_CLOEXEC
+	rootFlags := parentFlags
+	if abs == "/" {
+		rootFlags = flags | syscall.O_DIRECTORY
+	}
+	fd, err := syscall.Open("/", rootFlags, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -35,7 +42,9 @@ func openPath(name string, directory bool) (*os.File, error) {
 			continue
 		}
 		partFlags := flags
-		if i < len(parts)-1 || directory {
+		if i < len(parts)-1 {
+			partFlags = parentFlags
+		} else if directory {
 			partFlags |= syscall.O_DIRECTORY
 		}
 		next, openErr := syscall.Openat(fd, part, partFlags, 0)

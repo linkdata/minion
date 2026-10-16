@@ -92,7 +92,7 @@ func TestRunAIRevisionPreservesWorkAndBoundaries(t *testing.T) {
 					t.Fatal("round changed the checkout or shared deadline")
 				}
 				if request.provider == tt.main {
-					if request.writable == tt.reports || request.outputDir != outputDir || len(request.readOnlyDirs) != 0 || request.outputSchema != mainOutputSchema {
+					if request.reviewPhase != "" || request.writable == tt.reports || request.outputDir != outputDir || len(request.readOnlyDirs) != 0 || request.outputSchema != mainOutputSchema {
 						t.Fatalf("wrong main permissions: %+v", request)
 					}
 					switch calls {
@@ -136,15 +136,23 @@ func TestRunAIRevisionPreservesWorkAndBoundaries(t *testing.T) {
 						t.Fatalf("critic cannot inspect the untracked file: %q, %v", out, err)
 					}
 				}
-				priorAnswer, priorFeedback, notes := "", "", firstNotes
+				priorAnswer, priorFeedback, notes := "", "", ""
 				if calls == 4 {
 					priorAnswer, priorFeedback, notes = "first proposal", feedback, revisedNotes
-				} else if calls != 2 {
+					if request.reviewPhase != "verification" || request.round != 2 {
+						t.Fatalf("wrong verification metadata: %+v", request)
+					}
+				} else if calls != 2 && calls != 5 {
 					t.Fatalf("unexpected critic call %d", calls)
+				} else if request.reviewPhase != "full" || request.round != (calls+1)/3 {
+					t.Fatalf("wrong full-review metadata: %+v", request)
 				}
 				content, err := os.ReadFile(file)
 				if err != nil || request.prompt != criticPrompt(task, string(content), notes, priorAnswer, priorFeedback, outputDir) {
 					t.Fatalf("critic prompt lacks current task context: %q, %v", request.prompt, err)
+				}
+				if request.criticPrompt == nil || request.criticPrompt("Frozen task", "frozen-reports") != criticPrompt("Frozen task", string(content), notes, priorAnswer, priorFeedback, "frozen-reports") {
+					t.Fatal("critic prompt cannot bind to immutable source and report context")
 				}
 				if calls == 2 {
 					return aicli.Result{Answer: fmt.Sprintf(`{"approved":false,"feedback":%q}`, feedback)}, nil
@@ -152,8 +160,101 @@ func TestRunAIRevisionPreservesWorkAndBoundaries(t *testing.T) {
 				return aicli.Result{Answer: `{"approved":true,"feedback":""}`}, nil
 			}
 			answer, err := e.runAI(ctx, dir, task, !tt.reports, outputDir)
-			if err != nil || answer != "revised proposal" || calls != 4 {
+			if err != nil || answer != "revised proposal" || calls != 5 {
 				t.Fatalf("runAI() = %q, %v; calls = %d", answer, err, calls)
+			}
+		})
+	}
+}
+
+func TestRunAIFreshReviewFindingsUseRemainingRounds(t *testing.T) {
+	const firstFinding = "Fix the first defect."
+	const missedFinding = "A full review found an unchanged defect."
+	const privateNotes = "PRIVATE_DISPOSITION_SENTINEL"
+	const task = "Complete the selected task."
+	var calls []modelRun
+	e := &Runner{Adversarial: "claude", CriticMaxRounds: 3}
+	e.runModel = func(_ context.Context, request modelRun) (aicli.Result, error) {
+		calls = append(calls, request)
+		if request.role == "main" {
+			if request.round > 1 {
+				finding := firstFinding
+				if request.round == 3 {
+					finding = missedFinding
+				}
+				if !strings.Contains(request.prompt, quotedContext(finding)) {
+					t.Fatalf("revision lacks latest finding: %+v", request)
+				}
+			}
+			return aicli.Result{Answer: proposalJSON(fmt.Sprintf("candidate %d", request.round), privateNotes)}, nil
+		}
+		if request.reviewPhase == "full" {
+			if request.prompt != criticPrompt(task, fmt.Sprintf("candidate %d", request.round), "", "", "", "") || strings.Contains(request.prompt, privateNotes) || strings.Contains(request.prompt, firstFinding) || strings.Contains(request.prompt, missedFinding) {
+				t.Fatal("full review was seeded with prior findings or author dispositions")
+			}
+			feedback := firstFinding
+			if request.round == 2 {
+				feedback = missedFinding
+			} else if request.round == 3 {
+				return aicli.Result{Answer: `{"approved":true,"feedback":""}`}, nil
+			}
+			return aicli.Result{Answer: fmt.Sprintf(`{"approved":false,"feedback":%q}`, feedback)}, nil
+		}
+		if request.reviewPhase != "verification" || !strings.Contains(request.prompt, privateNotes) {
+			t.Fatalf("verification lacks private rationale: %+v", request)
+		}
+		return aicli.Result{Answer: `{"approved":true,"feedback":""}`}, nil
+	}
+	answer, err := e.runAI(context.Background(), t.TempDir(), task, true, "")
+	if err != nil || answer != "candidate 3" || len(calls) != 8 {
+		t.Fatalf("runAI() = %q, %v; calls=%+v", answer, err, calls)
+	}
+	want := []string{"main/1/", "critic/1/full", "main/2/", "critic/2/verification", "critic/2/full", "main/3/", "critic/3/verification", "critic/3/full"}
+	for i, call := range calls {
+		if got := fmt.Sprintf("%s/%d/%s", call.role, call.round, call.reviewPhase); got != want[i] {
+			t.Fatalf("call %d = %s; want %s", i, got, want[i])
+		}
+	}
+}
+
+func TestRunAINeverPublishesScopedApprovalAlone(t *testing.T) {
+	modelErr := errors.New("full review unavailable")
+	for _, tt := range []struct {
+		name, verdict string
+		failure       error
+		cancel        bool
+		wantCalls     int
+		wantError     error
+	}{
+		{name: "fresh finding at round cap", verdict: `{"approved":false,"feedback":"Previously missed defect."}`, wantCalls: 5, wantError: monitor.ErrTerminalJob},
+		{name: "invalid full verdict", verdict: "approved", wantCalls: 5, wantError: monitor.ErrTerminalJob},
+		{name: "full review failure", failure: modelErr, wantCalls: 5, wantError: modelErr},
+		{name: "cancel after verification", cancel: true, wantCalls: 4, wantError: context.Canceled},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			calls := 0
+			e := &Runner{Adversarial: "claude", CriticMaxRounds: 2}
+			e.runModel = func(_ context.Context, request modelRun) (aicli.Result, error) {
+				calls++
+				if request.role == "main" {
+					return aicli.Result{Answer: proposalJSON("unapproved candidate", "private notes")}, nil
+				}
+				if request.round == 1 {
+					return aicli.Result{Answer: `{"approved":false,"feedback":"Fix a defect."}`}, nil
+				}
+				if request.reviewPhase == "verification" {
+					if tt.cancel {
+						cancel()
+					}
+					return aicli.Result{Answer: `{"approved":true,"feedback":""}`}, nil
+				}
+				return aicli.Result{Answer: tt.verdict}, tt.failure
+			}
+			answer, err := e.runAI(ctx, t.TempDir(), "task", false, "")
+			if answer != "" || !errors.Is(err, tt.wantError) || calls != tt.wantCalls {
+				t.Fatalf("runAI() = %q, %v; calls=%d; want no answer, %v, %d calls", answer, err, calls, tt.wantError, tt.wantCalls)
 			}
 		})
 	}
@@ -172,7 +273,7 @@ func TestRunAIFailsWithoutReturningProposal(t *testing.T) {
 		wantError     error
 	}{
 		{name: "round limit", verdict: `{"approved":false,"feedback":"Repair the defect."}`, rounds: 2, wantCalls: 4, wantError: monitor.ErrTerminalJob},
-		{name: "default round limit", verdict: `{"approved":false,"feedback":"Repair the defect."}`, wantCalls: 6, wantError: monitor.ErrTerminalJob},
+		{name: "default round limit", verdict: `{"approved":false,"feedback":"Repair the defect."}`, wantCalls: 2 * config.DefaultCriticMaxRounds, wantError: monitor.ErrTerminalJob},
 		{name: "malformed verdict", verdict: "looks fine", wantCalls: 2, wantError: monitor.ErrTerminalJob},
 		{name: "duplicate approval", verdict: `{"approved":false,"approved":true,"feedback":""}`, wantCalls: 2, wantError: monitor.ErrTerminalJob},
 		{name: "main fails", failureCall: 1, wantCalls: 1, wantError: modelErr},
@@ -353,8 +454,12 @@ func TestCommentPublishesOnlyCriticApprovedResult(t *testing.T) {
 						if criticCalls == 1 {
 							return aicli.Result{Answer: `{"approved":false,"feedback":"Justify the unchanged result."}`}, nil
 						}
-						if !strings.Contains(request.prompt, quotedContext(privateNotes)) {
-							t.Fatal("critic did not receive private refutation")
+						if request.reviewPhase == "verification" {
+							if !strings.Contains(request.prompt, quotedContext(privateNotes)) {
+								t.Fatal("verification critic did not receive private refutation")
+							}
+						} else if strings.Contains(request.prompt, privateNotes) {
+							t.Fatal("fresh full critic received private refutation")
 						}
 					}
 					return aicli.Result{Answer: tt.verdict}, nil

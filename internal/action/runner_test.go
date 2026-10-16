@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -279,9 +280,11 @@ func TestRunnerKeepsCriticReadOnlyAndNotesPrivate(t *testing.T) {
 		WorkRoot: t.TempDir(),
 	}
 	calls := 0
+	var mainDir string
 	runner.runModel = func(_ context.Context, request modelRun) (aicli.Result, error) {
 		calls++
 		if request.role == "main" {
+			mainDir = request.dir
 			if request.outputSchema != mainOutputSchema || !request.writable {
 				t.Fatal("main lost proposal schema or write access")
 			}
@@ -297,9 +300,9 @@ func TestRunnerKeepsCriticReadOnlyAndNotesPrivate(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(request.dir, "added.bin"), []byte{0, 1, 2}, 0600); err != nil {
 				t.Fatal(err)
 			}
-			return aicli.Result{Answer: proposalJSON("public answer", "private rationale"), UsageComplete: true}, nil
+			return aicli.Result{Answer: proposalJSON("public answer", "UNPUBLISHED_AUTHOR_REASON"), UsageComplete: true}, nil
 		}
-		if request.role != "critic" || request.writable || request.outputSchema != criticOutputSchema || !strings.Contains(request.prompt, "private rationale") || len(request.readOnlyDirs) != 1 {
+		if request.role != "critic" || request.reviewPhase != "full" || request.dir == mainDir || request.writable || request.outputSchema != criticOutputSchema || strings.Contains(request.prompt, "UNPUBLISHED_AUTHOR_REASON") || len(request.readOnlyDirs) != 1 {
 			t.Fatalf("wrong critic boundary: %+v", request)
 		}
 		baseline := filepath.Join(request.readOnlyDirs[0], "base")
@@ -338,6 +341,56 @@ func TestRunnerKeepsCriticReadOnlyAndNotesPrivate(t *testing.T) {
 	result, err := runner.Run(context.Background(), job)
 	if err != nil || calls != 2 || result.Answer != "public answer" || len(result.Calls) != 2 || result.Calls[1].Role != "critic" || len(result.Changes) != 3 {
 		t.Fatalf("result = %+v, %v", result, err)
+	}
+}
+
+func TestRunnerRejectsCandidateChangedDuringCritic(t *testing.T) {
+	job := portableJob(command.Fix)
+	job.Critic = &RoleSettings{Provider: "claude"}
+	var mainDir string
+	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+		if request.role == "main" {
+			mainDir = request.dir
+			return aicli.Result{Answer: proposalJSON("Done.", "")}, nil
+		}
+		if err := os.WriteFile(filepath.Join(mainDir, "source.txt"), []byte("unreviewed change"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if data, err := os.ReadFile(filepath.Join(request.dir, "source.txt")); err != nil || string(data) != "source\n" {
+			t.Fatalf("frozen source changed: %q, %v", data, err)
+		}
+		return aicli.Result{Answer: `{"approved":true,"feedback":""}`}, nil
+	}}
+	result, err := runner.Run(context.Background(), job)
+	if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "changed during critic") || result.Answer != "" || len(result.Changes) != 0 {
+		t.Fatalf("unreviewed result released: %+v, %v", result, err)
+	}
+}
+
+func TestRunnerFixUsesOnlyOfflineGit(t *testing.T) {
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	marker := filepath.Join(bin, "network-command")
+	script := fmt.Sprintf("#!/bin/sh\nfor arg do\n case \"$arg\" in fetch|clone|push|remote|ls-remote) printf forbidden > '%s'; exit 77;; esac\ndone\nexec '%s' \"$@\"\n", marker, strings.ReplaceAll(realGit, "'", "'\\''"))
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+		if err := os.WriteFile(filepath.Join(request.dir, "source.txt"), []byte("changed"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		return aicli.Result{Answer: "Done."}, nil
+	}}
+	result, err := runner.Run(context.Background(), portableJob(command.Fix))
+	if err != nil || len(result.Changes) != 1 {
+		t.Fatalf("offline fix failed: %+v, %v", result, err)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("runner attempted remote Git: %v", err)
 	}
 }
 
@@ -385,7 +438,7 @@ func TestRunnerIgnoresWorkerGitMetadata(t *testing.T) {
 				return aicli.Result{Answer: "Changed source", UsageComplete: true}, nil
 			}}
 			result, err := runner.Run(context.Background(), portableJob(command.Fix))
-			if err != nil || len(result.Changes) != 1 || result.Changes[0].Path != "source.txt" || len(result.Diagnostics) != 1 || result.Diagnostics[0].Code != "git_metadata_ignored" {
+			if err != nil || len(result.Changes) != 1 || result.Changes[0].Path != "source.txt" {
 				t.Fatalf("metadata result = %+v, %v", result, err)
 			}
 			if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
@@ -412,58 +465,6 @@ func TestRunnerCanonicalizesTrustedWorkRoot(t *testing.T) {
 	}}
 	if _, err := runner.Run(context.Background(), portableJob(command.Comment)); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func TestRunnerHandlesSourceMetadataReadFailure(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root bypasses directory read permissions")
-	}
-	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
-		if err := os.Chmod(request.dir, 0000); err != nil {
-			t.Fatal(err)
-		}
-		return aicli.Result{Answer: "completed"}, nil
-	}}
-	if _, err := runner.Run(context.Background(), portableJob(command.Fix)); !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "inspect source metadata") {
-		t.Fatalf("metadata read failure = %v", err)
-	}
-}
-
-func TestWorkerGitMetadataDoesNotEnumerate(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root bypasses directory read permissions")
-	}
-	source := t.TempDir()
-	if err := os.WriteFile(filepath.Join(source, ".gIt"), []byte("untrusted metadata"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(source, 0111); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := os.Chmod(source, 0700); err != nil {
-			t.Error(err)
-		}
-	})
-	if _, err := os.ReadDir(source); !errors.Is(err, os.ErrPermission) {
-		t.Fatalf("enumeration should be denied: %v", err)
-	}
-	if found, err := workerGitMetadata(source); err != nil || !found {
-		t.Fatalf("fixed metadata probes = %t, %v", found, err)
-	}
-}
-
-func TestRunnerHandlesMissingSource(t *testing.T) {
-	transient := errors.New("transient")
-	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
-		if err := os.RemoveAll(request.dir); err != nil {
-			t.Fatal(err)
-		}
-		return aicli.Result{}, transient
-	}}
-	if _, err := runner.Run(context.Background(), portableJob(command.Fix)); !errors.Is(err, transient) || !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "inspect source metadata") {
-		t.Fatalf("missing source = %v", err)
 	}
 }
 

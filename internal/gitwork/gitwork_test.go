@@ -149,9 +149,6 @@ func TestRepositoryAndRefValidation(t *testing.T) {
 			t.Errorf("validateBranch(%q) should fail", branch)
 		}
 	}
-	if !validSHA(strings.Repeat("a", 40)) || validSHA("bad") || validSHA(strings.Repeat("g", 40)) {
-		t.Fatal("SHA validation failed")
-	}
 	if _, err := Clone(context.Background(), t.TempDir(), "../bad", "main", nil); err == nil {
 		t.Fatal("Clone accepted an invalid repository")
 	}
@@ -233,7 +230,7 @@ func TestCheckoutPullRequestBoundsAliasedTrees(t *testing.T) {
 		blocked   bool
 	}{
 		{name: "small tree", width: 4, depth: 2, blobBytes: 1024},
-		{name: "expanded bytes", width: 8, depth: 2, blobBytes: maxCheckoutBytes/64 + 1, blocked: true},
+		{name: "expanded bytes", width: 8, depth: 2, blobBytes: workspace.MaxBytes/64 + 1, blocked: true},
 		{name: "expanded paths", width: 11, depth: 4, blobBytes: 1, blocked: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -316,7 +313,7 @@ func TestSourceTreeRejectsIncompleteMetadata(t *testing.T) {
 		completeTree(sha, []github.GitTreeEntry{{Path: "x", Type: "blob", Mode: "100644"}}),
 		completeTree(sha, []github.GitTreeEntry{{Path: "x", Type: "blob", Mode: "100644", Size: &size}, {Path: "y", Type: "unknown"}}),
 	} {
-		if err := checkSourceTree(tree, sha); !errors.Is(err, ErrCheckoutTooLarge) {
+		if err := checkSourceTree(tree, sha); !errors.Is(err, ErrUnsupportedSource) {
 			t.Fatalf("metadata %+v: error = %v, want checkout refusal", tree, err)
 		}
 	}
@@ -332,7 +329,7 @@ func TestSourceTreeAcceptsSymlinksAndRejectsInvalidModes(t *testing.T) {
 		{Path: "wrong-gitlink-mode", Type: "commit", Mode: "100644"},
 	} {
 		tree := completeTree(sha, []github.GitTreeEntry{entry})
-		if err := checkSourceTree(tree, sha); !errors.Is(err, ErrCheckoutTooLarge) {
+		if err := checkSourceTree(tree, sha); !errors.Is(err, ErrUnsupportedSource) {
 			t.Errorf("entry %+v: error = %v, want checkout refusal", entry, err)
 		}
 	}
@@ -408,7 +405,7 @@ func TestCheckoutPullRequestPreflightDoesNotFetchMissingBlob(t *testing.T) {
 		t.Fatal("fixture did not omit the PR blob")
 	}
 	oversized := func(_ context.Context, sha string) (github.GitTree, error) {
-		size := int64(maxCheckoutBytes + 1)
+		size := int64(workspace.MaxBytes + 1)
 		return completeTree(sha, []github.GitTreeEntry{{Path: "new.dat", Type: "blob", Mode: "100644", Size: &size}}), nil
 	}
 	checkout.lookupTree = oversized
@@ -579,7 +576,7 @@ func TestCommitAndPushBoundsChanges(t *testing.T) {
 		{
 			name: "file count",
 			write: func(t *testing.T, path string) {
-				for i := 0; i <= maxChangedFiles; i++ {
+				for i := 0; i <= workspace.MaxChanges; i++ {
 					writeFile(t, filepath.Join(path, fmt.Sprintf("file-%03d.txt", i)), "x\n")
 				}
 			},
@@ -588,14 +585,14 @@ func TestCommitAndPushBoundsChanges(t *testing.T) {
 		{
 			name: "changed file size",
 			write: func(t *testing.T, path string) {
-				writeFile(t, filepath.Join(path, "large.txt"), strings.Repeat("x", maxChangedFileSize+1))
+				writeFile(t, filepath.Join(path, "large.txt"), strings.Repeat("x", workspace.MaxChangeBytes+1))
 			},
 			want: ErrChangedFileLarge,
 		},
 		{
 			name: "patch size",
 			write: func(t *testing.T, path string) {
-				writeFile(t, filepath.Join(path, "many-lines.txt"), strings.Repeat("x\n", maxChangedFileSize/2-100))
+				writeFile(t, filepath.Join(path, "many-lines.txt"), strings.Repeat("x\n", workspace.MaxChangeBytes/2-100))
 			},
 			want: ErrDiffTooLarge,
 		},
@@ -687,6 +684,9 @@ func newFixture(t *testing.T) gitFixture {
 	fixture.git("", "clone", "--no-checkout", "--branch", "main", fixture.remote, path)
 	fixture.git(path, "checkout", "--detach", "refs/remotes/origin/main")
 	fixture.checkout = &Checkout{path: path, url: fixture.remote, pushURL: fixture.remote, expectedHead: fixture.base, lookupTree: localTreeMetadata(t, path)}
+	if err := fixture.checkout.disableAttributes(); err != nil {
+		t.Fatal(err)
+	}
 	if err := fixture.checkout.recordConfig(); err != nil {
 		t.Fatal(err)
 	}

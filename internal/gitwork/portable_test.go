@@ -251,7 +251,7 @@ func TestSnapshotReusesValidatedTreesByCommit(t *testing.T) {
 	}
 }
 
-func TestSnapshotDeduplicatesOmittedPathsIgnoringCase(t *testing.T) {
+func TestSnapshotPreservesOmittedPathSpellingsAcrossRevisions(t *testing.T) {
 	fixture := newFixture(t)
 	if err := os.Symlink("/outside", filepath.Join(fixture.source, "Docs")); err != nil {
 		t.Fatal(err)
@@ -275,7 +275,7 @@ func TestSnapshotDeduplicatesOmittedPathsIgnoringCase(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot, err := checkout.Snapshot(context.Background(), false, true)
-	if err != nil || len(snapshot.Omitted) != 1 || snapshot.Omitted[0] != "docs" {
+	if err != nil || len(snapshot.Omitted) != 2 || snapshot.Omitted[0] != "docs" || snapshot.Omitted[1] != "Docs" {
 		t.Fatalf("omitted=%v error=%v", snapshot.Omitted, err)
 	}
 }
@@ -293,8 +293,8 @@ func TestPublishIgnoresDefaultGlobalExcludesAndAttributes(t *testing.T) {
 	fixture := newFixture(t)
 	ctx := context.Background()
 	attributes, err := runGit(ctx, fixture.checkout.Path(), "check-attr", "filter", "diff", "--", "notes.local")
-	if err != nil || strings.Contains(attributes, "probe") || strings.Contains(attributes, "unset") {
-		t.Fatalf("global attributes applied: %q error=%v", attributes, err)
+	if err != nil || attributes != "notes.local: filter: unset\nnotes.local: diff: unspecified" {
+		t.Fatalf("global attributes replaced controlled attributes: %q error=%v", attributes, err)
 	}
 	const branch = "minion/fix-global-excludes"
 	if err := fixture.checkout.NewBranch(ctx, branch); err != nil {
@@ -311,5 +311,87 @@ func TestPublishIgnoresDefaultGlobalExcludesAndAttributes(t *testing.T) {
 	actual, err := cmd.Output()
 	if err != nil || !bytes.Equal(actual, data) {
 		t.Fatalf("published bytes=%q error=%v", actual, err)
+	}
+}
+
+func TestControlledGitRejectsPortableMetadataVariants(t *testing.T) {
+	for _, name := range []string{".g\u200cit/hooks/post-checkout", "git~1/hooks/post-checkout", ".git:alternate/hooks/post-checkout"} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			ctx := context.Background()
+			if _, err := runGit(ctx, root, "init"); err != nil {
+				t.Fatal(err)
+			}
+			for _, key := range []string{"core.protectHFS", "core.protectNTFS"} {
+				if _, err := runGit(ctx, root, "config", key, "false"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.MkdirAll(filepath.Dir(filepath.Join(root, name)), 0700); err != nil {
+				t.Fatal(err)
+			}
+			writeFile(t, filepath.Join(root, name), "unsafe metadata alias")
+			if _, err := runGit(ctx, root, "add", "--all", "--", "."); err == nil || !strings.Contains(err.Error(), "invalid path") {
+				t.Fatalf("metadata alias %q staging error=%v", name, err)
+			}
+			output, err := runGit(ctx, root, "diff", "--cached", "--name-only")
+			if err != nil || output != "" {
+				t.Fatalf("rejected metadata was staged: %q, %v", output, err)
+			}
+		})
+	}
+}
+
+func TestSnapshotHistoryIgnoresUntrustedMailmap(t *testing.T) {
+	fixture := newFixture(t)
+	writeFile(t, filepath.Join(fixture.checkout.Path(), ".mailmap"), "Forged <forged@example.invalid> Test <test@example.invalid>\n")
+	fixture.git(fixture.checkout.Path(), "add", ".mailmap")
+	fixture.git(fixture.checkout.Path(), "commit", "-m", "untrusted author mapping")
+	fixture.git(fixture.checkout.Path(), "config", "log.mailmap", "true")
+	fixture.checkout.expectedHead = fixture.git(fixture.checkout.Path(), "rev-parse", "HEAD")
+	if err := fixture.checkout.recordConfig(); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := fixture.checkout.Snapshot(context.Background(), true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(snapshot.History, []byte("Forged")) || !bytes.Contains(snapshot.History, []byte("Test <test@example.invalid>")) {
+		t.Fatalf("mailmap rewrote history authors: %s", snapshot.History)
+	}
+}
+
+func TestSnapshotPreservesGitLegalSourceNames(t *testing.T) {
+	fixture := newFixture(t)
+	names := []string{"include/xt_connmark.h", "include/xt_CONNMARK.h", "Docs/a.md", "docs/b.md", `back\slash`}
+	for _, name := range names {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(fixture.checkout.Path(), name)), 0700); err != nil {
+			t.Fatal(err)
+		}
+		writeFile(t, filepath.Join(fixture.checkout.Path(), name), name)
+	}
+	fixture.git(fixture.checkout.Path(), "add", ".")
+	fixture.git(fixture.checkout.Path(), "commit", "-m", "Git-legal source names")
+	fixture.checkout.expectedHead = fixture.git(fixture.checkout.Path(), "rev-parse", "HEAD")
+	snapshot, err := fixture.checkout.Snapshot(context.Background(), false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	if err := os.Chmod(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := workspace.Materialize(root, snapshot.Files); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range names {
+		data, err := os.ReadFile(filepath.Join(root, name))
+		if err != nil || string(data) != name {
+			t.Fatalf("source %q data=%q, error=%v", name, data, err)
+		}
+	}
+	changes, err := workspace.Changes(context.Background(), root, snapshot.Files)
+	if err != nil || len(changes) != 0 {
+		t.Fatalf("unchanged source changes=%+v, error=%v", changes, err)
 	}
 }

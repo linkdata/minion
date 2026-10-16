@@ -799,6 +799,7 @@ func TestReviewMarksOnlyPostCodexPublicationFailure(t *testing.T) {
 	job := monitor.Job{Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2}, SubjectType: "PullRequest", Number: 7,
 		ID: strings.Repeat("a", 64), Command: command.Command{Name: "review", Action: command.Review}, Source: github.Item{Author: github.User{ID: 7, Login: "writer"}, Body: "@linkdataminion review\n\nCheck API compatibility."}}
 	repoFail := true
+	var failAfterModel bool
 	var codexRuns, postCalls int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -831,6 +832,7 @@ func TestReviewMarksOnlyPostCodexPublicationFailure(t *testing.T) {
 			WorkRoot: t.TempDir(),
 			RunCodex: func(_ context.Context, _ string, prompt string, _ bool, _ string) (codexcli.Result, error) {
 				codexRuns++
+				repoFail = failAfterModel
 				if !strings.Contains(prompt, fmt.Sprintf("Pull request title: %q", title)) || !strings.Contains(prompt, fmt.Sprintf("Pull request description: %q", description)) ||
 					strings.Contains(prompt, "\nRequest comment") || strings.Contains(prompt, "\u2028") {
 					t.Errorf("review prompt lacks an unspoofed data boundary: %q", prompt)
@@ -850,8 +852,14 @@ func TestReviewMarksOnlyPostCodexPublicationFailure(t *testing.T) {
 		t.Fatalf("pre-Codex outage: err=%v runs=%d", err, codexRuns)
 	}
 	repoFail = false
+	failAfterModel = true
 	err = executor.perform(context.Background(), job)
-	if !errors.Is(err, monitor.ErrPostModelPublication) || codexRuns != 1 || postCalls != 1 {
+	if !errors.Is(err, monitor.ErrPostModelPublication) || codexRuns != 1 || postCalls != 0 {
+		t.Fatalf("post-model repository outage: err=%v runs=%d posts=%d", err, codexRuns, postCalls)
+	}
+	repoFail, failAfterModel = false, false
+	err = executor.perform(context.Background(), job)
+	if !errors.Is(err, monitor.ErrPostModelPublication) || codexRuns != 2 || postCalls != 1 {
 		t.Fatalf("post-Codex outage: err=%v runs=%d posts=%d", err, codexRuns, postCalls)
 	}
 }

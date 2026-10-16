@@ -123,8 +123,36 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 			return result, err
 		}
 	}
+	outputDir := ""
+	var review *reviewSnapshot
+	closeReview := func() {
+		if review != nil {
+			if err := review.close(); err != nil {
+				result.Diagnostics = append(result.Diagnostics, Diagnostic{Code: "cleanup_failed", Message: "Critic snapshot cleanup failed; operator attention is required."})
+			}
+			review = nil
+		}
+	}
+	defer closeReview()
 	observe := configured.aroundModel
 	configured.aroundModel = func(ctx context.Context, request modelRun, next modelCall) (aicli.Result, error) {
+		closeReview()
+		if request.role == "critic" {
+			var err error
+			if review, err = freezeReviewSnapshot(ctx, workRoot, job, source, outputDir, index); err != nil {
+				return aicli.Result{}, fmt.Errorf("%w: freeze critic input: %w", monitor.ErrTerminalJob, err)
+			}
+			task, err := configured.actionPrompt(ctx, job, source, contextDir, outputDir)
+			if err != nil {
+				return aicli.Result{}, err
+			}
+			task += fmt.Sprintf("\n\nFor this review, inspect the frozen source at %q and frozen reports at %q. These are copies of the main execution source %q and reports %q. Original execution paths in the task and raw report metadata identify those originals; use the frozen copies for inspection. The original input baseline is unchanged.", review.source, review.outputDir, source, outputDir)
+			request.dir, request.prompt = review.source, request.criticPrompt(task, review.outputDir)
+			request.readOnlyDirs = nil
+			if review.outputDir != "" {
+				request.readOnlyDirs = []string{review.outputDir}
+			}
+		}
 		request.readOnlyDirs = append(append([]string(nil), request.readOnlyDirs...), contextDir)
 		settings := job.Main
 		if request.role == "critic" && job.Critic != nil {
@@ -137,10 +165,14 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 		} else {
 			call, err = next(ctx, request)
 		}
-		result.Calls = append(result.Calls, CallUsage{Provider: request.provider, Role: request.role, Round: request.round, Model: settings.Model, Effort: settings.Effort, Tokens: call.Tokens, Complete: call.UsageComplete})
+		result.Calls = append(result.Calls, CallUsage{Provider: request.provider, Role: request.role, Round: request.round, ReviewPhase: request.reviewPhase, Model: settings.Model, Effort: settings.Effort, Tokens: call.Tokens, Complete: call.UsageComplete})
+		if err == nil && review != nil {
+			if verificationErr := review.verify(ctx, job, source, outputDir, index); verificationErr != nil {
+				err = fmt.Errorf("%w: %w", monitor.ErrTerminalJob, verificationErr)
+			}
+		}
 		return call, err
 	}
-	outputDir := ""
 	if job.Action == command.SecurityAudit {
 		outputDir, err = os.MkdirTemp(workRoot, ".minion-reports-")
 		if err != nil {
@@ -163,20 +195,14 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 		return result, err
 	}
 	answer, runErr := configured.runAI(ctx, source, prompt, job.Action == command.Fix, outputDir)
-	if job.Action == command.Fix {
-		metadata, err := workerGitMetadata(source)
-		if err != nil {
-			return result, errors.Join(runErr, fmt.Errorf("%w: inspect source metadata: %w", monitor.ErrTerminalJob, err))
-		}
-		if metadata {
-			result.Diagnostics = append(result.Diagnostics, Diagnostic{Code: "git_metadata_ignored", Message: "Worker Git metadata at the source root was ignored."})
-		}
-	}
 	if runErr != nil {
 		return result, runErr
 	}
 	var changes []workspace.Change
-	if index != nil {
+	if review != nil {
+		err = review.verify(ctx, job, source, outputDir, index)
+		changes = review.changes
+	} else if index != nil {
 		changes, err = index.changes(ctx)
 	} else {
 		// Read-only byte canary: detect sandbox or runner regressions against supplied input.
@@ -192,7 +218,12 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 	}
 	if job.Action == command.SecurityAudit {
 		skill := configured.Codex.SecurityAuditSkill()
-		files, err := readAuditFiles(outputDir)
+		var files []workspace.File
+		if review != nil {
+			files = review.artifacts
+		} else {
+			files, err = readAuditFiles(outputDir)
+		}
 		if err != nil {
 			return result, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
 		}
@@ -214,25 +245,6 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 		return result, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
 	}
 	return result, nil
-}
-
-func workerGitMetadata(source string) (bool, error) {
-	info, err := os.Lstat(source)
-	if err != nil {
-		return false, err
-	}
-	if !info.IsDir() {
-		return false, errors.New("source root is not a directory")
-	}
-	// Fixed ASCII case probes avoid allocating a listing of unbounded ignored output.
-	for _, name := range []string{".git", ".giT", ".gIt", ".gIT", ".Git", ".GiT", ".GIt", ".GIT"} {
-		if _, err := os.Lstat(filepath.Join(source, name)); err == nil {
-			return true, nil
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return false, err
-		}
-	}
-	return false, nil
 }
 
 func (r *Runner) checkIndexIsolation(index string, grants ...string) error {
@@ -419,20 +431,12 @@ func collectPartialAuditArtifacts(outputDir string, job Job, skill string) ([]wo
 	var diagnostics []Diagnostic
 	total := 0
 	for _, name := range auditArtifacts {
-		limit := int64(maxAuditArtifactBytes)
-		if name == "REPORT.md" {
-			limit = maxOutputBytes
-		}
-		data, err := readAuditArtifact(filepath.Join(outputDir, name), limit, true)
+		data, err := readAuditArtifact(filepath.Join(outputDir, name), auditArtifactLimit(name), true)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
 		if err != nil {
 			diagnostics = append(diagnostics, Diagnostic{Code: "artifact_unavailable", Message: "Incomplete audit artifact " + name + " could not be safely collected."})
-			continue
-		}
-		if len(data) > maxAuditArtifactsBytes-total {
-			diagnostics = append(diagnostics, Diagnostic{Code: "artifact_limit", Message: "Incomplete audit artifacts exceed the retention byte limit."})
 			continue
 		}
 		file := workspace.File{Path: name, Mode: workspace.Regular, Data: data}
