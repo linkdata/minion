@@ -121,13 +121,14 @@ func TestRun(t *testing.T) {
 			reports := t.TempDir()
 			binary := fakeExecutable(t, "claude", `printf '%s\n' "$@" > "$0.args"
 pwd > "$0.cwd"
-printf '%s\n' "${GH_TOKEN-absent},${GITHUB_TOKEN-absent},${NODE_OPTIONS-absent}" > "$0.env"
+printf '%s\n' "${GH_TOKEN-absent},${GITHUB_TOKEN-absent},${NODE_OPTIONS-absent},${CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS-absent}" > "$0.env"
 cat > "$0.prompt"
 printf '%s\n' '`+successfulResult+`'
 `)
 			t.Setenv("GH_TOKEN", "dummy-token")
 			t.Setenv("GITHUB_TOKEN", "dummy-token")
 			t.Setenv("NODE_OPTIONS", "dummy-option")
+			t.Setenv("CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS", "600000")
 			result, err := Run(context.Background(), workspace, "Handle task", writable, "", config.ClaudeConfig{Model: "claude-test", Effort: "high", Skills: []string{skills.BuiltinAntiPromptInjection}, ReadOnlyDirs: []string{reports}})
 			if err != nil {
 				t.Fatal(err)
@@ -135,8 +136,8 @@ printf '%s\n' '`+successfulResult+`'
 			if result.Answer != "final answer" || !result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) {
 				t.Fatalf("result = %+v", result)
 			}
-			if readFile(t, binary+".env") != "absent,absent,absent\n" {
-				t.Fatal("unsafe environment reached Claude")
+			if readFile(t, binary+".env") != "absent,absent,absent,0\n" {
+				t.Fatal("unsafe or incorrect environment reached Claude")
 			}
 			args := strings.Split(strings.TrimSuffix(readFile(t, binary+".args"), "\n"), "\n")
 			values := map[string]string{}
@@ -208,12 +209,42 @@ func TestRunFailures(t *testing.T) {
 		{"empty", `{"type":"result","subtype":"success","result":" "}`},
 		{"denied", `{"type":"result","subtype":"success","result":"declined","permission_denials":[{}]}`},
 		{"duplicate", successfulResult + "\n" + successfulResult},
+		{"unfinished background task", `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"reviewer"}]}` + "\n" + successfulResult},
+		{"background completion without final answer", `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"reviewer"}]}` + "\n" + successfulResult + "\n" + `{"type":"system","subtype":"background_tasks_changed","tasks":[]}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fakeExecutable(t, "claude", "cat >/dev/null\ncat <<'RESULT'\n"+tc.output+"\nRESULT\n")
 			result, err := Run(context.Background(), t.TempDir(), "task", false, "", config.ClaudeConfig{})
 			if err == nil || result.Answer != "" || result.UsageComplete {
 				t.Fatalf("Run = %+v, %v", result, err)
+			}
+		})
+	}
+}
+
+func TestRunBackgroundWaitCeiling(t *testing.T) {
+	const diagnostic = "Background tasks still running 10m after the last turn (subagent reviewer); stopping them. Set CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 to wait indefinitely."
+	for _, tc := range []struct {
+		name, stderr, answer string
+		fails                bool
+	}{
+		{name: "native ceiling", stderr: diagnostic, answer: "final answer", fails: true},
+		{name: "other diagnostics", stderr: "prefix: " + diagnostic, answer: "final answer"},
+		{name: "answer text", answer: diagnostic},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			output := strings.Replace(successfulResult, "final answer", tc.answer, 1)
+			fakeExecutable(t, "claude", "cat >/dev/null\ncat <<'DIAGNOSTIC' >&2\n"+tc.stderr+"\nDIAGNOSTIC\ncat <<'RESULT'\n"+output+"\nRESULT\n")
+			result, err := Run(context.Background(), t.TempDir(), "task", false, "", config.ClaudeConfig{})
+			if (err != nil) != tc.fails || result.UsageComplete == tc.fails || result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) {
+				t.Fatalf("Run = %+v, %v", result, err)
+			}
+			if tc.fails {
+				if result.Answer != "" || !strings.Contains(err.Error(), "wait ceiling") {
+					t.Fatalf("ceiling returned an answer or lost its diagnostic: %+v, %v", result, err)
+				}
+			} else if result.Answer != tc.answer {
+				t.Fatalf("answer = %q, want %q", result.Answer, tc.answer)
 			}
 		})
 	}
@@ -227,6 +258,7 @@ func TestRunStructuredOutput(t *testing.T) {
 		fails        bool
 	}{
 		{"success", strings.TrimSuffix(successfulResult, "}") + `,"structured_output":` + structured + `}`, false},
+		{"final schema after background completion", `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"reviewer"}]}` + "\n" + successfulResult + "\n" + `{"type":"system","subtype":"background_tasks_changed","tasks":[]}` + "\n" + strings.TrimSuffix(successfulResult, "}") + `,"structured_output":` + structured + `}`, false},
 		{"missing", successfulResult, true},
 		{"null", strings.TrimSuffix(successfulResult, "}") + `,"structured_output":null}`, true},
 		{"failed", `{"type":"result","subtype":"error_max_structured_output_retries","is_error":true,"structured_output":` + structured + `}`, true},

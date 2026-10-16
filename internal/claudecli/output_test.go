@@ -29,6 +29,40 @@ func TestOutputFragments(t *testing.T) {
 	}
 }
 
+func TestOutputBackgroundTasks(t *testing.T) {
+	const pending = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"reviewer"}]}`
+	const empty = `{"type":"system","subtype":"background_tasks_changed","tasks":[]}`
+	for _, tc := range []struct {
+		name, before, after string
+		fails               bool
+	}{
+		{name: "unfinished before result", before: pending, fails: true},
+		{name: "unfinished after result", after: pending, fails: true},
+		{name: "completion before result", before: pending + "\n" + empty},
+		{name: "completion after result needs new answer", before: pending, after: empty, fails: true},
+		{name: "answer after completion", before: pending + "\n" + successfulResult + "\n" + empty},
+		{name: "work after result needs new answer", after: pending + "\n" + empty, fails: true},
+		{name: "answer after new work", before: successfulResult + "\n" + pending + "\n" + empty},
+		{name: "terminal history", before: `{"type":"system","subtype":"background_tasks_changed","tasks":[{"status":"completed"},{"status":"failed"},{"status":"stopped"}]}`},
+		{name: "active alongside history", after: `{"type":"system","subtype":"background_tasks_changed","tasks":[{"status":"completed"},{"status":"running"}]}`, fails: true},
+		{name: "optional task stopped", after: `{"type":"system","subtype":"task_notification","task_id":"server","status":"stopped"}`},
+		{name: "failed command recovered", before: `{"type":"system","subtype":"task_notification","task_id":"test","status":"failed"}`},
+		{name: "assistant text is not task state", after: `{"type":"assistant","subtype":"background_tasks_changed","tasks":[{"task_id":"reviewer"}]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cancelled := false
+			o := jsonlOutput{cancel: func() { cancelled = true }}
+			if _, err := o.Write([]byte(tc.before + "\n" + successfulResult + "\n" + tc.after + "\n")); err != nil {
+				t.Fatal(err)
+			}
+			o.finish()
+			if (o.err != nil || !o.completed) != tc.fails || cancelled != (o.err != nil) || o.result.UsageComplete == tc.fails || o.result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) {
+				t.Fatalf("output = %+v, error %v, cancelled %v", o.result, o.err, cancelled)
+			}
+		})
+	}
+}
+
 func TestOutputLimits(t *testing.T) {
 	for _, tc := range []struct {
 		name string

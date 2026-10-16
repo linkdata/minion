@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
@@ -71,5 +72,26 @@ func TestRunnerMaterializationFailureIsTerminalBeforeModels(t *testing.T) {
 	}}
 	if _, err := runner.Run(context.Background(), job); !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "materialize source") {
 		t.Fatalf("materialize=%v", err)
+	}
+}
+
+func TestRunnerEnforcesSuppliedRuntimeBudget(t *testing.T) {
+	parent, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	job := portableJob(command.Comment)
+	job.RuntimeBudget = 100 * time.Millisecond
+	calls := 0
+	runner := Runner{WorkRoot: t.TempDir(), runModel: func(ctx context.Context, _ modelRun) (aicli.Result, error) {
+		calls++
+		deadline, ok := ctx.Deadline()
+		if !ok || time.Until(deadline) > job.RuntimeBudget {
+			t.Fatalf("model context did not apply the supplied %s budget: deadline=%v present=%t", job.RuntimeBudget, deadline, ok)
+		}
+		<-ctx.Done()
+		return aicli.Result{}, ctx.Err()
+	}}
+	result, err := runner.Run(parent, job)
+	if !errors.Is(err, context.DeadlineExceeded) || parent.Err() != nil || calls != 1 || len(result.Calls) != 1 || result.Answer != "" {
+		t.Fatalf("runtime budget: result=%+v calls=%d parent=%v error=%v", result, calls, parent.Err(), err)
 	}
 }

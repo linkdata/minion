@@ -44,8 +44,11 @@ func (u eventUsage) tokens() (tokens usage.Tokens, valid bool) {
 }
 
 type event struct {
-	Type              string            `json:"type"`
-	Subtype           string            `json:"subtype"`
+	Type    string `json:"type"`
+	Subtype string `json:"subtype"`
+	Tasks   []struct {
+		Status string `json:"status"`
+	} `json:"tasks"`
 	IsError           bool              `json:"is_error"`
 	Result            string            `json:"result"`
 	StructuredOutput  json.RawMessage   `json:"structured_output"`
@@ -96,6 +99,7 @@ type jsonlOutput struct {
 	err        error
 	completed  bool
 	structured bool
+	pending    int
 	result     aicli.Result
 }
 
@@ -143,6 +147,12 @@ func (o *jsonlOutput) finish() {
 	if o.err == nil && len(o.line) != 0 {
 		o.finishLine()
 	}
+	if o.err == nil && o.pending != 0 {
+		o.fail(errors.New("Claude exited with background tasks still running"))
+	}
+	if !o.completed {
+		o.result.UsageComplete = false
+	}
 }
 
 func (o *jsonlOutput) finishLine() {
@@ -162,6 +172,20 @@ func (o *jsonlOutput) finishLine() {
 		return
 	}
 	o.line = o.line[:0]
+	if e.Type == "system" && e.Subtype == "background_tasks_changed" {
+		o.pending = 0
+		for _, task := range e.Tasks {
+			switch task.Status {
+			case "completed", "failed", "stopped":
+			default:
+				o.pending++
+			}
+		}
+		if o.pending != 0 {
+			o.completed = false
+			o.result.Answer = ""
+		}
+	}
 	if e.Type == "user" && len(e.Message) != 0 {
 		var message struct {
 			Content []struct {
@@ -190,7 +214,6 @@ func (o *jsonlOutput) finishLine() {
 		o.fail(errors.New("duplicate Claude result"))
 		return
 	}
-	o.completed = true
 	o.result.Tokens, o.result.UsageComplete = e.tokens()
 	if e.IsError || e.Subtype != "success" {
 		o.fail(fmt.Errorf("result failed: %s", limitText(e.Subtype)))
@@ -198,6 +221,10 @@ func (o *jsonlOutput) finishLine() {
 	}
 	if len(e.PermissionDenials) != 0 {
 		o.fail(errors.New("task encountered denied tool permissions"))
+		return
+	}
+	// Print mode can emit provisional turn results while background work runs.
+	if o.pending != 0 {
 		return
 	}
 	if o.structured {
@@ -210,6 +237,7 @@ func (o *jsonlOutput) finishLine() {
 	} else {
 		o.result.Answer = e.Result
 	}
+	o.completed = true
 }
 
 func toolSandboxFailure(content json.RawMessage) bool {

@@ -18,6 +18,11 @@ func openDirectory(name string) (*os.File, error) {
 	return openPath(name, true)
 }
 
+func singleLink(info os.FileInfo) bool {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	return ok && stat.Nlink == 1
+}
+
 // Pin each parent directory before opening its child; a worker may still rename paths.
 func openPath(name string, directory bool) (*os.File, error) {
 	abs, err := filepath.Abs(name)

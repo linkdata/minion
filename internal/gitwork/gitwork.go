@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/cleanup"
@@ -327,7 +328,7 @@ func (c *Checkout) CommitAndPush(ctx context.Context, branch, botLogin, message 
 	if _, err := runGit(ctx, c.path, "add", "--all", "--", "."); err != nil {
 		return err
 	}
-	paths, err := c.stagedPaths(ctx)
+	paths, err := c.stagedPaths(ctx, "")
 	if err != nil {
 		return err
 	}
@@ -336,6 +337,12 @@ func (c *Checkout) CommitAndPush(ctx context.Context, branch, botLogin, message 
 	}
 	if len(paths) > workspace.MaxChanges {
 		return fmt.Errorf("%w: %d > %d", ErrTooManyFiles, len(paths), workspace.MaxChanges)
+	}
+	// Deleted paths may now be directories or lie beneath replacement files.
+	// They contribute no new blob, so exclude them before examining the worktree.
+	paths, err = c.stagedPaths(ctx, "d")
+	if err != nil {
+		return err
 	}
 	if err := c.checkChangedFileSizes(paths); err != nil {
 		return err
@@ -359,9 +366,13 @@ func (c *Checkout) CommitAndPush(ctx context.Context, branch, botLogin, message 
 	return c.recordConfig()
 }
 
-func (c *Checkout) stagedPaths(ctx context.Context) ([]string, error) {
+func (c *Checkout) stagedPaths(ctx context.Context, filter string) ([]string, error) {
 	const limit = (workspace.MaxChanges + 1) * (workspace.MaxPathBytes + 128)
-	data, truncated, err := c.boundedGit(ctx, limit, true, "diff", "--cached", "--name-only", "-z", "--no-renames", "--no-ext-diff")
+	args := []string{"diff", "--cached", "--name-only", "-z", "--no-renames", "--no-ext-diff"}
+	if filter != "" {
+		args = append(args, "--diff-filter="+filter)
+	}
+	data, truncated, err := c.boundedGit(ctx, limit, true, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -389,9 +400,6 @@ func (c *Checkout) checkChangedFileSizes(paths []string) error {
 			return fmt.Errorf("unsafe changed path %q", path)
 		}
 		info, err := os.Lstat(filepath.Join(c.path, filepath.FromSlash(path)))
-		if errors.Is(err, os.ErrNotExist) {
-			continue // A deletion contributes no new blob.
-		}
 		if err != nil {
 			return fmt.Errorf("stat changed file %q: %w", path, err)
 		}
@@ -466,6 +474,8 @@ func runGitTo(ctx context.Context, dir string, stdout io.Writer, args ...string)
 
 func runGitInputTo(ctx context.Context, dir string, stdin io.Reader, stdout io.Writer, args ...string) error {
 	gitArgs := []string{
+		"-c", "user.name=Minion",
+		"-c", "user.email=minion@localhost",
 		"-c", "credential.helper=",
 		"-c", credentialHelperConfig(credentialHelperGH),
 		"-c", "core.hooksPath=/dev/null",
@@ -479,6 +489,8 @@ func runGitInputTo(ctx context.Context, dir string, stdin io.Reader, stdout io.W
 		"-c", "submodule.recurse=false",
 	}
 	cmd := exec.CommandContext(ctx, "git", append(gitArgs, args...)...)
+	configureGitCancellation(cmd)
+	cmd.WaitDelay = 2 * time.Second
 	cmd.Dir = dir
 	cmd.Env = cleanGitEnvironment()
 	cmd.Stdin = stdin

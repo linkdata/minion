@@ -35,6 +35,46 @@ func TestCollectionRefusesSymlinkParents(t *testing.T) {
 	}
 }
 
+func TestCollectionRefusesHardlinkedFiles(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside")
+	const contents = "outside file contents"
+	if err := os.WriteFile(outside, []byte(contents), 0600); err != nil {
+		t.Fatal(err)
+	}
+	name := filepath.Join(root, "file")
+	if err := os.Link(outside, name); err != nil {
+		t.Fatal(err)
+	}
+	for _, check := range []struct {
+		name string
+		read func() (int, error)
+	}{
+		{"regular file", func() (int, error) { data, err := ReadRegular(name, MaxBytes); return len(data), err }},
+		{"source scan", func() (int, error) {
+			changes, err := Changes(context.Background(), root, nil)
+			return len(changes), err
+		}},
+		{"selected changes", func() (int, error) {
+			changes, err := ReadChanges(context.Background(), root, []Change{{Path: "file"}})
+			return len(changes), err
+		}},
+	} {
+		t.Run(check.name, func(t *testing.T) {
+			count, err := check.read()
+			if count != 0 || err == nil || !strings.Contains(err.Error(), "exactly one hard link") {
+				t.Fatalf("hardlink collection returned %d entries/bytes, error=%v", count, err)
+			}
+		})
+	}
+	if err := os.Remove(outside); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := ReadRegular(name, MaxBytes); err != nil || string(data) != contents {
+		t.Fatalf("single remaining link=%q,%v", data, err)
+	}
+}
+
 func TestWalkRefusesDirectoryReplacedAfterQueueing(t *testing.T) {
 	root, outside := t.TempDir(), t.TempDir()
 	parent := filepath.Join(root, "parent")

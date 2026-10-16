@@ -172,6 +172,8 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	result = output.result
 	if ctx.Err() != nil {
 		err = ctx.Err()
+	} else if backgroundWaitCeiling(diagnostics.String()) {
+		err = errors.New("Claude stopped background tasks after its wait ceiling")
 	} else if output.err != nil {
 		err = output.err
 	} else if err != nil {
@@ -185,6 +187,15 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 		return result, fmt.Errorf("claude: %w", err)
 	}
 	return result, nil
+}
+
+func backgroundWaitCeiling(diagnostics string) bool {
+	for _, line := range strings.Split(diagnostics, "\n") {
+		if strings.HasPrefix(line, "Background tasks still running ") && strings.HasSuffix(line, "; stopping them. Set CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 to wait indefinitely.") {
+			return true
+		}
+	}
+	return false
 }
 
 func arguments(policy string) []string {
@@ -357,6 +368,8 @@ func childEnvironment(env []string, runtimeDir, cacheDir, authDir string) ([]str
 	// Keep runtime and cache paths inside the sandbox write grants.
 	return append(
 		clean,
+		// The application context owns runtime limits, including background work.
+		"CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0",
 		"CLAUDE_CODE_TMPDIR="+filepath.Join(runtimeDir, "tmp"),
 		"TMPDIR="+runtimeDir, "TMP="+runtimeDir, "TEMP="+runtimeDir, "GOCACHE="+cacheDir,
 	), nil

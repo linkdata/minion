@@ -306,7 +306,7 @@ func (c *Checkout) Import(ctx context.Context, expectedHead string, changes []wo
 	if _, err := runGit(ctx, c.path, "add", "--all", "--", "."); err != nil {
 		return fmt.Errorf("stage imported changes: %w", err)
 	}
-	staged, err := c.stagedPaths(ctx)
+	staged, err := c.stagedPaths(ctx, "")
 	if err != nil {
 		return err
 	}

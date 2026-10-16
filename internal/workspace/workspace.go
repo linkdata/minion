@@ -580,7 +580,7 @@ func Apply(root string, changes []Change) error {
 	return nil
 }
 
-// ReadRegular opens one bounded regular file without following any path symlinks.
+// ReadRegular opens one bounded, singly linked regular file without following path symlinks.
 func ReadRegular(name string, limit int64) ([]byte, error) {
 	data, _, err := readFile(name, limit)
 	return data, err
@@ -602,6 +602,9 @@ func readFile(name string, limit int64) (data []byte, info fs.FileInfo, resultEr
 	if !opened.Mode().IsRegular() || opened.Size() < 0 || opened.Size() > limit {
 		return nil, nil, errors.New("file is not regular or exceeds byte limit")
 	}
+	if !singleLink(opened) {
+		return nil, nil, errors.New("file must have exactly one hard link")
+	}
 	data, err = io.ReadAll(io.LimitReader(f, limit+1))
 	if err != nil {
 		return nil, nil, err
@@ -609,6 +612,9 @@ func readFile(name string, limit int64) (data []byte, info fs.FileInfo, resultEr
 	after, err := f.Stat()
 	if err != nil {
 		return nil, nil, err
+	}
+	if !singleLink(after) {
+		return nil, nil, errors.New("file hard links changed while reading")
 	}
 	if int64(len(data)) > limit || int64(len(data)) != opened.Size() || after.Size() != opened.Size() || after.Mode() != opened.Mode() || !after.ModTime().Equal(opened.ModTime()) {
 		return nil, nil, errors.New("file changed or exceeded limit while reading")

@@ -104,7 +104,7 @@ func TestImportRejectsGitMetadataAliasesAtStaging(t *testing.T) {
 			if !errors.Is(err, ErrUnsupportedSource) || !strings.Contains(err.Error(), "invalid path") {
 				t.Fatalf("alias %q import error=%v", name, err)
 			}
-			paths, err := fixture.checkout.stagedPaths(context.Background())
+			paths, err := fixture.checkout.stagedPaths(context.Background(), "")
 			if err != nil || len(paths) != 0 {
 				t.Fatalf("rejected alias staged=%v error=%v", paths, err)
 			}

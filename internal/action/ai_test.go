@@ -208,6 +208,49 @@ func TestRunAIFreshReviewFindingsUseRemainingRounds(t *testing.T) {
 	}
 }
 
+func TestRunAIVerificationRejectionFeedsNextRevision(t *testing.T) {
+	const firstFinding = "Repair the first defect."
+	const verificationFinding = "The proposed correction still misses the empty input."
+	var calls []modelRun
+	runner := Runner{runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+		calls = append(calls, request)
+		if request.role == "main" {
+			if request.round == 3 && (!strings.Contains(request.prompt, quotedContext(verificationFinding)) || !strings.Contains(request.prompt, quotedContext("candidate 2"))) {
+				t.Fatal("third revision lost the rejected correction or verification feedback")
+			}
+			return aicli.Result{Answer: proposalJSON(fmt.Sprintf("candidate %d", request.round), "private rationale")}, nil
+		}
+		switch request.round {
+		case 1:
+			return aicli.Result{Answer: fmt.Sprintf(`{"approved":false,"feedback":%q}`, firstFinding)}, nil
+		case 2:
+			if request.reviewPhase != "verification" {
+				t.Fatal("rejected verification was followed by a full review")
+			}
+			return aicli.Result{Answer: fmt.Sprintf(`{"approved":false,"feedback":%q}`, verificationFinding)}, nil
+		}
+		if request.reviewPhase == "verification" {
+			for _, want := range []string{quotedContext(verificationFinding), quotedContext("candidate 2")} {
+				if !strings.Contains(request.prompt, want) {
+					t.Fatalf("third verification lost prior correction context %q", want)
+				}
+			}
+		}
+		return aicli.Result{Answer: `{"approved":true,"feedback":""}`}, nil
+	}}
+	job := Job{Main: RoleSettings{Provider: "codex"}, Critic: &RoleSettings{Provider: "claude"}, CriticMaxRounds: 3}
+	answer, err := runner.runAI(context.Background(), job, t.TempDir(), "selected task", false, "")
+	want := []string{"main/1/", "critic/1/full", "main/2/", "critic/2/verification", "main/3/", "critic/3/verification", "critic/3/full"}
+	if err != nil || answer != "candidate 3" || len(calls) != len(want) {
+		t.Fatalf("verification rejection: answer=%q calls=%+v error=%v", answer, calls, err)
+	}
+	for i, request := range calls {
+		if got := fmt.Sprintf("%s/%d/%s", request.role, request.round, request.reviewPhase); got != want[i] {
+			t.Fatalf("call %d=%q want%q", i, got, want[i])
+		}
+	}
+}
+
 func TestRunAINeverPublishesScopedApprovalAlone(t *testing.T) {
 	modelErr := errors.New("full review unavailable")
 	for _, tt := range []struct {
