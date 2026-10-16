@@ -23,6 +23,10 @@ type sourceEntry struct {
 
 // sourceTree checks API metadata before any partial-clone blob is requested.
 func (c *Checkout) sourceTree(ctx context.Context, ref string) ([]sourceEntry, error) {
+	key := strings.ToLower(ref)
+	if entries, ok := c.sourceTrees[key]; ok {
+		return entries, nil
+	}
 	if c.lookupTree == nil {
 		return nil, errors.New("source tree metadata lookup is missing")
 	}
@@ -34,11 +38,19 @@ func (c *Checkout) sourceTree(ctx context.Context, ref string) ([]sourceEntry, e
 	if err != nil {
 		return nil, fmt.Errorf("load source tree metadata: %w", err)
 	}
-	return c.sourceEntries(ctx, ref, tree, treeSHA)
+	entries, err := c.sourceEntries(ctx, ref, tree, treeSHA)
+	if err != nil {
+		return nil, err
+	}
+	if c.sourceTrees == nil {
+		c.sourceTrees = make(map[string][]sourceEntry)
+	}
+	c.sourceTrees[key] = entries
+	return entries, nil
 }
 
 func (c *Checkout) sourceEntries(ctx context.Context, ref string, tree github.GitTree, treeSHA string) ([]sourceEntry, error) {
-	if err := checkSourceTree(tree, treeSHA, true); err != nil {
+	if err := checkSourceTree(tree, treeSHA); err != nil {
 		return nil, err
 	}
 	if len(tree.Tree) > maxWorktreeEntries {
@@ -195,12 +207,13 @@ func (c *Checkout) Snapshot(ctx context.Context, history, pull bool) (s workspac
 		}
 		seen := map[string]bool{}
 		for _, name := range s.Omitted {
-			seen[name] = true
+			seen[strings.ToLower(name)] = true
 		}
 		for _, name := range omitted {
-			if !seen[name] {
+			key := strings.ToLower(name)
+			if !seen[key] {
 				s.Omitted = append(s.Omitted, name)
-				seen[name] = true
+				seen[key] = true
 			}
 		}
 	}
@@ -257,7 +270,7 @@ func (c *Checkout) disableAttributes() error {
 	if err := os.MkdirAll(filepath.Join(c.path, ".git", "info"), 0700); err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(c.path, ".git", "info", "attributes"), []byte(checkoutAttributes), 0600)
+	return os.WriteFile(filepath.Join(c.path, ".git", "info", "attributes"), []byte(workspace.GitAttributes), 0600)
 }
 
 type boundedGitWriter struct {

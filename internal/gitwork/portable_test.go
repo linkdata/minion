@@ -6,10 +6,12 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -89,7 +91,7 @@ func TestSnapshotPreservesPRDeletedBinaryAndModeContext(t *testing.T) {
 	fixture.git(fixture.source, "commit", "-m", "base advanced after fork")
 	baseTip := fixture.git(fixture.source, "rev-parse", "HEAD")
 	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/heads/main")
-	if err := fixture.checkout.CheckoutPullRequest(context.Background(), 7, "main", head, localTreeMetadata(t, fixture.source)); err != nil {
+	if err := fixture.checkout.CheckoutPullRequest(context.Background(), 7, "main", head); err != nil {
 		t.Fatal(err)
 	}
 	snapshot, err := fixture.checkout.Snapshot(context.Background(), false, true)
@@ -207,5 +209,107 @@ func TestCloneOmitsDefaultBranchSymlinkFromSnapshot(t *testing.T) {
 		if file.Path == "escape" {
 			t.Fatal("symlink content exported")
 		}
+	}
+}
+
+func TestSnapshotReusesValidatedTreesByCommit(t *testing.T) {
+	fixture := newFixture(t)
+	lookups := 0
+	lookup := localTreeMetadata(t, fixture.source)
+	checkout, err := cloneFromURL(context.Background(), t.TempDir(), fixture.remote, "main", func(ctx context.Context, sha string) (github.GitTree, error) {
+		lookups++
+		return lookup(ctx, sha)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer checkout.Close()
+	for i := 0; i < 2; i++ {
+		if _, err := checkout.Snapshot(context.Background(), false, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if lookups != 1 {
+		t.Fatalf("default clone/snapshot metadata lookups=%d, want 1", lookups)
+	}
+	writeFile(t, filepath.Join(fixture.source, "README.md"), "PR source\n")
+	fixture.git(fixture.source, "add", ".")
+	fixture.git(fixture.source, "commit", "-m", "PR source")
+	head := fixture.git(fixture.source, "rev-parse", "HEAD")
+	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/pull/7/head")
+	if err := checkout.CheckoutPullRequest(context.Background(), 7, "main", head); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		snapshot, err := checkout.Snapshot(context.Background(), false, true)
+		if err != nil || snapshot.Head != head || string(snapshot.Files[0].Data) != "PR source\n" {
+			t.Fatalf("snapshot=%+v error=%v", snapshot, err)
+		}
+	}
+	if lookups != 2 {
+		t.Fatalf("PR checkout/snapshot metadata lookups=%d, want 2 total", lookups)
+	}
+}
+
+func TestSnapshotDeduplicatesOmittedPathsIgnoringCase(t *testing.T) {
+	fixture := newFixture(t)
+	if err := os.Symlink("/outside", filepath.Join(fixture.source, "Docs")); err != nil {
+		t.Fatal(err)
+	}
+	fixture.git(fixture.source, "add", ".")
+	fixture.git(fixture.source, "commit", "-m", "base symlink")
+	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/heads/main")
+	checkout, err := cloneFromURL(context.Background(), t.TempDir(), fixture.remote, "main", localTreeMetadata(t, fixture.source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer checkout.Close()
+	if err := os.Rename(filepath.Join(fixture.source, "Docs"), filepath.Join(fixture.source, "docs")); err != nil {
+		t.Fatal(err)
+	}
+	fixture.git(fixture.source, "add", ".")
+	fixture.git(fixture.source, "commit", "-m", "rename symlink")
+	head := fixture.git(fixture.source, "rev-parse", "HEAD")
+	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/pull/7/head")
+	if err := checkout.CheckoutPullRequest(context.Background(), 7, "main", head); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := checkout.Snapshot(context.Background(), false, true)
+	if err != nil || len(snapshot.Omitted) != 1 || snapshot.Omitted[0] != "docs" {
+		t.Fatalf("omitted=%v error=%v", snapshot.Omitted, err)
+	}
+}
+
+func TestPublishIgnoresDefaultGlobalExcludesAndAttributes(t *testing.T) {
+	home := t.TempDir()
+	gitConfig := filepath.Join(home, ".config", "git")
+	if err := os.MkdirAll(gitConfig, 0700); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(gitConfig, "ignore"), "notes.local\n")
+	writeFile(t, filepath.Join(gitConfig, "attributes"), "notes.local filter=probe -diff\n")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	fixture := newFixture(t)
+	ctx := context.Background()
+	attributes, err := runGit(ctx, fixture.checkout.Path(), "check-attr", "filter", "diff", "--", "notes.local")
+	if err != nil || strings.Contains(attributes, "probe") || strings.Contains(attributes, "unset") {
+		t.Fatalf("global attributes applied: %q error=%v", attributes, err)
+	}
+	const branch = "minion/fix-global-excludes"
+	if err := fixture.checkout.NewBranch(ctx, branch); err != nil {
+		t.Fatal(err)
+	}
+	data := []byte("exact source\r\n")
+	if err := fixture.checkout.Import(ctx, fixture.base, []workspace.Change{{Path: "notes.local", Mode: workspace.Regular, Data: data}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.checkout.CommitAndPush(ctx, branch, "bot", "include new source", func(string) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("git", "--git-dir="+fixture.remote, "show", "refs/heads/"+branch+":notes.local")
+	actual, err := cmd.Output()
+	if err != nil || !bytes.Equal(actual, data) {
+		t.Fatalf("published bytes=%q error=%v", actual, err)
 	}
 }

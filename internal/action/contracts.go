@@ -40,6 +40,7 @@ type RoleSettings struct {
 	AlwaysOnSkills []string `json:"always_on_skills,omitempty"`
 }
 
+const maxActionTitleBytes = 1 << 20
 const maxAuditArtifactBytes = 5 << 20
 const maxAuditArtifactsBytes = 7 * maxAuditArtifactBytes
 
@@ -188,7 +189,7 @@ func (j Job) Validate() error {
 	default:
 		return errors.New("unsupported action")
 	}
-	if !boundedText(j.Title, workspace.MaxContextBytes) || !boundedText(j.Description, workspace.MaxBytes) || !boundedText(j.Notes, workspace.MaxBytes) || len(j.Title)+len(j.Description)+len(j.Notes) > workspace.MaxBytes {
+	if !boundedText(j.Title, maxActionTitleBytes) || !boundedText(j.Description, workspace.MaxBytes) || !boundedText(j.Notes, workspace.MaxBytes) || len(j.Title)+len(j.Description)+len(j.Notes) > workspace.MaxBytes {
 		return errors.New("action text exceeds limits")
 	}
 	if err := j.Main.validate(); err != nil {
@@ -232,6 +233,21 @@ func (r Result) validate(j Job, complete bool) error {
 		return errors.New("read-only action returned source changes")
 	}
 	if err := workspace.ValidateChanges(r.Changes); err != nil {
+		return err
+	}
+	omittedPaths := make([]string, len(j.Source.Omitted))
+	for i, name := range j.Source.Omitted {
+		omittedPaths[i] = strings.ToLower(name)
+	}
+	for _, change := range r.Changes {
+		name := strings.ToLower(change.Path)
+		for i, path := range omittedPaths {
+			if name == path || strings.HasPrefix(name, path+"/") || strings.HasPrefix(path, name+"/") {
+				return fmt.Errorf("action change %q overlaps omitted source path %q", change.Path, j.Source.Omitted[i])
+			}
+		}
+	}
+	if err := workspace.ValidateChangedPaths(j.Source.Files, r.Changes); err != nil {
 		return err
 	}
 	if j.Action != command.SecurityAudit && len(r.Artifacts) != 0 {

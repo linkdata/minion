@@ -57,7 +57,7 @@ func FuzzRequesterNotesContext(f *testing.F) {
 	f.Fuzz(func(t *testing.T, note string) {
 		body := "@linkdataminion review\n" + note
 		job := monitor.Job{Source: github.Item{Body: body}}
-		got := requestNotesContext(job)
+		got := notesContext(requestNotes(job))
 		normalized := strings.ReplaceAll(strings.ReplaceAll(note, "\r\n", "\n"), "\r", "\n")
 		want := strings.TrimSpace(normalized)
 		if want == "" {

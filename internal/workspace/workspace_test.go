@@ -116,6 +116,88 @@ func TestRejectUnsafeFilesAndChanges(t *testing.T) {
 	}
 }
 
+func TestRejectDirectorySpellingCollisions(t *testing.T) {
+	for i, paths := range [][]string{
+		{"Foo/a", "foo/b"},
+		{"Foo/Bar/a", "Foo/bar/b"},
+		{"Foo/Bar/a", "foo/Bar/b"},
+	} {
+		t.Run("case-"+strconv.Itoa(i), func(t *testing.T) {
+			files := []File{{Path: paths[0], Mode: Regular}, {Path: paths[1], Mode: Regular}}
+			if err := ValidateSnapshot(Snapshot{Head: strings.Repeat("a", 40), Files: files}); err == nil {
+				t.Fatalf("accepted source directory spelling collision: %v", paths)
+			}
+			changes := []Change{{Path: paths[0], Mode: Regular}, {Path: paths[1], Mode: Regular}}
+			if err := ValidateChanges(changes); err == nil {
+				t.Fatalf("accepted changed directory spelling collision: %v", paths)
+			}
+		})
+	}
+	if err := ValidateChanges([]Change{{Path: "Foo/a", Mode: Regular}, {Path: "Foo/b", Mode: Regular}}); err != nil {
+		t.Fatalf("rejected shared directory spelling: %v", err)
+	}
+	if err := ValidateChanges([]Change{{Path: "Foo/a", Delete: true}, {Path: "foo/b", Mode: Regular}}); err != nil {
+		t.Fatalf("rejected replacement directory spelling: %v", err)
+	}
+}
+
+func TestChangedPathsChecksFinalSourceLayout(t *testing.T) {
+	if err := ValidateChangedPaths([]File{{Path: "Foo/stay", Mode: Regular}}, []Change{{Path: "foo/new", Mode: Regular}}); err == nil {
+		t.Fatal("accepted added path with different source directory spelling")
+	}
+	if err := ValidateChangedPaths(nil, []Change{{Path: "missing", Delete: true}}); err == nil {
+		t.Fatal("accepted deletion absent from source")
+	}
+	for _, test := range []struct {
+		base    []File
+		changes []Change
+	}{
+		{[]File{{Path: "Foo/a", Mode: Regular}}, []Change{{Path: "Foo/a", Delete: true}, {Path: "foo/a", Mode: Regular}}},
+		{[]File{{Path: "entry", Mode: Regular}}, []Change{{Path: "entry", Delete: true}, {Path: "entry/child", Mode: Regular}}},
+		{[]File{{Path: "entry/child", Mode: Regular}}, []Change{{Path: "entry/child", Delete: true}, {Path: "entry", Mode: Regular}}},
+	} {
+		if err := ValidateChangedPaths(test.base, test.changes); err != nil {
+			t.Fatalf("rejected valid final layout: %+v,%v", test, err)
+		}
+	}
+}
+
+func TestCaseOnlyRenameAppliesDeletionBeforeCreation(t *testing.T) {
+	root := privateRoot(t)
+	base := []File{{Path: "Foo/a", Mode: Regular, Data: []byte("before")}}
+	if err := Materialize(root, base); err != nil {
+		t.Fatal(err)
+	}
+	changes := []Change{{Path: "Foo/a", Delete: true}, {Path: "foo/a", Mode: Regular, Data: []byte("after")}}
+	if err := ValidateChanges(changes); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateChangedPaths(base, changes); err != nil {
+		t.Fatal(err)
+	}
+	if err := Apply(root, changes); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil || len(entries) != 1 || entries[0].Name() != "foo" {
+		t.Fatalf("renamed root entries=%v,%v", entries, err)
+	}
+	got, err := Changes(context.Background(), root, base)
+	if err != nil || !reflect.DeepEqual(got, changes) {
+		t.Fatalf("renamed changes=%+v,%v", got, err)
+	}
+	for _, invalid := range [][]Change{
+		{{Path: "Foo/a", Delete: true}, {Path: "Foo/a", Mode: Regular}},
+		{{Path: "Foo/a", Delete: true}, {Path: "foo/a", Delete: true}},
+		{{Path: "Foo/a", Mode: Regular}, {Path: "foo/a", Mode: Regular}},
+		{{Path: "Foo/a", Delete: true}, {Path: "foo/a", Mode: Regular}, {Path: "FOO/a", Delete: true}},
+	} {
+		if err := ValidateChanges(invalid); err == nil {
+			t.Fatalf("accepted duplicated rename operations: %+v", invalid)
+		}
+	}
+}
+
 func TestWorkspaceRefusesLinksAndNonemptyMaterialization(t *testing.T) {
 	root := t.TempDir()
 	if err := os.Symlink(t.TempDir(), filepath.Join(root, "outside")); err != nil {

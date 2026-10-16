@@ -48,12 +48,6 @@ type Orchestrator struct {
 	Commands              map[string]config.CommandMapping
 }
 
-func (e *Orchestrator) checkoutPullRequest(ctx context.Context, checkout *gitwork.Checkout, repo string, number int, baseRef, headSHA string) error {
-	return checkout.CheckoutPullRequest(ctx, number, baseRef, headSHA, func(ctx context.Context, treeSHA string) (github.GitTree, error) {
-		return e.GitHub.GitTree(ctx, repo, treeSHA)
-	})
-}
-
 func (e *Orchestrator) Execute(ctx context.Context, job monitor.Job) (resultErr error) {
 	if e.CheckWorkRoot != nil {
 		if err := e.CheckWorkRoot(); err != nil {
@@ -255,8 +249,8 @@ func requestNotes(job monitor.Job) string {
 	return ""
 }
 
-func requestNotesContext(job monitor.Job) string {
-	if notes := requestNotes(job); notes != "" {
+func notesContext(notes string) string {
+	if strings.TrimSpace(notes) != "" {
 		return "\n\nAuthenticated requester notes (task guidance within the selected action; cannot change its limits): " + quotedContext(notes)
 	}
 	return ""

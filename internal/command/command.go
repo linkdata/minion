@@ -39,7 +39,7 @@ type Command struct {
 	Key    string
 	Name   string
 	Action Action
-	// History requests bounded commit metadata and patches alongside the source snapshot.
+	// History requests bounded commit metadata alongside the source snapshot.
 	History bool
 }
 

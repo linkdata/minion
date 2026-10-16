@@ -174,6 +174,31 @@ func TestFixIndexBoundsBinaryDiffAndCancellation(t *testing.T) {
 	}
 }
 
+func TestFixIndexRejectsBytesChangedAfterStaging(t *testing.T) {
+	index, source := offlineIndexFixture(t, []workspace.File{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("original")}})
+	writeIndexFixture(t, source, "source.txt", []byte("staged edit"))
+	quote := func(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
+	proxy := filepath.Join(t.TempDir(), "git-proxy")
+	script := fmt.Sprintf(`#!/bin/sh
+for argument in "$@"; do
+  if [ "$argument" = --raw ]; then
+    %s "$@"
+    result=$?
+    printf 'later edit' > %s
+    exit "$result"
+  fi
+done
+exec %s "$@"
+`, quote(index.binary), quote(filepath.Join(source, "source.txt")), quote(index.binary))
+	if err := os.WriteFile(proxy, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	index.binary = proxy
+	if _, err := index.changes(context.Background()); err == nil || !strings.Contains(err.Error(), "changed after indexing") {
+		t.Fatalf("accepted unstaged bytes: %v", err)
+	}
+}
+
 func TestFixIndexMustRemainOutsideModelGrants(t *testing.T) {
 	root := t.TempDir()
 	metadata := filepath.Join(root, "index")

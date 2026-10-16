@@ -24,6 +24,7 @@ const (
 	MaxContextBytes        = 1 << 20
 	MaxEntries             = 100_000
 	MaxPathBytes           = 4096
+	GitAttributes          = "* -text -ident -filter -working-tree-encoding !diff\n"
 	Regular         uint32 = 0100644
 	Executable      uint32 = 0100755
 )
@@ -147,6 +148,7 @@ func validateFiles(files []File) error {
 
 func validatePaths(paths []string) error {
 	seen := make(map[string]bool, len(paths))
+	directories := make(map[string]string)
 	for _, name := range paths {
 		key := strings.ToLower(name)
 		if seen[key] {
@@ -155,10 +157,15 @@ func validatePaths(paths []string) error {
 		seen[key] = true
 	}
 	for _, name := range paths {
-		for parent := path.Dir(strings.ToLower(name)); parent != "."; parent = path.Dir(parent) {
-			if seen[parent] {
+		for parent := path.Dir(name); parent != "."; parent = path.Dir(parent) {
+			key := strings.ToLower(parent)
+			if seen[key] {
 				return fmt.Errorf("source file/directory collision at %q", name)
 			}
+			if spelling, exists := directories[key]; exists && spelling != parent {
+				return fmt.Errorf("source directory spelling collision at %q", name)
+			}
+			directories[key] = parent
 		}
 	}
 	return nil
@@ -377,15 +384,16 @@ func ValidateChanges(changes []Change) error {
 	if len(changes) > MaxChanges {
 		return errors.New("result exceeds changed file limit")
 	}
-	seen := map[string]bool{}
+	seen := map[string][]Change{}
 	var paths []string
 	total := 0
 	for _, change := range changes {
 		key := strings.ToLower(change.Path)
-		if !ValidPath(change.Path) || seen[key] {
+		prior := seen[key]
+		if !ValidPath(change.Path) || len(prior) > 1 || (len(prior) == 1 && (prior[0].Path == change.Path || prior[0].Delete == change.Delete)) {
 			return fmt.Errorf("unsafe or duplicate changed path %q", change.Path)
 		}
-		seen[key] = true
+		seen[key] = append(prior, change)
 		if change.Delete {
 			if change.Mode != 0 || len(change.Data) != 0 {
 				return fmt.Errorf("deleted file %q has content or mode", change.Path)
@@ -400,6 +408,35 @@ func ValidateChanges(changes []Change) error {
 			}
 			total += len(change.Data)
 		}
+	}
+	return validatePaths(paths)
+}
+
+// ValidateChangedPaths checks the final layout after applying validated changes.
+func ValidateChangedPaths(base []File, changes []Change) error {
+	files := make(map[string]bool, len(base)+len(changes))
+	for _, file := range base {
+		if !ValidPath(file.Path) || files[file.Path] {
+			return fmt.Errorf("unsafe or duplicate base path %q", file.Path)
+		}
+		files[file.Path] = true
+	}
+	for _, change := range changes {
+		if !ValidPath(change.Path) {
+			return fmt.Errorf("unsafe changed path %q", change.Path)
+		}
+		if change.Delete {
+			if !files[change.Path] {
+				return fmt.Errorf("deleted path %q does not match source", change.Path)
+			}
+			delete(files, change.Path)
+		} else {
+			files[change.Path] = true
+		}
+	}
+	paths := make([]string, 0, len(files))
+	for name := range files {
+		paths = append(paths, name)
 	}
 	return validatePaths(paths)
 }

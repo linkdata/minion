@@ -11,9 +11,9 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/linkdata/minion/internal/github"
+	"github.com/linkdata/minion/internal/workspace"
 )
 
 // Local fixtures have every blob; production must obtain sizes from GitHub.
@@ -209,10 +209,10 @@ func TestCheckoutPullRequestVerifiesHead(t *testing.T) {
 	head := fixture.git(fixture.source, "rev-parse", "HEAD")
 	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/pull/7/head")
 
-	if err := fixture.checkout.CheckoutPullRequest(ctx, 7, "main", strings.Repeat("f", 40), smallTree); !errors.Is(err, ErrHeadMoved) {
+	if err := fixture.checkout.CheckoutPullRequest(ctx, 7, "main", strings.Repeat("f", 40)); !errors.Is(err, ErrHeadMoved) {
 		t.Fatalf("mismatched PR head error = %v, want ErrHeadMoved", err)
 	}
-	if err := fixture.checkout.CheckoutPullRequest(ctx, 7, "main", head, localTreeMetadata(t, fixture.source)); err != nil {
+	if err := fixture.checkout.CheckoutPullRequest(ctx, 7, "main", head); err != nil {
 		t.Fatalf("CheckoutPullRequest() error = %v", err)
 	}
 	got := fixture.git(fixture.checkout.Path(), "rev-parse", "HEAD")
@@ -270,7 +270,8 @@ func TestCheckoutPullRequestBoundsAliasedTrees(t *testing.T) {
 				}
 				return tree, nil
 			}
-			err := fixture.checkout.CheckoutPullRequest(context.Background(), 7, "main", head, lookup)
+			fixture.checkout.lookupTree = lookup
+			err := fixture.checkout.CheckoutPullRequest(context.Background(), 7, "main", head)
 			if tt.blocked {
 				if !errors.Is(err, ErrCheckoutTooLarge) {
 					t.Fatalf("CheckoutPullRequest() error = %v, want checkout limit", err)
@@ -297,17 +298,12 @@ func TestCheckoutPullRequestBoundsAliasedTrees(t *testing.T) {
 	}
 }
 
-func smallTree(_ context.Context, sha string) (github.GitTree, error) {
-	size := int64(32)
-	return completeTree(sha, []github.GitTreeEntry{{Path: "change.txt", Type: "blob", Mode: "100644", Size: &size}}), nil
-}
-
 func completeTree(sha string, entries []github.GitTreeEntry) github.GitTree {
 	truncated := false
 	return github.GitTree{SHA: sha, Truncated: &truncated, Tree: entries}
 }
 
-func TestCheckoutPullRequestRejectsIncompleteTreeMetadata(t *testing.T) {
+func TestSourceTreeRejectsIncompleteMetadata(t *testing.T) {
 	sha := strings.Repeat("a", 40)
 	size := int64(1)
 	truncated := true
@@ -320,41 +316,41 @@ func TestCheckoutPullRequestRejectsIncompleteTreeMetadata(t *testing.T) {
 		completeTree(sha, []github.GitTreeEntry{{Path: "x", Type: "blob", Mode: "100644"}}),
 		completeTree(sha, []github.GitTreeEntry{{Path: "x", Type: "blob", Mode: "100644", Size: &size}, {Path: "y", Type: "unknown"}}),
 	} {
-		if err := checkPullRequestTree(tree, sha); !errors.Is(err, ErrCheckoutTooLarge) {
+		if err := checkSourceTree(tree, sha); !errors.Is(err, ErrCheckoutTooLarge) {
 			t.Fatalf("metadata %+v: error = %v, want checkout refusal", tree, err)
 		}
 	}
 }
 
-func TestPullRequestTreeRejectsSymlinks(t *testing.T) {
+func TestSourceTreeAcceptsSymlinksAndRejectsInvalidModes(t *testing.T) {
 	sha := strings.Repeat("a", 40)
 	size := int64(len("../../../private"))
 	for _, entry := range []github.GitTreeEntry{
-		{Path: ".agents/skills/escape", Type: "blob", Mode: "120000", Size: &size},
 		{Path: "missing-mode", Type: "blob", Size: &size},
 		{Path: "unknown-mode", Type: "blob", Mode: "100664", Size: &size},
 		{Path: "wrong-tree-mode", Type: "tree", Mode: "120000"},
 		{Path: "wrong-gitlink-mode", Type: "commit", Mode: "100644"},
 	} {
 		tree := completeTree(sha, []github.GitTreeEntry{entry})
-		if err := checkPullRequestTree(tree, sha); !errors.Is(err, ErrCheckoutTooLarge) {
+		if err := checkSourceTree(tree, sha); !errors.Is(err, ErrCheckoutTooLarge) {
 			t.Errorf("entry %+v: error = %v, want checkout refusal", entry, err)
 		}
 	}
 	for _, entry := range []github.GitTreeEntry{
+		{Path: ".agents/skills/escape", Type: "blob", Mode: "120000", Size: &size},
 		{Path: "ordinary", Type: "blob", Mode: "100644", Size: &size},
 		{Path: "executable", Type: "blob", Mode: "100755", Size: &size},
 		{Path: "directory", Type: "tree", Mode: "040000"},
 		{Path: "submodule", Type: "commit", Mode: "160000"},
 	} {
 		tree := completeTree(sha, []github.GitTreeEntry{entry})
-		if err := checkPullRequestTree(tree, sha); err != nil {
+		if err := checkSourceTree(tree, sha); err != nil {
 			t.Errorf("entry %+v: unexpected error: %v", entry, err)
 		}
 	}
 }
 
-func TestPullRequestSymlinkRejectedBeforeCheckout(t *testing.T) {
+func TestPullRequestSnapshotOmitsSymlinks(t *testing.T) {
 	fixture := newFixture(t)
 	linkDir := filepath.Join(fixture.source, ".agents", "skills")
 	if err := os.MkdirAll(linkDir, 0700); err != nil {
@@ -367,18 +363,20 @@ func TestPullRequestSymlinkRejectedBeforeCheckout(t *testing.T) {
 	fixture.git(fixture.source, "commit", "-m", "add skill link")
 	head := fixture.git(fixture.source, "rev-parse", "HEAD")
 	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/pull/7/head")
-	lookup := func(_ context.Context, sha string) (github.GitTree, error) {
-		size := int64(len("../../../../private"))
-		return completeTree(sha, []github.GitTreeEntry{{Path: ".agents/skills/escape", Type: "blob", Mode: "120000", Size: &size}}), nil
+	if err := fixture.checkout.CheckoutPullRequest(context.Background(), 7, "main", head); err != nil {
+		t.Fatal(err)
 	}
-	if err := fixture.checkout.CheckoutPullRequest(context.Background(), 7, "main", head, lookup); !errors.Is(err, ErrCheckoutTooLarge) {
-		t.Fatalf("symlink PR error = %v, want checkout refusal", err)
+	snapshot, err := fixture.checkout.Snapshot(context.Background(), false, true)
+	if err != nil || len(snapshot.Omitted) != 1 || snapshot.Omitted[0] != ".agents/skills/escape" {
+		t.Fatalf("omitted=%v error=%v", snapshot.Omitted, err)
 	}
-	if got := fixture.git(fixture.checkout.Path(), "rev-parse", "HEAD"); got != fixture.base {
-		t.Fatalf("refused PR changed checkout HEAD to %s", got)
+	if snapshot.Head != head {
+		t.Fatalf("snapshot HEAD=%s want %s", snapshot.Head, head)
 	}
-	if _, err := os.Lstat(filepath.Join(fixture.checkout.Path(), ".agents")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("refused PR materialized skill directory: %v", err)
+	for _, file := range snapshot.Files {
+		if file.Path == ".agents/skills/escape" {
+			t.Fatal("symlink exported")
+		}
 	}
 }
 
@@ -413,7 +411,8 @@ func TestCheckoutPullRequestPreflightDoesNotFetchMissingBlob(t *testing.T) {
 		size := int64(maxCheckoutBytes + 1)
 		return completeTree(sha, []github.GitTreeEntry{{Path: "new.dat", Type: "blob", Mode: "100644", Size: &size}}), nil
 	}
-	if err := checkout.CheckoutPullRequest(context.Background(), 7, "main", head, oversized); !errors.Is(err, ErrCheckoutTooLarge) {
+	checkout.lookupTree = oversized
+	if err := checkout.CheckoutPullRequest(context.Background(), 7, "main", head); !errors.Is(err, ErrCheckoutTooLarge) {
 		t.Fatalf("oversized PR error = %v, want checkout limit", err)
 	}
 	if !missing() {
@@ -422,7 +421,8 @@ func TestCheckoutPullRequestPreflightDoesNotFetchMissingBlob(t *testing.T) {
 	if got := fixture.git(checkout.Path(), "rev-parse", "HEAD"); got != fixture.base {
 		t.Fatalf("rejected PR moved HEAD to %s", got)
 	}
-	if err := checkout.CheckoutPullRequest(context.Background(), 7, "main", head, localTreeMetadata(t, fixture.source)); err != nil {
+	checkout.lookupTree = localTreeMetadata(t, fixture.source)
+	if err := checkout.CheckoutPullRequest(context.Background(), 7, "main", head); err != nil {
 		t.Fatalf("bounded PR checkout: %v", err)
 	}
 	if info, err := os.Stat(filepath.Join(checkout.Path(), "new.dat")); err != nil || info.Size() != blobBytes {
@@ -451,7 +451,7 @@ func TestCheckoutPullRequestDisablesRepositoryTransforms(t *testing.T) {
 			t.Error(err)
 		}
 	}()
-	if err := checkout.CheckoutPullRequest(context.Background(), 7, "main", head, localTreeMetadata(t, fixture.source)); err != nil {
+	if err := checkout.CheckoutPullRequest(context.Background(), 7, "main", head); err != nil {
 		t.Fatal(err)
 	}
 	got, err := os.ReadFile(filepath.Join(checkout.Path(), "payload.txt"))
@@ -486,127 +486,26 @@ func TestNewBranchRejectsTrackedGitlink(t *testing.T) {
 	}
 }
 
-func TestNestedGitMetadataCannotRunFilter(t *testing.T) {
-	t.Setenv("GH_TOKEN", "DUMMY_CANARY")
-	t.Setenv("GITHUB_TOKEN", "DUMMY_CANARY")
-	fixture := newFixture(t)
-	child := filepath.Join(t.TempDir(), "child")
-	fixture.git("", "init", "--initial-branch=main", child)
-	writeFile(t, filepath.Join(child, ".gitattributes"), "*.txt filter=probe\n")
-	writeFile(t, filepath.Join(child, "payload.txt"), "original\n")
-	fixture.git(child, "add", ".")
-	fixture.git(child, "commit", "-m", "child")
-	childHead := fixture.git(child, "rev-parse", "HEAD")
-	fixture.git(fixture.source, "update-index", "--add", "--cacheinfo", "160000,"+childHead+",sub")
-	fixture.git(fixture.source, "commit", "-m", "add gitlink")
-	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/heads/main")
-
-	ctx := context.Background()
-	checkout, err := cloneFromURL(ctx, t.TempDir(), fixture.remote, "main", localTreeMetadata(t, fixture.source))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := checkout.Close(); err != nil {
-			t.Error(err)
-		}
-	}()
-	if changed, err := checkout.HasChanges(ctx); err != nil || changed {
-		t.Fatalf("clean gitlink HasChanges() = (%t, %v)", changed, err)
-	}
-	const branch = "minion/fix-nested-git"
-	// Bypass NewBranch's preflight to test the post-run metadata guard independently.
-	fixture.git(checkout.Path(), "switch", "--create", branch)
-	checkout.branch = branch
-	if err := checkout.recordConfig(); err != nil {
-		t.Fatal(err)
-	}
-	sub := filepath.Join(checkout.Path(), "sub")
-	fixture.git(sub, "init", "--initial-branch=main")
-	filter := filepath.Join(t.TempDir(), "filter.sh")
-	marker := filepath.Join(t.TempDir(), "filter-ran")
-	writeFile(t, filter, "#!/bin/sh\ncat\nprintf x >> \"$1\"\n")
-	if err := os.Chmod(filter, 0700); err != nil {
-		t.Fatal(err)
-	}
-	fixture.git(sub, "config", "filter.probe.clean", filter+" "+marker)
-	writeFile(t, filepath.Join(sub, ".gitattributes"), "*.txt filter=probe\n")
-	writeFile(t, filepath.Join(sub, "payload.txt"), "original\n")
-	fixture.git(sub, "add", ".")
-	writeFile(t, filepath.Join(sub, "payload.txt"), "altered!\n") // Same size forces Git to clean the file.
-	when := time.Now().Add(2 * time.Second)
-	if err := os.Chtimes(filepath.Join(sub, "payload.txt"), when, when); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(marker, nil, 0600); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := checkout.HasChanges(ctx); err == nil || !strings.Contains(err.Error(), "nested Git metadata") {
-		t.Fatalf("HasChanges() error = %v, want nested Git refusal", err)
-	}
-	if err := checkout.CommitAndPush(ctx, branch, "bot", "fix", func(string) error { return nil }); err == nil || !strings.Contains(err.Error(), "nested Git metadata") {
-		t.Fatalf("CommitAndPush() error = %v, want nested Git refusal", err)
-	}
-	data, err := os.ReadFile(marker)
-	if err != nil || len(data) != 0 {
-		t.Fatalf("nested filter ran: marker = %q, error = %v", data, err)
-	}
-
-	cleanCheckout, err := cloneFromURL(ctx, t.TempDir(), fixture.remote, "main", localTreeMetadata(t, fixture.source))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := cleanCheckout.Close(); err != nil {
-			t.Error(err)
-		}
-	}()
-	cleanSub := filepath.Join(cleanCheckout.Path(), "sub")
-	fixture.git("", "clone", child, cleanSub) // Its HEAD matches the tracked gitlink.
-	fixture.git(cleanSub, "config", "filter.probe.clean", filter+" "+marker)
-	when = time.Now().Add(2 * time.Second)
-	if err := os.Chtimes(filepath.Join(cleanSub, "payload.txt"), when, when); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(marker, nil, 0600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := cleanCheckout.HasChanges(ctx); err == nil || !strings.Contains(err.Error(), "nested Git metadata") {
-		t.Fatalf("clean nested repo HasChanges() error = %v, want refusal", err)
-	}
-	data, err = os.ReadFile(marker)
-	if err != nil || len(data) != 0 {
-		t.Fatalf("clean nested filter ran: marker = %q, error = %v", data, err)
-	}
-}
-
-func TestNestedGitScanBoundsAndDoesNotFollowSymlinks(t *testing.T) {
-	root := t.TempDir()
-	if err := os.Mkdir(filepath.Join(root, ".git"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	outside := t.TempDir()
-	if err := os.Mkdir(filepath.Join(outside, ".git"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(outside, filepath.Join(root, "link")); err != nil {
-		t.Fatal(err)
-	}
-	if err := rejectNestedGitMetadata(context.Background(), root, 2); err != nil {
-		t.Fatalf("root Git metadata or symlink target was scanned: %v", err)
-	}
-	writeFile(t, filepath.Join(root, "second"), "x")
-	if err := rejectNestedGitMetadata(context.Background(), root, 2); err == nil || !strings.Contains(err.Error(), "scan exceeds") {
-		t.Fatalf("bounded scan error = %v, want entry limit", err)
-	}
-	nested := filepath.Join(root, "nested")
-	if err := os.Mkdir(nested, 0700); err != nil {
-		t.Fatal(err)
-	}
-	writeFile(t, filepath.Join(nested, ".git"), "gitdir: elsewhere\n")
-	if err := rejectNestedGitMetadata(context.Background(), root, 10); err == nil || !strings.Contains(err.Error(), "nested Git metadata") {
-		t.Fatalf("Git metadata file error = %v, want refusal", err)
+func TestImportRejectsNestedGitMetadataBeforePublishing(t *testing.T) {
+	for _, name := range []string{"sub/.git/config", "sub/.GIT/config", ".git/config"} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newFixture(t)
+			ctx := context.Background()
+			const branch = "minion/fix-nested-git"
+			if err := fixture.checkout.NewBranch(ctx, branch); err != nil {
+				t.Fatal(err)
+			}
+			changes := []workspace.Change{{Path: name, Mode: workspace.Regular, Data: []byte("[filter \"probe\"]\nclean = malicious-command\n")}, {Path: "payload.txt", Mode: workspace.Regular, Data: []byte("new data")}}
+			if err := fixture.checkout.Import(ctx, fixture.base, changes); err == nil {
+				t.Fatal("accepted nested Git metadata")
+			}
+			if _, err := os.Stat(filepath.Join(fixture.checkout.Path(), "payload.txt")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("invalid import partially applied: %v", err)
+			}
+			if err := fixture.checkout.CommitAndPush(ctx, branch, "bot", "fix", func(string) error { t.Fatal("invalid data reached publication"); return nil }); !errors.Is(err, ErrNoChanges) {
+				t.Fatalf("publication after rejected import=%v", err)
+			}
+		})
 	}
 }
 
@@ -626,10 +525,6 @@ func TestCommitAndPushUsesTrustedURLAndSkipsHooks(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	changed, err := fixture.checkout.HasChanges(ctx)
-	if err != nil || !changed {
-		t.Fatalf("HasChanges() = (%t, %v), want true", changed, err)
-	}
 	var recordedHead string
 	if err := fixture.checkout.CommitAndPush(ctx, branch, "example-bot", "Minion: fix issue 123", func(sha string) error {
 		recordedHead = sha
@@ -646,9 +541,8 @@ func TestCommitAndPushUsesTrustedURLAndSkipsHooks(t *testing.T) {
 	if want := "example-bot <example-bot@users.noreply.github.com>|example-bot <example-bot@users.noreply.github.com>"; identity != want {
 		t.Fatalf("commit identity = %q, want %q", identity, want)
 	}
-	changed, err = fixture.checkout.HasChanges(ctx)
-	if err != nil || changed {
-		t.Fatalf("HasChanges() after push = (%t, %v), want false", changed, err)
+	if err := fixture.checkout.CommitAndPush(ctx, branch, "example-bot", "no changes", func(string) error { t.Fatal("unchanged tree reached push"); return nil }); !errors.Is(err, ErrNoChanges) {
+		t.Fatalf("repeat publication=%v", err)
 	}
 	path := fixture.checkout.Path()
 	if err := fixture.checkout.Close(); err != nil {

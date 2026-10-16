@@ -84,9 +84,7 @@ func TestLiveCloneAndPullRequest(t *testing.T) {
 	if head, err := checkout.Head(ctx); err != nil || len(head) != 40 {
 		t.Fatalf("cloned default-branch HEAD = %q, %v", head, err)
 	}
-	if err := checkout.CheckoutPullRequest(ctx, pull.Number, pull.Base.Ref, pull.Head.SHA, func(ctx context.Context, treeSHA string) (github.GitTree, error) {
-		return client.GitTree(ctx, repoName, treeSHA)
-	}); err != nil {
+	if err := checkout.CheckoutPullRequest(ctx, pull.Number, pull.Base.Ref, pull.Head.SHA); err != nil {
 		t.Fatal(err)
 	}
 	if head, err := checkout.Head(ctx); err != nil || !strings.EqualFold(head, pull.Head.SHA) {
@@ -199,17 +197,12 @@ func TestLiveCommitAndPush(t *testing.T) {
 	if err := checkout.SetPushRepository(forkName); err != nil {
 		t.Fatal(err)
 	}
-	changed, err := checkout.HasChanges(ctx)
-	if err != nil || changed {
-		t.Fatalf("new branch HasChanges = %t, %v; want false", changed, err)
+	if err := checkout.CommitAndPush(ctx, branch, cfg.BotLogin, "test: unchanged branch", func(string) error { t.Fatal("unchanged tree reached push"); return nil }); !errors.Is(err, ErrNoChanges) {
+		t.Fatalf("unchanged branch=%v", err)
 	}
 	name := "minion-live-gitwork-" + id + ".txt"
 	if err := os.WriteFile(filepath.Join(checkout.Path(), name), []byte("Minion live Gitwork test.\n"), 0o600); err != nil {
 		t.Fatal(err)
-	}
-	changed, err = checkout.HasChanges(ctx)
-	if err != nil || !changed {
-		t.Fatalf("modified branch HasChanges = %t, %v; want true", changed, err)
 	}
 	if err := checkout.CommitAndPush(ctx, branch, cfg.BotLogin, "test: Gitwork live publish "+id, func(sha string) error {
 		recordedHead = sha
@@ -220,9 +213,8 @@ func TestLiveCommitAndPush(t *testing.T) {
 	if head, err := checkout.Head(ctx); err != nil || head != recordedHead || head == base {
 		t.Fatalf("committed HEAD = %q, recorded = %q, base = %q: %v", head, recordedHead, base, err)
 	}
-	changed, err = checkout.HasChanges(ctx)
-	if err != nil || changed {
-		t.Fatalf("committed branch HasChanges = %t, %v; want false", changed, err)
+	if err := checkout.CommitAndPush(ctx, branch, cfg.BotLogin, "test: unchanged branch", func(string) error { t.Fatal("unchanged committed tree reached push"); return nil }); !errors.Is(err, ErrNoChanges) {
+		t.Fatalf("committed branch=%v", err)
 	}
 	remote, err := bot.Branch(ctx, forkName, branch)
 	if err != nil || remote.Commit.SHA != recordedHead {

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
@@ -256,11 +257,11 @@ func TestRunnerBoundsCriticDisabledAnswer(t *testing.T) {
 	runner := Runner{
 		WorkRoot: t.TempDir(),
 		runModel: func(context.Context, modelRun) (aicli.Result, error) {
-			return aicli.Result{Answer: strings.Repeat("å", maxOutputBytes), UsageComplete: true}, nil
+			return aicli.Result{Answer: strings.Repeat("€", maxOutputBytes), UsageComplete: true}, nil
 		},
 	}
 	result, err := runner.Run(context.Background(), job)
-	if err != nil || len(result.Answer) > maxOutputBytes || !strings.HasSuffix(result.Answer, "[truncated]") || len(result.Diagnostics) != 1 || result.Diagnostics[0].Code != "output_truncated" {
+	if err != nil || len(result.Answer) > maxOutputBytes || !utf8.ValidString(result.Answer) || !strings.HasSuffix(result.Answer, "[truncated]") || len(result.Diagnostics) != 1 || result.Diagnostics[0].Code != "output_truncated" {
 		t.Fatalf("bounded answer = %+v, %v", result, err)
 	}
 }
@@ -299,6 +300,9 @@ func TestRunnerKeepsCriticReadOnlyAndNotesPrivate(t *testing.T) {
 		baseline := filepath.Join(request.readOnlyDirs[0], "base")
 		if !strings.Contains(request.prompt, baseline) || !strings.Contains(request.prompt, "original input baseline") || !strings.Contains(request.prompt, "executable modes") {
 			t.Fatal("critic lacks original baseline instructions")
+		}
+		if !strings.Contains(request.prompt, "Do not write omitted paths or their parents") {
+			t.Fatal("omitted-path constraint missing")
 		}
 		for name, want := range map[string]string{"source.txt": "source\n", "deleted.txt": "original deleted file"} {
 			data, err := os.ReadFile(filepath.Join(baseline, name))
@@ -403,6 +407,21 @@ func TestRunnerCanonicalizesTrustedWorkRoot(t *testing.T) {
 	}}
 	if _, err := runner.Run(context.Background(), portableJob(command.Comment)); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRunnerHandlesSourceMetadataReadFailure(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory read permissions")
+	}
+	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+		if err := os.Chmod(request.dir, 0000); err != nil {
+			t.Fatal(err)
+		}
+		return aicli.Result{Answer: "completed"}, nil
+	}}
+	if _, err := runner.Run(context.Background(), portableJob(command.Fix)); !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "inspect source metadata") {
+		t.Fatalf("metadata read failure = %v", err)
 	}
 }
 

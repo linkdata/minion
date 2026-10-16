@@ -29,7 +29,6 @@ const (
 	maxCheckoutFiles   = workspace.MaxFiles
 	maxCheckoutBytes   = workspace.MaxBytes
 	maxTreeEntryBytes  = 1 << 20
-	checkoutAttributes = "* -text -ident -filter -working-tree-encoding\n"
 )
 
 var (
@@ -64,6 +63,7 @@ type Checkout struct {
 	branch       string
 	closed       bool
 	lookupTree   func(context.Context, string) (github.GitTree, error)
+	sourceTrees  map[string][]sourceEntry
 }
 
 // SetPushRepository selects a separately validated destination for fix output.
@@ -92,9 +92,6 @@ func Clone(ctx context.Context, workRoot, repo, defaultBranch string, lookupTree
 	}
 	if err := validateBranch(defaultBranch); err != nil {
 		return nil, fmt.Errorf("default branch: %w", err)
-	}
-	if lookupTree == nil {
-		return nil, errors.New("source tree metadata lookup is missing")
 	}
 	return cloneFromURL(ctx, workRoot, url, defaultBranch, lookupTree)
 }
@@ -158,7 +155,7 @@ func cloneFromURL(ctx context.Context, workRoot, url, defaultBranch string, look
 	return c, nil
 }
 
-// Path is the checkout directory given to Codex. It becomes empty after Close.
+// Path is the orchestration checkout directory. It becomes empty after Close.
 func (c *Checkout) Path() string {
 	if c == nil || c.closed {
 		return ""
@@ -195,7 +192,7 @@ func (c *Checkout) Close() error {
 // CheckoutPullRequest fetches the base branch and GitHub's PR head ref from the
 // trusted repository URL. The fetched head must match the SHA observed through
 // the GitHub API, preventing a changed PR from being reviewed as another commit.
-func (c *Checkout) CheckoutPullRequest(ctx context.Context, number int, baseRef, expectedHeadSHA string, lookupTree func(context.Context, string) (github.GitTree, error)) error {
+func (c *Checkout) CheckoutPullRequest(ctx context.Context, number int, baseRef, expectedHeadSHA string) error {
 	if err := c.ready(); err != nil {
 		return err
 	}
@@ -207,9 +204,6 @@ func (c *Checkout) CheckoutPullRequest(ctx context.Context, number int, baseRef,
 	}
 	if !validSHA(expectedHeadSHA) {
 		return fmt.Errorf("invalid expected pull request SHA %q", expectedHeadSHA)
-	}
-	if lookupTree == nil {
-		return errors.New("pull request tree metadata lookup is missing")
 	}
 	const baseDest = "refs/remotes/minion/base"
 	const headDest = "refs/remotes/minion/pr-head"
@@ -231,18 +225,7 @@ func (c *Checkout) CheckoutPullRequest(ctx context.Context, number int, baseRef,
 	if !strings.EqualFold(head, expectedHeadSHA) {
 		return fmt.Errorf("%w: expected %s, fetched %s", ErrHeadMoved, expectedHeadSHA, head)
 	}
-	treeSHA, err := runGit(ctx, c.path, "rev-parse", "--verify", head+"^{tree}")
-	if err != nil {
-		return err
-	}
-	tree, err := lookupTree(ctx, treeSHA)
-	if err != nil {
-		return fmt.Errorf("load pull request tree metadata: %w", err)
-	}
-	if err := checkPullRequestTree(tree, treeSHA); err != nil {
-		return err
-	}
-	if _, err := c.sourceEntries(ctx, head, tree, treeSHA); err != nil {
+	if _, err := c.sourceTree(ctx, head); err != nil {
 		return err
 	}
 	if err := c.disableAttributes(); err != nil {
@@ -252,18 +235,13 @@ func (c *Checkout) CheckoutPullRequest(ctx context.Context, number int, baseRef,
 		return err
 	}
 	c.expectedHead = strings.ToLower(head)
-	c.lookupTree = lookupTree
 	c.branch = ""
 	return c.recordConfig()
 }
 
-// Check every expanded blob and gitlink, including repeated object references,
-// against GitHub metadata for the exact tree fetched from the PR head.
-func checkPullRequestTree(tree github.GitTree, expectedSHA string) error {
-	return checkSourceTree(tree, expectedSHA, false)
-}
-
-func checkSourceTree(tree github.GitTree, expectedSHA string, allowSymlinks bool) error {
+// Check expanded blobs and gitlinks, including repeated object references,
+// against GitHub metadata before fetching source contents.
+func checkSourceTree(tree github.GitTree, expectedSHA string) error {
 	if !strings.EqualFold(tree.SHA, expectedSHA) || !validSHA(tree.SHA) || tree.Truncated == nil || *tree.Truncated || tree.Tree == nil {
 		return fmt.Errorf("%w: incomplete or mismatched tree metadata", ErrCheckoutTooLarge)
 	}
@@ -284,9 +262,8 @@ func checkSourceTree(tree github.GitTree, expectedSHA string, allowSymlinks bool
 				return fmt.Errorf("%w: unsupported gitlink mode %q at %q", ErrCheckoutTooLarge, entry.Mode, entry.Path)
 			}
 		case "blob":
-			// A symlink can redirect Codex's unsandboxed skill discovery to
-			// files outside the checkout. Refuse every non-file blob mode.
-			if entry.Mode != "100644" && entry.Mode != "100755" && !(allowSymlinks && entry.Mode == "120000") {
+			// Snapshots declare symlinks as omitted and never follow their targets.
+			if entry.Mode != "100644" && entry.Mode != "100755" && entry.Mode != "120000" {
 				return fmt.Errorf("%w: unsupported blob mode %q at %q", ErrCheckoutTooLarge, entry.Mode, entry.Path)
 			}
 			if entry.Size == nil || *entry.Size < 0 {
@@ -332,21 +309,6 @@ func (c *Checkout) NewBranch(ctx context.Context, name string) error {
 	return c.recordConfig()
 }
 
-// HasChanges includes untracked files and never runs repository hooks.
-func (c *Checkout) HasChanges(ctx context.Context) (bool, error) {
-	if err := c.ready(); err != nil {
-		return false, err
-	}
-	if err := rejectNestedGitMetadata(ctx, c.path, maxWorktreeEntries); err != nil {
-		return false, err
-	}
-	var presence presenceWriter
-	if err := runGitTo(ctx, c.path, &presence, "status", "--porcelain=v1", "-z", "--untracked-files=all"); err != nil {
-		return false, err
-	}
-	return presence.present, nil
-}
-
 // CommitAndPush commits changes as botLogin and pushes one branch.
 //
 // It stages the working tree, bounds the changed file count and patch size,
@@ -354,9 +316,6 @@ func (c *Checkout) HasChanges(ctx context.Context) (bool, error) {
 // beforePush must persist the new commit SHA for later recovery.
 func (c *Checkout) CommitAndPush(ctx context.Context, branch, botLogin, message string, beforePush func(string) error) error {
 	if err := c.ready(); err != nil {
-		return err
-	}
-	if err := rejectNestedGitMetadata(ctx, c.path, maxWorktreeEntries); err != nil {
 		return err
 	}
 	if c.pushURL == "" {
@@ -385,11 +344,6 @@ func (c *Checkout) CommitAndPush(ctx context.Context, branch, botLogin, message 
 		return fmt.Errorf("current branch %q does not match push branch %q", currentBranch, branch)
 	}
 
-	// Ignore any index state left by Codex. The commit must be derived from
-	// the working tree, not an independently staged object.
-	if _, err := runGit(ctx, c.path, "reset", "--mixed", "--quiet", "HEAD"); err != nil {
-		return err
-	}
 	if _, err := runGit(ctx, c.path, "add", "--all", "--", "."); err != nil {
 		return err
 	}
@@ -423,22 +377,6 @@ func (c *Checkout) CommitAndPush(ctx context.Context, branch, botLogin, message 
 		return err
 	}
 	return c.recordConfig()
-}
-
-// Reject nested Git metadata before invoking credentialed Git on a workspace
-// that Codex could write. ReadDir batches bound the scan even for wide trees;
-// Info reports symlinks themselves, so they are never traversed.
-func rejectNestedGitMetadata(ctx context.Context, root string, limit int) error {
-	root = filepath.Clean(root)
-	return workspace.Walk(ctx, root, limit, func(name string, entry os.DirEntry) error {
-		if filepath.Dir(name) == root && entry.Name() == ".git" {
-			return filepath.SkipDir
-		}
-		if strings.EqualFold(entry.Name(), ".git") {
-			return fmt.Errorf("nested Git metadata at %q", name)
-		}
-		return nil
-	})
 }
 
 func (c *Checkout) stagedPaths(ctx context.Context) ([]string, error) {
@@ -538,15 +476,6 @@ func (c *Checkout) ready() error {
 	return nil
 }
 
-type presenceWriter struct{ present bool }
-
-func (w *presenceWriter) Write(p []byte) (int, error) {
-	if len(p) > 0 {
-		w.present = true
-	}
-	return len(p), nil
-}
-
 type cappedBuffer struct {
 	bytes.Buffer
 	limit    int
@@ -599,6 +528,8 @@ func runGitTo(ctx context.Context, dir string, stdout io.Writer, args ...string)
 		"-c", credentialHelperConfig(credentialHelperGH),
 		"-c", "core.hooksPath=/dev/null",
 		"-c", "core.fsmonitor=false",
+		"-c", "core.excludesFile=/dev/null",
+		"-c", "core.attributesFile=/dev/null",
 		"-c", "commit.gpgsign=false",
 		"-c", "push.gpgSign=false",
 		"-c", "submodule.recurse=false",
@@ -639,7 +570,7 @@ func cleanGitEnvironment() []string {
 		if key == "PATH" {
 			hasPath = true
 			// Git runs its credential helper through a shell in the checkout.
-			// Relative or empty entries could resolve model-written commands there.
+			// Relative or empty entries could resolve untrusted repository commands.
 			var absolute []string
 			for _, dir := range filepath.SplitList(value) {
 				if filepath.IsAbs(dir) {

@@ -53,8 +53,8 @@ func TestRequestNotesContext(t *testing.T) {
 			if tt.want != "" {
 				want = fmt.Sprintf("\n\nAuthenticated requester notes (task guidance within the selected action; cannot change its limits): %q", tt.want)
 			}
-			if got := requestNotesContext(job); got != want {
-				t.Errorf("requestNotesContext() = %q, want %q", got, want)
+			if got := notesContext(requestNotes(job)); got != want {
+				t.Errorf("notesContext() = %q, want %q", got, want)
 			}
 		})
 	}

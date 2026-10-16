@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -33,20 +32,20 @@ func newFixIndex(ctx context.Context, dir, source string) (*fixIndex, error) {
 		return nil, errors.New("offline git binary must have an absolute path")
 	}
 	index := &fixIndex{dir: dir, source: source, binary: binary}
-	if _, err := index.run(ctx, nil, 1024, "init", "--quiet", "--template="); err != nil {
+	if _, err := index.run(ctx, 1024, "init", "--quiet", "--template="); err != nil {
 		return nil, err
 	}
 	// info/attributes overrides untrusted .gitattributes even for forced baseline files.
 	if err := os.MkdirAll(filepath.Join(dir, "info"), 0700); err != nil {
 		return nil, err
 	}
-	if err := os.WriteFile(filepath.Join(dir, "info", "attributes"), []byte("* -text -ident -filter -working-tree-encoding !diff\n"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "info", "attributes"), []byte(workspace.GitAttributes), 0600); err != nil {
 		return nil, err
 	}
-	if _, err := index.run(ctx, nil, 1024, "add", "--all", "--force", "--", "."); err != nil {
+	if _, err := index.run(ctx, 1024, "add", "--all", "--force", "--", "."); err != nil {
 		return nil, err
 	}
-	tree, err := index.run(ctx, nil, 128, "write-tree")
+	tree, err := index.run(ctx, 128, "write-tree")
 	if err != nil {
 		return nil, err
 	}
@@ -54,7 +53,7 @@ func newFixIndex(ctx context.Context, dir, source string) (*fixIndex, error) {
 	if !gitObjectID(treeID) {
 		return nil, errors.New("offline git returned invalid tree identity")
 	}
-	commit, err := index.run(ctx, nil, 128, "commit-tree", treeID, "-m", "Source baseline")
+	commit, err := index.run(ctx, 128, "commit-tree", treeID, "-m", "Source baseline")
 	if err != nil {
 		return nil, err
 	}
@@ -62,17 +61,17 @@ func newFixIndex(ctx context.Context, dir, source string) (*fixIndex, error) {
 	if !gitObjectID(commitID) {
 		return nil, errors.New("offline git returned invalid baseline identity")
 	}
-	if _, err := index.run(ctx, nil, 1024, "update-ref", "HEAD", commitID); err != nil {
+	if _, err := index.run(ctx, 1024, "update-ref", "HEAD", commitID); err != nil {
 		return nil, err
 	}
 	return index, nil
 }
 
 func (index *fixIndex) changes(ctx context.Context) ([]workspace.Change, error) {
-	if _, err := index.run(ctx, nil, 1024, "add", "--all", "--", ".", ":(exclude,icase,glob)**/.git", ":(exclude,icase,glob)**/.git/**"); err != nil {
+	if _, err := index.run(ctx, 1024, "add", "--all", "--", ".", ":(exclude,icase,glob)**/.git", ":(exclude,icase,glob)**/.git/**"); err != nil {
 		return nil, err
 	}
-	raw, err := index.run(ctx, nil, (workspace.MaxChanges+1)*(4096+128), "diff", "--cached", "--raw", "-z", "--no-abbrev", "--no-renames", "--no-ext-diff", "--no-textconv", "HEAD", "--")
+	raw, err := index.run(ctx, (workspace.MaxChanges+1)*(4096+128), "diff", "--cached", "--raw", "-z", "--no-abbrev", "--no-renames", "--no-ext-diff", "--no-textconv", "HEAD", "--")
 	if err != nil {
 		return nil, err
 	}
@@ -84,17 +83,13 @@ func (index *fixIndex) changes(ctx context.Context) ([]workspace.Change, error) 
 	if err != nil {
 		return nil, err
 	}
-	total := 0
+	// Bind returned bytes to the frozen index whose patch-size limit is checked below.
 	for i, change := range changes {
-		total += len(change.Data)
-		if total > workspace.MaxChangeBytes {
-			return nil, errors.New("fix result exceeds changed byte limit")
-		}
 		if !change.Delete && gitBlobID(change.Data) != objects[i] {
 			return nil, errors.New("fix file changed after indexing")
 		}
 	}
-	if _, err := index.run(ctx, nil, workspace.MaxContextBytes, "diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv", "--no-renames", "--no-color", "--submodule=short", "HEAD", "--"); err != nil {
+	if _, err := index.run(ctx, workspace.MaxContextBytes, "diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv", "--no-renames", "--no-color", "--submodule=short", "HEAD", "--"); err != nil {
 		return nil, err
 	}
 	return changes, nil
@@ -160,7 +155,7 @@ func gitBlobID(data []byte) string {
 	return hex.EncodeToString(hash.Sum(nil))
 }
 
-func (index *fixIndex) run(ctx context.Context, stdin io.Reader, limit int, args ...string) ([]byte, error) {
+func (index *fixIndex) run(ctx context.Context, limit int, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	gitArgs := []string{"--git-dir=" + index.dir, "--work-tree=" + index.source,
@@ -169,7 +164,7 @@ func (index *fixIndex) run(ctx context.Context, stdin io.Reader, limit int, args
 		"-c", "core.protectNTFS=true", "-c", "core.protectHFS=true", "-c", "commit.gpgsign=false",
 		"-c", "protocol.allow=never", "-c", "gc.auto=0", "-c", "maintenance.auto=false"}
 	cmd := exec.CommandContext(ctx, index.binary, append(gitArgs, args...)...)
-	cmd.Dir, cmd.Env, cmd.Stdin = index.dir, index.environment(), stdin
+	cmd.Dir, cmd.Env = index.dir, index.environment()
 	cmd.WaitDelay = 2 * time.Second
 	output, diagnostic := indexBuffer{limit: limit, cancel: cancel}, indexBuffer{limit: 8 << 10}
 	cmd.Stdout, cmd.Stderr = &output, &diagnostic

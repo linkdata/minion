@@ -132,7 +132,7 @@ func (e *Orchestrator) prepare(ctx context.Context, request monitor.Job) (prepar
 		return nil, err
 	}
 	if pullHead != "" {
-		if err := e.checkoutPullRequest(ctx, p.checkout, repo.FullName, request.Number, branch, pullHead); err != nil {
+		if err := p.checkout.CheckoutPullRequest(ctx, request.Number, branch, pullHead); err != nil {
 			return nil, err
 		}
 	}
@@ -364,7 +364,7 @@ func (e *Orchestrator) publishFix(ctx context.Context, p *Prepared, result Resul
 		return errors.New("repository or fork changed during fix; refusing to push")
 	}
 	if err := p.checkout.Import(ctx, p.Job.Source.Head, result.Changes); err != nil {
-		return err
+		return fmt.Errorf("%w: import action result: %w", monitor.ErrTerminalJob, err)
 	}
 	if err := p.checkout.SetPushRepository(fork.FullName); err != nil {
 		return err

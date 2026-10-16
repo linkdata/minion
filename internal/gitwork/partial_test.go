@@ -114,7 +114,7 @@ func TestSnapshotDeclaresOversizedComparisonAndPreservesFiles(t *testing.T) {
 	fixture.git(fixture.source, "commit", "-m", "large diff")
 	head := fixture.git(fixture.source, "rev-parse", "HEAD")
 	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/pull/7/head")
-	if err := fixture.checkout.CheckoutPullRequest(context.Background(), 7, "main", head, localTreeMetadata(t, fixture.source)); err != nil {
+	if err := fixture.checkout.CheckoutPullRequest(context.Background(), 7, "main", head); err != nil {
 		t.Fatal(err)
 	}
 	snapshot, err := fixture.checkout.Snapshot(context.Background(), false, true)
