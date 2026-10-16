@@ -26,8 +26,8 @@ type eventUsage struct {
 	Output  *int64 `json:"output_tokens"`
 }
 
-func (u *eventUsage) tokens() (tokens usage.Tokens, valid bool) {
-	if u == nil || u.Input == nil || u.Created == nil || u.Cached == nil || u.Output == nil {
+func (u eventUsage) tokens() (tokens usage.Tokens, valid bool) {
+	if u.Input == nil || u.Created == nil || u.Cached == nil || u.Output == nil {
 		return
 	}
 	for _, value := range []*int64{u.Input, u.Created, u.Cached, u.Output} {
@@ -50,9 +50,42 @@ type event struct {
 	Result            string            `json:"result"`
 	StructuredOutput  json.RawMessage   `json:"structured_output"`
 	Errors            []string          `json:"errors"`
-	Usage             *eventUsage       `json:"usage"`
+	Usage             json.RawMessage   `json:"usage"`
+	ModelUsage        json.RawMessage   `json:"modelUsage"`
 	PermissionDenials []json.RawMessage `json:"permission_denials"`
 	Message           json.RawMessage   `json:"message"`
+}
+
+func (e event) tokens() (usage.Tokens, bool) {
+	var models map[string]struct {
+		Input   *int64 `json:"inputTokens"`
+		Created *int64 `json:"cacheCreationInputTokens"`
+		Cached  *int64 `json:"cacheReadInputTokens"`
+		Output  *int64 `json:"outputTokens"`
+	}
+	if json.Unmarshal(e.ModelUsage, &models) == nil && len(models) != 0 {
+		var total usage.Tokens
+		valid := true
+		for _, model := range models {
+			tokens, ok := eventUsage(model).tokens()
+			if !ok || tokens.Total() > math.MaxInt64-total.Total() {
+				valid = false
+				break
+			}
+			total.Add(tokens)
+		}
+		if valid {
+			return total, true
+		}
+	}
+	// Top-level usage excludes subagents, so it is only an incomplete fallback.
+	var fallback eventUsage
+	if json.Unmarshal(e.Usage, &fallback) == nil {
+		if tokens, valid := fallback.tokens(); valid {
+			return tokens, false
+		}
+	}
+	return usage.Tokens{}, false
 }
 
 type jsonlOutput struct {
@@ -158,7 +191,7 @@ func (o *jsonlOutput) finishLine() {
 		return
 	}
 	o.completed = true
-	o.result.Tokens, o.result.UsageComplete = e.Usage.tokens()
+	o.result.Tokens, o.result.UsageComplete = e.tokens()
 	if e.IsError || e.Subtype != "success" {
 		o.fail(fmt.Errorf("result failed: %s", limitText(e.Subtype)))
 		return

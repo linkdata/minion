@@ -1,6 +1,7 @@
 package action
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -15,6 +16,7 @@ import (
 )
 
 const (
+	defaultCriticRounds  = 3
 	maxCriticOutputBytes = 64 << 10
 	// JSON escaping can use six bytes per content byte, plus keys and whitespace.
 	maxProposalOutputBytes = 6*maxOutputBytes + 128
@@ -78,10 +80,7 @@ func (e *Runner) runOnce(ctx context.Context, request modelRun) (aicli.Result, e
 }
 
 func (e *Runner) runAI(ctx context.Context, dir, prompt string, writable bool, outputDir string) (answer string, err error) {
-	rounds := e.CriticMaxRounds
-	if rounds == 0 {
-		rounds = 3
-	}
+	rounds := cmp.Or(e.CriticMaxRounds, defaultCriticRounds)
 	if rounds < 1 || rounds > 10 || (e.Adversarial != "" &&
 		(e.Adversarial == e.mainProvider() || (e.Adversarial != "codex" && e.Adversarial != "claude"))) {
 		return "", fmt.Errorf("%w: invalid critic configuration", monitor.ErrTerminalJob)

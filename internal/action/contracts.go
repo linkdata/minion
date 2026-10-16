@@ -1,6 +1,7 @@
 package action
 
 import (
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -40,7 +41,7 @@ type RoleSettings struct {
 	AlwaysOnSkills []string `json:"always_on_skills,omitempty"`
 }
 
-const maxActionTitleBytes = 1 << 20
+const maxActionTitleBytes = 1 << 10
 const maxAuditArtifactBytes = 5 << 20
 const maxAuditArtifactsBytes = 7 * maxAuditArtifactBytes
 
@@ -256,10 +257,7 @@ func (r Result) validate(j Job, complete bool) error {
 	if err := validateResultArtifacts(j, r.Artifacts, complete); err != nil {
 		return err
 	}
-	maxCalls := j.CriticMaxRounds
-	if maxCalls == 0 {
-		maxCalls = 3
-	}
+	maxCalls := cmp.Or(j.CriticMaxRounds, defaultCriticRounds)
 	if j.Critic == nil {
 		maxCalls = 1
 	} else {

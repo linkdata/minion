@@ -114,6 +114,16 @@ func ValidateSnapshot(s Snapshot) error {
 		}
 		seen[key] = true
 	}
+	if s.Base == "" && len(s.Omitted) != 0 {
+		paths := make([]string, 0, len(s.Files)+len(s.Omitted))
+		for _, file := range s.Files {
+			paths = append(paths, file.Path)
+		}
+		paths = append(paths, s.Omitted...)
+		if err := validatePaths(paths); err != nil {
+			return err
+		}
+	}
 	if len(s.ChangedPaths) > MaxFiles || (s.DiffIncomplete && len(s.Diff) != 0) {
 		return errors.New("snapshot changed paths or incomplete diff is invalid")
 	}
@@ -412,19 +422,16 @@ func ValidateChanges(changes []Change) error {
 	return validatePaths(paths)
 }
 
-// ValidateChangedPaths checks the final layout after applying validated changes.
+// ValidateChangedPaths checks the final layout of an already validated base and changes.
 func ValidateChangedPaths(base []File, changes []Change) error {
+	if len(changes) == 0 {
+		return nil
+	}
 	files := make(map[string]bool, len(base)+len(changes))
 	for _, file := range base {
-		if !ValidPath(file.Path) || files[file.Path] {
-			return fmt.Errorf("unsafe or duplicate base path %q", file.Path)
-		}
 		files[file.Path] = true
 	}
 	for _, change := range changes {
-		if !ValidPath(change.Path) {
-			return fmt.Errorf("unsafe changed path %q", change.Path)
-		}
 		if change.Delete {
 			if !files[change.Path] {
 				return fmt.Errorf("deleted path %q does not match source", change.Path)

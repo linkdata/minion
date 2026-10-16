@@ -47,6 +47,7 @@ func TestPortableContractsRejectMismatches(t *testing.T) {
 		{"source", func(j *Job) { j.Source.Head = "untrusted" }},
 		{"requester identity", func(j *Job) { j.Identity.RequesterID = 0 }},
 		{"runtime", func(j *Job) { j.RuntimeBudget = 0 }},
+		{"title bound", func(j *Job) { j.Title = strings.Repeat("x", maxActionTitleBytes+1) }},
 		{"action", func(j *Job) { j.Action = "unknown" }},
 		{"skill path", func(j *Job) { j.Main.Skills = []string{"/tmp/skill/SKILL.md"} }},
 		{"provider", func(j *Job) { j.Main.Provider = "unknown" }},
@@ -301,7 +302,7 @@ func TestRunnerKeepsCriticReadOnlyAndNotesPrivate(t *testing.T) {
 		if !strings.Contains(request.prompt, baseline) || !strings.Contains(request.prompt, "original input baseline") || !strings.Contains(request.prompt, "executable modes") {
 			t.Fatal("critic lacks original baseline instructions")
 		}
-		if !strings.Contains(request.prompt, "Do not write omitted paths or their parents") {
+		if !strings.Contains(request.prompt, "Do not create, change or delete omitted paths or anything beneath them, or replace their parent directories with files") {
 			t.Fatal("omitted-path constraint missing")
 		}
 		for name, want := range map[string]string{"source.txt": "source\n", "deleted.txt": "original deleted file"} {

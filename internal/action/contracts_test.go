@@ -32,7 +32,7 @@ func TestRunnerOmittedSourceWriteIsTerminal(t *testing.T) {
 	job := portableJob(command.Fix)
 	job.Source.Omitted = []string{"hidden"}
 	runner := Runner{WorkRoot: t.TempDir(), RunCodex: func(_ context.Context, dir, prompt string, _ bool, _ string) (codexcli.Result, error) {
-		if !strings.Contains(prompt, "Do not write omitted paths") {
+		if !strings.Contains(prompt, "Do not create, change or delete omitted paths or anything beneath them") {
 			t.Fatal("prompt permits writing omitted source")
 		}
 		if err := os.WriteFile(filepath.Join(dir, "hidden"), []byte("replacement"), 0600); err != nil {
@@ -40,8 +40,12 @@ func TestRunnerOmittedSourceWriteIsTerminal(t *testing.T) {
 		}
 		return codexcli.Result{Answer: "Done."}, nil
 	}}
-	if _, err := runner.Run(context.Background(), job); !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "omitted source path") {
+	result, err := runner.Run(context.Background(), job)
+	if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "omitted source path") {
 		t.Fatalf("omitted write must not rerun the model: %v", err)
+	}
+	if err := result.validate(job, false); err != nil {
+		t.Fatalf("incomplete result must retain valid diagnostics: %v", err)
 	}
 }
 

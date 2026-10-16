@@ -152,6 +152,7 @@ func TestChangedPathsChecksFinalSourceLayout(t *testing.T) {
 		base    []File
 		changes []Change
 	}{
+		{[]File{{Path: "Foo/a", Mode: Regular}}, nil},
 		{[]File{{Path: "Foo/a", Mode: Regular}}, []Change{{Path: "Foo/a", Delete: true}, {Path: "foo/a", Mode: Regular}}},
 		{[]File{{Path: "entry", Mode: Regular}}, []Change{{Path: "entry", Delete: true}, {Path: "entry/child", Mode: Regular}}},
 		{[]File{{Path: "entry/child", Mode: Regular}}, []Change{{Path: "entry/child", Delete: true}, {Path: "entry", Mode: Regular}}},
@@ -159,6 +160,26 @@ func TestChangedPathsChecksFinalSourceLayout(t *testing.T) {
 		if err := ValidateChangedPaths(test.base, test.changes); err != nil {
 			t.Fatalf("rejected valid final layout: %+v,%v", test, err)
 		}
+	}
+}
+
+func TestDefaultSnapshotRejectsOmittedFileOverlap(t *testing.T) {
+	for i, test := range []struct{ file, omitted string }{
+		{"file", "file"}, {"File", "file"}, {"dir/file", "dir"}, {"dir", "dir/file"}, {"Foo/a", "foo/b"},
+	} {
+		t.Run("overlap-"+strconv.Itoa(i), func(t *testing.T) {
+			snapshot := Snapshot{Head: strings.Repeat("a", 40), Files: []File{{Path: test.file, Mode: Regular}}, Omitted: []string{test.omitted}}
+			if err := ValidateSnapshot(snapshot); err == nil {
+				t.Fatalf("accepted default source/omission overlap: %+v", test)
+			}
+			snapshot.Base, snapshot.MergeBase = strings.Repeat("b", 40), strings.Repeat("b", 40)
+			if err := ValidateSnapshot(snapshot); err != nil {
+				t.Fatalf("rejected possible base-side omission: %+v,%v", test, err)
+			}
+		})
+	}
+	if err := ValidateSnapshot(Snapshot{Head: strings.Repeat("a", 40), Files: []File{{Path: "Foo/a", Mode: Regular}}, Omitted: []string{"Foo/b"}}); err != nil {
+		t.Fatalf("rejected disjoint default omission: %v", err)
 	}
 }
 

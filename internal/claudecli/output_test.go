@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/linkdata/minion/internal/aicli"
+	"github.com/linkdata/minion/internal/usage"
 )
 
 func TestOutputFragments(t *testing.T) {
@@ -91,19 +92,59 @@ func TestUsageValidation(t *testing.T) {
 	zero, one, negative, maximum := int64(0), int64(1), int64(-1), int64(math.MaxInt64)
 	for _, tc := range []struct {
 		name  string
-		usage *eventUsage
+		usage eventUsage
 		valid bool
 	}{
-		{"absent", nil, false},
-		{"missing", &eventUsage{}, false},
-		{"zero", &eventUsage{Input: &zero, Created: &zero, Cached: &zero, Output: &zero}, true},
-		{"negative", &eventUsage{Input: &negative, Created: &zero, Cached: &zero, Output: &zero}, false},
-		{"input overflow", &eventUsage{Input: &maximum, Created: &one, Cached: &zero, Output: &zero}, false},
-		{"total overflow", &eventUsage{Input: &maximum, Created: &zero, Cached: &zero, Output: &one}, false},
+		{"missing", eventUsage{}, false},
+		{"zero", eventUsage{Input: &zero, Created: &zero, Cached: &zero, Output: &zero}, true},
+		{"negative", eventUsage{Input: &negative, Created: &zero, Cached: &zero, Output: &zero}, false},
+		{"input overflow", eventUsage{Input: &maximum, Created: &one, Cached: &zero, Output: &zero}, false},
+		{"total overflow", eventUsage{Input: &maximum, Created: &zero, Cached: &zero, Output: &one}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, valid := tc.usage.tokens(); valid != tc.valid {
 				t.Fatalf("valid = %v, want %v", valid, tc.valid)
+			}
+		})
+	}
+}
+
+func TestOutputWholeTreeUsage(t *testing.T) {
+	const root = `{"input_tokens":3,"cache_creation_input_tokens":5,"cache_read_input_tokens":7,"output_tokens":11}`
+	const models = `{"claude-main":{"inputTokens":13,"cacheCreationInputTokens":17,"cacheReadInputTokens":19,"outputTokens":23},"claude-helper":{"inputTokens":29,"cacheCreationInputTokens":31,"cacheReadInputTokens":37,"outputTokens":41}}`
+	fallback := usage.Tokens{Input: 15, CachedInput: 7, Output: 11}
+	for _, tc := range []struct {
+		name, root, models string
+		want               usage.Tokens
+		complete           bool
+	}{
+		{"root and helper models", root, models, usage.Tokens{Input: 146, CachedInput: 56, Output: 64}, true},
+		{"aggregate ignores malformed root", `"bad"`, models, usage.Tokens{Input: 146, CachedInput: 56, Output: 64}, true},
+		{"zero aggregate", root, `{"main":{"inputTokens":0,"cacheCreationInputTokens":0,"cacheReadInputTokens":0,"outputTokens":0}}`, usage.Tokens{}, true},
+		{"absent aggregate", root, "", fallback, false},
+		{"empty aggregate", root, "{}", fallback, false},
+		{"malformed aggregate", root, `"bad"`, fallback, false},
+		{"partially decoded aggregate", root, `{"main":{"inputTokens":"bad","cacheCreationInputTokens":0,"cacheReadInputTokens":0,"outputTokens":1}}`, fallback, false},
+		{"missing counter", root, `{"main":{"inputTokens":1,"outputTokens":2}}`, fallback, false},
+		{"aggregate total overflow", root, `{"main":{"inputTokens":9223372036854775806,"cacheCreationInputTokens":0,"cacheReadInputTokens":0,"outputTokens":0},"helper":{"inputTokens":0,"cacheCreationInputTokens":0,"cacheReadInputTokens":0,"outputTokens":2}}`, fallback, false},
+		{"malformed fallback", `"bad"`, "null", usage.Tokens{}, false},
+		{"invalid fallback", `{"input_tokens":9223372036854775807,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":1}`, "null", usage.Tokens{}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data := `{"type":"result","subtype":"success","result":"answer"`
+			if tc.root != "" {
+				data += `,"usage":` + tc.root
+			}
+			if tc.models != "" {
+				data += `,"modelUsage":` + tc.models
+			}
+			o := jsonlOutput{}
+			if _, err := o.Write([]byte(data + "}\n")); err != nil {
+				t.Fatal(err)
+			}
+			o.finish()
+			if o.err != nil || o.result.Answer != "answer" || o.result.Tokens != tc.want || o.result.UsageComplete != tc.complete {
+				t.Fatalf("output = %+v, %v; want tokens %+v, complete %v", o.result, o.err, tc.want, tc.complete)
 			}
 		})
 	}
