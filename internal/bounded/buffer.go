@@ -4,7 +4,6 @@ package bounded
 import (
 	"bytes"
 	"context"
-	"io"
 )
 
 // Buffer discards output beyond Limit and optionally cancels its producer.
@@ -30,10 +29,5 @@ func (b *Buffer) Write(p []byte) (int, error) {
 	return n, nil
 }
 
-func (b *Buffer) ReadFrom(r io.Reader) (int64, error) {
-	return io.Copy(struct{ io.Writer }{b}, r)
-}
-
 func (b *Buffer) Bytes() []byte  { return b.buffer.Bytes() }
 func (b *Buffer) String() string { return b.buffer.String() }
-func (b *Buffer) Len() int       { return b.buffer.Len() }

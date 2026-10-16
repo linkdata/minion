@@ -201,10 +201,15 @@ func TestFixIndexDisablesAttributesAndOperatorConfiguration(t *testing.T) {
 	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("repository filter ran: %v", err)
 	}
+	systemDisabled := false
 	for _, entry := range index.environment() {
+		systemDisabled = systemDisabled || entry == "GIT_CONFIG_NOSYSTEM=1"
 		if strings.HasPrefix(entry, "GH_TOKEN=") || strings.Contains(entry, global) || strings.HasPrefix(entry, "GIT_CONFIG_COUNT=") {
 			t.Fatalf("unsafe offline Git environment: %q", entry)
 		}
+	}
+	if !systemDisabled {
+		t.Fatal("offline Git did not disable system configuration")
 	}
 }
 

@@ -381,8 +381,7 @@ func TestSnapshotPreservesGitLegalSourceNames(t *testing.T) {
 			t.Fatalf("source %q data=%q, error=%v", name, data, err)
 		}
 	}
-	changes, err := workspace.Changes(context.Background(), root, snapshot.Files)
-	if err != nil || len(changes) != 0 {
-		t.Fatalf("unchanged source changes=%+v, error=%v", changes, err)
+	if err := workspace.CheckUnchanged(context.Background(), root, snapshot.Files); err != nil {
+		t.Fatalf("unchanged source: %v", err)
 	}
 }

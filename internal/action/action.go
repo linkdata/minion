@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 	"time"
@@ -32,9 +33,10 @@ var modelLineBreaks = strings.NewReplacer(
 
 // Orchestrator prepares portable actions and publishes results through trusted Git/GitHub access.
 type Orchestrator struct {
-	Runner                    Runner
-	WorkRoot                  string
-	Main, Adversarial         string
+	Runner            Runner
+	WorkRoot          string
+	Main, Adversarial string
+	// CriticMaxRounds selects config.DefaultCriticMaxRounds when zero.
 	CriticMaxRounds           int
 	AlwaysOnSkills            []string
 	CodexModel, CodexEffort   string
@@ -43,11 +45,13 @@ type Orchestrator struct {
 	BotLogin                  string
 	Store                     *state.Store
 	Usage                     *usage.Store
+	Logger                    *log.Logger
 	// CheckWorkRoot verifies the work filesystem before a job and after failure.
 	//
 	// A nil function disables these checks.
 	CheckWorkRoot func() error
-	Timeout       time.Duration
+	// Timeout selects config.DefaultJobTimeout when zero.
+	Timeout time.Duration
 	// MaxGitHubContextBytes limits combined GitHub text.
 	//
 	// Nonpositive values use [config.DefaultMaxGitHubContextBytes].
@@ -128,7 +132,7 @@ func (e *Orchestrator) validateCommand(job monitor.Job) error {
 	if !mapping.SupportsProvider(e.mainProvider()) {
 		return fmt.Errorf("%w: action %q is not supported with %s as main", monitor.ErrTerminalJob, mapping.Action, e.mainProvider())
 	}
-	if _, err := e.Runner.selectedSkills(e.mainProvider(), mapping.Skills, e.AlwaysOnSkills); err != nil {
+	if _, err := e.Runner.selectedSkills(e.mainProvider(), mapping.Skills, nil); err != nil {
 		return err
 	}
 	return nil
@@ -136,7 +140,11 @@ func (e *Orchestrator) validateCommand(job monitor.Job) error {
 
 func (e *Orchestrator) mainProvider() string { return cmp.Or(e.Main, "codex") }
 
-func (e *Orchestrator) logf(format string, args ...any) { e.Runner.logf(format, args...) }
+func (e *Orchestrator) logf(format string, args ...any) {
+	if e.Logger != nil {
+		e.Logger.Printf(format, args...)
+	}
+}
 
 func (e *Orchestrator) alreadyAcknowledged(ctx context.Context, job monitor.Job) (bool, error) {
 	includeReviews := job.SubjectType == "PullRequest" && job.Command.Action == command.Review

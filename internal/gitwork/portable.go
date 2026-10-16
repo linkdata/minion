@@ -30,9 +30,6 @@ func (c *Checkout) sourceTree(ctx context.Context, ref string) ([]sourceEntry, e
 	if entries, ok := c.sourceTrees[ref]; ok {
 		return entries, nil
 	}
-	if c.lookupTree == nil {
-		return nil, errors.New("source tree metadata lookup is missing")
-	}
 	treeSHA, err := runGit(ctx, c.path, "rev-parse", "--verify", ref+"^{tree}")
 	if err != nil {
 		return nil, err
@@ -309,9 +306,6 @@ func (c *Checkout) Import(ctx context.Context, expectedHead string, changes []wo
 	staged, err := c.stagedPaths(ctx, "")
 	if err != nil {
 		return err
-	}
-	if len(changes) != 0 && len(staged) == 0 {
-		return ErrNoChanges
 	}
 	declared := make([]string, len(changes))
 	for i, change := range changes {

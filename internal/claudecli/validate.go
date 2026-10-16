@@ -20,7 +20,7 @@ import (
 
 // Validate checks Claude's prerequisites and resolves model settings.
 //
-// It requires Linux, Claude Code 2.1.295 or later, authenticated CLI state,
+// It requires Linux, Claude Code 2.1.302 or later, authenticated CLI state,
 // bubblewrap, and socat. Model discovery uses the CLI's initialization protocol
 // without an inference turn. These checks do not execute a sandboxed command;
 // deployments must validate runtime isolation.
@@ -60,7 +60,7 @@ func Validate(ctx context.Context, settings config.ClaudeConfig) (validated conf
 		return validated, err
 	}
 	if !supportedVersion(string(version)) {
-		return validated, errors.New("claude isolation requires Claude Code 2.1.295 or later")
+		return validated, errors.New("claude isolation requires Claude Code 2.1.302 or later")
 	}
 	for _, name := range []string{"bwrap", "socat"} {
 		if _, err := executable(name, ""); err != nil {
@@ -162,7 +162,7 @@ func supportedVersion(version string) bool {
 	if len(parts) != 3 {
 		return false
 	}
-	minimum := []int{2, 1, 295}
+	minimum := []int{2, 1, 302}
 	numbers := make([]int, len(parts))
 	for i, part := range parts {
 		n, err := strconv.Atoi(part)

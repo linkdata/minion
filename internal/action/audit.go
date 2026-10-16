@@ -21,16 +21,11 @@ const (
 	auditIncomplete
 )
 
-func readAuditFiles(outputDir string) ([]workspace.File, error) {
-	files, _, err := readAuditArtifacts(outputDir, auditComplete)
-	return files, err
-}
-
 func readAuditArtifacts(outputDir string, mode auditReadMode) ([]workspace.File, []Diagnostic, error) {
 	var files []workspace.File
 	var diagnostics []Diagnostic
 	for _, name := range auditArtifacts {
-		data, err := readAuditArtifact(filepath.Join(outputDir, name), auditArtifactLimit(name), mode == auditIncomplete || auditArtifactMayBeEmpty(name))
+		data, err := readAuditArtifact(filepath.Join(outputDir, name), auditArtifactLimit(name), mode != auditComplete || auditArtifactMayBeEmpty(name))
 		if errors.Is(err, os.ErrNotExist) && mode != auditComplete {
 			continue
 		}

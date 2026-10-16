@@ -20,8 +20,8 @@ const (
 	maxUsageFiles        = 1024
 	maxUsageAgents       = 257
 	maxUsageHeaderBytes  = 64 << 10
-	maxUsageRolloutBytes = 16 << 20
-	maxUsageScanBytes    = 64 << 20
+	maxUsageRolloutBytes = 128 << 20
+	maxUsageScanBytes    = 512 << 20
 )
 
 type rolloutMeta struct {

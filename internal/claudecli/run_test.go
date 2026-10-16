@@ -66,7 +66,7 @@ func TestUnixSocketWorkaround(t *testing.T) {
 			fakeExecutable(t, "socat", "exit 99\n")
 			binary := fakeExecutable(t, "claude", `printf '%s\n' "$@" > "$0.args"
 if [ "$1" = '--version' ]; then
-  printf '%s\n' '2.1.295 (Claude Code)'
+  printf '%s\n' '2.1.302 (Claude Code)'
 elif [ "$4" = 'auth' ]; then
   printf '%s\n' '{"loggedIn":true}'
 else
@@ -140,6 +140,9 @@ printf '%s\n' '`+successfulResult+`'
 				t.Fatal("unsafe or incorrect environment reached Claude")
 			}
 			args := strings.Split(strings.TrimSuffix(readFile(t, binary+".args"), "\n"), "\n")
+			if strings.Contains(strings.Join(args, "\n"), "--include-partial-messages") {
+				t.Fatal("unused token deltas consume the bounded event budget")
+			}
 			values := map[string]string{}
 			for i, arg := range args[:len(args)-1] {
 				values[arg] = args[i+1]
@@ -265,7 +268,7 @@ func TestRunStructuredOutput(t *testing.T) {
 		{"denied", `{"type":"result","subtype":"success","structured_output":` + structured + `,"permission_denials":[{}]}`, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			binary := fakeExecutable(t, "claude", "printf '%s\\n' \"$@\" > \"$0.args\"\ncat >/dev/null\ncat <<'RESULT'\n"+tc.output+"\nRESULT\n")
+			binary := fakeExecutable(t, "claude", "printf '%s\\n' \"$@\" > \"$0.args\"\ncat >/dev/null\ncat <<'RESULT'\n"+numberResultEvents(tc.output)+"\nRESULT\n")
 			result, err := Run(context.Background(), t.TempDir(), "task", true, "", config.ClaudeConfig{OutputSchema: schema})
 			if (err != nil) != tc.fails || tc.fails && (result.Answer != "" || result.UsageComplete) || !tc.fails && result.Answer != structured {
 				t.Fatalf("Run = %+v, %v", result, err)
@@ -284,8 +287,8 @@ func TestRunRejectsUnsafePaths(t *testing.T) {
 		name, dir, output string
 		settings          config.ClaudeConfig
 	}{
-		{name: "empty checkout"},
-		{name: "root checkout", dir: "/"},
+		{name: "empty source snapshot"},
+		{name: "root source snapshot", dir: "/"},
 		{name: "same output", dir: workspace, output: workspace},
 		{name: "ancestor output", dir: workspace, output: filepath.Dir(workspace)},
 		{name: "relative skill", dir: workspace, settings: config.ClaudeConfig{Skills: []string{"SKILL.md"}}},
@@ -303,7 +306,7 @@ func TestRunRejectsUnsafePaths(t *testing.T) {
 	}
 	t.Setenv("PATH", workspace)
 	if _, err := Run(context.Background(), workspace, "task", false, "", config.ClaudeConfig{}); err == nil {
-		t.Fatal("accepted executable inside checkout")
+		t.Fatal("accepted executable inside source snapshot")
 	}
 }
 

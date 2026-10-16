@@ -606,7 +606,6 @@ func TestRunOnceCountsPublicationFailureWhenWorkRootFills(t *testing.T) {
 func TestRunOnceBoundsPublicationFailuresAfterModel(t *testing.T) {
 	for _, cause := range []error{&github.StatusError{StatusCode: http.StatusBadGateway}, context.Canceled} {
 		t.Run(cause.Error(), func(t *testing.T) {
-
 			now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
 			item := github.Item{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}, HTMLURL: "https://github.com/example-owner/example-repo/pull/7#issuecomment-1"}
 			gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}, items: []github.Item{item}, permission: github.Permission{Permission: "write"}}
@@ -633,7 +632,6 @@ func TestRunOnceBoundsPublicationFailuresAfterModel(t *testing.T) {
 			if _, err := m.RunOnce(context.Background(), store); err != nil || len(executor.jobs) != maxJobAttempts {
 				t.Fatalf("finished job reran: err=%v jobs=%d", err, len(executor.jobs))
 			}
-
 		})
 	}
 }
@@ -1319,10 +1317,13 @@ func TestRunOnceRefundsCanceledTerminalExecution(t *testing.T) {
 	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
 	item := github.Item{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}, HTMLURL: "https://github.com/example-owner/example-repo/pull/7#issuecomment-1"}
 	gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}, items: []github.Item{item}, permission: github.Permission{Permission: "write"}}
-	executor := &fakeExecutor{executeErr: errors.Join(ErrTerminalJob, context.Canceled)}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	executor := &fakeExecutor{onExecute: cancel, executeErr: errors.Join(ErrTerminalJob, context.Canceled)}
 	store := openState(t, now.Add(-time.Minute))
-	m := &Monitor{Config: testConfig(t), GitHub: gh, Executor: executor, Now: func() time.Time { return now }}
-	if _, err := m.RunOnce(context.Background(), store); !errors.Is(err, context.Canceled) {
+	var logs bytes.Buffer
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Executor: executor, Logger: log.New(&logs, "", 0), Now: func() time.Time { return now }}
+	if _, err := m.RunOnce(ctx, store); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled execution=%v", err)
 	}
 	if len(executor.jobs) != 1 || len(gh.comments) != 0 || len(store.Data.Processed) != 0 {
@@ -1332,9 +1333,41 @@ func TestRunOnceRefundsCanceledTerminalExecution(t *testing.T) {
 	if got := store.Data.JobFailures[id].Attempts; got != 0 {
 		t.Fatalf("cancellation consumed %d attempts", got)
 	}
+	if !strings.Contains(logs.String(), " interrupted: ") || strings.Contains(logs.String(), "failed (attempt") {
+		t.Fatalf("shutdown log is not an interruption: %q", logs.String())
+	}
+	executor.onExecute = nil
 	executor.executeErr = nil
 	m.Now = func() time.Time { return now.Add(time.Minute) }
 	if _, err := m.RunOnce(context.Background(), store); err != nil || len(executor.jobs) != 2 || len(store.Data.Processed) != 1 {
 		t.Fatalf("canceled job did not resume: err=%v jobs=%d state=%+v", err, len(executor.jobs), store.Data)
+	}
+}
+
+func TestRunOnceCountsInternalCancellation(t *testing.T) {
+	for _, terminal := range []bool{false, true} {
+		t.Run(fmt.Sprint(terminal), func(t *testing.T) {
+			now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+			item := github.Item{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}, HTMLURL: "https://github.com/example-owner/example-repo/pull/7#issuecomment-1"}
+			gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}, items: []github.Item{item}, permission: github.Permission{Permission: "write"}}
+			executeErr := context.Canceled
+			if terminal {
+				executeErr = errors.Join(ErrTerminalJob, executeErr)
+			}
+			executor := &fakeExecutor{executeErr: executeErr}
+			store := openState(t, now.Add(-time.Minute))
+			m := &Monitor{Config: testConfig(t), GitHub: gh, Executor: executor, Now: func() time.Time { return now }}
+			_, err := m.RunOnce(context.Background(), store)
+			if len(executor.jobs) != 1 {
+				t.Fatalf("jobs=%d", len(executor.jobs))
+			}
+			if terminal {
+				if err != nil || len(gh.comments) != 1 || len(store.Data.Processed) != 1 {
+					t.Fatalf("terminal internal cancellation refunded: err=%v replies=%d processed=%d", err, len(gh.comments), len(store.Data.Processed))
+				}
+			} else if !errors.Is(err, context.Canceled) || store.Data.JobFailures[executor.jobs[0].ID].Attempts != 1 {
+				t.Fatalf("internal cancellation refunded: err=%v failures=%+v", err, store.Data.JobFailures)
+			}
+		})
 	}
 }

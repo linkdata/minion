@@ -67,7 +67,7 @@ func TestAPIKeyConfiguration(t *testing.T) {
 test "$(cat "$CLAUDE_CONFIG_DIR/api-key")" = '`+dummyAPIKey+`' || exit 3
 printf '%s\n' "$CLAUDE_CONFIG_DIR" >> "$0.authdirs"
 if [ "$1" = '--version' ]; then
-  printf '%s\n' '2.1.295 (Claude Code)'
+  printf '%s\n' '2.1.302 (Claude Code)'
   exit
 fi
 printf '%s\n' "$@" >> "$0.args"

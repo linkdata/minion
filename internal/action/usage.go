@@ -1,6 +1,7 @@
 package action
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -30,16 +31,10 @@ func (e *Orchestrator) trackUsage(job monitor.Job) (*Orchestrator, func(error) e
 		StartedAt: time.Now().UTC(), Status: "running", UsageComplete: true,
 	}
 	main := e.roleSettings(record.Provider, nil)
-	record.Model, record.Effort = main.Model, main.Effort
-	if record.Model == "" {
-		record.Model = "default"
-	}
+	record.Model, record.Effort = cmp.Or(main.Model, "default"), main.Effort
 	if record.CriticProvider != "" {
 		critic := e.roleSettings(record.CriticProvider, nil)
-		record.CriticModel, record.CriticEffort = critic.Model, critic.Effort
-		if record.CriticModel == "" {
-			record.CriticModel = "default"
-		}
+		record.CriticModel, record.CriticEffort = cmp.Or(critic.Model, "default"), critic.Effort
 	}
 	save := func() error {
 		if err := e.Usage.Save(record); err != nil {
@@ -51,16 +46,12 @@ func (e *Orchestrator) trackUsage(job monitor.Job) (*Orchestrator, func(error) e
 		return nil, nil, err
 	}
 	tracked := *e
-	observe := tracked.Runner.aroundModel
 	tracked.Runner.aroundModel = func(ctx context.Context, request modelRun, next modelCall) (aicli.Result, error) {
-		model := request.model
-		if model == "" {
-			model = "default"
-		}
+		// The dispatched Job's settings are authoritative over host defaults.
 		if request.role == "main" {
-			record.Provider, record.Model, record.Effort = request.provider, model, request.effort
-		} else if request.role == "critic" {
-			record.CriticProvider, record.CriticModel, record.CriticEffort = request.provider, model, request.effort
+			record.Provider, record.Model, record.Effort = request.provider, cmp.Or(request.model, "default"), request.effort
+		} else {
+			record.CriticProvider, record.CriticModel, record.CriticEffort = request.provider, cmp.Or(request.model, "default"), request.effort
 		}
 		calls := &record.CodexCalls
 		if request.provider == "claude" {
@@ -74,13 +65,7 @@ func (e *Orchestrator) trackUsage(job monitor.Job) (*Orchestrator, func(error) e
 			record.UsageComplete = complete
 			return aicli.Result{}, err
 		}
-		var result aicli.Result
-		var err error
-		if observe != nil {
-			result, err = observe(ctx, request, next)
-		} else {
-			result, err = next(ctx, request)
-		}
+		result, err := next(ctx, request)
 		record.Tokens.Add(result.Tokens)
 		record.UsageComplete = complete && result.UsageComplete
 		return result, errors.Join(err, save())

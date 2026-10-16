@@ -153,7 +153,7 @@ func TestPublishFixRejectsNonemptyReviewedChangesDroppedByGit(t *testing.T) {
 			orchestrator := Orchestrator{GitHub: client, BotLogin: "bot", WorkRoot: root}
 			result := Result{Changes: []workspace.Change{{Path: "reviewed.txt", Mode: workspace.Regular, Data: []byte("reviewed change")}}}
 			err = orchestrator.publishFix(context.Background(), prepared, result)
-			if !errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, gitwork.ErrNoChanges) || writes != 0 {
+			if !errors.Is(err, monitor.ErrTerminalJob) || writes != 0 || (stage == "commit" && !errors.Is(err, gitwork.ErrNoChanges)) || (stage == "import" && !strings.Contains(err.Error(), "staged paths do not match reviewed changes")) {
 				t.Fatalf("dropped %s changes: writes=%d err=%v", stage, writes, err)
 			}
 		})
@@ -172,7 +172,7 @@ func TestCompletedAuditRetentionFailureIsTerminal(t *testing.T) {
 	defer checkout.Close()
 	job := portableJob(command.SecurityAudit)
 	job.Source.Head, job.Source.Files = base, nil
-	result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: base, Answer: "Complete report"}
+	result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: base, Answer: "content", Calls: []CallUsage{{Provider: job.Main.Provider, Role: "main", Round: 1}}}
 	metadata := []byte(fmt.Sprintf(`{"run_id":"test-run","repo":%q,"target":%q,"source_ref":%q,"profile":"standard","scope_paths":["."],"budget":null,"selected_companion_files":[],"prior_run_paths":[],"shared_file_owners":%s,"execution_policy":"sandboxed-source-and-local-only","run_status":"complete"}`, job.Identity.Repository, sourceIdentity(job), base, auditTestOwners))
 	for _, name := range auditArtifacts {
 		data := []byte("content")

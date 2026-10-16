@@ -27,13 +27,12 @@ func assertGitChildStopped(t *testing.T, pidFile string) {
 		t.Fatalf("invalid Git child PID %q: %v", data, err)
 	}
 	data, err = os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
-	if errors.Is(err, os.ErrNotExist) {
+	if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ESRCH) {
 		return
 	}
 	// A killed orphan may wait briefly for its new parent to reap it.
 	_, state, ok := strings.Cut(string(data), ") ")
 	if err != nil || !ok || !strings.HasPrefix(state, "Z ") {
-		t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
 		t.Fatalf("Git child is still running: pid=%d stat=%q error=%v", pid, data, err)
 	}
 }

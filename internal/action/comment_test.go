@@ -83,7 +83,7 @@ func TestCommentCommandReportsIssueAndPullRequest(t *testing.T) {
 					},
 				},
 			}
-			if err := executor.perform(context.Background(), job); err != nil {
+			if err := executor.perform(testActionContext(t), job); err != nil {
 				t.Fatal(err)
 			}
 			if !strings.Contains(published, wantHead) || !strings.Contains(published, "Report") || !strings.Contains(published, job.Marker()) || !strings.Contains(published, "\n> @otherbot fix") {

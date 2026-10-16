@@ -18,6 +18,7 @@ import (
 	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/cleanup"
 	"github.com/linkdata/minion/internal/github"
+	"github.com/linkdata/minion/internal/processgroup"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -92,10 +93,48 @@ func Clone(ctx context.Context, workRoot, repo, defaultBranch string, lookupTree
 	return cloneFromURL(ctx, workRoot, url, defaultBranch, lookupTree)
 }
 
-// cloneFromURL is separate so local Git fixtures can exercise the same clone
-// sequence without a network call. Production callers always pass the URL
-// returned by repositoryURL.
+// ClonePullRequest checks out only the verified PR head. The base tip is fetched
+// for merge-base discovery without validating or materializing its unused tree.
+func ClonePullRequest(ctx context.Context, workRoot, repo string, number int, baseRef, expectedHeadSHA string, lookupTree func(context.Context, string) (github.GitTree, error)) (*Checkout, error) {
+	url, err := repositoryURL(repo)
+	if err != nil {
+		return nil, err
+	}
+	return clonePullRequestFromURL(ctx, workRoot, url, number, baseRef, expectedHeadSHA, lookupTree)
+}
+
+// URL constructors let local fixtures exercise production preparation without network calls.
 func cloneFromURL(ctx context.Context, workRoot, url, defaultBranch string, lookupTree func(context.Context, string) (github.GitTree, error)) (*Checkout, error) {
+	c, err := cloneRepository(ctx, workRoot, url, defaultBranch, lookupTree)
+	if err != nil {
+		return nil, err
+	}
+	head, err := runGit(ctx, c.path, "rev-parse", "--verify", "refs/remotes/origin/"+defaultBranch+"^{commit}")
+	if err == nil {
+		err = c.checkoutSource(ctx, head)
+	}
+	if err != nil {
+		return nil, errors.Join(err, c.Close())
+	}
+	return c, nil
+}
+
+func clonePullRequestFromURL(ctx context.Context, workRoot, url string, number int, baseRef, expectedHeadSHA string, lookupTree func(context.Context, string) (github.GitTree, error)) (*Checkout, error) {
+	if err := validatePullRequest(number, baseRef, expectedHeadSHA); err != nil {
+		return nil, err
+	}
+	c, err := cloneRepository(ctx, workRoot, url, baseRef, lookupTree)
+	if err != nil {
+		return nil, err
+	}
+	if err := c.CheckoutPullRequest(ctx, number, baseRef, expectedHeadSHA); err != nil {
+		return nil, errors.Join(err, c.Close())
+	}
+	return c, nil
+}
+
+// cloneRepository fetches filtered objects and configures a trusted checkout before materialization.
+func cloneRepository(ctx context.Context, workRoot, url, defaultBranch string, lookupTree func(context.Context, string) (github.GitTree, error)) (*Checkout, error) {
 	if lookupTree == nil {
 		return nil, errors.New("source tree metadata lookup is missing")
 	}
@@ -128,20 +167,7 @@ func cloneFromURL(ctx context.Context, workRoot, url, defaultBranch string, look
 		return nil, err
 	}
 	c := &Checkout{path: path, url: url, lookupTree: lookupTree}
-	head, err := runGit(ctx, path, "rev-parse", "--verify", "refs/remotes/origin/"+defaultBranch+"^{commit}")
-	if err != nil {
-		return nil, err
-	}
-	if _, err := c.sourceTree(ctx, head); err != nil {
-		return nil, err
-	}
 	if err := c.disableAttributes(); err != nil {
-		return nil, err
-	}
-	if _, err := runGit(ctx, path, "checkout", "--detach", head); err != nil {
-		return nil, err
-	}
-	if c.expectedHead, err = c.head(ctx); err != nil {
 		return nil, err
 	}
 	if err := c.recordConfig(); err != nil {
@@ -184,14 +210,8 @@ func (c *Checkout) CheckoutPullRequest(ctx context.Context, number int, baseRef,
 	if err := c.ready(); err != nil {
 		return err
 	}
-	if number <= 0 {
-		return fmt.Errorf("invalid pull request number %d", number)
-	}
-	if err := validateBranch(baseRef); err != nil {
-		return fmt.Errorf("pull request base: %w", err)
-	}
-	if !workspace.ValidSHA(expectedHeadSHA) {
-		return fmt.Errorf("invalid expected pull request SHA %q", expectedHeadSHA)
+	if err := validatePullRequest(number, baseRef, expectedHeadSHA); err != nil {
+		return err
 	}
 	const baseDest = "refs/remotes/minion/base"
 	const headDest = "refs/remotes/minion/pr-head"
@@ -213,6 +233,23 @@ func (c *Checkout) CheckoutPullRequest(ctx context.Context, number int, baseRef,
 	if !strings.EqualFold(head, expectedHeadSHA) {
 		return fmt.Errorf("%w: expected %s, fetched %s", ErrHeadMoved, expectedHeadSHA, head)
 	}
+	return c.checkoutSource(ctx, head)
+}
+
+func validatePullRequest(number int, baseRef, expectedHeadSHA string) error {
+	if number <= 0 {
+		return fmt.Errorf("invalid pull request number %d", number)
+	}
+	if err := validateBranch(baseRef); err != nil {
+		return fmt.Errorf("pull request base: %w", err)
+	}
+	if !workspace.ValidSHA(expectedHeadSHA) {
+		return fmt.Errorf("invalid expected pull request SHA %q", expectedHeadSHA)
+	}
+	return nil
+}
+
+func (c *Checkout) checkoutSource(ctx context.Context, head string) error {
 	if _, err := c.sourceTree(ctx, head); err != nil {
 		return err
 	}
@@ -489,7 +526,7 @@ func runGitInputTo(ctx context.Context, dir string, stdin io.Reader, stdout io.W
 		"-c", "submodule.recurse=false",
 	}
 	cmd := exec.CommandContext(ctx, "git", append(gitArgs, args...)...)
-	configureGitCancellation(cmd)
+	processgroup.Configure(cmd)
 	cmd.WaitDelay = 2 * time.Second
 	cmd.Dir = dir
 	cmd.Env = cleanGitEnvironment()

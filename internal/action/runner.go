@@ -47,6 +47,12 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 	}
 	ctx, cancel := context.WithTimeout(ctx, job.RuntimeBudget)
 	defer cancel()
+	defer func() {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			result.Answer, result.Changes = "", nil
+			resultErr = errors.Join(monitor.ErrTerminalJob, ctx.Err(), resultErr)
+		}
+	}()
 	configured := *r
 	if err := configured.configureRole(job.Main); err != nil {
 		return result, err
@@ -103,7 +109,7 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 		contextSource.BaseFiles = job.Source.Files
 	}
 	if err := materializeContext(contextDir, contextSource); err != nil {
-		return result, err
+		return result, fmt.Errorf("%w: materialize context: %w", monitor.ErrTerminalJob, err)
 	}
 	var index *fixIndex
 	if job.Action == command.Fix {
@@ -141,7 +147,10 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 			if err != nil {
 				return aicli.Result{}, fmt.Errorf("%w: freeze critic input: %w", monitor.ErrTerminalJob, err)
 			}
-			mapping := fmt.Sprintf("\n\nFor this review, inspect the frozen source at %q. It is a copy of the main execution source %q. Original execution paths in the task identify that original; use the frozen copy for inspection. The original input baseline is unchanged.", review.source, source)
+			mapping := ""
+			if review.source != source {
+				mapping = fmt.Sprintf("\n\nFor this review, inspect the frozen source at %q. It is a copy of the main execution source %q. Original execution paths in the task identify that original; use the frozen copy for inspection. The original input baseline is unchanged.", review.source, source)
+			}
 			if review.outputDir != "" {
 				mapping += fmt.Sprintf(" Frozen reports are at %q, copied from %q; original paths in raw report metadata identify that original report directory.", review.outputDir, outputDir)
 			}
@@ -165,7 +174,7 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 			call, err = dispatch(ctx, request)
 		}
 		if err == nil && review != nil {
-			if verificationErr := review.verify(ctx, job, source, outputDir, index); verificationErr != nil {
+			if verificationErr := review.verify(ctx, job, outputDir, index); verificationErr != nil {
 				err = fmt.Errorf("%w: %w", monitor.ErrTerminalJob, verificationErr)
 			}
 		}
@@ -190,28 +199,26 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 	}
 	prompt, err := configured.actionPrompt(ctx, job, source, contextDir, outputDir)
 	if err != nil {
-		return result, err
+		return result, fmt.Errorf("%w: action prompt: %w", monitor.ErrTerminalJob, err)
 	}
 	answer, runErr := configured.runAI(ctx, job, source, prompt, job.Action == command.Fix, outputDir)
 	if runErr != nil {
 		return result, runErr
 	}
 	var changes []workspace.Change
-	if review != nil {
+	if review != nil && index != nil {
 		changes = review.changes
 	} else if index != nil {
 		changes, err = index.changes(ctx)
 	} else {
 		// Read-only byte canary: detect sandbox or runner regressions against supplied input.
-		changes, err = workspace.Changes(ctx, source, job.Source.Files)
+		err = workspace.CheckUnchanged(ctx, source, job.Source.Files)
 	}
 	if err != nil {
 		return result, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
 	}
 	if job.Action == command.Fix {
 		result.Changes = changes
-	} else if len(changes) != 0 {
-		return result, fmt.Errorf("%w: read-only action modified supplied source", monitor.ErrTerminalJob)
 	}
 	if job.Action == command.SecurityAudit {
 		skill := configured.Codex.SecurityAuditSkill()
@@ -219,7 +226,7 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 		if review != nil {
 			files = review.artifacts
 		} else {
-			files, err = readAuditFiles(outputDir)
+			files, _, err = readAuditArtifacts(outputDir, auditComplete)
 		}
 		if err != nil {
 			return result, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
@@ -237,7 +244,7 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 		result.Answer = strings.ToValidUTF8(result.Answer[:maxOutputBytes-len(suffix)], "") + suffix
 		result.Diagnostics = append(result.Diagnostics, Diagnostic{Code: "output_truncated", Message: "Model answer exceeded the action output limit and was truncated."})
 	}
-	if err := result.Validate(job); err != nil {
+	if err := result.validate(job, true); err != nil {
 		result.Changes, result.Answer = nil, ""
 		return result, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
 	}
@@ -294,7 +301,7 @@ func (r *Runner) checkWorkRootIsolation(root string, job Job) error {
 func (r *Runner) configureRole(role RoleSettings) error {
 	selected, err := r.selectedSkills(role.Provider, role.Skills, role.AlwaysOnSkills)
 	if err != nil {
-		return fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
+		return err
 	}
 	if role.Provider == "codex" {
 		r.Codex.Model, r.Codex.ReasoningEffort = role.Model, role.Effort

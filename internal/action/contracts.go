@@ -1,7 +1,6 @@
 package action
 
 import (
-	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -68,11 +67,13 @@ type CallUsage struct {
 	Model       string       `json:"model,omitempty"`
 	Effort      string       `json:"effort,omitempty"`
 	Tokens      usage.Tokens `json:"tokens"`
-	Complete    bool         `json:"complete"`
+	// Complete describes accounting coverage, independently of model success.
+	Complete bool `json:"complete"`
 }
 
 type Diagnostic struct {
-	Code    string `json:"code"`
+	Code string `json:"code"`
+	// Message is private record content; journals expose only Code and identity.
 	Message string `json:"message"`
 }
 
@@ -107,12 +108,13 @@ const (
 )
 
 type Status struct {
-	Version          int           `json:"version"`
-	Identity         Identity      `json:"identity"`
-	State            StatusState   `json:"state"`
-	Phase            StatusPhase   `json:"phase"`
-	Round            int           `json:"round"`
-	ReviewPhase      string        `json:"review_phase,omitempty"`
+	Version     int         `json:"version"`
+	Identity    Identity    `json:"identity"`
+	State       StatusState `json:"state"`
+	Phase       StatusPhase `json:"phase"`
+	Round       int         `json:"round"`
+	ReviewPhase string      `json:"review_phase,omitempty"`
+	// A receiver checks sequences against its previous status for this attempt.
 	ProgressSequence uint64        `json:"progress_sequence"`
 	LogSequence      uint64        `json:"log_sequence"`
 	ProgressAge      time.Duration `json:"progress_age_ns"`
@@ -121,7 +123,7 @@ type Status struct {
 
 func (id Identity) validate() error {
 	for _, value := range []string{id.JobID, id.AttemptID, id.ExecutorID, id.Requester} {
-		if !boundedText(value, 128) || strings.TrimSpace(value) == "" || strings.ContainsAny(value, "\r\n\x00") {
+		if !boundedText(value, 128) || strings.TrimSpace(value) == "" || strings.ContainsAny(value, "\r\n") {
 			return errors.New("action identity is missing or invalid")
 		}
 	}
@@ -185,8 +187,8 @@ func (j Job) Validate() error {
 			return errors.New("review requires a supplied pull request comparison")
 		}
 	case command.Fix:
-		if j.Identity.SubjectType != "Issue" {
-			return errors.New("fix requires an issue")
+		if j.Identity.SubjectType != "Issue" || j.Source.Base != "" {
+			return errors.New("fix requires an issue without a pull request comparison")
 		}
 	case command.Comment, command.SecurityAudit:
 	default:
@@ -209,7 +211,7 @@ func (j Job) Validate() error {
 			return errors.New("main and critic currently require different providers")
 		}
 	}
-	if j.CriticMaxRounds < 0 || j.CriticMaxRounds > config.MaxCriticMaxRounds {
+	if j.CriticMaxRounds < 0 || j.CriticMaxRounds > config.MaxCriticMaxRounds || (j.Critic != nil && j.CriticMaxRounds == 0) {
 		return errors.New("invalid critic round limit")
 	}
 	if err := workspace.ValidateSnapshot(j.Source); err != nil {
@@ -221,16 +223,24 @@ func (j Job) Validate() error {
 	return nil
 }
 
-func (j Job) rounds() int { return cmp.Or(j.CriticMaxRounds, config.DefaultCriticMaxRounds) }
+func (j Job) rounds() int {
+	if j.Critic == nil {
+		return 1
+	}
+	return j.CriticMaxRounds
+}
 
 func sourceIdentity(j Job) string { return j.Identity.Repository + "@" + j.Source.Head }
 
-func (r Result) Validate(j Job) error { return r.validate(j, true) }
-
-func (r Result) validate(j Job, complete bool) error {
+func (r Result) Validate(j Job) error {
 	if err := j.Validate(); err != nil {
 		return err
 	}
+	return r.validate(j, true)
+}
+
+// validate requires an already validated Job; public imports use Validate.
+func (r Result) validate(j Job, complete bool) error {
 	if r.Version != ProtocolVersion || r.Identity != j.Identity || r.SourceRef != j.Source.Head {
 		return errors.New("action result version, identity or source differs from job")
 	}
@@ -248,6 +258,13 @@ func (r Result) validate(j Job, complete bool) error {
 	}
 	if err := validateResultArtifacts(j, r.Artifacts, complete); err != nil {
 		return err
+	}
+	if complete && j.Action == command.SecurityAudit {
+		for _, file := range r.Artifacts {
+			if file.Path == "REPORT.md" && r.Answer != string(file.Data) {
+				return errors.New("audit answer differs from REPORT.md")
+			}
+		}
 	}
 	rounds := j.rounds()
 	for i, call := range r.Calls {
@@ -285,10 +302,17 @@ func (r Result) validate(j Job, complete bool) error {
 			return errors.New("action result lacks a final full review")
 		}
 	}
-	if len(r.Diagnostics) > 100 {
+	if complete && j.Critic == nil && len(r.Calls) != 1 {
+		return errors.New("action result requires one main call")
+	}
+	return validDiagnostics(r.Diagnostics)
+}
+
+func validDiagnostics(diagnostics []Diagnostic) error {
+	if len(diagnostics) > 100 {
 		return errors.New("too many action diagnostics")
 	}
-	for _, diagnostic := range r.Diagnostics {
+	for _, diagnostic := range diagnostics {
 		if !identitySegment(diagnostic.Code) || !boundedText(diagnostic.Message, 8<<10) {
 			return errors.New("invalid action diagnostic")
 		}
@@ -300,19 +324,18 @@ func (j Job) validateChanges(changes []workspace.Change) error {
 	if err := workspace.ValidateChanges(changes); err != nil {
 		return err
 	}
-	omittedPaths := make([]string, len(j.Source.Omitted))
-	for i, name := range j.Source.Omitted {
-		omittedPaths[i] = workspace.FoldPath(name)
+	files := append([]workspace.File(nil), j.Source.Files...)
+	omittedPaths := make(map[string]string, len(j.Source.Omitted))
+	for _, name := range j.Source.Omitted {
+		omittedPaths[workspace.FoldPath(name)] = name
+		files = append(files, workspace.File{Path: name, Mode: workspace.Regular})
 	}
 	for _, change := range changes {
-		name := workspace.FoldPath(change.Path)
-		for i, path := range omittedPaths {
-			if name == path || strings.HasPrefix(name, path+"/") || strings.HasPrefix(path, name+"/") {
-				return fmt.Errorf("action change %q overlaps omitted source path %q", change.Path, j.Source.Omitted[i])
-			}
+		if omitted, exists := omittedPaths[workspace.FoldPath(change.Path)]; exists {
+			return fmt.Errorf("action change %q overlaps omitted source path %q", change.Path, omitted)
 		}
 	}
-	return workspace.ValidateChangedPaths(j.Source.Files, changes)
+	return workspace.ValidateChangedPaths(files, changes)
 }
 
 var auditArtifacts = []string{"run-metadata.json", "architecture.md", "coverage-ledger.json", "findings.json", "REPORT.md", "FINDINGS-DETAIL.md", "NEEDS-VALIDATION.md"}
@@ -384,6 +407,22 @@ func (s Status) Validate(j Job) error {
 	default:
 		return errors.New("invalid action status phase")
 	}
+	validPair := false
+	switch s.State {
+	case StatusReady:
+		validPair = s.Phase == PhasePreparing && s.Round == 0
+	case StatusRunning:
+		validPair = s.Phase != PhaseFinished
+	case StatusStopping:
+		validPair = s.Phase != PhaseFinished
+	case StatusCompleted, StatusFailed, StatusUnavailable:
+		validPair = s.Phase == PhaseFinished
+	}
+	if !validPair || (s.State == StatusCompleted && s.Round == 0) ||
+		(s.Phase == PhasePreparing && s.Round != 0) ||
+		((s.Phase == PhaseMain || s.Phase == PhaseCollecting || s.Phase == PhaseUploading) && s.Round < 1) {
+		return errors.New("invalid action status state and phase")
+	}
 	if s.Phase == PhaseCritic {
 		if j.Critic == nil || s.Round < 1 || (s.ReviewPhase != "full" && s.ReviewPhase != "verification") || (s.ReviewPhase == "verification" && s.Round == 1) {
 			return errors.New("invalid action status review phase")
@@ -395,13 +434,8 @@ func (s Status) Validate(j Job) error {
 	if j.Critic == nil {
 		rounds = 1
 	}
-	if s.Round < 0 || s.Round > rounds || s.ProgressAge < 0 || len(s.Diagnostics) > 100 {
+	if s.Round < 0 || s.Round > rounds || s.ProgressAge < 0 {
 		return errors.New("invalid action status")
 	}
-	for _, diagnostic := range s.Diagnostics {
-		if !identitySegment(diagnostic.Code) || !boundedText(diagnostic.Message, 8<<10) {
-			return errors.New("invalid action status diagnostic")
-		}
-	}
-	return nil
+	return validDiagnostics(s.Diagnostics)
 }

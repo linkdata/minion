@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/usage"
@@ -15,7 +16,7 @@ import (
 const (
 	maxEventBytes      = 4 << 20
 	maxOutputBytes     = 64 << 20
-	maxEvents          = 10000
+	maxEvents          = 100000
 	maxDiagnosticBytes = 8 << 10
 )
 
@@ -44,11 +45,10 @@ func (u eventUsage) tokens() (tokens usage.Tokens, valid bool) {
 }
 
 type event struct {
-	Type    string `json:"type"`
-	Subtype string `json:"subtype"`
-	Tasks   []struct {
-		Status string `json:"status"`
-	} `json:"tasks"`
+	Type              string            `json:"type"`
+	Subtype           string            `json:"subtype"`
+	ResultIndex       *int64            `json:"result_index"`
+	Tasks             []struct{}        `json:"tasks"`
 	IsError           bool              `json:"is_error"`
 	Result            string            `json:"result"`
 	StructuredOutput  json.RawMessage   `json:"structured_output"`
@@ -100,6 +100,8 @@ type jsonlOutput struct {
 	completed  bool
 	structured bool
 	pending    int
+	results    int64
+	indexed    bool
 	result     aicli.Result
 }
 
@@ -150,8 +152,15 @@ func (o *jsonlOutput) finish() {
 	if o.err == nil && o.pending != 0 {
 		o.fail(errors.New("Claude exited with background tasks still running"))
 	}
-	if !o.completed {
-		o.result.UsageComplete = false
+	if o.err == nil {
+		answer := strings.TrimSpace(o.result.Answer)
+		if !o.completed {
+			o.fail(errors.New("missing successful Claude result after background work"))
+		} else if o.structured && (answer == "" || answer == "null") {
+			o.fail(errors.New("missing Claude structured output"))
+		} else if answer == "" {
+			o.fail(errors.New("missing successful Claude result"))
+		}
 	}
 }
 
@@ -173,14 +182,7 @@ func (o *jsonlOutput) finishLine() {
 	}
 	o.line = o.line[:0]
 	if e.Type == "system" && e.Subtype == "background_tasks_changed" {
-		o.pending = 0
-		for _, task := range e.Tasks {
-			switch task.Status {
-			case "completed", "failed", "stopped":
-			default:
-				o.pending++
-			}
-		}
+		o.pending = len(e.Tasks)
 		if o.pending != 0 {
 			o.completed = false
 			o.result.Answer = ""
@@ -210,11 +212,14 @@ func (o *jsonlOutput) finishLine() {
 	if e.Type != "result" {
 		return
 	}
-	if o.completed {
-		o.fail(errors.New("duplicate Claude result"))
-		return
+	tokens, complete := e.tokens()
+	// A later partial report must not erase previously recorded usage.
+	if tokens.Input >= o.result.Tokens.Input && tokens.CachedInput >= o.result.Tokens.CachedInput && tokens.Output >= o.result.Tokens.Output {
+		o.result.Tokens = tokens
+	} else {
+		complete = false
 	}
-	o.result.Tokens, o.result.UsageComplete = e.tokens()
+	o.result.UsageComplete = complete
 	if e.IsError || e.Subtype != "success" {
 		o.fail(fmt.Errorf("result failed: %s", limitText(e.Subtype)))
 		return
@@ -223,17 +228,22 @@ func (o *jsonlOutput) finishLine() {
 		o.fail(errors.New("task encountered denied tool permissions"))
 		return
 	}
+	if o.results != 0 && (!o.indexed || e.ResultIndex == nil) {
+		o.fail(errors.New("multiple Claude results require native result_index"))
+		return
+	}
+	if e.ResultIndex != nil && *e.ResultIndex != o.results {
+		o.fail(fmt.Errorf("Claude result_index %d, want %d", *e.ResultIndex, o.results))
+		return
+	}
+	o.indexed = e.ResultIndex != nil
+	o.results++
 	// Print mode can emit provisional turn results while background work runs.
 	if o.pending != 0 {
 		return
 	}
 	if o.structured {
-		data := bytes.TrimSpace(e.StructuredOutput)
-		if len(data) == 0 || bytes.Equal(data, []byte("null")) {
-			o.fail(errors.New("missing Claude structured output"))
-			return
-		}
-		o.result.Answer = string(data)
+		o.result.Answer = string(bytes.TrimSpace(e.StructuredOutput))
 	} else {
 		o.result.Answer = e.Result
 	}

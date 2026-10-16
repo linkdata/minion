@@ -23,7 +23,7 @@ func TestFixLayoutIncludesOmittedFilesAndAncestorAliases(t *testing.T) {
 	}
 }
 
-func TestReadonlyChangesStillRefusesUnsafeWorkerNames(t *testing.T) {
+func TestCheckUnchangedRefusesUnsafeWorkerNames(t *testing.T) {
 	for _, test := range []struct {
 		name      string
 		directory bool
@@ -33,7 +33,7 @@ func TestReadonlyChangesStillRefusesUnsafeWorkerNames(t *testing.T) {
 			label += "-directory"
 		}
 		t.Run(label, func(t *testing.T) {
-			root := privateRoot(t)
+			root := t.TempDir()
 			name := filepath.Join(root, test.name)
 			if test.directory {
 				if err := os.MkdirAll(name, 0700); err != nil {
@@ -42,8 +42,12 @@ func TestReadonlyChangesStillRefusesUnsafeWorkerNames(t *testing.T) {
 			} else if err := os.WriteFile(name, []byte("worker output"), 0600); err != nil {
 				t.Fatal(err)
 			}
-			if changes, err := Changes(context.Background(), root, nil); err == nil || !strings.Contains(err.Error(), "unsafe") {
-				t.Fatalf("unsafe worker name %q accepted: %+v,%v", test.name, changes, err)
+			want := "unsafe"
+			if test.name == "new\\output" {
+				want = "modified supplied source"
+			}
+			if err := CheckUnchanged(context.Background(), root, nil); err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("unsafe worker name %q validation=%v", test.name, err)
 			}
 		})
 	}

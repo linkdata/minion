@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -91,7 +92,98 @@ func TestRunnerEnforcesSuppliedRuntimeBudget(t *testing.T) {
 		return aicli.Result{}, ctx.Err()
 	}}
 	result, err := runner.Run(parent, job)
-	if !errors.Is(err, context.DeadlineExceeded) || parent.Err() != nil || calls != 1 || len(result.Calls) != 1 || result.Answer != "" {
+	if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, monitor.ErrTerminalJob) || parent.Err() != nil || calls != 1 || len(result.Calls) != 1 || result.Answer != "" {
 		t.Fatalf("runtime budget: result=%+v calls=%d parent=%v error=%v", result, calls, parent.Err(), err)
+	}
+}
+
+func TestRunnerContextMaterializationFailureIsTerminalBeforeModels(t *testing.T) {
+	job := portableJob(command.Review)
+	job.Source.BaseFiles[0].Path = strings.TrimSuffix(strings.Repeat(strings.Repeat("a", 255)+"/", 16), "/")
+	runner := Runner{WorkRoot: t.TempDir(), runModel: func(context.Context, modelRun) (aicli.Result, error) {
+		t.Fatal("model ran despite unrepresentable context")
+		return aicli.Result{}, nil
+	}}
+	if result, err := runner.Run(context.Background(), job); !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "materialize context") || len(result.Calls) != 0 {
+		t.Fatalf("context materialization result=%+v error=%v", result, err)
+	}
+}
+
+func TestRunnerMissingAuditTaskSkillIsTerminalBeforeModels(t *testing.T) {
+	job := portableJob(command.SecurityAudit)
+	runner := Runner{WorkRoot: t.TempDir(), runModel: func(context.Context, modelRun) (aicli.Result, error) {
+		t.Fatal("model ran without the audit task skill")
+		return aicli.Result{}, nil
+	}}
+	if result, err := runner.Run(context.Background(), job); !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "action prompt: security audit requires") || len(result.Calls) != 0 {
+		t.Fatalf("audit task result=%+v error=%v", result, err)
+	}
+}
+
+func TestRunnerReadOnlyCriticReusesSourceAndCanaryGuardsExport(t *testing.T) {
+	for _, action := range []command.Action{command.Review, command.Comment} {
+		for _, mutate := range []bool{false, true} {
+			t.Run(string(action)+"/mutate="+strconv.FormatBool(mutate), func(t *testing.T) {
+				job := portableJob(action)
+				job.Critic = &RoleSettings{Provider: "claude"}
+				var source string
+				calls := 0
+				runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+					calls++
+					if request.role == "main" {
+						source = request.dir
+						return aicli.Result{Answer: proposalJSON("reviewed answer", "private notes")}, nil
+					}
+					if request.dir != source || request.writable || request.outputDir != "" {
+						t.Fatalf("read-only critic source/grants=%+v", request)
+					}
+					if mutate {
+						if err := os.WriteFile(filepath.Join(source, "source.txt"), []byte("sandbox regression"), 0600); err != nil {
+							t.Fatal(err)
+						}
+					}
+					return aicli.Result{Answer: `{"approved":true,"feedback":""}`}, nil
+				}}
+				result, err := runner.Run(context.Background(), job)
+				if mutate {
+					if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "read-only action modified") || result.Answer != "" {
+						t.Fatalf("canary accepted changed source: %+v,%v", result, err)
+					}
+				} else if err != nil || result.Answer != "reviewed answer" {
+					t.Fatalf("read-only review failed: %+v,%v", result, err)
+				}
+				if calls != 2 {
+					t.Fatalf("model calls=%d", calls)
+				}
+			})
+		}
+	}
+}
+
+func TestRunnerMissingHostSkillsRemainRetryableBeforeModels(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	for _, provider := range []string{"codex", "claude"} {
+		for _, role := range []string{"main", "critic"} {
+			t.Run(provider+"/"+role, func(t *testing.T) {
+				job := portableJob(command.Comment)
+				settings := RoleSettings{Provider: provider, Skills: []string{"https://github.com/owner/repo/tree/pinned/skills/missing"}}
+				if role == "main" {
+					job.Main = settings
+				} else {
+					job.Critic = &settings
+					if provider == "codex" {
+						job.Main.Provider = "claude"
+					}
+				}
+				runner := Runner{WorkRoot: t.TempDir(), runModel: func(context.Context, modelRun) (aicli.Result, error) {
+					t.Fatal("model ran despite failed host preflight")
+					return aicli.Result{}, nil
+				}}
+				result, err := runner.Run(context.Background(), job)
+				if err == nil || errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "not installed") || len(result.Calls) != 0 {
+					t.Fatalf("host preflight result=%+v error=%v", result, err)
+				}
+			})
+		}
 	}
 }

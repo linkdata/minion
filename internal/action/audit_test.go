@@ -430,7 +430,7 @@ func auditGitFixtureRemote(t *testing.T) (base, head, remote string) {
 }
 
 func validateAuditOutput(ctx context.Context, outputDir, skill, repo, target, head string) (string, error) {
-	files, err := readAuditFiles(outputDir)
+	files, _, err := readAuditArtifacts(outputDir, auditComplete)
 	if err != nil {
 		return "", err
 	}
@@ -466,7 +466,7 @@ func TestAuditArtifactReadModesPreserveFailurePolicies(t *testing.T) {
 					}
 				}
 				files, diagnostics, err := readAuditArtifacts(root, mode)
-				wantError := mode == auditComplete || mode == auditForReview && scenario != "missing core"
+				wantError := mode == auditComplete || mode == auditForReview && scenario != "missing core" && scenario != "empty core"
 				if (err != nil) != wantError {
 					t.Fatalf("files=%v diagnostics=%v error=%v want error=%t", files, diagnostics, err, wantError)
 				}

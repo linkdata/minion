@@ -49,7 +49,7 @@ func TestReviewSnapshotFixFreezesOnlyExportedCandidate(t *testing.T) {
 	if err != nil || info.Mode().Perm() != 0755 {
 		t.Fatalf("frozen executable=%v,%v", info, err)
 	}
-	if err := snapshot.verify(context.Background(), job, source, "", index); err != nil {
+	if err := snapshot.verify(context.Background(), job, "", index); err != nil {
 		t.Fatal(err)
 	}
 	writeIndexFixture(t, source, "source.txt", []byte("changed after proposal"))
@@ -57,7 +57,7 @@ func TestReviewSnapshotFixFreezesOnlyExportedCandidate(t *testing.T) {
 	if err != nil || string(data) != "reviewed" {
 		t.Fatalf("background change reached critic copy=%q,%v", data, err)
 	}
-	if err := snapshot.verify(context.Background(), job, source, "", index); err == nil {
+	if err := snapshot.verify(context.Background(), job, "", index); err == nil {
 		t.Fatal("accepted candidate source changed during review")
 	}
 }
@@ -84,6 +84,9 @@ func TestReviewSnapshotFreezesRawAuditArtifactsAndAbsence(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			if snapshot.source != source || snapshot.ownedSource {
+				t.Fatal("copied an already read-only audit source")
+			}
 			t.Cleanup(func() {
 				if err := snapshot.close(); err != nil {
 					t.Error(err)
@@ -96,7 +99,7 @@ func TestReviewSnapshotFreezesRawAuditArtifactsAndAbsence(t *testing.T) {
 			if _, err := os.Lstat(filepath.Join(snapshot.outputDir, "findings.json")); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("absent artifact was created: %v", err)
 			}
-			if err := snapshot.verify(context.Background(), job, source, output, nil); err != nil {
+			if err := snapshot.verify(context.Background(), job, output, nil); err != nil {
 				t.Fatal(err)
 			}
 			switch mutation {
@@ -115,12 +118,15 @@ func TestReviewSnapshotFreezesRawAuditArtifactsAndAbsence(t *testing.T) {
 			if err != nil || string(data) != "reviewed report" {
 				t.Fatalf("background work changed frozen report=%q,%v", data, err)
 			}
-			wantCause := "candidate reports changed"
 			if mutation == "source" {
-				wantCause = "read-only action modified"
-			}
-			if err := snapshot.verify(context.Background(), job, source, output, nil); err == nil || !strings.Contains(err.Error(), wantCause) {
-				t.Fatalf("mutation %s: want %s, got %v", mutation, wantCause, err)
+				if err := snapshot.verify(context.Background(), job, output, nil); err != nil {
+					t.Fatalf("read-only source checked before final canary: %v", err)
+				}
+				if err := workspace.CheckUnchanged(context.Background(), source, job.Source.Files); err == nil {
+					t.Fatal("final read-only canary accepted a changed source")
+				}
+			} else if err := snapshot.verify(context.Background(), job, output, nil); err == nil || !strings.Contains(err.Error(), "candidate reports changed") {
+				t.Fatalf("mutation %s: got %v", mutation, err)
 			}
 			if err := snapshot.close(); err != nil {
 				t.Fatal(err)
@@ -128,6 +134,9 @@ func TestReviewSnapshotFreezesRawAuditArtifactsAndAbsence(t *testing.T) {
 			entries, err := os.ReadDir(workRoot)
 			if err != nil || len(entries) != 0 {
 				t.Fatalf("critic copies remain after cleanup=%v,%v", entries, err)
+			}
+			if _, err := os.Stat(source); err != nil {
+				t.Fatalf("cleanup removed the shared read-only source: %v", err)
 			}
 		})
 	}

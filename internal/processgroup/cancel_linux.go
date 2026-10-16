@@ -1,6 +1,7 @@
 //go:build linux
 
-package gitwork
+// Package processgroup configures command cancellation without changing host support.
+package processgroup
 
 import (
 	"errors"
@@ -9,12 +10,10 @@ import (
 	"syscall"
 )
 
-func configureGitCancellation(cmd *exec.Cmd) {
+// Configure makes context cancellation terminate the command's process group.
+func Configure(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
-		if cmd.Process == nil {
-			return os.ErrProcessDone
-		}
 		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		if errors.Is(err, syscall.ESRCH) {
 			return os.ErrProcessDone

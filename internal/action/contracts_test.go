@@ -18,12 +18,9 @@ import (
 func TestStatusUsesConfiguredRoundBudget(t *testing.T) {
 	job := portableJob(command.Comment)
 	job.Critic = &RoleSettings{Provider: "claude"}
-	for _, limit := range []int{0, config.MaxCriticMaxRounds} {
+	for _, limit := range []int{config.DefaultCriticMaxRounds, config.MaxCriticMaxRounds} {
 		job.CriticMaxRounds = limit
 		rounds := limit
-		if rounds == 0 {
-			rounds = config.DefaultCriticMaxRounds
-		}
 		status := Status{Version: ProtocolVersion, Identity: job.Identity, State: StatusRunning, Phase: PhaseCritic, Round: rounds, ReviewPhase: "full"}
 		if err := status.Validate(job); err != nil {
 			t.Fatalf("valid round %d: %v", rounds, err)
@@ -128,7 +125,7 @@ func TestRunnerFixCanReturnEmptyAnswerWithoutCritic(t *testing.T) {
 		if test.critic {
 			job.Critic = &RoleSettings{Provider: "claude"}
 		}
-		result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head}
+		result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Calls: []CallUsage{{Provider: job.Main.Provider, Role: "main", Round: 1}}}
 		if err := result.Validate(job); (err == nil) != test.valid || (!test.valid && !strings.Contains(err.Error(), "action answer")) {
 			t.Fatalf("empty %s answer with critic=%t: %v", test.action, test.critic, err)
 		}
@@ -142,7 +139,7 @@ func TestResultRejectsChangesOverlappingOmittedSource(t *testing.T) {
 			job.Source.Omitted = []string{"private/link"}
 			result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Done.",
 				Changes: []workspace.Change{{Path: name, Mode: workspace.Regular, Data: []byte("replacement")}}}
-			if err := result.Validate(job); err == nil || !strings.Contains(err.Error(), "omitted source path") {
+			if err := result.Validate(job); err == nil || (!strings.Contains(err.Error(), "omitted source path") && !strings.Contains(err.Error(), "collision")) {
 				t.Fatalf("change %q validation=%v", name, err)
 			}
 		})
@@ -154,7 +151,7 @@ func TestJobChangeValidationFoldsOmittedUnicodePaths(t *testing.T) {
 		job := portableJob(command.Fix)
 		job.Source.Omitted = []string{pair[0] + "/link"}
 		changes := []workspace.Change{{Path: pair[1] + "/link/file", Mode: workspace.Regular}}
-		if err := job.validateChanges(changes); err == nil || !strings.Contains(err.Error(), "omitted source path") {
+		if err := job.validateChanges(changes); err == nil || !strings.Contains(err.Error(), "collision") {
 			t.Fatalf("omitted %q vs changed %q: %v", pair[0], pair[1], err)
 		}
 	}
@@ -185,7 +182,7 @@ func TestResultValidatesChangedPathsAgainstOriginalSource(t *testing.T) {
 	job := portableJob(command.Fix)
 	job.Source.Files = []workspace.File{{Path: "Foo/stay", Mode: workspace.Regular}}
 	result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Done.",
-		Changes: []workspace.Change{{Path: "foo/new", Mode: workspace.Regular}}}
+		Changes: []workspace.Change{{Path: "foo/new", Mode: workspace.Regular}}, Calls: []CallUsage{{Provider: job.Main.Provider, Role: "main", Round: 1}}}
 	if err := result.Validate(job); err == nil {
 		t.Fatal("accepted directory case collision against unchanged source")
 	}
@@ -276,15 +273,22 @@ func TestResultCallUsageRejectsCriticsAndRepeatedMainWithoutCritic(t *testing.T)
 	if err := result.Validate(job); err != nil {
 		t.Fatalf("refused one valid main call without critic: %v", err)
 	}
+	result.Calls = nil
+	if err := result.Validate(job); err == nil || !strings.Contains(err.Error(), "requires one main call") {
+		t.Fatalf("accepted complete result without an executed main call: %v", err)
+	}
+	if err := result.validate(job, false); err != nil {
+		t.Fatalf("refused an interrupted result before main dispatch: %v", err)
+	}
 }
 
-func TestResultCallUsageHonorsConfiguredAndDefaultRoundLimits(t *testing.T) {
+func TestResultCallUsageHonorsConfiguredRoundLimits(t *testing.T) {
 	for _, test := range []struct {
 		name   string
 		limit  int
 		rounds int
 	}{
-		{"explicit", 2, 2}, {"default", 0, config.DefaultCriticMaxRounds}, {"maximum", config.MaxCriticMaxRounds, config.MaxCriticMaxRounds},
+		{"explicit", 2, 2}, {"configured default", config.DefaultCriticMaxRounds, config.DefaultCriticMaxRounds}, {"maximum", config.MaxCriticMaxRounds, config.MaxCriticMaxRounds},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			job := portableJob(command.Comment)

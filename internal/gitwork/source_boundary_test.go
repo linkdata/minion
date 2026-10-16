@@ -31,10 +31,6 @@ func TestImportRequiresExactlyReviewedPaths(t *testing.T) {
 			}
 			err := fixture.checkout.Import(context.Background(), fixture.base, changes)
 			switch scenario {
-			case "no-op":
-				if !errors.Is(err, ErrNoChanges) {
-					t.Fatalf("no-op import error=%v", err)
-				}
 			case "unsorted":
 				if err != nil {
 					t.Fatalf("valid unsorted import error=%v", err)

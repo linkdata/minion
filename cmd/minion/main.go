@@ -123,8 +123,9 @@ func run() int {
 		}
 	}()
 
-	executor := &action.Orchestrator{
+	orchestrator := &action.Orchestrator{
 		WorkRoot:              cfg.WorkRoot,
+		Logger:                logger,
 		GitHub:                client,
 		BotLogin:              cfg.BotLogin,
 		Store:                 store,
@@ -148,7 +149,7 @@ func run() int {
 			Logger:   logger,
 		},
 	}
-	watcher := &monitor.Monitor{Config: cfg, ConfigPath: *configPath, GitHub: client, Executor: executor, Logger: logger}
+	watcher := &monitor.Monitor{Config: cfg, ConfigPath: *configPath, GitHub: client, Executor: orchestrator, Logger: logger}
 	for {
 		next, err := watcher.RunOnce(ctx, store)
 		if err != nil {
@@ -303,11 +304,11 @@ func checkRepositories(ctx context.Context, client *github.Client, cfg config.Co
 			}
 		}
 		if needsFixFork {
-			executor := action.Orchestrator{
+			orchestrator := action.Orchestrator{
 				GitHub:   client,
 				BotLogin: cfg.BotLogin,
 			}
-			if err := executor.CheckFixFork(ctx, repo); err != nil {
+			if err := orchestrator.CheckFixFork(ctx, repo); err != nil {
 				problems = append(problems, fmt.Errorf("%s: fix fork preflight: %w", repo.Name, err))
 			}
 		}

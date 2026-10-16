@@ -14,7 +14,7 @@ func TestValidate(t *testing.T) {
 	fakeExecutable(t, "bwrap", "exit 99\n")
 	fakeExecutable(t, "socat", "exit 99\n")
 	fakeExecutable(t, "claude", `if [ "$1" = '--version' ]; then
-  printf '%s\n' '2.1.295 (Claude Code)'
+  printf '%s\n' '2.1.302 (Claude Code)'
 elif [ "$4" = 'auth' ]; then
   printf '%s\n' '{"loggedIn":true}'
 else
@@ -53,7 +53,7 @@ func TestValidateRequiresInitialization(t *testing.T) {
 	fakeExecutable(t, "bwrap", "exit 99\n")
 	fakeExecutable(t, "socat", "exit 99\n")
 	fakeExecutable(t, "claude", `if [ "$1" = '--version' ]; then
-  printf '%s\n' '2.1.295 (Claude Code)'
+  printf '%s\n' '2.1.302 (Claude Code)'
 elif [ "$4" = 'auth' ]; then
   printf '%s\n' '{"loggedIn":true}'
 else
@@ -70,10 +70,11 @@ func TestSupportedVersion(t *testing.T) {
 		version string
 		want    bool
 	}{
-		{"2.1.295 (Claude Code)", true},
-		{"2.1.296", true},
+		{"2.1.302 (Claude Code)", true},
+		{"2.1.303", true},
 		{"3.0.0", true},
-		{"2.1.294", false},
+		{"2.1.301", false},
+		{"2.1.295", false},
 		{"2.0.999", false},
 		{"", false},
 		{"3.x.y", false},

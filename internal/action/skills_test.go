@@ -124,8 +124,8 @@ func TestRunnerRequiresEverySkillAndLoadsOptionalSkills(t *testing.T) {
 	}
 	role := RoleSettings{Provider: "codex", Skills: executor.Commands["inspect"].Skills,
 		AlwaysOnSkills: executor.AlwaysOnSkills}
-	if err := executor.Runner.configureRole(role); err == nil {
-		t.Fatal("execution accepted a missing required skill")
+	if err := executor.Runner.configureRole(role); err == nil || errors.Is(err, monitor.ErrTerminalJob) {
+		t.Fatalf("execution must fail early and retryably for a missing required skill: %v", err)
 	}
 	installActionTestSkills(t, testReviewSkillURL, extraURL, optionalURL)
 	if err := executor.validateCommand(job); err != nil {

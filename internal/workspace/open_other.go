@@ -16,3 +16,5 @@ func openDirectory(name string) (*os.File, error) {
 }
 
 func singleLink(os.FileInfo) bool { return false }
+
+func sameChangeTime(os.FileInfo, os.FileInfo) bool { return false }

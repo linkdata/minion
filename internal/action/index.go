@@ -167,9 +167,6 @@ func parseIndexChanges(raw []byte) ([]workspace.Change, []string, error) {
 		}
 		changes, objects = append(changes, change), append(objects, fields[3])
 	}
-	if err := workspace.ValidateChanges(changes); err != nil {
-		return nil, nil, err
-	}
 	return changes, objects, nil
 }
 
@@ -230,7 +227,7 @@ func (index *fixIndex) environment() []string {
 		paths = []string{"/usr/bin", "/bin"}
 	}
 	return []string{"PATH=" + strings.Join(paths, string(os.PathListSeparator)), "HOME=" + index.dir, "TMPDIR=" + index.dir, "LC_ALL=C",
-		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=/bin/false", "GIT_NO_REPLACE_OBJECTS=1",
+		"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=/bin/false", "GIT_NO_REPLACE_OBJECTS=1",
 		"GIT_AUTHOR_NAME=source", "GIT_AUTHOR_EMAIL=source@localhost", "GIT_COMMITTER_NAME=source", "GIT_COMMITTER_EMAIL=source@localhost",
 		"GIT_AUTHOR_DATE=2000-01-01T00:00:00Z", "GIT_COMMITTER_DATE=2000-01-01T00:00:00Z"}
 }

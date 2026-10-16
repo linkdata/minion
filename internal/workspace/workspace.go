@@ -18,16 +18,17 @@ import (
 )
 
 const (
-	MaxFiles               = 10_000
-	MaxBytes               = 64 << 20
-	MaxChanges             = 100
-	MaxChangeBytes         = 1 << 20
-	MaxContextBytes        = 1 << 20
-	MaxEntries             = 100_000
-	MaxPathBytes           = 4096
-	GitAttributes          = "* -text -ident -filter -working-tree-encoding !diff\n"
-	Regular         uint32 = 0100644
-	Executable      uint32 = 0100755
+	MaxFiles        = 10_000
+	MaxBytes        = 64 << 20
+	MaxChanges      = 100
+	MaxChangeBytes  = 1 << 20
+	MaxContextBytes = 1 << 20
+	MaxEntries      = 100_000
+	// MaxPathBytes bounds relative transfer paths; absolute paths also obey host limits.
+	MaxPathBytes         = 4096
+	GitAttributes        = "* -text -ident -filter -working-tree-encoding !diff\n"
+	Regular       uint32 = 0100644
+	Executable    uint32 = 0100755
 )
 
 type File struct {
@@ -59,10 +60,11 @@ type Snapshot struct {
 }
 
 func ValidPath(name string) bool {
-	return ValidSourcePath(name) && !strings.Contains(name, "\\") && filepath.IsLocal(name)
+	return ValidSourcePath(name) && !strings.Contains(name, "\\")
 }
 
 // FoldPath returns the same key for Unicode simple-case-fold equivalents.
+// It does not normalize Unicode spellings.
 func FoldPath(name string) string {
 	return strings.Map(func(r rune) rune {
 		key := r
@@ -76,6 +78,7 @@ func FoldPath(name string) string {
 }
 
 // ValidSourcePath accepts Git's case-sensitive slash paths, including literal backslashes.
+// Protected Git staging additionally rejects HFS/NTFS aliases of Git metadata.
 func ValidSourcePath(name string) bool {
 	if name == "" || name == "." || name == ".." || len(name) >= MaxPathBytes || !utf8.ValidString(name) || strings.ContainsRune(name, '\x00') || path.Clean(name) != name || path.IsAbs(name) || strings.HasPrefix(name, "../") {
 		return false
@@ -130,7 +133,7 @@ func ValidateSnapshot(s Snapshot) error {
 			paths = append(paths, file.Path)
 		}
 		paths = append(paths, s.Omitted...)
-		if err := validatePaths(paths, nil); err != nil {
+		if err := validatePaths(paths, false); err != nil {
 			return err
 		}
 	}
@@ -163,13 +166,13 @@ func validateFiles(files []File) error {
 		}
 		total += len(file.Data)
 	}
-	return validatePaths(paths, nil)
+	return validatePaths(paths, false)
 }
 
-func validatePaths(paths []string, key func(string) string) error {
-	folded := key != nil
-	if key == nil {
-		key = func(name string) string { return name }
+func validatePaths(paths []string, folded bool) error {
+	key := func(name string) string { return name }
+	if folded {
+		key = FoldPath
 	}
 	seen := make(map[string]bool, len(paths))
 	directories := make(map[string]string)
@@ -197,14 +200,8 @@ func validatePaths(paths []string, key func(string) string) error {
 	return nil
 }
 
-// ValidateFixPaths checks the source layout, including omissions, before a writable action.
+// ValidateFixPaths checks a validated snapshot's stricter writable layout, including omissions.
 func ValidateFixPaths(files []File, omitted []string) error {
-	if err := validateFiles(files); err != nil {
-		return err
-	}
-	if len(omitted) > MaxFiles {
-		return errors.New("source exceeds omitted path limit")
-	}
 	paths := make([]string, len(files), len(files)+len(omitted))
 	for i, file := range files {
 		if !ValidPath(file.Path) {
@@ -218,7 +215,7 @@ func ValidateFixPaths(files []File, omitted []string) error {
 		}
 		paths = append(paths, name)
 	}
-	return validatePaths(paths, FoldPath)
+	return validatePaths(paths, true)
 }
 
 // CheckRoot verifies that safe, anchored collection is available before a model runs.
@@ -230,7 +227,7 @@ func CheckRoot(root string) error {
 	return dir.Close()
 }
 
-func checkRoot(root string, private bool) error {
+func checkRootDir(root string, private bool) error {
 	info, err := os.Lstat(root)
 	if err != nil {
 		return err
@@ -241,11 +238,12 @@ func checkRoot(root string, private bool) error {
 	return nil
 }
 
+// Materialize requires a root and parents not concurrently writable by untrusted processes.
 func Materialize(root string, files []File) error {
 	if err := validateFiles(files); err != nil {
 		return err
 	}
-	if err := checkRoot(root, true); err != nil {
+	if err := checkRootDir(root, true); err != nil {
 		return err
 	}
 	dir, err := os.Open(root)
@@ -275,32 +273,27 @@ func Materialize(root string, files []File) error {
 				directories[parent] = true
 			}
 		}
-		f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, fs.FileMode(file.Mode&0777))
+		mode := fs.FileMode(file.Mode & 0777)
+		f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
 		if err != nil {
 			return err
 		}
-		_, writeErr := f.Write(file.Data)
-		if err := errors.Join(writeErr, f.Close()); err != nil {
-			return err
-		}
-		if err := os.Chmod(name, fs.FileMode(file.Mode&0777)); err != nil {
+		if err := writeFile(f, file.Data, mode); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// Changes compares regular files only; generated Git metadata or links are refused.
-func Changes(ctx context.Context, root string, base []File) ([]Change, error) {
+// CheckUnchanged verifies exact source bytes and executable modes without following links.
+func CheckUnchanged(ctx context.Context, root string, base []File) error {
 	if err := validateFiles(base); err != nil {
-		return nil, err
+		return err
 	}
 	prior := make(map[string]File, len(base))
 	for _, file := range base {
 		prior[file.Path] = file
 	}
-	var changes []Change
-	files := 0
 	total := 0
 	err := walk(ctx, root, func(name string, entry fs.DirEntry) error {
 		rel, err := filepath.Rel(root, name)
@@ -314,9 +307,9 @@ func Changes(ctx context.Context, root string, base []File) ([]Change, error) {
 		if entry.IsDir() {
 			return nil
 		}
-		files++
-		if files > MaxFiles {
-			return errors.New("workspace exceeds file limit")
+		old, exists := prior[rel]
+		if !exists {
+			return fmt.Errorf("read-only action modified supplied source: added %q", rel)
 		}
 		data, info, err := readFile(name, int64(MaxBytes-total))
 		if err != nil {
@@ -327,36 +320,30 @@ func Changes(ctx context.Context, root string, base []File) ([]Change, error) {
 		if info.Mode().Perm()&0100 != 0 {
 			mode = Executable
 		}
-		old, exists := prior[rel]
 		delete(prior, rel)
-		if !exists || old.Mode != mode || !bytes.Equal(old.Data, data) {
-			changes = append(changes, Change{Path: rel, Mode: mode, Data: data})
+		if old.Mode != mode || !bytes.Equal(old.Data, data) {
+			return fmt.Errorf("read-only action modified supplied source: changed %q", rel)
 		}
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		return err
 	}
-	for name := range prior {
-		changes = append(changes, Change{Path: name, Delete: true})
+	if len(prior) != 0 {
+		return errors.New("read-only action modified supplied source: deleted files")
 	}
-	sort.Slice(changes, func(i, j int) bool { return changes[i].Path < changes[j].Path })
-	return changes, ValidateChanges(changes)
+	return nil
 }
 
 // ReadChanges reads only selected paths; ignored build output is never traversed.
 // Selection carries paths and deletions, with optional expected regular-file modes.
 func ReadChanges(ctx context.Context, root string, selected []Change) ([]Change, error) {
-	checked := append([]Change(nil), selected...)
-	for i := range checked {
-		if len(checked[i].Data) != 0 {
+	for _, selection := range selected {
+		if len(selection.Data) != 0 {
 			return nil, errors.New("change selection contains file data")
 		}
-		if !checked[i].Delete && checked[i].Mode == 0 {
-			checked[i].Mode = Regular
-		}
 	}
-	if err := ValidateChanges(checked); err != nil {
+	if err := ValidateChanges(selected); err != nil {
 		return nil, err
 	}
 	if err := CheckRoot(root); err != nil {
@@ -381,7 +368,7 @@ func ReadChanges(ctx context.Context, root string, selected []Change) ([]Change,
 		if info.Mode().Perm()&0100 != 0 {
 			mode = Executable
 		}
-		if selection.Mode != 0 && selection.Mode != mode {
+		if selection.Mode != mode {
 			return nil, errors.New("selected change mode differs from file")
 		}
 		changes = append(changes, Change{Path: selection.Path, Mode: mode, Data: data})
@@ -466,7 +453,7 @@ func ValidateChanges(changes []Change) error {
 			total += len(change.Data)
 		}
 	}
-	return validatePaths(paths, FoldPath)
+	return validatePaths(paths, true)
 }
 
 // ValidateChangedPaths checks the final layout of an already validated base and changes.
@@ -492,7 +479,8 @@ func ValidateChangedPaths(base []File, changes []Change) error {
 	for name := range files {
 		paths = append(paths, name)
 	}
-	return validatePaths(paths, FoldPath)
+	sort.Strings(paths)
+	return validatePaths(paths, true)
 }
 
 func safeParents(root, name string) error {
@@ -514,18 +502,17 @@ func safeParents(root, name string) error {
 	return nil
 }
 
+// Apply requires a root and parents not concurrently writable by untrusted processes.
 func Apply(root string, changes []Change) error {
 	root = filepath.Clean(root)
 	if err := ValidateChanges(changes); err != nil {
 		return err
 	}
-	if err := checkRoot(root, false); err != nil {
+	if err := checkRootDir(root, false); err != nil {
 		return err
 	}
 	// Delete first, including empty ancestors, so file/directory changes work.
-	ordered := append([]Change(nil), changes...)
-	sort.Slice(ordered, func(i, j int) bool { return len(ordered[i].Path) > len(ordered[j].Path) })
-	for _, change := range ordered {
+	for _, change := range changes {
 		if !change.Delete {
 			continue
 		}
@@ -570,14 +557,24 @@ func Apply(root string, changes []Change) error {
 		if err := os.MkdirAll(filepath.Dir(name), 0700); err != nil {
 			return err
 		}
-		if err := os.WriteFile(name, change.Data, fs.FileMode(change.Mode&0777)); err != nil {
+		mode := fs.FileMode(change.Mode & 0777)
+		f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
+		if err != nil {
 			return err
 		}
-		if err := os.Chmod(name, fs.FileMode(change.Mode&0777)); err != nil {
+		if err := writeFile(f, change.Data, mode); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func writeFile(f *os.File, data []byte, mode fs.FileMode) error {
+	_, err := f.Write(data)
+	if err == nil {
+		err = f.Chmod(mode)
+	}
+	return errors.Join(err, f.Close())
 }
 
 // ReadRegular opens one bounded, singly linked regular file without following path symlinks.
@@ -616,7 +613,7 @@ func readFile(name string, limit int64) (data []byte, info fs.FileInfo, resultEr
 	if !singleLink(after) {
 		return nil, nil, errors.New("file hard links changed while reading")
 	}
-	if int64(len(data)) > limit || int64(len(data)) != opened.Size() || after.Size() != opened.Size() || after.Mode() != opened.Mode() || !after.ModTime().Equal(opened.ModTime()) {
+	if int64(len(data)) != opened.Size() || after.Size() != opened.Size() || after.Mode() != opened.Mode() || !after.ModTime().Equal(opened.ModTime()) || !sameChangeTime(opened, after) {
 		return nil, nil, errors.New("file changed or exceeded limit while reading")
 	}
 	return data, opened, nil

@@ -452,7 +452,7 @@ func TestFixRefusesIssueEditedAfterRequest(t *testing.T) {
 		},
 		},
 	}
-	if err := executor.perform(context.Background(), job); err != nil {
+	if err := executor.perform(testActionContext(t), job); err != nil {
 		t.Fatal(err)
 	}
 	if comments != 1 || len(store.Data.PendingFixes) != 0 {
@@ -588,7 +588,7 @@ func TestFixRecoversOnlyRecordedBranch(t *testing.T) {
 				job.Source.Body = "@linkdataminion fix\nOversized notes"
 				executor.MaxGitHubContextBytes = 1
 			}
-			err = executor.perform(context.Background(), job)
+			err = executor.perform(testActionContext(t), job)
 			if tt.wantError != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantError) {
 					t.Fatalf("fix() error = %v, want %q", err, tt.wantError)
@@ -754,7 +754,7 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 			},
 		},
 	}
-	if err := executor.perform(context.Background(), job); err != nil {
+	if err := executor.perform(testActionContext(t), job); err != nil {
 		t.Fatal(err)
 	}
 	branch := "minion/fix-7-aaaaaaaaaaaa"
@@ -846,18 +846,18 @@ func TestReviewMarksOnlyPostModelPublicationFailure(t *testing.T) {
 			},
 		},
 	}
-	err := executor.perform(context.Background(), job)
+	err := executor.perform(testActionContext(t), job)
 	if err == nil || errors.Is(err, monitor.ErrPostModelPublication) || codexRuns != 0 {
 		t.Fatalf("pre-Codex outage: err=%v runs=%d", err, codexRuns)
 	}
 	repoFail = false
 	failAfterModel = true
-	err = executor.perform(context.Background(), job)
+	err = executor.perform(testActionContext(t), job)
 	if !errors.Is(err, monitor.ErrPostModelPublication) || codexRuns != 1 || postCalls != 0 {
 		t.Fatalf("post-model repository outage: err=%v runs=%d posts=%d", err, codexRuns, postCalls)
 	}
 	repoFail, failAfterModel = false, false
-	err = executor.perform(context.Background(), job)
+	err = executor.perform(testActionContext(t), job)
 	if !errors.Is(err, monitor.ErrPostModelPublication) || codexRuns != 2 || postCalls != 1 {
 		t.Fatalf("post-model outage: err=%v runs=%d posts=%d", err, codexRuns, postCalls)
 	}

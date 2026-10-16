@@ -159,7 +159,7 @@ func TestFailedAuditRetainsLabelledPartialArtifactsWithoutPublication(t *testing
 	failure := errors.New("private provider failure detail")
 	const report = "Private incomplete findings requiring validation."
 	var sourceDir, reportDir string
-	e := &Orchestrator{WorkRoot: t.TempDir(), GitHub: client, Commands: map[string]config.CommandMapping{"security-audit": {Action: "security-audit", Skills: []string{testAuditSkillURL}}},
+	e := &Orchestrator{WorkRoot: t.TempDir(), Logger: log.New(&journal, "", 0), GitHub: client, Commands: map[string]config.CommandMapping{"security-audit": {Action: "security-audit", Skills: []string{testAuditSkillURL}}},
 		Runner: Runner{
 			WorkRoot: t.TempDir(), Logger: log.New(&journal, "", 0), runModel: func(_ context.Context, modelRequest modelRun) (codexcli.Result, error) {
 				dir, output := modelRequest.dir, modelRequest.outputDir
@@ -224,7 +224,7 @@ func TestIncompleteAuditIdentityAndPrivateDiagnosticLogging(t *testing.T) {
 		}
 	}
 	var journal bytes.Buffer
-	e := Orchestrator{Runner: Runner{Logger: log.New(&journal, "", 0)}}
+	e := Orchestrator{Logger: log.New(&journal, "", 0)}
 	e.logDiagnostics(result)
 	for _, want := range []string{"job=" + job.Identity.JobID, "attempt=" + job.Identity.AttemptID, "executor=" + job.Identity.ExecutorID, "code=limit_hit"} {
 		if !strings.Contains(journal.String(), want) {
@@ -265,7 +265,7 @@ func TestPreparedReplyNeedsNoExecution(t *testing.T) {
 		Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"review"}},
 		Command:    command.Command{Name: "review", Action: command.Review},
 	}
-	prepared, err := e.prepare(context.Background(), request)
+	prepared, err := e.prepare(testActionContext(t), request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -313,5 +313,34 @@ func TestPublishFixWithoutChangesPostsNormalReply(t *testing.T) {
 	}
 	if !strings.Contains(body, "without changing files") || !strings.Contains(body, "Tests passed.") || !strings.Contains(body, request.Marker()) {
 		t.Fatalf("no-change reply=%q", body)
+	}
+}
+
+func testActionContext(t *testing.T) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	t.Cleanup(cancel)
+	return ctx
+}
+
+func TestPortableJobRequiresExistingActionDeadline(t *testing.T) {
+	if _, err := (&Orchestrator{}).portableJob(context.Background(), nil, "", ""); err == nil || !strings.Contains(err.Error(), "requires a deadline") {
+		t.Fatalf("preparation created a fresh budget: %v", err)
+	}
+}
+
+func TestPublishFixForkCheckFailureConsumesPublicationAttempt(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "temporary GitHub failure", http.StatusBadGateway)
+	}))
+	defer server.Close()
+	client := github.New("token")
+	client.BaseURL, client.HTTPClient = server.URL, server.Client()
+	orchestrator := Orchestrator{GitHub: client}
+	prepared := &preparedAction{request: monitor.Job{Repository: config.Repository{Name: "owner/repo", ID: 1, OwnerID: 2}}}
+	err := orchestrator.publishFix(context.Background(), prepared, Result{Changes: []workspace.Change{{Path: "a", Mode: workspace.Regular}}})
+	var apiError *github.StatusError
+	if !errors.Is(err, monitor.ErrPostModelPublication) || errors.Is(err, monitor.ErrTerminalJob) || !errors.As(err, &apiError) || apiError.StatusCode != http.StatusBadGateway {
+		t.Fatalf("post-model fork check lost classification or cause: %v", err)
 	}
 }

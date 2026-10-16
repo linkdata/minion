@@ -13,8 +13,8 @@ func TestBufferBoundsCopiedOutputAndCancels(t *testing.T) {
 	if err != nil || n != 11 || !output.Exceeded || output.String() != "lon" || canceled != 1 {
 		t.Fatalf("copy=%d,%v output=%q exceeded=%v cancellations=%d", n, err, output.String(), output.Exceeded, canceled)
 	}
-	if n, err := output.Write([]byte("more")); n != 4 || err != nil || canceled != 1 || output.Len() != 3 {
-		t.Fatalf("subsequent write=%d,%v len=%d cancellations=%d", n, err, output.Len(), canceled)
+	if n, err := output.Write([]byte("more")); n != 4 || err != nil || canceled != 1 || len(output.Bytes()) != 3 {
+		t.Fatalf("subsequent write=%d,%v len=%d cancellations=%d", n, err, len(output.Bytes()), canceled)
 	}
 }
 

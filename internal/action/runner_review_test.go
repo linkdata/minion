@@ -172,9 +172,9 @@ exec %q "$@"
 
 func TestRunnerAuditReviewFreezesAndExportsRawReports(t *testing.T) {
 	realNode, err := exec.LookPath("node")
-	for _, scenario := range []string{"approved", "mutated during critic", "mutated during validation", "empty architecture"} {
+	for _, scenario := range []string{"approved", "mutated during critic", "mutated during validation", "empty architecture", "empty architecture repaired"} {
 		t.Run(scenario, func(t *testing.T) {
-			if err != nil && (scenario == "approved" || scenario == "mutated during validation") {
+			if err != nil && scenario != "mutated during critic" {
 				t.Skip("audit validators require node")
 			}
 			installActionTestSkills(t, testAuditSkillURL)
@@ -213,7 +213,7 @@ func TestRunnerAuditReviewFreezesAndExportsRawReports(t *testing.T) {
 						"run-metadata.json": rawMetadata, "architecture.md": []byte("Architecture"), "coverage-ledger.json": []byte(`[{"status":"covered"}]`),
 						"findings.json": []byte("[]"), "REPORT.md": []byte("approved report"), "FINDINGS-DETAIL.md": nil, "NEEDS-VALIDATION.md": nil,
 					} {
-						if scenario == "empty architecture" && name == "architecture.md" {
+						if (scenario == "empty architecture" || scenario == "empty architecture repaired" && request.round == 1) && name == "architecture.md" {
 							content = nil
 						}
 						writeIndexFixture(t, reports, name, content)
@@ -227,12 +227,18 @@ func TestRunnerAuditReviewFreezesAndExportsRawReports(t *testing.T) {
 						frozenReports = dir
 					}
 				}
-				if request.dir == source || request.outputDir != "" || request.writable || frozenReports == "" || frozenReports == reports || slices.Contains(request.readOnlyDirs, reports) {
+				if request.dir != source || request.outputDir != "" || request.writable || frozenReports == "" || frozenReports == reports || slices.Contains(request.readOnlyDirs, reports) {
 					t.Fatalf("audit critic received mutable grants: dir=%q writable=%t output=%q grants=%q", request.dir, request.writable, request.outputDir, request.readOnlyDirs)
 				}
 				data, err := workspace.ReadRegular(filepath.Join(frozenReports, "run-metadata.json"), maxAuditArtifactBytes)
 				if err != nil || !bytes.Equal(data, rawMetadata) {
 					t.Fatalf("critic did not receive raw metadata=%q,%v", data, err)
+				}
+				if scenario == "empty architecture repaired" && request.round == 1 {
+					if data, err := os.ReadFile(filepath.Join(frozenReports, "architecture.md")); err != nil || len(data) != 0 {
+						t.Fatalf("critic could not inspect the empty artifact: %q,%v", data, err)
+					}
+					return aicli.Result{Answer: `{"approved":false,"feedback":"Fill architecture.md with the required architecture report."}`}, nil
 				}
 				if scenario == "mutated during critic" {
 					writeIndexFixture(t, reports, "REPORT.md", []byte("concurrent report edit"))
@@ -247,14 +253,18 @@ func TestRunnerAuditReviewFreezesAndExportsRawReports(t *testing.T) {
 			if scenario == "mutated during critic" || scenario == "empty architecture" {
 				want, calls := "reports changed during critic review", 1
 				if scenario == "empty architecture" {
-					want, calls = "architecture.md: audit artifact must not be empty", 0
+					want, calls = `empty action report artifact "architecture.md"`, 1
 				}
 				if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), want) || criticCalls != calls || result.Answer != "" {
 					t.Fatalf("invalid audit result=%+v critics=%d error=%v", result, criticCalls, err)
 				}
 				return
 			}
-			if err != nil || result.Answer != "approved report" || criticCalls != 1 {
+			wantCritics := 1
+			if scenario == "empty architecture repaired" {
+				wantCritics = 3
+			}
+			if err != nil || result.Answer != "approved report" || criticCalls != wantCritics {
 				t.Fatalf("approved audit result=%+v critics=%d error=%v", result, criticCalls, err)
 			}
 			if changed != "" {

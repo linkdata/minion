@@ -52,11 +52,10 @@ func TestCollectionRefusesHardlinkedFiles(t *testing.T) {
 	}{
 		{"regular file", func() (int, error) { data, err := ReadRegular(name, MaxBytes); return len(data), err }},
 		{"source scan", func() (int, error) {
-			changes, err := Changes(context.Background(), root, nil)
-			return len(changes), err
+			return 0, CheckUnchanged(context.Background(), root, []File{{Path: "file", Mode: Regular, Data: []byte(contents)}})
 		}},
 		{"selected changes", func() (int, error) {
-			changes, err := ReadChanges(context.Background(), root, []Change{{Path: "file"}})
+			changes, err := ReadChanges(context.Background(), root, []Change{{Path: "file", Mode: Regular}})
 			return len(changes), err
 		}},
 	} {
@@ -124,9 +123,8 @@ func TestCollectionTraversesExecuteOnlyParents(t *testing.T) {
 	if err != nil || string(data) != "contents" {
 		t.Fatalf("read through execute-only parent=%q,%v", data, err)
 	}
-	changes, err := Changes(context.Background(), root, base)
-	if err != nil || len(changes) != 0 {
-		t.Fatalf("scan below execute-only parent=%+v,%v", changes, err)
+	if err := CheckUnchanged(context.Background(), root, base); err != nil {
+		t.Fatalf("scan below execute-only parent=%v", err)
 	}
 }
 
@@ -141,16 +139,23 @@ func TestReadChangesUsesOnlySelectedRegularPaths(t *testing.T) {
 	if err := os.Symlink(outside, filepath.Join(root, "ignored")); err != nil {
 		t.Fatal(err)
 	}
-	changes, err := ReadChanges(context.Background(), root, []Change{{Path: "changed"}, {Path: "deleted", Delete: true}})
+	changes, err := ReadChanges(context.Background(), root, []Change{{Path: "changed", Mode: Executable}, {Path: "deleted", Delete: true}})
 	if err != nil || len(changes) != 2 || changes[0].Mode != Executable || string(changes[0].Data) != string([]byte{0, 255}) {
 		t.Fatalf("selected changes=%+v,%v", changes, err)
 	}
-	for _, selected := range [][]Change{
-		{{Path: "ignored/secret"}}, {{Path: "../outside"}}, {{Path: ".git/config"}},
-		{{Path: "changed", Mode: Regular}}, {{Path: "changed", Delete: true, Data: []byte("invalid")}},
+	for _, test := range []struct {
+		selected []Change
+		want     string
+	}{
+		{[]Change{{Path: "ignored/secret", Mode: Regular}}, "not a directory"},
+		{[]Change{{Path: "../outside", Mode: Regular}}, "unsafe"},
+		{[]Change{{Path: ".git/config", Mode: Regular}}, "unsafe"},
+		{[]Change{{Path: "changed", Mode: Regular}}, "selected change mode differs"},
+		{[]Change{{Path: "changed"}}, "invalid changed mode"},
+		{[]Change{{Path: "changed", Delete: true, Data: []byte("invalid")}}, "selection contains file data"},
 	} {
-		if _, err := ReadChanges(context.Background(), root, selected); err == nil {
-			t.Fatalf("accepted unsafe selection %+v", selected)
+		if _, err := ReadChanges(context.Background(), root, test.selected); err == nil || !strings.Contains(err.Error(), test.want) {
+			t.Fatalf("selection %+v validation=%v want%q", test.selected, err, test.want)
 		}
 	}
 }
@@ -167,7 +172,7 @@ func TestCollectionRefusesRootSymlinksEvenForDeleteOnlySelections(t *testing.T) 
 	}
 	for _, check := range []func() error{
 		func() error { return CheckRoot(root) },
-		func() error { _, err := Changes(context.Background(), root, base); return err },
+		func() error { return CheckUnchanged(context.Background(), root, base) },
 		func() error { _, err := ReadChanges(context.Background(), root, nil); return err },
 		func() error {
 			_, err := ReadChanges(context.Background(), root, []Change{{Path: "file", Delete: true}})
@@ -206,8 +211,35 @@ func TestReadRegularRefusesFIFOWithoutBlocking(t *testing.T) {
 	}
 }
 
+type fileInfoWithStat struct {
+	os.FileInfo
+	stat syscall.Stat_t
+}
+
+func (info fileInfoWithStat) Sys() any { return &info.stat }
+
+func TestReadStabilityIncludesChangeTime(t *testing.T) {
+	name := filepath.Join(t.TempDir(), "source")
+	if err := os.WriteFile(name, []byte("source"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := fileInfoWithStat{FileInfo: info, stat: *info.Sys().(*syscall.Stat_t)}
+	after := before
+	if !sameChangeTime(before, after) {
+		t.Fatal("unchanged metadata was refused")
+	}
+	after.stat.Ctim.Sec++
+	if sameChangeTime(before, after) {
+		t.Fatal("restored size, mode and mtime hid a changed ctime")
+	}
+}
+
 func TestApplyRefusesDeletionThroughSymlinkedParent(t *testing.T) {
-	root, outside := privateRoot(t), privateRoot(t)
+	root, outside := t.TempDir(), t.TempDir()
 	name := filepath.Join(outside, "file")
 	if err := os.WriteFile(name, []byte("outside"), 0600); err != nil {
 		t.Fatal(err)

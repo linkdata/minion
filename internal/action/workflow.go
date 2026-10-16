@@ -119,16 +119,16 @@ func (e *Orchestrator) prepare(ctx context.Context, request monitor.Job) (prepar
 	if err := e.checkGitHubContext(request, title, description); err != nil {
 		return nil, err
 	}
-	p.checkout, err = gitwork.Clone(ctx, e.WorkRoot, repo.FullName, branch, func(ctx context.Context, sha string) (github.GitTree, error) {
+	lookupTree := func(ctx context.Context, sha string) (github.GitTree, error) {
 		return e.GitHub.GitTree(ctx, repo.FullName, sha)
-	})
-	if err != nil {
-		return nil, err
 	}
 	if pullHead != "" {
-		if err := p.checkout.CheckoutPullRequest(ctx, request.Number, branch, pullHead); err != nil {
-			return nil, err
-		}
+		p.checkout, err = gitwork.ClonePullRequest(ctx, e.WorkRoot, repo.FullName, request.Number, branch, pullHead, lookupTree)
+	} else {
+		p.checkout, err = gitwork.Clone(ctx, e.WorkRoot, repo.FullName, branch, lookupTree)
+	}
+	if err != nil {
+		return nil, err
 	}
 	if p.Job, err = e.portableJob(ctx, p, title, description); err != nil {
 		return nil, err
@@ -146,6 +146,10 @@ func (e *Orchestrator) roleSettings(provider string, required []string) RoleSett
 }
 
 func (e *Orchestrator) portableJob(ctx context.Context, p *preparedAction, title, description string) (Job, error) {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return Job{}, errors.New("action preparation requires a deadline")
+	}
 	request := p.request
 	source, err := p.checkout.Snapshot(ctx, request.Command.History, request.SubjectType == "PullRequest")
 	if err != nil {
@@ -154,10 +158,6 @@ func (e *Orchestrator) portableJob(ctx context.Context, p *preparedAction, title
 	var attempt [16]byte
 	if _, err := rand.Read(attempt[:]); err != nil {
 		return Job{}, fmt.Errorf("create action attempt: %w", err)
-	}
-	budget := cmp.Or(e.Timeout, config.DefaultJobTimeout)
-	if deadline, ok := ctx.Deadline(); ok {
-		budget = min(budget, time.Until(deadline))
 	}
 	job := Job{
 		Version: ProtocolVersion,
@@ -170,7 +170,7 @@ func (e *Orchestrator) portableJob(ctx context.Context, p *preparedAction, title
 		Command: request.Command.Name, Action: request.Command.Action,
 		Title: title, Description: description, Notes: requestNotes(request), Source: source,
 		Main:            e.roleSettings(e.mainProvider(), e.Commands[request.Command.Name].Skills),
-		CriticMaxRounds: e.CriticMaxRounds, RuntimeBudget: budget,
+		CriticMaxRounds: cmp.Or(e.CriticMaxRounds, config.DefaultCriticMaxRounds), RuntimeBudget: time.Until(deadline),
 	}
 	if e.Adversarial != "" {
 		critic := e.roleSettings(e.Adversarial, nil)
@@ -203,9 +203,6 @@ func (e *Orchestrator) publish(ctx context.Context, p *preparedAction, result Re
 		return fmt.Errorf("%w: invalid action result: %w", monitor.ErrTerminalJob, err)
 	}
 	e.logDiagnostics(result)
-	if _, err := p.checkout.Head(ctx); err != nil {
-		return err
-	}
 	if p.Job.Action == command.SecurityAudit {
 		if err := e.retainAudit(p, result, true); err != nil {
 			return fmt.Errorf("%w: retain completed audit: %w", monitor.ErrTerminalJob, err)
@@ -260,7 +257,7 @@ func (e *Orchestrator) retainAudit(p *preparedAction, result Result, complete bo
 	}
 	if !complete {
 		if err := os.WriteFile(filepath.Join(dir, "INCOMPLETE.txt"), []byte("The audit failed. These partial artifacts are incomplete and must not be published.\n"), 0600); err != nil {
-			return err
+			return errors.Join(err, os.RemoveAll(dir))
 		}
 	}
 	e.logf("audit %s #%d at %s; reports: %s", p.Job.Identity.Repository, p.Job.Identity.Number, p.Job.Source.Head, dir)
@@ -352,7 +349,7 @@ func (e *Orchestrator) publishFix(ctx context.Context, p *preparedAction, result
 	}
 	currentRepo, currentFork, err := e.fixFork(ctx, request.Repository)
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: %w", monitor.ErrPostModelPublication, err)
 	}
 	repo, fork := p.repository, p.fork
 	if currentRepo.ID != repo.ID || currentRepo.DefaultBranch != repo.DefaultBranch || currentRepo.Private != repo.Private || currentRepo.Visibility != repo.Visibility || currentFork.ID != fork.ID || !strings.EqualFold(currentFork.FullName, fork.FullName) {

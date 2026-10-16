@@ -23,6 +23,12 @@ func singleLink(info os.FileInfo) bool {
 	return ok && stat.Nlink == 1
 }
 
+func sameChangeTime(before, after os.FileInfo) bool {
+	first, firstOK := before.Sys().(*syscall.Stat_t)
+	last, lastOK := after.Sys().(*syscall.Stat_t)
+	return firstOK && lastOK && first.Ctim == last.Ctim
+}
+
 // Pin each parent directory before opening its child; a worker may still rename paths.
 func openPath(name string, directory bool) (*os.File, error) {
 	abs, err := filepath.Abs(name)
@@ -33,11 +39,13 @@ func openPath(name string, directory bool) (*os.File, error) {
 	// syscall omits O_PATH on amd64; Linux uses this value on every supported architecture.
 	const oPath = 0x200000
 	parentFlags := oPath | syscall.O_DIRECTORY | syscall.O_NOFOLLOW | syscall.O_CLOEXEC
-	rootFlags := parentFlags
-	if abs == "/" {
-		rootFlags = flags | syscall.O_DIRECTORY
+	var fd int
+	for {
+		fd, err = syscall.Open("/", parentFlags, 0)
+		if err != syscall.EINTR {
+			break
+		}
 	}
-	fd, err := syscall.Open("/", rootFlags, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -52,7 +60,14 @@ func openPath(name string, directory bool) (*os.File, error) {
 		} else if directory {
 			partFlags |= syscall.O_DIRECTORY
 		}
-		next, openErr := syscall.Openat(fd, part, partFlags, 0)
+		var next int
+		var openErr error
+		for {
+			next, openErr = syscall.Openat(fd, part, partFlags, 0)
+			if openErr != syscall.EINTR {
+				break
+			}
+		}
 		closeErr := syscall.Close(fd)
 		if openErr != nil {
 			return nil, errors.Join(openErr, closeErr)

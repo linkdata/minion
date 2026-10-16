@@ -23,7 +23,7 @@ import (
 const (
 	maxEventBytes       = 4 << 20
 	maxCodexOutputBytes = 64 << 20
-	maxCodexEvents      = 10000
+	maxCodexEvents      = 100000
 	maxCodexChildren    = 256
 	maxDiagnosticBytes  = 8 << 10
 	instructionRoot     = ".minion-codex-root"
