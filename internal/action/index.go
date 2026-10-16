@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -33,7 +34,7 @@ func newFixIndex(ctx context.Context, dir, source string) (*fixIndex, error) {
 		return nil, errors.New("offline git binary must have an absolute path")
 	}
 	index := &fixIndex{dir: dir, source: source, binary: binary}
-	if _, err := index.run(ctx, 1024, "init", "--quiet", "--template="); err != nil {
+	if _, err := index.run(ctx, 1024, "init", "--quiet", "--template=", "--object-format=sha1"); err != nil {
 		return nil, err
 	}
 	// info/attributes overrides untrusted .gitattributes even for forced baseline files.
@@ -91,6 +92,9 @@ func (index *fixIndex) changes(ctx context.Context) ([]workspace.Change, error) 
 				return nil, err
 			}
 			name := string(path)
+			if strings.HasSuffix(name, "/") {
+				return nil, fmt.Errorf("nested repository output %q must be removed or ignored", name)
+			}
 			if !workspace.ValidPath(name) {
 				return nil, fmt.Errorf("fix output %q is not a portable regular-file path", name)
 			}
@@ -101,6 +105,7 @@ func (index *fixIndex) changes(ctx context.Context) ([]workspace.Change, error) 
 			total += len(data)
 		}
 	}
+	// shortcut: tracked edits are hashed before result limits; add I/O quotas with isolated executors (#96).
 	if _, err := index.run(ctx, 1024, "add", "--all", "--", ".", ":(exclude,icase,glob)**/.git", ":(exclude,icase,glob)**/.git/**"); err != nil {
 		return nil, err
 	}
@@ -199,19 +204,19 @@ func (index *fixIndex) run(ctx context.Context, limit int, args ...string) ([]by
 	cmd := exec.CommandContext(ctx, index.binary, append(gitArgs, args...)...)
 	cmd.Dir, cmd.Env = index.dir, index.environment()
 	cmd.WaitDelay = 2 * time.Second
-	output, diagnostic := indexBuffer{limit: limit, cancel: cancel}, indexBuffer{limit: 8 << 10}
+	output, diagnostic := bounded.Buffer{Limit: limit, Cancel: cancel}, bounded.Buffer{Limit: 8 << 10}
 	cmd.Stdout, cmd.Stderr = &output, &diagnostic
 	err := cmd.Run()
-	if output.exceeded {
+	if output.Exceeded {
 		return nil, errors.New("offline git output exceeds action limit")
 	}
 	if err != nil {
 		if contextErr := ctx.Err(); contextErr != nil {
 			err = errors.Join(err, contextErr)
 		}
-		return nil, fmt.Errorf("offline git %s: %w: %s", args[0], err, strings.TrimSpace(string(diagnostic.data)))
+		return nil, fmt.Errorf("offline git %s: %w: %s", args[0], err, strings.TrimSpace(diagnostic.String()))
 	}
-	return output.data, nil
+	return output.Bytes(), nil
 }
 
 func (index *fixIndex) environment() []string {
@@ -228,23 +233,4 @@ func (index *fixIndex) environment() []string {
 		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=/bin/false", "GIT_NO_REPLACE_OBJECTS=1",
 		"GIT_AUTHOR_NAME=source", "GIT_AUTHOR_EMAIL=source@localhost", "GIT_COMMITTER_NAME=source", "GIT_COMMITTER_EMAIL=source@localhost",
 		"GIT_AUTHOR_DATE=2000-01-01T00:00:00Z", "GIT_COMMITTER_DATE=2000-01-01T00:00:00Z"}
-}
-
-type indexBuffer struct {
-	data     []byte
-	limit    int
-	exceeded bool
-	cancel   context.CancelFunc
-}
-
-func (b *indexBuffer) Write(data []byte) (int, error) {
-	n := len(data)
-	if len(data) > b.limit-len(b.data) {
-		data, b.exceeded = data[:b.limit-len(b.data)], true
-		if b.cancel != nil {
-			b.cancel()
-		}
-	}
-	b.data = append(b.data, data...)
-	return n, nil
 }

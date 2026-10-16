@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
+	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/workspace"
 )
@@ -144,18 +146,18 @@ func (c *Checkout) sourceFiles(ctx context.Context, entries []sourceEntry) (file
 	defer cancel()
 	// Content bounds were checked against API metadata before requesting blobs.
 	// Leave room for each bounded cat-file header and its content terminator.
-	output := boundedGitWriter{buffer: cappedBuffer{limit: int(size) + (maxBatchHeaderBytes+2)*len(requested)}, cancel: cancel}
+	output := bounded.Buffer{Limit: int(size) + (maxBatchHeaderBytes+2)*len(requested), Cancel: cancel}
 	err = runGitInputTo(readCtx, c.path, strings.NewReader(input.String()), &output, "cat-file", "--batch")
 	if ctx.Err() != nil {
 		return nil, nil, ctx.Err()
 	}
-	if output.buffer.exceeded {
+	if output.Exceeded {
 		return nil, nil, fmt.Errorf("%w: Git blobs exceed API-declared sizes", ErrUnsupportedSource)
 	}
 	if err != nil {
 		return nil, nil, err
 	}
-	files, err = readBatchBlobs(output.buffer.Bytes(), requested)
+	files, err = readBatchBlobs(output.Bytes(), requested)
 	return files, omitted, err
 }
 
@@ -287,6 +289,7 @@ func (c *Checkout) Snapshot(ctx context.Context, history, pull bool) (s workspac
 }
 
 // Import applies data-only changes to the original orchestrator-owned checkout.
+// The caller must validate the complete action result, including omitted-source overlap.
 func (c *Checkout) Import(ctx context.Context, expectedHead string, changes []workspace.Change) error {
 	if err := c.ready(); err != nil {
 		return err
@@ -301,10 +304,23 @@ func (c *Checkout) Import(ctx context.Context, expectedHead string, changes []wo
 		return err
 	}
 	if _, err := runGit(ctx, c.path, "add", "--all", "--", "."); err != nil {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		return fmt.Errorf("%w: stage imported changes: %w", ErrUnsupportedSource, err)
+		return fmt.Errorf("stage imported changes: %w", err)
+	}
+	staged, err := c.stagedPaths(ctx)
+	if err != nil {
+		return err
+	}
+	if len(changes) != 0 && len(staged) == 0 {
+		return ErrNoChanges
+	}
+	declared := make([]string, len(changes))
+	for i, change := range changes {
+		declared[i] = change.Path
+	}
+	slices.Sort(declared)
+	slices.Sort(staged)
+	if !slices.Equal(staged, declared) {
+		return errors.New("staged paths do not match reviewed changes")
 	}
 	return nil
 }
@@ -316,32 +332,19 @@ func (c *Checkout) disableAttributes() error {
 	return os.WriteFile(filepath.Join(c.path, ".git", "info", "attributes"), []byte(workspace.GitAttributes), 0600)
 }
 
-type boundedGitWriter struct {
-	buffer cappedBuffer
-	cancel context.CancelFunc
-}
-
-func (w *boundedGitWriter) Write(p []byte) (int, error) {
-	n, err := w.buffer.Write(p)
-	if w.buffer.exceeded {
-		w.cancel()
-	}
-	return n, err
-}
-
 func (c *Checkout) boundedGit(ctx context.Context, limit int, truncate bool, args ...string) ([]byte, bool, error) {
 	readCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	output := boundedGitWriter{buffer: cappedBuffer{limit: limit}, cancel: cancel}
+	output := bounded.Buffer{Limit: limit, Cancel: cancel}
 	err := runGitTo(readCtx, c.path, &output, args...)
 	if ctx.Err() != nil {
 		return nil, false, ctx.Err()
 	}
-	if output.buffer.exceeded {
+	if output.Exceeded {
 		if truncate {
-			return output.buffer.Bytes(), true, nil
+			return output.Bytes(), true, nil
 		}
 		return nil, false, fmt.Errorf("%w: Git %s output exceeds %d bytes", ErrCheckoutTooLarge, args[0], limit)
 	}
-	return output.buffer.Bytes(), false, err
+	return output.Bytes(), false, err
 }

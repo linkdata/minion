@@ -50,6 +50,49 @@ func writeIndexFixture(t *testing.T, source, name string, data []byte) {
 	}
 }
 
+func TestFixIndexPinsSHA1WhenGitDefaultsToSHA256(t *testing.T) {
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	proxy := filepath.Join(bin, "git")
+	quotedGit := "'" + strings.ReplaceAll(realGit, "'", "'\\''") + "'"
+	if err := os.WriteFile(proxy, []byte("#!/bin/sh\nGIT_DEFAULT_HASH=sha256 exec "+quotedGit+" \"$@\"\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	control := filepath.Join(t.TempDir(), "control")
+	if output, err := exec.Command(proxy, "init", "--quiet", "--template=", control).CombinedOutput(); err != nil {
+		t.Fatalf("initialize SHA256 control: %s,%v", output, err)
+	}
+	if output, err := exec.Command(realGit, "-C", control, "rev-parse", "--show-object-format").Output(); err != nil || strings.TrimSpace(string(output)) != "sha256" {
+		t.Fatalf("control did not select SHA256: %q,%v", output, err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	index, source := offlineIndexFixture(t, []workspace.File{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("before")}})
+	if output, err := index.run(context.Background(), 128, "rev-parse", "--show-object-format"); err != nil || strings.TrimSpace(string(output)) != "sha1" {
+		t.Fatalf("offline index changed its object format: %q,%v", output, err)
+	}
+	writeIndexFixture(t, source, "source.txt", []byte("after"))
+	changes, err := index.changes(context.Background())
+	if err != nil || len(changes) != 1 || string(changes[0].Data) != "after" {
+		t.Fatalf("pinned index failed byte binding: %+v,%v", changes, err)
+	}
+}
+
+func TestFixIndexBoundsTrackedChangesWithoutRefusingUnchangedLargeSource(t *testing.T) {
+	data := make([]byte, workspace.MaxChangeBytes+1)
+	index, source := offlineIndexFixture(t, []workspace.File{{Path: "large", Mode: workspace.Regular, Data: data}})
+	if changes, err := index.changes(context.Background()); err != nil || len(changes) != 0 {
+		t.Fatalf("unchanged source over result limit was refused: %+v,%v", changes, err)
+	}
+	data[len(data)-1] = 1
+	writeIndexFixture(t, source, "large", data)
+	if changes, err := index.changes(context.Background()); err == nil || !strings.Contains(err.Error(), "byte limit") {
+		t.Fatalf("oversized same-size tracked edit was exported: %+v,%v", changes, err)
+	}
+}
+
 func TestFixIndexPreservesGitignoreAndTrackedIgnoredFiles(t *testing.T) {
 	index, source := offlineIndexFixture(t, []workspace.File{
 		{Path: ".gitignore", Mode: workspace.Regular, Data: []byte(".venv/\ntarget/\n__pycache__/\n*.log\ntracked.log\n")},
@@ -135,17 +178,6 @@ func TestFixIndexRejectsRelativeExecutableWhenErrDotDisabled(t *testing.T) {
 	}
 }
 
-func TestFixIndexIgnoresCaseVariantGitMetadata(t *testing.T) {
-	index, source := offlineIndexFixture(t, nil)
-	writeIndexFixture(t, source, ".gIt/config", []byte("untrusted root metadata"))
-	writeIndexFixture(t, source, "nested/.GiT/config", []byte("untrusted nested metadata"))
-	writeIndexFixture(t, source, "nested/file", []byte("source"))
-	changes, err := index.changes(context.Background())
-	if err != nil || len(changes) != 1 || changes[0].Path != "nested/file" {
-		t.Fatalf("Git metadata escaped exclusions: %+v, %v", changes, err)
-	}
-}
-
 func TestFixIndexDisablesAttributesAndOperatorConfiguration(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "executed")
 	global := filepath.Join(t.TempDir(), "gitconfig")
@@ -179,7 +211,7 @@ func TestFixIndexDisablesAttributesAndOperatorConfiguration(t *testing.T) {
 func TestFixIndexRejectsNonIgnoredUnsafeOutput(t *testing.T) {
 	for _, tt := range []struct{ kind, cause string }{
 		{"symlink", `fix output "link"`},
-		{"nested repository", `fix output "nested/"`},
+		{"nested repository", `nested repository output "nested/" must be removed or ignored`},
 		{"oversized", "byte limit"},
 		{"aggregate oversized", "byte limit"},
 		{"too many", "changed file limit"},

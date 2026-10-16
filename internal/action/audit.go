@@ -13,16 +13,37 @@ import (
 	"github.com/linkdata/minion/internal/workspace"
 )
 
+type auditReadMode uint8
+
+const (
+	auditComplete auditReadMode = iota
+	auditForReview
+	auditIncomplete
+)
+
 func readAuditFiles(outputDir string) ([]workspace.File, error) {
-	files := make([]workspace.File, 0, len(auditArtifacts))
+	files, _, err := readAuditArtifacts(outputDir, auditComplete)
+	return files, err
+}
+
+func readAuditArtifacts(outputDir string, mode auditReadMode) ([]workspace.File, []Diagnostic, error) {
+	var files []workspace.File
+	var diagnostics []Diagnostic
 	for _, name := range auditArtifacts {
-		data, err := readAuditArtifact(filepath.Join(outputDir, name), auditArtifactLimit(name), auditArtifactMayBeEmpty(name))
+		data, err := readAuditArtifact(filepath.Join(outputDir, name), auditArtifactLimit(name), mode == auditIncomplete || auditArtifactMayBeEmpty(name))
+		if errors.Is(err, os.ErrNotExist) && mode != auditComplete {
+			continue
+		}
 		if err != nil {
-			return nil, fmt.Errorf("invalid audit %s: %w", name, err)
+			if mode != auditIncomplete {
+				return nil, nil, fmt.Errorf("invalid audit %s: %w", name, err)
+			}
+			diagnostics = append(diagnostics, Diagnostic{Code: "artifact_unavailable", Message: "Incomplete audit artifact " + name + " could not be safely collected."})
+			continue
 		}
 		files = append(files, workspace.File{Path: name, Mode: workspace.Regular, Data: data})
 	}
-	return files, nil
+	return files, diagnostics, nil
 }
 
 func auditArtifactMayBeEmpty(name string) bool {

@@ -11,7 +11,6 @@ import (
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/claudecli"
 	"github.com/linkdata/minion/internal/codexcli"
-	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/monitor"
 )
 
@@ -54,17 +53,11 @@ func (e *Runner) runOnce(ctx context.Context, request modelRun) (aicli.Result, e
 	}
 	switch request.provider {
 	case "codex":
-		if e.RunCodex != nil {
-			return e.RunCodex(ctx, request.dir, request.prompt, request.writable, request.outputDir)
-		}
 		settings := e.Codex
 		settings.ReadOnlyDirs = append(append([]string(nil), settings.ReadOnlyDirs...), request.readOnlyDirs...)
 		settings.OutputSchema = request.outputSchema
 		return codexcli.Run(ctx, request.dir, request.prompt, request.writable, request.outputDir, settings)
 	case "claude":
-		if e.RunClaude != nil {
-			return e.RunClaude(ctx, request.dir, request.prompt, request.writable, request.outputDir)
-		}
 		settings := e.Claude
 		settings.ReadOnlyDirs = append(append([]string(nil), settings.ReadOnlyDirs...), request.readOnlyDirs...)
 		settings.OutputSchema = request.outputSchema
@@ -77,16 +70,9 @@ func (e *Runner) runOnce(ctx context.Context, request modelRun) (aicli.Result, e
 func (e *Runner) runAI(ctx context.Context, job Job, dir, prompt string, writable bool, outputDir string) (answer string, err error) {
 	rounds := job.rounds()
 	main := job.Main.Provider
-	if main == "" {
-		main = "codex"
-	}
 	criticProvider := ""
 	if job.Critic != nil {
 		criticProvider = job.Critic.Provider
-	}
-	if rounds < 1 || rounds > config.MaxCriticMaxRounds || (criticProvider != "" &&
-		(criticProvider == main || (criticProvider != "codex" && criticProvider != "claude"))) {
-		return "", fmt.Errorf("%w: invalid critic configuration", monitor.ErrTerminalJob)
 	}
 	request := modelRun{role: "main", provider: main, model: job.Main.Model, effort: job.Main.Effort, dir: dir, prompt: prompt, writable: writable, outputDir: outputDir}
 	if criticProvider != "" {

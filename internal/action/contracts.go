@@ -216,7 +216,7 @@ func (j Job) Validate() error {
 		return err
 	}
 	if j.Action == command.Fix {
-		return workspace.ValidateFixPaths(j.Source.Files)
+		return workspace.ValidateFixPaths(j.Source.Files, j.Source.Omitted)
 	}
 	return nil
 }
@@ -234,7 +234,7 @@ func (r Result) validate(j Job, complete bool) error {
 	if r.Version != ProtocolVersion || r.Identity != j.Identity || r.SourceRef != j.Source.Head {
 		return errors.New("action result version, identity or source differs from job")
 	}
-	if !boundedText(r.Answer, maxOutputBytes) || (complete && strings.TrimSpace(r.Answer) == "") {
+	if !boundedText(r.Answer, maxOutputBytes) || (complete && (j.Action != command.Fix || j.Critic != nil) && strings.TrimSpace(r.Answer) == "") {
 		return errors.New("action answer exceeds limit or is invalid text")
 	}
 	if j.Action != command.Fix && len(r.Changes) != 0 {

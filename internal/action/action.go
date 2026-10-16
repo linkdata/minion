@@ -33,6 +33,7 @@ var modelLineBreaks = strings.NewReplacer(
 // Orchestrator prepares portable actions and publishes results through trusted Git/GitHub access.
 type Orchestrator struct {
 	Runner                    Runner
+	WorkRoot                  string
 	Main, Adversarial         string
 	CriticMaxRounds           int
 	AlwaysOnSkills            []string

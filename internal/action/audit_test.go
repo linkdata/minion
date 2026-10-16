@@ -43,7 +43,7 @@ func TestSecurityAuditIssueAndPullRequest(t *testing.T) {
 		{name: "moved pull request", subject: "PullRequest", movedHead: true, wantError: "pull request head changed"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			base, head := auditGitFixture(t)
+			base, head, _ := auditGitFixtureRemote(t)
 			expected := base
 			if tt.subject == "PullRequest" {
 				expected = head
@@ -126,19 +126,16 @@ func TestSecurityAuditIssueAndPullRequest(t *testing.T) {
 			}
 			var calls int
 			var sourceDir, reportsDir string
-			e := &Orchestrator{
-				GitHub:   client,
-				BotLogin: "linkdataminion",
-				Usage:    usageStore,
-
+			e := &Orchestrator{WorkRoot: t.TempDir(), GitHub: client,
+				BotLogin:    "linkdataminion",
+				Usage:       usageStore,
 				Commands:    map[string]config.CommandMapping{"security-audit": {Action: "security-audit", Skills: []string{testAuditSkillURL}}},
 				CodexModel:  "test-model",
 				CodexEffort: "high",
 				Runner: Runner{
 					WorkRoot: t.TempDir(),
-					Codex:    config.CodexConfig{Model: "test-model", ReasoningEffort: "high"},
-
-					RunCodex: func(ctx context.Context, dir, prompt string, writable bool, outputDir string) (codexcli.Result, error) {
+					runModel: func(ctx context.Context, modelRequest modelRun) (codexcli.Result, error) {
+						dir, prompt, writable, outputDir := modelRequest.dir, modelRequest.prompt, modelRequest.writable, modelRequest.outputDir
 						calls++
 						records, err := usage.ReadAll(usageStore.Dir)
 						if err != nil || len(records) == 0 {
@@ -230,7 +227,7 @@ func TestSecurityAuditIssueAndPullRequest(t *testing.T) {
 				if err != nil || calls != 1 || len(comments) != 1 {
 					t.Fatalf("audit failed: err=%v calls=%d comments=%d", err, calls, len(comments))
 				}
-				retained, err := filepath.Glob(filepath.Join(e.Runner.WorkRoot, "audits", "*", "REPORT.md"))
+				retained, err := filepath.Glob(filepath.Join(e.WorkRoot, "audits", "*", "REPORT.md"))
 				if err != nil || len(retained) != 1 {
 					t.Fatalf("reports not retained: %v, %v", retained, err)
 				}
@@ -395,11 +392,6 @@ JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 	validate("unvalidated candidate")
 }
 
-func auditGitFixture(t *testing.T) (base, head string) {
-	base, head, _ = auditGitFixtureRemote(t)
-	return base, head
-}
-
 func auditGitFixtureRemote(t *testing.T) (base, head, remote string) {
 	t.Helper()
 	realGit, err := exec.LookPath("git")
@@ -443,4 +435,61 @@ func validateAuditOutput(ctx context.Context, outputDir, skill, repo, target, he
 		return "", err
 	}
 	return validateAuditFiles(ctx, files, filepath.Dir(outputDir), skill, repo, target, head)
+}
+
+func TestAuditArtifactReadModesPreserveFailurePolicies(t *testing.T) {
+	for _, scenario := range []string{"missing core", "empty core", "unsafe core"} {
+		for _, mode := range []auditReadMode{auditComplete, auditForReview, auditIncomplete} {
+			t.Run(fmt.Sprintf("%s/mode-%d", scenario, mode), func(t *testing.T) {
+				root := t.TempDir()
+				for _, name := range auditArtifacts {
+					if err := os.WriteFile(filepath.Join(root, name), []byte("content"), 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				name := filepath.Join(root, "architecture.md")
+				switch scenario {
+				case "missing core":
+					if err := os.Remove(name); err != nil {
+						t.Fatal(err)
+					}
+				case "empty core":
+					if err := os.WriteFile(name, nil, 0600); err != nil {
+						t.Fatal(err)
+					}
+				case "unsafe core":
+					if err := os.Remove(name); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Symlink("REPORT.md", name); err != nil {
+						t.Fatal(err)
+					}
+				}
+				files, diagnostics, err := readAuditArtifacts(root, mode)
+				wantError := mode == auditComplete || mode == auditForReview && scenario != "missing core"
+				if (err != nil) != wantError {
+					t.Fatalf("files=%v diagnostics=%v error=%v want error=%t", files, diagnostics, err, wantError)
+				}
+				if wantError {
+					if !strings.Contains(err.Error(), "architecture.md") {
+						t.Fatalf("lost invalid artifact name: %v", err)
+					}
+					return
+				}
+				wantFiles, wantDiagnostics := len(auditArtifacts), 0
+				if scenario != "empty core" {
+					wantFiles--
+				}
+				if scenario == "unsafe core" {
+					wantDiagnostics = 1
+				}
+				if len(files) != wantFiles || len(diagnostics) != wantDiagnostics {
+					t.Fatalf("files=%d diagnostics=%+v; want %d/%d", len(files), diagnostics, wantFiles, wantDiagnostics)
+				}
+				if wantDiagnostics == 1 && diagnostics[0].Code != "artifact_unavailable" {
+					t.Fatalf("invalid partial artifact diagnostic: %+v", diagnostics)
+				}
+			})
+		}
+	}
 }

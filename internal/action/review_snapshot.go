@@ -3,9 +3,7 @@ package action
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
-	"path/filepath"
 	"reflect"
 
 	"github.com/linkdata/minion/internal/cleanup"
@@ -42,7 +40,7 @@ func freezeReviewSnapshot(ctx context.Context, workRoot string, job Job, source,
 		return snapshot, err
 	}
 	if outputDir != "" {
-		if snapshot.artifacts, err = readReviewArtifacts(outputDir); err != nil {
+		if snapshot.artifacts, _, err = readAuditArtifacts(outputDir, auditForReview); err != nil {
 			return snapshot, err
 		}
 		if snapshot.outputDir, err = os.MkdirTemp(workRoot, ".minion-review-reports-"); err != nil {
@@ -64,7 +62,7 @@ func (s *reviewSnapshot) verify(ctx context.Context, job Job, source, outputDir 
 		return errors.New("candidate source changed during critic review")
 	}
 	if outputDir != "" {
-		files, err := readReviewArtifacts(outputDir)
+		files, _, err := readAuditArtifacts(outputDir, auditForReview)
 		if err != nil {
 			return err
 		}
@@ -107,19 +105,4 @@ func reviewChanges(ctx context.Context, job Job, source string, index *fixIndex)
 		return nil, errors.New("read-only action modified supplied source")
 	}
 	return nil, nil
-}
-
-func readReviewArtifacts(outputDir string) ([]workspace.File, error) {
-	var files []workspace.File
-	for _, name := range auditArtifacts {
-		data, err := readAuditArtifact(filepath.Join(outputDir, name), auditArtifactLimit(name), auditArtifactMayBeEmpty(name))
-		if errors.Is(err, os.ErrNotExist) {
-			continue
-		}
-		if err != nil {
-			return nil, fmt.Errorf("freeze audit %s: %w", name, err)
-		}
-		files = append(files, workspace.File{Path: name, Mode: workspace.Regular, Data: data})
-	}
-	return files, nil
 }

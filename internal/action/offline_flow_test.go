@@ -26,7 +26,7 @@ import (
 // Exercise the real API client, monitor, executor, and Git checkout together.
 // All GitHub responses come from this local server; Git uses a local bare repo.
 func TestOfflineReviewPollRecoversAfterPublication(t *testing.T) {
-	_, head := auditGitFixture(t)
+	_, head, _ := auditGitFixtureRemote(t)
 
 	now := time.Date(2026, 10, 9, 8, 1, 0, 0, time.UTC)
 	requestAt := now.Add(-time.Second) // Remains inside the next poll's cursor overlap.
@@ -177,14 +177,13 @@ func TestOfflineReviewPollRecoversAfterPublication(t *testing.T) {
 		t.Helper()
 		client := github.New("offline-token")
 		client.BaseURL, client.HTTPClient = server.URL, server.Client()
-		executor := &Orchestrator{
-			GitHub:   client,
+		executor := &Orchestrator{WorkRoot: t.TempDir(), GitHub: client,
 			BotLogin: "linkdataminion",
 			Store:    store,
 			Commands: commands,
 			Runner: Runner{
-				WorkRoot: t.TempDir(),
-				RunCodex: func(_ context.Context, dir, prompt string, writable bool, outputDir string) (codexcli.Result, error) {
+				WorkRoot: t.TempDir(), runModel: func(_ context.Context, modelRequest modelRun) (codexcli.Result, error) {
+					dir, prompt, writable, outputDir := modelRequest.dir, modelRequest.prompt, modelRequest.writable, modelRequest.outputDir
 					if _, err := os.Stat(dir); err != nil || writable || outputDir != "" || !strings.Contains(prompt, head) {
 						return codexcli.Result{}, fmt.Errorf("unexpected Codex invocation: dir=%q writable=%t output=%q stat=%v", dir, writable, outputDir, err)
 					}

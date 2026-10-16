@@ -453,9 +453,6 @@ func (m *Monitor) deferNotification(store *state.Store, key string, notification
 }
 
 func infrastructureFailure(err error) bool {
-	if errors.Is(err, context.Canceled) {
-		return true
-	}
 	var status *github.StatusError
 	if errors.As(err, &status) && (status.StatusCode == http.StatusUnauthorized || status.StatusCode == http.StatusForbidden ||
 		status.StatusCode == http.StatusRequestTimeout || status.StatusCode == http.StatusTooManyRequests || status.StatusCode >= http.StatusInternalServerError) {

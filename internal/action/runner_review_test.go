@@ -101,6 +101,9 @@ func TestRunnerReviewRejectsSourceMutationEvenAfterRejection(t *testing.T) {
 					return aicli.Result{Answer: proposalJSON("answer", "")}, nil
 				}
 				writeIndexFixture(t, source, "source.txt", []byte("background edit"))
+				if data, err := workspace.ReadRegular(filepath.Join(request.dir, "source.txt"), workspace.MaxBytes); err != nil || string(data) != "candidate" {
+					t.Fatalf("live mutation reached frozen copy: %q, %v", data, err)
+				}
 				feedback := ""
 				if !approved {
 					feedback = "Fix the candidate."
@@ -169,11 +172,11 @@ exec %q "$@"
 
 func TestRunnerAuditReviewFreezesAndExportsRawReports(t *testing.T) {
 	realNode, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("audit validators require node")
-	}
 	for _, scenario := range []string{"approved", "mutated during critic", "mutated during validation", "empty architecture"} {
 		t.Run(scenario, func(t *testing.T) {
+			if err != nil && (scenario == "approved" || scenario == "mutated during validation") {
+				t.Skip("audit validators require node")
+			}
 			installActionTestSkills(t, testAuditSkillURL)
 			skillDir := filepath.Join(os.Getenv("HOME"), ".agents", "skills", "security-audit")
 			for _, name := range []string{"validate-findings.cjs", "validate-coverage-ledger.cjs"} {

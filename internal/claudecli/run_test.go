@@ -186,7 +186,7 @@ printf '%s\n' '`+successfulResult+`'
 				t.Fatal("read-only protections missing")
 			}
 			prompt := readFile(t, binary+".prompt")
-			if !strings.Contains(prompt, workspace) || !strings.Contains(prompt, "SKILL.md") || !strings.HasSuffix(prompt, "Handle task") {
+			if !strings.Contains(prompt, "Source snapshot: ") || !strings.Contains(prompt, workspace) || !strings.Contains(prompt, "SKILL.md") || !strings.HasSuffix(prompt, "Handle task") {
 				t.Fatalf("prompt = %q", prompt)
 			}
 			cwd := strings.TrimSpace(readFile(t, binary+".cwd"))

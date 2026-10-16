@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/linkdata/minion/internal/codexcli"
+	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/monitor"
@@ -85,6 +85,56 @@ func TestFixJobRejectsUnsupportedLayoutBeforeExecution(t *testing.T) {
 	}
 }
 
+func TestFixJobIncludesOmittedPathsInUpfrontFoldedLayout(t *testing.T) {
+	for _, names := range [][2]string{{"link/a", "Link"}, {"LINK", "link/b"}, {"ſ/a", "s"}, {"Docs/a", "docs/b"}, {"File", "file"}} {
+		t.Run(names[0]+"-"+names[1], func(t *testing.T) {
+			job := portableJob(command.Fix)
+			job.Source.Files = []workspace.File{{Path: names[0], Mode: workspace.Regular}}
+			job.Source.Omitted = []string{names[1]}
+			if err := workspace.ValidateSnapshot(job.Source); err != nil {
+				t.Fatalf("test does not describe a valid exact source: %v", err)
+			}
+			runner := Runner{WorkRoot: t.TempDir(), runModel: func(context.Context, modelRun) (aicli.Result, error) {
+				t.Fatal("model ran with a folded file/omission collision")
+				return aicli.Result{}, nil
+			}}
+			if _, err := runner.Run(context.Background(), job); !errors.Is(err, monitor.ErrTerminalJob) || (!strings.Contains(err.Error(), "collision") && !strings.Contains(err.Error(), "duplicate source path")) {
+				t.Fatalf("unsupported fix source was not refused before execution: %v", err)
+			}
+			job.Action = command.Comment
+			if err := job.Validate(); err != nil {
+				t.Fatalf("read-only exact source must remain supported: %v", err)
+			}
+		})
+	}
+}
+
+func TestRunnerFixCanReturnEmptyAnswerWithoutCritic(t *testing.T) {
+	job := portableJob(command.Fix)
+	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+		writeIndexFixture(t, request.dir, "source.txt", []byte("fixed source"))
+		return aicli.Result{}, nil
+	}}
+	result, err := runner.Run(context.Background(), job)
+	if err != nil || result.Answer != "" || len(result.Changes) != 1 || string(result.Changes[0].Data) != "fixed source" {
+		t.Fatalf("valid fix was lost because its summary was empty: %+v,%v", result, err)
+	}
+	for _, test := range []struct {
+		action command.Action
+		critic bool
+		valid  bool
+	}{{command.Fix, false, true}, {command.Fix, true, false}, {command.Comment, false, false}, {command.Review, false, false}, {command.SecurityAudit, false, false}} {
+		job := portableJob(test.action)
+		if test.critic {
+			job.Critic = &RoleSettings{Provider: "claude"}
+		}
+		result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head}
+		if err := result.Validate(job); (err == nil) != test.valid || (!test.valid && !strings.Contains(err.Error(), "action answer")) {
+			t.Fatalf("empty %s answer with critic=%t: %v", test.action, test.critic, err)
+		}
+	}
+}
+
 func TestResultRejectsChangesOverlappingOmittedSource(t *testing.T) {
 	for _, name := range []string{"private/link", "PRIVATE/link", "private/link/file", "private"} {
 		t.Run(strings.ReplaceAll(name, "/", "-"), func(t *testing.T) {
@@ -113,14 +163,14 @@ func TestJobChangeValidationFoldsOmittedUnicodePaths(t *testing.T) {
 func TestRunnerOmittedSourceWriteIsTerminal(t *testing.T) {
 	job := portableJob(command.Fix)
 	job.Source.Omitted = []string{"hidden"}
-	runner := Runner{WorkRoot: t.TempDir(), RunCodex: func(_ context.Context, dir, prompt string, _ bool, _ string) (codexcli.Result, error) {
-		if !strings.Contains(prompt, "Do not create, change or delete omitted paths or anything beneath them") {
+	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+		if !strings.Contains(request.prompt, "Do not create, change or delete omitted paths or anything beneath them") {
 			t.Fatal("prompt permits writing omitted source")
 		}
-		if err := os.WriteFile(filepath.Join(dir, "hidden"), []byte("replacement"), 0600); err != nil {
+		if err := os.WriteFile(filepath.Join(request.dir, "hidden"), []byte("replacement"), 0600); err != nil {
 			t.Fatal(err)
 		}
-		return codexcli.Result{Answer: "Done."}, nil
+		return aicli.Result{Answer: "Done."}, nil
 	}}
 	result, err := runner.Run(context.Background(), job)
 	if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "omitted source path") {
@@ -203,6 +253,28 @@ func TestResultCallUsageRequiresOrderedReviewPhases(t *testing.T) {
 				t.Fatal("accepted malformed or incorrectly attributed call")
 			}
 		})
+	}
+}
+
+func TestResultCallUsageRejectsCriticsAndRepeatedMainWithoutCritic(t *testing.T) {
+	job := portableJob(command.Comment)
+	main := CallUsage{Provider: job.Main.Provider, Role: "main", Round: 1}
+	for _, calls := range [][]CallUsage{
+		{{Provider: "claude", Role: "critic", Round: 1, ReviewPhase: "full"}},
+		{main, {Provider: "claude", Role: "critic", Round: 1, ReviewPhase: "full"}},
+		{main, {Provider: job.Main.Provider, Role: "main", Round: 2}},
+		{main, main},
+	} {
+		result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Answer.", Calls: calls}
+		for _, complete := range []bool{false, true} {
+			if err := result.validate(job, complete); err == nil || (!strings.Contains(err.Error(), "model call")) {
+				t.Fatalf("accepted unexpected no-critic calls (complete=%t): %+v,%v", complete, calls, err)
+			}
+		}
+	}
+	result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Answer.", Calls: []CallUsage{main}}
+	if err := result.Validate(job); err != nil {
+		t.Fatalf("refused one valid main call without critic: %v", err)
 	}
 }
 

@@ -23,25 +23,23 @@ func (e *Orchestrator) trackUsage(job monitor.Job) (*Orchestrator, func(error) e
 	if name == "" {
 		name = string(job.Command.Action)
 	}
-	modelSettings := func(provider string) (model, effort string) {
-		model, effort = e.CodexModel, e.CodexEffort
-		if provider == "claude" {
-			model, effort = e.ClaudeModel, e.ClaudeEffort
-		}
-		if model == "" {
-			model = "default"
-		}
-		return
-	}
 	record := usage.Record{
 		ID: hex.EncodeToString(id[:]), JobID: job.ID, Repo: job.Repository.Name,
 		User: job.Source.Author.Login, Action: name, Number: job.Number,
 		SourceURL: sourceURL(job), Provider: e.mainProvider(), CriticProvider: e.Adversarial,
 		StartedAt: time.Now().UTC(), Status: "running", UsageComplete: true,
 	}
-	record.Model, record.Effort = modelSettings(record.Provider)
+	main := e.roleSettings(record.Provider, nil)
+	record.Model, record.Effort = main.Model, main.Effort
+	if record.Model == "" {
+		record.Model = "default"
+	}
 	if record.CriticProvider != "" {
-		record.CriticModel, record.CriticEffort = modelSettings(record.CriticProvider)
+		critic := e.roleSettings(record.CriticProvider, nil)
+		record.CriticModel, record.CriticEffort = critic.Model, critic.Effort
+		if record.CriticModel == "" {
+			record.CriticModel = "default"
+		}
 	}
 	save := func() error {
 		if err := e.Usage.Save(record); err != nil {

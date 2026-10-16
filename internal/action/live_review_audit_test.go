@@ -33,13 +33,12 @@ func TestLiveReviewAction(t *testing.T) {
 	pull := liveReviewAuditPull(t, ctx, fixture.owner, fixture.cfg)
 	job := liveReviewAuditJob(t, fixture.cfg, fixture.repo, fixture.ownerUser, command.Review, "PullRequest", pull.Number, pull.HTMLURL)
 	var calls int
-	executor := &Orchestrator{
-		GitHub:   fixture.bot,
+	executor := &Orchestrator{WorkRoot: t.TempDir(), GitHub: fixture.bot,
 		BotLogin: fixture.cfg.BotLogin,
 		Commands: map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{testReviewSkillURL}}},
 		Runner: Runner{
-			WorkRoot: t.TempDir(),
-			RunCodex: func(ctx context.Context, dir, prompt string, writable bool, outputDir string) (codexcli.Result, error) {
+			WorkRoot: t.TempDir(), runModel: func(ctx context.Context, modelRequest modelRun) (codexcli.Result, error) {
+				dir, prompt, writable, outputDir := modelRequest.dir, modelRequest.prompt, modelRequest.writable, modelRequest.outputDir
 				calls++
 				if writable || outputDir != "" || !strings.Contains(prompt, pull.Head.SHA) {
 					return codexcli.Result{}, fmt.Errorf("live review did not use the expected read-only pull request")
@@ -115,14 +114,12 @@ func TestLiveSecurityAuditAction(t *testing.T) {
 			}
 			report := "Minion live audit fixture " + job.ID[:12] + ".\n"
 			var calls int
-			executor := &Orchestrator{
-				GitHub:   fixture.bot,
+			executor := &Orchestrator{WorkRoot: t.TempDir(), GitHub: fixture.bot,
 				BotLogin: fixture.cfg.BotLogin,
-
 				Commands: map[string]config.CommandMapping{"security-audit": {Action: "security-audit", Skills: []string{testAuditSkillURL}}},
 				Runner: Runner{
-					WorkRoot: t.TempDir(),
-					RunCodex: func(ctx context.Context, dir, prompt string, writable bool, outputDir string) (codexcli.Result, error) {
+					WorkRoot: t.TempDir(), runModel: func(ctx context.Context, modelRequest modelRun) (codexcli.Result, error) {
+						dir, prompt, writable, outputDir := modelRequest.dir, modelRequest.prompt, modelRequest.writable, modelRequest.outputDir
 						calls++
 						if writable || outputDir == "" || strings.HasPrefix(outputDir, dir+string(os.PathSeparator)) || !strings.Contains(prompt, test.head) {
 							return codexcli.Result{}, fmt.Errorf("live audit did not use a separate report directory and expected commit")

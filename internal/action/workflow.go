@@ -21,8 +21,8 @@ import (
 	"github.com/linkdata/minion/internal/workspace"
 )
 
-// Prepared owns orchestration-only publication state. Only Job crosses the worker boundary.
-type Prepared struct {
+// preparedAction owns orchestration-only publication state. Only Job crosses the worker boundary.
+type preparedAction struct {
 	Job Job
 
 	request    monitor.Job
@@ -34,11 +34,11 @@ type Prepared struct {
 	reply      string
 }
 
-// NeedsExecution distinguishes supplied work from fixed replies and publication recovery.
-func (p *Prepared) NeedsExecution() bool { return p != nil && p.checkout != nil }
+// needsExecution distinguishes supplied work from fixed replies and publication recovery.
+func (p *preparedAction) needsExecution() bool { return p != nil && p.checkout != nil }
 
 // Close releases the trusted orchestration checkout after publication or failure.
-func (p *Prepared) Close() error {
+func (p *preparedAction) Close() error {
 	if p == nil || p.checkout == nil {
 		return nil
 	}
@@ -56,7 +56,7 @@ func (e *Orchestrator) perform(ctx context.Context, request monitor.Job) error {
 		}
 	}()
 	var result Result
-	if prepared.NeedsExecution() {
+	if prepared.needsExecution() {
 		result, err = e.Runner.Run(ctx, prepared.Job)
 		if err != nil {
 			if validationErr := result.validate(prepared.Job, false); validationErr != nil {
@@ -69,11 +69,11 @@ func (e *Orchestrator) perform(ctx context.Context, request monitor.Job) error {
 			return err
 		}
 	}
-	return e.Publish(ctx, prepared, result)
+	return e.publish(ctx, prepared, result)
 }
 
-func (e *Orchestrator) prepare(ctx context.Context, request monitor.Job) (prepared *Prepared, resultErr error) {
-	p := &Prepared{request: request}
+func (e *Orchestrator) prepare(ctx context.Context, request monitor.Job) (prepared *preparedAction, resultErr error) {
+	p := &preparedAction{request: request}
 	defer func() {
 		if resultErr != nil {
 			resultErr = errors.Join(resultErr, p.Close())
@@ -119,7 +119,7 @@ func (e *Orchestrator) prepare(ctx context.Context, request monitor.Job) (prepar
 	if err := e.checkGitHubContext(request, title, description); err != nil {
 		return nil, err
 	}
-	p.checkout, err = gitwork.Clone(ctx, e.Runner.WorkRoot, repo.FullName, branch, func(ctx context.Context, sha string) (github.GitTree, error) {
+	p.checkout, err = gitwork.Clone(ctx, e.WorkRoot, repo.FullName, branch, func(ctx context.Context, sha string) (github.GitTree, error) {
 		return e.GitHub.GitTree(ctx, repo.FullName, sha)
 	})
 	if err != nil {
@@ -136,7 +136,16 @@ func (e *Orchestrator) prepare(ctx context.Context, request monitor.Job) (prepar
 	return p, nil
 }
 
-func (e *Orchestrator) portableJob(ctx context.Context, p *Prepared, title, description string) (Job, error) {
+func (e *Orchestrator) roleSettings(provider string, required []string) RoleSettings {
+	role := RoleSettings{Provider: provider, Skills: required, AlwaysOnSkills: e.AlwaysOnSkills}
+	role.Model, role.Effort = e.CodexModel, e.CodexEffort
+	if provider == "claude" {
+		role.Model, role.Effort = e.ClaudeModel, e.ClaudeEffort
+	}
+	return role
+}
+
+func (e *Orchestrator) portableJob(ctx context.Context, p *preparedAction, title, description string) (Job, error) {
 	request := p.request
 	source, err := p.checkout.Snapshot(ctx, request.Command.History, request.SubjectType == "PullRequest")
 	if err != nil {
@@ -150,14 +159,6 @@ func (e *Orchestrator) portableJob(ctx context.Context, p *Prepared, title, desc
 	if deadline, ok := ctx.Deadline(); ok {
 		budget = min(budget, time.Until(deadline))
 	}
-	settings := func(provider string, required []string) RoleSettings {
-		role := RoleSettings{Provider: provider, Skills: required, AlwaysOnSkills: e.AlwaysOnSkills}
-		role.Model, role.Effort = e.CodexModel, e.CodexEffort
-		if provider == "claude" {
-			role.Model, role.Effort = e.ClaudeModel, e.ClaudeEffort
-		}
-		return role
-	}
 	job := Job{
 		Version: ProtocolVersion,
 		Identity: Identity{
@@ -168,11 +169,11 @@ func (e *Orchestrator) portableJob(ctx context.Context, p *Prepared, title, desc
 		},
 		Command: request.Command.Name, Action: request.Command.Action,
 		Title: title, Description: description, Notes: requestNotes(request), Source: source,
-		Main:            settings(e.mainProvider(), e.Commands[request.Command.Name].Skills),
+		Main:            e.roleSettings(e.mainProvider(), e.Commands[request.Command.Name].Skills),
 		CriticMaxRounds: e.CriticMaxRounds, RuntimeBudget: budget,
 	}
 	if e.Adversarial != "" {
-		critic := settings(e.Adversarial, nil)
+		critic := e.roleSettings(e.Adversarial, nil)
 		job.Critic = &critic
 	}
 	if err := job.Validate(); err != nil {
@@ -181,8 +182,8 @@ func (e *Orchestrator) portableJob(ctx context.Context, p *Prepared, title, desc
 	return job, nil
 }
 
-// Publish validates a worker result before applying data or issuing GitHub writes.
-func (e *Orchestrator) Publish(ctx context.Context, p *Prepared, result Result) error {
+// publish validates a worker result before applying data or issuing GitHub writes.
+func (e *Orchestrator) publish(ctx context.Context, p *preparedAction, result Result) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -207,7 +208,7 @@ func (e *Orchestrator) Publish(ctx context.Context, p *Prepared, result Result) 
 	}
 	if p.Job.Action == command.SecurityAudit {
 		if err := e.retainAudit(p, result, true); err != nil {
-			return err
+			return fmt.Errorf("%w: retain completed audit: %w", monitor.ErrTerminalJob, err)
 		}
 	}
 	request := p.request
@@ -241,8 +242,8 @@ func (e *Orchestrator) logDiagnostics(result Result) {
 	}
 }
 
-func (e *Orchestrator) retainAudit(p *Prepared, result Result, complete bool) error {
-	root := filepath.Join(e.Runner.WorkRoot, "audits")
+func (e *Orchestrator) retainAudit(p *preparedAction, result Result, complete bool) error {
+	root := filepath.Join(e.WorkRoot, "audits")
 	if err := os.MkdirAll(root, 0700); err != nil {
 		return err
 	}
@@ -266,7 +267,7 @@ func (e *Orchestrator) retainAudit(p *Prepared, result Result, complete bool) er
 	return nil
 }
 
-func (e *Orchestrator) prepareFix(ctx context.Context, p *Prepared) (*Prepared, error) {
+func (e *Orchestrator) prepareFix(ctx context.Context, p *preparedAction) (*preparedAction, error) {
 	request := p.request
 	if request.SubjectType != "Issue" {
 		p.reply = fmt.Sprintf("`%s` currently applies to issue threads. It pushes a branch for the requester to open a pull request.", request.Command.Name)
@@ -325,7 +326,7 @@ func (e *Orchestrator) prepareFix(ctx context.Context, p *Prepared) (*Prepared, 
 	if err := e.checkGitHubContext(request, "", content.BodyText); err != nil {
 		return nil, err
 	}
-	p.checkout, err = gitwork.Clone(ctx, e.Runner.WorkRoot, repo.FullName, repo.DefaultBranch, func(ctx context.Context, sha string) (github.GitTree, error) {
+	p.checkout, err = gitwork.Clone(ctx, e.WorkRoot, repo.FullName, repo.DefaultBranch, func(ctx context.Context, sha string) (github.GitTree, error) {
 		return e.GitHub.GitTree(ctx, repo.FullName, sha)
 	})
 	if err != nil {
@@ -341,7 +342,7 @@ func (e *Orchestrator) prepareFix(ctx context.Context, p *Prepared) (*Prepared, 
 	return p, nil
 }
 
-func (e *Orchestrator) publishFix(ctx context.Context, p *Prepared, result Result) error {
+func (e *Orchestrator) publishFix(ctx context.Context, p *preparedAction, result Result) error {
 	request := p.request
 	if len(result.Changes) == 0 {
 		if err := e.acknowledge(ctx, request, "AI completed the request without changing files.\n\n"+inertModelOutput(result.Answer)); err != nil {
@@ -368,17 +369,14 @@ func (e *Orchestrator) publishFix(ctx context.Context, p *Prepared, result Resul
 		return e.Store.Save()
 	}); err != nil {
 		if errors.Is(err, gitwork.ErrNoChanges) {
-			if err := e.acknowledge(ctx, request, "AI completed the request without changing files.\n\n"+inertModelOutput(result.Answer)); err != nil {
-				return fmt.Errorf("%w: %w", monitor.ErrPostModelPublication, err)
-			}
-			return nil
+			return fmt.Errorf("%w: reviewed changes produced no commit: %w", monitor.ErrTerminalJob, err)
 		}
 		return err
 	}
 	return e.publishFixReply(ctx, p)
 }
 
-func (e *Orchestrator) publishFixReply(ctx context.Context, p *Prepared) error {
+func (e *Orchestrator) publishFixReply(ctx context.Context, p *preparedAction) error {
 	request, repo, fork, branch := p.request, p.repository, p.fork, p.branch
 	expected := e.Store.Data.PendingFixes[request.ID]
 	if existing := p.existing; existing != nil {

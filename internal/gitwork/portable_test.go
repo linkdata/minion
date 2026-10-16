@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,14 +13,6 @@ import (
 	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/workspace"
 )
-
-func TestCappedBufferReadFromCannotBypassLimit(t *testing.T) {
-	output := cappedBuffer{limit: 3}
-	n, err := io.Copy(&output, io.LimitReader(strings.NewReader("long output"), 100))
-	if err != nil || n != 11 || !output.exceeded || output.String() != "lon" {
-		t.Fatalf("copy=%d,%v output=%q exceeded=%v", n, err, output.String(), output.exceeded)
-	}
-}
 
 func TestBoundedGitClassifiesLimitsAndCancellation(t *testing.T) {
 	fixture := newFixture(t)

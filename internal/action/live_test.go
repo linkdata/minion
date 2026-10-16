@@ -101,14 +101,13 @@ func TestLiveFixPublishesBranch(t *testing.T) {
 	t.Cleanup(func() { liveFixCleanup(t, owner, bot, fixture.ownerToken, fixture.botToken, cfg, job, branch, store) })
 	t.Setenv("GH_TOKEN", fixture.botToken)
 	codexCalls := 0
-	executor := &Orchestrator{
-		GitHub:   bot,
+	executor := &Orchestrator{WorkRoot: t.TempDir(), GitHub: bot,
 		BotLogin: cfg.BotLogin,
 		Store:    store,
 		Commands: map[string]config.CommandMapping{"fix": {Action: "fix", Skills: []string{testFixSkillURL}}},
 		Runner: Runner{
-			WorkRoot: t.TempDir(),
-			RunCodex: func(_ context.Context, dir, _ string, writable bool, outputDir string) (codexcli.Result, error) {
+			WorkRoot: t.TempDir(), runModel: func(_ context.Context, modelRequest modelRun) (codexcli.Result, error) {
+				dir, writable, outputDir := modelRequest.dir, modelRequest.writable, modelRequest.outputDir
 				codexCalls++
 				if !writable || outputDir != "" {
 					return codexcli.Result{}, errors.New("unexpected Codex invocation for live fix")

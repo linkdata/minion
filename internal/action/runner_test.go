@@ -340,29 +340,6 @@ func TestRunnerKeepsCriticReadOnlyAndNotesPrivate(t *testing.T) {
 	}
 }
 
-func TestRunnerRejectsCandidateChangedDuringCritic(t *testing.T) {
-	job := portableJob(command.Fix)
-	job.Critic = &RoleSettings{Provider: "claude"}
-	var mainDir string
-	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
-		if request.role == "main" {
-			mainDir = request.dir
-			return aicli.Result{Answer: proposalJSON("Done.", "")}, nil
-		}
-		if err := os.WriteFile(filepath.Join(mainDir, "source.txt"), []byte("unreviewed change"), 0600); err != nil {
-			t.Fatal(err)
-		}
-		if data, err := os.ReadFile(filepath.Join(request.dir, "source.txt")); err != nil || string(data) != "source\n" {
-			t.Fatalf("frozen source changed: %q, %v", data, err)
-		}
-		return aicli.Result{Answer: `{"approved":true,"feedback":""}`}, nil
-	}}
-	result, err := runner.Run(context.Background(), job)
-	if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "changed during critic") || result.Answer != "" || len(result.Changes) != 0 {
-		t.Fatalf("unreviewed result released: %+v, %v", result, err)
-	}
-}
-
 func TestRunnerFixUsesOnlyOfflineGit(t *testing.T) {
 	realGit, err := exec.LookPath("git")
 	if err != nil {
@@ -419,7 +396,7 @@ func TestRunnerRejectsMissingSkillsAndReadOnlyWrites(t *testing.T) {
 }
 
 func TestRunnerIgnoresWorkerGitMetadata(t *testing.T) {
-	for _, name := range []string{".git", ".gIt"} {
+	for _, name := range []string{".git", ".gIt", "nested/.GiT"} {
 		t.Run(name, func(t *testing.T) {
 			runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 				writeIndexFixture(t, request.dir, name+"/config", []byte("untrusted worker metadata"))

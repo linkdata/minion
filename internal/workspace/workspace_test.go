@@ -297,7 +297,12 @@ func TestSnapshotBoundsAndIdentity(t *testing.T) {
 		func(s *Snapshot) { s.Base = strings.Repeat("b", 40) },
 		func(s *Snapshot) { s.Diff = make([]byte, MaxContextBytes+1) },
 		func(s *Snapshot) { s.History = make([]byte, MaxContextBytes+1) },
-		func(s *Snapshot) { s.Files = make([]File, MaxFiles+1) },
+		func(s *Snapshot) {
+			s.Files = make([]File, MaxFiles+1)
+			for i := range s.Files {
+				s.Files[i] = File{Path: fmt.Sprintf("file-%d", i), Mode: Regular}
+			}
+		},
 		func(s *Snapshot) { s.Omitted = []string{"../outside"} },
 		func(s *Snapshot) { s.History = []byte("unrequested") },
 		func(s *Snapshot) { s.Base, s.MergeBase = s.Head, s.Head; s.ChangedPaths = []string{"../outside"} },
@@ -370,7 +375,7 @@ func TestUnicodeFoldCollisionsInFixLayouts(t *testing.T) {
 				if err := ValidateSnapshot(Snapshot{Head: strings.Repeat("a", 40), Files: files}); err != nil {
 					t.Fatalf("rejected exact source names: %v", err)
 				}
-				if err := ValidateFixPaths(files); err == nil {
+				if err := ValidateFixPaths(files, nil); err == nil {
 					t.Fatalf("accepted folded fix source collision: %q", names)
 				}
 				changes := []Change{{Path: names[0], Mode: Regular}, {Path: names[1], Mode: Regular}}
@@ -393,10 +398,10 @@ func TestValidateFixPathsUsesSourceLimits(t *testing.T) {
 	for i := range files {
 		files[i] = File{Path: fmt.Sprintf("source/%d", i), Mode: Regular}
 	}
-	if err := ValidateFixPaths(files); err != nil {
+	if err := ValidateFixPaths(files, nil); err != nil {
 		t.Fatalf("applied change-count limit to complete fix source: %v", err)
 	}
-	if err := ValidateFixPaths([]File{{Path: "literal\\backslash", Mode: Regular}}); err == nil || !strings.Contains(err.Error(), "unsafe fix source path") {
+	if err := ValidateFixPaths([]File{{Path: "literal\\backslash", Mode: Regular}}, nil); err == nil || !strings.Contains(err.Error(), "unsafe fix source path") {
 		t.Fatalf("accepted non-portable fix source: %v", err)
 	}
 }

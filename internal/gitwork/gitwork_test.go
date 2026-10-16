@@ -303,10 +303,8 @@ func completeTree(sha string, entries []github.GitTreeEntry) github.GitTree {
 func TestSourceTreeRejectsIncompleteMetadata(t *testing.T) {
 	sha := strings.Repeat("a", 40)
 	size := int64(1)
-	truncated := true
 	for _, tree := range []github.GitTree{
 		{SHA: strings.Repeat("b", 40)},
-		{SHA: sha, Truncated: &truncated},
 		{SHA: sha},
 		{SHA: sha, Tree: []github.GitTreeEntry{}},
 		completeTree(sha, nil),

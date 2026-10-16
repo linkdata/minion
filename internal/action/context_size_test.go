@@ -98,7 +98,7 @@ func TestGitHubContextLimitAcrossActions(t *testing.T) {
 				}
 				head := strings.Repeat("a", 40)
 				if mode == "exact" {
-					_, head = auditGitFixture(t)
+					_, head, _ = auditGitFixtureRemote(t)
 				}
 				job := monitor.Job{
 					Repository:  config.Repository{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{tt.commandName}},
@@ -230,15 +230,14 @@ func TestGitHubContextLimitAcrossActions(t *testing.T) {
 					}()
 				}
 				var codexCalls int
-				executor := &Orchestrator{
-					GitHub:                client,
+				executor := &Orchestrator{WorkRoot: t.TempDir(), GitHub: client,
 					BotLogin:              "linkdataminion",
 					Store:                 store,
 					MaxGitHubContextBytes: limit,
 					Commands:              map[string]config.CommandMapping{job.Command.Name: {Action: string(tt.action), Skills: []string{tt.skill}}},
 					Runner: Runner{
-						WorkRoot: t.TempDir(),
-						RunCodex: func(_ context.Context, _, prompt string, _ bool, _ string) (codexcli.Result, error) {
+						WorkRoot: t.TempDir(), runModel: func(_ context.Context, modelRequest modelRun) (codexcli.Result, error) {
+							prompt := modelRequest.prompt
 							codexCalls++
 							if !strings.Contains(prompt, strconv.Quote(description)) || !strings.Contains(prompt, strconv.Quote(requestNotes)) ||
 								(tt.action != command.Fix && !strings.Contains(prompt, strconv.Quote(title))) || strings.Contains(prompt, "[truncated]") {

@@ -97,8 +97,8 @@ printf '%s\n' '{"type":"thread.started","thread_id":"test"}' '{"type":"item.comp
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !strings.Contains(string(gotPrompt), strconv.Quote(dir)) || !strings.HasSuffix(string(gotPrompt), "Handle mention") {
-				t.Fatalf("stdin prompt lacks checkout location or original request: %q", gotPrompt)
+			if !strings.HasPrefix(string(gotPrompt), "Source snapshot: ") || !strings.Contains(string(gotPrompt), strconv.Quote(dir)) || !strings.HasSuffix(string(gotPrompt), "Handle mention") {
+				t.Fatalf("stdin prompt lacks source location or original request: %q", gotPrompt)
 			}
 			tmp, err := os.ReadFile(tmpFile)
 			if err != nil {

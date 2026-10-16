@@ -124,6 +124,7 @@ func run() int {
 	}()
 
 	executor := &action.Orchestrator{
+		WorkRoot:              cfg.WorkRoot,
 		GitHub:                client,
 		BotLogin:              cfg.BotLogin,
 		Store:                 store,

@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/cleanup"
 	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/workspace"
@@ -225,7 +226,10 @@ func (c *Checkout) CheckoutPullRequest(ctx context.Context, number int, baseRef,
 // Check expanded blobs and gitlinks, including repeated object references,
 // against GitHub metadata before fetching source contents.
 func checkSourceTree(tree github.GitTree, expectedSHA string) error {
-	if !strings.EqualFold(tree.SHA, expectedSHA) || !workspace.ValidSHA(tree.SHA) || tree.Truncated == nil || *tree.Truncated || tree.Tree == nil {
+	if tree.Truncated != nil && *tree.Truncated {
+		return fmt.Errorf("%w: GitHub tree metadata is truncated", ErrCheckoutTooLarge)
+	}
+	if !strings.EqualFold(tree.SHA, expectedSHA) || !workspace.ValidSHA(tree.SHA) || tree.Truncated == nil || tree.Tree == nil {
 		return fmt.Errorf("%w: incomplete or mismatched tree metadata", ErrUnsupportedSource)
 	}
 	var files int
@@ -448,28 +452,6 @@ func (c *Checkout) ready() error {
 	return nil
 }
 
-type cappedBuffer struct {
-	bytes.Buffer
-	limit    int
-	exceeded bool
-}
-
-func (w *cappedBuffer) Write(p []byte) (int, error) {
-	n := len(p)
-	remaining := w.limit - w.Len()
-	if len(p) > remaining {
-		w.exceeded = true
-		p = p[:remaining]
-	}
-	_, _ = w.Buffer.Write(p)
-	return n, nil
-}
-
-func (w *cappedBuffer) ReadFrom(r io.Reader) (int64, error) {
-	// Hide bytes.Buffer.ReadFrom, which would bypass the bounded Write method.
-	return io.Copy(struct{ io.Writer }{w}, r)
-}
-
 func runGit(ctx context.Context, dir string, args ...string) (string, error) {
 	var output bytes.Buffer
 	if err := runGitTo(ctx, dir, &output, args...); err != nil {
@@ -501,8 +483,7 @@ func runGitInputTo(ctx context.Context, dir string, stdin io.Reader, stdout io.W
 	cmd.Env = cleanGitEnvironment()
 	cmd.Stdin = stdin
 	cmd.Stdout = stdout
-	var diagnostic cappedBuffer
-	diagnostic.limit = maxGitDiagnostic
+	diagnostic := bounded.Buffer{Limit: maxGitDiagnostic}
 	cmd.Stderr = &diagnostic
 	if err := cmd.Run(); err != nil {
 		operation := args[0]
@@ -510,6 +491,11 @@ func runGitInputTo(ctx context.Context, dir string, stdin io.Reader, stdout io.W
 			operation = args[i+2]
 		}
 		message := strings.TrimSpace(diagnostic.String())
+		if ctx.Err() != nil {
+			err = fmt.Errorf("%w: %w", ctx.Err(), err)
+		} else if (operation == "add" || operation == "checkout") && strings.HasPrefix(message, "error: invalid path ") {
+			err = fmt.Errorf("%w: %w", ErrUnsupportedSource, err)
+		}
 		if message != "" {
 			return fmt.Errorf("git %s: %w: %s", operation, err, message)
 		}
@@ -523,11 +509,11 @@ func credentialHelperConfig(path string) string {
 }
 
 func cleanGitEnvironment() []string {
-	env := make([]string, 0, len(os.Environ())+6)
+	env := make([]string, 0, len(os.Environ())+7)
 	hasPath := false
 	for _, entry := range os.Environ() {
 		key, value, ok := strings.Cut(entry, "=")
-		if !ok || strings.HasPrefix(key, "GIT_") || key == "GCM_INTERACTIVE" || key == "GH_PROMPT_DISABLED" {
+		if !ok || strings.HasPrefix(key, "GIT_") || key == "GCM_INTERACTIVE" || key == "GH_PROMPT_DISABLED" || key == "LC_ALL" {
 			continue
 		}
 		if key == "PATH" {
@@ -558,5 +544,6 @@ func cleanGitEnvironment() []string {
 		"GIT_CONFIG_GLOBAL=/dev/null",
 		"GCM_INTERACTIVE=never",
 		"GH_PROMPT_DISABLED=1",
+		"LC_ALL=C",
 	)
 }

@@ -25,8 +25,9 @@ import (
 )
 
 func TestPreparedActionRejectsForeignResultBeforePublication(t *testing.T) {
-	base, _ := auditGitFixture(t)
+	base, _, _ := auditGitFixtureRemote(t)
 	installActionTestSkills(t, testReviewSkillURL)
+	writeActionTestSkills(t, os.Getenv("HOME"), ".claude", testReviewSkillURL)
 	writes := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -48,14 +49,16 @@ func TestPreparedActionRejectsForeignResultBeforePublication(t *testing.T) {
 	defer server.Close()
 	client := github.New("github-secret")
 	client.BaseURL, client.HTTPClient = server.URL, server.Client()
-	e := &Orchestrator{
-		GitHub:   client,
+	e := &Orchestrator{WorkRoot: t.TempDir(), GitHub: client, Main: "claude", ClaudeModel: "portable-claude-model", ClaudeEffort: "high", Timeout: 2 * time.Minute,
 		BotLogin: "linkdataminion",
 		Commands: map[string]config.CommandMapping{"audit": {Action: "comment", Skills: []string{testReviewSkillURL}}},
 		Runner: Runner{
 			WorkRoot: t.TempDir(),
-			Codex:    config.CodexConfig{APIKey: "model-secret"},
-			RunCodex: func(_ context.Context, dir, prompt string, _ bool, _ string) (codexcli.Result, error) {
+			Claude:   config.ClaudeConfig{APIKey: "model-secret"}, runModel: func(_ context.Context, modelRequest modelRun) (codexcli.Result, error) {
+				dir, prompt := modelRequest.dir, modelRequest.prompt
+				if modelRequest.provider != "claude" || modelRequest.model != "portable-claude-model" || modelRequest.effort != "high" {
+					t.Fatalf("lost actual Claude role settings: %+v", modelRequest)
+				}
 				assertPortableSource(t, dir)
 				if !strings.Contains(prompt, base) {
 					t.Fatal("prompt lost source commit")
@@ -78,6 +81,12 @@ func TestPreparedActionRejectsForeignResultBeforePublication(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if prepared.Job.RuntimeBudget <= 0 || prepared.Job.RuntimeBudget > time.Minute {
+		t.Fatalf("accepted budget %s exceeds context deadline despite 2m configured timeout", prepared.Job.RuntimeBudget)
+	}
+	if prepared.Job.Main.Provider != "claude" || prepared.Job.Main.Model != "portable-claude-model" || prepared.Job.Main.Effort != "high" {
+		t.Fatalf("portableJob lost Claude model/effort: %+v", prepared.Job.Main)
+	}
 	defer func() {
 		if err := prepared.Close(); err != nil {
 			t.Error(err)
@@ -87,7 +96,7 @@ func TestPreparedActionRejectsForeignResultBeforePublication(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(data), "secret") || strings.Contains(string(data), e.Runner.WorkRoot) {
+	if strings.Contains(string(data), "secret") || strings.Contains(string(data), e.Runner.WorkRoot) || strings.Contains(string(data), e.WorkRoot) {
 		t.Fatal("portable job contains credentials or host paths")
 	}
 	var portable Job
@@ -105,14 +114,14 @@ func TestPreparedActionRejectsForeignResultBeforePublication(t *testing.T) {
 	} {
 		bad := result
 		mutate(&bad)
-		if err := e.Publish(ctx, prepared, bad); err == nil {
+		if err := e.publish(ctx, prepared, bad); err == nil {
 			t.Fatal("invalid result published")
 		}
 	}
 	if writes != 0 {
 		t.Fatal("invalid result issued a GitHub write")
 	}
-	if err := e.Publish(ctx, prepared, result); err != nil {
+	if err := e.publish(ctx, prepared, result); err != nil {
 		t.Fatal(err)
 	}
 	if writes != 1 {
@@ -121,7 +130,7 @@ func TestPreparedActionRejectsForeignResultBeforePublication(t *testing.T) {
 }
 
 func TestFailedAuditRetainsLabelledPartialArtifactsWithoutPublication(t *testing.T) {
-	auditGitFixture(t)
+	auditGitFixtureRemote(t)
 	installActionTestSkills(t, testAuditSkillURL)
 	writes := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -150,10 +159,10 @@ func TestFailedAuditRetainsLabelledPartialArtifactsWithoutPublication(t *testing
 	failure := errors.New("private provider failure detail")
 	const report = "Private incomplete findings requiring validation."
 	var sourceDir, reportDir string
-	e := &Orchestrator{GitHub: client, Commands: map[string]config.CommandMapping{"security-audit": {Action: "security-audit", Skills: []string{testAuditSkillURL}}},
+	e := &Orchestrator{WorkRoot: t.TempDir(), GitHub: client, Commands: map[string]config.CommandMapping{"security-audit": {Action: "security-audit", Skills: []string{testAuditSkillURL}}},
 		Runner: Runner{
-			WorkRoot: t.TempDir(), Logger: log.New(&journal, "", 0),
-			RunCodex: func(_ context.Context, dir, _ string, _ bool, output string) (codexcli.Result, error) {
+			WorkRoot: t.TempDir(), Logger: log.New(&journal, "", 0), runModel: func(_ context.Context, modelRequest modelRun) (codexcli.Result, error) {
+				dir, output := modelRequest.dir, modelRequest.outputDir
 				sourceDir, reportDir = dir, output
 				if err := os.WriteFile(filepath.Join(output, "REPORT.md"), []byte(report), 0600); err != nil {
 					t.Fatal(err)
@@ -172,7 +181,7 @@ func TestFailedAuditRetainsLabelledPartialArtifactsWithoutPublication(t *testing
 	if writes != 0 {
 		t.Fatalf("publication writes=%d", writes)
 	}
-	dirs, err := filepath.Glob(filepath.Join(e.Runner.WorkRoot, "audits", "incomplete-*"))
+	dirs, err := filepath.Glob(filepath.Join(e.WorkRoot, "audits", "incomplete-*"))
 	if err != nil || len(dirs) != 1 {
 		t.Fatalf("incomplete audit directories=%v,%v", dirs, err)
 	}
@@ -260,10 +269,10 @@ func TestPreparedReplyNeedsNoExecution(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if prepared.NeedsExecution() {
+	if prepared.needsExecution() {
 		t.Fatal("fixed reply dispatched execution")
 	}
-	if err := e.Publish(context.Background(), prepared, Result{}); err != nil {
+	if err := e.publish(context.Background(), prepared, Result{}); err != nil {
 		t.Fatal(err)
 	}
 	if writes != 1 {
@@ -299,7 +308,7 @@ func TestPublishFixWithoutChangesPostsNormalReply(t *testing.T) {
 	e := Orchestrator{GitHub: client}
 	request := monitor.Job{ID: strings.Repeat("a", 64), SubjectType: "Issue", Number: 7,
 		Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2}, Command: command.Command{Name: "fix", Action: command.Fix}}
-	if err := e.publishFix(context.Background(), &Prepared{request: request}, Result{Answer: "Tests passed."}); err != nil {
+	if err := e.publishFix(context.Background(), &preparedAction{request: request}, Result{Answer: "Tests passed."}); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(body, "without changing files") || !strings.Contains(body, "Tests passed.") || !strings.Contains(body, request.Marker()) {

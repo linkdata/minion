@@ -197,17 +197,26 @@ func validatePaths(paths []string, key func(string) string) error {
 	return nil
 }
 
-// ValidateFixPaths checks a complete source layout before running a writable action.
-func ValidateFixPaths(files []File) error {
+// ValidateFixPaths checks the source layout, including omissions, before a writable action.
+func ValidateFixPaths(files []File, omitted []string) error {
 	if err := validateFiles(files); err != nil {
 		return err
 	}
-	paths := make([]string, len(files))
+	if len(omitted) > MaxFiles {
+		return errors.New("source exceeds omitted path limit")
+	}
+	paths := make([]string, len(files), len(files)+len(omitted))
 	for i, file := range files {
 		if !ValidPath(file.Path) {
 			return fmt.Errorf("unsafe fix source path %q", file.Path)
 		}
 		paths[i] = file.Path
+	}
+	for _, name := range omitted {
+		if !ValidSourcePath(name) {
+			return fmt.Errorf("unsafe omitted fix source path %q", name)
+		}
+		paths = append(paths, name)
 	}
 	return validatePaths(paths, FoldPath)
 }
@@ -291,7 +300,7 @@ func Changes(ctx context.Context, root string, base []File) ([]Change, error) {
 		prior[file.Path] = file
 	}
 	var changes []Change
-	var paths []string
+	files := 0
 	total := 0
 	err := walk(ctx, root, func(name string, entry fs.DirEntry) error {
 		rel, err := filepath.Rel(root, name)
@@ -305,8 +314,8 @@ func Changes(ctx context.Context, root string, base []File) ([]Change, error) {
 		if entry.IsDir() {
 			return nil
 		}
-		paths = append(paths, rel)
-		if len(paths) > MaxFiles {
+		files++
+		if files > MaxFiles {
 			return errors.New("workspace exceeds file limit")
 		}
 		data, info, err := readFile(name, int64(MaxBytes-total))
@@ -326,9 +335,6 @@ func Changes(ctx context.Context, root string, base []File) ([]Change, error) {
 		return nil
 	})
 	if err != nil {
-		return nil, err
-	}
-	if err := validatePaths(paths, nil); err != nil {
 		return nil, err
 	}
 	for name := range prior {
