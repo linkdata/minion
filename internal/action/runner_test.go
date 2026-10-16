@@ -425,6 +425,42 @@ func TestRunnerHandlesSourceMetadataReadFailure(t *testing.T) {
 	}
 }
 
+func TestWorkerGitMetadataDoesNotEnumerate(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory read permissions")
+	}
+	source := t.TempDir()
+	if err := os.WriteFile(filepath.Join(source, ".gIt"), []byte("untrusted metadata"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(source, 0111); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(source, 0700); err != nil {
+			t.Error(err)
+		}
+	})
+	if _, err := os.ReadDir(source); !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("enumeration should be denied: %v", err)
+	}
+	if found, err := workerGitMetadata(source); err != nil || !found {
+		t.Fatalf("fixed metadata probes = %t, %v", found, err)
+	}
+}
+
+func TestRunnerHandlesMissingSource(t *testing.T) {
+	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+		if err := os.RemoveAll(request.dir); err != nil {
+			t.Fatal(err)
+		}
+		return aicli.Result{Answer: "completed"}, nil
+	}}
+	if _, err := runner.Run(context.Background(), portableJob(command.Fix)); !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "inspect source metadata") {
+		t.Fatalf("missing source = %v", err)
+	}
+}
+
 func TestRunnerClearsHostSkillsAndRejectsMissingCLI(t *testing.T) {
 	for _, provider := range []string{"codex", "claude"} {
 		t.Run(provider, func(t *testing.T) {

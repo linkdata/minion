@@ -164,15 +164,12 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 	}
 	answer, runErr := configured.runAI(ctx, source, prompt, job.Action == command.Fix, outputDir)
 	if job.Action == command.Fix {
-		entries, err := os.ReadDir(source)
+		metadata, err := workerGitMetadata(source)
 		if err != nil {
 			return result, errors.Join(runErr, fmt.Errorf("%w: inspect source metadata: %w", monitor.ErrTerminalJob, err))
 		}
-		for _, entry := range entries {
-			if strings.EqualFold(entry.Name(), ".git") {
-				result.Diagnostics = append(result.Diagnostics, Diagnostic{Code: "git_metadata_ignored", Message: "Worker Git metadata at the source root was ignored."})
-				break
-			}
+		if metadata {
+			result.Diagnostics = append(result.Diagnostics, Diagnostic{Code: "git_metadata_ignored", Message: "Worker Git metadata at the source root was ignored."})
 		}
 	}
 	if runErr != nil {
@@ -216,6 +213,25 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 		return result, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
 	}
 	return result, nil
+}
+
+func workerGitMetadata(source string) (bool, error) {
+	info, err := os.Lstat(source)
+	if err != nil {
+		return false, err
+	}
+	if !info.IsDir() {
+		return false, errors.New("source root is not a directory")
+	}
+	// Fixed ASCII case probes avoid allocating a listing of unbounded ignored output.
+	for _, name := range []string{".git", ".giT", ".gIt", ".gIT", ".Git", ".GiT", ".GIt", ".GIT"} {
+		if _, err := os.Lstat(filepath.Join(source, name)); err == nil {
+			return true, nil
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return false, err
+		}
+	}
+	return false, nil
 }
 
 func (r *Runner) checkIndexIsolation(index string, grants ...string) error {
