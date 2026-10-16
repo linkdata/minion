@@ -341,6 +341,16 @@ JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 		}
 	}
 	validate("")
+	t.Run("symlinked skill directory", func(t *testing.T) {
+		link := filepath.Join(t.TempDir(), "security-audit")
+		if err := os.Symlink(skillDir, link); err != nil {
+			t.Fatal(err)
+		}
+		report, err := validateAuditOutput(context.Background(), root, filepath.Join(link, "SKILL.md"), "o/r", target, head)
+		if err != nil || report != "Verified audit report\n" {
+			t.Fatalf("symlinked audit skill = %q, %v", report, err)
+		}
+	})
 	if err := os.Remove(filepath.Join(root, "run-metadata.json")); err != nil {
 		t.Fatal(err)
 	}
