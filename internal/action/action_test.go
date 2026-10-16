@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -295,7 +296,7 @@ func TestReviewEchoDoesNotSuppressSecurityAuditInMonitor(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/pulls/7":
 			_, _ = fmt.Fprintf(w, `{"title":"PR","base":{"ref":"main"},"head":{"sha":%q}}`, head)
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/o/r/git/trees/"):
-			_, _ = fmt.Fprintf(w, `{"sha":%q,"truncated":false,"tree":[{"path":"README.md","type":"blob","mode":"100644","size":8}]}`, strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/"))
+			_, _ = fmt.Fprintf(w, `{"sha":%q,"truncated":false,"tree":[]}`, strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/"))
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7/comments":
 			_ = json.NewEncoder(w).Encode(comments)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/pulls/7/comments":
@@ -374,7 +375,8 @@ func TestReviewEchoDoesNotSuppressSecurityAuditInMonitor(t *testing.T) {
 			t.Error(err)
 		}
 	}()
-	m := monitor.Monitor{Config: config.Config{BotLogin: "linkdataminion", PollIntervalSeconds: 60, Commands: commands,
+	var journal bytes.Buffer
+	m := monitor.Monitor{Logger: log.New(&journal, "", 0), Config: config.Config{BotLogin: "linkdataminion", PollIntervalSeconds: 60, Commands: commands,
 		Repositories: []config.Repository{{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"review", "security-audit"}, AllowedActors: []string{"writer"}, AllowedActorIDs: map[string]int64{"writer": 7}}}},
 		GitHub: monitorGitHub, Executor: executor, Now: func() time.Time { return now.Add(time.Minute) }}
 	if _, err := m.RunOnce(context.Background(), store); err != nil {
@@ -383,7 +385,7 @@ func TestReviewEchoDoesNotSuppressSecurityAuditInMonitor(t *testing.T) {
 	if reviewRuns != 1 || auditRuns != 1 || len(reviews) != 1 || len(comments) != 1 || len(store.Data.Processed) != 2 ||
 		!strings.Contains(reviews[0].Body, auditMarker) || !strings.Contains(comments[0].Body, "Verified audit report") ||
 		!strings.HasSuffix(strings.TrimSpace(comments[0].Body), auditMarker) {
-		t.Fatalf("review echo suppressed audit: reviews=%d audits=%d review posts=%d comments=%d processed=%d", reviewRuns, auditRuns, len(reviews), len(comments), len(store.Data.Processed))
+		t.Fatalf("review echo suppressed audit: reviews=%d audits=%d review posts=%d comments=%d processed=%d; log=%s", reviewRuns, auditRuns, len(reviews), len(comments), len(store.Data.Processed), &journal)
 	}
 	if _, err := command.ParseForLogin(reviews[0].Body, "secondbot"); !errors.Is(err, command.ErrNoCommand) {
 		t.Fatalf("review relayed a live second-bot command: %v", err)
