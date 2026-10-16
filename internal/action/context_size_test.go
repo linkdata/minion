@@ -38,7 +38,9 @@ func TestCheckGitHubContext(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			job := monitor.Job{Source: github.Item{Body: "@linkdataminion review\n" + tt.notes}}
-			executor := Executor{MaxGitHubContextBytes: tt.limit}
+			executor := Orchestrator{
+				MaxGitHubContextBytes: tt.limit,
+			}
 			err := executor.checkGitHubContext(job, tt.fields...)
 			if errors.Is(err, errGitHubContextTooLarge) != tt.tooLarge {
 				t.Fatalf("checkGitHubContext() = %v, tooLarge=%t", err, tt.tooLarge)
@@ -48,7 +50,7 @@ func TestCheckGitHubContext(t *testing.T) {
 			}
 		})
 	}
-	var zero Executor
+	var zero Orchestrator
 	if got := zero.githubContextLimit(); got != config.DefaultMaxGitHubContextBytes {
 		t.Fatalf("zero-value limit = %d, want %d", got, config.DefaultMaxGitHubContextBytes)
 	}
@@ -226,16 +228,23 @@ func TestGitHubContextLimitAcrossActions(t *testing.T) {
 					}()
 				}
 				var codexCalls int
-				executor := &Executor{
-					GitHub: client, BotLogin: "linkdataminion", Store: store, WorkRoot: t.TempDir(), MaxGitHubContextBytes: limit,
-					Commands: map[string]config.CommandMapping{job.Command.Name: {Action: string(tt.action), Skills: []string{tt.skill}}},
-					RunCodex: func(_ context.Context, _, prompt string, _ bool, _ string) (codexcli.Result, error) {
-						codexCalls++
-						if !strings.Contains(prompt, strconv.Quote(description)) || !strings.Contains(prompt, strconv.Quote(requestNotes)) ||
-							(tt.action != command.Fix && !strings.Contains(prompt, strconv.Quote(title))) || strings.Contains(prompt, "[truncated]") {
-							t.Errorf("Codex prompt lost GitHub text or clipped it: %q", prompt)
-						}
-						return codexcli.Result{}, modelErr
+				executor := &Orchestrator{
+					GitHub:                client,
+					BotLogin:              "linkdataminion",
+					Store:                 store,
+					MaxGitHubContextBytes: limit,
+					Commands:              map[string]config.CommandMapping{job.Command.Name: {Action: string(tt.action), Skills: []string{tt.skill}}},
+					Runner: Runner{
+						WorkRoot: t.TempDir(),
+
+						RunCodex: func(_ context.Context, _, prompt string, _ bool, _ string) (codexcli.Result, error) {
+							codexCalls++
+							if !strings.Contains(prompt, strconv.Quote(description)) || !strings.Contains(prompt, strconv.Quote(requestNotes)) ||
+								(tt.action != command.Fix && !strings.Contains(prompt, strconv.Quote(title))) || strings.Contains(prompt, "[truncated]") {
+								t.Errorf("Codex prompt lost GitHub text or clipped it: %q", prompt)
+							}
+							return codexcli.Result{}, modelErr
+						},
 					},
 				}
 				err := executor.Execute(context.Background(), job)

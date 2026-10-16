@@ -32,14 +32,17 @@ func TestUsageAccumulatesPartialResults(t *testing.T) {
 	store := &usage.Store{Dir: filepath.Join(t.TempDir(), "usage")}
 	runErr := errors.New("model interrupted")
 	var calls int
-	e := &Executor{
-		Usage: store, Codex: config.CodexConfig{Model: "test-model"},
-		RunCodex: func(context.Context, string, string, bool, string) (codexcli.Result, error) {
-			calls++
-			if calls == 2 {
-				return codexcli.Result{Tokens: usage.Tokens{Input: 10, CachedInput: 8, Output: 2}}, runErr
-			}
-			return codexcli.Result{Answer: "answer", Tokens: usage.Tokens{Input: 100, CachedInput: 80, Output: 20}, UsageComplete: true}, nil
+	e := &Orchestrator{
+		Usage: store,
+		Runner: Runner{
+			Codex: config.CodexConfig{Model: "test-model"},
+			RunCodex: func(context.Context, string, string, bool, string) (codexcli.Result, error) {
+				calls++
+				if calls == 2 {
+					return codexcli.Result{Tokens: usage.Tokens{Input: 10, CachedInput: 8, Output: 2}}, runErr
+				}
+				return codexcli.Result{Answer: "answer", Tokens: usage.Tokens{Input: 100, CachedInput: 80, Output: 20}, UsageComplete: true}, nil
+			},
 		},
 	}
 	tracked, finish, err := e.trackUsage(usageJob())
@@ -47,7 +50,7 @@ func TestUsageAccumulatesPartialResults(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := 1; i <= 3; i++ {
-		answer, err := tracked.runAI(context.Background(), "dir", "prompt", false, "")
+		answer, err := tracked.Runner.runAI(context.Background(), "dir", "prompt", false, "")
 		if i == 2 {
 			if !errors.Is(err, runErr) {
 				t.Fatalf("lost model error: %v", err)
@@ -90,18 +93,23 @@ func TestUsageTracksBothModelRoles(t *testing.T) {
 					return aicli.Result{Answer: "answer", Tokens: usage.Tokens{Input: 100, CachedInput: 80, Output: 20}, UsageComplete: true}, nil
 				}
 			}
-			e := &Executor{
-				Usage: store, Main: main, Adversarial: critic,
-				Codex:    config.CodexConfig{Model: "codex-model", ReasoningEffort: "high"},
-				Claude:   config.ClaudeConfig{Effort: "medium"},
-				RunCodex: runner("codex"), RunClaude: runner("claude"),
+			e := &Orchestrator{
+				Usage: store,
+				Runner: Runner{
+					Main:        main,
+					Adversarial: critic,
+					Codex:       config.CodexConfig{Model: "codex-model", ReasoningEffort: "high"},
+					Claude:      config.ClaudeConfig{Effort: "medium"},
+					RunCodex:    runner("codex"),
+					RunClaude:   runner("claude"),
+				},
 			}
 			tracked, finish, err := e.trackUsage(usageJob())
 			if err != nil {
 				t.Fatal(err)
 			}
 			for _, provider := range []string{main, critic, main} {
-				result, err := tracked.runOnce(context.Background(), modelRun{provider: provider, dir: "dir", prompt: "prompt"})
+				result, err := tracked.Runner.runOnce(context.Background(), modelRun{provider: provider, dir: "dir", prompt: "prompt"})
 				if provider == critic {
 					if !errors.Is(err, runErr) {
 						t.Fatalf("lost critic error: %v", err)
@@ -135,25 +143,29 @@ func TestUsageTracksBothModelRoles(t *testing.T) {
 func TestUsageAccumulatesCriticRevisions(t *testing.T) {
 	store := &usage.Store{Dir: filepath.Join(t.TempDir(), "usage")}
 	var critiques int
-	e := &Executor{
-		Usage: store, Main: "claude", Adversarial: "codex",
-		RunClaude: func(context.Context, string, string, bool, string) (aicli.Result, error) {
-			return aicli.Result{Answer: proposalJSON("proposal", "Private evidence"), Tokens: usage.Tokens{Input: 100, Output: 20}, UsageComplete: true}, nil
-		},
-		RunCodex: func(context.Context, string, string, bool, string) (codexcli.Result, error) {
-			critiques++
-			answer := `{"approved":true,"feedback":""}`
-			if critiques == 1 {
-				answer = `{"approved":false,"feedback":"Check the error path."}`
-			}
-			return codexcli.Result{Answer: answer, Tokens: usage.Tokens{Input: 10, Output: 2}, UsageComplete: true}, nil
+	e := &Orchestrator{
+		Usage: store,
+		Runner: Runner{
+			Main:        "claude",
+			Adversarial: "codex",
+			RunClaude: func(context.Context, string, string, bool, string) (aicli.Result, error) {
+				return aicli.Result{Answer: proposalJSON("proposal", "Private evidence"), Tokens: usage.Tokens{Input: 100, Output: 20}, UsageComplete: true}, nil
+			},
+			RunCodex: func(context.Context, string, string, bool, string) (codexcli.Result, error) {
+				critiques++
+				answer := `{"approved":true,"feedback":""}`
+				if critiques == 1 {
+					answer = `{"approved":false,"feedback":"Check the error path."}`
+				}
+				return codexcli.Result{Answer: answer, Tokens: usage.Tokens{Input: 10, Output: 2}, UsageComplete: true}, nil
+			},
 		},
 	}
 	tracked, finish, err := e.trackUsage(usageJob())
 	if err != nil {
 		t.Fatal(err)
 	}
-	answer, err := tracked.runAI(context.Background(), "dir", "prompt", false, "")
+	answer, err := tracked.Runner.runAI(context.Background(), "dir", "prompt", false, "")
 	if err != nil || answer != "proposal" {
 		t.Fatalf("answer=%q err=%v", answer, err)
 	}
@@ -189,8 +201,14 @@ func TestUsagePersistenceFailureStopsModelsOrPublication(t *testing.T) {
 						store.Dir = blocked
 						return aicli.Result{Tokens: usage.Tokens{Input: 10, Output: 2}}, modelErr
 					}
-					e := &Executor{
-						Usage: store, Main: provider, Codex: config.CodexConfig{Model: "test-model"}, RunCodex: run, RunClaude: run,
+					e := &Orchestrator{
+						Usage: store,
+						Runner: Runner{
+							Main:      provider,
+							Codex:     config.CodexConfig{Model: "test-model"},
+							RunCodex:  run,
+							RunClaude: run,
+						},
 					}
 					tracked, finish, err := e.trackUsage(usageJob())
 					if err != nil {
@@ -199,7 +217,7 @@ func TestUsagePersistenceFailureStopsModelsOrPublication(t *testing.T) {
 					if stage == "before call" {
 						store.Dir = blocked
 					}
-					_, err = tracked.runAI(context.Background(), "dir", "prompt", false, "")
+					_, err = tracked.Runner.runAI(context.Background(), "dir", "prompt", false, "")
 					if err == nil || !strings.Contains(err.Error(), "save action usage") {
 						t.Fatalf("storage failure not returned: %v", err)
 					}
@@ -274,12 +292,18 @@ func TestExecuteRecordsNoCodexAndSkipsAcknowledged(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			e := &Executor{
-				GitHub: client, BotLogin: "bot", Usage: &usage.Store{Dir: dir}, Codex: config.CodexConfig{Model: "test-model"},
+			e := &Orchestrator{
+				GitHub:   client,
+				BotLogin: "bot",
+				Usage:    &usage.Store{Dir: dir},
 				Commands: map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{testReviewSkillURL}}},
-				RunCodex: func(context.Context, string, string, bool, string) (codexcli.Result, error) {
-					t.Fatal("review on an issue must not invoke Codex")
-					return codexcli.Result{}, nil
+				Runner: Runner{
+					Codex: config.CodexConfig{Model: "test-model"},
+
+					RunCodex: func(context.Context, string, string, bool, string) (codexcli.Result, error) {
+						t.Fatal("review on an issue must not invoke Codex")
+						return codexcli.Result{}, nil
+					},
 				},
 			}
 			err := e.Execute(context.Background(), job)
@@ -304,5 +328,59 @@ func TestExecuteRecordsNoCodexAndSkipsAcknowledged(t *testing.T) {
 				t.Fatalf("incorrect no-Codex record: %+v", record)
 			}
 		})
+	}
+}
+
+func TestUsagePreservesWorkerModelSkillsAndContext(t *testing.T) {
+	installActionTestSkills(t, testReviewSkillURL)
+	root := t.TempDir()
+	argsPath, promptPath := filepath.Join(root, "args"), filepath.Join(root, "prompt")
+	binary := filepath.Join(root, "codex")
+	script := fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$@" > %q
+cat > %q
+printf '%%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"No findings."}}' '{"type":"turn.completed","usage":{"input_tokens":3,"cached_input_tokens":1,"output_tokens":2}}'
+`, argsPath, promptPath)
+	if err := os.WriteFile(binary, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", root+string(os.PathListSeparator)+os.Getenv("PATH"))
+	store := &usage.Store{Dir: filepath.Join(root, "usage")}
+	executor := &Orchestrator{
+		Usage: store,
+		Runner: Runner{
+			WorkRoot: filepath.Join(root, "work"),
+			Codex:    config.CodexConfig{Model: "stale-host-model"},
+		},
+	}
+	tracked, finish, err := executor.trackUsage(usageJob())
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := portableJob(command.Comment)
+	job.Main.Model = "portable-model"
+	job.Main.Skills = []string{testReviewSkillURL}
+	result, err := tracked.Runner.Run(context.Background(), job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := finish(nil); err != nil {
+		t.Fatal(err)
+	}
+	args, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt, err := os.ReadFile(promptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	installed := filepath.Join(os.Getenv("HOME"), ".agents", "skills", "ponytail-review", "SKILL.md")
+	if !strings.Contains(string(args), "portable-model") || strings.Contains(string(args), "stale-host-model") || !strings.Contains(string(args), ".minion-context-") || !strings.Contains(string(prompt), installed) {
+		t.Fatalf("usage wrapper lost worker settings: args=%s prompt=%s", args, prompt)
+	}
+	records, err := usage.ReadAll(store.Dir)
+	if err != nil || len(records) != 1 || records[0].CodexCalls != 1 || records[0].Tokens.Total() != 5 || len(result.Calls) != 1 {
+		t.Fatalf("usage counted dispatch incorrectly: records=%+v calls=%+v err=%v", records, result.Calls, err)
 	}
 }

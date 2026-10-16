@@ -1,0 +1,211 @@
+package gitwork
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/linkdata/minion/internal/workspace"
+)
+
+func TestCappedBufferReadFromCannotBypassLimit(t *testing.T) {
+	output := cappedBuffer{limit: 3}
+	n, err := io.Copy(&output, io.LimitReader(strings.NewReader("long output"), 100))
+	if err != nil || n != 11 || !output.exceeded || output.String() != "lon" {
+		t.Fatalf("copy=%d,%v output=%q exceeded=%v", n, err, output.String(), output.exceeded)
+	}
+}
+
+func TestBoundedGitClassifiesLimitsAndCancellation(t *testing.T) {
+	fixture := newFixture(t)
+	if _, _, err := fixture.checkout.boundedGit(context.Background(), 1, false, "cat-file", "blob", fixture.base+":README.md"); !errors.Is(err, ErrCheckoutTooLarge) {
+		t.Fatalf("limit error=%v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, err := fixture.checkout.boundedGit(ctx, 1, false, "cat-file", "blob", fixture.base+":README.md"); !errors.Is(err, context.Canceled) || errors.Is(err, ErrCheckoutTooLarge) {
+		t.Fatalf("canceled read=%v", err)
+	}
+}
+
+func TestSnapshotUsesPinnedBlobsAndBoundedHistory(t *testing.T) {
+	fixture := newFixture(t)
+	writeFile(t, filepath.Join(fixture.checkout.Path(), "README.md"), "untrusted working tree")
+	writeFile(t, filepath.Join(fixture.checkout.Path(), "untracked"), "not source")
+	snapshot, err := fixture.checkout.Snapshot(context.Background(), false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Files) != 1 || string(snapshot.Files[0].Data) != "fixture\n" || snapshot.Head != fixture.base || len(snapshot.History) != 0 {
+		t.Fatalf("snapshot=%+v", snapshot)
+	}
+	withHistory, err := fixture.checkout.Snapshot(context.Background(), true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !withHistory.HistoryComplete || !bytes.Contains(withHistory.History, []byte("initial")) {
+		t.Fatalf("history=%q complete=%v", withHistory.History, withHistory.HistoryComplete)
+	}
+	for i := 0; i < 101; i++ {
+		fixture.git(fixture.checkout.Path(), "commit", "--allow-empty", "-m", "more history")
+	}
+	fixture.checkout.expectedHead = fixture.git(fixture.checkout.Path(), "rev-parse", "HEAD")
+	withHistory, err = fixture.checkout.Snapshot(context.Background(), true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withHistory.HistoryComplete || bytes.Contains(withHistory.History, []byte("initial")) {
+		t.Fatal("bounded history claimed complete coverage")
+	}
+}
+
+func TestSnapshotPreservesPRDeletedBinaryAndModeContext(t *testing.T) {
+	fixture := newFixture(t)
+	writeFile(t, filepath.Join(fixture.source, "deleted.txt"), "deleted base content\n")
+	writeFile(t, filepath.Join(fixture.source, "binary"), "\x00\xffbase")
+	fixture.git(fixture.source, "add", ".")
+	fixture.git(fixture.source, "commit", "-m", "base files")
+	base := fixture.git(fixture.source, "rev-parse", "HEAD")
+	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/heads/main")
+	if err := os.Remove(filepath.Join(fixture.source, "deleted.txt")); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(fixture.source, "binary"), "\x00\xffhead")
+	if err := os.Chmod(filepath.Join(fixture.source, "binary"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	fixture.git(fixture.source, "add", ".")
+	fixture.git(fixture.source, "commit", "-m", "PR files")
+	head := fixture.git(fixture.source, "rev-parse", "HEAD")
+	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/pull/7/head")
+	fixture.git(fixture.source, "checkout", "--detach", base)
+	writeFile(t, filepath.Join(fixture.source, "base-only"), "new base branch content")
+	fixture.git(fixture.source, "add", ".")
+	fixture.git(fixture.source, "commit", "-m", "base advanced after fork")
+	baseTip := fixture.git(fixture.source, "rev-parse", "HEAD")
+	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/heads/main")
+	if err := fixture.checkout.CheckoutPullRequest(context.Background(), 7, "main", head, localTreeMetadata(t, fixture.source)); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := fixture.checkout.Snapshot(context.Background(), false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Head != head || snapshot.Base != baseTip || snapshot.MergeBase != base {
+		t.Fatalf("snapshot commits=%+v", snapshot)
+	}
+	if !bytes.Contains(snapshot.Diff, []byte("Binary files")) || !bytes.Contains(snapshot.Diff, []byte("deleted.txt")) || !bytes.Contains(snapshot.Diff, []byte("100755")) {
+		t.Fatalf("comparison diff=%s", snapshot.Diff)
+	}
+	old := map[string]workspace.File{}
+	for _, file := range snapshot.BaseFiles {
+		old[file.Path] = file
+	}
+	if string(old["deleted.txt"].Data) != "deleted base content\n" || string(old["binary"].Data) != "\x00\xffbase" {
+		t.Fatalf("base context=%+v", snapshot.BaseFiles)
+	}
+	for _, file := range snapshot.Files {
+		if file.Path == "binary" && (file.Mode != workspace.Executable || string(file.Data) != "\x00\xffhead") {
+			t.Fatalf("binary source=%+v", file)
+		}
+	}
+}
+
+func TestSnapshotReportsOmittedGitlinksAndTruncatedHistory(t *testing.T) {
+	fixture := newFixture(t)
+	fixture.git(fixture.checkout.Path(), "update-index", "--add", "--cacheinfo", "160000,"+fixture.base+",dependency")
+	writeFile(t, filepath.Join(fixture.checkout.Path(), "large"), "small source")
+	fixture.git(fixture.checkout.Path(), "add", "large")
+	fixture.git(fixture.checkout.Path(), "commit", "-m", "bounded context")
+	fixture.gitInput(fixture.checkout.Path(), strings.Repeat("m", workspace.MaxContextBytes+256), "commit", "--allow-empty", "-F", "-")
+	fixture.checkout.expectedHead = fixture.git(fixture.checkout.Path(), "rev-parse", "HEAD")
+	snapshot, err := fixture.checkout.Snapshot(context.Background(), true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Omitted) != 1 || snapshot.Omitted[0] != "dependency" {
+		t.Fatalf("omitted=%v", snapshot.Omitted)
+	}
+	if snapshot.HistoryComplete || len(snapshot.History) != workspace.MaxContextBytes {
+		t.Fatalf("history complete=%v bytes=%d", snapshot.HistoryComplete, len(snapshot.History))
+	}
+}
+
+func TestCloneDefaultBranchDisablesRepositoryTransforms(t *testing.T) {
+	fixture := newFixture(t)
+	payload := strings.Repeat("$Id$\n", 128)
+	writeFile(t, filepath.Join(fixture.source, "payload"), payload)
+	fixture.git(fixture.source, "add", "payload")
+	writeFile(t, filepath.Join(fixture.source, ".gitattributes"), "payload ident text eol=crlf working-tree-encoding=UTF-16LE\n")
+	fixture.git(fixture.source, "add", ".gitattributes")
+	fixture.git(fixture.source, "commit", "-m", "checkout transforms")
+	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/heads/main")
+	checkout, err := cloneFromURL(context.Background(), t.TempDir(), fixture.remote, "main", localTreeMetadata(t, fixture.source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := checkout.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	data, err := os.ReadFile(filepath.Join(checkout.Path(), "payload"))
+	if err != nil || string(data) != payload {
+		t.Fatalf("transformed default source: %q,%v", data, err)
+	}
+}
+
+func TestImportRejectsIdentityAndMetadataAndPreservesBytes(t *testing.T) {
+	fixture := newFixture(t)
+	ctx := context.Background()
+	if err := fixture.checkout.Import(ctx, strings.Repeat("f", 40), nil); err == nil {
+		t.Fatal("accepted wrong source")
+	}
+	if err := fixture.checkout.Import(ctx, fixture.base, []workspace.Change{{Path: ".git/config", Mode: workspace.Regular}}); err == nil {
+		t.Fatal("accepted Git metadata")
+	}
+	changes := []workspace.Change{{Path: "README.md", Delete: true}, {Path: "binary", Mode: workspace.Executable, Data: []byte{0, 255, 1}}}
+	if err := fixture.checkout.Import(ctx, fixture.base, changes); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(fixture.checkout.Path(), "binary"))
+	if err != nil || !bytes.Equal(data, changes[1].Data) {
+		t.Fatalf("binary=%v,%v", data, err)
+	}
+	if _, err := os.Stat(filepath.Join(fixture.checkout.Path(), "README.md")); !os.IsNotExist(err) {
+		t.Fatalf("deleted source=%v", err)
+	}
+}
+
+func TestCloneOmitsDefaultBranchSymlinkFromSnapshot(t *testing.T) {
+	fixture := newFixture(t)
+	if err := os.Symlink("/etc/passwd", filepath.Join(fixture.source, "escape")); err != nil {
+		t.Fatal(err)
+	}
+	fixture.git(fixture.source, "add", ".")
+	fixture.git(fixture.source, "commit", "-m", "symlink source")
+	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/heads/main")
+	checkout, err := cloneFromURL(context.Background(), t.TempDir(), fixture.remote, "main", localTreeMetadata(t, fixture.source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := checkout.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	snapshot, err := checkout.Snapshot(context.Background(), false, false)
+	if err != nil || len(snapshot.Omitted) != 1 || snapshot.Omitted[0] != "escape" {
+		t.Fatalf("snapshot omitted=%v error=%v", snapshot.Omitted, err)
+	}
+	for _, file := range snapshot.Files {
+		if file.Path == "escape" {
+			t.Fatal("symlink content exported")
+		}
+	}
+}

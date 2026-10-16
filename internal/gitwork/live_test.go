@@ -70,7 +70,9 @@ func TestLiveCloneAndPullRequest(t *testing.T) {
 		t.Fatalf("pull request metadata = %+v", pull)
 	}
 
-	checkout, err := Clone(ctx, t.TempDir(), repoName, repo.DefaultBranch)
+	checkout, err := Clone(ctx, t.TempDir(), repoName, repo.DefaultBranch, func(ctx context.Context, sha string) (github.GitTree, error) {
+		return client.GitTree(ctx, repoName, sha)
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +180,7 @@ func TestLiveCommitAndPush(t *testing.T) {
 		}
 	})
 	t.Setenv("GH_TOKEN", botToken)
-	checkout, err := Clone(ctx, t.TempDir(), repoName, repo.DefaultBranch)
+	checkout, err := Clone(ctx, t.TempDir(), repoName, repo.DefaultBranch, func(ctx context.Context, sha string) (github.GitTree, error) { return bot.GitTree(ctx, repoName, sha) })
 	if err != nil {
 		t.Fatal(err)
 	}

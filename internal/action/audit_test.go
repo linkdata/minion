@@ -75,7 +75,7 @@ func TestSecurityAuditIssueAndPullRequest(t *testing.T) {
 						t.Error(err)
 					}
 				case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/o/r/git/trees/"):
-					_, _ = fmt.Fprintf(w, `{"sha":%q,"truncated":false,"tree":[{"path":"README.md","type":"blob","mode":"100644","size":8}]}`, strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/"))
+					_, _ = fmt.Fprintf(w, `{"sha":%q,"truncated":false,"tree":[]}`, strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/"))
 				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7/comments":
 					if err := json.NewEncoder(w).Encode(comments); err != nil {
 						t.Error(err)
@@ -126,82 +126,86 @@ func TestSecurityAuditIssueAndPullRequest(t *testing.T) {
 			}
 			var calls int
 			var sourceDir, reportsDir string
-			e := &Executor{
-				GitHub: client, BotLogin: "linkdataminion", WorkRoot: t.TempDir(), Usage: usageStore,
-				Codex:    config.CodexConfig{Model: "test-model", ReasoningEffort: "high", Skills: []string{skill}},
+			e := &Orchestrator{
+				GitHub:   client,
+				BotLogin: "linkdataminion",
+				Usage:    usageStore,
+
 				Commands: map[string]config.CommandMapping{"security-audit": {Action: "security-audit", Skills: []string{testAuditSkillURL}}},
-				RunCodex: func(ctx context.Context, dir, prompt string, writable bool, outputDir string) (codexcli.Result, error) {
-					calls++
-					records, err := usage.ReadAll(usageStore.Dir)
-					if err != nil || len(records) == 0 {
-						t.Fatalf("read usage checkpoint: records=%+v err=%v", records, err)
-					}
-					current := records[len(records)-1]
-					if current.Status != "running" || current.CodexCalls != 1 || current.UsageComplete {
-						t.Fatalf("invalid pre-call checkpoint: %+v", current)
-					}
-					sourceDir, reportsDir = dir, outputDir
-					if writable || outputDir == "" || strings.HasPrefix(outputDir, dir+string(os.PathSeparator)) {
-						t.Fatalf("audit source writable or reports not separate: writable=%v output=%q source=%q", writable, outputDir, dir)
-					}
-					for _, want := range []string{skill, expected, outputDir, "full-audit mode", "standard profile", "needs_validation", "Check authorization."} {
-						if !strings.Contains(prompt, want) {
-							t.Fatalf("audit prompt missing %q", want)
+				Runner: Runner{
+					WorkRoot: t.TempDir(),
+					Codex:    config.CodexConfig{Model: "test-model", ReasoningEffort: "high"},
+
+					RunCodex: func(ctx context.Context, dir, prompt string, writable bool, outputDir string) (codexcli.Result, error) {
+						calls++
+						records, err := usage.ReadAll(usageStore.Dir)
+						if err != nil || len(records) == 0 {
+							t.Fatalf("read usage checkpoint: records=%+v err=%v", records, err)
 						}
-					}
-					if !strings.Contains(prompt, fmt.Sprintf("Thread title: %q", title)) || !strings.Contains(prompt, fmt.Sprintf("Thread description: %q", description)) ||
-						strings.Contains(prompt, "\nRequest comment") || strings.Contains(prompt, "\u2028") ||
-						!strings.Contains(prompt, "Untrusted GitHub thread text:") ||
-						strings.Index(prompt, "Authenticated requester notes") > strings.Index(prompt, "Untrusted GitHub thread text:") {
-						t.Errorf("audit prompt lacks an unspoofed data boundary: %q", prompt)
-					}
-					assertRequesterNotesPrompt(t, prompt, job.Source.Body, "Inspect authorization boundaries.")
-					got, err := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "HEAD").Output()
-					if err != nil || strings.TrimSpace(string(got)) != expected {
-						t.Fatalf("auditing wrong commit: %s, %v", got, err)
-					}
-					if tt.failCodex {
-						return codexcli.Result{Tokens: usage.Tokens{Input: 10, CachedInput: 8, Output: 2}}, errors.New("Codex unavailable")
-					}
-					write := func(name, content string) error {
-						return os.WriteFile(filepath.Join(outputDir, name), []byte(content), 0600)
-					}
-					if !tt.reportOnly {
-						status := "complete"
-						if tt.incomplete {
-							status = "incomplete"
+						current := records[len(records)-1]
+						if current.Status != "running" || current.CodexCalls != 1 || current.UsageComplete {
+							t.Fatalf("invalid pre-call checkpoint: %+v", current)
 						}
-						sourceRef := expected
-						if tt.wrongSourceRef {
-							sourceRef = strings.Repeat("f", 40)
+						sourceDir, reportsDir = dir, outputDir
+						if writable || outputDir == "" || strings.HasPrefix(outputDir, dir+string(os.PathSeparator)) {
+							t.Fatalf("audit source writable or reports not separate: writable=%v output=%q source=%q", writable, outputDir, dir)
 						}
-						metadata := fmt.Sprintf(`{"run_id":"test-run","repo":"o/r","target":%q,"source_ref":%q,"profile":"standard","scope_paths":["."],"budget":null,"selected_companion_files":[],"prior_run_paths":[],"shared_file_owners":%s,"execution_policy":"sandboxed-source-and-local-only","run_status":%q}`, dir, sourceRef, auditTestOwners, status)
-						ledger := `[{"status":"covered"}]`
-						if tt.unresolvedCandidate {
-							ledger = `[{"status":"candidate","result_fingerprints":["F"],"unresolved":["validation_budget_exhausted"]}]`
-						}
-						for name, content := range map[string]string{
-							"run-metadata.json":    metadata,
-							"architecture.md":      "Architecture\n",
-							"coverage-ledger.json": ledger,
-							"findings.json":        "[]",
-							"FINDINGS-DETAIL.md":   "No detailed findings.\n",
-							"NEEDS-VALIDATION.md":  "No validation leads.\n",
-						} {
-							if tt.badFindings && name == "findings.json" {
-								content = "not JSON"
+						for _, want := range []string{skill, expected, outputDir, "full-audit mode", "standard profile", "needs_validation", "Check authorization."} {
+							if !strings.Contains(prompt, want) {
+								t.Fatalf("audit prompt missing %q", want)
 							}
-							if err := write(name, content); err != nil {
+						}
+						if !strings.Contains(prompt, fmt.Sprintf("Thread title: %q", title)) || !strings.Contains(prompt, fmt.Sprintf("Thread description: %q", description)) ||
+							strings.Contains(prompt, "\nRequest comment") || strings.Contains(prompt, "\u2028") ||
+							!strings.Contains(prompt, "Untrusted GitHub thread text:") ||
+							strings.Index(prompt, "Authenticated requester notes") > strings.Index(prompt, "Untrusted GitHub thread text:") {
+							t.Errorf("audit prompt lacks an unspoofed data boundary: %q", prompt)
+						}
+						assertRequesterNotesPrompt(t, prompt, job.Source.Body, "Inspect authorization boundaries.")
+						assertPortableSource(t, dir)
+						if tt.failCodex {
+							return codexcli.Result{Tokens: usage.Tokens{Input: 10, CachedInput: 8, Output: 2}}, errors.New("Codex unavailable")
+						}
+						write := func(name, content string) error {
+							return os.WriteFile(filepath.Join(outputDir, name), []byte(content), 0600)
+						}
+						if !tt.reportOnly {
+							status := "complete"
+							if tt.incomplete {
+								status = "incomplete"
+							}
+							sourceRef := expected
+							if tt.wrongSourceRef {
+								sourceRef = strings.Repeat("f", 40)
+							}
+							metadata := fmt.Sprintf(`{"run_id":"test-run","repo":"o/r","target":%q,"source_ref":%q,"profile":"standard","scope_paths":["."],"budget":null,"selected_companion_files":[],"prior_run_paths":[],"shared_file_owners":%s,"execution_policy":"sandboxed-source-and-local-only","run_status":%q}`, dir, sourceRef, auditTestOwners, status)
+							ledger := `[{"status":"covered"}]`
+							if tt.unresolvedCandidate {
+								ledger = `[{"status":"candidate","result_fingerprints":["F"],"unresolved":["validation_budget_exhausted"]}]`
+							}
+							for name, content := range map[string]string{
+								"run-metadata.json":    metadata,
+								"architecture.md":      "Architecture\n",
+								"coverage-ledger.json": ledger,
+								"findings.json":        "[]",
+								"FINDINGS-DETAIL.md":   "No detailed findings.\n",
+								"NEEDS-VALIDATION.md":  "No validation leads.\n",
+							} {
+								if tt.badFindings && name == "findings.json" {
+									content = "not JSON"
+								}
+								if err := write(name, content); err != nil {
+									return codexcli.Result{}, err
+								}
+							}
+						}
+						if !tt.missingReport {
+							if err := write("REPORT.md", "Verified audit report\n"); err != nil {
 								return codexcli.Result{}, err
 							}
 						}
-					}
-					if !tt.missingReport {
-						if err := write("REPORT.md", "Verified audit report\n"); err != nil {
-							return codexcli.Result{}, err
-						}
-					}
-					return codexcli.Result{Answer: "Untrusted final answer", Tokens: usage.Tokens{Input: 100, CachedInput: 80, Output: 20}, UsageComplete: true}, nil
+						return codexcli.Result{Answer: "Untrusted final answer", Tokens: usage.Tokens{Input: 100, CachedInput: 80, Output: 20}, UsageComplete: true}, nil
+					},
 				},
 			}
 			err := e.Execute(context.Background(), job)
@@ -224,8 +228,12 @@ func TestSecurityAuditIssueAndPullRequest(t *testing.T) {
 				if err != nil || calls != 1 || len(comments) != 1 {
 					t.Fatalf("audit failed: err=%v calls=%d comments=%d", err, calls, len(comments))
 				}
-				if _, err := os.Stat(filepath.Join(reportsDir, "REPORT.md")); err != nil {
-					t.Fatalf("reports not retained: %v", err)
+				retained, err := filepath.Glob(filepath.Join(e.WorkRoot, "audits", "*", "REPORT.md"))
+				if err != nil || len(retained) != 1 {
+					t.Fatalf("reports not retained: %v, %v", retained, err)
+				}
+				if _, err := os.Stat(reportsDir); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("executor reports not cleaned: %v", err)
 				}
 				if err := e.Execute(context.Background(), job); err != nil || calls != 1 || len(comments) != 1 {
 					t.Fatalf("duplicate audit executed: err=%v calls=%d comments=%d", err, calls, len(comments))
@@ -425,4 +433,12 @@ func auditGitFixtureRemote(t *testing.T) (base, head, remote string) {
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	return base, head, remote
+}
+
+func validateAuditOutput(ctx context.Context, outputDir, skill, repo, target, head string) (string, error) {
+	files, err := readAuditFiles(outputDir)
+	if err != nil {
+		return "", err
+	}
+	return validateAuditFiles(ctx, files, filepath.Dir(outputDir), skill, repo, target, head)
 }

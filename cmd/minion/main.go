@@ -123,23 +123,25 @@ func run() int {
 		}
 	}()
 
-	executor := &action.Executor{
+	executor := &action.Orchestrator{
 		GitHub:                client,
 		BotLogin:              cfg.BotLogin,
 		Store:                 store,
 		Usage:                 &usage.Store{Dir: filepath.Join(filepath.Dir(cfg.StatePath), "usage")},
-		WorkRoot:              cfg.WorkRoot,
 		CheckWorkRoot:         checkWorkRoot,
 		Timeout:               time.Duration(cfg.JobTimeoutMinutes) * time.Minute,
-		Main:                  cfg.Main,
-		Adversarial:           cfg.Adversarial,
-		CriticMaxRounds:       cfg.CriticMaxRounds,
-		Codex:                 cfg.Codex,
-		Claude:                cfg.Claude,
 		MaxGitHubContextBytes: cfg.MaxGitHubContextBytes,
 		Commands:              cfg.Commands,
-		AlwaysOnSkills:        cfg.AlwaysOnSkills,
-		Logger:                logger,
+		Runner: action.Runner{
+			WorkRoot:        cfg.WorkRoot,
+			Main:            cfg.Main,
+			Adversarial:     cfg.Adversarial,
+			CriticMaxRounds: cfg.CriticMaxRounds,
+			Codex:           cfg.Codex,
+			Claude:          cfg.Claude,
+			AlwaysOnSkills:  cfg.AlwaysOnSkills,
+			Logger:          logger,
+		},
 	}
 	watcher := &monitor.Monitor{Config: cfg, ConfigPath: *configPath, GitHub: client, Executor: executor, Logger: logger}
 	for {
@@ -296,7 +298,10 @@ func checkRepositories(ctx context.Context, client *github.Client, cfg config.Co
 			}
 		}
 		if needsFixFork {
-			executor := action.Executor{GitHub: client, BotLogin: cfg.BotLogin}
+			executor := action.Orchestrator{
+				GitHub:   client,
+				BotLogin: cfg.BotLogin,
+			}
 			if err := executor.CheckFixFork(ctx, repo); err != nil {
 				problems = append(problems, fmt.Errorf("%s: fix fork preflight: %w", repo.Name, err))
 			}

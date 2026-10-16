@@ -49,7 +49,7 @@ func writeActionTestSkills(t *testing.T, home, parent string, sources ...string)
 	}
 }
 
-func TestForCommandSeparatesMainAndCriticSkills(t *testing.T) {
+func TestRunnerSeparatesMainAndCriticSkills(t *testing.T) {
 	const optional = "https://github.com/example/skills/tree/main/skills/optional"
 	const missing = "https://github.com/example/skills/tree/main/skills/missing"
 	for _, main := range []string{"codex", "claude"} {
@@ -62,20 +62,19 @@ func TestForCommandSeparatesMainAndCriticSkills(t *testing.T) {
 			}
 			writeActionTestSkills(t, home, mainRoot, testReviewSkillURL, optional)
 			writeActionTestSkills(t, home, criticRoot, optional)
-			e := &Executor{
-				Main: main, Adversarial: critic,
-				Codex: config.CodexConfig{Skills: []string{"stale codex skill"}}, Claude: config.ClaudeConfig{Skills: []string{"stale claude skill"}},
-				Commands: map[string]config.CommandMapping{
-					"inspect": {Action: "review", Skills: []string{testReviewSkillURL}},
-				},
-				AlwaysOnSkills: []string{optional, skills.BuiltinAntiPromptInjection, missing},
+			runner := &Runner{
+				Main:        main,
+				Adversarial: critic,
+				Codex:       config.CodexConfig{Skills: []string{"stale codex skill"}},
+				Claude:      config.ClaudeConfig{Skills: []string{"stale claude skill"}},
 			}
-			job := monitor.Job{
-				Repository: config.Repository{Name: "owner/repo", Actions: []string{"inspect"}},
-				Command:    command.Command{Name: "inspect", Action: command.Review},
+			mainRole := RoleSettings{Provider: main, Skills: []string{testReviewSkillURL}, AlwaysOnSkills: []string{optional, skills.BuiltinAntiPromptInjection, missing}}
+			criticRole := RoleSettings{Provider: critic, AlwaysOnSkills: mainRole.AlwaysOnSkills}
+			configured := *runner
+			if err := configured.configureRole(mainRole); err != nil {
+				t.Fatal(err)
 			}
-			configured, err := e.forCommand(job)
-			if err != nil {
+			if err := configured.configureRole(criticRole); err != nil {
 				t.Fatal(err)
 			}
 			mainSkills, criticSkills := configured.Codex.Skills, configured.Claude.Skills
@@ -91,21 +90,21 @@ func TestForCommandSeparatesMainAndCriticSkills(t *testing.T) {
 			if !slices.Equal(mainSkills, wantMain) || !slices.Equal(criticSkills, wantCritic) {
 				t.Fatalf("skills mixed roles: main=%v critic=%v", mainSkills, criticSkills)
 			}
-			if e.Codex.Skills[0] != "stale codex skill" || e.Claude.Skills[0] != "stale claude skill" {
-				t.Fatal("per-job selection changed shared executor settings")
+			if runner.Codex.Skills[0] != "stale codex skill" || runner.Claude.Skills[0] != "stale claude skill" {
+				t.Fatal("per-job selection changed shared runner settings")
 			}
 			writeActionTestSkills(t, home, criticRoot, testReviewSkillURL)
 			if err := os.RemoveAll(filepath.Dir(wantMain[0])); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := e.forCommand(job); err == nil {
+			if err := configured.configureRole(mainRole); err == nil {
 				t.Fatal("main used a required skill installed only for its critic")
 			}
 		})
 	}
 }
 
-func TestForCommandRequiresEverySkillAndLoadsOptionalSkills(t *testing.T) {
+func TestRunnerRequiresEverySkillAndLoadsOptionalSkills(t *testing.T) {
 	const extraURL = "https://github.com/example/skills/tree/main/skills/extra"
 	const optionalURL = "https://github.com/example/skills/tree/main/skills/optional"
 	installActionTestSkills(t, testReviewSkillURL, optionalURL)
@@ -113,18 +112,24 @@ func TestForCommandRequiresEverySkillAndLoadsOptionalSkills(t *testing.T) {
 		Repository: config.Repository{Name: "owner/repo", Actions: []string{"inspect"}},
 		Command:    command.Command{Name: "inspect", Action: command.Review},
 	}
-	executor := &Executor{
+	executor := &Orchestrator{
 		Commands: map[string]config.CommandMapping{
 			"inspect": {Action: "review", Skills: []string{testReviewSkillURL, extraURL}},
 		},
-		AlwaysOnSkills: []string{optionalURL},
+		Runner: Runner{
+			AlwaysOnSkills: []string{optionalURL},
+		},
 	}
-	if _, err := executor.forCommand(job); err == nil {
-		t.Fatal("command ran with a missing required skill")
+	if err := executor.validateCommand(job); err != nil {
+		t.Fatalf("orchestration requires local skills: %v", err)
+	}
+	role := RoleSettings{Provider: "codex", Skills: executor.Commands["inspect"].Skills, AlwaysOnSkills: executor.AlwaysOnSkills}
+	if err := executor.Runner.configureRole(role); err == nil {
+		t.Fatal("execution accepted a missing required skill")
 	}
 	installActionTestSkills(t, testReviewSkillURL, extraURL, optionalURL)
-	configured, err := executor.forCommand(job)
-	if err != nil {
+	configured := executor.Runner
+	if err := configured.configureRole(role); err != nil {
 		t.Fatal(err)
 	}
 	if len(configured.Codex.Skills) != 3 {
@@ -134,29 +139,31 @@ func TestForCommandRequiresEverySkillAndLoadsOptionalSkills(t *testing.T) {
 		t.Fatal("skill selection changed the shared executor")
 	}
 	delete(executor.Commands, "inspect")
-	if _, err := executor.forCommand(job); err == nil {
+	if err := executor.validateCommand(job); err == nil {
 		t.Fatal("unmapped command ran")
 	}
 	executor.Commands["inspect"] = config.CommandMapping{Action: "review"}
-	if _, err := executor.forCommand(job); err == nil {
+	if err := executor.validateCommand(job); err == nil {
 		t.Fatal("command with no required skills ran")
 	}
 }
 
-func TestForCommandRequiresSupportedMainWorkflow(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	writeActionTestSkills(t, home, ".agents", testAuditSkillURL)
-	writeActionTestSkills(t, home, ".claude", testAuditSkillURL)
+func TestValidateCommandRequiresSupportedMainWorkflow(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	job := monitor.Job{
 		Repository: config.Repository{Name: "owner/repo", Actions: []string{"inspect"}},
 		Command:    command.Command{Name: "inspect", Action: command.SecurityAudit},
 	}
 	for _, main := range []string{"codex", "claude"} {
-		e := &Executor{Main: main, Commands: map[string]config.CommandMapping{
-			"inspect": {Action: "security-audit", Skills: []string{testAuditSkillURL}},
-		}}
-		_, err := e.forCommand(job)
+		e := &Orchestrator{
+			Commands: map[string]config.CommandMapping{
+				"inspect": {Action: "security-audit", Skills: []string{testAuditSkillURL}},
+			},
+			Runner: Runner{
+				Main: main,
+			},
+		}
+		err := e.validateCommand(job)
 		if main == "claude" {
 			if !errors.Is(err, monitor.ErrTerminalJob) {
 				t.Fatalf("unsupported workflow must fail before invocation: %v", err)

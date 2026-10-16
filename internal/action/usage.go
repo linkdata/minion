@@ -14,7 +14,7 @@ import (
 )
 
 // trackUsage gives each action attempt its own record and runner wrapper.
-func (e *Executor) trackUsage(job monitor.Job) (*Executor, func(error) error, error) {
+func (e *Orchestrator) trackUsage(job monitor.Job) (*Orchestrator, func(error) error, error) {
 	var id [16]byte
 	if _, err := rand.Read(id[:]); err != nil {
 		return nil, nil, fmt.Errorf("create usage ID: %w", err)
@@ -53,7 +53,7 @@ func (e *Executor) trackUsage(job monitor.Job) (*Executor, func(error) error, er
 		return nil, nil, err
 	}
 	tracked := *e
-	tracked.runModel = func(ctx context.Context, request modelRun) (aicli.Result, error) {
+	tracked.aroundModel = func(ctx context.Context, request modelRun, next modelCall) (aicli.Result, error) {
 		calls := &record.CodexCalls
 		if request.provider == "claude" {
 			calls = &record.ClaudeCalls
@@ -66,7 +66,7 @@ func (e *Executor) trackUsage(job monitor.Job) (*Executor, func(error) error, er
 			record.UsageComplete = complete
 			return aicli.Result{}, err
 		}
-		result, err := e.runOnce(ctx, request)
+		result, err := next(ctx, request)
 		record.Tokens.Add(result.Tokens)
 		record.UsageComplete = complete && result.UsageComplete
 		return result, errors.Join(err, save())

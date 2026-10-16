@@ -4,21 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
-	"net/url"
 	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
 
-	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/codexcli"
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/gitwork"
 	"github.com/linkdata/minion/internal/monitor"
-	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/state"
 	"github.com/linkdata/minion/internal/usage"
 )
@@ -33,57 +29,32 @@ var modelLineBreaks = strings.NewReplacer(
 	"\u0085", "\n", "\u2028", "\n", "\u2029", "\n",
 )
 
-// Executor runs configured actions and publishes their bounded GitHub results.
-type Executor struct {
+// Orchestrator prepares portable actions and publishes results through trusted Git/GitHub access.
+type Orchestrator struct {
+	Runner
 	GitHub   *github.Client
 	BotLogin string
 	Store    *state.Store
 	Usage    *usage.Store
-	WorkRoot string
 	// CheckWorkRoot verifies the work filesystem before a job and after failure.
 	//
 	// A nil function disables these checks.
 	CheckWorkRoot func() error
 	Timeout       time.Duration
-	// Main selects codex (the zero value) or claude. Adversarial optionally selects the other CLI.
-	Main        string
-	Adversarial string
-	// CriticMaxRounds bounds main/critic pairs; zero selects three.
-	CriticMaxRounds int
-	Codex           config.CodexConfig
-	Claude          config.ClaudeConfig
 	// MaxGitHubContextBytes limits combined GitHub text.
 	//
 	// Nonpositive values use [config.DefaultMaxGitHubContextBytes].
 	MaxGitHubContextBytes int
 	Commands              map[string]config.CommandMapping
-	AlwaysOnSkills        []string
-	Logger                *log.Logger
-	RunCodex              func(context.Context, string, string, bool, string) (codexcli.Result, error)
-	RunClaude             func(context.Context, string, string, bool, string) (aicli.Result, error)
-	runModel              func(context.Context, modelRun) (aicli.Result, error)
 }
 
-func (e *Executor) logf(format string, args ...any) {
-	if e.Logger != nil {
-		e.Logger.Printf(format, args...)
-	}
-}
-
-func (e *Executor) closeCheckout(checkout *gitwork.Checkout) {
-	// Cleanup failures must not retry an action already published to GitHub.
-	if err := checkout.Close(); err != nil {
-		e.logf("close checkout: %v", err)
-	}
-}
-
-func (e *Executor) checkoutPullRequest(ctx context.Context, checkout *gitwork.Checkout, repo string, number int, baseRef, headSHA string) error {
+func (e *Orchestrator) checkoutPullRequest(ctx context.Context, checkout *gitwork.Checkout, repo string, number int, baseRef, headSHA string) error {
 	return checkout.CheckoutPullRequest(ctx, number, baseRef, headSHA, func(ctx context.Context, treeSHA string) (github.GitTree, error) {
 		return e.GitHub.GitTree(ctx, repo, treeSHA)
 	})
 }
 
-func (e *Executor) Execute(ctx context.Context, job monitor.Job) (resultErr error) {
+func (e *Orchestrator) Execute(ctx context.Context, job monitor.Job) (resultErr error) {
 	if e.CheckWorkRoot != nil {
 		if err := e.CheckWorkRoot(); err != nil {
 			return err
@@ -99,11 +70,9 @@ func (e *Executor) Execute(ctx context.Context, job monitor.Job) (resultErr erro
 	if e.GitHub == nil {
 		return errors.New("GitHub client is missing")
 	}
-	configured, err := e.forCommand(job)
-	if err != nil {
+	if err := e.validateCommand(job); err != nil {
 		return err
 	}
-	e = configured
 	timeout := e.Timeout
 	if timeout == 0 {
 		timeout = 30 * time.Minute
@@ -135,18 +104,7 @@ func (e *Executor) Execute(ctx context.Context, job monitor.Job) (resultErr erro
 			}
 		}()
 	}
-	switch job.Command.Action {
-	case command.Review:
-		resultErr = e.review(ctx, job)
-	case command.Comment:
-		resultErr = e.comment(ctx, job)
-	case command.SecurityAudit:
-		resultErr = e.securityAudit(ctx, job)
-	case command.Fix:
-		resultErr = e.fix(ctx, job)
-	default:
-		resultErr = fmt.Errorf("unsupported action %q", job.Command.Action)
-	}
+	resultErr = e.perform(ctx, job)
 	if errors.Is(resultErr, errGitHubContextTooLarge) {
 		// Give the fixed refusal its own deadline even when the action timed out.
 		replyCtx, replyCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
@@ -157,70 +115,25 @@ func (e *Executor) Execute(ctx context.Context, job monitor.Job) (resultErr erro
 	}
 	if resultErr != nil && (errors.Is(ctx.Err(), context.DeadlineExceeded) ||
 		errors.Is(resultErr, gitwork.ErrTooManyFiles) || errors.Is(resultErr, gitwork.ErrChangedFileLarge) ||
-		errors.Is(resultErr, gitwork.ErrDiffTooLarge) || errors.Is(resultErr, codexcli.ErrOutputLimit)) {
+		errors.Is(resultErr, gitwork.ErrDiffTooLarge) || errors.Is(resultErr, gitwork.ErrCheckoutTooLarge) || errors.Is(resultErr, codexcli.ErrOutputLimit)) {
 		resultErr = fmt.Errorf("%w: %w", monitor.ErrTerminalJob, resultErr)
 	}
 	returned = true
 	return resultErr
 }
 
-func (e *Executor) forCommand(job monitor.Job) (*Executor, error) {
+func (e *Orchestrator) validateCommand(job monitor.Job) error {
 	mapping, ok := e.Commands[job.Command.Name]
 	if !ok || mapping.Action != string(job.Command.Action) || len(mapping.Skills) == 0 || !job.Repository.AllowsAction(job.Command.Name) {
-		return nil, fmt.Errorf("command %q is not enabled for %s", job.Command.Name, job.Repository.Name)
+		return fmt.Errorf("command %q is not enabled for %s", job.Command.Name, job.Repository.Name)
 	}
 	if !mapping.SupportsProvider(e.mainProvider()) {
-		return nil, fmt.Errorf("%w: action %q is not supported with %s as main", monitor.ErrTerminalJob, mapping.Action, e.mainProvider())
+		return fmt.Errorf("%w: action %q is not supported with %s as main", monitor.ErrTerminalJob, mapping.Action, e.mainProvider())
 	}
-	configured := *e
-	mainSkills, err := e.selectedSkills(e.mainProvider(), mapping.Skills)
-	if err != nil {
-		return nil, fmt.Errorf("command %q: %w", job.Command.Name, err)
-	}
-	var criticSkills []string
-	if e.Adversarial != "" {
-		if criticSkills, err = e.selectedSkills(e.Adversarial, nil); err != nil {
-			return nil, err
-		}
-	}
-	if e.mainProvider() == "claude" {
-		configured.Claude.Skills, configured.Codex.Skills = mainSkills, criticSkills
-	} else {
-		configured.Codex.Skills, configured.Claude.Skills = mainSkills, criticSkills
-	}
-	return &configured, nil
+	return nil
 }
 
-func (e *Executor) selectedSkills(provider string, required []string) (selected []string, err error) {
-	seen := map[string]bool{}
-	for _, source := range required {
-		path, installed, err := skills.InstalledPathFor(source, provider)
-		if err != nil {
-			return nil, fmt.Errorf("%s skill: %w", provider, err)
-		}
-		if !installed {
-			return nil, fmt.Errorf("%s skill is not installed: %s", provider, source)
-		}
-		if !seen[path] {
-			selected = append(selected, path)
-			seen[path] = true
-		}
-	}
-	for _, source := range e.AlwaysOnSkills {
-		path, installed, err := skills.InstalledPathFor(source, provider)
-		if err != nil {
-			e.logf("skip unavailable %s always-on skill %s: %v", provider, source, err)
-			continue
-		}
-		if installed && !seen[path] {
-			selected = append(selected, path)
-			seen[path] = true
-		}
-	}
-	return
-}
-
-func (e *Executor) alreadyAcknowledged(ctx context.Context, job monitor.Job) (bool, error) {
+func (e *Orchestrator) alreadyAcknowledged(ctx context.Context, job monitor.Job) (bool, error) {
 	includeReviews := job.SubjectType == "PullRequest" && job.Command.Action == command.Review
 	found, err := e.GitHub.HasVerifiedBotReply(ctx, job.Repository.Name, job.Number, job.Source.UpdatedAt, e.BotLogin, job.Marker(), includeReviews)
 	if err != nil {
@@ -229,7 +142,7 @@ func (e *Executor) alreadyAcknowledged(ctx context.Context, job monitor.Job) (bo
 	return found, nil
 }
 
-func (e *Executor) verifiedRepository(ctx context.Context, configured config.Repository) (github.Repository, error) {
+func (e *Orchestrator) verifiedRepository(ctx context.Context, configured config.Repository) (github.Repository, error) {
 	repo, err := e.GitHub.Repository(ctx, configured.Name)
 	if err != nil {
 		return github.Repository{}, err
@@ -240,166 +153,7 @@ func (e *Executor) verifiedRepository(ctx context.Context, configured config.Rep
 	return repo, nil
 }
 
-func (e *Executor) review(ctx context.Context, job monitor.Job) error {
-	if job.SubjectType != "PullRequest" {
-		return e.acknowledge(ctx, job, fmt.Sprintf("`%s` applies to pull requests.", job.Command.Name))
-	}
-	if _, err := e.verifiedRepository(ctx, job.Repository); err != nil {
-		return err
-	}
-	pull, err := e.GitHub.PullRequestDetails(ctx, job.Repository.Name, job.Number)
-	if err != nil {
-		return err
-	}
-	if pull.Base.Ref == "" || pull.Head.SHA == "" {
-		return errors.New("pull request is missing base ref or head SHA")
-	}
-	if err := e.checkGitHubContext(job, pull.Title, pull.Body); err != nil {
-		return err
-	}
-	checkout, err := gitwork.Clone(ctx, e.WorkRoot, job.Repository.Name, pull.Base.Ref)
-	if err != nil {
-		return err
-	}
-	defer e.closeCheckout(checkout)
-	if err := e.checkoutPullRequest(ctx, checkout, job.Repository.Name, job.Number, pull.Base.Ref, pull.Head.SHA); err != nil {
-		return err
-	}
-	prompt := fmt.Sprintf(`Use the configured skills to review pull request #%d in %s, requested by @%s.
-
-The checkout is at the exact pull request head %s. Compare refs/remotes/minion/base...HEAD. Return Markdown findings with file and line references, or say plainly if there are none. Do not edit files, run network commands, or publish anything.%s
-
-Untrusted GitHub metadata:
-Pull request title: %s
-Pull request description: %s`, job.Number, job.Repository.Name, job.Source.Author.Login, pull.Head.SHA, requestNotesContext(job), quotedContext(pull.Title), quotedContext(pull.Body))
-	result, err := e.runAI(ctx, checkout.Path(), prompt, false, "")
-	if err != nil {
-		return err
-	}
-	body := fmt.Sprintf("Automated review requested by @%s:\n\n%s\n\n%s", job.Source.Author.Login, inertModelOutput(result), job.Marker())
-	_, err = e.GitHub.CreatePullRequestReview(ctx, job.Repository.Name, job.Number, body, pull.Head.SHA)
-	if err != nil {
-		return fmt.Errorf("%w: %w", monitor.ErrPostCodexPublication, err)
-	}
-	return nil
-}
-
-func (e *Executor) fix(ctx context.Context, job monitor.Job) error {
-	if job.SubjectType != "Issue" {
-		return e.acknowledge(ctx, job, fmt.Sprintf("`%s` currently applies to issue threads. It pushes a branch for the requester to open a pull request.", job.Command.Name))
-	}
-	issue, err := e.GitHub.IssueDetails(ctx, job.Repository.Name, job.Number)
-	if err != nil {
-		return err
-	}
-	repo, fork, err := e.fixFork(ctx, job.Repository)
-	if err != nil {
-		return err
-	}
-	forkRepo := fork.FullName
-	if len(job.ID) < 12 || e.Store == nil {
-		return errors.New("fix job has no durable state or valid ID")
-	}
-	branch := fmt.Sprintf("minion/fix-%d-%s", job.Number, job.ID[:12])
-	existing, err := e.GitHub.FindPullRequestByHead(ctx, repo.FullName, repo.DefaultBranch, e.BotLogin+":"+branch)
-	if err != nil {
-		return err
-	}
-	expected := e.Store.Data.PendingFixes[job.ID]
-	remoteBranch, err := e.GitHub.Branch(ctx, forkRepo, branch)
-	if isNotFound(err) {
-		if existing != nil {
-			return fmt.Errorf("branch %s has a pull request but no remote branch", branch)
-		}
-		if expected != "" {
-			_, err := e.GitHub.Branch(ctx, repo.FullName, branch)
-			if err != nil && !isNotFound(err) {
-				return fmt.Errorf("check legacy base branch: %w", err)
-			}
-			if err == nil {
-				return fmt.Errorf("legacy base branch %s exists; review and retire it before a new fix request", branch)
-			}
-			delete(e.Store.Data.PendingFixes, job.ID)
-			if err := e.Store.Save(); err != nil {
-				return fmt.Errorf("clear failed fork push checkpoint: %w", err)
-			}
-		}
-		content, err := e.GitHub.CurrentIssueContent(ctx, issue.NodeID)
-		if err != nil {
-			return err
-		}
-		if job.Source.UpdatedAt.IsZero() || content.LastEditedAt != nil && !content.LastEditedAt.Before(job.Source.UpdatedAt) {
-			return e.acknowledge(ctx, job, "The issue changed after this `fix` request, so no branch was created. Review its current text and post a new `fix` command.")
-		}
-		if err := e.checkGitHubContext(job, content.BodyText); err != nil {
-			return err
-		}
-		checkout, err := gitwork.Clone(ctx, e.WorkRoot, repo.FullName, repo.DefaultBranch)
-		if err != nil {
-			return err
-		}
-		defer e.closeCheckout(checkout)
-		if err := checkout.NewBranch(ctx, branch); err != nil {
-			return err
-		}
-		prompt := fmt.Sprintf(`Use the configured skills to address issue #%d in %s. The request came from an authorized repository committer @%s.
-
-Read the code, make the needed change, and run relevant local tests. Do not commit, push, open a pull request, create a release, or run network commands. Summarize the change and tests in Markdown when done.%s
-
-Untrusted GitHub issue text:
-Issue description: %s`, job.Number, repo.FullName, job.Source.Author.Login, requestNotesContext(job), quotedContext(content.BodyText))
-		result, err := e.runAI(ctx, checkout.Path(), prompt, true, "")
-		if err != nil {
-			return err
-		}
-		changed, err := checkout.HasChanges(ctx)
-		if err != nil {
-			return err
-		}
-		if !changed {
-			if err := e.acknowledge(ctx, job, "AI completed the request without changing files.\n\n"+inertModelOutput(result)); err != nil {
-				return fmt.Errorf("%w: %w", monitor.ErrPostCodexPublication, err)
-			}
-			return nil
-		}
-		currentRepo, currentFork, err := e.fixFork(ctx, job.Repository)
-		if err != nil {
-			return err
-		}
-		if currentRepo.ID != repo.ID || currentRepo.DefaultBranch != repo.DefaultBranch || currentRepo.Private != repo.Private || currentRepo.Visibility != repo.Visibility || currentFork.ID != fork.ID || !strings.EqualFold(currentFork.FullName, forkRepo) {
-			return errors.New("repository or fork changed during fix; refusing to push")
-		}
-		if err := checkout.SetPushRepository(forkRepo); err != nil {
-			return err
-		}
-		err = checkout.CommitAndPush(ctx, branch, e.BotLogin, fmt.Sprintf("Fix #%d via %s", job.Number, e.BotLogin), func(sha string) error {
-			e.Store.Data.PendingFixes[job.ID] = sha
-			return e.Store.Save()
-		})
-		if err != nil {
-			return err
-		}
-	} else if err != nil {
-		return err
-	} else {
-		if remoteBranch.Name != branch || expected == "" || !strings.EqualFold(remoteBranch.Commit.SHA, expected) {
-			return fmt.Errorf("branch %s exists without a matching recorded bot commit; refusing to reuse it", branch)
-		}
-	}
-	expected = e.Store.Data.PendingFixes[job.ID]
-	if existing != nil {
-		if existing.State != "open" || job.Source.Author.ID == 0 || existing.User.ID != job.Source.Author.ID ||
-			existing.Head.Ref != branch || existing.Head.Repo == nil || !strings.EqualFold(existing.Head.Repo.FullName, forkRepo) ||
-			!strings.EqualFold(existing.Head.SHA, expected) || existing.Base.Ref != repo.DefaultBranch {
-			return fmt.Errorf("branch %s has a pull request without matching requester authorship and recorded head", branch)
-		}
-		return e.acknowledge(ctx, job, fmt.Sprintf("Fix branch `%s` at `%s` has a pull request opened by @%s: %s", branch, expected, existing.User.Login, existing.HTMLURL))
-	}
-	compare := fmt.Sprintf("https://github.com/%s/compare/%s...%s?expand=1", repo.FullName, url.PathEscape(repo.DefaultBranch), url.PathEscape(e.BotLogin+":"+branch))
-	return e.acknowledge(ctx, job, fmt.Sprintf("Fix branch `%s` is ready in `%s` at `%s`. @%s, [open the pull request yourself](%s) after reviewing the diff. Repository review rules, when enabled, can then evaluate your authorship.", branch, forkRepo, expected, job.Source.Author.Login, compare))
-}
-
-func (e *Executor) fixFork(ctx context.Context, configured config.Repository) (github.Repository, github.Repository, error) {
+func (e *Orchestrator) fixFork(ctx context.Context, configured config.Repository) (github.Repository, github.Repository, error) {
 	base, err := e.verifiedRepository(ctx, configured)
 	if err != nil {
 		return github.Repository{}, github.Repository{}, err
@@ -462,12 +216,12 @@ func (e *Executor) fixFork(ctx context.Context, configured config.Repository) (g
 }
 
 // CheckFixFork verifies the publication destination during operator preflight.
-func (e *Executor) CheckFixFork(ctx context.Context, configured config.Repository) error {
+func (e *Orchestrator) CheckFixFork(ctx context.Context, configured config.Repository) error {
 	_, _, err := e.fixFork(ctx, configured)
 	return err
 }
 
-func (e *Executor) acknowledge(ctx context.Context, job monitor.Job, message string) error {
+func (e *Orchestrator) acknowledge(ctx context.Context, job monitor.Job, message string) error {
 	body := message + "\n\n" + job.Marker()
 	switch job.SubjectType {
 	case "Issue", "PullRequest":
@@ -512,14 +266,14 @@ func quotedContext(s string) string {
 	return strconv.Quote(strings.TrimSpace(s))
 }
 
-func (e *Executor) githubContextLimit() int {
+func (e *Orchestrator) githubContextLimit() int {
 	if e.MaxGitHubContextBytes > 0 {
 		return e.MaxGitHubContextBytes
 	}
 	return config.DefaultMaxGitHubContextBytes
 }
 
-func (e *Executor) checkGitHubContext(job monitor.Job, fields ...string) error {
+func (e *Orchestrator) checkGitHubContext(job monitor.Job, fields ...string) error {
 	remaining := e.githubContextLimit() - len(requestNotes(job))
 	if remaining < 0 {
 		return errGitHubContextTooLarge

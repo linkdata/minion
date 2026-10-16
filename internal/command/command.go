@@ -39,7 +39,7 @@ type Command struct {
 	Key    string
 	Name   string
 	Action Action
-	// History reports the modifier; source selection does not use it yet (see #91).
+	// History requests bounded commit metadata and patches alongside the source snapshot.
 	History bool
 }
 

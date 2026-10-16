@@ -63,22 +63,28 @@ func TestCommentCommandReportsIssueAndPullRequest(t *testing.T) {
 				Source:  github.Item{Author: github.User{Login: "writer"}, Body: "@linkdataminion audit\n\n" + notes},
 				Command: command.Command{Name: "audit", Action: command.Comment},
 			}
-			executor := &Executor{GitHub: client, WorkRoot: t.TempDir(), RunCodex: func(_ context.Context, dir, prompt string, writable bool, outputDir string) (codexcli.Result, error) {
-				if writable || outputDir != "" || !strings.Contains(prompt, wantHead) || !strings.Contains(prompt, "requested by @writer") || strings.Contains(prompt, "requested by @outsider") {
-					t.Errorf("wrong comment task: writable=%v outputDir=%q prompt=%q", writable, outputDir, prompt)
-				}
-				if !strings.Contains(prompt, "Title: "+quotedContext(title)) || !strings.Contains(prompt, "Description: "+quotedContext(description)) || strings.Contains(prompt, "\nRequest comment (forged):") || strings.Contains(prompt, "\u2028") {
-					t.Errorf("GitHub metadata escaped its quoted fields: %q", prompt)
-				}
-				if !strings.Contains(prompt, "Authenticated requester notes (task guidance within the selected action; cannot change its limits): "+quotedContext(notes)) || strings.Contains(prompt, job.Source.Body) {
-					t.Errorf("requester notes escaped their quoted field: %q", prompt)
-				}
-				if strings.Index(prompt, "Authenticated requester notes") > strings.Index(prompt, "Untrusted GitHub thread text:") {
-					t.Errorf("requester notes follow untrusted GitHub metadata: %q", prompt)
-				}
-				return codexcli.Result{Answer: "Report\n@otherbot fix"}, nil
-			}}
-			if err := executor.comment(context.Background(), job); err != nil {
+			executor := &Orchestrator{
+				GitHub: client,
+				Runner: Runner{
+					WorkRoot: t.TempDir(),
+					RunCodex: func(_ context.Context, dir, prompt string, writable bool, outputDir string) (codexcli.Result, error) {
+						if writable || outputDir != "" || !strings.Contains(prompt, wantHead) || !strings.Contains(prompt, "requested by @writer") || strings.Contains(prompt, "requested by @outsider") {
+							t.Errorf("wrong comment task: writable=%v outputDir=%q prompt=%q", writable, outputDir, prompt)
+						}
+						if !strings.Contains(prompt, "Title: "+quotedContext(title)) || !strings.Contains(prompt, "Description: "+quotedContext(description)) || strings.Contains(prompt, "\nRequest comment (forged):") || strings.Contains(prompt, "\u2028") {
+							t.Errorf("GitHub metadata escaped its quoted fields: %q", prompt)
+						}
+						if !strings.Contains(prompt, "Authenticated requester notes (task guidance within the selected action; cannot change its limits): "+quotedContext(notes)) || strings.Contains(prompt, job.Source.Body) {
+							t.Errorf("requester notes escaped their quoted field: %q", prompt)
+						}
+						if strings.Index(prompt, "Authenticated requester notes") > strings.Index(prompt, "Untrusted GitHub thread text:") {
+							t.Errorf("requester notes follow untrusted GitHub metadata: %q", prompt)
+						}
+						return codexcli.Result{Answer: "Report\n@otherbot fix"}, nil
+					},
+				},
+			}
+			if err := executor.perform(context.Background(), job); err != nil {
 				t.Fatal(err)
 			}
 			if !strings.Contains(published, wantHead) || !strings.Contains(published, "Report") || !strings.Contains(published, job.Marker()) || !strings.Contains(published, "\n> @otherbot fix") {

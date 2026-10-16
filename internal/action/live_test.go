@@ -101,17 +101,23 @@ func TestLiveFixPublishesBranch(t *testing.T) {
 	t.Cleanup(func() { liveFixCleanup(t, owner, bot, fixture.ownerToken, fixture.botToken, cfg, job, branch, store) })
 	t.Setenv("GH_TOKEN", fixture.botToken)
 	codexCalls := 0
-	executor := &Executor{
-		GitHub: bot, BotLogin: cfg.BotLogin, Store: store, WorkRoot: t.TempDir(),
+	executor := &Orchestrator{
+		GitHub:   bot,
+		BotLogin: cfg.BotLogin,
+		Store:    store,
 		Commands: map[string]config.CommandMapping{"fix": {Action: "fix", Skills: []string{testFixSkillURL}}},
-		RunCodex: func(_ context.Context, dir, _ string, writable bool, outputDir string) (codexcli.Result, error) {
-			codexCalls++
-			if !writable || outputDir != "" {
-				return codexcli.Result{}, errors.New("unexpected Codex invocation for live fix")
-			}
-			name := "minion-live-fix-" + id[:12] + ".txt"
-			err := os.WriteFile(filepath.Join(dir, name), []byte("Minion live fix test fixture.\n"), 0o600)
-			return codexcli.Result{Answer: "Live fix fixture created."}, err
+		Runner: Runner{
+			WorkRoot: t.TempDir(),
+
+			RunCodex: func(_ context.Context, dir, _ string, writable bool, outputDir string) (codexcli.Result, error) {
+				codexCalls++
+				if !writable || outputDir != "" {
+					return codexcli.Result{}, errors.New("unexpected Codex invocation for live fix")
+				}
+				name := "minion-live-fix-" + id[:12] + ".txt"
+				err := os.WriteFile(filepath.Join(dir, name), []byte("Minion live fix test fixture.\n"), 0o600)
+				return codexcli.Result{Answer: "Live fix fixture created."}, err
+			},
 		},
 	}
 	if err := executor.CheckFixFork(ctx, job.Repository); err != nil {

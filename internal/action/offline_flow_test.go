@@ -177,13 +177,20 @@ func TestOfflineReviewPollRecoversAfterPublication(t *testing.T) {
 		t.Helper()
 		client := github.New("offline-token")
 		client.BaseURL, client.HTTPClient = server.URL, server.Client()
-		executor := &Executor{GitHub: client, BotLogin: "linkdataminion", Store: store, WorkRoot: t.TempDir(), Commands: commands,
-			RunCodex: func(_ context.Context, dir, prompt string, writable bool, outputDir string) (codexcli.Result, error) {
-				if _, err := os.Stat(dir); err != nil || writable || outputDir != "" || !strings.Contains(prompt, head) {
-					return codexcli.Result{}, fmt.Errorf("unexpected Codex invocation: dir=%q writable=%t output=%q stat=%v", dir, writable, outputDir, err)
-				}
-				record("codex")
-				return codexcli.Result{Answer: "No findings."}, nil
+		executor := &Orchestrator{
+			GitHub:   client,
+			BotLogin: "linkdataminion",
+			Store:    store,
+			Commands: commands,
+			Runner: Runner{
+				WorkRoot: t.TempDir(),
+				RunCodex: func(_ context.Context, dir, prompt string, writable bool, outputDir string) (codexcli.Result, error) {
+					if _, err := os.Stat(dir); err != nil || writable || outputDir != "" || !strings.Contains(prompt, head) {
+						return codexcli.Result{}, fmt.Errorf("unexpected Codex invocation: dir=%q writable=%t output=%q stat=%v", dir, writable, outputDir, err)
+					}
+					record("codex")
+					return codexcli.Result{Answer: "No findings."}, nil
+				},
 			},
 		}
 		m := monitor.Monitor{Config: config.Config{BotLogin: "linkdataminion", PollIntervalSeconds: 60, Commands: commands,

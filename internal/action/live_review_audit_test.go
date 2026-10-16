@@ -33,18 +33,21 @@ func TestLiveReviewAction(t *testing.T) {
 	pull := liveReviewAuditPull(t, ctx, fixture.owner, fixture.cfg)
 	job := liveReviewAuditJob(t, fixture.cfg, fixture.repo, fixture.ownerUser, command.Review, "PullRequest", pull.Number, pull.HTMLURL)
 	var calls int
-	executor := &Executor{
-		GitHub: fixture.bot, BotLogin: fixture.cfg.BotLogin, WorkRoot: t.TempDir(),
+	executor := &Orchestrator{
+		GitHub:   fixture.bot,
+		BotLogin: fixture.cfg.BotLogin,
 		Commands: map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{testReviewSkillURL}}},
-		RunCodex: func(ctx context.Context, dir, prompt string, writable bool, outputDir string) (codexcli.Result, error) {
-			calls++
-			if writable || outputDir != "" || !strings.Contains(prompt, pull.Head.SHA) {
-				return codexcli.Result{}, fmt.Errorf("live review did not use the expected read-only pull request")
-			}
-			if head := liveReviewAuditHead(t, ctx, dir); head != pull.Head.SHA {
-				t.Fatalf("review checkout HEAD = %s, want %s", head, pull.Head.SHA)
-			}
-			return codexcli.Result{Answer: "Live review fixture " + job.ID[:12] + "."}, nil
+		Runner: Runner{
+			WorkRoot: t.TempDir(),
+
+			RunCodex: func(ctx context.Context, dir, prompt string, writable bool, outputDir string) (codexcli.Result, error) {
+				calls++
+				if writable || outputDir != "" || !strings.Contains(prompt, pull.Head.SHA) {
+					return codexcli.Result{}, fmt.Errorf("live review did not use the expected read-only pull request")
+				}
+				assertPortableSource(t, dir)
+				return codexcli.Result{Answer: "Live review fixture " + job.ID[:12] + "."}, nil
+			},
 		},
 	}
 	if err := executor.Execute(ctx, job); err != nil {
@@ -113,29 +116,32 @@ func TestLiveSecurityAuditAction(t *testing.T) {
 			}
 			report := "Minion live audit fixture " + job.ID[:12] + ".\n"
 			var calls int
-			executor := &Executor{
-				GitHub: fixture.bot, BotLogin: fixture.cfg.BotLogin, WorkRoot: t.TempDir(),
-				Codex:    config.CodexConfig{Skills: []string{skill}},
+			executor := &Orchestrator{
+				GitHub:   fixture.bot,
+				BotLogin: fixture.cfg.BotLogin,
+
 				Commands: map[string]config.CommandMapping{"security-audit": {Action: "security-audit", Skills: []string{testAuditSkillURL}}},
-				RunCodex: func(ctx context.Context, dir, prompt string, writable bool, outputDir string) (codexcli.Result, error) {
-					calls++
-					if writable || outputDir == "" || strings.HasPrefix(outputDir, dir+string(os.PathSeparator)) || !strings.Contains(prompt, test.head) {
-						return codexcli.Result{}, fmt.Errorf("live audit did not use a separate report directory and expected commit")
-					}
-					if head := liveReviewAuditHead(t, ctx, dir); head != test.head {
-						t.Fatalf("audit checkout HEAD = %s, want %s", head, test.head)
-					}
-					metadata := fmt.Sprintf(`{"run_id":%q,"repo":%q,"target":%q,"source_ref":%q,"profile":"standard","scope_paths":["."],"budget":null,"selected_companion_files":[],"prior_run_paths":[],"shared_file_owners":%s,"execution_policy":"sandboxed-source-and-local-only","run_status":"complete"}`, job.ID, liveFixRepository, dir, test.head, auditTestOwners)
-					for name, content := range map[string]string{
-						"run-metadata.json": metadata, "architecture.md": "Test fixture architecture.\n",
-						"coverage-ledger.json": `[{"status":"covered"}]`, "findings.json": "[]",
-						"REPORT.md": report, "FINDINGS-DETAIL.md": "No findings.\n", "NEEDS-VALIDATION.md": "No validation leads.\n",
-					} {
-						if err := os.WriteFile(filepath.Join(outputDir, name), []byte(content), 0o600); err != nil {
-							return codexcli.Result{}, err
+				Runner: Runner{
+					WorkRoot: t.TempDir(),
+
+					RunCodex: func(ctx context.Context, dir, prompt string, writable bool, outputDir string) (codexcli.Result, error) {
+						calls++
+						if writable || outputDir == "" || strings.HasPrefix(outputDir, dir+string(os.PathSeparator)) || !strings.Contains(prompt, test.head) {
+							return codexcli.Result{}, fmt.Errorf("live audit did not use a separate report directory and expected commit")
 						}
-					}
-					return codexcli.Result{Answer: "Untrusted final answer"}, nil
+						assertPortableSource(t, dir)
+						metadata := fmt.Sprintf(`{"run_id":%q,"repo":%q,"target":%q,"source_ref":%q,"profile":"standard","scope_paths":["."],"budget":null,"selected_companion_files":[],"prior_run_paths":[],"shared_file_owners":%s,"execution_policy":"sandboxed-source-and-local-only","run_status":"complete"}`, job.ID, liveFixRepository, dir, test.head, auditTestOwners)
+						for name, content := range map[string]string{
+							"run-metadata.json": metadata, "architecture.md": "Test fixture architecture.\n",
+							"coverage-ledger.json": `[{"status":"covered"}]`, "findings.json": "[]",
+							"REPORT.md": report, "FINDINGS-DETAIL.md": "No findings.\n", "NEEDS-VALIDATION.md": "No validation leads.\n",
+						} {
+							if err := os.WriteFile(filepath.Join(outputDir, name), []byte(content), 0o600); err != nil {
+								return codexcli.Result{}, err
+							}
+						}
+						return codexcli.Result{Answer: "Untrusted final answer"}, nil
+					},
 				},
 			}
 			if err := executor.Execute(ctx, job); err != nil {
@@ -187,13 +193,11 @@ func liveReviewAuditPull(t *testing.T, ctx context.Context, owner *github.Client
 	return pull
 }
 
-func liveReviewAuditHead(t *testing.T, ctx context.Context, dir string) string {
+func assertPortableSource(t *testing.T, dir string) {
 	t.Helper()
-	output, err := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "HEAD").Output()
-	if err != nil {
-		t.Fatal(err)
+	if _, err := os.Lstat(filepath.Join(dir, ".git")); !os.IsNotExist(err) {
+		t.Fatalf("executor received Git metadata: %v", err)
 	}
-	return strings.TrimSpace(string(output))
 }
 
 func liveReviewAuditSubmittedReview(t *testing.T, ctx context.Context, ownerToken string, cfg liveFixConfig, job monitor.Job, head string) github.Review {

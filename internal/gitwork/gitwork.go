@@ -16,17 +16,18 @@ import (
 
 	"github.com/linkdata/minion/internal/cleanup"
 	"github.com/linkdata/minion/internal/github"
+	"github.com/linkdata/minion/internal/workspace"
 )
 
 const (
-	maxChangedFiles    = 100
-	maxPatchBytes      = 1 << 20
-	maxChangedFileSize = 1 << 20
-	maxPathListBytes   = 1 << 20
+	maxChangedFiles    = workspace.MaxChanges
+	maxPatchBytes      = workspace.MaxContextBytes
+	maxChangedFileSize = workspace.MaxChangeBytes
+	maxPathListBytes   = workspace.MaxFiles * (workspace.MaxPathBytes + 128)
 	maxGitDiagnostic   = 8 << 10
-	maxWorktreeEntries = 100_000
-	maxCheckoutFiles   = 10_000
-	maxCheckoutBytes   = 64 << 20
+	maxWorktreeEntries = workspace.MaxEntries
+	maxCheckoutFiles   = workspace.MaxFiles
+	maxCheckoutBytes   = workspace.MaxBytes
 	maxTreeEntryBytes  = 1 << 20
 	checkoutAttributes = "* -text -ident -filter -working-tree-encoding\n"
 )
@@ -37,7 +38,7 @@ var (
 	ErrDiffTooLarge     = errors.New("staged diff exceeds size limit")
 	ErrChangedFileLarge = errors.New("changed file exceeds size limit")
 	ErrHeadMoved        = errors.New("pull request head changed")
-	ErrCheckoutTooLarge = errors.New("pull request tree exceeds checkout limits")
+	ErrCheckoutTooLarge = errors.New("source tree exceeds checkout limits")
 	credentialHelperGH  = resolveCredentialHelperGH()
 )
 
@@ -53,8 +54,7 @@ func resolveCredentialHelperGH() string {
 	return path
 }
 
-// Checkout owns a temporary clone. Git operations are deliberately kept here,
-// outside the Codex process, which receives only Path().
+// Checkout owns the trusted orchestration clone; models receive separate source snapshots.
 type Checkout struct {
 	path         string
 	url          string
@@ -63,6 +63,7 @@ type Checkout struct {
 	expectedHead string
 	branch       string
 	closed       bool
+	lookupTree   func(context.Context, string) (github.GitTree, error)
 }
 
 // SetPushRepository selects a separately validated destination for fix output.
@@ -84,7 +85,7 @@ func (c *Checkout) SetPushRepository(repo string) error {
 // The Git remote is always derived from a validated owner/name; GitHub CLI's
 // credential helper supplies authentication without embedding a token in URLs.
 // Blob contents are fetched on demand.
-func Clone(ctx context.Context, workRoot, repo, defaultBranch string) (*Checkout, error) {
+func Clone(ctx context.Context, workRoot, repo, defaultBranch string, lookupTree func(context.Context, string) (github.GitTree, error)) (*Checkout, error) {
 	url, err := repositoryURL(repo)
 	if err != nil {
 		return nil, err
@@ -92,13 +93,19 @@ func Clone(ctx context.Context, workRoot, repo, defaultBranch string) (*Checkout
 	if err := validateBranch(defaultBranch); err != nil {
 		return nil, fmt.Errorf("default branch: %w", err)
 	}
-	return cloneFromURL(ctx, workRoot, url, defaultBranch)
+	if lookupTree == nil {
+		return nil, errors.New("source tree metadata lookup is missing")
+	}
+	return cloneFromURL(ctx, workRoot, url, defaultBranch, lookupTree)
 }
 
 // cloneFromURL is separate so local Git fixtures can exercise the same clone
 // sequence without a network call. Production callers always pass the URL
 // returned by repositoryURL.
-func cloneFromURL(ctx context.Context, workRoot, url, defaultBranch string) (*Checkout, error) {
+func cloneFromURL(ctx context.Context, workRoot, url, defaultBranch string, lookupTree func(context.Context, string) (github.GitTree, error)) (*Checkout, error) {
+	if lookupTree == nil {
+		return nil, errors.New("source tree metadata lookup is missing")
+	}
 	if strings.TrimSpace(workRoot) == "" {
 		return nil, errors.New("work root is empty")
 	}
@@ -108,6 +115,10 @@ func cloneFromURL(ctx context.Context, workRoot, url, defaultBranch string) (*Ch
 	}
 	if err := os.MkdirAll(workRoot, 0700); err != nil {
 		return nil, fmt.Errorf("create work root: %w", err)
+	}
+	workRoot, err = filepath.EvalSymlinks(workRoot)
+	if err != nil {
+		return nil, err
 	}
 	path, err := os.MkdirTemp(workRoot, "minion-")
 	if err != nil {
@@ -123,8 +134,18 @@ func cloneFromURL(ctx context.Context, workRoot, url, defaultBranch string) (*Ch
 	if _, err := runGit(ctx, workRoot, "clone", "--filter=blob:none", "--single-branch", "--no-checkout", "--branch", defaultBranch, "--", url, path); err != nil {
 		return nil, err
 	}
-	c := &Checkout{path: path, url: url}
-	if _, err := runGit(ctx, path, "checkout", "--detach", "refs/remotes/origin/"+defaultBranch); err != nil {
+	c := &Checkout{path: path, url: url, lookupTree: lookupTree}
+	head, err := runGit(ctx, path, "rev-parse", "--verify", "refs/remotes/origin/"+defaultBranch+"^{commit}")
+	if err != nil {
+		return nil, err
+	}
+	if _, err := c.sourceTree(ctx, head); err != nil {
+		return nil, err
+	}
+	if err := c.disableAttributes(); err != nil {
+		return nil, err
+	}
+	if _, err := runGit(ctx, path, "checkout", "--detach", head); err != nil {
 		return nil, err
 	}
 	if c.expectedHead, err = c.head(ctx); err != nil {
@@ -221,15 +242,17 @@ func (c *Checkout) CheckoutPullRequest(ctx context.Context, number int, baseRef,
 	if err := checkPullRequestTree(tree, treeSHA); err != nil {
 		return err
 	}
-	// Repository attributes cannot expand blobs or run a checkout filter.
-	// info/attributes takes precedence over every in-tree .gitattributes.
-	if err := os.WriteFile(filepath.Join(c.path, ".git", "info", "attributes"), []byte(checkoutAttributes), 0600); err != nil {
-		return fmt.Errorf("set pull request checkout attributes: %w", err)
+	if _, err := c.sourceEntries(ctx, head, tree, treeSHA); err != nil {
+		return err
+	}
+	if err := c.disableAttributes(); err != nil {
+		return err
 	}
 	if _, err := runGit(ctx, c.path, "checkout", "--detach", head); err != nil {
 		return err
 	}
 	c.expectedHead = strings.ToLower(head)
+	c.lookupTree = lookupTree
 	c.branch = ""
 	return c.recordConfig()
 }
@@ -237,6 +260,10 @@ func (c *Checkout) CheckoutPullRequest(ctx context.Context, number int, baseRef,
 // Check every expanded blob and gitlink, including repeated object references,
 // against GitHub metadata for the exact tree fetched from the PR head.
 func checkPullRequestTree(tree github.GitTree, expectedSHA string) error {
+	return checkSourceTree(tree, expectedSHA, false)
+}
+
+func checkSourceTree(tree github.GitTree, expectedSHA string, allowSymlinks bool) error {
 	if !strings.EqualFold(tree.SHA, expectedSHA) || !validSHA(tree.SHA) || tree.Truncated == nil || *tree.Truncated || tree.Tree == nil {
 		return fmt.Errorf("%w: incomplete or mismatched tree metadata", ErrCheckoutTooLarge)
 	}
@@ -259,7 +286,7 @@ func checkPullRequestTree(tree github.GitTree, expectedSHA string) error {
 		case "blob":
 			// A symlink can redirect Codex's unsandboxed skill discovery to
 			// files outside the checkout. Refuse every non-file blob mode.
-			if entry.Mode != "100644" && entry.Mode != "100755" {
+			if entry.Mode != "100644" && entry.Mode != "100755" && !(allowSymlinks && entry.Mode == "120000") {
 				return fmt.Errorf("%w: unsupported blob mode %q at %q", ErrCheckoutTooLarge, entry.Mode, entry.Path)
 			}
 			if entry.Size == nil || *entry.Size < 0 {
@@ -402,59 +429,16 @@ func (c *Checkout) CommitAndPush(ctx context.Context, branch, botLogin, message 
 // that Codex could write. ReadDir batches bound the scan even for wide trees;
 // Info reports symlinks themselves, so they are never traversed.
 func rejectNestedGitMetadata(ctx context.Context, root string, limit int) error {
-	dirs := []string{root}
-	entries := 0
-	for len(dirs) > 0 {
-		dir := dirs[len(dirs)-1]
-		dirs = dirs[:len(dirs)-1]
-		err := func() (err error) {
-			f, err := os.Open(dir)
-			if err != nil {
-				return err
-			}
-			defer func() {
-				if closeErr := f.Close(); closeErr != nil {
-					err = errors.Join(err, closeErr)
-				}
-			}()
-			for {
-				if err := ctx.Err(); err != nil {
-					return err
-				}
-				batch, readErr := f.ReadDir(128)
-				if readErr != nil && !errors.Is(readErr, io.EOF) {
-					return readErr
-				}
-				for _, entry := range batch {
-					if dir == root && entry.Name() == ".git" {
-						continue
-					}
-					entries++
-					if entries > limit {
-						return fmt.Errorf("checkout scan exceeds %d entries", limit)
-					}
-					path := filepath.Join(dir, entry.Name())
-					if strings.EqualFold(entry.Name(), ".git") {
-						return fmt.Errorf("nested Git metadata at %q", path)
-					}
-					info, err := entry.Info()
-					if err != nil {
-						return err
-					}
-					if info.IsDir() {
-						dirs = append(dirs, path)
-					}
-				}
-				if errors.Is(readErr, io.EOF) {
-					return nil
-				}
-			}
-		}()
-		if err != nil {
-			return err
+	root = filepath.Clean(root)
+	return workspace.Walk(ctx, root, limit, func(name string, entry os.DirEntry) error {
+		if filepath.Dir(name) == root && entry.Name() == ".git" {
+			return filepath.SkipDir
 		}
-	}
-	return nil
+		if strings.EqualFold(entry.Name(), ".git") {
+			return fmt.Errorf("nested Git metadata at %q", name)
+		}
+		return nil
+	})
 }
 
 func (c *Checkout) stagedPaths(ctx context.Context) ([]string, error) {
@@ -578,6 +562,11 @@ func (w *cappedBuffer) Write(p []byte) (int, error) {
 	}
 	_, _ = w.Buffer.Write(p)
 	return n, nil
+}
+
+func (w *cappedBuffer) ReadFrom(r io.Reader) (int64, error) {
+	// Hide bytes.Buffer.ReadFrom, which would bypass the bounded Write method.
+	return io.Copy(struct{ io.Writer }{w}, r)
 }
 
 type byteLimitWriter struct {

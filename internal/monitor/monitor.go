@@ -38,10 +38,10 @@ type GitHub interface {
 // ErrTerminalJob marks a failed execution that cannot succeed by rerunning Codex.
 var ErrTerminalJob = errors.New("terminal job failure")
 
-// ErrPostCodexPublication marks a failed GitHub write after Codex completed.
+// ErrPostModelPublication marks a failed GitHub write after model execution completed.
 //
 // Retrying it must consume a job attempt even when the write error is transient.
-var ErrPostCodexPublication = errors.New("post-Codex publication failure")
+var ErrPostModelPublication = errors.New("post-model publication failure")
 
 const (
 	maxJobAttempts          = 3
@@ -343,9 +343,9 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			if err := m.Executor.Execute(ctx, job); err != nil {
 				if errors.Is(err, ErrTerminalJob) {
 					jobFailure.Attempts = maxJobAttempts
-				} else if errors.Is(err, workroot.ErrUnsafe) && !errors.Is(err, ErrPostCodexPublication) {
+				} else if errors.Is(err, workroot.ErrUnsafe) && !errors.Is(err, ErrPostModelPublication) {
 					jobFailure.Attempts--
-				} else if !errors.Is(err, ErrPostCodexPublication) && infrastructureFailure(err) {
+				} else if !errors.Is(err, ErrPostModelPublication) && infrastructureFailure(err) {
 					jobFailure.Attempts--
 				}
 				store.Data.JobFailures[job.ID] = jobFailure
