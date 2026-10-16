@@ -26,7 +26,6 @@ type Data struct {
 	JobFailures          map[string]JobFailure          `json:"job_failures,omitempty"`
 	PendingNotifications map[string]PendingNotification `json:"pending_notifications,omitempty"`
 	PendingFixes         map[string]string              `json:"pending_fixes,omitempty"`
-	PendingReleases      map[string]PendingRelease      `json:"pending_releases,omitempty"`
 }
 
 // PendingNotification retains a failed thread after its repository cursor advances.
@@ -45,12 +44,6 @@ type PendingNotification struct {
 type JobFailure struct {
 	Attempts      int `json:"attempts"`
 	ReplyAttempts int `json:"reply_attempts,omitempty"`
-}
-
-type PendingRelease struct {
-	Tag    string `json:"tag"`
-	Target string `json:"target"`
-	Notes  string `json:"notes"`
 }
 
 type Store struct {
@@ -79,7 +72,7 @@ func Open(path string, initialCursor time.Time) (*Store, error) {
 	store := &Store{path: path, lock: lock}
 	f, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
-		store.Data = Data{Cursor: initialCursor.UTC(), RepositoryCursors: map[string]time.Time{}, Processed: map[string]time.Time{}, JobFailures: map[string]JobFailure{}, PendingNotifications: map[string]PendingNotification{}, PendingFixes: map[string]string{}, PendingReleases: map[string]PendingRelease{}}
+		store.Data = Data{Cursor: initialCursor.UTC(), RepositoryCursors: map[string]time.Time{}, Processed: map[string]time.Time{}, JobFailures: map[string]JobFailure{}, PendingNotifications: map[string]PendingNotification{}, PendingFixes: map[string]string{}}
 		if err := store.Save(); err != nil {
 			return nil, errors.Join(err, store.Close())
 		}
@@ -90,7 +83,12 @@ func Open(path string, initialCursor time.Time) (*Store, error) {
 	}
 	decoder := json.NewDecoder(f)
 	decoder.DisallowUnknownFields()
-	if err = decoder.Decode(&store.Data); err != nil {
+	// Release checkpoints are read only to retire them, never to resume writes.
+	var saved struct {
+		Data
+		PendingReleases map[string]json.RawMessage `json:"pending_releases"`
+	}
+	if err = decoder.Decode(&saved); err != nil {
 		err = fmt.Errorf("decode state: %w", err)
 	}
 	if err == nil {
@@ -103,6 +101,7 @@ func Open(path string, initialCursor time.Time) (*Store, error) {
 	if err != nil {
 		return nil, errors.Join(err, store.Close())
 	}
+	store.Data = saved.Data
 	if store.Data.Cursor.IsZero() {
 		return nil, errors.Join(fmt.Errorf("state cursor is missing"), store.Close())
 	}
@@ -121,8 +120,17 @@ func Open(path string, initialCursor time.Time) (*Store, error) {
 	if store.Data.PendingFixes == nil {
 		store.Data.PendingFixes = map[string]string{}
 	}
-	if store.Data.PendingReleases == nil {
-		store.Data.PendingReleases = map[string]PendingRelease{}
+	if saved.PendingReleases != nil {
+		retiredAt := time.Now().UTC()
+		for id := range saved.PendingReleases {
+			if _, done := store.Data.Processed[id]; !done {
+				store.Data.Processed[id] = retiredAt
+			}
+			delete(store.Data.JobFailures, id)
+		}
+		if err := store.Save(); err != nil {
+			return nil, errors.Join(err, store.Close())
+		}
 	}
 	return store, nil
 }

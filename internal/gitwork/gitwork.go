@@ -83,7 +83,7 @@ func (c *Checkout) SetPushRepository(repo string) error {
 // Clone checks out the repository's default branch in an isolated directory.
 // The Git remote is always derived from a validated owner/name; GitHub CLI's
 // credential helper supplies authentication without embedding a token in URLs.
-// Blob contents are fetched on demand, while tags are fetched for release notes.
+// Blob contents are fetched on demand.
 func Clone(ctx context.Context, workRoot, repo, defaultBranch string) (*Checkout, error) {
 	url, err := repositoryURL(repo)
 	if err != nil {
@@ -124,11 +124,6 @@ func cloneFromURL(ctx context.Context, workRoot, url, defaultBranch string) (*Ch
 		return nil, err
 	}
 	c := &Checkout{path: path, url: url}
-	// origin was created by the trusted clone operation and has a fixed URL.
-	// Fetching through its name keeps partial-clone promisor settings valid.
-	if _, err := runGit(ctx, path, "fetch", "--tags", "--filter=blob:none", "--no-recurse-submodules", "origin"); err != nil {
-		return nil, err
-	}
 	if _, err := runGit(ctx, path, "checkout", "--detach", "refs/remotes/origin/"+defaultBranch); err != nil {
 		return nil, err
 	}
@@ -160,25 +155,6 @@ func (c *Checkout) Head(ctx context.Context) (string, error) {
 		return "", err
 	}
 	return c.expectedHead, nil
-}
-
-// HasTag reports whether an exact Git tag already exists in the checkout.
-func (c *Checkout) HasTag(ctx context.Context, tag string) (bool, error) {
-	if err := c.ready(); err != nil {
-		return false, err
-	}
-	if err := validateBranch(tag); err != nil {
-		return false, fmt.Errorf("invalid tag %q: %w", tag, err)
-	}
-	_, err := runGit(ctx, c.path, "show-ref", "--verify", "--quiet", "refs/tags/"+tag)
-	if err == nil {
-		return true, nil
-	}
-	var exit *exec.ExitError
-	if errors.As(err, &exit) && exit.ExitCode() == 1 {
-		return false, nil
-	}
-	return false, err
 }
 
 // Close removes the isolated checkout. It is safe to call more than once.

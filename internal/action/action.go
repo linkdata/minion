@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"net/url"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -26,10 +25,7 @@ import (
 
 const maxOutputBytes = 58 << 10
 
-var (
-	tagPattern               = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$`)
-	errGitHubContextTooLarge = errors.New("GitHub context exceeds configured byte limit")
-)
+var errGitHubContextTooLarge = errors.New("GitHub context exceeds configured byte limit")
 
 var modelLineBreaks = strings.NewReplacer(
 	"\r\n", "\n", "\r", "\n", "\v", "\n", "\f", "\n",
@@ -148,8 +144,6 @@ func (e *Executor) Execute(ctx context.Context, job monitor.Job) (resultErr erro
 		resultErr = e.securityAudit(ctx, job)
 	case command.Fix:
 		resultErr = e.fix(ctx, job)
-	case command.Release:
-		resultErr = e.release(ctx, job)
 	default:
 		resultErr = fmt.Errorf("unsupported action %q", job.Command.Action)
 	}
@@ -473,139 +467,6 @@ func (e *Executor) CheckFixFork(ctx context.Context, configured config.Repositor
 	return err
 }
 
-func (e *Executor) release(ctx context.Context, job monitor.Job) error {
-	tag := job.Command.Args
-	if !validTag(tag) {
-		return e.acknowledge(ctx, job, "Invalid release tag. Use a simple Git tag such as `v1.2.3`.")
-	}
-	if e.Store == nil || job.ID == "" {
-		return errors.New("release job has no durable state or valid ID")
-	}
-	repo, err := e.verifiedRepository(ctx, job.Repository)
-	if err != nil {
-		return err
-	}
-	if repo.Archived || repo.DefaultBranch == "" {
-		return fmt.Errorf("repository %s is archived or has no default branch", repo.FullName)
-	}
-	protected, err := e.GitHub.ProtectedReleaseTags(ctx, repo.FullName)
-	if err != nil {
-		var status *github.StatusError
-		if errors.As(err, &status) && (status.StatusCode == 403 || status.StatusCode == 404) {
-			return e.acknowledge(ctx, job, "Release drafts are disabled because GitHub does not allow this repository's tag rulesets to be verified. Configure an active all-tag ruleset and send a new release command when it can be checked.")
-		}
-		return fmt.Errorf("check tag protection: %w", err)
-	}
-	if !protected {
-		return e.acknowledge(ctx, job, "Release drafts are disabled until an active GitHub ruleset covers all tags, blocks updates and deletions, exposes an empty bypass list to the bot, and no active tag ruleset restricts creation. Configure the rulesets and send a new release command.")
-	}
-	pending, recovering := e.Store.Data.PendingReleases[job.ID]
-	if recovering && (pending.Tag != tag || pending.Target == "" || pending.Notes == "") {
-		return fmt.Errorf("pending release for %s has incomplete or mismatched state", tag)
-	}
-	existing, err := e.GitHub.ReleaseByTag(ctx, repo.FullName, tag)
-	if err != nil && !isNotFound(err) {
-		return err
-	}
-	if err == nil {
-		if !recovering || !existing.Draft || !strings.EqualFold(existing.Author.Login, e.BotLogin) ||
-			existing.TagName != tag ||
-			existing.Body != inertModelOutput(pending.Notes)+"\n\n"+job.Marker() {
-			return fmt.Errorf("tag %s has a release without matching bot provenance and recorded target", tag)
-		}
-		if err := e.verifyTagReference(ctx, repo.FullName, tag, pending.Target); err != nil {
-			return err
-		}
-		e.bestEffortAcknowledge(ctx, job, "Draft release: "+existing.HTMLURL)
-		return nil
-	}
-	if !recovering {
-		if err := e.checkGitHubContext(job); err != nil {
-			return err
-		}
-		checkout, err := gitwork.Clone(ctx, e.WorkRoot, repo.FullName, repo.DefaultBranch)
-		if err != nil {
-			return err
-		}
-		defer e.closeCheckout(checkout)
-		tagExists, err := checkout.HasTag(ctx, tag)
-		if err != nil {
-			return err
-		}
-		if tagExists {
-			return e.acknowledge(ctx, job, fmt.Sprintf("Tag `%s` already exists. No draft release was created.", tag))
-		}
-		target, err := checkout.Head(ctx)
-		if err != nil {
-			return err
-		}
-		prompt := fmt.Sprintf(`Prepare GitHub release notes for proposed tag %q in %s at commit %s. Inspect the repository tags and history locally. Describe user-visible changes since the previous release, any known compatibility changes, and test coverage. Do not invent facts. Return Markdown release notes only. Do not edit files, create tags or releases, or run network commands.%s`, tag, repo.FullName, target, requestNotesContext(job))
-		result, err := e.runAI(ctx, checkout.Path(), prompt, false, "")
-		if err != nil {
-			return err
-		}
-		if _, err := checkout.Head(ctx); err != nil {
-			return err
-		}
-		pending = state.PendingRelease{Tag: tag, Target: target, Notes: bounded(result, maxOutputBytes)}
-		if pending.Notes == "" {
-			return errors.New("release notes are empty")
-		}
-		e.Store.Data.PendingReleases[job.ID] = pending
-		if err := e.Store.Save(); err != nil {
-			delete(e.Store.Data.PendingReleases, job.ID)
-			return err
-		}
-	}
-	protected, err = e.GitHub.ProtectedReleaseTags(ctx, repo.FullName)
-	if err != nil {
-		return fmt.Errorf("recheck tag protection: %w", err)
-	}
-	if !protected {
-		return errors.New("tag protection changed during release; retry after restoring the ruleset")
-	}
-	if err := e.GitHub.CreateTagReference(ctx, repo.FullName, tag, pending.Target); err != nil {
-		var status *github.StatusError
-		if !recovering || !errors.As(err, &status) || (status.StatusCode != 409 && status.StatusCode != 422) {
-			return fmt.Errorf("reserve tag %s: %w", tag, err)
-		}
-	}
-	if err := e.verifyTagReference(ctx, repo.FullName, tag, pending.Target); err != nil {
-		return err
-	}
-	protected, err = e.GitHub.ProtectedReleaseTags(ctx, repo.FullName)
-	if err != nil {
-		return fmt.Errorf("recheck tag protection: %w", err)
-	}
-	if !protected {
-		return errors.New("tag protection changed during release; retry after restoring the ruleset")
-	}
-	body := inertModelOutput(pending.Notes) + "\n\n" + job.Marker()
-	release, err := e.GitHub.CreateDraftRelease(ctx, repo.FullName, tag, pending.Target, tag, body)
-	if err != nil {
-		return err
-	}
-	if !release.Draft || !strings.EqualFold(release.Author.Login, e.BotLogin) || release.TagName != tag {
-		return fmt.Errorf("draft release %s does not match recorded bot target %s", release.HTMLURL, pending.Target)
-	}
-	if err := e.verifyTagReference(ctx, repo.FullName, tag, pending.Target); err != nil {
-		return err
-	}
-	e.bestEffortAcknowledge(ctx, job, "Draft release: "+release.HTMLURL)
-	return nil
-}
-
-func (e *Executor) verifyTagReference(ctx context.Context, repo, tag, target string) error {
-	ref, err := e.GitHub.TagReference(ctx, repo, tag)
-	if err != nil {
-		return fmt.Errorf("verify tag %s: %w", tag, err)
-	}
-	if ref.Ref != "refs/tags/"+tag || ref.Object.Type != "commit" || !strings.EqualFold(ref.Object.SHA, target) {
-		return fmt.Errorf("tag %s does not point to recorded commit %s", tag, target)
-	}
-	return nil
-}
-
 func (e *Executor) acknowledge(ctx context.Context, job monitor.Job, message string) error {
 	body := message + "\n\n" + job.Marker()
 	switch job.SubjectType {
@@ -617,12 +478,6 @@ func (e *Executor) acknowledge(ctx context.Context, job monitor.Job, message str
 		return err
 	default:
 		return fmt.Errorf("cannot reply to %s", job.SubjectType)
-	}
-}
-
-func (e *Executor) bestEffortAcknowledge(ctx context.Context, job monitor.Job, message string) {
-	if err := e.acknowledge(ctx, job, message); err != nil {
-		e.logf("could not post completion reply for %s: %v", job.ID, err)
 	}
 }
 
@@ -677,26 +532,6 @@ func (e *Executor) checkGitHubContext(job monitor.Job, fields ...string) error {
 		remaining -= size
 	}
 	return nil
-}
-
-func validTag(tag string) bool {
-	if !tagPattern.MatchString(tag) || strings.Contains(tag, "..") || strings.Contains(tag, "//") || strings.HasSuffix(tag, "/") || strings.HasSuffix(tag, ".") {
-		return false
-	}
-	for _, component := range strings.Split(tag, "/") {
-		if strings.HasPrefix(component, ".") || strings.HasSuffix(component, ".lock") {
-			return false
-		}
-	}
-	return true
-}
-
-func bounded(s string, max int) string {
-	s = strings.TrimSpace(s)
-	if len(s) <= max {
-		return s
-	}
-	return s[:max] + "\n\n[truncated]"
 }
 
 // inertModelOutput keeps model text visible without letting GitHub render

@@ -125,12 +125,13 @@ func TestRepositoryAndRefValidation(t *testing.T) {
 	}
 }
 
-func TestCloneFromLocalFixtureIncludesTags(t *testing.T) {
+func TestCloneFromLocalFixtureIncludesBranchHistory(t *testing.T) {
 	fixture := newFixture(t)
-	fixture.git(fixture.source, "tag", "v1.0.0")
-	fixture.git(fixture.source, "push", fixture.remote, "refs/tags/v1.0.0")
+	fixture.git(fixture.source, "commit", "--allow-empty", "-m", "next")
+	tip := fixture.git(fixture.source, "rev-parse", "HEAD")
+	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/heads/main")
 	ctx := context.Background()
-	checkout, err := cloneFromURL(ctx, t.TempDir(), fixture.remote, "main")
+	checkout, err := cloneFromURL(ctx, t.TempDir(), "file://"+fixture.remote, "main")
 	if err != nil {
 		t.Fatalf("cloneFromURL() error = %v", err)
 	}
@@ -139,23 +140,14 @@ func TestCloneFromLocalFixtureIncludesTags(t *testing.T) {
 			t.Error(err)
 		}
 	}()
-	if head := fixture.git(checkout.Path(), "rev-parse", "HEAD"); head != fixture.base {
-		t.Fatalf("clone HEAD = %s, want %s", head, fixture.base)
+	if head := fixture.git(checkout.Path(), "rev-parse", "HEAD"); head != tip {
+		t.Fatalf("clone HEAD = %s, want %s", head, tip)
 	}
-	if tag := fixture.git(checkout.Path(), "rev-parse", "refs/tags/v1.0.0"); tag != fixture.base {
-		t.Fatalf("cloned tag = %s, want %s", tag, fixture.base)
+	if head, err := checkout.Head(ctx); err != nil || head != tip {
+		t.Fatalf("Head() = (%q, %v), want %s", head, err, tip)
 	}
-	if head, err := checkout.Head(ctx); err != nil || head != fixture.base {
-		t.Fatalf("Head() = (%q, %v), want %s", head, err, fixture.base)
-	}
-	if exists, err := checkout.HasTag(ctx, "v1.0.0"); err != nil || !exists {
-		t.Fatalf("HasTag(v1.0.0) = (%t, %v), want true", exists, err)
-	}
-	if exists, err := checkout.HasTag(ctx, "v2.0.0"); err != nil || exists {
-		t.Fatalf("HasTag(v2.0.0) = (%t, %v), want false", exists, err)
-	}
-	if _, err := checkout.HasTag(ctx, "v2/.bad"); err == nil {
-		t.Fatal("HasTag accepted an invalid ref name")
+	if count := fixture.git(checkout.Path(), "rev-list", "--count", "HEAD"); count != "2" {
+		t.Fatalf("cloned history contains %s commits, want 2", count)
 	}
 }
 

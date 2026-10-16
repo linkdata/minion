@@ -235,30 +235,4 @@ func TestLiveClientReadOnly(t *testing.T) {
 			}
 		})
 	}
-
-	if cfg.ReleaseTag != "" {
-		t.Run("release and tag", func(t *testing.T) {
-			protected, err := bot.ProtectedReleaseTags(ctx, cfg.Repo)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if strings.EqualFold(cfg.Repo, "linkdata/miniontesting") && protected {
-				t.Fatal("test repository unexpectedly has protected release tags")
-			}
-			ref, err := bot.TagReference(ctx, cfg.Repo, cfg.ReleaseTag)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if ref.Ref != "refs/tags/"+cfg.ReleaseTag || len(ref.Object.SHA) != 40 {
-				t.Fatalf("tag reference = %+v", ref)
-			}
-			release, err := owner.ReleaseByTag(ctx, cfg.Repo, cfg.ReleaseTag)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if release.TagName != cfg.ReleaseTag || release.ID == 0 || !release.Draft {
-				t.Fatalf("release = %+v", release)
-			}
-		})
-	}
 }

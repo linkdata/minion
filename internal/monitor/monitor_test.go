@@ -215,7 +215,6 @@ func testConfig(t *testing.T) config.Config {
 		"fix":            "https://github.com/example/skills/tree/main/skills/fix",
 		"audit":          "https://github.com/example/skills/tree/main/skills/audit",
 		"security-audit": "https://github.com/example/skills/tree/main/skills/security-audit",
-		"release":        "https://github.com/example/skills/tree/main/skills/release",
 	}
 	for name, rawURL := range urls {
 		dir := filepath.Join(home, ".agents", "skills", name)
@@ -238,11 +237,10 @@ func testConfig(t *testing.T) config.Config {
 			"fix":            {Action: "fix", Skills: []string{urls["fix"]}},
 			"audit":          {Action: "comment", Skills: []string{urls["audit"]}},
 			"security-audit": {Action: "security-audit", Skills: []string{urls["security-audit"]}},
-			"release":        {Action: "release", Skills: []string{urls["release"]}},
 		},
 		AlwaysOnSkills: []string{},
 		Repositories: []config.Repository{{
-			Name: "example-owner/example-repo", ID: 1, OwnerID: 2, Actions: []string{"review", "fix", "release"},
+			Name: "example-owner/example-repo", ID: 1, OwnerID: 2, Actions: []string{"review", "fix", "audit"},
 		}},
 	}
 }
@@ -258,18 +256,18 @@ func TestAvailableCommandsRequireInstalledSkills(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := m.availableCommands(cfg.Repositories[0])
-	if len(got) != 2 || got["review"] != "review" || got["release"] != "release" {
+	if len(got) != 2 || got["review"] != "review" || got["audit"] != "comment" {
 		t.Fatalf("missing fix skill affected other commands: %v", got)
 	}
 	if _, ok := got["fix"]; ok {
 		t.Fatalf("fix enabled without its skill: %v", got)
 	}
-	if err := os.WriteFile(filepath.Join(home, ".agents", "skills", "release", ".minion-install.json"), []byte("{}"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(home, ".agents", "skills", "audit", ".minion-install.json"), []byte("{}"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	got = m.availableCommands(cfg.Repositories[0])
 	if len(got) != 1 || got["review"] != "review" {
-		t.Fatalf("corrupt release installation affected another command: %v", got)
+		t.Fatalf("corrupt audit installation affected another command: %v", got)
 	}
 }
 
@@ -454,6 +452,34 @@ func TestRunOnceChecksPermissionAndDeduplicates(t *testing.T) {
 	}
 	if len(executor.jobs) != 1 || gh.checks != 1 || len(gh.reactions) != 1 || gh.currentChecks != 1 {
 		t.Fatalf("duplicate command handled: %d jobs, %d permission checks, %d reactions, %d provenance checks", len(executor.jobs), gh.checks, len(gh.reactions), gh.currentChecks)
+	}
+}
+
+func TestRunOnceCarriesHistoryAndDeduplicatesEachVariant(t *testing.T) {
+	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	item := github.Item{
+		Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"},
+	}
+	gh := &fakeGitHub{
+		notifications: []github.Notification{testNotification(now)}, items: []github.Item{item},
+		permission: github.Permission{Permission: "write"},
+	}
+	executor := &fakeExecutor{}
+	store := openState(t, now.Add(-time.Minute))
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Executor: executor, Now: func() time.Time { return now }}
+	for _, body := range []string{"@linkdataminion review", "@linkdataminion review history", "@linkdataminion REVIEW HISTORY"} {
+		gh.items[0].Body = body
+		if _, err := m.RunOnce(context.Background(), store); err != nil {
+			t.Fatal(err)
+		}
+		now = now.Add(time.Minute)
+	}
+	if len(executor.jobs) != 2 || len(store.Data.Processed) != 2 {
+		t.Fatalf("jobs = %+v, processed = %v; want two distinct variants", executor.jobs, store.Data.Processed)
+	}
+	plain, history := executor.jobs[0], executor.jobs[1]
+	if plain.Command.History || !history.Command.History || plain.ID == history.ID {
+		t.Fatalf("history lost or identity reused: plain=%+v history=%+v", plain, history)
 	}
 }
 
@@ -1083,7 +1109,7 @@ func TestInvitationRegistersRepositoryBeforeAcceptanceAndMonitorsImmediately(t *
 						t.Fatal(err)
 					}
 					repo, ok := saved.Repository("example-owner/second-repo")
-					if !ok || !repo.AllowsAction("review") || !repo.AllowsAction("audit") || !repo.AllowsAction("security-audit") || !repo.AllowsAction("fix") || !repo.AllowsAction("release") {
+					if !ok || !repo.AllowsAction("review") || !repo.AllowsAction("audit") || !repo.AllowsAction("security-audit") || !repo.AllowsAction("fix") {
 						t.Fatalf("repository not persisted before accepting invitation: %+v", saved.Repositories)
 					}
 				},

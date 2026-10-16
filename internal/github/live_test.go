@@ -88,7 +88,6 @@ type liveTestConfig struct {
 	RepositoryURL     string `json:"repository_url"`
 	IssueNumber       int    `json:"issue_number"`
 	PullRequestNumber int    `json:"pull_request_number"`
-	ReleaseTag        string `json:"release_tag"`
 	BotSSHKey         string `json:"bot_ssh_key"`
 	Repo              string `json:"-"`
 }

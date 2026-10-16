@@ -16,10 +16,9 @@ import (
 )
 
 const (
-	testReviewSkillURL  = "https://github.com/DietrichGebert/ponytail/tree/main/skills/ponytail-review"
-	testFixSkillURL     = "https://github.com/DietrichGebert/ponytail/tree/main/skills/ponytail"
-	testAuditSkillURL   = "https://github.com/cloudflare/security-audit-skill/tree/main/skills/security-audit"
-	testReleaseSkillURL = "https://github.com/example/skills/tree/main/skills/release-notes"
+	testReviewSkillURL = "https://github.com/DietrichGebert/ponytail/tree/main/skills/ponytail-review"
+	testFixSkillURL    = "https://github.com/DietrichGebert/ponytail/tree/main/skills/ponytail"
+	testAuditSkillURL  = "https://github.com/cloudflare/security-audit-skill/tree/main/skills/security-audit"
 )
 
 func installActionTestSkills(t *testing.T, sources ...string) {

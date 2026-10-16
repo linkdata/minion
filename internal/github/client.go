@@ -135,14 +135,6 @@ type Branch struct {
 	Commit BranchCommit `json:"commit"`
 }
 
-type GitReference struct {
-	Ref    string `json:"ref"`
-	Object struct {
-		Type string `json:"type"`
-		SHA  string `json:"sha"`
-	} `json:"object"`
-}
-
 // GitTree is GitHub's recursive listing of a content-addressed tree.
 type GitTree struct {
 	SHA       string
@@ -162,15 +154,6 @@ type repositoryRuleset struct {
 	Target       string             `json:"target"`
 	Enforcement  string             `json:"enforcement"`
 	BypassActors *[]json.RawMessage `json:"bypass_actors"`
-	Conditions   struct {
-		RefName struct {
-			Include []string `json:"include"`
-			Exclude []string `json:"exclude"`
-		} `json:"ref_name"`
-	} `json:"conditions"`
-	Rules []struct {
-		Type string `json:"type"`
-	} `json:"rules"`
 }
 
 type Review struct {
@@ -181,17 +164,6 @@ type Review struct {
 	State       string    `json:"state"`
 	SubmittedAt time.Time `json:"submitted_at"`
 	HTMLURL     string    `json:"html_url"`
-}
-
-type Release struct {
-	ID              int64  `json:"id"`
-	TagName         string `json:"tag_name"`
-	TargetCommitish string `json:"target_commitish"`
-	Name            string `json:"name"`
-	Body            string `json:"body"`
-	Draft           bool   `json:"draft"`
-	HTMLURL         string `json:"html_url"`
-	Author          User   `json:"author"`
 }
 
 // StatusError preserves the HTTP status so callers can distinguish missing
@@ -560,94 +532,6 @@ func (c *Client) Branch(ctx context.Context, repo, branch string) (Branch, error
 	return details, err
 }
 
-func (c *Client) TagReference(ctx context.Context, repo, tag string) (GitReference, error) {
-	path, err := repoPath(repo)
-	if err != nil {
-		return GitReference{}, err
-	}
-	if strings.TrimSpace(tag) == "" {
-		return GitReference{}, errors.New("tag is required")
-	}
-	var ref GitReference
-	_, _, err = c.request(ctx, http.MethodGet, path+"/git/ref/tags/"+url.PathEscape(tag), nil, &ref, nil, http.StatusOK)
-	return ref, err
-}
-
-func (c *Client) CreateTagReference(ctx context.Context, repo, tag, sha string) error {
-	path, err := repoPath(repo)
-	if err != nil {
-		return err
-	}
-	if strings.TrimSpace(tag) == "" || strings.TrimSpace(sha) == "" {
-		return errors.New("tag and SHA are required")
-	}
-	_, _, err = c.request(ctx, http.MethodPost, path+"/git/refs", map[string]string{
-		"ref": "refs/tags/" + tag,
-		"sha": sha,
-	}, nil, nil, http.StatusCreated)
-	return err
-}
-
-// ProtectedReleaseTags checks whether draft release tags are protected.
-//
-// It requires an active all-tag integrity ruleset and refuses release creation
-// unless every active tag rule is limited to update, deletion, or non-fast-forward
-// protection. The bot must not create a tag by bypassing a restriction that
-// applies to the requester. GitHub omits bypass_actors for tokens without
-// ruleset write access; omission is not proof of no bypass.
-func (c *Client) ProtectedReleaseTags(ctx context.Context, repo string) (bool, error) {
-	path, err := repoPath(repo)
-	if err != nil {
-		return false, err
-	}
-	q := url.Values{"per_page": {"100"}, "targets": {"tag"}, "includes_parents": {"true"}}
-	protected := false
-	for page := 1; page <= 1000; page++ {
-		q.Set("page", strconv.Itoa(page))
-		var summaries []struct {
-			ID int64 `json:"id"`
-		}
-		header, _, err := c.request(ctx, http.MethodGet, withQuery(path+"/rulesets", q), nil, &summaries, nil, http.StatusOK)
-		if err != nil {
-			return false, err
-		}
-		for _, summary := range summaries {
-			if summary.ID <= 0 {
-				return false, errors.New("GitHub returned a ruleset without a valid ID")
-			}
-			var detail repositoryRuleset
-			_, _, err := c.request(ctx, http.MethodGet, path+"/rulesets/"+strconv.FormatInt(summary.ID, 10)+"?includes_parents=true", nil, &detail, nil, http.StatusOK)
-			if err != nil {
-				return false, err
-			}
-			if detail.ID != summary.ID {
-				return false, errors.New("GitHub returned mismatched ruleset details")
-			}
-			if detail.Target != "tag" || detail.Enforcement != "active" {
-				continue
-			}
-			var updates, deletions bool
-			for _, rule := range detail.Rules {
-				switch rule.Type {
-				case "update":
-					updates = true
-				case "deletion":
-					deletions = true
-				case "non_fast_forward":
-				default:
-					return false, nil
-				}
-			}
-			protected = protected || updates && deletions && detail.BypassActors != nil && len(*detail.BypassActors) == 0 &&
-				len(detail.Conditions.RefName.Exclude) == 0 && containsString(detail.Conditions.RefName.Include, "~ALL")
-		}
-		if !hasNextPage(header.Get("Link")) {
-			return protected, nil
-		}
-	}
-	return false, errors.New("too many GitHub ruleset pages")
-}
-
 // SafeFixPushRules checks effective push rules for bot publication.
 //
 // It refuses active rules with bypass actors or unreadable bypass lists, and incomplete responses.
@@ -694,15 +578,6 @@ func (c *Client) SafeFixPushRules(ctx context.Context, repo string) error {
 		}
 	}
 	return nil
-}
-
-func containsString(values []string, want string) bool {
-	for _, value := range values {
-		if value == want {
-			return true
-		}
-	}
-	return false
 }
 
 func (c *Client) IssueDetails(ctx context.Context, repo string, number int) (Issue, error) {
@@ -792,57 +667,4 @@ func (c *Client) CreatePullRequestReview(ctx context.Context, repo string, numbe
 	var review Review
 	_, _, err = c.request(ctx, http.MethodPost, path+"/pulls/"+strconv.Itoa(number)+"/reviews", map[string]string{"body": body, "commit_id": commitSHA, "event": "COMMENT"}, &review, nil, http.StatusOK)
 	return review, err
-}
-
-func (c *Client) CreateDraftRelease(ctx context.Context, repo, tag, target, name, body string) (Release, error) {
-	path, err := repoPath(repo)
-	if err != nil {
-		return Release{}, err
-	}
-	if strings.TrimSpace(tag) == "" {
-		return Release{}, errors.New("release tag is required")
-	}
-	input := struct {
-		TagName         string `json:"tag_name"`
-		TargetCommitish string `json:"target_commitish,omitempty"`
-		Name            string `json:"name"`
-		Body            string `json:"body"`
-		Draft           bool   `json:"draft"`
-	}{tag, target, name, body, true}
-	var release Release
-	_, _, err = c.request(ctx, http.MethodPost, path+"/releases", input, &release, nil, http.StatusCreated)
-	return release, err
-}
-
-// ReleaseByTag scans releases because GitHub's get-by-tag endpoint returns
-// published releases only; draft releases appear in the list to users with
-// push access. This lets callers recover a previously created draft.
-func (c *Client) ReleaseByTag(ctx context.Context, repo, tag string) (Release, error) {
-	path, err := repoPath(repo)
-	if err != nil {
-		return Release{}, err
-	}
-	if strings.TrimSpace(tag) == "" {
-		return Release{}, errors.New("release tag is required")
-	}
-	q := url.Values{"per_page": {"100"}}
-	for page := 1; ; page++ {
-		if page > 1000 {
-			return Release{}, errors.New("too many GitHub release pages")
-		}
-		q.Set("page", strconv.Itoa(page))
-		var batch []Release
-		header, _, err := c.request(ctx, http.MethodGet, withQuery(path+"/releases", q), nil, &batch, nil, http.StatusOK)
-		if err != nil {
-			return Release{}, err
-		}
-		for _, release := range batch {
-			if release.TagName == tag {
-				return release, nil
-			}
-		}
-		if !hasNextPage(header.Get("Link")) {
-			return Release{}, &StatusError{Method: http.MethodGet, Path: path + "/releases", StatusCode: http.StatusNotFound, Message: "release tag not found"}
-		}
-	}
 }

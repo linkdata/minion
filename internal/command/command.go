@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"strings"
-	"unicode"
 )
 
 // Action is one of the operations the bot recognizes.
@@ -17,8 +16,6 @@ const (
 	Review Action = "review"
 	// Fix selects the issue fix action.
 	Fix Action = "fix"
-	// Release selects the draft-release action.
-	Release Action = "release"
 	// Comment selects a read-only report posted to the requesting thread.
 	Comment Action = "comment"
 	// SecurityAudit selects the structured security-audit action.
@@ -36,13 +33,14 @@ var (
 
 // Command is a directive on its own Markdown line.
 //
-// Key is a deterministic SHA-256 digest of the name and argument; callers
+// Key is a deterministic SHA-256 digest of the name and history modifier; callers
 // should include the GitHub item's identity when using it as an idempotency key.
 type Command struct {
 	Key    string
 	Name   string
 	Action Action
-	Args   string
+	// History requests Git history in the action's source inputs.
+	History bool
 }
 
 // Parse finds exactly one directive for @linkdataminion in markdown.
@@ -62,6 +60,7 @@ func Parse(markdown string) (Command, error) {
 // The directive must be the first nonblank line. Later text is not a command
 // argument; callers may use it as task context after authorization. A second
 // configured directive returns [ErrAmbiguous].
+// Each command accepts a single optional history modifier after its name.
 func ParseForLogin(markdown, login string) (Command, error) {
 	return ParseForLoginCommands(markdown, login, map[string]Action{
 		"review": Review, "fix": Fix, "audit": Comment, "security-audit": SecurityAudit,
@@ -72,7 +71,8 @@ func ParseForLogin(markdown, login string) (Command, error) {
 //
 // The directive must be the first nonblank line. Later text may be used as
 // task context after authorization; a second configured directive returns
-// [ErrAmbiguous]. Only [Release] actions take an argument, which is one tag.
+// [ErrAmbiguous]. A single optional history modifier immediately follows the
+// command name. Other modifiers are rejected.
 func ParseForLoginCommands(markdown, login string, actions map[string]Action) (Command, error) {
 	if !validLogin(login) {
 		return Command{}, ErrInvalidLogin
@@ -117,16 +117,16 @@ func parseLine(line, handle string, actions map[string]Action) (Command, bool) {
 	if !ok || !equalASCIIFold(verb, name) {
 		return Command{}, false
 	}
-	if action == Release {
-		if args == "" || strings.IndexFunc(args, unicode.IsSpace) >= 0 {
-			return Command{}, false
-		}
-	} else if args != "" {
+	if args != "" && !equalASCIIFold(args, "history") {
 		return Command{}, false
+	}
+	history := args != ""
+	if history {
+		args = "history"
 	}
 
 	keyBytes := sha256.Sum256([]byte(name + "\x00" + args))
-	return Command{Key: hex.EncodeToString(keyBytes[:]), Name: name, Action: action, Args: args}, true
+	return Command{Key: hex.EncodeToString(keyBytes[:]), Name: name, Action: action, History: history}, true
 }
 
 func validLogin(login string) bool {

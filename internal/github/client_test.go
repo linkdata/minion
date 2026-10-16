@@ -702,14 +702,6 @@ func TestWritesUseSafeGitHubModes(t *testing.T) {
 			if _, err := fmt.Fprint(w, `{"id":4}`); err != nil {
 				t.Error(err)
 			}
-		case "/repos/o/r/releases":
-			if body["draft"] != true || body["tag_name"] != "v1.0.0" || body["target_commitish"] != strings.Repeat("a", 40) {
-				t.Errorf("release not draft or not pinned to commit: %v", body)
-			}
-			w.WriteHeader(http.StatusCreated)
-			if _, err := fmt.Fprint(w, `{"id":5}`); err != nil {
-				t.Error(err)
-			}
 		default:
 			http.NotFound(w, r)
 		}
@@ -729,9 +721,6 @@ func TestWritesUseSafeGitHubModes(t *testing.T) {
 	if _, err := c.CreatePullRequestReview(ctx, "o/r", 3, "review notes", ""); err == nil {
 		t.Fatal("review without explicit commit SHA must fail")
 	}
-	if _, err := c.CreateDraftRelease(ctx, "o/r", "v1.0.0", strings.Repeat("a", 40), "v1.0.0", "notes"); err != nil {
-		t.Fatal(err)
-	}
 }
 
 func TestRecoveryLookups(t *testing.T) {
@@ -744,20 +733,6 @@ func TestRecoveryLookups(t *testing.T) {
 			if _, err := fmt.Fprint(w, `[{"number":3,"title":"recovered"}]`); err != nil {
 				t.Error(err)
 			}
-		case "/repos/o/r/releases":
-			if r.URL.Query().Get("per_page") != "100" {
-				t.Errorf("release lookup did not request 100 per page: %s", r.URL.RawQuery)
-			}
-			if r.URL.Query().Get("page") == "1" {
-				w.Header().Set("Link", `<https://api.github.com/repos/o/r/releases?page=2>; rel="next"`)
-				if _, err := fmt.Fprint(w, `[{"id":8,"tag_name":"older","draft":false}]`); err != nil {
-					t.Error(err)
-				}
-				return
-			}
-			if _, err := fmt.Fprint(w, `[{"id":9,"tag_name":"v1.0.0","draft":true}]`); err != nil {
-				t.Error(err)
-			}
 		default:
 			http.NotFound(w, r)
 		}
@@ -767,78 +742,6 @@ func TestRecoveryLookups(t *testing.T) {
 	pull, err := c.FindPullRequestByHead(context.Background(), "o/r", "main", "bot-branch")
 	if err != nil || pull == nil || pull.Number != 3 {
 		t.Fatalf("recover PR: %+v, %v", pull, err)
-	}
-	release, err := c.ReleaseByTag(context.Background(), "o/r", "v1.0.0")
-	if err != nil || release.ID != 9 || !release.Draft {
-		t.Fatalf("recover release: %+v, %v", release, err)
-	}
-	_, err = c.ReleaseByTag(context.Background(), "o/r", "missing")
-	var status *StatusError
-	if !errors.As(err, &status) || status.StatusCode != 404 {
-		t.Fatalf("missing release should return typed 404, got %v", err)
-	}
-}
-
-func TestProtectedReleaseTagsRequiresVisibleCompleteRuleset(t *testing.T) {
-	good := `{"id":42,"target":"tag","enforcement":"active","bypass_actors":[],"conditions":{"ref_name":{"include":["~ALL"],"exclude":[]}},"rules":[{"type":"update"},{"type":"deletion"}]}`
-	for _, tt := range []struct {
-		name   string
-		list   string
-		detail string
-		status int
-		want   bool
-	}{
-		{name: "complete ruleset", list: `[{"id":42}]`, detail: good, want: true},
-		{name: "no rulesets", list: `[]`},
-		{name: "hidden bypass list", list: `[{"id":42}]`, detail: strings.Replace(good, `"bypass_actors":[],`, "", 1)},
-		{name: "null bypass list", list: `[{"id":42}]`, detail: strings.Replace(good, `"bypass_actors":[]`, `"bypass_actors":null`, 1)},
-		{name: "bypass actor", list: `[{"id":42}]`, detail: strings.Replace(good, `"bypass_actors":[]`, `"bypass_actors":[{"actor_type":"RepositoryRole","actor_id":5}]`, 1)},
-		{name: "branch target", list: `[{"id":42}]`, detail: strings.Replace(good, `"target":"tag"`, `"target":"branch"`, 1)},
-		{name: "disabled", list: `[{"id":42}]`, detail: strings.Replace(good, `"enforcement":"active"`, `"enforcement":"disabled"`, 1)},
-		{name: "partial coverage", list: `[{"id":42}]`, detail: strings.Replace(good, `"~ALL"`, `"refs/tags/v*"`, 1)},
-		{name: "excluded tag", list: `[{"id":42}]`, detail: strings.Replace(good, `"exclude":[]`, `"exclude":["refs/tags/test"]`, 1)},
-		{name: "no update rule", list: `[{"id":42}]`, detail: strings.Replace(good, `{"type":"update"},`, "", 1)},
-		{name: "plan blocks rulesets", status: http.StatusForbidden},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Method != http.MethodGet {
-					t.Errorf("unexpected method: %s", r.Method)
-				}
-				switch r.URL.Path {
-				case "/repos/o/r/rulesets":
-					if r.URL.Query().Get("targets") != "tag" || r.URL.Query().Get("includes_parents") != "true" || r.URL.Query().Get("per_page") != "100" {
-						t.Errorf("wrong ruleset query: %s", r.URL.RawQuery)
-					}
-					if tt.status != 0 {
-						w.WriteHeader(tt.status)
-						_, _ = fmt.Fprint(w, `{"message":"rulesets unavailable"}`)
-						return
-					}
-					_, _ = fmt.Fprint(w, tt.list)
-				case "/repos/o/r/rulesets/42":
-					if r.URL.Query().Get("includes_parents") != "true" {
-						t.Errorf("parent rulesets omitted: %s", r.URL.RawQuery)
-					}
-					_, _ = fmt.Fprint(w, tt.detail)
-				default:
-					t.Errorf("unexpected request: %s", r.URL)
-					http.NotFound(w, r)
-				}
-			}))
-			defer server.Close()
-			protected, err := testClient(server).ProtectedReleaseTags(context.Background(), "o/r")
-			if tt.status != 0 {
-				var status *StatusError
-				if !errors.As(err, &status) || status.StatusCode != tt.status {
-					t.Fatalf("error = %v, want HTTP %d", err, tt.status)
-				}
-				return
-			}
-			if err != nil || protected != tt.want {
-				t.Fatalf("protected = %v, error = %v, want %v", protected, err, tt.want)
-			}
-		})
 	}
 }
 
@@ -923,47 +826,6 @@ func TestSafeFixPushRulesRequiresCompletePagination(t *testing.T) {
 			err := testClient(server).SafeFixPushRules(context.Background(), "o/r")
 			if err == nil || !strings.Contains(err.Error(), "incomplete") {
 				t.Fatalf("SafeFixPushRules() = %v, want incomplete list error", err)
-			}
-		})
-	}
-}
-
-func TestProtectedReleaseTagsRejectsCreationConstraintsAfterIntegrityRule(t *testing.T) {
-	for _, tt := range []struct {
-		name   string
-		detail string
-		want   bool
-	}{
-		{"active creation rule", `{"id":43,"target":"tag","enforcement":"active","conditions":{"ref_name":{"include":["refs/tags/v*"]}},"rules":[{"type":"creation"}]}`, false},
-		{"active tag name restriction", `{"id":43,"target":"tag","enforcement":"active","rules":[{"type":"tag_name_pattern","parameters":{"operator":"starts_with","pattern":"release-","negate":true}}]}`, false},
-		{"allowed rule followed by tag restriction", `{"id":43,"target":"tag","enforcement":"active","rules":[{"type":"non_fast_forward"},{"type":"tag_name_pattern"}]}`, false},
-		{"active commit metadata restriction", `{"id":43,"target":"tag","enforcement":"active","rules":[{"type":"commit_message_pattern"}]}`, false},
-		{"unknown active tag rule", `{"id":43,"target":"tag","enforcement":"active","rules":[{"type":"future_rule"}]}`, false},
-		{"non-fast-forward rule", `{"id":43,"target":"tag","enforcement":"active","rules":[{"type":"non_fast_forward"}]}`, true},
-		{"disabled creation rule", `{"id":43,"target":"tag","enforcement":"disabled","rules":[{"type":"creation"}]}`, true},
-		{"branch creation rule", `{"id":43,"target":"branch","enforcement":"active","rules":[{"type":"creation"}]}`, true},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			var details int
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				switch r.URL.Path {
-				case "/repos/o/r/rulesets":
-					_, _ = fmt.Fprint(w, `[{"id":42},{"id":43}]`)
-				case "/repos/o/r/rulesets/42":
-					details++
-					_, _ = fmt.Fprint(w, `{"id":42,"target":"tag","enforcement":"active","bypass_actors":[],"conditions":{"ref_name":{"include":["~ALL"],"exclude":[]}},"rules":[{"type":"update"},{"type":"deletion"}]}`)
-				case "/repos/o/r/rulesets/43":
-					details++
-					_, _ = fmt.Fprint(w, tt.detail)
-				default:
-					t.Errorf("unexpected request: %s", r.URL)
-					http.NotFound(w, r)
-				}
-			}))
-			defer server.Close()
-			protected, err := testClient(server).ProtectedReleaseTags(context.Background(), "o/r")
-			if err != nil || protected != tt.want || details != 2 {
-				t.Fatalf("protected = %v, error = %v, details = %d; want %v, nil, 2", protected, err, details, tt.want)
 			}
 		})
 	}

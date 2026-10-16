@@ -2,7 +2,6 @@ package github
 
 import (
 	"context"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -323,50 +322,7 @@ func TestLiveBotWriteLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	base, err := owner.Branch(ctx, cfg.Repo, repository.DefaultBranch)
-	if err != nil || len(base.Commit.SHA) != 40 {
-		t.Fatalf("default branch HEAD is unavailable: %v", err)
-	}
-	if _, err := hex.DecodeString(base.Commit.SHA); err != nil {
-		t.Fatalf("default branch HEAD is invalid: %v", err)
-	}
 	id := strconv.FormatInt(comment.ID, 10)
-	tag := "minion-live-" + id
-	artifacts.tag = tag
-	artifacts.tagSHA = base.Commit.SHA
-	if err := bot.CreateTagReference(ctx, cfg.Repo, tag, base.Commit.SHA); err != nil {
-		t.Fatal(err)
-	}
-	ref, err := bot.TagReference(ctx, cfg.Repo, tag)
-	if err != nil || ref.Ref != "refs/tags/"+tag || ref.Object.SHA != base.Commit.SHA {
-		t.Fatalf("created tag %s does not target default branch HEAD: %v", tag, err)
-	}
-	t.Logf("tag: https://github.com/%s/tree/%s", cfg.Repo, tag)
-	artifacts.releaseAttempted = true
-	release, err := bot.CreateDraftRelease(ctx, cfg.Repo, tag, base.Commit.SHA, "Minion live test "+id, "Draft release created by the Minion live write test.")
-	if err != nil || release.ID <= 0 || !release.Draft || release.TagName != tag || release.Author.Login != cfg.BotLogin {
-		t.Fatalf("draft release for %s was not confirmed: id=%d: %v", tag, release.ID, err)
-	}
-	artifacts.releaseID = release.ID
-	t.Logf("draft release: %s (id=%d)", release.HTMLURL, release.ID)
-	var readBack Release
-	for attempt := 0; attempt < 20; attempt++ {
-		readBack, err = bot.ReleaseByTag(ctx, cfg.Repo, tag)
-		if err == nil {
-			break
-		}
-		if !liveNotFound(err) || attempt == 19 {
-			t.Fatalf("draft release for %s cannot be read back: %v", tag, err)
-		}
-		select {
-		case <-ctx.Done():
-			t.Fatal(ctx.Err())
-		case <-time.After(time.Second):
-		}
-	}
-	if readBack.ID != release.ID || !readBack.Draft {
-		t.Fatalf("draft release for %s has unexpected ID or state", tag)
-	}
 	if cfg.BotSSHKey != "" {
 		livePushDraftPullRequest(t, ctx, cfg, bot, artifacts, id)
 	}
@@ -380,17 +336,13 @@ func TestLiveBotWriteLifecycle(t *testing.T) {
 }
 
 type liveWriteArtifacts struct {
-	issueNumber      int
-	comments         []liveCommentArtifact
-	tag              string
-	tagSHA           string
-	releaseAttempted bool
-	releaseID        int64
-	baseBranch       string
-	branch           string
-	branchSHA        string
-	pullAttempted    bool
-	pullNumber       int
+	issueNumber   int
+	comments      []liveCommentArtifact
+	baseBranch    string
+	branch        string
+	branchSHA     string
+	pullAttempted bool
+	pullNumber    int
 }
 
 type liveCommentArtifact struct {
@@ -512,55 +464,6 @@ func liveRemoveArtifacts(t *testing.T, owner *Client, cfg liveTestConfig, artifa
 					t.Errorf("delete test branch %s: %v", artifacts.branch, err)
 				} else if _, err := owner.Branch(ctx, cfg.Repo, artifacts.branch); !liveNotFound(err) {
 					t.Errorf("test branch %s remains after cleanup: %v", artifacts.branch, err)
-				}
-			}
-		}
-	}
-
-	if artifacts.tag != "" {
-		var release Release
-		var err error
-		if artifacts.releaseID > 0 {
-			_, _, err = owner.request(ctx, http.MethodGet, path+"/releases/"+strconv.FormatInt(artifacts.releaseID, 10), nil, &release, nil, http.StatusOK)
-			if liveNotFound(err) {
-				release, err = owner.ReleaseByTag(ctx, cfg.Repo, artifacts.tag)
-			}
-		} else {
-			release, err = owner.ReleaseByTag(ctx, cfg.Repo, artifacts.tag)
-		}
-		canDeleteTag := true
-		if err != nil && !liveNotFound(err) {
-			t.Errorf("find test release for cleanup: %v", err)
-			canDeleteTag = false
-		} else if liveNotFound(err) && artifacts.releaseAttempted {
-			t.Errorf("draft test release %s is not visible; leaving tag intact", artifacts.tag)
-			canDeleteTag = false
-		} else if err == nil {
-			if release.TagName != artifacts.tag || !release.Draft || release.Author.Login != cfg.BotLogin {
-				t.Errorf("refuse to delete changed test release %s", artifacts.tag)
-				canDeleteTag = false
-			} else if _, _, err := owner.request(ctx, http.MethodDelete, path+"/releases/"+strconv.FormatInt(release.ID, 10), nil, nil, nil, http.StatusNoContent, http.StatusNotFound); err != nil {
-				t.Errorf("delete draft test release %s: %v", artifacts.tag, err)
-				canDeleteTag = false
-			} else {
-				_, status, err := owner.request(ctx, http.MethodGet, path+"/releases/"+strconv.FormatInt(release.ID, 10), nil, nil, nil, http.StatusOK, http.StatusNotFound)
-				if err != nil || status != http.StatusNotFound {
-					t.Errorf("draft test release %s remains after cleanup: HTTP %d: %v", artifacts.tag, status, err)
-					canDeleteTag = false
-				}
-			}
-		}
-		if canDeleteTag {
-			ref, err := owner.TagReference(ctx, cfg.Repo, artifacts.tag)
-			if err != nil && !liveNotFound(err) {
-				t.Errorf("find test tag for cleanup: %v", err)
-			} else if err == nil {
-				if ref.Ref != "refs/tags/"+artifacts.tag || ref.Object.SHA != artifacts.tagSHA {
-					t.Errorf("refuse to delete changed test tag %s", artifacts.tag)
-				} else if _, _, err := owner.request(ctx, http.MethodDelete, path+"/git/refs/tags/"+artifacts.tag, nil, nil, nil, http.StatusNoContent, http.StatusNotFound); err != nil {
-					t.Errorf("delete test tag %s: %v", artifacts.tag, err)
-				} else if _, err := owner.TagReference(ctx, cfg.Repo, artifacts.tag); !liveNotFound(err) {
-					t.Errorf("test tag %s remains after cleanup: %v", artifacts.tag, err)
 				}
 			}
 		}

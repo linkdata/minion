@@ -331,6 +331,19 @@ func TestConfiguredRepositoryActionMustExist(t *testing.T) {
 	}
 }
 
+func TestRemovedReleaseActionRejected(t *testing.T) {
+	cfg := Config{
+		BotLogin: "bot",
+		Commands: map[string]CommandMapping{
+			"publish": {Action: "release", Skills: []string{defaultAntiInjectionSkill}},
+		},
+		Repositories: []Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"publish"}}},
+	}
+	if err := cfg.Validate(t.TempDir()); err == nil || !strings.Contains(err.Error(), `unsupported action "release"`) {
+		t.Fatalf("accepted removed release action: %v", err)
+	}
+}
+
 func TestCommandInstalledRequiresAtLeastOneSkill(t *testing.T) {
 	cfg := Config{Commands: map[string]CommandMapping{"review": {Action: "review"}}}
 	installed, err := cfg.CommandInstalled("review")
