@@ -230,11 +230,11 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 cat > /dev/null
-printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"approved\":true,\"feedback\":\"\"}"}}' '{"type":"turn.completed"}'
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"answer\":\"public\",\"review_notes\":\"private\"}"}}' '{"type":"turn.completed"}'
 `)
-	const schema = `{"type":"object","properties":{"approved":{"type":"boolean"},"feedback":{"type":"string"}},"required":["approved","feedback"],"additionalProperties":false}`
-	result, err := Run(context.Background(), t.TempDir(), "Review candidate", false, "", config.CodexConfig{OutputSchema: schema})
-	if err != nil || result.Answer != `{"approved":true,"feedback":""}` {
+	const schema = `{"type":"object","properties":{"answer":{"type":"string"},"review_notes":{"type":"string"}},"required":["answer","review_notes"],"additionalProperties":false}`
+	result, err := Run(context.Background(), t.TempDir(), "Review candidate", true, "", config.CodexConfig{OutputSchema: schema})
+	if err != nil || result.Answer != `{"answer":"public","review_notes":"private"}` {
 		t.Fatalf("structured result = %q, %v", result.Answer, err)
 	}
 	content, err := os.ReadFile(fakeCodex + ".schema")

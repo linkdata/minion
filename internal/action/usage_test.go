@@ -138,7 +138,7 @@ func TestUsageAccumulatesCriticRevisions(t *testing.T) {
 	e := &Executor{
 		Usage: store, Main: "claude", Adversarial: "codex",
 		RunClaude: func(context.Context, string, string, bool, string) (aicli.Result, error) {
-			return aicli.Result{Answer: "proposal", Tokens: usage.Tokens{Input: 100, Output: 20}, UsageComplete: true}, nil
+			return aicli.Result{Answer: proposalJSON("proposal", "Private evidence"), Tokens: usage.Tokens{Input: 100, Output: 20}, UsageComplete: true}, nil
 		},
 		RunCodex: func(context.Context, string, string, bool, string) (codexcli.Result, error) {
 			critiques++

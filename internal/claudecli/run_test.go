@@ -220,8 +220,8 @@ func TestRunFailures(t *testing.T) {
 }
 
 func TestRunStructuredOutput(t *testing.T) {
-	const schema = `{"type":"object","required":["approved","feedback"],"properties":{"approved":{"type":"boolean"},"feedback":{"type":"string"}},"additionalProperties":false}`
-	const structured = `{"approved":true,"feedback":"ok"}`
+	const schema = `{"type":"object","required":["answer","review_notes"],"properties":{"answer":{"type":"string"},"review_notes":{"type":"string"}},"additionalProperties":false}`
+	const structured = `{"answer":"public","review_notes":"private"}`
 	for _, tc := range []struct {
 		name, output string
 		fails        bool
@@ -234,7 +234,7 @@ func TestRunStructuredOutput(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			binary := fakeExecutable(t, "claude", "printf '%s\\n' \"$@\" > \"$0.args\"\ncat >/dev/null\ncat <<'RESULT'\n"+tc.output+"\nRESULT\n")
-			result, err := Run(context.Background(), t.TempDir(), "task", false, "", config.ClaudeConfig{OutputSchema: schema})
+			result, err := Run(context.Background(), t.TempDir(), "task", true, "", config.ClaudeConfig{OutputSchema: schema})
 			if (err != nil) != tc.fails || tc.fails && (result.Answer != "" || result.UsageComplete) || !tc.fails && result.Answer != structured {
 				t.Fatalf("Run = %+v, %v", result, err)
 			}

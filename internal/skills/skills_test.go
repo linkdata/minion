@@ -96,6 +96,22 @@ func TestInstalledPathRequiresMatchingSafeInstallation(t *testing.T) {
 			if path, installed, err := tt.lookup(testURL); err != nil || !installed || path != filepath.Join(dir, "SKILL.md") {
 				t.Fatalf("installed skill = %q, %t, %v", path, installed, err)
 			}
+			realDir := dir + "-installed"
+			if err := os.Rename(dir, realDir); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(realDir, dir); err != nil {
+				t.Fatal(err)
+			}
+			if path, installed, err := tt.lookup(testURL); err == nil || installed || path != "" || !strings.Contains(err.Error(), "must not be a symlink") {
+				t.Fatalf("symlinked skill directory = %q, %t, %v", path, installed, err)
+			}
+			if err := os.Remove(dir); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(realDir, dir); err != nil {
+				t.Fatal(err)
+			}
 			if _, installed, err := tt.lookup("https://github.com/other/skills/tree/main/skills/review"); err == nil || installed {
 				t.Fatalf("mismatched source = %t, %v", installed, err)
 			}
