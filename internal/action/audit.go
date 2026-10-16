@@ -188,18 +188,14 @@ func validateAuditOutput(ctx context.Context, outputDir, skill, repo, target, he
 	if err != nil {
 		return "", err
 	}
-	skillDir, err := filepath.EvalSymlinks(filepath.Dir(skill))
-	if err != nil {
-		return "", fmt.Errorf("resolve audit skill directory: %w", err)
-	}
 	for _, validator := range []struct{ script, artifact string }{
 		{"validate-findings.cjs", "findings.json"},
 		{"validate-coverage-ledger.cjs", "coverage-ledger.json"},
 	} {
-		script := filepath.Join(skillDir, validator.script)
+		script := filepath.Join(filepath.Dir(skill), validator.script)
 		// #nosec G204 -- the installed skill path and validation directory are checked paths; arguments bypass a shell.
 		cmd := exec.CommandContext(ctx, "node", permissionFlag,
-			"--allow-fs-read="+skillDir, "--allow-fs-read="+validationDir,
+			"--allow-fs-read="+filepath.Dir(skill), "--allow-fs-read="+validationDir,
 			script, filepath.Join(validationDir, validator.artifact))
 		cmd.Dir = validationDir
 		cmd.Env = []string{"HOME=" + validationDir, "PATH=/usr/bin:/bin"}
