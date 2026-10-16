@@ -39,7 +39,8 @@ type Command struct {
 	Key    string
 	Name   string
 	Action Action
-	// History requests Git history in the action's source inputs.
+	// History records the modifier in command identity; source selection does not
+	// honor it until the executor split in #91.
 	History bool
 }
 
@@ -120,13 +121,10 @@ func parseLine(line, handle string, actions map[string]Action) (Command, bool) {
 	if args != "" && !equalASCIIFold(args, "history") {
 		return Command{}, false
 	}
-	history := args != ""
-	if history {
-		args = "history"
-	}
+	args = strings.ToLower(args)
 
 	keyBytes := sha256.Sum256([]byte(name + "\x00" + args))
-	return Command{Key: hex.EncodeToString(keyBytes[:]), Name: name, Action: action, History: history}, true
+	return Command{Key: hex.EncodeToString(keyBytes[:]), Name: name, Action: action, History: args != ""}, true
 }
 
 func validLogin(login string) bool {
