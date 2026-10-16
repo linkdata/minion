@@ -41,7 +41,7 @@ type RoleSettings struct {
 	AlwaysOnSkills []string `json:"always_on_skills,omitempty"`
 }
 
-const maxActionTitleBytes = 1 << 10
+const maxActionTitleBytes = 256 * utf8.UTFMax // Allow 256 four-byte code points.
 const maxAuditArtifactBytes = 5 << 20
 const maxAuditArtifactsBytes = 7 * maxAuditArtifactBytes
 

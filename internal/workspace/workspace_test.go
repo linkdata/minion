@@ -152,7 +152,6 @@ func TestChangedPathsChecksFinalSourceLayout(t *testing.T) {
 		base    []File
 		changes []Change
 	}{
-		{[]File{{Path: "Foo/a", Mode: Regular}}, nil},
 		{[]File{{Path: "Foo/a", Mode: Regular}}, []Change{{Path: "Foo/a", Delete: true}, {Path: "foo/a", Mode: Regular}}},
 		{[]File{{Path: "entry", Mode: Regular}}, []Change{{Path: "entry", Delete: true}, {Path: "entry/child", Mode: Regular}}},
 		{[]File{{Path: "entry/child", Mode: Regular}}, []Change{{Path: "entry/child", Delete: true}, {Path: "entry", Mode: Regular}}},

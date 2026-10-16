@@ -62,6 +62,10 @@ func TestPortableContractsRejectMismatches(t *testing.T) {
 		})
 	}
 	job := portableJob(command.Comment)
+	job.Title = strings.Repeat("😀", 256)
+	if err := job.Validate(); err != nil {
+		t.Fatalf("rejected title at UTF-8 boundary: %v", err)
+	}
 	valid := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "answer"}
 	if err := valid.Validate(job); err != nil {
 		t.Fatal(err)
@@ -302,7 +306,7 @@ func TestRunnerKeepsCriticReadOnlyAndNotesPrivate(t *testing.T) {
 		if !strings.Contains(request.prompt, baseline) || !strings.Contains(request.prompt, "original input baseline") || !strings.Contains(request.prompt, "executable modes") {
 			t.Fatal("critic lacks original baseline instructions")
 		}
-		if !strings.Contains(request.prompt, "Do not create, change or delete omitted paths or anything beneath them, or replace their parent directories with files") {
+		if !strings.Contains(request.prompt, "Do not create, change or delete omitted paths or anything beneath them, or replace their ancestor directories with files") {
 			t.Fatal("omitted-path constraint missing")
 		}
 		for name, want := range map[string]string{"source.txt": "source\n", "deleted.txt": "original deleted file"} {
@@ -451,13 +455,14 @@ func TestWorkerGitMetadataDoesNotEnumerate(t *testing.T) {
 }
 
 func TestRunnerHandlesMissingSource(t *testing.T) {
+	transient := errors.New("transient")
 	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 		if err := os.RemoveAll(request.dir); err != nil {
 			t.Fatal(err)
 		}
-		return aicli.Result{Answer: "completed"}, nil
+		return aicli.Result{}, transient
 	}}
-	if _, err := runner.Run(context.Background(), portableJob(command.Fix)); !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "inspect source metadata") {
+	if _, err := runner.Run(context.Background(), portableJob(command.Fix)); !errors.Is(err, transient) || !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "inspect source metadata") {
 		t.Fatalf("missing source = %v", err)
 	}
 }

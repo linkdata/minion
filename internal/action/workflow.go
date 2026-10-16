@@ -328,7 +328,7 @@ func (e *Orchestrator) prepareFix(ctx context.Context, p *Prepared) (*Prepared, 
 		p.reply = "The issue changed after this `fix` request, so no branch was created. Review its current text and post a new `fix` command."
 		return p, nil
 	}
-	if err := e.checkGitHubContext(request, content.BodyText); err != nil {
+	if err := e.checkGitHubContext(request, "", content.BodyText); err != nil {
 		return nil, err
 	}
 	p.checkout, err = gitwork.Clone(ctx, e.WorkRoot, repo.FullName, repo.DefaultBranch, func(ctx context.Context, sha string) (github.GitTree, error) {

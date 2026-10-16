@@ -102,7 +102,7 @@ func (e *Orchestrator) Execute(ctx context.Context, job monitor.Job) (resultErr 
 	if errors.Is(resultErr, errGitHubContextTooLarge) {
 		// Give the fixed refusal its own deadline even when the action timed out.
 		replyCtx, replyCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-		resultErr = e.acknowledge(replyCtx, job, fmt.Sprintf("Request exceeds the configured GitHub context limit of %d UTF-8 bytes. Shorten the thread text or requester notes included in this action, then post a new command.", e.githubContextLimit()))
+		resultErr = e.acknowledge(replyCtx, job, fmt.Sprintf("Request exceeds the GitHub context limits: %d UTF-8 bytes combined and %d bytes per title. Shorten the title, thread text or requester notes included in this action, then post a new command.", e.githubContextLimit(), maxActionTitleBytes))
 		replyCancel()
 		returned = true
 		return resultErr
@@ -267,9 +267,9 @@ func (e *Orchestrator) githubContextLimit() int {
 	return config.DefaultMaxGitHubContextBytes
 }
 
-func (e *Orchestrator) checkGitHubContext(job monitor.Job, fields ...string) error {
-	remaining := e.githubContextLimit() - len(requestNotes(job))
-	if remaining < 0 {
+func (e *Orchestrator) checkGitHubContext(job monitor.Job, title string, fields ...string) error {
+	remaining := e.githubContextLimit() - len(requestNotes(job)) - len(strings.TrimSpace(title))
+	if len(title) > maxActionTitleBytes || remaining < 0 {
 		return errGitHubContextTooLarge
 	}
 	for _, field := range fields {

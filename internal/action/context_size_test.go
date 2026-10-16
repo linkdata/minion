@@ -24,10 +24,10 @@ import (
 
 func TestCheckGitHubContext(t *testing.T) {
 	for _, tt := range []struct {
-		name, notes string
-		fields      []string
-		limit       int
-		tooLarge    bool
+		name, notes, title string
+		fields             []string
+		limit              int
+		tooLarge           bool
 	}{
 		{name: "combined exact", notes: "n", fields: []string{"T", "éé"}, limit: 6},
 		{name: "combined over", notes: "n", fields: []string{"T", "ééx"}, limit: 6, tooLarge: true},
@@ -35,13 +35,15 @@ func TestCheckGitHubContext(t *testing.T) {
 		{name: "rune crosses limit", fields: []string{"é"}, limit: 1, tooLarge: true},
 		{name: "notes over", notes: "é", limit: 1, tooLarge: true},
 		{name: "trimmed input", fields: []string{"  é  "}, limit: 2},
+		{name: "title exact", title: strings.Repeat("😀", 256), limit: 2 * maxActionTitleBytes},
+		{name: "title over", title: strings.Repeat("x", maxActionTitleBytes+1), limit: 2 * maxActionTitleBytes, tooLarge: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			job := monitor.Job{Source: github.Item{Body: "@linkdataminion review\n" + tt.notes}}
 			executor := Orchestrator{
 				MaxGitHubContextBytes: tt.limit,
 			}
-			err := executor.checkGitHubContext(job, tt.fields...)
+			err := executor.checkGitHubContext(job, tt.title, tt.fields...)
 			if errors.Is(err, errGitHubContextTooLarge) != tt.tooLarge {
 				t.Fatalf("checkGitHubContext() = %v, tooLarge=%t", err, tt.tooLarge)
 			}
@@ -266,7 +268,7 @@ func TestGitHubContextLimitAcrossActions(t *testing.T) {
 				mu.Lock()
 				got := append([]github.Comment(nil), replies...)
 				mu.Unlock()
-				want := fmt.Sprintf("Request exceeds the configured GitHub context limit of %d UTF-8 bytes. Shorten the thread text or requester notes included in this action, then post a new command.\n\n%s", limit, job.Marker())
+				want := fmt.Sprintf("Request exceeds the GitHub context limits: %d UTF-8 bytes combined and %d bytes per title. Shorten the title, thread text or requester notes included in this action, then post a new command.\n\n%s", limit, maxActionTitleBytes, job.Marker())
 				if len(got) != 1 || got[0].Body != want {
 					t.Fatalf("refusal replies = %+v; want %q", got, want)
 				}
