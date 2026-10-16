@@ -10,32 +10,27 @@ import (
 func TestConfiguredCommandsPreserveKeysAndUseNames(t *testing.T) {
 	actions := map[string]Action{
 		"review": Review, "fix": Fix, "audit": Comment,
-		"security-audit": SecurityAudit, "release": Release,
-		"inspect": Comment,
+		"security-audit": SecurityAudit,
+		"inspect":        Comment,
 	}
 	for _, tt := range []struct {
 		name   string
-		args   string
 		action Action
 	}{
-		{"review", "", Review},
-		{"fix", "", Fix},
-		{"audit", "", Comment},
-		{"security-audit", "", SecurityAudit},
-		{"release", "v1", Release},
-		{"inspect", "", Comment},
+		{"review", Review},
+		{"fix", Fix},
+		{"audit", Comment},
+		{"security-audit", SecurityAudit},
+		{"inspect", Comment},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			body := "@linkdataminion " + tt.name
-			if tt.args != "" {
-				body += " " + tt.args
-			}
 			got, err := ParseForLoginCommands(body, "linkdataminion", actions)
 			if err != nil {
 				t.Fatal(err)
 			}
-			oldDigest := sha256.Sum256([]byte(tt.name + "\x00" + tt.args))
-			if got.Key != hex.EncodeToString(oldDigest[:]) || got.Name != tt.name || got.Action != tt.action || got.Args != tt.args {
+			oldDigest := sha256.Sum256([]byte(tt.name + "\x00"))
+			if got.Key != hex.EncodeToString(oldDigest[:]) || got.Name != tt.name || got.Action != tt.action || got.History {
 				t.Fatalf("command = %+v", got)
 			}
 		})
@@ -55,9 +50,9 @@ func TestConfiguredCommandsPreserveKeysAndUseNames(t *testing.T) {
 	if _, err := ParseForLoginCommands("@linkdataminion review\n@linkdataminion inspect", "linkdataminion", actions); !errors.Is(err, ErrAmbiguous) {
 		t.Fatalf("accepted second configured directive: %v", err)
 	}
-	releaseWithNotes, err := ParseForLoginCommands("@linkdataminion release v1\nMention the migration steps.", "linkdataminion", actions)
-	if err != nil || releaseWithNotes.Action != Release || releaseWithNotes.Args != "v1" {
-		t.Fatalf("release with notes = (%#v, %v)", releaseWithNotes, err)
+	withHistory, err := ParseForLoginCommands("@linkdataminion inspect history\nCheck the previous design.", "linkdataminion", actions)
+	if err != nil || withHistory.Name != "inspect" || withHistory.Action != Comment || !withHistory.History {
+		t.Fatalf("configured history command = (%#v, %v)", withHistory, err)
 	}
 	if _, err := ParseForLoginCommands("@linkdataminion review", "linkdataminion", nil); !errors.Is(err, ErrNoCommand) {
 		t.Fatalf("accepted command with no mappings: %v", err)
@@ -66,18 +61,22 @@ func TestConfiguredCommandsPreserveKeysAndUseNames(t *testing.T) {
 
 func TestParseCommands(t *testing.T) {
 	tests := []struct {
-		name   string
-		body   string
-		action Action
-		args   string
+		name    string
+		body    string
+		action  Action
+		history bool
 	}{
-		{"review", "@linkdataminion review", Review, ""},
-		{"audit", "@linkdataminion audit", Comment, ""},
-		{"audit case", "  @LinkDataMinion\tAUDIT  ", Comment, ""},
-		{"fix", "  @LinkDataMinion\tFIX  \t", Fix, ""},
-		{"security audit", "@linkdataminion security-audit", SecurityAudit, ""},
-		{"CRLF", "\r\n@linkdataminion fix\r\n", Fix, ""},
-		{"surrounding blanks", " \t\n\n@linkdataminion security-audit\n\t", SecurityAudit, ""},
+		{"review", "@linkdataminion review", Review, false},
+		{"audit", "@linkdataminion audit", Comment, false},
+		{"audit case", "  @LinkDataMinion\tAUDIT  ", Comment, false},
+		{"fix", "  @LinkDataMinion\tFIX  \t", Fix, false},
+		{"security audit", "@linkdataminion security-audit", SecurityAudit, false},
+		{"CRLF", "\r\n@linkdataminion fix\r\n", Fix, false},
+		{"surrounding blanks", " \t\n\n@linkdataminion security-audit\n\t", SecurityAudit, false},
+		{"review history", "@linkdataminion review history", Review, true},
+		{"audit history", "@linkdataminion audit history", Comment, true},
+		{"fix history", "\r\n @LinkDataMinion\tFIX\tHiStOrY \t\r\n", Fix, true},
+		{"security audit history", "@linkdataminion security-audit history", SecurityAudit, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -85,8 +84,8 @@ func TestParseCommands(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Parse() error = %v", err)
 			}
-			if got.Action != tt.action || got.Args != tt.args {
-				t.Fatalf("Parse() = %#v, want action %q and args %q", got, tt.action, tt.args)
+			if got.Action != tt.action || got.History != tt.history {
+				t.Fatalf("Parse() = %#v, want action %q and history %t", got, tt.action, tt.history)
 			}
 			if len(got.Key) != 64 {
 				t.Fatalf("key length = %d, want 64", len(got.Key))
@@ -115,10 +114,15 @@ func TestParseIgnoresNonCommands(t *testing.T) {
 		{"fix argument", "@linkdataminion fix update docs"},
 		{"quoted audit", "> @linkdataminion audit"},
 		{"fenced audit", "```\n@linkdataminion audit\n```"},
-		{"missing release tag", "@linkdataminion release"},
-		{"release disabled by default", "@linkdataminion release v1"},
-		{"multiple release arguments", "@linkdataminion release v1 v2"},
-		{"Unicode space in tag", "@linkdataminion release v1\u00a0v2"},
+		{"removed release", "@linkdataminion release"},
+		{"removed release with tag", "@linkdataminion release v1"},
+		{"unknown modifier", "@linkdataminion review full"},
+		{"duplicate modifier", "@linkdataminion review history history"},
+		{"extra modifier", "@linkdataminion review history now"},
+		{"misplaced modifier", "@linkdataminion history review"},
+		{"Unicode lookalike modifier", "@linkdataminion review hіstory"},
+		{"long s modifier", "@linkdataminion review hi\u017ftory"},
+		{"Unicode space before modifier", "@linkdataminion review\u00a0history"},
 		{"quote", "> @linkdataminion review"},
 		{"indented code", "    @linkdataminion review\n\t@linkdataminion fix\n   \t@linkdataminion review"},
 		{"fenced code", "```\n@linkdataminion review\n```"},
@@ -156,6 +160,7 @@ func TestParseAcceptsTrailingNotes(t *testing.T) {
 		{"@linkdataminion review", "Please check the locking change."},
 		{"@linkdataminion audit", "Check authorization boundaries."},
 		{"@linkdataminion fix", "The test fails on Windows."},
+		{"@linkdataminion fix history", "Inspect the regression's history."},
 		{"@linkdataminion review", "@otherbot review\n```\nExample text\n```"},
 	} {
 		plain, err := Parse(tt.command)
@@ -173,6 +178,7 @@ func TestParseRejectsMultipleCommands(t *testing.T) {
 	for _, body := range []string{
 		"@linkdataminion review\n@linkdataminion fix",
 		"@linkdataminion review\n@linkdataminion review",
+		"@linkdataminion review\n@linkdataminion fix history",
 		"@linkdataminion audit\n@linkdataminion fix",
 		"@linkdataminion review\n```\n@linkdataminion fix\n```",
 	} {
@@ -186,17 +192,16 @@ func TestParseRejectsMultipleCommands(t *testing.T) {
 	}
 }
 
-func TestCommandKeyIsStableAndSensitiveToArguments(t *testing.T) {
-	release := map[string]Action{"release": Release}
-	a, err := ParseForLoginCommands("@LINKDATAMINION\tRELEASE\t v1.2.3 \t", "linkdataminion", release)
+func TestCommandKeyIsStableAndSensitiveToHistory(t *testing.T) {
+	a, err := Parse("@LINKDATAMINION\tREVIEW\t HiStOrY \t")
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := ParseForLoginCommands("  @linkdataminion release v1.2.3", "linkdataminion", release)
+	b, err := Parse("  @linkdataminion review history")
 	if err != nil {
 		t.Fatal(err)
 	}
-	c, err := ParseForLoginCommands("@linkdataminion release v1.2.4", "linkdataminion", release)
+	c, err := Parse("@linkdataminion review")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,7 +209,11 @@ func TestCommandKeyIsStableAndSensitiveToArguments(t *testing.T) {
 		t.Fatalf("equivalent commands have different keys: %q, %q", a.Key, b.Key)
 	}
 	if a.Key == c.Key {
-		t.Fatal("different arguments have the same key")
+		t.Fatal("history and no-history have the same key")
+	}
+	digest := sha256.Sum256([]byte("review\x00history"))
+	if !a.History || a.Key != hex.EncodeToString(digest[:]) {
+		t.Fatalf("history command = %#v", a)
 	}
 }
 
@@ -214,11 +223,10 @@ func TestParseForLogin(t *testing.T) {
 		login  string
 		body   string
 		action Action
-		args   string
 	}{
-		{"custom login", "my-bot", "@MY-BOT fix", Fix, ""},
-		{"bot suffix", "github-actions[bot]", "@GitHub-Actions[Bot] review", Review, ""},
-		{"custom security audit", "my-bot", "@my-bot security-audit", SecurityAudit, ""},
+		{"custom login", "my-bot", "@MY-BOT fix", Fix},
+		{"bot suffix", "github-actions[bot]", "@GitHub-Actions[Bot] review", Review},
+		{"custom security audit", "my-bot", "@my-bot security-audit", SecurityAudit},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -226,8 +234,8 @@ func TestParseForLogin(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ParseForLogin() error = %v", err)
 			}
-			if got.Action != tt.action || got.Args != tt.args {
-				t.Fatalf("ParseForLogin() = %#v, want action %q and args %q", got, tt.action, tt.args)
+			if got.Action != tt.action || got.History {
+				t.Fatalf("ParseForLogin() = %#v, want action %q without history", got, tt.action)
 			}
 		})
 	}

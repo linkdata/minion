@@ -17,7 +17,7 @@ import (
 func saveReportFixture(t *testing.T, dir string) {
 	t.Helper()
 	starts := []string{"2026-10-08T23:00:00Z", "2026-10-09T00:00:00Z", "2026-10-09T12:00:00Z", "2026-10-10T00:00:00Z"}
-	actions := []string{"audit", "fix", "review", "release"}
+	actions := []string{"audit", "fix", "review", "security-audit"}
 	statuses := []string{"succeeded", "failed", "running", "succeeded"}
 	for i := range starts {
 		start, err := time.Parse(time.RFC3339, starts[i])

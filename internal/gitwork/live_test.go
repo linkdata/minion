@@ -28,7 +28,6 @@ func TestLiveCloneAndPullRequest(t *testing.T) {
 		RepositoryURL     string `json:"repository_url"`
 		BotLogin          string `json:"bot_login"`
 		PullRequestNumber int    `json:"pull_request_number"`
-		ReleaseTag        string `json:"release_tag"`
 	}
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		t.Fatal(err)
@@ -82,15 +81,6 @@ func TestLiveCloneAndPullRequest(t *testing.T) {
 	}()
 	if head, err := checkout.Head(ctx); err != nil || len(head) != 40 {
 		t.Fatalf("cloned default-branch HEAD = %q, %v", head, err)
-	}
-	if cfg.ReleaseTag != "" {
-		hasTag, err := checkout.HasTag(ctx, cfg.ReleaseTag)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !hasTag {
-			t.Fatalf("clone has no %s tag", cfg.ReleaseTag)
-		}
 	}
 	if err := checkout.CheckoutPullRequest(ctx, pull.Number, pull.Base.Ref, pull.Head.SHA, func(ctx context.Context, treeSHA string) (github.GitTree, error) {
 		return client.GitTree(ctx, repoName, treeSHA)

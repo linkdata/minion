@@ -228,7 +228,7 @@ func (c *Config) Validate(configDir string) error {
 			return fmt.Errorf("invalid command name %q", name)
 		}
 		switch mapping.Action {
-		case "review", "fix", "comment", "security-audit", "release":
+		case "review", "fix", "comment", "security-audit":
 		default:
 			return fmt.Errorf("command %q has unsupported action %q", name, mapping.Action)
 		}
