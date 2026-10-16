@@ -39,8 +39,7 @@ type Command struct {
 	Key    string
 	Name   string
 	Action Action
-	// History records the modifier in command identity; source selection does not
-	// honor it until the executor split in #91.
+	// History reports the modifier; source selection does not use it yet (see #91).
 	History bool
 }
 
@@ -53,15 +52,14 @@ func Parse(markdown string) (Command, error) {
 //
 // It accepts these default standalone forms (ASCII case-insensitively):
 //
-//	@<login> review
-//	@<login> audit
-//	@<login> fix
-//	@<login> security-audit
+//	@<login> review [history]
+//	@<login> audit [history]
+//	@<login> fix [history]
+//	@<login> security-audit [history]
 //
 // The directive must be the first nonblank line. Later text is not a command
 // argument; callers may use it as task context after authorization. A second
 // configured directive returns [ErrAmbiguous].
-// Each command accepts a single optional history modifier after its name.
 func ParseForLogin(markdown, login string) (Command, error) {
 	return ParseForLoginCommands(markdown, login, map[string]Action{
 		"review": Review, "fix": Fix, "audit": Comment, "security-audit": SecurityAudit,

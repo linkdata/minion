@@ -121,6 +121,7 @@ func TestParseIgnoresNonCommands(t *testing.T) {
 		{"extra modifier", "@linkdataminion review history now"},
 		{"misplaced modifier", "@linkdataminion history review"},
 		{"Unicode lookalike modifier", "@linkdataminion review hіstory"},
+		{"long s modifier", "@linkdataminion review hi\u017ftory"},
 		{"Unicode space before modifier", "@linkdataminion review\u00a0history"},
 		{"quote", "> @linkdataminion review"},
 		{"indented code", "    @linkdataminion review\n\t@linkdataminion fix\n   \t@linkdataminion review"},
