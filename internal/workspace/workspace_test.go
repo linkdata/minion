@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -82,8 +83,8 @@ func privateRoot(t *testing.T) string {
 }
 
 func TestRejectUnsafeFilesAndChanges(t *testing.T) {
-	for _, name := range []string{"", ".", "..", "../outside", "/absolute", "a/../b", "a//b", "a\\b", ".git/config", "a/.GiT/hooks/x", "nul\x00file", strings.Repeat("x", 256)} {
-		t.Run(name, func(t *testing.T) {
+	for i, name := range []string{"", ".", "..", "../outside", "/absolute", "a/../b", "a//b", "a\\b", ".git/config", "a/.GiT/hooks/x", "nul\x00file", strings.Repeat("x", 256)} {
+		t.Run("path-"+strconv.Itoa(i), func(t *testing.T) {
 			if err := Materialize(t.TempDir(), []File{{Path: name, Mode: Regular}}); err == nil {
 				t.Fatalf("accepted path %q", name)
 			}

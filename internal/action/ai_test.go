@@ -311,6 +311,8 @@ func TestCommentPublishesOnlyCriticApprovedResult(t *testing.T) {
 			var published string
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch {
+				case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/o/r/git/trees/"):
+					_, _ = fmt.Fprintf(w, `{"sha":%q,"truncated":false,"tree":[]}`, strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/"))
 				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
 					_, _ = fmt.Fprint(w, `{"id":1,"full_name":"o/r","owner":{"id":2,"login":"o"},"default_branch":"main"}`)
 				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7":
@@ -367,7 +369,7 @@ func TestCommentPublishesOnlyCriticApprovedResult(t *testing.T) {
 			job := monitor.Job{
 				Repository:  config.Repository{Name: "o/r", ID: 1, OwnerID: 2},
 				SubjectType: "Issue", Number: 7, ID: strings.Repeat("a", 64),
-				Source:  github.Item{Author: github.User{Login: "writer"}},
+				Source:  github.Item{Author: github.User{ID: 7, Login: "writer"}},
 				Command: command.Command{Name: "audit", Action: command.Comment},
 			}
 			err := e.perform(context.Background(), job)

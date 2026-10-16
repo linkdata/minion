@@ -44,6 +44,7 @@ func TestPortableContractsRejectMismatches(t *testing.T) {
 	}{
 		{"version", func(j *Job) { j.Version++ }},
 		{"source", func(j *Job) { j.Source.Head = "untrusted" }},
+		{"requester identity", func(j *Job) { j.Identity.RequesterID = 0 }},
 		{"runtime", func(j *Job) { j.RuntimeBudget = 0 }},
 		{"action", func(j *Job) { j.Action = "unknown" }},
 		{"skill path", func(j *Job) { j.Main.Skills = []string{"/tmp/skill/SKILL.md"} }},

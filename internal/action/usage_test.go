@@ -24,7 +24,7 @@ import (
 func usageJob() monitor.Job {
 	return monitor.Job{
 		ID: strings.Repeat("a", 64), Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2}, SubjectType: "Issue", Number: 7,
-		Source: github.Item{Author: github.User{Login: "writer"}}, Command: command.Command{Action: command.Review},
+		Source: github.Item{Author: github.User{ID: 7, Login: "writer"}}, Command: command.Command{Action: command.Review},
 	}
 }
 

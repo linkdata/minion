@@ -122,7 +122,7 @@ func (id Identity) validate() error {
 		}
 	}
 	parts := strings.Split(id.Repository, "/")
-	if len(parts) != 2 || !identitySegment(parts[0]) || !identitySegment(parts[1]) || id.RepositoryID <= 0 || id.OwnerID <= 0 || id.RequesterID < 0 || id.Number <= 0 || (id.SubjectType != "Issue" && id.SubjectType != "PullRequest") {
+	if len(parts) != 2 || !identitySegment(parts[0]) || !identitySegment(parts[1]) || id.RepositoryID <= 0 || id.OwnerID <= 0 || id.RequesterID <= 0 || id.Number <= 0 || (id.SubjectType != "Issue" && id.SubjectType != "PullRequest") {
 		return errors.New("action repository or requester identity is invalid")
 	}
 	return nil

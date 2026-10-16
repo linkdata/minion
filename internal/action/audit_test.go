@@ -55,7 +55,7 @@ func TestSecurityAuditIssueAndPullRequest(t *testing.T) {
 			job := monitor.Job{
 				Repository:  config.Repository{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"security-audit"}},
 				SubjectType: tt.subject, Number: 7, ID: strings.Repeat("a", 64),
-				Source:  github.Item{Author: github.User{Login: "writer"}, Body: "@linkdataminion security-audit\n\nInspect authorization boundaries."},
+				Source:  github.Item{Author: github.User{ID: 7, Login: "writer"}, Body: "@linkdataminion security-audit\n\nInspect authorization boundaries."},
 				Command: command.Command{Name: "security-audit", Action: command.SecurityAudit},
 			}
 			var comments []github.Comment

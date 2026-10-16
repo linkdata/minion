@@ -60,7 +60,7 @@ func TestCommentCommandReportsIssueAndPullRequest(t *testing.T) {
 			job := monitor.Job{
 				Repository:  config.Repository{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"audit"}},
 				SubjectType: subject, Number: 7, ID: strings.Repeat("a", 64),
-				Source:  github.Item{Author: github.User{Login: "writer"}, Body: "@linkdataminion audit\n\n" + notes},
+				Source:  github.Item{Author: github.User{ID: 7, Login: "writer"}, Body: "@linkdataminion audit\n\n" + notes},
 				Command: command.Command{Name: "audit", Action: command.Comment},
 			}
 			executor := &Orchestrator{
