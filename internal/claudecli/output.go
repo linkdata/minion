@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"time"
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/usage"
@@ -18,6 +19,7 @@ const (
 	maxOutputBytes     = 64 << 20
 	maxEvents          = 100000
 	maxDiagnosticBytes = 8 << 10
+	maxResetTimestamp  = 253402300799 // 9999-12-31T23:59:59Z, the last RFC3339 year.
 )
 
 type eventUsage struct {
@@ -57,6 +59,10 @@ type event struct {
 	ModelUsage        json.RawMessage   `json:"modelUsage"`
 	PermissionDenials []json.RawMessage `json:"permission_denials"`
 	Message           json.RawMessage   `json:"message"`
+	RateLimitInfo     struct {
+		Status   string          `json:"status"`
+		ResetsAt json.RawMessage `json:"resetsAt"`
+	} `json:"rate_limit_info"`
 }
 
 func (e event) tokens() (usage.Tokens, bool) {
@@ -97,6 +103,7 @@ type jsonlOutput struct {
 	bytes      int64
 	events     int
 	err        error
+	usageLimit error
 	completed  bool
 	structured bool
 	pending    int
@@ -149,6 +156,9 @@ func (o *jsonlOutput) finish() {
 	if o.err == nil && len(o.line) != 0 {
 		o.finishLine()
 	}
+	if o.err == nil && o.usageLimit != nil {
+		o.fail(o.usageLimit)
+	}
 	if o.err == nil && o.pending != 0 {
 		o.fail(errors.New("background tasks still running when Claude exited"))
 	}
@@ -181,6 +191,15 @@ func (o *jsonlOutput) finishLine() {
 		return
 	}
 	o.line = o.line[:0]
+	if e.Type == "rate_limit_event" && e.RateLimitInfo.Status == "rejected" {
+		o.usageLimit = errors.New("provider usage limit reached")
+		var reset int64
+		// Only a validated UTC timestamp may enter the service diagnostic.
+		if json.Unmarshal(e.RateLimitInfo.ResetsAt, &reset) == nil && reset > 0 && reset <= maxResetTimestamp {
+			o.usageLimit = fmt.Errorf("provider usage limit reached; resets at %s", time.Unix(reset, 0).UTC().Format(time.RFC3339))
+		}
+		o.completed, o.result.Answer, o.result.UsageComplete = false, "", false
+	}
 	if e.Type == "system" && e.Subtype == "background_tasks_changed" {
 		o.pending = len(e.Tasks)
 		if o.pending != 0 {
@@ -220,9 +239,13 @@ func (o *jsonlOutput) finishLine() {
 	} else {
 		complete = false
 	}
-	o.result.UsageComplete = complete
+	o.result.UsageComplete = complete && o.usageLimit == nil
 	if e.IsError || e.Subtype != "success" {
-		o.fail(fmt.Errorf("result failed: %s", limitText(e.Subtype)))
+		if o.usageLimit != nil {
+			o.fail(o.usageLimit)
+		} else {
+			o.fail(fmt.Errorf("result failed: %s", limitText(e.Subtype)))
+		}
 		return
 	}
 	if len(e.PermissionDenials) != 0 {
@@ -239,6 +262,9 @@ func (o *jsonlOutput) finishLine() {
 	}
 	o.indexed = e.ResultIndex != nil
 	o.results++
+	if o.usageLimit != nil {
+		return
+	}
 	// Print mode can emit provisional turn results while background work runs.
 	if o.pending != 0 {
 		return

@@ -3,6 +3,7 @@ package claudecli
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"strconv"
 	"strings"
@@ -11,6 +12,76 @@ import (
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/usage"
 )
+
+func TestOutputNativeUsageLimit(t *testing.T) {
+	// Native events: overage rejection can accompany an allowed warning.
+	const warning = `{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","resetsAt":1792200000,"rateLimitType":"five_hour","utilization":0.99,"isUsingOverage":false,"overageStatus":"rejected","overageDisabledReason":"org_level_disabled","overageEnabled":false,"surpassedThreshold":0.9,"unifiedWindows":{"five_hour":{"utilization":0.99,"resetsAt":1792200000},"seven_day":{"utilization":0.24,"resetsAt":1792342800}}}}`
+	const rejected = `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1792200000,"rateLimitType":"five_hour","isUsingOverage":false,"overageStatus":"rejected","overageDisabledReason":"org_level_disabled","unifiedWindows":{"five_hour":{"utilization":1,"resetsAt":1792200000},"seven_day":{"utilization":0.24,"resetsAt":1792342800}}}}`
+	// A quota failure can carry subtype=success and cumulative helper usage.
+	const failed = `{"type":"result","subtype":"success","is_error":true,"result_index":0,"result":"PRIVATE_RESULT\nforged journal line","errors":["PRIVATE_ERROR"],"modelUsage":{"claude-opus-5-5":{"inputTokens":36,"cacheCreationInputTokens":160092,"cacheReadInputTokens":435540,"outputTokens":11489}}}`
+	const limit = "provider usage limit reached; resets at 2026-10-17T01:20:00Z"
+	known := usage.Tokens{Input: 15, CachedInput: 7, Output: 11}
+	for _, test := range []struct {
+		name, data   string
+		want         usage.Tokens
+		failsAtWrite bool
+		failure      string
+	}{
+		{"warning permits completion", warning + "\n" + successfulResult, known, false, ""},
+		{"native failure keeps helper counters", warning + "\n" + rejected + "\n" + failed, usage.Tokens{Input: 595668, CachedInput: 435540, Output: 11489}, true, limit},
+		{"rejection at EOF", rejected, usage.Tokens{}, false, limit},
+		{"later counters still parsed", rejected + "\n" + successfulResult, known, false, limit},
+		{"warning cannot clear rejection", rejected + "\n" + warning + "\n" + successfulResult, known, false, limit},
+		{"rejection invalidates earlier answer", successfulResult + "\n" + rejected, known, false, limit},
+		{"limit takes precedence over unfinished tasks", rejected + "\n" + `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"reviewer"}]}`, usage.Tokens{}, false, limit},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cancelled := false
+			o := jsonlOutput{cancel: func() { cancelled = true }}
+			data := test.data + "\n"
+			for len(data) > 0 {
+				n := min(7, len(data))
+				_, _ = o.Write([]byte(data[:n]))
+				data = data[n:]
+			}
+			if (o.err != nil) != test.failsAtWrite || cancelled != test.failsAtWrite || o.result.Tokens != test.want {
+				t.Fatalf("usage limit interrupted counter collection: tokens=%+v error=%v cancelled=%t", o.result.Tokens, o.err, cancelled)
+			}
+			o.finish()
+			if test.failure == "" {
+				if o.err != nil || cancelled || !o.result.UsageComplete || o.result.Answer != "final answer" {
+					t.Fatalf("warning refused successful result: %+v error=%v", o.result, o.err)
+				}
+			} else if o.err == nil || o.err.Error() != test.failure || !cancelled || o.result.UsageComplete || o.result.Answer != "" {
+				t.Fatalf("unsafe or missing usage limit failure: tokens=%+v error=%v complete=%t answer=%q", o.result.Tokens, o.err, o.result.UsageComplete, o.result.Answer)
+			}
+		})
+	}
+}
+
+func TestOutputUsageLimitResetValidation(t *testing.T) {
+	for _, test := range []struct{ name, reset, suffix string }{
+		{"missing", "", ""}, {"zero", "0", ""}, {"negative", "-1", ""}, {"fractional", "1.5", ""},
+		{"string", `"PRIVATE_RESET"`, ""}, {"null", "null", ""}, {"object", `{"private":"reset"}`, ""},
+		{"integer overflow", "9223372036854775808", ""}, {"time overflow", "9223372036854775807", ""},
+		{"outside RFC3339", "253402300800", ""}, {"first positive", "1", "; resets at 1970-01-01T00:00:01Z"},
+		{"last RFC3339 second", "253402300799", "; resets at 9999-12-31T23:59:59Z"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			reset := ""
+			if test.reset != "" {
+				reset = `,"resetsAt":` + test.reset
+			}
+			data := fmt.Sprintf(`{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"PRIVATE_TYPE\nforged journal line"%s}}`, reset)
+			o := jsonlOutput{}
+			_, _ = o.Write([]byte(data))
+			o.finish()
+			if o.err == nil || o.err.Error() != "provider usage limit reached"+test.suffix || o.result.UsageComplete {
+				t.Fatalf("reset was not safely bounded: %v", o.err)
+			}
+		})
+	}
+}
 
 // numberResultEvents models the native CLI's contiguous per-turn delivery indices.
 func numberResultEvents(data string) string {
