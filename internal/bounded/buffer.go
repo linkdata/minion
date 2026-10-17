@@ -36,14 +36,13 @@ func (b *Buffer) Write(p []byte) (int, error) {
 func (b *Buffer) Bytes() []byte  { return b.buffer.Bytes() }
 func (b *Buffer) String() string { return b.buffer.String() }
 
-// Tail drains command diagnostics while retaining only their last Limit bytes.
+// Tail drains command diagnostics while retaining their last DiagnosticBytes.
 type Tail struct {
-	Limit int
-	data  []byte
+	data []byte
 }
 
 func (b *Tail) Write(p []byte) (int, error) {
-	n, limit := len(p), max(0, b.Limit)
+	n, limit := len(p), DiagnosticBytes
 	if n >= limit {
 		b.data = append(b.data[:0], p[n-limit:]...)
 		return n, nil
@@ -59,10 +58,9 @@ func (b *Tail) Write(p []byte) (int, error) {
 func (b *Tail) String() string { return string(b.data) }
 
 // Text bounds diagnostic text and marks a discarded suffix.
-func Text(s string, limit int) string {
-	limit = max(0, limit)
-	if len(s) > limit {
-		return strings.ToValidUTF8(s[:limit], "") + "..."
+func Text(s string) string {
+	if len(s) > DiagnosticBytes {
+		return strings.ToValidUTF8(s[:DiagnosticBytes], "") + "..."
 	}
 	return s
 }

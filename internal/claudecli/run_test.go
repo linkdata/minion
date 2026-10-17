@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -15,6 +16,52 @@ import (
 	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/usage"
 )
+
+func TestReadOnlyAddDirsMatchCanonicalPolicyWithoutTreatingDirectoriesAsSkills(t *testing.T) {
+	root := t.TempDir()
+	realDir, alias, namedSkill := filepath.Join(root, "reports"), filepath.Join(root, "alias"), filepath.Join(root, "SKILL.md")
+	for _, path := range []string{realDir, namedSkill} {
+		if err := os.Mkdir(path, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(realDir, alias); err != nil {
+		t.Fatal(err)
+	}
+	binary := fakeExecutable(t, "claude", `printf '%s\n' "$@" > "$0.args"
+cat >/dev/null
+printf '%s\n' '`+successfulResult+`'
+`)
+	settings := config.ClaudeConfig{ReadOnlyDirs: []string{alias, namedSkill}}
+	if _, err := Run(context.Background(), t.TempDir(), "task", false, "", settings); err != nil {
+		t.Fatal(err)
+	}
+	args := strings.Split(strings.TrimSpace(readFile(t, binary+".args")), "\n")
+	var dirs []string
+	var policy struct {
+		Sandbox struct {
+			Filesystem struct{ DenyWrite []string } `json:"filesystem"`
+		} `json:"sandbox"`
+	}
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == "--add-dir" {
+			dirs = append(dirs, args[i+1])
+		}
+		if args[i] == "--settings" {
+			if err := json.Unmarshal([]byte(args[i+1]), &policy); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for _, dir := range []string{realDir, namedSkill} {
+		if !slices.Contains(dirs, dir) || !slices.Contains(policy.Sandbox.Filesystem.DenyWrite, dir) {
+			t.Fatalf("canonical directory missing from grant or denial: dirs=%v deny=%v", dirs, policy.Sandbox.Filesystem.DenyWrite)
+		}
+	}
+	if slices.Contains(dirs, root) || slices.Contains(dirs, alias) || !slices.Equal(settings.ReadOnlyDirs, []string{alias, namedSkill}) {
+		t.Fatalf("grant widened or caller settings mutated: dirs=%v settings=%v", dirs, settings.ReadOnlyDirs)
+	}
+}
 
 const successfulResult = `{"type":"result","subtype":"success","is_error":false,"result":"final answer","usage":{"input_tokens":3,"cache_creation_input_tokens":5,"cache_read_input_tokens":7,"output_tokens":11},"modelUsage":{"claude-main":{"inputTokens":3,"cacheCreationInputTokens":5,"cacheReadInputTokens":7,"outputTokens":11}}}`
 

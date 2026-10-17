@@ -17,6 +17,25 @@ func TestIdentitySegmentBounds(t *testing.T) {
 	}
 }
 
+func TestRepositoryIdentity(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		valid bool
+	}{
+		{"owner/repo.name_1-2", true},
+		{strings.Repeat("a", 100) + "/" + strings.Repeat("b", 100), true},
+		{"", false}, {"owner", false}, {"/repo", false}, {"owner/", false},
+		{"owner/repo/extra", false}, {"../repo", false}, {"owner/..", false},
+		{"owner/café", false}, {"owner/repo\n", false},
+		{strings.Repeat("a", 101) + "/repo", false},
+		{"owner/" + strings.Repeat("b", 101), false},
+	} {
+		if got := ValidRepository(test.name); got != test.valid {
+			t.Errorf("ValidRepository(%q)=%t, want %t", test.name, got, test.valid)
+		}
+	}
+}
+
 func TestWithinCanonicalPaths(t *testing.T) {
 	root := t.TempDir()
 	if !Within(root, root) || !Within(root, filepath.Join(root, "child")) || Within(root, root+"-sibling") || Within(root, filepath.Dir(root)) {

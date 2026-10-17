@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/linkdata/minion/internal/config"
-	"github.com/linkdata/minion/internal/workroot"
 )
 
 func TestWorkRootPreflightRefusesModelGrants(t *testing.T) {
@@ -55,7 +53,7 @@ func TestWorkRootPreflightRefusesModelGrants(t *testing.T) {
 				}
 				cfg.WorkRoot = alias
 			}
-			if err := checkWorkRootIsolation(cfg); !errors.Is(err, workroot.ErrUnsafe) || !strings.Contains(err.Error(), "work root overlaps") {
+			if err := checkWorkRootIsolation(cfg); err == nil || !strings.Contains(err.Error(), "work root overlaps") {
 				t.Fatalf("preflight accepted overlapping grant: %v", err)
 			}
 		})

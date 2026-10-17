@@ -1,6 +1,7 @@
 package action
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -14,6 +15,7 @@ import (
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/monitor"
+	"github.com/linkdata/minion/internal/workspace"
 )
 
 func TestRunnerRecordsOnlyParsedSuccessfulCriticApprovals(t *testing.T) {
@@ -110,6 +112,18 @@ func TestAuditResultRejectsRenderedOverflowButKeepsPartialReport(t *testing.T) {
 	}
 	if err := result.validate(job, false); err != nil {
 		t.Fatalf("bounded partial report cannot be retained: %v", err)
+	}
+}
+
+func TestPartialAuditReportPreservesByteLimit(t *testing.T) {
+	job := portableJob(command.SecurityAudit)
+	for _, size := range []int{maxOutputBytes, maxOutputBytes + 1} {
+		result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head,
+			Artifacts: []workspace.File{{Path: "REPORT.md", Mode: workspace.Regular, Data: bytes.Repeat([]byte("x"), size)}},
+		}
+		if err := result.validate(job, false); (err == nil) != (size == maxOutputBytes) || err != nil && !strings.Contains(err.Error(), "report artifacts exceed limits") {
+			t.Fatalf("partial report size %d accepted or misclassified: %v", size, err)
+		}
 	}
 }
 

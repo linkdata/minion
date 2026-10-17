@@ -1,4 +1,4 @@
-package action
+package gitwork
 
 import (
 	"bytes"
@@ -18,24 +18,28 @@ import (
 	"syscall"
 
 	"github.com/linkdata/minion/internal/bounded"
-	"github.com/linkdata/minion/internal/gitwork"
-	"github.com/linkdata/minion/internal/processgroup"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
-// fixIndex keeps Git metadata outside every model grant. It has no remotes,
+const (
+	excludeGit         = ":(exclude,icase,glob)**/.git"
+	excludeGitContents = ":(exclude,icase,glob)**/.git/**"
+)
+
+// OfflineIndex keeps Git metadata outside every model grant. It has no remotes,
 // source repository configuration, credential environment, hooks or checkout filters.
-type fixIndex struct {
+type OfflineIndex struct {
 	dir, source, binary, baseline string
 	tracked                       map[string]int64
 }
 
-func newFixIndex(ctx context.Context, dir, source string, files []workspace.File) (*fixIndex, error) {
-	binary, err := gitwork.ResolveGit()
+// NewOfflineIndex creates private Git metadata for a materialized source snapshot.
+func NewOfflineIndex(ctx context.Context, dir, source string, files []workspace.File) (*OfflineIndex, error) {
+	binary, err := resolveGit()
 	if err != nil {
 		return nil, fmt.Errorf("offline fix index requires git: %w", err)
 	}
-	index := &fixIndex{dir: dir, source: source, binary: binary, tracked: make(map[string]int64, len(files))}
+	index := &OfflineIndex{dir: dir, source: source, binary: binary, tracked: make(map[string]int64, len(files))}
 	for _, file := range files {
 		index.tracked[file.Path] = int64(len(file.Data))
 	}
@@ -43,7 +47,7 @@ func newFixIndex(ctx context.Context, dir, source string, files []workspace.File
 		return nil, err
 	}
 	// info/attributes overrides untrusted .gitattributes even for forced baseline files.
-	if err := gitwork.DisableAttributes(dir); err != nil {
+	if err := disableAttributes(dir); err != nil {
 		return nil, err
 	}
 	if _, err := index.run(ctx, 1024, nil, "add", "--all", "--force", "--", "."); err != nil {
@@ -60,7 +64,8 @@ func newFixIndex(ctx context.Context, dir, source string, files []workspace.File
 	return index, nil
 }
 
-func (index *fixIndex) changes(ctx context.Context) ([]workspace.Change, error) {
+// Changes captures bounded regular-file changes using the snapshot's ignore rules.
+func (index *OfflineIndex) Changes(ctx context.Context) ([]workspace.Change, error) {
 	if err := index.checkControlFiles(ctx); err != nil {
 		return nil, err
 	}
@@ -97,11 +102,11 @@ func (index *fixIndex) changes(ctx context.Context) ([]workspace.Change, error) 
 		return nil, err
 	}
 	// Bound new output before Git hashes it; ignored files and metadata remain excluded.
-	untracked, err := index.run(ctx, (workspace.MaxChanges+1)*(workspace.MaxPathBytes+1), nil, "ls-files", "-z", "--others", "--exclude-standard", "--", ".", ":(exclude,icase,glob)**/.git", ":(exclude,icase,glob)**/.git/**")
+	untracked, err := index.run(ctx, (workspace.MaxChanges+1)*(workspace.MaxPathBytes+1), nil, "ls-files", "-z", "--others", "--exclude-standard", "--", ".", excludeGit, excludeGitContents)
 	if err != nil {
 		return nil, err
 	}
-	paths, err := gitwork.SplitNUL(untracked)
+	paths, err := splitNUL(untracked)
 	if err != nil {
 		return nil, fmt.Errorf("invalid offline git untracked paths: %w", err)
 	}
@@ -129,10 +134,10 @@ func (index *fixIndex) changes(ctx context.Context) ([]workspace.Change, error) 
 		total += info.Size()
 	}
 	// shortcut: size prechecks can race and do not cap Git I/O; add isolated executor quotas (#96).
-	if _, err := index.run(ctx, 1024, nil, "add", "--all", "--", ".", ":(exclude,icase,glob)**/.git", ":(exclude,icase,glob)**/.git/**"); err != nil {
+	if _, err := index.run(ctx, 1024, nil, "add", "--all", "--", ".", excludeGit, excludeGitContents); err != nil {
 		return nil, err
 	}
-	raw, err := index.run(ctx, gitwork.MaxChangedPathListBytes, nil, "diff", "--cached", "--raw", "-z", "--no-abbrev", "--no-renames", "--no-ext-diff", "--no-textconv", index.baseline, "--")
+	raw, err := index.run(ctx, maxChangedPathListBytes, nil, "diff", "--cached", "--raw", "-z", "--no-abbrev", "--no-renames", "--no-ext-diff", "--no-textconv", index.baseline, "--")
 	if err != nil {
 		return nil, err
 	}
@@ -150,7 +155,7 @@ func (index *fixIndex) changes(ctx context.Context) ([]workspace.Change, error) 
 			return nil, fmt.Errorf("fix file %q changed after indexing", change.Path)
 		}
 	}
-	if _, err := index.run(ctx, gitwork.MaxPatchBytes, nil, "diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv", "--no-renames", "--no-color", "--submodule=short", index.baseline, "--"); err != nil {
+	if _, err := index.run(ctx, maxPatchBytes, nil, "diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv", "--no-renames", "--no-color", "--submodule=short", index.baseline, "--"); err != nil {
 		return nil, err
 	}
 	return changes, nil
@@ -159,7 +164,7 @@ func (index *fixIndex) changes(ctx context.Context) ([]workspace.Change, error) 
 // Check control-file shapes before Git can open FIFOs while discovering output.
 // Ignored directories are skipped unless they contain supplied tracked files.
 // shortcut: live writers can race these checks; isolate and quiesce executors in #96.
-func (index *fixIndex) checkControlFiles(ctx context.Context) error {
+func (index *OfflineIndex) checkControlFiles(ctx context.Context) error {
 	trackedDirs := map[string]bool{}
 	for name := range index.tracked {
 		for parent := path.Dir(name); parent != "."; parent = path.Dir(parent) {
@@ -263,7 +268,7 @@ func (index *fixIndex) checkControlFiles(ctx context.Context) error {
 }
 
 func parseIndexChanges(raw []byte) ([]workspace.Change, []string, error) {
-	parts, err := gitwork.SplitNUL(raw)
+	parts, err := splitNUL(raw)
 	if err != nil {
 		return nil, nil, fmt.Errorf("invalid offline git diff: %w", err)
 	}
@@ -308,21 +313,19 @@ func gitBlobID(data []byte) string {
 	return hex.EncodeToString(hash.Sum(nil))
 }
 
-func (index *fixIndex) run(ctx context.Context, limit int, input []byte, args ...string) ([]byte, error) {
+func (index *OfflineIndex) run(ctx context.Context, limit int, input []byte, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	gitArgs := append(gitwork.HardeningArgs(), "--git-dir="+index.dir, "--work-tree="+index.source,
-		"-c", "credential.helper=", "-c", "protocol.allow=never")
-	cmd := exec.CommandContext(ctx, index.binary, append(gitArgs, args...)...)
-	processgroup.Configure(cmd)
-	cmd.Dir = index.dir
-	cmd.Env = append([]string{"PATH=" + gitwork.SafePath(os.Getenv("PATH")), "HOME=" + index.dir, "TMPDIR=" + index.dir}, gitwork.HardeningEnv()...)
+	gitArgs := []string{"--git-dir=" + index.dir, "--work-tree=" + index.source,
+		"-c", "credential.helper=", "-c", "protocol.allow=never"}
+	env := append([]string{"PATH=" + safePath(os.Getenv("PATH")), "HOME=" + index.dir, "TMPDIR=" + index.dir}, hardeningEnv()...)
+	cmd := gitCommand(ctx, index.binary, index.dir, env, append(gitArgs, args...)...)
 	output, diagnostic := bounded.Buffer{Limit: limit, Cancel: cancel}, bounded.Buffer{Limit: bounded.DiagnosticBytes}
 	cmd.Stdout, cmd.Stderr, cmd.Stdin = &output, &diagnostic, bytes.NewReader(input)
 	err := cmd.Run()
 	if output.Exceeded {
 		if args[0] == "diff" && slices.Contains(args, "--binary") {
-			return nil, gitwork.ErrDiffTooLarge
+			return nil, ErrDiffTooLarge
 		}
 		return nil, fmt.Errorf("offline git %s output exceeds action limit", args[0])
 	}
@@ -334,7 +337,7 @@ func (index *fixIndex) run(ctx context.Context, limit int, input []byte, args ..
 		if contextErr := ctx.Err(); contextErr != nil {
 			err = errors.Join(err, contextErr)
 		} else {
-			err = gitwork.ClassifyPathError(args[0], diagnostic.String(), err)
+			err = classifyPathError(args[0], diagnostic.String(), err)
 		}
 		return nil, fmt.Errorf("offline git %s: %w: %q", args[0], err, strings.TrimSpace(diagnostic.String()))
 	}

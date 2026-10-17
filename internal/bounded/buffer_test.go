@@ -33,34 +33,34 @@ func TestBufferExactAndZeroLimit(t *testing.T) {
 }
 
 func TestTailDrainsAndKeepsSuffix(t *testing.T) {
-	for _, limit := range []int{0, 3} {
-		for _, chunks := range [][]string{{"abcdef"}, {"a", "bc", "de", "f"}, {"abc", "def"}} {
-			output := Tail{Limit: limit}
-			for _, chunk := range chunks {
-				if n, err := output.Write([]byte(chunk)); err != nil || n != len(chunk) {
-					t.Fatalf("write=%d,%v", n, err)
-				}
+	text := strings.Repeat("x", DiagnosticBytes) + "suffix"
+	for _, size := range []int{1, 3, DiagnosticBytes + 10} {
+		output := Tail{}
+		for remaining := text; len(remaining) > 0; {
+			next := min(size, len(remaining))
+			if n, err := output.Write([]byte(remaining[:next])); err != nil || n != next {
+				t.Fatalf("write=%d,%v", n, err)
 			}
-			if output.String() != "abcdef"[6-limit:] {
-				t.Fatalf("limit=%d tail=%q", limit, output.String())
-			}
+			remaining = remaining[next:]
+		}
+		if output.String() != text[len(text)-DiagnosticBytes:] {
+			t.Fatalf("chunk=%d tail=%q", size, output.String())
 		}
 	}
-	if Text("abc", 3) != "abc" || Text("abcd", 3) != "abc..." || Text("a", 0) != "..." {
+	if Text(text[:DiagnosticBytes]) != text[:DiagnosticBytes] || Text(text) != text[:DiagnosticBytes]+"..." {
 		t.Fatal("diagnostic text bounds changed")
 	}
 }
 
 func TestTextPreservesUTF8AtTheDiagnosticBound(t *testing.T) {
-	for _, scenario := range []struct {
-		value string
-		limit int
-		want  string
-	}{
-		{"a€b", 2, "a..."}, {"a€b", 4, "a€..."}, {"a€b", 5, "a€b"}, {"éx", 1, "..."},
+	for _, scenario := range []struct{ value, want string }{
+		{strings.Repeat("a", DiagnosticBytes-1) + "€b", strings.Repeat("a", DiagnosticBytes-1) + "..."},
+		{strings.Repeat("a", DiagnosticBytes-3) + "€b", strings.Repeat("a", DiagnosticBytes-3) + "€..."},
+		{strings.Repeat("a", DiagnosticBytes-4) + "€b", strings.Repeat("a", DiagnosticBytes-4) + "€b"},
+		{strings.Repeat("a", DiagnosticBytes-1) + "é", strings.Repeat("a", DiagnosticBytes-1) + "..."},
 	} {
-		if got := Text(scenario.value, scenario.limit); got != scenario.want {
-			t.Fatalf("Text(%q,%d)=%q want%q", scenario.value, scenario.limit, got, scenario.want)
+		if got := Text(scenario.value); got != scenario.want {
+			t.Fatalf("Text(%q)=%q want%q", scenario.value, got, scenario.want)
 		}
 	}
 }

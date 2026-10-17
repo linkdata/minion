@@ -67,6 +67,80 @@ func TestOversizedNormalizedMetadataPreservesOtherPartialArtifacts(t *testing.T)
 	}
 }
 
+func TestPartialAuditMetadataPathListsStayPortable(t *testing.T) {
+	job := portableJob(command.SecurityAudit)
+	for _, field := range []string{"scope_paths", "prior_run_paths"} {
+		for _, path := range []string{".", "relative/report.md", "/worker/source", "../outside", `bad\path`} {
+			data, err := json.Marshal(map[string]any{field: []string{path}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			files, err := normalizeAuditArtifacts([]workspace.File{{Path: "run-metadata.json", Mode: workspace.Regular, Data: data}}, job, "/installed/SKILL.md")
+			portable := path == "." || path == "relative/report.md"
+			if (err == nil) != portable {
+				t.Fatalf("partial %s path %q: %v", field, path, err)
+			}
+			if portable {
+				var normalized map[string]json.RawMessage
+				if err := json.Unmarshal(files[0].Data, &normalized); err != nil || len(normalized) != 2 {
+					t.Fatalf("partial normalization invented missing fields: %s, %v", files[0].Data, err)
+				}
+			}
+		}
+	}
+}
+
+func TestRunnerRejectsBlankNoChangeFix(t *testing.T) {
+	for _, test := range []struct{ name, answer string }{{"empty", ""}, {"whitespace", " \n\t"}, {"NUL", "\x00"}} {
+		t.Run(test.name, func(t *testing.T) {
+			runner := Runner{WorkRoot: t.TempDir(), runModel: func(context.Context, modelRun) (aicli.Result, error) {
+				return aicli.Result{Answer: test.answer}, nil
+			}}
+			result, err := runner.Run(context.Background(), portableJob(command.Fix))
+			if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "action answer is blank") || result.Answer != "" || len(result.Changes) != 0 || len(result.Calls) != 1 {
+				t.Fatalf("blank no-change fix accepted: %+v, %v", result, err)
+			}
+		})
+	}
+}
+
+func TestRunnerAuditCollectionAndNormalizationFailuresAreTerminal(t *testing.T) {
+	for _, stage := range []string{"collection", "normalization"} {
+		t.Run(stage, func(t *testing.T) {
+			installActionTestSkills(t, testAuditSkillURL)
+			fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
+			job := portableJob(command.SecurityAudit)
+			job.Main.Skills = []string{testAuditSkillURL}
+			runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+				for _, file := range auditPreflightArtifacts(job, request.dir) {
+					if stage == "collection" && file.Path == "REPORT.md" {
+						if err := os.Mkdir(filepath.Join(request.outputDir, file.Path), 0700); err != nil {
+							t.Fatal(err)
+						}
+						continue
+					}
+					if stage == "normalization" && file.Path == "run-metadata.json" {
+						file.Data = bytes.Replace(file.Data, []byte("preflight-test"), bytes.Repeat([]byte("<"), maxAuditArtifactBytes/5), 1)
+					}
+					writeIndexFixture(t, request.outputDir, file.Path, file.Data)
+				}
+				return aicli.Result{Answer: "Audit complete."}, nil
+			}}
+			result, err := runner.Run(context.Background(), job)
+			want := "invalid audit REPORT.md"
+			if stage == "normalization" {
+				want = "normalized audit metadata exceeds byte limit"
+			}
+			if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), want) || result.Answer != "" || len(result.Calls) != 1 {
+				t.Fatalf("audit %s error lost terminal boundary: calls=%d answer=%q artifacts=%d error=%v", stage, len(result.Calls), result.Answer, len(result.Artifacts), err)
+			}
+			if err := result.validate(job, false); err != nil {
+				t.Fatalf("failure discarded valid partial artifacts: %v", err)
+			}
+		})
+	}
+}
+
 func TestRunnerCancellationDuringInstalledAuditValidatorPreservesCause(t *testing.T) {
 	installActionTestSkills(t, testAuditSkillURL)
 	bin := t.TempDir()
@@ -244,7 +318,7 @@ func TestRunnerCancellationBeforeDispatchRecordsNoCall(t *testing.T) {
 	}
 }
 
-func TestRunnerMetadataAliasSourceIsTerminalBeforeModels(t *testing.T) {
+func TestRunnerJobValidationRejectsMetadataAliasBeforeModels(t *testing.T) {
 	job := portableJob(command.Fix)
 	job.Source.Files = []workspace.File{{Path: "GIT~1/x", Mode: workspace.Regular}}
 	runner := Runner{WorkRoot: t.TempDir(), runModel: func(context.Context, modelRun) (aicli.Result, error) {
@@ -252,7 +326,7 @@ func TestRunnerMetadataAliasSourceIsTerminalBeforeModels(t *testing.T) {
 		return aicli.Result{}, nil
 	}}
 	result, err := runner.Run(context.Background(), job)
-	if !errors.Is(err, monitor.ErrTerminalJob) || len(result.Calls) != 0 {
+	if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "unsafe fix source path") || len(result.Calls) != 0 {
 		t.Fatalf("unsupported source was retryable: %v", err)
 	}
 }

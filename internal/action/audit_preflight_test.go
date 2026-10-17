@@ -119,14 +119,14 @@ func TestRunnerChecksAuditPrerequisitesBeforeModel(t *testing.T) {
 }
 
 func TestAuditMissingInputsFailBeforeValidatorExecution(t *testing.T) {
-	for _, name := range []string{"findings.json", "coverage-ledger.json"} {
+	for _, name := range []string{"findings.json", "coverage-ledger.json", "both"} {
 		for _, empty := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/empty=%t", name, empty), func(t *testing.T) {
 				job := portableJob(command.SecurityAudit)
 				files := auditPreflightArtifacts(job, "/source")
 				var supplied []workspace.File
 				for _, file := range files {
-					if file.Path == name {
+					if file.Path == name || name == "both" && (file.Path == "findings.json" || file.Path == "coverage-ledger.json") {
 						if !empty {
 							continue
 						}
@@ -137,7 +137,11 @@ func TestAuditMissingInputsFailBeforeValidatorExecution(t *testing.T) {
 				marker := filepath.Join(t.TempDir(), "node-called")
 				fakeOnPath(t, "node", "#!/bin/sh\nprintf called > "+shellQuote(marker)+"\nexit 99\n")
 				report, err := validateAuditFiles(context.Background(), supplied, t.TempDir(), "/installed/SKILL.md", job.Identity.Repository, "/source", job.Source.Head)
-				if err == nil || !strings.Contains(err.Error(), name+" is missing or empty") || report != "" {
+				firstMissing := name
+				if name == "both" {
+					firstMissing = auditValidators[0].artifact
+				}
+				if err == nil || !strings.Contains(err.Error(), firstMissing+" is missing or empty") || report != "" {
 					t.Fatalf("missing audit input accepted: report=%q error=%v", report, err)
 				}
 				if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {

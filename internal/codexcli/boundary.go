@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/linkdata/minion/internal/aicli"
+	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/processgroup"
 )
 
@@ -82,18 +84,27 @@ func ValidateInstructionBoundary(ctx context.Context) (resultErr error) {
 	} {
 		args := append([]string{"debug", "prompt-input"}, check.config...)
 		args = append(args, probePrompt)
+		runCtx, cancelRun := context.WithCancel(ctx)
 		// #nosec G204 -- Codex receives only fixed config flags and an inert prompt.
-		cmd := exec.CommandContext(ctx, binary, args...)
+		cmd := exec.CommandContext(runCtx, binary, args...)
 		cmd.Args[0] = "codex"
 		cmd.Dir = check.dir
 		cmd.Env = childEnvironment([]string{"PATH=" + os.Getenv("PATH"), "HOME=" + probeHome, "CODEX_HOME=" + probeHome}, runtimeDir, runtimeDir, false)
 		processgroup.Configure(cmd)
-		output, err := cmd.Output()
-		if err != nil {
-			return fmt.Errorf("render Codex instruction probe: %w", err)
+		output := bounded.Buffer{Limit: maxEventBytes, Cancel: cancelRun}
+		diagnostics := bounded.Tail{}
+		cmd.Stdout, cmd.Stderr = &output, &diagnostics
+		err := cmd.Run()
+		cancelRun()
+		probeErr := errors.Join(ctx.Err(), err)
+		if output.Exceeded {
+			probeErr = errors.Join(aicli.ErrOutputLimit, probeErr)
 		}
-		foundAgent := bytes.Contains(output, []byte(probeAgent))
-		foundSkill := bytes.Contains(output, []byte(probeSkill))
+		if probeErr != nil {
+			return fmt.Errorf("render Codex instruction probe: %w: %q", probeErr, strings.TrimSpace(diagnostics.String()))
+		}
+		foundAgent := bytes.Contains(output.Bytes(), []byte(probeAgent))
+		foundSkill := bytes.Contains(output.Bytes(), []byte(probeSkill))
 		if check.wantCanary && (!foundAgent || !foundSkill) {
 			return errors.New("codex instruction probe cannot observe repository instructions and skills")
 		}
@@ -106,7 +117,7 @@ func ValidateInstructionBoundary(ctx context.Context) (resultErr error) {
 				Text string `json:"text"`
 			} `json:"content"`
 		}
-		if err := json.Unmarshal(output, &messages); err != nil {
+		if err := json.Unmarshal(output.Bytes(), &messages); err != nil {
 			return fmt.Errorf("decode Codex instruction probe: %w", err)
 		}
 		trusted := false

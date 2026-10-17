@@ -30,9 +30,8 @@ func (e *Orchestrator) trackUsage(job monitor.Job) (func(error) error, error) {
 		critic := e.roleSettings(record.CriticProvider, nil)
 		record.CriticModel, record.CriticEffort = cmp.Or(critic.Model, "default"), critic.Effort
 	}
-	store := e.Usage
 	save := func() error {
-		if err := store.Save(record); err != nil {
+		if err := e.Usage.Save(record); err != nil {
 			return fmt.Errorf("save action usage %s: %w", record.ID, err)
 		}
 		return nil

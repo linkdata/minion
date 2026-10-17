@@ -211,10 +211,10 @@ func TestCheckoutPullRequestVerifiesHead(t *testing.T) {
 	head := fixture.git(fixture.source, "rev-parse", "HEAD")
 	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/pull/7/head")
 
-	if err := fixture.checkout.checkoutPullRequest(ctx, 7, "main", strings.Repeat("f", 40), true); !errors.Is(err, errHeadMoved) {
+	if err := fixture.checkout.checkoutPullRequest(ctx, 7, "main", strings.Repeat("f", 40)); !errors.Is(err, errHeadMoved) {
 		t.Fatalf("mismatched PR head error = %v, want errHeadMoved", err)
 	}
-	if err := fixture.checkout.checkoutPullRequest(ctx, 7, "main", head, true); err != nil {
+	if err := fixture.checkout.checkoutPullRequest(ctx, 7, "main", head); err != nil {
 		t.Fatalf("CheckoutPullRequest() error = %v", err)
 	}
 	got := fixture.git(fixture.checkout.path, "rev-parse", "HEAD")
@@ -273,7 +273,7 @@ func TestCheckoutPullRequestBoundsAliasedTrees(t *testing.T) {
 				return tree, nil
 			}
 			fixture.checkout.lookupTree = lookup
-			err := fixture.checkout.checkoutPullRequest(context.Background(), 7, "main", head, true)
+			err := fixture.checkout.checkoutPullRequest(context.Background(), 7, "main", head)
 			if tt.blocked {
 				if !errors.Is(err, ErrCheckoutTooLarge) {
 					t.Fatalf("CheckoutPullRequest() error = %v, want checkout limit", err)
@@ -288,13 +288,19 @@ func TestCheckoutPullRequestBoundsAliasedTrees(t *testing.T) {
 			for level := 0; level < tt.depth; level++ {
 				path = filepath.Join(path, "d00")
 			}
-			info, statErr := os.Stat(filepath.Join(path, "payload"))
-			if tt.blocked {
-				if !errors.Is(statErr, os.ErrNotExist) {
-					t.Fatalf("oversized tree materialized: %v", statErr)
+			if _, statErr := os.Stat(filepath.Join(path, "payload")); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("PR worktree materialized: %v", statErr)
+			}
+			if !tt.blocked {
+				snapshot, err := fixture.checkout.Snapshot(context.Background(), false)
+				if err != nil || len(snapshot.Files) != entries {
+					t.Fatalf("small tree snapshot files=%d error=%v", len(snapshot.Files), err)
 				}
-			} else if statErr != nil || info.Size() != int64(tt.blobBytes) {
-				t.Fatalf("small tree checkout: size = %v, error = %v", info, statErr)
+				for _, file := range snapshot.Files {
+					if len(file.Data) != tt.blobBytes {
+						t.Fatalf("snapshot file %q bytes=%d", file.Path, len(file.Data))
+					}
+				}
 			}
 		})
 	}
@@ -363,7 +369,7 @@ func TestPullRequestSnapshotOmitsSymlinks(t *testing.T) {
 	fixture.git(fixture.source, "commit", "-m", "add skill link")
 	head := fixture.git(fixture.source, "rev-parse", "HEAD")
 	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/pull/7/head")
-	if err := fixture.checkout.checkoutPullRequest(context.Background(), 7, "main", head, true); err != nil {
+	if err := fixture.checkout.checkoutPullRequest(context.Background(), 7, "main", head); err != nil {
 		t.Fatal(err)
 	}
 	snapshot, err := fixture.checkout.Snapshot(context.Background(), false)
@@ -407,7 +413,7 @@ func TestCheckoutPullRequestPreflightDoesNotFetchMissingBlob(t *testing.T) {
 		return completeTree(sha, []github.GitTreeEntry{{Path: "new.dat", Type: "blob", Mode: "100644", Size: &size}}), nil
 	}
 	checkout.lookupTree = oversized
-	if err := checkout.checkoutPullRequest(context.Background(), 7, "main", head, true); !errors.Is(err, ErrCheckoutTooLarge) {
+	if err := checkout.checkoutPullRequest(context.Background(), 7, "main", head); !errors.Is(err, ErrCheckoutTooLarge) {
 		t.Fatalf("oversized PR error = %v, want checkout limit", err)
 	}
 	if !blobMissing(t, checkout.path, blob) {
@@ -417,15 +423,28 @@ func TestCheckoutPullRequestPreflightDoesNotFetchMissingBlob(t *testing.T) {
 		t.Fatalf("rejected PR moved HEAD to %s", got)
 	}
 	checkout.lookupTree = localTreeMetadata(t, fixture.source)
-	if err := checkout.checkoutPullRequest(context.Background(), 7, "main", head, true); err != nil {
+	if err := checkout.checkoutPullRequest(context.Background(), 7, "main", head); err != nil {
 		t.Fatalf("bounded PR checkout: %v", err)
 	}
-	if info, err := os.Stat(filepath.Join(checkout.path, "new.dat")); err != nil || info.Size() != blobBytes {
-		t.Fatalf("bounded PR file size = %v, error = %v", info, err)
+	if !blobMissing(t, checkout.path, blob) {
+		t.Fatal("PR ref preparation materialized missing blob")
+	}
+	snapshot, err := checkout.Snapshot(context.Background(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, file := range snapshot.Files {
+		if file.Path == "new.dat" {
+			found = len(file.Data) == blobBytes
+		}
+	}
+	if !found {
+		t.Fatal("bounded PR snapshot missing expected blob bytes")
 	}
 }
 
-func TestCheckoutPullRequestDisablesRepositoryTransforms(t *testing.T) {
+func TestPullRequestSnapshotPreservesRepositoryBlobBytes(t *testing.T) {
 	fixture := newFixture(t)
 	attributes := "payload.txt ident text eol=crlf working-tree-encoding=UTF-16LE\n"
 	payload := strings.Repeat("$Id$\n", 1024)
@@ -446,15 +465,21 @@ func TestCheckoutPullRequestDisablesRepositoryTransforms(t *testing.T) {
 			t.Error(err)
 		}
 	}()
-	if err := checkout.checkoutPullRequest(context.Background(), 7, "main", head, true); err != nil {
+	if err := checkout.checkoutPullRequest(context.Background(), 7, "main", head); err != nil {
 		t.Fatal(err)
 	}
-	got, err := os.ReadFile(filepath.Join(checkout.path, "payload.txt"))
+	snapshot, err := checkout.Snapshot(context.Background(), false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(got) != payload {
-		t.Fatalf("checkout transformed %d blob bytes into %d worktree bytes", len(payload), len(got))
+	found := false
+	for _, file := range snapshot.Files {
+		if file.Path == "payload.txt" {
+			found = string(file.Data) == payload
+		}
+	}
+	if !found {
+		t.Fatal("PR snapshot transformed or omitted source blob bytes")
 	}
 }
 
@@ -655,7 +680,7 @@ func TestSplitNULRecords(t *testing.T) {
 		{"one\x00two\x00", []string{"one", "two"}},
 		{"\x00", []string{""}},
 	} {
-		records, err := SplitNUL([]byte(test.data))
+		records, err := splitNUL([]byte(test.data))
 		if err != nil || len(records) != len(test.want) {
 			t.Fatalf("split %q=%q,%v", test.data, records, err)
 		}
@@ -665,7 +690,7 @@ func TestSplitNULRecords(t *testing.T) {
 			}
 		}
 	}
-	if _, err := SplitNUL([]byte("one\x00unterminated")); err == nil {
+	if _, err := splitNUL([]byte("one\x00unterminated")); err == nil {
 		t.Fatal("accepted unterminated records")
 	}
 }
@@ -738,7 +763,7 @@ func newFixture(t *testing.T) gitFixture {
 	fixture.git("", "clone", "--no-checkout", "--branch", "main", fixture.remote, path)
 	fixture.git(path, "checkout", "--detach", "refs/remotes/origin/main")
 	fixture.checkout = &Checkout{path: path, url: fixture.remote, expectedHead: fixture.base, lookupTree: localTreeMetadata(t, path)}
-	if err := DisableAttributes(filepath.Join(path, ".git")); err != nil {
+	if err := disableAttributes(filepath.Join(path, ".git")); err != nil {
 		t.Fatal(err)
 	}
 	if err := fixture.checkout.recordConfig(); err != nil {

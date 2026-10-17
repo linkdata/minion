@@ -20,6 +20,10 @@ func TestOutputStoppedTaskNeedsNewRootResponseAndResult(t *testing.T) {
 	const stop = `{"type":"system","subtype":"task_notification","status":"stopped","summary":"Background command tests was stopped"}`
 	notice, _ := json.Marshal(`<task-notification><task-id>tests</task-id><status>killed</status><summary>Tests stopped</summary></task-notification>`)
 	synthetic := `{"type":"user","isSynthetic":true,"message":{"content":` + string(notice) + `}}`
+	noticeEvent := func(summary string) string {
+		value, _ := json.Marshal("<task-notification><status>killed</status><summary>" + summary + "</summary></task-notification>")
+		return `{"type":"user","isSynthetic":true,"message":{"content":` + string(value) + `}}`
+	}
 	for _, tc := range []struct {
 		name, after string
 		fails       bool
@@ -37,6 +41,12 @@ func TestOutputStoppedTaskNeedsNewRootResponseAndResult(t *testing.T) {
 		{"synthetic killed string", synthetic + "\n" + successfulResult, true},
 		{"synthetic stopped block", `{"type":"user","isSynthetic":true,"message":{"content":[{"type":"text","text":` + strings.Replace(string(notice), "killed", "stopped", 1) + `}]}}` + "\n" + successfulResult, true},
 		{"synthetic stop assessed", synthetic + "\n" + fresh + "\n" + successfulResult, false},
+		{"raw ampersand notice", noticeEvent(`Background command "go test && go vet" was stopped`), true},
+		{"raw less-than notice", noticeEvent(`Background command "grep x <file" was stopped`), true},
+		{"entity-escaped notice", noticeEvent(`Background command &quot;go test &amp;&amp; go vet&quot; was stopped`), true},
+		{"killed system event", strings.Replace(stop, `"status":"stopped"`, `"status":"killed"`, 1), true},
+		{"raw memory-pressure summary", noticeEvent(`Background command "go test && go vet" was stopped because the system is running low on memory`) + "\n" + fresh + "\n" + successfulResult, true},
+		{"literal closing summary tag in command", noticeEvent(`Background command "echo </summary> && go vet" was stopped because the system is running low on memory`) + "\n" + fresh + "\n" + successfulResult, true},
 		{"ordinary user quote", strings.Replace(synthetic, `"isSynthetic":true`, `"isSynthetic":false`, 1), false},
 		{"ordinary failed command assessed", strings.Replace(stop, `"status":"stopped"`, `"status":"failed"`, 1), false},
 	} {

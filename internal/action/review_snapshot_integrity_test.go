@@ -118,7 +118,7 @@ func TestReviewSnapshotChecksExactFrozenFiles(t *testing.T) {
 						t.Fatalf("test changed the live reports instead of the frozen copy: %q,%v", data, err)
 					}
 				} else {
-					changes, err := index.changes(context.Background())
+					changes, err := index.Changes(context.Background())
 					if err != nil || len(changes) != 0 {
 						t.Fatalf("test changed live source instead of frozen copy: %+v,%v", changes, err)
 					}
@@ -128,5 +128,42 @@ func TestReviewSnapshotChecksExactFrozenFiles(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestReviewSnapshotRejectsUnreadableLiveCandidates(t *testing.T) {
+	for _, reports := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reports_%t", reports), func(t *testing.T) {
+			job := portableJob(command.Fix)
+			index, source := offlineIndexFixture(t, job.Source.Files)
+			output, want := "", "fix control file"
+			if reports {
+				job.Action, index = command.SecurityAudit, nil
+				output, want = t.TempDir(), "invalid audit REPORT.md"
+				writeIndexFixture(t, output, "REPORT.md", []byte("reviewed report"))
+			}
+			snapshot, err := freezeReviewSnapshot(context.Background(), t.TempDir(), job, source, output, index)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := snapshot.close(); err != nil {
+					t.Error(err)
+				}
+			})
+			path := filepath.Join(source, ".gitignore")
+			if reports {
+				path = filepath.Join(output, "REPORT.md")
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.Mkdir(path, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := snapshot.verify(context.Background()); err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("unreadable live candidate accepted: %v", err)
+			}
+		})
 	}
 }

@@ -424,38 +424,51 @@ func TestAuditPromptSelectsDomainCompanionsOnly(t *testing.T) {
 }
 
 func TestRunnerReturnsPartialAuditArtifactsOnFailure(t *testing.T) {
-	installActionTestSkills(t, testAuditSkillURL)
-	job := portableJob(command.SecurityAudit)
-	job.Main.Skills = []string{testAuditSkillURL}
-	failure := errors.New("provider stopped after writing partial report")
-	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
-		if err := os.WriteFile(filepath.Join(request.outputDir, "REPORT.md"), []byte("Incomplete source findings"), 0600); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(request.outputDir, "run-metadata.json"), []byte(`{"target":"/worker/local/source","selected_companion_files":[]}`), 0600); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(request.outputDir, "findings.json"), make([]byte, (5<<20)+1), 0600); err != nil {
-			t.Fatal(err)
-		}
-		return aicli.Result{Tokens: usage.Tokens{Input: 9}}, failure
-	}}
-	result, err := runner.Run(context.Background(), job)
-	if !errors.Is(err, failure) || len(result.Calls) != 1 || len(result.Artifacts) != 2 || result.Answer != "" {
-		t.Fatalf("partial audit = %+v, %v", result, err)
-	}
-	var incomplete, unavailable bool
-	for _, diagnostic := range result.Diagnostics {
-		incomplete = incomplete || diagnostic.Code == "audit_incomplete"
-		unavailable = unavailable || diagnostic.Code == "artifact_unavailable"
-	}
-	if !incomplete || !unavailable {
-		t.Fatalf("partial audit diagnostics missing: %+v", result.Diagnostics)
-	}
-	for _, file := range result.Artifacts {
-		if file.Path == "run-metadata.json" && (strings.Contains(string(file.Data), "/worker/") || !strings.Contains(string(file.Data), sourceIdentity(job))) {
-			t.Fatalf("partial metadata is not portable: %s", file.Data)
-		}
+	for _, field := range []string{"", "scope_paths", "prior_run_paths"} {
+		t.Run("host_path_in_"+field, func(t *testing.T) {
+			installActionTestSkills(t, testAuditSkillURL)
+			job := portableJob(command.SecurityAudit)
+			job.Main.Skills = []string{testAuditSkillURL}
+			failure := errors.New("provider stopped after writing partial report")
+			runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+				if err := os.WriteFile(filepath.Join(request.outputDir, "REPORT.md"), []byte("Incomplete source findings"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				metadata := `{"target":"/worker/local/source","selected_companion_files":[]}`
+				if field != "" {
+					metadata = fmt.Sprintf(`{"target":"/worker/local/source","selected_companion_files":[],%q:["/worker/local/source"]}`, field)
+				}
+				if err := os.WriteFile(filepath.Join(request.outputDir, "run-metadata.json"), []byte(metadata), 0600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(request.outputDir, "findings.json"), make([]byte, (5<<20)+1), 0600); err != nil {
+					t.Fatal(err)
+				}
+				return aicli.Result{Tokens: usage.Tokens{Input: 9}}, failure
+			}}
+			result, err := runner.Run(context.Background(), job)
+			wantArtifacts := 2
+			if field != "" {
+				wantArtifacts = 1
+			}
+			if !errors.Is(err, failure) || len(result.Calls) != 1 || len(result.Artifacts) != wantArtifacts || result.Answer != "" {
+				t.Fatalf("partial audit = %+v, %v", result, err)
+			}
+			var incomplete, unavailable, invalidMetadata bool
+			for _, diagnostic := range result.Diagnostics {
+				incomplete = incomplete || diagnostic.Code == "audit_incomplete"
+				unavailable = unavailable || diagnostic.Code == "artifact_unavailable"
+				invalidMetadata = invalidMetadata || diagnostic.Code == "artifact_metadata_invalid"
+			}
+			if !incomplete || !unavailable || invalidMetadata != (field != "") {
+				t.Fatalf("partial audit diagnostics missing: %+v", result.Diagnostics)
+			}
+			for _, file := range result.Artifacts {
+				if file.Path == "run-metadata.json" && (strings.Contains(string(file.Data), "/worker/") || !strings.Contains(string(file.Data), sourceIdentity(job))) {
+					t.Fatalf("partial metadata is not portable: %s", file.Data)
+				}
+			}
+		})
 	}
 }
 

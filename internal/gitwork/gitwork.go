@@ -24,10 +24,10 @@ import (
 const (
 	gitAttributes = "* -text -ident -filter -working-tree-encoding !diff\n"
 
-	// MaxPatchBytes bounds a published fix's binary patch independently of model context.
-	MaxPatchBytes = 1 << 20
-	// MaxChangedPathListBytes bounds a changed-path listing with Git's record metadata.
-	MaxChangedPathListBytes = (workspace.MaxChanges + 1) * (workspace.MaxPathBytes + 128)
+	// maxPatchBytes bounds a published fix's binary patch independently of model context.
+	maxPatchBytes = 1 << 20
+	// maxChangedPathListBytes bounds a changed-path listing with Git's record metadata.
+	maxChangedPathListBytes = (workspace.MaxChanges + 1) * (workspace.MaxPathBytes + 128)
 
 	maxPathListBytes = workspace.MaxFiles * (workspace.MaxPathBytes + 128)
 )
@@ -43,11 +43,8 @@ var (
 )
 
 func resolveCredentialHelperGH() string {
-	path, err := exec.LookPath("gh")
+	path, err := absoluteExecutable("gh")
 	if err != nil {
-		return "/bin/false"
-	}
-	if !filepath.IsAbs(path) {
 		return "/bin/false"
 	}
 	// Multicall launchers can select an app from the symlink name in argv[0].
@@ -82,14 +79,14 @@ func Clone(ctx context.Context, workRoot, repo, defaultBranch string, lookupTree
 	return cloneFromURL(ctx, workRoot, url, defaultBranch, lookupTree, checkoutFiles)
 }
 
-// ClonePullRequest pins the verified PR head, optionally materializing it. The base tip is fetched
+// ClonePullRequest pins the verified PR head without materializing its worktree. The base tip is fetched
 // for merge-base discovery without validating or materializing its unused tree.
-func ClonePullRequest(ctx context.Context, workRoot, repo string, number int, baseRef, expectedHeadSHA string, lookupTree func(context.Context, string) (github.GitTree, error), checkoutFiles bool) (*Checkout, error) {
+func ClonePullRequest(ctx context.Context, workRoot, repo string, number int, baseRef, expectedHeadSHA string, lookupTree func(context.Context, string) (github.GitTree, error)) (*Checkout, error) {
 	url, err := repositoryURL(repo)
 	if err != nil {
 		return nil, err
 	}
-	return clonePullRequestFromURL(ctx, workRoot, url, number, baseRef, expectedHeadSHA, lookupTree, checkoutFiles)
+	return clonePullRequestFromURL(ctx, workRoot, url, number, baseRef, expectedHeadSHA, lookupTree)
 }
 
 // URL constructors let local fixtures exercise production preparation without network calls.
@@ -108,7 +105,7 @@ func cloneFromURL(ctx context.Context, workRoot, url, defaultBranch string, look
 	return c, nil
 }
 
-func clonePullRequestFromURL(ctx context.Context, workRoot, url string, number int, baseRef, expectedHeadSHA string, lookupTree func(context.Context, string) (github.GitTree, error), checkoutFiles bool) (*Checkout, error) {
+func clonePullRequestFromURL(ctx context.Context, workRoot, url string, number int, baseRef, expectedHeadSHA string, lookupTree func(context.Context, string) (github.GitTree, error)) (*Checkout, error) {
 	if number <= 0 {
 		return nil, fmt.Errorf("invalid pull request number %d", number)
 	}
@@ -122,7 +119,7 @@ func clonePullRequestFromURL(ctx context.Context, workRoot, url string, number i
 	if err != nil {
 		return nil, err
 	}
-	if err := c.checkoutPullRequest(ctx, number, baseRef, expectedHeadSHA, checkoutFiles); err != nil {
+	if err := c.checkoutPullRequest(ctx, number, baseRef, expectedHeadSHA); err != nil {
 		return nil, errors.Join(err, c.Close())
 	}
 	return c, nil
@@ -155,7 +152,7 @@ func cloneRepository(ctx context.Context, workRoot, url, defaultBranch string, l
 		return nil, err
 	}
 	c := &Checkout{path: path, url: url, lookupTree: lookupTree}
-	if err := DisableAttributes(filepath.Join(c.path, ".git")); err != nil {
+	if err := disableAttributes(filepath.Join(c.path, ".git")); err != nil {
 		return nil, err
 	}
 	if err := c.recordConfig(); err != nil {
@@ -194,7 +191,7 @@ func (c *Checkout) Close() error {
 // checkoutPullRequest refreshes the base branch and fetches GitHub's PR head ref from the
 // trusted repository URL. The fetched head must match the SHA observed through
 // the GitHub API, preventing a changed PR from being reviewed as another commit.
-func (c *Checkout) checkoutPullRequest(ctx context.Context, number int, baseRef, expectedHeadSHA string, checkoutFiles bool) error {
+func (c *Checkout) checkoutPullRequest(ctx context.Context, number int, baseRef, expectedHeadSHA string) error {
 	if err := c.ready(); err != nil {
 		return err
 	}
@@ -222,7 +219,7 @@ func (c *Checkout) checkoutPullRequest(ctx context.Context, number int, baseRef,
 	if head != expectedHeadSHA {
 		return fmt.Errorf("%w: expected %s, fetched %s", errHeadMoved, expectedHeadSHA, head)
 	}
-	if err := c.checkoutSource(ctx, head, checkoutFiles); err != nil {
+	if err := c.checkoutSource(ctx, head, false); err != nil {
 		return err
 	}
 	c.comparisonBase = base
@@ -387,14 +384,14 @@ func (c *Checkout) commitAndPush(ctx context.Context, pushURL, branch, botLogin,
 
 func (c *Checkout) stagedPaths(ctx context.Context) ([]string, error) {
 	args := []string{"diff", "--cached", "--name-only", "-z", "--no-renames", "--no-ext-diff"}
-	data, truncated, err := c.boundedGit(ctx, nil, MaxChangedPathListBytes, true, args...)
+	data, truncated, err := c.boundedGit(ctx, nil, maxChangedPathListBytes, true, args...)
 	if err != nil {
 		return nil, err
 	}
 	if truncated {
 		return nil, ErrTooManyFiles
 	}
-	parts, err := SplitNUL(data)
+	parts, err := splitNUL(data)
 	if err != nil {
 		return nil, fmt.Errorf("invalid Git changed path output: %w", err)
 	}
@@ -405,8 +402,8 @@ func (c *Checkout) stagedPaths(ctx context.Context) ([]string, error) {
 	return paths, nil
 }
 
-// SplitNUL splits terminated Git records, accepting an empty result.
-func SplitNUL(data []byte) ([][]byte, error) {
+// splitNUL splits terminated Git records, accepting an empty result.
+func splitNUL(data []byte) ([][]byte, error) {
 	if len(data) == 0 {
 		return nil, nil
 	}
@@ -417,7 +414,7 @@ func SplitNUL(data []byte) ([][]byte, error) {
 }
 
 func (c *Checkout) checkPatchSize(ctx context.Context) error {
-	_, truncated, err := c.boundedGit(ctx, nil, MaxPatchBytes, true, "diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv", "--no-renames", "--no-color", "--submodule=short")
+	_, truncated, err := c.boundedGit(ctx, nil, maxPatchBytes, true, "diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv", "--no-renames", "--no-color", "--submodule=short")
 	if truncated {
 		return ErrDiffTooLarge
 	}
@@ -473,36 +470,43 @@ func runGit(ctx context.Context, dir string, args ...string) (string, error) {
 	return strings.TrimSpace(output.String()), nil
 }
 
-// ResolveGit pins command lookup before a checkout becomes the working directory.
-func ResolveGit() (string, error) {
-	binary, err := exec.LookPath("git")
+// resolveGit pins command lookup before a checkout becomes the working directory.
+func resolveGit() (string, error) { return absoluteExecutable("git") }
+
+func absoluteExecutable(name string) (string, error) {
+	binary, err := exec.LookPath(name)
 	if err != nil {
-		return "", fmt.Errorf("find Git executable: %w", err)
+		return "", fmt.Errorf("find %s executable: %w", name, err)
 	}
 	// execerrdot=0 can make LookPath accept an executable relative to the caller.
 	if !filepath.IsAbs(binary) {
-		return "", errors.New("git binary must have an absolute path")
+		return "", fmt.Errorf("%s binary must have an absolute path", name)
 	}
 	return binary, nil
 }
 
+// Credentials and network policy are supplied explicitly by each trusted/offline caller.
+func gitCommand(ctx context.Context, binary, dir string, env []string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, binary, append(hardeningArgs(), args...)...)
+	processgroup.Configure(cmd)
+	cmd.Dir, cmd.Env = dir, env
+	return cmd
+}
+
 func runGitInputTo(ctx context.Context, dir string, stdin io.Reader, stdout io.Writer, args ...string) error {
-	binary, err := ResolveGit()
+	binary, err := resolveGit()
 	if err != nil {
 		return err
 	}
-	gitArgs := append(HardeningArgs(),
+	gitArgs := []string{
 		"-c", "user.name=Minion",
 		"-c", "user.email=minion@localhost",
 		"-c", "credential.helper=",
 		"-c", credentialHelperConfig(credentialHelperGH),
 		"-c", "push.gpgSign=false",
 		"-c", "submodule.recurse=false",
-	)
-	cmd := exec.CommandContext(ctx, binary, append(gitArgs, args...)...)
-	processgroup.Configure(cmd)
-	cmd.Dir = dir
-	cmd.Env = cleanGitEnvironment()
+	}
+	cmd := gitCommand(ctx, binary, dir, cleanGitEnvironment(), append(gitArgs, args...)...)
 	cmd.Stdin = stdin
 	cmd.Stdout = stdout
 	diagnostic := bounded.Buffer{Limit: bounded.DiagnosticBytes}
@@ -516,7 +520,7 @@ func runGitInputTo(ctx context.Context, dir string, stdin io.Reader, stdout io.W
 		if ctx.Err() != nil {
 			err = fmt.Errorf("%w: %w", ctx.Err(), err)
 		} else {
-			err = ClassifyPathError(operation, message, err)
+			err = classifyPathError(operation, message, err)
 		}
 		if message != "" {
 			return fmt.Errorf("git %s: %w: %q", operation, err, message)
@@ -526,18 +530,18 @@ func runGitInputTo(ctx context.Context, dir string, stdin io.Reader, stdout io.W
 	return nil
 }
 
-// ClassifyPathError preserves a Git failure's cause while identifying protected
+// classifyPathError preserves a Git failure's cause while identifying protected
 // path rejections from add/checkout. Diagnostics must use Git's C locale.
-func ClassifyPathError(operation, message string, err error) error {
+func classifyPathError(operation, message string, err error) error {
 	if (operation == "add" || operation == "checkout") && (strings.HasPrefix(message, "error: invalid path ") || strings.Contains(message, "\nerror: invalid path ")) {
 		return fmt.Errorf("%w: %w", ErrUnsupportedSource, err)
 	}
 	return err
 }
 
-// HardeningArgs returns shared Git safeguards. Callers select credentials and
+// hardeningArgs returns shared Git safeguards. Callers select credentials and
 // network access separately; each call receives an independent argument slice.
-func HardeningArgs() []string {
+func hardeningArgs() []string {
 	return []string{
 		"-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
 		"-c", "core.fileMode=true",
@@ -552,27 +556,20 @@ func credentialHelperConfig(path string) string {
 }
 
 func cleanGitEnvironment() []string {
-	env := make([]string, 0, len(os.Environ())+7)
-	hasPath := false
+	var env []string
 	for _, entry := range os.Environ() {
-		key, value, ok := strings.Cut(entry, "=")
-		if !ok || strings.HasPrefix(key, "GIT_") || key == "GCM_INTERACTIVE" || key == "GH_PROMPT_DISABLED" || key == "LC_ALL" {
+		key, _, ok := strings.Cut(entry, "=")
+		if !ok || strings.HasPrefix(key, "GIT_") || key == "GCM_INTERACTIVE" || key == "GH_PROMPT_DISABLED" || key == "LC_ALL" || key == "PATH" {
 			continue
-		}
-		if key == "PATH" {
-			hasPath = true
-			entry = "PATH=" + SafePath(value)
 		}
 		env = append(env, entry)
 	}
-	if !hasPath {
-		env = append(env, "PATH=/usr/local/bin:/usr/bin:/bin")
-	}
-	return append(env, HardeningEnv()...)
+	env = append(env, "PATH="+safePath(os.Getenv("PATH")))
+	return append(env, hardeningEnv()...)
 }
 
-// HardeningEnv disables inherited Git configuration, replacement objects and prompts.
-func HardeningEnv() []string {
+// hardeningEnv disables inherited Git configuration, replacement objects and prompts.
+func hardeningEnv() []string {
 	return []string{
 		"GIT_TERMINAL_PROMPT=0",
 		"GIT_ASKPASS=/bin/false",
@@ -586,8 +583,8 @@ func HardeningEnv() []string {
 	}
 }
 
-// SafePath excludes checkout-relative command lookup, including credential helpers.
-func SafePath(value string) string {
+// safePath excludes checkout-relative command lookup, including credential helpers.
+func safePath(value string) string {
 	var absolute []string
 	for _, dir := range filepath.SplitList(value) {
 		if filepath.IsAbs(dir) {

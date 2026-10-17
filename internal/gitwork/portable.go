@@ -76,7 +76,7 @@ func (c *Checkout) sourceEntries(ctx context.Context, ref string, tree github.Gi
 	if truncated {
 		return nil, fmt.Errorf("%w: API tree differs from Git tree", ErrUnsupportedSource)
 	}
-	lines, err := SplitNUL(output)
+	lines, err := splitNUL(output)
 	if err != nil {
 		return nil, fmt.Errorf("%w: invalid Git tree listing: %w", ErrUnsupportedSource, err)
 	}
@@ -208,7 +208,7 @@ func (c *Checkout) Snapshot(ctx context.Context, history bool) (s workspace.Snap
 		if err != nil {
 			return s, err
 		}
-		names, err := SplitNUL(paths)
+		names, err := splitNUL(paths)
 		if err != nil {
 			return s, fmt.Errorf("%w: invalid Git comparison paths: %w", ErrUnsupportedSource, err)
 		}
@@ -317,8 +317,8 @@ func (c *Checkout) Import(ctx context.Context, expectedHead string, changes []wo
 	return nil
 }
 
-// DisableAttributes disables repository transformations on trusted and offline indexes.
-func DisableAttributes(gitDir string) error {
+// disableAttributes disables repository transformations on trusted and offline indexes.
+func disableAttributes(gitDir string) error {
 	if err := os.MkdirAll(filepath.Join(gitDir, "info"), 0700); err != nil {
 		return err
 	}

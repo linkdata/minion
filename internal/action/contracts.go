@@ -136,8 +136,7 @@ func (id Identity) validate() error {
 			return errors.New("action identity is missing or invalid")
 		}
 	}
-	parts := strings.Split(id.Repository, "/")
-	if len(parts) != 2 || !workspace.ValidIdentitySegment(parts[0]) || !workspace.ValidIdentitySegment(parts[1]) || id.RepositoryID <= 0 || id.OwnerID <= 0 || id.RequesterID <= 0 || id.Number <= 0 || (id.SubjectType != "Issue" && id.SubjectType != "PullRequest") {
+	if !workspace.ValidRepository(id.Repository) || id.RepositoryID <= 0 || id.OwnerID <= 0 || id.RequesterID <= 0 || id.Number <= 0 || (id.SubjectType != "Issue" && id.SubjectType != "PullRequest") {
 		return errors.New("action repository or requester identity is invalid")
 	}
 	return nil
@@ -255,7 +254,7 @@ func (r Result) validate(j Job, complete bool) error {
 	if !r.matchesJob(j) {
 		return errors.New("action result version, identity or source differs from job")
 	}
-	if !boundedText(r.Answer, maxOutputBytes) || (complete && (!modelOutputFits(r.Answer) || ((j.Action != command.Fix || j.Critic != nil) && strings.TrimSpace(r.Answer) == ""))) {
+	if !boundedText(r.Answer, maxOutputBytes) || (complete && (!modelOutputFits(r.Answer) || ((j.Action != command.Fix || j.Critic != nil || len(r.Changes) == 0) && strings.TrimSpace(r.Answer) == ""))) {
 		return errors.New("action answer is blank, invalid or exceeds limit")
 	}
 	if j.Action != command.Fix && len(r.Changes) != 0 {

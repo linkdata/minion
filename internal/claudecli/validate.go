@@ -49,7 +49,7 @@ func Validate(ctx context.Context, settings config.ClaudeConfig) (validated conf
 	if authDir != "" {
 		defer func() { resultErr = errors.Join(resultErr, os.RemoveAll(authDir)) }()
 	}
-	binary, err := executable("claude", "")
+	binary, err := aicli.ExecutableOutside("claude", "")
 	if err != nil {
 		return validated, err
 	}
@@ -65,7 +65,7 @@ func Validate(ctx context.Context, settings config.ClaudeConfig) (validated conf
 		return validated, errors.New("claude isolation requires Claude Code 2.1.302 or later")
 	}
 	for _, name := range []string{"bwrap", "socat"} {
-		if _, err := executable(name, ""); err != nil {
+		if _, err := aicli.ExecutableOutside(name, ""); err != nil {
 			return validated, fmt.Errorf("claude sandbox dependency %s: %w", name, err)
 		}
 	}
@@ -189,7 +189,7 @@ func probe(ctx context.Context, binary string, args []string, dir string, env []
 	cmd.Dir, cmd.Env, cmd.Stdin = dir, env, strings.NewReader(input)
 	processgroup.Configure(cmd)
 	output := bounded.Buffer{Limit: maxEventBytes, Cancel: cancel}
-	diagnostics := bounded.Tail{Limit: bounded.DiagnosticBytes}
+	diagnostics := bounded.Tail{}
 	cmd.Stdout, cmd.Stderr = &output, &diagnostics
 	err := cmd.Run()
 	if output.Exceeded {

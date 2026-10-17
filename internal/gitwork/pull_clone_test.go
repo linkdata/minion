@@ -18,7 +18,7 @@ func TestSnapshotRejectsUnrelatedPullRequestHistories(t *testing.T) {
 	fixture.git(fixture.source, "commit", "-m", "unrelated root")
 	head := fixture.git(fixture.source, "rev-parse", "HEAD")
 	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/pull/7/head")
-	checkout, err := clonePullRequestFromURL(context.Background(), t.TempDir(), fixture.remote, 7, "main", head, localTreeMetadata(t, fixture.source), true)
+	checkout, err := clonePullRequestFromURL(context.Background(), t.TempDir(), fixture.remote, 7, "main", head, localTreeMetadata(t, fixture.source))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +83,7 @@ func TestClonePullRequestSkipsUnusedBaseTip(t *testing.T) {
 			if baseLookups != 1 {
 				t.Fatalf("default clone skipped base preflight: lookups=%d", baseLookups)
 			}
-			checkout, err := clonePullRequestFromURL(context.Background(), t.TempDir(), url, 7, "main", head, metadata, true)
+			checkout, err := clonePullRequestFromURL(context.Background(), t.TempDir(), url, 7, "main", head, metadata)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -126,7 +126,7 @@ func TestPullRequestRejectsDeletedMergeBaseMetadataAliasBeforeBlobFetch(t *testi
 			head := fixture.git(fixture.source, "rev-parse", "HEAD")
 			fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/pull/7/head")
 			fixture.git(fixture.remote, "config", "uploadpack.allowFilter", "true")
-			checkout, err := clonePullRequestFromURL(context.Background(), t.TempDir(), "file://"+fixture.remote, 7, "main", head, localTreeMetadata(t, fixture.source), true)
+			checkout, err := clonePullRequestFromURL(context.Background(), t.TempDir(), "file://"+fixture.remote, 7, "main", head, localTreeMetadata(t, fixture.source))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -145,5 +145,48 @@ func TestPullRequestRejectsDeletedMergeBaseMetadataAliasBeforeBlobFetch(t *testi
 				t.Fatal("alias preflight fetched rejected blob")
 			}
 		})
+	}
+}
+
+func TestPullRequestInputGatesBeforeClone(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		number     int
+		base, head string
+	}{
+		{"zero number", 0, "main", strings.Repeat("a", 40)},
+		{"negative number", -1, "main", strings.Repeat("a", 40)},
+		{"refspec injection", 1, "main:refs/heads/other", strings.Repeat("a", 40)},
+		{"option base", 1, "--main", strings.Repeat("a", 40)},
+		{"invalid SHA", 1, "main", "missing"},
+		{"uppercase SHA", 1, "main", strings.Repeat("A", 40)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			lookup := func(context.Context, string) (github.GitTree, error) {
+				t.Fatal("input refusal reached tree lookup")
+				return github.GitTree{}, nil
+			}
+			if c, err := ClonePullRequest(context.Background(), root, "owner/repo", tt.number, tt.base, tt.head, lookup); err == nil || c != nil {
+				t.Fatalf("invalid input accepted: %v,%v", c, err)
+			}
+			entries, err := os.ReadDir(root)
+			if err != nil || len(entries) != 0 {
+				t.Fatalf("invalid input created clone: %v,%v", entries, err)
+			}
+		})
+	}
+}
+
+func TestNewBranchRejectsInvalidNameBeforeGit(t *testing.T) {
+	f := newFixture(t)
+	before := f.git(f.checkout.path, "for-each-ref", "--format=%(refname) %(objectname)")
+	for _, name := range []string{"", "--invalid", "bad:ref", "../escape", "refs/heads/x.lock"} {
+		if err := f.checkout.NewBranch(context.Background(), name); err == nil {
+			t.Fatalf("invalid branch accepted: %q", name)
+		}
+	}
+	if after := f.git(f.checkout.path, "for-each-ref", "--format=%(refname) %(objectname)"); after != before || f.checkout.branch != "" {
+		t.Fatalf("invalid branch changed refs: %s", after)
 	}
 }

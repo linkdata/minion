@@ -28,6 +28,8 @@ const (
 	maxUsageScanBytes    = 512 << 20
 )
 
+var errUnverifiedChildren = errors.New("helper agent work did not complete or completion could not be verified")
+
 type rolloutMeta struct {
 	ID           string          `json:"id"`
 	SessionID    string          `json:"session_id"`
@@ -51,10 +53,14 @@ func collectUsage(ctx context.Context, home, rootID string, started time.Time, f
 		if fallback != nil {
 			total = *fallback
 		}
+		if len(expectedChildren) != 0 {
+			return total, false, errUnverifiedChildren
+		}
 		return total, false, nil
 	}
 	complete := true
 	files := map[string]rolloutMeta{}
+	ambiguous := map[string]bool{}
 	entries, candidates := 0, 0
 	err := walkUsageFiles(ctx, filepath.Join(home, "sessions"), started, func(path string, entry fs.DirEntry) error {
 		if err := ctx.Err(); err != nil {
@@ -112,6 +118,7 @@ func collectUsage(ctx context.Context, home, rootID string, started time.Time, f
 		}
 		if _, exists := files[meta.ID]; exists {
 			complete = false
+			ambiguous[meta.ID] = true
 			return nil
 		}
 		meta.path = path
@@ -123,7 +130,10 @@ func collectUsage(ctx context.Context, home, rootID string, started time.Time, f
 	}
 	if ctx.Err() != nil {
 		if fallback != nil {
-			return *fallback, false, nil
+			total = *fallback
+		}
+		if len(expectedChildren) != 0 {
+			return total, false, errUnverifiedChildren
 		}
 		return total, false, nil
 	}
@@ -144,6 +154,7 @@ func collectUsage(ctx context.Context, home, rootID string, started time.Time, f
 	for _, id := range expectedChildren {
 		if !selected[id] {
 			complete = false
+			childError = errors.Join(childError, errUnverifiedChildren)
 		}
 	}
 	ids := make([]string, 0, len(selected)-1)
@@ -155,20 +166,25 @@ func collectUsage(ctx context.Context, home, rootID string, started time.Time, f
 	sort.Strings(ids)
 	ids = append([]string{rootID}, ids[:min(len(ids), maxCodexChildren)]...)
 	budget := int64(maxUsageScanBytes)
-	rootCounted := false
-	for _, id := range ids {
+	for i, id := range ids {
 		if ctx.Err() != nil {
 			complete = false
+			if i == 0 && fallback != nil {
+				total = *fallback
+			}
+			if len(ids) > 1 {
+				childError = errors.Join(childError, errUnverifiedChildren)
+			}
 			break
 		}
-		if id == rootID {
-			rootCounted = true
-		}
 		meta, exists := files[id]
+		if id != rootID && ambiguous[id] {
+			childError = errors.Join(childError, errUnverifiedChildren)
+		}
 		if !exists {
 			complete = false
 			if id == rootID && fallback != nil {
-				total.Add(*fallback)
+				total = *fallback
 			}
 			continue
 		}
@@ -177,6 +193,7 @@ func collectUsage(ctx context.Context, home, rootID string, started time.Time, f
 		for _, child := range children {
 			if _, exists := files[child]; !exists || !selected[child] {
 				ok = false
+				childError = errors.Join(childError, errUnverifiedChildren)
 			}
 		}
 		if id == rootID && fallback != nil && tokens != *fallback {
@@ -188,9 +205,6 @@ func collectUsage(ctx context.Context, home, rootID string, started time.Time, f
 		var added bool
 		total, added = total.AddChecked(tokens)
 		complete = complete && ok && added
-	}
-	if ctx.Err() != nil && !rootCounted && fallback != nil {
-		total.Add(*fallback)
 	}
 	return total, complete && ctx.Err() == nil, childError
 }
@@ -264,6 +278,8 @@ func readUsageDir(ctx context.Context, path string, visit func(string, fs.DirEnt
 	}
 }
 
+// Pull framing stops after a header and checks cancellation while dropping a
+// long line; transcript reads also distinguish an incomplete final line.
 func rolloutScanner(ctx context.Context, r io.Reader, complete *bool) *bufio.Scanner {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 64<<10), maxEventBytes+2)
@@ -301,12 +317,16 @@ func rolloutTokens(raw json.RawMessage) (usage.Tokens, bool) {
 }
 
 func readRolloutUsage(ctx context.Context, meta rolloutMeta, rootID string, budget *int64) (usage.Tokens, bool, []string, error) {
+	var childError error
+	if meta.ID != rootID {
+		childError = errUnverifiedChildren
+	}
 	if ctx.Err() != nil || *budget <= 0 {
-		return usage.Tokens{}, false, nil, nil
+		return usage.Tokens{}, false, nil, childError
 	}
 	f, err := os.Open(meta.path)
 	if err != nil {
-		return usage.Tokens{}, false, nil, nil
+		return usage.Tokens{}, false, nil, childError
 	}
 	limit := int64(maxUsageRolloutBytes)
 	if *budget < limit {
@@ -460,11 +480,10 @@ func readRolloutUsage(ctx context.Context, meta rolloutMeta, rootID string, budg
 		readable = false
 	}
 	complete = complete && readable
-	// The latest attributable abort, or an open latest turn in a fully read log,
-	// proves unfinished child work. Accounting gaps alone do not.
-	var childError error
-	if meta.ID != rootID && (latestOwnAborted || readable && ctx.Err() == nil && latestOwnTurn != "" && !latestOwnDone) {
-		childError = errors.New("helper agent work did not complete")
+	// Known helpers require a fully read, attributable completed latest turn.
+	// Missing counters alone do not prevent that lifecycle proof.
+	if readable && ctx.Err() == nil && meta.HistoryStart != nil && latestOwnTurn != "" && latestOwnDone && !latestOwnAborted {
+		childError = nil
 	}
 	if tooManyChildren {
 		childError = errors.Join(childError, fmt.Errorf("%w: Codex usage agent count exceeded the limit", aicli.ErrOutputLimit))
@@ -498,6 +517,10 @@ func readRolloutUsage(ctx context.Context, meta rolloutMeta, rootID string, budg
 	}
 	for turn := range ownedTurns {
 		complete = complete && turns[turn]
+		if _, observed := turns[turn]; !observed && meta.ID != rootID {
+			childError = errors.Join(childError, errUnverifiedChildren)
+			break
+		}
 	}
 	// Older child rollouts without a history boundary cannot prove that a later
 	// turn was not interrupted before its first usage record.

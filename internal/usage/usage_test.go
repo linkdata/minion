@@ -323,7 +323,10 @@ func TestSummarizeRejectsInvalidOptions(t *testing.T) {
 
 func TestTokensCachedInputIsNotDoubleCounted(t *testing.T) {
 	tokens := Tokens{Input: 100, CachedInput: 80, Output: 20}
-	tokens.Add(Tokens{Input: 50, CachedInput: 10, Output: 30})
+	tokens, ok := tokens.AddChecked(Tokens{Input: 50, CachedInput: 10, Output: 30})
+	if !ok {
+		t.Fatal("valid addition failed")
+	}
 	if tokens != (Tokens{Input: 150, CachedInput: 90, Output: 50}) || tokens.Total() != 200 {
 		t.Fatalf("tokens=%+v total=%d", tokens, tokens.Total())
 	}

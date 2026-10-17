@@ -99,12 +99,13 @@ func listModels(ctx context.Context, settings config.CodexConfig) (models []mode
 	if settings.ReasoningEffort != "" {
 		args = append(args, "-c", "model_reasoning_effort="+strconv.Quote(settings.ReasoningEffort))
 	}
+	// #nosec G204 -- The canonical installed executable receives fixed arguments without a shell.
 	cmd := exec.CommandContext(ctx, binary, args...)
 	cmd.Args[0] = "codex"
 	cmd.Dir = dir
 	cmd.Env = childEnvironment(os.Environ(), dir, dir, settings.APIKey != "")
 	processgroup.Configure(cmd)
-	diagnostics := bounded.Tail{Limit: bounded.DiagnosticBytes}
+	diagnostics := bounded.Tail{}
 	cmd.Stderr = &diagnostics
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -160,7 +161,7 @@ func listModels(ctx context.Context, settings config.CodexConfig) (models []mode
 				return fmt.Errorf("unexpected Codex response ID %d during %s", *response.ID, method)
 			}
 			if response.Error != nil {
-				return fmt.Errorf("Codex %s: %q", method, bounded.Text(response.Error.Message, bounded.DiagnosticBytes)) //nolint:staticcheck // -- Codex is a proper noun.
+				return fmt.Errorf("Codex %s: %q", method, bounded.Text(response.Error.Message)) //nolint:staticcheck // -- Codex is a proper noun.
 			}
 			if len(response.Result) == 0 || string(response.Result) == "null" {
 				return fmt.Errorf("Codex %s returned no result", method) //nolint:staticcheck // -- Codex is a proper noun.

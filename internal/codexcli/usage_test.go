@@ -110,7 +110,11 @@ func TestUsageAgentBoundsCountUniqueIDsAndRejectOverflow(t *testing.T) {
 			id := fmt.Sprintf("child-%03d", i)
 			writeUsageRollout(t, home, id, "root", usageEvent("task_started", "turn"), usageRecord(id, "turn", id, int64(i+1), 0, 1), usageEvent("task_complete", "turn"))
 			if i < maxCodexChildren {
-				want.Add(usage.Tokens{Input: int64(i + 1), Output: 1})
+				var ok bool
+				want, ok = want.AddChecked(usage.Tokens{Input: int64(i + 1), Output: 1})
+				if !ok {
+					t.Fatal("fixture counter overflow")
+				}
 			}
 		}
 		for _, fallback := range []*usage.Tokens{nil, {Input: 100, CachedInput: 10, Output: 7}} {
@@ -267,7 +271,11 @@ func TestCollectUsageNeverAddsUnverifiedInheritedChildCounters(t *testing.T) {
 		got, complete, _ := collectUsage(context.Background(), home, "root", time.Now(), nil, nil)
 		want := usage.Tokens{Input: 10, Output: 1}
 		if withRecord {
-			want.Add(usage.Tokens{Input: 20, CachedInput: 5, Output: 2})
+			var ok bool
+			want, ok = want.AddChecked(usage.Tokens{Input: 20, CachedInput: 5, Output: 2})
+			if !ok {
+				t.Fatal("fixture counter overflow")
+			}
 		}
 		if got != want || complete {
 			t.Fatalf("unverified child baseline (own records=%v) = %+v, %v; want %+v, incomplete", withRecord, got, complete, want)
@@ -332,7 +340,11 @@ func TestRolloutUsageSkipsOversizedLinesAndDebitsBytes(t *testing.T) {
 	writeUsageRollout(t, home, "late-child", "root", usageEvent("task_started", "child-turn"),
 		usageRecord("late-child", "child-turn", "child-response", 40, 2, 4), usageEvent("task_complete", "child-turn"))
 	got, complete, _ = collectUsage(context.Background(), home, "root", time.Now(), nil, nil)
-	want.Add(usage.Tokens{Input: 40, CachedInput: 2, Output: 4})
+	var ok bool
+	want, ok = want.AddChecked(usage.Tokens{Input: 40, CachedInput: 2, Output: 4})
+	if !ok {
+		t.Fatal("fixture counter overflow")
+	}
 	if got != want || complete {
 		t.Fatalf("later completed helper lost or incomplete reset: got=%+v complete=%t want=%+v", got, complete, want)
 	}

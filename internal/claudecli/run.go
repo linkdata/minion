@@ -51,7 +51,7 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	if err != nil {
 		return result, fmt.Errorf("claude source snapshot: %w", err)
 	}
-	binary, err := executable("claude", workspace)
+	binary, err := aicli.ExecutableOutside("claude", workspace)
 	if err != nil {
 		return result, err
 	}
@@ -131,11 +131,15 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	// Additional working directories also grant writes in Claude's sandbox;
 	// sandboxSettings denies them explicitly for read-only inputs.
 	args = append(args, "--add-dir", workspace)
-	for _, path := range append(append([]string{}, settings.ReadOnlyDirs...), skillPaths...) {
-		if filepath.Base(path) == "SKILL.md" {
-			path = filepath.Dir(path)
+	for _, path := range settings.ReadOnlyDirs {
+		resolved, err := directory(path)
+		if err != nil {
+			return result, err
 		}
-		args = append(args, "--add-dir", path)
+		args = append(args, "--add-dir", resolved)
+	}
+	for _, skill := range skillPaths {
+		args = append(args, "--add-dir", filepath.Dir(skill))
 	}
 	if outputDir != "" {
 		args = append(args, "--add-dir", outputDir)
@@ -174,7 +178,7 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 		// a managed retry watchdog without renewing the action deadline.
 		failureTimer = time.AfterFunc(time.Second, cancel)
 	}}
-	diagnostics := bounded.Tail{Limit: bounded.DiagnosticBytes}
+	diagnostics := bounded.Tail{}
 	ceilingMatched := false
 	ceiling := bounded.Lines{Limit: maxEventBytes, Line: func(line []byte) {
 		ceilingMatched = ceilingMatched || isWaitCeilingStop(line)
@@ -316,14 +320,6 @@ func directory(path string) (string, error) {
 		return "", errors.New("expected a non-root directory")
 	}
 	return resolved, nil
-}
-
-func executable(name, workspace string) (string, error) {
-	path, err := aicli.ExecutablePath(name)
-	if err == nil && workspace != "" && workspacepath.Within(workspace, path) {
-		err = errors.New("executable is inside the untrusted source snapshot")
-	}
-	return path, err
 }
 
 func childEnvironment(env []string, runtimeDir, cacheDir, authDir string) ([]string, error) {

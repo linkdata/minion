@@ -20,6 +20,7 @@ type Tokens struct {
 	Output      int64 `json:"output_tokens"`
 }
 
+// Valid checks nonnegative counters, cached-input inclusion and total overflow.
 func (t Tokens) Valid() bool {
 	return t.Input >= 0 && t.CachedInput >= 0 && t.CachedInput <= t.Input && t.Output >= 0 && t.Output <= math.MaxInt64-t.Input
 }
@@ -27,18 +28,14 @@ func (t Tokens) Valid() bool {
 // Cached input is a subset of input tokens.
 func (t Tokens) Total() int64 { return t.Input + t.Output }
 
-func (t *Tokens) Add(other Tokens) {
-	t.Input += other.Input
-	t.CachedInput += other.CachedInput
-	t.Output += other.Output
-}
-
 // AddChecked sums normalized counters, retaining the receiver on overflow.
 func (t Tokens) AddChecked(other Tokens) (Tokens, bool) {
 	if !t.Valid() || !other.Valid() || other.Total() > math.MaxInt64-t.Total() {
 		return t, false
 	}
-	t.Add(other)
+	t.Input += other.Input
+	t.CachedInput += other.CachedInput
+	t.Output += other.Output
 	return t, true
 }
 

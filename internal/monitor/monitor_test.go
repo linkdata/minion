@@ -643,8 +643,8 @@ func TestRunOnceTerminalFailureRepliesWithFreshContext(t *testing.T) {
 	executor := &fakeExecutor{onExecute: cancel, executeErr: errors.Join(ErrTerminalJob, context.DeadlineExceeded)}
 	store := openState(t, now.Add(-time.Minute))
 	m := &Monitor{Config: testConfig(t), GitHub: gh, Executor: executor, Now: func() time.Time { return now }}
-	if _, err := m.RunOnce(ctx, store); err != nil {
-		t.Fatal(err)
+	if _, err := m.RunOnce(ctx, store); !errors.Is(err, context.Canceled) || !errors.Is(err, ErrTerminalJob) {
+		t.Fatalf("terminal reply lost parent cancellation or execution failure: %v", err)
 	}
 	if len(executor.jobs) != 1 || len(gh.comments) != 1 || len(store.Data.Processed) != 1 || len(store.Data.JobFailures) != 0 {
 		t.Fatalf("terminal job was not handled: jobs=%d comments=%d state=%+v", len(executor.jobs), len(gh.comments), store.Data)

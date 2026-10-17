@@ -22,6 +22,7 @@ import (
 	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/gitwork"
 	"github.com/linkdata/minion/internal/monitor"
+	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/state"
 	"github.com/linkdata/minion/internal/usage"
 	"github.com/linkdata/minion/internal/workspace"
@@ -140,6 +141,77 @@ func TestExecuteSourceFailuresAndInvalidIncompleteResultsAreTerminal(t *testing.
 	}
 }
 
+func TestPrepareFixClassifiesUnsupportedLayoutBeforeBranchOrModels(t *testing.T) {
+	for _, kind := range []string{"case collision", "backslash"} {
+		t.Run(kind, func(t *testing.T) {
+			files := []workspace.File{{Path: "README", Mode: workspace.Regular}, {Path: "readme", Mode: workspace.Regular}}
+			if kind == "backslash" {
+				files = []workspace.File{{Path: `literal\name`, Mode: workspace.Regular}}
+			}
+			gitFixtureRemote(t, files...)
+			git, err := exec.LookPath("git")
+			if err != nil {
+				t.Fatal(err)
+			}
+			branched := filepath.Join(t.TempDir(), "branched")
+			fakeOnPath(t, "git", fmt.Sprintf("#!/bin/sh\ncase \" $* \" in *\" switch --create \"*) printf created > %s;; esac\nexec %s \"$@\"\n", shellQuote(branched), shellQuote(git)))
+			store, err := state.Open(filepath.Join(t.TempDir(), "state.json"), time.Now())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				if err := store.Close(); err != nil {
+					t.Error(err)
+				}
+			}()
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case serveSafeForkChecks(w, r, "o/r", "bot/r", false):
+				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
+					_, _ = fmt.Fprint(w, `{"id":1,"full_name":"o/r","owner":{"id":2},"default_branch":"main","visibility":"public"}`)
+				case r.Method == http.MethodGet && r.URL.Path == "/repos/bot/r":
+					_, _ = fmt.Fprint(w, `{"id":4,"full_name":"bot/r","fork":true,"parent":{"id":1,"full_name":"o/r"},"source":{"id":1,"full_name":"o/r"},"visibility":"public"}`)
+				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/pulls":
+					_, _ = fmt.Fprint(w, `[]`)
+				case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/bot/r/branches/"):
+					http.NotFound(w, r)
+				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7":
+					_, _ = fmt.Fprint(w, `{"node_id":"issue-node","title":"Task","body":"Fix source"}`)
+				case r.Method == http.MethodPost && r.URL.Path == "/graphql":
+					_, _ = fmt.Fprint(w, `{"data":{"node":{"title":"Task","bodyText":"Fix source","lastEditedAt":null}}}`)
+				case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/o/r/git/trees/"):
+					writeTreeFixture(t, w, strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/"), files...)
+				default:
+					t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+			root := t.TempDir()
+			orchestrator := &Orchestrator{WorkRoot: root, GitHub: testGitHub(server, "token"), BotLogin: "bot", Store: store,
+				Commands: map[string]config.CommandMapping{"fix": {Action: "fix", Skills: []string{skills.BuiltinAntiPromptInjection}}},
+				Runner: Runner{WorkRoot: t.TempDir(), runModel: func(context.Context, modelRun) (aicli.Result, error) {
+					t.Fatal("model ran for unsupported source")
+					return aicli.Result{}, nil
+				}},
+			}
+			request := monitor.Job{ID: strings.Repeat("a", 64), SubjectType: "Issue", Number: 7,
+				Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"fix"}},
+				Source:     github.Item{Author: github.User{ID: 3, Login: "writer"}, UpdatedAt: time.Now()}, Command: command.Command{Name: "fix", Action: command.Fix},
+			}
+			if err := attemptFixture(orchestrator).perform(testActionContext(t), request); !errors.Is(err, gitwork.ErrUnsupportedSource) || errors.Is(err, gitwork.ErrCheckoutTooLarge) {
+				t.Fatalf("unsupported fix layout lost classification: %v", err)
+			}
+			if _, err := os.Stat(branched); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("unsupported layout created a branch: %v", err)
+			}
+			if entries, err := os.ReadDir(root); err != nil || len(entries) != 0 {
+				t.Fatalf("unsupported source left a checkout: %v, %v", entries, err)
+			}
+		})
+	}
+}
+
 func TestExecuteLogsCheckoutCleanupFailureAfterSuccessfulPublication(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root bypasses directory permissions")
@@ -174,9 +246,8 @@ func TestExecuteLogsCheckoutCleanupFailureAfterSuccessfulPublication(t *testing.
 			_, _ = fmt.Fprint(w, `{"id":1,"full_name":"o/r","owner":{"id":2},"default_branch":"main","visibility":"public"}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/bot/r":
 			_, _ = fmt.Fprint(w, `{"id":4,"full_name":"bot/r","fork":true,"parent":{"id":1,"full_name":"o/r"},"source":{"id":1,"full_name":"o/r"},"visibility":"public"}`)
-		case r.Method == http.MethodGet && r.URL.Path == "/repos/bot/r/actions/permissions":
-			_, _ = fmt.Fprint(w, `{"enabled":false}`)
-		case r.Method == http.MethodGet && (r.URL.Path == "/repos/o/r/pulls" || strings.HasSuffix(r.URL.Path, "/rulesets") || r.URL.Path == "/repos/o/r/issues/7/comments"):
+		case serveSafeForkChecks(w, r, "o/r", "bot/r", false):
+		case r.Method == http.MethodGet && (r.URL.Path == "/repos/o/r/pulls" || r.URL.Path == "/repos/o/r/issues/7/comments"):
 			_, _ = fmt.Fprint(w, `[]`)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/bot/r/branches/minion/fix-7-aaaaaaaaaaaa":
 			http.NotFound(w, r)
@@ -252,6 +323,9 @@ func TestPublishFixRejectsNonemptyReviewedChangesDroppedByGit(t *testing.T) {
 					http.NotFound(w, r)
 					return
 				}
+				if serveSafeForkChecks(w, r, "o/r", "bot/r", false) {
+					return
+				}
 				switch r.URL.Path {
 				case "/repos/o/r":
 					_, _ = fmt.Fprint(w, `{"id":1,"full_name":"o/r","owner":{"id":2},"default_branch":"main","visibility":"public"}`)
@@ -261,10 +335,6 @@ func TestPublishFixRejectsNonemptyReviewedChangesDroppedByGit(t *testing.T) {
 						currentFork.ID++
 					}
 					_ = json.NewEncoder(w).Encode(currentFork)
-				case "/repos/bot/r/actions/permissions":
-					_, _ = fmt.Fprint(w, `{"enabled":false}`)
-				case "/repos/o/r/rulesets", "/repos/bot/r/rulesets":
-					_, _ = fmt.Fprint(w, `[]`)
 				default:
 					t.Errorf("unexpected request %s", r.URL)
 					http.NotFound(w, r)

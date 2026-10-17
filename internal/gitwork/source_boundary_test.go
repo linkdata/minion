@@ -116,7 +116,7 @@ func TestSourceAliasesAreUnsupportedForDefaultAndPullRequestCheckout(t *testing.
 			}
 			checked = false
 			fixture.checkout.lookupTree = lookupChecked
-			err = fixture.checkout.checkoutPullRequest(context.Background(), 7, "main", head, true)
+			err = fixture.checkout.checkoutPullRequest(context.Background(), 7, "main", head)
 			if !checked || !errors.Is(err, ErrUnsupportedSource) || errors.As(err, &exit) || !strings.Contains(err.Error(), "unsafe source path") {
 				t.Fatalf("PR checkout metadataChecked=%v error=%v", checked, err)
 			}

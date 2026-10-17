@@ -370,12 +370,7 @@ func TestFixRefusesIssueEditedAfterRequest(t *testing.T) {
 			_, _ = fmt.Fprint(w, privateRepositoryJSON)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/linkdataminion/r":
 			_, _ = fmt.Fprint(w, `{"id":2,"full_name":"linkdataminion/r","fork":true,"parent":{"id":1,"full_name":"o/r"},"source":{"id":1,"full_name":"o/r"},"private":true,"visibility":"private"}`)
-		case r.Method == http.MethodGet && r.URL.Path == "/repos/linkdataminion/r/actions/permissions":
-			_, _ = fmt.Fprint(w, `{"enabled":false}`)
-		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/actions/permissions/fork-pr-workflows-private-repos":
-			_, _ = fmt.Fprint(w, `{"send_write_tokens_to_workflows":false,"send_secrets_and_variables":false}`)
-		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/rulesets"):
-			_, _ = fmt.Fprint(w, `[]`)
+		case serveSafeForkChecks(w, r, "o/r", "linkdataminion/r", true):
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/pulls":
 			_, _ = fmt.Fprint(w, `[]`)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/linkdataminion/r/branches/minion/fix-7-aaaaaaaaaaaa":
@@ -479,12 +474,7 @@ func TestFixRecoversOnlyRecordedBranch(t *testing.T) {
 					}
 				case r.Method == http.MethodGet && r.URL.Path == "/repos/linkdataminion/r":
 					_, _ = fmt.Fprint(w, `{"id":2,"full_name":"linkdataminion/r","fork":true,"parent":{"id":1,"full_name":"o/r"},"source":{"id":1,"full_name":"o/r"},"private":true,"visibility":"private"}`)
-				case r.Method == http.MethodGet && r.URL.Path == "/repos/linkdataminion/r/actions/permissions":
-					_, _ = fmt.Fprint(w, `{"enabled":false}`)
-				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/actions/permissions/fork-pr-workflows-private-repos":
-					_, _ = fmt.Fprint(w, `{"send_write_tokens_to_workflows":false,"send_secrets_and_variables":false}`)
-				case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/rulesets"):
-					_, _ = fmt.Fprint(w, `[]`)
+				case serveSafeForkChecks(w, r, "o/r", "linkdataminion/r", true):
 				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/pulls":
 					if r.URL.Query().Get("head") != "linkdataminion:"+branch || r.URL.Query().Get("base") != "main" || r.URL.Query().Get("state") != "open" {
 						t.Errorf("unexpected PR head filter: %s", r.URL.RawQuery)
@@ -660,13 +650,10 @@ exec %s -c %s "$@"
 					_, _ = fmt.Fprint(w, privateRepositoryJSON)
 				case r.Method == http.MethodGet && r.URL.Path == "/repos/linkdataminion/r":
 					_, _ = fmt.Fprint(w, `{"id":2,"full_name":"linkdataminion/r","fork":true,"parent":{"id":1,"full_name":"o/r"},"source":{"id":1,"full_name":"o/r"},"private":true,"visibility":"private"}`)
-				case r.Method == http.MethodGet && r.URL.Path == "/repos/linkdataminion/r/actions/permissions":
-					_, _ = fmt.Fprint(w, `{"enabled":false}`)
-				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/actions/permissions/fork-pr-workflows-private-repos":
-					_, _ = fmt.Fprint(w, `{"send_write_tokens_to_workflows":false,"send_secrets_and_variables":false}`)
-				case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/rulesets"):
-					rulesetChecks++
-					_, _ = fmt.Fprint(w, `[]`)
+				case serveSafeForkChecks(w, r, "o/r", "linkdataminion/r", true):
+					if strings.HasSuffix(r.URL.Path, "/rulesets") {
+						rulesetChecks++
+					}
 				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/pulls":
 					_, _ = fmt.Fprint(w, `[]`)
 				case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/linkdataminion/r/branches/minion/"):
@@ -954,6 +941,9 @@ func TestFixForkChecksNetworkRootPushRules(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			var rootQueries int
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if serveSafeForkChecks(w, r, "o/r", "linkdataminion/r", true) {
+					return
+				}
 				switch r.URL.Path {
 				case "/repos/o/r":
 					_, _ = fmt.Fprint(w, `{"id":1,"full_name":"o/r","owner":{"id":2,"login":"o"},"fork":true,"source":{"id":9,"full_name":"upstream/r"},"default_branch":"main","private":true,"visibility":"private"}`)
@@ -961,10 +951,6 @@ func TestFixForkChecksNetworkRootPushRules(t *testing.T) {
 					_, _ = fmt.Fprint(w, `{"id":9,"full_name":"upstream/r","private":true,"visibility":"private"}`)
 				case "/repos/linkdataminion/r":
 					_, _ = fmt.Fprintf(w, `{"id":2,"full_name":"linkdataminion/r","fork":true,"parent":{"id":1,"full_name":"o/r"},"source":%s,"private":true,"visibility":"private"}`, tt.forkSource)
-				case "/repos/linkdataminion/r/actions/permissions":
-					_, _ = fmt.Fprint(w, `{"enabled":false}`)
-				case "/repos/o/r/actions/permissions/fork-pr-workflows-private-repos":
-					_, _ = fmt.Fprint(w, `{"send_write_tokens_to_workflows":false,"send_secrets_and_variables":false}`)
 				case "/repos/upstream/r/rulesets":
 					rootQueries++
 					if tt.rootStatus != 0 {
@@ -977,8 +963,6 @@ func TestFixForkChecksNetworkRootPushRules(t *testing.T) {
 					}
 				case "/repos/upstream/r/rulesets/42":
 					_, _ = fmt.Fprint(w, `{"id":42,"target":"push","enforcement":"active","bypass_actors":[{"actor_type":"RepositoryRole","actor_id":5}]}`)
-				case "/repos/o/r/rulesets", "/repos/linkdataminion/r/rulesets":
-					_, _ = fmt.Fprint(w, `[]`)
 				default:
 					t.Errorf("unexpected request: %s", r.URL)
 					http.NotFound(w, r)

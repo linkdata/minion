@@ -15,6 +15,7 @@ import (
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/workroot"
+	"github.com/linkdata/minion/internal/workspace"
 )
 
 func TestRunnerWorkRootIsolation(t *testing.T) {
@@ -66,6 +67,12 @@ func TestRunnerWorkRootIsolation(t *testing.T) {
 	runner = Runner{}
 	if _, err := runner.Run(context.Background(), portableJob(command.Comment)); !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "work root is required") {
 		t.Fatalf("missing root=%v", err)
+	}
+}
+
+func TestWorkRootIsolationRejectsUnknownProvider(t *testing.T) {
+	if err := (&Runner{}).CheckWorkRootIsolation(t.TempDir(), "unknown"); err == nil || !strings.Contains(err.Error(), "unsupported AI provider") {
+		t.Fatalf("unknown provider mixed filesystem grants: %v", err)
 	}
 }
 
@@ -240,16 +247,20 @@ func TestRunnerFixCanReturnEmptyAnswerWithoutCritic(t *testing.T) {
 		t.Fatalf("valid fix was lost because its summary was empty: %+v,%v", result, err)
 	}
 	for _, test := range []struct {
-		action command.Action
-		critic bool
-		valid  bool
-	}{{command.Fix, false, true}, {command.Fix, true, false}, {command.Comment, false, false}, {command.Review, false, false}, {command.SecurityAudit, false, false}} {
+		action  command.Action
+		critic  bool
+		changed bool
+		valid   bool
+	}{{command.Fix, false, true, true}, {command.Fix, false, false, false}, {command.Fix, true, false, false}, {command.Comment, false, false, false}, {command.Review, false, false, false}, {command.SecurityAudit, false, false, false}} {
 		job := portableJob(test.action)
 		if test.critic {
 			job.Critic = &RoleSettings{Provider: "claude"}
 			job.CriticMaxRounds = config.DefaultCriticMaxRounds
 		}
 		result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Calls: []CallUsage{{Provider: job.Main.Provider, Role: "main", Round: 1}}}
+		if test.changed {
+			result.Changes = []workspace.Change{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("fixed source")}}
+		}
 		if err := result.Validate(job); (err == nil) != test.valid || (!test.valid && !strings.Contains(err.Error(), "action answer")) {
 			t.Fatalf("empty %s answer with critic=%t: %v", test.action, test.critic, err)
 		}

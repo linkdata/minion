@@ -3,7 +3,7 @@ package bounded
 import "bytes"
 
 // Lines drains a stream into bounded lines without their newline bytes.
-// Line's slice is valid only during the callback. Overflow fires immediately
+// Line must be set; its slice is valid only during the callback. Overflow fires immediately
 // once per oversized line; that whole line is discarded through newline or EOF.
 type Lines struct {
 	Limit    int
@@ -34,7 +34,7 @@ func (w *Lines) Write(p []byte) (int, error) {
 		if end < 0 {
 			break
 		}
-		if !w.dropping && w.Line != nil {
+		if !w.dropping {
 			w.Line(w.line)
 		}
 		w.line, w.dropping = w.line[:0], false
@@ -45,7 +45,7 @@ func (w *Lines) Write(p []byte) (int, error) {
 
 // Finish delivers a nonempty final line and discards an oversized remainder.
 func (w *Lines) Finish() {
-	if !w.dropping && len(w.line) != 0 && w.Line != nil {
+	if !w.dropping && len(w.line) != 0 {
 		w.Line(w.line)
 	}
 	w.line, w.dropping = w.line[:0], false

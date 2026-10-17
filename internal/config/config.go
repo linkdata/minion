@@ -232,7 +232,7 @@ func (c *Config) Validate(configDir string) error {
 		return fmt.Errorf("critic_max_rounds must be between 1 and %d", MaxCriticMaxRounds)
 	}
 	if rounds := ResolveCriticNonblockingRounds(c.CriticMaxRounds, c.CriticNonblockingRounds); rounds < 0 || rounds > c.CriticMaxRounds {
-		return fmt.Errorf("critic_nonblocking_rounds must be between 0 and critic_max_rounds")
+		return fmt.Errorf("critic_nonblocking_rounds must be between 0 and %d", c.CriticMaxRounds)
 	}
 	if strings.ContainsAny(c.Codex.APIKey, " \t\r\n\x00") || strings.ContainsAny(c.Claude.APIKey, " \t\r\n\x00") {
 		return fmt.Errorf("provider api_key must not contain whitespace or NUL")
@@ -441,7 +441,8 @@ func (c *Config) Validate(configDir string) error {
 func validateSkillURLs(urls []string) error {
 	seenNames := make(map[string]bool, len(urls))
 	for i, rawURL := range urls {
-		if len(rawURL) > MaxSkillURLBytes {
+		normalized := strings.TrimSuffix(rawURL, "/")
+		if len(normalized) > MaxSkillURLBytes {
 			return fmt.Errorf("skill URL exceeds %d bytes", MaxSkillURLBytes)
 		}
 		name, err := skills.Name(rawURL)
@@ -453,7 +454,7 @@ func validateSkillURLs(urls []string) error {
 			return fmt.Errorf("duplicate skill %q", name)
 		}
 		seenNames[key] = true
-		urls[i] = strings.TrimSuffix(rawURL, "/")
+		urls[i] = normalized
 	}
 	return nil
 }

@@ -25,6 +25,42 @@ func testGitHub(server *httptest.Server, token string) *github.Client {
 	return client
 }
 
+func serveSafeForkChecks(w http.ResponseWriter, r *http.Request, base, fork string, private bool) bool {
+	if r.Method != http.MethodGet {
+		return false
+	}
+	var body string
+	switch r.URL.Path {
+	case "/repos/" + fork + "/actions/permissions":
+		body = `{"enabled":false}`
+	case "/repos/" + base + "/actions/permissions/fork-pr-workflows-private-repos":
+		if !private {
+			return false
+		}
+		body = `{"send_write_tokens_to_workflows":false,"send_secrets_and_variables":false}`
+	case "/repos/" + base + "/rulesets", "/repos/" + fork + "/rulesets":
+		body = `[]`
+	default:
+		return false
+	}
+	_, _ = fmt.Fprint(w, body)
+	return true
+}
+
+func TestSafeForkChecksRejectUnrelatedRoutes(t *testing.T) {
+	for _, request := range []*http.Request{
+		httptest.NewRequest(http.MethodPost, "/repos/bot/r/actions/permissions", nil),
+		httptest.NewRequest(http.MethodGet, "/repos/other/r/rulesets", nil),
+		httptest.NewRequest(http.MethodGet, "/repos/o/r/rulesets/42", nil),
+		httptest.NewRequest(http.MethodGet, "/repos/o/r/actions/permissions/fork-pr-workflows-private-repos", nil),
+	} {
+		response := httptest.NewRecorder()
+		if serveSafeForkChecks(response, request, "o/r", "bot/r", false) || response.Body.Len() != 0 {
+			t.Fatalf("unexpected fixture route accepted: %s %s", request.Method, request.URL)
+		}
+	}
+}
+
 func attemptFixture(orchestrator *Orchestrator) *Orchestrator {
 	attempt := *orchestrator
 	attempt.attemptID = strings.Repeat("a", 32)

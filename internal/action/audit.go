@@ -76,26 +76,17 @@ func auditArtifactLimit(name string) int64 {
 }
 
 func validateAuditFiles(ctx context.Context, files []workspace.File, validationRoot, skill, repo, target, head string) (report string, resultErr error) {
-	var metadataBytes, ledgerBytes, findingsBytes, reportBytes []byte
+	byPath := make(map[string][]byte, len(files))
 	for _, file := range files {
-		switch file.Path {
-		case "run-metadata.json":
-			metadataBytes = file.Data
-		case "coverage-ledger.json":
-			ledgerBytes = file.Data
-		case "findings.json":
-			findingsBytes = file.Data
-		case "REPORT.md":
-			reportBytes = file.Data
-		}
+		byPath[file.Path] = file.Data
 	}
-	if _, err := validateAuditMetadata(metadataBytes, reportBytes, repo, target, head); err != nil {
+	reportBytes := byPath["REPORT.md"]
+	if _, err := validateAuditMetadata(byPath["run-metadata.json"], reportBytes, repo, target, head); err != nil {
 		return "", err
 	}
-	inputs := map[string][]byte{"findings.json": findingsBytes, "coverage-ledger.json": ledgerBytes}
-	for name, data := range inputs {
-		if len(data) == 0 {
-			return "", fmt.Errorf("audit %s is missing or empty", name)
+	for _, validator := range auditValidators {
+		if len(byPath[validator.artifact]) == 0 {
+			return "", fmt.Errorf("audit %s is missing or empty", validator.artifact)
 		}
 	}
 	validationDir, err := os.MkdirTemp(validationRoot, ".audit-validation-")
@@ -108,9 +99,9 @@ func validateAuditFiles(ctx context.Context, files []workspace.File, validationR
 			resultErr = errors.Join(resultErr, fmt.Errorf("remove audit validation directory: %w", err))
 		}
 	}()
-	for name, data := range inputs {
-		if err := os.WriteFile(filepath.Join(validationDir, name), data, 0600); err != nil {
-			return "", fmt.Errorf("copy audit %s for validation: %w", name, err)
+	for _, validator := range auditValidators {
+		if err := os.WriteFile(filepath.Join(validationDir, validator.artifact), byPath[validator.artifact], 0600); err != nil {
+			return "", fmt.Errorf("copy audit %s for validation: %w", validator.artifact, err)
 		}
 	}
 	permissionFlag, err := auditNodePermissionFlag(ctx, validationDir)
@@ -126,7 +117,7 @@ func validateAuditFiles(ctx context.Context, files []workspace.File, validationR
 		if err != nil {
 			return "", err
 		}
-		stderr := bounded.Tail{Limit: bounded.DiagnosticBytes}
+		stderr := bounded.Tail{}
 		cmd.Stderr = &stderr
 		if err := cmd.Run(); err != nil {
 			return "", fmt.Errorf("audit %s failed: %w: %q", validator.script, err, stderr.String())
@@ -142,13 +133,13 @@ func validateAuditFiles(ctx context.Context, files []workspace.File, validationR
 			Unresolved         []string `json:"unresolved"`
 		} `json:"attempts"`
 	}
-	if err := json.Unmarshal(ledgerBytes, &units); err != nil || len(units) == 0 {
+	if err := json.Unmarshal(byPath["coverage-ledger.json"], &units); err != nil || len(units) == 0 {
 		return "", errors.New("audit coverage-ledger.json has no coverage units")
 	}
 	var findings []struct {
 		Fingerprint string `json:"fingerprint"`
 	}
-	if err := json.Unmarshal(findingsBytes, &findings); err != nil {
+	if err := json.Unmarshal(byPath["findings.json"], &findings); err != nil {
 		return "", fmt.Errorf("decode audit findings: %w", err)
 	}
 	final := make(map[string]bool, len(findings))

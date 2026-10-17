@@ -244,8 +244,8 @@ func TestOutputLimits(t *testing.T) {
 		data string
 	}{
 		{"line", func(*jsonlOutput) {}, strings.Repeat("x", maxEventBytes+1)},
-		{"total", func(o *jsonlOutput) { o.bytes = maxOutputBytes }, "x"},
-		{"events", func(o *jsonlOutput) { o.events = maxEvents }, "{}\n"},
+		{"total", func(o *jsonlOutput) { o.stream.Bytes = maxOutputBytes }, "x"},
+		{"events", func(o *jsonlOutput) { o.stream.Events = maxEvents }, "{}\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cancelled := false

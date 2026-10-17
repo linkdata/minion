@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/usage"
@@ -511,8 +512,8 @@ func TestJSONLOutputStopsAtCardinalityLimits(t *testing.T) {
 		cancelled := false
 		output := jsonlOutput{cancel: func() { cancelled = true }}
 		_, _ = output.Write([]byte(strings.Repeat("{\"type\":\"noop\"}\n", maxCodexEvents+1)))
-		if !cancelled || !output.failed || output.events != maxCodexEvents+1 || !strings.Contains(output.failureReason, "event count") {
-			t.Fatalf("unbounded events: cancelled=%t events=%d reason=%q", cancelled, output.events, output.failureReason)
+		if !cancelled || !output.failed || output.stream.Events != maxCodexEvents+1 || !strings.Contains(output.failureReason, "event count") {
+			t.Fatalf("unbounded events: cancelled=%t events=%d reason=%q", cancelled, output.stream.Events, output.failureReason)
 		}
 	})
 	t.Run("children", func(t *testing.T) {
@@ -533,7 +534,7 @@ func TestJSONLOutputStopsAtCardinalityLimits(t *testing.T) {
 	})
 	t.Run("bytes", func(t *testing.T) {
 		cancelled := false
-		output := jsonlOutput{cancel: func() { cancelled = true }, bytes: maxCodexOutputBytes - 1}
+		output := jsonlOutput{cancel: func() { cancelled = true }, stream: aicli.JSONL{Bytes: maxCodexOutputBytes - 1}}
 		_, _ = output.Write([]byte("xx"))
 		if !cancelled || !output.failed || !strings.Contains(output.failureReason, "size limit") {
 			t.Fatalf("unbounded output bytes: cancelled=%t reason=%q", cancelled, output.failureReason)
@@ -574,7 +575,7 @@ func TestRunRejectsExecutableFromSourceSnapshot(t *testing.T) {
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	_, err := Run(context.Background(), dir, "Review", false, "", config.CodexConfig{})
-	if err == nil || !strings.Contains(err.Error(), "executable is inside the source snapshot") {
+	if err == nil || !strings.Contains(err.Error(), "executable is inside the untrusted source snapshot") {
 		t.Fatalf("Run() error = %v, want source snapshot executable rejection", err)
 	}
 }

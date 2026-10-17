@@ -73,7 +73,7 @@ func TestLiveCloneAndPullRequest(t *testing.T) {
 
 	checkout, err := ClonePullRequest(ctx, t.TempDir(), repoName, pull.Number, pull.Base.Ref, pull.Head.SHA, func(ctx context.Context, sha string) (github.GitTree, error) {
 		return client.GitTree(ctx, repoName, sha)
-	}, true)
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,6 +84,13 @@ func TestLiveCloneAndPullRequest(t *testing.T) {
 	}()
 	if head, err := checkout.verifiedHead(ctx); err != nil || head != pull.Head.SHA {
 		t.Fatalf("pull request HEAD = %q, %v; want %s", head, err, pull.Head.SHA)
+	}
+	snapshot, err := checkout.Snapshot(ctx, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Head != pull.Head.SHA || snapshot.Base != checkout.comparisonBase || !workspace.ValidSHA(snapshot.MergeBase) {
+		t.Fatalf("pull request snapshot identities = head:%q base:%q merge-base:%q", snapshot.Head, snapshot.Base, snapshot.MergeBase)
 	}
 }
 

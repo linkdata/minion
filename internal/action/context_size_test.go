@@ -24,17 +24,16 @@ import (
 
 func TestCheckGitHubContext(t *testing.T) {
 	for _, tt := range []struct {
-		name, notes, title string
-		fields             []string
-		limit              int
-		tooLarge           bool
+		name, notes, title, body string
+		limit                    int
+		tooLarge                 bool
 	}{
-		{name: "combined exact", notes: "n", fields: []string{"T", "éé"}, limit: 6},
-		{name: "combined over", notes: "n", fields: []string{"T", "ééx"}, limit: 6, tooLarge: true},
-		{name: "rune exact", fields: []string{"é"}, limit: 2},
-		{name: "rune crosses limit", fields: []string{"é"}, limit: 1, tooLarge: true},
+		{name: "combined exact", notes: "n", title: "T", body: "éé", limit: 6},
+		{name: "combined over", notes: "n", title: "T", body: "ééx", limit: 6, tooLarge: true},
+		{name: "rune exact", body: "é", limit: 2},
+		{name: "rune crosses limit", body: "é", limit: 1, tooLarge: true},
 		{name: "notes over", notes: "é", limit: 1, tooLarge: true},
-		{name: "trimmed input", fields: []string{"  é  "}, limit: 2},
+		{name: "trimmed input", body: "  é  ", limit: 2},
 		{name: "title exact", title: strings.Repeat("😀", 256), limit: 2 * maxActionTitleBytes},
 		{name: "title over", title: strings.Repeat("x", maxActionTitleBytes+1), limit: 2 * maxActionTitleBytes, tooLarge: true},
 	} {
@@ -43,7 +42,7 @@ func TestCheckGitHubContext(t *testing.T) {
 			executor := Orchestrator{
 				MaxGitHubContextBytes: tt.limit,
 			}
-			err := executor.checkGitHubContext(job, tt.title, tt.fields...)
+			err := executor.checkGitHubContext(job, tt.title, tt.body)
 			if errors.Is(err, errGitHubContextTooLarge) != tt.tooLarge {
 				t.Fatalf("checkGitHubContext() = %v, tooLarge=%t", err, tt.tooLarge)
 			}
@@ -155,12 +154,7 @@ func TestGitHubContextLimitAcrossActions(t *testing.T) {
 							ID: 2, FullName: "linkdataminion/r", Fork: true, Private: true, Visibility: "private",
 							Parent: &github.Repository{ID: 1, FullName: "o/r"}, Source: &github.Repository{ID: 1, FullName: "o/r"},
 						})
-					case r.Method == http.MethodGet && r.URL.Path == "/repos/linkdataminion/r/actions/permissions":
-						respond(w, map[string]bool{"enabled": false})
-					case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/actions/permissions/fork-pr-workflows-private-repos":
-						respond(w, map[string]bool{"send_write_tokens_to_workflows": false, "send_secrets_and_variables": false})
-					case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/rulesets"):
-						respond(w, []string{})
+					case serveSafeForkChecks(w, r, "o/r", "linkdataminion/r", true):
 					case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/pulls":
 						respond(w, []string{})
 					case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/linkdataminion/r/branches/minion/"):

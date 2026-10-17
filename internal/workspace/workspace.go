@@ -24,7 +24,7 @@ const (
 	MaxChangeBytes  = 1 << 20
 	MaxContextBytes = 1 << 20
 	MaxEntries      = 100_000
-	// MaxPathBytes bounds relative transfer paths; absolute paths also obey host limits.
+	// MaxPathBytes is the exclusive relative transfer path limit; absolute paths also obey host limits.
 	MaxPathBytes        = 4096
 	Regular      uint32 = 0100644
 	Executable   uint32 = 0100755
@@ -72,10 +72,8 @@ func ValidCheckoutPath(name string) bool {
 		if hfsGitMetadataAlias(part) {
 			return false
 		}
-		for _, ntfsPart := range strings.Split(part, "\\") {
-			if ntfsGitMetadataAlias(ntfsPart) {
-				return false
-			}
+		if slices.ContainsFunc(strings.Split(part, "\\"), ntfsGitMetadataAlias) {
+			return false
 		}
 	}
 	return true

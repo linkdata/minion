@@ -111,7 +111,7 @@ func (e *Orchestrator) prepare(ctx context.Context, request monitor.Job) (prepar
 	}
 	lookupTree := e.treeLookup(repo.FullName)
 	if pullHead != "" {
-		p.checkout, err = gitwork.ClonePullRequest(ctx, e.WorkRoot, repo.FullName, request.Number, branch, pullHead, lookupTree, false)
+		p.checkout, err = gitwork.ClonePullRequest(ctx, e.WorkRoot, repo.FullName, request.Number, branch, pullHead, lookupTree)
 	} else {
 		p.checkout, err = gitwork.Clone(ctx, e.WorkRoot, repo.FullName, branch, lookupTree, false)
 	}
@@ -354,11 +354,14 @@ func (e *Orchestrator) prepareFix(ctx context.Context, p *preparedAction) (*prep
 	if err != nil {
 		return nil, err
 	}
-	if err := p.checkout.NewBranch(ctx, p.branch); err != nil {
-		return nil, err
-	}
 	p.job, err = e.portableJob(ctx, p, "", content.BodyText)
 	if err != nil {
+		return nil, err
+	}
+	if err := workspace.ValidateFixPaths(p.job.Source.Files, p.job.Source.Omitted); err != nil {
+		return nil, fmt.Errorf("%w: %w", gitwork.ErrUnsupportedSource, err)
+	}
+	if err := p.checkout.NewBranch(ctx, p.branch); err != nil {
 		return nil, err
 	}
 	return p, nil

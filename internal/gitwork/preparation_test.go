@@ -29,7 +29,7 @@ func TestReadOnlyCloneSnapshotsWithoutMaterializedWorktree(t *testing.T) {
 			var checkout *Checkout
 			var err error
 			if pull {
-				checkout, err = clonePullRequestFromURL(context.Background(), t.TempDir(), fixture.remote, 7, "main", head, lookup, false)
+				checkout, err = clonePullRequestFromURL(context.Background(), t.TempDir(), fixture.remote, 7, "main", head, lookup)
 			} else {
 				checkout, err = cloneFromURL(context.Background(), t.TempDir(), fixture.remote, "main", lookup, false)
 			}
@@ -95,7 +95,7 @@ func TestPullSnapshotPreservesSpecialComparisonPaths(t *testing.T) {
 	fixture.git(fixture.source, "commit", "-m", "change comparison names")
 	head := fixture.git(fixture.source, "rev-parse", "HEAD")
 	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/pull/7/head")
-	checkout, err := clonePullRequestFromURL(context.Background(), t.TempDir(), fixture.remote, 7, "main", head, localTreeMetadata(t, fixture.source), false)
+	checkout, err := clonePullRequestFromURL(context.Background(), t.TempDir(), fixture.remote, 7, "main", head, localTreeMetadata(t, fixture.source))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,7 +173,7 @@ func TestSnapshotAcceptsExactCombinedSourceByteLimit(t *testing.T) {
 	fixture.git(fixture.source, "commit", "-m", "half-budget head file")
 	head := fixture.git(fixture.source, "rev-parse", "HEAD")
 	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/pull/7/head")
-	checkout, err := clonePullRequestFromURL(context.Background(), t.TempDir(), fixture.remote, 7, "main", head, localTreeMetadata(t, fixture.source), false)
+	checkout, err := clonePullRequestFromURL(context.Background(), t.TempDir(), fixture.remote, 7, "main", head, localTreeMetadata(t, fixture.source))
 	if err != nil {
 		t.Fatal(err)
 	}

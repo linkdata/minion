@@ -3,11 +3,42 @@ package codexcli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"strings"
 	"testing"
+
+	"github.com/linkdata/minion/internal/aicli"
 )
+
+func TestInstructionProbeBoundsAndQuotesOutput(t *testing.T) {
+	for _, tc := range []struct {
+		name, script, diagnostic string
+		limited                  bool
+	}{
+		{"exact cap", "head -c 4194304 /dev/zero\n", "cannot observe repository instructions", false},
+		{"over cap", "head -c 4194305 /dev/zero\nexec sleep 30\n", "", true},
+		{"stderr", "printf 'first\\nforged journal line' >&2\nexit 7\n", `first\nforged journal line`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			installFakeCodex(t, "#!/bin/sh\n"+tc.script)
+			err := ValidateInstructionBoundary(context.Background())
+			if err == nil || errors.Is(err, aicli.ErrOutputLimit) != tc.limited || !strings.Contains(err.Error(), tc.diagnostic) {
+				t.Fatalf("probe cause changed: %v", err)
+			}
+			if strings.Contains(err.Error(), "\nforged journal line") {
+				t.Fatalf("stderr was not quoted: %v", err)
+			}
+		})
+	}
+	installFakeCodex(t, "#!/bin/sh\nexit 0\n")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := ValidateInstructionBoundary(ctx); !errors.Is(err, context.Canceled) || errors.Is(err, aicli.ErrOutputLimit) {
+		t.Fatalf("caller cancellation changed: %v", err)
+	}
+}
 
 func TestValidateInstructionBoundaryPassesIsolationSettings(t *testing.T) {
 	fakeCodex := installFakeCodex(t, `#!/bin/sh

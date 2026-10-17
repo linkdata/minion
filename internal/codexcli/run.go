@@ -1,7 +1,6 @@
 package codexcli
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -24,12 +23,15 @@ import (
 )
 
 const (
-	maxEventBytes       = 4 << 20
-	maxCodexOutputBytes = 64 << 20
-	maxCodexEvents      = 100000
+	maxEventBytes       = aicli.MaxEventBytes
+	maxCodexOutputBytes = aicli.MaxOutputBytes
+	maxCodexEvents      = aicli.MaxEvents
 	maxCodexChildren    = 256
 	instructionRoot     = ".minion-codex-root"
 )
+
+// ExecutablePath resolves the exact host file granted to sandboxed commands.
+func ExecutablePath() (string, error) { return aicli.ExecutablePath("codex") }
 
 // SystemReadPaths lists the Linux roots expanded by :minimal in Codex 0.160.0.
 // Admission checks use these paths; the native special path preserves OS aliases.
@@ -86,12 +88,9 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 		return result, fmt.Errorf("codex exec: mark isolated project root: %w", err)
 	}
 
-	realBinary, err := ExecutablePath()
+	realBinary, err := aicli.ExecutableOutside("codex", workspace)
 	if err != nil {
 		return result, fmt.Errorf("codex exec: resolve executable: %w", err)
-	}
-	if workspacefs.Within(workspace, realBinary) {
-		return result, errors.New("codex exec: executable is inside the source snapshot")
 	}
 	cacheDir := filepath.Join(runtimeDir, "go-build")
 	if err := os.Mkdir(cacheDir, 0o700); err != nil {
@@ -241,7 +240,7 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	processgroup.Configure(cmd)
 
 	output := jsonlOutput{cancel: cancelRun}
-	stderr := bounded.Tail{Limit: bounded.DiagnosticBytes}
+	stderr := bounded.Tail{}
 	cmd.Stdout = &output
 	cmd.Stderr = &stderr
 
@@ -256,6 +255,12 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	}
 	var childError error
 	result.Tokens, result.UsageComplete, childError = collectUsage(ctx, codexHome, output.threadID, started, output.tokens, output.children)
+	defer func() {
+		if childError != nil {
+			result.Answer, result.UsageComplete = "", false
+			runError = errors.Join(runError, fmt.Errorf("codex exec: %w", childError))
+		}
+	}()
 	if runErr != nil || ctx.Err() != nil || output.failed || output.parseErr != nil || !output.completed || output.finalMessage == "" {
 		// Keep known counters; a failed lifecycle cannot certify full coverage.
 		result.UsageComplete = false
@@ -294,9 +299,6 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	}
 	if output.finalMessage == "" {
 		return result, errors.New("codex exec completed without a final agent message")
-	}
-	if childError != nil {
-		return result, fmt.Errorf("codex exec: %w", childError)
 	}
 	result.Answer = output.finalMessage
 	return result, nil
@@ -363,10 +365,8 @@ type jsonlOutput struct {
 	tokens        *usage.Tokens
 	children      []string
 	seenChildren  map[string]bool
-	bytes         int64
-	events        int
 	stopped       bool
-	lines         bounded.Lines
+	stream        aicli.JSONL
 	parseErr      error
 	finalMessage  string
 	completed     bool
@@ -375,22 +375,10 @@ type jsonlOutput struct {
 }
 
 func (o *jsonlOutput) Write(p []byte) (int, error) {
-	n := len(p)
 	if o.stopped {
-		return n, nil
+		return len(p), nil
 	}
-	if int64(n) > maxCodexOutputBytes-o.bytes {
-		o.stop("Codex JSONL output exceeded the size limit")
-		return n, nil
-	}
-	o.bytes += int64(n)
-	if o.lines.Line == nil {
-		o.lines = bounded.Lines{Limit: maxEventBytes, Line: o.acceptLine, Overflow: func() {
-			o.stop("Codex JSONL event exceeded the output size limit")
-		}}
-	}
-	_, _ = o.lines.Write(p)
-	return n, nil
+	return o.stream.Write(p, o.acceptLine, func(err error) { o.stop(err.Error()) })
 }
 
 func (o *jsonlOutput) stop(reason string) {
@@ -407,20 +395,11 @@ func (o *jsonlOutput) stop(reason string) {
 }
 
 func (o *jsonlOutput) finish() {
-	o.lines.Finish()
+	o.stream.Finish()
 }
 
 func (o *jsonlOutput) acceptLine(line []byte) {
 	if o.stopped {
-		return
-	}
-	line = bytes.TrimSpace(line)
-	if len(line) == 0 {
-		return
-	}
-	o.events++
-	if o.events > maxCodexEvents {
-		o.stop("Codex JSONL event count exceeded the limit")
 		return
 	}
 	var event codexEvent
@@ -471,17 +450,34 @@ func (o *jsonlOutput) accept(event codexEvent) {
 
 func eventReason(event codexEvent) string {
 	if event.Message != "" {
-		return bounded.Text(event.Message, bounded.DiagnosticBytes)
+		return bounded.Text(event.Message)
 	}
 	var detail struct {
 		Message string `json:"message"`
 	}
 	if json.Unmarshal(event.Error, &detail) == nil && detail.Message != "" {
-		return bounded.Text(detail.Message, bounded.DiagnosticBytes)
+		return bounded.Text(detail.Message)
 	}
 	var simple string
 	if json.Unmarshal(event.Error, &simple) == nil {
-		return bounded.Text(simple, bounded.DiagnosticBytes)
+		return bounded.Text(simple)
 	}
 	return ""
+}
+
+// appendChildIDs keeps repeated waits from consuming the unique-helper bound.
+func appendChildIDs(children *[]string, seen map[string]bool, ids ...string) bool {
+	complete := true
+	for _, id := range ids {
+		if seen[id] {
+			continue
+		}
+		if len(*children) == maxCodexChildren {
+			complete = false
+			continue
+		}
+		seen[id] = true
+		*children = append(*children, id)
+	}
+	return complete
 }

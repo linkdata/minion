@@ -119,7 +119,7 @@ func TestOutputCountsUniqueHelpersAcrossRepeatedWaits(t *testing.T) {
 	o := jsonlOutput{}
 	for range 300 {
 		for _, kind := range []string{"item.started", "item.completed"} {
-			_, _ = o.Write([]byte(fmt.Sprintf(`{"type":%q,"item":{"type":"collab_tool_call","receiver_thread_ids":["child","child"]}}`+"\n", kind)))
+			_, _ = fmt.Fprintf(&o, `{"type":%q,"item":{"type":"collab_tool_call","receiver_thread_ids":["child","child"]}}`+"\n", kind)
 		}
 	}
 	_, _ = o.Write([]byte(`{"type":"item.completed","item":{"type":"agent_message","text":"answer"}}` + "\n" + `{"type":"turn.completed"}` + "\n"))
@@ -159,7 +159,7 @@ func TestRunChecksLatestOwnedChildTurn(t *testing.T) {
 }
 
 func TestRunRejectsKnownUnfinishedChildrenWithoutRejectingAccountingGaps(t *testing.T) {
-	for _, scenario := range []string{"complete", "unfinished", "aborted", "missing counters", "missing log", "inherited turn", "damaged log"} {
+	for _, scenario := range []string{"complete", "unfinished", "aborted", "missing counters", "missing log", "inherited turn", "damaged log", "completed then damaged tail", "completed then oversized tail", "completed then partial tail", "completed then new response only"} {
 		t.Run(scenario, func(t *testing.T) {
 			installFakeCodex(t, "#!/bin/sh\ncat <<'EVENTS'\n"+`{"type":"thread.started","thread_id":"root"}
 {"type":"item.completed","item":{"type":"collab_tool_call","receiver_thread_ids":["child"]}}
@@ -179,12 +179,30 @@ func TestRunRejectsKnownUnfinishedChildrenWithoutRejectingAccountingGaps(t *test
 				child = []string{strings.Replace(usageEvent("task_started", "inherited-turn"), `"ordinal":20`, `"ordinal":5`, 1)}
 			case "damaged log":
 				child = append(child, "{damaged")
+			case "completed then damaged tail":
+				child = append(child, usageEvent("task_complete", "child-turn"), "{damaged")
+			case "completed then oversized tail":
+				child = append(child, usageEvent("task_complete", "child-turn"), strings.Repeat("x", maxEventBytes+1))
+			case "completed then partial tail":
+				child = append(child, usageEvent("task_complete", "child-turn"))
+			case "completed then new response only":
+				child = append(child, usageEvent("task_complete", "child-turn"), usageRecord("child", "new-turn", "new-response", 30, 0, 3))
 			}
 			if scenario != "missing log" {
-				writeUsageRollout(t, home, "child", "root", child...)
+				path := writeUsageRollout(t, home, "child", "root", child...)
+				if scenario == "completed then partial tail" {
+					file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+					if err != nil {
+						t.Fatal(err)
+					}
+					_, writeErr := file.WriteString(`{"type":"event_msg"`)
+					if err := errors.Join(writeErr, file.Close()); err != nil {
+						t.Fatal(err)
+					}
+				}
 			}
 			result, err := Run(context.Background(), t.TempDir(), "task", false, "", config.CodexConfig{})
-			fails := scenario == "unfinished" || scenario == "aborted"
+			fails := scenario != "complete" && scenario != "missing counters"
 			if (err != nil) != fails || fails && (result.Answer != "" || result.UsageComplete || !strings.Contains(err.Error(), "helper agent work did not complete")) || !fails && result.Answer != "completed response" {
 				t.Fatalf("child lifecycle conflated with accounting: result=%+v error=%v", result, err)
 			}

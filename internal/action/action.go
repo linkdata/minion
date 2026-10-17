@@ -291,17 +291,10 @@ func (e *Orchestrator) githubContextLimit() int {
 	return config.DefaultMaxGitHubContextBytes
 }
 
-func (e *Orchestrator) checkGitHubContext(job monitor.Job, title string, fields ...string) error {
+func (e *Orchestrator) checkGitHubContext(job monitor.Job, title, body string) error {
 	remaining := e.githubContextLimit() - len(requestNotes(job)) - len(strings.TrimSpace(title))
-	if len(title) > maxActionTitleBytes || remaining < 0 {
+	if len(title) > maxActionTitleBytes || len(strings.TrimSpace(body)) > remaining {
 		return errGitHubContextTooLarge
-	}
-	for _, field := range fields {
-		size := len(strings.TrimSpace(field))
-		if size > remaining {
-			return errGitHubContextTooLarge
-		}
-		remaining -= size
 	}
 	return nil
 }

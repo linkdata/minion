@@ -155,7 +155,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			next = started.Add(minInterval)
 			store.Data.NextPollAt = next
 			if err := store.Save(); err != nil {
-				return next, err
+				return next, errors.Join(append(failures, err, ctx.Err())...)
 			}
 		}
 		if err != nil {
@@ -219,7 +219,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		if err != nil {
 			failures = append(failures, fmt.Errorf("verify %s repository identity: %w", repo.Name, err))
 			if err := m.deferNotification(store, entry.key, notification, entry.since, started); err != nil {
-				return next, err
+				return next, errors.Join(append(failures, err, ctx.Err())...)
 			}
 			continue
 		}
@@ -247,7 +247,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		if err != nil {
 			failures = append(failures, fmt.Errorf("%s %s #%d: %w", repo.Name, notification.Subject.Type, number, err))
 			if err := m.deferNotification(store, entry.key, notification, entry.since, started); err != nil {
-				return next, err
+				return next, errors.Join(append(failures, err, ctx.Err())...)
 			}
 			continue
 		}
@@ -307,7 +307,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				m.logf("ignore edited command in %s (last editor @%s)", item.HTMLURL, item.Editor.Login)
 				store.Data.Processed[job.ID] = started
 				if err := store.Save(); err != nil {
-					return next, err
+					return next, errors.Join(append(failures, err, ctx.Err())...)
 				}
 				continue
 			}
@@ -315,7 +315,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				m.logf("ignore %s from @%s in %s: disabled action or actor", cmd.Action, item.Author.Login, repo.Name)
 				store.Data.Processed[job.ID] = started
 				if err := store.Save(); err != nil {
-					return next, err
+					return next, errors.Join(append(failures, err, ctx.Err())...)
 				}
 				continue
 			}
@@ -331,7 +331,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				m.logf("ignore %s from @%s in %s: permission identity differs", cmd.Action, item.Author.Login, repo.Name)
 				store.Data.Processed[job.ID] = started
 				if err := store.Save(); err != nil {
-					return next, err
+					return next, errors.Join(append(failures, err, ctx.Err())...)
 				}
 				continue
 			}
@@ -339,7 +339,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				m.logf("ignore %s from @%s in %s: permission %q", cmd.Action, item.Author.Login, repo.Name, permission.Permission)
 				store.Data.Processed[job.ID] = started
 				if err := store.Save(); err != nil {
-					return next, err
+					return next, errors.Join(append(failures, err, ctx.Err())...)
 				}
 				continue
 			}
@@ -347,6 +347,9 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			if jobFailure.Attempts >= maxJobAttempts {
 				if err := m.finishFailedJob(ctx, store, job, items, started, jobFailure); err != nil {
 					failures = append(failures, err)
+				}
+				if err := ctx.Err(); err != nil {
+					return next, errors.Join(append(failures, err)...)
 				}
 				continue
 			}
@@ -363,7 +366,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			jobFailure.Attempts++
 			store.Data.JobFailures[job.ID] = jobFailure
 			if err := store.Save(); err != nil {
-				return next, err
+				return next, errors.Join(append(failures, err, ctx.Err())...)
 			}
 			m.logf("run %s from @%s in %s #%d", cmd.Action, item.Author.Login, repo.Name, number)
 			if err := m.Executor.Execute(ctx, job); err != nil {
@@ -377,11 +380,11 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				}
 				store.Data.JobFailures[job.ID] = jobFailure
 				if saveErr := store.Save(); saveErr != nil {
-					return next, errors.Join(err, saveErr)
+					return next, errors.Join(append(failures, err, saveErr, ctx.Err())...)
 				}
 				if interrupted {
 					m.logf("%s from %s interrupted: %v", cmd.Action, item.HTMLURL, err)
-					return next, err
+					return next, errors.Join(append(failures, err, ctx.Err())...)
 				}
 				m.logf("%s from %s failed (attempt %d/%d): %v", cmd.Action, item.HTMLURL, jobFailure.Attempts, maxJobAttempts, err)
 				if jobFailure.Attempts >= maxJobAttempts {
@@ -389,12 +392,12 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 						failures = append(failures, replyErr)
 					}
 					if ctx.Err() != nil {
-						return next, errors.Join(failures...)
+						return next, errors.Join(append(failures, err, ctx.Err())...)
 					}
 					continue
 				}
 				if ctx.Err() != nil {
-					return next, errors.Join(append(failures, err)...)
+					return next, errors.Join(append(failures, err, ctx.Err())...)
 				}
 				failures = append(failures, fmt.Errorf("%s from %s: %w", cmd.Action, item.HTMLURL, err))
 				continue
@@ -403,20 +406,20 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			delete(store.Data.JobFailures, job.ID)
 			delete(store.Data.PendingFixes, job.ID)
 			if err := store.Save(); err != nil {
-				return next, err
+				return next, errors.Join(append(failures, err, ctx.Err())...)
 			}
 			if err := ctx.Err(); err != nil {
-				return next, err
+				return next, errors.Join(append(failures, err)...)
 			}
 		}
 		if len(failures) != firstFailure {
 			if err := m.deferNotification(store, entry.key, notification, entry.since, started); err != nil {
-				return next, err
+				return next, errors.Join(append(failures, err, ctx.Err())...)
 			}
 		} else if _, pending := store.Data.PendingNotifications[entry.key]; pending {
 			delete(store.Data.PendingNotifications, entry.key)
 			if err := store.Save(); err != nil {
-				return next, err
+				return next, errors.Join(append(failures, err, ctx.Err())...)
 			}
 		}
 	}
@@ -435,7 +438,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		store.Data.Cursor = newCursor
 	}
 	if err := store.Save(); err != nil {
-		return next, err
+		return next, errors.Join(append(failures, err, ctx.Err())...)
 	}
 	return next, errors.Join(failures...)
 }

@@ -9,22 +9,23 @@ import (
 
 	"github.com/linkdata/minion/internal/cleanup"
 	"github.com/linkdata/minion/internal/command"
+	"github.com/linkdata/minion/internal/gitwork"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
 type reviewSnapshot struct {
 	source, outputDir string
 	liveOutputDir     string
-	job               Job
-	index             *fixIndex
+	base              []workspace.File
+	index             *gitwork.OfflineIndex
 	ownedSource       bool
 	changes           []workspace.Change
 	artifacts         []workspace.File
 }
 
 // Freeze outside the main model's writable grants so background work cannot change the critic's input.
-func freezeReviewSnapshot(ctx context.Context, workRoot string, job Job, source, outputDir string, index *fixIndex) (snapshot *reviewSnapshot, resultErr error) {
-	snapshot = &reviewSnapshot{source: source, liveOutputDir: outputDir, job: job, index: index}
+func freezeReviewSnapshot(ctx context.Context, workRoot string, job Job, source, outputDir string, index *gitwork.OfflineIndex) (snapshot *reviewSnapshot, resultErr error) {
+	snapshot = &reviewSnapshot{source: source, liveOutputDir: outputDir, base: job.Source.Files, index: index}
 	defer func() {
 		if resultErr != nil {
 			resultErr = errors.Join(resultErr, snapshot.close())
@@ -33,7 +34,7 @@ func freezeReviewSnapshot(ctx context.Context, workRoot string, job Job, source,
 	}()
 	var err error
 	if job.Action == command.Fix {
-		if snapshot.changes, err = index.changes(ctx); err != nil {
+		if snapshot.changes, err = index.Changes(ctx); err != nil {
 			return snapshot, err
 		}
 		if err := job.validateChanges(snapshot.changes); err != nil {
@@ -63,10 +64,10 @@ func freezeReviewSnapshot(ctx context.Context, workRoot string, job Job, source,
 
 func (s *reviewSnapshot) verify(ctx context.Context) error {
 	if s.ownedSource {
-		if err := workspace.CheckChangesUnchanged(ctx, s.source, s.job.Source.Files, s.changes); err != nil {
+		if err := workspace.CheckChangesUnchanged(ctx, s.source, s.base, s.changes); err != nil {
 			return fmt.Errorf("frozen candidate source changed during critic review: %w", err)
 		}
-		changes, err := s.index.changes(ctx)
+		changes, err := s.index.Changes(ctx)
 		if err != nil {
 			return err
 		}

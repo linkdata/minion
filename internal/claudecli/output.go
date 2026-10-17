@@ -4,9 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"encoding/xml"
 	"errors"
 	"fmt"
+	"html"
 	"math"
 	"strings"
 	"time"
@@ -17,9 +17,9 @@ import (
 )
 
 const (
-	maxEventBytes     = 4 << 20
-	maxOutputBytes    = 64 << 20
-	maxEvents         = 100000
+	maxEventBytes     = aicli.MaxEventBytes
+	maxOutputBytes    = aicli.MaxOutputBytes
+	maxEvents         = aicli.MaxEvents
 	maxResetTimestamp = 253402300799 // 9999-12-31T23:59:59Z, the last RFC3339 year.
 )
 
@@ -118,11 +118,9 @@ type messageUsage struct {
 
 type jsonlOutput struct {
 	cancel              context.CancelFunc
-	lines               bounded.Lines
+	stream              aicli.JSONL
 	fatal               func()
 	stopped             bool
-	bytes               int64
-	events              int
 	err                 error
 	usageLimit          error
 	taskFailure         error
@@ -141,22 +139,10 @@ type jsonlOutput struct {
 }
 
 func (o *jsonlOutput) Write(p []byte) (int, error) {
-	n := len(p)
 	if o.err != nil {
-		return n, nil
+		return len(p), nil
 	}
-	if int64(n) > maxOutputBytes-o.bytes {
-		o.fail(fmt.Errorf("%w: JSONL bytes", aicli.ErrOutputLimit))
-		return n, nil
-	}
-	o.bytes += int64(n)
-	if o.lines.Line == nil {
-		o.lines = bounded.Lines{Limit: maxEventBytes, Line: o.finishLine, Overflow: func() {
-			o.fail(fmt.Errorf("%w: JSONL event bytes", aicli.ErrOutputLimit))
-		}}
-	}
-	_, _ = o.lines.Write(p)
-	return n, nil
+	return o.stream.Write(p, o.finishLine, o.fail)
 }
 
 func (o *jsonlOutput) fail(err error) {
@@ -171,7 +157,7 @@ func (o *jsonlOutput) fail(err error) {
 }
 
 func (o *jsonlOutput) finish() {
-	o.lines.Finish()
+	o.stream.Finish()
 	lower, valid := o.assistantLowerBound()
 	if o.aggregateGeneration == 0 || o.uncovered || !valid || lower != o.result.Tokens {
 		if valid {
@@ -198,13 +184,7 @@ func (o *jsonlOutput) finish() {
 }
 
 func (o *jsonlOutput) finishLine(line []byte) {
-	line = bytes.TrimSpace(line)
-	if o.err != nil || len(line) == 0 {
-		return
-	}
-	o.events++
-	if o.events > maxEvents {
-		o.fail(fmt.Errorf("%w: JSONL events", aicli.ErrOutputLimit))
+	if o.err != nil {
 		return
 	}
 	var e event
@@ -215,7 +195,7 @@ func (o *jsonlOutput) finishLine(line []byte) {
 	if e.Type == "assistant" {
 		o.recordAssistantUsage(e.Message, bytes.Equal(bytes.TrimSpace(e.ParentToolUseID), []byte("null")))
 	}
-	if e.Type == "system" && e.Subtype == "task_notification" && e.Status == "stopped" && !e.Ambient {
+	if e.Type == "system" && e.Subtype == "task_notification" && (e.Status == "stopped" || e.Status == "killed") && !e.Ambient {
 		o.recordTaskStop(e.Summary)
 	}
 	if e.Type == "rate_limit_event" && e.RateLimitInfo.Status == "rejected" && !e.RateLimitInfo.IsUsingOverage && !e.RateLimitInfo.OverageInUse {
@@ -316,7 +296,7 @@ func (o *jsonlOutput) finishLine(line []byte) {
 		return
 	}
 	if e.IsError || e.Subtype != "success" {
-		reason := fmt.Sprintf("result failed: %q", bounded.Text(e.Subtype, bounded.DiagnosticBytes))
+		reason := fmt.Sprintf("result failed: %q", bounded.Text(e.Subtype))
 		switch e.APIError {
 		case "usage_limit_reached", "model_requires_usage_credits", "long_context_credits_required", "provider_credentials":
 			reason += "; API error=" + e.APIError
@@ -390,14 +370,20 @@ func (o *jsonlOutput) recordTaskNotice(text string) {
 	if !strings.HasPrefix(text, "<task-notification>") {
 		return
 	}
-	var notice struct {
-		XMLName xml.Name `xml:"task-notification"`
-		Status  string   `xml:"status"`
-		Summary string   `xml:"summary"`
+	_, status, found := strings.Cut(text, "<status>")
+	if !found {
+		return
 	}
-	if xml.Unmarshal([]byte(text), &notice) == nil && (notice.Status == "killed" || notice.Status == "stopped") {
-		o.recordTaskStop(notice.Summary)
+	status, _, found = strings.Cut(status, "</status>")
+	status = strings.TrimSpace(html.UnescapeString(status))
+	if !found || status != "killed" && status != "stopped" {
+		return
 	}
+	_, summary, _ := strings.Cut(text, "<summary>")
+	if end := strings.LastIndex(summary, "</summary>"); end >= 0 {
+		summary = summary[:end]
+	}
+	o.recordTaskStop(html.UnescapeString(summary))
 }
 
 func (o *jsonlOutput) recordAssistantUsage(raw json.RawMessage, root bool) {
@@ -497,4 +483,11 @@ func sandboxFailure(text string) bool {
 		}
 	}
 	return false
+}
+
+func isWaitCeilingStop(line []byte) bool {
+	// Managed CLI settings can override its launch environment. Match this
+	// diagnostic independently of the separately retained stderr tail.
+	line = bytes.TrimRight(line, " \t\r")
+	return bytes.HasPrefix(line, []byte("Background tasks still running ")) && bytes.HasSuffix(line, []byte("; stopping them. Set CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 to wait indefinitely."))
 }

@@ -131,15 +131,16 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 	if err := materializeContext(contextDir, contextSource); err != nil {
 		return result, preparationFailure("materialize context", err)
 	}
-	var index *fixIndex
+	var index *gitwork.OfflineIndex
 	if job.Action == command.Fix {
 		metadataDir, err := os.MkdirTemp(workRoot, ".minion-index-")
 		if err != nil {
 			return result, err
 		}
 		owned = append(owned, metadataDir)
-		index, err = newFixIndex(ctx, metadataDir, source, job.Source.Files)
+		index, err = gitwork.NewOfflineIndex(ctx, metadataDir, source, job.Source.Files)
 		if err != nil {
+			// Native Git can refuse a source that passed portable path validation.
 			if errors.Is(err, gitwork.ErrUnsupportedSource) {
 				return result, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
 			}
@@ -245,7 +246,7 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 	if review != nil && index != nil {
 		changes = review.changes
 	} else if index != nil {
-		changes, err = index.changes(ctx)
+		changes, err = index.Changes(ctx)
 	} else {
 		// Read-only byte canary: detect sandbox or runner regressions against supplied input.
 		err = workspace.CheckUnchanged(ctx, source, job.Source.Files)
@@ -310,15 +311,22 @@ func (r *Runner) CheckWorkRootIsolation(root string, providers ...string) error 
 		if provider == "" {
 			continue
 		}
-		systemReads := claudecli.SystemReadPaths()
-		if provider == "codex" {
+		var systemReads, readOnly, selected []string
+		switch provider {
+		case "codex":
 			systemReads = codexcli.SystemReadPaths()
+			readOnly, selected = r.Codex.ReadOnlyDirs, r.Codex.Skills
 			binary, err := codexcli.ExecutablePath()
 			if err == nil {
 				grants = append(grants, binary)
 			} else if !errors.Is(err, exec.ErrNotFound) && !errors.Is(err, os.ErrNotExist) {
 				return err
 			}
+		case "claude":
+			systemReads = claudecli.SystemReadPaths()
+			readOnly, selected = r.Claude.ReadOnlyDirs, r.Claude.Skills
+		default:
+			return fmt.Errorf("unsupported AI provider %q", provider)
 		}
 		for _, path := range systemReads {
 			if _, err := os.Stat(path); err == nil {
@@ -326,10 +334,6 @@ func (r *Runner) CheckWorkRootIsolation(root string, providers ...string) error 
 			} else if !errors.Is(err, os.ErrNotExist) {
 				return err
 			}
-		}
-		readOnly, selected := r.Codex.ReadOnlyDirs, r.Codex.Skills
-		if provider == "claude" {
-			readOnly, selected = r.Claude.ReadOnlyDirs, r.Claude.Skills
 		}
 		grants = append(grants, readOnly...)
 		for _, skill := range selected {
@@ -471,6 +475,19 @@ func normalizeAuditArtifacts(files []workspace.File, job Job, skill string) ([]w
 			for _, name := range []string{"run_id", "repo", "source_ref", "profile", "scope_paths", "budget", "selected_companion_files", "prior_run_paths", "execution_policy", "run_status"} {
 				if value, present := raw[name]; present {
 					metadata[name] = value
+				}
+			}
+			for _, name := range []string{"scope_paths", "prior_run_paths"} {
+				if value, present := metadata[name]; present {
+					var paths []string
+					if err := json.Unmarshal(value, &paths); err != nil {
+						return nil, err
+					}
+					for _, path := range paths {
+						if path != "." && !workspace.ValidPath(path) {
+							return nil, fmt.Errorf("audit %s path is not portable", name)
+						}
+					}
 				}
 			}
 			if value, present := raw["shared_file_owners"]; present {

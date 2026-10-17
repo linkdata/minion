@@ -32,6 +32,7 @@ func TestSkillListsFitPortableRoleLimits(t *testing.T) {
 	for i := range urls {
 		urls[i] = fmt.Sprintf("https://github.com/o/r/tree/main/skills/skill-%d", i)
 	}
+	sourceAtLimit := "https://github.com/o/r/tree/" + strings.Repeat("x", MaxSkillURLBytes-len("https://github.com/o/r/tree//skills/one")) + "/skills/one"
 	for _, test := range []struct {
 		name               string
 		required, optional []string
@@ -41,7 +42,12 @@ func TestSkillListsFitPortableRoleLimits(t *testing.T) {
 		{"combined overflow", urls[:32], urls[32:], false},
 		{"required overflow", urls, []string{}, false},
 		{"optional overflow", urls[:1], urls, false},
-		{"source exact bytes", []string{"https://github.com/o/r/tree/" + strings.Repeat("x", MaxSkillURLBytes-len("https://github.com/o/r/tree//skills/one")) + "/skills/one"}, []string{}, true},
+		{"source exact bytes", []string{sourceAtLimit}, []string{}, true},
+		{"source exact bytes with slash", []string{sourceAtLimit + "/"}, []string{}, true},
+		{"optional exact bytes with slash", urls[:1], []string{sourceAtLimit + "/"}, true},
+		{"normalized source too long", []string{strings.Replace(sourceAtLimit, "/tree/", "/tree/x", 1) + "/"}, []string{}, false},
+		{"double trailing slash", []string{urls[0] + "//"}, []string{}, false},
+		{"builtin trailing slash", []string{defaultAntiInjectionSkill + "/"}, []string{}, false},
 		{"source too long", []string{"https://github.com/o/r/tree/" + strings.Repeat("x", MaxSkillURLBytes) + "/skills/one"}, []string{}, false},
 		{"optional source too long", urls[:1], []string{"https://github.com/o/r/tree/" + strings.Repeat("x", MaxSkillURLBytes) + "/skills/one"}, false},
 	} {
@@ -50,6 +56,15 @@ func TestSkillListsFitPortableRoleLimits(t *testing.T) {
 				Repositories: []Repository{{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"review"}}}}
 			if err := cfg.Validate(t.TempDir()); (err == nil) != test.valid {
 				t.Fatalf("skill bounds: %v; valid=%t", err, test.valid)
+			}
+			if test.valid {
+				for _, sources := range [][]string{cfg.Commands["review"].Skills, cfg.AlwaysOnSkills} {
+					for _, source := range sources {
+						if len(source) > MaxSkillURLBytes || strings.HasSuffix(source, "/") {
+							t.Fatalf("skill source was not normalized within the portable bound: %q", source)
+						}
+					}
+				}
 			}
 		})
 	}

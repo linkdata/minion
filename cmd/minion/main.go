@@ -160,7 +160,11 @@ func run() int {
 	for {
 		next, err := watcher.RunOnce(ctx, store)
 		if err != nil {
-			logger.Printf("poll: %v", err)
+			if ctx.Err() != nil {
+				logger.Printf("poll interrupted: %v", err)
+			} else {
+				logger.Printf("poll: %v", err)
+			}
 			if !*loop {
 				return 1
 			}
@@ -204,10 +208,7 @@ func checkWorkRootIsolation(cfg config.Config) error {
 			runner.Codex.Skills = selected
 		}
 	}
-	if err := runner.CheckWorkRootIsolation(cfg.WorkRoot, cfg.Main, cfg.Adversarial); err != nil {
-		return fmt.Errorf("%w: %w", workroot.ErrUnsafe, err)
-	}
-	return nil
+	return runner.CheckWorkRootIsolation(cfg.WorkRoot, cfg.Main, cfg.Adversarial)
 }
 
 func logCommandSkills(cfg config.Config, logger *log.Logger) {

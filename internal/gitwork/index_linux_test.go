@@ -1,6 +1,6 @@
 //go:build linux
 
-package action
+package gitwork
 
 import (
 	"context"
@@ -36,7 +36,7 @@ func TestFixIndexRejectsControlFIFOsBeforeGitOpensThem(t *testing.T) {
 				}
 				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 				defer cancel()
-				_, err := index.changes(ctx)
+				_, err := index.Changes(ctx)
 				if err == nil || !strings.Contains(err.Error(), "fix control file") || !strings.Contains(err.Error(), control) || !strings.Contains(err.Error(), "must be regular") || ctx.Err() != nil {
 					t.Fatalf("FIFO refused only after Git blocked: %v; deadline=%v", err, ctx.Err())
 				}
@@ -59,7 +59,7 @@ func TestFixIndexRejectsNestedGitFIFOBeforeGitOpensIt(t *testing.T) {
 	writeIndexFixture(t, source, "newdir/file", []byte("new output"))
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	_, err := index.changes(ctx)
+	_, err := index.Changes(ctx)
 	if err == nil || !strings.Contains(err.Error(), `untracked nested repository output "newdir/"`) || ctx.Err() != nil {
 		t.Fatalf("nested Git FIFO refused only after blocking: %v; deadline=%v", err, ctx.Err())
 	}
@@ -77,7 +77,7 @@ func TestFixIndexTreatsColonDirectoriesAsLiteralNames(t *testing.T) {
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
-			_, err := index.changes(ctx)
+			_, err := index.Changes(ctx)
 			if err == nil || !strings.Contains(err.Error(), "fix control file") || !strings.Contains(err.Error(), "must be regular") || ctx.Err() != nil {
 				t.Fatalf("literal directory path was interpreted as a pathspec: %v; deadline=%v", err, ctx.Err())
 			}
@@ -85,7 +85,7 @@ func TestFixIndexTreatsColonDirectoriesAsLiteralNames(t *testing.T) {
 				t.Fatal(err)
 			}
 			writeIndexFixture(t, source, dir+"/file", []byte("legal source"))
-			changes, err := index.changes(ctx)
+			changes, err := index.Changes(ctx)
 			if err != nil || len(changes) != 1 || changes[0].Path != dir+"/file" {
 				t.Fatalf("legal colon directory was refused: %+v,%v", changes, err)
 			}
@@ -114,7 +114,7 @@ func TestFixIndexDoesNotInspectIgnoredControlFiles(t *testing.T) {
 	writeIndexFixture(t, source, "source", []byte("after"))
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	changes, err := index.changes(ctx)
+	changes, err := index.Changes(ctx)
 	if err != nil || len(changes) != 1 || changes[0].Path != "source" || string(changes[0].Data) != "after" || ctx.Err() != nil {
 		t.Fatalf("ignored build control files affected selection: %+v, %v; deadline=%v", changes, err, ctx.Err())
 	}
@@ -139,7 +139,7 @@ func TestFixIndexRejectsTrackedFIFOAndSymlink(t *testing.T) {
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
-			changes, err := index.changes(ctx)
+			changes, err := index.Changes(ctx)
 			want := "can only add regular files"
 			if kind == "symlink" {
 				want = `unsupported offline git change at "file"`
@@ -164,7 +164,7 @@ func TestFixIndexControlScanHonorsNestedIgnoreNegation(t *testing.T) {
 	writeIndexFixture(t, source, "sub/keep.cache/added", []byte("included by negation"))
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	changes, err := index.changes(ctx)
+	changes, err := index.Changes(ctx)
 	if err != nil || len(changes) != 1 || changes[0].Path != "sub/keep.cache/added" || ctx.Err() != nil {
 		t.Fatalf("nested ignore negation changed selection: %+v, %v; deadline=%v", changes, err, ctx.Err())
 	}
@@ -196,7 +196,7 @@ func TestFixIndexGrowthCheckDoesNotStatThroughSymlinkedParents(t *testing.T) {
 			if err := os.Symlink(outside, filepath.Join(source, "parent")); err != nil {
 				t.Fatal(err)
 			}
-			changes, err := index.changes(context.Background())
+			changes, err := index.Changes(context.Background())
 			if ignored {
 				if err != nil || len(changes) != 1 || changes[0].Path != "parent/file" || !changes[0].Delete {
 					t.Fatalf("ignored replacement did not export only deletion: %+v, %v", changes, err)
