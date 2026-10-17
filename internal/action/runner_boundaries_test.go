@@ -16,6 +16,7 @@ import (
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
+	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/workspace"
 )
@@ -81,10 +82,7 @@ func TestRunnerCancellationDuringInstalledAuditValidatorPreservesCause(t *testin
 	}
 	defer marker.Close()
 	script := fmt.Sprintf("#!/bin/sh\nif [ \"$2\" = -e ]; then exit 0; fi\nprintf started > %q\nexec /bin/cat < %q\n", startedPath, holdPath)
-	if err := os.WriteFile(filepath.Join(bin, "node"), []byte(script), 0700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	fakeOnPath(t, "node", script)
 	job := portableJob(command.SecurityAudit)
 	job.Main.Skills = []string{testAuditSkillURL}
 	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
@@ -156,6 +154,7 @@ func TestRunnerMissingConfiguredReadGrantIsRetryableBeforeModels(t *testing.T) {
 				job.Main.Provider = provider
 				if role == "critic" {
 					job.Critic = &RoleSettings{Provider: provider}
+					job.CriticMaxRounds = config.DefaultCriticMaxRounds
 					job.Main.Provider = "claude"
 					if provider == "claude" {
 						job.Main.Provider = "codex"
@@ -184,6 +183,7 @@ func TestRunnerMissingConfiguredReadGrantIsRetryableBeforeModels(t *testing.T) {
 func TestRunnerReviewsAndPublishesNormalizedAnswer(t *testing.T) {
 	job := portableJob(command.Comment)
 	job.Critic = &RoleSettings{Provider: "claude"}
+	job.CriticMaxRounds = config.DefaultCriticMaxRounds
 	mainCalls, criticCalls := 0, 0
 	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 		if request.role == "main" {
@@ -268,6 +268,7 @@ func TestRunnerReportsOwnedAndCriticCleanupFailures(t *testing.T) {
 				job.Action = command.Fix
 				job.Command = "fix"
 				job.Critic = &RoleSettings{Provider: "claude"}
+				job.CriticMaxRounds = config.DefaultCriticMaxRounds
 			}
 			root := t.TempDir()
 			defer func() {

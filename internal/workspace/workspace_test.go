@@ -305,8 +305,8 @@ func TestSnapshotBoundsAndIdentity(t *testing.T) {
 	for _, modify := range []func(*Snapshot){
 		func(s *Snapshot) { s.Head = "main" },
 		func(s *Snapshot) { s.Base = strings.Repeat("b", 40) },
-		func(s *Snapshot) { s.Diff = make([]byte, MaxContextBytes+1) },
-		func(s *Snapshot) { s.History = make([]byte, MaxContextBytes+1) },
+		func(s *Snapshot) { s.Base, s.MergeBase = s.Head, s.Head; s.Diff = make([]byte, MaxContextBytes+1) },
+		func(s *Snapshot) { s.HistoryRequested = true; s.History = make([]byte, MaxContextBytes+1) },
 		func(s *Snapshot) {
 			s.Files = make([]File, MaxFiles+1)
 			for i := range s.Files {
@@ -324,8 +324,12 @@ func TestSnapshotBoundsAndIdentity(t *testing.T) {
 	} {
 		bad := good
 		modify(&bad)
-		if err := ValidateSnapshot(bad); err == nil {
+		err := ValidateSnapshot(bad)
+		if err == nil {
 			t.Fatal("accepted invalid snapshot")
+		}
+		if (len(bad.Diff) > MaxContextBytes || len(bad.History) > MaxContextBytes) && !strings.Contains(err.Error(), "exceeds limits") {
+			t.Fatalf("context bounds did not reach limit validation: %v", err)
 		}
 	}
 	ctx, cancel := context.WithCancel(context.Background())

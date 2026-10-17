@@ -8,7 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"strings"
+	"slices"
 	"syscall"
 	"time"
 
@@ -76,14 +76,7 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 	if workRoot == "" {
 		return result, fmt.Errorf("%w: work root is required", monitor.ErrTerminalJob)
 	}
-	workRoot, err := filepath.Abs(workRoot)
-	if err != nil {
-		return result, err
-	}
-	if err := os.MkdirAll(workRoot, 0700); err != nil {
-		return result, err
-	}
-	workRoot, err = filepath.EvalSymlinks(workRoot)
+	workRoot, err := workspace.PrepareRoot(workRoot)
 	if err != nil {
 		return result, err
 	}
@@ -188,7 +181,12 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 				return aicli.Result{}, err
 			}
 			call, err := next(ctx, request)
-			result.Calls = append(result.Calls, CallUsage{Provider: request.provider, Role: request.role, Round: request.round, ReviewPhase: request.reviewPhase, Model: request.model, Effort: request.effort, Tokens: call.Tokens, Complete: call.UsageComplete})
+			entry := CallUsage{Provider: request.provider, Role: request.role, Round: request.round, ReviewPhase: request.reviewPhase, Model: request.model, Effort: request.effort, Tokens: call.Tokens, Complete: call.UsageComplete}
+			if err == nil && request.role == roleCritic {
+				approved, _, parseErr := parseCritique(call.Answer)
+				entry.Approved = parseErr == nil && approved
+			}
+			result.Calls = append(result.Calls, entry)
 			return call, err
 		}
 		var call aicli.Result
@@ -240,7 +238,7 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 		if review != nil {
 			files = review.artifacts
 		} else {
-			files, _, err = readAuditArtifacts(outputDir, auditComplete)
+			files, _, err = readAuditArtifacts(outputDir, auditForReview)
 		}
 		if err != nil {
 			return result, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
@@ -253,11 +251,6 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 		}
 	}
 	result.Answer = answer
-	if len(result.Answer) > maxOutputBytes {
-		const suffix = "\n[truncated]"
-		result.Answer = strings.ToValidUTF8(result.Answer[:maxOutputBytes-len(suffix)], "") + suffix
-		result.Diagnostics = append(result.Diagnostics, Diagnostic{Code: "output_truncated", Message: "Model answer exceeded the action output limit and was truncated."})
-	}
 	if err := result.validate(job, true); err != nil {
 		result.Changes, result.Answer = nil, ""
 		return result, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
@@ -425,7 +418,7 @@ Thread description: %s`, auditSkill, id.Repository, job.Source.Head, source, out
 }
 
 func normalizeAuditArtifacts(files []workspace.File, job Job, skill string) ([]workspace.File, error) {
-	files = append([]workspace.File(nil), files...)
+	files = slices.Clone(files)
 	for i, file := range files {
 		if file.Path == "run-metadata.json" {
 			var raw map[string]json.RawMessage

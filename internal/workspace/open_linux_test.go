@@ -14,6 +14,39 @@ import (
 	"time"
 )
 
+func TestOpenDirectoryRetainsAnchoredHandleAcrossReplacement(t *testing.T) {
+	root, outside := t.TempDir(), t.TempDir()
+	parent := filepath.Join(root, "parent")
+	if err := os.Mkdir(parent, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(parent, "original"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "outside"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := OpenDirectory(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = dir.Close() }()
+	if err := os.Rename(parent, filepath.Join(root, "moved")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, parent); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := dir.ReadDir(-1)
+	if err != nil || len(entries) != 1 || entries[0].Name() != "original" {
+		t.Fatalf("directory scan followed replacement: %v,%v", entries, err)
+	}
+	if followed, err := OpenDirectory(parent); err == nil {
+		_ = followed.Close()
+		t.Fatal("opened replacement symlink")
+	}
+}
+
 func TestCollectionRefusesSymlinkParents(t *testing.T) {
 	root, outside := t.TempDir(), t.TempDir()
 	secret := filepath.Join(outside, "secret")

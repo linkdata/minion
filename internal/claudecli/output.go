@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"math"
@@ -59,6 +60,11 @@ type event struct {
 	ModelUsage        json.RawMessage   `json:"modelUsage"`
 	PermissionDenials []json.RawMessage `json:"permission_denials"`
 	Message           json.RawMessage   `json:"message"`
+	Status            string            `json:"status"`
+	Summary           string            `json:"summary"`
+	APIError          string            `json:"api_error"`
+	APIErrorStatus    json.RawMessage   `json:"api_error_status"`
+	IsSynthetic       bool              `json:"isSynthetic"`
 	RateLimitInfo     struct {
 		Status         string          `json:"status"`
 		ResetsAt       json.RawMessage `json:"resetsAt"`
@@ -100,18 +106,22 @@ func (e event) tokens() (usage.Tokens, bool) {
 }
 
 type jsonlOutput struct {
-	cancel     context.CancelFunc
-	line       []byte
-	bytes      int64
-	events     int
-	err        error
-	usageLimit error
-	completed  bool
-	structured bool
-	pending    int
-	results    int64
-	indexed    bool
-	result     aicli.Result
+	cancel          context.CancelFunc
+	line            []byte
+	bytes           int64
+	events          int
+	err             error
+	usageLimit      error
+	taskFailure     error
+	completed       bool
+	structured      bool
+	pending         int
+	results         int64
+	indexed         bool
+	result          aicli.Result
+	aggregateSeen   bool
+	assistantUsage  map[string]usage.Tokens
+	assistantTokens usage.Tokens
 }
 
 func (o *jsonlOutput) Write(p []byte) (int, error) {
@@ -159,8 +169,17 @@ func (o *jsonlOutput) finish() {
 	if o.err == nil && len(o.line) != 0 {
 		o.finishLine()
 	}
-	if o.err == nil && o.usageLimit != nil {
-		o.fail(o.usageLimit)
+	if !o.aggregateSeen {
+		// Root-only result usage and assistant messages are overlapping lower
+		// bounds, never additive. Keep the greatest known value of each counter.
+		tokens := usage.Tokens{Input: max(o.result.Tokens.Input, o.assistantTokens.Input), CachedInput: max(o.result.Tokens.CachedInput, o.assistantTokens.CachedInput), Output: max(o.result.Tokens.Output, o.assistantTokens.Output)}
+		if tokens.Input <= math.MaxInt64-tokens.Output {
+			o.result.Tokens = tokens
+		}
+		o.result.UsageComplete = false
+	}
+	if failure := errors.Join(o.usageLimit, o.taskFailure); o.err == nil && failure != nil {
+		o.fail(failure)
 	}
 	if o.err == nil && o.pending != 0 {
 		o.fail(errors.New("background tasks still running when Claude exited"))
@@ -194,6 +213,13 @@ func (o *jsonlOutput) finishLine() {
 		return
 	}
 	o.line = o.line[:0]
+	if e.Type == "assistant" {
+		o.recordAssistantUsage(e.Message)
+	}
+	if e.Type == "system" && e.Subtype == "task_notification" && e.Status == "stopped" &&
+		pressureStopSummary(e.Summary) {
+		o.recordPressureStop()
+	}
 	if e.Type == "rate_limit_event" && e.RateLimitInfo.Status == "rejected" && !e.RateLimitInfo.IsUsingOverage && !e.RateLimitInfo.OverageInUse {
 		o.usageLimit = errors.New("provider usage limit reached")
 		var reset int64
@@ -204,12 +230,19 @@ func (o *jsonlOutput) finishLine() {
 		o.completed, o.result.Answer, o.result.UsageComplete = false, "", false
 	}
 	if e.Type == "system" && e.Subtype == "background_tasks_changed" {
-		var tasks []struct{}
+		var tasks []struct {
+			Ambient bool `json:"ambient"`
+		}
 		if len(e.Tasks) == 0 || e.Tasks[0] != '[' || json.Unmarshal(e.Tasks, &tasks) != nil {
 			o.fail(errors.New("invalid Claude background task list"))
 			return
 		}
-		o.pending = len(tasks)
+		o.pending = 0
+		for _, task := range tasks {
+			if !task.Ambient {
+				o.pending++
+			}
+		}
 		if o.pending != 0 {
 			o.completed = false
 			o.result.Answer = ""
@@ -217,21 +250,36 @@ func (o *jsonlOutput) finishLine() {
 	}
 	if e.Type == "user" && len(e.Message) != 0 {
 		var message struct {
-			Content []struct {
-				Type    string          `json:"type"`
-				IsError bool            `json:"is_error"`
-				Content json.RawMessage `json:"content"`
-			} `json:"content"`
+			Content json.RawMessage `json:"content"`
 		}
 		if err := json.Unmarshal(e.Message, &message); err != nil {
 			o.fail(fmt.Errorf("invalid Claude tool response: %w", err))
 			return
 		}
-		for _, content := range message.Content {
-			if content.Type == "tool_result" && content.IsError {
-				if toolSandboxFailure(content.Content) {
-					o.fail(errors.New("sandbox could not start"))
-					return
+		content := bytes.TrimSpace(message.Content)
+		if e.IsSynthetic && pressureStopNotice(content) {
+			o.recordPressureStop()
+		}
+		if len(content) != 0 && content[0] == '[' {
+			var blocks []struct {
+				Type    string          `json:"type"`
+				IsError bool            `json:"is_error"`
+				Content json.RawMessage `json:"content"`
+				Text    string          `json:"text"`
+			}
+			if err := json.Unmarshal(content, &blocks); err != nil {
+				o.fail(fmt.Errorf("invalid Claude tool response: %w", err))
+				return
+			}
+			for _, content := range blocks {
+				if e.IsSynthetic && content.Type == "text" && pressureStopText(content.Text) {
+					o.recordPressureStop()
+				}
+				if content.Type == "tool_result" && content.IsError {
+					if toolSandboxFailure(content.Content) {
+						o.fail(errors.New("sandbox could not start"))
+						return
+					}
 				}
 			}
 		}
@@ -247,12 +295,22 @@ func (o *jsonlOutput) finishLine() {
 	} else {
 		complete = false
 	}
-	o.result.UsageComplete = complete && o.usageLimit == nil
+	o.aggregateSeen = o.aggregateSeen || complete
+	o.result.UsageComplete = complete && o.usageLimit == nil && o.taskFailure == nil
 	if e.IsError || e.Subtype != "success" {
-		if o.usageLimit != nil {
-			o.fail(o.usageLimit)
+		if failure := errors.Join(o.usageLimit, o.taskFailure); failure != nil {
+			o.fail(failure)
 		} else {
-			o.fail(fmt.Errorf("result failed: %q", bounded.Text(e.Subtype, maxDiagnosticBytes)))
+			reason := fmt.Sprintf("result failed: %q", bounded.Text(e.Subtype, maxDiagnosticBytes))
+			switch e.APIError {
+			case "usage_limit_reached", "model_requires_usage_credits", "long_context_credits_required", "provider_credentials":
+				reason += "; API error=" + e.APIError
+			}
+			var status int
+			if json.Unmarshal(e.APIErrorStatus, &status) == nil && status >= 100 && status <= 599 {
+				reason += fmt.Sprintf("; HTTP status=%d", status)
+			}
+			o.fail(errors.New(reason))
 		}
 		return
 	}
@@ -270,7 +328,7 @@ func (o *jsonlOutput) finishLine() {
 	}
 	o.indexed = e.ResultIndex != nil
 	o.results++
-	if o.usageLimit != nil {
+	if o.usageLimit != nil || o.taskFailure != nil {
 		return
 	}
 	// Print mode can emit provisional turn results while background work runs.
@@ -283,6 +341,65 @@ func (o *jsonlOutput) finishLine() {
 		o.result.Answer = e.Result
 	}
 	o.completed = true
+}
+
+func (o *jsonlOutput) recordPressureStop() {
+	// Keep parsing cumulative counters; later results cannot erase this stop.
+	o.taskFailure = errors.New("background work stopped under provider memory pressure")
+	o.completed, o.result.Answer, o.result.UsageComplete = false, "", false
+}
+
+func pressureStopSummary(summary string) bool {
+	return strings.HasPrefix(summary, `Background command "`) && strings.HasSuffix(summary, `" was stopped because the system is running low on memory`)
+}
+
+func pressureStopNotice(raw json.RawMessage) bool {
+	var text string
+	return json.Unmarshal(raw, &text) == nil && pressureStopText(text)
+}
+
+func pressureStopText(text string) bool {
+	text = strings.TrimSpace(text)
+	if !strings.HasPrefix(text, "<task-notification>") {
+		return false
+	}
+	var notice struct {
+		XMLName xml.Name `xml:"task-notification"`
+		Status  string   `xml:"status"`
+		Summary string   `xml:"summary"`
+	}
+	return xml.Unmarshal([]byte(text), &notice) == nil && (notice.Status == "killed" || notice.Status == "stopped") && pressureStopSummary(notice.Summary)
+}
+
+func (o *jsonlOutput) recordAssistantUsage(raw json.RawMessage) {
+	if o.aggregateSeen {
+		return
+	}
+	var message struct {
+		ID    string     `json:"id"`
+		Usage eventUsage `json:"usage"`
+	}
+	if json.Unmarshal(raw, &message) != nil || message.ID == "" {
+		return
+	}
+	tokens, valid := message.Usage.tokens()
+	if !valid {
+		return
+	}
+	old := o.assistantUsage[message.ID]
+	tokens = usage.Tokens{Input: max(old.Input, tokens.Input), CachedInput: max(old.CachedInput, tokens.CachedInput), Output: max(old.Output, tokens.Output)}
+	total := usage.Tokens{Input: o.assistantTokens.Input - old.Input, CachedInput: o.assistantTokens.CachedInput - old.CachedInput, Output: o.assistantTokens.Output - old.Output}
+	if tokens.Input > math.MaxInt64-total.Input || tokens.CachedInput > math.MaxInt64-total.CachedInput || tokens.Output > math.MaxInt64-total.Output {
+		return
+	}
+	total.Add(tokens)
+	if total.Input > math.MaxInt64-total.Output {
+		return
+	}
+	if o.assistantUsage == nil {
+		o.assistantUsage = make(map[string]usage.Tokens)
+	}
+	o.assistantUsage[message.ID], o.assistantTokens = tokens, total
 }
 
 func toolSandboxFailure(content json.RawMessage) bool {

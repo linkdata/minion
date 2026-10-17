@@ -23,8 +23,7 @@ import (
 )
 
 const (
-	// GitAttributes disables repository transformations on trusted and offline indexes.
-	GitAttributes = "* -text -ident -filter -working-tree-encoding !diff\n"
+	gitAttributes = "* -text -ident -filter -working-tree-encoding !diff\n"
 
 	// MaxPatchBytes bounds a published fix's binary patch independently of model context.
 	MaxPatchBytes = 1 << 20
@@ -152,14 +151,7 @@ func cloneRepository(ctx context.Context, workRoot, url, defaultBranch string, l
 	if strings.TrimSpace(workRoot) == "" {
 		return nil, errors.New("work root is empty")
 	}
-	workRoot, err := filepath.Abs(workRoot)
-	if err != nil {
-		return nil, fmt.Errorf("resolve work root: %w", err)
-	}
-	if err := os.MkdirAll(workRoot, 0700); err != nil {
-		return nil, fmt.Errorf("create work root: %w", err)
-	}
-	workRoot, err = filepath.EvalSymlinks(workRoot)
+	workRoot, err := workspace.PrepareRoot(workRoot)
 	if err != nil {
 		return nil, err
 	}
@@ -174,11 +166,11 @@ func cloneRepository(ctx context.Context, workRoot, url, defaultBranch string, l
 		}
 	}()
 
-	if _, err := runGit(ctx, workRoot, "clone", "--no-tags", "--filter=blob:none", "--single-branch", "--no-checkout", "--branch", defaultBranch, "--", url, path); err != nil {
+	if _, err := runGit(ctx, workRoot, "clone", "--template=", "--no-tags", "--filter=blob:none", "--single-branch", "--no-checkout", "--branch", defaultBranch, "--", url, path); err != nil {
 		return nil, err
 	}
 	c := &Checkout{path: path, url: url, lookupTree: lookupTree}
-	if err := c.disableAttributes(); err != nil {
+	if err := DisableAttributes(filepath.Join(c.path, ".git")); err != nil {
 		return nil, err
 	}
 	if err := c.recordConfig(); err != nil {
@@ -368,6 +360,9 @@ func (c *Checkout) CommitAndPush(ctx context.Context, branch, botLogin, message 
 	if len(paths) == 0 {
 		return ErrNoChanges
 	}
+	if len(paths) > workspace.MaxChanges {
+		return ErrTooManyFiles
+	}
 	if err := c.checkPatchSize(ctx); err != nil {
 		return err
 	}
@@ -397,18 +392,29 @@ func (c *Checkout) stagedPaths(ctx context.Context) ([]string, error) {
 	if truncated {
 		return nil, ErrTooManyFiles
 	}
-	if len(data) == 0 {
+	parts, err := SplitNUL(data)
+	if err != nil {
+		return nil, fmt.Errorf("invalid Git changed path output: %w", err)
+	}
+	if len(parts) == 0 {
 		return nil, nil
 	}
-	if data[len(data)-1] != 0 {
-		return nil, errors.New("invalid Git changed path output")
-	}
-	parts := bytes.Split(data[:len(data)-1], []byte{0})
 	paths := make([]string, len(parts))
 	for i, part := range parts {
 		paths[i] = string(part)
 	}
 	return paths, nil
+}
+
+// SplitNUL splits terminated Git records, accepting an empty result.
+func SplitNUL(data []byte) ([][]byte, error) {
+	if len(data) == 0 {
+		return nil, nil
+	}
+	if data[len(data)-1] != 0 {
+		return nil, errors.New("unterminated Git records")
+	}
+	return bytes.Split(data[:len(data)-1], []byte{0}), nil
 }
 
 func (c *Checkout) checkPatchSize(ctx context.Context) error {

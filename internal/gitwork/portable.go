@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -78,12 +79,13 @@ func (c *Checkout) sourceEntries(ctx context.Context, ref string, tree github.Gi
 		}
 		return nil, nil
 	}
-	if output[len(output)-1] != 0 {
-		return nil, fmt.Errorf("%w: invalid Git tree listing", ErrUnsupportedSource)
+	lines, err := SplitNUL(output)
+	if err != nil {
+		return nil, fmt.Errorf("%w: invalid Git tree listing: %w", ErrUnsupportedSource, err)
 	}
 	var entries []sourceEntry
 	var validation []workspace.File
-	for _, line := range bytes.Split(output[:len(output)-1], []byte{0}) {
+	for _, line := range lines {
 		fieldsRaw, name, ok := bytes.Cut(line, []byte{'\t'})
 		fields := strings.Fields(string(fieldsRaw))
 		if !ok || len(fields) != 3 || !workspace.ValidSHA(fields[2]) {
@@ -194,6 +196,10 @@ func (c *Checkout) Snapshot(ctx context.Context, history, pull bool) (s workspac
 			return s, err
 		}
 		if s.MergeBase, err = runGit(ctx, c.path, "merge-base", s.Base, s.Head); err != nil {
+			var exit *exec.ExitError
+			if ctx.Err() == nil && errors.As(err, &exit) && exit.ExitCode() == 1 {
+				return s, fmt.Errorf("%w: pull request histories have no common ancestor: %w", ErrUnsupportedSource, err)
+			}
 			return s, err
 		}
 		if baseEntries, err = c.sourceTree(ctx, s.MergeBase); err != nil {
@@ -216,7 +222,7 @@ func (c *Checkout) Snapshot(ctx context.Context, history, pull bool) (s workspac
 	}
 	headFiles := 0
 	var total int64
-	allEntries := append([]sourceEntry(nil), entries...)
+	allEntries := slices.Clone(entries)
 	for _, entry := range entries {
 		if !entry.omitted {
 			headFiles++
@@ -272,9 +278,6 @@ func (c *Checkout) Snapshot(ctx context.Context, history, pull bool) (s workspac
 	if err := c.ready(); err != nil {
 		return s, err
 	}
-	if err := workspace.ValidateSnapshot(s); err != nil {
-		return s, fmt.Errorf("%w: %w", ErrUnsupportedSource, err)
-	}
 	return s, nil
 }
 
@@ -312,11 +315,12 @@ func (c *Checkout) Import(ctx context.Context, expectedHead string, changes []wo
 	return nil
 }
 
-func (c *Checkout) disableAttributes() error {
-	if err := os.MkdirAll(filepath.Join(c.path, ".git", "info"), 0700); err != nil {
+// DisableAttributes disables repository transformations on trusted and offline indexes.
+func DisableAttributes(gitDir string) error {
+	if err := os.MkdirAll(filepath.Join(gitDir, "info"), 0700); err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(c.path, ".git", "info", "attributes"), []byte(GitAttributes), 0600)
+	return os.WriteFile(filepath.Join(gitDir, "info", "attributes"), []byte(gitAttributes), 0600)
 }
 
 func (c *Checkout) boundedGit(ctx context.Context, stdin io.Reader, limit int, truncate bool, args ...string) ([]byte, bool, error) {

@@ -14,6 +14,7 @@ import (
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
+	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/workspace"
 )
@@ -91,6 +92,7 @@ func TestRunnerReviewRejectsSourceMutationEvenAfterRejection(t *testing.T) {
 		t.Run(fmt.Sprintf("approved=%t", approved), func(t *testing.T) {
 			job := portableJob(command.Fix)
 			job.Critic = &RoleSettings{Provider: "claude"}
+			job.CriticMaxRounds = config.DefaultCriticMaxRounds
 			var source string
 			calls := 0
 			runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
@@ -123,32 +125,30 @@ func TestRunnerReviewExportsApprovedBytesAfterLiveSourceChanges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	bin := t.TempDir()
-	armed, changed := filepath.Join(bin, "armed"), filepath.Join(bin, "changed")
+	markers := t.TempDir()
+	armed, changed := filepath.Join(markers, "armed"), filepath.Join(markers, "changed")
 	script := fmt.Sprintf(`#!/bin/sh
 case " $* " in
   *" --binary "*)
-    if test -f %q; then
-      %q "$@"
+    if test -f %s; then
+      %s "$@"
       status=$?
       if test "$status" -eq 0; then
-        source=$(cat %q)
+        source=$(cat %s)
         printf 'late live edit' > "$source/source.txt"
-        printf changed > %q
-        rm %q
+        printf changed > %s
+        rm %s
       fi
       exit "$status"
     fi
     ;;
 esac
-exec %q "$@"
-`, armed, realGit, armed, changed, armed, realGit)
-	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+exec %s "$@"
+`, shellQuote(armed), shellQuote(realGit), shellQuote(armed), shellQuote(changed), shellQuote(armed), shellQuote(realGit))
+	fakeOnPath(t, "git", script)
 	job := portableJob(command.Fix)
 	job.Critic = &RoleSettings{Provider: "claude"}
+	job.CriticMaxRounds = config.DefaultCriticMaxRounds
 	var source string
 	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 		if request.role == "main" {
@@ -186,18 +186,16 @@ func TestRunnerAuditReviewFreezesAndExportsRawReports(t *testing.T) {
 			}
 			job := portableJob(command.SecurityAudit)
 			job.Main.Skills, job.Critic = []string{testAuditSkillURL}, &RoleSettings{Provider: "claude"}
+			job.CriticMaxRounds = config.DefaultCriticMaxRounds
 			var source, reports string
 			var rawMetadata []byte
 			criticCalls := 0
 			var armedReports, changed string
 			if scenario == "mutated during validation" {
-				bin := t.TempDir()
-				armedReports, changed = filepath.Join(bin, "reports"), filepath.Join(bin, "changed")
-				script := fmt.Sprintf("#!/bin/sh\nreports=$(cat %q)\nprintf 'late report edit' > \"$reports/REPORT.md\"\nprintf changed > %q\nexec %q \"$@\"\n", armedReports, changed, realNode)
-				if err := os.WriteFile(filepath.Join(bin, "node"), []byte(script), 0700); err != nil {
-					t.Fatal(err)
-				}
-				t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+				markers := t.TempDir()
+				armedReports, changed = filepath.Join(markers, "reports"), filepath.Join(markers, "changed")
+				script := fmt.Sprintf("#!/bin/sh\nreports=$(cat %s)\nprintf 'late report edit' > \"$reports/REPORT.md\"\nprintf changed > %s\nexec %s \"$@\"\n", shellQuote(armedReports), shellQuote(changed), shellQuote(realNode))
+				fakeOnPath(t, "node", script)
 			}
 			runner := Runner{WorkRoot: t.TempDir()}
 			runner.runModel = func(_ context.Context, request modelRun) (aicli.Result, error) {
@@ -286,6 +284,7 @@ func TestRunnerReviewRejectsInvalidFixBeforeCritic(t *testing.T) {
 		t.Run(scenario, func(t *testing.T) {
 			job := portableJob(command.Fix)
 			job.Critic = &RoleSettings{Provider: "claude"}
+			job.CriticMaxRounds = config.DefaultCriticMaxRounds
 			name, want := "omitted", "omitted source path"
 			if scenario == "omitted path" {
 				job.Source.Omitted = []string{name}

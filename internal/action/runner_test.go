@@ -9,9 +9,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
-	"unicode/utf8"
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
@@ -31,14 +31,12 @@ func TestRunnerUsesSuppliedSourceAndContext(t *testing.T) {
 			job.Source.HistoryRequested = true
 			job.Source.Omitted = []string{"submodule"}
 			root := t.TempDir()
-			bin := t.TempDir()
-			marker := filepath.Join(bin, "called")
+			marker := filepath.Join(t.TempDir(), "called")
+			var bins []string
 			for _, name := range []string{"git", "gh"} {
-				if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\nprintf called > '"+marker+"'\nexit 77\n"), 0700); err != nil {
-					t.Fatal(err)
-				}
+				bins = append(bins, fakeOnPath(t, name, "#!/bin/sh\nprintf called > "+shellQuote(marker)+"\nexit 77\n"))
 			}
-			t.Setenv("PATH", bin)
+			t.Setenv("PATH", strings.Join(bins, string(os.PathListSeparator)))
 			runner := Runner{
 				WorkRoot: root,
 				Codex:    config.CodexConfig{APIKey: "local credential"},
@@ -162,8 +160,8 @@ func TestRunnerBoundsCriticDisabledAnswer(t *testing.T) {
 		},
 	}
 	result, err := runner.Run(context.Background(), job)
-	if err != nil || len(result.Answer) > maxOutputBytes || !utf8.ValidString(result.Answer) || !strings.HasSuffix(result.Answer, "[truncated]") || len(result.Diagnostics) != 1 || result.Diagnostics[0].Code != "output_truncated" {
-		t.Fatalf("bounded answer = %+v, %v", result, err)
+	if !errors.Is(err, monitor.ErrTerminalJob) || result.Answer != "" || len(result.Calls) != 1 {
+		t.Fatalf("oversized answer was not refused: %+v, %v", result, err)
 	}
 }
 
@@ -171,6 +169,7 @@ func TestRunnerKeepsCriticReadOnlyAndNotesPrivate(t *testing.T) {
 	job := portableJob(command.Fix)
 	job.Source.Files = append(job.Source.Files, workspace.File{Path: "deleted.txt", Mode: workspace.Regular, Data: []byte("original deleted file")})
 	job.Critic = &RoleSettings{Provider: "claude", Skills: []string{skills.BuiltinAntiPromptInjection}}
+	job.CriticMaxRounds = config.DefaultCriticMaxRounds
 	runner := Runner{WorkRoot: t.TempDir()}
 	calls := 0
 	var mainDir string
@@ -242,13 +241,9 @@ func TestRunnerFixUsesOnlyOfflineGit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	bin := t.TempDir()
-	marker := filepath.Join(bin, "network-command")
-	script := fmt.Sprintf("#!/bin/sh\nfor arg do\n case \"$arg\" in fetch|clone|push|remote|ls-remote) printf forbidden > '%s'; exit 77;; esac\ndone\nexec '%s' \"$@\"\n", marker, strings.ReplaceAll(realGit, "'", "'\\''"))
-	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	marker := filepath.Join(t.TempDir(), "network-command")
+	script := fmt.Sprintf("#!/bin/sh\nfor arg do\n case \"$arg\" in fetch|clone|push|remote|ls-remote) printf forbidden > %s; exit 77;; esac\ndone\nexec %s \"$@\"\n", shellQuote(marker), shellQuote(realGit))
+	fakeOnPath(t, "git", script)
 	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 		if err := os.WriteFile(filepath.Join(request.dir, "source.txt"), []byte("changed"), 0600); err != nil {
 			t.Fatal(err)
@@ -366,11 +361,11 @@ func TestPortableAuditMetadataUsesSourceIdentity(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	files, _, err := readAuditArtifacts(root, auditComplete)
+	files, _, err := readAuditArtifacts(root, auditForReview)
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw := append([]workspace.File(nil), files...)
+	raw := slices.Clone(files)
 	files, err = normalizeAuditArtifacts(files, job, "/installed/security-audit/SKILL.md")
 	if err != nil {
 		t.Fatal(err)
@@ -410,6 +405,7 @@ func TestAuditPromptSelectsDomainCompanionsOnly(t *testing.T) {
 		job := portableJob(command.SecurityAudit)
 		if critic {
 			job.Critic = &RoleSettings{Provider: "claude"}
+			job.CriticMaxRounds = config.DefaultCriticMaxRounds
 		}
 		prompt, err := actionPrompt(context.Background(), job, "/source", "/context", "/reports", "/installed/security-audit/SKILL.md")
 		if err != nil {

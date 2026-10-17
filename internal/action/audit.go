@@ -16,8 +16,7 @@ import (
 type auditReadMode uint8
 
 const (
-	auditComplete auditReadMode = iota
-	auditForReview
+	auditForReview auditReadMode = iota
 	auditIncomplete
 )
 
@@ -26,11 +25,11 @@ func readAuditArtifacts(outputDir string, mode auditReadMode) ([]workspace.File,
 	var diagnostics []Diagnostic
 	for _, name := range auditArtifacts {
 		data, err := workspace.ReadRegular(filepath.Join(outputDir, name), auditArtifactLimit(name))
-		if err == nil && mode == auditComplete && !auditArtifactMayBeEmpty(name) && len(data) == 0 {
-			err = errors.New("audit artifact must not be empty")
-		}
-		if errors.Is(err, os.ErrNotExist) && mode != auditComplete {
+		if errors.Is(err, os.ErrNotExist) {
 			continue
+		}
+		if err == nil && mode == auditForReview && name == "REPORT.md" && !modelOutputFits(string(data)) {
+			err = errors.New("quoted audit report exceeds publication limit")
 		}
 		if err != nil {
 			if mode != auditIncomplete {
@@ -142,7 +141,7 @@ func validateAuditFiles(ctx context.Context, files []workspace.File, validationR
 		for _, fingerprint := range fingerprints {
 			candidates[fingerprint] = true
 			if !final[fingerprint] {
-				return fmt.Errorf("audit coverage-ledger.json has candidate %s without final finding", fingerprint)
+				return fmt.Errorf("audit coverage-ledger.json has candidate %q without final finding", fingerprint)
 			}
 		}
 		return nil
@@ -166,7 +165,7 @@ func validateAuditFiles(ctx context.Context, files []workspace.File, validationR
 	}
 	for fingerprint := range final {
 		if !candidates[fingerprint] {
-			return "", fmt.Errorf("audit findings.json has finding %s without candidate", fingerprint)
+			return "", fmt.Errorf("audit findings.json has finding %q without candidate", fingerprint)
 		}
 	}
 	return string(reportBytes), nil

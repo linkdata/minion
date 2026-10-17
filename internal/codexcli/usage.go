@@ -42,13 +42,13 @@ type rolloutEvent struct {
 
 // collectUsage reads only new rollout headers until it has identified this
 // action's agent tree. Full transcripts of unrelated sessions are never read.
-func collectUsage(ctx context.Context, home, rootID string, started time.Time, fallback *usage.Tokens, expectedChildren []string) (usage.Tokens, bool) {
+func collectUsage(ctx context.Context, home, rootID string, started time.Time, fallback *usage.Tokens, expectedChildren []string) (usage.Tokens, bool, bool) {
 	var total usage.Tokens
 	if rootID == "" || home == "" || ctx.Err() != nil {
 		if fallback != nil {
 			total = *fallback
 		}
-		return total, false
+		return total, false, false
 	}
 	complete := true
 	files := map[string]rolloutMeta{}
@@ -120,9 +120,9 @@ func collectUsage(ctx context.Context, home, rootID string, started time.Time, f
 	}
 	if ctx.Err() != nil {
 		if fallback != nil {
-			return *fallback, false
+			return *fallback, false, false
 		}
-		return total, false
+		return total, false, false
 	}
 	selected := map[string]bool{rootID: true}
 	for changed := true; changed; {
@@ -135,9 +135,9 @@ func collectUsage(ctx context.Context, home, rootID string, started time.Time, f
 	}
 	if len(selected) > maxUsageAgents || len(expectedChildren) > maxUsageAgents {
 		if fallback != nil {
-			return *fallback, false
+			return *fallback, false, false
 		}
-		return total, false
+		return total, false, false
 	}
 	for _, id := range expectedChildren {
 		if !selected[id] {
@@ -145,7 +145,7 @@ func collectUsage(ctx context.Context, home, rootID string, started time.Time, f
 		}
 	}
 	budget := int64(maxUsageScanBytes)
-	rootCounted := false
+	rootCounted, unfinishedChild := false, false
 	for id := range selected {
 		if ctx.Err() != nil {
 			complete = false
@@ -162,7 +162,8 @@ func collectUsage(ctx context.Context, home, rootID string, started time.Time, f
 			}
 			continue
 		}
-		tokens, ok, children := readRolloutUsage(ctx, meta, rootID, &budget)
+		tokens, ok, children, unfinished := readRolloutUsage(ctx, meta, rootID, &budget)
+		unfinishedChild = unfinishedChild || unfinished
 		for _, child := range children {
 			if _, exists := files[child]; !exists || !selected[child] {
 				ok = false
@@ -180,7 +181,7 @@ func collectUsage(ctx context.Context, home, rootID string, started time.Time, f
 	if ctx.Err() != nil && !rootCounted && fallback != nil {
 		total.Add(*fallback)
 	}
-	return total, complete && ctx.Err() == nil
+	return total, complete && ctx.Err() == nil, unfinishedChild
 }
 
 // ReadDir with a positive count keeps a single large directory from being
@@ -264,10 +265,6 @@ func rolloutScanner(ctx context.Context, r io.Reader, complete *bool) *bufio.Sca
 	return scanner
 }
 
-func validTokens(tokens usage.Tokens) bool {
-	return tokens.Input >= 0 && tokens.CachedInput >= 0 && tokens.CachedInput <= tokens.Input && tokens.Output >= 0
-}
-
 func rolloutTokens(raw json.RawMessage) (usage.Tokens, bool) {
 	var fields eventUsage
 	if json.Unmarshal(raw, &fields) != nil {
@@ -280,28 +277,29 @@ func rolloutTokens(raw json.RawMessage) (usage.Tokens, bool) {
 	return *tokens, true
 }
 
-func readRolloutUsage(ctx context.Context, meta rolloutMeta, rootID string, budget *int64) (usage.Tokens, bool, []string) {
+func readRolloutUsage(ctx context.Context, meta rolloutMeta, rootID string, budget *int64) (usage.Tokens, bool, []string, bool) {
 	if ctx.Err() != nil || *budget <= 0 {
-		return usage.Tokens{}, false, nil
+		return usage.Tokens{}, false, nil, false
 	}
 	f, err := os.Open(meta.path)
 	if err != nil {
-		return usage.Tokens{}, false, nil
+		return usage.Tokens{}, false, nil, false
 	}
 	limit := int64(maxUsageRolloutBytes)
 	if *budget < limit {
 		limit = *budget
 	}
 	reader := &io.LimitedReader{R: f, N: limit + 1}
-	complete := true
-	scanner := rolloutScanner(ctx, reader, &complete)
+	complete, readable := true, true
+	scanner := rolloutScanner(ctx, reader, &readable)
 	var total, latest, inherited usage.Tokens
 	seenRecord, seenSnapshot := false, false
 	responses := map[string]usage.Tokens{}
 	turns := map[string]bool{}
+	currentTurns := map[string]bool{}
 	ownedTurns := map[string]bool{}
 	var children []string
-	tooManyChildren := false
+	tooManyChildren, aborted := false, false
 	appendChildren := func(ids ...string) {
 		if len(ids) > maxUsageAgents-len(children) {
 			tooManyChildren = true
@@ -317,7 +315,7 @@ func readRolloutUsage(ctx context.Context, meta rolloutMeta, rootID string, budg
 		}
 		var event rolloutEvent
 		if json.Unmarshal(scanner.Bytes(), &event) != nil {
-			complete = false
+			complete, readable = false, false
 			continue
 		}
 		switch event.Type {
@@ -372,7 +370,7 @@ func readRolloutUsage(ctx context.Context, meta rolloutMeta, rootID string, budg
 				} `json:"info"`
 			}
 			if json.Unmarshal(event.Payload, &payload) != nil {
-				complete = false
+				complete, readable = false, false
 				continue
 			}
 			own := meta.ID == rootID || (meta.HistoryStart != nil && event.Ordinal > *meta.HistoryStart)
@@ -405,25 +403,29 @@ func readRolloutUsage(ctx context.Context, meta rolloutMeta, rootID string, budg
 					inherited = tokens
 				}
 			}
-			if payload.TurnID != "" && (own || ownedTurns[payload.TurnID]) {
+			if payload.TurnID != "" && (payload.ThreadID == "" || payload.ThreadID == meta.ID) && (own || ownedTurns[payload.TurnID]) {
 				switch payload.Type {
-				case "task_started":
-					turns[payload.TurnID] = false
-				case "task_complete":
-					turns[payload.TurnID] = true
-				case "turn_aborted":
-					turns[payload.TurnID] = false
-					complete = false
+				case "task_started", "task_complete", "turn_aborted":
+					done := payload.Type == "task_complete"
+					turns[payload.TurnID] = done
+					if own {
+						currentTurns[payload.TurnID] = done
+						aborted = aborted || payload.Type == "turn_aborted"
+					}
+					if payload.Type == "turn_aborted" {
+						complete = false
+					}
 				}
 			}
 		}
 		if tooManyChildren {
+			readable = false
 			break
 		}
 	}
 	consumed := limit + 1 - reader.N
 	if consumed > limit {
-		complete = false
+		complete, readable = false, false
 		consumed = limit
 	}
 	*budget -= consumed
@@ -431,15 +433,24 @@ func readRolloutUsage(ctx context.Context, meta rolloutMeta, rootID string, budg
 		complete = false
 	}
 	if scanner.Err() != nil {
-		complete = false
+		readable = false
+	}
+	complete = complete && readable
+	// Only an attributable child turn in a fully read log proves unfinished work.
+	// Accounting gaps alone (missing counters, scan limits, old fork headers) do not.
+	unfinished := meta.ID != rootID && aborted
+	if meta.ID != rootID && readable && ctx.Err() == nil {
+		for _, done := range currentTurns {
+			unfinished = unfinished || !done
+		}
 	}
 	if !seenRecord {
 		if meta.ID != rootID && (!complete || meta.HistoryStart == nil) {
-			return usage.Tokens{}, false, children
+			return usage.Tokens{}, false, children, unfinished
 		}
 		total = usage.Tokens{Input: latest.Input - inherited.Input, CachedInput: latest.CachedInput - inherited.CachedInput, Output: latest.Output - inherited.Output}
-		if !seenSnapshot || !validTokens(total) {
-			return usage.Tokens{}, false, children
+		if !seenSnapshot || !total.Valid() {
+			return usage.Tokens{}, false, children, unfinished
 		}
 	} else if seenSnapshot {
 		snapshot := usage.Tokens{Input: latest.Input - inherited.Input, CachedInput: latest.CachedInput - inherited.CachedInput, Output: latest.Output - inherited.Output}
@@ -447,7 +458,7 @@ func readRolloutUsage(ctx context.Context, meta rolloutMeta, rootID string, budg
 			complete = false
 			// Child counters may include an inherited baseline absent from a damaged
 			// log. Only its individually attributed responses remain a lower bound.
-			if meta.ID == rootID && validTokens(snapshot) && snapshot.Total() > total.Total() {
+			if meta.ID == rootID && snapshot.Valid() && snapshot.Total() > total.Total() {
 				total = snapshot
 			}
 		}
@@ -463,5 +474,5 @@ func readRolloutUsage(ctx context.Context, meta rolloutMeta, rootID string, budg
 	}
 	// Older child rollouts without a history boundary cannot prove that a later
 	// turn was not interrupted before its first usage record.
-	return total, complete && (meta.ID == rootID || meta.HistoryStart != nil), children
+	return total, complete && (meta.ID == rootID || meta.HistoryStart != nil), children, unfinished
 }

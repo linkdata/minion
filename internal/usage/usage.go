@@ -19,6 +19,10 @@ type Tokens struct {
 	Output      int64 `json:"output_tokens"`
 }
 
+func (t Tokens) Valid() bool {
+	return t.Input >= 0 && t.CachedInput >= 0 && t.CachedInput <= t.Input && t.Output >= 0
+}
+
 // Cached input is a subset of input tokens.
 func (t Tokens) Total() int64 { return t.Input + t.Output }
 
@@ -81,7 +85,7 @@ func (r Record) validate() error {
 	default:
 		return fmt.Errorf("usage record %s has invalid status %q", r.ID, r.Status)
 	}
-	if r.CodexCalls < 0 || r.ClaudeCalls < 0 || r.Tokens.Input < 0 || r.Tokens.CachedInput < 0 || r.Tokens.Output < 0 || r.Tokens.CachedInput > r.Tokens.Input {
+	if r.CodexCalls < 0 || r.ClaudeCalls < 0 || !r.Tokens.Valid() {
 		return fmt.Errorf("usage record %s has invalid counts", r.ID)
 	}
 	return nil

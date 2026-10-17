@@ -1,9 +1,11 @@
 package action
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -41,8 +43,10 @@ func TestExecuteRechecksWorkRootAfterActionError(t *testing.T) {
 	client := github.New("test-token")
 	client.BaseURL, client.HTTPClient = server.URL, server.Client()
 	checks := 0
+	var logs bytes.Buffer
 	e := &Orchestrator{
 		GitHub: client,
+		Logger: log.New(&logs, "", 0),
 		CheckWorkRoot: func() error {
 			checks++
 			if checks == 2 {
@@ -53,7 +57,7 @@ func TestExecuteRechecksWorkRootAfterActionError(t *testing.T) {
 	}
 	job := monitor.Job{Repository: config.Repository{Name: "o/r"}, SubjectType: "Issue", Number: 1, Command: command.Command{Action: "unsupported"}}
 	err := e.Execute(context.Background(), job)
-	if checks != 2 || !errors.Is(err, workroot.ErrUnsafe) || !strings.Contains(err.Error(), "is not enabled") {
+	if checks != 2 || errors.Is(err, workroot.ErrUnsafe) || !strings.Contains(err.Error(), "is not enabled") || !strings.Contains(logs.String(), "work root after action failure:") {
 		t.Fatalf("action failure after root filled = %v, checks=%d", err, checks)
 	}
 }

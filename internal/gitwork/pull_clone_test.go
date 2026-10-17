@@ -12,6 +12,23 @@ import (
 	"github.com/linkdata/minion/internal/workspace"
 )
 
+func TestSnapshotRejectsUnrelatedPullRequestHistories(t *testing.T) {
+	fixture := newFixture(t)
+	fixture.git(fixture.source, "checkout", "--orphan", "unrelated")
+	fixture.git(fixture.source, "commit", "-m", "unrelated root")
+	head := fixture.git(fixture.source, "rev-parse", "HEAD")
+	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/pull/7/head")
+	checkout, err := clonePullRequestFromURL(context.Background(), t.TempDir(), fixture.remote, 7, "main", head, localTreeMetadata(t, fixture.source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = checkout.Close() })
+	_, err = checkout.Snapshot(context.Background(), false, true)
+	if !errors.Is(err, ErrUnsupportedSource) || !strings.Contains(err.Error(), "no common ancestor") {
+		t.Fatalf("unrelated histories were retryable: %v", err)
+	}
+}
+
 func TestClonePullRequestSkipsUnusedBaseTip(t *testing.T) {
 	for _, kind := range []string{"oversized", "unsupported"} {
 		t.Run(kind, func(t *testing.T) {

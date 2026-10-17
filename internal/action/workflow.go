@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -37,21 +38,13 @@ type preparedAction struct {
 // needsExecution distinguishes supplied work from fixed replies and publication recovery.
 func (p *preparedAction) needsExecution() bool { return p.job.Version != 0 }
 
-// close releases the trusted orchestration checkout after publication or failure.
-func (p *preparedAction) close() error {
-	if p.checkout == nil {
-		return nil
-	}
-	return p.checkout.Close()
-}
-
 func (e *Orchestrator) perform(ctx context.Context, request monitor.Job) error {
 	prepared, err := e.prepare(ctx, request)
 	if err != nil {
 		return err
 	}
 	defer func() {
-		if err := prepared.close(); err != nil {
+		if err := prepared.checkout.Close(); err != nil {
 			e.logf("close prepared action: %v", err)
 		}
 	}()
@@ -74,7 +67,7 @@ func (e *Orchestrator) prepare(ctx context.Context, request monitor.Job) (prepar
 	p := &preparedAction{request: request}
 	defer func() {
 		if resultErr != nil {
-			resultErr = errors.Join(resultErr, p.close())
+			resultErr = errors.Join(resultErr, p.checkout.Close())
 		}
 	}()
 	if request.Command.Action == command.Fix {
@@ -129,7 +122,7 @@ func (e *Orchestrator) prepare(ctx context.Context, request monitor.Job) (prepar
 	if p.job, err = e.portableJob(ctx, p, title, description); err != nil {
 		return nil, err
 	}
-	if err := p.close(); err != nil {
+	if err := p.checkout.Close(); err != nil {
 		return nil, err
 	}
 	p.checkout = nil
@@ -186,12 +179,12 @@ func (e *Orchestrator) portableJob(ctx context.Context, p *preparedAction, title
 		},
 		Command: request.Command.Name, Action: request.Command.Action,
 		Title: title, Description: description, Notes: requestNotes(request), Source: source,
-		Main:            e.roleSettings(e.mainProvider(), e.Commands[request.Command.Name].Skills),
-		CriticMaxRounds: cmp.Or(e.CriticMaxRounds, config.DefaultCriticMaxRounds), RuntimeBudget: time.Until(deadline),
+		Main: e.roleSettings(e.mainProvider(), e.Commands[request.Command.Name].Skills), RuntimeBudget: time.Until(deadline),
 	}
 	if e.Adversarial != "" {
 		critic := e.roleSettings(e.Adversarial, nil)
 		job.Critic = &critic
+		job.CriticMaxRounds = cmp.Or(e.CriticMaxRounds, config.DefaultCriticMaxRounds)
 	}
 	if err := job.Validate(); err != nil {
 		return job, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
@@ -201,13 +194,16 @@ func (e *Orchestrator) portableJob(ctx context.Context, p *preparedAction, title
 
 // publish validates a worker result before applying data or issuing GitHub writes.
 func (e *Orchestrator) publish(ctx context.Context, p *preparedAction, result Result) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
 	if p.reply != "" {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		return e.acknowledge(ctx, p.request, p.reply)
 	}
 	if !p.needsExecution() {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if p.request.Command.Action == command.Fix && p.branch != "" {
 			if err := e.publishFixReply(ctx, p); err != nil {
 				return fmt.Errorf("%w: %w", monitor.ErrPostModelPublication, err)
@@ -224,6 +220,9 @@ func (e *Orchestrator) publish(ctx context.Context, p *preparedAction, result Re
 		if err := e.retainAudit(p, result, true); err != nil {
 			return fmt.Errorf("%w: retain completed audit: %w", monitor.ErrTerminalJob, err)
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	request := p.request
 	var err error
@@ -259,7 +258,7 @@ func (e *Orchestrator) logResult(job Job, result Result) {
 	}
 	if result.matchesJob(job) && result.validateCalls(job, false) == nil {
 		for _, call := range result.Calls {
-			e.logf("action call job=%s attempt=%s executor=%s provider=%s role=%s round=%d review_phase=%s model=%q effort=%q complete=%t", id.JobID, id.AttemptID, id.ExecutorID, call.Provider, call.Role, call.Round, call.ReviewPhase, call.Model, call.Effort, call.Complete)
+			e.logf("action call job=%s attempt=%s executor=%s provider=%s role=%s round=%d review_phase=%s approved=%t model=%q effort=%q complete=%t", id.JobID, id.AttemptID, id.ExecutorID, call.Provider, call.Role, call.Round, call.ReviewPhase, call.Approved, call.Model, call.Effort, call.Complete)
 		}
 	}
 }
@@ -286,7 +285,7 @@ func (e *Orchestrator) retainAudit(p *preparedAction, result Result, complete bo
 	}
 	files := result.Artifacts
 	if !complete {
-		files = append(append([]workspace.File(nil), files...), workspace.File{Path: "INCOMPLETE.txt", Mode: workspace.Regular, Data: []byte("The audit failed. These partial artifacts are incomplete and must not be published.\n")})
+		files = slices.Concat(files, []workspace.File{{Path: "INCOMPLETE.txt", Mode: workspace.Regular, Data: []byte("The audit failed. These partial artifacts are incomplete and must not be published.\n")}})
 	}
 	if err := workspace.Materialize(dir, files); err != nil {
 		return errors.Join(err, os.RemoveAll(dir))

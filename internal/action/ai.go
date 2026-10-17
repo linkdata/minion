@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 
 	"github.com/linkdata/minion/internal/aicli"
@@ -59,12 +60,12 @@ func (r *Runner) runOnce(ctx context.Context, request modelRun) (aicli.Result, e
 	switch request.provider {
 	case "codex":
 		settings := r.Codex
-		settings.ReadOnlyDirs = append(append([]string(nil), settings.ReadOnlyDirs...), request.readOnlyDirs...)
+		settings.ReadOnlyDirs = slices.Concat(settings.ReadOnlyDirs, request.readOnlyDirs)
 		settings.OutputSchema = request.outputSchema
 		return codexcli.Run(ctx, request.dir, request.prompt, request.writable, request.outputDir, settings)
 	case "claude":
 		settings := r.Claude
-		settings.ReadOnlyDirs = append(append([]string(nil), settings.ReadOnlyDirs...), request.readOnlyDirs...)
+		settings.ReadOnlyDirs = slices.Concat(settings.ReadOnlyDirs, request.readOnlyDirs)
 		settings.OutputSchema = request.outputSchema
 		return claudecli.Run(ctx, request.dir, request.prompt, request.writable, request.outputDir, settings)
 	default:
@@ -135,7 +136,7 @@ func reviewPhases(round int) []string {
 func mainPrompt(task string) string {
 	return fmt.Sprintf(`%s
 
-Return only a JSON object with exactly two string fields: "answer" and "review_notes". Put a nonblank complete final response in answer, using the selected task's required output format. Keep Minion main/critic review commentary and critic-finding disposition logs out of answer and report artifacts, except content the selected task requires. Minion runs its own main/critic review after you finish; do not launch that review yourself. Use review_notes for concise private evidence for critic findings and each critic finding's severity and disposition, including evidence-backed refutations. Carry unresolved refutations forward between rounds. The two decoded strings together must fit within %d UTF-8 bytes.`, task, maxOutputBytes)
+Return only a JSON object with exactly two string fields: "answer" and "review_notes". Put a nonblank complete final response in answer, using the selected task's required output format. Keep Minion main/critic review commentary and critic-finding disposition logs out of answer and report artifacts, except content the selected task requires. Minion runs its own main/critic review after you finish; do not launch that review yourself. Use review_notes for concise private evidence for critic findings and each critic finding's severity and disposition, including evidence-backed refutations. Carry unresolved refutations forward between rounds. The two decoded strings together must fit within %d UTF-8 bytes. The answer must also fit that publication budget after line-ending normalization, a two-byte quote prefix on every line and 12 bytes of code fences; oversized content is refused rather than truncated.`, task, maxOutputBytes)
 }
 
 func criticPrompt(task, proposed, notes, priorAnswer, priorFeedback, outputDir string) string {
@@ -181,6 +182,9 @@ func parseProposal(raw string) (answer, notes string, err error) {
 	answer = strings.ReplaceAll(*response, "\x00", "")
 	if strings.TrimSpace(answer) == "" {
 		return "", "", errors.New("answer must not be blank")
+	}
+	if !modelOutputFits(answer) {
+		return "", "", errors.New("rendered answer exceeds publication limit")
 	}
 	return answer, *reviewNotes, nil
 }

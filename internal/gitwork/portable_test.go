@@ -178,6 +178,11 @@ func TestImportRejectsIdentityAndMetadataAndPreservesBytes(t *testing.T) {
 	if err != nil || !bytes.Equal(data, changes[1].Data) {
 		t.Fatalf("binary=%v,%v", data, err)
 	}
+	staged := exec.Command("git", "-C", fixture.checkout.path, "show", ":binary")
+	data, err = staged.Output()
+	if err != nil || !bytes.Equal(data, changes[1].Data) {
+		t.Fatalf("staged binary=%v,%v", data, err)
+	}
 	if _, err := os.Stat(filepath.Join(fixture.checkout.path, "README.md")); !os.IsNotExist(err) {
 		t.Fatalf("deleted source=%v", err)
 	}
@@ -294,13 +299,13 @@ func TestPublishIgnoresDefaultGlobalExcludesAndAttributes(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeFile(t, filepath.Join(gitConfig, "ignore"), "notes.local\n")
-	writeFile(t, filepath.Join(gitConfig, "attributes"), "notes.local filter=probe -diff\n")
+	writeFile(t, filepath.Join(gitConfig, "attributes"), "notes.local filter=probe -diff probe=global\n")
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	fixture := newFixture(t)
 	ctx := context.Background()
-	attributes, err := runGit(ctx, fixture.checkout.path, "check-attr", "filter", "diff", "--", "notes.local")
-	if err != nil || attributes != "notes.local: filter: unset\nnotes.local: diff: unspecified" {
+	attributes, err := runGit(ctx, fixture.checkout.path, "check-attr", "filter", "diff", "probe", "--", "notes.local")
+	if err != nil || attributes != "notes.local: filter: unset\nnotes.local: diff: unspecified\nnotes.local: probe: unspecified" {
 		t.Fatalf("global attributes replaced controlled attributes: %q error=%v", attributes, err)
 	}
 	const branch = "minion/fix-global-excludes"
@@ -318,6 +323,43 @@ func TestPublishIgnoresDefaultGlobalExcludesAndAttributes(t *testing.T) {
 	actual, err := cmd.Output()
 	if err != nil || !bytes.Equal(actual, data) {
 		t.Fatalf("published bytes=%q error=%v", actual, err)
+	}
+}
+
+func TestCloneIgnoresHostTemplateExclusions(t *testing.T) {
+	fixture := newFixture(t)
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := t.TempDir()
+	if err := os.Mkdir(filepath.Join(template, "info"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(template, "info", "exclude"), "notes.local\n")
+	control := filepath.Join(t.TempDir(), "control")
+	if output, err := exec.Command(realGit, "-c", "init.templateDir="+template, "clone", "--no-checkout", "--branch", "main", fixture.remote, control).CombinedOutput(); err != nil {
+		t.Fatalf("clone host-template control: %s,%v", output, err)
+	}
+	if data, err := os.ReadFile(filepath.Join(control, ".git", "info", "exclude")); err != nil || string(data) != "notes.local\n" {
+		t.Fatalf("control did not inherit host template: %q,%v", data, err)
+	}
+	bin := t.TempDir()
+	shim := "#!/bin/sh\nexec " + shellQuote(realGit) + " -c " + shellQuote("init.templateDir="+template) + " \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(shim), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	checkout, err := cloneFromURL(context.Background(), t.TempDir(), fixture.remote, "main", localTreeMetadata(t, fixture.source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = checkout.Close() })
+	if _, err := os.Lstat(filepath.Join(checkout.path, ".git", "info", "exclude")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("trusted clone inherited a template exclusion: %v", err)
+	}
+	if err := checkout.Import(context.Background(), fixture.base, []workspace.Change{{Path: "notes.local", Mode: workspace.Regular, Data: []byte("reviewed file")}}); err != nil {
+		t.Fatalf("host template excluded reviewed fix: %v", err)
 	}
 }
 

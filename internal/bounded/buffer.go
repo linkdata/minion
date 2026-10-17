@@ -4,6 +4,7 @@ package bounded
 import (
 	"bytes"
 	"context"
+	"strings"
 )
 
 // Buffer discards output beyond Limit and optionally cancels its producer.
@@ -54,11 +55,53 @@ func (b *Tail) Write(p []byte) (int, error) {
 
 func (b *Tail) String() string { return string(b.data) }
 
+// LineMatch remembers a matching diagnostic line while bounding partial lines.
+// Overlong lines are discarded through their next newline; Write always drains.
+type LineMatch struct {
+	Limit    int
+	Match    func([]byte) bool
+	Matched  bool
+	line     []byte
+	dropping bool
+}
+
+func (m *LineMatch) Write(p []byte) (int, error) {
+	n := len(p)
+	for len(p) != 0 && !m.Matched {
+		end := bytes.IndexByte(p, '\n')
+		part := p
+		if end >= 0 {
+			part = p[:end]
+		}
+		if len(part) > max(0, m.Limit)-len(m.line) {
+			m.line, m.dropping = nil, true
+		}
+		if !m.dropping {
+			m.line = append(m.line, part...)
+		}
+		if end < 0 {
+			break
+		}
+		if !m.dropping {
+			m.Finish()
+		}
+		m.line, m.dropping = m.line[:0], false
+		p = p[end+1:]
+	}
+	return n, nil
+}
+
+func (m *LineMatch) Finish() {
+	if !m.dropping && m.Match != nil && m.Match(m.line) {
+		m.Matched = true
+	}
+}
+
 // Text bounds diagnostic text and marks a discarded suffix.
 func Text(s string, limit int) string {
 	limit = max(0, limit)
 	if len(s) > limit {
-		return s[:limit] + "..."
+		return strings.ToValidUTF8(s[:limit], "") + "..."
 	}
 	return s
 }

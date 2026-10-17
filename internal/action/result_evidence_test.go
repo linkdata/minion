@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/linkdata/minion/internal/command"
+	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/monitor"
 )
 
@@ -19,8 +20,9 @@ func TestInvalidResultKeepsOnlyValidatedEvidence(t *testing.T) {
 		t.Run(scenario, func(t *testing.T) {
 			job := portableJob(command.SecurityAudit)
 			job.Critic = &RoleSettings{Provider: "claude"}
+			job.CriticMaxRounds = config.DefaultCriticMaxRounds
 			result := completeAuditResult(job)
-			result.Calls = append(result.Calls, CallUsage{Provider: "claude", Role: roleCritic, Round: 1, ReviewPhase: reviewFull})
+			result.Calls = append(result.Calls, CallUsage{Provider: "claude", Role: roleCritic, Round: 1, ReviewPhase: reviewFull, Approved: true})
 			result.Diagnostics = []Diagnostic{{Code: "cleanup_failed", Message: "PRIVATE cleanup details"}}
 			switch scenario {
 			case "invalid calls":

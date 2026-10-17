@@ -379,8 +379,10 @@ func TestParseProposal(t *testing.T) {
 		{name: "raw limit", input: strings.Repeat(" ", maxProposalOutputBytes) + proposalJSON("public", "")},
 		{name: "decoded limit", input: proposalJSON(strings.Repeat("x", maxOutputBytes+1), private)},
 		{name: "combined limit", input: proposalJSON(strings.Repeat("x", maxOutputBytes), "x")},
-		{name: "answer budget", input: proposalJSON(strings.Repeat("x", maxOutputBytes), ""), answer: strings.Repeat("x", maxOutputBytes), valid: true},
-		{name: "escaped budget", input: proposalJSON(strings.Repeat("\x01", maxOutputBytes), ""), answer: strings.Repeat("\x01", maxOutputBytes), valid: true},
+		{name: "answer budget", input: proposalJSON(strings.Repeat("x", maxOutputBytes-14), ""), answer: strings.Repeat("x", maxOutputBytes-14), valid: true},
+		{name: "rendered budget", input: proposalJSON(strings.Repeat("x", maxOutputBytes-13), "")},
+		{name: "escaped budget", input: proposalJSON(strings.Repeat("\x01", maxOutputBytes-14), ""), answer: strings.Repeat("\x01", maxOutputBytes-14), valid: true},
+		{name: "line prefix budget", input: proposalJSON(strings.Repeat("a\n", 25000), "")},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			answer, notes, err := parseProposal(tt.input)
@@ -429,23 +431,30 @@ func TestParseCritique(t *testing.T) {
 }
 
 func TestCommentPublishesOnlyCriticApprovedResult(t *testing.T) {
+	boundary := strings.Repeat("a\n", 12000) + strings.Repeat("x", maxOutputBytes-14-4*12000)
 	for _, tt := range []struct {
-		name, verdict string
-		wantError     bool
+		name, verdict, answer string
+		wantError             bool
 	}{
 		{name: "approved", verdict: `{"approved":true,"feedback":""}`},
+		{name: "approved rendered boundary", verdict: `{"approved":true,"feedback":""}`, answer: boundary},
+		{name: "rendered overflow", verdict: `{"approved":true,"feedback":""}`, answer: boundary + "x", wantError: true},
 		{name: "rejected", verdict: `{"approved":false,"feedback":"A defect remains."}`, wantError: true},
 		{name: "invalid", verdict: "approved", wantError: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			answer := tt.answer
+			if answer == "" {
+				answer = "Proposed report"
+			}
 			gitFixtureRemote(t)
 			var published string
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch {
 				case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/o/r/git/trees/"):
-					_, _ = fmt.Fprintf(w, `{"sha":%q,"truncated":false,"tree":[]}`, strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/"))
+					writeTreeFixture(t, w, strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/"))
 				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
-					_, _ = fmt.Fprint(w, `{"id":1,"full_name":"o/r","owner":{"id":2,"login":"o"},"default_branch":"main"}`)
+					_, _ = fmt.Fprint(w, publicRepositoryJSON)
 				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7":
 					_, _ = fmt.Fprint(w, `{"title":"Title","body":"Description"}`)
 				case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/issues/7/comments":
@@ -497,7 +506,7 @@ func TestCommentPublishesOnlyCriticApprovedResult(t *testing.T) {
 				if mainCalls > 1 {
 					notes = privateNotes
 				}
-				return aicli.Result{Answer: proposalJSON("Proposed report", notes)}, nil
+				return aicli.Result{Answer: proposalJSON(answer, notes)}, nil
 			}
 			job := monitor.Job{Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2},
 				SubjectType: "Issue", Number: 7, ID: strings.Repeat("a", 64),
@@ -509,7 +518,7 @@ func TestCommentPublishesOnlyCriticApprovedResult(t *testing.T) {
 				if !errors.Is(err, monitor.ErrTerminalJob) || published != "" {
 					t.Fatalf("unapproved result published: error=%v body=%q", err, published)
 				}
-			} else if err != nil || !strings.Contains(published, "Proposed report") || strings.Contains(published, `"approved"`) || strings.Contains(published, "review_notes") || strings.Contains(published, "PRIVATE_REFUTATION") {
+			} else if err != nil || !strings.Contains(published, inertModelOutput(answer)) || strings.Contains(published, "[truncated]") || strings.Contains(published, `"approved"`) || strings.Contains(published, "review_notes") || strings.Contains(published, "PRIVATE_REFUTATION") {
 				t.Fatalf("wrong published result: error=%v body=%q", err, published)
 			}
 		})

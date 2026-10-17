@@ -614,6 +614,57 @@ func TestImportAndCommitBoundsChanges(t *testing.T) {
 	}
 }
 
+func TestCommitAndPushBoundsDirectlyStagedPathCount(t *testing.T) {
+	fixture := newFixture(t)
+	ctx := context.Background()
+	const branch = "minion/fix-staged-limit"
+	if err := fixture.checkout.NewBranch(ctx, branch); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i <= workspace.MaxChanges; i++ {
+		writeFile(t, filepath.Join(fixture.checkout.path, fmt.Sprintf("f%d", i)), "x")
+	}
+	fixture.git(fixture.checkout.path, "add", ".")
+	err := fixture.checkout.CommitAndPush(ctx, branch, "bot", "too many paths", func(string) error {
+		t.Fatal("oversized stage reached before-push recorder")
+		return nil
+	})
+	if !errors.Is(err, ErrTooManyFiles) {
+		t.Fatalf("short staged paths bypassed count limit: %v", err)
+	}
+	if head := fixture.git(fixture.checkout.path, "rev-parse", "HEAD"); head != fixture.base {
+		t.Fatalf("oversized stage was committed: %s", head)
+	}
+	if output, err := exec.Command("git", "--git-dir="+fixture.remote, "show-ref", "--verify", "refs/heads/"+branch).CombinedOutput(); err == nil {
+		t.Fatalf("oversized stage was pushed: %s", output)
+	}
+}
+
+func TestSplitNULRecords(t *testing.T) {
+	for _, test := range []struct {
+		data string
+		want []string
+	}{
+		{"", nil},
+		{"one\x00", []string{"one"}},
+		{"one\x00two\x00", []string{"one", "two"}},
+		{"\x00", []string{""}},
+	} {
+		records, err := SplitNUL([]byte(test.data))
+		if err != nil || len(records) != len(test.want) {
+			t.Fatalf("split %q=%q,%v", test.data, records, err)
+		}
+		for i, want := range test.want {
+			if string(records[i]) != want {
+				t.Fatalf("split %q record %d=%q want=%q", test.data, i, records[i], want)
+			}
+		}
+	}
+	if _, err := SplitNUL([]byte("one\x00unterminated")); err == nil {
+		t.Fatal("accepted unterminated records")
+	}
+}
+
 func TestChangedGitConfigStopsPublish(t *testing.T) {
 	fixture := newFixture(t)
 	ctx := context.Background()
@@ -682,7 +733,7 @@ func newFixture(t *testing.T) gitFixture {
 	fixture.git("", "clone", "--no-checkout", "--branch", "main", fixture.remote, path)
 	fixture.git(path, "checkout", "--detach", "refs/remotes/origin/main")
 	fixture.checkout = &Checkout{path: path, url: fixture.remote, pushURL: fixture.remote, expectedHead: fixture.base, lookupTree: localTreeMetadata(t, path)}
-	if err := fixture.checkout.disableAttributes(); err != nil {
+	if err := DisableAttributes(filepath.Join(path, ".git")); err != nil {
 		t.Fatal(err)
 	}
 	if err := fixture.checkout.recordConfig(); err != nil {

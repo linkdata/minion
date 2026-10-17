@@ -45,6 +45,54 @@ func TestFixIndexRejectsControlFIFOsBeforeGitOpensThem(t *testing.T) {
 	}
 }
 
+func TestFixIndexRejectsNestedGitFIFOBeforeGitOpensIt(t *testing.T) {
+	index, source := offlineIndexFixture(t, nil)
+	metadata := filepath.Join(source, "newdir", ".git")
+	for _, dir := range []string{"objects", "refs"} {
+		if err := os.MkdirAll(filepath.Join(metadata, dir), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := syscall.Mkfifo(filepath.Join(metadata, "HEAD"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	writeIndexFixture(t, source, "newdir/file", []byte("new output"))
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_, err := index.changes(ctx)
+	if err == nil || !strings.Contains(err.Error(), `untracked nested repository output "newdir/"`) || ctx.Err() != nil {
+		t.Fatalf("nested Git FIFO refused only after blocking: %v; deadline=%v", err, ctx.Err())
+	}
+}
+
+func TestFixIndexTreatsColonDirectoriesAsLiteralNames(t *testing.T) {
+	for _, dir := range []string{":build", ":(top)build", ":!build", ":(icase)build"} {
+		t.Run(dir, func(t *testing.T) {
+			index, source := offlineIndexFixture(t, []workspace.File{{Path: ".gitignore", Mode: workspace.Regular, Data: []byte("build/\n")}})
+			if err := os.Mkdir(filepath.Join(source, dir), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := syscall.Mkfifo(filepath.Join(source, dir, ".gitignore"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			_, err := index.changes(ctx)
+			if err == nil || !strings.Contains(err.Error(), "fix control file") || !strings.Contains(err.Error(), "must be regular") || ctx.Err() != nil {
+				t.Fatalf("literal directory path was interpreted as a pathspec: %v; deadline=%v", err, ctx.Err())
+			}
+			if err := os.Remove(filepath.Join(source, dir, ".gitignore")); err != nil {
+				t.Fatal(err)
+			}
+			writeIndexFixture(t, source, dir+"/file", []byte("legal source"))
+			changes, err := index.changes(ctx)
+			if err != nil || len(changes) != 1 || changes[0].Path != dir+"/file" {
+				t.Fatalf("legal colon directory was refused: %+v,%v", changes, err)
+			}
+		})
+	}
+}
+
 func TestFixIndexDoesNotInspectIgnoredControlFiles(t *testing.T) {
 	index, source := offlineIndexFixture(t, []workspace.File{
 		{Path: ".gitignore", Mode: workspace.Regular, Data: []byte(".venv/\ntarget/\n")},

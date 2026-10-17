@@ -117,11 +117,11 @@ func TestIdentityStringBounds(t *testing.T) {
 		{"executor", func(id *Identity, v string) { id.ExecutorID = v }}, {"requester", func(id *Identity, v string) { id.Requester = v }},
 	} {
 		t.Run(field.name, func(t *testing.T) {
-			for _, value := range []string{strings.Repeat("a", 128), "", " ", "a\nb", "a\rb", strings.Repeat("a", 129), "a\x00b", string([]byte{0xff})} {
+			for _, value := range []string{strings.Repeat("a", 100), "", " ", "a\nb", "a\rb", "a\tb", "a\vb", "a\x1bb", "a\u0085b", "a\u2028b", "a\u2029b", "a/b", `a\b`, "é", ".", "..", strings.Repeat("a", 101), "a\x00b", string([]byte{0xff})} {
 				job := portableJob(command.Comment)
 				field.set(&job.Identity, value)
 				err := job.Validate()
-				if (err == nil) != (value == strings.Repeat("a", 128)) || (err != nil && !strings.Contains(err.Error(), "action identity is missing or invalid")) {
+				if (err == nil) != (value == strings.Repeat("a", 100)) || (err != nil && !strings.Contains(err.Error(), "action identity is missing or invalid")) {
 					t.Fatalf("identity %q: %v", value, err)
 				}
 			}
@@ -177,13 +177,18 @@ func TestJobRejectsInvalidRoleAndDispatchSettings(t *testing.T) {
 
 func TestResultJSONRoundTripPreservesValidatedPayload(t *testing.T) {
 	job := portableJob(command.Fix)
+	job.Critic, job.CriticMaxRounds = &RoleSettings{Provider: "claude"}, 1
 	result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Done.", Changes: []workspace.Change{{Path: "binary", Mode: workspace.Executable, Data: []byte{0, 0xff, '\n'}}}, Calls: []CallUsage{{Provider: job.Main.Provider, Role: "main", Round: 1}}}
+	result.Calls = append(result.Calls, CallUsage{Provider: "claude", Role: roleCritic, Round: 1, ReviewPhase: reviewFull, Approved: true})
 	if err := result.Validate(job); err != nil {
 		t.Fatal(err)
 	}
 	data, err := json.Marshal(result)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !bytes.Contains(data, []byte(`"approved":true`)) {
+		t.Fatalf("approval attestation missing from wire result: %s", data)
 	}
 	var decoded Result
 	if err := json.Unmarshal(data, &decoded); err != nil {
@@ -197,6 +202,7 @@ func TestResultJSONRoundTripPreservesValidatedPayload(t *testing.T) {
 func TestStatusUsesConfiguredRoundBudget(t *testing.T) {
 	job := portableJob(command.Comment)
 	job.Critic = &RoleSettings{Provider: "claude"}
+	job.CriticMaxRounds = config.DefaultCriticMaxRounds
 	for _, limit := range []int{config.DefaultCriticMaxRounds, config.MaxCriticMaxRounds} {
 		job.CriticMaxRounds = limit
 		status := Status{Version: ProtocolVersion, Identity: job.Identity, State: StatusRunning, Phase: PhaseCritic, Round: limit, ReviewPhase: "full"}
@@ -213,6 +219,7 @@ func TestStatusUsesConfiguredRoundBudget(t *testing.T) {
 func TestStatusDistinguishesReviewPhases(t *testing.T) {
 	job := portableJob(command.Comment)
 	job.Critic = &RoleSettings{Provider: "claude"}
+	job.CriticMaxRounds = config.DefaultCriticMaxRounds
 	for _, tt := range []struct {
 		name        string
 		phase       StatusPhase
@@ -238,6 +245,7 @@ func TestStatusDistinguishesReviewPhases(t *testing.T) {
 		})
 	}
 	job.Critic = nil
+	job.CriticMaxRounds = 0
 	status := Status{Version: ProtocolVersion, Identity: job.Identity, State: StatusRunning, Phase: PhaseCritic, Round: 1, ReviewPhase: "full"}
 	if err := status.Validate(job); err == nil || !strings.Contains(err.Error(), "review phase") {
 		t.Fatalf("allowed critic status without a critic: %v", err)
@@ -327,11 +335,12 @@ func TestResultCallUsageRequiresOrderedReviewPhases(t *testing.T) {
 	job := portableJob(command.Comment)
 	job.Main.Model, job.Main.Effort = "main-model", "high"
 	job.Critic = &RoleSettings{Provider: "claude", Model: "critic-model", Effort: "medium"}
+	job.CriticMaxRounds = config.DefaultCriticMaxRounds
 	main := func(round int) CallUsage {
 		return CallUsage{Provider: job.Main.Provider, Model: job.Main.Model, Effort: job.Main.Effort, Role: "main", Round: round, Complete: true}
 	}
-	critic := func(round int, phase string) CallUsage {
-		return CallUsage{Provider: job.Critic.Provider, Model: job.Critic.Model, Effort: job.Critic.Effort, Role: "critic", Round: round, ReviewPhase: phase, Complete: true}
+	critic := func(round int, phase string, approved bool) CallUsage {
+		return CallUsage{Provider: job.Critic.Provider, Model: job.Critic.Model, Effort: job.Critic.Effort, Role: "critic", Round: round, ReviewPhase: phase, Approved: approved, Complete: true}
 	}
 	for _, test := range []struct {
 		name              string
@@ -339,20 +348,24 @@ func TestResultCallUsageRequiresOrderedReviewPhases(t *testing.T) {
 		complete, partial bool
 	}{
 		{"no review calls", nil, false, true},
-		{"first full review", []CallUsage{main(1), critic(1, "full")}, true, true},
-		{"revised full review", []CallUsage{main(1), critic(1, "full"), main(2), critic(2, "verification"), critic(2, "full")}, true, true},
-		{"rejected verification then revision", []CallUsage{main(1), critic(1, "full"), main(2), critic(2, "verification"), main(3), critic(3, "verification"), critic(3, "full")}, true, true},
+		{"first full review", []CallUsage{main(1), critic(1, "full", true)}, true, true},
+		{"rejected full review", []CallUsage{main(1), critic(1, "full", false)}, false, true},
+		{"revised full review", []CallUsage{main(1), critic(1, "full", false), main(2), critic(2, "verification", true), critic(2, "full", true)}, true, true},
+		{"rejected verification then revision", []CallUsage{main(1), critic(1, "full", false), main(2), critic(2, "verification", false), main(3), critic(3, "verification", true), critic(3, "full", true)}, true, true},
+		{"unapproved verification followed by full", []CallUsage{main(1), critic(1, "full", false), main(2), critic(2, "verification", false), critic(2, "full", true)}, false, false},
+		{"approved verification skips full", []CallUsage{main(1), critic(1, "full", false), main(2), critic(2, "verification", true), main(3)}, false, false},
+		{"approved full followed by main", []CallUsage{main(1), critic(1, "full", true), main(2)}, false, false},
 		{"interrupted first main", []CallUsage{main(1)}, false, true},
-		{"interrupted revision", []CallUsage{main(1), critic(1, "full"), main(2)}, false, true},
-		{"interrupted verification", []CallUsage{main(1), critic(1, "full"), main(2), critic(2, "verification")}, false, true},
-		{"critic first", []CallUsage{critic(1, "full")}, false, false},
-		{"missing first full", []CallUsage{main(1), critic(1, "verification")}, false, false},
-		{"missing revision verification", []CallUsage{main(1), critic(1, "full"), main(2), critic(2, "full")}, false, false},
-		{"repeated full", []CallUsage{main(1), critic(1, "full"), critic(1, "full")}, false, false},
+		{"interrupted revision", []CallUsage{main(1), critic(1, "full", false), main(2)}, false, true},
+		{"interrupted verification", []CallUsage{main(1), critic(1, "full", false), main(2), critic(2, "verification", false)}, false, true},
+		{"critic first", []CallUsage{critic(1, "full", true)}, false, false},
+		{"missing first full", []CallUsage{main(1), critic(1, "verification", true)}, false, false},
+		{"missing revision verification", []CallUsage{main(1), critic(1, "full", false), main(2), critic(2, "full", true)}, false, false},
+		{"repeated full", []CallUsage{main(1), critic(1, "full", true), critic(1, "full", true)}, false, false},
 		{"main before critic", []CallUsage{main(1), main(2)}, false, false},
-		{"skipped round", []CallUsage{main(1), critic(1, "full"), main(3)}, false, false},
-		{"critic round mismatch", []CallUsage{main(1), critic(2, "full")}, false, false},
-		{"unknown phase", []CallUsage{main(1), critic(1, "focused")}, false, false},
+		{"skipped round", []CallUsage{main(1), critic(1, "full", false), main(3)}, false, false},
+		{"critic round mismatch", []CallUsage{main(1), critic(2, "full", true)}, false, false},
+		{"unknown phase", []CallUsage{main(1), critic(1, "focused", true)}, false, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Answer.", Calls: test.calls}
@@ -369,6 +382,7 @@ func TestResultCallUsageRequiresOrderedReviewPhases(t *testing.T) {
 		mutate func(*CallUsage)
 	}{
 		{"main phase", func(call *CallUsage) { call.ReviewPhase = "full" }},
+		{"main approval", func(call *CallUsage) { call.Approved = true }},
 		{"provider attribution", func(call *CallUsage) { call.Provider = "claude" }},
 		{"model attribution", func(call *CallUsage) { call.Model = "different-model" }},
 		{"effort attribution", func(call *CallUsage) { call.Effort = "low" }},
@@ -376,7 +390,7 @@ func TestResultCallUsageRequiresOrderedReviewPhases(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			call := main(1)
 			test.mutate(&call)
-			result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Answer.", Calls: []CallUsage{call, critic(1, "full")}}
+			result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Answer.", Calls: []CallUsage{call, critic(1, "full", true)}}
 			if err := result.validate(job, false); err == nil {
 				t.Fatal("accepted malformed or incorrectly attributed call")
 			}
@@ -426,11 +440,14 @@ func TestResultCallUsageHonorsConfiguredRoundLimits(t *testing.T) {
 			job.Critic, job.CriticMaxRounds = &RoleSettings{Provider: "claude"}, test.limit
 			result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Answer."}
 			for round := 1; round <= test.rounds+1; round++ {
-				result.Calls = append(result.Calls, CallUsage{Provider: job.Main.Provider, Role: "main", Round: round})
-				if round > 1 {
-					result.Calls = append(result.Calls, CallUsage{Provider: job.Critic.Provider, Role: "critic", Round: round, ReviewPhase: "verification"})
+				result.Calls = nil
+				for proposal := 1; proposal <= round; proposal++ {
+					result.Calls = append(result.Calls, CallUsage{Provider: job.Main.Provider, Role: "main", Round: proposal})
+					if proposal > 1 {
+						result.Calls = append(result.Calls, CallUsage{Provider: job.Critic.Provider, Role: "critic", Round: proposal, ReviewPhase: "verification", Approved: true})
+					}
+					result.Calls = append(result.Calls, CallUsage{Provider: job.Critic.Provider, Role: "critic", Round: proposal, ReviewPhase: "full", Approved: proposal == round})
 				}
-				result.Calls = append(result.Calls, CallUsage{Provider: job.Critic.Provider, Role: "critic", Round: round, ReviewPhase: "full"})
 				if err := result.Validate(job); (err == nil) != (round <= test.rounds) {
 					t.Fatalf("round=%d limit=%d result validation=%v", round, test.limit, err)
 				}

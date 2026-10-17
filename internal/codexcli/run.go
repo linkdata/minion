@@ -31,12 +31,6 @@ const (
 	instructionRoot     = ".minion-codex-root"
 )
 
-// ErrOutputLimit means a bounded Codex run cannot complete with this output.
-var ErrOutputLimit = aicli.ErrOutputLimit
-
-// Result contains the response and token accounting for one CLI call.
-type Result = aicli.Result
-
 // Run executes one non-interactive Codex task for a source snapshot.
 //
 // A writable run may edit the snapshot; outputDir optionally grants write
@@ -49,7 +43,7 @@ type Result = aicli.Result
 // A nonempty APIKey in settings overrides environment credentials and stored
 // login for this run. It is excluded from model-command environments and
 // redacted from the returned answer and error text.
-func Run(ctx context.Context, dir, prompt string, writable bool, outputDir string, settings config.CodexConfig) (result Result, runError error) {
+func Run(ctx context.Context, dir, prompt string, writable bool, outputDir string, settings config.CodexConfig) (result aicli.Result, runError error) {
 	defer func() {
 		if settings.APIKey != "" {
 			result.Answer = strings.ReplaceAll(result.Answer, settings.APIKey, "[redacted]")
@@ -264,7 +258,8 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 			codexHome = filepath.Join(home, ".codex")
 		}
 	}
-	result.Tokens, result.UsageComplete = collectUsage(runCtx, codexHome, output.threadID, started, output.tokens, output.children)
+	var unfinishedChild bool
+	result.Tokens, result.UsageComplete, unfinishedChild = collectUsage(ctx, codexHome, output.threadID, started, output.tokens, output.children)
 	if runErr != nil || ctx.Err() != nil || output.failed || output.parseErr != nil || output.oversizedLines > 0 {
 		// Keep known counters; a failed lifecycle cannot certify full coverage.
 		result.UsageComplete = false
@@ -273,7 +268,7 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 		return result, fmt.Errorf("codex exec: %w", err)
 	}
 	if output.stopped {
-		return result, fmt.Errorf("codex exec: %w: %s", ErrOutputLimit, output.failureReason)
+		return result, fmt.Errorf("codex exec: %w: %s", aicli.ErrOutputLimit, output.failureReason)
 	}
 	if runErr != nil || output.failed {
 		reason := output.failureReason
@@ -284,9 +279,9 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 			reason = "no further diagnostics"
 		}
 		if runErr != nil {
-			return result, fmt.Errorf("codex exec failed (%v): %s", runErr, reason)
+			return result, fmt.Errorf("codex exec failed (%w): %q", runErr, reason)
 		}
-		return result, fmt.Errorf("codex exec failed: %s", reason)
+		return result, fmt.Errorf("codex exec failed: %q", reason)
 	}
 	if output.parseErr != nil {
 		return result, fmt.Errorf("codex exec output: %w", output.parseErr)
@@ -294,7 +289,7 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	if !output.completed {
 		reason := output.failureReason
 		if reason == "" && output.oversizedLines > 0 {
-			return result, fmt.Errorf("codex exec: %w: JSONL event exceeded the output size limit", ErrOutputLimit)
+			return result, fmt.Errorf("codex exec: %w: JSONL event exceeded the output size limit", aicli.ErrOutputLimit)
 		}
 		if reason == "" {
 			reason = strings.TrimSpace(stderr.String())
@@ -302,10 +297,14 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 		if reason == "" {
 			reason = "missing turn.completed event"
 		}
-		return result, fmt.Errorf("codex exec did not complete: %s", reason)
+		return result, fmt.Errorf("codex exec did not complete: %q", reason)
 	}
 	if output.finalMessage == "" {
 		return result, errors.New("codex exec completed without a final agent message")
+	}
+	if unfinishedChild {
+		result.UsageComplete = false
+		return result, errors.New("codex exec: helper agent work did not complete")
 	}
 	result.Answer = output.finalMessage
 	return result, nil

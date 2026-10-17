@@ -36,13 +36,13 @@ func TestCommentCommandReportsIssueAndPullRequest(t *testing.T) {
 				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7/comments":
 					_, _ = fmt.Fprint(w, `[]`)
 				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
-					_, _ = fmt.Fprint(w, `{"id":1,"full_name":"o/r","owner":{"id":2,"login":"o"},"default_branch":"main"}`)
+					_, _ = fmt.Fprint(w, publicRepositoryJSON)
 				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7":
 					_, _ = fmt.Fprintf(w, `{"title":%q,"body":%q}`, title, description)
 				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/pulls/7":
 					_, _ = fmt.Fprintf(w, `{"title":%q,"body":%q,"user":{"id":8,"login":"outsider"},"base":{"ref":"main"},"head":{"sha":%q}}`, title, description, pullHead)
 				case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/o/r/git/trees/"):
-					_, _ = fmt.Fprintf(w, `{"sha":%q,"truncated":false,"tree":[]}`, strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/"))
+					writeTreeFixture(t, w, strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/"))
 				case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/issues/7/comments":
 					var payload struct {
 						Body string `json:"body"`

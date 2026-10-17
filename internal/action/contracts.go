@@ -66,6 +66,8 @@ type CallUsage struct {
 	Model       string       `json:"model,omitempty"`
 	Effort      string       `json:"effort,omitempty"`
 	Tokens      usage.Tokens `json:"tokens"`
+	// Approved attests a parsed approving critic verdict; false is not proof of rejection.
+	Approved bool `json:"approved,omitempty"`
 	// Complete confirms accounting coverage; interrupted or failed native runs are conservative.
 	Complete bool `json:"complete"`
 }
@@ -117,12 +119,13 @@ type Status struct {
 	ProgressSequence uint64        `json:"progress_sequence"`
 	LogSequence      uint64        `json:"log_sequence"`
 	ProgressAge      time.Duration `json:"progress_age_ns"`
+	RuntimeRemaining time.Duration `json:"runtime_remaining_ns"`
 	Diagnostics      []Diagnostic  `json:"diagnostics,omitempty"`
 }
 
 func (id Identity) validate() error {
 	for _, value := range []string{id.JobID, id.AttemptID, id.ExecutorID, id.Requester} {
-		if !boundedText(value, 128) || strings.TrimSpace(value) == "" || strings.ContainsAny(value, "\r\n") {
+		if !identitySegment(value) {
 			return errors.New("action identity is missing or invalid")
 		}
 	}
@@ -151,7 +154,7 @@ func (r RoleSettings) validate() error {
 	if !boundedText(r.Model, 128) || !boundedText(r.Effort, 128) || strings.ContainsAny(r.Model+r.Effort, "\r\n") || len(r.Skills)+len(r.AlwaysOnSkills) > 64 {
 		return errors.New("invalid action model or skills")
 	}
-	for _, source := range append(append([]string(nil), r.Skills...), r.AlwaysOnSkills...) {
+	for _, source := range slices.Concat(r.Skills, r.AlwaysOnSkills) {
 		if len(source) > 4096 {
 			return errors.New("skill source exceeds limit")
 		}
@@ -208,7 +211,7 @@ func (j Job) Validate() error {
 			return errors.New("main and critic currently require different providers")
 		}
 	}
-	if j.CriticMaxRounds < 0 || j.CriticMaxRounds > config.MaxCriticMaxRounds || (j.Critic != nil && j.CriticMaxRounds == 0) {
+	if (j.Critic == nil && j.CriticMaxRounds != 0) || (j.Critic != nil && (j.CriticMaxRounds < 1 || j.CriticMaxRounds > config.MaxCriticMaxRounds)) {
 		return errors.New("invalid critic round limit")
 	}
 	if err := workspace.ValidateSnapshot(j.Source); err != nil {
@@ -241,7 +244,7 @@ func (r Result) validate(j Job, complete bool) error {
 	if !r.matchesJob(j) {
 		return errors.New("action result version, identity or source differs from job")
 	}
-	if !boundedText(r.Answer, maxOutputBytes) || (complete && (j.Action != command.Fix || j.Critic != nil) && strings.TrimSpace(r.Answer) == "") {
+	if !boundedText(r.Answer, maxOutputBytes) || (complete && (!modelOutputFits(r.Answer) || ((j.Action != command.Fix || j.Critic != nil) && strings.TrimSpace(r.Answer) == ""))) {
 		return errors.New("action answer is blank, invalid or exceeds limit")
 	}
 	if j.Action != command.Fix && len(r.Changes) != 0 {
@@ -286,14 +289,14 @@ func (r Result) validateCalls(j Job, complete bool) error {
 		if i > 0 && j.Critic != nil {
 			previous := r.Calls[i-1]
 			if call.Role == roleMain {
-				validOrder = previous.Role == roleCritic && call.Round == previous.Round+1 && call.ReviewPhase == ""
+				validOrder = previous.Role == roleCritic && !previous.Approved && call.Round == previous.Round+1 && call.ReviewPhase == ""
 			} else if previous.Role == roleMain {
 				validOrder = call.Round == previous.Round && call.ReviewPhase == reviewPhases(call.Round)[0]
 			} else {
-				validOrder = previous.ReviewPhase == reviewVerification && call.Round == previous.Round && call.ReviewPhase == reviewFull
+				validOrder = previous.ReviewPhase == reviewVerification && previous.Approved && call.Round == previous.Round && call.ReviewPhase == reviewFull
 			}
 		}
-		if !validOrder || call.Round > rounds || call.Provider != role.Provider || call.Model != role.Model || call.Effort != role.Effort || call.Tokens.Input < 0 || call.Tokens.CachedInput < 0 || call.Tokens.Output < 0 || call.Tokens.CachedInput > call.Tokens.Input {
+		if !validOrder || call.Round > rounds || (call.Approved && call.Role != roleCritic) || call.Provider != role.Provider || call.Model != role.Model || call.Effort != role.Effort || !call.Tokens.Valid() {
 			return errors.New("invalid model call usage")
 		}
 	}
@@ -302,8 +305,8 @@ func (r Result) validateCalls(j Job, complete bool) error {
 			return errors.New("action result lacks a final full review")
 		}
 		last := r.Calls[len(r.Calls)-1]
-		if last.Role != roleCritic || last.ReviewPhase != reviewFull {
-			return errors.New("action result lacks a final full review")
+		if last.Role != roleCritic || last.ReviewPhase != reviewFull || !last.Approved {
+			return errors.New("action result lacks an approved final full review")
 		}
 	}
 	if complete && j.Critic == nil && len(r.Calls) != 1 {
@@ -328,7 +331,7 @@ func (j Job) validateChanges(changes []workspace.Change) error {
 	if err := workspace.ValidateChanges(changes); err != nil {
 		return err
 	}
-	files := append([]workspace.File(nil), j.Source.Files...)
+	files := slices.Clone(j.Source.Files)
 	omittedPaths := make(map[string]string, len(j.Source.Omitted))
 	for _, name := range j.Source.Omitted {
 		omittedPaths[workspace.FoldPath(name)] = name
@@ -421,7 +424,7 @@ func (s Status) Validate(j Job) error {
 	} else if s.ReviewPhase != "" {
 		return errors.New("unexpected action status review phase")
 	}
-	if s.Round < 0 || s.Round > j.rounds() || s.ProgressAge < 0 {
+	if s.Round < 0 || s.Round > j.rounds() || s.ProgressAge < 0 || s.RuntimeRemaining < 0 || s.RuntimeRemaining > j.RuntimeBudget {
 		return errors.New("invalid action status")
 	}
 	return validDiagnostics(s.Diagnostics)

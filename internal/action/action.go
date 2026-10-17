@@ -69,7 +69,7 @@ func (e *Orchestrator) Execute(ctx context.Context, job monitor.Job) (resultErr 
 		defer func() {
 			if resultErr != nil {
 				if err := e.CheckWorkRoot(); err != nil {
-					resultErr = errors.Join(resultErr, err)
+					e.logf("work root after action failure: %q", err)
 				}
 			}
 		}()
@@ -302,19 +302,21 @@ func (e *Orchestrator) checkGitHubContext(job monitor.Job, title string, fields 
 
 // inertModelOutput keeps model text visible without letting GitHub render
 // images, mentions, or commands from it. Quoting each line also stops raw
-// line-command parsers that do not understand Markdown fences.
+// line-command parsers that do not understand Markdown fences. Callers check
+// modelOutputFits before publication; rendering never truncates the text.
 func inertModelOutput(s string) string {
-	s = strings.TrimSpace(modelLineBreaks.Replace(s))
+	s = normalizedModelOutput(s)
 	quoted := "> " + strings.ReplaceAll(s, "\n", "\n> ")
-	const open, close, note = "```text\n", "\n```", "\n> [truncated]"
-	if budget := maxOutputBytes - len(open) - len(close); len(quoted) > budget {
-		quoted = quoted[:budget-len(note)]
-		for !utf8.ValidString(quoted) {
-			quoted = quoted[:len(quoted)-1]
-		}
-		quoted += note
-	}
-	return open + quoted + close
+	return "```text\n" + quoted + "\n```"
+}
+
+func modelOutputFits(s string) bool {
+	s = normalizedModelOutput(s)
+	return len(s) <= maxOutputBytes && utf8.ValidString(s) && len(s)+2*strings.Count(s, "\n")+14 <= maxOutputBytes
+}
+
+func normalizedModelOutput(s string) string {
+	return strings.TrimSpace(modelLineBreaks.Replace(s))
 }
 
 func isNotFound(err error) bool {

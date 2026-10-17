@@ -3,6 +3,7 @@ Description=linkdataminion GitHub mention monitor
 
 [Service]
 Type=simple
+KillMode=mixed
 WorkingDirectory=/path/to/minion
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 ExecStart=/path/to/minion/bin/minion -config /path/to/minion/config.local.json -loop

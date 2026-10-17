@@ -36,13 +36,7 @@ func TestPortableJobUsesCriticDefaultAndRejectsInvalidFixSource(t *testing.T) {
 			}
 			gitFixtureRemote(t, files...)
 			checkout, err := gitwork.Clone(context.Background(), t.TempDir(), "o/r", "main", func(_ context.Context, sha string) (github.GitTree, error) {
-				truncated := false
-				entries := []github.GitTreeEntry{}
-				for _, file := range files {
-					size := int64(len(file.Data))
-					entries = append(entries, github.GitTreeEntry{Path: file.Path, Type: "blob", Mode: "100644", Size: &size})
-				}
-				return github.GitTree{SHA: sha, Truncated: &truncated, Tree: entries}, nil
+				return gitTreeFixture(sha, files...), nil
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -78,7 +72,7 @@ func TestPreparedActionRejectsForeignResultBeforePublication(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/o/r/git/trees/"):
-			_, _ = fmt.Fprintf(w, `{"sha":%q,"truncated":false,"tree":[]}`, strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/"))
+			writeTreeFixture(t, w, strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/"))
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
 			_, _ = fmt.Fprint(w, `{"id":1,"full_name":"o/r","owner":{"id":2},"default_branch":"main"}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7":
@@ -146,7 +140,7 @@ func TestPreparedActionRejectsForeignResultBeforePublication(t *testing.T) {
 		t.Fatalf("portableJob lost Claude model/effort: %+v", prepared.job.Main)
 	}
 	defer func() {
-		if err := prepared.close(); err != nil {
+		if err := prepared.checkout.Close(); err != nil {
 			t.Error(err)
 		}
 	}()
@@ -207,7 +201,7 @@ func TestFailedAuditRetainsLabelledPartialArtifactsWithoutPublication(t *testing
 		}
 		switch {
 		case strings.HasPrefix(r.URL.Path, "/repos/o/r/git/trees/"):
-			_, _ = fmt.Fprintf(w, `{"sha":%q,"truncated":false,"tree":[]}`, strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/"))
+			writeTreeFixture(t, w, strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/"))
 		case r.URL.Path == "/repos/o/r":
 			_, _ = fmt.Fprint(w, `{"id":1,"full_name":"o/r","owner":{"id":2},"default_branch":"main"}`)
 		case r.URL.Path == "/repos/o/r/issues/7":
@@ -320,7 +314,7 @@ func TestPreparedReplyNeedsNoExecution(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/o/r/git/trees/"):
-			_, _ = fmt.Fprintf(w, `{"sha":%q,"truncated":false,"tree":[]}`, strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/"))
+			writeTreeFixture(t, w, strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/"))
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
 			_, _ = fmt.Fprint(w, `{"id":1,"full_name":"o/r","owner":{"id":2}}`)
 		case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/issues/7/comments":
@@ -356,7 +350,7 @@ func TestPreparedReplyNeedsNoExecution(t *testing.T) {
 	if writes != 1 {
 		t.Fatalf("reply writes = %d", writes)
 	}
-	if err := prepared.close(); err != nil {
+	if err := prepared.checkout.Close(); err != nil {
 		t.Fatal(err)
 	}
 }

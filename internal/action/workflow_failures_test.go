@@ -1,10 +1,12 @@
 package action
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -94,7 +96,7 @@ func TestExecuteSourceFailuresAndInvalidIncompleteResultsAreTerminal(t *testing.
 					case "unsupported source":
 						_, _ = fmt.Fprintf(w, `{"sha":%q,"truncated":false,"tree":[{"path":"source","type":"blob","mode":"100600","size":0}]}`, sha)
 					default:
-						_, _ = fmt.Fprintf(w, `{"sha":%q,"truncated":false,"tree":[]}`, sha)
+						writeTreeFixture(t, w, sha)
 					}
 				default:
 					t.Errorf("unexpected request %s", r.URL)
@@ -147,10 +149,7 @@ func TestPublishFixRejectsNonemptyReviewedChangesDroppedByGit(t *testing.T) {
 			bin := t.TempDir()
 			seen := filepath.Join(bin, "staged")
 			script := fmt.Sprintf("#!/bin/sh\ncase \" $* \" in *\" add --all \"*)\n if test %q = 'canceled import'; then touch %q; sleep 30; exit 1; fi\n ;;\n *\" diff --cached --name-only \"*)\n if test %q = import || test -f %q; then exit 0; fi\n touch %q\n ;;\nesac\nexec %q \"$@\"\n", stage, seen, stage, seen, seen, git)
-			if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0700); err != nil {
-				t.Fatal(err)
-			}
-			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			fakeOnPath(t, "git", script)
 			writes := 0
 			repo := github.Repository{ID: 1, FullName: "o/r", Owner: github.User{ID: 2}, DefaultBranch: "main", Visibility: "public"}
 			fork := github.Repository{ID: 3, FullName: "bot/r", Fork: true, Parent: &repo, Source: &repo, DefaultBranch: "main", Visibility: "public"}
@@ -183,10 +182,7 @@ func TestPublishFixRejectsNonemptyReviewedChangesDroppedByGit(t *testing.T) {
 			client := github.New("token")
 			client.BaseURL, client.HTTPClient = server.URL, server.Client()
 			root := t.TempDir()
-			checkout, err := gitwork.Clone(context.Background(), root, "o/r", "main", func(_ context.Context, sha string) (github.GitTree, error) {
-				truncated := false
-				return github.GitTree{SHA: sha, Truncated: &truncated, Tree: []github.GitTreeEntry{}}, nil
-			})
+			checkout, err := gitwork.Clone(context.Background(), root, "o/r", "main", emptyTreeFixture)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -244,10 +240,7 @@ func TestPublishFixRejectsNonemptyReviewedChangesDroppedByGit(t *testing.T) {
 
 func TestCompletedAuditRetentionFailureIsTerminal(t *testing.T) {
 	base, _, _ := gitFixtureRemote(t)
-	checkout, err := gitwork.Clone(context.Background(), t.TempDir(), "o/r", "main", func(_ context.Context, sha string) (github.GitTree, error) {
-		truncated := false
-		return github.GitTree{SHA: sha, Truncated: &truncated, Tree: []github.GitTreeEntry{}}, nil
-	})
+	checkout, err := gitwork.Clone(context.Background(), t.TempDir(), "o/r", "main", emptyTreeFixture)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -284,6 +277,46 @@ func TestCompletedAuditRetentionFailureIsTerminal(t *testing.T) {
 	err = orchestrator.publish(context.Background(), prepared, result)
 	if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "retain completed audit") || writes != 0 {
 		t.Fatalf("audit retention failure retried work or published: writes=%d err=%v", writes, err)
+	}
+}
+
+func TestCanceledPublicationRetainsValidatedAudit(t *testing.T) {
+	for _, valid := range []bool{true, false} {
+		t.Run(fmt.Sprintf("valid=%t", valid), func(t *testing.T) {
+			job := portableJob(command.SecurityAudit)
+			result := completeAuditResult(job)
+			if !valid {
+				result.Calls[0].Provider = "unknown"
+			}
+			writes := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				writes++
+				t.Errorf("canceled audit reached GitHub: %s %s", r.Method, r.URL.Path)
+				http.NotFound(w, r)
+			}))
+			defer server.Close()
+			client := github.New("fixture-token")
+			client.BaseURL, client.HTTPClient = server.URL, server.Client()
+			var journal bytes.Buffer
+			e := Orchestrator{GitHub: client, WorkRoot: t.TempDir(), Logger: log.New(&journal, "", 0)}
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			err := e.publish(ctx, &preparedAction{job: job}, result)
+			if valid && !errors.Is(err, context.Canceled) || !valid && !errors.Is(err, monitor.ErrTerminalJob) || writes != 0 {
+				t.Fatalf("canceled audit: valid=%t writes=%d err=%v", valid, writes, err)
+			}
+			dirs, err := os.ReadDir(filepath.Join(e.WorkRoot, "audits"))
+			if err != nil || len(dirs) != 1 || strings.HasPrefix(dirs[0].Name(), "incomplete-") == valid {
+				t.Fatalf("audit retention: dirs=%v err=%v", dirs, err)
+			}
+			data, err := os.ReadFile(filepath.Join(e.WorkRoot, "audits", dirs[0].Name(), "REPORT.md"))
+			if err != nil || string(data) != result.Answer {
+				t.Fatalf("retained report changed: %q %v", data, err)
+			}
+			if !strings.Contains(journal.String(), "reports:") || strings.Contains(journal.String(), "role=main") != valid {
+				t.Fatalf("audit evidence missing or invalid: %s", journal.String())
+			}
+		})
 	}
 }
 

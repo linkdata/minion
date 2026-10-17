@@ -362,7 +362,13 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 					if replyErr := m.finishFailedJob(ctx, store, job, items, started, jobFailure); replyErr != nil {
 						failures = append(failures, replyErr)
 					}
+					if ctx.Err() != nil {
+						return next, errors.Join(failures...)
+					}
 					continue
+				}
+				if ctx.Err() != nil {
+					return next, errors.Join(append(failures, err)...)
 				}
 				failures = append(failures, fmt.Errorf("%s from %s: %w", cmd.Action, item.HTMLURL, err))
 				continue
@@ -371,6 +377,9 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			delete(store.Data.JobFailures, job.ID)
 			delete(store.Data.PendingFixes, job.ID)
 			if err := store.Save(); err != nil {
+				return next, err
+			}
+			if err := ctx.Err(); err != nil {
 				return next, err
 			}
 		}

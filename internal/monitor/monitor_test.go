@@ -44,6 +44,7 @@ type fakeGitHub struct {
 	declined           []int64
 	reactions          []string
 	checks             int
+	repoChecks         int
 	currentChecks      int
 	currentItem        func(github.Item) (github.Item, error)
 	commentErr         error
@@ -96,6 +97,7 @@ func fixtureRepository(repo github.Repository) github.Repository {
 }
 
 func (f *fakeGitHub) Repository(_ context.Context, name string) (github.Repository, error) {
+	f.repoChecks++
 	if f.liveRepo != nil {
 		return *f.liveRepo, nil
 	}
@@ -604,35 +606,31 @@ func TestRunOnceCountsPublicationFailureWhenWorkRootFills(t *testing.T) {
 }
 
 func TestRunOnceBoundsPublicationFailuresAfterModel(t *testing.T) {
-	for _, cause := range []error{&github.StatusError{StatusCode: http.StatusBadGateway}, context.Canceled} {
-		t.Run(cause.Error(), func(t *testing.T) {
-			now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
-			item := github.Item{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}, HTMLURL: "https://github.com/example-owner/example-repo/pull/7#issuecomment-1"}
-			gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}, items: []github.Item{item}, permission: github.Permission{Permission: "write"}}
-			executor := &fakeExecutor{executeErr: errors.Join(ErrPostModelPublication, cause)}
-			store := openState(t, now.Add(-time.Minute))
-			clock := now
-			m := &Monitor{Config: testConfig(t), GitHub: gh, Executor: executor, Now: func() time.Time { return clock }}
-			for attempt := 1; attempt <= maxJobAttempts; attempt++ {
-				_, err := m.RunOnce(context.Background(), store)
-				if (err != nil) != (attempt < maxJobAttempts) || len(executor.jobs) != attempt {
-					t.Fatalf("attempt %d: err=%v jobs=%d", attempt, err, len(executor.jobs))
-				}
-				if attempt < maxJobAttempts && store.Data.JobFailures[executor.jobs[0].ID].Attempts != attempt {
-					t.Fatalf("publication failure refunded attempt %d: %+v", attempt, store.Data.JobFailures)
-				}
-				clock = clock.Add(time.Minute)
-				for _, pending := range store.Data.PendingNotifications {
-					clock = pending.RetryAt
-				}
-			}
-			if len(gh.comments) != 1 || len(store.Data.Processed) != 1 {
-				t.Fatalf("publication failure did not finish: comments=%d state=%+v", len(gh.comments), store.Data)
-			}
-			if _, err := m.RunOnce(context.Background(), store); err != nil || len(executor.jobs) != maxJobAttempts {
-				t.Fatalf("finished job reran: err=%v jobs=%d", err, len(executor.jobs))
-			}
-		})
+	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	item := github.Item{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}, HTMLURL: "https://github.com/example-owner/example-repo/pull/7#issuecomment-1"}
+	gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}, items: []github.Item{item}, permission: github.Permission{Permission: "write"}}
+	executor := &fakeExecutor{executeErr: errors.Join(ErrPostModelPublication, &github.StatusError{StatusCode: http.StatusBadGateway})}
+	store := openState(t, now.Add(-time.Minute))
+	clock := now
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Executor: executor, Now: func() time.Time { return clock }}
+	for attempt := 1; attempt <= maxJobAttempts; attempt++ {
+		_, err := m.RunOnce(context.Background(), store)
+		if (err != nil) != (attempt < maxJobAttempts) || len(executor.jobs) != attempt {
+			t.Fatalf("attempt %d: err=%v jobs=%d", attempt, err, len(executor.jobs))
+		}
+		if attempt < maxJobAttempts && store.Data.JobFailures[executor.jobs[0].ID].Attempts != attempt {
+			t.Fatalf("publication failure refunded attempt %d: %+v", attempt, store.Data.JobFailures)
+		}
+		clock = clock.Add(time.Minute)
+		for _, pending := range store.Data.PendingNotifications {
+			clock = pending.RetryAt
+		}
+	}
+	if len(gh.comments) != 1 || len(store.Data.Processed) != 1 {
+		t.Fatalf("publication failure did not finish: comments=%d state=%+v", len(gh.comments), store.Data)
+	}
+	if _, err := m.RunOnce(context.Background(), store); err != nil || len(executor.jobs) != maxJobAttempts {
+		t.Fatalf("finished job reran: err=%v jobs=%d", err, len(executor.jobs))
 	}
 }
 
@@ -1351,10 +1349,23 @@ func TestRunOnceCountsCanceledPublication(t *testing.T) {
 	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
 	item := github.Item{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}, HTMLURL: "https://github.com/example-owner/example-repo/pull/7#issuecomment-1"}
 	gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}, items: []github.Item{item}, permission: github.Permission{Permission: "write"}}
+	tail := testNotification(now.Add(time.Second))
+	tail.Subject.URL = strings.Replace(tail.Subject.URL, "/7", "/8", 1)
+	gh.notifications = append(gh.notifications, tail)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	executor := &fakeExecutor{onExecute: cancel, executeErr: errors.Join(ErrPostModelPublication, context.Canceled)}
+	var repoChecks, threadCalls, permissionChecks, currentChecks int
+	executor := &fakeExecutor{onExecute: func() {
+		repoChecks, threadCalls, permissionChecks, currentChecks = gh.repoChecks, gh.threadCalls, gh.checks, gh.currentChecks
+		cancel()
+	}, executeErr: errors.Join(ErrPostModelPublication, context.Canceled)}
 	store := openState(t, now.Add(-time.Minute))
+	pending := state.PendingNotification{Repository: tail.Repository.FullName, RepositoryID: 1, OwnerID: 2, SubjectType: tail.Subject.Type, SubjectURL: tail.Subject.URL,
+		Since: now.Add(-time.Minute), UpdatedAt: tail.UpdatedAt, RetryAt: now.Add(-time.Second), Failures: 2}
+	store.Data.PendingNotifications[notificationKey(tail)] = pending
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
 	var logs bytes.Buffer
 	m := &Monitor{Config: testConfig(t), GitHub: gh, Executor: executor, Logger: log.New(&logs, "", 0), Now: func() time.Time { return now }}
 	_, err := m.RunOnce(ctx, store)
@@ -1364,8 +1375,11 @@ func TestRunOnceCountsCanceledPublication(t *testing.T) {
 	if got := store.Data.JobFailures[executor.jobs[0].ID].Attempts; got != 1 {
 		t.Fatalf("canceled publication refunded its %d attempts", got)
 	}
-	if len(store.Data.PendingNotifications) != 1 || len(store.Data.Processed) != 0 || len(gh.comments) != 0 {
-		t.Fatalf("publication failure lost its retry: %+v", store.Data)
+	if len(store.Data.PendingNotifications) != 1 || store.Data.PendingNotifications[notificationKey(tail)] != pending || len(store.Data.Processed) != 0 || len(gh.comments) != 0 {
+		t.Fatalf("shutdown changed unvisited retry state: %+v", store.Data)
+	}
+	if gh.repoChecks != repoChecks || gh.threadCalls != threadCalls || gh.checks != permissionChecks || gh.currentChecks != currentChecks {
+		t.Fatalf("discovery continued after cancellation: repository=%d/%d thread=%d/%d permission=%d/%d current=%d/%d", gh.repoChecks, repoChecks, gh.threadCalls, threadCalls, gh.checks, permissionChecks, gh.currentChecks, currentChecks)
 	}
 	if strings.Contains(logs.String(), " interrupted: ") || !strings.Contains(logs.String(), "failed (attempt 1/3)") {
 		t.Fatalf("publication failure logged as an interruption: %q", logs.String())

@@ -134,7 +134,7 @@ func TestOfflineReviewPollRecoversAfterPublication(t *testing.T) {
 			_, _ = fmt.Fprint(w, `{"id":1,"full_name":"o/r","owner":{"id":2,"login":"o"},"default_branch":"main","private":true}`)
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/o/r/git/trees/"):
 			sha := strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/")
-			_, _ = fmt.Fprintf(w, `{"sha":%q,"truncated":false,"tree":[]}`, sha)
+			writeTreeFixture(t, w, sha)
 		case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/pulls/7/reviews":
 			var input struct {
 				Body     string `json:"body"`

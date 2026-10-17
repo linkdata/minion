@@ -67,10 +67,7 @@ func TestCloseCheckoutRemovesRestrictedDirectory(t *testing.T) {
 	gitFixtureRemote(t)
 	// Go 1.23 predates testing.T.Context.
 	workRoot := t.TempDir()
-	checkout, err := gitwork.Clone(context.Background(), workRoot, "o/r", "main", func(_ context.Context, sha string) (github.GitTree, error) {
-		truncated := false
-		return github.GitTree{SHA: sha, Truncated: &truncated, Tree: []github.GitTreeEntry{}}, nil
-	})
+	checkout, err := gitwork.Clone(context.Background(), workRoot, "o/r", "main", emptyTreeFixture)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +91,7 @@ func TestCloseCheckoutRemovesRestrictedDirectory(t *testing.T) {
 	if err := os.Chmod(locked, 0000); err != nil {
 		t.Fatal(err)
 	}
-	if err := (&preparedAction{checkout: checkout}).close(); err != nil {
+	if err := checkout.Close(); err != nil {
 		t.Fatalf("cleanup failed: %v", err)
 	}
 	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
@@ -296,11 +293,11 @@ func TestReviewEchoDoesNotSuppressSecurityAuditInMonitor(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
-			_, _ = fmt.Fprint(w, `{"id":1,"full_name":"o/r","owner":{"id":2,"login":"o"},"default_branch":"main"}`)
+			_, _ = fmt.Fprint(w, publicRepositoryJSON)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/pulls/7":
 			_, _ = fmt.Fprintf(w, `{"title":"PR","base":{"ref":"main"},"head":{"sha":%q}}`, head)
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/o/r/git/trees/"):
-			_, _ = fmt.Fprintf(w, `{"sha":%q,"truncated":false,"tree":[]}`, strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/"))
+			writeTreeFixture(t, w, strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/"))
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7/comments":
 			_ = json.NewEncoder(w).Encode(comments)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/pulls/7/comments":
@@ -632,13 +629,10 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 		{Path: "mode.sh", Mode: workspace.Regular, Data: []byte("echo fixture\n")},
 	}
 	fixtureSource := filepath.Join(filepath.Dir(remote), "source")
-	var treeEntries []github.GitTreeEntry
 	for _, file := range baseline {
 		if err := os.WriteFile(filepath.Join(fixtureSource, file.Path), file.Data, 0600); err != nil {
 			t.Fatal(err)
 		}
-		size := int64(len(file.Data))
-		treeEntries = append(treeEntries, github.GitTreeEntry{Path: file.Path, Type: "blob", Mode: fmt.Sprintf("%06o", file.Mode), Size: &size})
 	}
 	fixtureGit("-C", fixtureSource, "add", "--all")
 	fixtureGit("-C", fixtureSource, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--no-verify", "-m", "Fix fixture baseline")
@@ -648,15 +642,12 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 	if output, err := exec.Command("git", "clone", "--bare", remote, forkRemote).CombinedOutput(); err != nil {
 		t.Fatalf("create fork fixture: %v: %s", err, output)
 	}
-	gitWrapper := filepath.Join(filepath.Dir(remote), "bin", "git")
-	baseWrapper := filepath.Join(filepath.Dir(remote), "bin", "git-base")
-	if err := os.Rename(gitWrapper, baseWrapper); err != nil {
+	baseWrapper, err := exec.LookPath("git")
+	if err != nil {
 		t.Fatal(err)
 	}
 	wrapper := fmt.Sprintf("#!/bin/sh\nexec %q -c %q \"$@\"\n", baseWrapper, "url."+forkRemote+".insteadOf=https://github.com/linkdataminion/r.git")
-	if err := os.WriteFile(gitWrapper, []byte(wrapper), 0700); err != nil {
-		t.Fatal(err)
-	}
+	fakeOnPath(t, "git", wrapper)
 	job := monitor.Job{
 		Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"fix"}}, SubjectType: "Issue", Number: 7,
 		ID: strings.Repeat("a", 64), Source: github.Item{Author: github.User{ID: 7, Login: "writer"}, Body: "@linkdataminion fix\n\nCheck the failing error path.", HTMLURL: "https://github.com/o/r/issues/7#issuecomment-1", UpdatedAt: time.Now()},
@@ -680,8 +671,7 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/o/r/git/trees/"):
-			truncated := false
-			_ = json.NewEncoder(w).Encode(github.GitTree{SHA: strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/"), Truncated: &truncated, Tree: treeEntries})
+			writeTreeFixture(t, w, strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/"), baseline...)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7":
 			_, _ = fmt.Fprint(w, `{"node_id":"issue-node","title":"Bug","body":"Details"}`)
 		case r.Method == http.MethodPost && r.URL.Path == "/graphql":
@@ -808,12 +798,12 @@ func TestReviewMarksOnlyPostModelPublicationFailure(t *testing.T) {
 				http.Error(w, "unavailable", http.StatusBadGateway)
 				return
 			}
-			_, _ = fmt.Fprint(w, `{"id":1,"full_name":"o/r","owner":{"id":2,"login":"o"},"default_branch":"main"}`)
+			_, _ = fmt.Fprint(w, publicRepositoryJSON)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/pulls/7":
 			_, _ = fmt.Fprintf(w, `{"title":%q,"body":%q,"user":{"id":8,"login":"outsider"},"base":{"ref":"main"},"head":{"sha":%q}}`, title, description, head)
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/o/r/git/trees/"):
 			sha := strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/")
-			_, _ = fmt.Fprintf(w, `{"sha":%q,"truncated":false,"tree":[]}`, sha)
+			writeTreeFixture(t, w, sha)
 		case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/pulls/7/reviews":
 			postCalls++
 			http.Error(w, "unavailable", http.StatusBadGateway)

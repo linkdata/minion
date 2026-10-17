@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"os/exec"
@@ -35,6 +36,7 @@ import (
 // CLI login; environment API/OAuth tokens are rejected. Authenticated proxies
 // are rejected in either mode.
 func Run(ctx context.Context, dir, prompt string, writable bool, outputDir string, settings config.ClaudeConfig) (result aicli.Result, runError error) {
+	result.UsageComplete = true
 	defer func() {
 		runError = aicli.RedactError(runError, settings.APIKey)
 		if settings.APIKey != "" {
@@ -168,13 +170,15 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	processgroup.Configure(cmd)
 	output := jsonlOutput{cancel: cancel, structured: settings.OutputSchema != ""}
 	diagnostics := bounded.Tail{Limit: maxDiagnosticBytes}
-	cmd.Stdout, cmd.Stderr = &output, &diagnostics
+	ceiling := bounded.LineMatch{Limit: maxEventBytes, Match: func(line []byte) bool { return backgroundWaitCeiling(string(line)) }}
+	cmd.Stdout, cmd.Stderr = &output, io.MultiWriter(&diagnostics, &ceiling)
 	err = cmd.Run()
+	ceiling.Finish()
 	output.finish()
 	result = output.result
 	if ctx.Err() != nil {
 		err = errors.Join(ctx.Err(), output.err, err)
-	} else if backgroundWaitCeiling(diagnostics.String()) {
+	} else if ceiling.Matched {
 		err = errors.Join(errors.New("background tasks stopped by Claude's wait ceiling"), output.err, err)
 	} else if output.err != nil {
 		err = errors.Join(output.err, err)
@@ -192,7 +196,7 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 
 func backgroundWaitCeiling(diagnostics string) bool {
 	// Managed CLI settings can override its launch environment. Recognize this
-	// native diagnostic as a fallback; diagnostics retain only their last 8 KiB.
+	// native diagnostic as a fallback, independently of the retained stderr tail.
 	for _, line := range strings.Split(diagnostics, "\n") {
 		line = strings.TrimRight(line, " \t\r")
 		if strings.HasPrefix(line, "Background tasks still running ") && strings.HasSuffix(line, "; stopping them. Set CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 to wait indefinitely.") {

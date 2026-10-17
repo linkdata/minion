@@ -247,7 +247,7 @@ func checkModels(ctx context.Context, cfg *config.Config, logger *log.Logger) (e
 			return fmt.Errorf("unsupported AI provider %q", provider)
 		}
 	}
-	logger.Printf("AI roles: main=%s adversarial=%s critic_max_rounds=%d", cfg.Main, cfg.Adversarial, cfg.CriticMaxRounds)
+	logger.Printf("AI roles: main=%s adversarial=%s critic_max_rounds=%d job_timeout_minutes=%d", cfg.Main, cfg.Adversarial, cfg.CriticMaxRounds, cfg.JobTimeoutMinutes)
 	return
 }
 

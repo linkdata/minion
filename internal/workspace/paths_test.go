@@ -9,6 +9,26 @@ import (
 	"testing"
 )
 
+func TestPrepareRootCreatesCanonicalDirectory(t *testing.T) {
+	parent, linkParent := t.TempDir(), t.TempDir()
+	parent, err := filepath.EvalSymlinks(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(linkParent, "linked")
+	if err := os.Symlink(parent, link); err != nil {
+		t.Fatal(err)
+	}
+	root, err := PrepareRoot(filepath.Join(link, "new"))
+	if err != nil || root != filepath.Join(parent, "new") {
+		t.Fatalf("prepared root=%q,%v", root, err)
+	}
+	info, err := os.Stat(root)
+	if err != nil || !info.IsDir() || info.Mode().Perm() != 0700 {
+		t.Fatalf("prepared root permissions=%v,%v", info, err)
+	}
+}
+
 func TestCheckUnchangedBoundsEachFileToBaseline(t *testing.T) {
 	root := privateRoot(t)
 	base := []File{{Path: "source", Mode: Regular, Data: []byte("before")}}

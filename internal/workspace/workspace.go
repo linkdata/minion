@@ -15,7 +15,6 @@ import (
 	"slices"
 	"strings"
 	"unicode"
-	"unicode/utf8"
 )
 
 const (
@@ -60,15 +59,32 @@ type Snapshot struct {
 }
 
 func ValidPath(name string) bool {
-	if !ValidSourcePath(name) || strings.Contains(name, "\\") {
+	return !strings.Contains(name, "\\") && ValidCheckoutPath(name)
+}
+
+// ValidCheckoutPath applies Git's protected metadata names before any blob fetch.
+// Git's NTFS checks treat backslashes as separators; its HFS checks do not.
+func ValidCheckoutPath(name string) bool {
+	if !ValidSourcePath(name) {
 		return false
 	}
 	for _, part := range strings.Split(name, "/") {
 		if gitMetadataAlias(part) {
 			return false
 		}
+		for _, ntfsPart := range strings.Split(part, "\\") {
+			if ntfsGitMetadataAlias(ntfsPart) {
+				return false
+			}
+		}
 	}
 	return true
+}
+
+func ntfsGitMetadataAlias(part string) bool {
+	name, _, _ := strings.Cut(part, ":")
+	name = strings.TrimRight(name, " .")
+	return strings.EqualFold(name, ".git") || strings.EqualFold(name, "git~1")
 }
 
 // Match Git's independently applied protectNTFS and protectHFS metadata checks.
@@ -104,7 +120,7 @@ func FoldPath(name string) string {
 // ValidSourcePath accepts Git's case-sensitive slash paths, including literal backslashes.
 // Writable/import paths additionally reject HFS/NTFS aliases of Git metadata.
 func ValidSourcePath(name string) bool {
-	if name == "" || name == "." || name == ".." || len(name) >= MaxPathBytes || !utf8.ValidString(name) || strings.ContainsRune(name, '\x00') || path.Clean(name) != name || path.IsAbs(name) || strings.HasPrefix(name, "../") {
+	if !fs.ValidPath(name) || name == "." || len(name) >= MaxPathBytes || strings.ContainsRune(name, '\x00') {
 		return false
 	}
 	for _, part := range strings.Split(name, "/") {
@@ -243,9 +259,26 @@ func ValidateFixPaths(files []File, omitted []string) error {
 	return validatePaths(paths, true)
 }
 
+// PrepareRoot creates a work root and resolves its canonical absolute path.
+func PrepareRoot(root string) (string, error) {
+	root, err := filepath.Abs(root)
+	if err != nil {
+		return "", fmt.Errorf("resolve work root: %w", err)
+	}
+	if err := os.MkdirAll(root, 0700); err != nil {
+		return "", fmt.Errorf("create work root: %w", err)
+	}
+	return filepath.EvalSymlinks(root)
+}
+
+// OpenDirectory anchors collection without following any symlink component.
+func OpenDirectory(root string) (*os.File, error) {
+	return openPath(root, true)
+}
+
 // CheckRoot verifies that safe, anchored collection is available before a model runs.
 func CheckRoot(root string) error {
-	dir, err := openPath(root, true)
+	dir, err := OpenDirectory(root)
 	if err != nil {
 		return err
 	}

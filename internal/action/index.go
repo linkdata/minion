@@ -47,10 +47,7 @@ func newFixIndex(ctx context.Context, dir, source string, files []workspace.File
 		return nil, err
 	}
 	// info/attributes overrides untrusted .gitattributes even for forced baseline files.
-	if err := os.MkdirAll(filepath.Join(dir, "info"), 0700); err != nil {
-		return nil, err
-	}
-	if err := os.WriteFile(filepath.Join(dir, "info", "attributes"), []byte(gitwork.GitAttributes), 0600); err != nil {
+	if err := gitwork.DisableAttributes(dir); err != nil {
 		return nil, err
 	}
 	if _, err := index.run(ctx, 1024, nil, "add", "--all", "--force", "--", "."); err != nil {
@@ -107,11 +104,11 @@ func (index *fixIndex) changes(ctx context.Context) ([]workspace.Change, error) 
 	if err != nil {
 		return nil, err
 	}
-	if len(untracked) != 0 {
-		if untracked[len(untracked)-1] != 0 {
-			return nil, errors.New("invalid offline git untracked paths")
-		}
-		paths := bytes.Split(untracked[:len(untracked)-1], []byte{0})
+	paths, err := gitwork.SplitNUL(untracked)
+	if err != nil {
+		return nil, fmt.Errorf("invalid offline git untracked paths: %w", err)
+	}
+	if len(paths) != 0 {
 		if len(paths) > workspace.MaxChanges {
 			return nil, errors.New("fix result exceeds changed file limit")
 		}
@@ -180,23 +177,31 @@ func (index *fixIndex) checkControlFiles(ctx context.Context) error {
 		dirs = dirs[:len(dirs)-1]
 		absolute := filepath.Join(index.source, filepath.FromSlash(dir))
 		for _, control := range []string{".gitignore", ".gitattributes"} {
+			name := path.Join(dir, control)
 			info, err := os.Lstat(filepath.Join(absolute, control))
 			if errors.Is(err, os.ErrNotExist) {
 				continue
 			}
 			if err != nil {
-				return fmt.Errorf("fix control file %q: %w", path.Join(dir, control), err)
+				return fmt.Errorf("fix control file %q: %w", name, err)
 			}
 			if !info.Mode().IsRegular() {
-				return fmt.Errorf("fix control file %q must be regular", path.Join(dir, control))
+				return fmt.Errorf("fix control file %q must be regular", name)
+			}
+			if _, tracked := index.tracked[name]; control == ".gitignore" && !tracked {
+				input := []byte(":(top)" + name + "\x00")
+				ignored, err := index.run(ctx, len(input), input, "check-ignore", "--no-index", "-z", "--stdin")
+				if err != nil {
+					return err
+				}
+				if len(ignored) != 0 {
+					return fmt.Errorf("ignored untracked fix control file %q must be removed or tracked", name)
+				}
 			}
 		}
-		if err := workspace.CheckRoot(absolute); err != nil {
-			return fmt.Errorf("fix directory %q: %w", dir, err)
-		}
-		f, err := os.Open(absolute)
+		f, err := workspace.OpenDirectory(absolute)
 		if err != nil {
-			return err
+			return fmt.Errorf("fix directory %q: %w", dir, err)
 		}
 		scanErr := func() error {
 			for {
@@ -214,6 +219,9 @@ func (index *fixIndex) checkControlFiles(ctx context.Context) error {
 					if entries > workspace.MaxEntries {
 						return errors.New("fix directory scan exceeds entry limit")
 					}
+					if entry.Name() == ".git" && dir != "." && !trackedDirs[dir] {
+						return fmt.Errorf("untracked nested repository output %q must be removed or ignored", dir+"/")
+					}
 					if !entry.IsDir() || strings.EqualFold(entry.Name(), ".git") {
 						continue
 					}
@@ -223,6 +231,7 @@ func (index *fixIndex) checkControlFiles(ctx context.Context) error {
 						continue
 					}
 					candidates = append(candidates, name)
+					input = append(input, ":(top)"...)
 					input = append(input, name...)
 					input = append(input, 0)
 				}
@@ -234,7 +243,7 @@ func (index *fixIndex) checkControlFiles(ctx context.Context) error {
 					}
 					skip := map[string]bool{}
 					for _, name := range bytes.Split(ignored, []byte{0}) {
-						skip[string(name)] = true
+						skip[strings.TrimPrefix(string(name), ":(top)")] = true
 					}
 					for _, name := range candidates {
 						if !skip[name] {
@@ -255,13 +264,13 @@ func (index *fixIndex) checkControlFiles(ctx context.Context) error {
 }
 
 func parseIndexChanges(raw []byte) ([]workspace.Change, []string, error) {
-	if len(raw) == 0 {
+	parts, err := gitwork.SplitNUL(raw)
+	if err != nil {
+		return nil, nil, fmt.Errorf("invalid offline git diff: %w", err)
+	}
+	if len(parts) == 0 {
 		return nil, nil, nil
 	}
-	if raw[len(raw)-1] != 0 {
-		return nil, nil, errors.New("invalid offline git diff")
-	}
-	parts := bytes.Split(raw[:len(raw)-1], []byte{0})
 	if len(parts)%2 != 0 {
 		return nil, nil, errors.New("invalid offline git diff")
 	}
@@ -310,7 +319,9 @@ func (index *fixIndex) run(ctx context.Context, limit int, input []byte, args ..
 		"-c", "credential.helper=", "-c", "protocol.allow=never")
 	cmd := exec.CommandContext(ctx, index.binary, append(gitArgs, args...)...)
 	processgroup.Configure(cmd)
-	cmd.Dir, cmd.Env = index.dir, index.environment()
+	cmd.Dir = index.dir
+	cmd.Env = []string{"PATH=" + gitwork.SafePath(os.Getenv("PATH")), "HOME=" + index.dir, "TMPDIR=" + index.dir, "LC_ALL=C",
+		"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_ATTR_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=/bin/false", "GIT_NO_REPLACE_OBJECTS=1"}
 	cmd.WaitDelay = 2 * time.Second
 	output, diagnostic := bounded.Buffer{Limit: limit, Cancel: cancel}, bounded.Buffer{Limit: 8 << 10}
 	cmd.Stdout, cmd.Stderr, cmd.Stdin = &output, &diagnostic, bytes.NewReader(input)
@@ -331,9 +342,4 @@ func (index *fixIndex) run(ctx context.Context, limit int, input []byte, args ..
 		return nil, fmt.Errorf("offline git %s: %w: %q", args[0], err, strings.TrimSpace(diagnostic.String()))
 	}
 	return output.Bytes(), nil
-}
-
-func (index *fixIndex) environment() []string {
-	return []string{"PATH=" + gitwork.SafePath(os.Getenv("PATH")), "HOME=" + index.dir, "TMPDIR=" + index.dir, "LC_ALL=C",
-		"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_ATTR_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=/bin/false", "GIT_NO_REPLACE_OBJECTS=1"}
 }

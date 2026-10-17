@@ -12,6 +12,7 @@ import (
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
+	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/monitor"
 )
 
@@ -26,6 +27,7 @@ func TestRunnerWorkRootIsolation(t *testing.T) {
 			runner := Runner{}
 			job := portableJob(command.Comment)
 			job.Critic = &RoleSettings{Provider: "claude"}
+			job.CriticMaxRounds = config.DefaultCriticMaxRounds
 			switch kind {
 			case "main read":
 				runner.Codex.ReadOnlyDirs = []string{root}
@@ -153,6 +155,7 @@ func TestRunnerReadOnlyCriticReusesSourceAndCanaryGuardsExport(t *testing.T) {
 			t.Run(string(action)+"/mutate="+strconv.FormatBool(mutate), func(t *testing.T) {
 				job := portableJob(action)
 				job.Critic = &RoleSettings{Provider: "claude"}
+				job.CriticMaxRounds = config.DefaultCriticMaxRounds
 				var source string
 				calls := 0
 				runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
@@ -198,6 +201,7 @@ func TestRunnerMissingHostSkillsRemainRetryableBeforeModels(t *testing.T) {
 					job.Main = settings
 				} else {
 					job.Critic = &settings
+					job.CriticMaxRounds = config.DefaultCriticMaxRounds
 					if provider == "codex" {
 						job.Main.Provider = "claude"
 					}
@@ -233,6 +237,7 @@ func TestRunnerFixCanReturnEmptyAnswerWithoutCritic(t *testing.T) {
 		job := portableJob(test.action)
 		if test.critic {
 			job.Critic = &RoleSettings{Provider: "claude"}
+			job.CriticMaxRounds = config.DefaultCriticMaxRounds
 		}
 		result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Calls: []CallUsage{{Provider: job.Main.Provider, Role: "main", Round: 1}}}
 		if err := result.Validate(job); (err == nil) != test.valid || (!test.valid && !strings.Contains(err.Error(), "action answer")) {

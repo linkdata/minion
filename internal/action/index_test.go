@@ -56,12 +56,8 @@ func TestFixIndexPinsSHA1WhenGitDefaultsToSHA256(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	bin := t.TempDir()
+	bin := fakeOnPath(t, "git", "#!/bin/sh\nGIT_DEFAULT_HASH=sha256 exec "+shellQuote(realGit)+" \"$@\"\n")
 	proxy := filepath.Join(bin, "git")
-	quotedGit := "'" + strings.ReplaceAll(realGit, "'", "'\\''") + "'"
-	if err := os.WriteFile(proxy, []byte("#!/bin/sh\nGIT_DEFAULT_HASH=sha256 exec "+quotedGit+" \"$@\"\n"), 0700); err != nil {
-		t.Fatal(err)
-	}
 	control := filepath.Join(t.TempDir(), "control")
 	if output, err := exec.Command(proxy, "init", "--quiet", "--template=", control).CombinedOutput(); err != nil {
 		t.Fatalf("initialize SHA256 control: %s,%v", output, err)
@@ -69,7 +65,6 @@ func TestFixIndexPinsSHA1WhenGitDefaultsToSHA256(t *testing.T) {
 	if output, err := exec.Command(realGit, "-C", control, "rev-parse", "--show-object-format").Output(); err != nil || strings.TrimSpace(string(output)) != "sha256" {
 		t.Fatalf("control did not select SHA256: %q,%v", output, err)
 	}
-	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	index, source := offlineIndexFixture(t, []workspace.File{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("before")}})
 	if output, err := index.run(context.Background(), 128, nil, "rev-parse", "--show-object-format"); err != nil || strings.TrimSpace(string(output)) != "sha1" {
 		t.Fatalf("offline index changed its object format: %q,%v", output, err)
@@ -114,10 +109,7 @@ func TestFixIndexRejectsBaselineMetadataAliasWithoutHidingIOFailures(t *testing.
 
 func TestFixIndexQuotesGitDiagnostic(t *testing.T) {
 	index, _ := offlineIndexFixture(t, nil)
-	index.binary = filepath.Join(t.TempDir(), "git-proxy")
-	if err := os.WriteFile(index.binary, []byte("#!/bin/sh\nprintf 'first line\\nforged journal entry\\n' >&2\nexit 1\n"), 0700); err != nil {
-		t.Fatal(err)
-	}
+	index.binary = filepath.Join(fakeOnPath(t, "git-proxy", "#!/bin/sh\nprintf 'first line\\nforged journal entry\\n' >&2\nexit 1\n"), "git-proxy")
 	_, err := index.run(context.Background(), 1024, nil, "status")
 	if err == nil || strings.Contains(err.Error(), "\n") || !strings.Contains(err.Error(), `"first line\nforged journal entry"`) {
 		t.Fatalf("unquoted offline Git diagnostic: %v", err)
@@ -200,10 +192,7 @@ func TestFixIndexRebuildsEachCandidateFromBaseline(t *testing.T) {
 }
 
 func TestFixIndexRejectsRelativeExecutableWhenErrDotDisabled(t *testing.T) {
-	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "git"), []byte("#!/bin/sh\nexit 99\n"), 0700); err != nil {
-		t.Fatal(err)
-	}
+	root := fakeOnPath(t, "git", "#!/bin/sh\nexit 99\n")
 	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
@@ -245,8 +234,13 @@ func TestFixIndexDisablesAttributesAndOperatorConfiguration(t *testing.T) {
 	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("repository filter ran: %v", err)
 	}
+	index.binary = filepath.Join(fakeOnPath(t, "git-environment", "#!/bin/sh\nexec env\n"), "git-environment")
+	environment, err := index.run(context.Background(), 8<<10, nil, "environment-probe")
+	if err != nil {
+		t.Fatal(err)
+	}
 	systemDisabled, systemAttributesDisabled := false, false
-	for _, entry := range index.environment() {
+	for _, entry := range strings.Split(string(environment), "\n") {
 		systemDisabled = systemDisabled || entry == "GIT_CONFIG_NOSYSTEM=1"
 		systemAttributesDisabled = systemAttributesDisabled || entry == "GIT_ATTR_NOSYSTEM=1"
 		if strings.HasPrefix(entry, "GH_TOKEN=") || strings.Contains(entry, global) || strings.HasPrefix(entry, "GIT_CONFIG_COUNT=") {
@@ -297,17 +291,35 @@ func TestFixIndexRejectsNonIgnoredUnsafeOutput(t *testing.T) {
 				}
 			}
 			marker := filepath.Join(t.TempDir(), "add-ran")
-			proxy := filepath.Join(t.TempDir(), "git-proxy")
 			script := fmt.Sprintf("#!/bin/sh\nfor argument in \"$@\"; do\n if [ \"$argument\" = add ]; then touch %s; fi\ndone\nexec %s \"$@\"\n", shellQuote(marker), shellQuote(index.binary))
-			if err := os.WriteFile(proxy, []byte(script), 0700); err != nil {
-				t.Fatal(err)
-			}
-			index.binary = proxy
+			index.binary = filepath.Join(fakeOnPath(t, "git-proxy", script), "git-proxy")
 			if changes, err := index.changes(context.Background()); err == nil || !strings.Contains(err.Error(), tt.cause) {
 				t.Fatalf("%s output: changes=%+v, err=%v; want %q", tt.kind, changes, err, tt.cause)
 			}
 			if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("Git hashed rejected output before precheck: %v", err)
+			}
+		})
+	}
+}
+
+func TestFixIndexRejectsIgnoredUntrackedIgnoreRules(t *testing.T) {
+	for _, tracked := range []bool{false, true} {
+		t.Run(fmt.Sprint("tracked=", tracked), func(t *testing.T) {
+			files := []workspace.File{{Path: ".gitignore", Mode: workspace.Regular, Data: []byte(".gitignore\n*.gen\n")}}
+			if tracked {
+				files = append(files, workspace.File{Path: "sub/.gitignore", Mode: workspace.Regular})
+			}
+			index, source := offlineIndexFixture(t, files)
+			writeIndexFixture(t, source, "sub/.gitignore", []byte("!keep.gen\n"))
+			writeIndexFixture(t, source, "sub/keep.gen", []byte("included by local ignore rule"))
+			changes, err := index.changes(context.Background())
+			if !tracked {
+				if err == nil || !strings.Contains(err.Error(), `ignored untracked fix control file "sub/.gitignore"`) {
+					t.Fatalf("ignored untracked ignore rule exported changes: %+v,%v", changes, err)
+				}
+			} else if err != nil || len(changes) != 2 || changes[0].Path != "sub/.gitignore" || changes[1].Path != "sub/keep.gen" {
+				t.Fatalf("tracked ignored control file refused: %+v,%v", changes, err)
 			}
 		})
 	}
@@ -347,7 +359,6 @@ func TestFixIndexBoundsBinaryDiffAndCancellation(t *testing.T) {
 func TestFixIndexRejectsBytesChangedAfterStaging(t *testing.T) {
 	index, source := offlineIndexFixture(t, []workspace.File{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("original")}})
 	writeIndexFixture(t, source, "source.txt", []byte("staged edit"))
-	proxy := filepath.Join(t.TempDir(), "git-proxy")
 	script := fmt.Sprintf(`#!/bin/sh
 for argument in "$@"; do
   if [ "$argument" = --raw ]; then
@@ -359,10 +370,7 @@ for argument in "$@"; do
 done
 exec %s "$@"
 `, shellQuote(index.binary), shellQuote(filepath.Join(source, "source.txt")), shellQuote(index.binary))
-	if err := os.WriteFile(proxy, []byte(script), 0700); err != nil {
-		t.Fatal(err)
-	}
-	index.binary = proxy
+	index.binary = filepath.Join(fakeOnPath(t, "git-proxy", script), "git-proxy")
 	if _, err := index.changes(context.Background()); err == nil || !strings.Contains(err.Error(), "changed after indexing") {
 		t.Fatalf("accepted unstaged bytes: %v", err)
 	}
@@ -413,12 +421,8 @@ func TestFixIndexRejectsTrackedGrowthBeforeHashing(t *testing.T) {
 				writeIndexFixture(t, source, "second", make([]byte, workspace.MaxChangeBytes/2+1))
 			}
 			marker := filepath.Join(t.TempDir(), "add-ran")
-			proxy := filepath.Join(t.TempDir(), "git-proxy")
 			script := fmt.Sprintf("#!/bin/sh\nfor argument in \"$@\"; do\n if [ \"$argument\" = add ]; then touch %s; fi\ndone\nexec %s \"$@\"\n", shellQuote(marker), shellQuote(index.binary))
-			if err := os.WriteFile(proxy, []byte(script), 0700); err != nil {
-				t.Fatal(err)
-			}
-			index.binary = proxy
+			index.binary = filepath.Join(fakeOnPath(t, "git-proxy", script), "git-proxy")
 			if changes, err := index.changes(context.Background()); err == nil || !strings.Contains(err.Error(), "tracked fix path") || !strings.Contains(err.Error(), "byte limit") {
 				t.Fatalf("tracked growth returned %+v, %v", changes, err)
 			}

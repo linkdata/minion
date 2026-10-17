@@ -152,7 +152,6 @@ func TestRunnerRequiresEverySkillAndLoadsOptionalSkills(t *testing.T) {
 }
 
 func TestValidateCommandRequiresSupportedMainWorkflow(t *testing.T) {
-	installActionTestSkills(t, testAuditSkillURL)
 	job := monitor.Job{
 		Repository: config.Repository{Name: "owner/repo", Actions: []string{"inspect"}},
 		Command:    command.Command{Name: "inspect", Action: command.SecurityAudit},

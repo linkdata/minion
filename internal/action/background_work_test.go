@@ -8,9 +8,10 @@ import (
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
+	"github.com/linkdata/minion/internal/config"
 )
 
-func TestRunnerRequiresBackgroundResultsBeforeFinalResponse(t *testing.T) {
+func TestPromptsRequireAwaitingBackgroundWork(t *testing.T) {
 	for _, critic := range []bool{false, true} {
 		name := "without critic"
 		if critic {
@@ -20,6 +21,7 @@ func TestRunnerRequiresBackgroundResultsBeforeFinalResponse(t *testing.T) {
 			job := portableJob(command.Comment)
 			if critic {
 				job.Critic = &RoleSettings{Provider: "claude"}
+				job.CriticMaxRounds = config.DefaultCriticMaxRounds
 			}
 			var roles []string
 			runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {

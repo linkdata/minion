@@ -370,16 +370,12 @@ func TestUsagePreservesWorkerModelSkillsAndContext(t *testing.T) {
 	installActionTestSkills(t, testReviewSkillURL)
 	root := t.TempDir()
 	argsPath, promptPath := filepath.Join(root, "args"), filepath.Join(root, "prompt")
-	binary := filepath.Join(root, "codex")
 	script := fmt.Sprintf(`#!/bin/sh
 printf '%%s\n' "$@" > %q
 cat > %q
 printf '%%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"No findings."}}' '{"type":"turn.completed","usage":{"input_tokens":3,"cached_input_tokens":1,"output_tokens":2}}'
 `, argsPath, promptPath)
-	if err := os.WriteFile(binary, []byte(script), 0700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", root+string(os.PathListSeparator)+os.Getenv("PATH"))
+	fakeOnPath(t, "codex", script)
 	store := &usage.Store{Dir: filepath.Join(root, "usage")}
 	executor := &Orchestrator{WorkRoot: filepath.Join(root, "work"), Usage: store,
 		CodexModel: "stale-host-model",
