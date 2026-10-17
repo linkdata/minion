@@ -16,14 +16,9 @@ import (
 	"github.com/linkdata/minion/internal/workspace"
 )
 
-func auditPreflightArtifacts(job Job, target string) []workspace.File {
-	return auditArtifactsFixture(job, target, "Audit report\n")
-}
-
 func TestRunnerChecksAuditPrerequisitesBeforeModel(t *testing.T) {
 	for _, scenario := range []struct{ name, script, node, want string }{
 		{"missing findings validator", "validate-findings.cjs", "valid", "audit validator"},
-		{"missing ledger validator", "validate-coverage-ledger.cjs", "valid", "audit validator"},
 		{"nonregular validator", "directory", "valid", "not a regular file"},
 		{"missing node", "", "missing", "audit requires node"},
 		{"unsupported node", "", "unsupported", "permission model is unavailable"},
@@ -76,7 +71,7 @@ func TestRunnerChecksAuditPrerequisitesBeforeModel(t *testing.T) {
 			calls := 0
 			runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 				calls++
-				for _, file := range auditPreflightArtifacts(job, request.dir) {
+				for _, file := range auditArtifactsFixture(job, request.dir, "Audit report\n") {
 					if err := os.WriteFile(filepath.Join(request.outputDir, file.Path), file.Data, 0600); err != nil {
 						return aicli.Result{}, err
 					}
@@ -109,7 +104,7 @@ func TestAuditMissingInputsFailBeforeValidatorExecution(t *testing.T) {
 		for _, empty := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/empty=%t", name, empty), func(t *testing.T) {
 				job := portableJob(command.SecurityAudit)
-				files := auditPreflightArtifacts(job, "/source")
+				files := auditArtifactsFixture(job, "/source", "Audit report\n")
 				var supplied []workspace.File
 				for _, file := range files {
 					if file.Path == name {
@@ -144,7 +139,7 @@ func TestAuditMissingInputsFailBeforeValidatorExecution(t *testing.T) {
 	}
 	t.Run("whitespace report", func(t *testing.T) {
 		job := portableJob(command.SecurityAudit)
-		files := auditPreflightArtifacts(job, "/source")
+		files := auditArtifactsFixture(job, "/source", "Audit report\n")
 		for i := range files {
 			if files[i].Path == "REPORT.md" {
 				files[i].Data = []byte(" \t\r\n")
@@ -167,7 +162,7 @@ func TestAuditValidatorDiagnosticsAreBoundedAndQuoted(t *testing.T) {
 	diagnostic := "discarded-prefix\n" + strings.Repeat("x", 10000) + "\nforged journal line \"quoted\"\n"
 	script := "#!/bin/sh\nif [ \"$2\" = -e ]; then exit 0; fi\nprintf '%s' " + shellQuote(diagnostic) + " >&2\nexit 23\n"
 	fakeOnPath(t, "node", script)
-	report, err := validateAuditFiles(context.Background(), auditPreflightArtifacts(job, "/source"), t.TempDir(), "/installed/SKILL.md", job.Identity.Repository, "/source", job.Source.Head)
+	report, err := validateAuditFiles(context.Background(), auditArtifactsFixture(job, "/source", "Audit report\n"), t.TempDir(), "/installed/SKILL.md", job.Identity.Repository, "/source", job.Source.Head)
 	var exit *exec.ExitError
 	wantTail := fmt.Sprintf("%q", diagnostic[len(diagnostic)-(8<<10):])
 	if err == nil || !errors.As(err, &exit) || exit.ExitCode() != 23 || report != "" || !strings.Contains(err.Error(), "audit validate-findings.cjs failed") || !strings.HasSuffix(err.Error(), wantTail) || strings.Contains(err.Error(), "discarded-prefix") || strings.Contains(err.Error(), "\nforged journal") {

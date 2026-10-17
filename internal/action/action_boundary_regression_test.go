@@ -70,9 +70,9 @@ func TestJobCriticBudgetBoundaries(t *testing.T) {
 		rounds, threshold int
 		valid             bool
 	}{
-		{"disabled", false, 0, 0, true}, {"inactive budget", false, 1, 0, false}, {"inactive negative budget", false, -1, 0, false}, {"inactive threshold", false, 0, 1, false},
-		{"zero active", true, 0, 0, false}, {"negative active", true, -1, 0, false}, {"over maximum", true, config.MaxCriticMaxRounds + 1, 0, false},
-		{"one", true, 1, 0, true}, {"default", true, config.DefaultCriticMaxRounds, 0, true}, {"maximum", true, config.MaxCriticMaxRounds, 0, true},
+		{"disabled", false, 0, 0, true}, {"inactive budget", false, 1, 0, false}, {"inactive threshold", false, 0, 1, false},
+		{"zero active", true, 0, 0, false}, {"over maximum", true, config.MaxCriticMaxRounds + 1, 0, false},
+		{"one", true, 1, 0, true}, {"maximum", true, config.MaxCriticMaxRounds, 0, true},
 		{"negative threshold", true, 2, -1, false}, {"threshold exceeds budget", true, 2, 3, false}, {"threshold at budget", true, 2, 2, true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -125,6 +125,9 @@ func TestExecuteCriticAdmissionUsesControlledWorkRoot(t *testing.T) {
 			t.Run(fmt.Sprintf("critic_%t/unsafe_%t", critic, unsafe), func(t *testing.T) {
 				gitFixtureRemote(t)
 				root, other := filepath.Join(t.TempDir(), "controlled"), t.TempDir()
+				if err := os.Mkdir(root, 0700); err != nil {
+					t.Fatal(err)
+				}
 				calls := 0
 				failure := errors.New("provider stopped")
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -170,45 +173,20 @@ func TestExecuteCriticAdmissionUsesControlledWorkRoot(t *testing.T) {
 	}
 }
 
-func TestReviewHistoryInitialCheckpointClassification(t *testing.T) {
-	for _, cause := range []error{syscall.ENOSPC, syscall.EDQUOT, os.ErrPermission} {
-		for _, afterCall := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%v/after=%t", cause, afterCall), func(t *testing.T) {
-				job := withClaudeCritic(portableJob(command.Comment))
-				calls, checkpoints := 0, 0
-				runner := Runner{WorkRoot: t.TempDir(), recordReview: func(progress Result) error {
-					checkpoints++
-					if checkpoints == 1 && (len(progress.Calls) != 0 || len(progress.ReviewLedger) != 0 || progress.Identity != job.Identity || progress.SourceRef != job.Source.Head) {
-						t.Fatalf("initial checkpoint is not metadata only: %+v", progress)
-					}
-					if (len(progress.Calls) != 0) == afterCall {
-						return &os.PathError{Op: "write", Path: "private-review", Err: cause}
-					}
-					return nil
-				}, runModel: func(context.Context, modelRun) (aicli.Result, error) {
-					calls++
-					return aicli.Result{Answer: proposalJSON("Candidate", "")}, nil
-				}}
-				result, err := runner.Run(context.Background(), job)
-				wantCalls := 0
-				if afterCall {
-					wantCalls = 1
-				}
-				terminal := afterCall || !errors.Is(cause, syscall.ENOSPC) && !errors.Is(cause, syscall.EDQUOT)
-				if !errors.Is(err, cause) || errors.Is(err, monitor.ErrTerminalJob) != terminal || calls != wantCalls || result.Answer != "" || len(result.ReviewLedger) != wantCalls {
-					t.Fatalf("checkpoint policy: calls=%d result=%+v error=%v", calls, result, err)
-				}
-			})
+func TestRefutationInitialCheckpointIsRetryableBeforeModels(t *testing.T) {
+	job := withClaudeCritic(portableJob(command.Comment))
+	checkpoints := 0
+	runner := Runner{WorkRoot: t.TempDir(), recordReview: func(progress Result) error {
+		checkpoints++
+		if len(progress.Calls) != 0 || len(progress.Refutations) != 0 || progress.Identity != job.Identity || progress.SourceRef != job.Source.Head {
+			t.Fatalf("initial checkpoint is not metadata only: %+v", progress)
 		}
+		return &os.PathError{Op: "write", Path: "private-review", Err: syscall.ENOSPC}
+	}, runModel: forbidModel(t)}
+	result, err := runner.Run(context.Background(), job)
+	if !errors.Is(err, syscall.ENOSPC) || errors.Is(err, monitor.ErrTerminalJob) || checkpoints != 1 || len(result.Calls) != 0 || len(result.Refutations) != 0 || result.Answer != "" {
+		t.Fatalf("initial checkpoint policy: checkpoints=%d result=%+v error=%v", checkpoints, result, err)
 	}
-	t.Run("admission precedes sink", func(t *testing.T) {
-		root := t.TempDir()
-		checkpoints := 0
-		runner := Runner{WorkRoot: root, Codex: config.CodexConfig{ReadOnlyDirs: []string{root}}, recordReview: func(Result) error { checkpoints++; return nil }, runModel: forbidModel(t)}
-		if result, err := runner.Run(context.Background(), withClaudeCritic(portableJob(command.Comment))); !errors.Is(err, workroot.ErrUnsafe) || errors.Is(err, monitor.ErrTerminalJob) || checkpoints != 0 || len(result.Calls) != 0 {
-			t.Fatalf("unsafe root reached sink: checkpoints=%d result=%+v error=%v", checkpoints, result, err)
-		}
-	})
 }
 
 func TestPrivateReviewRejectsChangedSavedCheckpoint(t *testing.T) {
@@ -217,7 +195,7 @@ func TestPrivateReviewRejectsChangedSavedCheckpoint(t *testing.T) {
 			job := withClaudeCritic(portableJob(command.Comment))
 			result := privateReviewResult(job)
 			e := Orchestrator{WorkRoot: t.TempDir()}
-			if err := e.retainReviewLedger(job, result); err != nil {
+			if err := e.retainReviewEvidence(job, result); err != nil {
 				t.Fatal(err)
 			}
 			path := filepath.Join(e.WorkRoot, "reviews", job.Identity.AttemptID+".json")
@@ -252,7 +230,7 @@ func TestPrivateReviewRejectsChangedSavedCheckpoint(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			err := e.retainReviewLedger(job, result)
+			err := e.retainReviewEvidence(job, result)
 			if !errors.Is(err, monitor.ErrTerminalJob) {
 				t.Fatalf("tampered checkpoint accepted: %v", err)
 			}

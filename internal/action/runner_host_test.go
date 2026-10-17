@@ -18,7 +18,7 @@ import (
 )
 
 func TestRunnerWorkRootIsolation(t *testing.T) {
-	for _, kind := range []string{"main read", "critic read", "main skill", "critic skill", "system read", "codex binary"} {
+	for _, kind := range []string{"main read", "critic read", "main skill", "critic skill", "system read"} {
 		t.Run(kind, func(t *testing.T) {
 			root := t.TempDir()
 			work := filepath.Join(root, "work")
@@ -42,12 +42,6 @@ func TestRunnerWorkRootIsolation(t *testing.T) {
 				}
 			case "system read":
 				work = "/usr"
-			case "codex binary":
-				writeFixtureFile(t, work, "codex", []byte("#!/bin/sh\nexit 0\n"))
-				if err := os.Chmod(filepath.Join(work, "codex"), 0700); err != nil {
-					t.Fatal(err)
-				}
-				t.Setenv("PATH", work+string(os.PathListSeparator)+os.Getenv("PATH"))
 			}
 			if err := runner.CheckWorkRootIsolation(work, job.Main.Provider, job.Critic.Provider); err == nil || !strings.Contains(err.Error(), "work root overlaps") {
 				t.Fatalf("isolation=%v", err)
@@ -57,6 +51,14 @@ func TestRunnerWorkRootIsolation(t *testing.T) {
 	runner := Runner{WorkRoot: "/usr", runModel: forbidModel(t)}
 	if _, err := runner.Run(context.Background(), portableJob(command.Comment)); !errors.Is(err, workroot.ErrUnsafe) || errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "work root overlaps") {
 		t.Fatalf("unsafe root=%v", err)
+	}
+	missing := filepath.Join(t.TempDir(), "missing")
+	runner = Runner{WorkRoot: missing, runModel: forbidModel(t)}
+	if result, err := runner.Run(context.Background(), portableJob(command.Comment)); !errors.Is(err, os.ErrNotExist) || errors.Is(err, monitor.ErrTerminalJob) || len(result.Calls) != 0 {
+		t.Fatalf("missing trusted root recreated or used: %+v,%v", result, err)
+	}
+	if _, err := os.Stat(missing); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing trusted root was created: %v", err)
 	}
 	runner = Runner{}
 	if _, err := runner.Run(context.Background(), portableJob(command.Comment)); !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "work root is required") {
@@ -156,54 +158,38 @@ func TestRunnerEnforcesSuppliedRuntimeBudget(t *testing.T) {
 }
 
 func TestRunnerReadOnlyCriticReusesSourceAndCanaryGuardsExport(t *testing.T) {
-	for _, action := range []command.Action{command.Review, command.Comment} {
-		for _, mutate := range []bool{false, true} {
-			t.Run(string(action)+"/mutate="+strconv.FormatBool(mutate), func(t *testing.T) {
-				job := withClaudeCritic(portableJob(action))
-				var source string
-				calls := 0
-				runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
-					calls++
-					if request.role == "main" {
-						source = request.dir
-						return aicli.Result{Answer: proposalJSON("reviewed answer", "private notes")}, nil
-					}
-					if request.dir != source || request.writable || request.outputDir != "" {
-						t.Fatalf("read-only critic source/grants=%+v", request)
-					}
-					if mutate {
-						if err := os.WriteFile(filepath.Join(source, "source.txt"), []byte("mutate\n"), 0600); err != nil {
-							t.Fatal(err)
-						}
-					}
-					return aicli.Result{Answer: approvedCritiqueJSON}, nil
-				}}
-				result, err := runner.Run(context.Background(), job)
+	const action = command.Comment
+	for _, mutate := range []bool{false, true} {
+		t.Run(string(action)+"/mutate="+strconv.FormatBool(mutate), func(t *testing.T) {
+			job := withClaudeCritic(portableJob(action))
+			var source string
+			calls := 0
+			runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+				calls++
+				if request.role == "main" {
+					source = request.dir
+					return aicli.Result{Answer: proposalJSON("reviewed answer", "private notes")}, nil
+				}
+				if request.dir != source || request.writable || request.outputDir != "" {
+					t.Fatalf("read-only critic source/grants=%+v", request)
+				}
 				if mutate {
-					if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "read-only action modified") || result.Answer != "" {
-						t.Fatalf("canary accepted changed source: %+v,%v", result, err)
+					if err := os.WriteFile(filepath.Join(source, "source.txt"), []byte("mutate\n"), 0600); err != nil {
+						t.Fatal(err)
 					}
-				} else if err != nil || result.Answer != "reviewed answer" {
-					t.Fatalf("read-only review failed: %+v,%v", result, err)
 				}
-				if calls != 2 {
-					t.Fatalf("model calls=%d", calls)
-				}
-			})
-		}
-	}
-}
-
-func TestRunnerMissingHostSkillsRemainRetryableBeforeModels(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	for _, provider := range []string{"codex", "claude"} {
-		t.Run(provider, func(t *testing.T) {
-			job := portableJob(command.Comment)
-			job.Main = RoleSettings{Provider: provider, Skills: []string{"https://github.com/owner/repo/tree/pinned/skills/missing"}}
-			runner := Runner{WorkRoot: t.TempDir(), runModel: forbidModel(t)}
+				return aicli.Result{Answer: approvedCritiqueJSON}, nil
+			}}
 			result, err := runner.Run(context.Background(), job)
-			if err == nil || errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "not installed") || len(result.Calls) != 0 {
-				t.Fatalf("host preflight result=%+v error=%v", result, err)
+			if mutate {
+				if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "read-only action modified") || result.Answer != "" {
+					t.Fatalf("canary accepted changed source: %+v,%v", result, err)
+				}
+			} else if err != nil || result.Answer != "reviewed answer" {
+				t.Fatalf("read-only review failed: %+v,%v", result, err)
+			}
+			if calls != 2 {
+				t.Fatalf("model calls=%d", calls)
 			}
 		})
 	}
@@ -232,7 +218,6 @@ func TestRunnerFixCanReturnEmptyAnswerWithoutCritic(t *testing.T) {
 		result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Calls: []CallUsage{{Provider: job.Main.Provider, Role: "main", Round: 1}}}
 		if test.critic {
 			result.Calls = append(result.Calls, CallUsage{Provider: job.Critic.Provider, Role: roleCritic, Round: 1, ReviewPhase: reviewFull, Approved: true, NoBlockers: true})
-			result.ReviewLedger = reviewLedgerFixture(result.Calls)
 		}
 		if test.changed {
 			result.Changes = []workspace.Change{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("fixed source")}}
@@ -264,31 +249,39 @@ func TestRunnerOmittedSourceWriteIsTerminal(t *testing.T) {
 	}
 }
 
-func TestWorkRootIsolationRejectsResolvedCodexTarget(t *testing.T) {
-	root := t.TempDir()
-	work, bin := filepath.Join(root, "work"), filepath.Join(root, "bin")
-	for _, directory := range []string{work, bin} {
-		if err := os.Mkdir(directory, 0700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	target := filepath.Join(work, "actual-codex")
-	if err := os.WriteFile(target, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(target, filepath.Join(bin, "codex")); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	want, err := filepath.EvalSymlinks(target)
-	if err != nil {
-		t.Fatal(err)
-	}
-	runner := &Runner{}
-	if err := runner.CheckWorkRootIsolation(work, "codex"); err == nil || !strings.Contains(err.Error(), "work root overlaps") || !strings.Contains(err.Error(), want) {
-		t.Fatalf("outside symlink hid executable inside work root: %v", err)
-	}
-	if err := runner.CheckWorkRootIsolation(work, "claude"); err != nil {
-		t.Fatalf("unused Codex executable affected Claude admission: %v", err)
+func TestWorkRootIsolationRejectsResolvedExecutableTarget(t *testing.T) {
+	for _, provider := range []string{"codex", "claude"} {
+		t.Run(provider, func(t *testing.T) {
+			root := t.TempDir()
+			work, bin := filepath.Join(root, "work"), filepath.Join(root, "bin")
+			for _, directory := range []string{work, bin} {
+				if err := os.Mkdir(directory, 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			target := filepath.Join(work, "actual-"+provider)
+			if err := os.WriteFile(target, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, filepath.Join(bin, provider)); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			want, err := filepath.EvalSymlinks(target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			runner := Runner{}
+			if err := runner.CheckWorkRootIsolation(work, provider); err == nil || !strings.Contains(err.Error(), "work root overlaps") || !strings.Contains(err.Error(), want) {
+				t.Fatalf("outside symlink hid executable inside work root: %v", err)
+			}
+			other := "claude"
+			if provider == "claude" {
+				other = "codex"
+			}
+			if err := runner.CheckWorkRootIsolation(work, other); err != nil {
+				t.Fatalf("unused %s executable affected %s admission: %v", provider, other, err)
+			}
+		})
 	}
 }

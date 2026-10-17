@@ -1,6 +1,7 @@
 package workspace
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,7 +11,7 @@ import (
 	"unicode/utf8"
 )
 
-func TestPrepareRootCreatesCanonicalDirectory(t *testing.T) {
+func TestPrepareRootCanonicalizesExistingDirectory(t *testing.T) {
 	parent, linkParent := t.TempDir(), t.TempDir()
 	parent, err := filepath.EvalSymlinks(parent)
 	if err != nil {
@@ -20,6 +21,9 @@ func TestPrepareRootCreatesCanonicalDirectory(t *testing.T) {
 	if err := os.Symlink(parent, link); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Mkdir(filepath.Join(parent, "new"), 0700); err != nil {
+		t.Fatal(err)
+	}
 	root, err := PrepareRoot(filepath.Join(link, "new"))
 	if err != nil || root != filepath.Join(parent, "new") {
 		t.Fatalf("prepared root=%q,%v", root, err)
@@ -27,6 +31,21 @@ func TestPrepareRootCreatesCanonicalDirectory(t *testing.T) {
 	info, err := os.Stat(root)
 	if err != nil || !info.IsDir() || info.Mode().Perm() != 0700 {
 		t.Fatalf("prepared root permissions=%v,%v", info, err)
+	}
+}
+
+func TestPrepareRootDoesNotCreateMissingDirectory(t *testing.T) {
+	for _, root := range []string{"", " \t\n"} {
+		if _, err := PrepareRoot(root); err == nil || err.Error() != "work root is required" {
+			t.Fatalf("blank root error=%v", err)
+		}
+	}
+	name := filepath.Join(t.TempDir(), "missing", "nested")
+	if _, err := PrepareRoot(name); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing root error=%v", err)
+	}
+	if _, err := os.Lstat(filepath.Dir(name)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("PrepareRoot created a directory: %v", err)
 	}
 }
 
@@ -55,17 +74,12 @@ func TestSharedAncestorValidationPreservesLayoutRules(t *testing.T) {
 	}
 }
 
-func deepSharedFiles() []File {
+func BenchmarkDeepSharedPaths(b *testing.B) {
 	prefix := strings.Repeat("a/", 2000)
 	files := make([]File, 300)
 	for i := range files {
 		files[i] = File{Path: fmt.Sprintf("%sfile-%03d", prefix, i), Mode: Regular}
 	}
-	return files
-}
-
-func BenchmarkDeepSharedPaths(b *testing.B) {
-	files := deepSharedFiles()
 	b.Run("snapshot", func(b *testing.B) {
 		snapshot := Snapshot{Head: strings.Repeat("a", 40), Files: files}
 		b.ReportAllocs()
@@ -83,24 +97,7 @@ func BenchmarkDeepSharedPaths(b *testing.B) {
 			}
 		}
 	})
-	b.Run("materialize", func(b *testing.B) {
-		b.ReportAllocs()
-		for i := 0; i < b.N; i++ {
-			b.StopTimer()
-			root, err := os.MkdirTemp("", "minion-deep-")
-			if err != nil {
-				b.Fatal(err)
-			}
-			b.StartTimer()
-			err = Materialize(root, files)
-			b.StopTimer()
-			cleanupErr := os.RemoveAll(root)
-			if err != nil || cleanupErr != nil {
-				b.Fatalf("materialize=%v, cleanup=%v", err, cleanupErr)
-			}
-			b.StartTimer()
-		}
-	})
+
 }
 
 func TestFoldPathMatchesUnicodeSimpleCaseFolding(t *testing.T) {

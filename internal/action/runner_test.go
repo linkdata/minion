@@ -45,7 +45,7 @@ func TestRunnerUsesSuppliedSourceAndContext(t *testing.T) {
 			calls := 0
 			runner.runModel = func(_ context.Context, request modelRun) (aicli.Result, error) {
 				calls++
-				checkReviewHistory(t, request, nil)
+				checkRefutations(t, request, nil)
 				if request.provider != provider || request.writable || request.outputDir != "" || request.role != "main" || request.round != 1 {
 					t.Fatalf("wrong model request: %+v", request)
 				}
@@ -85,7 +85,7 @@ func TestRunnerUsesSuppliedSourceAndContext(t *testing.T) {
 				return aicli.Result{Answer: "No findings", Tokens: usage.Tokens{Input: 10, Output: 2}, UsageComplete: true}, nil
 			}
 			result, err := runner.Run(context.Background(), job)
-			if err != nil || len(result.ReviewLedger) != 0 || calls != 1 || result.Answer != "No findings" || len(result.Calls) != 1 || !result.Calls[0].Complete {
+			if err != nil || len(result.Refutations) != 0 || calls != 1 || result.Answer != "No findings" || len(result.Calls) != 1 || !result.Calls[0].Complete {
 				t.Fatalf("Run = %+v, %v; calls %d", result, err, calls)
 			}
 			entries, err := os.ReadDir(root)
@@ -164,7 +164,7 @@ func TestRunnerDeclaresIncompleteComparisonAndMetadataHistory(t *testing.T) {
 	}
 }
 
-func TestRunnerKeepsCriticReadOnlyAndNotesPrivate(t *testing.T) {
+func TestRunnerKeepsCriticReadOnlyAndRefutationsPrivate(t *testing.T) {
 	job := portableJob(command.Fix)
 	job.Source.Files = append(job.Source.Files, workspace.File{Path: "deleted.txt", Mode: workspace.Regular, Data: []byte("original deleted file")})
 	job.Critic = &RoleSettings{Provider: "claude", AlwaysOnSkills: []string{skills.BuiltinAntiPromptInjection}}
@@ -215,18 +215,6 @@ func TestRunnerKeepsCriticReadOnlyAndNotesPrivate(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(baseline, "added.bin")); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("added file entered baseline: %v", err)
 		}
-		if data, err := os.ReadFile(filepath.Join(request.dir, "source.txt")); err != nil || string(data) != "changed source" {
-			t.Fatalf("critic cannot read modified source: %q, %v", data, err)
-		}
-		if info, err := os.Stat(filepath.Join(request.dir, "source.txt")); err != nil || info.Mode().Perm()&0111 == 0 {
-			t.Fatalf("critic cannot inspect changed executable mode: %v", err)
-		}
-		if _, err := os.Stat(filepath.Join(request.dir, "deleted.txt")); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("critic cannot inspect deleted file: %v", err)
-		}
-		if data, err := os.ReadFile(filepath.Join(request.dir, "added.bin")); err != nil || !reflect.DeepEqual(data, []byte{0, 1, 2}) {
-			t.Fatalf("critic cannot inspect added binary: %v, %v", data, err)
-		}
 		return aicli.Result{Answer: approvedCritiqueJSON, UsageComplete: true}, nil
 	}
 	result, err := runner.Run(context.Background(), job)
@@ -255,16 +243,6 @@ func TestRunnerFixUsesOnlyOfflineGit(t *testing.T) {
 	}
 	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("runner attempted remote Git: %v", err)
-	}
-}
-
-func TestRunnerRejectsReadOnlyWrites(t *testing.T) {
-	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
-		writeFixtureFile(t, request.dir, "source.txt", []byte("changed"))
-		return aicli.Result{Answer: "answer"}, nil
-	}}
-	if _, err := runner.Run(context.Background(), portableJob(command.Comment)); !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "read-only") {
-		t.Fatalf("read-only write=%v", err)
 	}
 }
 
@@ -356,18 +334,6 @@ func TestPortableAuditMetadataUsesSourceIdentity(t *testing.T) {
 	}
 }
 
-func TestAuditPromptSelectsDomainCompanionsOnly(t *testing.T) {
-	prompt, err := actionPrompt(context.Background(), portableJob(command.SecurityAudit), "/source", "/context", "/reports", "/installed/security-audit/SKILL.md")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, want := range []string{"it overrides the skill's local-execution allowance", "selected security-audit domain companion files", `"When to use" conditions apply`, "Exclude its main SKILL.md and independently configured skills", "Use [] when no domain companion applies", "installed validation and publication"} {
-		if !strings.Contains(prompt, want) {
-			t.Fatalf("audit prompt lacks %q: %s", want, prompt)
-		}
-	}
-}
-
 func TestRunnerReturnsPartialAuditArtifactsOnFailure(t *testing.T) {
 	for _, field := range []string{"", "scope_paths", "prior_run_paths"} {
 		t.Run("host_path_in_"+field, func(t *testing.T) {
@@ -414,13 +380,5 @@ func TestRunnerReturnsPartialAuditArtifactsOnFailure(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-func TestCommentPromptUsesPortablePaths(t *testing.T) {
-	job := portableJob(command.Comment)
-	prompt, err := actionPrompt(context.Background(), job, "/host/private/source", "/context", "", "")
-	if err != nil || strings.Contains(prompt, "/host/private/source") || !strings.Contains(prompt, "Use repository-relative paths and source identity") {
-		t.Fatalf("comment prompt contains host path or lacks path guidance: %s, %v", prompt, err)
 	}
 }

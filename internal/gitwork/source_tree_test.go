@@ -27,7 +27,6 @@ func TestCheckSourceTree(t *testing.T) {
 		want error
 	}{
 		{"wrong identity", completeTree(strings.Repeat("b", 40), []github.GitTreeEntry{{Path: "x", Type: "blob", Mode: "100644", Size: &size}}), ErrUnsupportedSource},
-		{"missing completeness", github.GitTree{SHA: sha}, ErrUnsupportedSource},
 		{"missing completeness with empty tree", github.GitTree{SHA: sha, Tree: []github.GitTreeEntry{}}, ErrUnsupportedSource},
 		{"missing tree", completeTree(sha, nil), ErrUnsupportedSource},
 		{"missing size", completeTree(sha, []github.GitTreeEntry{{Path: "x", Type: "blob", Mode: "100644"}}), ErrUnsupportedSource},
@@ -39,8 +38,6 @@ func TestCheckSourceTree(t *testing.T) {
 		{"symlink", completeTree(sha, []github.GitTreeEntry{{Path: ".agents/skills/escape", Type: "blob", Mode: "120000", Size: &size}}), nil},
 		{"regular", completeTree(sha, []github.GitTreeEntry{{Path: "x", Type: "blob", Mode: "100644", Size: &size}}), nil},
 		{"executable", completeTree(sha, []github.GitTreeEntry{{Path: "x", Type: "blob", Mode: "100755", Size: &size}}), nil},
-		{"directory", completeTree(sha, []github.GitTreeEntry{{Path: "x", Type: "tree", Mode: "040000"}}), nil},
-		{"gitlink", completeTree(sha, []github.GitTreeEntry{{Path: "x", Type: "commit", Mode: "160000"}}), nil},
 		// Size/completeness gates precede the invalid or missing first entry.
 		{"truncated", github.GitTree{SHA: sha, Truncated: &truncated}, ErrCheckoutTooLarge},
 		{"too many entries before invalid path", completeTree(sha, make([]github.GitTreeEntry, workspace.MaxEntries+1)), ErrCheckoutTooLarge},

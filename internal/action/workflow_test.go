@@ -22,7 +22,6 @@ import (
 	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/skills"
-	"github.com/linkdata/minion/internal/workspace"
 )
 
 func TestPreparedActionRejectsForeignResultBeforePublication(t *testing.T) {
@@ -195,27 +194,6 @@ func TestFailedAuditRetainsLabelledPartialArtifactsWithoutPublication(t *testing
 	}
 	if strings.Contains(journal.String(), report) || strings.Contains(journal.String(), failure.Error()) || strings.Contains(journal.String(), "collected artifacts are incomplete") {
 		t.Fatalf("private discussion journaled: %s", &journal)
-	}
-}
-
-func TestIncompleteAuditIdentityAndPrivateDiagnosticLogging(t *testing.T) {
-	job := portableJob(command.SecurityAudit)
-	result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head,
-		Artifacts:   []workspace.File{{Path: "REPORT.md", Mode: workspace.Regular, Data: []byte("partial")}},
-		Diagnostics: []Diagnostic{{Code: "limit_hit", Message: "private provider diagnostic must remain private"}}}
-	if err := result.validate(job, false); err != nil {
-		t.Fatal(err)
-	}
-	var journal bytes.Buffer
-	e := Orchestrator{Logger: log.New(&journal, "", 0)}
-	e.logResult(job, result)
-	for _, want := range []string{"job=" + job.Identity.JobID, "attempt=" + job.Identity.AttemptID, "executor=" + job.Identity.ExecutorID, "code=limit_hit"} {
-		if !strings.Contains(journal.String(), want) {
-			t.Fatalf("diagnostic lacks %q: %s", want, &journal)
-		}
-	}
-	if strings.Contains(journal.String(), result.Diagnostics[0].Message) {
-		t.Fatalf("private diagnostic journaled: %s", &journal)
 	}
 }
 

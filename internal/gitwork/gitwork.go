@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/cleanup"
 	"github.com/linkdata/minion/internal/github"
@@ -43,7 +44,7 @@ var (
 )
 
 func resolveCredentialHelperGH() string {
-	path, err := absoluteExecutable("gh")
+	path, err := aicli.AbsoluteExecutable("gh")
 	if err != nil {
 		return "/bin/false"
 	}
@@ -472,18 +473,6 @@ func runGit(ctx context.Context, dir string, args ...string) (string, error) {
 	return strings.TrimSpace(output.String()), nil
 }
 
-func absoluteExecutable(name string) (string, error) {
-	binary, err := exec.LookPath(name)
-	if err != nil {
-		return "", fmt.Errorf("find %s executable: %w", name, err)
-	}
-	// execerrdot=0 can make LookPath accept an executable relative to the caller.
-	if !filepath.IsAbs(binary) {
-		return "", fmt.Errorf("%s binary must have an absolute path", name)
-	}
-	return binary, nil
-}
-
 // Credentials and network policy are supplied explicitly by each trusted/offline caller.
 func gitCommand(ctx context.Context, binary, dir string, env []string, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, binary, append(hardeningArgs(), args...)...)
@@ -493,7 +482,7 @@ func gitCommand(ctx context.Context, binary, dir string, env []string, args ...s
 }
 
 func runGitInputTo(ctx context.Context, dir string, stdin io.Reader, stdout io.Writer, args ...string) error {
-	binary, err := absoluteExecutable("git")
+	binary, err := aicli.AbsoluteExecutable("git")
 	if err != nil {
 		return err
 	}

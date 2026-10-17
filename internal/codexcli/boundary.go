@@ -35,7 +35,7 @@ func instructionBoundaryConfig() []string {
 func ValidateInstructionBoundary(ctx context.Context) (resultErr error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	binary, err := ExecutablePath()
+	binary, err := aicli.ExecutablePath("codex")
 	if err != nil {
 		return err
 	}

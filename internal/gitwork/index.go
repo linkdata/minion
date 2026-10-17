@@ -16,6 +16,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/workspace"
 )
@@ -34,7 +35,7 @@ type OfflineIndex struct {
 
 // NewOfflineIndex creates private Git metadata for a materialized source snapshot.
 func NewOfflineIndex(ctx context.Context, dir, source string, files []workspace.File) (*OfflineIndex, error) {
-	binary, err := absoluteExecutable("git")
+	binary, err := aicli.AbsoluteExecutable("git")
 	if err != nil {
 		return nil, fmt.Errorf("offline fix index requires git: %w", err)
 	}

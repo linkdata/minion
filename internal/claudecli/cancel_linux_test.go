@@ -5,8 +5,9 @@ package claudecli
 import (
 	"context"
 	"errors"
-	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -58,6 +59,15 @@ start:
 			t.Fatal("child process did not start")
 		}
 	}
+	stat, err := os.Open(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
+	if err != nil {
+		t.Fatalf("pin running child: %v", err)
+	}
+	defer func() {
+		if err := stat.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
 	cancel()
 	select {
 	case got := <-done:
@@ -67,17 +77,18 @@ start:
 	case <-deadline.C:
 		t.Fatal("cancellation did not finish the run")
 	}
+	// Keep observing this child after cancellation, even if its PID is recycled.
+	buffer := make([]byte, 4096)
 	for {
-		data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+		n, err := stat.ReadAt(buffer, 0)
 		if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ESRCH) {
-			// A process can disappear after ReadFile opens its proc entry.
 			return
 		}
-		if err != nil {
-			t.Fatal(err)
+		_, state, ok := strings.Cut(string(buffer[:n]), ") ")
+		if (err != nil && !errors.Is(err, io.EOF)) || !ok {
+			t.Fatalf("read child state: stat=%q error=%v", buffer[:n], err)
 		}
-		fields := strings.Fields(string(data))
-		if len(fields) > 2 && fields[2] == "Z" {
+		if strings.HasPrefix(state, "Z ") {
 			return // A killed child can await reaping by the container's init.
 		}
 		select {

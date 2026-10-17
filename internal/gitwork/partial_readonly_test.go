@@ -196,53 +196,44 @@ func TestPartialReadOnlySnapshotBulkFetchesBeforeDiff(t *testing.T) {
 				t.Fatalf("history changed source/comparison or contacted origin: sessions=%d", sessions())
 			}
 			assertPartialReadOnlyState(t, checkout, config)
-			t.Logf("file:// partial Snapshot: first=%d sessions; repeat=0 additional; head=%d selected-base=%d omitted=%d", tc.sessions, len(snapshot.Files), len(snapshot.BaseFiles), len(snapshot.Omitted))
 		})
 	}
 }
 
-func TestPartialReadOnlySnapshotRefusesBeforeBulkFetch(t *testing.T) {
-	for _, combined := range []bool{false, true} {
-		t.Run(map[bool]string{false: "oversized head metadata", true: "oversized combined head and base"}[combined], func(t *testing.T) {
-			fixture, checkout, base, head := partialReadOnlyFixture(t, true, false)
-			sessions := partialFetchSessions(t, fixture, checkout)
-			config, err := os.ReadFile(filepath.Join(checkout.path, ".git", "config"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			lookup := localTreeMetadata(fixture.source)
-			checkout.sourceTrees = nil
-			checkout.lookupTree = func(ctx context.Context, sha string) (github.GitTree, error) {
-				tree, err := lookup(ctx, sha)
-				if err == nil {
-					for i := range tree.Tree {
-						if tree.Tree[i].Path == "changed-00" {
-							size := int64(workspace.MaxBytes + 1)
-							if combined {
-								size = int64(workspace.MaxBytes/2 + 1)
-							}
-							tree.Tree[i].Size = &size
-						}
-					}
-				}
-				return tree, err
-			}
-			log := recordSnapshotContentCalls(t)
-			_, err = checkout.Snapshot(context.Background(), false)
-			if !errors.Is(err, ErrCheckoutTooLarge) || combined && !strings.Contains(err.Error(), "combined") || sessions() != 0 {
-				t.Fatalf("refusal fetched blob data: sessions=%d error=%v", sessions(), err)
-			}
-			for _, spec := range []string{head + ":unchanged-00", head + ":changed-00", base + ":changed-00", base + ":deleted-00"} {
-				if !blobMissing(t, checkout.path, fixture.git(fixture.source, "rev-parse", spec)) {
-					t.Fatalf("refused snapshot fetched %s", spec)
+func TestPartialReadOnlySnapshotRefusesCombinedBytesBeforeBulkFetch(t *testing.T) {
+	fixture, checkout, base, head := partialReadOnlyFixture(t, true, false)
+	sessions := partialFetchSessions(t, fixture, checkout)
+	config, err := os.ReadFile(filepath.Join(checkout.path, ".git", "config"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lookup := localTreeMetadata(fixture.source)
+	checkout.sourceTrees = nil
+	checkout.lookupTree = func(ctx context.Context, sha string) (github.GitTree, error) {
+		tree, err := lookup(ctx, sha)
+		if err == nil {
+			for i := range tree.Tree {
+				if tree.Tree[i].Path == "changed-00" {
+					size := int64(workspace.MaxBytes/2 + 1)
+					tree.Tree[i].Size = &size
 				}
 			}
-			assertPartialReadOnlyState(t, checkout, config)
-			if data, err := os.ReadFile(log); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("metadata preflight requested blob contents or rendered diff: %q error=%v", data, err)
-			}
-			t.Log("file:// partial metadata refusal: zero fetch sessions; head/base blobs remain missing")
-		})
+		}
+		return tree, err
+	}
+	log := recordSnapshotContentCalls(t)
+	_, err = checkout.Snapshot(context.Background(), false)
+	if !errors.Is(err, ErrCheckoutTooLarge) || !strings.Contains(err.Error(), "combined") || sessions() != 0 {
+		t.Fatalf("refusal fetched blob data: sessions=%d error=%v", sessions(), err)
+	}
+	for _, spec := range []string{head + ":unchanged-00", head + ":changed-00", base + ":changed-00", base + ":deleted-00"} {
+		if !blobMissing(t, checkout.path, fixture.git(fixture.source, "rev-parse", spec)) {
+			t.Fatalf("refused snapshot fetched %s", spec)
+		}
+	}
+	assertPartialReadOnlyState(t, checkout, config)
+	if data, err := os.ReadFile(log); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("metadata preflight requested blob contents or rendered diff: %q error=%v", data, err)
 	}
 }
 

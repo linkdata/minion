@@ -132,12 +132,9 @@ func TestExecuteSourceFailuresAndInvalidIncompleteResultsAreTerminal(t *testing.
 }
 
 func TestPrepareFixClassifiesUnsupportedLayoutBeforeBranchOrModels(t *testing.T) {
-	for _, kind := range []string{"case collision", "backslash"} {
+	for _, kind := range []string{"case collision"} {
 		t.Run(kind, func(t *testing.T) {
 			files := []workspace.File{{Path: "README", Mode: workspace.Regular}, {Path: "readme", Mode: workspace.Regular}}
-			if kind == "backslash" {
-				files = []workspace.File{{Path: `literal\name`, Mode: workspace.Regular}}
-			}
 			gitFixtureRemote(t, files...)
 			git, err := exec.LookPath("git")
 			if err != nil {
@@ -148,21 +145,7 @@ func TestPrepareFixClassifiesUnsupportedLayoutBeforeBranchOrModels(t *testing.T)
 			store := openState(t, time.Now())
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch {
-				case serveSafeForkChecks(w, r, "bot/r", false):
-				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
-					_, _ = fmt.Fprint(w, `{"id":1,"full_name":"o/r","owner":{"id":2},"default_branch":"main","visibility":"public"}`)
-				case r.Method == http.MethodGet && r.URL.Path == "/repos/bot/r":
-					_, _ = fmt.Fprint(w, `{"id":4,"full_name":"bot/r","fork":true,"parent":{"id":1,"full_name":"o/r"},"source":{"id":1,"full_name":"o/r"},"visibility":"public"}`)
-				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/pulls":
-					_, _ = fmt.Fprint(w, `[]`)
-				case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/bot/r/branches/"):
-					http.NotFound(w, r)
-				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7":
-					_, _ = fmt.Fprint(w, `{"node_id":"issue-node","title":"Task","body":"Fix source"}`)
-				case r.Method == http.MethodPost && r.URL.Path == "/graphql":
-					_, _ = fmt.Fprint(w, `{"data":{"node":{"title":"Task","bodyText":"Fix source","lastEditedAt":null}}}`)
-				case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/o/r/git/trees/"):
-					writeTreeFixture(t, w, strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/"), files...)
+				case serveFixFlowFixture(t, w, r, files...):
 				default:
 					t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 					http.NotFound(w, r)
@@ -213,21 +196,9 @@ func TestExecuteLogsCheckoutCleanupFailureAfterSuccessfulPublication(t *testing.
 	var body string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
-			_, _ = fmt.Fprint(w, `{"id":1,"full_name":"o/r","owner":{"id":2},"default_branch":"main","visibility":"public"}`)
-		case r.Method == http.MethodGet && r.URL.Path == "/repos/bot/r":
-			_, _ = fmt.Fprint(w, `{"id":4,"full_name":"bot/r","fork":true,"parent":{"id":1,"full_name":"o/r"},"source":{"id":1,"full_name":"o/r"},"visibility":"public"}`)
-		case serveSafeForkChecks(w, r, "bot/r", false):
-		case r.Method == http.MethodGet && (r.URL.Path == "/repos/o/r/pulls" || r.URL.Path == "/repos/o/r/issues/7/comments"):
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7/comments":
 			_, _ = fmt.Fprint(w, `[]`)
-		case r.Method == http.MethodGet && r.URL.Path == "/repos/bot/r/branches/minion/fix-7-aaaaaaaaaaaa":
-			http.NotFound(w, r)
-		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7":
-			_, _ = fmt.Fprint(w, `{"node_id":"issue-node","title":"Task","body":"Inspect source"}`)
-		case r.Method == http.MethodPost && r.URL.Path == "/graphql":
-			_, _ = fmt.Fprint(w, `{"data":{"node":{"title":"Task","bodyText":"Inspect source","lastEditedAt":null}}}`)
-		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/o/r/git/trees/"):
-			writeTreeFixture(t, w, strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/"))
+		case serveFixFlowFixture(t, w, r):
 		case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/issues/7/comments":
 			var payload struct{ Body string }
 			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {

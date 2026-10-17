@@ -31,8 +31,8 @@ func TestJSONLFramingAndFirstLimit(t *testing.T) {
 		init JSONL
 		data string
 	}{
-		{"bytes", JSONL{bytes: MaxOutputBytes}, "x"},
-		{"events", JSONL{events: MaxEvents}, "{}\n"},
+		{"bytes", JSONL{bytes: maxOutputBytes}, "x"},
+		{"events", JSONL{events: maxEvents}, "{}\n"},
 		{"line", JSONL{}, strings.Repeat("x", MaxEventBytes+1) + "\n{}\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -66,21 +66,16 @@ func TestJSONLAcceptsExactTotalLimits(t *testing.T) {
 				failures++
 			}}
 			if kind == "bytes" {
-				// Blank lines exercise the total-byte bound without reaching
-				// the independent per-event or event-count limits.
-				chunk := []byte(strings.Repeat(" \n", 32768))
-				for written := 0; written < MaxOutputBytes; written += len(chunk) {
-					_, _ = output.Write(chunk)
-				}
-				if output.bytes != MaxOutputBytes {
-					t.Fatalf("bytes=%d", output.bytes)
+				output.bytes = maxOutputBytes - 1
+				_, _ = output.Write([]byte("\n"))
+				if output.bytes != maxOutputBytes || dispatched != 0 {
+					t.Fatalf("bytes=%d dispatched=%d", output.bytes, dispatched)
 				}
 			} else {
-				for range MaxEvents {
-					_, _ = output.Write([]byte("{}\n"))
-				}
-				if dispatched != MaxEvents {
-					t.Fatalf("events=%d", dispatched)
+				output.events = maxEvents - 1
+				_, _ = output.Write([]byte("{}\n"))
+				if output.events != maxEvents || dispatched != 1 {
+					t.Fatalf("events=%d dispatched=%d", output.events, dispatched)
 				}
 			}
 			if failures != 0 {

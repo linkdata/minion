@@ -9,7 +9,7 @@ import (
 	"syscall"
 )
 
-// Go 1.23's syscall package does not expose this Linux open flag.
+// syscall omits O_PATH on amd64; Linux uses this value on every supported architecture.
 const oPath = 0x200000
 
 // RemoveAll restores owner access if a completed job left locked directories.

@@ -78,7 +78,6 @@ func TestGitOutputLimitStopsChildHoldingPipes(t *testing.T) {
 	if elapsed > 3*time.Second || !errors.Is(err, ErrCheckoutTooLarge) || errors.Is(err, context.Canceled) {
 		t.Fatalf("limited Git took %s: %v", elapsed, err)
 	}
-	t.Logf("output-limit cancellation completed in %s", elapsed)
 }
 
 func TestGitDeadlineStopsLazyFetchChildHoldingPipes(t *testing.T) {
@@ -112,5 +111,4 @@ func TestGitDeadlineStopsLazyFetchChildHoldingPipes(t *testing.T) {
 	if elapsed > 3*time.Second || !errors.Is(err, context.DeadlineExceeded) || !errors.As(err, &exit) || errors.Is(err, ErrUnsupportedSource) {
 		t.Fatalf("deadline Git took %s: %v", elapsed, err)
 	}
-	t.Logf("500ms lazy-fetch deadline completed in %s", elapsed)
 }

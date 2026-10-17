@@ -98,19 +98,3 @@ func TestPartialSnapshotPreflightsMergeBaseAndHistoryDoesNotFetchOldBlobs(t *tes
 		t.Fatalf("merge-base preflight fetched blob: %v", err)
 	}
 }
-
-func TestSnapshotDeclaresOversizedComparisonAndPreservesFiles(t *testing.T) {
-	fixture := newFixture(t)
-	writeFile(t, filepath.Join(fixture.source, "large"), strings.Repeat("x\n", workspace.MaxContextBytes/2))
-	fixture.git(fixture.source, "add", "large")
-	fixture.git(fixture.source, "commit", "-m", "large diff")
-	head := fixture.git(fixture.source, "rev-parse", "HEAD")
-	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/pull/7/head")
-	if err := fixture.checkout.checkoutPullRequest(context.Background(), 7, "main", head); err != nil {
-		t.Fatal(err)
-	}
-	snapshot, err := fixture.checkout.Snapshot(context.Background(), false)
-	if err != nil || !snapshot.DiffIncomplete || len(snapshot.Diff) != 0 || len(snapshot.ChangedPaths) != 1 || snapshot.ChangedPaths[0] != "large" || len(snapshot.Files) != 2 {
-		t.Fatalf("large comparison incomplete=%v paths=%v files=%d error=%v", snapshot.DiffIncomplete, snapshot.ChangedPaths, len(snapshot.Files), err)
-	}
-}

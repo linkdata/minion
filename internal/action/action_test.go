@@ -315,7 +315,7 @@ func TestReviewEchoDoesNotSuppressSecurityAuditInMonitor(t *testing.T) {
 	var journal bytes.Buffer
 	m := monitor.Monitor{Logger: log.New(&journal, "", 0), Config: config.Config{BotLogin: "linkdataminion", PollIntervalSeconds: 60, Commands: commands,
 		Repositories: []config.Repository{{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"review", "security-audit"}, AllowedActors: []string{"writer"}, AllowedActorIDs: map[string]int64{"writer": 7}}}},
-		GitHub: monitorGitHub, Executor: executor, Now: func() time.Time { return now.Add(time.Minute) }}
+		GitHub: monitorGitHub, Handler: executor, Now: func() time.Time { return now.Add(time.Minute) }}
 	if _, err := m.RunOnce(context.Background(), store); err != nil {
 		t.Fatal(err)
 	}

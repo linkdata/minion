@@ -65,6 +65,25 @@ func TestEveryActionPromptDeclaresRenderedPublicationBudget(t *testing.T) {
 						t.Fatalf("%s prompt omits %q", action, requirement)
 					}
 				}
+				if !strings.Contains(prompt, "Await all delegated work and background checks before your final response") || !strings.Contains(prompt, "inspect their results and handle failures instead of ending with a waiting or progress message") {
+					t.Fatal("action prompt omits background completion requirements")
+				}
+				if critic {
+					if !strings.Contains(mainPrompt(prompt), "source changes") {
+						t.Fatal("main prompt omits private-commentary restriction")
+					}
+					for _, phase := range []string{reviewFull, reviewVerification} {
+						critique := criticPrompt(phase, prompt, "Candidate", "", "", "", "/frozen-reports")
+						for _, requirement := range []string{"Await every delegated review and background check before your final verdict", "inspect their results and handle failures instead of ending with a waiting or progress message", "source changes"} {
+							if !strings.Contains(critique, requirement) {
+								t.Fatalf("%s critic omits %q", phase, requirement)
+							}
+						}
+					}
+				}
+				if action == command.Comment && (!strings.Contains(prompt, "Use repository-relative paths and source identity") || strings.Contains(prompt, "/source")) {
+					t.Fatal("comment prompt leaks host source path or omits path guidance")
+				}
 				if strings.Contains(prompt, "leave time for subsequent critic reviews") != critic {
 					t.Fatal("prompt misstates whether the action needs critic time")
 				}
@@ -84,6 +103,12 @@ func TestEveryActionPromptDeclaresRenderedPublicationBudget(t *testing.T) {
 						"REPORT.md must fit within 59392 UTF-8 bytes after line-ending normalization, a two-byte quote prefix per line and 12 bytes of code fences",
 						"Do not execute repository code, builds, tests, or fixtures, probe live services, publish, or run network commands",
 						"Copy this source-only execution prohibition verbatim into every delegated agent prompt",
+						"it overrides the skill's local-execution allowance",
+						"selected security-audit domain companion files",
+						`"When to use" conditions apply`,
+						"Exclude its main SKILL.md and independently configured skills",
+						"Use [] when no domain companion applies",
+						"installed validation and publication",
 					} {
 						if !strings.Contains(prompt, requirement) {
 							t.Fatalf("audit prompt omits %q", requirement)
@@ -103,20 +128,17 @@ func TestEveryActionPromptDeclaresRenderedPublicationBudget(t *testing.T) {
 
 func TestNoCriticRunnerKeepsChangedFixWithUnpublishedOversizedSummary(t *testing.T) {
 	// The provider seam returns data directly; no native CLI or model is invoked.
-	const provider = "codex"
-	fakeOnPath(t, provider, "#!/bin/sh\nexit 99\n")
 	for _, summary := range []struct{ name, text string }{
 		{"raw byte overflow", strings.Repeat("x", maxOutputBytes+1)},
 		{"quote expansion overflow", strings.Repeat("a\n", 20000)},
 	} {
 		for _, action := range []command.Action{command.Fix, command.Comment} {
-			t.Run(fmt.Sprintf("%s/%s/%s", provider, action, summary.name), func(t *testing.T) {
+			t.Run(fmt.Sprintf("%s/%s", action, summary.name), func(t *testing.T) {
 				job := portableJob(action)
-				job.Main.Provider = provider
 				calls := 0
 				runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 					calls++
-					if request.role != roleMain || request.outputSchema != "" || request.provider != provider || request.writable != (action == command.Fix) {
+					if request.role != roleMain || request.outputSchema != "" || request.provider != job.Main.Provider || request.writable != (action == command.Fix) {
 						t.Fatalf("unexpected no-critic call: %+v", request)
 					}
 					if action == command.Fix {

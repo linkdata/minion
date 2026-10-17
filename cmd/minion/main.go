@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"slices"
@@ -16,6 +15,7 @@ import (
 	"time"
 
 	"github.com/linkdata/minion/internal/action"
+	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/claudecli"
 	"github.com/linkdata/minion/internal/codexcli"
 	"github.com/linkdata/minion/internal/config"
@@ -52,6 +52,7 @@ func run() int {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	context.AfterFunc(ctx, stop)
 	if *installSkills {
 		if *loop || *check {
 			logger.Printf("-install-skills cannot be combined with -loop or -check")
@@ -129,7 +130,7 @@ func run() int {
 	}()
 
 	orchestrator := newOrchestrator(cfg, client, store, logger, checkWorkRoot)
-	watcher := &monitor.Monitor{Config: cfg, ConfigPath: *configPath, GitHub: client, Executor: orchestrator, Logger: logger}
+	watcher := &monitor.Monitor{Config: cfg, ConfigPath: *configPath, GitHub: client, Handler: orchestrator, Logger: logger}
 	for {
 		next, err := watcher.RunOnce(ctx, store)
 		if err != nil {
@@ -182,10 +183,9 @@ func newOrchestrator(cfg config.Config, client *github.Client, store *state.Stor
 		ClaudeEffort:            cfg.Claude.Effort,
 		// Jobs override model, effort and skills; the runner keeps host credentials and sandbox grants.
 		Runner: action.Runner{
-			WorkRoot: cfg.WorkRoot,
-			Codex:    config.CodexConfig{APIKey: cfg.Codex.APIKey},
-			Claude:   config.ClaudeConfig{APIKey: cfg.Claude.APIKey, AllowAllUnixSockets: cfg.Claude.AllowAllUnixSockets},
-			Logger:   logger,
+			Codex:  config.CodexConfig{APIKey: cfg.Codex.APIKey},
+			Claude: config.ClaudeConfig{APIKey: cfg.Claude.APIKey, AllowAllUnixSockets: cfg.Claude.AllowAllUnixSockets},
+			Logger: logger,
 		},
 	}
 }
@@ -247,8 +247,11 @@ func githubToken(ctx context.Context) (string, error) {
 	if token := strings.TrimSpace(os.Getenv("GITHUB_TOKEN")); token != "" {
 		return token, nil
 	}
-	cmd := exec.CommandContext(ctx, "gh", "auth", "token", "--hostname", "github.com")
-	output, err := cmd.Output()
+	binary, err := aicli.AbsoluteExecutable("gh")
+	if err != nil {
+		return "", err
+	}
+	output, err := aicli.Probe(ctx, binary, "gh", []string{"auth", "token", "--hostname", "github.com"}, "", nil, "")
 	if err != nil {
 		return "", fmt.Errorf("gh auth token failed: %w", err)
 	}
@@ -289,7 +292,8 @@ func checkModels(ctx context.Context, cfg *config.Config, logger *log.Logger) (e
 }
 
 func checkCodexCLI(ctx context.Context, settings config.CodexConfig) error {
-	if _, err := exec.LookPath("codex"); err != nil {
+	binary, err := aicli.AbsoluteExecutable("codex")
+	if err != nil {
 		return err
 	}
 	if settings.APIKey != "" {
@@ -297,10 +301,8 @@ func checkCodexCLI(ctx context.Context, settings config.CodexConfig) error {
 		// login status cannot validate that credential.
 		return nil
 	}
-	cmd := exec.CommandContext(ctx, "codex", "login", "status")
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("codex login status failed: %w: %s", err, strings.TrimSpace(string(output)))
+	if _, err := aicli.Probe(ctx, binary, "codex", []string{"login", "status"}, "", nil, ""); err != nil {
+		return fmt.Errorf("codex login status failed: %w", err)
 	}
 	return nil
 }

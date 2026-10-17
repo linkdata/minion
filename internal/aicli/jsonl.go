@@ -9,8 +9,8 @@ import (
 
 const (
 	MaxEventBytes  = 4 << 20
-	MaxOutputBytes = 64 << 20
-	MaxEvents      = 100000
+	maxOutputBytes = 64 << 20
+	maxEvents      = 100000
 )
 
 // JSONL frames bounded provider output; adapters retain their own event policy.
@@ -27,17 +27,11 @@ type JSONL struct {
 // Line and Fail must be configured before the first write.
 func (o *JSONL) Write(p []byte) (int, error) {
 	n := len(p)
-	stop := func(reason string) {
-		if !o.limited {
-			o.limited = true
-			o.Fail(fmt.Errorf("%w: JSONL %s", ErrOutputLimit, reason))
-		}
-	}
 	if o.limited {
 		return n, nil
 	}
-	if int64(n) > MaxOutputBytes-o.bytes {
-		stop("output exceeded the size limit")
+	if int64(n) > maxOutputBytes-o.bytes {
+		o.stop("output exceeded the size limit")
 		return n, nil
 	}
 	o.bytes += int64(n)
@@ -48,15 +42,22 @@ func (o *JSONL) Write(p []byte) (int, error) {
 				return
 			}
 			o.events++
-			if o.events > MaxEvents {
-				stop("event count exceeded the limit")
+			if o.events > maxEvents {
+				o.stop("event count exceeded the limit")
 				return
 			}
 			o.Line(p)
-		}, Overflow: func() { stop("event exceeded the output size limit") }}
+		}, Overflow: func() { o.stop("event exceeded the size limit") }}
 	}
 	_, _ = o.lines.Write(p)
 	return n, nil
+}
+
+func (o *JSONL) stop(reason string) {
+	if !o.limited {
+		o.limited = true
+		o.Fail(fmt.Errorf("%w: JSONL %s", ErrOutputLimit, reason))
+	}
 }
 
 // Finish dispatches a final unterminated event.

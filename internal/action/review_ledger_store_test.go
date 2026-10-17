@@ -29,10 +29,7 @@ func privateReviewResult(job Job) Result {
 			{Provider: job.Main.Provider, Role: roleMain, Round: 1},
 			{Provider: job.Critic.Provider, Role: roleCritic, Round: 1, ReviewPhase: reviewFull, Approved: true, NoBlockers: true},
 		},
-		ReviewLedger: []ReviewEntry{
-			{Role: roleMain, Round: 1, Notes: "PRIVATE_MAIN_REFUTATION"},
-			{Role: roleCritic, Round: 1, ReviewPhase: reviewFull, Approved: true},
-		},
+		Refutations: []Refutation{{Round: 1, Text: "PRIVATE_MAIN_REFUTATION"}},
 	}
 }
 
@@ -72,15 +69,13 @@ func TestPublishRetainsPrivateReviewBeforeGitHubWrites(t *testing.T) {
 			result := privateReviewResult(job)
 			if !test.approved {
 				result.Calls[1].Approved = false
-				result.ReviewLedger[1].Approved = false
-				result.ReviewLedger[1].Feedback = "PRIVATE_NONBLOCKING_FINDING"
 			}
-			root := filepath.Join(t.TempDir(), "work")
+			root := t.TempDir()
 			var body, journal bytes.Buffer
 			writes := 0
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				record := readPrivateReview(t, root)
-				if len(record.ReviewLedger) != 2 || record.ReviewLedger[1].Approved != test.approved || record.CriticNonblockingRounds != 1 || record.SourceRef != job.Source.Head {
+				if len(record.Refutations) != 1 || record.Calls[1].Approved != test.approved || record.CriticNonblockingRounds != 1 || record.SourceRef != job.Source.Head {
 					t.Errorf("private evidence/policy lost: %+v", record)
 				}
 				if r.Method == http.MethodGet && r.URL.Path == "/repos/o/r" {
@@ -124,13 +119,13 @@ func TestPrivateReviewRetainsPrefixAndRejectsRollback(t *testing.T) {
 	// Returned evidence does not require this provider skill on the orchestrator.
 	job.Main.Skills = []string{"https://github.com/example/skills/tree/pinned/skills/uninstalled"}
 	result := privateReviewResult(job)
-	e := Orchestrator{WorkRoot: filepath.Join(t.TempDir(), "work")}
+	e := Orchestrator{WorkRoot: t.TempDir()}
 	first := result
-	first.Calls, first.ReviewLedger = first.Calls[:1], first.ReviewLedger[:1]
-	if err := e.retainReviewLedger(job, first); err != nil {
+	first.Calls, first.Refutations = first.Calls[:1], first.Refutations[:1]
+	if err := e.retainReviewEvidence(job, first); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.retainReviewLedger(job, result); err != nil {
+	if err := e.retainReviewEvidence(job, result); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(e.WorkRoot, "reviews", job.Identity.AttemptID+".json")
@@ -138,17 +133,24 @@ func TestPrivateReviewRetainsPrefixAndRejectsRollback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := e.retainReviewLedger(job, result); err != nil {
+	if err := e.retainReviewEvidence(job, result); err != nil {
 		t.Fatal(err)
 	}
 	after, err := os.Stat(path)
 	if err != nil || !os.SameFile(before, after) || !before.ModTime().Equal(after.ModTime()) {
 		t.Fatal("identical final evidence rewrote the checkpoint")
 	}
-	if err := e.retainReviewLedger(job, first); err == nil {
+	if err := e.retainReviewEvidence(job, first); err == nil {
 		t.Fatal("saved evidence was rolled back")
 	}
-	if got := readPrivateReview(t, e.WorkRoot); len(got.ReviewLedger) != 2 {
+	for _, refs := range [][]Refutation{nil, {{Round: 1, Text: "Replacement interpretation"}}} {
+		changed := result
+		changed.Refutations = refs
+		if err := e.retainReviewEvidence(job, changed); err == nil {
+			t.Fatal("saved refutation was removed or rewritten")
+		}
+	}
+	if got := readPrivateReview(t, e.WorkRoot); len(got.Refutations) != 1 || got.Refutations[0].Text != "PRIVATE_MAIN_REFUTATION" {
 		t.Fatalf("saved prefix was lost: %+v", got)
 	}
 }
@@ -158,7 +160,7 @@ func TestPrivateReviewBoundaryBeforeStorageOrPublication(t *testing.T) {
 		t.Run(scenario, func(t *testing.T) {
 			job := withClaudeCritic(portableJob(command.Comment))
 			result := privateReviewResult(job)
-			root := filepath.Join(t.TempDir(), "work")
+			root := t.TempDir()
 			e := Orchestrator{WorkRoot: root}
 			safeHistory := false
 			switch scenario {
@@ -167,9 +169,9 @@ func TestPrivateReviewBoundaryBeforeStorageOrPublication(t *testing.T) {
 			case "foreign source":
 				result.SourceRef = strings.Repeat("b", 40)
 			case "malformed history":
-				result.ReviewLedger[0].Round = 2
+				result.Refutations[0].Round = 2
 			case "oversized history":
-				result.ReviewLedger[0].Notes = strings.Repeat("x", maxOutputBytes+1)
+				result.Refutations[0].Text = strings.Repeat("x", maxOutputBytes+1)
 			case "invalid calls":
 				result.Calls[0].Tokens.Input = -1
 			case "invalid answer":
@@ -177,6 +179,8 @@ func TestPrivateReviewBoundaryBeforeStorageOrPublication(t *testing.T) {
 			case "invalid changes":
 				result.Changes, safeHistory = []workspace.Change{{Path: "../escape", Delete: true}}, true
 			case "storage failure":
+				root = filepath.Join(t.TempDir(), "blocked")
+				e.WorkRoot = root
 				if err := os.WriteFile(root, []byte("blocked"), 0600); err != nil {
 					t.Fatal(err)
 				}
@@ -185,9 +189,6 @@ func TestPrivateReviewBoundaryBeforeStorageOrPublication(t *testing.T) {
 					t.Fatal(err)
 				}
 			case "symlink root":
-				if err := os.Mkdir(root, 0700); err != nil {
-					t.Fatal(err)
-				}
 				if err := os.Symlink(t.TempDir(), filepath.Join(root, "reviews")); err != nil {
 					t.Fatal(err)
 				}
@@ -198,7 +199,7 @@ func TestPrivateReviewBoundaryBeforeStorageOrPublication(t *testing.T) {
 				t.Fatalf("unsafe publication was not stopped: %v", err)
 			}
 			if safeHistory {
-				if got := readPrivateReview(t, root); len(got.ReviewLedger) != 2 {
+				if got := readPrivateReview(t, root); len(got.Refutations) != 1 {
 					t.Fatal("invalid public output erased valid private history")
 				}
 			} else if paths, err := filepath.Glob(filepath.Join(root, "reviews", "*.json")); err != nil || len(paths) != 0 {
@@ -206,7 +207,7 @@ func TestPrivateReviewBoundaryBeforeStorageOrPublication(t *testing.T) {
 			}
 			switch scenario {
 			case "foreign identity", "foreign source", "malformed history", "oversized history", "invalid calls":
-				if _, err := os.Stat(root); !errors.Is(err, os.ErrNotExist) {
+				if entries, err := os.ReadDir(root); err != nil || len(entries) != 0 {
 					t.Fatalf("untrusted evidence touched storage: %v", err)
 				}
 			}
@@ -221,11 +222,8 @@ func TestPerformCheckpointsPrivateReviewBeforeLaterCalls(t *testing.T) {
 				t.Skip("root bypasses read-only directory permissions")
 			}
 			gitFixtureRemote(t)
-			root := filepath.Join(t.TempDir(), "work")
+			root := t.TempDir()
 			if outcome == "initial storage failure" {
-				if err := os.Mkdir(root, 0700); err != nil {
-					t.Fatal(err)
-				}
 				if err := os.WriteFile(filepath.Join(root, "reviews"), []byte("blocked"), 0600); err != nil {
 					t.Fatal(err)
 				}
@@ -240,13 +238,13 @@ func TestPerformCheckpointsPrivateReviewBeforeLaterCalls(t *testing.T) {
 			defer server.Close()
 			failure := errors.New("provider stopped")
 			calls := 0
-			e := attemptFixture(&Orchestrator{WorkRoot: root, GitHub: testGitHub(server, "fixture"), Main: "codex", Adversarial: "claude",
+			e := attemptFixture(&Orchestrator{WorkRoot: root, GitHub: testGitHub(server, "fixture"), Main: "codex", Adversarial: "claude", CriticNonblockingRounds: new(int),
 				Commands: map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}},
 				Runner: Runner{WorkRoot: root, runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 					calls++
 					if calls > 1 {
 						record := readPrivateReview(t, root)
-						if len(record.ReviewLedger) != calls-1 {
+						if len(record.Calls) != calls-1 || len(record.Refutations) != 1 {
 							t.Fatalf("earlier round was not durable before dispatch: %+v", record)
 						}
 					}
@@ -298,7 +296,7 @@ func TestPerformCheckpointsPrivateReviewBeforeLaterCalls(t *testing.T) {
 				if !errors.Is(runErr, monitor.ErrTerminalJob) || !errors.Is(runErr, os.ErrPermission) || calls != 2 {
 					t.Fatalf("checkpoint failure allowed another call: calls=%d error=%v", calls, runErr)
 				}
-				if got := readPrivateReview(t, root); len(got.ReviewLedger) != 1 {
+				if got := readPrivateReview(t, root); len(got.Refutations) != 1 {
 					t.Fatal("checkpoint failure destroyed the previous durable prefix")
 				}
 				return
@@ -308,8 +306,12 @@ func TestPerformCheckpointsPrivateReviewBeforeLaterCalls(t *testing.T) {
 			if outcome == "provider and storage failure" && (!errors.Is(runErr, os.ErrPermission) || !errors.Is(runErr, monitor.ErrTerminalJob)) {
 				t.Fatalf("retention failure lost joined causes: %v", runErr)
 			}
+			wantCalls := 2
+			if outcome == "provider failure" {
+				wantCalls = 3
+			}
 			record := readPrivateReview(t, root)
-			if len(record.ReviewLedger) != 2 || record.ReviewLedger[0].Notes != "PRIVATE_FIRST_REFUTATION" || record.ReviewLedger[1].Feedback != "PRIVATE_CRITIC_FINDING" {
+			if len(record.Refutations) != 1 || record.Refutations[0].Text != "PRIVATE_FIRST_REFUTATION" || len(record.Calls) != wantCalls || !record.Calls[1].HasBlockers {
 				t.Fatalf("failed/interrupted action lost earlier evidence: %+v", record)
 			}
 		})

@@ -52,51 +52,6 @@ func TestUsageDoesNotCountCanceledDispatch(t *testing.T) {
 	}
 }
 
-func TestUsageAccumulatesPartialResults(t *testing.T) {
-	store := &usage.Store{Dir: filepath.Join(t.TempDir(), "usage")}
-	runErr := errors.New("model interrupted")
-	var calls int
-	e := &Orchestrator{
-		Usage:      store,
-		CodexModel: "test-model",
-		Runner: Runner{
-			runModel: func(_ context.Context, modelRequest modelRun) (aicli.Result, error) {
-				calls++
-				if calls == 2 {
-					return aicli.Result{Tokens: usage.Tokens{Input: 10, CachedInput: 8, Output: 2}}, runErr
-				}
-				return aicli.Result{Answer: "answer", Tokens: usage.Tokens{Input: 100, CachedInput: 80, Output: 20}, UsageComplete: true}, nil
-			},
-		},
-	}
-	tracked := attemptFixture(e)
-	finish, err := tracked.trackUsage(usageJob())
-	if err != nil {
-		t.Fatal(err)
-	}
-	for i := 1; i <= 3; i++ {
-		answer, err := tracked.Runner.runAI(context.Background(), Job{Main: RoleSettings{Provider: "codex", Model: "test-model"}}, "dir", "prompt", false, "", nil)
-		if i == 2 {
-			if !errors.Is(err, runErr) {
-				t.Fatalf("lost model error: %v", err)
-			}
-		} else if err != nil || answer != "answer" {
-			t.Fatalf("answer=%q err=%v", answer, err)
-		}
-	}
-	if err := finish(runErr); !errors.Is(err, runErr) {
-		t.Fatalf("lost action failure: %v", err)
-	}
-	records, err := usage.ReadAll(store.Dir)
-	if err != nil || len(records) != 1 {
-		t.Fatalf("records=%+v err=%v", records, err)
-	}
-	got := records[0]
-	if got.CodexCalls != 3 || got.Status != "failed" || got.UsageComplete || got.Tokens != (usage.Tokens{Input: 210, CachedInput: 168, Output: 42}) {
-		t.Fatalf("partial usage lost or marked complete: %+v", got)
-	}
-}
-
 func TestUsageTracksBothModelRoles(t *testing.T) {
 	codex := RoleSettings{Provider: "codex", Model: "codex-model", Effort: "high"}
 	claude := RoleSettings{Provider: "claude", Model: "claude-model", Effort: "medium"}
@@ -196,51 +151,54 @@ func TestUsageAccumulatesCriticRevisions(t *testing.T) {
 
 func TestUsagePersistenceFailureStopsModelsOrPublication(t *testing.T) {
 	modelErr := errors.New("model error")
-	for _, provider := range []string{"codex", "claude"} {
-		for _, tt := range []struct {
-			name     string
-			before   bool
-			modelErr error
-		}{
-			{"before call", true, modelErr}, {"after failed call", false, modelErr}, {"after successful call", false, nil},
-		} {
-			t.Run(provider+"/"+tt.name, func(t *testing.T) {
-				root := t.TempDir()
-				originalDir, blocked := filepath.Join(root, "usage"), filepath.Join(root, "blocked")
-				if err := os.WriteFile(blocked, []byte("not a directory"), 0600); err != nil {
-					t.Fatal(err)
-				}
-				store := &usage.Store{Dir: originalDir}
-				calls := 0
-				tracked := attemptFixture(&Orchestrator{Usage: store, Main: provider, Runner: Runner{runModel: func(context.Context, modelRun) (aicli.Result, error) {
-					calls++
-					store.Dir = blocked
-					return aicli.Result{Answer: "completed paid work", Tokens: usage.Tokens{Input: 10, Output: 2}, UsageComplete: tt.modelErr == nil}, tt.modelErr
-				}}})
-				finish, err := tracked.trackUsage(usageJob())
-				if err != nil {
-					t.Fatal(err)
-				}
-				if tt.before {
-					store.Dir = blocked
-				}
-				answer, err := tracked.Runner.runAI(context.Background(), Job{Main: RoleSettings{Provider: provider}}, "dir", "prompt", false, "", nil)
-				wantCalls := 1
-				if tt.before {
-					wantCalls = 0
-				}
-				if err == nil || !strings.Contains(err.Error(), "save action usage") || errors.Is(err, monitor.ErrTerminalJob) == tt.before || calls != wantCalls || answer != "" || (!tt.before && tt.modelErr != nil && !errors.Is(err, tt.modelErr)) {
-					t.Fatalf("storage failure: calls=%d answer=%q error=%v", calls, answer, err)
-				}
-				if finalErr := finish(err); finalErr == nil || !strings.Contains(finalErr.Error(), "save action usage") {
-					t.Fatalf("final save failure missing: %v", finalErr)
-				}
-				records, readErr := usage.ReadAll(originalDir)
-				if readErr != nil || len(records) != 1 || records[0].Status != "running" || (!tt.before && records[0].UsageComplete) {
-					t.Fatalf("last durable checkpoint lost: records=%+v error=%v", records, readErr)
-				}
-			})
-		}
+	const provider = "codex"
+	for _, tt := range []struct {
+		name     string
+		before   bool
+		modelErr error
+	}{
+		{"before call", true, modelErr}, {"after failed call", false, modelErr}, {"after successful call", false, nil},
+	} {
+		t.Run(provider+"/"+tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			originalDir, blocked := filepath.Join(root, "usage"), filepath.Join(root, "blocked")
+			if err := os.WriteFile(blocked, []byte("not a directory"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			store := &usage.Store{Dir: originalDir}
+			calls := 0
+			tracked := attemptFixture(&Orchestrator{Usage: store, Main: provider, Runner: Runner{runModel: func(context.Context, modelRun) (aicli.Result, error) {
+				calls++
+				store.Dir = blocked
+				return aicli.Result{Answer: "completed paid work", Tokens: usage.Tokens{Input: 10, Output: 2}, UsageComplete: tt.modelErr == nil}, tt.modelErr
+			}}})
+			finish, err := tracked.trackUsage(usageJob())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tt.before {
+				store.Dir = blocked
+			}
+			job := portableJob(command.Comment)
+			job.Main.Provider = provider
+			tracked.Runner.WorkRoot = t.TempDir()
+			result, err := tracked.Runner.Run(context.Background(), job)
+			answer := result.Answer
+			wantCalls := 1
+			if tt.before {
+				wantCalls = 0
+			}
+			if err == nil || !strings.Contains(err.Error(), "save action usage") || errors.Is(err, monitor.ErrTerminalJob) == tt.before || calls != wantCalls || len(result.Calls) != wantCalls || answer != "" || (!tt.before && tt.modelErr != nil && !errors.Is(err, tt.modelErr)) {
+				t.Fatalf("storage failure: calls=%d answer=%q error=%v", calls, answer, err)
+			}
+			if finalErr := finish(err); finalErr == nil || !strings.Contains(finalErr.Error(), "save action usage") {
+				t.Fatalf("final save failure missing: %v", finalErr)
+			}
+			records, readErr := usage.ReadAll(originalDir)
+			if readErr != nil || len(records) != 1 || records[0].Status != "running" || (!tt.before && records[0].UsageComplete) {
+				t.Fatalf("last durable checkpoint lost: records=%+v error=%v", records, readErr)
+			}
+		})
 	}
 }
 
@@ -338,10 +296,11 @@ printf '%%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"
 `, argsPath, promptPath)
 	fakeOnPath(t, "codex", script)
 	store := &usage.Store{Dir: filepath.Join(root, "usage")}
-	executor := &Orchestrator{WorkRoot: filepath.Join(root, "work"), Usage: store,
+	work := t.TempDir()
+	executor := &Orchestrator{WorkRoot: work, Usage: store,
 		CodexModel: "portable-model",
 		Runner: Runner{
-			WorkRoot: filepath.Join(root, "work"),
+			WorkRoot: work,
 			Codex:    config.CodexConfig{Model: "stale-host-model"},
 		},
 	}
@@ -375,25 +334,5 @@ printf '%%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"
 	records, err := usage.ReadAll(store.Dir)
 	if err != nil || len(records) != 1 || records[0].Model != "portable-model" || records[0].CodexCalls != 1 || records[0].Tokens.Total() != 5 || len(result.Calls) != 1 {
 		t.Fatalf("usage counted dispatch incorrectly: records=%+v calls=%+v err=%v", records, result.Calls, err)
-	}
-}
-
-func TestRunnerDoesNotRecordUndispatchedUsageCall(t *testing.T) {
-	root := t.TempDir()
-	blocked := filepath.Join(root, "blocked")
-	if err := os.WriteFile(blocked, []byte("file"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	store := &usage.Store{Dir: filepath.Join(root, "usage")}
-	executor := &Orchestrator{WorkRoot: filepath.Join(root, "work"), Usage: store, Runner: Runner{WorkRoot: filepath.Join(root, "work"), runModel: forbidModel(t)}}
-	tracked := attemptFixture(executor)
-	_, err := tracked.trackUsage(usageJob())
-	if err != nil {
-		t.Fatal(err)
-	}
-	store.Dir = blocked
-	result, err := tracked.Runner.Run(context.Background(), portableJob(command.Comment))
-	if err == nil || !strings.Contains(err.Error(), "save action usage") || len(result.Calls) != 0 {
-		t.Fatalf("undispatched calls=%+v err=%v", result.Calls, err)
 	}
 }

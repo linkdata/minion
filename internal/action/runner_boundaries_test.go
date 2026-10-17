@@ -112,7 +112,7 @@ func TestRunnerAuditCollectionAndNormalizationFailuresAreTerminal(t *testing.T) 
 			job := portableJob(command.SecurityAudit)
 			job.Main.Skills = []string{testAuditSkillURL}
 			runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
-				for _, file := range auditPreflightArtifacts(job, request.dir) {
+				for _, file := range auditArtifactsFixture(job, request.dir, "Audit report\n") {
 					if stage == "collection" && file.Path == "REPORT.md" {
 						if err := os.Mkdir(filepath.Join(request.outputDir, file.Path), 0700); err != nil {
 							t.Fatal(err)
@@ -164,7 +164,7 @@ func TestRunnerCancellationDuringInstalledAuditValidatorPreservesCause(t *testin
 	job := portableJob(command.SecurityAudit)
 	job.Main.Skills = []string{testAuditSkillURL}
 	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
-		for _, file := range auditPreflightArtifacts(job, request.dir) {
+		for _, file := range auditArtifactsFixture(job, request.dir, "Audit report\n") {
 			if err := os.WriteFile(filepath.Join(request.outputDir, file.Path), file.Data, 0600); err != nil {
 				return aicli.Result{}, err
 			}
@@ -215,36 +215,35 @@ func TestRunnerCancellationDuringInstalledAuditValidatorPreservesCause(t *testin
 }
 
 func TestRunnerMissingConfiguredReadGrantIsRetryableBeforeModels(t *testing.T) {
-	for _, provider := range []string{"codex", "claude"} {
-		for _, role := range []string{"main", "critic"} {
-			t.Run(provider+"/"+role, func(t *testing.T) {
-				job := portableJob(command.Comment)
-				job.Main.Provider = provider
-				if role == "critic" {
-					job.Critic = &RoleSettings{Provider: provider}
-					job.CriticMaxRounds = config.DefaultCriticMaxRounds
-					job.Main.Provider = "claude"
-					if provider == "claude" {
-						job.Main.Provider = "codex"
-					}
+	for _, scenario := range []struct{ provider, role string }{{"codex", "main"}, {"claude", "critic"}} {
+		provider, role := scenario.provider, scenario.role
+		t.Run(provider+"/"+role, func(t *testing.T) {
+			job := portableJob(command.Comment)
+			job.Main.Provider = provider
+			if role == "critic" {
+				job.Critic = &RoleSettings{Provider: provider}
+				job.CriticMaxRounds = config.DefaultCriticMaxRounds
+				job.Main.Provider = "claude"
+				if provider == "claude" {
+					job.Main.Provider = "codex"
 				}
-				calls := 0
-				runner := Runner{WorkRoot: t.TempDir(), runModel: func(context.Context, modelRun) (aicli.Result, error) {
-					calls++
-					return aicli.Result{}, nil
-				}}
-				missing := filepath.Join(t.TempDir(), "missing-grant")
-				if provider == "codex" {
-					runner.Codex.ReadOnlyDirs = []string{missing}
-				} else {
-					runner.Claude.ReadOnlyDirs = []string{missing}
-				}
-				result, err := runner.Run(context.Background(), job)
-				if !errors.Is(err, os.ErrNotExist) || errors.Is(err, monitor.ErrTerminalJob) || calls != 0 || len(result.Calls) != 0 {
-					t.Fatalf("missing host grant result: native calls=%d recorded calls=%d error=%v", calls, len(result.Calls), err)
-				}
-			})
-		}
+			}
+			calls := 0
+			runner := Runner{WorkRoot: t.TempDir(), runModel: func(context.Context, modelRun) (aicli.Result, error) {
+				calls++
+				return aicli.Result{}, nil
+			}}
+			missing := filepath.Join(t.TempDir(), "missing-grant")
+			if provider == "codex" {
+				runner.Codex.ReadOnlyDirs = []string{missing}
+			} else {
+				runner.Claude.ReadOnlyDirs = []string{missing}
+			}
+			result, err := runner.Run(context.Background(), job)
+			if !errors.Is(err, os.ErrNotExist) || errors.Is(err, monitor.ErrTerminalJob) || calls != 0 || len(result.Calls) != 0 {
+				t.Fatalf("missing host grant result: native calls=%d recorded calls=%d error=%v", calls, len(result.Calls), err)
+			}
+		})
 	}
 }
 

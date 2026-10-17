@@ -12,7 +12,7 @@ import (
 
 func TestWorkRootPreflightRefusesModelGrants(t *testing.T) {
 	const source = "https://github.com/owner/repo/tree/pinned/skills/example"
-	for _, kind := range []string{"required skill", "critic optional skill", "symlink root", "resolved Codex binary"} {
+	for _, kind := range []string{"required skill", "critic optional skill", "symlink root", "resolved Codex binary", "resolved Claude binary"} {
 		t.Run(kind, func(t *testing.T) {
 			root := t.TempDir()
 			t.Setenv("HOME", root)
@@ -22,15 +22,19 @@ func TestWorkRootPreflightRefusesModelGrants(t *testing.T) {
 				t.Fatal(err)
 			}
 			switch kind {
-			case "resolved Codex binary":
-				binary := filepath.Join(cfg.WorkRoot, "real-codex")
+			case "resolved Codex binary", "resolved Claude binary":
+				provider := "codex"
+				if kind == "resolved Claude binary" {
+					provider = "claude"
+				}
+				binary := filepath.Join(cfg.WorkRoot, "real-"+provider)
 				if err := os.WriteFile(binary, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
 					t.Fatal(err)
 				}
-				if err := os.Symlink(binary, filepath.Join(os.Getenv("PATH"), "codex")); err != nil {
+				if err := os.Symlink(binary, filepath.Join(os.Getenv("PATH"), provider)); err != nil {
 					t.Fatal(err)
 				}
-			case "required skill", "critic optional skill":
+			case "required skill", "critic optional skill", "symlink root":
 				parent := ".agents"
 				if kind == "critic optional skill" {
 					parent = ".claude"
@@ -53,21 +57,24 @@ func TestWorkRootPreflightRefusesModelGrants(t *testing.T) {
 				if err := os.Mkdir(cfg.WorkRoot, 0700); err != nil {
 					t.Fatal(err)
 				}
-			case "symlink root":
-				cfg.Codex.ReadOnlyDirs = []string{cfg.WorkRoot}
-				alias := filepath.Join(root, "alias")
-				if err := os.Symlink(cfg.WorkRoot, alias); err != nil {
-					t.Fatal(err)
+				if kind == "symlink root" {
+					alias := filepath.Join(root, "alias")
+					if err := os.Symlink(cfg.WorkRoot, alias); err != nil {
+						t.Fatal(err)
+					}
+					cfg.WorkRoot = alias
 				}
-				cfg.WorkRoot = alias
 			}
 			if err := checkWorkRootIsolation(cfg); err == nil || !strings.Contains(err.Error(), "work root overlaps") {
 				t.Fatalf("preflight accepted overlapping grant: %v", err)
 			}
-			if kind == "resolved Codex binary" {
+			if kind == "resolved Codex binary" || kind == "resolved Claude binary" {
 				cfg.Main, cfg.Adversarial = "claude", ""
+				if kind == "resolved Claude binary" {
+					cfg.Main = "codex"
+				}
 				if err := checkWorkRootIsolation(cfg); err != nil {
-					t.Fatalf("unused Codex executable affected startup: %v", err)
+					t.Fatalf("unused executable affected startup: %v", err)
 				}
 			}
 		})

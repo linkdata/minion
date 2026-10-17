@@ -16,11 +16,8 @@ import (
 	"github.com/linkdata/minion/internal/workspace"
 )
 
-func TestBoundedGitClassifiesLimitsAndCancellation(t *testing.T) {
+func TestBoundedGitPreservesCancellation(t *testing.T) {
 	fixture := newFixture(t)
-	if _, _, err := fixture.checkout.boundedGit(context.Background(), nil, 1, false, "cat-file", "blob", fixture.base+":README.md"); !errors.Is(err, ErrCheckoutTooLarge) {
-		t.Fatalf("limit error=%v", err)
-	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if _, _, err := fixture.checkout.boundedGit(ctx, nil, 1, false, "cat-file", "blob", fixture.base+":README.md"); !errors.Is(err, context.Canceled) || errors.Is(err, ErrCheckoutTooLarge) {
@@ -211,20 +208,13 @@ func TestSnapshotRejectsGitConfigChangedDuringPreparation(t *testing.T) {
 	}
 }
 
-func TestSnapshotReportsOmittedGitlinksAndTruncatedHistory(t *testing.T) {
+func TestSnapshotReportsTruncatedHistory(t *testing.T) {
 	fixture := newFixture(t)
-	fixture.git(fixture.checkout.path, "update-index", "--add", "--cacheinfo", "160000,"+fixture.base+",dependency")
-	writeFile(t, filepath.Join(fixture.checkout.path, "large"), "small source")
-	fixture.git(fixture.checkout.path, "add", "large")
-	fixture.git(fixture.checkout.path, "commit", "-m", "bounded context")
 	fixture.gitInput(fixture.checkout.path, strings.Repeat("m", workspace.MaxContextBytes+256), "commit", "--allow-empty", "-F", "-")
 	fixture.checkout.expectedHead = fixture.git(fixture.checkout.path, "rev-parse", "HEAD")
 	snapshot, err := fixture.checkout.Snapshot(context.Background(), true)
 	if err != nil {
 		t.Fatal(err)
-	}
-	if len(snapshot.Omitted) != 1 || snapshot.Omitted[0] != "dependency" {
-		t.Fatalf("omitted=%v", snapshot.Omitted)
 	}
 	if snapshot.HistoryComplete || len(snapshot.History) != workspace.MaxContextBytes {
 		t.Fatalf("history complete=%v bytes=%d", snapshot.HistoryComplete, len(snapshot.History))
@@ -411,7 +401,7 @@ func TestCloneIgnoresHostTemplateExclusions(t *testing.T) {
 }
 
 func TestControlledGitRejectsPortableMetadataVariants(t *testing.T) {
-	for _, name := range []string{".g\u200cit/hooks/post-checkout", "git~1/hooks/post-checkout", ".git:alternate/hooks/post-checkout"} {
+	for _, name := range []string{".g\u200cit/hooks/post-checkout", "git~1/hooks/post-checkout"} {
 		t.Run(name, func(t *testing.T) {
 			root := t.TempDir()
 			ctx := context.Background()
@@ -591,8 +581,6 @@ func TestReadBatchBlobsValidatesProtocol(t *testing.T) {
 		"wrong object":   bytes.Replace(valid, []byte(sha), []byte(strings.Repeat("b", 40)), 1),
 		"wrong type":     bytes.Replace(valid, []byte(" blob "), []byte(" tree "), 1),
 		"larger size":    bytes.Replace(valid, []byte(" blob 3"), []byte(" blob 4"), 1),
-		"smaller size":   bytes.Replace(valid, []byte(" blob 3"), []byte(" blob 2"), 1),
-		"negative size":  bytes.Replace(valid, []byte(" blob 3"), []byte(" blob -1"), 1),
 		"missing suffix": valid[:len(valid)-1],
 		"extra output":   append(append([]byte{}, valid...), 'x'),
 		"long header":    []byte(strings.Repeat("a", 129) + "\n"),

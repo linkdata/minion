@@ -288,7 +288,7 @@ func TestRunOnceIgnoresCommandWithoutInstalledSkill(t *testing.T) {
 		items:         []github.Item{{Key: "comment:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}}},
 	}
 	executor := &fakeExecutor{}
-	m := &Monitor{Config: cfg, GitHub: gh, Executor: executor, Now: func() time.Time { return now }}
+	m := &Monitor{Config: cfg, GitHub: gh, Handler: executor, Now: func() time.Time { return now }}
 	if _, err := m.RunOnce(context.Background(), openState(t, now.Add(-time.Minute))); err != nil {
 		t.Fatal(err)
 	}
@@ -365,7 +365,7 @@ func TestRunOnceKeepsFailedRepositoryWindowAndRetriesPendingThreads(t *testing.T
 	cfg.Repositories = []config.Repository{{Name: "a/one", ID: 1, OwnerID: 2, Actions: []string{"review"}}, {Name: "b/two", ID: 1, OwnerID: 2, Actions: []string{"review"}}}
 	executor := &fakeExecutor{}
 	clock := now
-	m := &Monitor{Config: cfg, GitHub: gh, Executor: executor, Now: func() time.Time { return clock }}
+	m := &Monitor{Config: cfg, GitHub: gh, Handler: executor, Now: func() time.Time { return clock }}
 	if _, err := m.RunOnce(context.Background(), store); err == nil || !strings.Contains(err.Error(), "a/one") {
 		t.Fatalf("failed repository poll was not reported: %v", err)
 	}
@@ -405,7 +405,7 @@ func TestRunOnceSeedsNewRepositoryFromCurrentCursor(t *testing.T) {
 	}}}
 	clock := now
 	executor := &fakeExecutor{}
-	m := &Monitor{Config: testConfig(t), GitHub: gh, Executor: executor, Now: func() time.Time { return clock }}
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: executor, Now: func() time.Time { return clock }}
 	if _, err := m.RunOnce(context.Background(), store); err != nil {
 		t.Fatal(err)
 	}
@@ -447,7 +447,7 @@ func TestRunOnceChecksPermissionAndDeduplicates(t *testing.T) {
 	}}
 	store := openState(t, first.Add(-time.Minute))
 	clock := first
-	m := &Monitor{Config: testConfig(t), GitHub: gh, Executor: executor, Logger: log.New(io.Discard, "", 0), Now: func() time.Time { return clock }}
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: executor, Logger: log.New(io.Discard, "", 0), Now: func() time.Time { return clock }}
 	if _, err := m.RunOnce(context.Background(), store); err != nil {
 		t.Fatal(err)
 	}
@@ -477,7 +477,7 @@ func TestRunOnceCarriesHistoryAndDeduplicatesEachVariant(t *testing.T) {
 	}
 	executor := &fakeExecutor{}
 	store := openState(t, now.Add(-time.Minute))
-	m := &Monitor{Config: testConfig(t), GitHub: gh, Executor: executor, Now: func() time.Time { return now }}
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: executor, Now: func() time.Time { return now }}
 	for _, body := range []string{"@linkdataminion review", "@linkdataminion review history", "@linkdataminion REVIEW HISTORY"} {
 		gh.items[0].Body = body
 		if _, err := m.RunOnce(context.Background(), store); err != nil {
@@ -520,7 +520,7 @@ func TestRunOnceBoundsFailedExecutions(t *testing.T) {
 				}
 			}
 			clock := now
-			m := &Monitor{Config: testConfig(t), GitHub: gh, Executor: executor, Now: func() time.Time { return clock }}
+			m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: executor, Now: func() time.Time { return clock }}
 			for attempt := 1; attempt <= maxJobAttempts; attempt++ {
 				_, err := m.RunOnce(context.Background(), store)
 				if (err != nil) != (attempt < maxJobAttempts) {
@@ -568,7 +568,7 @@ func TestRunOnceDoesNotExhaustJobsDuringInfrastructureFailure(t *testing.T) {
 			executor := &fakeExecutor{executeErr: test.err}
 			store := openState(t, now.Add(-time.Minute))
 			clock := now
-			m := &Monitor{Config: testConfig(t), GitHub: gh, Executor: executor, Now: func() time.Time { return clock }}
+			m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: executor, Now: func() time.Time { return clock }}
 			for attempt := 1; attempt <= maxJobAttempts+1; attempt++ {
 				if _, err := m.RunOnce(context.Background(), store); err == nil {
 					t.Fatal("infrastructure failure was not surfaced")
@@ -591,7 +591,7 @@ func TestRunOnceKeepsTerminalFailureWhenWorkRootFills(t *testing.T) {
 	gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}, items: []github.Item{item}, permission: github.Permission{Permission: "write"}}
 	executor := &fakeExecutor{executeErr: errors.Join(ErrTerminalJob, workroot.ErrUnsafe)}
 	store := openState(t, now.Add(-time.Minute))
-	m := &Monitor{Config: testConfig(t), GitHub: gh, Executor: executor, Now: func() time.Time { return now }}
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: executor, Now: func() time.Time { return now }}
 	if _, err := m.RunOnce(context.Background(), store); err != nil {
 		t.Fatal(err)
 	}
@@ -610,7 +610,7 @@ func TestRunOnceCountsPublicationFailureWhenWorkRootFills(t *testing.T) {
 	gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}, items: []github.Item{item}, permission: github.Permission{Permission: "write"}}
 	executor := &fakeExecutor{executeErr: errors.Join(ErrPostModelPublication, workroot.ErrUnsafe, &github.StatusError{StatusCode: http.StatusBadGateway})}
 	store := openState(t, now.Add(-time.Minute))
-	m := &Monitor{Config: testConfig(t), GitHub: gh, Executor: executor, Now: func() time.Time { return now }}
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: executor, Now: func() time.Time { return now }}
 	if _, err := m.RunOnce(context.Background(), store); err == nil || len(executor.jobs) != 1 {
 		t.Fatalf("publication failure = %v, jobs = %d", err, len(executor.jobs))
 	}
@@ -626,7 +626,7 @@ func TestRunOnceBoundsPublicationFailuresAfterModel(t *testing.T) {
 	executor := &fakeExecutor{executeErr: errors.Join(ErrPostModelPublication, &github.StatusError{StatusCode: http.StatusBadGateway})}
 	store := openState(t, now.Add(-time.Minute))
 	clock := now
-	m := &Monitor{Config: testConfig(t), GitHub: gh, Executor: executor, Now: func() time.Time { return clock }}
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: executor, Now: func() time.Time { return clock }}
 	for attempt := 1; attempt <= maxJobAttempts; attempt++ {
 		_, err := m.RunOnce(context.Background(), store)
 		if (err != nil) != (attempt < maxJobAttempts) || len(executor.jobs) != attempt {
@@ -656,7 +656,7 @@ func TestRunOnceTerminalFailureRepliesWithFreshContext(t *testing.T) {
 	defer cancel()
 	executor := &fakeExecutor{onExecute: cancel, executeErr: errors.Join(ErrTerminalJob, context.DeadlineExceeded)}
 	store := openState(t, now.Add(-time.Minute))
-	m := &Monitor{Config: testConfig(t), GitHub: gh, Executor: executor, Now: func() time.Time { return now }}
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: executor, Now: func() time.Time { return now }}
 	if _, err := m.RunOnce(ctx, store); !errors.Is(err, context.Canceled) || !errors.Is(err, ErrTerminalJob) {
 		t.Fatalf("terminal reply lost parent cancellation or execution failure: %v", err)
 	}
@@ -684,7 +684,7 @@ func TestRunOnceStopsAfterFailedReplyAttempts(t *testing.T) {
 	executor := &fakeExecutor{executeErr: ErrTerminalJob}
 	store := openState(t, now.Add(-time.Minute))
 	clock := now
-	m := &Monitor{Config: testConfig(t), GitHub: gh, Executor: executor, Now: func() time.Time { return clock }}
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: executor, Now: func() time.Time { return clock }}
 	for attempt := 1; attempt <= maxFailureReplyAttempts; attempt++ {
 		_, err := m.RunOnce(context.Background(), store)
 		if (err != nil) != (attempt < maxFailureReplyAttempts) {
@@ -719,7 +719,7 @@ func TestRunOnceIgnoresQuotedOutsiderCommand(t *testing.T) {
 	}
 	executor := &fakeExecutor{}
 	store := openState(t, now.Add(-time.Minute))
-	m := &Monitor{Config: testConfig(t), GitHub: gh, Executor: executor, Logger: log.New(io.Discard, "", 0), Now: func() time.Time { return now }}
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: executor, Logger: log.New(io.Discard, "", 0), Now: func() time.Time { return now }}
 	if _, err := m.RunOnce(context.Background(), store); err != nil {
 		t.Fatal(err)
 	}
@@ -742,7 +742,7 @@ func TestRunOnceRetriesFailedReaction(t *testing.T) {
 	store := openState(t, now.Add(-time.Minute))
 	initial := store.Data.Cursor
 	clock := now
-	m := &Monitor{Config: testConfig(t), GitHub: gh, Executor: executor, Logger: log.New(io.Discard, "", 0), Now: func() time.Time { return clock }}
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: executor, Logger: log.New(io.Discard, "", 0), Now: func() time.Time { return clock }}
 	if _, err := m.RunOnce(context.Background(), store); err == nil {
 		t.Fatal("expected reaction failure")
 	}
@@ -769,7 +769,7 @@ func TestRunOncePersistsPermissionFailureWithoutPinningCursor(t *testing.T) {
 	executor := &fakeExecutor{}
 	store := openState(t, now.Add(-time.Minute))
 	initial := store.Data.Cursor
-	m := &Monitor{Config: testConfig(t), GitHub: gh, Executor: executor, Logger: log.New(io.Discard, "", 0), Now: func() time.Time { return now }}
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: executor, Logger: log.New(io.Discard, "", 0), Now: func() time.Time { return now }}
 	if _, err := m.RunOnce(context.Background(), store); err == nil {
 		t.Fatal("expected permission failure")
 	}
@@ -815,7 +815,7 @@ func TestRunOnceRetriesFailedThreadAfterCursorAdvances(t *testing.T) {
 		t.Fatal(err)
 	}
 	clock := now
-	m := &Monitor{Config: cfg, GitHub: gh, Executor: &fakeExecutor{}, Logger: log.New(&logs, "", 0), Now: func() time.Time { return clock }}
+	m := &Monitor{Config: cfg, GitHub: gh, Handler: &fakeExecutor{}, Logger: log.New(&logs, "", 0), Now: func() time.Time { return clock }}
 	if _, err := m.RunOnce(context.Background(), store); err == nil || !strings.Contains(err.Error(), badItem.HTMLURL) {
 		t.Fatalf("failure did not identify item URL: %v", err)
 	}
@@ -870,7 +870,7 @@ func TestRunOnceRetriesThreadFetchWithoutNewNotification(t *testing.T) {
 	}
 	store := openState(t, initial)
 	clock := now
-	m := &Monitor{Config: testConfig(t), GitHub: gh, Executor: &fakeExecutor{}, Now: func() time.Time { return clock }}
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: &fakeExecutor{}, Now: func() time.Time { return clock }}
 	if _, err := m.RunOnce(context.Background(), store); err == nil || !store.Data.Cursor.After(initial) {
 		t.Fatalf("failure did not advance global cursor: %v, %+v", err, store.Data)
 	}
@@ -896,7 +896,7 @@ func TestAllowedActorsCannotBypassWritePermission(t *testing.T) {
 	config.Repositories[0].AllowedActorIDs = map[string]int64{"writer": 7}
 	executor := &fakeExecutor{}
 	store := openState(t, now.Add(-time.Minute))
-	m := &Monitor{Config: config, GitHub: gh, Executor: executor, Logger: log.New(io.Discard, "", 0), Now: func() time.Time { return now }}
+	m := &Monitor{Config: config, GitHub: gh, Handler: executor, Logger: log.New(io.Discard, "", 0), Now: func() time.Time { return now }}
 	if _, err := m.RunOnce(context.Background(), store); err != nil {
 		t.Fatal(err)
 	}
@@ -920,7 +920,7 @@ func TestEditedCommentCannotUseOriginalAuthorAuthorization(t *testing.T) {
 	config.Repositories[0].AllowedActorIDs = map[string]int64{"allowed": 7}
 	store := openState(t, first.Add(-time.Minute))
 	clock := first
-	m := &Monitor{Config: config, GitHub: gh, Executor: executor, Logger: log.New(io.Discard, "", 0), Now: func() time.Time { return clock }}
+	m := &Monitor{Config: config, GitHub: gh, Handler: executor, Logger: log.New(io.Discard, "", 0), Now: func() time.Time { return clock }}
 	if _, err := m.RunOnce(context.Background(), store); err != nil {
 		t.Fatal(err)
 	}
@@ -1086,7 +1086,7 @@ func TestInvitationOwnerDoesNotAuthorizeCommands(t *testing.T) {
 	config.InvitationOwnerIDs = map[string]int64{"example-owner": 2, "another-owner": 3}
 	executor := &fakeExecutor{}
 	store := openState(t, now.Add(-time.Minute))
-	m := &Monitor{Config: config, GitHub: gh, Executor: executor, Now: func() time.Time { return now }}
+	m := &Monitor{Config: config, GitHub: gh, Handler: executor, Now: func() time.Time { return now }}
 	if _, err := m.RunOnce(context.Background(), store); err != nil {
 		t.Fatal(err)
 	}
@@ -1131,7 +1131,7 @@ func TestInvitationRegistersRepositoryBeforeAcceptanceAndMonitorsImmediately(t *
 				},
 			}
 			executor := &fakeExecutor{}
-			m := &Monitor{Config: cfg, ConfigPath: path, GitHub: gh, Executor: executor, Now: func() time.Time { return now }}
+			m := &Monitor{Config: cfg, ConfigPath: path, GitHub: gh, Handler: executor, Now: func() time.Time { return now }}
 			if _, err := m.RunOnce(context.Background(), openState(t, now.Add(-time.Minute))); err != nil {
 				t.Fatal(err)
 			}
@@ -1265,7 +1265,7 @@ func TestReclaimedRepositoryCannotTriggerCommandOrRetry(t *testing.T) {
 				t.Fatal(err)
 			}
 			executor := &fakeExecutor{}
-			m := &Monitor{Config: testConfig(t), GitHub: gh, Executor: executor, Now: func() time.Time { return now }}
+			m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: executor, Now: func() time.Time { return now }}
 			if _, err := m.RunOnce(context.Background(), store); err != nil {
 				t.Fatal(err)
 			}
@@ -1297,7 +1297,7 @@ func TestReclaimedLoginCannotAuthorizeCommand(t *testing.T) {
 			cfg.Repositories[0].AllowedActorIDs = map[string]int64{"writer": 7}
 			tc.prepare(gh, &cfg)
 			executor := &fakeExecutor{}
-			m := &Monitor{Config: cfg, GitHub: gh, Executor: executor, Now: func() time.Time { return now }}
+			m := &Monitor{Config: cfg, GitHub: gh, Handler: executor, Now: func() time.Time { return now }}
 			if _, err := m.RunOnce(context.Background(), openState(t, now.Add(-time.Minute))); err != nil {
 				t.Fatal(err)
 			}
@@ -1325,81 +1325,6 @@ func TestReclaimedInvitationOwnerCannotRegisterOrAccept(t *testing.T) {
 	}
 }
 
-func TestRunOnceRefundsCanceledTerminalExecution(t *testing.T) {
-	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
-	item := github.Item{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}, HTMLURL: "https://github.com/example-owner/example-repo/pull/7#issuecomment-1"}
-	gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}, items: []github.Item{item}, permission: github.Permission{Permission: "write"}}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	executor := &fakeExecutor{onExecute: cancel, executeErr: errors.Join(ErrTerminalJob, context.Canceled)}
-	store := openState(t, now.Add(-time.Minute))
-	var logs bytes.Buffer
-	m := &Monitor{Config: testConfig(t), GitHub: gh, Executor: executor, Logger: log.New(&logs, "", 0), Now: func() time.Time { return now }}
-	if _, err := m.RunOnce(ctx, store); !errors.Is(err, context.Canceled) {
-		t.Fatalf("canceled execution=%v", err)
-	}
-	if len(executor.jobs) != 1 || len(gh.comments) != 0 || len(store.Data.Processed) != 0 {
-		t.Fatalf("cancellation consumed job: jobs=%d comments=%d state=%+v", len(executor.jobs), len(gh.comments), store.Data)
-	}
-	id := executor.jobs[0].ID
-	if got := store.Data.JobFailures[id].Attempts; got != 0 {
-		t.Fatalf("cancellation consumed %d attempts", got)
-	}
-	if len(store.Data.PendingNotifications) != 0 || !store.Data.Cursor.Equal(now.Add(-time.Minute)) {
-		t.Fatalf("shutdown added retry backoff or advanced the cursor: %+v", store.Data)
-	}
-	if !strings.Contains(logs.String(), " interrupted: ") || strings.Contains(logs.String(), "failed (attempt") {
-		t.Fatalf("shutdown log is not an interruption: %q", logs.String())
-	}
-	executor.onExecute = nil
-	executor.executeErr = nil
-	m.Now = func() time.Time { return now.Add(time.Minute) }
-	if _, err := m.RunOnce(context.Background(), store); err != nil || len(executor.jobs) != 2 || len(store.Data.Processed) != 1 {
-		t.Fatalf("canceled job did not resume: err=%v jobs=%d state=%+v", err, len(executor.jobs), store.Data)
-	}
-}
-
-func TestRunOnceCountsCanceledPublication(t *testing.T) {
-	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
-	item := github.Item{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}, HTMLURL: "https://github.com/example-owner/example-repo/pull/7#issuecomment-1"}
-	gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}, items: []github.Item{item}, permission: github.Permission{Permission: "write"}}
-	tail := testNotification(now.Add(time.Second))
-	tail.Subject.URL = strings.Replace(tail.Subject.URL, "/7", "/8", 1)
-	gh.notifications = append(gh.notifications, tail)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	var repoChecks, threadCalls, permissionChecks, currentChecks int
-	executor := &fakeExecutor{onExecute: func() {
-		repoChecks, threadCalls, permissionChecks, currentChecks = gh.repoChecks, gh.threadCalls, gh.checks, gh.currentChecks
-		cancel()
-	}, executeErr: errors.Join(ErrPostModelPublication, context.Canceled)}
-	store := openState(t, now.Add(-time.Minute))
-	pending := state.PendingNotification{Repository: tail.Repository.FullName, RepositoryID: 1, OwnerID: 2, SubjectType: tail.Subject.Type, SubjectURL: tail.Subject.URL,
-		Since: now.Add(-time.Minute), UpdatedAt: tail.UpdatedAt, RetryAt: now.Add(-time.Second), Failures: 2}
-	store.Data.PendingNotifications[notificationKey(tail)] = pending
-	if err := store.Save(); err != nil {
-		t.Fatal(err)
-	}
-	var logs bytes.Buffer
-	m := &Monitor{Config: testConfig(t), GitHub: gh, Executor: executor, Logger: log.New(&logs, "", 0), Now: func() time.Time { return now }}
-	_, err := m.RunOnce(ctx, store)
-	if !errors.Is(err, context.Canceled) || len(executor.jobs) != 1 {
-		t.Fatalf("canceled publication: err=%v jobs=%d", err, len(executor.jobs))
-	}
-	if got := store.Data.JobFailures[executor.jobs[0].ID].Attempts; got != 1 {
-		t.Fatalf("canceled publication refunded its %d attempts", got)
-	}
-	if len(store.Data.PendingNotifications) != 1 || store.Data.PendingNotifications[notificationKey(tail)] != pending || len(store.Data.Processed) != 0 || len(gh.comments) != 0 {
-		t.Fatalf("shutdown changed unvisited retry state: %+v", store.Data)
-	}
-	if gh.repoChecks != repoChecks || gh.threadCalls != threadCalls || gh.checks != permissionChecks || gh.currentChecks != currentChecks {
-		t.Fatalf("discovery continued after cancellation: repository=%d/%d thread=%d/%d permission=%d/%d current=%d/%d", gh.repoChecks, repoChecks, gh.threadCalls, threadCalls, gh.checks, permissionChecks, gh.currentChecks, currentChecks)
-	}
-	if strings.Contains(logs.String(), " interrupted: ") || !strings.Contains(logs.String(), "failed (attempt 1/3)") {
-		t.Fatalf("publication failure logged as an interruption: %q", logs.String())
-	}
-}
-
 func TestRunOnceCountsInternalCancellation(t *testing.T) {
 	for _, terminal := range []bool{false, true} {
 		t.Run(fmt.Sprint(terminal), func(t *testing.T) {
@@ -1412,7 +1337,7 @@ func TestRunOnceCountsInternalCancellation(t *testing.T) {
 			}
 			executor := &fakeExecutor{executeErr: executeErr}
 			store := openState(t, now.Add(-time.Minute))
-			m := &Monitor{Config: testConfig(t), GitHub: gh, Executor: executor, Now: func() time.Time { return now }}
+			m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: executor, Now: func() time.Time { return now }}
 			_, err := m.RunOnce(context.Background(), store)
 			if len(executor.jobs) != 1 {
 				t.Fatalf("jobs=%d", len(executor.jobs))

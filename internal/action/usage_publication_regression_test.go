@@ -61,10 +61,11 @@ func TestExecutePublicationBookkeepingBoundaries(t *testing.T) {
 			}))
 			defer server.Close()
 			started := time.Now()
+			work := t.TempDir()
 			var journal bytes.Buffer
-			e := Orchestrator{GitHub: testGitHub(server, "token"), BotLogin: "bot", WorkRoot: filepath.Join(root, "work"),
+			e := Orchestrator{GitHub: testGitHub(server, "token"), BotLogin: "bot", WorkRoot: work,
 				Timeout: 3 * time.Second, Logger: log.New(&journal, "", 0), Commands: map[string]config.CommandMapping{"audit": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}},
-				Runner: Runner{WorkRoot: filepath.Join(root, "work"), runModel: func(modelContext context.Context, _ modelRun) (aicli.Result, error) {
+				Runner: Runner{WorkRoot: work, runModel: func(modelContext context.Context, _ modelRun) (aicli.Result, error) {
 					got, ok := modelContext.Deadline()
 					if !ok || got.Before(started) || got.Sub(started) > 3500*time.Millisecond {
 						t.Fatal("model lost the configured action deadline")

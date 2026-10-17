@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/config"
 )
@@ -245,5 +247,29 @@ func TestCatalogueProviderErrorIsBoundedAndQuoted(t *testing.T) {
 	_, err = Validate(context.Background(), config.CodexConfig{})
 	if err == nil || strings.Contains(err.Error(), "\nforged journal line") || !strings.Contains(err.Error(), `first\nforged journal line`) || len(err.Error()) > bounded.DiagnosticBytes+200 || !strings.Contains(err.Error(), "...") {
 		t.Fatalf("unsafe/unbounded provider error: %v", err)
+	}
+}
+
+func TestCatalogueEventAcceptsExactLimitAndRejectsNextByte(t *testing.T) {
+	const prefix = `{"id":2,"result":{"data":[{"model":"fixture","isDefault":true}]},"padding":"`
+	const suffix = `"}`
+	for _, size := range []int{aicli.MaxEventBytes, aicli.MaxEventBytes + 1} {
+		for _, ending := range []string{"\n", ""} {
+			t.Run(fmt.Sprintf("bytes%d/newline%t", size, ending != ""), func(t *testing.T) {
+				binary := installFakeCodex(t, "#!/bin/sh\nIFS= read -r request\nprintf '%s\\n' '{\"id\":1,\"result\":{}}'\nIFS= read -r request\nIFS= read -r request\ncat \"$0.response\"\n")
+				response := prefix + strings.Repeat("x", size-len(prefix)-len(suffix)) + suffix + ending
+				if err := os.WriteFile(binary+".response", []byte(response), 0600); err != nil {
+					t.Fatal(err)
+				}
+				models, err := listModels(context.Background(), config.CodexConfig{})
+				if size == aicli.MaxEventBytes {
+					if err != nil || len(models) != 1 || models[0].Model != "fixture" {
+						t.Fatalf("exact-cap catalogue=%+v err=%v", models, err)
+					}
+				} else if !errors.Is(err, aicli.ErrOutputLimit) {
+					t.Fatalf("cap+1 accepted: models=%+v err=%v", models, err)
+				}
+			})
+		}
 	}
 }

@@ -228,11 +228,11 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 cat > /dev/null
-printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"answer\":\"public\",\"review_notes\":\"private\"}"}}' '{"type":"turn.completed"}'
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"answer\":\"public\",\"refutations\":\"private\"}"}}' '{"type":"turn.completed"}'
 `)
-	const schema = `{"type":"object","properties":{"answer":{"type":"string"},"review_notes":{"type":"string"}},"required":["answer","review_notes"],"additionalProperties":false}`
+	const schema = `{"type":"object","properties":{"answer":{"type":"string"},"refutations":{"type":"string"}},"required":["answer","refutations"],"additionalProperties":false}`
 	result, err := Run(context.Background(), t.TempDir(), "Review candidate", true, "", config.CodexConfig{OutputSchema: schema})
-	if err != nil || result.Answer != `{"answer":"public","review_notes":"private"}` {
+	if err != nil || result.Answer != `{"answer":"public","refutations":"private"}` {
 		t.Fatalf("structured result = %q, %v", result.Answer, err)
 	}
 	content, err := os.ReadFile(fakeCodex + ".schema")
@@ -511,22 +511,20 @@ func TestJSONLOutputCapturesUsageAndHelpers(t *testing.T) {
 }
 
 func TestJSONLOutputStopsAtCardinalityLimits(t *testing.T) {
-	t.Run("children", func(t *testing.T) {
-		cancelled := false
-		output := jsonlOutput{cancel: func() { cancelled = true }}
-		ids := make([]string, maxCodexChildren+1)
-		for i := range ids {
-			ids[i] = strconv.Itoa(i)
-		}
-		line, err := json.Marshal(map[string]any{"item": map[string]any{"type": "collab_tool_call", "receiver_thread_ids": ids}})
-		if err != nil {
-			t.Fatal(err)
-		}
-		_, _ = output.Write(append(line, '\n'))
-		if !cancelled || !output.failed || len(output.children) != maxCodexChildren || !strings.Contains(output.failureReason, "child agent") {
-			t.Fatalf("unbounded children: cancelled=%t children=%d reason=%q", cancelled, len(output.children), output.failureReason)
-		}
-	})
+	cancelled := false
+	output := jsonlOutput{cancel: func() { cancelled = true }}
+	ids := make([]string, maxCodexChildren+1)
+	for i := range ids {
+		ids[i] = strconv.Itoa(i)
+	}
+	line, err := json.Marshal(map[string]any{"item": map[string]any{"type": "collab_tool_call", "receiver_thread_ids": ids}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = output.Write(append(line, '\n'))
+	if !cancelled || !output.failed || len(output.children) != maxCodexChildren || !strings.Contains(output.failureReason, "child agent") {
+		t.Fatalf("unbounded children: cancelled=%t children=%d reason=%q", cancelled, len(output.children), output.failureReason)
+	}
 }
 
 func TestRunRetainsFallbackUsageOnFailure(t *testing.T) {

@@ -71,6 +71,18 @@ func TestSnapshotAcceptsExactDiffByteLimit(t *testing.T) {
 		if err != nil || snapshot.DiffIncomplete != (extra == 1) {
 			t.Fatalf("exact/+1 comparison boundary: extra=%d bytes=%d incomplete=%t error=%v", extra, len(snapshot.Diff), snapshot.DiffIncomplete, err)
 		}
+		if len(snapshot.ChangedPaths) != 1 || snapshot.ChangedPaths[0] != name || len(snapshot.Files) != 2 {
+			t.Fatalf("comparison lost paths or source: extra=%d paths=%v files=%d", extra, snapshot.ChangedPaths, len(snapshot.Files))
+		}
+		found := false
+		for _, file := range snapshot.Files {
+			if file.Path == name {
+				found = string(file.Data) == strings.Repeat("x", 1+padding+extra)+"\n"
+			}
+		}
+		if !found {
+			t.Fatalf("comparison lost complete current file at boundary: extra=%d", extra)
+		}
 		if extra == 0 && len(snapshot.Diff) != workspace.MaxContextBytes || extra == 1 && len(snapshot.Diff) != 0 {
 			t.Fatalf("comparison boundary retained incorrect bytes: extra=%d bytes=%d", extra, len(snapshot.Diff))
 		}

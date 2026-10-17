@@ -19,6 +19,16 @@ import (
 
 func writeUsageRollout(t *testing.T, home, id, parent string, events ...string) string {
 	t.Helper()
+	var boundary *int64
+	if parent != "" {
+		n := int64(9)
+		boundary = &n
+	}
+	return writeUsageRolloutBoundary(t, home, id, parent, boundary, events...)
+}
+
+func writeUsageRolloutBoundary(t *testing.T, home, id, parent string, boundary *int64, events ...string) string {
+	t.Helper()
 	dir := filepath.Join(home, "sessions", time.Now().Format("2006/01/02"))
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
@@ -26,7 +36,9 @@ func writeUsageRollout(t *testing.T, home, id, parent string, events ...string) 
 	meta := map[string]any{"id": id, "session_id": "root", "source": "exec"}
 	if parent != "" {
 		meta["source"] = map[string]any{"subagent": map[string]any{"thread_spawn": map[string]any{"parent_thread_id": parent}}}
-		meta["subagent_history_start_ordinal"] = 9
+		if boundary != nil {
+			meta["subagent_history_start_ordinal"] = *boundary
+		}
 	}
 	first, err := json.Marshal(map[string]any{"type": "session_meta", "payload": meta})
 	if err != nil {

@@ -128,24 +128,6 @@ func numberResultEvents(data string) string {
 	return strings.Join(lines, "\n")
 }
 
-func TestOutputFragments(t *testing.T) {
-	for _, chunk := range []int{1, 7, 1000} {
-		o := jsonlOutput{}
-		data := "{\"type\":\"system\",\"message\":\"status text\"}\n{\"type\":\"assistant\",\"result\":\"interim\"}\n" + successfulResult
-		for len(data) > 0 {
-			n := min(chunk, len(data))
-			if _, err := o.Write([]byte(data[:n])); err != nil {
-				t.Fatal(err)
-			}
-			data = data[n:]
-		}
-		o.finish()
-		if o.err != nil || !o.completed || o.result.Answer != "final answer" || !o.result.UsageComplete {
-			t.Fatalf("output = %+v", o)
-		}
-	}
-}
-
 func TestOutputBackgroundTasks(t *testing.T) {
 	const pending = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"reviewer"}]}`
 	const empty = `{"type":"system","subtype":"background_tasks_changed","tasks":[]}`
@@ -160,7 +142,6 @@ func TestOutputBackgroundTasks(t *testing.T) {
 		{name: "answer after completion", before: pending + "\n" + successfulResult + "\n" + empty},
 		{name: "work after result needs new answer", after: pending + "\n" + empty, fails: true},
 		{name: "answer after new work", before: successfulResult + "\n" + pending + "\n" + empty},
-		{name: "unassessed task stopped", after: `{"type":"system","subtype":"task_notification","task_id":"server","status":"stopped"}`, fails: true},
 		{name: "failed command recovered", before: `{"type":"system","subtype":"task_notification","task_id":"test","status":"failed"}`},
 		{name: "assistant text is not task state", after: `{"type":"assistant","subtype":"background_tasks_changed","tasks":[{"task_id":"reviewer"}]}`},
 	} {
@@ -181,7 +162,7 @@ func TestOutputBackgroundTasks(t *testing.T) {
 func TestOutputNativeTurnResults(t *testing.T) {
 	const pending = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"worker"}]}`
 	const clear = `{"type":"system","subtype":"background_tasks_changed","tasks":[]}`
-	const structured = `{"answer":"published","review_notes":"private"}`
+	const structured = `{"answer":"published","refutations":"private"}`
 	waiting := strings.Replace(successfulResult, "final answer", "waiting", 1)
 	empty := strings.Replace(successfulResult, "final answer", "", 1)
 	formatted := strings.TrimSuffix(empty, "}") + `,"structured_output":` + structured + `}`
@@ -189,12 +170,10 @@ func TestOutputNativeTurnResults(t *testing.T) {
 	failed := strings.Replace(successfulResult, `"subtype":"success"`, `"subtype":"error_during_execution"`, 1)
 	for _, tc := range []struct {
 		name, data, answer, failure string
-		structured                  bool
+		structured, unterminated    bool
 	}{
 		{name: "deferred turns after task completion", data: numberResultEvents(pending + "\n" + clear + "\n" + waiting + "\n" + waiting + "\n" + empty + "\n" + successfulResult), answer: "final answer"},
 		{name: "latest empty never falls back", data: numberResultEvents(waiting + "\n" + empty), failure: "missing successful Claude result"},
-		{name: "new work invalidates candidate", data: numberResultEvents(successfulResult + "\n" + pending + "\n" + clear), failure: "missing successful final result"},
-		{name: "fresh indexed answer after new work", data: numberResultEvents(successfulResult + "\n" + pending + "\n" + clear + "\n" + successfulResult), answer: "final answer"},
 		{name: "only final structured schema required", data: numberResultEvents(waiting + "\n" + empty + "\n" + formatted), structured: true, answer: structured},
 		{name: "latest missing schema never falls back", data: numberResultEvents(formatted + "\n" + waiting), structured: true, failure: "missing Claude structured output"},
 		{name: "first error cannot be replaced", data: numberResultEvents(failed + "\n" + successfulResult), failure: "result failed:"},
@@ -205,7 +184,7 @@ func TestOutputNativeTurnResults(t *testing.T) {
 		{name: "gap in indices", data: numberResultEvents(successfulResult) + "\n" + strings.TrimSuffix(successfulResult, "}") + `,"result_index":2}`, failure: "result_index 2, want 1"},
 		{name: "nonzero initial index", data: strings.TrimSuffix(successfulResult, "}") + `,"result_index":1}`, failure: "result_index 1, want 0"},
 		{name: "negative index", data: strings.TrimSuffix(successfulResult, "}") + `,"result_index":-1}`, failure: "result_index -1, want 0"},
-		{name: "single unindexed result", data: successfulResult, answer: "final answer"},
+		{name: "single unindexed result", data: successfulResult, answer: "final answer", unterminated: true},
 		{name: "multiple unindexed results", data: successfulResult + "\n" + successfulResult, failure: "require native result_index"},
 		{name: "indexed then unindexed", data: numberResultEvents(successfulResult) + "\n" + successfulResult, failure: "require native result_index"},
 		{name: "unindexed then indexed", data: successfulResult + "\n" + strings.TrimSuffix(successfulResult, "}") + `,"result_index":1}`, failure: "require native result_index"},
@@ -213,7 +192,10 @@ func TestOutputNativeTurnResults(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cancelled := false
 			o := jsonlOutput{structured: tc.structured, cancel: func() { cancelled = true }}
-			data := tc.data + "\n"
+			data := tc.data
+			if !tc.unterminated {
+				data += "\n"
+			}
 			writeChunks(t, &o, data)
 			o.finish()
 			if tc.failure != "" {

@@ -76,7 +76,7 @@ func Validate(ctx context.Context, settings config.CodexConfig) (resolved config
 func listModels(ctx context.Context, settings config.CodexConfig) (models []modelInfo, err error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	binary, err := ExecutablePath()
+	binary, err := aicli.ExecutablePath("codex")
 	if err != nil {
 		return nil, err
 	}
@@ -138,12 +138,15 @@ func listModels(ctx context.Context, settings config.CodexConfig) (models []mode
 	}()
 	encoder := json.NewEncoder(stdin)
 	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 4096), aicli.MaxEventBytes)
+	scanner.Buffer(make([]byte, 4096), aicli.MaxEventBytes+2)
 	call := func(id int, method string, params any, result any) error {
 		if err := encoder.Encode(map[string]any{"id": id, "method": method, "params": params}); err != nil {
 			return err
 		}
 		for scanner.Scan() {
+			if len(scanner.Bytes()) > aicli.MaxEventBytes {
+				return fmt.Errorf("%w: Codex catalogue event exceeded the size limit", aicli.ErrOutputLimit)
+			}
 			var response struct {
 				ID     *int            `json:"id"`
 				Result json.RawMessage `json:"result"`

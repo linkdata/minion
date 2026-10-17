@@ -46,28 +46,17 @@ func TestRunOutputLimitPreservesRolloutUsage(t *testing.T) {
 func TestOutputRejectsOversizedRecordsAfterProgress(t *testing.T) {
 	const progress = `{"type":"item.completed","item":{"type":"agent_message","text":"still working"}}`
 	const final = `{"type":"item.completed","item":{"type":"agent_message","text":"final answer"}}`
-	const complete = `{"type":"turn.completed"}`
-	large := strings.Repeat("x", aicli.MaxEventBytes)
-	for _, scenario := range []struct{ name, data string }{
-		{"oversized final", progress + "\n" + `{"type":"item.completed","item":{"type":"agent_message","text":"` + large + `"}}` + "\n" + complete},
-		{"oversized tool then valid final", progress + "\n" + `{"type":"item.completed","item":{"type":"command_execution","output":"` + large + `"}}` + "\n" + final + "\n" + complete},
-		{"unterminated oversized final", progress + "\n" + `{"type":"item.completed","item":{"type":"agent_message","text":"` + large},
-	} {
-		for _, chunk := range []int{7, 32768} {
-			t.Run(fmt.Sprintf("%s/chunk%d", scenario.name, chunk), func(t *testing.T) {
-				canceled := false
-				o := jsonlOutput{cancel: func() { canceled = true }}
-				for data := scenario.data; len(data) != 0; {
-					n := min(chunk, len(data))
-					_, _ = o.Write([]byte(data[:n]))
-					data = data[n:]
-				}
-				o.stream.Finish()
-				if !o.stopped || !o.failed || !canceled || o.completed || !strings.Contains(o.failureReason, "event exceeded") {
-					t.Fatalf("oversized record accepted: stopped=%t failed=%t canceled=%t completed=%t reason=%q", o.stopped, o.failed, canceled, o.completed, o.failureReason)
-				}
-			})
-		}
+	data := progress + "\n" + `{"type":"item.completed","item":{"type":"command_execution","output":"` + strings.Repeat("x", aicli.MaxEventBytes) + `"}}` + "\n" + final + "\n" + `{"type":"turn.completed"}`
+	canceled := false
+	o := jsonlOutput{cancel: func() { canceled = true }}
+	for len(data) != 0 {
+		n := min(32768, len(data))
+		_, _ = o.Write([]byte(data[:n]))
+		data = data[n:]
+	}
+	o.stream.Finish()
+	if !o.stopped || !o.failed || !canceled || o.completed || !strings.Contains(o.failureReason, "event exceeded") {
+		t.Fatalf("oversized record accepted: stopped=%t failed=%t canceled=%t completed=%t reason=%q", o.stopped, o.failed, canceled, o.completed, o.failureReason)
 	}
 }
 

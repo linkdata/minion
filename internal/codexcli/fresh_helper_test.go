@@ -56,31 +56,7 @@ func TestRunFreshAndBoundaryHelpers(t *testing.T) {
 {"type":"turn.completed"}`+"\nEVENTS\n")
 			home := os.Getenv("CODEX_HOME")
 			writeUsageRollout(t, home, "root", "", usageEvent("task_started", "root-turn"), usageRecord("root", "root-turn", "root-response", 10, 0, 1), usageEvent("task_complete", "root-turn"))
-			path := writeUsageRollout(t, home, "child", "root", scenario.events...)
-			data, err := os.ReadFile(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			lines := strings.SplitN(string(data), "\n", 2)
-			var header struct {
-				Type    string         `json:"type"`
-				Payload map[string]any `json:"payload"`
-			}
-			if err := json.Unmarshal([]byte(lines[0]), &header); err != nil {
-				t.Fatal(err)
-			}
-			header.Payload["parent_thread_id"] = "root"
-			delete(header.Payload, "subagent_history_start_ordinal")
-			if scenario.boundary != nil {
-				header.Payload["subagent_history_start_ordinal"] = *scenario.boundary
-			}
-			first, err := json.Marshal(header)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(path, append(append(first, '\n'), []byte(lines[1])...), 0600); err != nil {
-				t.Fatal(err)
-			}
+			writeUsageRolloutBoundary(t, home, "child", "root", scenario.boundary, scenario.events...)
 			result, err := Run(context.Background(), t.TempDir(), "synthetic helper lifecycle fixture", false, "", config.CodexConfig{})
 			want := usage.Tokens{Input: 10, Output: 1}
 			if scenario.childInput != 0 {

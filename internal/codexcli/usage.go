@@ -55,9 +55,6 @@ func collectUsage(ctx context.Context, home, rootID string, started time.Time, f
 	entries, candidates := 0, 0
 	if rootID != "" && home != "" {
 		err := walkUsageFiles(ctx, filepath.Join(home, "sessions"), started, func(path string, entry fs.DirEntry) error {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
 			entries++
 			if entries > maxUsageWalkEntries {
 				complete = false
@@ -84,7 +81,8 @@ func collectUsage(ctx context.Context, home, rootID string, started time.Time, f
 				complete = false
 				return nil
 			}
-			scanner := rolloutScanner(ctx, io.LimitReader(f, maxUsageHeaderBytes+1), nil)
+			scanner := bufio.NewScanner(io.LimitReader(f, maxUsageHeaderBytes+1))
+			scanner.Buffer(make([]byte, maxUsageHeaderBytes+2), maxUsageHeaderBytes+2)
 			var event rolloutEvent
 			var meta rolloutMeta
 			ok := scanner.Scan() && len(scanner.Bytes()) <= maxUsageHeaderBytes && json.Unmarshal(scanner.Bytes(), &event) == nil && event.Type == "session_meta" && json.Unmarshal(event.Payload, &meta) == nil && meta.ID != ""

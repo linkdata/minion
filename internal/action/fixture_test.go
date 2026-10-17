@@ -137,10 +137,6 @@ func gitTreeFixture(sha string, files ...workspace.File) github.GitTree {
 	return github.GitTree{SHA: sha, Truncated: &truncated, Tree: entries}
 }
 
-func emptyTreeFixture(_ context.Context, sha string) (github.GitTree, error) {
-	return gitTreeFixture(sha), nil
-}
-
 func writeTreeFixture(t *testing.T, w http.ResponseWriter, sha string, files ...workspace.File) {
 	t.Helper()
 	if err := json.NewEncoder(w).Encode(gitTreeFixture(sha, files...)); err != nil {
@@ -222,11 +218,8 @@ func withClaudeCritic(job Job) Job {
 
 func cloneFixture(t *testing.T, root string, files ...workspace.File) *gitwork.Checkout {
 	t.Helper()
-	metadata := emptyTreeFixture
-	if len(files) != 0 {
-		metadata = func(_ context.Context, sha string) (github.GitTree, error) {
-			return gitTreeFixture(sha, files...), nil
-		}
+	metadata := func(_ context.Context, sha string) (github.GitTree, error) {
+		return gitTreeFixture(sha, files...), nil
 	}
 	checkout, err := gitwork.Clone(context.Background(), root, "o/r", "main", metadata, true)
 	if err != nil {
@@ -304,3 +297,27 @@ func captureComment(t *testing.T, w http.ResponseWriter, r *http.Request, body *
 }
 
 const approvedCritiqueJSON = `{"approved":true,"has_blockers":false,"feedback":""}`
+
+func serveFixFlowFixture(t *testing.T, w http.ResponseWriter, r *http.Request, files ...workspace.File) bool {
+	t.Helper()
+	switch {
+	case serveSafeForkChecks(w, r, "bot/r", false):
+	case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
+		_, _ = fmt.Fprint(w, `{"id":1,"full_name":"o/r","owner":{"id":2},"default_branch":"main","visibility":"public"}`)
+	case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7":
+		_, _ = fmt.Fprint(w, `{"node_id":"issue-node","title":"Task","body":"Inspect source"}`)
+	case r.Method == http.MethodGet && r.URL.Path == "/repos/bot/r":
+		_, _ = fmt.Fprint(w, `{"id":4,"full_name":"bot/r","fork":true,"parent":{"id":1,"full_name":"o/r"},"source":{"id":1,"full_name":"o/r"},"visibility":"public"}`)
+	case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/pulls":
+		_, _ = fmt.Fprint(w, `[]`)
+	case r.Method == http.MethodGet && r.URL.Path == "/repos/bot/r/branches/minion/fix-7-aaaaaaaaaaaa":
+		http.NotFound(w, r)
+	case r.Method == http.MethodPost && r.URL.Path == "/graphql":
+		_, _ = fmt.Fprint(w, `{"data":{"node":{"title":"Task","bodyText":"Inspect source","lastEditedAt":null}}}`)
+	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/o/r/git/trees/"):
+		writeTreeFixture(t, w, strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/"), files...)
+	default:
+		return false
+	}
+	return true
+}

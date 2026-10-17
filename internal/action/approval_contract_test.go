@@ -5,8 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -17,41 +15,27 @@ import (
 	"github.com/linkdata/minion/internal/workspace"
 )
 
-func TestRunnerRefusesRenderedOverflowBeforeCritic(t *testing.T) {
-	for _, audit := range []bool{false, true} {
-		t.Run(map[bool]string{false: "answer", true: "audit report"}[audit], func(t *testing.T) {
-			job := portableJob(command.Comment)
-			job.Critic, job.CriticMaxRounds = &RoleSettings{Provider: "claude"}, 1
-			if audit {
-				installActionTestSkills(t, testAuditSkillURL)
-				job.Action, job.Command, job.Main.Skills = command.SecurityAudit, "security-audit", []string{testAuditSkillURL}
-			}
-			text := strings.Repeat("a\n", 25000)
-			mainCalls, criticCalls := 0, 0
-			runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
-				if request.role == roleCritic {
-					criticCalls++
-					return aicli.Result{Answer: approvedCritiqueJSON}, nil
-				}
-				mainCalls++
-				if audit {
-					if err := os.WriteFile(filepath.Join(request.outputDir, "REPORT.md"), []byte(text), 0600); err != nil {
-						t.Fatal(err)
-					}
-					return aicli.Result{Answer: proposalJSON("Complete report", "")}, nil
-				}
-				return aicli.Result{Answer: proposalJSON(text, "")}, nil
-			}}
-			result, err := runner.Run(context.Background(), job)
-			if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "publication limit") || mainCalls != 1 || criticCalls != 0 || result.Answer != "" || len(result.Calls) != 1 {
-				t.Fatalf("overflow reached critic or successful output: main=%d critic=%d calls=%+v err=%v", mainCalls, criticCalls, result.Calls, err)
-			}
-			if audit {
-				if len(result.Artifacts) != 1 || result.Artifacts[0].Path != "REPORT.md" || string(result.Artifacts[0].Data) != text || result.validate(job, false) != nil {
-					t.Fatalf("unpublishable report lost as partial evidence: %+v", result.Artifacts)
-				}
-			}
-		})
+func TestRunnerRefusesRenderedReportOverflowBeforeCritic(t *testing.T) {
+	installActionTestSkills(t, testAuditSkillURL)
+	job := withClaudeCritic(portableJob(command.SecurityAudit))
+	job.CriticMaxRounds = 1
+	job.Main.Skills = []string{testAuditSkillURL}
+	text := strings.Repeat("a\n", 25000)
+	calls := 0
+	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+		calls++
+		if request.role != roleMain {
+			t.Fatal("unpublishable report reached critic")
+		}
+		writeFixtureFile(t, request.outputDir, "REPORT.md", []byte(text))
+		return aicli.Result{Answer: proposalJSON("Complete report", "")}, nil
+	}}
+	result, err := runner.Run(context.Background(), job)
+	if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "publication limit") || calls != 1 || len(result.Calls) != 1 || result.Answer != "" {
+		t.Fatalf("overflow reached critic/success: calls=%d result=%+v error=%v", calls, result, err)
+	}
+	if len(result.Artifacts) != 1 || result.Artifacts[0].Path != "REPORT.md" || string(result.Artifacts[0].Data) != text || result.validate(job, false) != nil {
+		t.Fatalf("partial report lost: %+v", result.Artifacts)
 	}
 }
 

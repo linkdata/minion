@@ -28,7 +28,7 @@ func TestRunnerNativeClaudePreservesContextAndCriticSchema(t *testing.T) {
 set -e
 case "$*" in
  *has_blockers*) output='{"approved":true,"has_blockers":false,"feedback":""}' ;;
- *) output='{"answer":"No findings.","review_notes":""}' ;;
+ *) output='{"answer":"No findings.","refutations":""}' ;;
 esac
 printf '%%s\n' "$@" > %s
 cat > %s
@@ -53,7 +53,7 @@ printf '%%s\n' '{"type":"result","subtype":"success","is_error":false,"terminal_
 			}
 			job.Main.Model, job.Main.Effort, job.Main.Skills = "portable-"+job.Main.Provider, "high", []string{testReviewSkillURL}
 			job.Critic.Model, job.Critic.Effort, job.Critic.AlwaysOnSkills = "portable-"+job.Critic.Provider, "medium", []string{testReviewSkillURL}
-			runner := Runner{WorkRoot: filepath.Join(root, "work"), Claude: config.ClaudeConfig{Model: "stale-host-model"}}
+			runner := Runner{WorkRoot: t.TempDir(), Claude: config.ClaudeConfig{Model: "stale-host-model"}}
 			result, err := runner.Run(context.Background(), job)
 			if err != nil || result.Answer != "No findings." || len(result.Calls) != 2 {
 				t.Fatalf("native action: result=%+v error=%v", result, err)

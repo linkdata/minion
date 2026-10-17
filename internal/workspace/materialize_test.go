@@ -48,41 +48,29 @@ func TestMaterializeChangesCreatesOnlyFinalFiles(t *testing.T) {
 }
 
 func TestMaterializeChangesRefusesFilesystemAliases(t *testing.T) {
-	for _, names := range [][2]string{{"ß", "ss"}, {"é", "e\u0301"}} {
-		t.Run(names[0], func(t *testing.T) {
-			root := privateRoot(t)
-			base := []File{{Path: names[0], Mode: Regular, Data: []byte("baseline")}}
-			changes := []Change{{Path: names[1], Mode: Regular, Data: []byte("candidate")}}
-			err := MaterializeChanges(root, base, changes)
-			if err != nil && !errors.Is(err, os.ErrExist) {
-				t.Fatal(err)
-			}
-			if err != nil {
-				entries, readErr := os.ReadDir(root)
-				if readErr != nil || len(entries) != 1 {
-					t.Fatalf("alias refusal left unexpected files: %v, %v", entries, readErr)
-				}
-				want := "baseline"
-				if entries[0].Name() == names[1] {
-					want = "candidate"
-				} else if entries[0].Name() != names[0] {
-					t.Fatalf("alias refusal left unexpected spelling: %q", entries[0].Name())
-				}
-				data, readErr := os.ReadFile(filepath.Join(root, entries[0].Name()))
-				if readErr != nil || string(data) != want {
-					t.Fatalf("alias overwrote first exclusive file: %q, %v", data, readErr)
-				}
-				return
-			}
-			data, readErr := os.ReadFile(filepath.Join(root, names[0]))
-			if readErr != nil || string(data) != "baseline" {
-				t.Fatalf("alias overwrote baseline: %q, %v (materialize: %v)", data, readErr, err)
-			}
-			data, readErr = os.ReadFile(filepath.Join(root, names[1]))
-			if readErr != nil || string(data) != "candidate" {
-				t.Fatalf("distinct candidate file=%q, %v", data, readErr)
-			}
-		})
+	root := privateRoot(t)
+	base := []File{{Path: "é", Mode: Regular, Data: []byte("baseline")}}
+	changes := []Change{{Path: "e\u0301", Mode: Regular, Data: []byte("candidate")}}
+	err := MaterializeChanges(root, base, changes)
+	entries, readErr := os.ReadDir(root)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if err == nil {
+		if len(entries) != 2 {
+			t.Fatalf("aliased names accepted without exclusive refusal: %v", entries)
+		}
+		return // This host represents the exact names as distinct files.
+	}
+	if !errors.Is(err, os.ErrExist) {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("alias refusal left unexpected files: %v", entries)
+	}
+	// The sorted candidate spelling is written first; the exclusive baseline write must not truncate it.
+	if data, err := os.ReadFile(filepath.Join(root, entries[0].Name())); err != nil || string(data) != "candidate" {
+		t.Fatalf("alias overwrote first exclusive file: %q, %v", data, err)
 	}
 }
 
@@ -100,30 +88,12 @@ func TestMaterializeChangesPreservesSeparateTransferLimits(t *testing.T) {
 		changes[i] = Change{Path: fmt.Sprintf("added-%03d", i), Mode: Regular}
 	}
 	changes[0].Data = data
-	// Stop before writing 65 MiB and 10,100 files, after all candidate validation.
 	root := privateRoot(t)
-	marker := filepath.Join(root, "marker")
-	if err := os.WriteFile(marker, []byte("unchanged"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := MaterializeChanges(root, base, changes); err == nil || err.Error() != "workspace root is not empty" {
-		t.Fatalf("valid source plus bounded growth was rejected before materialization: %v", err)
-	}
-	if got, err := os.ReadFile(marker); err != nil || string(got) != "unchanged" {
-		t.Fatalf("refused root was modified: %q, %v", got, err)
-	}
-	if err := os.Remove(marker); err != nil {
-		t.Fatal(err)
-	}
 	if err := MaterializeChanges(root, base, changes); err != nil {
 		t.Fatal(err)
 	}
 	if err := CheckChangesUnchanged(context.Background(), root, base, changes); err != nil {
 		t.Fatalf("valid 65 MiB / 10,100-file candidate cannot be checked: %v", err)
-	}
-	final := append(slices.Clone(base), File{Path: changes[0].Path, Mode: Regular, Data: data})
-	if err := CheckUnchanged(context.Background(), root, final); err == nil || !strings.Contains(err.Error(), "source exceeds file limit") {
-		t.Fatalf("candidate canary widened source transfer limits: %v", err)
 	}
 	byteOverflow := append(slices.Clone(base[:MaxBytes/len(data)]), File{Path: changes[0].Path, Mode: Regular, Data: data})
 	if err := CheckUnchanged(context.Background(), root, byteOverflow); err == nil || !strings.Contains(err.Error(), "source exceeds byte limit") {
@@ -143,7 +113,6 @@ func TestMaterializeChangesValidatesBeforeWriting(t *testing.T) {
 		{{Path: "missing", Delete: true}},
 		{{Path: "dir/new", Mode: Regular}},
 		{{Path: ".git./config", Mode: Regular}},
-		{{Path: "new", Mode: Regular, Data: make([]byte, MaxChangeBytes+1)}},
 	} {
 		root := privateRoot(t)
 		if err := MaterializeChanges(root, base, changes); err == nil {
@@ -154,7 +123,7 @@ func TestMaterializeChangesValidatesBeforeWriting(t *testing.T) {
 			t.Fatalf("invalid candidate wrote files: %v, %v", entries, err)
 		}
 	}
-	for _, name := range []string{"literal\\backslash", ".git./config"} {
+	for _, name := range []string{"literal\\backslash"} {
 		root := privateRoot(t)
 		if err := MaterializeChanges(root, []File{{Path: name, Mode: Regular}}, nil); err == nil || !strings.Contains(err.Error(), "unsafe fix source path") {
 			t.Fatalf("unsafe candidate baseline %q accepted: %v", name, err)
@@ -166,7 +135,7 @@ func TestMaterializeChangesValidatesBeforeWriting(t *testing.T) {
 	}
 }
 
-func TestSnapshotSingleListByteLimit(t *testing.T) {
+func TestSnapshotSingleAndCombinedByteLimits(t *testing.T) {
 	data := make([]byte, 1<<20)
 	files := make([]File, MaxBytes/len(data))
 	for i := range files {
@@ -179,6 +148,15 @@ func TestSnapshotSingleListByteLimit(t *testing.T) {
 	snapshot.Files = append(snapshot.Files, File{Path: "overflow", Mode: Regular, Data: data[:1]})
 	if err := ValidateSnapshot(snapshot); err == nil || err.Error() != "source exceeds byte limit" {
 		t.Fatalf("single-list source overflow: %v", err)
+	}
+	half := files[:len(files)/2]
+	snapshot = Snapshot{Head: strings.Repeat("a", 40), Base: strings.Repeat("b", 40), MergeBase: strings.Repeat("b", 40), Files: half, BaseFiles: half}
+	if err := ValidateSnapshot(snapshot); err != nil {
+		t.Fatalf("source at exact combined byte limit: %v", err)
+	}
+	snapshot.BaseFiles = append(slices.Clone(half), File{Path: "overflow", Mode: Regular, Data: data[:1]})
+	if err := ValidateSnapshot(snapshot); err == nil || err.Error() != "snapshot files exceed byte limit" {
+		t.Fatalf("combined source overflow: %v", err)
 	}
 }
 

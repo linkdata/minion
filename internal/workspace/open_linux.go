@@ -33,6 +33,9 @@ func openPath(name string, directory bool) (file *os.File, resultErr error) {
 	if err != nil {
 		return nil, err
 	}
+	if abs == "/" {
+		return nil, errors.New("filesystem root is not a workspace")
+	}
 	flags := syscall.O_RDONLY | syscall.O_NOFOLLOW | syscall.O_NONBLOCK | syscall.O_CLOEXEC
 	// syscall omits O_PATH on amd64; Linux uses this value on every supported architecture.
 	const oPath = 0x200000

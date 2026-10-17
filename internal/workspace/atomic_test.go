@@ -19,7 +19,7 @@ func TestWriteAtomicReplacesPrivateRecordAndCleansTemporaryFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = old.Close() }()
-	if err := WriteAtomic(path, []byte("new"), root); err != nil {
+	if err := WriteAtomic(path, []byte("new")); err != nil {
 		t.Fatal(err)
 	}
 	if data, err := os.ReadFile(path); err != nil || string(data) != "new" {

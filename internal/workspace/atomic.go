@@ -6,16 +6,19 @@ import (
 	"path/filepath"
 )
 
-// WriteAtomic replaces a private record, then syncs the supplied directories.
+// WriteAtomic replaces a private record, then syncs its directory and extra ancestors.
 // The caller validates paths and serializes updates; sync failure can follow replacement.
-func WriteAtomic(path string, data []byte, syncDirs ...string) (resultErr error) {
+func WriteAtomic(path string, data []byte, extraDirs ...string) (resultErr error) {
 	file, err := os.CreateTemp(filepath.Dir(path), ".record-*")
 	if err != nil {
 		return err
 	}
+	temporary := file.Name()
 	defer func() {
-		if err := os.Remove(file.Name()); !errors.Is(err, os.ErrNotExist) {
-			resultErr = errors.Join(resultErr, err)
+		if temporary != "" {
+			if err := os.Remove(temporary); !errors.Is(err, os.ErrNotExist) {
+				resultErr = errors.Join(resultErr, err)
+			}
 		}
 	}()
 	_, writeErr := file.Write(data)
@@ -25,10 +28,11 @@ func WriteAtomic(path string, data []byte, syncDirs ...string) (resultErr error)
 	if err := errors.Join(writeErr, file.Close()); err != nil {
 		return err
 	}
-	if err := os.Rename(file.Name(), path); err != nil {
+	if err := os.Rename(temporary, path); err != nil {
 		return err
 	}
-	for _, directory := range syncDirs {
+	temporary = ""
+	for _, directory := range append([]string{filepath.Dir(path)}, extraDirs...) {
 		file, err := os.Open(directory)
 		if err != nil {
 			return err

@@ -24,38 +24,55 @@ func TestOutputStoppedTaskNeedsNewRootResponseAndResult(t *testing.T) {
 		value, _ := json.Marshal("<task-notification><status>killed</status><summary>" + summary + "</summary></task-notification>")
 		return `{"type":"user","isSynthetic":true,"message":{"content":` + string(value) + `}}`
 	}
+	const pressureSummary = `Background command "tests" was stopped because the system is running low on memory`
+	pressureNotice, _ := json.Marshal(`<task-notification><task-id>worker</task-id><status>killed</status><summary>Background command &quot;tests&quot; was stopped because the system is running low on memory</summary></task-notification>`)
+	pressureSystem := fmt.Sprintf(`{"type":"system","subtype":"task_notification","status":"stopped","summary":%q}`, pressureSummary)
+	pressureSynthetic := `{"type":"user","isSynthetic":true,"message":{"content":` + string(pressureNotice) + `}}`
+	later := strings.Replace(successfulResult, `"outputTokens":11`, `"outputTokens":22`, 1)
 	for _, tc := range []struct {
 		name, after string
 		fails       bool
+		failure     string
+		output      int64
 	}{
-		{"wind down then held waiting result", pending + "\n" + stop + "\n" + clear + "\n" + successfulResult, true},
-		{"stop after final", stop, true},
-		{"new result without root response", stop + "\n" + successfulResult, true},
-		{"repeated old root ID", stop + "\n" + old + "\n" + successfulResult, true},
-		{"unknown parent cannot assess stop", stop + "\n" + strings.Replace(fresh, `"parent_tool_use_id":null,`, "", 1) + "\n" + successfulResult, true},
-		{"delegate cannot assess stop", stop + "\n" + strings.Replace(fresh, `"parent_tool_use_id":null`, `"parent_tool_use_id":"parent"`, 1) + "\n" + successfulResult, true},
-		{"new root without final result", stop + "\n" + fresh, true},
-		{"new root assessment and final", stop + "\n" + fresh + "\n" + successfulResult, false},
-		{"memory pressure remains fatal after new root", strings.Replace(stop, `"summary":"Background command tests was stopped"`, `"summary":"Background command \"tests\" was stopped because the system is running low on memory"`, 1) + "\n" + fresh + "\n" + successfulResult, true},
-		{"ambient stop after final", strings.Replace(stop, `"status":"stopped"`, `"status":"stopped","ambient":true`, 1), false},
-		{"synthetic killed string", synthetic + "\n" + successfulResult, true},
-		{"synthetic stopped block", `{"type":"user","isSynthetic":true,"message":{"content":[{"type":"text","text":` + strings.Replace(string(notice), "killed", "stopped", 1) + `}]}}` + "\n" + successfulResult, true},
-		{"synthetic stop assessed", synthetic + "\n" + fresh + "\n" + successfulResult, false},
-		{"raw ampersand notice", noticeEvent(`Background command "go test && go vet" was stopped`), true},
-		{"raw less-than notice", noticeEvent(`Background command "grep x <file" was stopped`), true},
-		{"entity-escaped notice", noticeEvent(`Background command &quot;go test &amp;&amp; go vet&quot; was stopped`), true},
-		{"killed system event", strings.Replace(stop, `"status":"stopped"`, `"status":"killed"`, 1), true},
-		{"raw memory-pressure summary", noticeEvent(`Background command "go test && go vet" was stopped because the system is running low on memory`) + "\n" + fresh + "\n" + successfulResult, true},
-		{"literal closing summary tag in command", noticeEvent(`Background command "echo </summary> && go vet" was stopped because the system is running low on memory`) + "\n" + fresh + "\n" + successfulResult, true},
-		{"ordinary user quote", strings.Replace(synthetic, `"isSynthetic":true`, `"isSynthetic":false`, 1), false},
-		{"ordinary failed command assessed", strings.Replace(stop, `"status":"stopped"`, `"status":"failed"`, 1), false},
+		{"wind down then held waiting result", pending + "\n" + stop + "\n" + clear + "\n" + successfulResult, true, "", 11},
+		{"stop after final", stop, true, "", 11},
+		{"new result without root response", stop + "\n" + successfulResult, true, "", 11},
+		{"repeated old root ID", stop + "\n" + old + "\n" + successfulResult, true, "", 11},
+		{"unknown parent cannot assess stop", stop + "\n" + strings.Replace(fresh, `"parent_tool_use_id":null,`, "", 1) + "\n" + successfulResult, true, "", 11},
+		{"delegate cannot assess stop", stop + "\n" + strings.Replace(fresh, `"parent_tool_use_id":null`, `"parent_tool_use_id":"parent"`, 1) + "\n" + successfulResult, true, "", 11},
+		{"new root without final result", stop + "\n" + fresh, true, "", 11},
+		{"new root assessment and final", stop + "\n" + fresh + "\n" + successfulResult, false, "", 11},
+		{"memory pressure remains fatal after new root", strings.Replace(stop, `"summary":"Background command tests was stopped"`, `"summary":"Background command \"tests\" was stopped because the system is running low on memory"`, 1) + "\n" + fresh + "\n" + successfulResult, true, "provider memory pressure", 11},
+		{"ambient stop after final", strings.Replace(stop, `"status":"stopped"`, `"status":"stopped","ambient":true`, 1), false, "", 11},
+		{"synthetic killed string", synthetic + "\n" + successfulResult, true, "", 11},
+		{"synthetic stopped block", `{"type":"user","isSynthetic":true,"message":{"content":[{"type":"text","text":` + strings.Replace(string(notice), "killed", "stopped", 1) + `}]}}` + "\n" + successfulResult, true, "", 11},
+		{"synthetic stop assessed", synthetic + "\n" + fresh + "\n" + successfulResult, false, "", 11},
+		{"raw ampersand notice", noticeEvent(`Background command "go test && go vet" was stopped`), true, "", 11},
+		{"raw less-than notice", noticeEvent(`Background command "grep x <file" was stopped`), true, "", 11},
+		{"entity-escaped notice", noticeEvent(`Background command &quot;go test &amp;&amp; go vet&quot; was stopped`), true, "", 11},
+		{"killed system event", strings.Replace(stop, `"status":"stopped"`, `"status":"killed"`, 1), true, "", 11},
+		{"raw memory-pressure summary", noticeEvent(`Background command "go test && go vet" was stopped because the system is running low on memory`) + "\n" + fresh + "\n" + successfulResult, true, "provider memory pressure", 11},
+		{"literal closing summary tag in command", noticeEvent(`Background command "echo </summary> && go vet" was stopped because the system is running low on memory`) + "\n" + fresh + "\n" + successfulResult, true, "provider memory pressure", 11},
+		{"ordinary user quote", strings.Replace(synthetic, `"isSynthetic":true`, `"isSynthetic":false`, 1), false, "", 11},
+		{"ordinary failed command assessed", strings.Replace(stop, `"status":"stopped"`, `"status":"failed"`, 1), false, "", 11},
+		{"memory pressure/native system", pressureSystem + "\n" + later, true, "provider memory pressure", 22},
+		{"memory pressure/native synthetic string", pressureSynthetic + "\n" + later, true, "provider memory pressure", 22},
+		{"memory pressure/native synthetic text block", `{"type":"user","isSynthetic":true,"message":{"content":[{"type":"text","text":` + string(pressureNotice) + `}]}}` + "\n" + later, true, "provider memory pressure", 22},
+		{"memory pressure/ordinary user quote", strings.Replace(pressureSynthetic, `"isSynthetic":true`, `"isSynthetic":false`, 1) + "\n" + later, false, "", 22},
+		{"memory pressure/ambient server stopped", `{"type":"system","subtype":"task_notification","status":"stopped","ambient":true,"summary":"Background server deliberately stopped"}` + "\n" + later, false, "", 22},
+		{"memory pressure/ordinary completed task", strings.Replace(pressureSystem, `"stopped"`, `"completed"`, 1) + "\n" + later, false, "", 22},
+		{"memory pressure/unrelated assistant summary", strings.Replace(pressureSystem, `"type":"system"`, `"type":"assistant"`, 1) + "\n" + later, false, "", 22},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			o := jsonlOutput{}
 			data := numberResultEvents(old+"\n"+successfulResult+"\n"+tc.after) + "\n"
 			writeChunks(t, &o, data)
 			o.finish()
-			if (o.err != nil) != tc.fails || o.completed == tc.fails || o.result.UsageComplete == tc.fails || o.result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) {
+			if tc.failure != "" && (o.err == nil || !strings.Contains(o.err.Error(), tc.failure)) {
+				t.Fatalf("lost native failure %q: %v", tc.failure, o.err)
+			}
+			if (o.err != nil) != tc.fails || o.completed == tc.fails || o.result.UsageComplete == tc.fails || o.result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: tc.output}) {
 				t.Fatalf("result=%+v completed=%v error=%v", o.result, o.completed, o.err)
 			}
 		})

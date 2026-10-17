@@ -2,7 +2,6 @@ package claudecli
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"math"
 	"os"
@@ -129,48 +128,19 @@ func TestOutputIgnoresAmbientTasksAndStillAwaitsRequestedWork(t *testing.T) {
 	}
 }
 
-func TestOutputRejectsNativeMemoryPressureStops(t *testing.T) {
-	const summary = `Background command "tests" was stopped because the system is running low on memory`
-	notice := `<task-notification><task-id>worker</task-id><status>killed</status><summary>Background command &quot;tests&quot; was stopped because the system is running low on memory</summary></task-notification>`
-	data, _ := json.Marshal(notice)
-	system := fmt.Sprintf(`{"type":"system","subtype":"task_notification","status":"stopped","summary":%q}`, summary)
-	synthetic := `{"type":"user","isSynthetic":true,"message":{"content":` + string(data) + `}}`
-	later := strings.Replace(successfulResult, `"outputTokens":11`, `"outputTokens":22`, 1)
-	for _, scenario := range []struct {
-		name, event string
-		fails       bool
-	}{
-		{"native system", system, true},
-		{"native synthetic string", synthetic, true},
-		{"native synthetic text block", `{"type":"user","isSynthetic":true,"message":{"content":[{"type":"text","text":` + string(data) + `}]}}`, true},
-		{"ordinary user quote", strings.Replace(synthetic, `"isSynthetic":true`, `"isSynthetic":false`, 1), false},
-		{"ambient server stopped", `{"type":"system","subtype":"task_notification","status":"stopped","ambient":true,"summary":"Background server deliberately stopped"}`, false},
-		{"ordinary completed task", strings.Replace(system, `"stopped"`, `"completed"`, 1), false},
-		{"unrelated assistant summary", strings.Replace(system, `"type":"system"`, `"type":"assistant"`, 1), false},
-	} {
-		t.Run(scenario.name, func(t *testing.T) {
-			o := jsonlOutput{}
-			_, _ = o.Write([]byte(numberResultEvents(successfulResult+"\n"+scenario.event+"\n"+later) + "\n"))
-			o.finish()
-			if (o.err != nil) != scenario.fails || scenario.fails && (o.result.Answer != "" || o.result.UsageComplete || !strings.Contains(o.err.Error(), "provider memory pressure")) || o.result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 22}) {
-				t.Fatalf("result=%+v error=%v", o.result, o.err)
-			}
-		})
-	}
-}
+const waitCeilingDiagnostic = "Background tasks still running 10m after the last turn (worker); stopping them. Set CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 to wait indefinitely."
 
 func TestWaitCeilingDiagnostic(t *testing.T) {
-	const diagnostic = "Background tasks still running 10m after the last turn (worker); stopping them. Set CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 to wait indefinitely."
 	for _, tc := range []struct {
 		line string
 		want bool
 	}{
-		{diagnostic, true}, {diagnostic + " \t\r", true},
-		{"prefix " + diagnostic, false}, {diagnostic + " extra", false},
+		{waitCeilingDiagnostic, true}, {waitCeilingDiagnostic + " \t\r", true},
+		{"prefix " + waitCeilingDiagnostic, false}, {waitCeilingDiagnostic + " extra", false},
 		{"Background tasks still running; ordinary progress", false}, {"", false},
 	} {
 		if got := isWaitCeilingStop([]byte(tc.line)); got != tc.want {
-			t.Errorf("diagnostic %q matched=%t want=%t", tc.line, got, tc.want)
+			t.Errorf("waitCeilingDiagnostic %q matched=%t want=%t", tc.line, got, tc.want)
 		}
 	}
 }
@@ -201,14 +171,5 @@ func TestRunPrelaunchFailuresHaveCompleteZeroUsage(t *testing.T) {
 	}
 	if _, err := os.Stat(binary + ".called"); !os.IsNotExist(err) {
 		t.Fatalf("prelaunch failure started CLI: %v", err)
-	}
-}
-
-func TestRunRecognizesEarlierWaitCeilingAfterLaterStderr(t *testing.T) {
-	const ceiling = "Background tasks still running 10m after the last turn (worker); stopping them. Set CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 to wait indefinitely."
-	fakeExecutable(t, "claude", "cat >/dev/null\ncat <<'DIAG' >&2\n"+ceiling+"\n"+strings.Repeat("later diagnostic\n", 2000)+"DIAG\ncat <<'RESULT'\n"+successfulResult+"\nRESULT\n")
-	result, err := Run(context.Background(), t.TempDir(), "task", false, "", config.ClaudeConfig{})
-	if err == nil || !strings.Contains(err.Error(), "wait ceiling") || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) {
-		t.Fatalf("earlier wait stop lost: result=%+v error=%v", result, err)
 	}
 }

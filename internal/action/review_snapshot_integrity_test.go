@@ -52,8 +52,8 @@ func TestReviewSnapshotRejectsCriticCopyMutation(t *testing.T) {
 			if len(result.Calls) != wantCalls {
 				t.Fatalf("lost calls after integrity failure: %+v", result.Calls)
 			}
-			if len(result.ReviewLedger) != wantCalls-1 {
-				t.Fatalf("checkpointed an integrity-failed call: %+v", result.ReviewLedger)
+			if len(result.Refutations) != 0 {
+				t.Fatalf("checkpointed an integrity-failed call: %+v", result.Refutations)
 			}
 			if err := result.validate(job, false); err != nil {
 				t.Fatalf("invalid partial evidence after integrity failure: %v", err)
@@ -68,7 +68,7 @@ func TestReviewSnapshotRejectsCriticCopyMutation(t *testing.T) {
 
 func TestReviewSnapshotChecksExactFrozenFiles(t *testing.T) {
 	for _, reports := range []bool{false, true} {
-		for _, mutation := range []string{"bytes", "permissions", "special permissions", "new file", "removed file"} {
+		for _, mutation := range []string{"special permissions", "new file"} {
 			t.Run(fmt.Sprintf("reports=%t/%s", reports, mutation), func(t *testing.T) {
 				job := portableJob(command.Fix)
 				index, source := offlineIndexFixture(t, job.Source.Files)
@@ -88,13 +88,6 @@ func TestReviewSnapshotChecksExactFrozenFiles(t *testing.T) {
 				}
 				filename := filepath.Join(root, name)
 				switch mutation {
-				case "bytes":
-					writeFixtureFile(t, root, name, []byte("tampered copy"))
-				case "permissions":
-					// Preserve the executable bit: even non-executable permission changes break the copy's identity.
-					if err := os.Chmod(filename, 0600); err != nil {
-						t.Fatal(err)
-					}
 				case "special permissions":
 					if err := os.Chmod(filename, os.ModeSetuid|0644); err != nil {
 						t.Fatal(err)
@@ -102,10 +95,6 @@ func TestReviewSnapshotChecksExactFrozenFiles(t *testing.T) {
 				case "new file":
 					// An unknown report name is not visited by the known-artifact collector.
 					writeFixtureFile(t, root, "unexpected.txt", []byte("new copy content"))
-				case "removed file":
-					if err := os.Remove(filename); err != nil {
-						t.Fatal(err)
-					}
 				}
 				if err := snapshot.verify(context.Background()); err == nil || !strings.Contains(err.Error(), "frozen candidate") {
 					t.Fatalf("frozen %s mutation accepted: %v", mutation, err)

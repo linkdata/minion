@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -24,6 +25,9 @@ func TestExecutablePathCanonicalizesAliasAndPreservesLookupErrors(t *testing.T) 
 	}
 	if got, err := ExecutablePath("test-cli"); err != nil || got != want || !filepath.IsAbs(got) {
 		t.Fatalf("canonical executable=%q error=%v want=%q", got, err, want)
+	}
+	if got, err := AbsoluteExecutable("test-cli"); err != nil || got != filepath.Join(bin, "test-cli") {
+		t.Fatalf("launcher alias=%q error=%v", got, err)
 	}
 	if _, err := ExecutablePath("missing-cli"); !errors.Is(err, exec.ErrNotFound) {
 		t.Fatalf("lookup cause lost: %v", err)
@@ -46,5 +50,9 @@ func TestExecutablePathCanonicalizesAliasAndPreservesLookupErrors(t *testing.T) 
 	t.Setenv("PATH", rel)
 	if _, err := ExecutablePath("test-cli"); !errors.Is(err, exec.ErrDot) {
 		t.Fatalf("relative PATH command accepted: %v", err)
+	}
+	t.Setenv("GODEBUG", "execerrdot=0")
+	if _, err := ExecutablePath("test-cli"); err == nil || !strings.Contains(err.Error(), "absolute path") {
+		t.Fatalf("relative PATH accepted with execerrdot disabled: %v", err)
 	}
 }

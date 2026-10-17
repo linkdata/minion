@@ -1,8 +1,10 @@
 package monitor
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log"
 	"os"
 	"path/filepath"
 	"slices"
@@ -17,28 +19,20 @@ import (
 
 type cancelDiscoveryGitHub struct {
 	*fakeGitHub
-	stage  string
-	cancel context.CancelFunc
-	err    error
-	calls  []string
-}
-
-type cancelFailureReplyGitHub struct {
-	*fakeGitHub
+	stage           string
 	cancel          context.CancelFunc
 	err             error
+	calls           []string
 	repositoryCalls int
 }
 
-func (f *cancelFailureReplyGitHub) Repository(ctx context.Context, repo string) (github.Repository, error) {
-	f.repositoryCalls++
-	if f.repositoryCalls == 2 {
-		f.cancel()
-		if f.err != nil {
-			return github.Repository{}, f.err
-		}
-	}
-	return f.fakeGitHub.Repository(ctx, repo)
+func seedShutdownPending(store *state.Store, first, tail github.Notification, since time.Time) (string, state.PendingNotification) {
+	pending := state.PendingNotification{Repository: tail.Repository.FullName, RepositoryID: 1, OwnerID: 2, SubjectType: tail.Subject.Type, SubjectURL: tail.Subject.URL,
+		Since: since, UpdatedAt: tail.UpdatedAt, RetryAt: first.UpdatedAt.Add(-time.Second), Failures: 5}
+	key := notificationKey(tail)
+	store.Data.PendingNotifications[key] = pending
+	store.Data.RepositoryCursors[first.Repository.FullName] = since
+	return key, pending
 }
 
 func TestRunOnceStopsCanceledFailureReplyWithoutDeferring(t *testing.T) {
@@ -59,21 +53,17 @@ func TestRunOnceStopsCanceledFailureReplyWithoutDeferring(t *testing.T) {
 			tail.Subject.URL = strings.Replace(tail.Subject.URL, "/7", "/8", 1)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			gh := &cancelFailureReplyGitHub{fakeGitHub: &fakeGitHub{notifications: []github.Notification{first, tail}, items: []github.Item{item}, permission: github.Permission{Permission: "write"}}, cancel: cancel, err: test.err}
+			gh := &cancelDiscoveryGitHub{stage: "reply", fakeGitHub: &fakeGitHub{notifications: []github.Notification{first, tail}, items: []github.Item{item}, permission: github.Permission{Permission: "write"}}, cancel: cancel, err: test.err}
 			store := openState(t, initial)
 			executor := &fakeExecutor{}
-			m := &Monitor{Config: testConfig(t), GitHub: gh, Executor: executor, Now: func() time.Time { return now }}
+			m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: executor, Now: func() time.Time { return now }}
 			cmd, err := command.ParseForLoginCommands(item.Body, m.Config.BotLogin, m.availableCommands(m.Config.Repositories[0]))
 			if err != nil {
 				t.Fatal(err)
 			}
 			id := jobID(item.Key, cmd.Key)
 			store.Data.JobFailures[id] = state.JobFailure{Attempts: maxJobAttempts}
-			pending := state.PendingNotification{Repository: tail.Repository.FullName, RepositoryID: 1, OwnerID: 2, SubjectType: tail.Subject.Type, SubjectURL: tail.Subject.URL,
-				Since: initial, UpdatedAt: tail.UpdatedAt, RetryAt: now.Add(-time.Second), Failures: 5}
-			key := notificationKey(tail)
-			store.Data.PendingNotifications[key] = pending
-			store.Data.RepositoryCursors[first.Repository.FullName] = initial
+			key, pending := seedShutdownPending(store, first, tail, initial)
 			if _, err := m.RunOnce(ctx, store); !errors.Is(err, context.Canceled) {
 				t.Fatalf("canceled failure reply lost cancellation: %v", err)
 			}
@@ -97,10 +87,13 @@ func TestRunOnceCanceledExecutionPreservesEarlierFailure(t *testing.T) {
 		processed  bool
 		attempts   int
 		saveFails  bool
+		wantLog    string
+		resume     bool
 	}{
-		{name: "interrupted", executeErr: context.Canceled},
+		{name: "interrupted", executeErr: context.Canceled, wantLog: " interrupted: "},
+		{name: "interrupted terminal", executeErr: errors.Join(ErrTerminalJob, context.Canceled), wantLog: " interrupted: ", resume: true},
 		{name: "completed", processed: true},
-		{name: "publication", executeErr: ErrPostModelPublication, attempts: 1},
+		{name: "publication", executeErr: errors.Join(ErrPostModelPublication, context.Canceled), attempts: 1, wantLog: "failed (attempt 1/3)"},
 		{name: "terminal publication", executeErr: ErrPostModelPublication, terminal: true, processed: true},
 		{name: "interrupted state save fails", executeErr: context.Canceled, saveFails: true},
 		{name: "completed state save fails", processed: true, saveFails: true},
@@ -125,7 +118,9 @@ func TestRunOnceCanceledExecutionPreservesEarlierFailure(t *testing.T) {
 			defer cancel()
 			statePath := filepath.Join(t.TempDir(), "state.json")
 			store := openStateAt(t, statePath, initial)
+			var calls [4]int
 			executor := &fakeExecutor{onExecute: func() {
+				calls = [4]int{gh.repoChecks, gh.threadCalls, gh.checks, gh.currentChecks}
 				cancel()
 				if test.saveFails {
 					if err := os.RemoveAll(filepath.Dir(statePath)); err != nil {
@@ -133,7 +128,8 @@ func TestRunOnceCanceledExecutionPreservesEarlierFailure(t *testing.T) {
 					}
 				}
 			}, executeErr: test.executeErr}
-			m := &Monitor{Config: testConfig(t), GitHub: gh, Executor: executor, Now: func() time.Time { return now }}
+			var logs bytes.Buffer
+			m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: executor, Logger: log.New(&logs, "", 0), Now: func() time.Time { return now }}
 			cmd, err := command.ParseForLoginCommands(item.Body, m.Config.BotLogin, m.availableCommands(m.Config.Repositories[0]))
 			if err != nil {
 				t.Fatal(err)
@@ -143,11 +139,7 @@ func TestRunOnceCanceledExecutionPreservesEarlierFailure(t *testing.T) {
 				store.Data.JobFailures[id] = state.JobFailure{Attempts: maxJobAttempts - 1}
 				gh.items = append(gh.items, github.Item{Body: "failure\n\n" + (Job{ID: id}).Marker(), Author: github.User{Login: m.Config.BotLogin}})
 			}
-			pending := state.PendingNotification{Repository: tail.Repository.FullName, RepositoryID: 1, OwnerID: 2, SubjectType: tail.Subject.Type, SubjectURL: tail.Subject.URL,
-				Since: initial, UpdatedAt: tail.UpdatedAt, RetryAt: now.Add(-time.Second), Failures: 5}
-			key := notificationKey(tail)
-			store.Data.PendingNotifications[key] = pending
-			store.Data.RepositoryCursors[first.Repository.FullName] = initial
+			key, pending := seedShutdownPending(store, first, tail, initial)
 			_, err = m.RunOnce(ctx, store)
 			if !errors.Is(err, earlier) || !errors.Is(err, context.Canceled) || test.executeErr != nil && !errors.Is(err, test.executeErr) {
 				t.Fatalf("cancellation lost an earlier/current failure or parent context: %v", err)
@@ -159,10 +151,27 @@ func TestRunOnceCanceledExecutionPreservesEarlierFailure(t *testing.T) {
 				!store.Data.Cursor.Equal(initial) || !store.Data.RepositoryCursors[first.Repository.FullName].Equal(initial) {
 				t.Fatalf("canceled execution continued discovery or changed backoff/cursors: jobs=%d state=%+v", len(executor.jobs), store.Data)
 			}
+			if !test.terminal && ([4]int{gh.repoChecks, gh.threadCalls, gh.checks, gh.currentChecks}) != calls {
+				t.Fatalf("discovery continued after cancellation: got=%v want=%v", [4]int{gh.repoChecks, gh.threadCalls, gh.checks, gh.currentChecks}, calls)
+			}
+			if test.wantLog != "" {
+				interrupted := test.wantLog == " interrupted: "
+				if !strings.Contains(logs.String(), test.wantLog) || strings.Contains(logs.String(), " interrupted: ") != interrupted || interrupted && strings.Contains(logs.String(), "failed (attempt") {
+					t.Fatalf("cancellation log changed: want=%q logs=%q", test.wantLog, logs.String())
+				}
+			}
 			_, processed := store.Data.Processed[id]
 			failure, remains := store.Data.JobFailures[id]
 			if processed != test.processed || remains == test.processed || failure.Attempts != test.attempts {
 				t.Fatalf("cancellation changed completion/attempt policy: processed=%t failure=%+v remains=%t", processed, failure, remains)
+			}
+			if test.resume {
+				executor.onExecute, executor.executeErr = nil, nil
+				gh.currentItem, gh.items = nil, []github.Item{item}
+				m.Now = func() time.Time { return now.Add(time.Minute) }
+				if _, err := m.RunOnce(context.Background(), store); err != nil || len(executor.jobs) != 2 || len(store.Data.Processed) != 1 {
+					t.Fatalf("refunded job did not resume: err=%v jobs=%d state=%+v", err, len(executor.jobs), store.Data)
+				}
 			}
 		})
 	}
@@ -170,7 +179,10 @@ func TestRunOnceCanceledExecutionPreservesEarlierFailure(t *testing.T) {
 
 func (f *cancelDiscoveryGitHub) call(stage string) error {
 	f.calls = append(f.calls, stage)
-	if stage == f.stage {
+	if stage == "repository" {
+		f.repositoryCalls++
+	}
+	if stage == f.stage || f.stage == "reply" && stage == "repository" && f.repositoryCalls == 2 {
 		f.cancel()
 		return f.err
 	}
@@ -254,11 +266,7 @@ func TestRunOnceStopsCanceledDiscoveryWithoutDeferring(t *testing.T) {
 				}
 				path := filepath.Join(t.TempDir(), "state.json")
 				store := openStateAt(t, path, initial)
-				pending := state.PendingNotification{Repository: tail.Repository.FullName, RepositoryID: 1, OwnerID: 2, SubjectType: tail.Subject.Type, SubjectURL: tail.Subject.URL,
-					Since: initial, UpdatedAt: tail.UpdatedAt, RetryAt: now.Add(-time.Second), Failures: 5}
-				key := notificationKey(tail)
-				store.Data.PendingNotifications[key] = pending
-				store.Data.RepositoryCursors[first.Repository.FullName] = initial
+				key, pending := seedShutdownPending(store, first, tail, initial)
 				store.Data.NextInviteCheckAt = now.Add(time.Minute)
 				if stage == "before start" {
 					cancel()
@@ -270,7 +278,7 @@ func TestRunOnceStopsCanceledDiscoveryWithoutDeferring(t *testing.T) {
 					t.Fatal(err)
 				}
 				executor := &fakeExecutor{}
-				m := &Monitor{Config: testConfig(t), GitHub: gh, Executor: executor, Now: func() time.Time { return now }}
+				m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: executor, Now: func() time.Time { return now }}
 				if _, err := m.RunOnce(ctx, store); !errors.Is(err, context.Canceled) {
 					t.Fatalf("canceled discovery: %v", err)
 				}
@@ -309,7 +317,7 @@ func TestRunOnceDefersDiscoveryCancellationWithoutParentShutdown(t *testing.T) {
 		return nil, context.Canceled
 	}}
 	store := openState(t, now.Add(-time.Minute))
-	m := &Monitor{Config: testConfig(t), GitHub: gh, Executor: &fakeExecutor{}, Now: func() time.Time { return now }}
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: &fakeExecutor{}, Now: func() time.Time { return now }}
 	if _, err := m.RunOnce(context.Background(), store); !errors.Is(err, context.Canceled) {
 		t.Fatalf("internal discovery cancellation: %v", err)
 	}

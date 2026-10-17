@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/workspace"
 )
@@ -234,12 +235,9 @@ func auditNodePermissionFlag(ctx context.Context, dir string) (string, error) {
 }
 
 func auditNodeCommand(ctx context.Context, dir string, args ...string) (*exec.Cmd, error) {
-	binary, err := exec.LookPath("node")
+	binary, err := aicli.AbsoluteExecutable("node")
 	if err != nil {
 		return nil, fmt.Errorf("audit requires node: %w", err)
-	}
-	if !filepath.IsAbs(binary) {
-		return nil, errors.New("audit node binary must have an absolute path")
 	}
 	cmd := exec.CommandContext(ctx, binary, args...)
 	cmd.Dir = dir

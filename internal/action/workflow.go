@@ -54,14 +54,14 @@ func (e *Orchestrator) perform(ctx context.Context, request monitor.Job) error {
 		if prepared.job.Critic != nil {
 			workRoot, logger, job := e.WorkRoot, e.Logger, prepared.job
 			runner.recordReview = func(result Result) error {
-				return saveReviewLedger(workRoot, job, result, logger)
+				return saveReviewEvidence(workRoot, job, result, logger)
 			}
 		}
 		result, err = runner.Run(ctx, prepared.job)
 		if err != nil {
 			e.logResult(prepared.job, result)
-			if len(result.Calls) != 0 || len(result.ReviewLedger) != 0 {
-				err = errors.Join(err, e.retainReviewLedger(prepared.job, result))
+			if len(result.Calls) != 0 || len(result.Refutations) != 0 {
+				err = errors.Join(err, e.retainReviewEvidence(prepared.job, result))
 			}
 			err = errors.Join(err, e.retainIncompleteAudit(prepared, result))
 			if validationErr := result.validate(prepared.job, false); validationErr != nil {
@@ -220,7 +220,7 @@ func (e *Orchestrator) publish(ctx context.Context, p *preparedAction, result Re
 		return errors.New("action has no prepared source")
 	}
 	e.logResult(p.job, result)
-	if err := e.retainReviewLedger(p.job, result); err != nil {
+	if err := e.retainReviewEvidence(p.job, result); err != nil {
 		return errors.Join(err, e.retainIncompleteAudit(p, result))
 	}
 	if err := result.validate(p.job, true); err != nil {

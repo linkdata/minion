@@ -17,7 +17,7 @@ import (
 
 func TestFixIndexRejectsControlFIFOsBeforeGitOpensThem(t *testing.T) {
 	for _, control := range []string{".gitignore", ".gitattributes"} {
-		for _, dir := range []string{".", "tracked", "untracked", "ignored-tracked"} {
+		for _, dir := range []string{".", "untracked", "ignored-tracked"} {
 			t.Run(dir+"/"+control, func(t *testing.T) {
 				index, source := offlineIndexFixture(t, []workspace.File{
 					{Path: ".gitignore", Mode: workspace.Regular, Data: []byte("ignored-tracked/\n")},
@@ -106,9 +106,6 @@ func TestFixIndexDoesNotInspectIgnoredControlFiles(t *testing.T) {
 			if err := syscall.Mkfifo(filepath.Join(source, dir, control), 0600); err != nil {
 				t.Fatal(err)
 			}
-		}
-		if err := os.Symlink("/outside/virtualenv", filepath.Join(source, dir, "packages")); err != nil {
-			t.Fatal(err)
 		}
 	}
 	writeIndexFixture(t, source, "source", []byte("after"))

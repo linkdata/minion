@@ -281,24 +281,28 @@ func TestRunRetainsKnownUsageAfterExitFailure(t *testing.T) {
 }
 
 func TestRunBackgroundWaitCeiling(t *testing.T) {
-	const diagnostic = "Background tasks still running 10m after the last turn (subagent reviewer); stopping them. Set CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 to wait indefinitely."
+	emit := func(data string) string { return "cat <<'RESULT'\n" + data + "\nRESULT\n" }
+	known := usage.Tokens{Input: 15, CachedInput: 7, Output: 11}
 	for _, tc := range []struct {
-		name, stderr, answer string
-		fails                bool
+		name, stderr, script, answer, extraFailure string
+		tokens                                     usage.Tokens
+		fails, outputLimit                         bool
 	}{
-		{name: "native ceiling", stderr: diagnostic, answer: "final answer", fails: true},
-		{name: "answer text", answer: diagnostic},
+		{name: "native ceiling", stderr: waitCeilingDiagnostic, script: emit(successfulResult), tokens: known, fails: true},
+		{name: "answer text", script: emit(strings.Replace(successfulResult, "final answer", waitCeilingDiagnostic, 1)), answer: waitCeilingDiagnostic, tokens: known},
+		{name: "early diagnostic outlives tail", stderr: waitCeilingDiagnostic + "\n" + strings.Repeat("later diagnostic\n", 2000), script: emit(successfulResult), tokens: known, fails: true},
+		{name: "quota", stderr: waitCeilingDiagnostic, script: emit(`{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1792200000}}`), fails: true, extraFailure: "resets at 2026-10-17T01:20:00Z"},
+		{name: "output", stderr: waitCeilingDiagnostic, script: "head -c 4194305 /dev/zero | tr '\\000' x\n", fails: true, outputLimit: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			output := strings.Replace(successfulResult, "final answer", tc.answer, 1)
-			fakeExecutable(t, "claude", "cat >/dev/null\ncat <<'DIAGNOSTIC' >&2\n"+tc.stderr+"\nDIAGNOSTIC\ncat <<'RESULT'\n"+output+"\nRESULT\n")
+			fakeExecutable(t, "claude", "cat >/dev/null\ncat <<'DIAGNOSTIC' >&2\n"+tc.stderr+"\nDIAGNOSTIC\n"+tc.script)
 			result, err := Run(context.Background(), t.TempDir(), "task", false, "", config.ClaudeConfig{})
-			if (err != nil) != tc.fails || result.UsageComplete == tc.fails || result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) {
+			if (err != nil) != tc.fails || result.UsageComplete == tc.fails || result.Tokens != tc.tokens {
 				t.Fatalf("Run = %+v, %v", result, err)
 			}
 			if tc.fails {
-				if result.Answer != "" || !strings.Contains(err.Error(), "wait ceiling") {
-					t.Fatalf("ceiling returned an answer or lost its diagnostic: %+v, %v", result, err)
+				if result.Answer != "" || !strings.Contains(err.Error(), "wait ceiling") || !strings.Contains(err.Error(), tc.extraFailure) || tc.outputLimit && !errors.Is(err, aicli.ErrOutputLimit) {
+					t.Fatalf("ceiling returned an answer or lost its cause: %+v, %v", result, err)
 				}
 			} else if result.Answer != tc.answer {
 				t.Fatalf("answer = %q, want %q", result.Answer, tc.answer)
@@ -308,8 +312,8 @@ func TestRunBackgroundWaitCeiling(t *testing.T) {
 }
 
 func TestRunStructuredOutput(t *testing.T) {
-	const schema = `{"type":"object","required":["answer","review_notes"],"properties":{"answer":{"type":"string"},"review_notes":{"type":"string"}},"additionalProperties":false}`
-	const structured = `{"answer":"public","review_notes":"private"}`
+	const schema = `{"type":"object","required":["answer","refutations"],"properties":{"answer":{"type":"string"},"refutations":{"type":"string"}},"additionalProperties":false}`
+	const structured = `{"answer":"public","refutations":"private"}`
 	for _, tc := range []struct {
 		name, output string
 		fails        bool
@@ -462,32 +466,48 @@ func TestRunStartupFailureRetainsBoundedQuotedDiagnostic(t *testing.T) {
 	}
 }
 
-func TestRunWaitCeilingPreservesLimitCauses(t *testing.T) {
-	const ceiling = "Background tasks still running 10m after the last turn (worker); stopping them. Set CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 to wait indefinitely."
-	for _, test := range []struct {
-		name, output string
-		outputLimit  bool
-	}{
-		{"quota", "cat <<'RESULT'\n" + `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1792200000}}` + "\nRESULT\n", false},
-		{"output", "head -c 4194305 /dev/zero | tr '\\000' x\n", true},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			fakeExecutable(t, "claude", "cat >/dev/null\ncat <<'DIAG' >&2\n"+ceiling+"\nDIAG\n"+test.output)
-			result, err := Run(context.Background(), t.TempDir(), "task", false, "", config.ClaudeConfig{})
-			if err == nil || !strings.Contains(err.Error(), "wait ceiling") || result.Answer != "" || result.UsageComplete {
-				t.Fatalf("result=%+v error=%v", result, err)
-			}
-			if test.outputLimit && !errors.Is(err, aicli.ErrOutputLimit) || !test.outputLimit && !strings.Contains(err.Error(), "resets at 2026-10-17T01:20:00Z") {
-				t.Fatalf("native failure cause lost: %v", err)
-			}
-		})
-	}
-}
-
 func TestRunQuotesNativeFailureSubtype(t *testing.T) {
 	fakeExecutable(t, "claude", "cat >/dev/null\ncat <<'RESULT'\n"+`{"type":"result","subtype":"failed\nforged journal line","is_error":true}`+"\nRESULT\n")
 	_, err := Run(context.Background(), t.TempDir(), "task", false, "", config.ClaudeConfig{})
 	if err == nil || strings.Contains(err.Error(), "\nforged journal line") || !strings.Contains(err.Error(), `failed\nforged journal line`) {
 		t.Fatalf("unquoted native failure: %v", err)
+	}
+}
+
+func TestRunUsesCanonicalGrantPathsInPolicyAndArguments(t *testing.T) {
+	parent := t.TempDir()
+	output, readOnly := t.TempDir(), t.TempDir()
+	outputAlias, readOnlyAlias := filepath.Join(parent, "output"), filepath.Join(parent, "read-only")
+	for alias, target := range map[string]string{outputAlias: output, readOnlyAlias: readOnly} {
+		if err := os.Symlink(target, alias); err != nil {
+			t.Fatal(err)
+		}
+	}
+	binary := fakeExecutable(t, "claude", "printf '%s\\n' \"$@\" > \"$0.args\"\ncat >/dev/null\nprintf '%s\\n' '"+successfulResult+"'\n")
+	if _, err := Run(context.Background(), t.TempDir(), "task", false, outputAlias, config.ClaudeConfig{ReadOnlyDirs: []string{readOnlyAlias}}); err != nil {
+		t.Fatal(err)
+	}
+	args := strings.Split(strings.TrimSuffix(readFile(t, binary+".args"), "\n"), "\n")
+	var settings struct {
+		Sandbox struct {
+			Filesystem struct {
+				AllowWrite []string `json:"allowWrite"`
+				DenyWrite  []string `json:"denyWrite"`
+			} `json:"filesystem"`
+		} `json:"sandbox"`
+	}
+	var added []string
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == "--settings" {
+			if err := json.Unmarshal([]byte(args[i+1]), &settings); err != nil {
+				t.Fatal(err)
+			}
+		} else if args[i] == "--add-dir" {
+			added = append(added, args[i+1])
+		}
+	}
+	if !slices.Contains(added, output) || !slices.Contains(added, readOnly) || slices.Contains(added, outputAlias) || slices.Contains(added, readOnlyAlias) ||
+		!slices.Contains(settings.Sandbox.Filesystem.AllowWrite, output) || !slices.Contains(settings.Sandbox.Filesystem.DenyWrite, readOnly) {
+		t.Fatalf("policy/argv grant paths differ: added=%v filesystem=%+v", added, settings.Sandbox.Filesystem)
 	}
 }

@@ -252,14 +252,14 @@ func ValidateFixPaths(files []File, omitted []string) error {
 	return validatePaths(paths, true)
 }
 
-// PrepareRoot creates a work root and resolves its canonical absolute path.
+// PrepareRoot resolves an existing work root to its canonical absolute path.
 func PrepareRoot(root string) (string, error) {
+	if strings.TrimSpace(root) == "" {
+		return "", errors.New("work root is required")
+	}
 	root, err := filepath.Abs(root)
 	if err != nil {
 		return "", fmt.Errorf("resolve work root: %w", err)
-	}
-	if err := os.MkdirAll(root, 0700); err != nil {
-		return "", fmt.Errorf("create work root: %w", err)
 	}
 	return filepath.EvalSymlinks(root)
 }
@@ -284,7 +284,7 @@ func CheckPrivateRoot(root string) error {
 	if err != nil {
 		return err
 	}
-	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0077 != 0 {
+	if !info.IsDir() || info.Mode().Perm()&0077 != 0 {
 		return fmt.Errorf("workspace root must be a private directory: %s (%s)", root, info.Mode())
 	}
 	return nil

@@ -20,7 +20,6 @@ func TestInvalidResultKeepsOnlyValidatedEvidence(t *testing.T) {
 			job := withClaudeCritic(portableJob(command.SecurityAudit))
 			result := completeAuditResult(job)
 			result.Calls = append(result.Calls, CallUsage{Provider: "claude", Role: roleCritic, Round: 1, ReviewPhase: reviewFull, Approved: true, NoBlockers: true})
-			result.ReviewLedger = reviewLedgerFixture(result.Calls)
 			result.Diagnostics = []Diagnostic{{Code: "cleanup_failed", Message: "PRIVATE cleanup details"}}
 			switch scenario {
 			case "invalid calls":

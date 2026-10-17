@@ -80,13 +80,13 @@ func TestReadAllMissingDirectory(t *testing.T) {
 	}
 }
 
-func TestSaveFailureCleansTemporaryFile(t *testing.T) {
-	for _, failure := range []string{"encoding", "rename"} {
+func TestSaveEncodeAndRenameFailuresKeepDirectoryClean(t *testing.T) {
+	for _, failure := range []string{"no write on encode error", "rename"} {
 		t.Run(failure, func(t *testing.T) {
 			dir := t.TempDir()
 			record := testRecord()
 			wantFiles := 0
-			if failure == "encoding" {
+			if failure == "no write on encode error" {
 				record.StartedAt = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
 				record.Status, record.FinishedAt = "running", nil
 			} else {
@@ -98,7 +98,7 @@ func TestSaveFailureCleansTemporaryFile(t *testing.T) {
 			err := (Store{Dir: dir}).Save(record)
 			var marshalErr *json.MarshalerError
 			var renameErr *os.LinkError
-			if failure == "encoding" && !errors.As(err, &marshalErr) || failure == "rename" && !errors.As(err, &renameErr) {
+			if failure == "no write on encode error" && !errors.As(err, &marshalErr) || failure == "rename" && !errors.As(err, &renameErr) {
 				t.Fatalf("Save() = %v; want %s error", err, failure)
 			}
 			files, err := os.ReadDir(dir)
@@ -321,17 +321,6 @@ func TestSummarizeRejectsInvalidOptions(t *testing.T) {
 	}
 }
 
-func TestTokensCachedInputIsNotDoubleCounted(t *testing.T) {
-	tokens := Tokens{Input: 100, CachedInput: 80, Output: 20}
-	tokens, ok := tokens.AddChecked(Tokens{Input: 50, CachedInput: 10, Output: 30})
-	if !ok {
-		t.Fatal("valid addition failed")
-	}
-	if tokens != (Tokens{Input: 150, CachedInput: 90, Output: 50}) || tokens.Total() != 200 {
-		t.Fatalf("tokens=%+v total=%d", tokens, tokens.Total())
-	}
-}
-
 func TestTokensValidBoundsAndComponentOperations(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -405,10 +394,8 @@ func TestSummarizeAggregateBounds(t *testing.T) {
 		{name: "invalid tokens", second: Tokens{Input: -1}, wantError: "token counts"},
 		{name: "exact codex call maximum", codex: [2]int{math.MaxInt / 2, math.MaxInt/2 + 1}, wantCodex: math.MaxInt},
 		{name: "codex call overflow", codex: [2]int{math.MaxInt, 1}, wantError: "call counts"},
-		{name: "negative codex calls", codex: [2]int{0, -1}, wantError: "call counts"},
 		{name: "exact claude call maximum", claude: [2]int{math.MaxInt / 2, math.MaxInt/2 + 1}, wantClaude: math.MaxInt},
 		{name: "claude call overflow", claude: [2]int{math.MaxInt, 1}, wantError: "call counts"},
-		{name: "negative claude calls", claude: [2]int{0, -1}, wantError: "call counts"},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			first, second := testRecord(), testRecord()

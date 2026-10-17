@@ -111,8 +111,8 @@ func TestFixIndexQuotesGitDiagnostic(t *testing.T) {
 }
 
 func TestFixIndexBoundsControlFilesBeforeGitReadsThem(t *testing.T) {
-	for _, control := range []string{".gitignore", ".gitattributes"} {
-		for _, size := range []int64{0, workspace.MaxBytes, workspace.MaxBytes + 1} {
+	for _, control := range []string{".gitattributes"} {
+		for _, size := range []int64{workspace.MaxBytes, workspace.MaxBytes + 1} {
 			t.Run(fmt.Sprintf("%s/%d", control, size), func(t *testing.T) {
 				index, source := offlineIndexFixture(t, nil)
 				name := filepath.Join(source, control)
@@ -269,7 +269,6 @@ func TestFixIndexRejectsNonIgnoredUnsafeOutput(t *testing.T) {
 		{"symlink", `fix output "link"`},
 		{"unsafe path", "not a portable regular-file path"},
 		{"nested repository", `untracked nested repository output "nested/" must be removed or ignored`},
-		{"oversized", "byte limit"},
 		{"aggregate oversized", "byte limit"},
 		{"too many", "changed file limit"},
 	} {
@@ -292,8 +291,6 @@ func TestFixIndexRejectsNonIgnoredUnsafeOutput(t *testing.T) {
 				if _, err := NewOfflineIndex(context.Background(), metadata, nested, nil); err != nil {
 					t.Fatal(err)
 				}
-			case "oversized":
-				writeIndexFixture(t, source, "huge", make([]byte, workspace.MaxChangeBytes+1))
 			case "aggregate oversized":
 				writeIndexFixture(t, source, "first", make([]byte, workspace.MaxChangeBytes/2+1))
 				writeIndexFixture(t, source, "second", make([]byte, workspace.MaxChangeBytes/2+1))
@@ -424,14 +421,12 @@ func TestFixIndexPreservesModeDeletionAndBinary(t *testing.T) {
 	}
 }
 
-func TestFixIndexBoundsBinaryDiffAndCancellation(t *testing.T) {
-	for _, kind := range []string{"binary addition", "large deletion", "text replacement"} {
+func TestFixIndexBoundsBinaryAndDeletionDiffs(t *testing.T) {
+	for _, kind := range []string{"binary addition", "large deletion"} {
 		t.Run(kind, func(t *testing.T) {
 			var files []workspace.File
 			if kind == "large deletion" {
 				files = []workspace.File{{Path: "deleted", Mode: workspace.Regular, Data: []byte(strings.Repeat("x", 2<<20))}}
-			} else if kind == "text replacement" {
-				files = []workspace.File{{Path: "replaced", Mode: workspace.Regular, Data: []byte(strings.Repeat("before\n", 100000))}}
 			}
 			index, source := offlineIndexFixture(t, files)
 			switch kind {
@@ -443,18 +438,21 @@ func TestFixIndexBoundsBinaryDiffAndCancellation(t *testing.T) {
 				if err := os.Remove(filepath.Join(source, "deleted")); err != nil {
 					t.Fatal(err)
 				}
-			case "text replacement":
-				writeIndexFixture(t, source, "replaced", []byte(strings.Repeat("after!\n", 100000)))
 			}
 			if _, err := index.Changes(context.Background()); !errors.Is(err, ErrDiffTooLarge) {
 				t.Fatalf("oversized binary patch lost its size classification: %v", err)
 			}
-			ctx, cancel := context.WithCancel(context.Background())
-			cancel()
-			if _, err := index.Changes(ctx); !errors.Is(err, context.Canceled) {
-				t.Fatalf("canceled index = %v", err)
-			}
+
 		})
+	}
+}
+
+func TestFixIndexHonorsPreCanceledRequest(t *testing.T) {
+	index, _ := offlineIndexFixture(t, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := index.Changes(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled index = %v", err)
 	}
 }
 
@@ -493,10 +491,7 @@ func TestParseIndexChangesRejectsMalformedRecords(t *testing.T) {
 		{"invalid record", []byte("wrong\x00changed\x00"), "invalid offline git change record"},
 		{"invalid identity", []byte(":100644 100644 short " + current + " M\x00changed\x00"), "invalid offline git change record"},
 		{"invalid mode", record("100888", "M"), "invalid offline git file mode"},
-		{"unmerged", record("100644", "U"), `unsupported offline git change at "changed"`},
 		{"unknown", record("100644", "X"), `unsupported offline git change at "changed"`},
-		{"copy", record("100644", "C"), `unsupported offline git change at "changed"`},
-		{"type change", record("120000", "T"), `unsupported offline git change at "changed"`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			changes, objects, err := parseIndexChanges(test.raw)

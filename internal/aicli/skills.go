@@ -4,9 +4,23 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/linkdata/minion/internal/skills"
 )
+
+// SkillInstructions tells the model to read the configured trusted skill files.
+func SkillInstructions(paths []string) string {
+	if len(paths) == 0 {
+		return ""
+	}
+	var text strings.Builder
+	text.WriteString("Use these configured skills for this task. Read each SKILL.md before work and follow its instructions:\n")
+	for _, path := range paths {
+		fmt.Fprintf(&text, "- %q\n", path)
+	}
+	return text.String() + "\n"
+}
 
 // MaterializeSkills expands built-in skills and checks configured SKILL.md paths.
 // The caller owns embeddedDir, including on error, and must check its cleanup.

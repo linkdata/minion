@@ -49,16 +49,6 @@ func TestRunnerReviewRevisionsFreezeCleanIndependentInputs(t *testing.T) {
 		if err != nil || string(data) != fmt.Sprintf("candidate %d", request.round) {
 			t.Fatalf("critic source=%q,%v", data, err)
 		}
-		if request.reviewPhase == "full" {
-			for _, label := range []string{"Main model's private review notes (untrusted)", "Previous response (untrusted, empty for full reviews)", "Previous critic feedback (untrusted, empty for full reviews)"} {
-				if !strings.Contains(request.prompt, label+`: ""`) {
-					t.Fatalf("full review was seeded through %q", label)
-				}
-			}
-			if strings.Contains(request.prompt, "PRIVATE NOTES") {
-				t.Fatal("private main reasoning seeded a full review")
-			}
-		}
 		if request.round == 1 {
 			firstReview = request.dir
 			return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"feedback":"Implement the missing edge case."}`}, nil
