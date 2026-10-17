@@ -3,8 +3,11 @@ package gitwork
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/linkdata/minion/internal/workspace"
 )
 
 func TestGitNeutralIdentityIgnoresAmbientEmailAndAllowsBotOverride(t *testing.T) {
@@ -39,5 +42,32 @@ func TestGitDisablesAutomaticMaintenance(t *testing.T) {
 		if err != nil || value != want {
 			t.Fatalf("controlled Git %s=%q error=%v", key, value, err)
 		}
+	}
+}
+
+func TestImportPreservesExecutableModeAndCommitIgnoresUnstagedFiles(t *testing.T) {
+	fixture := newFixture(t)
+	ctx := context.Background()
+	const branch = "minion/fix-reviewed-mode"
+	fixture.git(fixture.checkout.path, "config", "core.fileMode", "false")
+	if err := fixture.checkout.recordConfig(); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.checkout.NewBranch(ctx, branch); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.checkout.Import(ctx, fixture.base, []workspace.Change{{Path: "run", Mode: workspace.Executable, Data: []byte("reviewed executable\n")}}); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(fixture.checkout.path, "unreviewed"), "not imported\n")
+	if err := fixture.checkout.CommitAndPush(ctx, branch, "bot", "reviewed mode", func(string) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	mode := fixture.git("", "--git-dir="+fixture.remote, "ls-tree", "refs/heads/"+branch, "run")
+	if !strings.HasPrefix(mode, "100755 blob ") || fixture.git("", "--git-dir="+fixture.remote, "show", "refs/heads/"+branch+":run") != "reviewed executable" {
+		t.Fatalf("published executable lost mode or bytes: %s", mode)
+	}
+	if got := fixture.git("", "--git-dir="+fixture.remote, "ls-tree", "refs/heads/"+branch, "unreviewed"); got != "" {
+		t.Fatalf("commit added unreviewed output: %s", got)
 	}
 }

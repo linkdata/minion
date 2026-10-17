@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/linkdata/minion/internal/aicli"
 	"net/http"
 	"os"
 	"os/exec"
@@ -16,7 +17,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/linkdata/minion/internal/codexcli"
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/github"
@@ -106,15 +106,15 @@ func TestLiveFixPublishesBranch(t *testing.T) {
 		Store:    store,
 		Commands: map[string]config.CommandMapping{"fix": {Action: "fix", Skills: []string{testFixSkillURL}}},
 		Runner: Runner{
-			WorkRoot: t.TempDir(), runModel: func(_ context.Context, modelRequest modelRun) (codexcli.Result, error) {
+			WorkRoot: t.TempDir(), runModel: func(_ context.Context, modelRequest modelRun) (aicli.Result, error) {
 				dir, writable, outputDir := modelRequest.dir, modelRequest.writable, modelRequest.outputDir
 				codexCalls++
 				if !writable || outputDir != "" {
-					return codexcli.Result{}, errors.New("unexpected Codex invocation for live fix")
+					return aicli.Result{}, errors.New("unexpected Codex invocation for live fix")
 				}
 				name := "minion-live-fix-" + id[:12] + ".txt"
 				err := os.WriteFile(filepath.Join(dir, name), []byte("Minion live fix test fixture.\n"), 0o600)
-				return codexcli.Result{Answer: "Live fix fixture created."}, err
+				return aicli.Result{Answer: "Live fix fixture created."}, err
 			},
 		},
 	}
@@ -132,7 +132,7 @@ func TestLiveFixPublishesBranch(t *testing.T) {
 		t.Fatalf("fix did not record a commit SHA: %q", sha)
 	}
 	remote, err := bot.Branch(ctx, liveFixFork, branch)
-	if err != nil || remote.Name != branch || !strings.EqualFold(remote.Commit.SHA, sha) {
+	if err != nil || remote.Name != branch || remote.Commit.SHA != sha {
 		t.Fatalf("live fix branch does not match recorded SHA: %v", err)
 	}
 	if _, err := owner.Branch(ctx, liveFixRepository, branch); !liveFixNotFound(err) {
@@ -259,7 +259,7 @@ func liveFixCleanup(t *testing.T, owner, bot *github.Client, ownerToken, botToke
 		return
 	}
 	sha := store.Data.PendingFixes[job.ID]
-	if len(sha) != 40 || remote.Name != branch || !strings.EqualFold(remote.Commit.SHA, sha) {
+	if len(sha) != 40 || remote.Name != branch || remote.Commit.SHA != sha {
 		t.Errorf("refuse to delete changed or unrecorded live fix branch %s", branch)
 		return
 	}

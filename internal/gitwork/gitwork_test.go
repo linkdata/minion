@@ -524,7 +524,9 @@ func TestCommitAndPushUsesTrustedURLAndSkipsHooks(t *testing.T) {
 	if err := fixture.checkout.NewBranch(ctx, branch); err != nil {
 		t.Fatal(err)
 	}
-	writeFile(t, filepath.Join(fixture.checkout.path, "fix.txt"), "fixed\n")
+	if err := fixture.checkout.Import(ctx, fixture.base, []workspace.Change{{Path: "fix.txt", Mode: workspace.Regular, Data: []byte("fixed\n")}}); err != nil {
+		t.Fatal(err)
+	}
 	// These hooks would fail a normal commit or push.
 	for _, name := range []string{"pre-commit", "pre-push"} {
 		hook := filepath.Join(fixture.checkout.path, ".git", "hooks", name)
@@ -577,50 +579,38 @@ func TestGitErrorLabelsCommandAfterConfigOptions(t *testing.T) {
 	}
 }
 
-func TestCommitAndPushBoundsChanges(t *testing.T) {
+func TestImportAndCommitBoundsChanges(t *testing.T) {
 	ctx := context.Background()
-	tests := []struct {
-		name  string
-		write func(t *testing.T, path string)
-		want  error
-	}{
-		{
-			name: "file count",
-			write: func(t *testing.T, path string) {
-				for i := 0; i <= workspace.MaxChanges; i++ {
-					writeFile(t, filepath.Join(path, fmt.Sprintf("file-%03d.txt", i)), "x\n")
-				}
-			},
-			want: ErrTooManyFiles,
-		},
-		{
-			name: "changed file size",
-			write: func(t *testing.T, path string) {
-				writeFile(t, filepath.Join(path, "large.txt"), strings.Repeat("x", workspace.MaxChangeBytes+1))
-			},
-			want: ErrChangedFileLarge,
-		},
-		{
-			name: "patch size",
-			write: func(t *testing.T, path string) {
-				writeFile(t, filepath.Join(path, "many-lines.txt"), strings.Repeat("x\n", workspace.MaxChangeBytes/2-100))
-			},
-			want: ErrDiffTooLarge,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+	for _, kind := range []string{"file count", "new bytes", "patch bytes"} {
+		t.Run(kind, func(t *testing.T) {
 			fixture := newFixture(t)
 			const branch = "minion/fix-limited"
 			if err := fixture.checkout.NewBranch(ctx, branch); err != nil {
 				t.Fatal(err)
 			}
-			tt.write(t, fixture.checkout.path)
-			if err := fixture.checkout.CommitAndPush(ctx, branch, "example-bot", "Minion: fix", func(string) error {
-				t.Fatal("oversized changes reached before-push recorder")
-				return nil
-			}); !errors.Is(err, tt.want) {
-				t.Fatalf("CommitAndPush() error = %v, want %v", err, tt.want)
+			changes := []workspace.Change{{Path: "large.txt", Mode: workspace.Regular, Data: []byte(strings.Repeat("x", workspace.MaxChangeBytes+1))}}
+			if kind == "file count" {
+				changes = nil
+				for i := 0; i <= workspace.MaxChanges; i++ {
+					changes = append(changes, workspace.Change{Path: fmt.Sprintf("file-%03d", i), Mode: workspace.Regular, Data: []byte("x")})
+				}
+			} else if kind == "patch bytes" {
+				changes[0].Data = []byte(strings.Repeat("x\n", workspace.MaxChangeBytes/2-100))
+			}
+			err := fixture.checkout.Import(ctx, fixture.base, changes)
+			if kind == "patch bytes" && err != nil {
+				t.Fatal(err)
+			}
+			if kind != "patch bytes" && err == nil {
+				t.Fatal("oversized import succeeded")
+			}
+			err = fixture.checkout.CommitAndPush(ctx, branch, "example-bot", "Minion: fix", func(string) error { t.Fatal("oversized changes reached before-push recorder"); return nil })
+			want := ErrNoChanges
+			if kind == "patch bytes" {
+				want = ErrDiffTooLarge
+			}
+			if !errors.Is(err, want) {
+				t.Fatalf("publication after %s error=%v want=%v", kind, err, want)
 			}
 			if _, err := exec.Command("git", "--git-dir="+fixture.remote, "show-ref", "--verify", "refs/heads/"+branch).CombinedOutput(); err == nil {
 				t.Fatal("oversized changes were pushed")
@@ -658,7 +648,9 @@ func TestCommitAndPushStopsWhenRecordFails(t *testing.T) {
 	if err := fixture.checkout.NewBranch(ctx, branch); err != nil {
 		t.Fatal(err)
 	}
-	writeFile(t, filepath.Join(fixture.checkout.path, "fix.txt"), "fixed\n")
+	if err := fixture.checkout.Import(ctx, fixture.base, []workspace.Change{{Path: "fix.txt", Mode: workspace.Regular, Data: []byte("fixed\n")}}); err != nil {
+		t.Fatal(err)
+	}
 	recordFailure := errors.New("cannot persist commit SHA")
 	err := fixture.checkout.CommitAndPush(ctx, branch, "example-bot", "Minion: fix", func(string) error { return recordFailure })
 	if !errors.Is(err, recordFailure) {
@@ -730,4 +722,9 @@ func writeFile(t *testing.T, path, content string) {
 	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// shellQuote treats fixture paths as literal shell arguments.
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }

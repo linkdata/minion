@@ -261,6 +261,7 @@ func TestFixIndexDisablesAttributesAndOperatorConfiguration(t *testing.T) {
 func TestFixIndexRejectsNonIgnoredUnsafeOutput(t *testing.T) {
 	for _, tt := range []struct{ kind, cause string }{
 		{"symlink", `fix output "link"`},
+		{"unsafe path", "not a portable regular-file path"},
 		{"nested repository", `nested repository output "nested/" must be removed or ignored`},
 		{"oversized", "byte limit"},
 		{"aggregate oversized", "byte limit"},
@@ -269,6 +270,8 @@ func TestFixIndexRejectsNonIgnoredUnsafeOutput(t *testing.T) {
 		t.Run(tt.kind, func(t *testing.T) {
 			index, source := offlineIndexFixture(t, nil)
 			switch tt.kind {
+			case "unsafe path":
+				writeIndexFixture(t, source, "new\\output", []byte("data"))
 			case "symlink":
 				if err := os.Symlink("/outside/secret", filepath.Join(source, "link")); err != nil {
 					t.Fatal(err)
@@ -294,9 +297,8 @@ func TestFixIndexRejectsNonIgnoredUnsafeOutput(t *testing.T) {
 				}
 			}
 			marker := filepath.Join(t.TempDir(), "add-ran")
-			quote := func(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
 			proxy := filepath.Join(t.TempDir(), "git-proxy")
-			script := fmt.Sprintf("#!/bin/sh\nfor argument in \"$@\"; do\n if [ \"$argument\" = add ]; then touch %s; fi\ndone\nexec %s \"$@\"\n", quote(marker), quote(index.binary))
+			script := fmt.Sprintf("#!/bin/sh\nfor argument in \"$@\"; do\n if [ \"$argument\" = add ]; then touch %s; fi\ndone\nexec %s \"$@\"\n", shellQuote(marker), shellQuote(index.binary))
 			if err := os.WriteFile(proxy, []byte(script), 0700); err != nil {
 				t.Fatal(err)
 			}
@@ -345,7 +347,6 @@ func TestFixIndexBoundsBinaryDiffAndCancellation(t *testing.T) {
 func TestFixIndexRejectsBytesChangedAfterStaging(t *testing.T) {
 	index, source := offlineIndexFixture(t, []workspace.File{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("original")}})
 	writeIndexFixture(t, source, "source.txt", []byte("staged edit"))
-	quote := func(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
 	proxy := filepath.Join(t.TempDir(), "git-proxy")
 	script := fmt.Sprintf(`#!/bin/sh
 for argument in "$@"; do
@@ -357,7 +358,7 @@ for argument in "$@"; do
   fi
 done
 exec %s "$@"
-`, quote(index.binary), quote(filepath.Join(source, "source.txt")), quote(index.binary))
+`, shellQuote(index.binary), shellQuote(filepath.Join(source, "source.txt")), shellQuote(index.binary))
 	if err := os.WriteFile(proxy, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}

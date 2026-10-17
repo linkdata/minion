@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/linkdata/minion/internal/codexcli"
+	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/github"
@@ -26,7 +26,7 @@ import (
 // Exercise the real API client, monitor, executor, and Git checkout together.
 // All GitHub responses come from this local server; Git uses a local bare repo.
 func TestOfflineReviewPollRecoversAfterPublication(t *testing.T) {
-	_, head, _ := auditGitFixtureRemote(t)
+	_, head, _ := gitFixtureRemote(t)
 
 	now := time.Date(2026, 10, 9, 8, 1, 0, 0, time.UTC)
 	requestAt := now.Add(-time.Second) // Remains inside the next poll's cursor overlap.
@@ -182,13 +182,13 @@ func TestOfflineReviewPollRecoversAfterPublication(t *testing.T) {
 			Store:    store,
 			Commands: commands,
 			Runner: Runner{
-				WorkRoot: t.TempDir(), runModel: func(_ context.Context, modelRequest modelRun) (codexcli.Result, error) {
+				WorkRoot: t.TempDir(), runModel: func(_ context.Context, modelRequest modelRun) (aicli.Result, error) {
 					dir, prompt, writable, outputDir := modelRequest.dir, modelRequest.prompt, modelRequest.writable, modelRequest.outputDir
 					if _, err := os.Stat(dir); err != nil || writable || outputDir != "" || !strings.Contains(prompt, head) {
-						return codexcli.Result{}, fmt.Errorf("unexpected Codex invocation: dir=%q writable=%t output=%q stat=%v", dir, writable, outputDir, err)
+						return aicli.Result{}, fmt.Errorf("unexpected Codex invocation: dir=%q writable=%t output=%q stat=%v", dir, writable, outputDir, err)
 					}
 					record("codex")
-					return codexcli.Result{Answer: "No findings."}, nil
+					return aicli.Result{Answer: "No findings."}, nil
 				},
 			},
 		}

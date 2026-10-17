@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/linkdata/minion/internal/codexcli"
+	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/github"
@@ -98,7 +98,7 @@ func TestGitHubContextLimitAcrossActions(t *testing.T) {
 				}
 				head := strings.Repeat("a", 40)
 				if mode == "exact" {
-					_, head, _ = auditGitFixtureRemote(t)
+					_, head, _ = gitFixtureRemote(t)
 				}
 				job := monitor.Job{
 					Repository:  config.Repository{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{tt.commandName}},
@@ -236,14 +236,14 @@ func TestGitHubContextLimitAcrossActions(t *testing.T) {
 					MaxGitHubContextBytes: limit,
 					Commands:              map[string]config.CommandMapping{job.Command.Name: {Action: string(tt.action), Skills: []string{tt.skill}}},
 					Runner: Runner{
-						WorkRoot: t.TempDir(), runModel: func(_ context.Context, modelRequest modelRun) (codexcli.Result, error) {
+						WorkRoot: t.TempDir(), runModel: func(_ context.Context, modelRequest modelRun) (aicli.Result, error) {
 							prompt := modelRequest.prompt
 							codexCalls++
 							if !strings.Contains(prompt, strconv.Quote(description)) || !strings.Contains(prompt, strconv.Quote(requestNotes)) ||
 								(tt.action != command.Fix && !strings.Contains(prompt, strconv.Quote(title))) || strings.Contains(prompt, "[truncated]") {
 								t.Errorf("Codex prompt lost GitHub text or clipped it: %q", prompt)
 							}
-							return codexcli.Result{}, modelErr
+							return aicli.Result{}, modelErr
 						},
 					},
 				}

@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -26,22 +27,50 @@ func assertGitChildStopped(t *testing.T, pidFile string) {
 	if err != nil || pid <= 0 {
 		t.Fatalf("invalid Git child PID %q: %v", data, err)
 	}
-	data, err = os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
+	stat, err := os.Open(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
 	if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ESRCH) {
 		return
 	}
-	// A killed orphan may wait briefly for its new parent to reap it.
-	_, state, ok := strings.Cut(string(data), ") ")
-	if err != nil || !ok || !strings.HasPrefix(state, "Z ") {
-		t.Fatalf("Git child is still running: pid=%d stat=%q error=%v", pid, data, err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := stat.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	// SIGKILL delivery precedes zombie visibility. Pin the proc entry so a
+	// recycled numeric PID cannot redirect later observations to another task.
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	deadline := time.NewTimer(time.Second)
+	defer deadline.Stop()
+	buffer := make([]byte, 4096)
+	for {
+		n, readErr := stat.ReadAt(buffer, 0)
+		if errors.Is(readErr, os.ErrNotExist) || errors.Is(readErr, syscall.ESRCH) {
+			return
+		}
+		data = buffer[:n]
+		_, state, ok := strings.Cut(string(data), ") ")
+		if (readErr != nil && !errors.Is(readErr, io.EOF)) || !ok {
+			t.Fatalf("read Git child state: pid=%d stat=%q error=%v", pid, data, readErr)
+		}
+		if strings.HasPrefix(state, "Z ") {
+			return // A killed orphan can await reaping by its new parent.
+		}
+		select {
+		case <-ticker.C:
+		case <-deadline.C:
+			t.Fatalf("Git child is still running: pid=%d stat=%q", pid, data)
+		}
 	}
 }
 
 func TestGitOutputLimitStopsChildHoldingPipes(t *testing.T) {
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "child.pid")
-	quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }
-	alias := "!printf '%s' $$ > " + quote(pidFile) + "; printf overflow-output; exec sleep 6"
+	alias := "!printf '%s' $$ > " + shellQuote(pidFile) + "; printf overflow-output; exec sleep 6"
 	started := time.Now()
 	_, _, err := (&Checkout{path: dir}).boundedGit(context.Background(), 4, false, "-c", "alias.probe="+alias, "probe")
 	elapsed := time.Since(started)
@@ -68,8 +97,7 @@ func TestGitDeadlineStopsLazyFetchChildHoldingPipes(t *testing.T) {
 	}
 	pidFile := filepath.Join(root, "fetch.pid")
 	stall := filepath.Join(root, "upload-pack")
-	quote := "'" + strings.ReplaceAll(pidFile, "'", "'\\''") + "'"
-	if err := os.WriteFile(stall, []byte("#!/bin/sh\nprintf '%s' $$ > "+quote+"\nexec sleep 6\n"), 0700); err != nil {
+	if err := os.WriteFile(stall, []byte("#!/bin/sh\nprintf '%s' $$ > "+shellQuote(pidFile)+"\nexec sleep 6\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	fixture.git(clone, "config", "remote.origin.uploadpack", stall)

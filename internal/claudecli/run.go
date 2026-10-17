@@ -177,7 +177,7 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	if ctx.Err() != nil {
 		err = ctx.Err()
 	} else if backgroundWaitCeiling(diagnostics.String()) {
-		err = errors.New("Claude stopped background tasks after its wait ceiling")
+		err = errors.New("background tasks stopped by Claude's wait ceiling")
 	} else if output.err != nil {
 		err = errors.Join(output.err, err)
 	}

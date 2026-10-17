@@ -153,10 +153,10 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 	defer closeReview()
 	observe := configured.aroundModel
 	configured.aroundModel = func(ctx context.Context, request modelRun, next modelCall) (aicli.Result, error) {
-		if request.role != "critic" || request.reviewPhase != "full" {
+		if request.role == roleMain {
 			closeReview()
 		}
-		if request.role == "critic" {
+		if request.role == roleCritic {
 			var err error
 			if review == nil {
 				review, err = freezeReviewSnapshot(ctx, workRoot, job, source, outputDir, index)

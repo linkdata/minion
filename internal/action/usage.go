@@ -47,8 +47,11 @@ func (e *Orchestrator) trackUsage(job monitor.Job) (*Orchestrator, func(error) e
 	}
 	tracked := *e
 	tracked.Runner.aroundModel = func(ctx context.Context, request modelRun, next modelCall) (aicli.Result, error) {
+		if err := ctx.Err(); err != nil {
+			return aicli.Result{}, err
+		}
 		// The dispatched Job's settings are authoritative over host defaults.
-		if request.role == "main" {
+		if request.role == roleMain {
 			record.Provider, record.Model, record.Effort = request.provider, cmp.Or(request.model, "default"), request.effort
 		} else {
 			record.CriticProvider, record.CriticModel, record.CriticEffort = request.provider, cmp.Or(request.model, "default"), request.effort

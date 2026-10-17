@@ -13,7 +13,6 @@ import (
 	"testing"
 
 	"github.com/linkdata/minion/internal/aicli"
-	"github.com/linkdata/minion/internal/codexcli"
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/github"
@@ -28,6 +27,33 @@ func usageJob() monitor.Job {
 	}
 }
 
+func TestUsageDoesNotCountCanceledDispatch(t *testing.T) {
+	store := &usage.Store{Dir: filepath.Join(t.TempDir(), "usage")}
+	tracked, finish, err := (&Orchestrator{Usage: store}).trackUsage(usageJob())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = tracked.Runner.aroundModel(ctx, modelRun{provider: "codex", role: roleMain}, func(context.Context, modelRun) (aicli.Result, error) {
+		t.Fatal("dispatched a canceled model call")
+		return aicli.Result{}, nil
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled dispatch: %v", err)
+	}
+	if err := finish(err); !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	records, err := usage.ReadAll(store.Dir)
+	if err != nil || len(records) != 1 {
+		t.Fatalf("records=%+v err=%v", records, err)
+	}
+	if got := records[0]; got.CodexCalls != 0 || got.ClaudeCalls != 0 || !got.UsageComplete || got.Tokens != (usage.Tokens{}) {
+		t.Fatalf("counted an undispatched call: %+v", got)
+	}
+}
+
 func TestUsageAccumulatesPartialResults(t *testing.T) {
 	store := &usage.Store{Dir: filepath.Join(t.TempDir(), "usage")}
 	runErr := errors.New("model interrupted")
@@ -36,12 +62,12 @@ func TestUsageAccumulatesPartialResults(t *testing.T) {
 		Usage:      store,
 		CodexModel: "test-model",
 		Runner: Runner{
-			runModel: func(_ context.Context, modelRequest modelRun) (codexcli.Result, error) {
+			runModel: func(_ context.Context, modelRequest modelRun) (aicli.Result, error) {
 				calls++
 				if calls == 2 {
-					return codexcli.Result{Tokens: usage.Tokens{Input: 10, CachedInput: 8, Output: 2}}, runErr
+					return aicli.Result{Tokens: usage.Tokens{Input: 10, CachedInput: 8, Output: 2}}, runErr
 				}
-				return codexcli.Result{Answer: "answer", Tokens: usage.Tokens{Input: 100, CachedInput: 80, Output: 20}, UsageComplete: true}, nil
+				return aicli.Result{Answer: "answer", Tokens: usage.Tokens{Input: 100, CachedInput: 80, Output: 20}, UsageComplete: true}, nil
 			},
 		},
 	}
@@ -283,9 +309,9 @@ func TestExecuteRecordsNoCodexAndSkipsAcknowledged(t *testing.T) {
 				Commands:   map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{testReviewSkillURL}}},
 				CodexModel: "test-model",
 				Runner: Runner{
-					runModel: func(_ context.Context, modelRequest modelRun) (codexcli.Result, error) {
+					runModel: func(_ context.Context, modelRequest modelRun) (aicli.Result, error) {
 						t.Fatal("review on an issue must not invoke Codex")
-						return codexcli.Result{}, nil
+						return aicli.Result{}, nil
 					},
 				},
 			}

@@ -16,16 +16,61 @@ import (
 	"testing"
 	"time"
 
-	"github.com/linkdata/minion/internal/codexcli"
+	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/github"
+	"github.com/linkdata/minion/internal/gitwork"
 	"github.com/linkdata/minion/internal/monitor"
+	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
+func TestPortableJobUsesCriticDefaultAndRejectsInvalidFixSource(t *testing.T) {
+	for _, collision := range []bool{false, true} {
+		t.Run(fmt.Sprint(collision), func(t *testing.T) {
+			var files []workspace.File
+			if collision {
+				files = []workspace.File{{Path: "Docs/a", Mode: workspace.Regular}, {Path: "docs/b", Mode: workspace.Regular}}
+			}
+			gitFixtureRemote(t, files...)
+			checkout, err := gitwork.Clone(context.Background(), t.TempDir(), "o/r", "main", func(_ context.Context, sha string) (github.GitTree, error) {
+				truncated := false
+				entries := []github.GitTreeEntry{}
+				for _, file := range files {
+					size := int64(len(file.Data))
+					entries = append(entries, github.GitTreeEntry{Path: file.Path, Type: "blob", Mode: "100644", Size: &size})
+				}
+				return github.GitTree{SHA: sha, Truncated: &truncated, Tree: entries}, nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				if err := checkout.Close(); err != nil {
+					t.Error(err)
+				}
+			}()
+			action := command.Comment
+			if collision {
+				action = command.Fix
+			}
+			request := monitor.Job{ID: strings.Repeat("a", 64), SubjectType: "Issue", Number: 7, Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2}, Source: github.Item{Author: github.User{ID: 3, Login: "writer"}}, Command: command.Command{Name: string(action), Action: action}}
+			orchestrator := Orchestrator{Adversarial: "claude", Commands: map[string]config.CommandMapping{string(action): {Action: string(action), Skills: []string{skills.BuiltinAntiPromptInjection}}}}
+			job, err := orchestrator.portableJob(testActionContext(t), &preparedAction{checkout: checkout, request: request}, "title", "body")
+			if collision {
+				if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "directory spelling collision") {
+					t.Fatalf("invalid fix source was not terminal: %v", err)
+				}
+			} else if err != nil || job.CriticMaxRounds != config.DefaultCriticMaxRounds {
+				t.Fatalf("critic default=%d err=%v", job.CriticMaxRounds, err)
+			}
+		})
+	}
+}
+
 func TestPreparedActionRejectsForeignResultBeforePublication(t *testing.T) {
-	base, _, _ := auditGitFixtureRemote(t)
+	base, _, _ := gitFixtureRemote(t)
 	installActionTestSkills(t, testReviewSkillURL)
 	writeActionTestSkills(t, os.Getenv("HOME"), ".claude", testReviewSkillURL)
 	writes := 0
@@ -54,7 +99,7 @@ func TestPreparedActionRejectsForeignResultBeforePublication(t *testing.T) {
 		Commands: map[string]config.CommandMapping{"audit": {Action: "comment", Skills: []string{testReviewSkillURL}}},
 		Runner: Runner{
 			WorkRoot: t.TempDir(),
-			Claude:   config.ClaudeConfig{APIKey: "model-secret"}, runModel: func(_ context.Context, modelRequest modelRun) (codexcli.Result, error) {
+			Claude:   config.ClaudeConfig{APIKey: "model-secret"}, runModel: func(_ context.Context, modelRequest modelRun) (aicli.Result, error) {
 				dir, prompt := modelRequest.dir, modelRequest.prompt
 				if modelRequest.provider != "claude" || modelRequest.model != "portable-claude-model" || modelRequest.effort != "high" {
 					t.Fatalf("lost actual Claude role settings: %+v", modelRequest)
@@ -63,7 +108,7 @@ func TestPreparedActionRejectsForeignResultBeforePublication(t *testing.T) {
 				if !strings.Contains(prompt, base) {
 					t.Fatal("prompt lost source commit")
 				}
-				return codexcli.Result{Answer: "No findings."}, nil
+				return aicli.Result{Answer: "No findings."}, nil
 			},
 		},
 	}
@@ -137,7 +182,7 @@ func TestPreparedActionRejectsForeignResultBeforePublication(t *testing.T) {
 }
 
 func TestFailedAuditRetainsLabelledPartialArtifactsWithoutPublication(t *testing.T) {
-	auditGitFixtureRemote(t)
+	gitFixtureRemote(t)
 	installActionTestSkills(t, testAuditSkillURL)
 	writes := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -168,13 +213,13 @@ func TestFailedAuditRetainsLabelledPartialArtifactsWithoutPublication(t *testing
 	var sourceDir, reportDir string
 	e := &Orchestrator{WorkRoot: t.TempDir(), Logger: log.New(&journal, "", 0), GitHub: client, Commands: map[string]config.CommandMapping{"security-audit": {Action: "security-audit", Skills: []string{testAuditSkillURL}}},
 		Runner: Runner{
-			WorkRoot: t.TempDir(), Logger: log.New(&journal, "", 0), runModel: func(_ context.Context, modelRequest modelRun) (codexcli.Result, error) {
+			WorkRoot: t.TempDir(), Logger: log.New(&journal, "", 0), runModel: func(_ context.Context, modelRequest modelRun) (aicli.Result, error) {
 				dir, output := modelRequest.dir, modelRequest.outputDir
 				sourceDir, reportDir = dir, output
 				if err := os.WriteFile(filepath.Join(output, "REPORT.md"), []byte(report), 0600); err != nil {
 					t.Fatal(err)
 				}
-				return codexcli.Result{}, failure
+				return aicli.Result{}, failure
 			},
 		}}
 	request := monitor.Job{ID: strings.Repeat("a", 64), SubjectType: "Issue", Number: 7,

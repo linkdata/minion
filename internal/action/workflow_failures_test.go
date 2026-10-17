@@ -30,7 +30,7 @@ func TestFixReplyFailureConsumesPublicationAttempt(t *testing.T) {
 		t.Run(fmt.Sprintf("recovery=%t", recovery), func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.Method == http.MethodGet && r.URL.Path == "/repos/o/r" {
-					fmt.Fprint(w, `{"id":1,"full_name":"o/r","owner":{"id":2}}`)
+					_, _ = fmt.Fprint(w, `{"id":1,"full_name":"o/r","owner":{"id":2}}`)
 					return
 				}
 				if r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/issues/7/comments" {
@@ -70,7 +70,7 @@ func TestFixReplyFailureConsumesPublicationAttempt(t *testing.T) {
 func TestExecuteSourceFailuresAndInvalidIncompleteResultsAreTerminal(t *testing.T) {
 	for _, scenario := range []string{"oversized source", "unsupported source", "invalid incomplete result"} {
 		t.Run(scenario, func(t *testing.T) {
-			auditGitFixtureRemote(t)
+			gitFixtureRemote(t)
 			installActionTestSkills(t, testReviewSkillURL)
 			calls, writes := 0, 0
 			modelErr := errors.New("worker failed with invalid usage")
@@ -81,20 +81,20 @@ func TestExecuteSourceFailuresAndInvalidIncompleteResultsAreTerminal(t *testing.
 					t.Errorf("unexpected write %s %s", r.Method, r.URL.Path)
 					http.NotFound(w, r)
 				case r.URL.Path == "/repos/o/r/issues/7/comments":
-					fmt.Fprint(w, `[]`)
+					_, _ = fmt.Fprint(w, `[]`)
 				case r.URL.Path == "/repos/o/r":
-					fmt.Fprint(w, `{"id":1,"full_name":"o/r","owner":{"id":2},"default_branch":"main"}`)
+					_, _ = fmt.Fprint(w, `{"id":1,"full_name":"o/r","owner":{"id":2},"default_branch":"main"}`)
 				case r.URL.Path == "/repos/o/r/issues/7":
-					fmt.Fprint(w, `{"title":"Task","body":"Inspect source"}`)
+					_, _ = fmt.Fprint(w, `{"title":"Task","body":"Inspect source"}`)
 				case strings.HasPrefix(r.URL.Path, "/repos/o/r/git/trees/"):
 					sha := strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/")
 					switch scenario {
 					case "oversized source":
-						fmt.Fprintf(w, `{"sha":%q,"truncated":true,"tree":[]}`, sha)
+						_, _ = fmt.Fprintf(w, `{"sha":%q,"truncated":true,"tree":[]}`, sha)
 					case "unsupported source":
-						fmt.Fprintf(w, `{"sha":%q,"truncated":false,"tree":[{"path":"source","type":"blob","mode":"100600","size":0}]}`, sha)
+						_, _ = fmt.Fprintf(w, `{"sha":%q,"truncated":false,"tree":[{"path":"source","type":"blob","mode":"100600","size":0}]}`, sha)
 					default:
-						fmt.Fprintf(w, `{"sha":%q,"truncated":false,"tree":[]}`, sha)
+						_, _ = fmt.Fprintf(w, `{"sha":%q,"truncated":false,"tree":[]}`, sha)
 					}
 				default:
 					t.Errorf("unexpected request %s", r.URL)
@@ -137,9 +137,9 @@ func TestExecuteSourceFailuresAndInvalidIncompleteResultsAreTerminal(t *testing.
 }
 
 func TestPublishFixRejectsNonemptyReviewedChangesDroppedByGit(t *testing.T) {
-	for _, stage := range []string{"import", "commit"} {
+	for _, stage := range []string{"import", "commit", "fork changed"} {
 		t.Run(stage, func(t *testing.T) {
-			base, _, _ := auditGitFixtureRemote(t)
+			base, _, _ := gitFixtureRemote(t)
 			git, err := exec.LookPath("git")
 			if err != nil {
 				t.Fatal(err)
@@ -163,13 +163,17 @@ func TestPublishFixRejectsNonemptyReviewedChangesDroppedByGit(t *testing.T) {
 				}
 				switch r.URL.Path {
 				case "/repos/o/r":
-					fmt.Fprint(w, `{"id":1,"full_name":"o/r","owner":{"id":2},"default_branch":"main","visibility":"public"}`)
+					_, _ = fmt.Fprint(w, `{"id":1,"full_name":"o/r","owner":{"id":2},"default_branch":"main","visibility":"public"}`)
 				case "/repos/bot/r":
-					fmt.Fprint(w, `{"id":3,"full_name":"bot/r","fork":true,"parent":{"id":1,"full_name":"o/r"},"source":{"id":1,"full_name":"o/r"},"default_branch":"main","visibility":"public"}`)
+					currentFork := fork
+					if stage == "fork changed" {
+						currentFork.ID++
+					}
+					_ = json.NewEncoder(w).Encode(currentFork)
 				case "/repos/bot/r/actions/permissions":
-					fmt.Fprint(w, `{"enabled":false}`)
+					_, _ = fmt.Fprint(w, `{"enabled":false}`)
 				case "/repos/o/r/rulesets", "/repos/bot/r/rulesets":
-					fmt.Fprint(w, `[]`)
+					_, _ = fmt.Fprint(w, `[]`)
 				default:
 					t.Errorf("unexpected request %s", r.URL)
 					http.NotFound(w, r)
@@ -197,6 +201,15 @@ func TestPublishFixRejectsNonemptyReviewedChangesDroppedByGit(t *testing.T) {
 			orchestrator := Orchestrator{GitHub: client, BotLogin: "bot", WorkRoot: root}
 			result := Result{Changes: []workspace.Change{{Path: "reviewed.txt", Mode: workspace.Regular, Data: []byte("reviewed change")}}}
 			err = orchestrator.publishFix(context.Background(), prepared, result)
+			if stage == "fork changed" {
+				if err == nil || !strings.Contains(err.Error(), "repository or fork changed") || !errors.Is(err, monitor.ErrPostModelPublication) || writes != 0 {
+					t.Fatalf("changed fork reached publication: writes=%d err=%v", writes, err)
+				}
+				if _, statErr := os.Stat(seen); !errors.Is(statErr, os.ErrNotExist) {
+					t.Fatalf("changed fork reached import/commit: %v", statErr)
+				}
+				return
+			}
 			if !errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, monitor.ErrPostModelPublication) || writes != 0 || (stage == "commit" && !errors.Is(err, gitwork.ErrNoChanges)) || (stage == "import" && !strings.Contains(err.Error(), "staged paths do not match reviewed changes")) {
 				t.Fatalf("dropped %s changes: writes=%d err=%v", stage, writes, err)
 			}
@@ -205,7 +218,7 @@ func TestPublishFixRejectsNonemptyReviewedChangesDroppedByGit(t *testing.T) {
 }
 
 func TestCompletedAuditRetentionFailureIsTerminal(t *testing.T) {
-	base, _, _ := auditGitFixtureRemote(t)
+	base, _, _ := gitFixtureRemote(t)
 	checkout, err := gitwork.Clone(context.Background(), t.TempDir(), "o/r", "main", func(_ context.Context, sha string) (github.GitTree, error) {
 		truncated := false
 		return github.GitTree{SHA: sha, Truncated: &truncated, Tree: []github.GitTreeEntry{}}, nil

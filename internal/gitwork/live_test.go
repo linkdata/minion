@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/linkdata/minion/internal/github"
+	"github.com/linkdata/minion/internal/workspace"
 )
 
 func TestLiveCloneAndPullRequest(t *testing.T) {
@@ -87,7 +88,7 @@ func TestLiveCloneAndPullRequest(t *testing.T) {
 	if err := checkout.checkoutPullRequest(ctx, pull.Number, pull.Base.Ref, pull.Head.SHA); err != nil {
 		t.Fatal(err)
 	}
-	if head, err := checkout.Head(ctx); err != nil || !strings.EqualFold(head, pull.Head.SHA) {
+	if head, err := checkout.Head(ctx); err != nil || head != pull.Head.SHA {
 		t.Fatalf("pull request HEAD = %q, %v; want %s", head, err, pull.Head.SHA)
 	}
 }
@@ -201,7 +202,7 @@ func TestLiveCommitAndPush(t *testing.T) {
 		t.Fatalf("unchanged branch=%v", err)
 	}
 	name := "minion-live-gitwork-" + id + ".txt"
-	if err := os.WriteFile(filepath.Join(checkout.path, name), []byte("Minion live Gitwork test.\n"), 0o600); err != nil {
+	if err := checkout.Import(ctx, base, []workspace.Change{{Path: name, Mode: workspace.Regular, Data: []byte("Minion live Gitwork test.\n")}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := checkout.CommitAndPush(ctx, branch, cfg.BotLogin, "test: Gitwork live publish "+id, func(sha string) error {

@@ -431,12 +431,12 @@ func TestWalkBoundsEntries(t *testing.T) {
 }
 
 func TestValidSHA(t *testing.T) {
-	for _, value := range []string{strings.Repeat("a", 40), strings.Repeat("F", 64)} {
+	for _, value := range []string{strings.Repeat("a", 40), strings.Repeat("f", 64)} {
 		if !ValidSHA(value) {
 			t.Fatalf("rejected valid SHA %q", value)
 		}
 	}
-	for _, value := range []string{"bad", strings.Repeat("g", 40), strings.Repeat("g", 64)} {
+	for _, value := range []string{"bad", strings.Repeat("g", 40), strings.Repeat("g", 64), strings.Repeat("A", 40), strings.Repeat("F", 64), strings.Repeat("a", 39) + "F"} {
 		if ValidSHA(value) {
 			t.Fatalf("accepted invalid SHA %q", value)
 		}

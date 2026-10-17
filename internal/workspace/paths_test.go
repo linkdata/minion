@@ -18,7 +18,7 @@ func TestCheckUnchangedBoundsEachFileToBaseline(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "source"), []byte("longer content"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := CheckUnchanged(context.Background(), root, base); err == nil || !strings.Contains(err.Error(), "byte limit") {
+	if err := CheckUnchanged(context.Background(), root, base); err == nil || !strings.Contains(err.Error(), "modified supplied source") || !strings.Contains(err.Error(), "byte limit") {
 		t.Fatalf("grown source validation=%v", err)
 	}
 }

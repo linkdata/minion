@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -60,8 +59,6 @@ func TestRunAIRevisionPreservesWorkAndBoundaries(t *testing.T) {
 			if tt.reports {
 				outputDir = t.TempDir()
 				file = filepath.Join(outputDir, "REPORT.md")
-			} else if out, err := exec.Command("git", "init", "-q", dir).CombinedOutput(); err != nil {
-				t.Fatalf("git init: %s: %v", out, err)
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 			defer cancel()
@@ -126,11 +123,14 @@ func TestRunAIRevisionPreservesWorkAndBoundaries(t *testing.T) {
 				} else if request.reviewPhase != "full" || request.round != (calls+1)/3 {
 					t.Fatalf("wrong full-review metadata: %+v", request)
 				}
+				if request.criticPrompt == nil {
+					t.Fatal("missing critic renderer")
+				}
 				content, err := os.ReadFile(file)
 				if err != nil || request.criticPrompt("", outputDir) != criticPrompt(task, string(content), notes, priorAnswer, priorFeedback, outputDir) {
 					t.Fatalf("critic prompt lacks current task context: %q, %v", request.prompt, err)
 				}
-				if request.criticPrompt == nil || request.criticPrompt("Frozen task", "frozen-reports") != criticPrompt(task+"Frozen task", string(content), notes, priorAnswer, priorFeedback, "frozen-reports") {
+				if request.criticPrompt("Frozen task", "frozen-reports") != criticPrompt(task+"Frozen task", string(content), notes, priorAnswer, priorFeedback, "frozen-reports") {
 					t.Fatal("critic prompt cannot bind to immutable source and report context")
 				}
 				if calls == 2 {
@@ -435,7 +435,7 @@ func TestCommentPublishesOnlyCriticApprovedResult(t *testing.T) {
 		{name: "invalid", verdict: "approved", wantError: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			auditGitFixtureRemote(t)
+			gitFixtureRemote(t)
 			var published string
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch {

@@ -66,39 +66,6 @@ func TestOversizedNormalizedMetadataPreservesOtherPartialArtifacts(t *testing.T)
 	}
 }
 
-func TestJobSubjectMatchesComparisonForEveryAction(t *testing.T) {
-	for _, action := range []command.Action{command.Comment, command.SecurityAudit, command.Review, command.Fix} {
-		for _, subject := range []string{"Issue", "PullRequest"} {
-			for _, comparison := range []bool{false, true} {
-				t.Run(fmt.Sprintf("%s/%s/comparison=%t", action, subject, comparison), func(t *testing.T) {
-					job := portableJob(action)
-					job.Identity.SubjectType = subject
-					job.Source.Base, job.Source.MergeBase = "", ""
-					job.Source.BaseFiles, job.Source.Diff = nil, nil
-					if comparison {
-						job.Source.Base, job.Source.MergeBase = strings.Repeat("b", 40), strings.Repeat("c", 40)
-					}
-					if err := workspace.ValidateSnapshot(job.Source); err != nil {
-						t.Fatalf("invalid source fixture: %v", err)
-					}
-					want := ""
-					if (subject == "PullRequest") != comparison {
-						want = "action subject and supplied comparison differ"
-					} else if action == command.Review && subject != "PullRequest" {
-						want = "review requires a supplied pull request comparison"
-					} else if action == command.Fix && subject != "Issue" {
-						want = "fix requires an issue"
-					}
-					err := job.Validate()
-					if (err == nil) != (want == "") || (err != nil && !strings.Contains(err.Error(), want)) {
-						t.Fatalf("subject/comparison validation=%v want%q", err, want)
-					}
-				})
-			}
-		}
-	}
-}
-
 func TestRunnerCancellationDuringInstalledAuditValidatorPreservesCause(t *testing.T) {
 	installActionTestSkills(t, testAuditSkillURL)
 	bin := t.TempDir()
@@ -242,6 +209,94 @@ func TestPreparationFailureDistinguishesCapacityFromInvalidInput(t *testing.T) {
 			err := preparationFailure("materialize source", native)
 			if !errors.Is(err, test.cause) || errors.Is(err, monitor.ErrTerminalJob) != test.terminal || !strings.Contains(err.Error(), "materialize source") {
 				t.Fatalf("preparation classification=%v, want terminal=%t with cause%v", err, test.terminal, test.cause)
+			}
+		})
+	}
+}
+
+func TestRunnerDropsNULFromUnreviewedAnswer(t *testing.T) {
+	job := portableJob(command.Comment)
+	runner := Runner{WorkRoot: t.TempDir(), runModel: func(context.Context, modelRun) (aicli.Result, error) {
+		return aicli.Result{Answer: "before\x00after"}, nil
+	}}
+	result, err := runner.Run(context.Background(), job)
+	if err != nil || result.Answer != "beforeafter" || len(result.Calls) != 1 {
+		t.Fatalf("unreviewed NUL answer=%q error=%v", result.Answer, err)
+	}
+}
+
+func TestRunnerCancellationBeforeDispatchRecordsNoCall(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	job := portableJob(command.Comment)
+	calls := 0
+	runner := Runner{WorkRoot: t.TempDir(), runModel: func(context.Context, modelRun) (aicli.Result, error) { calls++; return aicli.Result{}, nil }}
+	runner.aroundModel = func(ctx context.Context, request modelRun, next modelCall) (aicli.Result, error) {
+		cancel()
+		return next(ctx, request)
+	}
+	result, err := runner.Run(ctx, job)
+	if !errors.Is(err, context.Canceled) || calls != 0 || len(result.Calls) != 0 || result.Answer != "" {
+		t.Fatalf("undispatched cancellation: native=%d recorded=%d answer=%q error=%v", calls, len(result.Calls), result.Answer, err)
+	}
+}
+
+func TestRunnerMetadataAliasSourceIsTerminalBeforeModels(t *testing.T) {
+	job := portableJob(command.Fix)
+	job.Source.Files = []workspace.File{{Path: "GIT~1/x", Mode: workspace.Regular}}
+	runner := Runner{WorkRoot: t.TempDir(), runModel: func(context.Context, modelRun) (aicli.Result, error) {
+		t.Fatal("model ran for unsupported fix source")
+		return aicli.Result{}, nil
+	}}
+	result, err := runner.Run(context.Background(), job)
+	if !errors.Is(err, monitor.ErrTerminalJob) || len(result.Calls) != 0 {
+		t.Fatalf("unsupported source was retryable: %v", err)
+	}
+}
+
+func TestRunnerReportsOwnedAndCriticCleanupFailures(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions")
+	}
+	for _, critic := range []bool{false, true} {
+		t.Run(fmt.Sprint(critic), func(t *testing.T) {
+			job := portableJob(command.Comment)
+			if critic {
+				job.Action = command.Fix
+				job.Command = "fix"
+				job.Critic = &RoleSettings{Provider: "claude"}
+			}
+			root := t.TempDir()
+			defer func() {
+				if err := os.Chmod(root, 0700); err != nil {
+					t.Error(err)
+				}
+			}()
+			runner := Runner{WorkRoot: root, runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+				if request.role == "main" && critic {
+					return aicli.Result{Answer: proposalJSON("Done.", "")}, nil
+				}
+				if err := os.Chmod(root, 0500); err != nil {
+					return aicli.Result{}, err
+				}
+				if critic {
+					return aicli.Result{Answer: `{"approved":true,"feedback":""}`}, nil
+				}
+				return aicli.Result{Answer: "Done."}, nil
+			}}
+			result, err := runner.Run(context.Background(), job)
+			if err != nil {
+				t.Fatal(err)
+			}
+			workspaceFailed, criticFailed := false, false
+			for _, diagnostic := range result.Diagnostics {
+				if diagnostic.Code == "cleanup_failed" {
+					workspaceFailed = workspaceFailed || strings.Contains(diagnostic.Message, "Execution workspace")
+					criticFailed = criticFailed || strings.Contains(diagnostic.Message, "Critic snapshot")
+				}
+			}
+			if !workspaceFailed || critic && !criticFailed {
+				t.Fatalf("cleanup failure not recorded: %+v", result.Diagnostics)
 			}
 		})
 	}

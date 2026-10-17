@@ -26,10 +26,9 @@ const (
 	MaxContextBytes = 1 << 20
 	MaxEntries      = 100_000
 	// MaxPathBytes bounds relative transfer paths; absolute paths also obey host limits.
-	MaxPathBytes         = 4096
-	GitAttributes        = "* -text -ident -filter -working-tree-encoding !diff\n"
-	Regular       uint32 = 0100644
-	Executable    uint32 = 0100755
+	MaxPathBytes        = 4096
+	Regular      uint32 = 0100644
+	Executable   uint32 = 0100755
 )
 
 type File struct {
@@ -61,7 +60,33 @@ type Snapshot struct {
 }
 
 func ValidPath(name string) bool {
-	return ValidSourcePath(name) && !strings.Contains(name, "\\")
+	if !ValidSourcePath(name) || strings.Contains(name, "\\") {
+		return false
+	}
+	for _, part := range strings.Split(name, "/") {
+		if gitMetadataAlias(part) {
+			return false
+		}
+	}
+	return true
+}
+
+// Match Git's independently applied protectNTFS and protectHFS metadata checks.
+func gitMetadataAlias(part string) bool {
+	ntfs, _, _ := strings.Cut(part, ":")
+	ntfs = strings.TrimRight(ntfs, " .")
+	if strings.EqualFold(ntfs, ".git") || strings.EqualFold(ntfs, "git~1") {
+		return true
+	}
+	hfs := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 0x200c && r <= 0x200f, r >= 0x202a && r <= 0x202e,
+			r >= 0x206a && r <= 0x206f, r == 0xfeff:
+			return -1
+		}
+		return r
+	}, part)
+	return strings.EqualFold(hfs, ".git")
 }
 
 // FoldPath returns the same key for Unicode simple-case-fold equivalents.
@@ -79,7 +104,7 @@ func FoldPath(name string) string {
 }
 
 // ValidSourcePath accepts Git's case-sensitive slash paths, including literal backslashes.
-// Protected Git staging additionally rejects HFS/NTFS aliases of Git metadata.
+// Writable/import paths additionally reject HFS/NTFS aliases of Git metadata.
 func ValidSourcePath(name string) bool {
 	if name == "" || name == "." || name == ".." || len(name) >= MaxPathBytes || !utf8.ValidString(name) || strings.ContainsRune(name, '\x00') || path.Clean(name) != name || path.IsAbs(name) || strings.HasPrefix(name, "../") {
 		return false
@@ -93,7 +118,7 @@ func ValidSourcePath(name string) bool {
 }
 
 func ValidSHA(value string) bool {
-	return (len(value) == 40 || len(value) == 64) && strings.Trim(value, "0123456789abcdefABCDEF") == ""
+	return (len(value) == 40 || len(value) == 64) && strings.Trim(value, "0123456789abcdef") == ""
 }
 
 func ValidateSnapshot(s Snapshot) error {
@@ -229,7 +254,7 @@ func CheckRoot(root string) error {
 	return dir.Close()
 }
 
-func checkRootDir(root string, private bool) error {
+func requireRootDir(root string, private bool) error {
 	info, err := os.Lstat(root)
 	if err != nil {
 		return err
@@ -245,7 +270,7 @@ func Materialize(root string, files []File) error {
 	if err := validateFiles(files); err != nil {
 		return err
 	}
-	if err := checkRootDir(root, true); err != nil {
+	if err := requireRootDir(root, true); err != nil {
 		return err
 	}
 	dir, err := os.Open(root)
@@ -305,6 +330,7 @@ func CheckUnchanged(ctx context.Context, root string, base []File) error {
 			return fmt.Errorf("unsafe workspace path %q", rel)
 		}
 		if entry.IsDir() {
+			// Empty directories carry no versioned source state; still inspect their entries.
 			return nil
 		}
 		old, exists := prior[rel]
@@ -313,7 +339,7 @@ func CheckUnchanged(ctx context.Context, root string, base []File) error {
 		}
 		data, info, err := readFile(name, int64(len(old.Data)))
 		if err != nil {
-			return err
+			return fmt.Errorf("read-only action modified supplied source: cannot verify %q: %w", rel, err)
 		}
 		mode := Regular
 		if info.Mode().Perm()&0100 != 0 {
@@ -503,7 +529,7 @@ func Apply(root string, changes []Change) error {
 	if err := ValidateChanges(changes); err != nil {
 		return err
 	}
-	if err := checkRootDir(root, false); err != nil {
+	if err := requireRootDir(root, false); err != nil {
 		return err
 	}
 	// Delete first, including empty ancestors, so file/directory changes work.
@@ -545,6 +571,9 @@ func Apply(root string, changes []Change) error {
 		if info, err := os.Lstat(name); err == nil {
 			if !info.Mode().IsRegular() {
 				return fmt.Errorf("changed path %q is not regular", change.Path)
+			}
+			if !singleLink(info) {
+				return fmt.Errorf("changed path %q must have exactly one hard link", change.Path)
 			}
 		} else if !errors.Is(err, os.ErrNotExist) {
 			return err
@@ -591,7 +620,7 @@ func readFile(name string, limit int64) (data []byte, info fs.FileInfo, resultEr
 	if err != nil {
 		return nil, nil, err
 	}
-	if !opened.Mode().IsRegular() || opened.Size() < 0 || opened.Size() > limit {
+	if !opened.Mode().IsRegular() || opened.Size() > limit {
 		return nil, nil, errors.New("file is not regular or exceeds byte limit")
 	}
 	if !singleLink(opened) {

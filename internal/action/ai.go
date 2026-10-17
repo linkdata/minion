@@ -15,6 +15,11 @@ import (
 )
 
 const (
+	roleMain           = "main"
+	roleCritic         = "critic"
+	reviewFull         = "full"
+	reviewVerification = "verification"
+
 	maxCriticOutputBytes = 64 << 10
 	// JSON escaping can use six bytes per content byte, plus keys and whitespace.
 	maxProposalOutputBytes = 6*maxOutputBytes + 128
@@ -69,7 +74,7 @@ func (r *Runner) runOnce(ctx context.Context, request modelRun) (aicli.Result, e
 
 func (r *Runner) runAI(ctx context.Context, job Job, dir, prompt string, writable bool, outputDir string) (answer string, err error) {
 	rounds := job.rounds()
-	request := modelRun{role: "main", provider: job.Main.Provider, model: job.Main.Model, effort: job.Main.Effort, dir: dir, prompt: prompt, writable: writable, outputDir: outputDir}
+	request := modelRun{role: roleMain, provider: job.Main.Provider, model: job.Main.Model, effort: job.Main.Effort, dir: dir, prompt: prompt, writable: writable, outputDir: outputDir}
 	if job.Critic != nil {
 		request.prompt, request.outputSchema = mainPrompt(prompt), mainOutputSchema
 	}
@@ -81,7 +86,7 @@ func (r *Runner) runAI(ctx context.Context, job Job, dir, prompt string, writabl
 			return
 		}
 		if job.Critic == nil {
-			answer = proposed.Answer
+			answer = strings.ReplaceAll(proposed.Answer, "\x00", "")
 			return
 		}
 		candidate, notes, parseErr := parseProposal(proposed.Answer)
@@ -90,16 +95,16 @@ func (r *Runner) runAI(ctx context.Context, job Job, dir, prompt string, writabl
 		}
 		var approved bool
 		var feedback string
-		phases := []string{"full"}
+		phases := []string{reviewFull}
 		if round > 0 {
-			phases = []string{"verification", "full"}
+			phases = []string{reviewVerification, reviewFull}
 		}
 		for _, phase := range phases {
 			criticNotes, previousAnswer, previousFeedback := "", "", ""
-			if phase == "verification" {
+			if phase == reviewVerification {
 				criticNotes, previousAnswer, previousFeedback = notes, priorAnswer, priorFeedback
 			}
-			critic := modelRun{role: "critic", round: round + 1, reviewPhase: phase, provider: job.Critic.Provider, model: job.Critic.Model, effort: job.Critic.Effort, outputSchema: criticOutputSchema}
+			critic := modelRun{role: roleCritic, round: round + 1, reviewPhase: phase, provider: job.Critic.Provider, model: job.Critic.Model, effort: job.Critic.Effort, outputSchema: criticOutputSchema}
 			critic.criticPrompt = func(mapping, reports string) string {
 				return criticPrompt(prompt+mapping, candidate, criticNotes, previousAnswer, previousFeedback, reports)
 			}

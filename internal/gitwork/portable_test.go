@@ -214,7 +214,11 @@ func TestSnapshotReusesValidatedTreesByCommit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer checkout.Close()
+	defer func() {
+		if err := checkout.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
 	for i := 0; i < 2; i++ {
 		if _, err := checkout.Snapshot(context.Background(), false, false); err != nil {
 			t.Fatal(err)
@@ -254,7 +258,11 @@ func TestSnapshotPreservesOmittedPathSpellingsAcrossRevisions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer checkout.Close()
+	defer func() {
+		if err := checkout.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
 	if err := os.Rename(filepath.Join(fixture.source, "Docs"), filepath.Join(fixture.source, "docs")); err != nil {
 		t.Fatal(err)
 	}

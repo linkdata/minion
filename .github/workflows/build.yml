@@ -27,8 +27,8 @@ jobs:
       - name: Go vet
         run: go vet ./...
 
-      - name: Compile alternate workspace platform
-        run: GOOS=darwin go vet ./internal/workspace
+      - name: Compile alternate platform
+        run: GOOS=darwin go vet ./...
 
       - name: Check gofmt
         run: |

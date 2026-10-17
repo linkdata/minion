@@ -23,6 +23,9 @@ import (
 )
 
 const (
+	// GitAttributes disables repository transformations on trusted and offline indexes.
+	GitAttributes = "* -text -ident -filter -working-tree-encoding !diff\n"
+
 	// MaxPatchBytes bounds a published fix's binary patch independently of model context.
 	MaxPatchBytes = 1 << 20
 
@@ -34,7 +37,6 @@ var (
 	ErrNoChanges         = errors.New("no changes to commit")
 	ErrTooManyFiles      = errors.New("too many changed files")
 	ErrDiffTooLarge      = errors.New("staged diff exceeds size limit")
-	ErrChangedFileLarge  = errors.New("changed file exceeds size limit")
 	ErrHeadMoved         = errors.New("pull request head changed")
 	ErrCheckoutTooLarge  = errors.New("source tree exceeds checkout limits")
 	ErrUnsupportedSource = errors.New("source tree is unsupported")
@@ -155,7 +157,7 @@ func cloneRepository(ctx context.Context, workRoot, url, defaultBranch string, l
 	if err != nil {
 		return nil, err
 	}
-	path, err := os.MkdirTemp(workRoot, "minion-")
+	path, err := os.MkdirTemp(workRoot, "minion-checkout-")
 	if err != nil {
 		return nil, fmt.Errorf("create checkout directory: %w", err)
 	}
@@ -213,9 +215,6 @@ func (c *Checkout) checkoutPullRequest(ctx context.Context, number int, baseRef,
 	if err := c.ready(); err != nil {
 		return err
 	}
-	if err := validatePullRequest(number, baseRef, expectedHeadSHA); err != nil {
-		return err
-	}
 	const baseDest = "refs/remotes/minion/base"
 	const headDest = "refs/remotes/minion/pr-head"
 	_, err := runGit(ctx, c.path, "fetch", "--no-tags", "--filter=blob:none", "--force", "--", c.url,
@@ -233,7 +232,7 @@ func (c *Checkout) checkoutPullRequest(ctx context.Context, number int, baseRef,
 	if err != nil {
 		return err
 	}
-	if !strings.EqualFold(head, expectedHeadSHA) {
+	if head != expectedHeadSHA {
 		return fmt.Errorf("%w: expected %s, fetched %s", ErrHeadMoved, expectedHeadSHA, head)
 	}
 	return c.checkoutSource(ctx, head)
@@ -259,7 +258,7 @@ func (c *Checkout) checkoutSource(ctx context.Context, head string) error {
 	if _, err := runGit(ctx, c.path, "checkout", "--detach", head); err != nil {
 		return err
 	}
-	c.expectedHead = strings.ToLower(head)
+	c.expectedHead = head
 	c.branch = ""
 	return c.recordConfig()
 }
@@ -267,10 +266,13 @@ func (c *Checkout) checkoutSource(ctx context.Context, head string) error {
 // Check expanded blobs and gitlinks, including repeated object references,
 // against GitHub metadata before fetching source contents.
 func checkSourceTree(tree github.GitTree, expectedSHA string) error {
+	if len(tree.Tree) > workspace.MaxEntries {
+		return ErrCheckoutTooLarge
+	}
 	if tree.Truncated != nil && *tree.Truncated {
 		return fmt.Errorf("%w: GitHub tree metadata is truncated", ErrCheckoutTooLarge)
 	}
-	if !strings.EqualFold(tree.SHA, expectedSHA) || !workspace.ValidSHA(tree.SHA) || tree.Truncated == nil || tree.Tree == nil {
+	if tree.SHA != expectedSHA || !workspace.ValidSHA(tree.SHA) || tree.Truncated == nil || tree.Tree == nil {
 		return fmt.Errorf("%w: incomplete or mismatched tree metadata", ErrUnsupportedSource)
 	}
 	var files int
@@ -332,8 +334,9 @@ func (c *Checkout) NewBranch(ctx context.Context, name string) error {
 
 // CommitAndPush commits changes as botLogin and pushes one branch.
 //
-// It stages the working tree, bounds the changed file count and patch size,
-// commits without hooks or signing, and uses the validated repository URL.
+// Import must have successfully validated and staged the reviewed changes.
+// It bounds the staged patch, commits without hooks or signing, and uses the
+// validated repository URL. Unstaged files are never added here.
 // beforePush must persist the new commit SHA for later recovery.
 func (c *Checkout) CommitAndPush(ctx context.Context, branch, botLogin, message string, beforePush func(string) error) error {
 	if err := c.ready(); err != nil {
@@ -365,27 +368,12 @@ func (c *Checkout) CommitAndPush(ctx context.Context, branch, botLogin, message 
 		return fmt.Errorf("current branch %q does not match push branch %q", currentBranch, branch)
 	}
 
-	if _, err := runGit(ctx, c.path, "add", "--all", "--", "."); err != nil {
-		return err
-	}
-	paths, err := c.stagedPaths(ctx, "")
+	paths, err := c.stagedPaths(ctx)
 	if err != nil {
 		return err
 	}
 	if len(paths) == 0 {
 		return ErrNoChanges
-	}
-	if len(paths) > workspace.MaxChanges {
-		return fmt.Errorf("%w: %d > %d", ErrTooManyFiles, len(paths), workspace.MaxChanges)
-	}
-	// Deleted paths may now be directories or lie beneath replacement files.
-	// They contribute no new blob, so exclude them before examining the worktree.
-	paths, err = c.stagedPaths(ctx, "d")
-	if err != nil {
-		return err
-	}
-	if err := c.checkChangedFileSizes(paths); err != nil {
-		return err
 	}
 	if err := c.checkPatchSize(ctx); err != nil {
 		return err
@@ -406,12 +394,9 @@ func (c *Checkout) CommitAndPush(ctx context.Context, branch, botLogin, message 
 	return c.recordConfig()
 }
 
-func (c *Checkout) stagedPaths(ctx context.Context, filter string) ([]string, error) {
+func (c *Checkout) stagedPaths(ctx context.Context) ([]string, error) {
 	const limit = (workspace.MaxChanges + 1) * (workspace.MaxPathBytes + 128)
 	args := []string{"diff", "--cached", "--name-only", "-z", "--no-renames", "--no-ext-diff"}
-	if filter != "" {
-		args = append(args, "--diff-filter="+filter)
-	}
 	data, truncated, err := c.boundedGit(ctx, limit, true, args...)
 	if err != nil {
 		return nil, err
@@ -433,27 +418,6 @@ func (c *Checkout) stagedPaths(ctx context.Context, filter string) ([]string, er
 	return paths, nil
 }
 
-func (c *Checkout) checkChangedFileSizes(paths []string) error {
-	var total int64
-	for _, path := range paths {
-		if path == "" || path == "." || !filepath.IsLocal(path) || filepath.Clean(path) != path {
-			return fmt.Errorf("unsafe changed path %q", path)
-		}
-		info, err := os.Lstat(filepath.Join(c.path, filepath.FromSlash(path)))
-		if err != nil {
-			return fmt.Errorf("stat changed file %q: %w", path, err)
-		}
-		if info.IsDir() {
-			return fmt.Errorf("changed path %q is a directory or submodule", path)
-		}
-		total += info.Size()
-		if info.Size() > workspace.MaxChangeBytes || total > workspace.MaxChangeBytes {
-			return fmt.Errorf("%w: %q (%d bytes; %d bytes total)", ErrChangedFileLarge, path, info.Size(), total)
-		}
-	}
-	return nil
-}
-
 func (c *Checkout) checkPatchSize(ctx context.Context) error {
 	_, truncated, err := c.boundedGit(ctx, MaxPatchBytes, true, "diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv", "--no-renames", "--no-color", "--submodule=short")
 	if truncated {
@@ -471,7 +435,7 @@ func (c *Checkout) assertHead(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if c.expectedHead == "" || !strings.EqualFold(head, c.expectedHead) {
+	if c.expectedHead == "" || head != c.expectedHead {
 		return fmt.Errorf("checkout HEAD moved: expected %s, found %s", c.expectedHead, head)
 	}
 	return nil
@@ -490,6 +454,9 @@ func (c *Checkout) ready() error {
 	if c == nil || c.closed || c.path == "" || c.url == "" {
 		return errors.New("checkout is closed or uninitialized")
 	}
+	// Defense in depth for the trusted checkout retained across preparation and
+	// publication: unexpected host changes must not alter
+	// Git behavior. Models receive snapshots and cannot access this checkout.
 	data, err := os.ReadFile(filepath.Join(c.path, ".git", "config"))
 	if err != nil {
 		return fmt.Errorf("read checkout Git config: %w", err)
@@ -502,14 +469,10 @@ func (c *Checkout) ready() error {
 
 func runGit(ctx context.Context, dir string, args ...string) (string, error) {
 	var output bytes.Buffer
-	if err := runGitTo(ctx, dir, &output, args...); err != nil {
+	if err := runGitInputTo(ctx, dir, nil, &output, args...); err != nil {
 		return "", err
 	}
 	return strings.TrimSpace(output.String()), nil
-}
-
-func runGitTo(ctx context.Context, dir string, stdout io.Writer, args ...string) error {
-	return runGitInputTo(ctx, dir, nil, stdout, args...)
 }
 
 func runGitInputTo(ctx context.Context, dir string, stdin io.Reader, stdout io.Writer, args ...string) error {
@@ -563,6 +526,7 @@ func ClassifyPathError(operation, message string, err error) error {
 func HardeningArgs() []string {
 	return []string{
 		"-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
+		"-c", "core.fileMode=true",
 		"-c", "core.protectHFS=true", "-c", "core.protectNTFS=true",
 		"-c", "core.excludesFile=/dev/null", "-c", "core.attributesFile=/dev/null",
 		"-c", "commit.gpgsign=false", "-c", "gc.auto=0", "-c", "maintenance.auto=false",

@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/linkdata/minion/internal/codexcli"
+	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/github"
@@ -37,14 +37,14 @@ func TestLiveReviewAction(t *testing.T) {
 		BotLogin: fixture.cfg.BotLogin,
 		Commands: map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{testReviewSkillURL}}},
 		Runner: Runner{
-			WorkRoot: t.TempDir(), runModel: func(ctx context.Context, modelRequest modelRun) (codexcli.Result, error) {
+			WorkRoot: t.TempDir(), runModel: func(ctx context.Context, modelRequest modelRun) (aicli.Result, error) {
 				dir, prompt, writable, outputDir := modelRequest.dir, modelRequest.prompt, modelRequest.writable, modelRequest.outputDir
 				calls++
 				if writable || outputDir != "" || !strings.Contains(prompt, pull.Head.SHA) {
-					return codexcli.Result{}, fmt.Errorf("live review did not use the expected read-only pull request")
+					return aicli.Result{}, fmt.Errorf("live review did not use the expected read-only pull request")
 				}
 				assertPortableSource(t, dir)
-				return codexcli.Result{Answer: "Live review fixture " + job.ID[:12] + "."}, nil
+				return aicli.Result{Answer: "Live review fixture " + job.ID[:12] + "."}, nil
 			},
 		},
 	}
@@ -118,11 +118,11 @@ func TestLiveSecurityAuditAction(t *testing.T) {
 				BotLogin: fixture.cfg.BotLogin,
 				Commands: map[string]config.CommandMapping{"security-audit": {Action: "security-audit", Skills: []string{testAuditSkillURL}}},
 				Runner: Runner{
-					WorkRoot: t.TempDir(), runModel: func(ctx context.Context, modelRequest modelRun) (codexcli.Result, error) {
+					WorkRoot: t.TempDir(), runModel: func(ctx context.Context, modelRequest modelRun) (aicli.Result, error) {
 						dir, prompt, writable, outputDir := modelRequest.dir, modelRequest.prompt, modelRequest.writable, modelRequest.outputDir
 						calls++
 						if writable || outputDir == "" || strings.HasPrefix(outputDir, dir+string(os.PathSeparator)) || !strings.Contains(prompt, test.head) {
-							return codexcli.Result{}, fmt.Errorf("live audit did not use a separate report directory and expected commit")
+							return aicli.Result{}, fmt.Errorf("live audit did not use a separate report directory and expected commit")
 						}
 						assertPortableSource(t, dir)
 						metadata := fmt.Sprintf(`{"run_id":%q,"repo":%q,"target":%q,"source_ref":%q,"profile":"standard","scope_paths":["."],"budget":null,"selected_companion_files":[],"prior_run_paths":[],"shared_file_owners":%s,"execution_policy":"sandboxed-source-and-local-only","run_status":"complete"}`, job.ID, liveFixRepository, dir, test.head, auditTestOwners)
@@ -132,10 +132,10 @@ func TestLiveSecurityAuditAction(t *testing.T) {
 							"REPORT.md": report, "FINDINGS-DETAIL.md": "No findings.\n", "NEEDS-VALIDATION.md": "No validation leads.\n",
 						} {
 							if err := os.WriteFile(filepath.Join(outputDir, name), []byte(content), 0o600); err != nil {
-								return codexcli.Result{}, err
+								return aicli.Result{}, err
 							}
 						}
-						return codexcli.Result{Answer: "Untrusted final answer"}, nil
+						return aicli.Result{Answer: "Untrusted final answer"}, nil
 					},
 				},
 			}
@@ -186,13 +186,6 @@ func liveReviewAuditPull(t *testing.T, ctx context.Context, owner *github.Client
 		t.Fatalf("pull request #%d is not an open owner-authored draft: %v", cfg.PullRequestNumber, err)
 	}
 	return pull
-}
-
-func assertPortableSource(t *testing.T, dir string) {
-	t.Helper()
-	if _, err := os.Lstat(filepath.Join(dir, ".git")); !os.IsNotExist(err) {
-		t.Fatalf("executor received Git metadata: %v", err)
-	}
 }
 
 func liveReviewAuditSubmittedReview(t *testing.T, ctx context.Context, ownerToken string, cfg liveFixConfig, job monitor.Job, head string) github.Review {

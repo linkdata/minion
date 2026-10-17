@@ -13,7 +13,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/linkdata/minion/internal/codexcli"
+	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/github"
@@ -43,7 +43,7 @@ func TestSecurityAuditIssueAndPullRequest(t *testing.T) {
 		{name: "moved pull request", subject: "PullRequest", movedHead: true, wantError: "pull request head changed"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			base, head, _ := auditGitFixtureRemote(t)
+			base, head, _ := gitFixtureRemote(t)
 			expected := base
 			if tt.subject == "PullRequest" {
 				expected = head
@@ -134,7 +134,7 @@ func TestSecurityAuditIssueAndPullRequest(t *testing.T) {
 				CodexEffort: "high",
 				Runner: Runner{
 					WorkRoot: t.TempDir(),
-					runModel: func(ctx context.Context, modelRequest modelRun) (codexcli.Result, error) {
+					runModel: func(ctx context.Context, modelRequest modelRun) (aicli.Result, error) {
 						dir, prompt, writable, outputDir := modelRequest.dir, modelRequest.prompt, modelRequest.writable, modelRequest.outputDir
 						calls++
 						records, err := usage.ReadAll(usageStore.Dir)
@@ -163,7 +163,7 @@ func TestSecurityAuditIssueAndPullRequest(t *testing.T) {
 						assertRequesterNotesPrompt(t, prompt, job.Source.Body, "Inspect authorization boundaries.")
 						assertPortableSource(t, dir)
 						if tt.failCodex {
-							return codexcli.Result{Tokens: usage.Tokens{Input: 10, CachedInput: 8, Output: 2}}, errors.New("Codex unavailable")
+							return aicli.Result{Tokens: usage.Tokens{Input: 10, CachedInput: 8, Output: 2}}, errors.New("Codex unavailable")
 						}
 						write := func(name, content string) error {
 							return os.WriteFile(filepath.Join(outputDir, name), []byte(content), 0600)
@@ -194,16 +194,16 @@ func TestSecurityAuditIssueAndPullRequest(t *testing.T) {
 									content = "not JSON"
 								}
 								if err := write(name, content); err != nil {
-									return codexcli.Result{}, err
+									return aicli.Result{}, err
 								}
 							}
 						}
 						if !tt.missingReport {
 							if err := write("REPORT.md", "Verified audit report\n"); err != nil {
-								return codexcli.Result{}, err
+								return aicli.Result{}, err
 							}
 						}
-						return codexcli.Result{Answer: "Untrusted final answer", Tokens: usage.Tokens{Input: 100, CachedInput: 80, Output: 20}, UsageComplete: true}, nil
+						return aicli.Result{Answer: "Untrusted final answer", Tokens: usage.Tokens{Input: 100, CachedInput: 80, Output: 20}, UsageComplete: true}, nil
 					},
 				},
 			}
@@ -338,7 +338,11 @@ JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 	write("NEEDS-VALIDATION.md", "")
 	validate := func(wantError string) {
 		t.Helper()
-		report, err := validateAuditOutput(context.Background(), root, filepath.Join(skillDir, "SKILL.md"), "o/r", target, head)
+		files, _, err := readAuditArtifacts(root, auditComplete)
+		var report string
+		if err == nil {
+			report, err = validateAuditFiles(context.Background(), files, filepath.Dir(root), filepath.Join(skillDir, "SKILL.md"), "o/r", target, head)
+		}
 		if wantError == "" {
 			if err != nil || report != "Verified audit report\n" {
 				t.Fatalf("valid audit output = %q, %v", report, err)
@@ -390,51 +394,6 @@ JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 	write("findings.json", `[{"fingerprint":"F"}]`)
 	write("coverage-ledger.json", `[{"status":"covered","attempts":[{"status":"candidate","result_fingerprints":["F"],"unresolved":["validation_budget_exhausted"]}]}]`)
 	validate("unvalidated candidate")
-}
-
-func auditGitFixtureRemote(t *testing.T) (base, head, remote string) {
-	t.Helper()
-	realGit, err := exec.LookPath("git")
-	if err != nil {
-		t.Fatal(err)
-	}
-	root := t.TempDir()
-	source, remote := filepath.Join(root, "source"), filepath.Join(root, "remote.git")
-	git := func(args ...string) string {
-		t.Helper()
-		cmd := exec.Command(realGit, args...)
-		cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null")
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("git %v: %s: %v", args, out, err)
-		}
-		return strings.TrimSpace(string(out))
-	}
-	git("init", "-b", "main", source)
-	git("-C", source, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-m", "base")
-	base = git("-C", source, "rev-parse", "HEAD")
-	git("clone", "--bare", source, remote)
-	git("-C", source, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-m", "PR")
-	head = git("-C", source, "rev-parse", "HEAD")
-	git("-C", source, "push", remote, "HEAD:refs/pull/7/head")
-	bin := filepath.Join(root, "bin")
-	if err := os.Mkdir(bin, 0700); err != nil {
-		t.Fatal(err)
-	}
-	wrapper := fmt.Sprintf("#!/bin/sh\nGIT_ALLOW_PROTOCOL=file exec %q -c %q \"$@\"\n", realGit, "url."+remote+".insteadOf=https://github.com/o/r.git")
-	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(wrapper), 0700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	return base, head, remote
-}
-
-func validateAuditOutput(ctx context.Context, outputDir, skill, repo, target, head string) (string, error) {
-	files, _, err := readAuditArtifacts(outputDir, auditComplete)
-	if err != nil {
-		return "", err
-	}
-	return validateAuditFiles(ctx, files, filepath.Dir(outputDir), skill, repo, target, head)
 }
 
 func TestAuditArtifactReadModesPreserveFailurePolicies(t *testing.T) {

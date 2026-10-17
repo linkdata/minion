@@ -187,3 +187,50 @@ func TestRunnerMissingHostSkillsRemainRetryableBeforeModels(t *testing.T) {
 		}
 	}
 }
+
+func TestRunnerFixCanReturnEmptyAnswerWithoutCritic(t *testing.T) {
+	job := portableJob(command.Fix)
+	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+		writeIndexFixture(t, request.dir, "source.txt", []byte("fixed source"))
+		return aicli.Result{}, nil
+	}}
+	result, err := runner.Run(context.Background(), job)
+	if err != nil || result.Answer != "" || len(result.Changes) != 1 || string(result.Changes[0].Data) != "fixed source" {
+		t.Fatalf("valid fix was lost because its summary was empty: %+v,%v", result, err)
+	}
+	for _, test := range []struct {
+		action command.Action
+		critic bool
+		valid  bool
+	}{{command.Fix, false, true}, {command.Fix, true, false}, {command.Comment, false, false}, {command.Review, false, false}, {command.SecurityAudit, false, false}} {
+		job := portableJob(test.action)
+		if test.critic {
+			job.Critic = &RoleSettings{Provider: "claude"}
+		}
+		result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Calls: []CallUsage{{Provider: job.Main.Provider, Role: "main", Round: 1}}}
+		if err := result.Validate(job); (err == nil) != test.valid || (!test.valid && !strings.Contains(err.Error(), "action answer")) {
+			t.Fatalf("empty %s answer with critic=%t: %v", test.action, test.critic, err)
+		}
+	}
+}
+
+func TestRunnerOmittedSourceWriteIsTerminal(t *testing.T) {
+	job := portableJob(command.Fix)
+	job.Source.Omitted = []string{"hidden"}
+	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+		if !strings.Contains(request.prompt, "Do not create, change or delete omitted paths or anything beneath them") {
+			t.Fatal("prompt permits writing omitted source")
+		}
+		if err := os.WriteFile(filepath.Join(request.dir, "hidden"), []byte("replacement"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		return aicli.Result{Answer: "Done."}, nil
+	}}
+	result, err := runner.Run(context.Background(), job)
+	if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "omitted source path") {
+		t.Fatalf("omitted write must not rerun the model: %v", err)
+	}
+	if err := result.validate(job, false); err != nil {
+		t.Fatalf("incomplete result must retain valid diagnostics: %v", err)
+	}
+}

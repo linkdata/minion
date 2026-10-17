@@ -53,9 +53,6 @@ func (c *Checkout) sourceEntries(ctx context.Context, ref string, tree github.Gi
 	if err := checkSourceTree(tree, treeSHA); err != nil {
 		return nil, err
 	}
-	if len(tree.Tree) > workspace.MaxEntries {
-		return nil, ErrCheckoutTooLarge
-	}
 	metadata := map[string]github.GitTreeEntry{}
 	seen := map[string]bool{}
 	for _, entry := range tree.Tree {
@@ -205,9 +202,6 @@ func (c *Checkout) Snapshot(ctx context.Context, history, pull bool) (s workspac
 		if s.MergeBase, err = runGit(ctx, c.path, "merge-base", s.Base, s.Head); err != nil {
 			return s, err
 		}
-		if !workspace.ValidSHA(s.Base) || !workspace.ValidSHA(s.MergeBase) {
-			return s, fmt.Errorf("%w: invalid comparison commits", ErrUnsupportedSource)
-		}
 		if baseEntries, err = c.sourceTree(ctx, s.MergeBase); err != nil {
 			return s, err
 		}
@@ -227,20 +221,26 @@ func (c *Checkout) Snapshot(ctx context.Context, history, pull bool) (s workspac
 		}
 	}
 	headFiles := 0
+	var total int64
 	allEntries := append([]sourceEntry(nil), entries...)
 	for _, entry := range entries {
 		if !entry.omitted {
 			headFiles++
+			total += entry.size
 		}
 	}
 	for _, entry := range baseEntries {
 		if selected[entry.file.Path] {
 			allEntries = append(allEntries, entry)
+			if !entry.omitted {
+				total += entry.size
+			}
 		}
 	}
-	files, omitted, err := c.sourceFiles(ctx, allEntries)
-	if err != nil {
-		return s, err
+	// Check the combined transfer before diff, which can lazily fetch blobs.
+	// sourceFiles separately sizes its bounded batch response.
+	if total > workspace.MaxBytes {
+		return s, fmt.Errorf("%w: combined source exceeds byte limit", ErrCheckoutTooLarge)
 	}
 	if pull {
 		if s.Diff, s.DiffIncomplete, err = c.boundedGit(ctx, workspace.MaxContextBytes, true, "diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--no-color", s.MergeBase, s.Head, "--"); err != nil {
@@ -249,6 +249,10 @@ func (c *Checkout) Snapshot(ctx context.Context, history, pull bool) (s workspac
 		if s.DiffIncomplete {
 			s.Diff = nil
 		}
+	}
+	files, omitted, err := c.sourceFiles(ctx, allEntries)
+	if err != nil {
+		return s, err
 	}
 	s.Files, s.BaseFiles, s.Omitted = files[:headFiles], files[headFiles:], omitted
 	if history {
@@ -286,7 +290,7 @@ func (c *Checkout) Import(ctx context.Context, expectedHead string, changes []wo
 	if err := c.ready(); err != nil {
 		return err
 	}
-	if !workspace.ValidSHA(expectedHead) || !strings.EqualFold(expectedHead, c.expectedHead) {
+	if !workspace.ValidSHA(expectedHead) || expectedHead != c.expectedHead {
 		return errors.New("result source commit does not match checkout")
 	}
 	if err := c.assertHead(ctx); err != nil {
@@ -298,7 +302,7 @@ func (c *Checkout) Import(ctx context.Context, expectedHead string, changes []wo
 	if _, err := runGit(ctx, c.path, "add", "--all", "--", "."); err != nil {
 		return fmt.Errorf("stage imported changes: %w", err)
 	}
-	staged, err := c.stagedPaths(ctx, "")
+	staged, err := c.stagedPaths(ctx)
 	if err != nil {
 		return err
 	}
@@ -318,14 +322,14 @@ func (c *Checkout) disableAttributes() error {
 	if err := os.MkdirAll(filepath.Join(c.path, ".git", "info"), 0700); err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(c.path, ".git", "info", "attributes"), []byte(workspace.GitAttributes), 0600)
+	return os.WriteFile(filepath.Join(c.path, ".git", "info", "attributes"), []byte(GitAttributes), 0600)
 }
 
 func (c *Checkout) boundedGit(ctx context.Context, limit int, truncate bool, args ...string) ([]byte, bool, error) {
 	readCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	output := bounded.Buffer{Limit: limit, Cancel: cancel}
-	err := runGitTo(readCtx, c.path, &output, args...)
+	err := runGitInputTo(readCtx, c.path, nil, &output, args...)
 	if ctx.Err() != nil {
 		return nil, false, ctx.Err()
 	}

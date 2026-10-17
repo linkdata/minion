@@ -97,8 +97,8 @@ const (
 	StatusFailed      StatusState = "failed"
 	StatusUnavailable StatusState = "unavailable"
 	PhasePreparing    StatusPhase = "preparing"
-	PhaseMain         StatusPhase = "main"
-	PhaseCritic       StatusPhase = "critic"
+	PhaseMain         StatusPhase = roleMain
+	PhaseCritic       StatusPhase = roleCritic
 	PhaseCollecting   StatusPhase = "collecting"
 	PhaseUploading    StatusPhase = "uploading"
 	PhaseCleanup      StatusPhase = "cleanup"
@@ -270,24 +270,24 @@ func (r Result) validate(j Job, complete bool) error {
 	rounds := j.rounds()
 	for i, call := range r.Calls {
 		role := j.Main
-		if call.Role == "critic" && j.Critic != nil {
+		if call.Role == roleCritic && j.Critic != nil {
 			role = *j.Critic
-		} else if call.Role != "main" {
+		} else if call.Role != roleMain {
 			return errors.New("invalid model call role")
 		}
-		validOrder := i == 0 && call.Role == "main" && call.Round == 1 && call.ReviewPhase == ""
+		validOrder := i == 0 && call.Role == roleMain && call.Round == 1 && call.ReviewPhase == ""
 		if i > 0 && j.Critic != nil {
 			previous := r.Calls[i-1]
-			if call.Role == "main" {
-				validOrder = previous.Role == "critic" && call.Round == previous.Round+1 && call.ReviewPhase == ""
-			} else if previous.Role == "main" {
-				phase := "verification"
+			if call.Role == roleMain {
+				validOrder = previous.Role == roleCritic && call.Round == previous.Round+1 && call.ReviewPhase == ""
+			} else if previous.Role == roleMain {
+				phase := reviewVerification
 				if call.Round == 1 {
-					phase = "full"
+					phase = reviewFull
 				}
 				validOrder = call.Round == previous.Round && call.ReviewPhase == phase
 			} else {
-				validOrder = previous.ReviewPhase == "verification" && call.Round == previous.Round && call.ReviewPhase == "full"
+				validOrder = previous.ReviewPhase == reviewVerification && call.Round == previous.Round && call.ReviewPhase == reviewFull
 			}
 		}
 		if !validOrder || call.Round > rounds || call.Provider != role.Provider || call.Model != role.Model || call.Effort != role.Effort || call.Tokens.Input < 0 || call.Tokens.CachedInput < 0 || call.Tokens.Output < 0 || call.Tokens.CachedInput > call.Tokens.Input {
@@ -299,7 +299,7 @@ func (r Result) validate(j Job, complete bool) error {
 			return errors.New("action result lacks a final full review")
 		}
 		last := r.Calls[len(r.Calls)-1]
-		if last.Role != "critic" || last.ReviewPhase != "full" {
+		if last.Role != roleCritic || last.ReviewPhase != reviewFull {
 			return errors.New("action result lacks a final full review")
 		}
 	}
@@ -416,7 +416,7 @@ func (s Status) Validate(j Job) error {
 		return errors.New("invalid action status state and phase")
 	}
 	if s.Phase == PhaseCritic {
-		if j.Critic == nil || s.Round < 1 || (s.ReviewPhase != "full" && s.ReviewPhase != "verification") || (s.ReviewPhase == "verification" && s.Round == 1) {
+		if j.Critic == nil || s.Round < 1 || (s.ReviewPhase != reviewFull && s.ReviewPhase != reviewVerification) || (s.ReviewPhase == reviewVerification && s.Round == 1) {
 			return errors.New("invalid action status review phase")
 		}
 	} else if s.ReviewPhase != "" {

@@ -74,6 +74,47 @@ func TestCollectionRefusesHardlinkedFiles(t *testing.T) {
 	}
 }
 
+func TestApplyRefusesHardlinkedTargetsBeforeTruncation(t *testing.T) {
+	root := privateRoot(t)
+	outside := filepath.Join(t.TempDir(), "outside")
+	const contents = "outside contents"
+	if err := os.WriteFile(outside, []byte(contents), 0640); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := filepath.Join(root, "file")
+	if err := os.Link(outside, name); err != nil {
+		t.Fatal(err)
+	}
+	change := []Change{{Path: "file", Mode: Executable, Data: []byte("updated")}}
+	if err := Apply(root, change); err == nil || !strings.Contains(err.Error(), "exactly one hard link") {
+		t.Fatalf("hardlinked target was accepted: %v", err)
+	}
+	for _, path := range []string{outside, name} {
+		data, err := os.ReadFile(path)
+		if err != nil || string(data) != contents {
+			t.Fatalf("hardlinked contents changed: %q, %v", data, err)
+		}
+		info, err := os.Stat(path)
+		if err != nil || !os.SameFile(before, info) || info.Mode() != before.Mode() {
+			t.Fatalf("hardlinked inode or mode changed: %v, %v", info, err)
+		}
+	}
+	if err := os.Remove(outside); err != nil {
+		t.Fatal(err)
+	}
+	if err := Apply(root, change); err != nil {
+		t.Fatalf("single-link update was refused: %v", err)
+	}
+	data, err := os.ReadFile(name)
+	if err != nil || string(data) != "updated" {
+		t.Fatalf("single-link update=%q, %v", data, err)
+	}
+}
+
 func TestWalkRefusesDirectoryReplacedAfterQueueing(t *testing.T) {
 	root, outside := t.TempDir(), t.TempDir()
 	parent := filepath.Join(root, "parent")

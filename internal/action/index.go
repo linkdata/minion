@@ -16,6 +16,7 @@ import (
 
 	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/gitwork"
+	"github.com/linkdata/minion/internal/processgroup"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -42,7 +43,7 @@ func newFixIndex(ctx context.Context, dir, source string) (*fixIndex, error) {
 	if err := os.MkdirAll(filepath.Join(dir, "info"), 0700); err != nil {
 		return nil, err
 	}
-	if err := os.WriteFile(filepath.Join(dir, "info", "attributes"), []byte(workspace.GitAttributes), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "info", "attributes"), []byte(gitwork.GitAttributes), 0600); err != nil {
 		return nil, err
 	}
 	if _, err := index.run(ctx, 1024, "add", "--all", "--force", "--", "."); err != nil {
@@ -149,9 +150,6 @@ func parseIndexChanges(raw []byte) ([]workspace.Change, []string, error) {
 		case "D":
 			change.Delete, change.Mode = true, 0
 		case "A", "M", "T":
-			if change.Mode != workspace.Regular && change.Mode != workspace.Executable {
-				return nil, nil, fmt.Errorf("fix changed a non-regular file %q", change.Path)
-			}
 		default:
 			return nil, nil, fmt.Errorf("unsupported offline git change at %q", change.Path)
 		}
@@ -176,8 +174,9 @@ func (index *fixIndex) run(ctx context.Context, limit int, args ...string) ([]by
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	gitArgs := append(gitwork.HardeningArgs(), "--git-dir="+index.dir, "--work-tree="+index.source,
-		"-c", "credential.helper=", "-c", "core.fileMode=true", "-c", "protocol.allow=never")
+		"-c", "credential.helper=", "-c", "protocol.allow=never")
 	cmd := exec.CommandContext(ctx, index.binary, append(gitArgs, args...)...)
+	processgroup.Configure(cmd)
 	cmd.Dir, cmd.Env = index.dir, index.environment()
 	cmd.WaitDelay = 2 * time.Second
 	output, diagnostic := bounded.Buffer{Limit: limit, Cancel: cancel}, bounded.Buffer{Limit: 8 << 10}

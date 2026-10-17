@@ -61,6 +61,68 @@ func TestPartialClonePreflightsMetadataBeforeAnyBlobFetch(t *testing.T) {
 	}
 }
 
+func TestPartialSnapshotBulkFetchesChangedBaseBlobs(t *testing.T) {
+	fixture := newFixture(t)
+	fixture.git(fixture.remote, "config", "uploadpack.allowFilter", "true")
+	const count = 20
+	for i := 0; i < count; i++ {
+		writeFile(t, filepath.Join(fixture.source, fmt.Sprintf("file-%02d", i)), fmt.Sprintf("base %02d\n", i))
+	}
+	fixture.git(fixture.source, "add", ".")
+	fixture.git(fixture.source, "commit", "-m", "base files")
+	base := fixture.git(fixture.source, "rev-parse", "HEAD")
+	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/heads/main")
+	for i := 0; i < count; i++ {
+		writeFile(t, filepath.Join(fixture.source, fmt.Sprintf("file-%02d", i)), fmt.Sprintf("head %02d\n", i))
+	}
+	fixture.git(fixture.source, "add", ".")
+	fixture.git(fixture.source, "commit", "-m", "PR files")
+	head := fixture.git(fixture.source, "rev-parse", "HEAD")
+	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/pull/7/head")
+	checkout, err := clonePullRequestFromURL(context.Background(), t.TempDir(), "file://"+fixture.remote, 7, "main", head, localTreeMetadata(t, fixture.source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := checkout.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	for i := 0; i < count; i++ {
+		blob := fixture.git(fixture.source, "rev-parse", fmt.Sprintf("%s:file-%02d", base, i))
+		if !blobMissing(t, checkout.path, blob) {
+			t.Fatal("fixture already fetched a base blob")
+		}
+	}
+	root := t.TempDir()
+	log, upload := filepath.Join(root, "fetches"), filepath.Join(root, "upload-pack")
+	gitUpload, err := exec.LookPath("git-upload-pack")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\nprintf x >> " + shellQuote(log) + "\nexec " + shellQuote(gitUpload) + " \"$@\"\n"
+	if err := os.WriteFile(upload, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	fixture.git(checkout.path, "config", "remote.origin.uploadpack", upload)
+	if err := checkout.recordConfig(); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := checkout.Snapshot(context.Background(), false, true)
+	if err != nil || snapshot.Head != head || snapshot.MergeBase != base || len(snapshot.BaseFiles) != count || len(snapshot.ChangedPaths) != count {
+		t.Fatalf("partial snapshot base=%s files=%d paths=%d error=%v", snapshot.MergeBase, len(snapshot.BaseFiles), len(snapshot.ChangedPaths), err)
+	}
+	for i, file := range snapshot.BaseFiles {
+		if file.Path != fmt.Sprintf("file-%02d", i) || string(file.Data) != fmt.Sprintf("base %02d\n", i) {
+			t.Fatalf("wrong base blob %q: %q", file.Path, file.Data)
+		}
+	}
+	sessions, err := os.ReadFile(log)
+	if err != nil || string(sessions) != "x" {
+		t.Fatalf("Snapshot fetched missing base blobs in %d sessions, want one: %q error=%v", len(sessions), sessions, err)
+	}
+}
+
 func TestPartialSnapshotPreflightsMergeBaseAndHistoryDoesNotFetchOldBlobs(t *testing.T) {
 	fixture := newFixture(t)
 	fixture.git("", "--git-dir="+fixture.remote, "config", "uploadpack.allowFilter", "true")

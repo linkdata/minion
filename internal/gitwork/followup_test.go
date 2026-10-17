@@ -42,16 +42,15 @@ func TestReadBatchBlobsValidatesProtocol(t *testing.T) {
 	}
 }
 
-func recordBatchCalls(t *testing.T) string {
+func recordSnapshotContentCalls(t *testing.T) string {
 	t.Helper()
 	git, err := exec.LookPath("git")
 	if err != nil {
 		t.Fatal(err)
 	}
 	root := t.TempDir()
-	log := filepath.Join(root, "batch-calls")
-	quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }
-	shim := "#!/bin/sh\nfor arg do\nif [ \"$arg\" = --batch ]; then printf x >> " + quote(log) + "; fi\ndone\nexec " + quote(git) + " \"$@\"\n"
+	log := filepath.Join(root, "content-calls")
+	shim := "#!/bin/sh\nfor arg do\ncase \"$arg\" in --batch) printf x >> " + shellQuote(log) + ";; --no-color) printf d >> " + shellQuote(log) + ";; esac\ndone\nexec " + shellQuote(git) + " \"$@\"\n"
 	if err := os.WriteFile(filepath.Join(root, "git"), []byte(shim), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -69,14 +68,14 @@ func TestSnapshotReadsHeadAndBaseInOneBatch(t *testing.T) {
 	if err := fixture.checkout.checkoutPullRequest(context.Background(), 7, "main", head); err != nil {
 		t.Fatal(err)
 	}
-	log := recordBatchCalls(t)
+	log := recordSnapshotContentCalls(t)
 	snapshot, err := fixture.checkout.Snapshot(context.Background(), false, true)
 	if err != nil || len(snapshot.Files) != 1 || len(snapshot.BaseFiles) != 1 || string(snapshot.Files[0].Data) != "\x00head\n\xff" || string(snapshot.BaseFiles[0].Data) != "fixture\n" {
 		t.Fatalf("batch snapshot=%+v error=%v", snapshot, err)
 	}
 	calls, err := os.ReadFile(log)
-	if err != nil || string(calls) != "x" {
-		t.Fatalf("cat-file batch invocations=%q error=%v", calls, err)
+	if err != nil || string(calls) != "dx" {
+		t.Fatalf("ordered content invocations=%q error=%v", calls, err)
 	}
 }
 
@@ -96,15 +95,15 @@ func TestSourceFilesClassifiesMetadataMismatchAndCancellation(t *testing.T) {
 	}
 }
 
-func TestImportRejectsGitMetadataAliasesAtStaging(t *testing.T) {
+func TestImportRejectsGitMetadataAliasesBeforeApplying(t *testing.T) {
 	fixture := newFixture(t)
 	for _, name := range []string{"git~1/config", ".git./config", ".git:alternate/config", ".g\u200cit/config"} {
 		t.Run(name, func(t *testing.T) {
 			err := fixture.checkout.Import(context.Background(), fixture.base, []workspace.Change{{Path: name, Mode: workspace.Regular, Data: []byte("invalid metadata alias")}})
-			if !errors.Is(err, ErrUnsupportedSource) || !strings.Contains(err.Error(), "invalid path") {
+			if err == nil {
 				t.Fatalf("alias %q import error=%v", name, err)
 			}
-			paths, err := fixture.checkout.stagedPaths(context.Background(), "")
+			paths, err := fixture.checkout.stagedPaths(context.Background())
 			if err != nil || len(paths) != 0 {
 				t.Fatalf("rejected alias staged=%v error=%v", paths, err)
 			}
@@ -125,7 +124,7 @@ func TestSnapshotPreflightsCombinedBytesAndChangedPaths(t *testing.T) {
 	fixture.checkout.expectedHead = head
 	fixture.git(fixture.checkout.path, "update-ref", "refs/remotes/minion/base", fixture.base)
 	blob := fixture.git(fixture.checkout.path, "rev-parse", "HEAD:README.md")
-	log := recordBatchCalls(t)
+	log := recordSnapshotContentCalls(t)
 	t.Run("combined byte budget", func(t *testing.T) {
 		fixture.checkout.sourceTrees = map[string][]sourceEntry{}
 		for _, ref := range []string{fixture.base, head} {
@@ -154,7 +153,7 @@ func TestSnapshotPreflightsCombinedBytesAndChangedPaths(t *testing.T) {
 		}
 	})
 	if data, err := os.ReadFile(log); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("preflight requested blob batch: %q error=%v", data, err)
+		t.Fatalf("preflight requested content: %q error=%v", data, err)
 	}
 }
 

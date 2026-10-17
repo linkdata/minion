@@ -293,7 +293,7 @@ func (e *Orchestrator) prepareFix(ctx context.Context, p *preparedAction) (*prep
 	expected := e.Store.Data.PendingFixes[request.ID]
 	remote, err := e.GitHub.Branch(ctx, fork.FullName, p.branch)
 	if err == nil {
-		if remote.Name != p.branch || expected == "" || !strings.EqualFold(remote.Commit.SHA, expected) {
+		if remote.Name != p.branch || expected == "" || remote.Commit.SHA != expected {
 			return nil, fmt.Errorf("branch %s exists without a matching recorded bot commit; refusing to reuse it", p.branch)
 		}
 		return p, nil
@@ -384,7 +384,7 @@ func (e *Orchestrator) publishFixReply(ctx context.Context, p *preparedAction) e
 	if existing := p.existing; existing != nil {
 		if existing.State != "open" || request.Source.Author.ID == 0 || existing.User.ID != request.Source.Author.ID ||
 			existing.Head.Ref != branch || existing.Head.Repo == nil || !strings.EqualFold(existing.Head.Repo.FullName, fork.FullName) ||
-			!strings.EqualFold(existing.Head.SHA, expected) || existing.Base.Ref != repo.DefaultBranch {
+			existing.Head.SHA != expected || existing.Base.Ref != repo.DefaultBranch {
 			return fmt.Errorf("branch %s has a pull request without matching requester authorship and recorded head", branch)
 		}
 		return e.acknowledge(ctx, request, fmt.Sprintf("Fix branch `%s` at `%s` has a pull request opened by @%s: %s", branch, expected, existing.User.Login, existing.HTMLURL))

@@ -67,6 +67,15 @@ func TestTruncatedSourceTreeIsTooLarge(t *testing.T) {
 	}
 }
 
+func TestSourceMetadataCountIsCheckedBeforeEntries(t *testing.T) {
+	sha := strings.Repeat("a", 40)
+	tree := completeTree(sha, make([]github.GitTreeEntry, workspace.MaxEntries+1))
+	// Even the first empty path is invalid; the count gate must reject first.
+	if err := checkSourceTree(tree, sha); !errors.Is(err, ErrCheckoutTooLarge) || errors.Is(err, ErrUnsupportedSource) {
+		t.Fatalf("entry validation preceded metadata bound: %v", err)
+	}
+}
+
 func TestSourceAliasesAreUnsupportedForDefaultAndPullRequestCheckout(t *testing.T) {
 	for _, path := range []string{"git~1/hooks/test", ".git./hooks/test", ".g\u200cit/hooks/test"} {
 		t.Run(path, func(t *testing.T) {
@@ -94,7 +103,11 @@ func TestSourceAliasesAreUnsupportedForDefaultAndPullRequestCheckout(t *testing.
 			}
 			checkout, err := cloneFromURL(context.Background(), t.TempDir(), fixture.remote, "main", lookupChecked)
 			if checkout != nil {
-				defer checkout.Close()
+				defer func() {
+					if err := checkout.Close(); err != nil {
+						t.Error(err)
+					}
+				}()
 			}
 			var exit *exec.ExitError
 			if !checked || !errors.Is(err, ErrUnsupportedSource) || !errors.As(err, &exit) || !strings.Contains(err.Error(), "git checkout:") {

@@ -150,12 +150,12 @@ func (o *jsonlOutput) finish() {
 		o.finishLine()
 	}
 	if o.err == nil && o.pending != 0 {
-		o.fail(errors.New("Claude exited with background tasks still running"))
+		o.fail(errors.New("background tasks still running when Claude exited"))
 	}
 	if o.err == nil {
 		answer := strings.TrimSpace(o.result.Answer)
 		if !o.completed {
-			o.fail(errors.New("Claude exited without a successful final result"))
+			o.fail(errors.New("missing successful final result from Claude"))
 		} else if o.structured && (answer == "" || answer == "null") {
 			o.fail(errors.New("missing Claude structured output"))
 		} else if answer == "" {
@@ -234,7 +234,7 @@ func (o *jsonlOutput) finishLine() {
 		return
 	}
 	if e.ResultIndex != nil && *e.ResultIndex != o.results {
-		o.fail(fmt.Errorf("Claude result_index %d, want %d", *e.ResultIndex, o.results))
+		o.fail(fmt.Errorf("invalid Claude result_index %d, want %d", *e.ResultIndex, o.results))
 		return
 	}
 	o.indexed = e.ResultIndex != nil
