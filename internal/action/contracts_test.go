@@ -185,6 +185,7 @@ func TestResultJSONRoundTripPreservesValidatedPayload(t *testing.T) {
 	job.Critic, job.CriticMaxRounds = &RoleSettings{Provider: "claude"}, 1
 	result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Done.", Changes: []workspace.Change{{Path: "binary", Mode: workspace.Executable, Data: []byte{0, 0xff, '\n'}}}, Calls: []CallUsage{{Provider: job.Main.Provider, Role: "main", Round: 1}}}
 	result.Calls = append(result.Calls, CallUsage{Provider: "claude", Role: roleCritic, Round: 1, ReviewPhase: reviewFull, Approved: true, NoBlockers: true})
+	result.ReviewLedger = reviewLedgerFixture(result.Calls)
 	if err := result.Validate(job); err != nil {
 		t.Fatal(err)
 	}
@@ -366,7 +367,7 @@ func TestResultCallUsageRequiresOrderedReviewPhases(t *testing.T) {
 		{"unknown phase", []CallUsage{main(1), critic(1, "focused", true)}, false, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Answer.", Calls: test.calls}
+			result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Answer.", Calls: test.calls, ReviewLedger: reviewLedgerFixture(test.calls)}
 			if err := result.Validate(job); (err == nil) != test.complete || (len(test.calls) == 0 && !strings.Contains(err.Error(), "final full review")) {
 				t.Fatalf("complete validation=%v, want valid=%v", err, test.complete)
 			}
@@ -446,6 +447,7 @@ func TestResultCallUsageHonorsConfiguredRoundLimits(t *testing.T) {
 					}
 					result.Calls = append(result.Calls, CallUsage{Provider: job.Critic.Provider, Role: "critic", Round: proposal, ReviewPhase: "full", Approved: proposal == round, NoBlockers: proposal == round, HasBlockers: proposal != round})
 				}
+				result.ReviewLedger = reviewLedgerFixture(result.Calls)
 				if err := result.Validate(job); (err == nil) != (round <= test.rounds) {
 					t.Fatalf("round=%d limit=%d result validation=%v", round, test.limit, err)
 				}

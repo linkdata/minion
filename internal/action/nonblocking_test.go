@@ -220,7 +220,7 @@ func TestResultNonblockingAcceptanceTrustBoundary(t *testing.T) {
 		{name: "blocker verification cannot advance", calls: []CallUsage{main(1), critic(1, reviewFull, false, true), main(2), {Provider: job.Critic.Provider, Role: roleCritic, Round: 2, ReviewPhase: reviewVerification, HasBlockers: true}, critic(2, reviewFull, true, true)}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Complete answer", Calls: tt.calls}
+			result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Complete answer", Calls: tt.calls, ReviewLedger: reviewLedgerFixture(tt.calls)}
 			if err := result.Validate(job); (err == nil) != tt.complete {
 				t.Fatalf("complete acceptance=%v want %t", err, tt.complete)
 			}

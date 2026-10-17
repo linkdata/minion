@@ -230,6 +230,10 @@ func TestRunnerFixCanReturnEmptyAnswerWithoutCritic(t *testing.T) {
 			job = withClaudeCritic(job)
 		}
 		result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Calls: []CallUsage{{Provider: job.Main.Provider, Role: "main", Round: 1}}}
+		if test.critic {
+			result.Calls = append(result.Calls, CallUsage{Provider: job.Critic.Provider, Role: roleCritic, Round: 1, ReviewPhase: reviewFull, Approved: true, NoBlockers: true})
+			result.ReviewLedger = reviewLedgerFixture(result.Calls)
+		}
 		if test.changed {
 			result.Changes = []workspace.Change{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("fixed source")}}
 		}

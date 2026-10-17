@@ -86,14 +86,15 @@ type Diagnostic struct {
 }
 
 type Result struct {
-	Version     int                `json:"version"`
-	Identity    Identity           `json:"identity"`
-	SourceRef   string             `json:"source_ref"`
-	Answer      string             `json:"answer"`
-	Changes     []workspace.Change `json:"changes,omitempty"`
-	Artifacts   []workspace.File   `json:"artifacts,omitempty"`
-	Calls       []CallUsage        `json:"calls,omitempty"`
-	Diagnostics []Diagnostic       `json:"diagnostics,omitempty"`
+	Version      int                `json:"version"`
+	Identity     Identity           `json:"identity"`
+	SourceRef    string             `json:"source_ref"`
+	Answer       string             `json:"answer"`
+	Changes      []workspace.Change `json:"changes,omitempty"`
+	Artifacts    []workspace.File   `json:"artifacts,omitempty"`
+	Calls        []CallUsage        `json:"calls,omitempty"`
+	ReviewLedger []ReviewEntry      `json:"review_ledger,omitempty"`
+	Diagnostics  []Diagnostic       `json:"diagnostics,omitempty"`
 }
 
 type StatusState string
@@ -277,6 +278,9 @@ func (r Result) validate(j Job, complete bool) error {
 		}
 	}
 	if err := r.validateCalls(j, complete); err != nil {
+		return err
+	}
+	if err := validateReviewLedger(j, r.Calls, r.ReviewLedger, complete); err != nil {
 		return err
 	}
 	return validDiagnostics(r.Diagnostics)

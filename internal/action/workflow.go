@@ -50,10 +50,35 @@ func (e *Orchestrator) perform(ctx context.Context, request monitor.Job) error {
 	}()
 	var result Result
 	if prepared.needsExecution() {
-		result, err = e.Runner.Run(ctx, prepared.job)
+		runner := e.Runner
+		if prepared.job.Critic != nil {
+			if err := runner.configureRole(prepared.job.Main); err != nil {
+				return err
+			}
+			if err := runner.configureRole(*prepared.job.Critic); err != nil {
+				return err
+			}
+			storage := *e
+			storage.Runner = runner
+			initial := Result{Version: ProtocolVersion, Identity: prepared.job.Identity, SourceRef: prepared.job.Source.Head}
+			if err := storage.retainReviewLedger(prepared.job, initial); err != nil {
+				return fmt.Errorf("%w: prepare private review ledger: %w", monitor.ErrTerminalJob, err)
+			}
+			observe := runner.recordReview
+			runner.recordReview = func(result Result) error {
+				if err := storage.retainReviewLedger(prepared.job, result); err != nil {
+					return err
+				}
+				if observe != nil {
+					return observe(result)
+				}
+				return nil
+			}
+		}
+		result, err = runner.Run(ctx, prepared.job)
 		if err != nil {
 			e.logResult(prepared.job, result)
-			err = errors.Join(err, e.retainIncompleteAudit(prepared, result))
+			err = errors.Join(err, e.retainReviewLedger(prepared.job, result), e.retainIncompleteAudit(prepared, result))
 			if validationErr := result.validate(prepared.job, false); validationErr != nil {
 				return errors.Join(err, fmt.Errorf("%w: invalid incomplete action result: %w", monitor.ErrTerminalJob, validationErr))
 			}
@@ -210,6 +235,9 @@ func (e *Orchestrator) publish(ctx context.Context, p *preparedAction, result Re
 		return errors.New("action has no prepared source")
 	}
 	e.logResult(p.job, result)
+	if err := e.retainReviewLedger(p.job, result); err != nil {
+		return errors.Join(err, e.retainIncompleteAudit(p, result))
+	}
 	if err := result.validate(p.job, true); err != nil {
 		return errors.Join(fmt.Errorf("%w: invalid action result: %w", monitor.ErrTerminalJob, err), e.retainIncompleteAudit(p, result))
 	}

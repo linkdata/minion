@@ -52,6 +52,12 @@ func TestReviewSnapshotRejectsCriticCopyMutation(t *testing.T) {
 			if len(result.Calls) != wantCalls {
 				t.Fatalf("lost calls after integrity failure: %+v", result.Calls)
 			}
+			if len(result.ReviewLedger) != wantCalls-1 {
+				t.Fatalf("checkpointed an integrity-failed call: %+v", result.ReviewLedger)
+			}
+			if err := result.validate(job, false); err != nil {
+				t.Fatalf("invalid partial evidence after integrity failure: %v", err)
+			}
 			last, wantApproval := result.Calls[len(result.Calls)-1], phase == reviewVerification
 			if last.Approved != wantApproval || last.NoBlockers != wantApproval || last.HasBlockers != (phase == reviewFull) {
 				t.Fatalf("lost native critic verdict after integrity failure: %+v", last)
