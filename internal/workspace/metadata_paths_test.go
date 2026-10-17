@@ -61,3 +61,16 @@ func TestApplyRejectsMetadataAliasesBeforeAnyMutation(t *testing.T) {
 		})
 	}
 }
+
+func TestCheckoutMetadataAliasesRespectGitSeparators(t *testing.T) {
+	for _, name := range []string{`git~1/hooks/x`, `.git./x`, `.git\x`, `dir\.GIT/x`, `dir\git~1/x`, ".g\u200cit/x"} {
+		if ValidCheckoutPath(name) {
+			t.Errorf("checkout alias accepted: %q", name)
+		}
+	}
+	for _, name := range []string{`dir\name`, `parent/dir\name`, `.gitignore\x`, `git~10\x`, ".g\u200cit\\x", "dir\\.g\u200cit/x"} {
+		if !ValidSourcePath(name) || !ValidCheckoutPath(name) {
+			t.Errorf("legal exact source spelling rejected: %q", name)
+		}
+	}
+}

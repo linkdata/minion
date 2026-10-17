@@ -87,3 +87,46 @@ func TestClonePullRequestSkipsUnusedBaseTip(t *testing.T) {
 		})
 	}
 }
+
+func TestPullRequestRejectsDeletedMergeBaseMetadataAliasBeforeBlobFetch(t *testing.T) {
+	for _, name := range []string{"git~1/hooks/x", `.git\x`, ".g\u200cit/hooks/x"} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newFixture(t)
+			path := filepath.Join(fixture.source, filepath.FromSlash(name))
+			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+				t.Fatal(err)
+			}
+			writeFile(t, path, strings.Repeat("alias blob", 1024))
+			fixture.git(fixture.source, "-c", "core.protectNTFS=false", "-c", "core.protectHFS=false", "add", ".")
+			fixture.git(fixture.source, "commit", "-m", "unsupported merge base")
+			blob := fixture.git(fixture.source, "rev-parse", "HEAD:"+name)
+			fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/heads/main")
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			fixture.git(fixture.source, "-c", "core.protectNTFS=false", "-c", "core.protectHFS=false", "add", "--all")
+			fixture.git(fixture.source, "commit", "-m", "remove unsupported path")
+			head := fixture.git(fixture.source, "rev-parse", "HEAD")
+			fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/pull/7/head")
+			fixture.git(fixture.remote, "config", "uploadpack.allowFilter", "true")
+			checkout, err := clonePullRequestFromURL(context.Background(), t.TempDir(), "file://"+fixture.remote, 7, "main", head, localTreeMetadata(t, fixture.source))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := checkout.Close(); err != nil {
+					t.Error(err)
+				}
+			})
+			if !blobMissing(t, checkout.path, blob) {
+				t.Fatal("fixture already fetched alias blob")
+			}
+			if _, err := checkout.Snapshot(context.Background(), false, true); !errors.Is(err, ErrUnsupportedSource) {
+				t.Fatalf("merge-base alias accepted: %v", err)
+			}
+			if !blobMissing(t, checkout.path, blob) {
+				t.Fatal("alias preflight fetched rejected blob")
+			}
+		})
+	}
+}

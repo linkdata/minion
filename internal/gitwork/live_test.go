@@ -71,7 +71,7 @@ func TestLiveCloneAndPullRequest(t *testing.T) {
 		t.Fatalf("pull request metadata = %+v", pull)
 	}
 
-	checkout, err := Clone(ctx, t.TempDir(), repoName, repo.DefaultBranch, func(ctx context.Context, sha string) (github.GitTree, error) {
+	checkout, err := ClonePullRequest(ctx, t.TempDir(), repoName, pull.Number, pull.Base.Ref, pull.Head.SHA, func(ctx context.Context, sha string) (github.GitTree, error) {
 		return client.GitTree(ctx, repoName, sha)
 	})
 	if err != nil {
@@ -82,12 +82,6 @@ func TestLiveCloneAndPullRequest(t *testing.T) {
 			t.Error(err)
 		}
 	}()
-	if head, err := checkout.Head(ctx); err != nil || len(head) != 40 {
-		t.Fatalf("cloned default-branch HEAD = %q, %v", head, err)
-	}
-	if err := checkout.checkoutPullRequest(ctx, pull.Number, pull.Base.Ref, pull.Head.SHA); err != nil {
-		t.Fatal(err)
-	}
 	if head, err := checkout.Head(ctx); err != nil || head != pull.Head.SHA {
 		t.Fatalf("pull request HEAD = %q, %v; want %s", head, err, pull.Head.SHA)
 	}

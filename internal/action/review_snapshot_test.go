@@ -49,7 +49,7 @@ func TestReviewSnapshotFixFreezesOnlyExportedCandidate(t *testing.T) {
 	if err != nil || info.Mode().Perm() != 0755 {
 		t.Fatalf("frozen executable=%v,%v", info, err)
 	}
-	if err := snapshot.verify(context.Background(), job, "", index); err != nil {
+	if err := snapshot.verify(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	writeIndexFixture(t, source, "source.txt", []byte("changed after proposal"))
@@ -57,7 +57,7 @@ func TestReviewSnapshotFixFreezesOnlyExportedCandidate(t *testing.T) {
 	if err != nil || string(data) != "reviewed" {
 		t.Fatalf("background change reached critic copy=%q,%v", data, err)
 	}
-	if err := snapshot.verify(context.Background(), job, "", index); err == nil {
+	if err := snapshot.verify(context.Background()); err == nil {
 		t.Fatal("accepted candidate source changed during review")
 	}
 }
@@ -99,7 +99,7 @@ func TestReviewSnapshotFreezesRawAuditArtifactsAndAbsence(t *testing.T) {
 			if _, err := os.Lstat(filepath.Join(snapshot.outputDir, "findings.json")); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("absent artifact was created: %v", err)
 			}
-			if err := snapshot.verify(context.Background(), job, output, nil); err != nil {
+			if err := snapshot.verify(context.Background()); err != nil {
 				t.Fatal(err)
 			}
 			switch mutation {
@@ -119,13 +119,13 @@ func TestReviewSnapshotFreezesRawAuditArtifactsAndAbsence(t *testing.T) {
 				t.Fatalf("background work changed frozen report=%q,%v", data, err)
 			}
 			if mutation == "source" {
-				if err := snapshot.verify(context.Background(), job, output, nil); err != nil {
+				if err := snapshot.verify(context.Background()); err != nil {
 					t.Fatalf("read-only source checked before final canary: %v", err)
 				}
 				if err := workspace.CheckUnchanged(context.Background(), source, job.Source.Files); err == nil {
 					t.Fatal("final read-only canary accepted a changed source")
 				}
-			} else if err := snapshot.verify(context.Background(), job, output, nil); err == nil || !strings.Contains(err.Error(), "candidate reports changed") {
+			} else if err := snapshot.verify(context.Background()); err == nil || !strings.Contains(err.Error(), "candidate reports changed") {
 				t.Fatalf("mutation %s: got %v", mutation, err)
 			}
 			if err := snapshot.close(); err != nil {
@@ -173,6 +173,47 @@ func TestReviewSnapshotRejectsUnsafeOrOversizedReportsAndCleansUp(t *testing.T) 
 			entries, err := os.ReadDir(workRoot)
 			if err != nil || len(entries) != 0 {
 				t.Fatalf("failed freeze left copies=%v,%v", entries, err)
+			}
+		})
+	}
+}
+
+func TestReviewSnapshotCleansFailedFixMaterializationAndApply(t *testing.T) {
+	for _, stage := range []string{"materialize", "apply"} {
+		t.Run(stage, func(t *testing.T) {
+			job := portableJob(command.Fix)
+			name := strings.TrimSuffix(strings.Repeat(strings.Repeat("a", 250)+"/", 14), "/")
+			if stage == "materialize" {
+				job.Source.Files = append(job.Source.Files, workspace.File{Path: name, Mode: workspace.Regular, Data: []byte("source")})
+			}
+			if err := job.Validate(); err != nil {
+				t.Fatalf("invalid source control: %v", err)
+			}
+			index, source := offlineIndexFixture(t, job.Source.Files)
+			if stage == "apply" {
+				writeIndexFixture(t, source, name, []byte("added"))
+			}
+			control, err := freezeReviewSnapshot(context.Background(), t.TempDir(), job, source, "", index)
+			if err != nil {
+				t.Fatalf("valid candidate failed under short root: %v", err)
+			}
+			if err := control.close(); err != nil {
+				t.Fatal(err)
+			}
+			workRoot := t.TempDir()
+			for i := 0; i < 3; i++ {
+				workRoot = filepath.Join(workRoot, strings.Repeat("b", 200))
+			}
+			if err := os.MkdirAll(workRoot, 0700); err != nil {
+				t.Fatal(err)
+			}
+			failed, err := freezeReviewSnapshot(context.Background(), workRoot, job, source, "", index)
+			if failed != nil || !errors.Is(err, syscall.ENAMETOOLONG) {
+				t.Fatalf("expected %s filesystem failure: snapshot=%v error=%v", stage, failed, err)
+			}
+			entries, err := os.ReadDir(workRoot)
+			if err != nil || len(entries) != 0 {
+				t.Fatalf("failed %s left frozen source: entries=%v error=%v", stage, entries, err)
 			}
 		})
 	}

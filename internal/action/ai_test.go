@@ -355,6 +355,9 @@ func TestParseProposal(t *testing.T) {
 	}{
 		{name: "proposal", input: proposalJSON("Public result", private), answer: "Public result", notes: private, valid: true},
 		{name: "empty notes", input: proposalJSON("public", ""), answer: "public", valid: true},
+		{name: "normalize NUL before review", input: proposalJSON("pub\x00lic", private), answer: "public", notes: private, valid: true},
+		{name: "NUL-only answer", input: proposalJSON("\x00", private)},
+		{name: "NUL cannot bypass decoded limit", input: proposalJSON(strings.Repeat("\x00", maxOutputBytes)+"x", "")},
 		{name: "blank answer", input: proposalJSON(" \n", private)},
 		{name: "empty answer", input: proposalJSON("", private)},
 		{name: "preserve whitespace", input: proposalJSON("  Markdown\n", " Private notes "), answer: "  Markdown\n", notes: " Private notes ", valid: true},

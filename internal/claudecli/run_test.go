@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/usage"
@@ -393,5 +395,54 @@ func TestCredentialEnvironmentStopsCLI(t *testing.T) {
 	}
 	if _, err := os.Stat(binary + ".called"); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("CLI launched with credentials: %v", err)
+	}
+}
+
+func TestRunUsageLimitKeepsSafeDiagnosticAndExitCause(t *testing.T) {
+	const quota = `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1792200000}}`
+	const failed = `{"type":"result","subtype":"success","is_error":true,"result_index":0,"result":"PRIVATE_RESULT","modelUsage":{"main":{"inputTokens":3,"cacheCreationInputTokens":5,"cacheReadInputTokens":7,"outputTokens":11}}}`
+	fakeExecutable(t, "claude", "cat >/dev/null\ncat <<'DIAG' >&2\nPRIVATE_STDERR\nforged journal line\nDIAG\ncat <<'RESULT'\n"+quota+"\n"+failed+"\nRESULT\nexit 7\n")
+	result, err := Run(context.Background(), t.TempDir(), "task", false, "", config.ClaudeConfig{})
+	var exit *exec.ExitError
+	if err == nil || !errors.As(err, &exit) || !strings.Contains(err.Error(), "resets at 2026-10-17T01:20:00Z") || strings.Contains(err.Error(), "PRIVATE") || strings.Contains(err.Error(), "forged journal line") || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) {
+		t.Fatalf("result=%+v error=%v", result, err)
+	}
+}
+
+func TestRunQuotesStderrOnExitFailure(t *testing.T) {
+	fakeExecutable(t, "claude", "cat >/dev/null\nprintf '%s\\n' '"+successfulResult+"'\nprintf 'first\\nforged journal line' >&2\nexit 7\n")
+	_, err := Run(context.Background(), t.TempDir(), "task", false, "", config.ClaudeConfig{})
+	if err == nil || !strings.Contains(err.Error(), `first\nforged journal line`) || strings.Contains(err.Error(), "\nforged journal line") {
+		t.Fatalf("unquoted diagnostic: %v", err)
+	}
+}
+
+func TestRunWaitCeilingPreservesLimitCauses(t *testing.T) {
+	const ceiling = "Background tasks still running 10m after the last turn (worker); stopping them. Set CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 to wait indefinitely."
+	for _, test := range []struct {
+		name, output string
+		outputLimit  bool
+	}{
+		{"quota", "cat <<'RESULT'\n" + `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1792200000}}` + "\nRESULT\n", false},
+		{"output", "head -c 4194305 /dev/zero | tr '\\000' x\n", true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fakeExecutable(t, "claude", "cat >/dev/null\ncat <<'DIAG' >&2\n"+ceiling+"\nDIAG\n"+test.output)
+			result, err := Run(context.Background(), t.TempDir(), "task", false, "", config.ClaudeConfig{})
+			if err == nil || !strings.Contains(err.Error(), "wait ceiling") || result.Answer != "" || result.UsageComplete {
+				t.Fatalf("result=%+v error=%v", result, err)
+			}
+			if test.outputLimit && !errors.Is(err, aicli.ErrOutputLimit) || !test.outputLimit && !strings.Contains(err.Error(), "resets at 2026-10-17T01:20:00Z") {
+				t.Fatalf("native failure cause lost: %v", err)
+			}
+		})
+	}
+}
+
+func TestRunQuotesNativeFailureSubtype(t *testing.T) {
+	fakeExecutable(t, "claude", "cat >/dev/null\ncat <<'RESULT'\n"+`{"type":"result","subtype":"failed\nforged journal line","is_error":true}`+"\nRESULT\n")
+	_, err := Run(context.Background(), t.TempDir(), "task", false, "", config.ClaudeConfig{})
+	if err == nil || strings.Contains(err.Error(), "\nforged journal line") || !strings.Contains(err.Error(), `failed\nforged journal line`) {
+		t.Fatalf("unquoted native failure: %v", err)
 	}
 }

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/linkdata/minion/internal/aicli"
+	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/cleanup"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/processgroup"
@@ -166,20 +167,19 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	cmd.WaitDelay = 2 * time.Second
 	processgroup.Configure(cmd)
 	output := jsonlOutput{cancel: cancel, structured: settings.OutputSchema != ""}
-	var diagnostics tailBuffer
+	diagnostics := bounded.Tail{Limit: maxDiagnosticBytes}
 	cmd.Stdout, cmd.Stderr = &output, &diagnostics
 	err = cmd.Run()
-	if err != nil {
-		err = fmt.Errorf("%w: %s", err, strings.TrimSpace(diagnostics.String()))
-	}
 	output.finish()
 	result = output.result
 	if ctx.Err() != nil {
-		err = ctx.Err()
+		err = errors.Join(ctx.Err(), output.err, err)
 	} else if backgroundWaitCeiling(diagnostics.String()) {
-		err = errors.New("background tasks stopped by Claude's wait ceiling")
+		err = errors.Join(errors.New("background tasks stopped by Claude's wait ceiling"), output.err, err)
 	} else if output.err != nil {
 		err = errors.Join(output.err, err)
+	} else if err != nil {
+		err = fmt.Errorf("%w: %q", err, strings.TrimSpace(diagnostics.String()))
 	}
 	if err != nil {
 		result.Answer = ""

@@ -94,7 +94,7 @@ func TestCloseCheckoutRemovesRestrictedDirectory(t *testing.T) {
 	if err := os.Chmod(locked, 0000); err != nil {
 		t.Fatal(err)
 	}
-	if err := (&preparedAction{checkout: checkout}).Close(); err != nil {
+	if err := (&preparedAction{checkout: checkout}).close(); err != nil {
 		t.Fatalf("cleanup failed: %v", err)
 	}
 	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {

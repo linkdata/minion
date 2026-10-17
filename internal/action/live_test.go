@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/linkdata/minion/internal/aicli"
 	"net/http"
 	"os"
 	"os/exec"
@@ -17,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/github"

@@ -296,3 +296,20 @@ func TestApplyRefusesDeletionThroughSymlinkedParent(t *testing.T) {
 		t.Fatalf("outside file changed=%q,%v", data, err)
 	}
 }
+
+func TestReadChangesErrorsIdentifySelectedPath(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "regular"), []byte("contents"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, selected := range []Change{
+		{Path: "regular/child", Mode: Regular},
+		{Path: "missing", Mode: Regular},
+		{Path: "regular", Mode: Executable},
+	} {
+		_, err := ReadChanges(context.Background(), root, []Change{selected})
+		if err == nil || !strings.Contains(err.Error(), `"`+selected.Path+`"`) {
+			t.Fatalf("selected path %q missing from error: %v", selected.Path, err)
+		}
+	}
+}

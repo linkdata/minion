@@ -30,7 +30,7 @@ func offlineIndexFixture(t *testing.T, files []workspace.File) (*fixIndex, strin
 	if err := workspace.Materialize(source, files); err != nil {
 		t.Fatal(err)
 	}
-	index, err := newFixIndex(context.Background(), metadata, source)
+	index, err := newFixIndex(context.Background(), metadata, source, files)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +71,7 @@ func TestFixIndexPinsSHA1WhenGitDefaultsToSHA256(t *testing.T) {
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	index, source := offlineIndexFixture(t, []workspace.File{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("before")}})
-	if output, err := index.run(context.Background(), 128, "rev-parse", "--show-object-format"); err != nil || strings.TrimSpace(string(output)) != "sha1" {
+	if output, err := index.run(context.Background(), 128, nil, "rev-parse", "--show-object-format"); err != nil || strings.TrimSpace(string(output)) != "sha1" {
 		t.Fatalf("offline index changed its object format: %q,%v", output, err)
 	}
 	writeIndexFixture(t, source, "source.txt", []byte("after"))
@@ -83,11 +83,11 @@ func TestFixIndexPinsSHA1WhenGitDefaultsToSHA256(t *testing.T) {
 
 func TestFixIndexBaselineIsTreeWithoutCommit(t *testing.T) {
 	index, _ := offlineIndexFixture(t, []workspace.File{{Path: "source", Mode: workspace.Regular, Data: []byte("baseline")}})
-	typeName, err := index.run(context.Background(), 128, "cat-file", "-t", index.baseline)
+	typeName, err := index.run(context.Background(), 128, nil, "cat-file", "-t", index.baseline)
 	if err != nil || strings.TrimSpace(string(typeName)) != "tree" {
 		t.Fatalf("baseline type=%q error=%v", typeName, err)
 	}
-	objects, err := index.run(context.Background(), 1024, "cat-file", "--batch-all-objects", "--batch-check=%(objecttype)")
+	objects, err := index.run(context.Background(), 1024, nil, "cat-file", "--batch-all-objects", "--batch-check=%(objecttype)")
 	if err != nil || strings.Contains(string(objects), "commit") {
 		t.Fatalf("offline objects=%q error=%v", objects, err)
 	}
@@ -98,7 +98,7 @@ func TestFixIndexRejectsBaselineMetadataAliasWithoutHidingIOFailures(t *testing.
 		t.Run(name, func(t *testing.T) {
 			source, metadata := t.TempDir(), t.TempDir()
 			writeIndexFixture(t, source, name, []byte("source"))
-			_, err := newFixIndex(context.Background(), metadata, source)
+			_, err := newFixIndex(context.Background(), metadata, source, nil)
 			var exit *exec.ExitError
 			if !errors.Is(err, gitwork.ErrUnsupportedSource) || !errors.As(err, &exit) {
 				t.Fatalf("baseline alias error=%v", err)
@@ -107,7 +107,7 @@ func TestFixIndexRejectsBaselineMetadataAliasWithoutHidingIOFailures(t *testing.
 	}
 	index, _ := offlineIndexFixture(t, nil)
 	index.dir = filepath.Join(t.TempDir(), "missing")
-	if _, err := index.run(context.Background(), 1024, "add", "--all", "--", "."); !errors.Is(err, os.ErrNotExist) || errors.Is(err, gitwork.ErrUnsupportedSource) {
+	if _, err := index.run(context.Background(), 1024, nil, "add", "--all", "--", "."); !errors.Is(err, os.ErrNotExist) || errors.Is(err, gitwork.ErrUnsupportedSource) {
 		t.Fatalf("offline Git I/O error=%v", err)
 	}
 }
@@ -118,7 +118,7 @@ func TestFixIndexQuotesGitDiagnostic(t *testing.T) {
 	if err := os.WriteFile(index.binary, []byte("#!/bin/sh\nprintf 'first line\\nforged journal entry\\n' >&2\nexit 1\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	_, err := index.run(context.Background(), 1024, "status")
+	_, err := index.run(context.Background(), 1024, nil, "status")
 	if err == nil || strings.Contains(err.Error(), "\n") || !strings.Contains(err.Error(), `"first line\nforged journal entry"`) {
 		t.Fatalf("unquoted offline Git diagnostic: %v", err)
 	}
@@ -217,7 +217,7 @@ func TestFixIndexRejectsRelativeExecutableWhenErrDotDisabled(t *testing.T) {
 	if binary, err := exec.LookPath("git"); err != nil || filepath.IsAbs(binary) {
 		t.Fatalf("probe did not produce a relative executable: %q, %v", binary, err)
 	}
-	if _, err := newFixIndex(context.Background(), filepath.Join(root, "index"), filepath.Join(root, "source")); err == nil || !strings.Contains(err.Error(), "absolute path") {
+	if _, err := newFixIndex(context.Background(), filepath.Join(root, "index"), filepath.Join(root, "source"), nil); err == nil || !strings.Contains(err.Error(), "absolute path") {
 		t.Fatalf("accepted relative Git executable: %v", err)
 	}
 }
@@ -262,7 +262,7 @@ func TestFixIndexRejectsNonIgnoredUnsafeOutput(t *testing.T) {
 	for _, tt := range []struct{ kind, cause string }{
 		{"symlink", `fix output "link"`},
 		{"unsafe path", "not a portable regular-file path"},
-		{"nested repository", `nested repository output "nested/" must be removed or ignored`},
+		{"nested repository", `untracked nested repository output "nested/" must be removed or ignored`},
 		{"oversized", "byte limit"},
 		{"aggregate oversized", "byte limit"},
 		{"too many", "changed file limit"},
@@ -283,7 +283,7 @@ func TestFixIndexRejectsNonIgnoredUnsafeOutput(t *testing.T) {
 				if err := os.Mkdir(metadata, 0700); err != nil {
 					t.Fatal(err)
 				}
-				if _, err := newFixIndex(context.Background(), metadata, nested); err != nil {
+				if _, err := newFixIndex(context.Background(), metadata, nested, nil); err != nil {
 					t.Fatal(err)
 				}
 			case "oversized":
@@ -365,5 +365,128 @@ exec %s "$@"
 	index.binary = proxy
 	if _, err := index.changes(context.Background()); err == nil || !strings.Contains(err.Error(), "changed after indexing") {
 		t.Fatalf("accepted unstaged bytes: %v", err)
+	}
+}
+
+func TestParseIndexChangesRejectsMalformedRecords(t *testing.T) {
+	old, current := strings.Repeat("1", 40), strings.Repeat("2", 40)
+	record := func(mode, status string) []byte {
+		return []byte(":100644 " + mode + " " + old + " " + current + " " + status + "\x00changed\x00")
+	}
+	for _, test := range []struct {
+		name string
+		raw  []byte
+		want string
+	}{
+		{"missing terminator", []byte(":100644"), "invalid offline git diff"},
+		{"odd field count", []byte("record\x00"), "invalid offline git diff"},
+		{"invalid record", []byte("wrong\x00changed\x00"), "invalid offline git change record"},
+		{"invalid identity", []byte(":100644 100644 short " + current + " M\x00changed\x00"), "invalid offline git change record"},
+		{"invalid mode", record("100888", "M"), "invalid offline git file mode"},
+		{"unmerged", record("100644", "U"), `unsupported offline git change at "changed"`},
+		{"unknown", record("100644", "X"), `unsupported offline git change at "changed"`},
+		{"copy", record("100644", "C"), `unsupported offline git change at "changed"`},
+		{"type change", record("120000", "T"), `unsupported offline git change at "changed"`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			changes, objects, err := parseIndexChanges(test.raw)
+			if err == nil || !strings.Contains(err.Error(), test.want) || changes != nil || objects != nil {
+				t.Fatalf("malformed record returned %+v, %+v, %v; want %q", changes, objects, err, test.want)
+			}
+		})
+	}
+}
+
+func TestFixIndexRejectsTrackedGrowthBeforeHashing(t *testing.T) {
+	for _, kind := range []string{"sparse huge file", "aggregate growth"} {
+		t.Run(kind, func(t *testing.T) {
+			index, source := offlineIndexFixture(t, []workspace.File{
+				{Path: "first", Mode: workspace.Regular, Data: []byte("one")},
+				{Path: "second", Mode: workspace.Regular, Data: []byte("two")},
+			})
+			if kind == "sparse huge file" {
+				if err := os.Truncate(filepath.Join(source, "first"), 1<<40); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				writeIndexFixture(t, source, "first", make([]byte, workspace.MaxChangeBytes/2+1))
+				writeIndexFixture(t, source, "second", make([]byte, workspace.MaxChangeBytes/2+1))
+			}
+			marker := filepath.Join(t.TempDir(), "add-ran")
+			proxy := filepath.Join(t.TempDir(), "git-proxy")
+			script := fmt.Sprintf("#!/bin/sh\nfor argument in \"$@\"; do\n if [ \"$argument\" = add ]; then touch %s; fi\ndone\nexec %s \"$@\"\n", shellQuote(marker), shellQuote(index.binary))
+			if err := os.WriteFile(proxy, []byte(script), 0700); err != nil {
+				t.Fatal(err)
+			}
+			index.binary = proxy
+			if changes, err := index.changes(context.Background()); err == nil || !strings.Contains(err.Error(), "tracked fix path") || !strings.Contains(err.Error(), "byte limit") {
+				t.Fatalf("tracked growth returned %+v, %v", changes, err)
+			}
+			if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("Git hashed oversized tracked data before refusal: %v", err)
+			}
+		})
+	}
+}
+
+func TestFixIndexExcludesModelCreatedGitMetadata(t *testing.T) {
+	index, source := offlineIndexFixture(t, []workspace.File{{Path: "tracked/source", Mode: workspace.Regular, Data: []byte("before")}})
+	writeIndexFixture(t, source, ".GIT/config", []byte("untrusted metadata"))
+	writeIndexFixture(t, source, "tracked/.Git/config", []byte("untrusted nested metadata"))
+	writeIndexFixture(t, source, "tracked/source", []byte("after"))
+	changes, err := index.changes(context.Background())
+	want := []workspace.Change{{Path: "tracked/source", Mode: workspace.Regular, Data: []byte("after")}}
+	if err != nil || !reflect.DeepEqual(changes, want) {
+		t.Fatalf("model metadata affected selected contents: %+v, %v", changes, err)
+	}
+}
+
+func TestFixIndexCountsModeOnlyFileContentsAgainstResultLimit(t *testing.T) {
+	index, source := offlineIndexFixture(t, []workspace.File{{Path: "large.sh", Mode: workspace.Regular, Data: make([]byte, workspace.MaxChangeBytes+1)}})
+	if err := os.Chmod(filepath.Join(source, "large.sh"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := index.changes(context.Background()); err == nil || !strings.Contains(err.Error(), `changed path "large.sh"`) || !strings.Contains(err.Error(), "byte limit") {
+		t.Fatalf("mode-only update did not obey full-content result limit: %v", err)
+	}
+}
+
+func TestFixIndexOutputLimitIdentifiesGitOperation(t *testing.T) {
+	index, _ := offlineIndexFixture(t, nil)
+	_, err := index.run(context.Background(), 1, nil, "rev-parse", "--git-dir")
+	if err == nil || !strings.Contains(err.Error(), "offline git rev-parse output exceeds action limit") {
+		t.Fatalf("output refusal lacks operation: %v", err)
+	}
+}
+
+func TestFixIndexPreservesFileDirectoryTransitions(t *testing.T) {
+	for _, kind := range []string{"file to directory", "directory to file"} {
+		t.Run(kind, func(t *testing.T) {
+			before, after := "parent", "parent/child"
+			if kind == "directory to file" {
+				before, after = after, before
+			}
+			index, source := offlineIndexFixture(t, []workspace.File{{Path: before, Mode: workspace.Regular, Data: []byte("before")}})
+			if err := os.RemoveAll(filepath.Join(source, "parent")); err != nil {
+				t.Fatal(err)
+			}
+			writeIndexFixture(t, source, after, []byte("after"))
+			changes, err := index.changes(context.Background())
+			if err != nil || len(changes) != 2 {
+				t.Fatalf("%s returned %+v, %v", kind, changes, err)
+			}
+			foundDelete, foundAddition := false, false
+			for _, change := range changes {
+				if change.Path == before && change.Delete {
+					foundDelete = true
+				}
+				if change.Path == after && !change.Delete && string(change.Data) == "after" {
+					foundAddition = true
+				}
+			}
+			if !foundDelete || !foundAddition {
+				t.Fatalf("%s lost a selected transition: %+v", kind, changes)
+			}
+		})
 	}
 }

@@ -95,11 +95,7 @@ func (r *Runner) runAI(ctx context.Context, job Job, dir, prompt string, writabl
 		}
 		var approved bool
 		var feedback string
-		phases := []string{reviewFull}
-		if round > 0 {
-			phases = []string{reviewVerification, reviewFull}
-		}
-		for _, phase := range phases {
+		for _, phase := range reviewPhases(round + 1) {
 			criticNotes, previousAnswer, previousFeedback := "", "", ""
 			if phase == reviewVerification {
 				criticNotes, previousAnswer, previousFeedback = notes, priorAnswer, priorFeedback
@@ -127,6 +123,13 @@ func (r *Runner) runAI(ctx context.Context, job Job, dir, prompt string, writabl
 		request.prompt = revisionPrompt(prompt, candidate, notes, feedback)
 	}
 	return "", fmt.Errorf("%w: critic did not approve after %d round(s)", monitor.ErrTerminalJob, rounds)
+}
+
+func reviewPhases(round int) []string {
+	if round == 1 {
+		return []string{reviewFull}
+	}
+	return []string{reviewVerification, reviewFull}
 }
 
 func mainPrompt(task string) string {
@@ -171,17 +174,15 @@ func parseProposal(raw string) (answer, notes string, err error) {
 		json.Unmarshal(fields["review_notes"], &reviewNotes) != nil || reviewNotes == nil {
 		return "", "", errors.New("answer and review_notes must be strings")
 	}
-	if strings.ContainsRune(*response, 0) {
-		return "", "", errors.New("answer must not contain NUL")
-	}
-	if strings.TrimSpace(*response) == "" {
-		return "", "", errors.New("answer must not be blank")
-	}
-	// Never silently omit part of the candidate or its rationale from the critic.
+	// Bound the decoded proposal before normalization, including its private rationale.
 	if len(*response)+len(*reviewNotes) > maxOutputBytes {
 		return "", "", errors.New("decoded response exceeds critic context limit")
 	}
-	return *response, *reviewNotes, nil
+	answer = strings.ReplaceAll(*response, "\x00", "")
+	if strings.TrimSpace(answer) == "" {
+		return "", "", errors.New("answer must not be blank")
+	}
+	return answer, *reviewNotes, nil
 }
 
 func parseCritique(answer string) (approved bool, feedback string, err error) {

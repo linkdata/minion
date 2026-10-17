@@ -23,6 +23,7 @@ import (
 	"github.com/linkdata/minion/internal/gitwork"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/skills"
+	"github.com/linkdata/minion/internal/usage"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -119,6 +120,11 @@ func TestPreparedActionRejectsForeignResultBeforePublication(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
+	e.Usage = &usage.Store{Dir: filepath.Join(t.TempDir(), "usage")}
+	e, finish, err := e.trackUsage(request)
+	if err != nil {
+		t.Fatal(err)
+	}
 	installedHome := os.Getenv("HOME")
 	t.Setenv("HOME", t.TempDir())
 	prepared, err := e.prepare(ctx, request)
@@ -133,18 +139,18 @@ func TestPreparedActionRejectsForeignResultBeforePublication(t *testing.T) {
 	if err != nil || len(entries) != 0 {
 		t.Fatalf("read-only preparation clone was not removed: %v, %v", entries, err)
 	}
-	if prepared.Job.RuntimeBudget <= 0 || prepared.Job.RuntimeBudget > time.Minute {
-		t.Fatalf("accepted budget %s exceeds context deadline despite 2m configured timeout", prepared.Job.RuntimeBudget)
+	if prepared.job.RuntimeBudget <= 0 || prepared.job.RuntimeBudget > time.Minute {
+		t.Fatalf("accepted budget %s exceeds context deadline despite 2m configured timeout", prepared.job.RuntimeBudget)
 	}
-	if prepared.Job.Main.Provider != "claude" || prepared.Job.Main.Model != "portable-claude-model" || prepared.Job.Main.Effort != "high" {
-		t.Fatalf("portableJob lost Claude model/effort: %+v", prepared.Job.Main)
+	if prepared.job.Main.Provider != "claude" || prepared.job.Main.Model != "portable-claude-model" || prepared.job.Main.Effort != "high" {
+		t.Fatalf("portableJob lost Claude model/effort: %+v", prepared.job.Main)
 	}
 	defer func() {
-		if err := prepared.Close(); err != nil {
+		if err := prepared.close(); err != nil {
 			t.Error(err)
 		}
 	}()
-	data, err := json.Marshal(prepared.Job)
+	data, err := json.Marshal(prepared.job)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,6 +184,13 @@ func TestPreparedActionRejectsForeignResultBeforePublication(t *testing.T) {
 	}
 	if writes != 1 {
 		t.Fatalf("publication writes = %d", writes)
+	}
+	if err := finish(nil); err != nil {
+		t.Fatal(err)
+	}
+	records, err := usage.ReadAll(e.Usage.Dir)
+	if err != nil || len(records) != 1 || records[0].ID != prepared.job.Identity.AttemptID || records[0].ClaudeCalls != 1 {
+		t.Fatalf("attempt/usage correlation lost: records=%+v job=%+v err=%v", records, prepared.job.Identity, err)
 	}
 }
 
@@ -277,7 +290,7 @@ func TestIncompleteAuditIdentityAndPrivateDiagnosticLogging(t *testing.T) {
 	}
 	var journal bytes.Buffer
 	e := Orchestrator{Logger: log.New(&journal, "", 0)}
-	e.logDiagnostics(result)
+	e.logResult(job, result)
 	for _, want := range []string{"job=" + job.Identity.JobID, "attempt=" + job.Identity.AttemptID, "executor=" + job.Identity.ExecutorID, "code=limit_hit"} {
 		if !strings.Contains(journal.String(), want) {
 			t.Fatalf("diagnostic lacks %q: %s", want, &journal)
@@ -285,6 +298,19 @@ func TestIncompleteAuditIdentityAndPrivateDiagnosticLogging(t *testing.T) {
 	}
 	if strings.Contains(journal.String(), result.Diagnostics[0].Message) {
 		t.Fatalf("private diagnostic journaled: %s", &journal)
+	}
+}
+
+func TestCommandValidationDoesNotResolveExecutorSkills(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	request := usageJob()
+	request.Command.Name = "review"
+	request.Repository.Actions = []string{"review"}
+	e := Orchestrator{Commands: map[string]config.CommandMapping{
+		"review": {Action: "review", Skills: []string{"https://github.com/owner/repo/tree/pinned/skills/not-installed"}},
+	}}
+	if err := e.validateCommand(request); err != nil {
+		t.Fatalf("logical command validation requires executor-host installation: %v", err)
 	}
 }
 
@@ -330,7 +356,7 @@ func TestPreparedReplyNeedsNoExecution(t *testing.T) {
 	if writes != 1 {
 		t.Fatalf("reply writes = %d", writes)
 	}
-	if err := prepared.Close(); err != nil {
+	if err := prepared.close(); err != nil {
 		t.Fatal(err)
 	}
 }

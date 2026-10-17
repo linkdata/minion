@@ -71,3 +71,47 @@ func TestImportPreservesExecutableModeAndCommitIgnoresUnstagedFiles(t *testing.T
 		t.Fatalf("commit added unreviewed output: %s", got)
 	}
 }
+
+func TestCloneSkipsTagsAndPublicationAcceptsAmbiguousShortName(t *testing.T) {
+	fixture := newFixture(t)
+	const branch = "minion/fix-same-tag"
+	fixture.git(fixture.source, "tag", branch)
+	fixture.git(fixture.source, "push", fixture.remote, "refs/tags/"+branch)
+	checkout, err := cloneFromURL(context.Background(), t.TempDir(), fixture.remote, "main", localTreeMetadata(t, fixture.source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := checkout.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	if got := fixture.git(checkout.path, "tag", "--list"); got != "" {
+		t.Fatalf("clone auto-followed remote tag: %s", got)
+	}
+	checkout.pushURL = fixture.remote
+	fixture.git(checkout.path, "tag", branch)
+	if err := checkout.NewBranch(context.Background(), branch); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkout.Import(context.Background(), fixture.base, []workspace.Change{{Path: "README.md", Mode: workspace.Regular, Data: []byte("reviewed\n")}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkout.CommitAndPush(context.Background(), branch, "bot", "reviewed", func(string) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if got := fixture.git("", "--git-dir="+fixture.remote, "show", "refs/heads/"+branch+":README.md"); got != "reviewed" {
+		t.Fatalf("wrong published branch: %s", got)
+	}
+}
+
+func TestGitEnvironmentDisablesReplacementAndSystemAttributes(t *testing.T) {
+	t.Setenv("GIT_NO_REPLACE_OBJECTS", "0")
+	t.Setenv("GIT_ATTR_NOSYSTEM", "0")
+	env := strings.Join(cleanGitEnvironment(), "\n")
+	for _, setting := range []string{"GIT_NO_REPLACE_OBJECTS=1", "GIT_ATTR_NOSYSTEM=1"} {
+		if !strings.Contains(env, "\n"+setting+"\n") {
+			t.Fatalf("missing hardening %s", setting)
+		}
+	}
+}

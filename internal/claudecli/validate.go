@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/linkdata/minion/internal/aicli"
+	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/processgroup"
 )
@@ -202,7 +203,7 @@ func probe(ctx context.Context, binary string, args []string, dir string, env []
 	cmd.WaitDelay = 2 * time.Second
 	processgroup.Configure(cmd)
 	output := probeOutput{cancel: cancel}
-	var diagnostics tailBuffer
+	diagnostics := bounded.Tail{Limit: maxDiagnosticBytes}
 	cmd.Stdout, cmd.Stderr = &output, &diagnostics
 	if err := cmd.Run(); err != nil {
 		if ctx.Err() != nil {

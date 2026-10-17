@@ -11,7 +11,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/linkdata/minion/internal/codexcli"
+	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/github"
@@ -33,6 +33,8 @@ var modelLineBreaks = strings.NewReplacer(
 
 // Orchestrator prepares portable actions and publishes results through trusted Git/GitHub access.
 type Orchestrator struct {
+	attemptID string
+
 	Runner            Runner
 	WorkRoot          string
 	Main, Adversarial string
@@ -117,7 +119,7 @@ func (e *Orchestrator) Execute(ctx context.Context, job monitor.Job) (resultErr 
 	}
 	if resultErr != nil && (errors.Is(ctx.Err(), context.DeadlineExceeded) ||
 		errors.Is(resultErr, gitwork.ErrTooManyFiles) ||
-		errors.Is(resultErr, gitwork.ErrDiffTooLarge) || errors.Is(resultErr, gitwork.ErrCheckoutTooLarge) || errors.Is(resultErr, gitwork.ErrUnsupportedSource) || errors.Is(resultErr, codexcli.ErrOutputLimit)) {
+		errors.Is(resultErr, gitwork.ErrDiffTooLarge) || errors.Is(resultErr, gitwork.ErrCheckoutTooLarge) || errors.Is(resultErr, gitwork.ErrUnsupportedSource) || errors.Is(resultErr, aicli.ErrOutputLimit)) {
 		resultErr = fmt.Errorf("%w: %w", monitor.ErrTerminalJob, resultErr)
 	}
 	returned = true
@@ -131,9 +133,6 @@ func (e *Orchestrator) validateCommand(job monitor.Job) error {
 	}
 	if !mapping.SupportsProvider(e.mainProvider()) {
 		return fmt.Errorf("%w: action %q is not supported with %s as main", monitor.ErrTerminalJob, mapping.Action, e.mainProvider())
-	}
-	if _, err := e.Runner.selectedSkills(e.mainProvider(), mapping.Skills, nil); err != nil {
-		return err
 	}
 	return nil
 }

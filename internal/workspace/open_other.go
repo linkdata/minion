@@ -7,11 +7,7 @@ import (
 	"os"
 )
 
-func openRegular(name string) (*os.File, error) {
-	return nil, errors.New("safe workspace collection requires Linux")
-}
-
-func openDirectory(name string) (*os.File, error) {
+func openPath(string, bool) (*os.File, error) {
 	return nil, errors.New("safe workspace collection requires Linux")
 }
 

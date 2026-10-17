@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/linkdata/minion/internal/aicli"
+	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/cleanup"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/processgroup"
@@ -250,7 +251,7 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	processgroup.Configure(cmd)
 
 	output := jsonlOutput{cancel: cancelRun}
-	var stderr tailBuffer
+	stderr := bounded.Tail{Limit: maxDiagnosticBytes}
 	cmd.Stdout = &output
 	cmd.Stderr = &stderr
 
@@ -500,42 +501,17 @@ func (o *jsonlOutput) accept(event codexEvent) {
 
 func eventReason(event codexEvent) string {
 	if event.Message != "" {
-		return limitText(event.Message)
+		return bounded.Text(event.Message, maxDiagnosticBytes)
 	}
 	var detail struct {
 		Message string `json:"message"`
 	}
 	if json.Unmarshal(event.Error, &detail) == nil && detail.Message != "" {
-		return limitText(detail.Message)
+		return bounded.Text(detail.Message, maxDiagnosticBytes)
 	}
 	var simple string
 	if json.Unmarshal(event.Error, &simple) == nil {
-		return limitText(simple)
+		return bounded.Text(simple, maxDiagnosticBytes)
 	}
 	return ""
 }
-
-func limitText(s string) string {
-	if len(s) > maxDiagnosticBytes {
-		return s[:maxDiagnosticBytes] + "..."
-	}
-	return s
-}
-
-type tailBuffer struct{ data []byte }
-
-func (b *tailBuffer) Write(p []byte) (int, error) {
-	n := len(p)
-	if len(p) >= maxDiagnosticBytes {
-		b.data = append(b.data[:0], p[len(p)-maxDiagnosticBytes:]...)
-		return n, nil
-	}
-	if excess := len(b.data) + len(p) - maxDiagnosticBytes; excess > 0 {
-		copy(b.data, b.data[excess:])
-		b.data = b.data[:len(b.data)-excess]
-	}
-	b.data = append(b.data, p...)
-	return n, nil
-}
-
-func (b *tailBuffer) String() string { return string(b.data) }

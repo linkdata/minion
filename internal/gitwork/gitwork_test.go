@@ -394,12 +394,7 @@ func TestCheckoutPullRequestPreflightDoesNotFetchMissingBlob(t *testing.T) {
 			t.Error(err)
 		}
 	}()
-	missing := func() bool {
-		cmd := exec.Command("git", "-C", checkout.path, "cat-file", "-e", blob)
-		cmd.Env = append(os.Environ(), "GIT_NO_LAZY_FETCH=1")
-		return cmd.Run() != nil
-	}
-	if !missing() {
+	if !blobMissing(t, checkout.path, blob) {
 		t.Fatal("fixture did not omit the PR blob")
 	}
 	oversized := func(_ context.Context, sha string) (github.GitTree, error) {
@@ -410,7 +405,7 @@ func TestCheckoutPullRequestPreflightDoesNotFetchMissingBlob(t *testing.T) {
 	if err := checkout.checkoutPullRequest(context.Background(), 7, "main", head); !errors.Is(err, ErrCheckoutTooLarge) {
 		t.Fatalf("oversized PR error = %v, want checkout limit", err)
 	}
-	if !missing() {
+	if !blobMissing(t, checkout.path, blob) {
 		t.Fatal("size preflight downloaded missing PR blob")
 	}
 	if got := fixture.git(checkout.path, "rev-parse", "HEAD"); got != fixture.base {

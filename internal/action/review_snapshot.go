@@ -13,6 +13,9 @@ import (
 
 type reviewSnapshot struct {
 	source, outputDir string
+	liveOutputDir     string
+	job               Job
+	index             *fixIndex
 	ownedSource       bool
 	changes           []workspace.Change
 	artifacts         []workspace.File
@@ -20,7 +23,7 @@ type reviewSnapshot struct {
 
 // Freeze outside the main model's writable grants so background work cannot change the critic's input.
 func freezeReviewSnapshot(ctx context.Context, workRoot string, job Job, source, outputDir string, index *fixIndex) (snapshot *reviewSnapshot, resultErr error) {
-	snapshot = &reviewSnapshot{source: source}
+	snapshot = &reviewSnapshot{source: source, liveOutputDir: outputDir, job: job, index: index}
 	defer func() {
 		if resultErr != nil {
 			resultErr = errors.Join(resultErr, snapshot.close())
@@ -57,9 +60,9 @@ func freezeReviewSnapshot(ctx context.Context, workRoot string, job Job, source,
 	return snapshot, nil
 }
 
-func (s *reviewSnapshot) verify(ctx context.Context, job Job, outputDir string, index *fixIndex) error {
-	if job.Action == command.Fix {
-		changes, err := reviewChanges(ctx, job, index)
+func (s *reviewSnapshot) verify(ctx context.Context) error {
+	if s.job.Action == command.Fix {
+		changes, err := reviewChanges(ctx, s.job, s.index)
 		if err != nil {
 			return err
 		}
@@ -67,8 +70,8 @@ func (s *reviewSnapshot) verify(ctx context.Context, job Job, outputDir string, 
 			return errors.New("candidate source changed during critic review")
 		}
 	}
-	if outputDir != "" {
-		files, _, err := readAuditArtifacts(outputDir, auditForReview)
+	if s.liveOutputDir != "" {
+		files, _, err := readAuditArtifacts(s.liveOutputDir, auditForReview)
 		if err != nil {
 			return err
 		}
@@ -91,9 +94,6 @@ func (s *reviewSnapshot) close() error {
 }
 
 func reviewChanges(ctx context.Context, job Job, index *fixIndex) ([]workspace.Change, error) {
-	if index == nil {
-		return nil, errors.New("fix critic snapshot requires the offline index")
-	}
 	changes, err := index.changes(ctx)
 	if err != nil {
 		return nil, err

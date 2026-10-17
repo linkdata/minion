@@ -3,8 +3,6 @@ package action
 import (
 	"cmp"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"time"
@@ -16,16 +14,16 @@ import (
 
 // trackUsage gives each action attempt its own record and runner wrapper.
 func (e *Orchestrator) trackUsage(job monitor.Job) (*Orchestrator, func(error) error, error) {
-	var id [16]byte
-	if _, err := rand.Read(id[:]); err != nil {
-		return nil, nil, fmt.Errorf("create usage ID: %w", err)
+	id, err := newAttemptID()
+	if err != nil {
+		return nil, nil, err
 	}
 	name := job.Command.Name
 	if name == "" {
 		name = string(job.Command.Action)
 	}
 	record := usage.Record{
-		ID: hex.EncodeToString(id[:]), JobID: job.ID, Repo: job.Repository.Name,
+		ID: id, JobID: job.ID, Repo: job.Repository.Name,
 		User: job.Source.Author.Login, Action: name, Number: job.Number,
 		SourceURL: sourceURL(job), Provider: e.mainProvider(), CriticProvider: e.Adversarial,
 		StartedAt: time.Now().UTC(), Status: "running", UsageComplete: true,
@@ -46,6 +44,7 @@ func (e *Orchestrator) trackUsage(job monitor.Job) (*Orchestrator, func(error) e
 		return nil, nil, err
 	}
 	tracked := *e
+	tracked.attemptID = id
 	tracked.Runner.aroundModel = func(ctx context.Context, request modelRun, next modelCall) (aicli.Result, error) {
 		if err := ctx.Err(); err != nil {
 			return aicli.Result{}, err
@@ -71,7 +70,10 @@ func (e *Orchestrator) trackUsage(job monitor.Job) (*Orchestrator, func(error) e
 		result, err := next(ctx, request)
 		record.Tokens.Add(result.Tokens)
 		record.UsageComplete = complete && result.UsageComplete
-		return result, errors.Join(err, save())
+		if saveErr := save(); saveErr != nil {
+			err = errors.Join(err, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, saveErr))
+		}
+		return result, err
 	}
 	finish := func(actionErr error) error {
 		finished := time.Now().UTC()

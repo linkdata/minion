@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/linkdata/minion/internal/aicli"
+	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/usage"
 )
 
@@ -50,18 +51,19 @@ type event struct {
 	Type              string            `json:"type"`
 	Subtype           string            `json:"subtype"`
 	ResultIndex       *int64            `json:"result_index"`
-	Tasks             []struct{}        `json:"tasks"` // Native live-task entries are objects; only their count is needed.
+	Tasks             json.RawMessage   `json:"tasks"`
 	IsError           bool              `json:"is_error"`
 	Result            string            `json:"result"`
 	StructuredOutput  json.RawMessage   `json:"structured_output"`
-	Errors            []string          `json:"errors"`
 	Usage             json.RawMessage   `json:"usage"`
 	ModelUsage        json.RawMessage   `json:"modelUsage"`
 	PermissionDenials []json.RawMessage `json:"permission_denials"`
 	Message           json.RawMessage   `json:"message"`
 	RateLimitInfo     struct {
-		Status   string          `json:"status"`
-		ResetsAt json.RawMessage `json:"resetsAt"`
+		Status         string          `json:"status"`
+		ResetsAt       json.RawMessage `json:"resetsAt"`
+		IsUsingOverage bool            `json:"isUsingOverage"`
+		OverageInUse   bool            `json:"overageInUse"`
 	} `json:"rate_limit_info"`
 }
 
@@ -145,6 +147,7 @@ func (o *jsonlOutput) Write(p []byte) (int, error) {
 func (o *jsonlOutput) fail(err error) {
 	if o.err == nil {
 		o.err = err
+		o.completed, o.result.Answer = false, ""
 		o.result.UsageComplete = false
 		if o.cancel != nil {
 			o.cancel()
@@ -191,7 +194,7 @@ func (o *jsonlOutput) finishLine() {
 		return
 	}
 	o.line = o.line[:0]
-	if e.Type == "rate_limit_event" && e.RateLimitInfo.Status == "rejected" {
+	if e.Type == "rate_limit_event" && e.RateLimitInfo.Status == "rejected" && !e.RateLimitInfo.IsUsingOverage && !e.RateLimitInfo.OverageInUse {
 		o.usageLimit = errors.New("provider usage limit reached")
 		var reset int64
 		// Only a validated UTC timestamp may enter the service diagnostic.
@@ -201,7 +204,12 @@ func (o *jsonlOutput) finishLine() {
 		o.completed, o.result.Answer, o.result.UsageComplete = false, "", false
 	}
 	if e.Type == "system" && e.Subtype == "background_tasks_changed" {
-		o.pending = len(e.Tasks)
+		var tasks []struct{}
+		if len(e.Tasks) == 0 || e.Tasks[0] != '[' || json.Unmarshal(e.Tasks, &tasks) != nil {
+			o.fail(errors.New("invalid Claude background task list"))
+			return
+		}
+		o.pending = len(tasks)
 		if o.pending != 0 {
 			o.completed = false
 			o.result.Answer = ""
@@ -244,7 +252,7 @@ func (o *jsonlOutput) finishLine() {
 		if o.usageLimit != nil {
 			o.fail(o.usageLimit)
 		} else {
-			o.fail(fmt.Errorf("result failed: %s", limitText(e.Subtype)))
+			o.fail(fmt.Errorf("result failed: %q", bounded.Text(e.Subtype, maxDiagnosticBytes)))
 		}
 		return
 	}
@@ -303,29 +311,4 @@ func sandboxFailure(text string) bool {
 		}
 	}
 	return false
-}
-
-type tailBuffer struct{ data []byte }
-
-func (b *tailBuffer) Write(p []byte) (int, error) {
-	n := len(p)
-	if n >= maxDiagnosticBytes {
-		b.data = append(b.data[:0], p[n-maxDiagnosticBytes:]...)
-		return n, nil
-	}
-	if excess := len(b.data) + n - maxDiagnosticBytes; excess > 0 {
-		copy(b.data, b.data[excess:])
-		b.data = b.data[:len(b.data)-excess]
-	}
-	b.data = append(b.data, p...)
-	return n, nil
-}
-
-func (b *tailBuffer) String() string { return string(b.data) }
-
-func limitText(s string) string {
-	if len(s) > maxDiagnosticBytes {
-		return s[:maxDiagnosticBytes] + "..."
-	}
-	return s
 }

@@ -28,6 +28,8 @@ func TestOutputNativeUsageLimit(t *testing.T) {
 		failure      string
 	}{
 		{"warning permits completion", warning + "\n" + successfulResult, known, false, ""},
+		{"paid overage permits completion", `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","isUsingOverage":true,"overageStatus":"allowed"}}` + "\n" + successfulResult, known, false, ""},
+		{"active overage permits completion", `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","overageInUse":true}}` + "\n" + successfulResult, known, false, ""},
 		{"native failure keeps helper counters", warning + "\n" + rejected + "\n" + failed, usage.Tokens{Input: 595668, CachedInput: 435540, Output: 11489}, true, limit},
 		{"rejection at EOF", rejected, usage.Tokens{}, false, limit},
 		{"later counters still parsed", rejected + "\n" + successfulResult, known, false, limit},
@@ -54,6 +56,29 @@ func TestOutputNativeUsageLimit(t *testing.T) {
 				}
 			} else if o.err == nil || o.err.Error() != test.failure || !cancelled || o.result.UsageComplete || o.result.Answer != "" {
 				t.Fatalf("unsafe or missing usage limit failure: tokens=%+v error=%v complete=%t answer=%q", o.result.Tokens, o.err, o.result.UsageComplete, o.result.Answer)
+			}
+		})
+	}
+}
+
+func TestOutputTaskListsAreScopedAndRequired(t *testing.T) {
+	for _, test := range []struct {
+		name, event string
+		invalid     bool
+	}{
+		{"unrelated tasks", `{"type":"assistant","tasks":["unrelated"]}`, false},
+		{"unrelated errors", `{"type":"system","errors":{"unrelated":true}}`, false},
+		{"missing", `{"type":"system","subtype":"background_tasks_changed"}`, true},
+		{"null", `{"type":"system","subtype":"background_tasks_changed","tasks":null}`, true},
+		{"object", `{"type":"system","subtype":"background_tasks_changed","tasks":{}}`, true},
+		{"string entries", `{"type":"system","subtype":"background_tasks_changed","tasks":["worker"]}`, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			o := jsonlOutput{}
+			_, _ = o.Write([]byte(successfulResult + "\n" + test.event + "\n"))
+			o.finish()
+			if (o.err != nil) != test.invalid || (o.result.Answer == "") != test.invalid {
+				t.Fatalf("result=%+v error=%v", o.result, o.err)
 			}
 		})
 	}
@@ -328,18 +353,6 @@ func TestOutputWholeTreeUsage(t *testing.T) {
 				t.Fatalf("output = %+v, %v; want tokens %+v, complete %v", o.result, o.err, tc.want, tc.complete)
 			}
 		})
-	}
-}
-
-func TestTailBuffer(t *testing.T) {
-	var buffer tailBuffer
-	for _, s := range []string{strings.Repeat("a", maxDiagnosticBytes+1), "end"} {
-		if _, err := buffer.Write([]byte(s)); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if len(buffer.String()) != maxDiagnosticBytes || !strings.HasSuffix(buffer.String(), "end") {
-		t.Fatal("diagnostics were not bounded")
 	}
 }
 

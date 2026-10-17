@@ -31,3 +31,22 @@ func TestBufferExactAndZeroLimit(t *testing.T) {
 		}
 	}
 }
+
+func TestTailDrainsAndKeepsSuffix(t *testing.T) {
+	for _, limit := range []int{0, 3} {
+		for _, chunks := range [][]string{{"abcdef"}, {"a", "bc", "de", "f"}, {"abc", "def"}} {
+			output := Tail{Limit: limit}
+			for _, chunk := range chunks {
+				if n, err := output.Write([]byte(chunk)); err != nil || n != len(chunk) {
+					t.Fatalf("write=%d,%v", n, err)
+				}
+			}
+			if output.String() != "abcdef"[6-limit:] {
+				t.Fatalf("limit=%d tail=%q", limit, output.String())
+			}
+		}
+	}
+	if Text("abc", 3) != "abc" || Text("abcd", 3) != "abc..." || Text("a", 0) != "..." {
+		t.Fatal("diagnostic text bounds changed")
+	}
+}

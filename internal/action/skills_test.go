@@ -119,8 +119,8 @@ func TestRunnerRequiresEverySkillAndLoadsOptionalSkills(t *testing.T) {
 
 		AlwaysOnSkills: []string{optionalURL},
 	}
-	if err := executor.validateCommand(job); err == nil || errors.Is(err, monitor.ErrTerminalJob) {
-		t.Fatalf("missing local skill must fail early and retryably: %v", err)
+	if err := executor.validateCommand(job); err != nil {
+		t.Fatalf("logical command depends on execution-host skills: %v", err)
 	}
 	role := RoleSettings{Provider: "codex", Skills: executor.Commands["inspect"].Skills,
 		AlwaysOnSkills: executor.AlwaysOnSkills}

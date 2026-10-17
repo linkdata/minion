@@ -3,7 +3,9 @@ package codexcli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -250,4 +252,126 @@ func TestCollectUsageBoundsScanningAndHonorsCancellation(t *testing.T) {
 			t.Fatalf("too many rollout files = %+v, %t; want fallback, incomplete", got, complete)
 		}
 	})
+}
+
+func TestRolloutUsageSkipsOversizedLinesAndDebitsBytes(t *testing.T) {
+	home := t.TempDir()
+	oversized := `{"type":"response_item","payload":"` + strings.Repeat("x", maxEventBytes) + `"}`
+	root := writeUsageRollout(t, home, "root", "", usageEvent("task_started", "turn"),
+		usageRecord("root", "turn", "before", 10, 5, 1), oversized,
+		usageRecord("root", "turn", "after", 20, 10, 2),
+		`{"ordinal":17,"type":"event_msg","payload":{"type":"collab_agent_spawn_end","new_thread_id":"late-child"}}`,
+		usageEvent("task_complete", "turn"))
+	info, err := os.Stat(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	budget := info.Size() + 1024
+	got, complete, children := readRolloutUsage(context.Background(), rolloutMeta{ID: "root", path: root}, "root", &budget)
+	want := usage.Tokens{Input: 30, CachedInput: 15, Output: 3}
+	if got != want || complete || budget != 1024 || len(children) != 1 || children[0] != "late-child" {
+		t.Fatalf("skipped line lost later usage/spawn or bytes: got=%+v complete=%t budget=%d children=%v", got, complete, budget, children)
+	}
+	writeUsageRollout(t, home, "late-child", "root", usageEvent("task_started", "child-turn"),
+		usageRecord("late-child", "child-turn", "child-response", 40, 2, 4), usageEvent("task_complete", "child-turn"))
+	got, complete = collectUsage(context.Background(), home, "root", time.Now(), nil, nil)
+	want.Add(usage.Tokens{Input: 40, CachedInput: 2, Output: 4})
+	if got != want || complete {
+		t.Fatalf("later completed helper lost or incomplete reset: got=%+v complete=%t want=%+v", got, complete, want)
+	}
+}
+
+func TestOversizedChildBaselineCountsOnlyOwnedResponses(t *testing.T) {
+	for _, withRecord := range []bool{false, true} {
+		t.Run(fmt.Sprint(withRecord), func(t *testing.T) {
+			events := []string{strings.Repeat("x", maxEventBytes+1), usageEvent("task_started", "child-turn")}
+			want := usage.Tokens{}
+			if withRecord {
+				events = append(events, usageRecord("child", "child-turn", "own-response", 20, 5, 2))
+				want = usage.Tokens{Input: 20, CachedInput: 5, Output: 2}
+			}
+			events = append(events, usageSnapshot(18, 1020, 500, 100), usageEvent("task_complete", "child-turn"))
+			path := writeUsageRollout(t, t.TempDir(), "child", "root", events...)
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			budget := info.Size() + 100
+			start := int64(9)
+			got, complete, _ := readRolloutUsage(context.Background(), rolloutMeta{ID: "child", path: path, HistoryStart: &start}, "root", &budget)
+			if got != want || complete || budget != 100 {
+				t.Fatalf("lost child baseline inflated totals: own=%t got=%+v complete=%t budget=%d want=%+v", withRecord, got, complete, budget, want)
+			}
+		})
+	}
+}
+
+func TestRolloutScannerEventBoundaryAndPartialEOF(t *testing.T) {
+	const prefix, suffix = `{"type":"response_item","payload":"`, `"}`
+	for _, test := range []struct {
+		name      string
+		size      int
+		ending    string
+		wantLines int
+		complete  bool
+	}{
+		{"exact boundary", maxEventBytes, "\n", 1, true},
+		{"exact partial EOF", maxEventBytes, "", 1, false},
+		{"oversized then valid", maxEventBytes + 1, "\n{}\n", 1, false},
+		{"oversized partial EOF", maxEventBytes + 1, "", 0, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			line := prefix + strings.Repeat("x", test.size-len(prefix)-len(suffix)) + suffix
+			complete := true
+			scanner := rolloutScanner(context.Background(), strings.NewReader(line+test.ending), &complete)
+			lines := 0
+			for scanner.Scan() {
+				lines++
+				if !json.Valid(scanner.Bytes()) || (test.size == maxEventBytes && len(scanner.Bytes()) != maxEventBytes) {
+					t.Fatalf("complete boundary JSON corrupted: length=%d", len(scanner.Bytes()))
+				}
+			}
+			if scanner.Err() != nil || lines != test.wantLines || complete != test.complete {
+				t.Fatalf("boundary scan: lines=%d complete=%t err=%v want=%d/%t", lines, complete, scanner.Err(), test.wantLines, test.complete)
+			}
+		})
+	}
+}
+
+func TestOversizedRolloutStillExhaustsOriginalBudget(t *testing.T) {
+	path := writeUsageRollout(t, t.TempDir(), "root", "", usageEvent("task_started", "turn"),
+		usageRecord("root", "turn", "before", 10, 0, 1), strings.Repeat("x", 2*maxEventBytes+1),
+		usageRecord("root", "turn", "unreachable", 1000, 0, 100), usageEvent("task_complete", "turn"))
+	budget := int64(maxEventBytes + (256 << 10))
+	got, complete, _ := readRolloutUsage(context.Background(), rolloutMeta{ID: "root", path: path}, "root", &budget)
+	if got != (usage.Tokens{Input: 10, Output: 1}) || complete || budget != 0 {
+		t.Fatalf("oversized discard bypassed budget: got=%+v complete=%t budget=%d", got, complete, budget)
+	}
+}
+
+func TestRolloutScannerCancellationWhileDiscarding(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	reader := &cancelingRolloutReader{Reader: strings.NewReader(strings.Repeat("x", 3*maxEventBytes)), cancel: cancel, cancelAfter: maxEventBytes + 2}
+	complete := true
+	scanner := rolloutScanner(ctx, reader, &complete)
+	if scanner.Scan() || !errors.Is(scanner.Err(), context.Canceled) || reader.bytes > 2*(maxEventBytes+2) || complete {
+		t.Fatalf("discard ignored cancellation: read=%d complete=%t err=%v", reader.bytes, complete, scanner.Err())
+	}
+}
+
+type cancelingRolloutReader struct {
+	io.Reader
+	cancel      context.CancelFunc
+	bytes       int
+	cancelAfter int
+}
+
+func (r *cancelingRolloutReader) Read(p []byte) (int, error) {
+	n, err := r.Reader.Read(p)
+	r.bytes += n
+	if r.bytes > r.cancelAfter {
+		r.cancel()
+	}
+	return n, err
 }

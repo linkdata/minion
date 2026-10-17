@@ -110,13 +110,13 @@ func TestSourceAliasesAreUnsupportedForDefaultAndPullRequestCheckout(t *testing.
 				}()
 			}
 			var exit *exec.ExitError
-			if !checked || !errors.Is(err, ErrUnsupportedSource) || !errors.As(err, &exit) || !strings.Contains(err.Error(), "git checkout:") {
+			if !checked || !errors.Is(err, ErrUnsupportedSource) || errors.As(err, &exit) || !strings.Contains(err.Error(), "unsafe source path") {
 				t.Fatalf("default checkout metadataChecked=%v error=%v", checked, err)
 			}
 			checked = false
 			fixture.checkout.lookupTree = lookupChecked
 			err = fixture.checkout.checkoutPullRequest(context.Background(), 7, "main", head)
-			if !checked || !errors.Is(err, ErrUnsupportedSource) || !errors.As(err, &exit) || !strings.Contains(err.Error(), "git checkout:") {
+			if !checked || !errors.Is(err, ErrUnsupportedSource) || errors.As(err, &exit) || !strings.Contains(err.Error(), "unsafe source path") {
 				t.Fatalf("PR checkout metadataChecked=%v error=%v", checked, err)
 			}
 		})
@@ -170,5 +170,24 @@ func TestGitEnvironmentPinsDiagnosticLocale(t *testing.T) {
 	}
 	if len(locales) != 1 || locales[0] != "LC_ALL=C" {
 		t.Fatalf("Git locales=%q", locales)
+	}
+}
+
+func TestImportRejectsGitMetadataAliasesBeforeApplying(t *testing.T) {
+	fixture := newFixture(t)
+	for _, name := range []string{"git~1/config", ".git./config", ".git:alternate/config", ".g\u200cit/config"} {
+		t.Run(name, func(t *testing.T) {
+			err := fixture.checkout.Import(context.Background(), fixture.base, []workspace.Change{{Path: name, Mode: workspace.Regular, Data: []byte("invalid metadata alias")}})
+			if err == nil {
+				t.Fatalf("alias %q import error=%v", name, err)
+			}
+			paths, err := fixture.checkout.stagedPaths(context.Background())
+			if err != nil || len(paths) != 0 {
+				t.Fatalf("rejected alias staged=%v error=%v", paths, err)
+			}
+			if err := os.RemoveAll(filepath.Join(fixture.checkout.path, strings.Split(name, "/")[0])); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }

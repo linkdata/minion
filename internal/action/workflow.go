@@ -23,7 +23,7 @@ import (
 
 // preparedAction owns orchestration-only publication state. Only Job crosses the worker boundary.
 type preparedAction struct {
-	Job Job
+	job Job
 
 	request    monitor.Job
 	checkout   *gitwork.Checkout
@@ -35,10 +35,10 @@ type preparedAction struct {
 }
 
 // needsExecution distinguishes supplied work from fixed replies and publication recovery.
-func (p *preparedAction) needsExecution() bool { return p.Job.Version != 0 }
+func (p *preparedAction) needsExecution() bool { return p.job.Version != 0 }
 
-// Close releases the trusted orchestration checkout after publication or failure.
-func (p *preparedAction) Close() error {
+// close releases the trusted orchestration checkout after publication or failure.
+func (p *preparedAction) close() error {
 	if p.checkout == nil {
 		return nil
 	}
@@ -51,20 +51,18 @@ func (e *Orchestrator) perform(ctx context.Context, request monitor.Job) error {
 		return err
 	}
 	defer func() {
-		if err := prepared.Close(); err != nil {
+		if err := prepared.close(); err != nil {
 			e.logf("close prepared action: %v", err)
 		}
 	}()
 	var result Result
 	if prepared.needsExecution() {
-		result, err = e.Runner.Run(ctx, prepared.Job)
+		result, err = e.Runner.Run(ctx, prepared.job)
 		if err != nil {
-			if validationErr := result.validate(prepared.Job, false); validationErr != nil {
+			e.logResult(prepared.job, result)
+			err = errors.Join(err, e.retainIncompleteAudit(prepared, result))
+			if validationErr := result.validate(prepared.job, false); validationErr != nil {
 				return errors.Join(err, fmt.Errorf("%w: invalid incomplete action result: %w", monitor.ErrTerminalJob, validationErr))
-			}
-			e.logDiagnostics(result)
-			if prepared.Job.Action == command.SecurityAudit && len(result.Artifacts) != 0 {
-				err = errors.Join(err, e.retainAudit(prepared, result, false))
 			}
 			return err
 		}
@@ -76,7 +74,7 @@ func (e *Orchestrator) prepare(ctx context.Context, request monitor.Job) (prepar
 	p := &preparedAction{request: request}
 	defer func() {
 		if resultErr != nil {
-			resultErr = errors.Join(resultErr, p.Close())
+			resultErr = errors.Join(resultErr, p.close())
 		}
 	}()
 	if request.Command.Action == command.Fix {
@@ -119,9 +117,7 @@ func (e *Orchestrator) prepare(ctx context.Context, request monitor.Job) (prepar
 	if err := e.checkGitHubContext(request, title, description); err != nil {
 		return nil, err
 	}
-	lookupTree := func(ctx context.Context, sha string) (github.GitTree, error) {
-		return e.GitHub.GitTree(ctx, repo.FullName, sha)
-	}
+	lookupTree := e.treeLookup(repo.FullName)
 	if pullHead != "" {
 		p.checkout, err = gitwork.ClonePullRequest(ctx, e.WorkRoot, repo.FullName, request.Number, branch, pullHead, lookupTree)
 	} else {
@@ -130,10 +126,10 @@ func (e *Orchestrator) prepare(ctx context.Context, request monitor.Job) (prepar
 	if err != nil {
 		return nil, err
 	}
-	if p.Job, err = e.portableJob(ctx, p, title, description); err != nil {
+	if p.job, err = e.portableJob(ctx, p, title, description); err != nil {
 		return nil, err
 	}
-	if err := p.Close(); err != nil {
+	if err := p.close(); err != nil {
 		return nil, err
 	}
 	p.checkout = nil
@@ -149,6 +145,20 @@ func (e *Orchestrator) roleSettings(provider string, required []string) RoleSett
 	return role
 }
 
+func newAttemptID() (string, error) {
+	var id [16]byte
+	if _, err := rand.Read(id[:]); err != nil {
+		return "", fmt.Errorf("create action attempt ID: %w", err)
+	}
+	return hex.EncodeToString(id[:]), nil
+}
+
+func (e *Orchestrator) treeLookup(repo string) func(context.Context, string) (github.GitTree, error) {
+	return func(ctx context.Context, sha string) (github.GitTree, error) {
+		return e.GitHub.GitTree(ctx, repo, sha)
+	}
+}
+
 func (e *Orchestrator) portableJob(ctx context.Context, p *preparedAction, title, description string) (Job, error) {
 	deadline, ok := ctx.Deadline()
 	if !ok {
@@ -159,14 +169,17 @@ func (e *Orchestrator) portableJob(ctx context.Context, p *preparedAction, title
 	if err != nil {
 		return Job{}, err
 	}
-	var attempt [16]byte
-	if _, err := rand.Read(attempt[:]); err != nil {
-		return Job{}, fmt.Errorf("create action attempt: %w", err)
+	attemptID := e.attemptID
+	if attemptID == "" {
+		attemptID, err = newAttemptID()
+		if err != nil {
+			return Job{}, err
+		}
 	}
 	job := Job{
 		Version: ProtocolVersion,
 		Identity: Identity{
-			JobID: request.ID, AttemptID: hex.EncodeToString(attempt[:]), ExecutorID: "local",
+			JobID: request.ID, AttemptID: attemptID, ExecutorID: "local",
 			Repository: request.Repository.Name, RepositoryID: request.Repository.ID, OwnerID: request.Repository.OwnerID,
 			Requester: request.Source.Author.Login, RequesterID: request.Source.Author.ID,
 			Number: request.Number, SubjectType: request.SubjectType,
@@ -203,11 +216,11 @@ func (e *Orchestrator) publish(ctx context.Context, p *preparedAction, result Re
 		}
 		return errors.New("action has no prepared source")
 	}
-	if err := result.Validate(p.Job); err != nil {
-		return fmt.Errorf("%w: invalid action result: %w", monitor.ErrTerminalJob, err)
+	e.logResult(p.job, result)
+	if err := result.validate(p.job, true); err != nil {
+		return errors.Join(fmt.Errorf("%w: invalid action result: %w", monitor.ErrTerminalJob, err), e.retainIncompleteAudit(p, result))
 	}
-	e.logDiagnostics(result)
-	if p.Job.Action == command.SecurityAudit {
+	if p.job.Action == command.SecurityAudit {
 		if err := e.retainAudit(p, result, true); err != nil {
 			return fmt.Errorf("%w: retain completed audit: %w", monitor.ErrTerminalJob, err)
 		}
@@ -220,11 +233,11 @@ func (e *Orchestrator) publish(ctx context.Context, p *preparedAction, result Re
 			break
 		}
 		body := fmt.Sprintf("Automated review requested by @%s:\n\n%s\n\n%s", request.Source.Author.Login, inertModelOutput(result.Answer), request.Marker())
-		_, err = e.GitHub.CreatePullRequestReview(ctx, request.Repository.Name, request.Number, body, p.Job.Source.Head)
+		_, err = e.GitHub.CreatePullRequestReview(ctx, request.Repository.Name, request.Number, body, p.job.Source.Head)
 	case command.Comment:
-		err = e.acknowledge(ctx, request, fmt.Sprintf("`%s` requested by @%s at commit `%s`:\n\n%s", request.Command.Name, request.Source.Author.Login, p.Job.Source.Head, inertModelOutput(result.Answer)))
+		err = e.acknowledge(ctx, request, fmt.Sprintf("`%s` requested by @%s at commit `%s`:\n\n%s", request.Command.Name, request.Source.Author.Login, p.job.Source.Head, inertModelOutput(result.Answer)))
 	case command.SecurityAudit:
-		err = e.acknowledge(ctx, request, fmt.Sprintf("Security audit requested by @%s at commit `%s`:\n\n%s", request.Source.Author.Login, p.Job.Source.Head, inertModelOutput(result.Answer)))
+		err = e.acknowledge(ctx, request, fmt.Sprintf("Security audit requested by @%s at commit `%s`:\n\n%s", request.Source.Author.Login, p.job.Source.Head, inertModelOutput(result.Answer)))
 	case command.Fix:
 		return e.publishFix(ctx, p, result)
 	default:
@@ -236,11 +249,26 @@ func (e *Orchestrator) publish(ctx context.Context, p *preparedAction, result Re
 	return nil
 }
 
-func (e *Orchestrator) logDiagnostics(result Result) {
-	for _, diagnostic := range result.Diagnostics {
-		// Full private messages belong in restricted action records, never journal text.
-		e.logf("action diagnostic job=%s attempt=%s executor=%s code=%s", result.Identity.JobID, result.Identity.AttemptID, result.Identity.ExecutorID, diagnostic.Code)
+func (e *Orchestrator) logResult(job Job, result Result) {
+	id := job.Identity
+	if validDiagnostics(result.Diagnostics) == nil {
+		for _, diagnostic := range result.Diagnostics {
+			// Full private messages belong in restricted action records, never journal text.
+			e.logf("action diagnostic job=%s attempt=%s executor=%s code=%s", id.JobID, id.AttemptID, id.ExecutorID, diagnostic.Code)
+		}
 	}
+	if result.matchesJob(job) && result.validateCalls(job, false) == nil {
+		for _, call := range result.Calls {
+			e.logf("action call job=%s attempt=%s executor=%s provider=%s role=%s round=%d review_phase=%s model=%q effort=%q complete=%t", id.JobID, id.AttemptID, id.ExecutorID, call.Provider, call.Role, call.Round, call.ReviewPhase, call.Model, call.Effort, call.Complete)
+		}
+	}
+}
+
+func (e *Orchestrator) retainIncompleteAudit(p *preparedAction, result Result) error {
+	if p.job.Action != command.SecurityAudit || len(result.Artifacts) == 0 || !result.matchesJob(p.job) || validateResultArtifacts(p.job, result.Artifacts, false) != nil {
+		return nil
+	}
+	return e.retainAudit(p, result, false)
 }
 
 func (e *Orchestrator) retainAudit(p *preparedAction, result Result, complete bool) error {
@@ -252,7 +280,7 @@ func (e *Orchestrator) retainAudit(p *preparedAction, result Result, complete bo
 	if !complete {
 		prefix = "incomplete-"
 	}
-	dir, err := os.MkdirTemp(root, prefix+fmt.Sprintf("%s-%d-", strings.ReplaceAll(p.Job.Identity.Repository, "/", "-"), p.Job.Identity.Number))
+	dir, err := os.MkdirTemp(root, fmt.Sprintf("%s%s-%d-", prefix, strings.ReplaceAll(p.job.Identity.Repository, "/", "-"), p.job.Identity.Number))
 	if err != nil {
 		return err
 	}
@@ -263,7 +291,7 @@ func (e *Orchestrator) retainAudit(p *preparedAction, result Result, complete bo
 	if err := workspace.Materialize(dir, files); err != nil {
 		return errors.Join(err, os.RemoveAll(dir))
 	}
-	e.logf("audit %s #%d at %s; reports: %s", p.Job.Identity.Repository, p.Job.Identity.Number, p.Job.Source.Head, dir)
+	e.logf("audit %s #%d at %s; reports: %s", p.job.Identity.Repository, p.job.Identity.Number, p.job.Source.Head, dir)
 	return nil
 }
 
@@ -326,16 +354,14 @@ func (e *Orchestrator) prepareFix(ctx context.Context, p *preparedAction) (*prep
 	if err := e.checkGitHubContext(request, "", content.BodyText); err != nil {
 		return nil, err
 	}
-	p.checkout, err = gitwork.Clone(ctx, e.WorkRoot, repo.FullName, repo.DefaultBranch, func(ctx context.Context, sha string) (github.GitTree, error) {
-		return e.GitHub.GitTree(ctx, repo.FullName, sha)
-	})
+	p.checkout, err = gitwork.Clone(ctx, e.WorkRoot, repo.FullName, repo.DefaultBranch, e.treeLookup(repo.FullName))
 	if err != nil {
 		return nil, err
 	}
 	if err := p.checkout.NewBranch(ctx, p.branch); err != nil {
 		return nil, err
 	}
-	p.Job, err = e.portableJob(ctx, p, "", content.BodyText)
+	p.job, err = e.portableJob(ctx, p, "", content.BodyText)
 	if err != nil {
 		return nil, err
 	}
@@ -360,7 +386,10 @@ func (e *Orchestrator) publishFix(ctx context.Context, p *preparedAction, result
 	if currentRepo.ID != repo.ID || currentRepo.DefaultBranch != repo.DefaultBranch || currentRepo.Private != repo.Private || currentRepo.Visibility != repo.Visibility || currentFork.ID != fork.ID || !strings.EqualFold(currentFork.FullName, fork.FullName) {
 		return errors.New("repository or fork changed during fix; refusing to push")
 	}
-	if err := p.checkout.Import(ctx, p.Job.Source.Head, result.Changes); err != nil {
+	if err := p.checkout.Import(ctx, p.job.Source.Head, result.Changes); err != nil {
+		if ctx.Err() != nil {
+			return err
+		}
 		return fmt.Errorf("%w: import action result: %w", monitor.ErrTerminalJob, err)
 	}
 	if err := p.checkout.SetPushRepository(fork.FullName); err != nil {

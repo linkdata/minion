@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -64,9 +65,12 @@ func (c *Checkout) sourceEntries(ctx context.Context, ref string, tree github.Gi
 			metadata[entry.Path] = entry
 		}
 	}
-	output, _, err := c.boundedGit(ctx, maxPathListBytes, false, "ls-tree", "-r", "-z", ref)
+	output, truncated, err := c.boundedGit(ctx, nil, maxPathListBytes, true, "ls-tree", "-r", "-z", ref)
 	if err != nil {
 		return nil, err
+	}
+	if truncated {
+		return nil, fmt.Errorf("%w: API tree differs from Git tree", ErrUnsupportedSource)
 	}
 	if len(output) == 0 {
 		if len(metadata) != 0 {
@@ -130,31 +134,21 @@ func (c *Checkout) sourceFiles(ctx context.Context, entries []sourceEntry) (file
 		size += entry.size
 		input.WriteString(entry.sha + "\n")
 	}
-	if size > workspace.MaxBytes {
-		return nil, nil, fmt.Errorf("%w: combined source exceeds byte limit", ErrCheckoutTooLarge)
-	}
 	if len(omitted) > workspace.MaxFiles {
 		return nil, nil, ErrCheckoutTooLarge
 	}
 	if len(requested) == 0 {
 		return nil, omitted, nil
 	}
-	readCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	// Content bounds were checked against API metadata before requesting blobs.
-	// Leave room for each bounded cat-file header and its content terminator.
-	output := bounded.Buffer{Limit: int(size) + (maxBatchHeaderBytes+2)*len(requested), Cancel: cancel}
-	err = runGitInputTo(readCtx, c.path, strings.NewReader(input.String()), &output, "cat-file", "--batch")
-	if ctx.Err() != nil {
-		return nil, nil, ctx.Err()
-	}
-	if output.Exceeded {
-		return nil, nil, fmt.Errorf("%w: Git blobs exceed API-declared sizes", ErrUnsupportedSource)
-	}
+	// Content bounds were checked before requesting blobs; include batch headers.
+	output, truncated, err := c.boundedGit(ctx, strings.NewReader(input.String()), int(size)+(maxBatchHeaderBytes+2)*len(requested), true, "cat-file", "--batch")
 	if err != nil {
 		return nil, nil, err
 	}
-	files, err = readBatchBlobs(output.Bytes(), requested)
+	if truncated {
+		return nil, nil, fmt.Errorf("%w: Git blobs exceed API-declared sizes", ErrUnsupportedSource)
+	}
+	files, err = readBatchBlobs(output, requested)
 	return files, omitted, err
 }
 
@@ -205,7 +199,7 @@ func (c *Checkout) Snapshot(ctx context.Context, history, pull bool) (s workspac
 		if baseEntries, err = c.sourceTree(ctx, s.MergeBase); err != nil {
 			return s, err
 		}
-		paths, _, err := c.boundedGit(ctx, maxPathListBytes, false, "diff", "--name-only", "-z", "--no-ext-diff", "--no-textconv", "--no-renames", s.MergeBase, s.Head, "--")
+		paths, _, err := c.boundedGit(ctx, nil, maxPathListBytes, false, "diff", "--name-only", "-z", "--no-ext-diff", "--no-textconv", "--no-renames", s.MergeBase, s.Head, "--")
 		if err != nil {
 			return s, err
 		}
@@ -243,7 +237,7 @@ func (c *Checkout) Snapshot(ctx context.Context, history, pull bool) (s workspac
 		return s, fmt.Errorf("%w: combined source exceeds byte limit", ErrCheckoutTooLarge)
 	}
 	if pull {
-		if s.Diff, s.DiffIncomplete, err = c.boundedGit(ctx, workspace.MaxContextBytes, true, "diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--no-color", s.MergeBase, s.Head, "--"); err != nil {
+		if s.Diff, s.DiffIncomplete, err = c.boundedGit(ctx, nil, workspace.MaxContextBytes, true, "diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--no-color", s.MergeBase, s.Head, "--"); err != nil {
 			return s, err
 		}
 		if s.DiffIncomplete {
@@ -265,7 +259,7 @@ func (c *Checkout) Snapshot(ctx context.Context, history, pull bool) (s workspac
 			return s, errors.New("invalid history commit count")
 		}
 		var truncated bool
-		s.History, truncated, err = c.boundedGit(ctx, workspace.MaxContextBytes, true, "log", "--no-mailmap", "--max-count=100", "--format=fuller", "--date=iso-strict", "--no-decorate", "--no-show-signature", s.Head, "--")
+		s.History, truncated, err = c.boundedGit(ctx, nil, workspace.MaxContextBytes, true, "log", "--no-notes", "--no-mailmap", "--max-count=100", "--format=fuller", "--date=iso-strict", "--no-decorate", "--no-show-signature", s.Head, "--")
 		if err != nil {
 			return s, err
 		}
@@ -325,11 +319,11 @@ func (c *Checkout) disableAttributes() error {
 	return os.WriteFile(filepath.Join(c.path, ".git", "info", "attributes"), []byte(GitAttributes), 0600)
 }
 
-func (c *Checkout) boundedGit(ctx context.Context, limit int, truncate bool, args ...string) ([]byte, bool, error) {
+func (c *Checkout) boundedGit(ctx context.Context, stdin io.Reader, limit int, truncate bool, args ...string) ([]byte, bool, error) {
 	readCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	output := bounded.Buffer{Limit: limit, Cancel: cancel}
-	err := runGitInputTo(readCtx, c.path, nil, &output, args...)
+	err := runGitInputTo(readCtx, c.path, stdin, &output, args...)
 	if ctx.Err() != nil {
 		return nil, false, ctx.Err()
 	}

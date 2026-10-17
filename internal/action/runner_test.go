@@ -351,11 +351,16 @@ func TestRunnerClearsHostSkillsAndRejectsMissingCLI(t *testing.T) {
 
 func TestPortableAuditMetadataUsesSourceIdentity(t *testing.T) {
 	job := portableJob(command.SecurityAudit)
+	job.Main.Skills = []string{testAuditSkillURL}
 	root := t.TempDir()
 	for _, name := range auditArtifacts {
 		data := []byte("content")
 		if name == "run-metadata.json" {
-			data = []byte(fmt.Sprintf(`{"run_id":"test-run","repo":"owner/repo","target":"/worker/local/source","source_ref":%q,"profile":"standard","scope_paths":["."],"budget":null,"selected_companion_files":["/installed/security-audit/WEB-PROTOCOL-AND-AUTH.md"],"prior_run_paths":[],"shared_file_owners":%s,"execution_policy":"sandboxed-source-and-local-only","run_status":"complete"}`, job.Source.Head, auditTestOwners))
+			owners := strings.TrimSuffix(auditTestOwners, "}") + `,"/worker/local/extra-owner":"/worker/local/child"}`
+			data = []byte(fmt.Sprintf(`{"run_id":"test-run","repo":"owner/repo","target":"/worker/local/source","source_ref":%q,"profile":"standard","scope_paths":["."],"budget":null,"selected_companion_files":["/installed/security-audit/WEB-PROTOCOL-AND-AUTH.md"],"prior_run_paths":[],"shared_file_owners":%s,"execution_policy":"sandboxed-source-and-local-only","run_status":"complete","output_dir":"/worker/local/reports","extra":{"run_dir":"/worker/local/runtime"}}`, job.Source.Head, owners))
+			if _, err := validateAuditMetadata(data, []byte("content"), job.Identity.Repository, "/worker/local/source", job.Source.Head); err != nil {
+				t.Fatalf("invalid raw metadata control: %v", err)
+			}
 		}
 		if err := os.WriteFile(filepath.Join(root, name), data, 0600); err != nil {
 			t.Fatal(err)
@@ -365,6 +370,7 @@ func TestPortableAuditMetadataUsesSourceIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	raw := append([]workspace.File(nil), files...)
 	files, err = normalizeAuditArtifacts(files, job, "/installed/security-audit/SKILL.md")
 	if err != nil {
 		t.Fatal(err)
@@ -372,12 +378,25 @@ func TestPortableAuditMetadataUsesSourceIdentity(t *testing.T) {
 	if err := validateResultArtifacts(job, files, true); err != nil {
 		t.Fatal(err)
 	}
-	for _, file := range files {
+	for i, file := range files {
+		if file.Path != "run-metadata.json" && string(file.Data) != string(raw[i].Data) {
+			t.Fatalf("normalization changed approved report %q", file.Path)
+		}
 		if file.Path == "run-metadata.json" && (strings.Contains(string(file.Data), "/worker/") || !strings.Contains(string(file.Data), sourceIdentity(job))) {
 			t.Fatalf("metadata is not portable: %s", file.Data)
 		}
 		if file.Path == "run-metadata.json" && (strings.Contains(string(file.Data), "/installed/") || !strings.Contains(string(file.Data), "WEB-PROTOCOL-AND-AUTH.md")) {
 			t.Fatalf("companion path is not portable: %s", file.Data)
+		}
+		if file.Path == "run-metadata.json" {
+			var metadata struct {
+				RunID       string            `json:"run_id"`
+				SkillSource string            `json:"skill_source"`
+				Owners      map[string]string `json:"shared_file_owners"`
+			}
+			if err := json.Unmarshal(file.Data, &metadata); err != nil || metadata.RunID != "test-run" || metadata.SkillSource != testAuditSkillURL || len(metadata.Owners) != len(auditArtifacts) || strings.Contains(string(file.Data), `"output_dir"`) || strings.Contains(string(file.Data), `"extra"`) || !strings.Contains(string(raw[i].Data), `"output_dir"`) {
+				t.Fatalf("metadata projection changed supported evidence or retained extensions: %+v, %v", metadata, err)
+			}
 		}
 	}
 	files[0].Data = []byte(`{"repo":"owner/repo","target":"other","source_ref":"` + job.Source.Head + `"}`)
@@ -387,16 +406,22 @@ func TestPortableAuditMetadataUsesSourceIdentity(t *testing.T) {
 }
 
 func TestAuditPromptSelectsDomainCompanionsOnly(t *testing.T) {
-	runner := Runner{
-		Codex: config.CodexConfig{Skills: []string{"/installed/security-audit/SKILL.md"}},
-	}
-	prompt, err := runner.actionPrompt(context.Background(), portableJob(command.SecurityAudit), "/source", "/context", "/reports")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, want := range []string{"selected security-audit domain companion files", `"When to use" conditions apply`, "Exclude its main SKILL.md and independently configured skills", "Use [] when no domain companion applies"} {
-		if !strings.Contains(prompt, want) {
-			t.Fatalf("audit prompt lacks %q: %s", want, prompt)
+	for _, critic := range []bool{false, true} {
+		job := portableJob(command.SecurityAudit)
+		if critic {
+			job.Critic = &RoleSettings{Provider: "claude"}
+		}
+		prompt, err := actionPrompt(context.Background(), job, "/source", "/context", "/reports", "/installed/security-audit/SKILL.md")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, want := range []string{"selected security-audit domain companion files", `"When to use" conditions apply`, "Exclude its main SKILL.md and independently configured skills", "Use [] when no domain companion applies", "installed validation and publication"} {
+			if !strings.Contains(prompt, want) {
+				t.Fatalf("audit prompt lacks %q: %s", want, prompt)
+			}
+		}
+		if strings.Contains(prompt, "subsequent critic reviews") != critic {
+			t.Fatalf("critic time requested without matching critic setting: %t", critic)
 		}
 	}
 }
@@ -439,7 +464,7 @@ func TestRunnerReturnsPartialAuditArtifactsOnFailure(t *testing.T) {
 
 func TestCommentPromptUsesPortablePaths(t *testing.T) {
 	job := portableJob(command.Comment)
-	prompt, err := (&Runner{}).actionPrompt(context.Background(), job, "/host/private/source", "/context", "")
+	prompt, err := actionPrompt(context.Background(), job, "/host/private/source", "/context", "", "")
 	if err != nil || strings.Contains(prompt, "/host/private/source") || !strings.Contains(prompt, "Use repository-relative paths and source identity") {
 		t.Fatalf("comment prompt contains host path or lacks path guidance: %s, %v", prompt, err)
 	}

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/linkdata/minion/internal/aicli"
+	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/processgroup"
 )
@@ -99,7 +100,7 @@ func listModels(ctx context.Context, settings config.CodexConfig) (models []mode
 	cmd.Env = childEnvironment(os.Environ(), dir, dir, settings.APIKey != "")
 	cmd.WaitDelay = 2 * time.Second
 	processgroup.Configure(cmd)
-	var diagnostics tailBuffer
+	diagnostics := bounded.Tail{Limit: maxDiagnosticBytes}
 	cmd.Stderr = &diagnostics
 	stdin, err := cmd.StdinPipe()
 	if err != nil {

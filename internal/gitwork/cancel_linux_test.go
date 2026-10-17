@@ -72,7 +72,7 @@ func TestGitOutputLimitStopsChildHoldingPipes(t *testing.T) {
 	pidFile := filepath.Join(dir, "child.pid")
 	alias := "!printf '%s' $$ > " + shellQuote(pidFile) + "; printf overflow-output; exec sleep 6"
 	started := time.Now()
-	_, _, err := (&Checkout{path: dir}).boundedGit(context.Background(), 4, false, "-c", "alias.probe="+alias, "probe")
+	_, _, err := (&Checkout{path: dir}).boundedGit(context.Background(), nil, 4, false, "-c", "alias.probe="+alias, "probe")
 	elapsed := time.Since(started)
 	assertGitChildStopped(t, pidFile)
 	if elapsed > 3*time.Second || !errors.Is(err, ErrCheckoutTooLarge) || errors.Is(err, context.Canceled) {

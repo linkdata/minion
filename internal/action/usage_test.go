@@ -231,6 +231,9 @@ func TestUsagePersistenceFailureStopsModelsOrPublication(t *testing.T) {
 					if err == nil || !strings.Contains(err.Error(), "save action usage") {
 						t.Fatalf("storage failure not returned: %v", err)
 					}
+					if errors.Is(err, monitor.ErrTerminalJob) != (stage == "after call") {
+						t.Fatalf("storage failure classification at %s: %v", stage, err)
+					}
 					if stage == "before call" && calls != 0 {
 						t.Fatal("model ran without durable checkpoint")
 					}
@@ -250,6 +253,29 @@ func TestUsagePersistenceFailureStopsModelsOrPublication(t *testing.T) {
 				})
 			}
 		})
+	}
+}
+
+func TestSuccessfulModelStopsAfterUsageSaveFailure(t *testing.T) {
+	root := t.TempDir()
+	blocked := filepath.Join(root, "blocked")
+	if err := os.WriteFile(blocked, []byte("not a directory"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	store := &usage.Store{Dir: filepath.Join(root, "usage")}
+	calls := 0
+	e := Orchestrator{Usage: store, Runner: Runner{runModel: func(context.Context, modelRun) (aicli.Result, error) {
+		calls++
+		store.Dir = blocked
+		return aicli.Result{Answer: "completed paid work", Tokens: usage.Tokens{Input: 10, Output: 2}, UsageComplete: true}, nil
+	}}}
+	tracked, _, err := e.trackUsage(usageJob())
+	if err != nil {
+		t.Fatal(err)
+	}
+	answer, err := tracked.Runner.runAI(context.Background(), Job{Main: RoleSettings{Provider: "codex"}}, "dir", "prompt", false, "")
+	if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "save action usage") || calls != 1 || answer != "" {
+		t.Fatalf("paid work can retry or publish after failed accounting: calls=%d answer=%q err=%v", calls, answer, err)
 	}
 }
 

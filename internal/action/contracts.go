@@ -3,6 +3,7 @@ package action
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -136,12 +137,7 @@ func identitySegment(value string) bool {
 	if value == "" || value == "." || value == ".." || len(value) > 100 {
 		return false
 	}
-	for _, c := range value {
-		if !strings.ContainsRune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-", c) {
-			return false
-		}
-	}
-	return true
+	return strings.Trim(value, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-") == ""
 }
 
 func boundedText(value string, limit int) bool {
@@ -195,7 +191,7 @@ func (j Job) Validate() error {
 	default:
 		return errors.New("unsupported action")
 	}
-	if !boundedText(j.Title, maxActionTitleBytes) || !boundedText(j.Description, workspace.MaxBytes) || !boundedText(j.Notes, workspace.MaxBytes) || len(j.Title)+len(j.Description)+len(j.Notes) > workspace.MaxBytes {
+	if len(j.Title) > maxActionTitleBytes || len(j.Description) > workspace.MaxBytes || len(j.Notes) > workspace.MaxBytes || len(j.Title)+len(j.Description)+len(j.Notes) > workspace.MaxBytes || !utf8.ValidString(j.Title) || !utf8.ValidString(j.Description) || !utf8.ValidString(j.Notes) {
 		return errors.New("action text is invalid or exceeds limits")
 	}
 	if err := j.Main.validate(); err != nil {
@@ -242,7 +238,7 @@ func (r Result) Validate(j Job) error {
 
 // validate requires an already validated Job; public imports use Validate.
 func (r Result) validate(j Job, complete bool) error {
-	if r.Version != ProtocolVersion || r.Identity != j.Identity || r.SourceRef != j.Source.Head {
+	if !r.matchesJob(j) {
 		return errors.New("action result version, identity or source differs from job")
 	}
 	if !boundedText(r.Answer, maxOutputBytes) || (complete && (j.Action != command.Fix || j.Critic != nil) && strings.TrimSpace(r.Answer) == "") {
@@ -267,6 +263,17 @@ func (r Result) validate(j Job, complete bool) error {
 			}
 		}
 	}
+	if err := r.validateCalls(j, complete); err != nil {
+		return err
+	}
+	return validDiagnostics(r.Diagnostics)
+}
+
+func (r Result) matchesJob(j Job) bool {
+	return r.Version == ProtocolVersion && r.Identity == j.Identity && r.SourceRef == j.Source.Head
+}
+
+func (r Result) validateCalls(j Job, complete bool) error {
 	rounds := j.rounds()
 	for i, call := range r.Calls {
 		role := j.Main
@@ -281,11 +288,7 @@ func (r Result) validate(j Job, complete bool) error {
 			if call.Role == roleMain {
 				validOrder = previous.Role == roleCritic && call.Round == previous.Round+1 && call.ReviewPhase == ""
 			} else if previous.Role == roleMain {
-				phase := reviewVerification
-				if call.Round == 1 {
-					phase = reviewFull
-				}
-				validOrder = call.Round == previous.Round && call.ReviewPhase == phase
+				validOrder = call.Round == previous.Round && call.ReviewPhase == reviewPhases(call.Round)[0]
 			} else {
 				validOrder = previous.ReviewPhase == reviewVerification && call.Round == previous.Round && call.ReviewPhase == reviewFull
 			}
@@ -306,7 +309,7 @@ func (r Result) validate(j Job, complete bool) error {
 	if complete && j.Critic == nil && len(r.Calls) != 1 {
 		return errors.New("action result requires one main call")
 	}
-	return validDiagnostics(r.Diagnostics)
+	return nil
 }
 
 func validDiagnostics(diagnostics []Diagnostic) error {
@@ -353,12 +356,8 @@ func validateResultArtifacts(j Job, files []workspace.File, complete bool) error
 	}
 	seen := make(map[string][]byte, len(files))
 	for _, file := range files {
-		allowed := false
-		for _, name := range auditArtifacts {
-			allowed = allowed || file.Path == name
-		}
 		_, duplicate := seen[file.Path]
-		if !allowed || duplicate || file.Mode != workspace.Regular || len(file.Data) > maxAuditArtifactBytes {
+		if !slices.Contains(auditArtifacts, file.Path) || duplicate || file.Mode != workspace.Regular || len(file.Data) > maxAuditArtifactBytes {
 			return errors.New("invalid action report artifact")
 		}
 		if complete && len(file.Data) == 0 && !auditArtifactMayBeEmpty(file.Path) {

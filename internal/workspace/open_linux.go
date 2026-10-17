@@ -10,14 +10,6 @@ import (
 	"syscall"
 )
 
-func openRegular(name string) (*os.File, error) {
-	return openPath(name, false)
-}
-
-func openDirectory(name string) (*os.File, error) {
-	return openPath(name, true)
-}
-
 func singleLink(info os.FileInfo) bool {
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	return ok && stat.Nlink == 1

@@ -137,7 +137,7 @@ func TestExecuteSourceFailuresAndInvalidIncompleteResultsAreTerminal(t *testing.
 }
 
 func TestPublishFixRejectsNonemptyReviewedChangesDroppedByGit(t *testing.T) {
-	for _, stage := range []string{"import", "commit", "fork changed"} {
+	for _, stage := range []string{"import", "commit", "fork changed", "canceled import"} {
 		t.Run(stage, func(t *testing.T) {
 			base, _, _ := gitFixtureRemote(t)
 			git, err := exec.LookPath("git")
@@ -146,7 +146,7 @@ func TestPublishFixRejectsNonemptyReviewedChangesDroppedByGit(t *testing.T) {
 			}
 			bin := t.TempDir()
 			seen := filepath.Join(bin, "staged")
-			script := fmt.Sprintf("#!/bin/sh\ncase \" $* \" in *\" diff --cached --name-only \"*)\n if test %q = import || test -f %q; then exit 0; fi\n touch %q\n ;;\nesac\nexec %q \"$@\"\n", stage, seen, seen, git)
+			script := fmt.Sprintf("#!/bin/sh\ncase \" $* \" in *\" add --all \"*)\n if test %q = 'canceled import'; then touch %q; sleep 30; exit 1; fi\n ;;\n *\" diff --cached --name-only \"*)\n if test %q = import || test -f %q; then exit 0; fi\n touch %q\n ;;\nesac\nexec %q \"$@\"\n", stage, seen, stage, seen, seen, git)
 			if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0700); err != nil {
 				t.Fatal(err)
 			}
@@ -197,10 +197,35 @@ func TestPublishFixRejectsNonemptyReviewedChangesDroppedByGit(t *testing.T) {
 			}
 			job := portableJob(command.Fix)
 			job.Source.Head = base
-			prepared := &preparedAction{Job: job, checkout: checkout, repository: repo, fork: fork, branch: branch, request: monitor.Job{ID: strings.Repeat("a", 64), Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2}, Command: command.Command{Name: "fix", Action: command.Fix}}}
+			prepared := &preparedAction{job: job, checkout: checkout, repository: repo, fork: fork, branch: branch, request: monitor.Job{ID: strings.Repeat("a", 64), Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2}, Command: command.Command{Name: "fix", Action: command.Fix}}}
 			orchestrator := Orchestrator{GitHub: client, BotLogin: "bot", WorkRoot: root}
 			result := Result{Changes: []workspace.Change{{Path: "reviewed.txt", Mode: workspace.Regular, Data: []byte("reviewed change")}}}
-			err = orchestrator.publishFix(context.Background(), prepared, result)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if stage == "canceled import" {
+				go func() {
+					ticker := time.NewTicker(5 * time.Millisecond)
+					defer ticker.Stop()
+					for {
+						select {
+						case <-ctx.Done():
+							return
+						case <-ticker.C:
+							if _, err := os.Stat(seen); err == nil {
+								cancel()
+								return
+							}
+						}
+					}
+				}()
+			}
+			err = orchestrator.publishFix(ctx, prepared, result)
+			if stage == "canceled import" {
+				if !errors.Is(err, context.Canceled) || errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, monitor.ErrPostModelPublication) || writes != 0 {
+					t.Fatalf("interrupted import became terminal: writes=%d err=%v", writes, err)
+				}
+				return
+			}
 			if stage == "fork changed" {
 				if err == nil || !strings.Contains(err.Error(), "repository or fork changed") || !errors.Is(err, monitor.ErrPostModelPublication) || writes != 0 {
 					t.Fatalf("changed fork reached publication: writes=%d err=%v", writes, err)
@@ -255,7 +280,7 @@ func TestCompletedAuditRetentionFailureIsTerminal(t *testing.T) {
 		t.Fatal(err)
 	}
 	orchestrator := Orchestrator{GitHub: client, WorkRoot: blocked, Runner: Runner{WorkRoot: t.TempDir()}}
-	prepared := &preparedAction{Job: job, checkout: checkout, request: monitor.Job{Command: command.Command{Action: command.SecurityAudit}}}
+	prepared := &preparedAction{job: job, checkout: checkout, request: monitor.Job{Command: command.Command{Action: command.SecurityAudit}}}
 	err = orchestrator.publish(context.Background(), prepared, result)
 	if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "retain completed audit") || writes != 0 {
 		t.Fatalf("audit retention failure retried work or published: writes=%d err=%v", writes, err)
@@ -291,7 +316,7 @@ func TestContextDescribesOmittedRevisionScope(t *testing.T) {
 			if source.OmittedScope != want {
 				t.Fatalf("omitted scope=%q want%q", source.OmittedScope, want)
 			}
-			prompt, err := (&Runner{}).actionPrompt(context.Background(), job, "/source", root, "")
+			prompt, err := actionPrompt(context.Background(), job, "/source", root, "", "")
 			if err != nil || !strings.Contains(prompt, "the omitted list covers both head and base revisions") {
 				t.Fatalf("omitted revision context missing: %s,%v", prompt, err)
 			}

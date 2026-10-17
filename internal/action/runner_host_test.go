@@ -77,23 +77,50 @@ func TestRunnerMaterializationFailureIsTerminalBeforeModels(t *testing.T) {
 }
 
 func TestRunnerEnforcesSuppliedRuntimeBudget(t *testing.T) {
-	parent, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	job := portableJob(command.Comment)
-	job.RuntimeBudget = 100 * time.Millisecond
-	calls := 0
-	runner := Runner{WorkRoot: t.TempDir(), runModel: func(ctx context.Context, _ modelRun) (aicli.Result, error) {
-		calls++
-		deadline, ok := ctx.Deadline()
-		if !ok || time.Until(deadline) > job.RuntimeBudget {
-			t.Fatalf("model context did not apply the supplied %s budget: deadline=%v present=%t", job.RuntimeBudget, deadline, ok)
-		}
-		<-ctx.Done()
-		return aicli.Result{}, ctx.Err()
-	}}
-	result, err := runner.Run(parent, job)
-	if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, monitor.ErrTerminalJob) || parent.Err() != nil || calls != 1 || len(result.Calls) != 1 || result.Answer != "" {
-		t.Fatalf("runtime budget: result=%+v calls=%d parent=%v error=%v", result, calls, parent.Err(), err)
+	for _, action := range []command.Action{command.Comment, command.SecurityAudit} {
+		t.Run(string(action), func(t *testing.T) {
+			parent, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			job := portableJob(action)
+			job.RuntimeBudget = 100 * time.Millisecond
+			if action == command.SecurityAudit {
+				installActionTestSkills(t, testAuditSkillURL)
+				job.Main.Skills = []string{testAuditSkillURL}
+			}
+			calls := 0
+			var source, reports string
+			runner := Runner{WorkRoot: t.TempDir(), runModel: func(ctx context.Context, request modelRun) (aicli.Result, error) {
+				calls++
+				deadline, ok := ctx.Deadline()
+				if !ok || time.Until(deadline) > job.RuntimeBudget {
+					t.Fatalf("model context did not apply the supplied %s budget: deadline=%v present=%t", job.RuntimeBudget, deadline, ok)
+				}
+				source, reports = request.dir, request.outputDir
+				if reports != "" {
+					if err := os.WriteFile(filepath.Join(reports, "REPORT.md"), []byte("partial audit"), 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				<-ctx.Done()
+				return aicli.Result{}, ctx.Err()
+			}}
+			result, err := runner.Run(parent, job)
+			if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, monitor.ErrTerminalJob) || parent.Err() != nil || calls != 1 || len(result.Calls) != 1 || result.Answer != "" {
+				t.Fatalf("runtime budget: result=%+v calls=%d parent=%v error=%v", result, calls, parent.Err(), err)
+			}
+			if action == command.SecurityAudit {
+				if len(result.Diagnostics) != 1 || result.Diagnostics[0].Code != "audit_incomplete" || len(result.Artifacts) != 1 || result.Artifacts[0].Path != "REPORT.md" || string(result.Artifacts[0].Data) != "partial audit" {
+					t.Fatalf("expired audit lost final diagnostic or pre-cleanup artifact: %+v", result)
+				}
+			}
+			for _, dir := range []string{source, reports} {
+				if dir != "" {
+					if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
+						t.Fatalf("execution workspace retained after partial collection: %q, %v", dir, err)
+					}
+				}
+			}
+		})
 	}
 }
 

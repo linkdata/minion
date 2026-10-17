@@ -125,8 +125,14 @@ func cloneFromURL(ctx context.Context, workRoot, url, defaultBranch string, look
 }
 
 func clonePullRequestFromURL(ctx context.Context, workRoot, url string, number int, baseRef, expectedHeadSHA string, lookupTree func(context.Context, string) (github.GitTree, error)) (*Checkout, error) {
-	if err := validatePullRequest(number, baseRef, expectedHeadSHA); err != nil {
-		return nil, err
+	if number <= 0 {
+		return nil, fmt.Errorf("invalid pull request number %d", number)
+	}
+	if err := validateBranch(baseRef); err != nil {
+		return nil, fmt.Errorf("pull request base: %w", err)
+	}
+	if !workspace.ValidSHA(expectedHeadSHA) {
+		return nil, fmt.Errorf("invalid expected pull request SHA %q", expectedHeadSHA)
 	}
 	c, err := cloneRepository(ctx, workRoot, url, baseRef, lookupTree)
 	if err != nil {
@@ -168,7 +174,7 @@ func cloneRepository(ctx context.Context, workRoot, url, defaultBranch string, l
 		}
 	}()
 
-	if _, err := runGit(ctx, workRoot, "clone", "--filter=blob:none", "--single-branch", "--no-checkout", "--branch", defaultBranch, "--", url, path); err != nil {
+	if _, err := runGit(ctx, workRoot, "clone", "--no-tags", "--filter=blob:none", "--single-branch", "--no-checkout", "--branch", defaultBranch, "--", url, path); err != nil {
 		return nil, err
 	}
 	c := &Checkout{path: path, url: url, lookupTree: lookupTree}
@@ -238,19 +244,6 @@ func (c *Checkout) checkoutPullRequest(ctx context.Context, number int, baseRef,
 	return c.checkoutSource(ctx, head)
 }
 
-func validatePullRequest(number int, baseRef, expectedHeadSHA string) error {
-	if number <= 0 {
-		return fmt.Errorf("invalid pull request number %d", number)
-	}
-	if err := validateBranch(baseRef); err != nil {
-		return fmt.Errorf("pull request base: %w", err)
-	}
-	if !workspace.ValidSHA(expectedHeadSHA) {
-		return fmt.Errorf("invalid expected pull request SHA %q", expectedHeadSHA)
-	}
-	return nil
-}
-
 func (c *Checkout) checkoutSource(ctx context.Context, head string) error {
 	if _, err := c.sourceTree(ctx, head); err != nil {
 		return err
@@ -278,7 +271,7 @@ func checkSourceTree(tree github.GitTree, expectedSHA string) error {
 	var files int
 	var total int64
 	for _, entry := range tree.Tree {
-		if !workspace.ValidSourcePath(entry.Path) {
+		if !workspace.ValidCheckoutPath(entry.Path) {
 			return fmt.Errorf("%w: unsafe source path %q", ErrUnsupportedSource, entry.Path)
 		}
 		switch entry.Type {
@@ -360,11 +353,11 @@ func (c *Checkout) CommitAndPush(ctx context.Context, branch, botLogin, message 
 	if err := c.assertHead(ctx); err != nil {
 		return err
 	}
-	currentBranch, err := runGit(ctx, c.path, "symbolic-ref", "--quiet", "--short", "HEAD")
+	currentBranch, err := runGit(ctx, c.path, "symbolic-ref", "--quiet", "HEAD")
 	if err != nil {
 		return err
 	}
-	if currentBranch != branch {
+	if currentBranch != "refs/heads/"+branch {
 		return fmt.Errorf("current branch %q does not match push branch %q", currentBranch, branch)
 	}
 
@@ -397,7 +390,7 @@ func (c *Checkout) CommitAndPush(ctx context.Context, branch, botLogin, message 
 func (c *Checkout) stagedPaths(ctx context.Context) ([]string, error) {
 	const limit = (workspace.MaxChanges + 1) * (workspace.MaxPathBytes + 128)
 	args := []string{"diff", "--cached", "--name-only", "-z", "--no-renames", "--no-ext-diff"}
-	data, truncated, err := c.boundedGit(ctx, limit, true, args...)
+	data, truncated, err := c.boundedGit(ctx, nil, limit, true, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -419,7 +412,7 @@ func (c *Checkout) stagedPaths(ctx context.Context) ([]string, error) {
 }
 
 func (c *Checkout) checkPatchSize(ctx context.Context) error {
-	_, truncated, err := c.boundedGit(ctx, MaxPatchBytes, true, "diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv", "--no-renames", "--no-color", "--submodule=short")
+	_, truncated, err := c.boundedGit(ctx, nil, MaxPatchBytes, true, "diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv", "--no-renames", "--no-color", "--submodule=short")
 	if truncated {
 		return ErrDiffTooLarge
 	}
@@ -547,19 +540,7 @@ func cleanGitEnvironment() []string {
 		}
 		if key == "PATH" {
 			hasPath = true
-			// Git runs its credential helper through a shell in the checkout.
-			// Relative or empty entries could resolve untrusted repository commands.
-			var absolute []string
-			for _, dir := range filepath.SplitList(value) {
-				if filepath.IsAbs(dir) {
-					absolute = append(absolute, dir)
-				}
-			}
-			if len(absolute) == 0 {
-				entry = "PATH=/usr/local/bin:/usr/bin:/bin"
-			} else {
-				entry = "PATH=" + strings.Join(absolute, string(os.PathListSeparator))
-			}
+			entry = "PATH=" + SafePath(value)
 		}
 		env = append(env, entry)
 	}
@@ -571,8 +552,24 @@ func cleanGitEnvironment() []string {
 		"GIT_ASKPASS=/bin/false",
 		"GIT_CONFIG_NOSYSTEM=1",
 		"GIT_CONFIG_GLOBAL=/dev/null",
+		"GIT_ATTR_NOSYSTEM=1",
+		"GIT_NO_REPLACE_OBJECTS=1",
 		"GCM_INTERACTIVE=never",
 		"GH_PROMPT_DISABLED=1",
 		"LC_ALL=C",
 	)
+}
+
+// SafePath excludes checkout-relative command lookup, including credential helpers.
+func SafePath(value string) string {
+	var absolute []string
+	for _, dir := range filepath.SplitList(value) {
+		if filepath.IsAbs(dir) {
+			absolute = append(absolute, dir)
+		}
+	}
+	if len(absolute) == 0 {
+		return "/usr/local/bin:/usr/bin:/bin"
+	}
+	return strings.Join(absolute, string(os.PathListSeparator))
 }

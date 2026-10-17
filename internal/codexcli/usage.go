@@ -2,6 +2,7 @@ package codexcli
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -82,7 +83,7 @@ func collectUsage(ctx context.Context, home, rootID string, started time.Time, f
 			complete = false
 			return nil
 		}
-		scanner := rolloutScanner(io.LimitReader(f, maxUsageHeaderBytes+1), nil)
+		scanner := rolloutScanner(ctx, io.LimitReader(f, maxUsageHeaderBytes+1), nil)
 		var event rolloutEvent
 		var meta rolloutMeta
 		ok := scanner.Scan() && len(scanner.Bytes()) <= maxUsageHeaderBytes && json.Unmarshal(scanner.Bytes(), &event) == nil && event.Type == "session_meta" && json.Unmarshal(event.Payload, &meta) == nil && meta.ID != ""
@@ -235,10 +236,26 @@ func readUsageDir(ctx context.Context, path string, visit func(string, fs.DirEnt
 	}
 }
 
-func rolloutScanner(r io.Reader, complete *bool) *bufio.Scanner {
+func rolloutScanner(ctx context.Context, r io.Reader, complete *bool) *bufio.Scanner {
 	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 64<<10), maxEventBytes)
+	scanner.Buffer(make([]byte, 64<<10), maxEventBytes+2)
+	dropping := false
 	scanner.Split(func(data []byte, atEOF bool) (int, []byte, error) {
+		if err := ctx.Err(); err != nil {
+			return 0, nil, err
+		}
+		newline := bytes.IndexByte(data, '\n')
+		if dropping || newline > maxEventBytes || (newline < 0 && len(data) > maxEventBytes) {
+			if complete != nil {
+				*complete = false
+			}
+			if newline >= 0 {
+				dropping = false
+				return newline + 1, nil, nil
+			}
+			dropping = true
+			return len(data), nil, nil
+		}
 		if complete != nil && atEOF && len(data) != 0 && data[len(data)-1] != '\n' {
 			*complete = false
 		}
@@ -277,7 +294,7 @@ func readRolloutUsage(ctx context.Context, meta rolloutMeta, rootID string, budg
 	}
 	reader := &io.LimitedReader{R: f, N: limit + 1}
 	complete := true
-	scanner := rolloutScanner(reader, &complete)
+	scanner := rolloutScanner(ctx, reader, &complete)
 	var total, latest, inherited usage.Tokens
 	seenRecord, seenSnapshot := false, false
 	responses := map[string]usage.Tokens{}

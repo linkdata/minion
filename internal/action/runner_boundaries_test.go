@@ -23,7 +23,7 @@ import (
 func TestOversizedNormalizedMetadataPreservesOtherPartialArtifacts(t *testing.T) {
 	job := portableJob(command.SecurityAudit)
 	job.Main.Skills = []string{testAuditSkillURL}
-	metadata := []byte(fmt.Sprintf(`{"run_id":"expansion-test","repo":%q,"target":"/worker/source","source_ref":%q,"profile":"standard","scope_paths":["."],"budget":null,"selected_companion_files":[],"prior_run_paths":[],"shared_file_owners":%s,"execution_policy":"sandboxed-source-and-local-only","run_status":"complete","payload":"%s"}`, job.Identity.Repository, job.Source.Head, auditTestOwners, strings.Repeat("<", maxAuditArtifactBytes/5)))
+	metadata := []byte(fmt.Sprintf(`{"run_id":"%s","repo":%q,"target":"/worker/source","source_ref":%q,"profile":"standard","scope_paths":["."],"budget":null,"selected_companion_files":[],"prior_run_paths":[],"shared_file_owners":%s,"execution_policy":"sandboxed-source-and-local-only","run_status":"complete"}`, strings.Repeat("<", maxAuditArtifactBytes/5), job.Identity.Repository, job.Source.Head, auditTestOwners))
 	if _, err := validateAuditMetadata(metadata, []byte("report content"), job.Identity.Repository, "/worker/source", job.Source.Head); err != nil {
 		t.Fatalf("invalid complete metadata fixture: %v", err)
 	}
@@ -181,7 +181,7 @@ func TestRunnerMissingConfiguredReadGrantIsRetryableBeforeModels(t *testing.T) {
 	}
 }
 
-func TestRunnerNULProposalFailsBeforeCritic(t *testing.T) {
+func TestRunnerReviewsAndPublishesNormalizedAnswer(t *testing.T) {
 	job := portableJob(command.Comment)
 	job.Critic = &RoleSettings{Provider: "claude"}
 	mainCalls, criticCalls := 0, 0
@@ -191,11 +191,14 @@ func TestRunnerNULProposalFailsBeforeCritic(t *testing.T) {
 			return aicli.Result{Answer: proposalJSON("answer\x00hidden", "")}, nil
 		}
 		criticCalls++
+		if !strings.Contains(request.prompt, "Main model's proposed response (untrusted): "+quotedContext("answerhidden")) || strings.Contains(request.prompt, `answer\u0000hidden`) {
+			t.Fatal("critic did not receive the normalized publication candidate")
+		}
 		return aicli.Result{Answer: `{"approved":true,"feedback":""}`}, nil
 	}}
 	result, err := runner.Run(context.Background(), job)
-	if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "answer must not contain NUL") || mainCalls != 1 || criticCalls != 0 || len(result.Calls) != 1 || result.Answer != "" {
-		t.Fatalf("NUL proposal reached critic: main=%d critic=%d recorded=%d answer=%q error=%v", mainCalls, criticCalls, len(result.Calls), result.Answer, err)
+	if err != nil || mainCalls != 1 || criticCalls != 1 || len(result.Calls) != 2 || result.Answer != "answerhidden" {
+		t.Fatalf("normalized proposal: main=%d critic=%d recorded=%d answer=%q error=%v", mainCalls, criticCalls, len(result.Calls), result.Answer, err)
 	}
 }
 

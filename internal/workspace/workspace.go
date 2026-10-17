@@ -73,9 +73,7 @@ func ValidPath(name string) bool {
 
 // Match Git's independently applied protectNTFS and protectHFS metadata checks.
 func gitMetadataAlias(part string) bool {
-	ntfs, _, _ := strings.Cut(part, ":")
-	ntfs = strings.TrimRight(ntfs, " .")
-	if strings.EqualFold(ntfs, ".git") || strings.EqualFold(ntfs, "git~1") {
+	if ntfsGitMetadataAlias(part) {
 		return true
 	}
 	hfs := strings.Map(func(r rune) rune {
@@ -247,7 +245,7 @@ func ValidateFixPaths(files []File, omitted []string) error {
 
 // CheckRoot verifies that safe, anchored collection is available before a model runs.
 func CheckRoot(root string) error {
-	dir, err := openDirectory(root)
+	dir, err := openPath(root, true)
 	if err != nil {
 		return err
 	}
@@ -387,14 +385,14 @@ func ReadChanges(ctx context.Context, root string, selected []Change) ([]Change,
 		name := filepath.Join(root, filepath.FromSlash(selection.Path))
 		data, info, err := readFile(name, int64(MaxChangeBytes-total))
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("changed path %q: %w", selection.Path, err)
 		}
 		mode := Regular
 		if info.Mode().Perm()&0100 != 0 {
 			mode = Executable
 		}
 		if selection.Mode != mode {
-			return nil, errors.New("selected change mode differs from file")
+			return nil, fmt.Errorf("selected change mode differs from file at %q", selection.Path)
 		}
 		changes = append(changes, Change{Path: selection.Path, Mode: mode, Data: data})
 		total += len(data)
@@ -411,7 +409,7 @@ func walk(ctx context.Context, root string, visit func(string, fs.DirEntry) erro
 		dir := dirs[len(dirs)-1]
 		dirs = dirs[:len(dirs)-1]
 		err := func() (resultErr error) {
-			f, err := openDirectory(dir)
+			f, err := openPath(dir, true)
 			if err != nil {
 				return err
 			}
@@ -611,7 +609,7 @@ func readFile(name string, limit int64) (data []byte, info fs.FileInfo, resultEr
 	if limit < 0 || limit > MaxBytes {
 		return nil, nil, errors.New("invalid regular file byte limit")
 	}
-	f, err := openRegular(name)
+	f, err := openPath(name, false)
 	if err != nil {
 		return nil, nil, err
 	}
