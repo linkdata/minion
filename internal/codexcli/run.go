@@ -23,11 +23,9 @@ import (
 )
 
 const (
-	maxEventBytes       = aicli.MaxEventBytes
-	maxCodexOutputBytes = aicli.MaxOutputBytes
-	maxCodexEvents      = aicli.MaxEvents
-	maxCodexChildren    = 256
-	instructionRoot     = ".minion-codex-root"
+	maxEventBytes    = aicli.MaxEventBytes
+	maxCodexChildren = 256
+	instructionRoot  = ".minion-codex-root"
 )
 
 // ExecutablePath resolves the exact host file granted to sandboxed commands.

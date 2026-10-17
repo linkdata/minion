@@ -3,6 +3,7 @@ package action
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -13,9 +14,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
+	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/github"
+	"github.com/linkdata/minion/internal/gitwork"
 	"github.com/linkdata/minion/internal/skills"
+	"github.com/linkdata/minion/internal/state"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -25,7 +30,7 @@ func testGitHub(server *httptest.Server, token string) *github.Client {
 	return client
 }
 
-func serveSafeForkChecks(w http.ResponseWriter, r *http.Request, base, fork string, private bool) bool {
+func serveSafeForkChecks(w http.ResponseWriter, r *http.Request, fork string, private bool) bool {
 	if r.Method != http.MethodGet {
 		return false
 	}
@@ -33,12 +38,12 @@ func serveSafeForkChecks(w http.ResponseWriter, r *http.Request, base, fork stri
 	switch r.URL.Path {
 	case "/repos/" + fork + "/actions/permissions":
 		body = `{"enabled":false}`
-	case "/repos/" + base + "/actions/permissions/fork-pr-workflows-private-repos":
+	case "/repos/o/r/actions/permissions/fork-pr-workflows-private-repos":
 		if !private {
 			return false
 		}
 		body = `{"send_write_tokens_to_workflows":false,"send_secrets_and_variables":false}`
-	case "/repos/" + base + "/rulesets", "/repos/" + fork + "/rulesets":
+	case "/repos/o/r/rulesets", "/repos/" + fork + "/rulesets":
 		body = `[]`
 	default:
 		return false
@@ -55,7 +60,7 @@ func TestSafeForkChecksRejectUnrelatedRoutes(t *testing.T) {
 		httptest.NewRequest(http.MethodGet, "/repos/o/r/actions/permissions/fork-pr-workflows-private-repos", nil),
 	} {
 		response := httptest.NewRecorder()
-		if serveSafeForkChecks(response, request, "o/r", "bot/r", false) || response.Body.Len() != 0 {
+		if serveSafeForkChecks(response, request, "bot/r", false) || response.Body.Len() != 0 {
 			t.Fatalf("unexpected fixture route accepted: %s %s", request.Method, request.URL)
 		}
 	}
@@ -178,3 +183,123 @@ func shellQuote(value string) string { return "'" + strings.ReplaceAll(value, "'
 const privateRepositoryJSON = `{"id":1,"full_name":"o/r","owner":{"id":2,"login":"o"},"default_branch":"main","private":true,"visibility":"private"}`
 
 const publicRepositoryJSON = `{"id":1,"full_name":"o/r","owner":{"id":2,"login":"o"},"default_branch":"main"}`
+
+func offlineIndexFixture(t *testing.T, files []workspace.File) (*gitwork.OfflineIndex, string) {
+	t.Helper()
+	root := t.TempDir()
+	source, err := os.MkdirTemp(root, "source-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata, err := os.MkdirTemp(root, "index-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := workspace.Materialize(source, files); err != nil {
+		t.Fatal(err)
+	}
+	index, err := gitwork.NewOfflineIndex(context.Background(), metadata, source, files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(source, ".git")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("source received Git metadata: %v", err)
+	}
+	return index, source
+}
+
+func writeFixtureFile(t *testing.T, source, name string, data []byte) {
+	t.Helper()
+	path := filepath.Join(source, name)
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func forbidModel(t *testing.T) modelCall {
+	t.Helper()
+	return func(context.Context, modelRun) (aicli.Result, error) {
+		t.Helper()
+		t.Fatal("model must not run")
+		return aicli.Result{}, nil
+	}
+}
+
+func withClaudeCritic(job Job) Job {
+	job.Critic = &RoleSettings{Provider: "claude"}
+	job.CriticMaxRounds = config.DefaultCriticMaxRounds
+	return job
+}
+
+func cloneFixture(t *testing.T, root string, files ...workspace.File) *gitwork.Checkout {
+	t.Helper()
+	metadata := emptyTreeFixture
+	if len(files) != 0 {
+		metadata = func(_ context.Context, sha string) (github.GitTree, error) {
+			return gitTreeFixture(sha, files...), nil
+		}
+	}
+	checkout, err := gitwork.Clone(context.Background(), root, "o/r", "main", metadata, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := checkout.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	return checkout
+}
+
+func mustFreeze(t *testing.T, ctx context.Context, root string, job Job, source, output string, index *gitwork.OfflineIndex) *reviewSnapshot {
+	t.Helper()
+	snapshot, err := freezeReviewSnapshot(ctx, root, job, source, output, index)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := snapshot.close(); err != nil {
+			t.Error(err)
+		}
+	})
+	return snapshot
+}
+
+func openState(t *testing.T, initial time.Time) *state.Store {
+	t.Helper()
+	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"), initial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	return store
+}
+
+func serveIssueFixture(t *testing.T, w http.ResponseWriter, r *http.Request) bool {
+	t.Helper()
+	if r.Method != http.MethodGet {
+		return false
+	}
+	switch {
+	case strings.HasPrefix(r.URL.Path, "/repos/o/r/git/trees/"):
+		writeTreeFixture(t, w, strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/"))
+	case r.URL.Path == "/repos/o/r":
+		_, _ = fmt.Fprint(w, publicRepositoryJSON)
+	case r.URL.Path == "/repos/o/r/issues/7":
+		_, _ = fmt.Fprint(w, `{"title":"Task","body":"Inspect source"}`)
+	case r.URL.Path == "/repos/o/r/issues/7/comments":
+		_, _ = fmt.Fprint(w, `[]`)
+	default:
+		return false
+	}
+	return true
+}
+
+const approvedCritiqueJSON = `{"approved":true,"has_blockers":false,"feedback":""}`

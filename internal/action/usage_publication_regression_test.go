@@ -32,14 +32,7 @@ func TestExecutePublicationBookkeepingBoundaries(t *testing.T) {
 			var posted atomic.Bool
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch {
-				case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/o/r/git/trees/"):
-					writeTreeFixture(t, w, strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/"))
-				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
-					_, _ = fmt.Fprint(w, publicRepositoryJSON)
-				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7":
-					_, _ = fmt.Fprint(w, `{"title":"Task","body":"Inspect source"}`)
-				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7/comments":
-					_, _ = fmt.Fprint(w, `[]`)
+				case serveIssueFixture(t, w, r):
 				case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/issues/7/comments":
 					posted.Store(true)
 					if scenario == "hard deadline" {

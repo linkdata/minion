@@ -13,6 +13,17 @@ import (
 	"github.com/linkdata/minion/internal/usage"
 )
 
+func writeChunks(t *testing.T, output *jsonlOutput, data string) {
+	t.Helper()
+	for len(data) > 0 {
+		n := min(7, len(data))
+		if wrote, err := output.Write([]byte(data[:n])); wrote != n || err != nil {
+			t.Fatalf("Write=%d,%v; want %d bytes", wrote, err, n)
+		}
+		data = data[n:]
+	}
+}
+
 func TestOutputNativeUsageLimit(t *testing.T) {
 	// Native events: overage rejection can accompany an allowed warning.
 	const warning = `{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","resetsAt":1792200000,"rateLimitType":"five_hour","utilization":0.99,"isUsingOverage":false,"overageStatus":"rejected","overageDisabledReason":"org_level_disabled","overageEnabled":false,"surpassedThreshold":0.9,"unifiedWindows":{"five_hour":{"utilization":0.99,"resetsAt":1792200000},"seven_day":{"utilization":0.24,"resetsAt":1792342800}}}}`
@@ -43,11 +54,7 @@ func TestOutputNativeUsageLimit(t *testing.T) {
 			cancelled := false
 			o := jsonlOutput{cancel: func() { cancelled = true }}
 			data := test.data + "\n"
-			for len(data) > 0 {
-				n := min(7, len(data))
-				_, _ = o.Write([]byte(data[:n]))
-				data = data[n:]
-			}
+			writeChunks(t, &o, data)
 			if (o.err != nil) != test.failsAtWrite || cancelled != test.failsAtWrite || o.result.Tokens != test.want {
 				t.Fatalf("usage limit interrupted counter collection: tokens=%+v error=%v cancelled=%t", o.result.Tokens, o.err, cancelled)
 			}
@@ -218,13 +225,7 @@ func TestOutputNativeTurnResults(t *testing.T) {
 			cancelled := false
 			o := jsonlOutput{structured: tc.structured, cancel: func() { cancelled = true }}
 			data := tc.data + "\n"
-			for len(data) != 0 {
-				n := min(7, len(data))
-				if _, err := o.Write([]byte(data[:n])); err != nil {
-					t.Fatal(err)
-				}
-				data = data[n:]
-			}
+			writeChunks(t, &o, data)
 			o.finish()
 			if tc.failure != "" {
 				if o.err == nil || !strings.Contains(o.err.Error(), tc.failure) || !cancelled || o.result.UsageComplete {
@@ -237,27 +238,14 @@ func TestOutputNativeTurnResults(t *testing.T) {
 	}
 }
 
-func TestOutputLimits(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		init func(*jsonlOutput)
-		data string
-	}{
-		{"line", func(*jsonlOutput) {}, strings.Repeat("x", maxEventBytes+1)},
-		{"total", func(o *jsonlOutput) { o.stream.Bytes = maxOutputBytes }, "x"},
-		{"events", func(o *jsonlOutput) { o.stream.Events = maxEvents }, "{}\n"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			cancelled := false
-			o := jsonlOutput{cancel: func() { cancelled = true }}
-			tc.init(&o)
-			if _, err := o.Write([]byte(tc.data)); err != nil {
-				t.Fatal(err)
-			}
-			if !errors.Is(o.err, aicli.ErrOutputLimit) || !cancelled {
-				t.Fatalf("limit not enforced: %v, %v", o.err, cancelled)
-			}
-		})
+func TestOutputLimitCancels(t *testing.T) {
+	cancelled := false
+	o := jsonlOutput{cancel: func() { cancelled = true }, stream: aicli.JSONL{Bytes: aicli.MaxOutputBytes}}
+	if _, err := o.Write([]byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	if !errors.Is(o.err, aicli.ErrOutputLimit) || !cancelled {
+		t.Fatalf("limit not enforced: %v, %v", o.err, cancelled)
 	}
 }
 
@@ -387,13 +375,7 @@ func TestOutputPreservesRecordedUsage(t *testing.T) {
 				first = aggregate
 			}
 			data := numberResultEvents(pending + "\n" + first + "\n" + tc.intermediate + "\n" + clear + "\n" + tc.final + "\n")
-			for len(data) != 0 {
-				n := min(7, len(data))
-				if _, err := o.Write([]byte(data[:n])); err != nil {
-					t.Fatal(err)
-				}
-				data = data[n:]
-			}
+			writeChunks(t, &o, data)
 			o.finish()
 			if o.result.Tokens != tc.want || o.result.UsageComplete != tc.complete || (o.err != nil) != tc.failed {
 				t.Fatalf("known counters not preserved: got tokens=%+v complete=%v error=%v; want tokens=%+v complete=%v failed=%v", o.result.Tokens, o.result.UsageComplete, o.err, tc.want, tc.complete, tc.failed)

@@ -91,7 +91,7 @@ func TestSourceAliasesAreUnsupportedForDefaultAndPullRequestCheckout(t *testing.
 			fixture.git(fixture.source, "commit", "-m", "source alias")
 			head := fixture.git(fixture.source, "rev-parse", "HEAD")
 			fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/heads/main", "HEAD:refs/pull/7/head")
-			lookup := localTreeMetadata(t, fixture.source)
+			lookup := localTreeMetadata(fixture.source)
 			checked := false
 			lookupChecked := func(ctx context.Context, sha string) (github.GitTree, error) {
 				tree, err := lookup(ctx, sha)
@@ -127,10 +127,7 @@ func TestSourceAliasesAreUnsupportedForDefaultAndPullRequestCheckout(t *testing.
 func TestGitFailureClassificationIsSpecificAndPreservesCancellation(t *testing.T) {
 	root := t.TempDir()
 	shim := "#!/bin/sh\nprintf '%s\\n' \"$MINION_TEST_GIT_DIAGNOSTIC\" >&2\nexit 1\n"
-	if err := os.WriteFile(filepath.Join(root, "git"), []byte(shim), 0700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", root+string(os.PathListSeparator)+os.Getenv("PATH"))
+	fakeOnPath(t, "git", shim)
 	for _, tc := range []struct {
 		operation   string
 		diagnostic  string

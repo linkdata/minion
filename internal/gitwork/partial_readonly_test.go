@@ -65,9 +65,9 @@ func partialReadOnlyFixture(t *testing.T, pull, link bool) (gitFixture, *Checkou
 	// file:// is necessary: a local path clone ignores --filter and hides this regression.
 	url := "file://" + fixture.remote
 	if pull {
-		checkout, err = clonePullRequestFromURL(context.Background(), t.TempDir(), url, 7, "main", head, localTreeMetadata(t, fixture.source))
+		checkout, err = clonePullRequestFromURL(context.Background(), t.TempDir(), url, 7, "main", head, localTreeMetadata(fixture.source))
 	} else {
-		checkout, err = cloneFromURL(context.Background(), t.TempDir(), url, "main", localTreeMetadata(t, fixture.source), false)
+		checkout, err = cloneFromURL(context.Background(), t.TempDir(), url, "main", localTreeMetadata(fixture.source), false)
 	}
 	if err != nil {
 		t.Fatal(err)
@@ -215,7 +215,7 @@ func TestPartialReadOnlySnapshotRefusesBeforeBulkFetch(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			lookup := localTreeMetadata(t, fixture.source)
+			lookup := localTreeMetadata(fixture.source)
 			checkout.sourceTrees = nil
 			checkout.lookupTree = func(ctx context.Context, sha string) (github.GitTree, error) {
 				tree, err := lookup(ctx, sha)

@@ -124,15 +124,7 @@ func TestRunOnceCanceledExecutionPreservesEarlierFailure(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			statePath := filepath.Join(t.TempDir(), "state.json")
-			store, err := state.Open(statePath, initial)
-			if err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(func() {
-				if err := store.Close(); err != nil {
-					t.Error(err)
-				}
-			})
+			store := openStateAt(t, statePath, initial)
 			executor := &fakeExecutor{onExecute: func() {
 				cancel()
 				if test.saveFails {
@@ -261,15 +253,7 @@ func TestRunOnceStopsCanceledDiscoveryWithoutDeferring(t *testing.T) {
 					gh.err = context.Canceled
 				}
 				path := filepath.Join(t.TempDir(), "state.json")
-				store, err := state.Open(path, initial)
-				if err != nil {
-					t.Fatal(err)
-				}
-				t.Cleanup(func() {
-					if err := store.Close(); err != nil {
-						t.Error(err)
-					}
-				})
+				store := openStateAt(t, path, initial)
 				pending := state.PendingNotification{Repository: tail.Repository.FullName, RepositoryID: 1, OwnerID: 2, SubjectType: tail.Subject.Type, SubjectURL: tail.Subject.URL,
 					Since: initial, UpdatedAt: tail.UpdatedAt, RetryAt: now.Add(-time.Second), Failures: 5}
 				key := notificationKey(tail)
@@ -312,15 +296,7 @@ func TestRunOnceStopsCanceledDiscoveryWithoutDeferring(t *testing.T) {
 				if err := store.Close(); err != nil {
 					t.Fatal(err)
 				}
-				reopened, err := state.Open(path, initial)
-				if err != nil {
-					t.Fatal(err)
-				}
-				t.Cleanup(func() {
-					if err := reopened.Close(); err != nil {
-						t.Error(err)
-					}
-				})
+				reopened := openStateAt(t, path, initial)
 				checkState(reopened.Data)
 			})
 		}

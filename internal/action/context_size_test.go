@@ -154,7 +154,7 @@ func TestGitHubContextLimitAcrossActions(t *testing.T) {
 							ID: 2, FullName: "linkdataminion/r", Fork: true, Private: true, Visibility: "private",
 							Parent: &github.Repository{ID: 1, FullName: "o/r"}, Source: &github.Repository{ID: 1, FullName: "o/r"},
 						})
-					case serveSafeForkChecks(w, r, "o/r", "linkdataminion/r", true):
+					case serveSafeForkChecks(w, r, "linkdataminion/r", true):
 					case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/pulls":
 						respond(w, []string{})
 					case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/linkdataminion/r/branches/minion/"):

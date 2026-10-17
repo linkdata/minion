@@ -17,8 +17,7 @@ import (
 )
 
 // Local fixtures have every blob; production must obtain sizes from GitHub.
-func localTreeMetadata(t *testing.T, dir string) func(context.Context, string) (github.GitTree, error) {
-	t.Helper()
+func localTreeMetadata(dir string) func(context.Context, string) (github.GitTree, error) {
 	return func(ctx context.Context, sha string) (github.GitTree, error) {
 		cmd := exec.CommandContext(ctx, "git", "-C", dir, "ls-tree", "-r", "-l", "-z", sha)
 		output, err := cmd.Output()
@@ -171,7 +170,7 @@ func TestCloneFromLocalFixtureIncludesBranchHistory(t *testing.T) {
 	tip := fixture.git(fixture.source, "rev-parse", "HEAD")
 	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/heads/main")
 	ctx := context.Background()
-	checkout, err := cloneFromURL(ctx, t.TempDir(), "file://"+fixture.remote, "main", localTreeMetadata(t, fixture.source), true)
+	checkout, err := cloneFromURL(ctx, t.TempDir(), "file://"+fixture.remote, "main", localTreeMetadata(fixture.source), true)
 	if err != nil {
 		t.Fatalf("cloneFromURL() error = %v", err)
 	}
@@ -263,7 +262,7 @@ func TestCheckoutPullRequestBoundsAliasedTrees(t *testing.T) {
 			}
 			lookup := func(ctx context.Context, sha string) (github.GitTree, error) {
 				if !tt.blocked {
-					return localTreeMetadata(t, fixture.source)(ctx, sha)
+					return localTreeMetadata(fixture.source)(ctx, sha)
 				}
 				tree := completeTree(sha, make([]github.GitTreeEntry, 0, entries))
 				for i := 0; i < entries; i++ {
@@ -396,7 +395,7 @@ func TestCheckoutPullRequestPreflightDoesNotFetchMissingBlob(t *testing.T) {
 	head := fixture.git(fixture.source, "rev-parse", "HEAD")
 	blob := fixture.git(fixture.source, "rev-parse", "HEAD:new.dat")
 	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/pull/7/head")
-	checkout, err := cloneFromURL(context.Background(), t.TempDir(), "file://"+fixture.remote, "main", localTreeMetadata(t, fixture.source), true)
+	checkout, err := cloneFromURL(context.Background(), t.TempDir(), "file://"+fixture.remote, "main", localTreeMetadata(fixture.source), true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -422,7 +421,7 @@ func TestCheckoutPullRequestPreflightDoesNotFetchMissingBlob(t *testing.T) {
 	if got := fixture.git(checkout.path, "rev-parse", "HEAD"); got != fixture.base {
 		t.Fatalf("rejected PR moved HEAD to %s", got)
 	}
-	checkout.lookupTree = localTreeMetadata(t, fixture.source)
+	checkout.lookupTree = localTreeMetadata(fixture.source)
 	if err := checkout.checkoutPullRequest(context.Background(), 7, "main", head); err != nil {
 		t.Fatalf("bounded PR checkout: %v", err)
 	}
@@ -456,15 +455,7 @@ func TestPullRequestSnapshotPreservesRepositoryBlobBytes(t *testing.T) {
 	head := fixture.git(fixture.source, "rev-parse", "HEAD")
 	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/pull/7/head")
 
-	checkout, err := cloneFromURL(context.Background(), t.TempDir(), fixture.remote, "main", localTreeMetadata(t, fixture.source), true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := checkout.Close(); err != nil {
-			t.Error(err)
-		}
-	}()
+	checkout := fixture.clone()
 	if err := checkout.checkoutPullRequest(context.Background(), 7, "main", head); err != nil {
 		t.Fatal(err)
 	}
@@ -489,15 +480,7 @@ func TestNewBranchPreservesOmittedGitlink(t *testing.T) {
 	fixture.git(fixture.source, "commit", "-m", "add gitlink")
 	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/heads/main")
 
-	checkout, err := cloneFromURL(context.Background(), t.TempDir(), fixture.remote, "main", localTreeMetadata(t, fixture.source), true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := checkout.Close(); err != nil {
-			t.Error(err)
-		}
-	})
+	checkout := fixture.clone()
 	ctx := context.Background()
 	snapshot, err := checkout.Snapshot(ctx, false)
 	if err != nil || len(snapshot.Omitted) != 1 || snapshot.Omitted[0] != "sub" {
@@ -762,7 +745,7 @@ func newFixture(t *testing.T) gitFixture {
 	path := filepath.Join(root, "checkout")
 	fixture.git("", "clone", "--no-checkout", "--branch", "main", fixture.remote, path)
 	fixture.git(path, "checkout", "--detach", "refs/remotes/origin/main")
-	fixture.checkout = &Checkout{path: path, url: fixture.remote, expectedHead: fixture.base, lookupTree: localTreeMetadata(t, path)}
+	fixture.checkout = &Checkout{path: path, url: fixture.remote, expectedHead: fixture.base, lookupTree: localTreeMetadata(path)}
 	if err := disableAttributes(filepath.Join(path, ".git")); err != nil {
 		t.Fatal(err)
 	}
@@ -774,6 +757,20 @@ func newFixture(t *testing.T) gitFixture {
 
 func (f gitFixture) git(dir string, args ...string) string {
 	return f.gitInput(dir, "", args...)
+}
+
+func (f gitFixture) clone() *Checkout {
+	f.t.Helper()
+	checkout, err := cloneFromURL(context.Background(), f.t.TempDir(), f.remote, "main", localTreeMetadata(f.source), true)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	f.t.Cleanup(func() {
+		if err := checkout.Close(); err != nil {
+			f.t.Error(err)
+		}
+	})
+	return checkout
 }
 
 func (f gitFixture) gitInput(dir, input string, args ...string) string {
@@ -795,6 +792,9 @@ func (f gitFixture) gitInput(dir, input string, args ...string) string {
 
 func writeFile(t *testing.T, path, content string) {
 	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
 		t.Fatal(err)
 	}

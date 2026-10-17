@@ -48,7 +48,7 @@ func TestPartialClonePreflightsMetadataBeforeAnyBlobFetch(t *testing.T) {
 			}
 		}
 		checked = true
-		tree, err := localTreeMetadata(t, fixture.source)(ctx, sha)
+		tree, err := localTreeMetadata(fixture.source)(ctx, sha)
 		if err == nil {
 			oversized := int64(workspace.MaxBytes + 1)
 			tree.Tree[0].Size = &oversized
@@ -79,7 +79,7 @@ func TestPartialSnapshotBulkFetchesChangedBaseBlobs(t *testing.T) {
 	fixture.git(fixture.source, "commit", "-m", "PR files")
 	head := fixture.git(fixture.source, "rev-parse", "HEAD")
 	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/pull/7/head")
-	checkout, err := clonePullRequestFromURL(context.Background(), t.TempDir(), "file://"+fixture.remote, 7, "main", head, localTreeMetadata(t, fixture.source))
+	checkout, err := clonePullRequestFromURL(context.Background(), t.TempDir(), "file://"+fixture.remote, 7, "main", head, localTreeMetadata(fixture.source))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,20 +94,7 @@ func TestPartialSnapshotBulkFetchesChangedBaseBlobs(t *testing.T) {
 			t.Fatal("fixture already fetched a base blob")
 		}
 	}
-	root := t.TempDir()
-	log, upload := filepath.Join(root, "fetches"), filepath.Join(root, "upload-pack")
-	gitUpload, err := exec.LookPath("git-upload-pack")
-	if err != nil {
-		t.Fatal(err)
-	}
-	script := "#!/bin/sh\nprintf x >> " + shellQuote(log) + "\nexec " + shellQuote(gitUpload) + " \"$@\"\n"
-	if err := os.WriteFile(upload, []byte(script), 0700); err != nil {
-		t.Fatal(err)
-	}
-	fixture.git(checkout.path, "config", "remote.origin.uploadpack", upload)
-	if err := checkout.recordConfig(); err != nil {
-		t.Fatal(err)
-	}
+	sessions := partialFetchSessions(t, fixture, checkout)
 	snapshot, err := checkout.Snapshot(context.Background(), false)
 	if err != nil || snapshot.Head != head || snapshot.MergeBase != base || len(snapshot.BaseFiles) != count || len(snapshot.ChangedPaths) != count {
 		t.Fatalf("partial snapshot base=%s files=%d paths=%d error=%v", snapshot.MergeBase, len(snapshot.BaseFiles), len(snapshot.ChangedPaths), err)
@@ -117,9 +104,8 @@ func TestPartialSnapshotBulkFetchesChangedBaseBlobs(t *testing.T) {
 			t.Fatalf("wrong base blob %q: %q", file.Path, file.Data)
 		}
 	}
-	sessions, err := os.ReadFile(log)
-	if err != nil || string(sessions) != "x" {
-		t.Fatalf("Snapshot fetched missing base blobs in %d sessions, want one: %q error=%v", len(sessions), sessions, err)
+	if got := sessions(); got != 1 {
+		t.Fatalf("Snapshot fetched missing base blobs in %d sessions, want one", got)
 	}
 }
 
@@ -135,7 +121,7 @@ func TestPartialSnapshotPreflightsMergeBaseAndHistoryDoesNotFetchOldBlobs(t *tes
 	fixture.git(fixture.source, "rm", "old")
 	fixture.git(fixture.source, "commit", "-m", "remove old blob")
 	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/heads/main")
-	lookup := localTreeMetadata(t, fixture.source)
+	lookup := localTreeMetadata(fixture.source)
 	checkout, err := cloneFromURL(context.Background(), t.TempDir(), "file://"+fixture.remote, "main", lookup, true)
 	if err != nil {
 		t.Fatal(err)

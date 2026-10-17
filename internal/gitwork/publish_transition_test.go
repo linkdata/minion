@@ -2,7 +2,6 @@ package gitwork
 
 import (
 	"context"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -22,9 +21,6 @@ func TestCommitAndPushPreservesFileDirectoryTransitions(t *testing.T) {
 			if transition == "directory to file" {
 				for _, path := range []string{"a/b", "a/c/d"} {
 					path = filepath.Join(fixture.checkout.path, filepath.FromSlash(path))
-					if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-						t.Fatal(err)
-					}
 					writeFile(t, path, "old\n")
 				}
 				fixture.git(fixture.checkout.path, "add", ".")

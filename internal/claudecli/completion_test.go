@@ -53,11 +53,7 @@ func TestOutputStoppedTaskNeedsNewRootResponseAndResult(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			o := jsonlOutput{}
 			data := numberResultEvents(old+"\n"+successfulResult+"\n"+tc.after) + "\n"
-			for len(data) > 0 {
-				n := min(7, len(data))
-				_, _ = o.Write([]byte(data[:n]))
-				data = data[n:]
-			}
+			writeChunks(t, &o, data)
 			o.finish()
 			if (o.err != nil) != tc.fails || o.completed == tc.fails || o.result.UsageComplete == tc.fails || o.result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) {
 				t.Fatalf("result=%+v completed=%v error=%v", o.result, o.completed, o.err)

@@ -36,10 +36,7 @@ func TestUsageDoesNotCountCanceledDispatch(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err = tracked.Runner.aroundModel(ctx, modelRun{provider: "codex", role: roleMain}, func(context.Context, modelRun) (aicli.Result, error) {
-		t.Fatal("dispatched a canceled model call")
-		return aicli.Result{}, nil
-	})
+	_, err = tracked.Runner.aroundModel(ctx, modelRun{provider: "codex", role: roleMain}, forbidModel(t))
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled dispatch: %v", err)
 	}
@@ -168,7 +165,7 @@ func TestUsageAccumulatesCriticRevisions(t *testing.T) {
 				return aicli.Result{Answer: proposalJSON("proposal", "Private evidence"), Tokens: usage.Tokens{Input: 100, Output: 20}, UsageComplete: true}, nil
 			}
 			critiques++
-			answer := `{"approved":true,"has_blockers":false,"feedback":""}`
+			answer := approvedCritiqueJSON
 			if critiques == 1 {
 				answer = `{"approved":false,"has_blockers":true,"feedback":"Check the error path."}`
 			}
@@ -429,10 +426,7 @@ func TestRunnerDoesNotRecordUndispatchedUsageCall(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := &usage.Store{Dir: filepath.Join(root, "usage")}
-	executor := &Orchestrator{WorkRoot: filepath.Join(root, "work"), Usage: store, Runner: Runner{WorkRoot: filepath.Join(root, "work"), runModel: func(context.Context, modelRun) (aicli.Result, error) {
-		t.Fatal("model ran without durable checkpoint")
-		return aicli.Result{}, nil
-	}}}
+	executor := &Orchestrator{WorkRoot: filepath.Join(root, "work"), Usage: store, Runner: Runner{WorkRoot: filepath.Join(root, "work"), runModel: forbidModel(t)}}
 	tracked := attemptFixture(executor)
 	_, err := tracked.trackUsage(usageJob())
 	if err != nil {

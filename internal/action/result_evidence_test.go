@@ -11,16 +11,13 @@ import (
 	"testing"
 
 	"github.com/linkdata/minion/internal/command"
-	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/monitor"
 )
 
 func TestInvalidResultKeepsOnlyValidatedEvidence(t *testing.T) {
 	for _, scenario := range []string{"invalid calls", "invalid answer", "foreign identity", "invalid diagnostics", "invalid artifact"} {
 		t.Run(scenario, func(t *testing.T) {
-			job := portableJob(command.SecurityAudit)
-			job.Critic = &RoleSettings{Provider: "claude"}
-			job.CriticMaxRounds = config.DefaultCriticMaxRounds
+			job := withClaudeCritic(portableJob(command.SecurityAudit))
 			result := completeAuditResult(job)
 			result.Calls = append(result.Calls, CallUsage{Provider: "claude", Role: roleCritic, Round: 1, ReviewPhase: reviewFull, Approved: true, NoBlockers: true})
 			result.Diagnostics = []Diagnostic{{Code: "cleanup_failed", Message: "PRIVATE cleanup details"}}

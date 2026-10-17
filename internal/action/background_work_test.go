@@ -9,7 +9,6 @@ import (
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
-	"github.com/linkdata/minion/internal/config"
 )
 
 func TestPromptsRequireAwaitingBackgroundWork(t *testing.T) {
@@ -21,8 +20,7 @@ func TestPromptsRequireAwaitingBackgroundWork(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			job := portableJob(command.Comment)
 			if critic {
-				job.Critic = &RoleSettings{Provider: "claude"}
-				job.CriticMaxRounds = config.DefaultCriticMaxRounds
+				job = withClaudeCritic(job)
 			}
 			var roles []string
 			runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
@@ -37,7 +35,7 @@ func TestPromptsRequireAwaitingBackgroundWork(t *testing.T) {
 					}
 				}
 				if request.role == "critic" {
-					return aicli.Result{Answer: `{"approved":true,"has_blockers":false,"feedback":""}`}, nil
+					return aicli.Result{Answer: approvedCritiqueJSON}, nil
 				}
 				answer := "completed response"
 				if critic {

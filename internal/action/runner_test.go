@@ -228,7 +228,7 @@ func TestRunnerKeepsCriticReadOnlyAndNotesPrivate(t *testing.T) {
 		if data, err := os.ReadFile(filepath.Join(request.dir, "added.bin")); err != nil || !reflect.DeepEqual(data, []byte{0, 1, 2}) {
 			t.Fatalf("critic cannot inspect added binary: %v, %v", data, err)
 		}
-		return aicli.Result{Answer: `{"approved":true,"has_blockers":false,"feedback":""}`, UsageComplete: true}, nil
+		return aicli.Result{Answer: approvedCritiqueJSON, UsageComplete: true}, nil
 	}
 	result, err := runner.Run(context.Background(), job)
 	if err != nil || calls != 2 || result.Answer != "public answer" || len(result.Calls) != 2 || result.Calls[1].Role != "critic" || len(result.Changes) != 3 {
@@ -291,8 +291,8 @@ func TestRunnerIgnoresWorkerGitMetadata(t *testing.T) {
 	for _, name := range []string{".git", ".gIt", "nested/.GiT"} {
 		t.Run(name, func(t *testing.T) {
 			runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
-				writeIndexFixture(t, request.dir, name+"/config", []byte("untrusted worker metadata"))
-				writeIndexFixture(t, request.dir, "source.txt", []byte("changed"))
+				writeFixtureFile(t, request.dir, name+"/config", []byte("untrusted worker metadata"))
+				writeFixtureFile(t, request.dir, "source.txt", []byte("changed"))
 				return aicli.Result{Answer: "Changed source", UsageComplete: true}, nil
 			}}
 			result, err := runner.Run(context.Background(), portableJob(command.Fix))
@@ -405,8 +405,7 @@ func TestAuditPromptSelectsDomainCompanionsOnly(t *testing.T) {
 	for _, critic := range []bool{false, true} {
 		job := portableJob(command.SecurityAudit)
 		if critic {
-			job.Critic = &RoleSettings{Provider: "claude"}
-			job.CriticMaxRounds = config.DefaultCriticMaxRounds
+			job = withClaudeCritic(job)
 		}
 		prompt, err := actionPrompt(context.Background(), job, "/source", "/context", "/reports", "/installed/security-audit/SKILL.md")
 		if err != nil {

@@ -18,8 +18,6 @@ import (
 
 const (
 	maxEventBytes     = aicli.MaxEventBytes
-	maxOutputBytes    = aicli.MaxOutputBytes
-	maxEvents         = aicli.MaxEvents
 	maxResetTimestamp = 253402300799 // 9999-12-31T23:59:59Z, the last RFC3339 year.
 )
 

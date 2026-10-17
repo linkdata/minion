@@ -3,6 +3,7 @@ package claudecli
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -107,7 +108,7 @@ func TestProbeRetainsOutputLimitAndQuotesDiagnostics(t *testing.T) {
 		name, script string
 		limited      bool
 	}{
-		{"output cap", "head -c 4194305 /dev/zero\nsleep 30\n", true},
+		{"output cap", fmt.Sprintf("head -c %d /dev/zero\nsleep 30\n", maxEventBytes+1), true},
 		{"diagnostic", "printf 'first\\nforged journal line' >&2\nexit 7\n", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -127,7 +128,7 @@ func TestProbeRetainsOutputLimitAndQuotesDiagnostics(t *testing.T) {
 }
 
 func TestProbeExactBoundAndCallerCancellation(t *testing.T) {
-	binary := fakeExecutable(t, "probe", "head -c 4194304 /dev/zero\n")
+	binary := fakeExecutable(t, "probe", fmt.Sprintf("head -c %d /dev/zero\n", maxEventBytes))
 	output, err := probe(context.Background(), binary, nil, t.TempDir(), os.Environ(), "")
 	if err != nil || len(output) != maxEventBytes {
 		t.Fatalf("exact bound bytes=%d error=%v", len(output), err)

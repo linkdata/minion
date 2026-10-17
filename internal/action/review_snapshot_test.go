@@ -19,24 +19,16 @@ func TestReviewSnapshotFixFreezesOnlyExportedCandidate(t *testing.T) {
 		workspace.File{Path: ".gitignore", Mode: workspace.Regular, Data: []byte("*.log\n")},
 		workspace.File{Path: "deleted", Mode: workspace.Regular, Data: []byte("deleted")})
 	index, source := offlineIndexFixture(t, job.Source.Files)
-	writeIndexFixture(t, source, "source.txt", []byte("reviewed"))
-	writeIndexFixture(t, source, "added", []byte("new executable"))
+	writeFixtureFile(t, source, "source.txt", []byte("reviewed"))
+	writeFixtureFile(t, source, "added", []byte("new executable"))
 	if err := os.Chmod(filepath.Join(source, "added"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Remove(filepath.Join(source, "deleted")); err != nil {
 		t.Fatal(err)
 	}
-	writeIndexFixture(t, source, "runtime.log", make([]byte, workspace.MaxChangeBytes+1))
-	snapshot, err := freezeReviewSnapshot(context.Background(), t.TempDir(), job, source, "", index)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := snapshot.close(); err != nil {
-			t.Error(err)
-		}
-	})
+	writeFixtureFile(t, source, "runtime.log", make([]byte, workspace.MaxChangeBytes+1))
+	snapshot := mustFreeze(t, context.Background(), t.TempDir(), job, source, "", index)
 	if snapshot.source == source || snapshot.outputDir != "" || len(snapshot.changes) != 3 {
 		t.Fatalf("unexpected critic snapshot: %+v", snapshot)
 	}
@@ -52,7 +44,7 @@ func TestReviewSnapshotFixFreezesOnlyExportedCandidate(t *testing.T) {
 	if err := snapshot.verify(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	writeIndexFixture(t, source, "source.txt", []byte("changed after proposal"))
+	writeFixtureFile(t, source, "source.txt", []byte("changed after proposal"))
 	data, err := workspace.ReadRegular(filepath.Join(snapshot.source, "source.txt"), workspace.MaxBytes)
 	if err != nil || string(data) != "reviewed" {
 		t.Fatalf("background change reached critic copy=%q,%v", data, err)
@@ -82,17 +74,9 @@ func TestReviewSnapshotFixFreezesFinalReplacementLayout(t *testing.T) {
 		{Path: "to-file", Mode: workspace.Regular, Data: []byte("new file")},
 	}
 	for _, file := range want[1:] {
-		writeIndexFixture(t, source, file.Path, file.Data)
+		writeFixtureFile(t, source, file.Path, file.Data)
 	}
-	snapshot, err := freezeReviewSnapshot(context.Background(), t.TempDir(), job, source, "", index)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := snapshot.close(); err != nil {
-			t.Error(err)
-		}
-	})
+	snapshot := mustFreeze(t, context.Background(), t.TempDir(), job, source, "", index)
 	if len(snapshot.changes) != 6 {
 		t.Fatalf("replacement changes=%+v", snapshot.changes)
 	}
@@ -146,11 +130,11 @@ func TestReviewSnapshotFreezesRawAuditArtifactsAndAbsence(t *testing.T) {
 			}
 			switch mutation {
 			case "source":
-				writeIndexFixture(t, source, "source.txt", []byte("background source edit"))
+				writeFixtureFile(t, source, "source.txt", []byte("background source edit"))
 			case "report":
-				writeIndexFixture(t, output, "REPORT.md", []byte("background report edit"))
+				writeFixtureFile(t, output, "REPORT.md", []byte("background report edit"))
 			case "new artifact":
-				writeIndexFixture(t, output, "findings.json", []byte("[]"))
+				writeFixtureFile(t, output, "findings.json", []byte("[]"))
 			case "removed artifact":
 				if err := os.Remove(filepath.Join(output, "REPORT.md")); err != nil {
 					t.Fatal(err)
@@ -197,9 +181,9 @@ func TestReviewSnapshotRejectsUnsafeOrOversizedReportsAndCleansUp(t *testing.T) 
 			}
 			switch invalid {
 			case "report limit":
-				writeIndexFixture(t, output, "REPORT.md", []byte(strings.Repeat("x", maxOutputBytes+1)))
+				writeFixtureFile(t, output, "REPORT.md", []byte(strings.Repeat("x", maxOutputBytes+1)))
 			case "artifact limit":
-				writeIndexFixture(t, output, "findings.json", make([]byte, maxAuditArtifactBytes+1))
+				writeFixtureFile(t, output, "findings.json", make([]byte, maxAuditArtifactBytes+1))
 			case "symlink":
 				if err := os.Symlink(filepath.Join(source, "source.txt"), filepath.Join(output, "REPORT.md")); err != nil {
 					t.Fatal(err)
@@ -233,7 +217,7 @@ func TestReviewSnapshotCleansFailedFixCandidateMaterialization(t *testing.T) {
 			}
 			index, source := offlineIndexFixture(t, job.Source.Files)
 			if stage == "addition" {
-				writeIndexFixture(t, source, name, []byte("added"))
+				writeFixtureFile(t, source, name, []byte("added"))
 			}
 			control, err := freezeReviewSnapshot(context.Background(), t.TempDir(), job, source, "", index)
 			if err != nil {

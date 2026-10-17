@@ -137,7 +137,7 @@ func TestRunAIRevisionPreservesWorkAndBoundaries(t *testing.T) {
 				if calls == 2 {
 					return aicli.Result{Answer: fmt.Sprintf(`{"approved":false,"has_blockers":true,"feedback":%q}`, feedback)}, nil
 				}
-				return aicli.Result{Answer: `{"approved":true,"has_blockers":false,"feedback":""}`}, nil
+				return aicli.Result{Answer: approvedCritiqueJSON}, nil
 			}
 			answer, err := e.runAI(ctx, job, dir, task, !tt.reports, outputDir)
 			if err != nil || answer != "revised proposal" || calls != 5 {
@@ -179,14 +179,14 @@ func TestRunAIFreshReviewFindingsUseRemainingRounds(t *testing.T) {
 			if request.round == 2 {
 				feedback = missedFinding
 			} else if request.round == 3 {
-				return aicli.Result{Answer: `{"approved":true,"has_blockers":false,"feedback":""}`}, nil
+				return aicli.Result{Answer: approvedCritiqueJSON}, nil
 			}
 			return aicli.Result{Answer: fmt.Sprintf(`{"approved":false,"has_blockers":true,"feedback":%q}`, feedback)}, nil
 		}
 		if request.reviewPhase != "verification" || !strings.Contains(request.criticPrompt("", ""), privateNotes) {
 			t.Fatalf("verification lacks private rationale: %+v", request)
 		}
-		return aicli.Result{Answer: `{"approved":true,"has_blockers":false,"feedback":""}`}, nil
+		return aicli.Result{Answer: approvedCritiqueJSON}, nil
 	}
 	answer, err := e.runAI(context.Background(), job, t.TempDir(), task, true, "")
 	if err != nil || answer != "candidate 3" || len(calls) != 8 {
@@ -228,7 +228,7 @@ func TestRunAIVerificationRejectionFeedsNextRevision(t *testing.T) {
 				}
 			}
 		}
-		return aicli.Result{Answer: `{"approved":true,"has_blockers":false,"feedback":""}`}, nil
+		return aicli.Result{Answer: approvedCritiqueJSON}, nil
 	}}
 	job := Job{Main: RoleSettings{Provider: "codex"}, Critic: &RoleSettings{Provider: "claude"}, CriticMaxRounds: 3}
 	answer, err := runner.runAI(context.Background(), job, t.TempDir(), "selected task", false, "")
@@ -276,7 +276,7 @@ func TestRunAINeverPublishesScopedApprovalAlone(t *testing.T) {
 					if tt.cancel {
 						cancel()
 					}
-					return aicli.Result{Answer: `{"approved":true,"has_blockers":false,"feedback":""}`}, nil
+					return aicli.Result{Answer: approvedCritiqueJSON}, nil
 				}
 				return aicli.Result{Answer: tt.verdict}, tt.failure
 			}
@@ -403,7 +403,7 @@ func TestParseCritique(t *testing.T) {
 		name, input, feedback        string
 		approved, hasBlockers, valid bool
 	}{
-		{name: "approval", input: `{"approved":true,"has_blockers":false,"feedback":""}`, approved: true, valid: true},
+		{name: "approval", input: approvedCritiqueJSON, approved: true, valid: true},
 		{name: "rejection", input: `{"feedback":" Repair the defect. ","approved":false,"has_blockers":true}`, feedback: "Repair the defect.", hasBlockers: true, valid: true},
 		{name: "nonblocking findings", input: `{"approved":false,"has_blockers":false,"feedback":"Nit: simplify the loop."}`, feedback: "Nit: simplify the loop.", valid: true},
 		{name: "not an object", input: `[]`},
@@ -446,9 +446,9 @@ func TestCommentPublishesOnlyCriticAcceptedResult(t *testing.T) {
 		threshold             *int
 		wantError             bool
 	}{
-		{name: "approved", verdict: `{"approved":true,"has_blockers":false,"feedback":""}`},
-		{name: "approved rendered boundary", verdict: `{"approved":true,"has_blockers":false,"feedback":""}`, answer: boundary},
-		{name: "rendered overflow", verdict: `{"approved":true,"has_blockers":false,"feedback":""}`, answer: boundary + "x", wantError: true},
+		{name: "approved", verdict: approvedCritiqueJSON},
+		{name: "approved rendered boundary", verdict: approvedCritiqueJSON, answer: boundary},
+		{name: "rendered overflow", verdict: approvedCritiqueJSON, answer: boundary + "x", wantError: true},
 		{name: "rejected", verdict: `{"approved":false,"has_blockers":true,"feedback":"A defect remains."}`, wantError: true},
 		{name: "nonblocking accepted", verdict: `{"approved":false,"has_blockers":false,"feedback":"Nit: simplify the loop."}`, threshold: &one},
 		{name: "strict nonblocking rejected", verdict: `{"approved":false,"has_blockers":false,"feedback":"Nit: simplify the loop."}`, threshold: &zero, wantError: true},

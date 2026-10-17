@@ -510,9 +510,9 @@ func TestJSONLOutputCapturesUsageAndHelpers(t *testing.T) {
 func TestJSONLOutputStopsAtCardinalityLimits(t *testing.T) {
 	t.Run("events", func(t *testing.T) {
 		cancelled := false
-		output := jsonlOutput{cancel: func() { cancelled = true }}
-		_, _ = output.Write([]byte(strings.Repeat("{\"type\":\"noop\"}\n", maxCodexEvents+1)))
-		if !cancelled || !output.failed || output.stream.Events != maxCodexEvents+1 || !strings.Contains(output.failureReason, "event count") {
+		output := jsonlOutput{cancel: func() { cancelled = true }, stream: aicli.JSONL{Events: aicli.MaxEvents}}
+		_, _ = output.Write([]byte("{\"type\":\"noop\"}\n"))
+		if !cancelled || !output.failed || !strings.Contains(output.failureReason, "event count") {
 			t.Fatalf("unbounded events: cancelled=%t events=%d reason=%q", cancelled, output.stream.Events, output.failureReason)
 		}
 	})
@@ -530,14 +530,6 @@ func TestJSONLOutputStopsAtCardinalityLimits(t *testing.T) {
 		_, _ = output.Write(append(line, '\n'))
 		if !cancelled || !output.failed || len(output.children) != maxCodexChildren || !strings.Contains(output.failureReason, "child agent") {
 			t.Fatalf("unbounded children: cancelled=%t children=%d reason=%q", cancelled, len(output.children), output.failureReason)
-		}
-	})
-	t.Run("bytes", func(t *testing.T) {
-		cancelled := false
-		output := jsonlOutput{cancel: func() { cancelled = true }, stream: aicli.JSONL{Bytes: maxCodexOutputBytes - 1}}
-		_, _ = output.Write([]byte("xx"))
-		if !cancelled || !output.failed || !strings.Contains(output.failureReason, "size limit") {
-			t.Fatalf("unbounded output bytes: cancelled=%t reason=%q", cancelled, output.failureReason)
 		}
 	})
 }

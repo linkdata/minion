@@ -11,7 +11,6 @@ import (
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
-	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/usage"
 )
 
@@ -45,7 +44,7 @@ func TestUsageAggregateBounds(t *testing.T) {
 					native = append(native, tokens)
 					answer := proposalJSON("No findings.", "Private evidence.")
 					if request.role == roleCritic {
-						answer = `{"approved":true,"has_blockers":false,"feedback":""}`
+						answer = approvedCritiqueJSON
 						if scenario.revise && request.round == 1 {
 							answer = `{"approved":false,"has_blockers":true,"feedback":"Check the remaining detail."}`
 						}
@@ -57,9 +56,7 @@ func TestUsageAggregateBounds(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			job := portableJob(command.Comment)
-			job.Critic = &RoleSettings{Provider: "claude"}
-			job.CriticMaxRounds = config.DefaultCriticMaxRounds
+			job := withClaudeCritic(portableJob(command.Comment))
 			result, err := orchestrator.Runner.Run(context.Background(), job)
 			if err != nil {
 				t.Fatalf("valid paid work failed on aggregate usage: %v", err)

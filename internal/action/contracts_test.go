@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/monitor"
@@ -206,9 +205,7 @@ func TestResultJSONRoundTripPreservesValidatedPayload(t *testing.T) {
 }
 
 func TestStatusUsesConfiguredRoundBudget(t *testing.T) {
-	job := portableJob(command.Comment)
-	job.Critic = &RoleSettings{Provider: "claude"}
-	job.CriticMaxRounds = config.DefaultCriticMaxRounds
+	job := withClaudeCritic(portableJob(command.Comment))
 	for _, limit := range []int{config.DefaultCriticMaxRounds, config.MaxCriticMaxRounds} {
 		job.CriticMaxRounds = limit
 		status := Status{Version: ProtocolVersion, Identity: job.Identity, State: StatusRunning, Phase: PhaseCritic, Round: limit, ReviewPhase: "full"}
@@ -223,9 +220,7 @@ func TestStatusUsesConfiguredRoundBudget(t *testing.T) {
 }
 
 func TestStatusDistinguishesReviewPhases(t *testing.T) {
-	job := portableJob(command.Comment)
-	job.Critic = &RoleSettings{Provider: "claude"}
-	job.CriticMaxRounds = config.DefaultCriticMaxRounds
+	job := withClaudeCritic(portableJob(command.Comment))
 	for _, tt := range []struct {
 		name        string
 		phase       StatusPhase
@@ -283,10 +278,7 @@ func TestFixJobIncludesOmittedPathsInUpfrontFoldedLayout(t *testing.T) {
 			if err := workspace.ValidateSnapshot(job.Source); err != nil {
 				t.Fatalf("test does not describe a valid exact source: %v", err)
 			}
-			runner := Runner{WorkRoot: t.TempDir(), runModel: func(context.Context, modelRun) (aicli.Result, error) {
-				t.Fatal("model ran with a folded file/omission collision")
-				return aicli.Result{}, nil
-			}}
+			runner := Runner{WorkRoot: t.TempDir(), runModel: forbidModel(t)}
 			if _, err := runner.Run(context.Background(), job); !errors.Is(err, monitor.ErrTerminalJob) || (!strings.Contains(err.Error(), "collision") && !strings.Contains(err.Error(), "duplicate source path")) {
 				t.Fatalf("unsupported fix source was not refused before execution: %v", err)
 			}
@@ -672,20 +664,8 @@ func TestJobRequiresExplicitCriticBudgetAndDefaultBranchFix(t *testing.T) {
 
 func TestAuditResultAnswerMustMatchTransferredReport(t *testing.T) {
 	job := portableJob(command.SecurityAudit)
-	const report = "Reviewed audit report."
-	metadata := []byte(fmt.Sprintf(`{"run_id":"contract-test","repo":%q,"target":%q,"source_ref":%q,"profile":"standard","scope_paths":["."],"budget":null,"selected_companion_files":[],"prior_run_paths":[],"shared_file_owners":%s,"execution_policy":"sandboxed-source-and-local-only","run_status":"complete"}`, job.Identity.Repository, sourceIdentity(job), job.Source.Head, auditTestOwners))
-	result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: report,
-		Calls: []CallUsage{{Provider: job.Main.Provider, Role: "main", Round: 1}}}
-	for _, name := range auditArtifacts {
-		data := []byte("content")
-		switch name {
-		case "run-metadata.json":
-			data = metadata
-		case "REPORT.md":
-			data = []byte(report)
-		}
-		result.Artifacts = append(result.Artifacts, workspace.File{Path: name, Mode: workspace.Regular, Data: data})
-	}
+	result := completeAuditResult(job)
+	report := result.Answer
 	if err := result.Validate(job); err != nil {
 		t.Fatalf("invalid complete audit fixture: %v", err)
 	}

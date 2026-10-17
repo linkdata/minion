@@ -18,7 +18,7 @@ func TestSnapshotRejectsUnrelatedPullRequestHistories(t *testing.T) {
 	fixture.git(fixture.source, "commit", "-m", "unrelated root")
 	head := fixture.git(fixture.source, "rev-parse", "HEAD")
 	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/pull/7/head")
-	checkout, err := clonePullRequestFromURL(context.Background(), t.TempDir(), fixture.remote, 7, "main", head, localTreeMetadata(t, fixture.source))
+	checkout, err := clonePullRequestFromURL(context.Background(), t.TempDir(), fixture.remote, 7, "main", head, localTreeMetadata(fixture.source))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,9 +45,6 @@ func TestClonePullRequestSkipsUnusedBaseTip(t *testing.T) {
 				unused, want = "git~1/hooks/test", ErrUnsupportedSource
 			}
 			path := filepath.Join(fixture.source, filepath.FromSlash(unused))
-			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-				t.Fatal(err)
-			}
 			writeFile(t, path, "unused base-tip blob\n")
 			fixture.git(fixture.source, "-c", "core.protectHFS=false", "-c", "core.protectNTFS=false", "add", ".")
 			fixture.git(fixture.source, "commit", "-m", "advance base")
@@ -56,7 +53,7 @@ func TestClonePullRequestSkipsUnusedBaseTip(t *testing.T) {
 			unusedBlob := fixture.git(fixture.source, "rev-parse", "HEAD:"+unused)
 			fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/heads/main")
 			fixture.git(fixture.remote, "config", "uploadpack.allowFilter", "true")
-			lookup := localTreeMetadata(t, fixture.source)
+			lookup := localTreeMetadata(fixture.source)
 			baseLookups := 0
 			metadata := func(ctx context.Context, sha string) (github.GitTree, error) {
 				tree, err := lookup(ctx, sha)
@@ -110,9 +107,6 @@ func TestPullRequestRejectsDeletedMergeBaseMetadataAliasBeforeBlobFetch(t *testi
 		t.Run(name, func(t *testing.T) {
 			fixture := newFixture(t)
 			path := filepath.Join(fixture.source, filepath.FromSlash(name))
-			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-				t.Fatal(err)
-			}
 			writeFile(t, path, strings.Repeat("alias blob", 1024))
 			fixture.git(fixture.source, "-c", "core.protectNTFS=false", "-c", "core.protectHFS=false", "add", ".")
 			fixture.git(fixture.source, "commit", "-m", "unsupported merge base")
@@ -126,7 +120,7 @@ func TestPullRequestRejectsDeletedMergeBaseMetadataAliasBeforeBlobFetch(t *testi
 			head := fixture.git(fixture.source, "rev-parse", "HEAD")
 			fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/pull/7/head")
 			fixture.git(fixture.remote, "config", "uploadpack.allowFilter", "true")
-			checkout, err := clonePullRequestFromURL(context.Background(), t.TempDir(), "file://"+fixture.remote, 7, "main", head, localTreeMetadata(t, fixture.source))
+			checkout, err := clonePullRequestFromURL(context.Background(), t.TempDir(), "file://"+fixture.remote, 7, "main", head, localTreeMetadata(fixture.source))
 			if err != nil {
 				t.Fatal(err)
 			}

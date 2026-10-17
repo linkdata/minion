@@ -39,7 +39,7 @@ func TestRunnerReviewRevisionsFreezeCleanIndependentInputs(t *testing.T) {
 					t.Fatalf("old critic snapshot survived into main revision: %v", err)
 				}
 			}
-			writeIndexFixture(t, source, "source.txt", []byte(fmt.Sprintf("candidate %d", request.round)))
+			writeFixtureFile(t, source, "source.txt", []byte(fmt.Sprintf("candidate %d", request.round)))
 			return aicli.Result{Answer: proposalJSON(fmt.Sprintf("answer %d", request.round), fmt.Sprintf("PRIVATE NOTES %d", request.round))}, nil
 		}
 		if request.dir == source || request.writable || request.outputDir != "" {
@@ -71,7 +71,7 @@ func TestRunnerReviewRevisionsFreezeCleanIndependentInputs(t *testing.T) {
 		} else if request.dir != revisionReview {
 			t.Fatal("unchanged verification/full phases copied different candidates")
 		}
-		return aicli.Result{Answer: `{"approved":true,"has_blockers":false,"feedback":""}`}, nil
+		return aicli.Result{Answer: approvedCritiqueJSON}, nil
 	}
 	result, err := runner.Run(context.Background(), job)
 	if err != nil || result.Answer != "answer 2" || len(result.Changes) != 1 || string(result.Changes[0].Data) != "candidate 2" {
@@ -90,19 +90,17 @@ func TestRunnerReviewRevisionsFreezeCleanIndependentInputs(t *testing.T) {
 func TestRunnerReviewRejectsSourceMutationEvenAfterRejection(t *testing.T) {
 	for _, approved := range []bool{false, true} {
 		t.Run(fmt.Sprintf("approved=%t", approved), func(t *testing.T) {
-			job := portableJob(command.Fix)
-			job.Critic = &RoleSettings{Provider: "claude"}
-			job.CriticMaxRounds = config.DefaultCriticMaxRounds
+			job := withClaudeCritic(portableJob(command.Fix))
 			var source string
 			calls := 0
 			runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 				calls++
 				if request.role == "main" {
 					source = request.dir
-					writeIndexFixture(t, source, "source.txt", []byte("candidate"))
+					writeFixtureFile(t, source, "source.txt", []byte("candidate"))
 					return aicli.Result{Answer: proposalJSON("answer", "")}, nil
 				}
-				writeIndexFixture(t, source, "source.txt", []byte("background edit"))
+				writeFixtureFile(t, source, "source.txt", []byte("background edit"))
 				if data, err := workspace.ReadRegular(filepath.Join(request.dir, "source.txt"), workspace.MaxBytes); err != nil || string(data) != "candidate" {
 					t.Fatalf("live mutation reached frozen copy: %q, %v", data, err)
 				}
@@ -146,20 +144,18 @@ esac
 exec %s "$@"
 `, shellQuote(armed), shellQuote(realGit), shellQuote(armed), shellQuote(changed), shellQuote(armed), shellQuote(realGit))
 	fakeOnPath(t, "git", script)
-	job := portableJob(command.Fix)
-	job.Critic = &RoleSettings{Provider: "claude"}
-	job.CriticMaxRounds = config.DefaultCriticMaxRounds
+	job := withClaudeCritic(portableJob(command.Fix))
 	var source string
 	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 		if request.role == "main" {
 			source = request.dir
-			writeIndexFixture(t, source, "source.txt", []byte("approved candidate"))
+			writeFixtureFile(t, source, "source.txt", []byte("approved candidate"))
 			return aicli.Result{Answer: proposalJSON("approved answer", "")}, nil
 		}
 		if err := os.WriteFile(armed, []byte(source), 0600); err != nil {
 			t.Fatal(err)
 		}
-		return aicli.Result{Answer: `{"approved":true,"has_blockers":false,"feedback":""}`}, nil
+		return aicli.Result{Answer: approvedCritiqueJSON}, nil
 	}}
 	result, err := runner.Run(context.Background(), job)
 	if err != nil || len(result.Changes) != 1 || string(result.Changes[0].Data) != "approved candidate" {
@@ -214,7 +210,7 @@ func TestRunnerAuditReviewFreezesAndExportsRawReports(t *testing.T) {
 						if (scenario == "empty architecture" || scenario == "empty architecture repaired" && request.round == 1) && name == "architecture.md" {
 							content = nil
 						}
-						writeIndexFixture(t, reports, name, content)
+						writeFixtureFile(t, reports, name, content)
 					}
 					return aicli.Result{Answer: proposalJSON("main response is not the published report", "")}, nil
 				}
@@ -239,13 +235,13 @@ func TestRunnerAuditReviewFreezesAndExportsRawReports(t *testing.T) {
 					return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"feedback":"Fill architecture.md with the required architecture report."}`}, nil
 				}
 				if scenario == "mutated during critic" {
-					writeIndexFixture(t, reports, "REPORT.md", []byte("concurrent report edit"))
+					writeFixtureFile(t, reports, "REPORT.md", []byte("concurrent report edit"))
 					data, err := workspace.ReadRegular(filepath.Join(frozenReports, "REPORT.md"), maxOutputBytes)
 					if err != nil || string(data) != "approved report" {
 						t.Fatalf("concurrent report edit reached frozen copy=%q,%v", data, err)
 					}
 				}
-				return aicli.Result{Answer: `{"approved":true,"has_blockers":false,"feedback":""}`}, nil
+				return aicli.Result{Answer: approvedCritiqueJSON}, nil
 			}
 			result, err := runner.Run(context.Background(), job)
 			if scenario == "mutated during critic" || scenario == "empty architecture" {
@@ -282,9 +278,7 @@ func TestRunnerAuditReviewFreezesAndExportsRawReports(t *testing.T) {
 func TestRunnerReviewRejectsInvalidFixBeforeCritic(t *testing.T) {
 	for _, scenario := range []string{"omitted path", "directory spelling collision"} {
 		t.Run(scenario, func(t *testing.T) {
-			job := portableJob(command.Fix)
-			job.Critic = &RoleSettings{Provider: "claude"}
-			job.CriticMaxRounds = config.DefaultCriticMaxRounds
+			job := withClaudeCritic(portableJob(command.Fix))
 			name, want := "omitted", "omitted source path"
 			if scenario == "omitted path" {
 				job.Source.Omitted = []string{name}
@@ -298,7 +292,7 @@ func TestRunnerReviewRejectsInvalidFixBeforeCritic(t *testing.T) {
 				if request.role != "main" {
 					t.Fatal("critic ran on an invalid result layout")
 				}
-				writeIndexFixture(t, request.dir, name, []byte("invalid change"))
+				writeFixtureFile(t, request.dir, name, []byte("invalid change"))
 				return aicli.Result{Answer: proposalJSON("candidate", "")}, nil
 			}}
 			if _, err := runner.Run(context.Background(), job); !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), want) || calls != 1 {

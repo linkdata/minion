@@ -23,7 +23,6 @@ import (
 	"github.com/linkdata/minion/internal/gitwork"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/skills"
-	"github.com/linkdata/minion/internal/state"
 	"github.com/linkdata/minion/internal/usage"
 	"github.com/linkdata/minion/internal/workspace"
 )
@@ -33,7 +32,7 @@ func TestFixReplyFailureConsumesPublicationAttempt(t *testing.T) {
 		t.Run(fmt.Sprintf("recovery=%t", recovery), func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.Method == http.MethodGet && r.URL.Path == "/repos/o/r" {
-					_, _ = fmt.Fprint(w, `{"id":1,"full_name":"o/r","owner":{"id":2}}`)
+					_, _ = fmt.Fprint(w, publicRepositoryJSON)
 					return
 				}
 				if r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/issues/7/comments" {
@@ -44,20 +43,13 @@ func TestFixReplyFailureConsumesPublicationAttempt(t *testing.T) {
 				http.NotFound(w, r)
 			}))
 			defer server.Close()
-			store, err := state.Open(filepath.Join(t.TempDir(), "state.json"), time.Now())
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer func() {
-				if err := store.Close(); err != nil {
-					t.Error(err)
-				}
-			}()
+			store := openState(t, time.Now())
 			client := testGitHub(server, "fixture-token")
 			request := monitor.Job{ID: strings.Repeat("a", 64), SubjectType: "Issue", Number: 7,
 				Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2}, Command: command.Command{Action: command.Fix}}
 			prepared := &preparedAction{request: request, repository: github.Repository{FullName: "o/r", DefaultBranch: "main"}, fork: github.Repository{FullName: "bot/r"}}
 			orchestrator := Orchestrator{GitHub: client, Store: store, BotLogin: "bot"}
+			var err error
 			if recovery {
 				prepared.branch = "minion/fix-recorded"
 				store.Data.PendingFixes[request.ID] = strings.Repeat("b", 40)
@@ -89,7 +81,7 @@ func TestExecuteSourceFailuresAndInvalidIncompleteResultsAreTerminal(t *testing.
 				case r.URL.Path == "/repos/o/r/issues/7/comments":
 					_, _ = fmt.Fprint(w, `[]`)
 				case r.URL.Path == "/repos/o/r":
-					_, _ = fmt.Fprint(w, `{"id":1,"full_name":"o/r","owner":{"id":2},"default_branch":"main"}`)
+					_, _ = fmt.Fprint(w, publicRepositoryJSON)
 				case r.URL.Path == "/repos/o/r/issues/7":
 					_, _ = fmt.Fprint(w, `{"title":"Task","body":"Inspect source"}`)
 				case strings.HasPrefix(r.URL.Path, "/repos/o/r/git/trees/"):
@@ -121,11 +113,11 @@ func TestExecuteSourceFailuresAndInvalidIncompleteResultsAreTerminal(t *testing.
 			wantCalls := 0
 			switch scenario {
 			case "oversized source":
-				if !errors.Is(err, gitwork.ErrCheckoutTooLarge) {
+				if !errors.Is(err, gitwork.ErrCheckoutTooLarge) || errors.Is(err, gitwork.ErrUnsupportedSource) {
 					t.Fatalf("source size cause lost: %v", err)
 				}
 			case "unsupported source":
-				if !errors.Is(err, gitwork.ErrUnsupportedSource) {
+				if !errors.Is(err, gitwork.ErrUnsupportedSource) || errors.Is(err, gitwork.ErrCheckoutTooLarge) {
 					t.Fatalf("unsupported source cause lost: %v", err)
 				}
 			default:
@@ -155,18 +147,10 @@ func TestPrepareFixClassifiesUnsupportedLayoutBeforeBranchOrModels(t *testing.T)
 			}
 			branched := filepath.Join(t.TempDir(), "branched")
 			fakeOnPath(t, "git", fmt.Sprintf("#!/bin/sh\ncase \" $* \" in *\" switch --create \"*) printf created > %s;; esac\nexec %s \"$@\"\n", shellQuote(branched), shellQuote(git)))
-			store, err := state.Open(filepath.Join(t.TempDir(), "state.json"), time.Now())
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer func() {
-				if err := store.Close(); err != nil {
-					t.Error(err)
-				}
-			}()
+			store := openState(t, time.Now())
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch {
-				case serveSafeForkChecks(w, r, "o/r", "bot/r", false):
+				case serveSafeForkChecks(w, r, "bot/r", false):
 				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
 					_, _ = fmt.Fprint(w, `{"id":1,"full_name":"o/r","owner":{"id":2},"default_branch":"main","visibility":"public"}`)
 				case r.Method == http.MethodGet && r.URL.Path == "/repos/bot/r":
@@ -190,10 +174,7 @@ func TestPrepareFixClassifiesUnsupportedLayoutBeforeBranchOrModels(t *testing.T)
 			root := t.TempDir()
 			orchestrator := &Orchestrator{WorkRoot: root, GitHub: testGitHub(server, "token"), BotLogin: "bot", Store: store,
 				Commands: map[string]config.CommandMapping{"fix": {Action: "fix", Skills: []string{skills.BuiltinAntiPromptInjection}}},
-				Runner: Runner{WorkRoot: t.TempDir(), runModel: func(context.Context, modelRun) (aicli.Result, error) {
-					t.Fatal("model ran for unsupported source")
-					return aicli.Result{}, nil
-				}},
+				Runner:   Runner{WorkRoot: t.TempDir(), runModel: forbidModel(t)},
 			}
 			request := monitor.Job{ID: strings.Repeat("a", 64), SubjectType: "Issue", Number: 7,
 				Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"fix"}},
@@ -224,15 +205,7 @@ func TestExecuteLogsCheckoutCleanupFailureAfterSuccessfulPublication(t *testing.
 			t.Error(err)
 		}
 	})
-	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"), time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := store.Close(); err != nil {
-			t.Error(err)
-		}
-	}()
+	store := openState(t, time.Now())
 	request := monitor.Job{ID: strings.Repeat("a", 64), SubjectType: "Issue", Number: 7,
 		Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"fix"}},
 		Source:     github.Item{UpdatedAt: time.Now(), Author: github.User{ID: 3, Login: "writer"}},
@@ -246,7 +219,7 @@ func TestExecuteLogsCheckoutCleanupFailureAfterSuccessfulPublication(t *testing.
 			_, _ = fmt.Fprint(w, `{"id":1,"full_name":"o/r","owner":{"id":2},"default_branch":"main","visibility":"public"}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/bot/r":
 			_, _ = fmt.Fprint(w, `{"id":4,"full_name":"bot/r","fork":true,"parent":{"id":1,"full_name":"o/r"},"source":{"id":1,"full_name":"o/r"},"visibility":"public"}`)
-		case serveSafeForkChecks(w, r, "o/r", "bot/r", false):
+		case serveSafeForkChecks(w, r, "bot/r", false):
 		case r.Method == http.MethodGet && (r.URL.Path == "/repos/o/r/pulls" || r.URL.Path == "/repos/o/r/issues/7/comments"):
 			_, _ = fmt.Fprint(w, `[]`)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/bot/r/branches/minion/fix-7-aaaaaaaaaaaa":
@@ -323,7 +296,7 @@ func TestPublishFixRejectsNonemptyReviewedChangesDroppedByGit(t *testing.T) {
 					http.NotFound(w, r)
 					return
 				}
-				if serveSafeForkChecks(w, r, "o/r", "bot/r", false) {
+				if serveSafeForkChecks(w, r, "bot/r", false) {
 					return
 				}
 				switch r.URL.Path {
@@ -343,15 +316,7 @@ func TestPublishFixRejectsNonemptyReviewedChangesDroppedByGit(t *testing.T) {
 			defer server.Close()
 			client := testGitHub(server, "token")
 			root := t.TempDir()
-			checkout, err := gitwork.Clone(context.Background(), root, "o/r", "main", emptyTreeFixture, true)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer func() {
-				if err := checkout.Close(); err != nil {
-					t.Error(err)
-				}
-			}()
+			checkout := cloneFixture(t, root)
 			const branch = "minion/fix-reviewed"
 			if err := checkout.NewBranch(context.Background(), branch); err != nil {
 				t.Fatal(err)
@@ -405,26 +370,10 @@ func TestPublishFixRejectsNonemptyReviewedChangesDroppedByGit(t *testing.T) {
 
 func TestCompletedAuditRetentionFailureIsTerminal(t *testing.T) {
 	base, _, _ := gitFixtureRemote(t)
-	checkout, err := gitwork.Clone(context.Background(), t.TempDir(), "o/r", "main", emptyTreeFixture, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := checkout.Close(); err != nil {
-			t.Error(err)
-		}
-	}()
+	checkout := cloneFixture(t, t.TempDir())
 	job := portableJob(command.SecurityAudit)
 	job.Source.Head, job.Source.Files = base, nil
-	result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: base, Answer: "content", Calls: []CallUsage{{Provider: job.Main.Provider, Role: "main", Round: 1}}}
-	metadata := []byte(fmt.Sprintf(`{"run_id":"test-run","repo":%q,"target":%q,"source_ref":%q,"profile":"standard","scope_paths":["."],"budget":null,"selected_companion_files":[],"prior_run_paths":[],"shared_file_owners":%s,"execution_policy":"sandboxed-source-and-local-only","run_status":"complete"}`, job.Identity.Repository, sourceIdentity(job), base, auditTestOwners))
-	for _, name := range auditArtifacts {
-		data := []byte("content")
-		if name == "run-metadata.json" {
-			data = metadata
-		}
-		result.Artifacts = append(result.Artifacts, workspace.File{Path: name, Mode: workspace.Regular, Data: data})
-	}
+	result := completeAuditResult(job)
 	if err := result.Validate(job); err != nil {
 		t.Fatal(err)
 	}
@@ -442,7 +391,7 @@ func TestCompletedAuditRetentionFailureIsTerminal(t *testing.T) {
 	}
 	orchestrator := Orchestrator{GitHub: client, WorkRoot: blocked, Runner: Runner{WorkRoot: t.TempDir()}}
 	prepared := &preparedAction{job: job, checkout: checkout, request: monitor.Job{Command: command.Command{Action: command.SecurityAudit}}}
-	err = orchestrator.publish(context.Background(), prepared, result)
+	err := orchestrator.publish(context.Background(), prepared, result)
 	if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "retain completed audit") || writes != 0 {
 		t.Fatalf("audit retention failure retried work or published: writes=%d err=%v", writes, err)
 	}

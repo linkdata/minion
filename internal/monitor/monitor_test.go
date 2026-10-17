@@ -303,7 +303,12 @@ func testNotification(at time.Time) github.Notification {
 
 func openState(t *testing.T, initial time.Time) *state.Store {
 	t.Helper()
-	s, err := state.Open(filepath.Join(t.TempDir(), "state.json"), initial)
+	return openStateAt(t, filepath.Join(t.TempDir(), "state.json"), initial)
+}
+
+func openStateAt(t *testing.T, path string, initial time.Time) *state.Store {
+	t.Helper()
+	s, err := state.Open(path, initial)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -50,20 +50,3 @@ func TestLinesOverflowIsImmediateAndDrainsRemainder(t *testing.T) {
 		t.Fatalf("EOF failed to drain oversized remainder: calls=%d writer=%+v", calls, w)
 	}
 }
-
-func TestLinesZeroLimit(t *testing.T) {
-	for _, limit := range []int{0, -1} {
-		empty, overflow := 0, 0
-		w := Lines{Limit: limit, Line: func(p []byte) {
-			if len(p) != 0 {
-				t.Fatal("nonempty zero-limit line")
-			}
-			empty++
-		}, Overflow: func() { overflow++ }}
-		_, _ = w.Write([]byte("\na\n"))
-		w.Finish()
-		if empty != 1 || overflow != 1 {
-			t.Fatalf("limit%d empty=%d overflow=%d", limit, empty, overflow)
-		}
-	}
-}

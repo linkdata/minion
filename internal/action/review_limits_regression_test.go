@@ -68,7 +68,7 @@ func TestReviewRoundBudgetIncludesEveryFreshFullRejection(t *testing.T) {
 						t.Fatalf("verification lost earlier correction evidence: %s", evidence)
 					}
 				}
-				return aicli.Result{Answer: `{"approved":true,"has_blockers":false,"feedback":""}`}, nil
+				return aicli.Result{Answer: approvedCritiqueJSON}, nil
 			}}
 			answer, err := runner.runAI(ctx, job, "source", task, true, "")
 			if !errors.Is(err, monitor.ErrTerminalJob) || answer != "" || !strings.Contains(err.Error(), fmt.Sprintf("after %d round(s)", rounds)) || len(got) != 3*rounds-1 {
@@ -106,7 +106,7 @@ func TestEveryActionPromptDeclaresRenderedPublicationBudget(t *testing.T) {
 				}
 				for _, requirement := range []string{
 					"Final response text must fit within 59392 UTF-8 bytes",
-					"after line-ending normalization, a two-byte quote prefix on every line and 14 bytes of code fences",
+					"after line-ending normalization, a two-byte quote prefix on every line and 12 bytes of code fences",
 					"oversized published text is refused rather than truncated",
 					"whole action must finish before " + deadline.UTC().Format(time.RFC3339),
 				} {
@@ -130,7 +130,7 @@ func TestEveryActionPromptDeclaresRenderedPublicationBudget(t *testing.T) {
 				}
 				if action == command.SecurityAudit {
 					for _, requirement := range []string{
-						"REPORT.md must fit within 59392 UTF-8 bytes after line-ending normalization, a two-byte quote prefix per line and 14 bytes of code fences",
+						"REPORT.md must fit within 59392 UTF-8 bytes after line-ending normalization, a two-byte quote prefix per line and 12 bytes of code fences",
 						"Do not execute repository code, builds, tests, or fixtures, probe live services, publish, or run network commands",
 						"Copy this source-only execution prohibition verbatim into every delegated agent prompt",
 					} {

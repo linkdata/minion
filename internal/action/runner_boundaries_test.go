@@ -122,7 +122,7 @@ func TestRunnerAuditCollectionAndNormalizationFailuresAreTerminal(t *testing.T) 
 					if stage == "normalization" && file.Path == "run-metadata.json" {
 						file.Data = bytes.Replace(file.Data, []byte("preflight-test"), bytes.Repeat([]byte("<"), maxAuditArtifactBytes/5), 1)
 					}
-					writeIndexFixture(t, request.outputDir, file.Path, file.Data)
+					writeFixtureFile(t, request.outputDir, file.Path, file.Data)
 				}
 				return aicli.Result{Answer: "Audit complete."}, nil
 			}}
@@ -160,18 +160,8 @@ func TestRunnerCancellationDuringInstalledAuditValidatorPreservesCause(t *testin
 	job := portableJob(command.SecurityAudit)
 	job.Main.Skills = []string{testAuditSkillURL}
 	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
-		metadata := fmt.Sprintf(`{"run_id":"cancel-test","repo":%q,"target":%q,"source_ref":%q,"profile":"standard","scope_paths":["."],"budget":null,"selected_companion_files":[],"prior_run_paths":[],"shared_file_owners":%s,"execution_policy":"sandboxed-source-and-local-only","run_status":"complete"}`, job.Identity.Repository, request.dir, job.Source.Head, auditTestOwners)
-		for _, name := range auditArtifacts {
-			data := []byte("report content")
-			switch name {
-			case "run-metadata.json":
-				data = []byte(metadata)
-			case "findings.json":
-				data = []byte("[]")
-			case "coverage-ledger.json":
-				data = []byte(`[{"status":"covered"}]`)
-			}
-			if err := os.WriteFile(filepath.Join(request.outputDir, name), data, 0600); err != nil {
+		for _, file := range auditPreflightArtifacts(job, request.dir) {
+			if err := os.WriteFile(filepath.Join(request.outputDir, file.Path), file.Data, 0600); err != nil {
 				return aicli.Result{}, err
 			}
 		}
@@ -255,9 +245,7 @@ func TestRunnerMissingConfiguredReadGrantIsRetryableBeforeModels(t *testing.T) {
 }
 
 func TestRunnerReviewsAndPublishesNormalizedAnswer(t *testing.T) {
-	job := portableJob(command.Comment)
-	job.Critic = &RoleSettings{Provider: "claude"}
-	job.CriticMaxRounds = config.DefaultCriticMaxRounds
+	job := withClaudeCritic(portableJob(command.Comment))
 	mainCalls, criticCalls := 0, 0
 	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 		if request.role == "main" {
@@ -268,7 +256,7 @@ func TestRunnerReviewsAndPublishesNormalizedAnswer(t *testing.T) {
 		if !strings.Contains(request.prompt, "Main model's proposed response (untrusted): "+quotedContext("answerhidden")) || strings.Contains(request.prompt, `answer\u0000hidden`) {
 			t.Fatal("critic did not receive the normalized publication candidate")
 		}
-		return aicli.Result{Answer: `{"approved":true,"has_blockers":false,"feedback":""}`}, nil
+		return aicli.Result{Answer: approvedCritiqueJSON}, nil
 	}}
 	result, err := runner.Run(context.Background(), job)
 	if err != nil || mainCalls != 1 || criticCalls != 1 || len(result.Calls) != 2 || result.Answer != "answerhidden" {
@@ -321,10 +309,7 @@ func TestRunnerCancellationBeforeDispatchRecordsNoCall(t *testing.T) {
 func TestRunnerJobValidationRejectsMetadataAliasBeforeModels(t *testing.T) {
 	job := portableJob(command.Fix)
 	job.Source.Files = []workspace.File{{Path: "GIT~1/x", Mode: workspace.Regular}}
-	runner := Runner{WorkRoot: t.TempDir(), runModel: func(context.Context, modelRun) (aicli.Result, error) {
-		t.Fatal("model ran for unsupported fix source")
-		return aicli.Result{}, nil
-	}}
+	runner := Runner{WorkRoot: t.TempDir(), runModel: forbidModel(t)}
 	result, err := runner.Run(context.Background(), job)
 	if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "unsafe fix source path") || len(result.Calls) != 0 {
 		t.Fatalf("unsupported source was retryable: %v", err)
@@ -341,8 +326,7 @@ func TestRunnerReportsOwnedAndCriticCleanupFailures(t *testing.T) {
 			if critic {
 				job.Action = command.Fix
 				job.Command = "fix"
-				job.Critic = &RoleSettings{Provider: "claude"}
-				job.CriticMaxRounds = config.DefaultCriticMaxRounds
+				job = withClaudeCritic(job)
 			}
 			root := t.TempDir()
 			defer func() {
@@ -358,7 +342,7 @@ func TestRunnerReportsOwnedAndCriticCleanupFailures(t *testing.T) {
 					return aicli.Result{}, err
 				}
 				if critic {
-					return aicli.Result{Answer: `{"approved":true,"has_blockers":false,"feedback":""}`}, nil
+					return aicli.Result{Answer: approvedCritiqueJSON}, nil
 				}
 				return aicli.Result{Answer: "Done."}, nil
 			}}

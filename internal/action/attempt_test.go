@@ -3,20 +3,17 @@ package action
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"regexp"
-	"strings"
 	"testing"
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
-	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/usage"
 )
@@ -28,14 +25,7 @@ func TestExecuteScopesAttemptIdentity(t *testing.T) {
 			writes, calls := 0, 0
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch {
-				case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/o/r/git/trees/"):
-					writeTreeFixture(t, w, strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/"))
-				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
-					_, _ = fmt.Fprint(w, publicRepositoryJSON)
-				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7":
-					_, _ = fmt.Fprint(w, `{"title":"Task","body":"Inspect source"}`)
-				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7/comments":
-					_ = json.NewEncoder(w).Encode([]github.Comment{})
+				case serveIssueFixture(t, w, r):
 				case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/issues/7/comments":
 					writes++
 					w.WriteHeader(http.StatusCreated)

@@ -12,7 +12,6 @@ import (
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
-	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/workroot"
 	"github.com/linkdata/minion/internal/workspace"
@@ -27,9 +26,7 @@ func TestRunnerWorkRootIsolation(t *testing.T) {
 				t.Fatal(err)
 			}
 			runner := Runner{}
-			job := portableJob(command.Comment)
-			job.Critic = &RoleSettings{Provider: "claude"}
-			job.CriticMaxRounds = config.DefaultCriticMaxRounds
+			job := withClaudeCritic(portableJob(command.Comment))
 			switch kind {
 			case "main read":
 				runner.Codex.ReadOnlyDirs = []string{root}
@@ -37,7 +34,7 @@ func TestRunnerWorkRootIsolation(t *testing.T) {
 				runner.Claude.ReadOnlyDirs = []string{root}
 			case "main skill", "critic skill":
 				skill := filepath.Join(work, "skill", "SKILL.md")
-				writeIndexFixture(t, work, "skill/SKILL.md", []byte("trusted skill"))
+				writeFixtureFile(t, work, "skill/SKILL.md", []byte("trusted skill"))
 				if kind == "main skill" {
 					runner.Codex.Skills = []string{skill}
 				} else {
@@ -46,7 +43,7 @@ func TestRunnerWorkRootIsolation(t *testing.T) {
 			case "system read":
 				work = "/usr"
 			case "codex binary":
-				writeIndexFixture(t, work, "codex", []byte("#!/bin/sh\nexit 0\n"))
+				writeFixtureFile(t, work, "codex", []byte("#!/bin/sh\nexit 0\n"))
 				if err := os.Chmod(filepath.Join(work, "codex"), 0700); err != nil {
 					t.Fatal(err)
 				}
@@ -57,10 +54,7 @@ func TestRunnerWorkRootIsolation(t *testing.T) {
 			}
 		})
 	}
-	runner := Runner{WorkRoot: "/usr", runModel: func(context.Context, modelRun) (aicli.Result, error) {
-		t.Fatal("model ran in public system directory")
-		return aicli.Result{}, nil
-	}}
+	runner := Runner{WorkRoot: "/usr", runModel: forbidModel(t)}
 	if _, err := runner.Run(context.Background(), portableJob(command.Comment)); !errors.Is(err, workroot.ErrUnsafe) || errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "work root overlaps") {
 		t.Fatalf("unsafe root=%v", err)
 	}
@@ -89,19 +83,26 @@ func TestRunnerRejectsCanceledContextBeforePreparation(t *testing.T) {
 	}
 }
 
-func TestRunnerMaterializationFailureIsTerminalBeforeModels(t *testing.T) {
-	job := portableJob(command.Comment)
-	parts := make([]string, 16)
-	for i := range parts {
-		parts[i] = strings.Repeat("a", 255)
-	}
-	job.Source.Files[0].Path = strings.Join(parts, "/")
-	runner := Runner{WorkRoot: t.TempDir(), runModel: func(context.Context, modelRun) (aicli.Result, error) {
-		t.Fatal("model ran despite unrepresentable source")
-		return aicli.Result{}, nil
-	}}
-	if _, err := runner.Run(context.Background(), job); !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "materialize source") {
-		t.Fatalf("materialize=%v", err)
+func TestRunnerPreparationFailuresAreTerminalBeforeModels(t *testing.T) {
+	longPath := strings.TrimSuffix(strings.Repeat(strings.Repeat("a", 255)+"/", 16), "/")
+	for _, test := range []struct {
+		name   string
+		action command.Action
+		mutate func(*Job)
+		want   string
+	}{
+		{"source materialization", command.Comment, func(job *Job) { job.Source.Files[0].Path = longPath }, "materialize source"},
+		{"context materialization", command.Review, func(job *Job) { job.Source.BaseFiles[0].Path = longPath }, "materialize context"},
+		{"missing audit task skill", command.SecurityAudit, func(*Job) {}, "action prompt: security audit requires"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			job := portableJob(test.action)
+			test.mutate(&job)
+			runner := Runner{WorkRoot: t.TempDir(), runModel: forbidModel(t)}
+			if result, err := runner.Run(context.Background(), job); !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), test.want) || len(result.Calls) != 0 {
+				t.Fatalf("preparation result=%+v error=%v", result, err)
+			}
+		})
 	}
 }
 
@@ -154,36 +155,11 @@ func TestRunnerEnforcesSuppliedRuntimeBudget(t *testing.T) {
 	}
 }
 
-func TestRunnerContextMaterializationFailureIsTerminalBeforeModels(t *testing.T) {
-	job := portableJob(command.Review)
-	job.Source.BaseFiles[0].Path = strings.TrimSuffix(strings.Repeat(strings.Repeat("a", 255)+"/", 16), "/")
-	runner := Runner{WorkRoot: t.TempDir(), runModel: func(context.Context, modelRun) (aicli.Result, error) {
-		t.Fatal("model ran despite unrepresentable context")
-		return aicli.Result{}, nil
-	}}
-	if result, err := runner.Run(context.Background(), job); !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "materialize context") || len(result.Calls) != 0 {
-		t.Fatalf("context materialization result=%+v error=%v", result, err)
-	}
-}
-
-func TestRunnerMissingAuditTaskSkillIsTerminalBeforeModels(t *testing.T) {
-	job := portableJob(command.SecurityAudit)
-	runner := Runner{WorkRoot: t.TempDir(), runModel: func(context.Context, modelRun) (aicli.Result, error) {
-		t.Fatal("model ran without the audit task skill")
-		return aicli.Result{}, nil
-	}}
-	if result, err := runner.Run(context.Background(), job); !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "action prompt: security audit requires") || len(result.Calls) != 0 {
-		t.Fatalf("audit task result=%+v error=%v", result, err)
-	}
-}
-
 func TestRunnerReadOnlyCriticReusesSourceAndCanaryGuardsExport(t *testing.T) {
 	for _, action := range []command.Action{command.Review, command.Comment} {
 		for _, mutate := range []bool{false, true} {
 			t.Run(string(action)+"/mutate="+strconv.FormatBool(mutate), func(t *testing.T) {
-				job := portableJob(action)
-				job.Critic = &RoleSettings{Provider: "claude"}
-				job.CriticMaxRounds = config.DefaultCriticMaxRounds
+				job := withClaudeCritic(portableJob(action))
 				var source string
 				calls := 0
 				runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
@@ -200,7 +176,7 @@ func TestRunnerReadOnlyCriticReusesSourceAndCanaryGuardsExport(t *testing.T) {
 							t.Fatal(err)
 						}
 					}
-					return aicli.Result{Answer: `{"approved":true,"has_blockers":false,"feedback":""}`}, nil
+					return aicli.Result{Answer: approvedCritiqueJSON}, nil
 				}}
 				result, err := runner.Run(context.Background(), job)
 				if mutate {
@@ -224,10 +200,7 @@ func TestRunnerMissingHostSkillsRemainRetryableBeforeModels(t *testing.T) {
 		t.Run(provider, func(t *testing.T) {
 			job := portableJob(command.Comment)
 			job.Main = RoleSettings{Provider: provider, Skills: []string{"https://github.com/owner/repo/tree/pinned/skills/missing"}}
-			runner := Runner{WorkRoot: t.TempDir(), runModel: func(context.Context, modelRun) (aicli.Result, error) {
-				t.Fatal("model ran despite failed host preflight")
-				return aicli.Result{}, nil
-			}}
+			runner := Runner{WorkRoot: t.TempDir(), runModel: forbidModel(t)}
 			result, err := runner.Run(context.Background(), job)
 			if err == nil || errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "not installed") || len(result.Calls) != 0 {
 				t.Fatalf("host preflight result=%+v error=%v", result, err)
@@ -239,7 +212,7 @@ func TestRunnerMissingHostSkillsRemainRetryableBeforeModels(t *testing.T) {
 func TestRunnerFixCanReturnEmptyAnswerWithoutCritic(t *testing.T) {
 	job := portableJob(command.Fix)
 	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
-		writeIndexFixture(t, request.dir, "source.txt", []byte("fixed source"))
+		writeFixtureFile(t, request.dir, "source.txt", []byte("fixed source"))
 		return aicli.Result{}, nil
 	}}
 	result, err := runner.Run(context.Background(), job)
@@ -254,8 +227,7 @@ func TestRunnerFixCanReturnEmptyAnswerWithoutCritic(t *testing.T) {
 	}{{command.Fix, false, true, true}, {command.Fix, false, false, false}, {command.Fix, true, false, false}, {command.Comment, false, false, false}, {command.Review, false, false, false}, {command.SecurityAudit, false, false, false}} {
 		job := portableJob(test.action)
 		if test.critic {
-			job.Critic = &RoleSettings{Provider: "claude"}
-			job.CriticMaxRounds = config.DefaultCriticMaxRounds
+			job = withClaudeCritic(job)
 		}
 		result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Calls: []CallUsage{{Provider: job.Main.Provider, Role: "main", Round: 1}}}
 		if test.changed {
@@ -285,5 +257,34 @@ func TestRunnerOmittedSourceWriteIsTerminal(t *testing.T) {
 	}
 	if err := result.validate(job, false); err != nil {
 		t.Fatalf("incomplete result must retain valid diagnostics: %v", err)
+	}
+}
+
+func TestWorkRootIsolationRejectsResolvedCodexTarget(t *testing.T) {
+	root := t.TempDir()
+	work, bin := filepath.Join(root, "work"), filepath.Join(root, "bin")
+	for _, directory := range []string{work, bin} {
+		if err := os.Mkdir(directory, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	target := filepath.Join(work, "actual-codex")
+	if err := os.WriteFile(target, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(bin, "codex")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	want, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &Runner{}
+	if err := runner.CheckWorkRootIsolation(work, "codex"); err == nil || !strings.Contains(err.Error(), "work root overlaps") || !strings.Contains(err.Error(), want) {
+		t.Fatalf("outside symlink hid executable inside work root: %v", err)
+	}
+	if err := runner.CheckWorkRootIsolation(work, "claude"); err != nil {
+		t.Fatalf("unused Codex executable affected Claude admission: %v", err)
 	}
 }

@@ -43,11 +43,7 @@ func TestOutputRetainsDeduplicatedAssistantUsageBeforeResult(t *testing.T) {
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			o := jsonlOutput{}
-			for data := scenario.data + "\n"; len(data) > 0; {
-				n := min(7, len(data))
-				_, _ = o.Write([]byte(data[:n]))
-				data = data[n:]
-			}
+			writeChunks(t, &o, scenario.data+"\n")
 			o.finish()
 			if o.result.Tokens != scenario.want || (o.err != nil) != scenario.fails || scenario.fails && (o.result.UsageComplete || o.result.Answer != "") {
 				t.Fatalf("partial usage=%+v error=%v want=%+v failure=%t", o.result, o.err, scenario.want, scenario.fails)
@@ -91,11 +87,7 @@ func TestOutputRetainsNewCallsAfterProvisionalAggregate(t *testing.T) {
 		t.Run(scenario.name, func(t *testing.T) {
 			o := jsonlOutput{}
 			data := numberResultEvents(scenario.data) + "\n"
-			for len(data) != 0 {
-				n := min(7, len(data))
-				_, _ = o.Write([]byte(data[:n]))
-				data = data[n:]
-			}
+			writeChunks(t, &o, data)
 			o.finish()
 			if o.result.Tokens != scenario.want || o.result.UsageComplete != scenario.complete || (o.err != nil) != scenario.fails || scenario.fails && o.result.Answer != "" {
 				t.Fatalf("result=%+v error=%v want=%+v complete=%t failure=%t", o.result, o.err, scenario.want, scenario.complete, scenario.fails)

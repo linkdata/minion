@@ -37,10 +37,6 @@ printf '%s\n' '{"type":"thread.started","thread_id":"symlink-test"}' '{"type":"i
 	if err != nil {
 		t.Fatal(err)
 	}
-	resolved, err := ExecutablePath()
-	if err != nil || resolved != want {
-		t.Fatalf("resolved executable=%q, %v; want %q", resolved, err, want)
-	}
 	result, err := Run(context.Background(), t.TempDir(), "Inert executable fixture", false, "", config.CodexConfig{})
 	if err != nil || result.Answer != "resolved executable" {
 		t.Fatalf("stub execution=%+v, %v", result, err)

@@ -39,7 +39,7 @@ func TestReviewSnapshotRejectsCriticCopyMutation(t *testing.T) {
 				if request.reviewPhase == reviewFull {
 					return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"feedback":"Revise the candidate."}`}, nil
 				}
-				return aicli.Result{Answer: `{"approved":true,"has_blockers":false,"feedback":""}`}, nil
+				return aicli.Result{Answer: approvedCritiqueJSON}, nil
 			}}
 			result, err := runner.Run(context.Background(), job)
 			wantCalls := 2
@@ -70,17 +70,9 @@ func TestReviewSnapshotChecksExactFrozenFiles(t *testing.T) {
 				if reports {
 					job.Action = command.SecurityAudit
 					output, name, index = t.TempDir(), "REPORT.md", nil
-					writeIndexFixture(t, output, name, []byte("reviewed report"))
+					writeFixtureFile(t, output, name, []byte("reviewed report"))
 				}
-				snapshot, err := freezeReviewSnapshot(context.Background(), t.TempDir(), job, source, output, index)
-				if err != nil {
-					t.Fatal(err)
-				}
-				t.Cleanup(func() {
-					if err := snapshot.close(); err != nil {
-						t.Error(err)
-					}
-				})
+				snapshot := mustFreeze(t, context.Background(), t.TempDir(), job, source, output, index)
 				if err := snapshot.verify(context.Background()); err != nil {
 					t.Fatalf("unchanged frozen copy rejected: %v", err)
 				}
@@ -91,7 +83,7 @@ func TestReviewSnapshotChecksExactFrozenFiles(t *testing.T) {
 				filename := filepath.Join(root, name)
 				switch mutation {
 				case "bytes":
-					writeIndexFixture(t, root, name, []byte("tampered copy"))
+					writeFixtureFile(t, root, name, []byte("tampered copy"))
 				case "permissions":
 					// Preserve the executable bit: even non-executable permission changes break the copy's identity.
 					if err := os.Chmod(filename, 0600); err != nil {
@@ -103,7 +95,7 @@ func TestReviewSnapshotChecksExactFrozenFiles(t *testing.T) {
 					}
 				case "new file":
 					// An unknown report name is not visited by the known-artifact collector.
-					writeIndexFixture(t, root, "unexpected.txt", []byte("new copy content"))
+					writeFixtureFile(t, root, "unexpected.txt", []byte("new copy content"))
 				case "removed file":
 					if err := os.Remove(filename); err != nil {
 						t.Fatal(err)
@@ -140,17 +132,9 @@ func TestReviewSnapshotRejectsUnreadableLiveCandidates(t *testing.T) {
 			if reports {
 				job.Action, index = command.SecurityAudit, nil
 				output, want = t.TempDir(), "invalid audit REPORT.md"
-				writeIndexFixture(t, output, "REPORT.md", []byte("reviewed report"))
+				writeFixtureFile(t, output, "REPORT.md", []byte("reviewed report"))
 			}
-			snapshot, err := freezeReviewSnapshot(context.Background(), t.TempDir(), job, source, output, index)
-			if err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(func() {
-				if err := snapshot.close(); err != nil {
-					t.Error(err)
-				}
-			})
+			snapshot := mustFreeze(t, context.Background(), t.TempDir(), job, source, output, index)
 			path := filepath.Join(source, ".gitignore")
 			if reports {
 				path = filepath.Join(output, "REPORT.md")

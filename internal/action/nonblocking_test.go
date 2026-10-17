@@ -14,7 +14,6 @@ import (
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/github"
-	"github.com/linkdata/minion/internal/gitwork"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/usage"
@@ -22,7 +21,7 @@ import (
 
 func TestFailedCriticCannotAttestNonblockingAcceptance(t *testing.T) {
 	for _, answer := range []string{
-		`{"approved":true,"has_blockers":false,"feedback":""}`,
+		approvedCritiqueJSON,
 		`{"approved":false,"has_blockers":false,"feedback":"Nonblocking nit: simplify the loop."}`,
 		`{"approved":false,"has_blockers":true,"feedback":"Blocking: wrong result."}`,
 	} {
@@ -58,7 +57,7 @@ func TestCriticEvidencePreservesBlockerVerdicts(t *testing.T) {
 		err                               error
 		approved, noBlockers, hasBlockers bool
 	}{
-		{name: "approved", answer: `{"approved":true,"has_blockers":false,"feedback":""}`, approved: true, noBlockers: true},
+		{name: "approved", answer: approvedCritiqueJSON, approved: true, noBlockers: true},
 		{name: "nonblocking rejection", answer: `{"approved":false,"has_blockers":false,"feedback":"Nonblocking nit."}`, noBlockers: true},
 		{name: "blocking rejection", answer: `{"approved":false,"has_blockers":true,"feedback":"Blocking failure."}`, hasBlockers: true},
 		{name: "invalid verdict", answer: `garbage`},
@@ -245,17 +244,7 @@ func TestResultNonblockingAcceptanceTrustBoundary(t *testing.T) {
 
 func TestPortableJobResolvesNonblockingThreshold(t *testing.T) {
 	gitFixtureRemote(t)
-	checkout, err := gitwork.Clone(context.Background(), t.TempDir(), "o/r", "main", func(_ context.Context, sha string) (github.GitTree, error) {
-		return gitTreeFixture(sha), nil
-	}, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := checkout.Close(); err != nil {
-			t.Error(err)
-		}
-	}()
+	checkout := cloneFixture(t, t.TempDir())
 	zero, one := 0, 1
 	for _, tt := range []struct {
 		name       string
