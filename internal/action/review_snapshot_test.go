@@ -62,6 +62,48 @@ func TestReviewSnapshotFixFreezesOnlyExportedCandidate(t *testing.T) {
 	}
 }
 
+func TestReviewSnapshotFixFreezesFinalReplacementLayout(t *testing.T) {
+	job := portableJob(command.Fix)
+	unchanged := job.Source.Files[0]
+	job.Source.Files = append(job.Source.Files,
+		workspace.File{Path: "Foo/old", Mode: workspace.Regular},
+		workspace.File{Path: "to-directory", Mode: workspace.Regular},
+		workspace.File{Path: "to-file/child", Mode: workspace.Regular})
+	index, source := offlineIndexFixture(t, job.Source.Files)
+	for _, name := range []string{"Foo", "to-directory", "to-file"} {
+		if err := os.RemoveAll(filepath.Join(source, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := []workspace.File{
+		unchanged,
+		{Path: "foo/new", Mode: workspace.Regular, Data: []byte("renamed directory")},
+		{Path: "to-directory/child", Mode: workspace.Regular, Data: []byte("new child")},
+		{Path: "to-file", Mode: workspace.Regular, Data: []byte("new file")},
+	}
+	for _, file := range want[1:] {
+		writeIndexFixture(t, source, file.Path, file.Data)
+	}
+	snapshot, err := freezeReviewSnapshot(context.Background(), t.TempDir(), job, source, "", index)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := snapshot.close(); err != nil {
+			t.Error(err)
+		}
+	})
+	if len(snapshot.changes) != 6 {
+		t.Fatalf("replacement changes=%+v", snapshot.changes)
+	}
+	if err := workspace.CheckUnchanged(context.Background(), snapshot.source, want); err != nil {
+		t.Fatalf("frozen critic tree differs from exported changes: %v", err)
+	}
+	if err := snapshot.verify(context.Background()); err != nil {
+		t.Fatalf("unchanged candidate verification failed: %v", err)
+	}
+}
+
 func TestReviewSnapshotFreezesRawAuditArtifactsAndAbsence(t *testing.T) {
 	for _, mutation := range []string{"source", "report", "new artifact", "removed artifact"} {
 		t.Run(mutation, func(t *testing.T) {
@@ -178,19 +220,19 @@ func TestReviewSnapshotRejectsUnsafeOrOversizedReportsAndCleansUp(t *testing.T) 
 	}
 }
 
-func TestReviewSnapshotCleansFailedFixMaterializationAndApply(t *testing.T) {
-	for _, stage := range []string{"materialize", "apply"} {
+func TestReviewSnapshotCleansFailedFixCandidateMaterialization(t *testing.T) {
+	for _, stage := range []string{"source", "addition"} {
 		t.Run(stage, func(t *testing.T) {
 			job := portableJob(command.Fix)
 			name := strings.TrimSuffix(strings.Repeat(strings.Repeat("a", 250)+"/", 14), "/")
-			if stage == "materialize" {
+			if stage == "source" {
 				job.Source.Files = append(job.Source.Files, workspace.File{Path: name, Mode: workspace.Regular, Data: []byte("source")})
 			}
 			if err := job.Validate(); err != nil {
 				t.Fatalf("invalid source control: %v", err)
 			}
 			index, source := offlineIndexFixture(t, job.Source.Files)
-			if stage == "apply" {
+			if stage == "addition" {
 				writeIndexFixture(t, source, name, []byte("added"))
 			}
 			control, err := freezeReviewSnapshot(context.Background(), t.TempDir(), job, source, "", index)

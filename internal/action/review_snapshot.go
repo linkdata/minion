@@ -39,10 +39,7 @@ func freezeReviewSnapshot(ctx context.Context, workRoot string, job Job, source,
 			return snapshot, err
 		}
 		snapshot.ownedSource = true
-		if err := workspace.Materialize(snapshot.source, job.Source.Files); err != nil {
-			return snapshot, err
-		}
-		if err := workspace.Apply(snapshot.source, snapshot.changes); err != nil {
+		if err := workspace.MaterializeChanges(snapshot.source, job.Source.Files, snapshot.changes); err != nil {
 			return snapshot, err
 		}
 	}

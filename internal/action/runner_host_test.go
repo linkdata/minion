@@ -14,10 +14,11 @@ import (
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/monitor"
+	"github.com/linkdata/minion/internal/workroot"
 )
 
 func TestRunnerWorkRootIsolation(t *testing.T) {
-	for _, kind := range []string{"main read", "critic read", "main skill", "critic skill", "system read"} {
+	for _, kind := range []string{"main read", "critic read", "main skill", "critic skill", "system read", "codex binary"} {
 		t.Run(kind, func(t *testing.T) {
 			root := t.TempDir()
 			work := filepath.Join(root, "work")
@@ -43,6 +44,12 @@ func TestRunnerWorkRootIsolation(t *testing.T) {
 				}
 			case "system read":
 				work = "/usr"
+			case "codex binary":
+				writeIndexFixture(t, work, "codex", []byte("#!/bin/sh\nexit 0\n"))
+				if err := os.Chmod(filepath.Join(work, "codex"), 0700); err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv("PATH", work+string(os.PathListSeparator)+os.Getenv("PATH"))
 			}
 			if err := runner.CheckWorkRootIsolation(work, job.Main.Provider, job.Critic.Provider); err == nil || !strings.Contains(err.Error(), "work root overlaps") {
 				t.Fatalf("isolation=%v", err)
@@ -53,12 +60,25 @@ func TestRunnerWorkRootIsolation(t *testing.T) {
 		t.Fatal("model ran in public system directory")
 		return aicli.Result{}, nil
 	}}
-	if _, err := runner.Run(context.Background(), portableJob(command.Comment)); !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "work root overlaps") {
+	if _, err := runner.Run(context.Background(), portableJob(command.Comment)); !errors.Is(err, workroot.ErrUnsafe) || errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "work root overlaps") {
 		t.Fatalf("unsafe root=%v", err)
 	}
 	runner = Runner{}
 	if _, err := runner.Run(context.Background(), portableJob(command.Comment)); !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "work root is required") {
 		t.Fatalf("missing root=%v", err)
+	}
+}
+
+func TestRunnerRejectsCanceledContextBeforePreparation(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "must-not-be-created")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	result, err := (&Runner{WorkRoot: root}).Run(ctx, portableJob(command.Comment))
+	if !errors.Is(err, context.Canceled) || len(result.Calls) != 0 {
+		t.Fatalf("canceled dispatch: %+v, %v", result, err)
+	}
+	if _, err := os.Stat(root); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("canceled dispatch prepared its work root: %v", err)
 	}
 }
 
@@ -88,6 +108,7 @@ func TestRunnerEnforcesSuppliedRuntimeBudget(t *testing.T) {
 			if action == command.SecurityAudit {
 				installActionTestSkills(t, testAuditSkillURL)
 				job.Main.Skills = []string{testAuditSkillURL}
+				fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
 			}
 			calls := 0
 			var source, reports string

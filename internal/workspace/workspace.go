@@ -286,7 +286,11 @@ func requireRootDir(root string, private bool) error {
 		return err
 	}
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || (private && info.Mode().Perm()&0077 != 0) {
-		return fmt.Errorf("workspace root must be a private directory: %s (%s)", root, info.Mode())
+		kind := "real directory"
+		if private {
+			kind = "private directory"
+		}
+		return fmt.Errorf("workspace root must be a %s: %s (%s)", kind, root, info.Mode())
 	}
 	return nil
 }
@@ -296,6 +300,45 @@ func Materialize(root string, files []File) error {
 	if err := validateFiles(files); err != nil {
 		return err
 	}
+	return materialize(root, files)
+}
+
+// MaterializeChanges creates a complete candidate with exclusive file creation.
+// Source and change bounds apply separately, so a candidate can grow by the change limit.
+// It requires the same trusted root and parents as Materialize.
+func MaterializeChanges(root string, base []File, changes []Change) error {
+	if err := validateFiles(base); err != nil {
+		return err
+	}
+	if err := ValidateChanges(changes); err != nil {
+		return err
+	}
+	paths := make([]string, len(base))
+	files := make(map[string]File, len(base)+len(changes))
+	for i, file := range base {
+		if !ValidPath(file.Path) {
+			return fmt.Errorf("unsafe fix source path %q", file.Path)
+		}
+		paths[i] = file.Path
+		files[file.Path] = file
+	}
+	paths, err := changedPaths(paths, changes)
+	if err != nil {
+		return err
+	}
+	for _, change := range changes {
+		if !change.Delete {
+			files[change.Path] = File{Path: change.Path, Mode: change.Mode, Data: change.Data}
+		}
+	}
+	final := make([]File, len(paths))
+	for i, name := range paths {
+		final[i] = files[name]
+	}
+	return materialize(root, final)
+}
+
+func materialize(root string, files []File) error {
 	if err := requireRootDir(root, true); err != nil {
 		return err
 	}
@@ -382,7 +425,7 @@ func CheckUnchanged(ctx context.Context, root string, base []File) error {
 		return err
 	}
 	if len(prior) != 0 {
-		return errors.New("read-only action modified supplied source: deleted files")
+		return fmt.Errorf("read-only action modified supplied source: deleted %q", slices.Min(slices.Collect(maps.Keys(prior))))
 	}
 	return nil
 }
@@ -509,18 +552,23 @@ func ValidateChanges(changes []Change) error {
 }
 
 // ValidateChangedPaths checks the final layout of an already validated base and changes.
-func ValidateChangedPaths(base []File, changes []Change) error {
+func ValidateChangedPaths(base []string, changes []Change) error {
 	if len(changes) == 0 {
 		return nil
 	}
+	_, err := changedPaths(base, changes)
+	return err
+}
+
+func changedPaths(base []string, changes []Change) ([]string, error) {
 	files := make(map[string]bool, len(base)+len(changes))
-	for _, file := range base {
-		files[file.Path] = true
+	for _, name := range base {
+		files[name] = true
 	}
 	for _, change := range changes {
 		if change.Delete {
 			if !files[change.Path] {
-				return fmt.Errorf("deleted path %q does not match source", change.Path)
+				return nil, fmt.Errorf("deleted path %q does not match source", change.Path)
 			}
 			delete(files, change.Path)
 		} else {
@@ -528,7 +576,7 @@ func ValidateChangedPaths(base []File, changes []Change) error {
 		}
 	}
 	paths := slices.Sorted(maps.Keys(files))
-	return validatePaths(paths, true)
+	return paths, validatePaths(paths, true)
 }
 
 func safeParents(root, name string) error {

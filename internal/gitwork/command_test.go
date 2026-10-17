@@ -3,12 +3,51 @@ package gitwork
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/linkdata/minion/internal/workspace"
 )
+
+func TestGitRejectsRelativeExecutableWhenErrDotDisabled(t *testing.T) {
+	root := t.TempDir()
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(root); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(cwd); err != nil {
+			t.Error(err)
+		}
+	})
+	checkout := filepath.Join(root, "checkout")
+	marker := filepath.Join(root, "executed")
+	for _, dir := range []string{root, checkout} {
+		bin := filepath.Join(dir, "relbin")
+		if err := os.MkdirAll(bin, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(bin, "git"), []byte("#!/bin/sh\nprintf planted > "+shellQuote(marker)+"\n"), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", "relbin")
+	t.Setenv("GODEBUG", "execerrdot=0")
+	if binary, err := exec.LookPath("git"); err != nil || filepath.IsAbs(binary) {
+		t.Fatalf("probe did not produce a relative executable: %q, %v", binary, err)
+	}
+	if _, err := runGit(context.Background(), checkout, "--version"); err == nil || !strings.Contains(err.Error(), "absolute path") {
+		t.Fatalf("accepted relative Git executable: %v", err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("checkout executable ran: %v", err)
+	}
+}
 
 func TestGitNeutralIdentityIgnoresAmbientEmailAndAllowsBotOverride(t *testing.T) {
 	for _, email := range []string{"", "ambient@example.invalid"} {

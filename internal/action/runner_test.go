@@ -335,6 +335,7 @@ func TestRunnerClearsHostSkillsAndRejectsMissingCLI(t *testing.T) {
 			if provider == "codex" && len(runner.Codex.Skills) != 0 || provider == "claude" && len(runner.Claude.Skills) != 0 {
 				t.Fatal("Job did not clear host skills")
 			}
+			job.Main.Skills = []string{skills.BuiltinAntiPromptInjection}
 			t.Setenv("PATH", "")
 			t.Setenv("HOME", t.TempDir())
 			if result, err := runner.Run(context.Background(), job); err == nil || len(result.Calls) != 1 {

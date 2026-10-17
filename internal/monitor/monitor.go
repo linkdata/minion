@@ -38,7 +38,7 @@ type GitHub interface {
 // ErrTerminalJob marks a failed execution that cannot succeed by rerunning the models.
 var ErrTerminalJob = errors.New("terminal job failure")
 
-// ErrPostModelPublication marks a failed GitHub write after model execution completed.
+// ErrPostModelPublication marks publication failure for completed or previously completed model work.
 //
 // Retrying it must consume a job attempt even when the write error is transient.
 var ErrPostModelPublication = errors.New("post-model publication failure")

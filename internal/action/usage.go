@@ -12,7 +12,7 @@ import (
 	"github.com/linkdata/minion/internal/usage"
 )
 
-// trackUsage gives each action attempt its own record and runner wrapper.
+// trackUsage adds a record and runner wrapper to this attempt-scoped receiver.
 func (e *Orchestrator) trackUsage(job monitor.Job) (*Orchestrator, func(error) error, error) {
 	name := job.Command.Name
 	if name == "" {
@@ -30,8 +30,9 @@ func (e *Orchestrator) trackUsage(job monitor.Job) (*Orchestrator, func(error) e
 		critic := e.roleSettings(record.CriticProvider, nil)
 		record.CriticModel, record.CriticEffort = cmp.Or(critic.Model, "default"), critic.Effort
 	}
+	store := e.Usage
 	save := func() error {
-		if err := e.Usage.Save(record); err != nil {
+		if err := store.Save(record); err != nil {
 			return fmt.Errorf("save action usage %s: %w", record.ID, err)
 		}
 		return nil
@@ -39,8 +40,7 @@ func (e *Orchestrator) trackUsage(job monitor.Job) (*Orchestrator, func(error) e
 	if err := save(); err != nil {
 		return nil, nil, err
 	}
-	tracked := *e
-	tracked.Runner.aroundModel = func(ctx context.Context, request modelRun, next modelCall) (aicli.Result, error) {
+	e.Runner.aroundModel = func(ctx context.Context, request modelRun, next modelCall) (aicli.Result, error) {
 		if err := ctx.Err(); err != nil {
 			return aicli.Result{}, err
 		}
@@ -73,5 +73,5 @@ func (e *Orchestrator) trackUsage(job monitor.Job) (*Orchestrator, func(error) e
 		}
 		return errors.Join(actionErr, save())
 	}
-	return &tracked, finish, nil
+	return e, finish, nil
 }

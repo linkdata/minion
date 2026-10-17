@@ -3,6 +3,7 @@ package gitwork
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -67,6 +68,8 @@ func TestSnapshotUsesPinnedBlobsAndBoundedHistory(t *testing.T) {
 
 func TestSnapshotPreservesPRDeletedBinaryAndModeContext(t *testing.T) {
 	fixture := newFixture(t)
+	writeFile(t, filepath.Join(fixture.source, ".gitattributes"), "* -diff\n")
+	writeFile(t, filepath.Join(fixture.source, "text.txt"), "base text\n")
 	writeFile(t, filepath.Join(fixture.source, "deleted.txt"), "deleted base content\n")
 	writeFile(t, filepath.Join(fixture.source, "binary"), "\x00\xffbase")
 	fixture.git(fixture.source, "add", ".")
@@ -77,6 +80,7 @@ func TestSnapshotPreservesPRDeletedBinaryAndModeContext(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeFile(t, filepath.Join(fixture.source, "binary"), "\x00\xffhead")
+	writeFile(t, filepath.Join(fixture.source, "text.txt"), "head text\n")
 	if err := os.Chmod(filepath.Join(fixture.source, "binary"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -103,6 +107,9 @@ func TestSnapshotPreservesPRDeletedBinaryAndModeContext(t *testing.T) {
 	if !bytes.Contains(snapshot.Diff, []byte("Binary files")) || !bytes.Contains(snapshot.Diff, []byte("deleted.txt")) || !bytes.Contains(snapshot.Diff, []byte("100755")) {
 		t.Fatalf("comparison diff=%s", snapshot.Diff)
 	}
+	if !bytes.Contains(snapshot.Diff, []byte("-base text\n+head text\n")) {
+		t.Fatalf("repository diff attributes hid text changes: %s", snapshot.Diff)
+	}
 	old := map[string]workspace.File{}
 	for _, file := range snapshot.BaseFiles {
 		old[file.Path] = file
@@ -114,6 +121,91 @@ func TestSnapshotPreservesPRDeletedBinaryAndModeContext(t *testing.T) {
 		if file.Path == "binary" && (file.Mode != workspace.Executable || string(file.Data) != "\x00\xffhead") {
 			t.Fatalf("binary source=%+v", file)
 		}
+	}
+}
+
+func TestSnapshotDisablesComparisonRenameDetection(t *testing.T) {
+	fixture := newFixture(t)
+	writeFile(t, filepath.Join(fixture.source, "old.txt"), "unchanged content to recognize as a rename\n")
+	fixture.git(fixture.source, "add", ".")
+	fixture.git(fixture.source, "commit", "-m", "rename base")
+	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/heads/main")
+	if err := os.Rename(filepath.Join(fixture.source, "old.txt"), filepath.Join(fixture.source, "new.txt")); err != nil {
+		t.Fatal(err)
+	}
+	fixture.git(fixture.source, "add", ".")
+	fixture.git(fixture.source, "commit", "-m", "rename file")
+	head := fixture.git(fixture.source, "rev-parse", "HEAD")
+	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/pull/7/head")
+	if err := fixture.checkout.checkoutPullRequest(context.Background(), 7, "main", head); err != nil {
+		t.Fatal(err)
+	}
+	fixture.git(fixture.checkout.path, "config", "diff.renames", "true")
+	if err := fixture.checkout.recordConfig(); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := fixture.checkout.Snapshot(context.Background(), false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(snapshot.Diff, []byte("deleted file mode 100644")) || !bytes.Contains(snapshot.Diff, []byte("new file mode 100644")) || bytes.Contains(snapshot.Diff, []byte("rename from")) {
+		t.Fatalf("comparison inferred a rename: %s", snapshot.Diff)
+	}
+}
+
+func TestSnapshotDoesNotClaimCompleteHistoryFromShallowSource(t *testing.T) {
+	fixture := newFixture(t)
+	fixture.git(fixture.source, "commit", "--allow-empty", "-m", "recent history")
+	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/heads/main")
+	server := filepath.Join(t.TempDir(), "shallow.git")
+	fixture.git("", "clone", "--bare", "--depth=1", "--branch", "main", "file://"+fixture.remote, server)
+	checkout, err := cloneFromURL(context.Background(), t.TempDir(), "file://"+server, "main", localTreeMetadata(t, fixture.source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := checkout.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	if fixture.git(checkout.path, "rev-parse", "--is-shallow-repository") != "true" {
+		t.Fatal("no-depth clone did not preserve the source's shallow boundary")
+	}
+	snapshot, err := checkout.Snapshot(context.Background(), true, false)
+	if err != nil || snapshot.HistoryComplete || !bytes.Contains(snapshot.History, []byte("recent history")) {
+		t.Fatalf("shallow history coverage: complete=%v error=%v", snapshot.HistoryComplete, err)
+	}
+}
+
+func TestSourceFilesBoundsDistinctOmittedUnion(t *testing.T) {
+	entries := make([]sourceEntry, workspace.MaxFiles+1)
+	for i := range entries {
+		entries[i] = sourceEntry{file: workspace.File{Path: fmt.Sprintf("link-%d", i)}, omitted: true}
+	}
+	checkout := &Checkout{}
+	if _, _, err := checkout.sourceFiles(context.Background(), entries); !errors.Is(err, ErrCheckoutTooLarge) {
+		t.Fatalf("accepted oversized omitted union: %v", err)
+	}
+	entries[len(entries)-1] = entries[0]
+	files, omitted, err := checkout.sourceFiles(context.Background(), entries)
+	if err != nil || len(files) != 0 || len(omitted) != workspace.MaxFiles {
+		t.Fatalf("exact distinct omitted union: files=%d omitted=%d error=%v", len(files), len(omitted), err)
+	}
+}
+
+func TestSnapshotRejectsGitConfigChangedDuringPreparation(t *testing.T) {
+	fixture := newFixture(t)
+	lookup := fixture.checkout.lookupTree
+	changed := false
+	fixture.checkout.lookupTree = func(ctx context.Context, sha string) (github.GitTree, error) {
+		tree, err := lookup(ctx, sha)
+		fixture.git(fixture.checkout.path, "config", "minion.probe", "changed")
+		changed = true
+		return tree, err
+	}
+	_, err := fixture.checkout.Snapshot(context.Background(), false, false)
+	if !changed || err == nil || !strings.Contains(err.Error(), "Git config changed") {
+		t.Fatalf("mid-preparation config change: changed=%v error=%v", changed, err)
 	}
 }
 
@@ -495,6 +587,36 @@ func TestSourceEntriesCrossChecksGitMetadata(t *testing.T) {
 				t.Fatalf("metadata mismatch classification: %v", err)
 			}
 		})
+	}
+}
+
+func TestSourceEntriesRejectsAncestorCollisionWithoutDirectoryMetadata(t *testing.T) {
+	fixture := newFixture(t)
+	blob := fixture.git(fixture.source, "rev-parse", "HEAD:README.md")
+	subtree := fixture.gitInput(fixture.source, "100644 blob "+blob+"\tb\n", "mktree")
+	blobBytes, err := hex.DecodeString(blob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	treeBytes, err := hex.DecodeString(subtree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A malformed tree can name both a file and a directory "a". The recursive
+	// metadata fixture, like a partial API response, lists only a and a/b.
+	raw := "100644 a\x00" + string(blobBytes) + "40000 a\x00" + string(treeBytes)
+	treeSHA := fixture.gitInput(fixture.source, raw, "hash-object", "--literally", "-w", "-t", "tree", "--stdin")
+	tree, err := localTreeMetadata(t, fixture.source)(context.Background(), treeSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkSourceTree(tree, treeSHA); err != nil {
+		t.Fatalf("fixture failed before ancestor-layout validation: %v", err)
+	}
+	checkout := &Checkout{path: fixture.source}
+	_, err = checkout.sourceEntries(context.Background(), treeSHA, tree, treeSHA)
+	if !errors.Is(err, ErrUnsupportedSource) || !strings.Contains(err.Error(), "file/directory collision") {
+		t.Fatalf("accepted incomplete directory metadata: %v", err)
 	}
 }
 

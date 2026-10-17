@@ -304,11 +304,11 @@ func (o *jsonlOutput) finishLine() {
 		// can replace their lower bound. Delegate/unknown messages can overlap
 		// the prior snapshot, so only their component maxima are safe here.
 		lower, valid := o.assistantLowerBound()
-		complete = valid && tokens.Input >= lower.Input && tokens.CachedInput >= lower.CachedInput && tokens.Output >= lower.Output
+		complete = valid && covers(tokens, lower)
 	}
 	// Native modelUsage is cumulative across result turns. A later partial
 	// report must not erase previously recorded usage.
-	if tokens.Input >= o.result.Tokens.Input && tokens.CachedInput >= o.result.Tokens.CachedInput && tokens.Output >= o.result.Tokens.Output {
+	if covers(tokens, o.result.Tokens) {
 		o.result.Tokens = tokens
 	} else {
 		if lower := maxTokens(o.result.Tokens, tokens); lower.Output <= math.MaxInt64-lower.Input {
@@ -354,6 +354,7 @@ func (o *jsonlOutput) finishLine() {
 	o.indexed = e.ResultIndex != nil
 	o.results++
 	if o.usageLimit != nil || o.taskFailure != nil {
+		o.fail(errors.Join(o.usageLimit, o.taskFailure))
 		return
 	}
 	// Print mode can emit provisional turn results while background work runs.
@@ -465,6 +466,8 @@ func (o *jsonlOutput) assistantLowerBound() (usage.Tokens, bool) {
 func maxTokens(a, b usage.Tokens) usage.Tokens {
 	return usage.Tokens{Input: max(a.Input, b.Input), CachedInput: max(a.CachedInput, b.CachedInput), Output: max(a.Output, b.Output)}
 }
+
+func covers(a, b usage.Tokens) bool { return maxTokens(a, b) == a }
 
 func subtractTokens(a, b usage.Tokens) usage.Tokens {
 	return usage.Tokens{Input: a.Input - b.Input, CachedInput: a.CachedInput - b.CachedInput, Output: a.Output - b.Output}

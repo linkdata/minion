@@ -25,6 +25,34 @@ func TestCheckedInConfigIsSample(t *testing.T) {
 	}
 }
 
+func TestSkillListsFitPortableRoleLimits(t *testing.T) {
+	urls := make([]string, MaxSkillsPerRole+1)
+	for i := range urls {
+		urls[i] = fmt.Sprintf("https://github.com/o/r/tree/main/skills/skill-%d", i)
+	}
+	for _, test := range []struct {
+		name               string
+		required, optional []string
+		valid              bool
+	}{
+		{"exact combined count", urls[:32], urls[32:64], true},
+		{"combined overflow", urls[:32], urls[32:], false},
+		{"required overflow", urls, []string{}, false},
+		{"optional overflow", urls[:1], urls, false},
+		{"source exact bytes", []string{"https://github.com/o/r/tree/" + strings.Repeat("x", MaxSkillURLBytes-len("https://github.com/o/r/tree//skills/one")) + "/skills/one"}, []string{}, true},
+		{"source too long", []string{"https://github.com/o/r/tree/" + strings.Repeat("x", MaxSkillURLBytes) + "/skills/one"}, []string{}, false},
+		{"optional source too long", urls[:1], []string{"https://github.com/o/r/tree/" + strings.Repeat("x", MaxSkillURLBytes) + "/skills/one"}, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := Config{BotLogin: "bot", Commands: map[string]CommandMapping{"review": {Action: "review", Skills: test.required}}, AlwaysOnSkills: test.optional,
+				Repositories: []Repository{{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"review"}}}}
+			if err := cfg.Validate(t.TempDir()); (err == nil) != test.valid {
+				t.Fatalf("skill bounds: %v; valid=%t", err, test.valid)
+			}
+		})
+	}
+}
+
 func TestLoadMaxGitHubContextBytes(t *testing.T) {
 	for _, tt := range []struct {
 		name, field string

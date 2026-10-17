@@ -292,14 +292,18 @@ func TestRunnerReportsOwnedAndCriticCleanupFailures(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			workspaceFailed, criticFailed := false, false
+			workspaceFailures, criticFailures := 0, 0
 			for _, diagnostic := range result.Diagnostics {
 				if diagnostic.Code == "cleanup_failed" {
-					workspaceFailed = workspaceFailed || strings.Contains(diagnostic.Message, "Execution workspace")
-					criticFailed = criticFailed || strings.Contains(diagnostic.Message, "Critic snapshot")
+					if strings.Contains(diagnostic.Message, "Execution workspace") {
+						workspaceFailures++
+					}
+					if strings.Contains(diagnostic.Message, "Critic snapshot") {
+						criticFailures++
+					}
 				}
 			}
-			if !workspaceFailed || critic && !criticFailed {
+			if workspaceFailures != 1 || critic && criticFailures != 1 {
 				t.Fatalf("cleanup failure not recorded: %+v", result.Diagnostics)
 			}
 		})

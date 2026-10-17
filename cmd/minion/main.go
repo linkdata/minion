@@ -193,17 +193,15 @@ func checkWorkRootIsolation(cfg config.Config) error {
 				}
 			}
 		}
-		for _, source := range sources {
-			path, installed, err := skills.InstalledPathFor(source, provider)
-			// Unavailable skills already disable their command; they grant no path.
-			if err != nil || !installed || !filepath.IsAbs(path) {
-				continue
-			}
-			if provider == "claude" {
-				runner.Claude.Skills = append(runner.Claude.Skills, path)
-			} else {
-				runner.Codex.Skills = append(runner.Codex.Skills, path)
-			}
+		// Missing required skills disable their command; admission needs only existing grants.
+		selected, err := runner.SelectSkills(provider, nil, sources)
+		if err != nil {
+			return err
+		}
+		if provider == "claude" {
+			runner.Claude.Skills = selected
+		} else {
+			runner.Codex.Skills = selected
 		}
 	}
 	if err := runner.CheckWorkRootIsolation(cfg.WorkRoot, cfg.Main, cfg.Adversarial); err != nil {

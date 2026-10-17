@@ -55,7 +55,8 @@ type Job struct {
 	Main            RoleSettings       `json:"main"`
 	Critic          *RoleSettings      `json:"critic,omitempty"`
 	CriticMaxRounds int                `json:"critic_max_rounds"`
-	RuntimeBudget   time.Duration      `json:"runtime_budget_ns"`
+	// RuntimeBudget is remaining local time; a future transport must subtract transit time.
+	RuntimeBudget time.Duration `json:"runtime_budget_ns"`
 }
 
 type CallUsage struct {
@@ -151,11 +152,11 @@ func (r RoleSettings) validate() error {
 	if r.Provider != "codex" && r.Provider != "claude" {
 		return errors.New("unsupported action provider")
 	}
-	if !boundedText(r.Model, 128) || !boundedText(r.Effort, 128) || strings.ContainsAny(r.Model+r.Effort, "\r\n") || len(r.Skills)+len(r.AlwaysOnSkills) > 64 {
+	if !boundedText(r.Model, 128) || !boundedText(r.Effort, 128) || strings.ContainsAny(r.Model+r.Effort, "\r\n") || len(r.Skills)+len(r.AlwaysOnSkills) > config.MaxSkillsPerRole {
 		return errors.New("invalid action model or skills")
 	}
 	for _, source := range slices.Concat(r.Skills, r.AlwaysOnSkills) {
-		if len(source) > 4096 {
+		if len(source) > config.MaxSkillURLBytes {
 			return errors.New("skill source exceeds limit")
 		}
 		if _, err := skills.Name(source); err != nil {
@@ -200,6 +201,9 @@ func (j Job) Validate() error {
 	}
 	if err := j.Main.validate(); err != nil {
 		return err
+	}
+	if len(j.Main.Skills) == 0 {
+		return errors.New("main role requires at least one skill")
 	}
 	if !(config.CommandMapping{Action: string(j.Action)}).SupportsProvider(j.Main.Provider) {
 		return errors.New("action is unsupported by main provider")
@@ -332,18 +336,21 @@ func (j Job) validateChanges(changes []workspace.Change) error {
 	if err := workspace.ValidateChanges(changes); err != nil {
 		return err
 	}
-	files := slices.Clone(j.Source.Files)
+	paths := make([]string, 0, len(j.Source.Files)+len(j.Source.Omitted))
+	for _, file := range j.Source.Files {
+		paths = append(paths, file.Path)
+	}
 	omittedPaths := make(map[string]string, len(j.Source.Omitted))
 	for _, name := range j.Source.Omitted {
 		omittedPaths[workspace.FoldPath(name)] = name
-		files = append(files, workspace.File{Path: name, Mode: workspace.Regular})
+		paths = append(paths, name)
 	}
 	for _, change := range changes {
 		if omitted, exists := omittedPaths[workspace.FoldPath(change.Path)]; exists {
 			return fmt.Errorf("action change %q overlaps omitted source path %q", change.Path, omitted)
 		}
 	}
-	return workspace.ValidateChangedPaths(files, changes)
+	return workspace.ValidateChangedPaths(paths, changes)
 }
 
 var auditArtifacts = []string{"run-metadata.json", "architecture.md", "coverage-ledger.json", "findings.json", "REPORT.md", "FINDINGS-DETAIL.md", "NEEDS-VALIDATION.md"}

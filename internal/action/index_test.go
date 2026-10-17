@@ -325,6 +325,77 @@ func TestFixIndexRejectsIgnoredUntrackedIgnoreRules(t *testing.T) {
 	}
 }
 
+func TestFixIndexRejectsSelfIgnoringToolCachesUntilRemoved(t *testing.T) {
+	for _, cache := range []string{".pytest_cache", ".ruff_cache", ".mypy_cache", ".venv"} {
+		t.Run(cache, func(t *testing.T) {
+			index, source := offlineIndexFixture(t, []workspace.File{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("before")}})
+			writeIndexFixture(t, source, "source.txt", []byte("after"))
+			writeIndexFixture(t, source, cache+"/.gitignore", []byte("# Created by a test tool\n*\n"))
+			writeIndexFixture(t, source, cache+"/state", []byte("generated cache"))
+			if changes, err := index.changes(context.Background()); err == nil || !strings.Contains(err.Error(), fmt.Sprintf("ignored untracked fix control file %q", cache+"/.gitignore")) {
+				t.Fatalf("self-ignoring cache was accepted: changes=%+v error=%v", changes, err)
+			}
+			if err := os.RemoveAll(filepath.Join(source, cache)); err != nil {
+				t.Fatal(err)
+			}
+			changes, err := index.changes(context.Background())
+			want := []workspace.Change{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("after")}}
+			if err != nil || !reflect.DeepEqual(changes, want) {
+				t.Fatalf("removing the tool cache lost the intended fix: changes=%+v error=%v", changes, err)
+			}
+		})
+	}
+	t.Run("supplied parent ignore rule", func(t *testing.T) {
+		index, source := offlineIndexFixture(t, []workspace.File{{Path: ".gitignore", Mode: workspace.Regular, Data: []byte(".pytest_cache/\n")}})
+		writeIndexFixture(t, source, ".pytest_cache/.gitignore", []byte("*\n"))
+		writeIndexFixture(t, source, ".pytest_cache/state", []byte("generated cache"))
+		writeIndexFixture(t, source, "fix.txt", []byte("reviewed"))
+		changes, err := index.changes(context.Background())
+		want := []workspace.Change{{Path: "fix.txt", Mode: workspace.Regular, Data: []byte("reviewed")}}
+		if err != nil || !reflect.DeepEqual(changes, want) {
+			t.Fatalf("supplied ignore rule did not exclude the cache directory: changes=%+v error=%v", changes, err)
+		}
+	})
+}
+
+func TestFixIndexBoundsActualControlScanBeforeStaging(t *testing.T) {
+	index, source := offlineIndexFixture(t, []workspace.File{{Path: ".gitignore", Mode: workspace.Regular, Data: []byte("*.cache\n")}})
+	// The tracked ignore file and intended change bring this to exactly 100000.
+	for i := 0; i < workspace.MaxEntries-2; i++ {
+		if err := os.WriteFile(filepath.Join(source, fmt.Sprintf("entry-%06d.cache", i)), nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeIndexFixture(t, source, "fix.txt", []byte("reviewed"))
+	marker := filepath.Join(t.TempDir(), "add-ran")
+	script := "#!/bin/sh\nfor argument in \"$@\"; do\n if [ \"$argument\" = add ]; then touch " + shellQuote(marker) + "; fi\ndone\nexec " + shellQuote(index.binary) + " \"$@\"\n"
+	index.binary = filepath.Join(fakeOnPath(t, "git-proxy", script), "git-proxy")
+	changes, err := index.changes(context.Background())
+	want := []workspace.Change{{Path: "fix.txt", Mode: workspace.Regular, Data: []byte("reviewed")}}
+	if err != nil || !reflect.DeepEqual(changes, want) {
+		t.Fatalf("exact control-scan bound refused the intended fix: changes=%+v error=%v", changes, err)
+	}
+	if err := os.Remove(marker); err != nil {
+		t.Fatalf("exact-bound control did not stage output: %v", err)
+	}
+	if _, err := index.run(context.Background(), 1024, nil, "read-tree", index.baseline); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(source, "fix.txt"), filepath.Join(source, "next.txt")); err != nil {
+		t.Fatal(err)
+	}
+	writeIndexFixture(t, source, "overflow.cache", nil)
+	if changes, err := index.changes(context.Background()); err == nil || !strings.Contains(err.Error(), "fix directory scan exceeds entry limit") {
+		t.Fatalf("oversized control scan was accepted: changes=%+v error=%v", changes, err)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Git staged output before refusing the oversized scan: %v", err)
+	}
+	if staged, err := index.run(context.Background(), 1024, nil, "ls-files", "--cached", "--", "next.txt"); err != nil || len(staged) != 0 {
+		t.Fatalf("refused scan left new output staged: %q,%v", staged, err)
+	}
+}
+
 func TestFixIndexPreservesModeDeletionAndBinary(t *testing.T) {
 	index, source := offlineIndexFixture(t, []workspace.File{{Path: "mode", Mode: workspace.Regular, Data: []byte("same")}, {Path: "deleted", Mode: workspace.Regular, Data: []byte("deleted")}})
 	if err := os.Chmod(filepath.Join(source, "mode"), 0755); err != nil {

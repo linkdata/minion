@@ -346,3 +346,19 @@ func TestReadChangesErrorsIdentifySelectedPath(t *testing.T) {
 		}
 	}
 }
+
+func TestOpenPathErrorsIdentifyPathAndPreserveCause(t *testing.T) {
+	root := t.TempDir()
+	name := filepath.Join(root, "missing", "source")
+	for _, open := range []func() error{
+		func() error { return CheckRoot(name) },
+		func() error { _, err := ReadRegular(name, MaxBytes); return err },
+		func() error { return walk(context.Background(), name, func(string, fs.DirEntry) error { return nil }) },
+	} {
+		err := open()
+		var pathErr *os.PathError
+		if !errors.Is(err, os.ErrNotExist) || !errors.As(err, &pathErr) || pathErr.Op != "openat" || pathErr.Path != name {
+			t.Fatalf("open error lost path or cause: %v", err)
+		}
+	}
+}

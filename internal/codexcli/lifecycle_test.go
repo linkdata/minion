@@ -101,6 +101,63 @@ func TestRunRequiresCompletionForLatestTurn(t *testing.T) {
 	}
 }
 
+func TestRunIncompleteOutputKeepsUsageIncompleteWithCompleteRollout(t *testing.T) {
+	for _, events := range []string{
+		`{"type":"item.completed","item":{"type":"agent_message","text":"progress"}}`,
+		`{"type":"turn.completed"}`,
+	} {
+		installFakeCodex(t, "#!/bin/sh\ncat <<'EVENTS'\n"+`{"type":"thread.started","thread_id":"root"}`+"\n"+events+"\nEVENTS\n")
+		writeUsageRollout(t, os.Getenv("CODEX_HOME"), "root", "", usageEvent("task_started", "root-turn"), usageRecord("root", "root-turn", "response", 100, 10, 7), usageEvent("task_complete", "root-turn"))
+		result, err := Run(context.Background(), t.TempDir(), "task", false, "", config.CodexConfig{})
+		if err == nil || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 100, CachedInput: 10, Output: 7}) {
+			t.Fatalf("incomplete output certified complete usage: result=%+v error=%v", result, err)
+		}
+	}
+}
+
+func TestOutputCountsUniqueHelpersAcrossRepeatedWaits(t *testing.T) {
+	o := jsonlOutput{}
+	for range 300 {
+		for _, kind := range []string{"item.started", "item.completed"} {
+			_, _ = o.Write([]byte(fmt.Sprintf(`{"type":%q,"item":{"type":"collab_tool_call","receiver_thread_ids":["child","child"]}}`+"\n", kind)))
+		}
+	}
+	_, _ = o.Write([]byte(`{"type":"item.completed","item":{"type":"agent_message","text":"answer"}}` + "\n" + `{"type":"turn.completed"}` + "\n"))
+	o.finish()
+	if o.stopped || o.failed || !o.completed || len(o.children) != 1 || o.children[0] != "child" || len(o.seenChildren) != 1 {
+		t.Fatalf("repeated waits consumed helper capacity: stopped=%t failed=%t complete=%t children=%v", o.stopped, o.failed, o.completed, o.children)
+	}
+}
+
+func TestRunChecksLatestOwnedChildTurn(t *testing.T) {
+	first := usageEvent("task_started", "first") + "\n" + usageRecord("child", "first", "response-1", 20, 0, 2)
+	second := usageEvent("task_started", "second") + "\n" + usageRecord("child", "second", "response-2", 30, 0, 3)
+	for _, scenario := range []struct {
+		name, events string
+		fails        bool
+	}{
+		{"aborted then completed", first + "\n" + usageEvent("turn_aborted", "first") + "\n" + second + "\n" + usageEvent("task_complete", "second"), false},
+		{"completed then new open turn", first + "\n" + usageEvent("task_complete", "first") + "\n" + second, true},
+		{"old abort after newer completion", first + "\n" + second + "\n" + usageEvent("task_complete", "second") + "\n" + usageEvent("turn_aborted", "first"), false},
+		{"old completion cannot close newer turn", first + "\n" + second + "\n" + usageEvent("task_complete", "first"), true},
+		{"observed latest abort before unreadable tail", first + "\n" + usageEvent("turn_aborted", "first") + "\n{damaged", true},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			installFakeCodex(t, "#!/bin/sh\ncat <<'EVENTS'\n"+`{"type":"thread.started","thread_id":"root"}
+{"type":"item.completed","item":{"type":"collab_tool_call","receiver_thread_ids":["child"]}}
+{"type":"item.completed","item":{"type":"agent_message","text":"answer"}}
+{"type":"turn.completed"}`+"\nEVENTS\n")
+			home := os.Getenv("CODEX_HOME")
+			writeUsageRollout(t, home, "root", "", usageEvent("task_started", "root-turn"), usageRecord("root", "root-turn", "root-response", 10, 0, 1), usageEvent("task_complete", "root-turn"))
+			writeUsageRollout(t, home, "child", "root", strings.Split(scenario.events, "\n")...)
+			result, err := Run(context.Background(), t.TempDir(), "task", false, "", config.CodexConfig{})
+			if (err != nil) != scenario.fails || scenario.fails && (!strings.Contains(err.Error(), "helper agent work did not complete") || result.Answer != "") || !scenario.fails && result.Answer != "answer" || result.UsageComplete || result.Tokens.Input < 30 {
+				t.Fatalf("latest child turn misclassified: result=%+v error=%v", result, err)
+			}
+		})
+	}
+}
+
 func TestRunRejectsKnownUnfinishedChildrenWithoutRejectingAccountingGaps(t *testing.T) {
 	for _, scenario := range []string{"complete", "unfinished", "aborted", "missing counters", "missing log", "inherited turn", "damaged log"} {
 		t.Run(scenario, func(t *testing.T) {

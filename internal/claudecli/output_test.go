@@ -32,8 +32,8 @@ func TestOutputNativeUsageLimit(t *testing.T) {
 		{"active overage permits completion", `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","overageInUse":true}}` + "\n" + successfulResult, known, false, ""},
 		{"native failure keeps helper counters", warning + "\n" + rejected + "\n" + failed, usage.Tokens{Input: 595668, CachedInput: 435540, Output: 11489}, true, limit},
 		{"rejection at EOF", rejected, usage.Tokens{}, false, limit},
-		{"later counters still parsed", rejected + "\n" + successfulResult, known, false, limit},
-		{"warning cannot clear rejection", rejected + "\n" + warning + "\n" + successfulResult, known, false, limit},
+		{"later counters parsed before cancellation", rejected + "\n" + successfulResult, known, true, limit},
+		{"warning cannot clear rejection", rejected + "\n" + warning + "\n" + successfulResult, known, true, limit},
 		{"rejection invalidates earlier answer", successfulResult + "\n" + rejected, known, false, limit},
 		{"limit takes precedence over unfinished tasks", rejected + "\n" + `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"reviewer"}]}`, usage.Tokens{}, false, limit},
 	} {

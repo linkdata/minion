@@ -75,7 +75,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"test"}' '{"type":"item.comp
 				"-c", `shell_environment_policy.filters={"PATH"="include","HOME"="include","TMPDIR"="include","TMP"="include","TEMP"="include","GOCACHE"="include","LANG"="include","LC_ALL"="include","LC_CTYPE"="include","TERM"="include"}`,
 				"-c", `default_permissions="minion"`,
 				"-c", fmt.Sprintf("permissions.minion.extends=%q", tt.parent),
-				"-c", fmt.Sprintf(`permissions.minion.filesystem={":root"="deny",":minimal"="read",":tmpdir"="write",":slash_tmp"="deny",%s=%q,%s="read",%s="read",%s="read",%s="read",%s="read"}`, strconv.Quote(dir), tt.access, strconv.Quote(filepath.Join(dir, ".git")), strconv.Quote(filepath.Join(dir, ".agents")), strconv.Quote(filepath.Join(dir, ".codex")), strconv.Quote(filepath.Join(dir, ".claude")), strconv.Quote(fakeCodex)),
+				"-c", fmt.Sprintf(`permissions.minion.filesystem={":root"="deny",":minimal"="read",":tmpdir"="write",":slash_tmp"="deny",%s="deny",%s=%q,%s="read",%s="read",%s="read",%s="read",%s="read"}`, strconv.Quote(filepath.Dir(dir)), strconv.Quote(dir), tt.access, strconv.Quote(filepath.Join(dir, ".git")), strconv.Quote(filepath.Join(dir, ".agents")), strconv.Quote(filepath.Join(dir, ".codex")), strconv.Quote(filepath.Join(dir, ".claude")), strconv.Quote(fakeCodex)),
 				"-c", "permissions.minion.network.enabled=false",
 				"--", "-",
 			}
@@ -529,7 +529,7 @@ func TestJSONLOutputStopsAtCardinalityLimits(t *testing.T) {
 			t.Fatal(err)
 		}
 		_, _ = output.Write(append(line, '\n'))
-		if !cancelled || !output.failed || len(output.children) != 0 || !strings.Contains(output.failureReason, "child agent") {
+		if !cancelled || !output.failed || len(output.children) != maxCodexChildren || !strings.Contains(output.failureReason, "child agent") {
 			t.Fatalf("unbounded children: cancelled=%t children=%d reason=%q", cancelled, len(output.children), output.failureReason)
 		}
 	})

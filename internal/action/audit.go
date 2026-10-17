@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -19,6 +20,26 @@ const (
 	auditForReview auditReadMode = iota
 	auditIncomplete
 )
+
+var auditValidators = []struct{ script, artifact string }{
+	{"validate-findings.cjs", "findings.json"},
+	{"validate-coverage-ledger.cjs", "coverage-ledger.json"},
+}
+
+func checkAuditTools(ctx context.Context, dir, skill string) error {
+	for _, validator := range auditValidators {
+		script := filepath.Join(filepath.Dir(skill), validator.script)
+		info, err := os.Stat(script)
+		if err != nil {
+			return fmt.Errorf("audit validator %q: %w", script, err)
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("audit validator %q is not a regular file", script)
+		}
+	}
+	_, err := auditNodePermissionFlag(ctx, dir)
+	return err
+}
 
 func readAuditArtifacts(outputDir string, mode auditReadMode) ([]workspace.File, []Diagnostic, error) {
 	var files []workspace.File
@@ -71,6 +92,11 @@ func validateAuditFiles(ctx context.Context, files []workspace.File, validationR
 	if _, err := validateAuditMetadata(metadataBytes, reportBytes, repo, target, head); err != nil {
 		return "", err
 	}
+	for name, data := range map[string][]byte{"findings.json": findingsBytes, "coverage-ledger.json": ledgerBytes} {
+		if len(data) == 0 {
+			return "", fmt.Errorf("audit %s is missing or empty", name)
+		}
+	}
 	validationDir, err := os.MkdirTemp(validationRoot, ".audit-validation-")
 	if err != nil {
 		return "", fmt.Errorf("create audit validation directory: %w", err)
@@ -90,19 +116,19 @@ func validateAuditFiles(ctx context.Context, files []workspace.File, validationR
 	if err != nil {
 		return "", err
 	}
-	for _, validator := range []struct{ script, artifact string }{
-		{"validate-findings.cjs", "findings.json"},
-		{"validate-coverage-ledger.cjs", "coverage-ledger.json"},
-	} {
+	for _, validator := range auditValidators {
 		script := filepath.Join(filepath.Dir(skill), validator.script)
 		// #nosec G204 -- the installed skill path and validation directory are checked paths; arguments bypass a shell.
-		cmd := exec.CommandContext(ctx, "node", permissionFlag,
+		cmd, err := auditNodeCommand(ctx, validationDir, permissionFlag,
 			"--allow-fs-read="+filepath.Dir(skill), "--allow-fs-read="+validationDir,
 			script, filepath.Join(validationDir, validator.artifact))
-		cmd.Dir = validationDir
-		cmd.Env = []string{"HOME=" + validationDir, "PATH=/usr/bin:/bin"}
+		if err != nil {
+			return "", err
+		}
+		stderr := bounded.Tail{Limit: 8 << 10}
+		cmd.Stderr = &stderr
 		if err := cmd.Run(); err != nil {
-			return "", fmt.Errorf("audit %s failed: %w", validator.script, err)
+			return "", fmt.Errorf("audit %s failed: %w: %q", validator.script, err, stderr.String())
 		}
 	}
 	var units []struct {
@@ -210,9 +236,10 @@ func auditNodePermissionFlag(ctx context.Context, dir string) (string, error) {
 	// Prefer the stable flag; Node 20 requires the experimental spelling.
 	for _, flag := range []string{"--permission", "--experimental-permission"} {
 		// #nosec G204 -- the flags and probe program are fixed strings, passed without a shell.
-		cmd := exec.CommandContext(ctx, "node", flag, "-e", `if (!process.permission || process.permission.has('fs.read', '/etc/passwd')) process.exit(1)`)
-		cmd.Dir = dir
-		cmd.Env = []string{"HOME=" + dir, "PATH=/usr/bin:/bin"}
+		cmd, err := auditNodeCommand(ctx, dir, flag, "-e", `if (!process.permission || process.permission.has('fs.read', '/etc/passwd')) process.exit(1)`)
+		if err != nil {
+			return "", err
+		}
 		if err := cmd.Run(); err == nil {
 			return flag, nil
 		}
@@ -221,4 +248,18 @@ func auditNodePermissionFlag(ctx context.Context, dir string) (string, error) {
 		}
 	}
 	return "", errors.New("node permission model is unavailable")
+}
+
+func auditNodeCommand(ctx context.Context, dir string, args ...string) (*exec.Cmd, error) {
+	binary, err := exec.LookPath("node")
+	if err != nil {
+		return nil, fmt.Errorf("audit requires node: %w", err)
+	}
+	if !filepath.IsAbs(binary) {
+		return nil, errors.New("audit node binary must have an absolute path")
+	}
+	cmd := exec.CommandContext(ctx, binary, args...)
+	cmd.Dir = dir
+	cmd.Env = []string{"HOME=" + dir, "PATH=/usr/bin:/bin"}
+	return cmd, nil
 }

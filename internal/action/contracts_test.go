@@ -139,6 +139,7 @@ func TestJobRejectsInvalidRoleAndDispatchSettings(t *testing.T) {
 		{"model bound", func(j *Job) { j.Main.Model = strings.Repeat("m", 129) }, "invalid action model or skills"},
 		{"effort bound", func(j *Job) { j.Main.Effort = strings.Repeat("e", 129) }, "invalid action model or skills"},
 		{"model newline", func(j *Job) { j.Main.Model = "model\nother" }, "invalid action model or skills"},
+		{"missing main skills", func(j *Job) { j.Main.Skills = nil }, "requires at least one skill"},
 		{"skill count", func(j *Job) {
 			for i := 0; i < 65; i++ {
 				j.Main.Skills = append(j.Main.Skills, j.Main.Skills[0])
@@ -495,6 +496,14 @@ func TestPortableContractsRejectMismatches(t *testing.T) {
 		{"version", func(j *Job) { j.Version++ }},
 		{"source", func(j *Job) { j.Source.Head = "untrusted" }},
 		{"requester identity", func(j *Job) { j.Identity.RequesterID = 0 }},
+		{"repository identity zero", func(j *Job) { j.Identity.RepositoryID = 0 }},
+		{"repository identity negative", func(j *Job) { j.Identity.RepositoryID = -1 }},
+		{"owner identity zero", func(j *Job) { j.Identity.OwnerID = 0 }},
+		{"owner identity negative", func(j *Job) { j.Identity.OwnerID = -1 }},
+		{"number zero", func(j *Job) { j.Identity.Number = 0 }},
+		{"number negative", func(j *Job) { j.Identity.Number = -1 }},
+		{"subject type", func(j *Job) { j.Identity.SubjectType = "Discussion" }},
+		{"repository shape", func(j *Job) { j.Identity.Repository = "a/b/c" }},
 		{"runtime", func(j *Job) { j.RuntimeBudget = 0 }},
 		{"title bound", func(j *Job) { j.Title = strings.Repeat("x", maxActionTitleBytes+1) }},
 		{"action", func(j *Job) { j.Action = "unknown" }},
@@ -553,6 +562,11 @@ func TestPortableContractsRejectMismatches(t *testing.T) {
 	if err := status.Validate(job); err != nil {
 		t.Fatal(err)
 	}
+	status.ProgressAge = -time.Nanosecond
+	if status.Validate(job) == nil {
+		t.Fatal("accepted negative progress age")
+	}
+	status.ProgressAge = 0
 	status.Version++
 	if status.Validate(job) == nil {
 		t.Fatal("accepted incompatible status version")

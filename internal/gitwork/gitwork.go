@@ -471,7 +471,24 @@ func runGit(ctx context.Context, dir string, args ...string) (string, error) {
 	return strings.TrimSpace(output.String()), nil
 }
 
+// ResolveGit pins command lookup before a checkout becomes the working directory.
+func ResolveGit() (string, error) {
+	binary, err := exec.LookPath("git")
+	if err != nil {
+		return "", fmt.Errorf("find Git executable: %w", err)
+	}
+	// execerrdot=0 can make LookPath accept an executable relative to the caller.
+	if !filepath.IsAbs(binary) {
+		return "", errors.New("Git binary must have an absolute path")
+	}
+	return binary, nil
+}
+
 func runGitInputTo(ctx context.Context, dir string, stdin io.Reader, stdout io.Writer, args ...string) error {
+	binary, err := ResolveGit()
+	if err != nil {
+		return err
+	}
 	gitArgs := append(HardeningArgs(),
 		"-c", "user.name=Minion",
 		"-c", "user.email=minion@localhost",
@@ -480,7 +497,7 @@ func runGitInputTo(ctx context.Context, dir string, stdin io.Reader, stdout io.W
 		"-c", "push.gpgSign=false",
 		"-c", "submodule.recurse=false",
 	)
-	cmd := exec.CommandContext(ctx, "git", append(gitArgs, args...)...)
+	cmd := exec.CommandContext(ctx, binary, append(gitArgs, args...)...)
 	processgroup.Configure(cmd)
 	cmd.WaitDelay = 2 * time.Second
 	cmd.Dir = dir

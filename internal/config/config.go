@@ -33,6 +33,10 @@ const (
 	DefaultCriticMaxRounds = 5
 	// MaxCriticMaxRounds is the largest configurable proposal/revision round limit.
 	MaxCriticMaxRounds = 20
+	// MaxSkillsPerRole bounds the combined required and always-on skill list.
+	MaxSkillsPerRole = 64
+	// MaxSkillURLBytes is the portable action limit for one skill source.
+	MaxSkillURLBytes = 4096
 
 	defaultReviewSkill        = "https://github.com/DietrichGebert/ponytail/tree/main/skills/ponytail-review"
 	defaultFixSkill           = "https://github.com/DietrichGebert/ponytail/tree/main/skills/ponytail"
@@ -228,6 +232,15 @@ func (c *Config) Validate(configDir string) error {
 	if strings.ContainsAny(c.Claude.Model, " \t\r\n") || strings.ContainsAny(c.Claude.Effort, " \t\r\n") {
 		return fmt.Errorf("claude model and effort must not contain whitespace")
 	}
+	if c.AlwaysOnSkills == nil {
+		c.AlwaysOnSkills = []string{defaultAntiInjectionSkill, defaultCavemanSkill}
+	}
+	if len(c.AlwaysOnSkills) > MaxSkillsPerRole {
+		return fmt.Errorf("always_on_skills exceeds %d skills", MaxSkillsPerRole)
+	}
+	if err := validateSkillURLs(c.AlwaysOnSkills); err != nil {
+		return fmt.Errorf("always_on_skills: %w", err)
+	}
 	if c.Commands == nil {
 		c.Commands = defaultCommands()
 	}
@@ -242,6 +255,9 @@ func (c *Config) Validate(configDir string) error {
 		}
 		if len(mapping.Skills) == 0 {
 			return fmt.Errorf("command %q must have at least one skill", name)
+		}
+		if len(mapping.Skills)+len(c.AlwaysOnSkills) > MaxSkillsPerRole {
+			return fmt.Errorf("command %q exceeds %d required and always-on skills", name, MaxSkillsPerRole)
 		}
 		if err := validateSkillURLs(mapping.Skills); err != nil {
 			return fmt.Errorf("command %q: %w", name, err)
@@ -258,12 +274,6 @@ func (c *Config) Validate(configDir string) error {
 				return fmt.Errorf("command %q requires a security-audit skill", name)
 			}
 		}
-	}
-	if c.AlwaysOnSkills == nil {
-		c.AlwaysOnSkills = []string{defaultAntiInjectionSkill, defaultCavemanSkill}
-	}
-	if err := validateSkillURLs(c.AlwaysOnSkills); err != nil {
-		return fmt.Errorf("always_on_skills: %w", err)
 	}
 	sourceByName := make(map[string]struct{ name, url string })
 	addSkill := func(rawURL string) error {
@@ -416,6 +426,9 @@ func (c *Config) Validate(configDir string) error {
 func validateSkillURLs(urls []string) error {
 	seenNames := make(map[string]bool, len(urls))
 	for i, rawURL := range urls {
+		if len(rawURL) > MaxSkillURLBytes {
+			return fmt.Errorf("skill URL exceeds %d bytes", MaxSkillURLBytes)
+		}
 		name, err := skills.Name(rawURL)
 		if err != nil {
 			return fmt.Errorf("invalid skill URL %q: %w", rawURL, err)

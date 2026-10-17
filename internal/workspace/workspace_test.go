@@ -156,19 +156,19 @@ func TestSourceAllowsDirectorySpellingsButChangesRejectCollisions(t *testing.T) 
 }
 
 func TestChangedPathsChecksFinalSourceLayout(t *testing.T) {
-	if err := ValidateChangedPaths([]File{{Path: "Foo/stay", Mode: Regular}}, []Change{{Path: "foo/new", Mode: Regular}}); err == nil {
+	if err := ValidateChangedPaths([]string{"Foo/stay"}, []Change{{Path: "foo/new", Mode: Regular}}); err == nil {
 		t.Fatal("accepted added path with different source directory spelling")
 	}
 	if err := ValidateChangedPaths(nil, []Change{{Path: "missing", Delete: true}}); err == nil {
 		t.Fatal("accepted deletion absent from source")
 	}
 	for _, test := range []struct {
-		base    []File
+		base    []string
 		changes []Change
 	}{
-		{[]File{{Path: "Foo/a", Mode: Regular}}, []Change{{Path: "Foo/a", Delete: true}, {Path: "foo/a", Mode: Regular}}},
-		{[]File{{Path: "entry", Mode: Regular}}, []Change{{Path: "entry", Delete: true}, {Path: "entry/child", Mode: Regular}}},
-		{[]File{{Path: "entry/child", Mode: Regular}}, []Change{{Path: "entry/child", Delete: true}, {Path: "entry", Mode: Regular}}},
+		{[]string{"Foo/a"}, []Change{{Path: "Foo/a", Delete: true}, {Path: "foo/a", Mode: Regular}}},
+		{[]string{"entry"}, []Change{{Path: "entry", Delete: true}, {Path: "entry/child", Mode: Regular}}},
+		{[]string{"entry/child"}, []Change{{Path: "entry/child", Delete: true}, {Path: "entry", Mode: Regular}}},
 	} {
 		if err := ValidateChangedPaths(test.base, test.changes); err != nil {
 			t.Fatalf("rejected valid final layout: %+v,%v", test, err)
@@ -241,7 +241,7 @@ func TestCaseOnlyRenameAppliesDeletionBeforeCreation(t *testing.T) {
 	if err := ValidateChanges(changes); err != nil {
 		t.Fatal(err)
 	}
-	if err := ValidateChangedPaths(base, changes); err != nil {
+	if err := ValidateChangedPaths([]string{"Foo/a"}, changes); err != nil {
 		t.Fatal(err)
 	}
 	if err := Apply(root, changes); err != nil {
@@ -391,6 +391,33 @@ func TestMaterializeRefusesNonprivateRoot(t *testing.T) {
 	}
 }
 
+func TestApplyRootErrorDoesNotRequirePrivacy(t *testing.T) {
+	root := privateRoot(t)
+	name := filepath.Join(root, "file")
+	if err := os.WriteFile(name, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Apply(name, nil); err == nil || !strings.Contains(err.Error(), "real directory") || strings.Contains(err.Error(), "private") {
+		t.Fatalf("incorrect root requirement: %v", err)
+	}
+	if err := os.Chmod(root, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := Apply(root, []Change{{Path: "new", Mode: Regular}}); err != nil {
+		t.Fatalf("Apply imposed a private-root requirement: %v", err)
+	}
+}
+
+func TestCheckUnchangedNamesFirstDeletedPath(t *testing.T) {
+	root := privateRoot(t)
+	base := []File{{Path: "z-last", Mode: Regular}, {Path: "a-first", Mode: Regular}}
+	for range 5 {
+		if err := CheckUnchanged(context.Background(), root, base); err == nil || err.Error() != `read-only action modified supplied source: deleted "a-first"` {
+			t.Fatalf("deletion diagnostic lacks stable path: %v", err)
+		}
+	}
+}
+
 func TestCheckUnchangedRefusesAdditionsAndDeletions(t *testing.T) {
 	for _, mutation := range []string{"add", "delete"} {
 		t.Run(mutation, func(t *testing.T) {
@@ -476,7 +503,7 @@ func TestValidPathUsesTransportGrammar(t *testing.T) {
 }
 
 func TestChangedLayoutCollisionDiagnosticIsStable(t *testing.T) {
-	base := []File{{Path: "Dir/keep", Mode: Regular}, {Path: "Foo/keep", Mode: Regular}}
+	base := []string{"Dir/keep", "Foo/keep"}
 	changes := []Change{{Path: "foo/new", Mode: Regular}, {Path: "dir/new", Mode: Regular}}
 	if err := ValidateChangedPaths(base, changes); err == nil || err.Error() != `source directory spelling collision at "dir/new"` {
 		t.Fatalf("unstable layout diagnostic=%v", err)
@@ -523,7 +550,7 @@ func TestUnicodeFoldCollisionsInFixLayouts(t *testing.T) {
 				if err := ValidateChanges(changes); err == nil {
 					t.Fatalf("accepted folded result collision: %q", names)
 				}
-				if err := ValidateChangedPaths(files[:1], changes[1:]); err == nil {
+				if err := ValidateChangedPaths([]string{names[0]}, changes[1:]); err == nil {
 					t.Fatalf("accepted folded unchanged-source collision: %q", names)
 				}
 			}
@@ -558,16 +585,20 @@ func TestRelativePathByteLimit(t *testing.T) {
 }
 
 func TestSnapshotCombinedHeadAndBaseByteLimit(t *testing.T) {
-	data := make([]byte, MaxBytes+1)
+	data := make([]byte, 1<<20)
 	snapshot := Snapshot{
 		Head: strings.Repeat("a", 40), Base: strings.Repeat("b", 40), MergeBase: strings.Repeat("b", 40),
-		Files:     []File{{Path: "head", Mode: Regular, Data: data[:MaxBytes/2]}},
-		BaseFiles: []File{{Path: "base", Mode: Regular, Data: data[MaxBytes/2:]}},
 	}
+	for i := 0; i < MaxBytes/len(data)/2; i++ {
+		file := File{Path: fmt.Sprintf("file-%d", i), Mode: Regular, Data: data}
+		snapshot.Files = append(snapshot.Files, file)
+		snapshot.BaseFiles = append(snapshot.BaseFiles, file)
+	}
+	snapshot.BaseFiles = append(snapshot.BaseFiles, File{Path: "overflow", Mode: Regular, Data: data[:1]})
 	if err := ValidateSnapshot(snapshot); err == nil || !strings.Contains(err.Error(), "snapshot files exceed byte limit") {
 		t.Fatalf("combined source overflow validation=%v", err)
 	}
-	snapshot.BaseFiles[0].Data = snapshot.BaseFiles[0].Data[:MaxBytes/2]
+	snapshot.BaseFiles = snapshot.BaseFiles[:len(snapshot.BaseFiles)-1]
 	if err := ValidateSnapshot(snapshot); err != nil {
 		t.Fatalf("rejected source exactly at combined limit: %v", err)
 	}

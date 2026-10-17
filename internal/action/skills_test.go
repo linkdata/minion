@@ -42,6 +42,13 @@ func writeActionTestSkills(t *testing.T, home, parent string, sources ...string)
 		if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("---\nname: "+name+"\ndescription: Test skill\n---\nUse this test skill.\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
+		if name == "security-audit" {
+			for _, validator := range auditValidators {
+				if err := os.WriteFile(filepath.Join(dir, validator.script), []byte("JSON.parse(require('fs').readFileSync(process.argv[2], 'utf8'));\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
 		metadata := fmt.Sprintf(`{"url":%q,"commit":%q}`, source, strings.Repeat("a", 40))
 		if err := os.WriteFile(filepath.Join(dir, ".minion-install.json"), []byte(metadata), 0o600); err != nil {
 			t.Fatal(err)

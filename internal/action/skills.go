@@ -6,7 +6,9 @@ import (
 	"github.com/linkdata/minion/internal/skills"
 )
 
-func (r *Runner) selectedSkills(provider string, required, alwaysOn []string) (selected []string, err error) {
+// SelectSkills resolves required and optional installed skills using execution's grant rules.
+func (r *Runner) SelectSkills(provider string, required, alwaysOn []string) ([]string, error) {
+	var selected []string
 	seen := map[string]bool{}
 	for _, source := range required {
 		path, installed, err := skills.InstalledPathFor(source, provider)
@@ -32,5 +34,5 @@ func (r *Runner) selectedSkills(provider string, required, alwaysOn []string) (s
 			seen[path] = true
 		}
 	}
-	return
+	return selected, nil
 }

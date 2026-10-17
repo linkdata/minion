@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
@@ -53,5 +54,27 @@ func TestPromptsRequireAwaitingBackgroundWork(t *testing.T) {
 				t.Fatalf("background instruction run: answer=%q roles=%v error=%v", result.Answer, roles, err)
 			}
 		})
+	}
+}
+
+func TestAllActionPromptsDeclareSharedDeadline(t *testing.T) {
+	deadline := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	defer cancel()
+	for _, action := range []command.Action{command.Fix, command.Review, command.Comment, command.SecurityAudit} {
+		job := portableJob(action)
+		job.Critic = &RoleSettings{Provider: "claude"}
+		prompt, err := actionPrompt(ctx, job, "/source", "/context", "/reports", "/installed/security-audit/SKILL.md")
+		if err != nil || !strings.Contains(prompt, "The whole action must finish before "+deadline.Format(time.RFC3339)) || !strings.Contains(prompt, "leave time for subsequent critic reviews") {
+			t.Fatalf("%s shared deadline missing: %v, %s", action, err, prompt)
+		}
+	}
+}
+
+func TestReviewCommentaryIsExcludedFromSourceChanges(t *testing.T) {
+	for _, prompt := range []string{mainPrompt("task"), criticPrompt("task", "answer", "", "", "", "")} {
+		if !strings.Contains(prompt, "source changes") {
+			t.Fatal("review commentary restriction omits source changes")
+		}
 	}
 }

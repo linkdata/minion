@@ -8,8 +8,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
-	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/usage"
 )
@@ -171,17 +171,61 @@ func TestOutputRejectsNativeMemoryPressureStops(t *testing.T) {
 func TestWaitCeilingDetectionHandlesFragmentedAndUnterminatedLines(t *testing.T) {
 	const diagnostic = "Background tasks still running 10m after the last turn (worker); stopping them. Set CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 to wait indefinitely."
 	for _, chunk := range []int{1, 7, 1000} {
-		lines := bounded.LineMatch{Limit: maxEventBytes, Match: func(line []byte) bool { return backgroundWaitCeiling(string(line)) }}
+		lines := waitCeiling{}
 		data := "ordinary diagnostic\n" + diagnostic + " \t\r"
 		for len(data) != 0 {
 			n := min(chunk, len(data))
 			_, _ = lines.Write([]byte(data[:n]))
 			data = data[n:]
 		}
-		lines.Finish()
-		if !lines.Matched {
+		if lines.matched {
+			t.Fatal("unterminated diagnostic matched before EOF")
+		}
+		lines.finish()
+		if !lines.matched {
 			t.Fatalf("chunk%d missed the native final diagnostic", chunk)
 		}
+	}
+}
+
+func TestWaitCeilingBoundsLinesAndRetainsEarlierMatch(t *testing.T) {
+	const prefix = "Background tasks still running "
+	const suffix = "; stopping them. Set CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 to wait indefinitely."
+	for _, chunk := range []int{7, 32768} {
+		lines := waitCeiling{}
+		for data := prefix + strings.Repeat("x", maxEventBytes) + suffix + "\n"; len(data) != 0; {
+			n := min(chunk, len(data))
+			written, err := lines.Write([]byte(data[:n]))
+			if written != n || err != nil || len(lines.line) > maxEventBytes {
+				t.Fatalf("chunk%d write=%d error=%v retained=%d", chunk, written, err, len(lines.line))
+			}
+			data = data[n:]
+		}
+		if lines.matched {
+			t.Fatal("overlong diagnostic was accepted")
+		}
+		_, _ = lines.Write([]byte(prefix + "10m" + suffix + "\n" + strings.Repeat("later diagnostic\n", 2000)))
+		lines.finish()
+		if !lines.matched {
+			t.Fatalf("chunk%d lost an earlier valid diagnostic", chunk)
+		}
+	}
+}
+
+func TestRunCancelsAfterKnownFatalResult(t *testing.T) {
+	for _, scenario := range []struct{ name, event, failure string }{
+		{"quota", `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected"}}`, "provider usage limit reached"},
+		{"pressure", `{"type":"system","subtype":"task_notification","status":"stopped","summary":"Background command \"tests\" was stopped because the system is running low on memory"}`, "provider memory pressure"},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			fakeExecutable(t, "claude", "cat >/dev/null\nsleep 30 &\ncat <<'EVENTS'\n"+scenario.event+"\n"+`{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"worker"}]}`+"\n"+successfulResult+"\nEVENTS\nwait\n")
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			result, err := Run(ctx, t.TempDir(), "task", false, "", config.ClaudeConfig{})
+			if err == nil || !strings.Contains(err.Error(), scenario.failure) || ctx.Err() != nil || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) {
+				t.Fatalf("known fatal result did not cancel promptly: result=%+v error=%v parent=%v", result, err, ctx.Err())
+			}
+		})
 	}
 }
 

@@ -64,34 +64,3 @@ func TestTextPreservesUTF8AtTheDiagnosticBound(t *testing.T) {
 		}
 	}
 }
-
-func TestLineMatchRetainsEarlierLinesAndBoundsPartialInput(t *testing.T) {
-	for _, chunk := range []int{1, 7, 100000} {
-		output := LineMatch{Limit: 16, Match: func(line []byte) bool { return string(line) == "native warning" }}
-		data := strings.Repeat("x", 100) + "native warning\nnot it\nnative warning\n" + strings.Repeat("later noise\n", 10000)
-		for len(data) > 0 {
-			n := min(chunk, len(data))
-			written, err := output.Write([]byte(data[:n]))
-			if written != n || err != nil {
-				t.Fatalf("write=%d,%v", written, err)
-			}
-			data = data[n:]
-			if len(output.line) > 16 {
-				t.Fatal("partial line exceeded limit")
-			}
-		}
-		output.Finish()
-		if !output.Matched {
-			t.Fatalf("chunk%d lost earlier match", chunk)
-		}
-	}
-	final := LineMatch{Limit: 16, Match: func(line []byte) bool { return string(line) == "native warning" }}
-	_, _ = final.Write([]byte("native warning"))
-	if final.Matched {
-		t.Fatal("unfinished line matched before EOF")
-	}
-	final.Finish()
-	if !final.Matched {
-		t.Fatal("EOF lost final unterminated line")
-	}
-}

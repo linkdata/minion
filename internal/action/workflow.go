@@ -275,7 +275,7 @@ func (e *Orchestrator) retainAudit(p *preparedAction, result Result, complete bo
 	if err := os.MkdirAll(root, 0700); err != nil {
 		return err
 	}
-	prefix := ""
+	prefix := "complete-"
 	if !complete {
 		prefix = "incomplete-"
 	}

@@ -80,15 +80,7 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 		return result, fmt.Errorf("codex exec: mark isolated project root: %w", err)
 	}
 
-	binary, err := exec.LookPath("codex")
-	if err != nil {
-		return result, fmt.Errorf("codex exec: %w", err)
-	}
-	binary, err = filepath.Abs(binary)
-	if err != nil {
-		return result, fmt.Errorf("codex exec: resolve executable: %w", err)
-	}
-	realBinary, err := filepath.EvalSymlinks(binary)
+	realBinary, err := ExecutablePath()
 	if err != nil {
 		return result, fmt.Errorf("codex exec: resolve executable: %w", err)
 	}
@@ -112,6 +104,8 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	// explicitly so a root-deny profile can start without exposing CODEX_HOME.
 	filesystemRules := []string{
 		`":root"="deny"`, `":minimal"="read"`, `":tmpdir"="write"`, `":slash_tmp"="deny"`,
+		// :minimal expands with the CLI version; it must never expose private siblings.
+		fmt.Sprintf(`%s="deny"`, strconv.Quote(filepath.Dir(workspace))),
 		fmt.Sprintf(`%s=%q`, strconv.Quote(workspace), workspaceAccess),
 		fmt.Sprintf(`%s="read"`, strconv.Quote(filepath.Join(workspace, ".git"))),
 		fmt.Sprintf(`%s="read"`, strconv.Quote(filepath.Join(workspace, ".agents"))),
@@ -235,7 +229,7 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	runCtx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
 	// #nosec G204 -- The resolved executable is outside the source snapshot, and arguments do not pass through a shell.
-	cmd := exec.CommandContext(runCtx, binary, args...)
+	cmd := exec.CommandContext(runCtx, realBinary, args...)
 	cmd.Dir = runtimeDir
 	cmd.Env = childEnvironment(os.Environ(), runtimeDir, cacheDir, settings.APIKey != "")
 	if settings.APIKey != "" {
@@ -259,9 +253,9 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 			codexHome = filepath.Join(home, ".codex")
 		}
 	}
-	var unfinishedChild bool
-	result.Tokens, result.UsageComplete, unfinishedChild = collectUsage(ctx, codexHome, output.threadID, started, output.tokens, output.children)
-	if runErr != nil || ctx.Err() != nil || output.failed || output.parseErr != nil {
+	var childError error
+	result.Tokens, result.UsageComplete, childError = collectUsage(ctx, codexHome, output.threadID, started, output.tokens, output.children)
+	if runErr != nil || ctx.Err() != nil || output.failed || output.parseErr != nil || !output.completed || output.finalMessage == "" {
 		// Keep known counters; a failed lifecycle cannot certify full coverage.
 		result.UsageComplete = false
 	}
@@ -300,9 +294,9 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	if output.finalMessage == "" {
 		return result, errors.New("codex exec completed without a final agent message")
 	}
-	if unfinishedChild {
+	if childError != nil {
 		result.UsageComplete = false
-		return result, errors.New("codex exec: helper agent work did not complete")
+		return result, fmt.Errorf("codex exec: %w", childError)
 	}
 	result.Answer = output.finalMessage
 	return result, nil
@@ -368,6 +362,7 @@ type jsonlOutput struct {
 	threadID      string
 	tokens        *usage.Tokens
 	children      []string
+	seenChildren  map[string]bool
 	bytes         int64
 	events        int
 	stopped       bool
@@ -458,11 +453,20 @@ func (o *jsonlOutput) finishLine() {
 
 func (o *jsonlOutput) accept(event codexEvent) {
 	if event.Item != nil && event.Item.Type == "collab_tool_call" {
-		if len(event.Item.ReceiverThreadIDs) > maxCodexChildren-len(o.children) {
-			o.stop("Codex child agent count exceeded the limit")
-			return
+		for _, id := range event.Item.ReceiverThreadIDs {
+			if o.seenChildren[id] {
+				continue
+			}
+			if len(o.children) == maxCodexChildren {
+				o.stop("Codex child agent count exceeded the limit")
+				return
+			}
+			if o.seenChildren == nil {
+				o.seenChildren = make(map[string]bool)
+			}
+			o.seenChildren[id] = true
+			o.children = append(o.children, id)
 		}
-		o.children = append(o.children, event.Item.ReceiverThreadIDs...)
 	}
 	switch event.Type {
 	case "thread.started":

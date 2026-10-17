@@ -18,6 +18,7 @@ import (
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/monitor"
+	"github.com/linkdata/minion/internal/skills"
 )
 
 func proposalJSON(answer, notes string) string {
@@ -474,7 +475,7 @@ func TestCommentPublishesOnlyCriticApprovedResult(t *testing.T) {
 			client := github.New("test-token")
 			client.BaseURL, client.HTTPClient = server.URL, server.Client()
 			e := &Orchestrator{WorkRoot: t.TempDir(), GitHub: client,
-
+				Commands:        map[string]config.CommandMapping{"audit": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}},
 				Adversarial:     "claude",
 				CriticMaxRounds: 1,
 				Runner:          Runner{WorkRoot: t.TempDir()},

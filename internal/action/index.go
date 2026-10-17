@@ -31,13 +31,9 @@ type fixIndex struct {
 }
 
 func newFixIndex(ctx context.Context, dir, source string, files []workspace.File) (*fixIndex, error) {
-	binary, err := exec.LookPath("git")
+	binary, err := gitwork.ResolveGit()
 	if err != nil {
 		return nil, fmt.Errorf("offline fix index requires git: %w", err)
-	}
-	// execerrdot=0 can make LookPath return a relative executable without an error.
-	if !filepath.IsAbs(binary) {
-		return nil, errors.New("offline git binary must have an absolute path")
 	}
 	index := &fixIndex{dir: dir, source: source, binary: binary, tracked: make(map[string]int64, len(files))}
 	for _, file := range files {
@@ -108,30 +104,28 @@ func (index *fixIndex) changes(ctx context.Context) ([]workspace.Change, error) 
 	if err != nil {
 		return nil, fmt.Errorf("invalid offline git untracked paths: %w", err)
 	}
-	if len(paths) != 0 {
-		if len(paths) > workspace.MaxChanges {
-			return nil, errors.New("fix result exceeds changed file limit")
+	if len(paths) > workspace.MaxChanges {
+		return nil, errors.New("fix result exceeds changed file limit")
+	}
+	for _, path := range paths {
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
-		for _, path := range paths {
-			if err := ctx.Err(); err != nil {
-				return nil, err
-			}
-			name := string(path)
-			if strings.HasSuffix(name, "/") {
-				return nil, fmt.Errorf("untracked nested repository output %q must be removed or ignored", name)
-			}
-			if !workspace.ValidPath(name) {
-				return nil, fmt.Errorf("fix output %q is not a portable regular-file path", name)
-			}
-			info, err := os.Lstat(filepath.Join(index.source, filepath.FromSlash(name)))
-			if err != nil {
-				return nil, fmt.Errorf("fix output %q: %w", name, err)
-			}
-			if !info.Mode().IsRegular() || info.Size() > int64(workspace.MaxChangeBytes)-total {
-				return nil, fmt.Errorf("fix output %q is not regular or exceeds changed byte limit", name)
-			}
-			total += info.Size()
+		name := string(path)
+		if strings.HasSuffix(name, "/") {
+			return nil, fmt.Errorf("untracked nested repository output %q must be removed or ignored", name)
 		}
+		if !workspace.ValidPath(name) {
+			return nil, fmt.Errorf("fix output %q is not a portable regular-file path", name)
+		}
+		info, err := os.Lstat(filepath.Join(index.source, filepath.FromSlash(name)))
+		if err != nil {
+			return nil, fmt.Errorf("fix output %q: %w", name, err)
+		}
+		if !info.Mode().IsRegular() || info.Size() > int64(workspace.MaxChangeBytes)-total {
+			return nil, fmt.Errorf("fix output %q is not regular or exceeds changed byte limit", name)
+		}
+		total += info.Size()
 	}
 	// shortcut: size prechecks can race and do not cap Git I/O; add isolated executor quotas (#96).
 	if _, err := index.run(ctx, 1024, nil, "add", "--all", "--", ".", ":(exclude,icase,glob)**/.git", ":(exclude,icase,glob)**/.git/**"); err != nil {

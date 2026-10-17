@@ -236,7 +236,8 @@ func (c *Checkout) Snapshot(ctx context.Context, history, pull bool) (s workspac
 			}
 		}
 	}
-	// Check the combined transfer before diff, which can lazily fetch blobs.
+	// Bound regular-file transfer before diff can lazily fetch blobs. Omitted
+	// symlink blobs are bounded separately by each complete tree's metadata check.
 	// sourceFiles separately sizes its bounded batch response.
 	if total > workspace.MaxBytes {
 		return s, fmt.Errorf("%w: combined source exceeds byte limit", ErrCheckoutTooLarge)

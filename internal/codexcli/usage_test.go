@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/usage"
 )
 
@@ -78,6 +79,66 @@ func TestCollectUsageIncludesNestedHelpersWithoutInheritedOrDuplicateResponses(t
 	if got != want || !complete {
 		t.Fatalf("collectUsage() = %+v, %v; want %+v, complete", got, complete, want)
 	}
+}
+
+func TestRepeatedHelperActivityRetainsLaterCountersAndCompletion(t *testing.T) {
+	for _, done := range []bool{false, true} {
+		t.Run(fmt.Sprint(done), func(t *testing.T) {
+			home := t.TempDir()
+			activity := `{"ordinal":17,"type":"event_msg","payload":{"type":"item_completed","thread_id":"root","item":{"type":"SubAgentActivity","agent_thread_id":"child"}}}`
+			writeUsageRollout(t, home, "root", "", usageEvent("task_started", "root-turn"), usageRecord("root", "root-turn", "before", 10, 0, 1), strings.TrimSuffix(strings.Repeat(activity+"\n", 300), "\n"), usageRecord("root", "root-turn", "after", 1000, 0, 100), usageEvent("task_complete", "root-turn"))
+			child := []string{usageEvent("task_started", "child-turn"), usageRecord("child", "child-turn", "child-response", 20, 0, 2)}
+			if done {
+				child = append(child, usageEvent("task_complete", "child-turn"))
+			}
+			writeUsageRollout(t, home, "child", "root", child...)
+			tokens, complete, childError := collectUsage(context.Background(), home, "root", time.Now(), nil, []string{"child"})
+			if tokens != (usage.Tokens{Input: 1030, Output: 103}) || complete != done || (childError != nil) == done {
+				t.Fatalf("repeated activity lost counters/lifecycle: tokens=%+v complete=%t childError=%v", tokens, complete, childError)
+			}
+		})
+	}
+}
+
+func TestUsageAgentBoundsCountUniqueIDsAndRejectOverflow(t *testing.T) {
+	t.Run("repeated expected child", func(t *testing.T) {
+		home := t.TempDir()
+		writeUsageRollout(t, home, "root", "", usageEvent("task_started", "root-turn"), usageRecord("root", "root-turn", "root-response", 10, 0, 1), usageEvent("task_complete", "root-turn"))
+		writeUsageRollout(t, home, "child", "root", usageEvent("task_started", "child-turn"), usageRecord("child", "child-turn", "child-response", 20, 0, 2), usageEvent("task_complete", "child-turn"))
+		expected := make([]string, maxUsageAgents+1)
+		for i := range expected {
+			expected[i] = "child"
+		}
+		tokens, complete, childError := collectUsage(context.Background(), home, "root", time.Now(), nil, expected)
+		if tokens != (usage.Tokens{Input: 30, Output: 3}) || !complete || childError != nil {
+			t.Fatalf("duplicate expected IDs consumed agent bound: tokens=%+v complete=%t error=%v", tokens, complete, childError)
+		}
+	})
+	t.Run("selected tree exceeds bound", func(t *testing.T) {
+		home := t.TempDir()
+		writeUsageRollout(t, home, "root", "", usageEvent("task_started", "root-turn"))
+		for i := range maxUsageAgents {
+			writeUsageRollout(t, home, fmt.Sprintf("child-%d", i), "root")
+		}
+		known := usage.Tokens{Input: 100, CachedInput: 10, Output: 7}
+		tokens, complete, childError := collectUsage(context.Background(), home, "root", time.Now(), &known, nil)
+		if tokens != known || complete || !errors.Is(childError, aicli.ErrOutputLimit) {
+			t.Fatalf("oversized agent tree accepted: tokens=%+v complete=%t error=%v", tokens, complete, childError)
+		}
+	})
+	t.Run("rollout bound retains later counters", func(t *testing.T) {
+		home := t.TempDir()
+		var events []string
+		for i := range maxUsageAgents + 1 {
+			events = append(events, fmt.Sprintf(`{"ordinal":17,"type":"event_msg","payload":{"type":"collab_agent_spawn_end","new_thread_id":"child-%d"}}`, i))
+		}
+		events = append(events, usageEvent("task_started", "root-turn"), usageRecord("root", "root-turn", "later-response", 1000, 0, 100), usageEvent("task_complete", "root-turn"))
+		writeUsageRollout(t, home, "root", "", events...)
+		tokens, complete, childError := collectUsage(context.Background(), home, "root", time.Now(), nil, nil)
+		if tokens != (usage.Tokens{Input: 1000, Output: 100}) || complete || !errors.Is(childError, aicli.ErrOutputLimit) {
+			t.Fatalf("overflow lost later counters or accepted work: tokens=%+v complete=%t error=%v", tokens, complete, childError)
+		}
+	})
 }
 
 func TestCollectUsageUsesLatestCumulativeSnapshotAndSubtractsInheritedBaseline(t *testing.T) {

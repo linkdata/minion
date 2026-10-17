@@ -138,6 +138,93 @@ func TestExecuteSourceFailuresAndInvalidIncompleteResultsAreTerminal(t *testing.
 	}
 }
 
+func TestExecuteLogsCheckoutCleanupFailureAfterSuccessfulPublication(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions")
+	}
+	gitFixtureRemote(t)
+	installActionTestSkills(t, testFixSkillURL)
+	root := t.TempDir()
+	t.Cleanup(func() {
+		if err := os.Chmod(root, 0700); err != nil {
+			t.Error(err)
+		}
+	})
+	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	request := monitor.Job{ID: strings.Repeat("a", 64), SubjectType: "Issue", Number: 7,
+		Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"fix"}},
+		Source:     github.Item{UpdatedAt: time.Now(), Author: github.User{ID: 3, Login: "writer"}},
+		Command:    command.Command{Name: "fix", Action: command.Fix},
+	}
+	comments, modelCalls := 0, 0
+	var body string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
+			_, _ = fmt.Fprint(w, `{"id":1,"full_name":"o/r","owner":{"id":2},"default_branch":"main","visibility":"public"}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/bot/r":
+			_, _ = fmt.Fprint(w, `{"id":4,"full_name":"bot/r","fork":true,"parent":{"id":1,"full_name":"o/r"},"source":{"id":1,"full_name":"o/r"},"visibility":"public"}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/bot/r/actions/permissions":
+			_, _ = fmt.Fprint(w, `{"enabled":false}`)
+		case r.Method == http.MethodGet && (r.URL.Path == "/repos/o/r/pulls" || strings.HasSuffix(r.URL.Path, "/rulesets") || r.URL.Path == "/repos/o/r/issues/7/comments"):
+			_, _ = fmt.Fprint(w, `[]`)
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/bot/r/branches/minion/fix-7-aaaaaaaaaaaa":
+			http.NotFound(w, r)
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7":
+			_, _ = fmt.Fprint(w, `{"node_id":"issue-node","title":"Task","body":"Inspect source"}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/graphql":
+			_, _ = fmt.Fprint(w, `{"data":{"node":{"title":"Task","bodyText":"Inspect source","lastEditedAt":null}}}`)
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/o/r/git/trees/"):
+			writeTreeFixture(t, w, strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/"))
+		case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/issues/7/comments":
+			var payload struct{ Body string }
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Error(err)
+			}
+			comments++
+			body = payload.Body
+			// Publication has reached the server. Lock only the checkout's parent;
+			// cleanup can restore the checkout itself but cannot remove its entry.
+			if err := os.Chmod(root, 0500); err != nil {
+				t.Error(err)
+			}
+			w.WriteHeader(http.StatusCreated)
+			_, _ = fmt.Fprint(w, `{"id":1}`)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	client := github.New("fixture-token")
+	client.BaseURL, client.HTTPClient = server.URL, server.Client()
+	var journal bytes.Buffer
+	orchestrator := Orchestrator{WorkRoot: root, GitHub: client, BotLogin: "bot", Store: store, Logger: log.New(&journal, "", 0),
+		Commands: map[string]config.CommandMapping{"fix": {Action: "fix", Skills: []string{testFixSkillURL}}},
+		Runner: Runner{WorkRoot: t.TempDir(), runModel: func(context.Context, modelRun) (aicli.Result, error) {
+			modelCalls++
+			return aicli.Result{Answer: "No change is needed."}, nil
+		}},
+	}
+	if err := orchestrator.Execute(context.Background(), request); err != nil {
+		t.Fatalf("successful publication became a failed action: %v", err)
+	}
+	if modelCalls != 1 || comments != 1 || !strings.Contains(body, "No change is needed.") || !strings.HasSuffix(body, request.Marker()) {
+		t.Fatalf("publication did not complete: modelCalls=%d comments=%d body=%q", modelCalls, comments, body)
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil || len(entries) != 1 || !strings.HasPrefix(entries[0].Name(), "minion-checkout-") {
+		t.Fatalf("fixture did not leave a checkout after failed cleanup: entries=%v error=%v", entries, err)
+	}
+	if !strings.Contains(journal.String(), "close prepared action:") || !strings.Contains(journal.String(), "remove checkout:") || !strings.Contains(journal.String(), "permission denied") {
+		t.Fatalf("checkout cleanup failure was not logged: %s", &journal)
+	}
+}
+
 func TestPublishFixRejectsNonemptyReviewedChangesDroppedByGit(t *testing.T) {
 	for _, stage := range []string{"import", "commit", "fork changed", "canceled import"} {
 		t.Run(stage, func(t *testing.T) {

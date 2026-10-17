@@ -170,15 +170,15 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	processgroup.Configure(cmd)
 	output := jsonlOutput{cancel: cancel, structured: settings.OutputSchema != ""}
 	diagnostics := bounded.Tail{Limit: maxDiagnosticBytes}
-	ceiling := bounded.LineMatch{Limit: maxEventBytes, Match: func(line []byte) bool { return backgroundWaitCeiling(string(line)) }}
+	ceiling := waitCeiling{}
 	cmd.Stdout, cmd.Stderr = &output, io.MultiWriter(&diagnostics, &ceiling)
 	err = cmd.Run()
-	ceiling.Finish()
+	ceiling.finish()
 	output.finish()
 	result = output.result
 	if ctx.Err() != nil {
 		err = errors.Join(ctx.Err(), output.err, err)
-	} else if ceiling.Matched {
+	} else if ceiling.matched {
 		err = errors.Join(errors.New("background tasks stopped by Claude's wait ceiling"), output.err, err)
 	} else if output.err != nil {
 		err = errors.Join(output.err, err)
@@ -192,13 +192,6 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 		return result, fmt.Errorf("claude: %w", err)
 	}
 	return result, nil
-}
-
-func backgroundWaitCeiling(line string) bool {
-	// Managed CLI settings can override its launch environment. Recognize this
-	// native diagnostic as a fallback, independently of the retained stderr tail.
-	line = strings.TrimRight(line, " \t\r")
-	return strings.HasPrefix(line, "Background tasks still running ") && strings.HasSuffix(line, "; stopping them. Set CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 to wait indefinitely.")
 }
 
 func arguments(policy string) []string {
