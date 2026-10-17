@@ -485,8 +485,7 @@ func TestNewBranchPreservesOmittedGitlink(t *testing.T) {
 	if err := checkout.Import(ctx, snapshot.Head, []workspace.Change{{Path: "README.md", Mode: workspace.Regular, Data: []byte("fixed\n")}}); err != nil {
 		t.Fatal(err)
 	}
-	checkout.pushURL = fixture.remote
-	if err := checkout.CommitAndPush(ctx, branch, "bot", "fix", func(string) error { return nil }); err != nil {
+	if err := checkout.commitAndPush(ctx, fixture.remote, branch, "bot", "fix", func(string) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
 	if got := fixture.git("", "--git-dir="+fixture.remote, "ls-tree", "refs/heads/"+branch, "sub"); got != "160000 commit "+fixture.base+"\tsub" {
@@ -510,7 +509,7 @@ func TestImportRejectsNestedGitMetadataBeforePublishing(t *testing.T) {
 			if _, err := os.Stat(filepath.Join(fixture.checkout.path, "payload.txt")); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("invalid import partially applied: %v", err)
 			}
-			if err := fixture.checkout.CommitAndPush(ctx, branch, "bot", "fix", func(string) error { t.Fatal("invalid data reached publication"); return nil }); !errors.Is(err, ErrNoChanges) {
+			if err := fixture.checkout.commitAndPush(ctx, fixture.remote, branch, "bot", "fix", func(string) error { t.Fatal("invalid data reached publication"); return nil }); !errors.Is(err, ErrNoChanges) {
 				t.Fatalf("publication after rejected import=%v", err)
 			}
 		})
@@ -536,7 +535,7 @@ func TestCommitAndPushUsesTrustedURLAndSkipsHooks(t *testing.T) {
 		}
 	}
 	var recordedHead string
-	if err := fixture.checkout.CommitAndPush(ctx, branch, "example-bot", "Minion: fix issue 123", func(sha string) error {
+	if err := fixture.checkout.commitAndPush(ctx, fixture.remote, branch, "example-bot", "Minion: fix issue 123", func(sha string) error {
 		recordedHead = sha
 		return nil
 	}); err != nil {
@@ -551,7 +550,7 @@ func TestCommitAndPushUsesTrustedURLAndSkipsHooks(t *testing.T) {
 	if want := "example-bot <example-bot@users.noreply.github.com>|example-bot <example-bot@users.noreply.github.com>"; identity != want {
 		t.Fatalf("commit identity = %q, want %q", identity, want)
 	}
-	if err := fixture.checkout.CommitAndPush(ctx, branch, "example-bot", "no changes", func(string) error { t.Fatal("unchanged tree reached push"); return nil }); !errors.Is(err, ErrNoChanges) {
+	if err := fixture.checkout.commitAndPush(ctx, fixture.remote, branch, "example-bot", "no changes", func(string) error { t.Fatal("unchanged tree reached push"); return nil }); !errors.Is(err, ErrNoChanges) {
 		t.Fatalf("repeat publication=%v", err)
 	}
 	path := fixture.checkout.path
@@ -589,12 +588,13 @@ func TestImportAndCommitBoundsChanges(t *testing.T) {
 				t.Fatal(err)
 			}
 			changes := []workspace.Change{{Path: "large.txt", Mode: workspace.Regular, Data: []byte(strings.Repeat("x", workspace.MaxChangeBytes+1))}}
-			if kind == "file count" {
+			switch kind {
+			case "file count":
 				changes = nil
 				for i := 0; i <= workspace.MaxChanges; i++ {
 					changes = append(changes, workspace.Change{Path: fmt.Sprintf("file-%03d", i), Mode: workspace.Regular, Data: []byte("x")})
 				}
-			} else if kind == "patch bytes" {
+			case "patch bytes":
 				changes[0].Data = []byte(strings.Repeat("x\n", workspace.MaxChangeBytes/2-100))
 			}
 			err := fixture.checkout.Import(ctx, fixture.base, changes)
@@ -604,7 +604,7 @@ func TestImportAndCommitBoundsChanges(t *testing.T) {
 			if kind != "patch bytes" && err == nil {
 				t.Fatal("oversized import succeeded")
 			}
-			err = fixture.checkout.CommitAndPush(ctx, branch, "example-bot", "Minion: fix", func(string) error { t.Fatal("oversized changes reached before-push recorder"); return nil })
+			err = fixture.checkout.commitAndPush(ctx, fixture.remote, branch, "example-bot", "Minion: fix", func(string) error { t.Fatal("oversized changes reached before-push recorder"); return nil })
 			want := ErrNoChanges
 			if kind == "patch bytes" {
 				want = ErrDiffTooLarge
@@ -630,7 +630,7 @@ func TestCommitAndPushBoundsDirectlyStagedPathCount(t *testing.T) {
 		writeFile(t, filepath.Join(fixture.checkout.path, fmt.Sprintf("f%d", i)), "x")
 	}
 	fixture.git(fixture.checkout.path, "add", ".")
-	err := fixture.checkout.CommitAndPush(ctx, branch, "bot", "too many paths", func(string) error {
+	err := fixture.checkout.commitAndPush(ctx, fixture.remote, branch, "bot", "too many paths", func(string) error {
 		t.Fatal("oversized stage reached before-push recorder")
 		return nil
 	})
@@ -687,7 +687,7 @@ func TestChangedGitConfigStopsPublish(t *testing.T) {
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.checkout.CommitAndPush(ctx, "minion/fix-config", "example-bot", "Minion: fix", func(string) error { return nil }); err == nil || !strings.Contains(err.Error(), "Git config changed") {
+	if err := fixture.checkout.commitAndPush(ctx, fixture.remote, "minion/fix-config", "example-bot", "Minion: fix", func(string) error { return nil }); err == nil || !strings.Contains(err.Error(), "Git config changed") {
 		t.Fatalf("CommitAndPush() error = %v, want config change refusal", err)
 	}
 }
@@ -703,7 +703,7 @@ func TestCommitAndPushStopsWhenRecordFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	recordFailure := errors.New("cannot persist commit SHA")
-	err := fixture.checkout.CommitAndPush(ctx, branch, "example-bot", "Minion: fix", func(string) error { return recordFailure })
+	err := fixture.checkout.commitAndPush(ctx, fixture.remote, branch, "example-bot", "Minion: fix", func(string) error { return recordFailure })
 	if !errors.Is(err, recordFailure) {
 		t.Fatalf("CommitAndPush() error = %v, want recorder error", err)
 	}
@@ -737,7 +737,7 @@ func newFixture(t *testing.T) gitFixture {
 	path := filepath.Join(root, "checkout")
 	fixture.git("", "clone", "--no-checkout", "--branch", "main", fixture.remote, path)
 	fixture.git(path, "checkout", "--detach", "refs/remotes/origin/main")
-	fixture.checkout = &Checkout{path: path, url: fixture.remote, pushURL: fixture.remote, expectedHead: fixture.base, lookupTree: localTreeMetadata(t, path)}
+	fixture.checkout = &Checkout{path: path, url: fixture.remote, expectedHead: fixture.base, lookupTree: localTreeMetadata(t, path)}
 	if err := DisableAttributes(filepath.Join(path, ".git")); err != nil {
 		t.Fatal(err)
 	}

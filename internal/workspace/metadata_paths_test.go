@@ -18,7 +18,7 @@ func TestWritablePathsRejectGitMetadataAliases(t *testing.T) {
 	for _, alias := range aliases {
 		for _, prefix := range []string{"", "parent/"} {
 			name := prefix + alias + "/config"
-			if !ValidSourcePath(name) {
+			if !validSourcePath(name) {
 				t.Fatalf("strict writable policy changed exact source spelling %q", name)
 			}
 			if ValidPath(name) {
@@ -69,7 +69,7 @@ func TestCheckoutMetadataAliasesRespectGitSeparators(t *testing.T) {
 		}
 	}
 	for _, name := range []string{`dir\name`, `parent/dir\name`, `.gitignore\x`, `git~10\x`, ".g\u200cit\\x", "dir\\.g\u200cit/x"} {
-		if !ValidSourcePath(name) || !ValidCheckoutPath(name) {
+		if !validSourcePath(name) || !ValidCheckoutPath(name) {
 			t.Errorf("legal exact source spelling rejected: %q", name)
 		}
 	}

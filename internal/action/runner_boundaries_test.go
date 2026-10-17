@@ -194,7 +194,7 @@ func TestRunnerReviewsAndPublishesNormalizedAnswer(t *testing.T) {
 		if !strings.Contains(request.prompt, "Main model's proposed response (untrusted): "+quotedContext("answerhidden")) || strings.Contains(request.prompt, `answer\u0000hidden`) {
 			t.Fatal("critic did not receive the normalized publication candidate")
 		}
-		return aicli.Result{Answer: `{"approved":true,"feedback":""}`}, nil
+		return aicli.Result{Answer: `{"approved":true,"has_blockers":false,"feedback":""}`}, nil
 	}}
 	result, err := runner.Run(context.Background(), job)
 	if err != nil || mainCalls != 1 || criticCalls != 1 || len(result.Calls) != 2 || result.Answer != "answerhidden" {
@@ -284,7 +284,7 @@ func TestRunnerReportsOwnedAndCriticCleanupFailures(t *testing.T) {
 					return aicli.Result{}, err
 				}
 				if critic {
-					return aicli.Result{Answer: `{"approved":true,"feedback":""}`}, nil
+					return aicli.Result{Answer: `{"approved":true,"has_blockers":false,"feedback":""}`}, nil
 				}
 				return aicli.Result{Answer: "Done."}, nil
 			}}

@@ -65,7 +65,7 @@ func ValidPath(name string) bool {
 // ValidCheckoutPath applies Git's protected metadata names before any blob fetch.
 // Git's NTFS checks treat backslashes as separators; its HFS checks do not.
 func ValidCheckoutPath(name string) bool {
-	if !ValidSourcePath(name) {
+	if !validSourcePath(name) {
 		return false
 	}
 	for _, part := range strings.Split(name, "/") {
@@ -114,9 +114,9 @@ func FoldPath(name string) string {
 	}, name)
 }
 
-// ValidSourcePath accepts Git's case-sensitive slash paths, including literal backslashes.
+// validSourcePath accepts Git's case-sensitive slash paths, including literal backslashes.
 // Writable/import paths additionally reject HFS/NTFS aliases of Git metadata.
-func ValidSourcePath(name string) bool {
+func validSourcePath(name string) bool {
 	if !fs.ValidPath(name) || name == "." || len(name) >= MaxPathBytes || strings.ContainsRune(name, '\x00') {
 		return false
 	}
@@ -182,7 +182,7 @@ func ValidateSnapshot(s Snapshot) error {
 func invalidSourcePath(paths []string) (string, bool) {
 	seen := make(map[string]bool, len(paths))
 	for _, name := range paths {
-		if !ValidSourcePath(name) || seen[name] {
+		if !validSourcePath(name) || seen[name] {
 			return name, true
 		}
 		seen[name] = true
@@ -197,7 +197,7 @@ func validateFiles(files []File) error {
 	paths := make([]string, len(files))
 	total := 0
 	for i, file := range files {
-		if !ValidSourcePath(file.Path) || (file.Mode != Regular && file.Mode != Executable) {
+		if !validSourcePath(file.Path) || (file.Mode != Regular && file.Mode != Executable) {
 			return fmt.Errorf("invalid source file %q", file.Path)
 		}
 		paths[i] = file.Path
@@ -280,17 +280,13 @@ func CheckRoot(root string) error {
 	return dir.Close()
 }
 
-func requireRootDir(root string, private bool) error {
+func requireRootDir(root string) error {
 	info, err := os.Lstat(root)
 	if err != nil {
 		return err
 	}
-	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || (private && info.Mode().Perm()&0077 != 0) {
-		kind := "real directory"
-		if private {
-			kind = "private directory"
-		}
-		return fmt.Errorf("workspace root must be a %s: %s (%s)", kind, root, info.Mode())
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0077 != 0 {
+		return fmt.Errorf("workspace root must be a private directory: %s (%s)", root, info.Mode())
 	}
 	return nil
 }
@@ -347,7 +343,7 @@ func changedFiles(base []File, changes []Change) ([]File, error) {
 }
 
 func materialize(root string, files []File) error {
-	if err := requireRootDir(root, true); err != nil {
+	if err := requireRootDir(root); err != nil {
 		return err
 	}
 	dir, err := os.Open(root)
@@ -417,7 +413,7 @@ func checkUnchanged(ctx context.Context, root string, base []File) error {
 			return err
 		}
 		rel = filepath.ToSlash(rel)
-		if !ValidSourcePath(rel) {
+		if !validSourcePath(rel) {
 			return fmt.Errorf("unsafe workspace path %q", rel)
 		}
 		if entry.IsDir() {
@@ -619,9 +615,6 @@ func safeParents(root, name string) error {
 func Apply(root string, changes []Change) error {
 	root = filepath.Clean(root)
 	if err := ValidateChanges(changes); err != nil {
-		return err
-	}
-	if err := requireRootDir(root, false); err != nil {
 		return err
 	}
 	if err := CheckRoot(root); err != nil {

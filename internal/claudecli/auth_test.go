@@ -151,7 +151,6 @@ func TestAPIKeyErrors(t *testing.T) {
 		t.Run(map[bool]string{false: "run", true: "validate"}[validate], func(t *testing.T) {
 			binary := fakeExecutable(t, "claude", `printf '%s\n' "$CLAUDE_CONFIG_DIR" > "$0.authdir"
 cat "$CLAUDE_CONFIG_DIR/api-key" >&2
-printf '%s\n' '{"type":"result","subtype":"`+dummyAPIKey+`","is_error":true}'
 exit 1
 `)
 			settings := config.ClaudeConfig{APIKey: dummyAPIKey}

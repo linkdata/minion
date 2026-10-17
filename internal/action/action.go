@@ -40,6 +40,7 @@ type Orchestrator struct {
 	Main, Adversarial string
 	// CriticMaxRounds selects config.DefaultCriticMaxRounds when zero.
 	CriticMaxRounds           int
+	CriticNonblockingRounds   *int
 	AlwaysOnSkills            []string
 	CodexModel, CodexEffort   string
 	ClaudeModel, ClaudeEffort string

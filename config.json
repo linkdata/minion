@@ -3,6 +3,7 @@
   "main": "codex",
   "adversarial": "",
   "critic_max_rounds": 5,
+  "critic_nonblocking_rounds": null,
   "codex": {
     "api_key": ""
   },

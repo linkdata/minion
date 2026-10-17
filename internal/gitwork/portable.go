@@ -139,6 +139,11 @@ func (c *Checkout) sourceFiles(ctx context.Context, entries []sourceEntry) (file
 	if len(requested) == 0 {
 		return nil, omitted, nil
 	}
+	// Hydrate missing blobs together; cat-file otherwise lazy-fetches each one.
+	if err := runGitInputTo(ctx, c.path, strings.NewReader(input.String()), io.Discard,
+		"-c", "fetch.negotiationAlgorithm=noop", "fetch", "--no-tags", "--no-write-fetch-head", "--recurse-submodules=no", "--stdin", "origin"); err != nil {
+		return nil, nil, err
+	}
 	// Content bounds were checked before requesting blobs; include batch headers.
 	output, truncated, err := c.boundedGit(ctx, strings.NewReader(input.String()), int(size)+(maxBatchHeaderBytes+2)*len(requested), true, "cat-file", "--batch")
 	if err != nil {
@@ -239,6 +244,11 @@ func (c *Checkout) Snapshot(ctx context.Context, history bool) (s workspace.Snap
 	if total > workspace.MaxBytes {
 		return s, fmt.Errorf("%w: combined source exceeds byte limit", ErrCheckoutTooLarge)
 	}
+	files, omitted, err := c.sourceFiles(ctx, allEntries)
+	if err != nil {
+		return s, err
+	}
+	s.Files, s.BaseFiles, s.Omitted = files[:headFiles], files[headFiles:], omitted
 	if s.Base != "" {
 		if s.Diff, s.DiffIncomplete, err = c.boundedGit(ctx, nil, workspace.MaxContextBytes, true, "-c", "core.quotePath=false", "diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--no-color", s.MergeBase, s.Head, "--"); err != nil {
 			return s, err
@@ -247,11 +257,6 @@ func (c *Checkout) Snapshot(ctx context.Context, history bool) (s workspace.Snap
 			s.Diff = nil
 		}
 	}
-	files, omitted, err := c.sourceFiles(ctx, allEntries)
-	if err != nil {
-		return s, err
-	}
-	s.Files, s.BaseFiles, s.Omitted = files[:headFiles], files[headFiles:], omitted
 	if history {
 		count, err := runGit(ctx, c.path, "rev-list", "--count", "--max-count=101", s.Head)
 		if err != nil {

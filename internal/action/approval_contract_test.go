@@ -26,12 +26,12 @@ func TestRunnerRecordsOnlyParsedSuccessfulCriticApprovals(t *testing.T) {
 				if request.role == roleMain {
 					return aicli.Result{Answer: proposalJSON("Complete answer", "")}, nil
 				}
-				answer := `{"approved":true,"feedback":""}`
+				answer := `{"approved":true,"has_blockers":false,"feedback":""}`
 				switch scenario {
 				case "rejection":
-					answer = `{"approved":false,"feedback":"Repair the defect."}`
+					answer = `{"approved":false,"has_blockers":true,"feedback":"Repair the defect."}`
 				case "malformed":
-					answer = `{"approved":true,"feedback":"contradictory"}`
+					answer = `{"approved":true,"has_blockers":false,"feedback":"contradictory"}`
 				case "provider failure":
 					return aicli.Result{Answer: answer}, providerErr
 				}
@@ -72,7 +72,7 @@ func TestRunnerRefusesRenderedOverflowBeforeCritic(t *testing.T) {
 			runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 				if request.role == roleCritic {
 					criticCalls++
-					return aicli.Result{Answer: `{"approved":true,"feedback":""}`}, nil
+					return aicli.Result{Answer: `{"approved":true,"has_blockers":false,"feedback":""}`}, nil
 				}
 				mainCalls++
 				if audit {

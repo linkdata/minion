@@ -37,9 +37,9 @@ func TestReviewSnapshotRejectsCriticCopyMutation(t *testing.T) {
 					}
 				}
 				if request.reviewPhase == reviewFull {
-					return aicli.Result{Answer: `{"approved":false,"feedback":"Revise the candidate."}`}, nil
+					return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"feedback":"Revise the candidate."}`}, nil
 				}
-				return aicli.Result{Answer: `{"approved":true,"feedback":""}`}, nil
+				return aicli.Result{Answer: `{"approved":true,"has_blockers":false,"feedback":""}`}, nil
 			}}
 			result, err := runner.Run(context.Background(), job)
 			wantCalls := 2

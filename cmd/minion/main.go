@@ -129,24 +129,26 @@ func run() int {
 	}()
 
 	orchestrator := &action.Orchestrator{
-		WorkRoot:              cfg.WorkRoot,
-		Logger:                logger,
-		GitHub:                client,
-		BotLogin:              cfg.BotLogin,
-		Store:                 store,
-		Usage:                 &usage.Store{Dir: filepath.Join(filepath.Dir(cfg.StatePath), "usage")},
-		CheckWorkRoot:         checkWorkRoot,
-		Timeout:               time.Duration(cfg.JobTimeoutMinutes) * time.Minute,
-		MaxGitHubContextBytes: cfg.MaxGitHubContextBytes,
-		Commands:              cfg.Commands,
-		Main:                  cfg.Main,
-		Adversarial:           cfg.Adversarial,
-		CriticMaxRounds:       cfg.CriticMaxRounds,
-		AlwaysOnSkills:        cfg.AlwaysOnSkills,
-		CodexModel:            cfg.Codex.Model,
-		CodexEffort:           cfg.Codex.ReasoningEffort,
-		ClaudeModel:           cfg.Claude.Model,
-		ClaudeEffort:          cfg.Claude.Effort,
+		WorkRoot:                cfg.WorkRoot,
+		Logger:                  logger,
+		GitHub:                  client,
+		BotLogin:                cfg.BotLogin,
+		Store:                   store,
+		Usage:                   &usage.Store{Dir: filepath.Join(filepath.Dir(cfg.StatePath), "usage")},
+		CheckWorkRoot:           checkWorkRoot,
+		Timeout:                 time.Duration(cfg.JobTimeoutMinutes) * time.Minute,
+		MaxGitHubContextBytes:   cfg.MaxGitHubContextBytes,
+		Commands:                cfg.Commands,
+		Main:                    cfg.Main,
+		Adversarial:             cfg.Adversarial,
+		CriticMaxRounds:         cfg.CriticMaxRounds,
+		CriticNonblockingRounds: cfg.CriticNonblockingRounds,
+		AlwaysOnSkills:          cfg.AlwaysOnSkills,
+		CodexModel:              cfg.Codex.Model,
+		CodexEffort:             cfg.Codex.ReasoningEffort,
+		ClaudeModel:             cfg.Claude.Model,
+		ClaudeEffort:            cfg.Claude.Effort,
+		// Jobs override model, effort and skills; the runner keeps host credentials and sandbox grants.
 		Runner: action.Runner{
 			WorkRoot: cfg.WorkRoot,
 			Codex:    cfg.Codex,
@@ -283,7 +285,7 @@ func checkModels(ctx context.Context, cfg *config.Config, logger *log.Logger) (e
 			return fmt.Errorf("unsupported AI provider %q", provider)
 		}
 	}
-	logger.Printf("AI roles: main=%s adversarial=%s critic_max_rounds=%d job_timeout_minutes=%d", cfg.Main, cfg.Adversarial, cfg.CriticMaxRounds, cfg.JobTimeoutMinutes)
+	logger.Printf("AI roles: main=%s adversarial=%s critic_max_rounds=%d critic_nonblocking_rounds=%d job_timeout_minutes=%d", cfg.Main, cfg.Adversarial, cfg.CriticMaxRounds, config.ResolveCriticNonblockingRounds(cfg.CriticMaxRounds, cfg.CriticNonblockingRounds), cfg.JobTimeoutMinutes)
 	return
 }
 

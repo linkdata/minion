@@ -55,6 +55,8 @@ type Job struct {
 	Main            RoleSettings       `json:"main"`
 	Critic          *RoleSettings      `json:"critic,omitempty"`
 	CriticMaxRounds int                `json:"critic_max_rounds"`
+	// CriticNonblockingRounds is resolved by the orchestrator; zero keeps strict approval.
+	CriticNonblockingRounds int `json:"critic_nonblocking_rounds"`
 	// RuntimeBudget is remaining local time; a future transport must subtract transit time.
 	RuntimeBudget time.Duration `json:"runtime_budget_ns"`
 }
@@ -69,6 +71,8 @@ type CallUsage struct {
 	Tokens      usage.Tokens `json:"tokens"`
 	// Approved attests a parsed approving critic verdict; false is not proof of rejection.
 	Approved bool `json:"approved,omitempty"`
+	// NoBlockers attests an explicit has_blockers=false in a valid critic verdict.
+	NoBlockers bool `json:"no_blockers,omitempty"`
 	// Complete confirms accounting coverage; interrupted or failed native runs are conservative.
 	Complete bool `json:"complete"`
 }
@@ -212,7 +216,7 @@ func (j Job) Validate() error {
 			return errors.New("main and critic currently require different providers")
 		}
 	}
-	if (j.Critic == nil && j.CriticMaxRounds != 0) || (j.Critic != nil && (j.CriticMaxRounds < 1 || j.CriticMaxRounds > config.MaxCriticMaxRounds)) {
+	if (j.Critic == nil && (j.CriticMaxRounds != 0 || j.CriticNonblockingRounds != 0)) || (j.Critic != nil && (j.CriticMaxRounds < 1 || j.CriticMaxRounds > config.MaxCriticMaxRounds || j.CriticNonblockingRounds < 0 || j.CriticNonblockingRounds > j.CriticMaxRounds)) {
 		return errors.New("invalid critic round limit")
 	}
 	if err := workspace.ValidateSnapshot(j.Source); err != nil {
@@ -229,6 +233,10 @@ func (j Job) rounds() int {
 		return 1
 	}
 	return j.CriticMaxRounds
+}
+
+func (j Job) acceptsCritique(round int, approved, noBlockers bool) bool {
+	return noBlockers && (approved || (j.CriticNonblockingRounds > 0 && round >= j.CriticNonblockingRounds))
 }
 
 func sourceIdentity(j Job) string { return j.Identity.Repository + "@" + j.Source.Head }
@@ -289,15 +297,16 @@ func (r Result) validateCalls(j Job, complete bool) error {
 		validOrder := i == 0 && call.Role == roleMain && call.Round == 1 && call.ReviewPhase == ""
 		if i > 0 && j.Critic != nil {
 			previous := r.Calls[i-1]
+			accepted := j.acceptsCritique(previous.Round, previous.Approved, previous.NoBlockers)
 			if call.Role == roleMain {
-				validOrder = previous.Role == roleCritic && !previous.Approved && call.Round == previous.Round+1 && call.ReviewPhase == ""
+				validOrder = previous.Role == roleCritic && !accepted && call.Round == previous.Round+1 && call.ReviewPhase == ""
 			} else if previous.Role == roleMain {
 				validOrder = call.Round == previous.Round && call.ReviewPhase == reviewPhases(call.Round)[0]
 			} else {
-				validOrder = previous.ReviewPhase == reviewVerification && previous.Approved && call.Round == previous.Round && call.ReviewPhase == reviewFull
+				validOrder = previous.ReviewPhase == reviewVerification && accepted && call.Round == previous.Round && call.ReviewPhase == reviewFull
 			}
 		}
-		if !validOrder || call.Round > rounds || (call.Approved && call.Role != roleCritic) || call.Provider != role.Provider || call.Model != role.Model || call.Effort != role.Effort || !call.Tokens.Valid() {
+		if !validOrder || call.Round > rounds || ((call.Approved || call.NoBlockers) && call.Role != roleCritic) || (call.Approved && !call.NoBlockers) || call.Provider != role.Provider || call.Model != role.Model || call.Effort != role.Effort || !call.Tokens.Valid() {
 			return errors.New("invalid model call usage")
 		}
 	}
@@ -306,8 +315,8 @@ func (r Result) validateCalls(j Job, complete bool) error {
 			return errors.New("action result lacks a final full review")
 		}
 		last := r.Calls[len(r.Calls)-1]
-		if last.Role != roleCritic || last.ReviewPhase != reviewFull || !last.Approved {
-			return errors.New("action result lacks an approved final full review")
+		if last.Role != roleCritic || last.ReviewPhase != reviewFull || !j.acceptsCritique(last.Round, last.Approved, last.NoBlockers) {
+			return errors.New("action result lacks an accepted final full review")
 		}
 	}
 	if complete && j.Critic == nil && len(r.Calls) != 1 {

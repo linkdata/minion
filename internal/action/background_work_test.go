@@ -37,7 +37,7 @@ func TestPromptsRequireAwaitingBackgroundWork(t *testing.T) {
 					}
 				}
 				if request.role == "critic" {
-					return aicli.Result{Answer: `{"approved":true,"feedback":""}`}, nil
+					return aicli.Result{Answer: `{"approved":true,"has_blockers":false,"feedback":""}`}, nil
 				}
 				answer := "completed response"
 				if critic {

@@ -2,7 +2,12 @@
 
 package processgroup
 
-import "os/exec"
+import (
+	"os/exec"
+	"time"
+)
 
 // Configure preserves CommandContext's process cancellation on other hosts.
-func Configure(_ *exec.Cmd) {}
+func Configure(cmd *exec.Cmd) {
+	cmd.WaitDelay = 2 * time.Second
+}

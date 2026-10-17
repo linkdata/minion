@@ -129,9 +129,12 @@ type Config struct {
 	// Adversarial optionally selects the other provider as a read-only critic.
 	Adversarial string `json:"adversarial,omitempty"`
 	// CriticMaxRounds limits proposal/revision rounds; zero selects [DefaultCriticMaxRounds].
-	CriticMaxRounds int          `json:"critic_max_rounds,omitempty"`
-	Codex           CodexConfig  `json:"codex,omitempty"`
-	Claude          ClaudeConfig `json:"claude,omitempty"`
+	CriticMaxRounds int `json:"critic_max_rounds,omitempty"`
+	// CriticNonblockingRounds permits remaining nonblocking findings at this proposal round.
+	// Nil selects CriticMaxRounds-1; zero requires every finding cleared until the hard limit.
+	CriticNonblockingRounds *int         `json:"critic_nonblocking_rounds,omitempty"`
+	Codex                   CodexConfig  `json:"codex,omitempty"`
+	Claude                  ClaudeConfig `json:"claude,omitempty"`
 	// Nil Commands selects defaults; an empty map disables all commands.
 	Commands map[string]CommandMapping `json:"commands"`
 	// Nil AlwaysOnSkills selects anti-prompt-injection and caveman; an empty list disables always-on skills.
@@ -149,6 +152,14 @@ type Config struct {
 	InvitationOwners      []string         `json:"invitation_owners,omitempty"`
 	InvitationOwnerIDs    map[string]int64 `json:"invitation_owner_ids,omitempty"`
 	Repositories          []Repository     `json:"repositories"`
+}
+
+// ResolveCriticNonblockingRounds preserves explicit zero and defaults an omitted threshold.
+func ResolveCriticNonblockingRounds(maxRounds int, configured *int) int {
+	if configured != nil {
+		return *configured
+	}
+	return maxRounds - 1
 }
 
 // Load reads and validates configuration.
@@ -219,6 +230,9 @@ func (c *Config) Validate(configDir string) error {
 	}
 	if c.CriticMaxRounds < 1 || c.CriticMaxRounds > MaxCriticMaxRounds {
 		return fmt.Errorf("critic_max_rounds must be between 1 and %d", MaxCriticMaxRounds)
+	}
+	if rounds := ResolveCriticNonblockingRounds(c.CriticMaxRounds, c.CriticNonblockingRounds); rounds < 0 || rounds > c.CriticMaxRounds {
+		return fmt.Errorf("critic_nonblocking_rounds must be between 0 and critic_max_rounds")
 	}
 	if strings.ContainsAny(c.Codex.APIKey, " \t\r\n\x00") || strings.ContainsAny(c.Claude.APIKey, " \t\r\n\x00") {
 		return fmt.Errorf("provider api_key must not contain whitespace or NUL")

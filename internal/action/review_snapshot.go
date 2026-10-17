@@ -70,7 +70,7 @@ func (s *reviewSnapshot) verify(ctx context.Context) error {
 		}
 	}
 	if s.job.Action == command.Fix {
-		changes, err := reviewChanges(ctx, s.job, s.index)
+		changes, err := s.index.changes(ctx)
 		if err != nil {
 			return err
 		}

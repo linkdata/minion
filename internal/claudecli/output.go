@@ -119,7 +119,7 @@ type messageUsage struct {
 type jsonlOutput struct {
 	cancel              context.CancelFunc
 	lines               bounded.Lines
-	usageRejected       func()
+	fatal               func()
 	stopped             bool
 	bytes               int64
 	events              int
@@ -219,7 +219,6 @@ func (o *jsonlOutput) finishLine(line []byte) {
 		o.recordTaskStop(e.Summary)
 	}
 	if e.Type == "rate_limit_event" && e.RateLimitInfo.Status == "rejected" && !e.RateLimitInfo.IsUsingOverage && !e.RateLimitInfo.OverageInUse {
-		first := o.usageLimit == nil
 		o.usageLimit = errors.New("provider usage limit reached")
 		var reset int64
 		// Only a validated UTC timestamp may enter the service diagnostic.
@@ -227,9 +226,7 @@ func (o *jsonlOutput) finishLine(line []byte) {
 			o.usageLimit = fmt.Errorf("provider usage limit reached; resets at %s", time.Unix(reset, 0).UTC().Format(time.RFC3339))
 		}
 		o.completed, o.result.Answer, o.result.UsageComplete = false, "", false
-		if first && o.usageRejected != nil {
-			o.usageRejected()
-		}
+		o.startFailureGrace()
 	}
 	if e.Type == "system" && e.Subtype == "background_tasks_changed" {
 		var tasks []struct {
@@ -373,6 +370,14 @@ func (o *jsonlOutput) recordTaskStop(summary string) {
 		// Keep parsing cumulative counters; later results cannot erase this stop.
 		o.taskFailure = errors.New("background work stopped under provider memory pressure")
 		o.result.UsageComplete = false
+		o.startFailureGrace()
+	}
+}
+
+func (o *jsonlOutput) startFailureGrace() {
+	if o.fatal != nil {
+		o.fatal()
+		o.fatal = nil
 	}
 }
 

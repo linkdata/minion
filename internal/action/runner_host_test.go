@@ -193,7 +193,7 @@ func TestRunnerReadOnlyCriticReusesSourceAndCanaryGuardsExport(t *testing.T) {
 							t.Fatal(err)
 						}
 					}
-					return aicli.Result{Answer: `{"approved":true,"feedback":""}`}, nil
+					return aicli.Result{Answer: `{"approved":true,"has_blockers":false,"feedback":""}`}, nil
 				}}
 				result, err := runner.Run(context.Background(), job)
 				if mutate {

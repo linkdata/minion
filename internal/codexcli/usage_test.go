@@ -19,7 +19,7 @@ import (
 
 func writeUsageRollout(t *testing.T, home, id, parent string, events ...string) string {
 	t.Helper()
-	dir := filepath.Join(home, "sessions", "2026", "10", "09")
+	dir := filepath.Join(home, "sessions", time.Now().Format("2006/01/02"))
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
 	}

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/usage"
 )
@@ -171,18 +172,21 @@ func TestOutputRejectsNativeMemoryPressureStops(t *testing.T) {
 func TestWaitCeilingDetectionHandlesFragmentedAndUnterminatedLines(t *testing.T) {
 	const diagnostic = "Background tasks still running 10m after the last turn (worker); stopping them. Set CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 to wait indefinitely."
 	for _, chunk := range []int{1, 7, 1000} {
-		lines := waitCeiling{}
+		matched := false
+		lines := bounded.Lines{Limit: maxEventBytes, Line: func(line []byte) {
+			matched = matched || isWaitCeilingStop(line)
+		}}
 		data := "ordinary diagnostic\n" + diagnostic + " \t\r"
 		for len(data) != 0 {
 			n := min(chunk, len(data))
 			_, _ = lines.Write([]byte(data[:n]))
 			data = data[n:]
 		}
-		if lines.matched {
+		if matched {
 			t.Fatal("unterminated diagnostic matched before EOF")
 		}
-		lines.finish()
-		if !lines.matched {
+		lines.Finish()
+		if !matched {
 			t.Fatalf("chunk%d missed the native final diagnostic", chunk)
 		}
 	}
@@ -192,7 +196,10 @@ func TestWaitCeilingBoundsLinesAndRetainsEarlierMatch(t *testing.T) {
 	const prefix = "Background tasks still running "
 	const suffix = "; stopping them. Set CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 to wait indefinitely."
 	for _, chunk := range []int{7, 32768} {
-		lines := waitCeiling{}
+		matched := false
+		lines := bounded.Lines{Limit: maxEventBytes, Line: func(line []byte) {
+			matched = matched || isWaitCeilingStop(line)
+		}}
 		for data := prefix + strings.Repeat("x", maxEventBytes) + suffix + "\n"; len(data) != 0; {
 			n := min(chunk, len(data))
 			written, err := lines.Write([]byte(data[:n]))
@@ -201,12 +208,12 @@ func TestWaitCeilingBoundsLinesAndRetainsEarlierMatch(t *testing.T) {
 			}
 			data = data[n:]
 		}
-		if lines.matched {
+		if matched {
 			t.Fatal("overlong diagnostic was accepted")
 		}
 		_, _ = lines.Write([]byte(prefix + "10m" + suffix + "\n" + strings.Repeat("later diagnostic\n", 2000)))
-		lines.finish()
-		if !lines.matched {
+		lines.Finish()
+		if !matched {
 			t.Fatalf("chunk%d lost an earlier valid diagnostic", chunk)
 		}
 	}

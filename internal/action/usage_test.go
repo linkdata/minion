@@ -168,9 +168,9 @@ func TestUsageAccumulatesCriticRevisions(t *testing.T) {
 				return aicli.Result{Answer: proposalJSON("proposal", "Private evidence"), Tokens: usage.Tokens{Input: 100, Output: 20}, UsageComplete: true}, nil
 			}
 			critiques++
-			answer := `{"approved":true,"feedback":""}`
+			answer := `{"approved":true,"has_blockers":false,"feedback":""}`
 			if critiques == 1 {
-				answer = `{"approved":false,"feedback":"Check the error path."}`
+				answer = `{"approved":false,"has_blockers":true,"feedback":"Check the error path."}`
 			}
 			return aicli.Result{Answer: answer, Tokens: usage.Tokens{Input: 10, Output: 2}, UsageComplete: true}, nil
 		}},

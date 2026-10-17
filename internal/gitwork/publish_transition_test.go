@@ -47,7 +47,7 @@ func TestCommitAndPushPreservesFileDirectoryTransitions(t *testing.T) {
 				t.Fatalf("Import: %v", err)
 			}
 			var checkpoint string
-			if err := fixture.checkout.CommitAndPush(ctx, branch, "example-bot", "fix transition", func(sha string) error {
+			if err := fixture.checkout.commitAndPush(ctx, fixture.remote, branch, "example-bot", "fix transition", func(sha string) error {
 				checkpoint = sha
 				return nil
 			}); err != nil {

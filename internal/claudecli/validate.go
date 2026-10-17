@@ -187,7 +187,6 @@ func probe(ctx context.Context, binary string, args []string, dir string, env []
 	// #nosec G204 -- Callers pass trusted installed executables and fixed argument shapes without a shell.
 	cmd := exec.CommandContext(runCtx, binary, args...)
 	cmd.Dir, cmd.Env, cmd.Stdin = dir, env, strings.NewReader(input)
-	cmd.WaitDelay = 2 * time.Second
 	processgroup.Configure(cmd)
 	output := bounded.Buffer{Limit: maxEventBytes, Cancel: cancel}
 	diagnostics := bounded.Tail{Limit: bounded.DiagnosticBytes}

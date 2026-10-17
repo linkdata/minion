@@ -257,8 +257,8 @@ func TestCollectionRefusesRootSymlinksEvenForDeleteOnlySelections(t *testing.T) 
 			t.Fatalf("root symlink was not refused by anchored open: %v", err)
 		}
 	}
-	if err := Apply(root, []Change{{Path: "file", Delete: true}}); err == nil || !strings.Contains(err.Error(), "workspace root") {
-		t.Fatalf("Apply accepted a symlinked workspace root: %v", err)
+	if err := Apply(root, []Change{{Path: "file", Delete: true}}); !errors.Is(err, syscall.ENOTDIR) && !errors.Is(err, syscall.ELOOP) {
+		t.Fatalf("Apply did not refuse the symlinked root through its anchored open: %v", err)
 	}
 	if data, err := os.ReadFile(filepath.Join(outside, "file")); err != nil || string(data) != "outside" {
 		t.Fatalf("symlink-root deletion changed outside file=%q,%v", data, err)

@@ -87,7 +87,6 @@ func ValidateInstructionBoundary(ctx context.Context) (resultErr error) {
 		cmd.Args[0] = "codex"
 		cmd.Dir = check.dir
 		cmd.Env = childEnvironment([]string{"PATH=" + os.Getenv("PATH"), "HOME=" + probeHome, "CODEX_HOME=" + probeHome}, runtimeDir, runtimeDir, false)
-		cmd.WaitDelay = 2 * time.Second
 		processgroup.Configure(cmd)
 		output, err := cmd.Output()
 		if err != nil {

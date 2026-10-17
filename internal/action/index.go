@@ -16,7 +16,6 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/gitwork"
@@ -189,8 +188,8 @@ func (index *fixIndex) checkControlFiles(ctx context.Context) error {
 			if err != nil {
 				return fmt.Errorf("fix control file %q: %w", name, err)
 			}
-			if !info.Mode().IsRegular() {
-				return fmt.Errorf("fix control file %q must be regular", name)
+			if !info.Mode().IsRegular() || info.Size() > workspace.MaxBytes {
+				return fmt.Errorf("fix control file %q must be regular and bounded to %d bytes", name, workspace.MaxBytes)
 			}
 			if _, tracked := index.tracked[name]; control == ".gitignore" && !tracked && !current.ignored {
 				input := []byte(":(top)" + name + "\x00")
@@ -318,7 +317,6 @@ func (index *fixIndex) run(ctx context.Context, limit int, input []byte, args ..
 	processgroup.Configure(cmd)
 	cmd.Dir = index.dir
 	cmd.Env = append([]string{"PATH=" + gitwork.SafePath(os.Getenv("PATH")), "HOME=" + index.dir, "TMPDIR=" + index.dir}, gitwork.HardeningEnv()...)
-	cmd.WaitDelay = 2 * time.Second
 	output, diagnostic := bounded.Buffer{Limit: limit, Cancel: cancel}, bounded.Buffer{Limit: bounded.DiagnosticBytes}
 	cmd.Stdout, cmd.Stderr, cmd.Stdin = &output, &diagnostic, bytes.NewReader(input)
 	err := cmd.Run()

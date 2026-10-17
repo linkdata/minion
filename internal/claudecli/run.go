@@ -167,32 +167,37 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 		return result, err
 	}
 	cmd.Stdin = strings.NewReader(instructions.String())
-	cmd.WaitDelay = 2 * time.Second
 	processgroup.Configure(cmd)
-	var quotaTimer *time.Timer
-	output := jsonlOutput{cancel: cancel, structured: settings.OutputSchema != "", usageRejected: func() {
+	var failureTimer *time.Timer
+	output := jsonlOutput{cancel: cancel, structured: settings.OutputSchema != "", fatal: func() {
 		// Let the CLI flush a final result and cumulative accounting, then stop
 		// a managed retry watchdog without renewing the action deadline.
-		quotaTimer = time.AfterFunc(time.Second, cancel)
+		failureTimer = time.AfterFunc(time.Second, cancel)
 	}}
 	diagnostics := bounded.Tail{Limit: bounded.DiagnosticBytes}
-	ceiling := waitCeiling{}
+	ceilingMatched := false
+	ceiling := bounded.Lines{Limit: maxEventBytes, Line: func(line []byte) {
+		ceilingMatched = ceilingMatched || isWaitCeilingStop(line)
+	}}
 	cmd.Stdout, cmd.Stderr = &output, io.MultiWriter(&diagnostics, &ceiling)
 	err = cmd.Run()
-	if quotaTimer != nil {
-		quotaTimer.Stop()
+	if failureTimer != nil {
+		failureTimer.Stop()
 	}
-	ceiling.finish()
+	ceiling.Finish()
+	// Preserve crash/startup stderr before finish adds a generic missing-result
+	// error; native structured failures retain their safer diagnostic instead.
+	if err != nil && output.err == nil && output.usageLimit == nil && output.taskFailure == nil && !ceilingMatched {
+		err = fmt.Errorf("%w: %q", err, strings.TrimSpace(diagnostics.String()))
+	}
 	output.finish()
 	result = output.result
 	if ctx.Err() != nil {
 		err = errors.Join(ctx.Err(), output.err, err)
-	} else if ceiling.matched {
+	} else if ceilingMatched {
 		err = errors.Join(errors.New("background tasks stopped by Claude's wait ceiling"), output.err, err)
 	} else if output.err != nil {
 		err = errors.Join(output.err, err)
-	} else if err != nil {
-		err = fmt.Errorf("%w: %q", err, strings.TrimSpace(diagnostics.String()))
 	}
 	if err != nil {
 		result.Answer = ""
@@ -314,13 +319,7 @@ func directory(path string) (string, error) {
 }
 
 func executable(name, workspace string) (string, error) {
-	path, err := exec.LookPath(name)
-	if err == nil {
-		path, err = filepath.Abs(path)
-	}
-	if err == nil {
-		path, err = filepath.EvalSymlinks(path)
-	}
+	path, err := aicli.ExecutablePath(name)
 	if err == nil && workspace != "" && workspacepath.Within(workspace, path) {
 		err = errors.New("executable is inside the untrusted source snapshot")
 	}

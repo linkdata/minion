@@ -56,7 +56,7 @@ func collectUsage(ctx context.Context, home, rootID string, started time.Time, f
 	complete := true
 	files := map[string]rolloutMeta{}
 	entries, candidates := 0, 0
-	err := walkUsageFiles(ctx, filepath.Join(home, "sessions"), func(path string, entry fs.DirEntry) error {
+	err := walkUsageFiles(ctx, filepath.Join(home, "sessions"), started, func(path string, entry fs.DirEntry) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -197,7 +197,20 @@ func collectUsage(ctx context.Context, home, rootID string, started time.Time, f
 
 // ReadDir with a positive count keeps a single large directory from being
 // loaded into memory before the entry limit can stop the scan.
-func walkUsageFiles(ctx context.Context, root string, visit func(string, fs.DirEntry) error) error {
+func walkUsageFiles(ctx context.Context, root string, started time.Time, visit func(string, fs.DirEntry) error) error {
+	// Codex creates local-date YYYY/MM/DD directories. Keep the preceding UTC
+	// day too, covering timezone offsets and actions crossing local midnight.
+	oldest := started.UTC().AddDate(0, 0, -1).Format("2006/01/02")
+	recent := func(path string, entry fs.DirEntry) error {
+		if entry.IsDir() {
+			rel, err := filepath.Rel(root, path)
+			day := filepath.ToSlash(rel)
+			if _, dateErr := time.Parse("2006/01/02", day); err == nil && dateErr == nil && day < oldest {
+				return fs.SkipDir
+			}
+		}
+		return visit(path, entry)
+	}
 	pending := []string{root}
 	for len(pending) != 0 {
 		if err := ctx.Err(); err != nil {
@@ -206,7 +219,7 @@ func walkUsageFiles(ctx context.Context, root string, visit func(string, fs.DirE
 		last := len(pending) - 1
 		dir := pending[last]
 		pending = pending[:last]
-		children, err := readUsageDir(ctx, dir, visit)
+		children, err := readUsageDir(ctx, dir, recent)
 		if err != nil {
 			return err
 		}
@@ -233,6 +246,9 @@ func readUsageDir(ctx context.Context, path string, visit func(string, fs.DirEnt
 			}
 			name := filepath.Join(path, entry.Name())
 			if err := visit(name, entry); err != nil {
+				if err == fs.SkipDir && entry.IsDir() {
+					continue
+				}
 				return nil, err
 			}
 			if entry.IsDir() {
@@ -281,11 +297,7 @@ func rolloutTokens(raw json.RawMessage) (usage.Tokens, bool) {
 	if json.Unmarshal(raw, &fields) != nil {
 		return usage.Tokens{}, false
 	}
-	tokens := fields.tokens()
-	if tokens == nil {
-		return usage.Tokens{}, false
-	}
-	return *tokens, true
+	return fields.tokens()
 }
 
 func readRolloutUsage(ctx context.Context, meta rolloutMeta, rootID string, budget *int64) (usage.Tokens, bool, []string, error) {

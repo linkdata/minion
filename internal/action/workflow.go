@@ -184,6 +184,7 @@ func (e *Orchestrator) portableJob(ctx context.Context, p *preparedAction, title
 		critic := e.roleSettings(e.Adversarial, nil)
 		job.Critic = &critic
 		job.CriticMaxRounds = cmp.Or(e.CriticMaxRounds, config.DefaultCriticMaxRounds)
+		job.CriticNonblockingRounds = config.ResolveCriticNonblockingRounds(job.CriticMaxRounds, e.CriticNonblockingRounds)
 	}
 	return job, nil
 }
@@ -254,7 +255,7 @@ func (e *Orchestrator) logResult(job Job, result Result) {
 	}
 	if result.matchesJob(job) && result.validateCalls(job, false) == nil {
 		for _, call := range result.Calls {
-			e.logf("action call job=%s attempt=%s executor=%s provider=%s role=%s round=%d review_phase=%s approved=%t model=%q effort=%q complete=%t", id.JobID, id.AttemptID, id.ExecutorID, call.Provider, call.Role, call.Round, call.ReviewPhase, call.Approved, call.Model, call.Effort, call.Complete)
+			e.logf("action call job=%s attempt=%s executor=%s provider=%s role=%s round=%d review_phase=%s approved=%t no_blockers=%t accepted=%t model=%q effort=%q complete=%t", id.JobID, id.AttemptID, id.ExecutorID, call.Provider, call.Role, call.Round, call.ReviewPhase, call.Approved, call.NoBlockers, call.Role == roleCritic && job.acceptsCritique(call.Round, call.Approved, call.NoBlockers), call.Model, call.Effort, call.Complete)
 		}
 	}
 }
@@ -387,10 +388,7 @@ func (e *Orchestrator) publishFix(ctx context.Context, p *preparedAction, result
 		}
 		return fmt.Errorf("%w: import action result: %w", monitor.ErrTerminalJob, err)
 	}
-	if err := p.checkout.SetPushRepository(fork.FullName); err != nil {
-		return err
-	}
-	if err := p.checkout.CommitAndPush(ctx, p.branch, e.BotLogin, fmt.Sprintf("Fix #%d via %s", request.Number, e.BotLogin), func(sha string) error {
+	if err := p.checkout.CommitAndPush(ctx, fork.FullName, p.branch, e.BotLogin, fmt.Sprintf("Fix #%d via %s", request.Number, e.BotLogin), func(sha string) error {
 		e.Store.Data.PendingFixes[request.ID] = sha
 		return e.Store.Save()
 	}); err != nil {

@@ -281,13 +281,21 @@ func Summarize(records []Record, filter Filter, groupBy []string) ([]Summary, er
 		default:
 			return nil, fmt.Errorf("usage record %s has invalid status %q", record.ID, record.Status)
 		}
+		if record.CodexCalls < 0 || record.ClaudeCalls < 0 ||
+			record.CodexCalls > math.MaxInt-summary.CodexCalls || record.ClaudeCalls > math.MaxInt-summary.ClaudeCalls {
+			return nil, errors.New("usage call counts are invalid or exceed integer limit")
+		}
 		summary.CodexCalls += record.CodexCalls
 		summary.ClaudeCalls += record.ClaudeCalls
 		if !record.UsageComplete || record.Status == "running" {
 			summary.IncompleteUsage++
 		}
-		summary.Tokens.Add(record.Tokens)
-		summary.TotalTokens = summary.Tokens.Total()
+		tokens, valid := summary.Tokens.AddChecked(record.Tokens)
+		if !valid {
+			return nil, errors.New("usage token counts are invalid or exceed integer limit")
+		}
+		summary.Tokens = tokens
+		summary.TotalTokens = tokens.Total()
 	}
 	keys := make([][5]string, 0, len(groups))
 	for key := range groups {

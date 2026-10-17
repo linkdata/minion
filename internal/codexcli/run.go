@@ -90,7 +90,7 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	if err != nil {
 		return result, fmt.Errorf("codex exec: resolve executable: %w", err)
 	}
-	if rel, err := filepath.Rel(workspace, realBinary); err == nil && filepath.IsLocal(rel) {
+	if workspacefs.Within(workspace, realBinary) {
 		return result, errors.New("codex exec: executable is inside the source snapshot")
 	}
 	cacheDir := filepath.Join(runtimeDir, "go-build")
@@ -238,7 +238,6 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 		cmd.Env = append(cmd.Env, "CODEX_API_KEY="+settings.APIKey)
 	}
 	cmd.Stdin = strings.NewReader(prompt)
-	cmd.WaitDelay = 2 * time.Second
 	processgroup.Configure(cmd)
 
 	output := jsonlOutput{cancel: cancelRun}
@@ -337,15 +336,12 @@ type eventUsage struct {
 	Output      *int64 `json:"output_tokens"`
 }
 
-func (u *eventUsage) tokens() *usage.Tokens {
+func (u *eventUsage) tokens() (usage.Tokens, bool) {
 	if u == nil || u.Input == nil || u.CachedInput == nil || u.Output == nil {
-		return nil
+		return usage.Tokens{}, false
 	}
 	tokens := usage.Tokens{Input: *u.Input, CachedInput: *u.CachedInput, Output: *u.Output}
-	if !tokens.Valid() {
-		return nil
-	}
-	return &tokens
+	return tokens, tokens.Valid()
 }
 
 type codexEvent struct {
@@ -459,7 +455,10 @@ func (o *jsonlOutput) accept(event codexEvent) {
 		}
 	case "turn.completed":
 		o.completed = true
-		o.tokens = event.Usage.tokens()
+		o.tokens = nil
+		if tokens, valid := event.Usage.tokens(); valid {
+			o.tokens = &tokens
+		}
 	case "turn.failed":
 		o.failed = true
 		o.failureReason = eventReason(event)

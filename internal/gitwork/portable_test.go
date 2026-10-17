@@ -408,7 +408,7 @@ func TestPublishIgnoresDefaultGlobalExcludesAndAttributes(t *testing.T) {
 	if err := fixture.checkout.Import(ctx, fixture.base, []workspace.Change{{Path: "notes.local", Mode: workspace.Regular, Data: data}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.checkout.CommitAndPush(ctx, branch, "bot", "include new source", func(string) error { return nil }); err != nil {
+	if err := fixture.checkout.commitAndPush(ctx, fixture.remote, branch, "bot", "include new source", func(string) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
 	cmd := exec.Command("git", "--git-dir="+fixture.remote, "show", "refs/heads/"+branch+":notes.local")
@@ -735,7 +735,7 @@ func TestSnapshotReadsHeadAndBaseInOneBatch(t *testing.T) {
 		t.Fatalf("batch snapshot=%+v error=%v", snapshot, err)
 	}
 	calls, err := os.ReadFile(log)
-	if err != nil || string(calls) != "dx" {
+	if err != nil || string(calls) != "xd" {
 		t.Fatalf("ordered content invocations=%q error=%v", calls, err)
 	}
 }

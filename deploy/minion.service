@@ -3,6 +3,7 @@ Description=linkdataminion GitHub mention monitor
 
 [Service]
 Type=simple
+# Let Minion cancel model/Git process groups so shutdown is recorded as an interruption.
 KillMode=mixed
 WorkingDirectory=/path/to/minion
 Environment=PATH=/usr/local/bin:/usr/bin:/bin

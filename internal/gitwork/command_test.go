@@ -99,7 +99,7 @@ func TestImportPreservesExecutableModeAndCommitIgnoresUnstagedFiles(t *testing.T
 		t.Fatal(err)
 	}
 	writeFile(t, filepath.Join(fixture.checkout.path, "unreviewed"), "not imported\n")
-	if err := fixture.checkout.CommitAndPush(ctx, branch, "bot", "reviewed mode", func(string) error { return nil }); err != nil {
+	if err := fixture.checkout.commitAndPush(ctx, fixture.remote, branch, "bot", "reviewed mode", func(string) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
 	mode := fixture.git("", "--git-dir="+fixture.remote, "ls-tree", "refs/heads/"+branch, "run")
@@ -128,7 +128,6 @@ func TestCloneSkipsTagsAndPublicationAcceptsAmbiguousShortName(t *testing.T) {
 	if got := fixture.git(checkout.path, "tag", "--list"); got != "" {
 		t.Fatalf("clone auto-followed remote tag: %s", got)
 	}
-	checkout.pushURL = fixture.remote
 	fixture.git(checkout.path, "tag", branch)
 	if err := checkout.NewBranch(context.Background(), branch); err != nil {
 		t.Fatal(err)
@@ -136,7 +135,7 @@ func TestCloneSkipsTagsAndPublicationAcceptsAmbiguousShortName(t *testing.T) {
 	if err := checkout.Import(context.Background(), fixture.base, []workspace.Change{{Path: "README.md", Mode: workspace.Regular, Data: []byte("reviewed\n")}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := checkout.CommitAndPush(context.Background(), branch, "bot", "reviewed", func(string) error { return nil }); err != nil {
+	if err := checkout.commitAndPush(context.Background(), fixture.remote, branch, "bot", "reviewed", func(string) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
 	if got := fixture.git("", "--git-dir="+fixture.remote, "show", "refs/heads/"+branch+":README.md"); got != "reviewed" {

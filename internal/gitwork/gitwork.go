@@ -13,7 +13,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/cleanup"
@@ -59,7 +58,6 @@ func resolveCredentialHelperGH() string {
 type Checkout struct {
 	path           string
 	url            string
-	pushURL        string
 	configDigest   [sha256.Size]byte
 	expectedHead   string
 	comparisonBase string
@@ -67,21 +65,6 @@ type Checkout struct {
 	closed         bool
 	lookupTree     func(context.Context, string) (github.GitTree, error)
 	sourceTrees    map[string][]sourceEntry
-}
-
-// SetPushRepository selects a separately validated destination for fix output.
-//
-// A normal clone cannot publish changes until this is set.
-func (c *Checkout) SetPushRepository(repo string) error {
-	if err := c.ready(); err != nil {
-		return err
-	}
-	url, err := repositoryURL(repo)
-	if err != nil {
-		return err
-	}
-	c.pushURL = url
-	return nil
 }
 
 // Clone pins the repository's default branch in an isolated directory.
@@ -337,12 +320,18 @@ func (c *Checkout) NewBranch(ctx context.Context, name string) error {
 // It bounds the staged patch, commits without hooks or signing, and uses the
 // validated repository URL. Unstaged files are never added here.
 // beforePush must persist the new commit SHA for later recovery.
-func (c *Checkout) CommitAndPush(ctx context.Context, branch, botLogin, message string, beforePush func(string) error) error {
-	if err := c.ready(); err != nil {
+func (c *Checkout) CommitAndPush(ctx context.Context, repo, branch, botLogin, message string, beforePush func(string) error) error {
+	url, err := repositoryURL(repo)
+	if err != nil {
 		return err
 	}
-	if c.pushURL == "" {
-		return errors.New("push repository is not configured")
+	return c.commitAndPush(ctx, url, branch, botLogin, message, beforePush)
+}
+
+// The URL entry point lets local fixtures exercise publication without network calls.
+func (c *Checkout) commitAndPush(ctx context.Context, pushURL, branch, botLogin, message string, beforePush func(string) error) error {
+	if err := c.ready(); err != nil {
+		return err
 	}
 	if beforePush == nil {
 		return errors.New("before-push recorder is required")
@@ -390,7 +379,7 @@ func (c *Checkout) CommitAndPush(ctx context.Context, branch, botLogin, message 
 	if err := beforePush(c.expectedHead); err != nil {
 		return fmt.Errorf("record commit before push: %w", err)
 	}
-	if _, err := runGit(ctx, c.path, "push", "--porcelain", "--no-verify", "--", c.pushURL, "HEAD:refs/heads/"+branch); err != nil {
+	if _, err := runGit(ctx, c.path, "push", "--porcelain", "--no-verify", "--", pushURL, "HEAD:refs/heads/"+branch); err != nil {
 		return err
 	}
 	return c.recordConfig()
@@ -512,7 +501,6 @@ func runGitInputTo(ctx context.Context, dir string, stdin io.Reader, stdout io.W
 	)
 	cmd := exec.CommandContext(ctx, binary, append(gitArgs, args...)...)
 	processgroup.Configure(cmd)
-	cmd.WaitDelay = 2 * time.Second
 	cmd.Dir = dir
 	cmd.Env = cleanGitEnvironment()
 	cmd.Stdin = stdin

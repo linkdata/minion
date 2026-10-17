@@ -417,6 +417,15 @@ func TestRunQuotesStderrOnExitFailure(t *testing.T) {
 	}
 }
 
+func TestRunStartupFailureRetainsBoundedQuotedDiagnostic(t *testing.T) {
+	fakeExecutable(t, "claude", "cat >/dev/null\nhead -c 16384 /dev/zero | tr '\\000' x >&2\nprintf 'startup failed\\nforged journal line' >&2\nexit 7\n")
+	result, err := Run(context.Background(), t.TempDir(), "task", false, "", config.ClaudeConfig{})
+	var exit *exec.ExitError
+	if err == nil || !errors.As(err, &exit) || exit.ExitCode() != 7 || !strings.Contains(err.Error(), `startup failed\nforged journal line`) || strings.Contains(err.Error(), "\nforged journal line") || len(err.Error()) > 9000 || result.Answer != "" || result.UsageComplete {
+		t.Fatalf("lost or unsafe startup diagnostic: result=%+v error=%v", result, err)
+	}
+}
+
 func TestRunWaitCeilingPreservesLimitCauses(t *testing.T) {
 	const ceiling = "Background tasks still running 10m after the last turn (worker); stopping them. Set CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 to wait indefinitely."
 	for _, test := range []struct {

@@ -57,8 +57,12 @@ func (e *Orchestrator) trackUsage(job monitor.Job) (func(error) error, error) {
 			return aicli.Result{}, err
 		}
 		result, err := next(ctx, request)
-		record.Tokens.Add(result.Tokens)
-		record.UsageComplete = complete && result.UsageComplete
+		tokens, valid := record.Tokens.AddChecked(result.Tokens)
+		record.Tokens = tokens
+		record.UsageComplete = complete && result.UsageComplete && valid
+		if !valid {
+			e.logf("action usage counters invalid or overflowed; retaining lower bound for attempt %s", record.ID)
+		}
 		if saveErr := save(); saveErr != nil {
 			err = errors.Join(err, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, saveErr))
 		}

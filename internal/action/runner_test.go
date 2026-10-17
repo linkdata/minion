@@ -228,7 +228,7 @@ func TestRunnerKeepsCriticReadOnlyAndNotesPrivate(t *testing.T) {
 		if data, err := os.ReadFile(filepath.Join(request.dir, "added.bin")); err != nil || !reflect.DeepEqual(data, []byte{0, 1, 2}) {
 			t.Fatalf("critic cannot inspect added binary: %v, %v", data, err)
 		}
-		return aicli.Result{Answer: `{"approved":true,"feedback":""}`, UsageComplete: true}, nil
+		return aicli.Result{Answer: `{"approved":true,"has_blockers":false,"feedback":""}`, UsageComplete: true}, nil
 	}
 	result, err := runner.Run(context.Background(), job)
 	if err != nil || calls != 2 || result.Answer != "public answer" || len(result.Calls) != 2 || result.Calls[1].Role != "critic" || len(result.Changes) != 3 {

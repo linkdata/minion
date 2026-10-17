@@ -80,19 +80,34 @@ func TestOutputTerminalReasonRequiresCompletion(t *testing.T) {
 func TestOutputUsageGraceStartsOnlyOnce(t *testing.T) {
 	const rejected = `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected"}}`
 	const paid = `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","isUsingOverage":true}}`
-	calls := 0
-	o := jsonlOutput{usageRejected: func() { calls++ }}
-	_, _ = o.Write([]byte(paid + "\n"))
-	if calls != 0 {
-		t.Fatal("usable overage started cancellation grace")
+	const pressure = `{"type":"system","subtype":"task_notification","status":"stopped","summary":"Background command \"tests\" was stopped because the system is running low on memory"}`
+	for _, events := range []string{rejected + "\n" + rejected, pressure + "\n" + pressure, rejected + "\n" + pressure, pressure + "\n" + rejected} {
+		calls := 0
+		o := jsonlOutput{fatal: func() { calls++ }}
+		_, _ = o.Write([]byte(paid + "\n"))
+		if calls != 0 {
+			t.Fatal("usable overage started cancellation grace")
+		}
+		_, _ = o.Write([]byte(events + "\n"))
+		if calls != 1 || o.err != nil {
+			t.Fatalf("grace calls=%d error=%v", calls, o.err)
+		}
+		_, _ = o.Write([]byte(successfulResult + "\n"))
+		o.finish()
+		if o.err == nil || o.result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) {
+			t.Fatalf("late result usage lost: %+v error=%v", o.result, o.err)
+		}
 	}
-	_, _ = o.Write([]byte(rejected + "\n" + rejected + "\n"))
-	if calls != 1 || o.err != nil {
-		t.Fatalf("grace calls=%d error=%v", calls, o.err)
-	}
-	_, _ = o.Write([]byte(successfulResult + "\n"))
-	if o.err == nil || o.result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) {
-		t.Fatalf("late result usage lost: %+v error=%v", o.result, o.err)
+}
+
+func TestRunPressureGraceStopsWatchdogWithoutResult(t *testing.T) {
+	const stopped = `{"type":"system","subtype":"task_notification","status":"stopped","summary":"Background command \"tests\" was stopped because the system is running low on memory"}`
+	fakeExecutable(t, "claude", "cat >/dev/null\ncat <<'EVENTS'\n"+assistantUsageEvent("root", 3, 5, 7, 2)+"\n"+stopped+"\nEVENTS\nsleep 30\n")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	result, err := Run(ctx, t.TempDir(), "task", false, "", config.ClaudeConfig{})
+	if err == nil || !strings.Contains(err.Error(), "provider memory pressure") || ctx.Err() != nil || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 2}) {
+		t.Fatalf("memory-pressure stop waited for the action deadline: result=%+v error=%v parent=%v", result, err, ctx.Err())
 	}
 }
 

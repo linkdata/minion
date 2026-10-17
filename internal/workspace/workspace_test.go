@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -394,17 +395,30 @@ func TestMaterializeRefusesNonprivateRoot(t *testing.T) {
 func TestApplyRootErrorDoesNotRequirePrivacy(t *testing.T) {
 	root := privateRoot(t)
 	name := filepath.Join(root, "file")
-	if err := os.WriteFile(name, nil, 0600); err != nil {
+	if err := os.WriteFile(name, []byte("unchanged"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := Apply(name, nil); err == nil || !strings.Contains(err.Error(), "real directory") || strings.Contains(err.Error(), "private") {
+	changes := []Change{{Path: "new", Mode: Regular, Data: []byte("imported")}}
+	if err := Apply(name, changes); !errors.Is(err, syscall.ENOTDIR) || strings.Contains(err.Error(), "private") {
 		t.Fatalf("incorrect root requirement: %v", err)
+	}
+	if data, err := os.ReadFile(name); err != nil || string(data) != "unchanged" {
+		t.Fatalf("invalid root changed its contents: %q, %v", data, err)
+	}
+	if entries, err := os.ReadDir(root); err != nil || len(entries) != 1 || entries[0].Name() != "file" {
+		t.Fatalf("invalid root caused writes: %v, %v", entries, err)
 	}
 	if err := os.Chmod(root, 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := Apply(root, []Change{{Path: "new", Mode: Regular}}); err != nil {
+	if err := Apply(root, changes); err != nil {
 		t.Fatalf("Apply imposed a private-root requirement: %v", err)
+	}
+	if data, err := os.ReadFile(filepath.Join(root, "new")); err != nil || string(data) != "imported" {
+		t.Fatalf("public directory import failed: %q, %v", data, err)
+	}
+	if info, err := os.Stat(root); err != nil || info.Mode().Perm() != 0755 {
+		t.Fatalf("Apply changed root privacy: %v, %v", info, err)
 	}
 }
 
@@ -576,10 +590,10 @@ func TestValidateFixPathsUsesSourceLimits(t *testing.T) {
 
 func TestRelativePathByteLimit(t *testing.T) {
 	name := strings.Repeat("a/", MaxPathBytes/2-1) + "a"
-	if len(name) != MaxPathBytes-1 || !ValidSourcePath(name) || !ValidPath(name) {
+	if len(name) != MaxPathBytes-1 || !validSourcePath(name) || !ValidPath(name) {
 		t.Fatalf("rejected path below byte boundary: %d", len(name))
 	}
-	if ValidSourcePath(name+"b") || ValidPath(name+"b") {
+	if validSourcePath(name+"b") || ValidPath(name+"b") {
 		t.Fatal("accepted relative path at the transfer byte limit")
 	}
 }

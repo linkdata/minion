@@ -58,7 +58,7 @@ func TestReviewRoundBudgetIncludesEveryFreshFullRejection(t *testing.T) {
 							t.Fatalf("fresh full review field was not empty: %s", field)
 						}
 					}
-					return aicli.Result{Answer: fmt.Sprintf(`{"approved":false,"feedback":%q}`, fmt.Sprintf("Finding from full round %d", request.round))}, nil
+					return aicli.Result{Answer: fmt.Sprintf(`{"approved":false,"has_blockers":true,"feedback":%q}`, fmt.Sprintf("Finding from full round %d", request.round))}, nil
 				}
 				if request.reviewPhase != reviewVerification || request.round == 1 || !strings.Contains(prompt, verificationRule) || strings.Contains(prompt, fullRule) {
 					t.Fatalf("wrong phase instructions: %s/%d", request.reviewPhase, request.round)
@@ -68,7 +68,7 @@ func TestReviewRoundBudgetIncludesEveryFreshFullRejection(t *testing.T) {
 						t.Fatalf("verification lost earlier correction evidence: %s", evidence)
 					}
 				}
-				return aicli.Result{Answer: `{"approved":true,"feedback":""}`}, nil
+				return aicli.Result{Answer: `{"approved":true,"has_blockers":false,"feedback":""}`}, nil
 			}}
 			answer, err := runner.runAI(ctx, job, "source", task, true, "")
 			if !errors.Is(err, monitor.ErrTerminalJob) || answer != "" || !strings.Contains(err.Error(), fmt.Sprintf("after %d round(s)", rounds)) || len(got) != 3*rounds-1 {

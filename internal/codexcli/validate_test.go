@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/config"
 )
 
@@ -230,5 +231,19 @@ func TestModelPreflightQuotesStderr(t *testing.T) {
 	_, err := listModels(context.Background(), config.CodexConfig{})
 	if err == nil || strings.Contains(err.Error(), "\nforged journal line") || !strings.Contains(err.Error(), `private\nforged journal line`) {
 		t.Fatalf("unsafe preflight stderr: %v", err)
+	}
+}
+
+func TestCatalogueProviderErrorIsBoundedAndQuoted(t *testing.T) {
+	dir := t.TempDir()
+	message := "first\nforged journal line " + strings.Repeat("x", 10000)
+	response, err := json.Marshal(map[string]any{"id": 2, "error": map[string]string{"message": message}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	installFakeCodex(t, catalogueScriptFor(dir, string(response), ""))
+	_, err = Validate(context.Background(), config.CodexConfig{})
+	if err == nil || strings.Contains(err.Error(), "\nforged journal line") || !strings.Contains(err.Error(), `first\nforged journal line`) || len(err.Error()) > bounded.DiagnosticBytes+200 || !strings.Contains(err.Error(), "...") {
+		t.Fatalf("unsafe/unbounded provider error: %v", err)
 	}
 }

@@ -61,7 +61,7 @@ func TestRunnerReviewRevisionsFreezeCleanIndependentInputs(t *testing.T) {
 		}
 		if request.round == 1 {
 			firstReview = request.dir
-			return aicli.Result{Answer: `{"approved":false,"feedback":"Implement the missing edge case."}`}, nil
+			return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"feedback":"Implement the missing edge case."}`}, nil
 		}
 		if request.reviewPhase == "verification" {
 			revisionReview = request.dir
@@ -71,7 +71,7 @@ func TestRunnerReviewRevisionsFreezeCleanIndependentInputs(t *testing.T) {
 		} else if request.dir != revisionReview {
 			t.Fatal("unchanged verification/full phases copied different candidates")
 		}
-		return aicli.Result{Answer: `{"approved":true,"feedback":""}`}, nil
+		return aicli.Result{Answer: `{"approved":true,"has_blockers":false,"feedback":""}`}, nil
 	}
 	result, err := runner.Run(context.Background(), job)
 	if err != nil || result.Answer != "answer 2" || len(result.Changes) != 1 || string(result.Changes[0].Data) != "candidate 2" {
@@ -110,7 +110,7 @@ func TestRunnerReviewRejectsSourceMutationEvenAfterRejection(t *testing.T) {
 				if !approved {
 					feedback = "Fix the candidate."
 				}
-				return aicli.Result{Answer: fmt.Sprintf(`{"approved":%t,"feedback":%q}`, approved, feedback)}, nil
+				return aicli.Result{Answer: fmt.Sprintf(`{"approved":%t,"has_blockers":%t,"feedback":%q}`, approved, !approved, feedback)}, nil
 			}}
 			result, err := runner.Run(context.Background(), job)
 			if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "source changed during critic review") || calls != 2 || result.Answer != "" {
@@ -159,7 +159,7 @@ exec %s "$@"
 		if err := os.WriteFile(armed, []byte(source), 0600); err != nil {
 			t.Fatal(err)
 		}
-		return aicli.Result{Answer: `{"approved":true,"feedback":""}`}, nil
+		return aicli.Result{Answer: `{"approved":true,"has_blockers":false,"feedback":""}`}, nil
 	}}
 	result, err := runner.Run(context.Background(), job)
 	if err != nil || len(result.Changes) != 1 || string(result.Changes[0].Data) != "approved candidate" {
@@ -236,7 +236,7 @@ func TestRunnerAuditReviewFreezesAndExportsRawReports(t *testing.T) {
 					if data, err := os.ReadFile(filepath.Join(frozenReports, "architecture.md")); err != nil || len(data) != 0 {
 						t.Fatalf("critic could not inspect the empty artifact: %q,%v", data, err)
 					}
-					return aicli.Result{Answer: `{"approved":false,"feedback":"Fill architecture.md with the required architecture report."}`}, nil
+					return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"feedback":"Fill architecture.md with the required architecture report."}`}, nil
 				}
 				if scenario == "mutated during critic" {
 					writeIndexFixture(t, reports, "REPORT.md", []byte("concurrent report edit"))
@@ -245,7 +245,7 @@ func TestRunnerAuditReviewFreezesAndExportsRawReports(t *testing.T) {
 						t.Fatalf("concurrent report edit reached frozen copy=%q,%v", data, err)
 					}
 				}
-				return aicli.Result{Answer: `{"approved":true,"feedback":""}`}, nil
+				return aicli.Result{Answer: `{"approved":true,"has_blockers":false,"feedback":""}`}, nil
 			}
 			result, err := runner.Run(context.Background(), job)
 			if scenario == "mutated during critic" || scenario == "empty architecture" {

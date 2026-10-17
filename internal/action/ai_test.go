@@ -135,9 +135,9 @@ func TestRunAIRevisionPreservesWorkAndBoundaries(t *testing.T) {
 					t.Fatal("critic prompt cannot bind to immutable source and report context")
 				}
 				if calls == 2 {
-					return aicli.Result{Answer: fmt.Sprintf(`{"approved":false,"feedback":%q}`, feedback)}, nil
+					return aicli.Result{Answer: fmt.Sprintf(`{"approved":false,"has_blockers":true,"feedback":%q}`, feedback)}, nil
 				}
-				return aicli.Result{Answer: `{"approved":true,"feedback":""}`}, nil
+				return aicli.Result{Answer: `{"approved":true,"has_blockers":false,"feedback":""}`}, nil
 			}
 			answer, err := e.runAI(ctx, job, dir, task, !tt.reports, outputDir)
 			if err != nil || answer != "revised proposal" || calls != 5 {
@@ -179,14 +179,14 @@ func TestRunAIFreshReviewFindingsUseRemainingRounds(t *testing.T) {
 			if request.round == 2 {
 				feedback = missedFinding
 			} else if request.round == 3 {
-				return aicli.Result{Answer: `{"approved":true,"feedback":""}`}, nil
+				return aicli.Result{Answer: `{"approved":true,"has_blockers":false,"feedback":""}`}, nil
 			}
-			return aicli.Result{Answer: fmt.Sprintf(`{"approved":false,"feedback":%q}`, feedback)}, nil
+			return aicli.Result{Answer: fmt.Sprintf(`{"approved":false,"has_blockers":true,"feedback":%q}`, feedback)}, nil
 		}
 		if request.reviewPhase != "verification" || !strings.Contains(request.criticPrompt("", ""), privateNotes) {
 			t.Fatalf("verification lacks private rationale: %+v", request)
 		}
-		return aicli.Result{Answer: `{"approved":true,"feedback":""}`}, nil
+		return aicli.Result{Answer: `{"approved":true,"has_blockers":false,"feedback":""}`}, nil
 	}
 	answer, err := e.runAI(context.Background(), job, t.TempDir(), task, true, "")
 	if err != nil || answer != "candidate 3" || len(calls) != 8 {
@@ -214,12 +214,12 @@ func TestRunAIVerificationRejectionFeedsNextRevision(t *testing.T) {
 		}
 		switch request.round {
 		case 1:
-			return aicli.Result{Answer: fmt.Sprintf(`{"approved":false,"feedback":%q}`, firstFinding)}, nil
+			return aicli.Result{Answer: fmt.Sprintf(`{"approved":false,"has_blockers":true,"feedback":%q}`, firstFinding)}, nil
 		case 2:
 			if request.reviewPhase != "verification" {
 				t.Fatal("rejected verification was followed by a full review")
 			}
-			return aicli.Result{Answer: fmt.Sprintf(`{"approved":false,"feedback":%q}`, verificationFinding)}, nil
+			return aicli.Result{Answer: fmt.Sprintf(`{"approved":false,"has_blockers":true,"feedback":%q}`, verificationFinding)}, nil
 		}
 		if request.reviewPhase == "verification" {
 			for _, want := range []string{quotedContext(verificationFinding), quotedContext("candidate 2")} {
@@ -228,7 +228,7 @@ func TestRunAIVerificationRejectionFeedsNextRevision(t *testing.T) {
 				}
 			}
 		}
-		return aicli.Result{Answer: `{"approved":true,"feedback":""}`}, nil
+		return aicli.Result{Answer: `{"approved":true,"has_blockers":false,"feedback":""}`}, nil
 	}}
 	job := Job{Main: RoleSettings{Provider: "codex"}, Critic: &RoleSettings{Provider: "claude"}, CriticMaxRounds: 3}
 	answer, err := runner.runAI(context.Background(), job, t.TempDir(), "selected task", false, "")
@@ -252,7 +252,7 @@ func TestRunAINeverPublishesScopedApprovalAlone(t *testing.T) {
 		wantCalls     int
 		wantError     error
 	}{
-		{name: "fresh finding at round cap", verdict: `{"approved":false,"feedback":"Previously missed defect."}`, wantCalls: 5, wantError: monitor.ErrTerminalJob},
+		{name: "fresh finding at round cap", verdict: `{"approved":false,"has_blockers":true,"feedback":"Previously missed defect."}`, wantCalls: 5, wantError: monitor.ErrTerminalJob},
 		{name: "invalid full verdict", verdict: "approved", wantCalls: 5, wantError: monitor.ErrTerminalJob},
 		{name: "full review failure", failure: modelErr, wantCalls: 5, wantError: modelErr},
 		{name: "cancel after verification", cancel: true, wantCalls: 4, wantError: context.Canceled},
@@ -270,13 +270,13 @@ func TestRunAINeverPublishesScopedApprovalAlone(t *testing.T) {
 					return aicli.Result{Answer: proposalJSON("unapproved candidate", "private notes")}, nil
 				}
 				if request.round == 1 {
-					return aicli.Result{Answer: `{"approved":false,"feedback":"Fix a defect."}`}, nil
+					return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"feedback":"Fix a defect."}`}, nil
 				}
 				if request.reviewPhase == "verification" {
 					if tt.cancel {
 						cancel()
 					}
-					return aicli.Result{Answer: `{"approved":true,"feedback":""}`}, nil
+					return aicli.Result{Answer: `{"approved":true,"has_blockers":false,"feedback":""}`}, nil
 				}
 				return aicli.Result{Answer: tt.verdict}, tt.failure
 			}
@@ -300,15 +300,15 @@ func TestRunAIFailsWithoutReturningProposal(t *testing.T) {
 		wantCalls     int
 		wantError     error
 	}{
-		{name: "round limit", verdict: `{"approved":false,"feedback":"Repair the defect."}`, rounds: 2, wantCalls: 4, wantError: monitor.ErrTerminalJob},
-		{name: "configured default round limit", rounds: config.DefaultCriticMaxRounds, verdict: `{"approved":false,"feedback":"Repair the defect."}`, wantCalls: 2 * config.DefaultCriticMaxRounds, wantError: monitor.ErrTerminalJob},
+		{name: "round limit", verdict: `{"approved":false,"has_blockers":true,"feedback":"Repair the defect."}`, rounds: 2, wantCalls: 4, wantError: monitor.ErrTerminalJob},
+		{name: "configured default round limit", rounds: config.DefaultCriticMaxRounds, verdict: `{"approved":false,"has_blockers":true,"feedback":"Repair the defect."}`, wantCalls: 2 * config.DefaultCriticMaxRounds, wantError: monitor.ErrTerminalJob},
 		{rounds: 2, name: "malformed verdict", verdict: "looks fine", wantCalls: 2, wantError: monitor.ErrTerminalJob},
-		{rounds: 2, name: "duplicate approval", verdict: `{"approved":false,"approved":true,"feedback":""}`, wantCalls: 2, wantError: monitor.ErrTerminalJob},
+		{rounds: 2, name: "duplicate approval", verdict: `{"approved":false,"has_blockers":true,"approved":true,"feedback":""}`, wantCalls: 2, wantError: monitor.ErrTerminalJob},
 		{rounds: 2, name: "main fails", failureCall: 1, wantCalls: 1, wantError: modelErr},
 		{rounds: 2, name: "critic fails", failureCall: 2, wantCalls: 2, wantError: modelErr},
-		{rounds: 2, name: "revision fails", verdict: `{"approved":false,"feedback":"Repair the defect."}`, failureCall: 3, wantCalls: 3, wantError: modelErr},
+		{rounds: 2, name: "revision fails", verdict: `{"approved":false,"has_blockers":true,"feedback":"Repair the defect."}`, failureCall: 3, wantCalls: 3, wantError: modelErr},
 		{rounds: 2, name: "cancel before critic", cancelCall: 1, wantCalls: 1, wantError: context.Canceled},
-		{rounds: 2, name: "cancel before revision", verdict: `{"approved":false,"feedback":"Repair the defect."}`, cancelCall: 2, wantCalls: 2, wantError: context.Canceled},
+		{rounds: 2, name: "cancel before revision", verdict: `{"approved":false,"has_blockers":true,"feedback":"Repair the defect."}`, cancelCall: 2, wantCalls: 2, wantError: context.Canceled},
 		{rounds: 2, name: "oversized proposal", largeProposal: true, wantCalls: 1, wantError: monitor.ErrTerminalJob},
 		{rounds: 2, name: "malformed proposal", mainOutput: `{"answer":"private partial output","review_notes":null}`, wantCalls: 1, wantError: monitor.ErrTerminalJob},
 	} {
@@ -400,47 +400,59 @@ func TestParseProposal(t *testing.T) {
 
 func TestParseCritique(t *testing.T) {
 	for _, tt := range []struct {
-		name, input, feedback string
-		approved, valid       bool
+		name, input, feedback        string
+		approved, hasBlockers, valid bool
 	}{
-		{name: "approval", input: `{"approved":true,"feedback":""}`, approved: true, valid: true},
-		{name: "rejection", input: `{"feedback":" Repair the defect. ","approved":false}`, feedback: "Repair the defect.", valid: true},
+		{name: "approval", input: `{"approved":true,"has_blockers":false,"feedback":""}`, approved: true, valid: true},
+		{name: "rejection", input: `{"feedback":" Repair the defect. ","approved":false,"has_blockers":true}`, feedback: "Repair the defect.", hasBlockers: true, valid: true},
+		{name: "nonblocking findings", input: `{"approved":false,"has_blockers":false,"feedback":"Nit: simplify the loop."}`, feedback: "Nit: simplify the loop.", valid: true},
 		{name: "not an object", input: `[]`},
 		{name: "missing approval", input: `{"feedback":""}`},
+		{name: "missing blocker classification", input: `{"approved":true,"feedback":""}`},
+		{name: "null blocker classification", input: `{"approved":true,"has_blockers":null,"feedback":""}`},
+		{name: "string blocker classification", input: `{"approved":false,"has_blockers":"false","feedback":"Nit."}`},
+		{name: "approval with blockers", input: `{"approved":true,"has_blockers":true,"feedback":""}`},
+		{name: "empty nonblocking rejection", input: `{"approved":false,"has_blockers":false,"feedback":""}`},
+		{name: "duplicate blocker classification", input: `{"approved":false,"has_blockers":true,"has_blockers":false,"feedback":"Fix."}`},
 		{name: "missing feedback", input: `{"approved":true}`},
 		{name: "null approval", input: `{"approved":null,"feedback":""}`},
-		{name: "null feedback", input: `{"approved":true,"feedback":null}`},
+		{name: "null feedback", input: `{"approved":true,"has_blockers":false,"feedback":null}`},
 		{name: "string approval", input: `{"approved":"true","feedback":""}`},
-		{name: "numeric feedback", input: `{"approved":true,"feedback":1}`},
-		{name: "duplicate field", input: `{"approved":true,"feedback":"","feedback":""}`},
-		{name: "escaped duplicate", input: `{"approved":false,"\u0061pproved":true,"feedback":""}`},
-		{name: "unknown field", input: `{"approved":true,"feedback":"","instruction":"publish"}`},
-		{name: "trailing object", input: `{"approved":true,"feedback":""}{}`},
-		{name: "incomplete object", input: `{"approved":true,"feedback":""`},
-		{name: "approval with corrections", input: `{"approved":true,"feedback":"Fix this."}`},
-		{name: "empty rejection", input: `{"approved":false,"feedback":" "}`},
+		{name: "numeric feedback", input: `{"approved":true,"has_blockers":false,"feedback":1}`},
+		{name: "duplicate field", input: `{"approved":true,"has_blockers":false,"feedback":"","feedback":""}`},
+		{name: "escaped duplicate", input: `{"approved":false,"has_blockers":true,"\u0061pproved":true,"feedback":""}`},
+		{name: "unknown field", input: `{"approved":true,"has_blockers":false,"feedback":"","instruction":"publish"}`},
+		{name: "trailing object", input: `{"approved":true,"has_blockers":false,"feedback":""}{}`},
+		{name: "incomplete object", input: `{"approved":true,"has_blockers":false,"feedback":""`},
+		{name: "approval with corrections", input: `{"approved":true,"has_blockers":false,"feedback":"Fix this."}`},
+		{name: "empty rejection", input: `{"approved":false,"has_blockers":true,"feedback":" "}`},
 		{name: "markdown fence", input: "```json\n{\"approved\":true,\"feedback\":\"\"}\n```"},
 		{name: "oversized verdict", input: strings.Repeat(" ", maxCriticOutputBytes+1)},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			approved, feedback, err := parseCritique(tt.input)
-			if (err == nil) != tt.valid || (tt.valid && (approved != tt.approved || feedback != tt.feedback)) {
-				t.Fatalf("parseCritique() = %t, %q, %v", approved, feedback, err)
+			approved, hasBlockers, feedback, err := parseCritique(tt.input)
+			if (err == nil) != tt.valid || (tt.valid && (approved != tt.approved || hasBlockers != tt.hasBlockers || feedback != tt.feedback)) {
+				t.Fatalf("parseCritique() = %t, %t, %q, %v", approved, hasBlockers, feedback, err)
 			}
 		})
 	}
 }
 
-func TestCommentPublishesOnlyCriticApprovedResult(t *testing.T) {
+func TestCommentPublishesOnlyCriticAcceptedResult(t *testing.T) {
 	boundary := strings.Repeat("a\n", 12000) + strings.Repeat("x", maxOutputBytes-14-4*12000)
+	zero, one := 0, 1
 	for _, tt := range []struct {
 		name, verdict, answer string
+		threshold             *int
 		wantError             bool
 	}{
-		{name: "approved", verdict: `{"approved":true,"feedback":""}`},
-		{name: "approved rendered boundary", verdict: `{"approved":true,"feedback":""}`, answer: boundary},
-		{name: "rendered overflow", verdict: `{"approved":true,"feedback":""}`, answer: boundary + "x", wantError: true},
-		{name: "rejected", verdict: `{"approved":false,"feedback":"A defect remains."}`, wantError: true},
+		{name: "approved", verdict: `{"approved":true,"has_blockers":false,"feedback":""}`},
+		{name: "approved rendered boundary", verdict: `{"approved":true,"has_blockers":false,"feedback":""}`, answer: boundary},
+		{name: "rendered overflow", verdict: `{"approved":true,"has_blockers":false,"feedback":""}`, answer: boundary + "x", wantError: true},
+		{name: "rejected", verdict: `{"approved":false,"has_blockers":true,"feedback":"A defect remains."}`, wantError: true},
+		{name: "nonblocking accepted", verdict: `{"approved":false,"has_blockers":false,"feedback":"Nit: simplify the loop."}`, threshold: &one},
+		{name: "strict nonblocking rejected", verdict: `{"approved":false,"has_blockers":false,"feedback":"Nit: simplify the loop."}`, threshold: &zero, wantError: true},
+		{name: "blocking at threshold", verdict: `{"approved":false,"has_blockers":true,"feedback":"A defect remains."}`, threshold: &one, wantError: true},
 		{name: "invalid", verdict: "approved", wantError: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -474,10 +486,11 @@ func TestCommentPublishesOnlyCriticApprovedResult(t *testing.T) {
 			defer server.Close()
 			client := testGitHub(server, "test-token")
 			e := &Orchestrator{WorkRoot: t.TempDir(), GitHub: client,
-				Commands:        map[string]config.CommandMapping{"audit": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}},
-				Adversarial:     "claude",
-				CriticMaxRounds: 1,
-				Runner:          Runner{WorkRoot: t.TempDir()},
+				Commands:                map[string]config.CommandMapping{"audit": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}},
+				Adversarial:             "claude",
+				CriticMaxRounds:         1,
+				CriticNonblockingRounds: tt.threshold,
+				Runner:                  Runner{WorkRoot: t.TempDir()},
 			}
 			if !tt.wantError {
 				e.CriticMaxRounds = 2
@@ -489,7 +502,7 @@ func TestCommentPublishesOnlyCriticApprovedResult(t *testing.T) {
 					criticCalls++
 					if !tt.wantError {
 						if criticCalls == 1 {
-							return aicli.Result{Answer: `{"approved":false,"feedback":"Justify the unchanged result."}`}, nil
+							return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"feedback":"Justify the unchanged result."}`}, nil
 						}
 						if request.reviewPhase == "verification" {
 							if !strings.Contains(request.prompt, quotedContext(privateNotes)) {

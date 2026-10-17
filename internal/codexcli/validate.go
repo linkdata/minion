@@ -103,7 +103,6 @@ func listModels(ctx context.Context, settings config.CodexConfig) (models []mode
 	cmd.Args[0] = "codex"
 	cmd.Dir = dir
 	cmd.Env = childEnvironment(os.Environ(), dir, dir, settings.APIKey != "")
-	cmd.WaitDelay = 2 * time.Second
 	processgroup.Configure(cmd)
 	diagnostics := bounded.Tail{Limit: bounded.DiagnosticBytes}
 	cmd.Stderr = &diagnostics
@@ -161,7 +160,7 @@ func listModels(ctx context.Context, settings config.CodexConfig) (models []mode
 				return fmt.Errorf("unexpected Codex response ID %d during %s", *response.ID, method)
 			}
 			if response.Error != nil {
-				return fmt.Errorf("Codex %s: %s", method, response.Error.Message) //nolint:staticcheck // -- Codex is a proper noun.
+				return fmt.Errorf("Codex %s: %q", method, bounded.Text(response.Error.Message, bounded.DiagnosticBytes)) //nolint:staticcheck // -- Codex is a proper noun.
 			}
 			if len(response.Result) == 0 || string(response.Result) == "null" {
 				return fmt.Errorf("Codex %s returned no result", method) //nolint:staticcheck // -- Codex is a proper noun.
