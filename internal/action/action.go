@@ -102,11 +102,10 @@ func (e *Orchestrator) Execute(ctx context.Context, job monitor.Job) (resultErr 
 	// A panic leaves the last running checkpoint instead of claiming success.
 	returned := false
 	if e.Usage != nil {
-		tracked, finish, err := e.trackUsage(job)
+		finish, err := e.trackUsage(job)
 		if err != nil {
 			return err
 		}
-		e = tracked
 		defer func() {
 			if returned {
 				resultErr = finish(resultErr)

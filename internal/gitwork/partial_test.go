@@ -55,7 +55,7 @@ func TestPartialClonePreflightsMetadataBeforeAnyBlobFetch(t *testing.T) {
 		}
 		return tree, err
 	}
-	_, err := cloneFromURL(context.Background(), root, "file://"+fixture.remote, "main", lookup)
+	_, err := cloneFromURL(context.Background(), root, "file://"+fixture.remote, "main", lookup, true)
 	if !checked || !errors.Is(err, ErrCheckoutTooLarge) {
 		t.Fatalf("preflight checked=%v error=%v", checked, err)
 	}
@@ -79,7 +79,7 @@ func TestPartialSnapshotBulkFetchesChangedBaseBlobs(t *testing.T) {
 	fixture.git(fixture.source, "commit", "-m", "PR files")
 	head := fixture.git(fixture.source, "rev-parse", "HEAD")
 	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/pull/7/head")
-	checkout, err := clonePullRequestFromURL(context.Background(), t.TempDir(), "file://"+fixture.remote, 7, "main", head, localTreeMetadata(t, fixture.source))
+	checkout, err := clonePullRequestFromURL(context.Background(), t.TempDir(), "file://"+fixture.remote, 7, "main", head, localTreeMetadata(t, fixture.source), true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +108,7 @@ func TestPartialSnapshotBulkFetchesChangedBaseBlobs(t *testing.T) {
 	if err := checkout.recordConfig(); err != nil {
 		t.Fatal(err)
 	}
-	snapshot, err := checkout.Snapshot(context.Background(), false, true)
+	snapshot, err := checkout.Snapshot(context.Background(), false)
 	if err != nil || snapshot.Head != head || snapshot.MergeBase != base || len(snapshot.BaseFiles) != count || len(snapshot.ChangedPaths) != count {
 		t.Fatalf("partial snapshot base=%s files=%d paths=%d error=%v", snapshot.MergeBase, len(snapshot.BaseFiles), len(snapshot.ChangedPaths), err)
 	}
@@ -136,7 +136,7 @@ func TestPartialSnapshotPreflightsMergeBaseAndHistoryDoesNotFetchOldBlobs(t *tes
 	fixture.git(fixture.source, "commit", "-m", "remove old blob")
 	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/heads/main")
 	lookup := localTreeMetadata(t, fixture.source)
-	checkout, err := cloneFromURL(context.Background(), t.TempDir(), "file://"+fixture.remote, "main", lookup)
+	checkout, err := cloneFromURL(context.Background(), t.TempDir(), "file://"+fixture.remote, "main", lookup, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,11 +148,11 @@ func TestPartialSnapshotPreflightsMergeBaseAndHistoryDoesNotFetchOldBlobs(t *tes
 	if !blobMissing(t, checkout.path, blob) {
 		t.Fatal("partial clone fetched deleted historical content")
 	}
-	snapshot, err := checkout.Snapshot(context.Background(), true, false)
+	snapshot, err := checkout.Snapshot(context.Background(), true)
 	if err != nil || !snapshot.HistoryComplete || !strings.Contains(string(snapshot.History), "historical blob") || !blobMissing(t, checkout.path, blob) {
 		t.Fatalf("metadata history fetched old contents or lost coverage: complete=%v err=%v", snapshot.HistoryComplete, err)
 	}
-	fixture.git(checkout.path, "update-ref", "refs/remotes/minion/base", base)
+	checkout.comparisonBase = base
 	checkout.lookupTree = func(ctx context.Context, sha string) (github.GitTree, error) {
 		tree, err := lookup(ctx, sha)
 		if sha == baseTree && err == nil {
@@ -164,7 +164,7 @@ func TestPartialSnapshotPreflightsMergeBaseAndHistoryDoesNotFetchOldBlobs(t *tes
 		}
 		return tree, err
 	}
-	if _, err := checkout.Snapshot(context.Background(), false, true); !errors.Is(err, ErrCheckoutTooLarge) || !blobMissing(t, checkout.path, blob) {
+	if _, err := checkout.Snapshot(context.Background(), false); !errors.Is(err, ErrCheckoutTooLarge) || !blobMissing(t, checkout.path, blob) {
 		t.Fatalf("merge-base preflight fetched blob: %v", err)
 	}
 }
@@ -176,10 +176,10 @@ func TestSnapshotDeclaresOversizedComparisonAndPreservesFiles(t *testing.T) {
 	fixture.git(fixture.source, "commit", "-m", "large diff")
 	head := fixture.git(fixture.source, "rev-parse", "HEAD")
 	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/pull/7/head")
-	if err := fixture.checkout.checkoutPullRequest(context.Background(), 7, "main", head); err != nil {
+	if err := fixture.checkout.checkoutPullRequest(context.Background(), 7, "main", head, true); err != nil {
 		t.Fatal(err)
 	}
-	snapshot, err := fixture.checkout.Snapshot(context.Background(), false, true)
+	snapshot, err := fixture.checkout.Snapshot(context.Background(), false)
 	if err != nil || !snapshot.DiffIncomplete || len(snapshot.Diff) != 0 || len(snapshot.ChangedPaths) != 1 || snapshot.ChangedPaths[0] != "large" || len(snapshot.Files) != 2 {
 		t.Fatalf("large comparison incomplete=%v paths=%v files=%d error=%v", snapshot.DiffIncomplete, snapshot.ChangedPaths, len(snapshot.Files), err)
 	}

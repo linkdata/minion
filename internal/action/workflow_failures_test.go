@@ -47,9 +47,12 @@ func TestFixReplyFailureConsumesPublicationAttempt(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer store.Close()
-			client := github.New("fixture-token")
-			client.BaseURL, client.HTTPClient = server.URL, server.Client()
+			defer func() {
+				if err := store.Close(); err != nil {
+					t.Error(err)
+				}
+			}()
+			client := testGitHub(server, "fixture-token")
 			request := monitor.Job{ID: strings.Repeat("a", 64), SubjectType: "Issue", Number: 7,
 				Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2}, Command: command.Command{Action: command.Fix}}
 			prepared := &preparedAction{request: request, repository: github.Repository{FullName: "o/r", DefaultBranch: "main"}, fork: github.Repository{FullName: "bot/r"}}
@@ -104,8 +107,7 @@ func TestExecuteSourceFailuresAndInvalidIncompleteResultsAreTerminal(t *testing.
 				}
 			}))
 			defer server.Close()
-			client := github.New("token")
-			client.BaseURL, client.HTTPClient = server.URL, server.Client()
+			client := testGitHub(server, "token")
 			orchestrator := Orchestrator{WorkRoot: t.TempDir(), GitHub: client, BotLogin: "bot", Commands: map[string]config.CommandMapping{"audit": {Action: "comment", Skills: []string{testReviewSkillURL}}}, Runner: Runner{WorkRoot: t.TempDir(), runModel: func(context.Context, modelRun) (aicli.Result, error) {
 				calls++
 				return aicli.Result{Tokens: usage.Tokens{Input: -1}}, modelErr
@@ -154,7 +156,11 @@ func TestExecuteLogsCheckoutCleanupFailureAfterSuccessfulPublication(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() {
+		if err := store.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
 	request := monitor.Job{ID: strings.Repeat("a", 64), SubjectType: "Issue", Number: 7,
 		Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"fix"}},
 		Source:     github.Item{UpdatedAt: time.Now(), Author: github.User{ID: 3, Login: "writer"}},
@@ -200,8 +206,7 @@ func TestExecuteLogsCheckoutCleanupFailureAfterSuccessfulPublication(t *testing.
 		}
 	}))
 	defer server.Close()
-	client := github.New("fixture-token")
-	client.BaseURL, client.HTTPClient = server.URL, server.Client()
+	client := testGitHub(server, "fixture-token")
 	var journal bytes.Buffer
 	orchestrator := Orchestrator{WorkRoot: root, GitHub: client, BotLogin: "bot", Store: store, Logger: log.New(&journal, "", 0),
 		Commands: map[string]config.CommandMapping{"fix": {Action: "fix", Skills: []string{testFixSkillURL}}},
@@ -266,14 +271,17 @@ func TestPublishFixRejectsNonemptyReviewedChangesDroppedByGit(t *testing.T) {
 				}
 			}))
 			defer server.Close()
-			client := github.New("token")
-			client.BaseURL, client.HTTPClient = server.URL, server.Client()
+			client := testGitHub(server, "token")
 			root := t.TempDir()
-			checkout, err := gitwork.Clone(context.Background(), root, "o/r", "main", emptyTreeFixture)
+			checkout, err := gitwork.Clone(context.Background(), root, "o/r", "main", emptyTreeFixture, true)
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer checkout.Close()
+			defer func() {
+				if err := checkout.Close(); err != nil {
+					t.Error(err)
+				}
+			}()
 			const branch = "minion/fix-reviewed"
 			if err := checkout.NewBranch(context.Background(), branch); err != nil {
 				t.Fatal(err)
@@ -327,11 +335,15 @@ func TestPublishFixRejectsNonemptyReviewedChangesDroppedByGit(t *testing.T) {
 
 func TestCompletedAuditRetentionFailureIsTerminal(t *testing.T) {
 	base, _, _ := gitFixtureRemote(t)
-	checkout, err := gitwork.Clone(context.Background(), t.TempDir(), "o/r", "main", emptyTreeFixture)
+	checkout, err := gitwork.Clone(context.Background(), t.TempDir(), "o/r", "main", emptyTreeFixture, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer checkout.Close()
+	defer func() {
+		if err := checkout.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
 	job := portableJob(command.SecurityAudit)
 	job.Source.Head, job.Source.Files = base, nil
 	result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: base, Answer: "content", Calls: []CallUsage{{Provider: job.Main.Provider, Role: "main", Round: 1}}}
@@ -353,8 +365,7 @@ func TestCompletedAuditRetentionFailureIsTerminal(t *testing.T) {
 		http.NotFound(w, r)
 	}))
 	defer server.Close()
-	client := github.New("token")
-	client.BaseURL, client.HTTPClient = server.URL, server.Client()
+	client := testGitHub(server, "token")
 	blocked := filepath.Join(t.TempDir(), "file")
 	if err := os.WriteFile(blocked, []byte("not a directory"), 0600); err != nil {
 		t.Fatal(err)
@@ -382,8 +393,7 @@ func TestCanceledPublicationRetainsValidatedAudit(t *testing.T) {
 				http.NotFound(w, r)
 			}))
 			defer server.Close()
-			client := github.New("fixture-token")
-			client.BaseURL, client.HTTPClient = server.URL, server.Client()
+			client := testGitHub(server, "fixture-token")
 			var journal bytes.Buffer
 			e := Orchestrator{GitHub: client, WorkRoot: t.TempDir(), Logger: log.New(&journal, "", 0)}
 			ctx, cancel := context.WithCancel(context.Background())
@@ -437,7 +447,7 @@ func TestContextDescribesOmittedRevisionScope(t *testing.T) {
 				t.Fatalf("omitted scope=%q want%q", source.OmittedScope, want)
 			}
 			prompt, err := actionPrompt(context.Background(), job, "/source", root, "", "")
-			if err != nil || !strings.Contains(prompt, "the omitted list covers both head and base revisions") {
+			if err != nil || !strings.Contains(prompt, "the omitted list covers both head and merge-base revisions") {
 				t.Fatalf("omitted revision context missing: %s,%v", prompt, err)
 			}
 		})

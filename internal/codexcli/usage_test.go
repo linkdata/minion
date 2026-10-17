@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -101,29 +102,24 @@ func TestRepeatedHelperActivityRetainsLaterCountersAndCompletion(t *testing.T) {
 }
 
 func TestUsageAgentBoundsCountUniqueIDsAndRejectOverflow(t *testing.T) {
-	t.Run("repeated expected child", func(t *testing.T) {
+	t.Run("selected tree retains root and sorted bounded children", func(t *testing.T) {
 		home := t.TempDir()
-		writeUsageRollout(t, home, "root", "", usageEvent("task_started", "root-turn"), usageRecord("root", "root-turn", "root-response", 10, 0, 1), usageEvent("task_complete", "root-turn"))
-		writeUsageRollout(t, home, "child", "root", usageEvent("task_started", "child-turn"), usageRecord("child", "child-turn", "child-response", 20, 0, 2), usageEvent("task_complete", "child-turn"))
-		expected := make([]string, maxUsageAgents+1)
-		for i := range expected {
-			expected[i] = "child"
+		writeUsageRollout(t, home, "root", "", usageEvent("task_started", "root-turn"), usageRecord("root", "root-turn", "root-response", 100, 10, 7), usageEvent("task_complete", "root-turn"))
+		want := usage.Tokens{Input: 100, CachedInput: 10, Output: 7}
+		for i := maxUsageAgents - 1; i >= 0; i-- {
+			id := fmt.Sprintf("child-%03d", i)
+			writeUsageRollout(t, home, id, "root", usageEvent("task_started", "turn"), usageRecord(id, "turn", id, int64(i+1), 0, 1), usageEvent("task_complete", "turn"))
+			if i < maxCodexChildren {
+				want.Add(usage.Tokens{Input: int64(i + 1), Output: 1})
+			}
 		}
-		tokens, complete, childError := collectUsage(context.Background(), home, "root", time.Now(), nil, expected)
-		if tokens != (usage.Tokens{Input: 30, Output: 3}) || !complete || childError != nil {
-			t.Fatalf("duplicate expected IDs consumed agent bound: tokens=%+v complete=%t error=%v", tokens, complete, childError)
-		}
-	})
-	t.Run("selected tree exceeds bound", func(t *testing.T) {
-		home := t.TempDir()
-		writeUsageRollout(t, home, "root", "", usageEvent("task_started", "root-turn"))
-		for i := range maxUsageAgents {
-			writeUsageRollout(t, home, fmt.Sprintf("child-%d", i), "root")
-		}
-		known := usage.Tokens{Input: 100, CachedInput: 10, Output: 7}
-		tokens, complete, childError := collectUsage(context.Background(), home, "root", time.Now(), &known, nil)
-		if tokens != known || complete || !errors.Is(childError, aicli.ErrOutputLimit) {
-			t.Fatalf("oversized agent tree accepted: tokens=%+v complete=%t error=%v", tokens, complete, childError)
+		for _, fallback := range []*usage.Tokens{nil, {Input: 100, CachedInput: 10, Output: 7}} {
+			for range 3 {
+				tokens, complete, childError := collectUsage(context.Background(), home, "root", time.Now(), fallback, nil)
+				if tokens != want || complete || !errors.Is(childError, aicli.ErrOutputLimit) {
+					t.Fatalf("overflow discarded or randomized known counters: tokens=%+v want=%+v complete=%t error=%v", tokens, want, complete, childError)
+				}
+			}
 		}
 	})
 	t.Run("rollout bound retains later counters", func(t *testing.T) {
@@ -435,4 +431,62 @@ func (r *cancelingRolloutReader) Read(p []byte) (int, error) {
 		r.cancel()
 	}
 	return n, err
+}
+
+func TestCollectUsageMergesRootLowerBoundsByComponent(t *testing.T) {
+	for _, source := range []string{"stdout", "snapshot"} {
+		t.Run(source, func(t *testing.T) {
+			home := t.TempDir()
+			events := []string{usageEvent("task_started", "turn"), usageRecord("root", "turn", "response", 100, 10, 1)}
+			var fallback *usage.Tokens
+			if source == "stdout" {
+				fallback = &usage.Tokens{Input: 90, CachedInput: 20, Output: 20}
+			} else {
+				events = append(events, usageSnapshot(18, 90, 20, 20))
+			}
+			events = append(events, usageEvent("task_complete", "turn"))
+			writeUsageRollout(t, home, "root", "", events...)
+			got, complete, err := collectUsage(context.Background(), home, "root", time.Now(), fallback, nil)
+			if got != (usage.Tokens{Input: 100, CachedInput: 20, Output: 20}) || complete || err != nil {
+				t.Fatalf("component lower bounds lost: %+v complete=%t err=%v", got, complete, err)
+			}
+		})
+	}
+}
+
+func TestCollectUsageRetainsValidCountersOnOverflow(t *testing.T) {
+	for _, source := range []string{"response", "helper", "stdout maximum", "snapshot maximum"} {
+		t.Run(source, func(t *testing.T) {
+			home := t.TempDir()
+			known := usage.Tokens{Input: math.MaxInt64 - 1, Output: 1}
+			events := []string{usageEvent("task_started", "turn"), usageRecord("root", "turn", "response", known.Input, 0, known.Output)}
+			var fallback *usage.Tokens
+			switch source {
+			case "response":
+				events = append(events, usageRecord("root", "turn", "response-2", 2, 0, 0))
+			case "helper":
+				writeUsageRollout(t, home, "child", "root", usageEvent("task_started", "child-turn"), usageRecord("child", "child-turn", "child-response", 2, 0, 0), usageEvent("task_complete", "child-turn"))
+			case "stdout maximum":
+				fallback = &usage.Tokens{Input: 1, Output: math.MaxInt64 - 1}
+			case "snapshot maximum":
+				events = append(events, usageSnapshot(18, 1, 0, math.MaxInt64-1))
+			}
+			events = append(events, usageEvent("task_complete", "turn"))
+			writeUsageRollout(t, home, "root", "", events...)
+			got, complete, err := collectUsage(context.Background(), home, "root", time.Now(), fallback, nil)
+			if got != known || !got.Valid() || complete || err != nil {
+				t.Fatalf("overflow discarded valid counters: %+v complete=%t err=%v", got, complete, err)
+			}
+		})
+	}
+}
+
+func TestInterruptedHelperReasonDoesNotProveCompletion(t *testing.T) {
+	path := writeUsageRollout(t, t.TempDir(), "child", "root", usageEvent("task_started", "turn"), usageRecord("child", "turn", "response", 20, 0, 2), `{"ordinal":21,"type":"event_msg","payload":{"type":"turn_aborted","turn_id":"turn","reason":"interrupted"}}`)
+	start := int64(9)
+	budget := int64(maxUsageScanBytes)
+	tokens, complete, _, err := readRolloutUsage(context.Background(), rolloutMeta{ID: "child", path: path, HistoryStart: &start}, "root", &budget)
+	if tokens != (usage.Tokens{Input: 20, Output: 2}) || complete || err == nil || !strings.Contains(err.Error(), "helper agent work did not complete") {
+		t.Fatalf("interruption reason accepted as completed work: %+v complete=%t err=%v", tokens, complete, err)
+	}
 }

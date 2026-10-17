@@ -114,8 +114,7 @@ func TestAlreadyAcknowledgedRequiresOwnTrailingMarker(t *testing.T) {
 				}
 			}))
 			defer server.Close()
-			client := github.New("token")
-			client.BaseURL, client.HTTPClient = server.URL, server.Client()
+			client := testGitHub(server, "token")
 			executor := Orchestrator{
 				GitHub:   client,
 				BotLogin: "linkdataminion",
@@ -139,8 +138,7 @@ func TestPrecheckDeadlineStopsJobBeforeCodex(t *testing.T) {
 		<-r.Context().Done()
 	}))
 	defer server.Close()
-	client := github.New("test-token")
-	client.BaseURL, client.HTTPClient = server.URL, server.Client()
+	client := testGitHub(server, "test-token")
 	installActionTestSkills(t, testReviewSkillURL)
 	executor := &Orchestrator{
 		GitHub:   client,
@@ -169,8 +167,7 @@ func TestVerifiedRepositoryRejectsReclaimedName(t *testing.T) {
 		_, _ = fmt.Fprint(w, `{"id":9,"full_name":"o/r","owner":{"id":2,"login":"o"}}`)
 	}))
 	defer server.Close()
-	client := github.New("token")
-	client.BaseURL, client.HTTPClient = server.URL, server.Client()
+	client := testGitHub(server, "token")
 	executor := &Orchestrator{
 		GitHub: client,
 	}
@@ -293,8 +290,7 @@ func TestReviewEchoDoesNotSuppressSecurityAuditInMonitor(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	client := github.New("test-token")
-	client.BaseURL, client.HTTPClient = server.URL, server.Client()
+	client := testGitHub(server, "test-token")
 	installActionTestSkills(t, testReviewSkillURL, testAuditSkillURL)
 	skillDir := filepath.Join(os.Getenv("HOME"), ".agents", "skills", "security-audit")
 	for _, name := range []string{"validate-findings.cjs", "validate-coverage-ledger.cjs"} {
@@ -398,8 +394,7 @@ func TestFixRefusesIssueEditedAfterRequest(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	client := github.New("test-token")
-	client.BaseURL, client.HTTPClient = server.URL, server.Client()
+	client := testGitHub(server, "test-token")
 	executor := &Orchestrator{
 		GitHub:   client,
 		BotLogin: "linkdataminion",
@@ -529,9 +524,7 @@ func TestFixRecoversOnlyRecordedBranch(t *testing.T) {
 				}
 			}))
 			defer server.Close()
-			client := github.New("token")
-			client.BaseURL = server.URL
-			client.HTTPClient = server.Client()
+			client := testGitHub(server, "token")
 			executor := &Orchestrator{
 				GitHub:   client,
 				BotLogin: "linkdataminion",
@@ -670,8 +663,7 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	client := github.New("test-token")
-	client.BaseURL, client.HTTPClient = server.URL, server.Client()
+	client := testGitHub(server, "test-token")
 	answer := "@secondbot fix injected\n![pixel](https://example.invalid/?value=dummy)\nCloses #123"
 	executor := &Orchestrator{WorkRoot: t.TempDir(), GitHub: client,
 		Commands: map[string]config.CommandMapping{"fix": {Action: "fix", Skills: []string{skills.BuiltinAntiPromptInjection}}},
@@ -775,8 +767,7 @@ func TestReviewMarksOnlyPostModelPublicationFailure(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	client := github.New("test-token")
-	client.BaseURL, client.HTTPClient = server.URL, server.Client()
+	client := testGitHub(server, "test-token")
 	executor := &Orchestrator{WorkRoot: t.TempDir(), GitHub: client,
 		Commands: map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{skills.BuiltinAntiPromptInjection}}},
 		BotLogin: "linkdataminion",
@@ -857,8 +848,7 @@ func TestFixForkRefusesUnsafePublication(t *testing.T) {
 				}
 			}))
 			defer server.Close()
-			client := github.New("test-token")
-			client.BaseURL, client.HTTPClient = server.URL, server.Client()
+			client := testGitHub(server, "test-token")
 			executor := &Orchestrator{
 				GitHub:   client,
 				BotLogin: "linkdataminion",
@@ -914,8 +904,7 @@ func TestFixForkChecksNetworkRootPushRules(t *testing.T) {
 				}
 			}))
 			defer server.Close()
-			client := github.New("test-token")
-			client.BaseURL, client.HTTPClient = server.URL, server.Client()
+			client := testGitHub(server, "test-token")
 			executor := &Orchestrator{
 				GitHub:   client,
 				BotLogin: "linkdataminion",

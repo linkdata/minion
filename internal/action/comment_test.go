@@ -59,8 +59,7 @@ func TestCommentCommandReportsIssueAndPullRequest(t *testing.T) {
 				}
 			}))
 			defer server.Close()
-			client := github.New("test-token")
-			client.BaseURL, client.HTTPClient = server.URL, server.Client()
+			client := testGitHub(server, "test-token")
 			job := monitor.Job{
 				Repository:  config.Repository{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"audit"}},
 				SubjectType: subject, Number: 7, ID: strings.Repeat("a", 64),

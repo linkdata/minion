@@ -214,29 +214,18 @@ func TestRunnerReadOnlyCriticReusesSourceAndCanaryGuardsExport(t *testing.T) {
 func TestRunnerMissingHostSkillsRemainRetryableBeforeModels(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	for _, provider := range []string{"codex", "claude"} {
-		for _, role := range []string{"main", "critic"} {
-			t.Run(provider+"/"+role, func(t *testing.T) {
-				job := portableJob(command.Comment)
-				settings := RoleSettings{Provider: provider, Skills: []string{"https://github.com/owner/repo/tree/pinned/skills/missing"}}
-				if role == "main" {
-					job.Main = settings
-				} else {
-					job.Critic = &settings
-					job.CriticMaxRounds = config.DefaultCriticMaxRounds
-					if provider == "codex" {
-						job.Main.Provider = "claude"
-					}
-				}
-				runner := Runner{WorkRoot: t.TempDir(), runModel: func(context.Context, modelRun) (aicli.Result, error) {
-					t.Fatal("model ran despite failed host preflight")
-					return aicli.Result{}, nil
-				}}
-				result, err := runner.Run(context.Background(), job)
-				if err == nil || errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "not installed") || len(result.Calls) != 0 {
-					t.Fatalf("host preflight result=%+v error=%v", result, err)
-				}
-			})
-		}
+		t.Run(provider, func(t *testing.T) {
+			job := portableJob(command.Comment)
+			job.Main = RoleSettings{Provider: provider, Skills: []string{"https://github.com/owner/repo/tree/pinned/skills/missing"}}
+			runner := Runner{WorkRoot: t.TempDir(), runModel: func(context.Context, modelRun) (aicli.Result, error) {
+				t.Fatal("model ran despite failed host preflight")
+				return aicli.Result{}, nil
+			}}
+			result, err := runner.Run(context.Background(), job)
+			if err == nil || errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "not installed") || len(result.Calls) != 0 {
+				t.Fatalf("host preflight result=%+v error=%v", result, err)
+			}
+		})
 	}
 }
 

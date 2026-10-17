@@ -181,35 +181,26 @@ func supportedVersion(version string) bool {
 	return true
 }
 
-type probeOutput struct {
-	data   bytes.Buffer
-	cancel context.CancelFunc
-}
-
-func (b *probeOutput) Write(p []byte) (int, error) {
-	if len(p) > maxEventBytes-b.data.Len() {
-		b.cancel()
-		return 0, aicli.ErrOutputLimit
-	}
-	return b.data.Write(p)
-}
-
 func probe(ctx context.Context, binary string, args []string, dir string, env []string, input string) ([]byte, error) {
-	ctx, cancel := context.WithCancel(ctx)
+	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	// #nosec G204 -- Callers pass trusted installed executables and fixed argument shapes without a shell.
-	cmd := exec.CommandContext(ctx, binary, args...)
+	cmd := exec.CommandContext(runCtx, binary, args...)
 	cmd.Dir, cmd.Env, cmd.Stdin = dir, env, strings.NewReader(input)
 	cmd.WaitDelay = 2 * time.Second
 	processgroup.Configure(cmd)
-	output := probeOutput{cancel: cancel}
-	diagnostics := bounded.Tail{Limit: maxDiagnosticBytes}
+	output := bounded.Buffer{Limit: maxEventBytes, Cancel: cancel}
+	diagnostics := bounded.Tail{Limit: bounded.DiagnosticBytes}
 	cmd.Stdout, cmd.Stderr = &output, &diagnostics
-	if err := cmd.Run(); err != nil {
+	err := cmd.Run()
+	if output.Exceeded {
+		return nil, errors.Join(aicli.ErrOutputLimit, ctx.Err(), err)
+	}
+	if err != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		return nil, fmt.Errorf("%w: %s", err, strings.TrimSpace(diagnostics.String()))
+		return nil, fmt.Errorf("%w: %q", err, strings.TrimSpace(diagnostics.String()))
 	}
-	return output.data.Bytes(), nil
+	return output.Bytes(), nil
 }

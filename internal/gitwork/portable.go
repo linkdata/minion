@@ -177,9 +177,9 @@ func readBatchBlobs(data []byte, entries []sourceEntry) ([]workspace.File, error
 }
 
 // Snapshot exports pinned source and optional comparison/history data, never Git configuration.
-func (c *Checkout) Snapshot(ctx context.Context, history, pull bool) (s workspace.Snapshot, err error) {
+func (c *Checkout) Snapshot(ctx context.Context, history bool) (s workspace.Snapshot, err error) {
 	s.HistoryRequested = history
-	if s.Head, err = c.Head(ctx); err != nil {
+	if s.Head, err = c.verifiedHead(ctx); err != nil {
 		return s, err
 	}
 	entries, err := c.sourceTree(ctx, s.Head)
@@ -188,10 +188,7 @@ func (c *Checkout) Snapshot(ctx context.Context, history, pull bool) (s workspac
 	}
 	var baseEntries []sourceEntry
 	var selected map[string]bool
-	if pull {
-		if s.Base, err = runGit(ctx, c.path, "rev-parse", "--verify", "refs/remotes/minion/base^{commit}"); err != nil {
-			return s, err
-		}
+	if s.Base = c.comparisonBase; s.Base != "" {
 		if s.MergeBase, err = runGit(ctx, c.path, "merge-base", s.Base, s.Head); err != nil {
 			var exit *exec.ExitError
 			if ctx.Err() == nil && errors.As(err, &exit) && exit.ExitCode() == 1 {
@@ -242,8 +239,8 @@ func (c *Checkout) Snapshot(ctx context.Context, history, pull bool) (s workspac
 	if total > workspace.MaxBytes {
 		return s, fmt.Errorf("%w: combined source exceeds byte limit", ErrCheckoutTooLarge)
 	}
-	if pull {
-		if s.Diff, s.DiffIncomplete, err = c.boundedGit(ctx, nil, workspace.MaxContextBytes, true, "diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--no-color", s.MergeBase, s.Head, "--"); err != nil {
+	if s.Base != "" {
+		if s.Diff, s.DiffIncomplete, err = c.boundedGit(ctx, nil, workspace.MaxContextBytes, true, "-c", "core.quotePath=false", "diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--no-color", s.MergeBase, s.Head, "--"); err != nil {
 			return s, err
 		}
 		if s.DiffIncomplete {

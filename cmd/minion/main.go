@@ -71,12 +71,13 @@ func run() int {
 	}
 	logCommandSkills(cfg, logger)
 	checkWorkRoot := func() error {
-		if err := workroot.Check(cfg.WorkRoot, cfg.StatePath, cfg.WorkRootMaxBytes); err != nil {
-			return err
-		}
-		return checkWorkRootIsolation(cfg)
+		return workroot.Check(cfg.WorkRoot, cfg.StatePath, cfg.WorkRootMaxBytes)
 	}
 	if err := checkWorkRoot(); err != nil {
+		logger.Printf("work root: %v", err)
+		return 1
+	}
+	if err := checkWorkRootIsolation(cfg); err != nil {
 		logger.Printf("work root: %v", err)
 		return 1
 	}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -20,7 +21,7 @@ type Tokens struct {
 }
 
 func (t Tokens) Valid() bool {
-	return t.Input >= 0 && t.CachedInput >= 0 && t.CachedInput <= t.Input && t.Output >= 0
+	return t.Input >= 0 && t.CachedInput >= 0 && t.CachedInput <= t.Input && t.Output >= 0 && t.Output <= math.MaxInt64-t.Input
 }
 
 // Cached input is a subset of input tokens.
@@ -30,6 +31,25 @@ func (t *Tokens) Add(other Tokens) {
 	t.Input += other.Input
 	t.CachedInput += other.CachedInput
 	t.Output += other.Output
+}
+
+// AddChecked sums normalized counters, retaining the receiver on overflow.
+func (t Tokens) AddChecked(other Tokens) (Tokens, bool) {
+	if !t.Valid() || !other.Valid() || other.Total() > math.MaxInt64-t.Total() {
+		return t, false
+	}
+	t.Add(other)
+	return t, true
+}
+
+// Sub returns raw component differences; callers validate the resulting delta.
+func (t Tokens) Sub(other Tokens) Tokens {
+	return Tokens{Input: t.Input - other.Input, CachedInput: t.CachedInput - other.CachedInput, Output: t.Output - other.Output}
+}
+
+// Max returns component maxima; callers validate that the combined total fits.
+func (t Tokens) Max(other Tokens) Tokens {
+	return Tokens{Input: max(t.Input, other.Input), CachedInput: max(t.CachedInput, other.CachedInput), Output: max(t.Output, other.Output)}
 }
 
 // Record contains the usage reported by all model calls in one action attempt.

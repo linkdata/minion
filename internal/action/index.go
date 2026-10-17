@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -24,7 +25,7 @@ import (
 )
 
 // fixIndex keeps Git metadata outside every model grant. It has no remotes,
-// repository configuration, credential environment, hooks or checkout filters.
+// source repository configuration, credential environment, hooks or checkout filters.
 type fixIndex struct {
 	dir, source, binary, baseline string
 	tracked                       map[string]int64
@@ -92,6 +93,7 @@ func (index *fixIndex) changes(ctx context.Context) ([]workspace.Change, error) 
 			total += info.Size()
 		}
 	}
+	// Rebuild baseline entries without cached worktree stats before each capture.
 	if _, err := index.run(ctx, 1024, nil, "read-tree", index.baseline); err != nil {
 		return nil, err
 	}
@@ -131,7 +133,7 @@ func (index *fixIndex) changes(ctx context.Context) ([]workspace.Change, error) 
 	if _, err := index.run(ctx, 1024, nil, "add", "--all", "--", ".", ":(exclude,icase,glob)**/.git", ":(exclude,icase,glob)**/.git/**"); err != nil {
 		return nil, err
 	}
-	raw, err := index.run(ctx, (workspace.MaxChanges+1)*(workspace.MaxPathBytes+128), nil, "diff", "--cached", "--raw", "-z", "--no-abbrev", "--no-renames", "--no-ext-diff", "--no-textconv", index.baseline, "--")
+	raw, err := index.run(ctx, gitwork.MaxChangedPathListBytes, nil, "diff", "--cached", "--raw", "-z", "--no-abbrev", "--no-renames", "--no-ext-diff", "--no-textconv", index.baseline, "--")
 	if err != nil {
 		return nil, err
 	}
@@ -165,13 +167,18 @@ func (index *fixIndex) checkControlFiles(ctx context.Context) error {
 			trackedDirs[parent] = true
 		}
 	}
-	dirs, entries := []string{"."}, 0
+	type directory struct {
+		name    string
+		ignored bool
+	}
+	dirs, entries := []directory{{name: "."}}, 0
 	for len(dirs) != 0 {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		dir := dirs[len(dirs)-1]
+		current := dirs[len(dirs)-1]
 		dirs = dirs[:len(dirs)-1]
+		dir := current.name
 		absolute := filepath.Join(index.source, filepath.FromSlash(dir))
 		for _, control := range []string{".gitignore", ".gitattributes"} {
 			name := path.Join(dir, control)
@@ -185,7 +192,7 @@ func (index *fixIndex) checkControlFiles(ctx context.Context) error {
 			if !info.Mode().IsRegular() {
 				return fmt.Errorf("fix control file %q must be regular", name)
 			}
-			if _, tracked := index.tracked[name]; control == ".gitignore" && !tracked {
+			if _, tracked := index.tracked[name]; control == ".gitignore" && !tracked && !current.ignored {
 				input := []byte(":(top)" + name + "\x00")
 				ignored, err := index.run(ctx, len(input), input, "check-ignore", "--no-index", "-z", "--stdin")
 				if err != nil {
@@ -223,10 +230,6 @@ func (index *fixIndex) checkControlFiles(ctx context.Context) error {
 						continue
 					}
 					name := path.Join(dir, entry.Name())
-					if trackedDirs[name] {
-						dirs = append(dirs, name)
-						continue
-					}
 					candidates = append(candidates, name)
 					input = append(input, ":(top)"...)
 					input = append(input, name...)
@@ -243,8 +246,8 @@ func (index *fixIndex) checkControlFiles(ctx context.Context) error {
 						skip[strings.TrimPrefix(string(name), ":(top)")] = true
 					}
 					for _, name := range candidates {
-						if !skip[name] {
-							dirs = append(dirs, name)
+						if !skip[name] || trackedDirs[name] {
+							dirs = append(dirs, directory{name: name, ignored: skip[name]})
 						}
 					}
 				}
@@ -314,13 +317,15 @@ func (index *fixIndex) run(ctx context.Context, limit int, input []byte, args ..
 	cmd := exec.CommandContext(ctx, index.binary, append(gitArgs, args...)...)
 	processgroup.Configure(cmd)
 	cmd.Dir = index.dir
-	cmd.Env = []string{"PATH=" + gitwork.SafePath(os.Getenv("PATH")), "HOME=" + index.dir, "TMPDIR=" + index.dir, "LC_ALL=C",
-		"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_ATTR_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=/bin/false", "GIT_NO_REPLACE_OBJECTS=1"}
+	cmd.Env = append([]string{"PATH=" + gitwork.SafePath(os.Getenv("PATH")), "HOME=" + index.dir, "TMPDIR=" + index.dir}, gitwork.HardeningEnv()...)
 	cmd.WaitDelay = 2 * time.Second
-	output, diagnostic := bounded.Buffer{Limit: limit, Cancel: cancel}, bounded.Buffer{Limit: 8 << 10}
+	output, diagnostic := bounded.Buffer{Limit: limit, Cancel: cancel}, bounded.Buffer{Limit: bounded.DiagnosticBytes}
 	cmd.Stdout, cmd.Stderr, cmd.Stdin = &output, &diagnostic, bytes.NewReader(input)
 	err := cmd.Run()
 	if output.Exceeded {
+		if args[0] == "diff" && slices.Contains(args, "--binary") {
+			return nil, gitwork.ErrDiffTooLarge
+		}
 		return nil, fmt.Errorf("offline git %s output exceeds action limit", args[0])
 	}
 	if err != nil {

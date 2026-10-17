@@ -604,7 +604,7 @@ func TestSnapshotCombinedHeadAndBaseByteLimit(t *testing.T) {
 	}
 }
 
-func TestCollectionUsesOwnerExecutableBitLikeGit(t *testing.T) {
+func TestCollectionSeparatesGitModesAndReadOnlyPermissions(t *testing.T) {
 	for _, mode := range []os.FileMode{0644, 0654, 0645, 0744, 0755} {
 		t.Run(fmt.Sprintf("%o", mode), func(t *testing.T) {
 			root := privateRoot(t)
@@ -619,7 +619,7 @@ func TestCollectionUsesOwnerExecutableBitLikeGit(t *testing.T) {
 			if mode&0100 != 0 {
 				wantMode = Executable
 			}
-			if err := CheckUnchanged(context.Background(), root, base); (err == nil) != (wantMode == Regular) || (err != nil && !strings.Contains(err.Error(), "modified supplied source")) {
+			if err := CheckUnchanged(context.Background(), root, base); (err == nil) != (mode == 0644) || (err != nil && !strings.Contains(err.Error(), "modified supplied source")) {
 				t.Fatalf("mode-only validation=%v, want mode=%o", err, wantMode)
 			}
 			if err := os.WriteFile(filepath.Join(root, "file"), []byte("after"), mode); err != nil {

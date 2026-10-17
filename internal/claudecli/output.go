@@ -17,11 +17,10 @@ import (
 )
 
 const (
-	maxEventBytes      = 4 << 20
-	maxOutputBytes     = 64 << 20
-	maxEvents          = 100000
-	maxDiagnosticBytes = 8 << 10
-	maxResetTimestamp  = 253402300799 // 9999-12-31T23:59:59Z, the last RFC3339 year.
+	maxEventBytes     = 4 << 20
+	maxOutputBytes    = 64 << 20
+	maxEvents         = 100000
+	maxResetTimestamp = 253402300799 // 9999-12-31T23:59:59Z, the last RFC3339 year.
 )
 
 type eventUsage struct {
@@ -44,7 +43,7 @@ func (u eventUsage) tokens() (tokens usage.Tokens, valid bool) {
 		return
 	}
 	tokens = usage.Tokens{Input: *u.Input + *u.Created + *u.Cached, CachedInput: *u.Cached, Output: *u.Output}
-	valid = tokens.Output <= math.MaxInt64-tokens.Input
+	valid = tokens.Valid()
 	return
 }
 
@@ -52,6 +51,7 @@ type event struct {
 	Type              string            `json:"type"`
 	Subtype           string            `json:"subtype"`
 	ResultIndex       *int64            `json:"result_index"`
+	TerminalReason    json.RawMessage   `json:"terminal_reason"`
 	Tasks             json.RawMessage   `json:"tasks"`
 	IsError           bool              `json:"is_error"`
 	Result            string            `json:"result"`
@@ -62,6 +62,7 @@ type event struct {
 	Message           json.RawMessage   `json:"message"`
 	ParentToolUseID   json.RawMessage   `json:"parent_tool_use_id"`
 	Status            string            `json:"status"`
+	Ambient           bool              `json:"ambient"`
 	Summary           string            `json:"summary"`
 	APIError          string            `json:"api_error"`
 	APIErrorStatus    json.RawMessage   `json:"api_error_status"`
@@ -90,7 +91,7 @@ func (e event) tokens() (usage.Tokens, bool) {
 				valid = false
 				break
 			}
-			if total, ok = sumTokens(total, tokens); !ok {
+			if total, ok = total.AddChecked(tokens); !ok {
 				valid = false
 				break
 			}
@@ -117,7 +118,9 @@ type messageUsage struct {
 
 type jsonlOutput struct {
 	cancel              context.CancelFunc
-	line                []byte
+	lines               bounded.Lines
+	usageRejected       func()
+	stopped             bool
 	bytes               int64
 	events              int
 	err                 error
@@ -147,23 +150,12 @@ func (o *jsonlOutput) Write(p []byte) (int, error) {
 		return n, nil
 	}
 	o.bytes += int64(n)
-	for len(p) > 0 && o.err == nil {
-		end := bytes.IndexByte(p, '\n')
-		fragment := p
-		if end >= 0 {
-			fragment = p[:end]
-		}
-		if len(fragment) > maxEventBytes-len(o.line) {
+	if o.lines.Line == nil {
+		o.lines = bounded.Lines{Limit: maxEventBytes, Line: o.finishLine, Overflow: func() {
 			o.fail(fmt.Errorf("%w: JSONL event bytes", aicli.ErrOutputLimit))
-			break
-		}
-		o.line = append(o.line, fragment...)
-		if end < 0 {
-			break
-		}
-		o.finishLine()
-		p = p[end+1:]
+		}}
 	}
+	_, _ = o.lines.Write(p)
 	return n, nil
 }
 
@@ -179,9 +171,7 @@ func (o *jsonlOutput) fail(err error) {
 }
 
 func (o *jsonlOutput) finish() {
-	if o.err == nil && len(o.line) != 0 {
-		o.finishLine()
-	}
+	o.lines.Finish()
 	lower, valid := o.assistantLowerBound()
 	if o.aggregateGeneration == 0 || o.uncovered || !valid || lower != o.result.Tokens {
 		if valid {
@@ -207,10 +197,9 @@ func (o *jsonlOutput) finish() {
 	}
 }
 
-func (o *jsonlOutput) finishLine() {
-	line := bytes.TrimSpace(o.line)
-	if len(line) == 0 {
-		o.line = o.line[:0]
+func (o *jsonlOutput) finishLine(line []byte) {
+	line = bytes.TrimSpace(line)
+	if o.err != nil || len(line) == 0 {
 		return
 	}
 	o.events++
@@ -223,15 +212,14 @@ func (o *jsonlOutput) finishLine() {
 		o.fail(fmt.Errorf("invalid Claude JSONL event: %w", err))
 		return
 	}
-	o.line = o.line[:0]
 	if e.Type == "assistant" {
 		o.recordAssistantUsage(e.Message, bytes.Equal(bytes.TrimSpace(e.ParentToolUseID), []byte("null")))
 	}
-	if e.Type == "system" && e.Subtype == "task_notification" && e.Status == "stopped" &&
-		pressureStopSummary(e.Summary) {
-		o.recordPressureStop()
+	if e.Type == "system" && e.Subtype == "task_notification" && e.Status == "stopped" && !e.Ambient {
+		o.recordTaskStop(e.Summary)
 	}
 	if e.Type == "rate_limit_event" && e.RateLimitInfo.Status == "rejected" && !e.RateLimitInfo.IsUsingOverage && !e.RateLimitInfo.OverageInUse {
+		first := o.usageLimit == nil
 		o.usageLimit = errors.New("provider usage limit reached")
 		var reset int64
 		// Only a validated UTC timestamp may enter the service diagnostic.
@@ -239,6 +227,9 @@ func (o *jsonlOutput) finishLine() {
 			o.usageLimit = fmt.Errorf("provider usage limit reached; resets at %s", time.Unix(reset, 0).UTC().Format(time.RFC3339))
 		}
 		o.completed, o.result.Answer, o.result.UsageComplete = false, "", false
+		if first && o.usageRejected != nil {
+			o.usageRejected()
+		}
 	}
 	if e.Type == "system" && e.Subtype == "background_tasks_changed" {
 		var tasks []struct {
@@ -268,8 +259,9 @@ func (o *jsonlOutput) finishLine() {
 			return
 		}
 		content := bytes.TrimSpace(message.Content)
-		if e.IsSynthetic && pressureStopNotice(content) {
-			o.recordPressureStop()
+		var text string
+		if e.IsSynthetic && !e.Ambient && json.Unmarshal(content, &text) == nil {
+			o.recordTaskNotice(text)
 		}
 		if len(content) != 0 && content[0] == '[' {
 			var blocks []struct {
@@ -283,8 +275,8 @@ func (o *jsonlOutput) finishLine() {
 				return
 			}
 			for _, content := range blocks {
-				if e.IsSynthetic && content.Type == "text" && pressureStopText(content.Text) {
-					o.recordPressureStop()
+				if e.IsSynthetic && !e.Ambient && content.Type == "text" {
+					o.recordTaskNotice(content.Text)
 				}
 				if content.Type == "tool_result" && content.IsError {
 					if toolSandboxFailure(content.Content) {
@@ -311,7 +303,7 @@ func (o *jsonlOutput) finishLine() {
 	if covers(tokens, o.result.Tokens) {
 		o.result.Tokens = tokens
 	} else {
-		if lower := maxTokens(o.result.Tokens, tokens); lower.Output <= math.MaxInt64-lower.Input {
+		if lower := o.result.Tokens.Max(tokens); lower.Valid() {
 			o.result.Tokens = lower
 		}
 		complete = false
@@ -322,21 +314,21 @@ func (o *jsonlOutput) finishLine() {
 		o.rootTokens, o.uncovered = usage.Tokens{}, false
 	}
 	o.result.UsageComplete = complete && o.usageLimit == nil && o.taskFailure == nil
+	if failure := errors.Join(o.usageLimit, o.taskFailure); failure != nil {
+		o.fail(failure)
+		return
+	}
 	if e.IsError || e.Subtype != "success" {
-		if failure := errors.Join(o.usageLimit, o.taskFailure); failure != nil {
-			o.fail(failure)
-		} else {
-			reason := fmt.Sprintf("result failed: %q", bounded.Text(e.Subtype, maxDiagnosticBytes))
-			switch e.APIError {
-			case "usage_limit_reached", "model_requires_usage_credits", "long_context_credits_required", "provider_credentials":
-				reason += "; API error=" + e.APIError
-			}
-			var status int
-			if json.Unmarshal(e.APIErrorStatus, &status) == nil && status >= 100 && status <= 599 {
-				reason += fmt.Sprintf("; HTTP status=%d", status)
-			}
-			o.fail(errors.New(reason))
+		reason := fmt.Sprintf("result failed: %q", bounded.Text(e.Subtype, bounded.DiagnosticBytes))
+		switch e.APIError {
+		case "usage_limit_reached", "model_requires_usage_credits", "long_context_credits_required", "provider_credentials":
+			reason += "; API error=" + e.APIError
 		}
+		var status int
+		if json.Unmarshal(e.APIErrorStatus, &status) == nil && status >= 100 && status <= 599 {
+			reason += fmt.Sprintf("; HTTP status=%d", status)
+		}
+		o.fail(errors.New(reason))
 		return
 	}
 	if len(e.PermissionDenials) != 0 {
@@ -353,12 +345,15 @@ func (o *jsonlOutput) finishLine() {
 	}
 	o.indexed = e.ResultIndex != nil
 	o.results++
-	if o.usageLimit != nil || o.taskFailure != nil {
-		o.fail(errors.Join(o.usageLimit, o.taskFailure))
-		return
+	if len(e.TerminalReason) != 0 {
+		var reason string
+		if json.Unmarshal(e.TerminalReason, &reason) != nil || reason != "completed" {
+			o.completed, o.result.Answer, o.result.UsageComplete = false, "", false
+			return
+		}
 	}
 	// Print mode can emit provisional turn results while background work runs.
-	if o.pending != 0 {
+	if o.pending != 0 || o.stopped {
 		return
 	}
 	if o.structured {
@@ -369,32 +364,35 @@ func (o *jsonlOutput) finishLine() {
 	o.completed = true
 }
 
-func (o *jsonlOutput) recordPressureStop() {
-	// Keep parsing cumulative counters; later results cannot erase this stop.
-	o.taskFailure = errors.New("background work stopped under provider memory pressure")
-	o.completed, o.result.Answer, o.result.UsageComplete = false, "", false
+func (o *jsonlOutput) recordTaskStop(summary string) {
+	// A new root response must assess an interrupted task before a later
+	// successful result can certify completion. Ambient cleanup is ignored.
+	o.stopped = true
+	o.completed, o.result.Answer = false, ""
+	if pressureStopSummary(summary) {
+		// Keep parsing cumulative counters; later results cannot erase this stop.
+		o.taskFailure = errors.New("background work stopped under provider memory pressure")
+		o.result.UsageComplete = false
+	}
 }
 
 func pressureStopSummary(summary string) bool {
 	return strings.HasPrefix(summary, `Background command "`) && strings.HasSuffix(summary, `" was stopped because the system is running low on memory`)
 }
 
-func pressureStopNotice(raw json.RawMessage) bool {
-	var text string
-	return json.Unmarshal(raw, &text) == nil && pressureStopText(text)
-}
-
-func pressureStopText(text string) bool {
+func (o *jsonlOutput) recordTaskNotice(text string) {
 	text = strings.TrimSpace(text)
 	if !strings.HasPrefix(text, "<task-notification>") {
-		return false
+		return
 	}
 	var notice struct {
 		XMLName xml.Name `xml:"task-notification"`
 		Status  string   `xml:"status"`
 		Summary string   `xml:"summary"`
 	}
-	return xml.Unmarshal([]byte(text), &notice) == nil && (notice.Status == "killed" || notice.Status == "stopped") && pressureStopSummary(notice.Summary)
+	if xml.Unmarshal([]byte(text), &notice) == nil && (notice.Status == "killed" || notice.Status == "stopped") {
+		o.recordTaskStop(notice.Summary)
+	}
 }
 
 func (o *jsonlOutput) recordAssistantUsage(raw json.RawMessage, root bool) {
@@ -415,6 +413,9 @@ func (o *jsonlOutput) recordAssistantUsage(raw json.RawMessage, root bool) {
 		// an already covered message must not become a new billable call.
 		o.assistantUsage[message.ID] = old
 		o.uncovered = o.aggregateGeneration != 0
+		if root {
+			o.stopped = false
+		}
 		if root && o.results != 0 {
 			// A new root response starts another turn even if no background-task
 			// notification exposed it. The preceding answer is provisional.
@@ -429,16 +430,16 @@ func (o *jsonlOutput) recordAssistantUsage(raw json.RawMessage, root bool) {
 	if !valid {
 		return
 	}
-	tokens = maxTokens(old.tokens, tokens)
-	if !tokens.Valid() || tokens.Output > math.MaxInt64-tokens.Input {
+	tokens = old.tokens.Max(tokens)
+	if !tokens.Valid() {
 		return
 	}
-	total, valid := sumTokens(subtractTokens(o.assistantTokens, old.tokens), tokens)
+	total, valid := o.assistantTokens.Sub(old.tokens).AddChecked(tokens)
 	if !valid {
 		return
 	}
 	if old.root && old.generation == o.aggregateGeneration {
-		rootTotal, valid := sumTokens(subtractTokens(o.rootTokens, old.tokens), tokens)
+		rootTotal, valid := o.rootTokens.Sub(old.tokens).AddChecked(tokens)
 		if !valid {
 			return
 		}
@@ -450,38 +451,20 @@ func (o *jsonlOutput) recordAssistantUsage(raw json.RawMessage, root bool) {
 }
 
 func (o *jsonlOutput) assistantLowerBound() (usage.Tokens, bool) {
-	tokens := maxTokens(o.result.Tokens, o.assistantTokens)
+	tokens := o.result.Tokens.Max(o.assistantTokens)
 	if o.aggregateGeneration != 0 {
 		// Root responses follow the preceding result in the native stream.
 		// Unknown/delegate messages may arrive late and are never added to it.
-		root, valid := sumTokens(o.aggregateTokens, o.rootTokens)
+		root, valid := o.aggregateTokens.AddChecked(o.rootTokens)
 		if !valid {
 			return usage.Tokens{}, false
 		}
-		tokens = maxTokens(tokens, root)
+		tokens = tokens.Max(root)
 	}
-	return tokens, tokens.Valid() && tokens.Output <= math.MaxInt64-tokens.Input
+	return tokens, tokens.Valid()
 }
 
-func maxTokens(a, b usage.Tokens) usage.Tokens {
-	return usage.Tokens{Input: max(a.Input, b.Input), CachedInput: max(a.CachedInput, b.CachedInput), Output: max(a.Output, b.Output)}
-}
-
-func covers(a, b usage.Tokens) bool { return maxTokens(a, b) == a }
-
-func subtractTokens(a, b usage.Tokens) usage.Tokens {
-	return usage.Tokens{Input: a.Input - b.Input, CachedInput: a.CachedInput - b.CachedInput, Output: a.Output - b.Output}
-}
-
-// sumTokens adds normalized vectors; raw cache normalization and component
-// maxima have different validity rules and remain checked at their boundaries.
-func sumTokens(a, b usage.Tokens) (usage.Tokens, bool) {
-	if !a.Valid() || !b.Valid() || b.Input > math.MaxInt64-a.Input || b.Output > math.MaxInt64-a.Output {
-		return usage.Tokens{}, false
-	}
-	a.Add(b)
-	return a, a.Output <= math.MaxInt64-a.Input
-}
+func covers(a, b usage.Tokens) bool { return a.Max(b) == a }
 
 func toolSandboxFailure(content json.RawMessage) bool {
 	var text string

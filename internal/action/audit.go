@@ -92,7 +92,8 @@ func validateAuditFiles(ctx context.Context, files []workspace.File, validationR
 	if _, err := validateAuditMetadata(metadataBytes, reportBytes, repo, target, head); err != nil {
 		return "", err
 	}
-	for name, data := range map[string][]byte{"findings.json": findingsBytes, "coverage-ledger.json": ledgerBytes} {
+	inputs := map[string][]byte{"findings.json": findingsBytes, "coverage-ledger.json": ledgerBytes}
+	for name, data := range inputs {
 		if len(data) == 0 {
 			return "", fmt.Errorf("audit %s is missing or empty", name)
 		}
@@ -107,7 +108,7 @@ func validateAuditFiles(ctx context.Context, files []workspace.File, validationR
 			resultErr = errors.Join(resultErr, fmt.Errorf("remove audit validation directory: %w", err))
 		}
 	}()
-	for name, data := range map[string][]byte{"findings.json": findingsBytes, "coverage-ledger.json": ledgerBytes} {
+	for name, data := range inputs {
 		if err := os.WriteFile(filepath.Join(validationDir, name), data, 0600); err != nil {
 			return "", fmt.Errorf("copy audit %s for validation: %w", name, err)
 		}
@@ -125,7 +126,7 @@ func validateAuditFiles(ctx context.Context, files []workspace.File, validationR
 		if err != nil {
 			return "", err
 		}
-		stderr := bounded.Tail{Limit: 8 << 10}
+		stderr := bounded.Tail{Limit: bounded.DiagnosticBytes}
 		cmd.Stderr = &stderr
 		if err := cmd.Run(); err != nil {
 			return "", fmt.Errorf("audit %s failed: %w: %q", validator.script, err, stderr.String())

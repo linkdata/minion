@@ -21,11 +21,10 @@ func TestRunInvokesCodexAndReturnsFinalMessage(t *testing.T) {
 	for _, tt := range []struct {
 		name     string
 		writable bool
-		parent   string
 		access   string
 	}{
-		{name: "review", parent: ":read-only", access: "read"},
-		{name: "fix", writable: true, parent: ":workspace", access: "write"},
+		{name: "review", access: "read"},
+		{name: "fix", writable: true, access: "write"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -65,7 +64,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"test"}' '{"type":"item.comp
 				"--disable", "apps", "--disable", "browser_use", "--disable", "browser_use_external",
 				"--disable", "browser_use_full_cdp_access", "--disable", "computer_use",
 				"--disable", "image_generation", "--disable", "plugins", "--disable", "remote_plugin",
-				"--disable", "shell_snapshot", "--disable", "skill_mcp_dependency_install",
+				"--disable", "shell_snapshot", "--disable", "skill_mcp_dependency_install", "--disable", "memories",
 				"-c", "project_doc_max_bytes=0",
 				"-c", `project_root_markers=[".minion-codex-root"]`,
 				"-c", "skills.include_instructions=false",
@@ -74,8 +73,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"test"}' '{"type":"item.comp
 				"-c", "shell_environment_policy.ignore_default_excludes=false",
 				"-c", `shell_environment_policy.filters={"PATH"="include","HOME"="include","TMPDIR"="include","TMP"="include","TEMP"="include","GOCACHE"="include","LANG"="include","LC_ALL"="include","LC_CTYPE"="include","TERM"="include"}`,
 				"-c", `default_permissions="minion"`,
-				"-c", fmt.Sprintf("permissions.minion.extends=%q", tt.parent),
-				"-c", fmt.Sprintf(`permissions.minion.filesystem={":root"="deny",":minimal"="read",":tmpdir"="write",":slash_tmp"="deny",%s="deny",%s=%q,%s="read",%s="read",%s="read",%s="read",%s="read"}`, strconv.Quote(filepath.Dir(dir)), strconv.Quote(dir), tt.access, strconv.Quote(filepath.Join(dir, ".git")), strconv.Quote(filepath.Join(dir, ".agents")), strconv.Quote(filepath.Join(dir, ".codex")), strconv.Quote(filepath.Join(dir, ".claude")), strconv.Quote(fakeCodex)),
+				"-c", fmt.Sprintf(`permissions.minion.filesystem={":root"="deny",":minimal"="read",":tmpdir"="write",%s=%q,%s="read",%s="read",%s="read",%s="read",%s="read"}`, strconv.Quote(dir), tt.access, strconv.Quote(filepath.Join(dir, ".git")), strconv.Quote(filepath.Join(dir, ".agents")), strconv.Quote(filepath.Join(dir, ".codex")), strconv.Quote(filepath.Join(dir, ".claude")), strconv.Quote(fakeCodex)),
 				"-c", "permissions.minion.network.enabled=false",
 				"--", "-",
 			}

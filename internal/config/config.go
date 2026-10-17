@@ -14,6 +14,7 @@ import (
 
 	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/workroot"
+	"github.com/linkdata/minion/internal/workspace"
 )
 
 var (
@@ -317,8 +318,8 @@ func (c *Config) Validate(configDir string) error {
 	if c.MaxGitHubContextBytes == 0 {
 		c.MaxGitHubContextBytes = DefaultMaxGitHubContextBytes
 	}
-	if c.MaxGitHubContextBytes < 0 {
-		return fmt.Errorf("max_github_context_bytes must be positive")
+	if c.MaxGitHubContextBytes < 0 || c.MaxGitHubContextBytes > workspace.MaxBytes {
+		return fmt.Errorf("max_github_context_bytes must be between 1 and %d", workspace.MaxBytes)
 	}
 	if c.StatePath == "" {
 		c.StatePath = "var/state.json"

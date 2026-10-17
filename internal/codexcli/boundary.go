@@ -35,6 +35,10 @@ func instructionBoundaryConfig() []string {
 func ValidateInstructionBoundary(ctx context.Context) (resultErr error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
+	binary, err := ExecutablePath()
+	if err != nil {
+		return err
+	}
 	root, err := os.MkdirTemp("", "minion-codex-boundary-")
 	if err != nil {
 		return err
@@ -79,7 +83,8 @@ func ValidateInstructionBoundary(ctx context.Context) (resultErr error) {
 		args := append([]string{"debug", "prompt-input"}, check.config...)
 		args = append(args, probePrompt)
 		// #nosec G204 -- Codex receives only fixed config flags and an inert prompt.
-		cmd := exec.CommandContext(ctx, "codex", args...)
+		cmd := exec.CommandContext(ctx, binary, args...)
+		cmd.Args[0] = "codex"
 		cmd.Dir = check.dir
 		cmd.Env = childEnvironment([]string{"PATH=" + os.Getenv("PATH"), "HOME=" + probeHome, "CODEX_HOME=" + probeHome}, runtimeDir, runtimeDir, false)
 		cmd.WaitDelay = 2 * time.Second

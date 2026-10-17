@@ -72,7 +72,7 @@ func TestAllActionPromptsDeclareSharedDeadline(t *testing.T) {
 }
 
 func TestReviewCommentaryIsExcludedFromSourceChanges(t *testing.T) {
-	for _, prompt := range []string{mainPrompt("task"), criticPrompt("task", "answer", "", "", "", "")} {
+	for _, prompt := range []string{mainPrompt("task"), criticPrompt(reviewFull, "task", "answer", "", "", "", "")} {
 		if !strings.Contains(prompt, "source changes") {
 			t.Fatal("review commentary restriction omits source changes")
 		}

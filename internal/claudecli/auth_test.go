@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/linkdata/minion/internal/config"
+	workspacepath "github.com/linkdata/minion/internal/workspace"
 )
 
 const dummyAPIKey = "minion-dummy-config-api-key"
@@ -128,7 +129,7 @@ esac
 					t.Fatal("missing explicit configured-key helper")
 				}
 				for _, grant := range append(policy.Sandbox.Filesystem.Read, policy.Sandbox.Filesystem.Write...) {
-					if within(grant, dirs[0]) {
+					if workspacepath.Within(grant, dirs[0]) {
 						t.Fatal("credential helper is exposed to sandbox tools")
 					}
 				}

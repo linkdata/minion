@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -21,7 +22,7 @@ import (
 const (
 	maxUsageWalkEntries  = 100000
 	maxUsageFiles        = 1024
-	maxUsageAgents       = 257
+	maxUsageAgents       = maxCodexChildren + 1
 	maxUsageHeaderBytes  = 64 << 10
 	maxUsageRolloutBytes = 128 << 20
 	maxUsageScanBytes    = 512 << 20
@@ -135,29 +136,27 @@ func collectUsage(ctx context.Context, home, rootID string, started time.Time, f
 			}
 		}
 	}
-	expected := map[string]bool{}
+	var childError error
+	if len(selected) > maxUsageAgents {
+		complete = false
+		childError = fmt.Errorf("%w: Codex usage agent count exceeded the limit", aicli.ErrOutputLimit)
+	}
 	for _, id := range expectedChildren {
-		expected[id] = true
-		if len(expected) > maxUsageAgents {
-			break
-		}
-	}
-	if len(selected) > maxUsageAgents || len(expected) > maxUsageAgents {
-		limitError := fmt.Errorf("%w: Codex usage agent count exceeded the limit", aicli.ErrOutputLimit)
-		if fallback != nil {
-			return *fallback, false, limitError
-		}
-		return total, false, limitError
-	}
-	for id := range expected {
 		if !selected[id] {
 			complete = false
 		}
 	}
+	ids := make([]string, 0, len(selected)-1)
+	for id := range selected {
+		if id != rootID {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	ids = append([]string{rootID}, ids[:min(len(ids), maxCodexChildren)]...)
 	budget := int64(maxUsageScanBytes)
 	rootCounted := false
-	var childError error
-	for id := range selected {
+	for _, id := range ids {
 		if ctx.Err() != nil {
 			complete = false
 			break
@@ -182,12 +181,13 @@ func collectUsage(ctx context.Context, home, rootID string, started time.Time, f
 		}
 		if id == rootID && fallback != nil && tokens != *fallback {
 			ok = false
-			if fallback.Total() > tokens.Total() {
-				tokens = *fallback
+			if lower := tokens.Max(*fallback); lower.Valid() {
+				tokens = lower
 			}
 		}
-		total.Add(tokens)
-		complete = complete && ok
+		var added bool
+		total, added = total.AddChecked(tokens)
+		complete = complete && ok && added
 	}
 	if ctx.Err() != nil && !rootCounted && fallback != nil {
 		total.Add(*fallback)
@@ -314,16 +314,8 @@ func readRolloutUsage(ctx context.Context, meta rolloutMeta, rootID string, budg
 	seenChildren := map[string]bool{}
 	tooManyChildren := false
 	appendChildren := func(ids ...string) {
-		for _, id := range ids {
-			if seenChildren[id] {
-				continue
-			}
-			if len(children) == maxUsageAgents {
-				tooManyChildren, complete = true, false
-				continue
-			}
-			seenChildren[id] = true
-			children = append(children, id)
+		if !appendChildIDs(&children, seenChildren, ids...) {
+			tooManyChildren, complete = true, false
 		}
 	}
 	for scanner.Scan() {
@@ -368,7 +360,8 @@ func readRolloutUsage(ctx context.Context, meta rolloutMeta, rootID string, budg
 				continue
 			}
 			responses[record.ResponseID] = tokens
-			total.Add(tokens)
+			total, valid = total.AddChecked(tokens)
+			complete = complete && valid
 			seenRecord = true
 		case "event_msg":
 			var payload struct {
@@ -468,18 +461,20 @@ func readRolloutUsage(ctx context.Context, meta rolloutMeta, rootID string, budg
 		if meta.ID != rootID && (!complete || meta.HistoryStart == nil) {
 			return usage.Tokens{}, false, children, childError
 		}
-		total = usage.Tokens{Input: latest.Input - inherited.Input, CachedInput: latest.CachedInput - inherited.CachedInput, Output: latest.Output - inherited.Output}
+		total = latest.Sub(inherited)
 		if !seenSnapshot || !total.Valid() {
 			return usage.Tokens{}, false, children, childError
 		}
 	} else if seenSnapshot {
-		snapshot := usage.Tokens{Input: latest.Input - inherited.Input, CachedInput: latest.CachedInput - inherited.CachedInput, Output: latest.Output - inherited.Output}
+		snapshot := latest.Sub(inherited)
 		if snapshot != total {
 			complete = false
 			// Child counters may include an inherited baseline absent from a damaged
 			// log. Only its individually attributed responses remain a lower bound.
-			if meta.ID == rootID && snapshot.Valid() && snapshot.Total() > total.Total() {
-				total = snapshot
+			if meta.ID == rootID && snapshot.Valid() {
+				if lower := total.Max(snapshot); lower.Valid() {
+					total = lower
+				}
 			}
 		}
 	}

@@ -3,6 +3,7 @@ package action
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"reflect"
 
@@ -58,6 +59,16 @@ func freezeReviewSnapshot(ctx context.Context, workRoot string, job Job, source,
 }
 
 func (s *reviewSnapshot) verify(ctx context.Context) error {
+	if s.ownedSource {
+		if err := workspace.CheckChangesUnchanged(ctx, s.source, s.job.Source.Files, s.changes); err != nil {
+			return fmt.Errorf("frozen candidate source changed during critic review: %w", err)
+		}
+	}
+	if s.outputDir != "" {
+		if err := workspace.CheckUnchanged(ctx, s.outputDir, s.artifacts); err != nil {
+			return fmt.Errorf("frozen candidate reports changed during critic review: %w", err)
+		}
+	}
 	if s.job.Action == command.Fix {
 		changes, err := reviewChanges(ctx, s.job, s.index)
 		if err != nil {

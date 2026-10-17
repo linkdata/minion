@@ -76,6 +76,10 @@ func Validate(ctx context.Context, settings config.CodexConfig) (resolved config
 func listModels(ctx context.Context, settings config.CodexConfig) (models []modelInfo, err error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
+	binary, err := ExecutablePath()
+	if err != nil {
+		return nil, err
+	}
 	dir, err := os.MkdirTemp("", "minion-codex-check-")
 	if err != nil {
 		return nil, err
@@ -95,12 +99,13 @@ func listModels(ctx context.Context, settings config.CodexConfig) (models []mode
 	if settings.ReasoningEffort != "" {
 		args = append(args, "-c", "model_reasoning_effort="+strconv.Quote(settings.ReasoningEffort))
 	}
-	cmd := exec.CommandContext(ctx, "codex", args...)
+	cmd := exec.CommandContext(ctx, binary, args...)
+	cmd.Args[0] = "codex"
 	cmd.Dir = dir
 	cmd.Env = childEnvironment(os.Environ(), dir, dir, settings.APIKey != "")
 	cmd.WaitDelay = 2 * time.Second
 	processgroup.Configure(cmd)
-	diagnostics := bounded.Tail{Limit: maxDiagnosticBytes}
+	diagnostics := bounded.Tail{Limit: bounded.DiagnosticBytes}
 	cmd.Stderr = &diagnostics
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -127,7 +132,7 @@ func listModels(ctx context.Context, settings config.CodexConfig) (models []mode
 			if contextErr != nil {
 				err = fmt.Errorf("Codex model discovery: %w", contextErr) //nolint:staticcheck // -- Codex is a proper noun.
 			} else if detail := strings.TrimSpace(diagnostics.String()); detail != "" {
-				err = fmt.Errorf("%w: %s", err, detail)
+				err = fmt.Errorf("%w: %q", err, detail)
 			}
 		}
 	}()

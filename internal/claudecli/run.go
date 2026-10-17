@@ -20,6 +20,7 @@ import (
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/processgroup"
 	"github.com/linkdata/minion/internal/skills"
+	workspacepath "github.com/linkdata/minion/internal/workspace"
 )
 
 // Run executes one Claude task with sandboxed shell tools.
@@ -117,7 +118,7 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 		if err != nil {
 			return result, err
 		}
-		if within(workspace, resolved) {
+		if workspacepath.Within(workspace, resolved) {
 			return result, errors.New("claude skill is inside the untrusted source snapshot")
 		}
 		skillPaths = append(skillPaths, resolved)
@@ -168,11 +169,19 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	cmd.Stdin = strings.NewReader(instructions.String())
 	cmd.WaitDelay = 2 * time.Second
 	processgroup.Configure(cmd)
-	output := jsonlOutput{cancel: cancel, structured: settings.OutputSchema != ""}
-	diagnostics := bounded.Tail{Limit: maxDiagnosticBytes}
+	var quotaTimer *time.Timer
+	output := jsonlOutput{cancel: cancel, structured: settings.OutputSchema != "", usageRejected: func() {
+		// Let the CLI flush a final result and cumulative accounting, then stop
+		// a managed retry watchdog without renewing the action deadline.
+		quotaTimer = time.AfterFunc(time.Second, cancel)
+	}}
+	diagnostics := bounded.Tail{Limit: bounded.DiagnosticBytes}
 	ceiling := waitCeiling{}
 	cmd.Stdout, cmd.Stderr = &output, io.MultiWriter(&diagnostics, &ceiling)
 	err = cmd.Run()
+	if quotaTimer != nil {
+		quotaTimer.Stop()
+	}
 	ceiling.finish()
 	output.finish()
 	result = output.result
@@ -227,7 +236,7 @@ func sandboxSettings(workspace, runtimeDir string, writable bool, outputDir stri
 		if err != nil {
 			return "", err
 		}
-		if within(workspace, resolved) || within(resolved, workspace) {
+		if workspacepath.Within(workspace, resolved) || workspacepath.Within(resolved, workspace) {
 			return "", errors.New("claude output directory must be separate from source snapshot")
 		}
 		reads = append(reads, resolved)
@@ -239,7 +248,7 @@ func sandboxSettings(workspace, runtimeDir string, writable bool, outputDir stri
 		if err != nil {
 			return "", err
 		}
-		if within(resolved, workspace) || within(resolved, runtimeDir) || outputDir != "" && (within(resolved, outputDir) || within(outputDir, resolved)) {
+		if workspacepath.Within(resolved, workspace) || workspacepath.Within(resolved, runtimeDir) || outputDir != "" && (workspacepath.Within(resolved, outputDir) || workspacepath.Within(outputDir, resolved)) {
 			return "", errors.New("claude read-only directory overlaps a writable grant")
 		}
 		reads = append(reads, resolved)
@@ -265,7 +274,7 @@ func sandboxSettings(workspace, runtimeDir string, writable bool, outputDir stri
 	}
 	if authDir != "" {
 		for _, grant := range append(reads, writes...) {
-			if within(grant, authDir) || within(authDir, grant) {
+			if workspacepath.Within(grant, authDir) || workspacepath.Within(authDir, grant) {
 				return "", errors.New("claude API key directory overlaps a sandbox grant")
 			}
 		}
@@ -304,10 +313,6 @@ func directory(path string) (string, error) {
 	return resolved, nil
 }
 
-func within(root, path string) bool {
-	return path == root || strings.HasPrefix(path, root+string(os.PathSeparator))
-}
-
 func executable(name, workspace string) (string, error) {
 	path, err := exec.LookPath(name)
 	if err == nil {
@@ -316,7 +321,7 @@ func executable(name, workspace string) (string, error) {
 	if err == nil {
 		path, err = filepath.EvalSymlinks(path)
 	}
-	if err == nil && workspace != "" && within(workspace, path) {
+	if err == nil && workspace != "" && workspacepath.Within(workspace, path) {
 		err = errors.New("executable is inside the untrusted source snapshot")
 	}
 	return path, err

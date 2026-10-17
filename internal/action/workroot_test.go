@@ -13,7 +13,6 @@ import (
 
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
-	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/workroot"
 )
@@ -40,8 +39,7 @@ func TestExecuteRechecksWorkRootAfterActionError(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	client := github.New("test-token")
-	client.BaseURL, client.HTTPClient = server.URL, server.Client()
+	client := testGitHub(server, "test-token")
 	checks := 0
 	var logs bytes.Buffer
 	e := &Orchestrator{

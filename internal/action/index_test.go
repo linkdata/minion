@@ -413,17 +413,36 @@ func TestFixIndexPreservesModeDeletionAndBinary(t *testing.T) {
 }
 
 func TestFixIndexBoundsBinaryDiffAndCancellation(t *testing.T) {
-	index, source := offlineIndexFixture(t, nil)
-	data := make([]byte, 1000<<10)
-	_, _ = rand.New(rand.NewSource(1)).Read(data) // Deterministic incompressible binary patch.
-	writeIndexFixture(t, source, "binary", data)
-	if _, err := index.changes(context.Background()); err == nil || !strings.Contains(err.Error(), "limit") {
-		t.Fatalf("oversized binary patch = %v", err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if _, err := index.changes(ctx); !errors.Is(err, context.Canceled) {
-		t.Fatalf("canceled index = %v", err)
+	for _, kind := range []string{"binary addition", "large deletion", "text replacement"} {
+		t.Run(kind, func(t *testing.T) {
+			var files []workspace.File
+			if kind == "large deletion" {
+				files = []workspace.File{{Path: "deleted", Mode: workspace.Regular, Data: []byte(strings.Repeat("x", 2<<20))}}
+			} else if kind == "text replacement" {
+				files = []workspace.File{{Path: "replaced", Mode: workspace.Regular, Data: []byte(strings.Repeat("before\n", 100000))}}
+			}
+			index, source := offlineIndexFixture(t, files)
+			switch kind {
+			case "binary addition":
+				data := make([]byte, 1000<<10)
+				_, _ = rand.New(rand.NewSource(1)).Read(data) // Deterministic incompressible binary patch.
+				writeIndexFixture(t, source, "binary", data)
+			case "large deletion":
+				if err := os.Remove(filepath.Join(source, "deleted")); err != nil {
+					t.Fatal(err)
+				}
+			case "text replacement":
+				writeIndexFixture(t, source, "replaced", []byte(strings.Repeat("after!\n", 100000)))
+			}
+			if _, err := index.changes(context.Background()); !errors.Is(err, gitwork.ErrDiffTooLarge) {
+				t.Fatalf("oversized binary patch lost its size classification: %v", err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			if _, err := index.changes(ctx); !errors.Is(err, context.Canceled) {
+				t.Fatalf("canceled index = %v", err)
+			}
+		})
 	}
 }
 
@@ -563,5 +582,58 @@ func TestFixIndexPreservesFileDirectoryTransitions(t *testing.T) {
 				t.Fatalf("%s lost a selected transition: %+v", kind, changes)
 			}
 		})
+	}
+}
+
+func TestFixIndexIgnoresUnusedRulesUnderIgnoredTrackedDirectory(t *testing.T) {
+	for _, nested := range []bool{false, true} {
+		t.Run(fmt.Sprintf("nested=%t", nested), func(t *testing.T) {
+			dir := "vendor"
+			if nested {
+				dir += "/package"
+			}
+			tracked := dir + "/lib.go"
+			index, source := offlineIndexFixture(t, []workspace.File{
+				{Path: ".gitignore", Mode: workspace.Regular, Data: []byte("vendor/\n")},
+				{Path: tracked, Mode: workspace.Regular, Data: []byte("before")},
+			})
+			writeIndexFixture(t, source, tracked, []byte("after"))
+			writeIndexFixture(t, source, dir+"/.gitignore", []byte("!*\n!keep.tmp\n"))
+			writeIndexFixture(t, source, dir+"/keep.tmp", []byte("still excluded by ancestor"))
+			changes, err := index.changes(context.Background())
+			want := []workspace.Change{{Path: tracked, Mode: workspace.Regular, Data: []byte("after")}}
+			if err != nil || !reflect.DeepEqual(changes, want) {
+				t.Fatalf("unused ignored rules blocked tracked edit or included outputs: %+v,%v", changes, err)
+			}
+			if err := os.Remove(filepath.Join(source, dir, ".gitignore")); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(tracked, filepath.Join(source, dir, ".gitignore")); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := index.changes(context.Background()); err == nil || !strings.Contains(err.Error(), "must be regular") {
+				t.Fatalf("ignored tracked-directory control shape was not checked: %v", err)
+			}
+		})
+	}
+}
+
+func TestFixIndexPatchOverflowClassificationPreservesOtherErrors(t *testing.T) {
+	index, _ := offlineIndexFixture(t, nil)
+	index.binary = filepath.Join(fakeOnPath(t, "git-output", "#!/bin/sh\nprintf 'too much output'\n"), "git-output")
+	if data, err := index.run(context.Background(), len("too much output"), nil, "diff", "--binary"); err != nil || string(data) != "too much output" {
+		t.Fatalf("patch output exactly at its limit was rejected: %q,%v", data, err)
+	}
+	if _, err := index.run(context.Background(), 1, nil, "diff", "--binary"); !errors.Is(err, gitwork.ErrDiffTooLarge) {
+		t.Fatalf("binary patch overflow lost classification: %v", err)
+	}
+	if _, err := index.run(context.Background(), 1, nil, "diff", "--raw"); err == nil || errors.Is(err, gitwork.ErrDiffTooLarge) || !strings.Contains(err.Error(), "output exceeds action limit") {
+		t.Fatalf("raw diff overflow was classified as binary patch overflow: %v", err)
+	}
+	index.binary = filepath.Join(fakeOnPath(t, "git-failure", "#!/bin/sh\nprintf 'fixture failure' >&2\nexit 7\n"), "git-failure")
+	_, err := index.run(context.Background(), 128, nil, "diff", "--binary")
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != 7 || errors.Is(err, gitwork.ErrDiffTooLarge) || !strings.Contains(err.Error(), "fixture failure") {
+		t.Fatalf("ordinary binary diff command failure lost its cause: %v", err)
 	}
 }

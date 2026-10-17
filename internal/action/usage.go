@@ -13,7 +13,7 @@ import (
 )
 
 // trackUsage adds a record and runner wrapper to this attempt-scoped receiver.
-func (e *Orchestrator) trackUsage(job monitor.Job) (*Orchestrator, func(error) error, error) {
+func (e *Orchestrator) trackUsage(job monitor.Job) (func(error) error, error) {
 	name := job.Command.Name
 	if name == "" {
 		name = string(job.Command.Action)
@@ -38,7 +38,7 @@ func (e *Orchestrator) trackUsage(job monitor.Job) (*Orchestrator, func(error) e
 		return nil
 	}
 	if err := save(); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	e.Runner.aroundModel = func(ctx context.Context, request modelRun, next modelCall) (aicli.Result, error) {
 		if err := ctx.Err(); err != nil {
@@ -71,7 +71,14 @@ func (e *Orchestrator) trackUsage(job monitor.Job) (*Orchestrator, func(error) e
 		if actionErr != nil {
 			record.Status = "failed"
 		}
-		return errors.Join(actionErr, save())
+		if err := save(); err != nil {
+			if actionErr == nil {
+				e.logf("final action usage checkpoint failed: %q", err)
+				return nil
+			}
+			return errors.Join(actionErr, err)
+		}
+		return actionErr
 	}
-	return e, finish, nil
+	return finish, nil
 }

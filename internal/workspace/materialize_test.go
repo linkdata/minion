@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -110,6 +111,29 @@ func TestMaterializeChangesPreservesSeparateTransferLimits(t *testing.T) {
 	}
 	if got, err := os.ReadFile(marker); err != nil || string(got) != "unchanged" {
 		t.Fatalf("refused root was modified: %q, %v", got, err)
+	}
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
+	if err := MaterializeChanges(root, base, changes); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckChangesUnchanged(context.Background(), root, base, changes); err != nil {
+		t.Fatalf("valid 65 MiB / 10,100-file candidate cannot be checked: %v", err)
+	}
+	final := append(slices.Clone(base), File{Path: changes[0].Path, Mode: Regular, Data: data})
+	if err := CheckUnchanged(context.Background(), root, final); err == nil || !strings.Contains(err.Error(), "source exceeds file limit") {
+		t.Fatalf("candidate canary widened source transfer limits: %v", err)
+	}
+	byteOverflow := append(slices.Clone(base[:MaxBytes/len(data)]), File{Path: changes[0].Path, Mode: Regular, Data: data})
+	if err := CheckUnchanged(context.Background(), root, byteOverflow); err == nil || !strings.Contains(err.Error(), "source exceeds byte limit") {
+		t.Fatalf("candidate canary widened source byte limit: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, changes[0].Path), []byte("tampered candidate"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckChangesUnchanged(context.Background(), root, base, changes); err == nil || !strings.Contains(err.Error(), "modified supplied source") {
+		t.Fatalf("large candidate mutation went undetected: %v", err)
 	}
 }
 

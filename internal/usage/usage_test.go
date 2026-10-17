@@ -3,6 +3,7 @@ package usage
 import (
 	"encoding/json"
 	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -325,5 +326,62 @@ func TestTokensCachedInputIsNotDoubleCounted(t *testing.T) {
 	tokens.Add(Tokens{Input: 50, CachedInput: 10, Output: 30})
 	if tokens != (Tokens{Input: 150, CachedInput: 90, Output: 50}) || tokens.Total() != 200 {
 		t.Fatalf("tokens=%+v total=%d", tokens, tokens.Total())
+	}
+}
+
+func TestTokensValidBoundsAndComponentOperations(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		tokens Tokens
+		valid  bool
+	}{
+		{"zero", Tokens{}, true},
+		{"exact total", Tokens{Input: math.MaxInt64 - 1, CachedInput: 3, Output: 1}, true},
+		{"total overflow", Tokens{Input: math.MaxInt64, Output: 1}, false},
+		{"negative input", Tokens{Input: -1}, false},
+		{"negative output", Tokens{Output: -1}, false},
+		{"negative cache", Tokens{CachedInput: -1}, false},
+		{"cache outside input", Tokens{Input: 1, CachedInput: 2}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.tokens.Valid(); got != tc.valid {
+				t.Fatalf("Valid=%v want=%v", got, tc.valid)
+			}
+		})
+	}
+	a, b := Tokens{Input: 100, CachedInput: 80, Output: 2}, Tokens{Input: 90, CachedInput: 70, Output: 30}
+	if got := a.Sub(b); got != (Tokens{Input: 10, CachedInput: 10, Output: -28}) || got.Valid() {
+		t.Fatalf("raw delta=%+v", got)
+	}
+	if got := a.Max(b); got != (Tokens{Input: 100, CachedInput: 80, Output: 30}) || !got.Valid() {
+		t.Fatalf("component maximum=%+v", got)
+	}
+	// Individually valid snapshots can have a component maximum whose total overflows.
+	if got := (Tokens{Input: math.MaxInt64 - 1, Output: 1}).Max(Tokens{Input: 1, Output: math.MaxInt64 - 1}); got.Valid() {
+		t.Fatalf("overflowing maximum accepted: %+v", got)
+	}
+}
+
+func TestTokensCheckedAdditionPreservesKnownUsage(t *testing.T) {
+	base := Tokens{Input: 100, CachedInput: 80, Output: 20}
+	for _, tc := range []struct {
+		name  string
+		other Tokens
+		want  Tokens
+		valid bool
+	}{
+		{"normal", Tokens{Input: 50, CachedInput: 10, Output: 30}, Tokens{Input: 150, CachedInput: 90, Output: 50}, true},
+		{"exact total", Tokens{Input: math.MaxInt64 - 121, Output: 1}, Tokens{Input: math.MaxInt64 - 21, CachedInput: 80, Output: 21}, true},
+		{"total overflow", Tokens{Input: math.MaxInt64 - 120, Output: 1}, base, false},
+		{"component overflow", Tokens{Input: math.MaxInt64}, base, false},
+		{"invalid cache", Tokens{Input: 1, CachedInput: 2}, base, false},
+		{"negative", Tokens{Output: -1}, base, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := base.AddChecked(tc.other)
+			if got != tc.want || ok != tc.valid {
+				t.Fatalf("addition=%+v valid=%v want=%+v valid=%v", got, ok, tc.want, tc.valid)
+			}
+		})
 	}
 }

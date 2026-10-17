@@ -168,7 +168,7 @@ func TestRunnerBoundsCriticDisabledAnswer(t *testing.T) {
 func TestRunnerKeepsCriticReadOnlyAndNotesPrivate(t *testing.T) {
 	job := portableJob(command.Fix)
 	job.Source.Files = append(job.Source.Files, workspace.File{Path: "deleted.txt", Mode: workspace.Regular, Data: []byte("original deleted file")})
-	job.Critic = &RoleSettings{Provider: "claude", Skills: []string{skills.BuiltinAntiPromptInjection}}
+	job.Critic = &RoleSettings{Provider: "claude", AlwaysOnSkills: []string{skills.BuiltinAntiPromptInjection}}
 	job.CriticMaxRounds = config.DefaultCriticMaxRounds
 	runner := Runner{WorkRoot: t.TempDir()}
 	calls := 0

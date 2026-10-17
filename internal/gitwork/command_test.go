@@ -116,7 +116,7 @@ func TestCloneSkipsTagsAndPublicationAcceptsAmbiguousShortName(t *testing.T) {
 	const branch = "minion/fix-same-tag"
 	fixture.git(fixture.source, "tag", branch)
 	fixture.git(fixture.source, "push", fixture.remote, "refs/tags/"+branch)
-	checkout, err := cloneFromURL(context.Background(), t.TempDir(), fixture.remote, "main", localTreeMetadata(t, fixture.source))
+	checkout, err := cloneFromURL(context.Background(), t.TempDir(), fixture.remote, "main", localTreeMetadata(t, fixture.source), true)
 	if err != nil {
 		t.Fatal(err)
 	}

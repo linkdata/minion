@@ -73,7 +73,7 @@ func TestLiveCloneAndPullRequest(t *testing.T) {
 
 	checkout, err := ClonePullRequest(ctx, t.TempDir(), repoName, pull.Number, pull.Base.Ref, pull.Head.SHA, func(ctx context.Context, sha string) (github.GitTree, error) {
 		return client.GitTree(ctx, repoName, sha)
-	})
+	}, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +82,7 @@ func TestLiveCloneAndPullRequest(t *testing.T) {
 			t.Error(err)
 		}
 	}()
-	if head, err := checkout.Head(ctx); err != nil || head != pull.Head.SHA {
+	if head, err := checkout.verifiedHead(ctx); err != nil || head != pull.Head.SHA {
 		t.Fatalf("pull request HEAD = %q, %v; want %s", head, err, pull.Head.SHA)
 	}
 }
@@ -173,7 +173,7 @@ func TestLiveCommitAndPush(t *testing.T) {
 		}
 	})
 	t.Setenv("GH_TOKEN", botToken)
-	checkout, err := Clone(ctx, t.TempDir(), repoName, repo.DefaultBranch, func(ctx context.Context, sha string) (github.GitTree, error) { return bot.GitTree(ctx, repoName, sha) })
+	checkout, err := Clone(ctx, t.TempDir(), repoName, repo.DefaultBranch, func(ctx context.Context, sha string) (github.GitTree, error) { return bot.GitTree(ctx, repoName, sha) }, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +182,7 @@ func TestLiveCommitAndPush(t *testing.T) {
 			t.Error(err)
 		}
 	})
-	base, err := checkout.Head(ctx)
+	base, err := checkout.verifiedHead(ctx)
 	if err != nil || len(base) != 40 {
 		t.Fatalf("cloned default-branch HEAD = %q: %v", base, err)
 	}
@@ -205,7 +205,7 @@ func TestLiveCommitAndPush(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if head, err := checkout.Head(ctx); err != nil || head != recordedHead || head == base {
+	if head, err := checkout.verifiedHead(ctx); err != nil || head != recordedHead || head == base {
 		t.Fatalf("committed HEAD = %q, recorded = %q, base = %q: %v", head, recordedHead, base, err)
 	}
 	if err := checkout.CommitAndPush(ctx, branch, cfg.BotLogin, "test: unchanged branch", func(string) error { t.Fatal("unchanged committed tree reached push"); return nil }); !errors.Is(err, ErrNoChanges) {

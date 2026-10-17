@@ -20,6 +20,7 @@ import (
 	"github.com/linkdata/minion/internal/processgroup"
 	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/usage"
+	workspacefs "github.com/linkdata/minion/internal/workspace"
 )
 
 const (
@@ -27,9 +28,14 @@ const (
 	maxCodexOutputBytes = 64 << 20
 	maxCodexEvents      = 100000
 	maxCodexChildren    = 256
-	maxDiagnosticBytes  = 8 << 10
 	instructionRoot     = ".minion-codex-root"
 )
+
+// SystemReadPaths lists the Linux roots expanded by :minimal in Codex 0.160.0.
+// Admission checks use these paths; the native special path preserves OS aliases.
+func SystemReadPaths() []string {
+	return []string{"/bin", "/sbin", "/usr", "/etc", "/lib", "/lib64", "/nix/store", "/run/current-system/sw"}
+}
 
 // Run executes one non-interactive Codex task for a source snapshot.
 //
@@ -84,7 +90,7 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	if err != nil {
 		return result, fmt.Errorf("codex exec: resolve executable: %w", err)
 	}
-	if rel, err := filepath.Rel(workspace, realBinary); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+	if rel, err := filepath.Rel(workspace, realBinary); err == nil && filepath.IsLocal(rel) {
 		return result, errors.New("codex exec: executable is inside the source snapshot")
 	}
 	cacheDir := filepath.Join(runtimeDir, "go-build")
@@ -92,10 +98,8 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 		return result, fmt.Errorf("codex exec: create build cache: %w", err)
 	}
 
-	parentProfile := ":read-only"
 	workspaceAccess := "read"
 	if writable {
-		parentProfile = ":workspace"
 		workspaceAccess = "write"
 	}
 	// The source snapshot is outside Codex's workspace, so keep its metadata and
@@ -103,9 +107,7 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	// The sandbox re-executes the installed Codex binary. Grant that one file
 	// explicitly so a root-deny profile can start without exposing CODEX_HOME.
 	filesystemRules := []string{
-		`":root"="deny"`, `":minimal"="read"`, `":tmpdir"="write"`, `":slash_tmp"="deny"`,
-		// :minimal expands with the CLI version; it must never expose private siblings.
-		fmt.Sprintf(`%s="deny"`, strconv.Quote(filepath.Dir(workspace))),
+		`":root"="deny"`, `":minimal"="read"`, `":tmpdir"="write"`,
 		fmt.Sprintf(`%s=%q`, strconv.Quote(workspace), workspaceAccess),
 		fmt.Sprintf(`%s="read"`, strconv.Quote(filepath.Join(workspace, ".git"))),
 		fmt.Sprintf(`%s="read"`, strconv.Quote(filepath.Join(workspace, ".agents"))),
@@ -122,7 +124,7 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 		if err != nil {
 			return result, err
 		}
-		if outputDir == workspace || strings.HasPrefix(workspace, outputDir+string(os.PathSeparator)) || strings.HasPrefix(outputDir, workspace+string(os.PathSeparator)) || outputDir == string(os.PathSeparator) {
+		if workspacefs.Within(workspace, outputDir) || workspacefs.Within(outputDir, workspace) {
 			return result, errors.New("codex exec: output directory must be separate from the source snapshot")
 		}
 		filesystemRules = append(filesystemRules, fmt.Sprintf(`%s="write"`, strconv.Quote(outputDir)))
@@ -136,7 +138,7 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 		if err != nil {
 			return result, err
 		}
-		if path == workspace || strings.HasPrefix(workspace, path+string(os.PathSeparator)) || strings.HasPrefix(path, workspace+string(os.PathSeparator)) || path == string(os.PathSeparator) {
+		if workspacefs.Within(workspace, path) || workspacefs.Within(path, workspace) {
 			return result, errors.New("codex exec: read-only directory must be separate from the source snapshot")
 		}
 		filesystemRules = append(filesystemRules, fmt.Sprintf(`%s="read"`, strconv.Quote(path)))
@@ -186,7 +188,7 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	for _, feature := range []string{
 		"apps", "browser_use", "browser_use_external", "browser_use_full_cdp_access",
 		"computer_use", "image_generation", "plugins", "remote_plugin",
-		"shell_snapshot", "skill_mcp_dependency_install",
+		"shell_snapshot", "skill_mcp_dependency_install", "memories",
 	} {
 		args = append(args, "--disable", feature)
 	}
@@ -199,7 +201,6 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 		"-c", "shell_environment_policy.ignore_default_excludes=false",
 		"-c", `shell_environment_policy.filters={"PATH"="include","HOME"="include","TMPDIR"="include","TMP"="include","TEMP"="include","GOCACHE"="include","LANG"="include","LC_ALL"="include","LC_CTYPE"="include","TERM"="include"}`,
 		"-c", `default_permissions="minion"`,
-		"-c", fmt.Sprintf("permissions.minion.extends=%q", parentProfile),
 		"-c", filesystemRule,
 		"-c", "permissions.minion.network.enabled=false",
 	)
@@ -230,6 +231,7 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	defer cancelRun()
 	// #nosec G204 -- The resolved executable is outside the source snapshot, and arguments do not pass through a shell.
 	cmd := exec.CommandContext(runCtx, realBinary, args...)
+	cmd.Args[0] = "codex"
 	cmd.Dir = runtimeDir
 	cmd.Env = childEnvironment(os.Environ(), runtimeDir, cacheDir, settings.APIKey != "")
 	if settings.APIKey != "" {
@@ -240,7 +242,7 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	processgroup.Configure(cmd)
 
 	output := jsonlOutput{cancel: cancelRun}
-	stderr := bounded.Tail{Limit: maxDiagnosticBytes}
+	stderr := bounded.Tail{Limit: bounded.DiagnosticBytes}
 	cmd.Stdout = &output
 	cmd.Stderr = &stderr
 
@@ -295,7 +297,6 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 		return result, errors.New("codex exec completed without a final agent message")
 	}
 	if childError != nil {
-		result.UsageComplete = false
 		return result, fmt.Errorf("codex exec: %w", childError)
 	}
 	result.Answer = output.finalMessage
@@ -337,11 +338,14 @@ type eventUsage struct {
 }
 
 func (u *eventUsage) tokens() *usage.Tokens {
-	if u == nil || u.Input == nil || u.CachedInput == nil || u.Output == nil ||
-		*u.Input < 0 || *u.CachedInput < 0 || *u.CachedInput > *u.Input || *u.Output < 0 {
+	if u == nil || u.Input == nil || u.CachedInput == nil || u.Output == nil {
 		return nil
 	}
-	return &usage.Tokens{Input: *u.Input, CachedInput: *u.CachedInput, Output: *u.Output}
+	tokens := usage.Tokens{Input: *u.Input, CachedInput: *u.CachedInput, Output: *u.Output}
+	if !tokens.Valid() {
+		return nil
+	}
+	return &tokens
 }
 
 type codexEvent struct {
@@ -366,7 +370,7 @@ type jsonlOutput struct {
 	bytes         int64
 	events        int
 	stopped       bool
-	line          []byte
+	lines         bounded.Lines
 	parseErr      error
 	finalMessage  string
 	completed     bool
@@ -384,19 +388,12 @@ func (o *jsonlOutput) Write(p []byte) (int, error) {
 		return n, nil
 	}
 	o.bytes += int64(n)
-	for len(p) > 0 {
-		end := bytes.IndexByte(p, '\n')
-		if end < 0 {
-			o.appendFragment(p)
-			break
-		}
-		o.appendFragment(p[:end])
-		o.finishLine()
-		p = p[end+1:]
-		if o.stopped {
-			break
-		}
+	if o.lines.Line == nil {
+		o.lines = bounded.Lines{Limit: maxEventBytes, Line: o.acceptLine, Overflow: func() {
+			o.stop("Codex JSONL event exceeded the output size limit")
+		}}
 	}
+	_, _ = o.lines.Write(p)
 	return n, nil
 }
 
@@ -413,59 +410,41 @@ func (o *jsonlOutput) stop(reason string) {
 	}
 }
 
-func (o *jsonlOutput) appendFragment(p []byte) {
-	if len(o.line)+len(p) > maxEventBytes {
-		o.stop("Codex JSONL event exceeded the output size limit")
-		return
-	}
-	o.line = append(o.line, p...)
-}
-
 func (o *jsonlOutput) finish() {
-	if len(o.line) > 0 {
-		o.finishLine()
-	}
+	o.lines.Finish()
 }
 
-func (o *jsonlOutput) finishLine() {
+func (o *jsonlOutput) acceptLine(line []byte) {
 	if o.stopped {
-		o.line = nil
 		return
 	}
-	line := bytes.TrimSpace(o.line)
-	if len(line) > 0 {
-		o.events++
-		if o.events > maxCodexEvents {
-			o.stop("Codex JSONL event count exceeded the limit")
-			return
-		}
-		var event codexEvent
-		if err := json.Unmarshal(line, &event); err != nil {
-			if o.parseErr == nil {
-				o.parseErr = fmt.Errorf("invalid JSONL event: %w", err)
-			}
-		} else {
-			o.accept(event)
-		}
+	line = bytes.TrimSpace(line)
+	if len(line) == 0 {
+		return
 	}
-	o.line = o.line[:0]
+	o.events++
+	if o.events > maxCodexEvents {
+		o.stop("Codex JSONL event count exceeded the limit")
+		return
+	}
+	var event codexEvent
+	if err := json.Unmarshal(line, &event); err != nil {
+		if o.parseErr == nil {
+			o.parseErr = fmt.Errorf("invalid JSONL event: %w", err)
+		}
+	} else {
+		o.accept(event)
+	}
 }
 
 func (o *jsonlOutput) accept(event codexEvent) {
 	if event.Item != nil && event.Item.Type == "collab_tool_call" {
-		for _, id := range event.Item.ReceiverThreadIDs {
-			if o.seenChildren[id] {
-				continue
-			}
-			if len(o.children) == maxCodexChildren {
-				o.stop("Codex child agent count exceeded the limit")
-				return
-			}
-			if o.seenChildren == nil {
-				o.seenChildren = make(map[string]bool)
-			}
-			o.seenChildren[id] = true
-			o.children = append(o.children, id)
+		if o.seenChildren == nil {
+			o.seenChildren = make(map[string]bool)
+		}
+		if !appendChildIDs(&o.children, o.seenChildren, event.Item.ReceiverThreadIDs...) {
+			o.stop("Codex child agent count exceeded the limit")
+			return
 		}
 	}
 	switch event.Type {
@@ -493,17 +472,17 @@ func (o *jsonlOutput) accept(event codexEvent) {
 
 func eventReason(event codexEvent) string {
 	if event.Message != "" {
-		return bounded.Text(event.Message, maxDiagnosticBytes)
+		return bounded.Text(event.Message, bounded.DiagnosticBytes)
 	}
 	var detail struct {
 		Message string `json:"message"`
 	}
 	if json.Unmarshal(event.Error, &detail) == nil && detail.Message != "" {
-		return bounded.Text(detail.Message, maxDiagnosticBytes)
+		return bounded.Text(detail.Message, bounded.DiagnosticBytes)
 	}
 	var simple string
 	if json.Unmarshal(event.Error, &simple) == nil {
-		return bounded.Text(simple, maxDiagnosticBytes)
+		return bounded.Text(simple, bounded.DiagnosticBytes)
 	}
 	return ""
 }

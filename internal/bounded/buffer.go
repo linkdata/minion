@@ -7,6 +7,9 @@ import (
 	"strings"
 )
 
+// DiagnosticBytes bounds captured host-command diagnostics, not transport fields.
+const DiagnosticBytes = 8 << 10
+
 // Buffer discards output beyond Limit and optionally cancels its producer.
 // Write reports the full input length so subprocess output continues to drain.
 type Buffer struct {

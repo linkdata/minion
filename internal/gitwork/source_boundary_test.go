@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -101,7 +102,7 @@ func TestSourceAliasesAreUnsupportedForDefaultAndPullRequestCheckout(t *testing.
 				}
 				return tree, err
 			}
-			checkout, err := cloneFromURL(context.Background(), t.TempDir(), fixture.remote, "main", lookupChecked)
+			checkout, err := cloneFromURL(context.Background(), t.TempDir(), fixture.remote, "main", lookupChecked, true)
 			if checkout != nil {
 				defer func() {
 					if err := checkout.Close(); err != nil {
@@ -115,7 +116,7 @@ func TestSourceAliasesAreUnsupportedForDefaultAndPullRequestCheckout(t *testing.
 			}
 			checked = false
 			fixture.checkout.lookupTree = lookupChecked
-			err = fixture.checkout.checkoutPullRequest(context.Background(), 7, "main", head)
+			err = fixture.checkout.checkoutPullRequest(context.Background(), 7, "main", head, true)
 			if !checked || !errors.Is(err, ErrUnsupportedSource) || errors.As(err, &exit) || !strings.Contains(err.Error(), "unsafe source path") {
 				t.Fatalf("PR checkout metadataChecked=%v error=%v", checked, err)
 			}
@@ -146,7 +147,7 @@ func TestGitFailureClassificationIsSpecificAndPreservesCancellation(t *testing.T
 		t.Setenv("MINION_TEST_GIT_DIAGNOSTIC", tc.diagnostic)
 		_, err := runGit(context.Background(), root, "-c", "user.name=test", tc.operation)
 		var exit *exec.ExitError
-		if !errors.As(err, &exit) || errors.Is(err, ErrUnsupportedSource) != tc.unsupported || !strings.Contains(err.Error(), tc.diagnostic) {
+		if !errors.As(err, &exit) || errors.Is(err, ErrUnsupportedSource) != tc.unsupported || !strings.Contains(err.Error(), strconv.Quote(tc.diagnostic)) || strings.ContainsAny(err.Error(), "\r\n") {
 			t.Fatalf("operation=%s diagnostic=%q error=%v", tc.operation, tc.diagnostic, err)
 		}
 	}
@@ -197,7 +198,7 @@ func TestSourceTreeResponseOverflowIsTerminalSizeRefusal(t *testing.T) {
 	fixture.checkout.lookupTree = func(context.Context, string) (github.GitTree, error) {
 		return github.GitTree{}, github.ErrResponseTooLarge
 	}
-	_, err := fixture.checkout.Snapshot(context.Background(), false, false)
+	_, err := fixture.checkout.Snapshot(context.Background(), false)
 	if !errors.Is(err, ErrCheckoutTooLarge) || !errors.Is(err, github.ErrResponseTooLarge) {
 		t.Fatalf("source response overflow classification: %v", err)
 	}

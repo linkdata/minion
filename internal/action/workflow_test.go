@@ -27,7 +27,7 @@ import (
 	"github.com/linkdata/minion/internal/workspace"
 )
 
-func TestPortableJobUsesCriticDefaultAndRejectsInvalidFixSource(t *testing.T) {
+func TestPortableJobUsesCriticDefaultAndRunnerRejectsInvalidFixSource(t *testing.T) {
 	for _, collision := range []bool{false, true} {
 		t.Run(fmt.Sprint(collision), func(t *testing.T) {
 			var files []workspace.File
@@ -37,7 +37,7 @@ func TestPortableJobUsesCriticDefaultAndRejectsInvalidFixSource(t *testing.T) {
 			gitFixtureRemote(t, files...)
 			checkout, err := gitwork.Clone(context.Background(), t.TempDir(), "o/r", "main", func(_ context.Context, sha string) (github.GitTree, error) {
 				return gitTreeFixture(sha, files...), nil
-			})
+			}, true)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -53,12 +53,18 @@ func TestPortableJobUsesCriticDefaultAndRejectsInvalidFixSource(t *testing.T) {
 			request := monitor.Job{ID: strings.Repeat("a", 64), SubjectType: "Issue", Number: 7, Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2}, Source: github.Item{Author: github.User{ID: 3, Login: "writer"}}, Command: command.Command{Name: string(action), Action: action}}
 			orchestrator := Orchestrator{Adversarial: "claude", Commands: map[string]config.CommandMapping{string(action): {Action: string(action), Skills: []string{skills.BuiltinAntiPromptInjection}}}}
 			job, err := attemptFixture(&orchestrator).portableJob(testActionContext(t), &preparedAction{checkout: checkout, request: request}, "title", "body")
+			if err != nil || job.CriticMaxRounds != config.DefaultCriticMaxRounds {
+				t.Fatalf("critic default=%d err=%v", job.CriticMaxRounds, err)
+			}
 			if collision {
+				runner := Runner{runModel: func(context.Context, modelRun) (aicli.Result, error) {
+					t.Fatal("model ran for an invalid fix source")
+					return aicli.Result{}, nil
+				}}
+				_, err = runner.Run(testActionContext(t), job)
 				if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "directory spelling collision") {
 					t.Fatalf("invalid fix source was not terminal: %v", err)
 				}
-			} else if err != nil || job.CriticMaxRounds != config.DefaultCriticMaxRounds {
-				t.Fatalf("critic default=%d err=%v", job.CriticMaxRounds, err)
 			}
 		})
 	}
@@ -87,8 +93,7 @@ func TestPreparedActionRejectsForeignResultBeforePublication(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	client := github.New("github-secret")
-	client.BaseURL, client.HTTPClient = server.URL, server.Client()
+	client := testGitHub(server, "github-secret")
 	e := &Orchestrator{WorkRoot: t.TempDir(), GitHub: client, Main: "claude", ClaudeModel: "portable-claude-model", ClaudeEffort: "high", Timeout: 2 * time.Minute,
 		BotLogin: "linkdataminion",
 		Commands: map[string]config.CommandMapping{"audit": {Action: "comment", Skills: []string{testReviewSkillURL}}},
@@ -115,7 +120,8 @@ func TestPreparedActionRejectsForeignResultBeforePublication(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	e.Usage = &usage.Store{Dir: filepath.Join(t.TempDir(), "usage")}
-	e, finish, err := attemptFixture(e).trackUsage(request)
+	e = attemptFixture(e)
+	finish, err := e.trackUsage(request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,8 +213,7 @@ func TestFailedAuditRetainsLabelledPartialArtifactsWithoutPublication(t *testing
 		}
 	}))
 	defer server.Close()
-	client := github.New("token")
-	client.BaseURL, client.HTTPClient = server.URL, server.Client()
+	client := testGitHub(server, "token")
 	var journal bytes.Buffer
 	failure := errors.New("private provider failure detail")
 	const report = "Private incomplete findings requiring validation."
@@ -320,8 +325,7 @@ func TestPreparedReplyNeedsNoExecution(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	client := github.New("token")
-	client.BaseURL, client.HTTPClient = server.URL, server.Client()
+	client := testGitHub(server, "token")
 	e := &Orchestrator{
 		GitHub:   client,
 		Commands: map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{testReviewSkillURL}}},
@@ -365,8 +369,7 @@ func TestPublishFixWithoutChangesPostsNormalReply(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	client := github.New("token")
-	client.BaseURL, client.HTTPClient = server.URL, server.Client()
+	client := testGitHub(server, "token")
 	e := Orchestrator{GitHub: client}
 	request := monitor.Job{ID: strings.Repeat("a", 64), SubjectType: "Issue", Number: 7,
 		Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2}, Command: command.Command{Name: "fix", Action: command.Fix}}
@@ -396,8 +399,7 @@ func TestPublishFixForkCheckFailureConsumesPublicationAttempt(t *testing.T) {
 		http.Error(w, "temporary GitHub failure", http.StatusBadGateway)
 	}))
 	defer server.Close()
-	client := github.New("token")
-	client.BaseURL, client.HTTPClient = server.URL, server.Client()
+	client := testGitHub(server, "token")
 	orchestrator := Orchestrator{GitHub: client}
 	prepared := &preparedAction{request: monitor.Job{Repository: config.Repository{Name: "owner/repo", ID: 1, OwnerID: 2}}}
 	err := orchestrator.publishFix(context.Background(), prepared, Result{Changes: []workspace.Change{{Path: "a", Mode: workspace.Regular}}})
@@ -416,7 +418,7 @@ func (c expiredPreparationContext) Deadline() (time.Time, bool) { return c.deadl
 
 func TestPortableJobPreservesElapsedDeadlineCause(t *testing.T) {
 	gitFixtureRemote(t)
-	checkout, err := gitwork.Clone(context.Background(), t.TempDir(), "o/r", "main", emptyTreeFixture)
+	checkout, err := gitwork.Clone(context.Background(), t.TempDir(), "o/r", "main", emptyTreeFixture, true)
 	if err != nil {
 		t.Fatal(err)
 	}

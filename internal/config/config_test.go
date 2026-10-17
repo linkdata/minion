@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/linkdata/minion/internal/workspace"
 )
 
 func TestCheckedInConfigIsSample(t *testing.T) {
@@ -63,6 +65,8 @@ func TestLoadMaxGitHubContextBytes(t *testing.T) {
 		{name: "custom", field: `,"max_github_context_bytes":12345`, want: 12345},
 		{name: "explicit zero", field: `,"max_github_context_bytes":0`, want: DefaultMaxGitHubContextBytes},
 		{name: "negative", field: `,"max_github_context_bytes":-1`, wantError: true},
+		{name: "maximum", field: fmt.Sprintf(`,"max_github_context_bytes":%d`, workspace.MaxBytes), want: workspace.MaxBytes},
+		{name: "above protocol maximum", field: fmt.Sprintf(`,"max_github_context_bytes":%d`, workspace.MaxBytes+1), wantError: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "config.json")

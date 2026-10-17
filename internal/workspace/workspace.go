@@ -307,24 +307,32 @@ func Materialize(root string, files []File) error {
 // Source and change bounds apply separately, so a candidate can grow by the change limit.
 // It requires the same trusted root and parents as Materialize.
 func MaterializeChanges(root string, base []File, changes []Change) error {
-	if err := validateFiles(base); err != nil {
+	files, err := changedFiles(base, changes)
+	if err != nil {
 		return err
 	}
+	return materialize(root, files)
+}
+
+func changedFiles(base []File, changes []Change) ([]File, error) {
+	if err := validateFiles(base); err != nil {
+		return nil, err
+	}
 	if err := ValidateChanges(changes); err != nil {
-		return err
+		return nil, err
 	}
 	paths := make([]string, len(base))
 	files := make(map[string]File, len(base)+len(changes))
 	for i, file := range base {
 		if !ValidPath(file.Path) {
-			return fmt.Errorf("unsafe fix source path %q", file.Path)
+			return nil, fmt.Errorf("unsafe fix source path %q", file.Path)
 		}
 		paths[i] = file.Path
 		files[file.Path] = file
 	}
 	paths, err := changedPaths(paths, changes)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	for _, change := range changes {
 		if !change.Delete {
@@ -335,7 +343,7 @@ func MaterializeChanges(root string, base []File, changes []Change) error {
 	for i, name := range paths {
 		final[i] = files[name]
 	}
-	return materialize(root, final)
+	return final, nil
 }
 
 func materialize(root string, files []File) error {
@@ -381,11 +389,24 @@ func materialize(root string, files []File) error {
 	return nil
 }
 
-// CheckUnchanged verifies exact source bytes and executable modes without following links.
+// CheckUnchanged verifies exact materialized source bytes and permissions without following links.
 func CheckUnchanged(ctx context.Context, root string, base []File) error {
 	if err := validateFiles(base); err != nil {
 		return err
 	}
+	return checkUnchanged(ctx, root, base)
+}
+
+// CheckChangesUnchanged verifies a materialized candidate with separate source/change bounds.
+func CheckChangesUnchanged(ctx context.Context, root string, base []File, changes []Change) error {
+	files, err := changedFiles(base, changes)
+	if err != nil {
+		return err
+	}
+	return checkUnchanged(ctx, root, files)
+}
+
+func checkUnchanged(ctx context.Context, root string, base []File) error {
 	prior := make(map[string]File, len(base))
 	for _, file := range base {
 		prior[file.Path] = file
@@ -411,12 +432,8 @@ func CheckUnchanged(ctx context.Context, root string, base []File) error {
 		if err != nil {
 			return fmt.Errorf("read-only action modified supplied source: cannot verify %q: %w", rel, err)
 		}
-		mode := Regular
-		if info.Mode().Perm()&0100 != 0 {
-			mode = Executable
-		}
 		delete(prior, rel)
-		if old.Mode != mode || !bytes.Equal(old.Data, data) {
+		if info.Mode() != fs.FileMode(old.Mode&0777) || !bytes.Equal(old.Data, data) {
 			return fmt.Errorf("read-only action modified supplied source: changed %q", rel)
 		}
 		return nil
@@ -605,6 +622,9 @@ func Apply(root string, changes []Change) error {
 		return err
 	}
 	if err := requireRootDir(root, false); err != nil {
+		return err
+	}
+	if err := CheckRoot(root); err != nil {
 		return err
 	}
 	// Delete first, including empty ancestors, so file/directory changes work.

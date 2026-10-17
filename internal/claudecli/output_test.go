@@ -35,6 +35,8 @@ func TestOutputNativeUsageLimit(t *testing.T) {
 		{"later counters parsed before cancellation", rejected + "\n" + successfulResult, known, true, limit},
 		{"warning cannot clear rejection", rejected + "\n" + warning + "\n" + successfulResult, known, true, limit},
 		{"rejection invalidates earlier answer", successfulResult + "\n" + rejected, known, false, limit},
+		{"limit takes precedence over denials", rejected + "\n" + strings.TrimSuffix(successfulResult, "}") + `,"permission_denials":[{"tool_name":"Bash"}]}`, known, true, limit},
+		{"limit takes precedence over invalid index", rejected + "\n" + strings.TrimSuffix(successfulResult, "}") + `,"result_index":9}`, known, true, limit},
 		{"limit takes precedence over unfinished tasks", rejected + "\n" + `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"reviewer"}]}`, usage.Tokens{}, false, limit},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -162,7 +164,7 @@ func TestOutputBackgroundTasks(t *testing.T) {
 		{name: "answer after completion", before: pending + "\n" + successfulResult + "\n" + empty},
 		{name: "work after result needs new answer", after: pending + "\n" + empty, fails: true},
 		{name: "answer after new work", before: successfulResult + "\n" + pending + "\n" + empty},
-		{name: "optional task stopped", after: `{"type":"system","subtype":"task_notification","task_id":"server","status":"stopped"}`},
+		{name: "unassessed task stopped", after: `{"type":"system","subtype":"task_notification","task_id":"server","status":"stopped"}`, fails: true},
 		{name: "failed command recovered", before: `{"type":"system","subtype":"task_notification","task_id":"test","status":"failed"}`},
 		{name: "assistant text is not task state", after: `{"type":"assistant","subtype":"background_tasks_changed","tasks":[{"task_id":"reviewer"}]}`},
 	} {

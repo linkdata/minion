@@ -46,8 +46,7 @@ func TestExecuteScopesAttemptIdentity(t *testing.T) {
 				}
 			}))
 			defer server.Close()
-			client := github.New("test-token")
-			client.BaseURL, client.HTTPClient = server.URL, server.Client()
+			client := testGitHub(server, "test-token")
 			var journal bytes.Buffer
 			orchestrator := Orchestrator{GitHub: client, BotLogin: "bot", WorkRoot: t.TempDir(), Logger: log.New(&journal, "", 0), Commands: map[string]config.CommandMapping{"audit": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}}, Runner: Runner{WorkRoot: t.TempDir(), runModel: func(context.Context, modelRun) (aicli.Result, error) {
 				calls++

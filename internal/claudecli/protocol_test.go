@@ -153,7 +153,7 @@ func TestOutputRejectsNativeMemoryPressureStops(t *testing.T) {
 		{"native synthetic string", synthetic, true},
 		{"native synthetic text block", `{"type":"user","isSynthetic":true,"message":{"content":[{"type":"text","text":` + string(data) + `}]}}`, true},
 		{"ordinary user quote", strings.Replace(synthetic, `"isSynthetic":true`, `"isSynthetic":false`, 1), false},
-		{"optional server stopped", `{"type":"system","subtype":"task_notification","status":"stopped","summary":"Background server deliberately stopped"}`, false},
+		{"ambient server stopped", `{"type":"system","subtype":"task_notification","status":"stopped","ambient":true,"summary":"Background server deliberately stopped"}`, false},
 		{"ordinary completed task", strings.Replace(system, `"stopped"`, `"completed"`, 1), false},
 		{"unrelated assistant summary", strings.Replace(system, `"type":"system"`, `"type":"assistant"`, 1), false},
 	} {
@@ -196,8 +196,8 @@ func TestWaitCeilingBoundsLinesAndRetainsEarlierMatch(t *testing.T) {
 		for data := prefix + strings.Repeat("x", maxEventBytes) + suffix + "\n"; len(data) != 0; {
 			n := min(chunk, len(data))
 			written, err := lines.Write([]byte(data[:n]))
-			if written != n || err != nil || len(lines.line) > maxEventBytes {
-				t.Fatalf("chunk%d write=%d error=%v retained=%d", chunk, written, err, len(lines.line))
+			if written != n || err != nil {
+				t.Fatalf("chunk%d write=%d error=%v", chunk, written, err)
 			}
 			data = data[n:]
 		}

@@ -15,6 +15,7 @@ import (
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/monitor"
+	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/usage"
 	"github.com/linkdata/minion/internal/workspace"
 )
@@ -151,6 +152,9 @@ func TestJobRejectsInvalidRoleAndDispatchSettings(t *testing.T) {
 		{"command", func(j *Job) { j.Command = "../command" }, "invalid action command"},
 		{"main workflow", func(j *Job) { j.Action = command.SecurityAudit; j.Main.Provider = "claude" }, "unsupported by main provider"},
 		{"critic provider", func(j *Job) { j.Critic = &RoleSettings{Provider: "unknown"} }, "unsupported action provider"},
+		{"critic required skills", func(j *Job) {
+			j.Critic = &RoleSettings{Provider: "claude", Skills: []string{skills.BuiltinAntiPromptInjection}}
+		}, "only always-on skills"},
 		{"same provider", func(j *Job) { j.Critic = &RoleSettings{Provider: j.Main.Provider} }, "require different providers"},
 		{"runtime maximum", func(j *Job) { j.RuntimeBudget = config.MaxJobTimeout + time.Nanosecond }, "invalid action runtime budget"},
 	} {

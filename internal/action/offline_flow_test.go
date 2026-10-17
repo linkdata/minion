@@ -175,8 +175,7 @@ func TestOfflineReviewPollRecoversAfterPublication(t *testing.T) {
 	commands := map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{testReviewSkillURL}}}
 	run := func(at time.Time, store *state.Store) {
 		t.Helper()
-		client := github.New("offline-token")
-		client.BaseURL, client.HTTPClient = server.URL, server.Client()
+		client := testGitHub(server, "offline-token")
 		executor := &Orchestrator{WorkRoot: t.TempDir(), GitHub: client,
 			BotLogin: "linkdataminion",
 			Store:    store,

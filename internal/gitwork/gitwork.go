@@ -27,16 +27,17 @@ const (
 
 	// MaxPatchBytes bounds a published fix's binary patch independently of model context.
 	MaxPatchBytes = 1 << 20
+	// MaxChangedPathListBytes bounds a changed-path listing with Git's record metadata.
+	MaxChangedPathListBytes = (workspace.MaxChanges + 1) * (workspace.MaxPathBytes + 128)
 
 	maxPathListBytes = workspace.MaxFiles * (workspace.MaxPathBytes + 128)
-	maxGitDiagnostic = 8 << 10
 )
 
 var (
 	ErrNoChanges         = errors.New("no changes to commit")
 	ErrTooManyFiles      = errors.New("too many changed files")
 	ErrDiffTooLarge      = errors.New("staged diff exceeds size limit")
-	ErrHeadMoved         = errors.New("pull request head changed")
+	errHeadMoved         = errors.New("pull request head changed")
 	ErrCheckoutTooLarge  = errors.New("source tree exceeds checkout limits")
 	ErrUnsupportedSource = errors.New("source tree is unsupported")
 	credentialHelperGH   = resolveCredentialHelperGH()
@@ -56,15 +57,16 @@ func resolveCredentialHelperGH() string {
 
 // Checkout owns the trusted orchestration clone; models receive separate source snapshots.
 type Checkout struct {
-	path         string
-	url          string
-	pushURL      string
-	configDigest [sha256.Size]byte
-	expectedHead string
-	branch       string
-	closed       bool
-	lookupTree   func(context.Context, string) (github.GitTree, error)
-	sourceTrees  map[string][]sourceEntry
+	path           string
+	url            string
+	pushURL        string
+	configDigest   [sha256.Size]byte
+	expectedHead   string
+	comparisonBase string
+	branch         string
+	closed         bool
+	lookupTree     func(context.Context, string) (github.GitTree, error)
+	sourceTrees    map[string][]sourceEntry
 }
 
 // SetPushRepository selects a separately validated destination for fix output.
@@ -82,11 +84,11 @@ func (c *Checkout) SetPushRepository(repo string) error {
 	return nil
 }
 
-// Clone checks out the repository's default branch in an isolated directory.
+// Clone pins the repository's default branch in an isolated directory.
 // The Git remote is always derived from a validated owner/name; GitHub CLI's
 // credential helper supplies authentication without embedding a token in URLs.
-// Blob contents are fetched on demand.
-func Clone(ctx context.Context, workRoot, repo, defaultBranch string, lookupTree func(context.Context, string) (github.GitTree, error)) (*Checkout, error) {
+// Blob contents are fetched on demand; checkoutFiles materializes the trusted fix worktree.
+func Clone(ctx context.Context, workRoot, repo, defaultBranch string, lookupTree func(context.Context, string) (github.GitTree, error), checkoutFiles bool) (*Checkout, error) {
 	url, err := repositoryURL(repo)
 	if err != nil {
 		return nil, err
@@ -94,28 +96,28 @@ func Clone(ctx context.Context, workRoot, repo, defaultBranch string, lookupTree
 	if err := validateBranch(defaultBranch); err != nil {
 		return nil, fmt.Errorf("default branch: %w", err)
 	}
-	return cloneFromURL(ctx, workRoot, url, defaultBranch, lookupTree)
+	return cloneFromURL(ctx, workRoot, url, defaultBranch, lookupTree, checkoutFiles)
 }
 
-// ClonePullRequest checks out only the verified PR head. The base tip is fetched
+// ClonePullRequest pins the verified PR head, optionally materializing it. The base tip is fetched
 // for merge-base discovery without validating or materializing its unused tree.
-func ClonePullRequest(ctx context.Context, workRoot, repo string, number int, baseRef, expectedHeadSHA string, lookupTree func(context.Context, string) (github.GitTree, error)) (*Checkout, error) {
+func ClonePullRequest(ctx context.Context, workRoot, repo string, number int, baseRef, expectedHeadSHA string, lookupTree func(context.Context, string) (github.GitTree, error), checkoutFiles bool) (*Checkout, error) {
 	url, err := repositoryURL(repo)
 	if err != nil {
 		return nil, err
 	}
-	return clonePullRequestFromURL(ctx, workRoot, url, number, baseRef, expectedHeadSHA, lookupTree)
+	return clonePullRequestFromURL(ctx, workRoot, url, number, baseRef, expectedHeadSHA, lookupTree, checkoutFiles)
 }
 
 // URL constructors let local fixtures exercise production preparation without network calls.
-func cloneFromURL(ctx context.Context, workRoot, url, defaultBranch string, lookupTree func(context.Context, string) (github.GitTree, error)) (*Checkout, error) {
+func cloneFromURL(ctx context.Context, workRoot, url, defaultBranch string, lookupTree func(context.Context, string) (github.GitTree, error), checkoutFiles bool) (*Checkout, error) {
 	c, err := cloneRepository(ctx, workRoot, url, defaultBranch, lookupTree)
 	if err != nil {
 		return nil, err
 	}
 	head, err := runGit(ctx, c.path, "rev-parse", "--verify", "refs/remotes/origin/"+defaultBranch+"^{commit}")
 	if err == nil {
-		err = c.checkoutSource(ctx, head)
+		err = c.checkoutSource(ctx, head, checkoutFiles)
 	}
 	if err != nil {
 		return nil, errors.Join(err, c.Close())
@@ -123,7 +125,7 @@ func cloneFromURL(ctx context.Context, workRoot, url, defaultBranch string, look
 	return c, nil
 }
 
-func clonePullRequestFromURL(ctx context.Context, workRoot, url string, number int, baseRef, expectedHeadSHA string, lookupTree func(context.Context, string) (github.GitTree, error)) (*Checkout, error) {
+func clonePullRequestFromURL(ctx context.Context, workRoot, url string, number int, baseRef, expectedHeadSHA string, lookupTree func(context.Context, string) (github.GitTree, error), checkoutFiles bool) (*Checkout, error) {
 	if number <= 0 {
 		return nil, fmt.Errorf("invalid pull request number %d", number)
 	}
@@ -137,7 +139,7 @@ func clonePullRequestFromURL(ctx context.Context, workRoot, url string, number i
 	if err != nil {
 		return nil, err
 	}
-	if err := c.checkoutPullRequest(ctx, number, baseRef, expectedHeadSHA); err != nil {
+	if err := c.checkoutPullRequest(ctx, number, baseRef, expectedHeadSHA, checkoutFiles); err != nil {
 		return nil, errors.Join(err, c.Close())
 	}
 	return c, nil
@@ -180,9 +182,9 @@ func cloneRepository(ctx context.Context, workRoot, url, defaultBranch string, l
 	return c, nil
 }
 
-// Head returns the checkout commit only while Git config and HEAD still match
+// verifiedHead returns the checkout commit only while Git config and HEAD still match
 // the values verified during clone or pull request checkout.
-func (c *Checkout) Head(ctx context.Context) (string, error) {
+func (c *Checkout) verifiedHead(ctx context.Context) (string, error) {
 	if err := c.ready(); err != nil {
 		return "", err
 	}
@@ -206,10 +208,10 @@ func (c *Checkout) Close() error {
 	return nil
 }
 
-// checkoutPullRequest fetches the base branch and GitHub's PR head ref from the
+// checkoutPullRequest refreshes the base branch and fetches GitHub's PR head ref from the
 // trusted repository URL. The fetched head must match the SHA observed through
 // the GitHub API, preventing a changed PR from being reviewed as another commit.
-func (c *Checkout) checkoutPullRequest(ctx context.Context, number int, baseRef, expectedHeadSHA string) error {
+func (c *Checkout) checkoutPullRequest(ctx context.Context, number int, baseRef, expectedHeadSHA string, checkoutFiles bool) error {
 	if err := c.ready(); err != nil {
 		return err
 	}
@@ -226,21 +228,33 @@ func (c *Checkout) checkoutPullRequest(ctx context.Context, number int, baseRef,
 	if err := c.recordConfig(); err != nil {
 		return err
 	}
+	base, err := runGit(ctx, c.path, "rev-parse", "--verify", baseDest+"^{commit}")
+	if err != nil {
+		return err
+	}
 	head, err := runGit(ctx, c.path, "rev-parse", "--verify", headDest+"^{commit}")
 	if err != nil {
 		return err
 	}
 	if head != expectedHeadSHA {
-		return fmt.Errorf("%w: expected %s, fetched %s", ErrHeadMoved, expectedHeadSHA, head)
+		return fmt.Errorf("%w: expected %s, fetched %s", errHeadMoved, expectedHeadSHA, head)
 	}
-	return c.checkoutSource(ctx, head)
+	if err := c.checkoutSource(ctx, head, checkoutFiles); err != nil {
+		return err
+	}
+	c.comparisonBase = base
+	return nil
 }
 
-func (c *Checkout) checkoutSource(ctx context.Context, head string) error {
+func (c *Checkout) checkoutSource(ctx context.Context, head string, checkoutFiles bool) error {
 	if _, err := c.sourceTree(ctx, head); err != nil {
 		return err
 	}
-	if _, err := runGit(ctx, c.path, "checkout", "--detach", head); err != nil {
+	args := []string{"update-ref", "--no-deref", "HEAD", head}
+	if checkoutFiles {
+		args = []string{"checkout", "--detach", head}
+	}
+	if _, err := runGit(ctx, c.path, args...); err != nil {
 		return err
 	}
 	c.expectedHead = head
@@ -383,9 +397,8 @@ func (c *Checkout) CommitAndPush(ctx context.Context, branch, botLogin, message 
 }
 
 func (c *Checkout) stagedPaths(ctx context.Context) ([]string, error) {
-	const limit = (workspace.MaxChanges + 1) * (workspace.MaxPathBytes + 128)
 	args := []string{"diff", "--cached", "--name-only", "-z", "--no-renames", "--no-ext-diff"}
-	data, truncated, err := c.boundedGit(ctx, nil, limit, true, args...)
+	data, truncated, err := c.boundedGit(ctx, nil, MaxChangedPathListBytes, true, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -479,7 +492,7 @@ func ResolveGit() (string, error) {
 	}
 	// execerrdot=0 can make LookPath accept an executable relative to the caller.
 	if !filepath.IsAbs(binary) {
-		return "", errors.New("Git binary must have an absolute path")
+		return "", errors.New("git binary must have an absolute path")
 	}
 	return binary, nil
 }
@@ -504,7 +517,7 @@ func runGitInputTo(ctx context.Context, dir string, stdin io.Reader, stdout io.W
 	cmd.Env = cleanGitEnvironment()
 	cmd.Stdin = stdin
 	cmd.Stdout = stdout
-	diagnostic := bounded.Buffer{Limit: maxGitDiagnostic}
+	diagnostic := bounded.Buffer{Limit: bounded.DiagnosticBytes}
 	cmd.Stderr = &diagnostic
 	if err := cmd.Run(); err != nil {
 		operation := args[0]
@@ -518,7 +531,7 @@ func runGitInputTo(ctx context.Context, dir string, stdin io.Reader, stdout io.W
 			err = ClassifyPathError(operation, message, err)
 		}
 		if message != "" {
-			return fmt.Errorf("git %s: %w: %s", operation, err, message)
+			return fmt.Errorf("git %s: %w: %q", operation, err, message)
 		}
 		return fmt.Errorf("git %s: %w", operation, err)
 	}
@@ -567,7 +580,12 @@ func cleanGitEnvironment() []string {
 	if !hasPath {
 		env = append(env, "PATH=/usr/local/bin:/usr/bin:/bin")
 	}
-	return append(env,
+	return append(env, HardeningEnv()...)
+}
+
+// HardeningEnv disables inherited Git configuration, replacement objects and prompts.
+func HardeningEnv() []string {
+	return []string{
 		"GIT_TERMINAL_PROMPT=0",
 		"GIT_ASKPASS=/bin/false",
 		"GIT_CONFIG_NOSYSTEM=1",
@@ -577,7 +595,7 @@ func cleanGitEnvironment() []string {
 		"GCM_INTERACTIVE=never",
 		"GH_PROMPT_DISABLED=1",
 		"LC_ALL=C",
-	)
+	}
 }
 
 // SafePath excludes checkout-relative command lookup, including credential helpers.

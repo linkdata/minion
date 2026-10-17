@@ -116,7 +116,7 @@ type Status struct {
 	Phase       StatusPhase `json:"phase"`
 	Round       int         `json:"round"`
 	ReviewPhase string      `json:"review_phase,omitempty"`
-	// A receiver checks sequences against its previous status for this attempt.
+	// Transport receivers must compare sequences with the previous accepted status for this attempt.
 	ProgressSequence uint64        `json:"progress_sequence"`
 	LogSequence      uint64        `json:"log_sequence"`
 	ProgressAge      time.Duration `json:"progress_age_ns"`
@@ -126,22 +126,15 @@ type Status struct {
 
 func (id Identity) validate() error {
 	for _, value := range []string{id.JobID, id.AttemptID, id.ExecutorID, id.Requester} {
-		if !identitySegment(value) {
+		if !workspace.ValidIdentitySegment(value) {
 			return errors.New("action identity is missing or invalid")
 		}
 	}
 	parts := strings.Split(id.Repository, "/")
-	if len(parts) != 2 || !identitySegment(parts[0]) || !identitySegment(parts[1]) || id.RepositoryID <= 0 || id.OwnerID <= 0 || id.RequesterID <= 0 || id.Number <= 0 || (id.SubjectType != "Issue" && id.SubjectType != "PullRequest") {
+	if len(parts) != 2 || !workspace.ValidIdentitySegment(parts[0]) || !workspace.ValidIdentitySegment(parts[1]) || id.RepositoryID <= 0 || id.OwnerID <= 0 || id.RequesterID <= 0 || id.Number <= 0 || (id.SubjectType != "Issue" && id.SubjectType != "PullRequest") {
 		return errors.New("action repository or requester identity is invalid")
 	}
 	return nil
-}
-
-func identitySegment(value string) bool {
-	if value == "" || value == "." || value == ".." || len(value) > 100 {
-		return false
-	}
-	return strings.Trim(value, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-") == ""
 }
 
 func boundedText(value string, limit int) bool {
@@ -173,7 +166,7 @@ func (j Job) Validate() error {
 	if err := j.Identity.validate(); err != nil {
 		return err
 	}
-	if !identitySegment(j.Command) {
+	if !workspace.ValidIdentitySegment(j.Command) {
 		return errors.New("invalid action command")
 	}
 	if j.RuntimeBudget <= 0 || j.RuntimeBudget > config.MaxJobTimeout {
@@ -212,6 +205,9 @@ func (j Job) Validate() error {
 		if err := j.Critic.validate(); err != nil {
 			return err
 		}
+		if len(j.Critic.Skills) != 0 {
+			return errors.New("critic role accepts only always-on skills")
+		}
 		if j.Critic.Provider == j.Main.Provider {
 			return errors.New("main and critic currently require different providers")
 		}
@@ -244,7 +240,7 @@ func (r Result) Validate(j Job) error {
 	return r.validate(j, true)
 }
 
-// validate requires an already validated Job; public imports use Validate.
+// validate requires an already validated Job; Validate is the standalone contract entry point.
 func (r Result) validate(j Job, complete bool) error {
 	if !r.matchesJob(j) {
 		return errors.New("action result version, identity or source differs from job")
@@ -325,7 +321,7 @@ func validDiagnostics(diagnostics []Diagnostic) error {
 		return errors.New("too many action diagnostics")
 	}
 	for _, diagnostic := range diagnostics {
-		if !identitySegment(diagnostic.Code) || !boundedText(diagnostic.Message, 8<<10) {
+		if !workspace.ValidIdentitySegment(diagnostic.Code) || !boundedText(diagnostic.Message, 8<<10) {
 			return errors.New("invalid action diagnostic")
 		}
 	}

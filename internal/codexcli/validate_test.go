@@ -224,3 +224,11 @@ func TestValidateReportsCleanupFailure(t *testing.T) {
 		t.Fatalf("Validate() = %v; want cleanup permission error", err)
 	}
 }
+
+func TestModelPreflightQuotesStderr(t *testing.T) {
+	installFakeCodex(t, "#!/bin/sh\nprintf 'private\\nforged journal line' >&2\nprintf '%s\\n' '{not json'\n")
+	_, err := listModels(context.Background(), config.CodexConfig{})
+	if err == nil || strings.Contains(err.Error(), "\nforged journal line") || !strings.Contains(err.Error(), `private\nforged journal line`) {
+		t.Fatalf("unsafe preflight stderr: %v", err)
+	}
+}

@@ -214,8 +214,7 @@ func TestGitHubContextLimitAcrossActions(t *testing.T) {
 					}
 				}))
 				defer server.Close()
-				client := github.New("test-token")
-				client.BaseURL, client.HTTPClient = server.URL, server.Client()
+				client := testGitHub(server, "test-token")
 				var store *state.Store
 				if tt.action == command.Fix {
 					var err error

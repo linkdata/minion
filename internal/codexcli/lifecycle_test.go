@@ -221,3 +221,17 @@ func TestRunQuotesProviderDiagnosticsAndPreservesExitCause(t *testing.T) {
 		})
 	}
 }
+
+func TestOversizedHelperEventCannotHideUnfinishedWork(t *testing.T) {
+	// A dropped event could carry the only ID needed to find an unfinished helper.
+	events := `{"type":"thread.started","thread_id":"root"}` + "\n" +
+		`{"type":"item.completed","item":{"type":"collab_tool_call","receiver_thread_ids":["unlogged-child"],"padding":"` + strings.Repeat("x", maxEventBytes) + `"}}` + "\n" +
+		`{"type":"item.completed","item":{"type":"agent_message","text":"root finished"}}` + "\n" +
+		`{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":10,"output_tokens":7}}`
+	installFakeCodex(t, "#!/bin/sh\ncat <<'EVENTS'\n"+events+"\nEVENTS\n")
+	writeUsageRollout(t, os.Getenv("CODEX_HOME"), "root", "", usageEvent("task_started", "root-turn"), usageRecord("root", "root-turn", "response", 100, 10, 7), usageEvent("task_complete", "root-turn"))
+	result, err := Run(context.Background(), t.TempDir(), "task", false, "", config.CodexConfig{})
+	if !errors.Is(err, aicli.ErrOutputLimit) || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 100, CachedInput: 10, Output: 7}) {
+		t.Fatalf("unread helper identity accepted or known counters lost: result=%+v error=%v", result, err)
+	}
+}

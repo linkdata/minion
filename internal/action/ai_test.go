@@ -128,10 +128,10 @@ func TestRunAIRevisionPreservesWorkAndBoundaries(t *testing.T) {
 					t.Fatal("missing critic renderer")
 				}
 				content, err := os.ReadFile(file)
-				if err != nil || request.criticPrompt("", outputDir) != criticPrompt(task, string(content), notes, priorAnswer, priorFeedback, outputDir) {
+				if err != nil || request.criticPrompt("", outputDir) != criticPrompt(request.reviewPhase, task, string(content), notes, priorAnswer, priorFeedback, outputDir) {
 					t.Fatalf("critic prompt lacks current task context: %q, %v", request.prompt, err)
 				}
-				if request.criticPrompt("Frozen task", "frozen-reports") != criticPrompt(task+"Frozen task", string(content), notes, priorAnswer, priorFeedback, "frozen-reports") {
+				if request.criticPrompt("Frozen task", "frozen-reports") != criticPrompt(request.reviewPhase, task+"Frozen task", string(content), notes, priorAnswer, priorFeedback, "frozen-reports") {
 					t.Fatal("critic prompt cannot bind to immutable source and report context")
 				}
 				if calls == 2 {
@@ -172,7 +172,7 @@ func TestRunAIFreshReviewFindingsUseRemainingRounds(t *testing.T) {
 		}
 		if request.reviewPhase == "full" {
 			prompt := request.criticPrompt("", "")
-			if prompt != criticPrompt(task, fmt.Sprintf("candidate %d", request.round), "", "", "", "") || strings.Contains(prompt, privateNotes) || strings.Contains(prompt, firstFinding) || strings.Contains(prompt, missedFinding) {
+			if prompt != criticPrompt(reviewFull, task, fmt.Sprintf("candidate %d", request.round), "", "", "", "") || strings.Contains(prompt, privateNotes) || strings.Contains(prompt, firstFinding) || strings.Contains(prompt, missedFinding) {
 				t.Fatal("full review was seeded with prior findings or author dispositions")
 			}
 			feedback := firstFinding
@@ -472,8 +472,7 @@ func TestCommentPublishesOnlyCriticApprovedResult(t *testing.T) {
 				}
 			}))
 			defer server.Close()
-			client := github.New("test-token")
-			client.BaseURL, client.HTTPClient = server.URL, server.Client()
+			client := testGitHub(server, "test-token")
 			e := &Orchestrator{WorkRoot: t.TempDir(), GitHub: client,
 				Commands:        map[string]config.CommandMapping{"audit": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}},
 				Adversarial:     "claude",
@@ -531,9 +530,9 @@ func FuzzPeerContext(f *testing.F) {
 		f.Add(seed, seed, seed, seed, seed, seed)
 	}
 	f.Fuzz(func(t *testing.T, task, proposed, feedback, priorAnswer, priorFeedback, notes string) {
-		critic := criticPrompt(task, proposed, notes, priorAnswer, priorFeedback, "")
+		critic := criticPrompt(reviewVerification, task, proposed, notes, priorAnswer, priorFeedback, "")
 		revision := revisionPrompt("Original task", proposed, notes, feedback)
-		if strings.Count(critic, "\n") != strings.Count(criticPrompt("", "", "", "", "", ""), "\n") || strings.Count(revision, "\n") != strings.Count(revisionPrompt("Original task", "", "", ""), "\n") {
+		if strings.Count(critic, "\n") != strings.Count(criticPrompt(reviewVerification, "", "", "", "", "", ""), "\n") || strings.Count(revision, "\n") != strings.Count(revisionPrompt("Original task", "", "", ""), "\n") {
 			t.Fatal("peer text introduced an unquoted prompt line")
 		}
 		for _, field := range []struct{ prompt, prefix, want string }{

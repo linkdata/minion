@@ -84,7 +84,6 @@ func (e *Orchestrator) prepare(ctx context.Context, request monitor.Job) (prepar
 	if repo.Archived || repo.DefaultBranch == "" {
 		return nil, fmt.Errorf("repository %s is archived or has no default branch", repo.FullName)
 	}
-	p.repository = repo
 	branch := repo.DefaultBranch
 	var title, description, pullHead string
 	switch request.SubjectType {
@@ -112,9 +111,9 @@ func (e *Orchestrator) prepare(ctx context.Context, request monitor.Job) (prepar
 	}
 	lookupTree := e.treeLookup(repo.FullName)
 	if pullHead != "" {
-		p.checkout, err = gitwork.ClonePullRequest(ctx, e.WorkRoot, repo.FullName, request.Number, branch, pullHead, lookupTree)
+		p.checkout, err = gitwork.ClonePullRequest(ctx, e.WorkRoot, repo.FullName, request.Number, branch, pullHead, lookupTree, false)
 	} else {
-		p.checkout, err = gitwork.Clone(ctx, e.WorkRoot, repo.FullName, branch, lookupTree)
+		p.checkout, err = gitwork.Clone(ctx, e.WorkRoot, repo.FullName, branch, lookupTree, false)
 	}
 	if err != nil {
 		return nil, err
@@ -158,7 +157,7 @@ func (e *Orchestrator) portableJob(ctx context.Context, p *preparedAction, title
 		return Job{}, errors.New("action preparation requires a deadline")
 	}
 	request := p.request
-	source, err := p.checkout.Snapshot(ctx, request.Command.History, request.SubjectType == "PullRequest")
+	source, err := p.checkout.Snapshot(ctx, request.Command.History)
 	if err != nil {
 		return Job{}, err
 	}
@@ -185,9 +184,6 @@ func (e *Orchestrator) portableJob(ctx context.Context, p *preparedAction, title
 		critic := e.roleSettings(e.Adversarial, nil)
 		job.Critic = &critic
 		job.CriticMaxRounds = cmp.Or(e.CriticMaxRounds, config.DefaultCriticMaxRounds)
-	}
-	if err := job.Validate(); err != nil {
-		return job, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
 	}
 	return job, nil
 }
@@ -353,7 +349,7 @@ func (e *Orchestrator) prepareFix(ctx context.Context, p *preparedAction) (*prep
 	if err := e.checkGitHubContext(request, "", content.BodyText); err != nil {
 		return nil, err
 	}
-	p.checkout, err = gitwork.Clone(ctx, e.WorkRoot, repo.FullName, repo.DefaultBranch, e.treeLookup(repo.FullName))
+	p.checkout, err = gitwork.Clone(ctx, e.WorkRoot, repo.FullName, repo.DefaultBranch, e.treeLookup(repo.FullName), true)
 	if err != nil {
 		return nil, err
 	}

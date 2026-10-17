@@ -117,8 +117,7 @@ func TestSecurityAuditIssueAndPullRequest(t *testing.T) {
 				}
 			}))
 			defer server.Close()
-			client := github.New("test-token")
-			client.BaseURL, client.HTTPClient = server.URL, server.Client()
+			client := testGitHub(server, "test-token")
 			installActionTestSkills(t, testAuditSkillURL)
 			skillDir := filepath.Join(os.Getenv("HOME"), ".agents", "skills", "security-audit")
 			skill := filepath.Join(skillDir, "SKILL.md")

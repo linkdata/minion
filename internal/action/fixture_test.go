@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,6 +18,12 @@ import (
 	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/workspace"
 )
+
+func testGitHub(server *httptest.Server, token string) *github.Client {
+	client := github.New(token)
+	client.BaseURL, client.HTTPClient = server.URL, server.Client()
+	return client
+}
 
 func attemptFixture(orchestrator *Orchestrator) *Orchestrator {
 	attempt := *orchestrator
