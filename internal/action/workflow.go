@@ -255,7 +255,7 @@ func (e *Orchestrator) logResult(job Job, result Result) {
 	}
 	if result.matchesJob(job) && result.validateCalls(job, false) == nil {
 		for _, call := range result.Calls {
-			e.logf("action call job=%s attempt=%s executor=%s provider=%s role=%s round=%d review_phase=%s approved=%t no_blockers=%t accepted=%t model=%q effort=%q complete=%t", id.JobID, id.AttemptID, id.ExecutorID, call.Provider, call.Role, call.Round, call.ReviewPhase, call.Approved, call.NoBlockers, call.Role == roleCritic && job.acceptsCritique(call.Round, call.Approved, call.NoBlockers), call.Model, call.Effort, call.Complete)
+			e.logf("action call job=%s attempt=%s executor=%s provider=%s role=%s round=%d review_phase=%s approved=%t no_blockers=%t has_blockers=%t policy_met=%t model=%q effort=%q complete=%t", id.JobID, id.AttemptID, id.ExecutorID, call.Provider, call.Role, call.Round, call.ReviewPhase, call.Approved, call.NoBlockers, call.HasBlockers, call.Role == roleCritic && job.acceptsCritique(call.Round, call.Approved, call.NoBlockers), call.Model, call.Effort, call.Complete)
 		}
 	}
 }

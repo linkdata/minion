@@ -130,7 +130,7 @@ type Config struct {
 	Adversarial string `json:"adversarial,omitempty"`
 	// CriticMaxRounds limits proposal/revision rounds; zero selects [DefaultCriticMaxRounds].
 	CriticMaxRounds int `json:"critic_max_rounds,omitempty"`
-	// CriticNonblockingRounds permits remaining nonblocking findings at this proposal round.
+	// CriticNonblockingRounds permits remaining nonblocking findings from this proposal round onward.
 	// Nil selects CriticMaxRounds-1; zero requires every finding cleared until the hard limit.
 	CriticNonblockingRounds *int         `json:"critic_nonblocking_rounds,omitempty"`
 	Codex                   CodexConfig  `json:"codex,omitempty"`

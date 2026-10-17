@@ -87,6 +87,9 @@ func (m *Monitor) logf(format string, args ...any) {
 // It persists each completed command before advancing that repository's cursor.
 // Failed threads remain queued for retries without blocking other repositories.
 func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, error) {
+	if err := ctx.Err(); err != nil {
+		return store.Data.NextPollAt, err
+	}
 	now := time.Now
 	if m.Now != nil {
 		now = m.Now
@@ -96,6 +99,9 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			// Invitation failures should be visible, but should not stop scans of
 			// repositories for which this account already has access.
 			m.logf("invitation check: %v", err)
+		}
+		if err := ctx.Err(); err != nil {
+			return store.Data.NextPollAt, err
 		}
 		store.Data.NextInviteCheckAt = now().UTC().Add(15 * time.Minute)
 		if err := store.Save(); err != nil {
@@ -141,6 +147,9 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 	for _, repo := range m.Config.Repositories {
 		since := store.Data.RepositoryCursors[repo.Name]
 		notifications, githubInterval, err := m.GitHub.ListRepositoryNotifications(ctx, repo.Name, since)
+		if err := ctx.Err(); err != nil {
+			return next, errors.Join(append(failures, err)...)
+		}
 		if githubInterval > minInterval {
 			minInterval = githubInterval
 			next = started.Add(minInterval)
@@ -204,6 +213,9 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			continue
 		}
 		liveRepo, err := m.GitHub.Repository(ctx, repo.Name)
+		if err := ctx.Err(); err != nil {
+			return next, errors.Join(append(failures, err)...)
+		}
 		if err != nil {
 			failures = append(failures, fmt.Errorf("verify %s repository identity: %w", repo.Name, err))
 			if err := m.deferNotification(store, entry.key, notification, entry.since, started); err != nil {
@@ -229,6 +241,9 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		}
 		firstFailure := len(failures)
 		items, err := m.GitHub.ThreadItems(ctx, repo.Name, notification.Subject.Type, number, entry.since)
+		if err := ctx.Err(); err != nil {
+			return next, errors.Join(append(failures, err)...)
+		}
 		if err != nil {
 			failures = append(failures, fmt.Errorf("%s %s #%d: %w", repo.Name, notification.Subject.Type, number, err))
 			if err := m.deferNotification(store, entry.key, notification, entry.since, started); err != nil {
@@ -252,6 +267,9 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				continue
 			}
 			current, err := m.GitHub.CurrentItem(ctx, item)
+			if err := ctx.Err(); err != nil {
+				return next, errors.Join(append(failures, err)...)
+			}
 			if err != nil {
 				failures = append(failures, fmt.Errorf("verify command in %s: %w", itemLocation(item), err))
 				continue
@@ -302,6 +320,9 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				continue
 			}
 			permission, err := m.GitHub.Permission(ctx, repo.Name, item.Author.Login)
+			if err := ctx.Err(); err != nil {
+				return next, errors.Join(append(failures, err)...)
+			}
 			if err != nil {
 				failures = append(failures, fmt.Errorf("check @%s permission in %s: %w", item.Author.Login, repo.Name, err))
 				continue
@@ -329,7 +350,11 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				}
 				continue
 			}
-			if err := m.GitHub.ReactEyes(ctx, item.NodeID); err != nil {
+			err = m.GitHub.ReactEyes(ctx, item.NodeID)
+			if err := ctx.Err(); err != nil {
+				return next, errors.Join(append(failures, err)...)
+			}
+			if err != nil {
 				failures = append(failures, fmt.Errorf("react to %s: %w", item.HTMLURL, err))
 				continue
 			}
@@ -394,6 +419,9 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				return next, err
 			}
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return next, errors.Join(append(failures, err)...)
 	}
 	// GitHub timestamps have second precision. Keep a two-second overlap so an
 	// update racing with this poll cannot fall on the exclusive since boundary.

@@ -33,7 +33,10 @@ func freezeReviewSnapshot(ctx context.Context, workRoot string, job Job, source,
 	}()
 	var err error
 	if job.Action == command.Fix {
-		if snapshot.changes, err = reviewChanges(ctx, job, index); err != nil {
+		if snapshot.changes, err = index.changes(ctx); err != nil {
+			return snapshot, err
+		}
+		if err := job.validateChanges(snapshot.changes); err != nil {
 			return snapshot, err
 		}
 		if snapshot.source, err = os.MkdirTemp(workRoot, "minion-review-"); err != nil {
@@ -63,13 +66,6 @@ func (s *reviewSnapshot) verify(ctx context.Context) error {
 		if err := workspace.CheckChangesUnchanged(ctx, s.source, s.job.Source.Files, s.changes); err != nil {
 			return fmt.Errorf("frozen candidate source changed during critic review: %w", err)
 		}
-	}
-	if s.outputDir != "" {
-		if err := workspace.CheckUnchanged(ctx, s.outputDir, s.artifacts); err != nil {
-			return fmt.Errorf("frozen candidate reports changed during critic review: %w", err)
-		}
-	}
-	if s.job.Action == command.Fix {
 		changes, err := s.index.changes(ctx)
 		if err != nil {
 			return err
@@ -78,7 +74,10 @@ func (s *reviewSnapshot) verify(ctx context.Context) error {
 			return errors.New("candidate source changed during critic review")
 		}
 	}
-	if s.liveOutputDir != "" {
+	if s.outputDir != "" {
+		if err := workspace.CheckUnchanged(ctx, s.outputDir, s.artifacts); err != nil {
+			return fmt.Errorf("frozen candidate reports changed during critic review: %w", err)
+		}
 		files, _, err := readAuditArtifacts(s.liveOutputDir, auditForReview)
 		if err != nil {
 			return err
@@ -99,15 +98,4 @@ func (s *reviewSnapshot) close() error {
 		err = errors.Join(err, cleanup.RemoveAll(s.outputDir))
 	}
 	return err
-}
-
-func reviewChanges(ctx context.Context, job Job, index *fixIndex) ([]workspace.Change, error) {
-	changes, err := index.changes(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if err := job.validateChanges(changes); err != nil {
-		return nil, err
-	}
-	return changes, nil
 }

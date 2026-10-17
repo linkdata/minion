@@ -80,8 +80,8 @@ func (r *Runner) runAI(ctx context.Context, job Job, dir, prompt string, writabl
 		request.prompt, request.outputSchema = mainPrompt(prompt), mainOutputSchema
 	}
 	var priorAnswer, priorFeedback string
-	for round := 0; round < rounds; round++ {
-		request.round = round + 1
+	for round := 1; round <= rounds; round++ {
+		request.round = round
 		var proposed aicli.Result
 		if proposed, err = r.runOnce(ctx, request); err != nil {
 			return
@@ -96,12 +96,12 @@ func (r *Runner) runAI(ctx context.Context, job Job, dir, prompt string, writabl
 		}
 		var accepted bool
 		var feedback string
-		for _, phase := range reviewPhases(round + 1) {
+		for _, phase := range reviewPhases(round) {
 			criticNotes, previousAnswer, previousFeedback := "", "", ""
 			if phase == reviewVerification {
 				criticNotes, previousAnswer, previousFeedback = notes, priorAnswer, priorFeedback
 			}
-			critic := modelRun{role: roleCritic, round: round + 1, reviewPhase: phase, provider: job.Critic.Provider, model: job.Critic.Model, effort: job.Critic.Effort, outputSchema: criticOutputSchema}
+			critic := modelRun{role: roleCritic, round: round, reviewPhase: phase, provider: job.Critic.Provider, model: job.Critic.Model, effort: job.Critic.Effort, outputSchema: criticOutputSchema}
 			critic.criticPrompt = func(mapping, reports string) string {
 				return criticPrompt(phase, prompt+mapping, candidate, criticNotes, previousAnswer, previousFeedback, reports)
 			}
@@ -113,7 +113,7 @@ func (r *Runner) runAI(ctx context.Context, job Job, dir, prompt string, writabl
 			if approved, hasBlockers, feedback, err = parseCritique(review.Answer); err != nil {
 				return "", fmt.Errorf("%w: invalid critic verdict: %w", monitor.ErrTerminalJob, err)
 			}
-			accepted = job.acceptsCritique(round+1, approved, !hasBlockers)
+			accepted = job.acceptsCritique(round, approved, !hasBlockers)
 			if !accepted {
 				break
 			}

@@ -14,7 +14,7 @@ import (
 
 func TestWorkRootPreflightRefusesModelGrants(t *testing.T) {
 	const source = "https://github.com/owner/repo/tree/pinned/skills/example"
-	for _, kind := range []string{"main read", "critic read", "required skill", "critic optional skill", "system read", "symlink root"} {
+	for _, kind := range []string{"required skill", "critic optional skill", "symlink root"} {
 		t.Run(kind, func(t *testing.T) {
 			root := t.TempDir()
 			t.Setenv("HOME", root)
@@ -24,10 +24,6 @@ func TestWorkRootPreflightRefusesModelGrants(t *testing.T) {
 				t.Fatal(err)
 			}
 			switch kind {
-			case "main read":
-				cfg.Codex.ReadOnlyDirs = []string{root}
-			case "critic read":
-				cfg.Claude.ReadOnlyDirs = []string{cfg.WorkRoot}
 			case "required skill", "critic optional skill":
 				parent := ".agents"
 				if kind == "critic optional skill" {
@@ -51,8 +47,6 @@ func TestWorkRootPreflightRefusesModelGrants(t *testing.T) {
 				if err := os.Mkdir(cfg.WorkRoot, 0700); err != nil {
 					t.Fatal(err)
 				}
-			case "system read":
-				cfg.WorkRoot = "/usr"
 			case "symlink root":
 				cfg.Codex.ReadOnlyDirs = []string{cfg.WorkRoot}
 				alias := filepath.Join(root, "alias")

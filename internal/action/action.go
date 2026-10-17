@@ -39,7 +39,8 @@ type Orchestrator struct {
 	WorkRoot          string
 	Main, Adversarial string
 	// CriticMaxRounds selects config.DefaultCriticMaxRounds when zero.
-	CriticMaxRounds           int
+	CriticMaxRounds int
+	// CriticNonblockingRounds: nil selects the resolved round maximum minus one; zero keeps strict approval.
 	CriticNonblockingRounds   *int
 	AlwaysOnSkills            []string
 	CodexModel, CodexEffort   string

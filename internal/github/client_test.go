@@ -40,7 +40,7 @@ func TestGitTreeUsesExactSHAAndBoundsResponse(t *testing.T) {
 		t.Fatal("invalid tree SHA accepted")
 	}
 	response = fmt.Sprintf(`{"sha":%q,"truncated":false,"tree":[]}`, sha) + strings.Repeat(" ", maxTreeResponseBytes)
-	if _, err := client.GitTree(context.Background(), "o/r", sha); !errors.Is(err, ErrResponseTooLarge) || !strings.Contains(err.Error(), "exceeds") {
+	if _, err := client.GitTree(context.Background(), "o/r", sha); !errors.Is(err, ErrResponseTooLarge) {
 		t.Fatalf("oversized tree response error = %v", err)
 	}
 }

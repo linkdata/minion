@@ -346,7 +346,7 @@ func TestResultCallUsageRequiresOrderedReviewPhases(t *testing.T) {
 		return CallUsage{Provider: job.Main.Provider, Model: job.Main.Model, Effort: job.Main.Effort, Role: "main", Round: round, Complete: true}
 	}
 	critic := func(round int, phase string, approved bool) CallUsage {
-		return CallUsage{Provider: job.Critic.Provider, Model: job.Critic.Model, Effort: job.Critic.Effort, Role: "critic", Round: round, ReviewPhase: phase, Approved: approved, NoBlockers: approved, Complete: true}
+		return CallUsage{Provider: job.Critic.Provider, Model: job.Critic.Model, Effort: job.Critic.Effort, Role: "critic", Round: round, ReviewPhase: phase, Approved: approved, NoBlockers: approved, HasBlockers: !approved, Complete: true}
 	}
 	for _, test := range []struct {
 		name              string
@@ -452,7 +452,7 @@ func TestResultCallUsageHonorsConfiguredRoundLimits(t *testing.T) {
 					if proposal > 1 {
 						result.Calls = append(result.Calls, CallUsage{Provider: job.Critic.Provider, Role: "critic", Round: proposal, ReviewPhase: "verification", Approved: true, NoBlockers: true})
 					}
-					result.Calls = append(result.Calls, CallUsage{Provider: job.Critic.Provider, Role: "critic", Round: proposal, ReviewPhase: "full", Approved: proposal == round, NoBlockers: proposal == round})
+					result.Calls = append(result.Calls, CallUsage{Provider: job.Critic.Provider, Role: "critic", Round: proposal, ReviewPhase: "full", Approved: proposal == round, NoBlockers: proposal == round, HasBlockers: proposal != round})
 				}
 				if err := result.Validate(job); (err == nil) != (round <= test.rounds) {
 					t.Fatalf("round=%d limit=%d result validation=%v", round, test.limit, err)

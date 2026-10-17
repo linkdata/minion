@@ -73,6 +73,8 @@ type CallUsage struct {
 	Approved bool `json:"approved,omitempty"`
 	// NoBlockers attests an explicit has_blockers=false in a valid critic verdict.
 	NoBlockers bool `json:"no_blockers,omitempty"`
+	// HasBlockers attests an explicit has_blockers=true; both false means no valid verdict.
+	HasBlockers bool `json:"has_blockers,omitempty"`
 	// Complete confirms accounting coverage; interrupted or failed native runs are conservative.
 	Complete bool `json:"complete"`
 }
@@ -299,14 +301,14 @@ func (r Result) validateCalls(j Job, complete bool) error {
 			previous := r.Calls[i-1]
 			accepted := j.acceptsCritique(previous.Round, previous.Approved, previous.NoBlockers)
 			if call.Role == roleMain {
-				validOrder = previous.Role == roleCritic && !accepted && call.Round == previous.Round+1 && call.ReviewPhase == ""
+				validOrder = previous.Role == roleCritic && (previous.NoBlockers || previous.HasBlockers) && !accepted && call.Round == previous.Round+1 && call.ReviewPhase == ""
 			} else if previous.Role == roleMain {
 				validOrder = call.Round == previous.Round && call.ReviewPhase == reviewPhases(call.Round)[0]
 			} else {
 				validOrder = previous.ReviewPhase == reviewVerification && accepted && call.Round == previous.Round && call.ReviewPhase == reviewFull
 			}
 		}
-		if !validOrder || call.Round > rounds || ((call.Approved || call.NoBlockers) && call.Role != roleCritic) || (call.Approved && !call.NoBlockers) || call.Provider != role.Provider || call.Model != role.Model || call.Effort != role.Effort || !call.Tokens.Valid() {
+		if !validOrder || call.Round > rounds || ((call.Approved || call.NoBlockers || call.HasBlockers) && call.Role != roleCritic) || (call.Approved && !call.NoBlockers) || (call.HasBlockers && call.NoBlockers) || call.Provider != role.Provider || call.Model != role.Model || call.Effort != role.Effort || !call.Tokens.Valid() {
 			return errors.New("invalid model call usage")
 		}
 	}

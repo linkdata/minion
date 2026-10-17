@@ -200,6 +200,7 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 				approved, hasBlockers, _, parseErr := parseCritique(call.Answer)
 				entry.Approved = parseErr == nil && approved
 				entry.NoBlockers = parseErr == nil && !hasBlockers
+				entry.HasBlockers = parseErr == nil && hasBlockers
 			}
 			result.Calls = append(result.Calls, entry)
 			return call, err

@@ -24,6 +24,7 @@ func TestFailedCriticCannotAttestNonblockingAcceptance(t *testing.T) {
 	for _, answer := range []string{
 		`{"approved":true,"has_blockers":false,"feedback":""}`,
 		`{"approved":false,"has_blockers":false,"feedback":"Nonblocking nit: simplify the loop."}`,
+		`{"approved":false,"has_blockers":true,"feedback":"Blocking: wrong result."}`,
 	} {
 		t.Run(answer, func(t *testing.T) {
 			job := portableJob(command.Comment)
@@ -40,13 +41,77 @@ func TestFailedCriticCannotAttestNonblockingAcceptance(t *testing.T) {
 				t.Fatalf("failed critic escaped: result=%+v err=%v", result, err)
 			}
 			last := result.Calls[1]
-			if last.Approved || last.NoBlockers || last.Tokens != (usage.Tokens{Input: 11, Output: 2}) {
+			if last.Approved || last.NoBlockers || last.HasBlockers || last.Tokens != (usage.Tokens{Input: 11, Output: 2}) {
 				t.Fatalf("failed critic fabricated an attestation or lost usage: %+v", last)
 			}
 			if err := result.Validate(job); err == nil {
 				t.Fatal("complete result accepted failed-critic output")
 			}
 		})
+	}
+}
+
+func TestCriticEvidencePreservesBlockerVerdicts(t *testing.T) {
+	failed := errors.New("provider failed")
+	for _, tt := range []struct {
+		name, answer                      string
+		err                               error
+		approved, noBlockers, hasBlockers bool
+	}{
+		{name: "approved", answer: `{"approved":true,"has_blockers":false,"feedback":""}`, approved: true, noBlockers: true},
+		{name: "nonblocking rejection", answer: `{"approved":false,"has_blockers":false,"feedback":"Nonblocking nit."}`, noBlockers: true},
+		{name: "blocking rejection", answer: `{"approved":false,"has_blockers":true,"feedback":"Blocking failure."}`, hasBlockers: true},
+		{name: "invalid verdict", answer: `garbage`},
+		{name: "failed provider", answer: `{"approved":false,"has_blockers":true,"feedback":"Blocking failure."}`, err: failed},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			job := portableJob(command.Comment)
+			job.Critic, job.CriticMaxRounds = &RoleSettings{Provider: "claude"}, 1
+			runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+				if request.role == roleMain {
+					return aicli.Result{Answer: proposalJSON("Candidate answer", "")}, nil
+				}
+				return aicli.Result{Answer: tt.answer, Tokens: usage.Tokens{Input: 11, Output: 2}}, tt.err
+			}}
+			result, err := runner.Run(context.Background(), job)
+			if (err == nil) != tt.approved || len(result.Calls) != 2 || result.validate(job, false) != nil {
+				t.Fatalf("invalid critic outcome: result=%+v err=%v", result, err)
+			}
+			want := CallUsage{Provider: "claude", Role: roleCritic, Round: 1, ReviewPhase: reviewFull, Tokens: usage.Tokens{Input: 11, Output: 2}, Approved: tt.approved, NoBlockers: tt.noBlockers, HasBlockers: tt.hasBlockers}
+			if result.Calls[1] != want {
+				t.Fatalf("native verdict lost: got=%+v want=%+v", result.Calls[1], want)
+			}
+			data, err := json.Marshal(result)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var decoded Result
+			if err := json.Unmarshal(data, &decoded); err != nil || decoded.Calls[1] != want || decoded.validate(job, false) != nil {
+				t.Fatalf("wire lost critic evidence: %s, %v", data, err)
+			}
+		})
+	}
+}
+
+func TestJournalPolicyIsNotPublication(t *testing.T) {
+	job := portableJob(command.Comment)
+	job.Critic, job.CriticMaxRounds, job.CriticNonblockingRounds = &RoleSettings{Provider: "claude"}, 2, 2
+	result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Calls: []CallUsage{
+		{Provider: job.Main.Provider, Role: roleMain, Round: 1},
+		{Provider: "claude", Role: roleCritic, Round: 1, ReviewPhase: reviewFull, HasBlockers: true},
+		{Provider: job.Main.Provider, Role: roleMain, Round: 2},
+		{Provider: "claude", Role: roleCritic, Round: 2, ReviewPhase: reviewVerification, NoBlockers: true},
+		{Provider: "claude", Role: roleCritic, Round: 2, ReviewPhase: reviewFull, HasBlockers: true},
+	}}
+	var output bytes.Buffer
+	(&Orchestrator{Logger: log.New(&output, "", 0)}).logResult(job, result)
+	text := output.String()
+	if !strings.Contains(text, "review_phase=verification approved=false no_blockers=true has_blockers=false policy_met=true") ||
+		!strings.Contains(text, "review_phase=full approved=false no_blockers=false has_blockers=true policy_met=false") || strings.Contains(text, "accepted=") {
+		t.Fatalf("journal blurred verdict policy and publication: %s", text)
+	}
+	if result.Validate(job) == nil {
+		t.Fatal("verification policy was mistaken for an accepted final result")
 	}
 }
 
@@ -119,7 +184,7 @@ func TestRunnerNonblockingThresholdRequiresFreshFullReview(t *testing.T) {
 			var output bytes.Buffer
 			orchestrator := Orchestrator{Logger: log.New(&output, "", 0)}
 			orchestrator.logResult(job, result)
-			if !strings.Contains(output.String(), "approved=false no_blockers=true accepted=true") {
+			if !strings.Contains(output.String(), "approved=false no_blockers=true has_blockers=false policy_met=true") {
 				t.Fatalf("journal hid the policy decision: %s", output.String())
 			}
 		})
@@ -143,13 +208,17 @@ func TestResultNonblockingAcceptanceTrustBoundary(t *testing.T) {
 		{name: "nits before threshold", calls: []CallUsage{main(1), critic(1, reviewFull, false, true)}, partial: true},
 		{name: "nits at threshold", calls: []CallUsage{main(1), critic(1, reviewFull, false, true), main(2), critic(2, reviewVerification, false, true), critic(2, reviewFull, false, true)}, complete: true, partial: true},
 		{name: "verification cannot finish", calls: []CallUsage{main(1), critic(1, reviewFull, false, true), main(2), critic(2, reviewVerification, false, true)}, partial: true},
-		{name: "fresh full still has blockers", calls: []CallUsage{main(1), critic(1, reviewFull, false, true), main(2), critic(2, reviewVerification, false, true), critic(2, reviewFull, false, false)}, partial: true},
+		{name: "fresh full still has blockers", calls: []CallUsage{main(1), critic(1, reviewFull, false, true), main(2), critic(2, reviewVerification, false, true), {Provider: job.Critic.Provider, Role: roleCritic, Round: 2, ReviewPhase: reviewFull, HasBlockers: true}}, partial: true},
 		{name: "unparsed verdict cannot finish", calls: []CallUsage{main(1), critic(1, reviewFull, false, false)}, partial: true},
+		{name: "unparsed verdict cannot revise", calls: []CallUsage{main(1), critic(1, reviewFull, false, false), main(2), critic(2, reviewVerification, true, true), critic(2, reviewFull, true, true)}},
 		{name: "approval without no-blocker attestation", calls: []CallUsage{main(1), critic(1, reviewFull, true, false)}},
 		{name: "main cannot attest no blockers", calls: []CallUsage{{Provider: job.Main.Provider, Role: roleMain, Round: 1, NoBlockers: true}, critic(1, reviewFull, true, true)}},
+		{name: "main cannot attest blockers", calls: []CallUsage{{Provider: job.Main.Provider, Role: roleMain, Round: 1, HasBlockers: true}, critic(1, reviewFull, true, true)}},
+		{name: "contradictory blocker attestations", calls: []CallUsage{main(1), {Provider: job.Critic.Provider, Role: roleCritic, Round: 1, ReviewPhase: reviewFull, HasBlockers: true, NoBlockers: true}}},
+		{name: "approval contradicts blockers", calls: []CallUsage{main(1), {Provider: job.Critic.Provider, Role: roleCritic, Round: 1, ReviewPhase: reviewFull, Approved: true, HasBlockers: true}}},
 		{name: "accepted verification cannot skip full", calls: []CallUsage{main(1), critic(1, reviewFull, false, true), main(2), critic(2, reviewVerification, false, true), main(3)}},
 		{name: "accepted full cannot revise again", calls: []CallUsage{main(1), critic(1, reviewFull, false, true), main(2), critic(2, reviewVerification, false, true), critic(2, reviewFull, false, true), main(3)}},
-		{name: "blocker verification cannot advance", calls: []CallUsage{main(1), critic(1, reviewFull, false, true), main(2), critic(2, reviewVerification, false, false), critic(2, reviewFull, true, true)}},
+		{name: "blocker verification cannot advance", calls: []CallUsage{main(1), critic(1, reviewFull, false, true), main(2), {Provider: job.Critic.Provider, Role: roleCritic, Round: 2, ReviewPhase: reviewVerification, HasBlockers: true}, critic(2, reviewFull, true, true)}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Complete answer", Calls: tt.calls}

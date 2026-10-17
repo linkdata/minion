@@ -245,7 +245,7 @@ func (c *Client) requestBounded(ctx context.Context, method, path string, input,
 						return resp.Header, resp.StatusCode, fmt.Errorf("read GitHub %s %s response: %w", method, path, err)
 					}
 					if int64(len(data)) > maxBytes {
-						return resp.Header, resp.StatusCode, fmt.Errorf("%w: %s %s response exceeds %d bytes", ErrResponseTooLarge, method, path, maxBytes)
+						return resp.Header, resp.StatusCode, fmt.Errorf("%w: %s %s allows %d bytes", ErrResponseTooLarge, method, path, maxBytes)
 					}
 					if err := json.Unmarshal(data, output); err != nil {
 						return resp.Header, resp.StatusCode, fmt.Errorf("decode GitHub %s %s response: %w", method, path, err)

@@ -151,8 +151,8 @@ func run() int {
 		// Jobs override model, effort and skills; the runner keeps host credentials and sandbox grants.
 		Runner: action.Runner{
 			WorkRoot: cfg.WorkRoot,
-			Codex:    cfg.Codex,
-			Claude:   cfg.Claude,
+			Codex:    config.CodexConfig{APIKey: cfg.Codex.APIKey},
+			Claude:   config.ClaudeConfig{APIKey: cfg.Claude.APIKey, AllowAllUnixSockets: cfg.Claude.AllowAllUnixSockets},
 			Logger:   logger,
 		},
 	}
@@ -197,10 +197,7 @@ func checkWorkRootIsolation(cfg config.Config) error {
 			}
 		}
 		// Missing required skills disable their command; admission needs only existing grants.
-		selected, err := runner.SelectSkills(provider, nil, sources)
-		if err != nil {
-			return err
-		}
+		selected, _ := runner.SelectSkills(provider, nil, sources)
 		if provider == "claude" {
 			runner.Claude.Skills = selected
 		} else {

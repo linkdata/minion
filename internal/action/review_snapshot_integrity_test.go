@@ -49,6 +49,13 @@ func TestReviewSnapshotRejectsCriticCopyMutation(t *testing.T) {
 			if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "frozen candidate source changed") || calls != wantCalls || fullReviews != 1 || result.Answer != "" || len(result.Changes) != 0 {
 				t.Fatalf("mutated critic copy reached a subsequent call or successful export: calls=%d full=%d result=%+v error=%v", calls, fullReviews, result, err)
 			}
+			if len(result.Calls) != wantCalls {
+				t.Fatalf("lost calls after integrity failure: %+v", result.Calls)
+			}
+			last, wantApproval := result.Calls[len(result.Calls)-1], phase == reviewVerification
+			if last.Approved != wantApproval || last.NoBlockers != wantApproval || last.HasBlockers != (phase == reviewFull) {
+				t.Fatalf("lost native critic verdict after integrity failure: %+v", last)
+			}
 		})
 	}
 }
@@ -110,8 +117,14 @@ func TestReviewSnapshotChecksExactFrozenFiles(t *testing.T) {
 					if err != nil || string(data) != "reviewed report" {
 						t.Fatalf("test changed the live reports instead of the frozen copy: %q,%v", data, err)
 					}
-				} else if changes, err := reviewChanges(context.Background(), job, index); err != nil || len(changes) != 0 {
-					t.Fatalf("test changed live source instead of frozen copy: %+v,%v", changes, err)
+				} else {
+					changes, err := index.changes(context.Background())
+					if err != nil || len(changes) != 0 {
+						t.Fatalf("test changed live source instead of frozen copy: %+v,%v", changes, err)
+					}
+					if err := job.validateChanges(changes); err != nil {
+						t.Fatal(err)
+					}
 				}
 			})
 		}
