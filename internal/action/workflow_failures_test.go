@@ -27,9 +27,9 @@ import (
 	"github.com/linkdata/minion/internal/workspace"
 )
 
-func TestFixReplyFailureConsumesPublicationAttempt(t *testing.T) {
-	for _, recovery := range []bool{false, true} {
-		t.Run(fmt.Sprintf("recovery=%t", recovery), func(t *testing.T) {
+func TestReplyFailureClassificationBeforeAndAfterModel(t *testing.T) {
+	for _, kind := range []string{"model result", "recovery", "fixed reply"} {
+		t.Run(kind, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.Method == http.MethodGet && r.URL.Path == "/repos/o/r" {
 					_, _ = fmt.Fprint(w, publicRepositoryJSON)
@@ -50,7 +50,10 @@ func TestFixReplyFailureConsumesPublicationAttempt(t *testing.T) {
 			prepared := &preparedAction{request: request, repository: github.Repository{FullName: "o/r", DefaultBranch: "main"}, fork: github.Repository{FullName: "bot/r"}}
 			orchestrator := Orchestrator{GitHub: client, Store: store, BotLogin: "bot"}
 			var err error
-			if recovery {
+			if kind == "fixed reply" {
+				prepared.reply = "Review needs a pull request."
+				err = orchestrator.publish(context.Background(), prepared, Result{})
+			} else if kind == "recovery" {
 				prepared.branch = "minion/fix-recorded"
 				store.Data.PendingFixes[request.ID] = strings.Repeat("b", 40)
 				err = orchestrator.publish(context.Background(), prepared, Result{})
@@ -58,7 +61,7 @@ func TestFixReplyFailureConsumesPublicationAttempt(t *testing.T) {
 				err = orchestrator.publishFix(context.Background(), prepared, Result{Answer: "No changes."})
 			}
 			var status *github.StatusError
-			if !errors.Is(err, monitor.ErrPostModelPublication) || errors.Is(err, monitor.ErrTerminalJob) || !errors.As(err, &status) || status.StatusCode != http.StatusBadGateway {
+			if errors.Is(err, monitor.ErrPostModelPublication) != (kind != "fixed reply") || errors.Is(err, monitor.ErrTerminalJob) || !errors.As(err, &status) || status.StatusCode != http.StatusBadGateway {
 				t.Fatalf("reply lost publication classification or cause: %v", err)
 			}
 		})
@@ -78,12 +81,6 @@ func TestExecuteSourceFailuresAndInvalidIncompleteResultsAreTerminal(t *testing.
 					writes++
 					t.Errorf("unexpected write %s %s", r.Method, r.URL.Path)
 					http.NotFound(w, r)
-				case r.URL.Path == "/repos/o/r/issues/7/comments":
-					_, _ = fmt.Fprint(w, `[]`)
-				case r.URL.Path == "/repos/o/r":
-					_, _ = fmt.Fprint(w, publicRepositoryJSON)
-				case r.URL.Path == "/repos/o/r/issues/7":
-					_, _ = fmt.Fprint(w, `{"title":"Task","body":"Inspect source"}`)
 				case strings.HasPrefix(r.URL.Path, "/repos/o/r/git/trees/"):
 					sha := strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/")
 					switch scenario {
@@ -94,6 +91,7 @@ func TestExecuteSourceFailuresAndInvalidIncompleteResultsAreTerminal(t *testing.
 					default:
 						writeTreeFixture(t, w, sha)
 					}
+				case serveIssueFixture(t, w, r):
 				default:
 					t.Errorf("unexpected request %s", r.URL)
 					http.NotFound(w, r)
@@ -422,7 +420,11 @@ func TestCanceledPublicationRetainsValidatedAudit(t *testing.T) {
 				t.Fatalf("canceled audit: valid=%t writes=%d err=%v", valid, writes, err)
 			}
 			dirs, err := os.ReadDir(filepath.Join(e.WorkRoot, "audits"))
-			if err != nil || len(dirs) != 1 || strings.HasPrefix(dirs[0].Name(), "incomplete-") == valid {
+			wantPrefix := "incomplete-"
+			if valid {
+				wantPrefix = "complete-"
+			}
+			if err != nil || len(dirs) != 1 || !strings.HasPrefix(dirs[0].Name(), wantPrefix) {
 				t.Fatalf("audit retention: dirs=%v err=%v", dirs, err)
 			}
 			data, err := os.ReadFile(filepath.Join(e.WorkRoot, "audits", dirs[0].Name(), "REPORT.md"))

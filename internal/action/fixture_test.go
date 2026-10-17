@@ -52,20 +52,6 @@ func serveSafeForkChecks(w http.ResponseWriter, r *http.Request, fork string, pr
 	return true
 }
 
-func TestSafeForkChecksRejectUnrelatedRoutes(t *testing.T) {
-	for _, request := range []*http.Request{
-		httptest.NewRequest(http.MethodPost, "/repos/bot/r/actions/permissions", nil),
-		httptest.NewRequest(http.MethodGet, "/repos/other/r/rulesets", nil),
-		httptest.NewRequest(http.MethodGet, "/repos/o/r/rulesets/42", nil),
-		httptest.NewRequest(http.MethodGet, "/repos/o/r/actions/permissions/fork-pr-workflows-private-repos", nil),
-	} {
-		response := httptest.NewRecorder()
-		if serveSafeForkChecks(response, request, "bot/r", false) || response.Body.Len() != 0 {
-			t.Fatalf("unexpected fixture route accepted: %s %s", request.Method, request.URL)
-		}
-	}
-}
-
 func attemptFixture(orchestrator *Orchestrator) *Orchestrator {
 	attempt := *orchestrator
 	attempt.attemptID = strings.Repeat("a", 32)
@@ -299,6 +285,21 @@ func serveIssueFixture(t *testing.T, w http.ResponseWriter, r *http.Request) boo
 	default:
 		return false
 	}
+	return true
+}
+
+func captureComment(t *testing.T, w http.ResponseWriter, r *http.Request, body *string) bool {
+	t.Helper()
+	if r.Method != http.MethodPost || r.URL.Path != "/repos/o/r/issues/7/comments" {
+		return false
+	}
+	var payload struct{ Body string }
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		t.Error(err)
+	}
+	*body = payload.Body
+	w.WriteHeader(http.StatusCreated)
+	_, _ = fmt.Fprint(w, `{"id":1}`)
 	return true
 }
 

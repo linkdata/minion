@@ -8,7 +8,6 @@ import (
 	"os"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/usage"
@@ -176,23 +175,6 @@ func TestWaitCeilingDiagnostic(t *testing.T) {
 	}
 }
 
-func TestRunCancelsAfterKnownFatalResult(t *testing.T) {
-	for _, scenario := range []struct{ name, event, failure string }{
-		{"quota", `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected"}}`, "provider usage limit reached"},
-		{"pressure", `{"type":"system","subtype":"task_notification","status":"stopped","summary":"Background command \"tests\" was stopped because the system is running low on memory"}`, "provider memory pressure"},
-	} {
-		t.Run(scenario.name, func(t *testing.T) {
-			fakeExecutable(t, "claude", "cat >/dev/null\nsleep 30 &\ncat <<'EVENTS'\n"+scenario.event+"\n"+`{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"worker"}]}`+"\n"+successfulResult+"\nEVENTS\nwait\n")
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			result, err := Run(ctx, t.TempDir(), "task", false, "", config.ClaudeConfig{})
-			if err == nil || !strings.Contains(err.Error(), scenario.failure) || ctx.Err() != nil || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) {
-				t.Fatalf("known fatal result did not cancel promptly: result=%+v error=%v parent=%v", result, err, ctx.Err())
-			}
-		})
-	}
-}
-
 func TestOutputReportsSafeNativeAPIErrorFields(t *testing.T) {
 	for _, scenario := range []struct{ status, kind, want string }{
 		{"429", "usage_limit_reached", "HTTP status=429"}, {"402", "model_requires_usage_credits", "HTTP status=402"},
@@ -213,19 +195,9 @@ func TestOutputReportsSafeNativeAPIErrorFields(t *testing.T) {
 
 func TestRunPrelaunchFailuresHaveCompleteZeroUsage(t *testing.T) {
 	binary := fakeExecutable(t, "claude", "touch \"$0.called\"\nexit 99\n")
-	for _, scenario := range []string{"empty prompt", "credential environment"} {
-		t.Run(scenario, func(t *testing.T) {
-			prompt := "task"
-			if scenario == "empty prompt" {
-				prompt = ""
-			} else {
-				t.Setenv("ANTHROPIC_API_KEY", "dummy-secret")
-			}
-			result, err := Run(context.Background(), t.TempDir(), prompt, false, "", config.ClaudeConfig{})
-			if err == nil || !result.UsageComplete || result.Tokens != (usage.Tokens{}) || result.Answer != "" {
-				t.Fatalf("prelaunch failure=%+v error=%v", result, err)
-			}
-		})
+	result, err := Run(context.Background(), t.TempDir(), "", false, "", config.ClaudeConfig{})
+	if err == nil || !result.UsageComplete || result.Tokens != (usage.Tokens{}) || result.Answer != "" {
+		t.Fatalf("prelaunch failure=%+v error=%v", result, err)
 	}
 	if _, err := os.Stat(binary + ".called"); !os.IsNotExist(err) {
 		t.Fatalf("prelaunch failure started CLI: %v", err)

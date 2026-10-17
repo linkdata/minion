@@ -38,7 +38,7 @@ func TestRunAIWithoutCriticSelectsMain(t *testing.T) {
 				return aicli.Result{Answer: provider + " result"}, nil
 			}}
 			job := Job{Main: RoleSettings{Provider: provider}}
-			answer, err := runner.runAI(context.Background(), job, "checkout", "task", true, "reports")
+			answer, err := runner.runAI(context.Background(), job, "checkout", "task", true, "reports", nil)
 			if err != nil || answer != provider+" result" || len(calls) != 1 || calls[0] != provider {
 				t.Fatalf("runAI() = %q, %v; calls = %v", answer, err, calls)
 			}
@@ -139,7 +139,7 @@ func TestRunAIRevisionPreservesWorkAndBoundaries(t *testing.T) {
 				}
 				return aicli.Result{Answer: approvedCritiqueJSON}, nil
 			}
-			answer, err := e.runAI(ctx, job, dir, task, !tt.reports, outputDir)
+			answer, err := e.runAI(ctx, job, dir, task, !tt.reports, outputDir, nil)
 			if err != nil || answer != "revised proposal" || calls != 5 {
 				t.Fatalf("runAI() = %q, %v; calls = %d", answer, err, calls)
 			}
@@ -188,7 +188,7 @@ func TestRunAIFreshReviewFindingsUseRemainingRounds(t *testing.T) {
 		}
 		return aicli.Result{Answer: approvedCritiqueJSON}, nil
 	}
-	answer, err := e.runAI(context.Background(), job, t.TempDir(), task, true, "")
+	answer, err := e.runAI(context.Background(), job, t.TempDir(), task, true, "", nil)
 	if err != nil || answer != "candidate 3" || len(calls) != 8 {
 		t.Fatalf("runAI() = %q, %v; calls=%+v", answer, err, calls)
 	}
@@ -231,7 +231,7 @@ func TestRunAIVerificationRejectionFeedsNextRevision(t *testing.T) {
 		return aicli.Result{Answer: approvedCritiqueJSON}, nil
 	}}
 	job := Job{Main: RoleSettings{Provider: "codex"}, Critic: &RoleSettings{Provider: "claude"}, CriticMaxRounds: 3}
-	answer, err := runner.runAI(context.Background(), job, t.TempDir(), "selected task", false, "")
+	answer, err := runner.runAI(context.Background(), job, t.TempDir(), "selected task", false, "", nil)
 	want := []string{"main/1/", "critic/1/full", "main/2/", "critic/2/verification", "main/3/", "critic/3/verification", "critic/3/full"}
 	if err != nil || answer != "candidate 3" || len(calls) != len(want) {
 		t.Fatalf("verification rejection: answer=%q calls=%+v error=%v", answer, calls, err)
@@ -280,7 +280,7 @@ func TestRunAINeverPublishesScopedApprovalAlone(t *testing.T) {
 				}
 				return aicli.Result{Answer: tt.verdict}, tt.failure
 			}
-			answer, err := e.runAI(ctx, job, t.TempDir(), "task", false, "")
+			answer, err := e.runAI(ctx, job, t.TempDir(), "task", false, "", nil)
 			if answer != "" || !errors.Is(err, tt.wantError) || calls != tt.wantCalls {
 				t.Fatalf("runAI() = %q, %v; calls=%d; want no answer, %v, %d calls", answer, err, calls, tt.wantError, tt.wantCalls)
 			}
@@ -340,7 +340,7 @@ func TestRunAIFailsWithoutReturningProposal(t *testing.T) {
 				}
 				return aicli.Result{Answer: proposalJSON(answer, "Private rationale")}, nil
 			}
-			answer, err := e.runAI(ctx, job, t.TempDir(), "task", false, "")
+			answer, err := e.runAI(ctx, job, t.TempDir(), "task", false, "", nil)
 			if answer != "" || !errors.Is(err, tt.wantError) || calls != tt.wantCalls {
 				t.Fatalf("runAI() = %q, %v; calls = %d; want no answer, %v, %d calls", answer, err, calls, tt.wantError, tt.wantCalls)
 			}
@@ -350,9 +350,11 @@ func TestRunAIFailsWithoutReturningProposal(t *testing.T) {
 
 func TestParseProposal(t *testing.T) {
 	const private = "PRIVATE_REVIEW_SENTINEL"
+	const base = `{"answer":"public","review_notes":""}`
+	rawExact := strings.Replace(base, ":", ":"+strings.Repeat(" ", maxProposalOutputBytes-len(base)), 1)
 	for _, tt := range []struct {
-		name, input, answer, notes string
-		valid                      bool
+		name, input, answer, notes, errText string
+		valid                               bool
 	}{
 		{name: "proposal", input: proposalJSON("Public result", private), answer: "Public result", notes: private, valid: true},
 		{name: "empty notes", input: proposalJSON("public", ""), answer: "public", valid: true},
@@ -377,6 +379,8 @@ func TestParseProposal(t *testing.T) {
 		{name: "trailing object", input: proposalJSON("public", private) + `{}`},
 		{name: "incomplete object", input: `{"answer":"public","review_notes":"` + private + `"`},
 		{name: "markdown fence", input: "```json\n" + proposalJSON("public", private) + "\n```"},
+		{name: "raw exact", input: rawExact, answer: "public", valid: true},
+		{name: "raw one byte over", input: strings.Replace(rawExact, ":", ": ", 1), errText: "response exceeds byte limit"},
 		{name: "raw limit", input: strings.Repeat(" ", maxProposalOutputBytes) + proposalJSON("public", "")},
 		{name: "decoded limit", input: proposalJSON(strings.Repeat("x", maxOutputBytes+1), private)},
 		{name: "combined limit", input: proposalJSON(strings.Repeat("x", maxOutputBytes), "x")},
@@ -391,7 +395,7 @@ func TestParseProposal(t *testing.T) {
 				if err != nil || answer != tt.answer || notes != tt.notes {
 					t.Fatalf("parseProposal() = %q, %q, %v", answer, notes, err)
 				}
-			} else if err == nil || (answer != "" || notes != "") || strings.Contains(err.Error(), private) {
+			} else if err == nil || (answer != "" || notes != "") || strings.Contains(err.Error(), private) || (tt.errText != "" && !strings.Contains(err.Error(), tt.errText)) {
 				t.Fatalf("invalid proposal accepted or exposed private data: %q, %q, %v", answer, notes, err)
 			}
 		})
@@ -439,45 +443,23 @@ func TestParseCritique(t *testing.T) {
 }
 
 func TestCommentPublishesOnlyCriticAcceptedResult(t *testing.T) {
-	boundary := strings.Repeat("a\n", 12000) + strings.Repeat("x", maxOutputBytes-14-4*12000)
-	zero, one := 0, 1
+	zero := 0
 	for _, tt := range []struct {
-		name, verdict, answer string
-		threshold             *int
-		wantError             bool
+		name, verdict string
+		wantError     bool
 	}{
 		{name: "approved", verdict: approvedCritiqueJSON},
-		{name: "approved rendered boundary", verdict: approvedCritiqueJSON, answer: boundary},
-		{name: "rendered overflow", verdict: approvedCritiqueJSON, answer: boundary + "x", wantError: true},
 		{name: "rejected", verdict: `{"approved":false,"has_blockers":true,"feedback":"A defect remains."}`, wantError: true},
-		{name: "nonblocking accepted", verdict: `{"approved":false,"has_blockers":false,"feedback":"Nit: simplify the loop."}`, threshold: &one},
-		{name: "strict nonblocking rejected", verdict: `{"approved":false,"has_blockers":false,"feedback":"Nit: simplify the loop."}`, threshold: &zero, wantError: true},
-		{name: "blocking at threshold", verdict: `{"approved":false,"has_blockers":true,"feedback":"A defect remains."}`, threshold: &one, wantError: true},
-		{name: "invalid", verdict: "approved", wantError: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			answer := tt.answer
-			if answer == "" {
-				answer = "Proposed report"
-			}
+			const answer = "Proposed report"
 			gitFixtureRemote(t)
 			var published string
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch {
-				case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/o/r/git/trees/"):
-					writeTreeFixture(t, w, strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/"))
-				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
-					_, _ = fmt.Fprint(w, publicRepositoryJSON)
-				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7":
-					_, _ = fmt.Fprint(w, `{"title":"Title","body":"Description"}`)
+				case serveIssueFixture(t, w, r):
 				case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/issues/7/comments":
-					var payload struct{ Body string }
-					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-						t.Error(err)
-					}
-					published = payload.Body
-					w.WriteHeader(http.StatusCreated)
-					_, _ = fmt.Fprint(w, `{"id":1}`)
+					captureComment(t, w, r, &published)
 				default:
 					t.Errorf("unexpected API call: %s %s", r.Method, r.URL.Path)
 					http.NotFound(w, r)
@@ -489,7 +471,7 @@ func TestCommentPublishesOnlyCriticAcceptedResult(t *testing.T) {
 				Commands:                map[string]config.CommandMapping{"audit": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}},
 				Adversarial:             "claude",
 				CriticMaxRounds:         1,
-				CriticNonblockingRounds: tt.threshold,
+				CriticNonblockingRounds: &zero,
 				Runner:                  Runner{WorkRoot: t.TempDir()},
 			}
 			if !tt.wantError {

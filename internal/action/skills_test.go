@@ -96,10 +96,10 @@ func TestRunnerSeparatesMainAndCriticSkills(t *testing.T) {
 			criticRole := RoleSettings{Provider: critic,
 				AlwaysOnSkills: mainRole.AlwaysOnSkills}
 			configured := *runner
-			if err := configured.configureRole(mainRole); err != nil {
+			if err := configured.ConfigureRole(mainRole); err != nil {
 				t.Fatal(err)
 			}
-			if err := configured.configureRole(criticRole); err != nil {
+			if err := configured.ConfigureRole(criticRole); err != nil {
 				t.Fatal(err)
 			}
 			mainSkills, criticSkills := configured.Codex.Skills, configured.Claude.Skills
@@ -118,11 +118,22 @@ func TestRunnerSeparatesMainAndCriticSkills(t *testing.T) {
 			if runner.Codex.Skills[0] != "stale codex skill" || runner.Claude.Skills[0] != "stale claude skill" {
 				t.Fatal("per-job selection changed shared runner settings")
 			}
+
+			if err := configured.ConfigureRole(RoleSettings{Provider: critic}); err != nil {
+				t.Fatal(err)
+			}
+			selected := configured.Codex.Skills
+			if critic == "claude" {
+				selected = configured.Claude.Skills
+			}
+			if len(selected) != 0 {
+				t.Fatalf("empty role retained stale skills: %v", selected)
+			}
 			writeActionTestSkills(t, home, criticRoot, testReviewSkillURL)
 			if err := os.RemoveAll(filepath.Dir(wantMain[0])); err != nil {
 				t.Fatal(err)
 			}
-			if err := configured.configureRole(mainRole); err == nil {
+			if err := configured.ConfigureRole(mainRole); err == nil {
 				t.Fatal("main used a required skill installed only for its critic")
 			}
 		})
@@ -149,7 +160,7 @@ func TestRunnerRequiresEverySkillAndLoadsOptionalSkills(t *testing.T) {
 	}
 	role := RoleSettings{Provider: "codex", Skills: executor.Commands["inspect"].Skills,
 		AlwaysOnSkills: executor.AlwaysOnSkills}
-	if err := executor.Runner.configureRole(role); err == nil || errors.Is(err, monitor.ErrTerminalJob) {
+	if err := executor.Runner.ConfigureRole(role); err == nil || errors.Is(err, monitor.ErrTerminalJob) {
 		t.Fatalf("execution must fail early and retryably for a missing required skill: %v", err)
 	}
 	installActionTestSkills(t, testReviewSkillURL, extraURL, optionalURL)
@@ -157,7 +168,7 @@ func TestRunnerRequiresEverySkillAndLoadsOptionalSkills(t *testing.T) {
 		t.Fatal(err)
 	}
 	configured := executor.Runner
-	if err := configured.configureRole(role); err != nil {
+	if err := configured.ConfigureRole(role); err != nil {
 		t.Fatal(err)
 	}
 	if len(configured.Codex.Skills) != 3 {

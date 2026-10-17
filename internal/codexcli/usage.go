@@ -49,86 +49,80 @@ type rolloutEvent struct {
 // action's agent tree. Full transcripts of unrelated sessions are never read.
 func collectUsage(ctx context.Context, home, rootID string, started time.Time, fallback *usage.Tokens, expectedChildren []string) (usage.Tokens, bool, error) {
 	var total usage.Tokens
-	if rootID == "" || home == "" || ctx.Err() != nil {
-		if fallback != nil {
-			total = *fallback
-		}
-		if len(expectedChildren) != 0 {
-			return total, false, errUnverifiedChildren
-		}
-		return total, false, nil
-	}
 	complete := true
 	files := map[string]rolloutMeta{}
 	ambiguous := map[string]bool{}
 	entries, candidates := 0, 0
-	err := walkUsageFiles(ctx, filepath.Join(home, "sessions"), started, func(path string, entry fs.DirEntry) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		entries++
-		if entries > maxUsageWalkEntries {
-			complete = false
-			return fs.SkipAll
-		}
-		if !entry.Type().IsRegular() || !strings.HasSuffix(entry.Name(), ".jsonl") {
+	if rootID != "" && home != "" {
+		err := walkUsageFiles(ctx, filepath.Join(home, "sessions"), started, func(path string, entry fs.DirEntry) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			entries++
+			if entries > maxUsageWalkEntries {
+				complete = false
+				return fs.SkipAll
+			}
+			if !entry.Type().IsRegular() || !strings.HasSuffix(entry.Name(), ".jsonl") {
+				return nil
+			}
+			info, err := entry.Info()
+			if err != nil {
+				complete = false
+				return nil
+			}
+			if info.ModTime().Before(started.Add(-time.Minute)) {
+				return nil
+			}
+			candidates++
+			if candidates > maxUsageFiles {
+				complete = false
+				return fs.SkipAll
+			}
+			f, err := os.Open(path)
+			if err != nil {
+				complete = false
+				return nil
+			}
+			scanner := rolloutScanner(ctx, io.LimitReader(f, maxUsageHeaderBytes+1), nil)
+			var event rolloutEvent
+			var meta rolloutMeta
+			ok := scanner.Scan() && len(scanner.Bytes()) <= maxUsageHeaderBytes && json.Unmarshal(scanner.Bytes(), &event) == nil && event.Type == "session_meta" && json.Unmarshal(event.Payload, &meta) == nil && meta.ID != ""
+			ok = ok && scanner.Err() == nil
+			if err := f.Close(); err != nil {
+				complete = false
+			}
+			if !ok {
+				complete = false
+				return nil
+			}
+			if meta.ParentID == "" {
+				var source struct {
+					Subagent struct {
+						Spawn struct {
+							ParentID string `json:"parent_thread_id"`
+						} `json:"thread_spawn"`
+					} `json:"subagent"`
+				}
+				if json.Unmarshal(meta.Source, &source) == nil {
+					meta.ParentID = source.Subagent.Spawn.ParentID
+				}
+			}
+			if _, exists := files[meta.ID]; exists {
+				complete = false
+				ambiguous[meta.ID] = true
+				return nil
+			}
+			meta.path = path
+			files[meta.ID] = meta
 			return nil
-		}
-		info, err := entry.Info()
+		})
 		if err != nil {
 			complete = false
-			return nil
 		}
-		if info.ModTime().Before(started.Add(-time.Minute)) {
-			return nil
-		}
-		candidates++
-		if candidates > maxUsageFiles {
-			complete = false
-			return fs.SkipAll
-		}
-		f, err := os.Open(path)
-		if err != nil {
-			complete = false
-			return nil
-		}
-		scanner := rolloutScanner(ctx, io.LimitReader(f, maxUsageHeaderBytes+1), nil)
-		var event rolloutEvent
-		var meta rolloutMeta
-		ok := scanner.Scan() && len(scanner.Bytes()) <= maxUsageHeaderBytes && json.Unmarshal(scanner.Bytes(), &event) == nil && event.Type == "session_meta" && json.Unmarshal(event.Payload, &meta) == nil && meta.ID != ""
-		ok = ok && scanner.Err() == nil
-		if err := f.Close(); err != nil {
-			complete = false
-		}
-		if !ok {
-			complete = false
-			return nil
-		}
-		if meta.ParentID == "" {
-			var source struct {
-				Subagent struct {
-					Spawn struct {
-						ParentID string `json:"parent_thread_id"`
-					} `json:"thread_spawn"`
-				} `json:"subagent"`
-			}
-			if json.Unmarshal(meta.Source, &source) == nil {
-				meta.ParentID = source.Subagent.Spawn.ParentID
-			}
-		}
-		if _, exists := files[meta.ID]; exists {
-			complete = false
-			ambiguous[meta.ID] = true
-			return nil
-		}
-		meta.path = path
-		files[meta.ID] = meta
-		return nil
-	})
-	if err != nil {
-		complete = false
 	}
-	if ctx.Err() != nil {
+
+	if rootID == "" || home == "" || ctx.Err() != nil {
 		if fallback != nil {
 			total = *fallback
 		}
@@ -282,14 +276,14 @@ func readUsageDir(ctx context.Context, path string, visit func(string, fs.DirEnt
 // long line; transcript reads also distinguish an incomplete final line.
 func rolloutScanner(ctx context.Context, r io.Reader, complete *bool) *bufio.Scanner {
 	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 64<<10), maxEventBytes+2)
+	scanner.Buffer(make([]byte, 64<<10), aicli.MaxEventBytes+2)
 	dropping := false
 	scanner.Split(func(data []byte, atEOF bool) (int, []byte, error) {
 		if err := ctx.Err(); err != nil {
 			return 0, nil, err
 		}
 		newline := bytes.IndexByte(data, '\n')
-		if dropping || newline > maxEventBytes || (newline < 0 && len(data) > maxEventBytes) {
+		if dropping || newline > aicli.MaxEventBytes || (newline < 0 && len(data) > aicli.MaxEventBytes) {
 			if complete != nil {
 				*complete = false
 			}
@@ -328,15 +322,13 @@ func readRolloutUsage(ctx context.Context, meta rolloutMeta, rootID string, budg
 	if err != nil {
 		return usage.Tokens{}, false, nil, childError
 	}
-	limit := int64(maxUsageRolloutBytes)
-	if *budget < limit {
-		limit = *budget
-	}
+	limit := min(int64(maxUsageRolloutBytes), *budget)
 	reader := &io.LimitedReader{R: f, N: limit + 1}
 	complete, readable := true, true
 	scanner := rolloutScanner(ctx, reader, &readable)
 	var total, latest, inherited usage.Tokens
 	seenRecord, seenSnapshot := false, false
+	seenHeader, inheritedWithoutBoundary := false, false
 	responses := map[string]usage.Tokens{}
 	turns := map[string]bool{}
 	ownedTurns := map[string]bool{}
@@ -361,6 +353,18 @@ func readRolloutUsage(ctx context.Context, meta rolloutMeta, rootID string, budg
 			continue
 		}
 		switch event.Type {
+		case "session_meta":
+			if !seenHeader {
+				seenHeader = true
+				var header rolloutMeta
+				if json.Unmarshal(event.Payload, &header) != nil || header.ID != meta.ID {
+					complete, readable = false, false
+				}
+			} else if meta.ID != rootID && meta.HistoryStart == nil {
+				// A fresh child has no copied header. Without a boundary, a
+				// later session header prevents attributing inherited lifecycle.
+				inheritedWithoutBoundary, complete = true, false
+			}
 		case "token_usage_record":
 			var record struct {
 				ThreadID   string          `json:"thread_id"`
@@ -378,7 +382,7 @@ func readRolloutUsage(ctx context.Context, meta rolloutMeta, rootID string, budg
 			if record.ThreadID != meta.ID {
 				continue
 			}
-			if meta.ID != rootID && (meta.HistoryStart == nil || event.Ordinal <= *meta.HistoryStart) {
+			if meta.ID != rootID && meta.HistoryStart != nil && event.Ordinal < *meta.HistoryStart {
 				complete = false
 			}
 			tokens, valid := rolloutTokens(record.Usage)
@@ -416,7 +420,7 @@ func readRolloutUsage(ctx context.Context, meta rolloutMeta, rootID string, budg
 				complete, readable = false, false
 				continue
 			}
-			own := meta.ID == rootID || (meta.HistoryStart != nil && event.Ordinal > *meta.HistoryStart)
+			own := meta.ID == rootID || (!inheritedWithoutBoundary && (meta.HistoryStart == nil || event.Ordinal >= *meta.HistoryStart))
 			if own && (payload.ThreadID == "" || payload.ThreadID == meta.ID) {
 				if payload.Type == "collab_agent_spawn_end" && payload.NewThreadID != "" {
 					appendChildren(payload.NewThreadID)
@@ -479,17 +483,17 @@ func readRolloutUsage(ctx context.Context, meta rolloutMeta, rootID string, budg
 	if scanner.Err() != nil {
 		readable = false
 	}
-	complete = complete && readable
+	complete = complete && readable && (meta.ID == rootID || seenHeader)
 	// Known helpers require a fully read, attributable completed latest turn.
 	// Missing counters alone do not prevent that lifecycle proof.
-	if readable && ctx.Err() == nil && meta.HistoryStart != nil && latestOwnTurn != "" && latestOwnDone && !latestOwnAborted {
+	if seenHeader && readable && ctx.Err() == nil && !inheritedWithoutBoundary && latestOwnTurn != "" && latestOwnDone && !latestOwnAborted {
 		childError = nil
 	}
 	if tooManyChildren {
 		childError = errors.Join(childError, fmt.Errorf("%w: Codex usage agent count exceeded the limit", aicli.ErrOutputLimit))
 	}
 	if !seenRecord {
-		if meta.ID != rootID && (!complete || meta.HistoryStart == nil) {
+		if meta.ID != rootID && !complete {
 			return usage.Tokens{}, false, children, childError
 		}
 		total = latest.Sub(inherited)
@@ -522,7 +526,5 @@ func readRolloutUsage(ctx context.Context, meta rolloutMeta, rootID string, budg
 			break
 		}
 	}
-	// Older child rollouts without a history boundary cannot prove that a later
-	// turn was not interrupted before its first usage record.
-	return total, complete && (meta.ID == rootID || meta.HistoryStart != nil), children, childError
+	return total, complete, children, childError
 }

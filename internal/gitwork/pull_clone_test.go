@@ -18,12 +18,8 @@ func TestSnapshotRejectsUnrelatedPullRequestHistories(t *testing.T) {
 	fixture.git(fixture.source, "commit", "-m", "unrelated root")
 	head := fixture.git(fixture.source, "rev-parse", "HEAD")
 	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/pull/7/head")
-	checkout, err := clonePullRequestFromURL(context.Background(), t.TempDir(), fixture.remote, 7, "main", head, localTreeMetadata(fixture.source))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = checkout.Close() })
-	_, err = checkout.Snapshot(context.Background(), false)
+	checkout := fixture.keepCheckout(clonePullRequestFromURL(context.Background(), t.TempDir(), fixture.remote, 7, "main", head, localTreeMetadata(fixture.source)))
+	_, err := checkout.Snapshot(context.Background(), false)
 	if !errors.Is(err, ErrUnsupportedSource) || !strings.Contains(err.Error(), "no common ancestor") {
 		t.Fatalf("unrelated histories were retryable: %v", err)
 	}
@@ -34,10 +30,7 @@ func TestClonePullRequestSkipsUnusedBaseTip(t *testing.T) {
 		t.Run(kind, func(t *testing.T) {
 			fixture := newFixture(t)
 			writeFile(t, filepath.Join(fixture.source, "README.md"), "PR head\n")
-			fixture.git(fixture.source, "add", ".")
-			fixture.git(fixture.source, "commit", "-m", "PR head")
-			head := fixture.git(fixture.source, "rev-parse", "HEAD")
-			fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/pull/7/head")
+			head := fixture.commit("refs/pull/7/head", "PR head")
 			fixture.git(fixture.source, "checkout", "--detach", fixture.base)
 			unused := "base-only"
 			want := ErrCheckoutTooLarge
@@ -80,11 +73,7 @@ func TestClonePullRequestSkipsUnusedBaseTip(t *testing.T) {
 			if baseLookups != 1 {
 				t.Fatalf("default clone skipped base preflight: lookups=%d", baseLookups)
 			}
-			checkout, err := clonePullRequestFromURL(context.Background(), t.TempDir(), url, 7, "main", head, metadata)
-			if err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(func() { _ = checkout.Close() })
+			checkout := fixture.keepCheckout(clonePullRequestFromURL(context.Background(), t.TempDir(), url, 7, "main", head, metadata))
 			snapshot, err := checkout.Snapshot(context.Background(), false)
 			if err != nil || snapshot.Head != head || snapshot.Base != base || snapshot.MergeBase != fixture.base || len(snapshot.Files) != 1 || string(snapshot.Files[0].Data) != "PR head\n" {
 				t.Fatalf("PR snapshot=%+v error=%v", snapshot, err)
@@ -120,15 +109,7 @@ func TestPullRequestRejectsDeletedMergeBaseMetadataAliasBeforeBlobFetch(t *testi
 			head := fixture.git(fixture.source, "rev-parse", "HEAD")
 			fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/pull/7/head")
 			fixture.git(fixture.remote, "config", "uploadpack.allowFilter", "true")
-			checkout, err := clonePullRequestFromURL(context.Background(), t.TempDir(), "file://"+fixture.remote, 7, "main", head, localTreeMetadata(fixture.source))
-			if err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(func() {
-				if err := checkout.Close(); err != nil {
-					t.Error(err)
-				}
-			})
+			checkout := fixture.keepCheckout(clonePullRequestFromURL(context.Background(), t.TempDir(), "file://"+fixture.remote, 7, "main", head, localTreeMetadata(fixture.source)))
 			if !blobMissing(t, checkout.path, blob) {
 				t.Fatal("fixture already fetched alias blob")
 			}

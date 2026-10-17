@@ -74,12 +74,12 @@ func (r *Runner) runOnce(ctx context.Context, request modelRun) (aicli.Result, e
 	}
 }
 
-func (r *Runner) runAI(ctx context.Context, job Job, dir, prompt string, writable bool, outputDir string) (answer string, err error) {
+func (r *Runner) runAI(ctx context.Context, job Job, dir, prompt string, writable bool, outputDir string, checkpoint func([]ReviewEntry) error) (answer string, err error) {
 	var history []ReviewEntry
 	record := func(entry ReviewEntry) error {
 		history = append(history, entry)
-		if r.checkpointReview != nil {
-			if err := r.checkpointReview(slices.Clone(history)); err != nil {
+		if checkpoint != nil {
+			if err := checkpoint(slices.Clone(history)); err != nil {
 				return fmt.Errorf("%w: checkpoint review ledger: %w", monitor.ErrTerminalJob, err)
 			}
 		}
@@ -112,11 +112,9 @@ func (r *Runner) runAI(ctx context.Context, job Job, dir, prompt string, writabl
 		var feedback string
 		for _, phase := range reviewPhases(round) {
 			criticNotes, previousAnswer, previousFeedback := "", "", ""
-			if phase == reviewVerification {
-				criticNotes, previousAnswer, previousFeedback = notes, priorAnswer, priorFeedback
-			}
 			critic := modelRun{role: roleCritic, round: round, reviewPhase: phase, provider: job.Critic.Provider, model: job.Critic.Model, effort: job.Critic.Effort, outputSchema: criticOutputSchema}
 			if phase == reviewVerification {
+				criticNotes, previousAnswer, previousFeedback = notes, priorAnswer, priorFeedback
 				critic.reviewHistory = slices.Clone(history)
 			}
 			critic.criticPrompt = func(mapping, reports string) string {

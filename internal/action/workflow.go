@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"net/url"
 	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -51,34 +50,20 @@ func (e *Orchestrator) perform(ctx context.Context, request monitor.Job) error {
 	var result Result
 	if prepared.needsExecution() {
 		runner := e.Runner
+		runner.WorkRoot = e.WorkRoot
 		if prepared.job.Critic != nil {
-			if err := runner.configureRole(prepared.job.Main); err != nil {
-				return err
-			}
-			if err := runner.configureRole(*prepared.job.Critic); err != nil {
-				return err
-			}
-			storage := *e
-			storage.Runner = runner
-			initial := Result{Version: ProtocolVersion, Identity: prepared.job.Identity, SourceRef: prepared.job.Source.Head}
-			if err := storage.retainReviewLedger(prepared.job, initial); err != nil {
-				return fmt.Errorf("%w: prepare private review ledger: %w", monitor.ErrTerminalJob, err)
-			}
-			observe := runner.recordReview
+			workRoot, logger, job := e.WorkRoot, e.Logger, prepared.job
 			runner.recordReview = func(result Result) error {
-				if err := storage.retainReviewLedger(prepared.job, result); err != nil {
-					return err
-				}
-				if observe != nil {
-					return observe(result)
-				}
-				return nil
+				return saveReviewLedger(workRoot, job, result, logger)
 			}
 		}
 		result, err = runner.Run(ctx, prepared.job)
 		if err != nil {
 			e.logResult(prepared.job, result)
-			err = errors.Join(err, e.retainReviewLedger(prepared.job, result), e.retainIncompleteAudit(prepared, result))
+			if len(result.Calls) != 0 || len(result.ReviewLedger) != 0 {
+				err = errors.Join(err, e.retainReviewLedger(prepared.job, result))
+			}
+			err = errors.Join(err, e.retainIncompleteAudit(prepared, result))
 			if validationErr := result.validate(prepared.job, false); validationErr != nil {
 				return errors.Join(err, fmt.Errorf("%w: invalid incomplete action result: %w", monitor.ErrTerminalJob, validationErr))
 			}
@@ -191,7 +176,7 @@ func (e *Orchestrator) portableJob(ctx context.Context, p *preparedAction, title
 		if err := ctx.Err(); err != nil {
 			return Job{}, err
 		}
-		return Job{}, context.DeadlineExceeded
+		return Job{}, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, context.DeadlineExceeded)
 	}
 	job := Job{
 		Version: ProtocolVersion,
@@ -296,8 +281,8 @@ func (e *Orchestrator) retainIncompleteAudit(p *preparedAction, result Result) e
 }
 
 func (e *Orchestrator) retainAudit(p *preparedAction, result Result, complete bool) error {
-	root := filepath.Join(e.WorkRoot, "audits")
-	if err := os.MkdirAll(root, 0700); err != nil {
+	root, err := privateRecordsDir(e.WorkRoot, "audits")
+	if err != nil {
 		return err
 	}
 	prefix := "complete-"

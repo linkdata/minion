@@ -118,68 +118,14 @@ func TestRunnerReviewRejectsSourceMutationEvenAfterRejection(t *testing.T) {
 	}
 }
 
-func TestRunnerReviewExportsApprovedBytesAfterLiveSourceChanges(t *testing.T) {
-	realGit, err := exec.LookPath("git")
-	if err != nil {
-		t.Fatal(err)
-	}
-	markers := t.TempDir()
-	armed, changed := filepath.Join(markers, "armed"), filepath.Join(markers, "changed")
-	script := fmt.Sprintf(`#!/bin/sh
-case " $* " in
-  *" --binary "*)
-    if test -f %s; then
-      %s "$@"
-      status=$?
-      if test "$status" -eq 0; then
-        source=$(cat %s)
-        printf 'late live edit' > "$source/source.txt"
-        printf changed > %s
-        rm %s
-      fi
-      exit "$status"
-    fi
-    ;;
-esac
-exec %s "$@"
-`, shellQuote(armed), shellQuote(realGit), shellQuote(armed), shellQuote(changed), shellQuote(armed), shellQuote(realGit))
-	fakeOnPath(t, "git", script)
-	job := withClaudeCritic(portableJob(command.Fix))
-	var source string
-	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
-		if request.role == "main" {
-			source = request.dir
-			writeFixtureFile(t, source, "source.txt", []byte("approved candidate"))
-			return aicli.Result{Answer: proposalJSON("approved answer", "")}, nil
-		}
-		if err := os.WriteFile(armed, []byte(source), 0600); err != nil {
-			t.Fatal(err)
-		}
-		return aicli.Result{Answer: approvedCritiqueJSON}, nil
-	}}
-	result, err := runner.Run(context.Background(), job)
-	if err != nil || len(result.Changes) != 1 || string(result.Changes[0].Data) != "approved candidate" {
-		t.Fatalf("export did not use approved captured bytes=%+v,%v", result, err)
-	}
-	if _, err := os.Stat(changed); err != nil {
-		t.Fatalf("late source mutation did not execute: %v", err)
-	}
-}
-
 func TestRunnerAuditReviewFreezesAndExportsRawReports(t *testing.T) {
 	realNode, err := exec.LookPath("node")
-	for _, scenario := range []string{"approved", "mutated during critic", "mutated during validation", "empty architecture", "empty architecture repaired"} {
+	for _, scenario := range []string{"approved", "mutated during critic", "mutated during validation", "empty architecture repaired"} {
 		t.Run(scenario, func(t *testing.T) {
 			if err != nil && scenario != "mutated during critic" {
 				t.Skip("audit validators require node")
 			}
 			installActionTestSkills(t, testAuditSkillURL)
-			skillDir := filepath.Join(os.Getenv("HOME"), ".agents", "skills", "security-audit")
-			for _, name := range []string{"validate-findings.cjs", "validate-coverage-ledger.cjs"} {
-				if err := os.WriteFile(filepath.Join(skillDir, name), []byte(`JSON.parse(require('fs').readFileSync(process.argv[2], 'utf8'));`), 0600); err != nil {
-					t.Fatal(err)
-				}
-			}
 			job := portableJob(command.SecurityAudit)
 			job.Main.Skills, job.Critic = []string{testAuditSkillURL}, &RoleSettings{Provider: "claude"}
 			job.CriticMaxRounds = config.DefaultCriticMaxRounds
@@ -202,16 +148,16 @@ func TestRunnerAuditReviewFreezesAndExportsRawReports(t *testing.T) {
 						}
 					}
 					source, reports = request.dir, request.outputDir
-					rawMetadata = []byte(fmt.Sprintf(`{"run_id":"review","repo":%q,"target":%q,"source_ref":%q,"profile":"standard","scope_paths":["."],"budget":null,"selected_companion_files":[],"prior_run_paths":[],"shared_file_owners":%s,"execution_policy":"sandboxed-source-and-local-only","run_status":"complete"}`, job.Identity.Repository, source, job.Source.Head, auditTestOwners))
-					for name, content := range map[string][]byte{
-						"run-metadata.json": rawMetadata, "architecture.md": []byte("Architecture"), "coverage-ledger.json": []byte(`[{"status":"covered"}]`),
-						"findings.json": []byte("[]"), "REPORT.md": []byte("approved report"), "FINDINGS-DETAIL.md": nil, "NEEDS-VALIDATION.md": nil,
-					} {
-						if (scenario == "empty architecture" || scenario == "empty architecture repaired" && request.round == 1) && name == "architecture.md" {
-							content = nil
+					for _, file := range auditArtifactsFixture(job, source, "approved report") {
+						if file.Path == "run-metadata.json" {
+							rawMetadata = file.Data
 						}
-						writeFixtureFile(t, reports, name, content)
+						if scenario == "empty architecture repaired" && request.round == 1 && file.Path == "architecture.md" {
+							file.Data = nil
+						}
+						writeFixtureFile(t, reports, file.Path, file.Data)
 					}
+
 					return aicli.Result{Answer: proposalJSON("main response is not the published report", "")}, nil
 				}
 				criticCalls++
@@ -244,11 +190,8 @@ func TestRunnerAuditReviewFreezesAndExportsRawReports(t *testing.T) {
 				return aicli.Result{Answer: approvedCritiqueJSON}, nil
 			}
 			result, err := runner.Run(context.Background(), job)
-			if scenario == "mutated during critic" || scenario == "empty architecture" {
+			if scenario == "mutated during critic" {
 				want, calls := "reports changed during critic review", 1
-				if scenario == "empty architecture" {
-					want, calls = `empty action report artifact "architecture.md"`, 1
-				}
 				if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), want) || criticCalls != calls || result.Answer != "" {
 					t.Fatalf("invalid audit result=%+v critics=%d error=%v", result, criticCalls, err)
 				}

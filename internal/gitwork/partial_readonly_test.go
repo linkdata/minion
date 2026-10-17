@@ -34,10 +34,7 @@ func partialReadOnlyFixture(t *testing.T, pull, link bool) (gitFixture, *Checkou
 			t.Fatal(err)
 		}
 	}
-	fixture.git(fixture.source, "add", ".")
-	fixture.git(fixture.source, "commit", "-m", "base files")
-	base := fixture.git(fixture.source, "rev-parse", "HEAD")
-	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/heads/main")
+	base := fixture.commit("refs/heads/main", "base files")
 	head := base
 	if pull {
 		for i := 0; i < 3; i++ {
@@ -55,10 +52,7 @@ func partialReadOnlyFixture(t *testing.T, pull, link bool) (gitFixture, *Checkou
 				t.Fatal(err)
 			}
 		}
-		fixture.git(fixture.source, "add", ".")
-		fixture.git(fixture.source, "commit", "-m", "PR changes")
-		head = fixture.git(fixture.source, "rev-parse", "HEAD")
-		fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/pull/7/head")
+		head = fixture.commit("refs/pull/7/head", "PR changes")
 	}
 	var checkout *Checkout
 	var err error
@@ -69,14 +63,7 @@ func partialReadOnlyFixture(t *testing.T, pull, link bool) (gitFixture, *Checkou
 	} else {
 		checkout, err = cloneFromURL(context.Background(), t.TempDir(), url, "main", localTreeMetadata(fixture.source), false)
 	}
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := checkout.Close(); err != nil {
-			t.Error(err)
-		}
-	})
+	checkout = fixture.keepCheckout(checkout, err)
 	if got := fixture.git(checkout.path, "config", "remote.origin.promisor"); got != "true" {
 		t.Fatalf("fixture is not partial: promisor=%q", got)
 	}
@@ -138,7 +125,8 @@ func TestPartialReadOnlySnapshotBulkFetchesBeforeDiff(t *testing.T) {
 		pull, link bool
 		sessions   int
 	}{
-		{"default", false, false, 1}, {"PR regular files", true, false, 1}, {"PR omitted link", true, true, 2},
+		{"default", false, false, 1}, {"default omitted link", false, true, 1},
+		{"PR regular files", true, false, 1}, {"PR omitted link", true, true, 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fixture, checkout, base, head := partialReadOnlyFixture(t, tc.pull, tc.link)
@@ -173,6 +161,9 @@ func TestPartialReadOnlySnapshotBulkFetchesBeforeDiff(t *testing.T) {
 			if tc.pull && (snapshot.Base != base || snapshot.MergeBase != base || len(snapshot.ChangedPaths) != 5+len(snapshot.Omitted)) {
 				t.Fatalf("PR comparison lost: base=%s merge-base=%s changed=%q", snapshot.Base, snapshot.MergeBase, snapshot.ChangedPaths)
 			}
+			if !tc.pull && (snapshot.Base != "" || snapshot.MergeBase != "") {
+				t.Fatalf("default snapshot unexpectedly compared another revision: base=%s merge-base=%s", snapshot.Base, snapshot.MergeBase)
+			}
 			if tc.link && (len(snapshot.Omitted) != 1 || snapshot.Omitted[0] != "omitted-link") {
 				t.Fatalf("omitted links=%q", snapshot.Omitted)
 			}
@@ -196,9 +187,13 @@ func TestPartialReadOnlySnapshotBulkFetchesBeforeDiff(t *testing.T) {
 				t.Fatal(err)
 			}
 			assertPartialReadOnlyState(t, checkout, config)
-			second, err := checkout.Snapshot(context.Background(), false)
-			if err != nil || !reflect.DeepEqual(second, snapshot) || sessions() != tc.sessions {
-				t.Fatalf("local repeated snapshot changed contents/config or contacted origin: sessions=%d error=%v", sessions(), err)
+			second, err := checkout.Snapshot(context.Background(), true)
+			if err != nil || !second.HistoryRequested || !second.HistoryComplete || len(second.History) == 0 || len(second.History) > workspace.MaxContextBytes {
+				t.Fatalf("history snapshot failed: requested=%t complete=%t bytes=%d error=%v", second.HistoryRequested, second.HistoryComplete, len(second.History), err)
+			}
+			second.History, second.HistoryRequested, second.HistoryComplete = nil, false, false
+			if !reflect.DeepEqual(second, snapshot) || sessions() != tc.sessions {
+				t.Fatalf("history changed source/comparison or contacted origin: sessions=%d", sessions())
 			}
 			assertPartialReadOnlyState(t, checkout, config)
 			t.Logf("file:// partial Snapshot: first=%d sessions; repeat=0 additional; head=%d selected-base=%d omitted=%d", tc.sessions, len(snapshot.Files), len(snapshot.BaseFiles), len(snapshot.Omitted))
@@ -232,6 +227,7 @@ func TestPartialReadOnlySnapshotRefusesBeforeBulkFetch(t *testing.T) {
 				}
 				return tree, err
 			}
+			log := recordSnapshotContentCalls(t)
 			_, err = checkout.Snapshot(context.Background(), false)
 			if !errors.Is(err, ErrCheckoutTooLarge) || combined && !strings.Contains(err.Error(), "combined") || sessions() != 0 {
 				t.Fatalf("refusal fetched blob data: sessions=%d error=%v", sessions(), err)
@@ -242,6 +238,9 @@ func TestPartialReadOnlySnapshotRefusesBeforeBulkFetch(t *testing.T) {
 				}
 			}
 			assertPartialReadOnlyState(t, checkout, config)
+			if data, err := os.ReadFile(log); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("metadata preflight requested blob contents or rendered diff: %q error=%v", data, err)
+			}
 			t.Log("file:// partial metadata refusal: zero fetch sessions; head/base blobs remain missing")
 		})
 	}

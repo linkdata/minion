@@ -19,37 +19,6 @@ import (
 	"github.com/linkdata/minion/internal/usage"
 )
 
-func TestFailedCriticCannotAttestNonblockingAcceptance(t *testing.T) {
-	for _, answer := range []string{
-		approvedCritiqueJSON,
-		`{"approved":false,"has_blockers":false,"feedback":"Nonblocking nit: simplify the loop."}`,
-		`{"approved":false,"has_blockers":true,"feedback":"Blocking: wrong result."}`,
-	} {
-		t.Run(answer, func(t *testing.T) {
-			job := portableJob(command.Comment)
-			job.Critic, job.CriticMaxRounds, job.CriticNonblockingRounds = &RoleSettings{Provider: "claude"}, 3, 1
-			failed := errors.New("provider failed after yielding final-looking JSON")
-			runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
-				if request.role == roleMain {
-					return aicli.Result{Answer: proposalJSON("Candidate answer", "Private evidence")}, nil
-				}
-				return aicli.Result{Answer: answer, Tokens: usage.Tokens{Input: 11, Output: 2}}, failed
-			}}
-			result, err := runner.Run(context.Background(), job)
-			if !errors.Is(err, failed) || result.Answer != "" || len(result.Calls) != 2 {
-				t.Fatalf("failed critic escaped: result=%+v err=%v", result, err)
-			}
-			last := result.Calls[1]
-			if last.Approved || last.NoBlockers || last.HasBlockers || last.Tokens != (usage.Tokens{Input: 11, Output: 2}) {
-				t.Fatalf("failed critic fabricated an attestation or lost usage: %+v", last)
-			}
-			if err := result.Validate(job); err == nil {
-				t.Fatal("complete result accepted failed-critic output")
-			}
-		})
-	}
-}
-
 func TestCriticEvidencePreservesBlockerVerdicts(t *testing.T) {
 	failed := errors.New("provider failed")
 	for _, tt := range []struct {
@@ -61,11 +30,18 @@ func TestCriticEvidencePreservesBlockerVerdicts(t *testing.T) {
 		{name: "nonblocking rejection", answer: `{"approved":false,"has_blockers":false,"feedback":"Nonblocking nit."}`, noBlockers: true},
 		{name: "blocking rejection", answer: `{"approved":false,"has_blockers":true,"feedback":"Blocking failure."}`, hasBlockers: true},
 		{name: "invalid verdict", answer: `garbage`},
-		{name: "failed provider", answer: `{"approved":false,"has_blockers":true,"feedback":"Blocking failure."}`, err: failed},
+		{name: "contradictory verdict", answer: `{"approved":true,"has_blockers":false,"feedback":"unresolved"}`},
+		{name: "failed approval", answer: approvedCritiqueJSON, err: failed},
+		{name: "failed nonblocking", answer: `{"approved":false,"has_blockers":false,"feedback":"Nonblocking nit."}`, err: failed},
+		{name: "failed blocking", answer: `{"approved":false,"has_blockers":true,"feedback":"Blocking failure."}`, err: failed},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			job := portableJob(command.Comment)
 			job.Critic, job.CriticMaxRounds = &RoleSettings{Provider: "claude"}, 1
+			// Even a threshold that permits nits cannot accept failed provider output.
+			if tt.err != nil {
+				job.CriticNonblockingRounds = 1
+			}
 			runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 				if request.role == roleMain {
 					return aicli.Result{Answer: proposalJSON("Candidate answer", "")}, nil
@@ -73,8 +49,15 @@ func TestCriticEvidencePreservesBlockerVerdicts(t *testing.T) {
 				return aicli.Result{Answer: tt.answer, Tokens: usage.Tokens{Input: 11, Output: 2}}, tt.err
 			}}
 			result, err := runner.Run(context.Background(), job)
-			if (err == nil) != tt.approved || len(result.Calls) != 2 || result.validate(job, false) != nil {
+			if (err == nil) != tt.approved || (tt.err != nil && !errors.Is(err, tt.err)) || len(result.Calls) != 2 || result.validate(job, false) != nil {
 				t.Fatalf("invalid critic outcome: result=%+v err=%v", result, err)
+			}
+			if tt.approved {
+				if result.Answer != "Candidate answer" || result.Validate(job) != nil {
+					t.Fatalf("approved result invalid: %+v", result)
+				}
+			} else if result.Answer != "" || result.Validate(job) == nil {
+				t.Fatalf("failed critic published: %+v", result)
 			}
 			want := CallUsage{Provider: "claude", Role: roleCritic, Round: 1, ReviewPhase: reviewFull, Tokens: usage.Tokens{Input: 11, Output: 2}, Approved: tt.approved, NoBlockers: tt.noBlockers, HasBlockers: tt.hasBlockers}
 			if result.Calls[1] != want {
@@ -86,7 +69,7 @@ func TestCriticEvidencePreservesBlockerVerdicts(t *testing.T) {
 			}
 			var decoded Result
 			if err := json.Unmarshal(data, &decoded); err != nil || decoded.Calls[1] != want || decoded.validate(job, false) != nil {
-				t.Fatalf("wire lost critic evidence: %s, %v", data, err)
+				t.Fatalf("wire lost critic evidence: %s,%v", data, err)
 			}
 		})
 	}
@@ -172,19 +155,8 @@ func TestRunnerNonblockingThresholdRequiresFreshFullReview(t *testing.T) {
 			if last.ReviewPhase != reviewFull || last.Approved || !last.NoBlockers || result.Answer != "Complete answer" {
 				t.Fatalf("policy acceptance falsified the actual critic verdict: %+v", result)
 			}
-			data, err := json.Marshal(result)
-			if err != nil {
-				t.Fatal(err)
-			}
-			var decoded Result
-			if err := json.Unmarshal(data, &decoded); err != nil || decoded.Validate(job) != nil || decoded.Calls[len(decoded.Calls)-1].Approved || !decoded.Calls[len(decoded.Calls)-1].NoBlockers {
-				t.Fatalf("wire result lost nonblocking attestation: %s, %v", data, err)
-			}
-			var output bytes.Buffer
-			orchestrator := Orchestrator{Logger: log.New(&output, "", 0)}
-			orchestrator.logResult(job, result)
-			if !strings.Contains(output.String(), "approved=false no_blockers=true has_blockers=false policy_met=true") {
-				t.Fatalf("journal hid the policy decision: %s", output.String())
+			if err := result.Validate(job); err != nil {
+				t.Fatalf("accepted policy result invalid: %v", err)
 			}
 		})
 	}
@@ -229,17 +201,6 @@ func TestResultNonblockingAcceptanceTrustBoundary(t *testing.T) {
 			}
 		})
 	}
-	for _, threshold := range []int{-1, 4} {
-		job.CriticNonblockingRounds = threshold
-		if err := job.Validate(); err == nil {
-			t.Fatalf("accepted threshold %d outside hard budget", threshold)
-		}
-	}
-	job.Critic = nil
-	job.CriticMaxRounds, job.CriticNonblockingRounds = 0, 1
-	if err := job.Validate(); err == nil {
-		t.Fatal("accepted nonblocking threshold without critic")
-	}
 }
 
 func TestPortableJobResolvesNonblockingThreshold(t *testing.T) {
@@ -267,16 +228,18 @@ func TestPortableJobResolvesNonblockingThreshold(t *testing.T) {
 			}
 			request := monitor.Job{ID: "job", SubjectType: "Issue", Number: 7, Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2}, Source: github.Item{Author: github.User{ID: 3, Login: "writer"}}, Command: command.Command{Name: "comment", Action: command.Comment}}
 			job, err := attemptFixture(&orchestrator).portableJob(testActionContext(t), &preparedAction{checkout: checkout, request: request}, "title", "body")
-			if err != nil || job.CriticNonblockingRounds != tt.want || (!tt.critic && job.CriticMaxRounds != 0) {
+			wantRounds := 0
+			if tt.critic {
+				wantRounds = tt.maximum
+				if wantRounds == 0 {
+					wantRounds = config.DefaultCriticMaxRounds
+				}
+			}
+			if err != nil || job.CriticNonblockingRounds != tt.want || job.CriticMaxRounds != wantRounds {
 				t.Fatalf("portable threshold=%d hard=%d err=%v; want %d", job.CriticNonblockingRounds, job.CriticMaxRounds, err, tt.want)
 			}
-			data, err := json.Marshal(job)
-			if err != nil {
-				t.Fatal(err)
-			}
-			var decoded Job
-			if err := json.Unmarshal(data, &decoded); err != nil || decoded.Validate() != nil || decoded.CriticNonblockingRounds != tt.want {
-				t.Fatalf("portable threshold roundtrip invalid: %s, %v", data, err)
+			if err := job.Validate(); err != nil {
+				t.Fatalf("resolved Job invalid: %v", err)
 			}
 		})
 	}

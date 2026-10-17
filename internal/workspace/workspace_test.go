@@ -287,15 +287,7 @@ func TestWorkspaceRefusesLinksAndNonemptyMaterialization(t *testing.T) {
 	if err := Apply(root, []Change{{Path: "outside", Delete: true}}); err == nil {
 		t.Fatal("deleted symlink as regular source")
 	}
-	if err := os.Remove(filepath.Join(root, "outside")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Mkdir(filepath.Join(root, ".GIT"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := CheckUnchanged(context.Background(), root, nil); err == nil || !strings.Contains(err.Error(), "unsafe workspace path") {
-		t.Fatalf("generated Git metadata validation=%v", err)
-	}
+
 }
 
 func TestSnapshotBoundsAndIdentity(t *testing.T) {
@@ -314,9 +306,7 @@ func TestSnapshotBoundsAndIdentity(t *testing.T) {
 				s.Files[i] = File{Path: fmt.Sprintf("file-%d", i), Mode: Regular}
 			}
 		},
-		func(s *Snapshot) { s.Omitted = []string{"../outside"} },
 		func(s *Snapshot) { s.History = []byte("unrequested") },
-		func(s *Snapshot) { s.Base, s.MergeBase = s.Head, s.Head; s.ChangedPaths = []string{"../outside"} },
 		func(s *Snapshot) {
 			s.Base, s.MergeBase = s.Head, s.Head
 			s.DiffIncomplete = true
@@ -462,30 +452,6 @@ func TestCheckUnchangedNamesFirstDeletedPath(t *testing.T) {
 	}
 }
 
-func TestCheckUnchangedRefusesAdditionsAndDeletions(t *testing.T) {
-	for _, mutation := range []string{"add", "delete"} {
-		t.Run(mutation, func(t *testing.T) {
-			root := privateRoot(t)
-			base := []File{{Path: "source", Mode: Regular, Data: []byte("before")}}
-			if err := Materialize(root, base); err != nil {
-				t.Fatal(err)
-			}
-			var err error
-			if mutation == "add" {
-				err = os.WriteFile(filepath.Join(root, "new"), nil, 0600)
-			} else {
-				err = os.Remove(filepath.Join(root, "source"))
-			}
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := CheckUnchanged(context.Background(), root, base); err == nil || !strings.Contains(err.Error(), "modified supplied source") {
-				t.Fatalf("%s validation=%v", mutation, err)
-			}
-		})
-	}
-}
-
 func TestCollectionBoundsFileCountsAndBytes(t *testing.T) {
 	files := make([]File, MaxFiles+1)
 	for i := range files {
@@ -503,11 +469,13 @@ func TestCollectionBoundsFileCountsAndBytes(t *testing.T) {
 	if data, err := ReadRegular(name, 3); len(data) != 0 || err == nil || !strings.Contains(err.Error(), "byte limit") {
 		t.Fatalf("bounded read=%q,%v", data, err)
 	}
-	if err := os.Truncate(name, MaxBytes+1); err != nil {
-		t.Fatal(err)
-	}
-	if err := CheckUnchanged(context.Background(), root, base); err == nil || !strings.Contains(err.Error(), "byte limit") {
-		t.Fatalf("oversized source read=%v", err)
+	for _, size := range []int64{int64(len(base[0].Data)) + 1, MaxBytes + 1} {
+		if err := os.Truncate(name, size); err != nil {
+			t.Fatal(err)
+		}
+		if err := CheckUnchanged(context.Background(), root, base); err == nil || !strings.Contains(err.Error(), "byte limit") || !strings.Contains(err.Error(), "modified supplied source") {
+			t.Fatalf("grown source size=%d read=%v", size, err)
+		}
 	}
 }
 

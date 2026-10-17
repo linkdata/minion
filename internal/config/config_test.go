@@ -132,7 +132,7 @@ func TestLoadValidatesWhitelistAndResolvesPaths(t *testing.T) {
 	if _, err := Load(path); err == nil {
 		t.Fatal("accepted repository outside whitelist syntax")
 	}
-	for _, name := range []string{"../repo", "owner/.."} {
+	for _, name := range []string{"../repo", "owner/..", "owner/" + strings.Repeat("x", 101)} {
 		bad = strings.Replace(data, "example-owner/example-repo", name, 1)
 		if err := os.WriteFile(path, []byte(bad), 0600); err != nil {
 			t.Fatal(err)

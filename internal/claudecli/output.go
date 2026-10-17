@@ -17,7 +17,6 @@ import (
 )
 
 const (
-	maxEventBytes     = aicli.MaxEventBytes
 	maxResetTimestamp = 253402300799 // 9999-12-31T23:59:59Z, the last RFC3339 year.
 )
 
@@ -140,7 +139,10 @@ func (o *jsonlOutput) Write(p []byte) (int, error) {
 	if o.err != nil {
 		return len(p), nil
 	}
-	return o.stream.Write(p, o.finishLine, o.fail)
+	if o.stream.Line == nil {
+		o.stream.Line, o.stream.Fail = o.finishLine, o.fail
+	}
+	return o.stream.Write(p)
 }
 
 func (o *jsonlOutput) fail(err error) {

@@ -17,21 +17,7 @@ import (
 )
 
 func auditPreflightArtifacts(job Job, target string) []workspace.File {
-	metadata := fmt.Sprintf(`{"run_id":"preflight-test","repo":%q,"target":%q,"source_ref":%q,"profile":"standard","scope_paths":["."],"budget":null,"selected_companion_files":[],"prior_run_paths":[],"shared_file_owners":%s,"execution_policy":"sandboxed-source-and-local-only","run_status":"complete"}`, job.Identity.Repository, target, job.Source.Head, auditTestOwners)
-	var files []workspace.File
-	for _, name := range auditArtifacts {
-		data := "Audit report\n"
-		switch name {
-		case "run-metadata.json":
-			data = metadata
-		case "findings.json":
-			data = "[]"
-		case "coverage-ledger.json":
-			data = `[{"status":"covered"}]`
-		}
-		files = append(files, workspace.File{Path: name, Mode: workspace.Regular, Data: []byte(data)})
-	}
-	return files
+	return auditArtifactsFixture(job, target, "Audit report\n")
 }
 
 func TestRunnerChecksAuditPrerequisitesBeforeModel(t *testing.T) {
@@ -119,14 +105,14 @@ func TestRunnerChecksAuditPrerequisitesBeforeModel(t *testing.T) {
 }
 
 func TestAuditMissingInputsFailBeforeValidatorExecution(t *testing.T) {
-	for _, name := range []string{"findings.json", "coverage-ledger.json", "both"} {
+	for _, name := range auditArtifacts {
 		for _, empty := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/empty=%t", name, empty), func(t *testing.T) {
 				job := portableJob(command.SecurityAudit)
 				files := auditPreflightArtifacts(job, "/source")
 				var supplied []workspace.File
 				for _, file := range files {
-					if file.Path == name || name == "both" && (file.Path == "findings.json" || file.Path == "coverage-ledger.json") {
+					if file.Path == name {
 						if !empty {
 							continue
 						}
@@ -135,21 +121,45 @@ func TestAuditMissingInputsFailBeforeValidatorExecution(t *testing.T) {
 					supplied = append(supplied, file)
 				}
 				marker := filepath.Join(t.TempDir(), "node-called")
-				fakeOnPath(t, "node", "#!/bin/sh\nprintf called > "+shellQuote(marker)+"\nexit 99\n")
+				fakeOnPath(t, "node", "#!/bin/sh\nprintf called > "+shellQuote(marker)+"\nexit 0\n")
 				report, err := validateAuditFiles(context.Background(), supplied, t.TempDir(), "/installed/SKILL.md", job.Identity.Repository, "/source", job.Source.Head)
-				firstMissing := name
-				if name == "both" {
-					firstMissing = auditValidators[0].artifact
+				allowed := empty && auditArtifactMayBeEmpty(name)
+				if allowed {
+					if err != nil || report != "Audit report\n" {
+						t.Fatalf("allowed empty %s rejected: %q,%v", name, report, err)
+					}
+				} else if err == nil || !strings.Contains(err.Error(), name+" is missing or empty") || report != "" {
+					t.Fatalf("missing input accepted: report=%q error=%v", report, err)
 				}
-				if err == nil || !strings.Contains(err.Error(), firstMissing+" is missing or empty") || report != "" {
-					t.Fatalf("missing audit input accepted: report=%q error=%v", report, err)
-				}
-				if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
-					t.Fatalf("missing input invoked node: %v", err)
+				_, statErr := os.Stat(marker)
+				if allowed {
+					if statErr != nil {
+						t.Fatalf("positive control never invoked validator: %v", statErr)
+					}
+				} else if !errors.Is(statErr, os.ErrNotExist) {
+					t.Fatalf("missing input invoked node: %v", statErr)
 				}
 			})
 		}
 	}
+	t.Run("whitespace report", func(t *testing.T) {
+		job := portableJob(command.SecurityAudit)
+		files := auditPreflightArtifacts(job, "/source")
+		for i := range files {
+			if files[i].Path == "REPORT.md" {
+				files[i].Data = []byte(" \t\r\n")
+			}
+		}
+		marker := filepath.Join(t.TempDir(), "node-called")
+		fakeOnPath(t, "node", "#!/bin/sh\nprintf called > "+shellQuote(marker)+"\nexit 99\n")
+		_, err := validateAuditFiles(context.Background(), files, t.TempDir(), "/installed/SKILL.md", job.Identity.Repository, "/source", job.Source.Head)
+		if err == nil || !strings.Contains(err.Error(), "REPORT.md is missing or empty") {
+			t.Fatalf("blank report accepted: %v", err)
+		}
+		if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("blank report invoked node: %v", err)
+		}
+	})
 }
 
 func TestAuditValidatorDiagnosticsAreBoundedAndQuoted(t *testing.T) {

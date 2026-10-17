@@ -49,7 +49,7 @@ func freezeReviewSnapshot(ctx context.Context, workRoot string, job Job, source,
 		}
 	}
 	if outputDir != "" {
-		if snapshot.artifacts, _, err = readAuditArtifacts(outputDir, auditForReview); err != nil {
+		if snapshot.artifacts, _, err = readAuditArtifacts(outputDir, false); err != nil {
 			return snapshot, err
 		}
 		if snapshot.outputDir, err = os.MkdirTemp(workRoot, ".minion-review-reports-"); err != nil {
@@ -79,7 +79,7 @@ func (s *reviewSnapshot) verify(ctx context.Context) error {
 		if err := workspace.CheckUnchanged(ctx, s.outputDir, s.artifacts); err != nil {
 			return fmt.Errorf("frozen candidate reports changed during critic review: %w", err)
 		}
-		files, _, err := readAuditArtifacts(s.liveOutputDir, auditForReview)
+		files, _, err := readAuditArtifacts(s.liveOutputDir, false)
 		if err != nil {
 			return err
 		}

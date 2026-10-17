@@ -47,9 +47,7 @@ func TestTailDrainsAndKeepsSuffix(t *testing.T) {
 			t.Fatalf("chunk=%d tail=%q", size, output.String())
 		}
 	}
-	if Text(text[:DiagnosticBytes]) != text[:DiagnosticBytes] || Text(text) != text[:DiagnosticBytes]+"..." {
-		t.Fatal("diagnostic text bounds changed")
-	}
+
 }
 
 func TestTextPreservesUTF8AtTheDiagnosticBound(t *testing.T) {
@@ -58,6 +56,12 @@ func TestTextPreservesUTF8AtTheDiagnosticBound(t *testing.T) {
 		{strings.Repeat("a", DiagnosticBytes-3) + "€b", strings.Repeat("a", DiagnosticBytes-3) + "€..."},
 		{strings.Repeat("a", DiagnosticBytes-4) + "€b", strings.Repeat("a", DiagnosticBytes-4) + "€b"},
 		{strings.Repeat("a", DiagnosticBytes-1) + "é", strings.Repeat("a", DiagnosticBytes-1) + "..."},
+		{strings.Repeat("a", DiagnosticBytes-3) + "😀", strings.Repeat("a", DiagnosticBytes-3) + "..."},
+		{strings.Repeat("a", DiagnosticBytes-4) + "😀b", strings.Repeat("a", DiagnosticBytes-4) + "😀..."},
+		{"a\xffb", "a\xffb"},
+		{"a\xff" + strings.Repeat("b", DiagnosticBytes), "a\xff" + strings.Repeat("b", DiagnosticBytes-2) + "..."},
+		{strings.Repeat("a", DiagnosticBytes) + "\x80b", strings.Repeat("a", DiagnosticBytes) + "..."},
+		{strings.Repeat("a", DiagnosticBytes-1) + "\x80b", strings.Repeat("a", DiagnosticBytes-1) + "\x80..."},
 	} {
 		if got := Text(scenario.value); got != scenario.want {
 			t.Fatalf("Text(%q)=%q want%q", scenario.value, got, scenario.want)

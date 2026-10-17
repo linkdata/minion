@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -287,12 +288,18 @@ func TestReadRegularRefusesFIFOWithoutBlocking(t *testing.T) {
 
 type fileInfoWithStat struct {
 	os.FileInfo
-	stat syscall.Stat_t
+	stat     syscall.Stat_t
+	size     int64
+	mode     fs.FileMode
+	modified time.Time
 }
 
-func (info fileInfoWithStat) Sys() any { return &info.stat }
+func (info fileInfoWithStat) Sys() any           { return &info.stat }
+func (info fileInfoWithStat) Size() int64        { return info.size }
+func (info fileInfoWithStat) Mode() fs.FileMode  { return info.mode }
+func (info fileInfoWithStat) ModTime() time.Time { return info.modified }
 
-func TestReadStabilityIncludesChangeTime(t *testing.T) {
+func TestReadStabilityRejectsChangedMetadata(t *testing.T) {
 	name := filepath.Join(t.TempDir(), "source")
 	if err := os.WriteFile(name, []byte("source"), 0600); err != nil {
 		t.Fatal(err)
@@ -301,14 +308,52 @@ func TestReadStabilityIncludesChangeTime(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	before := fileInfoWithStat{FileInfo: info, stat: *info.Sys().(*syscall.Stat_t)}
-	after := before
-	if !sameChangeTime(before, after) {
-		t.Fatal("unchanged metadata was refused")
+	before := fileInfoWithStat{FileInfo: info, stat: *info.Sys().(*syscall.Stat_t), size: info.Size(), mode: info.Mode(), modified: info.ModTime()}
+	for _, test := range []struct {
+		name   string
+		change func(*fileInfoWithStat, *int)
+		want   string
+	}{
+		{"unchanged", func(*fileInfoWithStat, *int) {}, ""},
+		{"read length", func(_ *fileInfoWithStat, n *int) { *n++ }, "file changed"},
+		{"size", func(after *fileInfoWithStat, _ *int) { after.size++ }, "file changed"},
+		{"mode", func(after *fileInfoWithStat, _ *int) { after.mode ^= 0100 }, "file changed"},
+		{"mtime", func(after *fileInfoWithStat, _ *int) { after.modified = after.modified.Add(time.Second) }, "file changed"},
+		{"ctime", func(after *fileInfoWithStat, _ *int) { after.stat.Ctim.Sec++ }, "file changed"},
+		{"hard link", func(after *fileInfoWithStat, _ *int) { after.stat.Nlink++ }, "hard links changed"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			after, n := before, int(before.Size())
+			test.change(&after, &n)
+			err := checkReadStability(before, after, n)
+			if test.want == "" && err != nil || test.want != "" && (err == nil || !strings.Contains(err.Error(), test.want)) {
+				t.Fatalf("stability check=%v, want %q", err, test.want)
+			}
+		})
 	}
-	after.stat.Ctim.Sec++
-	if sameChangeTime(before, after) {
-		t.Fatal("restored size, mode and mtime hid a changed ctime")
+}
+
+func TestReadRegularChecksActualReadLength(t *testing.T) {
+	name := filepath.Join("/proc", strconv.Itoa(os.Getpid()), "status")
+	if _, err := ReadRegular(name, 1<<20); err == nil || !strings.Contains(err.Error(), "while reading") {
+		t.Fatalf("accepted proc content exceeding its stat size: %v", err)
+	}
+}
+
+func TestApplyRefusesWritingThroughTargetSymlink(t *testing.T) {
+	root, outside := privateRoot(t), filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(outside, []byte("outside"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "file")); err != nil {
+		t.Fatal(err)
+	}
+	err := Apply(root, []Change{{Path: "file", Mode: Regular, Data: []byte("changed")}})
+	if err == nil || !strings.Contains(err.Error(), "not regular") {
+		t.Fatalf("accepted target symlink: %v", err)
+	}
+	if data, err := os.ReadFile(outside); err != nil || string(data) != "outside" {
+		t.Fatalf("outside file changed: %q,%v", data, err)
 	}
 }
 

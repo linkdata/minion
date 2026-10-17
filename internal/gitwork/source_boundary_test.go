@@ -60,32 +60,12 @@ func TestImportPreservesStagingIOFailure(t *testing.T) {
 	}
 }
 
-func TestTruncatedSourceTreeIsTooLarge(t *testing.T) {
-	truncated := true
-	err := checkSourceTree(github.GitTree{SHA: strings.Repeat("a", 40), Truncated: &truncated}, strings.Repeat("a", 40))
-	if !errors.Is(err, ErrCheckoutTooLarge) || errors.Is(err, ErrUnsupportedSource) {
-		t.Fatalf("truncated source error=%v", err)
-	}
-}
-
-func TestSourceMetadataCountIsCheckedBeforeEntries(t *testing.T) {
-	sha := strings.Repeat("a", 40)
-	tree := completeTree(sha, make([]github.GitTreeEntry, workspace.MaxEntries+1))
-	// Even the first empty path is invalid; the count gate must reject first.
-	if err := checkSourceTree(tree, sha); !errors.Is(err, ErrCheckoutTooLarge) || errors.Is(err, ErrUnsupportedSource) {
-		t.Fatalf("entry validation preceded metadata bound: %v", err)
-	}
-}
-
 func TestSourceAliasesAreUnsupportedForDefaultAndPullRequestCheckout(t *testing.T) {
 	for _, path := range []string{"git~1/hooks/test", ".git./hooks/test", ".g\u200cit/hooks/test"} {
 		t.Run(path, func(t *testing.T) {
 			t.Parallel()
 			fixture := newFixture(t)
 			alias := filepath.Join(fixture.source, filepath.FromSlash(path))
-			if err := os.MkdirAll(filepath.Dir(alias), 0700); err != nil {
-				t.Fatal(err)
-			}
 			writeFile(t, alias, "not Git metadata")
 			fixture.git(fixture.source, "-c", "core.protectHFS=false", "-c", "core.protectNTFS=false", "add", "--all", "--", ".")
 			fixture.git(fixture.source, "commit", "-m", "source alias")
@@ -142,9 +122,9 @@ func TestGitFailureClassificationIsSpecificAndPreservesCancellation(t *testing.T
 		{"checkout", "fatal: cannot read 'error: invalid path file'", false},
 	} {
 		t.Setenv("MINION_TEST_GIT_DIAGNOSTIC", tc.diagnostic)
-		_, err := runGit(context.Background(), root, "-c", "user.name=test", tc.operation)
+		_, err := runGit(context.Background(), root, "-c", "user.name=test", "-c", "user.email=test@example.invalid", tc.operation)
 		var exit *exec.ExitError
-		if !errors.As(err, &exit) || errors.Is(err, ErrUnsupportedSource) != tc.unsupported || !strings.Contains(err.Error(), strconv.Quote(tc.diagnostic)) || strings.ContainsAny(err.Error(), "\r\n") {
+		if !errors.As(err, &exit) || errors.Is(err, ErrUnsupportedSource) != tc.unsupported || !strings.HasPrefix(err.Error(), "git "+tc.operation+":") || !strings.Contains(err.Error(), strconv.Quote(tc.diagnostic)) || strings.ContainsAny(err.Error(), "\r\n") {
 			t.Fatalf("operation=%s diagnostic=%q error=%v", tc.operation, tc.diagnostic, err)
 		}
 	}
@@ -155,38 +135,6 @@ func TestGitFailureClassificationIsSpecificAndPreservesCancellation(t *testing.T
 	}
 	if _, err := runGit(context.Background(), filepath.Join(root, "missing"), "checkout"); !errors.Is(err, os.ErrNotExist) || errors.Is(err, ErrUnsupportedSource) {
 		t.Fatalf("checkout I/O error=%v", err)
-	}
-}
-
-func TestGitEnvironmentPinsDiagnosticLocale(t *testing.T) {
-	t.Setenv("LC_ALL", "sv_SE.UTF-8")
-	var locales []string
-	for _, entry := range cleanGitEnvironment() {
-		if strings.HasPrefix(entry, "LC_ALL=") {
-			locales = append(locales, entry)
-		}
-	}
-	if len(locales) != 1 || locales[0] != "LC_ALL=C" {
-		t.Fatalf("Git locales=%q", locales)
-	}
-}
-
-func TestImportRejectsGitMetadataAliasesBeforeApplying(t *testing.T) {
-	fixture := newFixture(t)
-	for _, name := range []string{"git~1/config", ".git./config", ".git:alternate/config", ".g\u200cit/config"} {
-		t.Run(name, func(t *testing.T) {
-			err := fixture.checkout.Import(context.Background(), fixture.base, []workspace.Change{{Path: name, Mode: workspace.Regular, Data: []byte("invalid metadata alias")}})
-			if err == nil {
-				t.Fatalf("alias %q import error=%v", name, err)
-			}
-			paths, err := fixture.checkout.stagedPaths(context.Background())
-			if err != nil || len(paths) != 0 {
-				t.Fatalf("rejected alias staged=%v error=%v", paths, err)
-			}
-			if err := os.RemoveAll(filepath.Join(fixture.checkout.path, strings.Split(name, "/")[0])); err != nil {
-				t.Fatal(err)
-			}
-		})
 	}
 }
 

@@ -14,13 +14,10 @@ import (
 
 // trackUsage adds a record and runner wrapper to this attempt-scoped receiver.
 func (e *Orchestrator) trackUsage(job monitor.Job) (func(error) error, error) {
-	name := job.Command.Name
-	if name == "" {
-		name = string(job.Command.Action)
-	}
+	store, logger := e.Usage, e.Logger
 	record := usage.Record{
 		ID: e.attemptID, JobID: job.ID, Repo: job.Repository.Name,
-		User: job.Source.Author.Login, Action: name, Number: job.Number,
+		User: job.Source.Author.Login, Action: cmp.Or(job.Command.Name, string(job.Command.Action)), Number: job.Number,
 		SourceURL: sourceURL(job), Provider: e.mainProvider(), CriticProvider: e.Adversarial,
 		StartedAt: time.Now().UTC(), Status: "running", UsageComplete: true,
 	}
@@ -31,7 +28,7 @@ func (e *Orchestrator) trackUsage(job monitor.Job) (func(error) error, error) {
 		record.CriticModel, record.CriticEffort = cmp.Or(critic.Model, "default"), critic.Effort
 	}
 	save := func() error {
-		if err := e.Usage.Save(record); err != nil {
+		if err := store.Save(record); err != nil {
 			return fmt.Errorf("save action usage %s: %w", record.ID, err)
 		}
 		return nil
@@ -59,8 +56,8 @@ func (e *Orchestrator) trackUsage(job monitor.Job) (func(error) error, error) {
 		tokens, valid := record.Tokens.AddChecked(result.Tokens)
 		record.Tokens = tokens
 		record.UsageComplete = complete && result.UsageComplete && valid
-		if !valid {
-			e.logf("action usage counters invalid or overflowed; retaining lower bound for attempt %s", record.ID)
+		if !valid && logger != nil {
+			logger.Printf("action usage counters invalid or overflowed; retaining lower bound for attempt %s", record.ID)
 		}
 		if saveErr := save(); saveErr != nil {
 			err = errors.Join(err, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, saveErr))
@@ -76,7 +73,9 @@ func (e *Orchestrator) trackUsage(job monitor.Job) (func(error) error, error) {
 		}
 		if err := save(); err != nil {
 			if actionErr == nil {
-				e.logf("final action usage checkpoint failed: %q", err)
+				if logger != nil {
+					logger.Printf("final action usage checkpoint failed: %q", err)
+				}
 				return nil
 			}
 			return errors.Join(actionErr, err)

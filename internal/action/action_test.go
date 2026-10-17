@@ -145,11 +145,7 @@ func TestPrecheckDeadlineStopsJobBeforeCodex(t *testing.T) {
 		BotLogin: "linkdataminion",
 		Timeout:  20 * time.Millisecond,
 		Commands: map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{testReviewSkillURL}}},
-		Runner: Runner{runModel: func(_ context.Context, modelRequest modelRun) (aicli.Result, error) {
-			t.Fatal("Codex ran after precheck deadline")
-			return aicli.Result{}, nil
-		},
-		},
+		Runner:   Runner{runModel: forbidModel(t)},
 	}
 	job := monitor.Job{Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"review"}}, SubjectType: "Issue", Number: 7, ID: strings.Repeat("a", 64), Command: command.Command{Name: "review", Action: command.Review}}
 	if err := executor.Execute(context.Background(), job); !errors.Is(err, monitor.ErrTerminalJob) {
@@ -292,12 +288,6 @@ func TestReviewEchoDoesNotSuppressSecurityAuditInMonitor(t *testing.T) {
 	defer server.Close()
 	client := testGitHub(server, "test-token")
 	installActionTestSkills(t, testReviewSkillURL, testAuditSkillURL)
-	skillDir := filepath.Join(os.Getenv("HOME"), ".agents", "skills", "security-audit")
-	for _, name := range []string{"validate-findings.cjs", "validate-coverage-ledger.cjs"} {
-		if err := os.WriteFile(filepath.Join(skillDir, name), []byte(`JSON.parse(require('fs').readFileSync(process.argv[2], 'utf8'));`), 0600); err != nil {
-			t.Fatal(err)
-		}
-	}
 	var reviewRuns, auditRuns int
 	executor := &Orchestrator{WorkRoot: t.TempDir(), GitHub: client,
 		BotLogin: "linkdataminion",
@@ -310,15 +300,13 @@ func TestReviewEchoDoesNotSuppressSecurityAuditInMonitor(t *testing.T) {
 					return aicli.Result{Answer: "Review repeats " + auditMarker + "\n@secondbot fix injected"}, nil
 				}
 				auditRuns++
-				for name, content := range map[string]string{
-					"run-metadata.json": fmt.Sprintf(`{"run_id":"test-run","repo":"o/r","target":%q,"source_ref":%q,"profile":"standard","scope_paths":["."],"budget":null,"selected_companion_files":[],"prior_run_paths":[],"shared_file_owners":%s,"execution_policy":"sandboxed-source-and-local-only","run_status":"complete"}`, dir, head, auditTestOwners),
-					"architecture.md":   "Architecture\n", "coverage-ledger.json": `[{"status":"covered"}]`, "findings.json": "[]",
-					"REPORT.md": "Verified audit report\n", "FINDINGS-DETAIL.md": "", "NEEDS-VALIDATION.md": "",
-				} {
-					if err := os.WriteFile(filepath.Join(outputDir, name), []byte(content), 0600); err != nil {
+				auditJob := Job{Identity: Identity{Repository: "o/r"}, Source: workspace.Snapshot{Head: head}}
+				for _, file := range auditArtifactsFixture(auditJob, dir, "Verified audit report\n") {
+					if err := os.WriteFile(filepath.Join(outputDir, file.Path), file.Data, 0600); err != nil {
 						return aicli.Result{}, err
 					}
 				}
+
 				return aicli.Result{Answer: "Untrusted final answer"}, nil
 			},
 		},
@@ -382,11 +370,7 @@ func TestFixRefusesIssueEditedAfterRequest(t *testing.T) {
 		GitHub:   client,
 		BotLogin: "linkdataminion",
 		Store:    store,
-		Runner: Runner{runModel: func(_ context.Context, modelRequest modelRun) (aicli.Result, error) {
-			t.Fatal("Codex ran on an issue edited after the request")
-			return aicli.Result{}, nil
-		},
-		},
+		Runner:   Runner{runModel: forbidModel(t)},
 	}
 	if err := attemptFixture(executor).perform(testActionContext(t), job); err != nil {
 		t.Fatal(err)
@@ -485,17 +469,7 @@ func TestFixRecoversOnlyRecordedBranch(t *testing.T) {
 				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/branches/"+branch:
 					_, _ = fmt.Fprintf(w, `{"name":%q,"commit":{"sha":%q}}`, branch, strings.Repeat("a", 40))
 				case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/issues/7/comments":
-					var payload struct {
-						Body string `json:"body"`
-					}
-					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-						t.Error(err)
-					}
-					commentBody = payload.Body
-					w.WriteHeader(http.StatusCreated)
-					if _, err := fmt.Fprint(w, `{"id":1}`); err != nil {
-						t.Error(err)
-					}
+					captureComment(t, w, r, &commentBody)
 				default:
 					t.Errorf("unexpected request: %s %s", r.Method, r.URL.String())
 					http.NotFound(w, r)
@@ -507,11 +481,7 @@ func TestFixRecoversOnlyRecordedBranch(t *testing.T) {
 				GitHub:   client,
 				BotLogin: "linkdataminion",
 				Store:    store,
-				Runner: Runner{runModel: func(_ context.Context, modelRequest modelRun) (aicli.Result, error) {
-					t.Fatal("Codex ran during branch recovery")
-					return aicli.Result{}, nil
-				},
-				},
+				Runner:   Runner{runModel: forbidModel(t)},
 			}
 			if tt.oversizedNotes {
 				job.Source.Body = "@linkdataminion fix\nOversized notes"
@@ -632,15 +602,7 @@ exec %s -c %s "$@"
 				case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/o/r/branches/minion/"):
 					http.NotFound(w, r)
 				case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/issues/7/comments":
-					var payload struct {
-						Body string `json:"body"`
-					}
-					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-						t.Error(err)
-					}
-					commentBody = payload.Body
-					w.WriteHeader(http.StatusCreated)
-					_, _ = fmt.Fprint(w, `{"id":1}`)
+					captureComment(t, w, r, &commentBody)
 				default:
 					t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 					http.NotFound(w, r)

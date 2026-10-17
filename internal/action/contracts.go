@@ -392,7 +392,7 @@ func validateResultArtifacts(j Job, files []workspace.File, complete bool) error
 	if !complete {
 		return nil
 	}
-	companions, err := validateAuditMetadata(seen["run-metadata.json"], seen["REPORT.md"], j.Identity.Repository, sourceIdentity(j), j.Source.Head)
+	companions, err := validateAuditMetadata(seen["run-metadata.json"], j.Identity.Repository, sourceIdentity(j), j.Source.Head)
 	if err != nil {
 		return err
 	}

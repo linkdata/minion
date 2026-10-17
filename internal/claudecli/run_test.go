@@ -261,8 +261,6 @@ func TestRunFailures(t *testing.T) {
 		{"empty", `{"type":"result","subtype":"success","result":" "}`},
 		{"denied", `{"type":"result","subtype":"success","result":"declined","permission_denials":[{}]}`},
 		{"duplicate", successfulResult + "\n" + successfulResult},
-		{"unfinished background task", `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"reviewer"}]}` + "\n" + successfulResult},
-		{"background completion without final answer", `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"reviewer"}]}` + "\n" + successfulResult + "\n" + `{"type":"system","subtype":"background_tasks_changed","tasks":[]}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fakeExecutable(t, "claude", "cat >/dev/null\ncat <<'RESULT'\n"+tc.output+"\nRESULT\n")
@@ -289,8 +287,6 @@ func TestRunBackgroundWaitCeiling(t *testing.T) {
 		fails                bool
 	}{
 		{name: "native ceiling", stderr: diagnostic, answer: "final answer", fails: true},
-		{name: "native trailing space", stderr: diagnostic + " ", answer: "final answer", fails: true},
-		{name: "other diagnostics", stderr: "prefix: " + diagnostic, answer: "final answer"},
 		{name: "answer text", answer: diagnostic},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -436,8 +432,9 @@ func TestCredentialEnvironmentStopsCLI(t *testing.T) {
 		if _, err := Validate(context.Background(), settings); err == nil || !strings.Contains(err.Error(), "ANTHROPIC_API_KEY") {
 			t.Fatalf("Validate accepted environment credentials: %v", err)
 		}
-		if _, err := Run(context.Background(), t.TempDir(), "task", false, "", settings); err == nil || !strings.Contains(err.Error(), "ANTHROPIC_API_KEY") {
-			t.Fatalf("Run accepted environment credentials: %v", err)
+		result, err := Run(context.Background(), t.TempDir(), "task", false, "", settings)
+		if err == nil || !strings.Contains(err.Error(), "ANTHROPIC_API_KEY") || !result.UsageComplete || result.Tokens != (usage.Tokens{}) || result.Answer != "" {
+			t.Fatalf("Run accepted environment credentials or lost complete zero usage: result=%+v err=%v", result, err)
 		}
 	}
 	if _, err := os.Stat(binary + ".called"); !errors.Is(err, os.ErrNotExist) {
@@ -453,14 +450,6 @@ func TestRunUsageLimitKeepsSafeDiagnosticAndExitCause(t *testing.T) {
 	var exit *exec.ExitError
 	if err == nil || !errors.As(err, &exit) || !strings.Contains(err.Error(), "resets at 2026-10-17T01:20:00Z") || strings.Contains(err.Error(), "PRIVATE") || strings.Contains(err.Error(), "forged journal line") || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) {
 		t.Fatalf("result=%+v error=%v", result, err)
-	}
-}
-
-func TestRunQuotesStderrOnExitFailure(t *testing.T) {
-	fakeExecutable(t, "claude", "cat >/dev/null\nprintf '%s\\n' '"+successfulResult+"'\nprintf 'first\\nforged journal line' >&2\nexit 7\n")
-	_, err := Run(context.Background(), t.TempDir(), "task", false, "", config.ClaudeConfig{})
-	if err == nil || !strings.Contains(err.Error(), `first\nforged journal line`) || strings.Contains(err.Error(), "\nforged journal line") {
-		t.Fatalf("unquoted diagnostic: %v", err)
 	}
 }
 

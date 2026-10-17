@@ -14,13 +14,6 @@ import (
 	"github.com/linkdata/minion/internal/workspace"
 )
 
-type auditReadMode uint8
-
-const (
-	auditForReview auditReadMode = iota
-	auditIncomplete
-)
-
 var auditValidators = []struct{ script, artifact string }{
 	{"validate-findings.cjs", "findings.json"},
 	{"validate-coverage-ledger.cjs", "coverage-ledger.json"},
@@ -41,7 +34,7 @@ func checkAuditTools(ctx context.Context, dir, skill string) error {
 	return err
 }
 
-func readAuditArtifacts(outputDir string, mode auditReadMode) ([]workspace.File, []Diagnostic, error) {
+func readAuditArtifacts(outputDir string, partial bool) ([]workspace.File, []Diagnostic, error) {
 	var files []workspace.File
 	var diagnostics []Diagnostic
 	for _, name := range auditArtifacts {
@@ -49,11 +42,11 @@ func readAuditArtifacts(outputDir string, mode auditReadMode) ([]workspace.File,
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
-		if err == nil && mode == auditForReview && name == "REPORT.md" && !modelOutputFits(string(data)) {
-			err = errors.New("quoted audit report exceeds publication limit")
+		if err == nil && !partial && name == "REPORT.md" && !modelOutputFits(string(data)) {
+			err = errors.New("audit REPORT.md is not valid UTF-8 or exceeds publication limit")
 		}
 		if err != nil {
-			if mode != auditIncomplete {
+			if !partial {
 				return nil, nil, fmt.Errorf("invalid audit %s: %w", name, err)
 			}
 			diagnostics = append(diagnostics, Diagnostic{Code: "artifact_unavailable", Message: "Incomplete audit artifact " + name + " could not be safely collected."})
@@ -80,14 +73,15 @@ func validateAuditFiles(ctx context.Context, files []workspace.File, validationR
 	for _, file := range files {
 		byPath[file.Path] = file.Data
 	}
-	reportBytes := byPath["REPORT.md"]
-	if _, err := validateAuditMetadata(byPath["run-metadata.json"], reportBytes, repo, target, head); err != nil {
-		return "", err
-	}
-	for _, validator := range auditValidators {
-		if len(byPath[validator.artifact]) == 0 {
-			return "", fmt.Errorf("audit %s is missing or empty", validator.artifact)
+	for _, name := range auditArtifacts {
+		data, present := byPath[name]
+		if !present || len(data) == 0 && !auditArtifactMayBeEmpty(name) || name == "REPORT.md" && strings.TrimSpace(string(data)) == "" {
+			return "", fmt.Errorf("audit %s is missing or empty", name)
 		}
+	}
+	reportBytes := byPath["REPORT.md"]
+	if _, err := validateAuditMetadata(byPath["run-metadata.json"], repo, target, head); err != nil {
+		return "", err
 	}
 	validationDir, err := os.MkdirTemp(validationRoot, ".audit-validation-")
 	if err != nil {
@@ -189,7 +183,7 @@ func validateAuditFiles(ctx context.Context, files []workspace.File, validationR
 	return string(reportBytes), nil
 }
 
-func validateAuditMetadata(metadataBytes, reportBytes []byte, repo, target, head string) ([]string, error) {
+func validateAuditMetadata(metadataBytes []byte, repo, target, head string) ([]string, error) {
 	var metadata struct {
 		RunID                  string            `json:"run_id"`
 		Repo                   string            `json:"repo"`
@@ -217,9 +211,6 @@ func validateAuditMetadata(metadataBytes, reportBytes []byte, repo, target, head
 		if metadata.SharedFileOwners[name] != "parent" {
 			return nil, fmt.Errorf("audit metadata lacks parent ownership of %s", name)
 		}
-	}
-	if strings.TrimSpace(string(reportBytes)) == "" {
-		return nil, errors.New("audit REPORT.md is empty")
 	}
 	return metadata.SelectedCompanionFiles, nil
 }

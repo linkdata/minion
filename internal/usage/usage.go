@@ -9,9 +9,12 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/linkdata/minion/internal/workspace"
 )
 
 type Tokens struct {
@@ -114,39 +117,18 @@ type Store struct{ Dir string }
 //
 // The caller serializes updates to an ID. An error after replacement can leave
 // the new attempt in place.
-func (s Store) Save(record Record) (err error) {
+func (s Store) Save(record Record) error {
 	if err := record.validate(); err != nil {
 		return err
 	}
 	if err := os.MkdirAll(s.Dir, 0700); err != nil {
 		return err
 	}
-	f, err := os.CreateTemp(s.Dir, ".usage-*")
+	data, err := json.Marshal(record)
 	if err != nil {
 		return err
 	}
-	defer func() {
-		if removeErr := os.Remove(f.Name()); !errors.Is(removeErr, os.ErrNotExist) {
-			err = errors.Join(err, removeErr)
-		}
-	}()
-	err = json.NewEncoder(f).Encode(record)
-	if err == nil {
-		err = f.Sync()
-	}
-	err = errors.Join(err, f.Close())
-	if err != nil {
-		return
-	}
-	if err := os.Rename(f.Name(), filepath.Join(s.Dir, record.ID+".json")); err != nil {
-		return err
-	}
-	dir, err := os.Open(s.Dir)
-	if err != nil {
-		return err
-	}
-	err = errors.Join(dir.Sync(), dir.Close())
-	return
+	return workspace.WriteAtomic(filepath.Join(s.Dir, record.ID+".json"), append(data, '\n'), s.Dir)
 }
 
 // ReadAll reads complete usage records from dir.
@@ -238,18 +220,11 @@ func Summarize(records []Record, filter Filter, groupBy []string) ([]Summary, er
 		return nil, fmt.Errorf("since must precede until")
 	}
 	indices := make([]int, 0, len(groupBy))
-	used := map[string]bool{}
 	for _, group := range groupBy {
-		index := -1
-		for i, name := range []string{"repo", "user", "action", "day", "month"} {
-			if group == name {
-				index = i
-			}
-		}
-		if index < 0 || used[group] {
+		index := slices.Index([]string{"repo", "user", "action", "day", "month"}, group)
+		if index < 0 || slices.Contains(indices, index) {
 			return nil, fmt.Errorf("invalid or duplicate usage group %q", group)
 		}
-		used[group] = true
 		indices = append(indices, index)
 	}
 	groups := map[[5]string]*Summary{}

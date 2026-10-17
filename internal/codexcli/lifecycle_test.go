@@ -24,11 +24,22 @@ func TestRunOutputLimitPreservesRolloutUsage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	installFakeCodex(t, "#!/bin/sh\ncat <<'EVENTS'\n"+`{"type":"thread.started","thread_id":"root"}`+"\n"+string(event)+"\nEVENTS\n")
-	writeUsageRollout(t, os.Getenv("CODEX_HOME"), "root", "", usageEvent("task_started", "root-turn"), usageRecord("root", "root-turn", "response", 100, 10, 7), usageEvent("task_complete", "root-turn"))
-	result, err := Run(context.Background(), t.TempDir(), "task", false, "", config.CodexConfig{})
-	if !errors.Is(err, aicli.ErrOutputLimit) || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 100, CachedInput: 10, Output: 7}) {
-		t.Fatalf("output limit lost known usage: result=%+v error=%v", result, err)
+	const message = `{"type":"item.completed","item":{"type":"agent_message","text":"progress"}}`
+	const completed = `{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":10,"output_tokens":7}}`
+	for _, scenario := range []struct{ name, events string }{
+		{"helper count", string(event)},
+		{"oversized final after progress", message + "\n" + `{"type":"item.completed","item":{"type":"agent_message","text":"` + strings.Repeat("x", aicli.MaxEventBytes) + `"}}` + "\n" + completed},
+		// This dropped event carries the only ID for an unknown unfinished helper.
+		{"oversized hidden helper", `{"type":"item.completed","item":{"type":"collab_tool_call","receiver_thread_ids":["unlogged-child"],"padding":"` + strings.Repeat("x", aicli.MaxEventBytes) + `"}}` + "\n" + message + "\n" + completed},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			installFakeCodex(t, "#!/bin/sh\ncat <<'EVENTS'\n"+`{"type":"thread.started","thread_id":"root"}`+"\n"+scenario.events+"\nEVENTS\n")
+			writeUsageRollout(t, os.Getenv("CODEX_HOME"), "root", "", usageEvent("task_started", "root-turn"), usageRecord("root", "root-turn", "response", 100, 10, 7), usageEvent("task_complete", "root-turn"))
+			result, err := Run(context.Background(), t.TempDir(), "task", false, "", config.CodexConfig{})
+			if !errors.Is(err, aicli.ErrOutputLimit) || strings.Count(err.Error(), aicli.ErrOutputLimit.Error()) != 1 || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 100, CachedInput: 10, Output: 7}) {
+				t.Fatalf("output limit accepted or known counters lost: result=%+v error=%v", result, err)
+			}
+		})
 	}
 }
 
@@ -36,7 +47,7 @@ func TestOutputRejectsOversizedRecordsAfterProgress(t *testing.T) {
 	const progress = `{"type":"item.completed","item":{"type":"agent_message","text":"still working"}}`
 	const final = `{"type":"item.completed","item":{"type":"agent_message","text":"final answer"}}`
 	const complete = `{"type":"turn.completed"}`
-	large := strings.Repeat("x", maxEventBytes)
+	large := strings.Repeat("x", aicli.MaxEventBytes)
 	for _, scenario := range []struct{ name, data string }{
 		{"oversized final", progress + "\n" + `{"type":"item.completed","item":{"type":"agent_message","text":"` + large + `"}}` + "\n" + complete},
 		{"oversized tool then valid final", progress + "\n" + `{"type":"item.completed","item":{"type":"command_execution","output":"` + large + `"}}` + "\n" + final + "\n" + complete},
@@ -51,7 +62,7 @@ func TestOutputRejectsOversizedRecordsAfterProgress(t *testing.T) {
 					_, _ = o.Write([]byte(data[:n]))
 					data = data[n:]
 				}
-				o.finish()
+				o.stream.Finish()
 				if !o.stopped || !o.failed || !canceled || o.completed || !strings.Contains(o.failureReason, "event exceeded") {
 					t.Fatalf("oversized record accepted: stopped=%t failed=%t canceled=%t completed=%t reason=%q", o.stopped, o.failed, canceled, o.completed, o.failureReason)
 				}
@@ -60,58 +71,35 @@ func TestOutputRejectsOversizedRecordsAfterProgress(t *testing.T) {
 	}
 }
 
-func TestRunOversizedFinalCannotPublishProgressAndRetainsKnownUsage(t *testing.T) {
-	events := `{"type":"thread.started","thread_id":"root"}` + "\n" +
-		`{"type":"item.completed","item":{"type":"agent_message","text":"still working"}}` + "\n" +
-		`{"type":"item.completed","item":{"type":"agent_message","text":"` + strings.Repeat("x", maxEventBytes) + `"}}` + "\n" +
-		`{"type":"turn.completed"}`
-	installFakeCodex(t, "#!/bin/sh\ncat <<'EVENTS'\n"+events+"\nEVENTS\n")
-	writeUsageRollout(t, os.Getenv("CODEX_HOME"), "root", "", usageEvent("task_started", "root-turn"), usageRecord("root", "root-turn", "response", 100, 10, 7), usageEvent("task_complete", "root-turn"))
-	result, err := Run(context.Background(), t.TempDir(), "task", false, "", config.CodexConfig{})
-	if !errors.Is(err, aicli.ErrOutputLimit) || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 100, CachedInput: 10, Output: 7}) {
-		t.Fatalf("oversized final accepted or lost known usage: result=%+v error=%v", result, err)
-	}
-}
-
 func TestRunRequiresCompletionForLatestTurn(t *testing.T) {
 	const message = `{"type":"item.completed","item":{"type":"agent_message","text":"answer"}}`
 	const started = `{"type":"turn.started"}`
 	const complete = `{"type":"turn.completed"}`
 	first := message + "\n" + complete + "\n"
-	for _, scenario := range []struct {
-		name, after, failure string
-	}{
-		{"new message without completion", message, "missing turn.completed"},
-		{"new turn without completion", started, "missing turn.completed"},
-		{"new completed turn without answer", started + "\n" + complete, "without a final agent message"},
-		{"new turn completes", started + "\n" + message + "\n" + complete, ""},
-		{"new message completes", message + "\n" + complete, ""},
+	for _, scenario := range []struct{ name, events, failure string }{
+		{"initial message without completion", message, "missing turn.completed"},
+		{"initial completion without answer", complete, "without a final agent message"},
+		{"new message without completion", first + message, "missing turn.completed"},
+		{"new turn without completion", first + started, "missing turn.completed"},
+		{"new completed turn without answer", first + started + "\n" + complete, "without a final agent message"},
+		{"new turn completes", first + started + "\n" + message + "\n" + complete, ""},
+		{"new message completes", first + message + "\n" + complete, ""},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
-			installFakeCodex(t, "#!/bin/sh\ncat <<'EVENTS'\n"+first+scenario.after+"\nEVENTS\n")
+			installFakeCodex(t, "#!/bin/sh\ncat <<'EVENTS'\n"+`{"type":"thread.started","thread_id":"root"}`+"\n"+scenario.events+"\nEVENTS\n")
+			writeUsageRollout(t, os.Getenv("CODEX_HOME"), "root", "", usageEvent("task_started", "root-turn"), usageRecord("root", "root-turn", "response", 100, 10, 7), usageEvent("task_complete", "root-turn"))
 			result, err := Run(context.Background(), t.TempDir(), "task", false, "", config.CodexConfig{})
+			if result.Tokens != (usage.Tokens{Input: 100, CachedInput: 10, Output: 7}) {
+				t.Fatalf("lost known usage: %+v", result)
+			}
 			if scenario.failure == "" {
-				if err != nil || result.Answer != "answer" {
+				if err != nil || result.Answer != "answer" || !result.UsageComplete {
 					t.Fatalf("valid final turn refused: result=%+v error=%v", result, err)
 				}
 			} else if err == nil || !strings.Contains(err.Error(), scenario.failure) || result.Answer != "" || result.UsageComplete {
 				t.Fatalf("unfinished latest turn accepted: result=%+v error=%v", result, err)
 			}
 		})
-	}
-}
-
-func TestRunIncompleteOutputKeepsUsageIncompleteWithCompleteRollout(t *testing.T) {
-	for _, events := range []string{
-		`{"type":"item.completed","item":{"type":"agent_message","text":"progress"}}`,
-		`{"type":"turn.completed"}`,
-	} {
-		installFakeCodex(t, "#!/bin/sh\ncat <<'EVENTS'\n"+`{"type":"thread.started","thread_id":"root"}`+"\n"+events+"\nEVENTS\n")
-		writeUsageRollout(t, os.Getenv("CODEX_HOME"), "root", "", usageEvent("task_started", "root-turn"), usageRecord("root", "root-turn", "response", 100, 10, 7), usageEvent("task_complete", "root-turn"))
-		result, err := Run(context.Background(), t.TempDir(), "task", false, "", config.CodexConfig{})
-		if err == nil || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 100, CachedInput: 10, Output: 7}) {
-			t.Fatalf("incomplete output certified complete usage: result=%+v error=%v", result, err)
-		}
 	}
 }
 
@@ -123,7 +111,7 @@ func TestOutputCountsUniqueHelpersAcrossRepeatedWaits(t *testing.T) {
 		}
 	}
 	_, _ = o.Write([]byte(`{"type":"item.completed","item":{"type":"agent_message","text":"answer"}}` + "\n" + `{"type":"turn.completed"}` + "\n"))
-	o.finish()
+	o.stream.Finish()
 	if o.stopped || o.failed || !o.completed || len(o.children) != 1 || o.children[0] != "child" || len(o.seenChildren) != 1 {
 		t.Fatalf("repeated waits consumed helper capacity: stopped=%t failed=%t complete=%t children=%v", o.stopped, o.failed, o.completed, o.children)
 	}
@@ -172,7 +160,7 @@ func TestRunRejectsKnownUnfinishedChildrenWithoutRejectingAccountingGaps(t *test
 			case "complete":
 				child = append(child, usageEvent("task_complete", "child-turn"))
 			case "aborted":
-				child = append(child, usageEvent("turn_aborted", "child-turn"))
+				child = append(child, `{"ordinal":20,"type":"event_msg","payload":{"type":"turn_aborted","turn_id":"child-turn","reason":"interrupted"}}`)
 			case "missing counters":
 				child = []string{usageEvent("task_started", "child-turn"), usageEvent("task_complete", "child-turn")}
 			case "inherited turn":
@@ -182,7 +170,7 @@ func TestRunRejectsKnownUnfinishedChildrenWithoutRejectingAccountingGaps(t *test
 			case "completed then damaged tail":
 				child = append(child, usageEvent("task_complete", "child-turn"), "{damaged")
 			case "completed then oversized tail":
-				child = append(child, usageEvent("task_complete", "child-turn"), strings.Repeat("x", maxEventBytes+1))
+				child = append(child, usageEvent("task_complete", "child-turn"), strings.Repeat("x", aicli.MaxEventBytes+1))
 			case "completed then partial tail":
 				child = append(child, usageEvent("task_complete", "child-turn"))
 			case "completed then new response only":
@@ -237,19 +225,5 @@ func TestRunQuotesProviderDiagnosticsAndPreservesExitCause(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-func TestOversizedHelperEventCannotHideUnfinishedWork(t *testing.T) {
-	// A dropped event could carry the only ID needed to find an unfinished helper.
-	events := `{"type":"thread.started","thread_id":"root"}` + "\n" +
-		`{"type":"item.completed","item":{"type":"collab_tool_call","receiver_thread_ids":["unlogged-child"],"padding":"` + strings.Repeat("x", maxEventBytes) + `"}}` + "\n" +
-		`{"type":"item.completed","item":{"type":"agent_message","text":"root finished"}}` + "\n" +
-		`{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":10,"output_tokens":7}}`
-	installFakeCodex(t, "#!/bin/sh\ncat <<'EVENTS'\n"+events+"\nEVENTS\n")
-	writeUsageRollout(t, os.Getenv("CODEX_HOME"), "root", "", usageEvent("task_started", "root-turn"), usageRecord("root", "root-turn", "response", 100, 10, 7), usageEvent("task_complete", "root-turn"))
-	result, err := Run(context.Background(), t.TempDir(), "task", false, "", config.CodexConfig{})
-	if !errors.Is(err, aicli.ErrOutputLimit) || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 100, CachedInput: 10, Output: 7}) {
-		t.Fatalf("unread helper identity accepted or known counters lost: result=%+v error=%v", result, err)
 	}
 }

@@ -75,7 +75,7 @@ func TestUsageAccumulatesPartialResults(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := 1; i <= 3; i++ {
-		answer, err := tracked.Runner.runAI(context.Background(), Job{Main: RoleSettings{Provider: "codex", Model: "test-model"}}, "dir", "prompt", false, "")
+		answer, err := tracked.Runner.runAI(context.Background(), Job{Main: RoleSettings{Provider: "codex", Model: "test-model"}}, "dir", "prompt", false, "", nil)
 		if i == 2 {
 			if !errors.Is(err, runErr) {
 				t.Fatalf("lost model error: %v", err)
@@ -177,7 +177,7 @@ func TestUsageAccumulatesCriticRevisions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	answer, err := tracked.Runner.runAI(context.Background(), Job{Main: RoleSettings{Provider: "claude"}, Critic: &RoleSettings{Provider: "codex"}, CriticMaxRounds: config.DefaultCriticMaxRounds}, "dir", "prompt", false, "")
+	answer, err := tracked.Runner.runAI(context.Background(), Job{Main: RoleSettings{Provider: "claude"}, Critic: &RoleSettings{Provider: "codex"}, CriticMaxRounds: config.DefaultCriticMaxRounds}, "dir", "prompt", false, "", nil)
 	if err != nil || answer != "proposal" {
 		t.Fatalf("answer=%q err=%v", answer, err)
 	}
@@ -195,90 +195,52 @@ func TestUsageAccumulatesCriticRevisions(t *testing.T) {
 }
 
 func TestUsagePersistenceFailureStopsModelsOrPublication(t *testing.T) {
+	modelErr := errors.New("model error")
 	for _, provider := range []string{"codex", "claude"} {
-		t.Run(provider, func(t *testing.T) {
-			for _, stage := range []string{"before call", "after call"} {
-				t.Run(stage, func(t *testing.T) {
-					root := t.TempDir()
-					originalDir := filepath.Join(root, "usage")
-					blocked := filepath.Join(root, "blocked")
-					if err := os.WriteFile(blocked, []byte("not a directory"), 0600); err != nil {
-						t.Fatal(err)
-					}
-					store := &usage.Store{Dir: originalDir}
-					modelErr := errors.New("model error")
-					var calls int
-					run := func(context.Context, modelRun) (aicli.Result, error) {
-						calls++
-						store.Dir = blocked
-						return aicli.Result{Tokens: usage.Tokens{Input: 10, Output: 2}}, modelErr
-					}
-					e := &Orchestrator{
-						Usage:      store,
-						Main:       provider,
-						CodexModel: "test-model",
-						Runner: Runner{
-							runModel: run,
-						},
-					}
-					tracked := attemptFixture(e)
-					finish, err := tracked.trackUsage(usageJob())
-					if err != nil {
-						t.Fatal(err)
-					}
-					if stage == "before call" {
-						store.Dir = blocked
-					}
-					_, err = tracked.Runner.runAI(context.Background(), Job{Main: RoleSettings{Provider: provider}}, "dir", "prompt", false, "")
-					if err == nil || !strings.Contains(err.Error(), "save action usage") {
-						t.Fatalf("storage failure not returned: %v", err)
-					}
-					if errors.Is(err, monitor.ErrTerminalJob) != (stage == "after call") {
-						t.Fatalf("storage failure classification at %s: %v", stage, err)
-					}
-					if stage == "before call" && calls != 0 {
-						t.Fatal("model ran without durable checkpoint")
-					}
-					if stage == "after call" && (calls != 1 || !errors.Is(err, modelErr)) {
-						t.Fatalf("model failure missing: calls=%d error=%v", calls, err)
-					}
-					if finalErr := finish(err); finalErr == nil || !strings.Contains(finalErr.Error(), "save action usage") {
-						t.Fatalf("final save failure missing: %v", finalErr)
-					}
-					records, readErr := usage.ReadAll(originalDir)
-					if readErr != nil || len(records) != 1 || records[0].Status != "running" {
-						t.Fatalf("last durable checkpoint missing: records=%+v err=%v", records, readErr)
-					}
-					if stage == "after call" && records[0].UsageComplete {
-						t.Fatal("interrupted usage claimed complete")
-					}
-				})
-			}
-		})
-	}
-}
-
-func TestSuccessfulModelStopsAfterUsageSaveFailure(t *testing.T) {
-	root := t.TempDir()
-	blocked := filepath.Join(root, "blocked")
-	if err := os.WriteFile(blocked, []byte("not a directory"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	store := &usage.Store{Dir: filepath.Join(root, "usage")}
-	calls := 0
-	e := Orchestrator{Usage: store, Runner: Runner{runModel: func(context.Context, modelRun) (aicli.Result, error) {
-		calls++
-		store.Dir = blocked
-		return aicli.Result{Answer: "completed paid work", Tokens: usage.Tokens{Input: 10, Output: 2}, UsageComplete: true}, nil
-	}}}
-	tracked := attemptFixture(&e)
-	_, err := tracked.trackUsage(usageJob())
-	if err != nil {
-		t.Fatal(err)
-	}
-	answer, err := tracked.Runner.runAI(context.Background(), Job{Main: RoleSettings{Provider: "codex"}}, "dir", "prompt", false, "")
-	if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "save action usage") || calls != 1 || answer != "" {
-		t.Fatalf("paid work can retry or publish after failed accounting: calls=%d answer=%q err=%v", calls, answer, err)
+		for _, tt := range []struct {
+			name     string
+			before   bool
+			modelErr error
+		}{
+			{"before call", true, modelErr}, {"after failed call", false, modelErr}, {"after successful call", false, nil},
+		} {
+			t.Run(provider+"/"+tt.name, func(t *testing.T) {
+				root := t.TempDir()
+				originalDir, blocked := filepath.Join(root, "usage"), filepath.Join(root, "blocked")
+				if err := os.WriteFile(blocked, []byte("not a directory"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				store := &usage.Store{Dir: originalDir}
+				calls := 0
+				tracked := attemptFixture(&Orchestrator{Usage: store, Main: provider, Runner: Runner{runModel: func(context.Context, modelRun) (aicli.Result, error) {
+					calls++
+					store.Dir = blocked
+					return aicli.Result{Answer: "completed paid work", Tokens: usage.Tokens{Input: 10, Output: 2}, UsageComplete: tt.modelErr == nil}, tt.modelErr
+				}}})
+				finish, err := tracked.trackUsage(usageJob())
+				if err != nil {
+					t.Fatal(err)
+				}
+				if tt.before {
+					store.Dir = blocked
+				}
+				answer, err := tracked.Runner.runAI(context.Background(), Job{Main: RoleSettings{Provider: provider}}, "dir", "prompt", false, "", nil)
+				wantCalls := 1
+				if tt.before {
+					wantCalls = 0
+				}
+				if err == nil || !strings.Contains(err.Error(), "save action usage") || errors.Is(err, monitor.ErrTerminalJob) == tt.before || calls != wantCalls || answer != "" || (!tt.before && tt.modelErr != nil && !errors.Is(err, tt.modelErr)) {
+					t.Fatalf("storage failure: calls=%d answer=%q error=%v", calls, answer, err)
+				}
+				if finalErr := finish(err); finalErr == nil || !strings.Contains(finalErr.Error(), "save action usage") {
+					t.Fatalf("final save failure missing: %v", finalErr)
+				}
+				records, readErr := usage.ReadAll(originalDir)
+				if readErr != nil || len(records) != 1 || records[0].Status != "running" || (!tt.before && records[0].UsageComplete) {
+					t.Fatalf("last durable checkpoint lost: records=%+v error=%v", records, readErr)
+				}
+			})
+		}
 	}
 }
 
@@ -288,7 +250,7 @@ func TestExecuteRecordsNoCodexAndSkipsAcknowledged(t *testing.T) {
 			job := usageJob()
 			job.Command.Name = "review"
 			job.Repository.Actions = []string{"review"}
-			installActionTestSkills(t, testReviewSkillURL)
+			t.Setenv("HOME", t.TempDir())
 			var comments []github.Comment
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch {
@@ -337,15 +299,12 @@ func TestExecuteRecordsNoCodexAndSkipsAcknowledged(t *testing.T) {
 				Commands:   map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{testReviewSkillURL}}},
 				CodexModel: "test-model",
 				Runner: Runner{
-					runModel: func(_ context.Context, modelRequest modelRun) (aicli.Result, error) {
-						t.Fatal("review on an issue must not invoke Codex")
-						return aicli.Result{}, nil
-					},
+					runModel: forbidModel(t),
 				},
 			}
 			err := e.Execute(context.Background(), job)
 			if failInitialSave {
-				if err == nil || !strings.Contains(err.Error(), "save action usage") || len(comments) != 0 {
+				if err == nil || errors.Is(err, monitor.ErrTerminalJob) || errors.Is(err, monitor.ErrPostModelPublication) || !strings.Contains(err.Error(), "save action usage") || len(comments) != 0 {
 					t.Fatalf("action ran without initial usage record: err=%v comments=%+v", err, comments)
 				}
 				return

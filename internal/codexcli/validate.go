@@ -138,7 +138,7 @@ func listModels(ctx context.Context, settings config.CodexConfig) (models []mode
 	}()
 	encoder := json.NewEncoder(stdin)
 	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 4096), maxEventBytes)
+	scanner.Buffer(make([]byte, 4096), aicli.MaxEventBytes)
 	call := func(id int, method string, params any, result any) error {
 		if err := encoder.Encode(map[string]any{"id": id, "method": method, "params": params}); err != nil {
 			return err

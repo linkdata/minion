@@ -19,7 +19,6 @@ import (
 	"github.com/linkdata/minion/internal/cleanup"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/processgroup"
-	"github.com/linkdata/minion/internal/skills"
 	workspacepath "github.com/linkdata/minion/internal/workspace"
 )
 
@@ -47,7 +46,7 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	if strings.TrimSpace(prompt) == "" {
 		return result, errors.New("claude: prompt is empty")
 	}
-	workspace, err := directory(dir)
+	workspace, err := aicli.Directory(dir)
 	if err != nil {
 		return result, fmt.Errorf("claude source snapshot: %w", err)
 	}
@@ -81,7 +80,7 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	if err := os.Mkdir(cacheDir, 0o700); err != nil {
 		return result, err
 	}
-	var embeddedDir string
+	skillPaths, embeddedDir, err := aicli.MaterializeSkills(filepath.Dir(workspace), settings.Skills)
 	defer func() {
 		if embeddedDir != "" {
 			if err := cleanup.RemoveAll(embeddedDir); err != nil {
@@ -90,30 +89,10 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 			}
 		}
 	}()
-	skillPaths := make([]string, 0, len(settings.Skills))
-	for _, skill := range settings.Skills {
-		if content, builtin := skills.BuiltinContent(skill); builtin {
-			if embeddedDir == "" {
-				embeddedDir, err = os.MkdirTemp(filepath.Dir(workspace), ".minion-skills-")
-				if err != nil {
-					return result, err
-				}
-			}
-			name, err := skills.Name(skill)
-			if err != nil {
-				return result, err
-			}
-			skill = filepath.Join(embeddedDir, name, "SKILL.md")
-			if err := os.MkdirAll(filepath.Dir(skill), 0o700); err != nil {
-				return result, err
-			}
-			if err := os.WriteFile(skill, content, 0o600); err != nil {
-				return result, err
-			}
-		}
-		if !filepath.IsAbs(skill) || filepath.Base(skill) != "SKILL.md" {
-			return result, errors.New("claude skill must be an absolute SKILL.md path")
-		}
+	if err != nil {
+		return result, fmt.Errorf("claude skills: %w", err)
+	}
+	for i, skill := range skillPaths {
 		resolved, err := filepath.EvalSymlinks(skill)
 		if err != nil {
 			return result, err
@@ -121,7 +100,7 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 		if workspacepath.Within(workspace, resolved) {
 			return result, errors.New("claude skill is inside the untrusted source snapshot")
 		}
-		skillPaths = append(skillPaths, resolved)
+		skillPaths[i] = resolved
 	}
 	policy, err := sandboxSettings(workspace, runtimeDir, writable, outputDir, settings, skillPaths, authDir)
 	if err != nil {
@@ -132,7 +111,7 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	// sandboxSettings denies them explicitly for read-only inputs.
 	args = append(args, "--add-dir", workspace)
 	for _, path := range settings.ReadOnlyDirs {
-		resolved, err := directory(path)
+		resolved, err := aicli.Directory(path)
 		if err != nil {
 			return result, err
 		}
@@ -180,14 +159,11 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	}}
 	diagnostics := bounded.Tail{}
 	ceilingMatched := false
-	ceiling := bounded.Lines{Limit: maxEventBytes, Line: func(line []byte) {
+	ceiling := bounded.Lines{Limit: aicli.MaxEventBytes, Line: func(line []byte) {
 		ceilingMatched = ceilingMatched || isWaitCeilingStop(line)
 	}}
 	cmd.Stdout, cmd.Stderr = &output, io.MultiWriter(&diagnostics, &ceiling)
 	err = cmd.Run()
-	if failureTimer != nil {
-		failureTimer.Stop()
-	}
 	ceiling.Finish()
 	// Preserve crash/startup stderr before finish adds a generic missing-result
 	// error; native structured failures retain their safer diagnostic instead.
@@ -195,6 +171,9 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 		err = fmt.Errorf("%w: %q", err, strings.TrimSpace(diagnostics.String()))
 	}
 	output.finish()
+	if failureTimer != nil {
+		failureTimer.Stop()
+	}
 	result = output.result
 	if ctx.Err() != nil {
 		err = errors.Join(ctx.Err(), output.err, err)
@@ -241,7 +220,7 @@ func sandboxSettings(workspace, runtimeDir string, writable bool, outputDir stri
 		deniedWrites = append(deniedWrites, workspace)
 	}
 	if outputDir != "" {
-		resolved, err := directory(outputDir)
+		resolved, err := aicli.Directory(outputDir)
 		if err != nil {
 			return "", err
 		}
@@ -253,7 +232,7 @@ func sandboxSettings(workspace, runtimeDir string, writable bool, outputDir stri
 		outputDir = resolved
 	}
 	for _, path := range settings.ReadOnlyDirs {
-		resolved, err := directory(path)
+		resolved, err := aicli.Directory(path)
 		if err != nil {
 			return "", err
 		}
@@ -299,27 +278,6 @@ func credentialDenials() []map[string]string {
 		rules = append(rules, map[string]string{"name": name, "mode": "deny"})
 	}
 	return rules
-}
-
-func directory(path string) (string, error) {
-	if strings.TrimSpace(path) == "" {
-		return "", errors.New("directory is empty")
-	}
-	resolved, err := filepath.EvalSymlinks(path)
-	if err == nil {
-		resolved, err = filepath.Abs(resolved)
-	}
-	if err != nil {
-		return "", err
-	}
-	info, err := os.Stat(resolved)
-	if err != nil {
-		return "", err
-	}
-	if !info.IsDir() || resolved == string(os.PathSeparator) {
-		return "", errors.New("expected a non-root directory")
-	}
-	return resolved, nil
 }
 
 func childEnvironment(env []string, runtimeDir, cacheDir, authDir string) ([]string, error) {

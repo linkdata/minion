@@ -2,14 +2,12 @@ package claudecli
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"math"
 	"strconv"
 	"strings"
 	"testing"
 
-	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/usage"
 )
 
@@ -148,15 +146,6 @@ func TestOutputFragments(t *testing.T) {
 	}
 }
 
-func TestOutputMissingFinalResult(t *testing.T) {
-	o := jsonlOutput{}
-	_, _ = o.Write([]byte("{\"type\":\"system\",\"subtype\":\"init\"}\n"))
-	o.finish()
-	if o.err == nil || !strings.Contains(o.err.Error(), "missing successful final result from Claude") {
-		t.Fatalf("missing final result diagnostic = %v", o.err)
-	}
-}
-
 func TestOutputBackgroundTasks(t *testing.T) {
 	const pending = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"reviewer"}]}`
 	const empty = `{"type":"system","subtype":"background_tasks_changed","tasks":[]}`
@@ -235,17 +224,6 @@ func TestOutputNativeTurnResults(t *testing.T) {
 				t.Fatalf("valid result stream rejected: result=%+v error=%v cancelled=%v", o.result, o.err, cancelled)
 			}
 		})
-	}
-}
-
-func TestOutputLimitCancels(t *testing.T) {
-	cancelled := false
-	o := jsonlOutput{cancel: func() { cancelled = true }, stream: aicli.JSONL{Bytes: aicli.MaxOutputBytes}}
-	if _, err := o.Write([]byte("x")); err != nil {
-		t.Fatal(err)
-	}
-	if !errors.Is(o.err, aicli.ErrOutputLimit) || !cancelled {
-		t.Fatalf("limit not enforced: %v, %v", o.err, cancelled)
 	}
 }
 

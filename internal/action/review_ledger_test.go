@@ -79,7 +79,8 @@ func TestReviewLedgerRequiresParsedCallPrefix(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			entries := test.mutate(append([]ReviewEntry(nil), ledger...))
-			if err := validateReviewLedger(job, calls, entries, false); err == nil {
+			result.Calls, result.ReviewLedger = calls, entries
+			if err := result.validate(job, false); err == nil {
 				t.Fatal("accepted invalid or skipped review evidence")
 			}
 		})
@@ -116,7 +117,8 @@ func TestReviewLedgerRetainsNonblockingAndRejectsUnknownVerdicts(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			call := CallUsage{Provider: job.Critic.Provider, Role: roleCritic, Round: 1, ReviewPhase: reviewFull, Approved: test.approved, NoBlockers: test.noBlockers, HasBlockers: test.hasBlockers}
 			entries := []ReviewEntry{{Role: roleMain, Round: 1}, {Role: roleCritic, Round: 1, ReviewPhase: reviewFull, Approved: test.approved, HasBlockers: test.hasBlockers, Feedback: test.feedback}}
-			if err := validateReviewLedger(job, []CallUsage{main, call}, entries, false); (err == nil) != test.valid {
+			result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Calls: []CallUsage{main, call}, ReviewLedger: entries}
+			if err := result.validate(job, false); (err == nil) != test.valid {
 				t.Fatalf("verdict ledger validation=%v want valid=%t", err, test.valid)
 			}
 			if !test.approved && test.noBlockers && test.valid {
@@ -124,6 +126,21 @@ func TestReviewLedgerRetainsNonblockingAndRejectsUnknownVerdicts(t *testing.T) {
 				if err := result.Validate(job); err != nil || result.ReviewLedger[1].Approved {
 					t.Fatalf("threshold promoted a nonblocking verdict to approval: %+v, %v", result.ReviewLedger, err)
 				}
+				data, err := json.Marshal(result)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var wire struct {
+					ReviewLedger []map[string]json.RawMessage `json:"review_ledger"`
+				}
+				if err := json.Unmarshal(data, &wire); err != nil || len(wire.ReviewLedger) != 2 || string(wire.ReviewLedger[1]["approved"]) != "false" || string(wire.ReviewLedger[1]["has_blockers"]) != "false" {
+					t.Fatalf("false critic verdict omitted: %s,%v", data, err)
+				}
+				var decoded Result
+				if err := json.Unmarshal(data, &decoded); err != nil || decoded.Validate(job) != nil || !reflect.DeepEqual(decoded.ReviewLedger, entries) {
+					t.Fatalf("nonblocking private wire evidence changed: %s,%v", data, err)
+				}
+
 			}
 		})
 	}
@@ -192,12 +209,14 @@ func TestReviewLedgerUsesExistingRoundCountBound(t *testing.T) {
 			calls = append(calls, CallUsage{Provider: job.Critic.Provider, Role: roleCritic, Round: round, ReviewPhase: reviewFull, Approved: round == rounds, NoBlockers: round == rounds, HasBlockers: round != rounds})
 		}
 		entries := reviewLedgerFixture(calls)
-		if err := validateReviewLedger(job, calls, entries, true); err != nil || len(entries) != 3*rounds-1 {
+		result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Complete answer", Calls: calls, ReviewLedger: entries}
+		if err := result.Validate(job); err != nil || len(entries) != 3*rounds-1 {
 			t.Fatalf("maximum ledger refused: entries=%d err=%v", len(entries), err)
 		}
 		calls = append(calls, CallUsage{Provider: job.Main.Provider, Role: roleMain, Round: rounds + 1})
 		entries = append(entries, ReviewEntry{Role: roleMain, Round: rounds + 1})
-		if err := validateReviewLedger(job, calls, entries, false); err == nil {
+		result.Calls, result.ReviewLedger = calls, entries
+		if err := result.validate(job, false); err == nil {
 			t.Fatal("ledger exceeded configured call/round bound")
 		}
 	}

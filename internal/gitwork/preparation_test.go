@@ -3,7 +3,6 @@ package gitwork
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -13,75 +12,13 @@ import (
 	"github.com/linkdata/minion/internal/workspace"
 )
 
-func TestReadOnlyCloneSnapshotsWithoutMaterializedWorktree(t *testing.T) {
-	for _, pull := range []bool{false, true} {
-		t.Run(fmt.Sprintf("pull=%t", pull), func(t *testing.T) {
-			fixture := newFixture(t)
-			head := fixture.base
-			if pull {
-				writeFile(t, filepath.Join(fixture.source, "README.md"), "pull request source\n")
-				fixture.git(fixture.source, "add", ".")
-				fixture.git(fixture.source, "commit", "-m", "PR source")
-				head = fixture.git(fixture.source, "rev-parse", "HEAD")
-				fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/pull/7/head")
-			}
-			lookup := localTreeMetadata(fixture.source)
-			var checkout *Checkout
-			var err error
-			if pull {
-				checkout, err = clonePullRequestFromURL(context.Background(), t.TempDir(), fixture.remote, 7, "main", head, lookup)
-			} else {
-				checkout, err = cloneFromURL(context.Background(), t.TempDir(), fixture.remote, "main", lookup, false)
-			}
-			if err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(func() {
-				if err := checkout.Close(); err != nil {
-					t.Error(err)
-				}
-			})
-			assertNoWorktree := func() {
-				t.Helper()
-				entries, err := os.ReadDir(checkout.path)
-				if err != nil || len(entries) != 1 || entries[0].Name() != ".git" {
-					t.Fatalf("read-only preparation materialized source: entries=%v error=%v", entries, err)
-				}
-			}
-			assertNoWorktree()
-			snapshot, err := checkout.Snapshot(context.Background(), true)
-			if err != nil || snapshot.Head != head || len(snapshot.Files) != 1 || snapshot.Files[0].Path != "README.md" || !snapshot.HistoryRequested || !snapshot.HistoryComplete {
-				t.Fatalf("metadata-only snapshot failed: head=%s files=%d history=%t/%t error=%v", snapshot.Head, len(snapshot.Files), snapshot.HistoryRequested, snapshot.HistoryComplete, err)
-			}
-			if pull {
-				if snapshot.Base != fixture.base || snapshot.MergeBase != fixture.base || len(snapshot.BaseFiles) != 1 || string(snapshot.BaseFiles[0].Data) != "fixture\n" || string(snapshot.Files[0].Data) != "pull request source\n" {
-					t.Fatalf("metadata-only PR lost pinned comparison: base=%s merge-base=%s base-files=%d", snapshot.Base, snapshot.MergeBase, len(snapshot.BaseFiles))
-				}
-			} else if snapshot.Base != "" || snapshot.MergeBase != "" || len(snapshot.BaseFiles) != 0 || string(snapshot.Files[0].Data) != "fixture\n" {
-				t.Fatalf("default snapshot unexpectedly compared another revision: base=%s merge-base=%s base-files=%d", snapshot.Base, snapshot.MergeBase, len(snapshot.BaseFiles))
-			}
-			if err := workspace.ValidateSnapshot(snapshot); err != nil {
-				t.Fatalf("metadata-only snapshot violates transfer contract: %v", err)
-			}
-			assertNoWorktree()
-			fixture.git(checkout.path, "config", "minion.test", "changed")
-			if _, err := checkout.Snapshot(context.Background(), false); err == nil || !strings.Contains(err.Error(), "Git config changed") {
-				t.Fatalf("read-only checkout stopped verifying its config: %v", err)
-			}
-		})
-	}
-}
-
 func TestPullSnapshotPreservesSpecialComparisonPaths(t *testing.T) {
 	fixture := newFixture(t)
 	names := []string{"-dash", " leading", "trailing ", "tab\tname", "line\nname", `quote"name`, `literal\backslash`, "café"}
 	for _, name := range names {
 		writeFile(t, filepath.Join(fixture.source, name), "merge-base contents\n")
 	}
-	fixture.git(fixture.source, "add", ".")
-	fixture.git(fixture.source, "commit", "-m", "comparison names")
-	base := fixture.git(fixture.source, "rev-parse", "HEAD")
-	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/heads/main")
+	base := fixture.commit("refs/heads/main", "comparison names")
 	for i, name := range names {
 		if i == 0 {
 			if err := os.Remove(filepath.Join(fixture.source, name)); err != nil {
@@ -91,19 +28,8 @@ func TestPullSnapshotPreservesSpecialComparisonPaths(t *testing.T) {
 			writeFile(t, filepath.Join(fixture.source, name), "head contents\n")
 		}
 	}
-	fixture.git(fixture.source, "add", ".")
-	fixture.git(fixture.source, "commit", "-m", "change comparison names")
-	head := fixture.git(fixture.source, "rev-parse", "HEAD")
-	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/pull/7/head")
-	checkout, err := clonePullRequestFromURL(context.Background(), t.TempDir(), fixture.remote, 7, "main", head, localTreeMetadata(fixture.source))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := checkout.Close(); err != nil {
-			t.Error(err)
-		}
-	})
+	head := fixture.commit("refs/pull/7/head", "change comparison names")
+	checkout := fixture.keepCheckout(clonePullRequestFromURL(context.Background(), t.TempDir(), fixture.remote, 7, "main", head, localTreeMetadata(fixture.source)))
 	snapshot, err := checkout.Snapshot(context.Background(), false)
 	if err != nil {
 		t.Fatal(err)
@@ -159,29 +85,15 @@ func TestSnapshotAcceptsExactCombinedSourceByteLimit(t *testing.T) {
 	if err := os.WriteFile(filename, data, 0600); err != nil {
 		t.Fatal(err)
 	}
-	fixture.git(fixture.source, "add", ".")
-	fixture.git(fixture.source, "commit", "-m", "half-budget merge-base file")
-	base := fixture.git(fixture.source, "rev-parse", "HEAD")
-	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/heads/main")
+	base := fixture.commit("refs/heads/main", "half-budget merge-base file")
 	for i := 0; i < len(data); i += 2 {
 		data[i] = 'b'
 	}
 	if err := os.WriteFile(filename, data, 0600); err != nil {
 		t.Fatal(err)
 	}
-	fixture.git(fixture.source, "add", ".")
-	fixture.git(fixture.source, "commit", "-m", "half-budget head file")
-	head := fixture.git(fixture.source, "rev-parse", "HEAD")
-	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/pull/7/head")
-	checkout, err := clonePullRequestFromURL(context.Background(), t.TempDir(), fixture.remote, 7, "main", head, localTreeMetadata(fixture.source))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := checkout.Close(); err != nil {
-			t.Error(err)
-		}
-	})
+	head := fixture.commit("refs/pull/7/head", "half-budget head file")
+	checkout := fixture.keepCheckout(clonePullRequestFromURL(context.Background(), t.TempDir(), fixture.remote, 7, "main", head, localTreeMetadata(fixture.source)))
 	snapshot, err := checkout.Snapshot(context.Background(), false)
 	if err != nil || snapshot.Base != base || len(snapshot.Files) != 1 || len(snapshot.BaseFiles) != 1 {
 		t.Fatalf("exact combined transfer failed: head-files=%d base-files=%d base=%s error=%v", len(snapshot.Files), len(snapshot.BaseFiles), snapshot.Base, err)

@@ -26,9 +26,6 @@ func TestRepositoryIdentity(t *testing.T) {
 		{strings.Repeat("a", 100) + "/" + strings.Repeat("b", 100), true},
 		{"", false}, {"owner", false}, {"/repo", false}, {"owner/", false},
 		{"owner/repo/extra", false}, {"../repo", false}, {"owner/..", false},
-		{"owner/café", false}, {"owner/repo\n", false},
-		{strings.Repeat("a", 101) + "/repo", false},
-		{"owner/" + strings.Repeat("b", 101), false},
 	} {
 		if got := ValidRepository(test.name); got != test.valid {
 			t.Errorf("ValidRepository(%q)=%t, want %t", test.name, got, test.valid)

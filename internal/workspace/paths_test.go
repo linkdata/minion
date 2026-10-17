@@ -1,7 +1,6 @@
 package workspace
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -28,20 +27,6 @@ func TestPrepareRootCreatesCanonicalDirectory(t *testing.T) {
 	info, err := os.Stat(root)
 	if err != nil || !info.IsDir() || info.Mode().Perm() != 0700 {
 		t.Fatalf("prepared root permissions=%v,%v", info, err)
-	}
-}
-
-func TestCheckUnchangedBoundsEachFileToBaseline(t *testing.T) {
-	root := privateRoot(t)
-	base := []File{{Path: "source", Mode: Regular, Data: []byte("before")}}
-	if err := Materialize(root, base); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(root, "source"), []byte("longer content"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := CheckUnchanged(context.Background(), root, base); err == nil || !strings.Contains(err.Error(), "modified supplied source") || !strings.Contains(err.Error(), "byte limit") {
-		t.Fatalf("grown source validation=%v", err)
 	}
 }
 

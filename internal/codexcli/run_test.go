@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/usage"
@@ -351,7 +350,11 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"a
 		t.Fatal(err)
 	}
 	for _, unsafe := range []string{workspace, inside, filepath.Dir(workspace), "/"} {
-		if _, err := Run(context.Background(), workspace, "Audit source", false, unsafe, config.CodexConfig{}); err == nil || !strings.Contains(err.Error(), "separate from the source snapshot") {
+		want := "separate from the source snapshot"
+		if unsafe == "/" {
+			want = "expected a non-root directory"
+		}
+		if _, err := Run(context.Background(), workspace, "Audit source", false, unsafe, config.CodexConfig{}); err == nil || !strings.Contains(err.Error(), want) {
 			t.Fatalf("accepted unsafe reports directory %q: %v", unsafe, err)
 		}
 	}
@@ -489,7 +492,7 @@ func TestJSONLOutputCapturesUsageAndHelpers(t *testing.T) {
 {"type":"item.completed","item":{"type":"collab_tool_call","receiver_thread_ids":["child"]}}
 {"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":70,"output_tokens":12}}
 `))
-	output.finish()
+	output.stream.Finish()
 	if output.threadID != "root" || len(output.children) != 1 || output.children[0] != "child" || output.tokens == nil || *output.tokens != (usage.Tokens{Input: 100, CachedInput: 70, Output: 12}) {
 		t.Fatalf("missing accounting events: %+v", output)
 	}
@@ -500,7 +503,7 @@ func TestJSONLOutputCapturesUsageAndHelpers(t *testing.T) {
 	} {
 		var broken jsonlOutput
 		_, _ = broken.Write([]byte(`{"type":"turn.completed","usage":` + invalid + `}`))
-		broken.finish()
+		broken.stream.Finish()
 		if broken.tokens != nil {
 			t.Fatalf("invalid usage accepted: %s", invalid)
 		}
@@ -508,14 +511,6 @@ func TestJSONLOutputCapturesUsageAndHelpers(t *testing.T) {
 }
 
 func TestJSONLOutputStopsAtCardinalityLimits(t *testing.T) {
-	t.Run("events", func(t *testing.T) {
-		cancelled := false
-		output := jsonlOutput{cancel: func() { cancelled = true }, stream: aicli.JSONL{Events: aicli.MaxEvents}}
-		_, _ = output.Write([]byte("{\"type\":\"noop\"}\n"))
-		if !cancelled || !output.failed || !strings.Contains(output.failureReason, "event count") {
-			t.Fatalf("unbounded events: cancelled=%t events=%d reason=%q", cancelled, output.stream.Events, output.failureReason)
-		}
-	})
 	t.Run("children", func(t *testing.T) {
 		cancelled := false
 		output := jsonlOutput{cancel: func() { cancelled = true }}

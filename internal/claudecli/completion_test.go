@@ -3,7 +3,7 @@ package claudecli
 import (
 	"context"
 	"encoding/json"
-	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -106,38 +106,31 @@ func TestOutputUsageGraceStartsOnlyOnce(t *testing.T) {
 	}
 }
 
-func TestRunPressureGraceStopsWatchdogWithoutResult(t *testing.T) {
-	const stopped = `{"type":"system","subtype":"task_notification","status":"stopped","summary":"Background command \"tests\" was stopped because the system is running low on memory"}`
-	fakeExecutable(t, "claude", "cat >/dev/null\ncat <<'EVENTS'\n"+assistantUsageEvent("root", 3, 5, 7, 2)+"\n"+stopped+"\nEVENTS\nsleep 30\n")
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	result, err := Run(ctx, t.TempDir(), "task", false, "", config.ClaudeConfig{})
-	if err == nil || !strings.Contains(err.Error(), "provider memory pressure") || ctx.Err() != nil || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 2}) {
-		t.Fatalf("memory-pressure stop waited for the action deadline: result=%+v error=%v parent=%v", result, err, ctx.Err())
-	}
-}
-
-func TestRunQuotaGraceStopsWatchdogAndKeepsObservedUsage(t *testing.T) {
-	const rejected = `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected"}}`
-	for _, resultFollows := range []bool{false, true} {
-		t.Run(map[bool]string{false: "watchdog waits forever", true: "final aggregate within grace"}[resultFollows], func(t *testing.T) {
-			script := "cat >/dev/null\ncat <<'EVENTS'\n" + assistantUsageEvent("root", 3, 5, 7, 2) + "\n" + rejected + "\nEVENTS\n"
-			if resultFollows {
-				script += "sleep 0.1\ncat <<'RESULT'\n" + successfulResult + "\nRESULT\n"
-			}
-			script += "sleep 30\n"
-			fakeExecutable(t, "claude", script)
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			start := time.Now()
-			result, err := Run(ctx, t.TempDir(), "task", false, "", config.ClaudeConfig{})
-			want := usage.Tokens{Input: 15, CachedInput: 7, Output: 2}
-			if resultFollows {
-				want.Output = 11
-			}
-			if err == nil || !strings.Contains(err.Error(), "provider usage limit reached") || errors.Is(err, context.DeadlineExceeded) || result.Tokens != want || result.Answer != "" || result.UsageComplete || time.Since(start) > 5*time.Second {
-				t.Fatalf("result=%+v elapsed=%v error=%v", result, time.Since(start), err)
-			}
-		})
+func TestRunFatalGraceStopsWatchdogAndKeepsObservedUsage(t *testing.T) {
+	for _, scenario := range []struct{ name, event, failure string }{
+		{"quota", `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected"}}`, "provider usage limit reached"},
+		{"pressure", `{"type":"system","subtype":"task_notification","status":"stopped","summary":"Background command \"tests\" was stopped because the system is running low on memory"}`, "provider memory pressure"},
+	} {
+		for _, resultFollows := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/result=%t", scenario.name, resultFollows), func(t *testing.T) {
+				script := "cat >/dev/null\ncat <<'EVENTS'\n" + assistantUsageEvent("root", 3, 5, 7, 2) + "\n" + `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"worker"}]}` + "\n" + scenario.event + "\nEVENTS\n"
+				if resultFollows {
+					script += "sleep 0.1\ncat <<'RESULT'\n" + successfulResult + "\nRESULT\n"
+				}
+				script += "sleep 30\n"
+				fakeExecutable(t, "claude", script)
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				start := time.Now()
+				result, err := Run(ctx, t.TempDir(), "task", false, "", config.ClaudeConfig{})
+				want := usage.Tokens{Input: 15, CachedInput: 7, Output: 2}
+				if resultFollows {
+					want.Output = 11
+				}
+				if err == nil || !strings.Contains(err.Error(), scenario.failure) || ctx.Err() != nil || result.Tokens != want || result.Answer != "" || result.UsageComplete || time.Since(start) > 5*time.Second {
+					t.Fatalf("result=%+v elapsed=%v error=%v parent=%v", result, time.Since(start), err, ctx.Err())
+				}
+			})
+		}
 	}
 }

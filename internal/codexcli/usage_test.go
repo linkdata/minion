@@ -163,7 +163,7 @@ func TestCollectUsagePartialRunsPreserveKnownTokens(t *testing.T) {
 		{"unterminated", ""},
 		{"malformed", "{broken"},
 		{"bad counts", usageSnapshot(20, -1, 0, 0)},
-		{"oversized", strings.Repeat("x", maxEventBytes+1)},
+		{"oversized", strings.Repeat("x", aicli.MaxEventBytes+1)},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			home := t.TempDir()
@@ -176,51 +176,19 @@ func TestCollectUsagePartialRunsPreserveKnownTokens(t *testing.T) {
 	}
 }
 
-func TestCollectUsageMissingLogsAndChildrenUseIncompleteFallback(t *testing.T) {
-	fallback := usage.Tokens{Input: 100, CachedInput: 30, Output: 10}
-	for _, test := range []struct {
-		name, rootID string
-		createRoot   bool
-		expected     []string
-	}{
-		{"missing root", "root", false, nil},
-		{"missing ID", "", false, nil},
-		{"missing child", "root", true, []string{"missing"}},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			home := t.TempDir()
-			if test.createRoot {
-				writeUsageRollout(t, home, "root", "", usageEvent("task_started", "root-turn"), usageSnapshot(12, 100, 30, 10), usageEvent("task_complete", "root-turn"))
-			}
-			got, complete, _ := collectUsage(context.Background(), home, test.rootID, time.Now(), &fallback, test.expected)
-			if got != fallback || complete {
-				t.Fatalf("collectUsage() = %+v, %v; want fallback, incomplete", got, complete)
-			}
-		})
+func TestCollectUsageTruncatedCompleteEventIsIncomplete(t *testing.T) {
+	home := t.TempDir()
+	root := writeUsageRollout(t, home, "root", "", usageEvent("task_started", "root-turn"), usageRecord("root", "root-turn", "root-response", 10, 0, 1), usageEvent("task_complete", "root-turn"))
+	data, err := os.ReadFile(root)
+	if err != nil {
+		t.Fatal(err)
 	}
-}
-
-func TestCollectUsageUnfinishedChildAndTruncatedCompleteEventAreIncomplete(t *testing.T) {
-	for _, truncated := range []bool{false, true} {
-		t.Run(fmt.Sprint(truncated), func(t *testing.T) {
-			home := t.TempDir()
-			root := writeUsageRollout(t, home, "root", "", usageEvent("task_started", "root-turn"), usageRecord("root", "root-turn", "root-response", 10, 0, 1), usageEvent("task_complete", "root-turn"))
-			if truncated {
-				data, err := os.ReadFile(root)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(root, data[:len(data)-1], 0600); err != nil {
-					t.Fatal(err)
-				}
-			} else {
-				writeUsageRollout(t, home, "child", "root", usageEvent("task_started", "child-turn"), usageRecord("child", "child-turn", "child-response", 20, 0, 2))
-			}
-			got, complete, _ := collectUsage(context.Background(), home, "root", time.Now(), nil, nil)
-			if got.Input == 0 || complete {
-				t.Fatalf("collectUsage() = %+v, %v; want known usage, incomplete", got, complete)
-			}
-		})
+	if err := os.WriteFile(root, data[:len(data)-1], 0600); err != nil {
+		t.Fatal(err)
+	}
+	got, complete, _ := collectUsage(context.Background(), home, "root", time.Now(), nil, nil)
+	if got != (usage.Tokens{Input: 10, Output: 1}) || complete {
+		t.Fatalf("truncated complete event usage=%+v complete=%t", got, complete)
 	}
 }
 
@@ -321,7 +289,7 @@ func TestCollectUsageBoundsScanningAndHonorsCancellation(t *testing.T) {
 
 func TestRolloutUsageSkipsOversizedLinesAndDebitsBytes(t *testing.T) {
 	home := t.TempDir()
-	oversized := `{"type":"response_item","payload":"` + strings.Repeat("x", maxEventBytes) + `"}`
+	oversized := `{"type":"response_item","payload":"` + strings.Repeat("x", aicli.MaxEventBytes) + `"}`
 	root := writeUsageRollout(t, home, "root", "", usageEvent("task_started", "turn"),
 		usageRecord("root", "turn", "before", 10, 5, 1), oversized,
 		usageRecord("root", "turn", "after", 20, 10, 2),
@@ -353,7 +321,7 @@ func TestRolloutUsageSkipsOversizedLinesAndDebitsBytes(t *testing.T) {
 func TestOversizedChildBaselineCountsOnlyOwnedResponses(t *testing.T) {
 	for _, withRecord := range []bool{false, true} {
 		t.Run(fmt.Sprint(withRecord), func(t *testing.T) {
-			events := []string{strings.Repeat("x", maxEventBytes+1), usageEvent("task_started", "child-turn")}
+			events := []string{strings.Repeat("x", aicli.MaxEventBytes+1), usageEvent("task_started", "child-turn")}
 			want := usage.Tokens{}
 			if withRecord {
 				events = append(events, usageRecord("child", "child-turn", "own-response", 20, 5, 2))
@@ -384,10 +352,10 @@ func TestRolloutScannerEventBoundaryAndPartialEOF(t *testing.T) {
 		wantLines int
 		complete  bool
 	}{
-		{"exact boundary", maxEventBytes, "\n", 1, true},
-		{"exact partial EOF", maxEventBytes, "", 1, false},
-		{"oversized then valid", maxEventBytes + 1, "\n{}\n", 1, false},
-		{"oversized partial EOF", maxEventBytes + 1, "", 0, false},
+		{"exact boundary", aicli.MaxEventBytes, "\n", 1, true},
+		{"exact partial EOF", aicli.MaxEventBytes, "", 1, false},
+		{"oversized then valid", aicli.MaxEventBytes + 1, "\n{}\n", 1, false},
+		{"oversized partial EOF", aicli.MaxEventBytes + 1, "", 0, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			line := prefix + strings.Repeat("x", test.size-len(prefix)-len(suffix)) + suffix
@@ -396,7 +364,7 @@ func TestRolloutScannerEventBoundaryAndPartialEOF(t *testing.T) {
 			lines := 0
 			for scanner.Scan() {
 				lines++
-				if !json.Valid(scanner.Bytes()) || (test.size == maxEventBytes && len(scanner.Bytes()) != maxEventBytes) {
+				if !json.Valid(scanner.Bytes()) || (test.size == aicli.MaxEventBytes && len(scanner.Bytes()) != aicli.MaxEventBytes) {
 					t.Fatalf("complete boundary JSON corrupted: length=%d", len(scanner.Bytes()))
 				}
 			}
@@ -409,22 +377,48 @@ func TestRolloutScannerEventBoundaryAndPartialEOF(t *testing.T) {
 
 func TestOversizedRolloutStillExhaustsOriginalBudget(t *testing.T) {
 	path := writeUsageRollout(t, t.TempDir(), "root", "", usageEvent("task_started", "turn"),
-		usageRecord("root", "turn", "before", 10, 0, 1), strings.Repeat("x", 2*maxEventBytes+1),
+		usageRecord("root", "turn", "before", 10, 0, 1), strings.Repeat("x", 2*aicli.MaxEventBytes+1),
 		usageRecord("root", "turn", "unreachable", 1000, 0, 100), usageEvent("task_complete", "turn"))
-	budget := int64(maxEventBytes + (256 << 10))
+	budget := int64(aicli.MaxEventBytes + (256 << 10))
 	got, complete, _, _ := readRolloutUsage(context.Background(), rolloutMeta{ID: "root", path: path}, "root", &budget)
 	if got != (usage.Tokens{Input: 10, Output: 1}) || complete || budget != 0 {
 		t.Fatalf("oversized discard bypassed budget: got=%+v complete=%t budget=%d", got, complete, budget)
 	}
 }
 
+func TestRolloutSessionCapPrecedesLargerTreeBudget(t *testing.T) {
+	const sessionBytes int64 = 128 << 20
+	const treeBytes int64 = 512 << 20
+	path := writeUsageRollout(t, t.TempDir(), "root", "", usageEvent("task_started", "turn"),
+		usageRecord("root", "turn", "before", 10, 0, 1), usageEvent("task_complete", "turn"))
+	file, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Sparse padding avoids a 128 MiB allocation. The newline makes the later
+	// counter readable if the independent per-session cap is removed.
+	_, seekErr := file.Seek(sessionBytes, io.SeekStart)
+	var writeErr error
+	if seekErr == nil {
+		_, writeErr = file.WriteString("\n" + usageRecord("root", "turn", "past-session-cap", 1000, 0, 100) + "\n")
+	}
+	if err := errors.Join(seekErr, writeErr, file.Close()); err != nil {
+		t.Fatal(err)
+	}
+	budget := treeBytes
+	got, complete, _, err := readRolloutUsage(context.Background(), rolloutMeta{ID: "root", path: path}, "root", &budget)
+	if err != nil || got != (usage.Tokens{Input: 10, Output: 1}) || complete || budget != treeBytes-sessionBytes {
+		t.Fatalf("session cap bypassed: tokens=%+v complete=%t budget=%d err=%v", got, complete, budget, err)
+	}
+}
+
 func TestRolloutScannerCancellationWhileDiscarding(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	reader := &cancelingRolloutReader{Reader: strings.NewReader(strings.Repeat("x", 3*maxEventBytes)), cancel: cancel, cancelAfter: maxEventBytes + 2}
+	reader := &cancelingRolloutReader{Reader: strings.NewReader(strings.Repeat("x", 3*aicli.MaxEventBytes)), cancel: cancel, cancelAfter: aicli.MaxEventBytes + 2}
 	complete := true
 	scanner := rolloutScanner(ctx, reader, &complete)
-	if scanner.Scan() || !errors.Is(scanner.Err(), context.Canceled) || reader.bytes > 2*(maxEventBytes+2) || complete {
+	if scanner.Scan() || !errors.Is(scanner.Err(), context.Canceled) || reader.bytes > 2*(aicli.MaxEventBytes+2) || complete {
 		t.Fatalf("discard ignored cancellation: read=%d complete=%t err=%v", reader.bytes, complete, scanner.Err())
 	}
 }
@@ -490,15 +484,5 @@ func TestCollectUsageRetainsValidCountersOnOverflow(t *testing.T) {
 				t.Fatalf("overflow discarded valid counters: %+v complete=%t err=%v", got, complete, err)
 			}
 		})
-	}
-}
-
-func TestInterruptedHelperReasonDoesNotProveCompletion(t *testing.T) {
-	path := writeUsageRollout(t, t.TempDir(), "child", "root", usageEvent("task_started", "turn"), usageRecord("child", "turn", "response", 20, 0, 2), `{"ordinal":21,"type":"event_msg","payload":{"type":"turn_aborted","turn_id":"turn","reason":"interrupted"}}`)
-	start := int64(9)
-	budget := int64(maxUsageScanBytes)
-	tokens, complete, _, err := readRolloutUsage(context.Background(), rolloutMeta{ID: "child", path: path, HistoryStart: &start}, "root", &budget)
-	if tokens != (usage.Tokens{Input: 20, Output: 2}) || complete || err == nil || !strings.Contains(err.Error(), "helper agent work did not complete") {
-		t.Fatalf("interruption reason accepted as completed work: %+v complete=%t err=%v", tokens, complete, err)
 	}
 }

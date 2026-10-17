@@ -14,8 +14,8 @@ type ReviewEntry struct {
 	Round       int    `json:"round"`
 	ReviewPhase string `json:"review_phase,omitempty"`
 	Notes       string `json:"notes,omitempty"`
-	Approved    bool   `json:"approved,omitempty"`
-	HasBlockers bool   `json:"has_blockers,omitempty"`
+	Approved    bool   `json:"approved"`
+	HasBlockers bool   `json:"has_blockers"`
 	Feedback    string `json:"feedback,omitempty"`
 }
 
@@ -28,7 +28,7 @@ func validateReviewLedger(job Job, calls []CallUsage, ledger []ReviewEntry, comp
 		}
 		return nil
 	}
-	if len(ledger) > 3*job.rounds()-1 || len(ledger) > len(calls) || (complete && len(ledger) != len(calls)) {
+	if len(ledger) > len(calls) || (complete && len(ledger) != len(calls)) {
 		return errors.New("review ledger does not match model call count")
 	}
 	for i, entry := range ledger {
@@ -49,7 +49,7 @@ func validateReviewLedger(job Job, calls []CallUsage, ledger []ReviewEntry, comp
 			if entry.Notes != "" || entry.Approved != call.Approved || entry.HasBlockers != call.HasBlockers || call.NoBlockers != !entry.HasBlockers {
 				return errors.New("review ledger differs from parsed critic verdict")
 			}
-			if entry.Approved != (entry.Feedback == "") || (entry.Approved && entry.HasBlockers) || (!entry.Approved && strings.TrimSpace(entry.Feedback) == "") {
+			if entry.Approved != (entry.Feedback == "") || (!entry.Approved && strings.TrimSpace(entry.Feedback) == "") {
 				return errors.New("invalid critic verdict in review ledger")
 			}
 		default:

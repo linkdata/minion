@@ -12,7 +12,7 @@ import (
 
 func TestWorkRootPreflightRefusesModelGrants(t *testing.T) {
 	const source = "https://github.com/owner/repo/tree/pinned/skills/example"
-	for _, kind := range []string{"required skill", "critic optional skill", "symlink root"} {
+	for _, kind := range []string{"required skill", "critic optional skill", "symlink root", "resolved Codex binary"} {
 		t.Run(kind, func(t *testing.T) {
 			root := t.TempDir()
 			t.Setenv("HOME", root)
@@ -22,6 +22,14 @@ func TestWorkRootPreflightRefusesModelGrants(t *testing.T) {
 				t.Fatal(err)
 			}
 			switch kind {
+			case "resolved Codex binary":
+				binary := filepath.Join(cfg.WorkRoot, "real-codex")
+				if err := os.WriteFile(binary, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(binary, filepath.Join(os.Getenv("PATH"), "codex")); err != nil {
+					t.Fatal(err)
+				}
 			case "required skill", "critic optional skill":
 				parent := ".agents"
 				if kind == "critic optional skill" {
@@ -55,6 +63,12 @@ func TestWorkRootPreflightRefusesModelGrants(t *testing.T) {
 			}
 			if err := checkWorkRootIsolation(cfg); err == nil || !strings.Contains(err.Error(), "work root overlaps") {
 				t.Fatalf("preflight accepted overlapping grant: %v", err)
+			}
+			if kind == "resolved Codex binary" {
+				cfg.Main, cfg.Adversarial = "claude", ""
+				if err := checkWorkRootIsolation(cfg); err != nil {
+					t.Fatalf("unused Codex executable affected startup: %v", err)
+				}
 			}
 		})
 	}

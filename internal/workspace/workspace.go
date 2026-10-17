@@ -278,7 +278,8 @@ func CheckRoot(root string) error {
 	return dir.Close()
 }
 
-func requireRootDir(root string) error {
+// CheckPrivateRoot requires a private directory without following a final symlink.
+func CheckPrivateRoot(root string) error {
 	info, err := os.Lstat(root)
 	if err != nil {
 		return err
@@ -341,7 +342,7 @@ func changedFiles(base []File, changes []Change) ([]File, error) {
 }
 
 func materialize(root string, files []File) error {
-	if err := requireRootDir(root); err != nil {
+	if err := CheckPrivateRoot(root); err != nil {
 		return err
 	}
 	dir, err := os.Open(root)
@@ -720,11 +721,18 @@ func readFile(name string, limit int64) (data []byte, info fs.FileInfo, resultEr
 	if err != nil {
 		return nil, nil, err
 	}
-	if !singleLink(after) {
-		return nil, nil, errors.New("file hard links changed while reading")
-	}
-	if int64(len(data)) != opened.Size() || after.Size() != opened.Size() || after.Mode() != opened.Mode() || !after.ModTime().Equal(opened.ModTime()) || !sameChangeTime(opened, after) {
-		return nil, nil, errors.New("file changed or exceeded limit while reading")
+	if err := checkReadStability(opened, after, len(data)); err != nil {
+		return nil, nil, err
 	}
 	return data, opened, nil
+}
+
+func checkReadStability(opened, after fs.FileInfo, bytesRead int) error {
+	if !singleLink(after) {
+		return errors.New("file hard links changed while reading")
+	}
+	if int64(bytesRead) != opened.Size() || after.Size() != opened.Size() || after.Mode() != opened.Mode() || !after.ModTime().Equal(opened.ModTime()) || !sameChangeTime(opened, after) {
+		return errors.New("file changed or exceeded limit while reading")
+	}
+	return nil
 }

@@ -128,34 +128,7 @@ func run() int {
 		}
 	}()
 
-	orchestrator := &action.Orchestrator{
-		WorkRoot:                cfg.WorkRoot,
-		Logger:                  logger,
-		GitHub:                  client,
-		BotLogin:                cfg.BotLogin,
-		Store:                   store,
-		Usage:                   &usage.Store{Dir: filepath.Join(filepath.Dir(cfg.StatePath), "usage")},
-		CheckWorkRoot:           checkWorkRoot,
-		Timeout:                 time.Duration(cfg.JobTimeoutMinutes) * time.Minute,
-		MaxGitHubContextBytes:   cfg.MaxGitHubContextBytes,
-		Commands:                cfg.Commands,
-		Main:                    cfg.Main,
-		Adversarial:             cfg.Adversarial,
-		CriticMaxRounds:         cfg.CriticMaxRounds,
-		CriticNonblockingRounds: cfg.CriticNonblockingRounds,
-		AlwaysOnSkills:          cfg.AlwaysOnSkills,
-		CodexModel:              cfg.Codex.Model,
-		CodexEffort:             cfg.Codex.ReasoningEffort,
-		ClaudeModel:             cfg.Claude.Model,
-		ClaudeEffort:            cfg.Claude.Effort,
-		// Jobs override model, effort and skills; the runner keeps host credentials and sandbox grants.
-		Runner: action.Runner{
-			WorkRoot: cfg.WorkRoot,
-			Codex:    config.CodexConfig{APIKey: cfg.Codex.APIKey},
-			Claude:   config.ClaudeConfig{APIKey: cfg.Claude.APIKey, AllowAllUnixSockets: cfg.Claude.AllowAllUnixSockets},
-			Logger:   logger,
-		},
-	}
+	orchestrator := newOrchestrator(cfg, client, store, logger, checkWorkRoot)
 	watcher := &monitor.Monitor{Config: cfg, ConfigPath: *configPath, GitHub: client, Executor: orchestrator, Logger: logger}
 	for {
 		next, err := watcher.RunOnce(ctx, store)
@@ -186,6 +159,37 @@ func run() int {
 	}
 }
 
+func newOrchestrator(cfg config.Config, client *github.Client, store *state.Store, logger *log.Logger, checkWorkRoot func() error) *action.Orchestrator {
+	return &action.Orchestrator{
+		WorkRoot:                cfg.WorkRoot,
+		Logger:                  logger,
+		GitHub:                  client,
+		BotLogin:                cfg.BotLogin,
+		Store:                   store,
+		Usage:                   &usage.Store{Dir: filepath.Join(filepath.Dir(cfg.StatePath), "usage")},
+		CheckWorkRoot:           checkWorkRoot,
+		Timeout:                 time.Duration(cfg.JobTimeoutMinutes) * time.Minute,
+		MaxGitHubContextBytes:   cfg.MaxGitHubContextBytes,
+		Commands:                cfg.Commands,
+		Main:                    cfg.Main,
+		Adversarial:             cfg.Adversarial,
+		CriticMaxRounds:         cfg.CriticMaxRounds,
+		CriticNonblockingRounds: cfg.CriticNonblockingRounds,
+		AlwaysOnSkills:          cfg.AlwaysOnSkills,
+		CodexModel:              cfg.Codex.Model,
+		CodexEffort:             cfg.Codex.ReasoningEffort,
+		ClaudeModel:             cfg.Claude.Model,
+		ClaudeEffort:            cfg.Claude.Effort,
+		// Jobs override model, effort and skills; the runner keeps host credentials and sandbox grants.
+		Runner: action.Runner{
+			WorkRoot: cfg.WorkRoot,
+			Codex:    config.CodexConfig{APIKey: cfg.Codex.APIKey},
+			Claude:   config.ClaudeConfig{APIKey: cfg.Claude.APIKey, AllowAllUnixSockets: cfg.Claude.AllowAllUnixSockets},
+			Logger:   logger,
+		},
+	}
+}
+
 func checkWorkRootIsolation(cfg config.Config) error {
 	runner := action.Runner{Codex: cfg.Codex, Claude: cfg.Claude}
 	for _, provider := range []string{cfg.Main, cfg.Adversarial} {
@@ -201,11 +205,8 @@ func checkWorkRootIsolation(cfg config.Config) error {
 			}
 		}
 		// Missing required skills disable their command; admission needs only existing grants.
-		selected, _ := runner.SelectSkills(provider, nil, sources)
-		if provider == "claude" {
-			runner.Claude.Skills = selected
-		} else {
-			runner.Codex.Skills = selected
+		if err := runner.ConfigureRole(action.RoleSettings{Provider: provider, AlwaysOnSkills: sources}); err != nil {
+			return err
 		}
 	}
 	return runner.CheckWorkRootIsolation(cfg.WorkRoot, cfg.Main, cfg.Adversarial)

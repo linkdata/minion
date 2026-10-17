@@ -25,7 +25,7 @@ func TestOversizedNormalizedMetadataPreservesOtherPartialArtifacts(t *testing.T)
 	job := portableJob(command.SecurityAudit)
 	job.Main.Skills = []string{testAuditSkillURL}
 	metadata := []byte(fmt.Sprintf(`{"run_id":"%s","repo":%q,"target":"/worker/source","source_ref":%q,"profile":"standard","scope_paths":["."],"budget":null,"selected_companion_files":[],"prior_run_paths":[],"shared_file_owners":%s,"execution_policy":"sandboxed-source-and-local-only","run_status":"complete"}`, strings.Repeat("<", maxAuditArtifactBytes/5), job.Identity.Repository, job.Source.Head, auditTestOwners))
-	if _, err := validateAuditMetadata(metadata, []byte("report content"), job.Identity.Repository, "/worker/source", job.Source.Head); err != nil {
+	if _, err := validateAuditMetadata(metadata, job.Identity.Repository, "/worker/source", job.Source.Head); err != nil {
 		t.Fatalf("invalid complete metadata fixture: %v", err)
 	}
 	var decoded map[string]json.RawMessage
@@ -120,7 +120,11 @@ func TestRunnerAuditCollectionAndNormalizationFailuresAreTerminal(t *testing.T) 
 						continue
 					}
 					if stage == "normalization" && file.Path == "run-metadata.json" {
-						file.Data = bytes.Replace(file.Data, []byte("preflight-test"), bytes.Repeat([]byte("<"), maxAuditArtifactBytes/5), 1)
+						original := file.Data
+						file.Data = bytes.Replace(file.Data, []byte(`"run_id":"test-run"`), []byte(`"run_id":"`+strings.Repeat("<", maxAuditArtifactBytes/5)+`"`), 1)
+						if bytes.Equal(file.Data, original) || len(file.Data) > maxAuditArtifactBytes {
+							t.Fatal("normalization fixture must replace run_id and fit the raw collection cap")
+						}
 					}
 					writeFixtureFile(t, request.outputDir, file.Path, file.Data)
 				}

@@ -88,6 +88,11 @@ func TestReviewHistorySurvivesForgottenRefutationsAcrossFourRounds(t *testing.T)
 	var historyPaths []string
 	runner := Runner{WorkRoot: root, runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 		sequence = append(sequence, fmt.Sprintf("%s/%d/%s", request.role, request.round, request.reviewPhase))
+		for _, path := range historyPaths {
+			if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("earlier history grant retained into next call: %s,%v", path, err)
+			}
+		}
 		history := expected
 		if request.round == 1 && request.role == roleMain || request.reviewPhase == reviewFull {
 			history = nil
@@ -188,7 +193,8 @@ func TestReviewHistoryRetainsParsedPrefixAfterFailure(t *testing.T) {
 			job.CriticMaxRounds, job.CriticNonblockingRounds = 2, 0
 			providerErr := errors.New("provider stopped after returning final-looking text")
 			var expected []ReviewEntry
-			runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+			root := t.TempDir()
+			runner := Runner{WorkRoot: root, runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 				history := expected
 				if request.round == 1 {
 					history = nil
@@ -222,6 +228,9 @@ func TestReviewHistoryRetainsParsedPrefixAfterFailure(t *testing.T) {
 				return aicli.Result{Answer: fmt.Sprintf(`{"approved":false,"has_blockers":true,"feedback":%q}`, entry.Feedback)}, nil
 			}}
 			result, err := runner.Run(context.Background(), job)
+			if entries, err := os.ReadDir(root); err != nil || len(entries) != 0 {
+				t.Fatalf("failed call retained history or workspace: %v,%v", entries, err)
+			}
 			if err == nil || result.Answer != "" || !reflect.DeepEqual(result.ReviewLedger, expected) {
 				t.Fatalf("parsed history lost or failed text promoted: result=%+v expected=%+v error=%v", result, expected, err)
 			}
@@ -326,17 +335,6 @@ func TestReviewHistoryRemainsPrivateFromAuditArtifacts(t *testing.T) {
 	}
 }
 
-func TestReviewHistoryAbsentWithoutCritic(t *testing.T) {
-	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
-		checkReviewHistory(t, request, nil)
-		return aicli.Result{Answer: "Public answer"}, nil
-	}}
-	result, err := runner.Run(context.Background(), portableJob(command.Comment))
-	if err != nil || result.Answer != "Public answer" || len(result.ReviewLedger) != 0 {
-		t.Fatalf("no-critic ledger=%+v error=%v", result, err)
-	}
-}
-
 func TestReviewHistoryCheckpointFailureStopsBeforeNextCall(t *testing.T) {
 	for _, failAt := range []int{1, 2, 3} {
 		t.Run(fmt.Sprint(failAt), func(t *testing.T) {
@@ -347,11 +345,11 @@ func TestReviewHistoryCheckpointFailureStopsBeforeNextCall(t *testing.T) {
 			var expected, lastCheckpoint []ReviewEntry
 			runner := Runner{WorkRoot: t.TempDir(), recordReview: func(progress Result) error {
 				checkpoints++
-				if len(progress.Calls) != checkpoints || len(progress.ReviewLedger) != checkpoints || !reflect.DeepEqual(progress.ReviewLedger, expected) || progress.Answer != "" {
+				if len(progress.Calls) != checkpoints-1 || len(progress.ReviewLedger) != checkpoints-1 || !reflect.DeepEqual(progress.ReviewLedger, expected) || progress.Answer != "" {
 					t.Fatalf("checkpoint did not preserve the parsed call prefix: %+v", progress)
 				}
 				lastCheckpoint = append([]ReviewEntry(nil), progress.ReviewLedger...)
-				if checkpoints == failAt {
+				if checkpoints == failAt+1 {
 					return checkpointErr
 				}
 				return nil
@@ -370,7 +368,7 @@ func TestReviewHistoryCheckpointFailureStopsBeforeNextCall(t *testing.T) {
 				return aicli.Result{Answer: answer}, nil
 			}}
 			result, err := runner.Run(context.Background(), job)
-			if !errors.Is(err, checkpointErr) || calls != failAt || checkpoints != failAt || result.Answer != "" || !reflect.DeepEqual(result.ReviewLedger, expected) || !reflect.DeepEqual(lastCheckpoint, expected) {
+			if !errors.Is(err, checkpointErr) || calls != failAt || checkpoints != failAt+1 || result.Answer != "" || !reflect.DeepEqual(result.ReviewLedger, expected) || !reflect.DeepEqual(lastCheckpoint, expected) {
 				t.Fatalf("checkpoint failure did not stop execution with retained evidence: calls=%d checkpoints=%d result=%+v error=%v", calls, checkpoints, result, err)
 			}
 			if err := result.validate(job, false); err != nil {
@@ -388,7 +386,7 @@ func TestReviewHistoryObserverCannotMutateApplicationEvidence(t *testing.T) {
 	tokens := usage.Tokens{Input: 7, Output: 2}
 	runner := Runner{WorkRoot: t.TempDir(), recordReview: func(progress Result) error {
 		checkpoints++
-		if !reflect.DeepEqual(progress.ReviewLedger, expected) || len(progress.Calls) != checkpoints {
+		if !reflect.DeepEqual(progress.ReviewLedger, expected) || len(progress.Calls) != checkpoints-1 {
 			t.Fatalf("earlier observer changed the next checkpoint: %+v", progress)
 		}
 		for i := range progress.Calls {
@@ -423,7 +421,7 @@ func TestReviewHistoryObserverCannotMutateApplicationEvidence(t *testing.T) {
 		return aicli.Result{Answer: answer, Tokens: tokens, UsageComplete: true}, nil
 	}}
 	result, err := runner.Run(context.Background(), job)
-	if err != nil || checkpoints != 5 || !reflect.DeepEqual(result.ReviewLedger, expected) || len(result.Diagnostics) != 0 || result.Answer != "Public answer" {
+	if err != nil || checkpoints != 6 || !reflect.DeepEqual(result.ReviewLedger, expected) || len(result.Diagnostics) != 0 || result.Answer != "Public answer" {
 		t.Fatalf("observer changed authoritative result: checkpoints=%d result=%+v error=%v", checkpoints, result, err)
 	}
 	for _, call := range result.Calls {

@@ -1,6 +1,7 @@
 package codexcli
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -17,13 +18,11 @@ import (
 	"github.com/linkdata/minion/internal/cleanup"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/processgroup"
-	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/usage"
 	workspacefs "github.com/linkdata/minion/internal/workspace"
 )
 
 const (
-	maxEventBytes    = aicli.MaxEventBytes
 	maxCodexChildren = 256
 	instructionRoot  = ".minion-codex-root"
 )
@@ -57,18 +56,10 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 		}
 	}()
 	result.UsageComplete = true
-	if strings.TrimSpace(dir) == "" {
-		return result, errors.New("codex exec: source snapshot directory is empty")
-	}
 	if strings.TrimSpace(prompt) == "" {
 		return result, errors.New("codex exec: prompt is empty")
 	}
-
-	workspace, err := filepath.EvalSymlinks(dir)
-	if err != nil {
-		return result, fmt.Errorf("codex exec: resolve source snapshot directory: %w", err)
-	}
-	workspace, err = filepath.Abs(workspace)
+	workspace, err := aicli.Directory(dir)
 	if err != nil {
 		return result, fmt.Errorf("codex exec: resolve source snapshot directory: %w", err)
 	}
@@ -113,13 +104,9 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 		fmt.Sprintf(`%s="read"`, strconv.Quote(realBinary)),
 	}
 	if outputDir != "" {
-		outputDir, err = filepath.EvalSymlinks(outputDir)
+		outputDir, err = aicli.Directory(outputDir)
 		if err != nil {
 			return result, fmt.Errorf("codex exec: resolve output directory: %w", err)
-		}
-		outputDir, err = filepath.Abs(outputDir)
-		if err != nil {
-			return result, err
 		}
 		if workspacefs.Within(workspace, outputDir) || workspacefs.Within(outputDir, workspace) {
 			return result, errors.New("codex exec: output directory must be separate from the source snapshot")
@@ -127,13 +114,9 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 		filesystemRules = append(filesystemRules, fmt.Sprintf(`%s="write"`, strconv.Quote(outputDir)))
 	}
 	for _, path := range settings.ReadOnlyDirs {
-		path, err = filepath.EvalSymlinks(path)
+		path, err = aicli.Directory(path)
 		if err != nil {
 			return result, fmt.Errorf("codex exec: resolve read-only directory: %w", err)
-		}
-		path, err = filepath.Abs(path)
-		if err != nil {
-			return result, err
 		}
 		if workspacefs.Within(workspace, path) || workspacefs.Within(path, workspace) {
 			return result, errors.New("codex exec: read-only directory must be separate from the source snapshot")
@@ -141,39 +124,19 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 		filesystemRules = append(filesystemRules, fmt.Sprintf(`%s="read"`, strconv.Quote(path)))
 	}
 
-	skillPaths := make([]string, 0, len(settings.Skills))
-	var embeddedDir string
-	for _, skill := range settings.Skills {
-		if content, builtin := skills.BuiltinContent(skill); builtin {
-			name, err := skills.Name(skill)
-			if err != nil {
-				return result, fmt.Errorf("codex exec: resolve embedded skill: %w", err)
-			}
-			if embeddedDir == "" {
-				embeddedDir, err = os.MkdirTemp(filepath.Dir(workspace), ".minion-skills-")
-				if err != nil {
-					return result, fmt.Errorf("codex exec: create embedded skill root: %w", err)
-				}
-				defer func() {
-					if err := cleanup.RemoveAll(embeddedDir); err != nil {
-						result.Answer = ""
-						runError = errors.Join(runError, fmt.Errorf("codex exec: remove embedded skill root: %w", err))
-					}
-				}()
-			}
-			skillDir := filepath.Join(embeddedDir, name)
-			if err := os.MkdirAll(skillDir, 0o700); err != nil {
-				return result, fmt.Errorf("codex exec: create embedded skill directory: %w", err)
-			}
-			skill = filepath.Join(skillDir, "SKILL.md")
-			if err := os.WriteFile(skill, content, 0o600); err != nil {
-				return result, fmt.Errorf("codex exec: write embedded skill: %w", err)
+	skillPaths, embeddedDir, err := aicli.MaterializeSkills(filepath.Dir(workspace), settings.Skills)
+	defer func() {
+		if embeddedDir != "" {
+			if err := cleanup.RemoveAll(embeddedDir); err != nil {
+				result.Answer = ""
+				runError = errors.Join(runError, fmt.Errorf("codex exec: remove embedded skill root: %w", err))
 			}
 		}
-		if !filepath.IsAbs(skill) || filepath.Base(skill) != "SKILL.md" {
-			return result, fmt.Errorf("codex skill %q must be an absolute SKILL.md path", skill)
-		}
-		skillPaths = append(skillPaths, skill)
+	}()
+	if err != nil {
+		return result, fmt.Errorf("codex exec: skills: %w", err)
+	}
+	for _, skill := range skillPaths {
 		filesystemRules = append(filesystemRules, fmt.Sprintf(`%s="read"`, strconv.Quote(filepath.Dir(skill))))
 	}
 	filesystemRule := "permissions.minion.filesystem={" + strings.Join(filesystemRules, ",") + "}"
@@ -244,7 +207,7 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 
 	started := time.Now()
 	runErr := cmd.Run()
-	output.finish()
+	output.stream.Finish()
 	codexHome := os.Getenv("CODEX_HOME")
 	if codexHome == "" {
 		if home, err := os.UserHomeDir(); err == nil {
@@ -267,32 +230,20 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 		return result, fmt.Errorf("codex exec: %w", err)
 	}
 	if output.stopped {
-		return result, fmt.Errorf("codex exec: %w: %s", aicli.ErrOutputLimit, output.failureReason)
+		return result, fmt.Errorf("codex exec: %w", output.stopErr)
+	}
+	if output.parseErr != nil {
+		return result, fmt.Errorf("codex exec output: %w", errors.Join(output.parseErr, runErr))
 	}
 	if runErr != nil || output.failed {
-		reason := output.failureReason
-		if reason == "" {
-			reason = strings.TrimSpace(stderr.String())
-		}
-		if reason == "" {
-			reason = "no further diagnostics"
-		}
+		reason := cmp.Or(output.failureReason, strings.TrimSpace(stderr.String()), "no further diagnostics")
 		if runErr != nil {
 			return result, fmt.Errorf("codex exec failed (%w): %q", runErr, reason)
 		}
 		return result, fmt.Errorf("codex exec failed: %q", reason)
 	}
-	if output.parseErr != nil {
-		return result, fmt.Errorf("codex exec output: %w", output.parseErr)
-	}
 	if !output.completed {
-		reason := output.failureReason
-		if reason == "" {
-			reason = strings.TrimSpace(stderr.String())
-		}
-		if reason == "" {
-			reason = "missing turn.completed event"
-		}
+		reason := cmp.Or(output.failureReason, strings.TrimSpace(stderr.String()), "missing turn.completed event")
 		return result, fmt.Errorf("codex exec did not complete: %q", reason)
 	}
 	if output.finalMessage == "" {
@@ -363,6 +314,7 @@ type jsonlOutput struct {
 	tokens        *usage.Tokens
 	children      []string
 	seenChildren  map[string]bool
+	stopErr       error
 	stopped       bool
 	stream        aicli.JSONL
 	parseErr      error
@@ -376,24 +328,21 @@ func (o *jsonlOutput) Write(p []byte) (int, error) {
 	if o.stopped {
 		return len(p), nil
 	}
-	return o.stream.Write(p, o.acceptLine, func(err error) { o.stop(err.Error()) })
+	if o.stream.Line == nil {
+		o.stream.Line, o.stream.Fail = o.acceptLine, o.stop
+	}
+	return o.stream.Write(p)
 }
 
-func (o *jsonlOutput) stop(reason string) {
+func (o *jsonlOutput) stop(err error) {
 	if o.stopped {
 		return
 	}
-	o.stopped = true
-	o.failed = true
-	o.failureReason = reason
-	o.parseErr = errors.New(reason)
+	o.stopped, o.failed = true, true
+	o.stopErr, o.failureReason = err, err.Error()
 	if o.cancel != nil {
 		o.cancel()
 	}
-}
-
-func (o *jsonlOutput) finish() {
-	o.stream.Finish()
 }
 
 func (o *jsonlOutput) acceptLine(line []byte) {
@@ -404,6 +353,9 @@ func (o *jsonlOutput) acceptLine(line []byte) {
 	if err := json.Unmarshal(line, &event); err != nil {
 		if o.parseErr == nil {
 			o.parseErr = fmt.Errorf("invalid JSONL event: %w", err)
+			if o.cancel != nil {
+				o.cancel()
+			}
 		}
 	} else {
 		o.accept(event)
@@ -416,7 +368,7 @@ func (o *jsonlOutput) accept(event codexEvent) {
 			o.seenChildren = make(map[string]bool)
 		}
 		if !appendChildIDs(&o.children, o.seenChildren, event.Item.ReceiverThreadIDs...) {
-			o.stop("Codex child agent count exceeded the limit")
+			o.stop(fmt.Errorf("%w: Codex child agent count exceeded the limit", aicli.ErrOutputLimit))
 			return
 		}
 	}

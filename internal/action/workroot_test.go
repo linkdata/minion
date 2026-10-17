@@ -4,15 +4,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"log"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
+	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/workroot"
 )
@@ -27,23 +25,10 @@ func TestExecuteChecksWorkRootBeforeGitHub(t *testing.T) {
 }
 
 func TestExecuteRechecksWorkRootAfterActionError(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/repos/o/r/issues/1":
-			_, _ = fmt.Fprint(w, `{"number":1}`)
-		case "/repos/o/r/issues/1/comments":
-			_, _ = fmt.Fprint(w, `[]`)
-		default:
-			t.Errorf("unexpected GitHub request: %s", r.URL.Path)
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
-	client := testGitHub(server, "test-token")
 	checks := 0
 	var logs bytes.Buffer
 	e := &Orchestrator{
-		GitHub: client,
+		GitHub: github.New(""),
 		Logger: log.New(&logs, "", 0),
 		CheckWorkRoot: func() error {
 			checks++

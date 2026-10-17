@@ -4,7 +4,7 @@ package bounded
 import (
 	"bytes"
 	"context"
-	"strings"
+	"unicode/utf8"
 )
 
 // DiagnosticBytes bounds captured host-command diagnostics, not transport fields.
@@ -60,7 +60,16 @@ func (b *Tail) String() string { return string(b.data) }
 // Text bounds diagnostic text and marks a discarded suffix.
 func Text(s string) string {
 	if len(s) > DiagnosticBytes {
-		return strings.ToValidUTF8(s[:DiagnosticBytes], "") + "..."
+		end := DiagnosticBytes
+		for start := end - 1; start >= max(0, end-utf8.UTFMax); start-- {
+			if utf8.RuneStart(s[start]) {
+				if !utf8.FullRuneInString(s[start:end]) {
+					end = start
+				}
+				break
+			}
+		}
+		return s[:end] + "..."
 	}
 	return s
 }

@@ -12,7 +12,6 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -35,7 +34,7 @@ type OfflineIndex struct {
 
 // NewOfflineIndex creates private Git metadata for a materialized source snapshot.
 func NewOfflineIndex(ctx context.Context, dir, source string, files []workspace.File) (*OfflineIndex, error) {
-	binary, err := resolveGit()
+	binary, err := absoluteExecutable("git")
 	if err != nil {
 		return nil, fmt.Errorf("offline fix index requires git: %w", err)
 	}
@@ -64,7 +63,7 @@ func NewOfflineIndex(ctx context.Context, dir, source string, files []workspace.
 	return index, nil
 }
 
-// Changes captures bounded regular-file changes using the snapshot's ignore rules.
+// Changes captures bounded regular-file changes using the candidate's current ignore rules.
 func (index *OfflineIndex) Changes(ctx context.Context) ([]workspace.Change, error) {
 	if err := index.checkControlFiles(ctx); err != nil {
 		return nil, err
@@ -155,7 +154,10 @@ func (index *OfflineIndex) Changes(ctx context.Context) ([]workspace.Change, err
 			return nil, fmt.Errorf("fix file %q changed after indexing", change.Path)
 		}
 	}
-	if _, err := index.run(ctx, maxPatchBytes, nil, "diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv", "--no-renames", "--no-color", "--submodule=short", index.baseline, "--"); err != nil {
+	if _, err := index.run(ctx, maxPatchBytes, nil, append(patchDiffArgs(), index.baseline, "--")...); err != nil {
+		if errors.Is(err, ErrCheckoutTooLarge) {
+			return nil, ErrDiffTooLarge
+		}
 		return nil, err
 	}
 	return changes, nil
@@ -324,10 +326,7 @@ func (index *OfflineIndex) run(ctx context.Context, limit int, input []byte, arg
 	cmd.Stdout, cmd.Stderr, cmd.Stdin = &output, &diagnostic, bytes.NewReader(input)
 	err := cmd.Run()
 	if output.Exceeded {
-		if args[0] == "diff" && slices.Contains(args, "--binary") {
-			return nil, ErrDiffTooLarge
-		}
-		return nil, fmt.Errorf("offline git %s output exceeds action limit", args[0])
+		return nil, fmt.Errorf("offline git %s output exceeds action limit: %w", args[0], ErrCheckoutTooLarge)
 	}
 	if err != nil {
 		var exit *exec.ExitError

@@ -516,16 +516,16 @@ func (m *Monitor) finishFailedJob(ctx context.Context, store *state.Store, job J
 		}
 	}
 	if !replied {
-		repo, err := m.GitHub.Repository(ctx, job.Repository.Name)
+		replyCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		repo, err := m.GitHub.Repository(replyCtx, job.Repository.Name)
 		if err != nil {
 			return fmt.Errorf("verify %s before failure reply: %w", job.Repository.Name, err)
 		}
 		if !job.Repository.MatchesIdentity(repo.ID, repo.Owner.ID) {
 			return fmt.Errorf("%s identity changed before failure reply", job.Repository.Name)
 		}
-		replyCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		_, err = m.GitHub.CreateIssueComment(replyCtx, job.Repository.Name, job.Number, failureReply+"\n\n"+marker)
-		cancel()
 		if err != nil {
 			failure.ReplyAttempts++
 			if failure.ReplyAttempts < maxFailureReplyAttempts {

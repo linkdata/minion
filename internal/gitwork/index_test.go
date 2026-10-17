@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/linkdata/minion/internal/workspace"
 )
@@ -41,13 +42,7 @@ func offlineIndexFixture(t *testing.T, files []workspace.File) (*OfflineIndex, s
 
 func writeIndexFixture(t *testing.T, source, name string, data []byte) {
 	t.Helper()
-	path := filepath.Join(source, name)
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, data, 0600); err != nil {
-		t.Fatal(err)
-	}
+	writeFile(t, filepath.Join(source, name), string(data))
 }
 
 func TestFixIndexPinsSHA1WhenGitDefaultsToSHA256(t *testing.T) {
@@ -562,14 +557,6 @@ func TestFixIndexCountsModeOnlyFileContentsAgainstResultLimit(t *testing.T) {
 	}
 }
 
-func TestFixIndexOutputLimitIdentifiesGitOperation(t *testing.T) {
-	index, _ := offlineIndexFixture(t, nil)
-	_, err := index.run(context.Background(), 1, nil, "rev-parse", "--git-dir")
-	if err == nil || !strings.Contains(err.Error(), "offline git rev-parse output exceeds action limit") {
-		t.Fatalf("output refusal lacks operation: %v", err)
-	}
-}
-
 func TestFixIndexPreservesFileDirectoryTransitions(t *testing.T) {
 	for _, kind := range []string{"file to directory", "directory to file"} {
 		t.Run(kind, func(t *testing.T) {
@@ -636,23 +623,80 @@ func TestFixIndexIgnoresUnusedRulesUnderIgnoredTrackedDirectory(t *testing.T) {
 }
 
 func TestFixIndexPatchOverflowClassificationPreservesOtherErrors(t *testing.T) {
-	index, _ := offlineIndexFixture(t, nil)
-	index.binary = filepath.Join(fakeOnPath(t, "git-output", "#!/bin/sh\nprintf 'too much output'\n"), "git-output")
-	if data, err := index.run(context.Background(), len("too much output"), nil, "diff", "--binary"); err != nil || string(data) != "too much output" {
-		t.Fatalf("patch output exactly at its limit was rejected: %q,%v", data, err)
+	for _, kind := range []string{"exact", "overflow", "failure", "canceled"} {
+		t.Run(kind, func(t *testing.T) {
+			index, source := offlineIndexFixture(t, []workspace.File{{Path: "source", Mode: workspace.Regular, Data: []byte("before")}})
+			writeIndexFixture(t, source, "source", []byte("after"))
+			marker := filepath.Join(t.TempDir(), "patch-started")
+			behavior := fmt.Sprintf("head -c %d /dev/zero", maxPatchBytes)
+			switch kind {
+			case "overflow":
+				behavior = fmt.Sprintf("head -c %d /dev/zero", maxPatchBytes+1)
+			case "failure":
+				behavior = "printf 'fixture failure' >&2; exit 7"
+			case "canceled":
+				behavior = "exec sleep 60"
+			}
+			script := "#!/bin/sh\nfor arg do\nif [ \"$arg\" = --binary ]; then\nprintf x > " + shellQuote(marker) + "\n" + behavior + "\nexit\nfi\ndone\nexec " + shellQuote(index.binary) + " \"$@\"\n"
+			index.binary = filepath.Join(fakeOnPath(t, "git-patch", script), "git-patch")
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				if kind != "canceled" {
+					return
+				}
+				ticker := time.NewTicker(time.Millisecond)
+				defer ticker.Stop()
+				for {
+					if _, err := os.Stat(marker); err == nil {
+						cancel()
+						return
+					}
+					select {
+					case <-ctx.Done():
+						return
+					case <-ticker.C:
+					}
+				}
+			}()
+			changes, err := index.Changes(ctx)
+			cancel()
+			<-done
+			if _, markerErr := os.Stat(marker); markerErr != nil {
+				t.Fatalf("Changes did not reach patch-size command: %v; error=%v", markerErr, err)
+			}
+			switch kind {
+			case "exact":
+				want := []workspace.Change{{Path: "source", Mode: workspace.Regular, Data: []byte("after")}}
+				if err != nil || !reflect.DeepEqual(changes, want) {
+					t.Fatalf("exact patch limit rejected valid changes: %+v,%v", changes, err)
+				}
+			case "overflow":
+				if !errors.Is(err, ErrDiffTooLarge) {
+					t.Fatalf("patch overflow lost classification: %v", err)
+				}
+			case "failure":
+				var exit *exec.ExitError
+				if !errors.As(err, &exit) || exit.ExitCode() != 7 || errors.Is(err, ErrDiffTooLarge) || !strings.Contains(err.Error(), "fixture failure") {
+					t.Fatalf("ordinary patch failure lost cause: %v", err)
+				}
+			case "canceled":
+				if !errors.Is(err, context.Canceled) || errors.Is(err, ErrDiffTooLarge) {
+					t.Fatalf("canceled patch lost cause: %v", err)
+				}
+			}
+		})
 	}
-	if _, err := index.run(context.Background(), 1, nil, "diff", "--binary"); !errors.Is(err, ErrDiffTooLarge) {
-		t.Fatalf("binary patch overflow lost classification: %v", err)
-	}
-	if _, err := index.run(context.Background(), 1, nil, "diff", "--raw"); err == nil || errors.Is(err, ErrDiffTooLarge) || !strings.Contains(err.Error(), "output exceeds action limit") {
-		t.Fatalf("raw diff overflow was classified as binary patch overflow: %v", err)
-	}
-	index.binary = filepath.Join(fakeOnPath(t, "git-failure", "#!/bin/sh\nprintf 'fixture failure' >&2\nexit 7\n"), "git-failure")
-	_, err := index.run(context.Background(), 128, nil, "diff", "--binary")
-	var exit *exec.ExitError
-	if !errors.As(err, &exit) || exit.ExitCode() != 7 || errors.Is(err, ErrDiffTooLarge) || !strings.Contains(err.Error(), "fixture failure") {
-		t.Fatalf("ordinary binary diff command failure lost its cause: %v", err)
-	}
+	t.Run("generic output", func(t *testing.T) {
+		index, _ := offlineIndexFixture(t, nil)
+		index.binary = filepath.Join(fakeOnPath(t, "git-output", "#!/bin/sh\nprintf 'too much output'\n"), "git-output")
+		_, err := index.run(context.Background(), 1, nil, "diff", "--raw")
+		if !errors.Is(err, ErrCheckoutTooLarge) || errors.Is(err, ErrDiffTooLarge) || !strings.HasPrefix(err.Error(), "offline git diff output exceeds action limit:") {
+			t.Fatalf("generic overflow lost its operation or classification: %v", err)
+		}
+	})
 }
 
 func fakeOnPath(t *testing.T, name, script string) string {

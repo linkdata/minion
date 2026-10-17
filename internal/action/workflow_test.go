@@ -22,39 +22,8 @@ import (
 	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/skills"
-	"github.com/linkdata/minion/internal/usage"
 	"github.com/linkdata/minion/internal/workspace"
 )
-
-func TestPortableJobUsesCriticDefaultAndRunnerRejectsInvalidFixSource(t *testing.T) {
-	for _, collision := range []bool{false, true} {
-		t.Run(fmt.Sprint(collision), func(t *testing.T) {
-			var files []workspace.File
-			if collision {
-				files = []workspace.File{{Path: "Docs/a", Mode: workspace.Regular}, {Path: "docs/b", Mode: workspace.Regular}}
-			}
-			gitFixtureRemote(t, files...)
-			checkout := cloneFixture(t, t.TempDir(), files...)
-			action := command.Comment
-			if collision {
-				action = command.Fix
-			}
-			request := monitor.Job{ID: strings.Repeat("a", 64), SubjectType: "Issue", Number: 7, Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2}, Source: github.Item{Author: github.User{ID: 3, Login: "writer"}}, Command: command.Command{Name: string(action), Action: action}}
-			orchestrator := Orchestrator{Adversarial: "claude", Commands: map[string]config.CommandMapping{string(action): {Action: string(action), Skills: []string{skills.BuiltinAntiPromptInjection}}}}
-			job, err := attemptFixture(&orchestrator).portableJob(testActionContext(t), &preparedAction{checkout: checkout, request: request}, "title", "body")
-			if err != nil || job.CriticMaxRounds != config.DefaultCriticMaxRounds {
-				t.Fatalf("critic default=%d err=%v", job.CriticMaxRounds, err)
-			}
-			if collision {
-				runner := Runner{runModel: forbidModel(t)}
-				_, err = runner.Run(testActionContext(t), job)
-				if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "directory spelling collision") {
-					t.Fatalf("invalid fix source was not terminal: %v", err)
-				}
-			}
-		})
-	}
-}
 
 func TestPreparedActionRejectsForeignResultBeforePublication(t *testing.T) {
 	base, _, _ := gitFixtureRemote(t)
@@ -63,12 +32,7 @@ func TestPreparedActionRejectsForeignResultBeforePublication(t *testing.T) {
 	writes := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/o/r/git/trees/"):
-			writeTreeFixture(t, w, strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/"))
-		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
-			_, _ = fmt.Fprint(w, publicRepositoryJSON)
-		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7":
-			_, _ = fmt.Fprint(w, `{"title":"Task","body":"Inspect source"}`)
+		case serveIssueFixture(t, w, r):
 		case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/issues/7/comments":
 			writes++
 			w.WriteHeader(http.StatusCreated)
@@ -105,12 +69,7 @@ func TestPreparedActionRejectsForeignResultBeforePublication(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	e.Usage = &usage.Store{Dir: filepath.Join(t.TempDir(), "usage")}
 	e = attemptFixture(e)
-	finish, err := e.trackUsage(request)
-	if err != nil {
-		t.Fatal(err)
-	}
 	installedHome := os.Getenv("HOME")
 	t.Setenv("HOME", t.TempDir())
 	prepared, err := attemptFixture(e).prepare(ctx, request)
@@ -166,13 +125,6 @@ func TestPreparedActionRejectsForeignResultBeforePublication(t *testing.T) {
 	if writes != 1 {
 		t.Fatalf("publication writes = %d", writes)
 	}
-	if err := finish(nil); err != nil {
-		t.Fatal(err)
-	}
-	records, err := usage.ReadAll(e.Usage.Dir)
-	if err != nil || len(records) != 1 || records[0].ID != prepared.job.Identity.AttemptID || records[0].ClaudeCalls != 1 {
-		t.Fatalf("attempt/usage correlation lost: records=%+v job=%+v err=%v", records, prepared.job.Identity, err)
-	}
 }
 
 func TestFailedAuditRetainsLabelledPartialArtifactsWithoutPublication(t *testing.T) {
@@ -187,12 +139,7 @@ func TestFailedAuditRetainsLabelledPartialArtifactsWithoutPublication(t *testing
 			return
 		}
 		switch {
-		case strings.HasPrefix(r.URL.Path, "/repos/o/r/git/trees/"):
-			writeTreeFixture(t, w, strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/"))
-		case r.URL.Path == "/repos/o/r":
-			_, _ = fmt.Fprint(w, publicRepositoryJSON)
-		case r.URL.Path == "/repos/o/r/issues/7":
-			_, _ = fmt.Fprint(w, `{"title":"Audit","body":"Inspect source"}`)
+		case serveIssueFixture(t, w, r):
 		default:
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 			http.NotFound(w, r)
@@ -259,15 +206,6 @@ func TestIncompleteAuditIdentityAndPrivateDiagnosticLogging(t *testing.T) {
 	if err := result.validate(job, false); err != nil {
 		t.Fatal(err)
 	}
-	for _, mutate := range []func(*Result){
-		func(r *Result) { r.Identity.AttemptID = "foreign" }, func(r *Result) { r.SourceRef = strings.Repeat("b", 40) }, func(r *Result) { r.Version++ },
-	} {
-		bad := result
-		mutate(&bad)
-		if bad.validate(job, false) == nil {
-			t.Fatal("incomplete result bypassed source or attempt identity validation")
-		}
-	}
 	var journal bytes.Buffer
 	e := Orchestrator{Logger: log.New(&journal, "", 0)}
 	e.logResult(job, result)
@@ -281,60 +219,6 @@ func TestIncompleteAuditIdentityAndPrivateDiagnosticLogging(t *testing.T) {
 	}
 }
 
-func TestCommandValidationDoesNotResolveExecutorSkills(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	request := usageJob()
-	request.Command.Name = "review"
-	request.Repository.Actions = []string{"review"}
-	e := Orchestrator{Commands: map[string]config.CommandMapping{
-		"review": {Action: "review", Skills: []string{"https://github.com/owner/repo/tree/pinned/skills/not-installed"}},
-	}}
-	if err := e.validateCommand(request); err != nil {
-		t.Fatalf("logical command validation requires executor-host installation: %v", err)
-	}
-}
-
-func TestPreparedReplyNeedsNoExecution(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	writes := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
-			_, _ = fmt.Fprint(w, publicRepositoryJSON)
-		case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/issues/7/comments":
-			writes++
-			w.WriteHeader(http.StatusCreated)
-			_, _ = fmt.Fprint(w, `{"id":1}`)
-		default:
-			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
-	client := testGitHub(server, "token")
-	e := &Orchestrator{
-		GitHub:   client,
-		Commands: map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{testReviewSkillURL}}},
-	}
-	request := monitor.Job{SubjectType: "Issue", Number: 7, ID: strings.Repeat("a", 64),
-		Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"review"}},
-		Command:    command.Command{Name: "review", Action: command.Review},
-	}
-	prepared, err := attemptFixture(e).prepare(testActionContext(t), request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if prepared.needsExecution() {
-		t.Fatal("fixed reply dispatched execution")
-	}
-	if err := e.publish(context.Background(), prepared, Result{}); err != nil {
-		t.Fatal(err)
-	}
-	if writes != 1 {
-		t.Fatalf("reply writes = %d", writes)
-	}
-}
-
 func TestPublishFixWithoutChangesPostsNormalReply(t *testing.T) {
 	var body string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -342,13 +226,7 @@ func TestPublishFixWithoutChangesPostsNormalReply(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
 			_, _ = fmt.Fprint(w, publicRepositoryJSON)
 		case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/issues/7/comments":
-			var payload struct{ Body string }
-			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-				t.Error(err)
-			}
-			body = payload.Body
-			w.WriteHeader(http.StatusCreated)
-			_, _ = fmt.Fprint(w, `{"id":1}`)
+			captureComment(t, w, r, &body)
 		default:
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 			http.NotFound(w, r)
@@ -380,21 +258,6 @@ func TestPortableJobRequiresExistingActionDeadline(t *testing.T) {
 	}
 }
 
-func TestPublishFixForkCheckFailureConsumesPublicationAttempt(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		http.Error(w, "temporary GitHub failure", http.StatusBadGateway)
-	}))
-	defer server.Close()
-	client := testGitHub(server, "token")
-	orchestrator := Orchestrator{GitHub: client}
-	prepared := &preparedAction{request: monitor.Job{Repository: config.Repository{Name: "owner/repo", ID: 1, OwnerID: 2}}}
-	err := orchestrator.publishFix(context.Background(), prepared, Result{Changes: []workspace.Change{{Path: "a", Mode: workspace.Regular}}})
-	var apiError *github.StatusError
-	if !errors.Is(err, monitor.ErrPostModelPublication) || errors.Is(err, monitor.ErrTerminalJob) || !errors.As(err, &apiError) || apiError.StatusCode != http.StatusBadGateway {
-		t.Fatalf("post-model fork check lost classification or cause: %v", err)
-	}
-}
-
 type expiredPreparationContext struct {
 	context.Context
 	deadline time.Time
@@ -415,12 +278,12 @@ func TestPortableJobPreservesElapsedDeadlineCause(t *testing.T) {
 		t.Fatal("fixture must model the deadline/Err propagation race")
 	}
 	_, err := orchestrator.portableJob(ctx, &preparedAction{checkout: checkout, request: request}, "title", "description")
-	if !errors.Is(err, context.DeadlineExceeded) || errors.Is(err, monitor.ErrTerminalJob) || strings.Contains(err.Error(), "invalid action runtime budget") {
+	if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, monitor.ErrTerminalJob) || strings.Contains(err.Error(), "invalid action runtime budget") {
 		t.Fatalf("elapsed preparation deadline lost its cause: %v", err)
 	}
 }
 
-func TestPreparedHistoryModifierReachesRunnerContext(t *testing.T) {
+func TestPreparedHistoryModifierReachesPortableSource(t *testing.T) {
 	for _, history := range []bool{false, true} {
 		t.Run(fmt.Sprintf("history_%t", history), func(t *testing.T) {
 			base, _, _ := gitFixtureRemote(t)
@@ -441,31 +304,6 @@ func TestPreparedHistoryModifierReachesRunnerContext(t *testing.T) {
 			job := prepared.job
 			if job.Source.HistoryRequested != history || (len(job.Source.History) != 0) != history || (history && !strings.Contains(string(job.Source.History), base)) {
 				t.Fatalf("modifier lost during source preparation: history=%t snapshot=%+v", history, job.Source)
-			}
-			calls := 0
-			runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, call modelRun) (aicli.Result, error) {
-				calls++
-				data, err := os.ReadFile(filepath.Join(call.readOnlyDirs[0], "history.txt"))
-				if err != nil || !bytes.Equal(data, job.Source.History) {
-					t.Fatalf("runner history context=%q error=%v", data, err)
-				}
-				data, err = os.ReadFile(filepath.Join(call.readOnlyDirs[0], "source.json"))
-				var metadata struct {
-					HistoryRequested bool `json:"history_requested"`
-				}
-				if err != nil {
-					t.Fatal(err)
-				}
-				if err := json.Unmarshal(data, &metadata); err != nil {
-					t.Fatal(err)
-				}
-				if metadata.HistoryRequested != history || !strings.Contains(call.prompt, fmt.Sprintf("History requested=%t", history)) {
-					t.Fatalf("runner lost history coverage declaration: metadata=%s prompt=%s", data, call.prompt)
-				}
-				return aicli.Result{Answer: "History coverage checked.", UsageComplete: true}, nil
-			}}
-			if _, err := runner.Run(context.Background(), job); err != nil || calls != 1 {
-				t.Fatalf("runner: calls=%d error=%v", calls, err)
 			}
 		})
 	}

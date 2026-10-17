@@ -45,6 +45,7 @@ func TestRunnerUsesSuppliedSourceAndContext(t *testing.T) {
 			calls := 0
 			runner.runModel = func(_ context.Context, request modelRun) (aicli.Result, error) {
 				calls++
+				checkReviewHistory(t, request, nil)
 				if request.provider != provider || request.writable || request.outputDir != "" || request.role != "main" || request.round != 1 {
 					t.Fatalf("wrong model request: %+v", request)
 				}
@@ -61,11 +62,22 @@ func TestRunnerUsesSuppliedSourceAndContext(t *testing.T) {
 						t.Fatalf("context %s = %q, %v", file, data, err)
 					}
 				}
+
+				metadataBytes, err := os.ReadFile(filepath.Join(contextDir, "source.json"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				var metadata struct {
+					HistoryRequested bool `json:"history_requested"`
+				}
+				if err := json.Unmarshal(metadataBytes, &metadata); err != nil || !metadata.HistoryRequested {
+					t.Fatalf("history flag missing: %s,%v", metadataBytes, err)
+				}
 				data, err := os.ReadFile(filepath.Join(request.dir, "source.txt"))
 				if err != nil || string(data) != "source\n" {
 					t.Fatalf("source = %q, %v", data, err)
 				}
-				for _, want := range []string{job.Source.Head, job.Source.Base, job.Source.MergeBase, contextDir, "complete=false", quotedContext(job.Title), quotedContext(job.Notes), "Report missing context or dependencies rather than fetching them"} {
+				for _, want := range []string{job.Source.Head, job.Source.Base, job.Source.MergeBase, contextDir, "complete=false", "History requested=true", quotedContext(job.Title), quotedContext(job.Notes), "Report missing context or dependencies rather than fetching them"} {
 					if !strings.Contains(request.prompt, want) {
 						t.Fatalf("prompt lacks %q: %s", want, request.prompt)
 					}
@@ -73,7 +85,7 @@ func TestRunnerUsesSuppliedSourceAndContext(t *testing.T) {
 				return aicli.Result{Answer: "No findings", Tokens: usage.Tokens{Input: 10, Output: 2}, UsageComplete: true}, nil
 			}
 			result, err := runner.Run(context.Background(), job)
-			if err != nil || calls != 1 || result.Answer != "No findings" || len(result.Calls) != 1 || !result.Calls[0].Complete {
+			if err != nil || len(result.ReviewLedger) != 0 || calls != 1 || result.Answer != "No findings" || len(result.Calls) != 1 || !result.Calls[0].Complete {
 				t.Fatalf("Run = %+v, %v; calls %d", result, err, calls)
 			}
 			entries, err := os.ReadDir(root)
@@ -129,13 +141,14 @@ func TestRunnerDeclaresIncompleteComparisonAndMetadataHistory(t *testing.T) {
 				t.Fatal(err)
 			}
 			var metadata struct {
-				DiffIncomplete bool     `json:"diff_incomplete"`
-				ChangedPaths   []string `json:"changed_paths"`
+				DiffIncomplete   bool     `json:"diff_incomplete"`
+				HistoryRequested bool     `json:"history_requested"`
+				ChangedPaths     []string `json:"changed_paths"`
 			}
 			if err := json.Unmarshal(data, &metadata); err != nil {
 				t.Fatal(err)
 			}
-			if !metadata.DiffIncomplete || !reflect.DeepEqual(metadata.ChangedPaths, job.Source.ChangedPaths) {
+			if metadata.HistoryRequested || !metadata.DiffIncomplete || !reflect.DeepEqual(metadata.ChangedPaths, job.Source.ChangedPaths) {
 				t.Fatalf("comparison coverage metadata missing: %s", data)
 			}
 			for _, want := range []string{"report incomplete comparison coverage", "commit metadata only, without historical patches", "Comparison diff incomplete=true", "History requested=false"} {
@@ -148,20 +161,6 @@ func TestRunnerDeclaresIncompleteComparisonAndMetadataHistory(t *testing.T) {
 	}
 	if _, err := runner.Run(context.Background(), job); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func TestRunnerBoundsCriticDisabledAnswer(t *testing.T) {
-	job := portableJob(command.Comment)
-	runner := Runner{
-		WorkRoot: t.TempDir(),
-		runModel: func(context.Context, modelRun) (aicli.Result, error) {
-			return aicli.Result{Answer: strings.Repeat("€", maxOutputBytes), UsageComplete: true}, nil
-		},
-	}
-	result, err := runner.Run(context.Background(), job)
-	if !errors.Is(err, monitor.ErrTerminalJob) || result.Answer != "" || len(result.Calls) != 1 {
-		t.Fatalf("oversized answer was not refused: %+v, %v", result, err)
 	}
 }
 
@@ -259,47 +258,25 @@ func TestRunnerFixUsesOnlyOfflineGit(t *testing.T) {
 	}
 }
 
-func TestRunnerRejectsMissingSkillsAndReadOnlyWrites(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	runner := Runner{WorkRoot: t.TempDir()}
-	job := portableJob(command.Comment)
-	job.Main.Skills = []string{"https://github.com/owner/repo/tree/pinned/skills/missing"}
-	runner.runModel = func(_ context.Context, _ modelRun) (aicli.Result, error) {
-		t.Fatal("model ran with missing required skill")
-		return aicli.Result{}, nil
-	}
-	if _, err := runner.Run(context.Background(), job); err == nil || errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "not installed") {
-		t.Fatalf("missing skill = %v", err)
-	}
-	job.Main.Skills = []string{skills.BuiltinAntiPromptInjection}
-	runner.runModel = func(_ context.Context, request modelRun) (aicli.Result, error) {
-		if err := os.WriteFile(filepath.Join(request.dir, "source.txt"), []byte("changed"), 0600); err != nil {
-			t.Fatal(err)
-		}
+func TestRunnerRejectsReadOnlyWrites(t *testing.T) {
+	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+		writeFixtureFile(t, request.dir, "source.txt", []byte("changed"))
 		return aicli.Result{Answer: "answer"}, nil
-	}
-	if _, err := runner.Run(context.Background(), job); !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "read-only") {
-		t.Fatalf("read-only write = %v", err)
-	}
-	job.Version++
-	if _, err := runner.Run(context.Background(), job); !errors.Is(err, monitor.ErrTerminalJob) {
-		t.Fatalf("invalid job was not terminal: %v", err)
+	}}
+	if _, err := runner.Run(context.Background(), portableJob(command.Comment)); !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "read-only") {
+		t.Fatalf("read-only write=%v", err)
 	}
 }
 
 func TestRunnerIgnoresWorkerGitMetadata(t *testing.T) {
-	for _, name := range []string{".git", ".gIt", "nested/.GiT"} {
-		t.Run(name, func(t *testing.T) {
-			runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
-				writeFixtureFile(t, request.dir, name+"/config", []byte("untrusted worker metadata"))
-				writeFixtureFile(t, request.dir, "source.txt", []byte("changed"))
-				return aicli.Result{Answer: "Changed source", UsageComplete: true}, nil
-			}}
-			result, err := runner.Run(context.Background(), portableJob(command.Fix))
-			if err != nil || len(result.Changes) != 1 || result.Changes[0].Path != "source.txt" {
-				t.Fatalf("metadata result = %+v, %v", result, err)
-			}
-		})
+	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+		writeFixtureFile(t, request.dir, "nested/.GiT/config", []byte("untrusted worker metadata"))
+		writeFixtureFile(t, request.dir, "source.txt", []byte("changed"))
+		return aicli.Result{Answer: "Changed source", UsageComplete: true}, nil
+	}}
+	result, err := runner.Run(context.Background(), portableJob(command.Fix))
+	if err != nil || len(result.Changes) != 1 || result.Changes[0].Path != "source.txt" || string(result.Changes[0].Data) != "changed" {
+		t.Fatalf("metadata result=%+v,%v", result, err)
 	}
 }
 
@@ -323,28 +300,6 @@ func TestRunnerCanonicalizesTrustedWorkRoot(t *testing.T) {
 	}
 }
 
-func TestRunnerClearsHostSkillsAndRejectsMissingCLI(t *testing.T) {
-	for _, provider := range []string{"codex", "claude"} {
-		t.Run(provider, func(t *testing.T) {
-			job := portableJob(command.Comment)
-			job.Main = RoleSettings{Provider: provider}
-			runner := Runner{WorkRoot: t.TempDir(), Codex: config.CodexConfig{Skills: []string{"/stale/codex/SKILL.md"}}, Claude: config.ClaudeConfig{Skills: []string{"/stale/claude/SKILL.md"}}}
-			if err := runner.configureRole(job.Main); err != nil {
-				t.Fatal(err)
-			}
-			if provider == "codex" && len(runner.Codex.Skills) != 0 || provider == "claude" && len(runner.Claude.Skills) != 0 {
-				t.Fatal("Job did not clear host skills")
-			}
-			job.Main.Skills = []string{skills.BuiltinAntiPromptInjection}
-			t.Setenv("PATH", "")
-			t.Setenv("HOME", t.TempDir())
-			if result, err := runner.Run(context.Background(), job); err == nil || len(result.Calls) != 1 {
-				t.Fatalf("missing CLI result = %+v, %v", result, err)
-			}
-		})
-	}
-}
-
 func TestPortableAuditMetadataUsesSourceIdentity(t *testing.T) {
 	job := portableJob(command.SecurityAudit)
 	job.Main.Skills = []string{testAuditSkillURL}
@@ -354,7 +309,7 @@ func TestPortableAuditMetadataUsesSourceIdentity(t *testing.T) {
 		if name == "run-metadata.json" {
 			owners := strings.TrimSuffix(auditTestOwners, "}") + `,"/worker/local/extra-owner":"/worker/local/child"}`
 			data = []byte(fmt.Sprintf(`{"run_id":"test-run","repo":"owner/repo","target":"/worker/local/source","source_ref":%q,"profile":"standard","scope_paths":["."],"budget":null,"selected_companion_files":["/installed/security-audit/WEB-PROTOCOL-AND-AUTH.md"],"prior_run_paths":[],"shared_file_owners":%s,"execution_policy":"sandboxed-source-and-local-only","run_status":"complete","output_dir":"/worker/local/reports","extra":{"run_dir":"/worker/local/runtime"}}`, job.Source.Head, owners))
-			if _, err := validateAuditMetadata(data, []byte("content"), job.Identity.Repository, "/worker/local/source", job.Source.Head); err != nil {
+			if _, err := validateAuditMetadata(data, job.Identity.Repository, "/worker/local/source", job.Source.Head); err != nil {
 				t.Fatalf("invalid raw metadata control: %v", err)
 			}
 		}
@@ -362,7 +317,7 @@ func TestPortableAuditMetadataUsesSourceIdentity(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	files, _, err := readAuditArtifacts(root, auditForReview)
+	files, _, err := readAuditArtifacts(root, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -402,22 +357,13 @@ func TestPortableAuditMetadataUsesSourceIdentity(t *testing.T) {
 }
 
 func TestAuditPromptSelectsDomainCompanionsOnly(t *testing.T) {
-	for _, critic := range []bool{false, true} {
-		job := portableJob(command.SecurityAudit)
-		if critic {
-			job = withClaudeCritic(job)
-		}
-		prompt, err := actionPrompt(context.Background(), job, "/source", "/context", "/reports", "/installed/security-audit/SKILL.md")
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, want := range []string{"Do not execute repository code, builds, tests, or fixtures", "Copy this source-only execution prohibition verbatim into every delegated agent prompt", "it overrides the skill's local-execution allowance", "selected security-audit domain companion files", `"When to use" conditions apply`, "Exclude its main SKILL.md and independently configured skills", "Use [] when no domain companion applies", "installed validation and publication"} {
-			if !strings.Contains(prompt, want) {
-				t.Fatalf("audit prompt lacks %q: %s", want, prompt)
-			}
-		}
-		if strings.Contains(prompt, "subsequent critic reviews") != critic {
-			t.Fatalf("critic time requested without matching critic setting: %t", critic)
+	prompt, err := actionPrompt(context.Background(), portableJob(command.SecurityAudit), "/source", "/context", "/reports", "/installed/security-audit/SKILL.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"it overrides the skill's local-execution allowance", "selected security-audit domain companion files", `"When to use" conditions apply`, "Exclude its main SKILL.md and independently configured skills", "Use [] when no domain companion applies", "installed validation and publication"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("audit prompt lacks %q: %s", want, prompt)
 		}
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"slices"
@@ -27,38 +28,49 @@ type retainedReview struct {
 
 // retainReviewLedger validates private history independently of public output.
 // A failed call may leave a valid prefix; answer/change validation must not erase it.
-func (e *Orchestrator) retainReviewLedger(job Job, result Result) error {
-	if err := e.saveReviewLedger(job, result); err != nil {
-		return fmt.Errorf("%w: retain private review ledger: %w", monitor.ErrTerminalJob, err)
+func (e *Orchestrator) retainReviewLedger(job Job, result Result) (resultErr error) {
+	defer func() {
+		if resultErr != nil {
+			resultErr = fmt.Errorf("%w: retain private review ledger: %w", monitor.ErrTerminalJob, resultErr)
+		}
+	}()
+	if job.Critic == nil && len(result.ReviewLedger) == 0 {
+		return nil
 	}
-	return nil
-}
-
-func (e *Orchestrator) reviewLedgerRoot(job Job) (string, error) {
-	if e.WorkRoot == "" {
-		return "", errors.New("review evidence work root is required")
+	if err := job.Validate(); err != nil {
+		return err
+	}
+	if err := validateReviewEvidence(job, result); err != nil {
+		return err
 	}
 	workRoot, err := workspace.PrepareRoot(e.WorkRoot)
 	if err != nil {
-		return "", err
+		return err
 	}
 	providers := []string{job.Main.Provider}
 	if job.Critic != nil {
 		providers = append(providers, job.Critic.Provider)
 	}
 	if err := e.Runner.CheckWorkRootIsolation(workRoot, providers...); err != nil {
-		return "", err
+		return err
 	}
-	root := filepath.Join(workRoot, "reviews")
-	if err := os.MkdirAll(root, 0700); err != nil {
-		return "", err
+	return saveReviewLedger(workRoot, job, result, e.Logger)
+}
+
+func privateRecordsDir(workRoot, name string) (string, error) {
+	if workRoot == "" {
+		return "", errors.New("private records work root is required")
 	}
-	info, err := os.Lstat(root)
+	workRoot, err := workspace.PrepareRoot(workRoot)
 	if err != nil {
 		return "", err
 	}
-	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0077 != 0 {
-		return "", errors.New("review evidence root must be a private directory")
+	root := filepath.Join(workRoot, name)
+	if err := os.MkdirAll(root, 0700); err != nil {
+		return "", err
+	}
+	if err := workspace.CheckPrivateRoot(root); err != nil {
+		return "", err
 	}
 	if err := workspace.CheckRoot(root); err != nil {
 		return "", err
@@ -66,20 +78,19 @@ func (e *Orchestrator) reviewLedgerRoot(job Job) (string, error) {
 	return root, nil
 }
 
-func (e *Orchestrator) saveReviewLedger(job Job, result Result) (resultErr error) {
-	if job.Critic == nil && len(result.ReviewLedger) == 0 {
-		return nil
-	}
+func validateReviewEvidence(job Job, result Result) error {
 	if !result.matchesJob(job) {
 		return errors.New("review evidence does not match action identity or source")
-	}
-	if err := job.Validate(); err != nil {
-		return err
 	}
 	if err := result.validateCalls(job, false); err != nil {
 		return err
 	}
-	if err := validateReviewLedger(job, result.Calls, result.ReviewLedger, false); err != nil {
+	return validateReviewLedger(job, result.Calls, result.ReviewLedger, false)
+}
+
+// saveReviewLedger accepts a validated job on an admitted host work root.
+func saveReviewLedger(workRoot string, job Job, result Result, logger *log.Logger) error {
+	if err := validateReviewEvidence(job, result); err != nil {
 		return err
 	}
 	record := retainedReview{
@@ -94,7 +105,7 @@ func (e *Orchestrator) saveReviewLedger(job Job, result Result) (resultErr error
 	if len(data) > workspace.MaxBytes {
 		return errors.New("review evidence exceeds transfer byte limit")
 	}
-	root, err := e.reviewLedgerRoot(job)
+	root, err := privateRecordsDir(workRoot, "reviews")
 	if err != nil {
 		return err
 	}
@@ -118,34 +129,11 @@ func (e *Orchestrator) saveReviewLedger(job Job, result Result) (resultErr error
 			return nil
 		}
 	}
-	file, err := os.CreateTemp(root, ".review-*")
-	if err != nil {
+	if err := workspace.WriteAtomic(path, data, root, filepath.Dir(root)); err != nil {
 		return err
 	}
-	defer func() {
-		if err := os.Remove(file.Name()); !errors.Is(err, os.ErrNotExist) {
-			resultErr = errors.Join(resultErr, err)
-		}
-	}()
-	_, writeErr := file.Write(data)
-	if writeErr == nil {
-		writeErr = file.Sync()
+	if logger != nil {
+		logger.Printf("review evidence job=%s attempt=%s executor=%s entries=%d path=%q", job.Identity.JobID, job.Identity.AttemptID, job.Identity.ExecutorID, len(result.ReviewLedger), path)
 	}
-	if err := errors.Join(writeErr, file.Close()); err != nil {
-		return err
-	}
-	if err := os.Rename(file.Name(), path); err != nil {
-		return err
-	}
-	for _, directory := range []string{root, filepath.Dir(root)} {
-		file, err := os.Open(directory)
-		if err != nil {
-			return err
-		}
-		if err := errors.Join(file.Sync(), file.Close()); err != nil {
-			return err
-		}
-	}
-	e.logf("review evidence job=%s attempt=%s executor=%s entries=%d path=%q", job.Identity.JobID, job.Identity.AttemptID, job.Identity.ExecutorID, len(result.ReviewLedger), path)
 	return nil
 }

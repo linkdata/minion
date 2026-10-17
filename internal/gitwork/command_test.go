@@ -135,24 +135,29 @@ func TestCloneSkipsTagsAndPublicationAcceptsAmbiguousShortName(t *testing.T) {
 	}
 }
 
-func TestGitEnvironmentDisablesReplacementAndSystemAttributes(t *testing.T) {
-	t.Setenv("GIT_NO_REPLACE_OBJECTS", "0")
-	t.Setenv("GIT_ATTR_NOSYSTEM", "0")
-	env := strings.Join(cleanGitEnvironment(), "\n")
-	for _, setting := range []string{"GIT_NO_REPLACE_OBJECTS=1", "GIT_ATTR_NOSYSTEM=1"} {
-		if !strings.Contains(env, "\n"+setting+"\n") {
-			t.Fatalf("missing hardening %s", setting)
+func TestGitEnvironmentPinsHardening(t *testing.T) {
+	settings := []struct{ key, hostile, want string }{
+		{"GIT_NO_REPLACE_OBJECTS", "0", "1"}, {"GIT_ATTR_NOSYSTEM", "0", "1"}, {"LC_ALL", "sv_SE.UTF-8", "C"},
+	}
+	for _, setting := range settings {
+		t.Setenv(setting.key, setting.hostile)
+	}
+	env := cleanGitEnvironment()
+	for _, setting := range settings {
+		var matches []string
+		for _, entry := range env {
+			if strings.HasPrefix(entry, setting.key+"=") {
+				matches = append(matches, entry)
+			}
+		}
+		if len(matches) != 1 || matches[0] != setting.key+"="+setting.want {
+			t.Fatalf("%s settings=%q", setting.key, matches)
 		}
 	}
 }
 
 func TestCommitAndPushRequiresValidatedDestination(t *testing.T) {
 	fixture := newFixture(t)
-	t.Cleanup(func() {
-		if err := fixture.checkout.Close(); err != nil {
-			t.Error(err)
-		}
-	})
 	ctx := context.Background()
 	const repo, branch = "owner/destination", "minion/fix-destination"
 	// Redirect only this controlled fixture's validated HTTPS URL to its local remote.

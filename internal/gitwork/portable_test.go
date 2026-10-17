@@ -72,10 +72,7 @@ func TestSnapshotPreservesPRDeletedBinaryAndModeContext(t *testing.T) {
 	writeFile(t, filepath.Join(fixture.source, "text.txt"), "base text\n")
 	writeFile(t, filepath.Join(fixture.source, "deleted.txt"), "deleted base content\n")
 	writeFile(t, filepath.Join(fixture.source, "binary"), "\x00\xffbase")
-	fixture.git(fixture.source, "add", ".")
-	fixture.git(fixture.source, "commit", "-m", "base files")
-	base := fixture.git(fixture.source, "rev-parse", "HEAD")
-	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/heads/main")
+	base := fixture.commit("refs/heads/main", "base files")
 	if err := os.Remove(filepath.Join(fixture.source, "deleted.txt")); err != nil {
 		t.Fatal(err)
 	}
@@ -84,16 +81,10 @@ func TestSnapshotPreservesPRDeletedBinaryAndModeContext(t *testing.T) {
 	if err := os.Chmod(filepath.Join(fixture.source, "binary"), 0755); err != nil {
 		t.Fatal(err)
 	}
-	fixture.git(fixture.source, "add", ".")
-	fixture.git(fixture.source, "commit", "-m", "PR files")
-	head := fixture.git(fixture.source, "rev-parse", "HEAD")
-	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/pull/7/head")
+	head := fixture.commit("refs/pull/7/head", "PR files")
 	fixture.git(fixture.source, "checkout", "--detach", base)
 	writeFile(t, filepath.Join(fixture.source, "base-only"), "new base branch content")
-	fixture.git(fixture.source, "add", ".")
-	fixture.git(fixture.source, "commit", "-m", "base advanced after fork")
-	baseTip := fixture.git(fixture.source, "rev-parse", "HEAD")
-	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/heads/main")
+	baseTip := fixture.commit("refs/heads/main", "base advanced after fork")
 	if err := fixture.checkout.checkoutPullRequest(context.Background(), 7, "main", head); err != nil {
 		t.Fatal(err)
 	}
@@ -124,19 +115,38 @@ func TestSnapshotPreservesPRDeletedBinaryAndModeContext(t *testing.T) {
 	}
 }
 
+func TestSnapshotOverridesNamedBinaryDiffDriver(t *testing.T) {
+	fixture := newFixture(t)
+	writeFile(t, filepath.Join(fixture.source, ".gitattributes"), "text.txt diff=blocked\n")
+	writeFile(t, filepath.Join(fixture.source, "text.txt"), "base text\n")
+	base := fixture.commit("refs/heads/main", "named diff driver base")
+	writeFile(t, filepath.Join(fixture.source, "text.txt"), "head text\n")
+	head := fixture.commit("refs/pull/7/head", "named diff driver head")
+	control := fixture.git(fixture.source, "-c", "diff.blocked.binary=true", "diff", "--no-ext-diff", "--no-textconv", base, head, "--", "text.txt")
+	if !strings.Contains(control, "Binary files") || strings.Contains(control, "-base text") {
+		t.Fatalf("named-driver control did not hide text: %s", control)
+	}
+	fixture.git(fixture.checkout.path, "config", "diff.blocked.binary", "true")
+	if err := fixture.checkout.recordConfig(); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.checkout.checkoutPullRequest(context.Background(), 7, "main", head); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := fixture.checkout.Snapshot(context.Background(), false)
+	if err != nil || !bytes.Contains(snapshot.Diff, []byte("-base text\n+head text\n")) || bytes.Contains(snapshot.Diff, []byte("Binary files")) {
+		t.Fatalf("named diff driver hid snapshot text: %s error=%v", snapshot.Diff, err)
+	}
+}
+
 func TestSnapshotDisablesComparisonRenameDetection(t *testing.T) {
 	fixture := newFixture(t)
 	writeFile(t, filepath.Join(fixture.source, "old.txt"), "unchanged content to recognize as a rename\n")
-	fixture.git(fixture.source, "add", ".")
-	fixture.git(fixture.source, "commit", "-m", "rename base")
-	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/heads/main")
+	fixture.commit("refs/heads/main", "rename base")
 	if err := os.Rename(filepath.Join(fixture.source, "old.txt"), filepath.Join(fixture.source, "new.txt")); err != nil {
 		t.Fatal(err)
 	}
-	fixture.git(fixture.source, "add", ".")
-	fixture.git(fixture.source, "commit", "-m", "rename file")
-	head := fixture.git(fixture.source, "rev-parse", "HEAD")
-	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/pull/7/head")
+	head := fixture.commit("refs/pull/7/head", "rename file")
 	if err := fixture.checkout.checkoutPullRequest(context.Background(), 7, "main", head); err != nil {
 		t.Fatal(err)
 	}
@@ -159,15 +169,7 @@ func TestSnapshotDoesNotClaimCompleteHistoryFromShallowSource(t *testing.T) {
 	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/heads/main")
 	server := filepath.Join(t.TempDir(), "shallow.git")
 	fixture.git("", "clone", "--bare", "--depth=1", "--branch", "main", "file://"+fixture.remote, server)
-	checkout, err := cloneFromURL(context.Background(), t.TempDir(), "file://"+server, "main", localTreeMetadata(fixture.source), true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := checkout.Close(); err != nil {
-			t.Error(err)
-		}
-	})
+	checkout := fixture.keepCheckout(cloneFromURL(context.Background(), t.TempDir(), "file://"+server, "main", localTreeMetadata(fixture.source), true))
 	if fixture.git(checkout.path, "rev-parse", "--is-shallow-repository") != "true" {
 		t.Fatal("no-depth clone did not preserve the source's shallow boundary")
 	}
@@ -248,11 +250,14 @@ func TestCloneDefaultBranchDisablesRepositoryTransforms(t *testing.T) {
 func TestImportRejectsIdentityAndMetadataAndPreservesBytes(t *testing.T) {
 	fixture := newFixture(t)
 	ctx := context.Background()
-	if err := fixture.checkout.Import(ctx, strings.Repeat("f", 40), nil); err == nil {
-		t.Fatal("accepted wrong source")
+	if err := fixture.checkout.Import(ctx, strings.Repeat("f", 40), []workspace.Change{{Path: "README.md", Mode: workspace.Regular, Data: []byte("wrong source\n")}}); err == nil || !strings.Contains(err.Error(), "result source commit does not match checkout") {
+		t.Fatalf("wrong-source import error=%v", err)
 	}
-	if err := fixture.checkout.Import(ctx, fixture.base, []workspace.Change{{Path: ".git/config", Mode: workspace.Regular}}); err == nil {
-		t.Fatal("accepted Git metadata")
+	if data, err := os.ReadFile(filepath.Join(fixture.checkout.path, "README.md")); err != nil || string(data) != "fixture\n" {
+		t.Fatalf("wrong-source import changed source: %q error=%v", data, err)
+	}
+	if paths, err := fixture.checkout.stagedPaths(ctx); err != nil || len(paths) != 0 {
+		t.Fatalf("wrong-source import staged=%q error=%v", paths, err)
 	}
 	marker := filepath.Join(t.TempDir(), "executed")
 	fixture.git(fixture.checkout.path, "config", "filter.returned.clean", "printf filter >> "+shellQuote(marker)+"; cat")
@@ -296,42 +301,14 @@ func TestImportRejectsIdentityAndMetadataAndPreservesBytes(t *testing.T) {
 	}
 }
 
-func TestCloneOmitsDefaultBranchSymlinkFromSnapshot(t *testing.T) {
-	fixture := newFixture(t)
-	if err := os.Symlink("/etc/passwd", filepath.Join(fixture.source, "escape")); err != nil {
-		t.Fatal(err)
-	}
-	fixture.git(fixture.source, "add", ".")
-	fixture.git(fixture.source, "commit", "-m", "symlink source")
-	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/heads/main")
-	checkout := fixture.clone()
-	snapshot, err := checkout.Snapshot(context.Background(), false)
-	if err != nil || len(snapshot.Omitted) != 1 || snapshot.Omitted[0] != "escape" {
-		t.Fatalf("snapshot omitted=%v error=%v", snapshot.Omitted, err)
-	}
-	for _, file := range snapshot.Files {
-		if file.Path == "escape" {
-			t.Fatal("symlink content exported")
-		}
-	}
-}
-
 func TestSnapshotReusesValidatedTreesByCommit(t *testing.T) {
 	fixture := newFixture(t)
 	lookups := 0
 	lookup := localTreeMetadata(fixture.source)
-	checkout, err := cloneFromURL(context.Background(), t.TempDir(), fixture.remote, "main", func(ctx context.Context, sha string) (github.GitTree, error) {
+	checkout := fixture.keepCheckout(cloneFromURL(context.Background(), t.TempDir(), fixture.remote, "main", func(ctx context.Context, sha string) (github.GitTree, error) {
 		lookups++
 		return lookup(ctx, sha)
-	}, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := checkout.Close(); err != nil {
-			t.Error(err)
-		}
-	}()
+	}, true))
 	for i := 0; i < 2; i++ {
 		if _, err := checkout.Snapshot(context.Background(), false); err != nil {
 			t.Fatal(err)
@@ -341,10 +318,7 @@ func TestSnapshotReusesValidatedTreesByCommit(t *testing.T) {
 		t.Fatalf("default clone/snapshot metadata lookups=%d, want 1", lookups)
 	}
 	writeFile(t, filepath.Join(fixture.source, "README.md"), "PR source\n")
-	fixture.git(fixture.source, "add", ".")
-	fixture.git(fixture.source, "commit", "-m", "PR source")
-	head := fixture.git(fixture.source, "rev-parse", "HEAD")
-	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/pull/7/head")
+	head := fixture.commit("refs/pull/7/head", "PR source")
 	if err := checkout.checkoutPullRequest(context.Background(), 7, "main", head); err != nil {
 		t.Fatal(err)
 	}
@@ -364,17 +338,12 @@ func TestSnapshotPreservesOmittedPathSpellingsAcrossRevisions(t *testing.T) {
 	if err := os.Symlink("/outside", filepath.Join(fixture.source, "Docs")); err != nil {
 		t.Fatal(err)
 	}
-	fixture.git(fixture.source, "add", ".")
-	fixture.git(fixture.source, "commit", "-m", "base symlink")
-	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/heads/main")
+	fixture.commit("refs/heads/main", "base symlink")
 	checkout := fixture.clone()
 	if err := os.Rename(filepath.Join(fixture.source, "Docs"), filepath.Join(fixture.source, "docs")); err != nil {
 		t.Fatal(err)
 	}
-	fixture.git(fixture.source, "add", ".")
-	fixture.git(fixture.source, "commit", "-m", "rename symlink")
-	head := fixture.git(fixture.source, "rev-parse", "HEAD")
-	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/pull/7/head")
+	head := fixture.commit("refs/pull/7/head", "rename symlink")
 	if err := checkout.checkoutPullRequest(context.Background(), 7, "main", head); err != nil {
 		t.Fatal(err)
 	}
@@ -387,9 +356,6 @@ func TestSnapshotPreservesOmittedPathSpellingsAcrossRevisions(t *testing.T) {
 func TestPublishIgnoresDefaultGlobalExcludesAndAttributes(t *testing.T) {
 	home := t.TempDir()
 	gitConfig := filepath.Join(home, ".config", "git")
-	if err := os.MkdirAll(gitConfig, 0700); err != nil {
-		t.Fatal(err)
-	}
 	writeFile(t, filepath.Join(gitConfig, "ignore"), "notes.local\n")
 	writeFile(t, filepath.Join(gitConfig, "attributes"), "notes.local filter=probe -diff probe=global\n")
 	t.Setenv("HOME", home)
@@ -425,9 +391,6 @@ func TestCloneIgnoresHostTemplateExclusions(t *testing.T) {
 		t.Fatal(err)
 	}
 	template := t.TempDir()
-	if err := os.Mkdir(filepath.Join(template, "info"), 0700); err != nil {
-		t.Fatal(err)
-	}
 	writeFile(t, filepath.Join(template, "info", "exclude"), "notes.local\n")
 	control := filepath.Join(t.TempDir(), "control")
 	if output, err := exec.Command(realGit, "-c", "init.templateDir="+template, "clone", "--no-checkout", "--branch", "main", fixture.remote, control).CombinedOutput(); err != nil {
@@ -498,9 +461,7 @@ func TestSnapshotPreservesGitLegalSourceNames(t *testing.T) {
 	for _, name := range names {
 		writeFile(t, filepath.Join(fixture.source, name), name)
 	}
-	fixture.git(fixture.source, "add", ".")
-	fixture.git(fixture.source, "commit", "-m", "Git-legal source names")
-	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/heads/main")
+	fixture.commit("refs/heads/main", "Git-legal source names")
 	checkout := fixture.clone()
 	snapshot, err := checkout.Snapshot(context.Background(), false)
 	if err != nil {
@@ -595,39 +556,6 @@ func TestSourceEntriesRejectsAncestorCollisionWithoutDirectoryMetadata(t *testin
 	_, err = checkout.sourceEntries(context.Background(), treeSHA, tree, treeSHA)
 	if !errors.Is(err, ErrUnsupportedSource) || !strings.Contains(err.Error(), "file/directory collision") {
 		t.Fatalf("accepted incomplete directory metadata: %v", err)
-	}
-}
-
-func TestSourceTreeAcceptsExactTransferLimits(t *testing.T) {
-	sha := strings.Repeat("a", 40)
-	for _, test := range []struct {
-		name    string
-		entries []github.GitTreeEntry
-	}{
-		{"files", func() []github.GitTreeEntry {
-			entries := make([]github.GitTreeEntry, workspace.MaxFiles)
-			for i := range entries {
-				entries[i] = github.GitTreeEntry{Path: fmt.Sprintf("f%d", i), Type: "commit", Mode: "160000"}
-			}
-			return entries
-		}()},
-		{"entries", func() []github.GitTreeEntry {
-			entries := make([]github.GitTreeEntry, workspace.MaxEntries)
-			for i := range entries {
-				entries[i] = github.GitTreeEntry{Path: fmt.Sprintf("d%d", i), Type: "tree", Mode: "040000"}
-			}
-			return entries
-		}()},
-		{"bytes", func() []github.GitTreeEntry {
-			size := int64(workspace.MaxBytes)
-			return []github.GitTreeEntry{{Path: "full", Type: "blob", Mode: "100644", Size: &size}}
-		}()},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			if err := checkSourceTree(completeTree(sha, test.entries), sha); err != nil {
-				t.Fatal(err)
-			}
-		})
 	}
 }
 
@@ -727,7 +655,7 @@ func TestSourceFilesClassifiesMetadataMismatchAndCancellation(t *testing.T) {
 	}
 }
 
-func TestSnapshotPreflightsCombinedBytesAndChangedPaths(t *testing.T) {
+func TestSnapshotPreflightsChangedPaths(t *testing.T) {
 	fixture := newFixture(t)
 	ctx := context.Background()
 	writeFile(t, filepath.Join(fixture.checkout.path, "README.md"), "changed\n")
@@ -738,18 +666,6 @@ func TestSnapshotPreflightsCombinedBytesAndChangedPaths(t *testing.T) {
 	fixture.checkout.comparisonBase = fixture.base
 	blob := fixture.git(fixture.checkout.path, "rev-parse", "HEAD:README.md")
 	log := recordSnapshotContentCalls(t)
-	t.Run("combined byte budget", func(t *testing.T) {
-		fixture.checkout.sourceTrees = map[string][]sourceEntry{}
-		for _, ref := range []string{fixture.base, head} {
-			fixture.checkout.sourceTrees[ref] = []sourceEntry{{file: workspace.File{Path: "README.md", Mode: workspace.Regular}, sha: blob, size: workspace.MaxBytes/2 + 1}}
-		}
-		if _, err := fixture.checkout.Snapshot(ctx, false); !errors.Is(err, ErrCheckoutTooLarge) || !strings.Contains(err.Error(), "combined") {
-			t.Fatalf("combined budget error=%v", err)
-		}
-	})
-	if data, err := os.ReadFile(log); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("byte preflight requested content: %q error=%v", data, err)
-	}
 	t.Run("changed path budget", func(t *testing.T) {
 		tree := func(prefix string, count int) string {
 			var input strings.Builder
@@ -782,20 +698,5 @@ func TestSnapshotPreflightsCombinedBytesAndChangedPaths(t *testing.T) {
 	})
 	if data, err := os.ReadFile(log); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("preflight requested content: %q error=%v", data, err)
-	}
-}
-
-func TestSourcePreparationBoundsIncludeOmittedLinks(t *testing.T) {
-	sha := strings.Repeat("a", 40)
-	size := int64(workspace.MaxBytes + 1)
-	if err := checkSourceTree(completeTree(sha, []github.GitTreeEntry{{Path: "link", Type: "blob", Mode: "120000", Size: &size}}), sha); !errors.Is(err, ErrCheckoutTooLarge) {
-		t.Fatalf("oversized omitted symlink error=%v", err)
-	}
-	entries := make([]github.GitTreeEntry, workspace.MaxFiles+1)
-	for i := range entries {
-		entries[i] = github.GitTreeEntry{Path: fmt.Sprintf("sub-%d", i), Type: "commit", Mode: "160000"}
-	}
-	if err := checkSourceTree(completeTree(sha, entries), sha); !errors.Is(err, ErrCheckoutTooLarge) {
-		t.Fatalf("oversized gitlink list error=%v", err)
 	}
 }

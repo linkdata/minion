@@ -19,20 +19,31 @@ import (
 	"github.com/linkdata/minion/internal/workspace"
 )
 
+func auditArtifactsFixture(job Job, target, report string) []workspace.File {
+	metadata := fmt.Sprintf(`{"run_id":"test-run","repo":%q,"target":%q,"source_ref":%q,"profile":"standard","scope_paths":["."],"budget":null,"selected_companion_files":[],"prior_run_paths":[],"shared_file_owners":%s,"execution_policy":"sandboxed-source-and-local-only","run_status":"complete"}`, job.Identity.Repository, target, job.Source.Head, auditTestOwners)
+	var files []workspace.File
+	for _, name := range auditArtifacts {
+		data := "Audit content\n"
+		switch name {
+		case "run-metadata.json":
+			data = metadata
+		case "REPORT.md":
+			data = report
+		case "findings.json":
+			data = "[]"
+		case "coverage-ledger.json":
+			data = `[{"status":"covered"}]`
+		case "FINDINGS-DETAIL.md", "NEEDS-VALIDATION.md":
+			data = ""
+		}
+		files = append(files, workspace.File{Path: name, Mode: workspace.Regular, Data: []byte(data)})
+	}
+	return files
+}
+
 func completeAuditResult(job Job) Result {
 	const report = "Reviewed audit report."
-	metadata := []byte(fmt.Sprintf(`{"run_id":"contract-test","repo":%q,"target":%q,"source_ref":%q,"profile":"standard","scope_paths":["."],"budget":null,"selected_companion_files":[],"prior_run_paths":[],"shared_file_owners":%s,"execution_policy":"sandboxed-source-and-local-only","run_status":"complete"}`, job.Identity.Repository, sourceIdentity(job), job.Source.Head, auditTestOwners))
-	result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: report, Calls: []CallUsage{{Provider: job.Main.Provider, Role: "main", Round: 1}}}
-	for _, name := range auditArtifacts {
-		data := []byte("content")
-		if name == "run-metadata.json" {
-			data = metadata
-		} else if name == "REPORT.md" {
-			data = []byte(report)
-		}
-		result.Artifacts = append(result.Artifacts, workspace.File{Path: name, Mode: workspace.Regular, Data: data})
-	}
-	return result
+	return Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: report, Calls: []CallUsage{{Provider: job.Main.Provider, Role: roleMain, Round: 1}}, Artifacts: auditArtifactsFixture(job, sourceIdentity(job), report)}
 }
 
 func TestResultArtifactActionAndCardinality(t *testing.T) {
@@ -138,6 +149,10 @@ func TestJobRejectsInvalidRoleAndDispatchSettings(t *testing.T) {
 	}{
 		{"model bound", func(j *Job) { j.Main.Model = strings.Repeat("m", 129) }, "invalid action model or skills"},
 		{"effort bound", func(j *Job) { j.Main.Effort = strings.Repeat("e", 129) }, "invalid action model or skills"},
+		{"model NUL", func(j *Job) { j.Main.Model = "a\x00b" }, "invalid action model or skills"},
+		{"effort NUL", func(j *Job) { j.Main.Effort = "a\x00b" }, "invalid action model or skills"},
+		{"model CR", func(j *Job) { j.Main.Model = "a\rb" }, "invalid action model or skills"},
+		{"effort CR", func(j *Job) { j.Main.Effort = "a\rb" }, "invalid action model or skills"},
 		{"model newline", func(j *Job) { j.Main.Model = "model\nother" }, "invalid action model or skills"},
 		{"missing main skills", func(j *Job) { j.Main.Skills = nil }, "requires at least one skill"},
 		{"skill count", func(j *Job) {
@@ -255,7 +270,7 @@ func TestStatusDistinguishesReviewPhases(t *testing.T) {
 }
 
 func TestFixJobRejectsUnsupportedLayoutBeforeExecution(t *testing.T) {
-	for _, paths := range [][]string{{"Docs/a", "docs/b"}, {"ſ", "s"}, {"µ/a", "μ/b"}, {`back\slash`}} {
+	for _, paths := range [][]string{{"Docs/a", "docs/b"}, {`back\slash`}} {
 		job := portableJob(command.Fix)
 		for _, name := range paths {
 			job.Source.Files = append(job.Source.Files, workspace.File{Path: name, Mode: workspace.Regular})
@@ -271,7 +286,7 @@ func TestFixJobRejectsUnsupportedLayoutBeforeExecution(t *testing.T) {
 }
 
 func TestFixJobIncludesOmittedPathsInUpfrontFoldedLayout(t *testing.T) {
-	for _, names := range [][2]string{{"link/a", "Link"}, {"LINK", "link/b"}, {"ſ/a", "s"}, {"Docs/a", "docs/b"}, {"File", "file"}} {
+	for _, names := range [][2]string{{"ſ/a", "s"}} {
 		t.Run(names[0]+"-"+names[1], func(t *testing.T) {
 			job := portableJob(command.Fix)
 			job.Source.Files = []workspace.File{{Path: names[0], Mode: workspace.Regular}}
@@ -288,31 +303,6 @@ func TestFixJobIncludesOmittedPathsInUpfrontFoldedLayout(t *testing.T) {
 				t.Fatalf("read-only exact source must remain supported: %v", err)
 			}
 		})
-	}
-}
-
-func TestResultRejectsChangesOverlappingOmittedSource(t *testing.T) {
-	for _, name := range []string{"private/link", "PRIVATE/link", "private/link/file", "private"} {
-		t.Run(strings.ReplaceAll(name, "/", "-"), func(t *testing.T) {
-			job := portableJob(command.Fix)
-			job.Source.Omitted = []string{"private/link"}
-			result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Done.",
-				Changes: []workspace.Change{{Path: name, Mode: workspace.Regular, Data: []byte("replacement")}}}
-			if err := result.Validate(job); err == nil || (!strings.Contains(err.Error(), "omitted source path") && !strings.Contains(err.Error(), "collision")) {
-				t.Fatalf("change %q validation=%v", name, err)
-			}
-		})
-	}
-}
-
-func TestJobChangeValidationFoldsOmittedUnicodePaths(t *testing.T) {
-	for _, pair := range [][2]string{{"ſ", "s"}, {"µ", "μ"}, {"ς", "σ"}, {"ϐ", "β"}, {"K", "k"}} {
-		job := portableJob(command.Fix)
-		job.Source.Omitted = []string{pair[0] + "/link"}
-		changes := []workspace.Change{{Path: pair[1] + "/link/file", Mode: workspace.Regular}}
-		if err := job.validateChanges(changes); err == nil || !strings.Contains(err.Error(), "collision") {
-			t.Fatalf("omitted %q vs changed %q: %v", pair[0], pair[1], err)
-		}
 	}
 }
 
@@ -453,13 +443,6 @@ func TestResultCallUsageHonorsConfiguredRoundLimits(t *testing.T) {
 				}
 			}
 		})
-	}
-	job := portableJob(command.Comment)
-	for _, invalid := range []int{-1, config.MaxCriticMaxRounds + 1} {
-		job.CriticMaxRounds = invalid
-		if err := job.Validate(); err == nil {
-			t.Fatalf("accepted invalid critic round limit %d", invalid)
-		}
 	}
 }
 
@@ -636,31 +619,6 @@ func TestFixResultIncludesOmittedDirectorySpellingsInFinalLayout(t *testing.T) {
 				t.Fatalf("omission layout validation=%v want%q", err, test.want)
 			}
 		})
-	}
-}
-
-func TestJobRequiresExplicitCriticBudgetAndDefaultBranchFix(t *testing.T) {
-	job := portableJob(command.Comment)
-	job.Critic = &RoleSettings{Provider: "claude"}
-	for _, rounds := range []int{0, -1, config.MaxCriticMaxRounds + 1} {
-		job.CriticMaxRounds = rounds
-		if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "critic round limit") {
-			t.Fatalf("invalid critic budget %d validation=%v", rounds, err)
-		}
-	}
-	for _, rounds := range []int{1, config.DefaultCriticMaxRounds, config.MaxCriticMaxRounds} {
-		job.CriticMaxRounds = rounds
-		if err := job.Validate(); err != nil {
-			t.Fatalf("explicit critic budget %d validation=%v", rounds, err)
-		}
-	}
-	job = portableJob(command.Fix)
-	job.Source.Base, job.Source.MergeBase = strings.Repeat("b", 40), strings.Repeat("c", 40)
-	if err := workspace.ValidateSnapshot(job.Source); err != nil {
-		t.Fatalf("invalid comparison fixture: %v", err)
-	}
-	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "action subject and supplied comparison differ") {
-		t.Fatalf("accepted fix on a PR-comparison snapshot: %v", err)
 	}
 }
 

@@ -2,7 +2,6 @@ package action
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -44,15 +43,7 @@ func TestCommentCommandReportsIssueAndPullRequest(t *testing.T) {
 				case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/o/r/git/trees/"):
 					writeTreeFixture(t, w, strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/"))
 				case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/issues/7/comments":
-					var payload struct {
-						Body string `json:"body"`
-					}
-					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-						t.Error(err)
-					}
-					published = payload.Body
-					w.WriteHeader(http.StatusCreated)
-					_, _ = fmt.Fprint(w, `{"id":1}`)
+					captureComment(t, w, r, &published)
 				default:
 					t.Errorf("unexpected API call: %s %s", r.Method, r.URL.Path)
 					http.NotFound(w, r)

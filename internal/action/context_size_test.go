@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -35,6 +34,7 @@ func TestCheckGitHubContext(t *testing.T) {
 		{name: "notes over", notes: "é", limit: 1, tooLarge: true},
 		{name: "trimmed input", body: "  é  ", limit: 2},
 		{name: "title exact", title: strings.Repeat("😀", 256), limit: 2 * maxActionTitleBytes},
+		{name: "raw padded title over", title: " " + strings.Repeat("x", maxActionTitleBytes-1) + " ", limit: 2 * maxActionTitleBytes, tooLarge: true},
 		{name: "title over", title: strings.Repeat("x", maxActionTitleBytes+1), limit: 2 * maxActionTitleBytes, tooLarge: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -211,16 +211,7 @@ func TestGitHubContextLimitAcrossActions(t *testing.T) {
 				client := testGitHub(server, "test-token")
 				var store *state.Store
 				if tt.action == command.Fix {
-					var err error
-					store, err = state.Open(filepath.Join(t.TempDir(), "state.json"), job.Source.UpdatedAt)
-					if err != nil {
-						t.Fatal(err)
-					}
-					defer func() {
-						if err := store.Close(); err != nil {
-							t.Error(err)
-						}
-					}()
+					store = openState(t, job.Source.UpdatedAt)
 				}
 				var codexCalls int
 				executor := &Orchestrator{WorkRoot: t.TempDir(), GitHub: client,
@@ -248,7 +239,7 @@ func TestGitHubContextLimitAcrossActions(t *testing.T) {
 					return
 				}
 				if mode == "reply retry" {
-					if err == nil || errors.Is(err, monitor.ErrTerminalJob) || codexCalls != 0 {
+					if err == nil || errors.Is(err, monitor.ErrTerminalJob) || errors.Is(err, monitor.ErrPostModelPublication) || codexCalls != 0 {
 						t.Fatalf("failed refusal publication = %v, Codex calls = %d; want retryable error and zero calls", err, codexCalls)
 					}
 					err = executor.Execute(context.Background(), job)

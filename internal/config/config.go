@@ -18,7 +18,6 @@ import (
 )
 
 var (
-	repoNamePattern  = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
 	ownerNamePattern = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$`)
 	commandPattern   = regexp.MustCompile(`^[a-z][a-z0-9-]{0,99}$`)
 )
@@ -387,8 +386,7 @@ func (c *Config) Validate(configDir string) error {
 	seen := map[string]bool{}
 	for i := range c.Repositories {
 		repo := &c.Repositories[i]
-		parts := strings.Split(repo.Name, "/")
-		if !repoNamePattern.MatchString(repo.Name) || parts[0] == "." || parts[0] == ".." || parts[1] == "." || parts[1] == ".." {
+		if !workspace.ValidRepository(repo.Name) {
 			return fmt.Errorf("invalid repository name %q (use owner/repo)", repo.Name)
 		}
 		repo.Name = strings.ToLower(repo.Name)

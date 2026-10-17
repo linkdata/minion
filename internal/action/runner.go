@@ -29,14 +29,13 @@ import (
 // Runner computes an action using supplied files and installed tools only.
 // Authentication belongs to this host configuration, never to Job or Result.
 type Runner struct {
-	Codex            config.CodexConfig
-	Claude           config.ClaudeConfig
-	runModel         modelCall
-	aroundModel      func(context.Context, modelRun, modelCall) (aicli.Result, error)
-	Logger           *log.Logger
-	WorkRoot         string
-	recordReview     func(Result) error
-	checkpointReview func([]ReviewEntry) error
+	Codex        config.CodexConfig
+	Claude       config.ClaudeConfig
+	runModel     modelCall
+	aroundModel  func(context.Context, modelRun, modelCall) (aicli.Result, error)
+	Logger       *log.Logger
+	WorkRoot     string
+	recordReview func(Result) error
 }
 
 func (r *Runner) logf(format string, args ...any) {
@@ -71,7 +70,7 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 		}
 	}()
 	configured := *r
-	configured.checkpointReview = func(history []ReviewEntry) error {
+	checkpointReview := func(history []ReviewEntry) error {
 		result.ReviewLedger = history
 		if r.recordReview != nil {
 			progress := result
@@ -82,11 +81,11 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 		}
 		return nil
 	}
-	if err := configured.configureRole(job.Main); err != nil {
+	if err := configured.ConfigureRole(job.Main); err != nil {
 		return result, err
 	}
 	if job.Critic != nil {
-		if err := configured.configureRole(*job.Critic); err != nil {
+		if err := configured.ConfigureRole(*job.Critic); err != nil {
 			return result, err
 		}
 	}
@@ -108,6 +107,11 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 			return result, err
 		}
 		return result, fmt.Errorf("%w: %w", workroot.ErrUnsafe, err)
+	}
+	if job.Critic != nil {
+		if err := checkpointReview(nil); err != nil {
+			return result, preparationFailure("prepare private review ledger", err)
+		}
 	}
 	// Keep source and context as siblings: native CLI socket paths are bounded.
 	source, err := os.MkdirTemp(workRoot, "minion-")
@@ -204,12 +208,17 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 			}
 		}
 		request.readOnlyDirs = append(request.readOnlyDirs, contextDir)
-		if len(request.reviewHistory) != 0 && ((request.role == roleMain && request.round > 1) || (request.role == roleCritic && request.reviewPhase == reviewVerification)) {
+		if len(request.reviewHistory) != 0 {
 			historyDir, err := os.MkdirTemp(workRoot, ".minion-review-history-")
 			if err != nil {
 				return aicli.Result{}, fmt.Errorf("prepare review history: %w", err)
 			}
 			owned = append(owned, historyDir)
+			defer func() {
+				if err := cleanup.RemoveAll(historyDir); err != nil {
+					result.Diagnostics = append(result.Diagnostics, Diagnostic{Code: "cleanup_failed", Message: "Private review history cleanup failed; operator attention is required."})
+				}
+			}()
 			data, err := json.Marshal(request.reviewHistory)
 			if err != nil {
 				return aicli.Result{}, fmt.Errorf("encode review history: %w", err)
@@ -267,7 +276,7 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 			return result, fmt.Errorf("audit prerequisites: %w", err)
 		}
 	}
-	answer, runErr := configured.runAI(ctx, job, source, prompt, job.Action == command.Fix, outputDir)
+	answer, runErr := configured.runAI(ctx, job, source, prompt, job.Action == command.Fix, outputDir, checkpointReview)
 	if runErr != nil {
 		return result, runErr
 	}
@@ -293,12 +302,12 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 		if review != nil {
 			files = review.artifacts
 		} else {
-			files, _, err = readAuditArtifacts(outputDir, auditForReview)
+			files, _, err = readAuditArtifacts(outputDir, false)
 		}
 		if err != nil {
 			return result, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
 		}
-		if answer, err = validateAuditFiles(ctx, files, filepath.Dir(source), auditSkill, job.Identity.Repository, source, job.Source.Head); err != nil {
+		if answer, err = validateAuditFiles(ctx, files, workRoot, auditSkill, job.Identity.Repository, source, job.Source.Head); err != nil {
 			return result, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
 		}
 		if result.Artifacts, err = normalizeAuditArtifacts(files, job, auditSkill); err != nil {
@@ -387,7 +396,8 @@ func (r *Runner) CheckWorkRootIsolation(root string, providers ...string) error 
 	return nil
 }
 
-func (r *Runner) configureRole(role RoleSettings) error {
+// ConfigureRole resolves the execution host's selected model and installed skill grants.
+func (r *Runner) ConfigureRole(role RoleSettings) error {
 	selected, err := r.SelectSkills(role.Provider, role.Skills, role.AlwaysOnSkills)
 	if err != nil {
 		return err
@@ -571,7 +581,7 @@ func normalizeAuditArtifacts(files []workspace.File, job Job, skill string) ([]w
 }
 
 func collectPartialAuditArtifacts(outputDir string, job Job, skill string) ([]workspace.File, []Diagnostic) {
-	read, diagnostics, _ := readAuditArtifacts(outputDir, auditIncomplete)
+	read, diagnostics, _ := readAuditArtifacts(outputDir, true)
 	var files []workspace.File
 	for _, file := range read {
 		if file.Path == "run-metadata.json" {

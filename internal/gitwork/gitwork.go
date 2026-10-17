@@ -59,7 +59,6 @@ type Checkout struct {
 	expectedHead   string
 	comparisonBase string
 	branch         string
-	closed         bool
 	lookupTree     func(context.Context, string) (github.GitTree, error)
 	sourceTrees    map[string][]sourceEntry
 }
@@ -126,14 +125,14 @@ func clonePullRequestFromURL(ctx context.Context, workRoot, url string, number i
 }
 
 // cloneRepository fetches filtered objects and configures a trusted checkout before materialization.
-func cloneRepository(ctx context.Context, workRoot, url, defaultBranch string, lookupTree func(context.Context, string) (github.GitTree, error)) (*Checkout, error) {
+func cloneRepository(ctx context.Context, workRoot, url, defaultBranch string, lookupTree func(context.Context, string) (github.GitTree, error)) (_ *Checkout, err error) {
 	if lookupTree == nil {
 		return nil, errors.New("source tree metadata lookup is missing")
 	}
 	if strings.TrimSpace(workRoot) == "" {
 		return nil, errors.New("work root is empty")
 	}
-	workRoot, err := workspace.PrepareRoot(workRoot)
+	workRoot, err = workspace.PrepareRoot(workRoot)
 	if err != nil {
 		return nil, err
 	}
@@ -141,10 +140,10 @@ func cloneRepository(ctx context.Context, workRoot, url, defaultBranch string, l
 	if err != nil {
 		return nil, fmt.Errorf("create checkout directory: %w", err)
 	}
-	cleanup := true
+	removeOnError := true
 	defer func() {
-		if cleanup {
-			_ = os.RemoveAll(path)
+		if removeOnError {
+			err = errors.Join(err, cleanup.RemoveAll(path))
 		}
 	}()
 
@@ -158,7 +157,7 @@ func cloneRepository(ctx context.Context, workRoot, url, defaultBranch string, l
 	if err := c.recordConfig(); err != nil {
 		return nil, err
 	}
-	cleanup = false
+	removeOnError = false
 	return c, nil
 }
 
@@ -176,10 +175,9 @@ func (c *Checkout) verifiedHead(ctx context.Context) (string, error) {
 
 // Close removes the isolated checkout. It is safe to call more than once.
 func (c *Checkout) Close() error {
-	if c == nil || c.closed {
+	if c == nil || c.path == "" {
 		return nil
 	}
-	c.closed = true
 	path := c.path
 	c.path = ""
 	if err := cleanup.RemoveAll(path); err != nil {
@@ -414,11 +412,15 @@ func splitNUL(data []byte) ([][]byte, error) {
 }
 
 func (c *Checkout) checkPatchSize(ctx context.Context) error {
-	_, truncated, err := c.boundedGit(ctx, nil, maxPatchBytes, true, "diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv", "--no-renames", "--no-color", "--submodule=short")
+	_, truncated, err := c.boundedGit(ctx, nil, maxPatchBytes, true, patchDiffArgs()...)
 	if truncated {
 		return ErrDiffTooLarge
 	}
 	return err
+}
+
+func patchDiffArgs() []string {
+	return []string{"diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv", "--no-renames", "--no-color", "--submodule=short"}
 }
 
 func (c *Checkout) head(ctx context.Context) (string, error) {
@@ -446,7 +448,7 @@ func (c *Checkout) recordConfig() error {
 }
 
 func (c *Checkout) ready() error {
-	if c == nil || c.closed || c.path == "" || c.url == "" {
+	if c == nil || c.path == "" || c.url == "" {
 		return errors.New("checkout is closed or uninitialized")
 	}
 	// Defense in depth for the trusted checkout retained across preparation and
@@ -470,9 +472,6 @@ func runGit(ctx context.Context, dir string, args ...string) (string, error) {
 	return strings.TrimSpace(output.String()), nil
 }
 
-// resolveGit pins command lookup before a checkout becomes the working directory.
-func resolveGit() (string, error) { return absoluteExecutable("git") }
-
 func absoluteExecutable(name string) (string, error) {
 	binary, err := exec.LookPath(name)
 	if err != nil {
@@ -494,7 +493,7 @@ func gitCommand(ctx context.Context, binary, dir string, env []string, args ...s
 }
 
 func runGitInputTo(ctx context.Context, dir string, stdin io.Reader, stdout io.Writer, args ...string) error {
-	binary, err := resolveGit()
+	binary, err := absoluteExecutable("git")
 	if err != nil {
 		return err
 	}

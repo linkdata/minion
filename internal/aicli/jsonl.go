@@ -15,42 +15,44 @@ const (
 
 // JSONL frames bounded provider output; adapters retain their own event policy.
 type JSONL struct {
-	Bytes   int64
-	Events  int
+	Line    func([]byte)
+	Fail    func(error)
+	bytes   int64
+	events  int
 	lines   bounded.Lines
 	limited bool
 }
 
 // Write drains p, dispatching nonblank lines and reporting the first limit.
-// Callbacks must remain the same for the lifetime of the stream.
-func (o *JSONL) Write(p []byte, line func([]byte), fail func(error)) (int, error) {
+// Line and Fail must be configured before the first write.
+func (o *JSONL) Write(p []byte) (int, error) {
 	n := len(p)
 	stop := func(reason string) {
 		if !o.limited {
 			o.limited = true
-			fail(fmt.Errorf("%w: JSONL %s", ErrOutputLimit, reason))
+			o.Fail(fmt.Errorf("%w: JSONL %s", ErrOutputLimit, reason))
 		}
 	}
 	if o.limited {
 		return n, nil
 	}
-	if int64(n) > MaxOutputBytes-o.Bytes {
+	if int64(n) > MaxOutputBytes-o.bytes {
 		stop("output exceeded the size limit")
 		return n, nil
 	}
-	o.Bytes += int64(n)
+	o.bytes += int64(n)
 	if o.lines.Line == nil {
 		o.lines = bounded.Lines{Limit: MaxEventBytes, Line: func(p []byte) {
 			p = bytes.TrimSpace(p)
 			if o.limited || len(p) == 0 {
 				return
 			}
-			o.Events++
-			if o.Events > MaxEvents {
+			o.events++
+			if o.events > MaxEvents {
 				stop("event count exceeded the limit")
 				return
 			}
-			line(p)
+			o.Line(p)
 		}, Overflow: func() { stop("event exceeded the output size limit") }}
 	}
 	_, _ = o.lines.Write(p)

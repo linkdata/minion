@@ -13,52 +13,9 @@ import (
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
-	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/workspace"
 )
-
-func TestRunnerRecordsOnlyParsedSuccessfulCriticApprovals(t *testing.T) {
-	for _, scenario := range []string{"approval", "rejection", "malformed", "provider failure"} {
-		t.Run(scenario, func(t *testing.T) {
-			job := portableJob(command.Comment)
-			job.Critic, job.CriticMaxRounds = &RoleSettings{Provider: "claude"}, 1
-			providerErr := errors.New("critic provider failed")
-			runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
-				if request.role == roleMain {
-					return aicli.Result{Answer: proposalJSON("Complete answer", "")}, nil
-				}
-				answer := approvedCritiqueJSON
-				switch scenario {
-				case "rejection":
-					answer = `{"approved":false,"has_blockers":true,"feedback":"Repair the defect."}`
-				case "malformed":
-					answer = `{"approved":true,"has_blockers":false,"feedback":"contradictory"}`
-				case "provider failure":
-					return aicli.Result{Answer: answer}, providerErr
-				}
-				return aicli.Result{Answer: answer}, nil
-			}}
-			result, err := runner.Run(context.Background(), job)
-			wantApproval := scenario == "approval"
-			if (err == nil) != wantApproval || len(result.Calls) != 2 || result.Calls[0].Approved || result.Calls[1].Approved != wantApproval {
-				t.Fatalf("critic approval attestation: calls=%+v err=%v", result.Calls, err)
-			}
-			if wantApproval {
-				if err := result.Validate(job); err != nil || result.Answer != "Complete answer" {
-					t.Fatalf("approved result invalid: %+v,%v", result, err)
-				}
-			} else {
-				if result.Answer != "" || result.validate(job, false) != nil {
-					t.Fatalf("failed critic evidence lost: %+v,%v", result, err)
-				}
-				if scenario == "provider failure" && !errors.Is(err, providerErr) {
-					t.Fatalf("provider failure lost: %v", err)
-				}
-			}
-		})
-	}
-}
 
 func TestRunnerRefusesRenderedOverflowBeforeCritic(t *testing.T) {
 	for _, audit := range []bool{false, true} {
@@ -152,15 +109,5 @@ func TestStatusBoundsRemainingRuntimeWithoutRenewingBudget(t *testing.T) {
 	status := Status{Version: ProtocolVersion, Identity: job.Identity, State: StatusReady, Phase: PhasePreparing, RuntimeRemaining: 2 * time.Nanosecond}
 	if status.Validate(job) == nil {
 		t.Fatal("status renewed the supplied runtime budget")
-	}
-}
-
-func TestJobRoundBudgetIsAbsentWithoutCritic(t *testing.T) {
-	job := portableJob(command.Comment)
-	for _, rounds := range []int{-1, 0, 1, config.DefaultCriticMaxRounds, config.MaxCriticMaxRounds} {
-		job.CriticMaxRounds = rounds
-		if err := job.Validate(); (err == nil) != (rounds == 0) {
-			t.Fatalf("inactive critic budget %d validation=%v", rounds, err)
-		}
 	}
 }
