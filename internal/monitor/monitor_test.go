@@ -1333,6 +1333,9 @@ func TestRunOnceRefundsCanceledTerminalExecution(t *testing.T) {
 	if got := store.Data.JobFailures[id].Attempts; got != 0 {
 		t.Fatalf("cancellation consumed %d attempts", got)
 	}
+	if len(store.Data.PendingNotifications) != 0 || !store.Data.Cursor.Equal(now.Add(-time.Minute)) {
+		t.Fatalf("shutdown added retry backoff or advanced the cursor: %+v", store.Data)
+	}
 	if !strings.Contains(logs.String(), " interrupted: ") || strings.Contains(logs.String(), "failed (attempt") {
 		t.Fatalf("shutdown log is not an interruption: %q", logs.String())
 	}

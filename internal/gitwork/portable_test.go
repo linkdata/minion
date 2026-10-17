@@ -82,7 +82,7 @@ func TestSnapshotPreservesPRDeletedBinaryAndModeContext(t *testing.T) {
 	fixture.git(fixture.source, "commit", "-m", "base advanced after fork")
 	baseTip := fixture.git(fixture.source, "rev-parse", "HEAD")
 	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/heads/main")
-	if err := fixture.checkout.CheckoutPullRequest(context.Background(), 7, "main", head); err != nil {
+	if err := fixture.checkout.checkoutPullRequest(context.Background(), 7, "main", head); err != nil {
 		t.Fatal(err)
 	}
 	snapshot, err := fixture.checkout.Snapshot(context.Background(), false, true)
@@ -228,7 +228,7 @@ func TestSnapshotReusesValidatedTreesByCommit(t *testing.T) {
 	fixture.git(fixture.source, "commit", "-m", "PR source")
 	head := fixture.git(fixture.source, "rev-parse", "HEAD")
 	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/pull/7/head")
-	if err := checkout.CheckoutPullRequest(context.Background(), 7, "main", head); err != nil {
+	if err := checkout.checkoutPullRequest(context.Background(), 7, "main", head); err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 2; i++ {
@@ -262,7 +262,7 @@ func TestSnapshotPreservesOmittedPathSpellingsAcrossRevisions(t *testing.T) {
 	fixture.git(fixture.source, "commit", "-m", "rename symlink")
 	head := fixture.git(fixture.source, "rev-parse", "HEAD")
 	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/pull/7/head")
-	if err := checkout.CheckoutPullRequest(context.Background(), 7, "main", head); err != nil {
+	if err := checkout.checkoutPullRequest(context.Background(), 7, "main", head); err != nil {
 		t.Fatal(err)
 	}
 	snapshot, err := checkout.Snapshot(context.Background(), false, true)

@@ -1,7 +1,6 @@
 package action
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -42,7 +41,6 @@ type RoleSettings struct {
 
 const maxActionTitleBytes = 256 * utf8.UTFMax // Allow 256 four-byte code points.
 const maxAuditArtifactBytes = 5 << 20
-const maxAuditArtifactsBytes = 7 * maxAuditArtifactBytes
 
 type Job struct {
 	Version         int                `json:"version"`
@@ -67,7 +65,7 @@ type CallUsage struct {
 	Model       string       `json:"model,omitempty"`
 	Effort      string       `json:"effort,omitempty"`
 	Tokens      usage.Tokens `json:"tokens"`
-	// Complete describes accounting coverage, independently of model success.
+	// Complete confirms accounting coverage; interrupted or failed native runs are conservative.
 	Complete bool `json:"complete"`
 }
 
@@ -181,21 +179,24 @@ func (j Job) Validate() error {
 	if j.RuntimeBudget <= 0 || j.RuntimeBudget > config.MaxJobTimeout {
 		return errors.New("invalid action runtime budget")
 	}
+	if (j.Identity.SubjectType == "PullRequest") != (j.Source.Base != "") {
+		return errors.New("action subject and supplied comparison differ")
+	}
 	switch j.Action {
 	case command.Review:
-		if j.Identity.SubjectType != "PullRequest" || j.Source.Base == "" {
+		if j.Identity.SubjectType != "PullRequest" {
 			return errors.New("review requires a supplied pull request comparison")
 		}
 	case command.Fix:
-		if j.Identity.SubjectType != "Issue" || j.Source.Base != "" {
-			return errors.New("fix requires an issue without a pull request comparison")
+		if j.Identity.SubjectType != "Issue" {
+			return errors.New("fix requires an issue")
 		}
 	case command.Comment, command.SecurityAudit:
 	default:
 		return errors.New("unsupported action")
 	}
 	if !boundedText(j.Title, maxActionTitleBytes) || !boundedText(j.Description, workspace.MaxBytes) || !boundedText(j.Notes, workspace.MaxBytes) || len(j.Title)+len(j.Description)+len(j.Notes) > workspace.MaxBytes {
-		return errors.New("action text exceeds limits")
+		return errors.New("action text is invalid or exceeds limits")
 	}
 	if err := j.Main.validate(); err != nil {
 		return err
@@ -245,7 +246,7 @@ func (r Result) validate(j Job, complete bool) error {
 		return errors.New("action result version, identity or source differs from job")
 	}
 	if !boundedText(r.Answer, maxOutputBytes) || (complete && (j.Action != command.Fix || j.Critic != nil) && strings.TrimSpace(r.Answer) == "") {
-		return errors.New("action answer exceeds limit or is invalid text")
+		return errors.New("action answer is blank, invalid or exceeds limit")
 	}
 	if j.Action != command.Fix && len(r.Changes) != 0 {
 		return errors.New("read-only action returned source changes")
@@ -351,7 +352,6 @@ func validateResultArtifacts(j Job, files []workspace.File, complete bool) error
 		return errors.New("action result has incomplete audit artifacts")
 	}
 	seen := make(map[string][]byte, len(files))
-	total := 0
 	for _, file := range files {
 		allowed := false
 		for _, name := range auditArtifacts {
@@ -365,24 +365,18 @@ func validateResultArtifacts(j Job, files []workspace.File, complete bool) error
 			return fmt.Errorf("empty action report artifact %q", file.Path)
 		}
 		seen[file.Path] = file.Data
-		total += len(file.Data)
 	}
-	if total > maxAuditArtifactsBytes || len(seen["REPORT.md"]) > maxOutputBytes {
+	if len(seen["REPORT.md"]) > maxOutputBytes {
 		return errors.New("action report artifacts exceed limits")
 	}
 	if !complete {
 		return nil
 	}
-	if err := validateAuditMetadata(seen["run-metadata.json"], seen["REPORT.md"], j.Identity.Repository, sourceIdentity(j), j.Source.Head); err != nil {
+	companions, err := validateAuditMetadata(seen["run-metadata.json"], seen["REPORT.md"], j.Identity.Repository, sourceIdentity(j), j.Source.Head)
+	if err != nil {
 		return err
 	}
-	var metadata struct {
-		SelectedCompanionFiles []string `json:"selected_companion_files"`
-	}
-	if err := json.Unmarshal(seen["run-metadata.json"], &metadata); err != nil {
-		return err
-	}
-	for _, companion := range metadata.SelectedCompanionFiles {
+	for _, companion := range companions {
 		if !workspace.ValidPath(companion) {
 			return errors.New("audit companion file path is not portable")
 		}
@@ -411,9 +405,7 @@ func (s Status) Validate(j Job) error {
 	switch s.State {
 	case StatusReady:
 		validPair = s.Phase == PhasePreparing && s.Round == 0
-	case StatusRunning:
-		validPair = s.Phase != PhaseFinished
-	case StatusStopping:
+	case StatusRunning, StatusStopping:
 		validPair = s.Phase != PhaseFinished
 	case StatusCompleted, StatusFailed, StatusUnavailable:
 		validPair = s.Phase == PhaseFinished
@@ -430,11 +422,7 @@ func (s Status) Validate(j Job) error {
 	} else if s.ReviewPhase != "" {
 		return errors.New("unexpected action status review phase")
 	}
-	rounds := j.rounds()
-	if j.Critic == nil {
-		rounds = 1
-	}
-	if s.Round < 0 || s.Round > rounds || s.ProgressAge < 0 {
+	if s.Round < 0 || s.Round > j.rounds() || s.ProgressAge < 0 {
 		return errors.New("invalid action status")
 	}
 	return validDiagnostics(s.Diagnostics)

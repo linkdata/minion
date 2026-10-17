@@ -64,7 +64,7 @@ func TestJobRequiresExplicitCriticBudgetAndDefaultBranchFix(t *testing.T) {
 	if err := workspace.ValidateSnapshot(job.Source); err != nil {
 		t.Fatalf("invalid comparison fixture: %v", err)
 	}
-	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "fix requires an issue without a pull request comparison") {
+	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "action subject and supplied comparison differ") {
 		t.Fatalf("accepted fix on a PR-comparison snapshot: %v", err)
 	}
 }

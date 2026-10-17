@@ -138,7 +138,7 @@ func TestRunnerReadOnlyCriticReusesSourceAndCanaryGuardsExport(t *testing.T) {
 						t.Fatalf("read-only critic source/grants=%+v", request)
 					}
 					if mutate {
-						if err := os.WriteFile(filepath.Join(source, "source.txt"), []byte("sandbox regression"), 0600); err != nil {
+						if err := os.WriteFile(filepath.Join(source, "source.txt"), []byte("mutate\n"), 0600); err != nil {
 							t.Fatal(err)
 						}
 					}

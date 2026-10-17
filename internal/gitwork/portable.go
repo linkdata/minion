@@ -133,6 +133,9 @@ func (c *Checkout) sourceFiles(ctx context.Context, entries []sourceEntry) (file
 		size += entry.size
 		input.WriteString(entry.sha + "\n")
 	}
+	if size > workspace.MaxBytes {
+		return nil, nil, fmt.Errorf("%w: combined source exceeds byte limit", ErrCheckoutTooLarge)
+	}
 	if len(omitted) > workspace.MaxFiles {
 		return nil, nil, ErrCheckoutTooLarge
 	}
@@ -223,25 +226,21 @@ func (c *Checkout) Snapshot(ctx context.Context, history, pull bool) (s workspac
 			return s, ErrCheckoutTooLarge
 		}
 	}
-	var total int64
 	headFiles := 0
 	allEntries := append([]sourceEntry(nil), entries...)
 	for _, entry := range entries {
 		if !entry.omitted {
-			total += entry.size
 			headFiles++
 		}
 	}
 	for _, entry := range baseEntries {
 		if selected[entry.file.Path] {
 			allEntries = append(allEntries, entry)
-			if !entry.omitted {
-				total += entry.size
-			}
 		}
 	}
-	if total > workspace.MaxBytes {
-		return s, fmt.Errorf("%w: combined source exceeds byte limit", ErrCheckoutTooLarge)
+	files, omitted, err := c.sourceFiles(ctx, allEntries)
+	if err != nil {
+		return s, err
 	}
 	if pull {
 		if s.Diff, s.DiffIncomplete, err = c.boundedGit(ctx, workspace.MaxContextBytes, true, "diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--no-color", s.MergeBase, s.Head, "--"); err != nil {
@@ -250,10 +249,6 @@ func (c *Checkout) Snapshot(ctx context.Context, history, pull bool) (s workspac
 		if s.DiffIncomplete {
 			s.Diff = nil
 		}
-	}
-	files, omitted, err := c.sourceFiles(ctx, allEntries)
-	if err != nil {
-		return s, err
 	}
 	s.Files, s.BaseFiles, s.Omitted = files[:headFiles], files[headFiles:], omitted
 	if history {

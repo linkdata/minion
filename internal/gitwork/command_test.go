@@ -32,3 +32,12 @@ func TestGitNeutralIdentityIgnoresAmbientEmailAndAllowsBotOverride(t *testing.T)
 		})
 	}
 }
+
+func TestGitDisablesAutomaticMaintenance(t *testing.T) {
+	for key, want := range map[string]string{"gc.auto": "0", "maintenance.auto": "false"} {
+		value, err := runGit(context.Background(), t.TempDir(), "config", "--get", key)
+		if err != nil || value != want {
+			t.Fatalf("controlled Git %s=%q error=%v", key, value, err)
+		}
+	}
+}

@@ -16,6 +16,7 @@ import (
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/cleanup"
 	"github.com/linkdata/minion/internal/config"
+	"github.com/linkdata/minion/internal/processgroup"
 	"github.com/linkdata/minion/internal/skills"
 )
 
@@ -163,7 +164,7 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	}
 	cmd.Stdin = strings.NewReader(instructions.String())
 	cmd.WaitDelay = 2 * time.Second
-	configureCancellation(cmd)
+	processgroup.Configure(cmd)
 	output := jsonlOutput{cancel: cancel, structured: settings.OutputSchema != ""}
 	var diagnostics tailBuffer
 	cmd.Stdout, cmd.Stderr = &output, &diagnostics
@@ -182,6 +183,7 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	}
 	if err != nil {
 		result.Answer = ""
+		// Keep known counters; a failed lifecycle cannot certify full coverage.
 		result.UsageComplete = false
 		return result, fmt.Errorf("claude: %w", err)
 	}
@@ -189,7 +191,10 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 }
 
 func backgroundWaitCeiling(diagnostics string) bool {
+	// Managed CLI settings can override its launch environment. Recognize this
+	// native diagnostic as a fallback; diagnostics retain only their last 8 KiB.
 	for _, line := range strings.Split(diagnostics, "\n") {
+		line = strings.TrimRight(line, " \t\r")
 		if strings.HasPrefix(line, "Background tasks still running ") && strings.HasSuffix(line, "; stopping them. Set CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 to wait indefinitely.") {
 			return true
 		}

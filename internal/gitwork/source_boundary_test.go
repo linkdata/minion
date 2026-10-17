@@ -102,7 +102,7 @@ func TestSourceAliasesAreUnsupportedForDefaultAndPullRequestCheckout(t *testing.
 			}
 			checked = false
 			fixture.checkout.lookupTree = lookupChecked
-			err = fixture.checkout.CheckoutPullRequest(context.Background(), 7, "main", head)
+			err = fixture.checkout.checkoutPullRequest(context.Background(), 7, "main", head)
 			if !checked || !errors.Is(err, ErrUnsupportedSource) || !errors.As(err, &exit) || !strings.Contains(err.Error(), "git checkout:") {
 				t.Fatalf("PR checkout metadataChecked=%v error=%v", checked, err)
 			}
@@ -124,6 +124,8 @@ func TestGitFailureClassificationIsSpecificAndPreservesCancellation(t *testing.T
 	}{
 		{"checkout", "error: invalid path 'git~1/config'", true},
 		{"add", "error: invalid path 'git~1/config'", true},
+		{"add", "warning: ignored path\nerror: invalid path 'git~1/config'", true},
+		{"checkout", "warning: preceding diagnostic\nerror: invalid path 'git~1/config'", true},
 		{"status", "error: invalid path 'git~1/config'", false},
 		{"checkout", "fatal: unable to create index.lock: No space left on device", false},
 		{"checkout", "fatal: cannot read 'error: invalid path file'", false},

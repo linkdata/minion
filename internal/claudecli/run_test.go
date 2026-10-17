@@ -225,6 +225,14 @@ func TestRunFailures(t *testing.T) {
 	}
 }
 
+func TestRunRetainsKnownUsageAfterExitFailure(t *testing.T) {
+	fakeExecutable(t, "claude", "cat >/dev/null\nprintf '%s\\n' '"+successfulResult+"'\nexit 7\n")
+	result, err := Run(context.Background(), t.TempDir(), "task", false, "", config.ClaudeConfig{})
+	if err == nil || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) {
+		t.Fatalf("failed lifecycle lost counters or certified full coverage: result=%+v, error=%v", result, err)
+	}
+}
+
 func TestRunBackgroundWaitCeiling(t *testing.T) {
 	const diagnostic = "Background tasks still running 10m after the last turn (subagent reviewer); stopping them. Set CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 to wait indefinitely."
 	for _, tc := range []struct {
@@ -232,6 +240,7 @@ func TestRunBackgroundWaitCeiling(t *testing.T) {
 		fails                bool
 	}{
 		{name: "native ceiling", stderr: diagnostic, answer: "final answer", fails: true},
+		{name: "native trailing space", stderr: diagnostic + " ", answer: "final answer", fails: true},
 		{name: "other diagnostics", stderr: "prefix: " + diagnostic, answer: "final answer"},
 		{name: "answer text", answer: diagnostic},
 	} {

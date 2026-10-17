@@ -16,6 +16,7 @@ import (
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/cleanup"
 	"github.com/linkdata/minion/internal/config"
+	"github.com/linkdata/minion/internal/processgroup"
 	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/usage"
 )
@@ -35,13 +36,13 @@ var ErrOutputLimit = aicli.ErrOutputLimit
 // Result contains the response and token accounting for one CLI call.
 type Result = aicli.Result
 
-// Run executes one non-interactive Codex task for a checkout.
+// Run executes one non-interactive Codex task for a source snapshot.
 //
-// A writable run may edit the checkout; outputDir optionally grants write
+// A writable run may edit the snapshot; outputDir optionally grants write
 // access to a separate report directory. ReadOnlyDirs in settings grants only
 // read access to separate report directories for a critic. OutputSchema constrains
 // the final response to that JSON Schema when set. Codex starts in a separate
-// project root and reads the checkout through its absolute path. Model-generated
+// project root and reads the snapshot through its absolute path. Model-generated
 // commands have no network access.
 //
 // A nonempty APIKey in settings overrides environment credentials and stored
@@ -56,7 +57,7 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	}()
 	result.UsageComplete = true
 	if strings.TrimSpace(dir) == "" {
-		return result, errors.New("codex exec: repository directory is empty")
+		return result, errors.New("codex exec: source snapshot directory is empty")
 	}
 	if strings.TrimSpace(prompt) == "" {
 		return result, errors.New("codex exec: prompt is empty")
@@ -64,11 +65,11 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 
 	workspace, err := filepath.EvalSymlinks(dir)
 	if err != nil {
-		return result, fmt.Errorf("codex exec: resolve repository directory: %w", err)
+		return result, fmt.Errorf("codex exec: resolve source snapshot directory: %w", err)
 	}
 	workspace, err = filepath.Abs(workspace)
 	if err != nil {
-		return result, fmt.Errorf("codex exec: resolve repository directory: %w", err)
+		return result, fmt.Errorf("codex exec: resolve source snapshot directory: %w", err)
 	}
 	runtimeDir, err := os.MkdirTemp(filepath.Dir(workspace), ".minion-codex-")
 	if err != nil {
@@ -97,7 +98,7 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 		return result, fmt.Errorf("codex exec: resolve executable: %w", err)
 	}
 	if rel, err := filepath.Rel(workspace, realBinary); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
-		return result, errors.New("codex exec: executable is inside the repository checkout")
+		return result, errors.New("codex exec: executable is inside the source snapshot")
 	}
 	cacheDir := filepath.Join(runtimeDir, "go-build")
 	if err := os.Mkdir(cacheDir, 0o700); err != nil {
@@ -110,7 +111,7 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 		parentProfile = ":workspace"
 		workspaceAccess = "write"
 	}
-	// The checkout is outside Codex's workspace, so keep its metadata and
+	// The source snapshot is outside Codex's workspace, so keep its metadata and
 	// instruction directories read-only even when source edits are allowed.
 	// The sandbox re-executes the installed Codex binary. Grant that one file
 	// explicitly so a root-deny profile can start without exposing CODEX_HOME.
@@ -133,7 +134,7 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 			return result, err
 		}
 		if outputDir == workspace || strings.HasPrefix(workspace, outputDir+string(os.PathSeparator)) || strings.HasPrefix(outputDir, workspace+string(os.PathSeparator)) || outputDir == string(os.PathSeparator) {
-			return result, errors.New("codex exec: output directory must be separate from the checkout")
+			return result, errors.New("codex exec: output directory must be separate from the source snapshot")
 		}
 		filesystemRules = append(filesystemRules, fmt.Sprintf(`%s="write"`, strconv.Quote(outputDir)))
 	}
@@ -147,7 +148,7 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 			return result, err
 		}
 		if path == workspace || strings.HasPrefix(workspace, path+string(os.PathSeparator)) || strings.HasPrefix(path, workspace+string(os.PathSeparator)) || path == string(os.PathSeparator) {
-			return result, errors.New("codex exec: read-only directory must be separate from the checkout")
+			return result, errors.New("codex exec: read-only directory must be separate from the source snapshot")
 		}
 		filesystemRules = append(filesystemRules, fmt.Sprintf(`%s="read"`, strconv.Quote(path)))
 	}
@@ -237,7 +238,7 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	args = append(args, "--", "-")
 	runCtx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
-	// #nosec G204 -- The resolved executable is outside the checkout, and arguments do not pass through a shell.
+	// #nosec G204 -- The resolved executable is outside the source snapshot, and arguments do not pass through a shell.
 	cmd := exec.CommandContext(runCtx, binary, args...)
 	cmd.Dir = runtimeDir
 	cmd.Env = childEnvironment(os.Environ(), runtimeDir, cacheDir, settings.APIKey != "")
@@ -246,7 +247,7 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	}
 	cmd.Stdin = strings.NewReader(prompt)
 	cmd.WaitDelay = 2 * time.Second
-	configureCancellation(cmd)
+	processgroup.Configure(cmd)
 
 	output := jsonlOutput{cancel: cancelRun}
 	var stderr tailBuffer
@@ -264,6 +265,7 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	}
 	result.Tokens, result.UsageComplete = collectUsage(runCtx, codexHome, output.threadID, started, output.tokens, output.children)
 	if runErr != nil || ctx.Err() != nil || output.failed || output.parseErr != nil || output.oversizedLines > 0 {
+		// Keep known counters; a failed lifecycle cannot certify full coverage.
 		result.UsageComplete = false
 	}
 	if err := ctx.Err(); err != nil {

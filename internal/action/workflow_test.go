@@ -81,6 +81,13 @@ func TestPreparedActionRejectsForeignResultBeforePublication(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if prepared.checkout != nil || !prepared.needsExecution() {
+		t.Fatal("read-only preparation retained its clone or lost the computation job")
+	}
+	entries, err := os.ReadDir(e.WorkRoot)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("read-only preparation clone was not removed: %v, %v", entries, err)
+	}
 	if prepared.Job.RuntimeBudget <= 0 || prepared.Job.RuntimeBudget > time.Minute {
 		t.Fatalf("accepted budget %s exceeds context deadline despite 2m configured timeout", prepared.Job.RuntimeBudget)
 	}

@@ -43,6 +43,15 @@ func TestOutputFragments(t *testing.T) {
 	}
 }
 
+func TestOutputMissingFinalResult(t *testing.T) {
+	o := jsonlOutput{}
+	_, _ = o.Write([]byte("{\"type\":\"system\",\"subtype\":\"init\"}\n"))
+	o.finish()
+	if o.err == nil || !strings.Contains(o.err.Error(), "Claude exited without a successful final result") {
+		t.Fatalf("missing final result diagnostic = %v", o.err)
+	}
+}
+
 func TestOutputBackgroundTasks(t *testing.T) {
 	const pending = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"reviewer"}]}`
 	const empty = `{"type":"system","subtype":"background_tasks_changed","tasks":[]}`
@@ -90,7 +99,7 @@ func TestOutputNativeTurnResults(t *testing.T) {
 	}{
 		{name: "deferred turns after task completion", data: numberResultEvents(pending + "\n" + clear + "\n" + waiting + "\n" + waiting + "\n" + empty + "\n" + successfulResult), answer: "final answer"},
 		{name: "latest empty never falls back", data: numberResultEvents(waiting + "\n" + empty), failure: "missing successful Claude result"},
-		{name: "new work invalidates candidate", data: numberResultEvents(successfulResult + "\n" + pending + "\n" + clear), failure: "after background work"},
+		{name: "new work invalidates candidate", data: numberResultEvents(successfulResult + "\n" + pending + "\n" + clear), failure: "without a successful final result"},
 		{name: "fresh indexed answer after new work", data: numberResultEvents(successfulResult + "\n" + pending + "\n" + clear + "\n" + successfulResult), answer: "final answer"},
 		{name: "only final structured schema required", data: numberResultEvents(waiting + "\n" + empty + "\n" + formatted), structured: true, answer: structured},
 		{name: "latest missing schema never falls back", data: numberResultEvents(formatted + "\n" + waiting), structured: true, failure: "missing Claude structured output"},

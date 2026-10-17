@@ -123,7 +123,7 @@ type Config struct {
 	Main string `json:"main,omitempty"`
 	// Adversarial optionally selects the other provider as a read-only critic.
 	Adversarial string `json:"adversarial,omitempty"`
-	// CriticMaxRounds limits proposal/revision rounds; zero selects five rounds.
+	// CriticMaxRounds limits proposal/revision rounds; zero selects [DefaultCriticMaxRounds].
 	CriticMaxRounds int          `json:"critic_max_rounds,omitempty"`
 	Codex           CodexConfig  `json:"codex,omitempty"`
 	Claude          ClaudeConfig `json:"claude,omitempty"`

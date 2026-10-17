@@ -35,11 +35,11 @@ type preparedAction struct {
 }
 
 // needsExecution distinguishes supplied work from fixed replies and publication recovery.
-func (p *preparedAction) needsExecution() bool { return p != nil && p.checkout != nil }
+func (p *preparedAction) needsExecution() bool { return p.Job.Version != 0 }
 
 // Close releases the trusted orchestration checkout after publication or failure.
 func (p *preparedAction) Close() error {
-	if p == nil || p.checkout == nil {
+	if p.checkout == nil {
 		return nil
 	}
 	return p.checkout.Close()
@@ -133,6 +133,10 @@ func (e *Orchestrator) prepare(ctx context.Context, request monitor.Job) (prepar
 	if p.Job, err = e.portableJob(ctx, p, title, description); err != nil {
 		return nil, err
 	}
+	if err := p.Close(); err != nil {
+		return nil, err
+	}
+	p.checkout = nil
 	return p, nil
 }
 
@@ -187,15 +191,15 @@ func (e *Orchestrator) publish(ctx context.Context, p *preparedAction, result Re
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if p == nil {
-		return errors.New("action has no prepared source")
-	}
 	if p.reply != "" {
 		return e.acknowledge(ctx, p.request, p.reply)
 	}
-	if p.checkout == nil {
+	if !p.needsExecution() {
 		if p.request.Command.Action == command.Fix && p.branch != "" {
-			return e.publishFixReply(ctx, p)
+			if err := e.publishFixReply(ctx, p); err != nil {
+				return fmt.Errorf("%w: %w", monitor.ErrPostModelPublication, err)
+			}
+			return nil
 		}
 		return errors.New("action has no prepared source")
 	}
@@ -252,13 +256,12 @@ func (e *Orchestrator) retainAudit(p *preparedAction, result Result, complete bo
 	if err != nil {
 		return err
 	}
-	if err := workspace.Materialize(dir, result.Artifacts); err != nil {
-		return errors.Join(err, os.RemoveAll(dir))
-	}
+	files := result.Artifacts
 	if !complete {
-		if err := os.WriteFile(filepath.Join(dir, "INCOMPLETE.txt"), []byte("The audit failed. These partial artifacts are incomplete and must not be published.\n"), 0600); err != nil {
-			return errors.Join(err, os.RemoveAll(dir))
-		}
+		files = append(append([]workspace.File(nil), files...), workspace.File{Path: "INCOMPLETE.txt", Mode: workspace.Regular, Data: []byte("The audit failed. These partial artifacts are incomplete and must not be published.\n")})
+	}
+	if err := workspace.Materialize(dir, files); err != nil {
+		return errors.Join(err, os.RemoveAll(dir))
 	}
 	e.logf("audit %s #%d at %s; reports: %s", p.Job.Identity.Repository, p.Job.Identity.Number, p.Job.Source.Head, dir)
 	return nil
@@ -339,17 +342,19 @@ func (e *Orchestrator) prepareFix(ctx context.Context, p *preparedAction) (*prep
 	return p, nil
 }
 
-func (e *Orchestrator) publishFix(ctx context.Context, p *preparedAction, result Result) error {
+func (e *Orchestrator) publishFix(ctx context.Context, p *preparedAction, result Result) (resultErr error) {
+	defer func() {
+		if resultErr != nil {
+			resultErr = fmt.Errorf("%w: %w", monitor.ErrPostModelPublication, resultErr)
+		}
+	}()
 	request := p.request
 	if len(result.Changes) == 0 {
-		if err := e.acknowledge(ctx, request, "AI completed the request without changing files.\n\n"+inertModelOutput(result.Answer)); err != nil {
-			return fmt.Errorf("%w: %w", monitor.ErrPostModelPublication, err)
-		}
-		return nil
+		return e.acknowledge(ctx, request, "AI completed the request without changing files.\n\n"+inertModelOutput(result.Answer))
 	}
 	currentRepo, currentFork, err := e.fixFork(ctx, request.Repository)
 	if err != nil {
-		return fmt.Errorf("%w: %w", monitor.ErrPostModelPublication, err)
+		return err
 	}
 	repo, fork := p.repository, p.fork
 	if currentRepo.ID != repo.ID || currentRepo.DefaultBranch != repo.DefaultBranch || currentRepo.Private != repo.Private || currentRepo.Visibility != repo.Visibility || currentFork.ID != fork.ID || !strings.EqualFold(currentFork.FullName, fork.FullName) {

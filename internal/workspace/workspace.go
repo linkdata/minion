@@ -8,10 +8,11 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -189,12 +190,13 @@ func validatePaths(paths []string, folded bool) error {
 			if seen[parentKey] {
 				return fmt.Errorf("source file/directory collision at %q", name)
 			}
-			if folded {
-				if spelling, exists := directories[parentKey]; exists && spelling != parent {
+			if spelling, exists := directories[parentKey]; exists {
+				if spelling != parent {
 					return fmt.Errorf("source directory spelling collision at %q", name)
 				}
-				directories[parentKey] = parent
+				break
 			}
+			directories[parentKey] = parent
 		}
 	}
 	return nil
@@ -260,18 +262,17 @@ func Materialize(root string, files []File) error {
 	if len(entries) != 0 {
 		return errors.New("workspace root is not empty")
 	}
-	directories := map[string]bool{".": true}
+	directories := map[string]bool{}
 	for _, file := range files {
 		name := filepath.Join(root, filepath.FromSlash(file.Path))
-		parent := "."
-		for _, part := range strings.Split(path.Dir(file.Path), "/") {
-			parent = path.Join(parent, part)
-			if !directories[parent] {
-				if err := os.Mkdir(filepath.Join(root, filepath.FromSlash(parent)), 0700); err != nil {
-					return err
-				}
-				directories[parent] = true
+		for i, char := range file.Path {
+			if char != '/' || directories[file.Path[:i]] {
+				continue
 			}
+			if err := os.Mkdir(filepath.Join(root, filepath.FromSlash(file.Path[:i])), 0700); err != nil {
+				return err
+			}
+			directories[file.Path[:i]] = true
 		}
 		mode := fs.FileMode(file.Mode & 0777)
 		f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
@@ -294,7 +295,6 @@ func CheckUnchanged(ctx context.Context, root string, base []File) error {
 	for _, file := range base {
 		prior[file.Path] = file
 	}
-	total := 0
 	err := walk(ctx, root, func(name string, entry fs.DirEntry) error {
 		rel, err := filepath.Rel(root, name)
 		if err != nil {
@@ -311,11 +311,10 @@ func CheckUnchanged(ctx context.Context, root string, base []File) error {
 		if !exists {
 			return fmt.Errorf("read-only action modified supplied source: added %q", rel)
 		}
-		data, info, err := readFile(name, int64(MaxBytes-total))
+		data, info, err := readFile(name, int64(len(old.Data)))
 		if err != nil {
 			return err
 		}
-		total += len(data)
 		mode := Regular
 		if info.Mode().Perm()&0100 != 0 {
 			mode = Executable
@@ -336,7 +335,7 @@ func CheckUnchanged(ctx context.Context, root string, base []File) error {
 }
 
 // ReadChanges reads only selected paths; ignored build output is never traversed.
-// Selection carries paths and deletions, with optional expected regular-file modes.
+// Selection carries paths and deletions, with required expected regular-file modes.
 func ReadChanges(ctx context.Context, root string, selected []Change) ([]Change, error) {
 	for _, selection := range selected {
 		if len(selection.Data) != 0 {
@@ -374,7 +373,7 @@ func ReadChanges(ctx context.Context, root string, selected []Change) ([]Change,
 		changes = append(changes, Change{Path: selection.Path, Mode: mode, Data: data})
 		total += len(data)
 	}
-	return changes, ValidateChanges(changes)
+	return changes, nil
 }
 
 // walk visits bounded entries without following directory symlinks.
@@ -475,11 +474,7 @@ func ValidateChangedPaths(base []File, changes []Change) error {
 			files[change.Path] = true
 		}
 	}
-	paths := make([]string, 0, len(files))
-	for name := range files {
-		paths = append(paths, name)
-	}
-	sort.Strings(paths)
+	paths := slices.Sorted(maps.Keys(files))
 	return validatePaths(paths, true)
 }
 

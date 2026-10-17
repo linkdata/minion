@@ -377,7 +377,7 @@ func TestParseProposal(t *testing.T) {
 		{name: "decoded limit", input: proposalJSON(strings.Repeat("x", maxOutputBytes+1), private)},
 		{name: "combined limit", input: proposalJSON(strings.Repeat("x", maxOutputBytes), "x")},
 		{name: "answer budget", input: proposalJSON(strings.Repeat("x", maxOutputBytes), ""), answer: strings.Repeat("x", maxOutputBytes), valid: true},
-		{name: "escaped budget", input: proposalJSON(strings.Repeat("\x00", maxOutputBytes), ""), answer: strings.Repeat("\x00", maxOutputBytes), valid: true},
+		{name: "escaped budget", input: proposalJSON(strings.Repeat("\x01", maxOutputBytes), ""), answer: strings.Repeat("\x01", maxOutputBytes), valid: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			answer, notes, err := parseProposal(tt.input)

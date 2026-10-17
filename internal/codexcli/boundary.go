@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/linkdata/minion/internal/processgroup"
 )
 
 const (
@@ -28,7 +30,7 @@ func instructionBoundaryConfig() []string {
 
 // ValidateInstructionBoundary checks the installed Codex CLI's instruction isolation.
 //
-// It renders inert prompts from a checkout and an isolated runtime without
+// It renders inert prompts from a source fixture and an isolated runtime without
 // starting an inference turn, then fails if the CLI cannot verify separation.
 func ValidateInstructionBoundary(ctx context.Context) (resultErr error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -81,7 +83,7 @@ func ValidateInstructionBoundary(ctx context.Context) (resultErr error) {
 		cmd.Dir = check.dir
 		cmd.Env = childEnvironment([]string{"PATH=" + os.Getenv("PATH"), "HOME=" + probeHome, "CODEX_HOME=" + probeHome}, runtimeDir, runtimeDir, false)
 		cmd.WaitDelay = 2 * time.Second
-		configureCancellation(cmd)
+		processgroup.Configure(cmd)
 		output, err := cmd.Output()
 		if err != nil {
 			return fmt.Errorf("render Codex instruction probe: %w", err)
@@ -92,7 +94,7 @@ func ValidateInstructionBoundary(ctx context.Context) (resultErr error) {
 			return errors.New("codex instruction probe cannot observe repository instructions and skills")
 		}
 		if !check.wantCanary && (foundAgent || foundSkill) {
-			return errors.New("codex loaded checkout instructions or repository skills")
+			return errors.New("codex loaded source snapshot instructions or repository skills")
 		}
 		var messages []struct {
 			Role    string `json:"role"`

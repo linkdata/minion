@@ -84,7 +84,7 @@ func TestLiveCloneAndPullRequest(t *testing.T) {
 	if head, err := checkout.Head(ctx); err != nil || len(head) != 40 {
 		t.Fatalf("cloned default-branch HEAD = %q, %v", head, err)
 	}
-	if err := checkout.CheckoutPullRequest(ctx, pull.Number, pull.Base.Ref, pull.Head.SHA); err != nil {
+	if err := checkout.checkoutPullRequest(ctx, pull.Number, pull.Base.Ref, pull.Head.SHA); err != nil {
 		t.Fatal(err)
 	}
 	if head, err := checkout.Head(ctx); err != nil || !strings.EqualFold(head, pull.Head.SHA) {

@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
@@ -19,9 +20,52 @@ import (
 	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/gitwork"
 	"github.com/linkdata/minion/internal/monitor"
+	"github.com/linkdata/minion/internal/state"
 	"github.com/linkdata/minion/internal/usage"
 	"github.com/linkdata/minion/internal/workspace"
 )
+
+func TestFixReplyFailureConsumesPublicationAttempt(t *testing.T) {
+	for _, recovery := range []bool{false, true} {
+		t.Run(fmt.Sprintf("recovery=%t", recovery), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodGet && r.URL.Path == "/repos/o/r" {
+					fmt.Fprint(w, `{"id":1,"full_name":"o/r","owner":{"id":2}}`)
+					return
+				}
+				if r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/issues/7/comments" {
+					w.WriteHeader(http.StatusBadGateway)
+					return
+				}
+				t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+				http.NotFound(w, r)
+			}))
+			defer server.Close()
+			store, err := state.Open(filepath.Join(t.TempDir(), "state.json"), time.Now())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			client := github.New("fixture-token")
+			client.BaseURL, client.HTTPClient = server.URL, server.Client()
+			request := monitor.Job{ID: strings.Repeat("a", 64), SubjectType: "Issue", Number: 7,
+				Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2}, Command: command.Command{Action: command.Fix}}
+			prepared := &preparedAction{request: request, repository: github.Repository{FullName: "o/r", DefaultBranch: "main"}, fork: github.Repository{FullName: "bot/r"}}
+			orchestrator := Orchestrator{GitHub: client, Store: store, BotLogin: "bot"}
+			if recovery {
+				prepared.branch = "minion/fix-recorded"
+				store.Data.PendingFixes[request.ID] = strings.Repeat("b", 40)
+				err = orchestrator.publish(context.Background(), prepared, Result{})
+			} else {
+				err = orchestrator.publishFix(context.Background(), prepared, Result{Answer: "No changes."})
+			}
+			var status *github.StatusError
+			if !errors.Is(err, monitor.ErrPostModelPublication) || errors.Is(err, monitor.ErrTerminalJob) || !errors.As(err, &status) || status.StatusCode != http.StatusBadGateway {
+				t.Fatalf("reply lost publication classification or cause: %v", err)
+			}
+		})
+	}
+}
 
 func TestExecuteSourceFailuresAndInvalidIncompleteResultsAreTerminal(t *testing.T) {
 	for _, scenario := range []string{"oversized source", "unsupported source", "invalid incomplete result"} {
@@ -153,7 +197,7 @@ func TestPublishFixRejectsNonemptyReviewedChangesDroppedByGit(t *testing.T) {
 			orchestrator := Orchestrator{GitHub: client, BotLogin: "bot", WorkRoot: root}
 			result := Result{Changes: []workspace.Change{{Path: "reviewed.txt", Mode: workspace.Regular, Data: []byte("reviewed change")}}}
 			err = orchestrator.publishFix(context.Background(), prepared, result)
-			if !errors.Is(err, monitor.ErrTerminalJob) || writes != 0 || (stage == "commit" && !errors.Is(err, gitwork.ErrNoChanges)) || (stage == "import" && !strings.Contains(err.Error(), "staged paths do not match reviewed changes")) {
+			if !errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, monitor.ErrPostModelPublication) || writes != 0 || (stage == "commit" && !errors.Is(err, gitwork.ErrNoChanges)) || (stage == "import" && !strings.Contains(err.Error(), "staged paths do not match reviewed changes")) {
 				t.Fatalf("dropped %s changes: writes=%d err=%v", stage, writes, err)
 			}
 		})

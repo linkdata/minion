@@ -15,13 +15,14 @@ import (
 	"time"
 
 	"github.com/linkdata/minion/internal/bounded"
+	"github.com/linkdata/minion/internal/gitwork"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
 // fixIndex keeps Git metadata outside every model grant. It has no remotes,
 // repository configuration, credential environment, hooks or checkout filters.
 type fixIndex struct {
-	dir, source, binary string
+	dir, source, binary, baseline string
 }
 
 func newFixIndex(ctx context.Context, dir, source string) (*fixIndex, error) {
@@ -51,26 +52,15 @@ func newFixIndex(ctx context.Context, dir, source string) (*fixIndex, error) {
 	if err != nil {
 		return nil, err
 	}
-	treeID := strings.TrimSpace(string(tree))
-	if !gitObjectID(treeID) {
+	index.baseline = strings.TrimSpace(string(tree))
+	if !gitObjectID(index.baseline) {
 		return nil, errors.New("offline git returned invalid tree identity")
-	}
-	commit, err := index.run(ctx, 128, "commit-tree", treeID, "-m", "Source baseline")
-	if err != nil {
-		return nil, err
-	}
-	commitID := strings.TrimSpace(string(commit))
-	if !gitObjectID(commitID) {
-		return nil, errors.New("offline git returned invalid baseline identity")
-	}
-	if _, err := index.run(ctx, 1024, "update-ref", "HEAD", commitID); err != nil {
-		return nil, err
 	}
 	return index, nil
 }
 
 func (index *fixIndex) changes(ctx context.Context) ([]workspace.Change, error) {
-	if _, err := index.run(ctx, 1024, "read-tree", "HEAD"); err != nil {
+	if _, err := index.run(ctx, 1024, "read-tree", index.baseline); err != nil {
 		return nil, err
 	}
 	// Bound new output before Git hashes it; ignored files and metadata remain excluded.
@@ -109,7 +99,7 @@ func (index *fixIndex) changes(ctx context.Context) ([]workspace.Change, error) 
 	if _, err := index.run(ctx, 1024, "add", "--all", "--", ".", ":(exclude,icase,glob)**/.git", ":(exclude,icase,glob)**/.git/**"); err != nil {
 		return nil, err
 	}
-	raw, err := index.run(ctx, (workspace.MaxChanges+1)*(workspace.MaxPathBytes+128), "diff", "--cached", "--raw", "-z", "--no-abbrev", "--no-renames", "--no-ext-diff", "--no-textconv", "HEAD", "--")
+	raw, err := index.run(ctx, (workspace.MaxChanges+1)*(workspace.MaxPathBytes+128), "diff", "--cached", "--raw", "-z", "--no-abbrev", "--no-renames", "--no-ext-diff", "--no-textconv", index.baseline, "--")
 	if err != nil {
 		return nil, err
 	}
@@ -127,7 +117,7 @@ func (index *fixIndex) changes(ctx context.Context) ([]workspace.Change, error) 
 			return nil, errors.New("fix file changed after indexing")
 		}
 	}
-	if _, err := index.run(ctx, workspace.MaxContextBytes, "diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv", "--no-renames", "--no-color", "--submodule=short", "HEAD", "--"); err != nil {
+	if _, err := index.run(ctx, gitwork.MaxPatchBytes, "diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv", "--no-renames", "--no-color", "--submodule=short", index.baseline, "--"); err != nil {
 		return nil, err
 	}
 	return changes, nil
@@ -171,15 +161,7 @@ func parseIndexChanges(raw []byte) ([]workspace.Change, []string, error) {
 }
 
 func gitObjectID(value string) bool {
-	if len(value) != 40 {
-		return false
-	}
-	for _, c := range value {
-		if !strings.ContainsRune("0123456789abcdef", c) {
-			return false
-		}
-	}
-	return true
+	return len(value) == 40 && strings.Trim(value, "0123456789abcdef") == ""
 }
 
 func gitBlobID(data []byte) string {
@@ -193,11 +175,8 @@ func gitBlobID(data []byte) string {
 func (index *fixIndex) run(ctx context.Context, limit int, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	gitArgs := []string{"--git-dir=" + index.dir, "--work-tree=" + index.source,
-		"-c", "credential.helper=", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
-		"-c", "core.attributesFile=/dev/null", "-c", "core.excludesFile=/dev/null", "-c", "core.fileMode=true",
-		"-c", "core.protectNTFS=true", "-c", "core.protectHFS=true", "-c", "commit.gpgsign=false",
-		"-c", "protocol.allow=never", "-c", "gc.auto=0", "-c", "maintenance.auto=false"}
+	gitArgs := append(gitwork.HardeningArgs(), "--git-dir="+index.dir, "--work-tree="+index.source,
+		"-c", "credential.helper=", "-c", "core.fileMode=true", "-c", "protocol.allow=never")
 	cmd := exec.CommandContext(ctx, index.binary, append(gitArgs, args...)...)
 	cmd.Dir, cmd.Env = index.dir, index.environment()
 	cmd.WaitDelay = 2 * time.Second
@@ -210,8 +189,10 @@ func (index *fixIndex) run(ctx context.Context, limit int, args ...string) ([]by
 	if err != nil {
 		if contextErr := ctx.Err(); contextErr != nil {
 			err = errors.Join(err, contextErr)
+		} else {
+			err = gitwork.ClassifyPathError(args[0], diagnostic.String(), err)
 		}
-		return nil, fmt.Errorf("offline git %s: %w: %s", args[0], err, strings.TrimSpace(diagnostic.String()))
+		return nil, fmt.Errorf("offline git %s: %w: %q", args[0], err, strings.TrimSpace(diagnostic.String()))
 	}
 	return output.Bytes(), nil
 }
@@ -227,7 +208,5 @@ func (index *fixIndex) environment() []string {
 		paths = []string{"/usr/bin", "/bin"}
 	}
 	return []string{"PATH=" + strings.Join(paths, string(os.PathListSeparator)), "HOME=" + index.dir, "TMPDIR=" + index.dir, "LC_ALL=C",
-		"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=/bin/false", "GIT_NO_REPLACE_OBJECTS=1",
-		"GIT_AUTHOR_NAME=source", "GIT_AUTHOR_EMAIL=source@localhost", "GIT_COMMITTER_NAME=source", "GIT_COMMITTER_EMAIL=source@localhost",
-		"GIT_AUTHOR_DATE=2000-01-01T00:00:00Z", "GIT_COMMITTER_DATE=2000-01-01T00:00:00Z"}
+		"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_ATTR_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=/bin/false", "GIT_NO_REPLACE_OBJECTS=1"}
 }

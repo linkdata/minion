@@ -14,6 +14,7 @@ import (
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/config"
+	"github.com/linkdata/minion/internal/processgroup"
 )
 
 type modelInfo struct {
@@ -97,7 +98,7 @@ func listModels(ctx context.Context, settings config.CodexConfig) (models []mode
 	cmd.Dir = dir
 	cmd.Env = childEnvironment(os.Environ(), dir, dir, settings.APIKey != "")
 	cmd.WaitDelay = 2 * time.Second
-	configureCancellation(cmd)
+	processgroup.Configure(cmd)
 	var diagnostics tailBuffer
 	cmd.Stderr = &diagnostics
 	stdin, err := cmd.StdinPipe()

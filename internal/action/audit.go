@@ -25,7 +25,10 @@ func readAuditArtifacts(outputDir string, mode auditReadMode) ([]workspace.File,
 	var files []workspace.File
 	var diagnostics []Diagnostic
 	for _, name := range auditArtifacts {
-		data, err := readAuditArtifact(filepath.Join(outputDir, name), auditArtifactLimit(name), mode != auditComplete || auditArtifactMayBeEmpty(name))
+		data, err := workspace.ReadRegular(filepath.Join(outputDir, name), auditArtifactLimit(name))
+		if err == nil && mode == auditComplete && !auditArtifactMayBeEmpty(name) && len(data) == 0 {
+			err = errors.New("audit artifact must not be empty")
+		}
 		if errors.Is(err, os.ErrNotExist) && mode != auditComplete {
 			continue
 		}
@@ -66,7 +69,7 @@ func validateAuditFiles(ctx context.Context, files []workspace.File, validationR
 			reportBytes = file.Data
 		}
 	}
-	if err := validateAuditMetadata(metadataBytes, reportBytes, repo, target, head); err != nil {
+	if _, err := validateAuditMetadata(metadataBytes, reportBytes, repo, target, head); err != nil {
 		return "", err
 	}
 	validationDir, err := os.MkdirTemp(validationRoot, ".audit-validation-")
@@ -169,7 +172,7 @@ func validateAuditFiles(ctx context.Context, files []workspace.File, validationR
 	return string(reportBytes), nil
 }
 
-func validateAuditMetadata(metadataBytes, reportBytes []byte, repo, target, head string) error {
+func validateAuditMetadata(metadataBytes, reportBytes []byte, repo, target, head string) ([]string, error) {
 	var metadata struct {
 		RunID                  string            `json:"run_id"`
 		Repo                   string            `json:"repo"`
@@ -185,23 +188,23 @@ func validateAuditMetadata(metadataBytes, reportBytes []byte, repo, target, head
 		RunStatus              string            `json:"run_status"`
 	}
 	if err := json.Unmarshal(metadataBytes, &metadata); err != nil {
-		return fmt.Errorf("decode audit metadata: %w", err)
+		return nil, fmt.Errorf("decode audit metadata: %w", err)
 	}
 	if strings.TrimSpace(metadata.RunID) == "" || metadata.Repo != repo || metadata.Target != target || metadata.SourceRef != head ||
 		metadata.Profile != "standard" || len(metadata.ScopePaths) != 1 || metadata.ScopePaths[0] != "." ||
 		string(metadata.Budget) != "null" || metadata.SelectedCompanionFiles == nil || metadata.PriorRunPaths == nil || len(metadata.PriorRunPaths) != 0 ||
 		metadata.ExecutionPolicy != "sandboxed-source-and-local-only" || metadata.RunStatus != "complete" {
-		return fmt.Errorf("audit metadata does not confirm a complete standard run of %s at %s", repo, head)
+		return nil, fmt.Errorf("audit metadata does not confirm a complete standard run of %s at %s", repo, head)
 	}
 	for _, name := range auditArtifacts {
 		if metadata.SharedFileOwners[name] != "parent" {
-			return fmt.Errorf("audit metadata lacks parent ownership of %s", name)
+			return nil, fmt.Errorf("audit metadata lacks parent ownership of %s", name)
 		}
 	}
 	if strings.TrimSpace(string(reportBytes)) == "" {
-		return errors.New("audit REPORT.md is empty")
+		return nil, errors.New("audit REPORT.md is empty")
 	}
-	return nil
+	return metadata.SelectedCompanionFiles, nil
 }
 
 func auditNodePermissionFlag(ctx context.Context, dir string) (string, error) {
@@ -219,12 +222,4 @@ func auditNodePermissionFlag(ctx context.Context, dir string) (string, error) {
 		}
 	}
 	return "", errors.New("node permission model is unavailable")
-}
-
-func readAuditArtifact(path string, limit int64, allowEmpty bool) ([]byte, error) {
-	data, err := workspace.ReadRegular(path, limit)
-	if err == nil && !allowEmpty && len(data) == 0 {
-		err = errors.New("audit artifact must not be empty")
-	}
-	return data, err
 }

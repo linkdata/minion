@@ -66,7 +66,7 @@ func TestSnapshotReadsHeadAndBaseInOneBatch(t *testing.T) {
 	fixture.git(fixture.source, "commit", "-m", "binary PR")
 	head := fixture.git(fixture.source, "rev-parse", "HEAD")
 	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/pull/7/head")
-	if err := fixture.checkout.CheckoutPullRequest(context.Background(), 7, "main", head); err != nil {
+	if err := fixture.checkout.checkoutPullRequest(context.Background(), 7, "main", head); err != nil {
 		t.Fatal(err)
 	}
 	log := recordBatchCalls(t)

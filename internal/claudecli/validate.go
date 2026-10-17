@@ -16,6 +16,7 @@ import (
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/config"
+	"github.com/linkdata/minion/internal/processgroup"
 )
 
 // Validate checks Claude's prerequisites and resolves model settings.
@@ -199,7 +200,7 @@ func probe(ctx context.Context, binary string, args []string, dir string, env []
 	cmd := exec.CommandContext(ctx, binary, args...)
 	cmd.Dir, cmd.Env, cmd.Stdin = dir, env, strings.NewReader(input)
 	cmd.WaitDelay = 2 * time.Second
-	configureCancellation(cmd)
+	processgroup.Configure(cmd)
 	output := probeOutput{cancel: cancel}
 	var diagnostics tailBuffer
 	cmd.Stdout, cmd.Stderr = &output, &diagnostics

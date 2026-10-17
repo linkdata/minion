@@ -39,26 +39,26 @@ type modelRun struct {
 	model, effort string
 }
 
-func (e *Runner) runOnce(ctx context.Context, request modelRun) (aicli.Result, error) {
+func (r *Runner) runOnce(ctx context.Context, request modelRun) (aicli.Result, error) {
 	if err := ctx.Err(); err != nil {
 		return aicli.Result{}, err
 	}
-	if e.aroundModel != nil {
-		native := *e
+	if r.aroundModel != nil {
+		native := *r
 		native.aroundModel = nil
-		return e.aroundModel(ctx, request, native.runOnce)
+		return r.aroundModel(ctx, request, native.runOnce)
 	}
-	if e.runModel != nil {
-		return e.runModel(ctx, request)
+	if r.runModel != nil {
+		return r.runModel(ctx, request)
 	}
 	switch request.provider {
 	case "codex":
-		settings := e.Codex
+		settings := r.Codex
 		settings.ReadOnlyDirs = append(append([]string(nil), settings.ReadOnlyDirs...), request.readOnlyDirs...)
 		settings.OutputSchema = request.outputSchema
 		return codexcli.Run(ctx, request.dir, request.prompt, request.writable, request.outputDir, settings)
 	case "claude":
-		settings := e.Claude
+		settings := r.Claude
 		settings.ReadOnlyDirs = append(append([]string(nil), settings.ReadOnlyDirs...), request.readOnlyDirs...)
 		settings.OutputSchema = request.outputSchema
 		return claudecli.Run(ctx, request.dir, request.prompt, request.writable, request.outputDir, settings)
@@ -67,25 +67,20 @@ func (e *Runner) runOnce(ctx context.Context, request modelRun) (aicli.Result, e
 	}
 }
 
-func (e *Runner) runAI(ctx context.Context, job Job, dir, prompt string, writable bool, outputDir string) (answer string, err error) {
+func (r *Runner) runAI(ctx context.Context, job Job, dir, prompt string, writable bool, outputDir string) (answer string, err error) {
 	rounds := job.rounds()
-	main := job.Main.Provider
-	criticProvider := ""
+	request := modelRun{role: "main", provider: job.Main.Provider, model: job.Main.Model, effort: job.Main.Effort, dir: dir, prompt: prompt, writable: writable, outputDir: outputDir}
 	if job.Critic != nil {
-		criticProvider = job.Critic.Provider
-	}
-	request := modelRun{role: "main", provider: main, model: job.Main.Model, effort: job.Main.Effort, dir: dir, prompt: prompt, writable: writable, outputDir: outputDir}
-	if criticProvider != "" {
 		request.prompt, request.outputSchema = mainPrompt(prompt), mainOutputSchema
 	}
 	var priorAnswer, priorFeedback string
 	for round := 0; round < rounds; round++ {
 		request.round = round + 1
 		var proposed aicli.Result
-		if proposed, err = e.runOnce(ctx, request); err != nil {
+		if proposed, err = r.runOnce(ctx, request); err != nil {
 			return
 		}
-		if criticProvider == "" {
+		if job.Critic == nil {
 			answer = proposed.Answer
 			return
 		}
@@ -104,12 +99,12 @@ func (e *Runner) runAI(ctx context.Context, job Job, dir, prompt string, writabl
 			if phase == "verification" {
 				criticNotes, previousAnswer, previousFeedback = notes, priorAnswer, priorFeedback
 			}
-			critic := modelRun{role: "critic", round: round + 1, reviewPhase: phase, provider: criticProvider, model: job.Critic.Model, effort: job.Critic.Effort, outputSchema: criticOutputSchema}
+			critic := modelRun{role: "critic", round: round + 1, reviewPhase: phase, provider: job.Critic.Provider, model: job.Critic.Model, effort: job.Critic.Effort, outputSchema: criticOutputSchema}
 			critic.criticPrompt = func(mapping, reports string) string {
 				return criticPrompt(prompt+mapping, candidate, criticNotes, previousAnswer, previousFeedback, reports)
 			}
 			var review aicli.Result
-			if review, err = e.runOnce(ctx, critic); err != nil {
+			if review, err = r.runOnce(ctx, critic); err != nil {
 				return
 			}
 			if approved, feedback, err = parseCritique(review.Answer); err != nil {
@@ -170,6 +165,9 @@ func parseProposal(raw string) (answer, notes string, err error) {
 	if json.Unmarshal(fields["answer"], &response) != nil || response == nil ||
 		json.Unmarshal(fields["review_notes"], &reviewNotes) != nil || reviewNotes == nil {
 		return "", "", errors.New("answer and review_notes must be strings")
+	}
+	if strings.ContainsRune(*response, 0) {
+		return "", "", errors.New("answer must not contain NUL")
 	}
 	if strings.TrimSpace(*response) == "" {
 		return "", "", errors.New("answer must not be blank")

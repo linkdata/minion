@@ -355,6 +355,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				}
 				if interrupted {
 					m.logf("%s from %s interrupted: %v", cmd.Action, item.HTMLURL, err)
+					return next, err
 				} else {
 					m.logf("%s from %s failed (attempt %d/%d): %v", cmd.Action, item.HTMLURL, jobFailure.Attempts, maxJobAttempts, err)
 				}

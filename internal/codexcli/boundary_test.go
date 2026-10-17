@@ -70,8 +70,8 @@ func TestValidateInstructionBoundaryRejectsUntrustedContent(t *testing.T) {
 		text string
 		want string
 	}{
-		{name: "agents", text: probePrompt + " " + probeAgent, want: "loaded checkout instructions"},
-		{name: "skill", text: probePrompt + " " + probeSkill, want: "loaded checkout instructions"},
+		{name: "agents", text: probePrompt + " " + probeAgent, want: "loaded source snapshot instructions"},
+		{name: "skill", text: probePrompt + " " + probeSkill, want: "loaded source snapshot instructions"},
 		{name: "missing prompt", text: "unrelated", want: "omitted the trusted"},
 	} {
 		t.Run(test.name, func(t *testing.T) {

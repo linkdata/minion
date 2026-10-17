@@ -206,10 +206,10 @@ func TestCheckoutPullRequestVerifiesHead(t *testing.T) {
 	head := fixture.git(fixture.source, "rev-parse", "HEAD")
 	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/pull/7/head")
 
-	if err := fixture.checkout.CheckoutPullRequest(ctx, 7, "main", strings.Repeat("f", 40)); !errors.Is(err, ErrHeadMoved) {
+	if err := fixture.checkout.checkoutPullRequest(ctx, 7, "main", strings.Repeat("f", 40)); !errors.Is(err, ErrHeadMoved) {
 		t.Fatalf("mismatched PR head error = %v, want ErrHeadMoved", err)
 	}
-	if err := fixture.checkout.CheckoutPullRequest(ctx, 7, "main", head); err != nil {
+	if err := fixture.checkout.checkoutPullRequest(ctx, 7, "main", head); err != nil {
 		t.Fatalf("CheckoutPullRequest() error = %v", err)
 	}
 	got := fixture.git(fixture.checkout.path, "rev-parse", "HEAD")
@@ -268,7 +268,7 @@ func TestCheckoutPullRequestBoundsAliasedTrees(t *testing.T) {
 				return tree, nil
 			}
 			fixture.checkout.lookupTree = lookup
-			err := fixture.checkout.CheckoutPullRequest(context.Background(), 7, "main", head)
+			err := fixture.checkout.checkoutPullRequest(context.Background(), 7, "main", head)
 			if tt.blocked {
 				if !errors.Is(err, ErrCheckoutTooLarge) {
 					t.Fatalf("CheckoutPullRequest() error = %v, want checkout limit", err)
@@ -358,7 +358,7 @@ func TestPullRequestSnapshotOmitsSymlinks(t *testing.T) {
 	fixture.git(fixture.source, "commit", "-m", "add skill link")
 	head := fixture.git(fixture.source, "rev-parse", "HEAD")
 	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/pull/7/head")
-	if err := fixture.checkout.CheckoutPullRequest(context.Background(), 7, "main", head); err != nil {
+	if err := fixture.checkout.checkoutPullRequest(context.Background(), 7, "main", head); err != nil {
 		t.Fatal(err)
 	}
 	snapshot, err := fixture.checkout.Snapshot(context.Background(), false, true)
@@ -407,7 +407,7 @@ func TestCheckoutPullRequestPreflightDoesNotFetchMissingBlob(t *testing.T) {
 		return completeTree(sha, []github.GitTreeEntry{{Path: "new.dat", Type: "blob", Mode: "100644", Size: &size}}), nil
 	}
 	checkout.lookupTree = oversized
-	if err := checkout.CheckoutPullRequest(context.Background(), 7, "main", head); !errors.Is(err, ErrCheckoutTooLarge) {
+	if err := checkout.checkoutPullRequest(context.Background(), 7, "main", head); !errors.Is(err, ErrCheckoutTooLarge) {
 		t.Fatalf("oversized PR error = %v, want checkout limit", err)
 	}
 	if !missing() {
@@ -417,7 +417,7 @@ func TestCheckoutPullRequestPreflightDoesNotFetchMissingBlob(t *testing.T) {
 		t.Fatalf("rejected PR moved HEAD to %s", got)
 	}
 	checkout.lookupTree = localTreeMetadata(t, fixture.source)
-	if err := checkout.CheckoutPullRequest(context.Background(), 7, "main", head); err != nil {
+	if err := checkout.checkoutPullRequest(context.Background(), 7, "main", head); err != nil {
 		t.Fatalf("bounded PR checkout: %v", err)
 	}
 	if info, err := os.Stat(filepath.Join(checkout.path, "new.dat")); err != nil || info.Size() != blobBytes {
@@ -446,7 +446,7 @@ func TestCheckoutPullRequestDisablesRepositoryTransforms(t *testing.T) {
 			t.Error(err)
 		}
 	}()
-	if err := checkout.CheckoutPullRequest(context.Background(), 7, "main", head); err != nil {
+	if err := checkout.checkoutPullRequest(context.Background(), 7, "main", head); err != nil {
 		t.Fatal(err)
 	}
 	got, err := os.ReadFile(filepath.Join(checkout.path, "payload.txt"))

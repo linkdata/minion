@@ -48,7 +48,7 @@ type event struct {
 	Type              string            `json:"type"`
 	Subtype           string            `json:"subtype"`
 	ResultIndex       *int64            `json:"result_index"`
-	Tasks             []struct{}        `json:"tasks"`
+	Tasks             []struct{}        `json:"tasks"` // Native live-task entries are objects; only their count is needed.
 	IsError           bool              `json:"is_error"`
 	Result            string            `json:"result"`
 	StructuredOutput  json.RawMessage   `json:"structured_output"`
@@ -155,7 +155,7 @@ func (o *jsonlOutput) finish() {
 	if o.err == nil {
 		answer := strings.TrimSpace(o.result.Answer)
 		if !o.completed {
-			o.fail(errors.New("missing successful Claude result after background work"))
+			o.fail(errors.New("Claude exited without a successful final result"))
 		} else if o.structured && (answer == "" || answer == "null") {
 			o.fail(errors.New("missing Claude structured output"))
 		} else if answer == "" {
@@ -213,7 +213,8 @@ func (o *jsonlOutput) finishLine() {
 		return
 	}
 	tokens, complete := e.tokens()
-	// A later partial report must not erase previously recorded usage.
+	// Native modelUsage is cumulative across result turns. A later partial
+	// report must not erase previously recorded usage.
 	if tokens.Input >= o.result.Tokens.Input && tokens.CachedInput >= o.result.Tokens.CachedInput && tokens.Output >= o.result.Tokens.Output {
 		o.result.Tokens = tokens
 	} else {

@@ -112,7 +112,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"test"}' '{"type":"item.comp
 				t.Fatalf("isolated project root marker missing during run: %q, %v", marker, err)
 			}
 			if filepath.Dir(runtimeDir) != filepath.Dir(dir) {
-				t.Fatalf("runtime directory %q is not a checkout sibling", runtimeDir)
+				t.Fatalf("runtime directory %q is not a source snapshot sibling", runtimeDir)
 			}
 			if _, err := os.Stat(runtimeDir); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("runtime directory not removed: %v", err)
@@ -352,7 +352,7 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"a
 		t.Fatal(err)
 	}
 	for _, unsafe := range []string{workspace, inside, filepath.Dir(workspace), "/"} {
-		if _, err := Run(context.Background(), workspace, "Audit source", false, unsafe, config.CodexConfig{}); err == nil || !strings.Contains(err.Error(), "separate from the checkout") {
+		if _, err := Run(context.Background(), workspace, "Audit source", false, unsafe, config.CodexConfig{}); err == nil || !strings.Contains(err.Error(), "separate from the source snapshot") {
 			t.Fatalf("accepted unsafe reports directory %q: %v", unsafe, err)
 		}
 	}
@@ -568,7 +568,7 @@ func TestRunHonorsCancellation(t *testing.T) {
 	}
 }
 
-func TestRunRejectsExecutableFromCheckout(t *testing.T) {
+func TestRunRejectsExecutableFromSourceSnapshot(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "codex")
 	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
@@ -576,8 +576,8 @@ func TestRunRejectsExecutableFromCheckout(t *testing.T) {
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	_, err := Run(context.Background(), dir, "Review", false, "", config.CodexConfig{})
-	if err == nil || !strings.Contains(err.Error(), "executable is inside the repository checkout") {
-		t.Fatalf("Run() error = %v, want checkout executable rejection", err)
+	if err == nil || !strings.Contains(err.Error(), "executable is inside the source snapshot") {
+		t.Fatalf("Run() error = %v, want source snapshot executable rejection", err)
 	}
 }
 

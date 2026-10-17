@@ -23,6 +23,9 @@ import (
 )
 
 const (
+	// MaxPatchBytes bounds a published fix's binary patch independently of model context.
+	MaxPatchBytes = 1 << 20
+
 	maxPathListBytes = workspace.MaxFiles * (workspace.MaxPathBytes + 128)
 	maxGitDiagnostic = 8 << 10
 )
@@ -127,7 +130,7 @@ func clonePullRequestFromURL(ctx context.Context, workRoot, url string, number i
 	if err != nil {
 		return nil, err
 	}
-	if err := c.CheckoutPullRequest(ctx, number, baseRef, expectedHeadSHA); err != nil {
+	if err := c.checkoutPullRequest(ctx, number, baseRef, expectedHeadSHA); err != nil {
 		return nil, errors.Join(err, c.Close())
 	}
 	return c, nil
@@ -203,10 +206,10 @@ func (c *Checkout) Close() error {
 	return nil
 }
 
-// CheckoutPullRequest fetches the base branch and GitHub's PR head ref from the
+// checkoutPullRequest fetches the base branch and GitHub's PR head ref from the
 // trusted repository URL. The fetched head must match the SHA observed through
 // the GitHub API, preventing a changed PR from being reviewed as another commit.
-func (c *Checkout) CheckoutPullRequest(ctx context.Context, number int, baseRef, expectedHeadSHA string) error {
+func (c *Checkout) checkoutPullRequest(ctx context.Context, number int, baseRef, expectedHeadSHA string) error {
 	if err := c.ready(); err != nil {
 		return err
 	}
@@ -452,7 +455,7 @@ func (c *Checkout) checkChangedFileSizes(paths []string) error {
 }
 
 func (c *Checkout) checkPatchSize(ctx context.Context) error {
-	_, truncated, err := c.boundedGit(ctx, workspace.MaxContextBytes, true, "diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv", "--no-renames", "--no-color", "--submodule=short")
+	_, truncated, err := c.boundedGit(ctx, MaxPatchBytes, true, "diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv", "--no-renames", "--no-color", "--submodule=short")
 	if truncated {
 		return ErrDiffTooLarge
 	}
@@ -510,21 +513,14 @@ func runGitTo(ctx context.Context, dir string, stdout io.Writer, args ...string)
 }
 
 func runGitInputTo(ctx context.Context, dir string, stdin io.Reader, stdout io.Writer, args ...string) error {
-	gitArgs := []string{
+	gitArgs := append(HardeningArgs(),
 		"-c", "user.name=Minion",
 		"-c", "user.email=minion@localhost",
 		"-c", "credential.helper=",
 		"-c", credentialHelperConfig(credentialHelperGH),
-		"-c", "core.hooksPath=/dev/null",
-		"-c", "core.fsmonitor=false",
-		"-c", "core.protectHFS=true",
-		"-c", "core.protectNTFS=true",
-		"-c", "core.excludesFile=/dev/null",
-		"-c", "core.attributesFile=/dev/null",
-		"-c", "commit.gpgsign=false",
 		"-c", "push.gpgSign=false",
 		"-c", "submodule.recurse=false",
-	}
+	)
 	cmd := exec.CommandContext(ctx, "git", append(gitArgs, args...)...)
 	processgroup.Configure(cmd)
 	cmd.WaitDelay = 2 * time.Second
@@ -542,8 +538,8 @@ func runGitInputTo(ctx context.Context, dir string, stdin io.Reader, stdout io.W
 		message := strings.TrimSpace(diagnostic.String())
 		if ctx.Err() != nil {
 			err = fmt.Errorf("%w: %w", ctx.Err(), err)
-		} else if (operation == "add" || operation == "checkout") && strings.HasPrefix(message, "error: invalid path ") {
-			err = fmt.Errorf("%w: %w", ErrUnsupportedSource, err)
+		} else {
+			err = ClassifyPathError(operation, message, err)
 		}
 		if message != "" {
 			return fmt.Errorf("git %s: %w: %s", operation, err, message)
@@ -551,6 +547,26 @@ func runGitInputTo(ctx context.Context, dir string, stdin io.Reader, stdout io.W
 		return fmt.Errorf("git %s: %w", operation, err)
 	}
 	return nil
+}
+
+// ClassifyPathError preserves a Git failure's cause while identifying protected
+// path rejections from add/checkout. Diagnostics must use Git's C locale.
+func ClassifyPathError(operation, message string, err error) error {
+	if (operation == "add" || operation == "checkout") && (strings.HasPrefix(message, "error: invalid path ") || strings.Contains(message, "\nerror: invalid path ")) {
+		return fmt.Errorf("%w: %w", ErrUnsupportedSource, err)
+	}
+	return err
+}
+
+// HardeningArgs returns shared Git safeguards. Callers select credentials and
+// network access separately; each call receives an independent argument slice.
+func HardeningArgs() []string {
+	return []string{
+		"-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
+		"-c", "core.protectHFS=true", "-c", "core.protectNTFS=true",
+		"-c", "core.excludesFile=/dev/null", "-c", "core.attributesFile=/dev/null",
+		"-c", "commit.gpgsign=false", "-c", "gc.auto=0", "-c", "maintenance.auto=false",
+	}
 }
 
 func credentialHelperConfig(path string) string {

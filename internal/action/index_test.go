@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/linkdata/minion/internal/gitwork"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -77,6 +78,49 @@ func TestFixIndexPinsSHA1WhenGitDefaultsToSHA256(t *testing.T) {
 	changes, err := index.changes(context.Background())
 	if err != nil || len(changes) != 1 || string(changes[0].Data) != "after" {
 		t.Fatalf("pinned index failed byte binding: %+v,%v", changes, err)
+	}
+}
+
+func TestFixIndexBaselineIsTreeWithoutCommit(t *testing.T) {
+	index, _ := offlineIndexFixture(t, []workspace.File{{Path: "source", Mode: workspace.Regular, Data: []byte("baseline")}})
+	typeName, err := index.run(context.Background(), 128, "cat-file", "-t", index.baseline)
+	if err != nil || strings.TrimSpace(string(typeName)) != "tree" {
+		t.Fatalf("baseline type=%q error=%v", typeName, err)
+	}
+	objects, err := index.run(context.Background(), 1024, "cat-file", "--batch-all-objects", "--batch-check=%(objecttype)")
+	if err != nil || strings.Contains(string(objects), "commit") {
+		t.Fatalf("offline objects=%q error=%v", objects, err)
+	}
+}
+
+func TestFixIndexRejectsBaselineMetadataAliasWithoutHidingIOFailures(t *testing.T) {
+	for _, name := range []string{"GIT~1/file", ".git./file"} {
+		t.Run(name, func(t *testing.T) {
+			source, metadata := t.TempDir(), t.TempDir()
+			writeIndexFixture(t, source, name, []byte("source"))
+			_, err := newFixIndex(context.Background(), metadata, source)
+			var exit *exec.ExitError
+			if !errors.Is(err, gitwork.ErrUnsupportedSource) || !errors.As(err, &exit) {
+				t.Fatalf("baseline alias error=%v", err)
+			}
+		})
+	}
+	index, _ := offlineIndexFixture(t, nil)
+	index.dir = filepath.Join(t.TempDir(), "missing")
+	if _, err := index.run(context.Background(), 1024, "add", "--all", "--", "."); !errors.Is(err, os.ErrNotExist) || errors.Is(err, gitwork.ErrUnsupportedSource) {
+		t.Fatalf("offline Git I/O error=%v", err)
+	}
+}
+
+func TestFixIndexQuotesGitDiagnostic(t *testing.T) {
+	index, _ := offlineIndexFixture(t, nil)
+	index.binary = filepath.Join(t.TempDir(), "git-proxy")
+	if err := os.WriteFile(index.binary, []byte("#!/bin/sh\nprintf 'first line\\nforged journal entry\\n' >&2\nexit 1\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	_, err := index.run(context.Background(), 1024, "status")
+	if err == nil || strings.Contains(err.Error(), "\n") || !strings.Contains(err.Error(), `"first line\nforged journal entry"`) {
+		t.Fatalf("unquoted offline Git diagnostic: %v", err)
 	}
 }
 
@@ -201,15 +245,16 @@ func TestFixIndexDisablesAttributesAndOperatorConfiguration(t *testing.T) {
 	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("repository filter ran: %v", err)
 	}
-	systemDisabled := false
+	systemDisabled, systemAttributesDisabled := false, false
 	for _, entry := range index.environment() {
 		systemDisabled = systemDisabled || entry == "GIT_CONFIG_NOSYSTEM=1"
+		systemAttributesDisabled = systemAttributesDisabled || entry == "GIT_ATTR_NOSYSTEM=1"
 		if strings.HasPrefix(entry, "GH_TOKEN=") || strings.Contains(entry, global) || strings.HasPrefix(entry, "GIT_CONFIG_COUNT=") {
 			t.Fatalf("unsafe offline Git environment: %q", entry)
 		}
 	}
-	if !systemDisabled {
-		t.Fatal("offline Git did not disable system configuration")
+	if !systemDisabled || !systemAttributesDisabled {
+		t.Fatal("offline Git did not disable system configuration and attributes")
 	}
 }
 
