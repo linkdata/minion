@@ -513,7 +513,7 @@ func TestCommentPublishesOnlyCriticApprovedResult(t *testing.T) {
 				Source:  github.Item{Author: github.User{ID: 7, Login: "writer"}},
 				Command: command.Command{Name: "audit", Action: command.Comment},
 			}
-			err := e.perform(testActionContext(t), job)
+			err := attemptFixture(e).perform(testActionContext(t), job)
 			if tt.wantError {
 				if !errors.Is(err, monitor.ErrTerminalJob) || published != "" {
 					t.Fatalf("unapproved result published: error=%v body=%q", err, published)

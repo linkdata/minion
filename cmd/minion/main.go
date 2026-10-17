@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -70,7 +71,10 @@ func run() int {
 	}
 	logCommandSkills(cfg, logger)
 	checkWorkRoot := func() error {
-		return workroot.Check(cfg.WorkRoot, cfg.StatePath, cfg.WorkRootMaxBytes)
+		if err := workroot.Check(cfg.WorkRoot, cfg.StatePath, cfg.WorkRootMaxBytes); err != nil {
+			return err
+		}
+		return checkWorkRootIsolation(cfg)
 	}
 	if err := checkWorkRoot(); err != nil {
 		logger.Printf("work root: %v", err)
@@ -173,6 +177,39 @@ func run() int {
 		case <-timer.C:
 		}
 	}
+}
+
+func checkWorkRootIsolation(cfg config.Config) error {
+	runner := action.Runner{Codex: cfg.Codex, Claude: cfg.Claude}
+	for _, provider := range []string{cfg.Main, cfg.Adversarial} {
+		if provider == "" {
+			continue
+		}
+		sources := slices.Clone(cfg.AlwaysOnSkills)
+		if provider == cfg.Main {
+			for _, mapping := range cfg.Commands {
+				if mapping.SupportsProvider(provider) {
+					sources = append(sources, mapping.Skills...)
+				}
+			}
+		}
+		for _, source := range sources {
+			path, installed, err := skills.InstalledPathFor(source, provider)
+			// Unavailable skills already disable their command; they grant no path.
+			if err != nil || !installed || !filepath.IsAbs(path) {
+				continue
+			}
+			if provider == "claude" {
+				runner.Claude.Skills = append(runner.Claude.Skills, path)
+			} else {
+				runner.Codex.Skills = append(runner.Codex.Skills, path)
+			}
+		}
+	}
+	if err := runner.CheckWorkRootIsolation(cfg.WorkRoot, cfg.Main, cfg.Adversarial); err != nil {
+		return fmt.Errorf("%w: %w", workroot.ErrUnsafe, err)
+	}
+	return nil
 }
 
 func logCommandSkills(cfg config.Config, logger *log.Logger) {

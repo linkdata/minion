@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -785,5 +786,28 @@ func TestJobSubjectMatchesComparisonForEveryAction(t *testing.T) {
 				})
 			}
 		}
+	}
+}
+
+func TestJobJSONRoundTrip(t *testing.T) {
+	job := portableJob(command.Review)
+	job.Critic = &RoleSettings{Provider: "claude", Model: "critic-model", Effort: "high"}
+	job.CriticMaxRounds = config.DefaultCriticMaxRounds
+	job.Source.HistoryRequested = true
+	job.Source.Omitted = []string{"omitted-link"}
+	job.Source.ChangedPaths = []string{`back\slash`, "case", "CASE"}
+	data, err := json.Marshal(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded Job
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(job, decoded) {
+		t.Fatalf("job changed in JSON round trip: %#v != %#v", job, decoded)
+	}
+	if err := decoded.Validate(); err != nil {
+		t.Fatalf("decoded job: %v", err)
 	}
 }

@@ -60,6 +60,7 @@ type event struct {
 	ModelUsage        json.RawMessage   `json:"modelUsage"`
 	PermissionDenials []json.RawMessage `json:"permission_denials"`
 	Message           json.RawMessage   `json:"message"`
+	ParentToolUseID   json.RawMessage   `json:"parent_tool_use_id"`
 	Status            string            `json:"status"`
 	Summary           string            `json:"summary"`
 	APIError          string            `json:"api_error"`
@@ -85,11 +86,14 @@ func (e event) tokens() (usage.Tokens, bool) {
 		valid := true
 		for _, model := range models {
 			tokens, ok := eventUsage(model).tokens()
-			if !ok || tokens.Total() > math.MaxInt64-total.Total() {
+			if !ok {
 				valid = false
 				break
 			}
-			total.Add(tokens)
+			if total, ok = sumTokens(total, tokens); !ok {
+				valid = false
+				break
+			}
 		}
 		if valid {
 			return total, true
@@ -105,23 +109,32 @@ func (e event) tokens() (usage.Tokens, bool) {
 	return usage.Tokens{}, false
 }
 
+type messageUsage struct {
+	tokens     usage.Tokens
+	generation int64
+	root       bool
+}
+
 type jsonlOutput struct {
-	cancel          context.CancelFunc
-	line            []byte
-	bytes           int64
-	events          int
-	err             error
-	usageLimit      error
-	taskFailure     error
-	completed       bool
-	structured      bool
-	pending         int
-	results         int64
-	indexed         bool
-	result          aicli.Result
-	aggregateSeen   bool
-	assistantUsage  map[string]usage.Tokens
-	assistantTokens usage.Tokens
+	cancel              context.CancelFunc
+	line                []byte
+	bytes               int64
+	events              int
+	err                 error
+	usageLimit          error
+	taskFailure         error
+	completed           bool
+	structured          bool
+	pending             int
+	results             int64
+	indexed             bool
+	result              aicli.Result
+	aggregateGeneration int64
+	aggregateTokens     usage.Tokens
+	assistantUsage      map[string]messageUsage
+	assistantTokens     usage.Tokens
+	rootTokens          usage.Tokens
+	uncovered           bool
 }
 
 func (o *jsonlOutput) Write(p []byte) (int, error) {
@@ -169,12 +182,10 @@ func (o *jsonlOutput) finish() {
 	if o.err == nil && len(o.line) != 0 {
 		o.finishLine()
 	}
-	if !o.aggregateSeen {
-		// Root-only result usage and assistant messages are overlapping lower
-		// bounds, never additive. Keep the greatest known value of each counter.
-		tokens := usage.Tokens{Input: max(o.result.Tokens.Input, o.assistantTokens.Input), CachedInput: max(o.result.Tokens.CachedInput, o.assistantTokens.CachedInput), Output: max(o.result.Tokens.Output, o.assistantTokens.Output)}
-		if tokens.Input <= math.MaxInt64-tokens.Output {
-			o.result.Tokens = tokens
+	lower, valid := o.assistantLowerBound()
+	if o.aggregateGeneration == 0 || o.uncovered || !valid || lower != o.result.Tokens {
+		if valid {
+			o.result.Tokens = lower
 		}
 		o.result.UsageComplete = false
 	}
@@ -214,7 +225,7 @@ func (o *jsonlOutput) finishLine() {
 	}
 	o.line = o.line[:0]
 	if e.Type == "assistant" {
-		o.recordAssistantUsage(e.Message)
+		o.recordAssistantUsage(e.Message, bytes.Equal(bytes.TrimSpace(e.ParentToolUseID), []byte("null")))
 	}
 	if e.Type == "system" && e.Subtype == "task_notification" && e.Status == "stopped" &&
 		pressureStopSummary(e.Summary) {
@@ -288,14 +299,28 @@ func (o *jsonlOutput) finishLine() {
 		return
 	}
 	tokens, complete := e.tokens()
+	if complete {
+		// A cumulative snapshot must cover newly observed root calls before it
+		// can replace their lower bound. Delegate/unknown messages can overlap
+		// the prior snapshot, so only their component maxima are safe here.
+		lower, valid := o.assistantLowerBound()
+		complete = valid && tokens.Input >= lower.Input && tokens.CachedInput >= lower.CachedInput && tokens.Output >= lower.Output
+	}
 	// Native modelUsage is cumulative across result turns. A later partial
 	// report must not erase previously recorded usage.
 	if tokens.Input >= o.result.Tokens.Input && tokens.CachedInput >= o.result.Tokens.CachedInput && tokens.Output >= o.result.Tokens.Output {
 		o.result.Tokens = tokens
 	} else {
+		if lower := maxTokens(o.result.Tokens, tokens); lower.Output <= math.MaxInt64-lower.Input {
+			o.result.Tokens = lower
+		}
 		complete = false
 	}
-	o.aggregateSeen = o.aggregateSeen || complete
+	if complete {
+		o.aggregateTokens = tokens
+		o.aggregateGeneration++
+		o.rootTokens, o.uncovered = usage.Tokens{}, false
+	}
 	o.result.UsageComplete = complete && o.usageLimit == nil && o.taskFailure == nil
 	if e.IsError || e.Subtype != "success" {
 		if failure := errors.Join(o.usageLimit, o.taskFailure); failure != nil {
@@ -371,35 +396,88 @@ func pressureStopText(text string) bool {
 	return xml.Unmarshal([]byte(text), &notice) == nil && (notice.Status == "killed" || notice.Status == "stopped") && pressureStopSummary(notice.Summary)
 }
 
-func (o *jsonlOutput) recordAssistantUsage(raw json.RawMessage) {
-	if o.aggregateSeen {
-		return
-	}
+func (o *jsonlOutput) recordAssistantUsage(raw json.RawMessage, root bool) {
 	var message struct {
-		ID    string     `json:"id"`
-		Usage eventUsage `json:"usage"`
+		ID    string          `json:"id"`
+		Usage json.RawMessage `json:"usage"`
 	}
 	if json.Unmarshal(raw, &message) != nil || message.ID == "" {
 		return
 	}
-	tokens, valid := message.Usage.tokens()
+	old, seen := o.assistantUsage[message.ID]
+	if !seen {
+		if o.assistantUsage == nil {
+			o.assistantUsage = make(map[string]messageUsage)
+		}
+		old = messageUsage{generation: o.aggregateGeneration, root: root}
+		// Remember IDs even before usable counters arrive. A later block from
+		// an already covered message must not become a new billable call.
+		o.assistantUsage[message.ID] = old
+		o.uncovered = o.aggregateGeneration != 0
+		if root && o.results != 0 {
+			// A new root response starts another turn even if no background-task
+			// notification exposed it. The preceding answer is provisional.
+			o.completed, o.result.Answer = false, ""
+		}
+	}
+	var rawUsage eventUsage
+	if json.Unmarshal(message.Usage, &rawUsage) != nil {
+		return
+	}
+	tokens, valid := rawUsage.tokens()
 	if !valid {
 		return
 	}
-	old := o.assistantUsage[message.ID]
-	tokens = usage.Tokens{Input: max(old.Input, tokens.Input), CachedInput: max(old.CachedInput, tokens.CachedInput), Output: max(old.Output, tokens.Output)}
-	total := usage.Tokens{Input: o.assistantTokens.Input - old.Input, CachedInput: o.assistantTokens.CachedInput - old.CachedInput, Output: o.assistantTokens.Output - old.Output}
-	if tokens.Input > math.MaxInt64-total.Input || tokens.CachedInput > math.MaxInt64-total.CachedInput || tokens.Output > math.MaxInt64-total.Output {
+	tokens = maxTokens(old.tokens, tokens)
+	if !tokens.Valid() || tokens.Output > math.MaxInt64-tokens.Input {
 		return
 	}
-	total.Add(tokens)
-	if total.Input > math.MaxInt64-total.Output {
+	total, valid := sumTokens(subtractTokens(o.assistantTokens, old.tokens), tokens)
+	if !valid {
 		return
 	}
-	if o.assistantUsage == nil {
-		o.assistantUsage = make(map[string]usage.Tokens)
+	if old.root && old.generation == o.aggregateGeneration {
+		rootTotal, valid := sumTokens(subtractTokens(o.rootTokens, old.tokens), tokens)
+		if !valid {
+			return
+		}
+		o.rootTokens = rootTotal
 	}
-	o.assistantUsage[message.ID], o.assistantTokens = tokens, total
+	o.assistantTokens = total
+	old.tokens = tokens
+	o.assistantUsage[message.ID] = old
+}
+
+func (o *jsonlOutput) assistantLowerBound() (usage.Tokens, bool) {
+	tokens := maxTokens(o.result.Tokens, o.assistantTokens)
+	if o.aggregateGeneration != 0 {
+		// Root responses follow the preceding result in the native stream.
+		// Unknown/delegate messages may arrive late and are never added to it.
+		root, valid := sumTokens(o.aggregateTokens, o.rootTokens)
+		if !valid {
+			return usage.Tokens{}, false
+		}
+		tokens = maxTokens(tokens, root)
+	}
+	return tokens, tokens.Valid() && tokens.Output <= math.MaxInt64-tokens.Input
+}
+
+func maxTokens(a, b usage.Tokens) usage.Tokens {
+	return usage.Tokens{Input: max(a.Input, b.Input), CachedInput: max(a.CachedInput, b.CachedInput), Output: max(a.Output, b.Output)}
+}
+
+func subtractTokens(a, b usage.Tokens) usage.Tokens {
+	return usage.Tokens{Input: a.Input - b.Input, CachedInput: a.CachedInput - b.CachedInput, Output: a.Output - b.Output}
+}
+
+// sumTokens adds normalized vectors; raw cache normalization and component
+// maxima have different validity rules and remain checked at their boundaries.
+func sumTokens(a, b usage.Tokens) (usage.Tokens, bool) {
+	if !a.Valid() || !b.Valid() || b.Input > math.MaxInt64-a.Input || b.Output > math.MaxInt64-a.Output {
+		return usage.Tokens{}, false
+	}
+	a.Add(b)
+	return a, a.Output <= math.MaxInt64-a.Input
 }
 
 func toolSandboxFailure(content json.RawMessage) bool {

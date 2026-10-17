@@ -69,7 +69,7 @@ func ValidCheckoutPath(name string) bool {
 		return false
 	}
 	for _, part := range strings.Split(name, "/") {
-		if gitMetadataAlias(part) {
+		if hfsGitMetadataAlias(part) {
 			return false
 		}
 		for _, ntfsPart := range strings.Split(part, "\\") {
@@ -87,11 +87,8 @@ func ntfsGitMetadataAlias(part string) bool {
 	return strings.EqualFold(name, ".git") || strings.EqualFold(name, "git~1")
 }
 
-// Match Git's independently applied protectNTFS and protectHFS metadata checks.
-func gitMetadataAlias(part string) bool {
-	if ntfsGitMetadataAlias(part) {
-		return true
-	}
+// HFS metadata checks use slash components even when a name contains backslashes.
+func hfsGitMetadataAlias(part string) bool {
 	hfs := strings.Map(func(r rune) rune {
 		switch {
 		case r >= 0x200c && r <= 0x200f, r >= 0x202a && r <= 0x202e,
@@ -160,12 +157,8 @@ func ValidateSnapshot(s Snapshot) error {
 	if total > MaxBytes {
 		return errors.New("snapshot files exceed byte limit")
 	}
-	seen := map[string]bool{}
-	for _, name := range s.Omitted {
-		if !ValidSourcePath(name) || seen[name] {
-			return fmt.Errorf("invalid omitted source path %q", name)
-		}
-		seen[name] = true
+	if name, invalid := invalidSourcePath(s.Omitted); invalid {
+		return fmt.Errorf("invalid omitted source path %q", name)
 	}
 	if s.Base == "" && len(s.Omitted) != 0 {
 		paths := make([]string, 0, len(s.Files)+len(s.Omitted))
@@ -180,14 +173,21 @@ func ValidateSnapshot(s Snapshot) error {
 	if len(s.ChangedPaths) > MaxFiles || (s.DiffIncomplete && len(s.Diff) != 0) {
 		return errors.New("snapshot changed paths or incomplete diff is invalid")
 	}
-	seen = map[string]bool{}
-	for _, name := range s.ChangedPaths {
+	if _, invalid := invalidSourcePath(s.ChangedPaths); invalid {
+		return errors.New("snapshot changed path is unsafe or duplicated")
+	}
+	return nil
+}
+
+func invalidSourcePath(paths []string) (string, bool) {
+	seen := make(map[string]bool, len(paths))
+	for _, name := range paths {
 		if !ValidSourcePath(name) || seen[name] {
-			return errors.New("snapshot changed path is unsafe or duplicated")
+			return name, true
 		}
 		seen[name] = true
 	}
-	return nil
+	return "", false
 }
 
 func validateFiles(files []File) error {
@@ -250,12 +250,7 @@ func ValidateFixPaths(files []File, omitted []string) error {
 		}
 		paths[i] = file.Path
 	}
-	for _, name := range omitted {
-		if !ValidSourcePath(name) {
-			return fmt.Errorf("unsafe omitted fix source path %q", name)
-		}
-		paths = append(paths, name)
-	}
+	paths = append(paths, omitted...)
 	return validatePaths(paths, true)
 }
 
@@ -318,6 +313,7 @@ func Materialize(root string, files []File) error {
 	if len(entries) != 0 {
 		return errors.New("workspace root is not empty")
 	}
+	// Creating each spelling once refuses aliases on casefolding filesystems.
 	directories := map[string]bool{}
 	for _, file := range files {
 		name := filepath.Join(root, filepath.FromSlash(file.Path))

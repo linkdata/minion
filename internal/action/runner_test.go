@@ -411,7 +411,7 @@ func TestAuditPromptSelectsDomainCompanionsOnly(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, want := range []string{"selected security-audit domain companion files", `"When to use" conditions apply`, "Exclude its main SKILL.md and independently configured skills", "Use [] when no domain companion applies", "installed validation and publication"} {
+		for _, want := range []string{"Do not execute repository code, builds, tests, or fixtures", "Copy this source-only execution prohibition verbatim into every delegated agent prompt", "it overrides the skill's local-execution allowance", "selected security-audit domain companion files", `"When to use" conditions apply`, "Exclude its main SKILL.md and independently configured skills", "Use [] when no domain companion applies", "installed validation and publication"} {
 			if !strings.Contains(prompt, want) {
 				t.Fatalf("audit prompt lacks %q: %s", want, prompt)
 			}

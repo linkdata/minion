@@ -49,6 +49,7 @@ const (
 	failureReply            = "Minion could not complete this request. No further automatic attempts will run. Check the service log and post a new command after the cause is fixed."
 )
 
+// Executor runs the trusted orchestration and publication workflow.
 type Executor interface {
 	Execute(context.Context, Job) error
 }

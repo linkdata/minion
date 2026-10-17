@@ -194,16 +194,11 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	return result, nil
 }
 
-func backgroundWaitCeiling(diagnostics string) bool {
+func backgroundWaitCeiling(line string) bool {
 	// Managed CLI settings can override its launch environment. Recognize this
 	// native diagnostic as a fallback, independently of the retained stderr tail.
-	for _, line := range strings.Split(diagnostics, "\n") {
-		line = strings.TrimRight(line, " \t\r")
-		if strings.HasPrefix(line, "Background tasks still running ") && strings.HasSuffix(line, "; stopping them. Set CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 to wait indefinitely.") {
-			return true
-		}
-	}
-	return false
+	line = strings.TrimRight(line, " \t\r")
+	return strings.HasPrefix(line, "Background tasks still running ") && strings.HasSuffix(line, "; stopping them. Set CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 to wait indefinitely.")
 }
 
 func arguments(policy string) []string {

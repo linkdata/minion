@@ -17,13 +17,7 @@ func validRepositorySegment(s string) bool {
 	if s == "" || s == "." || s == ".." {
 		return false
 	}
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '_' && c != '.' && c != '-' {
-			return false
-		}
-	}
-	return true
+	return strings.Trim(s, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-") == ""
 }
 
 // validateBranch applies Git's refname restrictions before the value is used

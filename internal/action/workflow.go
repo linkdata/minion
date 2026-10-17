@@ -162,24 +162,24 @@ func (e *Orchestrator) portableJob(ctx context.Context, p *preparedAction, title
 	if err != nil {
 		return Job{}, err
 	}
-	attemptID := e.attemptID
-	if attemptID == "" {
-		attemptID, err = newAttemptID()
-		if err != nil {
+	budget := time.Until(deadline)
+	if budget <= 0 {
+		if err := ctx.Err(); err != nil {
 			return Job{}, err
 		}
+		return Job{}, context.DeadlineExceeded
 	}
 	job := Job{
 		Version: ProtocolVersion,
 		Identity: Identity{
-			JobID: request.ID, AttemptID: attemptID, ExecutorID: "local",
+			JobID: request.ID, AttemptID: e.attemptID, ExecutorID: "local",
 			Repository: request.Repository.Name, RepositoryID: request.Repository.ID, OwnerID: request.Repository.OwnerID,
 			Requester: request.Source.Author.Login, RequesterID: request.Source.Author.ID,
 			Number: request.Number, SubjectType: request.SubjectType,
 		},
 		Command: request.Command.Name, Action: request.Command.Action,
 		Title: title, Description: description, Notes: requestNotes(request), Source: source,
-		Main: e.roleSettings(e.mainProvider(), e.Commands[request.Command.Name].Skills), RuntimeBudget: time.Until(deadline),
+		Main: e.roleSettings(e.mainProvider(), e.Commands[request.Command.Name].Skills), RuntimeBudget: budget,
 	}
 	if e.Adversarial != "" {
 		critic := e.roleSettings(e.Adversarial, nil)

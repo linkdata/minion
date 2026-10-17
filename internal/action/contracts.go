@@ -194,6 +194,7 @@ func (j Job) Validate() error {
 	default:
 		return errors.New("unsupported action")
 	}
+	// Bound fields before adding their lengths so a 32-bit int cannot wrap.
 	if len(j.Title) > maxActionTitleBytes || len(j.Description) > workspace.MaxBytes || len(j.Notes) > workspace.MaxBytes || len(j.Title)+len(j.Description)+len(j.Notes) > workspace.MaxBytes || !utf8.ValidString(j.Title) || !utf8.ValidString(j.Description) || !utf8.ValidString(j.Notes) {
 		return errors.New("action text is invalid or exceeds limits")
 	}

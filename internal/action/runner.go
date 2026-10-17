@@ -80,7 +80,11 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 	if err != nil {
 		return result, err
 	}
-	if err := configured.checkWorkRootIsolation(workRoot, job); err != nil {
+	providers := []string{job.Main.Provider}
+	if job.Critic != nil {
+		providers = append(providers, job.Critic.Provider)
+	}
+	if err := configured.CheckWorkRootIsolation(workRoot, providers...); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return result, err
 		}
@@ -266,10 +270,19 @@ func preparationFailure(stage string, err error) error {
 	return fmt.Errorf("%w: %s: %w", monitor.ErrTerminalJob, stage, err)
 }
 
-func (r *Runner) checkWorkRootIsolation(root string, job Job) error {
-	providers := []string{job.Main.Provider}
-	if job.Critic != nil {
-		providers = append(providers, job.Critic.Provider)
+// CheckWorkRootIsolation refuses overlap with the selected providers' filesystem grants.
+// It checks existing paths without creating directories or invoking models.
+func (r *Runner) CheckWorkRootIsolation(root string, providers ...string) error {
+	if root == "" {
+		return errors.New("work root is required")
+	}
+	root, err := filepath.Abs(root)
+	if err != nil {
+		return err
+	}
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		return err
 	}
 	var grants []string
 	for _, path := range claudecli.SystemReadPaths() {
@@ -280,6 +293,9 @@ func (r *Runner) checkWorkRootIsolation(root string, job Job) error {
 		}
 	}
 	for _, provider := range providers {
+		if provider == "" {
+			continue
+		}
 		readOnly, selected := r.Codex.ReadOnlyDirs, r.Codex.Skills
 		if provider == "claude" {
 			readOnly, selected = r.Claude.ReadOnlyDirs, r.Claude.Skills
@@ -408,7 +424,7 @@ Description: %s`, job.Command, id.SubjectType, id.Number, job.Source.Head, id.Re
 
 Set run-metadata.json repo=%q, target=%q, source_ref=%q, profile="standard", scope_paths=["."], budget=null, prior_run_paths=[], execution_policy="sandboxed-source-and-local-only", and shared_file_owners to "parent" for every shared artifact. Set selected_companion_files to selected security-audit domain companion files whose "When to use" conditions apply, within that installed security-audit directory. Exclude its main SKILL.md and independently configured skills, including Caveman, Ponytail and anti-prompt-injection. Use [] when no domain companion applies. Mark complete only when the skill's workflow and installed validators pass. The bot posts REPORT.md.
 
-Source is read-only. Do not execute repository code, builds, tests, or fixtures, probe live services, publish, or run network commands. This runner lacks the skill's required per-agent execution isolation for target code; record claims requiring runtime evidence as needs_validation. Do not include secrets in reports. Use repository-relative file paths and source identity %q in report prose.%s%s
+Source is read-only. Do not execute repository code, builds, tests, or fixtures, probe live services, publish, or run network commands. Copy this source-only execution prohibition verbatim into every delegated agent prompt; it overrides the skill's local-execution allowance. This runner lacks the skill's required per-agent execution isolation for target code; record claims requiring runtime evidence as needs_validation. Do not include secrets in reports. Use repository-relative file paths and source identity %q in report prose.%s%s
 
 Untrusted GitHub thread text:
 Thread title: %s

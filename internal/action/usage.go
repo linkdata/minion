@@ -14,16 +14,12 @@ import (
 
 // trackUsage gives each action attempt its own record and runner wrapper.
 func (e *Orchestrator) trackUsage(job monitor.Job) (*Orchestrator, func(error) error, error) {
-	id, err := newAttemptID()
-	if err != nil {
-		return nil, nil, err
-	}
 	name := job.Command.Name
 	if name == "" {
 		name = string(job.Command.Action)
 	}
 	record := usage.Record{
-		ID: id, JobID: job.ID, Repo: job.Repository.Name,
+		ID: e.attemptID, JobID: job.ID, Repo: job.Repository.Name,
 		User: job.Source.Author.Login, Action: name, Number: job.Number,
 		SourceURL: sourceURL(job), Provider: e.mainProvider(), CriticProvider: e.Adversarial,
 		StartedAt: time.Now().UTC(), Status: "running", UsageComplete: true,
@@ -44,16 +40,9 @@ func (e *Orchestrator) trackUsage(job monitor.Job) (*Orchestrator, func(error) e
 		return nil, nil, err
 	}
 	tracked := *e
-	tracked.attemptID = id
 	tracked.Runner.aroundModel = func(ctx context.Context, request modelRun, next modelCall) (aicli.Result, error) {
 		if err := ctx.Err(); err != nil {
 			return aicli.Result{}, err
-		}
-		// The dispatched Job's settings are authoritative over host defaults.
-		if request.role == roleMain {
-			record.Provider, record.Model, record.Effort = request.provider, cmp.Or(request.model, "default"), request.effort
-		} else {
-			record.CriticProvider, record.CriticModel, record.CriticEffort = request.provider, cmp.Or(request.model, "default"), request.effort
 		}
 		calls := &record.CodexCalls
 		if request.provider == "claude" {

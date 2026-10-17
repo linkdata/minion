@@ -339,6 +339,26 @@ func TestSnapshotBoundsAndIdentity(t *testing.T) {
 	}
 }
 
+func TestSnapshotRefusesUnsafeOrRepeatedPathLists(t *testing.T) {
+	for _, field := range []string{"omitted", "changed"} {
+		for _, paths := range [][]string{{""}, {"../outside"}, {"/absolute"}, {".git/config"}, {"repeat", "repeat"}} {
+			t.Run(field+fmt.Sprint(paths), func(t *testing.T) {
+				snapshot := Snapshot{Head: strings.Repeat("a", 40), Base: strings.Repeat("b", 40), MergeBase: strings.Repeat("b", 40)}
+				want := "snapshot changed path is unsafe or duplicated"
+				if field == "omitted" {
+					snapshot.Omitted = paths
+					want = fmt.Sprintf("invalid omitted source path %q", paths[len(paths)-1])
+				} else {
+					snapshot.ChangedPaths = paths
+				}
+				if err := ValidateSnapshot(snapshot); err == nil || err.Error() != want {
+					t.Fatalf("invalid %s paths %q error=%v want=%q", field, paths, err, want)
+				}
+			})
+		}
+	}
+}
+
 func TestApplyCleansRootAndKeepsRootDirectory(t *testing.T) {
 	root := privateRoot(t)
 	if err := Materialize(root, []File{{Path: "nested/shallow", Mode: Regular}, {Path: "nested/deep/deleted", Mode: Regular}}); err != nil {

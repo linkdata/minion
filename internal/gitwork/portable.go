@@ -38,6 +38,9 @@ func (c *Checkout) sourceTree(ctx context.Context, ref string) ([]sourceEntry, e
 	}
 	tree, err := c.lookupTree(ctx, treeSHA)
 	if err != nil {
+		if errors.Is(err, github.ErrResponseTooLarge) {
+			return nil, fmt.Errorf("%w: load source tree metadata: %w", ErrCheckoutTooLarge, err)
+		}
 		return nil, fmt.Errorf("load source tree metadata: %w", err)
 	}
 	entries, err := c.sourceEntries(ctx, ref, tree, treeSHA)
@@ -72,12 +75,6 @@ func (c *Checkout) sourceEntries(ctx context.Context, ref string, tree github.Gi
 	}
 	if truncated {
 		return nil, fmt.Errorf("%w: API tree differs from Git tree", ErrUnsupportedSource)
-	}
-	if len(output) == 0 {
-		if len(metadata) != 0 {
-			return nil, fmt.Errorf("%w: API tree differs from Git tree", ErrUnsupportedSource)
-		}
-		return nil, nil
 	}
 	lines, err := SplitNUL(output)
 	if err != nil {
@@ -137,7 +134,7 @@ func (c *Checkout) sourceFiles(ctx context.Context, entries []sourceEntry) (file
 		input.WriteString(entry.sha + "\n")
 	}
 	if len(omitted) > workspace.MaxFiles {
-		return nil, nil, ErrCheckoutTooLarge
+		return nil, nil, fmt.Errorf("%w: more than %d omitted paths", ErrCheckoutTooLarge, workspace.MaxFiles)
 	}
 	if len(requested) == 0 {
 		return nil, omitted, nil
@@ -209,15 +206,17 @@ func (c *Checkout) Snapshot(ctx context.Context, history, pull bool) (s workspac
 		if err != nil {
 			return s, err
 		}
+		names, err := SplitNUL(paths)
+		if err != nil {
+			return s, fmt.Errorf("%w: invalid Git comparison paths: %w", ErrUnsupportedSource, err)
+		}
 		selected = map[string]bool{}
-		for _, name := range bytes.Split(paths, []byte{0}) {
-			if len(name) != 0 {
-				selected[string(name)] = true
-				s.ChangedPaths = append(s.ChangedPaths, string(name))
-			}
+		for _, name := range names {
+			selected[string(name)] = true
+			s.ChangedPaths = append(s.ChangedPaths, string(name))
 		}
 		if len(s.ChangedPaths) > workspace.MaxFiles {
-			return s, ErrCheckoutTooLarge
+			return s, fmt.Errorf("%w: more than %d changed paths", ErrCheckoutTooLarge, workspace.MaxFiles)
 		}
 	}
 	headFiles := 0
@@ -287,7 +286,7 @@ func (c *Checkout) Import(ctx context.Context, expectedHead string, changes []wo
 	if err := c.ready(); err != nil {
 		return err
 	}
-	if !workspace.ValidSHA(expectedHead) || expectedHead != c.expectedHead {
+	if expectedHead != c.expectedHead {
 		return errors.New("result source commit does not match checkout")
 	}
 	if err := c.assertHead(ctx); err != nil {

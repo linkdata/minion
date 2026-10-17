@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -389,6 +390,22 @@ func TestValidateJobTimeoutMinutes(t *testing.T) {
 			}
 			if err != nil || cfg.JobTimeoutMinutes != tt.want {
 				t.Fatalf("Validate() timeout=%d, error=%v; want %d", cfg.JobTimeoutMinutes, err, tt.want)
+			}
+		})
+	}
+}
+
+func TestCommandNameMatchesPortableLimit(t *testing.T) {
+	for _, length := range []int{1, 100, 101} {
+		t.Run(fmt.Sprint(length), func(t *testing.T) {
+			name := strings.Repeat("a", length)
+			cfg := Config{BotLogin: "bot", Commands: map[string]CommandMapping{name: {Action: "comment", Skills: []string{defaultAntiInjectionSkill}}}, Repositories: []Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{name}}}}
+			err := cfg.Validate(t.TempDir())
+			if (err != nil) != (length > 100) {
+				t.Fatalf("command length%d validation=%v", length, err)
+			}
+			if length > 100 && !strings.Contains(err.Error(), "invalid command name") {
+				t.Fatalf("wrong long-name refusal: %v", err)
 			}
 		})
 	}

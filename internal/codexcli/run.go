@@ -185,7 +185,8 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	}
 	filesystemRule := "permissions.minion.filesystem={" + strings.Join(filesystemRules, ",") + "}"
 
-	// Persist sessions so accounting includes helper agents and interrupted turns.
+	// Persist sessions to recover helper/interrupted usage while the action
+	// budget is live. Cancellation can leave rollout-only counters unread.
 	args := []string{"exec", "--json", "--ignore-user-config", "--ignore-rules", "--strict-config", "--skip-git-repo-check"}
 	// Untrusted jobs must not inherit connected tools, plugins, rules, or a login-shell snapshot.
 	for _, feature := range []string{
@@ -260,7 +261,7 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	}
 	var unfinishedChild bool
 	result.Tokens, result.UsageComplete, unfinishedChild = collectUsage(ctx, codexHome, output.threadID, started, output.tokens, output.children)
-	if runErr != nil || ctx.Err() != nil || output.failed || output.parseErr != nil || output.oversizedLines > 0 {
+	if runErr != nil || ctx.Err() != nil || output.failed || output.parseErr != nil {
 		// Keep known counters; a failed lifecycle cannot certify full coverage.
 		result.UsageComplete = false
 	}
@@ -288,9 +289,6 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	}
 	if !output.completed {
 		reason := output.failureReason
-		if reason == "" && output.oversizedLines > 0 {
-			return result, fmt.Errorf("codex exec: %w: JSONL event exceeded the output size limit", aicli.ErrOutputLimit)
-		}
 		if reason == "" {
 			reason = strings.TrimSpace(stderr.String())
 		}
@@ -366,21 +364,19 @@ type codexEvent struct {
 }
 
 type jsonlOutput struct {
-	cancel         context.CancelFunc
-	threadID       string
-	tokens         *usage.Tokens
-	children       []string
-	bytes          int64
-	events         int
-	stopped        bool
-	line           []byte
-	dropping       bool
-	oversizedLines int
-	parseErr       error
-	finalMessage   string
-	completed      bool
-	failed         bool
-	failureReason  string
+	cancel        context.CancelFunc
+	threadID      string
+	tokens        *usage.Tokens
+	children      []string
+	bytes         int64
+	events        int
+	stopped       bool
+	line          []byte
+	parseErr      error
+	finalMessage  string
+	completed     bool
+	failed        bool
+	failureReason string
 }
 
 func (o *jsonlOutput) Write(p []byte) (int, error) {
@@ -423,31 +419,21 @@ func (o *jsonlOutput) stop(reason string) {
 }
 
 func (o *jsonlOutput) appendFragment(p []byte) {
-	if o.dropping {
-		return
-	}
 	if len(o.line)+len(p) > maxEventBytes {
-		o.line = nil
-		o.dropping = true
+		o.stop("Codex JSONL event exceeded the output size limit")
 		return
 	}
 	o.line = append(o.line, p...)
 }
 
 func (o *jsonlOutput) finish() {
-	if o.dropping || len(o.line) > 0 {
+	if len(o.line) > 0 {
 		o.finishLine()
 	}
 }
 
 func (o *jsonlOutput) finishLine() {
 	if o.stopped {
-		o.line = nil
-		return
-	}
-	if o.dropping {
-		o.oversizedLines++
-		o.dropping = false
 		o.line = nil
 		return
 	}
@@ -481,9 +467,12 @@ func (o *jsonlOutput) accept(event codexEvent) {
 	switch event.Type {
 	case "thread.started":
 		o.threadID = event.ThreadID
+	case "turn.started":
+		o.completed, o.finalMessage = false, ""
 	case "item.completed":
 		if event.Item != nil && event.Item.Type == "agent_message" {
 			o.finalMessage = event.Item.Text
+			o.completed = false
 		}
 	case "turn.completed":
 		o.completed = true

@@ -415,15 +415,24 @@ func TestSnapshotPreservesGitLegalSourceNames(t *testing.T) {
 	fixture := newFixture(t)
 	names := []string{"include/xt_connmark.h", "include/xt_CONNMARK.h", "Docs/a.md", "docs/b.md", `back\slash`, ".g\u200cit\\x", "dir\\.g\u200cit/x"}
 	for _, name := range names {
-		if err := os.MkdirAll(filepath.Dir(filepath.Join(fixture.checkout.path, name)), 0700); err != nil {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(fixture.source, name)), 0700); err != nil {
 			t.Fatal(err)
 		}
-		writeFile(t, filepath.Join(fixture.checkout.path, name), name)
+		writeFile(t, filepath.Join(fixture.source, name), name)
 	}
-	fixture.git(fixture.checkout.path, "add", ".")
-	fixture.git(fixture.checkout.path, "commit", "-m", "Git-legal source names")
-	fixture.checkout.expectedHead = fixture.git(fixture.checkout.path, "rev-parse", "HEAD")
-	snapshot, err := fixture.checkout.Snapshot(context.Background(), false, false)
+	fixture.git(fixture.source, "add", ".")
+	fixture.git(fixture.source, "commit", "-m", "Git-legal source names")
+	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/heads/main")
+	checkout, err := cloneFromURL(context.Background(), t.TempDir(), fixture.remote, "main", localTreeMetadata(t, fixture.source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := checkout.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	snapshot, err := checkout.Snapshot(context.Background(), false, false)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -252,7 +252,7 @@ func (c *Checkout) checkoutSource(ctx context.Context, head string) error {
 // against GitHub metadata before fetching source contents.
 func checkSourceTree(tree github.GitTree, expectedSHA string) error {
 	if len(tree.Tree) > workspace.MaxEntries {
-		return ErrCheckoutTooLarge
+		return fmt.Errorf("%w: more than %d metadata entries", ErrCheckoutTooLarge, workspace.MaxEntries)
 	}
 	if tree.Truncated != nil && *tree.Truncated {
 		return fmt.Errorf("%w: GitHub tree metadata is truncated", ErrCheckoutTooLarge)
@@ -395,9 +395,6 @@ func (c *Checkout) stagedPaths(ctx context.Context) ([]string, error) {
 	parts, err := SplitNUL(data)
 	if err != nil {
 		return nil, fmt.Errorf("invalid Git changed path output: %w", err)
-	}
-	if len(parts) == 0 {
-		return nil, nil
 	}
 	paths := make([]string, len(parts))
 	for i, part := range parts {

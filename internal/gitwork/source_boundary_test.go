@@ -191,3 +191,14 @@ func TestImportRejectsGitMetadataAliasesBeforeApplying(t *testing.T) {
 		})
 	}
 }
+
+func TestSourceTreeResponseOverflowIsTerminalSizeRefusal(t *testing.T) {
+	fixture := newFixture(t)
+	fixture.checkout.lookupTree = func(context.Context, string) (github.GitTree, error) {
+		return github.GitTree{}, github.ErrResponseTooLarge
+	}
+	_, err := fixture.checkout.Snapshot(context.Background(), false, false)
+	if !errors.Is(err, ErrCheckoutTooLarge) || !errors.Is(err, github.ErrResponseTooLarge) {
+		t.Fatalf("source response overflow classification: %v", err)
+	}
+}

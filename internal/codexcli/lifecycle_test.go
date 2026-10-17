@@ -32,6 +32,75 @@ func TestRunOutputLimitPreservesRolloutUsage(t *testing.T) {
 	}
 }
 
+func TestOutputRejectsOversizedRecordsAfterProgress(t *testing.T) {
+	const progress = `{"type":"item.completed","item":{"type":"agent_message","text":"still working"}}`
+	const final = `{"type":"item.completed","item":{"type":"agent_message","text":"final answer"}}`
+	const complete = `{"type":"turn.completed"}`
+	large := strings.Repeat("x", maxEventBytes)
+	for _, scenario := range []struct{ name, data string }{
+		{"oversized final", progress + "\n" + `{"type":"item.completed","item":{"type":"agent_message","text":"` + large + `"}}` + "\n" + complete},
+		{"oversized tool then valid final", progress + "\n" + `{"type":"item.completed","item":{"type":"command_execution","output":"` + large + `"}}` + "\n" + final + "\n" + complete},
+		{"unterminated oversized final", progress + "\n" + `{"type":"item.completed","item":{"type":"agent_message","text":"` + large},
+	} {
+		for _, chunk := range []int{7, 32768} {
+			t.Run(fmt.Sprintf("%s/chunk%d", scenario.name, chunk), func(t *testing.T) {
+				canceled := false
+				o := jsonlOutput{cancel: func() { canceled = true }}
+				for data := scenario.data; len(data) != 0; {
+					n := min(chunk, len(data))
+					_, _ = o.Write([]byte(data[:n]))
+					data = data[n:]
+				}
+				o.finish()
+				if !o.stopped || !o.failed || !canceled || o.completed || !strings.Contains(o.failureReason, "event exceeded") {
+					t.Fatalf("oversized record accepted: stopped=%t failed=%t canceled=%t completed=%t reason=%q", o.stopped, o.failed, canceled, o.completed, o.failureReason)
+				}
+			})
+		}
+	}
+}
+
+func TestRunOversizedFinalCannotPublishProgressAndRetainsKnownUsage(t *testing.T) {
+	events := `{"type":"thread.started","thread_id":"root"}` + "\n" +
+		`{"type":"item.completed","item":{"type":"agent_message","text":"still working"}}` + "\n" +
+		`{"type":"item.completed","item":{"type":"agent_message","text":"` + strings.Repeat("x", maxEventBytes) + `"}}` + "\n" +
+		`{"type":"turn.completed"}`
+	installFakeCodex(t, "#!/bin/sh\ncat <<'EVENTS'\n"+events+"\nEVENTS\n")
+	writeUsageRollout(t, os.Getenv("CODEX_HOME"), "root", "", usageEvent("task_started", "root-turn"), usageRecord("root", "root-turn", "response", 100, 10, 7), usageEvent("task_complete", "root-turn"))
+	result, err := Run(context.Background(), t.TempDir(), "task", false, "", config.CodexConfig{})
+	if !errors.Is(err, aicli.ErrOutputLimit) || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 100, CachedInput: 10, Output: 7}) {
+		t.Fatalf("oversized final accepted or lost known usage: result=%+v error=%v", result, err)
+	}
+}
+
+func TestRunRequiresCompletionForLatestTurn(t *testing.T) {
+	const message = `{"type":"item.completed","item":{"type":"agent_message","text":"answer"}}`
+	const started = `{"type":"turn.started"}`
+	const complete = `{"type":"turn.completed"}`
+	first := message + "\n" + complete + "\n"
+	for _, scenario := range []struct {
+		name, after, failure string
+	}{
+		{"new message without completion", message, "missing turn.completed"},
+		{"new turn without completion", started, "missing turn.completed"},
+		{"new completed turn without answer", started + "\n" + complete, "without a final agent message"},
+		{"new turn completes", started + "\n" + message + "\n" + complete, ""},
+		{"new message completes", message + "\n" + complete, ""},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			installFakeCodex(t, "#!/bin/sh\ncat <<'EVENTS'\n"+first+scenario.after+"\nEVENTS\n")
+			result, err := Run(context.Background(), t.TempDir(), "task", false, "", config.CodexConfig{})
+			if scenario.failure == "" {
+				if err != nil || result.Answer != "answer" {
+					t.Fatalf("valid final turn refused: result=%+v error=%v", result, err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), scenario.failure) || result.Answer != "" || result.UsageComplete {
+				t.Fatalf("unfinished latest turn accepted: result=%+v error=%v", result, err)
+			}
+		})
+	}
+}
+
 func TestRunRejectsKnownUnfinishedChildrenWithoutRejectingAccountingGaps(t *testing.T) {
 	for _, scenario := range []string{"complete", "unfinished", "aborted", "missing counters", "missing log", "inherited turn", "damaged log"} {
 		t.Run(scenario, func(t *testing.T) {

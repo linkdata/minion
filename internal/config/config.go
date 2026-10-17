@@ -19,7 +19,7 @@ import (
 var (
 	repoNamePattern  = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
 	ownerNamePattern = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$`)
-	commandPattern   = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
+	commandPattern   = regexp.MustCompile(`^[a-z][a-z0-9-]{0,99}$`)
 )
 
 const (

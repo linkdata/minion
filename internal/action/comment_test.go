@@ -98,7 +98,7 @@ func TestCommentCommandReportsIssueAndPullRequest(t *testing.T) {
 			if subject == "Issue" {
 				err = executor.Execute(context.Background(), job)
 			} else {
-				err = executor.perform(testActionContext(t), job)
+				err = attemptFixture(executor).perform(testActionContext(t), job)
 			}
 			if err != nil {
 				t.Fatal(err)

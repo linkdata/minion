@@ -15,7 +15,7 @@ import (
 )
 
 func assistantUsageEvent(id string, input, created, cached, output int64) string {
-	return fmt.Sprintf(`{"type":"assistant","message":{"id":%q,"usage":{"input_tokens":%d,"cache_creation_input_tokens":%d,"cache_read_input_tokens":%d,"output_tokens":%d}}}`, id, input, created, cached, output)
+	return fmt.Sprintf(`{"type":"assistant","parent_tool_use_id":null,"message":{"id":%q,"usage":{"input_tokens":%d,"cache_creation_input_tokens":%d,"cache_read_input_tokens":%d,"output_tokens":%d}}}`, id, input, created, cached, output)
 }
 
 func TestOutputRetainsDeduplicatedAssistantUsageBeforeResult(t *testing.T) {
@@ -33,12 +33,12 @@ func TestOutputRetainsDeduplicatedAssistantUsageBeforeResult(t *testing.T) {
 		{"invalid counters", assistantUsageEvent("a", -1, 5, 7, 11), usage.Tokens{}, true},
 		{"sum overflow", assistantUsageEvent("a", math.MaxInt64-2, 0, 0, 1) + "\n" + assistantUsageEvent("b", 3, 0, 0, 1), usage.Tokens{Input: math.MaxInt64 - 2, Output: 1}, true},
 		{"component maxima overflow", assistantUsageEvent("a", math.MaxInt64-10, 0, 0, 1) + "\n" + assistantUsageEvent("a", 1, 0, 0, math.MaxInt64-5), usage.Tokens{Input: math.MaxInt64 - 10, Output: 1}, true},
-		{"success cumulative wins", first + "\n" + other + "\n" + successfulResult, usage.Tokens{Input: 15, CachedInput: 7, Output: 11}, false},
-		{"failed cumulative wins", first + "\n" + other + "\n" + strings.Replace(successfulResult, `"is_error":false`, `"is_error":true`, 1), usage.Tokens{Input: 15, CachedInput: 7, Output: 11}, true},
+		{"success cannot erase known lower bound", first + "\n" + other + "\n" + successfulResult, usage.Tokens{Input: 20, CachedInput: 10, Output: 11}, false},
+		{"failed aggregate cannot erase known lower bound", first + "\n" + other + "\n" + strings.Replace(successfulResult, `"is_error":false`, `"is_error":true`, 1), usage.Tokens{Input: 20, CachedInput: 10, Output: 11}, true},
 		{"failed result lacks usage", first + "\n" + `{"type":"result","is_error":true,"subtype":"error_during_execution"}`, usage.Tokens{Input: 15, CachedInput: 7, Output: 2}, true},
 		{"parser failure", first + "\n" + "{invalid", usage.Tokens{Input: 15, CachedInput: 7, Output: 2}, true},
 		{"root fallback cannot erase helper counters", assistantUsageEvent("a", 80, 10, 10, 7) + "\n" + rootOnly, usage.Tokens{Input: 100, CachedInput: 10, Output: 7}, false},
-		{"assistant counters after root-only result", first + "\n" + rootOnly + "\n" + other, usage.Tokens{Input: 20, CachedInput: 10, Output: 3}, false},
+		{"new turn after root-only result", first + "\n" + rootOnly + "\n" + other, usage.Tokens{Input: 20, CachedInput: 10, Output: 3}, true},
 		{"failed root fallback cannot erase helper counters", assistantUsageEvent("a", 80, 10, 10, 7) + "\n" + strings.TrimSuffix(rootOnly, "}") + `,"is_error":true}`, usage.Tokens{Input: 100, CachedInput: 10, Output: 7}, true},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
@@ -51,6 +51,54 @@ func TestOutputRetainsDeduplicatedAssistantUsageBeforeResult(t *testing.T) {
 			o.finish()
 			if o.result.Tokens != scenario.want || (o.err != nil) != scenario.fails || scenario.fails && (o.result.UsageComplete || o.result.Answer != "") {
 				t.Fatalf("partial usage=%+v error=%v want=%+v failure=%t", o.result, o.err, scenario.want, scenario.fails)
+			}
+		})
+	}
+}
+
+func TestOutputRetainsNewCallsAfterProvisionalAggregate(t *testing.T) {
+	const pending = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"worker"}]}`
+	const clear = `{"type":"system","subtype":"background_tasks_changed","tasks":[]}`
+	const rootOnly = `{"type":"result","subtype":"success","result":"answer","usage":{"input_tokens":900,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":400}}`
+	full := func(input, cached, output int64) string {
+		return fmt.Sprintf(`{"type":"result","subtype":"success","result":"answer","modelUsage":{"main":{"inputTokens":%d,"cacheCreationInputTokens":0,"cacheReadInputTokens":%d,"outputTokens":%d}}}`, input-cached, cached, output)
+	}
+	newCall := assistantUsageEvent("new", 1000, 0, 0, 500)
+	provisional := pending + "\n" + successfulResult + "\n" + clear + "\n"
+	for _, scenario := range []struct {
+		name, data string
+		want       usage.Tokens
+		complete   bool
+		fails      bool
+	}{
+		{"new root call interrupted", provisional + newCall, usage.Tokens{Input: 1015, CachedInput: 7, Output: 511}, false, true},
+		{"new root turn invalidates final without task notification", successfulResult + "\n" + newCall, usage.Tokens{Input: 1015, CachedInput: 7, Output: 511}, false, true},
+		{"new root blocks deduplicated", provisional + assistantUsageEvent("new", 1000, 0, 0, 400) + "\n" + newCall + "\n" + newCall, usage.Tokens{Input: 1015, CachedInput: 7, Output: 511}, false, true},
+		{"covering aggregate replaces lower bound", provisional + newCall + "\n" + full(1015, 7, 511), usage.Tokens{Input: 1015, CachedInput: 7, Output: 511}, true, false},
+		{"partial result is overlapping", provisional + newCall + "\n" + rootOnly, usage.Tokens{Input: 1015, CachedInput: 7, Output: 511}, false, false},
+		{"incomparable partial result preserves larger output", provisional + newCall + "\n" + strings.Replace(rootOnly, `"output_tokens":400`, `"output_tokens":2000`, 1), usage.Tokens{Input: 1015, CachedInput: 7, Output: 2000}, false, false},
+		{"stale aggregate keeps new counters", provisional + newCall + "\n" + successfulResult, usage.Tokens{Input: 1015, CachedInput: 7, Output: 511}, false, false},
+		{"later aggregate restores complete coverage", provisional + newCall + "\n" + successfulResult + "\n" + full(1015, 7, 511), usage.Tokens{Input: 1015, CachedInput: 7, Output: 511}, true, false},
+		{"late covered block is not added", assistantUsageEvent("old", 2, 0, 1, 2) + "\n" + successfulResult + "\n" + assistantUsageEvent("old", 7, 0, 1, 5), usage.Tokens{Input: 15, CachedInput: 7, Output: 11}, true, false},
+		{"late covered block raises independent lower bound", assistantUsageEvent("old", 3, 5, 7, 2) + "\n" + successfulResult + "\n" + assistantUsageEvent("old", 1000, 0, 0, 500), usage.Tokens{Input: 1000, CachedInput: 7, Output: 500}, false, false},
+		{"ID without initial usage remains covered", `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"old"}}` + "\n" + successfulResult + "\n" + assistantUsageEvent("old", 1000, 0, 0, 500), usage.Tokens{Input: 1000, CachedInput: 7, Output: 500}, false, false},
+		{"ID with malformed initial usage remains covered", `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"old","usage":{"input_tokens":"bad"}}}` + "\n" + successfulResult + "\n" + assistantUsageEvent("old", 1000, 0, 0, 500), usage.Tokens{Input: 1000, CachedInput: 7, Output: 500}, false, false},
+		{"delayed delegate overlaps prior aggregate", provisional + strings.Replace(newCall, `"parent_tool_use_id":null`, `"parent_tool_use_id":"tool"`, 1), usage.Tokens{Input: 1000, CachedInput: 7, Output: 500}, false, true},
+		{"unknown parent overlaps prior aggregate", provisional + strings.Replace(newCall, `"parent_tool_use_id":null,`, "", 1), usage.Tokens{Input: 1000, CachedInput: 7, Output: 500}, false, true},
+		{"unknown counters cannot be erased by stale aggregate", provisional + strings.Replace(newCall, `"parent_tool_use_id":null,`, "", 1) + "\n" + successfulResult, usage.Tokens{Input: 1000, CachedInput: 7, Output: 500}, false, false},
+		{"addition overflow preserves known aggregate", provisional + assistantUsageEvent("new", math.MaxInt64-2, 0, 0, 1), usage.Tokens{Input: 15, CachedInput: 7, Output: 11}, false, true},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			o := jsonlOutput{}
+			data := numberResultEvents(scenario.data) + "\n"
+			for len(data) != 0 {
+				n := min(7, len(data))
+				_, _ = o.Write([]byte(data[:n]))
+				data = data[n:]
+			}
+			o.finish()
+			if o.result.Tokens != scenario.want || o.result.UsageComplete != scenario.complete || (o.err != nil) != scenario.fails || scenario.fails && o.result.Answer != "" {
+				t.Fatalf("result=%+v error=%v want=%+v complete=%t failure=%t", o.result, o.err, scenario.want, scenario.complete, scenario.fails)
 			}
 		})
 	}

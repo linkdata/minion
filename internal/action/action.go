@@ -94,6 +94,11 @@ func (e *Orchestrator) Execute(ctx context.Context, job monitor.Job) (resultErr 
 		e.logf("already completed %s", job.ID)
 		return nil
 	}
+	attempt := *e
+	e = &attempt
+	if e.attemptID, err = newAttemptID(); err != nil {
+		return err
+	}
 	// A panic leaves the last running checkpoint instead of claiming success.
 	returned := false
 	if e.Usage != nil {
@@ -312,6 +317,7 @@ func inertModelOutput(s string) string {
 
 func modelOutputFits(s string) bool {
 	s = normalizedModelOutput(s)
+	// Bound length before quote expansion so its int arithmetic cannot wrap.
 	return len(s) <= maxOutputBytes && utf8.ValidString(s) && len(s)+2*strings.Count(s, "\n")+14 <= maxOutputBytes
 }
 

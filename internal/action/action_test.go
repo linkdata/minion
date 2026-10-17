@@ -21,7 +21,6 @@ import (
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/github"
-	"github.com/linkdata/minion/internal/gitwork"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/state"
 	"github.com/linkdata/minion/internal/workspace"
@@ -57,45 +56,6 @@ func TestRequestNotesContext(t *testing.T) {
 				t.Errorf("notesContext() = %q, want %q", got, want)
 			}
 		})
-	}
-}
-
-func TestCloseCheckoutRemovesRestrictedDirectory(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root bypasses directory permissions")
-	}
-	gitFixtureRemote(t)
-	// Go 1.23 predates testing.T.Context.
-	workRoot := t.TempDir()
-	checkout, err := gitwork.Clone(context.Background(), workRoot, "o/r", "main", emptyTreeFixture)
-	if err != nil {
-		t.Fatal(err)
-	}
-	entries, err := os.ReadDir(workRoot)
-	if err != nil || len(entries) != 1 {
-		t.Fatalf("checkout entries=%v err=%v", entries, err)
-	}
-	path := filepath.Join(workRoot, entries[0].Name())
-	locked := filepath.Join(path, "locked")
-	if err := os.Mkdir(locked, 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(locked, "file"), nil, 0600); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := os.Chmod(locked, 0700); err != nil && !errors.Is(err, os.ErrNotExist) {
-			t.Error(err)
-		}
-	})
-	if err := os.Chmod(locked, 0000); err != nil {
-		t.Fatal(err)
-	}
-	if err := checkout.Close(); err != nil {
-		t.Fatalf("cleanup failed: %v", err)
-	}
-	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("checkout still exists: %v", err)
 	}
 }
 
@@ -449,7 +409,7 @@ func TestFixRefusesIssueEditedAfterRequest(t *testing.T) {
 		},
 		},
 	}
-	if err := executor.perform(testActionContext(t), job); err != nil {
+	if err := attemptFixture(executor).perform(testActionContext(t), job); err != nil {
 		t.Fatal(err)
 	}
 	if comments != 1 || len(store.Data.PendingFixes) != 0 {
@@ -585,7 +545,7 @@ func TestFixRecoversOnlyRecordedBranch(t *testing.T) {
 				job.Source.Body = "@linkdataminion fix\nOversized notes"
 				executor.MaxGitHubContextBytes = 1
 			}
-			err = executor.perform(testActionContext(t), job)
+			err = attemptFixture(executor).perform(testActionContext(t), job)
 			if tt.wantError != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantError) {
 					t.Fatalf("fix() error = %v, want %q", err, tt.wantError)
@@ -744,7 +704,7 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 			},
 		},
 	}
-	if err := executor.perform(testActionContext(t), job); err != nil {
+	if err := attemptFixture(executor).perform(testActionContext(t), job); err != nil {
 		t.Fatal(err)
 	}
 	branch := "minion/fix-7-aaaaaaaaaaaa"
@@ -836,18 +796,18 @@ func TestReviewMarksOnlyPostModelPublicationFailure(t *testing.T) {
 			},
 		},
 	}
-	err := executor.perform(testActionContext(t), job)
+	err := attemptFixture(executor).perform(testActionContext(t), job)
 	if err == nil || errors.Is(err, monitor.ErrPostModelPublication) || codexRuns != 0 {
 		t.Fatalf("pre-Codex outage: err=%v runs=%d", err, codexRuns)
 	}
 	repoFail = false
 	failAfterModel = true
-	err = executor.perform(testActionContext(t), job)
+	err = attemptFixture(executor).perform(testActionContext(t), job)
 	if !errors.Is(err, monitor.ErrPostModelPublication) || codexRuns != 1 || postCalls != 0 {
 		t.Fatalf("post-model repository outage: err=%v runs=%d posts=%d", err, codexRuns, postCalls)
 	}
 	repoFail, failAfterModel = false, false
-	err = executor.perform(testActionContext(t), job)
+	err = attemptFixture(executor).perform(testActionContext(t), job)
 	if !errors.Is(err, monitor.ErrPostModelPublication) || codexRuns != 2 || postCalls != 1 {
 		t.Fatalf("post-model outage: err=%v runs=%d posts=%d", err, codexRuns, postCalls)
 	}

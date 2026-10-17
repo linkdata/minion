@@ -18,6 +18,12 @@ import (
 	"github.com/linkdata/minion/internal/workspace"
 )
 
+func attemptFixture(orchestrator *Orchestrator) *Orchestrator {
+	attempt := *orchestrator
+	attempt.attemptID = strings.Repeat("a", 32)
+	return &attempt
+}
+
 func portableJob(action command.Action) Job {
 	job := Job{Version: ProtocolVersion,
 		Identity: Identity{JobID: "job", AttemptID: "attempt", ExecutorID: "local", Repository: "owner/repo", RepositoryID: 1, OwnerID: 2, Requester: "writer", RequesterID: 3, Number: 7, SubjectType: "Issue"},

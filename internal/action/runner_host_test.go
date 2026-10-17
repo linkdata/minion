@@ -44,7 +44,7 @@ func TestRunnerWorkRootIsolation(t *testing.T) {
 			case "system read":
 				work = "/usr"
 			}
-			if err := runner.checkWorkRootIsolation(work, job); err == nil || !strings.Contains(err.Error(), "work root overlaps") {
+			if err := runner.CheckWorkRootIsolation(work, job.Main.Provider, job.Critic.Provider); err == nil || !strings.Contains(err.Error(), "work root overlaps") {
 				t.Fatalf("isolation=%v", err)
 			}
 		})

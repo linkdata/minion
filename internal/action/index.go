@@ -123,11 +123,14 @@ func (index *fixIndex) changes(ctx context.Context) ([]workspace.Change, error) 
 			if !workspace.ValidPath(name) {
 				return nil, fmt.Errorf("fix output %q is not a portable regular-file path", name)
 			}
-			data, err := workspace.ReadRegular(filepath.Join(index.source, filepath.FromSlash(name)), int64(workspace.MaxChangeBytes)-total)
+			info, err := os.Lstat(filepath.Join(index.source, filepath.FromSlash(name)))
 			if err != nil {
 				return nil, fmt.Errorf("fix output %q: %w", name, err)
 			}
-			total += int64(len(data))
+			if !info.Mode().IsRegular() || info.Size() > int64(workspace.MaxChangeBytes)-total {
+				return nil, fmt.Errorf("fix output %q is not regular or exceeds changed byte limit", name)
+			}
+			total += info.Size()
 		}
 	}
 	// shortcut: size prechecks can race and do not cap Git I/O; add isolated executor quotas (#96).
@@ -267,9 +270,6 @@ func parseIndexChanges(raw []byte) ([]workspace.Change, []string, error) {
 	parts, err := gitwork.SplitNUL(raw)
 	if err != nil {
 		return nil, nil, fmt.Errorf("invalid offline git diff: %w", err)
-	}
-	if len(parts) == 0 {
-		return nil, nil, nil
 	}
 	if len(parts)%2 != 0 {
 		return nil, nil, errors.New("invalid offline git diff")

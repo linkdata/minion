@@ -20,6 +20,9 @@ const defaultBaseURL = "https://api.github.com"
 
 const maxTreeResponseBytes = 8 << 20
 
+// ErrResponseTooLarge identifies a refused bounded API response.
+var ErrResponseTooLarge = errors.New("GitHub response exceeds byte limit")
+
 // Client calls GitHub with a user token. BaseURL and HTTPClient may be changed
 // before the first request, which also makes the client usable with httptest.
 type Client struct {
@@ -242,7 +245,7 @@ func (c *Client) requestBounded(ctx context.Context, method, path string, input,
 						return resp.Header, resp.StatusCode, fmt.Errorf("read GitHub %s %s response: %w", method, path, err)
 					}
 					if int64(len(data)) > maxBytes {
-						return resp.Header, resp.StatusCode, fmt.Errorf("GitHub %s %s response exceeds %d bytes", method, path, maxBytes)
+						return resp.Header, resp.StatusCode, fmt.Errorf("%w: %s %s response exceeds %d bytes", ErrResponseTooLarge, method, path, maxBytes)
 					}
 					if err := json.Unmarshal(data, output); err != nil {
 						return resp.Header, resp.StatusCode, fmt.Errorf("decode GitHub %s %s response: %w", method, path, err)

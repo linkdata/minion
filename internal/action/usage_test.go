@@ -29,7 +29,7 @@ func usageJob() monitor.Job {
 
 func TestUsageDoesNotCountCanceledDispatch(t *testing.T) {
 	store := &usage.Store{Dir: filepath.Join(t.TempDir(), "usage")}
-	tracked, finish, err := (&Orchestrator{Usage: store}).trackUsage(usageJob())
+	tracked, finish, err := attemptFixture(&Orchestrator{Usage: store}).trackUsage(usageJob())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +71,7 @@ func TestUsageAccumulatesPartialResults(t *testing.T) {
 			},
 		},
 	}
-	tracked, finish, err := e.trackUsage(usageJob())
+	tracked, finish, err := attemptFixture(e).trackUsage(usageJob())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +118,7 @@ func TestUsageTracksBothModelRoles(t *testing.T) {
 					}
 					return aicli.Result{Answer: "answer", Tokens: usage.Tokens{Input: 100, CachedInput: 80, Output: 20}, UsageComplete: true}, nil
 				}}}
-			tracked, finish, err := e.trackUsage(usageJob())
+			tracked, finish, err := attemptFixture(e).trackUsage(usageJob())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -172,7 +172,7 @@ func TestUsageAccumulatesCriticRevisions(t *testing.T) {
 			return aicli.Result{Answer: answer, Tokens: usage.Tokens{Input: 10, Output: 2}, UsageComplete: true}, nil
 		}},
 	}
-	tracked, finish, err := e.trackUsage(usageJob())
+	tracked, finish, err := attemptFixture(e).trackUsage(usageJob())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,7 +220,7 @@ func TestUsagePersistenceFailureStopsModelsOrPublication(t *testing.T) {
 							runModel: run,
 						},
 					}
-					tracked, finish, err := e.trackUsage(usageJob())
+					tracked, finish, err := attemptFixture(e).trackUsage(usageJob())
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -269,7 +269,7 @@ func TestSuccessfulModelStopsAfterUsageSaveFailure(t *testing.T) {
 		store.Dir = blocked
 		return aicli.Result{Answer: "completed paid work", Tokens: usage.Tokens{Input: 10, Output: 2}, UsageComplete: true}, nil
 	}}}
-	tracked, _, err := e.trackUsage(usageJob())
+	tracked, _, err := attemptFixture(&e).trackUsage(usageJob())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -378,13 +378,13 @@ printf '%%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"
 	fakeOnPath(t, "codex", script)
 	store := &usage.Store{Dir: filepath.Join(root, "usage")}
 	executor := &Orchestrator{WorkRoot: filepath.Join(root, "work"), Usage: store,
-		CodexModel: "stale-host-model",
+		CodexModel: "portable-model",
 		Runner: Runner{
 			WorkRoot: filepath.Join(root, "work"),
 			Codex:    config.CodexConfig{Model: "stale-host-model"},
 		},
 	}
-	tracked, finish, err := executor.trackUsage(usageJob())
+	tracked, finish, err := attemptFixture(executor).trackUsage(usageJob())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -427,7 +427,7 @@ func TestRunnerDoesNotRecordUndispatchedUsageCall(t *testing.T) {
 		t.Fatal("model ran without durable checkpoint")
 		return aicli.Result{}, nil
 	}}}
-	tracked, _, err := executor.trackUsage(usageJob())
+	tracked, _, err := attemptFixture(executor).trackUsage(usageJob())
 	if err != nil {
 		t.Fatal(err)
 	}
