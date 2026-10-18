@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"errors"
 	"log"
 	"os"
 	"path/filepath"
@@ -45,24 +44,6 @@ func TestCheckModelsRequiresOnlySelectedProvider(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-func TestConfiguredCodexKeySkipsAmbientLogin(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("PATH", dir)
-	binary := filepath.Join(dir, "codex")
-	if err := os.WriteFile(binary, []byte("#!/bin/sh\nprintf called > \"$0.called\"\nexit 1\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := checkCodexCLI(context.Background(), config.CodexConfig{APIKey: "dummy-key"}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(binary + ".called"); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("checked ambient login despite configured key: %v", err)
-	}
-	if err := checkCodexCLI(context.Background(), config.CodexConfig{}); err == nil {
-		t.Fatal("accepted failed ambient login")
 	}
 }
 

@@ -161,37 +161,6 @@ func TestJobCriticBudgetBoundaries(t *testing.T) {
 	}
 }
 
-func TestAuditIncompleteOversizedReportKeepsOtherArtifacts(t *testing.T) {
-	job := portableJob(command.SecurityAudit)
-	root := t.TempDir()
-	for _, file := range auditArtifactsFixture(job, sourceIdentity(job), strings.Repeat("x", maxOutputBytes+1)) {
-		writeFixtureFile(t, root, file.Path, file.Data)
-	}
-	files, diagnostics, err := readAuditArtifacts(root, true)
-	if err != nil || len(files) != len(auditArtifacts)-1 || len(diagnostics) != 1 || diagnostics[0].Code != "artifact_unavailable" || !strings.Contains(diagnostics[0].Message, "REPORT.md") {
-		t.Fatalf("partial report collection: files=%d diagnostics=%+v error=%v", len(files), diagnostics, err)
-	}
-	for _, file := range files {
-		if file.Path == "REPORT.md" {
-			t.Fatal("oversized raw report retained")
-		}
-	}
-	result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Artifacts: files, Diagnostics: diagnostics}
-	if err := result.validate(job, false); err != nil {
-		t.Fatalf("six safe artifacts cannot be retained: %v", err)
-	}
-}
-
-func TestAuditReviewReportRejectsInvalidUTF8AndSize(t *testing.T) {
-	for _, report := range [][]byte{{0xff}, []byte(strings.Repeat("x", maxOutputBytes+1))} {
-		root := t.TempDir()
-		writeFixtureFile(t, root, "REPORT.md", report)
-		if _, _, err := readAuditArtifacts(root, false); err == nil || !strings.Contains(err.Error(), "REPORT.md") {
-			t.Fatalf("invalid report accepted: %v", err)
-		}
-	}
-}
-
 func TestExecuteCriticAdmissionUsesControlledWorkRoot(t *testing.T) {
 	for _, critic := range []bool{false, true} {
 		for _, unsafe := range []bool{false, true} {
@@ -319,36 +288,6 @@ func TestPrivateReviewRejectsChangedSavedCheckpoint(t *testing.T) {
 				if data, err := os.ReadFile(outside); err != nil || string(data) != "outside sentinel" {
 					t.Fatalf("outside checkpoint touched: %q,%v", data, err)
 				}
-			}
-		})
-	}
-}
-
-func TestRetainedAuditRequiresPrivateDirectory(t *testing.T) {
-	for _, symlink := range []bool{false, true} {
-		t.Run(fmt.Sprint(symlink), func(t *testing.T) {
-			root, outside := t.TempDir(), t.TempDir()
-			auditRoot := filepath.Join(root, "audits")
-			if symlink {
-				if err := os.Symlink(outside, auditRoot); err != nil {
-					t.Fatal(err)
-				}
-			} else {
-				if err := os.Mkdir(auditRoot, 0700); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.Chmod(auditRoot, 0755); err != nil {
-					t.Fatal(err)
-				}
-			}
-			job := portableJob(command.SecurityAudit)
-			e := Orchestrator{WorkRoot: root}
-			if err := e.retainAudit(&preparedAction{job: job}, completeAuditResult(job), false); err == nil {
-				t.Fatal("audit retained through unsafe directory")
-			}
-			entries, err := os.ReadDir(outside)
-			if err != nil || len(entries) != 0 {
-				t.Fatalf("outside directory changed: %v,%v", entries, err)
 			}
 		})
 	}

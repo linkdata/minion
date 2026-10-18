@@ -32,7 +32,11 @@ func ResolvePath(path string) (string, error) {
 			path = parent[:len(parent)-1]
 			continue
 		}
-		if name == "." || name == ".." {
+		if name == "." {
+			path = parent
+			continue
+		}
+		if name == ".." {
 			return "", err
 		}
 		missing = append(missing, name)

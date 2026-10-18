@@ -5,17 +5,16 @@ package claudecli
 import (
 	"context"
 	"errors"
-	"io"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/config"
+	"github.com/linkdata/minion/internal/testsupport"
 	"github.com/linkdata/minion/internal/usage"
 )
 
@@ -41,8 +40,8 @@ wait
 	// cannot establish whether its process group has actually been created.
 	ticker := time.NewTicker(5 * time.Millisecond)
 	defer ticker.Stop()
-	deadline := time.NewTimer(5 * time.Second)
-	defer deadline.Stop()
+	waitCtx, stopWait := context.WithTimeout(context.Background(), 5*time.Second)
+	defer stopWait()
 	var pid int
 start:
 	for {
@@ -55,7 +54,7 @@ start:
 			}
 		case got := <-done:
 			t.Fatalf("run exited before child started: %v", got.err)
-		case <-deadline.C:
+		case <-waitCtx.Done():
 			t.Fatal("child process did not start")
 		}
 	}
@@ -74,27 +73,11 @@ start:
 		if !errors.Is(got.err, context.Canceled) || got.result.Answer != "" || got.result.UsageComplete || got.result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 2}) {
 			t.Fatalf("canceled Run lost partial usage: result=%+v error=%v", got.result, got.err)
 		}
-	case <-deadline.C:
+	case <-waitCtx.Done():
 		t.Fatal("cancellation did not finish the run")
 	}
 	// Keep observing this child after cancellation, even if its PID is recycled.
-	buffer := make([]byte, 4096)
-	for {
-		n, err := stat.ReadAt(buffer, 0)
-		if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ESRCH) {
-			return
-		}
-		_, state, ok := strings.Cut(string(buffer[:n]), ") ")
-		if (err != nil && !errors.Is(err, io.EOF)) || !ok {
-			t.Fatalf("read child state: stat=%q error=%v", buffer[:n], err)
-		}
-		if strings.HasPrefix(state, "Z ") {
-			return // A killed child can await reaping by the container's init.
-		}
-		select {
-		case <-ticker.C:
-		case <-deadline.C:
-			t.Fatal("child survived process-group cancellation")
-		}
+	if err := testsupport.WaitStopped(waitCtx, stat); err != nil {
+		t.Fatalf("child survived process-group cancellation: %v", err)
 	}
 }

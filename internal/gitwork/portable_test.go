@@ -82,9 +82,7 @@ func TestSnapshotPreservesPRDeletedBinaryAndModeContext(t *testing.T) {
 	fixture.git(fixture.source, "checkout", "--detach", base)
 	writeFile(t, filepath.Join(fixture.source, "base-only"), "new base branch content")
 	baseTip := fixture.commit("refs/heads/main", "base advanced after fork")
-	if err := fixture.checkout.checkoutPullRequest(context.Background(), 7, "main", head); err != nil {
-		t.Fatal(err)
-	}
+	fixture.checkout = fixture.clonePullRequest(head)
 	snapshot, err := fixture.checkout.Snapshot(context.Background(), false)
 	if err != nil {
 		t.Fatal(err)
@@ -123,11 +121,9 @@ func TestSnapshotOverridesNamedBinaryDiffDriver(t *testing.T) {
 	if !strings.Contains(control, "Binary files") || strings.Contains(control, "-base text") {
 		t.Fatalf("named-driver control did not hide text: %s", control)
 	}
+	fixture.checkout = fixture.clonePullRequest(head)
 	fixture.git(fixture.checkout.path, "config", "diff.blocked.binary", "true")
 	if err := fixture.checkout.recordConfig(); err != nil {
-		t.Fatal(err)
-	}
-	if err := fixture.checkout.checkoutPullRequest(context.Background(), 7, "main", head); err != nil {
 		t.Fatal(err)
 	}
 	snapshot, err := fixture.checkout.Snapshot(context.Background(), false)
@@ -144,9 +140,7 @@ func TestSnapshotDisablesComparisonRenameDetection(t *testing.T) {
 		t.Fatal(err)
 	}
 	head := fixture.commit("refs/pull/7/head", "rename file")
-	if err := fixture.checkout.checkoutPullRequest(context.Background(), 7, "main", head); err != nil {
-		t.Fatal(err)
-	}
+	fixture.checkout = fixture.clonePullRequest(head)
 	fixture.git(fixture.checkout.path, "config", "diff.renames", "true")
 	if err := fixture.checkout.recordConfig(); err != nil {
 		t.Fatal(err)

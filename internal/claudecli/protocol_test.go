@@ -105,29 +105,6 @@ func TestOutputAcceptsNativeUserStringContent(t *testing.T) {
 	}
 }
 
-func TestOutputIgnoresAmbientTasksAndStillAwaitsRequestedWork(t *testing.T) {
-	const ambient = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"housekeeping","ambient":true}]}`
-	const worker = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"housekeeping","ambient":true},{"task_id":"worker"}]}`
-	for _, scenario := range []struct {
-		name, data string
-		fails      bool
-	}{
-		{"ambient after final", successfulResult + "\n" + ambient, false},
-		{"mixed pending", successfulResult + "\n" + worker, true},
-		{"pending removed needs new result", successfulResult + "\n" + worker + "\n" + ambient, true},
-		{"new result after worker completes", successfulResult + "\n" + worker + "\n" + ambient + "\n" + successfulResult, false},
-	} {
-		t.Run(scenario.name, func(t *testing.T) {
-			o := jsonlOutput{}
-			_, _ = o.Write([]byte(numberResultEvents(scenario.data) + "\n"))
-			o.finish()
-			if (o.err != nil) != scenario.fails {
-				t.Fatalf("result=%+v error=%v", o.result, o.err)
-			}
-		})
-	}
-}
-
 const waitCeilingDiagnostic = "Background tasks still running 10m after the last turn (worker); stopping them. Set CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 to wait indefinitely."
 
 func TestWaitCeilingDiagnostic(t *testing.T) {

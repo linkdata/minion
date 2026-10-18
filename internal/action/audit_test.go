@@ -302,12 +302,16 @@ JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 	write("REPORT.md", "Verified audit report\n")
 	write("FINDINGS-DETAIL.md", "")
 	write("NEEDS-VALIDATION.md", "")
+	validationDir, err := os.MkdirTemp(t.TempDir(), ".minion-audit-validation-")
+	if err != nil {
+		t.Fatal(err)
+	}
 	validate := func(wantError string) {
 		t.Helper()
 		files, _, err := readAuditArtifacts(root, false)
 		var report string
 		if err == nil {
-			report, err = validateAuditFiles(context.Background(), files, filepath.Dir(root), filepath.Join(skillDir, "SKILL.md"), "o/r", target, head)
+			report, err = validateAuditFiles(context.Background(), files, validationDir, filepath.Join(skillDir, "SKILL.md"), "o/r", target, head)
 		}
 		if wantError == "" {
 			if err != nil || report != "Verified audit report\n" {
@@ -373,25 +377,26 @@ JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 }
 
 func TestAuditArtifactReadModesPreserveFailurePolicies(t *testing.T) {
-	for _, scenario := range []string{"missing core", "empty core", "unsafe core"} {
+	for _, scenario := range []string{"missing core", "empty core", "unsafe core", "oversized report", "invalid UTF-8 report"} {
 		for _, partial := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/partial-%t", scenario, partial), func(t *testing.T) {
+				job := portableJob(command.SecurityAudit)
 				root := t.TempDir()
-				for _, name := range auditArtifacts {
-					if err := os.WriteFile(filepath.Join(root, name), []byte("content"), 0600); err != nil {
-						t.Fatal(err)
-					}
+				for _, file := range auditArtifactsFixture(job, sourceIdentity(job), "Audit report\n") {
+					writeFixtureFile(t, root, file.Path, file.Data)
 				}
-				name := filepath.Join(root, "architecture.md")
+				artifact := "architecture.md"
+				if strings.HasSuffix(scenario, "report") {
+					artifact = "REPORT.md"
+				}
+				name := filepath.Join(root, artifact)
 				switch scenario {
 				case "missing core":
 					if err := os.Remove(name); err != nil {
 						t.Fatal(err)
 					}
 				case "empty core":
-					if err := os.WriteFile(name, nil, 0600); err != nil {
-						t.Fatal(err)
-					}
+					writeFixtureFile(t, root, artifact, nil)
 				case "unsafe core":
 					if err := os.Remove(name); err != nil {
 						t.Fatal(err)
@@ -399,30 +404,52 @@ func TestAuditArtifactReadModesPreserveFailurePolicies(t *testing.T) {
 					if err := os.Symlink("REPORT.md", name); err != nil {
 						t.Fatal(err)
 					}
+				case "oversized report":
+					writeFixtureFile(t, root, artifact, []byte(strings.Repeat("x", maxOutputBytes+1)))
+				case "invalid UTF-8 report":
+					writeFixtureFile(t, root, artifact, []byte{0xff})
 				}
 				files, diagnostics, err := readAuditArtifacts(root, partial)
-				wantError := !partial && scenario == "unsafe core"
+				wantError := !partial && (scenario == "unsafe core" || artifact == "REPORT.md")
 				if (err != nil) != wantError {
 					t.Fatalf("files=%v diagnostics=%v error=%v want error=%t", files, diagnostics, err, wantError)
 				}
 				if wantError {
-					if !strings.Contains(err.Error(), "architecture.md") {
+					if !strings.Contains(err.Error(), artifact) {
 						t.Fatalf("lost invalid artifact name: %v", err)
 					}
 					return
 				}
 				wantFiles, wantDiagnostics := len(auditArtifacts), 0
-				if scenario != "empty core" {
+				if scenario == "missing core" || scenario == "unsafe core" || scenario == "oversized report" {
 					wantFiles--
 				}
-				if scenario == "unsafe core" {
+				if scenario == "unsafe core" || scenario == "oversized report" {
 					wantDiagnostics = 1
 				}
 				if len(files) != wantFiles || len(diagnostics) != wantDiagnostics {
 					t.Fatalf("files=%d diagnostics=%+v; want %d/%d", len(files), diagnostics, wantFiles, wantDiagnostics)
 				}
-				if wantDiagnostics == 1 && diagnostics[0].Code != "artifact_unavailable" {
+				if wantDiagnostics == 1 && (diagnostics[0].Code != "artifact_unavailable" || !strings.Contains(diagnostics[0].Message, artifact)) {
 					t.Fatalf("invalid partial artifact diagnostic: %+v", diagnostics)
+				}
+				if scenario == "invalid UTF-8 report" {
+					for _, file := range files {
+						if file.Path == "REPORT.md" && string(file.Data) != string([]byte{0xff}) {
+							t.Fatalf("partial collection changed raw invalid UTF-8 report: %q", file.Data)
+						}
+					}
+				}
+				if scenario == "oversized report" {
+					for _, file := range files {
+						if file.Path == "REPORT.md" {
+							t.Fatal("oversized raw report retained")
+						}
+					}
+					result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Artifacts: files, Diagnostics: diagnostics}
+					if err := result.validate(job, false); err != nil {
+						t.Fatalf("six safe artifacts cannot be retained: %v", err)
+					}
 				}
 			})
 		}

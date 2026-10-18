@@ -99,3 +99,29 @@ func TestUsageDatePruningPreservesMidnightMarginAndUnknownLayouts(t *testing.T) 
 		})
 	}
 }
+
+func TestCollectUsageHeaderAcceptsExactLimitAndRejectsNextByte(t *testing.T) {
+	const prefix = `{"type":"session_meta","payload":{"id":"unrelated"},"padding":"`
+	const suffix = `"}`
+	for _, size := range []int{maxUsageHeaderBytes, maxUsageHeaderBytes + 1} {
+		for _, ending := range []string{"\n", "\r\n", ""} {
+			t.Run(fmt.Sprintf("bytes%d/ending%q", size, ending), func(t *testing.T) {
+				home := t.TempDir()
+				started := time.Now()
+				root := writeUsageRollout(t, home, "root", "", usageEvent("task_started", "turn"), usageRecord("root", "turn", "response", 10, 0, 1), usageEvent("task_complete", "turn"))
+				path := filepath.Join(filepath.Dir(root), "unrelated.jsonl")
+				header := prefix + strings.Repeat("x", size-len(prefix)-len(suffix)) + suffix + ending
+				if ending != "" {
+					header += "unrelated body is not inspected\n"
+				}
+				if err := os.WriteFile(path, []byte(header), 0600); err != nil {
+					t.Fatal(err)
+				}
+				tokens, complete, childError := collectUsage(context.Background(), home, "root", started, nil, nil)
+				if tokens != (usage.Tokens{Input: 10, Output: 1}) || complete != (size == maxUsageHeaderBytes) || childError != nil {
+					t.Fatalf("header boundary changed: tokens=%+v complete=%v childError=%v", tokens, complete, childError)
+				}
+			})
+		}
+	}
+}

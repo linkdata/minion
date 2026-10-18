@@ -64,7 +64,7 @@ func (e *Orchestrator) perform(ctx context.Context, request monitor.Job) error {
 		result, err = runner.Run(ctx, prepared.job)
 		if err != nil {
 			e.logResult(prepared.job, result)
-			if len(result.Calls) != 0 || len(result.Refutations) != 0 {
+			if len(result.Calls) != 0 {
 				err = errors.Join(err, e.retainReviewEvidence(prepared.job, result))
 			}
 			err = errors.Join(err, e.retainIncompleteAudit(prepared, result))

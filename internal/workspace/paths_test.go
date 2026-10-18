@@ -32,7 +32,7 @@ func TestPrepareRootCanonicalizesExistingDirectory(t *testing.T) {
 
 func TestPrepareRootDoesNotCreateMissingDirectory(t *testing.T) {
 	for _, root := range []string{"", " \t\n"} {
-		if _, err := PrepareRoot(root); err == nil || err.Error() != "work root is required" {
+		if _, err := PrepareRoot(root); err == nil || err.Error() != "path is required" {
 			t.Fatalf("blank root error=%v", err)
 		}
 	}

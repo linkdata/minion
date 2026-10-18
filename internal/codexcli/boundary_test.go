@@ -21,6 +21,7 @@ func TestInstructionProbePreservesOutputLimit(t *testing.T) {
 
 func TestValidateInstructionBoundaryPassesIsolationSettings(t *testing.T) {
 	fakeCodex := installFakeCodex(t, `#!/bin/sh
+[ "${CODEX_HOME+x}" = x ] && [ "$CODEX_HOME" = "$HOME" ] || exit 4
 pwd > "$0.cwd"
 printf '%s\n' "$@" >> "$0.args"
 printf 'END\n' >> "$0.args"

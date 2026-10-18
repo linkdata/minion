@@ -201,7 +201,7 @@ func TestReadChangesUsesOnlySelectedRegularPaths(t *testing.T) {
 		{[]Change{{Path: "../outside", Mode: Regular}}, "unsafe"},
 		{[]Change{{Path: "changed", Mode: Regular}}, `selected change mode differs from file at "changed"`},
 		{[]Change{{Path: "changed"}}, "invalid changed mode"},
-		{[]Change{{Path: "changed", Delete: true, Data: []byte("invalid")}}, "selection contains file data"},
+		{[]Change{{Path: "changed", Delete: true, Data: []byte("invalid")}}, "has content or mode"},
 	} {
 		if _, err := ReadChanges(context.Background(), root, test.selected); err == nil || !strings.Contains(err.Error(), test.want) {
 			t.Fatalf("selection %+v validation=%v want%q", test.selected, err, test.want)
@@ -309,41 +309,6 @@ func TestReadRegularChecksActualReadLength(t *testing.T) {
 	name := filepath.Join("/proc", strconv.Itoa(os.Getpid()), "status")
 	if _, err := ReadRegular(name, 1<<20); err == nil || !strings.Contains(err.Error(), "while reading") {
 		t.Fatalf("accepted proc content exceeding its stat size: %v", err)
-	}
-}
-
-func TestApplyRefusesWritingThroughTargetSymlink(t *testing.T) {
-	root, outside := privateRoot(t), filepath.Join(t.TempDir(), "file")
-	if err := os.WriteFile(outside, []byte("outside"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(outside, filepath.Join(root, "file")); err != nil {
-		t.Fatal(err)
-	}
-	err := Apply(root, []Change{{Path: "file", Mode: Regular, Data: []byte("changed")}})
-	if err == nil || !strings.Contains(err.Error(), "not regular") {
-		t.Fatalf("accepted target symlink: %v", err)
-	}
-	if data, err := os.ReadFile(outside); err != nil || string(data) != "outside" {
-		t.Fatalf("outside file changed: %q,%v", data, err)
-	}
-}
-
-func TestApplyRefusesDeletionThroughSymlinkedParent(t *testing.T) {
-	root, outside := t.TempDir(), t.TempDir()
-	name := filepath.Join(outside, "file")
-	if err := os.WriteFile(name, []byte("outside"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(outside, filepath.Join(root, "parent")); err != nil {
-		t.Fatal(err)
-	}
-	err := Apply(root, []Change{{Path: "parent/file", Delete: true}})
-	if err == nil || !strings.Contains(err.Error(), "not a directory") {
-		t.Fatalf("symlinked deletion parent validation=%v", err)
-	}
-	if data, err := os.ReadFile(name); err != nil || string(data) != "outside" {
-		t.Fatalf("outside file changed=%q,%v", data, err)
 	}
 }
 

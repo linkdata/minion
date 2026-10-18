@@ -132,45 +132,41 @@ func TestExecuteSourceFailuresAndInvalidIncompleteResultsAreTerminal(t *testing.
 }
 
 func TestPrepareFixClassifiesUnsupportedLayoutBeforeBranchOrModels(t *testing.T) {
-	for _, kind := range []string{"case collision"} {
-		t.Run(kind, func(t *testing.T) {
-			files := []workspace.File{{Path: "README", Mode: workspace.Regular}, {Path: "readme", Mode: workspace.Regular}}
-			gitFixtureRemote(t, files...)
-			git, err := exec.LookPath("git")
-			if err != nil {
-				t.Fatal(err)
-			}
-			branched := filepath.Join(t.TempDir(), "branched")
-			fakeOnPath(t, "git", fmt.Sprintf("#!/bin/sh\ncase \" $* \" in *\" switch --create \"*) printf created > %s;; esac\nexec %s \"$@\"\n", shellQuote(branched), shellQuote(git)))
-			store := openState(t, time.Now())
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				switch {
-				case serveFixFlowFixture(t, w, r, files...):
-				default:
-					t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
-					http.NotFound(w, r)
-				}
-			}))
-			defer server.Close()
-			root := t.TempDir()
-			orchestrator := &Orchestrator{WorkRoot: root, GitHub: testGitHub(server, "token"), BotLogin: "bot", Store: store,
-				Commands: map[string]config.CommandMapping{"fix": {Action: "fix", Skills: []string{skills.BuiltinAntiPromptInjection}}},
-				Runner:   Runner{runModel: forbidModel(t)},
-			}
-			request := monitor.Job{ID: strings.Repeat("a", 64), SubjectType: "Issue", Number: 7,
-				Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"fix"}},
-				Source:     github.Item{Author: github.User{ID: 3, Login: "writer"}, UpdatedAt: time.Now()}, Command: command.Command{Name: "fix", Action: command.Fix},
-			}
-			if err := attemptFixture(orchestrator).perform(testActionContext(t), request); !errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, gitwork.ErrUnsupportedSource) || errors.Is(err, gitwork.ErrCheckoutTooLarge) {
-				t.Fatalf("unsupported fix layout lost classification: %v", err)
-			}
-			if _, err := os.Stat(branched); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("unsupported layout created a branch: %v", err)
-			}
-			if entries, err := os.ReadDir(root); err != nil || len(entries) != 0 {
-				t.Fatalf("unsupported source left a checkout: %v, %v", entries, err)
-			}
-		})
+	files := []workspace.File{{Path: "README", Mode: workspace.Regular}, {Path: "readme", Mode: workspace.Regular}}
+	gitFixtureRemote(t, files...)
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	branched := filepath.Join(t.TempDir(), "branched")
+	fakeOnPath(t, "git", fmt.Sprintf("#!/bin/sh\ncase \" $* \" in *\" switch --create \"*) printf created > %s;; esac\nexec %s \"$@\"\n", shellQuote(branched), shellQuote(git)))
+	store := openState(t, time.Now())
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case serveFixFlowFixture(t, w, r, files...):
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	root := t.TempDir()
+	orchestrator := &Orchestrator{WorkRoot: root, GitHub: testGitHub(server, "token"), BotLogin: "bot", Store: store,
+		Commands: map[string]config.CommandMapping{"fix": {Action: "fix", Skills: []string{skills.BuiltinAntiPromptInjection}}},
+		Runner:   Runner{runModel: forbidModel(t)},
+	}
+	request := monitor.Job{ID: strings.Repeat("a", 64), SubjectType: "Issue", Number: 7,
+		Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"fix"}},
+		Source:     github.Item{Author: github.User{ID: 3, Login: "writer"}, UpdatedAt: time.Now()}, Command: command.Command{Name: "fix", Action: command.Fix},
+	}
+	if err := attemptFixture(orchestrator).perform(testActionContext(t), request); !errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, gitwork.ErrUnsupportedSource) || errors.Is(err, gitwork.ErrCheckoutTooLarge) {
+		t.Fatalf("unsupported fix layout lost classification: %v", err)
+	}
+	if _, err := os.Stat(branched); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unsupported layout created a branch: %v", err)
+	}
+	if entries, err := os.ReadDir(root); err != nil || len(entries) != 0 {
+		t.Fatalf("unsupported source left a checkout: %v, %v", entries, err)
 	}
 }
 
@@ -253,7 +249,24 @@ func TestPublishFixRejectsNonemptyReviewedChangesDroppedByGit(t *testing.T) {
 			}
 			bin := t.TempDir()
 			seen := filepath.Join(bin, "staged")
-			script := fmt.Sprintf("#!/bin/sh\ncase \" $* \" in *\" add --all \"*)\n if test %q = 'canceled import'; then touch %q; sleep 30; exit 1; fi\n ;;\n *\" diff --cached --name-only \"*)\n if test %q = import || test -f %q; then exit 0; fi\n touch %q\n ;;\nesac\nexec %q \"$@\"\n", stage, seen, stage, seen, seen, git)
+			publication := filepath.Join(bin, "publication")
+			script := fmt.Sprintf(`#!/bin/sh
+case " $* " in
+ *" add --all "*)
+  if test %s = 'canceled import'; then touch %s; sleep 30; exit 1; fi
+  ;;
+ *" diff --cached --raw "*)
+  if test %s = import; then touch %s; exit 0; fi
+  ;;
+ *" diff --cached --name-only "*)
+  if test %s = commit; then touch %s; exit 0; fi
+  ;;
+ *" commit --no-verify "*|*" push --porcelain "*)
+  touch %s; exit 73
+  ;;
+esac
+exec %s "$@"
+`, shellQuote(stage), shellQuote(seen), shellQuote(stage), shellQuote(seen), shellQuote(stage), shellQuote(seen), shellQuote(publication), shellQuote(git))
 			fakeOnPath(t, "git", script)
 			writes := 0
 			repo := github.Repository{ID: 1, FullName: "o/r", Owner: github.User{ID: 2}, DefaultBranch: "main", Visibility: "public"}
@@ -332,6 +345,12 @@ func TestPublishFixRejectsNonemptyReviewedChangesDroppedByGit(t *testing.T) {
 			}
 			if !errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, monitor.ErrPostModelPublication) || writes != 0 || (stage == "commit" && !errors.Is(err, gitwork.ErrNoChanges)) || (stage == "import" && !strings.Contains(err.Error(), "staged paths do not match reviewed changes")) {
 				t.Fatalf("dropped %s changes: writes=%d err=%v", stage, writes, err)
+			}
+			if _, err := os.Stat(seen); err != nil {
+				t.Fatalf("fixture did not drop the %s diff: %v", stage, err)
+			}
+			if _, err := os.Stat(publication); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("dropped %s changes reached commit or push: %v", stage, err)
 			}
 		})
 	}

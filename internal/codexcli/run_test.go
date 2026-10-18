@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/usage"
@@ -564,8 +565,8 @@ func TestJSONLOutputStopsAtCardinalityLimits(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, _ = output.Write(append(line, '\n'))
-	if !cancelled || !output.failed || len(output.children) != maxCodexChildren || !strings.Contains(output.failureReason, "child agent") {
-		t.Fatalf("unbounded children: cancelled=%t children=%d reason=%q", cancelled, len(output.children), output.failureReason)
+	if !cancelled || !output.failed || len(output.children) != maxCodexChildren || !errors.Is(output.stopErr, aicli.ErrOutputLimit) || !strings.Contains(output.stopErr.Error(), "child agent") {
+		t.Fatalf("unbounded children: cancelled=%t children=%d stop=%v", cancelled, len(output.children), output.stopErr)
 	}
 }
 

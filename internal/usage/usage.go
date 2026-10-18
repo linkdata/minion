@@ -215,7 +215,8 @@ type Summary struct {
 	TotalTokens     int64  `json:"total_tokens"`
 }
 
-// Summarize aggregates validated records, as returned by ReadAll.
+// Summarize aggregates validated records, as returned by ReadAll. It rejects
+// invalid filters, groups, status values and unrepresentable aggregate counts.
 func Summarize(records []Record, filter Filter, groupBy []string) ([]Summary, error) {
 	if !filter.Since.IsZero() && !filter.Until.IsZero() && !filter.Since.Before(filter.Until) {
 		return nil, fmt.Errorf("since must precede until")
@@ -254,8 +255,8 @@ func Summarize(records []Record, filter Filter, groupBy []string) ([]Summary, er
 		default:
 			return nil, fmt.Errorf("usage record %s has invalid status %q", record.ID, record.Status)
 		}
-		if record.CodexCalls < 0 || record.ClaudeCalls < 0 || record.CodexCalls > math.MaxInt-summary.CodexCalls || record.ClaudeCalls > math.MaxInt-summary.ClaudeCalls {
-			return nil, errors.New("usage call counts are invalid or exceed integer limit")
+		if record.CodexCalls > math.MaxInt-summary.CodexCalls || record.ClaudeCalls > math.MaxInt-summary.ClaudeCalls {
+			return nil, errors.New("usage call counts exceed integer limit")
 		}
 		summary.CodexCalls += record.CodexCalls
 		summary.ClaudeCalls += record.ClaudeCalls

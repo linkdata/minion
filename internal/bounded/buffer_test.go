@@ -1,6 +1,7 @@
 package bounded
 
 import (
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -50,21 +51,14 @@ func TestTailDrainsAndKeepsSuffix(t *testing.T) {
 
 }
 
-func TestTextPreservesUTF8AtTheDiagnosticBound(t *testing.T) {
-	for _, scenario := range []struct{ value, want string }{
-		{strings.Repeat("a", DiagnosticBytes-1) + "€b", strings.Repeat("a", DiagnosticBytes-1) + "..."},
-		{strings.Repeat("a", DiagnosticBytes-3) + "€b", strings.Repeat("a", DiagnosticBytes-3) + "€..."},
-		{strings.Repeat("a", DiagnosticBytes-4) + "€b", strings.Repeat("a", DiagnosticBytes-4) + "€b"},
-		{strings.Repeat("a", DiagnosticBytes-1) + "é", strings.Repeat("a", DiagnosticBytes-1) + "..."},
-		{strings.Repeat("a", DiagnosticBytes-3) + "😀", strings.Repeat("a", DiagnosticBytes-3) + "..."},
-		{strings.Repeat("a", DiagnosticBytes-4) + "😀b", strings.Repeat("a", DiagnosticBytes-4) + "😀..."},
-		{"a\xffb", "a\xffb"},
-		{"a\xff" + strings.Repeat("b", DiagnosticBytes), "a\xff" + strings.Repeat("b", DiagnosticBytes-2) + "..."},
-		{strings.Repeat("a", DiagnosticBytes) + "\x80b", strings.Repeat("a", DiagnosticBytes) + "..."},
-		{strings.Repeat("a", DiagnosticBytes-1) + "\x80b", strings.Repeat("a", DiagnosticBytes-1) + "\x80..."},
-	} {
-		if got := Text(scenario.value); got != scenario.want {
-			t.Fatalf("Text(%q)=%q want%q", scenario.value, got, scenario.want)
+func TestTextBoundsBytesForQuotedDiagnostics(t *testing.T) {
+	value := strings.Repeat("a", DiagnosticBytes-1) + "€b"
+	if got := Text(value); got != value[:DiagnosticBytes]+"..." || !strings.HasSuffix(fmt.Sprintf("%q", got), `\xe2..."`) {
+		t.Fatalf("byte-bound diagnostic=%q", got)
+	}
+	for _, value := range []string{"short\xff", strings.Repeat("x", DiagnosticBytes)} {
+		if got := Text(value); got != value {
+			t.Fatalf("changed untruncated diagnostic: %q", got)
 		}
 	}
 }

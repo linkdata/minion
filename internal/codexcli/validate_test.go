@@ -273,3 +273,23 @@ func TestCatalogueEventAcceptsExactLimitAndRejectsNextByte(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateKeepsImplicitNativeHome(t *testing.T) {
+	for _, key := range []string{"", "fixture-key"} {
+		t.Run(fmt.Sprint(key != ""), func(t *testing.T) {
+			dir := t.TempDir()
+			page := `{"id":2,"result":{"data":[{"model":"fixture","isDefault":true,"defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high"}]}]}}`
+			script := catalogueScriptFor(dir, page, "")
+			if key != "" {
+				script = strings.Replace(script, "printf '%s\\n' '{\"method\":\"test/notification\",\"params\":{}}'", "printf '%s\\n' '{\"id\":0,\"result\":{\"type\":\"apiKey\"}}'\nIFS= read -r request\nprintf '%s\\n'", 1)
+			}
+			script = strings.Replace(script, "#!/bin/sh\n", "#!/bin/sh\n[ \"${CODEX_HOME+x}\" != x ] || exit 3\n[ ! -e \"$HOME/.codex\" ] || exit 4\n", 1)
+			installFakeCodex(t, script)
+			t.Setenv("HOME", t.TempDir())
+			t.Setenv("CODEX_HOME", "")
+			if _, err := Validate(context.Background(), config.CodexConfig{APIKey: key}); err != nil {
+				t.Fatalf("model discovery injected a missing implicit home: %v", err)
+			}
+		})
+	}
+}

@@ -13,6 +13,38 @@ import (
 	"github.com/linkdata/minion/internal/workspace"
 )
 
+func TestClonePullRequestFetchesOnlyPinnedHeadAfterBaseClone(t *testing.T) {
+	fixture := newFixture(t)
+	writeFile(t, filepath.Join(fixture.source, "README.md"), "PR head\n")
+	head := fixture.commit("refs/pull/7/head", "PR head")
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := filepath.Join(t.TempDir(), "git-calls")
+	fakeOnPath(t, "git", `#!/bin/sh
+for argument do
+  case "$argument" in
+    clone|fetch) printf '%s\n' "$*" >> `+shellQuote(log)+`; break ;;
+  esac
+done
+exec `+shellQuote(git)+` "$@"
+`)
+	checkout := fixture.clonePullRequest(head)
+	data, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(calls) != 2 || !strings.Contains(calls[0], "clone ") || !strings.Contains(calls[0], "--branch main") ||
+		!strings.Contains(calls[1], "fetch ") || !strings.Contains(calls[1], "+refs/pull/7/head:refs/remotes/minion/pr-head") || strings.Contains(calls[1], "+refs/heads/") {
+		t.Fatalf("base fetched again or pinned head omitted: %q", calls)
+	}
+	if checkout.comparisonBase != fixture.base || checkout.expectedHead != head {
+		t.Fatalf("PR identity changed: base=%s head=%s", checkout.comparisonBase, checkout.expectedHead)
+	}
+}
+
 func TestSnapshotRejectsUnrelatedPullRequestHistories(t *testing.T) {
 	fixture := newFixture(t)
 	fixture.git(fixture.source, "checkout", "--orphan", "unrelated")

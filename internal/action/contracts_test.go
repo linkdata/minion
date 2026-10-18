@@ -158,6 +158,20 @@ func TestJobRejectsInvalidRoleAndDispatchSettings(t *testing.T) {
 		mutate func(*Job)
 		want   string
 	}{
+		{"version", func(j *Job) { j.Version++ }, "unsupported action protocol version"},
+		{"source", func(j *Job) { j.Source.Head = "untrusted" }, "snapshot has invalid source commits"},
+		{"requester identity", func(j *Job) { j.Identity.RequesterID = 0 }, "action repository or requester identity is invalid"},
+		{"repository identity zero", func(j *Job) { j.Identity.RepositoryID = 0 }, "action repository or requester identity is invalid"},
+		{"owner identity zero", func(j *Job) { j.Identity.OwnerID = 0 }, "action repository or requester identity is invalid"},
+		{"number zero", func(j *Job) { j.Identity.Number = 0 }, "action repository or requester identity is invalid"},
+		{"subject type", func(j *Job) { j.Identity.SubjectType = "Discussion" }, "action repository or requester identity is invalid"},
+		{"repository shape", func(j *Job) { j.Identity.Repository = "a/b/c" }, "action repository or requester identity is invalid"},
+		{"runtime", func(j *Job) { j.RuntimeBudget = 0 }, "invalid action runtime budget"},
+		{"title bound", func(j *Job) { j.Title = strings.Repeat("x", maxActionTitleBytes+1) }, "action text is invalid or exceeds limits"},
+		{"action", func(j *Job) { j.Action = "unknown" }, "unsupported action"},
+		{"skill path", func(j *Job) { j.Main.Skills = []string{"/tmp/skill/SKILL.md"} }, "skill URL"},
+		{"provider", func(j *Job) { j.Main.Provider = "unknown" }, "unsupported action provider"},
+		{"file bound", func(j *Job) { j.Source.Files[0].Data = make([]byte, workspace.MaxBytes+1) }, "source exceeds byte limit"},
 		{"model bound", func(j *Job) { j.Main.Model = strings.Repeat("m", 129) }, "invalid action model or skills"},
 		{"model NUL", func(j *Job) { j.Main.Model = "a\x00b" }, "invalid action model or skills"},
 		{"model CR", func(j *Job) { j.Main.Model = "a\rb" }, "invalid action model or skills"},
@@ -284,23 +298,19 @@ func TestFixJobRejectsUnsupportedLayoutBeforeExecution(t *testing.T) {
 }
 
 func TestFixJobIncludesOmittedPathsInUpfrontFoldedLayout(t *testing.T) {
-	for _, names := range [][2]string{{"ſ/a", "s"}} {
-		t.Run(names[0]+"-"+names[1], func(t *testing.T) {
-			job := portableJob(command.Fix)
-			job.Source.Files = []workspace.File{{Path: names[0], Mode: workspace.Regular}}
-			job.Source.Omitted = []string{names[1]}
-			if err := workspace.ValidateSnapshot(job.Source); err != nil {
-				t.Fatalf("test does not describe a valid exact source: %v", err)
-			}
-			runner := Runner{WorkRoot: t.TempDir(), runModel: forbidModel(t)}
-			if _, err := runner.Run(context.Background(), job); !errors.Is(err, monitor.ErrTerminalJob) || (!strings.Contains(err.Error(), "collision") && !strings.Contains(err.Error(), "duplicate source path")) {
-				t.Fatalf("unsupported fix source was not refused before execution: %v", err)
-			}
-			job.Action = command.Comment
-			if err := job.Validate(); err != nil {
-				t.Fatalf("read-only exact source must remain supported: %v", err)
-			}
-		})
+	job := portableJob(command.Fix)
+	job.Source.Files = []workspace.File{{Path: "ſ/a", Mode: workspace.Regular}}
+	job.Source.Omitted = []string{"s"}
+	if err := workspace.ValidateSnapshot(job.Source); err != nil {
+		t.Fatalf("test does not describe a valid exact source: %v", err)
+	}
+	runner := Runner{WorkRoot: t.TempDir(), runModel: forbidModel(t)}
+	if _, err := runner.Run(context.Background(), job); !errors.Is(err, monitor.ErrTerminalJob) || (!strings.Contains(err.Error(), "collision") && !strings.Contains(err.Error(), "duplicate source path")) {
+		t.Fatalf("unsupported fix source was not refused before execution: %v", err)
+	}
+	job.Action = command.Comment
+	if err := job.Validate(); err != nil {
+		t.Fatalf("read-only exact source must remain supported: %v", err)
 	}
 }
 
@@ -467,33 +477,6 @@ func TestCompleteAuditRequiresNonemptyCoreArtifacts(t *testing.T) {
 }
 
 func TestPortableContractsRejectMismatches(t *testing.T) {
-	for _, test := range []struct {
-		name   string
-		change func(*Job)
-	}{
-		{"version", func(j *Job) { j.Version++ }},
-		{"source", func(j *Job) { j.Source.Head = "untrusted" }},
-		{"requester identity", func(j *Job) { j.Identity.RequesterID = 0 }},
-		{"repository identity zero", func(j *Job) { j.Identity.RepositoryID = 0 }},
-		{"owner identity zero", func(j *Job) { j.Identity.OwnerID = 0 }},
-		{"number zero", func(j *Job) { j.Identity.Number = 0 }},
-		{"subject type", func(j *Job) { j.Identity.SubjectType = "Discussion" }},
-		{"repository shape", func(j *Job) { j.Identity.Repository = "a/b/c" }},
-		{"runtime", func(j *Job) { j.RuntimeBudget = 0 }},
-		{"title bound", func(j *Job) { j.Title = strings.Repeat("x", maxActionTitleBytes+1) }},
-		{"action", func(j *Job) { j.Action = "unknown" }},
-		{"skill path", func(j *Job) { j.Main.Skills = []string{"/tmp/skill/SKILL.md"} }},
-		{"provider", func(j *Job) { j.Main.Provider = "unknown" }},
-		{"file bound", func(j *Job) { j.Source.Files[0].Data = make([]byte, workspace.MaxBytes+1) }},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			job := portableJob(command.Comment)
-			test.change(&job)
-			if job.Validate() == nil {
-				t.Fatal("accepted invalid job")
-			}
-		})
-	}
 	job := portableJob(command.Comment)
 	job.Title = strings.Repeat("😀", 256)
 	if err := job.Validate(); err != nil {

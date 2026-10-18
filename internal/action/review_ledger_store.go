@@ -25,16 +25,14 @@ type retainedReview struct {
 
 // retainReviewEvidence saves private history after Runner validates the job and admits its root.
 // A failed call may leave a valid prefix; answer/change validation must not erase it.
-func (e *Orchestrator) retainReviewEvidence(job Job, result Result) (resultErr error) {
-	defer func() {
-		if resultErr != nil {
-			resultErr = fmt.Errorf("%w: retain private review evidence: %w", monitor.ErrTerminalJob, resultErr)
-		}
-	}()
+func (e *Orchestrator) retainReviewEvidence(job Job, result Result) error {
 	if job.Critic == nil {
 		return nil
 	}
-	return saveReviewEvidence(e.WorkRoot, job, result, e.Logger)
+	if err := saveReviewEvidence(e.WorkRoot, job, result, e.Logger); err != nil {
+		return fmt.Errorf("%w: retain private review evidence: %w", monitor.ErrTerminalJob, err)
+	}
+	return nil
 }
 
 func privateRecordsDir(workRoot, name string) (string, error) {
@@ -58,19 +56,15 @@ func privateRecordsDir(workRoot, name string) (string, error) {
 	return root, nil
 }
 
-func validateReviewEvidence(job Job, result Result) error {
+// saveReviewEvidence accepts a validated job on an admitted host work root.
+func saveReviewEvidence(workRoot string, job Job, result Result, logger *log.Logger) error {
 	if !result.matchesJob(job) {
 		return errors.New("review evidence does not match action identity or source")
 	}
 	if err := result.validateCalls(job, false); err != nil {
 		return err
 	}
-	return validateRefutations(job, result.Calls, result.Refutations)
-}
-
-// saveReviewEvidence accepts a validated job on an admitted host work root.
-func saveReviewEvidence(workRoot string, job Job, result Result, logger *log.Logger) error {
-	if err := validateReviewEvidence(job, result); err != nil {
+	if err := validateRefutations(job, result.Calls, result.Refutations); err != nil {
 		return err
 	}
 	record := retainedReview{

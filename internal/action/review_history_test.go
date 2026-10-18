@@ -336,42 +336,38 @@ func TestRefutationsRemainPrivateFromAuditArtifacts(t *testing.T) {
 }
 
 func TestRefutationCheckpointFailureStopsBeforeNextCall(t *testing.T) {
-	for _, failAt := range []int{3, 4} {
-		t.Run(fmt.Sprint(failAt), func(t *testing.T) {
-			job := withClaudeCritic(portableJob(command.Comment))
-			job.CriticMaxRounds, job.CriticNonblockingRounds = 2, 0
-			checkpointErr := errors.New("private refutation checkpoint unavailable")
-			calls, checkpoints := 0, 0
-			var expected, lastCheckpoint []Refutation
-			runner := Runner{WorkRoot: t.TempDir(), recordReview: func(receipts []CallUsage, refs []Refutation) error {
-				checkpoints++
-				if len(receipts) != checkpoints-1 || !reflect.DeepEqual(refs, expected) {
-					t.Fatalf("checkpoint evidence lost: calls=%+v refutations=%+v", receipts, refs)
-				}
-				lastCheckpoint = append([]Refutation(nil), refs...)
-				if checkpoints == failAt+1 {
-					return checkpointErr
-				}
-				return nil
-			}, runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
-				calls++
-				if request.role == roleMain {
-					text := ""
-					if request.round > 1 {
-						text = "PRIVATE_CHECKPOINT_REFUTATION"
-						expected = append(expected, Refutation{Round: request.round, Text: text})
-					}
-					return aicli.Result{Answer: proposalJSON("Public answer", text)}, nil
-				}
-				return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"feedback":"PRIVATE_BLOCKER"}`}, nil
-			}}
-			result, err := runner.Run(context.Background(), job)
-			if !errors.Is(err, checkpointErr) || !errors.Is(err, monitor.ErrTerminalJob) || calls != failAt || checkpoints != failAt+1 || result.Answer != "" || !reflect.DeepEqual(result.Refutations, expected) || !reflect.DeepEqual(lastCheckpoint, expected) {
-				t.Fatalf("checkpoint failure lost evidence/continued: calls=%d checkpoints=%d result=%+v error=%v", calls, checkpoints, result, err)
+	job := withClaudeCritic(portableJob(command.Comment))
+	job.CriticMaxRounds, job.CriticNonblockingRounds = 2, 0
+	checkpointErr := errors.New("private refutation checkpoint unavailable")
+	calls, checkpoints := 0, 0
+	var expected, lastCheckpoint []Refutation
+	runner := Runner{WorkRoot: t.TempDir(), recordReview: func(receipts []CallUsage, refs []Refutation) error {
+		checkpoints++
+		if len(receipts) != checkpoints-1 || !reflect.DeepEqual(refs, expected) {
+			t.Fatalf("checkpoint evidence lost: calls=%+v refutations=%+v", receipts, refs)
+		}
+		lastCheckpoint = append([]Refutation(nil), refs...)
+		if checkpoints == 4 {
+			return checkpointErr
+		}
+		return nil
+	}, runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+		calls++
+		if request.role == roleMain {
+			text := ""
+			if request.round > 1 {
+				text = "PRIVATE_CHECKPOINT_REFUTATION"
+				expected = append(expected, Refutation{Round: request.round, Text: text})
 			}
-			if err := result.validate(job, false); err != nil {
-				t.Fatal(err)
-			}
-		})
+			return aicli.Result{Answer: proposalJSON("Public answer", text)}, nil
+		}
+		return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"feedback":"PRIVATE_BLOCKER"}`}, nil
+	}}
+	result, err := runner.Run(context.Background(), job)
+	if !errors.Is(err, checkpointErr) || !errors.Is(err, monitor.ErrTerminalJob) || calls != 3 || checkpoints != 4 || result.Answer != "" || !reflect.DeepEqual(result.Refutations, expected) || !reflect.DeepEqual(lastCheckpoint, expected) {
+		t.Fatalf("checkpoint failure lost evidence/continued: calls=%d checkpoints=%d result=%+v error=%v", calls, checkpoints, result, err)
+	}
+	if err := result.validate(job, false); err != nil {
+		t.Fatal(err)
 	}
 }

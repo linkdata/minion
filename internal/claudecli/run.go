@@ -77,7 +77,7 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 		}()
 	}
 	configDir := authDir
-	if configDir == "" {
+	if configDir == "" && os.Getenv("CLAUDE_CONFIG_DIR") != "" {
 		configDir, err = HomePath()
 		if err != nil {
 			return result, err

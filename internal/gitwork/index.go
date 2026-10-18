@@ -337,16 +337,7 @@ func (index *OfflineIndex) run(ctx context.Context, limit int, input []byte, arg
 		if args[0] == "check-ignore" && errors.As(err, &exit) && exit.ExitCode() == 1 && contextErr == nil {
 			return output.Bytes(), nil
 		}
-		message := strings.TrimSpace(diagnostic.String())
-		if contextErr != nil {
-			err = errors.Join(err, contextErr)
-		} else {
-			err = classifyPathError(args[0], message, err)
-		}
-		if message != "" {
-			return nil, fmt.Errorf("offline git %s: %w: %q", args[0], err, message)
-		}
-		return nil, fmt.Errorf("offline git %s: %w", args[0], err)
+		return nil, gitFailure("offline git", args[0], diagnostic.String(), contextErr, err)
 	}
 	return output.Bytes(), nil
 }

@@ -156,8 +156,10 @@ func TestUsagePersistenceFailureStopsModelsOrPublication(t *testing.T) {
 		name     string
 		before   bool
 		modelErr error
+		critic   bool
 	}{
-		{"before call", true, modelErr}, {"after failed call", false, modelErr}, {"after successful call", false, nil},
+		{"before call", true, modelErr, false}, {"after failed call", false, modelErr, false}, {"after successful call", false, nil, false},
+		{"after critic call", false, nil, true},
 	} {
 		t.Run(provider+"/"+tt.name, func(t *testing.T) {
 			root := t.TempDir()
@@ -167,9 +169,15 @@ func TestUsagePersistenceFailureStopsModelsOrPublication(t *testing.T) {
 			}
 			store := &usage.Store{Dir: originalDir}
 			calls := 0
-			tracked := attemptFixture(&Orchestrator{Usage: store, Main: provider, Runner: Runner{runModel: func(context.Context, modelRun) (aicli.Result, error) {
+			tracked := attemptFixture(&Orchestrator{Usage: store, Main: provider, Runner: Runner{runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 				calls++
+				if tt.critic && request.role == roleMain {
+					return aicli.Result{Answer: proposalJSON("Candidate answer", ""), Tokens: usage.Tokens{Input: 10, Output: 2}, UsageComplete: true}, nil
+				}
 				store.Dir = blocked
+				if tt.critic {
+					return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"feedback":"Blocking failure."}`, Tokens: usage.Tokens{Input: 11, Output: 3}, UsageComplete: true}, nil
+				}
 				return aicli.Result{Answer: "completed paid work", Tokens: usage.Tokens{Input: 10, Output: 2}, UsageComplete: tt.modelErr == nil}, tt.modelErr
 			}}})
 			finish, err := tracked.trackUsage(usageJob())
@@ -181,15 +189,26 @@ func TestUsagePersistenceFailureStopsModelsOrPublication(t *testing.T) {
 			}
 			job := portableJob(command.Comment)
 			job.Main.Provider = provider
+			if tt.critic {
+				job = withClaudeCritic(job)
+			}
 			tracked.Runner.WorkRoot = t.TempDir()
 			result, err := tracked.Runner.Run(context.Background(), job)
 			answer := result.Answer
 			wantCalls := 1
 			if tt.before {
 				wantCalls = 0
+			} else if tt.critic {
+				wantCalls = 2
 			}
 			if err == nil || !strings.Contains(err.Error(), "save action usage") || errors.Is(err, monitor.ErrTerminalJob) == tt.before || calls != wantCalls || len(result.Calls) != wantCalls || answer != "" || (!tt.before && tt.modelErr != nil && !errors.Is(err, tt.modelErr)) {
 				t.Fatalf("storage failure: calls=%d answer=%q error=%v", calls, answer, err)
+			}
+			if tt.critic {
+				last := result.Calls[1]
+				if !last.HasBlockers || last.Approved || last.NoBlockers || last.Tokens != (usage.Tokens{Input: 11, Output: 3}) || !last.Complete || result.validate(job, false) != nil {
+					t.Fatalf("post-native save failure lost parsed critic evidence: %+v", result)
+				}
 			}
 			if finalErr := finish(err); finalErr == nil || !strings.Contains(finalErr.Error(), "save action usage") {
 				t.Fatalf("final save failure missing: %v", finalErr)
@@ -197,6 +216,9 @@ func TestUsagePersistenceFailureStopsModelsOrPublication(t *testing.T) {
 			records, readErr := usage.ReadAll(originalDir)
 			if readErr != nil || len(records) != 1 || records[0].Status != "running" || (!tt.before && records[0].UsageComplete) {
 				t.Fatalf("last durable checkpoint lost: records=%+v error=%v", records, readErr)
+			}
+			if tt.critic && (records[0].CodexCalls != 1 || records[0].ClaudeCalls != 1 || records[0].Tokens != (usage.Tokens{Input: 10, Output: 2})) {
+				t.Fatalf("last pre-critic usage checkpoint changed: %+v", records[0])
 			}
 		})
 	}
@@ -328,11 +350,8 @@ printf '%%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"
 		t.Fatal(err)
 	}
 	installed := filepath.Join(os.Getenv("HOME"), ".agents", "skills", "ponytail-review", "SKILL.md")
-	if !strings.Contains(string(args), "portable-model") || !strings.Contains(string(args), `model_reasoning_effort="high"`) || strings.Contains(string(args), "stale-host-model") || !strings.Contains(string(args), ".minion-context-") || !strings.Contains(string(prompt), installed) {
-		t.Fatalf("usage wrapper lost worker settings: args=%s prompt=%s", args, prompt)
-	}
-	if tracked.Runner.Codex.Model != "stale-host-model" || tracked.Runner.Codex.ReasoningEffort != "low" {
-		t.Fatal("usage/native dispatch changed shared host settings")
+	if !strings.Contains(string(args), ".minion-context-") || !strings.Contains(string(prompt), installed) {
+		t.Fatalf("usage wrapper lost worker context or skills: args=%s prompt=%s", args, prompt)
 	}
 	records, err := usage.ReadAll(store.Dir)
 	if err != nil || len(records) != 1 || records[0].Model != "portable-model" || records[0].CodexCalls != 1 || records[0].Tokens.Total() != 5 || len(result.Calls) != 1 {

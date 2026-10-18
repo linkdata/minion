@@ -171,7 +171,13 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 	closeReview := func() {
 		if review != nil {
 			if err := review.close(); err != nil {
-				result.Diagnostics = append(result.Diagnostics, Diagnostic{Code: "cleanup_failed", Message: "Critic snapshot cleanup failed; operator attention is required."})
+				r.logf("critic snapshot cleanup retry scheduled job=%s attempt=%s", job.Identity.JobID, job.Identity.AttemptID)
+				if review.ownedSource {
+					owned = append(owned, review.source)
+				}
+				if review.outputDir != "" {
+					owned = append(owned, review.outputDir)
+				}
 			}
 			review = nil
 		}
@@ -211,7 +217,7 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 			defer func() {
 				if err := cleanup.RemoveAll(historyDir); err != nil {
 					owned = append(owned, historyDir)
-					result.Diagnostics = append(result.Diagnostics, Diagnostic{Code: "cleanup_failed", Message: "Private review history cleanup failed; operator attention is required."})
+					r.logf("private review history cleanup retry scheduled job=%s attempt=%s", job.Identity.JobID, job.Identity.AttemptID)
 				}
 			}()
 			data, err := json.Marshal(request.refutations)
@@ -299,7 +305,12 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 		if err != nil {
 			return result, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
 		}
-		if answer, err = validateAuditFiles(ctx, files, workRoot, auditSkill, job.Identity.Repository, source, job.Source.Head); err != nil {
+		validationDir, err := os.MkdirTemp(workRoot, ".minion-audit-validation-")
+		if err != nil {
+			return result, fmt.Errorf("%w: create audit validation directory: %w", monitor.ErrTerminalJob, err)
+		}
+		owned = append(owned, validationDir)
+		if answer, err = validateAuditFiles(ctx, files, validationDir, auditSkill, job.Identity.Repository, source, job.Source.Head); err != nil {
 			return result, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
 		}
 		if result.Artifacts, err = normalizeAuditArtifacts(files, job, auditSkill); err != nil {

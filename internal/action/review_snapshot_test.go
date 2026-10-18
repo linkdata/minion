@@ -248,9 +248,6 @@ func TestReviewSnapshotRejectsCriticCopyMutation(t *testing.T) {
 			if len(result.Calls) != wantCalls {
 				t.Fatalf("lost calls after integrity failure: %+v", result.Calls)
 			}
-			if len(result.Refutations) != 0 {
-				t.Fatalf("checkpointed an integrity-failed call: %+v", result.Refutations)
-			}
 			if err := result.validate(job, false); err != nil {
 				t.Fatalf("invalid partial evidence after integrity failure: %v", err)
 			}
@@ -264,7 +261,7 @@ func TestReviewSnapshotRejectsCriticCopyMutation(t *testing.T) {
 
 func TestReviewSnapshotChecksExactFrozenFiles(t *testing.T) {
 	for _, reports := range []bool{false, true} {
-		for _, mutation := range []string{"special permissions", "new file"} {
+		for _, mutation := range []string{"special permissions", "new file", "directory"} {
 			t.Run(fmt.Sprintf("reports=%t/%s", reports, mutation), func(t *testing.T) {
 				job := portableJob(command.Fix)
 				index, source := offlineIndexFixture(t, job.Source.Files)
@@ -278,9 +275,9 @@ func TestReviewSnapshotChecksExactFrozenFiles(t *testing.T) {
 				if err := snapshot.verify(context.Background()); err != nil {
 					t.Fatalf("unchanged frozen copy rejected: %v", err)
 				}
-				root := snapshot.source
+				root, want := snapshot.source, "frozen candidate source"
 				if reports {
-					root = snapshot.outputDir
+					root, want = snapshot.outputDir, "frozen candidate reports"
 				}
 				filename := filepath.Join(root, name)
 				switch mutation {
@@ -291,8 +288,15 @@ func TestReviewSnapshotChecksExactFrozenFiles(t *testing.T) {
 				case "new file":
 					// An unknown report name is not visited by the known-artifact collector.
 					writeFixtureFile(t, root, "unexpected.txt", []byte("new copy content"))
+				case "directory":
+					if err := os.Remove(filename); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Mkdir(filename, 0700); err != nil {
+						t.Fatal(err)
+					}
 				}
-				if err := snapshot.verify(context.Background()); err == nil || !strings.Contains(err.Error(), "frozen candidate") {
+				if err := snapshot.verify(context.Background()); err == nil || !strings.Contains(err.Error(), want) {
 					t.Fatalf("frozen %s mutation accepted: %v", mutation, err)
 				}
 				if reports {
@@ -311,34 +315,5 @@ func TestReviewSnapshotChecksExactFrozenFiles(t *testing.T) {
 				}
 			})
 		}
-	}
-}
-
-func TestReviewSnapshotRejectsUnreadableFrozenCandidates(t *testing.T) {
-	for _, reports := range []bool{false, true} {
-		t.Run(fmt.Sprintf("reports_%t", reports), func(t *testing.T) {
-			job := portableJob(command.Fix)
-			index, source := offlineIndexFixture(t, job.Source.Files)
-			output, want := "", "frozen candidate source"
-			if reports {
-				job.Action, index = command.SecurityAudit, nil
-				output, want = t.TempDir(), "frozen candidate reports"
-				writeFixtureFile(t, output, "REPORT.md", []byte("reviewed report"))
-			}
-			snapshot := mustFreeze(t, context.Background(), t.TempDir(), job, source, output, index)
-			path := filepath.Join(snapshot.source, "source.txt")
-			if reports {
-				path = filepath.Join(snapshot.outputDir, "REPORT.md")
-			}
-			if err := os.Remove(path); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Mkdir(path, 0700); err != nil {
-				t.Fatal(err)
-			}
-			if err := snapshot.verify(context.Background()); err == nil || !strings.Contains(err.Error(), want) {
-				t.Fatalf("unreadable frozen candidate accepted: %v", err)
-			}
-		})
 	}
 }

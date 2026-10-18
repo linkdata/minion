@@ -5,7 +5,6 @@ package gitwork
 import (
 	"context"
 	"errors"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +13,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/linkdata/minion/internal/testsupport"
 )
 
 func assertGitChildStopped(t *testing.T, pidFile string) {
@@ -40,29 +41,10 @@ func assertGitChildStopped(t *testing.T, pidFile string) {
 	}()
 	// SIGKILL delivery precedes zombie visibility. Pin the proc entry so a
 	// recycled numeric PID cannot redirect later observations to another task.
-	ticker := time.NewTicker(5 * time.Millisecond)
-	defer ticker.Stop()
-	deadline := time.NewTimer(time.Second)
-	defer deadline.Stop()
-	buffer := make([]byte, 4096)
-	for {
-		n, readErr := stat.ReadAt(buffer, 0)
-		if errors.Is(readErr, os.ErrNotExist) || errors.Is(readErr, syscall.ESRCH) {
-			return
-		}
-		data = buffer[:n]
-		_, state, ok := strings.Cut(string(data), ") ")
-		if (readErr != nil && !errors.Is(readErr, io.EOF)) || !ok {
-			t.Fatalf("read Git child state: pid=%d stat=%q error=%v", pid, data, readErr)
-		}
-		if strings.HasPrefix(state, "Z ") {
-			return // A killed orphan can await reaping by its new parent.
-		}
-		select {
-		case <-ticker.C:
-		case <-deadline.C:
-			t.Fatalf("Git child is still running: pid=%d stat=%q", pid, data)
-		}
+	waitCtx, stopWait := context.WithTimeout(context.Background(), time.Second)
+	defer stopWait()
+	if err := testsupport.WaitStopped(waitCtx, stat); err != nil {
+		t.Fatalf("Git child is still running: pid=%d: %v", pid, err)
 	}
 }
 

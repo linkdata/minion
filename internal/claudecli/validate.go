@@ -52,7 +52,7 @@ func Validate(ctx context.Context, settings config.ClaudeConfig) (validated conf
 		return validated, err
 	}
 	configDir := authDir
-	if configDir == "" {
+	if configDir == "" && os.Getenv("CLAUDE_CONFIG_DIR") != "" {
 		configDir, err = HomePath()
 		if err != nil {
 			return validated, err

@@ -68,7 +68,7 @@ func auditArtifactLimit(name string) int64 {
 	return maxAuditArtifactBytes
 }
 
-func validateAuditFiles(ctx context.Context, files []workspace.File, validationRoot, skill, repo, target, head string) (report string, resultErr error) {
+func validateAuditFiles(ctx context.Context, files []workspace.File, validationDir, skill, repo, target, head string) (string, error) {
 	byPath := make(map[string][]byte, len(files))
 	for _, file := range files {
 		byPath[file.Path] = file.Data
@@ -83,16 +83,6 @@ func validateAuditFiles(ctx context.Context, files []workspace.File, validationR
 	if _, err := validateAuditMetadata(byPath["run-metadata.json"], repo, target, head); err != nil {
 		return "", err
 	}
-	validationDir, err := os.MkdirTemp(validationRoot, ".minion-audit-validation-")
-	if err != nil {
-		return "", fmt.Errorf("create audit validation directory: %w", err)
-	}
-	defer func() {
-		if err := os.RemoveAll(validationDir); err != nil {
-			report = ""
-			resultErr = errors.Join(resultErr, fmt.Errorf("remove audit validation directory: %w", err))
-		}
-	}()
 	for _, validator := range auditValidators {
 		if err := os.WriteFile(filepath.Join(validationDir, validator.artifact), byPath[validator.artifact], 0600); err != nil {
 			return "", fmt.Errorf("copy audit %s for validation: %w", validator.artifact, err)

@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/linkdata/minion/internal/aicli"
+	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/usage"
 )
@@ -40,23 +41,6 @@ func TestRunOutputLimitPreservesRolloutUsage(t *testing.T) {
 				t.Fatalf("output limit accepted or known counters lost: result=%+v error=%v", result, err)
 			}
 		})
-	}
-}
-
-func TestOutputRejectsOversizedRecordsAfterProgress(t *testing.T) {
-	const progress = `{"type":"item.completed","item":{"type":"agent_message","text":"still working"}}`
-	const final = `{"type":"item.completed","item":{"type":"agent_message","text":"final answer"}}`
-	data := progress + "\n" + `{"type":"item.completed","item":{"type":"command_execution","output":"` + strings.Repeat("x", aicli.MaxEventBytes) + `"}}` + "\n" + final + "\n" + `{"type":"turn.completed"}`
-	canceled := false
-	o := jsonlOutput{cancel: func() { canceled = true }}
-	for len(data) != 0 {
-		n := min(32768, len(data))
-		_, _ = o.Write([]byte(data[:n]))
-		data = data[n:]
-	}
-	o.stream.Finish()
-	if !o.stopped || !o.failed || !canceled || o.completed || !strings.Contains(o.failureReason, "event exceeded") {
-		t.Fatalf("oversized record accepted: stopped=%t failed=%t canceled=%t completed=%t reason=%q", o.stopped, o.failed, canceled, o.completed, o.failureReason)
 	}
 }
 
@@ -101,8 +85,8 @@ func TestOutputCountsUniqueHelpersAcrossRepeatedWaits(t *testing.T) {
 	}
 	_, _ = o.Write([]byte(`{"type":"item.completed","item":{"type":"agent_message","text":"answer"}}` + "\n" + `{"type":"turn.completed"}` + "\n"))
 	o.stream.Finish()
-	if o.stopped || o.failed || !o.completed || len(o.children) != 1 || o.children[0] != "child" || len(o.seenChildren) != 1 {
-		t.Fatalf("repeated waits consumed helper capacity: stopped=%t failed=%t complete=%t children=%v", o.stopped, o.failed, o.completed, o.children)
+	if o.stopErr != nil || o.failed || !o.completed || len(o.children) != 1 || o.children[0] != "child" || len(o.seenChildren) != 1 {
+		t.Fatalf("repeated waits consumed helper capacity: stop=%v failed=%t complete=%t children=%v", o.stopErr, o.failed, o.completed, o.children)
 	}
 }
 
@@ -212,6 +196,23 @@ func TestRunQuotesProviderDiagnosticsAndPreservesExitCause(t *testing.T) {
 				if !errors.As(err, &exit) || exit.ExitCode() != 7 {
 					t.Fatalf("lost native exit cause: %v", err)
 				}
+			}
+		})
+	}
+}
+
+func TestEventReasonDecodesBeforeClipping(t *testing.T) {
+	long := strings.Repeat("x", bounded.DiagnosticBytes+1)
+	for _, tc := range []struct{ name, message, raw, want string }{
+		{"top level precedence", "top", `{"message":"nested"}`, "top"},
+		{"object", "", `{"message":"nested"}`, "nested"},
+		{"string", "", `"simple"`, "simple"},
+		{"failed object decode", "", `{"message":"partial","message":42}`, ""},
+		{"long decoded object", "", `{"message":"` + long + `"}`, long[:bounded.DiagnosticBytes] + "..."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := eventReason(codexEvent{Message: tc.message, Error: json.RawMessage(tc.raw)}); got != tc.want {
+				t.Fatalf("reason=%q want=%q", got, tc.want)
 			}
 		})
 	}

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,6 +19,93 @@ import (
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/workspace"
 )
+
+type cleanupRetryLog struct {
+	bytes.Buffer
+	root string
+	err  error
+}
+
+func (w *cleanupRetryLog) Write(p []byte) (int, error) {
+	if bytes.Contains(p, []byte("cleanup retry scheduled")) {
+		w.err = os.Chmod(w.root, 0700)
+	}
+	return w.Buffer.Write(p)
+}
+
+func TestRunnerCleanupRetryRecoveryKeepsValidatedResult(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions")
+	}
+	for _, kind := range []string{"history", "snapshot"} {
+		t.Run(kind, func(t *testing.T) {
+			root := t.TempDir()
+			t.Cleanup(func() { _ = os.Chmod(root, 0700) })
+			journal := &cleanupRetryLog{root: root}
+			job := withClaudeCritic(portableJob(command.Comment))
+			job.CriticMaxRounds = 2
+			if kind == "snapshot" {
+				job.Action, job.Command = command.Fix, "fix"
+			}
+			calls := 0
+			runner := Runner{WorkRoot: root, Logger: log.New(journal, "", 0), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+				calls++
+				if request.role == roleMain {
+					if kind == "history" && request.round == 2 {
+						return aicli.Result{Answer: proposalJSON("Done.", "Counterevidence.")}, nil
+					}
+					return aicli.Result{Answer: proposalJSON("Done.", "")}, nil
+				}
+				if kind == "history" && request.round == 1 {
+					return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"feedback":"Check the concern."}`}, nil
+				}
+				if kind == "snapshot" || request.reviewPhase == reviewVerification {
+					if err := os.Chmod(root, 0500); err != nil {
+						t.Fatal(err)
+					}
+				}
+				return aicli.Result{Answer: approvedCritiqueJSON}, nil
+			}}
+			result, err := runner.Run(context.Background(), job)
+			wantCalls := 5
+			if kind == "snapshot" {
+				wantCalls = 2
+			}
+			if err != nil || journal.err != nil || calls != wantCalls || result.Answer != "Done." || len(result.Diagnostics) != 0 || strings.Count(journal.String(), "cleanup retry scheduled") != 1 {
+				t.Fatalf("recovered cleanup: calls=%d result=%+v err=%v restore=%v log=%q", calls, result, err, journal.err, journal.String())
+			}
+			entries, err := os.ReadDir(root)
+			if err != nil || len(entries) != 0 {
+				t.Fatalf("retry leaked workspaces: %v,%v", entries, err)
+			}
+		})
+	}
+}
+
+func TestRunnerAuditValidationCleanupRestoresRestrictedDirectory(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions")
+	}
+	installActionTestSkills(t, testAuditSkillURL)
+	fakeOnPath(t, "node", "#!/bin/sh\ncase \"$*\" in *validate-coverage-ledger.cjs*) /bin/chmod 000 .;; esac\nexit 0\n")
+	job := portableJob(command.SecurityAudit)
+	job.Main.Skills = []string{testAuditSkillURL}
+	root := t.TempDir()
+	runner := Runner{WorkRoot: root, runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+		for _, file := range auditArtifactsFixture(job, request.dir, "Audit report\n") {
+			writeFixtureFile(t, request.outputDir, file.Path, file.Data)
+		}
+		return aicli.Result{Answer: "Audit report\n"}, nil
+	}}
+	result, err := runner.Run(context.Background(), job)
+	if err != nil || result.Answer != "Audit report\n" || len(result.Artifacts) != len(auditArtifacts) || len(result.Diagnostics) != 0 {
+		t.Fatalf("cleanup discarded validated audit: %+v,%v", result, err)
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("validation directory survived cleanup: %v,%v", entries, err)
+	}
+}
 
 func TestRunnerReviewRevisionsFreezeCleanIndependentInputs(t *testing.T) {
 	job := portableJob(command.Fix)

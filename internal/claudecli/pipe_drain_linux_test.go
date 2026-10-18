@@ -5,18 +5,17 @@ package claudecli
 import (
 	"context"
 	"errors"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/config"
+	"github.com/linkdata/minion/internal/testsupport"
 	"github.com/linkdata/minion/internal/usage"
 )
 
@@ -85,30 +84,10 @@ exit 0
 				t.Error(err)
 			}
 		}()
-		until := time.NewTimer(time.Second)
-		defer until.Stop()
-		observe := time.NewTicker(5 * time.Millisecond)
-		defer observe.Stop()
-		buffer := make([]byte, 4096)
-		for {
-			n, err := stat.ReadAt(buffer, 0)
-			if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ESRCH) {
-				return
-			}
-			_, state, ok := strings.Cut(string(buffer[:n]), ") ")
-			if (err != nil && !errors.Is(err, io.EOF)) || !ok {
-				t.Errorf("read fixture child state: %q, %v", buffer[:n], err)
-				return
-			}
-			if strings.HasPrefix(state, "Z ") {
-				return
-			} // Exited; the host reaps the orphan.
-			select {
-			case <-observe.C:
-			case <-until.C:
-				t.Error("finite fixture child remained live after cleanup")
-				return
-			}
+		waitCtx, stopWait := context.WithTimeout(context.Background(), time.Second)
+		defer stopWait()
+		if err := testsupport.WaitStopped(waitCtx, stat); err != nil {
+			t.Errorf("finite fixture child remained live after cleanup: %v", err)
 		}
 	})
 	select {

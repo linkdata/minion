@@ -256,21 +256,21 @@ func ValidateFixPaths(files []File, omitted []string) error {
 	return validatePaths(paths, true)
 }
 
-// PrepareRoot resolves an existing work root to its canonical absolute path.
+// PrepareRoot resolves an existing path to its canonical absolute path.
 func PrepareRoot(root string) (string, error) {
 	if strings.TrimSpace(root) == "" {
-		return "", errors.New("work root is required")
+		return "", errors.New("path is required")
 	}
 	if !filepath.IsAbs(root) {
 		cwd, err := os.Getwd()
 		if err != nil {
-			return "", fmt.Errorf("resolve work root: %w", err)
+			return "", fmt.Errorf("resolve path: %w", err)
 		}
 		root = cwd + string(os.PathSeparator) + root
 	}
 	root, err := filepath.EvalSymlinks(root)
 	if err != nil {
-		return "", fmt.Errorf("resolve work root: %w", err)
+		return "", fmt.Errorf("resolve path: %w", err)
 	}
 	return root, nil
 }
@@ -456,11 +456,6 @@ func checkUnchanged(ctx context.Context, root string, base []File) error {
 // ReadChanges reads only selected paths; ignored build output is never traversed.
 // Selection carries paths and deletions, with required expected regular-file modes.
 func ReadChanges(ctx context.Context, root string, selected []Change) ([]Change, error) {
-	for _, selection := range selected {
-		if len(selection.Data) != 0 {
-			return nil, errors.New("change selection contains file data")
-		}
-	}
 	if err := ValidateChanges(selected); err != nil {
 		return nil, err
 	}
@@ -724,7 +719,7 @@ func readFile(name string, limit int64) (data []byte, info fs.FileInfo, resultEr
 	if !singleLink(opened) {
 		return nil, nil, errors.New("file must have exactly one hard link")
 	}
-	data, err = io.ReadAll(io.LimitReader(f, limit+1))
+	data, err = io.ReadAll(io.LimitReader(f, opened.Size()+1))
 	if err != nil {
 		return nil, nil, err
 	}

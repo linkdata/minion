@@ -222,9 +222,15 @@ func TestCaseOnlyRenameAppliesDeletionBeforeCreation(t *testing.T) {
 }
 
 func TestWorkspaceRefusesLinksAndNonemptyMaterialization(t *testing.T) {
-	root := privateRoot(t)
-	if err := os.Symlink(t.TempDir(), filepath.Join(root, "outside")); err != nil {
+	root, outside := privateRoot(t), t.TempDir()
+	sentinel := filepath.Join(outside, "file")
+	if err := os.WriteFile(sentinel, []byte("outside"), 0600); err != nil {
 		t.Fatal(err)
+	}
+	for name, target := range map[string]string{"parent": outside, "target": sentinel} {
+		if err := os.Symlink(target, filepath.Join(root, name)); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := CheckUnchanged(context.Background(), root, nil); err == nil || !strings.Contains(err.Error(), "modified supplied source") {
 		t.Fatalf("generated symlink validation=%v", err)
@@ -232,13 +238,29 @@ func TestWorkspaceRefusesLinksAndNonemptyMaterialization(t *testing.T) {
 	if err := Materialize(root, nil); err == nil || !strings.Contains(err.Error(), "not empty") {
 		t.Fatalf("nonempty root validation=%v", err)
 	}
-	if err := Apply(root, []Change{{Path: "outside/exfiltrate", Mode: Regular}}); err == nil {
-		t.Fatal("followed symlink parent")
+	for _, tc := range []struct {
+		name, path, want string
+		remove           bool
+	}{
+		{"target write", "target", "not regular", false},
+		{"target deletion", "target", "not regular", true},
+		{"parent write", "parent/file", "not a directory", false},
+		{"parent deletion", "parent/file", "not a directory", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			change := Change{Path: tc.path, Delete: tc.remove}
+			if !tc.remove {
+				change.Mode = Regular
+				change.Data = []byte("changed")
+			}
+			if err := Apply(root, []Change{change}); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("symlink change accepted: %v", err)
+			}
+			if data, err := os.ReadFile(sentinel); err != nil || string(data) != "outside" {
+				t.Fatalf("outside file changed=%q,%v", data, err)
+			}
+		})
 	}
-	if err := Apply(root, []Change{{Path: "outside", Delete: true}}); err == nil {
-		t.Fatal("deleted symlink as regular source")
-	}
-
 }
 
 func TestSnapshotBoundsAndIdentity(t *testing.T) {

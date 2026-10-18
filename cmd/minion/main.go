@@ -83,8 +83,8 @@ func run() int {
 		logger.Printf("work root: %v", err)
 		return 1
 	}
-	if err := checkWorkRootIsolation(cfg, loadedPath); err != nil {
-		logger.Printf("work root: %v", err)
+	if err := checkIsolation(cfg, loadedPath); err != nil {
+		logger.Printf("isolation: %v", err)
 		return 1
 	}
 	if err := checkModels(ctx, &cfg, logger); err != nil {
@@ -195,7 +195,7 @@ func newOrchestrator(cfg config.Config, client *github.Client, store *state.Stor
 	}
 }
 
-func checkWorkRootIsolation(cfg config.Config, configPath string) error {
+func checkIsolation(cfg config.Config, configPath string) error {
 	root, err := workspace.PrepareRoot(cfg.WorkRoot)
 	if err != nil {
 		return err
@@ -226,28 +226,34 @@ func checkWorkRootIsolation(cfg config.Config, configPath string) error {
 	}
 	private := []string{configPath}
 	// Shared system reads can expose stored credentials even for an unused provider.
-	for _, provider := range []string{"codex", "claude"} {
-		var home string
-		var err error
-		switch provider {
-		case "codex":
-			home, err = codexcli.HomePath()
-			if home != "" {
-				private = append(private, home, filepath.Join(home, "auth.json"), filepath.Join(home, "config.toml"))
-			}
-		case "claude":
-			home, err = claudecli.HomePath()
-			if home != "" {
-				private = append(private, home, filepath.Join(home, ".credentials.json"), filepath.Join(home, ".claude.json"), filepath.Join(home, "settings.json"))
-			}
-			if userHome, homeErr := os.UserHomeDir(); homeErr == nil {
-				private = append(private, filepath.Join(userHome, ".claude.json"))
-			}
-		}
+	codexHome, err := codexcli.HomePath()
+	if err != nil {
+		return err
+	}
+	if codexHome != "" {
+		private = append(private, codexHome, filepath.Join(codexHome, "auth.json"), filepath.Join(codexHome, "config.toml"))
+	}
+	claudeHome, err := claudecli.HomePath()
+	if err != nil {
+		return err
+	}
+	if claudeHome != "" {
+		private = append(private, claudeHome, filepath.Join(claudeHome, ".credentials.json"), filepath.Join(claudeHome, ".claude.json"), filepath.Join(claudeHome, "settings.json"))
+	}
+	if userHome, homeErr := os.UserHomeDir(); homeErr == nil {
+		private = append(private, filepath.Join(userHome, ".claude.json"))
+	}
+	ghHome := os.Getenv("GH_CONFIG_DIR")
+	if ghHome == "" {
+		configHome, err := os.UserConfigDir()
 		if err != nil {
 			return err
 		}
+		ghHome = filepath.Join(configHome, "gh")
 	}
+	// Match gh's filepath.Join cleaning before checking aliases of hosts.yml.
+	ghHome = filepath.Clean(ghHome)
+	private = append(private, ghHome, filepath.Join(ghHome, "hosts.yml"))
 	return runner.CheckPrivatePaths(private, cfg.Main, cfg.Adversarial)
 }
 
@@ -305,7 +311,7 @@ func checkModels(ctx context.Context, cfg *config.Config, logger *log.Logger) (e
 	for _, provider := range []string{cfg.Main, cfg.Adversarial} {
 		switch provider {
 		case "codex":
-			if err = checkCodexCLI(ctx, cfg.Codex); err == nil {
+			if err = codexcli.CheckLogin(ctx, cfg.Codex); err == nil {
 				if err = codexcli.ValidateInstructionBoundary(ctx); err == nil {
 					cfg.Codex, err = codexcli.Validate(ctx, cfg.Codex)
 				}
@@ -328,10 +334,6 @@ func checkModels(ctx context.Context, cfg *config.Config, logger *log.Logger) (e
 	}
 	logger.Printf("AI roles: main=%s adversarial=%s critic_max_rounds=%d critic_nonblocking_rounds=%d job_timeout_minutes=%d", cfg.Main, cfg.Adversarial, cfg.CriticMaxRounds, config.ResolveCriticNonblockingRounds(cfg.CriticMaxRounds, cfg.CriticNonblockingRounds), cfg.JobTimeoutMinutes)
 	return
-}
-
-func checkCodexCLI(ctx context.Context, settings config.CodexConfig) error {
-	return codexcli.CheckLogin(ctx, settings)
 }
 
 func checkRepositories(ctx context.Context, client *github.Client, cfg config.Config, logger *log.Logger) error {

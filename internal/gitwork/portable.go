@@ -299,18 +299,34 @@ func (c *Checkout) Import(ctx context.Context, expectedHead string, changes []wo
 	if _, err := runGit(ctx, c.path, "add", "--all", "--", "."); err != nil {
 		return fmt.Errorf("stage imported changes: %w", err)
 	}
-	staged, err := c.stagedPaths(ctx)
+	raw, truncated, err := c.boundedGit(ctx, nil, maxChangedPathListBytes, true,
+		"diff", "--cached", "--raw", "-z", "--no-abbrev", "--no-renames", "--no-ext-diff", "--no-textconv", "HEAD", "--")
 	if err != nil {
 		return err
 	}
-	declared := make([]string, len(changes))
-	for i, change := range changes {
-		declared[i] = change.Path
+	if truncated {
+		return ErrTooManyFiles
 	}
-	slices.Sort(declared)
-	slices.Sort(staged)
-	if !slices.Equal(staged, declared) {
+	staged, objects, err := parseIndexChanges(raw)
+	if err != nil {
+		return err
+	}
+	if len(staged) != len(changes) {
 		return errors.New("staged paths do not match reviewed changes")
+	}
+	declared := make(map[string]workspace.Change, len(changes))
+	for _, change := range changes {
+		declared[change.Path] = change
+	}
+	for i, entry := range staged {
+		change, exists := declared[entry.Path]
+		if !exists {
+			return errors.New("staged paths do not match reviewed changes")
+		}
+		delete(declared, entry.Path)
+		if entry.Delete != change.Delete || entry.Mode != change.Mode || (!change.Delete && objects[i] != gitBlobID(change.Data)) {
+			return fmt.Errorf("staged content or mode differs from reviewed change %q", entry.Path)
+		}
 	}
 	return nil
 }

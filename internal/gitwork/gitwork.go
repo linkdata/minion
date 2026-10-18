@@ -179,17 +179,11 @@ func (c *Checkout) Close() error {
 	return nil
 }
 
-// checkoutPullRequest refreshes the base branch and fetches GitHub's PR head ref from the
-// trusted repository URL. The fetched head must match the SHA observed through
-// the GitHub API, preventing a changed PR from being reviewed as another commit.
+// checkoutPullRequest uses the freshly cloned base and fetches GitHub's PR head ref.
+// The fetched head must match the API observation, so a changed PR is not reviewed as another commit.
 func (c *Checkout) checkoutPullRequest(ctx context.Context, number int, baseRef, expectedHeadSHA string) error {
-	if err := c.ready(); err != nil {
-		return err
-	}
-	const baseDest = "refs/remotes/minion/base"
 	const headDest = "refs/remotes/minion/pr-head"
 	_, err := runGit(ctx, c.path, "fetch", "--no-tags", "--filter=blob:none", "--force", "--", c.url,
-		"+refs/heads/"+baseRef+":"+baseDest,
 		"+refs/pull/"+strconv.Itoa(number)+"/head:"+headDest)
 	if err != nil {
 		return err
@@ -199,7 +193,7 @@ func (c *Checkout) checkoutPullRequest(ctx context.Context, number int, baseRef,
 	if err := c.recordConfig(); err != nil {
 		return err
 	}
-	base, err := runGit(ctx, c.path, "rev-parse", "--verify", baseDest+"^{commit}")
+	base, err := runGit(ctx, c.path, "rev-parse", "--verify", "refs/remotes/origin/"+baseRef+"^{commit}")
 	if err != nil {
 		return err
 	}
@@ -489,18 +483,22 @@ func runGitInputTo(ctx context.Context, dir string, stdin io.Reader, stdout io.W
 		for i := 0; i+2 < len(args) && args[i] == "-c"; i += 2 {
 			operation = args[i+2]
 		}
-		message := strings.TrimSpace(diagnostic.String())
-		if ctx.Err() != nil {
-			err = errors.Join(ctx.Err(), err)
-		} else {
-			err = classifyPathError(operation, message, err)
-		}
-		if message != "" {
-			return fmt.Errorf("git %s: %w: %q", operation, err, message)
-		}
-		return fmt.Errorf("git %s: %w", operation, err)
+		return gitFailure("git", operation, diagnostic.String(), ctx.Err(), err)
 	}
 	return nil
+}
+
+func gitFailure(prefix, operation, message string, contextErr, err error) error {
+	message = strings.TrimSpace(message)
+	if contextErr != nil {
+		err = errors.Join(contextErr, err)
+	} else {
+		err = classifyPathError(operation, message, err)
+	}
+	if message != "" {
+		return fmt.Errorf("%s %s: %w: %q", prefix, operation, err, message)
+	}
+	return fmt.Errorf("%s %s: %w", prefix, operation, err)
 }
 
 // classifyPathError preserves a Git failure's cause while identifying protected

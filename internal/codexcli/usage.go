@@ -45,8 +45,8 @@ type rolloutEvent struct {
 	Payload json.RawMessage `json:"payload"`
 }
 
-// collectUsage reads only new rollout headers until it has identified this
-// action's agent tree. Full transcripts of unrelated sessions are never read.
+// collectUsage reads bounded first-line headers of recent rollouts to identify
+// this action's agent tree. Unrelated transcripts are never read past their header.
 func collectUsage(ctx context.Context, home, rootID string, started time.Time, fallback *usage.Tokens, expectedChildren []string) (usage.Tokens, bool, error) {
 	var total usage.Tokens
 	complete := true

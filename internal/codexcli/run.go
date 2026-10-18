@@ -221,7 +221,7 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	if err := ctx.Err(); err != nil {
 		return result, fmt.Errorf("codex exec: %w", err)
 	}
-	if output.stopped {
+	if output.stopErr != nil {
 		return result, fmt.Errorf("codex exec: %w", output.stopErr)
 	}
 	if output.parseErr != nil {
@@ -257,9 +257,14 @@ func childEnvironment(env []string, runtimeDir, cacheDir, codexHome string, conf
 		"HTTP_PROXY": true, "HTTPS_PROXY": true, "ALL_PROXY": true, "NO_PROXY": true,
 	}
 	clean := make([]string, 0, len(env))
+	explicitHome := false
 	for _, entry := range env {
-		key, _, ok := strings.Cut(entry, "=")
+		key, value, ok := strings.Cut(entry, "=")
 		if !ok {
+			continue
+		}
+		if key == "CODEX_HOME" {
+			explicitHome = value != ""
 			continue
 		}
 		if configuredAuth && (strings.EqualFold(key, "CODEX_API_KEY") || strings.EqualFold(key, "CODEX_ACCESS_TOKEN")) {
@@ -269,7 +274,7 @@ func childEnvironment(env []string, runtimeDir, cacheDir, codexHome string, conf
 			clean = append(clean, entry)
 		}
 	}
-	if codexHome != "" {
+	if explicitHome && codexHome != "" {
 		clean = append(clean, "CODEX_HOME="+codexHome)
 	}
 	clean = append(clean, "TMPDIR="+runtimeDir, "TMP="+runtimeDir, "TEMP="+runtimeDir, "GOCACHE="+cacheDir)
@@ -310,7 +315,6 @@ type jsonlOutput struct {
 	children      []string
 	seenChildren  map[string]bool
 	stopErr       error
-	stopped       bool
 	stream        aicli.JSONL
 	parseErr      error
 	finalMessage  string
@@ -320,7 +324,7 @@ type jsonlOutput struct {
 }
 
 func (o *jsonlOutput) Write(p []byte) (int, error) {
-	if o.stopped {
+	if o.stopErr != nil {
 		return len(p), nil
 	}
 	if o.stream.Line == nil {
@@ -330,18 +334,17 @@ func (o *jsonlOutput) Write(p []byte) (int, error) {
 }
 
 func (o *jsonlOutput) stop(err error) {
-	if o.stopped {
+	if o.stopErr != nil {
 		return
 	}
-	o.stopped, o.failed = true, true
-	o.stopErr, o.failureReason = err, err.Error()
+	o.stopErr, o.failed = err, true
 	if o.cancel != nil {
 		o.cancel()
 	}
 }
 
 func (o *jsonlOutput) acceptLine(line []byte) {
-	if o.stopped {
+	if o.stopErr != nil {
 		return
 	}
 	var event codexEvent
@@ -394,20 +397,18 @@ func (o *jsonlOutput) accept(event codexEvent) {
 }
 
 func eventReason(event codexEvent) string {
-	if event.Message != "" {
-		return bounded.Text(event.Message)
+	reason := event.Message
+	if reason == "" {
+		var detail struct {
+			Message string `json:"message"`
+		}
+		if json.Unmarshal(event.Error, &detail) == nil {
+			reason = detail.Message
+		} else {
+			_ = json.Unmarshal(event.Error, &reason)
+		}
 	}
-	var detail struct {
-		Message string `json:"message"`
-	}
-	if json.Unmarshal(event.Error, &detail) == nil && detail.Message != "" {
-		return bounded.Text(detail.Message)
-	}
-	var simple string
-	if json.Unmarshal(event.Error, &simple) == nil {
-		return bounded.Text(simple)
-	}
-	return ""
+	return bounded.Text(reason)
 }
 
 // appendChildIDs keeps repeated waits from consuming the unique-helper bound.

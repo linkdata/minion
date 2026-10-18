@@ -222,9 +222,10 @@ func TestRunAIFreshReviewFindingsUseRemainingRounds(t *testing.T) {
 				t.Fatal("full review was seeded with prior findings or author dispositions")
 			}
 			feedback := firstFinding
-			if request.round == 2 {
+			switch request.round {
+			case 2:
 				feedback = missedFinding
-			} else if request.round == 3 {
+			case 3:
 				return aicli.Result{Answer: approvedCritiqueJSON}, nil
 			}
 			return aicli.Result{Answer: fmt.Sprintf(`{"approved":false,"has_blockers":true,"feedback":%q}`, feedback)}, nil

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,52 +21,6 @@ import (
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/workspace"
 )
-
-func TestOversizedNormalizedMetadataPreservesOtherPartialArtifacts(t *testing.T) {
-	job := portableJob(command.SecurityAudit)
-	job.Main.Skills = []string{testAuditSkillURL}
-	metadata := []byte(fmt.Sprintf(`{"run_id":"%s","repo":%q,"target":"/worker/source","source_ref":%q,"profile":"standard","scope_paths":["."],"budget":null,"selected_companion_files":[],"prior_run_paths":[],"shared_file_owners":%s,"execution_policy":"sandboxed-source-and-local-only","run_status":"complete"}`, strings.Repeat("<", maxAuditArtifactBytes/5), job.Identity.Repository, job.Source.Head, auditTestOwners))
-	if _, err := validateAuditMetadata(metadata, job.Identity.Repository, "/worker/source", job.Source.Head); err != nil {
-		t.Fatalf("invalid complete metadata fixture: %v", err)
-	}
-	var decoded map[string]json.RawMessage
-	if err := json.Unmarshal(metadata, &decoded); err != nil {
-		t.Fatal(err)
-	}
-	expanded, err := json.Marshal(decoded)
-	if err != nil || len(metadata) > maxAuditArtifactBytes || len(expanded) <= maxAuditArtifactBytes {
-		t.Fatalf("invalid expansion fixture: raw=%d normalized=%d error=%v", len(metadata), len(expanded), err)
-	}
-	root := t.TempDir()
-	var files []workspace.File
-	for _, name := range auditArtifacts {
-		data := []byte("retain " + name)
-		if name == "run-metadata.json" {
-			data = metadata
-		}
-		files = append(files, workspace.File{Path: name, Mode: workspace.Regular, Data: data})
-		if err := os.WriteFile(filepath.Join(root, name), data, 0600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	const skill = "/installed/security-audit/SKILL.md"
-	if normalized, err := normalizeAuditArtifacts(files, job, skill); normalized != nil || err == nil || !strings.Contains(err.Error(), "normalized audit metadata exceeds byte limit") {
-		t.Fatalf("oversized normalized metadata accepted: files=%d error=%v", len(normalized), err)
-	}
-	partial, diagnostics := collectPartialAuditArtifacts(root, job, skill)
-	if len(partial) != len(auditArtifacts)-1 || len(diagnostics) != 1 || diagnostics[0].Code != "artifact_metadata_invalid" {
-		t.Fatalf("partial collection discarded unrelated artifacts: files=%d diagnostics=%+v", len(partial), diagnostics)
-	}
-	for _, file := range partial {
-		if file.Path == "run-metadata.json" || !bytes.Equal(file.Data, []byte("retain "+file.Path)) {
-			t.Fatalf("partial collection changed retained artifact %q", file.Path)
-		}
-	}
-	result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Artifacts: partial, Diagnostics: diagnostics}
-	if err := result.validate(job, false); err != nil {
-		t.Fatalf("salvaged partial artifacts cannot cross the result boundary: %v", err)
-	}
-}
 
 func TestPartialAuditMetadataPathListsStayPortable(t *testing.T) {
 	job := portableJob(command.SecurityAudit)
@@ -111,6 +66,7 @@ func TestRunnerAuditCollectionAndNormalizationFailuresAreTerminal(t *testing.T) 
 			fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
 			job := portableJob(command.SecurityAudit)
 			job.Main.Skills = []string{testAuditSkillURL}
+			expected := make(map[string]workspace.File)
 			runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 				for _, file := range auditArtifactsFixture(job, request.dir, "Audit report\n") {
 					if stage == "collection" && file.Path == "REPORT.md" {
@@ -125,6 +81,15 @@ func TestRunnerAuditCollectionAndNormalizationFailuresAreTerminal(t *testing.T) 
 						if bytes.Equal(file.Data, original) || len(file.Data) > maxAuditArtifactBytes {
 							t.Fatal("normalization fixture must replace run_id and fit the raw collection cap")
 						}
+						var decoded map[string]json.RawMessage
+						if err := json.Unmarshal(file.Data, &decoded); err != nil {
+							t.Fatal(err)
+						}
+						if expanded, err := json.Marshal(decoded); err != nil || len(expanded) <= maxAuditArtifactBytes {
+							t.Fatalf("metadata fixture does not exceed normalized cap: bytes=%d error=%v", len(expanded), err)
+						}
+					} else {
+						expected[file.Path] = file
 					}
 					writeFixtureFile(t, request.outputDir, file.Path, file.Data)
 				}
@@ -140,6 +105,26 @@ func TestRunnerAuditCollectionAndNormalizationFailuresAreTerminal(t *testing.T) 
 			}
 			if err := result.validate(job, false); err != nil {
 				t.Fatalf("failure discarded valid partial artifacts: %v", err)
+			}
+			if stage == "normalization" {
+				if len(result.Artifacts) != len(expected) || len(result.Artifacts) != len(auditArtifacts)-1 {
+					t.Fatalf("normalization discarded unrelated artifacts: %d", len(result.Artifacts))
+				}
+				for _, file := range result.Artifacts {
+					want, present := expected[file.Path]
+					if !present || file.Mode != want.Mode || !bytes.Equal(file.Data, want.Data) {
+						t.Fatalf("normalization changed retained artifact %q", file.Path)
+					}
+				}
+				metadataFailures := 0
+				for _, diagnostic := range result.Diagnostics {
+					if diagnostic.Code == "artifact_metadata_invalid" {
+						metadataFailures++
+					}
+				}
+				if metadataFailures != 1 {
+					t.Fatalf("missing metadata failure: %+v", result.Diagnostics)
+				}
 			}
 		})
 	}
@@ -248,22 +233,36 @@ func TestRunnerMissingConfiguredReadGrantIsNotTerminalBeforeModels(t *testing.T)
 }
 
 func TestRunnerReviewsAndPublishesNormalizedAnswer(t *testing.T) {
-	job := withClaudeCritic(portableJob(command.Comment))
-	mainCalls, criticCalls := 0, 0
-	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
-		if request.role == "main" {
-			mainCalls++
-			return aicli.Result{Answer: proposalJSON("answer\x00hidden", "")}, nil
-		}
-		criticCalls++
-		if !strings.Contains(request.prompt, "Main model's proposed response (untrusted): "+quotedContext("answerhidden")) || strings.Contains(request.prompt, `answer\u0000hidden`) {
-			t.Fatal("critic did not receive the normalized publication candidate")
-		}
-		return aicli.Result{Answer: approvedCritiqueJSON}, nil
-	}}
-	result, err := runner.Run(context.Background(), job)
-	if err != nil || mainCalls != 1 || criticCalls != 1 || len(result.Calls) != 2 || result.Answer != "answerhidden" {
-		t.Fatalf("normalized proposal: main=%d critic=%d recorded=%d answer=%q error=%v", mainCalls, criticCalls, len(result.Calls), result.Answer, err)
+	for _, critic := range []bool{false, true} {
+		t.Run(fmt.Sprint(critic), func(t *testing.T) {
+			job := portableJob(command.Comment)
+			if critic {
+				job = withClaudeCritic(job)
+			}
+			mainCalls, criticCalls := 0, 0
+			runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+				if request.role == "main" {
+					mainCalls++
+					if !critic {
+						return aicli.Result{Answer: "answer\x00hidden"}, nil
+					}
+					return aicli.Result{Answer: proposalJSON("answer\x00hidden", "")}, nil
+				}
+				criticCalls++
+				if !strings.Contains(request.prompt, "Main model's proposed response (untrusted): "+quotedContext("answerhidden")) || strings.Contains(request.prompt, `answer\u0000hidden`) {
+					t.Fatal("critic did not receive the normalized publication candidate")
+				}
+				return aicli.Result{Answer: approvedCritiqueJSON}, nil
+			}}
+			result, err := runner.Run(context.Background(), job)
+			wantCritic := 0
+			if critic {
+				wantCritic = 1
+			}
+			if err != nil || mainCalls != 1 || criticCalls != wantCritic || len(result.Calls) != 1+wantCritic || result.Answer != "answerhidden" {
+				t.Fatalf("normalized proposal: main=%d critic=%d recorded=%d answer=%q error=%v", mainCalls, criticCalls, len(result.Calls), result.Answer, err)
+			}
+		})
 	}
 }
 
@@ -279,17 +278,6 @@ func TestPreparationFailureDistinguishesCapacityFromInvalidInput(t *testing.T) {
 				t.Fatalf("preparation classification=%v, want terminal=%t with cause%v", err, test.terminal, test.cause)
 			}
 		})
-	}
-}
-
-func TestRunnerDropsNULFromUnreviewedAnswer(t *testing.T) {
-	job := portableJob(command.Comment)
-	runner := Runner{WorkRoot: t.TempDir(), runModel: func(context.Context, modelRun) (aicli.Result, error) {
-		return aicli.Result{Answer: "before\x00after"}, nil
-	}}
-	result, err := runner.Run(context.Background(), job)
-	if err != nil || result.Answer != "beforeafter" || len(result.Calls) != 1 {
-		t.Fatalf("unreviewed NUL answer=%q error=%v", result.Answer, err)
 	}
 }
 
@@ -332,12 +320,13 @@ func TestRunnerReportsOwnedAndCriticCleanupFailures(t *testing.T) {
 				job = withClaudeCritic(job)
 			}
 			root := t.TempDir()
+			var journal bytes.Buffer
 			defer func() {
 				if err := os.Chmod(root, 0700); err != nil {
 					t.Error(err)
 				}
 			}()
-			runner := Runner{WorkRoot: root, runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+			runner := Runner{WorkRoot: root, Logger: log.New(&journal, "", 0), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 				if request.role == "main" && critic {
 					return aicli.Result{Answer: proposalJSON("Done.", "")}, nil
 				}
@@ -353,18 +342,16 @@ func TestRunnerReportsOwnedAndCriticCleanupFailures(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			workspaceFailures, criticFailures := 0, 0
+			cleanupFailures := 0
 			for _, diagnostic := range result.Diagnostics {
 				if diagnostic.Code == "cleanup_failed" {
-					if strings.Contains(diagnostic.Message, "Execution workspace") {
-						workspaceFailures++
-					}
-					if strings.Contains(diagnostic.Message, "Critic snapshot") {
-						criticFailures++
+					cleanupFailures++
+					if !strings.Contains(diagnostic.Message, "Execution workspace") {
+						t.Fatalf("cleanup reported before final retry: %+v", diagnostic)
 					}
 				}
 			}
-			if workspaceFailures != 1 || critic && criticFailures != 1 {
+			if cleanupFailures != 1 || strings.Contains(journal.String(), "critic snapshot cleanup retry scheduled") != critic {
 				t.Fatalf("cleanup failure not recorded: %+v", result.Diagnostics)
 			}
 		})

@@ -129,12 +129,18 @@ func numberResultEvents(data string) string {
 }
 
 func TestOutputBackgroundTasks(t *testing.T) {
+	const ambient = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"housekeeping","ambient":true}]}`
+	const worker = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"housekeeping","ambient":true},{"task_id":"worker"}]}`
 	const pending = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"reviewer"}]}`
 	const empty = `{"type":"system","subtype":"background_tasks_changed","tasks":[]}`
 	for _, tc := range []struct {
 		name, before, after string
 		fails               bool
 	}{
+		{name: "ambient after final", after: ambient},
+		{name: "mixed pending", after: worker, fails: true},
+		{name: "pending removed needs new result", after: worker + "\n" + ambient, fails: true},
+		{name: "new result after worker completes", before: successfulResult + "\n" + worker + "\n" + ambient},
 		{name: "unfinished before result", before: pending, fails: true},
 		{name: "unfinished after result", after: pending, fails: true},
 		{name: "completion before result", before: pending + "\n" + empty},

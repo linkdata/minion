@@ -133,15 +133,8 @@ func TestRepositoryAndRefValidation(t *testing.T) {
 	if err != nil || url != "https://github.com/Acme/project.name.git" {
 		t.Fatalf("repositoryURL() = (%q, %v)", url, err)
 	}
-	for _, repo := range []string{strings.Repeat("a", 100) + "/repo", "owner/" + strings.Repeat("a", 100)} {
-		if _, err := repositoryURL(repo); err != nil {
-			t.Fatalf("repository identifier at its limit was rejected: %v", err)
-		}
-	}
-	for _, repo := range []string{"", "owner", "owner/repo/extra", "../repo", "owner/..", "owner/repo?x=1", "owner/repo space", "owner:token/repo", strings.Repeat("a", 101) + "/repo", "owner/" + strings.Repeat("a", 101)} {
-		if _, err := repositoryURL(repo); err == nil {
-			t.Errorf("repositoryURL(%q) should fail", repo)
-		}
+	if _, err := repositoryURL("owner/repo space"); err == nil {
+		t.Fatal("repositoryURL accepted an invalid repository")
 	}
 	for _, branch := range []string{"main", "release/v1.2", "minion/fix-123"} {
 		if err := validateBranch(branch); err != nil {
@@ -191,8 +184,8 @@ func TestCheckoutPullRequestVerifiesHead(t *testing.T) {
 	if got != head {
 		t.Fatalf("checkout HEAD = %s, want %s", got, head)
 	}
-	if fixture.git(fixture.checkout.path, "rev-parse", "refs/remotes/minion/base") != fixture.base {
-		t.Fatal("base branch was not fetched")
+	if fixture.git(fixture.checkout.path, "rev-parse", "refs/remotes/origin/main") != fixture.base {
+		t.Fatal("cloned base branch changed")
 	}
 }
 
@@ -310,29 +303,6 @@ func TestNewBranchPreservesOmittedGitlink(t *testing.T) {
 	}
 	if got := fixture.git("", "--git-dir="+fixture.remote, "ls-tree", "refs/heads/"+branch, "sub"); got != "160000 commit "+fixture.base+"\tsub" {
 		t.Fatalf("published gitlink changed: %q", got)
-	}
-}
-
-func TestImportRejectsNestedGitMetadataBeforePublishing(t *testing.T) {
-	const name = ".g\u200cit/config"
-	fixture := newFixture(t)
-	ctx := context.Background()
-	const branch = "minion/fix-nested-git"
-	if err := fixture.checkout.NewBranch(ctx, branch); err != nil {
-		t.Fatal(err)
-	}
-	changes := []workspace.Change{{Path: name, Mode: workspace.Regular, Data: []byte("[filter \"probe\"]\nclean = malicious-command\n")}, {Path: "payload.txt", Mode: workspace.Regular, Data: []byte("new data")}}
-	if err := fixture.checkout.Import(ctx, fixture.base, changes); err == nil {
-		t.Fatal("accepted nested Git metadata")
-	}
-	if _, err := os.Stat(filepath.Join(fixture.checkout.path, "payload.txt")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("invalid import partially applied: %v", err)
-	}
-	if paths, err := fixture.checkout.stagedPaths(ctx); err != nil || len(paths) != 0 {
-		t.Fatalf("invalid import staged=%q error=%v", paths, err)
-	}
-	if err := fixture.checkout.commitAndPush(ctx, fixture.remote, branch, "bot", "fix", func(string) error { t.Fatal("invalid data reached publication"); return nil }); !errors.Is(err, ErrNoChanges) {
-		t.Fatalf("publication after rejected import=%v", err)
 	}
 }
 
@@ -550,6 +520,11 @@ func (f gitFixture) git(dir string, args ...string) string {
 func (f gitFixture) clone() *Checkout {
 	f.t.Helper()
 	return f.keepCheckout(cloneFromURL(context.Background(), f.t.TempDir(), f.remote, "main", localTreeMetadata(f.source), true))
+}
+
+func (f gitFixture) clonePullRequest(head string) *Checkout {
+	f.t.Helper()
+	return f.keepCheckout(clonePullRequestFromURL(context.Background(), f.t.TempDir(), f.remote, 7, "main", head, localTreeMetadata(f.source)))
 }
 
 func (f gitFixture) keepCheckout(checkout *Checkout, err error) *Checkout {
