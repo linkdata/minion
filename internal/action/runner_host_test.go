@@ -177,7 +177,6 @@ func TestRunnerFixCanReturnEmptyAnswerWithoutCritic(t *testing.T) {
 	if err != nil || result.Answer != "" || len(result.Changes) != 1 || string(result.Changes[0].Data) != "fixed source" {
 		t.Fatalf("valid fix was lost because its summary was empty: %+v,%v", result, err)
 	}
-
 }
 
 func TestRunnerOmittedSourceWriteIsTerminal(t *testing.T) {

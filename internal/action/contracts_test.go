@@ -567,6 +567,7 @@ func TestPortableContractsRejectMismatches(t *testing.T) {
 		})
 	}
 }
+
 func TestResultRejectsInvalidRawAnswer(t *testing.T) {
 	job := testJob(command.Comment)
 	valid := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "ok", Calls: []CallUsage{{Provider: job.Main.Provider, Role: roleMain, Round: 1}}}

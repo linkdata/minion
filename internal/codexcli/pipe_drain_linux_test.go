@@ -22,7 +22,7 @@ cat >/dev/null
 printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.completed","item":{"type":"agent_message","text":"answer"}}' '{"type":"turn.completed","usage":{"input_tokens":15,"cached_input_tokens":7,"output_tokens":11}}'
 sleep 30 &
 printf '%s\n' "$!" > "$0.pid.tmp"
-mv "$0.pid.tmp" "$0.pid"
+mv -- "$0.pid.tmp" "$0.pid"
 exit 0
 `)
 	writeUsageRollout(t, os.Getenv("CODEX_HOME"), "root", "", usageEvent("task_started", "root-turn"), usageRecord("root", "root-turn", "response", 15, 7, 11), usageEvent("task_complete", "root-turn"))

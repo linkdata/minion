@@ -591,13 +591,16 @@ func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, 
 		consumed = limit
 	}
 	*budget -= consumed
-	if err := f.Close(); err != nil {
+	closeErr := f.Close()
+	if closeErr != nil {
 		complete = false
 	}
 	if scanner.Err() != nil {
 		readable = false
 	}
 	if capture != nil {
+		// Byte identity is independent of whether old token fields are usable.
+		capture.prefixKnown = reader.N > 0 && scanner.Err() == nil && closeErr == nil && ctx.Err() == nil
 		capture.size = consumed
 		if len(responses) <= maxUsageRecords {
 			capture.responses = responses

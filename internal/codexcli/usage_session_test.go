@@ -456,7 +456,7 @@ func TestUsageBoundaryEarlyReadFailuresAreInvalid(t *testing.T) {
 			}
 			capture := &usageBoundary{valid: true, turns: map[string]bool{}}
 			_, complete, _, _ := readRolloutUsageFrom(ctx, rolloutMeta{ID: "root", path: filepath.Join(t.TempDir(), "missing")}, "root", &budget, nil, capture, nil, false)
-			if capture.valid || complete {
+			if capture.valid || capture.prefixKnown || complete {
 				t.Fatalf("failed read left valid boundary: %+v,%v", capture, complete)
 			}
 		})

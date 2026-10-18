@@ -55,7 +55,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"terminal_r
 				job.Main.Provider = provider
 				runner := Runner{WorkRoot: root, Claude: config.ClaudeConfig{APIKey: "inert-test-key"}}
 				journal := &cleanupRetryLog{root: root}
-				var removed []string
+				removed := 0
 				if !recover {
 					journal.onRetry = func() (err error) {
 						if err = os.Chmod(root, 0700); err != nil {
@@ -66,19 +66,19 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"terminal_r
 						if err != nil {
 							return err
 						}
-						// Ordinary owned cleanup must succeed independently of the
-						// second failed native-session close and its diagnostic.
+						// Remove ordinary paths here so only the second failed
+						// native-session close can produce cleanup_failed.
 						for _, entry := range entries {
 							if strings.HasPrefix(entry.Name(), "minion-") || strings.HasPrefix(entry.Name(), ".minion-context-") {
 								path := filepath.Join(root, entry.Name())
 								if err := os.RemoveAll(path); err != nil {
 									return err
 								}
-								removed = append(removed, path)
+								removed++
 							}
 						}
-						if len(removed) != 2 {
-							return fmt.Errorf("expected source and context directories, removed %q", removed)
+						if removed != 2 {
+							return fmt.Errorf("expected source and context directories, removed %d", removed)
 						}
 						return nil
 					}
@@ -99,11 +99,6 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"terminal_r
 						t.Fatalf("recovered cleanup left paths: %v,%v", entries, err)
 					}
 				} else {
-					for _, path := range removed {
-						if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
-							t.Fatalf("ordinary owned cleanup did not succeed: %s: %v", path, err)
-						}
-					}
 					if len(result.Diagnostics) != 1 || result.Diagnostics[0].Code != "cleanup_failed" {
 						t.Fatalf("persistent cleanup was not reported: %+v", result.Diagnostics)
 					}

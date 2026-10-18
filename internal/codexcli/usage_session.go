@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"maps"
 	"os"
+	"slices"
 	"sort"
 	"time"
 
@@ -19,12 +21,12 @@ import (
 // usageBoundary records an exact prefix, rather than relying on timestamps or
 // event ordinals. Old turns remain old when their last records arrive late.
 type usageBoundary struct {
-	valid, hasSnapshot, unfinished, completed bool
-	size                                      int64
-	hash                                      [32]byte
-	turns                                     map[string]bool
-	responses                                 map[string]usage.Tokens
-	snapshot                                  usage.Tokens
+	valid, prefixKnown, hasSnapshot, unfinished, completed bool
+	size                                                   int64
+	hash                                                   [32]byte
+	turns                                                  map[string]bool
+	responses                                              map[string]usage.Tokens
+	snapshot                                               usage.Tokens
 }
 
 func (b *usageBoundary) rememberTurn(id string) {
@@ -55,7 +57,7 @@ func matchUsagePrefix(ctx context.Context, r io.Reader, before *usageBoundary, h
 // Unreferenced historical helpers need no new turn, but their bytes must still
 // match the baseline before their absence from current accounting is certain.
 func unchangedUsageRollout(ctx context.Context, name string, before *usageBoundary, budget *int64) bool {
-	if before == nil || !before.valid || before.size > int64(maxUsageRolloutBytes) || before.size > *budget || ctx.Err() != nil {
+	if before == nil || !before.prefixKnown || before.size > *budget || ctx.Err() != nil {
 		return false
 	}
 	f, err := os.Open(name)
@@ -131,10 +133,10 @@ func (s *usageSession) begin(ctx context.Context, home, rootID string, started t
 			s.baselineComplete = false
 			break
 		}
-		b := &usageBoundary{valid: !ambiguous[id], turns: map[string]bool{}}
+		b := &usageBoundary{valid: true, turns: map[string]bool{}}
 		s.before[id] = b
 		meta, exists := s.known[id]
-		if !exists {
+		if !exists || ambiguous[id] {
 			b.valid = false
 			continue
 		}
@@ -204,7 +206,8 @@ func (s *usageSession) collectUsage(ctx context.Context, home, rootID string, st
 	// Lifetime ownership alone cannot attribute unreferenced new or changed
 	// helper work to this invocation. Preserve the known lower bound and refuse
 	// completion rather than silently certifying that omitted evidence.
-	for id, meta := range owned {
+	for _, id := range slices.Sorted(maps.Keys(owned)) {
+		meta := owned[id]
 		if !visited[id] && (ambiguous[id] || !unchangedUsageRollout(ctx, meta.path, s.before[id], &s.budget)) {
 			complete = false
 			childError = errors.Join(childError, errUnverifiedChildren)

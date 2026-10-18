@@ -344,7 +344,7 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 	return result, nil
 }
 
-// Before any model runs, freeing host capacity can make preparation succeed.
+// Before model work, freeing host capacity or installing a missing executable can make preparation succeed.
 func preparationFailure(stage string, err error) error {
 	if errors.Is(err, exec.ErrNotFound) || errors.Is(err, syscall.ENOSPC) || errors.Is(err, syscall.EDQUOT) {
 		return fmt.Errorf("%s: %w", stage, err)

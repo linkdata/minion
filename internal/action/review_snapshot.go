@@ -36,9 +36,6 @@ func freezeReviewSnapshot(ctx context.Context, workRoot string, job Job, source,
 			if err := job.validateChanges(s.changes); err != nil {
 				return err
 			}
-			if !s.ownedSource {
-				s.source = ""
-			}
 			if s.source, err = resetReviewDirectory(s.source, workRoot, "minion-review-"); err != nil {
 				return err
 			}
