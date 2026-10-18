@@ -116,7 +116,7 @@ func clonePullRequestFromURL(ctx context.Context, workRoot, url string, number i
 	return c, nil
 }
 
-// cloneRepository fetches filtered objects and configures a trusted checkout before materialization.
+// cloneRepository fetches complete history and configures a trusted checkout before materialization.
 func cloneRepository(ctx context.Context, workRoot, url, defaultBranch string, lookupTree func(context.Context, string) (github.GitTree, error)) (_ *Checkout, err error) {
 	if err := validateBranch(defaultBranch); err != nil {
 		return nil, err
@@ -139,7 +139,7 @@ func cloneRepository(ctx context.Context, workRoot, url, defaultBranch string, l
 		}
 	}()
 
-	if _, err := runGit(ctx, workRoot, "clone", "--template=", "--no-tags", "--filter=blob:none", "--single-branch", "--no-checkout", "--branch", defaultBranch, "--", url, path); err != nil {
+	if _, err := runGit(ctx, workRoot, "clone", "--template=", "--reject-shallow", "--no-local", "--no-checkout", "--branch", defaultBranch, "--", url, path); err != nil {
 		return nil, err
 	}
 	c := &Checkout{path: path, lookupTree: lookupTree}
@@ -182,7 +182,7 @@ func (c *Checkout) Close() error {
 // The fetched head must match the API observation, so a changed PR is not reviewed as another commit.
 func (c *Checkout) checkoutPullRequest(ctx context.Context, number int, baseRef, expectedHeadSHA string) error {
 	const headDest = "refs/remotes/minion/pr-head"
-	if _, err := runGit(ctx, c.path, "fetch", "--no-tags", "--filter=blob:none", "--force", "--", "origin",
+	if _, err := runGit(ctx, c.path, "fetch", "--no-tags", "--force", "--", "origin",
 		"+refs/pull/"+strconv.Itoa(number)+"/head:"+headDest); err != nil {
 		return err
 	}
@@ -220,7 +220,7 @@ func (c *Checkout) checkoutSource(ctx context.Context, head string, checkoutFile
 }
 
 // Check expanded blobs and gitlinks, including repeated object references,
-// against GitHub metadata before fetching source contents.
+// against GitHub metadata before materializing source contents.
 func checkSourceTree(tree github.GitTree, expectedSHA string) error {
 	if len(tree.Tree) > workspace.MaxEntries {
 		return fmt.Errorf("%w: more than %d metadata entries", ErrCheckoutTooLarge, workspace.MaxEntries)
@@ -547,6 +547,7 @@ func hardeningEnv() []string {
 		"GIT_CONFIG_GLOBAL=/dev/null",
 		"GIT_ATTR_NOSYSTEM=1",
 		"GIT_NO_REPLACE_OBJECTS=1",
+		"GIT_NO_LAZY_FETCH=1",
 		"GCM_INTERACTIVE=never",
 		"GH_PROMPT_DISABLED=1",
 		"LC_ALL=C",

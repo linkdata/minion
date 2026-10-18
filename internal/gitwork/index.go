@@ -331,7 +331,12 @@ func (index *OfflineIndex) run(ctx context.Context, limit int, input []byte, arg
 	gitArgs := []string{"--git-dir=" + index.dir, "--work-tree=" + index.source,
 		"-c", "credential.helper=", "-c", "protocol.allow=never"}
 	env := append([]string{"PATH=" + safePath(os.Getenv("PATH")), "HOME=" + index.dir, "TMPDIR=" + index.dir}, hardeningEnv()...)
-	cmd := gitCommand(runCtx, index.binary, index.dir, env, append(gitArgs, args...)...)
+	dir := index.dir
+	// A metadata directory inside source would scope path commands to .git/.
+	if workspace.Within(index.source, dir) {
+		dir = index.source
+	}
+	cmd := gitCommand(runCtx, index.binary, dir, env, append(gitArgs, args...)...)
 	output, diagnostic := bounded.Buffer{Limit: limit, Cancel: cancel}, bounded.Buffer{Limit: bounded.DiagnosticBytes}
 	cmd.Stdout, cmd.Stderr, cmd.Stdin = &output, &diagnostic, bytes.NewReader(input)
 	err := cmd.Run()

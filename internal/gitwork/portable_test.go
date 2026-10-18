@@ -25,41 +25,16 @@ func TestBoundedGitPreservesCancellation(t *testing.T) {
 	}
 }
 
-func TestSnapshotUsesPinnedBlobsAndBoundedHistory(t *testing.T) {
+func TestSnapshotUsesPinnedBlobs(t *testing.T) {
 	fixture := newFixture(t)
 	writeFile(t, filepath.Join(fixture.checkout.path, "README.md"), "untrusted working tree")
 	writeFile(t, filepath.Join(fixture.checkout.path, "untracked"), "not source")
-	snapshot, err := fixture.checkout.Snapshot(context.Background(), false)
+	snapshot, err := fixture.checkout.Snapshot(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(snapshot.Files) != 1 || string(snapshot.Files[0].Data) != "fixture\n" || snapshot.Head != fixture.base || len(snapshot.History) != 0 {
+	if len(snapshot.Files) != 1 || string(snapshot.Files[0].Data) != "fixture\n" || snapshot.Head != fixture.base {
 		t.Fatalf("snapshot=%+v", snapshot)
-	}
-	withHistory, err := fixture.checkout.Snapshot(context.Background(), true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !withHistory.HistoryComplete || !bytes.Contains(withHistory.History, []byte("initial")) {
-		t.Fatalf("history=%q complete=%v", withHistory.History, withHistory.HistoryComplete)
-	}
-	for i := 0; i < 101; i++ {
-		fixture.git(fixture.checkout.path, "commit", "--allow-empty", "-m", "more history")
-		if i == 98 {
-			fixture.checkout.expectedHead = fixture.git(fixture.checkout.path, "rev-parse", "HEAD")
-			exact, err := fixture.checkout.Snapshot(context.Background(), true)
-			if err != nil || !exact.HistoryComplete || !bytes.Contains(exact.History, []byte("initial")) {
-				t.Fatalf("exact 100-commit history incomplete: %v", err)
-			}
-		}
-	}
-	fixture.checkout.expectedHead = fixture.git(fixture.checkout.path, "rev-parse", "HEAD")
-	withHistory, err = fixture.checkout.Snapshot(context.Background(), true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if withHistory.HistoryComplete || bytes.Contains(withHistory.History, []byte("initial")) {
-		t.Fatal("bounded history claimed complete coverage")
 	}
 }
 
@@ -83,7 +58,7 @@ func TestSnapshotPreservesPRDeletedBinaryAndModeContext(t *testing.T) {
 	writeFile(t, filepath.Join(fixture.source, "base-only"), "new base branch content")
 	baseTip := fixture.commit("refs/heads/main", "base advanced after fork")
 	fixture.checkout = fixture.clonePullRequest(head)
-	snapshot, err := fixture.checkout.Snapshot(context.Background(), false)
+	snapshot, err := fixture.checkout.Snapshot(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +101,7 @@ func TestSnapshotOverridesNamedBinaryDiffDriver(t *testing.T) {
 	if err := fixture.checkout.recordConfig(); err != nil {
 		t.Fatal(err)
 	}
-	snapshot, err := fixture.checkout.Snapshot(context.Background(), false)
+	snapshot, err := fixture.checkout.Snapshot(context.Background())
 	if err != nil || !bytes.Contains(snapshot.Diff, []byte("-base text\n+head text\n")) || bytes.Contains(snapshot.Diff, []byte("Binary files")) {
 		t.Fatalf("named diff driver hid snapshot text: %s error=%v", snapshot.Diff, err)
 	}
@@ -145,7 +120,7 @@ func TestSnapshotDisablesComparisonRenameDetection(t *testing.T) {
 	if err := fixture.checkout.recordConfig(); err != nil {
 		t.Fatal(err)
 	}
-	snapshot, err := fixture.checkout.Snapshot(context.Background(), false)
+	snapshot, err := fixture.checkout.Snapshot(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,19 +129,16 @@ func TestSnapshotDisablesComparisonRenameDetection(t *testing.T) {
 	}
 }
 
-func TestSnapshotDoesNotClaimCompleteHistoryFromShallowSource(t *testing.T) {
+func TestCloneRejectsShallowSource(t *testing.T) {
 	fixture := newFixture(t)
-	fixture.git(fixture.source, "commit", "--allow-empty", "-m", "recent history")
-	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/heads/main")
-	server := filepath.Join(t.TempDir(), "shallow.git")
-	fixture.git("", "clone", "--bare", "--depth=1", "--branch", "main", "file://"+fixture.remote, server)
-	checkout := fixture.keepCheckout(cloneFromURL(context.Background(), t.TempDir(), "file://"+server, "main", localTreeMetadata(fixture.source), true))
-	if fixture.git(checkout.path, "rev-parse", "--is-shallow-repository") != "true" {
-		t.Fatal("no-depth clone did not preserve the source's shallow boundary")
+	writeFile(t, filepath.Join(fixture.remote, "shallow"), fixture.base+"\n")
+	root := t.TempDir()
+	checkout, err := cloneFromURL(context.Background(), root, "file://"+fixture.remote, "main", localTreeMetadata(fixture.source), true)
+	if checkout != nil || err == nil || !strings.Contains(err.Error(), "shallow") {
+		t.Fatalf("shallow source returned checkout=%v error=%v", checkout, err)
 	}
-	snapshot, err := checkout.Snapshot(context.Background(), true)
-	if err != nil || snapshot.HistoryComplete || !bytes.Contains(snapshot.History, []byte("recent history")) {
-		t.Fatalf("shallow history coverage: complete=%v error=%v", snapshot.HistoryComplete, err)
+	if entries, err := os.ReadDir(root); err != nil || len(entries) != 0 {
+		t.Fatalf("shallow refusal retained checkout: entries=%v error=%v", entries, err)
 	}
 }
 
@@ -196,22 +168,9 @@ func TestSnapshotRejectsGitConfigChangedDuringPreparation(t *testing.T) {
 		changed = true
 		return tree, err
 	}
-	_, err := fixture.checkout.Snapshot(context.Background(), false)
+	_, err := fixture.checkout.Snapshot(context.Background())
 	if !changed || err == nil || !strings.Contains(err.Error(), "Git config changed") {
 		t.Fatalf("mid-preparation config change: changed=%v error=%v", changed, err)
-	}
-}
-
-func TestSnapshotReportsTruncatedHistory(t *testing.T) {
-	fixture := newFixture(t)
-	fixture.gitInput(fixture.checkout.path, strings.Repeat("m", workspace.MaxContextBytes+256), "commit", "--allow-empty", "-F", "-")
-	fixture.checkout.expectedHead = fixture.git(fixture.checkout.path, "rev-parse", "HEAD")
-	snapshot, err := fixture.checkout.Snapshot(context.Background(), true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if snapshot.HistoryComplete || len(snapshot.History) != workspace.MaxContextBytes {
-		t.Fatalf("history complete=%v bytes=%d", snapshot.HistoryComplete, len(snapshot.History))
 	}
 }
 
@@ -294,7 +253,7 @@ func TestSnapshotReusesValidatedTreesByCommit(t *testing.T) {
 		return lookup(ctx, sha)
 	}, true))
 	for i := 0; i < 2; i++ {
-		if _, err := checkout.Snapshot(context.Background(), false); err != nil {
+		if _, err := checkout.Snapshot(context.Background()); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -307,7 +266,7 @@ func TestSnapshotReusesValidatedTreesByCommit(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := 0; i < 2; i++ {
-		snapshot, err := checkout.Snapshot(context.Background(), false)
+		snapshot, err := checkout.Snapshot(context.Background())
 		if err != nil || snapshot.Head != head || string(snapshot.Files[0].Data) != "PR source\n" {
 			t.Fatalf("snapshot=%+v error=%v", snapshot, err)
 		}
@@ -331,7 +290,7 @@ func TestSnapshotPreservesOmittedPathSpellingsAcrossRevisions(t *testing.T) {
 	if err := checkout.checkoutPullRequest(context.Background(), 7, "main", head); err != nil {
 		t.Fatal(err)
 	}
-	snapshot, err := checkout.Snapshot(context.Background(), false)
+	snapshot, err := checkout.Snapshot(context.Background())
 	if err != nil || len(snapshot.Omitted) != 2 || snapshot.Omitted[0] != "docs" || snapshot.Omitted[1] != "Docs" {
 		t.Fatalf("omitted=%v error=%v", snapshot.Omitted, err)
 	}
@@ -419,26 +378,6 @@ func TestControlledGitRejectsPortableMetadataVariants(t *testing.T) {
 	}
 }
 
-func TestSnapshotHistoryIgnoresUntrustedMailmap(t *testing.T) {
-	fixture := newFixture(t)
-	writeFile(t, filepath.Join(fixture.checkout.path, ".mailmap"), "Forged <forged@example.invalid> Test <test@example.invalid>\n")
-	fixture.git(fixture.checkout.path, "add", ".mailmap")
-	fixture.git(fixture.checkout.path, "commit", "-m", "untrusted author mapping")
-	fixture.git(fixture.checkout.path, "config", "log.mailmap", "true")
-	fixture.git(fixture.checkout.path, "notes", "add", "-m", "PRIVATE_NOTE_NOT_EXPORTED")
-	fixture.checkout.expectedHead = fixture.git(fixture.checkout.path, "rev-parse", "HEAD")
-	if err := fixture.checkout.recordConfig(); err != nil {
-		t.Fatal(err)
-	}
-	snapshot, err := fixture.checkout.Snapshot(context.Background(), true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if bytes.Contains(snapshot.History, []byte("PRIVATE_NOTE_NOT_EXPORTED")) || bytes.Contains(snapshot.History, []byte("Forged")) || !bytes.Contains(snapshot.History, []byte("Test <test@example.invalid>")) {
-		t.Fatalf("mailmap rewrote history authors: %s", snapshot.History)
-	}
-}
-
 func TestSnapshotPreservesGitLegalSourceNames(t *testing.T) {
 	fixture := newFixture(t)
 	names := []string{"include/xt_connmark.h", "include/xt_CONNMARK.h", "Docs/a.md", "docs/b.md", `back\slash`, ".g\u200cit\\x", "dir\\.g\u200cit/x"}
@@ -447,7 +386,7 @@ func TestSnapshotPreservesGitLegalSourceNames(t *testing.T) {
 	}
 	fixture.commit("refs/heads/main", "Git-legal source names")
 	checkout := fixture.clone()
-	snapshot, err := checkout.Snapshot(context.Background(), false)
+	snapshot, err := checkout.Snapshot(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -609,7 +548,7 @@ func TestSnapshotReadsHeadAndBaseInOneBatch(t *testing.T) {
 	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/pull/7/head")
 	checkout := fixture.clonePullRequest(head)
 	log := recordSnapshotContentCalls(t)
-	snapshot, err := checkout.Snapshot(context.Background(), false)
+	snapshot, err := checkout.Snapshot(context.Background())
 	if err != nil || len(snapshot.Files) != 1 || len(snapshot.BaseFiles) != 1 || string(snapshot.Files[0].Data) != "\x00head\n\xff" || string(snapshot.BaseFiles[0].Data) != "fixture\n" {
 		t.Fatalf("batch snapshot=%+v error=%v", snapshot, err)
 	}
@@ -662,7 +601,7 @@ func TestSnapshotPreflightsChangedPaths(t *testing.T) {
 				fixture.checkout.comparisonBase = base
 				fixture.checkout.expectedHead = head
 				fixture.checkout.sourceTrees = nil
-				snapshot, err := fixture.checkout.Snapshot(ctx, false)
+				snapshot, err := fixture.checkout.Snapshot(ctx)
 				if count == workspace.MaxFiles {
 					if err != nil || len(snapshot.ChangedPaths) != count {
 						t.Fatalf("exact changed-path budget: paths=%d error=%v", len(snapshot.ChangedPaths), err)

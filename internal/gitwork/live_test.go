@@ -85,7 +85,7 @@ func TestLiveCloneAndPullRequest(t *testing.T) {
 	if head, err := checkout.verifiedHead(ctx); err != nil || head != pull.Head.SHA {
 		t.Fatalf("pull request HEAD = %q, %v; want %s", head, err, pull.Head.SHA)
 	}
-	snapshot, err := checkout.Snapshot(ctx, false)
+	snapshot, err := checkout.Snapshot(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}

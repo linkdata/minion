@@ -21,6 +21,7 @@ func TestReviewSnapshotFixFreezesOnlyExportedCandidate(t *testing.T) {
 	job.Source.Files = append(job.Source.Files,
 		workspace.File{Path: ".gitignore", Mode: workspace.Regular, Data: []byte("*.log\n")},
 		workspace.File{Path: "deleted", Mode: workspace.Regular, Data: []byte("deleted")})
+	attachRepository(t, &job)
 	index, source := offlineIndexFixture(t, job.Source.Files)
 	writeFixtureFile(t, source, "source.txt", []byte("reviewed"))
 	writeFixtureFile(t, source, "added", []byte("new executable"))
@@ -35,11 +36,12 @@ func TestReviewSnapshotFixFreezesOnlyExportedCandidate(t *testing.T) {
 	if snapshot.source == source || snapshot.outputDir != "" || len(snapshot.changes) != 3 {
 		t.Fatalf("unexpected critic snapshot: %+v", snapshot)
 	}
-	for _, name := range []string{"runtime.log", "deleted", ".git"} {
+	for _, name := range []string{"runtime.log", "deleted"} {
 		if _, err := os.Lstat(filepath.Join(snapshot.source, name)); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("copied non-candidate path %q: %v", name, err)
 		}
 	}
+	assertPortableSource(t, snapshot.source)
 	info, err := os.Stat(filepath.Join(snapshot.source, "added"))
 	if err != nil || info.Mode().Perm() != 0755 {
 		t.Fatalf("frozen executable=%v,%v", info, err)
@@ -69,6 +71,7 @@ func TestReviewSnapshotFixFreezesFinalReplacementLayout(t *testing.T) {
 		workspace.File{Path: "Foo/old", Mode: workspace.Regular},
 		workspace.File{Path: "to-directory", Mode: workspace.Regular},
 		workspace.File{Path: "to-file/child", Mode: workspace.Regular})
+	attachRepository(t, &job)
 	index, source := offlineIndexFixture(t, job.Source.Files)
 	for _, name := range []string{"Foo", "to-directory", "to-file"} {
 		if err := os.RemoveAll(filepath.Join(source, name)); err != nil {
@@ -88,7 +91,7 @@ func TestReviewSnapshotFixFreezesFinalReplacementLayout(t *testing.T) {
 	if len(snapshot.changes) != 6 {
 		t.Fatalf("replacement changes=%+v", snapshot.changes)
 	}
-	if err := workspace.CheckUnchanged(context.Background(), snapshot.source, want); err != nil {
+	if err := workspace.CheckRepositoryChangesUnchanged(context.Background(), snapshot.source, want, nil); err != nil {
 		t.Fatalf("frozen critic tree differs from exported changes: %v", err)
 	}
 	if err := snapshot.verify(context.Background()); err != nil {
@@ -180,6 +183,7 @@ func TestReviewSnapshotCleansFailedFixCandidateMaterialization(t *testing.T) {
 			name := strings.TrimSuffix(strings.Repeat(strings.Repeat("a", 250)+"/", 14), "/")
 			if stage == "source" {
 				job.Source.Files = append(job.Source.Files, workspace.File{Path: name, Mode: workspace.Regular, Data: []byte("source")})
+				attachRepository(t, &job)
 			}
 			if err := job.Validate(); err != nil {
 				t.Fatalf("invalid source control: %v", err)
@@ -353,5 +357,30 @@ func TestReviewSnapshotChecksExactFrozenFiles(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestRunnerRejectsGitMetadataMutation(t *testing.T) {
+	for _, role := range []string{roleMain, roleCritic} {
+		t.Run(role, func(t *testing.T) {
+			job := withClaudeCritic(portableJob(command.Fix))
+			calls := 0
+			runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+				calls++
+				assertPortableSource(t, request.dir)
+				if request.role == role {
+					writeFixtureFile(t, request.dir, ".git/HEAD", []byte("forged metadata"))
+				}
+				if request.role == roleMain {
+					writeFixtureFile(t, request.dir, "source.txt", []byte("candidate"))
+					return aicli.Result{Answer: proposalJSON("candidate", "")}, nil
+				}
+				return aicli.Result{Answer: `{"approved":true,"has_blockers":false,"feedback":""}`}, nil
+			}}
+			result, err := runner.Run(context.Background(), job)
+			if !errors.Is(err, monitor.ErrTerminalJob) || result.Answer != "" || !strings.Contains(err.Error(), "repository changed") || calls < 1 {
+				t.Fatalf("metadata mutation accepted: calls=%d result=%+v error=%v", calls, result, err)
+			}
+		})
 	}
 }

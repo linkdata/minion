@@ -30,7 +30,7 @@ func TestPullSnapshotPreservesSpecialComparisonPaths(t *testing.T) {
 	}
 	head := fixture.commit("refs/pull/7/head", "change comparison names")
 	checkout := fixture.keepCheckout(clonePullRequestFromURL(context.Background(), t.TempDir(), fixture.remote, 7, "main", head, localTreeMetadata(fixture.source)))
-	snapshot, err := checkout.Snapshot(context.Background(), false)
+	snapshot, err := checkout.Snapshot(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +57,7 @@ func TestSnapshotAcceptsExactDiffByteLimit(t *testing.T) {
 	fixture.git(checkout.path, "add", ".")
 	fixture.git(checkout.path, "commit", "-m", "measure diff envelope")
 	checkout.expectedHead = fixture.git(checkout.path, "rev-parse", "HEAD")
-	small, err := checkout.Snapshot(context.Background(), false)
+	small, err := checkout.Snapshot(context.Background())
 	if err != nil || small.DiffIncomplete || len(small.Diff) == 0 {
 		t.Fatalf("small diff control failed: bytes=%d incomplete=%t error=%v", len(small.Diff), small.DiffIncomplete, err)
 	}
@@ -67,7 +67,7 @@ func TestSnapshotAcceptsExactDiffByteLimit(t *testing.T) {
 		fixture.git(checkout.path, "add", ".")
 		fixture.git(checkout.path, "commit", "-m", "bounded comparison")
 		checkout.expectedHead = fixture.git(checkout.path, "rev-parse", "HEAD")
-		snapshot, err := checkout.Snapshot(context.Background(), false)
+		snapshot, err := checkout.Snapshot(context.Background())
 		if err != nil || snapshot.DiffIncomplete != (extra == 1) {
 			t.Fatalf("exact/+1 comparison boundary: extra=%d bytes=%d incomplete=%t error=%v", extra, len(snapshot.Diff), snapshot.DiffIncomplete, err)
 		}
@@ -106,7 +106,7 @@ func TestSnapshotAcceptsExactCombinedSourceByteLimit(t *testing.T) {
 	}
 	head := fixture.commit("refs/pull/7/head", "half-budget head file")
 	checkout := fixture.keepCheckout(clonePullRequestFromURL(context.Background(), t.TempDir(), fixture.remote, 7, "main", head, localTreeMetadata(fixture.source)))
-	snapshot, err := checkout.Snapshot(context.Background(), false)
+	snapshot, err := checkout.Snapshot(context.Background())
 	if err != nil || snapshot.Base != base || len(snapshot.Files) != 1 || len(snapshot.BaseFiles) != 1 {
 		t.Fatalf("exact combined transfer failed: head-files=%d base-files=%d base=%s error=%v", len(snapshot.Files), len(snapshot.BaseFiles), snapshot.Base, err)
 	}

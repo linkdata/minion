@@ -14,16 +14,17 @@ import (
 	"github.com/linkdata/minion/internal/workspace"
 )
 
-func blobMissing(t *testing.T, dir, sha string) bool {
+func assertBlobPresent(t *testing.T, dir, sha string) {
 	t.Helper()
 	cmd := exec.Command("git", "-C", dir, "cat-file", "-e", sha)
 	cmd.Env = append(os.Environ(), "GIT_NO_LAZY_FETCH=1")
-	return cmd.Run() != nil
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("complete clone is missing blob %s: %s: %v", sha, output, err)
+	}
 }
 
-func TestPartialClonePreflightsMetadataBeforeAnyBlobFetch(t *testing.T) {
+func TestClonePreflightsMetadataAfterCompleteClone(t *testing.T) {
 	fixture := newFixture(t)
-	fixture.git("", "--git-dir="+fixture.remote, "config", "uploadpack.allowFilter", "true")
 	var blobs []string
 	for i := 0; i < 5; i++ {
 		name := fmt.Sprintf("blob-%d", i)
@@ -43,9 +44,7 @@ func TestPartialClonePreflightsMetadataBeforeAnyBlobFetch(t *testing.T) {
 			t.Fatalf("clone roots=%v,%v", dirs, err)
 		}
 		for _, blob := range blobs {
-			if !blobMissing(t, filepath.Join(root, dirs[0].Name()), blob) {
-				t.Fatal("metadata preflight already downloaded a blob")
-			}
+			assertBlobPresent(t, filepath.Join(root, dirs[0].Name()), blob)
 		}
 		checked = true
 		tree, err := localTreeMetadata(fixture.source)(ctx, sha)
@@ -61,9 +60,8 @@ func TestPartialClonePreflightsMetadataBeforeAnyBlobFetch(t *testing.T) {
 	}
 }
 
-func TestPartialSnapshotPreflightsMergeBaseAndHistoryDoesNotFetchOldBlobs(t *testing.T) {
+func TestSnapshotPreflightsMergeBaseMetadata(t *testing.T) {
 	fixture := newFixture(t)
-	fixture.git("", "--git-dir="+fixture.remote, "config", "uploadpack.allowFilter", "true")
 	writeFile(t, filepath.Join(fixture.source, "old"), strings.Repeat("old", 1<<20))
 	fixture.git(fixture.source, "add", "old")
 	fixture.git(fixture.source, "commit", "-m", "historical blob")
@@ -75,26 +73,21 @@ func TestPartialSnapshotPreflightsMergeBaseAndHistoryDoesNotFetchOldBlobs(t *tes
 	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/heads/main")
 	lookup := localTreeMetadata(fixture.source)
 	checkout := fixture.keepCheckout(cloneFromURL(context.Background(), t.TempDir(), "file://"+fixture.remote, "main", lookup, true))
-	if !blobMissing(t, checkout.path, blob) {
-		t.Fatal("partial clone fetched deleted historical content")
-	}
-	snapshot, err := checkout.Snapshot(context.Background(), true)
-	if err != nil || !snapshot.HistoryComplete || !strings.Contains(string(snapshot.History), "historical blob") || !blobMissing(t, checkout.path, blob) {
-		t.Fatalf("metadata history fetched old contents or lost coverage: complete=%v err=%v", snapshot.HistoryComplete, err)
-	}
+	assertBlobPresent(t, checkout.path, blob)
 	checkout.comparisonBase = base
 	checkout.lookupTree = func(ctx context.Context, sha string) (github.GitTree, error) {
 		tree, err := lookup(ctx, sha)
 		if sha == baseTree && err == nil {
-			if !blobMissing(t, checkout.path, blob) {
-				t.Fatal("merge-base blob fetched before metadata check")
-			}
 			oversized := int64(workspace.MaxBytes + 1)
 			tree.Tree[0].Size = &oversized
 		}
 		return tree, err
 	}
-	if _, err := checkout.Snapshot(context.Background(), false); !errors.Is(err, ErrCheckoutTooLarge) || !blobMissing(t, checkout.path, blob) {
-		t.Fatalf("merge-base preflight fetched blob: %v", err)
+	log := recordSnapshotContentCalls(t)
+	if _, err := checkout.Snapshot(context.Background()); !errors.Is(err, ErrCheckoutTooLarge) {
+		t.Fatalf("merge-base preflight error: %v", err)
+	}
+	if data, err := os.ReadFile(log); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("metadata preflight requested content: %q error=%v", data, err)
 	}
 }

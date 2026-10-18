@@ -27,16 +27,10 @@ func TestRunnerUsesSuppliedSourceAndContext(t *testing.T) {
 		t.Run(provider, func(t *testing.T) {
 			job := portableJob(command.Review)
 			job.Main.Provider = provider
-			job.Source.History, job.Source.HistoryComplete = []byte("bounded supplied history"), false
-			job.Source.HistoryRequested = true
 			job.Source.Omitted = []string{"submodule"}
 			root := t.TempDir()
 			marker := filepath.Join(t.TempDir(), "called")
-			var bins []string
-			for _, name := range []string{"git", "gh"} {
-				bins = append(bins, fakeOnPath(t, name, "#!/bin/sh\nprintf called > "+shellQuote(marker)+"\nexit 77\n"))
-			}
-			t.Setenv("PATH", strings.Join(bins, string(os.PathListSeparator)))
+			fakeOnPath(t, "gh", "#!/bin/sh\nprintf called > "+shellQuote(marker)+"\nexit 77\n")
 			runner := Runner{
 				WorkRoot: root,
 				Codex:    config.CodexConfig{APIKey: "local credential"},
@@ -49,14 +43,12 @@ func TestRunnerUsesSuppliedSourceAndContext(t *testing.T) {
 				if request.provider != provider || request.writable || request.outputDir != "" || request.role != "main" || request.round != 1 {
 					t.Fatalf("wrong model request: %+v", request)
 				}
-				if _, err := os.Lstat(filepath.Join(request.dir, ".git")); !errors.Is(err, os.ErrNotExist) {
-					t.Fatalf("worker received Git metadata: %v", err)
-				}
+				assertPortableSource(t, request.dir)
 				if len(request.readOnlyDirs) != 1 {
 					t.Fatalf("missing read-only context grant: %v", request.readOnlyDirs)
 				}
 				contextDir := request.readOnlyDirs[0]
-				for file, want := range map[string]string{"comparison.diff": "exact supplied comparison\n", "history.txt": "bounded supplied history", "base/deleted.txt": "deleted base context\n"} {
+				for file, want := range map[string]string{"comparison.diff": "exact supplied comparison\n", "base/deleted.txt": "deleted base context\n"} {
 					data, err := os.ReadFile(filepath.Join(contextDir, file))
 					if err != nil || string(data) != want {
 						t.Fatalf("context %s = %q, %v", file, data, err)
@@ -68,16 +60,18 @@ func TestRunnerUsesSuppliedSourceAndContext(t *testing.T) {
 					t.Fatal(err)
 				}
 				var metadata struct {
-					HistoryRequested bool `json:"history_requested"`
+					Head      string `json:"head"`
+					Base      string `json:"base"`
+					MergeBase string `json:"merge_base"`
 				}
-				if err := json.Unmarshal(metadataBytes, &metadata); err != nil || !metadata.HistoryRequested {
-					t.Fatalf("history flag missing: %s,%v", metadataBytes, err)
+				if err := json.Unmarshal(metadataBytes, &metadata); err != nil || metadata.Head != job.Source.Head || metadata.Base != job.Source.Base || metadata.MergeBase != job.Source.MergeBase {
+					t.Fatalf("source identity missing: %s,%v", metadataBytes, err)
 				}
 				data, err := os.ReadFile(filepath.Join(request.dir, "source.txt"))
 				if err != nil || string(data) != "source\n" {
 					t.Fatalf("source = %q, %v", data, err)
 				}
-				for _, want := range []string{job.Source.Head, job.Source.Base, job.Source.MergeBase, contextDir, "complete=false", "History requested=true", quotedContext(job.Title), quotedContext(job.Notes), "Report missing context or dependencies rather than fetching them"} {
+				for _, want := range []string{job.Source.Head, job.Source.Base, job.Source.MergeBase, contextDir, "complete history, including historical file contents, branches and tags", "no remotes or GitHub credentials", "Use local Git commands to investigate history", quotedContext(job.Title), quotedContext(job.Notes), "Report missing context or dependencies rather than fetching them"} {
 					if !strings.Contains(request.prompt, want) {
 						t.Fatalf("prompt lacks %q: %s", want, request.prompt)
 					}
@@ -93,7 +87,7 @@ func TestRunnerUsesSuppliedSourceAndContext(t *testing.T) {
 				t.Fatalf("execution workspace retained: %v, %v", entries, err)
 			}
 			if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("executor invoked git or gh: %v", err)
+				t.Fatalf("executor invoked gh: %v", err)
 			}
 		})
 	}
@@ -129,7 +123,7 @@ func TestRunnerReturnsFileChangesAndPartialUsage(t *testing.T) {
 	}
 }
 
-func TestRunnerDeclaresIncompleteComparisonAndMetadataHistory(t *testing.T) {
+func TestRunnerDeclaresIncompleteComparisonAndLocalHistory(t *testing.T) {
 	job := portableJob(command.Review)
 	job.Source.Diff, job.Source.DiffIncomplete = nil, true
 	job.Source.ChangedPaths = []string{"source.txt", "deleted.txt"}
@@ -141,17 +135,16 @@ func TestRunnerDeclaresIncompleteComparisonAndMetadataHistory(t *testing.T) {
 				t.Fatal(err)
 			}
 			var metadata struct {
-				DiffIncomplete   bool     `json:"diff_incomplete"`
-				HistoryRequested bool     `json:"history_requested"`
-				ChangedPaths     []string `json:"changed_paths"`
+				DiffIncomplete bool     `json:"diff_incomplete"`
+				ChangedPaths   []string `json:"changed_paths"`
 			}
 			if err := json.Unmarshal(data, &metadata); err != nil {
 				t.Fatal(err)
 			}
-			if metadata.HistoryRequested || !metadata.DiffIncomplete || !reflect.DeepEqual(metadata.ChangedPaths, job.Source.ChangedPaths) {
+			if !metadata.DiffIncomplete || !reflect.DeepEqual(metadata.ChangedPaths, job.Source.ChangedPaths) {
 				t.Fatalf("comparison coverage metadata missing: %s", data)
 			}
-			for _, want := range []string{"report incomplete comparison coverage", "commit metadata only, without historical patches", "Comparison diff incomplete=true", "History requested=false"} {
+			for _, want := range []string{"report incomplete comparison coverage", "use local Git history", "Comparison diff incomplete=true", "disclose any remaining comparison limitation"} {
 				if !strings.Contains(request.prompt, want) {
 					t.Fatalf("prompt lacks %q", want)
 				}
@@ -167,6 +160,7 @@ func TestRunnerDeclaresIncompleteComparisonAndMetadataHistory(t *testing.T) {
 func TestRunnerKeepsCriticReadOnlyAndRefutationsPrivate(t *testing.T) {
 	job := portableJob(command.Fix)
 	job.Source.Files = append(job.Source.Files, workspace.File{Path: "deleted.txt", Mode: workspace.Regular, Data: []byte("original deleted file")})
+	attachRepository(t, &job)
 	job.Critic = &RoleSettings{Provider: "claude", AlwaysOnSkills: []string{skills.BuiltinAntiPromptInjection}}
 	job.CriticMaxRounds = config.DefaultCriticMaxRounds
 	runner := Runner{WorkRoot: t.TempDir()}
@@ -229,7 +223,7 @@ func TestRunnerFixUsesOnlyOfflineGit(t *testing.T) {
 		t.Fatal(err)
 	}
 	marker := filepath.Join(t.TempDir(), "network-command")
-	script := fmt.Sprintf("#!/bin/sh\nfor arg do\n case \"$arg\" in fetch|clone|push|remote|ls-remote) printf forbidden > %s; exit 77;; esac\ndone\nexec %s \"$@\"\n", shellQuote(marker), shellQuote(realGit))
+	script := fmt.Sprintf("#!/bin/sh\nfor arg do\n case \"$arg\" in fetch|clone|push|ls-remote) printf forbidden > %s; exit 77;; esac\ndone\nexec %s \"$@\"\n", shellQuote(marker), shellQuote(realGit))
 	fakeOnPath(t, "git", script)
 	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 		if err := os.WriteFile(filepath.Join(request.dir, "source.txt"), []byte("changed"), 0600); err != nil {

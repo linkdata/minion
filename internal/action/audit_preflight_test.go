@@ -50,10 +50,11 @@ func TestRunnerChecksAuditPrerequisitesBeforeModel(t *testing.T) {
 			if scenario.node == "unsupported" {
 				script = "#!/bin/sh\nexit 1\n"
 			}
+			gitPath := gitOnlyPath(t)
 			bin := fakeOnPath(t, "node", script)
 			switch scenario.node {
 			case "missing":
-				t.Setenv("PATH", t.TempDir())
+				t.Setenv("PATH", gitPath)
 			case "relative":
 				cwd, err := os.Getwd()
 				if err != nil {
@@ -63,7 +64,7 @@ func TestRunnerChecksAuditPrerequisitesBeforeModel(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				t.Setenv("PATH", relative)
+				t.Setenv("PATH", relative+string(os.PathListSeparator)+gitPath)
 				t.Setenv("GODEBUG", "execerrdot=0")
 				if binary, err := exec.LookPath("node"); err != nil || filepath.IsAbs(binary) {
 					t.Fatalf("relative executable fixture failed: binary=%q error=%v", binary, err)

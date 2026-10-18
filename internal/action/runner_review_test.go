@@ -309,6 +309,7 @@ func TestRunnerReviewRejectsInvalidFixBeforeCritic(t *testing.T) {
 				job.Source.Omitted = []string{name}
 			} else {
 				job.Source.Files = []workspace.File{{Path: "Docs/stay", Mode: workspace.Regular}}
+				attachRepository(t, &job)
 				name, want = "docs/new", "directory spelling collision"
 			}
 			calls := 0

@@ -91,16 +91,15 @@ func TestImportPreservesExecutableModeAndCommitIgnoresUnstagedFiles(t *testing.T
 	}
 }
 
-func TestCloneSkipsTagsAndPublicationAcceptsAmbiguousShortName(t *testing.T) {
+func TestCloneIncludesTagsAndPublicationAcceptsAmbiguousShortName(t *testing.T) {
 	fixture := newFixture(t)
 	const branch = "minion/fix-same-tag"
 	fixture.git(fixture.source, "tag", branch)
 	fixture.git(fixture.source, "push", fixture.remote, "refs/tags/"+branch)
 	checkout := fixture.clone()
-	if got := fixture.git(checkout.path, "tag", "--list"); got != "" {
-		t.Fatalf("clone auto-followed remote tag: %s", got)
+	if got := fixture.git(checkout.path, "tag", "--list"); got != branch {
+		t.Fatalf("clone lost remote tag: %s", got)
 	}
-	fixture.git(checkout.path, "tag", branch)
 	if err := checkout.NewBranch(context.Background(), branch); err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +116,7 @@ func TestCloneSkipsTagsAndPublicationAcceptsAmbiguousShortName(t *testing.T) {
 
 func TestGitEnvironmentPinsHardening(t *testing.T) {
 	settings := []struct{ key, hostile, want string }{
-		{"GIT_NO_REPLACE_OBJECTS", "0", "1"}, {"GIT_ATTR_NOSYSTEM", "0", "1"}, {"LC_ALL", "sv_SE.UTF-8", "C"},
+		{"GIT_NO_REPLACE_OBJECTS", "0", "1"}, {"GIT_NO_LAZY_FETCH", "0", "1"}, {"GIT_ATTR_NOSYSTEM", "0", "1"}, {"LC_ALL", "sv_SE.UTF-8", "C"},
 		{"GIT_CONFIG_GLOBAL", "/hostile/config", "/dev/null"}, {"GIT_CONFIG_NOSYSTEM", "0", "1"},
 		{"GIT_TERMINAL_PROMPT", "1", "0"}, {"GIT_ASKPASS", "/hostile/askpass", "/bin/false"},
 		{"GCM_INTERACTIVE", "always", "never"}, {"GH_PROMPT_DISABLED", "0", "1"},

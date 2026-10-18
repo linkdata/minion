@@ -171,7 +171,7 @@ func (e *Orchestrator) portableJob(ctx context.Context, p *preparedAction, title
 		return Job{}, errors.New("action preparation requires a deadline")
 	}
 	request := p.request
-	source, err := p.checkout.Snapshot(ctx, request.Command.History)
+	source, err := p.checkout.Snapshot(ctx)
 	if err != nil {
 		return Job{}, err
 	}

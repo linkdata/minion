@@ -44,25 +44,23 @@ type Change struct {
 }
 
 type Snapshot struct {
-	Head             string   `json:"head"`
-	Base             string   `json:"base,omitempty"`
-	MergeBase        string   `json:"merge_base,omitempty"`
-	Files            []File   `json:"files"`
-	BaseFiles        []File   `json:"base_files,omitempty"`
-	Diff             []byte   `json:"diff,omitempty"`
-	DiffIncomplete   bool     `json:"diff_incomplete"`
-	ChangedPaths     []string `json:"changed_paths,omitempty"`
-	History          []byte   `json:"history,omitempty"`
-	HistoryRequested bool     `json:"history_requested"`
-	HistoryComplete  bool     `json:"history_complete"`
-	Omitted          []string `json:"omitted,omitempty"`
+	Head           string   `json:"head"`
+	Base           string   `json:"base,omitempty"`
+	MergeBase      string   `json:"merge_base,omitempty"`
+	Files          []File   `json:"files"`
+	BaseFiles      []File   `json:"base_files,omitempty"`
+	Diff           []byte   `json:"diff,omitempty"`
+	DiffIncomplete bool     `json:"diff_incomplete"`
+	ChangedPaths   []string `json:"changed_paths,omitempty"`
+	Repository     []byte   `json:"repository"`
+	Omitted        []string `json:"omitted,omitempty"`
 }
 
 func ValidPath(name string) bool {
 	return !strings.Contains(name, "\\") && ValidCheckoutPath(name)
 }
 
-// ValidCheckoutPath applies Git's protected metadata names before any blob fetch.
+// ValidCheckoutPath applies Git's protected metadata names before materialization.
 // Git's NTFS checks treat backslashes as separators; its HFS checks do not.
 func ValidCheckoutPath(name string) bool {
 	if !validSourcePath(name) {
@@ -135,13 +133,10 @@ func ValidateSnapshot(s Snapshot) error {
 	if !ValidSHA(s.Head) || (s.Base != "" && !ValidSHA(s.Base)) || (s.MergeBase != "" && !ValidSHA(s.MergeBase)) || (s.Base == "") != (s.MergeBase == "") {
 		return errors.New("snapshot has invalid source commits")
 	}
-	if (s.Base == "" && (len(s.Diff) != 0 || len(s.BaseFiles) != 0 || s.DiffIncomplete || len(s.ChangedPaths) != 0)) || (s.HistoryComplete && len(s.History) == 0) {
-		return errors.New("snapshot context lacks source identity or history coverage")
+	if s.Base == "" && (len(s.Diff) != 0 || len(s.BaseFiles) != 0 || s.DiffIncomplete || len(s.ChangedPaths) != 0) {
+		return errors.New("snapshot context lacks source identity")
 	}
-	if !s.HistoryRequested && (len(s.History) != 0 || s.HistoryComplete) {
-		return errors.New("snapshot supplied unrequested history")
-	}
-	if len(s.Diff) > MaxContextBytes || len(s.History) > MaxContextBytes || len(s.Omitted) > MaxFiles {
+	if len(s.Diff) > MaxContextBytes || len(s.Repository) > MaxBytes || len(s.Omitted) > MaxFiles {
 		return errors.New("snapshot context exceeds limits")
 	}
 	total := 0
@@ -406,7 +401,7 @@ func CheckUnchanged(ctx context.Context, root string, base []File) error {
 	if err := validateFiles(base); err != nil {
 		return err
 	}
-	return checkUnchanged(ctx, root, base)
+	return checkUnchanged(ctx, root, base, false)
 }
 
 // CheckChangesUnchanged verifies a materialized candidate with separate source/change bounds.
@@ -415,10 +410,19 @@ func CheckChangesUnchanged(ctx context.Context, root string, base []File, change
 	if err != nil {
 		return err
 	}
-	return checkUnchanged(ctx, root, files)
+	return checkUnchanged(ctx, root, files, false)
 }
 
-func checkUnchanged(ctx context.Context, root string, base []File) error {
+// CheckRepositoryChangesUnchanged excludes only top-level Git metadata, verified separately by its owner.
+func CheckRepositoryChangesUnchanged(ctx context.Context, root string, base []File, changes []Change) error {
+	files, err := changedFiles(base, changes)
+	if err != nil {
+		return err
+	}
+	return checkUnchanged(ctx, root, files, true)
+}
+
+func checkUnchanged(ctx context.Context, root string, base []File, repository bool) error {
 	prior := make(map[string]File, len(base))
 	for _, file := range base {
 		prior[file.Path] = file
@@ -429,6 +433,9 @@ func checkUnchanged(ctx context.Context, root string, base []File) error {
 			return err
 		}
 		rel = filepath.ToSlash(rel)
+		if repository && rel == ".git" && entry.IsDir() {
+			return filepath.SkipDir
+		}
 		if !validSourcePath(rel) {
 			return fmt.Errorf("unsafe workspace path %q", rel)
 		}
@@ -529,6 +536,9 @@ func walk(ctx context.Context, root string, visit func(string, fs.DirEntry) erro
 					}
 					name := filepath.Join(dir, entry.Name())
 					if err := visit(name, entry); err != nil {
+						if err == filepath.SkipDir && entry.IsDir() {
+							continue
+						}
 						return err
 					}
 					if entry.IsDir() {

@@ -279,16 +279,14 @@ func TestSnapshotBoundsAndIdentity(t *testing.T) {
 		func(s *Snapshot) { s.Head = "main" },
 		func(s *Snapshot) { s.Base = strings.Repeat("b", 40) },
 		func(s *Snapshot) { s.Base, s.MergeBase = s.Head, s.Head; s.Diff = make([]byte, MaxContextBytes+1) },
-		func(s *Snapshot) { s.HistoryRequested = true; s.History = make([]byte, MaxContextBytes+1) },
+		func(s *Snapshot) { s.Repository = make([]byte, MaxBytes+1) },
 		func(s *Snapshot) {
 			s.Files = make([]File, MaxFiles+1)
 			for i := range s.Files {
 				s.Files[i] = File{Path: fmt.Sprintf("file-%d", i), Mode: Regular}
 			}
 		},
-		func(s *Snapshot) { s.History = []byte("unrequested") },
 		func(s *Snapshot) { s.ChangedPaths = []string{"a"} },
-		func(s *Snapshot) { s.HistoryRequested, s.HistoryComplete = true, true },
 		func(s *Snapshot) {
 			s.Base, s.MergeBase = s.Head, s.Head
 			s.DiffIncomplete = true
@@ -301,11 +299,11 @@ func TestSnapshotBoundsAndIdentity(t *testing.T) {
 		if err == nil {
 			t.Fatal("accepted invalid snapshot")
 		}
-		if (len(bad.Diff) > MaxContextBytes || len(bad.History) > MaxContextBytes) && !strings.Contains(err.Error(), "exceeds limits") {
+		if (len(bad.Diff) > MaxContextBytes || len(bad.Repository) > MaxBytes) && !strings.Contains(err.Error(), "exceeds limits") {
 			t.Fatalf("context bounds did not reach limit validation: %v", err)
 		}
-		if (len(bad.ChangedPaths) != 0 || bad.HistoryComplete) && !strings.Contains(err.Error(), "lacks source identity or history coverage") {
-			t.Fatalf("context identity/coverage refusal lost: %v", err)
+		if len(bad.ChangedPaths) != 0 && !strings.Contains(err.Error(), "lacks source identity") {
+			t.Fatalf("context identity refusal lost: %v", err)
 		}
 	}
 	ctx, cancel := context.WithCancel(context.Background())

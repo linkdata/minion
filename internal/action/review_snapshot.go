@@ -18,6 +18,7 @@ type reviewSnapshot struct {
 	ownedSource       bool
 	changes           []workspace.Change
 	artifacts         []workspace.File
+	repository        *gitwork.Repository
 }
 
 // Freeze outside the main model's writable grants. The caller owns the partial snapshot even on failure.
@@ -53,6 +54,9 @@ func (s *reviewSnapshot) refresh(ctx context.Context, workRoot string, job Job, 
 		if err := workspace.MaterializeChanges(s.source, job.Source.Files, s.changes); err != nil {
 			return err
 		}
+		if s.repository, err = gitwork.MaterializeRepository(ctx, s.source, job.Source); err != nil {
+			return err
+		}
 	} else {
 		s.source = source
 	}
@@ -81,8 +85,13 @@ func (s *reviewSnapshot) refresh(ctx context.Context, workRoot string, job Job, 
 
 func (s *reviewSnapshot) verify(ctx context.Context) error {
 	if s.ownedSource {
-		if err := workspace.CheckChangesUnchanged(ctx, s.source, s.base, s.changes); err != nil {
+		if err := workspace.CheckRepositoryChangesUnchanged(ctx, s.source, s.base, s.changes); err != nil {
 			return fmt.Errorf("frozen candidate source changed during critic review: %w", err)
+		}
+	}
+	if s.repository != nil {
+		if err := s.repository.Verify(ctx); err != nil {
+			return fmt.Errorf("frozen candidate repository changed during critic review: %w", err)
 		}
 	}
 	if s.outputDir != "" {

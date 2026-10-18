@@ -16,7 +16,7 @@ import (
 	"github.com/linkdata/minion/internal/workspace"
 )
 
-const ProtocolVersion = 1
+const ProtocolVersion = 2
 
 // Identity travels between hosts; authentication is supplied separately.
 type Identity struct {
@@ -224,6 +224,9 @@ func (j Job) Validate() error {
 	invalidRounds := j.Critic != nil && (j.CriticMaxRounds < 1 || j.CriticMaxRounds > config.MaxCriticMaxRounds || j.CriticNonblockingRounds < 0 || j.CriticNonblockingRounds > j.CriticMaxRounds)
 	if unexpectedRounds || invalidRounds {
 		return errors.New("invalid critic round limit")
+	}
+	if len(j.Source.Repository) == 0 {
+		return errors.New("action requires a complete repository bundle")
 	}
 	if err := workspace.ValidateSnapshot(j.Source); err != nil {
 		return err

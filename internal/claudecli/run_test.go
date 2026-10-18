@@ -388,11 +388,20 @@ func TestRunCancelled(t *testing.T) {
 }
 
 func TestChildEnvironment(t *testing.T) {
-	got, err := childEnvironment([]string{"HOME=/home/operator", "PATH=/bin", "CLAUDE_CONFIG_DIR=/home/operator/.claude", "ANTHROPIC_API_KEY=", "anthropic_api_key=dummy", "GH_TOKEN=dummy", "GITHUB_TOKEN=dummy", "NODE_OPTIONS=dummy", "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=0", "BASH_ENV=bad", "HTTPS_PROXY=http://proxy.example:8080", "https_proxy=http://lower.example:3128", "http_proxy=http://lower.example:3128", "all_proxy=socks5://lower.example:1080", "no_proxy=localhost", "Https_Proxy=http://ignored.example:3128", "invalid"}, "/run", "/cache", "", "/home/operator/.claude")
+	got, err := childEnvironment([]string{"HOME=/home/operator", "PATH=/bin", "CLAUDE_CONFIG_DIR=/home/operator/.claude", "ANTHROPIC_API_KEY=", "anthropic_api_key=dummy", "GH_TOKEN=dummy", "GITHUB_TOKEN=dummy", "GIT_CONFIG_GLOBAL=/private-git-config", "GIT_DIR=/private-git-dir", "NODE_OPTIONS=dummy", "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=0", "BASH_ENV=bad", "HTTPS_PROXY=http://proxy.example:8080", "https_proxy=http://lower.example:3128", "http_proxy=http://lower.example:3128", "all_proxy=socks5://lower.example:1080", "no_proxy=localhost", "Https_Proxy=http://ignored.example:3128", "invalid"}, "/run", "/cache", "", "/home/operator/.claude")
 	if err != nil {
 		t.Fatal(err)
 	}
 	joined := strings.Join(got, "\n")
+	for _, required := range []string{"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_ATTR_NOSYSTEM=1", "GIT_NO_REPLACE_OBJECTS=1", "GIT_NO_LAZY_FETCH=1", "GIT_OPTIONAL_LOCKS=0"} {
+		if !strings.Contains(joined, required) {
+			t.Fatalf("missing local Git setting %q: %s", required, joined)
+		}
+	}
+	if strings.Contains(joined, "/private-git-") {
+		t.Fatalf("inherited host Git setting: %s", joined)
+	}
+
 	for _, key := range []string{"ANTHROPIC_API_KEY", "anthropic_api_key", "GH_TOKEN", "GITHUB_TOKEN", "NODE_OPTIONS", "SUBPROCESS_ENV_SCRUB", "BASH_ENV", "Https_Proxy"} {
 		if strings.Contains(joined, key+"=") {
 			t.Fatalf("unsafe environment key %s", key)

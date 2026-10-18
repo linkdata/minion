@@ -25,7 +25,7 @@ type sourceEntry struct {
 
 const maxBatchHeaderBytes = 128
 
-// sourceTree checks API metadata before any partial-clone blob is requested.
+// sourceTree validates complete source metadata before materialization.
 func (c *Checkout) sourceTree(ctx context.Context, ref string) ([]sourceEntry, error) {
 	if entries, ok := c.sourceTrees[ref]; ok {
 		return entries, nil
@@ -137,12 +137,6 @@ func (c *Checkout) sourceFiles(ctx context.Context, entries []sourceEntry) (file
 	if len(requested) == 0 {
 		return nil, omitted, nil
 	}
-	// Hydrate missing blobs together; cat-file otherwise lazy-fetches each one.
-	if err := runGitInputTo(ctx, c.path, strings.NewReader(input.String()), io.Discard,
-		"-c", "fetch.negotiationAlgorithm=noop", "fetch", "--no-tags", "--no-write-fetch-head", "--recurse-submodules=no", "--stdin", "origin"); err != nil {
-		return nil, nil, err
-	}
-	// Content bounds were checked before requesting blobs; include batch headers.
 	output, truncated, err := c.boundedGit(ctx, strings.NewReader(input.String()), int(size)+(maxBatchHeaderBytes+2)*len(requested), true, "cat-file", "--batch")
 	if err != nil {
 		return nil, nil, err
@@ -179,9 +173,8 @@ func readBatchBlobs(data []byte, entries []sourceEntry) ([]workspace.File, error
 	return files, nil
 }
 
-// Snapshot exports pinned source and optional comparison/history data, never Git configuration.
-func (c *Checkout) Snapshot(ctx context.Context, history bool) (s workspace.Snapshot, err error) {
-	s.HistoryRequested = history
+// Snapshot exports pinned source, comparison data and complete Git history without configuration.
+func (c *Checkout) Snapshot(ctx context.Context) (s workspace.Snapshot, err error) {
 	if s.Head, err = c.verifiedHead(ctx); err != nil {
 		return s, err
 	}
@@ -236,7 +229,7 @@ func (c *Checkout) Snapshot(ctx context.Context, history bool) (s workspace.Snap
 			}
 		}
 	}
-	// Bound regular-file transfer before diff can lazily fetch blobs. Omitted
+	// Bound regular-file transfer before reading contents or rendering a diff. Omitted
 	// symlink blobs are bounded separately by each complete tree's metadata check.
 	// sourceFiles separately sizes its bounded batch response.
 	if total > workspace.MaxBytes {
@@ -255,25 +248,8 @@ func (c *Checkout) Snapshot(ctx context.Context, history bool) (s workspace.Snap
 			s.Diff = nil
 		}
 	}
-	if history {
-		count, err := runGit(ctx, c.path, "rev-list", "--count", "--max-count=101", s.Head)
-		if err != nil {
-			return s, err
-		}
-		commits, err := strconv.ParseUint(count, 10, 64)
-		if err != nil {
-			return s, errors.New("invalid history commit count")
-		}
-		var truncated bool
-		s.History, truncated, err = c.boundedGit(ctx, nil, workspace.MaxContextBytes, true, "log", "--no-notes", "--no-mailmap", "--max-count=100", "--format=fuller", "--date=iso-strict", "--no-decorate", "--no-show-signature", s.Head, "--")
-		if err != nil {
-			return s, err
-		}
-		shallow, err := runGit(ctx, c.path, "rev-parse", "--is-shallow-repository")
-		if err != nil {
-			return s, err
-		}
-		s.HistoryComplete = !truncated && commits <= 100 && shallow == "false"
+	if s.Repository, _, err = c.boundedGit(ctx, nil, workspace.MaxBytes, false, "bundle", "create", "-", "--all"); err != nil {
+		return s, fmt.Errorf("export complete repository: %w", err)
 	}
 	if err := c.ready(); err != nil {
 		return s, err

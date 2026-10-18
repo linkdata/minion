@@ -236,7 +236,7 @@ func TestSourceTreeResponseOverflowIsTerminalSizeRefusal(t *testing.T) {
 	fixture.checkout.lookupTree = func(context.Context, string) (github.GitTree, error) {
 		return github.GitTree{}, github.ErrResponseTooLarge
 	}
-	_, err := fixture.checkout.Snapshot(context.Background(), false)
+	_, err := fixture.checkout.Snapshot(context.Background())
 	if !errors.Is(err, ErrCheckoutTooLarge) || !errors.Is(err, github.ErrResponseTooLarge) {
 		t.Fatalf("source response overflow classification: %v", err)
 	}

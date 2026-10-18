@@ -256,28 +256,23 @@ func TestPortableJobPreservesElapsedDeadlineCause(t *testing.T) {
 	}
 }
 
-func TestPreparedHistoryModifierReachesPortableSource(t *testing.T) {
-	for _, history := range []bool{false, true} {
-		t.Run(fmt.Sprintf("history_%t", history), func(t *testing.T) {
-			base, _, _ := gitFixtureRemote(t)
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if !serveIssueFixture(t, w, r) {
-					t.Errorf("unexpected preparation request: %s %s", r.Method, r.URL.Path)
-					http.NotFound(w, r)
-				}
-			}))
-			defer server.Close()
-			request := usageJob()
-			request.Command = command.Command{Name: "inspect", Action: command.Comment, History: history}
-			orchestrator := attemptFixture(&Orchestrator{WorkRoot: t.TempDir(), GitHub: testGitHub(server, "token"), Commands: map[string]config.CommandMapping{"inspect": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}}})
-			prepared, err := orchestrator.prepare(testActionContext(t), request)
-			if err != nil {
-				t.Fatal(err)
-			}
-			job := prepared.job
-			if job.Source.HistoryRequested != history || (len(job.Source.History) != 0) != history || (history && !strings.Contains(string(job.Source.History), base)) {
-				t.Fatalf("modifier lost during source preparation: history=%t snapshot=%+v", history, job.Source)
-			}
-		})
+func TestPreparedActionAlwaysCarriesCompleteRepository(t *testing.T) {
+	base, _, _ := gitFixtureRemote(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !serveIssueFixture(t, w, r) {
+			t.Errorf("unexpected preparation request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	request := usageJob()
+	request.Command = command.Command{Name: "inspect", Action: command.Comment}
+	orchestrator := attemptFixture(&Orchestrator{WorkRoot: t.TempDir(), GitHub: testGitHub(server, "token"), Commands: map[string]config.CommandMapping{"inspect": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}}})
+	prepared, err := orchestrator.prepare(testActionContext(t), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared.job.Source.Head != base || len(prepared.job.Source.Repository) == 0 {
+		t.Fatalf("complete repository missing from prepared source: %+v", prepared.job.Source)
 	}
 }

@@ -313,5 +313,7 @@ func childEnvironment(env []string, runtimeDir, cacheDir, authDir, configDir str
 		"CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0",
 		"CLAUDE_CODE_TMPDIR="+filepath.Join(runtimeDir, "tmp"),
 		"TMPDIR="+runtimeDir, "TMP="+runtimeDir, "TEMP="+runtimeDir, "GOCACHE="+cacheDir,
+		// Local history commands must not read host Git config or write optional metadata.
+		"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_ATTR_NOSYSTEM=1", "GIT_NO_REPLACE_OBJECTS=1", "GIT_NO_LAZY_FETCH=1", "GIT_OPTIONAL_LOCKS=0",
 	), nil
 }

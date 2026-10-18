@@ -136,7 +136,7 @@ printf '%%s\n' '{"type":"result","subtype":"success","is_error":false,"terminal_
 func TestRunnerMissingProviderIsNotTerminalAndRecordsZeroUsage(t *testing.T) {
 	for _, provider := range []string{"codex", "claude"} {
 		t.Run(provider, func(t *testing.T) {
-			t.Setenv("PATH", t.TempDir())
+			t.Setenv("PATH", gitOnlyPath(t))
 			job := portableJob(command.Comment)
 			job.Main.Provider = provider
 			result, err := (&Runner{WorkRoot: t.TempDir()}).Run(context.Background(), job)
@@ -147,5 +147,13 @@ func TestRunnerMissingProviderIsNotTerminalAndRecordsZeroUsage(t *testing.T) {
 				t.Fatalf("missing %s call=%+v", provider, got)
 			}
 		})
+	}
+}
+
+func TestRunnerMissingGitIsRetryableBeforeModelWork(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	result, err := (&Runner{WorkRoot: t.TempDir()}).Run(context.Background(), portableJob(command.Comment))
+	if !errors.Is(err, exec.ErrNotFound) || errors.Is(err, monitor.ErrTerminalJob) || len(result.Calls) != 0 || result.Answer != "" {
+		t.Fatalf("missing Git misclassified or charged: result=%+v error=%v", result, err)
 	}
 }

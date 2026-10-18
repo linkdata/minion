@@ -50,30 +50,14 @@ func TestGitOutputLimitStopsChildHoldingPipes(t *testing.T) {
 	}
 }
 
-func TestGitDeadlineStopsLazyFetchChildHoldingPipes(t *testing.T) {
-	t.Setenv("EMAIL", "probe@example.invalid")
-	fixture := newFixture(t)
-	root := t.TempDir()
-	server := filepath.Join(root, "server.git")
-	fixture.git("", "clone", "--bare", fixture.remote, server)
-	fixture.git(server, "config", "uploadpack.allowFilter", "true")
-	fixture.git(server, "config", "uploadpack.allowAnySHA1InWant", "true")
-	clone := filepath.Join(root, "clone")
-	fixture.git("", "clone", "--filter=blob:none", "--no-checkout", "--branch", "main", "file://"+server, clone)
-	blob := fixture.git(clone, "rev-parse", "HEAD:README.md")
-	if missing := fixture.git(clone, "rev-list", "--objects", "--missing=print", "HEAD"); !strings.Contains(missing, "?"+blob) {
-		t.Fatalf("fixture blob was not filtered: %s", missing)
-	}
-	pidFile := filepath.Join(root, "fetch.pid")
-	stall := filepath.Join(root, "upload-pack")
-	if err := os.WriteFile(stall, []byte("#!/bin/sh\nprintf '%s' $$ > "+shellQuote(pidFile)+"\nprintf 'deadline diagnostic\\nforged journal\\n' >&2\nexec sleep 6\n"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	fixture.git(clone, "config", "remote.origin.uploadpack", stall)
+func TestGitDeadlineStopsChildHoldingPipes(t *testing.T) {
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "child.pid")
+	alias := "!printf '%s' $$ > " + shellQuote(pidFile) + "; printf 'deadline diagnostic\\nforged journal\\n' >&2; exec sleep 6"
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 	started := time.Now()
-	_, _, err := (&Checkout{path: clone}).boundedGit(ctx, strings.NewReader(blob+"\n"), 1024, false, "cat-file", "--batch")
+	_, _, err := (&Checkout{path: dir}).boundedGit(ctx, nil, 1024, false, "-c", "alias.probe="+alias, "probe")
 	elapsed := time.Since(started)
 	assertGitChildStopped(t, pidFile)
 	var exit *exec.ExitError

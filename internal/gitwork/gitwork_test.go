@@ -17,7 +17,7 @@ import (
 	"github.com/linkdata/minion/internal/workspace"
 )
 
-// Local fixtures have every blob; production must obtain sizes from GitHub.
+// Fixtures provide the same tree metadata as the GitHub lookup.
 func localTreeMetadata(dir string) func(context.Context, string) (github.GitTree, error) {
 	return func(ctx context.Context, sha string) (github.GitTree, error) {
 		cmd := exec.CommandContext(ctx, "git", "-C", dir, "ls-tree", "-r", "-l", "-z", sha)
@@ -217,7 +217,7 @@ func TestCheckoutPullRequestPreservesAliasedTreeEntries(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(path, "payload")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("PR worktree materialized: %v", err)
 	}
-	snapshot, err := checkout.Snapshot(context.Background(), false)
+	snapshot, err := checkout.Snapshot(context.Background())
 	if err != nil || len(snapshot.Files) != width*width {
 		t.Fatalf("aliased tree snapshot files=%d error=%v", len(snapshot.Files), err)
 	}
@@ -233,9 +233,8 @@ func completeTree(sha string, entries []github.GitTreeEntry) github.GitTree {
 	return github.GitTree{SHA: sha, Truncated: &truncated, Tree: entries}
 }
 
-func TestCheckoutPullRequestPreflightDoesNotFetchMissingBlob(t *testing.T) {
+func TestCheckoutPullRequestPreflightsMetadataBeforeSourceRead(t *testing.T) {
 	fixture := newFixture(t)
-	fixture.git("", "--git-dir="+fixture.remote, "config", "uploadpack.allowFilter", "true")
 	const blobBytes = 2 << 20
 	writeFile(t, filepath.Join(fixture.source, "new.dat"), strings.Repeat("x", blobBytes))
 	fixture.git(fixture.source, "add", "new.dat")
@@ -244,9 +243,7 @@ func TestCheckoutPullRequestPreflightDoesNotFetchMissingBlob(t *testing.T) {
 	blob := fixture.git(fixture.source, "rev-parse", "HEAD:new.dat")
 	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/pull/7/head")
 	checkout := fixture.keepCheckout(cloneFromURL(context.Background(), t.TempDir(), "file://"+fixture.remote, "main", localTreeMetadata(fixture.source), true))
-	if !blobMissing(t, checkout.path, blob) {
-		t.Fatal("fixture did not omit the PR blob")
-	}
+	log := recordSnapshotContentCalls(t)
 	oversized := func(_ context.Context, sha string) (github.GitTree, error) {
 		size := int64(workspace.MaxBytes + 1)
 		return completeTree(sha, []github.GitTreeEntry{{Path: "new.dat", Type: "blob", Mode: "100644", Size: &size}}), nil
@@ -255,8 +252,9 @@ func TestCheckoutPullRequestPreflightDoesNotFetchMissingBlob(t *testing.T) {
 	if err := checkout.checkoutPullRequest(context.Background(), 7, "main", head); !errors.Is(err, ErrCheckoutTooLarge) {
 		t.Fatalf("oversized PR error = %v, want checkout limit", err)
 	}
-	if !blobMissing(t, checkout.path, blob) {
-		t.Fatal("size preflight downloaded missing PR blob")
+	assertBlobPresent(t, checkout.path, blob)
+	if data, err := os.ReadFile(log); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("metadata preflight requested source content: %q error=%v", data, err)
 	}
 	if got := fixture.git(checkout.path, "rev-parse", "HEAD"); got != fixture.base {
 		t.Fatalf("rejected PR moved HEAD to %s", got)
@@ -286,7 +284,7 @@ func TestNewBranchPreservesOmittedGitlink(t *testing.T) {
 
 	checkout := fixture.clone()
 	ctx := context.Background()
-	snapshot, err := checkout.Snapshot(ctx, false)
+	snapshot, err := checkout.Snapshot(ctx)
 	if err != nil || len(snapshot.Omitted) != 1 || snapshot.Omitted[0] != "sub" {
 		t.Fatalf("gitlink snapshot=%+v error=%v", snapshot, err)
 	}

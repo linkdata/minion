@@ -785,7 +785,6 @@ func TestJobJSONRoundTrip(t *testing.T) {
 	job := portableJob(command.Review)
 	job.Critic = &RoleSettings{Provider: "claude", Model: "critic-model", Effort: "high"}
 	job.CriticMaxRounds = config.DefaultCriticMaxRounds
-	job.Source.HistoryRequested = true
 	job.Source.Omitted = []string{"omitted-link"}
 	job.Source.ChangedPaths = []string{`back\slash`, "case", "CASE"}
 	data, err := json.Marshal(job)

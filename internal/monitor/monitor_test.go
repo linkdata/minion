@@ -466,7 +466,7 @@ func TestRunOnceChecksPermissionAndDeduplicates(t *testing.T) {
 	}
 }
 
-func TestRunOnceCarriesHistoryAndDeduplicatesEachVariant(t *testing.T) {
+func TestRunOnceRejectsInlineArgumentsAndDeduplicatesCommand(t *testing.T) {
 	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
 	item := github.Item{
 		Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"},
@@ -478,19 +478,18 @@ func TestRunOnceCarriesHistoryAndDeduplicatesEachVariant(t *testing.T) {
 	handler := &fakeHandler{}
 	store := openState(t, now.Add(-time.Minute))
 	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Now: func() time.Time { return now }}
-	for _, body := range []string{"@linkdataminion review", "@linkdataminion review history", "@linkdataminion REVIEW HISTORY"} {
+	for _, body := range []string{"@linkdataminion review history", "@linkdataminion REVIEW HISTORY", "@linkdataminion review now", "@linkdataminion review", "@linkdataminion REVIEW"} {
 		gh.items[0].Body = body
 		if _, err := m.RunOnce(context.Background(), store); err != nil {
 			t.Fatal(err)
 		}
 		now = now.Add(time.Minute)
 	}
-	if len(handler.jobs) != 2 || len(store.Data.Processed) != 2 {
-		t.Fatalf("jobs = %+v, processed = %v; want two distinct variants", handler.jobs, store.Data.Processed)
+	if len(handler.jobs) != 1 || len(store.Data.Processed) != 1 {
+		t.Fatalf("jobs = %+v, processed = %v; want one standalone command", handler.jobs, store.Data.Processed)
 	}
-	plain, history := handler.jobs[0], handler.jobs[1]
-	if plain.Command.History || !history.Command.History || plain.ID == history.ID {
-		t.Fatalf("history lost or identity reused: plain=%+v history=%+v", plain, history)
+	if handler.jobs[0].Command.Name != "review" {
+		t.Fatalf("standalone command lost: %+v", handler.jobs[0])
 	}
 }
 
