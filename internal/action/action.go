@@ -310,8 +310,11 @@ func inertModelOutput(s string) string {
 }
 
 func modelOutputFits(s string) bool {
-	s = normalizedModelOutput(s)
-	return len(s) <= maxOutputBytes && utf8.ValidString(s) && len(inertModelOutput(s)) <= maxOutputBytes
+	return utf8.ValidString(s) && len(inertModelOutput(s)) <= maxOutputBytes
+}
+
+func publishableAnswer(s string) bool {
+	return boundedText(s, maxOutputBytes) && modelOutputFits(s)
 }
 
 func normalizedModelOutput(s string) string {

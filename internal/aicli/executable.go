@@ -34,8 +34,11 @@ func AbsoluteExecutable(name string) (string, error) {
 // ExecutableOutside excludes an untrusted snapshot from executable lookup.
 func ExecutableOutside(name, root string) (string, error) {
 	path, err := ExecutablePath(name)
-	if err == nil && workspace.Within(root, path) {
-		err = errors.New("executable is inside the untrusted source snapshot")
+	if err != nil {
+		return "", err
 	}
-	return path, err
+	if workspace.Within(root, path) {
+		return "", errors.New("executable is inside the untrusted source snapshot")
+	}
+	return path, nil
 }

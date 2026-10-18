@@ -372,7 +372,11 @@ func (o *jsonlOutput) accept(event codexEvent) {
 	}
 	switch event.Type {
 	case "thread.started":
-		o.threadID = event.ThreadID
+		if o.threadID == "" {
+			o.threadID = event.ThreadID
+		} else if event.ThreadID != "" && event.ThreadID != o.threadID {
+			o.stop(errors.New("Codex thread identity changed within one call"))
+		}
 	case "turn.started":
 		o.completed, o.finalMessage = false, ""
 	case "item.completed":

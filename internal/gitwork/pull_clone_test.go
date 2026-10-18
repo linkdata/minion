@@ -25,7 +25,15 @@ func TestClonePullRequestFetchesOnlyPinnedHeadAfterBaseClone(t *testing.T) {
 	fakeOnPath(t, "git", `#!/bin/sh
 for argument do
   case "$argument" in
-    clone|fetch) printf '%s\n' "$*" >> `+shellQuote(log)+`; break ;;
+    clone) printf '%s\n' "$*" >> `+shellQuote(log)+`; break ;;
+    fetch)
+      printf '%s\n' "$*" >> `+shellQuote(log)+`
+      cat .git/config > `+shellQuote(log+".before")+`
+      `+shellQuote(git)+` "$@"
+      result=$?
+      cat .git/config > `+shellQuote(log+".after")+`
+      exit "$result"
+      ;;
   esac
 done
 exec `+shellQuote(git)+` "$@"
@@ -37,8 +45,16 @@ exec `+shellQuote(git)+` "$@"
 	}
 	calls := strings.Split(strings.TrimSpace(string(data)), "\n")
 	if len(calls) != 2 || !strings.Contains(calls[0], "clone ") || !strings.Contains(calls[0], "--branch main") ||
-		!strings.Contains(calls[1], "fetch ") || !strings.Contains(calls[1], "+refs/pull/7/head:refs/remotes/minion/pr-head") || strings.Contains(calls[1], "+refs/heads/") {
+		!strings.Contains(calls[1], "fetch ") || !strings.Contains(calls[1], "-- origin +refs/pull/7/head:refs/remotes/minion/pr-head") || strings.Contains(calls[1], "+refs/heads/") {
 		t.Fatalf("base fetched again or pinned head omitted: %q", calls)
+	}
+	before, err := os.ReadFile(log + ".before")
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(log + ".after")
+	if err != nil || string(before) != string(after) {
+		t.Fatalf("PR fetch changed trusted config: before=%q after=%q error=%v", before, after, err)
 	}
 	if checkout.comparisonBase != fixture.base || checkout.expectedHead != head {
 		t.Fatalf("PR identity changed: base=%s head=%s", checkout.comparisonBase, checkout.expectedHead)
@@ -64,9 +80,9 @@ func TestClonePullRequestSkipsUnusedBaseTip(t *testing.T) {
 	head := fixture.commit("refs/pull/7/head", "PR head")
 	fixture.git(fixture.source, "checkout", "--detach", fixture.base)
 	unused := "base-only"
-	path := filepath.Join(fixture.source, filepath.FromSlash(unused))
+	path := filepath.Join(fixture.source, unused)
 	writeFile(t, path, "unused base-tip blob\n")
-	fixture.git(fixture.source, "-c", "core.protectHFS=false", "-c", "core.protectNTFS=false", "add", ".")
+	fixture.git(fixture.source, "add", ".")
 	fixture.git(fixture.source, "commit", "-m", "advance base")
 	base := fixture.git(fixture.source, "rev-parse", "HEAD")
 	baseTree := fixture.git(fixture.source, "rev-parse", "HEAD^{tree}")
@@ -106,7 +122,7 @@ func TestClonePullRequestSkipsUnusedBaseTip(t *testing.T) {
 	if baseLookups != 1 {
 		t.Fatalf("unused base tip was validated during PR preparation: lookups=%d", baseLookups)
 	}
-	if _, err := os.Lstat(filepath.Join(checkout.path, filepath.FromSlash(unused))); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Lstat(filepath.Join(checkout.path, unused)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("unused base path materialized: %v", err)
 	}
 	if missing := fixture.git(checkout.path, "rev-list", "--objects", "--missing=print", base); !strings.Contains(missing, "?"+unusedBlob) {

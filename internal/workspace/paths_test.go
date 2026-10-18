@@ -11,7 +11,7 @@ import (
 	"unicode/utf8"
 )
 
-func TestPrepareRootCanonicalizesExistingDirectory(t *testing.T) {
+func TestCanonicalPathCanonicalizesExistingDirectory(t *testing.T) {
 	parent, linkParent := t.TempDir(), t.TempDir()
 	parent, err := filepath.EvalSymlinks(parent)
 	if err != nil {
@@ -24,28 +24,28 @@ func TestPrepareRootCanonicalizesExistingDirectory(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(parent, "new"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	root, err := PrepareRoot(filepath.Join(link, "new"))
+	root, err := CanonicalPath(filepath.Join(link, "new"))
 	if err != nil || root != filepath.Join(parent, "new") {
 		t.Fatalf("prepared root=%q,%v", root, err)
 	}
 }
 
-func TestPrepareRootDoesNotCreateMissingDirectory(t *testing.T) {
+func TestCanonicalPathDoesNotCreateMissingDirectory(t *testing.T) {
 	for _, root := range []string{"", " \t\n"} {
-		if _, err := PrepareRoot(root); err == nil || err.Error() != "path is required" {
+		if _, err := CanonicalPath(root); err == nil || err.Error() != "path is required" {
 			t.Fatalf("blank root error=%v", err)
 		}
 	}
 	name := filepath.Join(t.TempDir(), "missing", "nested")
-	if _, err := PrepareRoot(name); !errors.Is(err, os.ErrNotExist) {
+	if _, err := CanonicalPath(name); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("missing root error=%v", err)
 	}
 	if _, err := os.Lstat(filepath.Dir(name)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("PrepareRoot created a directory: %v", err)
+		t.Fatalf("CanonicalPath created a directory: %v", err)
 	}
 }
 
-func TestPrepareRootResolvesRelativeParentsThroughPWD(t *testing.T) {
+func TestCanonicalPathResolvesRelativeParentsThroughPWD(t *testing.T) {
 	root, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -72,7 +72,7 @@ func TestPrepareRootResolvesRelativeParentsThroughPWD(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PWD", alias)
-	if got, err := PrepareRoot(".."); err != nil || got != actual {
+	if got, err := CanonicalPath(".."); err != nil || got != actual {
 		t.Fatalf("relative parent resolved=%q want=%q error=%v", got, actual, err)
 	}
 }
@@ -176,5 +176,12 @@ func TestFoldPathMatchesUnicodeSimpleCaseFolding(t *testing.T) {
 		if strings.EqualFold(name, next) && FoldPath(next) != key {
 			t.Fatalf("equivalent runes have distinct keys: %U => %q", r, next)
 		}
+	}
+}
+
+func TestWithinCanonicalPaths(t *testing.T) {
+	root := t.TempDir()
+	if !Within(root, root) || !Within(root, filepath.Join(root, "child")) || Within(root, root+"-sibling") || Within(root, filepath.Dir(root)) {
+		t.Fatal("incorrect path containment")
 	}
 }

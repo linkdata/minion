@@ -261,8 +261,8 @@ func (r Result) validate(j Job, complete bool) error {
 		return errors.New("action result version, identity or source differs from job")
 	}
 	requiresAnswer := j.Action != command.Fix || j.Critic != nil || len(r.Changes) == 0
-	invalidCompleteAnswer := complete && (!modelOutputFits(r.Answer) || (requiresAnswer && strings.TrimSpace(r.Answer) == ""))
-	if !boundedText(r.Answer, maxOutputBytes) || invalidCompleteAnswer {
+	invalidCompleteAnswer := complete && (!publishableAnswer(r.Answer) || (requiresAnswer && strings.TrimSpace(r.Answer) == ""))
+	if (!complete && !boundedText(r.Answer, maxOutputBytes)) || invalidCompleteAnswer {
 		return errors.New("action answer is blank, invalid or exceeds limit")
 	}
 	if j.Action != command.Fix && len(r.Changes) != 0 {

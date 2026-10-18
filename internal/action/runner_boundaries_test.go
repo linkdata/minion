@@ -143,7 +143,11 @@ func TestRunnerCancellationDuringInstalledAuditValidatorPreservesCause(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer marker.Close()
+	defer func() {
+		if err := marker.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
 	script := fmt.Sprintf("#!/bin/sh\nif [ \"$2\" = -e ]; then exit 0; fi\nprintf started > %q\nexec /bin/cat < %q\n", startedPath, holdPath)
 	fakeOnPath(t, "node", script)
 	job := portableJob(command.SecurityAudit)

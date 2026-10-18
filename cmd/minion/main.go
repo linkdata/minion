@@ -196,7 +196,7 @@ func newOrchestrator(cfg config.Config, client *github.Client, store *state.Stor
 }
 
 func checkIsolation(cfg config.Config, configPath string) error {
-	root, err := workspace.PrepareRoot(cfg.WorkRoot)
+	root, err := workspace.CanonicalPath(cfg.WorkRoot)
 	if err != nil {
 		return err
 	}
@@ -230,19 +230,17 @@ func checkIsolation(cfg config.Config, configPath string) error {
 	if err != nil {
 		return err
 	}
-	if codexHome != "" {
-		private = append(private, codexHome, filepath.Join(codexHome, "auth.json"), filepath.Join(codexHome, "config.toml"))
-	}
+	private = append(private, codexHome, filepath.Join(codexHome, "auth.json"), filepath.Join(codexHome, "config.toml"))
 	claudeHome, err := claudecli.HomePath()
 	if err != nil {
 		return err
 	}
-	if claudeHome != "" {
-		private = append(private, claudeHome, filepath.Join(claudeHome, ".credentials.json"), filepath.Join(claudeHome, ".claude.json"), filepath.Join(claudeHome, "settings.json"))
+	private = append(private, claudeHome, filepath.Join(claudeHome, ".credentials.json"), filepath.Join(claudeHome, ".claude.json"), filepath.Join(claudeHome, "settings.json"))
+	userHome, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("resolve default Claude home: %w", err)
 	}
-	if userHome, homeErr := os.UserHomeDir(); homeErr == nil {
-		private = append(private, filepath.Join(userHome, ".claude.json"))
-	}
+	private = append(private, filepath.Join(userHome, ".claude.json"))
 	ghHome := os.Getenv("GH_CONFIG_DIR")
 	if ghHome == "" {
 		configHome, err := os.UserConfigDir()

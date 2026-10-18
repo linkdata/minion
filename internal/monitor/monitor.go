@@ -145,7 +145,11 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 	seen := make(map[string]bool)
 	var failures []error
 	stop := func(errs ...error) (time.Time, error) {
-		return next, errors.Join(slices.Concat(failures, errs, []error{ctx.Err()})...)
+		err := errors.Join(slices.Concat(failures, errs)...)
+		if !errors.Is(err, ctx.Err()) {
+			err = errors.Join(err, ctx.Err())
+		}
+		return next, err
 	}
 	var polled []string
 	for _, repo := range m.Config.Repositories {

@@ -217,20 +217,24 @@ func walkUsageFiles(ctx context.Context, root string, started time.Time, visit f
 		return visit(path, entry)
 	}
 	pending := []string{root}
+	var skipped error
 	for len(pending) != 0 {
 		if err := ctx.Err(); err != nil {
-			return err
+			return errors.Join(skipped, err)
 		}
 		last := len(pending) - 1
 		dir := pending[last]
 		pending = pending[:last]
 		children, err := readUsageDir(ctx, dir, recent)
 		if err != nil {
-			return err
+			if errors.Is(err, fs.SkipAll) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return errors.Join(skipped, err)
+			}
+			skipped = errors.Join(skipped, err)
 		}
 		pending = append(pending, children...)
 	}
-	return nil
+	return skipped
 }
 
 func readUsageDir(ctx context.Context, path string, visit func(string, fs.DirEntry) error) (children []string, err error) {
@@ -247,14 +251,14 @@ func readUsageDir(ctx context.Context, path string, visit func(string, fs.DirEnt
 		entries, err := dir.ReadDir(256)
 		for _, entry := range entries {
 			if err := ctx.Err(); err != nil {
-				return nil, err
+				return children, err
 			}
 			name := filepath.Join(path, entry.Name())
 			if err := visit(name, entry); err != nil {
 				if err == fs.SkipDir && entry.IsDir() {
 					continue
 				}
-				return nil, err
+				return children, err
 			}
 			if entry.IsDir() {
 				children = append(children, name)
@@ -264,7 +268,7 @@ func readUsageDir(ctx context.Context, path string, visit func(string, fs.DirEnt
 			return children, nil
 		}
 		if err != nil {
-			return nil, err
+			return children, err
 		}
 	}
 }

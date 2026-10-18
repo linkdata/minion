@@ -2,6 +2,7 @@ package codexcli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -12,6 +13,74 @@ import (
 
 	"github.com/linkdata/minion/internal/usage"
 )
+
+func TestUsageWalkContinuesAfterLocalFailureButHonorsStops(t *testing.T) {
+	local := errors.New("local discovery failure")
+	for _, cause := range []error{local, fs.SkipAll, context.Canceled} {
+		t.Run(cause.Error(), func(t *testing.T) {
+			root := t.TempDir()
+			for _, name := range []string{"one", "two"} {
+				if err := os.Mkdir(filepath.Join(root, name), 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(root, name, "event.jsonl"), nil, 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			visited := 0
+			err := walkUsageFiles(ctx, root, time.Now(), func(_ string, entry fs.DirEntry) error {
+				if !entry.IsDir() {
+					visited++
+					if visited == 1 {
+						if errors.Is(cause, context.Canceled) {
+							cancel()
+						}
+						return cause
+					}
+				}
+				return nil
+			})
+			want := 1
+			if cause == local {
+				want = 2
+			}
+			if !errors.Is(err, cause) || visited != want {
+				t.Fatalf("walk lost failure or skipped/stopped wrong branch: error=%v visited=%d want=%d", err, visited, want)
+			}
+		})
+	}
+}
+
+func TestCollectUsageKeepsKnownHelpersAcrossUnreadableUnrelatedDirectory(t *testing.T) {
+	home := t.TempDir()
+	blocked := filepath.Join(home, "sessions", "unrelated")
+	if err := os.MkdirAll(blocked, 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(blocked, 0700); err != nil {
+			t.Error(err)
+		}
+	})
+	if err := os.Chmod(blocked, 0000); err != nil {
+		t.Fatal(err)
+	}
+	if file, err := os.Open(blocked); err == nil {
+		_ = file.Close()
+		t.Skip("directory permissions do not restrict this test user")
+	} else if !errors.Is(err, os.ErrPermission) {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	writeUsageRollout(t, home, "root", "", usageEvent("task_started", "root-turn"), usageRecord("root", "root-turn", "r", 10, 0, 1), usageEvent("task_complete", "root-turn"))
+	writeUsageRollout(t, home, "child", "root", usageEvent("task_started", "child-turn"), usageRecord("child", "child-turn", "c", 20, 0, 2), usageEvent("task_complete", "child-turn"))
+	tokens, complete, childError := collectUsage(context.Background(), home, "root", started, nil, []string{"child"})
+	if tokens != (usage.Tokens{Input: 30, Output: 3}) || complete || childError != nil {
+		t.Fatalf("local scan failure lost known helper evidence: tokens=%+v complete=%t childError=%v", tokens, complete, childError)
+	}
+}
 
 func TestCollectUsagePrunesHistoricalDaysBeforeCurrentRootAndHelper(t *testing.T) {
 	for _, done := range []bool{false, true} {

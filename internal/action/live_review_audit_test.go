@@ -103,10 +103,6 @@ func TestLiveSecurityAuditAction(t *testing.T) {
 				liveActionReplyCleanup(t, cleanupCtx, fixture.owner, fixture.ownerToken, fixture.cfg, job)
 			})
 			skillDir := filepath.Join(os.Getenv("HOME"), ".agents", "skills", "security-audit")
-			skill := filepath.Join(skillDir, "SKILL.md")
-			if err := os.WriteFile(skill, []byte("# Live audit test validator fixture\n"), 0o600); err != nil {
-				t.Fatal(err)
-			}
 			for _, name := range []string{"validate-findings.cjs", "validate-coverage-ledger.cjs"} {
 				if err := os.WriteFile(filepath.Join(skillDir, name), []byte(`const fs = require('fs'); if (!Array.isArray(JSON.parse(fs.readFileSync(process.argv[2], 'utf8')))) process.exit(1);`), 0o600); err != nil {
 					t.Fatal(err)

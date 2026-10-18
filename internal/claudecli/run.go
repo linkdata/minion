@@ -2,6 +2,7 @@
 package claudecli
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -77,10 +78,13 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 		}()
 	}
 	configDir := authDir
-	if configDir == "" && os.Getenv("CLAUDE_CONFIG_DIR") != "" {
-		configDir, err = HomePath()
-		if err != nil {
-			return result, err
+	if configDir == "" {
+		home, homeErr := HomePath()
+		if homeErr != nil {
+			return result, homeErr
+		}
+		if os.Getenv("CLAUDE_CONFIG_DIR") != "" {
+			configDir = home
 		}
 	}
 	cacheDir := filepath.Join(runtimeDir, "go-build")
@@ -176,7 +180,7 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	// Preserve crash/startup stderr before finish adds a generic missing-result
 	// error; native structured failures retain their safer diagnostic instead.
 	if err != nil && output.err == nil && output.usageLimit == nil && output.taskFailure == nil && !ceilingMatched {
-		err = fmt.Errorf("%w: %q", err, strings.TrimSpace(diagnostics.String()))
+		err = fmt.Errorf("%w: %q", err, cmp.Or(strings.TrimSpace(diagnostics.String()), "no further diagnostics"))
 	}
 	output.finish()
 	if failureTimer != nil {

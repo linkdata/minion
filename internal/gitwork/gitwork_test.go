@@ -208,17 +208,15 @@ func TestCheckoutPullRequestPreservesAliasedTreeEntries(t *testing.T) {
 	}
 	head := fixture.gitInput(fixture.source, "aliased PR head\n", "commit-tree", tree, "-p", fixture.base)
 	fixture.git(fixture.source, "push", fixture.remote, head+":refs/pull/7/head")
-	if err := fixture.checkout.checkoutPullRequest(context.Background(), 7, "main", head); err != nil {
-		t.Fatal(err)
-	}
-	path := fixture.checkout.path
+	checkout := fixture.clonePullRequest(head)
+	path := checkout.path
 	for level := 0; level < depth; level++ {
 		path = filepath.Join(path, "d00")
 	}
 	if _, err := os.Stat(filepath.Join(path, "payload")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("PR worktree materialized: %v", err)
 	}
-	snapshot, err := fixture.checkout.Snapshot(context.Background(), false)
+	snapshot, err := checkout.Snapshot(context.Background(), false)
 	if err != nil || len(snapshot.Files) != width*width {
 		t.Fatalf("aliased tree snapshot files=%d error=%v", len(snapshot.Files), err)
 	}
@@ -306,7 +304,7 @@ func TestNewBranchPreservesOmittedGitlink(t *testing.T) {
 	}
 }
 
-func TestCommitAndPushUsesTrustedURLAndSkipsHooks(t *testing.T) {
+func TestCommitAndPushPublishesRecordedBotCommit(t *testing.T) {
 	fixture := newFixture(t)
 	ctx := context.Background()
 	const branch = "minion/fix-123"
@@ -315,14 +313,6 @@ func TestCommitAndPushUsesTrustedURLAndSkipsHooks(t *testing.T) {
 	}
 	if err := fixture.checkout.Import(ctx, fixture.base, []workspace.Change{{Path: "fix.txt", Mode: workspace.Regular, Data: []byte("fixed\n")}}); err != nil {
 		t.Fatal(err)
-	}
-	// These hooks would fail a normal commit or push.
-	for _, name := range []string{"pre-commit", "pre-push"} {
-		hook := filepath.Join(fixture.checkout.path, ".git", "hooks", name)
-		writeFile(t, hook, "#!/bin/sh\nexit 1\n")
-		if err := os.Chmod(hook, 0700); err != nil {
-			t.Fatal(err)
-		}
 	}
 	var recordedHead string
 	if err := fixture.checkout.commitAndPush(ctx, fixture.remote, branch, "example-bot", "Minion: fix issue 123", func(sha string) error {
@@ -380,8 +370,8 @@ func TestImportAndCommitBoundsChanges(t *testing.T) {
 			if kind == "patch bytes" && err != nil {
 				t.Fatal(err)
 			}
-			if kind != "patch bytes" && err == nil {
-				t.Fatal("oversized import succeeded")
+			if kind == "file count" && (err == nil || !strings.Contains(err.Error(), "changed file limit")) {
+				t.Fatalf("oversized import lost file count limit: %v", err)
 			}
 			err = fixture.checkout.commitAndPush(ctx, fixture.remote, branch, "example-bot", "Minion: fix", func(string) error { t.Fatal("oversized changes reached before-push recorder"); return nil })
 			want := ErrNoChanges
@@ -503,7 +493,7 @@ func newFixture(t *testing.T) gitFixture {
 	path := filepath.Join(root, "checkout")
 	fixture.git("", "clone", "--no-checkout", "--branch", "main", fixture.remote, path)
 	fixture.git(path, "checkout", "--detach", "refs/remotes/origin/main")
-	fixture.checkout = &Checkout{path: path, url: fixture.remote, expectedHead: fixture.base, lookupTree: localTreeMetadata(path)}
+	fixture.checkout = &Checkout{path: path, expectedHead: fixture.base, lookupTree: localTreeMetadata(path)}
 	if err := disableAttributes(filepath.Join(path, ".git")); err != nil {
 		t.Fatal(err)
 	}

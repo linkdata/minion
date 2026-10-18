@@ -7,9 +7,6 @@ import (
 	"errors"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"strconv"
-	"strings"
 	"testing"
 	"time"
 
@@ -40,29 +37,16 @@ exit 0
 	}()
 	ticker := time.NewTicker(5 * time.Millisecond)
 	defer ticker.Stop()
-	var child *os.Process
-	var stat *os.File
+	var child *testsupport.Process
 	for child == nil {
 		select {
 		case <-ticker.C:
-			data, err := os.ReadFile(binary + ".pid")
+			var err error
+			child, err = testsupport.PinProcess(binary + ".pid")
 			if errors.Is(err, os.ErrNotExist) {
 				continue
 			}
 			if err != nil {
-				t.Fatal(err)
-			}
-			pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-			if err != nil || pid <= 0 {
-				t.Fatalf("invalid fixture child PID: %q, %v", data, err)
-			}
-			stat, err = os.Open(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			child, err = os.FindProcess(pid)
-			if err != nil {
-				_ = stat.Close()
 				t.Fatal(err)
 			}
 		case got := <-done:
@@ -72,21 +56,9 @@ exit 0
 		}
 	}
 	t.Cleanup(func() {
-		// Kill only the pinned finite fixture, never a historical process group.
-		if err := child.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
-			t.Error(err)
-		}
-		defer func() {
-			if err := child.Release(); err != nil {
-				t.Error(err)
-			}
-			if err := stat.Close(); err != nil {
-				t.Error(err)
-			}
-		}()
 		waitCtx, stopWait := context.WithTimeout(context.Background(), time.Second)
 		defer stopWait()
-		if err := testsupport.WaitStopped(waitCtx, stat); err != nil {
+		if err := child.Cleanup(waitCtx); err != nil {
 			t.Errorf("finite fixture child remained live after cleanup: %v", err)
 		}
 	})

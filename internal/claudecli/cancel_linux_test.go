@@ -6,9 +6,6 @@ import (
 	"context"
 	"errors"
 	"os"
-	"path/filepath"
-	"strconv"
-	"strings"
 	"testing"
 	"time"
 
@@ -42,28 +39,28 @@ wait
 	defer ticker.Stop()
 	waitCtx, stopWait := context.WithTimeout(context.Background(), 5*time.Second)
 	defer stopWait()
-	var pid int
+	var child *testsupport.Process
 start:
 	for {
 		select {
 		case <-ticker.C:
-			if data, err := os.ReadFile(binary + ".pid"); err == nil {
-				if pid, err = strconv.Atoi(strings.TrimSpace(string(data))); err == nil {
-					break start
-				}
+			var err error
+			child, err = testsupport.PinProcess(binary + ".pid")
+			if errors.Is(err, os.ErrNotExist) {
+				continue
 			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			break start
 		case got := <-done:
 			t.Fatalf("run exited before child started: %v", got.err)
 		case <-waitCtx.Done():
 			t.Fatal("child process did not start")
 		}
 	}
-	stat, err := os.Open(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
-	if err != nil {
-		t.Fatalf("pin running child: %v", err)
-	}
 	defer func() {
-		if err := stat.Close(); err != nil {
+		if err := child.Close(); err != nil {
 			t.Error(err)
 		}
 	}()
@@ -77,7 +74,7 @@ start:
 		t.Fatal("cancellation did not finish the run")
 	}
 	// Keep observing this child after cancellation, even if its PID is recycled.
-	if err := testsupport.WaitStopped(waitCtx, stat); err != nil {
+	if err := child.WaitExited(waitCtx); err != nil {
 		t.Fatalf("child survived process-group cancellation: %v", err)
 	}
 }

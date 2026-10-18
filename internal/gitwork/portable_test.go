@@ -20,7 +20,7 @@ func TestBoundedGitPreservesCancellation(t *testing.T) {
 	fixture := newFixture(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, _, err := fixture.checkout.boundedGit(ctx, nil, 1, false, "cat-file", "blob", fixture.base+":README.md"); !errors.Is(err, context.Canceled) || errors.Is(err, ErrCheckoutTooLarge) {
+	if _, _, err := fixture.checkout.boundedGit(ctx, nil, 1, false, "cat-file", "blob", fixture.base+":README.md"); !errors.Is(err, context.Canceled) || errors.Is(err, ErrCheckoutTooLarge) || strings.Count(err.Error(), context.Canceled.Error()) != 1 {
 		t.Fatalf("canceled read=%v", err)
 	}
 }
@@ -240,8 +240,8 @@ func TestImportRejectsIdentityAndMetadataAndPreservesBytes(t *testing.T) {
 	if data, err := os.ReadFile(filepath.Join(fixture.checkout.path, "README.md")); err != nil || string(data) != "fixture\n" {
 		t.Fatalf("wrong-source import changed source: %q error=%v", data, err)
 	}
-	if paths, err := fixture.checkout.stagedPaths(ctx); err != nil || len(paths) != 0 {
-		t.Fatalf("wrong-source import staged=%q error=%v", paths, err)
+	if count, err := fixture.checkout.stagedPathCount(ctx); err != nil || count != 0 {
+		t.Fatalf("wrong-source import staged count=%d error=%v", count, err)
 	}
 	marker := filepath.Join(t.TempDir(), "executed")
 	fixture.git(fixture.checkout.path, "config", "filter.returned.clean", "printf filter >> "+shellQuote(marker)+"; cat")
@@ -607,11 +607,9 @@ func TestSnapshotReadsHeadAndBaseInOneBatch(t *testing.T) {
 	fixture.git(fixture.source, "commit", "-m", "binary PR")
 	head := fixture.git(fixture.source, "rev-parse", "HEAD")
 	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/pull/7/head")
-	if err := fixture.checkout.checkoutPullRequest(context.Background(), 7, "main", head); err != nil {
-		t.Fatal(err)
-	}
+	checkout := fixture.clonePullRequest(head)
 	log := recordSnapshotContentCalls(t)
-	snapshot, err := fixture.checkout.Snapshot(context.Background(), false)
+	snapshot, err := checkout.Snapshot(context.Background(), false)
 	if err != nil || len(snapshot.Files) != 1 || len(snapshot.BaseFiles) != 1 || string(snapshot.Files[0].Data) != "\x00head\n\xff" || string(snapshot.BaseFiles[0].Data) != "fixture\n" {
 		t.Fatalf("batch snapshot=%+v error=%v", snapshot, err)
 	}

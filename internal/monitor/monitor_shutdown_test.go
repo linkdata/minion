@@ -147,6 +147,9 @@ func TestRunOnceCanceledExecutionPreservesEarlierFailure(t *testing.T) {
 			if test.saveFails && !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("cancellation lost state-save failure: %v", err)
 			}
+			if strings.Count(err.Error(), context.Canceled.Error()) != 1 {
+				t.Fatalf("cancellation cause repeated: %v", err)
+			}
 			if len(handler.jobs) != 1 || len(gh.comments) != 0 || len(store.Data.PendingNotifications) != 1 || store.Data.PendingNotifications[key] != pending ||
 				!store.Data.Cursor.Equal(initial) || !store.Data.RepositoryCursors[first.Repository.FullName].Equal(initial) {
 				t.Fatalf("canceled execution continued discovery or changed backoff/cursors: jobs=%d state=%+v", len(handler.jobs), store.Data)

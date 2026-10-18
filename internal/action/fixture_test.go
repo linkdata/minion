@@ -166,6 +166,8 @@ const privateRepositoryJSON = `{"id":1,"full_name":"o/r","owner":{"id":2,"login"
 
 const publicRepositoryJSON = `{"id":1,"full_name":"o/r","owner":{"id":2,"login":"o"},"default_branch":"main"}`
 
+const publicForkableRepositoryJSON = `{"id":1,"full_name":"o/r","owner":{"id":2},"default_branch":"main","visibility":"public"}`
+
 func offlineIndexFixture(t *testing.T, files []workspace.File) (*gitwork.OfflineIndex, string) {
 	t.Helper()
 	root := t.TempDir()
@@ -303,7 +305,7 @@ func serveFixFlowFixture(t *testing.T, w http.ResponseWriter, r *http.Request, f
 	switch {
 	case serveSafeForkChecks(w, r, "bot/r", false):
 	case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
-		_, _ = fmt.Fprint(w, `{"id":1,"full_name":"o/r","owner":{"id":2},"default_branch":"main","visibility":"public"}`)
+		_, _ = fmt.Fprint(w, publicForkableRepositoryJSON)
 	case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7":
 		_, _ = fmt.Fprint(w, `{"node_id":"issue-node","title":"Task","body":"Inspect source"}`)
 	case r.Method == http.MethodGet && r.URL.Path == "/repos/bot/r":

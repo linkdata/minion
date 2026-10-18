@@ -83,6 +83,15 @@ func TestRunConfiguredKeyAllowsMissingNativeHome(t *testing.T) {
 			}
 			t.Setenv("CODEX_HOME", home)
 			result, err := Run(context.Background(), t.TempDir(), "task", false, "", config.CodexConfig{APIKey: "fixture-key"})
+			if noHome {
+				if err == nil || !strings.Contains(err.Error(), "CODEX_HOME") || result.Answer != "" || !result.UsageComplete || result.Tokens != (usage.Tokens{}) {
+					t.Fatalf("unavailable home was not refused before inference: %+v, %v", result, err)
+				}
+				if _, err := os.Stat(binary + ".home"); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("unknown-home refusal launched Codex: %v", err)
+				}
+				return
+			}
 			if err != nil || result.Answer != "answer" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 10, Output: 1}) {
 				t.Fatalf("missing home rejected configured key or overstated usage: %+v, %v", result, err)
 			}
@@ -90,10 +99,8 @@ func TestRunConfiguredKeyAllowsMissingNativeHome(t *testing.T) {
 			if err != nil || strings.TrimSpace(string(data)) != home {
 				t.Fatalf("native home=%q, %v; want %q", data, err, home)
 			}
-			if !noHome {
-				if _, err := os.Stat(home); !errors.Is(err, os.ErrNotExist) {
-					t.Fatalf("home admission created a directory: %v", err)
-				}
+			if _, err := os.Stat(home); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("home admission created a directory: %v", err)
 			}
 		})
 	}

@@ -32,8 +32,8 @@ func TestExecutablePathCanonicalizesAliasAndPreservesLookupErrors(t *testing.T) 
 	if _, err := ExecutablePath("missing-cli"); !errors.Is(err, exec.ErrNotFound) {
 		t.Fatalf("lookup cause lost: %v", err)
 	}
-	if _, err := ExecutableOutside("test-cli", filepath.Dir(want)); err == nil {
-		t.Fatal("executable inside the untrusted root was accepted")
+	if got, err := ExecutableOutside("test-cli", filepath.Dir(want)); err == nil || got != "" {
+		t.Fatalf("executable inside the untrusted root returned %q, %v", got, err)
 	}
 	if got, err := ExecutableOutside("test-cli", filepath.Dir(want)+"-other"); err != nil || got != want {
 		t.Fatalf("separate executable refused: %q %v", got, err)

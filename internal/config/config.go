@@ -25,9 +25,9 @@ var (
 const (
 	// DefaultMaxGitHubContextBytes is the default GitHub text budget for an AI action.
 	DefaultMaxGitHubContextBytes = 32 << 10
-	// DefaultJobTimeout is the total runtime budget for an action.
+	// DefaultJobTimeout is the runtime budget for each execution attempt.
 	DefaultJobTimeout = 4 * time.Hour
-	// MaxJobTimeout is the largest configurable action runtime budget.
+	// MaxJobTimeout is the largest configurable per-attempt runtime budget.
 	MaxJobTimeout = 24 * time.Hour
 	// DefaultCriticMaxRounds is the default proposal/revision round limit.
 	DefaultCriticMaxRounds = 5

@@ -2,12 +2,14 @@ package claudecli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/usage"
 )
 
@@ -63,6 +65,27 @@ func TestOutputNativeUsageLimit(t *testing.T) {
 				}
 			} else if o.err == nil || o.err.Error() != test.failure || !cancelled || o.result.UsageComplete || o.result.Answer != "" {
 				t.Fatalf("unsafe or missing usage limit failure: tokens=%+v error=%v complete=%t answer=%q", o.result.Tokens, o.err, o.result.UsageComplete, o.result.Answer)
+			}
+		})
+	}
+}
+
+func TestOutputKeepsAllStructuredFailuresAfterAnotherFailure(t *testing.T) {
+	quota := errors.New("provider usage limit reached")
+	pressure := errors.New("background work stopped under provider memory pressure")
+	for _, first := range []error{nil, errors.New("invalid JSONL event"), aicli.ErrOutputLimit, fmt.Errorf("wrapped: %w", quota), fmt.Errorf("wrapped: %w", pressure)} {
+		t.Run(fmt.Sprint(first), func(t *testing.T) {
+			cancels := 0
+			o := jsonlOutput{usageLimit: quota, taskFailure: pressure, cancel: func() { cancels++ }}
+			if first != nil {
+				o.fail(first)
+			}
+			o.finish()
+			if !errors.Is(o.err, quota) || !errors.Is(o.err, pressure) || first != nil && !errors.Is(o.err, first) || cancels != 1 || o.result.Answer != "" || o.result.UsageComplete {
+				t.Fatalf("structured cause or original failure lost: error=%v cancels=%d result=%+v", o.err, cancels, o.result)
+			}
+			if strings.Count(o.err.Error(), quota.Error()) != 1 || strings.Count(o.err.Error(), pressure.Error()) != 1 {
+				t.Fatalf("structured cause duplicated: %v", o.err)
 			}
 		})
 	}

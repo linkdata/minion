@@ -1,7 +1,6 @@
 package workspace
 
 import (
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -30,12 +29,5 @@ func TestRepositoryIdentity(t *testing.T) {
 		if got := ValidRepository(test.name); got != test.valid {
 			t.Errorf("ValidRepository(%q)=%t, want %t", test.name, got, test.valid)
 		}
-	}
-}
-
-func TestWithinCanonicalPaths(t *testing.T) {
-	root := t.TempDir()
-	if !Within(root, root) || !Within(root, filepath.Join(root, "child")) || Within(root, root+"-sibling") || Within(root, filepath.Dir(root)) {
-		t.Fatal("incorrect path containment")
 	}
 }

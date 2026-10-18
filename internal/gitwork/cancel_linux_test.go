@@ -8,9 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -19,32 +17,23 @@ import (
 
 func assertGitChildStopped(t *testing.T, pidFile string) {
 	t.Helper()
-	data, err := os.ReadFile(pidFile)
-	if err != nil {
-		t.Fatalf("Git child did not start: %v", err)
-	}
-	pid, err := strconv.Atoi(string(data))
-	if err != nil || pid <= 0 {
-		t.Fatalf("invalid Git child PID %q: %v", data, err)
-	}
-	stat, err := os.Open(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
-	if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ESRCH) {
+	child, err := testsupport.PinProcess(pidFile)
+	if errors.Is(err, os.ErrProcessDone) {
 		return
 	}
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("pin Git child: %v", err)
 	}
 	defer func() {
-		if err := stat.Close(); err != nil {
+		if err := child.Close(); err != nil {
 			t.Error(err)
 		}
 	}()
-	// SIGKILL delivery precedes zombie visibility. Pin the proc entry so a
-	// recycled numeric PID cannot redirect later observations to another task.
+	// SIGKILL delivery precedes zombie visibility; keep observing the pinned child.
 	waitCtx, stopWait := context.WithTimeout(context.Background(), time.Second)
 	defer stopWait()
-	if err := testsupport.WaitStopped(waitCtx, stat); err != nil {
-		t.Fatalf("Git child is still running: pid=%d: %v", pid, err)
+	if err := child.WaitExited(waitCtx); err != nil {
+		t.Fatalf("Git child is still running: %v", err)
 	}
 }
 

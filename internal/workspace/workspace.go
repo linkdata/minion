@@ -256,8 +256,8 @@ func ValidateFixPaths(files []File, omitted []string) error {
 	return validatePaths(paths, true)
 }
 
-// PrepareRoot resolves an existing path to its canonical absolute path.
-func PrepareRoot(root string) (string, error) {
+// CanonicalPath resolves an existing path to its canonical absolute path.
+func CanonicalPath(root string) (string, error) {
 	if strings.TrimSpace(root) == "" {
 		return "", errors.New("path is required")
 	}
@@ -273,6 +273,12 @@ func PrepareRoot(root string) (string, error) {
 		return "", fmt.Errorf("resolve path: %w", err)
 	}
 	return root, nil
+}
+
+// Within compares canonical absolute paths; callers resolve symlinks first.
+func Within(root, name string) bool {
+	rel, err := filepath.Rel(root, name)
+	return err == nil && filepath.IsLocal(rel)
 }
 
 // OpenDirectory anchors collection without following any symlink component.

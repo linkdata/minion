@@ -230,7 +230,7 @@ func TestCommitAndPushPreservesDivergentRemote(t *testing.T) {
 	}
 }
 
-func TestStagedPathsClassifiesPathListTruncation(t *testing.T) {
+func TestStagedPathCountClassifiesPathListTruncation(t *testing.T) {
 	f := newFixture(t)
 	realGit, err := exec.LookPath("git")
 	if err != nil {
@@ -238,8 +238,8 @@ func TestStagedPathsClassifiesPathListTruncation(t *testing.T) {
 	}
 	script := fmt.Sprintf("#!/bin/sh\nfor arg do\nif [ \"$arg\" = --name-only ]; then\nhead -c %d /dev/zero\nexit\nfi\ndone\nexec %s \"$@\"\n", maxChangedPathListBytes+1, shellQuote(realGit))
 	fakeOnPath(t, "git", script)
-	if paths, err := f.checkout.stagedPaths(context.Background()); paths != nil || !errors.Is(err, ErrTooManyFiles) || errors.Is(err, ErrCheckoutTooLarge) || errors.Is(err, context.Canceled) {
-		t.Fatalf("staged path truncation misclassified: %q, %v", paths, err)
+	if count, err := f.checkout.stagedPathCount(context.Background()); count != 0 || !errors.Is(err, ErrTooManyFiles) || errors.Is(err, ErrCheckoutTooLarge) || errors.Is(err, context.Canceled) {
+		t.Fatalf("staged path truncation misclassified: %d, %v", count, err)
 	}
 }
 

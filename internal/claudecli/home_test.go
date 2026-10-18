@@ -26,6 +26,48 @@ func TestHomePathUsesNativeVariableAndDefault(t *testing.T) {
 	}
 }
 
+func TestUnavailableImplicitHomeStopsBeforeCLI(t *testing.T) {
+	for _, validate := range []bool{false, true} {
+		t.Run(map[bool]string{false: "run", true: "validate"}[validate], func(t *testing.T) {
+			binary := fakeExecutable(t, "claude", `touch "$0.called"; exit 99`)
+			t.Setenv("HOME", "")
+			t.Setenv("CLAUDE_CONFIG_DIR", "")
+			var err error
+			if validate {
+				_, err = Validate(context.Background(), config.ClaudeConfig{})
+			} else {
+				_, err = Run(context.Background(), t.TempDir(), "task", false, "", config.ClaudeConfig{})
+			}
+			if err == nil || !strings.Contains(err.Error(), "CLAUDE_CONFIG_DIR") {
+				t.Fatalf("unavailable implicit home accepted: %v", err)
+			}
+			if _, err := os.Stat(binary + ".called"); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("unknown-home refusal launched Claude: %v", err)
+			}
+		})
+	}
+}
+
+func TestConfiguredKeyUsesPrivateHomeWithoutUserHome(t *testing.T) {
+	binary := fakeExecutable(t, "claude", `printf '%s' "$CLAUDE_CONFIG_DIR" > "$0.home"
+cat >/dev/null
+printf '%s\n' '`+successfulResult+`'
+`)
+	t.Setenv("HOME", "")
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	result, err := Run(context.Background(), t.TempDir(), "task", false, "", config.ClaudeConfig{APIKey: "fixture-key"})
+	if err != nil || result.Answer != "final answer" {
+		t.Fatalf("configured private home was refused: %+v, %v", result, err)
+	}
+	home := readFile(t, binary+".home")
+	if !strings.HasPrefix(filepath.Base(home), ".minion-claude-auth-") {
+		t.Fatalf("configured key did not select its private home: %q", home)
+	}
+	if _, err := os.Stat(home); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("configured private home was not removed: %v", err)
+	}
+}
+
 func TestRunAndValidatePreserveNativeHomeSelection(t *testing.T) {
 	for _, mode := range []string{"explicit relative", "implicit", "empty override"} {
 		t.Run(mode, func(t *testing.T) {

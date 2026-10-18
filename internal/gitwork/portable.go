@@ -337,7 +337,10 @@ func (c *Checkout) boundedGit(ctx context.Context, stdin io.Reader, limit int, t
 	output := bounded.Buffer{Limit: limit, Cancel: cancel}
 	err := runGitInputTo(readCtx, c.path, stdin, &output, args...)
 	if contextErr := ctx.Err(); contextErr != nil {
-		return nil, false, errors.Join(err, contextErr)
+		if !errors.Is(err, contextErr) {
+			err = errors.Join(err, contextErr)
+		}
+		return nil, false, err
 	}
 	if output.Exceeded {
 		if truncate {

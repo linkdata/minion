@@ -3,6 +3,7 @@ package gitwork
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +14,16 @@ import (
 	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/workspace"
 )
+
+func TestGitFailurePreservesDistinctContextCauseWithoutDuplication(t *testing.T) {
+	native := errors.New("native failure")
+	for _, failure := range []error{context.Canceled, fmt.Errorf("wrapped: %w", context.Canceled), errors.Join(native, context.Canceled), native} {
+		err := gitFailure("git", "probe", "", context.Canceled, failure)
+		if !errors.Is(err, context.Canceled) || !errors.Is(err, failure) || strings.Count(err.Error(), context.Canceled.Error()) != 1 {
+			t.Fatalf("context cause repeated or distinct failure lost: %v", err)
+		}
+	}
+}
 
 func TestImportRequiresExactlyReviewedPaths(t *testing.T) {
 	for _, scenario := range []string{"no-op", "ignored", "undeclared", "unsorted", "mode-only"} {

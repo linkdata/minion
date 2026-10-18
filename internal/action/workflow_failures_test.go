@@ -45,19 +45,21 @@ func TestReplyFailureClassificationBeforeAndAfterModel(t *testing.T) {
 			defer server.Close()
 			store := openState(t, time.Now())
 			client := testGitHub(server, "fixture-token")
-			request := monitor.Job{ID: strings.Repeat("a", 64), SubjectType: "Issue", Number: 7,
-				Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2}, Command: command.Command{Action: command.Fix}}
+			request := usageJob()
+			request.Source = github.Item{}
+			request.Command = command.Command{Action: command.Fix}
 			prepared := &preparedAction{request: request, repository: github.Repository{FullName: "o/r", DefaultBranch: "main"}, fork: github.Repository{FullName: "bot/r"}}
 			orchestrator := Orchestrator{GitHub: client, Store: store, BotLogin: "bot"}
 			var err error
-			if kind == "fixed reply" {
+			switch kind {
+			case "fixed reply":
 				prepared.reply = "Review needs a pull request."
 				err = orchestrator.publish(context.Background(), prepared, Result{})
-			} else if kind == "recovery" {
+			case "recovery":
 				prepared.branch = "minion/fix-recorded"
 				store.Data.PendingFixes[request.ID] = strings.Repeat("b", 40)
 				err = orchestrator.publish(context.Background(), prepared, Result{})
-			} else {
+			default:
 				err = orchestrator.publishFix(context.Background(), prepared, Result{Answer: "No changes."})
 			}
 			var status *github.StatusError
@@ -103,7 +105,10 @@ func TestExecuteSourceFailuresAndInvalidIncompleteResultsAreTerminal(t *testing.
 				calls++
 				return aicli.Result{Tokens: usage.Tokens{Input: -1}}, modelErr
 			}}}
-			request := monitor.Job{ID: strings.Repeat("a", 64), SubjectType: "Issue", Number: 7, Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"audit"}}, Source: github.Item{Author: github.User{ID: 3, Login: "writer"}}, Command: command.Command{Name: "audit", Action: command.Comment}}
+			request := usageJob()
+			request.Repository.Actions = []string{"audit"}
+			request.Source.Author.ID = 3
+			request.Command = command.Command{Name: "audit", Action: command.Comment}
 			err := orchestrator.Execute(context.Background(), request)
 			if !errors.Is(err, monitor.ErrTerminalJob) || writes != 0 {
 				t.Fatalf("source/result failure not terminal: calls=%d writes=%d err=%v", calls, writes, err)
@@ -155,10 +160,11 @@ func TestPrepareFixClassifiesUnsupportedLayoutBeforeBranchOrModels(t *testing.T)
 		Commands: map[string]config.CommandMapping{"fix": {Action: "fix", Skills: []string{skills.BuiltinAntiPromptInjection}}},
 		Runner:   Runner{runModel: forbidModel(t)},
 	}
-	request := monitor.Job{ID: strings.Repeat("a", 64), SubjectType: "Issue", Number: 7,
-		Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"fix"}},
-		Source:     github.Item{Author: github.User{ID: 3, Login: "writer"}, UpdatedAt: time.Now()}, Command: command.Command{Name: "fix", Action: command.Fix},
-	}
+	request := usageJob()
+	request.Repository.Actions = []string{"fix"}
+	request.Source.Author.ID = 3
+	request.Source.UpdatedAt = time.Now()
+	request.Command = command.Command{Name: "fix", Action: command.Fix}
 	if err := attemptFixture(orchestrator).perform(testActionContext(t), request); !errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, gitwork.ErrUnsupportedSource) || errors.Is(err, gitwork.ErrCheckoutTooLarge) {
 		t.Fatalf("unsupported fix layout lost classification: %v", err)
 	}
@@ -183,11 +189,11 @@ func TestExecuteLogsCheckoutCleanupFailureAfterSuccessfulPublication(t *testing.
 		}
 	})
 	store := openState(t, time.Now())
-	request := monitor.Job{ID: strings.Repeat("a", 64), SubjectType: "Issue", Number: 7,
-		Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"fix"}},
-		Source:     github.Item{UpdatedAt: time.Now(), Author: github.User{ID: 3, Login: "writer"}},
-		Command:    command.Command{Name: "fix", Action: command.Fix},
-	}
+	request := usageJob()
+	request.Repository.Actions = []string{"fix"}
+	request.Source.Author.ID = 3
+	request.Source.UpdatedAt = time.Now()
+	request.Command = command.Command{Name: "fix", Action: command.Fix}
 	comments, modelCalls := 0, 0
 	var body string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -283,7 +289,7 @@ exec %s "$@"
 				}
 				switch r.URL.Path {
 				case "/repos/o/r":
-					_, _ = fmt.Fprint(w, `{"id":1,"full_name":"o/r","owner":{"id":2},"default_branch":"main","visibility":"public"}`)
+					_, _ = fmt.Fprint(w, publicForkableRepositoryJSON)
 				case "/repos/bot/r":
 					currentFork := fork
 					if stage == "fork changed" {

@@ -61,11 +61,10 @@ func TestPreparedActionRejectsForeignResultBeforePublication(t *testing.T) {
 			},
 		},
 	}
-	request := monitor.Job{ID: strings.Repeat("a", 64), SubjectType: "Issue", Number: 7,
-		Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"audit"}},
-		Source:     github.Item{Author: github.User{ID: 3, Login: "writer"}},
-		Command:    command.Command{Name: "audit", Action: command.Comment},
-	}
+	request := usageJob()
+	request.Repository.Actions = []string{"audit"}
+	request.Source.Author.ID = 3
+	request.Command = command.Command{Name: "audit", Action: command.Comment}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	e = attemptFixture(e)
@@ -155,9 +154,10 @@ func TestFailedAuditRetainsLabelledPartialArtifactsWithoutPublication(t *testing
 				return aicli.Result{}, failure
 			},
 		}}
-	request := monitor.Job{ID: strings.Repeat("a", 64), SubjectType: "Issue", Number: 7,
-		Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"security-audit"}},
-		Source:     github.Item{Author: github.User{ID: 3, Login: "writer"}}, Command: command.Command{Name: "security-audit", Action: command.SecurityAudit}}
+	request := usageJob()
+	request.Repository.Actions = []string{"security-audit"}
+	request.Source.Author.ID = 3
+	request.Command = command.Command{Name: "security-audit", Action: command.SecurityAudit}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	if err := attemptFixture(e).perform(ctx, request); !errors.Is(err, failure) {
@@ -207,8 +207,9 @@ func TestPublishFixWithoutChangesPostsNormalReply(t *testing.T) {
 	defer server.Close()
 	client := testGitHub(server, "token")
 	e := Orchestrator{GitHub: client}
-	request := monitor.Job{ID: strings.Repeat("a", 64), SubjectType: "Issue", Number: 7,
-		Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2}, Command: command.Command{Name: "fix", Action: command.Fix}}
+	request := usageJob()
+	request.Source = github.Item{}
+	request.Command = command.Command{Name: "fix", Action: command.Fix}
 	if err := e.publishFix(context.Background(), &preparedAction{request: request}, Result{Answer: "Tests passed."}); err != nil {
 		t.Fatal(err)
 	}

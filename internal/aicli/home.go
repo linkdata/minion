@@ -12,13 +12,13 @@ func HomePath(envVar, dirName string) (string, error) {
 	if path == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
-			return "", nil
+			return "", fmt.Errorf("resolve %s home: %w", envVar, err)
 		}
 		path = home + string(os.PathSeparator) + dirName
 	}
 	resolved, err := ResolvePath(path)
 	if err != nil {
-		return "", fmt.Errorf("resolve %s: %w", envVar, err)
+		return "", fmt.Errorf("resolve %s path %q: %w", envVar, path, err)
 	}
 	return resolved, nil
 }

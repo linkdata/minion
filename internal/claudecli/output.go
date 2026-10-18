@@ -165,8 +165,14 @@ func (o *jsonlOutput) finish() {
 		}
 		o.result.UsageComplete = false
 	}
-	if failure := errors.Join(o.usageLimit, o.taskFailure); o.err == nil && failure != nil {
-		o.fail(failure)
+	for _, failure := range []error{o.usageLimit, o.taskFailure} {
+		if failure != nil && !errors.Is(o.err, failure) {
+			if o.err == nil {
+				o.fail(failure)
+			} else {
+				o.err = errors.Join(failure, o.err)
+			}
+		}
 	}
 	if o.err == nil && o.pending != 0 {
 		o.fail(errors.New("background tasks still running when Claude exited"))

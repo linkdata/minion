@@ -39,7 +39,7 @@ func privateRecordsDir(workRoot, name string) (string, error) {
 	if workRoot == "" {
 		return "", errors.New("private records work root is required")
 	}
-	workRoot, err := workspace.PrepareRoot(workRoot)
+	workRoot, err := workspace.CanonicalPath(workRoot)
 	if err != nil {
 		return "", err
 	}

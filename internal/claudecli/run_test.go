@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -451,11 +452,28 @@ func TestCredentialEnvironmentStopsCLI(t *testing.T) {
 func TestRunUsageLimitKeepsSafeDiagnosticAndExitCause(t *testing.T) {
 	const quota = `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1792200000}}`
 	const failed = `{"type":"result","subtype":"success","is_error":true,"result_index":0,"result":"PRIVATE_RESULT","modelUsage":{"main":{"inputTokens":3,"cacheCreationInputTokens":5,"cacheReadInputTokens":7,"outputTokens":11}}}`
-	fakeExecutable(t, "claude", "cat >/dev/null\ncat <<'DIAG' >&2\nPRIVATE_STDERR\nforged journal line\nDIAG\ncat <<'RESULT'\n"+quota+"\n"+failed+"\nRESULT\nexit 7\n")
-	result, err := Run(context.Background(), t.TempDir(), "task", false, "", config.ClaudeConfig{})
+	for _, malformed := range []bool{false, true} {
+		t.Run(fmt.Sprint(malformed), func(t *testing.T) {
+			output := "cat <<'RESULT'\n" + quota + "\n" + failed + "\nRESULT\nexit 7\n"
+			if malformed {
+				output = "printf '%s\\n' '" + assistantUsageEvent("partial", 3, 5, 7, 11) + "' '" + quota + "'\nprintf '{'\nsleep 30\n"
+			}
+			fakeExecutable(t, "claude", "cat >/dev/null\ncat <<'DIAG' >&2\nPRIVATE_STDERR\nforged journal line\nDIAG\n"+output)
+			result, err := Run(context.Background(), t.TempDir(), "task", false, "", config.ClaudeConfig{})
+			var exit *exec.ExitError
+			if err == nil || !errors.As(err, &exit) || !strings.Contains(err.Error(), "resets at 2026-10-17T01:20:00Z") || strings.Contains(err.Error(), "PRIVATE") || strings.Contains(err.Error(), "forged journal line") || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) || malformed && !strings.Contains(err.Error(), "invalid Claude JSONL event") {
+				t.Fatalf("result=%+v error=%v", result, err)
+			}
+		})
+	}
+}
+
+func TestRunQuietNativeFailureHasUsefulDiagnostic(t *testing.T) {
+	fakeExecutable(t, "claude", "cat >/dev/null\nexit 7\n")
+	_, err := Run(context.Background(), t.TempDir(), "task", false, "", config.ClaudeConfig{})
 	var exit *exec.ExitError
-	if err == nil || !errors.As(err, &exit) || !strings.Contains(err.Error(), "resets at 2026-10-17T01:20:00Z") || strings.Contains(err.Error(), "PRIVATE") || strings.Contains(err.Error(), "forged journal line") || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) {
-		t.Fatalf("result=%+v error=%v", result, err)
+	if !errors.As(err, &exit) || exit.ExitCode() != 7 || !strings.Contains(err.Error(), "no further diagnostics") || strings.Contains(err.Error(), `: ""`) {
+		t.Fatalf("quiet failure lost cause or useful diagnostic: %v", err)
 	}
 }
 

@@ -54,7 +54,6 @@ func resolveCredentialHelperGH() string {
 // Checkout owns the trusted orchestration clone; models receive separate source snapshots.
 type Checkout struct {
 	path           string
-	url            string
 	configDigest   [sha256.Size]byte
 	expectedHead   string
 	comparisonBase string
@@ -125,7 +124,7 @@ func cloneRepository(ctx context.Context, workRoot, url, defaultBranch string, l
 	if lookupTree == nil {
 		return nil, errors.New("source tree metadata lookup is missing")
 	}
-	workRoot, err = workspace.PrepareRoot(workRoot)
+	workRoot, err = workspace.CanonicalPath(workRoot)
 	if err != nil {
 		return nil, err
 	}
@@ -143,7 +142,7 @@ func cloneRepository(ctx context.Context, workRoot, url, defaultBranch string, l
 	if _, err := runGit(ctx, workRoot, "clone", "--template=", "--no-tags", "--filter=blob:none", "--single-branch", "--no-checkout", "--branch", defaultBranch, "--", url, path); err != nil {
 		return nil, err
 	}
-	c := &Checkout{path: path, url: url, lookupTree: lookupTree}
+	c := &Checkout{path: path, lookupTree: lookupTree}
 	if err := disableAttributes(filepath.Join(c.path, ".git")); err != nil {
 		return nil, err
 	}
@@ -183,14 +182,8 @@ func (c *Checkout) Close() error {
 // The fetched head must match the API observation, so a changed PR is not reviewed as another commit.
 func (c *Checkout) checkoutPullRequest(ctx context.Context, number int, baseRef, expectedHeadSHA string) error {
 	const headDest = "refs/remotes/minion/pr-head"
-	_, err := runGit(ctx, c.path, "fetch", "--no-tags", "--filter=blob:none", "--force", "--", c.url,
-		"+refs/pull/"+strconv.Itoa(number)+"/head:"+headDest)
-	if err != nil {
-		return err
-	}
-	// A filtered fetch may record promisor settings in the local config.
-	// Remember Git's own update even when the fetched head has moved.
-	if err := c.recordConfig(); err != nil {
+	if _, err := runGit(ctx, c.path, "fetch", "--no-tags", "--filter=blob:none", "--force", "--", "origin",
+		"+refs/pull/"+strconv.Itoa(number)+"/head:"+headDest); err != nil {
 		return err
 	}
 	base, err := runGit(ctx, c.path, "rev-parse", "--verify", "refs/remotes/origin/"+baseRef+"^{commit}")
@@ -333,14 +326,14 @@ func (c *Checkout) commitAndPush(ctx context.Context, pushURL, branch, botLogin,
 		return fmt.Errorf("current branch %q does not match push branch %q", currentBranch, branch)
 	}
 
-	paths, err := c.stagedPaths(ctx)
+	count, err := c.stagedPathCount(ctx)
 	if err != nil {
 		return err
 	}
-	if len(paths) == 0 {
+	if count == 0 {
 		return ErrNoChanges
 	}
-	if len(paths) > workspace.MaxChanges {
+	if count > workspace.MaxChanges {
 		return ErrTooManyFiles
 	}
 	if err := c.checkPatchSize(ctx); err != nil {
@@ -360,24 +353,20 @@ func (c *Checkout) commitAndPush(ctx context.Context, pushURL, branch, botLogin,
 	return err
 }
 
-func (c *Checkout) stagedPaths(ctx context.Context) ([]string, error) {
+func (c *Checkout) stagedPathCount(ctx context.Context) (int, error) {
 	args := []string{"diff", "--cached", "--name-only", "-z", "--no-renames", "--no-ext-diff"}
 	data, truncated, err := c.boundedGit(ctx, nil, maxChangedPathListBytes, true, args...)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 	if truncated {
-		return nil, ErrTooManyFiles
+		return 0, ErrTooManyFiles
 	}
 	parts, err := splitNUL(data)
 	if err != nil {
-		return nil, fmt.Errorf("invalid Git changed path output: %w", err)
+		return 0, fmt.Errorf("invalid Git changed path output: %w", err)
 	}
-	paths := make([]string, len(parts))
-	for i, part := range parts {
-		paths[i] = string(part)
-	}
-	return paths, nil
+	return len(parts), nil
 }
 
 // splitNUL splits terminated Git records, accepting an empty result.
@@ -428,12 +417,12 @@ func (c *Checkout) recordConfig() error {
 }
 
 func (c *Checkout) ready() error {
-	if c == nil || c.path == "" || c.url == "" {
+	if c == nil || c.path == "" {
 		return errors.New("checkout is closed or uninitialized")
 	}
 	// Defense in depth for the trusted checkout retained across preparation and
-	// publication: unexpected host changes must not alter
-	// Git behavior. Models receive snapshots and cannot access this checkout.
+	// publication: refuse changes to its Git config. Models receive snapshots
+	// and cannot access this checkout.
 	data, err := os.ReadFile(filepath.Join(c.path, ".git", "config"))
 	if err != nil {
 		return fmt.Errorf("read checkout Git config: %w", err)
@@ -491,7 +480,9 @@ func runGitInputTo(ctx context.Context, dir string, stdin io.Reader, stdout io.W
 func gitFailure(prefix, operation, message string, contextErr, err error) error {
 	message = strings.TrimSpace(message)
 	if contextErr != nil {
-		err = errors.Join(contextErr, err)
+		if !errors.Is(err, contextErr) {
+			err = errors.Join(contextErr, err)
+		}
 	} else {
 		err = classifyPathError(operation, message, err)
 	}

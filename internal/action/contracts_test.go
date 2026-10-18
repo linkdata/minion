@@ -545,23 +545,64 @@ func TestPortableContractsRejectMismatches(t *testing.T) {
 	}
 }
 
+func TestResultRejectsInvalidRawAnswer(t *testing.T) {
+	job := portableJob(command.Comment)
+	valid := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "ok", Calls: []CallUsage{{Provider: job.Main.Provider, Role: roleMain, Round: 1}}}
+	if err := valid.Validate(job); err != nil {
+		t.Fatalf("invalid positive control: %v", err)
+	}
+	for _, test := range []struct {
+		name, answer string
+	}{
+		{"NUL", "ok\x00"},
+		{"oversized raw answer after trimming", "ok" + strings.Repeat(" ", maxOutputBytes)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if !modelOutputFits(test.answer) {
+				t.Fatal("fixture must isolate raw text validation from rendered output limits")
+			}
+			result := valid
+			result.Answer = test.answer
+			if err := result.Validate(job); err == nil || !strings.Contains(err.Error(), "action answer") {
+				t.Fatalf("raw answer validation = %v", err)
+			}
+		})
+	}
+}
+
 func TestResultRejectsChangedFileAndArtifactBounds(t *testing.T) {
 	job := portableJob(command.Fix)
-	result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "answer"}
-	for i := 0; i <= workspace.MaxChanges; i++ {
+	result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "answer", Calls: []CallUsage{{Provider: job.Main.Provider, Role: roleMain, Round: 1}}}
+	for i := 0; i < workspace.MaxChanges; i++ {
 		result.Changes = append(result.Changes, workspace.Change{Path: fmt.Sprintf("file-%d", i), Mode: workspace.Regular})
 	}
-	if err := result.Validate(job); err == nil {
-		t.Fatal("accepted too many changed files")
+	if err := result.Validate(job); err != nil {
+		t.Fatalf("invalid exact-limit fixture: %v", err)
+	}
+	result.Changes = append(result.Changes, workspace.Change{Path: "one-too-many", Mode: workspace.Regular})
+	if err := result.Validate(job); err == nil || !strings.Contains(err.Error(), "changed file limit") {
+		t.Fatalf("changed file bound validation = %v", err)
 	}
 	job = portableJob(command.SecurityAudit)
-	result.Identity, result.SourceRef, result.Changes = job.Identity, job.Source.Head, nil
-	for _, name := range auditArtifacts {
-		result.Artifacts = append(result.Artifacts, workspace.File{Path: name, Mode: workspace.Regular})
+	result = completeAuditResult(job)
+	if err := result.Validate(job); err != nil {
+		t.Fatalf("invalid audit fixture: %v", err)
 	}
 	result.Artifacts[0].Data = make([]byte, maxAuditArtifactBytes+1)
-	if err := result.Validate(job); err == nil || !strings.Contains(err.Error(), "artifact") {
+	if err := result.Validate(job); err == nil || !strings.Contains(err.Error(), "invalid action report artifact") {
 		t.Fatalf("oversized artifact validation = %v", err)
+	}
+}
+
+func TestResultRejectsExecutableAuditArtifact(t *testing.T) {
+	job := portableJob(command.SecurityAudit)
+	result := completeAuditResult(job)
+	if err := result.Validate(job); err != nil {
+		t.Fatalf("invalid audit fixture: %v", err)
+	}
+	result.Artifacts[0].Mode = workspace.Executable
+	if err := result.Validate(job); err == nil || !strings.Contains(err.Error(), "invalid action report artifact") {
+		t.Fatalf("executable artifact validation = %v", err)
 	}
 }
 

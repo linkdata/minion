@@ -10,10 +10,11 @@ import (
 	"github.com/linkdata/minion/internal/config"
 )
 
-// CheckLogin checks stored authentication without an inference turn. Configured
-// API keys are validated by model discovery instead of the unrelated stored login.
+// CheckLogin inspects stored authentication without an inference turn.
+// Configured and native environment credentials bypass the stored-login check.
+// Model discovery runs separately.
 func CheckLogin(ctx context.Context, settings config.CodexConfig) (resultErr error) {
-	if settings.APIKey != "" {
+	if settings.APIKey != "" || os.Getenv("CODEX_API_KEY") != "" || os.Getenv("CODEX_ACCESS_TOKEN") != "" {
 		return nil
 	}
 	binary, err := aicli.ExecutablePath("codex")

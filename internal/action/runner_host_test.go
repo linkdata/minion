@@ -156,6 +156,21 @@ func TestRunnerEnforcesSuppliedRuntimeBudget(t *testing.T) {
 	}
 }
 
+func TestRunnerDiscardsSuccessfulAnswerReturnedAfterDeadline(t *testing.T) {
+	job := portableJob(command.Comment)
+	job.RuntimeBudget = 100 * time.Millisecond
+	calls := 0
+	runner := Runner{WorkRoot: t.TempDir(), runModel: func(ctx context.Context, _ modelRun) (aicli.Result, error) {
+		calls++
+		<-ctx.Done()
+		return aicli.Result{Answer: "Completed after the deadline."}, nil
+	}}
+	result, err := runner.Run(context.Background(), job)
+	if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, monitor.ErrTerminalJob) || result.Answer != "" || len(result.Changes) != 0 || calls != 1 || len(result.Calls) != 1 {
+		t.Fatalf("late successful answer escaped deadline boundary: result=%+v calls=%d error=%v", result, calls, err)
+	}
+}
+
 func TestRunnerReadOnlyCriticReusesSource(t *testing.T) {
 	job := withClaudeCritic(portableJob(command.Comment))
 	var source string
@@ -192,7 +207,7 @@ func TestRunnerFixCanReturnEmptyAnswerWithoutCritic(t *testing.T) {
 		critic  bool
 		changed bool
 		valid   bool
-	}{{command.Fix, false, true, true}, {command.Fix, false, false, false}, {command.Fix, true, false, false}, {command.Comment, false, false, false}, {command.Review, false, false, false}, {command.SecurityAudit, false, false, false}} {
+	}{{command.Fix, false, true, true}, {command.Fix, false, false, false}, {command.Fix, true, false, false}, {command.Fix, true, true, false}, {command.Comment, false, false, false}, {command.Review, false, false, false}, {command.SecurityAudit, false, false, false}} {
 		job := portableJob(test.action)
 		if test.critic {
 			job = withClaudeCritic(job)
@@ -203,6 +218,13 @@ func TestRunnerFixCanReturnEmptyAnswerWithoutCritic(t *testing.T) {
 		}
 		if test.changed {
 			result.Changes = []workspace.Change{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("fixed source")}}
+		}
+		if test.critic && test.changed {
+			result.Answer = "Fixed source."
+			if err := result.Validate(job); err != nil {
+				t.Fatalf("invalid changed-fix critic positive control: %v", err)
+			}
+			result.Answer = ""
 		}
 		if err := result.Validate(job); (err == nil) != test.valid || (!test.valid && !strings.Contains(err.Error(), "action answer")) {
 			t.Fatalf("empty %s answer with critic=%t: %v", test.action, test.critic, err)

@@ -12,7 +12,7 @@ import (
 func ResolvePath(path string) (string, error) {
 	var missing []string
 	for {
-		resolved, err := workspace.PrepareRoot(path)
+		resolved, err := workspace.CanonicalPath(path)
 		if err == nil {
 			for i := len(missing) - 1; i >= 0; i-- {
 				resolved = filepath.Join(resolved, missing[i])
@@ -49,7 +49,7 @@ func ResolvePath(path string) (string, error) {
 
 // Directory resolves an existing, non-root directory to its canonical absolute path.
 func Directory(path string) (string, error) {
-	resolved, err := workspace.PrepareRoot(path)
+	resolved, err := workspace.CanonicalPath(path)
 	if err != nil {
 		return "", err
 	}

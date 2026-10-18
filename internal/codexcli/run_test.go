@@ -553,6 +553,22 @@ func TestJSONLOutputCapturesUsageAndHelpers(t *testing.T) {
 	}
 }
 
+func TestJSONLOutputBindsRootThreadIdentity(t *testing.T) {
+	for _, next := range []string{"root", "", "another-root"} {
+		t.Run(next, func(t *testing.T) {
+			canceled := false
+			output := jsonlOutput{cancel: func() { canceled = true }}
+			_, _ = fmt.Fprintf(&output, "{\"type\":\"thread.started\",\"thread_id\":\"root\"}\n{\"type\":\"thread.started\",\"thread_id\":%q}\n", next)
+			_, _ = output.Write([]byte(`{"type":"item.completed","item":{"type":"agent_message","text":"answer"}}` + "\n" + `{"type":"turn.completed"}` + "\n"))
+			output.stream.Finish()
+			conflict := next == "another-root"
+			if output.threadID != "root" || (output.stopErr != nil) != conflict || canceled != conflict || output.completed == conflict {
+				t.Fatalf("root identity changed or conflict completed: root=%q error=%v canceled=%t completed=%t", output.threadID, output.stopErr, canceled, output.completed)
+			}
+		})
+	}
+}
+
 func TestJSONLOutputStopsAtCardinalityLimits(t *testing.T) {
 	cancelled := false
 	output := jsonlOutput{cancel: func() { cancelled = true }}

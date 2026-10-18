@@ -12,6 +12,8 @@ import (
 )
 
 func TestCheckLoginUsesPrivateCwdAndNativeEnvironment(t *testing.T) {
+	t.Setenv("CODEX_API_KEY", "")
+	t.Setenv("CODEX_ACCESS_TOKEN", "")
 	binary := installFakeCodex(t, `#!/bin/sh
 printf '%s\n' "$@" > "$0.args"
 pwd > "$0.cwd"
@@ -53,14 +55,31 @@ printf '%s,%s,%s,%s\n' "${GH_TOKEN-absent}" "${GITHUB_TOKEN-absent}" "$TMPDIR" "
 	}
 }
 
-func TestCheckLoginConfiguredKeyDoesNotInspectStoredLogin(t *testing.T) {
-	t.Setenv("PATH", t.TempDir())
-	if err := CheckLogin(context.Background(), config.CodexConfig{APIKey: "dummy-key"}); err != nil {
-		t.Fatalf("configured key checked unrelated stored login: %v", err)
+func TestCheckLoginSelectedCredentialsDoNotInspectStoredLogin(t *testing.T) {
+	for _, test := range []struct{ key, value string }{
+		{"configured", "dummy-key"}, {"CODEX_API_KEY", "dummy-environment-key"},
+		{"CODEX_ACCESS_TOKEN", "dummy-environment-token"}, {"CODEX_API_KEY", " "},
+	} {
+		t.Run(test.key+"/"+test.value, func(t *testing.T) {
+			t.Setenv("PATH", t.TempDir())
+			t.Setenv("CODEX_API_KEY", "")
+			t.Setenv("CODEX_ACCESS_TOKEN", "")
+			settings := config.CodexConfig{}
+			if test.key == "configured" {
+				settings.APIKey = test.value
+			} else {
+				t.Setenv(test.key, test.value)
+			}
+			if err := CheckLogin(context.Background(), settings); err != nil {
+				t.Fatalf("selected credentials checked unrelated stored login: %v", err)
+			}
+		})
 	}
 }
 
 func TestCheckLoginRejectsFailedStoredLogin(t *testing.T) {
+	t.Setenv("CODEX_API_KEY", "")
+	t.Setenv("CODEX_ACCESS_TOKEN", "")
 	installFakeCodex(t, "#!/bin/sh\nexit 7\n")
 	if err := CheckLogin(context.Background(), config.CodexConfig{}); err == nil || !strings.Contains(err.Error(), "codex login status failed") {
 		t.Fatalf("failed stored login accepted: %v", err)
@@ -68,6 +87,8 @@ func TestCheckLoginRejectsFailedStoredLogin(t *testing.T) {
 }
 
 func TestCheckLoginKeepsImplicitNativeHome(t *testing.T) {
+	t.Setenv("CODEX_API_KEY", "")
+	t.Setenv("CODEX_ACCESS_TOKEN", "")
 	installFakeCodex(t, "#!/bin/sh\n[ \"${CODEX_HOME+x}\" != x ] || exit 3\n[ ! -e \"$HOME/.codex\" ] || exit 4\n")
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("CODEX_HOME", "")
