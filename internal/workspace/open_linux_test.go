@@ -285,19 +285,19 @@ func TestReadStabilityRejectsChangedMetadata(t *testing.T) {
 	before := fileInfoWithStat{FileInfo: info, stat: *info.Sys().(*syscall.Stat_t), size: info.Size(), mode: info.Mode(), modified: info.ModTime()}
 	for _, test := range []struct {
 		name   string
-		change func(*fileInfoWithStat, *int)
+		change func(*fileInfoWithStat)
 		want   string
 	}{
-		{"size", func(after *fileInfoWithStat, _ *int) { after.size++ }, "file changed"},
-		{"mode", func(after *fileInfoWithStat, _ *int) { after.mode ^= 0100 }, "file changed"},
-		{"mtime", func(after *fileInfoWithStat, _ *int) { after.modified = after.modified.Add(time.Second) }, "file changed"},
-		{"ctime", func(after *fileInfoWithStat, _ *int) { after.stat.Ctim.Sec++ }, "file changed"},
-		{"hard link", func(after *fileInfoWithStat, _ *int) { after.stat.Nlink++ }, "hard links changed"},
+		{"size", func(after *fileInfoWithStat) { after.size++ }, "file changed"},
+		{"mode", func(after *fileInfoWithStat) { after.mode ^= 0100 }, "file changed"},
+		{"mtime", func(after *fileInfoWithStat) { after.modified = after.modified.Add(time.Second) }, "file changed"},
+		{"ctime", func(after *fileInfoWithStat) { after.stat.Ctim.Sec++ }, "file changed"},
+		{"hard link", func(after *fileInfoWithStat) { after.stat.Nlink++ }, "hard links changed"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			after, n := before, int(before.Size())
-			test.change(&after, &n)
-			err := checkReadStability(before, after, n)
+			after := before
+			test.change(&after)
+			err := checkReadStability(before, after, int(before.Size()))
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("stability check=%v, want %q", err, test.want)
 			}

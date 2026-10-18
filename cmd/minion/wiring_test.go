@@ -13,14 +13,20 @@ func TestServiceWiringPreservesAdmissionAndHostPolicy(t *testing.T) {
 	cfg := config.Config{
 		WorkRoot: "/private/work", StatePath: "/private/state.json", BotLogin: "bot",
 		Main: "claude", Adversarial: "codex", CriticNonblockingRounds: &strict,
-		Codex:  config.CodexConfig{APIKey: "codex-test-key", Skills: []string{"stale-host-skill"}},
-		Claude: config.ClaudeConfig{APIKey: "claude-test-key", AllowAllUnixSockets: &sockets, Skills: []string{"stale-host-skill"}},
+		CriticMaxRounds: 5,
+		Codex:           config.CodexConfig{APIKey: "codex-test-key", Model: "codex-pinned", ReasoningEffort: "high", Skills: []string{"stale-host-skill"}},
+		Claude:          config.ClaudeConfig{APIKey: "claude-test-key", Model: "claude-pinned", Effort: "medium", AllowAllUnixSockets: &sockets, Skills: []string{"stale-host-skill"}},
 	}
 	admissionErr := errors.New("admission sentinel")
 	orchestrator := newOrchestrator(cfg, nil, nil, nil, func() error { return admissionErr })
 	if orchestrator.WorkRoot != cfg.WorkRoot || !errors.Is(orchestrator.CheckWorkRoot(), admissionErr) ||
 		orchestrator.CriticNonblockingRounds == nil || *orchestrator.CriticNonblockingRounds != 0 {
 		t.Fatal("service lost controlled admission or strict review policy")
+	}
+	if orchestrator.Main != cfg.Main || orchestrator.Adversarial != cfg.Adversarial || orchestrator.CriticMaxRounds != cfg.CriticMaxRounds ||
+		orchestrator.CodexModel != cfg.Codex.Model || orchestrator.CodexEffort != cfg.Codex.ReasoningEffort ||
+		orchestrator.ClaudeModel != cfg.Claude.Model || orchestrator.ClaudeEffort != cfg.Claude.Effort {
+		t.Fatal("service lost pinned provider roles, models, efforts or critic budget")
 	}
 	if orchestrator.Runner.Codex.APIKey != cfg.Codex.APIKey ||
 		orchestrator.Runner.Claude.APIKey != cfg.Claude.APIKey ||

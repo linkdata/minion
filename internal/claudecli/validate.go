@@ -51,7 +51,14 @@ func Validate(ctx context.Context, settings config.ClaudeConfig) (validated conf
 	if err != nil {
 		return validated, err
 	}
-	env, err := childEnvironment(os.Environ(), dir, dir, authDir)
+	configDir := authDir
+	if configDir == "" {
+		configDir, err = HomePath()
+		if err != nil {
+			return validated, err
+		}
+	}
+	env, err := childEnvironment(os.Environ(), dir, dir, authDir, configDir)
 	if err != nil {
 		return validated, err
 	}

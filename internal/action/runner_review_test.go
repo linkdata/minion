@@ -40,7 +40,11 @@ func TestRunnerReviewRevisionsFreezeCleanIndependentInputs(t *testing.T) {
 				}
 			}
 			writeFixtureFile(t, source, "source.txt", []byte(fmt.Sprintf("candidate %d", request.round)))
-			return aicli.Result{Answer: proposalJSON(fmt.Sprintf("answer %d", request.round), fmt.Sprintf("PRIVATE NOTES %d", request.round))}, nil
+			notes := ""
+			if request.round > 1 {
+				notes = fmt.Sprintf("PRIVATE REFUTATION %d", request.round)
+			}
+			return aicli.Result{Answer: proposalJSON(fmt.Sprintf("answer %d", request.round), notes)}, nil
 		}
 		if request.dir == source || request.writable || request.outputDir != "" {
 			t.Fatalf("critic received mutable main workspace: dir=%q writable=%t output=%q", request.dir, request.writable, request.outputDir)
@@ -55,7 +59,7 @@ func TestRunnerReviewRevisionsFreezeCleanIndependentInputs(t *testing.T) {
 		}
 		if request.reviewPhase == "verification" {
 			revisionReview = request.dir
-			checkRefutations(t, request, []Refutation{{Round: 1, Text: "PRIVATE NOTES 1"}, {Round: 2, Text: "PRIVATE NOTES 2"}})
+			checkRefutations(t, request, []Refutation{{Round: 2, Text: "PRIVATE REFUTATION 2"}})
 			if revisionReview == firstReview || !strings.Contains(request.prompt, "Implement the missing edge case.") {
 				t.Fatal("verification lacks a fresh revision snapshot or its private evidence")
 			}
@@ -78,31 +82,37 @@ func TestRunnerReviewRevisionsFreezeCleanIndependentInputs(t *testing.T) {
 	}
 }
 
-func TestRunnerReviewRejectsSourceMutationEvenAfterRejection(t *testing.T) {
+func TestRunnerReviewExportsFrozenSourceDespiteLiveChanges(t *testing.T) {
 	for _, approved := range []bool{false, true} {
 		t.Run(fmt.Sprintf("approved=%t", approved), func(t *testing.T) {
 			job := withClaudeCritic(portableJob(command.Fix))
+			job.CriticMaxRounds = 2
 			var source string
 			calls := 0
 			runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 				calls++
 				if request.role == "main" {
 					source = request.dir
-					writeFixtureFile(t, source, "source.txt", []byte("candidate"))
+					writeFixtureFile(t, source, "source.txt", []byte(fmt.Sprintf("candidate %d", request.round)))
 					return aicli.Result{Answer: proposalJSON("answer", "")}, nil
 				}
 				writeFixtureFile(t, source, "source.txt", []byte("background edit"))
-				if data, err := workspace.ReadRegular(filepath.Join(request.dir, "source.txt"), workspace.MaxBytes); err != nil || string(data) != "candidate" {
+				if data, err := workspace.ReadRegular(filepath.Join(request.dir, "source.txt"), workspace.MaxBytes); err != nil || string(data) != fmt.Sprintf("candidate %d", request.round) {
 					t.Fatalf("live mutation reached frozen copy: %q, %v", data, err)
 				}
 				feedback := ""
-				if !approved {
+				accepted := approved || request.round > 1
+				if !accepted {
 					feedback = "Fix the candidate."
 				}
-				return aicli.Result{Answer: fmt.Sprintf(`{"approved":%t,"has_blockers":%t,"feedback":%q}`, approved, !approved, feedback)}, nil
+				return aicli.Result{Answer: fmt.Sprintf(`{"approved":%t,"has_blockers":%t,"feedback":%q}`, accepted, !accepted, feedback)}, nil
 			}}
 			result, err := runner.Run(context.Background(), job)
-			if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "source changed during critic review") || calls != 2 || result.Answer != "" {
+			wantCalls, round := 2, 1
+			if !approved {
+				wantCalls, round = 5, 2
+			}
+			if err != nil || calls != wantCalls || result.Answer != "answer" || len(result.Changes) != 1 || string(result.Changes[0].Data) != fmt.Sprintf("candidate %d", round) {
 				t.Fatalf("concurrent mutation result=%+v calls=%d error=%v", result, calls, err)
 			}
 		})
@@ -113,7 +123,7 @@ func TestRunnerAuditReviewFreezesAndExportsRawReports(t *testing.T) {
 	realNode, err := exec.LookPath("node")
 	for _, scenario := range []string{"approved", "mutated during critic", "mutated during validation", "empty architecture repaired"} {
 		t.Run(scenario, func(t *testing.T) {
-			if err != nil && scenario != "mutated during critic" {
+			if err != nil {
 				t.Skip("audit validators require node")
 			}
 			installActionTestSkills(t, testAuditSkillURL)
@@ -181,13 +191,6 @@ func TestRunnerAuditReviewFreezesAndExportsRawReports(t *testing.T) {
 				return aicli.Result{Answer: approvedCritiqueJSON}, nil
 			}
 			result, err := runner.Run(context.Background(), job)
-			if scenario == "mutated during critic" {
-				want, calls := "reports changed during critic review", 1
-				if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), want) || criticCalls != calls || result.Answer != "" {
-					t.Fatalf("invalid audit result=%+v critics=%d error=%v", result, criticCalls, err)
-				}
-				return
-			}
 			wantCritics := 1
 			if scenario == "empty architecture repaired" {
 				wantCritics = 3

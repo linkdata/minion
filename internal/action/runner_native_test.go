@@ -129,7 +129,7 @@ printf '%%s\n' '{"type":"result","subtype":"success","is_error":false,"terminal_
 	}
 }
 
-func TestRunnerMissingProviderIsRetryableAndRecordsZeroUsage(t *testing.T) {
+func TestRunnerMissingProviderIsNotTerminalAndRecordsZeroUsage(t *testing.T) {
 	for _, provider := range []string{"codex", "claude"} {
 		t.Run(provider, func(t *testing.T) {
 			t.Setenv("PATH", t.TempDir())

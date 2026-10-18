@@ -258,6 +258,8 @@ func TestSnapshotBoundsAndIdentity(t *testing.T) {
 			}
 		},
 		func(s *Snapshot) { s.History = []byte("unrequested") },
+		func(s *Snapshot) { s.ChangedPaths = []string{"a"} },
+		func(s *Snapshot) { s.HistoryRequested, s.HistoryComplete = true, true },
 		func(s *Snapshot) {
 			s.Base, s.MergeBase = s.Head, s.Head
 			s.DiffIncomplete = true
@@ -272,6 +274,9 @@ func TestSnapshotBoundsAndIdentity(t *testing.T) {
 		}
 		if (len(bad.Diff) > MaxContextBytes || len(bad.History) > MaxContextBytes) && !strings.Contains(err.Error(), "exceeds limits") {
 			t.Fatalf("context bounds did not reach limit validation: %v", err)
+		}
+		if (len(bad.ChangedPaths) != 0 || bad.HistoryComplete) && !strings.Contains(err.Error(), "lacks source identity or history coverage") {
+			t.Fatalf("context identity/coverage refusal lost: %v", err)
 		}
 	}
 	ctx, cancel := context.WithCancel(context.Background())

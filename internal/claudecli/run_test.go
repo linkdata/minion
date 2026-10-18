@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/linkdata/minion/internal/aicli"
+	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/usage"
@@ -291,6 +292,7 @@ func TestRunBackgroundWaitCeiling(t *testing.T) {
 		{name: "native ceiling", stderr: waitCeilingDiagnostic, script: emit(successfulResult), tokens: known, fails: true},
 		{name: "answer text", script: emit(strings.Replace(successfulResult, "final answer", waitCeilingDiagnostic, 1)), answer: waitCeilingDiagnostic, tokens: known},
 		{name: "early diagnostic outlives tail", stderr: waitCeilingDiagnostic + "\n" + strings.Repeat("later diagnostic\n", 2000), script: emit(successfulResult), tokens: known, fails: true},
+		{name: "diagnostic after oversized line", stderr: strings.Repeat("x", bounded.DiagnosticBytes+1) + "\n" + waitCeilingDiagnostic, script: emit(successfulResult), tokens: known, fails: true},
 		{name: "quota", stderr: waitCeilingDiagnostic, script: emit(`{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1792200000}}`), fails: true, extraFailure: "resets at 2026-10-17T01:20:00Z"},
 		{name: "output", stderr: waitCeilingDiagnostic, script: "head -c 4194305 /dev/zero | tr '\\000' x\n", fails: true, outputLimit: true},
 	} {
@@ -379,7 +381,7 @@ func TestRunCancelled(t *testing.T) {
 }
 
 func TestChildEnvironment(t *testing.T) {
-	got, err := childEnvironment([]string{"HOME=/home/operator", "PATH=/bin", "CLAUDE_CONFIG_DIR=/home/operator/.claude", "ANTHROPIC_API_KEY=", "anthropic_api_key=dummy", "GH_TOKEN=dummy", "GITHUB_TOKEN=dummy", "NODE_OPTIONS=dummy", "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=0", "BASH_ENV=bad", "HTTPS_PROXY=http://proxy.example:8080", "invalid"}, "/run", "/cache", "")
+	got, err := childEnvironment([]string{"HOME=/home/operator", "PATH=/bin", "CLAUDE_CONFIG_DIR=/home/operator/.claude", "ANTHROPIC_API_KEY=", "anthropic_api_key=dummy", "GH_TOKEN=dummy", "GITHUB_TOKEN=dummy", "NODE_OPTIONS=dummy", "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=0", "BASH_ENV=bad", "HTTPS_PROXY=http://proxy.example:8080", "invalid"}, "/run", "/cache", "", "/home/operator/.claude")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -420,7 +422,7 @@ func TestChildEnvironmentRejectsCredentials(t *testing.T) {
 		{"HTTP_PROXY", "http:user:dummy-secret@proxy.example:8080"},
 	} {
 		t.Run(tc.name+"/"+tc.value, func(t *testing.T) {
-			env, err := childEnvironment([]string{tc.name + "=" + tc.value}, "/run", "/cache", "")
+			env, err := childEnvironment([]string{tc.name + "=" + tc.value}, "/run", "/cache", "", "")
 			if env != nil || err == nil || !strings.Contains(err.Error(), tc.name) || strings.Contains(err.Error(), "dummy-secret") {
 				t.Fatalf("credential environment accepted or exposed in error: %v, %v", env, err)
 			}
@@ -498,11 +500,12 @@ func TestRunUsesCanonicalGrantPathsInPolicyAndArguments(t *testing.T) {
 	}
 	var added []string
 	for i := 0; i+1 < len(args); i++ {
-		if args[i] == "--settings" {
+		switch args[i] {
+		case "--settings":
 			if err := json.Unmarshal([]byte(args[i+1]), &settings); err != nil {
 				t.Fatal(err)
 			}
-		} else if args[i] == "--add-dir" {
+		case "--add-dir":
 			added = append(added, args[i+1])
 		}
 	}

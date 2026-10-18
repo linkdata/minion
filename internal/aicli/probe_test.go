@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -22,11 +23,12 @@ func probeExecutable(t *testing.T, script string) string {
 
 func TestProbeRetainsOutputLimitAndQuotesDiagnostics(t *testing.T) {
 	for _, tc := range []struct {
-		name, script string
-		limited      bool
+		name, script, diagnostic string
+		limited                  bool
 	}{
-		{"output cap", fmt.Sprintf("head -c %d /dev/zero\nsleep 30\n", MaxEventBytes+1), true},
-		{"diagnostic", "printf 'first\\nforged journal line' >&2\nexit 7\n", false},
+		{"output cap", fmt.Sprintf("head -c %d /dev/zero\nsleep 30\n", MaxEventBytes+1), "", true},
+		{"diagnostic", "printf 'first\\nforged journal line' >&2\nexit 7\n", `first\nforged journal line`, false},
+		{"quiet failure", "exit 7\n", "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			binary := probeExecutable(t, tc.script)
@@ -37,7 +39,17 @@ func TestProbeRetainsOutputLimitAndQuotesDiagnostics(t *testing.T) {
 				if !errors.Is(err, ErrOutputLimit) || errors.Is(err, context.DeadlineExceeded) {
 					t.Fatalf("limit cause lost: %v", err)
 				}
-			} else if err == nil || !strings.Contains(err.Error(), `first\nforged journal line`) || strings.Contains(err.Error(), "\nforged journal line") {
+			} else {
+				var exitErr *exec.ExitError
+				if !errors.As(err, &exitErr) || exitErr.ExitCode() != 7 {
+					t.Fatalf("native failure cause lost: %v", err)
+				}
+			}
+			if tc.diagnostic == "" {
+				if strings.Contains(err.Error(), `: ""`) {
+					t.Fatalf("empty diagnostic suffix: %v", err)
+				}
+			} else if !strings.Contains(err.Error(), tc.diagnostic) || strings.Contains(err.Error(), "\nforged journal line") {
 				t.Fatalf("unquoted diagnostic: %v", err)
 			}
 		})

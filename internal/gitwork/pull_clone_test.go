@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -144,7 +145,28 @@ func TestNewBranchRejectsInvalidNameBeforeGit(t *testing.T) {
 	if err := f.checkout.NewBranch(context.Background(), name); err == nil {
 		t.Fatalf("invalid branch accepted: %q", name)
 	}
-	if after := f.git(f.checkout.path, "for-each-ref", "--format=%(refname) %(objectname)"); after != before || f.checkout.branch != "" {
+	if after := f.git(f.checkout.path, "for-each-ref", "--format=%(refname) %(objectname)"); after != before {
 		t.Fatalf("invalid branch changed refs: %s", after)
+	}
+	if head := f.git(f.checkout.path, "rev-parse", "HEAD"); head != f.base {
+		t.Fatalf("invalid branch moved HEAD: %s", head)
+	}
+	if output, err := exec.Command("git", "-C", f.checkout.path, "symbolic-ref", "--quiet", "HEAD").Output(); err == nil || len(output) != 0 {
+		t.Fatalf("invalid branch attached HEAD: %q, %v", output, err)
+	}
+}
+
+func TestClonePullRequestRemovesCheckoutAfterHeadMoves(t *testing.T) {
+	f := newFixture(t)
+	writeFile(t, filepath.Join(f.source, "change.txt"), "new PR head\n")
+	head := f.commit("refs/pull/7/head", "PR head")
+	root := t.TempDir()
+	checkout, err := clonePullRequestFromURL(context.Background(), root, f.remote, 7, "main", f.base, localTreeMetadata(f.source))
+	if checkout != nil || err == nil || !strings.Contains(err.Error(), "pull request head changed: expected "+f.base+", fetched "+head) {
+		t.Fatalf("moved head returned checkout=%v error=%v", checkout, err)
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("failed PR preparation retained checkout: %v, %v", entries, err)
 	}
 }

@@ -27,9 +27,12 @@ func privateReviewResult(job Job) Result {
 	return Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Public answer.",
 		Calls: []CallUsage{
 			{Provider: job.Main.Provider, Role: roleMain, Round: 1},
-			{Provider: job.Critic.Provider, Role: roleCritic, Round: 1, ReviewPhase: reviewFull, Approved: true, NoBlockers: true},
+			{Provider: job.Critic.Provider, Role: roleCritic, Round: 1, ReviewPhase: reviewFull, HasBlockers: true},
+			{Provider: job.Main.Provider, Role: roleMain, Round: 2},
+			{Provider: job.Critic.Provider, Role: roleCritic, Round: 2, ReviewPhase: reviewVerification, Approved: true, NoBlockers: true},
+			{Provider: job.Critic.Provider, Role: roleCritic, Round: 2, ReviewPhase: reviewFull, Approved: true, NoBlockers: true},
 		},
-		Refutations: []Refutation{{Round: 1, Text: "PRIVATE_MAIN_REFUTATION"}},
+		Refutations: []Refutation{{Round: 2, Text: "PRIVATE_MAIN_REFUTATION"}},
 	}
 }
 
@@ -68,14 +71,14 @@ func TestPublishRetainsPrivateReviewBeforeGitHubWrites(t *testing.T) {
 			job.CriticNonblockingRounds = 1
 			result := privateReviewResult(job)
 			if !test.approved {
-				result.Calls[1].Approved = false
+				result.Calls[len(result.Calls)-1].Approved = false
 			}
 			root := t.TempDir()
 			var body, journal bytes.Buffer
 			writes := 0
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				record := readPrivateReview(t, root)
-				if len(record.Refutations) != 1 || record.Calls[1].Approved != test.approved || record.CriticNonblockingRounds != 1 || record.SourceRef != job.Source.Head {
+				if len(record.Refutations) != 1 || record.Calls[len(record.Calls)-1].Approved != test.approved || record.CriticNonblockingRounds != 1 || record.SourceRef != job.Source.Head {
 					t.Errorf("private evidence/policy lost: %+v", record)
 				}
 				if r.Method == http.MethodGet && r.URL.Path == "/repos/o/r" {
@@ -121,7 +124,7 @@ func TestPrivateReviewRetainsPrefixAndRejectsRollback(t *testing.T) {
 	result := privateReviewResult(job)
 	e := Orchestrator{WorkRoot: t.TempDir()}
 	first := result
-	first.Calls, first.Refutations = first.Calls[:1], first.Refutations[:1]
+	first.Calls, first.Refutations = first.Calls[:3], first.Refutations[:1]
 	if err := e.retainReviewEvidence(job, first); err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +146,7 @@ func TestPrivateReviewRetainsPrefixAndRejectsRollback(t *testing.T) {
 	if err := e.retainReviewEvidence(job, first); err == nil {
 		t.Fatal("saved evidence was rolled back")
 	}
-	for _, refs := range [][]Refutation{nil, {{Round: 1, Text: "Replacement interpretation"}}} {
+	for _, refs := range [][]Refutation{nil, {{Round: 2, Text: "Replacement interpretation"}}} {
 		changed := result
 		changed.Refutations = refs
 		if err := e.retainReviewEvidence(job, changed); err == nil {
@@ -156,7 +159,7 @@ func TestPrivateReviewRetainsPrefixAndRejectsRollback(t *testing.T) {
 }
 
 func TestPrivateReviewBoundaryBeforeStorageOrPublication(t *testing.T) {
-	for _, scenario := range []string{"foreign identity", "foreign source", "malformed history", "oversized history", "invalid calls", "invalid answer", "invalid changes", "storage failure", "public root", "symlink root"} {
+	for _, scenario := range []string{"foreign identity", "foreign source", "malformed history", "oversized history", "invalid calls", "refutations without critic", "invalid answer", "invalid changes", "storage failure", "public root", "symlink root"} {
 		t.Run(scenario, func(t *testing.T) {
 			job := withClaudeCritic(portableJob(command.Comment))
 			result := privateReviewResult(job)
@@ -169,11 +172,14 @@ func TestPrivateReviewBoundaryBeforeStorageOrPublication(t *testing.T) {
 			case "foreign source":
 				result.SourceRef = strings.Repeat("b", 40)
 			case "malformed history":
-				result.Refutations[0].Round = 2
+				result.Refutations[0].Round = 3
 			case "oversized history":
 				result.Refutations[0].Text = strings.Repeat("x", maxOutputBytes+1)
 			case "invalid calls":
 				result.Calls[0].Tokens.Input = -1
+			case "refutations without critic":
+				job.Critic, job.CriticMaxRounds, job.CriticNonblockingRounds = nil, 0, 0
+				result.Calls = result.Calls[:1]
 			case "invalid answer":
 				result.Answer, safeHistory = "", true
 			case "invalid changes":
@@ -242,18 +248,26 @@ func TestPerformCheckpointsPrivateReviewBeforeLaterCalls(t *testing.T) {
 					calls++
 					if calls > 1 {
 						record := readPrivateReview(t, root)
-						if len(record.Calls) != calls-1 || len(record.Refutations) != 1 {
+						wantRefs := 0
+						if calls > 3 {
+							wantRefs = 1
+						}
+						if len(record.Calls) != calls-1 || len(record.Refutations) != wantRefs {
 							t.Fatalf("earlier round was not durable before dispatch: %+v", record)
 						}
 					}
 					if calls == 1 {
-						return aicli.Result{Answer: proposalJSON("Public answer", "PRIVATE_FIRST_REFUTATION")}, nil
+						return aicli.Result{Answer: proposalJSON("Public answer", "")}, nil
 					}
 					if calls == 2 {
-						if outcome == "storage failure" {
-							if err := os.Chmod(filepath.Join(root, "reviews"), 0500); err != nil {
-								t.Fatal(err)
-							}
+						return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"feedback":"PRIVATE_CRITIC_FINDING"}`}, nil
+					}
+					if calls == 3 {
+						return aicli.Result{Answer: proposalJSON("Public answer", "PRIVATE_LATER_REFUTATION")}, nil
+					}
+					if outcome == "storage failure" {
+						if err := os.Chmod(filepath.Join(root, "reviews"), 0500); err != nil {
+							t.Fatal(err)
 						}
 						return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"feedback":"PRIVATE_CRITIC_FINDING"}`}, nil
 					}
@@ -282,7 +296,7 @@ func TestPerformCheckpointsPrivateReviewBeforeLaterCalls(t *testing.T) {
 				}
 			}
 			if outcome == "panic" {
-				if !panicked || calls != 3 {
+				if !panicked || calls != 4 {
 					t.Fatalf("interruption not exercised: panic=%t calls=%d", panicked, calls)
 				}
 			} else if outcome == "initial storage failure" {
@@ -291,25 +305,25 @@ func TestPerformCheckpointsPrivateReviewBeforeLaterCalls(t *testing.T) {
 				}
 				return
 			} else if outcome == "storage failure" {
-				if !errors.Is(runErr, monitor.ErrTerminalJob) || !errors.Is(runErr, os.ErrPermission) || calls != 2 {
+				if !errors.Is(runErr, monitor.ErrTerminalJob) || !errors.Is(runErr, os.ErrPermission) || calls != 4 {
 					t.Fatalf("checkpoint failure allowed another call: calls=%d error=%v", calls, runErr)
 				}
 				if got := readPrivateReview(t, root); len(got.Refutations) != 1 {
 					t.Fatal("checkpoint failure destroyed the previous durable prefix")
 				}
 				return
-			} else if !errors.Is(runErr, failure) || calls != 3 {
+			} else if !errors.Is(runErr, failure) || calls != 4 {
 				t.Fatalf("original provider failure lost: calls=%d error=%v", calls, runErr)
 			}
 			if outcome == "provider and storage failure" && (!errors.Is(runErr, os.ErrPermission) || !errors.Is(runErr, monitor.ErrTerminalJob)) {
 				t.Fatalf("retention failure lost joined causes: %v", runErr)
 			}
-			wantCalls := 2
+			wantCalls := 3
 			if outcome == "provider failure" {
-				wantCalls = 3
+				wantCalls = 4
 			}
 			record := readPrivateReview(t, root)
-			if len(record.Refutations) != 1 || record.Refutations[0].Text != "PRIVATE_FIRST_REFUTATION" || len(record.Calls) != wantCalls || !record.Calls[1].HasBlockers {
+			if len(record.Refutations) != 1 || record.Refutations[0].Text != "PRIVATE_LATER_REFUTATION" || len(record.Calls) != wantCalls || !record.Calls[1].HasBlockers {
 				t.Fatalf("failed/interrupted action lost earlier evidence: %+v", record)
 			}
 		})

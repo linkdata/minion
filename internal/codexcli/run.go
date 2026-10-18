@@ -78,6 +78,10 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	if err != nil {
 		return result, fmt.Errorf("codex exec: resolve executable: %w", err)
 	}
+	codexHome, err := HomePath()
+	if err != nil {
+		return result, err
+	}
 	cacheDir := filepath.Join(runtimeDir, "go-build")
 	if err := os.Mkdir(cacheDir, 0o700); err != nil {
 		return result, fmt.Errorf("codex exec: create build cache: %w", err)
@@ -187,7 +191,7 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	cmd := exec.CommandContext(runCtx, realBinary, args...)
 	cmd.Args[0] = "codex"
 	cmd.Dir = runtimeDir
-	cmd.Env = childEnvironment(os.Environ(), runtimeDir, cacheDir, settings.APIKey != "")
+	cmd.Env = childEnvironment(os.Environ(), runtimeDir, cacheDir, codexHome, settings.APIKey != "")
 	if settings.APIKey != "" {
 		cmd.Env = append(cmd.Env, "CODEX_API_KEY="+settings.APIKey)
 	}
@@ -202,12 +206,6 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	started := time.Now()
 	runErr := cmd.Run()
 	output.stream.Finish()
-	codexHome := os.Getenv("CODEX_HOME")
-	if codexHome == "" {
-		if home, err := os.UserHomeDir(); err == nil {
-			codexHome = filepath.Join(home, ".codex")
-		}
-	}
 	var childError error
 	result.Tokens, result.UsageComplete, childError = collectUsage(ctx, codexHome, output.threadID, started, output.tokens, output.children)
 	defer func() {
@@ -250,10 +248,10 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 // The runner holds GitHub and other service credentials; Codex only needs its
 // own authentication and ordinary process/network settings. Configured
 // authentication removes inherited credentials before the caller supplies it.
-func childEnvironment(env []string, runtimeDir, cacheDir string, configuredAuth bool) []string {
+func childEnvironment(env []string, runtimeDir, cacheDir, codexHome string, configuredAuth bool) []string {
 	allowed := map[string]bool{
 		"PATH": true, "HOME": true, "LANG": true, "LC_ALL": true, "LC_CTYPE": true, "TERM": true,
-		"CODEX_HOME": true, "CODEX_API_KEY": true, "CODEX_ACCESS_TOKEN": true,
+		"CODEX_API_KEY": true, "CODEX_ACCESS_TOKEN": true,
 		"XDG_RUNTIME_DIR": true, "DBUS_SESSION_BUS_ADDRESS": true,
 		"CODEX_CA_CERTIFICATE": true, "SSL_CERT_FILE": true, "SSL_CERT_DIR": true,
 		"HTTP_PROXY": true, "HTTPS_PROXY": true, "ALL_PROXY": true, "NO_PROXY": true,
@@ -270,6 +268,9 @@ func childEnvironment(env []string, runtimeDir, cacheDir string, configuredAuth 
 		if allowed[strings.ToUpper(key)] {
 			clean = append(clean, entry)
 		}
+	}
+	if codexHome != "" {
+		clean = append(clean, "CODEX_HOME="+codexHome)
 	}
 	clean = append(clean, "TMPDIR="+runtimeDir, "TMP="+runtimeDir, "TEMP="+runtimeDir, "GOCACHE="+cacheDir)
 	return clean

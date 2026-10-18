@@ -36,7 +36,7 @@ func openPath(name string, directory bool) (file *os.File, resultErr error) {
 	if abs == "/" {
 		return nil, errors.New("filesystem root is not a workspace")
 	}
-	flags := syscall.O_RDONLY | syscall.O_NOFOLLOW | syscall.O_NONBLOCK | syscall.O_CLOEXEC
+	flags := syscall.O_RDONLY | syscall.O_NOFOLLOW | syscall.O_NONBLOCK | syscall.O_CLOEXEC | syscall.O_NOCTTY
 	// syscall omits O_PATH on some Linux architectures; its value is stable across them.
 	const oPath = 0x200000
 	parentFlags := oPath | syscall.O_DIRECTORY | syscall.O_NOFOLLOW | syscall.O_CLOEXEC
@@ -52,9 +52,6 @@ func openPath(name string, directory bool) (file *os.File, resultErr error) {
 	}
 	parts := strings.Split(strings.TrimPrefix(abs, "/"), "/")
 	for i, part := range parts {
-		if part == "" {
-			continue
-		}
 		partFlags := flags
 		if i < len(parts)-1 {
 			partFlags = parentFlags

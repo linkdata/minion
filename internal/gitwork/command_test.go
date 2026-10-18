@@ -2,6 +2,8 @@ package gitwork
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -116,6 +118,9 @@ func TestCloneSkipsTagsAndPublicationAcceptsAmbiguousShortName(t *testing.T) {
 func TestGitEnvironmentPinsHardening(t *testing.T) {
 	settings := []struct{ key, hostile, want string }{
 		{"GIT_NO_REPLACE_OBJECTS", "0", "1"}, {"GIT_ATTR_NOSYSTEM", "0", "1"}, {"LC_ALL", "sv_SE.UTF-8", "C"},
+		{"GIT_CONFIG_GLOBAL", "/hostile/config", "/dev/null"}, {"GIT_CONFIG_NOSYSTEM", "0", "1"},
+		{"GIT_TERMINAL_PROMPT", "1", "0"}, {"GIT_ASKPASS", "/hostile/askpass", "/bin/false"},
+		{"GCM_INTERACTIVE", "always", "never"}, {"GH_PROMPT_DISABLED", "0", "1"},
 	}
 	for _, setting := range settings {
 		t.Setenv(setting.key, setting.hostile)
@@ -131,6 +136,110 @@ func TestGitEnvironmentPinsHardening(t *testing.T) {
 		if len(matches) != 1 || matches[0] != setting.key+"="+setting.want {
 			t.Fatalf("%s settings=%q", setting.key, matches)
 		}
+	}
+}
+
+func TestCommitAndPushRefusesInvalidArgumentsAndHead(t *testing.T) {
+	for _, kind := range []string{"branch", "blank message", "NUL message", "moved HEAD", "detached HEAD", "wrong branch"} {
+		t.Run(kind, func(t *testing.T) {
+			f := newFixture(t)
+			ctx := context.Background()
+			const branch = "minion/fix-input-gates"
+			if err := f.checkout.NewBranch(ctx, branch); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.checkout.Import(ctx, f.base, []workspace.Change{{Path: "fix.txt", Mode: workspace.Regular, Data: []byte("reviewed\n")}}); err != nil {
+				t.Fatal(err)
+			}
+			pushBranch, message, want := branch, "reviewed fix", ""
+			switch kind {
+			case "branch":
+				pushBranch, want = "bad:ref", "invalid branch"
+			case "blank message":
+				message, want = " \n", "commit message"
+			case "NUL message":
+				message, want = "bad\x00message", "commit message"
+			case "moved HEAD":
+				f.git(f.checkout.path, "commit", "-m", "unreviewed commit")
+				want = "HEAD moved"
+			case "detached HEAD":
+				f.git(f.checkout.path, "checkout", "--detach")
+			case "wrong branch":
+				f.git(f.checkout.path, "switch", "--create", "other-branch")
+				want = "does not match push branch"
+			}
+			head := f.git(f.checkout.path, "rev-parse", "HEAD")
+			refs := f.git(f.checkout.path, "for-each-ref", "--format=%(refname) %(objectname)")
+			stage := f.git(f.checkout.path, "diff", "--cached", "--raw")
+			remoteRefs := f.git("", "--git-dir="+f.remote, "for-each-ref", "--format=%(refname) %(objectname)")
+			err := f.checkout.commitAndPush(ctx, f.remote, pushBranch, "bot", message, func(string) error {
+				t.Fatal("invalid publication reached before-push recorder")
+				return nil
+			})
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("%s was not refused: %v", kind, err)
+			}
+			if kind == "detached HEAD" {
+				var exit *exec.ExitError
+				if !errors.As(err, &exit) || !strings.Contains(err.Error(), "symbolic-ref") {
+					t.Fatalf("detached HEAD lost Git failure: %v", err)
+				}
+			}
+			if got := f.git(f.checkout.path, "rev-parse", "HEAD"); got != head {
+				t.Fatalf("refusal moved HEAD: %s", got)
+			}
+			if got := f.git(f.checkout.path, "for-each-ref", "--format=%(refname) %(objectname)"); got != refs {
+				t.Fatalf("refusal changed local refs: %s", got)
+			}
+			if got := f.git(f.checkout.path, "diff", "--cached", "--raw"); got != stage {
+				t.Fatalf("refusal changed staging: %s", got)
+			}
+			if got := f.git("", "--git-dir="+f.remote, "for-each-ref", "--format=%(refname) %(objectname)"); got != remoteRefs {
+				t.Fatalf("refusal changed remote refs: %s", got)
+			}
+		})
+	}
+}
+
+func TestCommitAndPushPreservesDivergentRemote(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	const branch = "minion/fix-divergent"
+	writeFile(t, filepath.Join(f.source, "remote.txt"), "remote-only\n")
+	remoteHead := f.commit("refs/heads/"+branch, "divergent remote")
+	if err := f.checkout.NewBranch(ctx, branch); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.checkout.Import(ctx, f.base, []workspace.Change{{Path: "fix.txt", Mode: workspace.Regular, Data: []byte("local-only\n")}}); err != nil {
+		t.Fatal(err)
+	}
+	var recorded string
+	err := f.checkout.commitAndPush(ctx, f.remote, branch, "bot", "local fix", func(sha string) error {
+		recorded = sha
+		return nil
+	})
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || !strings.Contains(err.Error(), "git push") {
+		t.Fatalf("divergent push did not preserve Git failure: %v", err)
+	}
+	if got := f.git(f.checkout.path, "rev-parse", "HEAD"); recorded == "" || recorded == f.base || recorded != got {
+		t.Fatalf("rejected push lost commit checkpoint: recorded=%s local=%s", recorded, got)
+	}
+	if got := f.git("", "--git-dir="+f.remote, "rev-parse", "refs/heads/"+branch); got != remoteHead {
+		t.Fatalf("rejected push changed remote: got=%s want=%s", got, remoteHead)
+	}
+}
+
+func TestStagedPathsClassifiesPathListTruncation(t *testing.T) {
+	f := newFixture(t)
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := fmt.Sprintf("#!/bin/sh\nfor arg do\nif [ \"$arg\" = --name-only ]; then\nhead -c %d /dev/zero\nexit\nfi\ndone\nexec %s \"$@\"\n", maxChangedPathListBytes+1, shellQuote(realGit))
+	fakeOnPath(t, "git", script)
+	if paths, err := f.checkout.stagedPaths(context.Background()); paths != nil || !errors.Is(err, ErrTooManyFiles) || errors.Is(err, ErrCheckoutTooLarge) || errors.Is(err, context.Canceled) {
+		t.Fatalf("staged path truncation misclassified: %q, %v", paths, err)
 	}
 }
 

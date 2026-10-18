@@ -193,7 +193,7 @@ func (o *jsonlOutput) finishLine(line []byte) {
 		return
 	}
 	if e.Type == "assistant" {
-		o.recordAssistantUsage(e.Message, bytes.Equal(bytes.TrimSpace(e.ParentToolUseID), []byte("null")))
+		o.recordAssistantUsage(e.Message, e.ParentToolUseID)
 	}
 	if e.Type == "system" && e.Subtype == "task_notification" && (e.Status == "stopped" || e.Status == "killed") && !e.Ambient {
 		o.recordTaskStop(e.Summary)
@@ -386,7 +386,7 @@ func (o *jsonlOutput) recordTaskNotice(text string) {
 	o.recordTaskStop(html.UnescapeString(summary))
 }
 
-func (o *jsonlOutput) recordAssistantUsage(raw json.RawMessage, root bool) {
+func (o *jsonlOutput) recordAssistantUsage(raw, parent json.RawMessage) {
 	var message struct {
 		ID    string          `json:"id"`
 		Usage json.RawMessage `json:"usage"`
@@ -394,6 +394,9 @@ func (o *jsonlOutput) recordAssistantUsage(raw json.RawMessage, root bool) {
 	if json.Unmarshal(raw, &message) != nil || message.ID == "" {
 		return
 	}
+	root := bytes.Equal(bytes.TrimSpace(parent), []byte("null"))
+	var parentID string
+	unknown := !root && (json.Unmarshal(parent, &parentID) != nil || parentID == "")
 	old, seen := o.assistantUsage[message.ID]
 	if !seen {
 		if o.assistantUsage == nil {
@@ -407,9 +410,9 @@ func (o *jsonlOutput) recordAssistantUsage(raw json.RawMessage, root bool) {
 		if root {
 			o.stopped = false
 		}
-		if root && o.results != 0 {
-			// A new root response starts another turn even if no background-task
-			// notification exposed it. The preceding answer is provisional.
+		if (root || unknown) && o.results != 0 {
+			// Unknown parentage cannot prove a delayed delegate; require a new
+			// result without treating it as a root assessment of stopped work.
 			o.completed, o.result.Answer = false, ""
 		}
 	}
@@ -478,7 +481,8 @@ func toolSandboxFailure(content json.RawMessage) bool {
 
 func sandboxFailure(text string) bool {
 	for _, line := range bytes.Split([]byte(text), []byte{'\n'}) {
-		if bytes.HasPrefix(line, []byte("apply-seccomp:")) || bytes.HasPrefix(line, []byte("bwrap:")) || bytes.HasPrefix(line, []byte("Sandbox is required but failed to initialize:")) {
+		// Bare bwrap/apply-seccomp output can come from repository commands.
+		if bytes.HasPrefix(line, []byte("Sandbox is required but failed to initialize:")) {
 			return true
 		}
 	}

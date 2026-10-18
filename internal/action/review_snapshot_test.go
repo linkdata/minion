@@ -3,13 +3,16 @@ package action
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
 
+	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
+	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -49,8 +52,13 @@ func TestReviewSnapshotFixFreezesOnlyExportedCandidate(t *testing.T) {
 	if err != nil || string(data) != "reviewed" {
 		t.Fatalf("background change reached critic copy=%q,%v", data, err)
 	}
-	if err := snapshot.verify(context.Background()); err == nil {
-		t.Fatal("accepted candidate source changed during review")
+	if err := snapshot.verify(context.Background()); err != nil {
+		t.Fatalf("live source edit invalidated the frozen candidate: %v", err)
+	}
+	for _, change := range snapshot.changes {
+		if change.Path == "source.txt" && string(change.Data) != "reviewed" {
+			t.Fatalf("exported live source bytes: %q", change.Data)
+		}
 	}
 }
 
@@ -89,76 +97,57 @@ func TestReviewSnapshotFixFreezesFinalReplacementLayout(t *testing.T) {
 }
 
 func TestReviewSnapshotFreezesRawAuditArtifactsAndAbsence(t *testing.T) {
-	for _, mutation := range []string{"source", "report"} {
-		t.Run(mutation, func(t *testing.T) {
-			job := portableJob(command.SecurityAudit)
-			source := t.TempDir()
-			if err := os.Chmod(source, 0700); err != nil {
-				t.Fatal(err)
-			}
-			if err := workspace.Materialize(source, job.Source.Files); err != nil {
-				t.Fatal(err)
-			}
-			output, workRoot := t.TempDir(), t.TempDir()
-			rawMetadata := `{"target":"` + source + `","raw":"not normalized"}`
-			for name, data := range map[string]string{"REPORT.md": "reviewed report", "run-metadata.json": rawMetadata, "FINDINGS-DETAIL.md": ""} {
-				if err := os.WriteFile(filepath.Join(output, name), []byte(data), 0600); err != nil {
-					t.Fatal(err)
-				}
-			}
-			snapshot, err := freezeReviewSnapshot(context.Background(), workRoot, job, source, output, nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if snapshot.source != source || snapshot.ownedSource {
-				t.Fatal("copied an already read-only audit source")
-			}
-			t.Cleanup(func() {
-				if err := snapshot.close(); err != nil {
-					t.Error(err)
-				}
-			})
-			data, err := workspace.ReadRegular(filepath.Join(snapshot.outputDir, "run-metadata.json"), maxAuditArtifactBytes)
-			if err != nil || string(data) != rawMetadata || len(snapshot.artifacts) != 3 {
-				t.Fatalf("frozen raw reports=%q,%+v,%v", data, snapshot.artifacts, err)
-			}
-			if _, err := os.Lstat(filepath.Join(snapshot.outputDir, "findings.json")); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("absent artifact was created: %v", err)
-			}
-			if err := snapshot.verify(context.Background()); err != nil {
-				t.Fatal(err)
-			}
-			switch mutation {
-			case "source":
-				writeFixtureFile(t, source, "source.txt", []byte("background source edit"))
-			case "report":
-				writeFixtureFile(t, output, "REPORT.md", []byte("background report edit"))
-			}
-			data, err = workspace.ReadRegular(filepath.Join(snapshot.outputDir, "REPORT.md"), maxOutputBytes)
-			if err != nil || string(data) != "reviewed report" {
-				t.Fatalf("background work changed frozen report=%q,%v", data, err)
-			}
-			if mutation == "source" {
-				if err := snapshot.verify(context.Background()); err != nil {
-					t.Fatalf("read-only source checked before final canary: %v", err)
-				}
-				if err := workspace.CheckUnchanged(context.Background(), source, job.Source.Files); err == nil {
-					t.Fatal("final read-only canary accepted a changed source")
-				}
-			} else if err := snapshot.verify(context.Background()); err == nil || !strings.Contains(err.Error(), "candidate reports changed") {
-				t.Fatalf("mutation %s: got %v", mutation, err)
-			}
-			if err := snapshot.close(); err != nil {
-				t.Fatal(err)
-			}
-			entries, err := os.ReadDir(workRoot)
-			if err != nil || len(entries) != 0 {
-				t.Fatalf("critic copies remain after cleanup=%v,%v", entries, err)
-			}
-			if _, err := os.Stat(source); err != nil {
-				t.Fatalf("cleanup removed the shared read-only source: %v", err)
-			}
-		})
+	job := portableJob(command.SecurityAudit)
+	source := t.TempDir()
+	if err := os.Chmod(source, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := workspace.Materialize(source, job.Source.Files); err != nil {
+		t.Fatal(err)
+	}
+	output, workRoot := t.TempDir(), t.TempDir()
+	rawMetadata := `{"target":"` + source + `","raw":"not normalized"}`
+	for name, data := range map[string]string{"REPORT.md": "reviewed report", "run-metadata.json": rawMetadata, "FINDINGS-DETAIL.md": ""} {
+		if err := os.WriteFile(filepath.Join(output, name), []byte(data), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snapshot := mustFreeze(t, context.Background(), workRoot, job, source, output, nil)
+	if snapshot.source != source || snapshot.ownedSource {
+		t.Fatal("copied an already read-only audit source")
+	}
+	data, err := workspace.ReadRegular(filepath.Join(snapshot.outputDir, "run-metadata.json"), maxAuditArtifactBytes)
+	if err != nil || string(data) != rawMetadata || len(snapshot.artifacts) != 3 {
+		t.Fatalf("frozen raw reports=%q,%+v,%v", data, snapshot.artifacts, err)
+	}
+	if _, err := os.Lstat(filepath.Join(snapshot.outputDir, "findings.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("absent artifact was created: %v", err)
+	}
+	if err := snapshot.verify(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	writeFixtureFile(t, output, "REPORT.md", []byte("background report edit"))
+	data, err = workspace.ReadRegular(filepath.Join(snapshot.outputDir, "REPORT.md"), maxOutputBytes)
+	if err != nil || string(data) != "reviewed report" {
+		t.Fatalf("background work changed frozen report=%q,%v", data, err)
+	}
+	if err := snapshot.verify(context.Background()); err != nil {
+		t.Fatalf("live report edit invalidated frozen publication bytes: %v", err)
+	}
+	for _, artifact := range snapshot.artifacts {
+		if artifact.Path == "REPORT.md" && string(artifact.Data) != "reviewed report" {
+			t.Fatalf("exported live report bytes: %q", artifact.Data)
+		}
+	}
+	if err := snapshot.close(); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(workRoot)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("critic copies remain after cleanup=%v,%v", entries, err)
+	}
+	if _, err := os.Stat(source); err != nil {
+		t.Fatalf("cleanup removed the shared read-only source: %v", err)
 	}
 }
 
@@ -216,6 +205,139 @@ func TestReviewSnapshotCleansFailedFixCandidateMaterialization(t *testing.T) {
 			entries, err := os.ReadDir(workRoot)
 			if err != nil || len(entries) != 0 {
 				t.Fatalf("failed %s left frozen source: entries=%v error=%v", stage, entries, err)
+			}
+		})
+	}
+}
+
+func TestReviewSnapshotRejectsCriticCopyMutation(t *testing.T) {
+	for _, phase := range []string{reviewFull, reviewVerification} {
+		t.Run(phase, func(t *testing.T) {
+			job := portableJob(command.Fix)
+			job.Critic, job.CriticMaxRounds = &RoleSettings{Provider: "claude"}, 2
+			calls, fullReviews := 0, 0
+			runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+				calls++
+				if request.role == roleMain {
+					if err := os.WriteFile(filepath.Join(request.dir, "source.txt"), []byte(fmt.Sprintf("candidate %d", request.round)), 0644); err != nil {
+						t.Fatal(err)
+					}
+					return aicli.Result{Answer: proposalJSON("Completed fix.", "")}, nil
+				}
+				if request.reviewPhase == reviewFull {
+					fullReviews++
+				}
+				if request.reviewPhase == phase {
+					if err := os.WriteFile(filepath.Join(request.dir, "source.txt"), []byte("tampered by critic"), 0644); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if request.reviewPhase == reviewFull {
+					return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"feedback":"Revise the candidate."}`}, nil
+				}
+				return aicli.Result{Answer: approvedCritiqueJSON}, nil
+			}}
+			result, err := runner.Run(context.Background(), job)
+			wantCalls := 2
+			if phase == reviewVerification {
+				wantCalls = 4
+			}
+			if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "frozen candidate source changed") || calls != wantCalls || fullReviews != 1 || result.Answer != "" || len(result.Changes) != 0 {
+				t.Fatalf("mutated critic copy reached a subsequent call or successful export: calls=%d full=%d result=%+v error=%v", calls, fullReviews, result, err)
+			}
+			if len(result.Calls) != wantCalls {
+				t.Fatalf("lost calls after integrity failure: %+v", result.Calls)
+			}
+			if len(result.Refutations) != 0 {
+				t.Fatalf("checkpointed an integrity-failed call: %+v", result.Refutations)
+			}
+			if err := result.validate(job, false); err != nil {
+				t.Fatalf("invalid partial evidence after integrity failure: %v", err)
+			}
+			last, wantApproval := result.Calls[len(result.Calls)-1], phase == reviewVerification
+			if last.Approved != wantApproval || last.NoBlockers != wantApproval || last.HasBlockers != (phase == reviewFull) {
+				t.Fatalf("lost native critic verdict after integrity failure: %+v", last)
+			}
+		})
+	}
+}
+
+func TestReviewSnapshotChecksExactFrozenFiles(t *testing.T) {
+	for _, reports := range []bool{false, true} {
+		for _, mutation := range []string{"special permissions", "new file"} {
+			t.Run(fmt.Sprintf("reports=%t/%s", reports, mutation), func(t *testing.T) {
+				job := portableJob(command.Fix)
+				index, source := offlineIndexFixture(t, job.Source.Files)
+				output, name := "", "source.txt"
+				if reports {
+					job.Action = command.SecurityAudit
+					output, name, index = t.TempDir(), "REPORT.md", nil
+					writeFixtureFile(t, output, name, []byte("reviewed report"))
+				}
+				snapshot := mustFreeze(t, context.Background(), t.TempDir(), job, source, output, index)
+				if err := snapshot.verify(context.Background()); err != nil {
+					t.Fatalf("unchanged frozen copy rejected: %v", err)
+				}
+				root := snapshot.source
+				if reports {
+					root = snapshot.outputDir
+				}
+				filename := filepath.Join(root, name)
+				switch mutation {
+				case "special permissions":
+					if err := os.Chmod(filename, os.ModeSetuid|0644); err != nil {
+						t.Fatal(err)
+					}
+				case "new file":
+					// An unknown report name is not visited by the known-artifact collector.
+					writeFixtureFile(t, root, "unexpected.txt", []byte("new copy content"))
+				}
+				if err := snapshot.verify(context.Background()); err == nil || !strings.Contains(err.Error(), "frozen candidate") {
+					t.Fatalf("frozen %s mutation accepted: %v", mutation, err)
+				}
+				if reports {
+					data, err := os.ReadFile(filepath.Join(output, name))
+					if err != nil || string(data) != "reviewed report" {
+						t.Fatalf("test changed the live reports instead of the frozen copy: %q,%v", data, err)
+					}
+				} else {
+					changes, err := index.Changes(context.Background())
+					if err != nil || len(changes) != 0 {
+						t.Fatalf("test changed live source instead of frozen copy: %+v,%v", changes, err)
+					}
+					if err := job.validateChanges(changes); err != nil {
+						t.Fatal(err)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestReviewSnapshotRejectsUnreadableFrozenCandidates(t *testing.T) {
+	for _, reports := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reports_%t", reports), func(t *testing.T) {
+			job := portableJob(command.Fix)
+			index, source := offlineIndexFixture(t, job.Source.Files)
+			output, want := "", "frozen candidate source"
+			if reports {
+				job.Action, index = command.SecurityAudit, nil
+				output, want = t.TempDir(), "frozen candidate reports"
+				writeFixtureFile(t, output, "REPORT.md", []byte("reviewed report"))
+			}
+			snapshot := mustFreeze(t, context.Background(), t.TempDir(), job, source, output, index)
+			path := filepath.Join(snapshot.source, "source.txt")
+			if reports {
+				path = filepath.Join(snapshot.outputDir, "REPORT.md")
+			}
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(path, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := snapshot.verify(context.Background()); err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("unreadable frozen candidate accepted: %v", err)
 			}
 		})
 	}

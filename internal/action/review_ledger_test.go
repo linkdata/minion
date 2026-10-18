@@ -21,14 +21,14 @@ func TestRefutationsRequireOrderedMainRoundsButPermitEmptyOrSparseMemory(t *test
 		{Provider: job.Critic.Provider, Role: roleCritic, Round: 3, ReviewPhase: reviewVerification, Approved: true, NoBlockers: true},
 		{Provider: job.Critic.Provider, Role: roleCritic, Round: 3, ReviewPhase: reviewFull, Approved: true, NoBlockers: true},
 	}
-	for _, refs := range [][]Refutation{nil, {{Round: 2, Text: "One refutation; implemented changes are intentionally absent."}}, {{Round: 1, Text: "Earlier refutation."}, {Round: 3, Text: "Independent later refutation."}}} {
+	for _, refs := range [][]Refutation{nil, {{Round: 2, Text: "One refutation; implemented changes are intentionally absent."}}, {{Round: 2, Text: "Earlier refutation."}, {Round: 3, Text: "Independent later refutation."}}} {
 		result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Complete answer", Calls: calls, Refutations: refs}
 		if err := result.Validate(job); err != nil {
 			t.Fatalf("empty/sparse memory refused: %+v: %v", refs, err)
 		}
 	}
 	for _, refs := range [][]Refutation{
-		{{Round: 0, Text: "Refutation"}}, {{Round: -1, Text: "Refutation"}}, {{Round: 4, Text: "No corresponding main call"}},
+		{{Round: 1, Text: "Preemptive refutation"}}, {{Round: 0, Text: "Refutation"}}, {{Round: -1, Text: "Refutation"}}, {{Round: 4, Text: "No corresponding main call"}},
 		{{Round: 2, Text: "First"}, {Round: 2, Text: "Duplicate"}}, {{Round: 3, Text: "Later"}, {Round: 1, Text: "Earlier"}},
 	} {
 		if err := validateRefutations(job, calls, refs); err == nil {
@@ -51,7 +51,7 @@ func TestRefutationsRequireOrderedMainRoundsButPermitEmptyOrSparseMemory(t *test
 
 func TestRefutationsBoundPrivateTextAndPreserveJSONControls(t *testing.T) {
 	job := withClaudeCritic(portableJob(command.Comment))
-	calls := []CallUsage{{Provider: job.Main.Provider, Role: roleMain, Round: 1}}
+	calls := privateReviewResult(job).Calls[:3]
 	for _, test := range []struct {
 		name, text string
 		valid      bool
@@ -60,7 +60,7 @@ func TestRefutationsBoundPrivateTextAndPreserveJSONControls(t *testing.T) {
 		{"empty", "", false}, {"whitespace", " \n\t", false}, {"invalid UTF8", string([]byte{0xff}), false}, {"control characters", "Private refutation\x00\n\t\"quoted\"\\path", true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			refs := []Refutation{{Round: 1, Text: test.text}}
+			refs := []Refutation{{Round: 2, Text: test.text}}
 			if err := validateRefutations(job, calls, refs); (err == nil) != test.valid {
 				t.Fatalf("refutation validation=%v valid=%t", err, test.valid)
 			}

@@ -126,7 +126,7 @@ func TestRunAIRevisionPreservesWorkAndBoundaries(t *testing.T) {
 							t.Fatalf("initial task changed: %q", request.prompt)
 						}
 					case 3:
-						if !slices.Equal(request.refutations, []Refutation{{Round: 1, Text: firstNotes}}) {
+						if !slices.Equal(request.refutations, []Refutation(nil)) {
 							t.Fatalf("revision refutations=%+v", request.refutations)
 						}
 						content, err := os.ReadFile(file)
@@ -158,7 +158,7 @@ func TestRunAIRevisionPreservesWorkAndBoundaries(t *testing.T) {
 				var wantRefutations []Refutation
 				if calls == 4 {
 					priorAnswer, priorFeedback = "first proposal", feedback
-					wantRefutations = []Refutation{{Round: 1, Text: firstNotes}, {Round: 2, Text: revisedNotes}}
+					wantRefutations = []Refutation{{Round: 2, Text: revisedNotes}}
 					if request.reviewPhase != "verification" || request.round != 2 {
 						t.Fatalf("wrong verification metadata: %+v", request)
 					}
@@ -230,7 +230,7 @@ func TestRunAIFreshReviewFindingsUseRemainingRounds(t *testing.T) {
 			return aicli.Result{Answer: fmt.Sprintf(`{"approved":false,"has_blockers":true,"feedback":%q}`, feedback)}, nil
 		}
 		var wantRefutations []Refutation
-		for round := 1; round <= request.round; round++ {
+		for round := 2; round <= request.round; round++ {
 			wantRefutations = append(wantRefutations, Refutation{Round: round, Text: privateRefutations})
 		}
 		if request.reviewPhase != "verification" || !slices.Equal(request.refutations, wantRefutations) {

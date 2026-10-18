@@ -67,7 +67,7 @@ func TestWorkRootPreflightRefusesModelGrants(t *testing.T) {
 					cfg.WorkRoot = alias
 				}
 			}
-			if err := checkWorkRootIsolation(cfg); err == nil || !strings.Contains(err.Error(), "work root overlaps") {
+			if err := checkWorkRootIsolation(cfg, filepath.Join(root, "config.json")); err == nil || !strings.Contains(err.Error(), "work root overlaps") {
 				t.Fatalf("preflight accepted overlapping grant: %v", err)
 			}
 			if kind == "resolved Codex binary" || kind == "resolved Claude binary" {
@@ -75,7 +75,7 @@ func TestWorkRootPreflightRefusesModelGrants(t *testing.T) {
 				if kind == "resolved Claude binary" {
 					cfg.Main = "codex"
 				}
-				if err := checkWorkRootIsolation(cfg); err != nil {
+				if err := checkWorkRootIsolation(cfg, filepath.Join(root, "config.json")); err != nil {
 					t.Fatalf("unused executable affected startup: %v", err)
 				}
 			}
@@ -88,7 +88,7 @@ func TestWorkRootPreflightKeepsMissingSkillsDisabled(t *testing.T) {
 	t.Setenv("HOME", root)
 	t.Setenv("PATH", t.TempDir())
 	cfg := config.Config{Main: "codex", WorkRoot: root, Commands: map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{"https://github.com/owner/repo/tree/pinned/skills/missing"}}}, AlwaysOnSkills: []string{"https://github.com/owner/repo/tree/pinned/skills/optional"}}
-	if err := checkWorkRootIsolation(cfg); err != nil {
+	if err := checkWorkRootIsolation(cfg, filepath.Join(root, "config.json")); err != nil {
 		t.Fatalf("missing/unselected skills changed startup: %v", err)
 	}
 	installed, err := cfg.CommandInstalled("review")
@@ -105,8 +105,53 @@ func TestWorkRootPreflightRequiresWorkspaceBackend(t *testing.T) {
 	if err := os.WriteFile(file, nil, 0600); err != nil {
 		t.Fatal(err)
 	}
-	err := checkWorkRootIsolation(config.Config{Main: "codex", WorkRoot: file})
+	err := checkWorkRootIsolation(config.Config{Main: "codex", WorkRoot: file}, filepath.Join(root, "config.json"))
 	if err == nil || (!errors.Is(err, syscall.ENOTDIR) && !strings.Contains(err.Error(), "requires Linux")) {
 		t.Fatalf("startup did not enforce the workspace backend: %v", err)
+	}
+}
+
+func TestWorkRootPreflightProtectsConfigurationAndCredentials(t *testing.T) {
+	for _, kind := range []string{"config", "codex home", "claude home", "unused claude home", "credential alias"} {
+		t.Run(kind, func(t *testing.T) {
+			root := t.TempDir()
+			t.Setenv("HOME", root)
+			t.Setenv("PATH", t.TempDir())
+			work, public, native := filepath.Join(root, "work"), filepath.Join(root, "public"), filepath.Join(root, "native")
+			for _, dir := range []string{work, public, native} {
+				if err := os.Mkdir(dir, 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv("CODEX_HOME", native)
+			t.Setenv("CLAUDE_CONFIG_DIR", native)
+			cfg := config.Config{Main: "codex", WorkRoot: work, Codex: config.CodexConfig{ReadOnlyDirs: []string{public}}}
+			configPath := filepath.Join(root, "config.json")
+			switch kind {
+			case "config":
+				configPath = filepath.Join(public, "config.json")
+			case "codex home":
+				t.Setenv("CODEX_HOME", public)
+			case "claude home":
+				cfg.Main = "claude"
+				cfg.Claude.ReadOnlyDirs = []string{public}
+				t.Setenv("CLAUDE_CONFIG_DIR", public)
+			case "unused claude home":
+				t.Setenv("CLAUDE_CONFIG_DIR", public)
+			case "credential alias":
+				if err := os.WriteFile(filepath.Join(public, "auth.json"), []byte("fixture only"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(filepath.Join(public, "auth.json"), filepath.Join(native, "auth.json")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(configPath, []byte("fixture only"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := checkWorkRootIsolation(cfg, configPath); err == nil || !strings.Contains(err.Error(), "private host path") {
+				t.Fatalf("preflight accepted exposed %s: %v", kind, err)
+			}
+		})
 	}
 }

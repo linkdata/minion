@@ -269,8 +269,8 @@ func readUsageDir(ctx context.Context, path string, visit func(string, fs.DirEnt
 	}
 }
 
-// Pull framing stops after a header and checks cancellation while dropping a
-// long line; transcript reads also distinguish an incomplete final line.
+// Pull transcript framing checks cancellation while dropping long lines and
+// distinguishes an incomplete final line.
 func rolloutScanner(ctx context.Context, r io.Reader, complete *bool) *bufio.Scanner {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 64<<10), aicli.MaxEventBytes+2)
@@ -281,9 +281,7 @@ func rolloutScanner(ctx context.Context, r io.Reader, complete *bool) *bufio.Sca
 		}
 		newline := bytes.IndexByte(data, '\n')
 		if dropping || newline > aicli.MaxEventBytes || (newline < 0 && len(data) > aicli.MaxEventBytes) {
-			if complete != nil {
-				*complete = false
-			}
+			*complete = false
 			if newline >= 0 {
 				dropping = false
 				return newline + 1, nil, nil
@@ -291,7 +289,7 @@ func rolloutScanner(ctx context.Context, r io.Reader, complete *bool) *bufio.Sca
 			dropping = true
 			return len(data), nil, nil
 		}
-		if complete != nil && atEOF && len(data) != 0 && data[len(data)-1] != '\n' {
+		if atEOF && len(data) != 0 && data[len(data)-1] != '\n' {
 			*complete = false
 		}
 		return bufio.ScanLines(data, atEOF)
@@ -330,7 +328,7 @@ func readRolloutUsage(ctx context.Context, meta rolloutMeta, rootID string, budg
 	turns := map[string]bool{}
 	ownedTurns := map[string]bool{}
 	latestOwnTurn := ""
-	latestOwnDone, latestOwnAborted := false, false
+	latestOwnDone := false
 	var children []string
 	seenChildren := map[string]bool{}
 	tooManyChildren := false
@@ -458,7 +456,6 @@ func readRolloutUsage(ctx context.Context, meta rolloutMeta, rootID string, budg
 						}
 						if payload.TurnID == latestOwnTurn {
 							latestOwnDone = done
-							latestOwnAborted = payload.Type == "turn_aborted"
 						}
 					}
 					if payload.Type == "turn_aborted" {
@@ -483,7 +480,7 @@ func readRolloutUsage(ctx context.Context, meta rolloutMeta, rootID string, budg
 	complete = complete && readable && (meta.ID == rootID || seenHeader)
 	// Known helpers require a fully read, attributable completed latest turn.
 	// Missing counters alone do not prevent that lifecycle proof.
-	if seenHeader && readable && ctx.Err() == nil && !inheritedWithoutBoundary && latestOwnTurn != "" && latestOwnDone && !latestOwnAborted {
+	if seenHeader && readable && ctx.Err() == nil && !inheritedWithoutBoundary && latestOwnTurn != "" && latestOwnDone {
 		childError = nil
 	}
 	if tooManyChildren {

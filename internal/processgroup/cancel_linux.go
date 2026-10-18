@@ -10,7 +10,8 @@ import (
 	"time"
 )
 
-// Configure makes context cancellation terminate the command's process group.
+// Configure bounds pipe draining and cancels the original process group.
+// Numeric group IDs can race leader reaping; positive process ownership is #96 work.
 func Configure(cmd *exec.Cmd) {
 	cmd.WaitDelay = 2 * time.Second
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

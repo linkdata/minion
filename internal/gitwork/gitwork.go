@@ -38,7 +38,6 @@ var (
 	ErrNoChanges         = errors.New("no changes to commit")
 	ErrTooManyFiles      = errors.New("too many changed files")
 	ErrDiffTooLarge      = errors.New("staged diff exceeds size limit")
-	errHeadMoved         = errors.New("pull request head changed")
 	ErrCheckoutTooLarge  = errors.New("source tree exceeds checkout limits")
 	ErrUnsupportedSource = errors.New("source tree is unsupported")
 )
@@ -59,7 +58,6 @@ type Checkout struct {
 	configDigest   [sha256.Size]byte
 	expectedHead   string
 	comparisonBase string
-	branch         string
 	lookupTree     func(context.Context, string) (github.GitTree, error)
 	sourceTrees    map[string][]sourceEntry
 }
@@ -210,7 +208,7 @@ func (c *Checkout) checkoutPullRequest(ctx context.Context, number int, baseRef,
 		return err
 	}
 	if head != expectedHeadSHA {
-		return fmt.Errorf("%w: expected %s, fetched %s", errHeadMoved, expectedHeadSHA, head)
+		return fmt.Errorf("pull request head changed: expected %s, fetched %s", expectedHeadSHA, head)
 	}
 	if err := c.checkoutSource(ctx, head, false); err != nil {
 		return err
@@ -231,8 +229,7 @@ func (c *Checkout) checkoutSource(ctx context.Context, head string, checkoutFile
 		return err
 	}
 	c.expectedHead = head
-	c.branch = ""
-	return c.recordConfig()
+	return nil
 }
 
 // Check expanded blobs and gitlinks, including repeated object references,
@@ -300,8 +297,7 @@ func (c *Checkout) NewBranch(ctx context.Context, name string) error {
 	if _, err := runGit(ctx, c.path, "switch", "--create", name); err != nil {
 		return err
 	}
-	c.branch = name
-	return c.recordConfig()
+	return nil
 }
 
 // CommitAndPush commits changes as botLogin and pushes one branch.
@@ -331,9 +327,6 @@ func (c *Checkout) commitAndPush(ctx context.Context, pushURL, branch, botLogin,
 	}
 	if strings.TrimSpace(message) == "" || strings.ContainsRune(message, 0) {
 		return errors.New("commit message is empty or contains NUL")
-	}
-	if c.branch != branch {
-		return fmt.Errorf("checkout branch %q does not match push branch %q", c.branch, branch)
 	}
 	if err := c.assertHead(ctx); err != nil {
 		return err
@@ -369,10 +362,8 @@ func (c *Checkout) commitAndPush(ctx context.Context, pushURL, branch, botLogin,
 	if err := beforePush(c.expectedHead); err != nil {
 		return fmt.Errorf("record commit before push: %w", err)
 	}
-	if _, err := runGit(ctx, c.path, "push", "--porcelain", "--no-verify", "--", pushURL, "HEAD:refs/heads/"+branch); err != nil {
-		return err
-	}
-	return c.recordConfig()
+	_, err = runGit(ctx, c.path, "push", "--porcelain", "--no-verify", "--", pushURL, "HEAD:refs/heads/"+branch)
+	return err
 }
 
 func (c *Checkout) stagedPaths(ctx context.Context) ([]string, error) {
@@ -500,7 +491,7 @@ func runGitInputTo(ctx context.Context, dir string, stdin io.Reader, stdout io.W
 		}
 		message := strings.TrimSpace(diagnostic.String())
 		if ctx.Err() != nil {
-			err = fmt.Errorf("%w: %w", ctx.Err(), err)
+			err = errors.Join(ctx.Err(), err)
 		} else {
 			err = classifyPathError(operation, message, err)
 		}

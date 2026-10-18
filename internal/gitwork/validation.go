@@ -18,8 +18,7 @@ func repositoryURL(repo string) (string, error) {
 // in a command argument or refspec. A branch must never be an option or a ref
 // expression such as @{...}.
 func validateBranch(branch string) error {
-	if branch == "" || branch == "@" || strings.HasPrefix(branch, "-") || strings.HasPrefix(branch, "/") ||
-		strings.HasSuffix(branch, "/") || strings.HasSuffix(branch, ".") || strings.Contains(branch, "//") ||
+	if branch == "@" || strings.HasPrefix(branch, "-") || strings.HasSuffix(branch, ".") ||
 		strings.Contains(branch, "..") || strings.Contains(branch, "@{") {
 		return fmt.Errorf("invalid branch %q", branch)
 	}

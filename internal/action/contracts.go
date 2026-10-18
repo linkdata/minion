@@ -10,6 +10,7 @@ import (
 
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
+	"github.com/linkdata/minion/internal/gitwork"
 	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/usage"
 	"github.com/linkdata/minion/internal/workspace"
@@ -132,7 +133,7 @@ type Status struct {
 }
 
 func (id Identity) validate() error {
-	for _, value := range []string{id.JobID, id.AttemptID, id.ExecutorID, id.Requester} {
+	for _, value := range []string{id.JobID, id.AttemptID, id.ExecutorID, strings.TrimSuffix(id.Requester, "[bot]")} {
 		if !workspace.ValidIdentitySegment(value) {
 			return errors.New("action identity is missing or invalid")
 		}
@@ -218,14 +219,18 @@ func (j Job) Validate() error {
 			return errors.New("main and critic currently require different providers")
 		}
 	}
-	if (j.Critic == nil && (j.CriticMaxRounds != 0 || j.CriticNonblockingRounds != 0)) || (j.Critic != nil && (j.CriticMaxRounds < 1 || j.CriticMaxRounds > config.MaxCriticMaxRounds || j.CriticNonblockingRounds < 0 || j.CriticNonblockingRounds > j.CriticMaxRounds)) {
+	unexpectedRounds := j.Critic == nil && (j.CriticMaxRounds != 0 || j.CriticNonblockingRounds != 0)
+	invalidRounds := j.Critic != nil && (j.CriticMaxRounds < 1 || j.CriticMaxRounds > config.MaxCriticMaxRounds || j.CriticNonblockingRounds < 0 || j.CriticNonblockingRounds > j.CriticMaxRounds)
+	if unexpectedRounds || invalidRounds {
 		return errors.New("invalid critic round limit")
 	}
 	if err := workspace.ValidateSnapshot(j.Source); err != nil {
 		return err
 	}
 	if j.Action == command.Fix {
-		return workspace.ValidateFixPaths(j.Source.Files, j.Source.Omitted)
+		if err := workspace.ValidateFixPaths(j.Source.Files, j.Source.Omitted); err != nil {
+			return fmt.Errorf("%w: %w", gitwork.ErrUnsupportedSource, err)
+		}
 	}
 	return nil
 }
@@ -255,7 +260,9 @@ func (r Result) validate(j Job, complete bool) error {
 	if !r.matchesJob(j) {
 		return errors.New("action result version, identity or source differs from job")
 	}
-	if !boundedText(r.Answer, maxOutputBytes) || (complete && (!modelOutputFits(r.Answer) || ((j.Action != command.Fix || j.Critic != nil || len(r.Changes) == 0) && strings.TrimSpace(r.Answer) == ""))) {
+	requiresAnswer := j.Action != command.Fix || j.Critic != nil || len(r.Changes) == 0
+	invalidCompleteAnswer := complete && (!modelOutputFits(r.Answer) || (requiresAnswer && strings.TrimSpace(r.Answer) == ""))
+	if !boundedText(r.Answer, maxOutputBytes) || invalidCompleteAnswer {
 		return errors.New("action answer is blank, invalid or exceeds limit")
 	}
 	if j.Action != command.Fix && len(r.Changes) != 0 {
@@ -311,7 +318,9 @@ func (r Result) validateCalls(j Job, complete bool) error {
 				validOrder = previous.ReviewPhase == reviewVerification && accepted && call.Round == previous.Round && call.ReviewPhase == reviewFull
 			}
 		}
-		if !validOrder || call.Round > rounds || ((call.Approved || call.NoBlockers || call.HasBlockers) && call.Role != roleCritic) || (call.Approved && !call.NoBlockers) || (call.HasBlockers && call.NoBlockers) || call.Provider != role.Provider || call.Model != role.Model || call.Effort != role.Effort || !call.Tokens.Valid() {
+		invalidVerdict := ((call.Approved || call.NoBlockers || call.HasBlockers) && call.Role != roleCritic) || (call.Approved && !call.NoBlockers) || (call.HasBlockers && call.NoBlockers)
+		wrongModel := call.Provider != role.Provider || call.Model != role.Model || call.Effort != role.Effort
+		if !validOrder || call.Round > rounds || invalidVerdict || wrongModel || !call.Tokens.Valid() {
 			return errors.New("invalid model call usage")
 		}
 	}

@@ -113,7 +113,7 @@ func (r Record) validate() error {
 
 type Store struct{ Dir string }
 
-// Save atomically replaces one attempt and syncs its directory.
+// Save atomically replaces one attempt and syncs its directory and parent.
 //
 // The caller serializes updates to an ID. An error after replacement can leave
 // the new attempt in place.
@@ -254,7 +254,7 @@ func Summarize(records []Record, filter Filter, groupBy []string) ([]Summary, er
 		default:
 			return nil, fmt.Errorf("usage record %s has invalid status %q", record.ID, record.Status)
 		}
-		if record.CodexCalls > math.MaxInt-summary.CodexCalls || record.ClaudeCalls > math.MaxInt-summary.ClaudeCalls {
+		if record.CodexCalls < 0 || record.ClaudeCalls < 0 || record.CodexCalls > math.MaxInt-summary.CodexCalls || record.ClaudeCalls > math.MaxInt-summary.ClaudeCalls {
 			return nil, errors.New("usage call counts are invalid or exceed integer limit")
 		}
 		summary.CodexCalls += record.CodexCalls

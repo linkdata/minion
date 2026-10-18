@@ -16,7 +16,7 @@ func WriteAtomic(path string, data []byte, extraDirs ...string) (resultErr error
 	temporary := file.Name()
 	defer func() {
 		if temporary != "" {
-			if err := os.Remove(temporary); !errors.Is(err, os.ErrNotExist) {
+			if err := os.Remove(temporary); err != nil && !errors.Is(err, os.ErrNotExist) {
 				resultErr = errors.Join(resultErr, err)
 			}
 		}

@@ -301,8 +301,12 @@ func TestFixIndexRejectsNonIgnoredUnsafeOutput(t *testing.T) {
 			marker := filepath.Join(t.TempDir(), "add-ran")
 			script := fmt.Sprintf("#!/bin/sh\nfor argument in \"$@\"; do\n if [ \"$argument\" = add ]; then touch %s; fi\ndone\nexec %s \"$@\"\n", shellQuote(marker), shellQuote(index.binary))
 			index.binary = filepath.Join(fakeOnPath(t, "git-proxy", script), "git-proxy")
-			if changes, err := index.Changes(context.Background()); err == nil || !strings.Contains(err.Error(), tt.cause) {
+			changes, err := index.Changes(context.Background())
+			if err == nil || !strings.Contains(err.Error(), tt.cause) {
 				t.Fatalf("%s output: changes=%+v, err=%v; want %q", tt.kind, changes, err, tt.cause)
+			}
+			if tt.kind == "too many" && !errors.Is(err, ErrTooManyFiles) {
+				t.Fatalf("untracked change count lost native classification: %v", err)
 			}
 			if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("Git hashed rejected output before precheck: %v", err)
@@ -621,7 +625,7 @@ func TestFixIndexPathListOverflowIsTooManyFiles(t *testing.T) {
 		arg   string
 		limit int
 	}{
-		{"ls-files", (workspace.MaxChanges + 1) * (workspace.MaxPathBytes + 1)},
+		{"ls-files", maxChangedPathListBytes},
 		{"--raw", maxChangedPathListBytes},
 	} {
 		t.Run(stage.arg, func(t *testing.T) {
@@ -707,10 +711,43 @@ func TestFixIndexPatchOverflowClassificationPreservesOtherErrors(t *testing.T) {
 		index, _ := offlineIndexFixture(t, nil)
 		index.binary = filepath.Join(fakeOnPath(t, "git-output", "#!/bin/sh\nprintf 'too much output'\n"), "git-output")
 		_, err := index.run(context.Background(), 1, nil, "diff", "--raw")
-		if !errors.Is(err, ErrCheckoutTooLarge) || errors.Is(err, ErrDiffTooLarge) || !strings.HasPrefix(err.Error(), "offline git diff output exceeds action limit:") {
+		if !errors.Is(err, ErrCheckoutTooLarge) || errors.Is(err, ErrDiffTooLarge) || errors.Is(err, context.Canceled) || !strings.HasPrefix(err.Error(), "offline git diff output exceeds action limit:") {
 			t.Fatalf("generic overflow lost its operation or classification: %v", err)
 		}
 	})
+}
+
+func TestFixIndexClassifiesTrackedChangeCount(t *testing.T) {
+	files := make([]workspace.File, workspace.MaxChanges+1)
+	for i := range files {
+		files[i] = workspace.File{Path: fmt.Sprintf("tracked-%03d", i), Mode: workspace.Regular, Data: []byte("before")}
+	}
+	index, source := offlineIndexFixture(t, files)
+	for _, file := range files {
+		writeIndexFixture(t, source, file.Path, []byte("after"))
+	}
+	if changes, err := index.Changes(context.Background()); !errors.Is(err, ErrTooManyFiles) || changes != nil {
+		t.Fatalf("tracked change count lost native classification: %+v, %v", changes, err)
+	}
+}
+
+func TestFixIndexReportsTrackedGrowthInPathOrder(t *testing.T) {
+	index, source := offlineIndexFixture(t, []workspace.File{
+		{Path: "z-last", Mode: workspace.Regular},
+		{Path: "a-first", Mode: workspace.Regular},
+	})
+	for _, name := range []string{"z-last", "a-first"} {
+		file, err := os.OpenFile(filepath.Join(source, name), os.O_WRONLY, 0600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := errors.Join(file.Truncate(workspace.MaxChangeBytes+1), file.Close()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := index.Changes(context.Background()); err == nil || !strings.Contains(err.Error(), `tracked fix path "a-first" exceeds changed byte limit`) {
+		t.Fatalf("growth diagnostic did not select first path: %v", err)
+	}
 }
 
 func fakeOnPath(t *testing.T, name, script string) string {

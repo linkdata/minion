@@ -396,6 +396,8 @@ func TestSummarizeAggregateBounds(t *testing.T) {
 		{name: "codex call overflow", codex: [2]int{math.MaxInt, 1}, wantError: "call counts"},
 		{name: "exact claude call maximum", claude: [2]int{math.MaxInt / 2, math.MaxInt/2 + 1}, wantClaude: math.MaxInt},
 		{name: "claude call overflow", claude: [2]int{math.MaxInt, 1}, wantError: "call counts"},
+		{name: "negative codex calls", codex: [2]int{0, -1}, wantError: "call counts"},
+		{name: "negative claude calls", claude: [2]int{0, -1}, wantError: "call counts"},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			first, second := testRecord(), testRecord()

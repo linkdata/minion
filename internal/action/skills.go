@@ -6,24 +6,25 @@ import (
 	"github.com/linkdata/minion/internal/skills"
 )
 
-// SelectSkills resolves required and optional installed skills using execution's grant rules.
-func (r *Runner) SelectSkills(provider string, required, alwaysOn []string) ([]string, error) {
+// ConfigureRole resolves the execution host's installed skill grants.
+func (r *Runner) ConfigureRole(role RoleSettings) error {
+	provider := role.Provider
 	var selected []string
 	seen := map[string]bool{}
-	for _, source := range required {
+	for _, source := range role.Skills {
 		path, installed, err := skills.InstalledPathFor(source, provider)
 		if err != nil {
-			return nil, fmt.Errorf("%s skill: %w", provider, err)
+			return fmt.Errorf("%s skill: %w", provider, err)
 		}
 		if !installed {
-			return nil, fmt.Errorf("%s skill is not installed: %s", provider, source)
+			return fmt.Errorf("%s skill is not installed: %s", provider, source)
 		}
 		if !seen[path] {
 			selected = append(selected, path)
 			seen[path] = true
 		}
 	}
-	for _, source := range alwaysOn {
+	for _, source := range role.AlwaysOnSkills {
 		path, installed, err := skills.InstalledPathFor(source, provider)
 		if err != nil {
 			r.logf("skip unavailable %s always-on skill %s: %v", provider, source, err)
@@ -34,5 +35,10 @@ func (r *Runner) SelectSkills(provider string, required, alwaysOn []string) ([]s
 			seen[path] = true
 		}
 	}
-	return selected, nil
+	if provider == "codex" {
+		r.Codex.Skills = selected
+	} else {
+		r.Claude.Skills = selected
+	}
+	return nil
 }

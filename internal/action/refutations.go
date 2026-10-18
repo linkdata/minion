@@ -19,12 +19,9 @@ func validateRefutations(job Job, calls []CallUsage, refutations []Refutation) e
 	if job.Critic == nil && len(refutations) != 0 {
 		return errors.New("unexpected refutations without a critic")
 	}
-	if len(refutations) > job.rounds() {
-		return errors.New("refutations exceed main round count")
-	}
 	previous := 0
 	for _, entry := range refutations {
-		if entry.Round <= previous || !slices.ContainsFunc(calls, func(call CallUsage) bool { return call.Role == roleMain && call.Round == entry.Round }) {
+		if entry.Round < 2 || entry.Round <= previous || !slices.ContainsFunc(calls, func(call CallUsage) bool { return call.Role == roleMain && call.Round == entry.Round }) {
 			return errors.New("refutation does not match an ordered main call")
 		}
 		if strings.TrimSpace(entry.Text) == "" || len(entry.Text) > maxOutputBytes || !utf8.ValidString(entry.Text) {

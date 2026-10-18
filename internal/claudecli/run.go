@@ -76,6 +76,13 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 			}
 		}()
 	}
+	configDir := authDir
+	if configDir == "" {
+		configDir, err = HomePath()
+		if err != nil {
+			return result, err
+		}
+	}
 	cacheDir := filepath.Join(runtimeDir, "go-build")
 	if err := os.Mkdir(cacheDir, 0o700); err != nil {
 		return result, err
@@ -146,7 +153,7 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	// #nosec G204 -- The resolved executable is outside the source snapshot; arguments do not pass through a shell.
 	cmd := exec.CommandContext(runCtx, binary, args...)
 	cmd.Dir = runtimeDir
-	cmd.Env, err = childEnvironment(os.Environ(), runtimeDir, cacheDir, authDir)
+	cmd.Env, err = childEnvironment(os.Environ(), runtimeDir, cacheDir, authDir, configDir)
 	if err != nil {
 		return result, err
 	}
@@ -160,7 +167,7 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	}}
 	diagnostics := bounded.Tail{}
 	ceilingMatched := false
-	ceiling := bounded.Lines{Limit: aicli.MaxEventBytes, Line: func(line []byte) {
+	ceiling := bounded.Lines{Limit: bounded.DiagnosticBytes, Line: func(line []byte) {
 		ceilingMatched = ceilingMatched || isWaitCeilingStop(line)
 	}}
 	cmd.Stdout, cmd.Stderr = &output, io.MultiWriter(&diagnostics, &ceiling)
@@ -247,7 +254,7 @@ func sandboxSettings(workspace, runtimeDir string, writable bool, outputDir stri
 		},
 	}
 	if authDir != "" {
-		for _, grant := range append(reads, writes...) {
+		for _, grant := range reads {
 			if workspacefs.Within(grant, authDir) || workspacefs.Within(authDir, grant) {
 				return "", errors.New("claude API key directory overlaps a sandbox grant")
 			}
@@ -266,11 +273,10 @@ func credentialDenials() []map[string]string {
 	return rules
 }
 
-func childEnvironment(env []string, runtimeDir, cacheDir, authDir string) ([]string, error) {
+func childEnvironment(env []string, runtimeDir, cacheDir, authDir, configDir string) ([]string, error) {
 	allowed := map[string]bool{
 		"PATH": true, "HOME": true, "LANG": true, "LC_ALL": true, "LC_CTYPE": true, "TERM": true,
-		"CLAUDE_CONFIG_DIR": true,
-		"SSL_CERT_FILE":     true, "SSL_CERT_DIR": true, "NODE_EXTRA_CA_CERTS": true,
+		"SSL_CERT_FILE": true, "SSL_CERT_DIR": true, "NODE_EXTRA_CA_CERTS": true,
 		"HTTP_PROXY": true, "HTTPS_PROXY": true, "ALL_PROXY": true, "NO_PROXY": true,
 	}
 	clean := make([]string, 0, len(env))
@@ -302,8 +308,8 @@ func childEnvironment(env []string, runtimeDir, cacheDir, authDir string) ([]str
 			clean = append(clean, entry)
 		}
 	}
-	if authDir != "" {
-		clean = append(clean, "CLAUDE_CONFIG_DIR="+authDir)
+	if configDir != "" {
+		clean = append(clean, "CLAUDE_CONFIG_DIR="+configDir)
 	}
 	// Keep runtime and cache paths inside the sandbox write grants.
 	return append(

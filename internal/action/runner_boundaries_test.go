@@ -214,7 +214,7 @@ func TestRunnerCancellationDuringInstalledAuditValidatorPreservesCause(t *testin
 	}
 }
 
-func TestRunnerMissingConfiguredReadGrantIsRetryableBeforeModels(t *testing.T) {
+func TestRunnerMissingConfiguredReadGrantIsNotTerminalBeforeModels(t *testing.T) {
 	for _, scenario := range []struct{ provider, role string }{{"codex", "main"}, {"claude", "critic"}} {
 		provider, role := scenario.provider, scenario.role
 		t.Run(provider+"/"+role, func(t *testing.T) {
@@ -368,5 +368,29 @@ func TestRunnerReportsOwnedAndCriticCleanupFailures(t *testing.T) {
 				t.Fatalf("cleanup failure not recorded: %+v", result.Diagnostics)
 			}
 		})
+	}
+}
+
+func TestRunnerRefusesRenderedReportOverflowBeforeCritic(t *testing.T) {
+	installActionTestSkills(t, testAuditSkillURL)
+	job := withClaudeCritic(portableJob(command.SecurityAudit))
+	job.CriticMaxRounds = 1
+	job.Main.Skills = []string{testAuditSkillURL}
+	text := strings.Repeat("a\n", 25000)
+	calls := 0
+	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+		calls++
+		if request.role != roleMain {
+			t.Fatal("unpublishable report reached critic")
+		}
+		writeFixtureFile(t, request.outputDir, "REPORT.md", []byte(text))
+		return aicli.Result{Answer: proposalJSON("Complete report", "")}, nil
+	}}
+	result, err := runner.Run(context.Background(), job)
+	if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "publication limit") || calls != 1 || len(result.Calls) != 1 || result.Answer != "" {
+		t.Fatalf("overflow reached critic/success: calls=%d result=%+v error=%v", calls, result, err)
+	}
+	if len(result.Artifacts) != 1 || result.Artifacts[0].Path != "REPORT.md" || string(result.Artifacts[0].Data) != text || result.validate(job, false) != nil {
+		t.Fatalf("partial report lost: %+v", result.Artifacts)
 	}
 }

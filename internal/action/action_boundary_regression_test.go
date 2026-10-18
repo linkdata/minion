@@ -22,6 +22,79 @@ import (
 	"github.com/linkdata/minion/internal/workspace"
 )
 
+func TestPrivateHostPathsCannotBeExposedByModelGrants(t *testing.T) {
+	for _, provider := range []string{"codex", "claude"} {
+		t.Run(provider, func(t *testing.T) {
+			home, outside := t.TempDir(), t.TempDir()
+			public := filepath.Join(home, "public")
+			if err := os.Mkdir(public, 0700); err != nil {
+				t.Fatal(err)
+			}
+			binary := filepath.Join(public, provider)
+			writeFixtureFile(t, public, provider, []byte("inert installed executable"))
+			if err := os.Chmod(binary, 0700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", public)
+			skill := filepath.Join(public, "SKILL.md")
+			writeFixtureFile(t, public, "SKILL.md", []byte("public skill"))
+			secret := filepath.Join(outside, "auth.json")
+			writeFixtureFile(t, outside, "auth.json", nil)
+			linked := filepath.Join(home, "auth.json")
+			if err := os.Symlink(secret, linked); err != nil {
+				t.Fatal(err)
+			}
+			future := filepath.Join(outside, "new", "auth.json")
+			for _, test := range []struct {
+				name, protected, grant string
+				refuse                 bool
+			}{
+				{"public descendants", home, public, false},
+				{"home exposure", home, home, true},
+				{"config exposure", secret, outside, true},
+				{"symlinked auth outside home", linked, outside, true},
+				{"future auth exposure", future, outside, true},
+			} {
+				t.Run(test.name, func(t *testing.T) {
+					runner := Runner{}
+					if provider == "codex" {
+						runner.Codex.Skills, runner.Codex.ReadOnlyDirs = []string{skill}, []string{test.grant}
+					} else {
+						runner.Claude.Skills, runner.Claude.ReadOnlyDirs = []string{skill}, []string{test.grant}
+					}
+					if err := runner.CheckPrivatePaths([]string{test.protected}, provider); (err != nil) != test.refuse {
+						t.Fatalf("private-path admission error=%v want refusal=%t", err, test.refuse)
+					}
+				})
+			}
+			if _, err := os.Lstat(filepath.Dir(future)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("private admission created credentials: %v", err)
+			}
+		})
+	}
+}
+
+func TestWorkRootIsolationUsesPhysicalGrantParents(t *testing.T) {
+	root := t.TempDir()
+	physical := filepath.Join(root, "physical")
+	for _, dir := range []string{filepath.Join(physical, "nested"), filepath.Join(physical, "target"), filepath.Join(root, "target")} {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	alias := filepath.Join(root, "alias")
+	if err := os.Symlink(filepath.Join(physical, "nested"), alias); err != nil {
+		t.Fatal(err)
+	}
+	runner := Runner{Codex: config.CodexConfig{ReadOnlyDirs: []string{alias + "/../target"}}}
+	if err := runner.CheckWorkRootIsolation(filepath.Join(physical, "target"), "codex"); err == nil || !strings.Contains(err.Error(), "overlaps") {
+		t.Fatalf("physical grant overlap accepted: %v", err)
+	}
+	if err := runner.CheckWorkRootIsolation(filepath.Join(root, "target"), "codex"); err != nil {
+		t.Fatalf("logical decoy substituted for physical grant: %v", err)
+	}
+}
+
 func TestJobActionTextBounds(t *testing.T) {
 	text := strings.Repeat("x", workspace.MaxBytes+1)
 	for _, tt := range []struct {
@@ -173,13 +246,13 @@ func TestExecuteCriticAdmissionUsesControlledWorkRoot(t *testing.T) {
 	}
 }
 
-func TestRefutationInitialCheckpointIsRetryableBeforeModels(t *testing.T) {
+func TestRefutationInitialCheckpointIsNotTerminalBeforeModels(t *testing.T) {
 	job := withClaudeCritic(portableJob(command.Comment))
 	checkpoints := 0
-	runner := Runner{WorkRoot: t.TempDir(), recordReview: func(progress Result) error {
+	runner := Runner{WorkRoot: t.TempDir(), recordReview: func(receipts []CallUsage, refs []Refutation) error {
 		checkpoints++
-		if len(progress.Calls) != 0 || len(progress.Refutations) != 0 || progress.Identity != job.Identity || progress.SourceRef != job.Source.Head {
-			t.Fatalf("initial checkpoint is not metadata only: %+v", progress)
+		if len(receipts) != 0 || len(refs) != 0 {
+			t.Fatalf("initial checkpoint carried model evidence: calls=%+v refutations=%+v", receipts, refs)
 		}
 		return &os.PathError{Op: "write", Path: "private-review", Err: syscall.ENOSPC}
 	}, runModel: forbidModel(t)}

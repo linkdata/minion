@@ -32,7 +32,10 @@ func Probe(ctx context.Context, binary, argv0 string, args []string, dir string,
 		err = errors.Join(ErrOutputLimit, err)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("%w: %q", err, strings.TrimSpace(diagnostics.String()))
+		if text := strings.TrimSpace(diagnostics.String()); text != "" {
+			err = fmt.Errorf("%w: %q", err, text)
+		}
+		return nil, err
 	}
 	return output.Bytes(), nil
 }

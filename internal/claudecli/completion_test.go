@@ -12,6 +12,37 @@ import (
 	"github.com/linkdata/minion/internal/usage"
 )
 
+func TestNewAssistantParentageCannotPreserveStaleResult(t *testing.T) {
+	for _, parent := range []string{"", `null`, `"delegate"`, `""`, `0`, `false`, `{}`, `[]`} {
+		for _, stopped := range []bool{false, true} {
+			for _, freshResult := range []bool{false, true} {
+				name := fmt.Sprintf("parent=%s/stopped=%t/result=%t", parent, stopped, freshResult)
+				t.Run(name, func(t *testing.T) {
+					data := successfulResult + "\n"
+					if stopped {
+						data += `{"type":"system","subtype":"task_notification","status":"stopped"}` + "\n"
+					}
+					field := ""
+					if parent != "" {
+						field = `,"parent_tool_use_id":` + parent
+					}
+					data += `{"type":"assistant"` + field + `,"message":{"id":"new"}}` + "\n"
+					if freshResult {
+						data += successfulResult + "\n"
+					}
+					o := jsonlOutput{}
+					writeChunks(t, &o, numberResultEvents(data))
+					o.finish()
+					wantComplete := (!stopped && (freshResult || parent == `"delegate"`)) || (stopped && parent == `null` && freshResult)
+					if o.completed != wantComplete || (o.err == nil) != wantComplete || !wantComplete && o.result.Answer != "" || o.result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) {
+						t.Fatalf("stale completion or lost usage: result=%+v completed=%t error=%v", o.result, o.completed, o.err)
+					}
+				})
+			}
+		}
+	}
+}
+
 func TestOutputStoppedTaskNeedsNewRootResponseAndResult(t *testing.T) {
 	const old = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"old"}}`
 	const fresh = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"new"}}`

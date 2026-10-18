@@ -1,9 +1,12 @@
 package aicli
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/linkdata/minion/internal/workspace"
 )
 
 func TestDirectoryRequiresAnExistingNonRootDirectory(t *testing.T) {
@@ -27,5 +30,86 @@ func TestDirectoryRequiresAnExistingNonRootDirectory(t *testing.T) {
 	}
 	if got, err := Directory(alias); err != nil || got != want {
 		t.Fatalf("resolved=%q want=%q err=%v", got, want, err)
+	}
+}
+
+func TestDirectoryResolvesSymlinksBeforeParentComponents(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	actual := filepath.Join(root, "actual")
+	for _, dir := range []string{filepath.Join(actual, "nested"), filepath.Join(actual, "directory"), filepath.Join(root, "file")} {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, file := range []string{filepath.Join(actual, "file"), filepath.Join(root, "directory")} {
+		if err := os.WriteFile(file, nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	alias := filepath.Join(root, "alias")
+	if err := os.Symlink(filepath.Join(actual, "nested"), alias); err != nil {
+		t.Fatal(err)
+	}
+	// Join would clean away the parent component before symlink resolution.
+	if got, err := Directory(alias + "/../directory"); err != nil || got != filepath.Join(actual, "directory") {
+		t.Fatalf("directory resolved=%q error=%v", got, err)
+	}
+	file := alias + "/../file"
+	if got, err := workspace.PrepareRoot(file); err != nil || got != filepath.Join(actual, "file") {
+		t.Fatalf("file grant resolved=%q error=%v", got, err)
+	}
+	if _, err := Directory(file); err == nil {
+		t.Fatal("accepted the actual file as the lexical decoy directory")
+	}
+}
+
+func TestResolvePathKeepsFilesystemSemanticsWithoutCreating(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	actual := filepath.Join(root, "actual")
+	if err := os.MkdirAll(filepath.Join(actual, "nested"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(root, "alias")
+	if err := os.Symlink(filepath.Join(actual, "nested"), alias); err != nil {
+		t.Fatal(err)
+	}
+	dangling := filepath.Join(root, "dangling")
+	if err := os.Symlink(filepath.Join(root, "absent"), dangling); err != nil {
+		t.Fatal(err)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	relative, err := filepath.Rel(cwd, alias)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name, path, want string
+	}{
+		{"existing parent", alias + "/..", actual},
+		{"missing suffix", alias + "/../new/home", filepath.Join(actual, "new", "home")},
+		{"relative missing suffix", relative + "/../new/home", filepath.Join(actual, "new", "home")},
+		{"dangling link", dangling + "/home", ""},
+		{"unknown parent", root + "/absent/../target", ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := ResolvePath(test.path)
+			if (err == nil) != (test.want != "") || got != test.want {
+				t.Fatalf("resolved=%q want=%q error=%v", got, test.want, err)
+			}
+		})
+	}
+	for _, path := range []string{filepath.Join(actual, "new"), filepath.Join(root, "absent")} {
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("resolution created %q: %v", path, err)
+		}
 	}
 }

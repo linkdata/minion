@@ -17,7 +17,7 @@ const (
 type JSONL struct {
 	Line    func([]byte)
 	Fail    func(error)
-	bytes   int64
+	total   int64
 	events  int
 	lines   bounded.Lines
 	limited bool
@@ -30,11 +30,11 @@ func (o *JSONL) Write(p []byte) (int, error) {
 	if o.limited {
 		return n, nil
 	}
-	if int64(n) > maxOutputBytes-o.bytes {
+	if int64(n) > maxOutputBytes-o.total {
 		o.stop("output exceeded the size limit")
 		return n, nil
 	}
-	o.bytes += int64(n)
+	o.total += int64(n)
 	if o.lines.Line == nil {
 		o.lines = bounded.Lines{Limit: MaxEventBytes, Line: func(p []byte) {
 			p = bytes.TrimSpace(p)

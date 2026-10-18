@@ -80,6 +80,10 @@ func listModels(ctx context.Context, settings config.CodexConfig) (models []mode
 	if err != nil {
 		return nil, err
 	}
+	home, err := HomePath()
+	if err != nil {
+		return nil, err
+	}
 	dir, err := os.MkdirTemp("", "minion-codex-check-")
 	if err != nil {
 		return nil, err
@@ -103,7 +107,7 @@ func listModels(ctx context.Context, settings config.CodexConfig) (models []mode
 	cmd := exec.CommandContext(ctx, binary, args...)
 	cmd.Args[0] = "codex"
 	cmd.Dir = dir
-	cmd.Env = childEnvironment(os.Environ(), dir, dir, settings.APIKey != "")
+	cmd.Env = childEnvironment(os.Environ(), dir, dir, home, settings.APIKey != "")
 	processgroup.Configure(cmd)
 	diagnostics := bounded.Tail{}
 	cmd.Stderr = &diagnostics

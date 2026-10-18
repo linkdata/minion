@@ -106,7 +106,7 @@ func TestRunnerNonblockingThresholdRequiresFreshFullReview(t *testing.T) {
 		wantCalls            int
 		wantSuccess          bool
 	}{
-		{name: "first full can accept nits", threshold: 1, rounds: 5, wantCalls: 2, wantSuccess: true},
+		{name: "first full at hard maximum can accept nits", threshold: 1, rounds: 1, wantCalls: 2, wantSuccess: true},
 		{name: "threshold follows required revision", threshold: 2, rounds: 5, wantCalls: 5, wantSuccess: true},
 		{name: "last allowed proposal can accept", threshold: 3, rounds: 3, wantCalls: 7, wantSuccess: true},
 		{name: "zero remains strict", rounds: 2, wantCalls: 4},

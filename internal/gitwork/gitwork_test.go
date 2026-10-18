@@ -148,7 +148,7 @@ func TestRepositoryAndRefValidation(t *testing.T) {
 			t.Errorf("validateBranch(%q): %v", branch, err)
 		}
 	}
-	for _, branch := range []string{"", "-bad", "bad..name", "bad.lock", "topic/.hidden", "topic//bad", "topic@{1}", "bad:ref", "bad name", "bad\\ref"} {
+	for _, branch := range []string{"", "@", "-bad", "bad..name", "bad.lock", "topic/.hidden", "topic//bad", "topic@{1}", "bad:ref", "bad name", "bad\\ref", "/a", "a/", "a.", "a~b", "a^b", "a?b", "a*b", "a[b", "a\x01b", "a\x7fb"} {
 		if err := validateBranch(branch); err == nil {
 			t.Errorf("validateBranch(%q) should fail", branch)
 		}
@@ -181,8 +181,8 @@ func TestCheckoutPullRequestVerifiesHead(t *testing.T) {
 	writeFile(t, filepath.Join(fixture.source, "change.txt"), "PR change\n")
 	head := fixture.commit("refs/pull/7/head", "PR head")
 
-	if err := fixture.checkout.checkoutPullRequest(ctx, 7, "main", strings.Repeat("f", 40)); !errors.Is(err, errHeadMoved) {
-		t.Fatalf("mismatched PR head error = %v, want errHeadMoved", err)
+	if err := fixture.checkout.checkoutPullRequest(ctx, 7, "main", strings.Repeat("f", 40)); err == nil || !strings.Contains(err.Error(), "pull request head changed: expected "+strings.Repeat("f", 40)+", fetched "+head) {
+		t.Fatalf("mismatched PR head error = %v", err)
 	}
 	if err := fixture.checkout.checkoutPullRequest(ctx, 7, "main", head); err != nil {
 		t.Fatalf("CheckoutPullRequest() error = %v", err)

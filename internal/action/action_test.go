@@ -391,7 +391,6 @@ func TestFixRecoversOnlyRecordedBranch(t *testing.T) {
 		wantComment    bool
 		wantError      string
 	}{
-		{name: "legacy base branch", wantError: "legacy base branch"},
 		{name: "recorded commit", remoteSHA: strings.Repeat("a", 40), wantComment: true},
 		{name: "recorded commit with oversized notes", remoteSHA: strings.Repeat("a", 40), oversizedNotes: true, wantComment: true},
 		{name: "changed branch", remoteSHA: strings.Repeat("b", 40), wantError: "without a matching recorded bot commit"},
@@ -466,8 +465,6 @@ func TestFixRecoversOnlyRecordedBranch(t *testing.T) {
 					} else if _, err := fmt.Fprintf(w, `{"name":%q,"commit":{"sha":%q}}`, branch, tt.remoteSHA); err != nil {
 						t.Error(err)
 					}
-				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/branches/"+branch:
-					_, _ = fmt.Fprintf(w, `{"name":%q,"commit":{"sha":%q}}`, branch, strings.Repeat("a", 40))
 				case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/issues/7/comments":
 					captureComment(t, w, r, &commentBody)
 				default:
@@ -541,31 +538,8 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			markers := t.TempDir()
-			armed, changed := filepath.Join(markers, "armed"), filepath.Join(markers, "changed")
 			gitConfig := "url." + forkRemote + ".insteadOf=https://github.com/linkdataminion/r.git"
-			wrapper := fmt.Sprintf(`#!/bin/sh
-case " $* " in
-  *" --binary "*)
-    if test -f %s; then
-      %s -c %s "$@"
-      status=$?
-      if test "$status" -eq 0; then
-        source=$(cat %s)
-        printf 'late live edit' > "$source/fix.txt"
-        printf 'late binary edit' > "$source/binary.bin"
-        chmod 0644 "$source/mode.sh"
-        printf 'late resurrection' > "$source/deleted.txt"
-        printf 'late ignored output' > "$source/generated.log"
-        printf changed > %s
-        rm %s
-      fi
-      exit "$status"
-    fi
-    ;;
-esac
-exec %s -c %s "$@"
-`, shellQuote(armed), shellQuote(baseWrapper), shellQuote(gitConfig), shellQuote(armed), shellQuote(changed), shellQuote(armed), shellQuote(baseWrapper), shellQuote(gitConfig))
+			wrapper := fmt.Sprintf("#!/bin/sh\nexec %s -c %s \"$@\"\n", shellQuote(baseWrapper), shellQuote(gitConfig))
 			fakeOnPath(t, "git", wrapper)
 			job := monitor.Job{
 				Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"fix"}}, SubjectType: "Issue", Number: 7,
@@ -619,6 +593,7 @@ exec %s -c %s "$@"
 			}
 			absentPaths := []string{"deleted.txt", "generated.log"}
 			var source string
+			liveMutated := false
 			mainCalls, criticCalls, strict := 0, 0, 0
 			orchestrator := &Orchestrator{WorkRoot: t.TempDir(), GitHub: client,
 				Commands:        map[string]config.CommandMapping{"fix": {Action: "fix", Skills: []string{skills.BuiltinAntiPromptInjection}}},
@@ -646,9 +621,16 @@ exec %s -c %s "$@"
 									t.Fatalf("critic received excluded %s: %v", path, err)
 								}
 							}
-							if err := os.WriteFile(armed, []byte(source), 0600); err != nil {
+							for path, text := range map[string]string{"fix.txt": "late live edit", "binary.bin": "late binary edit", "deleted.txt": "late resurrection", "generated.log": "late ignored output"} {
+								writeFixtureFile(t, source, path, []byte(text))
+							}
+							if err := os.Chmod(filepath.Join(source, "mode.sh"), 0644); err != nil {
 								t.Fatal(err)
 							}
+							if data, err := os.ReadFile(filepath.Join(source, "fix.txt")); err != nil || string(data) != "late live edit" {
+								t.Fatalf("late live edit not exercised: %q,%v", data, err)
+							}
+							liveMutated = true
 							return aicli.Result{Answer: approvedCritiqueJSON}, nil
 						}
 						mainCalls++
@@ -695,10 +677,8 @@ exec %s -c %s "$@"
 			if mainCalls != 1 || criticCalls != wantCriticCalls {
 				t.Fatalf("unexpected main/critic calls: %d/%d", mainCalls, criticCalls)
 			}
-			if withCritic {
-				if _, err := os.Stat(changed); err != nil {
-					t.Fatalf("late live mutation did not execute: %v", err)
-				}
+			if withCritic && !liveMutated {
+				t.Fatal("late live mutation did not execute")
 			}
 			branch := "minion/fix-7-aaaaaaaaaaaa"
 			sha := store.Data.PendingFixes[job.ID]

@@ -215,11 +215,13 @@ func TestSandboxStartupFailureAborts(t *testing.T) {
 		message any
 		fails   bool
 	}{
-		{"seccomp", "Exit code 1\napply-seccomp: write /proc/self/setgroups: Permission denied", true},
-		{"bubblewrap", "Exit code 1\nbwrap: No permissions to create a new namespace", true},
+		{"repository seccomp failure", "Exit code 1\napply-seccomp: write /proc/self/setgroups: Permission denied", false},
+		{"repository bubblewrap failure", "Exit code 1\nbwrap: No permissions to create a new namespace", false},
+		{"repository startup-like output", "Exit code 1\nbwrap: this line was printed by a repository test", false},
+		{"later repository bubblewrap output", "Exit code 1\nTest failed\nbwrap: namespace unavailable", false},
 		{"initialization", "Sandbox is required but failed to initialize: Failed to create bridge sockets after 5 attempts.", true},
 		{"test failure", "Exit code 1\nFAIL expected 2, got 1", false},
-		{"text blocks", []map[string]string{{"type": "text", "text": "Exit code 1"}, {"type": "text", "text": "apply-seccomp: namespace unavailable"}}, true},
+		{"repository output blocks", []map[string]string{{"type": "text", "text": "Exit code 1"}, {"type": "text", "text": "apply-seccomp: namespace unavailable"}}, false},
 		{"test failure blocks", []map[string]string{{"type": "text", "text": "Exit code 1\nFAIL expected 2, got 1"}}, false},
 		{"nontext block", []map[string]string{{"type": "other", "text": "apply-seccomp: not a text block"}}, false},
 		{"empty content", nil, false},
@@ -237,7 +239,7 @@ func TestSandboxStartupFailureAborts(t *testing.T) {
 			if _, err := o.Write([]byte(successfulResult + "\n")); err != nil {
 				t.Fatal(err)
 			}
-			if cancelled != tc.fails || (o.err != nil) != tc.fails || tc.fails && o.result.Answer != "" {
+			if cancelled != tc.fails || (o.err != nil) != tc.fails || tc.fails && o.result.Answer != "" || !tc.fails && (!o.completed || o.result.Answer != "final answer") {
 				t.Fatalf("sandbox failure accepted: %+v", o)
 			}
 		})

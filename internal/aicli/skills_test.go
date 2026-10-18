@@ -4,10 +4,23 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/linkdata/minion/internal/skills"
 )
+
+func TestSkillInstructionsQuotesPaths(t *testing.T) {
+	if got := SkillInstructions(nil); got != "" {
+		t.Fatalf("empty skills produced instructions: %q", got)
+	}
+	path := "/trusted/line\n\"quoted\"/SKILL.md"
+	got := SkillInstructions([]string{path})
+	if !strings.Contains(got, "- "+strconv.Quote(path)+"\n") || strings.Contains(got, path) {
+		t.Fatalf("skill path was not quoted: %q", got)
+	}
+}
 
 func TestMaterializeSkillsKeepsPartialCleanupOwnership(t *testing.T) {
 	for _, invalid := range []bool{false, true} {
@@ -27,7 +40,6 @@ func TestMaterializeSkillsKeepsPartialCleanupOwnership(t *testing.T) {
 			if (err != nil) != invalid || owned == "" {
 				t.Fatalf("owned=%q err=%v", owned, err)
 			}
-			defer os.RemoveAll(owned)
 			if !invalid && (len(paths) != 2 || paths[1] != external) {
 				t.Fatalf("paths=%v", paths)
 			}

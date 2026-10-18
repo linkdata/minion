@@ -21,7 +21,8 @@ import (
 	"github.com/linkdata/minion/internal/workspace"
 )
 
-// preparedAction owns orchestration-only publication state. Only Job crosses the worker boundary.
+// preparedAction owns orchestration-only publication state. Job and Result are portable data;
+// usage/evidence checkpoints use in-process orchestrator callbacks until #96.
 type preparedAction struct {
 	job Job
 
@@ -53,8 +54,11 @@ func (e *Orchestrator) perform(ctx context.Context, request monitor.Job) error {
 		runner.WorkRoot = e.WorkRoot
 		if prepared.job.Critic != nil {
 			workRoot, logger, job := e.WorkRoot, e.Logger, prepared.job
-			runner.recordReview = func(result Result) error {
-				return saveReviewEvidence(workRoot, job, result, logger)
+			runner.recordReview = func(calls []CallUsage, refutations []Refutation) error {
+				return saveReviewEvidence(workRoot, job, Result{
+					Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head,
+					Calls: calls, Refutations: refutations,
+				}, logger)
 			}
 		}
 		result, err = runner.Run(ctx, prepared.job)
@@ -181,6 +185,7 @@ func (e *Orchestrator) portableJob(ctx context.Context, p *preparedAction, title
 	job := Job{
 		Version: ProtocolVersion,
 		Identity: Identity{
+			// Local executor correlation label; transport authentication is #96 work.
 			JobID: request.ID, AttemptID: e.attemptID, ExecutorID: "local",
 			Repository: request.Repository.Name, RepositoryID: request.Repository.ID, OwnerID: request.Repository.OwnerID,
 			Requester: request.Source.Author.Login, RequesterID: request.Source.Author.ID,
@@ -195,6 +200,9 @@ func (e *Orchestrator) portableJob(ctx context.Context, p *preparedAction, title
 		job.Critic = &critic
 		job.CriticMaxRounds = cmp.Or(e.CriticMaxRounds, config.DefaultCriticMaxRounds)
 		job.CriticNonblockingRounds = config.ResolveCriticNonblockingRounds(job.CriticMaxRounds, e.CriticNonblockingRounds)
+	}
+	if err := job.Validate(); err != nil {
+		return Job{}, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
 	}
 	return job, nil
 }
@@ -211,13 +219,10 @@ func (e *Orchestrator) publish(ctx context.Context, p *preparedAction, result Re
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if p.request.Command.Action == command.Fix && p.branch != "" {
-			if err := e.publishFixReply(ctx, p); err != nil {
-				return fmt.Errorf("%w: %w", monitor.ErrPostModelPublication, err)
-			}
-			return nil
+		if err := e.publishFixReply(ctx, p); err != nil {
+			return fmt.Errorf("%w: %w", monitor.ErrPostModelPublication, err)
 		}
-		return errors.New("action has no prepared source")
+		return nil
 	}
 	e.logResult(p.job, result)
 	if err := e.retainReviewEvidence(p.job, result); err != nil {
@@ -342,11 +347,6 @@ func (e *Orchestrator) prepareFix(ctx context.Context, p *preparedAction) (*prep
 		return nil, fmt.Errorf("branch %s has a pull request but no remote branch", p.branch)
 	}
 	if expected != "" {
-		if _, err := e.GitHub.Branch(ctx, repo.FullName, p.branch); err == nil {
-			return nil, fmt.Errorf("legacy base branch %s exists; review and retire it before a new fix request", p.branch)
-		} else if !isNotFound(err) {
-			return nil, fmt.Errorf("check legacy base branch: %w", err)
-		}
 		delete(e.Store.Data.PendingFixes, request.ID)
 		if err := e.Store.Save(); err != nil {
 			return nil, fmt.Errorf("clear failed fork push checkpoint: %w", err)
@@ -370,9 +370,6 @@ func (e *Orchestrator) prepareFix(ctx context.Context, p *preparedAction) (*prep
 	p.job, err = e.portableJob(ctx, p, "", content.BodyText)
 	if err != nil {
 		return nil, err
-	}
-	if err := workspace.ValidateFixPaths(p.job.Source.Files, p.job.Source.Omitted); err != nil {
-		return nil, fmt.Errorf("%w: %w", gitwork.ErrUnsupportedSource, err)
 	}
 	if err := p.checkout.NewBranch(ctx, p.branch); err != nil {
 		return nil, err

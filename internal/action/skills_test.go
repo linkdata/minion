@@ -17,15 +17,19 @@ import (
 	"github.com/linkdata/minion/internal/skills"
 )
 
-func TestSelectSkillsReportsRequiredAndOptionalResolutionErrors(t *testing.T) {
+func TestConfigureRoleReportsRequiredAndOptionalResolutionErrors(t *testing.T) {
 	for _, provider := range []string{"codex", "claude"} {
 		t.Run(provider, func(t *testing.T) {
 			var journal bytes.Buffer
 			runner := Runner{Logger: log.New(&journal, "", 0)}
-			if _, err := runner.SelectSkills(provider, []string{"invalid skill URL"}, nil); err == nil || !strings.Contains(err.Error(), provider+" skill:") {
+			if err := runner.ConfigureRole(RoleSettings{Provider: provider, Skills: []string{"invalid skill URL"}}); err == nil || !strings.Contains(err.Error(), provider+" skill:") {
 				t.Fatalf("required skill error was lost: %v", err)
 			}
-			selected, err := runner.SelectSkills(provider, nil, []string{"invalid skill URL", skills.BuiltinAntiPromptInjection})
+			err := runner.ConfigureRole(RoleSettings{Provider: provider, AlwaysOnSkills: []string{"invalid skill URL", skills.BuiltinAntiPromptInjection}})
+			selected := runner.Codex.Skills
+			if provider == "claude" {
+				selected = runner.Claude.Skills
+			}
 			if err != nil || !slices.Equal(selected, []string{skills.BuiltinAntiPromptInjection}) || !strings.Contains(journal.String(), "skip unavailable "+provider+" always-on skill invalid skill URL:") {
 				t.Fatalf("optional skill error was not logged and skipped: skills=%v error=%v journal=%s", selected, err, &journal)
 			}

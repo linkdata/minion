@@ -8,10 +8,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -70,7 +72,8 @@ func (index *OfflineIndex) Changes(ctx context.Context) ([]workspace.Change, err
 		return nil, err
 	}
 	total := int64(0)
-	for name, size := range index.tracked {
+	for _, name := range slices.Sorted(maps.Keys(index.tracked)) {
+		size := index.tracked[name]
 		filename := filepath.Join(index.source, filepath.FromSlash(name))
 		if err := workspace.CheckRoot(filepath.Dir(filename)); err != nil {
 			if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) || errors.Is(err, syscall.ELOOP) {
@@ -102,7 +105,7 @@ func (index *OfflineIndex) Changes(ctx context.Context) ([]workspace.Change, err
 		return nil, err
 	}
 	// Bound new output before Git hashes it; ignored files and metadata remain excluded.
-	untracked, err := index.run(ctx, (workspace.MaxChanges+1)*(workspace.MaxPathBytes+1), nil, "ls-files", "-z", "--others", "--exclude-standard", "--", ".", excludeGit, excludeGitContents)
+	untracked, err := index.run(ctx, maxChangedPathListBytes, nil, "ls-files", "-z", "--others", "--exclude-standard", "--", ".", excludeGit, excludeGitContents)
 	if err != nil {
 		if errors.Is(err, ErrCheckoutTooLarge) {
 			return nil, ErrTooManyFiles
@@ -114,16 +117,13 @@ func (index *OfflineIndex) Changes(ctx context.Context) ([]workspace.Change, err
 		return nil, fmt.Errorf("invalid offline git untracked paths: %w", err)
 	}
 	if len(paths) > workspace.MaxChanges {
-		return nil, errors.New("fix result exceeds changed file limit")
+		return nil, fmt.Errorf("%w: fix result exceeds changed file limit", ErrTooManyFiles)
 	}
 	for _, path := range paths {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 		name := string(path)
-		if strings.HasSuffix(name, "/") {
-			return nil, fmt.Errorf("untracked nested repository output %q must be removed or ignored", name)
-		}
 		if !workspace.ValidPath(name) {
 			return nil, fmt.Errorf("fix output %q is not a portable regular-file path", name)
 		}
@@ -285,7 +285,7 @@ func parseIndexChanges(raw []byte) ([]workspace.Change, []string, error) {
 		return nil, nil, errors.New("invalid offline git diff")
 	}
 	if len(parts)/2 > workspace.MaxChanges {
-		return nil, nil, errors.New("fix result exceeds changed file limit")
+		return nil, nil, fmt.Errorf("%w: fix result exceeds changed file limit", ErrTooManyFiles)
 	}
 	changes, objects := make([]workspace.Change, 0, len(parts)/2), make([]string, 0, len(parts)/2)
 	for i := 0; i < len(parts); i += 2 {
@@ -319,29 +319,31 @@ func gitBlobID(data []byte) string {
 }
 
 func (index *OfflineIndex) run(ctx context.Context, limit int, input []byte, args ...string) ([]byte, error) {
-	ctx, cancel := context.WithCancel(ctx)
+	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	gitArgs := []string{"--git-dir=" + index.dir, "--work-tree=" + index.source,
 		"-c", "credential.helper=", "-c", "protocol.allow=never"}
 	env := append([]string{"PATH=" + safePath(os.Getenv("PATH")), "HOME=" + index.dir, "TMPDIR=" + index.dir}, hardeningEnv()...)
-	cmd := gitCommand(ctx, index.binary, index.dir, env, append(gitArgs, args...)...)
+	cmd := gitCommand(runCtx, index.binary, index.dir, env, append(gitArgs, args...)...)
 	output, diagnostic := bounded.Buffer{Limit: limit, Cancel: cancel}, bounded.Buffer{Limit: bounded.DiagnosticBytes}
 	cmd.Stdout, cmd.Stderr, cmd.Stdin = &output, &diagnostic, bytes.NewReader(input)
 	err := cmd.Run()
-	if output.Exceeded {
+	contextErr := ctx.Err()
+	if output.Exceeded && contextErr == nil {
 		return nil, fmt.Errorf("offline git %s output exceeds action limit: %w", args[0], ErrCheckoutTooLarge)
 	}
-	if err != nil {
+	if err != nil || contextErr != nil {
 		var exit *exec.ExitError
-		if args[0] == "check-ignore" && errors.As(err, &exit) && exit.ExitCode() == 1 && ctx.Err() == nil {
+		if args[0] == "check-ignore" && errors.As(err, &exit) && exit.ExitCode() == 1 && contextErr == nil {
 			return output.Bytes(), nil
 		}
-		if contextErr := ctx.Err(); contextErr != nil {
+		message := strings.TrimSpace(diagnostic.String())
+		if contextErr != nil {
 			err = errors.Join(err, contextErr)
 		} else {
-			err = classifyPathError(args[0], diagnostic.String(), err)
+			err = classifyPathError(args[0], message, err)
 		}
-		if message := strings.TrimSpace(diagnostic.String()); message != "" {
+		if message != "" {
 			return nil, fmt.Errorf("offline git %s: %w: %q", args[0], err, message)
 		}
 		return nil, fmt.Errorf("offline git %s: %w", args[0], err)

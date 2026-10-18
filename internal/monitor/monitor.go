@@ -374,12 +374,14 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			}
 			m.logf("run %s from @%s in %s #%d", cmd.Action, item.Author.Login, repo.Name, number)
 			if err := m.Handler.Execute(ctx, job); err != nil {
-				interrupted := ctx.Err() != nil && errors.Is(err, context.Canceled) && !errors.Is(err, ErrPostModelPublication)
-				if interrupted {
+				publicationFailure := errors.Is(err, ErrPostModelPublication)
+				interrupted := ctx.Err() != nil && errors.Is(err, context.Canceled) && !publicationFailure
+				switch {
+				case interrupted:
 					jobFailure.Attempts--
-				} else if errors.Is(err, ErrTerminalJob) {
+				case errors.Is(err, ErrTerminalJob):
 					jobFailure.Attempts = maxJobAttempts
-				} else if !errors.Is(err, ErrPostModelPublication) && (errors.Is(err, workroot.ErrUnsafe) || infrastructureFailure(err)) {
+				case !publicationFailure && (errors.Is(err, workroot.ErrUnsafe) || infrastructureFailure(err)):
 					jobFailure.Attempts--
 				}
 				store.Data.JobFailures[job.ID] = jobFailure
@@ -395,15 +397,13 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 					if replyErr := m.finishFailedJob(ctx, store, job, items, started, jobFailure); replyErr != nil {
 						failures = append(failures, replyErr)
 					}
-					if ctx.Err() != nil {
-						return stop(err)
-					}
-					continue
 				}
 				if ctx.Err() != nil {
 					return stop(err)
 				}
-				failures = append(failures, fmt.Errorf("%s from %s: %w", cmd.Action, item.HTMLURL, err))
+				if jobFailure.Attempts < maxJobAttempts {
+					failures = append(failures, fmt.Errorf("%s from %s: %w", cmd.Action, item.HTMLURL, err))
+				}
 				continue
 			}
 			store.Data.Processed[job.ID] = started

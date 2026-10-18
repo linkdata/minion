@@ -45,6 +45,38 @@ func TestPrepareRootDoesNotCreateMissingDirectory(t *testing.T) {
 	}
 }
 
+func TestPrepareRootResolvesRelativeParentsThroughPWD(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	actual := filepath.Join(root, "actual")
+	nested := filepath.Join(actual, "nested")
+	if err := os.MkdirAll(nested, 0700); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(root, "alias")
+	if err := os.Symlink(nested, alias); err != nil {
+		t.Fatal(err)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(cwd); err != nil {
+			t.Error(err)
+		}
+	})
+	if err := os.Chdir(nested); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PWD", alias)
+	if got, err := PrepareRoot(".."); err != nil || got != actual {
+		t.Fatalf("relative parent resolved=%q want=%q error=%v", got, actual, err)
+	}
+}
+
 func TestSharedAncestorValidationPreservesLayoutRules(t *testing.T) {
 	for _, test := range []struct {
 		name   string
@@ -67,6 +99,38 @@ func TestSharedAncestorValidationPreservesLayoutRules(t *testing.T) {
 				t.Fatalf("layout validation=%v, want %q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestSourceLayoutBoundsFilesAndDistinctAncestors(t *testing.T) {
+	files := make([]File, MaxFiles)
+	paths := make([]string, len(files))
+	for i := range files {
+		// Each file has nine private ancestors: exactly MaxEntries total.
+		paths[i] = fmt.Sprintf("d%05d/a/b/c/d/e/f/g/h/file", i)
+		files[i] = File{Path: paths[i], Mode: Regular}
+	}
+	for _, extra := range []bool{false, true} {
+		if extra {
+			files[0].Path = "extra/" + files[0].Path
+		}
+		for _, err := range []error{
+			ValidateSnapshot(Snapshot{Head: strings.Repeat("a", 40), Files: files}),
+			ValidateFixPaths(files, nil),
+		} {
+			if (err != nil) != extra || (err != nil && !strings.Contains(err.Error(), "entry limit")) {
+				t.Fatalf("extra ancestor=%t validation=%v", extra, err)
+			}
+		}
+	}
+	if err := ValidateChangedPaths(paths, []Change{{Path: "new-file", Mode: Regular}}); err == nil || !strings.Contains(err.Error(), "entry limit") {
+		t.Fatalf("final layout exceeded entry bound: %v", err)
+	}
+	for i := range files {
+		files[i].Path = fmt.Sprintf("shared/a/b/c/d/e/f/g/h/i/file-%05d", i)
+	}
+	if err := ValidateSnapshot(Snapshot{Head: strings.Repeat("a", 40), Files: files}); err != nil {
+		t.Fatalf("shared ancestors counted repeatedly: %v", err)
 	}
 }
 

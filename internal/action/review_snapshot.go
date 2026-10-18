@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"reflect"
 
 	"github.com/linkdata/minion/internal/cleanup"
 	"github.com/linkdata/minion/internal/command"
@@ -15,9 +14,7 @@ import (
 
 type reviewSnapshot struct {
 	source, outputDir string
-	liveOutputDir     string
 	base              []workspace.File
-	index             *gitwork.OfflineIndex
 	ownedSource       bool
 	changes           []workspace.Change
 	artifacts         []workspace.File
@@ -25,7 +22,7 @@ type reviewSnapshot struct {
 
 // Freeze outside the main model's writable grants so background work cannot change the critic's input.
 func freezeReviewSnapshot(ctx context.Context, workRoot string, job Job, source, outputDir string, index *gitwork.OfflineIndex) (snapshot *reviewSnapshot, resultErr error) {
-	snapshot = &reviewSnapshot{source: source, liveOutputDir: outputDir, base: job.Source.Files, index: index}
+	snapshot = &reviewSnapshot{source: source, base: job.Source.Files}
 	defer func() {
 		if resultErr != nil {
 			resultErr = errors.Join(resultErr, snapshot.close())
@@ -67,24 +64,10 @@ func (s *reviewSnapshot) verify(ctx context.Context) error {
 		if err := workspace.CheckChangesUnchanged(ctx, s.source, s.base, s.changes); err != nil {
 			return fmt.Errorf("frozen candidate source changed during critic review: %w", err)
 		}
-		changes, err := s.index.Changes(ctx)
-		if err != nil {
-			return err
-		}
-		if !reflect.DeepEqual(s.changes, changes) {
-			return errors.New("candidate source changed during critic review")
-		}
 	}
 	if s.outputDir != "" {
 		if err := workspace.CheckUnchanged(ctx, s.outputDir, s.artifacts); err != nil {
 			return fmt.Errorf("frozen candidate reports changed during critic review: %w", err)
-		}
-		files, _, err := readAuditArtifacts(s.liveOutputDir, false)
-		if err != nil {
-			return err
-		}
-		if !reflect.DeepEqual(s.artifacts, files) {
-			return errors.New("candidate reports changed during critic review")
 		}
 	}
 	return nil

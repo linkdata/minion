@@ -161,7 +161,7 @@ func TestPrepareFixClassifiesUnsupportedLayoutBeforeBranchOrModels(t *testing.T)
 				Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"fix"}},
 				Source:     github.Item{Author: github.User{ID: 3, Login: "writer"}, UpdatedAt: time.Now()}, Command: command.Command{Name: "fix", Action: command.Fix},
 			}
-			if err := attemptFixture(orchestrator).perform(testActionContext(t), request); !errors.Is(err, gitwork.ErrUnsupportedSource) || errors.Is(err, gitwork.ErrCheckoutTooLarge) {
+			if err := attemptFixture(orchestrator).perform(testActionContext(t), request); !errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, gitwork.ErrUnsupportedSource) || errors.Is(err, gitwork.ErrCheckoutTooLarge) {
 				t.Fatalf("unsupported fix layout lost classification: %v", err)
 			}
 			if _, err := os.Stat(branched); !errors.Is(err, os.ErrNotExist) {

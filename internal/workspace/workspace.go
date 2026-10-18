@@ -235,6 +235,9 @@ func validatePaths(paths []string, folded bool) error {
 				break
 			}
 			directories[parentKey] = parent
+			if len(seen)+len(directories) > MaxEntries {
+				return errors.New("source layout exceeds entry limit")
+			}
 		}
 	}
 	return nil
@@ -258,11 +261,18 @@ func PrepareRoot(root string) (string, error) {
 	if strings.TrimSpace(root) == "" {
 		return "", errors.New("work root is required")
 	}
-	root, err := filepath.Abs(root)
+	if !filepath.IsAbs(root) {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return "", fmt.Errorf("resolve work root: %w", err)
+		}
+		root = cwd + string(os.PathSeparator) + root
+	}
+	root, err := filepath.EvalSymlinks(root)
 	if err != nil {
 		return "", fmt.Errorf("resolve work root: %w", err)
 	}
-	return filepath.EvalSymlinks(root)
+	return root, nil
 }
 
 // OpenDirectory anchors collection without following any symlink component.
@@ -594,9 +604,6 @@ func changedPaths(base []string, changes []Change) ([]string, error) {
 
 func safeParents(root, name string) error {
 	for parent := filepath.Dir(name); parent != root; parent = filepath.Dir(parent) {
-		if parent == filepath.Dir(parent) {
-			return errors.New("changed path escapes workspace")
-		}
 		info, err := os.Lstat(parent)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
@@ -708,8 +715,11 @@ func readFile(name string, limit int64) (data []byte, info fs.FileInfo, resultEr
 	if err != nil {
 		return nil, nil, err
 	}
-	if !opened.Mode().IsRegular() || opened.Size() > limit {
-		return nil, nil, errors.New("file is not regular or exceeds byte limit")
+	if !opened.Mode().IsRegular() {
+		return nil, nil, errors.New("file is not regular")
+	}
+	if opened.Size() > limit {
+		return nil, nil, errors.New("file exceeds byte limit")
 	}
 	if !singleLink(opened) {
 		return nil, nil, errors.New("file must have exactly one hard link")

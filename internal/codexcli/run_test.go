@@ -442,7 +442,7 @@ func TestChildEnvironmentIsolatesCodexSessionButKeepsAuthentication(t *testing.T
 		"GH_TOKEN=secret", "GITHUB_TOKEN=secret", "OPENAI_API_KEY=secret", "PGPASSWORD=secret",
 		"PATH=/usr/bin", "HOME=/trusted/home", "HTTPS_PROXY=http://proxy", "SSL_CERT_FILE=/cert",
 		"TMPDIR=/host-tmp", "GOCACHE=/host-cache",
-	}, "/runtime", "/cache", false)
+	}, "/runtime", "/cache", "/trusted/codex", false)
 	joined := strings.Join(env, "\n")
 	for _, denied := range []string{"unsafe-parent-profile", "CODEX_THREAD_ID", "CODEX_SESSION_ID", "CODEX_APP_TOOLS_PIPE_PATH", "CODEX_SANDBOX_NETWORK_DISABLED", "GH_TOKEN", "GITHUB_TOKEN", "OPENAI_API_KEY", "PGPASSWORD", "/host-tmp", "/host-cache"} {
 		if strings.Contains(joined, denied) {

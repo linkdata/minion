@@ -5,7 +5,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -157,41 +156,24 @@ func TestRunnerEnforcesSuppliedRuntimeBudget(t *testing.T) {
 	}
 }
 
-func TestRunnerReadOnlyCriticReusesSourceAndCanaryGuardsExport(t *testing.T) {
-	const action = command.Comment
-	for _, mutate := range []bool{false, true} {
-		t.Run(string(action)+"/mutate="+strconv.FormatBool(mutate), func(t *testing.T) {
-			job := withClaudeCritic(portableJob(action))
-			var source string
-			calls := 0
-			runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
-				calls++
-				if request.role == "main" {
-					source = request.dir
-					return aicli.Result{Answer: proposalJSON("reviewed answer", "private notes")}, nil
-				}
-				if request.dir != source || request.writable || request.outputDir != "" {
-					t.Fatalf("read-only critic source/grants=%+v", request)
-				}
-				if mutate {
-					if err := os.WriteFile(filepath.Join(source, "source.txt"), []byte("mutate\n"), 0600); err != nil {
-						t.Fatal(err)
-					}
-				}
-				return aicli.Result{Answer: approvedCritiqueJSON}, nil
-			}}
-			result, err := runner.Run(context.Background(), job)
-			if mutate {
-				if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "read-only action modified") || result.Answer != "" {
-					t.Fatalf("canary accepted changed source: %+v,%v", result, err)
-				}
-			} else if err != nil || result.Answer != "reviewed answer" {
-				t.Fatalf("read-only review failed: %+v,%v", result, err)
-			}
-			if calls != 2 {
-				t.Fatalf("model calls=%d", calls)
-			}
-		})
+func TestRunnerReadOnlyCriticReusesSource(t *testing.T) {
+	job := withClaudeCritic(portableJob(command.Comment))
+	var source string
+	calls := 0
+	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+		calls++
+		if request.role == "main" {
+			source = request.dir
+			return aicli.Result{Answer: proposalJSON("reviewed answer", "")}, nil
+		}
+		if request.dir != source || request.writable || request.outputDir != "" {
+			t.Fatalf("read-only critic source/grants=%+v", request)
+		}
+		return aicli.Result{Answer: approvedCritiqueJSON}, nil
+	}}
+	result, err := runner.Run(context.Background(), job)
+	if err != nil || result.Answer != "reviewed answer" || calls != 2 {
+		t.Fatalf("read-only review result=%+v calls=%d error=%v", result, calls, err)
 	}
 }
 

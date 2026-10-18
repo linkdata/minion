@@ -46,14 +46,18 @@ func run() int {
 		logger.Printf("unexpected positional arguments; use flags")
 		return 2
 	}
-	cfg, err := config.Load(*configPath)
+	loadedPath, err := filepath.Abs(*configPath)
+	if err != nil {
+		logger.Printf("config: %v", err)
+		return 2
+	}
+	cfg, err := config.Load(loadedPath)
 	if err != nil {
 		logger.Printf("config: %v", err)
 		return 2
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	context.AfterFunc(ctx, stop)
 	if *installSkills {
 		if *loop || *check {
 			logger.Printf("-install-skills cannot be combined with -loop or -check")
@@ -79,7 +83,7 @@ func run() int {
 		logger.Printf("work root: %v", err)
 		return 1
 	}
-	if err := checkWorkRootIsolation(cfg); err != nil {
+	if err := checkWorkRootIsolation(cfg, loadedPath); err != nil {
 		logger.Printf("work root: %v", err)
 		return 1
 	}
@@ -131,7 +135,7 @@ func run() int {
 	}()
 
 	orchestrator := newOrchestrator(cfg, client, store, logger, checkWorkRoot)
-	watcher := &monitor.Monitor{Config: cfg, ConfigPath: *configPath, GitHub: client, Handler: orchestrator, Logger: logger}
+	watcher := &monitor.Monitor{Config: cfg, ConfigPath: loadedPath, GitHub: client, Handler: orchestrator, Logger: logger}
 	for {
 		next, err := watcher.RunOnce(ctx, store)
 		if err != nil {
@@ -191,7 +195,7 @@ func newOrchestrator(cfg config.Config, client *github.Client, store *state.Stor
 	}
 }
 
-func checkWorkRootIsolation(cfg config.Config) error {
+func checkWorkRootIsolation(cfg config.Config, configPath string) error {
 	root, err := workspace.PrepareRoot(cfg.WorkRoot)
 	if err != nil {
 		return err
@@ -217,7 +221,34 @@ func checkWorkRootIsolation(cfg config.Config) error {
 			return err
 		}
 	}
-	return runner.CheckWorkRootIsolation(root, cfg.Main, cfg.Adversarial)
+	if err := runner.CheckWorkRootIsolation(root, cfg.Main, cfg.Adversarial); err != nil {
+		return err
+	}
+	private := []string{configPath}
+	// Shared system reads can expose stored credentials even for an unused provider.
+	for _, provider := range []string{"codex", "claude"} {
+		var home string
+		var err error
+		switch provider {
+		case "codex":
+			home, err = codexcli.HomePath()
+			if home != "" {
+				private = append(private, home, filepath.Join(home, "auth.json"), filepath.Join(home, "config.toml"))
+			}
+		case "claude":
+			home, err = claudecli.HomePath()
+			if home != "" {
+				private = append(private, home, filepath.Join(home, ".credentials.json"), filepath.Join(home, ".claude.json"), filepath.Join(home, "settings.json"))
+			}
+			if userHome, homeErr := os.UserHomeDir(); homeErr == nil {
+				private = append(private, filepath.Join(userHome, ".claude.json"))
+			}
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return runner.CheckPrivatePaths(private, cfg.Main, cfg.Adversarial)
 }
 
 func logCommandSkills(cfg config.Config, logger *log.Logger) {
@@ -300,19 +331,7 @@ func checkModels(ctx context.Context, cfg *config.Config, logger *log.Logger) (e
 }
 
 func checkCodexCLI(ctx context.Context, settings config.CodexConfig) error {
-	binary, err := aicli.AbsoluteExecutable("codex")
-	if err != nil {
-		return err
-	}
-	if settings.APIKey != "" {
-		// Model discovery authenticates with the configured key. An ambient
-		// login status cannot validate that credential.
-		return nil
-	}
-	if _, err := aicli.Probe(ctx, binary, "codex", []string{"login", "status"}, "", nil, ""); err != nil {
-		return fmt.Errorf("codex login status failed: %w", err)
-	}
-	return nil
+	return codexcli.CheckLogin(ctx, settings)
 }
 
 func checkRepositories(ctx context.Context, client *github.Client, cfg config.Config, logger *log.Logger) error {

@@ -11,7 +11,6 @@ import (
 	"strings"
 
 	"github.com/linkdata/minion/internal/aicli"
-	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -112,10 +111,8 @@ func validateAuditFiles(ctx context.Context, files []workspace.File, validationR
 		if err != nil {
 			return "", err
 		}
-		stderr := bounded.Tail{}
-		cmd.Stderr = &stderr
 		if err := cmd.Run(); err != nil {
-			return "", fmt.Errorf("audit %s failed: %w: %q", validator.script, err, stderr.String())
+			return "", fmt.Errorf("audit %s failed: %w", validator.script, err)
 		}
 	}
 	var units []struct {

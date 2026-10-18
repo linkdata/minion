@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"time"
 
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/workspace"
@@ -16,10 +15,8 @@ import (
 
 // retainedReview contains review evidence only, never a publication outcome.
 type retainedReview struct {
-	Version                 int          `json:"version"`
 	Identity                Identity     `json:"identity"`
 	SourceRef               string       `json:"source_ref"`
-	RecordedAt              time.Time    `json:"recorded_at"`
 	CriticMaxRounds         int          `json:"critic_max_rounds"`
 	CriticNonblockingRounds int          `json:"critic_nonblocking_rounds"`
 	Calls                   []CallUsage  `json:"calls"`
@@ -34,7 +31,7 @@ func (e *Orchestrator) retainReviewEvidence(job Job, result Result) (resultErr e
 			resultErr = fmt.Errorf("%w: retain private review evidence: %w", monitor.ErrTerminalJob, resultErr)
 		}
 	}()
-	if job.Critic == nil && len(result.Refutations) == 0 {
+	if job.Critic == nil {
 		return nil
 	}
 	return saveReviewEvidence(e.WorkRoot, job, result, e.Logger)
@@ -77,7 +74,7 @@ func saveReviewEvidence(workRoot string, job Job, result Result, logger *log.Log
 		return err
 	}
 	record := retainedReview{
-		Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, RecordedAt: time.Now().UTC(),
+		Identity: job.Identity, SourceRef: job.Source.Head,
 		CriticMaxRounds: job.CriticMaxRounds, CriticNonblockingRounds: job.CriticNonblockingRounds,
 		Calls: result.Calls, Refutations: result.Refutations,
 	}
@@ -102,7 +99,7 @@ func saveReviewEvidence(workRoot string, job Job, result Result, logger *log.Log
 		if err := json.Unmarshal(previous, &saved); err != nil {
 			return errors.New("saved review evidence is invalid")
 		}
-		if saved.Version != record.Version || saved.Identity != record.Identity || saved.SourceRef != record.SourceRef ||
+		if saved.Identity != record.Identity || saved.SourceRef != record.SourceRef ||
 			saved.CriticMaxRounds != record.CriticMaxRounds || saved.CriticNonblockingRounds != record.CriticNonblockingRounds ||
 			len(saved.Calls) > len(record.Calls) || len(saved.Refutations) > len(record.Refutations) ||
 			!slices.Equal(saved.Calls, record.Calls[:len(saved.Calls)]) || !slices.Equal(saved.Refutations, record.Refutations[:len(saved.Refutations)]) {

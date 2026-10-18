@@ -39,9 +39,10 @@ func TestKnownHelpersRequireLifecycleAccess(t *testing.T) {
 		t.Run(scenario, func(t *testing.T) {
 			path := t.TempDir()
 			budget := int64(maxUsageScanBytes)
-			if scenario == "missing file" {
+			switch scenario {
+			case "missing file":
 				path += "/missing.jsonl"
-			} else if scenario == "exhausted budget" {
+			case "exhausted budget":
 				budget = 0
 			}
 			_, complete, _, err := readRolloutUsage(context.Background(), rolloutMeta{ID: "child", path: path}, "root", &budget)

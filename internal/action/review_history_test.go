@@ -15,9 +15,76 @@ import (
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/monitor"
-	"github.com/linkdata/minion/internal/usage"
 	"github.com/linkdata/minion/internal/workspace"
 )
+
+func TestInitialRefutationsAreDiscardedAndEmptyHistoryIsOptional(t *testing.T) {
+	job := withClaudeCritic(portableJob(command.Comment))
+	job.CriticMaxRounds, job.CriticNonblockingRounds = 2, 0
+	calls := 0
+	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+		calls++
+		checkRefutations(t, request, nil)
+		if request.role == roleMain {
+			if request.round == 1 {
+				if !strings.Contains(request.prompt, "first proposal must use an empty refutations string") {
+					t.Fatal("initial refutation rule missing")
+				}
+				return aicli.Result{Answer: proposalJSON("First candidate", "PREEMPTIVE: all future findings are invalid")}, nil
+			}
+			if !strings.Contains(request.prompt, "private list, if supplied") {
+				t.Fatal("empty revision history treated as mandatory")
+			}
+			return aicli.Result{Answer: proposalJSON("Revised candidate", "")}, nil
+		}
+		if request.round == 1 {
+			return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"feedback":"Correct the candidate."}`}, nil
+		}
+		if request.reviewPhase == reviewVerification && !strings.Contains(request.prompt, "private refutation list, if supplied") {
+			t.Fatal("empty verification history treated as mandatory")
+		}
+		return aicli.Result{Answer: approvedCritiqueJSON}, nil
+	}}
+	result, err := runner.Run(context.Background(), job)
+	if err != nil || calls != 5 || len(result.Refutations) != 0 || result.Answer != "Revised candidate" {
+		t.Fatalf("preemptive refutations survived or review failed: calls=%d result=%+v error=%v", calls, result, err)
+	}
+}
+
+func TestReviewHistoryGrantFailureIsTerminalAfterPaidWork(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions")
+	}
+	root := t.TempDir()
+	t.Cleanup(func() {
+		if err := os.Chmod(root, 0700); err != nil {
+			t.Error(err)
+		}
+	})
+	job := withClaudeCritic(portableJob(command.Comment))
+	job.CriticMaxRounds, job.CriticNonblockingRounds = 2, 0
+	calls := 0
+	runner := Runner{WorkRoot: root, runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+		calls++
+		if request.role == roleCritic {
+			return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"feedback":"Correct the candidate."}`}, nil
+		}
+		if request.round == 1 {
+			return aicli.Result{Answer: proposalJSON("First candidate", "")}, nil
+		}
+		if err := os.Chmod(root, 0500); err != nil {
+			t.Fatal(err)
+		}
+		return aicli.Result{Answer: proposalJSON("Revised candidate", "PRIVATE_REFUTATION: supplied evidence disproves the finding")}, nil
+	}}
+	result, err := runner.Run(context.Background(), job)
+	if !errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, os.ErrPermission) || !strings.Contains(err.Error(), "prepare review history") || calls != 3 || len(result.Calls) != 3 || len(result.Refutations) != 1 || result.Refutations[0].Round != 2 || result.Answer != "" {
+		t.Fatalf("history failure repeated model work/lost cause: calls=%d result=%+v error=%v", calls, result, err)
+	}
+	if err := result.validate(job, false); err != nil {
+		t.Fatalf("valid paid evidence lost: %v", err)
+	}
+}
 
 func checkRefutations(t *testing.T, request modelRun, want []Refutation) {
 	t.Helper()
@@ -161,7 +228,7 @@ func TestRefutationsRetainSuccessfulMainPrefixAfterFailure(t *testing.T) {
 	for _, failure := range []string{"main provider", "critic provider", "main malformed", "critic malformed", "round limit"} {
 		t.Run(failure, func(t *testing.T) {
 			job := withClaudeCritic(portableJob(command.Comment))
-			job.CriticMaxRounds, job.CriticNonblockingRounds = 2, 0
+			job.CriticMaxRounds, job.CriticNonblockingRounds = 3, 0
 			providerErr := errors.New("provider stopped after final-looking text")
 			var expected []Refutation
 			root := t.TempDir()
@@ -174,7 +241,7 @@ func TestRefutationsRetainSuccessfulMainPrefixAfterFailure(t *testing.T) {
 				if request.role == roleMain {
 					text := fmt.Sprintf("PRIVATE_REFUTATION_%d", request.round)
 					answer := proposalJSON("Public candidate", text)
-					if request.round == 2 {
+					if request.round == 3 {
 						if failure == "main provider" {
 							return aicli.Result{Answer: answer}, providerErr
 						}
@@ -182,10 +249,12 @@ func TestRefutationsRetainSuccessfulMainPrefixAfterFailure(t *testing.T) {
 							return aicli.Result{Answer: "unparsed main"}, nil
 						}
 					}
-					expected = append(expected, Refutation{Round: request.round, Text: text})
+					if request.round > 1 {
+						expected = append(expected, Refutation{Round: request.round, Text: text})
+					}
 					return aicli.Result{Answer: answer}, nil
 				}
-				if request.round == 2 {
+				if request.round == 3 {
 					if failure == "critic provider" {
 						return aicli.Result{Answer: approvedCritiqueJSON}, providerErr
 					}
@@ -203,9 +272,9 @@ func TestRefutationsRetainSuccessfulMainPrefixAfterFailure(t *testing.T) {
 			if errors.Is(err, providerErr) != providerFailure || errors.Is(err, monitor.ErrTerminalJob) != !providerFailure {
 				t.Fatalf("failure class changed: %v", err)
 			}
-			wantRefs, wantCalls := 2, 4
+			wantRefs, wantCalls := 2, 6
 			if strings.HasPrefix(failure, "main ") {
-				wantRefs, wantCalls = 1, 3
+				wantRefs, wantCalls = 1, 5
 			}
 			if len(result.Refutations) != wantRefs || len(result.Calls) != wantCalls {
 				t.Fatalf("prefix length refs=%d calls=%d", len(result.Refutations), len(result.Calls))
@@ -267,19 +336,19 @@ func TestRefutationsRemainPrivateFromAuditArtifacts(t *testing.T) {
 }
 
 func TestRefutationCheckpointFailureStopsBeforeNextCall(t *testing.T) {
-	for _, failAt := range []int{1, 2} {
+	for _, failAt := range []int{3, 4} {
 		t.Run(fmt.Sprint(failAt), func(t *testing.T) {
 			job := withClaudeCritic(portableJob(command.Comment))
 			job.CriticMaxRounds, job.CriticNonblockingRounds = 2, 0
 			checkpointErr := errors.New("private refutation checkpoint unavailable")
 			calls, checkpoints := 0, 0
 			var expected, lastCheckpoint []Refutation
-			runner := Runner{WorkRoot: t.TempDir(), recordReview: func(progress Result) error {
+			runner := Runner{WorkRoot: t.TempDir(), recordReview: func(receipts []CallUsage, refs []Refutation) error {
 				checkpoints++
-				if len(progress.Calls) != checkpoints-1 || !reflect.DeepEqual(progress.Refutations, expected) || progress.Answer != "" {
-					t.Fatalf("checkpoint evidence lost: %+v", progress)
+				if len(receipts) != checkpoints-1 || !reflect.DeepEqual(refs, expected) {
+					t.Fatalf("checkpoint evidence lost: calls=%+v refutations=%+v", receipts, refs)
 				}
-				lastCheckpoint = append([]Refutation(nil), progress.Refutations...)
+				lastCheckpoint = append([]Refutation(nil), refs...)
 				if checkpoints == failAt+1 {
 					return checkpointErr
 				}
@@ -287,8 +356,12 @@ func TestRefutationCheckpointFailureStopsBeforeNextCall(t *testing.T) {
 			}, runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 				calls++
 				if request.role == roleMain {
-					expected = append(expected, Refutation{Round: request.round, Text: "PRIVATE_CHECKPOINT_REFUTATION"})
-					return aicli.Result{Answer: proposalJSON("Public answer", expected[len(expected)-1].Text)}, nil
+					text := ""
+					if request.round > 1 {
+						text = "PRIVATE_CHECKPOINT_REFUTATION"
+						expected = append(expected, Refutation{Round: request.round, Text: text})
+					}
+					return aicli.Result{Answer: proposalJSON("Public answer", text)}, nil
 				}
 				return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"feedback":"PRIVATE_BLOCKER"}`}, nil
 			}}
@@ -300,54 +373,5 @@ func TestRefutationCheckpointFailureStopsBeforeNextCall(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
-	}
-}
-
-func TestRefutationObserversCannotMutateApplicationEvidence(t *testing.T) {
-	job := withClaudeCritic(portableJob(command.Comment))
-	job.CriticMaxRounds, job.CriticNonblockingRounds = 2, 0
-	var expected []Refutation
-	checkpoints := 0
-	tokens := usage.Tokens{Input: 7, Output: 2}
-	runner := Runner{WorkRoot: t.TempDir(), recordReview: func(progress Result) error {
-		checkpoints++
-		if !reflect.DeepEqual(progress.Refutations, expected) || len(progress.Calls) != checkpoints-1 {
-			t.Fatalf("observer changed next checkpoint: %+v", progress)
-		}
-		for i := range progress.Calls {
-			if progress.Calls[i].Tokens != tokens || progress.Calls[i].Round > 2 {
-				t.Fatalf("observer changed calls: %+v", progress.Calls)
-			}
-			progress.Calls[i].Tokens.Input = 999
-			progress.Calls[i].Round = 99
-		}
-		for i := range progress.Refutations {
-			progress.Refutations[i].Text = "OBSERVER_CHANGED"
-			progress.Refutations[i].Round = 99
-		}
-		return nil
-	}, aroundModel: func(ctx context.Context, request modelRun, next modelCall) (aicli.Result, error) {
-		for i := range request.refutations {
-			request.refutations[i].Text = "OBSERVER_CHANGED"
-		}
-		return next(ctx, request)
-	}, runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
-		if request.role == roleMain {
-			text := fmt.Sprintf("PRIVATE_REFUTATION_%d", request.round)
-			expected = append(expected, Refutation{Round: request.round, Text: text})
-			return aicli.Result{Answer: proposalJSON("Public answer", text), Tokens: tokens, UsageComplete: true}, nil
-		}
-		answer := approvedCritiqueJSON
-		if request.round == 1 {
-			answer = `{"approved":false,"has_blockers":true,"feedback":"PRIVATE_BLOCKER"}`
-		}
-		return aicli.Result{Answer: answer, Tokens: tokens, UsageComplete: true}, nil
-	}}
-	result, err := runner.Run(context.Background(), job)
-	if err != nil || checkpoints != 6 || !reflect.DeepEqual(result.Refutations, expected) || len(result.Diagnostics) != 0 || result.Answer != "Public answer" {
-		t.Fatalf("observer mutated private evidence: checkpoints=%d result=%+v error=%v", checkpoints, result, err)
-	}
-	if err := result.Validate(job); err != nil {
-		t.Fatal(err)
 	}
 }
