@@ -148,8 +148,8 @@ func TestRunnerReviewRevisionsFreezeCleanIndependentInputs(t *testing.T) {
 		if request.reviewPhase == "verification" {
 			revisionReview = request.dir
 			checkRefutations(t, request, []Refutation{{Round: 2, Text: "PRIVATE REFUTATION 2"}})
-			if revisionReview == firstReview || !strings.Contains(request.prompt, "Implement the missing edge case.") {
-				t.Fatal("verification lacks a fresh revision snapshot or its private evidence")
+			if revisionReview != firstReview || !strings.Contains(request.prompt, "Implement the missing edge case.") {
+				t.Fatal("verification changed paths or lacks its private evidence")
 			}
 		} else if request.dir != revisionReview {
 			t.Fatal("unchanged verification/full phases copied different candidates")

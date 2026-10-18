@@ -1,0 +1,317 @@
+package claudecli
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"slices"
+	"strings"
+	"testing"
+
+	"github.com/linkdata/minion/internal/config"
+	"github.com/linkdata/minion/internal/skills"
+	"github.com/linkdata/minion/internal/usage"
+)
+
+func TestSessionContinuesAndResetsAtStableRolePaths(t *testing.T) {
+	const doubled = `{"type":"result","subtype":"success","result":"continued","modelUsage":{"main":{"inputTokens":6,"cacheCreationInputTokens":10,"cacheReadInputTokens":14,"outputTokens":22}}}`
+	binary := fakeExecutable(t, "claude", `n=0
+[ ! -f "$0.count" ] || n=$(cat "$0.count")
+n=$((n+1)); printf '%s' "$n" > "$0.count"
+printf '%s\n' "$@" > "$0.$n.args"
+printf '%s\n' "$PWD" "$CLAUDE_CONFIG_DIR" > "$0.$n.paths"
+if [ -e "$PWD/prior-notes" ] || [ -e "$GOCACHE/prior-notes" ]; then printf old; else printf clean; fi > "$0.$n.scratch"
+cat >/dev/null
+resume=false
+for arg do [ "$arg" != --resume ] || resume=true; done
+if $resume; then printf '%s\n' '`+doubled+`'; else printf '%s\n' '`+successfulResult+`'; fi
+`)
+	workspace, oldGrant, newGrant := t.TempDir(), t.TempDir(), t.TempDir()
+	settings := config.ClaudeConfig{APIKey: "fixture-private-key", Model: "fixed-model", Effort: "high", Skills: []string{skills.BuiltinAntiPromptInjection}, ReadOnlyDirs: []string{oldGrant}}
+	var session Session
+	t.Cleanup(func() {
+		if err := session.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	known := usage.Tokens{Input: 15, CachedInput: 7, Output: 11}
+	for call := 1; call <= 3; call++ {
+		if call == 2 {
+			settings.ReadOnlyDirs = []string{newGrant}
+		}
+		if call == 3 {
+			for _, dir := range []string{session.runtimeDir, session.cacheDir} {
+				if err := os.WriteFile(filepath.Join(dir, "prior-notes"), []byte("previous critic findings"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			session.NewConversation()
+			settings.ReadOnlyDirs = nil
+		}
+		result, err := session.Run(context.Background(), workspace, "task", false, "", settings)
+		if err != nil || !result.UsageComplete || result.Tokens != known {
+			t.Fatalf("call%d: %+v, %v", call, result, err)
+		}
+	}
+	firstArgs := strings.Split(readFile(t, binary+".1.args"), "\n")
+	secondArgs := strings.Split(readFile(t, binary+".2.args"), "\n")
+	thirdArgs := strings.Split(readFile(t, binary+".3.args"), "\n")
+	option := func(args []string, flag string) string {
+		t.Helper()
+		at := slices.Index(args, flag)
+		if at < 0 || at+1 == len(args) {
+			t.Fatalf("missing%s: %q", flag, args)
+		}
+		return args[at+1]
+	}
+	firstID := option(firstArgs, "--session-id")
+	if firstID == "" || option(secondArgs, "--resume") != firstID || option(thirdArgs, "--session-id") == firstID {
+		t.Fatal("conversation selection did not continue then start fresh")
+	}
+	paths := readFile(t, binary+".1.paths")
+	if paths != readFile(t, binary+".2.paths") || paths != readFile(t, binary+".3.paths") {
+		t.Fatal("runtime or authentication path changed")
+	}
+	if readFile(t, binary+".3.scratch") != "clean" {
+		t.Fatal("fresh conversation retained model-writable critic notes")
+	}
+	for i, args := range [][]string{firstArgs, secondArgs, thirdArgs} {
+		for _, forbidden := range []string{"--continue", "--fork-session", "--no-session-persistence"} {
+			if slices.Contains(args, forbidden) {
+				t.Fatalf("call%d used%s", i+1, forbidden)
+			}
+		}
+		if option(args, "--permission-mode") != "dontAsk" || option(args, "--model") != settings.Model || option(args, "--effort") != settings.Effort || !slices.Contains(args, "--safe-mode") {
+			t.Fatal("role settings were not reapplied")
+		}
+		var policy struct {
+			AutoMemory *bool `json:"autoMemoryEnabled"`
+			Sandbox    struct {
+				Filesystem struct{ AllowRead, AllowWrite, DenyWrite []string } `json:"filesystem"`
+			} `json:"sandbox"`
+		}
+		if err := json.Unmarshal([]byte(option(args, "--settings")), &policy); err != nil {
+			t.Fatal(err)
+		}
+		if policy.AutoMemory == nil || *policy.AutoMemory || slices.Contains(policy.Sandbox.Filesystem.AllowRead, session.authDir) || slices.Contains(policy.Sandbox.Filesystem.AllowWrite, session.authDir) {
+			t.Fatal("native memory or private authentication exposed")
+		}
+		for _, grant := range []string{oldGrant, newGrant} {
+			want := i == 0 && grant == oldGrant || i == 1 && grant == newGrant
+			if slices.Contains(args, grant) != want || slices.Contains(policy.Sandbox.Filesystem.AllowRead, grant) != want {
+				t.Fatalf("call%d retained stale/wrong grant%s", i+1, grant)
+			}
+		}
+	}
+	owned := []string{session.runtimeDir, session.authDir, session.embeddedDir}
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range owned {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Fatalf("owned resource remains%s: %v", path, err)
+		}
+	}
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := session.Run(context.Background(), workspace, "task", false, "", settings); err == nil || !strings.Contains(err.Error(), "closed") {
+		t.Fatalf("closed session ran: %v", err)
+	}
+}
+
+func TestSessionRejectsChangedIdentityAndSettingsBeforeNativeCall(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		change func(*string, *bool, *string, *config.ClaudeConfig)
+	}{
+		{"source", func(dir *string, _ *bool, _ *string, _ *config.ClaudeConfig) { *dir = t.TempDir() }},
+		{"output", func(_ *string, _ *bool, out *string, _ *config.ClaudeConfig) { *out = t.TempDir() }},
+		{"writable", func(_ *string, writable *bool, _ *string, _ *config.ClaudeConfig) { *writable = true }},
+		{"model", func(_ *string, _ *bool, _ *string, cfg *config.ClaudeConfig) { cfg.Model = "other" }},
+		{"effort", func(_ *string, _ *bool, _ *string, cfg *config.ClaudeConfig) { cfg.Effort = "other" }},
+		{"key", func(_ *string, _ *bool, _ *string, cfg *config.ClaudeConfig) { cfg.APIKey = "other" }},
+		{"skill", func(_ *string, _ *bool, _ *string, cfg *config.ClaudeConfig) { cfg.Skills[0] = "builtin://other" }},
+		{"socket policy", func(_ *string, _ *bool, _ *string, cfg *config.ClaudeConfig) { *cfg.AllowAllUnixSockets = false }},
+		{"schema", func(_ *string, _ *bool, _ *string, cfg *config.ClaudeConfig) { cfg.OutputSchema = `{}` }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			binary := fakeExecutable(t, "claude", "cat >/dev/null\nprintf called >>\"$0.calls\"\nprintf '%s\\n' '"+successfulResult+"'\n")
+			dir, output, writable := t.TempDir(), "", false
+			allow := true
+			settings := config.ClaudeConfig{APIKey: "private-fixture-key", Skills: []string{skills.BuiltinAntiPromptInjection}, AllowAllUnixSockets: &allow}
+			var session Session
+			t.Cleanup(func() {
+				if err := session.Close(); err != nil {
+					t.Error(err)
+				}
+			})
+			if _, err := session.Run(context.Background(), dir, "first", writable, output, settings); err != nil {
+				t.Fatal(err)
+			}
+			test.change(&dir, &writable, &output, &settings)
+			if _, err := session.Run(context.Background(), dir, "second", writable, output, settings); err == nil || !strings.Contains(err.Error(), "changed") {
+				t.Fatalf("changed bound inputs accepted: %v", err)
+			}
+			if readFile(t, binary+".calls") != "called" {
+				t.Fatal("changed session reached native execution")
+			}
+		})
+	}
+}
+
+func TestSessionPreservesFailedTurnAndReportsMissingResume(t *testing.T) {
+	binary := fakeExecutable(t, "claude", `n=0; [ ! -f "$0.count" ] || n=$(cat "$0.count")
+n=$((n+1)); printf '%s' "$n" > "$0.count"
+printf '%s\n' "$@" > "$0.$n.args"
+cat >/dev/null
+case "$n" in
+1) printf '%s\n' '`+successfulResult+`'; exit 7 ;;
+2) printf '%s\n' '`+strings.ReplaceAll(strings.ReplaceAll(strings.ReplaceAll(strings.ReplaceAll(successfulResult, `"inputTokens":3`, `"inputTokens":6`), `"cacheCreationInputTokens":5`, `"cacheCreationInputTokens":10`), `"cacheReadInputTokens":7`, `"cacheReadInputTokens":14`), `"outputTokens":11`, `"outputTokens":22`)+`' ;;
+*) printf 'No conversation found\n' >&2; exit 9 ;;
+esac
+`)
+	var session Session
+	t.Cleanup(func() {
+		if err := session.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	dir := t.TempDir()
+	first, err := session.Run(context.Background(), dir, "first", false, "", config.ClaudeConfig{})
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != 7 || first.Answer != "" || first.UsageComplete || first.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) {
+		t.Fatalf("failed turn: %+v,%v", first, err)
+	}
+	id := session.id
+	second, err := session.Run(context.Background(), dir, "continue", false, "", config.ClaudeConfig{})
+	if err != nil || second.Tokens != first.Tokens || !second.UsageComplete {
+		t.Fatalf("continued failed turn: %+v,%v", second, err)
+	}
+	third, err := session.Run(context.Background(), dir, "continue again", false, "", config.ClaudeConfig{})
+	if err == nil || !strings.Contains(err.Error(), "No conversation found") || third.Answer != "" || session.id != id || !strings.Contains(readFile(t, binary+".3.args"), "--resume\n"+id) || readFile(t, binary+".count") != "3" {
+		t.Fatalf("missing resume silently replaced: %+v,%v", third, err)
+	}
+}
+
+func TestSessionNativeHomeCannotChange(t *testing.T) {
+	for _, nativeEnv := range []string{"CLAUDE_CONFIG_DIR", "HOME"} {
+		t.Run(nativeEnv, func(t *testing.T) {
+			binary := fakeExecutable(t, "claude", "cat >/dev/null\nprintf called >>\"$0.calls\"\nprintf '%s\\n' '"+successfulResult+"'\n")
+			t.Setenv("CLAUDE_CONFIG_DIR", "")
+			t.Setenv(nativeEnv, t.TempDir())
+			var session Session
+			t.Cleanup(func() {
+				if err := session.Close(); err != nil {
+					t.Error(err)
+				}
+			})
+			dir := t.TempDir()
+			if _, err := session.Run(context.Background(), dir, "first", false, "", config.ClaudeConfig{}); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv(nativeEnv, t.TempDir())
+			if _, err := session.Run(context.Background(), dir, "second", false, "", config.ClaudeConfig{}); err == nil || !strings.Contains(err.Error(), "changed") {
+				t.Fatalf("native configuration changed: %v", err)
+			}
+			if readFile(t, binary+".calls") != "called" {
+				t.Fatal("changed native home executed")
+			}
+		})
+	}
+}
+
+func TestResumedUsageKeepsOnlyNewWholeTreeCounters(t *testing.T) {
+	known := usage.Tokens{Input: 15, CachedInput: 7, Output: 11}
+	doubled := strings.ReplaceAll(strings.ReplaceAll(strings.ReplaceAll(strings.ReplaceAll(successfulResult, `"inputTokens":3`, `"inputTokens":6`), `"cacheCreationInputTokens":5`, `"cacheCreationInputTokens":10`), `"cacheReadInputTokens":7`, `"cacheReadInputTokens":14`), `"outputTokens":11`, `"outputTokens":22`)
+	withHelper := strings.TrimSuffix(successfulResult, "}}") + `,"helper":{"inputTokens":29,"cacheCreationInputTokens":31,"cacheReadInputTokens":37,"outputTokens":41}}}`
+	for _, test := range []struct {
+		name, stream     string
+		baseline, want   usage.Tokens
+		complete, failed bool
+	}{
+		{"new counters", doubled, known, known, true, false},
+		{"prior totals repeated", successfulResult, known, usage.Tokens{}, true, false},
+		{"helper total", withHelper, known, usage.Tokens{Input: 97, CachedInput: 37, Output: 41}, true, false},
+		{"repeated result snapshots", numberResultEvents(doubled + "\n" + doubled), known, known, true, false},
+		{"root fallback is current turn", `{"type":"result","subtype":"success","result":"answer","usage":{"input_tokens":3,"cache_creation_input_tokens":5,"cache_read_input_tokens":7,"output_tokens":11}}`, known, known, false, false},
+		{"missing usage", `{"type":"result","subtype":"success","result":"answer"}`, known, usage.Tokens{}, false, false},
+		{"decreasing aggregate", successfulResult, usage.Tokens{Input: 30, CachedInput: 14, Output: 22}, usage.Tokens{}, false, false},
+		{"decreasing aggregate retains current assistant", assistantUsageEvent("current", 3, 5, 7, 11) + "\n" + successfulResult, usage.Tokens{Input: 30, CachedInput: 14, Output: 22}, known, false, false},
+		{"failed new counters", strings.Replace(doubled, `"is_error":false`, `"is_error":true`, 1), known, known, false, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			output := jsonlOutput{baseline: test.baseline}
+			writeChunks(t, &output, test.stream+"\n")
+			output.finish()
+			if output.result.Tokens != test.want || output.result.UsageComplete != test.complete || (output.err != nil) != test.failed {
+				t.Fatalf("resumed usage: %+v,%v; want%+v complete=%t failed=%t", output.result, output.err, test.want, test.complete, test.failed)
+			}
+		})
+	}
+}
+
+func TestSessionRejectsForeignNativeConversation(t *testing.T) {
+	for _, stream := range []string{
+		`{"type":"system","subtype":"init","session_id":"other"}` + "\n" + successfulResult,
+		strings.TrimSuffix(successfulResult, "}") + `,"session_id":"other"}`,
+	} {
+		output := jsonlOutput{sessionID: "expected"}
+		writeChunks(t, &output, stream+"\n")
+		if output.err == nil || !strings.Contains(output.err.Error(), "identity changed") || output.result.Answer != "" || output.result.UsageComplete {
+			t.Fatalf("foreign conversation accepted: %+v,%v", output.result, output.err)
+		}
+	}
+}
+
+func TestSessionScratchAndCloseFailuresAreVisible(t *testing.T) {
+	binary := fakeExecutable(t, "claude", "cat >/dev/null\nprintf called >>\"$0.calls\"\nprintf '%s\\n' '"+successfulResult+"'\n")
+	var session Session
+	dir := t.TempDir()
+	if _, err := session.Run(context.Background(), dir, "first", false, "", config.ClaudeConfig{}); err != nil {
+		t.Fatal(err)
+	}
+	runtime := session.runtimeDir
+	t.Cleanup(func() {
+		session.runtimeDir = runtime
+		if err := session.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	session.NewConversation()
+	// A malformed owned path gives a portable filesystem failure without
+	// modifying host permissions or deleting any unowned resource.
+	session.runtimeDir = "invalid\x00path"
+	if _, err := session.Run(context.Background(), dir, "new", false, "", config.ClaudeConfig{}); err == nil || !strings.Contains(err.Error(), "scratch cleanup") {
+		t.Fatalf("scratch failure ignored: %v", err)
+	}
+	if readFile(t, binary+".calls") != "called" {
+		t.Fatal("scratch failure reached native execution")
+	}
+	if err := session.Close(); err == nil || session.runtimeDir == "" {
+		t.Fatalf("failed cleanup lost its path: %v", err)
+	}
+}
+
+func TestSessionRequiresItsOwnRootIdentity(t *testing.T) {
+	for _, test := range []struct {
+		name, stream string
+		fails        bool
+	}{
+		{"missing", successfulResult, true},
+		{"tagged helper only", strings.TrimSuffix(successfulResult, "}") + `,"session_id":"helper","parent_tool_use_id":"parent"}`, true},
+		{"tagged helper then root", `{"type":"system","subtype":"init","session_id":"helper","parent_tool_use_id":"parent"}` + "\n" + strings.TrimSuffix(successfulResult, "}") + `,"session_id":"expected"}`, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			output := jsonlOutput{sessionID: "expected"}
+			writeChunks(t, &output, test.stream+"\n")
+			output.finish()
+			if (output.err != nil) != test.fails || output.result.UsageComplete == test.fails || test.fails && output.result.Answer != "" {
+				t.Fatalf("root identity: %+v,%v", output.result, output.err)
+			}
+		})
+	}
+}

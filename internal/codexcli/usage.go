@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -48,77 +49,12 @@ type rolloutEvent struct {
 // collectUsage reads bounded first-line headers of recent rollouts to identify
 // this action's agent tree. Unrelated transcripts are never read past their header.
 func collectUsage(ctx context.Context, home, rootID string, started time.Time, fallback *usage.Tokens, expectedChildren []string) (usage.Tokens, bool, error) {
-	var total usage.Tokens
-	complete := true
-	files := map[string]rolloutMeta{}
-	ambiguous := map[string]bool{}
-	entries, candidates := 0, 0
-	if rootID != "" {
-		err := walkUsageFiles(ctx, filepath.Join(home, "sessions"), started, func(path string, entry fs.DirEntry) error {
-			entries++
-			if entries > maxUsageWalkEntries {
-				complete = false
-				return fs.SkipAll
-			}
-			if !entry.Type().IsRegular() || !strings.HasSuffix(entry.Name(), ".jsonl") {
-				return nil
-			}
-			info, err := entry.Info()
-			if err != nil {
-				complete = false
-				return nil
-			}
-			if info.ModTime().Before(started.Add(-time.Minute)) {
-				return nil
-			}
-			candidates++
-			if candidates > maxUsageFiles {
-				complete = false
-				return fs.SkipAll
-			}
-			f, err := os.Open(path)
-			if err != nil {
-				complete = false
-				return nil
-			}
-			scanner := bufio.NewScanner(io.LimitReader(f, maxUsageHeaderBytes+1))
-			scanner.Buffer(make([]byte, 4096), maxUsageHeaderBytes+2)
-			var event rolloutEvent
-			var meta rolloutMeta
-			ok := scanner.Scan() && len(scanner.Bytes()) <= maxUsageHeaderBytes && json.Unmarshal(scanner.Bytes(), &event) == nil && event.Type == "session_meta" && json.Unmarshal(event.Payload, &meta) == nil && meta.ID != "" && scanner.Err() == nil
-			if err := f.Close(); err != nil {
-				complete = false
-			}
-			if !ok {
-				complete = false
-				return nil
-			}
-			if meta.ParentID == "" {
-				var source struct {
-					Subagent struct {
-						Spawn struct {
-							ParentID string `json:"parent_thread_id"`
-						} `json:"thread_spawn"`
-					} `json:"subagent"`
-				}
-				if json.Unmarshal(meta.Source, &source) == nil {
-					meta.ParentID = source.Subagent.Spawn.ParentID
-				}
-			}
-			if _, exists := files[meta.ID]; exists {
-				complete = false
-				ambiguous[meta.ID] = true
-				return nil
-			}
-			meta.path = path
-			files[meta.ID] = meta
-			return nil
-		})
-		if err != nil {
-			complete = false
-		}
-	}
+	files, ambiguous, complete := usageFiles(ctx, home, rootID, started, nil)
+	return collectUsageFiles(ctx, rootID, fallback, expectedChildren, files, ambiguous, complete)
+}
 
+func collectUsageFiles(ctx context.Context, rootID string, fallback *usage.Tokens, expectedChildren []string, files map[string]rolloutMeta, ambiguous map[string]bool, complete bool) (usage.Tokens, bool, error) {
+	var total usage.Tokens
 	if rootID == "" || ctx.Err() != nil {
 		if fallback != nil {
 			total = *fallback
@@ -198,6 +134,99 @@ func collectUsage(ctx context.Context, home, rootID string, started time.Time, f
 		complete = complete && ok && added
 	}
 	return total, complete && ctx.Err() == nil, childError
+}
+
+// usageFiles reads only bounded headers. Known paths bypass discovery timestamps,
+// so a resumed conversation remains visible after its original directory ages.
+func usageFiles(ctx context.Context, home, rootID string, started time.Time, known map[string]rolloutMeta) (map[string]rolloutMeta, map[string]bool, bool) {
+	files := map[string]rolloutMeta{}
+	ambiguous := map[string]bool{}
+	complete := true
+	entries, candidates := 0, 0
+	visited := map[string]bool{}
+	readHeader := func(path string) {
+		if visited[path] {
+			return
+		}
+		visited[path] = true
+		candidates++
+		if candidates > maxUsageFiles {
+			complete = false
+			return
+		}
+		f, err := os.Open(path)
+		if err != nil {
+			complete = false
+			return
+		}
+		scanner := bufio.NewScanner(io.LimitReader(f, maxUsageHeaderBytes+1))
+		scanner.Buffer(make([]byte, 4096), maxUsageHeaderBytes+2)
+		var event rolloutEvent
+		var meta rolloutMeta
+		ok := scanner.Scan() && len(scanner.Bytes()) <= maxUsageHeaderBytes && json.Unmarshal(scanner.Bytes(), &event) == nil && event.Type == "session_meta" && json.Unmarshal(event.Payload, &meta) == nil && meta.ID != "" && scanner.Err() == nil
+		if err := f.Close(); err != nil {
+			complete = false
+		}
+		if !ok {
+			complete = false
+			return
+		}
+		if meta.ParentID == "" {
+			var source struct {
+				Subagent struct {
+					Spawn struct {
+						ParentID string `json:"parent_thread_id"`
+					} `json:"thread_spawn"`
+				} `json:"subagent"`
+			}
+			if json.Unmarshal(meta.Source, &source) == nil {
+				meta.ParentID = source.Subagent.Spawn.ParentID
+			}
+		}
+		if _, exists := files[meta.ID]; exists {
+			complete = false
+			ambiguous[meta.ID] = true
+			return
+		}
+		meta.path = path
+		files[meta.ID] = meta
+	}
+	for _, meta := range known {
+		if ctx.Err() != nil {
+			complete = false
+			break
+		}
+		readHeader(meta.path)
+	}
+	if rootID != "" {
+		err := walkUsageFiles(ctx, filepath.Join(home, "sessions"), started, func(path string, entry fs.DirEntry) error {
+			entries++
+			if entries > maxUsageWalkEntries || candidates > maxUsageFiles {
+				complete = false
+				return fs.SkipAll
+			}
+			if !entry.Type().IsRegular() || !strings.HasSuffix(entry.Name(), ".jsonl") {
+				return nil
+			}
+			if visited[path] {
+				return nil
+			}
+			info, err := entry.Info()
+			if err != nil {
+				complete = false
+				return nil
+			}
+			if info.ModTime().Before(started.Add(-time.Minute)) {
+				return nil
+			}
+			readHeader(path)
+			return nil
+		})
+		if err != nil {
+			complete = false
+		}
+	}
+	return files, ambiguous, complete && ctx.Err() == nil
 }
 
 // ReadDir with a positive count keeps a single large directory from being
@@ -310,6 +339,11 @@ func rolloutTokens(raw json.RawMessage) (usage.Tokens, bool) {
 }
 
 func readRolloutUsage(ctx context.Context, meta rolloutMeta, rootID string, budget *int64) (usage.Tokens, bool, []string, error) {
+	return readRolloutUsageFrom(ctx, meta, rootID, budget, nil, nil, nil)
+}
+
+// A boundary excludes previous turns even when their final records arrive late.
+func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, budget *int64, before, capture *usageBoundary, spawned map[string]bool) (usage.Tokens, bool, []string, error) {
 	var childError error
 	if meta.ID != rootID {
 		childError = errUnverifiedChildren
@@ -323,13 +357,32 @@ func readRolloutUsage(ctx context.Context, meta rolloutMeta, rootID string, budg
 	}
 	limit := min(int64(maxUsageRolloutBytes), *budget)
 	reader := &io.LimitedReader{R: f, N: limit + 1}
+	hash := sha256.New()
+	if before != nil {
+		if !before.valid || before.size > limit || !matchUsagePrefix(ctx, reader, before, hash) {
+			*budget -= min(limit, limit+1-reader.N)
+			_ = f.Close()
+			return usage.Tokens{}, false, nil, childError
+		}
+	}
+	var input io.Reader = reader
+	if capture != nil {
+		input = io.TeeReader(reader, hash)
+	}
 	complete, readable := true, true
-	scanner := rolloutScanner(ctx, reader, &readable)
+	scanner := rolloutScanner(ctx, input, &readable)
 	var total, latest, inherited usage.Tokens
 	seenRecord, seenSnapshot := false, false
-	seenHeader, inheritedWithoutBoundary := false, false
+	seenHeader, inheritedWithoutBoundary := before != nil, false
+	if before != nil {
+		inherited = before.snapshot
+	}
+	lateOld := usage.Tokens{}
+	snapshotKnown := before == nil || (before.hasSnapshot && !before.unfinished)
 	responses := map[string]usage.Tokens{}
+	responseTurns := map[string]string{}
 	turns := map[string]bool{}
+	abortedTurns := map[string]bool{}
 	ownedTurns := map[string]bool{}
 	latestOwnTurn := ""
 	latestOwnDone := false
@@ -339,6 +392,22 @@ func readRolloutUsage(ctx context.Context, meta rolloutMeta, rootID string, budg
 	appendChildren := func(ids ...string) {
 		if !appendChildIDs(&children, seenChildren, ids...) {
 			tooManyChildren, complete = true, false
+		}
+	}
+	appendSpawned := func(ids ...string) {
+		appendChildren(ids...)
+		if spawned == nil {
+			return
+		}
+		for _, id := range ids {
+			if !seenChildren[id] {
+				continue
+			}
+			if !spawned[id] && len(spawned) >= maxCodexChildren {
+				tooManyChildren, complete = true, false
+				continue
+			}
+			spawned[id] = true
 		}
 	}
 	for scanner.Scan() {
@@ -374,6 +443,9 @@ func readRolloutUsage(ctx context.Context, meta rolloutMeta, rootID string, budg
 			}
 			if json.Unmarshal(event.Payload, &record) != nil {
 				complete = false
+				if capture != nil {
+					capture.valid = false
+				}
 				continue
 			}
 			// Forks can retain parent history and cumulative counters. Per-response
@@ -385,16 +457,55 @@ func readRolloutUsage(ctx context.Context, meta rolloutMeta, rootID string, budg
 				complete = false
 			}
 			tokens, valid := rolloutTokens(record.Usage)
+			if capture != nil && record.TurnID != "" {
+				capture.rememberTurn(record.TurnID)
+			}
 			if record.SessionID != rootID || record.ResponseID == "" || record.TurnID == "" || !valid {
 				complete = false
+				if capture != nil {
+					capture.valid = false
+				}
+				if before != nil {
+					snapshotKnown = false
+				}
 				continue
+			}
+			if before != nil {
+				if old, exists := before.responses[record.ResponseID]; exists {
+					if old != tokens || !before.turns[record.TurnID] {
+						complete, snapshotKnown = false, false
+					}
+					continue
+				}
+				if before.turns[record.TurnID] {
+					if old, exists := responses[record.ResponseID]; exists {
+						if old != tokens {
+							complete, snapshotKnown = false, false
+						}
+						continue
+					}
+					responses[record.ResponseID] = tokens
+					responseTurns[record.ResponseID] = record.TurnID
+					lateOld, valid = lateOld.AddChecked(tokens)
+					snapshotKnown = snapshotKnown && valid
+					continue
+				}
 			}
 			ownedTurns[record.TurnID] = true
 			if old, exists := responses[record.ResponseID]; exists {
 				complete = complete && old == tokens
+				if before != nil && responseTurns[record.ResponseID] != record.TurnID {
+					complete, snapshotKnown = false, false
+				}
 				continue
 			}
 			responses[record.ResponseID] = tokens
+			if before != nil {
+				responseTurns[record.ResponseID] = record.TurnID
+			}
+			if capture != nil && len(responses) > maxUsageWalkEntries {
+				capture.valid = false
+			}
 			total, valid = total.AddChecked(tokens)
 			complete = complete && valid
 			seenRecord = true
@@ -420,9 +531,17 @@ func readRolloutUsage(ctx context.Context, meta rolloutMeta, rootID string, budg
 				continue
 			}
 			own := meta.ID == rootID || (!inheritedWithoutBoundary && (meta.HistoryStart == nil || event.Ordinal >= *meta.HistoryStart))
+			if own && (payload.ThreadID == "" || payload.ThreadID == meta.ID) && payload.TurnID != "" {
+				if capture != nil {
+					capture.rememberTurn(payload.TurnID)
+				}
+				if before != nil && before.turns[payload.TurnID] {
+					continue
+				}
+			}
 			if own && (payload.ThreadID == "" || payload.ThreadID == meta.ID) {
 				if payload.Type == "collab_agent_spawn_end" && payload.NewThreadID != "" {
-					appendChildren(payload.NewThreadID)
+					appendSpawned(payload.NewThreadID)
 				}
 				if payload.Type == "item_completed" && payload.Item != nil {
 					if payload.Item.Type == "SubAgentActivity" {
@@ -433,7 +552,7 @@ func readRolloutUsage(ctx context.Context, meta rolloutMeta, rootID string, budg
 						}
 					}
 					if payload.Item.Type == "CollabAgentToolCall" && payload.Item.Tool == "spawn_agent" && payload.Item.Status == "completed" {
-						appendChildren(payload.Item.ReceiverID...)
+						appendSpawned(payload.Item.ReceiverID...)
 					}
 				}
 			}
@@ -463,6 +582,9 @@ func readRolloutUsage(ctx context.Context, meta rolloutMeta, rootID string, budg
 						}
 					}
 					if payload.Type == "turn_aborted" {
+						if capture != nil {
+							abortedTurns[payload.TurnID] = true
+						}
 						complete = false
 					}
 				}
@@ -480,6 +602,34 @@ func readRolloutUsage(ctx context.Context, meta rolloutMeta, rootID string, budg
 	}
 	if scanner.Err() != nil {
 		readable = false
+	}
+	if capture != nil {
+		capture.size = consumed
+		if len(responses) <= maxUsageWalkEntries {
+			capture.responses = responses
+		} else {
+			capture.valid = false
+		}
+		copy(capture.hash[:], hash.Sum(nil))
+		capture.snapshot, capture.hasSnapshot = latest, seenSnapshot
+		for turn, done := range turns {
+			capture.unfinished = capture.unfinished || (!done && !abortedTurns[turn])
+		}
+		for turn := range ownedTurns {
+			capture.unfinished = capture.unfinished || (!turns[turn] && !abortedTurns[turn])
+		}
+		capture.valid = capture.valid && readable && seenHeader && ctx.Err() == nil
+	}
+	if before != nil {
+		var added bool
+		inherited, added = inherited.AddChecked(lateOld)
+		snapshotKnown = snapshotKnown && added
+		if !snapshotKnown {
+			if seenSnapshot {
+				complete = false
+			}
+			seenSnapshot = false
+		}
 	}
 	complete = complete && readable && (meta.ID == rootID || seenHeader)
 	// Known helpers require a fully read, attributable completed latest turn.
@@ -504,7 +654,7 @@ func readRolloutUsage(ctx context.Context, meta rolloutMeta, rootID string, budg
 			complete = false
 			// Child counters may include an inherited baseline absent from a damaged
 			// log. Only its individually attributed responses remain a lower bound.
-			if meta.ID == rootID && snapshot.Valid() {
+			if before == nil && meta.ID == rootID && snapshot.Valid() {
 				if lower := total.Max(snapshot); lower.Valid() {
 					total = lower
 				}

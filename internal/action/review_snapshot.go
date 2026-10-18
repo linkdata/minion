@@ -22,35 +22,61 @@ type reviewSnapshot struct {
 
 // Freeze outside the main model's writable grants. The caller owns the partial snapshot even on failure.
 func freezeReviewSnapshot(ctx context.Context, workRoot string, job Job, source, outputDir string, index *gitwork.OfflineIndex) (*reviewSnapshot, error) {
-	snapshot := &reviewSnapshot{source: source, base: job.Source.Files}
+	snapshot := &reviewSnapshot{}
+	return snapshot, snapshot.refresh(ctx, workRoot, job, source, outputDir, index)
+}
+
+// Refresh frozen bytes at stable private paths only between model calls.
+func (s *reviewSnapshot) refresh(ctx context.Context, workRoot string, job Job, source, outputDir string, index *gitwork.OfflineIndex) error {
+	s.base = job.Source.Files
 	var err error
 	if job.Action == command.Fix {
-		if snapshot.changes, err = index.Changes(ctx); err != nil {
-			return snapshot, err
+		if s.changes, err = index.Changes(ctx); err != nil {
+			return err
 		}
-		if err := job.validateChanges(snapshot.changes); err != nil {
-			return snapshot, err
+		if err := job.validateChanges(s.changes); err != nil {
+			return err
 		}
-		if snapshot.source, err = os.MkdirTemp(workRoot, "minion-review-"); err != nil {
-			return snapshot, err
+		if !s.ownedSource {
+			if s.source, err = os.MkdirTemp(workRoot, "minion-review-"); err != nil {
+				return err
+			}
+			s.ownedSource = true
+		} else {
+			if err := cleanup.RemoveAll(s.source); err != nil {
+				return err
+			}
+			if err := os.Mkdir(s.source, 0700); err != nil {
+				return err
+			}
 		}
-		snapshot.ownedSource = true
-		if err := workspace.MaterializeChanges(snapshot.source, job.Source.Files, snapshot.changes); err != nil {
-			return snapshot, err
+		if err := workspace.MaterializeChanges(s.source, job.Source.Files, s.changes); err != nil {
+			return err
 		}
+	} else {
+		s.source = source
 	}
 	if outputDir != "" {
-		if snapshot.artifacts, _, err = readAuditArtifacts(outputDir, false); err != nil {
-			return snapshot, err
+		if s.artifacts, _, err = readAuditArtifacts(outputDir, false); err != nil {
+			return err
 		}
-		if snapshot.outputDir, err = os.MkdirTemp(workRoot, ".minion-review-reports-"); err != nil {
-			return snapshot, err
+		if s.outputDir == "" {
+			if s.outputDir, err = os.MkdirTemp(workRoot, ".minion-review-reports-"); err != nil {
+				return err
+			}
+		} else {
+			if err := cleanup.RemoveAll(s.outputDir); err != nil {
+				return err
+			}
+			if err := os.Mkdir(s.outputDir, 0700); err != nil {
+				return err
+			}
 		}
-		if err := workspace.Materialize(snapshot.outputDir, snapshot.artifacts); err != nil {
-			return snapshot, err
+		if err := workspace.Materialize(s.outputDir, s.artifacts); err != nil {
+			return err
 		}
 	}
-	return snapshot, nil
+	return nil
 }
 
 func (s *reviewSnapshot) verify(ctx context.Context) error {

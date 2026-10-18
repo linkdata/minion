@@ -32,9 +32,13 @@ case "$*" in
 esac
 printf '%%s\n' "$@" > %s
 cat > %s
+previous=""
 for arg in "$@"; do
+ case "$previous" in --session-id|--resume) session="$arg" ;; esac
  case "$arg" in /*/.minion-context-*) cat "$arg/source.json" > %s ;; esac
+ previous="$arg"
 done
+printf '{"type":"system","subtype":"init","session_id":"%%s"}\n' "$session"
 printf '%%s\n' '{"type":"result","subtype":"success","is_error":false,"terminal_reason":"completed","structured_output":'"$output"',"usage":{"input_tokens":3,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":2},"modelUsage":{"portable-claude":{"inputTokens":3,"cacheCreationInputTokens":0,"cacheReadInputTokens":0,"outputTokens":2}}}'
 `, shellQuote(filepath.Join(root, "args")), shellQuote(filepath.Join(root, "prompt")), shellQuote(filepath.Join(root, "source")))
 			fakeOnPath(t, "claude", script)

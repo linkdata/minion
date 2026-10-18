@@ -32,20 +32,31 @@ const (
 
 type modelCall func(context.Context, modelRun) (aicli.Result, error)
 
+type modelSession struct {
+	codex  codexcli.Session
+	claude claudecli.Session
+}
+
+func (s *modelSession) close() error {
+	return errors.Join(s.codex.Close(), s.claude.Close())
+}
+
 type modelRun struct {
-	role          string
-	round         int
-	reviewPhase   string
-	provider      string
-	dir           string
-	prompt        string
-	writable      bool
-	outputDir     string
-	readOnlyDirs  []string
-	refutations   []Refutation
-	outputSchema  string
-	criticPrompt  func(mapping, outputDir string) string
-	model, effort string
+	session           *modelSession
+	freshConversation bool
+	role              string
+	round             int
+	reviewPhase       string
+	provider          string
+	dir               string
+	prompt            string
+	writable          bool
+	outputDir         string
+	readOnlyDirs      []string
+	refutations       []Refutation
+	outputSchema      string
+	criticPrompt      func(mapping, outputDir string) string
+	model, effort     string
 }
 
 func (r *Runner) runOnce(ctx context.Context, request modelRun) (aicli.Result, error) {
@@ -65,25 +76,41 @@ func (r *Runner) runNative(ctx context.Context, request modelRun) (aicli.Result,
 	if r.runModel != nil {
 		return r.runModel(ctx, request)
 	}
+	if request.session == nil {
+		return aicli.Result{}, errors.New("model call has no action-scoped session")
+	}
 	switch request.provider {
 	case "codex":
 		settings := r.Codex
 		settings.Model, settings.ReasoningEffort = request.model, request.effort
 		settings.ReadOnlyDirs = slices.Concat(settings.ReadOnlyDirs, request.readOnlyDirs)
 		settings.OutputSchema = request.outputSchema
-		return codexcli.Run(ctx, request.dir, request.prompt, request.writable, request.outputDir, settings)
+		if request.freshConversation {
+			request.session.codex.NewConversation()
+		}
+		return request.session.codex.Run(ctx, request.dir, request.prompt, request.writable, request.outputDir, settings)
 	case "claude":
 		settings := r.Claude
 		settings.Model, settings.Effort = request.model, request.effort
 		settings.ReadOnlyDirs = slices.Concat(settings.ReadOnlyDirs, request.readOnlyDirs)
 		settings.OutputSchema = request.outputSchema
-		return claudecli.Run(ctx, request.dir, request.prompt, request.writable, request.outputDir, settings)
+		if request.freshConversation {
+			request.session.claude.NewConversation()
+		}
+		return request.session.claude.Run(ctx, request.dir, request.prompt, request.writable, request.outputDir, settings)
 	default:
 		return aicli.Result{}, fmt.Errorf("unsupported AI provider %q", request.provider)
 	}
 }
 
 func (r *Runner) runAI(ctx context.Context, job Job, dir, prompt, outputDir string, checkpoint func([]Refutation) error) (answer string, err error) {
+	var mainSession, criticSession modelSession
+	defer func() {
+		if closeErr := errors.Join(mainSession.close(), criticSession.close()); closeErr != nil {
+			answer = ""
+			err = errors.Join(err, fmt.Errorf("close action model sessions: %w", closeErr))
+		}
+	}()
 	var history []Refutation
 	record := func() error {
 		if checkpoint != nil {
@@ -94,7 +121,7 @@ func (r *Runner) runAI(ctx context.Context, job Job, dir, prompt, outputDir stri
 		return nil
 	}
 	rounds := job.rounds()
-	request := modelRun{role: roleMain, provider: job.Main.Provider, model: job.Main.Model, effort: job.Main.Effort, dir: dir, prompt: prompt, writable: job.Action == command.Fix, outputDir: outputDir}
+	request := modelRun{session: &mainSession, role: roleMain, provider: job.Main.Provider, model: job.Main.Model, effort: job.Main.Effort, dir: dir, prompt: prompt, writable: job.Action == command.Fix, outputDir: outputDir}
 	if job.Critic != nil {
 		request.prompt, request.outputSchema = mainPrompt(prompt), mainOutputSchema
 	}
@@ -123,7 +150,7 @@ func (r *Runner) runAI(ctx context.Context, job Job, dir, prompt, outputDir stri
 		var feedback string
 		for _, phase := range reviewPhases(round) {
 			previousAnswer, previousFeedback := "", ""
-			critic := modelRun{role: roleCritic, round: round, reviewPhase: phase, provider: job.Critic.Provider, model: job.Critic.Model, effort: job.Critic.Effort, outputSchema: criticOutputSchema}
+			critic := modelRun{session: &criticSession, freshConversation: phase == reviewFull, role: roleCritic, round: round, reviewPhase: phase, provider: job.Critic.Provider, model: job.Critic.Model, effort: job.Critic.Effort, outputSchema: criticOutputSchema}
 			if phase == reviewVerification {
 				previousAnswer, previousFeedback = priorAnswer, priorFeedback
 				critic.refutations = slices.Clone(history)

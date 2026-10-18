@@ -168,6 +168,8 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 		owned = append(owned, outputDir)
 	}
 	var review *reviewSnapshot
+	reviewCurrent := false
+	historyDir := ""
 	closeReview := func() {
 		if review != nil {
 			if err := review.close(); err != nil {
@@ -179,19 +181,31 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 					owned = append(owned, review.outputDir)
 				}
 			}
-			review = nil
 		}
 	}
 	defer closeReview()
+	defer func() {
+		if historyDir != "" {
+			if err := cleanup.RemoveAll(historyDir); err != nil {
+				r.logf("critic history cleanup retry scheduled job=%s attempt=%s", job.Identity.JobID, job.Identity.AttemptID)
+			}
+		}
+	}()
 	observe := configured.aroundModel
 	configured.aroundModel = func(ctx context.Context, request modelRun, next modelCall) (aicli.Result, error) {
 		if request.role == roleMain {
 			closeReview()
+			reviewCurrent = false
 		}
 		if request.role == roleCritic {
 			var err error
-			if review == nil {
-				review, err = freezeReviewSnapshot(ctx, workRoot, job, source, outputDir, index)
+			if !reviewCurrent {
+				if review == nil {
+					review, err = freezeReviewSnapshot(ctx, workRoot, job, source, outputDir, index)
+				} else {
+					err = review.refresh(ctx, workRoot, job, source, outputDir, index)
+				}
+				reviewCurrent = err == nil
 			}
 			if err != nil {
 				if ctx.Err() != nil {
@@ -213,21 +227,19 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 		}
 		request.readOnlyDirs = append(request.readOnlyDirs, contextDir)
 		if len(request.refutations) != 0 {
-			historyDir, err := os.MkdirTemp(workRoot, ".minion-review-history-")
-			if err != nil {
-				return aicli.Result{}, fmt.Errorf("%w: prepare review history: %w", monitor.ErrTerminalJob, err)
-			}
-			defer func() {
-				if err := cleanup.RemoveAll(historyDir); err != nil {
-					owned = append(owned, historyDir)
-					r.logf("private review history cleanup retry scheduled job=%s attempt=%s", job.Identity.JobID, job.Identity.AttemptID)
+			if historyDir == "" {
+				var err error
+				historyDir, err = os.MkdirTemp(workRoot, ".minion-review-history-")
+				if err != nil {
+					return aicli.Result{}, fmt.Errorf("%w: prepare review history: %w", monitor.ErrTerminalJob, err)
 				}
-			}()
+				owned = append(owned, historyDir)
+			}
 			data, err := json.Marshal(request.refutations)
 			if err != nil {
 				return aicli.Result{}, fmt.Errorf("%w: encode review history: %w", monitor.ErrTerminalJob, err)
 			}
-			if err := workspace.Materialize(historyDir, []workspace.File{{Path: "refutations.json", Mode: workspace.Regular, Data: data}}); err != nil {
+			if err := workspace.WriteAtomic(filepath.Join(historyDir, "refutations.json"), data); err != nil {
 				return aicli.Result{}, fmt.Errorf("%w: materialize review history: %w", monitor.ErrTerminalJob, err)
 			}
 			request.readOnlyDirs = append(request.readOnlyDirs, historyDir)
@@ -255,7 +267,7 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 		} else {
 			call, err = dispatch(ctx, request)
 		}
-		if err == nil && review != nil {
+		if err == nil && reviewCurrent {
 			if verificationErr := review.verify(ctx); verificationErr != nil {
 				if ctx.Err() != nil {
 					err = ctx.Err()

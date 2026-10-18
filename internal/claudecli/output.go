@@ -46,6 +46,7 @@ func (u eventUsage) tokens() (tokens usage.Tokens, valid bool) {
 
 type event struct {
 	Type              string            `json:"type"`
+	SessionID         string            `json:"session_id"`
 	Subtype           string            `json:"subtype"`
 	ResultIndex       *int64            `json:"result_index"`
 	TerminalReason    json.RawMessage   `json:"terminal_reason"`
@@ -114,6 +115,9 @@ type messageUsage struct {
 }
 
 type jsonlOutput struct {
+	sessionID           string
+	identitySeen        bool
+	baseline            usage.Tokens
 	cancel              context.CancelFunc
 	stream              aicli.JSONL
 	fatal               func()
@@ -177,6 +181,9 @@ func (o *jsonlOutput) finish() {
 	if o.err == nil && o.pending != 0 {
 		o.fail(errors.New("background tasks still running when Claude exited"))
 	}
+	if o.err == nil && o.sessionID != "" && !o.identitySeen {
+		o.fail(errors.New("missing Claude conversation identity"))
+	}
 	if o.err == nil {
 		answer := strings.TrimSpace(o.result.Answer)
 		if !o.completed {
@@ -197,6 +204,20 @@ func (o *jsonlOutput) finishLine(line []byte) {
 	if err := json.Unmarshal(line, &e); err != nil {
 		o.fail(fmt.Errorf("invalid Claude JSONL event: %w", err))
 		return
+	}
+	if e.Type == "result" || e.Type == "system" && e.Subtype == "init" {
+		parent := bytes.TrimSpace(e.ParentToolUseID)
+		if len(parent) != 0 && !bytes.Equal(parent, []byte("null")) {
+			// A tagged helper is not this invocation's root conversation/result.
+			return
+		}
+		if o.sessionID != "" && e.SessionID != "" {
+			if e.SessionID != o.sessionID {
+				o.fail(errors.New("claude conversation identity changed within one call"))
+				return
+			}
+			o.identitySeen = true
+		}
 	}
 	if e.Type == "assistant" {
 		o.recordAssistantUsage(e.Message, e.ParentToolUseID)
@@ -274,6 +295,14 @@ func (o *jsonlOutput) finishLine(line []byte) {
 		return
 	}
 	tokens, complete := e.tokens()
+	if complete {
+		// Resumed modelUsage includes earlier invocations. Assistant messages and
+		// root-only fallback counters describe this invocation instead.
+		tokens = tokens.Sub(o.baseline)
+		if !tokens.Valid() {
+			tokens, complete = usage.Tokens{}, false
+		}
+	}
 	if complete {
 		// A cumulative snapshot must cover newly observed root calls before it
 		// can replace their lower bound. Delegate/unknown messages can overlap

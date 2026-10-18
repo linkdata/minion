@@ -183,11 +183,6 @@ func TestRefutationsSurviveOmissionWithoutRememberingImplementedChanges(t *testi
 	var sequence, paths []string
 	runner := Runner{WorkRoot: root, runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 		sequence = append(sequence, fmt.Sprintf("%s/%d/%s", request.role, request.round, request.reviewPhase))
-		for _, path := range paths {
-			if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("previous refutations grant retained: %s,%v", path, err)
-			}
-		}
 		want := expected
 		if request.reviewPhase == reviewFull {
 			want = nil
@@ -195,6 +190,9 @@ func TestRefutationsSurviveOmissionWithoutRememberingImplementedChanges(t *testi
 		checkRefutations(t, request, want)
 		for _, dir := range request.readOnlyDirs {
 			if _, err := os.Stat(filepath.Join(dir, "refutations.json")); err == nil {
+				if len(paths) != 0 && paths[0] != dir {
+					t.Fatalf("refutations path changed within the action: %s -> %s", paths[0], dir)
+				}
 				paths = append(paths, dir)
 			}
 		}
@@ -256,7 +254,7 @@ func TestRefutationsSurviveOmissionWithoutRememberingImplementedChanges(t *testi
 		t.Fatal(err)
 	}
 	if entries, err := os.ReadDir(root); err != nil || len(entries) != 0 {
-		t.Fatalf("owned per-call files retained: %v,%v", entries, err)
+		t.Fatalf("owned action files retained: %v,%v", entries, err)
 	}
 }
 

@@ -89,7 +89,7 @@ func Validate(ctx context.Context, settings config.ClaudeConfig) (validated conf
 	if json.Unmarshal(auth, &status) != nil || !status.LoggedIn {
 		return validated, errors.New("claude is not authenticated; configure claude.api_key or run claude auth login")
 	}
-	args := append(arguments(policy), "--input-format", "stream-json")
+	args := append(arguments(policy), "--no-session-persistence", "--input-format", "stream-json")
 	data, err := aicli.Probe(ctx, binary, "", args, dir, env, "{\"type\":\"control_request\",\"request_id\":\"minion-initialize\",\"request\":{\"subtype\":\"initialize\"}}\n")
 	if err != nil {
 		return validated, fmt.Errorf("claude model discovery: %w", err)

@@ -17,7 +17,6 @@ import (
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/bounded"
-	"github.com/linkdata/minion/internal/cleanup"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/processgroup"
 	workspacefs "github.com/linkdata/minion/internal/workspace"
@@ -37,6 +36,17 @@ import (
 // CLI login; environment API/OAuth tokens are rejected. Authenticated proxies
 // are rejected in either mode.
 func Run(ctx context.Context, dir, prompt string, writable bool, outputDir string, settings config.ClaudeConfig) (result aicli.Result, runError error) {
+	var session Session
+	result, runError = session.Run(ctx, dir, prompt, writable, outputDir, settings)
+	if err := session.Close(); err != nil {
+		result.Answer = ""
+		runError = errors.Join(runError, err)
+	}
+	return result, aicli.RedactError(runError, settings.APIKey)
+}
+
+// Run continues this action role's conversation with the current evidence grants.
+func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, outputDir string, settings config.ClaudeConfig) (result aicli.Result, runError error) {
 	result.UsageComplete = true
 	defer func() {
 		runError = aicli.RedactError(runError, settings.APIKey)
@@ -55,48 +65,6 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	if err != nil {
 		return result, err
 	}
-	runtimeDir, err := os.MkdirTemp(filepath.Dir(workspace), ".minion-claude-")
-	if err != nil {
-		return result, err
-	}
-	defer func() {
-		if err := cleanup.RemoveAll(runtimeDir); err != nil {
-			result.Answer = ""
-			runError = errors.Join(runError, fmt.Errorf("claude cleanup: %w", err))
-		}
-	}()
-	authDir, err := authentication(filepath.Dir(workspace), settings.APIKey)
-	if err != nil {
-		return result, err
-	}
-	if authDir != "" {
-		defer func() {
-			if err := cleanup.RemoveAll(authDir); err != nil {
-				result.Answer = ""
-				runError = errors.Join(runError, fmt.Errorf("claude credential cleanup: %w", err))
-			}
-		}()
-	}
-	configDir, err := configDirectory(authDir)
-	if err != nil {
-		return result, err
-	}
-	cacheDir := filepath.Join(runtimeDir, "go-build")
-	if err := os.Mkdir(cacheDir, 0o700); err != nil {
-		return result, err
-	}
-	skillPaths, embeddedDir, err := aicli.MaterializeSkills(workspace, settings.Skills)
-	defer func() {
-		if embeddedDir != "" {
-			if err := cleanup.RemoveAll(embeddedDir); err != nil {
-				result.Answer = ""
-				runError = errors.Join(runError, fmt.Errorf("claude skill cleanup: %w", err))
-			}
-		}
-	}()
-	if err != nil {
-		return result, fmt.Errorf("claude skills: %w", err)
-	}
 	if outputDir != "" {
 		resolved, err := aicli.Directory(outputDir)
 		if err != nil {
@@ -107,6 +75,11 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 		}
 		outputDir = resolved
 	}
+	if err := s.prepare(workspace, writable, outputDir, settings); err != nil {
+		return result, err
+	}
+	runtimeDir, authDir, cacheDir := s.runtimeDir, s.authDir, s.cacheDir
+	skillPaths, configDir := s.skillPaths, s.configDir
 	readOnlyDirs := make([]string, 0, len(settings.ReadOnlyDirs))
 	for _, path := range settings.ReadOnlyDirs {
 		resolved, err := aicli.Directory(path)
@@ -124,6 +97,16 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 		return result, err
 	}
 	args := arguments(policy)
+	if s.id == "" {
+		if s.id, err = conversationID(); err != nil {
+			return result, err
+		}
+	}
+	if s.started {
+		args = append(args, "--resume", s.id)
+	} else {
+		args = append(args, "--session-id", s.id)
+	}
 	// Additional working directories also grant writes in Claude's sandbox;
 	// sandboxSettings denies them explicitly for read-only inputs.
 	args = append(args, "--add-dir", workspace)
@@ -158,7 +141,7 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	cmd.Stdin = strings.NewReader(prompt)
 	processgroup.Configure(cmd)
 	var failureTimer *time.Timer
-	output := jsonlOutput{cancel: cancel, structured: settings.OutputSchema != "", fatal: func() {
+	output := jsonlOutput{sessionID: s.id, baseline: s.accounted, cancel: cancel, structured: settings.OutputSchema != "", fatal: func() {
 		// Let the CLI flush a final result and cumulative accounting, then stop
 		// a managed retry watchdog without renewing the action deadline.
 		failureTimer = time.AfterFunc(time.Second, cancel)
@@ -170,6 +153,9 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	}}
 	cmd.Stdout, cmd.Stderr = &output, io.MultiWriter(&diagnostics, &ceiling)
 	err = cmd.Run()
+	if cmd.Process != nil {
+		s.started = true
+	}
 	ceiling.Finish()
 	// Preserve crash/startup stderr before finish adds a generic missing-result
 	// error; native structured failures retain their safer diagnostic instead.
@@ -181,6 +167,11 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 		failureTimer.Stop()
 	}
 	result = output.result
+	if accounted, valid := s.accounted.AddChecked(result.Tokens); valid {
+		s.accounted = accounted
+	} else {
+		err = errors.Join(err, errors.New("claude session usage totals overflow"))
+	}
 	if ctx.Err() != nil {
 		err = errors.Join(ctx.Err(), output.err, err)
 	} else if ceilingMatched {
@@ -203,7 +194,7 @@ func arguments(policy string) []string {
 		"--permission-mode", "dontAsk", "--permission-prompts", "none",
 		"--safe-mode", "--setting-sources", "", "--disable-slash-commands",
 		"--strict-mcp-config", "--mcp-config", `{"mcpServers":{}}`,
-		"--no-session-persistence", "--no-chrome", "--tools", "Bash", "--allowedTools", "Bash",
+		"--no-chrome", "--tools", "Bash", "--allowedTools", "Bash",
 		"--settings", policy,
 	}
 }
@@ -239,6 +230,7 @@ func sandboxSettings(workspace, runtimeDir string, writable bool, outputDir stri
 	}
 	policy := map[string]any{
 		"disableClaudeAiConnectors": true,
+		"autoMemoryEnabled":         false,
 		"sandbox": map[string]any{
 			"enabled": true, "failIfUnavailable": true, "autoAllowBashIfSandboxed": true,
 			"allowUnsandboxedCommands": false, "excludedCommands": []string{},
