@@ -488,8 +488,8 @@ func TestRunOnceRejectsInlineArgumentsAndDeduplicatesCommand(t *testing.T) {
 	if len(handler.jobs) != 1 || len(store.Data.Processed) != 1 {
 		t.Fatalf("jobs = %+v, processed = %v; want one standalone command", handler.jobs, store.Data.Processed)
 	}
-	if handler.jobs[0].Command.Name != "review" {
-		t.Fatalf("standalone command lost: %+v", handler.jobs[0])
+	if handler.jobs[0].Command.Name != "review" || handler.jobs[0].Source.Body != "@linkdataminion review" {
+		t.Fatalf("standalone command lost or inline arguments accepted: %+v", handler.jobs[0])
 	}
 }
 

@@ -404,17 +404,9 @@ func CheckUnchanged(ctx context.Context, root string, base []File) error {
 	return checkUnchanged(ctx, root, base, false)
 }
 
-// CheckChangesUnchanged verifies a materialized candidate with separate source/change bounds.
+// CheckChangesUnchanged verifies a candidate with separate source/change bounds,
+// excluding only top-level Git metadata verified separately by its owner.
 func CheckChangesUnchanged(ctx context.Context, root string, base []File, changes []Change) error {
-	files, err := changedFiles(base, changes)
-	if err != nil {
-		return err
-	}
-	return checkUnchanged(ctx, root, files, false)
-}
-
-// CheckRepositoryChangesUnchanged excludes only top-level Git metadata, verified separately by its owner.
-func CheckRepositoryChangesUnchanged(ctx context.Context, root string, base []File, changes []Change) error {
 	files, err := changedFiles(base, changes)
 	if err != nil {
 		return err

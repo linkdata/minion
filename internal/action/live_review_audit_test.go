@@ -43,7 +43,7 @@ func TestLiveReviewAction(t *testing.T) {
 				if writable || outputDir != "" || !strings.Contains(prompt, pull.Head.SHA) {
 					return aicli.Result{}, fmt.Errorf("live review did not use the expected read-only pull request")
 				}
-				assertPortableSource(t, dir)
+				assertModelRepository(t, dir, pull.Head.SHA)
 				return aicli.Result{Answer: "Live review fixture " + job.ID[:12] + "."}, nil
 			},
 		},
@@ -120,7 +120,7 @@ func TestLiveSecurityAuditAction(t *testing.T) {
 						if writable || outputDir == "" || strings.HasPrefix(outputDir, dir+string(os.PathSeparator)) || !strings.Contains(prompt, test.head) {
 							return aicli.Result{}, fmt.Errorf("live audit did not use a separate report directory and expected commit")
 						}
-						assertPortableSource(t, dir)
+						assertModelRepository(t, dir, test.head)
 						metadata := fmt.Sprintf(`{"run_id":%q,"repo":%q,"target":%q,"source_ref":%q,"profile":"standard","scope_paths":["."],"budget":null,"selected_companion_files":[],"prior_run_paths":[],"shared_file_owners":%s,"execution_policy":"sandboxed-source-and-local-only","run_status":"complete"}`, job.ID, liveFixRepository, dir, test.head, auditTestOwners)
 						for name, content := range map[string]string{
 							"run-metadata.json": metadata, "architecture.md": "Test fixture architecture.\n",

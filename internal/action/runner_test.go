@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -25,6 +24,7 @@ import (
 func TestRunnerUsesSuppliedSourceAndContext(t *testing.T) {
 	for _, provider := range []string{"codex", "claude"} {
 		t.Run(provider, func(t *testing.T) {
+			forbidNetworkGit(t)
 			job := portableJob(command.Review)
 			job.Main.Provider = provider
 			job.Source.Omitted = []string{"submodule"}
@@ -43,7 +43,7 @@ func TestRunnerUsesSuppliedSourceAndContext(t *testing.T) {
 				if request.provider != provider || request.writable || request.outputDir != "" || request.role != "main" || request.round != 1 {
 					t.Fatalf("wrong model request: %+v", request)
 				}
-				assertPortableSource(t, request.dir)
+				assertModelRepository(t, request.dir, job.Source.Head)
 				if len(request.readOnlyDirs) != 1 {
 					t.Fatalf("missing read-only context grant: %v", request.readOnlyDirs)
 				}
@@ -123,7 +123,7 @@ func TestRunnerReturnsFileChangesAndPartialUsage(t *testing.T) {
 	}
 }
 
-func TestRunnerDeclaresIncompleteComparisonAndLocalHistory(t *testing.T) {
+func TestRunnerUsesLocalHistoryWhenComparisonExcerptIsIncomplete(t *testing.T) {
 	job := portableJob(command.Review)
 	job.Source.Diff, job.Source.DiffIncomplete = nil, true
 	job.Source.ChangedPaths = []string{"source.txt", "deleted.txt"}
@@ -144,7 +144,7 @@ func TestRunnerDeclaresIncompleteComparisonAndLocalHistory(t *testing.T) {
 			if !metadata.DiffIncomplete || !reflect.DeepEqual(metadata.ChangedPaths, job.Source.ChangedPaths) {
 				t.Fatalf("comparison coverage metadata missing: %s", data)
 			}
-			for _, want := range []string{"report incomplete comparison coverage", "use local Git history", "Comparison diff incomplete=true", "disclose any remaining comparison limitation"} {
+			for _, want := range []string{"The text diff exceeds its limit", "use local Git to compare the declared changed paths against the merge base", "use local Git history", "Comparison diff incomplete=true", "disclose any remaining comparison limitation"} {
 				if !strings.Contains(request.prompt, want) {
 					t.Fatalf("prompt lacks %q", want)
 				}
@@ -158,6 +158,7 @@ func TestRunnerDeclaresIncompleteComparisonAndLocalHistory(t *testing.T) {
 }
 
 func TestRunnerKeepsCriticReadOnlyAndRefutationsPrivate(t *testing.T) {
+	forbidNetworkGit(t)
 	job := portableJob(command.Fix)
 	job.Source.Files = append(job.Source.Files, workspace.File{Path: "deleted.txt", Mode: workspace.Regular, Data: []byte("original deleted file")})
 	attachRepository(t, &job)
@@ -190,24 +191,31 @@ func TestRunnerKeepsCriticReadOnlyAndRefutationsPrivate(t *testing.T) {
 		if request.role != "critic" || request.reviewPhase != "full" || request.dir == mainDir || request.writable || request.outputSchema != criticOutputSchema || strings.Contains(request.prompt, "UNPUBLISHED_AUTHOR_REASON") || len(request.readOnlyDirs) != 1 {
 			t.Fatalf("wrong critic boundary: %+v", request)
 		}
-		baseline := filepath.Join(request.readOnlyDirs[0], "base")
-		if !strings.Contains(request.prompt, baseline) || !strings.Contains(request.prompt, "original input baseline") || !strings.Contains(request.prompt, "executable modes") {
-			t.Fatal("critic lacks original baseline instructions")
+		assertModelRepository(t, request.dir, job.Source.Head)
+		for _, want := range []string{"git status", "git diff", "HEAD", "executable modes"} {
+			if !strings.Contains(request.prompt, want) {
+				t.Fatalf("critic lacks local baseline instruction %q", want)
+			}
 		}
 		if !strings.Contains(request.prompt, "Do not create, change or delete omitted paths or anything beneath them, or replace their ancestor directories with files") {
 			t.Fatal("omitted-path constraint missing")
 		}
 		for name, want := range map[string]string{"source.txt": "source\n", "deleted.txt": "original deleted file"} {
-			data, err := os.ReadFile(filepath.Join(baseline, name))
-			if err != nil || string(data) != want {
-				t.Fatalf("baseline %s = %q, %v", name, data, err)
+			if got := modelGit(t, request.dir, "show", "HEAD:"+name); got != want {
+				t.Fatalf("Git baseline %s = %q, want %q", name, got, want)
 			}
 		}
-		if info, err := os.Stat(filepath.Join(baseline, "source.txt")); err != nil || info.Mode().Perm()&0111 != 0 {
-			t.Fatalf("baseline executable mode changed: %v", err)
+		if entry := modelGit(t, request.dir, "ls-tree", "HEAD", "--", "source.txt"); !strings.HasPrefix(entry, "100644 ") {
+			t.Fatalf("baseline executable mode changed: %q", entry)
 		}
-		if _, err := os.Stat(filepath.Join(baseline, "added.bin")); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("added file entered baseline: %v", err)
+		if entry := modelGit(t, request.dir, "ls-tree", "HEAD", "--", "added.bin"); entry != "" {
+			t.Fatalf("added file entered Git baseline: %q", entry)
+		}
+		if status := modelGit(t, request.dir, "status", "--porcelain", "--untracked-files=all"); status != " D deleted.txt\n M source.txt\n?? added.bin\n" {
+			t.Fatalf("critic Git status lost candidate changes: %q", status)
+		}
+		if _, err := os.Stat(filepath.Join(request.readOnlyDirs[0], "base", "source.txt")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("redundant fix baseline retained: %v", err)
 		}
 		return aicli.Result{Answer: approvedCritiqueJSON, UsageComplete: true}, nil
 	}
@@ -218,13 +226,7 @@ func TestRunnerKeepsCriticReadOnlyAndRefutationsPrivate(t *testing.T) {
 }
 
 func TestRunnerFixUsesOnlyOfflineGit(t *testing.T) {
-	realGit, err := exec.LookPath("git")
-	if err != nil {
-		t.Fatal(err)
-	}
-	marker := filepath.Join(t.TempDir(), "network-command")
-	script := fmt.Sprintf("#!/bin/sh\nfor arg do\n case \"$arg\" in fetch|clone|push|ls-remote) printf forbidden > %s; exit 77;; esac\ndone\nexec %s \"$@\"\n", shellQuote(marker), shellQuote(realGit))
-	fakeOnPath(t, "git", script)
+	forbidNetworkGit(t)
 	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 		if err := os.WriteFile(filepath.Join(request.dir, "source.txt"), []byte("changed"), 0600); err != nil {
 			t.Fatal(err)
@@ -234,9 +236,6 @@ func TestRunnerFixUsesOnlyOfflineGit(t *testing.T) {
 	result, err := runner.Run(context.Background(), portableJob(command.Fix))
 	if err != nil || len(result.Changes) != 1 {
 		t.Fatalf("offline fix failed: %+v, %v", result, err)
-	}
-	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("runner attempted remote Git: %v", err)
 	}
 }
 
@@ -374,5 +373,74 @@ func TestRunnerReturnsPartialAuditArtifactsOnFailure(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestRunnerRejectsGitMetadataMutation(t *testing.T) {
+	for _, role := range []string{roleMain, roleCritic} {
+		for _, mutation := range []string{"HEAD contents", "config contents", "added file", "permissions", "root file", "root symlink", "hard link"} {
+			t.Run(role+"/"+mutation, func(t *testing.T) {
+				job := withClaudeCritic(portableJob(command.Fix))
+				calls := 0
+				runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+					calls++
+					assertModelRepository(t, request.dir, job.Source.Head)
+					if request.role == role {
+						dir := filepath.Join(request.dir, ".git")
+						switch mutation {
+						case "HEAD contents", "config contents":
+							name := "HEAD"
+							if mutation == "config contents" {
+								name = "config"
+							}
+							writeFixtureFile(t, dir, name, []byte("forged metadata"))
+						case "added file":
+							writeFixtureFile(t, dir, "injected", []byte("added metadata"))
+						case "permissions":
+							name := filepath.Join(dir, "HEAD")
+							info, err := os.Stat(name)
+							if err != nil {
+								t.Fatal(err)
+							}
+							if err := os.Chmod(name, info.Mode().Perm()^0100); err != nil {
+								t.Fatal(err)
+							}
+						case "root file", "root symlink":
+							moved := filepath.Join(t.TempDir(), "metadata")
+							if err := os.Rename(dir, moved); err != nil {
+								t.Fatal(err)
+							}
+							if mutation == "root file" {
+								if err := os.WriteFile(dir, []byte("replaced metadata"), 0600); err != nil {
+									t.Fatal(err)
+								}
+							} else if err := os.Symlink(moved, dir); err != nil {
+								t.Fatal(err)
+							}
+						case "hard link":
+							if err := os.Link(filepath.Join(dir, "HEAD"), filepath.Join(t.TempDir(), "linked-head")); err != nil {
+								t.Fatal(err)
+							}
+						}
+					}
+					if request.role == roleMain {
+						writeFixtureFile(t, request.dir, "source.txt", []byte("candidate"))
+						return aicli.Result{Answer: proposalJSON("candidate", "")}, nil
+					}
+					return aicli.Result{Answer: approvedCritiqueJSON}, nil
+				}}
+				wantCalls, wantError := 1, "supplied repository changed"
+				if role == roleCritic {
+					wantCalls, wantError = 2, "frozen candidate repository changed"
+					if mutation == "root file" || mutation == "root symlink" {
+						wantError = "frozen candidate source changed"
+					}
+				}
+				result, err := runner.Run(context.Background(), job)
+				if !errors.Is(err, monitor.ErrTerminalJob) || result.Answer != "" || len(result.Changes) != 0 || !strings.Contains(err.Error(), wantError) || calls != wantCalls || len(result.Calls) != wantCalls || result.Calls[len(result.Calls)-1].Role != role {
+					t.Fatalf("metadata mutation accepted or wrong role failed: calls=%d want=%d result=%+v error=%v want=%q", calls, wantCalls, result, err, wantError)
+				}
+			})
+		}
 	}
 }

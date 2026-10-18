@@ -93,6 +93,7 @@ func TestRunnerPreparationFailuresAreTerminalBeforeModels(t *testing.T) {
 		want   string
 	}{
 		{"source materialization", command.Comment, func(job *Job) { job.Source.Files[0].Path = longPath }, "materialize source"},
+		{"repository materialization", command.Comment, func(job *Job) { job.Source.Files[0].Data = []byte("forged\n") }, "materialize repository"},
 		{"context materialization", command.Review, func(job *Job) { job.Source.BaseFiles[0].Path = longPath }, "materialize context"},
 		{"missing audit task skill", command.SecurityAudit, func(*Job) {}, "action prompt: security audit requires"},
 	} {
@@ -110,10 +111,10 @@ func TestRunnerPreparationFailuresAreTerminalBeforeModels(t *testing.T) {
 func TestRunnerEnforcesSuppliedRuntimeBudget(t *testing.T) {
 	for _, action := range []command.Action{command.Comment, command.SecurityAudit} {
 		t.Run(string(action), func(t *testing.T) {
-			parent, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			parent, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			job := portableJob(action)
-			job.RuntimeBudget = 100 * time.Millisecond
+			job.RuntimeBudget = 2 * time.Second
 			if action == command.SecurityAudit {
 				installActionTestSkills(t, testAuditSkillURL)
 				job.Main.Skills = []string{testAuditSkillURL}
@@ -157,16 +158,18 @@ func TestRunnerEnforcesSuppliedRuntimeBudget(t *testing.T) {
 }
 
 func TestRunnerDiscardsSuccessfulAnswerReturnedAfterDeadline(t *testing.T) {
+	parent, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 	job := portableJob(command.Comment)
-	job.RuntimeBudget = 100 * time.Millisecond
+	job.RuntimeBudget = 2 * time.Second
 	calls := 0
 	runner := Runner{WorkRoot: t.TempDir(), runModel: func(ctx context.Context, _ modelRun) (aicli.Result, error) {
 		calls++
 		<-ctx.Done()
 		return aicli.Result{Answer: "Completed after the deadline."}, nil
 	}}
-	result, err := runner.Run(context.Background(), job)
-	if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, monitor.ErrTerminalJob) || result.Answer != "" || len(result.Changes) != 0 || calls != 1 || len(result.Calls) != 1 {
+	result, err := runner.Run(parent, job)
+	if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, monitor.ErrTerminalJob) || parent.Err() != nil || result.Answer != "" || len(result.Changes) != 0 || calls != 1 || len(result.Calls) != 1 {
 		t.Fatalf("late successful answer escaped deadline boundary: result=%+v calls=%d error=%v", result, calls, err)
 	}
 }

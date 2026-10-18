@@ -235,6 +235,9 @@ func (c *Checkout) Snapshot(ctx context.Context) (s workspace.Snapshot, err erro
 	if total > workspace.MaxBytes {
 		return s, fmt.Errorf("%w: combined source exceeds byte limit", ErrCheckoutTooLarge)
 	}
+	if s.Repository, _, err = c.boundedGit(ctx, nil, workspace.MaxBytes, false, "bundle", "create", "-", "--all"); err != nil {
+		return s, fmt.Errorf("export complete repository: %w", err)
+	}
 	files, omitted, err := c.sourceFiles(ctx, allEntries)
 	if err != nil {
 		return s, err
@@ -247,9 +250,6 @@ func (c *Checkout) Snapshot(ctx context.Context) (s workspace.Snapshot, err erro
 		if s.DiffIncomplete {
 			s.Diff = nil
 		}
-	}
-	if s.Repository, _, err = c.boundedGit(ctx, nil, workspace.MaxBytes, false, "bundle", "create", "-", "--all"); err != nil {
-		return s, fmt.Errorf("export complete repository: %w", err)
 	}
 	if err := c.ready(); err != nil {
 		return s, err

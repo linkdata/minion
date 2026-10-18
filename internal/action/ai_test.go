@@ -31,6 +31,9 @@ func TestReviewPromptsRequireCompleteInvestigationInEveryPhase(t *testing.T) {
 	prompts := map[string]string{}
 	for _, phase := range []string{reviewFull, reviewVerification} {
 		prompts[phase] = criticPrompt(phase, "Review this change.", "Candidate.", "", "", "")
+		if !strings.Contains(prompts[phase], "complete local Git history with read-only metadata") || strings.Contains(prompts[phase], "workspace has no Git metadata") {
+			t.Errorf("%s critic lacks accurate local Git instructions", phase)
+		}
 		if !strings.Contains(prompts[phase], "unfinished assigned review scope is a blocking task failure: set approved=false and has_blockers=true") {
 			t.Errorf("%s can waive an unfinished review as nonblocking", phase)
 		}

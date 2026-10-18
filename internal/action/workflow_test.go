@@ -53,7 +53,7 @@ func TestPreparedActionRejectsForeignResultBeforePublication(t *testing.T) {
 				if modelRequest.provider != "claude" || modelRequest.model != "portable-claude-model" || modelRequest.effort != "high" {
 					t.Fatalf("lost actual Claude role settings: %+v", modelRequest)
 				}
-				assertPortableSource(t, dir)
+				assertModelRepository(t, dir, base)
 				if !strings.Contains(prompt, base) {
 					t.Fatal("prompt lost source commit")
 				}
@@ -272,7 +272,11 @@ func TestPreparedActionAlwaysCarriesCompleteRepository(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if prepared.job.Source.Head != base || len(prepared.job.Source.Repository) == 0 {
-		t.Fatalf("complete repository missing from prepared source: %+v", prepared.job.Source)
+	if err := prepared.job.Validate(); err != nil {
+		t.Fatalf("invalid prepared job: %v", err)
+	}
+	header, _, ok := bytes.Cut(prepared.job.Source.Repository, []byte("\n\n"))
+	if prepared.job.Source.Head != base || !ok || !strings.Contains("\n"+string(header)+"\n", "\n"+base+" refs/remotes/origin/main\n") {
+		t.Fatalf("complete repository header lacks pinned origin/main: %s", header)
 	}
 }

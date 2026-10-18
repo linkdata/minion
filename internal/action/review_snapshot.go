@@ -85,7 +85,7 @@ func (s *reviewSnapshot) refresh(ctx context.Context, workRoot string, job Job, 
 
 func (s *reviewSnapshot) verify(ctx context.Context) error {
 	if s.ownedSource {
-		if err := workspace.CheckRepositoryChangesUnchanged(ctx, s.source, s.base, s.changes); err != nil {
+		if err := workspace.CheckChangesUnchanged(ctx, s.source, s.base, s.changes); err != nil {
 			return fmt.Errorf("frozen candidate source changed during critic review: %w", err)
 		}
 	}

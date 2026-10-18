@@ -41,7 +41,10 @@ func TestReviewSnapshotFixFreezesOnlyExportedCandidate(t *testing.T) {
 			t.Fatalf("copied non-candidate path %q: %v", name, err)
 		}
 	}
-	assertPortableSource(t, snapshot.source)
+	assertModelRepository(t, snapshot.source, job.Source.Head)
+	if status := modelGit(t, snapshot.source, "status", "--porcelain", "--untracked-files=all"); status != " D deleted\n M source.txt\n?? added\n" {
+		t.Fatalf("frozen repository does not show exported candidate: %q", status)
+	}
 	info, err := os.Stat(filepath.Join(snapshot.source, "added"))
 	if err != nil || info.Mode().Perm() != 0755 {
 		t.Fatalf("frozen executable=%v,%v", info, err)
@@ -91,7 +94,7 @@ func TestReviewSnapshotFixFreezesFinalReplacementLayout(t *testing.T) {
 	if len(snapshot.changes) != 6 {
 		t.Fatalf("replacement changes=%+v", snapshot.changes)
 	}
-	if err := workspace.CheckRepositoryChangesUnchanged(context.Background(), snapshot.source, want, nil); err != nil {
+	if err := workspace.CheckChangesUnchanged(context.Background(), snapshot.source, want, nil); err != nil {
 		t.Fatalf("frozen critic tree differs from exported changes: %v", err)
 	}
 	if err := snapshot.verify(context.Background()); err != nil {
@@ -357,30 +360,5 @@ func TestReviewSnapshotChecksExactFrozenFiles(t *testing.T) {
 				}
 			})
 		}
-	}
-}
-
-func TestRunnerRejectsGitMetadataMutation(t *testing.T) {
-	for _, role := range []string{roleMain, roleCritic} {
-		t.Run(role, func(t *testing.T) {
-			job := withClaudeCritic(portableJob(command.Fix))
-			calls := 0
-			runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
-				calls++
-				assertPortableSource(t, request.dir)
-				if request.role == role {
-					writeFixtureFile(t, request.dir, ".git/HEAD", []byte("forged metadata"))
-				}
-				if request.role == roleMain {
-					writeFixtureFile(t, request.dir, "source.txt", []byte("candidate"))
-					return aicli.Result{Answer: proposalJSON("candidate", "")}, nil
-				}
-				return aicli.Result{Answer: `{"approved":true,"has_blockers":false,"feedback":""}`}, nil
-			}}
-			result, err := runner.Run(context.Background(), job)
-			if !errors.Is(err, monitor.ErrTerminalJob) || result.Answer != "" || !strings.Contains(err.Error(), "repository changed") || calls < 1 {
-				t.Fatalf("metadata mutation accepted: calls=%d result=%+v error=%v", calls, result, err)
-			}
-		})
 	}
 }

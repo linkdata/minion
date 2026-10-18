@@ -446,7 +446,7 @@ func TestChildEnvironmentIsolatesCodexSessionButKeepsAuthentication(t *testing.T
 		"TMPDIR=/host-tmp", "GOCACHE=/host-cache", "GIT_CONFIG_GLOBAL=/private-git-config", "GIT_DIR=/private-git-dir",
 	}, "/runtime", "/cache", "/trusted/codex", false)
 	joined := strings.Join(env, "\n")
-	for _, denied := range []string{"unsafe-parent-profile", "CODEX_THREAD_ID", "CODEX_SESSION_ID", "CODEX_APP_TOOLS_PIPE_PATH", "CODEX_SANDBOX_NETWORK_DISABLED", "GH_TOKEN", "GITHUB_TOKEN", "OPENAI_API_KEY", "PGPASSWORD", "/host-tmp", "/host-cache"} {
+	for _, denied := range []string{"unsafe-parent-profile", "CODEX_THREAD_ID", "CODEX_SESSION_ID", "CODEX_APP_TOOLS_PIPE_PATH", "CODEX_SANDBOX_NETWORK_DISABLED", "GH_TOKEN", "GITHUB_TOKEN", "OPENAI_API_KEY", "PGPASSWORD", "/host-tmp", "/host-cache", "/private-git-"} {
 		if strings.Contains(joined, denied) {
 			t.Fatalf("inherited parent session state: %s", joined)
 		}

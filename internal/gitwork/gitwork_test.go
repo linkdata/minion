@@ -252,7 +252,7 @@ func TestCheckoutPullRequestPreflightsMetadataBeforeSourceRead(t *testing.T) {
 	if err := checkout.checkoutPullRequest(context.Background(), 7, "main", head); !errors.Is(err, ErrCheckoutTooLarge) {
 		t.Fatalf("oversized PR error = %v, want checkout limit", err)
 	}
-	assertBlobPresent(t, checkout.path, blob)
+	assertBlobPresent(fixture, checkout.path, blob)
 	if data, err := os.ReadFile(log); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("metadata preflight requested source content: %q error=%v", data, err)
 	}

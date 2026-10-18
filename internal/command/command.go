@@ -33,8 +33,8 @@ var (
 
 // Command is a directive on its own Markdown line.
 //
-// Key is a deterministic SHA-256 digest of the name followed by a NUL byte;
-// callers should include the GitHub item's identity when using it as an idempotency key.
+// Key is a deterministic SHA-256 digest of the name; callers should include
+// the GitHub item's identity when using it as an idempotency key.
 type Command struct {
 	Key    string
 	Name   string
@@ -106,17 +106,16 @@ func parseLine(line, handle string, actions map[string]Action) (Command, bool) {
 		return Command{}, false
 	}
 
-	verb, args := splitFirst(strings.Trim(line[len(handle):], " \t"))
-	args = strings.Trim(args, " \t")
+	verb := strings.Trim(line[len(handle):], " \t")
+	if strings.ContainsAny(verb, " \t") {
+		return Command{}, false
+	}
 	name := strings.ToLower(verb)
 	action, ok := actions[name]
 	if !ok || !equalASCIIFold(verb, name) {
 		return Command{}, false
 	}
-	if args != "" {
-		return Command{}, false
-	}
-	keyBytes := sha256.Sum256([]byte(name + "\x00"))
+	keyBytes := sha256.Sum256([]byte(name))
 	return Command{Key: hex.EncodeToString(keyBytes[:]), Name: name, Action: action}, true
 }
 
@@ -153,15 +152,6 @@ func equalASCIIFold(a, b string) bool {
 		}
 	}
 	return true
-}
-
-func splitFirst(s string) (string, string) {
-	for i, c := range s {
-		if c == ' ' || c == '\t' {
-			return s[:i], s[i+1:]
-		}
-	}
-	return s, ""
 }
 
 func isIndentedCode(line string) bool {

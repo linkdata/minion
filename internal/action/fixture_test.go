@@ -1,6 +1,7 @@
 package action
 
 import (
+	"bytes"
 	"context"
 	_ "embed"
 	"encoding/json"
@@ -60,6 +61,8 @@ func attemptFixture(orchestrator *Orchestrator) *Orchestrator {
 	return &attempt
 }
 
+// Regenerate with the fixed identity/date commands in testdata/README.md.
+//
 //go:embed testdata/source.bundle
 var portableRepository []byte
 
@@ -143,17 +146,56 @@ func writeTreeFixture(t *testing.T, w http.ResponseWriter, sha string, files ...
 	}
 }
 
-func assertPortableSource(t *testing.T, dir string) {
+func modelGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()
-	cmd := exec.Command("git", "-C", dir, "rev-parse", "--is-shallow-repository")
-	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_ATTR_NOSYSTEM=1", "GIT_NO_LAZY_FETCH=1", "GIT_OPTIONAL_LOCKS=0"}
-	if out, err := cmd.CombinedOutput(); err != nil || strings.TrimSpace(string(out)) != "false" {
-		t.Fatalf("executor lacks complete repository: %s %v", out, err)
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	cmd.Env = append([]string{"PATH=" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME")}, aicli.ModelGitEnvironment()...)
+	var diagnostic bytes.Buffer
+	cmd.Stderr = &diagnostic
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("model Git %v: %s %v", args, diagnostic.String(), err)
+	}
+	return string(out)
+}
+
+func assertModelRepository(t *testing.T, dir, head string) {
+	t.Helper()
+	for _, check := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"rev-parse", "--is-shallow-repository"}, "false"},
+		{[]string{"rev-parse", "HEAD"}, head},
+		{[]string{"config", "--get", "core.hooksPath"}, "/dev/null"},
+		{[]string{"config", "--get", "core.fsmonitor"}, "false"},
+		{[]string{"config", "--get", "protocol.allow"}, "never"},
+		{[]string{"config", "--get", "credential.helper"}, ""},
+	} {
+		if got := strings.TrimSpace(modelGit(t, dir, check.args...)); got != check.want {
+			t.Fatalf("model Git %v = %q, want %q", check.args, got, check.want)
+		}
 	}
 	data, err := os.ReadFile(filepath.Join(dir, ".git", "config"))
 	if err != nil || strings.Contains(string(data), "[remote ") || strings.Contains(string(data), "promisor") {
 		t.Fatalf("unsafe model repository config: %s %v", data, err)
 	}
+}
+
+func forbidNetworkGit(t *testing.T) {
+	t.Helper()
+	realGit, err := aicli.AbsoluteExecutable("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(t.TempDir(), "network-command")
+	script := fmt.Sprintf("#!/bin/sh\nfor arg do\n case \"$arg\" in fetch|clone|push|remote|ls-remote|pull|submodule) printf forbidden > %s; exit 77;; esac\ndone\nexec %s \"$@\"\n", shellQuote(marker), shellQuote(realGit))
+	fakeOnPath(t, "git", script)
+	t.Cleanup(func() {
+		if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("runner attempted network-capable Git: %v", err)
+		}
+	})
 }
 
 // attachRepository refreshes a deliberately changed portable fixture before execution.
@@ -169,10 +211,12 @@ func attachRepository(t *testing.T, job *Job) {
 	git := func(args ...string) []byte {
 		t.Helper()
 		cmd := exec.Command("git", append([]string{"-C", root, "-c", "core.hooksPath=/dev/null"}, args...)...)
-		cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + root, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_NO_LAZY_FETCH=1", "GIT_AUTHOR_NAME=Fixture", "GIT_AUTHOR_EMAIL=fixture@example.invalid", "GIT_COMMITTER_NAME=Fixture", "GIT_COMMITTER_EMAIL=fixture@example.invalid"}
-		data, err := cmd.CombinedOutput()
+		cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + root, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_ATTR_NOSYSTEM=1", "GIT_NO_LAZY_FETCH=1", "GIT_AUTHOR_DATE=1767225600 +0000", "GIT_COMMITTER_DATE=1767225600 +0000", "GIT_AUTHOR_NAME=Fixture", "GIT_AUTHOR_EMAIL=fixture@example.invalid", "GIT_COMMITTER_NAME=Fixture", "GIT_COMMITTER_EMAIL=fixture@example.invalid"}
+		var diagnostic bytes.Buffer
+		cmd.Stderr = &diagnostic
+		data, err := cmd.Output()
 		if err != nil {
-			t.Fatalf("fixture git %v: %s %v", args, data, err)
+			t.Fatalf("fixture git %v: %s %v", args, diagnostic.String(), err)
 		}
 		return data
 	}

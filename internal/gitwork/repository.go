@@ -30,8 +30,8 @@ func MaterializeRepository(ctx context.Context, source string, snapshot workspac
 		return nil, err
 	}
 
-	if len(snapshot.Repository) == 0 || len(snapshot.Repository) > workspace.MaxBytes {
-		return nil, errors.New("missing or oversized complete repository bundle")
+	if len(snapshot.Repository) == 0 {
+		return nil, errors.New("missing complete repository bundle")
 	}
 	binary, err := aicli.AbsoluteExecutable("git")
 	if err != nil {
@@ -49,20 +49,21 @@ func MaterializeRepository(ctx context.Context, source string, snapshot workspac
 	if err := disableAttributes(dir); err != nil {
 		return nil, err
 	}
-	// Fixed identity avoids hostname lookup when writing refs; local settings protect model commands.
+	// Only fixed offline settings reach model commands; refs need neither reflogs nor a host identity.
 	const config = `[core]
 repositoryformatversion = 0
 bare = false
 filemode = true
 hooksPath = /dev/null
 fsmonitor = false
+logAllRefUpdates = false
+pager = cat
+[log]
+mailmap = false
 [protocol]
 allow = never
 [credential]
 helper =
-[user]
-name = Minion
-email = minion@localhost
 [gc]
 auto = 0
 [maintenance]
@@ -83,13 +84,19 @@ auto = false
 	if err := bundle.Close(); err != nil {
 		return nil, err
 	}
-	// An empty repository cannot satisfy prerequisites of an incremental bundle.
-	if _, err := run("bundle", "verify", bundle.Name()); err != nil {
-		return nil, fmt.Errorf("verify complete bundle: %w", err)
-	}
+	// Unbundle checks prerequisites before importing into the empty repository.
 	refs, err := run("bundle", "unbundle", bundle.Name())
 	if err != nil {
 		return nil, err
+	}
+	packs, err := os.ReadDir(filepath.Join(dir, "objects", "pack"))
+	if err != nil {
+		return nil, err
+	}
+	for _, pack := range packs {
+		if strings.HasSuffix(pack.Name(), ".promisor") {
+			return nil, errors.New("incomplete repository: filtered bundles are unsupported")
+		}
 	}
 	var updates strings.Builder
 	for _, line := range strings.Split(strings.TrimSpace(string(refs)), "\n") {
@@ -102,6 +109,9 @@ auto = false
 		}
 	}
 	if _, err := index.run(ctx, 1024, []byte(updates.String()), "update-ref", "--stdin"); err != nil {
+		return nil, err
+	}
+	if _, err := run("pack-refs", "--all"); err != nil {
 		return nil, err
 	}
 	for _, sha := range []string{snapshot.Head, snapshot.Base, snapshot.MergeBase} {
@@ -118,7 +128,7 @@ auto = false
 	if _, err := run("update-ref", "--no-deref", "HEAD", snapshot.Head); err != nil {
 		return nil, err
 	}
-	if _, err := run("fsck", "--full", "--no-dangling"); err != nil {
+	if _, err := run("fsck", "--connectivity-only", "--no-dangling"); err != nil {
 		return nil, fmt.Errorf("incomplete repository: %w", err)
 	}
 	if snapshot.Base != "" {
@@ -177,12 +187,17 @@ auto = false
 			return nil, err
 		}
 	}
+	if _, err := run("update-index", "-q", "--refresh", "--ignore-missing"); err != nil {
+		return nil, err
+	}
 	if err := os.Remove(bundle.Name()); err != nil {
 		return nil, err
 	}
 	repo := &Repository{dir: dir}
-	repo.digest, err = repositoryDigest(ctx, dir)
-	return repo, err
+	if repo.digest, err = repositoryDigest(ctx, dir); err != nil {
+		return nil, err
+	}
+	return repo, nil
 }
 
 // Verify detects changes without executing model-visible Git configuration.

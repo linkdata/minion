@@ -156,7 +156,7 @@ func TestSecurityAuditIssueAndPullRequest(t *testing.T) {
 							t.Errorf("audit prompt lacks an unspoofed data boundary: %q", prompt)
 						}
 						assertRequesterNotesPrompt(t, prompt, job.Source.Body, "Inspect authorization boundaries.")
-						assertPortableSource(t, dir)
+						assertModelRepository(t, dir, expected)
 						if tt.failCodex {
 							return aicli.Result{Tokens: usage.Tokens{Input: 10, CachedInput: 8, Output: 2}}, errors.New("Codex unavailable")
 						}

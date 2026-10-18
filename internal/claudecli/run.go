@@ -307,13 +307,12 @@ func childEnvironment(env []string, runtimeDir, cacheDir, authDir, configDir str
 		clean = append(clean, "CLAUDE_CONFIG_DIR="+configDir)
 	}
 	// Keep runtime and cache paths inside the sandbox write grants.
-	return append(
+	clean = append(
 		clean,
 		// The application context owns runtime limits, including background work.
 		"CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0",
 		"CLAUDE_CODE_TMPDIR="+filepath.Join(runtimeDir, "tmp"),
 		"TMPDIR="+runtimeDir, "TMP="+runtimeDir, "TEMP="+runtimeDir, "GOCACHE="+cacheDir,
-		// Local history commands must not read host Git config or write optional metadata.
-		"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_ATTR_NOSYSTEM=1", "GIT_NO_REPLACE_OBJECTS=1", "GIT_NO_LAZY_FETCH=1", "GIT_OPTIONAL_LOCKS=0",
-	), nil
+	)
+	return append(clean, aicli.ModelGitEnvironment()...), nil
 }

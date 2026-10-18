@@ -137,13 +137,19 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 		args = append(args, "--disable", feature)
 	}
 	args = append(args, instructionBoundaryConfig()...)
+	filters := []string{`"PATH"="include"`, `"HOME"="include"`, `"TMPDIR"="include"`, `"TMP"="include"`, `"TEMP"="include"`, `"GOCACHE"="include"`}
+	for _, entry := range aicli.ModelGitEnvironment() {
+		key, _, _ := strings.Cut(entry, "=")
+		filters = append(filters, strconv.Quote(key)+`="include"`)
+	}
+	filters = append(filters, `"LANG"="include"`, `"LC_ALL"="include"`, `"LC_CTYPE"="include"`, `"TERM"="include"`)
 	args = append(
 		args,
 		"-c", "skills.include_instructions=false",
 		"-c", "approval_policy=never",
 		"-c", `web_search="disabled"`,
 		"-c", "shell_environment_policy.ignore_default_excludes=false",
-		"-c", `shell_environment_policy.filters={"PATH"="include","HOME"="include","TMPDIR"="include","TMP"="include","TEMP"="include","GOCACHE"="include","GIT_CONFIG_NOSYSTEM"="include","GIT_CONFIG_GLOBAL"="include","GIT_ATTR_NOSYSTEM"="include","GIT_NO_REPLACE_OBJECTS"="include","GIT_NO_LAZY_FETCH"="include","GIT_OPTIONAL_LOCKS"="include","LANG"="include","LC_ALL"="include","LC_CTYPE"="include","TERM"="include"}`,
+		"-c", "shell_environment_policy.filters={"+strings.Join(filters, ",")+"}",
 		"-c", `default_permissions="minion"`,
 		"-c", filesystemRule,
 		"-c", "permissions.minion.network.enabled=false",
@@ -271,7 +277,7 @@ func childEnvironment(env []string, runtimeDir, cacheDir, codexHome string, conf
 	}
 	clean = append(clean, "TMPDIR="+runtimeDir, "TMP="+runtimeDir, "TEMP="+runtimeDir, "GOCACHE="+cacheDir)
 	// Local history commands must not read host Git config or write optional metadata.
-	clean = append(clean, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_ATTR_NOSYSTEM=1", "GIT_NO_REPLACE_OBJECTS=1", "GIT_NO_LAZY_FETCH=1", "GIT_OPTIONAL_LOCKS=0")
+	clean = append(clean, aicli.ModelGitEnvironment()...)
 	return clean
 }
 

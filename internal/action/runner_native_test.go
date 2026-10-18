@@ -153,7 +153,7 @@ func TestRunnerMissingProviderIsNotTerminalAndRecordsZeroUsage(t *testing.T) {
 func TestRunnerMissingGitIsRetryableBeforeModelWork(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 	result, err := (&Runner{WorkRoot: t.TempDir()}).Run(context.Background(), portableJob(command.Comment))
-	if !errors.Is(err, exec.ErrNotFound) || errors.Is(err, monitor.ErrTerminalJob) || len(result.Calls) != 0 || result.Answer != "" {
+	if !errors.Is(err, exec.ErrNotFound) || errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "materialize repository") || len(result.Calls) != 0 || result.Answer != "" {
 		t.Fatalf("missing Git misclassified or charged: result=%+v error=%v", result, err)
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/bounded"
@@ -64,7 +65,7 @@ type Checkout struct {
 // Clone pins the repository's default branch in an isolated directory.
 // The Git remote is always derived from a validated owner/name; GitHub CLI's
 // credential helper supplies authentication without embedding a token in URLs.
-// Blob contents are fetched on demand; checkoutFiles materializes the trusted fix worktree.
+// Clones complete history; checkoutFiles materializes the trusted fix worktree.
 func Clone(ctx context.Context, workRoot, repo, defaultBranch string, lookupTree func(context.Context, string) (github.GitTree, error), checkoutFiles bool) (*Checkout, error) {
 	url, err := repositoryURL(repo)
 	if err != nil {
@@ -139,6 +140,7 @@ func cloneRepository(ctx context.Context, workRoot, url, defaultBranch string, l
 		}
 	}()
 
+	// Disable local clone shortcuts too, so file sources cannot share objects with the checkout.
 	if _, err := runGit(ctx, workRoot, "clone", "--template=", "--reject-shallow", "--no-local", "--no-checkout", "--branch", defaultBranch, "--", url, path); err != nil {
 		return nil, err
 	}
@@ -484,6 +486,12 @@ func gitFailure(prefix, operation, message string, contextErr, err error) error 
 			err = errors.Join(contextErr, err)
 		}
 	} else {
+		switch {
+		case strings.Contains(message, "No space left on device"):
+			err = fmt.Errorf("%w: %w", syscall.ENOSPC, err)
+		case strings.Contains(message, "Disk quota exceeded"):
+			err = fmt.Errorf("%w: %w", syscall.EDQUOT, err)
+		}
 		err = classifyPathError(operation, message, err)
 	}
 	if message != "" {

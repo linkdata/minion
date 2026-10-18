@@ -132,7 +132,12 @@ func TestClonePullRequestSkipsUnusedBaseTipPreflight(t *testing.T) {
 	if _, err := os.Lstat(filepath.Join(checkout.path, unused)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("unused base path materialized: %v", err)
 	}
-	assertBlobPresent(t, checkout.path, unusedBlob)
+	assertBlobPresent(fixture, checkout.path, unusedBlob)
+	source, _ := repositoryFixture(t, snapshot)
+	assertModelRepositoryGit(t, source, head+"\n", "rev-parse", "HEAD")
+	assertModelRepositoryGit(t, source, base+"\n", "rev-parse", "refs/remotes/origin/main")
+	assertModelRepositoryGit(t, source, fixture.base+"\n", "merge-base", "HEAD", "refs/remotes/origin/main")
+	assertModelRepositoryGit(t, source, "unused base-tip blob\n", "show", "refs/remotes/origin/main:"+unused)
 }
 
 func TestPullRequestRejectsDeletedMergeBaseMetadataAliasBeforeContent(t *testing.T) {
@@ -152,14 +157,13 @@ func TestPullRequestRejectsDeletedMergeBaseMetadataAliasBeforeContent(t *testing
 	head := fixture.git(fixture.source, "rev-parse", "HEAD")
 	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/pull/7/head")
 	checkout := fixture.keepCheckout(clonePullRequestFromURL(context.Background(), t.TempDir(), "file://"+fixture.remote, 7, "main", head, localTreeMetadata(fixture.source)))
-	assertBlobPresent(t, checkout.path, blob)
-	sessions := originSessions(t, fixture, checkout)
+	assertBlobPresent(fixture, checkout.path, blob)
+	if err := os.Rename(fixture.remote, fixture.remote+".offline"); err != nil {
+		t.Fatal(err)
+	}
 	log := recordSnapshotContentCalls(t)
 	if _, err := checkout.Snapshot(context.Background()); !errors.Is(err, ErrUnsupportedSource) {
 		t.Fatalf("merge-base alias accepted: %v", err)
-	}
-	if sessions() != 0 {
-		t.Fatalf("alias preflight contacted origin: sessions=%d", sessions())
 	}
 	if data, err := os.ReadFile(log); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("alias preflight requested source content: %q error=%v", data, err)

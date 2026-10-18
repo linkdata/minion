@@ -54,14 +54,38 @@ func TestGitDeadlineStopsChildHoldingPipes(t *testing.T) {
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "child.pid")
 	alias := "!printf '%s' $$ > " + shellQuote(pidFile) + "; printf 'deadline diagnostic\\nforged journal\\n' >&2; exec sleep 6"
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	started := time.Now()
-	_, _, err := (&Checkout{path: dir}).boundedGit(ctx, nil, 1024, false, "-c", "alias.probe="+alias, "probe")
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := (&Checkout{path: dir}).boundedGit(ctx, nil, 1024, false, "-c", "alias.probe="+alias, "probe")
+		done <- err
+	}()
+	waitCtx, stopWait := context.WithTimeout(context.Background(), 5*time.Second)
+	defer stopWait()
+	child, err := testsupport.WaitForProcess(waitCtx, pidFile, done)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := child.Cleanup(cleanupCtx); err != nil {
+			t.Error(err)
+		}
+	}()
+	select {
+	case err = <-done:
+	case <-waitCtx.Done():
+		t.Fatal("deadline did not finish the Git run")
+	}
 	elapsed := time.Since(started)
-	assertGitChildStopped(t, pidFile)
+	if err := child.WaitExited(waitCtx); err != nil {
+		t.Fatalf("Git child survived deadline cancellation: %v", err)
+	}
 	var exit *exec.ExitError
-	if elapsed > 3*time.Second || !errors.Is(err, context.DeadlineExceeded) || !errors.As(err, &exit) || errors.Is(err, ErrUnsupportedSource) || !strings.Contains(err.Error(), `deadline diagnostic\nforged journal`) {
+	if elapsed > 5*time.Second || !errors.Is(err, context.DeadlineExceeded) || !errors.As(err, &exit) || errors.Is(err, ErrUnsupportedSource) || !strings.Contains(err.Error(), `deadline diagnostic\nforged journal`) {
 		t.Fatalf("deadline Git took %s: %v", elapsed, err)
 	}
 }

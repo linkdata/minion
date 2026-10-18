@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func TestConfiguredCommandsPreserveKeysAndUseNames(t *testing.T) {
+func TestConfiguredCommandsUseNames(t *testing.T) {
 	actions := map[string]Action{
 		"review": Review, "fix": Fix, "audit": Comment,
 		"security-audit": SecurityAudit,
@@ -29,8 +29,8 @@ func TestConfiguredCommandsPreserveKeysAndUseNames(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			oldDigest := sha256.Sum256([]byte(tt.name + "\x00"))
-			if got.Key != hex.EncodeToString(oldDigest[:]) || got.Name != tt.name || got.Action != tt.action {
+			digest := sha256.Sum256([]byte(tt.name))
+			if got.Key != hex.EncodeToString(digest[:]) || got.Name != tt.name || got.Action != tt.action {
 				t.Fatalf("command = %+v", got)
 			}
 		})
@@ -38,7 +38,6 @@ func TestConfiguredCommandsPreserveKeysAndUseNames(t *testing.T) {
 	for _, body := range []string{
 		"@linkdataminion unknown", "@linkdataminion fix extra text", "@linkdataminion inspect now",
 		"@linkdataminion release", "@linkdataminion release v1 v2",
-		"@linkdataminion inspect history", "@linkdataminion inspect HiStOrY",
 	} {
 		if _, err := ParseForLoginCommands(body, "linkdataminion", actions); !errors.Is(err, ErrNoCommand) {
 			t.Fatalf("accepted %q: %v", body, err)
@@ -108,17 +107,8 @@ func TestParseIgnoresNonCommands(t *testing.T) {
 		{"fenced audit", "```\n@linkdataminion audit\n```"},
 		{"removed release", "@linkdataminion release"},
 		{"removed release with tag", "@linkdataminion release v1"},
-		{"review history", "@linkdataminion review history"},
-		{"audit history", "@linkdataminion audit history"},
-		{"fix mixed case history", "\r\n @LinkDataMinion\tFIX\tHiStOrY \t\r\n"},
-		{"security audit history", "@linkdataminion security-audit history"},
-		{"unknown modifier", "@linkdataminion review full"},
-		{"duplicate modifier", "@linkdataminion review history history"},
-		{"extra modifier", "@linkdataminion review history now"},
-		{"misplaced modifier", "@linkdataminion history review"},
-		{"Unicode lookalike modifier", "@linkdataminion review hіstory"},
-		{"long s modifier", "@linkdataminion review hi\u017ftory"},
-		{"Unicode space before modifier", "@linkdataminion review\u00a0history"},
+		{"history argument", "@linkdataminion review HiStOrY"},
+		{"tab argument", "@linkdataminion review\tlater"},
 		{"quote", "> @linkdataminion review"},
 		{"indented code", "    @linkdataminion review\n\t@linkdataminion fix\n   \t@linkdataminion review"},
 		{"fenced code", "```\n@linkdataminion review\n```"},
@@ -200,7 +190,7 @@ func TestCommandKeyIsStable(t *testing.T) {
 	if a.Key != b.Key {
 		t.Fatalf("equivalent commands have different keys: %q, %q", a.Key, b.Key)
 	}
-	digest := sha256.Sum256([]byte("review\x00"))
+	digest := sha256.Sum256([]byte("review"))
 	if a.Key != hex.EncodeToString(digest[:]) {
 		t.Fatalf("command = %#v", a)
 	}

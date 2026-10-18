@@ -107,6 +107,61 @@ func TestMaterializeChangesPreservesSeparateTransferLimits(t *testing.T) {
 	}
 }
 
+func TestCheckChangesUnchangedSkipsOnlyTopLevelGitDirectory(t *testing.T) {
+	base := []File{{Path: "source", Mode: Regular, Data: []byte("before")}}
+	changes := []Change{{Path: "source", Mode: Regular, Data: []byte("after")}}
+	final := []File{{Path: "source", Mode: Regular, Data: []byte("after")}}
+	for _, test := range []struct {
+		name, path, kind string
+		allowed          bool
+	}{
+		{"top-level directory", ".git", "directory", true},
+		{"nested directory", "sub/.git", "directory", false},
+		{"metadata file", ".git", "file", false},
+		{"case variant", ".GIT", "directory", false},
+		{"metadata symlink", ".git", "symlink", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := privateRoot(t)
+			if err := MaterializeChanges(root, base, changes); err != nil {
+				t.Fatal(err)
+			}
+			if err := CheckChangesUnchanged(context.Background(), root, base, changes); err != nil {
+				t.Fatalf("invalid candidate control: %v", err)
+			}
+			name := filepath.Join(root, test.path)
+			if err := os.MkdirAll(filepath.Dir(name), 0700); err != nil {
+				t.Fatal(err)
+			}
+			switch test.kind {
+			case "directory":
+				if err := os.Mkdir(name, 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(name, "config"), []byte("metadata"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			case "file":
+				if err := os.WriteFile(name, []byte("gitdir: elsewhere"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			case "symlink":
+				if err := os.Symlink(privateRoot(t), name); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err := CheckChangesUnchanged(context.Background(), root, base, changes)
+			want := fmt.Sprintf("unsafe workspace path %q", test.path)
+			if (err == nil) != test.allowed || (err != nil && !strings.Contains(err.Error(), want)) {
+				t.Fatalf("candidate metadata %q: %v, want allowed=%t", test.path, err, test.allowed)
+			}
+			if err := CheckUnchanged(context.Background(), root, final); err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("strict unchanged check skipped metadata %q: %v", test.path, err)
+			}
+		})
+	}
+}
+
 func TestMaterializeChangesValidatesBeforeWriting(t *testing.T) {
 	base := []File{{Path: "Dir/stay", Mode: Regular}}
 	for i, changes := range [][]Change{

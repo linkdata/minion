@@ -152,6 +152,7 @@ func TestJobRejectsInvalidRoleAndDispatchSettings(t *testing.T) {
 		{"critic threshold exceeds budget", func(j *Job) { j.Critic, j.CriticMaxRounds, j.CriticNonblockingRounds = critic, 2, 3 }, "invalid critic round limit"},
 		{"version", func(j *Job) { j.Version++ }, "unsupported action protocol version"},
 		{"source", func(j *Job) { j.Source.Head = "untrusted" }, "snapshot has invalid source commits"},
+		{"missing repository", func(j *Job) { j.Source.Repository = nil }, "complete repository bundle"},
 		{"requester identity", func(j *Job) { j.Identity.RequesterID = 0 }, "action repository or requester identity is invalid"},
 		{"repository identity zero", func(j *Job) { j.Identity.RepositoryID = 0 }, "action repository or requester identity is invalid"},
 		{"owner identity zero", func(j *Job) { j.Identity.OwnerID = 0 }, "action repository or requester identity is invalid"},

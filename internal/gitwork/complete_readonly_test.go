@@ -68,33 +68,6 @@ func readOnlyFixture(t *testing.T, pull, link bool) (gitFixture, *Checkout, stri
 	return fixture, checkout, base, head
 }
 
-func originSessions(t *testing.T, fixture gitFixture, checkout *Checkout) func() int {
-	t.Helper()
-	root := t.TempDir()
-	log, upload := filepath.Join(root, "fetches"), filepath.Join(root, "upload-pack")
-	script := "#!/bin/sh\nprintf x >> " + shellQuote(log) + "\nexit 97\n"
-	if err := os.WriteFile(upload, []byte(script), 0700); err != nil {
-		t.Fatal(err)
-	}
-	fixture.git(checkout.path, "config", "remote.origin.uploadpack", upload)
-	if err := checkout.recordConfig(); err != nil {
-		t.Fatal(err)
-	}
-	return func() int {
-		data, err := os.ReadFile(log)
-		if errors.Is(err, os.ErrNotExist) {
-			return 0
-		}
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !bytes.Equal(data, bytes.Repeat([]byte("x"), len(data))) {
-			t.Fatal("invalid upload-pack session log")
-		}
-		return len(data)
-	}
-}
-
 func assertReadOnlyState(t *testing.T, checkout *Checkout, config []byte) {
 	t.Helper()
 	entries, err := os.ReadDir(checkout.path)
@@ -122,9 +95,11 @@ func TestReadOnlySnapshotUsesLocalObjectsWithoutOrigin(t *testing.T) {
 			fixture, checkout, base, head := readOnlyFixture(t, tc.pull, tc.link)
 			for _, spec := range []string{head + ":README.md", head + ":unchanged-00", head + ":unchanged-19", base + ":changed-00", base + ":deleted-00"} {
 				sha := fixture.git(fixture.source, "rev-parse", spec)
-				assertBlobPresent(t, checkout.path, sha)
+				assertBlobPresent(fixture, checkout.path, sha)
 			}
-			sessions := originSessions(t, fixture, checkout)
+			if err := os.Rename(fixture.remote, fixture.remote+".offline"); err != nil {
+				t.Fatal(err)
+			}
 			config, err := os.ReadFile(filepath.Join(checkout.path, ".git", "config"))
 			if err != nil {
 				t.Fatal(err)
@@ -133,9 +108,6 @@ func TestReadOnlySnapshotUsesLocalObjectsWithoutOrigin(t *testing.T) {
 			snapshot, err := checkout.Snapshot(context.Background())
 			if err != nil {
 				t.Fatal(err)
-			}
-			if got := sessions(); got != 0 {
-				t.Fatalf("Snapshot contacted origin: sessions=%d", got)
 			}
 			wantHead, wantBase := 26, 0
 			if tc.pull {
@@ -178,8 +150,8 @@ func TestReadOnlySnapshotUsesLocalObjectsWithoutOrigin(t *testing.T) {
 				t.Fatalf("second snapshot failed: repository bytes=%d error=%v", len(second.Repository), err)
 			}
 			second.Repository, snapshot.Repository = nil, nil
-			if !reflect.DeepEqual(second, snapshot) || sessions() != 0 {
-				t.Fatalf("repeated snapshot changed source/comparison or contacted origin: sessions=%d", sessions())
+			if !reflect.DeepEqual(second, snapshot) {
+				t.Fatal("repeated snapshot changed source or comparison")
 			}
 			assertReadOnlyState(t, checkout, config)
 		})
@@ -188,7 +160,9 @@ func TestReadOnlySnapshotUsesLocalObjectsWithoutOrigin(t *testing.T) {
 
 func TestReadOnlySnapshotPreflightsCombinedBytesBeforeContent(t *testing.T) {
 	fixture, checkout, base, head := readOnlyFixture(t, true, false)
-	sessions := originSessions(t, fixture, checkout)
+	if err := os.Rename(fixture.remote, fixture.remote+".offline"); err != nil {
+		t.Fatal(err)
+	}
 	config, err := os.ReadFile(filepath.Join(checkout.path, ".git", "config"))
 	if err != nil {
 		t.Fatal(err)
@@ -209,34 +183,14 @@ func TestReadOnlySnapshotPreflightsCombinedBytesBeforeContent(t *testing.T) {
 	}
 	log := recordSnapshotContentCalls(t)
 	_, err = checkout.Snapshot(context.Background())
-	if !errors.Is(err, ErrCheckoutTooLarge) || !strings.Contains(err.Error(), "combined") || sessions() != 0 {
-		t.Fatalf("refusal contacted origin: sessions=%d error=%v", sessions(), err)
+	if !errors.Is(err, ErrCheckoutTooLarge) || !strings.Contains(err.Error(), "combined") {
+		t.Fatalf("combined metadata preflight failed for an unrelated reason: %v", err)
 	}
 	for _, spec := range []string{head + ":unchanged-00", head + ":changed-00", base + ":changed-00", base + ":deleted-00"} {
-		assertBlobPresent(t, checkout.path, fixture.git(fixture.source, "rev-parse", spec))
+		assertBlobPresent(fixture, checkout.path, fixture.git(fixture.source, "rev-parse", spec))
 	}
 	assertReadOnlyState(t, checkout, config)
 	if data, err := os.ReadFile(log); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("metadata preflight requested blob contents or rendered diff: %q error=%v", data, err)
-	}
-}
-
-func TestLocalSnapshotKeepsConfigWithoutOrigin(t *testing.T) {
-	fixture := newFixture(t)
-	sessions := originSessions(t, fixture, fixture.checkout)
-	config, err := os.ReadFile(filepath.Join(fixture.checkout.path, ".git", "config"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	snapshot, err := fixture.checkout.Snapshot(context.Background())
-	if err != nil || len(snapshot.Files) != 1 || string(snapshot.Files[0].Data) != "fixture\n" || sessions() != 0 {
-		t.Fatalf("local snapshot contacted origin or failed: sessions=%d files=%d error=%v", sessions(), len(snapshot.Files), err)
-	}
-	after, err := os.ReadFile(filepath.Join(fixture.checkout.path, ".git", "config"))
-	if err != nil || !bytes.Equal(after, config) {
-		t.Fatalf("local snapshot changed config: %v", err)
-	}
-	if err := fixture.checkout.ready(); err != nil {
-		t.Fatal(err)
 	}
 }

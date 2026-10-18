@@ -28,8 +28,8 @@ const (
 	excludeGitContents = ":(exclude,icase,glob)**/.git/**"
 )
 
-// OfflineIndex keeps Git metadata outside every model grant. It has no remotes,
-// source repository configuration, credential environment, hooks or checkout filters.
+// OfflineIndex runs offline Git against explicitly selected metadata and source.
+// NewOfflineIndex keeps fix-collection metadata outside model grants.
 type OfflineIndex struct {
 	dir, source, binary, baseline string
 	tracked                       map[string]int64

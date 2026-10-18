@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/linkdata/minion/internal/github"
@@ -239,5 +240,34 @@ func TestSourceTreeResponseOverflowIsTerminalSizeRefusal(t *testing.T) {
 	_, err := fixture.checkout.Snapshot(context.Background())
 	if !errors.Is(err, ErrCheckoutTooLarge) || !errors.Is(err, github.ErrResponseTooLarge) {
 		t.Fatalf("source response overflow classification: %v", err)
+	}
+}
+
+func TestGitFailurePreservesDiskCapacityCauses(t *testing.T) {
+	native := &exec.ExitError{}
+	for _, scenario := range []struct {
+		message string
+		cause   error
+	}{
+		{"fatal: write error: No space left on device", syscall.ENOSPC},
+		{"fatal: unable to write: Disk quota exceeded", syscall.EDQUOT},
+	} {
+		t.Run(scenario.cause.Error(), func(t *testing.T) {
+			err := gitFailure("offline git", "unbundle", scenario.message, nil, native)
+			var exit *exec.ExitError
+			if !errors.Is(err, scenario.cause) || !errors.Is(err, native) || !errors.As(err, &exit) || !strings.Contains(err.Error(), "offline git unbundle") || !strings.Contains(err.Error(), strconv.Quote(scenario.message)) || errors.Is(err, ErrUnsupportedSource) {
+				t.Fatalf("capacity failure lost its cause or diagnostic: %v", err)
+			}
+			for _, contextErr := range []error{context.Canceled, context.DeadlineExceeded} {
+				err := gitFailure("offline git", "unbundle", scenario.message, contextErr, native)
+				if !errors.Is(err, contextErr) || !errors.Is(err, native) || errors.Is(err, scenario.cause) || strings.Count(err.Error(), contextErr.Error()) != 1 || !strings.Contains(err.Error(), strconv.Quote(scenario.message)) {
+					t.Fatalf("context failure was replaced by disk classification: %v", err)
+				}
+			}
+		})
+	}
+	err := gitFailure("offline git", "unbundle", "fatal: failed to write object", nil, native)
+	if !errors.Is(err, native) || errors.Is(err, syscall.ENOSPC) || errors.Is(err, syscall.EDQUOT) {
+		t.Fatalf("unclassified Git failure gained a capacity cause: %v", err)
 	}
 }
