@@ -132,7 +132,11 @@ func usageFiles(ctx context.Context, home, rootID string, started time.Time, kno
 	complete := true
 	entries, candidates := 0, 0
 	visited := map[string]bool{}
-	readHeader := func(path string) {
+	// Failed or cancelled rediscovery must not erase known ownership obligations.
+	for id, meta := range known {
+		files[id], ambiguous[id] = meta, true
+	}
+	readHeader := func(path, expectedID string) {
 		if visited[path] {
 			return
 		}
@@ -171,20 +175,31 @@ func usageFiles(ctx context.Context, home, rootID string, started time.Time, kno
 				meta.ParentID = source.Subagent.Spawn.ParentID
 			}
 		}
+		meta.path = path
+		if expectedID != "" {
+			before := known[expectedID]
+			sameBoundary := before.HistoryStart == nil && meta.HistoryStart == nil || before.HistoryStart != nil && meta.HistoryStart != nil && *before.HistoryStart == *meta.HistoryStart
+			if meta.ID != expectedID || meta.SessionID != before.SessionID || meta.ParentID != before.ParentID || !sameBoundary {
+				complete = false
+				return
+			}
+			files[expectedID] = meta
+			delete(ambiguous, expectedID)
+			return
+		}
 		if _, exists := files[meta.ID]; exists {
 			complete = false
 			ambiguous[meta.ID] = true
 			return
 		}
-		meta.path = path
 		files[meta.ID] = meta
 	}
-	for _, meta := range known {
+	for id, meta := range known {
 		if ctx.Err() != nil {
 			complete = false
 			break
 		}
-		readHeader(meta.path)
+		readHeader(meta.path, id)
 	}
 	if rootID != "" {
 		err := walkUsageFiles(ctx, filepath.Join(home, "sessions"), started, func(path string, entry fs.DirEntry) error {
@@ -207,7 +222,7 @@ func usageFiles(ctx context.Context, home, rootID string, started time.Time, kno
 			if info.ModTime().Before(started.Add(-time.Minute)) {
 				return nil
 			}
-			readHeader(path)
+			readHeader(path, "")
 			return nil
 		})
 		if err != nil {

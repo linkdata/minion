@@ -240,11 +240,14 @@ func checkIsolation(cfg config.Config, configPath string) error {
 		return err
 	}
 	private = append(private, claudeHome, filepath.Join(claudeHome, ".credentials.json"), filepath.Join(claudeHome, ".claude.json"), filepath.Join(claudeHome, "settings.json"))
-	defaultClaudeConfig, err := aicli.HomePath("", ".claude.json")
+	userHome, err := os.UserHomeDir()
 	if err != nil {
 		return fmt.Errorf("resolve default Claude home: %w", err)
 	}
-	private = append(private, defaultClaudeConfig)
+	if !filepath.IsAbs(userHome) {
+		return errors.New("resolve default Claude home: HOME must be absolute")
+	}
+	private = append(private, filepath.Join(userHome, ".claude.json"))
 	ghHome := os.Getenv("GH_CONFIG_DIR")
 	if ghHome == "" {
 		configHome, err := os.UserConfigDir()

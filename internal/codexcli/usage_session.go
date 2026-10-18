@@ -11,7 +11,6 @@ import (
 	"maps"
 	"os"
 	"slices"
-	"sort"
 	"time"
 
 	"github.com/linkdata/minion/internal/aicli"
@@ -120,14 +119,12 @@ func (s *usageSession) begin(ctx context.Context, home, rootID string, started t
 	s.baselineComplete = complete
 	s.known = ownedUsageFiles(files, rootID)
 	s.before = map[string]*usageBoundary{}
-	ids := make([]string, 0, len(s.known))
-	for id := range s.known {
+	ids := []string{rootID}
+	for _, id := range slices.Sorted(maps.Keys(s.known)) {
 		if id != rootID {
 			ids = append(ids, id)
 		}
 	}
-	sort.Strings(ids)
-	ids = append([]string{rootID}, ids...)
 	for i, id := range ids {
 		if i >= maxUsageFiles {
 			s.baselineComplete = false
@@ -214,7 +211,7 @@ func (s *usageSession) collectUsage(ctx context.Context, home, rootID string, st
 			break
 		}
 	}
-	// Keep only bounded, proven ownership for the next invocation's old paths.
+	// Keep bounded lifetime ownership, including unresolved known identities, for the next invocation.
 	s.known = owned
 	return total, complete && ctx.Err() == nil, childError
 }

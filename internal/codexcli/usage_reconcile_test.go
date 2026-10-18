@@ -196,3 +196,187 @@ func TestUsageSessionAmbiguousHistoricalIdentityCannotCertifyAnUnchangedHelper(t
 		t.Fatalf("ambiguous old identity was accepted: %+v complete=%t error=%v", got, complete, err)
 	}
 }
+
+func TestUsageSessionKnownHelperIdentityLossCannotDisappearFromReconcile(t *testing.T) {
+	for _, timing := range []string{"before begin", "between begin and collect"} {
+		for _, change := range []string{"unchanged", "removed", "unreadable", "malformed header", "reparented header", "changed parent only", "changed session only", "changed history boundary", "changed header ID", "equivalent parent header"} {
+			t.Run(timing+"/"+change, func(t *testing.T) {
+				ctx, home := context.Background(), t.TempDir()
+				root := writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "old-root", "r1", 100)...)
+				child := writeUsageRollout(t, home, "child", "root", completedUsageTurn("child", "old-child", "c1", 40)...)
+				t.Cleanup(func() {
+					if err := os.Chmod(child, 0600); err != nil && !errors.Is(err, os.ErrNotExist) {
+						t.Error(err)
+					}
+				})
+				var session usageSession
+				session.begin(ctx, home, "", time.Now())
+				if got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 100}, []string{"child"}, nil); got != (usage.Tokens{Input: 140}) || !complete || err != nil {
+					t.Fatalf("initial complete ownership was not established: %+v complete=%t error=%v", got, complete, err)
+				}
+				mutate := func() {
+					t.Helper()
+					switch change {
+					case "removed":
+						if err := os.Remove(child); err != nil {
+							t.Fatal(err)
+						}
+					case "unreadable":
+						if err := os.Chmod(child, 0000); err != nil {
+							t.Fatal(err)
+						}
+						if file, err := os.Open(child); err == nil {
+							_ = file.Close()
+							t.Skip("file permissions do not restrict this test user")
+						} else if !errors.Is(err, os.ErrPermission) {
+							t.Fatal(err)
+						}
+					case "malformed header", "reparented header", "changed parent only", "changed session only", "changed history boundary", "changed header ID", "equivalent parent header":
+						data, err := os.ReadFile(child)
+						if err != nil {
+							t.Fatal(err)
+						}
+						_, body, found := strings.Cut(string(data), "\n")
+						if !found {
+							t.Fatal("fixture has no header boundary")
+						}
+						header := "{"
+						switch change {
+						case "reparented header":
+							header = `{"type":"session_meta","payload":{"id":"child","session_id":"other-root","source":{"subagent":{"thread_spawn":{"parent_thread_id":"other-root"}}},"subagent_history_start_ordinal":9}}`
+						case "changed parent only":
+							header = `{"type":"session_meta","payload":{"id":"child","session_id":"root","source":{"subagent":{"thread_spawn":{"parent_thread_id":"other-root"}}},"subagent_history_start_ordinal":9}}`
+						case "changed session only":
+							header = `{"type":"session_meta","payload":{"id":"child","session_id":"other-root","source":{"subagent":{"thread_spawn":{"parent_thread_id":"root"}}},"subagent_history_start_ordinal":9}}`
+						case "changed history boundary":
+							header = `{"type":"session_meta","payload":{"id":"child","session_id":"root","source":{"subagent":{"thread_spawn":{"parent_thread_id":"root"}}},"subagent_history_start_ordinal":10}}`
+						case "changed header ID":
+							header = `{"type":"session_meta","payload":{"id":"replacement-child","session_id":"root","source":{"subagent":{"thread_spawn":{"parent_thread_id":"root"}}},"subagent_history_start_ordinal":9}}`
+						case "equivalent parent header":
+							header = `{"type":"session_meta","payload":{"id":"child","session_id":"root","parent_thread_id":"root","source":"exec","subagent_history_start_ordinal":9}}`
+						}
+						if err := os.WriteFile(child, []byte(header+"\n"+body), 0600); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+				if timing == "before begin" {
+					mutate()
+				}
+				session.begin(ctx, home, "root", time.Now())
+				if timing == "between begin and collect" {
+					mutate()
+				}
+				appendUsageEvents(t, root, completedUsageTurn("root", "new-root", "r2", 20)...)
+				got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 20}, nil, nil)
+				unverified := change != "unchanged" && !(timing == "before begin" && change == "equivalent parent header")
+				if got != (usage.Tokens{Input: 20}) || complete == unverified || errors.Is(err, errUnverifiedChildren) != unverified || (!unverified && err != nil) {
+					t.Fatalf("known helper identity loss: %+v complete=%t error=%v; want complete=%t unverified=%t", got, complete, err, !unverified, unverified)
+				}
+			})
+		}
+	}
+}
+
+func TestUsageSessionHeaderAliasesDoNotGrowKnownOwnership(t *testing.T) {
+	ctx, home := context.Background(), t.TempDir()
+	root := writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "old-root", "r1", 100)...)
+	child := writeUsageRollout(t, home, "child", "root", completedUsageTurn("child", "old-child", "c1", 40)...)
+	original, err := os.ReadFile(child)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, body, found := strings.Cut(string(original), "\n")
+	if !found {
+		t.Fatal("fixture has no header boundary")
+	}
+	var session usageSession
+	session.begin(ctx, home, "", time.Now())
+	if got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 100}, []string{"child"}, nil); got != (usage.Tokens{Input: 140}) || !complete || err != nil {
+		t.Fatalf("initial complete ownership was not established: %+v complete=%t error=%v", got, complete, err)
+	}
+	for round := range 3 {
+		alias := fmt.Sprintf("replacement-%d", round)
+		header := fmt.Sprintf(`{"type":"session_meta","payload":{"id":%q,"session_id":"root","source":{"subagent":{"thread_spawn":{"parent_thread_id":"root"}}},"subagent_history_start_ordinal":9}}`, alias)
+		if err := os.WriteFile(child, []byte(header+"\n"+body), 0600); err != nil {
+			t.Fatal(err)
+		}
+		session.begin(ctx, home, "root", time.Now())
+		appendUsageEvents(t, root, completedUsageTurn("root", fmt.Sprintf("bad-turn-%d", round), fmt.Sprintf("bad-response-%d", round), 20)...)
+		if got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 20}, nil, nil); got != (usage.Tokens{Input: 20}) || complete || !errors.Is(err, errUnverifiedChildren) {
+			t.Fatalf("alias round %d: %+v complete=%t error=%v", round, got, complete, err)
+		}
+		if len(session.known) != 2 || session.known["child"].path != child || session.known[alias].ID != "" {
+			t.Fatalf("alias round %d changed the bounded ownership set: %+v", round, session.known)
+		}
+		if err := os.WriteFile(child, original, 0600); err != nil {
+			t.Fatal(err)
+		}
+		session.begin(ctx, home, "root", time.Now())
+		appendUsageEvents(t, root, completedUsageTurn("root", fmt.Sprintf("good-turn-%d", round), fmt.Sprintf("good-response-%d", round), 20)...)
+		if got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 20}, nil, nil); got != (usage.Tokens{Input: 20}) || !complete || err != nil {
+			t.Fatalf("recovered round %d: %+v complete=%t error=%v", round, got, complete, err)
+		}
+		if len(session.known) != 2 {
+			t.Fatalf("recovered round %d grew the ownership set to %d", round, len(session.known))
+		}
+	}
+}
+
+func TestUsageSessionCancellationDoesNotForgetKnownHelperIdentity(t *testing.T) {
+	for _, timing := range []string{"before begin", "before collect"} {
+		for _, change := range []string{"unchanged", "removed", "reparented header"} {
+			t.Run(timing+"/"+change, func(t *testing.T) {
+				ctx, home := context.Background(), t.TempDir()
+				root := writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "old-root", "r1", 100)...)
+				child := writeUsageRollout(t, home, "child", "root", completedUsageTurn("child", "old-child", "c1", 40)...)
+				var session usageSession
+				session.begin(ctx, home, "", time.Now())
+				if got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 100}, []string{"child"}, nil); got != (usage.Tokens{Input: 140}) || !complete || err != nil {
+					t.Fatalf("initial complete ownership was not established: %+v complete=%t error=%v", got, complete, err)
+				}
+				cancelled, cancel := context.WithCancel(ctx)
+				defer cancel()
+				if timing == "before begin" {
+					cancel()
+					session.begin(cancelled, home, "root", time.Now())
+				} else {
+					session.begin(ctx, home, "root", time.Now())
+					cancel()
+				}
+				if _, complete, _ := session.collectUsage(cancelled, home, "root", time.Now(), nil, nil, nil); complete {
+					t.Fatal("cancelled accounting was reported complete")
+				}
+				switch change {
+				case "removed":
+					if err := os.Remove(child); err != nil {
+						t.Fatal(err)
+					}
+				case "reparented header":
+					data, err := os.ReadFile(child)
+					if err != nil {
+						t.Fatal(err)
+					}
+					_, body, found := strings.Cut(string(data), "\n")
+					if !found {
+						t.Fatal("fixture has no header boundary")
+					}
+					header := `{"type":"session_meta","payload":{"id":"child","session_id":"other-root","source":{"subagent":{"thread_spawn":{"parent_thread_id":"other-root"}}},"subagent_history_start_ordinal":9}}`
+					if err := os.WriteFile(child, []byte(header+"\n"+body), 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				session.begin(ctx, home, "root", time.Now())
+				appendUsageEvents(t, root, completedUsageTurn("root", "new-root", "r2", 20)...)
+				got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 20}, nil, nil)
+				unverified := change != "unchanged"
+				if got != (usage.Tokens{Input: 20}) || complete == unverified || errors.Is(err, errUnverifiedChildren) != unverified || (!unverified && err != nil) {
+					t.Fatalf("cancelled call forgot a known identity: %+v complete=%t error=%v; want complete=%t unverified=%t", got, complete, err, !unverified, unverified)
+				}
+				if len(session.known) != 2 || session.known["child"].path != child {
+					t.Fatalf("cancelled call lost bounded ownership: %+v", session.known)
+				}
+			})
+		}
+	}
+}
