@@ -3,6 +3,7 @@ package aicli
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 )
 
 // HomePath resolves a native override or HOME-relative default without creating it.
@@ -13,6 +14,9 @@ func HomePath(envVar, dirName string) (string, error) {
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return "", fmt.Errorf("resolve %s home: %w", envVar, err)
+		}
+		if !filepath.IsAbs(home) {
+			return "", fmt.Errorf("resolve %s home: HOME must be absolute", envVar)
 		}
 		path = home + string(os.PathSeparator) + dirName
 	}

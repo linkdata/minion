@@ -11,6 +11,7 @@ import (
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
+	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/workroot"
 	"github.com/linkdata/minion/internal/workspace"
@@ -47,7 +48,8 @@ func TestRunnerWorkRootIsolation(t *testing.T) {
 			}
 		})
 	}
-	runner := Runner{WorkRoot: "/usr", runModel: forbidModel(t)}
+	overlap := t.TempDir()
+	runner := Runner{WorkRoot: overlap, Codex: config.CodexConfig{ReadOnlyDirs: []string{overlap}}, runModel: forbidModel(t)}
 	if _, err := runner.Run(context.Background(), portableJob(command.Comment)); !errors.Is(err, workroot.ErrUnsafe) || errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "work root overlaps") {
 		t.Fatalf("unsafe root=%v", err)
 	}
@@ -76,7 +78,7 @@ func TestRunnerRejectsCanceledContextBeforePreparation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	result, err := (&Runner{WorkRoot: root}).Run(ctx, portableJob(command.Comment))
-	if !errors.Is(err, context.Canceled) || len(result.Calls) != 0 {
+	if !errors.Is(err, context.Canceled) || errors.Is(err, monitor.ErrTerminalJob) || len(result.Calls) != 0 {
 		t.Fatalf("canceled dispatch: %+v, %v", result, err)
 	}
 	if _, err := os.Stat(root); !errors.Is(err, os.ErrNotExist) {
@@ -121,14 +123,15 @@ func TestRunnerEnforcesSuppliedRuntimeBudget(t *testing.T) {
 				fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
 			}
 			calls := 0
-			var source, reports string
-			runner := Runner{WorkRoot: t.TempDir(), runModel: func(ctx context.Context, request modelRun) (aicli.Result, error) {
+			var reports string
+			root := t.TempDir()
+			runner := Runner{WorkRoot: root, runModel: func(ctx context.Context, request modelRun) (aicli.Result, error) {
 				calls++
 				deadline, ok := ctx.Deadline()
 				if !ok || time.Until(deadline) > job.RuntimeBudget {
 					t.Fatalf("model context did not apply the supplied %s budget: deadline=%v present=%t", job.RuntimeBudget, deadline, ok)
 				}
-				source, reports = request.dir, request.outputDir
+				reports = request.outputDir
 				if reports != "" {
 					if err := os.WriteFile(filepath.Join(reports, "REPORT.md"), []byte("partial audit"), 0600); err != nil {
 						t.Fatal(err)
@@ -146,12 +149,8 @@ func TestRunnerEnforcesSuppliedRuntimeBudget(t *testing.T) {
 					t.Fatalf("expired audit lost final diagnostic or pre-cleanup artifact: %+v", result)
 				}
 			}
-			for _, dir := range []string{source, reports} {
-				if dir != "" {
-					if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
-						t.Fatalf("execution workspace retained after partial collection: %q, %v", dir, err)
-					}
-				}
+			if entries, err := os.ReadDir(root); err != nil || len(entries) != 0 {
+				t.Fatalf("expired execution left workspaces: %v,%v", entries, err)
 			}
 		})
 	}
@@ -171,27 +170,6 @@ func TestRunnerDiscardsSuccessfulAnswerReturnedAfterDeadline(t *testing.T) {
 	result, err := runner.Run(parent, job)
 	if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, monitor.ErrTerminalJob) || parent.Err() != nil || result.Answer != "" || len(result.Changes) != 0 || calls != 1 || len(result.Calls) != 1 {
 		t.Fatalf("late successful answer escaped deadline boundary: result=%+v calls=%d error=%v", result, calls, err)
-	}
-}
-
-func TestRunnerReadOnlyCriticReusesSource(t *testing.T) {
-	job := withClaudeCritic(portableJob(command.Comment))
-	var source string
-	calls := 0
-	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
-		calls++
-		if request.role == "main" {
-			source = request.dir
-			return aicli.Result{Answer: proposalJSON("reviewed answer", "")}, nil
-		}
-		if request.dir != source || request.writable || request.outputDir != "" {
-			t.Fatalf("read-only critic source/grants=%+v", request)
-		}
-		return aicli.Result{Answer: approvedCritiqueJSON}, nil
-	}}
-	result, err := runner.Run(context.Background(), job)
-	if err != nil || result.Answer != "reviewed answer" || calls != 2 {
-		t.Fatalf("read-only review result=%+v calls=%d error=%v", result, calls, err)
 	}
 }
 

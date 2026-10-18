@@ -21,6 +21,10 @@ import (
 func TestRunnerNativeClaudePreservesContextAndCriticSchema(t *testing.T) {
 	for _, claudeRole := range []string{roleMain, roleCritic} {
 		t.Run(claudeRole, func(t *testing.T) {
+			t.Setenv("CODEX_HOME", t.TempDir())
+			for _, key := range []string{"CLAUDE_CONFIG_DIR", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"} {
+				t.Setenv(key, "")
+			}
 			installActionTestSkills(t, testReviewSkillURL)
 			writeActionTestSkills(t, os.Getenv("HOME"), ".claude", testReviewSkillURL)
 			root := t.TempDir()

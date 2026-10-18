@@ -55,7 +55,11 @@ func PinProcess(pidFile string) (*Process, error) {
 	if err != nil {
 		return nil, err
 	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	value := strings.TrimSpace(string(data))
+	if value == "" {
+		return nil, os.ErrNotExist
+	}
+	pid, err := strconv.Atoi(value)
 	if err != nil || pid <= 0 {
 		return nil, fmt.Errorf("invalid fixture child PID %q", data)
 	}

@@ -118,6 +118,9 @@ type jsonlOutput struct {
 	sessionID           string
 	identitySeen        bool
 	baseline            usage.Tokens
+	baselineUnknown     bool
+	cumulative          usage.Tokens
+	hasCumulative       bool
 	cancel              context.CancelFunc
 	stream              aicli.JSONL
 	fatal               func()
@@ -295,20 +298,21 @@ func (o *jsonlOutput) finishLine(line []byte) {
 		return
 	}
 	tokens, complete := e.tokens()
+	o.hasCumulative = false
 	if complete {
-		// Resumed modelUsage includes earlier invocations. Assistant messages and
-		// root-only fallback counters describe this invocation instead.
+		cumulative := tokens
 		tokens = tokens.Sub(o.baseline)
-		if !tokens.Valid() {
+		// An exact snapshot must cover the prior cumulative floor plus all
+		// attributable current counters before it can become the next baseline.
+		lower, valid := o.assistantLowerBound()
+		complete = tokens.Valid() && valid && covers(tokens, lower)
+		if complete {
+			o.cumulative, o.hasCumulative = cumulative, true
+		}
+		if o.baselineUnknown || !tokens.Valid() {
+			// An uncertain prior baseline cannot identify this invocation's delta.
 			tokens, complete = usage.Tokens{}, false
 		}
-	}
-	if complete {
-		// A cumulative snapshot must cover newly observed root calls before it
-		// can replace their lower bound. Delegate/unknown messages can overlap
-		// the prior snapshot, so only their component maxima are safe here.
-		lower, valid := o.assistantLowerBound()
-		complete = valid && covers(tokens, lower)
 	}
 	// Native modelUsage is cumulative across result turns. A later partial
 	// report must not erase previously recorded usage.
@@ -433,6 +437,9 @@ func (o *jsonlOutput) recordAssistantUsage(raw, parent json.RawMessage) {
 	var parentID string
 	unknown := !root && (json.Unmarshal(parent, &parentID) != nil || parentID == "")
 	old, seen := o.assistantUsage[message.ID]
+	if o.baselineUnknown || !seen {
+		o.hasCumulative = false
+	}
 	if !seen {
 		if o.assistantUsage == nil {
 			o.assistantUsage = make(map[string]messageUsage)
@@ -477,6 +484,10 @@ func (o *jsonlOutput) recordAssistantUsage(raw, parent json.RawMessage) {
 	o.assistantTokens = total
 	old.tokens = tokens
 	o.assistantUsage[message.ID] = old
+	if o.hasCumulative {
+		lower, valid := o.assistantLowerBound()
+		o.hasCumulative = valid && covers(o.cumulative.Sub(o.baseline), lower)
+	}
 }
 
 func (o *jsonlOutput) assistantLowerBound() (usage.Tokens, bool) {

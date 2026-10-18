@@ -81,6 +81,9 @@ func TestGitHubContextLimitAcrossActions(t *testing.T) {
 				continue
 			}
 			t.Run(tt.name+"/"+mode, func(t *testing.T) {
+				if tt.action == command.SecurityAudit {
+					fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
+				}
 				installActionTestSkills(t, tt.skill)
 				limit := len(notes) + len(exactDescription)
 				if tt.action != command.Fix {

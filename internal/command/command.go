@@ -35,29 +35,6 @@ type Command struct {
 	Action Action
 }
 
-// Parse finds exactly one directive for @linkdataminion in markdown.
-func Parse(markdown string) (Command, error) {
-	return ParseForLogin(markdown, "linkdataminion")
-}
-
-// ParseForLogin finds exactly one directive for login.
-//
-// It accepts these default standalone forms (ASCII case-insensitively):
-//
-//	@<login> review
-//	@<login> audit
-//	@<login> fix
-//	@<login> security-audit
-//
-// The directive must be the first nonblank line. Later text is not a command
-// argument; callers may use it as task context after authorization. A second
-// configured directive returns [ErrAmbiguous].
-func ParseForLogin(markdown, login string) (Command, error) {
-	return ParseForLoginCommands(markdown, login, map[string]Action{
-		"review": Review, "fix": Fix, "audit": Comment, "security-audit": SecurityAudit,
-	})
-}
-
 // ParseForLoginCommands finds exactly one configured standalone directive for login.
 //
 // The directive must be the first nonblank line. Later text may be used as

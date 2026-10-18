@@ -8,9 +8,9 @@ import (
 )
 
 const (
-	MaxEventBytes  = 4 << 20
-	maxOutputBytes = 64 << 20
-	maxEvents      = 100000
+	MaxEventBytes       = 4 << 20
+	maxJSONLOutputBytes = 64 << 20
+	maxEvents           = 100000
 )
 
 // JSONL frames bounded provider output; adapters retain their own event policy.
@@ -30,7 +30,7 @@ func (o *JSONL) Write(p []byte) (int, error) {
 	if o.limited {
 		return n, nil
 	}
-	if int64(n) > maxOutputBytes-o.total {
+	if int64(n) > maxJSONLOutputBytes-o.total {
 		o.stop("output exceeded the size limit")
 		return n, nil
 	}

@@ -5,6 +5,14 @@ import (
 	"testing"
 )
 
+var defaultActions = map[string]Action{
+	"review": Review, "fix": Fix, "audit": Comment, "security-audit": SecurityAudit,
+}
+
+func parseDefault(markdown string) (Command, error) {
+	return ParseForLoginCommands(markdown, "linkdataminion", defaultActions)
+}
+
 func TestConfiguredCommandsUseNames(t *testing.T) {
 	actions := map[string]Action{
 		"review": Review, "fix": Fix, "audit": Comment,
@@ -77,7 +85,7 @@ func TestParseCommands(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := Parse(tt.body)
+			got, err := parseDefault(tt.body)
 			if err != nil {
 				t.Fatalf("Parse() error = %v", err)
 			}
@@ -126,7 +134,7 @@ func TestParseIgnoresNonCommands(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := Parse(tt.body)
+			got, err := parseDefault(tt.body)
 			if !errors.Is(err, ErrNoCommand) {
 				t.Fatalf("Parse() = (%#v, %v), want ErrNoCommand", got, err)
 			}
@@ -143,16 +151,17 @@ func TestParseAcceptsTrailingNotes(t *testing.T) {
 		notes   string
 	}{
 		{"@linkdataminion review", "Please check the locking change."},
+		{"@linkdataminion review", "@linkdataminion fix later"},
 		{"@linkdataminion audit", "Check authorization boundaries."},
 		{"@linkdataminion fix", "The test fails on Windows."},
 		{"@linkdataminion fix", "Inspect the regression's history.\nTrace its original cause."},
 		{"@linkdataminion review", "@otherbot review\n```\nExample text\n```"},
 	} {
-		plain, err := Parse(tt.command)
+		plain, err := parseDefault(tt.command)
 		if err != nil {
 			t.Fatal(err)
 		}
-		withNotes, err := Parse(tt.command + "\n\n" + tt.notes)
+		withNotes, err := parseDefault(tt.command + "\n\n" + tt.notes)
 		if err != nil || withNotes != plain {
 			t.Fatalf("Parse(%q) = (%#v, %v), want %#v", tt.command+"\n\n"+tt.notes, withNotes, err, plain)
 		}
@@ -167,7 +176,7 @@ func TestParseRejectsMultipleCommands(t *testing.T) {
 		"@linkdataminion audit\n@linkdataminion fix",
 		"@linkdataminion review\n```\n@linkdataminion fix\n```",
 	} {
-		got, err := Parse(body)
+		got, err := parseDefault(body)
 		if !errors.Is(err, ErrAmbiguous) {
 			t.Fatalf("Parse(%q) = (%#v, %v), want ErrAmbiguous", body, got, err)
 		}
@@ -178,11 +187,11 @@ func TestParseRejectsMultipleCommands(t *testing.T) {
 }
 
 func TestParseNormalizesCommands(t *testing.T) {
-	a, err := Parse("@LINKDATAMINION\tREVIEW\t \t")
+	a, err := parseDefault("@LINKDATAMINION\tREVIEW\t \t")
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := Parse("  @linkdataminion review")
+	b, err := parseDefault("  @linkdataminion review")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,7 +200,7 @@ func TestParseNormalizesCommands(t *testing.T) {
 	}
 }
 
-func TestParseForLogin(t *testing.T) {
+func TestParseConfiguredLogin(t *testing.T) {
 	tests := []struct {
 		name   string
 		login  string
@@ -204,30 +213,18 @@ func TestParseForLogin(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := ParseForLogin(tt.body, tt.login)
+			got, err := ParseForLoginCommands(tt.body, tt.login, defaultActions)
 			if err != nil {
-				t.Fatalf("ParseForLogin() error = %v", err)
+				t.Fatalf("ParseForLoginCommands() error = %v", err)
 			}
 			if got.Action != tt.action {
-				t.Fatalf("ParseForLogin() = %#v, want action %q", got, tt.action)
+				t.Fatalf("ParseForLoginCommands() = %#v, want action %q", got, tt.action)
 			}
 		})
 	}
-
-	defaultCommand, err := Parse("@linkdataminion review")
-	if err != nil {
-		t.Fatal(err)
-	}
-	customCommand, err := ParseForLogin("@linkdataminion review", "linkdataminion")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if defaultCommand != customCommand {
-		t.Fatalf("Parse wrapper = %#v, ParseForLogin = %#v", defaultCommand, customCommand)
-	}
 }
 
-func TestParseForLoginRejectsLookalikes(t *testing.T) {
+func TestParseConfiguredLoginRejectsLookalikes(t *testing.T) {
 	for _, body := range []string{
 		"@my-bot-extra review",
 		"@my-bot.review",
@@ -235,18 +232,18 @@ func TestParseForLoginRejectsLookalikes(t *testing.T) {
 		"@my-bоt review", // Cyrillic o.
 		"@ｍy-bot review", // Fullwidth m.
 	} {
-		got, err := ParseForLogin(body, "my-bot")
+		got, err := ParseForLoginCommands(body, "my-bot", defaultActions)
 		if !errors.Is(err, ErrNoCommand) || got != (Command{}) {
-			t.Fatalf("ParseForLogin(%q) = (%#v, %v), want ErrNoCommand", body, got, err)
+			t.Fatalf("ParseForLoginCommands(%q) = (%#v, %v), want ErrNoCommand", body, got, err)
 		}
 	}
 }
 
-func TestParseForLoginRejectsInvalidLogins(t *testing.T) {
+func TestParseConfiguredLoginRejectsInvalidLogins(t *testing.T) {
 	for _, login := range []string{"", "@my-bot", "my bot", "my/bot", "-mybot", "mybot-", "my_bot", "my-bot[bo]", "my-bоt"} {
-		got, err := ParseForLogin("@my-bot review", login)
+		got, err := ParseForLoginCommands("@my-bot review", login, defaultActions)
 		if !errors.Is(err, ErrInvalidLogin) || got != (Command{}) {
-			t.Fatalf("ParseForLogin(login %q) = (%#v, %v), want ErrInvalidLogin", login, got, err)
+			t.Fatalf("ParseForLoginCommands(login %q) = (%#v, %v), want ErrInvalidLogin", login, got, err)
 		}
 	}
 }

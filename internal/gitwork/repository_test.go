@@ -356,7 +356,7 @@ func TestRepositoryPacksRefsWithoutReflogs(t *testing.T) {
 	}
 }
 
-func TestRepositoryPinsModelConfigAndIgnoresMailmap(t *testing.T) {
+func TestRepositoryPinsModelConfigAndDisablesLogMailmap(t *testing.T) {
 	fixture := newFixture(t)
 	writeFile(t, filepath.Join(fixture.source, ".mailmap"), "Forged <forged@example.invalid> Test <test@example.invalid>\n")
 	fixture.commit("refs/heads/main", "untrusted author mapping")
@@ -366,6 +366,7 @@ func TestRepositoryPinsModelConfigAndIgnoresMailmap(t *testing.T) {
 		t.Fatal(err)
 	}
 	source, _ := repositoryFixture(t, snapshot)
+	assertModelRepositoryGit(t, source, snapshot.Head+"\n", "rev-parse", "refs/remotes/origin/HEAD")
 	for _, setting := range []struct{ key, want string }{
 		{"core.hooksPath", "/dev/null\n"}, {"core.fsmonitor", "false\n"}, {"core.fileMode", "true\n"},
 		{"core.excludesFile", "/dev/null\n"}, {"core.attributesFile", "/dev/null\n"},
@@ -557,5 +558,66 @@ func TestRepositoryVerifyBoundsMetadata(t *testing.T) {
 	}
 	if err := repo.Verify(context.Background()); err == nil || !strings.Contains(err.Error(), "file exceeds byte limit") {
 		t.Fatalf("oversized metadata error=%v", err)
+	}
+}
+
+func TestRepositoryDigestBoundsWideDirectories(t *testing.T) {
+	dir := t.TempDir()
+	for i := 0; i < workspace.MaxEntries; i++ {
+		f, err := os.Create(filepath.Join(dir, fmt.Sprint(i)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := repositoryDigest(context.Background(), dir); err == nil || !strings.Contains(err.Error(), "repository metadata exceeds entry limit") {
+		t.Fatalf("wide metadata directory error=%v", err)
+	}
+	if err := os.Remove(filepath.Join(dir, "0")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repositoryDigest(context.Background(), dir); err != nil {
+		t.Fatalf("exact metadata entry limit, including root: %v", err)
+	}
+}
+
+func TestRepositoryDigestIsIndependentOfDirectoryOrder(t *testing.T) {
+	var expected [32]byte
+	for i, names := range [][]string{{"z/second", "a/first"}, {"a/first", "z/second"}} {
+		dir := t.TempDir()
+		for _, name := range names {
+			writeFile(t, filepath.Join(dir, name), name)
+		}
+		digest, err := repositoryDigest(context.Background(), dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i == 0 {
+			expected = digest
+		} else if digest != expected {
+			t.Fatal("metadata digest depends on directory insertion order")
+		}
+	}
+}
+
+func TestRepositoryDigestBoundsTotalMetadata(t *testing.T) {
+	dir := t.TempDir()
+	for name, size := range map[string]int64{"a": workspace.MaxBytes, "b": workspace.MaxBytes, "c": 1} {
+		f, err := os.Create(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := f.Truncate(size); err != nil {
+			_ = f.Close()
+			t.Fatal(err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := repositoryDigest(context.Background(), dir); err == nil || !strings.Contains(err.Error(), "file exceeds byte limit") {
+		t.Fatalf("metadata total byte limit error=%v", err)
 	}
 }

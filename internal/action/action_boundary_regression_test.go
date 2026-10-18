@@ -139,16 +139,24 @@ func TestExecuteCriticAdmissionUsesControlledWorkRoot(t *testing.T) {
 				} else if !errors.Is(err, failure) || calls != 1 {
 					t.Fatalf("safe controlled root did not dispatch: calls=%d error=%v", calls, err)
 				}
-				entries, err := os.ReadDir(other)
-				if err != nil || len(entries) != 0 {
-					t.Fatalf("unused Runner root changed: %v,%v", entries, err)
+				entries, readErr := os.ReadDir(root)
+				wantEntries := 0
+				if !unsafe && critic {
+					wantEntries = 1
+				}
+				if readErr != nil || len(entries) != wantEntries || (wantEntries == 1 && (entries[0].Name() != "reviews" || !entries[0].IsDir())) {
+					t.Fatalf("controlled root retained execution paths: %v,%v", entries, readErr)
+				}
+				otherEntries, readErr := os.ReadDir(other)
+				if readErr != nil || len(otherEntries) != 0 {
+					t.Fatalf("unused Runner root changed: %v,%v", otherEntries, readErr)
 				}
 			})
 		}
 	}
 }
 
-func TestRefutationInitialCheckpointIsNotTerminalBeforeModels(t *testing.T) {
+func TestReviewEvidenceInitialCheckpointIsNotTerminalBeforeModels(t *testing.T) {
 	job := withClaudeCritic(portableJob(command.Comment))
 	checkpoints := 0
 	runner := Runner{WorkRoot: t.TempDir(), recordReview: func(receipts []CallUsage, refs []Refutation) error {

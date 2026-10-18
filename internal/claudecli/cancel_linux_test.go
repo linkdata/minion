@@ -40,11 +40,13 @@ wait
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() {
-		if err := child.Close(); err != nil {
+	t.Cleanup(func() {
+		cleanupCtx, stopCleanup := context.WithTimeout(context.Background(), time.Second)
+		defer stopCleanup()
+		if err := child.Cleanup(cleanupCtx); err != nil {
 			t.Error(err)
 		}
-	}()
+	})
 	cancel()
 	select {
 	case got := <-done:

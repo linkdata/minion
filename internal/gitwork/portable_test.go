@@ -226,6 +226,7 @@ func TestImportRejectsIdentityAndMetadataAndPreservesBytes(t *testing.T) {
 		t.Fatalf("binary=%v,%v", data, err)
 	}
 	staged := exec.Command("git", "-C", fixture.checkout.path, "show", ":binary")
+	staged.Env = cleanGitEnvironment()
 	data, err = staged.Output()
 	if err != nil || !bytes.Equal(data, changes[1].Data) {
 		t.Fatalf("staged binary=%v,%v", data, err)
@@ -321,6 +322,7 @@ func TestPublishIgnoresDefaultGlobalExcludesAndAttributes(t *testing.T) {
 		t.Fatal(err)
 	}
 	cmd := exec.Command("git", "--git-dir="+fixture.remote, "show", "refs/heads/"+branch+":notes.local")
+	cmd.Env = cleanGitEnvironment()
 	actual, err := cmd.Output()
 	if err != nil || !bytes.Equal(actual, data) {
 		t.Fatalf("published bytes=%q error=%v", actual, err)

@@ -31,7 +31,7 @@ func TestOfflineReviewPollRecoversAfterPublication(t *testing.T) {
 	now := time.Date(2026, 10, 9, 8, 1, 0, 0, time.UTC)
 	requestAt := now.Add(-time.Second) // Remains inside the next poll's cursor overlap.
 	requestBody := "@linkdataminion review"
-	parsed, err := command.ParseForLogin(requestBody, "linkdataminion")
+	parsed, err := command.ParseForLoginCommands(requestBody, "linkdataminion", defaultActionTestCommands)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +186,7 @@ func TestOfflineReviewPollRecoversAfterPublication(t *testing.T) {
 					if _, err := os.Stat(dir); err != nil || writable || outputDir != "" || !strings.Contains(prompt, head) {
 						return aicli.Result{}, fmt.Errorf("unexpected model invocation: dir=%q writable=%t output=%q stat=%v", dir, writable, outputDir, err)
 					}
-					record("codex")
+					record("model")
 					return aicli.Result{Answer: "No findings."}, nil
 				},
 			},
@@ -200,7 +200,7 @@ func TestOfflineReviewPollRecoversAfterPublication(t *testing.T) {
 	}
 	run(now, store)
 	firstEvents, firstReviews := snapshot()
-	if !slices.Equal(firstEvents, []string{"verify request", "permission", "reaction", "codex", "publish"}) ||
+	if !slices.Equal(firstEvents, []string{"verify request", "permission", "reaction", "model", "publish"}) ||
 		len(firstReviews) != 1 || !strings.Contains(firstReviews[0].Body, "No findings.") || len(store.Data.Processed) != 1 {
 		t.Fatalf("first poll: events=%v reviews=%v processed=%v", firstEvents, firstReviews, store.Data.Processed)
 	}
@@ -226,7 +226,7 @@ func TestOfflineReviewPollRecoversAfterPublication(t *testing.T) {
 	}
 	run(now.Add(time.Minute), store)
 	allEvents, allReviews := snapshot()
-	if !slices.Equal(allEvents, []string{"verify request", "permission", "reaction", "codex", "publish",
+	if !slices.Equal(allEvents, []string{"verify request", "permission", "reaction", "model", "publish",
 		"verify request", "permission", "reaction", "verify review"}) || len(allReviews) != 1 || len(store.Data.Processed) != 1 {
 		t.Fatalf("replayed poll: events=%v reviews=%v processed=%v", allEvents, allReviews, store.Data.Processed)
 	}

@@ -208,3 +208,24 @@ func TestFixIndexGrowthCheckDoesNotStatThroughSymlinkedParents(t *testing.T) {
 		})
 	}
 }
+
+func TestFixIndexPrunesCaseVariantMetadataBeforeOpeningFIFOs(t *testing.T) {
+	for _, name := range []string{".GIT/.gitignore", "sub/.GIT/.git/HEAD"} {
+		t.Run(name, func(t *testing.T) {
+			index, source := offlineIndexFixture(t, nil)
+			file := filepath.Join(source, filepath.FromSlash(name))
+			if err := os.MkdirAll(filepath.Dir(file), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := syscall.Mkfifo(file, 0600); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			changes, err := index.Changes(ctx)
+			if err != nil || len(changes) != 0 || ctx.Err() != nil {
+				t.Fatalf("excluded metadata FIFO affected Git: %+v,%v; deadline=%v", changes, err, ctx.Err())
+			}
+		})
+	}
+}

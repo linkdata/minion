@@ -63,7 +63,7 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
 	}
 	for call := 1; call <= 3; call++ {
 		args := read(".args." + strconv.Itoa(call))
-		for _, required := range []string{"--ignore-user-config\n", "--ignore-rules\n", "--strict-config\n", "--skip-git-repo-check\n", "approval_policy=never\n", "permissions.minion.network.enabled=false\n", `":root"="deny"`, `":tmpdir"="write"`, strconv.Quote(dir) + `="write"`, strconv.Quote(output) + `="write"`, "--disable\nhooks\n", "--disable\nskill_search\n", "--model\nmodel\n", `model_reasoning_effort="high"`, "--output-schema\n" + filepath.Join(session.runtimeDir, "output-schema.json") + "\n"} {
+		for _, required := range []string{"--ignore-user-config\n", "--ignore-rules\n", "--strict-config\n", "--skip-git-repo-check\n", "approval_policy=never\n", "permissions.minion.network.enabled=false\n", `":root"="deny"`, `":tmpdir"="write"`, strconv.Quote(dir) + `="write"`, strconv.Quote(output) + `="write"`, strconv.Quote(filepath.Join(session.runtimeDir, ".agents")) + `="read"`, strconv.Quote(filepath.Join(session.runtimeDir, ".codex")) + `="read"`, "--disable\nmemories\n", "--disable\nhooks\n", "--disable\nskill_search\n", "--model\nmodel\n", `model_reasoning_effort="high"`, "--output-schema\n" + filepath.Join(session.runtimeDir, "output-schema.json") + "\n"} {
 			if !strings.Contains(args, required) {
 				t.Fatalf("call%d missing policy %q in %s", call, required, args)
 			}
@@ -266,5 +266,68 @@ func TestSessionFreshScratchResetFailureDoesNotDispatch(t *testing.T) {
 	}
 	if data, err := os.ReadFile(bin + ".calls"); err != nil || string(data) != "called" {
 		t.Fatalf("failed reset reached native CLI: %q %v", data, err)
+	}
+}
+
+func TestSessionRejectsRetargetedHomeWithoutNativeDispatch(t *testing.T) {
+	binary := installFakeCodex(t, "#!/bin/sh\ncat >/dev/null\nprintf called >>\"$0.calls\"\nprintf '%s\n' '{\"type\":\"thread.started\",\"thread_id\":\"root\"}' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"done\"}}' '{\"type\":\"turn.completed\"}'\n")
+	alias := filepath.Join(t.TempDir(), "home")
+	if err := os.Symlink(t.TempDir(), alias); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CODEX_HOME", alias)
+	var session Session
+	t.Cleanup(func() {
+		if err := session.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	source := t.TempDir()
+	if _, err := session.Run(context.Background(), source, "first", false, "", config.CodexConfig{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(alias); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(t.TempDir(), alias); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := session.Run(context.Background(), source, "second", false, "", config.CodexConfig{}); err == nil || !strings.Contains(err.Error(), "host settings changed") {
+		t.Fatalf("retargeted home accepted: %v", err)
+	}
+	if data, err := os.ReadFile(binary + ".calls"); err != nil || string(data) != "called" {
+		t.Fatalf("retarget dispatched: %q,%v", data, err)
+	}
+}
+
+func TestSessionMissingResumeIdentityRetainsOwnedUsage(t *testing.T) {
+	binary := installFakeCodex(t, `#!/bin/sh
+cat >/dev/null
+if [ "$2" = resume ]; then
+ cat "$0.next" >> "$(cat "$0.rollout")"
+else
+ printf '%s\n' '{"type":"thread.started","thread_id":"root"}'
+fi
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}' '{"type":"turn.completed"}'
+`)
+	root := writeUsageRollout(t, os.Getenv("CODEX_HOME"), "root", "", completedUsageTurn("root", "old", "r1", 100)...)
+	for suffix, data := range map[string]string{".rollout": root, ".next": strings.Join(completedUsageTurn("root", "new", "r2", 20), "\n") + "\n"} {
+		if err := os.WriteFile(binary+suffix, []byte(data), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var session Session
+	t.Cleanup(func() {
+		if err := session.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	source := t.TempDir()
+	if _, err := session.Run(context.Background(), source, "first", false, "", config.CodexConfig{}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := session.Run(context.Background(), source, "second", false, "", config.CodexConfig{})
+	if err == nil || result.Answer != "" || result.UsageComplete || result.Tokens.Input != 20 || session.accounting.known["root"].path != root {
+		t.Fatalf("resume lost owned usage: %+v,%v,%+v", result, err, session.accounting.known)
 	}
 }

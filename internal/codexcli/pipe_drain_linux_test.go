@@ -20,7 +20,7 @@ func TestRunRejectsCompletedAnswerAfterPipeDrainOverrun(t *testing.T) {
 	binary := installFakeCodex(t, `#!/bin/sh
 cat >/dev/null
 printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.completed","item":{"type":"agent_message","text":"answer"}}' '{"type":"turn.completed","usage":{"input_tokens":15,"cached_input_tokens":7,"output_tokens":11}}'
-sleep 3 &
+sleep 30 &
 printf '%s\n' "$!" > "$0.pid"
 exit 0
 `)

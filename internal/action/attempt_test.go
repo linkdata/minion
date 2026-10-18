@@ -20,7 +20,7 @@ import (
 
 func TestExecuteScopesAttemptIdentity(t *testing.T) {
 	for _, withUsage := range []bool{false, true} {
-		t.Run(fmt.Sprint(withUsage), func(t *testing.T) {
+		t.Run(fmt.Sprintf("usage=%t", withUsage), func(t *testing.T) {
 			gitFixtureRemote(t)
 			writes, calls := 0, 0
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -38,7 +38,7 @@ func TestExecuteScopesAttemptIdentity(t *testing.T) {
 			defer server.Close()
 			client := testGitHub(server, "test-token")
 			var journal bytes.Buffer
-			orchestrator := Orchestrator{GitHub: client, BotLogin: "bot", WorkRoot: t.TempDir(), Logger: log.New(&journal, "", 0), Commands: map[string]config.CommandMapping{"audit": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}}, Runner: Runner{runModel: func(context.Context, modelRun) (aicli.Result, error) {
+			orchestrator := Orchestrator{GitHub: client, BotLogin: "bot", WorkRoot: t.TempDir(), Logger: log.New(&journal, "", 0), Commands: map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}}, Runner: Runner{runModel: func(context.Context, modelRun) (aicli.Result, error) {
 				calls++
 				return aicli.Result{Answer: "No findings.", Tokens: usage.Tokens{Input: 1}, UsageComplete: true}, nil
 			}}}
@@ -46,9 +46,9 @@ func TestExecuteScopesAttemptIdentity(t *testing.T) {
 				orchestrator.Usage = &usage.Store{Dir: filepath.Join(t.TempDir(), "usage")}
 			}
 			request := usageJob()
-			request.Command.Name = "audit"
+			request.Command.Name = "comment"
 			request.Command.Action = command.Comment
-			request.Repository.Actions = []string{"audit"}
+			request.Repository.Actions = []string{"comment"}
 			for range 2 {
 				if err := orchestrator.Execute(context.Background(), request); err != nil {
 					t.Fatal(err)

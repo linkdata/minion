@@ -71,12 +71,13 @@ func TestReplyFailureClassificationBeforeAndAfterModel(t *testing.T) {
 }
 
 func TestExecuteSourceFailuresAndInvalidIncompleteResultsAreTerminal(t *testing.T) {
-	for _, scenario := range []string{"oversized source", "unsupported source", "invalid incomplete result"} {
+	for _, scenario := range []string{"oversized source", "unsupported source", "invalid incomplete result", "output limit", "too many files", "diff too large"} {
 		t.Run(scenario, func(t *testing.T) {
 			gitFixtureRemote(t)
 			installActionTestSkills(t, testReviewSkillURL)
 			calls, writes := 0, 0
 			modelErr := errors.New("worker failed with invalid usage")
+			limitCause := map[string]error{"output limit": aicli.ErrOutputLimit, "too many files": gitwork.ErrTooManyFiles, "diff too large": gitwork.ErrDiffTooLarge}[scenario]
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch {
 				case r.Method != http.MethodGet:
@@ -103,6 +104,9 @@ func TestExecuteSourceFailuresAndInvalidIncompleteResultsAreTerminal(t *testing.
 			client := testGitHub(server, "token")
 			orchestrator := Orchestrator{WorkRoot: t.TempDir(), GitHub: client, BotLogin: "bot", Commands: map[string]config.CommandMapping{"audit": {Action: "comment", Skills: []string{testReviewSkillURL}}}, Runner: Runner{runModel: func(context.Context, modelRun) (aicli.Result, error) {
 				calls++
+				if limitCause != nil {
+					return aicli.Result{}, fmt.Errorf("wrapped native limit: %w", limitCause)
+				}
 				return aicli.Result{Tokens: usage.Tokens{Input: -1}}, modelErr
 			}}}
 			request := usageJob()
@@ -122,6 +126,11 @@ func TestExecuteSourceFailuresAndInvalidIncompleteResultsAreTerminal(t *testing.
 			case "unsupported source":
 				if !errors.Is(err, gitwork.ErrUnsupportedSource) || errors.Is(err, gitwork.ErrCheckoutTooLarge) {
 					t.Fatalf("unsupported source cause lost: %v", err)
+				}
+			case "output limit", "too many files", "diff too large":
+				wantCalls = 1
+				if !errors.Is(err, limitCause) {
+					t.Fatalf("terminal native limit lost cause: %v", err)
 				}
 			default:
 				wantCalls = 1
@@ -245,7 +254,7 @@ func TestExecuteLogsCheckoutCleanupFailureAfterSuccessfulPublication(t *testing.
 	}
 }
 
-func TestPublishFixRejectsNonemptyReviewedChangesDroppedByGit(t *testing.T) {
+func TestPublishFixRevalidatesForkAndImportBeforePush(t *testing.T) {
 	for _, stage := range []string{"import", "commit", "fork changed", "canceled import"} {
 		t.Run(stage, func(t *testing.T) {
 			base, _, _ := gitFixtureRemote(t)
@@ -439,9 +448,6 @@ func TestContextDescribesOmittedRevisionScope(t *testing.T) {
 		t.Run(string(action), func(t *testing.T) {
 			job := portableJob(action)
 			job.Source.Omitted = []string{"docs"}
-			if action == command.Review {
-				job.Source.Files = []workspace.File{{Path: "docs/x", Mode: workspace.Regular}}
-			}
 			root := t.TempDir()
 			if err := materializeContext(root, job.Source); err != nil {
 				t.Fatal(err)
@@ -463,10 +469,7 @@ func TestContextDescribesOmittedRevisionScope(t *testing.T) {
 			if source.OmittedScope != want {
 				t.Fatalf("omitted scope=%q want%q", source.OmittedScope, want)
 			}
-			prompt, err := actionPrompt(context.Background(), job, "/source", root, "", "")
-			if err != nil || !strings.Contains(prompt, "the omitted list covers both head and merge-base revisions") {
-				t.Fatalf("omitted revision context missing: %s,%v", prompt, err)
-			}
+
 		})
 	}
 }

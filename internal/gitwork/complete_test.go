@@ -78,20 +78,30 @@ func TestSnapshotPreflightsMergeBaseMetadata(t *testing.T) {
 	}
 }
 
-func TestSnapshotRejectsOversizedBundleBeforeReadingSource(t *testing.T) {
-	fixture := newFixture(t)
-	realGit, err := exec.LookPath("git")
-	if err != nil {
-		t.Fatal(err)
-	}
-	marker := filepath.Join(t.TempDir(), "source-read")
-	script := fmt.Sprintf("#!/bin/sh\nfor argument do\ncase \"$argument\" in bundle) bundle=yes;; --batch) touch %s;; esac\ndone\nif [ \"$bundle\" = yes ]; then head -c %d /dev/zero; exit; fi\nexec %s \"$@\"\n", shellQuote(marker), workspace.MaxBytes+1, shellQuote(realGit))
-	fakeOnPath(t, "git", script)
-	snapshot, err := fixture.checkout.Snapshot(context.Background())
-	if !errors.Is(err, ErrCheckoutTooLarge) || !strings.Contains(err.Error(), "export complete repository") || len(snapshot.Repository) != 0 || len(snapshot.Files) != 0 {
-		t.Fatalf("oversized bundle was not refused before source read: repository bytes=%d files=%d error=%v", len(snapshot.Repository), len(snapshot.Files), err)
-	}
-	if data, err := os.ReadFile(marker); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("oversized bundle read source blobs: marker=%q error=%v", data, err)
+func TestSnapshotBoundsBundleBeforeReadingSource(t *testing.T) {
+	for _, size := range []int{workspace.MaxBytes, workspace.MaxBytes + 1} {
+		t.Run(fmt.Sprint(size), func(t *testing.T) {
+			fixture := newFixture(t)
+			realGit, err := exec.LookPath("git")
+			if err != nil {
+				t.Fatal(err)
+			}
+			marker := filepath.Join(t.TempDir(), "source-read")
+			script := fmt.Sprintf("#!/bin/sh\nfor argument do\ncase \"$argument\" in bundle) bundle=yes;; --batch) touch %s;; esac\ndone\nif [ \"$bundle\" = yes ]; then head -c %d /dev/zero; exit; fi\nexec %s \"$@\"\n", shellQuote(marker), size, shellQuote(realGit))
+			fakeOnPath(t, "git", script)
+			snapshot, err := fixture.checkout.Snapshot(context.Background())
+			if size == workspace.MaxBytes {
+				if err != nil || len(snapshot.Repository) != size || len(snapshot.Files) == 0 {
+					t.Fatalf("exact bundle limit: bytes=%d files=%d error=%v", len(snapshot.Repository), len(snapshot.Files), err)
+				}
+				return
+			}
+			if !errors.Is(err, ErrCheckoutTooLarge) || !strings.Contains(err.Error(), "export complete repository") || len(snapshot.Repository) != 0 || len(snapshot.Files) != 0 {
+				t.Fatalf("oversized bundle was not refused before source read: repository bytes=%d files=%d error=%v", len(snapshot.Repository), len(snapshot.Files), err)
+			}
+			if data, err := os.ReadFile(marker); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("oversized bundle read source blobs: marker=%q error=%v", data, err)
+			}
+		})
 	}
 }

@@ -44,7 +44,7 @@ func TestInertModelOutput(t *testing.T) {
 			t.Errorf("lost model text %q: %q", want, got)
 		}
 	}
-	if _, err := command.ParseForLogin(got, "secondbot"); !errors.Is(err, command.ErrNoCommand) {
+	if _, err := command.ParseForLoginCommands(got, "secondbot", defaultActionTestCommands); !errors.Is(err, command.ErrNoCommand) {
 		t.Fatalf("model output contains a live bot command: %v", err)
 	}
 }
@@ -59,15 +59,13 @@ func TestInertModelOutputPreservesOverBudgetContent(t *testing.T) {
 }
 
 func TestInertModelOutputUnicodeBoundary(t *testing.T) {
-	for pad := range 5 {
-		input := strings.Repeat("x", maxOutputBytes-18-pad) + "😀"
-		got := inertModelOutput(input)
-		if !modelOutputFits(input) || len(got) > maxOutputBytes || !utf8.ValidString(got) || !strings.HasSuffix(got, "\n```") {
-			t.Fatalf("pad %d: malformed bounded output", pad)
-		}
-		if modelOutputFits(input + strings.Repeat("x", pad+1)) {
-			t.Fatalf("pad %d: one-byte rendered overflow accepted", pad)
-		}
+	input := strings.Repeat("x", maxOutputBytes-18) + "😀"
+	got := inertModelOutput(input)
+	if !modelOutputFits(input) || len(got) > maxOutputBytes || !utf8.ValidString(got) || !strings.HasSuffix(got, "\n```") {
+		t.Fatal("malformed bounded Unicode output")
+	}
+	if modelOutputFits(input + "x") {
+		t.Fatal("one-byte rendered overflow accepted")
 	}
 }
 

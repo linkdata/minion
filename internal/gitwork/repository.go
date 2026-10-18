@@ -6,9 +6,10 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
-	"io/fs"
+	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/linkdata/minion/internal/aicli"
@@ -42,7 +43,7 @@ func MaterializeRepository(ctx context.Context, source string, snapshot workspac
 		return nil, err
 	}
 	index := &OfflineIndex{dir: dir, source: source, binary: binary}
-	run := func(args ...string) ([]byte, error) { return index.run(ctx, maxPathListBytes, nil, args...) }
+	run := func(args ...string) ([]byte, error) { return index.run(ctx, workspace.MaxBytes, nil, args...) }
 	if _, err := run("init", "--quiet", "--template=", "--object-format=sha1"); err != nil {
 		return nil, err
 	}
@@ -74,20 +75,8 @@ auto = false
 	if err := os.WriteFile(filepath.Join(dir, "config"), []byte(config), 0600); err != nil {
 		return nil, err
 	}
-	bundle, err := os.CreateTemp(dir, ".minion-bundle-")
-	if err != nil {
-		return nil, err
-	}
-	defer os.Remove(bundle.Name())
-	if _, err := bundle.Write(snapshot.Repository); err != nil {
-		_ = bundle.Close()
-		return nil, err
-	}
-	if err := bundle.Close(); err != nil {
-		return nil, err
-	}
 	// Unbundle checks prerequisites before importing into the empty repository.
-	refs, err := run("bundle", "unbundle", bundle.Name())
+	refs, err := index.run(ctx, workspace.MaxBytes, snapshot.Repository, "bundle", "unbundle", "-")
 	if err != nil {
 		return nil, err
 	}
@@ -148,11 +137,12 @@ auto = false
 	for _, name := range snapshot.Omitted {
 		omittedPaths[name] = true
 	}
+	parts, err := splitNUL(entries)
+	if err != nil {
+		return nil, fmt.Errorf("invalid repository index listing: %w", err)
+	}
 	var omitted bytes.Buffer
-	for _, entry := range bytes.Split(entries, []byte{0}) {
-		if len(entry) == 0 {
-			continue
-		}
+	for _, entry := range parts {
 		header, name, ok := bytes.Cut(entry, []byte{'\t'})
 		fields := strings.Fields(string(header))
 		if !ok || len(fields) != 3 || fields[2] != "0" {
@@ -183,9 +173,6 @@ auto = false
 	if _, err := run("update-index", "-q", "--refresh"); err != nil {
 		return nil, err
 	}
-	if err := os.Remove(bundle.Name()); err != nil {
-		return nil, err
-	}
 	repo := &Repository{dir: dir}
 	if repo.digest, err = repositoryDigest(ctx, dir); err != nil {
 		return nil, err
@@ -207,42 +194,73 @@ func (r *Repository) Verify(ctx context.Context) error {
 
 func repositoryDigest(ctx context.Context, dir string) (sum [32]byte, err error) {
 	hash := sha256.New()
-	count, total := 0, 0
-	err = filepath.WalkDir(dir, func(name string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
+	type entry struct{ parent, name string }
+	pending, count, total := []entry{{name: dir}}, 1, 0
+	for len(pending) != 0 {
 		if err := ctx.Err(); err != nil {
-			return err
+			return sum, err
 		}
-		count++
-		if count > workspace.MaxEntries {
-			return errors.New("repository metadata exceeds entry limit")
-		}
+		last := len(pending) - 1
+		current := pending[last]
+		pending[last] = entry{}
+		pending = pending[:last]
+		name := filepath.Join(current.parent, current.name)
 		rel, err := filepath.Rel(dir, name)
 		if err != nil {
-			return err
+			return sum, err
 		}
-		info, err := entry.Info()
+		info, err := os.Lstat(name)
 		if err != nil {
-			return err
+			return sum, err
 		}
 		fmt.Fprintf(hash, "%s\x00%d\x00", rel, info.Mode())
-		if entry.IsDir() {
-			return nil
+		if info.IsDir() {
+			f, err := workspace.OpenDirectory(name)
+			if err != nil {
+				return sum, err
+			}
+			var children []string
+			scanErr := func() error {
+				for {
+					if err := ctx.Err(); err != nil {
+						return err
+					}
+					batch, err := f.ReadDir(128)
+					if err != nil && !errors.Is(err, io.EOF) {
+						return err
+					}
+					count += len(batch)
+					if count > workspace.MaxEntries {
+						return errors.New("repository metadata exceeds entry limit")
+					}
+					for _, entry := range batch {
+						children = append(children, entry.Name())
+					}
+					if errors.Is(err, io.EOF) {
+						return nil
+					}
+				}
+			}()
+			if err := errors.Join(scanErr, f.Close()); err != nil {
+				return sum, err
+			}
+			slices.Sort(children)
+			for _, child := range children {
+				pending = append(pending, entry{parent: name, name: child})
+			}
+			continue
 		}
 		if !info.Mode().IsRegular() {
-			return errors.New("repository metadata is not regular")
+			return sum, errors.New("repository metadata is not regular")
 		}
 		data, err := workspace.ReadRegular(name, int64(min(workspace.MaxBytes, 2*workspace.MaxBytes-total)))
 		if err != nil {
-			return err
+			return sum, err
 		}
 		total += len(data)
 		fmt.Fprintf(hash, "%d\x00", len(data))
 		hash.Write(data)
-		return nil
-	})
+	}
 	copy(sum[:], hash.Sum(nil))
-	return sum, err
+	return sum, nil
 }

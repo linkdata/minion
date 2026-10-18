@@ -23,8 +23,11 @@ func authentication(parent, key string) (dir string, err error) {
 		if err = os.WriteFile(filepath.Join(dir, "api-key"), []byte(key), 0o600); err == nil {
 			return
 		}
-		err = errors.Join(err, os.RemoveAll(dir))
-		dir = ""
+		removeErr := os.RemoveAll(dir)
+		err = errors.Join(err, removeErr)
+		if removeErr == nil {
+			dir = ""
+		}
 	}
 	return
 }

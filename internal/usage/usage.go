@@ -54,8 +54,8 @@ func (t Tokens) Max(other Tokens) Tokens {
 
 // Record contains the usage reported by all model calls in one action attempt.
 //
-// Model and Effort describe the main model. An empty Provider denotes Codex;
-// the model name "default" denotes the provider CLI's selected default.
+// Model and Effort describe the main model. The model name "default" denotes
+// the provider CLI's selected default.
 type Record struct {
 	ID             string     `json:"id"`
 	JobID          string     `json:"job_id"`
@@ -64,7 +64,7 @@ type Record struct {
 	Action         string     `json:"action"`
 	Number         int        `json:"number"`
 	SourceURL      string     `json:"source_url,omitempty"`
-	Provider       string     `json:"provider,omitempty"`
+	Provider       string     `json:"provider"`
 	Model          string     `json:"model"`
 	Effort         string     `json:"reasoning_effort,omitempty"`
 	CriticProvider string     `json:"critic_provider,omitempty"`
@@ -88,10 +88,11 @@ func (r Record) validate() error {
 	if r.JobID == "" || r.Repo == "" || r.User == "" || r.Action == "" || r.Model == "" || r.StartedAt.IsZero() {
 		return fmt.Errorf("usage record %s is missing required metadata", r.ID)
 	}
-	for _, provider := range []string{r.Provider, r.CriticProvider} {
-		if provider != "" && provider != "codex" && provider != "claude" {
-			return fmt.Errorf("usage record %s has invalid provider %q", r.ID, provider)
-		}
+	if r.Provider != "codex" && r.Provider != "claude" {
+		return fmt.Errorf("usage record %s has invalid provider %q", r.ID, r.Provider)
+	}
+	if r.CriticProvider != "" && r.CriticProvider != "codex" && r.CriticProvider != "claude" {
+		return fmt.Errorf("usage record %s has invalid critic provider %q", r.ID, r.CriticProvider)
 	}
 	switch r.Status {
 	case "running":

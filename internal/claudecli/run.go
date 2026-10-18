@@ -22,7 +22,7 @@ import (
 	workspacefs "github.com/linkdata/minion/internal/workspace"
 )
 
-// Run executes one Claude task with sandboxed shell tools.
+// Run continues one action role's conversation with sandboxed shell tools.
 //
 // The CLI retains API network access. Model-generated commands have no allowed
 // network destinations; Unix sockets remain available when AllowAllUnixSockets
@@ -35,17 +35,6 @@ import (
 // temporary, tool-inaccessible key helper. Without APIKey, use Claude's stored
 // CLI login; environment API/OAuth tokens are rejected. Authenticated proxies
 // are rejected in either mode.
-func Run(ctx context.Context, dir, prompt string, writable bool, outputDir string, settings config.ClaudeConfig) (result aicli.Result, runError error) {
-	var session Session
-	result, runError = session.Run(ctx, dir, prompt, writable, outputDir, settings)
-	if err := session.Close(); err != nil {
-		result.Answer = ""
-		runError = errors.Join(runError, err)
-	}
-	return result, aicli.RedactError(runError, settings.APIKey)
-}
-
-// Run continues this action role's conversation with the current evidence grants.
 func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, outputDir string, settings config.ClaudeConfig) (result aicli.Result, runError error) {
 	result.UsageComplete = true
 	defer func() {
@@ -141,7 +130,7 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	cmd.Stdin = strings.NewReader(prompt)
 	processgroup.Configure(cmd)
 	var failureTimer *time.Timer
-	output := jsonlOutput{sessionID: s.id, baseline: s.accounted, cancel: cancel, structured: settings.OutputSchema != "", fatal: func() {
+	output := jsonlOutput{sessionID: s.id, baseline: s.baseline, baselineUnknown: s.usageGap, cancel: cancel, structured: settings.OutputSchema != "", fatal: func() {
 		// Let the CLI flush a final result and cumulative accounting, then stop
 		// a managed retry watchdog without renewing the action deadline.
 		failureTimer = time.AfterFunc(time.Second, cancel)
@@ -167,10 +156,15 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 		failureTimer.Stop()
 	}
 	result = output.result
-	if accounted, valid := s.accounted.AddChecked(result.Tokens); valid {
-		s.accounted = accounted
-	} else {
-		err = errors.Join(err, errors.New("claude session usage totals overflow"))
+	if cmd.Process != nil {
+		s.usageGap = !output.hasCumulative
+		if output.hasCumulative {
+			s.baseline = output.cumulative
+		} else if floor, valid := s.baseline.AddChecked(result.Tokens); valid {
+			s.baseline = floor
+		} else {
+			err = errors.Join(err, errors.New("claude session usage totals overflow"))
+		}
 	}
 	if ctx.Err() != nil {
 		err = errors.Join(ctx.Err(), output.err, err)

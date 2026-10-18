@@ -22,6 +22,7 @@ import (
 
 const (
 	maxUsageWalkEntries  = 100000
+	maxUsageRecords      = 100000 // Retained turn/response identities per rollout.
 	maxUsageFiles        = 1024
 	maxUsageAgents       = maxCodexChildren + 1
 	maxUsageHeaderBytes  = 64 << 10
@@ -46,13 +47,6 @@ type rolloutEvent struct {
 	Payload json.RawMessage `json:"payload"`
 }
 
-// collectUsage reads bounded first-line headers of recent rollouts to identify
-// this action's agent tree. Unrelated transcripts are never read past their header.
-func collectUsage(ctx context.Context, home, rootID string, started time.Time, fallback *usage.Tokens, expectedChildren []string) (usage.Tokens, bool, error) {
-	files, ambiguous, complete := usageFiles(ctx, home, rootID, started, nil)
-	return collectUsageFiles(ctx, rootID, fallback, expectedChildren, files, ambiguous, complete)
-}
-
 func collectUsageFiles(ctx context.Context, rootID string, fallback *usage.Tokens, expectedChildren []string, files map[string]rolloutMeta, ambiguous map[string]bool, complete bool) (usage.Tokens, bool, error) {
 	var total usage.Tokens
 	if rootID == "" || ctx.Err() != nil {
@@ -64,22 +58,15 @@ func collectUsageFiles(ctx context.Context, rootID string, fallback *usage.Token
 		}
 		return total, false, nil
 	}
-	selected := map[string]bool{rootID: true}
-	for changed := true; changed; {
-		changed = false
-		for id, meta := range files {
-			if !selected[id] && (meta.SessionID == rootID || selected[meta.ParentID]) {
-				selected[id], changed = true, true
-			}
-		}
-	}
+	selected := ownedUsageFiles(files, rootID)
+	selected[rootID] = files[rootID]
 	var childError error
 	if len(selected) > maxUsageAgents {
 		complete = false
 		childError = fmt.Errorf("%w: Codex usage agent count exceeded the limit", aicli.ErrOutputLimit)
 	}
 	for _, id := range expectedChildren {
-		if !selected[id] {
+		if _, selectedChild := selected[id]; !selectedChild {
 			complete = false
 			childError = errors.Join(childError, errUnverifiedChildren)
 		}
@@ -118,7 +105,8 @@ func collectUsageFiles(ctx context.Context, rootID string, fallback *usage.Token
 		tokens, ok, children, workError := readRolloutUsage(ctx, meta, rootID, &budget)
 		childError = errors.Join(childError, workError)
 		for _, child := range children {
-			if _, exists := files[child]; !exists || !selected[child] {
+			_, selectedChild := selected[child]
+			if _, exists := files[child]; !exists || !selectedChild {
 				ok = false
 				childError = errors.Join(childError, errUnverifiedChildren)
 			}
@@ -339,20 +327,26 @@ func rolloutTokens(raw json.RawMessage) (usage.Tokens, bool) {
 }
 
 func readRolloutUsage(ctx context.Context, meta rolloutMeta, rootID string, budget *int64) (usage.Tokens, bool, []string, error) {
-	return readRolloutUsageFrom(ctx, meta, rootID, budget, nil, nil, nil)
+	return readRolloutUsageFrom(ctx, meta, rootID, budget, nil, nil, nil, false)
 }
 
 // A boundary excludes previous turns even when their final records arrive late.
-func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, budget *int64, before, capture *usageBoundary, spawned map[string]bool) (usage.Tokens, bool, []string, error) {
+func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, budget *int64, before, capture *usageBoundary, spawned map[string]bool, allowUnchanged bool) (usage.Tokens, bool, []string, error) {
 	var childError error
 	if meta.ID != rootID {
 		childError = errUnverifiedChildren
 	}
 	if ctx.Err() != nil || *budget <= 0 {
+		if capture != nil {
+			capture.valid = false
+		}
 		return usage.Tokens{}, false, nil, childError
 	}
 	f, err := os.Open(meta.path)
 	if err != nil {
+		if capture != nil {
+			capture.valid = false
+		}
 		return usage.Tokens{}, false, nil, childError
 	}
 	limit := min(int64(maxUsageRolloutBytes), *budget)
@@ -503,7 +497,7 @@ func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, 
 			if before != nil {
 				responseTurns[record.ResponseID] = record.TurnID
 			}
-			if capture != nil && len(responses) > maxUsageWalkEntries {
+			if capture != nil && len(responses) > maxUsageRecords {
 				capture.valid = false
 			}
 			total, valid = total.AddChecked(tokens)
@@ -605,13 +599,14 @@ func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, 
 	}
 	if capture != nil {
 		capture.size = consumed
-		if len(responses) <= maxUsageWalkEntries {
+		if len(responses) <= maxUsageRecords {
 			capture.responses = responses
 		} else {
 			capture.valid = false
 		}
 		copy(capture.hash[:], hash.Sum(nil))
 		capture.snapshot, capture.hasSnapshot = latest, seenSnapshot
+		capture.completed = latestOwnTurn != "" && latestOwnDone && !inheritedWithoutBoundary
 		for turn, done := range turns {
 			capture.unfinished = capture.unfinished || (!done && !abortedTurns[turn])
 		}
@@ -619,6 +614,10 @@ func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, 
 			capture.unfinished = capture.unfinished || (!turns[turn] && !abortedTurns[turn])
 		}
 		capture.valid = capture.valid && readable && seenHeader && ctx.Err() == nil
+	}
+	// Observation-only references need no new turn when the finished baseline is unchanged.
+	if allowUnchanged && before != nil && before.valid && before.completed && !before.unfinished && consumed == before.size && complete && readable && ctx.Err() == nil {
+		return usage.Tokens{}, true, children, nil
 	}
 	if before != nil {
 		var added bool

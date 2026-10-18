@@ -1,6 +1,7 @@
 package gitwork
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -297,11 +298,7 @@ func TestFixIndexRejectsNonIgnoredUnsafeOutput(t *testing.T) {
 			case "nested repository":
 				writeIndexFixture(t, source, "nested/file", []byte("nested source"))
 				nested := filepath.Join(source, "nested")
-				metadata := filepath.Join(nested, ".git")
-				if err := os.Mkdir(metadata, 0700); err != nil {
-					t.Fatal(err)
-				}
-				if _, err := NewOfflineIndex(context.Background(), metadata, nested, nil); err != nil {
+				if _, err := runGit(context.Background(), nested, "init", "--quiet", "--template=", "--object-format=sha1"); err != nil {
 					t.Fatal(err)
 				}
 			case "aggregate oversized":
@@ -765,3 +762,78 @@ func TestFixIndexReportsTrackedGrowthInPathOrder(t *testing.T) {
 }
 
 var fakeOnPath = testsupport.FakeOnPath
+
+func TestOfflineIndexRefusesOverlappingDirectories(t *testing.T) {
+	root := t.TempDir()
+	for _, pair := range [][2]string{{root, root}, {root, filepath.Join(root, "source")}, {filepath.Join(root, "index"), root}} {
+		if _, err := NewOfflineIndex(context.Background(), pair[0], pair[1], nil); err == nil || !strings.Contains(err.Error(), "directories overlap") {
+			t.Fatalf("metadata=%q source=%q error=%v", pair[0], pair[1], err)
+		}
+	}
+}
+
+func TestFixIndexBatchesIgnoreQueriesAcrossDirectories(t *testing.T) {
+	index, source := offlineIndexFixture(t, nil)
+	for i := 0; i < 260; i++ {
+		if err := os.MkdirAll(filepath.Join(source, fmt.Sprint(i), "child"), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	marker := filepath.Join(t.TempDir(), "queries")
+	script := "#!/bin/sh\nfor arg do\n if [ \"$arg\" = check-ignore ]; then printf 'query\\n' >> " + shellQuote(marker) + "; fi\ndone\nexec " + shellQuote(index.binary) + " \"$@\"\n"
+	index.binary = filepath.Join(fakeOnPath(t, "git-proxy", script), "git-proxy")
+	if err := index.checkControlFiles(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(marker)
+	if err != nil || bytes.Count(data, []byte("query\n")) != 6 {
+		t.Fatalf("ignore queries=%q error=%v; want six bounded batches across two levels", data, err)
+	}
+}
+
+func TestFixIndexSkipsUntrackedContentsOfIgnoredTrackedDirectory(t *testing.T) {
+	index, source := offlineIndexFixture(t, []workspace.File{
+		{Path: ".gitignore", Mode: workspace.Regular, Data: []byte("build/\n")},
+		{Path: "build/tracked/source", Mode: workspace.Regular, Data: []byte("before")},
+	})
+	for i := 0; i < workspace.MaxEntries; i++ {
+		f, err := os.Create(filepath.Join(source, "build", fmt.Sprint(i)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeIndexFixture(t, source, "build/tracked/source", []byte("after"))
+	changes, err := index.Changes(context.Background())
+	want := []workspace.Change{{Path: "build/tracked/source", Mode: workspace.Regular, Data: []byte("after")}}
+	if err != nil || !reflect.DeepEqual(changes, want) {
+		t.Fatalf("ignored outputs changed tracked selection: %+v,%v", changes, err)
+	}
+}
+
+func TestFixIndexExportsNewIgnoreRulesAndExactChangeLimit(t *testing.T) {
+	index, source := offlineIndexFixture(t, nil)
+	writeIndexFixture(t, source, "sub/.gitignore", []byte("*.cache\n"))
+	writeIndexFixture(t, source, "sub/generated.cache", []byte("ignored"))
+	for i := 1; i < workspace.MaxChanges; i++ {
+		writeIndexFixture(t, source, fmt.Sprintf("sub/%03d", i), []byte("source"))
+	}
+	changes, err := index.Changes(context.Background())
+	if err != nil || len(changes) != workspace.MaxChanges {
+		t.Fatalf("exact change limit: count=%d error=%v", len(changes), err)
+	}
+	found := false
+	for _, change := range changes {
+		if change.Path == "sub/.gitignore" {
+			found = true
+		}
+		if change.Path == "sub/generated.cache" {
+			t.Fatal("new ignore rule was not applied")
+		}
+	}
+	if !found {
+		t.Fatal("new ignore rules were not exported")
+	}
+}

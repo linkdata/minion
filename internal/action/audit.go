@@ -20,18 +20,27 @@ var auditValidators = []struct{ script, artifact string }{
 	{"validate-coverage-ledger.cjs", "coverage-ledger.json"},
 }
 
-func checkAuditTools(ctx context.Context, dir, skill string) (string, error) {
+type auditTools struct {
+	binary, permissionFlag string
+}
+
+func checkAuditTools(ctx context.Context, dir, skill string) (auditTools, error) {
 	for _, validator := range auditValidators {
 		script := filepath.Join(filepath.Dir(skill), validator.script)
 		info, err := os.Stat(script)
 		if err != nil {
-			return "", fmt.Errorf("audit validator %q: %w", script, err)
+			return auditTools{}, fmt.Errorf("audit validator %q: %w", script, err)
 		}
 		if !info.Mode().IsRegular() {
-			return "", fmt.Errorf("audit validator %q is not a regular file", script)
+			return auditTools{}, fmt.Errorf("audit validator %q is not a regular file", script)
 		}
 	}
-	return auditNodePermissionFlag(ctx, dir)
+	binary, err := aicli.AbsoluteExecutable("node")
+	if err != nil {
+		return auditTools{}, fmt.Errorf("audit requires node: %w", err)
+	}
+	flag, err := auditNodePermissionFlag(ctx, dir, binary)
+	return auditTools{binary: binary, permissionFlag: flag}, err
 }
 
 func readAuditArtifacts(outputDir string, partial bool) ([]workspace.File, []Diagnostic, error) {
@@ -65,7 +74,7 @@ func auditArtifactMayBeEmpty(name string) bool {
 	return name == "FINDINGS-DETAIL.md" || name == "NEEDS-VALIDATION.md"
 }
 
-func validateAuditFiles(ctx context.Context, files []workspace.File, validationDir, skill, permissionFlag, repo, target, head string) (string, error) {
+func validateAuditFiles(ctx context.Context, files []workspace.File, validationDir, skill string, tools auditTools, repo, target, head string) (string, error) {
 	byPath := make(map[string][]byte, len(files))
 	for _, file := range files {
 		byPath[file.Path] = file.Data
@@ -88,13 +97,13 @@ func validateAuditFiles(ctx context.Context, files []workspace.File, validationD
 	for _, validator := range auditValidators {
 		script := filepath.Join(filepath.Dir(skill), validator.script)
 		// #nosec G204 -- the installed skill path and validation directory are checked paths; arguments bypass a shell.
-		cmd, err := auditNodeCommand(ctx, validationDir, permissionFlag,
+		cmd := auditNodeCommand(ctx, validationDir, tools.binary, tools.permissionFlag,
 			"--allow-fs-read="+filepath.Dir(skill), "--allow-fs-read="+validationDir,
 			script, filepath.Join(validationDir, validator.artifact))
-		if err != nil {
-			return "", err
-		}
 		if err := cmd.Run(); err != nil {
+			if cause := ctx.Err(); cause != nil && !errors.Is(err, cause) {
+				err = errors.Join(cause, err)
+			}
 			return "", fmt.Errorf("audit %s failed: %w", validator.script, err)
 		}
 	}
@@ -134,7 +143,7 @@ func validateAuditFiles(ctx context.Context, files []workspace.File, validationD
 		for _, fingerprint := range fingerprints {
 			candidates[fingerprint] = true
 			if !final[fingerprint] {
-				return fmt.Errorf("audit coverage-ledger.json has candidate %q without final finding", fingerprint)
+				return errors.New("audit coverage-ledger.json has a candidate without final finding")
 			}
 		}
 		return nil
@@ -158,7 +167,7 @@ func validateAuditFiles(ctx context.Context, files []workspace.File, validationD
 	}
 	for fingerprint := range final {
 		if !candidates[fingerprint] {
-			return "", fmt.Errorf("audit findings.json has finding %q without candidate", fingerprint)
+			return "", errors.New("audit findings.json has a finding without candidate")
 		}
 	}
 	return string(reportBytes), nil
@@ -196,14 +205,11 @@ func validateAuditMetadata(metadataBytes []byte, repo, target, head string) ([]s
 	return metadata.SelectedCompanionFiles, nil
 }
 
-func auditNodePermissionFlag(ctx context.Context, dir string) (string, error) {
+func auditNodePermissionFlag(ctx context.Context, dir, binary string) (string, error) {
 	// Prefer the stable flag; Node 20 requires the experimental spelling.
 	for _, flag := range []string{"--permission", "--experimental-permission"} {
 		// #nosec G204 -- the flags and probe program are fixed strings, passed without a shell.
-		cmd, err := auditNodeCommand(ctx, dir, flag, "-e", `if (!process.permission || process.permission.has('fs.read', '/etc/passwd')) process.exit(1)`)
-		if err != nil {
-			return "", err
-		}
+		cmd := auditNodeCommand(ctx, dir, binary, flag, "-e", `if (!process.permission || process.permission.has('fs.read', '/etc/passwd')) process.exit(1)`)
 		if err := cmd.Run(); err == nil {
 			return flag, nil
 		}
@@ -214,14 +220,10 @@ func auditNodePermissionFlag(ctx context.Context, dir string) (string, error) {
 	return "", errors.New("node permission model is unavailable")
 }
 
-func auditNodeCommand(ctx context.Context, dir string, args ...string) (*exec.Cmd, error) {
-	binary, err := aicli.AbsoluteExecutable("node")
-	if err != nil {
-		return nil, fmt.Errorf("audit requires node: %w", err)
-	}
+func auditNodeCommand(ctx context.Context, dir, binary string, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, binary, args...)
 	cmd.Dir = dir
 	cmd.Env = []string{"HOME=" + dir, "PATH=/usr/bin:/bin"}
 	processgroup.Configure(cmd)
-	return cmd, nil
+	return cmd
 }

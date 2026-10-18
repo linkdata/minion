@@ -257,7 +257,7 @@ func TestAuditNodePermissionFlag(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := fakeOnPath(t, "node", "#!/bin/sh\n"+tt.script+"\n")
-			got, err := auditNodePermissionFlag(context.Background(), dir)
+			got, err := auditNodePermissionFlag(context.Background(), dir, filepath.Join(dir, "node"))
 			if got != tt.want || (err != nil) != tt.wantError {
 				t.Fatalf("auditNodePermissionFlag() = %q, %v; want %q, error=%t", got, err, tt.want, tt.wantError)
 			}
@@ -306,7 +306,7 @@ JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 	if err != nil {
 		t.Fatal(err)
 	}
-	permissionFlag, err := checkAuditTools(context.Background(), validationDir, filepath.Join(skillDir, "SKILL.md"))
+	tools, err := checkAuditTools(context.Background(), validationDir, filepath.Join(skillDir, "SKILL.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -315,7 +315,7 @@ JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 		files, _, err := readAuditArtifacts(root, false)
 		var report string
 		if err == nil {
-			report, err = validateAuditFiles(context.Background(), files, validationDir, filepath.Join(skillDir, "SKILL.md"), permissionFlag, "o/r", target, head)
+			report, err = validateAuditFiles(context.Background(), files, validationDir, filepath.Join(skillDir, "SKILL.md"), tools, "o/r", target, head)
 		}
 		if wantError == "" {
 			if err != nil || report != "Verified audit report\n" {
@@ -323,6 +323,9 @@ JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 			}
 		} else if err == nil || !strings.Contains(err.Error(), wantError) {
 			t.Fatalf("audit output error = %v, want %q", err, wantError)
+		}
+		if err != nil && strings.Contains(err.Error(), "forged journal") {
+			t.Fatalf("private fingerprint entered error: %q", err)
 		}
 		if err != nil && strings.Contains(err.Error(), "\n") {
 			t.Fatalf("audit error contains an unquoted line break: %q", err)
@@ -363,7 +366,7 @@ JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 	write("coverage-ledger.json", `[{"status":"candidate","result_fingerprints":["F"],"unresolved":["validation_budget_exhausted"]}]`)
 	validate("unvalidated candidate")
 	write("coverage-ledger.json", `[{"status":"covered"}]`)
-	validate(`finding "F" without candidate`)
+	validate("finding without candidate")
 	write("coverage-ledger.json", `[{"status":"covered","attempts":[{"status":"candidate","result_fingerprints":["F"]}]}]`)
 	validate("")
 	write("findings.json", "[]")
@@ -374,10 +377,10 @@ JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 	fingerprint := "F\nforged journal \"line\""
 	write("findings.json", "[]")
 	write("coverage-ledger.json", fmt.Sprintf(`[{"status":"candidate","result_fingerprints":[%q]}]`, fingerprint))
-	validate(fmt.Sprintf("candidate %q without final finding", fingerprint))
+	validate("candidate without final finding")
 	write("findings.json", fmt.Sprintf(`[{"fingerprint":%q}]`, fingerprint))
 	write("coverage-ledger.json", `[{"status":"covered"}]`)
-	validate(fmt.Sprintf("finding %q without candidate", fingerprint))
+	validate("finding without candidate")
 }
 
 func TestAuditArtifactReadModesPreserveFailurePolicies(t *testing.T) {

@@ -37,12 +37,12 @@ func TestUsageSessionDoesNotRecountPreviousTurnsOrUnreferencedHelpers(t *testing
 	writeUsageRollout(t, home, "old-child", "root", completedUsageTurn("old-child", "old-child-turn", "c1", 40)...)
 	var session usageSession
 	session.begin(ctx, home, "", time.Now())
-	if got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 100}, []string{"old-child"}); got.Input != 140 || !complete || err != nil {
+	if got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 100}, []string{"old-child"}, nil); got.Input != 140 || !complete || err != nil {
 		t.Fatalf("initial = %+v, %v, %v", got, complete, err)
 	}
 	session.begin(ctx, home, "root", time.Now())
 	appendUsageEvents(t, root, completedUsageTurn("root", "new-root", "r2", 20)...)
-	got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 20}, nil)
+	got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 20}, nil, nil)
 	if got != (usage.Tokens{Input: 20}) || !complete || err != nil {
 		t.Fatalf("resumed = %+v, %v, %v", got, complete, err)
 	}
@@ -59,7 +59,7 @@ func TestUsageSessionSubtractsSnapshotBaselineAndLateOldRecords(t *testing.T) {
 		usageEvent("task_complete", "old"),
 		usageEvent("task_started", "new"), usageRecord("root", "new", "new-response", 20, 0, 0),
 		usageSnapshot(25, 127, 0, 0), usageEvent("task_complete", "new"))
-	got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 127}, nil)
+	got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 127}, nil, nil)
 	if got != (usage.Tokens{Input: 20}) || !complete || err != nil {
 		t.Fatalf("resumed = %+v, %v, %v", got, complete, err)
 	}
@@ -83,7 +83,7 @@ func TestUsageSessionPriorHelperNeedsANewCompletedTurn(t *testing.T) {
 					appendUsageEvents(t, child, usageEvent("turn_aborted", "new-child"))
 				}
 			}
-			got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 20}, []string{"child"})
+			got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 20}, []string{"child"}, nil)
 			if state == "complete" {
 				if got.Input != 25 || !complete || err != nil {
 					t.Fatalf("completed = %+v, %v, %v", got, complete, err)
@@ -109,7 +109,7 @@ func TestUsageSessionOnlyCountsNewHelpersWithCurrentSpawnProof(t *testing.T) {
 			events = append(events, usageEvent("task_complete", "new"))
 			appendUsageEvents(t, root, events...)
 			writeUsageRollout(t, home, "new-child", "root", completedUsageTurn("new-child", "child-turn", "c1", 5)...)
-			got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 20}, []string{"new-child"})
+			got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 20}, []string{"new-child"}, nil)
 			if spawn {
 				if got.Input != 25 || !complete || err != nil {
 					t.Fatalf("spawn = %+v, %v, %v", got, complete, err)
@@ -126,7 +126,7 @@ func TestUsageSessionKnownPathSurvivesOldDateAndMtime(t *testing.T) {
 	root := writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "old", "r1", 100)...)
 	var session usageSession
 	session.begin(ctx, home, "", time.Now())
-	_, _, _ = session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 100}, nil)
+	_, _, _ = session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 100}, nil, nil)
 	future := time.Now().AddDate(0, 0, 5)
 	session.begin(ctx, home, "root", future)
 	appendUsageEvents(t, root, completedUsageTurn("root", "new", "r2", 20)...)
@@ -134,7 +134,7 @@ func TestUsageSessionKnownPathSurvivesOldDateAndMtime(t *testing.T) {
 	if err := os.Chtimes(root, old, old); err != nil {
 		t.Fatal(err)
 	}
-	got, complete, err := session.collectUsage(ctx, home, "root", future, &usage.Tokens{Input: 20}, nil)
+	got, complete, err := session.collectUsage(ctx, home, "root", future, &usage.Tokens{Input: 20}, nil, nil)
 	if got.Input != 20 || !complete || err != nil {
 		t.Fatalf("aged = %+v, %v, %v", got, complete, err)
 	}
@@ -172,7 +172,7 @@ func TestUsageSessionChangedOrIncompletePrefixDoesNotRecountHistory(t *testing.T
 				}
 			}
 			appendUsageEvents(t, root, completedUsageTurn("root", "new", "r2", 20)...)
-			got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 20}, nil)
+			got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 20}, nil, nil)
 			if got.Input != 0 || complete || err != nil {
 				t.Fatalf("damaged prefix = %+v, %v, %v (%s)", got, complete, err, filepath.Base(root))
 			}
@@ -188,7 +188,7 @@ func TestUsageSessionSnapshotOnlyDeltaAndCumulativeStdout(t *testing.T) {
 			var session usageSession
 			session.begin(ctx, home, "root", time.Now())
 			appendUsageEvents(t, root, usageEvent("task_started", "new"), usageSnapshot(24, 120, 0, 0), usageEvent("task_complete", "new"))
-			got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: fallback}, nil)
+			got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: fallback}, nil, nil)
 			if got.Input != 20 || complete != (fallback == 120) || err != nil {
 				t.Fatalf("snapshot delta = %+v, %v, %v", got, complete, err)
 			}
@@ -202,7 +202,7 @@ func TestUsageSessionSnapshotResetKeepsOnlyAttributedNewResponses(t *testing.T) 
 	var session usageSession
 	session.begin(ctx, home, "root", time.Now())
 	appendUsageEvents(t, root, append(completedUsageTurn("root", "new", "r2", 20), usageSnapshot(25, 20, 0, 0))...)
-	got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 120}, nil)
+	got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 120}, nil, nil)
 	if got.Input != 20 || complete || err != nil {
 		t.Fatalf("reset = %+v, %v, %v", got, complete, err)
 	}
@@ -216,14 +216,14 @@ func TestUsageSessionLateOldTurnNeverCompletesCurrentHelper(t *testing.T) {
 	session.begin(ctx, home, "root", time.Now())
 	appendUsageEvents(t, root, completedUsageTurn("root", "new-root", "r2", 20)...)
 	appendUsageEvents(t, child, usageRecord("child", "old-child", "late-c1", 5, 0, 0), usageEvent("task_complete", "old-child"))
-	got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 20}, []string{"child"})
+	got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 20}, []string{"child"}, nil)
 	if got.Input != 20 || complete || !errors.Is(err, errUnverifiedChildren) {
 		t.Fatalf("late old helper = %+v, %v, %v", got, complete, err)
 	}
 }
 
 func TestUsageSessionBudgetAndCancellationKeepHelpersUnverified(t *testing.T) {
-	for _, mode := range []string{"budget", "cancel"} {
+	for _, mode := range []string{"prefix bound", "cancel"} {
 		t.Run(mode, func(t *testing.T) {
 			ctx, home := context.Background(), t.TempDir()
 			root := writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "old-root", "r1", 100)...)
@@ -232,16 +232,20 @@ func TestUsageSessionBudgetAndCancellationKeepHelpersUnverified(t *testing.T) {
 			session.begin(ctx, home, "root", time.Now())
 			appendUsageEvents(t, root, completedUsageTurn("root", "new-root", "r2", 20)...)
 			appendUsageEvents(t, child, completedUsageTurn("child", "new-child", "c2", 5)...)
-			if mode == "budget" {
-				session.budget = 1
+			if mode == "prefix bound" {
+				session.before["child"].size = maxUsageRolloutBytes + 1
 			} else {
 				var cancel context.CancelFunc
 				ctx, cancel = context.WithCancel(ctx)
 				cancel()
 			}
-			got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 20}, []string{"child"})
-			if got.Input != 0 || complete || !errors.Is(err, errUnverifiedChildren) {
-				t.Fatalf("limited = %+v, %v, %v", got, complete, err)
+			got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 20}, []string{"child"}, nil)
+			want := usage.Tokens{}
+			if mode == "prefix bound" {
+				want.Input = 20
+			}
+			if got != want || complete || !errors.Is(err, errUnverifiedChildren) {
+				t.Fatalf("limited = %+v, %v, %v; want %+v", got, complete, err, want)
 			}
 		})
 	}
@@ -253,7 +257,7 @@ func TestUsageSessionUnfinishedBaselineCannotCertifySnapshotDelta(t *testing.T) 
 	var session usageSession
 	session.begin(ctx, home, "root", time.Now())
 	appendUsageEvents(t, root, usageEvent("task_complete", "old"), usageEvent("task_started", "new"), usageSnapshot(24, 127, 0, 0), usageEvent("task_complete", "new"))
-	got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 27}, nil)
+	got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 27}, nil, nil)
 	if got.Input != 0 || complete || err != nil {
 		t.Fatalf("unfinished baseline = %+v, %v, %v", got, complete, err)
 	}
@@ -265,7 +269,7 @@ func TestUsageSessionDuplicateResponseAcrossOldAndNewTurnsIsIncomplete(t *testin
 	var session usageSession
 	session.begin(ctx, home, "root", time.Now())
 	appendUsageEvents(t, root, usageRecord("root", "old", "shared", 5, 0, 0), usageEvent("task_started", "new"), usageRecord("root", "new", "shared", 5, 0, 0), usageEvent("task_complete", "new"))
-	got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), nil, nil)
+	got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), nil, nil, nil)
 	if got.Input != 0 || complete || err != nil {
 		t.Fatalf("cross-turn duplicate = %+v, %v, %v", got, complete, err)
 	}
@@ -284,7 +288,7 @@ func TestUsageSessionHistoricalHelpersDoNotConsumeCurrentAgentSlots(t *testing.T
 	appendUsageEvents(t, root, completedUsageTurn("root", "new-root", "r2", 20)...)
 	id := fmt.Sprintf("old-child-%03d", maxUsageAgents+1)
 	appendUsageEvents(t, last, completedUsageTurn(id, "new-child", id+"-r2", 5)...)
-	got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 20}, []string{id})
+	got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 20}, []string{id}, nil)
 	if got.Input != 25 || !complete || err != nil {
 		t.Fatalf("historical slots = %+v, %v, %v", got, complete, err)
 	}
@@ -303,7 +307,7 @@ func TestUsageSessionSpawnProvenanceIsBounded(t *testing.T) {
 	path := writeUsageRollout(t, home, "root", "", usageEvent("task_started", "new"), fmt.Sprintf(`{"type":"event_msg","payload":{"type":"item_completed","turn_id":"new","item":{"type":"CollabAgentToolCall","tool":"spawn_agent","status":"completed","receiver_thread_ids":%s}}}`, raw), usageEvent("task_complete", "new"))
 	budget := int64(maxUsageScanBytes)
 	spawned := map[string]bool{}
-	_, complete, _, err := readRolloutUsageFrom(context.Background(), rolloutMeta{ID: "root", path: path}, "root", &budget, nil, nil, spawned)
+	_, complete, _, err := readRolloutUsageFrom(context.Background(), rolloutMeta{ID: "root", path: path}, "root", &budget, nil, nil, spawned, false)
 	if len(spawned) != maxCodexChildren || complete || !errors.Is(err, aicli.ErrOutputLimit) {
 		t.Fatalf("spawn bound = %d, %v, %v", len(spawned), complete, err)
 	}
@@ -353,11 +357,115 @@ func TestUsageSessionNativeCumulativeStdoutPreservesCompleteDeltas(t *testing.T)
 				if mismatch {
 					cumulative.Input++
 				}
-				got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &cumulative, expected)
+				got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &cumulative, expected, nil)
 				if got != want || complete == mismatch || err != nil {
 					t.Fatalf("native-shaped delta = %+v complete=%t error=%v, want %+v", got, complete, err, want)
 				}
 			})
 		}
+	}
+}
+
+func TestUsageSessionOnlyObservesUnchangedCompletedPriorHelper(t *testing.T) {
+	for _, test := range []struct {
+		name, tools, before, after string
+		accepted                   bool
+	}{
+		{"wait finished", "wait", "complete", "", true},
+		{"close finished", "close_agent", "complete", "", true},
+		{"input finished", "send_input", "complete", "", false},
+		{"spawn reference", "spawn_agent", "complete", "", false},
+		{"unknown reference", "unknown", "complete", "", false},
+		{"input then wait", "send_input,wait", "complete", "", false},
+		{"wait then input", "wait,send_input", "complete", "", false},
+		{"wait unfinished", "wait", "started", "", false},
+		{"close aborted", "close_agent", "aborted", "", false},
+		{"wait new unfinished", "wait", "complete", "started", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, home := context.Background(), t.TempDir()
+			root := writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "old-root", "r1", 100)...)
+			events := []string{usageEvent("task_started", "old-child"), usageRecord("child", "old-child", "c1", 40, 0, 0)}
+			if test.before == "complete" {
+				events = append(events, usageEvent("task_complete", "old-child"))
+			}
+			if test.before == "aborted" {
+				events = append(events, usageEvent("turn_aborted", "old-child"))
+			}
+			child := writeUsageRollout(t, home, "child", "root", events...)
+			var session usageSession
+			session.begin(ctx, home, "root", time.Now())
+			appendUsageEvents(t, root, completedUsageTurn("root", "new-root", "r2", 20)...)
+			if test.after != "" {
+				appendUsageEvents(t, child, usageEvent("task_started", "new-child"))
+			}
+			var output jsonlOutput
+			for _, tool := range strings.Split(test.tools, ",") {
+				_, _ = output.Write([]byte(fmt.Sprintf(`{"type":"item.completed","item":{"type":"collab_tool_call","tool":%q,"receiver_thread_ids":["child"]}}`+"\n", tool)))
+			}
+			got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 20}, output.children, output.observationOnly)
+			if test.accepted {
+				if got != (usage.Tokens{Input: 20}) || !complete || err != nil {
+					t.Fatalf("finished observation = %+v,%v,%v", got, complete, err)
+				}
+			} else if complete || !errors.Is(err, errUnverifiedChildren) {
+				t.Fatalf("unverified helper accepted: %+v,%v,%v", got, complete, err)
+			}
+		})
+	}
+}
+
+func TestUsageSessionCollectionHasIndependentBaselineBudget(t *testing.T) {
+	ctx, home := context.Background(), t.TempDir()
+	root := writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "old-root", "r1", 100)...)
+	child := writeUsageRollout(t, home, "child", "root", completedUsageTurn("child", "old-child", "c1", 40)...)
+	var session usageSession
+	session.begin(ctx, home, "root", time.Now())
+	// Model a baseline pass that used nearly its entire allowed tree budget.
+	session.budget = 1
+	appendUsageEvents(t, root, completedUsageTurn("root", "new-root", "r2", 20)...)
+	appendUsageEvents(t, child, completedUsageTurn("child", "new-child", "c2", 5)...)
+	got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 20}, []string{"child"}, nil)
+	if got != (usage.Tokens{Input: 25}) || !complete || err != nil {
+		t.Fatalf("collection reused baseline budget: %+v,%v,%v", got, complete, err)
+	}
+}
+
+func TestUsageBoundaryEarlyReadFailuresAreInvalid(t *testing.T) {
+	for _, cause := range []string{"budget", "cancel", "open"} {
+		t.Run(cause, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			budget := int64(maxUsageScanBytes)
+			if cause == "budget" {
+				budget = 0
+			}
+			if cause == "cancel" {
+				cancel()
+			}
+			capture := &usageBoundary{valid: true, turns: map[string]bool{}}
+			_, complete, _, _ := readRolloutUsageFrom(ctx, rolloutMeta{ID: "root", path: filepath.Join(t.TempDir(), "missing")}, "root", &budget, nil, capture, nil, false)
+			if capture.valid || complete {
+				t.Fatalf("failed read left valid boundary: %+v,%v", capture, complete)
+			}
+		})
+	}
+}
+
+func TestCollectUsageMissingRootKeepsDirectParentOwnership(t *testing.T) {
+	home := t.TempDir()
+	path := writeUsageRollout(t, home, "child", "root", completedUsageTurn("child", "own", "response", 5)...)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Native source-parent provenance remains enough without session_id or a root header.
+	data = []byte(strings.Replace(string(data), `"session_id":"root",`, "", 1))
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	got, complete, err := collectUsage(context.Background(), home, "root", time.Now(), &usage.Tokens{Input: 20}, []string{"child"})
+	if got != (usage.Tokens{Input: 25}) || complete || err != nil {
+		t.Fatalf("missing-root ownership changed: %+v,%v,%v", got, complete, err)
 	}
 }

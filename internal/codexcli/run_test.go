@@ -60,6 +60,11 @@ printf '%s\n' '{"type":"thread.started","thread_id":"test"}' '{"type":"item.comp
 			if err != nil {
 				t.Fatal(err)
 			}
+			tmp, err := os.ReadFile(tmpFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			runtimeDir := strings.TrimSpace(string(tmp))
 			got := strings.Split(strings.TrimSuffix(string(args), "\n"), "\n")
 			want := []string{
 				"exec", "--json", "--ignore-user-config", "--ignore-rules", "--strict-config", "--skip-git-repo-check",
@@ -75,7 +80,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"test"}' '{"type":"item.comp
 				"-c", "shell_environment_policy.ignore_default_excludes=false",
 				"-c", `shell_environment_policy.filters={"PATH"="include","HOME"="include","TMPDIR"="include","TMP"="include","TEMP"="include","GOCACHE"="include","GIT_CONFIG_NOSYSTEM"="include","GIT_CONFIG_GLOBAL"="include","GIT_ATTR_NOSYSTEM"="include","GIT_NO_REPLACE_OBJECTS"="include","GIT_NO_LAZY_FETCH"="include","GIT_OPTIONAL_LOCKS"="include","LANG"="include","LC_ALL"="include","LC_CTYPE"="include","TERM"="include"}`,
 				"-c", `default_permissions="minion"`,
-				"-c", fmt.Sprintf(`permissions.minion.filesystem={":root"="deny",":minimal"="read",":tmpdir"="write",%s=%q,%s="read",%s="read",%s="read",%s="read",%s="read"}`, strconv.Quote(dir), tt.access, strconv.Quote(filepath.Join(dir, ".git")), strconv.Quote(filepath.Join(dir, ".agents")), strconv.Quote(filepath.Join(dir, ".codex")), strconv.Quote(filepath.Join(dir, ".claude")), strconv.Quote(fakeCodex)),
+				"-c", fmt.Sprintf(`permissions.minion.filesystem={":root"="deny",":minimal"="read",":tmpdir"="write",%s=%q,%s="read",%s="read",%s="read",%s="read",%s="read",%s="read",%s="read"}`, strconv.Quote(dir), tt.access, strconv.Quote(filepath.Join(dir, ".git")), strconv.Quote(filepath.Join(dir, ".agents")), strconv.Quote(filepath.Join(dir, ".codex")), strconv.Quote(filepath.Join(dir, ".claude")), strconv.Quote(filepath.Join(runtimeDir, ".agents")), strconv.Quote(filepath.Join(runtimeDir, ".codex")), strconv.Quote(fakeCodex)),
 				"-c", "permissions.minion.network.enabled=false",
 				"--", "-",
 			}
@@ -100,11 +105,6 @@ printf '%s\n' '{"type":"thread.started","thread_id":"test"}' '{"type":"item.comp
 			if !strings.HasPrefix(string(gotPrompt), "Source snapshot: ") || !strings.Contains(string(gotPrompt), strconv.Quote(dir)) || !strings.HasSuffix(string(gotPrompt), "Handle mention") {
 				t.Fatalf("stdin prompt lacks source location or original request: %q", gotPrompt)
 			}
-			tmp, err := os.ReadFile(tmpFile)
-			if err != nil {
-				t.Fatal(err)
-			}
-			runtimeDir := strings.TrimSpace(string(tmp))
 			if strings.TrimSpace(string(cwd)) != runtimeDir {
 				t.Fatalf("working directory = %q, want %q", strings.TrimSpace(string(cwd)), runtimeDir)
 			}

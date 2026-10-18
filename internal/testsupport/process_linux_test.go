@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestWaitExitedParsesTheLastCommDelimiter(t *testing.T) {
@@ -62,12 +63,33 @@ func TestPinProcessRequiresAValidPIDFile(t *testing.T) {
 	if _, err := PinProcess(path); !errors.Is(err, os.ErrNotExist) || errors.Is(err, os.ErrProcessDone) {
 		t.Fatalf("missing PID marker was mistaken for an exited child: %v", err)
 	}
-	for _, data := range []string{"", "invalid", "0", "-1"} {
+	for _, data := range []string{"", " \t\n"} {
 		if err := os.WriteFile(path, []byte(data), 0600); err != nil {
 			t.Fatal(err)
 		}
-		if child, err := PinProcess(path); child != nil || err == nil || errors.Is(err, os.ErrProcessDone) {
+		if child, err := PinProcess(path); child != nil || !errors.Is(err, os.ErrNotExist) || errors.Is(err, os.ErrProcessDone) {
+			t.Fatalf("unpublished PID %q was mistaken for a child or exit: %v, %v", data, child, err)
+		}
+	}
+	for _, data := range []string{"invalid", "0", "-1"} {
+		if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if child, err := PinProcess(path); child != nil || err == nil || errors.Is(err, os.ErrNotExist) || errors.Is(err, os.ErrProcessDone) {
 			t.Fatalf("invalid PID %q was accepted or mistaken for exit: %v, %v", data, child, err)
 		}
+	}
+}
+
+func TestWaitForProcessRetriesUnpublishedPID(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pid")
+	if err := os.WriteFile(path, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	child, err := WaitForProcess(ctx, path, make(chan struct{}))
+	if child != nil || !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "fixture child did not start") {
+		t.Fatalf("unpublished PID stopped polling before startup deadline: %v, %v", child, err)
 	}
 }

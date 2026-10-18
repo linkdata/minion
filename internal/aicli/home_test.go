@@ -63,3 +63,16 @@ func TestHomePathErrorsIdentifySelectedPath(t *testing.T) {
 		})
 	}
 }
+
+func TestHomePathRejectsRelativeDefaultHome(t *testing.T) {
+	t.Setenv("HOME", "relative-home")
+	t.Setenv("MINION_TEST_AI_HOME", "")
+	if got, err := HomePath("MINION_TEST_AI_HOME", ".fixture"); err == nil || got != "" || !strings.Contains(err.Error(), "HOME must be absolute") {
+		t.Fatalf("relative default accepted: %q,%v", got, err)
+	}
+	explicit := t.TempDir()
+	t.Setenv("MINION_TEST_AI_HOME", explicit)
+	if got, err := HomePath("MINION_TEST_AI_HOME", ".fixture"); err != nil || got != explicit {
+		t.Fatalf("explicit native directory lost: %q,%v", got, err)
+	}
+}

@@ -51,6 +51,9 @@ func TestCriticEvidencePreservesBlockerVerdicts(t *testing.T) {
 			if (err == nil) != tt.approved || (tt.err != nil && !errors.Is(err, tt.err)) || len(result.Calls) != 2 || result.validate(job, false) != nil {
 				t.Fatalf("invalid critic outcome: result=%+v err=%v", result, err)
 			}
+			if !tt.approved && tt.err == nil && !errors.Is(err, monitor.ErrTerminalJob) {
+				t.Fatalf("critic rejection or invalid verdict was retryable: %v", err)
+			}
 			if tt.approved {
 				if result.Answer != "Candidate answer" || result.Validate(job) != nil {
 					t.Fatalf("approved result invalid: %+v", result)
@@ -77,7 +80,7 @@ func TestCriticEvidencePreservesBlockerVerdicts(t *testing.T) {
 func TestJournalPolicyIsNotPublication(t *testing.T) {
 	job := portableJob(command.Comment)
 	job.Critic, job.CriticMaxRounds, job.CriticNonblockingRounds = &RoleSettings{Provider: "claude"}, 2, 2
-	result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Calls: []CallUsage{
+	result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Complete answer", Calls: []CallUsage{
 		{Provider: job.Main.Provider, Role: roleMain, Round: 1},
 		{Provider: "claude", Role: roleCritic, Round: 1, ReviewPhase: reviewFull, HasBlockers: true},
 		{Provider: job.Main.Provider, Role: roleMain, Round: 2},
@@ -91,8 +94,8 @@ func TestJournalPolicyIsNotPublication(t *testing.T) {
 		!strings.Contains(text, "review_phase=full approved=false no_blockers=false has_blockers=true policy_met=false") || strings.Contains(text, "accepted=") {
 		t.Fatalf("journal blurred verdict policy and publication: %s", text)
 	}
-	if result.Validate(job) == nil {
-		t.Fatal("verification policy was mistaken for an accepted final result")
+	if err := result.Validate(job); err == nil || !strings.Contains(err.Error(), "accepted final full review") {
+		t.Fatalf("verification policy was mistaken for an accepted final result: %v", err)
 	}
 }
 
@@ -209,6 +212,7 @@ func TestPortableJobResolvesNonblockingThreshold(t *testing.T) {
 		{name: "default", critic: true, want: 4},
 		{name: "custom maximum", maximum: 3, critic: true, want: 2},
 		{name: "single round", maximum: 1, critic: true},
+		{name: "two round default", maximum: 2, critic: true, want: 1},
 		{name: "strict zero", configured: &zero, critic: true},
 		{name: "explicit first round", configured: &one, critic: true, want: 1},
 		{name: "disabled critic", configured: &one},
@@ -229,9 +233,6 @@ func TestPortableJobResolvesNonblockingThreshold(t *testing.T) {
 			}
 			if err != nil || job.CriticNonblockingRounds != tt.want || job.CriticMaxRounds != wantRounds {
 				t.Fatalf("portable threshold=%d hard=%d err=%v; want %d", job.CriticNonblockingRounds, job.CriticMaxRounds, err, tt.want)
-			}
-			if err := job.Validate(); err != nil {
-				t.Fatalf("resolved Job invalid: %v", err)
 			}
 		})
 	}

@@ -29,7 +29,7 @@ const (
 )
 
 // OfflineIndex runs offline Git against explicitly selected metadata and source.
-// NewOfflineIndex keeps fix-collection metadata outside model grants.
+// NewOfflineIndex places fix-collection metadata outside the model source.
 type OfflineIndex struct {
 	dir, source, binary, baseline string
 	tracked                       map[string]int64
@@ -38,6 +38,9 @@ type OfflineIndex struct {
 // NewOfflineIndex creates private Git metadata for a materialized source snapshot.
 // The caller supplies canonical absolute directories, with metadata outside source and model grants.
 func NewOfflineIndex(ctx context.Context, dir, source string, files []workspace.File) (*OfflineIndex, error) {
+	if workspace.Within(source, dir) || workspace.Within(dir, source) {
+		return nil, errors.New("offline index and source directories overlap")
+	}
 	binary, err := aicli.AbsoluteExecutable("git")
 	if err != nil {
 		return nil, fmt.Errorf("offline fix index requires git: %w", err)
@@ -74,6 +77,9 @@ func (index *OfflineIndex) Changes(ctx context.Context) ([]workspace.Change, err
 	}
 	total := int64(0)
 	for _, name := range slices.Sorted(maps.Keys(index.tracked)) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		size := index.tracked[name]
 		filename := filepath.Join(index.source, filepath.FromSlash(name))
 		if err := workspace.CheckRoot(filepath.Dir(filename)); err != nil {
@@ -176,9 +182,13 @@ func (index *OfflineIndex) Changes(ctx context.Context) ([]workspace.Change, err
 // shortcut: live writers can race these checks; isolate and quiesce executors in #96.
 func (index *OfflineIndex) checkControlFiles(ctx context.Context) error {
 	trackedDirs := map[string]bool{}
+	trackedChildren := map[string][]string{}
 	for name := range index.tracked {
 		for parent := path.Dir(name); parent != "."; parent = path.Dir(parent) {
-			trackedDirs[parent] = true
+			if !trackedDirs[parent] {
+				trackedChildren[path.Dir(parent)] = append(trackedChildren[path.Dir(parent)], parent)
+				trackedDirs[parent] = true
+			}
 		}
 	}
 	type directory struct {
@@ -187,98 +197,132 @@ func (index *OfflineIndex) checkControlFiles(ctx context.Context) error {
 	}
 	dirs, entries := []directory{{name: "."}}, 0
 	for len(dirs) != 0 {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		last := len(dirs) - 1
-		current := dirs[last]
-		dirs[last] = directory{}
-		dirs = dirs[:last]
-		dir := path.Join(current.parent, current.name)
-		absolute := filepath.Join(index.source, filepath.FromSlash(dir))
-		for _, control := range []string{".gitignore", ".gitattributes"} {
-			name := path.Join(dir, control)
-			info, err := os.Lstat(filepath.Join(absolute, control))
-			if errors.Is(err, os.ErrNotExist) {
-				continue
+		var next []directory
+		var candidates []directory
+		var input []byte
+		flush := func() error {
+			if len(candidates) == 0 {
+				return nil
 			}
+			// No trailing slash: Git must not open a child's unchecked .gitignore.
+			ignored, err := index.run(ctx, len(input), input, "check-ignore", "--no-index", "-z", "--stdin")
 			if err != nil {
-				return fmt.Errorf("fix control file %q: %w", name, err)
+				return err
 			}
-			if !info.Mode().IsRegular() || info.Size() > workspace.MaxBytes {
-				return fmt.Errorf("fix control file %q must be regular and bounded to %d bytes", name, workspace.MaxBytes)
+			names, err := splitNUL(ignored)
+			if err != nil {
+				return fmt.Errorf("invalid offline git ignore output: %w", err)
 			}
-			if _, tracked := index.tracked[name]; control == ".gitignore" && !tracked && !current.ignored {
-				input := []byte(":(top)" + name + "\x00")
-				ignored, err := index.run(ctx, len(input), input, "check-ignore", "--no-index", "-z", "--stdin")
+			skip := map[string]bool{}
+			for _, name := range names {
+				skip[strings.TrimPrefix(string(name), ":(top)")] = true
+			}
+			for _, candidate := range candidates {
+				name := path.Join(candidate.parent, candidate.name)
+				if !skip[name] || trackedDirs[name] {
+					candidate.ignored = skip[name]
+					next = append(next, candidate)
+				}
+			}
+			candidates, input = nil, nil
+			return nil
+		}
+		for _, current := range dirs {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			dir := path.Join(current.parent, current.name)
+			if len(dir) >= workspace.MaxPathBytes {
+				return errors.New("fix directory exceeds path limit")
+			}
+			absolute := filepath.Join(index.source, filepath.FromSlash(dir))
+			for _, control := range []string{".gitignore", ".gitattributes"} {
+				name := path.Join(dir, control)
+				info, err := os.Lstat(filepath.Join(absolute, control))
+				if errors.Is(err, os.ErrNotExist) {
+					continue
+				}
 				if err != nil {
-					return err
+					return fmt.Errorf("fix control file %q: %w", name, err)
 				}
-				if len(ignored) != 0 {
-					return fmt.Errorf("ignored untracked fix control file %q must be removed or tracked", name)
+				if !info.Mode().IsRegular() || info.Size() > workspace.MaxBytes {
+					return fmt.Errorf("fix control file %q must be regular and bounded to %d bytes", name, workspace.MaxBytes)
 				}
-			}
-		}
-		f, err := workspace.OpenDirectory(absolute)
-		if err != nil {
-			return fmt.Errorf("fix directory %q: %w", dir, err)
-		}
-		scanErr := func() error {
-			for {
-				if err := ctx.Err(); err != nil {
-					return err
-				}
-				batch, err := f.ReadDir(128)
-				if err != nil && !errors.Is(err, io.EOF) {
-					return err
-				}
-				var candidates []string
-				var input []byte
-				for _, entry := range batch {
-					entries++
-					if entries > workspace.MaxEntries {
-						return errors.New("fix directory scan exceeds entry limit")
-					}
-					if entry.Name() == ".git" && dir != "." && !trackedDirs[dir] {
-						return fmt.Errorf("untracked nested repository output %q must be removed or ignored", dir+"/")
-					}
-					if !entry.IsDir() || strings.EqualFold(entry.Name(), ".git") {
-						continue
-					}
-					name := path.Join(dir, entry.Name())
-					candidates = append(candidates, name)
-					input = append(input, ":(top)"...)
-					input = append(input, name...)
-					input = append(input, 0)
-				}
-				if len(candidates) != 0 {
-					// No trailing slash: check-ignore must not open a child's unchecked .gitignore.
+				if _, tracked := index.tracked[name]; control == ".gitignore" && !tracked && !current.ignored {
+					input := []byte(":(top)" + name + "\x00")
 					ignored, err := index.run(ctx, len(input), input, "check-ignore", "--no-index", "-z", "--stdin")
 					if err != nil {
 						return err
 					}
-					names, err := splitNUL(ignored)
-					if err != nil {
-						return fmt.Errorf("invalid offline git ignore output: %w", err)
+					if len(ignored) != 0 {
+						return fmt.Errorf("ignored untracked fix control file %q must be removed or tracked", name)
 					}
-					skip := map[string]bool{}
-					for _, name := range names {
-						skip[strings.TrimPrefix(string(name), ":(top)")] = true
-					}
-					for _, name := range candidates {
-						if !skip[name] || trackedDirs[name] {
-							dirs = append(dirs, directory{parent: dir, name: path.Base(name), ignored: skip[name]})
-						}
-					}
-				}
-				if errors.Is(err, io.EOF) {
-					return nil
 				}
 			}
-		}()
-		if err := errors.Join(scanErr, f.Close()); err != nil {
+			if current.ignored {
+				// Git cannot export untracked descendants of an excluded directory.
+				for _, name := range trackedChildren[dir] {
+					info, err := os.Lstat(filepath.Join(index.source, filepath.FromSlash(name)))
+					if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
+						continue
+					}
+					if err != nil {
+						return err
+					}
+					if info.IsDir() {
+						next = append(next, directory{parent: dir, name: path.Base(name), ignored: true})
+					}
+				}
+				continue
+			}
+			f, err := workspace.OpenDirectory(absolute)
+			if err != nil {
+				return fmt.Errorf("fix directory %q: %w", dir, err)
+			}
+			scanErr := func() error {
+				for {
+					if err := ctx.Err(); err != nil {
+						return err
+					}
+					batch, err := f.ReadDir(128)
+					if err != nil && !errors.Is(err, io.EOF) {
+						return err
+					}
+					for _, entry := range batch {
+						entries++
+						if entries > workspace.MaxEntries {
+							return errors.New("fix directory scan exceeds entry limit")
+						}
+						if entry.Name() == ".git" && dir != "." && !trackedDirs[dir] {
+							return fmt.Errorf("untracked nested repository output %q must be removed or ignored", dir+"/")
+						}
+						if !entry.IsDir() || strings.EqualFold(entry.Name(), ".git") {
+							continue
+						}
+						name := path.Join(dir, entry.Name())
+						candidates = append(candidates, directory{parent: dir, name: entry.Name()})
+						input = append(input, ":(top)"...)
+						input = append(input, name...)
+						input = append(input, 0)
+						if len(candidates) == 128 {
+							if err := flush(); err != nil {
+								return err
+							}
+						}
+					}
+					if errors.Is(err, io.EOF) {
+						return nil
+					}
+				}
+			}()
+			if err := errors.Join(scanErr, f.Close()); err != nil {
+				return err
+			}
+		}
+		if err := flush(); err != nil {
 			return err
 		}
+		dirs = next
 	}
 	return nil
 }

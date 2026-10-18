@@ -16,7 +16,14 @@ import (
 	"github.com/linkdata/minion/internal/workspace"
 )
 
+// ProtocolVersion 2 carries complete Git history instead of bounded history excerpts.
 const ProtocolVersion = 2
+
+const (
+	maxModelSettingBytes      = 128
+	maxDiagnostics            = 100
+	maxDiagnosticMessageBytes = 8 << 10
+)
 
 // Identity travels between hosts; authentication is supplied separately.
 type Identity struct {
@@ -153,7 +160,7 @@ func (r RoleSettings) Validate() error {
 	if r.Provider != "codex" && r.Provider != "claude" {
 		return errors.New("unsupported action provider")
 	}
-	if !boundedText(r.Model, 128) || !boundedText(r.Effort, 128) || strings.ContainsAny(r.Model+r.Effort, "\r\n") || len(r.Skills)+len(r.AlwaysOnSkills) > config.MaxSkillsPerRole {
+	if !boundedText(r.Model, maxModelSettingBytes) || !boundedText(r.Effort, maxModelSettingBytes) || strings.ContainsAny(r.Model+r.Effort, "\r\n") || len(r.Skills)+len(r.AlwaysOnSkills) > config.MaxSkillsPerRole {
 		return errors.New("invalid action model or skills")
 	}
 	for _, source := range slices.Concat(r.Skills, r.AlwaysOnSkills) {
@@ -344,11 +351,11 @@ func (r Result) validateCalls(j Job, complete bool) error {
 }
 
 func validDiagnostics(diagnostics []Diagnostic) error {
-	if len(diagnostics) > 100 {
+	if len(diagnostics) > maxDiagnostics {
 		return errors.New("too many action diagnostics")
 	}
 	for _, diagnostic := range diagnostics {
-		if !workspace.ValidIdentitySegment(diagnostic.Code) || !boundedText(diagnostic.Message, 8<<10) {
+		if !workspace.ValidIdentitySegment(diagnostic.Code) || !boundedText(diagnostic.Message, maxDiagnosticMessageBytes) {
 			return errors.New("invalid action diagnostic")
 		}
 	}
@@ -356,6 +363,9 @@ func validDiagnostics(diagnostics []Diagnostic) error {
 }
 
 func (j Job) validateChanges(changes []workspace.Change) error {
+	if len(changes) == 0 {
+		return nil
+	}
 	if err := workspace.ValidateChanges(changes); err != nil {
 		return err
 	}

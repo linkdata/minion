@@ -57,6 +57,7 @@ func run() int {
 		return 2
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	// Restore default signal handling so a later signal can terminate shutdown.
 	context.AfterFunc(ctx, stop)
 	defer stop()
 	if *installSkills {
@@ -88,6 +89,27 @@ func run() int {
 		logger.Printf("isolation: %v", err)
 		return 1
 	}
+	var store *state.Store
+	if !*check {
+		initial := time.Now().UTC()
+		if cfg.StartAt != "" {
+			initial, _ = time.Parse(time.RFC3339, cfg.StartAt)
+		}
+		store, err = state.Open(cfg.StatePath, initial)
+		if errors.Is(err, state.ErrLocked) && !*loop {
+			logger.Printf("another run is active; skipping this cron pass")
+			return 0
+		}
+		if err != nil {
+			logger.Printf("state: %v", err)
+			return 1
+		}
+		defer func() {
+			if err := store.Close(); err != nil {
+				logger.Printf("close state: %v", err)
+			}
+		}()
+	}
 	if err := checkModels(ctx, &cfg, logger); err != nil {
 		logger.Printf("AI preflight: %v", err)
 		return 1
@@ -115,25 +137,6 @@ func run() int {
 		logger.Printf("preflight passed as @%s", user.Login)
 		return 0
 	}
-
-	initial := time.Now().UTC()
-	if cfg.StartAt != "" {
-		initial, _ = time.Parse(time.RFC3339, cfg.StartAt)
-	}
-	store, err := state.Open(cfg.StatePath, initial)
-	if errors.Is(err, state.ErrLocked) && !*loop {
-		logger.Printf("another run is active; skipping this cron pass")
-		return 0
-	}
-	if err != nil {
-		logger.Printf("state: %v", err)
-		return 1
-	}
-	defer func() {
-		if err := store.Close(); err != nil {
-			logger.Printf("close state: %v", err)
-		}
-	}()
 
 	orchestrator := newOrchestrator(cfg, client, store, logger, checkWorkRoot)
 	watcher := &monitor.Monitor{Config: cfg, ConfigPath: loadedPath, GitHub: client, Handler: orchestrator, Logger: logger}
@@ -342,7 +345,10 @@ func checkModels(ctx context.Context, cfg *config.Config, logger *log.Logger) (e
 			logger.Printf("Claude settings: model=%s effort=%s", role.Model, role.Effort)
 		}
 	}
-	logger.Printf("AI roles: main=%s adversarial=%s critic_max_rounds=%d critic_nonblocking_rounds=%d job_timeout_minutes=%d", cfg.Main, cfg.Adversarial, cfg.CriticMaxRounds, config.ResolveCriticNonblockingRounds(cfg.CriticMaxRounds, cfg.CriticNonblockingRounds), cfg.JobTimeoutMinutes)
+	logger.Printf("AI roles: main=%s adversarial=%s job_timeout_minutes=%d", cfg.Main, cfg.Adversarial, cfg.JobTimeoutMinutes)
+	if cfg.Adversarial != "" {
+		logger.Printf("critic policy: critic_max_rounds=%d critic_nonblocking_rounds=%d", cfg.CriticMaxRounds, config.ResolveCriticNonblockingRounds(cfg.CriticMaxRounds, cfg.CriticNonblockingRounds))
+	}
 	return
 }
 

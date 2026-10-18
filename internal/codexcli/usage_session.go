@@ -17,16 +17,16 @@ import (
 // usageBoundary records an exact prefix, rather than relying on timestamps or
 // event ordinals. Old turns remain old when their last records arrive late.
 type usageBoundary struct {
-	valid, hasSnapshot, unfinished bool
-	size                           int64
-	hash                           [32]byte
-	turns                          map[string]bool
-	responses                      map[string]usage.Tokens
-	snapshot                       usage.Tokens
+	valid, hasSnapshot, unfinished, completed bool
+	size                                      int64
+	hash                                      [32]byte
+	turns                                     map[string]bool
+	responses                                 map[string]usage.Tokens
+	snapshot                                  usage.Tokens
 }
 
 func (b *usageBoundary) rememberTurn(id string) {
-	if len(b.turns) >= maxUsageWalkEntries && !b.turns[id] {
+	if len(b.turns) >= maxUsageRecords && !b.turns[id] {
 		b.valid = false
 		return
 	}
@@ -55,7 +55,6 @@ type usageSession struct {
 	// cap: historical helpers must not consume current helper slots.
 	known            map[string]rolloutMeta
 	before           map[string]*usageBoundary
-	resumed          bool
 	budget           int64
 	baselineComplete bool
 }
@@ -72,7 +71,7 @@ func ownedUsageFiles(files map[string]rolloutMeta, rootID string) map[string]rol
 				continue
 			}
 			_, parent := owned[meta.ParentID]
-			if meta.SessionID == rootID || parent {
+			if meta.SessionID == rootID || meta.ParentID == rootID || parent {
 				owned[id], changed = meta, true
 			}
 		}
@@ -84,11 +83,10 @@ func ownedUsageFiles(files map[string]rolloutMeta, rootID string) map[string]rol
 // damaged evidence affects accounting/completion, rather than inventing a zero
 // lifetime baseline or rejecting a call before its provider runs.
 func (s *usageSession) begin(ctx context.Context, home, rootID string, started time.Time) {
-	s.resumed = rootID != ""
 	s.before = nil
 	s.budget = maxUsageScanBytes
 	s.baselineComplete = true
-	if !s.resumed {
+	if rootID == "" {
 		s.known = nil
 		return
 	}
@@ -116,17 +114,18 @@ func (s *usageSession) begin(ctx context.Context, home, rootID string, started t
 			b.valid = false
 			continue
 		}
-		_, _, _, _ = readRolloutUsageFrom(ctx, meta, rootID, &s.budget, nil, b, nil)
+		_, _, _, _ = readRolloutUsageFrom(ctx, meta, rootID, &s.budget, nil, b, nil, false)
 	}
 }
 
-func (s *usageSession) collectUsage(ctx context.Context, home, rootID string, started time.Time, fallback *usage.Tokens, expectedChildren []string) (usage.Tokens, bool, error) {
-	if !s.resumed {
+func (s *usageSession) collectUsage(ctx context.Context, home, rootID string, started time.Time, fallback *usage.Tokens, expectedChildren []string, observationOnly map[string]bool) (usage.Tokens, bool, error) {
+	if s.before == nil {
 		files, ambiguous, complete := usageFiles(ctx, home, rootID, started, nil)
 		tokens, complete, err := collectUsageFiles(ctx, rootID, fallback, expectedChildren, files, ambiguous, complete)
 		s.known = ownedUsageFiles(files, rootID)
 		return tokens, complete, err
 	}
+	s.budget = maxUsageScanBytes // Collection has its own bound after the baseline pass.
 	files, ambiguous, complete := usageFiles(ctx, home, rootID, started, s.known)
 	complete = complete && s.baselineComplete
 	owned := ownedUsageFiles(files, rootID)
@@ -163,7 +162,7 @@ func (s *usageSession) collectUsage(ctx context.Context, home, rootID string, st
 		if exists && !ambiguous[id] && (prior || spawned[id]) {
 			var children []string
 			var workError error
-			tokens, ok, children, workError = readRolloutUsageFrom(ctx, meta, rootID, &s.budget, boundary, currentRoot, spawned)
+			tokens, ok, children, workError = readRolloutUsageFrom(ctx, meta, rootID, &s.budget, boundary, currentRoot, spawned, observationOnly[id])
 			childError = errors.Join(childError, workError)
 			queue = append(queue, children...)
 		} else if id != rootID {

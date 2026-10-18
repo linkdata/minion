@@ -165,10 +165,6 @@ func writeUsageTable(stdout io.Writer, output usageOutput, details bool) error {
 	if details {
 		fmt.Fprintln(w, "STARTED (UTC)\tREPO\tUSER\tACTION\tSTATUS\tMAIN\tCRITIC\tCODEX CALLS\tCLAUDE CALLS\tINPUT\tCACHED\tOUTPUT\tTOTAL\tUSAGE\tATTEMPT") //nolint:errcheck // -- The tabwriter writes to an infallible bytes.Buffer.
 		for _, attempt := range output.Attempts {
-			provider := attempt.Provider
-			if provider == "" {
-				provider = "codex"
-			}
 			critic := attempt.CriticProvider
 			if critic == "" {
 				critic = "-"
@@ -180,7 +176,7 @@ func writeUsageTable(stdout io.Writer, output usageOutput, details bool) error {
 					coverage = "partial"
 				}
 			}
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%d\t%d\t%d\t%s\t%s\n", attempt.StartedAt.UTC().Format(time.RFC3339), attempt.Repo, attempt.User, attempt.Action, attempt.Status, provider, critic, attempt.CodexCalls, attempt.ClaudeCalls, attempt.Tokens.Input, attempt.Tokens.CachedInput, attempt.Tokens.Output, attempt.TotalTokens, coverage, attempt.ID) //nolint:errcheck // -- The tabwriter writes to an infallible bytes.Buffer.
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%d\t%d\t%d\t%s\t%s\n", attempt.StartedAt.UTC().Format(time.RFC3339), attempt.Repo, attempt.User, attempt.Action, attempt.Status, attempt.Provider, critic, attempt.CodexCalls, attempt.ClaudeCalls, attempt.Tokens.Input, attempt.Tokens.CachedInput, attempt.Tokens.Output, attempt.TotalTokens, coverage, attempt.ID) //nolint:errcheck // -- The tabwriter writes to an infallible bytes.Buffer.
 		}
 	} else {
 		for _, group := range output.GroupBy {

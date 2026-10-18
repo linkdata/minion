@@ -29,16 +29,18 @@ type Session struct {
 	embeddedDir          string
 	skillPaths           []string
 	id                   string
-	accounted            usage.Tokens
-	started, reset       bool
-	closed               bool
-	initErr              error
+	// A missing snapshot leaves only a cumulative floor until a covering snapshot arrives.
+	baseline       usage.Tokens
+	usageGap       bool
+	started, reset bool
+	closed         bool
+	initErr        error
 }
 
 // NewConversation forgets the native history and accounting, retaining role paths.
 // Run clears model-writable scratch before starting the independent conversation.
 func (s *Session) NewConversation() {
-	s.id, s.started, s.accounted = "", false, usage.Tokens{}
+	s.id, s.started, s.baseline, s.usageGap = "", false, usage.Tokens{}, false
 	s.reset = s.runtimeDir != ""
 }
 
@@ -115,6 +117,14 @@ func (s *Session) prepare(workspace string, writable bool, outputDir string, set
 			return err
 		}
 		s.reset = false
+	}
+	// Native startup must not follow temp paths planted by the previous model call.
+	tmp := filepath.Join(s.runtimeDir, "tmp")
+	if err := cleanup.RemoveAll(tmp); err != nil {
+		return fmt.Errorf("claude native temp cleanup: %w", err)
+	}
+	if err := os.Mkdir(tmp, 0700); err != nil {
+		return fmt.Errorf("claude native temp directory: %w", err)
 	}
 	return nil
 }

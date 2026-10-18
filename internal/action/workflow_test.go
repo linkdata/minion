@@ -24,7 +24,7 @@ import (
 	"github.com/linkdata/minion/internal/skills"
 )
 
-func TestPreparedActionRejectsForeignResultBeforePublication(t *testing.T) {
+func TestPreparedActionRejectsWrongVersionBeforePublication(t *testing.T) {
 	base, _, _ := gitFixtureRemote(t)
 	installActionTestSkills(t, testReviewSkillURL)
 	writeActionTestSkills(t, os.Getenv("HOME"), ".claude", testReviewSkillURL)
@@ -70,7 +70,8 @@ func TestPreparedActionRejectsForeignResultBeforePublication(t *testing.T) {
 	e = attemptFixture(e)
 	installedHome := os.Getenv("HOME")
 	t.Setenv("HOME", t.TempDir())
-	prepared, err := attemptFixture(e).prepare(ctx, request)
+	// Preparation must not serialize the developer HOME into the portable Job.
+	prepared, err := e.prepare(ctx, request)
 	t.Setenv("HOME", installedHome)
 	if err != nil {
 		t.Fatal(err)
@@ -105,7 +106,7 @@ func TestPreparedActionRejectsForeignResultBeforePublication(t *testing.T) {
 	}
 	bad := result
 	bad.Version++
-	if err := e.publish(ctx, prepared, bad); err == nil {
+	if err := e.publish(ctx, prepared, bad); !errors.Is(err, monitor.ErrTerminalJob) {
 		t.Fatal("invalid result published")
 	}
 	if writes != 0 {
@@ -120,6 +121,7 @@ func TestPreparedActionRejectsForeignResultBeforePublication(t *testing.T) {
 }
 
 func TestFailedAuditRetainsLabelledPartialArtifactsWithoutPublication(t *testing.T) {
+	fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
 	gitFixtureRemote(t)
 	installActionTestSkills(t, testAuditSkillURL)
 	writes := 0
@@ -160,7 +162,7 @@ func TestFailedAuditRetainsLabelledPartialArtifactsWithoutPublication(t *testing
 	request.Command = command.Command{Name: "security-audit", Action: command.SecurityAudit}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	if err := attemptFixture(e).perform(ctx, request); !errors.Is(err, failure) {
+	if err := attemptFixture(e).perform(ctx, request); !errors.Is(err, failure) || errors.Is(err, monitor.ErrTerminalJob) {
 		t.Fatalf("audit failure=%v", err)
 	}
 	if writes != 0 {
@@ -256,7 +258,7 @@ func TestPortableJobPreservesElapsedDeadlineCause(t *testing.T) {
 	}
 }
 
-func TestPreparedActionAlwaysCarriesCompleteRepository(t *testing.T) {
+func TestPreparedIssueCommentCarriesCompleteRepository(t *testing.T) {
 	base, _, _ := gitFixtureRemote(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !serveIssueFixture(t, w, r) {

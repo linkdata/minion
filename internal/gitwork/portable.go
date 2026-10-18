@@ -242,7 +242,7 @@ func (c *Checkout) Snapshot(ctx context.Context) (s workspace.Snapshot, err erro
 	if err != nil {
 		return s, err
 	}
-	s.Files, s.BaseFiles, s.Omitted = files[:headFiles], files[headFiles:], omitted
+	s.Files, s.BaseFiles, s.Omitted = files[:headFiles:headFiles], files[headFiles:], omitted
 	if s.Base != "" {
 		if s.Diff, s.DiffIncomplete, err = c.boundedGit(ctx, nil, workspace.MaxContextBytes, true, "-c", "core.quotePath=false", "diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--no-color", s.MergeBase, s.Head, "--"); err != nil {
 			return s, err

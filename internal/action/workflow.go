@@ -136,9 +136,10 @@ func (e *Orchestrator) prepare(ctx context.Context, request monitor.Job) (prepar
 		return nil, err
 	}
 	if err := p.checkout.Close(); err != nil {
-		return nil, err
+		e.logf("prepared checkout cleanup failed; final retry scheduled: %v", err)
+	} else {
+		p.checkout = nil
 	}
-	p.checkout = nil
 	return p, nil
 }
 
@@ -315,6 +316,9 @@ func (e *Orchestrator) prepareFix(ctx context.Context, p *preparedAction) (*prep
 		p.reply = fmt.Sprintf("`%s` currently applies to issue threads. It pushes a branch for the requester to open a pull request.", request.Command.Name)
 		return p, nil
 	}
+	if len(request.ID) < 12 || e.Store == nil {
+		return nil, errors.New("fix job has no durable state or valid ID")
+	}
 	issue, err := e.GitHub.IssueDetails(ctx, request.Repository.Name, request.Number)
 	if err != nil {
 		return nil, err
@@ -322,9 +326,6 @@ func (e *Orchestrator) prepareFix(ctx context.Context, p *preparedAction) (*prep
 	repo, fork, err := e.fixFork(ctx, request.Repository)
 	if err != nil {
 		return nil, err
-	}
-	if len(request.ID) < 12 || e.Store == nil {
-		return nil, errors.New("fix job has no durable state or valid ID")
 	}
 	p.repository, p.fork = repo, fork
 	p.branch = fmt.Sprintf("minion/fix-%d-%s", request.Number, request.ID[:12])

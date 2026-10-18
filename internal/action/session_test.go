@@ -29,7 +29,7 @@ func TestRunAIKeepsRoleSessionsWithinEachAction(t *testing.T) {
 			}
 			return aicli.Result{Answer: approvedCritiqueJSON}, nil
 		}}
-		answer, err := runner.runAI(context.Background(), job, t.TempDir(), "Task.", "", nil)
+		answer, err := runner.runAI(context.Background(), job, t.TempDir(), "Task.", "", nil, nil)
 		if err != nil || answer != "proposal3" || len(calls) != 8 {
 			t.Fatalf("answer=%q calls=%d error=%v", answer, len(calls), err)
 		}

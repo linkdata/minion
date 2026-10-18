@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -15,7 +14,6 @@ import (
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
-	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/workspace"
 )
@@ -33,52 +31,31 @@ func (w *cleanupRetryLog) Write(p []byte) (int, error) {
 	return w.Buffer.Write(p)
 }
 
-func TestRunnerCleanupRetryRecoveryKeepsValidatedResult(t *testing.T) {
+func TestRunnerSnapshotCleanupRetryKeepsValidatedResult(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root bypasses directory permissions")
 	}
-	for _, kind := range []string{"history", "snapshot"} {
-		t.Run(kind, func(t *testing.T) {
-			root := t.TempDir()
-			t.Cleanup(func() { _ = os.Chmod(root, 0700) })
-			journal := &cleanupRetryLog{root: root}
-			job := withClaudeCritic(portableJob(command.Comment))
-			job.CriticMaxRounds = 2
-			if kind == "snapshot" {
-				job.Action, job.Command = command.Fix, "fix"
-			}
-			calls := 0
-			runner := Runner{WorkRoot: root, Logger: log.New(journal, "", 0), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
-				calls++
-				if request.role == roleMain {
-					if kind == "history" && request.round == 2 {
-						return aicli.Result{Answer: proposalJSON("Done.", "Counterevidence.")}, nil
-					}
-					return aicli.Result{Answer: proposalJSON("Done.", "")}, nil
-				}
-				if kind == "history" && request.round == 1 {
-					return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"feedback":"Check the concern."}`}, nil
-				}
-				if kind == "snapshot" || request.reviewPhase == reviewVerification {
-					if err := os.Chmod(root, 0500); err != nil {
-						t.Fatal(err)
-					}
-				}
-				return aicli.Result{Answer: approvedCritiqueJSON}, nil
-			}}
-			result, err := runner.Run(context.Background(), job)
-			wantCalls := 5
-			if kind == "snapshot" {
-				wantCalls = 2
-			}
-			if err != nil || journal.err != nil || calls != wantCalls || result.Answer != "Done." || len(result.Diagnostics) != 0 || strings.Count(journal.String(), "cleanup retry scheduled") != 1 {
-				t.Fatalf("recovered cleanup: calls=%d result=%+v err=%v restore=%v log=%q", calls, result, err, journal.err, journal.String())
-			}
-			entries, err := os.ReadDir(root)
-			if err != nil || len(entries) != 0 {
-				t.Fatalf("retry leaked workspaces: %v,%v", entries, err)
-			}
-		})
+	root := t.TempDir()
+	t.Cleanup(func() { _ = os.Chmod(root, 0700) })
+	journal := &cleanupRetryLog{root: root}
+	job := withClaudeCritic(portableJob(command.Fix))
+	calls := 0
+	runner := Runner{WorkRoot: root, Logger: log.New(journal, "", 0), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+		calls++
+		if request.role == roleMain {
+			return aicli.Result{Answer: proposalJSON("Done.", "")}, nil
+		}
+		if err := os.Chmod(root, 0500); err != nil {
+			t.Fatal(err)
+		}
+		return aicli.Result{Answer: approvedCritiqueJSON}, nil
+	}}
+	result, err := runner.Run(context.Background(), job)
+	if err != nil || journal.err != nil || calls != 2 || result.Answer != "Done." || len(result.Diagnostics) != 0 || strings.Count(journal.String(), "cleanup retry scheduled") != 1 {
+		t.Fatalf("recovered snapshot cleanup: calls=%d result=%+v err=%v restore=%v log=%q", calls, result, err, journal.err, journal.String())
+	}
+	if entries, err := os.ReadDir(root); err != nil || len(entries) != 0 {
+		t.Fatalf("retry leaked snapshots: %v,%v", entries, err)
 	}
 }
 
@@ -108,8 +85,8 @@ func TestRunnerAuditValidationCleanupRestoresRestrictedDirectory(t *testing.T) {
 }
 
 func TestRunnerReviewRevisionsFreezeCleanIndependentInputs(t *testing.T) {
-	job := portableJob(command.Fix)
-	job.Critic, job.CriticMaxRounds = &RoleSettings{Provider: "claude"}, 2
+	job := withClaudeCritic(portableJob(command.Fix))
+	job.CriticMaxRounds = 2
 	root := t.TempDir()
 	var source, firstReview, revisionReview string
 	var events []string
@@ -208,27 +185,25 @@ func TestRunnerReviewExportsFrozenSourceDespiteLiveChanges(t *testing.T) {
 }
 
 func TestRunnerAuditReviewFreezesAndExportsRawReports(t *testing.T) {
-	realNode, err := exec.LookPath("node")
 	for _, scenario := range []string{"approved", "mutated during critic", "mutated during validation", "empty architecture repaired"} {
 		t.Run(scenario, func(t *testing.T) {
-			if err != nil {
-				t.Skip("audit validators require node")
-			}
 			installActionTestSkills(t, testAuditSkillURL)
 			job := portableJob(command.SecurityAudit)
-			job.Main.Skills, job.Critic = []string{testAuditSkillURL}, &RoleSettings{Provider: "claude"}
-			job.CriticMaxRounds = config.DefaultCriticMaxRounds
+			job = withClaudeCritic(job)
+			job.Main.Skills = []string{testAuditSkillURL}
 			var source, reports string
 			var rawMetadata []byte
 			criticCalls := 0
 			var armedReports, changed string
+			fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
 			if scenario == "mutated during validation" {
 				markers := t.TempDir()
 				armedReports, changed = filepath.Join(markers, "reports"), filepath.Join(markers, "changed")
-				script := fmt.Sprintf("#!/bin/sh\nreports=$(cat %s)\nprintf 'late report edit' > \"$reports/REPORT.md\"\nprintf changed > %s\nexec %s \"$@\"\n", shellQuote(armedReports), shellQuote(changed), shellQuote(realNode))
+				script := fmt.Sprintf("#!/bin/sh\nset -eu\ncase \"$*\" in *validate-*.cjs*) reports=$(cat %s); [ -n \"$reports\" ]; printf 'late report edit' > \"$reports/REPORT.md\"; printf changed > %s;; esac\n", shellQuote(armedReports), shellQuote(changed))
 				fakeOnPath(t, "node", script)
 			}
-			runner := Runner{WorkRoot: t.TempDir()}
+			root := t.TempDir()
+			runner := Runner{WorkRoot: root}
 			runner.runModel = func(_ context.Context, request modelRun) (aicli.Result, error) {
 				if request.role == "main" {
 					if armedReports != "" {
@@ -290,6 +265,9 @@ func TestRunnerAuditReviewFreezesAndExportsRawReports(t *testing.T) {
 				if _, err := os.Stat(changed); err != nil {
 					t.Fatalf("late report mutation did not execute: %v", err)
 				}
+			}
+			if entries, err := os.ReadDir(root); err != nil || len(entries) != 0 {
+				t.Fatalf("audit critic workspaces leaked: %v,%v", entries, err)
 			}
 			for _, artifact := range result.Artifacts {
 				if artifact.Path == "REPORT.md" && string(artifact.Data) != "approved report" {

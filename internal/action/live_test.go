@@ -3,6 +3,7 @@ package action
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -134,6 +135,15 @@ func TestLiveFixPublishesBranch(t *testing.T) {
 	remote, err := bot.Branch(ctx, liveFixFork, branch)
 	if err != nil || remote.Name != branch || remote.Commit.SHA != sha {
 		t.Fatalf("live fix branch does not match recorded SHA: %v", err)
+	}
+	var pushedFile struct{ Type, Encoding, Content string }
+	status, err := liveFixAPIRepo(ctx, fixture.botToken, liveFixFork, http.MethodGet, "/contents/minion-live-fix-"+id[:12]+".txt?ref="+sha, &pushedFile)
+	if err != nil || status != http.StatusOK || pushedFile.Type != "file" || pushedFile.Encoding != "base64" {
+		t.Fatalf("read pushed fix bytes: HTTP%d,%v", status, err)
+	}
+	pushedBytes, err := base64.StdEncoding.DecodeString(pushedFile.Content)
+	if err != nil || string(pushedBytes) != "Minion live fix test fixture.\n" {
+		t.Fatalf("pushed fixture bytes differ: %q,%v", pushedBytes, err)
 	}
 	if _, err := owner.Branch(ctx, liveFixRepository, branch); !liveFixNotFound(err) {
 		t.Fatalf("base repository unexpectedly received a fix branch: %v", err)

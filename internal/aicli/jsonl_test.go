@@ -31,7 +31,7 @@ func TestJSONLFramingAndFirstLimit(t *testing.T) {
 		init JSONL
 		data string
 	}{
-		{"bytes", JSONL{total: maxOutputBytes}, "x"},
+		{"bytes", JSONL{total: maxJSONLOutputBytes}, "x"},
 		{"events", JSONL{events: maxEvents}, "{}\n"},
 		{"line", JSONL{}, strings.Repeat("x", MaxEventBytes+1) + "\n{}\n"},
 	} {
@@ -66,9 +66,9 @@ func TestJSONLAcceptsExactTotalLimits(t *testing.T) {
 				failures++
 			}}
 			if kind == "bytes" {
-				output.total = maxOutputBytes - 1
+				output.total = maxJSONLOutputBytes - 1
 				_, _ = output.Write([]byte("\n"))
-				if output.total != maxOutputBytes || dispatched != 0 {
+				if output.total != maxJSONLOutputBytes || dispatched != 0 {
 					t.Fatalf("bytes=%d dispatched=%d", output.total, dispatched)
 				}
 			} else {

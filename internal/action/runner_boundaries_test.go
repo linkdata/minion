@@ -18,6 +18,7 @@ import (
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
+	"github.com/linkdata/minion/internal/gitwork"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/workspace"
 )
@@ -236,7 +237,7 @@ func TestRunnerMissingConfiguredReadGrantIsNotTerminalBeforeModels(t *testing.T)
 	}
 }
 
-func TestRunnerReviewsAndPublishesNormalizedAnswer(t *testing.T) {
+func TestRunnerStripsNULBeforeCriticAndResult(t *testing.T) {
 	for _, critic := range []bool{false, true} {
 		t.Run(fmt.Sprint(critic), func(t *testing.T) {
 			job := portableJob(command.Comment)
@@ -296,7 +297,7 @@ func TestRunnerCancellationBeforeDispatchRecordsNoCall(t *testing.T) {
 		return next(ctx, request)
 	}
 	result, err := runner.Run(ctx, job)
-	if !errors.Is(err, context.Canceled) || calls != 0 || len(result.Calls) != 0 || result.Answer != "" {
+	if !errors.Is(err, context.Canceled) || errors.Is(err, monitor.ErrTerminalJob) || calls != 0 || len(result.Calls) != 0 || result.Answer != "" {
 		t.Fatalf("undispatched cancellation: native=%d recorded=%d answer=%q error=%v", calls, len(result.Calls), result.Answer, err)
 	}
 }
@@ -306,7 +307,7 @@ func TestRunnerJobValidationRejectsMetadataAliasBeforeModels(t *testing.T) {
 	job.Source.Files = []workspace.File{{Path: "GIT~1/x", Mode: workspace.Regular}}
 	runner := Runner{WorkRoot: t.TempDir(), runModel: forbidModel(t)}
 	result, err := runner.Run(context.Background(), job)
-	if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "unsafe fix source path") || len(result.Calls) != 0 {
+	if !errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, gitwork.ErrUnsupportedSource) || !strings.Contains(err.Error(), "unsafe fix source path") || len(result.Calls) != 0 {
 		t.Fatalf("unsupported source was retryable: %v", err)
 	}
 }
@@ -363,6 +364,7 @@ func TestRunnerReportsOwnedAndCriticCleanupFailures(t *testing.T) {
 }
 
 func TestRunnerRefusesRenderedReportOverflowBeforeCritic(t *testing.T) {
+	fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
 	installActionTestSkills(t, testAuditSkillURL)
 	job := withClaudeCritic(portableJob(command.SecurityAudit))
 	job.CriticMaxRounds = 1

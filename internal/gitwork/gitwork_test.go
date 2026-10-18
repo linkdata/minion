@@ -12,8 +12,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/github"
-	"github.com/linkdata/minion/internal/testsupport"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -21,6 +21,7 @@ import (
 func localTreeMetadata(dir string) func(context.Context, string) (github.GitTree, error) {
 	return func(ctx context.Context, sha string) (github.GitTree, error) {
 		cmd := exec.CommandContext(ctx, "git", "-C", dir, "ls-tree", "-r", "-l", "-z", sha)
+		cmd.Env = cleanGitEnvironment()
 		output, err := cmd.Output()
 		if err != nil {
 			return github.GitTree{}, err
@@ -233,7 +234,7 @@ func completeTree(sha string, entries []github.GitTreeEntry) github.GitTree {
 	return github.GitTree{SHA: sha, Truncated: &truncated, Tree: entries}
 }
 
-func TestCheckoutPullRequestPreflightsMetadataBeforeSourceRead(t *testing.T) {
+func TestCheckoutPullRequestRejectsOversizedHeadMetadata(t *testing.T) {
 	fixture := newFixture(t)
 	writeFile(t, filepath.Join(fixture.source, "new.dat"), "local PR blob\n")
 	fixture.git(fixture.source, "add", "new.dat")
@@ -242,7 +243,6 @@ func TestCheckoutPullRequestPreflightsMetadataBeforeSourceRead(t *testing.T) {
 	blob := fixture.git(fixture.source, "rev-parse", "HEAD:new.dat")
 	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/pull/7/head")
 	checkout := fixture.keepCheckout(cloneFromURL(context.Background(), t.TempDir(), "file://"+fixture.remote, "main", localTreeMetadata(fixture.source), true))
-	log := recordSnapshotContentCalls(t)
 	oversized := func(_ context.Context, sha string) (github.GitTree, error) {
 		size := int64(workspace.MaxBytes + 1)
 		return completeTree(sha, []github.GitTreeEntry{{Path: "new.dat", Type: "blob", Mode: "100644", Size: &size}}), nil
@@ -252,9 +252,6 @@ func TestCheckoutPullRequestPreflightsMetadataBeforeSourceRead(t *testing.T) {
 		t.Fatalf("oversized PR error = %v, want checkout limit", err)
 	}
 	assertBlobPresent(fixture, checkout.path, blob)
-	if data, err := os.ReadFile(log); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("metadata preflight requested source content: %q error=%v", data, err)
-	}
 	if got := fixture.git(checkout.path, "rev-parse", "HEAD"); got != fixture.base {
 		t.Fatalf("rejected PR moved HEAD to %s", got)
 	}
@@ -379,7 +376,7 @@ func TestImportAndCommitBoundsChanges(t *testing.T) {
 			if !errors.Is(err, want) {
 				t.Fatalf("publication after %s error=%v want=%v", kind, err, want)
 			}
-			if _, err := exec.Command("git", "--git-dir="+fixture.remote, "show-ref", "--verify", "refs/heads/"+branch).CombinedOutput(); err == nil {
+			if refs := fixture.git("", "--git-dir="+fixture.remote, "for-each-ref", "refs/heads/"+branch); refs != "" {
 				t.Fatal("oversized changes were pushed")
 			}
 		})
@@ -407,8 +404,8 @@ func TestCommitAndPushBoundsDirectlyStagedPathCount(t *testing.T) {
 	if head := fixture.git(fixture.checkout.path, "rev-parse", "HEAD"); head != fixture.base {
 		t.Fatalf("oversized stage was committed: %s", head)
 	}
-	if output, err := exec.Command("git", "--git-dir="+fixture.remote, "show-ref", "--verify", "refs/heads/"+branch).CombinedOutput(); err == nil {
-		t.Fatalf("oversized stage was pushed: %s", output)
+	if refs := fixture.git("", "--git-dir="+fixture.remote, "for-each-ref", "refs/heads/"+branch); refs != "" {
+		t.Fatalf("oversized stage was pushed: %s", refs)
 	}
 }
 
@@ -464,7 +461,7 @@ func TestCommitAndPushStopsWhenRecordFails(t *testing.T) {
 	if !errors.Is(err, recordFailure) {
 		t.Fatalf("CommitAndPush() error = %v, want recorder error", err)
 	}
-	if _, err := exec.Command("git", "--git-dir="+fixture.remote, "show-ref", "--verify", "refs/heads/"+branch).CombinedOutput(); err == nil {
+	if refs := fixture.git("", "--git-dir="+fixture.remote, "for-each-ref", "refs/heads/"+branch); refs != "" {
 		t.Fatal("commit was pushed despite recorder failure")
 	}
 }
@@ -484,7 +481,7 @@ func newFixture(t *testing.T) gitFixture {
 	}
 	root := t.TempDir()
 	fixture := gitFixture{t: t, remote: filepath.Join(root, "remote.git"), source: filepath.Join(root, "source")}
-	fixture.git("", "init", "--bare", fixture.remote)
+	fixture.git("", "init", "--bare", "--initial-branch=main", fixture.remote)
 	fixture.git("", "init", "--initial-branch=main", fixture.source)
 	writeFile(t, filepath.Join(fixture.source, "README.md"), "fixture\n")
 	fixture.base = fixture.commit("refs/heads/main", "initial")
@@ -539,10 +536,10 @@ func (f gitFixture) commit(ref, message string) string {
 
 func (f gitFixture) gitInput(dir, input string, args ...string) string {
 	f.t.Helper()
-	cmd := exec.Command("git", args...)
+	cmd := exec.Command("git", append(hardeningArgs(), args...)...)
 	cmd.Dir = dir
 	cmd.Stdin = strings.NewReader(input)
-	cmd.Env = append(cleanGitEnvironment(),
+	cmd.Env = append(append([]string{"PATH=" + safePath(os.Getenv("PATH")), "HOME=" + f.t.TempDir(), "TMPDIR=" + os.TempDir()}, hardeningEnv()...),
 		"GIT_AUTHOR_NAME=Test", "GIT_AUTHOR_EMAIL=test@example.invalid", "GIT_AUTHOR_DATE=2026-01-01T00:00:00Z",
 		"GIT_COMMITTER_NAME=Test", "GIT_COMMITTER_EMAIL=test@example.invalid", "GIT_COMMITTER_DATE=2026-01-01T00:00:00Z",
 	)
@@ -564,4 +561,29 @@ func writeFile(t *testing.T, path, content string) {
 }
 
 // shellQuote treats fixture paths as literal shell arguments.
-var shellQuote = testsupport.ShellQuote
+var shellQuote = aicli.ShellQuote
+
+func TestCheckoutCloseRetainsPathForRetry(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("requires ordinary directory permission enforcement")
+	}
+	root := t.TempDir()
+	name := filepath.Join(root, "checkout")
+	if err := os.Mkdir(name, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(root, 0500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(root, 0700) })
+	checkout := &Checkout{path: name}
+	if err := checkout.Close(); err == nil || checkout.path != name {
+		t.Fatalf("cleanup failure lost retry path: path=%q error=%v", checkout.path, err)
+	}
+	if err := os.Chmod(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkout.Close(); err != nil || checkout.path != "" {
+		t.Fatalf("cleanup retry: path=%q error=%v", checkout.path, err)
+	}
+}

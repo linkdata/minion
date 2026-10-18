@@ -1,7 +1,6 @@
 package codexcli
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -17,28 +16,15 @@ import (
 // Its zero value is ready to use. Calls must be serialized, followed by Close.
 // Native transcripts retain the CLI's normal private persistence policy.
 type Session struct {
-	bound, used, reset, skillsReady bool
-	workspace, binary, home, output string
-	homeEnv, overrideEnv            string
-	writable                        bool
-	settings                        config.CodexConfig
-	runtimeDir, embeddedDir         string
-	skillPaths                      []string
-	threadID                        string
-	accounting                      usageSession
-}
-
-// Run executes one task in a new conversation and removes its scratch paths.
-// Use Session.Run to continue an action conversation across invocations.
-func Run(ctx context.Context, dir, prompt string, writable bool, outputDir string, settings config.CodexConfig) (result aicli.Result, runError error) {
-	var session Session
-	defer func() {
-		if err := session.Close(); err != nil {
-			result.Answer = ""
-			runError = errors.Join(runError, err)
-		}
-	}()
-	return session.Run(ctx, dir, prompt, writable, outputDir, settings)
+	bound, used, reset, skillsReady   bool
+	workspace, binary, home, output   string
+	homeEnv, overrideEnv              string
+	writable                          bool
+	settings                          config.CodexConfig
+	runtimeDir, cacheDir, embeddedDir string
+	skillPaths                        []string
+	threadID                          string
+	accounting                        usageSession
 }
 
 // NewConversation makes the next invocation fresh, at the same stable paths.
@@ -110,12 +96,12 @@ func (s *Session) prepare(workspace, binary, home, output string, writable bool,
 	if err := writeRuntimeFile(filepath.Join(s.runtimeDir, instructionRoot), nil); err != nil {
 		return fmt.Errorf("codex exec: mark isolated project root: %w", err)
 	}
-	cacheDir := filepath.Join(s.runtimeDir, "go-build")
-	if err := os.Mkdir(cacheDir, 0700); err != nil {
+	s.cacheDir = filepath.Join(s.runtimeDir, "go-build")
+	if err := os.Mkdir(s.cacheDir, 0700); err != nil {
 		if !errors.Is(err, os.ErrExist) {
 			return fmt.Errorf("codex exec: create build cache: %w", err)
 		}
-		info, statErr := os.Lstat(cacheDir)
+		info, statErr := os.Lstat(s.cacheDir)
 		if statErr != nil {
 			return fmt.Errorf("codex exec: inspect build cache: %w", statErr)
 		}

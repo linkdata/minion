@@ -74,8 +74,8 @@ func Clone(ctx context.Context, workRoot, repo, defaultBranch string, lookupTree
 	return cloneFromURL(ctx, workRoot, url, defaultBranch, lookupTree, checkoutFiles)
 }
 
-// ClonePullRequest pins the verified PR head without materializing its worktree. The base tip is fetched
-// for merge-base discovery without validating or materializing its unused tree.
+// ClonePullRequest pins the verified PR head without materializing its worktree. Full base history
+// is cloned for comparison and model use, without validating or materializing the unused base tip tree.
 func ClonePullRequest(ctx context.Context, workRoot, repo string, number int, baseRef, expectedHeadSHA string, lookupTree func(context.Context, string) (github.GitTree, error)) (*Checkout, error) {
 	url, err := repositoryURL(repo)
 	if err != nil {
@@ -172,11 +172,10 @@ func (c *Checkout) Close() error {
 	if c == nil || c.path == "" {
 		return nil
 	}
-	path := c.path
-	c.path = ""
-	if err := cleanup.RemoveAll(path); err != nil {
+	if err := cleanup.RemoveAll(c.path); err != nil {
 		return fmt.Errorf("remove checkout: %w", err)
 	}
+	c.path = ""
 	return nil
 }
 
@@ -554,18 +553,10 @@ func cleanGitEnvironment() []string {
 
 // hardeningEnv disables inherited Git configuration, replacement objects and prompts.
 func hardeningEnv() []string {
-	return []string{
-		"GIT_TERMINAL_PROMPT=0",
-		"GIT_ASKPASS=/bin/false",
-		"GIT_CONFIG_NOSYSTEM=1",
-		"GIT_CONFIG_GLOBAL=/dev/null",
-		"GIT_ATTR_NOSYSTEM=1",
-		"GIT_NO_REPLACE_OBJECTS=1",
-		"GIT_NO_LAZY_FETCH=1",
-		"GCM_INTERACTIVE=never",
-		"GH_PROMPT_DISABLED=1",
-		"LC_ALL=C",
-	}
+	return append(aicli.ModelGitEnvironment(),
+		"GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=/bin/false",
+		"GCM_INTERACTIVE=never", "GH_PROMPT_DISABLED=1", "LC_ALL=C",
+	)
 }
 
 // safePath excludes checkout-relative command lookup, including credential helpers.

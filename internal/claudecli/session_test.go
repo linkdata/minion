@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -313,5 +314,142 @@ func TestSessionRequiresItsOwnRootIdentity(t *testing.T) {
 				t.Fatalf("root identity: %+v,%v", output.result, output.err)
 			}
 		})
+	}
+}
+
+func TestSessionIncompleteUsageDoesNotBecomeNextCallUsage(t *testing.T) {
+	for _, late := range []bool{false, true} {
+		t.Run(map[bool]string{false: "missing aggregate", true: "late delegate"}[late], func(t *testing.T) {
+			first := `{"type":"result","subtype":"success","result":"done","usage":{"input_tokens":3,"cache_creation_input_tokens":5,"cache_read_input_tokens":7,"output_tokens":11}}`
+			if late {
+				first = successfulResult + "\n" + strings.Replace(assistantUsageEvent("late", 20, 0, 0, 5), `"parent_tool_use_id":null`, `"parent_tool_use_id":"helper"`, 1)
+			}
+			const cumulative = `{"type":"result","subtype":"success","result":"done","modelUsage":{"main":{"inputTokens":93,"cacheCreationInputTokens":0,"cacheReadInputTokens":7,"outputTokens":100}}}`
+			const later = `{"type":"result","subtype":"success","result":"done","modelUsage":{"main":{"inputTokens":97,"cacheCreationInputTokens":0,"cacheReadInputTokens":7,"outputTokens":106}}}`
+			fakeExecutable(t, "claude", `n=0
+[ ! -f "$0.count" ] || n=$(cat "$0.count")
+n=$((n+1)); printf '%s' "$n" > "$0.count"
+cat >/dev/null
+case "$n" in
+1) printf '%s\n' '`+first+`' ;;
+2) printf '%s\n' '`+assistantUsageEvent("current", 4, 0, 0, 6)+`' '`+cumulative+`' ;;
+3) printf '%s\n' '`+later+`' ;;
+esac
+`)
+			var session Session
+			t.Cleanup(func() {
+				if err := session.Close(); err != nil {
+					t.Error(err)
+				}
+			})
+			source := t.TempDir()
+			initial, err := session.Run(context.Background(), source, "first", false, "", config.ClaudeConfig{})
+			if err != nil || initial.UsageComplete {
+				t.Fatalf("expected usable incomplete first call: %+v,%v", initial, err)
+			}
+			second, err := session.Run(context.Background(), source, "second", false, "", config.ClaudeConfig{})
+			want := usage.Tokens{Input: 4, Output: 6}
+			if err != nil || second.UsageComplete || second.Tokens != want {
+				t.Fatalf("prior usage leaked into next call: %+v,%v", second, err)
+			}
+			third, err := session.Run(context.Background(), source, "third", false, "", config.ClaudeConfig{})
+			if err != nil || !third.UsageComplete || third.Tokens != want {
+				t.Fatalf("fresh cumulative baseline not recovered: %+v,%v", third, err)
+			}
+		})
+	}
+}
+
+func TestSessionNativeTempRecreatedBeforeResume(t *testing.T) {
+	fakeExecutable(t, "claude", `cat >/dev/null
+[ -d "$CLAUDE_CODE_TMPDIR" ] && [ ! -L "$CLAUDE_CODE_TMPDIR" ] || exit 4
+printf '%s\n' '`+successfulResult+`'
+`)
+	var session Session
+	t.Cleanup(func() {
+		if err := session.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	source := t.TempDir()
+	if _, err := session.Run(context.Background(), source, "first", false, "", config.ClaudeConfig{}); err != nil {
+		t.Fatal(err)
+	}
+	tmp := filepath.Join(session.runtimeDir, "tmp")
+	outside := t.TempDir()
+	canary := filepath.Join(outside, "canary")
+	if err := os.WriteFile(canary, []byte("unchanged"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(tmp); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, tmp); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := session.Run(context.Background(), source, "resume", false, "", config.ClaudeConfig{}); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(canary); err != nil || string(data) != "unchanged" {
+		t.Fatalf("native temp followed planted target: %q,%v", data, err)
+	}
+	if err := os.WriteFile(filepath.Join(tmp, "plant"), []byte("old"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := session.Run(context.Background(), source, "again", false, "", config.ClaudeConfig{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(tmp, "plant")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("native temp plant survived: %v", err)
+	}
+}
+
+func TestSessionContradictedCumulativeCannotBecomeBaseline(t *testing.T) {
+	native := func(input, cached, output int64) string {
+		return fmt.Sprintf(`{"type":"result","subtype":"success","result":"done","modelUsage":{"main":{"inputTokens":%d,"cacheCreationInputTokens":0,"cacheReadInputTokens":%d,"outputTokens":%d}}}`, input-cached, cached, output)
+	}
+	for _, test := range []struct {
+		name          string
+		input, output int64
+	}{
+		{"regressed below baseline", 14, 10},
+		{"omitted current messages", 16, 12},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fakeExecutable(t, "claude", `n=0
+[ ! -f "$0.count" ] || n=$(cat "$0.count")
+n=$((n+1)); printf '%s' "$n" > "$0.count"
+cat >/dev/null
+case "$n" in
+1) printf '%s\n' '`+successfulResult+`' ;;
+2) printf '%s\n' '`+assistantUsageEvent("second", 4, 0, 0, 6)+`' '`+native(test.input, 7, test.output)+`' ;;
+3) printf '%s\n' '`+assistantUsageEvent("third", 2, 0, 0, 3)+`' '`+native(25, 7, 25)+`' ;;
+4) printf '%s\n' '`+native(27, 7, 28)+`' ;;
+esac
+`)
+			var session Session
+			t.Cleanup(func() {
+				if err := session.Close(); err != nil {
+					t.Error(err)
+				}
+			})
+			source := t.TempDir()
+			for call, want := range []usage.Tokens{{Input: 15, CachedInput: 7, Output: 11}, {Input: 4, Output: 6}, {Input: 2, Output: 3}, {Input: 2, Output: 3}} {
+				result, err := session.Run(context.Background(), source, "task", false, "", config.ClaudeConfig{})
+				complete := call == 0 || call == 3
+				if err != nil || result.Tokens != want || result.UsageComplete != complete {
+					t.Fatalf("call%d = %+v,%v want %+v complete=%v", call+1, result, err, want, complete)
+				}
+			}
+		})
+	}
+}
+
+func TestLateCoveredBlockKeepsExactCumulativeBaseline(t *testing.T) {
+	output := jsonlOutput{}
+	writeChunks(t, &output, assistantUsageEvent("covered", 3, 5, 7, 2)+"\n"+successfulResult+"\n"+assistantUsageEvent("covered", 3, 5, 7, 11)+"\n")
+	output.finish()
+	if output.err != nil || !output.result.UsageComplete || !output.hasCumulative || output.cumulative != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) {
+		t.Fatalf("covered duplicate invalidated exact baseline: %+v,%v", output, output.err)
 	}
 }

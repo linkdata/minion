@@ -96,7 +96,7 @@ func TestCommentCommandReportsIssueAndPullRequest(t *testing.T) {
 			if !strings.Contains(published, wantHead) || !strings.Contains(published, "Report") || !strings.Contains(published, job.Marker()) || !strings.Contains(published, "\n> @otherbot fix") {
 				t.Fatalf("unsafe or incomplete comment: %q", published)
 			}
-			if _, err := command.ParseForLogin(published, "otherbot"); !errors.Is(err, command.ErrNoCommand) {
+			if _, err := command.ParseForLoginCommands(published, "otherbot", defaultActionTestCommands); !errors.Is(err, command.ErrNoCommand) {
 				t.Fatalf("model output became a command: %v", err)
 			}
 		})

@@ -142,7 +142,7 @@ func TestRunAIWithoutCriticSelectsMain(t *testing.T) {
 				return aicli.Result{Answer: provider + " result"}, nil
 			}}
 			job := Job{Action: command.Fix, Main: RoleSettings{Provider: provider}}
-			answer, err := runner.runAI(context.Background(), job, "checkout", "task", "reports", nil)
+			answer, err := runner.runAI(context.Background(), job, "checkout", "task", "reports", nil, nil)
 			if err != nil || answer != provider+" result" || len(calls) != 1 || calls[0] != provider {
 				t.Fatalf("runAI() = %q, %v; calls = %v", answer, err, calls)
 			}
@@ -257,7 +257,7 @@ func TestRunAIRevisionPreservesWorkAndBoundaries(t *testing.T) {
 				}
 				return aicli.Result{Answer: approvedCritiqueJSON}, nil
 			}
-			answer, err := e.runAI(ctx, job, dir, task, outputDir, nil)
+			answer, err := e.runAI(ctx, job, dir, task, outputDir, nil, nil)
 			if err != nil || answer != "revised proposal" || calls != 5 {
 				t.Fatalf("runAI() = %q, %v; calls = %d", answer, err, calls)
 			}
@@ -311,7 +311,7 @@ func TestRunAIFreshReviewFindingsUseRemainingRounds(t *testing.T) {
 		}
 		return aicli.Result{Answer: approvedCritiqueJSON}, nil
 	}
-	answer, err := e.runAI(context.Background(), job, t.TempDir(), task, "", nil)
+	answer, err := e.runAI(context.Background(), job, t.TempDir(), task, "", nil, nil)
 	if err != nil || answer != "candidate 3" || len(calls) != 8 {
 		t.Fatalf("runAI() = %q, %v; calls=%+v", answer, err, calls)
 	}
@@ -354,7 +354,7 @@ func TestRunAIVerificationRejectionFeedsNextRevision(t *testing.T) {
 		return aicli.Result{Answer: approvedCritiqueJSON}, nil
 	}}
 	job := Job{Main: RoleSettings{Provider: "codex"}, Critic: &RoleSettings{Provider: "claude"}, CriticMaxRounds: 3}
-	answer, err := runner.runAI(context.Background(), job, t.TempDir(), "selected task", "", nil)
+	answer, err := runner.runAI(context.Background(), job, t.TempDir(), "selected task", "", nil, nil)
 	want := []string{"main/1/", "critic/1/full", "main/2/", "critic/2/verification", "main/3/", "critic/3/verification", "critic/3/full"}
 	if err != nil || answer != "candidate 3" || len(calls) != len(want) {
 		t.Fatalf("verification rejection: answer=%q calls=%+v error=%v", answer, calls, err)
@@ -415,7 +415,7 @@ func TestRunAIFailsWithoutReturningProposal(t *testing.T) {
 				}
 				return aicli.Result{Answer: proposalJSON(answer, "Private rationale")}, nil
 			}
-			answer, err := e.runAI(ctx, job, t.TempDir(), "task", "", nil)
+			answer, err := e.runAI(ctx, job, t.TempDir(), "task", "", nil, nil)
 			if answer != "" || !errors.Is(err, tt.wantError) || calls != tt.wantCalls {
 				t.Fatalf("runAI() = %q, %v; calls = %d; want no answer, %v, %d calls", answer, err, calls, tt.wantError, tt.wantCalls)
 			}

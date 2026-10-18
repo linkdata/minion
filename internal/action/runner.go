@@ -61,7 +61,7 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			result.Answer, result.Changes = "", nil
 			resultErr = errors.Join(monitor.ErrTerminalJob, ctx.Err(), resultErr)
-		} else if ctx.Err() != nil && resultErr != nil {
+		} else if ctx.Err() != nil && resultErr != nil && !errors.Is(resultErr, monitor.ErrTerminalJob) {
 			resultErr = errors.Join(ctx.Err(), resultErr)
 		}
 		if job.Action == command.SecurityAudit && resultErr != nil {
@@ -111,11 +111,12 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 	// Keep source and context as siblings: native CLI socket paths are bounded.
 	source, err := os.MkdirTemp(workRoot, "minion-")
 	if err != nil {
-		return result, err
+		return result, preparationFailure("create source workspace", err)
 	}
 	owned := []string{source}
+	cleanupFailed := false
 	defer func() {
-		failed := false
+		failed := cleanupFailed
 		for _, dir := range owned {
 			if err := cleanup.RemoveAll(dir); err != nil {
 				failed = true
@@ -127,7 +128,7 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 	}()
 	contextDir, err := os.MkdirTemp(workRoot, ".minion-context-")
 	if err != nil {
-		return result, err
+		return result, preparationFailure("create context workspace", err)
 	}
 	owned = append(owned, contextDir)
 	if err := workspace.CheckRoot(source); err != nil {
@@ -150,7 +151,7 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 	if job.Action == command.Fix {
 		metadataDir, err := os.MkdirTemp(workRoot, ".minion-index-")
 		if err != nil {
-			return result, err
+			return result, preparationFailure("create private index", err)
 		}
 		owned = append(owned, metadataDir)
 		index, err = gitwork.NewOfflineIndex(ctx, metadataDir, source, job.Source.Files)
@@ -159,14 +160,14 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 			if errors.Is(err, gitwork.ErrUnsupportedSource) {
 				return result, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
 			}
-			return result, err
+			return result, preparationFailure("prepare private index", err)
 		}
 	}
 	outputDir := ""
 	if job.Action == command.SecurityAudit {
 		outputDir, err = os.MkdirTemp(workRoot, ".minion-reports-")
 		if err != nil {
-			return result, err
+			return result, preparationFailure("create report workspace", err)
 		}
 		owned = append(owned, outputDir)
 	}
@@ -177,23 +178,16 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 		if review != nil {
 			if err := review.close(); err != nil {
 				r.logf("critic snapshot cleanup retry scheduled job=%s attempt=%s", job.Identity.JobID, job.Identity.AttemptID)
-				if review.ownedSource {
+				if review.ownedSource && !slices.Contains(owned, review.source) {
 					owned = append(owned, review.source)
 				}
-				if review.outputDir != "" {
+				if review.outputDir != "" && !slices.Contains(owned, review.outputDir) {
 					owned = append(owned, review.outputDir)
 				}
 			}
 		}
 	}
 	defer closeReview()
-	defer func() {
-		if historyDir != "" {
-			if err := cleanup.RemoveAll(historyDir); err != nil {
-				r.logf("critic history cleanup retry scheduled job=%s attempt=%s", job.Identity.JobID, job.Identity.AttemptID)
-			}
-		}
-	}()
 	observe := configured.aroundModel
 	configured.aroundModel = func(ctx context.Context, request modelRun, next modelCall) (aicli.Result, error) {
 		if request.role == roleMain {
@@ -211,10 +205,7 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 				reviewCurrent = err == nil
 			}
 			if err != nil {
-				if ctx.Err() != nil {
-					return aicli.Result{}, ctx.Err()
-				}
-				return aicli.Result{}, fmt.Errorf("%w: freeze critic input: %w", monitor.ErrTerminalJob, err)
+				return aicli.Result{}, terminalUnlessCanceled(ctx, fmt.Errorf("freeze critic input: %w", err))
 			}
 			mapping := ""
 			if review.source != source {
@@ -272,20 +263,12 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 		}
 		if err == nil {
 			if verifyErr := repository.Verify(ctx); verifyErr != nil {
-				if ctx.Err() != nil {
-					err = ctx.Err()
-				} else {
-					err = fmt.Errorf("%w: supplied repository changed: %w", monitor.ErrTerminalJob, verifyErr)
-				}
+				err = fmt.Errorf("supplied repository changed: %w", verifyErr)
+			} else if reviewCurrent {
+				err = review.verify(ctx)
 			}
-		}
-		if err == nil && reviewCurrent {
-			if verificationErr := review.verify(ctx); verificationErr != nil {
-				if ctx.Err() != nil {
-					err = ctx.Err()
-				} else {
-					err = fmt.Errorf("%w: %w", monitor.ErrTerminalJob, verificationErr)
-				}
+			if err != nil {
+				err = terminalUnlessCanceled(ctx, err)
 			}
 		}
 		return call, err
@@ -303,13 +286,20 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 	if err != nil {
 		return result, fmt.Errorf("%w: action prompt: %w", monitor.ErrTerminalJob, err)
 	}
-	permissionFlag := ""
+	var tools auditTools
 	if job.Action == command.SecurityAudit {
-		if permissionFlag, err = checkAuditTools(ctx, contextDir, auditSkill); err != nil {
+		if tools, err = checkAuditTools(ctx, contextDir, auditSkill); err != nil {
 			return result, fmt.Errorf("audit prerequisites: %w", err)
 		}
 	}
-	answer, runErr := configured.runAI(ctx, job, source, prompt, outputDir, checkpointReview)
+	var sessions modelSessions
+	defer func() {
+		if err := sessions.close(); err != nil {
+			configured.logf("model session cleanup retry scheduled job=%s attempt=%s", job.Identity.JobID, job.Identity.AttemptID)
+			cleanupFailed = sessions.close() != nil
+		}
+	}()
+	answer, runErr := configured.runAI(ctx, job, source, prompt, outputDir, checkpointReview, &sessions)
 	if runErr != nil {
 		return result, runErr
 	}
@@ -342,7 +332,7 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 			return result, fmt.Errorf("%w: create audit validation directory: %w", monitor.ErrTerminalJob, err)
 		}
 		owned = append(owned, validationDir)
-		if answer, err = validateAuditFiles(ctx, files, validationDir, auditSkill, permissionFlag, job.Identity.Repository, source, job.Source.Head); err != nil {
+		if answer, err = validateAuditFiles(ctx, files, validationDir, auditSkill, tools, job.Identity.Repository, source, job.Source.Head); err != nil {
 			return result, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
 		}
 		if result.Artifacts, err = normalizeAuditArtifacts(files, job, auditSkill); err != nil {
@@ -634,4 +624,11 @@ func collectPartialAuditArtifacts(outputDir string, job Job, skill string) ([]wo
 		files = append(files, file)
 	}
 	return files, diagnostics
+}
+
+func terminalUnlessCanceled(ctx context.Context, err error) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
 }

@@ -20,11 +20,6 @@ func FakeOnPath(t *testing.T, name, script string) string {
 	return bin
 }
 
-// ShellQuote treats a fixture value as one literal POSIX shell argument.
-func ShellQuote(value string) string {
-	return aicli.ShellQuote(value)
-}
-
 // ModelGit uses plain Git with isolated scratch paths and the model's Git environment.
 func ModelGit(t *testing.T, dir string, args ...string) ([]byte, error) {
 	t.Helper()

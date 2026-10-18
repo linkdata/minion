@@ -268,7 +268,7 @@ func TestCommitAndPushRequiresValidatedDestination(t *testing.T) {
 	if head, err := fixture.checkout.head(ctx); err != nil || head != fixture.base {
 		t.Fatalf("invalid destination changed HEAD: %s, %v", head, err)
 	}
-	if err := exec.Command("git", "--git-dir="+fixture.remote, "show-ref", "--verify", "refs/heads/"+branch).Run(); err == nil {
+	if refs := fixture.git("", "--git-dir="+fixture.remote, "for-each-ref", "refs/heads/"+branch); refs != "" {
 		t.Fatal("invalid destination pushed a branch")
 	}
 	var recorded string

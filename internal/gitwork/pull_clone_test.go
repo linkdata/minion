@@ -208,7 +208,9 @@ func TestNewBranchRejectsInvalidNameBeforeGit(t *testing.T) {
 	if head := f.git(f.checkout.path, "rev-parse", "HEAD"); head != f.base {
 		t.Fatalf("invalid branch moved HEAD: %s", head)
 	}
-	if output, err := exec.Command("git", "-C", f.checkout.path, "symbolic-ref", "--quiet", "HEAD").Output(); err == nil || len(output) != 0 {
+	cmd := exec.Command("git", "-C", f.checkout.path, "symbolic-ref", "--quiet", "HEAD")
+	cmd.Env = cleanGitEnvironment()
+	if output, err := cmd.Output(); err == nil || len(output) != 0 {
 		t.Fatalf("invalid branch attached HEAD: %q, %v", output, err)
 	}
 }

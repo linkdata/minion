@@ -92,10 +92,12 @@ func gitFixtureRemote(t *testing.T, files ...workspace.File) (base, head, remote
 	}
 	root := t.TempDir()
 	source, remote := filepath.Join(root, "source"), filepath.Join(root, "remote.git")
+	scratch := t.TempDir()
+	env := append([]string{"PATH=" + os.Getenv("PATH"), "HOME=" + scratch, "TMPDIR=" + scratch, "LC_ALL=C", "GIT_TEMPLATE_DIR=/dev/null"}, aicli.ModelGitEnvironment()...)
 	git := func(args ...string) string {
 		t.Helper()
 		cmd := exec.Command(realGit, args...)
-		cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null")
+		cmd.Env = env
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("git %v: %s: %v", args, out, err)
@@ -122,7 +124,9 @@ func gitFixtureRemote(t *testing.T, files ...workspace.File) (base, head, remote
 	git("-C", source, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-m", "PR")
 	head = git("-C", source, "rev-parse", "HEAD")
 	git("-C", source, "push", remote, "HEAD:refs/pull/7/head")
-	wrapper := fmt.Sprintf("#!/bin/sh\nGIT_ALLOW_PROTOCOL=file exec %q -c %q \"$@\"\n", realGit, "url."+remote+".insteadOf=https://github.com/o/r.git")
+	rewrite := filepath.Join(root, "gitconfig")
+	git("config", "--file", rewrite, "url."+remote+".insteadOf", "https://github.com/o/r.git")
+	wrapper := fmt.Sprintf("#!/bin/sh\nGIT_ALLOW_PROTOCOL=file exec %s -c %s \"$@\"\n", shellQuote(realGit), shellQuote("include.path="+rewrite))
 	fakeOnPath(t, "git", wrapper)
 	return base, head, remote
 }
@@ -157,6 +161,9 @@ func modelGit(t *testing.T, dir string, args ...string) string {
 
 func assertModelRepository(t *testing.T, dir, head string) {
 	t.Helper()
+	if _, err := os.Lstat(filepath.Join(dir, ".git", "objects", "info", "alternates")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("model repository has object alternates: %v", err)
+	}
 	for _, check := range []struct {
 		args []string
 		want string
@@ -226,7 +233,7 @@ func attachRepository(t *testing.T, job *Job) {
 	}
 }
 
-var shellQuote = testsupport.ShellQuote
+var shellQuote = aicli.ShellQuote
 
 const privateRepositoryJSON = `{"id":1,"full_name":"o/r","owner":{"id":2,"login":"o"},"default_branch":"main","private":true,"visibility":"private"}`
 
@@ -278,6 +285,7 @@ func forbidModel(t *testing.T) modelCall {
 	}
 }
 
+// withClaudeCritic deliberately keeps the zero-valued strict nonblocking threshold.
 func withClaudeCritic(job Job) Job {
 	job.Critic = &RoleSettings{Provider: "claude"}
 	job.CriticMaxRounds = config.DefaultCriticMaxRounds

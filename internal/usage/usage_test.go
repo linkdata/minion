@@ -17,7 +17,7 @@ func testRecord() Record {
 	finished := started.Add(time.Minute)
 	return Record{
 		ID: "0123456789abcdef0123456789abcdef", JobID: "github:123", Repo: "linkdata/minion", User: "example",
-		Action: "review", Number: 1, Model: "example-model", StartedAt: started, FinishedAt: &finished,
+		Action: "review", Number: 1, Provider: "codex", Model: "example-model", StartedAt: started, FinishedAt: &finished,
 		Status: "succeeded", CodexCalls: 1, Tokens: Tokens{Input: 100, CachedInput: 80, Output: 20}, UsageComplete: true,
 	}
 }
@@ -124,6 +124,7 @@ func TestSaveRejectsInvalidRecords(t *testing.T) {
 		"running finish":          func(r *Record) { r.Status = "running" },
 		"negative calls":          func(r *Record) { r.CodexCalls = -1 },
 		"negative Claude calls":   func(r *Record) { r.ClaudeCalls = -1 },
+		"missing main provider":   func(r *Record) { r.Provider = "" },
 		"invalid main provider":   func(r *Record) { r.Provider = "unknown" },
 		"invalid critic provider": func(r *Record) { r.CriticProvider = "unknown" },
 		"negative input":          func(r *Record) { r.Tokens.Input = -1 },
@@ -162,9 +163,12 @@ func TestStoreProviderMetadata(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			for _, field := range []string{"provider", "critic_provider", "critic_model", "critic_effort", "claude_calls"} {
+			if !strings.Contains(string(data), `"provider":"codex"`) {
+				t.Fatalf("record is missing its main provider: %s", data)
+			}
+			for _, field := range []string{"critic_provider", "critic_model", "critic_effort", "claude_calls"} {
 				if strings.Contains(string(data), `"`+field+`"`) {
-					t.Fatalf("legacy record contains unexpected field %s: %s", field, data)
+					t.Fatalf("single-provider record contains unexpected field %s: %s", field, data)
 				}
 			}
 		}
@@ -184,6 +188,7 @@ func TestReadAllRejectsMalformedRecords(t *testing.T) {
 	for name, content := range map[string]string{
 		"bad JSON":         "{",
 		"missing fields":   "{}",
+		"missing provider": strings.Replace(string(valid), `"provider":"codex",`, "", 1),
 		"trailing data":    string(valid) + " {}",
 		"unknown field":    strings.TrimSuffix(string(valid), "}") + `,"typo":1}`,
 		"wrong ID":         strings.ReplaceAll(string(valid), record.ID, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),

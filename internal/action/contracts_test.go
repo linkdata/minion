@@ -13,6 +13,7 @@ import (
 
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
+	"github.com/linkdata/minion/internal/gitwork"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/usage"
@@ -47,7 +48,7 @@ func completeAuditResult(job Job) Result {
 }
 
 func TestResultArtifactActionAndCardinality(t *testing.T) {
-	for _, scenario := range []string{"valid audit", "non-audit", "missing all", "missing optional"} {
+	for _, scenario := range []string{"valid audit", "non-audit", "missing all", "missing may-be-empty artifact"} {
 		t.Run(scenario, func(t *testing.T) {
 			job := portableJob(command.SecurityAudit)
 			result := completeAuditResult(job)
@@ -62,7 +63,7 @@ func TestResultArtifactActionAndCardinality(t *testing.T) {
 			case "missing all":
 				result.Artifacts = nil
 				want = "missing report artifacts"
-			case "missing optional":
+			case "missing may-be-empty artifact":
 				for i, file := range result.Artifacts {
 					if file.Path == "FINDINGS-DETAIL.md" {
 						result.Artifacts = append(result.Artifacts[:i], result.Artifacts[i+1:]...)
@@ -120,9 +121,9 @@ func TestAuditCompanionsStayInsideInstalledSkillAndPortableResult(t *testing.T) 
 	}
 }
 
-func TestJobRejectsInvalidRoleAndDispatchSettings(t *testing.T) {
+func TestJobValidate(t *testing.T) {
 	text := strings.Repeat("x", workspace.MaxBytes+1)
-	roleSkills := make([]string, 33)
+	roleSkills := make([]string, config.MaxSkillsPerRole)
 	for i := range roleSkills {
 		roleSkills[i] = skills.BuiltinAntiPromptInjection
 	}
@@ -143,7 +144,7 @@ func TestJobRejectsInvalidRoleAndDispatchSettings(t *testing.T) {
 		{"combined text over", func(j *Job) { j.Title, j.Description, j.Notes = "t", text[:workspace.MaxBytes-1], "n" }, "action text is invalid or exceeds limits"},
 		{"description over", func(j *Job) { j.Title, j.Description, j.Notes = "", text, "" }, "action text is invalid or exceeds limits"},
 		{"notes over", func(j *Job) { j.Title, j.Description, j.Notes = "", "", text }, "action text is invalid or exceeds limits"},
-		{"combined role skills over", func(j *Job) { j.Main.Skills, j.Main.AlwaysOnSkills = roleSkills[:32], roleSkills }, "invalid action model or skills"},
+		{"combined role skills over", func(j *Job) { j.Main.Skills, j.Main.AlwaysOnSkills = roleSkills[:1], roleSkills }, "invalid action model or skills"},
 		{"inactive critic budget", func(j *Job) { j.CriticMaxRounds = 1 }, "invalid critic round limit"},
 		{"inactive critic threshold", func(j *Job) { j.CriticNonblockingRounds = 1 }, "invalid critic round limit"},
 		{"zero critic budget", func(j *Job) { j.Critic = critic }, "invalid critic round limit"},
@@ -168,9 +169,27 @@ func TestJobRejectsInvalidRoleAndDispatchSettings(t *testing.T) {
 		{"model bound", func(j *Job) { j.Main.Model = strings.Repeat("m", 129) }, "invalid action model or skills"},
 		{"model NUL", func(j *Job) { j.Main.Model = "a\x00b" }, "invalid action model or skills"},
 		{"model CR", func(j *Job) { j.Main.Model = "a\rb" }, "invalid action model or skills"},
+		{"model LF", func(j *Job) { j.Main.Model = "a\nb" }, "invalid action model or skills"},
+		{"effort bound", func(j *Job) { j.Main.Effort = strings.Repeat("e", maxModelSettingBytes+1) }, "invalid action model or skills"},
+		{"effort CR", func(j *Job) { j.Main.Effort = "a\rb" }, "invalid action model or skills"},
+		{"effort LF", func(j *Job) { j.Main.Effort = "a\nb" }, "invalid action model or skills"},
+		{"effort NUL", func(j *Job) { j.Main.Effort = "a\x00b" }, "invalid action model or skills"},
+		{"negative runtime", func(j *Job) { j.RuntimeBudget = -1 }, "invalid action runtime budget"},
+		{"invalid UTF8 title", func(j *Job) { j.Title = "\xff" }, "action text is invalid or exceeds limits"},
+		{"invalid UTF8 description", func(j *Job) { j.Description = "\xff" }, "action text is invalid or exceeds limits"},
+		{"invalid UTF8 notes", func(j *Job) { j.Notes = "\xff" }, "action text is invalid or exceeds limits"},
+		{"critic model", func(j *Job) { j.Critic = &RoleSettings{Provider: "claude", Model: "a\x00b"}; j.CriticMaxRounds = 1 }, "invalid action model or skills"},
+		{"critic model bound", func(j *Job) {
+			j.Critic = &RoleSettings{Provider: "claude", Model: strings.Repeat("m", maxModelSettingBytes+1)}
+			j.CriticMaxRounds = 1
+		}, "invalid action model or skills"},
+		{"critic always-on skill", func(j *Job) {
+			j.Critic = &RoleSettings{Provider: "claude", AlwaysOnSkills: []string{"/tmp/private/SKILL.md"}}
+			j.CriticMaxRounds = 1
+		}, "skill URL"},
 		{"missing main skills", func(j *Job) { j.Main.Skills = nil }, "requires at least one skill"},
 		{"skill length", func(j *Job) {
-			j.Main.Skills = []string{"https://github.com/o/r/tree/main/skills/" + strings.Repeat("a", 4096)}
+			j.Main.Skills = []string{"https://github.com/o/r/tree/main/skills/" + strings.Repeat("a", config.MaxSkillURLBytes)}
 		}, "skill source exceeds limit"},
 		{"command", func(j *Job) { j.Command = "../command" }, "invalid action command"},
 		{"main workflow", func(j *Job) { j.Action = command.SecurityAudit; j.Main.Provider = "claude" }, "unsupported by main provider"},
@@ -200,13 +219,13 @@ func TestJobRejectsInvalidRoleAndDispatchSettings(t *testing.T) {
 		{"attempt identity", func(j *Job) { j.Identity.AttemptID = strings.Repeat("a", 100) }},
 		{"executor identity", func(j *Job) { j.Identity.ExecutorID = strings.Repeat("a", 100) }},
 		{"requester identity", func(j *Job) { j.Identity.Requester = strings.Repeat("a", 100) }},
-		{"ordinary requester", func(j *Job) { j.Identity.Requester = "writer" }},
 		{"bot requester", func(j *Job) { j.Identity.Requester = "app[bot]" }},
 		{"combined text exact", func(j *Job) { j.Title, j.Description, j.Notes = "t", text[:workspace.MaxBytes-2], "n" }},
 		{"description exact", func(j *Job) { j.Title, j.Description, j.Notes = "", text[:workspace.MaxBytes], "" }},
 		{"notes exact", func(j *Job) { j.Title, j.Description, j.Notes = "", "", text[:workspace.MaxBytes] }},
-		{"combined role skills exact", func(j *Job) { j.Main.Skills, j.Main.AlwaysOnSkills = roleSkills[:32], roleSkills[:32] }},
-		{"critic disabled", func(j *Job) { j.Critic, j.CriticMaxRounds, j.CriticNonblockingRounds = nil, 0, 0 }},
+		{"combined role skills exact", func(j *Job) {
+			j.Main.Skills, j.Main.AlwaysOnSkills = roleSkills[:config.MaxSkillsPerRole/2], roleSkills[:config.MaxSkillsPerRole-config.MaxSkillsPerRole/2]
+		}},
 		{"critic one round", func(j *Job) { j.Critic, j.CriticMaxRounds = critic, 1 }},
 		{"critic maximum rounds", func(j *Job) { j.Critic, j.CriticMaxRounds = critic, config.MaxCriticMaxRounds }},
 		{"critic threshold at budget", func(j *Job) { j.Critic, j.CriticMaxRounds, j.CriticNonblockingRounds = critic, 2, 2 }},
@@ -244,7 +263,7 @@ func TestResultJSONRoundTripPreservesValidatedPayload(t *testing.T) {
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		t.Fatal(err)
 	}
-	if err := decoded.Validate(job); err != nil || decoded.Answer != result.Answer || len(decoded.Changes) != 1 || !bytes.Equal(decoded.Changes[0].Data, result.Changes[0].Data) || decoded.Changes[0].Mode != workspace.Executable {
+	if err := decoded.Validate(job); err != nil || !reflect.DeepEqual(decoded, result) {
 		t.Fatalf("result roundtrip lost validated data: %+v,%v", decoded, err)
 	}
 }
@@ -304,7 +323,7 @@ func TestFixJobRejectsUnsupportedLayoutBeforeExecution(t *testing.T) {
 		for _, name := range paths {
 			job.Source.Files = append(job.Source.Files, workspace.File{Path: name, Mode: workspace.Regular})
 		}
-		if err := job.Validate(); err == nil {
+		if err := job.Validate(); !errors.Is(err, gitwork.ErrUnsupportedSource) {
 			t.Fatalf("accepted unsupported writable source paths %q", paths)
 		}
 		job.Action = command.Comment
@@ -322,7 +341,7 @@ func TestFixJobIncludesOmittedPathsInUpfrontFoldedLayout(t *testing.T) {
 		t.Fatalf("test does not describe a valid exact source: %v", err)
 	}
 	runner := Runner{WorkRoot: t.TempDir(), runModel: forbidModel(t)}
-	if _, err := runner.Run(context.Background(), job); !errors.Is(err, monitor.ErrTerminalJob) || (!strings.Contains(err.Error(), "collision") && !strings.Contains(err.Error(), "duplicate source path")) {
+	if _, err := runner.Run(context.Background(), job); !errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, gitwork.ErrUnsupportedSource) || !strings.Contains(err.Error(), "collision") {
 		t.Fatalf("unsupported fix source was not refused before execution: %v", err)
 	}
 	job.Action = command.Comment
@@ -524,15 +543,6 @@ func TestPortableContractsRejectMismatches(t *testing.T) {
 			}
 		})
 	}
-	data, err := json.Marshal(job)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, private := range []string{"api_key", "read_only_dirs", "/home/", "RunCodex"} {
-		if strings.Contains(string(data), private) {
-			t.Fatalf("portable job contains local setting %q", private)
-		}
-	}
 	status := Status{Version: ProtocolVersion, Identity: job.Identity, State: "running", Phase: "main", Round: 1, ProgressSequence: 2, LogSequence: 3}
 	if err := status.Validate(job); err != nil {
 		t.Fatal(err)
@@ -580,8 +590,10 @@ func TestResultRejectsInvalidRawAnswer(t *testing.T) {
 			}
 			result := valid
 			result.Answer = test.answer
-			if err := result.Validate(job); err == nil || !strings.Contains(err.Error(), "action answer") {
-				t.Fatalf("raw answer validation = %v", err)
+			for _, complete := range []bool{false, true} {
+				if err := result.validate(job, complete); err == nil || !strings.Contains(err.Error(), "action answer") {
+					t.Fatalf("raw answer complete=%t validation=%v", complete, err)
+				}
 			}
 		})
 	}

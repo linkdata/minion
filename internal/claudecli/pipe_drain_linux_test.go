@@ -18,7 +18,7 @@ import (
 func TestRunRejectsCompletedAnswerAfterPipeDrainOverrun(t *testing.T) {
 	binary := fakeExecutable(t, "claude", `cat >/dev/null
 printf '%s\n' '`+successfulResult+`'
-sleep 3 &
+sleep 30 &
 printf '%s\n' "$!" > "$0.pid"
 exit 0
 `)

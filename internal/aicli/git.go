@@ -1,6 +1,8 @@
 package aicli
 
-// ModelGitEnvironment disables global/system Git configuration and optional metadata writes.
+// ModelGitEnvironment disables global/system Git config, system attributes,
+// replacement objects, lazy fetching and optional metadata writes.
+// Callers must first remove inherited GIT_* entries.
 func ModelGitEnvironment() []string {
 	return []string{
 		"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_ATTR_NOSYSTEM=1",
