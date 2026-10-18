@@ -115,11 +115,11 @@ func TestAlreadyAcknowledgedRequiresOwnTrailingMarker(t *testing.T) {
 			}))
 			defer server.Close()
 			client := testGitHub(server, "token")
-			executor := Orchestrator{
+			orchestrator := Orchestrator{
 				GitHub:   client,
 				BotLogin: "linkdataminion",
 			}
-			got, err := executor.alreadyAcknowledged(context.Background(), job)
+			got, err := orchestrator.alreadyAcknowledged(context.Background(), job)
 			if err != nil || got != tt.want {
 				t.Fatalf("alreadyAcknowledged() = %t, %v; want %t", got, err, tt.want)
 			}
@@ -130,7 +130,7 @@ func TestAlreadyAcknowledgedRequiresOwnTrailingMarker(t *testing.T) {
 	}
 }
 
-func TestPrecheckDeadlineStopsJobBeforeCodex(t *testing.T) {
+func TestPrecheckDeadlineStopsJobBeforeModel(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/repos/o/r/issues/7/comments" {
 			t.Errorf("unexpected request: %s", r.URL)
@@ -140,7 +140,7 @@ func TestPrecheckDeadlineStopsJobBeforeCodex(t *testing.T) {
 	defer server.Close()
 	client := testGitHub(server, "test-token")
 	installActionTestSkills(t, testReviewSkillURL)
-	executor := &Orchestrator{
+	orchestrator := &Orchestrator{
 		GitHub:   client,
 		BotLogin: "linkdataminion",
 		Timeout:  20 * time.Millisecond,
@@ -148,7 +148,7 @@ func TestPrecheckDeadlineStopsJobBeforeCodex(t *testing.T) {
 		Runner:   Runner{runModel: forbidModel(t)},
 	}
 	job := monitor.Job{Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"review"}}, SubjectType: "Issue", Number: 7, ID: strings.Repeat("a", 64), Command: command.Command{Name: "review", Action: command.Review}}
-	if err := executor.Execute(context.Background(), job); !errors.Is(err, monitor.ErrTerminalJob) {
+	if err := orchestrator.Execute(context.Background(), job); !errors.Is(err, monitor.ErrTerminalJob) {
 		t.Fatalf("precheck deadline was refundable: %v", err)
 	}
 }
@@ -164,20 +164,20 @@ func TestVerifiedRepositoryRejectsReclaimedName(t *testing.T) {
 	}))
 	defer server.Close()
 	client := testGitHub(server, "token")
-	executor := &Orchestrator{
+	orchestrator := &Orchestrator{
 		GitHub: client,
 	}
 	job := monitor.Job{Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2}}
-	if _, err := executor.verifiedRepository(context.Background(), job.Repository); err == nil {
+	if _, err := orchestrator.verifiedRepository(context.Background(), job.Repository); err == nil {
 		t.Fatal("accepted a replacement repository under the same name")
 	}
 	job.Repository.ID = 9
 	job.Repository.OwnerID = 3
-	if _, err := executor.verifiedRepository(context.Background(), job.Repository); err == nil {
+	if _, err := orchestrator.verifiedRepository(context.Background(), job.Repository); err == nil {
 		t.Fatal("accepted a replacement owner under the same name")
 	}
 	job.Repository.OwnerID = 2
-	if _, err := executor.verifiedRepository(context.Background(), job.Repository); err != nil {
+	if _, err := orchestrator.verifiedRepository(context.Background(), job.Repository); err != nil {
 		t.Fatalf("rejected pinned repository: %v", err)
 	}
 }
@@ -289,11 +289,11 @@ func TestReviewEchoDoesNotSuppressSecurityAuditInMonitor(t *testing.T) {
 	client := testGitHub(server, "test-token")
 	installActionTestSkills(t, testReviewSkillURL, testAuditSkillURL)
 	var reviewRuns, auditRuns int
-	executor := &Orchestrator{WorkRoot: t.TempDir(), GitHub: client,
+	orchestrator := &Orchestrator{WorkRoot: t.TempDir(), GitHub: client,
 		BotLogin: "linkdataminion",
 		Commands: commands,
 		Runner: Runner{
-			WorkRoot: t.TempDir(), runModel: func(_ context.Context, modelRequest modelRun) (aicli.Result, error) {
+			runModel: func(_ context.Context, modelRequest modelRun) (aicli.Result, error) {
 				dir, outputDir := modelRequest.dir, modelRequest.outputDir
 				if outputDir == "" {
 					reviewRuns++
@@ -315,7 +315,7 @@ func TestReviewEchoDoesNotSuppressSecurityAuditInMonitor(t *testing.T) {
 	var journal bytes.Buffer
 	m := monitor.Monitor{Logger: log.New(&journal, "", 0), Config: config.Config{BotLogin: "linkdataminion", PollIntervalSeconds: 60, Commands: commands,
 		Repositories: []config.Repository{{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"review", "security-audit"}, AllowedActors: []string{"writer"}, AllowedActorIDs: map[string]int64{"writer": 7}}}},
-		GitHub: monitorGitHub, Handler: executor, Now: func() time.Time { return now.Add(time.Minute) }}
+		GitHub: monitorGitHub, Handler: orchestrator, Now: func() time.Time { return now.Add(time.Minute) }}
 	if _, err := m.RunOnce(context.Background(), store); err != nil {
 		t.Fatal(err)
 	}
@@ -366,13 +366,13 @@ func TestFixRefusesIssueEditedAfterRequest(t *testing.T) {
 	}))
 	defer server.Close()
 	client := testGitHub(server, "test-token")
-	executor := &Orchestrator{
+	orchestrator := &Orchestrator{
 		GitHub:   client,
 		BotLogin: "linkdataminion",
 		Store:    store,
 		Runner:   Runner{runModel: forbidModel(t)},
 	}
-	if err := attemptFixture(executor).perform(testActionContext(t), job); err != nil {
+	if err := attemptFixture(orchestrator).perform(testActionContext(t), job); err != nil {
 		t.Fatal(err)
 	}
 	if comments != 1 || len(store.Data.PendingFixes) != 0 {
@@ -477,7 +477,7 @@ func TestFixRecoversOnlyRecordedBranch(t *testing.T) {
 			}))
 			defer server.Close()
 			client := testGitHub(server, "token")
-			executor := &Orchestrator{
+			orchestrator := &Orchestrator{
 				GitHub:   client,
 				BotLogin: "linkdataminion",
 				Store:    store,
@@ -485,9 +485,9 @@ func TestFixRecoversOnlyRecordedBranch(t *testing.T) {
 			}
 			if tt.oversizedNotes {
 				job.Source.Body = "@linkdataminion fix\nOversized notes"
-				executor.MaxGitHubContextBytes = 1
+				orchestrator.MaxGitHubContextBytes = 1
 			}
-			err = attemptFixture(executor).perform(testActionContext(t), job)
+			err = attemptFixture(orchestrator).perform(testActionContext(t), job)
 			if tt.wantError != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantError) {
 					t.Fatalf("fix() error = %v, want %q", err, tt.wantError)
@@ -620,13 +620,13 @@ exec %s -c %s "$@"
 			absentPaths := []string{"deleted.txt", "generated.log"}
 			var source string
 			mainCalls, criticCalls, strict := 0, 0, 0
-			executor := &Orchestrator{WorkRoot: t.TempDir(), GitHub: client,
+			orchestrator := &Orchestrator{WorkRoot: t.TempDir(), GitHub: client,
 				Commands:        map[string]config.CommandMapping{"fix": {Action: "fix", Skills: []string{skills.BuiltinAntiPromptInjection}}},
 				BotLogin:        "linkdataminion",
 				Store:           store,
 				CriticMaxRounds: 1, CriticNonblockingRounds: &strict,
 				Runner: Runner{
-					WorkRoot: t.TempDir(), runModel: func(_ context.Context, modelRequest modelRun) (aicli.Result, error) {
+					runModel: func(_ context.Context, modelRequest modelRun) (aicli.Result, error) {
 						dir, prompt := modelRequest.dir, modelRequest.prompt
 						if modelRequest.role == roleCritic {
 							criticCalls++
@@ -683,9 +683,9 @@ exec %s -c %s "$@"
 				},
 			}
 			if withCritic {
-				executor.Adversarial = "claude"
+				orchestrator.Adversarial = "claude"
 			}
-			if err := attemptFixture(executor).perform(testActionContext(t), job); err != nil {
+			if err := attemptFixture(orchestrator).perform(testActionContext(t), job); err != nil {
 				t.Fatal(err)
 			}
 			wantCriticCalls := 0
@@ -711,7 +711,7 @@ exec %s -c %s "$@"
 				t.Fatalf("branch reply published model output: %q", commentBody)
 			}
 			if rulesetChecks != 4 {
-				t.Fatalf("push rulesets checked %d times, want base and fork before Codex and before push", rulesetChecks)
+				t.Fatalf("push rulesets checked %d times, want base and fork before model execution and before push", rulesetChecks)
 			}
 			if output, err := exec.Command("git", "--git-dir", remote, "rev-parse", "refs/heads/"+branch).CombinedOutput(); err == nil {
 				t.Fatalf("base repository received a pre-review branch: %s", output)
@@ -745,7 +745,7 @@ func TestReviewMarksOnlyPostModelPublicationFailure(t *testing.T) {
 		ID: strings.Repeat("a", 64), Command: command.Command{Name: "review", Action: command.Review}, Source: github.Item{Author: github.User{ID: 7, Login: "writer"}, Body: "@linkdataminion review\n\nCheck API compatibility."}}
 	repoFail := true
 	var failAfterModel bool
-	var codexRuns, postCalls int
+	var modelRuns, postCalls int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
@@ -769,13 +769,13 @@ func TestReviewMarksOnlyPostModelPublicationFailure(t *testing.T) {
 	}))
 	defer server.Close()
 	client := testGitHub(server, "test-token")
-	executor := &Orchestrator{WorkRoot: t.TempDir(), GitHub: client,
+	orchestrator := &Orchestrator{WorkRoot: t.TempDir(), GitHub: client,
 		Commands: map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{skills.BuiltinAntiPromptInjection}}},
 		BotLogin: "linkdataminion",
 		Runner: Runner{
-			WorkRoot: t.TempDir(), runModel: func(_ context.Context, modelRequest modelRun) (aicli.Result, error) {
+			runModel: func(_ context.Context, modelRequest modelRun) (aicli.Result, error) {
 				prompt := modelRequest.prompt
-				codexRuns++
+				modelRuns++
 				repoFail = failAfterModel
 				if !strings.Contains(prompt, fmt.Sprintf("Pull request title: %q", title)) || !strings.Contains(prompt, fmt.Sprintf("Pull request description: %q", description)) ||
 					strings.Contains(prompt, "\nRequest comment") || strings.Contains(prompt, "\u2028") {
@@ -791,20 +791,20 @@ func TestReviewMarksOnlyPostModelPublicationFailure(t *testing.T) {
 			},
 		},
 	}
-	err := attemptFixture(executor).perform(testActionContext(t), job)
-	if err == nil || errors.Is(err, monitor.ErrPostModelPublication) || codexRuns != 0 {
-		t.Fatalf("pre-Codex outage: err=%v runs=%d", err, codexRuns)
+	err := attemptFixture(orchestrator).perform(testActionContext(t), job)
+	if err == nil || errors.Is(err, monitor.ErrPostModelPublication) || modelRuns != 0 {
+		t.Fatalf("pre-model outage: err=%v runs=%d", err, modelRuns)
 	}
 	repoFail = false
 	failAfterModel = true
-	err = attemptFixture(executor).perform(testActionContext(t), job)
-	if !errors.Is(err, monitor.ErrPostModelPublication) || codexRuns != 1 || postCalls != 0 {
-		t.Fatalf("post-model repository outage: err=%v runs=%d posts=%d", err, codexRuns, postCalls)
+	err = attemptFixture(orchestrator).perform(testActionContext(t), job)
+	if !errors.Is(err, monitor.ErrPostModelPublication) || modelRuns != 1 || postCalls != 0 {
+		t.Fatalf("post-model repository outage: err=%v runs=%d posts=%d", err, modelRuns, postCalls)
 	}
 	repoFail, failAfterModel = false, false
-	err = attemptFixture(executor).perform(testActionContext(t), job)
-	if !errors.Is(err, monitor.ErrPostModelPublication) || codexRuns != 2 || postCalls != 1 {
-		t.Fatalf("post-model outage: err=%v runs=%d posts=%d", err, codexRuns, postCalls)
+	err = attemptFixture(orchestrator).perform(testActionContext(t), job)
+	if !errors.Is(err, monitor.ErrPostModelPublication) || modelRuns != 2 || postCalls != 1 {
+		t.Fatalf("post-model outage: err=%v runs=%d posts=%d", err, modelRuns, postCalls)
 	}
 }
 
@@ -850,11 +850,11 @@ func TestFixForkRefusesUnsafePublication(t *testing.T) {
 			}))
 			defer server.Close()
 			client := testGitHub(server, "test-token")
-			executor := &Orchestrator{
+			orchestrator := &Orchestrator{
 				GitHub:   client,
 				BotLogin: "linkdataminion",
 			}
-			if _, _, err := executor.fixFork(context.Background(), config.Repository{Name: "o/r", ID: 1, OwnerID: 2}); err == nil || !strings.Contains(err.Error(), tt.want) {
+			if _, _, err := orchestrator.fixFork(context.Background(), config.Repository{Name: "o/r", ID: 1, OwnerID: 2}); err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("fixFork() = %v, want %q", err, tt.want)
 			}
 		})
@@ -903,11 +903,11 @@ func TestFixForkChecksNetworkRootPushRules(t *testing.T) {
 			}))
 			defer server.Close()
 			client := testGitHub(server, "test-token")
-			executor := &Orchestrator{
+			orchestrator := &Orchestrator{
 				GitHub:   client,
 				BotLogin: "linkdataminion",
 			}
-			_, _, err := executor.fixFork(context.Background(), config.Repository{Name: "o/r", ID: 1, OwnerID: 2})
+			_, _, err := orchestrator.fixFork(context.Background(), config.Repository{Name: "o/r", ID: 1, OwnerID: 2})
 			if tt.want == "" && err != nil || tt.want != "" && (err == nil || !strings.Contains(err.Error(), tt.want)) {
 				t.Fatalf("fixFork() = %v, want %q", err, tt.want)
 			}

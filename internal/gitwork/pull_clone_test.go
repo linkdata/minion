@@ -140,10 +140,9 @@ func TestPullRequestInputGatesBeforeClone(t *testing.T) {
 func TestNewBranchRejectsInvalidNameBeforeGit(t *testing.T) {
 	f := newFixture(t)
 	before := f.git(f.checkout.path, "for-each-ref", "--format=%(refname) %(objectname)")
-	for _, name := range []string{"bad:ref"} {
-		if err := f.checkout.NewBranch(context.Background(), name); err == nil {
-			t.Fatalf("invalid branch accepted: %q", name)
-		}
+	const name = "bad:ref"
+	if err := f.checkout.NewBranch(context.Background(), name); err == nil {
+		t.Fatalf("invalid branch accepted: %q", name)
 	}
 	if after := f.git(f.checkout.path, "for-each-ref", "--format=%(refname) %(objectname)"); after != before || f.checkout.branch != "" {
 		t.Fatalf("invalid branch changed refs: %s", after)

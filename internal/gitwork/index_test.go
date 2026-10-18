@@ -111,40 +111,39 @@ func TestFixIndexQuotesGitDiagnostic(t *testing.T) {
 }
 
 func TestFixIndexBoundsControlFilesBeforeGitReadsThem(t *testing.T) {
-	for _, control := range []string{".gitattributes"} {
-		for _, size := range []int64{workspace.MaxBytes, workspace.MaxBytes + 1} {
-			t.Run(fmt.Sprintf("%s/%d", control, size), func(t *testing.T) {
-				index, source := offlineIndexFixture(t, nil)
-				name := filepath.Join(source, control)
-				if err := os.WriteFile(name, nil, 0600); err != nil {
-					t.Fatal(err)
+	const control = ".gitattributes"
+	for _, size := range []int64{workspace.MaxBytes, workspace.MaxBytes + 1} {
+		t.Run(fmt.Sprintf("%s/%d", control, size), func(t *testing.T) {
+			index, source := offlineIndexFixture(t, nil)
+			name := filepath.Join(source, control)
+			if err := os.WriteFile(name, nil, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Truncate(name, size); err != nil {
+				t.Fatal(err)
+			}
+			marker := filepath.Join(t.TempDir(), "called")
+			const command = "git-control-probe"
+			// No Git process reads the sparse file, including the exact-limit control.
+			index.binary = filepath.Join(fakeOnPath(t, command, "#!/bin/sh\nprintf called > "+shellQuote(marker)+"\nexit 91\n"), command)
+			_, err := index.Changes(context.Background())
+			if size > workspace.MaxBytes {
+				if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("fix control file %q must be regular and bounded", control)) {
+					t.Fatalf("oversized control reached later collection: %v", err)
 				}
-				if err := os.Truncate(name, size); err != nil {
-					t.Fatal(err)
+				if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("oversized control reached Git: %v", err)
 				}
-				marker := filepath.Join(t.TempDir(), "called")
-				const command = "git-control-probe"
-				// No Git process reads the sparse file, including the exact-limit control.
-				index.binary = filepath.Join(fakeOnPath(t, command, "#!/bin/sh\nprintf called > "+shellQuote(marker)+"\nexit 91\n"), command)
-				_, err := index.Changes(context.Background())
-				if size > workspace.MaxBytes {
-					if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("fix control file %q must be regular and bounded", control)) {
-						t.Fatalf("oversized control reached later collection: %v", err)
-					}
-					if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
-						t.Fatalf("oversized control reached Git: %v", err)
-					}
-					return
-				}
-				var exit *exec.ExitError
-				if !errors.As(err, &exit) || exit.ExitCode() != 91 {
-					t.Fatalf("in-bound control was refused before Git: %v", err)
-				}
-				if data, err := os.ReadFile(marker); err != nil || string(data) != "called" {
-					t.Fatalf("in-bound control did not reach Git: %q, %v", data, err)
-				}
-			})
-		}
+				return
+			}
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) || exit.ExitCode() != 91 {
+				t.Fatalf("in-bound control was refused before Git: %v", err)
+			}
+			if data, err := os.ReadFile(marker); err != nil || string(data) != "called" {
+				t.Fatalf("in-bound control did not reach Git: %q, %v", data, err)
+			}
+		})
 	}
 }
 
@@ -612,6 +611,26 @@ func TestFixIndexIgnoresUnusedRulesUnderIgnoredTrackedDirectory(t *testing.T) {
 			}
 			if _, err := index.Changes(context.Background()); err == nil || !strings.Contains(err.Error(), "must be regular") {
 				t.Fatalf("ignored tracked-directory control shape was not checked: %v", err)
+			}
+		})
+	}
+}
+
+func TestFixIndexPathListOverflowIsTooManyFiles(t *testing.T) {
+	for _, stage := range []struct {
+		arg   string
+		limit int
+	}{
+		{"ls-files", (workspace.MaxChanges + 1) * (workspace.MaxPathBytes + 1)},
+		{"--raw", maxChangedPathListBytes},
+	} {
+		t.Run(stage.arg, func(t *testing.T) {
+			index, source := offlineIndexFixture(t, []workspace.File{{Path: "source", Mode: workspace.Regular, Data: []byte("before")}})
+			writeIndexFixture(t, source, "source", []byte("after"))
+			script := fmt.Sprintf("#!/bin/sh\nfor arg do\nif [ \"$arg\" = %s ]; then\nhead -c %d /dev/zero\nexit\nfi\ndone\nexec %s \"$@\"\n", shellQuote(stage.arg), stage.limit+1, shellQuote(index.binary))
+			index.binary = filepath.Join(fakeOnPath(t, "git-path-list", script), "git-path-list")
+			if _, err := index.Changes(context.Background()); !errors.Is(err, ErrTooManyFiles) || errors.Is(err, ErrCheckoutTooLarge) || errors.Is(err, ErrDiffTooLarge) {
+				t.Fatalf("result path overflow misclassified: %v", err)
 			}
 		})
 	}

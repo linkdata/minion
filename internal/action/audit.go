@@ -84,7 +84,7 @@ func validateAuditFiles(ctx context.Context, files []workspace.File, validationR
 	if _, err := validateAuditMetadata(byPath["run-metadata.json"], repo, target, head); err != nil {
 		return "", err
 	}
-	validationDir, err := os.MkdirTemp(validationRoot, ".audit-validation-")
+	validationDir, err := os.MkdirTemp(validationRoot, ".minion-audit-validation-")
 	if err != nil {
 		return "", fmt.Errorf("create audit validation directory: %w", err)
 	}

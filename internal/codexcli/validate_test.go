@@ -253,9 +253,9 @@ func TestCatalogueProviderErrorIsBoundedAndQuoted(t *testing.T) {
 func TestCatalogueEventAcceptsExactLimitAndRejectsNextByte(t *testing.T) {
 	const prefix = `{"id":2,"result":{"data":[{"model":"fixture","isDefault":true}]},"padding":"`
 	const suffix = `"}`
-	for _, size := range []int{aicli.MaxEventBytes, aicli.MaxEventBytes + 1} {
-		for _, ending := range []string{"\n", ""} {
-			t.Run(fmt.Sprintf("bytes%d/newline%t", size, ending != ""), func(t *testing.T) {
+	for _, size := range []int{aicli.MaxEventBytes, aicli.MaxEventBytes + 1, aicli.MaxEventBytes + 10} {
+		for _, ending := range []string{"\n", "\r\n", ""} {
+			t.Run(fmt.Sprintf("bytes%d/ending%q", size, ending), func(t *testing.T) {
 				binary := installFakeCodex(t, "#!/bin/sh\nIFS= read -r request\nprintf '%s\\n' '{\"id\":1,\"result\":{}}'\nIFS= read -r request\nIFS= read -r request\ncat \"$0.response\"\n")
 				response := prefix + strings.Repeat("x", size-len(prefix)-len(suffix)) + suffix + ending
 				if err := os.WriteFile(binary+".response", []byte(response), 0600); err != nil {
@@ -267,7 +267,7 @@ func TestCatalogueEventAcceptsExactLimitAndRejectsNextByte(t *testing.T) {
 						t.Fatalf("exact-cap catalogue=%+v err=%v", models, err)
 					}
 				} else if !errors.Is(err, aicli.ErrOutputLimit) {
-					t.Fatalf("cap+1 accepted: models=%+v err=%v", models, err)
+					t.Fatalf("oversized catalogue accepted or unclassified: models=%+v err=%v", models, err)
 				}
 			})
 		}

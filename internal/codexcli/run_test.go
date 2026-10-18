@@ -392,6 +392,48 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"a
 	}
 }
 
+func TestRunRejectsSkillInsideSource(t *testing.T) {
+	source := t.TempDir()
+	skill := filepath.Join(source, "SKILL.md")
+	if err := os.WriteFile(skill, []byte("untrusted source"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(t.TempDir(), "SKILL.md")
+	if err := os.Symlink(skill, alias); err != nil {
+		t.Fatal(err)
+	}
+	binary := installFakeCodex(t, "#!/bin/sh\ntouch \"$0.invoked\"\nexit 99\n")
+	for _, path := range []string{skill, alias} {
+		if _, err := Run(context.Background(), source, "task", false, "", config.CodexConfig{Skills: []string{path}}); err == nil || !strings.Contains(err.Error(), "skill is inside the untrusted source snapshot") {
+			t.Fatalf("accepted source skill %q: %v", path, err)
+		}
+	}
+	if _, err := os.Stat(binary + ".invoked"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("invalid skill started Codex: %v", err)
+	}
+}
+
+func TestRunRejectsReadOnlyOutputOverlap(t *testing.T) {
+	source, output := t.TempDir(), filepath.Join(t.TempDir(), "reports")
+	child := filepath.Join(output, "child")
+	if err := os.MkdirAll(child, 0700); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(t.TempDir(), "output")
+	if err := os.Symlink(output, alias); err != nil {
+		t.Fatal(err)
+	}
+	binary := installFakeCodex(t, "#!/bin/sh\ntouch \"$0.invoked\"\nexit 99\n")
+	for _, path := range []string{output, child, filepath.Dir(output), alias} {
+		if _, err := Run(context.Background(), source, "task", false, output, config.CodexConfig{ReadOnlyDirs: []string{path}}); err == nil || !strings.Contains(err.Error(), "read-only directory overlaps the output directory") {
+			t.Fatalf("accepted read-only/output overlap %q: %v", path, err)
+		}
+	}
+	if _, err := os.Stat(binary + ".invoked"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("invalid grants started Codex: %v", err)
+	}
+}
+
 func TestChildEnvironmentIsolatesCodexSessionButKeepsAuthentication(t *testing.T) {
 	env := childEnvironment([]string{
 		"CODEX_PERMISSION_PROFILE=unsafe-parent-profile", "CODEX_THREAD_ID=parent", "CODEX_SESSION_ID=parent",

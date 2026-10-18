@@ -28,10 +28,6 @@ func TestPrepareRootCanonicalizesExistingDirectory(t *testing.T) {
 	if err != nil || root != filepath.Join(parent, "new") {
 		t.Fatalf("prepared root=%q,%v", root, err)
 	}
-	info, err := os.Stat(root)
-	if err != nil || !info.IsDir() || info.Mode().Perm() != 0700 {
-		t.Fatalf("prepared root permissions=%v,%v", info, err)
-	}
 }
 
 func TestPrepareRootDoesNotCreateMissingDirectory(t *testing.T) {

@@ -152,7 +152,7 @@ func TestFailedAuditRetainsLabelledPartialArtifactsWithoutPublication(t *testing
 	var sourceDir, reportDir string
 	e := &Orchestrator{WorkRoot: t.TempDir(), Logger: log.New(&journal, "", 0), GitHub: client, Commands: map[string]config.CommandMapping{"security-audit": {Action: "security-audit", Skills: []string{testAuditSkillURL}}},
 		Runner: Runner{
-			WorkRoot: t.TempDir(), Logger: log.New(&journal, "", 0), runModel: func(_ context.Context, modelRequest modelRun) (aicli.Result, error) {
+			Logger: log.New(&journal, "", 0), runModel: func(_ context.Context, modelRequest modelRun) (aicli.Result, error) {
 				dir, output := modelRequest.dir, modelRequest.outputDir
 				sourceDir, reportDir = dir, output
 				if err := os.WriteFile(filepath.Join(output, "REPORT.md"), []byte(report), 0600); err != nil {

@@ -3,7 +3,6 @@
 package gitwork
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -96,19 +95,18 @@ func TestGitDeadlineStopsLazyFetchChildHoldingPipes(t *testing.T) {
 	}
 	pidFile := filepath.Join(root, "fetch.pid")
 	stall := filepath.Join(root, "upload-pack")
-	if err := os.WriteFile(stall, []byte("#!/bin/sh\nprintf '%s' $$ > "+shellQuote(pidFile)+"\nexec sleep 6\n"), 0700); err != nil {
+	if err := os.WriteFile(stall, []byte("#!/bin/sh\nprintf '%s' $$ > "+shellQuote(pidFile)+"\nprintf 'deadline diagnostic\\nforged journal\\n' >&2\nexec sleep 6\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	fixture.git(clone, "config", "remote.origin.uploadpack", stall)
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
-	var output bytes.Buffer
 	started := time.Now()
-	err := runGitInputTo(ctx, clone, strings.NewReader(blob+"\n"), &output, "cat-file", "--batch")
+	_, _, err := (&Checkout{path: clone}).boundedGit(ctx, strings.NewReader(blob+"\n"), 1024, false, "cat-file", "--batch")
 	elapsed := time.Since(started)
 	assertGitChildStopped(t, pidFile)
 	var exit *exec.ExitError
-	if elapsed > 3*time.Second || !errors.Is(err, context.DeadlineExceeded) || !errors.As(err, &exit) || errors.Is(err, ErrUnsupportedSource) {
+	if elapsed > 3*time.Second || !errors.Is(err, context.DeadlineExceeded) || !errors.As(err, &exit) || errors.Is(err, ErrUnsupportedSource) || !strings.Contains(err.Error(), `deadline diagnostic\nforged journal`) {
 		t.Fatalf("deadline Git took %s: %v", elapsed, err)
 	}
 }

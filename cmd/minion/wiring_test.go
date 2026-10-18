@@ -7,7 +7,7 @@ import (
 	"github.com/linkdata/minion/internal/config"
 )
 
-func TestServiceWiringPreservesConfiguredRolesAndHostPolicy(t *testing.T) {
+func TestServiceWiringPreservesAdmissionAndHostPolicy(t *testing.T) {
 	strict := 0
 	sockets := true
 	cfg := config.Config{

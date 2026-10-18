@@ -202,7 +202,7 @@ func TestUsagePersistenceFailureStopsModelsOrPublication(t *testing.T) {
 	}
 }
 
-func TestExecuteRecordsNoCodexAndSkipsAcknowledged(t *testing.T) {
+func TestExecuteRecordsNoModelAndSkipsAcknowledged(t *testing.T) {
 	for _, failInitialSave := range []bool{false, true} {
 		t.Run(fmt.Sprintf("fail initial save %t", failInitialSave), func(t *testing.T) {
 			job := usageJob()
@@ -297,20 +297,20 @@ printf '%%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"
 	fakeOnPath(t, "codex", script)
 	store := &usage.Store{Dir: filepath.Join(root, "usage")}
 	work := t.TempDir()
-	executor := &Orchestrator{WorkRoot: work, Usage: store,
-		CodexModel: "portable-model",
+	orchestrator := &Orchestrator{WorkRoot: work, Usage: store,
+		CodexModel: "portable-model", CodexEffort: "high",
 		Runner: Runner{
 			WorkRoot: work,
-			Codex:    config.CodexConfig{Model: "stale-host-model"},
+			Codex:    config.CodexConfig{Model: "stale-host-model", ReasoningEffort: "low"},
 		},
 	}
-	tracked := attemptFixture(executor)
+	tracked := attemptFixture(orchestrator)
 	finish, err := tracked.trackUsage(usageJob())
 	if err != nil {
 		t.Fatal(err)
 	}
 	job := portableJob(command.Comment)
-	job.Main.Model = "portable-model"
+	job.Main.Model, job.Main.Effort = "portable-model", "high"
 	job.Main.Skills = []string{testReviewSkillURL}
 	result, err := tracked.Runner.Run(context.Background(), job)
 	if err != nil {
@@ -328,8 +328,11 @@ printf '%%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"
 		t.Fatal(err)
 	}
 	installed := filepath.Join(os.Getenv("HOME"), ".agents", "skills", "ponytail-review", "SKILL.md")
-	if !strings.Contains(string(args), "portable-model") || strings.Contains(string(args), "stale-host-model") || !strings.Contains(string(args), ".minion-context-") || !strings.Contains(string(prompt), installed) {
+	if !strings.Contains(string(args), "portable-model") || !strings.Contains(string(args), `model_reasoning_effort="high"`) || strings.Contains(string(args), "stale-host-model") || !strings.Contains(string(args), ".minion-context-") || !strings.Contains(string(prompt), installed) {
 		t.Fatalf("usage wrapper lost worker settings: args=%s prompt=%s", args, prompt)
+	}
+	if tracked.Runner.Codex.Model != "stale-host-model" || tracked.Runner.Codex.ReasoningEffort != "low" {
+		t.Fatal("usage/native dispatch changed shared host settings")
 	}
 	records, err := usage.ReadAll(store.Dir)
 	if err != nil || len(records) != 1 || records[0].Model != "portable-model" || records[0].CodexCalls != 1 || records[0].Tokens.Total() != 5 || len(result.Calls) != 1 {

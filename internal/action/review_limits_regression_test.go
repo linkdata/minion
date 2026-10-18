@@ -73,8 +73,8 @@ func TestEveryActionPromptDeclaresRenderedPublicationBudget(t *testing.T) {
 						t.Fatal("main prompt omits private-commentary restriction")
 					}
 					for _, phase := range []string{reviewFull, reviewVerification} {
-						critique := criticPrompt(phase, prompt, "Candidate", "", "", "", "/frozen-reports")
-						for _, requirement := range []string{"Await every delegated review and background check before your final verdict", "inspect their results and handle failures instead of ending with a waiting or progress message", "source changes"} {
+						critique := criticPrompt(phase, prompt, "Candidate", "", "", "/frozen-reports")
+						for _, requirement := range []string{"Await every delegated review and background check before your final verdict", "inspect their results and handle failures instead of ending with a waiting or progress message", "source changes", "The complete JSON object must fit within 65536 UTF-8 bytes, including syntax and escaping", "without omitting actionable issues or truncating the verdict"} {
 							if !strings.Contains(critique, requirement) {
 								t.Fatalf("%s critic omits %q", phase, requirement)
 							}
@@ -115,7 +115,7 @@ func TestEveryActionPromptDeclaresRenderedPublicationBudget(t *testing.T) {
 						}
 					}
 					for _, phase := range []string{reviewFull, reviewVerification} {
-						critique := criticPrompt(phase, prompt, "Audit candidate", "", "", "", "/frozen-reports")
+						critique := criticPrompt(phase, prompt, "Audit candidate", "", "", "/frozen-reports")
 						if !strings.Contains(critique, "Copy any source-only execution prohibition from the task verbatim into every delegated review prompt") || !strings.Contains(critique, "Do not execute repository code, builds, tests, or fixtures, probe live services, publish, or run network commands") {
 							t.Fatalf("%s critic lost the audit's inherited delegate execution prohibition", phase)
 						}

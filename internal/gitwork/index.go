@@ -58,7 +58,7 @@ func NewOfflineIndex(ctx context.Context, dir, source string, files []workspace.
 		return nil, err
 	}
 	index.baseline = strings.TrimSpace(string(tree))
-	if !gitObjectID(index.baseline) {
+	if !workspace.ValidSHA(index.baseline) {
 		return nil, errors.New("offline git returned invalid tree identity")
 	}
 	return index, nil
@@ -104,6 +104,9 @@ func (index *OfflineIndex) Changes(ctx context.Context) ([]workspace.Change, err
 	// Bound new output before Git hashes it; ignored files and metadata remain excluded.
 	untracked, err := index.run(ctx, (workspace.MaxChanges+1)*(workspace.MaxPathBytes+1), nil, "ls-files", "-z", "--others", "--exclude-standard", "--", ".", excludeGit, excludeGitContents)
 	if err != nil {
+		if errors.Is(err, ErrCheckoutTooLarge) {
+			return nil, ErrTooManyFiles
+		}
 		return nil, err
 	}
 	paths, err := splitNUL(untracked)
@@ -139,6 +142,9 @@ func (index *OfflineIndex) Changes(ctx context.Context) ([]workspace.Change, err
 	}
 	raw, err := index.run(ctx, maxChangedPathListBytes, nil, "diff", "--cached", "--raw", "-z", "--no-abbrev", "--no-renames", "--no-ext-diff", "--no-textconv", index.baseline, "--")
 	if err != nil {
+		if errors.Is(err, ErrCheckoutTooLarge) {
+			return nil, ErrTooManyFiles
+		}
 		return nil, err
 	}
 	selected, objects, err := parseIndexChanges(raw)
@@ -284,7 +290,7 @@ func parseIndexChanges(raw []byte) ([]workspace.Change, []string, error) {
 	changes, objects := make([]workspace.Change, 0, len(parts)/2), make([]string, 0, len(parts)/2)
 	for i := 0; i < len(parts); i += 2 {
 		fields := strings.Fields(string(parts[i]))
-		if len(fields) != 5 || len(fields[0]) != 7 || fields[0][0] != ':' || len(fields[1]) != 6 || !gitObjectID(fields[2]) || !gitObjectID(fields[3]) {
+		if len(fields) != 5 || len(fields[0]) != 7 || fields[0][0] != ':' || len(fields[1]) != 6 || !workspace.ValidSHA(fields[2]) || !workspace.ValidSHA(fields[3]) {
 			return nil, nil, errors.New("invalid offline git change record")
 		}
 		mode, err := strconv.ParseUint(fields[1], 8, 32)
@@ -302,10 +308,6 @@ func parseIndexChanges(raw []byte) ([]workspace.Change, []string, error) {
 		changes, objects = append(changes, change), append(objects, fields[3])
 	}
 	return changes, objects, nil
-}
-
-func gitObjectID(value string) bool {
-	return len(value) == 40 && workspace.ValidSHA(value)
 }
 
 func gitBlobID(data []byte) string {
@@ -339,7 +341,10 @@ func (index *OfflineIndex) run(ctx context.Context, limit int, input []byte, arg
 		} else {
 			err = classifyPathError(args[0], diagnostic.String(), err)
 		}
-		return nil, fmt.Errorf("offline git %s: %w: %q", args[0], err, strings.TrimSpace(diagnostic.String()))
+		if message := strings.TrimSpace(diagnostic.String()); message != "" {
+			return nil, fmt.Errorf("offline git %s: %w: %q", args[0], err, message)
+		}
+		return nil, fmt.Errorf("offline git %s: %w", args[0], err)
 	}
 	return output.Bytes(), nil
 }

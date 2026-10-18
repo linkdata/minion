@@ -13,11 +13,17 @@ func TestMaterializeSkillsKeepsPartialCleanupOwnership(t *testing.T) {
 	for _, invalid := range []bool{false, true} {
 		t.Run(map[bool]string{false: "mixed paths", true: "partial error"}[invalid], func(t *testing.T) {
 			parent := t.TempDir()
+			source := filepath.Join(parent, "source")
+			if err := os.Mkdir(source, 0700); err != nil {
+				t.Fatal(err)
+			}
 			external := filepath.Join(t.TempDir(), "SKILL.md")
 			if invalid {
 				external = "relative/SKILL.md"
+			} else if err := os.WriteFile(external, []byte("trusted skill"), 0600); err != nil {
+				t.Fatal(err)
 			}
-			paths, owned, err := MaterializeSkills(parent, []string{skills.BuiltinAntiPromptInjection, external})
+			paths, owned, err := MaterializeSkills(source, []string{skills.BuiltinAntiPromptInjection, external})
 			if (err != nil) != invalid || owned == "" {
 				t.Fatalf("owned=%q err=%v", owned, err)
 			}
@@ -41,7 +47,7 @@ func TestMaterializeSkillsKeepsPartialCleanupOwnership(t *testing.T) {
 				t.Fatal(err)
 			}
 			entries, err := os.ReadDir(parent)
-			if err != nil || len(entries) != 0 {
+			if err != nil || len(entries) != 1 || entries[0].Name() != "source" || !entries[0].IsDir() {
 				t.Fatalf("caller cleanup failed: %v %v", entries, err)
 			}
 		})

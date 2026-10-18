@@ -57,9 +57,9 @@ func TestCommentCommandReportsIssueAndPullRequest(t *testing.T) {
 				Source:  github.Item{Author: github.User{ID: 7, Login: "writer"}, Body: "@linkdataminion audit\n\n" + notes},
 				Command: command.Command{Name: "audit", Action: command.Comment},
 			}
-			executor := &Orchestrator{WorkRoot: t.TempDir(), GitHub: client, BotLogin: "linkdataminion", Commands: map[string]config.CommandMapping{"audit": {Action: "comment", Skills: []string{testReviewSkillURL}}},
+			orchestrator := &Orchestrator{WorkRoot: t.TempDir(), GitHub: client, BotLogin: "linkdataminion", Commands: map[string]config.CommandMapping{"audit": {Action: "comment", Skills: []string{testReviewSkillURL}}},
 				Runner: Runner{
-					WorkRoot: t.TempDir(), runModel: func(ctx context.Context, modelRequest modelRun) (aicli.Result, error) {
+					runModel: func(ctx context.Context, modelRequest modelRun) (aicli.Result, error) {
 						if subject == "Issue" {
 							deadline, ok := ctx.Deadline()
 							remaining := time.Until(deadline)
@@ -86,9 +86,9 @@ func TestCommentCommandReportsIssueAndPullRequest(t *testing.T) {
 			}
 			var err error
 			if subject == "Issue" {
-				err = executor.Execute(context.Background(), job)
+				err = orchestrator.Execute(context.Background(), job)
 			} else {
-				err = attemptFixture(executor).perform(testActionContext(t), job)
+				err = attemptFixture(orchestrator).perform(testActionContext(t), job)
 			}
 			if err != nil {
 				t.Fatal(err)

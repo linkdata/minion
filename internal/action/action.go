@@ -311,8 +311,7 @@ func inertModelOutput(s string) string {
 
 func modelOutputFits(s string) bool {
 	s = normalizedModelOutput(s)
-	// Bound length before quote expansion so its int arithmetic cannot wrap.
-	return len(s) <= maxOutputBytes && utf8.ValidString(s) && len(s)+2*strings.Count(s, "\n")+14 <= maxOutputBytes
+	return len(s) <= maxOutputBytes && utf8.ValidString(s) && len(inertModelOutput(s)) <= maxOutputBytes
 }
 
 func normalizedModelOutput(s string) string {

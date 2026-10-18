@@ -14,7 +14,6 @@ import (
 
 // trackUsage adds a record and runner wrapper to this attempt-scoped receiver.
 func (e *Orchestrator) trackUsage(job monitor.Job) (func(error) error, error) {
-	store, logger := e.Usage, e.Logger
 	record := usage.Record{
 		ID: e.attemptID, JobID: job.ID, Repo: job.Repository.Name,
 		User: job.Source.Author.Login, Action: cmp.Or(job.Command.Name, string(job.Command.Action)), Number: job.Number,
@@ -28,7 +27,7 @@ func (e *Orchestrator) trackUsage(job monitor.Job) (func(error) error, error) {
 		record.CriticModel, record.CriticEffort = cmp.Or(critic.Model, "default"), critic.Effort
 	}
 	save := func() error {
-		if err := store.Save(record); err != nil {
+		if err := e.Usage.Save(record); err != nil {
 			return fmt.Errorf("save action usage %s: %w", record.ID, err)
 		}
 		return nil
@@ -56,8 +55,8 @@ func (e *Orchestrator) trackUsage(job monitor.Job) (func(error) error, error) {
 		tokens, valid := record.Tokens.AddChecked(result.Tokens)
 		record.Tokens = tokens
 		record.UsageComplete = complete && result.UsageComplete && valid
-		if !valid && logger != nil {
-			logger.Printf("action usage counters invalid or overflowed; retaining lower bound for attempt %s", record.ID)
+		if !valid {
+			e.logf("action usage counters invalid or overflowed; retaining lower bound for attempt %s", record.ID)
 		}
 		if saveErr := save(); saveErr != nil {
 			err = errors.Join(err, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, saveErr))
@@ -73,9 +72,7 @@ func (e *Orchestrator) trackUsage(job monitor.Job) (func(error) error, error) {
 		}
 		if err := save(); err != nil {
 			if actionErr == nil {
-				if logger != nil {
-					logger.Printf("final action usage checkpoint failed: %q", err)
-				}
+				e.logf("final action usage checkpoint failed: %q", err)
 				return nil
 			}
 			return errors.Join(actionErr, err)

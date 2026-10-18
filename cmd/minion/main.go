@@ -25,6 +25,7 @@ import (
 	"github.com/linkdata/minion/internal/state"
 	"github.com/linkdata/minion/internal/usage"
 	"github.com/linkdata/minion/internal/workroot"
+	"github.com/linkdata/minion/internal/workspace"
 )
 
 func main() {
@@ -191,6 +192,13 @@ func newOrchestrator(cfg config.Config, client *github.Client, store *state.Stor
 }
 
 func checkWorkRootIsolation(cfg config.Config) error {
+	root, err := workspace.PrepareRoot(cfg.WorkRoot)
+	if err != nil {
+		return err
+	}
+	if err := workspace.CheckRoot(root); err != nil {
+		return err
+	}
 	runner := action.Runner{Codex: cfg.Codex, Claude: cfg.Claude}
 	for _, provider := range []string{cfg.Main, cfg.Adversarial} {
 		if provider == "" {
@@ -209,7 +217,7 @@ func checkWorkRootIsolation(cfg config.Config) error {
 			return err
 		}
 	}
-	return runner.CheckWorkRootIsolation(cfg.WorkRoot, cfg.Main, cfg.Adversarial)
+	return runner.CheckWorkRootIsolation(root, cfg.Main, cfg.Adversarial)
 }
 
 func logCommandSkills(cfg config.Config, logger *log.Logger) {
@@ -343,10 +351,7 @@ func checkRepositories(ctx context.Context, client *github.Client, cfg config.Co
 			}
 		}
 		if needsFixFork {
-			orchestrator := action.Orchestrator{
-				GitHub:   client,
-				BotLogin: cfg.BotLogin,
-			}
+			orchestrator := action.Orchestrator{GitHub: client, BotLogin: cfg.BotLogin}
 			if err := orchestrator.CheckFixFork(ctx, repo); err != nil {
 				problems = append(problems, fmt.Errorf("%s: fix fork preflight: %w", repo.Name, err))
 			}

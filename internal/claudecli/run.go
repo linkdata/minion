@@ -19,7 +19,7 @@ import (
 	"github.com/linkdata/minion/internal/cleanup"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/processgroup"
-	workspacepath "github.com/linkdata/minion/internal/workspace"
+	workspacefs "github.com/linkdata/minion/internal/workspace"
 )
 
 // Run executes one Claude task with sandboxed shell tools.
@@ -80,7 +80,7 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	if err := os.Mkdir(cacheDir, 0o700); err != nil {
 		return result, err
 	}
-	skillPaths, embeddedDir, err := aicli.MaterializeSkills(filepath.Dir(workspace), settings.Skills)
+	skillPaths, embeddedDir, err := aicli.MaterializeSkills(workspace, settings.Skills)
 	defer func() {
 		if embeddedDir != "" {
 			if err := cleanup.RemoveAll(embeddedDir); err != nil {
@@ -92,22 +92,12 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	if err != nil {
 		return result, fmt.Errorf("claude skills: %w", err)
 	}
-	for i, skill := range skillPaths {
-		resolved, err := filepath.EvalSymlinks(skill)
-		if err != nil {
-			return result, err
-		}
-		if workspacepath.Within(workspace, resolved) {
-			return result, errors.New("claude skill is inside the untrusted source snapshot")
-		}
-		skillPaths[i] = resolved
-	}
 	if outputDir != "" {
 		resolved, err := aicli.Directory(outputDir)
 		if err != nil {
 			return result, err
 		}
-		if workspacepath.Within(workspace, resolved) || workspacepath.Within(resolved, workspace) {
+		if workspacefs.Within(workspace, resolved) || workspacefs.Within(resolved, workspace) {
 			return result, errors.New("claude output directory must be separate from source snapshot")
 		}
 		outputDir = resolved
@@ -118,7 +108,7 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 		if err != nil {
 			return result, err
 		}
-		if workspacepath.Within(resolved, workspace) || workspacepath.Within(resolved, runtimeDir) || outputDir != "" && (workspacepath.Within(resolved, outputDir) || workspacepath.Within(outputDir, resolved)) {
+		if workspacefs.Within(resolved, workspace) || workspacefs.Within(resolved, runtimeDir) || outputDir != "" && (workspacefs.Within(resolved, outputDir) || workspacefs.Within(outputDir, resolved)) {
 			return result, errors.New("claude read-only directory overlaps a writable grant")
 		}
 		readOnlyDirs = append(readOnlyDirs, resolved)
@@ -258,7 +248,7 @@ func sandboxSettings(workspace, runtimeDir string, writable bool, outputDir stri
 	}
 	if authDir != "" {
 		for _, grant := range append(reads, writes...) {
-			if workspacepath.Within(grant, authDir) || workspacepath.Within(authDir, grant) {
+			if workspacefs.Within(grant, authDir) || workspacefs.Within(authDir, grant) {
 				return "", errors.New("claude API key directory overlaps a sandbox grant")
 			}
 		}

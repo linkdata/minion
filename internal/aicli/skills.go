@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/linkdata/minion/internal/skills"
+	"github.com/linkdata/minion/internal/workspace"
 )
 
 // SkillInstructions tells the model to read the configured trusted skill files.
@@ -22,9 +23,9 @@ func SkillInstructions(paths []string) string {
 	return text.String() + "\n"
 }
 
-// MaterializeSkills expands built-in skills and checks configured SKILL.md paths.
+// MaterializeSkills expands built-in skills beside the canonical source root and refuses source-owned skills.
 // The caller owns embeddedDir, including on error, and must check its cleanup.
-func MaterializeSkills(parent string, selected []string) (paths []string, embeddedDir string, err error) {
+func MaterializeSkills(source string, selected []string) (paths []string, embeddedDir string, err error) {
 	for _, skill := range selected {
 		if content, builtin := skills.BuiltinContent(skill); builtin {
 			name, err := skills.Name(skill)
@@ -32,7 +33,7 @@ func MaterializeSkills(parent string, selected []string) (paths []string, embedd
 				return nil, embeddedDir, err
 			}
 			if embeddedDir == "" {
-				embeddedDir, err = os.MkdirTemp(parent, ".minion-skills-")
+				embeddedDir, err = os.MkdirTemp(filepath.Dir(source), ".minion-skills-")
 				if err != nil {
 					return nil, embeddedDir, err
 				}
@@ -48,7 +49,14 @@ func MaterializeSkills(parent string, selected []string) (paths []string, embedd
 		if !filepath.IsAbs(skill) || filepath.Base(skill) != "SKILL.md" {
 			return nil, embeddedDir, fmt.Errorf("skill %q must be an absolute SKILL.md path", skill)
 		}
-		paths = append(paths, skill)
+		resolved, err := filepath.EvalSymlinks(skill)
+		if err != nil {
+			return nil, embeddedDir, err
+		}
+		if workspace.Within(source, resolved) {
+			return nil, embeddedDir, fmt.Errorf("skill is inside the untrusted source snapshot: %s", skill)
+		}
+		paths = append(paths, resolved)
 	}
 	return paths, embeddedDir, nil
 }

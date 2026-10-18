@@ -26,7 +26,7 @@ type retainedReview struct {
 	Refutations             []Refutation `json:"refutations"`
 }
 
-// retainReviewEvidence validates private history independently of public output.
+// retainReviewEvidence saves private history after Runner validates the job and admits its root.
 // A failed call may leave a valid prefix; answer/change validation must not erase it.
 func (e *Orchestrator) retainReviewEvidence(job Job, result Result) (resultErr error) {
 	defer func() {
@@ -37,24 +37,7 @@ func (e *Orchestrator) retainReviewEvidence(job Job, result Result) (resultErr e
 	if job.Critic == nil && len(result.Refutations) == 0 {
 		return nil
 	}
-	if err := job.Validate(); err != nil {
-		return err
-	}
-	if err := validateReviewEvidence(job, result); err != nil {
-		return err
-	}
-	workRoot, err := workspace.PrepareRoot(e.WorkRoot)
-	if err != nil {
-		return err
-	}
-	providers := []string{job.Main.Provider}
-	if job.Critic != nil {
-		providers = append(providers, job.Critic.Provider)
-	}
-	if err := e.Runner.CheckWorkRootIsolation(workRoot, providers...); err != nil {
-		return err
-	}
-	return saveReviewEvidence(workRoot, job, result, e.Logger)
+	return saveReviewEvidence(e.WorkRoot, job, result, e.Logger)
 }
 
 func privateRecordsDir(workRoot, name string) (string, error) {
@@ -133,7 +116,7 @@ func saveReviewEvidence(workRoot string, job Job, result Result, logger *log.Log
 		return err
 	}
 	if logger != nil {
-		logger.Printf("review evidence job=%s attempt=%s executor=%s entries=%d path=%q", job.Identity.JobID, job.Identity.AttemptID, job.Identity.ExecutorID, len(result.Refutations), path)
+		logger.Printf("review evidence job=%s attempt=%s executor=%s refutations=%d path=%q", job.Identity.JobID, job.Identity.AttemptID, job.Identity.ExecutorID, len(result.Refutations), path)
 	}
 	return nil
 }

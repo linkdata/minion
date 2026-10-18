@@ -6,9 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -317,21 +315,13 @@ func (c *Checkout) Import(ctx context.Context, expectedHead string, changes []wo
 	return nil
 }
 
-// disableAttributes disables repository transformations on trusted and offline indexes.
-func disableAttributes(gitDir string) error {
-	if err := os.MkdirAll(filepath.Join(gitDir, "info"), 0700); err != nil {
-		return err
-	}
-	return os.WriteFile(filepath.Join(gitDir, "info", "attributes"), []byte(gitAttributes), 0600)
-}
-
 func (c *Checkout) boundedGit(ctx context.Context, stdin io.Reader, limit int, truncate bool, args ...string) ([]byte, bool, error) {
 	readCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	output := bounded.Buffer{Limit: limit, Cancel: cancel}
 	err := runGitInputTo(readCtx, c.path, stdin, &output, args...)
-	if ctx.Err() != nil {
-		return nil, false, ctx.Err()
+	if contextErr := ctx.Err(); contextErr != nil {
+		return nil, false, errors.Join(err, contextErr)
 	}
 	if output.Exceeded {
 		if truncate {

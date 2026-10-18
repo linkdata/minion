@@ -100,17 +100,17 @@ func TestLiveFixPublishesBranch(t *testing.T) {
 	}
 	t.Cleanup(func() { liveFixCleanup(t, owner, bot, fixture.ownerToken, fixture.botToken, cfg, job, branch, store) })
 	t.Setenv("GH_TOKEN", fixture.botToken)
-	codexCalls := 0
-	executor := &Orchestrator{WorkRoot: t.TempDir(), GitHub: bot,
+	modelCalls := 0
+	orchestrator := &Orchestrator{WorkRoot: t.TempDir(), GitHub: bot,
 		BotLogin: cfg.BotLogin,
 		Store:    store,
 		Commands: map[string]config.CommandMapping{"fix": {Action: "fix", Skills: []string{testFixSkillURL}}},
 		Runner: Runner{
-			WorkRoot: t.TempDir(), runModel: func(_ context.Context, modelRequest modelRun) (aicli.Result, error) {
+			runModel: func(_ context.Context, modelRequest modelRun) (aicli.Result, error) {
 				dir, writable, outputDir := modelRequest.dir, modelRequest.writable, modelRequest.outputDir
-				codexCalls++
+				modelCalls++
 				if !writable || outputDir != "" {
-					return aicli.Result{}, errors.New("unexpected Codex invocation for live fix")
+					return aicli.Result{}, errors.New("unexpected model invocation for live fix")
 				}
 				name := "minion-live-fix-" + id[:12] + ".txt"
 				err := os.WriteFile(filepath.Join(dir, name), []byte("Minion live fix test fixture.\n"), 0o600)
@@ -118,14 +118,14 @@ func TestLiveFixPublishesBranch(t *testing.T) {
 			},
 		},
 	}
-	if err := executor.CheckFixFork(ctx, job.Repository); err != nil {
+	if err := orchestrator.CheckFixFork(ctx, job.Repository); err != nil {
 		t.Fatal(err)
 	}
-	if err := executor.Execute(ctx, job); err != nil {
+	if err := orchestrator.Execute(ctx, job); err != nil {
 		t.Fatal(err)
 	}
-	if codexCalls != 1 {
-		t.Fatalf("Codex calls = %d, want 1", codexCalls)
+	if modelCalls != 1 {
+		t.Fatalf("model calls = %d, want 1", modelCalls)
 	}
 	sha := store.Data.PendingFixes[job.ID]
 	if len(sha) != 40 {
@@ -145,11 +145,11 @@ func TestLiveFixPublishesBranch(t *testing.T) {
 	if pull, err := owner.FindPullRequestByHead(ctx, liveFixRepository, repo.DefaultBranch, cfg.BotLogin+":"+branch); err != nil || pull != nil {
 		t.Fatalf("fix unexpectedly opened a pull request: %v", err)
 	}
-	if err := executor.Execute(ctx, job); err != nil {
+	if err := orchestrator.Execute(ctx, job); err != nil {
 		t.Fatal(err)
 	}
-	if codexCalls != 1 || store.Data.PendingFixes[job.ID] != sha {
-		t.Fatalf("repeat execution changed the fix: Codex calls = %d, recorded SHA = %q", codexCalls, store.Data.PendingFixes[job.ID])
+	if modelCalls != 1 || store.Data.PendingFixes[job.ID] != sha {
+		t.Fatalf("repeat execution changed the fix: model calls = %d, recorded SHA = %q", modelCalls, store.Data.PendingFixes[job.ID])
 	}
 	if repeatID, _, err := liveActionReply(ctx, owner, cfg, job); err != nil || repeatID != commentID {
 		t.Fatalf("repeat execution changed the acknowledgement: id = %d, want %d: %v", repeatID, commentID, err)

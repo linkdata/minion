@@ -156,7 +156,7 @@ func TestPrivateReviewRetainsPrefixAndRejectsRollback(t *testing.T) {
 }
 
 func TestPrivateReviewBoundaryBeforeStorageOrPublication(t *testing.T) {
-	for _, scenario := range []string{"foreign identity", "foreign source", "malformed history", "oversized history", "invalid calls", "invalid answer", "invalid changes", "storage failure", "public root", "symlink root", "grant overlap"} {
+	for _, scenario := range []string{"foreign identity", "foreign source", "malformed history", "oversized history", "invalid calls", "invalid answer", "invalid changes", "storage failure", "public root", "symlink root"} {
 		t.Run(scenario, func(t *testing.T) {
 			job := withClaudeCritic(portableJob(command.Comment))
 			result := privateReviewResult(job)
@@ -192,8 +192,6 @@ func TestPrivateReviewBoundaryBeforeStorageOrPublication(t *testing.T) {
 				if err := os.Symlink(t.TempDir(), filepath.Join(root, "reviews")); err != nil {
 					t.Fatal(err)
 				}
-			case "grant overlap":
-				e.Runner.Claude.ReadOnlyDirs = []string{filepath.Dir(root)}
 			}
 			if err := e.publish(context.Background(), &preparedAction{job: job}, result); !errors.Is(err, monitor.ErrTerminalJob) {
 				t.Fatalf("unsafe publication was not stopped: %v", err)
@@ -240,7 +238,7 @@ func TestPerformCheckpointsPrivateReviewBeforeLaterCalls(t *testing.T) {
 			calls := 0
 			e := attemptFixture(&Orchestrator{WorkRoot: root, GitHub: testGitHub(server, "fixture"), Main: "codex", Adversarial: "claude", CriticNonblockingRounds: new(int),
 				Commands: map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}},
-				Runner: Runner{WorkRoot: root, runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+				Runner: Runner{runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 					calls++
 					if calls > 1 {
 						record := readPrivateReview(t, root)

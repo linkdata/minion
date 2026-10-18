@@ -129,7 +129,6 @@ func TestSecurityAuditIssueAndPullRequest(t *testing.T) {
 				CodexModel:  "test-model",
 				CodexEffort: "high",
 				Runner: Runner{
-					WorkRoot: t.TempDir(),
 					runModel: func(ctx context.Context, modelRequest modelRun) (aicli.Result, error) {
 						dir, prompt, writable, outputDir := modelRequest.dir, modelRequest.prompt, modelRequest.writable, modelRequest.outputDir
 						calls++

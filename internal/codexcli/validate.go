@@ -175,6 +175,9 @@ func listModels(ctx context.Context, settings config.CodexConfig) (models []mode
 			return nil
 		}
 		if err := scanner.Err(); err != nil {
+			if errors.Is(err, bufio.ErrTooLong) {
+				return fmt.Errorf("%w: Codex catalogue event exceeded the size limit", aicli.ErrOutputLimit)
+			}
 			return err
 		}
 		return fmt.Errorf("Codex exited before replying to %s", method) //nolint:staticcheck // -- Codex is a proper noun.

@@ -46,14 +46,17 @@ printf '%%s\n' '{"type":"result","subtype":"success","is_error":false,"terminal_
 			if err != nil {
 				t.Fatal(err)
 			}
-			fakeOnPath(t, "codex", "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' "+shellQuote(string(event))+" '{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":3,\"cached_input_tokens\":0,\"output_tokens\":2}}'\n")
+			fakeOnPath(t, "codex", "#!/bin/sh\nprintf '%s\\n' \"$@\" > "+shellQuote(filepath.Join(root, "codex-args"))+"\ncat >/dev/null\nprintf '%s\\n' "+shellQuote(string(event))+" '{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":3,\"cached_input_tokens\":0,\"output_tokens\":2}}'\n")
 			job := withClaudeCritic(portableJob(command.Comment))
 			if claudeRole == roleMain {
 				job.Main.Provider, job.Critic.Provider = "claude", "codex"
 			}
 			job.Main.Model, job.Main.Effort, job.Main.Skills = "portable-"+job.Main.Provider, "high", []string{testReviewSkillURL}
 			job.Critic.Model, job.Critic.Effort, job.Critic.AlwaysOnSkills = "portable-"+job.Critic.Provider, "medium", []string{testReviewSkillURL}
-			runner := Runner{WorkRoot: t.TempDir(), Claude: config.ClaudeConfig{Model: "stale-host-model"}}
+			runner := Runner{WorkRoot: t.TempDir(),
+				Codex:  config.CodexConfig{Model: "stale-host-codex", ReasoningEffort: "low"},
+				Claude: config.ClaudeConfig{Model: "stale-host-claude", Effort: "low"},
+			}
 			result, err := runner.Run(context.Background(), job)
 			if err != nil || result.Answer != "No findings." || len(result.Calls) != 2 {
 				t.Fatalf("native action: result=%+v error=%v", result, err)
@@ -77,6 +80,17 @@ printf '%%s\n' '{"type":"result","subtype":"success","is_error":false,"terminal_
 			}
 			if contextDir == "" || values["--json-schema"] != schema || values["--model"] != role.Model || values["--effort"] != role.Effort {
 				t.Fatalf("Claude %s lost native role/context/schema wiring: %s", claudeRole, argsData)
+			}
+			codexArgs, err := os.ReadFile(filepath.Join(root, "codex-args"))
+			codexRole := job.Main
+			if claudeRole == roleMain {
+				codexRole = *job.Critic
+			}
+			if err != nil || !strings.Contains(string(codexArgs), "--model\n"+codexRole.Model+"\n") || !strings.Contains(string(codexArgs), fmt.Sprintf("model_reasoning_effort=%q\n", codexRole.Effort)) || strings.Contains(string(codexArgs), "stale-host-") {
+				t.Fatalf("Codex lost native role model/effort wiring: %s, %v", codexArgs, err)
+			}
+			if runner.Codex.Model != "stale-host-codex" || runner.Codex.ReasoningEffort != "low" || runner.Claude.Model != "stale-host-claude" || runner.Claude.Effort != "low" {
+				t.Fatal("native dispatch changed shared host model/effort settings")
 			}
 			var policy struct {
 				Sandbox struct {

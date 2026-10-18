@@ -9,7 +9,7 @@ import (
 	"syscall"
 )
 
-// syscall omits O_PATH on amd64; Linux uses this value on every supported architecture.
+// syscall omits O_PATH on some Linux architectures; its value is stable across them.
 const oPath = 0x200000
 
 // RemoveAll restores owner access if a completed job left locked directories.

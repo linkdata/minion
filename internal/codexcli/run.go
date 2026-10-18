@@ -118,10 +118,13 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 		if workspacefs.Within(workspace, path) || workspacefs.Within(path, workspace) {
 			return result, errors.New("codex exec: read-only directory must be separate from the source snapshot")
 		}
+		if outputDir != "" && (workspacefs.Within(path, outputDir) || workspacefs.Within(outputDir, path)) {
+			return result, errors.New("codex exec: read-only directory overlaps the output directory")
+		}
 		filesystemRules = append(filesystemRules, fmt.Sprintf(`%s="read"`, strconv.Quote(path)))
 	}
 
-	skillPaths, embeddedDir, err := aicli.MaterializeSkills(filepath.Dir(workspace), settings.Skills)
+	skillPaths, embeddedDir, err := aicli.MaterializeSkills(workspace, settings.Skills)
 	defer func() {
 		if embeddedDir != "" {
 			if err := cleanup.RemoveAll(embeddedDir); err != nil {

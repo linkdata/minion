@@ -1,10 +1,12 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/linkdata/minion/internal/config"
@@ -85,12 +87,26 @@ func TestWorkRootPreflightKeepsMissingSkillsDisabled(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("HOME", root)
 	t.Setenv("PATH", t.TempDir())
-	cfg := config.Config{Main: "codex", WorkRoot: root, Commands: map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{"https://github.com/owner/repo/tree/pinned/skills/missing"}}}, AlwaysOnSkills: []string{"https://github.com/owner/repo/tree/pinned/skills/optional"}, Claude: config.ClaudeConfig{ReadOnlyDirs: []string{root}}}
+	cfg := config.Config{Main: "codex", WorkRoot: root, Commands: map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{"https://github.com/owner/repo/tree/pinned/skills/missing"}}}, AlwaysOnSkills: []string{"https://github.com/owner/repo/tree/pinned/skills/optional"}}
 	if err := checkWorkRootIsolation(cfg); err != nil {
-		t.Fatalf("missing/unselected skills or unused provider changed startup: %v", err)
+		t.Fatalf("missing/unselected skills changed startup: %v", err)
 	}
 	installed, err := cfg.CommandInstalled("review")
 	if err != nil || installed {
 		t.Fatalf("missing command no longer disabled: installed=%t err=%v", installed, err)
+	}
+}
+
+func TestWorkRootPreflightRequiresWorkspaceBackend(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	t.Setenv("PATH", t.TempDir())
+	file := filepath.Join(root, "not-a-directory")
+	if err := os.WriteFile(file, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	err := checkWorkRootIsolation(config.Config{Main: "codex", WorkRoot: file})
+	if err == nil || (!errors.Is(err, syscall.ENOTDIR) && !strings.Contains(err.Error(), "requires Linux")) {
+		t.Fatalf("startup did not enforce the workspace backend: %v", err)
 	}
 }

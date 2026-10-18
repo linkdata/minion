@@ -1,4 +1,4 @@
-// Package workspace transports bounded source files without Git metadata.
+// Package workspace provides bounded source transfer, path and identity validation, and private record helpers.
 package workspace
 
 import (
@@ -126,8 +126,9 @@ func validSourcePath(name string) bool {
 	return true
 }
 
+// ValidSHA reports whether value is a lowercase SHA-1 object ID.
 func ValidSHA(value string) bool {
-	return (len(value) == 40 || len(value) == 64) && strings.Trim(value, "0123456789abcdef") == ""
+	return len(value) == 40 && strings.Trim(value, "0123456789abcdef") == ""
 }
 
 func ValidateSnapshot(s Snapshot) error {

@@ -99,7 +99,7 @@ func TestExecuteSourceFailuresAndInvalidIncompleteResultsAreTerminal(t *testing.
 			}))
 			defer server.Close()
 			client := testGitHub(server, "token")
-			orchestrator := Orchestrator{WorkRoot: t.TempDir(), GitHub: client, BotLogin: "bot", Commands: map[string]config.CommandMapping{"audit": {Action: "comment", Skills: []string{testReviewSkillURL}}}, Runner: Runner{WorkRoot: t.TempDir(), runModel: func(context.Context, modelRun) (aicli.Result, error) {
+			orchestrator := Orchestrator{WorkRoot: t.TempDir(), GitHub: client, BotLogin: "bot", Commands: map[string]config.CommandMapping{"audit": {Action: "comment", Skills: []string{testReviewSkillURL}}}, Runner: Runner{runModel: func(context.Context, modelRun) (aicli.Result, error) {
 				calls++
 				return aicli.Result{Tokens: usage.Tokens{Input: -1}}, modelErr
 			}}}
@@ -155,7 +155,7 @@ func TestPrepareFixClassifiesUnsupportedLayoutBeforeBranchOrModels(t *testing.T)
 			root := t.TempDir()
 			orchestrator := &Orchestrator{WorkRoot: root, GitHub: testGitHub(server, "token"), BotLogin: "bot", Store: store,
 				Commands: map[string]config.CommandMapping{"fix": {Action: "fix", Skills: []string{skills.BuiltinAntiPromptInjection}}},
-				Runner:   Runner{WorkRoot: t.TempDir(), runModel: forbidModel(t)},
+				Runner:   Runner{runModel: forbidModel(t)},
 			}
 			request := monitor.Job{ID: strings.Repeat("a", 64), SubjectType: "Issue", Number: 7,
 				Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"fix"}},
@@ -223,7 +223,7 @@ func TestExecuteLogsCheckoutCleanupFailureAfterSuccessfulPublication(t *testing.
 	var journal bytes.Buffer
 	orchestrator := Orchestrator{WorkRoot: root, GitHub: client, BotLogin: "bot", Store: store, Logger: log.New(&journal, "", 0),
 		Commands: map[string]config.CommandMapping{"fix": {Action: "fix", Skills: []string{testFixSkillURL}}},
-		Runner: Runner{WorkRoot: t.TempDir(), runModel: func(context.Context, modelRun) (aicli.Result, error) {
+		Runner: Runner{runModel: func(context.Context, modelRun) (aicli.Result, error) {
 			modelCalls++
 			return aicli.Result{Answer: "No change is needed."}, nil
 		}},
@@ -358,7 +358,7 @@ func TestCompletedAuditRetentionFailureIsTerminal(t *testing.T) {
 	if err := os.WriteFile(blocked, []byte("not a directory"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	orchestrator := Orchestrator{GitHub: client, WorkRoot: blocked, Runner: Runner{WorkRoot: t.TempDir()}}
+	orchestrator := Orchestrator{GitHub: client, WorkRoot: blocked}
 	prepared := &preparedAction{job: job, checkout: checkout, request: monitor.Job{Command: command.Command{Action: command.SecurityAudit}}}
 	err := orchestrator.publish(context.Background(), prepared, result)
 	if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "retain completed audit") || writes != 0 {

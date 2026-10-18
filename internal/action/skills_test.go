@@ -88,12 +88,12 @@ func TestRunnerSeparatesMainAndCriticSkills(t *testing.T) {
 			writeActionTestSkills(t, home, mainRoot, testReviewSkillURL, optional)
 			writeActionTestSkills(t, home, criticRoot, optional)
 			runner := &Runner{
-				Codex:  config.CodexConfig{Skills: []string{"stale codex skill"}},
-				Claude: config.ClaudeConfig{Skills: []string{"stale claude skill"}},
+				Codex:  config.CodexConfig{Model: "host-codex", ReasoningEffort: "low", Skills: []string{"stale codex skill"}},
+				Claude: config.ClaudeConfig{Model: "host-claude", Effort: "low", Skills: []string{"stale claude skill"}},
 			}
-			mainRole := RoleSettings{Provider: main, Skills: []string{testReviewSkillURL},
+			mainRole := RoleSettings{Provider: main, Model: "main-model", Effort: "high", Skills: []string{testReviewSkillURL},
 				AlwaysOnSkills: []string{optional, skills.BuiltinAntiPromptInjection, missing}}
-			criticRole := RoleSettings{Provider: critic,
+			criticRole := RoleSettings{Provider: critic, Model: "critic-model", Effort: "medium",
 				AlwaysOnSkills: mainRole.AlwaysOnSkills}
 			configured := *runner
 			if err := configured.ConfigureRole(mainRole); err != nil {
@@ -117,6 +117,11 @@ func TestRunnerSeparatesMainAndCriticSkills(t *testing.T) {
 			}
 			if runner.Codex.Skills[0] != "stale codex skill" || runner.Claude.Skills[0] != "stale claude skill" {
 				t.Fatal("per-job selection changed shared runner settings")
+			}
+			for _, got := range []*Runner{runner, &configured} {
+				if got.Codex.Model != "host-codex" || got.Codex.ReasoningEffort != "low" || got.Claude.Model != "host-claude" || got.Claude.Effort != "low" {
+					t.Fatal("skill selection changed host model or effort settings")
+				}
 			}
 
 			if err := configured.ConfigureRole(RoleSettings{Provider: critic}); err != nil {
@@ -148,41 +153,41 @@ func TestRunnerRequiresEverySkillAndLoadsOptionalSkills(t *testing.T) {
 		Repository: config.Repository{Name: "owner/repo", Actions: []string{"inspect"}},
 		Command:    command.Command{Name: "inspect", Action: command.Review},
 	}
-	executor := &Orchestrator{
+	orchestrator := &Orchestrator{
 		Commands: map[string]config.CommandMapping{
 			"inspect": {Action: "review", Skills: []string{testReviewSkillURL, extraURL}},
 		},
 
 		AlwaysOnSkills: []string{optionalURL},
 	}
-	if err := executor.validateCommand(job); err != nil {
+	if err := orchestrator.validateCommand(job); err != nil {
 		t.Fatalf("logical command depends on execution-host skills: %v", err)
 	}
-	role := RoleSettings{Provider: "codex", Skills: executor.Commands["inspect"].Skills,
-		AlwaysOnSkills: executor.AlwaysOnSkills}
-	if err := executor.Runner.ConfigureRole(role); err == nil || errors.Is(err, monitor.ErrTerminalJob) {
+	role := RoleSettings{Provider: "codex", Skills: orchestrator.Commands["inspect"].Skills,
+		AlwaysOnSkills: orchestrator.AlwaysOnSkills}
+	if err := orchestrator.Runner.ConfigureRole(role); err == nil || errors.Is(err, monitor.ErrTerminalJob) {
 		t.Fatalf("execution must fail early and retryably for a missing required skill: %v", err)
 	}
 	installActionTestSkills(t, testReviewSkillURL, extraURL, optionalURL)
-	if err := executor.validateCommand(job); err != nil {
+	if err := orchestrator.validateCommand(job); err != nil {
 		t.Fatal(err)
 	}
-	configured := executor.Runner
+	configured := orchestrator.Runner
 	if err := configured.ConfigureRole(role); err != nil {
 		t.Fatal(err)
 	}
 	if len(configured.Codex.Skills) != 3 {
 		t.Fatalf("loaded skills = %v; want two required and one optional", configured.Codex.Skills)
 	}
-	if len(executor.Runner.Codex.Skills) != 0 {
-		t.Fatal("skill selection changed the shared executor")
+	if len(orchestrator.Runner.Codex.Skills) != 0 {
+		t.Fatal("skill selection changed the shared orchestrator")
 	}
-	delete(executor.Commands, "inspect")
-	if err := executor.validateCommand(job); err == nil {
+	delete(orchestrator.Commands, "inspect")
+	if err := orchestrator.validateCommand(job); err == nil {
 		t.Fatal("unmapped command ran")
 	}
-	executor.Commands["inspect"] = config.CommandMapping{Action: "review"}
-	if err := executor.validateCommand(job); err == nil {
+	orchestrator.Commands["inspect"] = config.CommandMapping{Action: "review"}
+	if err := orchestrator.validateCommand(job); err == nil {
 		t.Fatal("command with no required skills ran")
 	}
 }

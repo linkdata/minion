@@ -85,8 +85,7 @@ func collectUsage(ctx context.Context, home, rootID string, started time.Time, f
 			scanner.Buffer(make([]byte, maxUsageHeaderBytes+2), maxUsageHeaderBytes+2)
 			var event rolloutEvent
 			var meta rolloutMeta
-			ok := scanner.Scan() && len(scanner.Bytes()) <= maxUsageHeaderBytes && json.Unmarshal(scanner.Bytes(), &event) == nil && event.Type == "session_meta" && json.Unmarshal(event.Payload, &meta) == nil && meta.ID != ""
-			ok = ok && scanner.Err() == nil
+			ok := scanner.Scan() && len(scanner.Bytes()) <= maxUsageHeaderBytes && json.Unmarshal(scanner.Bytes(), &event) == nil && event.Type == "session_meta" && json.Unmarshal(event.Payload, &meta) == nil && meta.ID != "" && scanner.Err() == nil
 			if err := f.Close(); err != nil {
 				complete = false
 			}

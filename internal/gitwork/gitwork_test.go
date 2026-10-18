@@ -314,28 +314,25 @@ func TestNewBranchPreservesOmittedGitlink(t *testing.T) {
 }
 
 func TestImportRejectsNestedGitMetadataBeforePublishing(t *testing.T) {
-	for _, name := range []string{".g\u200cit/config"} {
-		t.Run(name, func(t *testing.T) {
-			fixture := newFixture(t)
-			ctx := context.Background()
-			const branch = "minion/fix-nested-git"
-			if err := fixture.checkout.NewBranch(ctx, branch); err != nil {
-				t.Fatal(err)
-			}
-			changes := []workspace.Change{{Path: name, Mode: workspace.Regular, Data: []byte("[filter \"probe\"]\nclean = malicious-command\n")}, {Path: "payload.txt", Mode: workspace.Regular, Data: []byte("new data")}}
-			if err := fixture.checkout.Import(ctx, fixture.base, changes); err == nil {
-				t.Fatal("accepted nested Git metadata")
-			}
-			if _, err := os.Stat(filepath.Join(fixture.checkout.path, "payload.txt")); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("invalid import partially applied: %v", err)
-			}
-			if paths, err := fixture.checkout.stagedPaths(ctx); err != nil || len(paths) != 0 {
-				t.Fatalf("invalid import staged=%q error=%v", paths, err)
-			}
-			if err := fixture.checkout.commitAndPush(ctx, fixture.remote, branch, "bot", "fix", func(string) error { t.Fatal("invalid data reached publication"); return nil }); !errors.Is(err, ErrNoChanges) {
-				t.Fatalf("publication after rejected import=%v", err)
-			}
-		})
+	const name = ".g\u200cit/config"
+	fixture := newFixture(t)
+	ctx := context.Background()
+	const branch = "minion/fix-nested-git"
+	if err := fixture.checkout.NewBranch(ctx, branch); err != nil {
+		t.Fatal(err)
+	}
+	changes := []workspace.Change{{Path: name, Mode: workspace.Regular, Data: []byte("[filter \"probe\"]\nclean = malicious-command\n")}, {Path: "payload.txt", Mode: workspace.Regular, Data: []byte("new data")}}
+	if err := fixture.checkout.Import(ctx, fixture.base, changes); err == nil {
+		t.Fatal("accepted nested Git metadata")
+	}
+	if _, err := os.Stat(filepath.Join(fixture.checkout.path, "payload.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("invalid import partially applied: %v", err)
+	}
+	if paths, err := fixture.checkout.stagedPaths(ctx); err != nil || len(paths) != 0 {
+		t.Fatalf("invalid import staged=%q error=%v", paths, err)
+	}
+	if err := fixture.checkout.commitAndPush(ctx, fixture.remote, branch, "bot", "fix", func(string) error { t.Fatal("invalid data reached publication"); return nil }); !errors.Is(err, ErrNoChanges) {
+		t.Fatalf("publication after rejected import=%v", err)
 	}
 }
 

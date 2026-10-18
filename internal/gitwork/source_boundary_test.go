@@ -61,46 +61,43 @@ func TestImportPreservesStagingIOFailure(t *testing.T) {
 }
 
 func TestSourceAliasesAreUnsupportedForDefaultAndPullRequestCheckout(t *testing.T) {
-	for _, path := range []string{"git~1/hooks/test"} {
-		t.Run(path, func(t *testing.T) {
-			t.Parallel()
-			fixture := newFixture(t)
-			alias := filepath.Join(fixture.source, filepath.FromSlash(path))
-			writeFile(t, alias, "not Git metadata")
-			fixture.git(fixture.source, "-c", "core.protectHFS=false", "-c", "core.protectNTFS=false", "add", "--all", "--", ".")
-			fixture.git(fixture.source, "commit", "-m", "source alias")
-			head := fixture.git(fixture.source, "rev-parse", "HEAD")
-			fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/heads/main", "HEAD:refs/pull/7/head")
-			lookup := localTreeMetadata(fixture.source)
-			checked := false
-			lookupChecked := func(ctx context.Context, sha string) (github.GitTree, error) {
-				tree, err := lookup(ctx, sha)
-				for _, entry := range tree.Tree {
-					if entry.Path == path {
-						checked = true
-					}
-				}
-				return tree, err
+	const path = "git~1/hooks/test"
+	t.Parallel()
+	fixture := newFixture(t)
+	alias := filepath.Join(fixture.source, filepath.FromSlash(path))
+	writeFile(t, alias, "not Git metadata")
+	fixture.git(fixture.source, "-c", "core.protectHFS=false", "-c", "core.protectNTFS=false", "add", "--all", "--", ".")
+	fixture.git(fixture.source, "commit", "-m", "source alias")
+	head := fixture.git(fixture.source, "rev-parse", "HEAD")
+	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/heads/main", "HEAD:refs/pull/7/head")
+	lookup := localTreeMetadata(fixture.source)
+	checked := false
+	lookupChecked := func(ctx context.Context, sha string) (github.GitTree, error) {
+		tree, err := lookup(ctx, sha)
+		for _, entry := range tree.Tree {
+			if entry.Path == path {
+				checked = true
 			}
-			checkout, err := cloneFromURL(context.Background(), t.TempDir(), fixture.remote, "main", lookupChecked, true)
-			if checkout != nil {
-				defer func() {
-					if err := checkout.Close(); err != nil {
-						t.Error(err)
-					}
-				}()
+		}
+		return tree, err
+	}
+	checkout, err := cloneFromURL(context.Background(), t.TempDir(), fixture.remote, "main", lookupChecked, true)
+	if checkout != nil {
+		defer func() {
+			if err := checkout.Close(); err != nil {
+				t.Error(err)
 			}
-			var exit *exec.ExitError
-			if !checked || !errors.Is(err, ErrUnsupportedSource) || errors.As(err, &exit) || !strings.Contains(err.Error(), "unsafe source path") {
-				t.Fatalf("default checkout metadataChecked=%v error=%v", checked, err)
-			}
-			checked = false
-			fixture.checkout.lookupTree = lookupChecked
-			err = fixture.checkout.checkoutPullRequest(context.Background(), 7, "main", head)
-			if !checked || !errors.Is(err, ErrUnsupportedSource) || errors.As(err, &exit) || !strings.Contains(err.Error(), "unsafe source path") {
-				t.Fatalf("PR checkout metadataChecked=%v error=%v", checked, err)
-			}
-		})
+		}()
+	}
+	var exit *exec.ExitError
+	if !checked || !errors.Is(err, ErrUnsupportedSource) || errors.As(err, &exit) || !strings.Contains(err.Error(), "unsafe source path") {
+		t.Fatalf("default checkout metadataChecked=%v error=%v", checked, err)
+	}
+	checked = false
+	fixture.checkout.lookupTree = lookupChecked
+	err = fixture.checkout.checkoutPullRequest(context.Background(), 7, "main", head)
+	if !checked || !errors.Is(err, ErrUnsupportedSource) || errors.As(err, &exit) || !strings.Contains(err.Error(), "unsafe source path") {
+		t.Fatalf("PR checkout metadataChecked=%v error=%v", checked, err)
 	}
 }
 

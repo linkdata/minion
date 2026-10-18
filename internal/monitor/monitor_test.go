@@ -198,13 +198,13 @@ func (f *fakeGitHub) CreateIssueComment(ctx context.Context, _ string, _ int, bo
 	return comment, nil
 }
 
-type fakeExecutor struct {
+type fakeHandler struct {
 	jobs       []Job
 	onExecute  func()
 	executeErr error
 }
 
-func (f *fakeExecutor) Execute(_ context.Context, job Job) error {
+func (f *fakeHandler) Execute(_ context.Context, job Job) error {
 	if f.onExecute != nil {
 		f.onExecute()
 	}
@@ -287,13 +287,13 @@ func TestRunOnceIgnoresCommandWithoutInstalledSkill(t *testing.T) {
 		notifications: []github.Notification{testNotification(now)},
 		items:         []github.Item{{Key: "comment:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}}},
 	}
-	executor := &fakeExecutor{}
-	m := &Monitor{Config: cfg, GitHub: gh, Handler: executor, Now: func() time.Time { return now }}
+	handler := &fakeHandler{}
+	m := &Monitor{Config: cfg, GitHub: gh, Handler: handler, Now: func() time.Time { return now }}
 	if _, err := m.RunOnce(context.Background(), openState(t, now.Add(-time.Minute))); err != nil {
 		t.Fatal(err)
 	}
-	if len(executor.jobs) != 0 || gh.currentChecks != 0 {
-		t.Fatalf("uninstalled command reached execution: jobs=%v item checks=%d", executor.jobs, gh.currentChecks)
+	if len(handler.jobs) != 0 || gh.currentChecks != 0 {
+		t.Fatalf("uninstalled command reached execution: jobs=%v item checks=%d", handler.jobs, gh.currentChecks)
 	}
 }
 
@@ -363,14 +363,14 @@ func TestRunOnceKeepsFailedRepositoryWindowAndRetriesPendingThreads(t *testing.T
 	}
 	cfg := testConfig(t)
 	cfg.Repositories = []config.Repository{{Name: "a/one", ID: 1, OwnerID: 2, Actions: []string{"review"}}, {Name: "b/two", ID: 1, OwnerID: 2, Actions: []string{"review"}}}
-	executor := &fakeExecutor{}
+	handler := &fakeHandler{}
 	clock := now
-	m := &Monitor{Config: cfg, GitHub: gh, Handler: executor, Now: func() time.Time { return clock }}
+	m := &Monitor{Config: cfg, GitHub: gh, Handler: handler, Now: func() time.Time { return clock }}
 	if _, err := m.RunOnce(context.Background(), store); err == nil || !strings.Contains(err.Error(), "a/one") {
 		t.Fatalf("failed repository poll was not reported: %v", err)
 	}
-	if len(executor.jobs) != 2 || len(store.Data.PendingNotifications) != 0 {
-		t.Fatalf("other repository or pending retry stalled: jobs=%+v pending=%+v", executor.jobs, store.Data.PendingNotifications)
+	if len(handler.jobs) != 2 || len(store.Data.PendingNotifications) != 0 {
+		t.Fatalf("other repository or pending retry stalled: jobs=%+v pending=%+v", handler.jobs, store.Data.PendingNotifications)
 	}
 	if !store.Data.RepositoryCursors["a/one"].Equal(initial) || !store.Data.RepositoryCursors["b/two"].After(initial) {
 		t.Fatalf("repository cursors after partial failure: %+v", store.Data.RepositoryCursors)
@@ -388,8 +388,8 @@ func TestRunOnceKeepsFailedRepositoryWindowAndRetriesPendingThreads(t *testing.T
 	if _, err := m.RunOnce(context.Background(), store); err != nil {
 		t.Fatal(err)
 	}
-	if len(executor.jobs) != 3 || executor.jobs[2].Repository.Name != "a/one" || executor.jobs[2].Number != 9 {
-		t.Fatalf("recovered repository notification was lost or duplicate ran: %+v", executor.jobs)
+	if len(handler.jobs) != 3 || handler.jobs[2].Repository.Name != "a/one" || handler.jobs[2].Number != 9 {
+		t.Fatalf("recovered repository notification was lost or duplicate ran: %+v", handler.jobs)
 	}
 	if len(gh.notificationCalls) != 4 || !gh.notificationCalls[2].since.Equal(initial) || !gh.notificationCalls[3].since.After(initial) {
 		t.Fatalf("repository cursors not independently restored: %+v", gh.notificationCalls)
@@ -404,8 +404,8 @@ func TestRunOnceSeedsNewRepositoryFromCurrentCursor(t *testing.T) {
 		Key: "b/two#comment:9", NodeID: "node-9", Body: "@linkdataminion review", Author: github.User{Login: "writer"},
 	}}}
 	clock := now
-	executor := &fakeExecutor{}
-	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: executor, Now: func() time.Time { return clock }}
+	handler := &fakeHandler{}
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Now: func() time.Time { return clock }}
 	if _, err := m.RunOnce(context.Background(), store); err != nil {
 		t.Fatal(err)
 	}
@@ -426,8 +426,8 @@ func TestRunOnceSeedsNewRepositoryFromCurrentCursor(t *testing.T) {
 	if len(gh.notificationCalls) != 3 || gh.notificationCalls[2].repo != "b/two" || !gh.notificationCalls[2].since.Equal(advanced) {
 		t.Fatalf("new repository did not inherit current cursor: %+v", gh.notificationCalls)
 	}
-	if len(executor.jobs) != 1 || executor.jobs[0].Repository.Name != "b/two" {
-		t.Fatalf("new repository notification was not processed: %+v", executor.jobs)
+	if len(handler.jobs) != 1 || handler.jobs[0].Repository.Name != "b/two" {
+		t.Fatalf("new repository notification was not processed: %+v", handler.jobs)
 	}
 }
 
@@ -440,19 +440,19 @@ func TestRunOnceChecksPermissionAndDeduplicates(t *testing.T) {
 		}},
 		permission: github.Permission{Permission: "write"},
 	}
-	executor := &fakeExecutor{onExecute: func() {
+	handler := &fakeHandler{onExecute: func() {
 		if len(gh.reactions) != 1 || gh.reactions[0] != "comment-node-123" {
 			t.Fatalf("command executed before eyes reaction: %v", gh.reactions)
 		}
 	}}
 	store := openState(t, first.Add(-time.Minute))
 	clock := first
-	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: executor, Logger: log.New(io.Discard, "", 0), Now: func() time.Time { return clock }}
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Logger: log.New(io.Discard, "", 0), Now: func() time.Time { return clock }}
 	if _, err := m.RunOnce(context.Background(), store); err != nil {
 		t.Fatal(err)
 	}
-	if len(executor.jobs) != 1 || gh.checks != 1 || len(gh.reactions) != 1 {
-		t.Fatalf("got %d jobs, %d permission checks, and %d reactions, want one each", len(executor.jobs), gh.checks, len(gh.reactions))
+	if len(handler.jobs) != 1 || gh.checks != 1 || len(gh.reactions) != 1 {
+		t.Fatalf("got %d jobs, %d permission checks, and %d reactions, want one each", len(handler.jobs), gh.checks, len(gh.reactions))
 	}
 	if len(store.Data.Processed) != 1 || !store.Data.Cursor.After(first.Add(-time.Minute)) {
 		t.Fatalf("state not advanced after successful job: %+v", store.Data)
@@ -461,8 +461,8 @@ func TestRunOnceChecksPermissionAndDeduplicates(t *testing.T) {
 	if _, err := m.RunOnce(context.Background(), store); err != nil {
 		t.Fatal(err)
 	}
-	if len(executor.jobs) != 1 || gh.checks != 1 || len(gh.reactions) != 1 || gh.currentChecks != 1 {
-		t.Fatalf("duplicate command handled: %d jobs, %d permission checks, %d reactions, %d provenance checks", len(executor.jobs), gh.checks, len(gh.reactions), gh.currentChecks)
+	if len(handler.jobs) != 1 || gh.checks != 1 || len(gh.reactions) != 1 || gh.currentChecks != 1 {
+		t.Fatalf("duplicate command handled: %d jobs, %d permission checks, %d reactions, %d provenance checks", len(handler.jobs), gh.checks, len(gh.reactions), gh.currentChecks)
 	}
 }
 
@@ -475,9 +475,9 @@ func TestRunOnceCarriesHistoryAndDeduplicatesEachVariant(t *testing.T) {
 		notifications: []github.Notification{testNotification(now)}, items: []github.Item{item},
 		permission: github.Permission{Permission: "write"},
 	}
-	executor := &fakeExecutor{}
+	handler := &fakeHandler{}
 	store := openState(t, now.Add(-time.Minute))
-	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: executor, Now: func() time.Time { return now }}
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Now: func() time.Time { return now }}
 	for _, body := range []string{"@linkdataminion review", "@linkdataminion review history", "@linkdataminion REVIEW HISTORY"} {
 		gh.items[0].Body = body
 		if _, err := m.RunOnce(context.Background(), store); err != nil {
@@ -485,10 +485,10 @@ func TestRunOnceCarriesHistoryAndDeduplicatesEachVariant(t *testing.T) {
 		}
 		now = now.Add(time.Minute)
 	}
-	if len(executor.jobs) != 2 || len(store.Data.Processed) != 2 {
-		t.Fatalf("jobs = %+v, processed = %v; want two distinct variants", executor.jobs, store.Data.Processed)
+	if len(handler.jobs) != 2 || len(store.Data.Processed) != 2 {
+		t.Fatalf("jobs = %+v, processed = %v; want two distinct variants", handler.jobs, store.Data.Processed)
 	}
-	plain, history := executor.jobs[0], executor.jobs[1]
+	plain, history := handler.jobs[0], handler.jobs[1]
 	if plain.Command.History || !history.Command.History || plain.ID == history.ID {
 		t.Fatalf("history lost or identity reused: plain=%+v history=%+v", plain, history)
 	}
@@ -507,41 +507,41 @@ func TestRunOnceBoundsFailedExecutions(t *testing.T) {
 			now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
 			item := github.Item{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}, HTMLURL: "https://github.com/example-owner/example-repo/pull/7#issuecomment-1"}
 			gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}, items: []github.Item{item}, permission: github.Permission{Permission: "write"}}
-			executor := &fakeExecutor{executeErr: test.err}
+			handler := &fakeHandler{executeErr: test.err}
 			store := openState(t, now.Add(-time.Minute))
-			executor.onExecute = func() {
+			handler.onExecute = func() {
 				if len(store.Data.JobFailures) != 1 {
 					t.Fatalf("execution began before a durable attempt was recorded: %+v", store.Data.JobFailures)
 				}
 				for _, failure := range store.Data.JobFailures {
-					if failure.Attempts != len(executor.jobs)+1 {
+					if failure.Attempts != len(handler.jobs)+1 {
 						t.Fatalf("execution attempt was not recorded first: %+v", failure)
 					}
 				}
 			}
 			clock := now
-			m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: executor, Now: func() time.Time { return clock }}
+			m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Now: func() time.Time { return clock }}
 			for attempt := 1; attempt <= maxJobAttempts; attempt++ {
 				_, err := m.RunOnce(context.Background(), store)
 				if (err != nil) != (attempt < maxJobAttempts) {
 					t.Fatalf("attempt %d error = %v", attempt, err)
 				}
-				if len(executor.jobs) != attempt {
-					t.Fatalf("attempt %d executed %d jobs", attempt, len(executor.jobs))
+				if len(handler.jobs) != attempt {
+					t.Fatalf("attempt %d executed %d jobs", attempt, len(handler.jobs))
 				}
 				clock = clock.Add(time.Minute)
 				for _, pending := range store.Data.PendingNotifications {
 					clock = pending.RetryAt
 				}
 			}
-			if len(gh.comments) != 1 || !strings.HasSuffix(gh.comments[0].Body, "\n\n"+executor.jobs[0].Marker()) {
+			if len(gh.comments) != 1 || !strings.HasSuffix(gh.comments[0].Body, "\n\n"+handler.jobs[0].Marker()) {
 				t.Fatalf("failure reply missing job marker: %+v", gh.comments)
 			}
 			if len(store.Data.Processed) != 1 || len(store.Data.JobFailures) != 0 || !store.Data.Cursor.After(now.Add(-time.Minute)) {
 				t.Fatalf("job did not finish after retry limit: %+v", store.Data)
 			}
-			if _, err := m.RunOnce(context.Background(), store); err != nil || len(executor.jobs) != maxJobAttempts || len(gh.comments) != 1 {
-				t.Fatalf("processed job reran: err=%v jobs=%d replies=%d", err, len(executor.jobs), len(gh.comments))
+			if _, err := m.RunOnce(context.Background(), store); err != nil || len(handler.jobs) != maxJobAttempts || len(gh.comments) != 1 {
+				t.Fatalf("processed job reran: err=%v jobs=%d replies=%d", err, len(handler.jobs), len(gh.comments))
 			}
 		})
 	}
@@ -565,10 +565,10 @@ func TestRunOnceDoesNotExhaustJobsDuringInfrastructureFailure(t *testing.T) {
 			now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
 			item := github.Item{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}, HTMLURL: "https://github.com/example-owner/example-repo/pull/7#issuecomment-1"}
 			gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}, items: []github.Item{item}, permission: github.Permission{Permission: "write"}}
-			executor := &fakeExecutor{executeErr: test.err}
+			handler := &fakeHandler{executeErr: test.err}
 			store := openState(t, now.Add(-time.Minute))
 			clock := now
-			m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: executor, Now: func() time.Time { return clock }}
+			m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Now: func() time.Time { return clock }}
 			for attempt := 1; attempt <= maxJobAttempts+1; attempt++ {
 				if _, err := m.RunOnce(context.Background(), store); err == nil {
 					t.Fatal("infrastructure failure was not surfaced")
@@ -578,8 +578,8 @@ func TestRunOnceDoesNotExhaustJobsDuringInfrastructureFailure(t *testing.T) {
 					clock = pending.RetryAt
 				}
 			}
-			if len(executor.jobs) != maxJobAttempts+1 || len(gh.comments) != 0 || len(store.Data.Processed) != 0 || store.Data.JobFailures[executor.jobs[0].ID].Attempts != 0 {
-				t.Fatalf("temporary outage consumed retry limit: jobs=%d comments=%d state=%+v", len(executor.jobs), len(gh.comments), store.Data)
+			if len(handler.jobs) != maxJobAttempts+1 || len(gh.comments) != 0 || len(store.Data.Processed) != 0 || store.Data.JobFailures[handler.jobs[0].ID].Attempts != 0 {
+				t.Fatalf("temporary outage consumed retry limit: jobs=%d comments=%d state=%+v", len(handler.jobs), len(gh.comments), store.Data)
 			}
 		})
 	}
@@ -589,18 +589,18 @@ func TestRunOnceKeepsTerminalFailureWhenWorkRootFills(t *testing.T) {
 	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
 	item := github.Item{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}, HTMLURL: "https://github.com/example-owner/example-repo/pull/7#issuecomment-1"}
 	gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}, items: []github.Item{item}, permission: github.Permission{Permission: "write"}}
-	executor := &fakeExecutor{executeErr: errors.Join(ErrTerminalJob, workroot.ErrUnsafe)}
+	handler := &fakeHandler{executeErr: errors.Join(ErrTerminalJob, workroot.ErrUnsafe)}
 	store := openState(t, now.Add(-time.Minute))
-	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: executor, Now: func() time.Time { return now }}
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Now: func() time.Time { return now }}
 	if _, err := m.RunOnce(context.Background(), store); err != nil {
 		t.Fatal(err)
 	}
-	if len(executor.jobs) != 1 || len(gh.comments) != 1 || len(store.Data.Processed) != 1 {
-		t.Fatalf("terminal job reran or lacked a failure reply: jobs=%d replies=%d state=%+v", len(executor.jobs), len(gh.comments), store.Data)
+	if len(handler.jobs) != 1 || len(gh.comments) != 1 || len(store.Data.Processed) != 1 {
+		t.Fatalf("terminal job reran or lacked a failure reply: jobs=%d replies=%d state=%+v", len(handler.jobs), len(gh.comments), store.Data)
 	}
 	m.Now = func() time.Time { return now.Add(time.Minute) }
-	if _, err := m.RunOnce(context.Background(), store); err != nil || len(executor.jobs) != 1 || len(gh.comments) != 1 {
-		t.Fatalf("terminal job retried after completion: err=%v jobs=%d replies=%d", err, len(executor.jobs), len(gh.comments))
+	if _, err := m.RunOnce(context.Background(), store); err != nil || len(handler.jobs) != 1 || len(gh.comments) != 1 {
+		t.Fatalf("terminal job retried after completion: err=%v jobs=%d replies=%d", err, len(handler.jobs), len(gh.comments))
 	}
 }
 
@@ -608,13 +608,13 @@ func TestRunOnceCountsPublicationFailureWhenWorkRootFills(t *testing.T) {
 	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
 	item := github.Item{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}, HTMLURL: "https://github.com/example-owner/example-repo/pull/7#issuecomment-1"}
 	gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}, items: []github.Item{item}, permission: github.Permission{Permission: "write"}}
-	executor := &fakeExecutor{executeErr: errors.Join(ErrPostModelPublication, workroot.ErrUnsafe, &github.StatusError{StatusCode: http.StatusBadGateway})}
+	handler := &fakeHandler{executeErr: errors.Join(ErrPostModelPublication, workroot.ErrUnsafe, &github.StatusError{StatusCode: http.StatusBadGateway})}
 	store := openState(t, now.Add(-time.Minute))
-	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: executor, Now: func() time.Time { return now }}
-	if _, err := m.RunOnce(context.Background(), store); err == nil || len(executor.jobs) != 1 {
-		t.Fatalf("publication failure = %v, jobs = %d", err, len(executor.jobs))
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Now: func() time.Time { return now }}
+	if _, err := m.RunOnce(context.Background(), store); err == nil || len(handler.jobs) != 1 {
+		t.Fatalf("publication failure = %v, jobs = %d", err, len(handler.jobs))
 	}
-	if failure := store.Data.JobFailures[executor.jobs[0].ID]; failure.Attempts != 1 {
+	if failure := store.Data.JobFailures[handler.jobs[0].ID]; failure.Attempts != 1 {
 		t.Fatalf("publication failure was refunded when work root filled: %+v", failure)
 	}
 }
@@ -623,16 +623,16 @@ func TestRunOnceBoundsPublicationFailuresAfterModel(t *testing.T) {
 	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
 	item := github.Item{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}, HTMLURL: "https://github.com/example-owner/example-repo/pull/7#issuecomment-1"}
 	gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}, items: []github.Item{item}, permission: github.Permission{Permission: "write"}}
-	executor := &fakeExecutor{executeErr: errors.Join(ErrPostModelPublication, &github.StatusError{StatusCode: http.StatusBadGateway})}
+	handler := &fakeHandler{executeErr: errors.Join(ErrPostModelPublication, &github.StatusError{StatusCode: http.StatusBadGateway})}
 	store := openState(t, now.Add(-time.Minute))
 	clock := now
-	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: executor, Now: func() time.Time { return clock }}
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Now: func() time.Time { return clock }}
 	for attempt := 1; attempt <= maxJobAttempts; attempt++ {
 		_, err := m.RunOnce(context.Background(), store)
-		if (err != nil) != (attempt < maxJobAttempts) || len(executor.jobs) != attempt {
-			t.Fatalf("attempt %d: err=%v jobs=%d", attempt, err, len(executor.jobs))
+		if (err != nil) != (attempt < maxJobAttempts) || len(handler.jobs) != attempt {
+			t.Fatalf("attempt %d: err=%v jobs=%d", attempt, err, len(handler.jobs))
 		}
-		if attempt < maxJobAttempts && store.Data.JobFailures[executor.jobs[0].ID].Attempts != attempt {
+		if attempt < maxJobAttempts && store.Data.JobFailures[handler.jobs[0].ID].Attempts != attempt {
 			t.Fatalf("publication failure refunded attempt %d: %+v", attempt, store.Data.JobFailures)
 		}
 		clock = clock.Add(time.Minute)
@@ -643,8 +643,8 @@ func TestRunOnceBoundsPublicationFailuresAfterModel(t *testing.T) {
 	if len(gh.comments) != 1 || len(store.Data.Processed) != 1 {
 		t.Fatalf("publication failure did not finish: comments=%d state=%+v", len(gh.comments), store.Data)
 	}
-	if _, err := m.RunOnce(context.Background(), store); err != nil || len(executor.jobs) != maxJobAttempts {
-		t.Fatalf("finished job reran: err=%v jobs=%d", err, len(executor.jobs))
+	if _, err := m.RunOnce(context.Background(), store); err != nil || len(handler.jobs) != maxJobAttempts {
+		t.Fatalf("finished job reran: err=%v jobs=%d", err, len(handler.jobs))
 	}
 }
 
@@ -654,26 +654,26 @@ func TestRunOnceTerminalFailureRepliesWithFreshContext(t *testing.T) {
 	gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}, items: []github.Item{item}, permission: github.Permission{Permission: "write"}}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	executor := &fakeExecutor{onExecute: cancel, executeErr: errors.Join(ErrTerminalJob, context.DeadlineExceeded)}
+	handler := &fakeHandler{onExecute: cancel, executeErr: errors.Join(ErrTerminalJob, context.DeadlineExceeded)}
 	store := openState(t, now.Add(-time.Minute))
-	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: executor, Now: func() time.Time { return now }}
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Now: func() time.Time { return now }}
 	if _, err := m.RunOnce(ctx, store); !errors.Is(err, context.Canceled) || !errors.Is(err, ErrTerminalJob) {
 		t.Fatalf("terminal reply lost parent cancellation or execution failure: %v", err)
 	}
-	if len(executor.jobs) != 1 || len(gh.comments) != 1 || len(store.Data.Processed) != 1 || len(store.Data.JobFailures) != 0 {
-		t.Fatalf("terminal job was not handled: jobs=%d comments=%d state=%+v", len(executor.jobs), len(gh.comments), store.Data)
+	if len(handler.jobs) != 1 || len(gh.comments) != 1 || len(store.Data.Processed) != 1 || len(store.Data.JobFailures) != 0 {
+		t.Fatalf("terminal job was not handled: jobs=%d comments=%d state=%+v", len(handler.jobs), len(gh.comments), store.Data)
 	}
 	// A reply may succeed just before saving completion fails. Its marker must
 	// prevent a duplicate reply after restart.
-	id := executor.jobs[0].ID
+	id := handler.jobs[0].ID
 	delete(store.Data.Processed, id)
 	store.Data.JobFailures[id] = state.JobFailure{Attempts: maxJobAttempts}
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}
 	m.Now = func() time.Time { return now.Add(time.Minute) }
-	if _, err := m.RunOnce(context.Background(), store); err != nil || gh.commentCalls != 1 || len(executor.jobs) != 1 || len(store.Data.Processed) != 1 {
-		t.Fatalf("failure reply duplicated after interrupted save: err=%v replies=%d jobs=%d state=%+v", err, gh.commentCalls, len(executor.jobs), store.Data)
+	if _, err := m.RunOnce(context.Background(), store); err != nil || gh.commentCalls != 1 || len(handler.jobs) != 1 || len(store.Data.Processed) != 1 {
+		t.Fatalf("failure reply duplicated after interrupted save: err=%v replies=%d jobs=%d state=%+v", err, gh.commentCalls, len(handler.jobs), store.Data)
 	}
 }
 
@@ -681,17 +681,17 @@ func TestRunOnceStopsAfterFailedReplyAttempts(t *testing.T) {
 	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
 	item := github.Item{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}, HTMLURL: "https://github.com/example-owner/example-repo/pull/7#issuecomment-1"}
 	gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}, items: []github.Item{item}, permission: github.Permission{Permission: "write"}, commentErr: errors.New("comment service unavailable")}
-	executor := &fakeExecutor{executeErr: ErrTerminalJob}
+	handler := &fakeHandler{executeErr: ErrTerminalJob}
 	store := openState(t, now.Add(-time.Minute))
 	clock := now
-	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: executor, Now: func() time.Time { return clock }}
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Now: func() time.Time { return clock }}
 	for attempt := 1; attempt <= maxFailureReplyAttempts; attempt++ {
 		_, err := m.RunOnce(context.Background(), store)
 		if (err != nil) != (attempt < maxFailureReplyAttempts) {
 			t.Fatalf("reply attempt %d error = %v", attempt, err)
 		}
 		if attempt < maxFailureReplyAttempts {
-			failure := store.Data.JobFailures[executor.jobs[0].ID]
+			failure := store.Data.JobFailures[handler.jobs[0].ID]
 			if failure.Attempts != maxJobAttempts || failure.ReplyAttempts != attempt {
 				t.Fatalf("failure disposition was not saved: %+v", failure)
 			}
@@ -701,8 +701,8 @@ func TestRunOnceStopsAfterFailedReplyAttempts(t *testing.T) {
 			clock = pending.RetryAt
 		}
 	}
-	if len(executor.jobs) != 1 || gh.commentCalls != maxFailureReplyAttempts || len(store.Data.Processed) != 1 || !store.Data.Cursor.After(now.Add(-time.Minute)) {
-		t.Fatalf("failed reply pinned job: jobs=%d replies=%d state=%+v", len(executor.jobs), gh.commentCalls, store.Data)
+	if len(handler.jobs) != 1 || gh.commentCalls != maxFailureReplyAttempts || len(store.Data.Processed) != 1 || !store.Data.Cursor.After(now.Add(-time.Minute)) {
+		t.Fatalf("failed reply pinned job: jobs=%d replies=%d state=%+v", len(handler.jobs), gh.commentCalls, store.Data)
 	}
 }
 
@@ -717,14 +717,14 @@ func TestRunOnceIgnoresQuotedOutsiderCommand(t *testing.T) {
 		}},
 		permission: github.Permission{Permission: "write"},
 	}
-	executor := &fakeExecutor{}
+	handler := &fakeHandler{}
 	store := openState(t, now.Add(-time.Minute))
-	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: executor, Logger: log.New(io.Discard, "", 0), Now: func() time.Time { return now }}
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Logger: log.New(io.Discard, "", 0), Now: func() time.Time { return now }}
 	if _, err := m.RunOnce(context.Background(), store); err != nil {
 		t.Fatal(err)
 	}
-	if len(executor.jobs) != 0 || gh.checks != 0 || len(gh.reactions) != 0 {
-		t.Fatalf("quoted outsider command was handled: jobs=%d checks=%d reactions=%d", len(executor.jobs), gh.checks, len(gh.reactions))
+	if len(handler.jobs) != 0 || gh.checks != 0 || len(gh.reactions) != 0 {
+		t.Fatalf("quoted outsider command was handled: jobs=%d checks=%d reactions=%d", len(handler.jobs), gh.checks, len(gh.reactions))
 	}
 }
 
@@ -738,15 +738,15 @@ func TestRunOnceRetriesFailedReaction(t *testing.T) {
 		permission:  github.Permission{Permission: "write"},
 		reactionErr: errors.New("HTTP 503"),
 	}
-	executor := &fakeExecutor{}
+	handler := &fakeHandler{}
 	store := openState(t, now.Add(-time.Minute))
 	initial := store.Data.Cursor
 	clock := now
-	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: executor, Logger: log.New(io.Discard, "", 0), Now: func() time.Time { return clock }}
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Logger: log.New(io.Discard, "", 0), Now: func() time.Time { return clock }}
 	if _, err := m.RunOnce(context.Background(), store); err == nil {
 		t.Fatal("expected reaction failure")
 	}
-	if !store.Data.Cursor.After(initial) || len(store.Data.PendingNotifications) != 1 || len(store.Data.Processed) != 0 || len(executor.jobs) != 0 {
+	if !store.Data.Cursor.After(initial) || len(store.Data.PendingNotifications) != 1 || len(store.Data.Processed) != 0 || len(handler.jobs) != 0 {
 		t.Fatalf("command was lost or executed without acknowledgement: %+v", store.Data)
 	}
 	gh.reactionErr = nil
@@ -754,8 +754,8 @@ func TestRunOnceRetriesFailedReaction(t *testing.T) {
 	if _, err := m.RunOnce(context.Background(), store); err != nil {
 		t.Fatal(err)
 	}
-	if len(gh.reactions) != 2 || len(executor.jobs) != 1 || len(store.Data.PendingNotifications) != 0 {
-		t.Fatalf("reaction retry: %d reactions, %d jobs", len(gh.reactions), len(executor.jobs))
+	if len(gh.reactions) != 2 || len(handler.jobs) != 1 || len(store.Data.PendingNotifications) != 0 {
+		t.Fatalf("reaction retry: %d reactions, %d jobs", len(gh.reactions), len(handler.jobs))
 	}
 }
 
@@ -766,14 +766,14 @@ func TestRunOncePersistsPermissionFailureWithoutPinningCursor(t *testing.T) {
 		items:         []github.Item{{Key: "comment:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}, UpdatedAt: now}},
 		permissionErr: errors.New("HTTP 403"),
 	}
-	executor := &fakeExecutor{}
+	handler := &fakeHandler{}
 	store := openState(t, now.Add(-time.Minute))
 	initial := store.Data.Cursor
-	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: executor, Logger: log.New(io.Discard, "", 0), Now: func() time.Time { return now }}
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Logger: log.New(io.Discard, "", 0), Now: func() time.Time { return now }}
 	if _, err := m.RunOnce(context.Background(), store); err == nil {
 		t.Fatal("expected permission failure")
 	}
-	if !store.Data.Cursor.After(initial) || len(store.Data.PendingNotifications) != 1 || len(store.Data.Processed) != 0 || len(executor.jobs) != 0 {
+	if !store.Data.Cursor.After(initial) || len(store.Data.PendingNotifications) != 1 || len(store.Data.Processed) != 0 || len(handler.jobs) != 0 {
 		t.Fatalf("command was lost or executed after permission failure: %+v", store.Data)
 	}
 }
@@ -815,7 +815,7 @@ func TestRunOnceRetriesFailedThreadAfterCursorAdvances(t *testing.T) {
 		t.Fatal(err)
 	}
 	clock := now
-	m := &Monitor{Config: cfg, GitHub: gh, Handler: &fakeExecutor{}, Logger: log.New(&logs, "", 0), Now: func() time.Time { return clock }}
+	m := &Monitor{Config: cfg, GitHub: gh, Handler: &fakeHandler{}, Logger: log.New(&logs, "", 0), Now: func() time.Time { return clock }}
 	if _, err := m.RunOnce(context.Background(), store); err == nil || !strings.Contains(err.Error(), badItem.HTMLURL) {
 		t.Fatalf("failure did not identify item URL: %v", err)
 	}
@@ -870,7 +870,7 @@ func TestRunOnceRetriesThreadFetchWithoutNewNotification(t *testing.T) {
 	}
 	store := openState(t, initial)
 	clock := now
-	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: &fakeExecutor{}, Now: func() time.Time { return clock }}
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: &fakeHandler{}, Now: func() time.Time { return clock }}
 	if _, err := m.RunOnce(context.Background(), store); err == nil || !store.Data.Cursor.After(initial) {
 		t.Fatalf("failure did not advance global cursor: %v, %+v", err, store.Data)
 	}
@@ -894,14 +894,14 @@ func TestAllowedActorsCannotBypassWritePermission(t *testing.T) {
 	config := testConfig(t)
 	config.Repositories[0].AllowedActors = []string{"writer"}
 	config.Repositories[0].AllowedActorIDs = map[string]int64{"writer": 7}
-	executor := &fakeExecutor{}
+	handler := &fakeHandler{}
 	store := openState(t, now.Add(-time.Minute))
-	m := &Monitor{Config: config, GitHub: gh, Handler: executor, Logger: log.New(io.Discard, "", 0), Now: func() time.Time { return now }}
+	m := &Monitor{Config: config, GitHub: gh, Handler: handler, Logger: log.New(io.Discard, "", 0), Now: func() time.Time { return now }}
 	if _, err := m.RunOnce(context.Background(), store); err != nil {
 		t.Fatal(err)
 	}
-	if gh.checks != 1 || len(executor.jobs) != 0 || len(gh.reactions) != 0 {
-		t.Fatalf("allowlisted reader ran command: checks=%d jobs=%d reactions=%d", gh.checks, len(executor.jobs), len(gh.reactions))
+	if gh.checks != 1 || len(handler.jobs) != 0 || len(gh.reactions) != 0 {
+		t.Fatalf("allowlisted reader ran command: checks=%d jobs=%d reactions=%d", gh.checks, len(handler.jobs), len(gh.reactions))
 	}
 }
 
@@ -914,17 +914,17 @@ func TestEditedCommentCannotUseOriginalAuthorAuthorization(t *testing.T) {
 		}},
 		permission: github.Permission{Permission: "write"},
 	}
-	executor := &fakeExecutor{}
+	handler := &fakeHandler{}
 	config := testConfig(t)
 	config.Repositories[0].AllowedActors = []string{"allowed"}
 	config.Repositories[0].AllowedActorIDs = map[string]int64{"allowed": 7}
 	store := openState(t, first.Add(-time.Minute))
 	clock := first
-	m := &Monitor{Config: config, GitHub: gh, Handler: executor, Logger: log.New(io.Discard, "", 0), Now: func() time.Time { return clock }}
+	m := &Monitor{Config: config, GitHub: gh, Handler: handler, Logger: log.New(io.Discard, "", 0), Now: func() time.Time { return clock }}
 	if _, err := m.RunOnce(context.Background(), store); err != nil {
 		t.Fatal(err)
 	}
-	if len(executor.jobs) != 0 {
+	if len(handler.jobs) != 0 {
 		t.Fatal("plain comment started a job")
 	}
 
@@ -944,8 +944,8 @@ func TestEditedCommentCannotUseOriginalAuthorAuthorization(t *testing.T) {
 	if _, err := m.RunOnce(context.Background(), store); err != nil {
 		t.Fatal(err)
 	}
-	if len(executor.jobs) != 1 || executor.jobs[0].Source.NodeID != "comment-node-2" || gh.checks != 1 || len(gh.reactions) != 1 {
-		t.Fatalf("edited command ran or original command failed: jobs=%+v checks=%d reactions=%v", executor.jobs, gh.checks, gh.reactions)
+	if len(handler.jobs) != 1 || handler.jobs[0].Source.NodeID != "comment-node-2" || gh.checks != 1 || len(gh.reactions) != 1 {
+		t.Fatalf("edited command ran or original command failed: jobs=%+v checks=%d reactions=%v", handler.jobs, gh.checks, gh.reactions)
 	}
 }
 
@@ -1084,14 +1084,14 @@ func TestInvitationOwnerDoesNotAuthorizeCommands(t *testing.T) {
 	config := testConfig(t)
 	config.InvitationOwners = []string{"example-owner", "another-owner"}
 	config.InvitationOwnerIDs = map[string]int64{"example-owner": 2, "another-owner": 3}
-	executor := &fakeExecutor{}
+	handler := &fakeHandler{}
 	store := openState(t, now.Add(-time.Minute))
-	m := &Monitor{Config: config, GitHub: gh, Handler: executor, Now: func() time.Time { return now }}
+	m := &Monitor{Config: config, GitHub: gh, Handler: handler, Now: func() time.Time { return now }}
 	if _, err := m.RunOnce(context.Background(), store); err != nil {
 		t.Fatal(err)
 	}
-	if len(executor.jobs) != 0 || gh.checks != 0 {
-		t.Fatalf("owner-only repository triggered command: jobs=%d permission checks=%d", len(executor.jobs), gh.checks)
+	if len(handler.jobs) != 0 || gh.checks != 0 {
+		t.Fatalf("owner-only repository triggered command: jobs=%d permission checks=%d", len(handler.jobs), gh.checks)
 	}
 }
 
@@ -1130,13 +1130,13 @@ func TestInvitationRegistersRepositoryBeforeAcceptanceAndMonitorsImmediately(t *
 					}
 				},
 			}
-			executor := &fakeExecutor{}
-			m := &Monitor{Config: cfg, ConfigPath: path, GitHub: gh, Handler: executor, Now: func() time.Time { return now }}
+			handler := &fakeHandler{}
+			m := &Monitor{Config: cfg, ConfigPath: path, GitHub: gh, Handler: handler, Now: func() time.Time { return now }}
 			if _, err := m.RunOnce(context.Background(), openState(t, now.Add(-time.Minute))); err != nil {
 				t.Fatal(err)
 			}
-			if len(gh.accepted) != 1 || len(executor.jobs) != 1 || len(m.Config.Repositories) != 2 {
-				t.Fatalf("invitation not registered and handled immediately: accepted=%v jobs=%d config=%+v", gh.accepted, len(executor.jobs), m.Config.Repositories)
+			if len(gh.accepted) != 1 || len(handler.jobs) != 1 || len(m.Config.Repositories) != 2 {
+				t.Fatalf("invitation not registered and handled immediately: accepted=%v jobs=%d config=%+v", gh.accepted, len(handler.jobs), m.Config.Repositories)
 			}
 		})
 	}
@@ -1264,13 +1264,13 @@ func TestReclaimedRepositoryCannotTriggerCommandOrRetry(t *testing.T) {
 			if err := store.Save(); err != nil {
 				t.Fatal(err)
 			}
-			executor := &fakeExecutor{}
-			m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: executor, Now: func() time.Time { return now }}
+			handler := &fakeHandler{}
+			m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Now: func() time.Time { return now }}
 			if _, err := m.RunOnce(context.Background(), store); err != nil {
 				t.Fatal(err)
 			}
-			if gh.threadCalls != 0 || gh.checks != 0 || len(gh.reactions) != 0 || len(executor.jobs) != 0 || len(store.Data.PendingNotifications) != 0 {
-				t.Fatalf("untrusted repository reached command path: threads=%d checks=%d reactions=%v jobs=%v pending=%v", gh.threadCalls, gh.checks, gh.reactions, executor.jobs, store.Data.PendingNotifications)
+			if gh.threadCalls != 0 || gh.checks != 0 || len(gh.reactions) != 0 || len(handler.jobs) != 0 || len(store.Data.PendingNotifications) != 0 {
+				t.Fatalf("untrusted repository reached command path: threads=%d checks=%d reactions=%v jobs=%v pending=%v", gh.threadCalls, gh.checks, gh.reactions, handler.jobs, store.Data.PendingNotifications)
 			}
 		})
 	}
@@ -1296,13 +1296,13 @@ func TestReclaimedLoginCannotAuthorizeCommand(t *testing.T) {
 			cfg.Repositories[0].AllowedActors = []string{"writer"}
 			cfg.Repositories[0].AllowedActorIDs = map[string]int64{"writer": 7}
 			tc.prepare(gh, &cfg)
-			executor := &fakeExecutor{}
-			m := &Monitor{Config: cfg, GitHub: gh, Handler: executor, Now: func() time.Time { return now }}
+			handler := &fakeHandler{}
+			m := &Monitor{Config: cfg, GitHub: gh, Handler: handler, Now: func() time.Time { return now }}
 			if _, err := m.RunOnce(context.Background(), openState(t, now.Add(-time.Minute))); err != nil {
 				t.Fatal(err)
 			}
-			if len(gh.reactions) != 0 || len(executor.jobs) != 0 {
-				t.Fatalf("reclaimed login executed: reactions=%v jobs=%v", gh.reactions, executor.jobs)
+			if len(gh.reactions) != 0 || len(handler.jobs) != 0 {
+				t.Fatalf("reclaimed login executed: reactions=%v jobs=%v", gh.reactions, handler.jobs)
 			}
 		})
 	}
@@ -1335,18 +1335,18 @@ func TestRunOnceCountsInternalCancellation(t *testing.T) {
 			if terminal {
 				executeErr = errors.Join(ErrTerminalJob, executeErr)
 			}
-			executor := &fakeExecutor{executeErr: executeErr}
+			handler := &fakeHandler{executeErr: executeErr}
 			store := openState(t, now.Add(-time.Minute))
-			m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: executor, Now: func() time.Time { return now }}
+			m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Now: func() time.Time { return now }}
 			_, err := m.RunOnce(context.Background(), store)
-			if len(executor.jobs) != 1 {
-				t.Fatalf("jobs=%d", len(executor.jobs))
+			if len(handler.jobs) != 1 {
+				t.Fatalf("jobs=%d", len(handler.jobs))
 			}
 			if terminal {
 				if err != nil || len(gh.comments) != 1 || len(store.Data.Processed) != 1 {
 					t.Fatalf("terminal internal cancellation refunded: err=%v replies=%d processed=%d", err, len(gh.comments), len(store.Data.Processed))
 				}
-			} else if !errors.Is(err, context.Canceled) || store.Data.JobFailures[executor.jobs[0].ID].Attempts != 1 {
+			} else if !errors.Is(err, context.Canceled) || store.Data.JobFailures[handler.jobs[0].ID].Attempts != 1 {
 				t.Fatalf("internal cancellation refunded: err=%v failures=%+v", err, store.Data.JobFailures)
 			}
 		})

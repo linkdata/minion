@@ -39,10 +39,10 @@ func TestCheckGitHubContext(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			job := monitor.Job{Source: github.Item{Body: "@linkdataminion review\n" + tt.notes}}
-			executor := Orchestrator{
+			orchestrator := Orchestrator{
 				MaxGitHubContextBytes: tt.limit,
 			}
-			err := executor.checkGitHubContext(job, tt.title, tt.body)
+			err := orchestrator.checkGitHubContext(job, tt.title, tt.body)
 			if errors.Is(err, errGitHubContextTooLarge) != tt.tooLarge {
 				t.Fatalf("checkGitHubContext() = %v, tooLarge=%t", err, tt.tooLarge)
 			}
@@ -64,7 +64,7 @@ func TestCheckGitHubContext(t *testing.T) {
 
 func TestGitHubContextLimitAcrossActions(t *testing.T) {
 	const title, notes, exactDescription = "T", "N", "éé"
-	modelErr := errors.New("stop after observing the Codex prompt")
+	modelErr := errors.New("stop after observing the model prompt")
 	for _, tt := range []struct {
 		name, commandName, subject, skill string
 		action                            command.Action
@@ -162,7 +162,7 @@ func TestGitHubContextLimitAcrossActions(t *testing.T) {
 					case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7":
 						body := description
 						if tt.action == command.Fix {
-							body = "REST body is not the rendered text sent to Codex"
+							body = "REST body is not the rendered text sent to the model"
 						}
 						respond(w, github.Issue{NodeID: "issue-node", Title: title, Body: body})
 					case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/pulls/7":
@@ -213,39 +213,39 @@ func TestGitHubContextLimitAcrossActions(t *testing.T) {
 				if tt.action == command.Fix {
 					store = openState(t, job.Source.UpdatedAt)
 				}
-				var codexCalls int
-				executor := &Orchestrator{WorkRoot: t.TempDir(), GitHub: client,
+				var modelCalls int
+				orchestrator := &Orchestrator{WorkRoot: t.TempDir(), GitHub: client,
 					BotLogin:              "linkdataminion",
 					Store:                 store,
 					MaxGitHubContextBytes: limit,
 					Commands:              map[string]config.CommandMapping{job.Command.Name: {Action: string(tt.action), Skills: []string{tt.skill}}},
 					Runner: Runner{
-						WorkRoot: t.TempDir(), runModel: func(_ context.Context, modelRequest modelRun) (aicli.Result, error) {
+						runModel: func(_ context.Context, modelRequest modelRun) (aicli.Result, error) {
 							prompt := modelRequest.prompt
-							codexCalls++
+							modelCalls++
 							if !strings.Contains(prompt, strconv.Quote(description)) || !strings.Contains(prompt, strconv.Quote(requestNotes)) ||
 								(tt.action != command.Fix && !strings.Contains(prompt, strconv.Quote(title))) || strings.Contains(prompt, "[truncated]") {
-								t.Errorf("Codex prompt lost GitHub text or clipped it: %q", prompt)
+								t.Errorf("model prompt lost GitHub text or clipped it: %q", prompt)
 							}
 							return aicli.Result{}, modelErr
 						},
 					},
 				}
-				err := executor.Execute(context.Background(), job)
+				err := orchestrator.Execute(context.Background(), job)
 				if mode == "exact" {
-					if !errors.Is(err, modelErr) || codexCalls != 1 {
-						t.Fatalf("exact-limit execution = %v, Codex calls = %d; want model error and one call", err, codexCalls)
+					if !errors.Is(err, modelErr) || modelCalls != 1 {
+						t.Fatalf("exact-limit execution = %v, model calls = %d; want model error and one call", err, modelCalls)
 					}
 					return
 				}
 				if mode == "reply retry" {
-					if err == nil || errors.Is(err, monitor.ErrTerminalJob) || errors.Is(err, monitor.ErrPostModelPublication) || codexCalls != 0 {
-						t.Fatalf("failed refusal publication = %v, Codex calls = %d; want retryable error and zero calls", err, codexCalls)
+					if err == nil || errors.Is(err, monitor.ErrTerminalJob) || errors.Is(err, monitor.ErrPostModelPublication) || modelCalls != 0 {
+						t.Fatalf("failed refusal publication = %v, model calls = %d; want retryable error and zero calls", err, modelCalls)
 					}
-					err = executor.Execute(context.Background(), job)
+					err = orchestrator.Execute(context.Background(), job)
 				}
-				if err != nil || codexCalls != 0 {
-					t.Fatalf("oversized execution = %v, Codex calls = %d; want fixed refusal and zero calls", err, codexCalls)
+				if err != nil || modelCalls != 0 {
+					t.Fatalf("oversized execution = %v, model calls = %d; want fixed refusal and zero calls", err, modelCalls)
 				}
 				mu.Lock()
 				got := append([]github.Comment(nil), replies...)
@@ -254,8 +254,8 @@ func TestGitHubContextLimitAcrossActions(t *testing.T) {
 				if len(got) != 1 || got[0].Body != want {
 					t.Fatalf("refusal replies = %+v; want %q", got, want)
 				}
-				if err := executor.Execute(context.Background(), job); err != nil || codexCalls != 0 {
-					t.Fatalf("repeated rejected request = %v, Codex calls = %d", err, codexCalls)
+				if err := orchestrator.Execute(context.Background(), job); err != nil || modelCalls != 0 {
+					t.Fatalf("repeated rejected request = %v, model calls = %d", err, modelCalls)
 				}
 				mu.Lock()
 				replyCount := len(replies)

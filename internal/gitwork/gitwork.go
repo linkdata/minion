@@ -30,6 +30,7 @@ const (
 	// maxChangedPathListBytes bounds a changed-path listing with Git's record metadata.
 	maxChangedPathListBytes = (workspace.MaxChanges + 1) * (workspace.MaxPathBytes + 128)
 
+	// maxPathListBytes bounds source and PR path listings including Git record metadata.
 	maxPathListBytes = workspace.MaxFiles * (workspace.MaxPathBytes + 128)
 )
 
@@ -40,7 +41,6 @@ var (
 	errHeadMoved         = errors.New("pull request head changed")
 	ErrCheckoutTooLarge  = errors.New("source tree exceeds checkout limits")
 	ErrUnsupportedSource = errors.New("source tree is unsupported")
-	credentialHelperGH   = resolveCredentialHelperGH()
 )
 
 func resolveCredentialHelperGH() string {
@@ -72,9 +72,6 @@ func Clone(ctx context.Context, workRoot, repo, defaultBranch string, lookupTree
 	url, err := repositoryURL(repo)
 	if err != nil {
 		return nil, err
-	}
-	if err := validateBranch(defaultBranch); err != nil {
-		return nil, fmt.Errorf("default branch: %w", err)
 	}
 	return cloneFromURL(ctx, workRoot, url, defaultBranch, lookupTree, checkoutFiles)
 }
@@ -109,9 +106,6 @@ func clonePullRequestFromURL(ctx context.Context, workRoot, url string, number i
 	if number <= 0 {
 		return nil, fmt.Errorf("invalid pull request number %d", number)
 	}
-	if err := validateBranch(baseRef); err != nil {
-		return nil, fmt.Errorf("pull request base: %w", err)
-	}
 	if !workspace.ValidSHA(expectedHeadSHA) {
 		return nil, fmt.Errorf("invalid expected pull request SHA %q", expectedHeadSHA)
 	}
@@ -127,11 +121,11 @@ func clonePullRequestFromURL(ctx context.Context, workRoot, url string, number i
 
 // cloneRepository fetches filtered objects and configures a trusted checkout before materialization.
 func cloneRepository(ctx context.Context, workRoot, url, defaultBranch string, lookupTree func(context.Context, string) (github.GitTree, error)) (_ *Checkout, err error) {
+	if err := validateBranch(defaultBranch); err != nil {
+		return nil, err
+	}
 	if lookupTree == nil {
 		return nil, errors.New("source tree metadata lookup is missing")
-	}
-	if strings.TrimSpace(workRoot) == "" {
-		return nil, errors.New("work root is empty")
 	}
 	workRoot, err = workspace.PrepareRoot(workRoot)
 	if err != nil {
@@ -490,7 +484,7 @@ func runGitInputTo(ctx context.Context, dir string, stdin io.Reader, stdout io.W
 		"-c", "user.name=Minion",
 		"-c", "user.email=minion@localhost",
 		"-c", "credential.helper=",
-		"-c", credentialHelperConfig(credentialHelperGH),
+		"-c", credentialHelperConfig(resolveCredentialHelperGH()),
 		"-c", "push.gpgSign=false",
 		"-c", "submodule.recurse=false",
 	}
@@ -525,6 +519,14 @@ func classifyPathError(operation, message string, err error) error {
 		return fmt.Errorf("%w: %w", ErrUnsupportedSource, err)
 	}
 	return err
+}
+
+// disableAttributes disables repository transformations on trusted and offline indexes.
+func disableAttributes(gitDir string) error {
+	if err := os.MkdirAll(filepath.Join(gitDir, "info"), 0700); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(gitDir, "info", "attributes"), []byte(gitAttributes), 0600)
 }
 
 // hardeningArgs returns shared Git safeguards. Callers select credentials and

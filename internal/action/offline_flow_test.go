@@ -23,7 +23,7 @@ import (
 	"github.com/linkdata/minion/internal/state"
 )
 
-// Exercise the real API client, monitor, executor, and Git checkout together.
+// Exercise the real API client, monitor, orchestrator, and Git checkout together.
 // All GitHub responses come from this local server; Git uses a local bare repo.
 func TestOfflineReviewPollRecoversAfterPublication(t *testing.T) {
 	_, head, _ := gitFixtureRemote(t)
@@ -176,15 +176,15 @@ func TestOfflineReviewPollRecoversAfterPublication(t *testing.T) {
 	run := func(at time.Time, store *state.Store) {
 		t.Helper()
 		client := testGitHub(server, "offline-token")
-		executor := &Orchestrator{WorkRoot: t.TempDir(), GitHub: client,
+		orchestrator := &Orchestrator{WorkRoot: t.TempDir(), GitHub: client,
 			BotLogin: "linkdataminion",
 			Store:    store,
 			Commands: commands,
 			Runner: Runner{
-				WorkRoot: t.TempDir(), runModel: func(_ context.Context, modelRequest modelRun) (aicli.Result, error) {
+				runModel: func(_ context.Context, modelRequest modelRun) (aicli.Result, error) {
 					dir, prompt, writable, outputDir := modelRequest.dir, modelRequest.prompt, modelRequest.writable, modelRequest.outputDir
 					if _, err := os.Stat(dir); err != nil || writable || outputDir != "" || !strings.Contains(prompt, head) {
-						return aicli.Result{}, fmt.Errorf("unexpected Codex invocation: dir=%q writable=%t output=%q stat=%v", dir, writable, outputDir, err)
+						return aicli.Result{}, fmt.Errorf("unexpected model invocation: dir=%q writable=%t output=%q stat=%v", dir, writable, outputDir, err)
 					}
 					record("codex")
 					return aicli.Result{Answer: "No findings."}, nil
@@ -193,7 +193,7 @@ func TestOfflineReviewPollRecoversAfterPublication(t *testing.T) {
 		}
 		m := monitor.Monitor{Config: config.Config{BotLogin: "linkdataminion", PollIntervalSeconds: 60, Commands: commands,
 			Repositories: []config.Repository{{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"review"}, AllowedActors: []string{"writer"}, AllowedActorIDs: map[string]int64{"writer": 7}}}},
-			GitHub: client, Handler: executor, Now: func() time.Time { return at }}
+			GitHub: client, Handler: orchestrator, Now: func() time.Time { return at }}
 		if _, err := m.RunOnce(context.Background(), store); err != nil {
 			t.Fatal(err)
 		}
