@@ -438,15 +438,15 @@ func checkUnchanged(ctx context.Context, root string, base []File) error {
 		}
 		old, exists := prior[rel]
 		if !exists {
-			return fmt.Errorf("read-only action modified supplied source: added %q", rel)
+			return fmt.Errorf("workspace changed: added %q", rel)
 		}
 		data, info, err := readFile(name, int64(len(old.Data)))
 		if err != nil {
-			return fmt.Errorf("read-only action modified supplied source: cannot verify %q: %w", rel, err)
+			return fmt.Errorf("workspace changed: cannot verify %q: %w", rel, err)
 		}
 		delete(prior, rel)
 		if info.Mode() != fs.FileMode(old.Mode&0777) || !bytes.Equal(old.Data, data) {
-			return fmt.Errorf("read-only action modified supplied source: changed %q", rel)
+			return fmt.Errorf("workspace changed: changed %q", rel)
 		}
 		return nil
 	})
@@ -454,7 +454,7 @@ func checkUnchanged(ctx context.Context, root string, base []File) error {
 		return err
 	}
 	if len(prior) != 0 {
-		return fmt.Errorf("read-only action modified supplied source: deleted %q", slices.Min(slices.Collect(maps.Keys(prior))))
+		return fmt.Errorf("workspace changed: deleted %q", slices.Min(slices.Collect(maps.Keys(prior))))
 	}
 	return nil
 }
@@ -499,11 +499,15 @@ func ReadChanges(ctx context.Context, root string, selected []Change) ([]Change,
 // walk visits bounded entries without following directory symlinks.
 func walk(ctx context.Context, root string, visit func(string, fs.DirEntry) error) error {
 	root = filepath.Clean(root)
-	dirs := []string{root}
+	type directory struct{ parent, name string }
+	dirs := []directory{{name: root}}
 	entries := 0
 	for len(dirs) > 0 {
-		dir := dirs[len(dirs)-1]
-		dirs = dirs[:len(dirs)-1]
+		last := len(dirs) - 1
+		current := dirs[last]
+		dirs[last] = directory{}
+		dirs = dirs[:last]
+		dir := filepath.Join(current.parent, current.name)
 		err := func() (resultErr error) {
 			f, err := openPath(dir, true)
 			if err != nil {
@@ -528,7 +532,7 @@ func walk(ctx context.Context, root string, visit func(string, fs.DirEntry) erro
 						return err
 					}
 					if entry.IsDir() {
-						dirs = append(dirs, name)
+						dirs = append(dirs, directory{parent: dir, name: entry.Name()})
 					}
 				}
 				if errors.Is(readErr, io.EOF) {
@@ -725,10 +729,12 @@ func readFile(name string, limit int64) (data []byte, info fs.FileInfo, resultEr
 	if !singleLink(opened) {
 		return nil, nil, errors.New("file must have exactly one hard link")
 	}
-	data, err = io.ReadAll(io.LimitReader(f, opened.Size()+1))
-	if err != nil {
+	data = make([]byte, opened.Size()+1)
+	n, err := io.ReadFull(f, data)
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
 		return nil, nil, err
 	}
+	data = data[:n]
 	after, err := f.Stat()
 	if err != nil {
 		return nil, nil, err

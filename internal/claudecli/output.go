@@ -218,7 +218,7 @@ func (o *jsonlOutput) finishLine(line []byte) {
 		var tasks []struct {
 			Ambient bool `json:"ambient"`
 		}
-		if len(e.Tasks) == 0 || e.Tasks[0] != '[' || json.Unmarshal(e.Tasks, &tasks) != nil {
+		if json.Unmarshal(e.Tasks, &tasks) != nil || tasks == nil {
 			o.fail(errors.New("invalid Claude background task list"))
 			return
 		}
@@ -486,13 +486,9 @@ func toolSandboxFailure(content json.RawMessage) bool {
 }
 
 func sandboxFailure(text string) bool {
-	for _, line := range bytes.Split([]byte(text), []byte{'\n'}) {
-		// Bare bwrap/apply-seccomp output can come from repository commands.
-		if bytes.HasPrefix(line, []byte("Sandbox is required but failed to initialize:")) {
-			return true
-		}
-	}
-	return false
+	// Bare bwrap/apply-seccomp output can come from repository commands.
+	const prefix = "Sandbox is required but failed to initialize:"
+	return strings.HasPrefix(text, prefix) || strings.Contains(text, "\n"+prefix)
 }
 
 func isWaitCeilingStop(line []byte) bool {

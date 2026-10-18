@@ -27,7 +27,7 @@ jobs:
       - name: Go vet
         run: go vet ./...
 
-      - name: Compile alternate platform
+      - name: Vet darwin build
         run: GOOS=darwin go vet ./...
 
       - name: Check gofmt

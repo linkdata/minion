@@ -161,8 +161,12 @@ func TestReviewSnapshotCleansFailedReportFreeze(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeFixtureFile(t, output, "findings.json", make([]byte, maxAuditArtifactBytes+1))
-	if snapshot, err := freezeReviewSnapshot(context.Background(), workRoot, job, source, output, nil); err == nil || snapshot != nil || !strings.Contains(err.Error(), "limit") {
+	snapshot, err := freezeReviewSnapshot(context.Background(), workRoot, job, source, output, nil)
+	if err == nil || snapshot == nil || !strings.Contains(err.Error(), "limit") {
 		t.Fatalf("oversized reports accepted: %+v,%v", snapshot, err)
+	}
+	if err := snapshot.close(); err != nil {
+		t.Fatal(err)
 	}
 	if entries, err := os.ReadDir(workRoot); err != nil || len(entries) != 0 {
 		t.Fatalf("failed freeze left copies: %v,%v", entries, err)
@@ -199,8 +203,11 @@ func TestReviewSnapshotCleansFailedFixCandidateMaterialization(t *testing.T) {
 				t.Fatal(err)
 			}
 			failed, err := freezeReviewSnapshot(context.Background(), workRoot, job, source, "", index)
-			if failed != nil || !errors.Is(err, syscall.ENAMETOOLONG) {
+			if failed == nil || !failed.ownedSource || !errors.Is(err, syscall.ENAMETOOLONG) {
 				t.Fatalf("expected %s filesystem failure: snapshot=%v error=%v", stage, failed, err)
+			}
+			if err := failed.close(); err != nil {
+				t.Fatal(err)
 			}
 			entries, err := os.ReadDir(workRoot)
 			if err != nil || len(entries) != 0 {
@@ -254,6 +261,37 @@ func TestReviewSnapshotRejectsCriticCopyMutation(t *testing.T) {
 			last, wantApproval := result.Calls[len(result.Calls)-1], phase == reviewVerification
 			if last.Approved != wantApproval || last.NoBlockers != wantApproval || last.HasBlockers != (phase == reviewFull) {
 				t.Fatalf("lost native critic verdict after integrity failure: %+v", last)
+			}
+		})
+	}
+}
+
+func TestReviewSnapshotCancellationKeepsVerdictWithoutIntegrityFailure(t *testing.T) {
+	for _, interrupted := range []bool{false, true} {
+		t.Run(fmt.Sprintf("canceled=%t", interrupted), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			job := withClaudeCritic(portableJob(command.Fix))
+			runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+				if request.role == roleMain {
+					writeFixtureFile(t, request.dir, "source.txt", []byte("candidate"))
+					return aicli.Result{Answer: proposalJSON("Completed fix.", "")}, nil
+				}
+				if interrupted {
+					cancel()
+				}
+				return aicli.Result{Answer: approvedCritiqueJSON}, nil
+			}}
+			result, err := runner.Run(ctx, job)
+			if interrupted {
+				if !errors.Is(err, context.Canceled) || errors.Is(err, monitor.ErrTerminalJob) || strings.Contains(err.Error(), "frozen") || result.Answer != "" || len(result.Changes) != 0 {
+					t.Fatalf("cancellation reported as an integrity failure: result=%+v error=%v", result, err)
+				}
+			} else if err != nil || result.Answer != "Completed fix." || len(result.Changes) != 1 {
+				t.Fatalf("valid candidate refused: result=%+v error=%v", result, err)
+			}
+			if len(result.Calls) != 2 || !result.Calls[1].Approved {
+				t.Fatalf("lost actual critic verdict: %+v", result.Calls)
 			}
 		})
 	}

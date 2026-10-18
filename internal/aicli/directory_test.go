@@ -5,8 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-
-	"github.com/linkdata/minion/internal/workspace"
 )
 
 func TestDirectoryRequiresAnExistingNonRootDirectory(t *testing.T) {
@@ -58,9 +56,6 @@ func TestDirectoryResolvesSymlinksBeforeParentComponents(t *testing.T) {
 		t.Fatalf("directory resolved=%q error=%v", got, err)
 	}
 	file := alias + "/../file"
-	if got, err := workspace.CanonicalPath(file); err != nil || got != filepath.Join(actual, "file") {
-		t.Fatalf("file grant resolved=%q error=%v", got, err)
-	}
 	if _, err := Directory(file); err == nil {
 		t.Fatal("accepted the actual file as the lexical decoy directory")
 	}

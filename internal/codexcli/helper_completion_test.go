@@ -16,14 +16,12 @@ import (
 
 func TestKnownHelpersRequireLifecycleAccess(t *testing.T) {
 	fallback := usage.Tokens{Input: 100, CachedInput: 10, Output: 7}
-	for _, scenario := range []string{"missing home", "missing root ID", "missing log", "canceled scan"} {
+	for _, scenario := range []string{"missing root ID", "missing log", "canceled scan"} {
 		t.Run(scenario, func(t *testing.T) {
 			home, rootID := t.TempDir(), "root"
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			switch scenario {
-			case "missing home":
-				home = ""
 			case "missing root ID":
 				rootID = ""
 			case "canceled scan":

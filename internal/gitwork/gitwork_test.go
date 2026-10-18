@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/linkdata/minion/internal/github"
+	"github.com/linkdata/minion/internal/testsupport"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -567,6 +568,4 @@ func writeFile(t *testing.T, path, content string) {
 }
 
 // shellQuote treats fixture paths as literal shell arguments.
-func shellQuote(value string) string {
-	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
-}
+var shellQuote = testsupport.ShellQuote

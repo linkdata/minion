@@ -36,6 +36,7 @@ type OfflineIndex struct {
 }
 
 // NewOfflineIndex creates private Git metadata for a materialized source snapshot.
+// The caller supplies canonical absolute directories, with metadata outside source and model grants.
 func NewOfflineIndex(ctx context.Context, dir, source string, files []workspace.File) (*OfflineIndex, error) {
 	binary, err := aicli.AbsoluteExecutable("git")
 	if err != nil {
@@ -181,17 +182,19 @@ func (index *OfflineIndex) checkControlFiles(ctx context.Context) error {
 		}
 	}
 	type directory struct {
-		name    string
-		ignored bool
+		parent, name string
+		ignored      bool
 	}
 	dirs, entries := []directory{{name: "."}}, 0
 	for len(dirs) != 0 {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		current := dirs[len(dirs)-1]
-		dirs = dirs[:len(dirs)-1]
-		dir := current.name
+		last := len(dirs) - 1
+		current := dirs[last]
+		dirs[last] = directory{}
+		dirs = dirs[:last]
+		dir := path.Join(current.parent, current.name)
 		absolute := filepath.Join(index.source, filepath.FromSlash(dir))
 		for _, control := range []string{".gitignore", ".gitattributes"} {
 			name := path.Join(dir, control)
@@ -254,13 +257,17 @@ func (index *OfflineIndex) checkControlFiles(ctx context.Context) error {
 					if err != nil {
 						return err
 					}
+					names, err := splitNUL(ignored)
+					if err != nil {
+						return fmt.Errorf("invalid offline git ignore output: %w", err)
+					}
 					skip := map[string]bool{}
-					for _, name := range bytes.Split(ignored, []byte{0}) {
+					for _, name := range names {
 						skip[strings.TrimPrefix(string(name), ":(top)")] = true
 					}
 					for _, name := range candidates {
 						if !skip[name] || trackedDirs[name] {
-							dirs = append(dirs, directory{name: name, ignored: skip[name]})
+							dirs = append(dirs, directory{parent: dir, name: path.Base(name), ignored: skip[name]})
 						}
 					}
 				}

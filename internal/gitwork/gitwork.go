@@ -349,7 +349,7 @@ func (c *Checkout) commitAndPush(ctx context.Context, pushURL, branch, botLogin,
 	if err := beforePush(c.expectedHead); err != nil {
 		return fmt.Errorf("record commit before push: %w", err)
 	}
-	_, err = runGit(ctx, c.path, "push", "--porcelain", "--no-verify", "--", pushURL, "HEAD:refs/heads/"+branch)
+	_, err = runGit(ctx, c.path, "push", "--no-verify", "--", pushURL, "HEAD:refs/heads/"+branch)
 	return err
 }
 
@@ -522,7 +522,7 @@ func hardeningArgs() []string {
 }
 
 func credentialHelperConfig(path string) string {
-	return "credential.helper=!'" + strings.ReplaceAll(path, "'", "'\\''") + "' auth git-credential"
+	return "credential.helper=!" + aicli.ShellQuote(path) + " auth git-credential"
 }
 
 func cleanGitEnvironment() []string {

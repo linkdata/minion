@@ -32,7 +32,7 @@ func TestReviewRoundBudgetIncludesEveryFreshFullRejection(t *testing.T) {
 				}
 				return aicli.Result{Answer: answer}, nil
 			}}
-			answer, err := runner.runAI(context.Background(), job, "source", "Complete the task.", true, "", nil)
+			answer, err := runner.runAI(context.Background(), job, "source", "Complete the task.", "", nil)
 			if !errors.Is(err, monitor.ErrTerminalJob) || answer != "" || calls != 3*rounds-1 || !strings.Contains(err.Error(), fmt.Sprintf("after %d round(s)", rounds)) {
 				t.Fatalf("round budget: answer=%q error=%v calls=%d want=%d", answer, err, calls, 3*rounds-1)
 			}

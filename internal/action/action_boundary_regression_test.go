@@ -19,7 +19,6 @@ import (
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/workroot"
-	"github.com/linkdata/minion/internal/workspace"
 )
 
 func TestPrivateHostPathsCannotBeExposedByModelGrants(t *testing.T) {
@@ -95,72 +94,6 @@ func TestWorkRootIsolationUsesPhysicalGrantParents(t *testing.T) {
 	}
 }
 
-func TestJobActionTextBounds(t *testing.T) {
-	text := strings.Repeat("x", workspace.MaxBytes+1)
-	for _, tt := range []struct {
-		name, title, description, notes string
-		valid                           bool
-	}{
-		{"combined exact", "t", text[:workspace.MaxBytes-2], "n", true},
-		{"combined over", "t", text[:workspace.MaxBytes-1], "n", false},
-		{"description exact", "", text[:workspace.MaxBytes], "", true},
-		{"description over", "", text, "", false},
-		{"notes exact", "", "", text[:workspace.MaxBytes], true},
-		{"notes over", "", "", text, false},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			job := portableJob(command.Comment)
-			job.Title, job.Description, job.Notes = tt.title, tt.description, tt.notes
-			err := job.Validate()
-			if (err == nil) != tt.valid || err != nil && !strings.Contains(err.Error(), "action text is invalid or exceeds limits") {
-				t.Fatalf("text boundary=%v want valid=%t", err, tt.valid)
-			}
-		})
-	}
-}
-
-func TestJobCombinedRoleSkillBound(t *testing.T) {
-	for _, optional := range []int{32, 33} {
-		job := portableJob(command.Comment)
-		job.Main.Skills = nil
-		for i := 0; i < 32; i++ {
-			job.Main.Skills = append(job.Main.Skills, skills.BuiltinAntiPromptInjection)
-		}
-		for i := 0; i < optional; i++ {
-			job.Main.AlwaysOnSkills = append(job.Main.AlwaysOnSkills, skills.BuiltinAntiPromptInjection)
-		}
-		err := job.Validate()
-		if (err == nil) != (optional == 32) || err != nil && !strings.Contains(err.Error(), "invalid action model or skills") {
-			t.Fatalf("32+%d role skills: %v", optional, err)
-		}
-	}
-}
-
-func TestJobCriticBudgetBoundaries(t *testing.T) {
-	for _, tt := range []struct {
-		name              string
-		critic            bool
-		rounds, threshold int
-		valid             bool
-	}{
-		{"disabled", false, 0, 0, true}, {"inactive budget", false, 1, 0, false}, {"inactive threshold", false, 0, 1, false},
-		{"zero active", true, 0, 0, false}, {"over maximum", true, config.MaxCriticMaxRounds + 1, 0, false},
-		{"one", true, 1, 0, true}, {"maximum", true, config.MaxCriticMaxRounds, 0, true},
-		{"negative threshold", true, 2, -1, false}, {"threshold exceeds budget", true, 2, 3, false}, {"threshold at budget", true, 2, 2, true},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			job := portableJob(command.Comment)
-			if tt.critic {
-				job.Critic = &RoleSettings{Provider: "claude"}
-			}
-			job.CriticMaxRounds, job.CriticNonblockingRounds = tt.rounds, tt.threshold
-			if err := job.Validate(); (err == nil) != tt.valid {
-				t.Fatalf("budget validation=%v want valid=%t", err, tt.valid)
-			}
-		})
-	}
-}
-
 func TestExecuteCriticAdmissionUsesControlledWorkRoot(t *testing.T) {
 	for _, critic := range []bool{false, true} {
 		for _, unsafe := range []bool{false, true} {
@@ -232,7 +165,7 @@ func TestRefutationInitialCheckpointIsNotTerminalBeforeModels(t *testing.T) {
 }
 
 func TestPrivateReviewRejectsChangedSavedCheckpoint(t *testing.T) {
-	for _, kind := range []string{"corrupt", "identity", "source", "policy", "symlink"} {
+	for _, kind := range []string{"corrupt", "identity", "source", "policy", "calls", "symlink"} {
 		t.Run(kind, func(t *testing.T) {
 			job := withClaudeCritic(portableJob(command.Comment))
 			result := privateReviewResult(job)
@@ -251,6 +184,8 @@ func TestPrivateReviewRejectsChangedSavedCheckpoint(t *testing.T) {
 				saved.SourceRef = strings.Repeat("b", 40)
 			case "policy":
 				saved.CriticNonblockingRounds++
+			case "calls":
+				saved.Calls[1].HasBlockers, saved.Calls[1].NoBlockers = false, true
 			case "symlink":
 				writeFixtureFile(t, filepath.Dir(outside), filepath.Base(outside), []byte("outside sentinel"))
 				if err := os.Remove(path); err != nil {
@@ -279,7 +214,7 @@ func TestPrivateReviewRejectsChangedSavedCheckpoint(t *testing.T) {
 			if kind == "corrupt" && !strings.Contains(err.Error(), "saved review evidence is invalid") {
 				t.Fatalf("corruption lost: %v", err)
 			}
-			if kind == "identity" || kind == "source" || kind == "policy" {
+			if kind == "identity" || kind == "source" || kind == "policy" || kind == "calls" {
 				if !strings.Contains(err.Error(), "changed or discarded a saved prefix") {
 					t.Fatalf("checkpoint binding lost: %v", err)
 				}

@@ -72,7 +72,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.comp
 	}
 }
 
-func TestRunConfiguredKeyAllowsMissingNativeHome(t *testing.T) {
+func TestRunConfiguredKeyRequiresKnownNativeHome(t *testing.T) {
 	for _, noHome := range []bool{false, true} {
 		t.Run(map[bool]string{false: "explicit missing", true: "unavailable"}[noHome], func(t *testing.T) {
 			binary := installFakeCodex(t, "#!/bin/sh\nprintf '%s\\n' \"${CODEX_HOME-}\" > \"$0.home\"\ncat >/dev/null\nprintf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"answer\"}}' '{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":10,\"cached_input_tokens\":0,\"output_tokens\":1}}'\n")

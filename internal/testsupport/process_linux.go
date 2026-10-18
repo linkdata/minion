@@ -14,13 +14,13 @@ import (
 	"time"
 )
 
-// WaitExited observes a pinned proc stat file without reopening, signalling or closing it.
-func WaitExited(ctx context.Context, pinned *os.File) error {
+// WaitExited observes the pinned proc stat file without reopening, signalling or closing it.
+func (p *Process) WaitExited(ctx context.Context) error {
 	ticker := time.NewTicker(5 * time.Millisecond)
 	defer ticker.Stop()
 	buffer := make([]byte, 4096)
 	for {
-		n, err := pinned.ReadAt(buffer, 0)
+		n, err := p.stat.ReadAt(buffer, 0)
 		if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ESRCH) {
 			return nil
 		}
@@ -44,7 +44,7 @@ func WaitExited(ctx context.Context, pinned *os.File) error {
 }
 
 // Process pins one process created by a test-owned fixture.
-// Callers retain their startup polling, deadlines and native-result assertions.
+// Callers retain their deadlines and native-result assertions.
 type Process struct {
 	process *os.Process
 	stat    *os.File
@@ -73,7 +73,25 @@ func PinProcess(pidFile string) (*Process, error) {
 	return &Process{process: process, stat: stat}, nil
 }
 
-func (p *Process) WaitExited(ctx context.Context) error { return WaitExited(ctx, p.stat) }
+// WaitForProcess pins a fixture child before its run completes or startup expires.
+func WaitForProcess[T any](ctx context.Context, pidFile string, done <-chan T) (*Process, error) {
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			child, err := PinProcess(pidFile)
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return child, err
+		case result := <-done:
+			return nil, fmt.Errorf("run exited before fixture child was pinned: %+v", result)
+		case <-ctx.Done():
+			return nil, fmt.Errorf("fixture child did not start: %w", ctx.Err())
+		}
+	}
+}
 
 // Cleanup kills the pinned fixture, observes its exit and releases both handles.
 func (p *Process) Cleanup(ctx context.Context) error {

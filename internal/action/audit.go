@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/linkdata/minion/internal/aicli"
+	"github.com/linkdata/minion/internal/processgroup"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -19,31 +20,34 @@ var auditValidators = []struct{ script, artifact string }{
 	{"validate-coverage-ledger.cjs", "coverage-ledger.json"},
 }
 
-func checkAuditTools(ctx context.Context, dir, skill string) error {
+func checkAuditTools(ctx context.Context, dir, skill string) (string, error) {
 	for _, validator := range auditValidators {
 		script := filepath.Join(filepath.Dir(skill), validator.script)
 		info, err := os.Stat(script)
 		if err != nil {
-			return fmt.Errorf("audit validator %q: %w", script, err)
+			return "", fmt.Errorf("audit validator %q: %w", script, err)
 		}
 		if !info.Mode().IsRegular() {
-			return fmt.Errorf("audit validator %q is not a regular file", script)
+			return "", fmt.Errorf("audit validator %q is not a regular file", script)
 		}
 	}
-	_, err := auditNodePermissionFlag(ctx, dir)
-	return err
+	return auditNodePermissionFlag(ctx, dir)
 }
 
 func readAuditArtifacts(outputDir string, partial bool) ([]workspace.File, []Diagnostic, error) {
 	var files []workspace.File
 	var diagnostics []Diagnostic
 	for _, name := range auditArtifacts {
-		data, err := workspace.ReadRegular(filepath.Join(outputDir, name), auditArtifactLimit(name))
+		limit := int64(maxAuditArtifactBytes)
+		if name == "REPORT.md" {
+			limit = maxOutputBytes
+		}
+		data, err := workspace.ReadRegular(filepath.Join(outputDir, name), limit)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
-		if err == nil && !partial && name == "REPORT.md" && !modelOutputFits(string(data)) {
-			err = errors.New("audit REPORT.md is not valid UTF-8 or exceeds publication limit")
+		if err == nil && !partial && name == "REPORT.md" && !publishableAnswer(string(data)) {
+			err = errors.New("audit REPORT.md is invalid or exceeds publication limit")
 		}
 		if err != nil {
 			if !partial {
@@ -61,14 +65,7 @@ func auditArtifactMayBeEmpty(name string) bool {
 	return name == "FINDINGS-DETAIL.md" || name == "NEEDS-VALIDATION.md"
 }
 
-func auditArtifactLimit(name string) int64 {
-	if name == "REPORT.md" {
-		return maxOutputBytes
-	}
-	return maxAuditArtifactBytes
-}
-
-func validateAuditFiles(ctx context.Context, files []workspace.File, validationDir, skill, repo, target, head string) (string, error) {
+func validateAuditFiles(ctx context.Context, files []workspace.File, validationDir, skill, permissionFlag, repo, target, head string) (string, error) {
 	byPath := make(map[string][]byte, len(files))
 	for _, file := range files {
 		byPath[file.Path] = file.Data
@@ -87,10 +84,6 @@ func validateAuditFiles(ctx context.Context, files []workspace.File, validationD
 		if err := os.WriteFile(filepath.Join(validationDir, validator.artifact), byPath[validator.artifact], 0600); err != nil {
 			return "", fmt.Errorf("copy audit %s for validation: %w", validator.artifact, err)
 		}
-	}
-	permissionFlag, err := auditNodePermissionFlag(ctx, validationDir)
-	if err != nil {
-		return "", err
 	}
 	for _, validator := range auditValidators {
 		script := filepath.Join(filepath.Dir(skill), validator.script)
@@ -229,5 +222,6 @@ func auditNodeCommand(ctx context.Context, dir string, args ...string) (*exec.Cm
 	cmd := exec.CommandContext(ctx, binary, args...)
 	cmd.Dir = dir
 	cmd.Env = []string{"HOME=" + dir, "PATH=/usr/bin:/bin"}
+	processgroup.Configure(cmd)
 	return cmd, nil
 }

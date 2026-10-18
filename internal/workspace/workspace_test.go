@@ -94,13 +94,20 @@ func privateRoot(t *testing.T) string {
 }
 
 func TestRejectUnsafeFilesAndChanges(t *testing.T) {
-	for i, name := range []string{".", "../outside", "a/.GiT/hooks/x", "nul\x00file", strings.Repeat("x", 256)} {
+	for i, test := range []struct {
+		name  string
+		valid bool
+	}{
+		{name: "."}, {name: "../outside"}, {name: "a/.GiT/hooks/x"}, {name: "nul\x00file"},
+		{name: strings.Repeat("x", 256)}, {name: strings.Repeat("x", 255), valid: true},
+	} {
 		t.Run("path-"+strconv.Itoa(i), func(t *testing.T) {
-			if err := Materialize(t.TempDir(), []File{{Path: name, Mode: Regular}}); err == nil || !strings.Contains(err.Error(), "invalid source file") {
-				t.Fatalf("path %q validation=%v", name, err)
+			err := Materialize(privateRoot(t), []File{{Path: test.name, Mode: Regular}})
+			if (err == nil) != test.valid || err != nil && !strings.Contains(err.Error(), "invalid source file") {
+				t.Fatalf("path %q validation=%v", test.name, err)
 			}
-			if err := ValidateChanges([]Change{{Path: name, Delete: true}}); err == nil {
-				t.Fatalf("accepted deleted path %q", name)
+			if err := ValidateChanges([]Change{{Path: test.name, Delete: true}}); (err == nil) != test.valid {
+				t.Fatalf("deleted path %q validation=%v", test.name, err)
 			}
 		})
 	}
@@ -232,7 +239,7 @@ func TestWorkspaceRefusesLinksAndNonemptyMaterialization(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := CheckUnchanged(context.Background(), root, nil); err == nil || !strings.Contains(err.Error(), "modified supplied source") {
+	if err := CheckUnchanged(context.Background(), root, nil); err == nil || !strings.Contains(err.Error(), "workspace changed") {
 		t.Fatalf("generated symlink validation=%v", err)
 	}
 	if err := Materialize(root, nil); err == nil || !strings.Contains(err.Error(), "not empty") {
@@ -378,15 +385,25 @@ func TestApplyCleansRootAndKeepsRootDirectory(t *testing.T) {
 }
 
 func TestMaterializeRefusesNonprivateRoot(t *testing.T) {
-	root := privateRoot(t)
-	if err := os.Chmod(root, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := Materialize(root, []File{{Path: "source", Mode: Regular}}); err == nil || !strings.Contains(err.Error(), "private directory") {
-		t.Fatalf("public root validation=%v", err)
-	}
-	if _, err := os.Stat(filepath.Join(root, "source")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("refused materialization wrote source: %v", err)
+	for _, kind := range []string{"public mode", "symlink"} {
+		t.Run(kind, func(t *testing.T) {
+			target := privateRoot(t)
+			root := target
+			if kind == "symlink" {
+				root = filepath.Join(t.TempDir(), "link")
+				if err := os.Symlink(target, root); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.Chmod(root, 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := Materialize(root, []File{{Path: "source", Mode: Regular}}); err == nil || !strings.Contains(err.Error(), "private directory") {
+				t.Fatalf("root validation=%v", err)
+			}
+			if _, err := os.Stat(filepath.Join(target, "source")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("refused materialization wrote source: %v", err)
+			}
+		})
 	}
 }
 
@@ -424,7 +441,7 @@ func TestCheckUnchangedNamesFirstDeletedPath(t *testing.T) {
 	root := privateRoot(t)
 	base := []File{{Path: "z-last", Mode: Regular}, {Path: "a-first", Mode: Regular}}
 	for range 5 {
-		if err := CheckUnchanged(context.Background(), root, base); err == nil || err.Error() != `read-only action modified supplied source: deleted "a-first"` {
+		if err := CheckUnchanged(context.Background(), root, base); err == nil || err.Error() != `workspace changed: deleted "a-first"` {
 			t.Fatalf("deletion diagnostic lacks stable path: %v", err)
 		}
 	}
@@ -451,7 +468,7 @@ func TestCollectionBoundsFileCountsAndBytes(t *testing.T) {
 		if err := os.Truncate(name, size); err != nil {
 			t.Fatal(err)
 		}
-		if err := CheckUnchanged(context.Background(), root, base); err == nil || !strings.Contains(err.Error(), "byte limit") || !strings.Contains(err.Error(), "modified supplied source") {
+		if err := CheckUnchanged(context.Background(), root, base); err == nil || !strings.Contains(err.Error(), "byte limit") || !strings.Contains(err.Error(), "workspace changed") {
 			t.Fatalf("grown source size=%d read=%v", size, err)
 		}
 	}
@@ -509,7 +526,7 @@ func TestCheckUnchangedDetectsSameSizeContentWithPreservedMtime(t *testing.T) {
 	if err := os.Chtimes(name, info.ModTime(), info.ModTime()); err != nil {
 		t.Fatal(err)
 	}
-	if err := CheckUnchanged(context.Background(), root, base); err == nil || !strings.Contains(err.Error(), "modified supplied source") {
+	if err := CheckUnchanged(context.Background(), root, base); err == nil || !strings.Contains(err.Error(), "workspace changed") {
 		t.Fatalf("hidden content mutation validation=%v", err)
 	}
 }
@@ -572,7 +589,7 @@ func TestCollectionSeparatesGitModesAndReadOnlyPermissions(t *testing.T) {
 			if mode&0100 != 0 {
 				wantMode = Executable
 			}
-			if err := CheckUnchanged(context.Background(), root, base); (err == nil) != (mode == 0644) || (err != nil && !strings.Contains(err.Error(), "modified supplied source")) {
+			if err := CheckUnchanged(context.Background(), root, base); (err == nil) != (mode == 0644) || (err != nil && !strings.Contains(err.Error(), "workspace changed")) {
 				t.Fatalf("mode-only validation=%v, want mode=%o", err, wantMode)
 			}
 			if err := os.WriteFile(filepath.Join(root, "file"), []byte("after"), mode); err != nil {
@@ -622,7 +639,7 @@ func TestCheckUnchangedRefusesUnsafeWorkerNames(t *testing.T) {
 			}
 			want := "unsafe"
 			if test.name == "new\\output" {
-				want = "modified supplied source"
+				want = "workspace changed"
 			}
 			if err := CheckUnchanged(context.Background(), root, nil); err == nil || !strings.Contains(err.Error(), want) {
 				t.Fatalf("unsafe worker name %q validation=%v", test.name, err)

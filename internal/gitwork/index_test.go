@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/linkdata/minion/internal/testsupport"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -111,39 +112,52 @@ func TestFixIndexQuotesGitDiagnostic(t *testing.T) {
 }
 
 func TestFixIndexBoundsControlFilesBeforeGitReadsThem(t *testing.T) {
-	const control = ".gitattributes"
-	for _, size := range []int64{workspace.MaxBytes, workspace.MaxBytes + 1} {
-		t.Run(fmt.Sprintf("%s/%d", control, size), func(t *testing.T) {
-			index, source := offlineIndexFixture(t, nil)
-			name := filepath.Join(source, control)
-			if err := os.WriteFile(name, nil, 0600); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Truncate(name, size); err != nil {
-				t.Fatal(err)
-			}
-			marker := filepath.Join(t.TempDir(), "called")
-			const command = "git-control-probe"
-			// No Git process reads the sparse file, including the exact-limit control.
-			index.binary = filepath.Join(fakeOnPath(t, command, "#!/bin/sh\nprintf called > "+shellQuote(marker)+"\nexit 91\n"), command)
-			_, err := index.Changes(context.Background())
-			if size > workspace.MaxBytes {
-				if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("fix control file %q must be regular and bounded", control)) {
-					t.Fatalf("oversized control reached later collection: %v", err)
+	for _, control := range []string{".gitignore", ".gitattributes"} {
+		for _, size := range []int64{workspace.MaxBytes, workspace.MaxBytes + 1} {
+			t.Run(fmt.Sprintf("%s/%d", control, size), func(t *testing.T) {
+				index, source := offlineIndexFixture(t, nil)
+				name := filepath.Join(source, control)
+				if err := os.WriteFile(name, nil, 0600); err != nil {
+					t.Fatal(err)
 				}
-				if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
-					t.Fatalf("oversized control reached Git: %v", err)
+				if err := os.Truncate(name, size); err != nil {
+					t.Fatal(err)
 				}
-				return
-			}
-			var exit *exec.ExitError
-			if !errors.As(err, &exit) || exit.ExitCode() != 91 {
-				t.Fatalf("in-bound control was refused before Git: %v", err)
-			}
-			if data, err := os.ReadFile(marker); err != nil || string(data) != "called" {
-				t.Fatalf("in-bound control did not reach Git: %q, %v", data, err)
-			}
-		})
+				marker := filepath.Join(t.TempDir(), "called")
+				const command = "git-control-probe"
+				// No Git process reads the sparse file, including the exact-limit control.
+				index.binary = filepath.Join(fakeOnPath(t, command, "#!/bin/sh\nprintf called > "+shellQuote(marker)+"\nexit 91\n"), command)
+				_, err := index.Changes(context.Background())
+				if size > workspace.MaxBytes {
+					if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("fix control file %q must be regular and bounded", control)) {
+						t.Fatalf("oversized control reached later collection: %v", err)
+					}
+					if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+						t.Fatalf("oversized control reached Git: %v", err)
+					}
+					return
+				}
+				var exit *exec.ExitError
+				if !errors.As(err, &exit) || exit.ExitCode() != 91 {
+					t.Fatalf("in-bound control was refused before Git: %v", err)
+				}
+				if data, err := os.ReadFile(marker); err != nil || string(data) != "called" {
+					t.Fatalf("in-bound control did not reach Git: %q, %v", data, err)
+				}
+			})
+		}
+	}
+}
+
+func TestFixIndexRefusesUnterminatedIgnoreOutput(t *testing.T) {
+	index, source := offlineIndexFixture(t, nil)
+	if err := os.Mkdir(filepath.Join(source, "candidate"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\nfor arg do\nif [ \"$arg\" = check-ignore ]; then\nprintf ':(top)candidate'\nexit\nfi\ndone\nexec " + shellQuote(index.binary) + " \"$@\"\n"
+	index.binary = filepath.Join(fakeOnPath(t, "git-ignore", script), "git-ignore")
+	if _, err := index.Changes(context.Background()); err == nil || !strings.Contains(err.Error(), "invalid offline git ignore output") {
+		t.Fatalf("unterminated ignore output accepted: %v", err)
 	}
 }
 
@@ -750,12 +764,4 @@ func TestFixIndexReportsTrackedGrowthInPathOrder(t *testing.T) {
 	}
 }
 
-func fakeOnPath(t *testing.T, name, script string) string {
-	t.Helper()
-	bin := t.TempDir()
-	if err := os.WriteFile(filepath.Join(bin, name), []byte(script), 0700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	return bin
-}
+var fakeOnPath = testsupport.FakeOnPath

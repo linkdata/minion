@@ -51,9 +51,10 @@ func TestRunnerChecksAuditPrerequisitesBeforeModel(t *testing.T) {
 				script = "#!/bin/sh\nexit 1\n"
 			}
 			bin := fakeOnPath(t, "node", script)
-			if scenario.node == "missing" {
+			switch scenario.node {
+			case "missing":
 				t.Setenv("PATH", t.TempDir())
-			} else if scenario.node == "relative" {
+			case "relative":
 				cwd, err := os.Getwd()
 				if err != nil {
 					t.Fatal(err)
@@ -89,6 +90,9 @@ func TestRunnerChecksAuditPrerequisitesBeforeModel(t *testing.T) {
 				if err != nil || !strings.Contains(string(data), "validate-findings.cjs") || !strings.Contains(string(data), "validate-coverage-ledger.cjs") {
 					t.Fatalf("valid audit did not run both validators: calls=%q error=%v", data, err)
 				}
+				if strings.Count(string(data), " -e ") != 1 {
+					t.Fatalf("audit repeated the permission probe: %q", data)
+				}
 			} else if err == nil || !strings.Contains(err.Error(), scenario.want) || errors.Is(err, monitor.ErrTerminalJob) || calls != 0 || len(result.Calls) != 0 {
 				t.Fatalf("invalid tools reached models or were misclassified: calls=%d recorded=%d error=%v", calls, len(result.Calls), err)
 			}
@@ -119,7 +123,7 @@ func TestAuditMissingInputsFailBeforeValidatorExecution(t *testing.T) {
 				}
 				marker := filepath.Join(t.TempDir(), "node-called")
 				fakeOnPath(t, "node", "#!/bin/sh\nprintf called > "+shellQuote(marker)+"\nexit 0\n")
-				report, err := validateAuditFiles(context.Background(), supplied, t.TempDir(), "/installed/SKILL.md", job.Identity.Repository, "/source", job.Source.Head)
+				report, err := validateAuditFiles(context.Background(), supplied, t.TempDir(), "/installed/SKILL.md", "--permission", job.Identity.Repository, "/source", job.Source.Head)
 				allowed := empty && auditArtifactMayBeEmpty(name)
 				if allowed {
 					if err != nil || report != "Audit report\n" {
@@ -149,7 +153,7 @@ func TestAuditMissingInputsFailBeforeValidatorExecution(t *testing.T) {
 		}
 		marker := filepath.Join(t.TempDir(), "node-called")
 		fakeOnPath(t, "node", "#!/bin/sh\nprintf called > "+shellQuote(marker)+"\nexit 99\n")
-		_, err := validateAuditFiles(context.Background(), files, t.TempDir(), "/installed/SKILL.md", job.Identity.Repository, "/source", job.Source.Head)
+		_, err := validateAuditFiles(context.Background(), files, t.TempDir(), "/installed/SKILL.md", "--permission", job.Identity.Repository, "/source", job.Source.Head)
 		if err == nil || !strings.Contains(err.Error(), "REPORT.md is missing or empty") {
 			t.Fatalf("blank report accepted: %v", err)
 		}
@@ -164,7 +168,7 @@ func TestAuditValidatorDiagnosticsStayOutOfErrorsAndJournal(t *testing.T) {
 	const diagnostic = "PRIVATE_VALIDATOR_FINDING\nforged journal line \"quoted\"\n"
 	script := "#!/bin/sh\nif [ \"$2\" = -e ]; then exit 0; fi\nprintf '%s' " + shellQuote(diagnostic) + " >&2\nexit 23\n"
 	fakeOnPath(t, "node", script)
-	report, err := validateAuditFiles(context.Background(), auditArtifactsFixture(job, "/source", "Audit report\n"), t.TempDir(), "/installed/SKILL.md", job.Identity.Repository, "/source", job.Source.Head)
+	report, err := validateAuditFiles(context.Background(), auditArtifactsFixture(job, "/source", "Audit report\n"), t.TempDir(), "/installed/SKILL.md", "--permission", job.Identity.Repository, "/source", job.Source.Head)
 	var exit *exec.ExitError
 	if !errors.As(err, &exit) || exit.ExitCode() != 23 || report != "" || !strings.Contains(err.Error(), "audit validate-findings.cjs failed") || strings.Contains(err.Error(), "PRIVATE_VALIDATOR_FINDING") || strings.Contains(err.Error(), "forged journal") {
 		t.Fatalf("private diagnostic leaked or native failure lost: report=%q error=%v", report, err)

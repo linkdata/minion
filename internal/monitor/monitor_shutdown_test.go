@@ -271,9 +271,10 @@ func TestRunOnceStopsCanceledDiscoveryWithoutDeferring(t *testing.T) {
 				store := openStateAt(t, path, initial)
 				key, pending := seedShutdownPending(store, first, tail, initial)
 				store.Data.NextInviteCheckAt = now.Add(time.Minute)
-				if stage == "before start" {
+				switch stage {
+				case "before start":
 					cancel()
-				} else if stage == "invitations" {
+				case "invitations":
 					store.Data.NextInviteCheckAt = time.Time{}
 					gh.beforeList = cancel
 				}

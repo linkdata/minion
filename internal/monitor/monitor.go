@@ -124,7 +124,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 	}
 	for _, repo := range m.Config.Repositories {
 		if _, ok := store.Data.RepositoryCursors[repo.Name]; !ok {
-			// Migrate the old account cursor before any repository poll can fail.
+			// Seed newly whitelisted repositories from the account cursor.
 			store.Data.RepositoryCursors[repo.Name] = store.Data.Cursor
 		}
 	}
@@ -146,8 +146,8 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 	var failures []error
 	stop := func(errs ...error) (time.Time, error) {
 		err := errors.Join(slices.Concat(failures, errs)...)
-		if !errors.Is(err, ctx.Err()) {
-			err = errors.Join(err, ctx.Err())
+		if canceled := ctx.Err(); canceled != nil && !errors.Is(err, canceled) {
+			err = errors.Join(err, canceled)
 		}
 		return next, err
 	}

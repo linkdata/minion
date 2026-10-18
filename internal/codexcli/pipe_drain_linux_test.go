@@ -37,25 +37,9 @@ exit 0
 		result, err := Run(ctx, workspace, "task", false, "", config.CodexConfig{})
 		done <- outcome{result, err}
 	}()
-	ticker := time.NewTicker(5 * time.Millisecond)
-	defer ticker.Stop()
-	var child *testsupport.Process
-	for child == nil {
-		select {
-		case <-ticker.C:
-			var err error
-			child, err = testsupport.PinProcess(binary + ".pid")
-			if errors.Is(err, os.ErrNotExist) {
-				continue
-			}
-			if err != nil {
-				t.Fatal(err)
-			}
-		case got := <-done:
-			t.Fatalf("run exited before the finite fixture child was pinned: %+v, %v", got.result, got.err)
-		case <-ctx.Done():
-			t.Fatal("fixture child did not start")
-		}
+	child, err := testsupport.WaitForProcess(ctx, binary+".pid", done)
+	if err != nil {
+		t.Fatal(err)
 	}
 	t.Cleanup(func() {
 		waitCtx, stopWait := context.WithTimeout(context.Background(), time.Second)

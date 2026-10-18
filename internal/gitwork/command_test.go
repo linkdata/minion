@@ -219,7 +219,7 @@ func TestCommitAndPushPreservesDivergentRemote(t *testing.T) {
 		return nil
 	})
 	var exit *exec.ExitError
-	if !errors.As(err, &exit) || !strings.Contains(err.Error(), "git push") {
+	if !errors.As(err, &exit) || !strings.Contains(err.Error(), "git push") || !strings.Contains(err.Error(), "[rejected]") {
 		t.Fatalf("divergent push did not preserve Git failure: %v", err)
 	}
 	if got := f.git(f.checkout.path, "rev-parse", "HEAD"); recorded == "" || recorded == f.base || recorded != got {

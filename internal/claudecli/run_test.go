@@ -16,6 +16,7 @@ import (
 	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/skills"
+	"github.com/linkdata/minion/internal/testsupport"
 	"github.com/linkdata/minion/internal/usage"
 )
 
@@ -70,17 +71,11 @@ const successfulResult = `{"type":"result","subtype":"success","is_error":false,
 func fakeExecutable(t *testing.T, name, script string) string {
 	t.Helper()
 	if name == "claude" {
-		for _, key := range []string{"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"} {
+		for _, key := range []string{"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"} {
 			t.Setenv(key, "")
 		}
 	}
-	dir := t.TempDir()
-	path := filepath.Join(dir, name)
-	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+script), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	return path
+	return filepath.Join(testsupport.FakeOnPath(t, name, "#!/bin/sh\n"+script), name)
 }
 
 func readFile(t *testing.T, path string) string {
@@ -382,12 +377,12 @@ func TestRunCancelled(t *testing.T) {
 }
 
 func TestChildEnvironment(t *testing.T) {
-	got, err := childEnvironment([]string{"HOME=/home/operator", "PATH=/bin", "CLAUDE_CONFIG_DIR=/home/operator/.claude", "ANTHROPIC_API_KEY=", "anthropic_api_key=dummy", "GH_TOKEN=dummy", "GITHUB_TOKEN=dummy", "NODE_OPTIONS=dummy", "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=0", "BASH_ENV=bad", "HTTPS_PROXY=http://proxy.example:8080", "invalid"}, "/run", "/cache", "", "/home/operator/.claude")
+	got, err := childEnvironment([]string{"HOME=/home/operator", "PATH=/bin", "CLAUDE_CONFIG_DIR=/home/operator/.claude", "ANTHROPIC_API_KEY=", "anthropic_api_key=dummy", "GH_TOKEN=dummy", "GITHUB_TOKEN=dummy", "NODE_OPTIONS=dummy", "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=0", "BASH_ENV=bad", "HTTPS_PROXY=http://proxy.example:8080", "https_proxy=http://lower.example:3128", "http_proxy=http://lower.example:3128", "all_proxy=socks5://lower.example:1080", "no_proxy=localhost", "Https_Proxy=http://ignored.example:3128", "invalid"}, "/run", "/cache", "", "/home/operator/.claude")
 	if err != nil {
 		t.Fatal(err)
 	}
 	joined := strings.Join(got, "\n")
-	for _, key := range []string{"ANTHROPIC_API_KEY", "anthropic_api_key", "GH_TOKEN", "GITHUB_TOKEN", "NODE_OPTIONS", "SUBPROCESS_ENV_SCRUB", "BASH_ENV"} {
+	for _, key := range []string{"ANTHROPIC_API_KEY", "anthropic_api_key", "GH_TOKEN", "GITHUB_TOKEN", "NODE_OPTIONS", "SUBPROCESS_ENV_SCRUB", "BASH_ENV", "Https_Proxy"} {
 		if strings.Contains(joined, key+"=") {
 			t.Fatalf("unsafe environment key %s", key)
 		}
@@ -395,7 +390,12 @@ func TestChildEnvironment(t *testing.T) {
 	if !strings.Contains(joined, "CLAUDE_CONFIG_DIR=/home/operator/.claude") || !strings.Contains(joined, "GOCACHE=/cache") || !strings.Contains(joined, "HTTPS_PROXY=http://proxy.example:8080") {
 		t.Fatalf("missing CLI configuration: %q", got)
 	}
-	for _, key := range []string{"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "HTTPS_PROXY"} {
+	for _, entry := range []string{"https_proxy=http://lower.example:3128", "http_proxy=http://lower.example:3128", "all_proxy=socks5://lower.example:1080", "no_proxy=localhost"} {
+		if !strings.Contains(joined, entry) {
+			t.Fatalf("proxy spelling/value was not preserved: %q", got)
+		}
+	}
+	for _, key := range []string{"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy"} {
 		found := false
 		for _, rule := range credentialDenials() {
 			if rule["name"] == key && rule["mode"] == "deny" {
@@ -421,6 +421,9 @@ func TestChildEnvironmentRejectsCredentials(t *testing.T) {
 		{"HTTP_PROXY", "/dummy-secret"},
 		{"HTTPS_PROXY", "http:/user:dummy-secret@proxy.example:8080"},
 		{"HTTP_PROXY", "http:user:dummy-secret@proxy.example:8080"},
+		{"http_proxy", "http://user:dummy-secret@proxy.example:8080"},
+		{"https_proxy", "user:dummy-secret@proxy.example:8080"},
+		{"all_proxy", "socks5://dummy-secret@proxy.example:1080"},
 	} {
 		t.Run(tc.name+"/"+tc.value, func(t *testing.T) {
 			env, err := childEnvironment([]string{tc.name + "=" + tc.value}, "/run", "/cache", "", "")

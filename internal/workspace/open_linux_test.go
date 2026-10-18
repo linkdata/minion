@@ -312,6 +312,21 @@ func TestReadRegularChecksActualReadLength(t *testing.T) {
 	}
 }
 
+func TestReadRegularKeepsEmptyAndExactLimitFiles(t *testing.T) {
+	for _, contents := range []string{"", "x", "bounded contents"} {
+		t.Run(strconv.Itoa(len(contents)), func(t *testing.T) {
+			name := filepath.Join(t.TempDir(), "source")
+			if err := os.WriteFile(name, []byte(contents), 0600); err != nil {
+				t.Fatal(err)
+			}
+			data, err := ReadRegular(name, int64(len(contents)))
+			if err != nil || string(data) != contents {
+				t.Fatalf("exact-limit contents=%q error=%v", data, err)
+			}
+		})
+	}
+}
+
 func TestOpenPathErrorsIdentifyPathAndPreserveCause(t *testing.T) {
 	name := filepath.Join(t.TempDir(), "missing", "source")
 	err := CheckRoot(name)

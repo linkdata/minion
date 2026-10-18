@@ -187,3 +187,60 @@ func TestWorkRootPreflightRequiresGlobalClaudeHomeWithExplicitNativeHomes(t *tes
 		t.Fatalf("unknown global Claude configuration was skipped: %v", err)
 	}
 }
+
+func TestPrivatePathsRejectAliasesIntoSelectedInstalledSkill(t *testing.T) {
+	const source = "https://github.com/owner/repo/tree/pinned/skills/example"
+	for _, provider := range []string{"codex", "claude"} {
+		for _, kind := range []string{"config", "credential"} {
+			t.Run(provider+"/"+kind, func(t *testing.T) {
+				root := t.TempDir()
+				t.Setenv("HOME", root)
+				t.Setenv("PATH", t.TempDir())
+				for key, name := range map[string]string{"CODEX_HOME": "codex", "CLAUDE_CONFIG_DIR": "claude", "GH_CONFIG_DIR": "gh", "XDG_CONFIG_HOME": "config"} {
+					t.Setenv(key, filepath.Join(root, name))
+				}
+				parent, credential := ".agents", filepath.Join(root, "codex", "auth.json")
+				if provider == "claude" {
+					parent, credential = ".claude", filepath.Join(root, "claude", ".credentials.json")
+				}
+				skill := filepath.Join(root, parent, "skills", "example")
+				work := filepath.Join(root, "work")
+				for _, path := range []string{skill, work, filepath.Dir(credential)} {
+					if err := os.MkdirAll(path, 0700); err != nil {
+						t.Fatal(err)
+					}
+				}
+				for name, data := range map[string]string{
+					"SKILL.md":             "Test skill.\n",
+					".minion-install.json": fmt.Sprintf(`{"url":%q,"commit":%q}`, source, strings.Repeat("a", 40)),
+					"fixture-data":         "Synthetic fixture only.\n",
+				} {
+					if err := os.WriteFile(filepath.Join(skill, name), []byte(data), 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				cfg := config.Config{Main: provider, WorkRoot: work, Commands: map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{source}}}}
+				configPath := filepath.Join(root, "config.json")
+				privatePath := credential
+				if kind == "config" {
+					privatePath = configPath
+				}
+				if err := os.Symlink(filepath.Join(skill, "fixture-data"), privatePath); err != nil {
+					t.Fatal(err)
+				}
+				if err := checkIsolation(cfg, configPath); err == nil || !strings.Contains(err.Error(), "private host path") {
+					t.Fatalf("selected installed skill exposed %s: %v", kind, err)
+				}
+				if err := os.Remove(privatePath); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(privatePath, []byte("Synthetic fixture only.\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				if err := checkIsolation(cfg, configPath); err != nil {
+					t.Fatalf("non-exposed selected installed skill was invalid: %v", err)
+				}
+			})
+		}
+	}
+}

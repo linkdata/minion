@@ -21,6 +21,7 @@ import (
 	"github.com/linkdata/minion/internal/gitwork"
 	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/state"
+	"github.com/linkdata/minion/internal/testsupport"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -117,15 +118,7 @@ func gitFixtureRemote(t *testing.T, files ...workspace.File) (base, head, remote
 	return base, head, remote
 }
 
-func fakeOnPath(t *testing.T, name, script string) string {
-	t.Helper()
-	bin := t.TempDir()
-	if err := os.WriteFile(filepath.Join(bin, name), []byte(script), 0700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	return bin
-}
+var fakeOnPath = testsupport.FakeOnPath
 
 func gitTreeFixture(sha string, files ...workspace.File) github.GitTree {
 	truncated := false
@@ -160,7 +153,7 @@ func assertPortableSource(t *testing.T, dir string) {
 	}
 }
 
-func shellQuote(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
+var shellQuote = testsupport.ShellQuote
 
 const privateRepositoryJSON = `{"id":1,"full_name":"o/r","owner":{"id":2,"login":"o"},"default_branch":"main","private":true,"visibility":"private"}`
 

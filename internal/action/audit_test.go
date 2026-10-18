@@ -306,12 +306,16 @@ JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 	if err != nil {
 		t.Fatal(err)
 	}
+	permissionFlag, err := checkAuditTools(context.Background(), validationDir, filepath.Join(skillDir, "SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	validate := func(wantError string) {
 		t.Helper()
 		files, _, err := readAuditArtifacts(root, false)
 		var report string
 		if err == nil {
-			report, err = validateAuditFiles(context.Background(), files, validationDir, filepath.Join(skillDir, "SKILL.md"), "o/r", target, head)
+			report, err = validateAuditFiles(context.Background(), files, validationDir, filepath.Join(skillDir, "SKILL.md"), permissionFlag, "o/r", target, head)
 		}
 		if wantError == "" {
 			if err != nil || report != "Verified audit report\n" {
@@ -377,7 +381,7 @@ JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 }
 
 func TestAuditArtifactReadModesPreserveFailurePolicies(t *testing.T) {
-	for _, scenario := range []string{"missing core", "empty core", "unsafe core", "oversized report", "invalid UTF-8 report"} {
+	for _, scenario := range []string{"missing core", "empty core", "unsafe core", "oversized report", "invalid UTF-8 report", "NUL report", "blank report"} {
 		for _, partial := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/partial-%t", scenario, partial), func(t *testing.T) {
 				job := portableJob(command.SecurityAudit)
@@ -408,9 +412,13 @@ func TestAuditArtifactReadModesPreserveFailurePolicies(t *testing.T) {
 					writeFixtureFile(t, root, artifact, []byte(strings.Repeat("x", maxOutputBytes+1)))
 				case "invalid UTF-8 report":
 					writeFixtureFile(t, root, artifact, []byte{0xff})
+				case "NUL report":
+					writeFixtureFile(t, root, artifact, []byte("Report\x00text"))
+				case "blank report":
+					writeFixtureFile(t, root, artifact, []byte(" \t\r\n"))
 				}
 				files, diagnostics, err := readAuditArtifacts(root, partial)
-				wantError := !partial && (scenario == "unsafe core" || artifact == "REPORT.md")
+				wantError := !partial && (scenario == "unsafe core" || artifact == "REPORT.md" && scenario != "blank report")
 				if (err != nil) != wantError {
 					t.Fatalf("files=%v diagnostics=%v error=%v want error=%t", files, diagnostics, err, wantError)
 				}

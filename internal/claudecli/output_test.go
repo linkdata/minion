@@ -249,6 +249,8 @@ func TestSandboxStartupFailureAborts(t *testing.T) {
 		{"repository startup-like output", "Exit code 1\nbwrap: this line was printed by a repository test", false},
 		{"later repository bubblewrap output", "Exit code 1\nTest failed\nbwrap: namespace unavailable", false},
 		{"initialization", "Sandbox is required but failed to initialize: Failed to create bridge sockets after 5 attempts.", true},
+		{"later initialization", "Exit code 1\nSandbox is required but failed to initialize: unavailable", true},
+		{"quoted initialization", "quoted Sandbox is required but failed to initialize: unavailable", false},
 		{"test failure", "Exit code 1\nFAIL expected 2, got 1", false},
 		{"repository output blocks", []map[string]string{{"type": "text", "text": "Exit code 1"}, {"type": "text", "text": "apply-seccomp: namespace unavailable"}}, false},
 		{"test failure blocks", []map[string]string{{"type": "text", "text": "Exit code 1\nFAIL expected 2, got 1"}}, false},

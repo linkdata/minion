@@ -20,15 +20,9 @@ type reviewSnapshot struct {
 	artifacts         []workspace.File
 }
 
-// Freeze outside the main model's writable grants so background work cannot change the critic's input.
-func freezeReviewSnapshot(ctx context.Context, workRoot string, job Job, source, outputDir string, index *gitwork.OfflineIndex) (snapshot *reviewSnapshot, resultErr error) {
-	snapshot = &reviewSnapshot{source: source, base: job.Source.Files}
-	defer func() {
-		if resultErr != nil {
-			resultErr = errors.Join(resultErr, snapshot.close())
-			snapshot = nil
-		}
-	}()
+// Freeze outside the main model's writable grants. The caller owns the partial snapshot even on failure.
+func freezeReviewSnapshot(ctx context.Context, workRoot string, job Job, source, outputDir string, index *gitwork.OfflineIndex) (*reviewSnapshot, error) {
+	snapshot := &reviewSnapshot{source: source, base: job.Source.Files}
 	var err error
 	if job.Action == command.Fix {
 		if snapshot.changes, err = index.Changes(ctx); err != nil {

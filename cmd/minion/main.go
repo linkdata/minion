@@ -57,6 +57,7 @@ func run() int {
 		return 2
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	context.AfterFunc(ctx, stop)
 	defer stop()
 	if *installSkills {
 		if *loop || *check {
@@ -318,16 +319,27 @@ func checkModels(ctx context.Context, cfg *config.Config, logger *log.Logger) (e
 				//lint:ignore ST1005 Codex is a proper noun.
 				return fmt.Errorf("Codex: %w", err) //nolint:staticcheck // -- Codex is a proper noun.
 			}
-			logger.Printf("Codex settings: model=%s reasoning_effort=%s", cfg.Codex.Model, cfg.Codex.ReasoningEffort)
 		case "claude":
 			if cfg.Claude, err = claudecli.Validate(ctx, cfg.Claude); err != nil {
 				//lint:ignore ST1005 Claude is a proper noun.
 				return fmt.Errorf("Claude: %w", err) //nolint:staticcheck // -- Claude is a proper noun.
 			}
-			logger.Printf("Claude settings: model=%s effort=%s", cfg.Claude.Model, cfg.Claude.Effort)
 		case "":
+			continue
 		default:
 			return fmt.Errorf("unsupported AI provider %q", provider)
+		}
+		role := action.RoleSettings{Provider: provider, Model: cfg.Codex.Model, Effort: cfg.Codex.ReasoningEffort}
+		if provider == "claude" {
+			role.Model, role.Effort = cfg.Claude.Model, cfg.Claude.Effort
+		}
+		if err := role.Validate(); err != nil {
+			return fmt.Errorf("%s settings: %w", provider, err)
+		}
+		if provider == "codex" {
+			logger.Printf("Codex settings: model=%s reasoning_effort=%s", role.Model, role.Effort)
+		} else {
+			logger.Printf("Claude settings: model=%s effort=%s", role.Model, role.Effort)
 		}
 	}
 	logger.Printf("AI roles: main=%s adversarial=%s critic_max_rounds=%d critic_nonblocking_rounds=%d job_timeout_minutes=%d", cfg.Main, cfg.Adversarial, cfg.CriticMaxRounds, config.ResolveCriticNonblockingRounds(cfg.CriticMaxRounds, cfg.CriticNonblockingRounds), cfg.JobTimeoutMinutes)

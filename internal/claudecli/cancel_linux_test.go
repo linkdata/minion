@@ -5,7 +5,6 @@ package claudecli
 import (
 	"context"
 	"errors"
-	"os"
 	"testing"
 	"time"
 
@@ -35,29 +34,11 @@ wait
 	}()
 	// The real subprocess must start before cancellation; a synthetic clock
 	// cannot establish whether its process group has actually been created.
-	ticker := time.NewTicker(5 * time.Millisecond)
-	defer ticker.Stop()
 	waitCtx, stopWait := context.WithTimeout(context.Background(), 5*time.Second)
 	defer stopWait()
-	var child *testsupport.Process
-start:
-	for {
-		select {
-		case <-ticker.C:
-			var err error
-			child, err = testsupport.PinProcess(binary + ".pid")
-			if errors.Is(err, os.ErrNotExist) {
-				continue
-			}
-			if err != nil {
-				t.Fatal(err)
-			}
-			break start
-		case got := <-done:
-			t.Fatalf("run exited before child started: %v", got.err)
-		case <-waitCtx.Done():
-			t.Fatal("child process did not start")
-		}
+	child, err := testsupport.WaitForProcess(waitCtx, binary+".pid", done)
+	if err != nil {
+		t.Fatal(err)
 	}
 	defer func() {
 		if err := child.Close(); err != nil {

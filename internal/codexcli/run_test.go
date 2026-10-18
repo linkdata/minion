@@ -15,6 +15,7 @@ import (
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/skills"
+	"github.com/linkdata/minion/internal/testsupport"
 	"github.com/linkdata/minion/internal/usage"
 )
 
@@ -65,7 +66,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"test"}' '{"type":"item.comp
 				"--disable", "apps", "--disable", "browser_use", "--disable", "browser_use_external",
 				"--disable", "browser_use_full_cdp_access", "--disable", "computer_use",
 				"--disable", "image_generation", "--disable", "plugins", "--disable", "remote_plugin",
-				"--disable", "shell_snapshot", "--disable", "skill_mcp_dependency_install", "--disable", "memories",
+				"--disable", "shell_snapshot", "--disable", "skill_mcp_dependency_install", "--disable", "memories", "--disable", "hooks", "--disable", "skill_search",
 				"-c", "project_doc_max_bytes=0",
 				"-c", `project_root_markers=[".minion-codex-root"]`,
 				"-c", "skills.include_instructions=false",
@@ -626,12 +627,6 @@ func TestRunRejectsExecutableFromSourceSnapshot(t *testing.T) {
 
 func installFakeCodex(t *testing.T, script string) string {
 	t.Helper()
-	dir := t.TempDir()
 	t.Setenv("CODEX_HOME", t.TempDir())
-	path := filepath.Join(dir, "codex")
-	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	return path
+	return filepath.Join(testsupport.FakeOnPath(t, "codex", script), "codex")
 }

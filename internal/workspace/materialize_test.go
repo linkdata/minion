@@ -102,7 +102,7 @@ func TestMaterializeChangesPreservesSeparateTransferLimits(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, changes[0].Path), []byte("tampered candidate"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := CheckChangesUnchanged(context.Background(), root, base, changes); err == nil || !strings.Contains(err.Error(), "modified supplied source") {
+	if err := CheckChangesUnchanged(context.Background(), root, base, changes); err == nil || !strings.Contains(err.Error(), "workspace changed") {
 		t.Fatalf("large candidate mutation went undetected: %v", err)
 	}
 }

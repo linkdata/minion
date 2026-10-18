@@ -267,7 +267,7 @@ case " $* " in
  *" diff --cached --name-only "*)
   if test %s = commit; then touch %s; exit 0; fi
   ;;
- *" commit --no-verify "*|*" push --porcelain "*)
+ *" commit --no-verify "*|*" push --no-verify "*)
   touch %s; exit 73
   ;;
 esac

@@ -98,12 +98,11 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	filesystemRules := []string{
 		`":root"="deny"`, `":minimal"="read"`, `":tmpdir"="write"`,
 		fmt.Sprintf(`%s=%q`, strconv.Quote(workspace), workspaceAccess),
-		fmt.Sprintf(`%s="read"`, strconv.Quote(filepath.Join(workspace, ".git"))),
-		fmt.Sprintf(`%s="read"`, strconv.Quote(filepath.Join(workspace, ".agents"))),
-		fmt.Sprintf(`%s="read"`, strconv.Quote(filepath.Join(workspace, ".codex"))),
-		fmt.Sprintf(`%s="read"`, strconv.Quote(filepath.Join(workspace, ".claude"))),
-		fmt.Sprintf(`%s="read"`, strconv.Quote(realBinary)),
 	}
+	for _, name := range []string{".git", ".agents", ".codex", ".claude"} {
+		filesystemRules = append(filesystemRules, fmt.Sprintf(`%s="read"`, strconv.Quote(filepath.Join(workspace, name))))
+	}
+	filesystemRules = append(filesystemRules, fmt.Sprintf(`%s="read"`, strconv.Quote(realBinary)))
 	if outputDir != "" {
 		outputDir, err = aicli.Directory(outputDir)
 		if err != nil {
@@ -152,7 +151,7 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 	for _, feature := range []string{
 		"apps", "browser_use", "browser_use_external", "browser_use_full_cdp_access",
 		"computer_use", "image_generation", "plugins", "remote_plugin",
-		"shell_snapshot", "skill_mcp_dependency_install", "memories",
+		"shell_snapshot", "skill_mcp_dependency_install", "memories", "hooks", "skill_search",
 	} {
 		args = append(args, "--disable", feature)
 	}
@@ -375,7 +374,7 @@ func (o *jsonlOutput) accept(event codexEvent) {
 		if o.threadID == "" {
 			o.threadID = event.ThreadID
 		} else if event.ThreadID != "" && event.ThreadID != o.threadID {
-			o.stop(errors.New("Codex thread identity changed within one call"))
+			o.stop(errors.New("Codex thread identity changed within one call")) //nolint:staticcheck // -- Codex is a proper noun.
 		}
 	case "turn.started":
 		o.completed, o.finalMessage = false, ""

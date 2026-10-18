@@ -38,7 +38,7 @@ func TestWaitExitedParsesTheLastCommDelimiter(t *testing.T) {
 			}()
 			ctx, cancel := context.WithCancel(context.Background())
 			cancel()
-			err = WaitExited(ctx, pinned)
+			err = (&Process{stat: pinned}).WaitExited(ctx)
 			switch {
 			case test.exited:
 				if err != nil {

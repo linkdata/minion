@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/linkdata/minion/internal/config"
+	"github.com/linkdata/minion/internal/testsupport"
 )
 
 func TestCheckModelsRequiresOnlySelectedProvider(t *testing.T) {
@@ -55,5 +57,56 @@ func TestLogCommandSkillsReportsUnsupportedWorkflow(t *testing.T) {
 	logCommandSkills(cfg, log.New(&output, "", 0))
 	if !strings.Contains(output.String(), "command security disabled: action security-audit is unsupported with claude as main") {
 		t.Fatalf("missing disabled action diagnostic: %s", output.String())
+	}
+}
+
+func TestCheckModelsBoundsResolvedCatalogueModel(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Claude sandbox support requires Linux")
+	}
+	for _, selection := range []string{"default", "alias"} {
+		for _, size := range []int{128, 129} {
+			t.Run(fmt.Sprintf("%s/bytes%d", selection, size), func(t *testing.T) {
+				t.Setenv("HOME", t.TempDir())
+				for _, key := range []string{"CLAUDE_CONFIG_DIR", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"} {
+					t.Setenv(key, "")
+				}
+				for _, name := range []string{"bwrap", "socat"} {
+					testsupport.FakeOnPath(t, name, "#!/bin/sh\nexit 99\n")
+				}
+				model := strings.Repeat("m", size)
+				value := "default"
+				cfg := config.Config{Main: "claude"}
+				if selection == "alias" {
+					value, cfg.Claude.Model = "quick", "quick"
+				}
+				catalogue := fmt.Sprintf(`{"type":"control_response","response":{"subtype":"success","request_id":"minion-initialize","response":{"models":[{"value":%q,"resolvedModel":%q}]}}}`, value, model)
+				testsupport.FakeOnPath(t, "claude", `#!/bin/sh
+if [ "$1" = '--version' ]; then
+  printf '%s\n' '2.1.302 (Claude Code)'
+elif [ "$4" = 'auth' ]; then
+  printf '%s\n' '{"loggedIn":true}'
+else
+  input=$(/bin/cat)
+  case "$input" in
+    *minion-initialize*) printf '%s\n' '`+catalogue+`' ;;
+    *) exit 90 ;;
+  esac
+fi
+`)
+				var output bytes.Buffer
+				err := checkModels(context.Background(), &cfg, log.New(&output, "", 0))
+				if cfg.Claude.Model != model {
+					t.Fatalf("preflight did not resolve catalogue model: model=%q error=%v", cfg.Claude.Model, err)
+				}
+				if size == 128 {
+					if err != nil {
+						t.Fatalf("exact-limit resolved model rejected: %v", err)
+					}
+				} else if err == nil || !strings.Contains(err.Error(), "claude settings: invalid action model or skills") {
+					t.Fatalf("over-limit resolved model reached jobs: %v", err)
+				}
+			})
+		}
 	}
 }

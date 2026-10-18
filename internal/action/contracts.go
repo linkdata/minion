@@ -148,7 +148,8 @@ func boundedText(value string, limit int) bool {
 	return len(value) <= limit && utf8.ValidString(value) && !strings.ContainsRune(value, 0)
 }
 
-func (r RoleSettings) validate() error {
+// Validate checks the portable model settings and skill-source limits.
+func (r RoleSettings) Validate() error {
 	if r.Provider != "codex" && r.Provider != "claude" {
 		return errors.New("unsupported action provider")
 	}
@@ -199,7 +200,7 @@ func (j Job) Validate() error {
 	if len(j.Title) > maxActionTitleBytes || len(j.Description) > workspace.MaxBytes || len(j.Notes) > workspace.MaxBytes || len(j.Title)+len(j.Description)+len(j.Notes) > workspace.MaxBytes || !utf8.ValidString(j.Title) || !utf8.ValidString(j.Description) || !utf8.ValidString(j.Notes) {
 		return errors.New("action text is invalid or exceeds limits")
 	}
-	if err := j.Main.validate(); err != nil {
+	if err := j.Main.Validate(); err != nil {
 		return err
 	}
 	if len(j.Main.Skills) == 0 {
@@ -209,7 +210,7 @@ func (j Job) Validate() error {
 		return errors.New("action is unsupported by main provider")
 	}
 	if j.Critic != nil {
-		if err := j.Critic.validate(); err != nil {
+		if err := j.Critic.Validate(); err != nil {
 			return err
 		}
 		if len(j.Critic.Skills) != 0 {

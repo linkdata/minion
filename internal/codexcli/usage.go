@@ -53,7 +53,7 @@ func collectUsage(ctx context.Context, home, rootID string, started time.Time, f
 	files := map[string]rolloutMeta{}
 	ambiguous := map[string]bool{}
 	entries, candidates := 0, 0
-	if rootID != "" && home != "" {
+	if rootID != "" {
 		err := walkUsageFiles(ctx, filepath.Join(home, "sessions"), started, func(path string, entry fs.DirEntry) error {
 			entries++
 			if entries > maxUsageWalkEntries {
@@ -82,7 +82,7 @@ func collectUsage(ctx context.Context, home, rootID string, started time.Time, f
 				return nil
 			}
 			scanner := bufio.NewScanner(io.LimitReader(f, maxUsageHeaderBytes+1))
-			scanner.Buffer(make([]byte, maxUsageHeaderBytes+2), maxUsageHeaderBytes+2)
+			scanner.Buffer(make([]byte, 4096), maxUsageHeaderBytes+2)
 			var event rolloutEvent
 			var meta rolloutMeta
 			ok := scanner.Scan() && len(scanner.Bytes()) <= maxUsageHeaderBytes && json.Unmarshal(scanner.Bytes(), &event) == nil && event.Type == "session_meta" && json.Unmarshal(event.Payload, &meta) == nil && meta.ID != "" && scanner.Err() == nil
@@ -119,7 +119,7 @@ func collectUsage(ctx context.Context, home, rootID string, started time.Time, f
 		}
 	}
 
-	if rootID == "" || home == "" || ctx.Err() != nil {
+	if rootID == "" || ctx.Err() != nil {
 		if fallback != nil {
 			total = *fallback
 		}

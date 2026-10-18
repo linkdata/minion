@@ -77,15 +77,9 @@ func Run(ctx context.Context, dir, prompt string, writable bool, outputDir strin
 			}
 		}()
 	}
-	configDir := authDir
-	if configDir == "" {
-		home, homeErr := HomePath()
-		if homeErr != nil {
-			return result, homeErr
-		}
-		if os.Getenv("CLAUDE_CONFIG_DIR") != "" {
-			configDir = home
-		}
+	configDir, err := configDirectory(authDir)
+	if err != nil {
+		return result, err
 	}
 	cacheDir := filepath.Join(runtimeDir, "go-build")
 	if err := os.Mkdir(cacheDir, 0o700); err != nil {
@@ -271,7 +265,7 @@ func sandboxSettings(workspace, runtimeDir string, writable bool, outputDir stri
 
 func credentialDenials() []map[string]string {
 	var rules []map[string]string
-	for _, name := range []string{"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CONFIG_DIR", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"} {
+	for _, name := range []string{"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CONFIG_DIR", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy"} {
 		rules = append(rules, map[string]string{"name": name, "mode": "deny"})
 	}
 	return rules
@@ -286,6 +280,11 @@ func childEnvironment(env []string, runtimeDir, cacheDir, authDir, configDir str
 	clean := make([]string, 0, len(env))
 	for _, entry := range env {
 		key, value, ok := strings.Cut(entry, "=")
+		originalKey := key
+		proxyKey := strings.ToUpper(key)
+		if key == strings.ToLower(key) && (proxyKey == "HTTP_PROXY" || proxyKey == "HTTPS_PROXY" || proxyKey == "ALL_PROXY" || proxyKey == "NO_PROXY") {
+			key = proxyKey
+		}
 		if authDir != "" && (key == "ANTHROPIC_API_KEY" || key == "CLAUDE_CODE_OAUTH_TOKEN" || key == "CLAUDE_CONFIG_DIR") {
 			continue
 		}
@@ -304,7 +303,7 @@ func childEnvironment(env []string, runtimeDir, cacheDir, authDir, configDir str
 				}
 				proxy, err := url.Parse(raw)
 				if err != nil || proxy.Host == "" || proxy.User != nil || strings.Contains(value, "@") {
-					return nil, fmt.Errorf("claude requires %s to be a proxy URL without credentials", key)
+					return nil, fmt.Errorf("claude requires %s to be a proxy URL without credentials", originalKey)
 				}
 			}
 		}

@@ -19,17 +19,6 @@ import (
 	"github.com/linkdata/minion/internal/workspace"
 )
 
-func TestRequesterAllowsOneBotSuffix(t *testing.T) {
-	for _, requester := range []string{"writer", "app[bot]", "[bot]", "app[bot][bot]", "app[Bot]", "app[bot]suffix"} {
-		job := portableJob(command.Comment)
-		job.Identity.Requester = requester
-		valid := requester == "writer" || requester == "app[bot]"
-		if err := job.Validate(); (err == nil) != valid {
-			t.Fatalf("requester=%q validation=%v want valid=%t", requester, err, valid)
-		}
-	}
-}
-
 func auditArtifactsFixture(job Job, target, report string) []workspace.File {
 	metadata := fmt.Sprintf(`{"run_id":"test-run","repo":%q,"target":%q,"source_ref":%q,"profile":"standard","scope_paths":["."],"budget":null,"selected_companion_files":[],"prior_run_paths":[],"shared_file_owners":%s,"execution_policy":"sandboxed-source-and-local-only","run_status":"complete"}`, job.Identity.Repository, target, job.Source.Head, auditTestOwners)
 	var files []workspace.File
@@ -131,33 +120,36 @@ func TestAuditCompanionsStayInsideInstalledSkillAndPortableResult(t *testing.T) 
 	}
 }
 
-func TestIdentityStringBounds(t *testing.T) {
-	for _, field := range []struct {
-		name string
-		set  func(*Identity, string)
-	}{
-		{"job", func(id *Identity, v string) { id.JobID = v }}, {"attempt", func(id *Identity, v string) { id.AttemptID = v }},
-		{"executor", func(id *Identity, v string) { id.ExecutorID = v }}, {"requester", func(id *Identity, v string) { id.Requester = v }},
-	} {
-		t.Run(field.name, func(t *testing.T) {
-			for _, value := range []string{strings.Repeat("a", 100), "a/b"} {
-				job := portableJob(command.Comment)
-				field.set(&job.Identity, value)
-				err := job.Validate()
-				if (err == nil) != (value == strings.Repeat("a", 100)) || (err != nil && !strings.Contains(err.Error(), "action identity is missing or invalid")) {
-					t.Fatalf("identity %q: %v", value, err)
-				}
-			}
-		})
-	}
-}
-
 func TestJobRejectsInvalidRoleAndDispatchSettings(t *testing.T) {
+	text := strings.Repeat("x", workspace.MaxBytes+1)
+	roleSkills := make([]string, 33)
+	for i := range roleSkills {
+		roleSkills[i] = skills.BuiltinAntiPromptInjection
+	}
+	critic := &RoleSettings{Provider: "claude"}
 	for _, test := range []struct {
 		name   string
 		mutate func(*Job)
 		want   string
 	}{
+		{"job identity", func(j *Job) { j.Identity.JobID = "a/b" }, "action identity is missing or invalid"},
+		{"attempt identity", func(j *Job) { j.Identity.AttemptID = "a/b" }, "action identity is missing or invalid"},
+		{"executor identity", func(j *Job) { j.Identity.ExecutorID = "a/b" }, "action identity is missing or invalid"},
+		{"requester separator", func(j *Job) { j.Identity.Requester = "a/b" }, "action identity is missing or invalid"},
+		{"empty bot name", func(j *Job) { j.Identity.Requester = "[bot]" }, "action identity is missing or invalid"},
+		{"repeated bot suffix", func(j *Job) { j.Identity.Requester = "app[bot][bot]" }, "action identity is missing or invalid"},
+		{"bot suffix case", func(j *Job) { j.Identity.Requester = "app[Bot]" }, "action identity is missing or invalid"},
+		{"trailing bot suffix", func(j *Job) { j.Identity.Requester = "app[bot]suffix" }, "action identity is missing or invalid"},
+		{"combined text over", func(j *Job) { j.Title, j.Description, j.Notes = "t", text[:workspace.MaxBytes-1], "n" }, "action text is invalid or exceeds limits"},
+		{"description over", func(j *Job) { j.Title, j.Description, j.Notes = "", text, "" }, "action text is invalid or exceeds limits"},
+		{"notes over", func(j *Job) { j.Title, j.Description, j.Notes = "", "", text }, "action text is invalid or exceeds limits"},
+		{"combined role skills over", func(j *Job) { j.Main.Skills, j.Main.AlwaysOnSkills = roleSkills[:32], roleSkills }, "invalid action model or skills"},
+		{"inactive critic budget", func(j *Job) { j.CriticMaxRounds = 1 }, "invalid critic round limit"},
+		{"inactive critic threshold", func(j *Job) { j.CriticNonblockingRounds = 1 }, "invalid critic round limit"},
+		{"zero critic budget", func(j *Job) { j.Critic = critic }, "invalid critic round limit"},
+		{"critic budget over maximum", func(j *Job) { j.Critic, j.CriticMaxRounds = critic, config.MaxCriticMaxRounds+1 }, "invalid critic round limit"},
+		{"negative critic threshold", func(j *Job) { j.Critic, j.CriticMaxRounds, j.CriticNonblockingRounds = critic, 2, -1 }, "invalid critic round limit"},
+		{"critic threshold exceeds budget", func(j *Job) { j.Critic, j.CriticMaxRounds, j.CriticNonblockingRounds = critic, 2, 3 }, "invalid critic round limit"},
 		{"version", func(j *Job) { j.Version++ }, "unsupported action protocol version"},
 		{"source", func(j *Job) { j.Source.Head = "untrusted" }, "snapshot has invalid source commits"},
 		{"requester identity", func(j *Job) { j.Identity.RequesterID = 0 }, "action repository or requester identity is invalid"},
@@ -199,12 +191,36 @@ func TestJobRejectsInvalidRoleAndDispatchSettings(t *testing.T) {
 			}
 		})
 	}
-	job := portableJob(command.Comment)
-	job.Main.Model = strings.Repeat("m", 128)
-	job.Main.Effort = strings.Repeat("e", 128)
-	job.RuntimeBudget = config.MaxJobTimeout
-	if err := job.Validate(); err != nil {
-		t.Fatalf("maximum valid settings refused: %v", err)
+	for _, test := range []struct {
+		name   string
+		mutate func(*Job)
+	}{
+		{"job identity", func(j *Job) { j.Identity.JobID = strings.Repeat("a", 100) }},
+		{"attempt identity", func(j *Job) { j.Identity.AttemptID = strings.Repeat("a", 100) }},
+		{"executor identity", func(j *Job) { j.Identity.ExecutorID = strings.Repeat("a", 100) }},
+		{"requester identity", func(j *Job) { j.Identity.Requester = strings.Repeat("a", 100) }},
+		{"ordinary requester", func(j *Job) { j.Identity.Requester = "writer" }},
+		{"bot requester", func(j *Job) { j.Identity.Requester = "app[bot]" }},
+		{"combined text exact", func(j *Job) { j.Title, j.Description, j.Notes = "t", text[:workspace.MaxBytes-2], "n" }},
+		{"description exact", func(j *Job) { j.Title, j.Description, j.Notes = "", text[:workspace.MaxBytes], "" }},
+		{"notes exact", func(j *Job) { j.Title, j.Description, j.Notes = "", "", text[:workspace.MaxBytes] }},
+		{"combined role skills exact", func(j *Job) { j.Main.Skills, j.Main.AlwaysOnSkills = roleSkills[:32], roleSkills[:32] }},
+		{"critic disabled", func(j *Job) { j.Critic, j.CriticMaxRounds, j.CriticNonblockingRounds = nil, 0, 0 }},
+		{"critic one round", func(j *Job) { j.Critic, j.CriticMaxRounds = critic, 1 }},
+		{"critic maximum rounds", func(j *Job) { j.Critic, j.CriticMaxRounds = critic, config.MaxCriticMaxRounds }},
+		{"critic threshold at budget", func(j *Job) { j.Critic, j.CriticMaxRounds, j.CriticNonblockingRounds = critic, 2, 2 }},
+		{"maximum settings", func(j *Job) {
+			j.Main.Model, j.Main.Effort = strings.Repeat("m", 128), strings.Repeat("e", 128)
+			j.RuntimeBudget = config.MaxJobTimeout
+		}},
+	} {
+		t.Run("valid/"+test.name, func(t *testing.T) {
+			job := portableJob(command.Comment)
+			test.mutate(&job)
+			if err := job.Validate(); err != nil {
+				t.Fatalf("valid boundary refused: %v", err)
+			}
+		})
 	}
 }
 
