@@ -497,9 +497,6 @@ func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, 
 			if before != nil {
 				responseTurns[record.ResponseID] = record.TurnID
 			}
-			if capture != nil && len(responses) > maxUsageRecords {
-				capture.valid = false
-			}
 			total, valid = total.AddChecked(tokens)
 			complete = complete && valid
 			seenRecord = true

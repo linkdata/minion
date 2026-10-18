@@ -32,7 +32,7 @@ func TestReviewRoundBudgetIncludesEveryFreshFullRejection(t *testing.T) {
 				}
 				return aicli.Result{Answer: answer}, nil
 			}}
-			answer, err := runner.runAI(context.Background(), job, "source", "Complete the task.", "", nil, nil)
+			answer, err := runner.runAI(context.Background(), job, "source", "Complete the task.", "", nil, &modelSessions{})
 			if !errors.Is(err, monitor.ErrTerminalJob) || answer != "" || calls != 3*rounds-1 || !strings.Contains(err.Error(), fmt.Sprintf("after %d round(s)", rounds)) {
 				t.Fatalf("round budget: answer=%q error=%v calls=%d want=%d", answer, err, calls, 3*rounds-1)
 			}
@@ -47,7 +47,7 @@ func TestEveryActionPromptDeclaresRenderedPublicationBudget(t *testing.T) {
 	for _, action := range []command.Action{command.Review, command.Fix, command.Comment, command.SecurityAudit} {
 		for _, critic := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/critic=%t", action, critic), func(t *testing.T) {
-				job := portableJob(action)
+				job := testJob(action)
 				if critic {
 					job.Critic, job.CriticMaxRounds = &RoleSettings{Provider: "claude"}, 2
 				}
@@ -134,7 +134,7 @@ func TestNoCriticRunnerKeepsChangedFixWithUnpublishedOversizedSummary(t *testing
 	} {
 		for _, action := range []command.Action{command.Fix, command.Comment} {
 			t.Run(fmt.Sprintf("%s/%s", action, summary.name), func(t *testing.T) {
-				job := portableJob(action)
+				job := testJob(action)
 				calls := 0
 				runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 					calls++

@@ -157,7 +157,7 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	}
 	result = output.result
 	if cmd.Process != nil {
-		s.usageGap = !output.hasCumulative
+		s.usageGap = !output.hasCumulative || output.err != nil
 		if output.hasCumulative {
 			s.baseline = output.cumulative
 		} else if floor, valid := s.baseline.AddChecked(result.Tokens); valid {

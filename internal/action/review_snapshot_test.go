@@ -17,7 +17,7 @@ import (
 )
 
 func TestReviewSnapshotFixFreezesOnlyExportedCandidate(t *testing.T) {
-	job := portableJob(command.Fix)
+	job := testJob(command.Fix)
 	job.Source.Files = append(job.Source.Files,
 		workspace.File{Path: ".gitignore", Mode: workspace.Regular, Data: []byte("*.log\n")},
 		workspace.File{Path: "deleted", Mode: workspace.Regular, Data: []byte("deleted")})
@@ -68,7 +68,7 @@ func TestReviewSnapshotFixFreezesOnlyExportedCandidate(t *testing.T) {
 }
 
 func TestReviewSnapshotFixFreezesFinalReplacementLayout(t *testing.T) {
-	job := portableJob(command.Fix)
+	job := testJob(command.Fix)
 	unchanged := job.Source.Files[0]
 	job.Source.Files = append(job.Source.Files,
 		workspace.File{Path: "Foo/old", Mode: workspace.Regular},
@@ -103,7 +103,7 @@ func TestReviewSnapshotFixFreezesFinalReplacementLayout(t *testing.T) {
 }
 
 func TestReviewSnapshotFreezesRawAuditArtifactsAndAbsence(t *testing.T) {
-	job := portableJob(command.SecurityAudit)
+	job := testJob(command.SecurityAudit)
 	source := t.TempDir()
 	if err := os.Chmod(source, 0700); err != nil {
 		t.Fatal(err)
@@ -158,7 +158,7 @@ func TestReviewSnapshotFreezesRawAuditArtifactsAndAbsence(t *testing.T) {
 }
 
 func TestReviewSnapshotCleansFailedReportFreeze(t *testing.T) {
-	job := portableJob(command.SecurityAudit)
+	job := testJob(command.SecurityAudit)
 	source, output, workRoot := t.TempDir(), t.TempDir(), t.TempDir()
 	if err := os.Chmod(source, 0700); err != nil {
 		t.Fatal(err)
@@ -182,7 +182,7 @@ func TestReviewSnapshotCleansFailedReportFreeze(t *testing.T) {
 func TestReviewSnapshotCleansFailedFixCandidateMaterialization(t *testing.T) {
 	for _, stage := range []string{"source", "addition"} {
 		t.Run(stage, func(t *testing.T) {
-			job := portableJob(command.Fix)
+			job := testJob(command.Fix)
 			name := strings.TrimSuffix(strings.Repeat(strings.Repeat("a", 250)+"/", 14), "/")
 			if stage == "source" {
 				job.Source.Files = append(job.Source.Files, workspace.File{Path: name, Mode: workspace.Regular, Data: []byte("source")})
@@ -227,7 +227,7 @@ func TestReviewSnapshotCleansFailedFixCandidateMaterialization(t *testing.T) {
 func TestReviewSnapshotRejectsCriticCopyMutation(t *testing.T) {
 	for _, phase := range []string{reviewFull, reviewVerification} {
 		t.Run(phase, func(t *testing.T) {
-			job := portableJob(command.Fix)
+			job := testJob(command.Fix)
 			job.Critic, job.CriticMaxRounds = &RoleSettings{Provider: "claude"}, 2
 			calls, fullReviews := 0, 0
 			runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
@@ -278,7 +278,7 @@ func TestReviewSnapshotCancellationKeepsVerdictWithoutIntegrityFailure(t *testin
 		t.Run(fmt.Sprintf("canceled=%t", interrupted), func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			job := withClaudeCritic(portableJob(command.Fix))
+			job := withClaudeCritic(testJob(command.Fix))
 			runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 				if request.role == roleMain {
 					writeFixtureFile(t, request.dir, "source.txt", []byte("candidate"))
@@ -308,7 +308,7 @@ func TestReviewSnapshotChecksExactFrozenFiles(t *testing.T) {
 	for _, reports := range []bool{false, true} {
 		for _, mutation := range []string{"special permissions", "new file", "directory"} {
 			t.Run(fmt.Sprintf("reports=%t/%s", reports, mutation), func(t *testing.T) {
-				job := portableJob(command.Fix)
+				job := testJob(command.Fix)
 				index, source := offlineIndexFixture(t, job.Source.Files)
 				output, name := "", "source.txt"
 				if reports {

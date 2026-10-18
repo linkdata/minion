@@ -13,13 +13,13 @@ import (
 	"github.com/linkdata/minion/internal/workspace"
 )
 
-func TestRunAIKeepsRoleSessionsWithinEachAction(t *testing.T) {
-	job := withClaudeCritic(portableJob(command.Comment))
+func TestRunnerKeepsRoleSessionsWithinEachAction(t *testing.T) {
+	job := withClaudeCritic(testJob(command.Comment))
 	job.CriticMaxRounds = 3
 	var actions [][]modelRun
 	for range 2 {
 		var calls []modelRun
-		runner := Runner{runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+		runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 			calls = append(calls, request)
 			if request.role == roleMain {
 				return aicli.Result{Answer: proposalJSON(fmt.Sprintf("proposal%d", request.round), "")}, nil
@@ -29,9 +29,9 @@ func TestRunAIKeepsRoleSessionsWithinEachAction(t *testing.T) {
 			}
 			return aicli.Result{Answer: approvedCritiqueJSON}, nil
 		}}
-		answer, err := runner.runAI(context.Background(), job, t.TempDir(), "Task.", "", nil, nil)
-		if err != nil || answer != "proposal3" || len(calls) != 8 {
-			t.Fatalf("answer=%q calls=%d error=%v", answer, len(calls), err)
+		result, err := runner.Run(context.Background(), job)
+		if err != nil || result.Answer != "proposal3" || len(calls) != 8 {
+			t.Fatalf("answer=%q calls=%d error=%v", result.Answer, len(calls), err)
 		}
 		main, critic := calls[0].session, calls[1].session
 		if main == nil || critic == nil || main == critic {
@@ -54,7 +54,7 @@ func TestRunAIKeepsRoleSessionsWithinEachAction(t *testing.T) {
 }
 
 func TestRunnerKeepsSourceCriticContextAndRefutationPaths(t *testing.T) {
-	job := withClaudeCritic(portableJob(command.Fix))
+	job := withClaudeCritic(testJob(command.Fix))
 	job.CriticMaxRounds = 3
 	var mainDir, criticDir, contextDir, historyDir string
 	calls := 0
@@ -134,7 +134,7 @@ func TestRunnerKeepsSourceCriticContextAndRefutationPaths(t *testing.T) {
 }
 
 func TestReviewSnapshotRefreshKeepsAuditPathsAndRemovesOldArtifacts(t *testing.T) {
-	job := portableJob(command.SecurityAudit)
+	job := testJob(command.SecurityAudit)
 	source, output, root := t.TempDir(), t.TempDir(), t.TempDir()
 	if err := os.Chmod(source, 0700); err != nil {
 		t.Fatal(err)
@@ -150,7 +150,7 @@ func TestReviewSnapshotRefreshKeepsAuditPathsAndRemovesOldArtifacts(t *testing.T
 	if err := os.Remove(filepath.Join(output, "FINDINGS-DETAIL.md")); err != nil {
 		t.Fatal(err)
 	}
-	if err := snapshot.refresh(context.Background(), root, job, source, output, nil); err != nil {
+	if err := snapshot.refresh(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if snapshot.source != source || snapshot.outputDir != frozenReports {

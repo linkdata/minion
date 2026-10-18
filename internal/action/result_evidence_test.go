@@ -17,7 +17,7 @@ import (
 func TestInvalidResultKeepsOnlyValidatedEvidence(t *testing.T) {
 	for _, scenario := range []string{"invalid calls", "invalid answer", "foreign identity", "invalid diagnostics", "invalid artifact"} {
 		t.Run(scenario, func(t *testing.T) {
-			job := withClaudeCritic(portableJob(command.SecurityAudit))
+			job := withClaudeCritic(testJob(command.SecurityAudit))
 			result := completeAuditResult(job)
 			result.Calls = append(result.Calls, CallUsage{Provider: "claude", Role: roleCritic, Round: 1, ReviewPhase: reviewFull, Approved: true, NoBlockers: true})
 			result.Diagnostics = []Diagnostic{{Code: "cleanup_failed", Message: "PRIVATE cleanup details"}}
@@ -77,7 +77,7 @@ func TestInvalidResultKeepsOnlyValidatedEvidence(t *testing.T) {
 func TestJobContextPreservesQuotedNUL(t *testing.T) {
 	for _, field := range []string{"title", "description", "notes"} {
 		t.Run(field, func(t *testing.T) {
-			job := portableJob(command.Comment)
+			job := testJob(command.Comment)
 			set := func(value string) {
 				switch field {
 				case "title":

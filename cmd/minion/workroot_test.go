@@ -171,20 +171,27 @@ func TestWorkRootPreflightProtectsConfigurationAndCredentials(t *testing.T) {
 }
 
 func TestWorkRootPreflightRequiresGlobalClaudeHomeWithExplicitNativeHomes(t *testing.T) {
-	root := t.TempDir()
-	t.Setenv("HOME", "")
-	t.Setenv("PATH", t.TempDir())
-	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
-	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
-	t.Setenv("GH_CONFIG_DIR", filepath.Join(root, "gh"))
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
-	work := filepath.Join(root, "work")
-	if err := os.Mkdir(work, 0700); err != nil {
-		t.Fatal(err)
-	}
-	err := checkIsolation(config.Config{Main: "codex", WorkRoot: work}, filepath.Join(root, "config.json"))
-	if err == nil || !strings.Contains(err.Error(), "default Claude home") {
-		t.Fatalf("unknown global Claude configuration was skipped: %v", err)
+	for _, test := range []struct{ name, home string }{
+		{"missing", ""},
+		{"relative", "relative-home"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			t.Setenv("HOME", test.home)
+			t.Setenv("PATH", t.TempDir())
+			t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
+			t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
+			t.Setenv("GH_CONFIG_DIR", filepath.Join(root, "gh"))
+			t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+			work := filepath.Join(root, "work")
+			if err := os.Mkdir(work, 0700); err != nil {
+				t.Fatal(err)
+			}
+			err := checkIsolation(config.Config{Main: "codex", WorkRoot: work}, filepath.Join(root, "config.json"))
+			if err == nil || !strings.Contains(err.Error(), "default Claude home") || test.home != "" && !strings.Contains(err.Error(), "HOME must be absolute") {
+				t.Fatalf("invalid global Claude configuration was skipped: %v", err)
+			}
+		})
 	}
 }
 

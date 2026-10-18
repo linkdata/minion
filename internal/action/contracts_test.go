@@ -20,68 +20,78 @@ import (
 	"github.com/linkdata/minion/internal/workspace"
 )
 
-func auditArtifactsFixture(job Job, target, report string) []workspace.File {
-	metadata := fmt.Sprintf(`{"run_id":"test-run","repo":%q,"target":%q,"source_ref":%q,"profile":"standard","scope_paths":["."],"budget":null,"selected_companion_files":[],"prior_run_paths":[],"shared_file_owners":%s,"execution_policy":"sandboxed-source-and-local-only","run_status":"complete"}`, job.Identity.Repository, target, job.Source.Head, auditTestOwners)
-	var files []workspace.File
-	for _, name := range auditArtifacts {
-		data := "Audit content\n"
-		switch name {
-		case "run-metadata.json":
-			data = metadata
-		case "REPORT.md":
-			data = report
-		case "findings.json":
-			data = "[]"
-		case "coverage-ledger.json":
-			data = `[{"status":"covered"}]`
-		case "FINDINGS-DETAIL.md", "NEEDS-VALIDATION.md":
-			data = ""
-		}
-		files = append(files, workspace.File{Path: name, Mode: workspace.Regular, Data: []byte(data)})
+func TestResultArtifactContracts(t *testing.T) {
+	type artifactCase struct {
+		name              string
+		mutate            func(*Job, *Result)
+		complete, partial string
 	}
-	return files
-}
-
-func completeAuditResult(job Job) Result {
-	const report = "Reviewed audit report."
-	return Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: report, Calls: []CallUsage{{Provider: job.Main.Provider, Role: roleMain, Round: 1}}, Artifacts: auditArtifactsFixture(job, sourceIdentity(job), report)}
-}
-
-func TestResultArtifactActionAndCardinality(t *testing.T) {
-	for _, scenario := range []string{"valid audit", "non-audit", "missing all", "missing may-be-empty artifact"} {
-		t.Run(scenario, func(t *testing.T) {
-			job := portableJob(command.SecurityAudit)
+	cases := []artifactCase{
+		{name: "valid audit"},
+		{"non-audit", func(j *Job, _ *Result) { j.Action, j.Command = command.Comment, "comment" }, "unexpected action report artifacts", "unexpected action report artifacts"},
+		{"missing all", func(_ *Job, r *Result) { r.Artifacts = nil }, "missing report artifacts", ""},
+		{"missing may-be-empty artifact", func(_ *Job, r *Result) {
+			for i, file := range r.Artifacts {
+				if file.Path == "FINDINGS-DETAIL.md" {
+					r.Artifacts = append(r.Artifacts[:i], r.Artifacts[i+1:]...)
+					break
+				}
+			}
+		}, "incomplete audit artifacts", ""},
+		{"executable artifact", func(_ *Job, r *Result) { r.Artifacts[0].Mode = workspace.Executable }, "invalid action report artifact", "invalid action report artifact"},
+		{"oversized artifact", func(_ *Job, r *Result) { r.Artifacts[0].Data = make([]byte, maxAuditArtifactBytes+1) }, "invalid action report artifact", "invalid action report artifact"},
+		{"different answer", func(_ *Job, r *Result) { r.Answer = "Different unreviewed text." }, "answer differs from REPORT.md", ""},
+		{"answer trailing newline", func(_ *Job, r *Result) { r.Answer += "\n" }, "answer differs from REPORT.md", ""},
+		{"rendered report overflow", func(_ *Job, r *Result) {
+			r.Answer = strings.Repeat("a\u0085", 19000)
+			for i := range r.Artifacts {
+				if r.Artifacts[i].Path == "REPORT.md" {
+					r.Artifacts[i].Data = []byte(r.Answer)
+				}
+			}
+		}, "answer", ""},
+		{"partial report exact limit", func(_ *Job, r *Result) {
+			r.Answer, r.Calls = "", nil
+			r.Artifacts = []workspace.File{{Path: "REPORT.md", Mode: workspace.Regular, Data: bytes.Repeat([]byte("x"), maxOutputBytes)}}
+		}, "action answer", ""},
+		{"partial report over limit", func(_ *Job, r *Result) {
+			r.Answer, r.Calls = "", nil
+			r.Artifacts = []workspace.File{{Path: "REPORT.md", Mode: workspace.Regular, Data: bytes.Repeat([]byte("x"), maxOutputBytes+1)}}
+		}, "action answer", "report artifacts exceed limits"},
+	}
+	for _, empty := range auditArtifacts {
+		if !auditArtifactMayBeEmpty(empty) {
+			cases = append(cases, artifactCase{"empty " + empty, func(_ *Job, r *Result) {
+				for i := range r.Artifacts {
+					if r.Artifacts[i].Path == empty {
+						r.Artifacts[i].Data = nil
+					}
+				}
+			}, "empty action report artifact", ""})
+		}
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			job := testJob(command.SecurityAudit)
 			result := completeAuditResult(job)
 			if err := result.Validate(job); err != nil {
 				t.Fatalf("invalid positive control: %v", err)
 			}
-			want := ""
-			switch scenario {
-			case "non-audit":
-				job.Action, job.Command = command.Comment, "comment"
-				want = "unexpected action report artifacts"
-			case "missing all":
-				result.Artifacts = nil
-				want = "missing report artifacts"
-			case "missing may-be-empty artifact":
-				for i, file := range result.Artifacts {
-					if file.Path == "FINDINGS-DETAIL.md" {
-						result.Artifacts = append(result.Artifacts[:i], result.Artifacts[i+1:]...)
-						break
-					}
-				}
-				want = "incomplete audit artifacts"
+			if test.mutate != nil {
+				test.mutate(&job, &result)
 			}
-			err := result.Validate(job)
-			if (err == nil) != (want == "") || (err != nil && !strings.Contains(err.Error(), want)) {
-				t.Fatalf("artifact action/count=%v want%q", err, want)
+			if err := result.Validate(job); (err == nil) != (test.complete == "") || (err != nil && !strings.Contains(err.Error(), test.complete)) {
+				t.Fatalf("complete artifacts=%v want%q", err, test.complete)
+			}
+			if err := result.validate(job, false); (err == nil) != (test.partial == "") || (err != nil && !strings.Contains(err.Error(), test.partial)) {
+				t.Fatalf("partial artifacts=%v want%q", err, test.partial)
 			}
 		})
 	}
 }
 
 func TestAuditCompanionsStayInsideInstalledSkillAndPortableResult(t *testing.T) {
-	job := portableJob(command.SecurityAudit)
+	job := testJob(command.SecurityAudit)
 	for _, companion := range []string{"DOMAIN.md", "/installed/security-audit/DOMAIN.md", "../outside.md", "/etc/passwd", "bad\\path"} {
 		t.Run(companion, func(t *testing.T) {
 			result := completeAuditResult(job)
@@ -201,7 +211,7 @@ func TestJobValidate(t *testing.T) {
 		{"runtime maximum", func(j *Job) { j.RuntimeBudget = config.MaxJobTimeout + time.Nanosecond }, "invalid action runtime budget"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			job := portableJob(command.Comment)
+			job := testJob(command.Comment)
 			if err := job.Validate(); err != nil {
 				t.Fatal(err)
 			}
@@ -235,7 +245,7 @@ func TestJobValidate(t *testing.T) {
 		}},
 	} {
 		t.Run("valid/"+test.name, func(t *testing.T) {
-			job := portableJob(command.Comment)
+			job := testJob(command.Comment)
 			test.mutate(&job)
 			if err := job.Validate(); err != nil {
 				t.Fatalf("valid boundary refused: %v", err)
@@ -245,10 +255,19 @@ func TestJobValidate(t *testing.T) {
 }
 
 func TestResultJSONRoundTripPreservesValidatedPayload(t *testing.T) {
-	job := portableJob(command.Fix)
-	job.Critic, job.CriticMaxRounds = &RoleSettings{Provider: "claude"}, 1
-	result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Done.", Changes: []workspace.Change{{Path: "binary", Mode: workspace.Executable, Data: []byte{0, 0xff, '\n'}}}, Calls: []CallUsage{{Provider: job.Main.Provider, Role: "main", Round: 1}}}
-	result.Calls = append(result.Calls, CallUsage{Provider: "claude", Role: roleCritic, Round: 1, ReviewPhase: reviewFull, Approved: true, NoBlockers: true})
+	job := testJob(command.Fix)
+	job.Critic, job.CriticMaxRounds = &RoleSettings{Provider: "claude"}, 3
+	result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Done.",
+		Changes: []workspace.Change{{Path: "binary", Mode: workspace.Executable, Data: []byte{0, 0xff, '\n'}}},
+		Calls: []CallUsage{
+			{Provider: job.Main.Provider, Role: roleMain, Round: 1},
+			{Provider: job.Critic.Provider, Role: roleCritic, Round: 1, ReviewPhase: reviewFull, HasBlockers: true, Complete: true},
+			{Provider: job.Main.Provider, Role: roleMain, Round: 2, Complete: true},
+			{Provider: job.Critic.Provider, Role: roleCritic, Round: 2, ReviewPhase: reviewVerification, NoBlockers: true},
+			{Provider: job.Main.Provider, Role: roleMain, Round: 3},
+			{Provider: job.Critic.Provider, Role: roleCritic, Round: 3, ReviewPhase: reviewVerification, Approved: true, NoBlockers: true, Complete: true},
+			{Provider: job.Critic.Provider, Role: roleCritic, Round: 3, ReviewPhase: reviewFull, Approved: true, NoBlockers: true},
+		}}
 	if err := result.Validate(job); err != nil {
 		t.Fatal(err)
 	}
@@ -256,8 +275,10 @@ func TestResultJSONRoundTripPreservesValidatedPayload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(data, []byte(`"approved":true`)) {
-		t.Fatalf("approval attestation missing from wire result: %s", data)
+	for _, field := range []string{`"approved":true`, `"no_blockers":true`, `"has_blockers":true`, `"complete":true`, `"complete":false`} {
+		if !bytes.Contains(data, []byte(field)) {
+			t.Fatalf("attestation %s missing from wire result: %s", field, data)
+		}
 	}
 	var decoded Result
 	if err := json.Unmarshal(data, &decoded); err != nil {
@@ -269,7 +290,7 @@ func TestResultJSONRoundTripPreservesValidatedPayload(t *testing.T) {
 }
 
 func TestStatusUsesConfiguredRoundBudget(t *testing.T) {
-	job := withClaudeCritic(portableJob(command.Comment))
+	job := withClaudeCritic(testJob(command.Comment))
 	for _, limit := range []int{config.DefaultCriticMaxRounds, config.MaxCriticMaxRounds} {
 		job.CriticMaxRounds = limit
 		status := Status{Version: ProtocolVersion, Identity: job.Identity, State: StatusRunning, Phase: PhaseCritic, Round: limit, ReviewPhase: "full"}
@@ -284,7 +305,7 @@ func TestStatusUsesConfiguredRoundBudget(t *testing.T) {
 }
 
 func TestStatusDistinguishesReviewPhases(t *testing.T) {
-	job := withClaudeCritic(portableJob(command.Comment))
+	job := withClaudeCritic(testJob(command.Comment))
 	for _, tt := range []struct {
 		name        string
 		phase       StatusPhase
@@ -318,89 +339,90 @@ func TestStatusDistinguishesReviewPhases(t *testing.T) {
 }
 
 func TestFixJobRejectsUnsupportedLayoutBeforeExecution(t *testing.T) {
-	for _, paths := range [][]string{{"Docs/a", "docs/b"}, {`back\slash`}} {
-		job := portableJob(command.Fix)
-		for _, name := range paths {
-			job.Source.Files = append(job.Source.Files, workspace.File{Path: name, Mode: workspace.Regular})
-		}
-		if err := job.Validate(); !errors.Is(err, gitwork.ErrUnsupportedSource) {
-			t.Fatalf("accepted unsupported writable source paths %q", paths)
-		}
-		job.Action = command.Comment
-		if err := job.Validate(); err != nil {
-			t.Fatalf("read-only source paths %q should remain supported: %v", paths, err)
-		}
-	}
-}
-
-func TestFixJobIncludesOmittedPathsInUpfrontFoldedLayout(t *testing.T) {
-	job := portableJob(command.Fix)
-	job.Source.Files = []workspace.File{{Path: "ſ/a", Mode: workspace.Regular}}
-	job.Source.Omitted = []string{"s"}
-	if err := workspace.ValidateSnapshot(job.Source); err != nil {
-		t.Fatalf("test does not describe a valid exact source: %v", err)
-	}
-	runner := Runner{WorkRoot: t.TempDir(), runModel: forbidModel(t)}
-	if _, err := runner.Run(context.Background(), job); !errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, gitwork.ErrUnsupportedSource) || !strings.Contains(err.Error(), "collision") {
-		t.Fatalf("unsupported fix source was not refused before execution: %v", err)
-	}
-	job.Action = command.Comment
-	if err := job.Validate(); err != nil {
-		t.Fatalf("read-only exact source must remain supported: %v", err)
-	}
-}
-
-func TestResultValidatesChangedPathsAgainstOriginalSource(t *testing.T) {
-	job := portableJob(command.Fix)
-	job.Source.Files = []workspace.File{{Path: "Foo/stay", Mode: workspace.Regular}}
-	result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Done.",
-		Changes: []workspace.Change{{Path: "foo/new", Mode: workspace.Regular}}, Calls: []CallUsage{{Provider: job.Main.Provider, Role: "main", Round: 1}}}
-	if err := result.Validate(job); err == nil {
-		t.Fatal("accepted directory case collision against unchanged source")
-	}
-	result.Changes = append([]workspace.Change{{Path: "Foo/stay", Delete: true}}, result.Changes...)
-	if err := result.Validate(job); err != nil {
-		t.Fatalf("rejected directory case rename: %v", err)
+	for _, test := range []struct {
+		name    string
+		files   []workspace.File
+		omitted []string
+		want    string
+	}{
+		{"directory spelling", []workspace.File{{Path: "Docs/a", Mode: workspace.Regular}, {Path: "docs/b", Mode: workspace.Regular}}, nil, "collision"},
+		{"backslash", []workspace.File{{Path: `back\slash`, Mode: workspace.Regular}}, nil, "unsafe fix source path"},
+		{"omitted folded ancestor", []workspace.File{{Path: "ſ/a", Mode: workspace.Regular}}, []string{"s"}, "collision"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			job := testJob(command.Fix)
+			job.Source.Files, job.Source.Omitted = test.files, test.omitted
+			if err := workspace.ValidateSnapshot(job.Source); err != nil {
+				t.Fatalf("invalid exact source fixture: %v", err)
+			}
+			if err := job.Validate(); !errors.Is(err, gitwork.ErrUnsupportedSource) || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("unsupported fix layout validation: %v", err)
+			}
+			runner := Runner{WorkRoot: t.TempDir(), runModel: forbidModel(t)}
+			if _, err := runner.Run(context.Background(), job); !errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, gitwork.ErrUnsupportedSource) || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("unsupported fix source was not refused before execution: %v", err)
+			}
+			job.Action = command.Comment
+			if err := job.Validate(); err != nil {
+				t.Fatalf("read-only exact source must remain supported: %v", err)
+			}
+		})
 	}
 }
 
 func TestResultCallUsageRequiresOrderedReviewPhases(t *testing.T) {
-	job := portableJob(command.Comment)
+	job := testJob(command.Comment)
 	job.Main.Model, job.Main.Effort = "main-model", "high"
 	job.Critic = &RoleSettings{Provider: "claude", Model: "critic-model", Effort: "medium"}
 	job.CriticMaxRounds = config.DefaultCriticMaxRounds
 	main := func(round int) CallUsage {
 		return CallUsage{Provider: job.Main.Provider, Model: job.Main.Model, Effort: job.Main.Effort, Role: "main", Round: round, Complete: true}
 	}
-	critic := func(round int, phase string, approved bool) CallUsage {
-		return CallUsage{Provider: job.Critic.Provider, Model: job.Critic.Model, Effort: job.Critic.Effort, Role: "critic", Round: round, ReviewPhase: phase, Approved: approved, NoBlockers: approved, HasBlockers: !approved, Complete: true}
+	critic := func(round int, phase string, verdict CallUsage) CallUsage {
+		return CallUsage{Provider: job.Critic.Provider, Model: job.Critic.Model, Effort: job.Critic.Effort, Role: roleCritic, Round: round, ReviewPhase: phase, Approved: verdict.Approved, NoBlockers: verdict.NoBlockers, HasBlockers: verdict.HasBlockers, Complete: true}
 	}
+	approved := CallUsage{Approved: true, NoBlockers: true}
+	blocking := CallUsage{HasBlockers: true}
+	nits := CallUsage{NoBlockers: true}
 	for _, test := range []struct {
 		name              string
 		calls             []CallUsage
+		threshold         int
 		complete, partial bool
 	}{
-		{"no review calls", nil, false, true},
-		{"first full review", []CallUsage{main(1), critic(1, "full", true)}, true, true},
-		{"rejected full review", []CallUsage{main(1), critic(1, "full", false)}, false, true},
-		{"revised full review", []CallUsage{main(1), critic(1, "full", false), main(2), critic(2, "verification", true), critic(2, "full", true)}, true, true},
-		{"rejected verification then revision", []CallUsage{main(1), critic(1, "full", false), main(2), critic(2, "verification", false), main(3), critic(3, "verification", true), critic(3, "full", true)}, true, true},
-		{"unapproved verification followed by full", []CallUsage{main(1), critic(1, "full", false), main(2), critic(2, "verification", false), critic(2, "full", true)}, false, false},
-		{"approved verification skips full", []CallUsage{main(1), critic(1, "full", false), main(2), critic(2, "verification", true), main(3)}, false, false},
-		{"approved full followed by main", []CallUsage{main(1), critic(1, "full", true), main(2)}, false, false},
-		{"interrupted first main", []CallUsage{main(1)}, false, true},
-		{"interrupted revision", []CallUsage{main(1), critic(1, "full", false), main(2)}, false, true},
-		{"interrupted verification", []CallUsage{main(1), critic(1, "full", false), main(2), critic(2, "verification", false)}, false, true},
-		{"critic first", []CallUsage{critic(1, "full", true)}, false, false},
-		{"missing first full", []CallUsage{main(1), critic(1, "verification", true)}, false, false},
-		{"missing revision verification", []CallUsage{main(1), critic(1, "full", false), main(2), critic(2, "full", true)}, false, false},
-		{"repeated full", []CallUsage{main(1), critic(1, "full", true), critic(1, "full", true)}, false, false},
-		{"main before critic", []CallUsage{main(1), main(2)}, false, false},
-		{"skipped round", []CallUsage{main(1), critic(1, "full", false), main(3)}, false, false},
-		{"critic round mismatch", []CallUsage{main(1), critic(2, "full", true)}, false, false},
-		{"unknown phase", []CallUsage{main(1), critic(1, "focused", true)}, false, false},
+		{"no review calls", nil, 0, false, true},
+		{"first full review", []CallUsage{main(1), critic(1, "full", approved)}, 0, true, true},
+		{"rejected full review", []CallUsage{main(1), critic(1, "full", blocking)}, 0, false, true},
+		{"revised full review", []CallUsage{main(1), critic(1, "full", blocking), main(2), critic(2, "verification", approved), critic(2, "full", approved)}, 0, true, true},
+		{"rejected verification then revision", []CallUsage{main(1), critic(1, "full", blocking), main(2), critic(2, "verification", blocking), main(3), critic(3, "verification", approved), critic(3, "full", approved)}, 0, true, true},
+		{"unapproved verification followed by full", []CallUsage{main(1), critic(1, "full", blocking), main(2), critic(2, "verification", blocking), critic(2, "full", approved)}, 0, false, false},
+		{"approved verification skips full", []CallUsage{main(1), critic(1, "full", blocking), main(2), critic(2, "verification", approved), main(3)}, 0, false, false},
+		{"approved full followed by main", []CallUsage{main(1), critic(1, "full", approved), main(2)}, 0, false, false},
+		{"interrupted first main", []CallUsage{main(1)}, 0, false, true},
+		{"interrupted revision", []CallUsage{main(1), critic(1, "full", blocking), main(2)}, 0, false, true},
+		{"interrupted verification", []CallUsage{main(1), critic(1, "full", blocking), main(2), critic(2, "verification", blocking)}, 0, false, true},
+		{"critic first", []CallUsage{critic(1, "full", approved)}, 0, false, false},
+		{"missing first full", []CallUsage{main(1), critic(1, "verification", approved)}, 0, false, false},
+		{"missing revision verification", []CallUsage{main(1), critic(1, "full", blocking), main(2), critic(2, "full", approved)}, 0, false, false},
+		{"repeated full", []CallUsage{main(1), critic(1, "full", approved), critic(1, "full", approved)}, 0, false, false},
+		{"main before critic", []CallUsage{main(1), main(2)}, 0, false, false},
+		{"skipped round", []CallUsage{main(1), critic(1, "full", blocking), main(3)}, 0, false, false},
+		{"critic round mismatch", []CallUsage{main(1), critic(2, "full", approved)}, 0, false, false},
+		{"unknown phase", []CallUsage{main(1), critic(1, "focused", approved)}, 0, false, false},
+		{"nits before threshold", []CallUsage{main(1), critic(1, reviewFull, nits)}, 2, false, true},
+		{"nits at threshold", []CallUsage{main(1), critic(1, reviewFull, nits), main(2), critic(2, reviewVerification, nits), critic(2, reviewFull, nits)}, 2, true, true},
+		{"verification cannot finish", []CallUsage{main(1), critic(1, reviewFull, nits), main(2), critic(2, reviewVerification, nits)}, 2, false, true},
+		{"fresh full still has blockers", []CallUsage{main(1), critic(1, reviewFull, nits), main(2), critic(2, reviewVerification, nits), critic(2, reviewFull, blocking)}, 2, false, true},
+		{"unparsed verdict cannot finish", []CallUsage{main(1), critic(1, reviewFull, CallUsage{})}, 2, false, true},
+		{"unparsed verdict cannot revise", []CallUsage{main(1), critic(1, reviewFull, CallUsage{}), main(2), critic(2, reviewVerification, approved), critic(2, reviewFull, approved)}, 2, false, false},
+		{"approval without no-blocker attestation", []CallUsage{main(1), critic(1, reviewFull, CallUsage{Approved: true})}, 2, false, false},
+		{"contradictory blocker attestations", []CallUsage{main(1), critic(1, reviewFull, CallUsage{HasBlockers: true, NoBlockers: true})}, 2, false, false},
+		{"accepted verification cannot skip full", []CallUsage{main(1), critic(1, reviewFull, nits), main(2), critic(2, reviewVerification, nits), main(3)}, 2, false, false},
+		{"accepted full cannot revise again", []CallUsage{main(1), critic(1, reviewFull, nits), main(2), critic(2, reviewVerification, nits), critic(2, reviewFull, nits), main(3)}, 2, false, false},
+		{"blocker verification cannot advance", []CallUsage{main(1), critic(1, reviewFull, nits), main(2), critic(2, reviewVerification, blocking), critic(2, reviewFull, approved)}, 2, false, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			job.CriticNonblockingRounds = test.threshold
 			result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Answer.", Calls: test.calls}
 			if err := result.Validate(job); (err == nil) != test.complete || (len(test.calls) == 0 && !strings.Contains(err.Error(), "final full review")) {
 				t.Fatalf("complete validation=%v, want valid=%v", err, test.complete)
@@ -416,6 +438,8 @@ func TestResultCallUsageRequiresOrderedReviewPhases(t *testing.T) {
 	}{
 		{"main phase", func(call *CallUsage) { call.ReviewPhase = "full" }},
 		{"main approval", func(call *CallUsage) { call.Approved = true }},
+		{"main cannot attest no blockers", func(call *CallUsage) { call.NoBlockers = true }},
+		{"main cannot attest blockers", func(call *CallUsage) { call.HasBlockers = true }},
 		{"provider attribution", func(call *CallUsage) { call.Provider = "claude" }},
 		{"model attribution", func(call *CallUsage) { call.Model = "different-model" }},
 		{"effort attribution", func(call *CallUsage) { call.Effort = "low" }},
@@ -423,7 +447,7 @@ func TestResultCallUsageRequiresOrderedReviewPhases(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			call := main(1)
 			test.mutate(&call)
-			result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Answer.", Calls: []CallUsage{call, critic(1, "full", true)}}
+			result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Answer.", Calls: []CallUsage{call, critic(1, "full", approved)}}
 			if err := result.validate(job, false); err == nil {
 				t.Fatal("accepted malformed or incorrectly attributed call")
 			}
@@ -432,7 +456,7 @@ func TestResultCallUsageRequiresOrderedReviewPhases(t *testing.T) {
 }
 
 func TestResultCallUsageRejectsCriticsAndRepeatedMainWithoutCritic(t *testing.T) {
-	job := portableJob(command.Comment)
+	job := testJob(command.Comment)
 	main := CallUsage{Provider: job.Main.Provider, Role: "main", Round: 1}
 	for _, calls := range [][]CallUsage{
 		{{Provider: "claude", Role: "critic", Round: 1, ReviewPhase: "full"}},
@@ -469,7 +493,7 @@ func TestResultCallUsageHonorsConfiguredRoundLimits(t *testing.T) {
 		{"explicit", 2, 2}, {"configured default", config.DefaultCriticMaxRounds, config.DefaultCriticMaxRounds}, {"maximum", config.MaxCriticMaxRounds, config.MaxCriticMaxRounds},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			job := portableJob(command.Comment)
+			job := testJob(command.Comment)
 			job.Critic, job.CriticMaxRounds = &RoleSettings{Provider: "claude"}, test.limit
 			result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Answer."}
 			for round := 1; round <= test.rounds+1; round++ {
@@ -489,31 +513,8 @@ func TestResultCallUsageHonorsConfiguredRoundLimits(t *testing.T) {
 	}
 }
 
-func TestCompleteAuditRequiresNonemptyCoreArtifacts(t *testing.T) {
-	job := portableJob(command.SecurityAudit)
-	for _, empty := range auditArtifacts {
-		if auditArtifactMayBeEmpty(empty) {
-			continue
-		}
-		var files []workspace.File
-		for _, name := range auditArtifacts {
-			data := []byte("placeholder")
-			if name == empty {
-				data = nil
-			}
-			files = append(files, workspace.File{Path: name, Mode: workspace.Regular, Data: data})
-		}
-		if err := validateResultArtifacts(job, files, true); err == nil || !strings.Contains(err.Error(), "empty action report artifact") {
-			t.Fatalf("empty %s=%v", empty, err)
-		}
-		if err := validateResultArtifacts(job, files, false); err != nil {
-			t.Fatalf("partial %s=%v", empty, err)
-		}
-	}
-}
-
 func TestPortableContractsRejectMismatches(t *testing.T) {
-	job := portableJob(command.Comment)
+	job := testJob(command.Comment)
 	job.Title = strings.Repeat("😀", 256)
 	if err := job.Validate(); err != nil {
 		t.Fatalf("rejected title at UTF-8 boundary: %v", err)
@@ -523,23 +524,23 @@ func TestPortableContractsRejectMismatches(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, test := range []struct {
-		name   string
-		change func(*Result)
+		name, want string
+		change     func(*Result)
 	}{
-		{"version", func(r *Result) { r.Version++ }},
-		{"source", func(r *Result) { r.SourceRef = strings.Repeat("b", 40) }},
-		{"identity", func(r *Result) { r.Identity.AttemptID = "stale" }},
-		{"oversized answer", func(r *Result) { r.Answer = strings.Repeat("x", maxOutputBytes+1) }},
-		{"read-only changes", func(r *Result) { r.Changes = []workspace.Change{{Path: "added", Mode: workspace.Regular}} }},
-		{"usage", func(r *Result) {
+		{"version", "action result version, identity or source differs from job", func(r *Result) { r.Version++ }},
+		{"source", "action result version, identity or source differs from job", func(r *Result) { r.SourceRef = strings.Repeat("b", 40) }},
+		{"identity", "action result version, identity or source differs from job", func(r *Result) { r.Identity.AttemptID = "stale" }},
+		{"oversized answer", "action answer is blank, invalid or exceeds limit", func(r *Result) { r.Answer = strings.Repeat("x", maxOutputBytes+1) }},
+		{"read-only changes", "read-only action returned source changes", func(r *Result) { r.Changes = []workspace.Change{{Path: "added", Mode: workspace.Regular}} }},
+		{"usage", "invalid model call usage", func(r *Result) {
 			r.Calls = []CallUsage{{Provider: "codex", Role: "main", Round: 1, Tokens: usage.Tokens{Input: -1}}}
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			result := valid
 			test.change(&result)
-			if result.Validate(job) == nil {
-				t.Fatal("accepted invalid result")
+			if err := result.Validate(job); err == nil || err.Error() != test.want {
+				t.Fatalf("result mismatch=%v want%q", err, test.want)
 			}
 		})
 	}
@@ -547,33 +548,27 @@ func TestPortableContractsRejectMismatches(t *testing.T) {
 	if err := status.Validate(job); err != nil {
 		t.Fatal(err)
 	}
-	status.ProgressAge = -time.Nanosecond
-	if status.Validate(job) == nil {
-		t.Fatal("accepted negative progress age")
-	}
-	status.ProgressAge = 0
-	status.Version++
-	if status.Validate(job) == nil {
-		t.Fatal("accepted incompatible status version")
-	}
-	status.Version = ProtocolVersion
-	status.Identity.AttemptID = "stale"
-	if status.Validate(job) == nil {
-		t.Fatal("accepted stale status identity")
-	}
-	status.Identity = job.Identity
-	status.State = "unknown"
-	if status.Validate(job) == nil {
-		t.Fatal("accepted unknown status state")
-	}
-	status.State, status.Phase = StatusRunning, "unknown"
-	if status.Validate(job) == nil {
-		t.Fatal("accepted unknown status phase")
+	for _, test := range []struct {
+		name, want string
+		change     func(*Status)
+	}{
+		{"negative progress age", "invalid action status", func(s *Status) { s.ProgressAge = -time.Nanosecond }},
+		{"version", "action status version or identity differs from job", func(s *Status) { s.Version++ }},
+		{"identity", "action status version or identity differs from job", func(s *Status) { s.Identity.AttemptID = "stale" }},
+		{"state", "invalid action status state", func(s *Status) { s.State = "unknown" }},
+		{"phase", "invalid action status phase", func(s *Status) { s.Phase = "unknown" }},
+	} {
+		t.Run("status/"+test.name, func(t *testing.T) {
+			changed := status
+			test.change(&changed)
+			if err := changed.Validate(job); err == nil || err.Error() != test.want {
+				t.Fatalf("status mismatch=%v want%q", err, test.want)
+			}
+		})
 	}
 }
-
 func TestResultRejectsInvalidRawAnswer(t *testing.T) {
-	job := portableJob(command.Comment)
+	job := testJob(command.Comment)
 	valid := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "ok", Calls: []CallUsage{{Provider: job.Main.Provider, Role: roleMain, Round: 1}}}
 	if err := valid.Validate(job); err != nil {
 		t.Fatalf("invalid positive control: %v", err)
@@ -599,8 +594,8 @@ func TestResultRejectsInvalidRawAnswer(t *testing.T) {
 	}
 }
 
-func TestResultRejectsChangedFileAndArtifactBounds(t *testing.T) {
-	job := portableJob(command.Fix)
+func TestResultRejectsChangedFileBounds(t *testing.T) {
+	job := testJob(command.Fix)
 	result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "answer", Calls: []CallUsage{{Provider: job.Main.Provider, Role: roleMain, Round: 1}}}
 	for i := 0; i < workspace.MaxChanges; i++ {
 		result.Changes = append(result.Changes, workspace.Change{Path: fmt.Sprintf("file-%d", i), Mode: workspace.Regular})
@@ -612,83 +607,48 @@ func TestResultRejectsChangedFileAndArtifactBounds(t *testing.T) {
 	if err := result.Validate(job); err == nil || !strings.Contains(err.Error(), "changed file limit") {
 		t.Fatalf("changed file bound validation = %v", err)
 	}
-	job = portableJob(command.SecurityAudit)
-	result = completeAuditResult(job)
-	if err := result.Validate(job); err != nil {
-		t.Fatalf("invalid audit fixture: %v", err)
-	}
-	result.Artifacts[0].Data = make([]byte, maxAuditArtifactBytes+1)
-	if err := result.Validate(job); err == nil || !strings.Contains(err.Error(), "invalid action report artifact") {
-		t.Fatalf("oversized artifact validation = %v", err)
-	}
 }
 
-func TestResultRejectsExecutableAuditArtifact(t *testing.T) {
-	job := portableJob(command.SecurityAudit)
-	result := completeAuditResult(job)
-	if err := result.Validate(job); err != nil {
-		t.Fatalf("invalid audit fixture: %v", err)
-	}
-	result.Artifacts[0].Mode = workspace.Executable
-	if err := result.Validate(job); err == nil || !strings.Contains(err.Error(), "invalid action report artifact") {
-		t.Fatalf("executable artifact validation = %v", err)
-	}
-}
-
-func TestFixResultIncludesOmittedDirectorySpellingsInFinalLayout(t *testing.T) {
+func TestFixResultValidatesFinalLayoutAgainstOriginalSource(t *testing.T) {
 	for _, test := range []struct {
-		name, omitted string
-		change        workspace.Change
-		want          string
+		name    string
+		files   []workspace.File
+		omitted string
+		changes []workspace.Change
+		want    string
 	}{
-		{"same directory", "dir/link", workspace.Change{Path: "dir/new", Mode: workspace.Regular}, ""},
-		{"directory spelling", "dir/link", workspace.Change{Path: "Dir/new", Mode: workspace.Regular}, "directory spelling collision"},
-		{"unicode directory spelling", "ſ/link", workspace.Change{Path: "s/new", Mode: workspace.Regular}, "directory spelling collision"},
-		{"replace omission", "dir/link", workspace.Change{Path: "dir/link", Mode: workspace.Regular}, "omitted source path"},
-		{"delete omission", "dir/link", workspace.Change{Path: "DIR/LINK", Delete: true}, "omitted source path"},
-		{"write descendant", "dir/link", workspace.Change{Path: "DIR/link/new", Mode: workspace.Regular}, "collision"},
-		{"replace ancestor", "dir/link", workspace.Change{Path: "DIR", Mode: workspace.Regular}, "collision"},
+		{"same directory", nil, "dir/link", []workspace.Change{{Path: "dir/new", Mode: workspace.Regular}}, ""},
+		{"directory spelling", nil, "dir/link", []workspace.Change{{Path: "Dir/new", Mode: workspace.Regular}}, "directory spelling collision"},
+		{"unicode directory spelling", nil, "ſ/link", []workspace.Change{{Path: "s/new", Mode: workspace.Regular}}, "directory spelling collision"},
+		{"replace omission", nil, "dir/link", []workspace.Change{{Path: "dir/link", Mode: workspace.Regular}}, "omitted source path"},
+		{"delete omission", nil, "dir/link", []workspace.Change{{Path: "DIR/LINK", Delete: true}}, "omitted source path"},
+		{"write descendant", nil, "dir/link", []workspace.Change{{Path: "DIR/link/new", Mode: workspace.Regular}}, "collision"},
+		{"replace ancestor", nil, "dir/link", []workspace.Change{{Path: "DIR", Mode: workspace.Regular}}, "collision"},
+		{"unchanged directory spelling", []workspace.File{{Path: "Foo/stay", Mode: workspace.Regular}}, "", []workspace.Change{{Path: "foo/new", Mode: workspace.Regular}}, "directory spelling collision"},
+		{"directory rename", []workspace.File{{Path: "Foo/stay", Mode: workspace.Regular}}, "", []workspace.Change{{Path: "Foo/stay", Delete: true}, {Path: "foo/new", Mode: workspace.Regular}}, ""},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			job := portableJob(command.Fix)
-			job.Source.Omitted = []string{test.omitted}
+			job := testJob(command.Fix)
+			if test.files != nil {
+				job.Source.Files = test.files
+			}
+			if test.omitted != "" {
+				job.Source.Omitted = []string{test.omitted}
+			}
 			if err := job.Validate(); err != nil {
 				t.Fatalf("invalid test source layout: %v", err)
 			}
 			result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Done.",
-				Changes: []workspace.Change{test.change}, Calls: []CallUsage{{Provider: job.Main.Provider, Role: "main", Round: 1}}}
-			err := result.Validate(job)
-			if test.want == "" {
-				if err != nil {
-					t.Fatalf("valid sibling change refused: %v", err)
-				}
-			} else if err == nil || !strings.Contains(err.Error(), test.want) {
-				t.Fatalf("omission layout validation=%v want%q", err, test.want)
+				Changes: test.changes, Calls: []CallUsage{{Provider: job.Main.Provider, Role: roleMain, Round: 1}}}
+			if err := result.Validate(job); (err == nil) != (test.want == "") || (err != nil && !strings.Contains(err.Error(), test.want)) {
+				t.Fatalf("final layout validation=%v want%q", err, test.want)
 			}
 		})
 	}
 }
 
-func TestAuditResultAnswerMustMatchTransferredReport(t *testing.T) {
-	job := portableJob(command.SecurityAudit)
-	result := completeAuditResult(job)
-	report := result.Answer
-	if err := result.Validate(job); err != nil {
-		t.Fatalf("invalid complete audit fixture: %v", err)
-	}
-	for _, answer := range []string{"Different unreviewed text.", report + "\n"} {
-		result.Answer = answer
-		if err := result.Validate(job); err == nil || !strings.Contains(err.Error(), "answer differs from REPORT.md") {
-			t.Fatalf("mismatched audit answer validation=%v", err)
-		}
-		if err := result.validate(job, false); err != nil {
-			t.Fatalf("incomplete audit diagnostics cannot be retained: %v", err)
-		}
-	}
-}
-
 func TestStatusRequiresMeaningfulStatePhasePairs(t *testing.T) {
-	job := portableJob(command.Comment)
+	job := testJob(command.Comment)
 	for _, test := range []struct {
 		state StatusState
 		phase StatusPhase
@@ -728,7 +688,7 @@ func TestStatusRequiresMeaningfulStatePhasePairs(t *testing.T) {
 }
 
 func TestResultAndStatusShareDiagnosticBounds(t *testing.T) {
-	job := portableJob(command.Comment)
+	job := testJob(command.Comment)
 	tooMany := make([]Diagnostic, 101)
 	for i := range tooMany {
 		tooMany[i] = Diagnostic{Code: "code", Message: "message"}
@@ -766,7 +726,7 @@ func TestJobSubjectMatchesComparisonForEveryAction(t *testing.T) {
 		for _, subject := range []string{"Issue", "PullRequest"} {
 			for _, comparison := range []bool{false, true} {
 				t.Run(fmt.Sprintf("%s/%s/comparison=%t", action, subject, comparison), func(t *testing.T) {
-					job := portableJob(action)
+					job := testJob(action)
 					job.Identity.SubjectType = subject
 					job.Source.Base, job.Source.MergeBase = "", ""
 					job.Source.BaseFiles, job.Source.Diff = nil, nil
@@ -795,7 +755,7 @@ func TestJobSubjectMatchesComparisonForEveryAction(t *testing.T) {
 }
 
 func TestJobJSONRoundTrip(t *testing.T) {
-	job := portableJob(command.Review)
+	job := testJob(command.Review)
 	job.Critic = &RoleSettings{Provider: "claude", Model: "critic-model", Effort: "high"}
 	job.CriticMaxRounds = config.DefaultCriticMaxRounds
 	job.Source.Omitted = []string{"omitted-link"}
@@ -816,37 +776,8 @@ func TestJobJSONRoundTrip(t *testing.T) {
 	}
 }
 
-func TestAuditResultRejectsRenderedOverflowButKeepsPartialReport(t *testing.T) {
-	job := portableJob(command.SecurityAudit)
-	result := completeAuditResult(job)
-	result.Answer = strings.Repeat("a\u0085", 19000)
-	for i := range result.Artifacts {
-		if result.Artifacts[i].Path == "REPORT.md" {
-			result.Artifacts[i].Data = []byte(result.Answer)
-		}
-	}
-	if err := result.Validate(job); err == nil || !strings.Contains(err.Error(), "answer") {
-		t.Fatalf("unpublishable report imported as complete: %v", err)
-	}
-	if err := result.validate(job, false); err != nil {
-		t.Fatalf("bounded partial report cannot be retained: %v", err)
-	}
-}
-
-func TestPartialAuditReportPreservesByteLimit(t *testing.T) {
-	job := portableJob(command.SecurityAudit)
-	for _, size := range []int{maxOutputBytes, maxOutputBytes + 1} {
-		result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head,
-			Artifacts: []workspace.File{{Path: "REPORT.md", Mode: workspace.Regular, Data: bytes.Repeat([]byte("x"), size)}},
-		}
-		if err := result.validate(job, false); (err == nil) != (size == maxOutputBytes) || err != nil && !strings.Contains(err.Error(), "report artifacts exceed limits") {
-			t.Fatalf("partial report size %d accepted or misclassified: %v", size, err)
-		}
-	}
-}
-
 func TestStatusBoundsRemainingRuntimeWithoutRenewingBudget(t *testing.T) {
-	job := portableJob(command.Comment)
+	job := testJob(command.Comment)
 	job.RuntimeBudget = time.Minute
 	for _, remaining := range []time.Duration{-1, 0, time.Nanosecond, time.Minute, time.Minute + 1} {
 		status := Status{Version: ProtocolVersion, Identity: job.Identity, State: StatusRunning, Phase: PhaseMain, Round: 1, RuntimeRemaining: remaining}
@@ -870,5 +801,36 @@ func TestStatusBoundsRemainingRuntimeWithoutRenewingBudget(t *testing.T) {
 	status := Status{Version: ProtocolVersion, Identity: job.Identity, State: StatusReady, Phase: PhasePreparing, RuntimeRemaining: 2 * time.Nanosecond}
 	if status.Validate(job) == nil {
 		t.Fatal("status renewed the supplied runtime budget")
+	}
+}
+
+func TestResultEmptyAnswerContract(t *testing.T) {
+	for _, test := range []struct {
+		action  command.Action
+		critic  bool
+		changed bool
+		valid   bool
+	}{{command.Fix, false, true, true}, {command.Fix, false, false, false}, {command.Fix, true, false, false}, {command.Fix, true, true, false}, {command.Comment, false, false, false}, {command.Review, false, false, false}, {command.SecurityAudit, false, false, false}} {
+		job := testJob(test.action)
+		if test.critic {
+			job = withClaudeCritic(job)
+		}
+		result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Calls: []CallUsage{{Provider: job.Main.Provider, Role: "main", Round: 1}}}
+		if test.critic {
+			result.Calls = append(result.Calls, CallUsage{Provider: job.Critic.Provider, Role: roleCritic, Round: 1, ReviewPhase: reviewFull, Approved: true, NoBlockers: true})
+		}
+		if test.changed {
+			result.Changes = []workspace.Change{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("fixed source")}}
+		}
+		if test.critic && test.changed {
+			result.Answer = "Fixed source."
+			if err := result.Validate(job); err != nil {
+				t.Fatalf("invalid changed-fix critic positive control: %v", err)
+			}
+			result.Answer = ""
+		}
+		if err := result.Validate(job); (err == nil) != test.valid || (!test.valid && !strings.Contains(err.Error(), "action answer")) {
+			t.Fatalf("empty %s answer with critic=%t: %v", test.action, test.critic, err)
+		}
 	}
 }

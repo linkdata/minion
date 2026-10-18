@@ -28,8 +28,8 @@ func TestUsageSessionNativeSubAgentActivityNewSpawnOnResume(t *testing.T) {
 		{name: "started owned new helper", kind: "started", want: 25, complete: true},
 		{name: "completed alone is not spawn", kind: "completed", want: 20, unverified: true},
 		{name: "unknown kind is not spawn", kind: "unknown", want: 20, unverified: true},
-		{name: "old turn cannot grant current spawn", kind: "started", turn: "old-root", want: 20, complete: true},
-		{name: "other thread cannot grant current spawn", kind: "started", thread: "unrelated-root", want: 20, complete: true},
+		{name: "old turn cannot grant current spawn", kind: "started", turn: "old-root", want: 20, unverified: true},
+		{name: "other thread cannot grant current spawn", kind: "started", thread: "unrelated-root", want: 20, unverified: true},
 		{name: "started missing child remains unverified", kind: "started", missing: true, want: 20, unverified: true},
 		{name: "started unrelated metadata remains unverified", kind: "started", unrelated: true, want: 20, unverified: true},
 		{name: "started unfinished child remains unverified", kind: "started", unfinished: true, want: 25, unverified: true},
@@ -99,8 +99,8 @@ func TestUsageSessionNativeInheritedActivityDoesNotGrantGrandchild(t *testing.T)
 	writeUsageRolloutBoundary(t, home, "child", "root", &boundary, childEvents...)
 	writeUsageRolloutBoundary(t, home, "grandchild", "child", nil, completedUsageTurn("grandchild", "grandchild-turn", "g1", 7)...)
 	got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 20}, nil, nil)
-	if got != (usage.Tokens{Input: 25}) || !complete || err != nil {
-		t.Fatalf("inherited native activity selected unrelated current work: %+v,%t,%v", got, complete, err)
+	if got != (usage.Tokens{Input: 25}) || complete || !errors.Is(err, errUnverifiedChildren) {
+		t.Fatalf("inherited native activity certified unverified grandchild work: %+v,%t,%v", got, complete, err)
 	}
 }
 

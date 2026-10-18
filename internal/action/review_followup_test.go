@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
@@ -50,25 +51,59 @@ printf '{"type":"system","subtype":"init","session_id":"%s"}\n' "$session"
 printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"terminal_reason":"completed","result":"Done.","modelUsage":{"fixture":{"inputTokens":3,"cacheCreationInputTokens":0,"cacheReadInputTokens":0,"outputTokens":2}}}'`
 				}
 				fakeOnPath(t, provider, "#!/bin/sh\nset -eu\ncat >/dev/null\n"+event+"\n/bin/chmod 0500 "+shellQuote(root)+"\n")
-				job := portableJob(command.Comment)
+				job := testJob(command.Comment)
 				job.Main.Provider = provider
 				runner := Runner{WorkRoot: root, Claude: config.ClaudeConfig{APIKey: "inert-test-key"}}
 				journal := &cleanupRetryLog{root: root}
-				if recover {
-					runner.Logger = log.New(journal, "", 0)
+				var removed []string
+				if !recover {
+					journal.onRetry = func() (err error) {
+						if err = os.Chmod(root, 0700); err != nil {
+							return err
+						}
+						defer func() { err = errors.Join(err, os.Chmod(root, 0500)) }()
+						entries, err := os.ReadDir(root)
+						if err != nil {
+							return err
+						}
+						// Ordinary owned cleanup must succeed independently of the
+						// second failed native-session close and its diagnostic.
+						for _, entry := range entries {
+							if strings.HasPrefix(entry.Name(), "minion-") || strings.HasPrefix(entry.Name(), ".minion-context-") {
+								path := filepath.Join(root, entry.Name())
+								if err := os.RemoveAll(path); err != nil {
+									return err
+								}
+								removed = append(removed, path)
+							}
+						}
+						if len(removed) != 2 {
+							return fmt.Errorf("expected source and context directories, removed %q", removed)
+						}
+						return nil
+					}
 				}
+				runner.Logger = log.New(journal, "", 0)
 				result, err := runner.Run(context.Background(), job)
 				if err != nil || result.Answer != "Done." || len(result.Calls) != 1 || result.Validate(job) != nil {
 					t.Fatalf("session cleanup discarded accepted result: %+v,%v", result, err)
 				}
+				if journal.err != nil || strings.Count(journal.String(), "model session cleanup retry scheduled") != 1 {
+					t.Fatalf("session cleanup retry was not exercised: %v, %q", journal.err, journal.String())
+				}
 				if recover {
-					if journal.err != nil || len(result.Diagnostics) != 0 {
+					if len(result.Diagnostics) != 0 {
 						t.Fatalf("cleanup retry did not recover: %+v,%v", result, journal.err)
 					}
 					if entries, err := os.ReadDir(root); err != nil || len(entries) != 0 {
 						t.Fatalf("recovered cleanup left paths: %v,%v", entries, err)
 					}
 				} else {
+					for _, path := range removed {
+						if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+							t.Fatalf("ordinary owned cleanup did not succeed: %s: %v", path, err)
+						}
+					}
 					if len(result.Diagnostics) != 1 || result.Diagnostics[0].Code != "cleanup_failed" {
 						t.Fatalf("persistent cleanup was not reported: %+v", result.Diagnostics)
 					}
@@ -101,7 +136,7 @@ func TestRunnerTerminalFailureStaysTerminalWhenParentCancels(t *testing.T) {
 		cancel()
 		return aicli.Result{}, terminal
 	}}
-	result, err := runner.Run(ctx, portableJob(command.Comment))
+	result, err := runner.Run(ctx, testJob(command.Comment))
 	if !errors.Is(err, monitor.ErrTerminalJob) || errors.Is(err, context.Canceled) || result.Answer != "" || len(result.Calls) != 1 {
 		t.Fatalf("late cancellation made a terminal attempt refundable: %+v,%v", result, err)
 	}
@@ -122,7 +157,7 @@ func TestFixPreparationChecksDurablePrerequisitesBeforeGitHub(t *testing.T) {
 }
 
 func TestAuditResultRejectsDuplicateAllowedArtifact(t *testing.T) {
-	job := portableJob(command.SecurityAudit)
+	job := testJob(command.SecurityAudit)
 	result := completeAuditResult(job)
 	if err := result.Validate(job); err != nil {
 		t.Fatal(err)
@@ -152,7 +187,7 @@ func TestRunnerScratchCreationUsesPreparationFailureClass(t *testing.T) {
 			t.Error(err)
 		}
 	})
-	result, err := (&Runner{WorkRoot: root, runModel: forbidModel(t)}).Run(context.Background(), portableJob(command.Comment))
+	result, err := (&Runner{WorkRoot: root, runModel: forbidModel(t)}).Run(context.Background(), testJob(command.Comment))
 	if !errors.Is(err, os.ErrPermission) || !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "create source workspace") || len(result.Calls) != 0 {
 		t.Fatalf("scratch creation classification: %+v,%v", result, err)
 	}
@@ -162,16 +197,20 @@ func TestRunnerScratchCreationUsesPreparationFailureClass(t *testing.T) {
 }
 
 func TestRevisionInstructionsEvaluateProposedChanges(t *testing.T) {
-	const rule = "Evaluate each proposed change against the current code, connected callers, tests and task constraints"
-	for _, prompt := range []string{revisionPrompt("Task", "Answer", "Finding"), criticPrompt(reviewFull, "Task", "Answer", "", "", ""), criticPrompt(reviewVerification, "Task", "Answer", "Earlier", "Finding", "")} {
-		if !strings.Contains(prompt, rule) {
+	for _, test := range []struct{ prompt, rule string }{
+		{revisionPrompt("Task", "Answer", "Finding"), "Evaluate each proposed change against the current code, connected callers, tests and task constraints"},
+		{criticPrompt(reviewFull, "Task", "Answer", "", "", ""), "Evaluate the candidate's changes and the main model's refutations against the current code, connected callers, tests and task constraints"},
+		{criticPrompt(reviewVerification, "Task", "Answer", "Earlier", "Finding", ""), "Evaluate the candidate's changes and the main model's refutations against the current code, connected callers, tests and task constraints"},
+	} {
+		prompt := test.prompt
+		if !strings.Contains(prompt, test.rule) {
 			t.Fatalf("missing change-evaluation instruction: %s", prompt)
 		}
 	}
 }
 
 func TestRunnerCleansPartiallyCreatedCriticSnapshot(t *testing.T) {
-	job := withClaudeCritic(portableJob(command.Fix))
+	job := withClaudeCritic(testJob(command.Fix))
 	root := t.TempDir()
 	marker := filepath.Join(t.TempDir(), "partial-snapshot")
 	binary, err := aicli.AbsoluteExecutable("git")
@@ -209,7 +248,7 @@ func TestRunnerUsesTheProbedNodeAfterPathChanges(t *testing.T) {
 	installActionTestSkills(t, testAuditSkillURL)
 	first, second := filepath.Join(t.TempDir(), "first-node"), filepath.Join(t.TempDir(), "second-node")
 	fakeOnPath(t, "node", "#!/bin/sh\nprintf '%s\\n' \"$*\" >> "+shellQuote(first)+"\n")
-	job := portableJob(command.SecurityAudit)
+	job := testJob(command.SecurityAudit)
 	job.Main.Skills = []string{testAuditSkillURL}
 	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 		fakeOnPath(t, "node", "#!/bin/sh\nprintf called > "+shellQuote(second)+"\nexit 77\n")
@@ -232,7 +271,7 @@ func TestRunnerUsesTheProbedNodeAfterPathChanges(t *testing.T) {
 }
 
 func TestStatusRejectsNegativeRoundsForTerminalAndCleanupPhases(t *testing.T) {
-	job := portableJob(command.Comment)
+	job := testJob(command.Comment)
 	for _, status := range []Status{
 		{Version: ProtocolVersion, Identity: job.Identity, State: StatusStopping, Phase: PhaseCleanup, Round: -1},
 		{Version: ProtocolVersion, Identity: job.Identity, State: StatusFailed, Phase: PhaseFinished, Round: -1},
@@ -240,5 +279,48 @@ func TestStatusRejectsNegativeRoundsForTerminalAndCleanupPhases(t *testing.T) {
 		if err := status.Validate(job); err == nil || err.Error() != "invalid action status" {
 			t.Fatalf("negative round accepted or failed earlier: %+v,%v", status, err)
 		}
+	}
+}
+
+func TestRunnerDeadlineDuringSessionCleanupClearsValidatedAnswer(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions")
+	}
+	installActionTestSkills(t)
+	t.Setenv("CODEX_HOME", t.TempDir())
+	root := t.TempDir()
+	t.Cleanup(func() {
+		if err := os.Chmod(root, 0700); err != nil {
+			t.Error(err)
+		}
+	})
+	fakeOnPath(t, "codex", `#!/bin/sh
+set -eu
+cat >/dev/null
+printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.completed","item":{"type":"agent_message","text":"Done."}}' '{"type":"turn.completed"}'
+/bin/chmod 0500 `+shellQuote(root)+"\n")
+	job := testJob(command.Comment)
+	job.RuntimeBudget = 5 * time.Second
+	var modelContext context.Context
+	journal := &cleanupRetryLog{root: root, onRetry: func() error {
+		if modelContext == nil {
+			return errors.New("cleanup ran before a model context was captured")
+		}
+		// This retry runs only after Run assigned and validated its result.
+		// Expire the action here so only the final deadline defer can clear it.
+		<-modelContext.Done()
+		return os.Chmod(root, 0700)
+	}}
+	runner := Runner{WorkRoot: root, Logger: log.New(journal, "", 0), aroundModel: func(ctx context.Context, request modelRun, next modelCall) (aicli.Result, error) {
+		modelContext = ctx
+		return next(ctx, request)
+	}}
+	result, err := runner.Run(context.Background(), job)
+	wantError := errors.Join(monitor.ErrTerminalJob, context.DeadlineExceeded).Error()
+	if err == nil || err.Error() != wantError || !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, monitor.ErrTerminalJob) || result.Answer != "" || len(result.Changes) != 0 || len(result.Calls) != 1 || len(result.Diagnostics) != 0 || journal.err != nil || strings.Count(journal.String(), "model session cleanup retry scheduled") != 1 {
+		t.Fatalf("deadline after result validation was publishable: %+v, %v; cleanup=%v log=%q", result, err, journal.err, journal.String())
+	}
+	if entries, err := os.ReadDir(root); err != nil || len(entries) != 0 {
+		t.Fatalf("deadline cleanup leaked: %v,%v", entries, err)
 	}
 }

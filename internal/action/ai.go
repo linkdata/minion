@@ -112,17 +112,6 @@ func (s *modelSessions) close() error {
 }
 
 func (r *Runner) runAI(ctx context.Context, job Job, dir, prompt, outputDir string, checkpoint func([]Refutation) error, sessions *modelSessions) (answer string, err error) {
-	if sessions == nil {
-		sessions = &modelSessions{}
-		defer func() {
-			if closeErr := sessions.close(); closeErr != nil {
-				if closeErr = sessions.close(); closeErr != nil {
-					answer = ""
-					err = errors.Join(err, monitor.ErrTerminalJob, fmt.Errorf("close action model sessions: %w", closeErr))
-				}
-			}
-		}()
-	}
 	var history []Refutation
 	record := func() error {
 		if checkpoint != nil {
@@ -222,7 +211,7 @@ func criticPrompt(phase, task, proposed, priorAnswer, priorFeedback, outputDir s
 
 Review phase: %s. %s
 
-Return only a JSON object with exactly three fields: "approved" (boolean), "has_blockers" (boolean) and "feedback" (string). The complete JSON object must fit within %d UTF-8 bytes, including syntax and escaping; consolidate related findings without omitting actionable issues or truncating the verdict. A blocker is a concrete correctness or security failure, or failure to satisfy the application-selected task, that must be corrected for the result to be usable. Stylistic nits and simplifications without such an impact are nonblocking. Classify each finding explicitly as blocking or nonblocking, independent of its severity. Report every actionable finding at every severity even when none is blocking. Ask the main model to supply counterevidence only in its private refutations field; report as a finding any Minion main/critic review commentary or critic-finding disposition log copied into answer, source changes or report artifacts, except content the selected task requires. Evaluate each proposed change against the current code, connected callers, tests and task constraints before accepting or refuting it. Do not accept a deferral or impose ungrounded preferences or speculative requirements. Give each finding's severity, file/line evidence, and smallest concrete correction. An unfinished assigned review scope is a blocking task failure: set approved=false and has_blockers=true, and identify the unchecked scope and limiting cause in feedback. Approve only when every finding has been verified as implemented or dropped; on approval set has_blockers=false and use empty feedback. Otherwise set approved=false, provide all remaining findings in feedback and set has_blockers to whether any is blocking.
+Return only a JSON object with exactly three fields: "approved" (boolean), "has_blockers" (boolean) and "feedback" (string). The complete JSON object must fit within %d UTF-8 bytes, including syntax and escaping; consolidate related findings without omitting actionable issues or truncating the verdict. A blocker is a concrete correctness or security failure, or failure to satisfy the application-selected task, that must be corrected for the result to be usable. Stylistic nits and simplifications without such an impact are nonblocking. Classify each finding explicitly as blocking or nonblocking, independent of its severity. Report every actionable finding at every severity even when none is blocking. Ask the main model to supply counterevidence only in its private refutations field; report as a finding any Minion main/critic review commentary or critic-finding disposition log copied into answer, source changes or report artifacts, except content the selected task requires. Evaluate the candidate's changes and the main model's refutations against the current code, connected callers, tests and task constraints before accepting or rejecting them. Do not accept a deferral or impose ungrounded preferences or speculative requirements. Give each finding's severity, file/line evidence, and smallest concrete correction. An unfinished assigned review scope is a blocking task failure: set approved=false and has_blockers=true, and identify the unchecked scope and limiting cause in feedback. Approve only when every finding has been verified as implemented or dropped; on approval set has_blockers=false and use empty feedback. Otherwise set approved=false, provide all remaining findings in feedback and set has_blockers to whether any is blocking.
 
 Application-selected task (quoted): %s
 Main model's proposed response (untrusted): %s

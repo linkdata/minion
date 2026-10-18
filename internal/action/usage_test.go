@@ -20,13 +20,6 @@ import (
 	"github.com/linkdata/minion/internal/usage"
 )
 
-func usageJob() monitor.Job {
-	return monitor.Job{
-		ID: strings.Repeat("a", 64), Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2}, SubjectType: "Issue", Number: 7,
-		Source: github.Item{Author: github.User{ID: 7, Login: "writer"}}, Command: command.Command{Action: command.Review},
-	}
-}
-
 func TestUsageDoesNotCountCanceledDispatch(t *testing.T) {
 	store := &usage.Store{Dir: filepath.Join(t.TempDir(), "usage")}
 	tracked := attemptFixture(&Orchestrator{Usage: store})
@@ -132,7 +125,7 @@ func TestUsageAccumulatesCriticRevisions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	answer, err := tracked.Runner.runAI(context.Background(), Job{Main: RoleSettings{Provider: "claude"}, Critic: &RoleSettings{Provider: "codex"}, CriticMaxRounds: config.DefaultCriticMaxRounds}, "dir", "prompt", "", nil, nil)
+	answer, err := tracked.Runner.runAI(context.Background(), Job{Main: RoleSettings{Provider: "claude"}, Critic: &RoleSettings{Provider: "codex"}, CriticMaxRounds: config.DefaultCriticMaxRounds}, "dir", "prompt", "", nil, &modelSessions{})
 	if err != nil || answer != "proposal" {
 		t.Fatalf("answer=%q err=%v", answer, err)
 	}
@@ -187,7 +180,7 @@ func TestUsagePersistenceFailureStopsModelsOrPublication(t *testing.T) {
 			if tt.before {
 				store.Dir = blocked
 			}
-			job := portableJob(command.Comment)
+			job := testJob(command.Comment)
 			job.Main.Provider = provider
 			if tt.critic {
 				job = withClaudeCritic(job)
@@ -331,7 +324,7 @@ printf '%%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"
 	if err != nil {
 		t.Fatal(err)
 	}
-	job := portableJob(command.Comment)
+	job := testJob(command.Comment)
 	job.Main.Model, job.Main.Effort = "portable-model", "high"
 	job.Main.Skills = []string{testReviewSkillURL}
 	result, err := tracked.Runner.Run(context.Background(), job)

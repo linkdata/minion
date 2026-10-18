@@ -345,7 +345,7 @@ func TestFixRefusesIssueEditedAfterRequest(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
 			_, _ = fmt.Fprint(w, privateRepositoryJSON)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/linkdataminion/r":
-			_, _ = fmt.Fprint(w, `{"id":2,"full_name":"linkdataminion/r","fork":true,"parent":{"id":1,"full_name":"o/r"},"source":{"id":1,"full_name":"o/r"},"private":true,"visibility":"private"}`)
+			_, _ = fmt.Fprint(w, privateForkRepositoryJSON)
 		case serveSafeForkChecks(w, r, "linkdataminion/r", true):
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/pulls":
 			_, _ = fmt.Fprint(w, `[]`)
@@ -442,7 +442,7 @@ func TestFixRecoversOnlyRecordedBranch(t *testing.T) {
 						t.Error(err)
 					}
 				case r.Method == http.MethodGet && r.URL.Path == "/repos/linkdataminion/r":
-					_, _ = fmt.Fprint(w, `{"id":2,"full_name":"linkdataminion/r","fork":true,"parent":{"id":1,"full_name":"o/r"},"source":{"id":1,"full_name":"o/r"},"private":true,"visibility":"private"}`)
+					_, _ = fmt.Fprint(w, privateForkRepositoryJSON)
 				case serveSafeForkChecks(w, r, "linkdataminion/r", true):
 				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/pulls":
 					if r.URL.Query().Get("head") != "linkdataminion:"+branch || r.URL.Query().Get("base") != "main" || r.URL.Query().Get("state") != "open" {
@@ -520,7 +520,7 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 			scratch := t.TempDir()
 			fixtureGitCommand := func(args ...string) *exec.Cmd {
 				cmd := exec.Command("git", args...)
-				cmd.Env = append([]string{"PATH=" + os.Getenv("PATH"), "HOME=" + scratch, "TMPDIR=" + scratch, "LC_ALL=C", "GIT_TEMPLATE_DIR=/dev/null"}, aicli.ModelGitEnvironment()...)
+				cmd.Env = fixtureGitEnv(scratch)
 				return cmd
 			}
 			fixtureGit := func(args ...string) []byte {
@@ -566,7 +566,7 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
 					_, _ = fmt.Fprint(w, privateRepositoryJSON)
 				case r.Method == http.MethodGet && r.URL.Path == "/repos/linkdataminion/r":
-					_, _ = fmt.Fprint(w, `{"id":2,"full_name":"linkdataminion/r","fork":true,"parent":{"id":1,"full_name":"o/r"},"source":{"id":1,"full_name":"o/r"},"private":true,"visibility":"private"}`)
+					_, _ = fmt.Fprint(w, privateForkRepositoryJSON)
 				case serveSafeForkChecks(w, r, "linkdataminion/r", true):
 					if strings.HasSuffix(r.URL.Path, "/rulesets") {
 						rulesetChecks++
@@ -800,11 +800,11 @@ func TestFixForkRefusesUnsafePublication(t *testing.T) {
 		{name: "unrelated repository", fork: `{"id":2,"full_name":"linkdataminion/r","private":true,"visibility":"private"}`, want: "not an active fork"},
 		{name: "different parent ID", fork: `{"id":2,"full_name":"linkdataminion/r","fork":true,"parent":{"id":3,"full_name":"o/r"},"private":true,"visibility":"private"}`, want: "not an active fork"},
 		{name: "public fork of private base", fork: `{"id":2,"full_name":"linkdataminion/r","fork":true,"parent":{"id":1,"full_name":"o/r"},"source":{"id":1,"full_name":"o/r"},"visibility":"public"}`, want: "matching visibility"},
-		{name: "fork Actions enabled", fork: `{"id":2,"full_name":"linkdataminion/r","fork":true,"parent":{"id":1,"full_name":"o/r"},"source":{"id":1,"full_name":"o/r"},"private":true,"visibility":"private"}`, actions: `{"enabled":true}`, want: "must be disabled"},
-		{name: "fork Actions status absent", fork: `{"id":2,"full_name":"linkdataminion/r","fork":true,"parent":{"id":1,"full_name":"o/r"},"source":{"id":1,"full_name":"o/r"},"private":true,"visibility":"private"}`, actions: `{}`, want: "omitted enabled"},
-		{name: "private PR gets secrets", fork: `{"id":2,"full_name":"linkdataminion/r","fork":true,"parent":{"id":1,"full_name":"o/r"},"source":{"id":1,"full_name":"o/r"},"private":true,"visibility":"private"}`, actions: `{"enabled":false}`, policy: `{"send_write_tokens_to_workflows":false,"send_secrets_and_variables":true}`, want: "secrets or write tokens"},
-		{name: "private PR gets write token", fork: `{"id":2,"full_name":"linkdataminion/r","fork":true,"parent":{"id":1,"full_name":"o/r"},"source":{"id":1,"full_name":"o/r"},"private":true,"visibility":"private"}`, actions: `{"enabled":false}`, policy: `{"send_write_tokens_to_workflows":true,"send_secrets_and_variables":false}`, want: "secrets or write tokens"},
-		{name: "private PR policy incomplete", fork: `{"id":2,"full_name":"linkdataminion/r","fork":true,"parent":{"id":1,"full_name":"o/r"},"source":{"id":1,"full_name":"o/r"},"private":true,"visibility":"private"}`, actions: `{"enabled":false}`, policy: `{}`, want: "incomplete"},
+		{name: "fork Actions enabled", fork: privateForkRepositoryJSON, actions: `{"enabled":true}`, want: "must be disabled"},
+		{name: "fork Actions status absent", fork: privateForkRepositoryJSON, actions: `{}`, want: "omitted enabled"},
+		{name: "private PR gets secrets", fork: privateForkRepositoryJSON, actions: `{"enabled":false}`, policy: `{"send_write_tokens_to_workflows":false,"send_secrets_and_variables":true}`, want: "secrets or write tokens"},
+		{name: "private PR gets write token", fork: privateForkRepositoryJSON, actions: `{"enabled":false}`, policy: `{"send_write_tokens_to_workflows":true,"send_secrets_and_variables":false}`, want: "secrets or write tokens"},
+		{name: "private PR policy incomplete", fork: privateForkRepositoryJSON, actions: `{"enabled":false}`, policy: `{}`, want: "incomplete"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

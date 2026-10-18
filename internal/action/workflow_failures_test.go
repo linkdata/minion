@@ -185,6 +185,70 @@ func TestPrepareFixClassifiesUnsupportedLayoutBeforeBranchOrModels(t *testing.T)
 	}
 }
 
+func TestPrepareRetainsCheckoutForRetryAfterCleanupFailure(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions")
+	}
+	base, _, _ := gitFixtureRemote(t)
+	root := t.TempDir()
+	t.Cleanup(func() {
+		if err := os.Chmod(root, 0700); err != nil {
+			t.Error(err)
+		}
+	})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/o/r/git/trees/") {
+			entries, err := os.ReadDir(root)
+			if err != nil || len(entries) != 1 || !entries[0].IsDir() || !strings.HasPrefix(entries[0].Name(), "minion-checkout-") {
+				t.Errorf("metadata requested without isolated checkout: entries=%v error=%v", entries, err)
+				http.Error(w, "missing fixture checkout", http.StatusInternalServerError)
+				return
+			}
+			// Snapshot work can still use the checkout; only removing its parent entry fails.
+			if err := os.Chmod(root, 0500); err != nil {
+				t.Error(err)
+				http.Error(w, "cannot restrict fixture parent", http.StatusInternalServerError)
+				return
+			}
+			writeTreeFixture(t, w, strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/"))
+			return
+		}
+		if !serveIssueFixture(t, w, r) {
+			t.Errorf("unexpected preparation request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	request := usageJob()
+	request.Command = command.Command{Name: "inspect", Action: command.Comment}
+	var journal bytes.Buffer
+	orchestrator := attemptFixture(&Orchestrator{WorkRoot: root, GitHub: testGitHub(server, "token"), Logger: log.New(&journal, "", 0),
+		Commands: map[string]config.CommandMapping{"inspect": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}},
+	})
+	prepared, err := orchestrator.prepare(testActionContext(t), request)
+	if err != nil || prepared == nil || prepared.checkout == nil || !prepared.needsExecution() {
+		t.Fatalf("cleanup failure discarded prepared work or retry handle: prepared=%+v error=%v", prepared, err)
+	}
+	if err := prepared.job.Validate(); err != nil || prepared.job.Source.Head != base || len(prepared.job.Source.Repository) == 0 {
+		t.Fatalf("cleanup failure invalidated portable job: source=%s error=%v", prepared.job.Source.Head, err)
+	}
+	if !strings.Contains(journal.String(), "prepared checkout cleanup failed; final retry scheduled:") || !strings.Contains(journal.String(), "remove checkout:") || !strings.Contains(journal.String(), "permission denied") {
+		t.Fatalf("prepare cleanup failure was not exercised/logged: %s", &journal)
+	}
+	if entries, err := os.ReadDir(root); err != nil || len(entries) != 1 || !strings.HasPrefix(entries[0].Name(), "minion-checkout-") {
+		t.Fatalf("failed cleanup did not retain checkout entry: entries=%v error=%v", entries, err)
+	}
+	if err := os.Chmod(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepared.checkout.Close(); err != nil {
+		t.Fatalf("retained checkout could not retry cleanup: %v", err)
+	}
+	if entries, err := os.ReadDir(root); err != nil || len(entries) != 0 {
+		t.Fatalf("successful cleanup retry left owned files: entries=%v error=%v", entries, err)
+	}
+}
+
 func TestExecuteLogsCheckoutCleanupFailureAfterSuccessfulPublication(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root bypasses directory permissions")
@@ -298,7 +362,7 @@ exec %s "$@"
 				}
 				switch r.URL.Path {
 				case "/repos/o/r":
-					_, _ = fmt.Fprint(w, publicForkableRepositoryJSON)
+					_, _ = fmt.Fprint(w, publicRepositoryJSON)
 				case "/repos/bot/r":
 					currentFork := fork
 					if stage == "fork changed" {
@@ -318,7 +382,7 @@ exec %s "$@"
 			if err := checkout.NewBranch(context.Background(), branch); err != nil {
 				t.Fatal(err)
 			}
-			job := portableJob(command.Fix)
+			job := testJob(command.Fix)
 			job.Source.Head = base
 			prepared := &preparedAction{job: job, checkout: checkout, repository: repo, fork: fork, branch: branch, request: monitor.Job{ID: strings.Repeat("a", 64), Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2}, Command: command.Command{Name: "fix", Action: command.Fix}}}
 			orchestrator := Orchestrator{GitHub: client, BotLogin: "bot", WorkRoot: root}
@@ -374,7 +438,7 @@ exec %s "$@"
 func TestCompletedAuditRetentionFailureIsTerminal(t *testing.T) {
 	base, _, _ := gitFixtureRemote(t)
 	checkout := cloneFixture(t, t.TempDir())
-	job := portableJob(command.SecurityAudit)
+	job := testJob(command.SecurityAudit)
 	job.Source.Head, job.Source.Files = base, nil
 	result := completeAuditResult(job)
 	if err := result.Validate(job); err != nil {
@@ -403,7 +467,7 @@ func TestCompletedAuditRetentionFailureIsTerminal(t *testing.T) {
 func TestCanceledPublicationRetainsValidatedAudit(t *testing.T) {
 	for _, valid := range []bool{true, false} {
 		t.Run(fmt.Sprintf("valid=%t", valid), func(t *testing.T) {
-			job := portableJob(command.SecurityAudit)
+			job := testJob(command.SecurityAudit)
 			result := completeAuditResult(job)
 			if !valid {
 				result.Calls[0].Provider = "unknown"
@@ -446,7 +510,7 @@ func TestCanceledPublicationRetainsValidatedAudit(t *testing.T) {
 func TestContextDescribesOmittedRevisionScope(t *testing.T) {
 	for _, action := range []command.Action{command.Comment, command.Review} {
 		t.Run(string(action), func(t *testing.T) {
-			job := portableJob(action)
+			job := testJob(action)
 			job.Source.Omitted = []string{"docs"}
 			root := t.TempDir()
 			if err := materializeContext(root, job.Source); err != nil {
@@ -469,7 +533,6 @@ func TestContextDescribesOmittedRevisionScope(t *testing.T) {
 			if source.OmittedScope != want {
 				t.Fatalf("omitted scope=%q want%q", source.OmittedScope, want)
 			}
-
 		})
 	}
 }

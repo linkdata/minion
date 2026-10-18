@@ -2,8 +2,9 @@ package codexcli
 
 import (
 	"context"
-	"github.com/linkdata/minion/internal/usage"
 	"time"
+
+	"github.com/linkdata/minion/internal/usage"
 )
 
 // collectUsage reads bounded first-line headers of recent rollouts to identify

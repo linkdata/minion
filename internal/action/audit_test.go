@@ -387,7 +387,7 @@ func TestAuditArtifactReadModesPreserveFailurePolicies(t *testing.T) {
 	for _, scenario := range []string{"missing core", "empty core", "unsafe core", "oversized report", "invalid UTF-8 report", "NUL report", "blank report"} {
 		for _, partial := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/partial-%t", scenario, partial), func(t *testing.T) {
-				job := portableJob(command.SecurityAudit)
+				job := testJob(command.SecurityAudit)
 				root := t.TempDir()
 				for _, file := range auditArtifactsFixture(job, sourceIdentity(job), "Audit report\n") {
 					writeFixtureFile(t, root, file.Path, file.Data)

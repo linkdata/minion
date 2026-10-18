@@ -157,7 +157,7 @@ func TestExecuteCriticAdmissionUsesControlledWorkRoot(t *testing.T) {
 }
 
 func TestReviewEvidenceInitialCheckpointIsNotTerminalBeforeModels(t *testing.T) {
-	job := withClaudeCritic(portableJob(command.Comment))
+	job := withClaudeCritic(testJob(command.Comment))
 	checkpoints := 0
 	runner := Runner{WorkRoot: t.TempDir(), recordReview: func(receipts []CallUsage, refs []Refutation) error {
 		checkpoints++
@@ -175,7 +175,7 @@ func TestReviewEvidenceInitialCheckpointIsNotTerminalBeforeModels(t *testing.T) 
 func TestPrivateReviewRejectsChangedSavedCheckpoint(t *testing.T) {
 	for _, kind := range []string{"corrupt", "identity", "source", "policy", "calls", "symlink"} {
 		t.Run(kind, func(t *testing.T) {
-			job := withClaudeCritic(portableJob(command.Comment))
+			job := withClaudeCritic(testJob(command.Comment))
 			result := privateReviewResult(job)
 			e := Orchestrator{WorkRoot: t.TempDir()}
 			if err := e.retainReviewEvidence(job, result); err != nil {

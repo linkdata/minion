@@ -40,7 +40,7 @@ func assertGitChildStopped(t *testing.T, pidFile string) {
 func TestGitOutputLimitStopsChildHoldingPipes(t *testing.T) {
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "child.pid")
-	alias := "!printf '%s' $$ > " + shellQuote(pidFile) + "; printf overflow-output; exec sleep 6"
+	alias := "!printf '%s' $$ > " + shellQuote(pidFile+".tmp") + " && mv " + shellQuote(pidFile+".tmp") + " " + shellQuote(pidFile) + "; printf overflow-output; exec sleep 6"
 	started := time.Now()
 	_, _, err := (&Checkout{path: dir}).boundedGit(context.Background(), nil, 4, false, "-c", "alias.probe="+alias, "probe")
 	elapsed := time.Since(started)
@@ -53,7 +53,7 @@ func TestGitOutputLimitStopsChildHoldingPipes(t *testing.T) {
 func TestGitDeadlineStopsChildHoldingPipes(t *testing.T) {
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "child.pid")
-	alias := "!printf '%s' $$ > " + shellQuote(pidFile) + "; printf 'deadline diagnostic\\nforged journal\\n' >&2; exec sleep 6"
+	alias := "!printf '%s' $$ > " + shellQuote(pidFile+".tmp") + " && mv " + shellQuote(pidFile+".tmp") + " " + shellQuote(pidFile) + "; printf 'deadline diagnostic\\nforged journal\\n' >&2; exec sleep 6"
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	started := time.Now()

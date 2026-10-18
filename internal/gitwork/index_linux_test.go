@@ -229,3 +229,45 @@ func TestFixIndexPrunesCaseVariantMetadataBeforeOpeningFIFOs(t *testing.T) {
 		})
 	}
 }
+
+func TestFixIndexIgnoredSymlinkParentDoesNotBlockOnAttributeFIFO(t *testing.T) {
+	for _, test := range []struct {
+		name, ignore, tracked, target, link string
+	}{
+		{"nested", "build/\n", "build/pkg/file", "build/cache", "cache"},
+		{"top level", "parent\ncache/\n", "parent/file", "cache", "cache"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			index, source := offlineIndexFixture(t, []workspace.File{
+				{Path: ".gitignore", Mode: workspace.Regular, Data: []byte(test.ignore)},
+				{Path: test.tracked, Mode: workspace.Regular, Data: []byte("before")},
+			})
+			if err := os.MkdirAll(filepath.Join(source, test.target), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := syscall.Mkfifo(filepath.Join(source, test.target, ".gitattributes"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			parent := filepath.Join(source, filepath.Dir(test.tracked))
+			if err := os.RemoveAll(parent); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(test.link, parent); err != nil {
+				t.Fatal(err)
+			}
+			if info, err := os.Lstat(filepath.Join(parent, ".gitattributes")); err != nil || info.Mode()&os.ModeNamedPipe == 0 {
+				t.Fatalf("symlink does not lead to attribute FIFO: %v, %v", info, err)
+			}
+			tracked, err := index.run(context.Background(), 1024, nil, "ls-tree", "-r", "--name-only", index.baseline, "--", test.tracked)
+			if err != nil || string(tracked) != test.tracked+"\n" {
+				t.Fatalf("baseline tracked path=%q error=%v", tracked, err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			changes, err := index.Changes(ctx)
+			if err != nil || len(changes) != 1 || changes[0].Path != test.tracked || !changes[0].Delete || ctx.Err() != nil {
+				t.Fatalf("ignored symlink parent affected deletion: %+v, %v; deadline=%v", changes, err, ctx.Err())
+			}
+		})
+	}
+}

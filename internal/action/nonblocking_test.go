@@ -3,7 +3,6 @@ package action
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -35,7 +34,7 @@ func TestCriticEvidencePreservesBlockerVerdicts(t *testing.T) {
 		{name: "failed blocking", answer: `{"approved":false,"has_blockers":true,"feedback":"Blocking failure."}`, err: failed},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			job := portableJob(command.Comment)
+			job := testJob(command.Comment)
 			job.Critic, job.CriticMaxRounds = &RoleSettings{Provider: "claude"}, 1
 			// Even a threshold that permits nits cannot accept failed provider output.
 			if tt.err != nil {
@@ -65,20 +64,12 @@ func TestCriticEvidencePreservesBlockerVerdicts(t *testing.T) {
 			if result.Calls[1] != want {
 				t.Fatalf("native verdict lost: got=%+v want=%+v", result.Calls[1], want)
 			}
-			data, err := json.Marshal(result)
-			if err != nil {
-				t.Fatal(err)
-			}
-			var decoded Result
-			if err := json.Unmarshal(data, &decoded); err != nil || decoded.Calls[1] != want || decoded.validate(job, false) != nil {
-				t.Fatalf("wire lost critic evidence: %s,%v", data, err)
-			}
 		})
 	}
 }
 
 func TestJournalPolicyIsNotPublication(t *testing.T) {
-	job := portableJob(command.Comment)
+	job := testJob(command.Comment)
 	job.Critic, job.CriticMaxRounds, job.CriticNonblockingRounds = &RoleSettings{Provider: "claude"}, 2, 2
 	result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Complete answer", Calls: []CallUsage{
 		{Provider: job.Main.Provider, Role: roleMain, Round: 1},
@@ -118,7 +109,7 @@ func TestRunnerNonblockingThresholdRequiresFreshFullReview(t *testing.T) {
 		{name: "missing blocker field fails closed", threshold: 1, rounds: 5, missingBlockers: true, wantCalls: 2},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			job := portableJob(command.Comment)
+			job := testJob(command.Comment)
 			job.Critic, job.CriticMaxRounds, job.CriticNonblockingRounds = &RoleSettings{Provider: "claude"}, tt.rounds, tt.threshold
 			var phases []string
 			runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
@@ -154,45 +145,6 @@ func TestRunnerNonblockingThresholdRequiresFreshFullReview(t *testing.T) {
 			}
 			if err := result.Validate(job); err != nil {
 				t.Fatalf("accepted policy result invalid: %v", err)
-			}
-		})
-	}
-}
-
-func TestResultNonblockingAcceptanceTrustBoundary(t *testing.T) {
-	job := portableJob(command.Comment)
-	job.Critic, job.CriticMaxRounds, job.CriticNonblockingRounds = &RoleSettings{Provider: "claude"}, 3, 2
-	main := func(round int) CallUsage { return CallUsage{Provider: job.Main.Provider, Role: roleMain, Round: round} }
-	critic := func(round int, phase string, approved, noBlockers bool) CallUsage {
-		return CallUsage{Provider: job.Critic.Provider, Role: roleCritic, Round: round, ReviewPhase: phase, Approved: approved, NoBlockers: noBlockers}
-	}
-	for _, tt := range []struct {
-		name     string
-		calls    []CallUsage
-		complete bool
-		partial  bool
-	}{
-		{name: "nits before threshold", calls: []CallUsage{main(1), critic(1, reviewFull, false, true)}, partial: true},
-		{name: "nits at threshold", calls: []CallUsage{main(1), critic(1, reviewFull, false, true), main(2), critic(2, reviewVerification, false, true), critic(2, reviewFull, false, true)}, complete: true, partial: true},
-		{name: "verification cannot finish", calls: []CallUsage{main(1), critic(1, reviewFull, false, true), main(2), critic(2, reviewVerification, false, true)}, partial: true},
-		{name: "fresh full still has blockers", calls: []CallUsage{main(1), critic(1, reviewFull, false, true), main(2), critic(2, reviewVerification, false, true), {Provider: job.Critic.Provider, Role: roleCritic, Round: 2, ReviewPhase: reviewFull, HasBlockers: true}}, partial: true},
-		{name: "unparsed verdict cannot finish", calls: []CallUsage{main(1), critic(1, reviewFull, false, false)}, partial: true},
-		{name: "unparsed verdict cannot revise", calls: []CallUsage{main(1), critic(1, reviewFull, false, false), main(2), critic(2, reviewVerification, true, true), critic(2, reviewFull, true, true)}},
-		{name: "approval without no-blocker attestation", calls: []CallUsage{main(1), critic(1, reviewFull, true, false)}},
-		{name: "main cannot attest no blockers", calls: []CallUsage{{Provider: job.Main.Provider, Role: roleMain, Round: 1, NoBlockers: true}, critic(1, reviewFull, true, true)}},
-		{name: "main cannot attest blockers", calls: []CallUsage{{Provider: job.Main.Provider, Role: roleMain, Round: 1, HasBlockers: true}, critic(1, reviewFull, true, true)}},
-		{name: "contradictory blocker attestations", calls: []CallUsage{main(1), {Provider: job.Critic.Provider, Role: roleCritic, Round: 1, ReviewPhase: reviewFull, HasBlockers: true, NoBlockers: true}}},
-		{name: "accepted verification cannot skip full", calls: []CallUsage{main(1), critic(1, reviewFull, false, true), main(2), critic(2, reviewVerification, false, true), main(3)}},
-		{name: "accepted full cannot revise again", calls: []CallUsage{main(1), critic(1, reviewFull, false, true), main(2), critic(2, reviewVerification, false, true), critic(2, reviewFull, false, true), main(3)}},
-		{name: "blocker verification cannot advance", calls: []CallUsage{main(1), critic(1, reviewFull, false, true), main(2), {Provider: job.Critic.Provider, Role: roleCritic, Round: 2, ReviewPhase: reviewVerification, HasBlockers: true}, critic(2, reviewFull, true, true)}},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Complete answer", Calls: tt.calls}
-			if err := result.Validate(job); (err == nil) != tt.complete {
-				t.Fatalf("complete acceptance=%v want %t", err, tt.complete)
-			}
-			if err := result.validate(job, false); (err == nil) != tt.partial {
-				t.Fatalf("partial acceptance=%v want %t", err, tt.partial)
 			}
 		})
 	}

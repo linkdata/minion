@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -24,7 +25,7 @@ import (
 )
 
 func TestPartialAuditMetadataPathListsStayPortable(t *testing.T) {
-	job := portableJob(command.SecurityAudit)
+	job := testJob(command.SecurityAudit)
 	for _, field := range []string{"scope_paths", "prior_run_paths"} {
 		for _, path := range []string{".", "relative/report.md", "/worker/source", "../outside", `bad\path`} {
 			data, err := json.Marshal(map[string]any{field: []string{path}})
@@ -52,7 +53,7 @@ func TestRunnerRejectsBlankNoChangeFix(t *testing.T) {
 			runner := Runner{WorkRoot: t.TempDir(), runModel: func(context.Context, modelRun) (aicli.Result, error) {
 				return aicli.Result{Answer: test.answer}, nil
 			}}
-			result, err := runner.Run(context.Background(), portableJob(command.Fix))
+			result, err := runner.Run(context.Background(), testJob(command.Fix))
 			if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "action answer is blank") || result.Answer != "" || len(result.Changes) != 0 || len(result.Calls) != 1 {
 				t.Fatalf("blank no-change fix accepted: %+v, %v", result, err)
 			}
@@ -65,7 +66,7 @@ func TestRunnerAuditCollectionAndNormalizationFailuresAreTerminal(t *testing.T) 
 		t.Run(stage, func(t *testing.T) {
 			installActionTestSkills(t, testAuditSkillURL)
 			fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
-			job := portableJob(command.SecurityAudit)
+			job := testJob(command.SecurityAudit)
 			job.Main.Skills = []string{testAuditSkillURL}
 			expected := make(map[string]workspace.File)
 			runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
@@ -151,7 +152,7 @@ func TestRunnerCancellationDuringInstalledAuditValidatorPreservesCause(t *testin
 	}()
 	script := fmt.Sprintf("#!/bin/sh\nif [ \"$2\" = -e ]; then exit 0; fi\nprintf started > %q\nexec /bin/cat < %q\n", startedPath, holdPath)
 	fakeOnPath(t, "node", script)
-	job := portableJob(command.SecurityAudit)
+	job := testJob(command.SecurityAudit)
 	job.Main.Skills = []string{testAuditSkillURL}
 	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 		for _, file := range auditArtifactsFixture(job, request.dir, "Audit report\n") {
@@ -208,7 +209,7 @@ func TestRunnerMissingConfiguredReadGrantIsNotTerminalBeforeModels(t *testing.T)
 	for _, scenario := range []struct{ provider, role string }{{"codex", "main"}, {"claude", "critic"}} {
 		provider, role := scenario.provider, scenario.role
 		t.Run(provider+"/"+role, func(t *testing.T) {
-			job := portableJob(command.Comment)
+			job := testJob(command.Comment)
 			job.Main.Provider = provider
 			if role == "critic" {
 				job.Critic = &RoleSettings{Provider: provider}
@@ -239,8 +240,8 @@ func TestRunnerMissingConfiguredReadGrantIsNotTerminalBeforeModels(t *testing.T)
 
 func TestRunnerStripsNULBeforeCriticAndResult(t *testing.T) {
 	for _, critic := range []bool{false, true} {
-		t.Run(fmt.Sprint(critic), func(t *testing.T) {
-			job := portableJob(command.Comment)
+		t.Run(fmt.Sprintf("critic=%t", critic), func(t *testing.T) {
+			job := testJob(command.Comment)
 			if critic {
 				job = withClaudeCritic(job)
 			}
@@ -273,9 +274,9 @@ func TestRunnerStripsNULBeforeCriticAndResult(t *testing.T) {
 
 func TestPreparationFailureDistinguishesCapacityFromInvalidInput(t *testing.T) {
 	for _, test := range []struct {
-		cause    syscall.Errno
+		cause    error
 		terminal bool
-	}{{syscall.ENOSPC, false}, {syscall.EDQUOT, false}, {syscall.ENAMETOOLONG, true}} {
+	}{{syscall.ENOSPC, false}, {syscall.EDQUOT, false}, {syscall.ENAMETOOLONG, true}, {exec.ErrNotFound, false}} {
 		t.Run(test.cause.Error(), func(t *testing.T) {
 			native := &os.PathError{Op: "write", Path: "source", Err: test.cause}
 			err := preparationFailure("materialize source", native)
@@ -289,7 +290,7 @@ func TestPreparationFailureDistinguishesCapacityFromInvalidInput(t *testing.T) {
 func TestRunnerCancellationBeforeDispatchRecordsNoCall(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	job := portableJob(command.Comment)
+	job := testJob(command.Comment)
 	calls := 0
 	runner := Runner{WorkRoot: t.TempDir(), runModel: func(context.Context, modelRun) (aicli.Result, error) { calls++; return aicli.Result{}, nil }}
 	runner.aroundModel = func(ctx context.Context, request modelRun, next modelCall) (aicli.Result, error) {
@@ -303,7 +304,7 @@ func TestRunnerCancellationBeforeDispatchRecordsNoCall(t *testing.T) {
 }
 
 func TestRunnerJobValidationRejectsMetadataAliasBeforeModels(t *testing.T) {
-	job := portableJob(command.Fix)
+	job := testJob(command.Fix)
 	job.Source.Files = []workspace.File{{Path: "GIT~1/x", Mode: workspace.Regular}}
 	runner := Runner{WorkRoot: t.TempDir(), runModel: forbidModel(t)}
 	result, err := runner.Run(context.Background(), job)
@@ -317,8 +318,8 @@ func TestRunnerReportsOwnedAndCriticCleanupFailures(t *testing.T) {
 		t.Skip("root bypasses directory permissions")
 	}
 	for _, critic := range []bool{false, true} {
-		t.Run(fmt.Sprint(critic), func(t *testing.T) {
-			job := portableJob(command.Comment)
+		t.Run(fmt.Sprintf("critic=%t", critic), func(t *testing.T) {
+			job := testJob(command.Comment)
 			if critic {
 				job.Action = command.Fix
 				job.Command = "fix"
@@ -366,7 +367,7 @@ func TestRunnerReportsOwnedAndCriticCleanupFailures(t *testing.T) {
 func TestRunnerRefusesRenderedReportOverflowBeforeCritic(t *testing.T) {
 	fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
 	installActionTestSkills(t, testAuditSkillURL)
-	job := withClaudeCritic(portableJob(command.SecurityAudit))
+	job := withClaudeCritic(testJob(command.SecurityAudit))
 	job.CriticMaxRounds = 1
 	job.Main.Skills = []string{testAuditSkillURL}
 	text := strings.Repeat("a\n", 25000)
@@ -385,5 +386,70 @@ func TestRunnerRefusesRenderedReportOverflowBeforeCritic(t *testing.T) {
 	}
 	if len(result.Artifacts) != 1 || result.Artifacts[0].Path != "REPORT.md" || string(result.Artifacts[0].Data) != text || result.validate(job, false) != nil {
 		t.Fatalf("partial report lost: %+v", result.Artifacts)
+	}
+}
+
+func TestRunnerPrivateIndexPreparationFailuresKeepTheirClass(t *testing.T) {
+	for _, test := range []struct {
+		name, diagnostic string
+		cause            error
+		terminal         bool
+	}{
+		{"native refusal", "fatal: deterministic private-index refusal", nil, true},
+		{"missing git after materialization", "", exec.ErrNotFound, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			realGit, err := aicli.AbsoluteExecutable("git")
+			if err != nil {
+				t.Fatal(err)
+			}
+			marker := filepath.Join(t.TempDir(), "private-index-stage")
+			inject := `case "$PWD" in */.minion-index-*)
+printf '%s\n' "$PWD" "$*" > ` + shellQuote(marker) + `
+printf '%s\n' ` + shellQuote(test.diagnostic) + ` >&2
+exit 77;;
+esac
+`
+			if errors.Is(test.cause, exec.ErrNotFound) {
+				// Materialization keeps its absolute executable; only the next
+				// constructor's PATH lookup fails after the final refresh.
+				inject = `case " $* " in *" update-index -q --refresh "*)
+` + shellQuote(realGit) + ` "$@"
+printf '%s\n' "$PWD" > ` + shellQuote(marker) + `
+/bin/rm -- "$0"
+exit 0;;
+esac
+`
+			}
+			bin := fakeOnPath(t, "git", "#!/bin/sh\nset -eu\n"+inject+"exec "+shellQuote(realGit)+` "$@"`+"\n")
+			if errors.Is(test.cause, exec.ErrNotFound) {
+				t.Setenv("PATH", bin)
+			}
+			root := t.TempDir()
+			result, err := (&Runner{WorkRoot: root, runModel: forbidModel(t)}).Run(context.Background(), testJob(command.Fix))
+			if err == nil || errors.Is(err, monitor.ErrTerminalJob) != test.terminal || !strings.Contains(err.Error(), "prepare private index") || len(result.Calls) != 0 || result.Answer != "" {
+				t.Fatalf("private index classification: %+v,%v; want terminal=%t", result, err, test.terminal)
+			}
+			if test.cause != nil && !errors.Is(err, test.cause) {
+				t.Fatalf("private index cause lost: %v; want %v", err, test.cause)
+			}
+			stage, markerErr := os.ReadFile(marker)
+			if markerErr != nil || len(stage) == 0 {
+				t.Fatalf("private index injection did not run: %q,%v", stage, markerErr)
+			}
+			if errors.Is(test.cause, exec.ErrNotFound) {
+				if !strings.HasPrefix(filepath.Base(strings.TrimSpace(string(stage))), "minion-") || !strings.Contains(err.Error(), "offline fix index requires git") {
+					t.Fatalf("missing git occurred before private-index lookup: %q,%v", stage, err)
+				}
+			} else {
+				var exit *exec.ExitError
+				if !strings.Contains(string(stage), "/.minion-index-") || !strings.Contains(string(stage), " init --quiet --template= --object-format=sha1") || !strings.Contains(err.Error(), test.diagnostic) || !errors.As(err, &exit) || exit.ExitCode() != 77 {
+					t.Fatalf("private-index native refusal lost evidence: %q,%v", stage, err)
+				}
+			}
+			if entries, err := os.ReadDir(root); err != nil || len(entries) != 0 {
+				t.Fatalf("private index preparation leaked: %v,%v", entries, err)
+			}
+		})
 	}
 }

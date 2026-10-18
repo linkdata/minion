@@ -70,7 +70,7 @@ func TestRunnerChecksAuditPrerequisitesBeforeModel(t *testing.T) {
 					t.Fatalf("relative executable fixture failed: binary=%q error=%v", binary, err)
 				}
 			}
-			job := portableJob(command.SecurityAudit)
+			job := testJob(command.SecurityAudit)
 			job.Main.Skills = []string{testAuditSkillURL}
 			calls := 0
 			runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
@@ -110,7 +110,7 @@ func TestAuditMissingInputsFailBeforeValidatorExecution(t *testing.T) {
 	for _, name := range auditArtifacts {
 		for _, empty := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/empty=%t", name, empty), func(t *testing.T) {
-				job := portableJob(command.SecurityAudit)
+				job := testJob(command.SecurityAudit)
 				files := auditArtifactsFixture(job, "/source", "Audit report\n")
 				var supplied []workspace.File
 				for _, file := range files {
@@ -145,7 +145,7 @@ func TestAuditMissingInputsFailBeforeValidatorExecution(t *testing.T) {
 		}
 	}
 	t.Run("whitespace report", func(t *testing.T) {
-		job := portableJob(command.SecurityAudit)
+		job := testJob(command.SecurityAudit)
 		files := auditArtifactsFixture(job, "/source", "Audit report\n")
 		for i := range files {
 			if files[i].Path == "REPORT.md" {
@@ -165,7 +165,7 @@ func TestAuditMissingInputsFailBeforeValidatorExecution(t *testing.T) {
 }
 
 func TestAuditValidatorDiagnosticsStayOutOfErrorsAndJournal(t *testing.T) {
-	job := portableJob(command.SecurityAudit)
+	job := testJob(command.SecurityAudit)
 	const diagnostic = "PRIVATE_VALIDATOR_FINDING\nforged journal line \"quoted\"\n"
 	script := "#!/bin/sh\nif [ \"$2\" = -e ]; then exit 0; fi\nprintf '%s' " + shellQuote(diagnostic) + " >&2\nexit 23\n"
 	nodeDir := fakeOnPath(t, "node", script)

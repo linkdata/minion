@@ -318,12 +318,15 @@ func TestSessionRequiresItsOwnRootIdentity(t *testing.T) {
 }
 
 func TestSessionIncompleteUsageDoesNotBecomeNextCallUsage(t *testing.T) {
-	for _, late := range []bool{false, true} {
-		t.Run(map[bool]string{false: "missing aggregate", true: "late delegate"}[late], func(t *testing.T) {
-			first := `{"type":"result","subtype":"success","result":"done","usage":{"input_tokens":3,"cache_creation_input_tokens":5,"cache_read_input_tokens":7,"output_tokens":11}}`
-			if late {
-				first = successfulResult + "\n" + strings.Replace(assistantUsageEvent("late", 20, 0, 0, 5), `"parent_tool_use_id":null`, `"parent_tool_use_id":"helper"`, 1)
-			}
+	for _, test := range []struct {
+		name, first string
+		fails       bool
+	}{
+		{"missing aggregate", `{"type":"result","subtype":"success","result":"done","usage":{"input_tokens":3,"cache_creation_input_tokens":5,"cache_read_input_tokens":7,"output_tokens":11}}`, false},
+		{"late delegate", successfulResult + "\n" + strings.Replace(assistantUsageEvent("late", 20, 0, 0, 5), `"parent_tool_use_id":null`, `"parent_tool_use_id":"helper"`, 1), false},
+		{"stream error after snapshot", successfulResult + "\n{", true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
 			const cumulative = `{"type":"result","subtype":"success","result":"done","modelUsage":{"main":{"inputTokens":93,"cacheCreationInputTokens":0,"cacheReadInputTokens":7,"outputTokens":100}}}`
 			const later = `{"type":"result","subtype":"success","result":"done","modelUsage":{"main":{"inputTokens":97,"cacheCreationInputTokens":0,"cacheReadInputTokens":7,"outputTokens":106}}}`
 			fakeExecutable(t, "claude", `n=0
@@ -331,7 +334,7 @@ func TestSessionIncompleteUsageDoesNotBecomeNextCallUsage(t *testing.T) {
 n=$((n+1)); printf '%s' "$n" > "$0.count"
 cat >/dev/null
 case "$n" in
-1) printf '%s\n' '`+first+`' ;;
+1) printf '%s\n' '`+test.first+`' ;;
 2) printf '%s\n' '`+assistantUsageEvent("current", 4, 0, 0, 6)+`' '`+cumulative+`' ;;
 3) printf '%s\n' '`+later+`' ;;
 esac
@@ -344,8 +347,8 @@ esac
 			})
 			source := t.TempDir()
 			initial, err := session.Run(context.Background(), source, "first", false, "", config.ClaudeConfig{})
-			if err != nil || initial.UsageComplete {
-				t.Fatalf("expected usable incomplete first call: %+v,%v", initial, err)
+			if (err != nil) != test.fails || initial.UsageComplete {
+				t.Fatalf("expected incomplete first call (error=%v): %+v,%v", test.fails, initial, err)
 			}
 			second, err := session.Run(context.Background(), source, "second", false, "", config.ClaudeConfig{})
 			want := usage.Tokens{Input: 4, Output: 6}

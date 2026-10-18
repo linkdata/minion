@@ -29,7 +29,7 @@ const (
 )
 
 // OfflineIndex runs offline Git against explicitly selected metadata and source.
-// NewOfflineIndex places fix-collection metadata outside the model source.
+// NewOfflineIndex refuses metadata overlapping the model source.
 type OfflineIndex struct {
 	dir, source, binary, baseline string
 	tracked                       map[string]int64
@@ -143,7 +143,7 @@ func (index *OfflineIndex) Changes(ctx context.Context) ([]workspace.Change, err
 		}
 		total += info.Size()
 	}
-	// shortcut: size prechecks can race and do not cap Git I/O; add isolated executor quotas (#96).
+	// shortcut: size prechecks can race and do not cap Git I/O; the dedicated work-root filesystem bounds storage.
 	if _, err := index.run(ctx, 1024, nil, "add", "--all", "--", ".", excludeGit, excludeGitContents); err != nil {
 		return nil, err
 	}
@@ -185,10 +185,11 @@ func (index *OfflineIndex) checkControlFiles(ctx context.Context) error {
 	trackedChildren := map[string][]string{}
 	for name := range index.tracked {
 		for parent := path.Dir(name); parent != "."; parent = path.Dir(parent) {
-			if !trackedDirs[parent] {
-				trackedChildren[path.Dir(parent)] = append(trackedChildren[path.Dir(parent)], parent)
-				trackedDirs[parent] = true
+			if trackedDirs[parent] {
+				break
 			}
+			trackedChildren[path.Dir(parent)] = append(trackedChildren[path.Dir(parent)], parent)
+			trackedDirs[parent] = true
 		}
 	}
 	type directory struct {
@@ -233,7 +234,7 @@ func (index *OfflineIndex) checkControlFiles(ctx context.Context) error {
 			}
 			dir := path.Join(current.parent, current.name)
 			if len(dir) >= workspace.MaxPathBytes {
-				return errors.New("fix directory exceeds path limit")
+				return fmt.Errorf("fix directory %q exceeds path limit", dir)
 			}
 			absolute := filepath.Join(index.source, filepath.FromSlash(dir))
 			for _, control := range []string{".gitignore", ".gitattributes"} {
@@ -267,7 +268,7 @@ func (index *OfflineIndex) checkControlFiles(ctx context.Context) error {
 						continue
 					}
 					if err != nil {
-						return err
+						return fmt.Errorf("tracked fix directory %q: %w", name, err)
 					}
 					if info.IsDir() {
 						next = append(next, directory{parent: dir, name: path.Base(name), ignored: true})

@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/linkdata/minion/internal/command"
+	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/usage"
 )
 
@@ -17,18 +19,21 @@ func TestRunnerNativeDispatchContinuesRolesAndRefreshesFullCritic(t *testing.T) 
 	for _, action := range []command.Action{command.Comment, command.Fix} {
 		for _, mainProvider := range []string{"codex", "claude"} {
 			t.Run(string(action)+"/"+mainProvider+"-main", func(t *testing.T) {
-				installActionTestSkills(t)
+				installActionTestSkills(t, testReviewSkillURL)
+				writeActionTestSkills(t, os.Getenv("HOME"), ".claude", testReviewSkillURL)
 				t.Setenv("CODEX_HOME", t.TempDir())
 				for _, key := range []string{"CLAUDE_CONFIG_DIR", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"} {
 					t.Setenv(key, "")
 				}
 				receipts := t.TempDir()
 				root := t.TempDir()
-				job := withClaudeCritic(portableJob(action))
+				job := withClaudeCritic(testJob(action))
 				if mainProvider == "claude" {
 					job.Main.Provider, job.Critic.Provider = "claude", "codex"
 				}
 				job.CriticMaxRounds, job.CriticNonblockingRounds = 3, 0
+				job.Main.Model, job.Main.Effort, job.Main.Skills = "portable-"+job.Main.Provider, "high", []string{testReviewSkillURL}
+				job.Critic.Model, job.Critic.Effort, job.Critic.AlwaysOnSkills = "portable-"+job.Critic.Provider, "medium", []string{testReviewSkillURL}
 				for _, provider := range []string{"codex", "claude"} {
 					first, later := `{"approved":false,"has_blockers":true,"feedback":"Clarify the response."}`, approvedCritiqueJSON
 					if provider == mainProvider {
@@ -74,6 +79,7 @@ for arg do
   --json-schema) printf '%%s' "$arg" > "$base.$n.schema" ;;
   --output-schema) cat "$arg" > "$base.$n.schema" ;;
  esac
+ case "$arg" in /*/.minion-context-*) cat "$arg/source.json" > "$base.$n.source" ;; esac
  if $positional && [ "$arg" != - ]; then id="$arg"; fi
  if [ "$arg" = -- ]; then positional=true; fi
  previous="$arg"
@@ -101,9 +107,16 @@ fi
 `, shellQuote(receipts), provider, shellQuote(root), shellQuote(provider), shellQuote(mainProvider), shellQuote(string(action)), shellQuote(first), shellQuote(message(first)), shellQuote(later), shellQuote(message(later)), provider)
 					fakeOnPath(t, provider, script)
 				}
-				result, err := (&Runner{WorkRoot: root}).Run(context.Background(), job)
+				runner := Runner{WorkRoot: root,
+					Codex:  config.CodexConfig{Model: "stale-host-codex", ReasoningEffort: "low"},
+					Claude: config.ClaudeConfig{Model: "stale-host-claude", Effort: "low"},
+				}
+				result, err := runner.Run(context.Background(), job)
 				if err != nil || result.Answer != "Second proposal." || len(result.Calls) != 8 || len(result.Refutations) != 2 || result.Validate(job) != nil {
 					t.Fatalf("native role sequence: result=%+v error=%v", result, err)
+				}
+				if runner.Codex.Model != "stale-host-codex" || runner.Codex.ReasoningEffort != "low" || runner.Claude.Model != "stale-host-claude" || runner.Claude.Effort != "low" {
+					t.Fatal("native dispatch changed shared host model/effort settings")
 				}
 				for i, refutation := range result.Refutations {
 					if refutation != (Refutation{Round: i + 2, Text: "Counterevidence for the earlier finding."}) {
@@ -122,9 +135,9 @@ fi
 					return strings.TrimSuffix(string(data), "\n")
 				}
 				for _, provider := range []string{job.Main.Provider, job.Critic.Provider} {
-					calls, schema := 3, mainOutputSchema
+					calls, schema, role := 3, mainOutputSchema, job.Main
 					if provider == job.Critic.Provider {
-						calls, schema = 5, criticOutputSchema
+						calls, schema, role = 5, criticOutputSchema, *job.Critic
 					}
 					firstID := strings.Split(read(provider, 1, "identity"), "\n")
 					if len(firstID) != 2 || firstID[0] != "fresh" || firstID[1] == "" {
@@ -152,6 +165,45 @@ fi
 						if read(provider, call, "cwd") != read(provider, 1, "cwd") || read(provider, call, "scratch") != state || read(provider, call, "schema") != schema {
 							t.Fatalf("%s call%d lost stable paths, scratch policy or schema", provider, call)
 						}
+						args := read(provider, call, "args")
+						if strings.Contains(args, "stale-host-") || !strings.Contains(args, "--model\n"+role.Model+"\n") {
+							t.Fatalf("%s call%d lost native role model: %s", provider, call, args)
+						}
+						if provider == "codex" {
+							if !strings.Contains(args, fmt.Sprintf("model_reasoning_effort=%q\n", role.Effort)) {
+								t.Fatalf("Codex call%d lost native role effort: %s", call, args)
+							}
+						} else {
+							arguments, values, contextDir := strings.Split(args, "\n"), map[string]string{}, ""
+							for n, arg := range arguments[:len(arguments)-1] {
+								values[arg] = arguments[n+1]
+								if arg == "--add-dir" && strings.HasPrefix(filepath.Base(arguments[n+1]), ".minion-context-") {
+									contextDir = arguments[n+1]
+								}
+							}
+							if contextDir == "" || values["--json-schema"] != schema || values["--effort"] != role.Effort {
+								t.Fatalf("Claude call%d lost native context/schema/effort: %s", call, args)
+							}
+							var policy struct {
+								Sandbox struct {
+									Filesystem struct {
+										AllowRead []string `json:"allowRead"`
+										DenyWrite []string `json:"denyWrite"`
+									} `json:"filesystem"`
+								} `json:"sandbox"`
+							}
+							if err := json.Unmarshal([]byte(values["--settings"]), &policy); err != nil {
+								t.Fatal(err)
+							}
+							if !slices.Contains(policy.Sandbox.Filesystem.AllowRead, contextDir) || !slices.Contains(policy.Sandbox.Filesystem.DenyWrite, contextDir) {
+								t.Fatalf("Claude call%d context grant is not read-only: %+v", call, policy)
+							}
+							prompt := read(provider, call, "prompt")
+							skill := filepath.Join(os.Getenv("HOME"), ".claude", "skills", "ponytail-review", "SKILL.md")
+							if !strings.Contains(read(provider, call, "source"), job.Source.Head) || !strings.Contains(prompt, contextDir) || !strings.Contains(prompt, skill) {
+								t.Fatalf("Claude call%d lost source identity or skill/context prompt: %s", call, prompt)
+							}
+						}
 						wantHistory := provider == job.Critic.Provider && call%2 == 0 || provider == job.Main.Provider && call >= 3
 						if strings.Contains(read(provider, call, "args"), ".minion-review-history-") != wantHistory || strings.Contains(read(provider, call, "prompt"), "Application-owned refutations") != wantHistory {
 							t.Fatalf("%s call%d received the wrong refutation grant/context", provider, call)
@@ -162,9 +214,18 @@ fi
 					}
 				}
 				for _, call := range result.Calls {
-					if !call.Complete || call.Tokens != (usage.Tokens{Input: 3, Output: 2}) {
-						t.Fatalf("lost per-invocation accounting at the native dispatch seam: %+v", call)
+					role := job.Main
+					if call.Role == roleCritic {
+						role = *job.Critic
+					} else if call.Role != roleMain {
+						t.Fatalf("unexpected native call role: %+v", call)
 					}
+					if call.Provider != role.Provider || call.Model != role.Model || call.Effort != role.Effort || !call.Complete || call.Tokens != (usage.Tokens{Input: 3, Output: 2}) {
+						t.Fatalf("lost per-invocation accounting/attribution at the native dispatch seam: %+v", call)
+					}
+				}
+				if last := result.Calls[len(result.Calls)-1]; !last.Approved || !last.NoBlockers || last.HasBlockers {
+					t.Fatalf("native structured critic verdict lost: %+v", last)
 				}
 				if entries, err := os.ReadDir(root); err != nil || len(entries) != 0 {
 					t.Fatalf("action scratch retained: %v, %v", entries, err)

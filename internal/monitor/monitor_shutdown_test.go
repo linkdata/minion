@@ -72,8 +72,8 @@ func TestRunOnceStopsCanceledFailureReplyWithoutDeferring(t *testing.T) {
 				t.Fatalf("canceled failure reply continued discovery or changed backoff/cursors: calls=%d state=%+v", gh.repositoryCalls, store.Data)
 			}
 			_, processed := store.Data.Processed[id]
-			if processed != (test.replies == 1) || len(gh.comments) != test.replies {
-				t.Fatalf("failure reply completion changed: processed=%t comments=%d", processed, len(gh.comments))
+			if processed != (test.replies == 1) || len(gh.comments) != test.replies || store.Data.JobFailures[id].ReplyAttempts != 0 {
+				t.Fatalf("failure reply completion or budget changed: processed=%t comments=%d failure=%+v", processed, len(gh.comments), store.Data.JobFailures[id])
 			}
 		})
 	}

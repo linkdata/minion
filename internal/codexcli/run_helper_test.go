@@ -3,6 +3,7 @@ package codexcli
 import (
 	"context"
 	"errors"
+
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/config"
 )

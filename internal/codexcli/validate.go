@@ -141,6 +141,7 @@ func listModels(ctx context.Context, settings config.CodexConfig) (models []mode
 		}
 	}()
 	encoder := json.NewEncoder(stdin)
+	// Catalogue limits count the logical line after ScanLines removes CR/LF.
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 4096), aicli.MaxEventBytes+2)
 	call := func(id int, method string, params any, result any) error {

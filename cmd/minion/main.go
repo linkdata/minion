@@ -244,6 +244,9 @@ func checkIsolation(cfg config.Config, configPath string) error {
 	if err != nil {
 		return fmt.Errorf("resolve default Claude home: %w", err)
 	}
+	if !filepath.IsAbs(userHome) {
+		return errors.New("resolve default Claude home: HOME must be absolute")
+	}
 	private = append(private, filepath.Join(userHome, ".claude.json"))
 	ghHome := os.Getenv("GH_CONFIG_DIR")
 	if ghHome == "" {

@@ -41,11 +41,11 @@ func Validate(ctx context.Context, settings config.ClaudeConfig) (validated conf
 	}
 	defer func() { resultErr = errors.Join(resultErr, os.RemoveAll(dir)) }()
 	authDir, err := authentication(filepath.Dir(dir), settings.APIKey)
-	if err != nil {
-		return validated, err
-	}
 	if authDir != "" {
 		defer func() { resultErr = errors.Join(resultErr, os.RemoveAll(authDir)) }()
+	}
+	if err != nil {
+		return validated, err
 	}
 	binary, err := aicli.ExecutablePath("claude")
 	if err != nil {

@@ -119,6 +119,7 @@ func (s *Session) prepare(workspace string, writable bool, outputDir string, set
 		s.reset = false
 	}
 	// Native startup must not follow temp paths planted by the previous model call.
+	// Earlier CLI temp outputs are intentionally discarded; native transcripts stay outside tmp.
 	tmp := filepath.Join(s.runtimeDir, "tmp")
 	if err := cleanup.RemoveAll(tmp); err != nil {
 		return fmt.Errorf("claude native temp cleanup: %w", err)

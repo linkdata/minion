@@ -331,3 +331,66 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
 		t.Fatalf("resume lost owned usage: %+v,%v,%+v", result, err, session.accounting.known)
 	}
 }
+
+func TestSessionClearsRuntimeMetadataBeforeResume(t *testing.T) {
+	installFakeCodex(t, `#!/bin/sh
+set -eu
+for name in .agents .codex; do
+  test ! -e "$TMPDIR/$name"
+  test ! -L "$TMPDIR/$name"
+done
+cat >/dev/null
+printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}' '{"type":"turn.completed"}'
+`)
+	var session Session
+	t.Cleanup(func() {
+		if err := session.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	source, outside := t.TempDir(), t.TempDir()
+	canary := filepath.Join(outside, "canary")
+	if err := os.WriteFile(canary, []byte("outside"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	run := func() {
+		t.Helper()
+		result, err := session.Run(context.Background(), source, "task", false, "", config.CodexConfig{})
+		if err != nil || result.Answer != "done" {
+			t.Fatalf("runtime cleanup prevented native startup: %+v,%v", result, err)
+		}
+	}
+	run()
+	keep := filepath.Join(session.runtimeDir, "prior-note")
+	if err := os.WriteFile(keep, []byte("retained"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, linked := range []string{".agents", ".codex"} {
+		for _, name := range []string{".agents", ".codex"} {
+			path := filepath.Join(session.runtimeDir, name)
+			if name == linked {
+				if err := os.Symlink(outside, path); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if err := os.MkdirAll(filepath.Join(path, "nested"), 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(path, "nested", "plant"), []byte("old metadata"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		run()
+		for _, name := range []string{".agents", ".codex"} {
+			if _, err := os.Lstat(filepath.Join(session.runtimeDir, name)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("runtime metadata survived: %s: %v", name, err)
+			}
+		}
+		for path, want := range map[string]string{canary: "outside", keep: "retained"} {
+			if data, err := os.ReadFile(path); err != nil || string(data) != want {
+				t.Fatalf("runtime cleanup changed %s: %q,%v", path, data, err)
+			}
+		}
+	}
+}

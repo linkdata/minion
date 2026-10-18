@@ -65,12 +65,11 @@ func TestPreparedActionRejectsWrongVersionBeforePublication(t *testing.T) {
 	request.Repository.Actions = []string{"audit"}
 	request.Source.Author.ID = 3
 	request.Command = command.Command{Name: "audit", Action: command.Comment}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
+	ctx := testActionContext(t)
 	e = attemptFixture(e)
 	installedHome := os.Getenv("HOME")
 	t.Setenv("HOME", t.TempDir())
-	// Preparation must not serialize the developer HOME into the portable Job.
+	// Preparation must not resolve skills from the executor HOME.
 	prepared, err := e.prepare(ctx, request)
 	t.Setenv("HOME", installedHome)
 	if err != nil {
@@ -160,8 +159,7 @@ func TestFailedAuditRetainsLabelledPartialArtifactsWithoutPublication(t *testing
 	request.Repository.Actions = []string{"security-audit"}
 	request.Source.Author.ID = 3
 	request.Command = command.Command{Name: "security-audit", Action: command.SecurityAudit}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
+	ctx := testActionContext(t)
 	if err := attemptFixture(e).perform(ctx, request); !errors.Is(err, failure) || errors.Is(err, monitor.ErrTerminalJob) {
 		t.Fatalf("audit failure=%v", err)
 	}
@@ -218,13 +216,6 @@ func TestPublishFixWithoutChangesPostsNormalReply(t *testing.T) {
 	if !strings.Contains(body, "without changing files") || !strings.Contains(body, "Tests passed.") || !strings.Contains(body, request.Marker()) {
 		t.Fatalf("no-change reply=%q", body)
 	}
-}
-
-func testActionContext(t *testing.T) context.Context {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	t.Cleanup(cancel)
-	return ctx
 }
 
 func TestPortableJobRequiresExistingActionDeadline(t *testing.T) {

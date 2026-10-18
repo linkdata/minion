@@ -3,10 +3,12 @@ package codexcli
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"hash"
 	"io"
+	"os"
 	"sort"
 	"time"
 
@@ -48,6 +50,28 @@ func matchUsagePrefix(ctx context.Context, r io.Reader, before *usageBoundary, h
 		}
 	}
 	return bytes.Equal(h.Sum(nil), before.hash[:])
+}
+
+// Unreferenced historical helpers need no new turn, but their bytes must still
+// match the baseline before their absence from current accounting is certain.
+func unchangedUsageRollout(ctx context.Context, name string, before *usageBoundary, budget *int64) bool {
+	if before == nil || !before.valid || before.size > int64(maxUsageRolloutBytes) || before.size > *budget || ctx.Err() != nil {
+		return false
+	}
+	f, err := os.Open(name)
+	if err != nil {
+		return false
+	}
+	reader := &io.LimitedReader{R: f, N: before.size + 1}
+	unchanged := matchUsagePrefix(ctx, reader, before, sha256.New())
+	if unchanged {
+		var extra [1]byte
+		n, err := reader.Read(extra[:])
+		unchanged = n == 0 && errors.Is(err, io.EOF)
+	}
+	*budget -= min(before.size, before.size+1-reader.N)
+	closeErr := f.Close()
+	return unchanged && closeErr == nil && ctx.Err() == nil
 }
 
 type usageSession struct {
@@ -162,7 +186,7 @@ func (s *usageSession) collectUsage(ctx context.Context, home, rootID string, st
 		if exists && !ambiguous[id] && (prior || spawned[id]) {
 			var children []string
 			var workError error
-			tokens, ok, children, workError = readRolloutUsageFrom(ctx, meta, rootID, &s.budget, boundary, currentRoot, spawned, observationOnly[id])
+			tokens, ok, children, workError = readRolloutUsageFrom(ctx, meta, rootID, &s.budget, boundary, currentRoot, spawned, id != rootID && observationOnly[id])
 			childError = errors.Join(childError, workError)
 			queue = append(queue, children...)
 		} else if id != rootID {
@@ -176,6 +200,16 @@ func (s *usageSession) collectUsage(ctx context.Context, home, rootID string, st
 		var added bool
 		total, added = total.AddChecked(tokens)
 		complete = complete && ok && added
+	}
+	// Lifetime ownership alone cannot attribute unreferenced new or changed
+	// helper work to this invocation. Preserve the known lower bound and refuse
+	// completion rather than silently certifying that omitted evidence.
+	for id, meta := range owned {
+		if !visited[id] && (ambiguous[id] || !unchangedUsageRollout(ctx, meta.path, s.before[id], &s.budget)) {
+			complete = false
+			childError = errors.Join(childError, errUnverifiedChildren)
+			break
+		}
 	}
 	// Keep only bounded, proven ownership for the next invocation's old paths.
 	s.known = owned

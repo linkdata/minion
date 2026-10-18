@@ -381,23 +381,30 @@ func TestUsageSessionOnlyObservesUnchangedCompletedPriorHelper(t *testing.T) {
 		{"wait unfinished", "wait", "started", "", false},
 		{"close aborted", "close_agent", "aborted", "", false},
 		{"wait new unfinished", "wait", "complete", "started", false},
+		{"wait new completed", "wait", "complete", "complete", true},
+		{"wait invalid baseline", "wait", "invalid", "", false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			ctx, home := context.Background(), t.TempDir()
 			root := writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "old-root", "r1", 100)...)
 			events := []string{usageEvent("task_started", "old-child"), usageRecord("child", "old-child", "c1", 40, 0, 0)}
-			if test.before == "complete" {
+			if test.before == "complete" || test.before == "invalid" {
 				events = append(events, usageEvent("task_complete", "old-child"))
 			}
 			if test.before == "aborted" {
 				events = append(events, usageEvent("turn_aborted", "old-child"))
 			}
+			if test.before == "invalid" {
+				events = append(events, "{")
+			}
 			child := writeUsageRollout(t, home, "child", "root", events...)
 			var session usageSession
 			session.begin(ctx, home, "root", time.Now())
 			appendUsageEvents(t, root, completedUsageTurn("root", "new-root", "r2", 20)...)
-			if test.after != "" {
+			if test.after == "started" {
 				appendUsageEvents(t, child, usageEvent("task_started", "new-child"))
+			} else if test.after == "complete" {
+				appendUsageEvents(t, child, completedUsageTurn("child", "new-child", "c2", 5)...)
 			}
 			var output jsonlOutput
 			for _, tool := range strings.Split(test.tools, ",") {
@@ -405,7 +412,11 @@ func TestUsageSessionOnlyObservesUnchangedCompletedPriorHelper(t *testing.T) {
 			}
 			got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 20}, output.children, output.observationOnly)
 			if test.accepted {
-				if got != (usage.Tokens{Input: 20}) || !complete || err != nil {
+				want := int64(20)
+				if test.after == "complete" {
+					want = 25
+				}
+				if got != (usage.Tokens{Input: want}) || !complete || err != nil {
 					t.Fatalf("finished observation = %+v,%v,%v", got, complete, err)
 				}
 			} else if complete || !errors.Is(err, errUnverifiedChildren) {

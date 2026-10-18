@@ -20,13 +20,18 @@ import (
 
 type cleanupRetryLog struct {
 	bytes.Buffer
-	root string
-	err  error
+	root    string
+	onRetry func() error
+	err     error
 }
 
 func (w *cleanupRetryLog) Write(p []byte) (int, error) {
 	if bytes.Contains(p, []byte("cleanup retry scheduled")) {
-		w.err = os.Chmod(w.root, 0700)
+		if w.onRetry != nil {
+			w.err = w.onRetry()
+		} else {
+			w.err = os.Chmod(w.root, 0700)
+		}
 	}
 	return w.Buffer.Write(p)
 }
@@ -38,7 +43,7 @@ func TestRunnerSnapshotCleanupRetryKeepsValidatedResult(t *testing.T) {
 	root := t.TempDir()
 	t.Cleanup(func() { _ = os.Chmod(root, 0700) })
 	journal := &cleanupRetryLog{root: root}
-	job := withClaudeCritic(portableJob(command.Fix))
+	job := withClaudeCritic(testJob(command.Fix))
 	calls := 0
 	runner := Runner{WorkRoot: root, Logger: log.New(journal, "", 0), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 		calls++
@@ -65,7 +70,7 @@ func TestRunnerAuditValidationCleanupRestoresRestrictedDirectory(t *testing.T) {
 	}
 	installActionTestSkills(t, testAuditSkillURL)
 	fakeOnPath(t, "node", "#!/bin/sh\ncase \"$*\" in *validate-coverage-ledger.cjs*) /bin/chmod 000 .;; esac\nexit 0\n")
-	job := portableJob(command.SecurityAudit)
+	job := testJob(command.SecurityAudit)
 	job.Main.Skills = []string{testAuditSkillURL}
 	root := t.TempDir()
 	runner := Runner{WorkRoot: root, runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
@@ -85,7 +90,7 @@ func TestRunnerAuditValidationCleanupRestoresRestrictedDirectory(t *testing.T) {
 }
 
 func TestRunnerReviewRevisionsFreezeCleanIndependentInputs(t *testing.T) {
-	job := withClaudeCritic(portableJob(command.Fix))
+	job := withClaudeCritic(testJob(command.Fix))
 	job.CriticMaxRounds = 2
 	root := t.TempDir()
 	var source, firstReview, revisionReview string
@@ -150,7 +155,7 @@ func TestRunnerReviewRevisionsFreezeCleanIndependentInputs(t *testing.T) {
 func TestRunnerReviewExportsFrozenSourceDespiteLiveChanges(t *testing.T) {
 	for _, approved := range []bool{false, true} {
 		t.Run(fmt.Sprintf("approved=%t", approved), func(t *testing.T) {
-			job := withClaudeCritic(portableJob(command.Fix))
+			job := withClaudeCritic(testJob(command.Fix))
 			job.CriticMaxRounds = 2
 			var source string
 			calls := 0
@@ -188,7 +193,7 @@ func TestRunnerAuditReviewFreezesAndExportsRawReports(t *testing.T) {
 	for _, scenario := range []string{"approved", "mutated during critic", "mutated during validation", "empty architecture repaired"} {
 		t.Run(scenario, func(t *testing.T) {
 			installActionTestSkills(t, testAuditSkillURL)
-			job := portableJob(command.SecurityAudit)
+			job := testJob(command.SecurityAudit)
 			job = withClaudeCritic(job)
 			job.Main.Skills = []string{testAuditSkillURL}
 			var source, reports string
@@ -281,7 +286,7 @@ func TestRunnerAuditReviewFreezesAndExportsRawReports(t *testing.T) {
 func TestRunnerReviewRejectsInvalidFixBeforeCritic(t *testing.T) {
 	for _, scenario := range []string{"omitted path", "directory spelling collision"} {
 		t.Run(scenario, func(t *testing.T) {
-			job := withClaudeCritic(portableJob(command.Fix))
+			job := withClaudeCritic(testJob(command.Fix))
 			name, want := "omitted", "omitted source path"
 			if scenario == "omitted path" {
 				job.Source.Omitted = []string{name}

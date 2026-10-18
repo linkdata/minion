@@ -139,9 +139,6 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 	}
 	repository, err := gitwork.MaterializeRepository(ctx, source, job.Source)
 	if err != nil {
-		if errors.Is(err, exec.ErrNotFound) {
-			return result, fmt.Errorf("materialize repository: %w", err)
-		}
 		return result, preparationFailure("materialize repository", err)
 	}
 	if err := materializeContext(contextDir, job.Source); err != nil {
@@ -200,7 +197,7 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 				if review == nil {
 					review, err = freezeReviewSnapshot(ctx, workRoot, job, source, outputDir, index)
 				} else {
-					err = review.refresh(ctx, workRoot, job, source, outputDir, index)
+					err = review.refresh(ctx)
 				}
 				reviewCurrent = err == nil
 			}
@@ -349,7 +346,7 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 
 // Before any model runs, freeing host capacity can make preparation succeed.
 func preparationFailure(stage string, err error) error {
-	if errors.Is(err, syscall.ENOSPC) || errors.Is(err, syscall.EDQUOT) {
+	if errors.Is(err, exec.ErrNotFound) || errors.Is(err, syscall.ENOSPC) || errors.Is(err, syscall.EDQUOT) {
 		return fmt.Errorf("%s: %w", stage, err)
 	}
 	return fmt.Errorf("%w: %s: %w", monitor.ErrTerminalJob, stage, err)

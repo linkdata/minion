@@ -23,19 +23,6 @@ import (
 	"github.com/linkdata/minion/internal/workspace"
 )
 
-func privateReviewResult(job Job) Result {
-	return Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Public answer.",
-		Calls: []CallUsage{
-			{Provider: job.Main.Provider, Role: roleMain, Round: 1},
-			{Provider: job.Critic.Provider, Role: roleCritic, Round: 1, ReviewPhase: reviewFull, HasBlockers: true},
-			{Provider: job.Main.Provider, Role: roleMain, Round: 2},
-			{Provider: job.Critic.Provider, Role: roleCritic, Round: 2, ReviewPhase: reviewVerification, Approved: true, NoBlockers: true},
-			{Provider: job.Critic.Provider, Role: roleCritic, Round: 2, ReviewPhase: reviewFull, Approved: true, NoBlockers: true},
-		},
-		Refutations: []Refutation{{Round: 2, Text: "PRIVATE_MAIN_REFUTATION"}},
-	}
-}
-
 func readPrivateReview(t *testing.T, root string) retainedReview {
 	t.Helper()
 	paths, err := filepath.Glob(filepath.Join(root, "reviews", "*.json"))
@@ -66,7 +53,7 @@ func TestPublishRetainsPrivateReviewBeforeGitHubWrites(t *testing.T) {
 		status   int
 	}{{"approved", true, http.StatusCreated}, {"nonblocking", false, http.StatusCreated}, {"publication failure", true, http.StatusBadGateway}} {
 		t.Run(test.name, func(t *testing.T) {
-			job := withClaudeCritic(portableJob(command.Comment))
+			job := withClaudeCritic(testJob(command.Comment))
 			job.Identity.Repository = "o/r"
 			job.CriticNonblockingRounds = 1
 			result := privateReviewResult(job)
@@ -118,7 +105,7 @@ func TestPublishRetainsPrivateReviewBeforeGitHubWrites(t *testing.T) {
 }
 
 func TestPrivateReviewRetainsPrefixAndRejectsRollback(t *testing.T) {
-	job := withClaudeCritic(portableJob(command.Comment))
+	job := withClaudeCritic(testJob(command.Comment))
 	// Returned evidence does not require this provider skill on the orchestrator.
 	job.Main.Skills = []string{"https://github.com/example/skills/tree/pinned/skills/uninstalled"}
 	result := privateReviewResult(job)
@@ -161,7 +148,7 @@ func TestPrivateReviewRetainsPrefixAndRejectsRollback(t *testing.T) {
 func TestPrivateReviewBoundaryBeforeStorageOrPublication(t *testing.T) {
 	for _, scenario := range []string{"foreign identity", "foreign source", "malformed history", "oversized history", "invalid calls", "refutations without critic", "invalid answer", "invalid changes", "storage failure", "public root", "symlink root"} {
 		t.Run(scenario, func(t *testing.T) {
-			job := withClaudeCritic(portableJob(command.Comment))
+			job := withClaudeCritic(testJob(command.Comment))
 			result := privateReviewResult(job)
 			root := t.TempDir()
 			e := Orchestrator{WorkRoot: root}

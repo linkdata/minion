@@ -17,7 +17,8 @@ import (
 func TestRunCancelsActiveChildProcess(t *testing.T) {
 	binary := fakeExecutable(t, "claude", `printf '%s\n' '`+assistantUsageEvent("partial", 3, 5, 7, 2)+`'
 sleep 30 &
-printf '%s\n' "$!" > "$0.pid"
+printf '%s\n' "$!" > "$0.pid.tmp"
+mv -- "$0.pid.tmp" "$0.pid"
 wait
 `)
 	workspace := t.TempDir()

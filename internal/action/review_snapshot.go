@@ -19,68 +19,63 @@ type reviewSnapshot struct {
 	changes           []workspace.Change
 	artifacts         []workspace.File
 	repository        *gitwork.Repository
+	refresh           func(context.Context) error
 }
 
 // Freeze outside the main model's writable grants. The caller owns the partial snapshot even on failure.
 func freezeReviewSnapshot(ctx context.Context, workRoot string, job Job, source, outputDir string, index *gitwork.OfflineIndex) (*reviewSnapshot, error) {
-	snapshot := &reviewSnapshot{}
-	return snapshot, snapshot.refresh(ctx, workRoot, job, source, outputDir, index)
-}
-
-// Refresh frozen bytes at stable private paths only between model calls.
-func (s *reviewSnapshot) refresh(ctx context.Context, workRoot string, job Job, source, outputDir string, index *gitwork.OfflineIndex) error {
-	s.base = job.Source.Files
-	var err error
-	if job.Action == command.Fix {
-		if s.changes, err = index.Changes(ctx); err != nil {
-			return err
-		}
-		if err := job.validateChanges(s.changes); err != nil {
-			return err
-		}
-		if !s.ownedSource {
-			if s.source, err = os.MkdirTemp(workRoot, "minion-review-"); err != nil {
+	s := &reviewSnapshot{}
+	// Bind the action once; refresh only frozen bytes between model calls.
+	s.refresh = func(ctx context.Context) error {
+		s.base = job.Source.Files
+		var err error
+		if job.Action == command.Fix {
+			if s.changes, err = index.Changes(ctx); err != nil {
+				return err
+			}
+			if err := job.validateChanges(s.changes); err != nil {
+				return err
+			}
+			if !s.ownedSource {
+				s.source = ""
+			}
+			if s.source, err = resetReviewDirectory(s.source, workRoot, "minion-review-"); err != nil {
 				return err
 			}
 			s.ownedSource = true
-		} else {
-			if err := cleanup.RemoveAll(s.source); err != nil {
+			if err := workspace.MaterializeChanges(s.source, job.Source.Files, s.changes); err != nil {
 				return err
 			}
-			if err := os.Mkdir(s.source, 0700); err != nil {
-				return err
-			}
-		}
-		if err := workspace.MaterializeChanges(s.source, job.Source.Files, s.changes); err != nil {
-			return err
-		}
-		if s.repository, err = gitwork.MaterializeRepository(ctx, s.source, job.Source); err != nil {
-			return err
-		}
-	} else {
-		s.source = source
-	}
-	if outputDir != "" {
-		if s.artifacts, _, err = readAuditArtifacts(outputDir, false); err != nil {
-			return err
-		}
-		if s.outputDir == "" {
-			if s.outputDir, err = os.MkdirTemp(workRoot, ".minion-review-reports-"); err != nil {
+			if s.repository, err = gitwork.MaterializeRepository(ctx, s.source, job.Source); err != nil {
 				return err
 			}
 		} else {
-			if err := cleanup.RemoveAll(s.outputDir); err != nil {
+			s.source = source
+		}
+		if outputDir != "" {
+			if s.artifacts, _, err = readAuditArtifacts(outputDir, false); err != nil {
 				return err
 			}
-			if err := os.Mkdir(s.outputDir, 0700); err != nil {
+			if s.outputDir, err = resetReviewDirectory(s.outputDir, workRoot, ".minion-review-reports-"); err != nil {
+				return err
+			}
+			if err := workspace.Materialize(s.outputDir, s.artifacts); err != nil {
 				return err
 			}
 		}
-		if err := workspace.Materialize(s.outputDir, s.artifacts); err != nil {
-			return err
-		}
+		return nil
 	}
-	return nil
+	return s, s.refresh(ctx)
+}
+
+func resetReviewDirectory(path, workRoot, prefix string) (string, error) {
+	if path == "" {
+		return os.MkdirTemp(workRoot, prefix)
+	}
+	if err := cleanup.RemoveAll(path); err != nil {
+		return path, err
+	}
+	return path, os.Mkdir(path, 0700)
 }
 
 func (s *reviewSnapshot) verify(ctx context.Context) error {

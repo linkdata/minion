@@ -19,7 +19,8 @@ func TestRunRejectsCompletedAnswerAfterPipeDrainOverrun(t *testing.T) {
 	binary := fakeExecutable(t, "claude", `cat >/dev/null
 printf '%s\n' '`+successfulResult+`'
 sleep 30 &
-printf '%s\n' "$!" > "$0.pid"
+printf '%s\n' "$!" > "$0.pid.tmp"
+mv -- "$0.pid.tmp" "$0.pid"
 exit 0
 `)
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)

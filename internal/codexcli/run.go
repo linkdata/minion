@@ -32,7 +32,7 @@ func SystemReadPaths() []string {
 	return []string{"/bin", "/sbin", "/usr", "/etc", "/lib", "/lib64", "/nix/store", "/run/current-system/sw"}
 }
 
-// Run executes one non-interactive Codex task for a source snapshot.
+// Run continues this action role's Codex conversation for a source snapshot.
 //
 // A writable run may edit the snapshot; outputDir optionally grants write
 // access to a separate report directory. ReadOnlyDirs in settings grants only

@@ -3,6 +3,7 @@ package gitwork
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -561,7 +562,7 @@ func TestRepositoryVerifyBoundsMetadata(t *testing.T) {
 	}
 }
 
-func TestRepositoryDigestBoundsWideDirectories(t *testing.T) {
+func TestRepositoryDigestEntryLimitCountsRoot(t *testing.T) {
 	dir := t.TempDir()
 	for i := 0; i < workspace.MaxEntries; i++ {
 		f, err := os.Create(filepath.Join(dir, fmt.Sprint(i)))
@@ -583,21 +584,27 @@ func TestRepositoryDigestBoundsWideDirectories(t *testing.T) {
 	}
 }
 
-func TestRepositoryDigestIsIndependentOfDirectoryOrder(t *testing.T) {
-	var expected [32]byte
-	for i, names := range [][]string{{"z/second", "a/first"}, {"a/first", "z/second"}} {
+func TestRepositoryDigestUsesReverseLexicalDepthFirstOrder(t *testing.T) {
+	for _, names := range [][]string{{"z/second", "a/first"}, {"a/first", "z/second"}} {
 		dir := t.TempDir()
 		for _, name := range names {
 			writeFile(t, filepath.Join(dir, name), name)
 		}
-		digest, err := repositoryDigest(context.Background(), dir)
-		if err != nil {
-			t.Fatal(err)
+		// The oracle uses a fixed traversal, independent of ReadDir and production sorting.
+		hash := sha256.New()
+		for _, name := range []string{".", "z", "z/second", "a", "a/first"} {
+			info, err := os.Lstat(filepath.Join(dir, name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			fmt.Fprintf(hash, "%s\x00%d\x00", name, info.Mode())
+			if info.Mode().IsRegular() {
+				fmt.Fprintf(hash, "%d\x00%s", len(name), name)
+			}
 		}
-		if i == 0 {
-			expected = digest
-		} else if digest != expected {
-			t.Fatal("metadata digest depends on directory insertion order")
+		digest, err := repositoryDigest(context.Background(), dir)
+		if err != nil || !bytes.Equal(digest[:], hash.Sum(nil)) {
+			t.Fatalf("metadata digest=%x error=%v; want %x", digest, err, hash.Sum(nil))
 		}
 	}
 }
@@ -619,5 +626,11 @@ func TestRepositoryDigestBoundsTotalMetadata(t *testing.T) {
 	}
 	if _, err := repositoryDigest(context.Background(), dir); err == nil || !strings.Contains(err.Error(), "file exceeds byte limit") {
 		t.Fatalf("metadata total byte limit error=%v", err)
+	}
+	if err := os.Remove(filepath.Join(dir, "c")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repositoryDigest(context.Background(), dir); err != nil {
+		t.Fatalf("exact metadata total byte limit: %v", err)
 	}
 }

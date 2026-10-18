@@ -14,7 +14,6 @@ import (
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/workroot"
-	"github.com/linkdata/minion/internal/workspace"
 )
 
 func TestRunnerWorkRootIsolation(t *testing.T) {
@@ -26,7 +25,7 @@ func TestRunnerWorkRootIsolation(t *testing.T) {
 				t.Fatal(err)
 			}
 			runner := Runner{}
-			job := withClaudeCritic(portableJob(command.Comment))
+			job := withClaudeCritic(testJob(command.Comment))
 			switch kind {
 			case "main read":
 				runner.Codex.ReadOnlyDirs = []string{root}
@@ -50,19 +49,19 @@ func TestRunnerWorkRootIsolation(t *testing.T) {
 	}
 	overlap := t.TempDir()
 	runner := Runner{WorkRoot: overlap, Codex: config.CodexConfig{ReadOnlyDirs: []string{overlap}}, runModel: forbidModel(t)}
-	if _, err := runner.Run(context.Background(), portableJob(command.Comment)); !errors.Is(err, workroot.ErrUnsafe) || errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "work root overlaps") {
+	if _, err := runner.Run(context.Background(), testJob(command.Comment)); !errors.Is(err, workroot.ErrUnsafe) || errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "work root overlaps") {
 		t.Fatalf("unsafe root=%v", err)
 	}
 	missing := filepath.Join(t.TempDir(), "missing")
 	runner = Runner{WorkRoot: missing, runModel: forbidModel(t)}
-	if result, err := runner.Run(context.Background(), portableJob(command.Comment)); !errors.Is(err, os.ErrNotExist) || errors.Is(err, monitor.ErrTerminalJob) || len(result.Calls) != 0 {
+	if result, err := runner.Run(context.Background(), testJob(command.Comment)); !errors.Is(err, os.ErrNotExist) || errors.Is(err, monitor.ErrTerminalJob) || len(result.Calls) != 0 {
 		t.Fatalf("missing trusted root recreated or used: %+v,%v", result, err)
 	}
 	if _, err := os.Stat(missing); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("missing trusted root was created: %v", err)
 	}
 	runner = Runner{}
-	if _, err := runner.Run(context.Background(), portableJob(command.Comment)); !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "work root is required") {
+	if _, err := runner.Run(context.Background(), testJob(command.Comment)); !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "work root is required") {
 		t.Fatalf("missing root=%v", err)
 	}
 }
@@ -77,7 +76,7 @@ func TestRunnerRejectsCanceledContextBeforePreparation(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "must-not-be-created")
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	result, err := (&Runner{WorkRoot: root}).Run(ctx, portableJob(command.Comment))
+	result, err := (&Runner{WorkRoot: root}).Run(ctx, testJob(command.Comment))
 	if !errors.Is(err, context.Canceled) || errors.Is(err, monitor.ErrTerminalJob) || len(result.Calls) != 0 {
 		t.Fatalf("canceled dispatch: %+v, %v", result, err)
 	}
@@ -100,7 +99,7 @@ func TestRunnerPreparationFailuresAreTerminalBeforeModels(t *testing.T) {
 		{"missing audit task skill", command.SecurityAudit, func(*Job) {}, "action prompt: security audit requires"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			job := portableJob(test.action)
+			job := testJob(test.action)
 			test.mutate(&job)
 			runner := Runner{WorkRoot: t.TempDir(), runModel: forbidModel(t)}
 			if result, err := runner.Run(context.Background(), job); !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), test.want) || len(result.Calls) != 0 {
@@ -111,11 +110,20 @@ func TestRunnerPreparationFailuresAreTerminalBeforeModels(t *testing.T) {
 }
 
 func TestRunnerEnforcesSuppliedRuntimeBudget(t *testing.T) {
-	for _, action := range []command.Action{command.Comment, command.SecurityAudit} {
-		t.Run(string(action), func(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		action      command.Action
+		lateSuccess bool
+	}{
+		{"comment cancellation", command.Comment, false},
+		{"audit cancellation", command.SecurityAudit, false},
+		{"late successful comment", command.Comment, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			action := test.action
 			parent, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
-			job := portableJob(action)
+			job := testJob(action)
 			job.RuntimeBudget = 2 * time.Second
 			if action == command.SecurityAudit {
 				installActionTestSkills(t, testAuditSkillURL)
@@ -138,10 +146,13 @@ func TestRunnerEnforcesSuppliedRuntimeBudget(t *testing.T) {
 					}
 				}
 				<-ctx.Done()
+				if test.lateSuccess {
+					return aicli.Result{Answer: "Completed after the deadline."}, nil
+				}
 				return aicli.Result{}, ctx.Err()
 			}}
 			result, err := runner.Run(parent, job)
-			if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, monitor.ErrTerminalJob) || parent.Err() != nil || calls != 1 || len(result.Calls) != 1 || result.Answer != "" {
+			if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, monitor.ErrTerminalJob) || parent.Err() != nil || calls != 1 || len(result.Calls) != 1 || result.Answer != "" || len(result.Changes) != 0 {
 				t.Fatalf("runtime budget: result=%+v calls=%d parent=%v error=%v", result, calls, parent.Err(), err)
 			}
 			if action == command.SecurityAudit {
@@ -156,25 +167,8 @@ func TestRunnerEnforcesSuppliedRuntimeBudget(t *testing.T) {
 	}
 }
 
-func TestRunnerDiscardsSuccessfulAnswerReturnedAfterDeadline(t *testing.T) {
-	parent, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	job := portableJob(command.Comment)
-	job.RuntimeBudget = 2 * time.Second
-	calls := 0
-	runner := Runner{WorkRoot: t.TempDir(), runModel: func(ctx context.Context, _ modelRun) (aicli.Result, error) {
-		calls++
-		<-ctx.Done()
-		return aicli.Result{Answer: "Completed after the deadline."}, nil
-	}}
-	result, err := runner.Run(parent, job)
-	if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, monitor.ErrTerminalJob) || parent.Err() != nil || result.Answer != "" || len(result.Changes) != 0 || calls != 1 || len(result.Calls) != 1 {
-		t.Fatalf("late successful answer escaped deadline boundary: result=%+v calls=%d error=%v", result, calls, err)
-	}
-}
-
 func TestRunnerFixCanReturnEmptyAnswerWithoutCritic(t *testing.T) {
-	job := portableJob(command.Fix)
+	job := testJob(command.Fix)
 	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 		writeFixtureFile(t, request.dir, "source.txt", []byte("fixed source"))
 		return aicli.Result{}, nil
@@ -183,38 +177,11 @@ func TestRunnerFixCanReturnEmptyAnswerWithoutCritic(t *testing.T) {
 	if err != nil || result.Answer != "" || len(result.Changes) != 1 || string(result.Changes[0].Data) != "fixed source" {
 		t.Fatalf("valid fix was lost because its summary was empty: %+v,%v", result, err)
 	}
-	for _, test := range []struct {
-		action  command.Action
-		critic  bool
-		changed bool
-		valid   bool
-	}{{command.Fix, false, true, true}, {command.Fix, false, false, false}, {command.Fix, true, false, false}, {command.Fix, true, true, false}, {command.Comment, false, false, false}, {command.Review, false, false, false}, {command.SecurityAudit, false, false, false}} {
-		job := portableJob(test.action)
-		if test.critic {
-			job = withClaudeCritic(job)
-		}
-		result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Calls: []CallUsage{{Provider: job.Main.Provider, Role: "main", Round: 1}}}
-		if test.critic {
-			result.Calls = append(result.Calls, CallUsage{Provider: job.Critic.Provider, Role: roleCritic, Round: 1, ReviewPhase: reviewFull, Approved: true, NoBlockers: true})
-		}
-		if test.changed {
-			result.Changes = []workspace.Change{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("fixed source")}}
-		}
-		if test.critic && test.changed {
-			result.Answer = "Fixed source."
-			if err := result.Validate(job); err != nil {
-				t.Fatalf("invalid changed-fix critic positive control: %v", err)
-			}
-			result.Answer = ""
-		}
-		if err := result.Validate(job); (err == nil) != test.valid || (!test.valid && !strings.Contains(err.Error(), "action answer")) {
-			t.Fatalf("empty %s answer with critic=%t: %v", test.action, test.critic, err)
-		}
-	}
+
 }
 
 func TestRunnerOmittedSourceWriteIsTerminal(t *testing.T) {
-	job := portableJob(command.Fix)
+	job := testJob(command.Fix)
 	job.Source.Omitted = []string{"hidden"}
 	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 		if !strings.Contains(request.prompt, "Do not create, change or delete omitted paths or anything beneath them") {

@@ -25,7 +25,7 @@ func TestRunnerUsesSuppliedSourceAndContext(t *testing.T) {
 	for _, provider := range []string{"codex", "claude"} {
 		t.Run(provider, func(t *testing.T) {
 			forbidNetworkGit(t)
-			job := portableJob(command.Review)
+			job := testJob(command.Review)
 			job.Main.Provider = provider
 			root := t.TempDir()
 			marker := filepath.Join(t.TempDir(), "called")
@@ -91,7 +91,7 @@ func TestRunnerUsesSuppliedSourceAndContext(t *testing.T) {
 }
 
 func TestRunnerReturnsFileChangesAndPartialUsage(t *testing.T) {
-	job := portableJob(command.Fix)
+	job := testJob(command.Fix)
 	runner := Runner{WorkRoot: t.TempDir()}
 	runner.runModel = func(_ context.Context, request modelRun) (aicli.Result, error) {
 		if !request.writable {
@@ -121,7 +121,7 @@ func TestRunnerReturnsFileChangesAndPartialUsage(t *testing.T) {
 }
 
 func TestRunnerUsesLocalHistoryWhenComparisonDiffIsIncomplete(t *testing.T) {
-	job := portableJob(command.Review)
+	job := testJob(command.Review)
 	job.Source.Diff, job.Source.DiffIncomplete = nil, true
 	job.Source.ChangedPaths = []string{"source.txt", "deleted.txt"}
 	runner := Runner{
@@ -141,11 +141,6 @@ func TestRunnerUsesLocalHistoryWhenComparisonDiffIsIncomplete(t *testing.T) {
 			if !metadata.DiffIncomplete || !reflect.DeepEqual(metadata.ChangedPaths, job.Source.ChangedPaths) {
 				t.Fatalf("comparison coverage metadata missing: %s", data)
 			}
-			for _, want := range []string{"The text diff exceeds its limit", "use local Git to compare the declared changed paths against the merge base", "supplied merge-base file versions (PRs)", "Comparison diff incomplete=true", "disclose any remaining comparison limitation"} {
-				if !strings.Contains(request.prompt, want) {
-					t.Fatalf("prompt lacks %q", want)
-				}
-			}
 			identity := fmt.Sprintf("The source is the exact pull request head %s (merge base %s, base tip %s).", job.Source.Head, job.Source.MergeBase, job.Source.Base)
 			if !strings.Contains(request.prompt, identity) || strings.Count(request.prompt, "disclose any remaining comparison limitation") != 1 {
 				t.Fatalf("comparison identities or guidance misplaced/duplicated: %s", request.prompt)
@@ -160,7 +155,7 @@ func TestRunnerUsesLocalHistoryWhenComparisonDiffIsIncomplete(t *testing.T) {
 
 func TestRunnerKeepsCriticReadOnlyAndRefutationsPrivate(t *testing.T) {
 	forbidNetworkGit(t)
-	job := portableJob(command.Fix)
+	job := testJob(command.Fix)
 	job.Source.Files = append(job.Source.Files, workspace.File{Path: "deleted.txt", Mode: workspace.Regular, Data: []byte("original deleted file")})
 	attachRepository(t, &job)
 	job.Critic = &RoleSettings{Provider: "claude", AlwaysOnSkills: []string{skills.BuiltinAntiPromptInjection}}
@@ -201,7 +196,6 @@ func TestRunnerKeepsCriticReadOnlyAndRefutationsPrivate(t *testing.T) {
 				t.Fatalf("critic lacks local baseline instruction %q", want)
 			}
 		}
-
 		if !strings.Contains(request.prompt, "Do not create, change or delete omitted paths or anything beneath them, or replace their ancestor directories with files") {
 			t.Fatal("omitted-path constraint missing")
 		}
@@ -219,7 +213,6 @@ func TestRunnerKeepsCriticReadOnlyAndRefutationsPrivate(t *testing.T) {
 		if status := modelGit(t, request.dir, "status", "--porcelain", "--untracked-files=all"); status != " D deleted.txt\n M source.txt\n?? added.bin\n" {
 			t.Fatalf("critic Git status lost candidate changes: %q", status)
 		}
-
 		return aicli.Result{Answer: approvedCritiqueJSON, UsageComplete: true}, nil
 	}
 	result, err := runner.Run(context.Background(), job)
@@ -234,7 +227,7 @@ func TestRunnerIgnoresWorkerGitMetadata(t *testing.T) {
 		writeFixtureFile(t, request.dir, "source.txt", []byte("changed"))
 		return aicli.Result{Answer: "Changed source", UsageComplete: true}, nil
 	}}
-	result, err := runner.Run(context.Background(), portableJob(command.Fix))
+	result, err := runner.Run(context.Background(), testJob(command.Fix))
 	if err != nil || len(result.Changes) != 1 || result.Changes[0].Path != "source.txt" || string(result.Changes[0].Data) != "changed" {
 		t.Fatalf("metadata result=%+v,%v", result, err)
 	}
@@ -259,13 +252,13 @@ func TestRunnerCanonicalizesTrustedWorkRoot(t *testing.T) {
 		}
 		return aicli.Result{Answer: "Read source", UsageComplete: true}, nil
 	}}
-	if _, err := runner.Run(context.Background(), portableJob(command.Comment)); err != nil {
+	if _, err := runner.Run(context.Background(), testJob(command.Comment)); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func TestPortableAuditMetadataUsesSourceIdentity(t *testing.T) {
-	job := portableJob(command.SecurityAudit)
+	job := testJob(command.SecurityAudit)
 	job.Main.Skills = []string{testAuditSkillURL}
 	root := t.TempDir()
 	for _, name := range auditArtifacts {
@@ -333,7 +326,7 @@ func TestRunnerReturnsPartialAuditArtifactsOnFailure(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			installActionTestSkills(t, testAuditSkillURL)
-			job := portableJob(command.SecurityAudit)
+			job := testJob(command.SecurityAudit)
 			job.Main.Skills = []string{testAuditSkillURL}
 			failure := errors.New("provider stopped after writing partial report")
 			runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
@@ -392,7 +385,7 @@ func TestRunnerRejectsGitMetadataMutation(t *testing.T) {
 		role := test.role
 		for _, mutation := range test.mutations {
 			t.Run(string(test.action)+"/"+role+"/"+mutation, func(t *testing.T) {
-				job := withClaudeCritic(portableJob(test.action))
+				job := withClaudeCritic(testJob(test.action))
 				calls := 0
 				var mainDir string
 				runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {

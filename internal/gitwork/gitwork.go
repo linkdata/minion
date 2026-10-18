@@ -551,7 +551,7 @@ func cleanGitEnvironment() []string {
 	return append(env, hardeningEnv()...)
 }
 
-// hardeningEnv disables inherited Git configuration, replacement objects and prompts.
+// hardeningEnv adds trusted prompt and locale settings to the model Git environment.
 func hardeningEnv() []string {
 	return append(aicli.ModelGitEnvironment(),
 		"GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=/bin/false",

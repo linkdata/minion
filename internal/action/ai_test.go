@@ -2,7 +2,6 @@ package action
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -21,11 +20,6 @@ import (
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/skills"
 )
-
-func proposalJSON(answer, refutations string) string {
-	data, _ := json.Marshal(map[string]string{"answer": answer, "refutations": refutations})
-	return string(data)
-}
 
 func TestReviewPromptsRequireCompleteInvestigationInEveryPhase(t *testing.T) {
 	prompts := map[string]string{}
@@ -52,7 +46,7 @@ func TestReviewPromptsRequireCompleteInvestigationInEveryPhase(t *testing.T) {
 		}
 	}
 	for _, action := range []command.Action{command.Review, command.Comment, command.SecurityAudit} {
-		prompt, err := actionPrompt(context.Background(), portableJob(action), "/source", "/context", "/reports", "/installed/SKILL.md")
+		prompt, err := actionPrompt(context.Background(), testJob(action), "/source", "/context", "/reports", "/installed/SKILL.md")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -77,7 +71,7 @@ func TestActionPromptsDescribeIncompletePRComparisonOnce(t *testing.T) {
 	const remedy = "when incomplete, use local Git to compare the declared changed paths against the merge base, and disclose any remaining comparison limitation"
 	for _, action := range []command.Action{command.Review, command.Comment, command.SecurityAudit} {
 		t.Run(string(action), func(t *testing.T) {
-			job := portableJob(action)
+			job := testJob(action)
 			job.Identity.SubjectType = "PullRequest"
 			job.Source.Base, job.Source.MergeBase = portableHead, portableHead
 			job.Source.Diff, job.Source.DiffIncomplete = nil, true
@@ -142,7 +136,7 @@ func TestRunAIWithoutCriticSelectsMain(t *testing.T) {
 				return aicli.Result{Answer: provider + " result"}, nil
 			}}
 			job := Job{Action: command.Fix, Main: RoleSettings{Provider: provider}}
-			answer, err := runner.runAI(context.Background(), job, "checkout", "task", "reports", nil, nil)
+			answer, err := runner.runAI(context.Background(), job, "checkout", "task", "reports", nil, &modelSessions{})
 			if err != nil || answer != provider+" result" || len(calls) != 1 || calls[0] != provider {
 				t.Fatalf("runAI() = %q, %v; calls = %v", answer, err, calls)
 			}
@@ -257,7 +251,7 @@ func TestRunAIRevisionPreservesWorkAndBoundaries(t *testing.T) {
 				}
 				return aicli.Result{Answer: approvedCritiqueJSON}, nil
 			}
-			answer, err := e.runAI(ctx, job, dir, task, outputDir, nil, nil)
+			answer, err := e.runAI(ctx, job, dir, task, outputDir, nil, &modelSessions{})
 			if err != nil || answer != "revised proposal" || calls != 5 {
 				t.Fatalf("runAI() = %q, %v; calls = %d", answer, err, calls)
 			}
@@ -311,7 +305,7 @@ func TestRunAIFreshReviewFindingsUseRemainingRounds(t *testing.T) {
 		}
 		return aicli.Result{Answer: approvedCritiqueJSON}, nil
 	}
-	answer, err := e.runAI(context.Background(), job, t.TempDir(), task, "", nil, nil)
+	answer, err := e.runAI(context.Background(), job, t.TempDir(), task, "", nil, &modelSessions{})
 	if err != nil || answer != "candidate 3" || len(calls) != 8 {
 		t.Fatalf("runAI() = %q, %v; calls=%+v", answer, err, calls)
 	}
@@ -354,7 +348,7 @@ func TestRunAIVerificationRejectionFeedsNextRevision(t *testing.T) {
 		return aicli.Result{Answer: approvedCritiqueJSON}, nil
 	}}
 	job := Job{Main: RoleSettings{Provider: "codex"}, Critic: &RoleSettings{Provider: "claude"}, CriticMaxRounds: 3}
-	answer, err := runner.runAI(context.Background(), job, t.TempDir(), "selected task", "", nil, nil)
+	answer, err := runner.runAI(context.Background(), job, t.TempDir(), "selected task", "", nil, &modelSessions{})
 	want := []string{"main/1/", "critic/1/full", "main/2/", "critic/2/verification", "main/3/", "critic/3/verification", "critic/3/full"}
 	if err != nil || answer != "candidate 3" || len(calls) != len(want) {
 		t.Fatalf("verification rejection: answer=%q calls=%+v error=%v", answer, calls, err)
@@ -415,7 +409,7 @@ func TestRunAIFailsWithoutReturningProposal(t *testing.T) {
 				}
 				return aicli.Result{Answer: proposalJSON(answer, "Private rationale")}, nil
 			}
-			answer, err := e.runAI(ctx, job, t.TempDir(), "task", "", nil, nil)
+			answer, err := e.runAI(ctx, job, t.TempDir(), "task", "", nil, &modelSessions{})
 			if answer != "" || !errors.Is(err, tt.wantError) || calls != tt.wantCalls {
 				t.Fatalf("runAI() = %q, %v; calls = %d; want no answer, %v, %d calls", answer, err, calls, tt.wantError, tt.wantCalls)
 			}

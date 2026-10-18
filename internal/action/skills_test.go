@@ -3,7 +3,6 @@ package action
 import (
 	"bytes"
 	"errors"
-	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -42,41 +41,6 @@ const (
 	testFixSkillURL    = "https://github.com/DietrichGebert/ponytail/tree/main/skills/ponytail"
 	testAuditSkillURL  = "https://github.com/cloudflare/security-audit-skill/tree/main/skills/security-audit"
 )
-
-func installActionTestSkills(t *testing.T, sources ...string) {
-	t.Helper()
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	writeActionTestSkills(t, home, ".agents", sources...)
-}
-
-func writeActionTestSkills(t *testing.T, home, parent string, sources ...string) {
-	t.Helper()
-	for _, source := range sources {
-		name, err := skills.Name(source)
-		if err != nil {
-			t.Fatal(err)
-		}
-		dir := filepath.Join(home, parent, "skills", name)
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("---\nname: "+name+"\ndescription: Test skill\n---\nUse this test skill.\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if name == "security-audit" {
-			for _, validator := range auditValidators {
-				if err := os.WriteFile(filepath.Join(dir, validator.script), []byte("JSON.parse(require('fs').readFileSync(process.argv[2], 'utf8'));\n"), 0600); err != nil {
-					t.Fatal(err)
-				}
-			}
-		}
-		metadata := fmt.Sprintf(`{"url":%q,"commit":%q}`, source, strings.Repeat("a", 40))
-		if err := os.WriteFile(filepath.Join(dir, ".minion-install.json"), []byte(metadata), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-}
 
 func TestRunnerSeparatesMainAndCriticSkills(t *testing.T) {
 	const optional = "https://github.com/example/skills/tree/main/skills/optional"

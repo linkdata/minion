@@ -20,7 +20,7 @@ import (
 )
 
 func TestInitialRefutationsAreDiscardedAndEmptyHistoryIsOptional(t *testing.T) {
-	job := withClaudeCritic(portableJob(command.Comment))
+	job := withClaudeCritic(testJob(command.Comment))
 	job.CriticMaxRounds, job.CriticNonblockingRounds = 2, 0
 	calls := 0
 	mainRules := []string{
@@ -92,7 +92,7 @@ func TestReviewHistoryGrantFailureIsTerminalAfterPaidWork(t *testing.T) {
 			t.Error(err)
 		}
 	})
-	job := withClaudeCritic(portableJob(command.Comment))
+	job := withClaudeCritic(testJob(command.Comment))
 	job.CriticMaxRounds, job.CriticNonblockingRounds = 2, 0
 	calls := 0
 	runner := Runner{WorkRoot: root, runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
@@ -176,7 +176,7 @@ func TestRefutationsSurviveOmissionWithoutRememberingImplementedChanges(t *testi
 	const findingA = "PRIVATE_FINDING_A: add a migration."
 	const findingB = "PRIVATE_BLOCKER_B: source.txt must contain fixed B."
 	const answer = "Fixed the requested source behavior."
-	job := withClaudeCritic(portableJob(command.Fix))
+	job := withClaudeCritic(testJob(command.Fix))
 	job.CriticMaxRounds, job.CriticNonblockingRounds = 4, 0
 	root := t.TempDir()
 	var expected []Refutation
@@ -261,7 +261,7 @@ func TestRefutationsSurviveOmissionWithoutRememberingImplementedChanges(t *testi
 func TestRefutationsRetainSuccessfulMainPrefixAfterFailure(t *testing.T) {
 	for _, failure := range []string{"main provider", "critic provider", "main malformed", "critic malformed", "round limit"} {
 		t.Run(failure, func(t *testing.T) {
-			job := withClaudeCritic(portableJob(command.Comment))
+			job := withClaudeCritic(testJob(command.Comment))
 			job.CriticMaxRounds, job.CriticNonblockingRounds = 3, 0
 			providerErr := errors.New("provider stopped after final-looking text")
 			var expected []Refutation
@@ -326,7 +326,7 @@ func TestRefutationsRetainSuccessfulMainPrefixAfterFailure(t *testing.T) {
 func TestRefutationsRemainPrivateFromAuditArtifacts(t *testing.T) {
 	installActionTestSkills(t, testAuditSkillURL)
 	fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
-	job := withClaudeCritic(portableJob(command.SecurityAudit))
+	job := withClaudeCritic(testJob(command.SecurityAudit))
 	job.Main.Skills = []string{testAuditSkillURL}
 	job.CriticMaxRounds, job.CriticNonblockingRounds = 2, 0
 	var expected []Refutation
@@ -370,7 +370,7 @@ func TestRefutationsRemainPrivateFromAuditArtifacts(t *testing.T) {
 }
 
 func TestRefutationCheckpointFailureStopsBeforeNextCall(t *testing.T) {
-	job := withClaudeCritic(portableJob(command.Comment))
+	job := withClaudeCritic(testJob(command.Comment))
 	job.CriticMaxRounds, job.CriticNonblockingRounds = 2, 0
 	checkpointErr := errors.New("private refutation checkpoint unavailable")
 	calls, checkpoints := 0, 0

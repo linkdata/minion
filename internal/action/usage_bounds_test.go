@@ -56,7 +56,7 @@ func TestUsageAggregateBounds(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			job := withClaudeCritic(portableJob(command.Comment))
+			job := withClaudeCritic(testJob(command.Comment))
 			result, err := orchestrator.Runner.Run(context.Background(), job)
 			if err != nil {
 				t.Fatalf("valid paid work failed on aggregate usage: %v", err)

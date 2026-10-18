@@ -10,7 +10,7 @@ import (
 )
 
 func TestRefutationsRequireOrderedMainRoundsButPermitEmptyOrSparseMemory(t *testing.T) {
-	job := withClaudeCritic(portableJob(command.Comment))
+	job := withClaudeCritic(testJob(command.Comment))
 	job.CriticMaxRounds = 3
 	calls := []CallUsage{
 		{Provider: job.Main.Provider, Role: roleMain, Round: 1},
@@ -50,7 +50,7 @@ func TestRefutationsRequireOrderedMainRoundsButPermitEmptyOrSparseMemory(t *test
 }
 
 func TestRefutationsBoundPrivateTextAndPreserveJSONControls(t *testing.T) {
-	job := withClaudeCritic(portableJob(command.Comment))
+	job := withClaudeCritic(testJob(command.Comment))
 	calls := privateReviewResult(job).Calls[:3]
 	for _, test := range []struct {
 		name, text string
