@@ -511,6 +511,7 @@ func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, 
 				NewThreadID string `json:"new_thread_id"`
 				Item        *struct {
 					Type       string   `json:"type"`
+					Kind       string   `json:"kind"`
 					AgentID    string   `json:"agent_thread_id"`
 					Tool       string   `json:"tool"`
 					Status     string   `json:"status"`
@@ -541,6 +542,8 @@ func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, 
 					if payload.Item.Type == "SubAgentActivity" {
 						if payload.Item.AgentID == "" {
 							complete = false
+						} else if payload.Item.Kind == "started" {
+							appendSpawned(payload.Item.AgentID)
 						} else {
 							appendChildren(payload.Item.AgentID)
 						}
