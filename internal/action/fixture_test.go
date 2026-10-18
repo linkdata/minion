@@ -148,13 +148,9 @@ func writeTreeFixture(t *testing.T, w http.ResponseWriter, sha string, files ...
 
 func modelGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()
-	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
-	cmd.Env = append([]string{"PATH=" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME")}, aicli.ModelGitEnvironment()...)
-	var diagnostic bytes.Buffer
-	cmd.Stderr = &diagnostic
-	out, err := cmd.Output()
+	out, err := testsupport.ModelGit(t, dir, args...)
 	if err != nil {
-		t.Fatalf("model Git %v: %s %v", args, diagnostic.String(), err)
+		t.Fatalf("model Git %v: %s %v", args, out, err)
 	}
 	return string(out)
 }
@@ -220,7 +216,7 @@ func attachRepository(t *testing.T, job *Job) {
 		}
 		return data
 	}
-	git("init", "--template=", "-b", "main")
+	git("init", "--template=", "--object-format=sha1", "-b", "main")
 	git("add", "--all", "--force")
 	git("commit", "--allow-empty", "-m", "fixture source")
 	job.Source.Head = strings.TrimSpace(string(git("rev-parse", "HEAD")))

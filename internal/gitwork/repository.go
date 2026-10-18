@@ -56,6 +56,8 @@ bare = false
 filemode = true
 hooksPath = /dev/null
 fsmonitor = false
+excludesFile = /dev/null
+attributesFile = /dev/null
 logAllRefUpdates = false
 pager = cat
 [log]
@@ -88,15 +90,6 @@ auto = false
 	refs, err := run("bundle", "unbundle", bundle.Name())
 	if err != nil {
 		return nil, err
-	}
-	packs, err := os.ReadDir(filepath.Join(dir, "objects", "pack"))
-	if err != nil {
-		return nil, err
-	}
-	for _, pack := range packs {
-		if strings.HasSuffix(pack.Name(), ".promisor") {
-			return nil, errors.New("incomplete repository: filtered bundles are unsupported")
-		}
 	}
 	var updates strings.Builder
 	for _, line := range strings.Split(strings.TrimSpace(string(refs)), "\n") {
@@ -187,7 +180,7 @@ auto = false
 			return nil, err
 		}
 	}
-	if _, err := run("update-index", "-q", "--refresh", "--ignore-missing"); err != nil {
+	if _, err := run("update-index", "-q", "--refresh"); err != nil {
 		return nil, err
 	}
 	if err := os.Remove(bundle.Name()); err != nil {

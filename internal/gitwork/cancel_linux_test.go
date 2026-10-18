@@ -53,7 +53,7 @@ func TestGitOutputLimitStopsChildHoldingPipes(t *testing.T) {
 func TestGitDeadlineStopsChildHoldingPipes(t *testing.T) {
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "child.pid")
-	alias := "!printf '%s' $$ > " + shellQuote(pidFile) + "; printf 'deadline diagnostic\\nforged journal\\n' >&2; exec sleep 6"
+	alias := "!printf '%s' $$ > " + shellQuote(pidFile+".tmp") + "; mv " + shellQuote(pidFile+".tmp") + " " + shellQuote(pidFile) + "; printf 'deadline diagnostic\\nforged journal\\n' >&2; exec sleep 6"
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	started := time.Now()

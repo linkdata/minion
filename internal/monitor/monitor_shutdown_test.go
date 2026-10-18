@@ -61,7 +61,7 @@ func TestRunOnceStopsCanceledFailureReplyWithoutDeferring(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			id := jobID(item.Key, cmd.Key)
+			id := jobID(item.Key, cmd.Name)
 			store.Data.JobFailures[id] = state.JobFailure{Attempts: maxJobAttempts}
 			key, pending := seedShutdownPending(store, first, tail, initial)
 			if _, err := m.RunOnce(ctx, store); !errors.Is(err, context.Canceled) {
@@ -134,7 +134,7 @@ func TestRunOnceCanceledExecutionPreservesEarlierFailure(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			id := jobID(item.Key, cmd.Key)
+			id := jobID(item.Key, cmd.Name)
 			if test.terminal {
 				store.Data.JobFailures[id] = state.JobFailure{Attempts: maxJobAttempts - 1}
 				gh.items = append(gh.items, github.Item{Body: "failure\n\n" + (Job{ID: id}).Marker(), Author: github.User{Login: m.Config.BotLogin}})

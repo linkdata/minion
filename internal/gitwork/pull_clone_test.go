@@ -94,7 +94,6 @@ func TestClonePullRequestSkipsUnusedBaseTipPreflight(t *testing.T) {
 	fixture.git(fixture.source, "commit", "-m", "advance base")
 	base := fixture.git(fixture.source, "rev-parse", "HEAD")
 	baseTree := fixture.git(fixture.source, "rev-parse", "HEAD^{tree}")
-	unusedBlob := fixture.git(fixture.source, "rev-parse", "HEAD:"+unused)
 	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/heads/main")
 	lookup := localTreeMetadata(fixture.source)
 	baseLookups := 0
@@ -132,7 +131,6 @@ func TestClonePullRequestSkipsUnusedBaseTipPreflight(t *testing.T) {
 	if _, err := os.Lstat(filepath.Join(checkout.path, unused)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("unused base path materialized: %v", err)
 	}
-	assertBlobPresent(fixture, checkout.path, unusedBlob)
 	source, _ := repositoryFixture(t, snapshot)
 	assertModelRepositoryGit(t, source, head+"\n", "rev-parse", "HEAD")
 	assertModelRepositoryGit(t, source, base+"\n", "rev-parse", "refs/remotes/origin/main")

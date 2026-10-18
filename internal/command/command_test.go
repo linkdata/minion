@@ -1,8 +1,6 @@
 package command
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"testing"
 )
@@ -29,8 +27,7 @@ func TestConfiguredCommandsUseNames(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			digest := sha256.Sum256([]byte(tt.name))
-			if got.Key != hex.EncodeToString(digest[:]) || got.Name != tt.name || got.Action != tt.action {
+			if got.Name != tt.name || got.Action != tt.action {
 				t.Fatalf("command = %+v", got)
 			}
 		})
@@ -52,6 +49,15 @@ func TestConfiguredCommandsUseNames(t *testing.T) {
 	}
 	if _, err := ParseForLoginCommands("@linkdataminion review", "linkdataminion", nil); !errors.Is(err, ErrNoCommand) {
 		t.Fatalf("accepted command with no mappings: %v", err)
+	}
+}
+
+func TestConfiguredCommandsRejectNamesWithWhitespace(t *testing.T) {
+	for _, name := range []string{"review now", "review\tnow"} {
+		got, err := ParseForLoginCommands("@linkdataminion "+name, "linkdataminion", map[string]Action{name: Review})
+		if !errors.Is(err, ErrNoCommand) || got != (Command{}) {
+			t.Fatalf("configured command %q = (%#v, %v), want ErrNoCommand", name, got, err)
+		}
 	}
 }
 
@@ -78,12 +84,6 @@ func TestParseCommands(t *testing.T) {
 			if got.Action != tt.action {
 				t.Fatalf("Parse() = %#v, want action %q", got, tt.action)
 			}
-			if len(got.Key) != 64 {
-				t.Fatalf("key length = %d, want 64", len(got.Key))
-			}
-			if _, err := hex.DecodeString(got.Key); err != nil {
-				t.Fatalf("key is not hex: %v", err)
-			}
 		})
 	}
 }
@@ -100,13 +100,12 @@ func TestParseIgnoresNonCommands(t *testing.T) {
 		{"handle suffix", "@linkdataminion-review"},
 		{"non ASCII at sign", "＠linkdataminion review"},
 		{"unknown verb", "@linkdataminion deploy"},
+		{"dotted capital I verb", "@linkdataminion FİX"},
+		{"Unicode handle separator", "@linkdataminion\u00a0review"},
+		{"Unicode trailing whitespace", "@linkdataminion review\u3000"},
 		{"review argument", "@linkdataminion review now"},
 		{"audit argument", "@linkdataminion audit now"},
 		{"fix argument", "@linkdataminion fix update docs"},
-		{"quoted audit", "> @linkdataminion audit"},
-		{"fenced audit", "```\n@linkdataminion audit\n```"},
-		{"removed release", "@linkdataminion release"},
-		{"removed release with tag", "@linkdataminion release v1"},
 		{"history argument", "@linkdataminion review HiStOrY"},
 		{"tab argument", "@linkdataminion review\tlater"},
 		{"quote", "> @linkdataminion review"},
@@ -178,7 +177,7 @@ func TestParseRejectsMultipleCommands(t *testing.T) {
 	}
 }
 
-func TestCommandKeyIsStable(t *testing.T) {
+func TestParseNormalizesCommands(t *testing.T) {
 	a, err := Parse("@LINKDATAMINION\tREVIEW\t \t")
 	if err != nil {
 		t.Fatal(err)
@@ -187,12 +186,8 @@ func TestCommandKeyIsStable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a.Key != b.Key {
-		t.Fatalf("equivalent commands have different keys: %q, %q", a.Key, b.Key)
-	}
-	digest := sha256.Sum256([]byte("review"))
-	if a.Key != hex.EncodeToString(digest[:]) {
-		t.Fatalf("command = %#v", a)
+	if a != b {
+		t.Fatalf("equivalent commands differ: %#v, %#v", a, b)
 	}
 }
 

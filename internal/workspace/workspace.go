@@ -405,7 +405,7 @@ func CheckUnchanged(ctx context.Context, root string, base []File) error {
 }
 
 // CheckChangesUnchanged verifies a candidate with separate source/change bounds,
-// excluding only top-level Git metadata verified separately by its owner.
+// excluding only the top-level .git directory, verified separately by its owner.
 func CheckChangesUnchanged(ctx context.Context, root string, base []File, changes []Change) error {
 	files, err := changedFiles(base, changes)
 	if err != nil {

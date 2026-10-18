@@ -35,7 +35,7 @@ func TestOfflineReviewPollRecoversAfterPublication(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	jobID := sha256.Sum256([]byte("o/r#issue-comment:42\x00" + parsed.Key))
+	jobID := sha256.Sum256([]byte("o/r#issue-comment:42\x00" + parsed.Name))
 	marker := fmt.Sprintf("<!-- linkdataminion:%x -->", jobID)
 	request := github.Comment{
 		ID: 42, NodeID: "request-node", Body: requestBody,

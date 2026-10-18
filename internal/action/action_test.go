@@ -235,7 +235,7 @@ func TestReviewEchoDoesNotSuppressSecurityAuditInMonitor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	auditID := sha256.Sum256([]byte(auditItem.Key + "\x00" + auditCommand.Key))
+	auditID := sha256.Sum256([]byte(auditItem.Key + "\x00" + auditCommand.Name))
 	auditMarker := fmt.Sprintf("<!-- linkdataminion:%x -->", auditID)
 	monitorGitHub := &actionMonitorGitHub{
 		items: []github.Item{reviewItem, auditItem},

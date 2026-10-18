@@ -3,6 +3,7 @@ scratch directory and the fixed identity/date below. The expected HEAD is
 `38a7fa625016861399920bfd0fbea8b0ef053773` (`portableHead` in fixture_test.go).
 
 ```sh
+(
 fixture=$(mktemp -d)
 export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_ATTR_NOSYSTEM=1
 export GIT_AUTHOR_NAME=Fixture GIT_AUTHOR_EMAIL=fixture@example.invalid
@@ -16,6 +17,7 @@ git -C "$fixture" tag fixture-tag
 test "$(git -C "$fixture" rev-parse HEAD)" = 38a7fa625016861399920bfd0fbea8b0ef053773
 git -C "$fixture" bundle create "$PWD/internal/action/testdata/source.bundle" --all
 rm -rf "$fixture"
+)
 ```
 
 The fixture contains one regular `source.txt` file with `source` plus newline,

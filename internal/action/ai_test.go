@@ -31,8 +31,21 @@ func TestReviewPromptsRequireCompleteInvestigationInEveryPhase(t *testing.T) {
 	prompts := map[string]string{}
 	for _, phase := range []string{reviewFull, reviewVerification} {
 		prompts[phase] = criticPrompt(phase, "Review this change.", "Candidate.", "", "", "")
-		if !strings.Contains(prompts[phase], "complete local Git history with read-only metadata") || strings.Contains(prompts[phase], "workspace has no Git metadata") {
-			t.Errorf("%s critic lacks accurate local Git instructions", phase)
+		for _, want := range []string{
+			"complete local Git history with read-only metadata",
+			"For fix actions, compare current source with the original input at Git HEAD using git status and git diff, including additions, deletions, binary content and executable modes.",
+		} {
+			if !strings.Contains(prompts[phase], want) {
+				t.Errorf("%s critic lacks local Git instruction %q", phase, want)
+			}
+		}
+		for _, stale := range []string{"workspace has no Git metadata", "ordinary file tools", "supplied filesystem baseline", "compare current source with the supplied read-only baseline"} {
+			if strings.Contains(prompts[phase], stale) {
+				t.Errorf("%s critic retains stale baseline instruction %q", phase, stale)
+			}
+		}
+		if phase == reviewVerification && !strings.Contains(prompts[phase], "The Git HEAD baseline is the original input, not the previous candidate") {
+			t.Error("verification lost the original Git baseline")
 		}
 		if !strings.Contains(prompts[phase], "unfinished assigned review scope is a blocking task failure: set approved=false and has_blockers=true") {
 			t.Errorf("%s can waive an unfinished review as nonblocking", phase)
@@ -57,6 +70,29 @@ func TestReviewPromptsRequireCompleteInvestigationInEveryPhase(t *testing.T) {
 				t.Errorf("%s omitted review requirement %q", name, rule)
 			}
 		}
+	}
+}
+
+func TestActionPromptsDescribeIncompletePRComparisonOnce(t *testing.T) {
+	const remedy = "when incomplete, use local Git to compare the declared changed paths against the merge base, and disclose any remaining comparison limitation"
+	for _, action := range []command.Action{command.Review, command.Comment, command.SecurityAudit} {
+		t.Run(string(action), func(t *testing.T) {
+			job := portableJob(action)
+			job.Identity.SubjectType = "PullRequest"
+			job.Source.Base, job.Source.MergeBase = portableHead, portableHead
+			job.Source.Diff, job.Source.DiffIncomplete = nil, true
+			prompt, err := actionPrompt(context.Background(), job, "/source", "/context", "/reports", "/installed/SKILL.md")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(prompt, "Comparison diff incomplete=true") || strings.Count(prompt, remedy) != 1 || strings.Count(prompt, "disclose any remaining comparison limitation") != 1 {
+				t.Fatalf("PR action lost or duplicated incomplete-comparison remedy: %s", prompt)
+			}
+			notice := strings.Contains(prompt, "The text diff exceeds its limit.")
+			if notice != (action == command.Review) {
+				t.Fatalf("review-specific text diff notice in %s: %t", action, notice)
+			}
+		})
 	}
 }
 

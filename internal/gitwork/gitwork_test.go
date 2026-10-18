@@ -235,8 +235,7 @@ func completeTree(sha string, entries []github.GitTreeEntry) github.GitTree {
 
 func TestCheckoutPullRequestPreflightsMetadataBeforeSourceRead(t *testing.T) {
 	fixture := newFixture(t)
-	const blobBytes = 2 << 20
-	writeFile(t, filepath.Join(fixture.source, "new.dat"), strings.Repeat("x", blobBytes))
+	writeFile(t, filepath.Join(fixture.source, "new.dat"), "local PR blob\n")
 	fixture.git(fixture.source, "add", "new.dat")
 	fixture.git(fixture.source, "commit", "-m", "new blob")
 	head := fixture.git(fixture.source, "rev-parse", "HEAD")
@@ -543,10 +542,9 @@ func (f gitFixture) gitInput(dir, input string, args ...string) string {
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
 	cmd.Stdin = strings.NewReader(input)
-	cmd.Env = append(os.Environ(),
-		"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null",
-		"GIT_AUTHOR_NAME=Test", "GIT_AUTHOR_EMAIL=test@example.invalid",
-		"GIT_COMMITTER_NAME=Test", "GIT_COMMITTER_EMAIL=test@example.invalid",
+	cmd.Env = append(cleanGitEnvironment(),
+		"GIT_AUTHOR_NAME=Test", "GIT_AUTHOR_EMAIL=test@example.invalid", "GIT_AUTHOR_DATE=2026-01-01T00:00:00Z",
+		"GIT_COMMITTER_NAME=Test", "GIT_COMMITTER_EMAIL=test@example.invalid", "GIT_COMMITTER_DATE=2026-01-01T00:00:00Z",
 	)
 	output, err := cmd.CombinedOutput()
 	if err != nil {

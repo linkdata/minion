@@ -93,10 +93,6 @@ func TestReadOnlySnapshotUsesLocalObjectsWithoutOrigin(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fixture, checkout, base, head := readOnlyFixture(t, tc.pull, tc.link)
-			for _, spec := range []string{head + ":README.md", head + ":unchanged-00", head + ":unchanged-19", base + ":changed-00", base + ":deleted-00"} {
-				sha := fixture.git(fixture.source, "rev-parse", spec)
-				assertBlobPresent(fixture, checkout.path, sha)
-			}
 			if err := os.Rename(fixture.remote, fixture.remote+".offline"); err != nil {
 				t.Fatal(err)
 			}

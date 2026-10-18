@@ -2,6 +2,7 @@ package testsupport
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -22,4 +23,18 @@ func FakeOnPath(t *testing.T, name, script string) string {
 // ShellQuote treats a fixture value as one literal POSIX shell argument.
 func ShellQuote(value string) string {
 	return aicli.ShellQuote(value)
+}
+
+// ModelGit uses plain Git with isolated scratch paths and the model's Git environment.
+func ModelGit(t *testing.T, dir string, args ...string) ([]byte, error) {
+	t.Helper()
+	binary, err := aicli.AbsoluteExecutable("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	scratch := t.TempDir()
+	cmd := exec.Command(binary, args...)
+	cmd.Dir = dir
+	cmd.Env = append([]string{"PATH=" + os.Getenv("PATH"), "HOME=" + scratch, "TMPDIR=" + scratch, "LC_ALL=C"}, aicli.ModelGitEnvironment()...)
+	return cmd.CombinedOutput()
 }

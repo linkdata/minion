@@ -144,12 +144,16 @@ func TestRunnerUsesLocalHistoryWhenComparisonExcerptIsIncomplete(t *testing.T) {
 			if !metadata.DiffIncomplete || !reflect.DeepEqual(metadata.ChangedPaths, job.Source.ChangedPaths) {
 				t.Fatalf("comparison coverage metadata missing: %s", data)
 			}
-			for _, want := range []string{"The text diff exceeds its limit", "use local Git to compare the declared changed paths against the merge base", "use local Git history", "Comparison diff incomplete=true", "disclose any remaining comparison limitation"} {
+			for _, want := range []string{"The text diff exceeds its limit", "use local Git to compare the declared changed paths against the merge base", "supplied merge-base file versions (PRs)", "Comparison diff incomplete=true", "disclose any remaining comparison limitation"} {
 				if !strings.Contains(request.prompt, want) {
 					t.Fatalf("prompt lacks %q", want)
 				}
 			}
-			return aicli.Result{Answer: "Incomplete comparison disclosed", UsageComplete: true}, nil
+			identity := fmt.Sprintf("The source is the exact pull request head %s (merge base %s, base tip %s).", job.Source.Head, job.Source.MergeBase, job.Source.Base)
+			if !strings.Contains(request.prompt, identity) || strings.Count(request.prompt, "disclose any remaining comparison limitation") != 1 {
+				t.Fatalf("comparison identities or guidance misplaced/duplicated: %s", request.prompt)
+			}
+			return aicli.Result{Answer: "Compared using local Git", UsageComplete: true}, nil
 		},
 	}
 	if _, err := runner.Run(context.Background(), job); err != nil {
@@ -192,9 +196,17 @@ func TestRunnerKeepsCriticReadOnlyAndRefutationsPrivate(t *testing.T) {
 			t.Fatalf("wrong critic boundary: %+v", request)
 		}
 		assertModelRepository(t, request.dir, job.Source.Head)
-		for _, want := range []string{"git status", "git diff", "HEAD", "executable modes"} {
+		for _, want := range []string{
+			"Use git status and git diff against HEAD to compare the current source against the original input baseline, including added and deleted files, binary content, and executable modes.",
+			"For fix actions, compare current source with the original input at Git HEAD using git status and git diff, including additions, deletions, binary content and executable modes.",
+		} {
 			if !strings.Contains(request.prompt, want) {
 				t.Fatalf("critic lacks local baseline instruction %q", want)
+			}
+		}
+		for _, stale := range []string{"ordinary file tools", "supplied filesystem baseline", "compare current source with the supplied read-only baseline"} {
+			if strings.Contains(request.prompt, stale) {
+				t.Fatalf("critic retains stale baseline instruction %q", stale)
 			}
 		}
 		if !strings.Contains(request.prompt, "Do not create, change or delete omitted paths or anything beneath them, or replace their ancestor directories with files") {
@@ -377,11 +389,22 @@ func TestRunnerReturnsPartialAuditArtifactsOnFailure(t *testing.T) {
 }
 
 func TestRunnerRejectsGitMetadataMutation(t *testing.T) {
-	for _, role := range []string{roleMain, roleCritic} {
-		for _, mutation := range []string{"HEAD contents", "config contents", "added file", "permissions", "root file", "root symlink", "hard link"} {
-			t.Run(role+"/"+mutation, func(t *testing.T) {
-				job := withClaudeCritic(portableJob(command.Fix))
+	mutations := []string{"HEAD contents", "config contents", "added file", "permissions", "root file", "root symlink", "hard link"}
+	for _, test := range []struct {
+		action    command.Action
+		role      string
+		mutations []string
+	}{
+		{command.Fix, roleMain, mutations},
+		{command.Fix, roleCritic, mutations},
+		{command.Comment, roleCritic, []string{"HEAD contents"}},
+	} {
+		role := test.role
+		for _, mutation := range test.mutations {
+			t.Run(string(test.action)+"/"+role+"/"+mutation, func(t *testing.T) {
+				job := withClaudeCritic(portableJob(test.action))
 				calls := 0
+				var mainDir string
 				runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 					calls++
 					assertModelRepository(t, request.dir, job.Source.Head)
@@ -424,16 +447,25 @@ func TestRunnerRejectsGitMetadataMutation(t *testing.T) {
 						}
 					}
 					if request.role == roleMain {
-						writeFixtureFile(t, request.dir, "source.txt", []byte("candidate"))
+						mainDir = request.dir
+						if test.action == command.Fix {
+							writeFixtureFile(t, request.dir, "source.txt", []byte("candidate"))
+						}
 						return aicli.Result{Answer: proposalJSON("candidate", "")}, nil
+					}
+					if test.action == command.Comment && (request.dir != mainDir || request.writable) {
+						t.Fatal("read-only critic lost the shared source boundary")
 					}
 					return aicli.Result{Answer: approvedCritiqueJSON}, nil
 				}}
 				wantCalls, wantError := 1, "supplied repository changed"
 				if role == roleCritic {
-					wantCalls, wantError = 2, "frozen candidate repository changed"
-					if mutation == "root file" || mutation == "root symlink" {
-						wantError = "frozen candidate source changed"
+					wantCalls = 2
+					if test.action == command.Fix {
+						wantError = "frozen candidate repository changed"
+						if mutation == "root file" || mutation == "root symlink" {
+							wantError = "frozen candidate source changed"
+						}
 					}
 				}
 				result, err := runner.Run(context.Background(), job)

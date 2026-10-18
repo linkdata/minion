@@ -271,7 +271,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				m.logf("skip command in %s: %v", item.HTMLURL, err)
 				continue
 			}
-			if _, done := store.Data.Processed[jobID(item.Key, preliminary.Key)]; done {
+			if _, done := store.Data.Processed[jobID(item.Key, preliminary.Name)]; done {
 				continue
 			}
 			current, err := m.GitHub.CurrentItem(ctx, item)
@@ -304,7 +304,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				Number:      number,
 				Source:      item,
 				Command:     cmd,
-				ID:          jobID(item.Key, cmd.Key),
+				ID:          jobID(item.Key, cmd.Name),
 			}
 			if _, done := store.Data.Processed[job.ID]; done {
 				continue
@@ -667,8 +667,8 @@ func invitationActionsBlocked(err error) bool {
 		(status.StatusCode == http.StatusForbidden || status.StatusCode == http.StatusTooManyRequests)
 }
 
-func jobID(itemKey, commandKey string) string {
-	sum := sha256.Sum256([]byte(itemKey + "\x00" + commandKey))
+func jobID(itemKey, commandName string) string {
+	sum := sha256.Sum256([]byte(itemKey + "\x00" + commandName))
 	return hex.EncodeToString(sum[:])
 }
 

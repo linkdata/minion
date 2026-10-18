@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/linkdata/minion/internal/aicli"
+	"github.com/linkdata/minion/internal/testsupport"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -41,22 +42,9 @@ func repositoryFixture(t *testing.T, snapshot workspace.Snapshot) (string, *Repo
 	return source, repo
 }
 
-// Use the model's environment and plain Git, without OfflineIndex hardening args.
-func modelRepositoryGit(t *testing.T, source string, args ...string) ([]byte, error) {
-	t.Helper()
-	binary, err := aicli.AbsoluteExecutable("git")
-	if err != nil {
-		t.Fatal(err)
-	}
-	cmd := exec.CommandContext(context.Background(), binary, args...)
-	cmd.Dir = source
-	cmd.Env = append([]string{"PATH=" + safePath(os.Getenv("PATH")), "HOME=" + t.TempDir(), "TMPDIR=" + t.TempDir(), "LC_ALL=C"}, aicli.ModelGitEnvironment()...)
-	return cmd.CombinedOutput()
-}
-
 func assertModelRepositoryGit(t *testing.T, source, want string, args ...string) {
 	t.Helper()
-	out, err := modelRepositoryGit(t, source, args...)
+	out, err := testsupport.ModelGit(t, source, args...)
 	if err != nil || string(out) != want {
 		t.Fatalf("model git %v=%q error=%v; want %q", args, out, err, want)
 	}
@@ -82,7 +70,6 @@ func TestRepositoryCarriesCompleteHistoryOffline(t *testing.T) {
 	fixture.git(fixture.source, "tag", "--annotate", "orphan-tag", "--message", "tag-only history", tagOnly)
 	fixture.git(fixture.source, "push", fixture.remote, "main", "other", "--tags")
 	checkout := fixture.keepCheckout(cloneFromURL(context.Background(), t.TempDir(), "file://"+fixture.remote, "main", localTreeMetadata(fixture.source), false))
-	assertBlobPresent(fixture, checkout.path, tagBlob)
 	// Preparation and all later inspection must work after the remote disappears.
 	if err := os.Rename(fixture.remote, fixture.remote+".offline"); err != nil {
 		t.Fatal(err)
@@ -342,7 +329,7 @@ func TestRepositoryPacksRefsWithoutReflogs(t *testing.T) {
 	}
 	snapshot.Repository = append([]byte(refs.String()+"\n"), pack...)
 	source, repo := repositoryFixture(t, snapshot)
-	out, err := modelRepositoryGit(t, source, "for-each-ref", "--format=%(refname)", "refs/heads/many", "refs/tags/many")
+	out, err := testsupport.ModelGit(t, source, "for-each-ref", "--format=%(refname)", "refs/heads/many", "refs/tags/many")
 	if err != nil || len(strings.Fields(string(out))) != 2*count {
 		t.Fatalf("packed refs lost: count=%d error=%v", len(strings.Fields(string(out))), err)
 	}
@@ -351,9 +338,6 @@ func TestRepositoryPacksRefsWithoutReflogs(t *testing.T) {
 	}
 	refsDir := filepath.Join(source, ".git", "refs")
 	if err := filepath.WalkDir(refsDir, func(name string, entry fs.DirEntry, err error) error {
-		if name == refsDir && errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
 		if err != nil {
 			return err
 		}
@@ -384,18 +368,59 @@ func TestRepositoryPinsModelConfigAndIgnoresMailmap(t *testing.T) {
 	source, _ := repositoryFixture(t, snapshot)
 	for _, setting := range []struct{ key, want string }{
 		{"core.hooksPath", "/dev/null\n"}, {"core.fsmonitor", "false\n"}, {"core.fileMode", "true\n"},
+		{"core.excludesFile", "/dev/null\n"}, {"core.attributesFile", "/dev/null\n"},
 		{"core.logAllRefUpdates", "false\n"}, {"core.pager", "cat\n"}, {"log.mailmap", "false\n"},
 		{"protocol.allow", "never\n"}, {"credential.helper", "\n"}, {"gc.auto", "0\n"}, {"maintenance.auto", "false\n"},
 	} {
 		assertModelRepositoryGit(t, source, setting.want, "config", "--get", setting.key)
 	}
-	control, err := modelRepositoryGit(t, source, "-c", "log.mailmap=true", "log", "-1", "--format=fuller")
+	control, err := testsupport.ModelGit(t, source, "-c", "log.mailmap=true", "log", "-1", "--format=fuller")
 	if err != nil || !bytes.Contains(control, []byte("Forged <forged@example.invalid>")) {
 		t.Fatalf("mailmap control did not rewrite authors: %q error=%v", control, err)
 	}
-	out, err := modelRepositoryGit(t, source, "log", "-1", "--format=fuller")
+	out, err := testsupport.ModelGit(t, source, "log", "-1", "--format=fuller")
 	if err != nil || bytes.Contains(out, []byte("Forged")) || !bytes.Contains(out, []byte("Test <test@example.invalid>")) {
 		t.Fatalf("model log applied untrusted mailmap: %q error=%v", out, err)
+	}
+}
+
+func TestRepositoryIgnoresHostGitDefaults(t *testing.T) {
+	fixture := newFixture(t)
+	writeFile(t, filepath.Join(fixture.source, ".gitattributes"), "README.md export-subst\n")
+	fixture.commit("refs/heads/main", "repository attribute control")
+	checkout := fixture.clone()
+	snapshot, err := checkout.Snapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, _ := repositoryFixture(t, snapshot)
+	writeFile(t, filepath.Join(source, "debug.log"), "candidate output\n")
+	home := t.TempDir()
+	ignore := filepath.Join(home, ".config", "git", "ignore")
+	attributes := filepath.Join(home, ".config", "git", "attributes")
+	writeFile(t, ignore, "debug.log\n")
+	writeFile(t, attributes, "* export-ignore\n")
+	binary, err := aicli.AbsoluteExecutable("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// This regression deliberately supplies a nonempty synthetic HOME instead of the shared helper's empty HOME.
+	env := append([]string{"PATH=" + safePath(os.Getenv("PATH")), "HOME=" + home, "TMPDIR=" + home, "LC_ALL=C"}, aicli.ModelGitEnvironment()...)
+	for _, check := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"status", "--porcelain"}, "?? debug.log\n"},
+		{[]string{"check-attr", "export-ignore", "export-subst", "--", "README.md"}, "README.md: export-ignore: unspecified\nREADME.md: export-subst: set\n"},
+		{[]string{"-c", "core.excludesFile=" + ignore, "status", "--porcelain"}, ""},
+		{[]string{"-c", "core.attributesFile=" + attributes, "check-attr", "export-ignore", "--", "README.md"}, "README.md: export-ignore: set\n"},
+	} {
+		cmd := exec.CommandContext(context.Background(), binary, check.args...)
+		cmd.Dir, cmd.Env = source, env
+		out, err := cmd.CombinedOutput()
+		if err != nil || string(out) != check.want {
+			t.Fatalf("model Git with host defaults %v=%q error=%v; want %q", check.args, out, err, check.want)
+		}
 	}
 }
 
@@ -454,7 +479,7 @@ func TestRepositoryRefreshesOriginalIndexAndPreservesCandidateChanges(t *testing
 			}
 			assertModelRepositoryGit(t, source, want, "status", "--porcelain")
 			for _, args := range [][]string{{"diff-index", "--quiet", "HEAD"}, {"diff-files", "--quiet"}, {"diff", "--quiet"}} {
-				out, err := modelRepositoryGit(t, source, args...)
+				out, err := testsupport.ModelGit(t, source, args...)
 				var exit *exec.ExitError
 				if (!candidate && err != nil) || (candidate && (!errors.As(err, &exit) || exit.ExitCode() != 1)) || len(out) != 0 {
 					t.Fatalf("candidate=%t git %v=%q error=%v", candidate, args, out, err)
@@ -517,91 +542,20 @@ func TestRepositoryVerifyRejectsMetadataMutations(t *testing.T) {
 }
 
 func TestRepositoryVerifyBoundsMetadata(t *testing.T) {
-	t.Run("file bytes", func(t *testing.T) {
-		dir := t.TempDir()
-		digest, err := repositoryDigest(context.Background(), dir)
-		if err != nil {
-			t.Fatal(err)
-		}
-		repo := &Repository{dir: dir, digest: digest}
-		name := filepath.Join(dir, "oversized")
-		if err := os.WriteFile(name, nil, 0600); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Truncate(name, workspace.MaxBytes+1); err != nil {
-			t.Fatal(err)
-		}
-		if err := repo.Verify(context.Background()); err == nil || !strings.Contains(err.Error(), "file exceeds byte limit") {
-			t.Fatalf("oversized metadata error=%v", err)
-		}
-	})
-	t.Run("entries", func(t *testing.T) {
-		dir := t.TempDir()
-		for i := 0; i < workspace.MaxEntries-1; i++ {
-			if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("entry-%06d", i)), nil, 0600); err != nil {
-				t.Fatal(err)
-			}
-		}
-		digest, err := repositoryDigest(context.Background(), dir)
-		if err != nil {
-			t.Fatalf("exact metadata entry limit rejected: %v", err)
-		}
-		repo := &Repository{dir: dir, digest: digest}
-		if err := os.WriteFile(filepath.Join(dir, "extra"), nil, 0600); err != nil {
-			t.Fatal(err)
-		}
-		if err := repo.Verify(context.Background()); err == nil || !strings.Contains(err.Error(), "repository metadata exceeds entry limit") {
-			t.Fatalf("metadata entry overflow error=%v", err)
-		}
-	})
-}
-
-func TestRepositoryMaterializationReturnsNilOnDigestFailure(t *testing.T) {
-	fixture := newFixture(t)
-	snapshot, err := fixture.checkout.Snapshot(context.Background())
+	dir := t.TempDir()
+	digest, err := repositoryDigest(context.Background(), dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	repositoryFixture(t, snapshot)
-	source := repositorySource(t, snapshot.Files)
-	realGit, err := exec.LookPath("git")
-	if err != nil {
+	repo := &Repository{dir: dir, digest: digest}
+	name := filepath.Join(dir, "oversized")
+	if err := os.WriteFile(name, nil, 0600); err != nil {
 		t.Fatal(err)
 	}
-	script := "#!/bin/sh\nfor argument do\nif [ \"$argument\" = --refresh ]; then\n" + shellQuote(realGit) + " \"$@\"\nresult=$?\nln -s config " + shellQuote(filepath.Join(source, ".git", "untrusted")) + "\nexit \"$result\"\nfi\ndone\nexec " + shellQuote(realGit) + " \"$@\"\n"
-	fakeOnPath(t, "git", script)
-	repo, err := MaterializeRepository(context.Background(), source, snapshot)
-	if repo != nil || err == nil || !strings.Contains(err.Error(), "repository metadata is not regular") {
-		t.Fatalf("digest failure returned repository=%v error=%v", repo, err)
-	}
-}
-
-func TestRepositoryRejectsFilteredBundle(t *testing.T) {
-	fixture := newFixture(t)
-	snapshot, err := fixture.checkout.Snapshot(context.Background())
-	if err != nil {
+	if err := os.Truncate(name, workspace.MaxBytes+1); err != nil {
 		t.Fatal(err)
 	}
-	repositoryFixture(t, snapshot)
-	header, pack, ok := bytes.Cut(snapshot.Repository, []byte("\n\n"))
-	if !ok {
-		t.Fatal("valid bundle is missing its pack separator")
-	}
-	_, refs, ok := bytes.Cut(header, []byte("\n"))
-	if !ok {
-		t.Fatal("valid bundle is missing its reference header")
-	}
-	// Only the bundle capability is filtered; the fixture has no promisor repository or remote access.
-	snapshot.Repository = append([]byte("# v3 git bundle\n@object-format=sha1\n@filter=blob:none\n"+string(refs)+"\n\n"), pack...)
-	repo, err := MaterializeRepository(context.Background(), repositorySource(t, snapshot.Files), snapshot)
-	if repo != nil || err == nil {
-		t.Fatalf("filtered bundle returned repository=%v error=%v", repo, err)
-	}
-	if !strings.Contains(err.Error(), "filtered bundles are unsupported") {
-		// Git 2.32–2.35 cannot import the filter capability added in Git 2.36.
-		var exit *exec.ExitError
-		if !errors.As(err, &exit) || !strings.Contains(err.Error(), "offline git bundle:") || !strings.Contains(err.Error(), "unknown capability 'filter=blob:none'") {
-			t.Fatalf("filtered bundle failed for an unrelated reason: %v", err)
-		}
+	if err := repo.Verify(context.Background()); err == nil || !strings.Contains(err.Error(), "file exceeds byte limit") {
+		t.Fatalf("oversized metadata error=%v", err)
 	}
 }

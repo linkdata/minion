@@ -140,7 +140,7 @@ func cloneRepository(ctx context.Context, workRoot, url, defaultBranch string, l
 		}
 	}()
 
-	// Disable local clone shortcuts too, so file sources cannot share objects with the checkout.
+	// Disable local clone shortcuts so file inputs (including fixtures) cannot share objects with the checkout.
 	if _, err := runGit(ctx, workRoot, "clone", "--template=", "--reject-shallow", "--no-local", "--no-checkout", "--branch", defaultBranch, "--", url, path); err != nil {
 		return nil, err
 	}
@@ -486,11 +486,17 @@ func gitFailure(prefix, operation, message string, contextErr, err error) error 
 			err = errors.Join(contextErr, err)
 		}
 	} else {
-		switch {
-		case strings.Contains(message, "No space left on device"):
-			err = fmt.Errorf("%w: %w", syscall.ENOSPC, err)
-		case strings.Contains(message, "Disk quota exceeded"):
-			err = fmt.Errorf("%w: %w", syscall.EDQUOT, err)
+		// Best-effort C-locale errno suffixes avoid matching phrases embedded in quoted paths.
+		for _, line := range strings.Split(message, "\n") {
+			switch {
+			case strings.HasSuffix(line, ": No space left on device"):
+				err = fmt.Errorf("%w: %w", syscall.ENOSPC, err)
+			case strings.HasSuffix(line, ": Disk quota exceeded"), strings.HasSuffix(line, ": Quota exceeded"):
+				err = fmt.Errorf("%w: %w", syscall.EDQUOT, err)
+			default:
+				continue
+			}
+			break
 		}
 		err = classifyPathError(operation, message, err)
 	}

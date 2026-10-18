@@ -2,8 +2,6 @@
 package command
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"strings"
 )
@@ -32,11 +30,7 @@ var (
 )
 
 // Command is a directive on its own Markdown line.
-//
-// Key is a deterministic SHA-256 digest of the name; callers should include
-// the GitHub item's identity when using it as an idempotency key.
 type Command struct {
-	Key    string
 	Name   string
 	Action Action
 }
@@ -115,8 +109,7 @@ func parseLine(line, handle string, actions map[string]Action) (Command, bool) {
 	if !ok || !equalASCIIFold(verb, name) {
 		return Command{}, false
 	}
-	keyBytes := sha256.Sum256([]byte(name))
-	return Command{Key: hex.EncodeToString(keyBytes[:]), Name: name, Action: action}, true
+	return Command{Name: name, Action: action}, true
 }
 
 func validLogin(login string) bool {
