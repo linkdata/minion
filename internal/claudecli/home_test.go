@@ -82,7 +82,7 @@ func TestRunAndValidatePreserveNativeHomeSelection(t *testing.T) {
 					binary := fakeExecutable(t, "claude", `printf '%s,%s\n' "${CLAUDE_CONFIG_DIR+x}" "${CLAUDE_CONFIG_DIR-}" >> "$0.homes"
 if [ "$1" = '--version' ]; then
   printf '%s\n' '2.1.302 (Claude Code)'
-elif [ "$4" = 'auth' ]; then
+elif [ "$3" = 'auth' ]; then
   printf '%s\n' '{"loggedIn":true}'
 else
   input=$(cat)

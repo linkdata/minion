@@ -149,7 +149,7 @@ func TestUnixSocketWorkaround(t *testing.T) {
 			binary := fakeExecutable(t, "claude", `printf '%s\n' "$@" > "$0.args"
 if [ "$1" = '--version' ]; then
   printf '%s\n' '2.1.302 (Claude Code)'
-elif [ "$4" = 'auth' ]; then
+elif [ "$3" = 'auth' ]; then
   printf '%s\n' '{"loggedIn":true}'
 else
   input=$(cat)
@@ -233,11 +233,14 @@ printf '%s\n' '`+successfulResult+`'
 			if strings.Contains(strings.Join(args, "\n"), "--include-partial-messages") {
 				t.Fatal("unused token deltas consume the bounded event budget")
 			}
+			if !slices.Contains(args, "--setting-sources=") {
+				t.Fatalf("empty setting-source selection missing: %q", args)
+			}
 			values := map[string]string{}
 			for i, arg := range args[:len(args)-1] {
 				values[arg] = args[i+1]
 			}
-			for key, want := range map[string]string{"--permission-mode": "dontAsk", "--tools": "Bash", "--allowedTools": "Bash", "--permission-prompts": "none", "--model": "claude-test", "--effort": "high", "--setting-sources": "", "--mcp-config": `{"mcpServers":{}}`} {
+			for key, want := range map[string]string{"--permission-mode": "dontAsk", "--tools": "Bash", "--allowedTools": "Bash", "--permission-prompts": "none", "--model": "claude-test", "--effort": "high", "--mcp-config": `{"mcpServers":{}}`} {
 				if got, ok := values[key]; !ok || got != want {
 					t.Errorf("%s = %q, want %q", key, got, want)
 				}

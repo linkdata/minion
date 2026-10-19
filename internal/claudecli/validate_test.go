@@ -15,7 +15,7 @@ func TestValidate(t *testing.T) {
 	fakeExecutable(t, "socat", "exit 99\n")
 	fakeExecutable(t, "claude", `if [ "$1" = '--version' ]; then
   printf '%s\n' '2.1.302 (Claude Code)'
-elif [ "$4" = 'auth' ]; then
+elif [ "$3" = 'auth' ]; then
   printf '%s\n' '{"loggedIn":true}'
 else
   cat > "$0.input"
@@ -54,7 +54,7 @@ func TestValidateRequiresInitialization(t *testing.T) {
 	fakeExecutable(t, "socat", "exit 99\n")
 	fakeExecutable(t, "claude", `if [ "$1" = '--version' ]; then
   printf '%s\n' '2.1.302 (Claude Code)'
-elif [ "$4" = 'auth' ]; then
+elif [ "$3" = 'auth' ]; then
   printf '%s\n' '{"loggedIn":true}'
 else
   exit 1

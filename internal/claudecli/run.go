@@ -186,7 +186,7 @@ func arguments(policy string) []string {
 	return []string{
 		"-p", "--verbose", "--output-format", "stream-json",
 		"--permission-mode", "dontAsk", "--permission-prompts", "none",
-		"--safe-mode", "--setting-sources", "", "--disable-slash-commands",
+		"--safe-mode", "--setting-sources=", "--disable-slash-commands",
 		"--strict-mcp-config", "--mcp-config", `{"mcpServers":{}}`,
 		"--no-chrome", "--tools", "Bash", "--allowedTools", "Bash",
 		"--settings", policy,

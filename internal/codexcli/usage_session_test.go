@@ -443,6 +443,7 @@ func TestUsageSessionCollectionHasIndependentBaselineBudget(t *testing.T) {
 }
 
 func TestUsageBoundaryEarlyReadFailuresAreInvalid(t *testing.T) {
+	// Zero budget documents fail-closed output; the bounded reader also rejects it without the early guard.
 	for _, cause := range []string{"budget", "cancel", "open"} {
 		t.Run(cause, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())

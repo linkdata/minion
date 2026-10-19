@@ -328,7 +328,9 @@ func openStateAt(t *testing.T, path string, initial time.Time) *state.Store {
 func advanceToRetry(clock time.Time, store *state.Store) time.Time {
 	clock = clock.Add(time.Minute)
 	for _, pending := range store.Data.PendingNotifications {
-		clock = pending.RetryAt
+		if pending.RetryAt.After(clock) {
+			clock = pending.RetryAt
+		}
 	}
 	return clock
 }
@@ -1309,12 +1311,11 @@ func TestRunOnceCountsInternalCancellation(t *testing.T) {
 		terminal bool
 	}{{"retryable", false}, {"terminal", true}} {
 		t.Run(test.name, func(t *testing.T) {
-			terminal := test.terminal
 			now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
-			item := github.Item{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}, HTMLURL: "https://github.com/example-owner/example-repo/pull/7#issuecomment-1"}
+			item := github.Item{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}}
 			gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}, items: []github.Item{item}, permission: github.Permission{Permission: "write"}}
 			executeErr := context.Canceled
-			if terminal {
+			if test.terminal {
 				executeErr = errors.Join(ErrTerminalJob, executeErr)
 			}
 			handler := &fakeHandler{executeErr: executeErr}
@@ -1324,11 +1325,11 @@ func TestRunOnceCountsInternalCancellation(t *testing.T) {
 			if len(handler.jobs) != 1 {
 				t.Fatalf("jobs=%d", len(handler.jobs))
 			}
-			if terminal {
+			if test.terminal {
 				if err != nil || len(gh.comments) != 1 || len(store.Data.Processed) != 1 {
 					t.Fatalf("terminal internal cancellation refunded: err=%v replies=%d processed=%d", err, len(gh.comments), len(store.Data.Processed))
 				}
-			} else if !errors.Is(err, context.Canceled) || store.Data.JobFailures[handler.jobs[0].ID].Attempts != 1 {
+			} else if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), item.Key) || store.Data.JobFailures[handler.jobs[0].ID].Attempts != 1 {
 				t.Fatalf("internal cancellation refunded: err=%v failures=%+v", err, store.Data.JobFailures)
 			}
 		})

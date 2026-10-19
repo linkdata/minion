@@ -78,17 +78,14 @@ func TestJobContextPreservesQuotedNUL(t *testing.T) {
 	for _, field := range []string{"title", "description", "notes"} {
 		t.Run(field, func(t *testing.T) {
 			job := testJob(command.Comment)
-			set := func(value string) {
-				switch field {
-				case "title":
-					job.Title = value
-				case "description":
-					job.Description = value
-				case "notes":
-					job.Notes = value
-				}
+			switch field {
+			case "title":
+				job.Title = "before\x00after"
+			case "description":
+				job.Description = "before\x00after"
+			case "notes":
+				job.Notes = "before\x00after"
 			}
-			set("before\x00after")
 			if err := job.Validate(); err != nil {
 				t.Fatalf("safe quoted context rejected: %v", err)
 			}

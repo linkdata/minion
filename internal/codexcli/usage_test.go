@@ -96,7 +96,7 @@ func TestCollectUsageIncludesNestedHelpersWithoutInheritedOrDuplicateResponses(t
 	got, complete, err := (&usageSession{}).collectUsage(context.Background(), home, "root", started, &fallback, []string{"child"}, nil)
 	want := usage.Tokens{Input: 410, CachedInput: 175, Output: 41}
 	if got != want || !complete || err != nil {
-		t.Fatalf("collectUsage() = %+v, %v; want %+v, complete", got, complete, want)
+		t.Fatalf("collectUsage() = %+v, %v, error=%v; want %+v, complete", got, complete, err, want)
 	}
 }
 
@@ -138,7 +138,7 @@ func TestUsageAgentBoundsCountUniqueIDsAndRejectOverflow(t *testing.T) {
 		for _, fallback := range []*usage.Tokens{nil, {Input: 100, CachedInput: 10, Output: 7}} {
 			for range 3 {
 				tokens, complete, childError := (&usageSession{}).collectUsage(context.Background(), home, "root", time.Now(), fallback, nil, nil)
-				if tokens != want || complete || !errors.Is(childError, aicli.ErrOutputLimit) {
+				if tokens != want || complete || !errors.Is(childError, aicli.ErrOutputLimit) || strings.Count(childError.Error(), errUsageAgentLimit.Error()) != 1 {
 					t.Fatalf("overflow discarded or randomized known counters: tokens=%+v want=%+v complete=%t error=%v", tokens, want, complete, childError)
 				}
 			}
@@ -168,7 +168,7 @@ func TestCollectUsageUsesLatestCumulativeSnapshotAndSubtractsInheritedBaseline(t
 	got, complete, err := (&usageSession{}).collectUsage(context.Background(), home, "root", time.Now(), nil, nil, nil)
 	want := usage.Tokens{Input: 310, CachedInput: 100, Output: 40}
 	if got != want || !complete || err != nil {
-		t.Fatalf("collectUsage() = %+v, %v; want %+v, complete", got, complete, want)
+		t.Fatalf("collectUsage() = %+v, %v, error=%v; want %+v, complete", got, complete, err, want)
 	}
 }
 
@@ -195,7 +195,7 @@ func TestCollectUsagePartialRunsPreserveKnownTokens(t *testing.T) {
 			writeUsageRollout(t, home, "root", "", events...)
 			got, complete, err := (&usageSession{}).collectUsage(context.Background(), home, "root", time.Now(), nil, nil, nil)
 			if got != (usage.Tokens{Input: 60, CachedInput: 40, Output: 3}) || complete || err != nil {
-				t.Fatalf("partial run = %+v, %v", got, complete)
+				t.Fatalf("partial run = %+v, %v, error=%v", got, complete, err)
 			}
 		})
 	}
@@ -213,7 +213,7 @@ func TestCollectUsageTruncatedCompleteEventIsIncomplete(t *testing.T) {
 	}
 	got, complete, err := (&usageSession{}).collectUsage(context.Background(), home, "root", time.Now(), nil, nil, nil)
 	if got != (usage.Tokens{Input: 10, Output: 1}) || complete || err != nil {
-		t.Fatalf("truncated complete event usage=%+v complete=%t", got, complete)
+		t.Fatalf("truncated complete event usage=%+v complete=%t error=%v", got, complete, err)
 	}
 }
 
@@ -223,7 +223,7 @@ func TestCollectUsageRequiresExplicitTokenFields(t *testing.T) {
 	writeUsageRollout(t, home, "root", "", usageEvent("task_started", "turn"), record, usageEvent("task_complete", "turn"))
 	got, complete, err := (&usageSession{}).collectUsage(context.Background(), home, "root", time.Now(), nil, nil, nil)
 	if got != (usage.Tokens{}) || complete || err != nil {
-		t.Fatalf("missing required field = %+v, %v; want unknown", got, complete)
+		t.Fatalf("missing required field = %+v, %v, error=%v; want unknown", got, complete, err)
 	}
 }
 
@@ -249,7 +249,7 @@ func TestCollectUsageDetectsMissingResponseRecords(t *testing.T) {
 	writeUsageRollout(t, home, "root", "", usageEvent("task_started", "turn"), usageRecord("root", "turn", "response", 10, 0, 1), usageSnapshot(18, 25, 10, 3), usageEvent("task_complete", "turn"))
 	got, complete, err := (&usageSession{}).collectUsage(context.Background(), home, "root", time.Now(), nil, nil, nil)
 	if got != (usage.Tokens{Input: 25, CachedInput: 10, Output: 3}) || complete || err != nil {
-		t.Fatalf("mismatched cumulative counter = %+v, %v; want snapshot, incomplete", got, complete)
+		t.Fatalf("mismatched cumulative counter = %+v, %v, error=%v; want snapshot, incomplete", got, complete, err)
 	}
 }
 
@@ -297,7 +297,7 @@ func TestCollectUsageBoundsScanningAndHonorsCancellation(t *testing.T) {
 		cancel()
 		got, complete, err := (&usageSession{}).collectUsage(ctx, home, "root", time.Now(), &fallback, nil, nil)
 		if got != fallback || complete || err != nil {
-			t.Fatalf("canceled scan = %+v, %t; want fallback, incomplete", got, complete)
+			t.Fatalf("canceled scan = %+v, %t, error=%v; want fallback, incomplete", got, complete, err)
 		}
 	})
 	t.Run("bytes", func(t *testing.T) {
@@ -318,7 +318,7 @@ func TestCollectUsageBoundsScanningAndHonorsCancellation(t *testing.T) {
 		}
 		got, complete, err := (&usageSession{}).collectUsage(context.Background(), home, "root", time.Now(), &fallback, nil, nil)
 		if got != fallback || complete || err != nil {
-			t.Fatalf("too many rollout files = %+v, %t; want fallback, incomplete", got, complete)
+			t.Fatalf("too many rollout files = %+v, %t, error=%v; want fallback, incomplete", got, complete, err)
 		}
 	})
 }
@@ -350,7 +350,7 @@ func TestRolloutUsageSkipsOversizedLinesAndDebitsBytes(t *testing.T) {
 		t.Fatal("fixture counter overflow")
 	}
 	if got != want || complete || err != nil {
-		t.Fatalf("later completed helper lost or incomplete reset: got=%+v complete=%t want=%+v", got, complete, want)
+		t.Fatalf("later completed helper lost or incomplete reset: got=%+v complete=%t error=%v want=%+v", got, complete, err, want)
 	}
 }
 

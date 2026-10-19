@@ -82,10 +82,7 @@ func run() int {
 		if err := workroot.Check(cfg.WorkRoot, cfg.StatePath, cfg.WorkRootMaxBytes); err != nil {
 			return err
 		}
-		if err := checkIsolation(cfg, loadedPath); err != nil {
-			return fmt.Errorf("%w: %w", workroot.ErrUnsafe, err)
-		}
-		return nil
+		return checkIsolation(cfg, loadedPath)
 	}
 	if err := checkWorkRoot(); err != nil {
 		logger.Printf("work root: %v", err)
@@ -201,7 +198,13 @@ func newOrchestrator(cfg config.Config, client *github.Client, store *state.Stor
 	}
 }
 
-func checkIsolation(cfg config.Config, configPath string) error {
+func checkIsolation(cfg config.Config, configPath string) (resultErr error) {
+	// Host admission retries unsafe placement; later job preparation has its own failure policy.
+	defer func() {
+		if resultErr != nil {
+			resultErr = fmt.Errorf("%w: %w", workroot.ErrUnsafe, resultErr)
+		}
+	}()
 	root, err := workspace.CanonicalPath(cfg.WorkRoot)
 	if err != nil {
 		return err

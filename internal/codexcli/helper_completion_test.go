@@ -33,6 +33,7 @@ func TestKnownHelpersRequireLifecycleAccess(t *testing.T) {
 			}
 		})
 	}
+	// Zero budget documents fail-closed output; the bounded reader also rejects it without the early guard.
 	for _, scenario := range []string{"missing file", "directory", "exhausted budget"} {
 		t.Run(scenario, func(t *testing.T) {
 			path := t.TempDir()

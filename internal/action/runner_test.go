@@ -168,7 +168,7 @@ func TestRunnerUsesLocalHistoryWhenComparisonDiffIsIncomplete(t *testing.T) {
 			}
 			identity := fmt.Sprintf("The source is the exact pull request head %s (merge base %s, base tip %s).", job.Source.Head, job.Source.MergeBase, job.Source.Base)
 			if !strings.Contains(request.prompt, identity) || !strings.Contains(request.prompt, "The text diff exceeds its limit.") || !strings.Contains(request.prompt, "Comparison diff incomplete=true") || strings.Contains(request.prompt, filepath.Join(request.readOnlyDirs[0], "comparison.diff")) {
-				t.Fatalf("comparison identities or guidance misplaced/duplicated: %s", request.prompt)
+				t.Fatalf("incomplete comparison identities or guidance wrong: %s", request.prompt)
 			}
 			return aicli.Result{Answer: "Compared using local Git", UsageComplete: true}, nil
 		},

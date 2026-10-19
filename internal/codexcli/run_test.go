@@ -259,7 +259,7 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"{
 }
 
 func TestRunUsesEmbeddedSkillWithoutInstallation(t *testing.T) {
-	dir := t.TempDir()
+	dir := canonicalTempDir(t)
 	t.Setenv("HOME", t.TempDir())
 	fakeCodex := installFakeCodex(t, `#!/bin/sh
 set -eu

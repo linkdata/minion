@@ -357,3 +357,62 @@ func TestRunOnceDefersDiscoveryCancellationWithoutParentShutdown(t *testing.T) {
 		t.Fatalf("internal cancellation pinned the cursor: %+v", store.Data)
 	}
 }
+
+type cancelOnRetryLog struct {
+	cancel context.CancelFunc
+	called bool
+}
+
+func (w *cancelOnRetryLog) Write(p []byte) (int, error) {
+	if strings.HasPrefix(string(p), "retry ") {
+		w.called = true
+		w.cancel()
+	}
+	return len(p), nil
+}
+
+func TestRunOnceCancellationAfterRetrySavePreservesCursors(t *testing.T) {
+	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	initial := now.Add(-time.Minute)
+	threadErr := errors.New("thread unavailable")
+	notification := testNotification(now)
+	gh := &fakeGitHub{notifications: []github.Notification{notification}, threadItems: func(string, int, time.Time) ([]github.Item, error) {
+		return nil, threadErr
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	path := filepath.Join(t.TempDir(), "state.json")
+	store := openStateAt(t, path, initial)
+	store.Data.NextInviteCheckAt = now.Add(time.Minute)
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	logs := &cancelOnRetryLog{cancel: cancel}
+	handler := &fakeHandler{}
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Logger: log.New(logs, "", 0), Now: func() time.Time { return now }}
+	if _, err := m.RunOnce(ctx, store); !errors.Is(err, context.Canceled) || !errors.Is(err, threadErr) {
+		t.Fatalf("cancellation after retry save lost a cause: %v", err)
+	}
+	if !logs.called || gh.threadCalls != 1 || len(handler.jobs) != 0 || len(gh.comments) != 0 {
+		t.Fatalf("retry-save cancellation did not stop discovery: logged=%t calls=%d jobs=%d replies=%d", logs.called, gh.threadCalls, len(handler.jobs), len(gh.comments))
+	}
+	key := notificationKey(notification)
+	pending := store.Data.PendingNotifications[key]
+	if pending.Failures != 1 || !pending.RetryAt.Equal(now.Add(time.Minute)) {
+		t.Fatalf("retry was not saved before cancellation: %+v", pending)
+	}
+	checkState := func(data state.Data) {
+		t.Helper()
+		if !data.Cursor.Equal(initial) || !data.RepositoryCursors[notification.Repository.FullName].Equal(initial) {
+			t.Fatalf("cancellation after retry save advanced cursors: %+v", data)
+		}
+		if len(data.PendingNotifications) != 1 || data.PendingNotifications[key] != pending {
+			t.Fatalf("cancellation changed the durable retry: %+v", data.PendingNotifications)
+		}
+	}
+	checkState(store.Data)
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	checkState(openStateAt(t, path, initial).Data)
+}

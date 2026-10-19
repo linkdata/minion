@@ -115,8 +115,7 @@ func TestSecurityAuditIssueAndPullRequest(t *testing.T) {
 			defer server.Close()
 			client := testGitHub(server, "test-token")
 			installActionTestSkills(t, testAuditSkillURL)
-			skillDir := filepath.Join(os.Getenv("HOME"), ".agents", "skills", "security-audit")
-			skill := filepath.Join(skillDir, "SKILL.md")
+			skill := filepath.Join(os.Getenv("HOME"), ".agents", "skills", "security-audit", "SKILL.md")
 			var calls int
 			var sourceDir, reportsDir string
 			e := &Orchestrator{WorkRoot: t.TempDir(), GitHub: client,

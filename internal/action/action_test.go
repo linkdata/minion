@@ -804,7 +804,7 @@ func TestFixForkRefusesUnsafePublication(t *testing.T) {
 		{name: "base without default branch", base: strings.Replace(privateRepositoryJSON, `"default_branch":"main"`, `"default_branch":""`, 1), want: "archived or has no default branch"},
 		{name: "bot-owned base", botLogin: "o", want: "requires a separate bot-owned fork"},
 		{name: "empty base visibility", base: strings.Replace(privateRepositoryJSON, `"visibility":"private"`, `"visibility":""`, 1), fork: strings.Replace(privateForkRepositoryJSON, `"visibility":"private"`, `"visibility":""`, 1), want: "matching visibility"},
-		{name: "missing fork", want: "bot-owned fork"},
+		{name: "missing fork", want: "bot-owned fork linkdataminion/r is unavailable"},
 		{name: "unrelated repository", fork: `{"id":2,"full_name":"linkdataminion/r","private":true,"visibility":"private"}`, want: "not an active fork"},
 		{name: "different parent ID", fork: `{"id":2,"full_name":"linkdataminion/r","fork":true,"parent":{"id":3,"full_name":"o/r"},"source":{"id":1,"full_name":"o/r"},"private":true,"visibility":"private"}`, want: "not an active fork"},
 		{name: "public fork of private base", fork: `{"id":2,"full_name":"linkdataminion/r","fork":true,"parent":{"id":1,"full_name":"o/r"},"source":{"id":1,"full_name":"o/r"},"private":true,"visibility":"public"}`, want: "matching visibility"},

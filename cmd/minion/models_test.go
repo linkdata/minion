@@ -7,7 +7,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -20,14 +19,11 @@ func TestCheckModelsRequiresOnlySelectedProvider(t *testing.T) {
 	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "")
 	t.Setenv("CODEX_API_KEY", "")
 	t.Setenv("CODEX_ACCESS_TOKEN", "")
-	for _, key := range []string{"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"} {
+	for _, key := range []string{"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy"} {
 		t.Setenv(key, "")
 	}
 	for _, provider := range []string{"codex", "claude"} {
 		t.Run(provider, func(t *testing.T) {
-			if provider == "claude" && runtime.GOOS != "linux" {
-				t.Skip("Claude sandbox support requires Linux")
-			}
 			dir := t.TempDir()
 			t.Setenv("PATH", dir)
 			for _, name := range []string{"codex", "claude"} {
@@ -63,14 +59,11 @@ func TestLogCommandSkillsReportsUnsupportedWorkflow(t *testing.T) {
 }
 
 func TestCheckModelsBoundsResolvedCatalogueModel(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("Claude sandbox support requires Linux")
-	}
 	for _, selection := range []string{"default", "alias"} {
 		for _, size := range []int{128, 129} {
 			t.Run(fmt.Sprintf("%s/bytes%d", selection, size), func(t *testing.T) {
 				t.Setenv("HOME", t.TempDir())
-				for _, key := range []string{"CLAUDE_CONFIG_DIR", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"} {
+				for _, key := range []string{"CLAUDE_CONFIG_DIR", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy"} {
 					t.Setenv(key, "")
 				}
 				for _, name := range []string{"bwrap", "socat"} {
@@ -86,7 +79,7 @@ func TestCheckModelsBoundsResolvedCatalogueModel(t *testing.T) {
 				testsupport.FakeOnPath(t, "claude", `#!/bin/sh
 if [ "$1" = '--version' ]; then
   printf '%s\n' '2.1.302 (Claude Code)'
-elif [ "$4" = 'auth' ]; then
+elif [ "$3" = 'auth' ]; then
   printf '%s\n' '{"loggedIn":true}'
 else
   input=$(/bin/cat)
@@ -117,7 +110,7 @@ func TestCheckModelsBoundsResolvedCodexCatalogueModel(t *testing.T) {
 	for _, size := range []int{128, 129} {
 		t.Run(fmt.Sprint(size), func(t *testing.T) {
 			t.Setenv("HOME", t.TempDir())
-			for _, key := range []string{"CODEX_HOME", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN"} {
+			for _, key := range []string{"CODEX_HOME", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy"} {
 				t.Setenv(key, "")
 			}
 			model := strings.Repeat("m", size)

@@ -75,7 +75,7 @@ func Validate(ctx context.Context, settings config.ClaudeConfig) (validated conf
 	if err != nil {
 		return validated, err
 	}
-	authArgs := []string{"--safe-mode", "--setting-sources", ""}
+	authArgs := []string{"--safe-mode", "--setting-sources="}
 	if authDir != "" {
 		authArgs = append(authArgs, "--settings", policy)
 	}

@@ -61,7 +61,7 @@ func TestPrivateHostPathsCannotBeExposedByModelGrants(t *testing.T) {
 					} else {
 						runner.Claude.Skills, runner.Claude.ReadOnlyDirs = []string{skill}, []string{test.grant}
 					}
-					if err := runner.CheckPrivatePaths([]string{test.protected}, provider); (err != nil) != test.refuse || (test.refuse && err != nil && !strings.Contains(err.Error(), "is visible through model filesystem grant")) {
+					if err := runner.CheckPrivatePaths([]string{test.protected}, provider); (err != nil) != test.refuse || (test.refuse && !strings.Contains(err.Error(), "is visible through model filesystem grant")) {
 						t.Fatalf("private-path admission error=%v want refusal=%t", err, test.refuse)
 					}
 				})

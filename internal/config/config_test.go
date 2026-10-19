@@ -37,30 +37,29 @@ func TestSkillListsFitPortableRoleLimits(t *testing.T) {
 	for _, test := range []struct {
 		name               string
 		required, optional []string
-		valid              bool
 		wantError          string
 	}{
-		{"exact combined count", urls[:32], urls[32:64], true, ""},
-		{"combined overflow", urls[:32], urls[32:], false, "required and always-on skills"},
-		{"required overflow", urls, []string{}, false, "required and always-on skills"},
-		{"default always-on overflow", urls[:63], nil, false, "required and always-on skills"},
-		{"optional overflow", urls[:1], urls, false, "always_on_skills exceeds"},
-		{"source exact bytes", []string{sourceAtLimit}, []string{}, true, ""},
-		{"source exact bytes with slash", []string{sourceAtLimit + "/"}, []string{}, true, ""},
-		{"optional exact bytes with slash", urls[:1], []string{sourceAtLimit + "/"}, true, ""},
-		{"normalized source too long", []string{strings.Replace(sourceAtLimit, "/tree/", "/tree/x", 1) + "/"}, []string{}, false, "skill URL exceeds"},
-		{"double trailing slash", []string{urls[0] + "//"}, []string{}, false, "invalid skill URL"},
-		{"builtin trailing slash", []string{defaultAntiInjectionSkill + "/"}, []string{}, false, "invalid skill URL"},
-		{"source too long", []string{"https://github.com/o/r/tree/" + strings.Repeat("x", MaxSkillURLBytes) + "/skills/one"}, []string{}, false, "skill URL exceeds"},
-		{"optional source too long", urls[:1], []string{"https://github.com/o/r/tree/" + strings.Repeat("x", MaxSkillURLBytes) + "/skills/one"}, false, "skill URL exceeds"},
+		{"exact combined count", urls[:32], urls[32:64], ""},
+		{"combined overflow", urls[:32], urls[32:], "required and always-on skills"},
+		{"required overflow", urls, []string{}, "required and always-on skills"},
+		{"default always-on overflow", urls[:63], nil, "required and always-on skills"},
+		{"optional overflow", urls[:1], urls, "always_on_skills exceeds"},
+		{"source exact bytes", []string{sourceAtLimit}, []string{}, ""},
+		{"source exact bytes with slash", []string{sourceAtLimit + "/"}, []string{}, ""},
+		{"optional exact bytes with slash", urls[:1], []string{sourceAtLimit + "/"}, ""},
+		{"normalized source too long", []string{strings.Replace(sourceAtLimit, "/tree/", "/tree/x", 1) + "/"}, []string{}, "skill URL exceeds"},
+		{"double trailing slash", []string{urls[0] + "//"}, []string{}, "invalid skill URL"},
+		{"builtin trailing slash", []string{defaultAntiInjectionSkill + "/"}, []string{}, "invalid skill URL"},
+		{"source too long", []string{"https://github.com/o/r/tree/" + strings.Repeat("x", MaxSkillURLBytes) + "/skills/one"}, []string{}, "skill URL exceeds"},
+		{"optional source too long", urls[:1], []string{"https://github.com/o/r/tree/" + strings.Repeat("x", MaxSkillURLBytes) + "/skills/one"}, "skill URL exceeds"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			cfg := Config{BotLogin: "bot", Commands: map[string]CommandMapping{"review": {Action: "review", Skills: test.required}}, AlwaysOnSkills: test.optional,
 				Repositories: []Repository{{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"review"}}}}
-			if err := cfg.Validate(t.TempDir()); (err == nil) != test.valid || err != nil && !strings.Contains(err.Error(), test.wantError) {
-				t.Fatalf("skill bounds: %v; valid=%t", err, test.valid)
+			if err := cfg.Validate(t.TempDir()); (err == nil) != (test.wantError == "") || err != nil && !strings.Contains(err.Error(), test.wantError) {
+				t.Fatalf("skill bounds: %v; want error %q", err, test.wantError)
 			}
-			if test.valid {
+			if test.wantError == "" {
 				for _, sources := range [][]string{cfg.Commands["review"].Skills, cfg.AlwaysOnSkills} {
 					for _, source := range sources {
 						if len(source) > MaxSkillURLBytes || strings.HasSuffix(source, "/") {
@@ -174,13 +173,26 @@ func TestInvitationOwnersAreNormalizedAndValidated(t *testing.T) {
 	if config.InvitationOwners[0] != "example-owner" || config.InvitationOwners[1] != "another-owner" {
 		t.Fatalf("invitation owners not normalized: %v", config.InvitationOwners)
 	}
-	for _, owners := range [][]string{{"example-owner", "EXAMPLE-OWNER"}, {"example-owner/other"}, {"-bad"}, {"bad-"}, {""}} {
-		config := base
-		config.InvitationOwners = owners
-		config.InvitationOwnerIDs = map[string]int64{"example-owner": 2}
-		if err := config.Validate(t.TempDir()); err == nil {
-			t.Errorf("accepted invalid invitation owners %v", owners)
-		}
+	for _, test := range []struct {
+		name      string
+		owners    []string
+		pins      map[string]int64
+		wantError string
+	}{
+		{"duplicate", []string{"example-owner", "EXAMPLE-OWNER"}, map[string]int64{"example-owner": 2}, "duplicate invitation owner"},
+		{"slash", []string{"example-owner/other"}, map[string]int64{"example-owner/other": 2}, "invalid invitation owner"},
+		{"leading hyphen", []string{"-bad"}, map[string]int64{"-bad": 2}, "invalid invitation owner"},
+		{"trailing hyphen", []string{"bad-"}, map[string]int64{"bad-": 2}, "invalid invitation owner"},
+		{"empty", []string{""}, map[string]int64{"": 2}, "invalid invitation owner"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			config := base
+			config.InvitationOwners = test.owners
+			config.InvitationOwnerIDs = test.pins
+			if err := config.Validate(t.TempDir()); err == nil || !strings.Contains(err.Error(), test.wantError) {
+				t.Errorf("invalid invitation owners %v: %v; want %q", test.owners, err, test.wantError)
+			}
+		})
 	}
 }
 
@@ -270,21 +282,22 @@ func TestCommandMappingsValidateWithoutInstalledSkills(t *testing.T) {
 		t.Fatalf("command names = %v", names)
 	}
 	for _, tt := range []struct {
-		name    string
-		mapping map[string]CommandMapping
+		name      string
+		mapping   map[string]CommandMapping
+		wantError string
 	}{
-		{"bad name", map[string]CommandMapping{"Review": {Action: "review", Skills: []string{defaultReviewSkill}}}},
-		{"bad action", map[string]CommandMapping{"review": {Action: "publish", Skills: []string{defaultReviewSkill}}}},
-		{"missing skill", map[string]CommandMapping{"review": {Action: "review"}}},
-		{"bad URL", map[string]CommandMapping{"review": {Action: "review", Skills: []string{"https://evil.invalid/SKILL.md"}}}},
-		{"duplicate skill", map[string]CommandMapping{"review": {Action: "review", Skills: []string{defaultReviewSkill, defaultReviewSkill}}}},
-		{"security audit without validator skill", map[string]CommandMapping{"security-audit": {Action: "security-audit", Skills: []string{defaultReviewSkill}}}},
+		{"bad name", map[string]CommandMapping{"Review": {Action: "review", Skills: []string{defaultReviewSkill}}}, "invalid command name"},
+		{"bad action", map[string]CommandMapping{"review": {Action: "publish", Skills: []string{defaultReviewSkill}}}, "unsupported action \"publish\""},
+		{"missing skill", map[string]CommandMapping{"review": {Action: "review"}}, "must have at least one skill"},
+		{"bad URL", map[string]CommandMapping{"review": {Action: "review", Skills: []string{"https://evil.invalid/SKILL.md"}}}, "invalid skill URL"},
+		{"duplicate skill", map[string]CommandMapping{"review": {Action: "review", Skills: []string{defaultReviewSkill, defaultReviewSkill}}}, "duplicate skill"},
+		{"security audit without validator skill", map[string]CommandMapping{"security-audit": {Action: "security-audit", Skills: []string{defaultReviewSkill}}}, "requires a security-audit skill"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			copy := base
 			copy.Commands = tt.mapping
 			err := copy.Validate(t.TempDir())
-			if err == nil || tt.name == "security audit without validator skill" && !strings.Contains(err.Error(), "requires a security-audit skill") {
+			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
 				t.Fatalf("invalid command mapping error: %v", err)
 			}
 		})

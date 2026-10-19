@@ -454,7 +454,7 @@ func TestFixIndexBoundsBinaryAndDeletionDiffs(t *testing.T) {
 				}
 			}
 			if _, err := index.Changes(context.Background()); !errors.Is(err, ErrDiffTooLarge) {
-				t.Fatalf("oversized binary patch lost its size classification: %v", err)
+				t.Fatalf("%s lost its size classification: %v", kind, err)
 			}
 		})
 	}

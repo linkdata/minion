@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/linkdata/minion/internal/config"
+	"github.com/linkdata/minion/internal/workroot"
 )
 
 func isolateHostPaths(t *testing.T, home string) {
@@ -75,7 +76,7 @@ func TestWorkRootPreflightRefusesModelGrants(t *testing.T) {
 					cfg.WorkRoot = alias
 				}
 			}
-			if err := checkIsolation(cfg, filepath.Join(root, "config.json")); err == nil || !strings.Contains(err.Error(), "work root overlaps") {
+			if err := checkIsolation(cfg, filepath.Join(root, "config.json")); !errors.Is(err, workroot.ErrUnsafe) || !strings.Contains(err.Error(), "work root overlaps") {
 				t.Fatalf("preflight accepted overlapping grant: %v", err)
 			}
 			if kind == "resolved Codex binary" || kind == "resolved Claude binary" {
@@ -91,7 +92,7 @@ func TestWorkRootPreflightRefusesModelGrants(t *testing.T) {
 	}
 }
 
-func TestWorkRootPreflightKeepsMissingSkillsDisabled(t *testing.T) {
+func TestWorkRootPreflightIgnoresMissingSkills(t *testing.T) {
 	root := t.TempDir()
 	isolateHostPaths(t, root)
 	cfg := config.Config{Main: "codex", WorkRoot: root, Commands: map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{"https://github.com/owner/repo/tree/pinned/skills/missing"}}}, AlwaysOnSkills: []string{"https://github.com/owner/repo/tree/pinned/skills/optional"}}
@@ -108,7 +109,7 @@ func TestWorkRootPreflightRequiresWorkspaceBackend(t *testing.T) {
 		t.Fatal(err)
 	}
 	err := checkIsolation(config.Config{Main: "codex", WorkRoot: file}, filepath.Join(root, "config.json"))
-	if !errors.Is(err, syscall.ENOTDIR) {
+	if !errors.Is(err, workroot.ErrUnsafe) || !errors.Is(err, syscall.ENOTDIR) {
 		t.Fatalf("startup did not enforce the workspace backend: %v", err)
 	}
 }
@@ -171,7 +172,7 @@ func TestWorkRootPreflightProtectsConfigurationAndCredentials(t *testing.T) {
 				return
 			}
 
-			if err := checkIsolation(cfg, configPath); err == nil || !strings.Contains(err.Error(), "private host path") {
+			if err := checkIsolation(cfg, configPath); !errors.Is(err, workroot.ErrUnsafe) || !strings.Contains(err.Error(), "private host path") {
 				t.Fatalf("preflight accepted exposed %s: %v", kind, err)
 			}
 		})
@@ -247,7 +248,7 @@ func TestPrivatePathsRejectAliasesIntoSelectedInstalledSkill(t *testing.T) {
 				if err := os.WriteFile(filepath.Join(skill, ".minion-install.json"), []byte(metadata), 0600); err != nil {
 					t.Fatal(err)
 				}
-				if err := checkIsolation(cfg, configPath); err == nil || !strings.Contains(err.Error(), "private host path") {
+				if err := checkIsolation(cfg, configPath); !errors.Is(err, workroot.ErrUnsafe) || !strings.Contains(err.Error(), "private host path") {
 					t.Fatalf("selected installed skill exposed %s: %v", kind, err)
 				}
 				if err := os.Remove(privatePath); err != nil {
@@ -261,5 +262,22 @@ func TestPrivatePathsRejectAliasesIntoSelectedInstalledSkill(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestIsolationAdmissionPreservesMissingPathCause(t *testing.T) {
+	root := t.TempDir()
+	isolateHostPaths(t, root)
+	work := filepath.Join(root, "work")
+	if err := os.Mkdir(work, 0700); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(root, "config.json")
+	if err := os.Symlink(filepath.Join(root, "missing-config"), configPath); err != nil {
+		t.Fatal(err)
+	}
+	err := checkIsolation(config.Config{Main: "codex", WorkRoot: work}, configPath)
+	if !errors.Is(err, workroot.ErrUnsafe) || !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unresolved host admission lost safety classification or missing-path cause: %v", err)
 	}
 }
