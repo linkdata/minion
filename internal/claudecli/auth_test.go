@@ -188,6 +188,19 @@ func TestAPIKeyEncodedStderrRedaction(t *testing.T) {
 	}
 }
 
+func TestValidateRedactsProbeDiagnosticsBeforeQuoting(t *testing.T) {
+	key := `fixture"secret`
+	encoded, err := json.Marshal(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fakeExecutable(t, "claude", "printf '%s\\n' "+aicli.ShellQuote(string(encoded[1:len(encoded)-1]))+" >&2\nexit 1\n")
+	_, err = Validate(context.Background(), config.ClaudeConfig{APIKey: key})
+	if err == nil || strings.Contains(err.Error(), "fixture") || !strings.Contains(err.Error(), "[redacted]") {
+		t.Fatalf("encoded key escaped probe diagnostics: %v", err)
+	}
+}
+
 func TestAPIKeyAnswerRedaction(t *testing.T) {
 	fakeExecutable(t, "claude", "cat >/dev/null\nprintf '%s\\n' '"+strings.ReplaceAll(successfulResult, "final answer", dummyAPIKey)+"'\n")
 	result, err := Run(context.Background(), t.TempDir(), "task", false, "", config.ClaudeConfig{APIKey: dummyAPIKey})

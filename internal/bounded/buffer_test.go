@@ -44,11 +44,15 @@ func TestTailDrainsAndKeepsSuffix(t *testing.T) {
 			}
 			remaining = remaining[next:]
 		}
-		if output.String() != text[len(text)-DiagnosticBytes:] {
-			t.Fatalf("chunk=%d tail=%q", size, output.String())
+		if output.String() != text[len(text)-DiagnosticBytes:] || !output.Truncated {
+			t.Fatalf("chunk=%d tail=%q truncated=%t", size, output.String(), output.Truncated)
 		}
 	}
 
+	var exact Tail
+	if n, err := exact.Write([]byte(strings.Repeat("x", DiagnosticBytes))); n != DiagnosticBytes || err != nil || exact.Truncated {
+		t.Fatalf("exact tail write=%d error=%v truncated=%t", n, err, exact.Truncated)
+	}
 }
 
 func TestTextBoundsBytesForQuotedDiagnostics(t *testing.T) {

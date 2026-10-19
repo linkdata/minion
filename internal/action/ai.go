@@ -127,6 +127,15 @@ func (r *Runner) runAI(ctx context.Context, job Job, dir, prompt, outputDir stri
 		request.prompt, request.outputSchema = mainPrompt(prompt), mainOutputSchema
 	}
 	var priorAnswer, priorFeedback string
+	redactDecoded := func(text, provider string) string {
+		switch provider {
+		case "codex":
+			return aicli.RedactText(text, r.Codex.APIKey)
+		case "claude":
+			return aicli.RedactText(text, r.Claude.APIKey)
+		}
+		return text
+	}
 	for round := 1; round <= rounds; round++ {
 		request.round = round
 		var proposed aicli.Result
@@ -141,6 +150,8 @@ func (r *Runner) runAI(ctx context.Context, job Job, dir, prompt, outputDir stri
 		if parseErr != nil {
 			return "", fmt.Errorf("%w: invalid main proposal: %w", monitor.ErrTerminalJob, parseErr)
 		}
+		candidate = redactDecoded(candidate, request.provider)
+		refutations = redactDecoded(refutations, request.provider)
 		if round > 1 && strings.TrimSpace(refutations) != "" {
 			history = append(history, Refutation{Round: round, Text: refutations})
 		}
@@ -167,6 +178,7 @@ func (r *Runner) runAI(ctx context.Context, job Job, dir, prompt, outputDir stri
 			if approved, hasBlockers, feedback, err = parseCritique(review.Answer); err != nil {
 				return "", fmt.Errorf("%w: invalid critic verdict: %w", monitor.ErrTerminalJob, err)
 			}
+			feedback = redactDecoded(feedback, critic.provider)
 			if err = record(); err != nil {
 				return "", err
 			}

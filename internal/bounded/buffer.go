@@ -37,16 +37,19 @@ func (b *Buffer) String() string { return b.buffer.String() }
 
 // Tail drains command diagnostics while retaining their last DiagnosticBytes.
 type Tail struct {
-	data []byte
+	data      []byte
+	Truncated bool
 }
 
 func (b *Tail) Write(p []byte) (int, error) {
 	n, limit := len(p), DiagnosticBytes
 	if n >= limit {
+		b.Truncated = b.Truncated || n > limit || len(b.data) > 0
 		b.data = append(b.data[:0], p[n-limit:]...)
 		return n, nil
 	}
 	if excess := len(b.data) + n - limit; excess > 0 {
+		b.Truncated = true
 		copy(b.data, b.data[excess:])
 		b.data = b.data[:len(b.data)-excess]
 	}

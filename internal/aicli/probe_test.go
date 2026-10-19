@@ -34,7 +34,7 @@ func TestProbeRetainsOutputLimitAndQuotesDiagnostics(t *testing.T) {
 			binary := probeExecutable(t, tc.script)
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
-			_, err := Probe(ctx, binary, "", nil, t.TempDir(), os.Environ(), "")
+			_, err := Probe(ctx, binary, "", nil, t.TempDir(), os.Environ(), "", "")
 			if tc.limited {
 				if !errors.Is(err, ErrOutputLimit) || errors.Is(err, context.DeadlineExceeded) {
 					t.Fatalf("limit cause lost: %v", err)
@@ -58,13 +58,13 @@ func TestProbeRetainsOutputLimitAndQuotesDiagnostics(t *testing.T) {
 
 func TestProbeExactBoundAndCallerCancellation(t *testing.T) {
 	binary := probeExecutable(t, fmt.Sprintf("head -c %d /dev/zero\n", MaxEventBytes))
-	output, err := Probe(context.Background(), binary, "", nil, t.TempDir(), os.Environ(), "")
+	output, err := Probe(context.Background(), binary, "", nil, t.TempDir(), os.Environ(), "", "")
 	if err != nil || len(output) != MaxEventBytes {
 		t.Fatalf("exact bound bytes=%d error=%v", len(output), err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err = Probe(ctx, binary, "", nil, t.TempDir(), os.Environ(), ""); !errors.Is(err, context.Canceled) || errors.Is(err, ErrOutputLimit) || err.Error() != context.Canceled.Error() {
+	if _, err = Probe(ctx, binary, "", nil, t.TempDir(), os.Environ(), "", ""); !errors.Is(err, context.Canceled) || errors.Is(err, ErrOutputLimit) || err.Error() != context.Canceled.Error() {
 		t.Fatalf("caller cancellation cause changed: %v", err)
 	}
 }

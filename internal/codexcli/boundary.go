@@ -83,7 +83,7 @@ func ValidateInstructionBoundary(ctx context.Context) (resultErr error) {
 		args := append([]string{"debug", "prompt-input"}, check.config...)
 		args = append(args, probePrompt)
 		env := childEnvironment([]string{"PATH=" + os.Getenv("PATH"), "HOME=" + probeHome, "CODEX_HOME=" + probeHome}, runtimeDir, runtimeDir, probeHome, false)
-		output, err := aicli.Probe(ctx, binary, "codex", args, check.dir, env, "")
+		output, err := aicli.Probe(ctx, binary, "codex", args, check.dir, env, "", "")
 		if err != nil {
 			return fmt.Errorf("render Codex instruction probe: %w", err)
 		}

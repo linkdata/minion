@@ -13,7 +13,8 @@ import (
 
 // Probe captures bounded output from an installed CLI without model inference.
 // A nonempty argv0 preserves the executable's logical name for multicall binaries.
-func Probe(ctx context.Context, binary, argv0 string, args []string, dir string, env []string, input string) ([]byte, error) {
+// A nonempty secret is redacted before diagnostics are quoted.
+func Probe(ctx context.Context, binary, argv0 string, args []string, dir string, env []string, input, secret string) ([]byte, error) {
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	// #nosec G204 -- Callers supply trusted installed executables and fixed argument shapes without a shell.
@@ -34,7 +35,7 @@ func Probe(ctx context.Context, binary, argv0 string, args []string, dir string,
 		err = errors.Join(ErrOutputLimit, err)
 	}
 	if err != nil {
-		if text := strings.TrimSpace(diagnostics.String()); text != "" {
+		if text := RedactTail(&diagnostics, secret); text != "" {
 			err = fmt.Errorf("%w: %q", err, text)
 		}
 		return nil, err

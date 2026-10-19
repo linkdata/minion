@@ -308,7 +308,7 @@ func githubToken(ctx context.Context) (string, error) {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	output, err := aicli.Probe(ctx, binary, "gh", []string{"auth", "token", "--hostname", "github.com"}, "", nil, "")
+	output, err := aicli.Probe(ctx, binary, "gh", []string{"auth", "token", "--hostname", "github.com"}, "", nil, "", "")
 	if err != nil {
 		return "", fmt.Errorf("gh auth token failed: %w", err)
 	}

@@ -135,8 +135,8 @@ func listModels(ctx context.Context, settings config.CodexConfig) (models []mode
 		if err != nil {
 			if contextErr != nil {
 				err = fmt.Errorf("Codex model discovery: %w", contextErr) //nolint:staticcheck // -- Codex is a proper noun.
-			} else if detail := strings.TrimSpace(diagnostics.String()); detail != "" {
-				err = fmt.Errorf("%w: %q", err, aicli.RedactText(detail, settings.APIKey))
+			} else if detail := aicli.RedactTail(&diagnostics, settings.APIKey); detail != "" {
+				err = fmt.Errorf("%w: %q", err, detail)
 			}
 		}
 	}()
@@ -169,7 +169,7 @@ func listModels(ctx context.Context, settings config.CodexConfig) (models []mode
 				return fmt.Errorf("unexpected Codex response ID %d during %s", *response.ID, method)
 			}
 			if response.Error != nil {
-				return fmt.Errorf("Codex %s: %q", method, aicli.RedactText(bounded.Text(response.Error.Message), settings.APIKey)) //nolint:staticcheck // -- Codex is a proper noun.
+				return fmt.Errorf("Codex %s: %q", method, bounded.Text(aicli.RedactText(response.Error.Message, settings.APIKey))) //nolint:staticcheck // -- Codex is a proper noun.
 			}
 			if len(response.Result) == 0 || string(response.Result) == "null" {
 				return fmt.Errorf("Codex %s returned no result", method) //nolint:staticcheck // -- Codex is a proper noun.

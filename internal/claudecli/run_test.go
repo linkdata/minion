@@ -538,6 +538,20 @@ func TestRunQuotesNativeFailureSubtype(t *testing.T) {
 	}
 }
 
+func TestRunRedactsKeyBeforeClippingNativeFailureSubtype(t *testing.T) {
+	key := "KEYPREFIX__LEAKSUFFIX"
+	subtype := strings.Repeat("x", bounded.DiagnosticBytes-5) + key
+	event, err := json.Marshal(map[string]any{"type": "result", "subtype": subtype, "is_error": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fakeExecutable(t, "claude", "cat >/dev/null\nprintf '%s\\n' "+aicli.ShellQuote(string(event))+"\n")
+	_, err = Run(context.Background(), t.TempDir(), "task", false, "", config.ClaudeConfig{APIKey: key})
+	if err == nil || strings.Contains(err.Error(), "KEYPR") {
+		t.Fatalf("clipped native failure exposed key fragment: %v", err)
+	}
+}
+
 func TestRunRequiresNativeConversationIdentity(t *testing.T) {
 	for _, test := range []struct{ name, init, failure string }{
 		{"missing", "", "missing Claude conversation identity"},

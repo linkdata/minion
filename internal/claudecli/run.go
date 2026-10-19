@@ -130,7 +130,7 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	cmd.Stdin = strings.NewReader(prompt)
 	processgroup.Configure(cmd)
 	var failureTimer *time.Timer
-	output := jsonlOutput{sessionID: s.id, baseline: s.baseline, baselineUnknown: s.usageGap, cancel: cancel, structured: settings.OutputSchema != "", fatal: func() {
+	output := jsonlOutput{sessionID: s.id, apiKey: settings.APIKey, baseline: s.baseline, baselineUnknown: s.usageGap, cancel: cancel, structured: settings.OutputSchema != "", fatal: func() {
 		// Let the CLI flush a final result and cumulative accounting, then stop
 		// a managed retry watchdog without renewing the action deadline.
 		failureTimer = time.AfterFunc(time.Second, cancel)
@@ -152,7 +152,7 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	// Preserve crash/startup stderr before finish adds a generic missing-result
 	// error; native structured failures retain their safer diagnostic instead.
 	if err != nil && output.err == nil && output.usageLimit == nil && output.taskFailure == nil && !ceilingMatched {
-		err = fmt.Errorf("%w: %q", err, aicli.RedactText(cmp.Or(strings.TrimSpace(diagnostics.String()), "no further diagnostics"), settings.APIKey))
+		err = fmt.Errorf("%w: %q", err, cmp.Or(aicli.RedactTail(&diagnostics, settings.APIKey), "no further diagnostics"))
 	}
 	output.finish()
 	if failureTimer != nil {

@@ -116,6 +116,7 @@ type messageUsage struct {
 
 type jsonlOutput struct {
 	sessionID           string
+	apiKey              string
 	identitySeen        bool
 	baseline            usage.Tokens
 	baselineUnknown     bool
@@ -335,7 +336,7 @@ func (o *jsonlOutput) finishLine(line []byte) {
 		return
 	}
 	if e.IsError || e.Subtype != "success" {
-		reason := fmt.Sprintf("result failed: %q", bounded.Text(e.Subtype))
+		reason := fmt.Sprintf("result failed: %q", bounded.Text(aicli.RedactText(e.Subtype, o.apiKey)))
 		switch e.APIError {
 		case "usage_limit_reached", "model_requires_usage_credits", "long_context_credits_required", "provider_credentials":
 			reason += "; API error=" + e.APIError

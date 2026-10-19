@@ -142,18 +142,19 @@ func TestFixPreparationChecksDurablePrerequisitesBeforeGitHub(t *testing.T) {
 	request := usageJob()
 	request.SubjectType = "Issue"
 	request.Command = command.Command{Name: "fix", Action: command.Fix}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("local prerequisite reached GitHub: %s %s", r.Method, r.URL.Path)
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	client := testGitHub(server, "fixture")
 	// Missing durable state must fail before any GitHub request.
-	_, err := (&Orchestrator{}).prepareFix(context.Background(), &preparedAction{request: request})
+	_, err := (&Orchestrator{GitHub: client}).prepareFix(context.Background(), &preparedAction{request: request})
 	if err == nil || !strings.Contains(err.Error(), "no durable state or valid ID") {
 		t.Fatalf("fix prerequisites: %v", err)
 	}
 	request.ID = "short"
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Errorf("short ID reached GitHub: %s %s", r.Method, r.URL.Path)
-		http.NotFound(w, r)
-	}))
-	defer server.Close()
-	orchestrator := Orchestrator{Store: openState(t, time.Now()), GitHub: testGitHub(server, "fixture")}
+	orchestrator := Orchestrator{Store: openState(t, time.Now()), GitHub: client}
 	_, err = orchestrator.prepareFix(context.Background(), &preparedAction{request: request})
 	if err == nil || !strings.Contains(err.Error(), "no durable state or valid ID") {
 		t.Fatalf("short fix ID reached GitHub: %v", err)

@@ -294,6 +294,20 @@ func TestValidateKeepsImplicitNativeHome(t *testing.T) {
 	}
 }
 
+func TestValidateRedactsKeyBeforeClippingCatalogueError(t *testing.T) {
+	key := "KEYPREFIX__LEAKSUFFIX"
+	message := strings.Repeat("x", bounded.DiagnosticBytes-len(key)+2) + key
+	response, err := json.Marshal(map[string]any{"id": 0, "error": map[string]string{"message": message}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	installFakeCodex(t, catalogueScriptFor(t.TempDir(), string(response), ""))
+	_, err = Validate(context.Background(), config.CodexConfig{APIKey: key})
+	if err == nil || strings.Contains(err.Error(), "KEYPREFIX__LEAK") {
+		t.Fatalf("clipped catalogue error exposed key fragment: %v", err)
+	}
+}
+
 func TestValidateRedactsQuotedConfiguredKeyFromProviderError(t *testing.T) {
 	for _, key := range []string{`fixture"secret`, `fixture\secret`} {
 		for _, escaped := range []bool{false, true} {

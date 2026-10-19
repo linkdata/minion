@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/linkdata/minion/internal/aicli"
+	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/testsupport"
@@ -534,6 +535,45 @@ func TestRunRedactsEncodedKeyBeforeQuotingFailure(t *testing.T) {
 	_, err = Run(context.Background(), t.TempDir(), "Review this checkout", false, "", config.CodexConfig{APIKey: key})
 	if err == nil || strings.Contains(err.Error(), "fixture") || !strings.Contains(err.Error(), "[redacted]") {
 		t.Fatalf("encoded configured key escaped in quoted error: %v", err)
+	}
+}
+
+func TestRunDoesNotExposeKeyFragmentsAtDiagnosticLimit(t *testing.T) {
+	key := "KEYPREFIX__LEAKSUFFIX"
+	stderr := key + strings.Repeat("x", bounded.DiagnosticBytes-len("LEAKSUFFIX")-len("rate limit reached")) + "rate limit reached"
+	eventMessage := strings.Repeat("x", bounded.DiagnosticBytes-len(key)+2) + key
+	event, err := json.Marshal(map[string]any{"type": "turn.failed", "error": map[string]string{"message": eventMessage}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ name, script, forbidden string }{
+		{"stderr tail", "printf '%s' " + aicli.ShellQuote(stderr) + " >&2\nexit 1\n", "LEAKSUFFIX"},
+		{"event prefix", "printf '%s\\n' " + aicli.ShellQuote(string(event)) + "\n", "KEYPREFIX__LEAK"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			installFakeCodex(t, "#!/bin/sh\ncat >/dev/null\n"+tc.script)
+			_, err := Run(context.Background(), t.TempDir(), "task", false, "", config.CodexConfig{APIKey: key})
+			if err == nil || strings.Contains(err.Error(), tc.forbidden) || tc.name == "stderr tail" && !strings.Contains(err.Error(), "rate limit reached") {
+				t.Fatalf("key fragment escaped or limit diagnostic lost in %s: %v", tc.name, err)
+			}
+		})
+	}
+}
+
+func TestRunRedactsEncodedKeyFromFailedEvent(t *testing.T) {
+	key := `fixture"secret`
+	encoded, err := json.Marshal(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event, err := json.Marshal(map[string]any{"type": "turn.failed", "error": map[string]string{"message": string(encoded[1 : len(encoded)-1])}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	installFakeCodex(t, "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' "+aicli.ShellQuote(string(event))+"\n")
+	_, err = Run(context.Background(), t.TempDir(), "task", false, "", config.CodexConfig{APIKey: key})
+	if err == nil || strings.Contains(err.Error(), "fixture") || !strings.Contains(err.Error(), "[redacted]") {
+		t.Fatalf("encoded configured key escaped failed event: %v", err)
 	}
 }
 

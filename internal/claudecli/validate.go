@@ -59,7 +59,7 @@ func Validate(ctx context.Context, settings config.ClaudeConfig) (validated conf
 	if err != nil {
 		return validated, err
 	}
-	version, err := aicli.Probe(ctx, binary, "", []string{"--version"}, dir, env, "")
+	version, err := aicli.Probe(ctx, binary, "", []string{"--version"}, dir, env, "", settings.APIKey)
 	if err != nil {
 		return validated, err
 	}
@@ -80,7 +80,7 @@ func Validate(ctx context.Context, settings config.ClaudeConfig) (validated conf
 	if authDir != "" {
 		authArgs = append(authArgs, "--settings", policy)
 	}
-	auth, err := aicli.Probe(ctx, binary, "", append(authArgs, "auth", "status", "--json"), dir, env, "")
+	auth, err := aicli.Probe(ctx, binary, "", append(authArgs, "auth", "status", "--json"), dir, env, "", settings.APIKey)
 	if err != nil {
 		return validated, fmt.Errorf("claude authentication: %w", err)
 	}
@@ -91,7 +91,7 @@ func Validate(ctx context.Context, settings config.ClaudeConfig) (validated conf
 		return validated, errors.New("claude is not authenticated; configure claude.api_key or run claude auth login")
 	}
 	args := append(arguments(policy), "--no-session-persistence", "--input-format", "stream-json")
-	data, err := aicli.Probe(ctx, binary, "", args, dir, env, "{\"type\":\"control_request\",\"request_id\":\"minion-initialize\",\"request\":{\"subtype\":\"initialize\"}}\n")
+	data, err := aicli.Probe(ctx, binary, "", args, dir, env, "{\"type\":\"control_request\",\"request_id\":\"minion-initialize\",\"request\":{\"subtype\":\"initialize\"}}\n", settings.APIKey)
 	if err != nil {
 		return validated, fmt.Errorf("claude model discovery: %w", err)
 	}

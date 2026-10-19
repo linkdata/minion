@@ -34,7 +34,7 @@ func CheckLogin(ctx context.Context, settings config.CodexConfig) (resultErr err
 	}
 	defer func() { resultErr = errors.Join(resultErr, os.RemoveAll(dir)) }()
 	env := childEnvironment(os.Environ(), dir, dir, home, false)
-	if _, err := aicli.Probe(ctx, binary, "codex", []string{"login", "status"}, dir, env, ""); err != nil {
+	if _, err := aicli.Probe(ctx, binary, "codex", []string{"login", "status"}, dir, env, "", ""); err != nil {
 		return fmt.Errorf("codex login status failed: %w", err)
 	}
 	return nil

@@ -202,14 +202,14 @@ func TestRunQuotesProviderDiagnosticsAndPreservesExitCause(t *testing.T) {
 	}
 }
 
-func TestEventReasonDecodesBeforeClipping(t *testing.T) {
+func TestEventReasonDecodesWithoutClipping(t *testing.T) {
 	long := strings.Repeat("x", bounded.DiagnosticBytes+1)
 	for _, tc := range []struct{ name, message, raw, want string }{
 		{"top level precedence", "top", `{"message":"nested"}`, "top"},
 		{"object", "", `{"message":"nested"}`, "nested"},
 		{"string", "", `"simple"`, "simple"},
 		{"failed object decode", "", `{"message":"partial","message":42}`, ""},
-		{"long decoded object", "", `{"message":"` + long + `"}`, long[:bounded.DiagnosticBytes] + "..."},
+		{"long decoded object", "", `{"message":"` + long + `"}`, long},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := eventReason(codexEvent{Message: tc.message, Error: json.RawMessage(tc.raw)}); got != tc.want {
