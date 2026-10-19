@@ -303,8 +303,8 @@ func TestValidateRedactsKeyBeforeClippingCatalogueError(t *testing.T) {
 	}
 	installFakeCodex(t, catalogueScriptFor(t.TempDir(), string(response), ""))
 	_, err = Validate(context.Background(), config.CodexConfig{APIKey: key})
-	if err == nil || strings.Contains(err.Error(), "KEYPREFIX__LEAK") {
-		t.Fatalf("clipped catalogue error exposed key fragment: %v", err)
+	if err == nil || strings.Contains(err.Error(), "KEYPREFIX__LEAK") || !strings.Contains(err.Error(), "[redacted]") || len(err.Error()) > bounded.DiagnosticBytes+200 {
+		t.Fatalf("clipped catalogue error exposed key fragment or lost bound: %v", err)
 	}
 }
 

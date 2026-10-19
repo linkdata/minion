@@ -150,7 +150,14 @@ func TestRunAIRedactsNoncanonicalEscapesAfterDecoding(t *testing.T) {
 	for _, provider := range []string{"codex", "claude"} {
 		t.Run(provider, func(t *testing.T) {
 			key := `fixture"secret`
-			runner := Runner{Codex: config.CodexConfig{APIKey: key}, Claude: config.ClaudeConfig{APIKey: key}}
+			runner := Runner{}
+			criticProvider := "claude"
+			if provider == "codex" {
+				runner.Codex.APIKey = key
+			} else {
+				runner.Claude.APIKey = key
+				criticProvider = "codex"
+			}
 			runner.runModel = func(_ context.Context, request modelRun) (aicli.Result, error) {
 				if request.role == roleMain {
 					return aicli.Result{Answer: `{"answer":"public fixture\u0022secret","refutations":"private fixture\u0022secret"}`}, nil
@@ -161,7 +168,7 @@ func TestRunAIRedactsNoncanonicalEscapesAfterDecoding(t *testing.T) {
 				}
 				return aicli.Result{Answer: approvedCritiqueJSON}, nil
 			}
-			job := Job{Main: RoleSettings{Provider: provider}, Critic: &RoleSettings{Provider: "claude"}, CriticMaxRounds: 1}
+			job := Job{Main: RoleSettings{Provider: provider}, Critic: &RoleSettings{Provider: criticProvider}, CriticMaxRounds: 1}
 			answer, err := runner.runAI(context.Background(), job, t.TempDir(), "task", "", nil, &modelSessions{})
 			if err != nil || answer != "public [redacted]" {
 				t.Fatalf("decoded main key reached accepted answer: %q,%v", answer, err)
@@ -171,31 +178,40 @@ func TestRunAIRedactsNoncanonicalEscapesAfterDecoding(t *testing.T) {
 }
 
 func TestRunAIRedactsDecodedCriticFeedback(t *testing.T) {
-	key := `fixture"secret`
+	mainKey, criticKey := `main"secret`, `critic"secret`
 	mainCalls, criticCalls := 0, 0
-	runner := Runner{Claude: config.ClaudeConfig{APIKey: key}}
+	runner := Runner{Codex: config.CodexConfig{APIKey: mainKey}, Claude: config.ClaudeConfig{APIKey: criticKey}}
 	runner.runModel = func(_ context.Context, request modelRun) (aicli.Result, error) {
 		if request.role == roleMain {
 			mainCalls++
-			if mainCalls == 2 && (strings.Contains(request.prompt, key) || !strings.Contains(request.prompt, "[redacted]")) {
-				t.Fatalf("decoded critic key reached revision prompt: %q", request.prompt)
+			if mainCalls == 2 {
+				if strings.Contains(request.prompt, criticKey) || !strings.Contains(request.prompt, "[redacted]") {
+					t.Fatalf("decoded critic key reached revision prompt: %q", request.prompt)
+				}
+				return aicli.Result{Answer: `{"answer":"answer2","refutations":"main\u0022secret"}`}, nil
 			}
-			return aicli.Result{Answer: proposalJSON(fmt.Sprintf("answer%d", mainCalls), "")}, nil
+			return aicli.Result{Answer: proposalJSON("answer1", "")}, nil
 		}
 		criticCalls++
 		if request.reviewPhase == reviewVerification {
 			message := request.criticPrompt("", "")
-			if strings.Contains(message, key) || !strings.Contains(message, "[redacted]") {
-				t.Fatalf("decoded critic key reached verification prompt: %q", message)
+			if strings.Contains(message, mainKey) || strings.Contains(message, criticKey) || !strings.Contains(message, "[redacted]") || len(request.refutations) != 1 || request.refutations[0].Text != "[redacted]" {
+				t.Fatalf("decoded keys reached verification prompt/refutations: %q, %+v", message, request.refutations)
 			}
 		}
 		if criticCalls == 1 {
-			return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"feedback":"fixture\u0022secret"}`}, nil
+			return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"feedback":"critic\u0022secret"}`}, nil
 		}
 		return aicli.Result{Answer: approvedCritiqueJSON}, nil
 	}
 	job := Job{Main: RoleSettings{Provider: "codex"}, Critic: &RoleSettings{Provider: "claude"}, CriticMaxRounds: 2}
-	answer, err := runner.runAI(context.Background(), job, t.TempDir(), "task", "", nil, &modelSessions{})
+	checkpoint := func(history []Refutation) error {
+		if len(history) > 0 && (len(history) != 1 || history[0].Text != "[redacted]") {
+			t.Fatalf("decoded main key reached durable refutations: %+v", history)
+		}
+		return nil
+	}
+	answer, err := runner.runAI(context.Background(), job, t.TempDir(), "task", "", checkpoint, &modelSessions{})
 	if err != nil || answer != "answer2" || mainCalls != 2 || criticCalls != 3 {
 		t.Fatalf("decoded critic feedback: answer=%q error=%v main=%d critic=%d", answer, err, mainCalls, criticCalls)
 	}

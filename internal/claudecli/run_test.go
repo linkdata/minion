@@ -530,6 +530,16 @@ func TestRunStartupFailureRetainsBoundedQuotedDiagnostic(t *testing.T) {
 	}
 }
 
+func TestRunRedactsKeyFragmentAtStderrTail(t *testing.T) {
+	key := "KEYPREFIX__LEAKSUFFIX"
+	stderr := key + strings.Repeat("x", bounded.DiagnosticBytes-len("LEAKSUFFIX")-len("rate limit reached")) + "rate limit reached"
+	fakeExecutable(t, "claude", "cat >/dev/null\nprintf '%s' "+aicli.ShellQuote(stderr)+" >&2\nexit 7\n")
+	_, err := Run(context.Background(), t.TempDir(), "task", false, "", config.ClaudeConfig{APIKey: key})
+	if err == nil || strings.Contains(err.Error(), "LEAKSUFFIX") || !strings.Contains(err.Error(), "rate limit reached") {
+		t.Fatalf("clipped stderr exposed key fragment or lost limit diagnostic: %v", err)
+	}
+}
+
 func TestRunQuotesNativeFailureSubtype(t *testing.T) {
 	fakeExecutable(t, "claude", "cat >/dev/null\ncat <<'RESULT'\n"+`{"type":"result","subtype":"failed\nforged journal line","is_error":true}`+"\nRESULT\n")
 	_, err := Run(context.Background(), t.TempDir(), "task", false, "", config.ClaudeConfig{})

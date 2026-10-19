@@ -53,6 +53,9 @@ func TestTailDrainsAndKeepsSuffix(t *testing.T) {
 	if n, err := exact.Write([]byte(strings.Repeat("x", DiagnosticBytes))); n != DiagnosticBytes || err != nil || exact.Truncated {
 		t.Fatalf("exact tail write=%d error=%v truncated=%t", n, err, exact.Truncated)
 	}
+	if n, err := exact.Write([]byte(strings.Repeat("y", DiagnosticBytes))); n != DiagnosticBytes || err != nil || !exact.Truncated || exact.String() != strings.Repeat("y", DiagnosticBytes) {
+		t.Fatalf("replacement tail write=%d error=%v truncated=%t", n, err, exact.Truncated)
+	}
 }
 
 func TestTextBoundsBytesForQuotedDiagnostics(t *testing.T) {

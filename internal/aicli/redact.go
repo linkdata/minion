@@ -32,7 +32,7 @@ func RedactTail(tail *bounded.Tail, secret string) string {
 	quoted := strconv.Quote(secret)
 	encoded, _ := json.Marshal(secret)
 	// Complete matches are gone; discard any encoded-key suffix at the cut.
-	discard := max(len(secret), len(quoted)-2, len(encoded)-2) - 1
+	discard := max(len(quoted)-2, len(encoded)-2) - 1
 	if discard >= len(text) {
 		return ""
 	}

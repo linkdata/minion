@@ -553,7 +553,7 @@ func TestRunDoesNotExposeKeyFragmentsAtDiagnosticLimit(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			installFakeCodex(t, "#!/bin/sh\ncat >/dev/null\n"+tc.script)
 			_, err := Run(context.Background(), t.TempDir(), "task", false, "", config.CodexConfig{APIKey: key})
-			if err == nil || strings.Contains(err.Error(), tc.forbidden) || tc.name == "stderr tail" && !strings.Contains(err.Error(), "rate limit reached") {
+			if err == nil || strings.Contains(err.Error(), tc.forbidden) || tc.name == "stderr tail" && !strings.Contains(err.Error(), "rate limit reached") || tc.name == "event prefix" && (!strings.Contains(err.Error(), "[redacted]") || len(err.Error()) > bounded.DiagnosticBytes+200) {
 				t.Fatalf("key fragment escaped or limit diagnostic lost in %s: %v", tc.name, err)
 			}
 		})

@@ -1,10 +1,14 @@
 package aicli
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"testing"
+
+	"github.com/linkdata/minion/internal/bounded"
 )
 
 func TestRedactError(t *testing.T) {
@@ -43,5 +47,43 @@ func TestRedactErrorKnownSecretEncodings(t *testing.T) {
 	var typed *strconv.NumError
 	if redacted.Error() != `strconv.ParseInt: parsing "[redacted]": invalid syntax` || !errors.As(redacted, &typed) || typed != cause || !errors.Is(redacted, strconv.ErrSyntax) {
 		t.Fatalf("quoted redaction lost the typed cause: %v", redacted)
+	}
+}
+
+func TestRedactTailCutsPartialKnownEncodings(t *testing.T) {
+	secret := "AB<\vCD"
+	quoted := strconv.Quote(secret)
+	encoded, err := json.Marshal(secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forms := []struct{ name, text string }{
+		{"literal", secret},
+		{"Go quoted", quoted[1 : len(quoted)-1]},
+		{"JSON encoded", string(encoded[1 : len(encoded)-1])},
+	}
+	for _, form := range forms {
+		t.Run(form.name, func(t *testing.T) {
+			const note = "rate limit reached"
+			fragment := form.text[1:]
+			fill := strings.Repeat("x", bounded.DiagnosticBytes-len(fragment)-len(note))
+			var tail bounded.Tail
+			if _, err := tail.Write([]byte(form.text + fill + note)); err != nil || !tail.Truncated {
+				t.Fatalf("expected truncated tail: %v, %t", err, tail.Truncated)
+			}
+			if got := RedactTail(&tail, secret); strings.TrimLeft(got, "x") != note {
+				t.Fatalf("partial %s key survived: %q", form.name, got)
+			}
+			if got := RedactTail(&tail, ""); got != tail.String() {
+				t.Fatalf("empty key altered tail: %q", got)
+			}
+		})
+	}
+	var whole bounded.Tail
+	if _, err := whole.Write([]byte("prefix " + forms[2].text + " suffix")); err != nil || whole.Truncated {
+		t.Fatalf("unexpected whole-tail truncation: %v, %t", err, whole.Truncated)
+	}
+	if got := RedactTail(&whole, secret); got != "prefix [redacted] suffix" {
+		t.Fatalf("nontruncated key survived: %q", got)
 	}
 }
