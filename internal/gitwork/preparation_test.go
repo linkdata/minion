@@ -29,7 +29,7 @@ func TestPullSnapshotPreservesSpecialComparisonPaths(t *testing.T) {
 		}
 	}
 	head := fixture.commit("refs/pull/7/head", "change comparison names")
-	checkout := fixture.keepCheckout(clonePullRequestFromURL(context.Background(), t.TempDir(), fixture.remote, 7, "main", head, localTreeMetadata(fixture.source)))
+	checkout := fixture.keepCheckout(clonePullRequestFromURL(context.Background(), t.TempDir(), fixture.remote, 7, "main", head))
 	snapshot, err := checkout.Snapshot(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -105,7 +105,7 @@ func TestSnapshotAcceptsExactCombinedSourceByteLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 	head := fixture.commit("refs/pull/7/head", "half-budget head file")
-	checkout := fixture.keepCheckout(clonePullRequestFromURL(context.Background(), t.TempDir(), fixture.remote, 7, "main", head, localTreeMetadata(fixture.source)))
+	checkout := fixture.keepCheckout(clonePullRequestFromURL(context.Background(), t.TempDir(), fixture.remote, 7, "main", head))
 	snapshot, err := checkout.Snapshot(context.Background())
 	if err != nil || snapshot.Base != base || len(snapshot.Files) != 1 || len(snapshot.BaseFiles) != 1 {
 		t.Fatalf("exact combined transfer failed: head-files=%d base-files=%d base=%s error=%v", len(snapshot.Files), len(snapshot.BaseFiles), snapshot.Base, err)

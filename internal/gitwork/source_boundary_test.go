@@ -12,7 +12,6 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -206,18 +205,10 @@ func TestSourceAliasesAreUnsupportedForDefaultAndPullRequestCheckout(t *testing.
 	fixture.git(fixture.source, "commit", "-m", "source alias")
 	head := fixture.git(fixture.source, "rev-parse", "HEAD")
 	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/heads/main", "HEAD:refs/pull/7/head")
-	lookup := localTreeMetadata(fixture.source)
-	checked := false
-	lookupChecked := func(ctx context.Context, sha string) (github.GitTree, error) {
-		tree, err := lookup(ctx, sha)
-		for _, entry := range tree.Tree {
-			if entry.Path == path {
-				checked = true
-			}
-		}
-		return tree, err
+	if listing := fixture.git(fixture.source, "ls-tree", "-r", "--name-only", "HEAD"); !strings.Contains(listing, path) {
+		t.Fatalf("fixture omitted protected path: %q", listing)
 	}
-	checkout, err := cloneFromURL(context.Background(), t.TempDir(), fixture.remote, "main", lookupChecked, true)
+	checkout, err := cloneFromURL(context.Background(), t.TempDir(), fixture.remote, "main", true)
 	if checkout != nil {
 		defer func() {
 			if err := checkout.Close(); err != nil {
@@ -226,14 +217,12 @@ func TestSourceAliasesAreUnsupportedForDefaultAndPullRequestCheckout(t *testing.
 		}()
 	}
 	var exit *exec.ExitError
-	if !checked || !errors.Is(err, ErrUnsupportedSource) || errors.As(err, &exit) || !strings.Contains(err.Error(), "unsafe source path") {
-		t.Fatalf("default checkout metadataChecked=%v error=%v", checked, err)
+	if !errors.Is(err, ErrUnsupportedSource) || errors.As(err, &exit) || !strings.Contains(err.Error(), "unsafe source path") {
+		t.Fatalf("default checkout error=%v", err)
 	}
-	checked = false
-	fixture.checkout.lookupTree = lookupChecked
 	err = fixture.checkout.checkoutPullRequest(context.Background(), 7, "main", head)
-	if !checked || !errors.Is(err, ErrUnsupportedSource) || errors.As(err, &exit) || !strings.Contains(err.Error(), "unsafe source path") {
-		t.Fatalf("PR checkout metadataChecked=%v error=%v", checked, err)
+	if !errors.Is(err, ErrUnsupportedSource) || errors.As(err, &exit) || !strings.Contains(err.Error(), "unsafe source path") {
+		t.Fatalf("PR checkout error=%v", err)
 	}
 }
 
@@ -269,13 +258,16 @@ func TestGitFailureClassificationIsSpecificAndPreservesCancellation(t *testing.T
 	}
 }
 
-func TestSourceTreeResponseOverflowIsTerminalSizeRefusal(t *testing.T) {
+func TestSourceTreeListingOverflowIsTerminalSizeRefusal(t *testing.T) {
 	fixture := newFixture(t)
-	fixture.checkout.lookupTree = func(context.Context, string) (github.GitTree, error) {
-		return github.GitTree{}, github.ErrResponseTooLarge
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
 	}
-	_, err := fixture.checkout.Snapshot(context.Background())
-	if !errors.Is(err, ErrCheckoutTooLarge) || !errors.Is(err, github.ErrResponseTooLarge) {
-		t.Fatalf("source response overflow classification: %v", err)
+	script := fmt.Sprintf("#!/bin/sh\nfor arg do if [ \"$arg\" = ls-tree ]; then head -c %d /dev/zero; exit; fi; done\nexec %s \"$@\"\n", maxSourceTreeListBytes+1, shellQuote(realGit))
+	fakeOnPath(t, "git", script)
+	_, err = fixture.checkout.Snapshot(context.Background())
+	if !errors.Is(err, ErrCheckoutTooLarge) || !strings.Contains(err.Error(), "source tree listing exceeds") {
+		t.Fatalf("source listing overflow classification: %v", err)
 	}
 }

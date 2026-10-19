@@ -76,9 +76,6 @@ func saveReviewEvidence(workRoot string, job Job, result Result, logger *log.Log
 	if err != nil {
 		return err
 	}
-	if len(data) > workspace.MaxBytes {
-		return errors.New("review evidence exceeds transfer byte limit")
-	}
 	root, err := privateRecordsDir(workRoot, "reviews")
 	if err != nil {
 		return err

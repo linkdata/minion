@@ -180,15 +180,20 @@ func TestJobValidate(t *testing.T) {
 		{"model NUL", func(j *Job) { j.Main.Model = "a\x00b" }, "invalid action model or skills"},
 		{"model CR", func(j *Job) { j.Main.Model = "a\rb" }, "invalid action model or skills"},
 		{"model LF", func(j *Job) { j.Main.Model = "a\nb" }, "invalid action model or skills"},
+		{"model space", func(j *Job) { j.Main.Model = "a b" }, "invalid action model or skills"},
+		{"model tab", func(j *Job) { j.Main.Model = "a\tb" }, "invalid action model or skills"},
 		{"effort bound", func(j *Job) { j.Main.Effort = strings.Repeat("e", maxModelSettingBytes+1) }, "invalid action model or skills"},
 		{"effort CR", func(j *Job) { j.Main.Effort = "a\rb" }, "invalid action model or skills"},
 		{"effort LF", func(j *Job) { j.Main.Effort = "a\nb" }, "invalid action model or skills"},
+		{"effort space", func(j *Job) { j.Main.Effort = "a b" }, "invalid action model or skills"},
+		{"effort tab", func(j *Job) { j.Main.Effort = "a\tb" }, "invalid action model or skills"},
 		{"effort NUL", func(j *Job) { j.Main.Effort = "a\x00b" }, "invalid action model or skills"},
 		{"negative runtime", func(j *Job) { j.RuntimeBudget = -1 }, "invalid action runtime budget"},
 		{"invalid UTF8 title", func(j *Job) { j.Title = "\xff" }, "action text is invalid or exceeds limits"},
 		{"invalid UTF8 description", func(j *Job) { j.Description = "\xff" }, "action text is invalid or exceeds limits"},
 		{"invalid UTF8 notes", func(j *Job) { j.Notes = "\xff" }, "action text is invalid or exceeds limits"},
 		{"critic model", func(j *Job) { j.Critic = &RoleSettings{Provider: "claude", Model: "a\x00b"}; j.CriticMaxRounds = 1 }, "invalid action model or skills"},
+		{"critic model space", func(j *Job) { j.Critic = &RoleSettings{Provider: "claude", Model: "a b"}; j.CriticMaxRounds = 1 }, "invalid action model or skills"},
 		{"critic model bound", func(j *Job) {
 			j.Critic = &RoleSettings{Provider: "claude", Model: strings.Repeat("m", maxModelSettingBytes+1)}
 			j.CriticMaxRounds = 1

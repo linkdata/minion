@@ -11,7 +11,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -56,9 +55,9 @@ func readOnlyFixture(t *testing.T, pull, link bool) (gitFixture, *Checkout, stri
 	var err error
 	url := "file://" + fixture.remote
 	if pull {
-		checkout, err = clonePullRequestFromURL(context.Background(), t.TempDir(), url, 7, "main", head, localTreeMetadata(fixture.source))
+		checkout, err = clonePullRequestFromURL(context.Background(), t.TempDir(), url, 7, "main", head)
 	} else {
-		checkout, err = cloneFromURL(context.Background(), t.TempDir(), url, "main", localTreeMetadata(fixture.source), false)
+		checkout, err = cloneFromURL(context.Background(), t.TempDir(), url, "main", false)
 	}
 	checkout = fixture.keepCheckout(checkout, err)
 	config, err := os.ReadFile(filepath.Join(checkout.path, ".git", "config"))
@@ -163,19 +162,22 @@ func TestReadOnlySnapshotPreflightsCombinedBytesBeforeContent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	lookup := localTreeMetadata(fixture.source)
-	checkout.sourceTrees = nil
-	checkout.lookupTree = func(ctx context.Context, sha string) (github.GitTree, error) {
-		tree, err := lookup(ctx, sha)
-		if err == nil {
-			for i := range tree.Tree {
-				if tree.Tree[i].Path == "changed-00" {
-					size := int64(workspace.MaxBytes/2 + 1)
-					tree.Tree[i].Size = &size
-				}
+	for _, ref := range []string{head, base} {
+		entries, err := checkout.sourceTree(context.Background(), ref)
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for i := range entries {
+			if entries[i].file.Path == "changed-00" {
+				entries[i].size = workspace.MaxBytes/2 + 1
+				found = true
 			}
 		}
-		return tree, err
+		if !found {
+			t.Fatalf("missing comparison entry at %s", ref)
+		}
+		checkout.sourceTrees[ref] = entries
 	}
 	log := recordSnapshotContentCalls(t)
 	_, err = checkout.Snapshot(context.Background())

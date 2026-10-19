@@ -10,7 +10,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -19,59 +18,45 @@ func assertBlobPresent(fixture gitFixture, dir, sha string) {
 	fixture.git(dir, "cat-file", "-e", sha)
 }
 
-func TestClonePreflightsMetadataAfterCompleteClone(t *testing.T) {
+func TestCloneRejectsOversizedLocalTree(t *testing.T) {
 	fixture := newFixture(t)
-	writeFile(t, filepath.Join(fixture.source, "blob"), "complete local blob\n")
-	fixture.commit("refs/heads/main", "new blob")
-	blob := fixture.git(fixture.source, "rev-parse", "HEAD:blob")
-	root := t.TempDir()
-	checked := false
-	lookup := func(ctx context.Context, sha string) (github.GitTree, error) {
-		dirs, err := os.ReadDir(root)
-		if err != nil || len(dirs) != 1 {
-			t.Fatalf("clone roots=%v,%v", dirs, err)
-		}
-		assertBlobPresent(fixture, filepath.Join(root, dirs[0].Name()), blob)
-		checked = true
-		tree, err := localTreeMetadata(fixture.source)(ctx, sha)
-		if err == nil {
-			oversized := int64(workspace.MaxBytes + 1)
-			tree.Tree[0].Size = &oversized
-		}
-		return tree, err
+	name := filepath.Join(fixture.source, "blob")
+	if err := os.WriteFile(name, nil, 0600); err != nil {
+		t.Fatal(err)
 	}
-	_, err := cloneFromURL(context.Background(), root, "file://"+fixture.remote, "main", lookup, true)
-	if !checked || !errors.Is(err, ErrCheckoutTooLarge) {
-		t.Fatalf("preflight checked=%v error=%v", checked, err)
+	if err := os.Truncate(name, workspace.MaxBytes+1); err != nil {
+		t.Fatal(err)
+	}
+	fixture.commit("refs/heads/main", "oversized local blob")
+	root := t.TempDir()
+	checkout, err := cloneFromURL(context.Background(), root, "file://"+fixture.remote, "main", true)
+	if checkout != nil || !errors.Is(err, ErrCheckoutTooLarge) {
+		t.Fatalf("oversized source accepted: checkout=%v error=%v", checkout, err)
+	}
+	if entries, err := os.ReadDir(root); err != nil || len(entries) != 0 {
+		t.Fatalf("failed clone retained checkout: %v,%v", entries, err)
 	}
 }
 
 func TestSnapshotPreflightsMergeBaseMetadata(t *testing.T) {
 	fixture := newFixture(t)
-	writeFile(t, filepath.Join(fixture.source, "old"), "historical local blob\n")
-	fixture.git(fixture.source, "add", "old")
-	fixture.git(fixture.source, "commit", "-m", "historical blob")
-	base := fixture.git(fixture.source, "rev-parse", "HEAD")
-	baseTree := fixture.git(fixture.source, "rev-parse", "HEAD^{tree}")
+	name := filepath.Join(fixture.source, "old")
+	if err := os.WriteFile(name, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(name, workspace.MaxBytes+1); err != nil {
+		t.Fatal(err)
+	}
+	base := fixture.commit("refs/heads/main", "historical oversized blob")
 	blob := fixture.git(fixture.source, "rev-parse", "HEAD:old")
 	fixture.git(fixture.source, "rm", "old")
-	fixture.git(fixture.source, "commit", "-m", "remove old blob")
-	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/heads/main")
-	lookup := localTreeMetadata(fixture.source)
-	checkout := fixture.keepCheckout(cloneFromURL(context.Background(), t.TempDir(), "file://"+fixture.remote, "main", lookup, true))
+	fixture.commit("refs/heads/main", "remove old blob")
+	checkout := fixture.keepCheckout(cloneFromURL(context.Background(), t.TempDir(), "file://"+fixture.remote, "main", true))
 	assertBlobPresent(fixture, checkout.path, blob)
 	checkout.comparisonBase = base
-	checkout.lookupTree = func(ctx context.Context, sha string) (github.GitTree, error) {
-		tree, err := lookup(ctx, sha)
-		if sha == baseTree && err == nil {
-			oversized := int64(workspace.MaxBytes + 1)
-			tree.Tree[0].Size = &oversized
-		}
-		return tree, err
-	}
 	log := recordSnapshotContentCalls(t)
 	if _, err := checkout.Snapshot(context.Background()); !errors.Is(err, ErrCheckoutTooLarge) {
-		t.Fatalf("merge-base preflight error: %v", err)
+		t.Fatalf("merge-base limit: %v", err)
 	}
 	if data, err := os.ReadFile(log); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("metadata preflight requested content: %q error=%v", data, err)

@@ -155,23 +155,6 @@ func gitFixtureRemote(t *testing.T, files ...workspace.File) (base, head, remote
 
 var fakeOnPath = testsupport.FakeOnPath
 
-func gitTreeFixture(sha string, files ...workspace.File) github.GitTree {
-	truncated := false
-	entries := make([]github.GitTreeEntry, 0, len(files))
-	for _, file := range files {
-		size := int64(len(file.Data))
-		entries = append(entries, github.GitTreeEntry{Path: file.Path, Type: "blob", Mode: fmt.Sprintf("%06o", file.Mode), Size: &size})
-	}
-	return github.GitTree{SHA: sha, Truncated: &truncated, Tree: entries}
-}
-
-func writeTreeFixture(t *testing.T, w http.ResponseWriter, sha string, files ...workspace.File) {
-	t.Helper()
-	if err := json.NewEncoder(w).Encode(gitTreeFixture(sha, files...)); err != nil {
-		t.Error(err)
-	}
-}
-
 func modelGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	out, err := testsupport.ModelGit(t, dir, args...)
@@ -316,10 +299,7 @@ func withClaudeCritic(job Job) Job {
 
 func cloneFixture(t *testing.T, root string) *gitwork.Checkout {
 	t.Helper()
-	metadata := func(_ context.Context, sha string) (github.GitTree, error) {
-		return gitTreeFixture(sha), nil
-	}
-	checkout, err := gitwork.Clone(context.Background(), root, "o/r", "main", metadata, true)
+	checkout, err := gitwork.Clone(context.Background(), root, "o/r", "main", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -365,8 +345,6 @@ func serveIssueFixture(t *testing.T, w http.ResponseWriter, r *http.Request) boo
 		return false
 	}
 	switch {
-	case strings.HasPrefix(r.URL.Path, "/repos/o/r/git/trees/"):
-		writeTreeFixture(t, w, strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/"))
 	case r.URL.Path == "/repos/o/r":
 		_, _ = fmt.Fprint(w, publicRepositoryJSON)
 	case r.URL.Path == "/repos/o/r/issues/7":
@@ -396,7 +374,7 @@ func captureComment(t *testing.T, w http.ResponseWriter, r *http.Request, body *
 
 const approvedCritiqueJSON = `{"approved":true,"has_blockers":false,"feedback":""}`
 
-func serveFixFlowFixture(t *testing.T, w http.ResponseWriter, r *http.Request, files ...workspace.File) bool {
+func serveFixFlowFixture(t *testing.T, w http.ResponseWriter, r *http.Request) bool {
 	t.Helper()
 	switch {
 	case serveSafeForkChecks(w, r, "bot/r", false):
@@ -412,8 +390,6 @@ func serveFixFlowFixture(t *testing.T, w http.ResponseWriter, r *http.Request, f
 		http.NotFound(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/graphql":
 		_, _ = fmt.Fprint(w, `{"data":{"node":{"title":"Task","bodyText":"Inspect source","lastEditedAt":null}}}`)
-	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/o/r/git/trees/"):
-		writeTreeFixture(t, w, strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/"), files...)
 	default:
 		return false
 	}

@@ -12,7 +12,6 @@ import (
 	"strings"
 
 	"github.com/linkdata/minion/internal/bounded"
-	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -25,23 +24,22 @@ type sourceEntry struct {
 
 const maxBatchHeaderBytes = 128
 
-// sourceTree validates complete source metadata before materialization.
+// sourceTree validates bounded local metadata before materialization.
 func (c *Checkout) sourceTree(ctx context.Context, ref string) ([]sourceEntry, error) {
 	if entries, ok := c.sourceTrees[ref]; ok {
 		return entries, nil
 	}
-	treeSHA, err := runGit(ctx, c.path, "rev-parse", "--verify", ref+"^{tree}")
+	if !workspace.ValidSHA(ref) {
+		return nil, fmt.Errorf("%w: invalid source identity", ErrUnsupportedSource)
+	}
+	output, truncated, err := c.boundedGit(ctx, nil, maxSourceTreeListBytes, true, "ls-tree", "-r", "-t", "-l", "-z", ref)
 	if err != nil {
 		return nil, err
 	}
-	tree, err := c.lookupTree(ctx, treeSHA)
-	if err != nil {
-		if errors.Is(err, github.ErrResponseTooLarge) {
-			return nil, fmt.Errorf("%w: load source tree metadata: %w", ErrCheckoutTooLarge, err)
-		}
-		return nil, fmt.Errorf("load source tree metadata: %w", err)
+	if truncated {
+		return nil, fmt.Errorf("%w: source tree listing exceeds %d bytes", ErrCheckoutTooLarge, maxSourceTreeListBytes)
 	}
-	entries, err := c.sourceEntries(ctx, ref, tree, treeSHA)
+	entries, err := parseSourceEntries(ref, output)
 	if err != nil {
 		return nil, err
 	}
@@ -52,61 +50,74 @@ func (c *Checkout) sourceTree(ctx context.Context, ref string) ([]sourceEntry, e
 	return entries, nil
 }
 
-func (c *Checkout) sourceEntries(ctx context.Context, ref string, tree github.GitTree, treeSHA string) ([]sourceEntry, error) {
-	if err := checkSourceTree(tree, treeSHA); err != nil {
-		return nil, err
-	}
-	metadata := map[string]github.GitTreeEntry{}
-	seen := map[string]bool{}
-	for _, entry := range tree.Tree {
-		if seen[entry.Path] {
-			return nil, fmt.Errorf("%w: duplicate source path %q", ErrUnsupportedSource, entry.Path)
-		}
-		seen[entry.Path] = true
-		if entry.Type != "tree" {
-			metadata[entry.Path] = entry
-		}
-	}
-	output, truncated, err := c.boundedGit(ctx, nil, maxPathListBytes, true, "ls-tree", "-r", "-z", ref)
-	if err != nil {
-		return nil, err
-	}
-	if truncated {
-		return nil, fmt.Errorf("%w: API tree differs from Git tree", ErrUnsupportedSource)
-	}
+func parseSourceEntries(ref string, output []byte) ([]sourceEntry, error) {
 	lines, err := splitNUL(output)
 	if err != nil {
 		return nil, fmt.Errorf("%w: invalid Git tree listing: %w", ErrUnsupportedSource, err)
 	}
+	if len(lines) > workspace.MaxEntries {
+		return nil, fmt.Errorf("%w: more than %d metadata entries", ErrCheckoutTooLarge, workspace.MaxEntries)
+	}
 	var entries []sourceEntry
 	var validation []workspace.File
+	seen := make(map[string]bool, len(lines))
+	var total int64
 	for _, line := range lines {
 		fieldsRaw, name, ok := bytes.Cut(line, []byte{'\t'})
 		fields := strings.Fields(string(fieldsRaw))
-		if !ok || len(fields) != 3 || !workspace.ValidSHA(fields[2]) {
+		if !ok || len(fields) != 4 || !workspace.ValidSHA(fields[2]) {
 			return nil, fmt.Errorf("%w: invalid Git source entry", ErrUnsupportedSource)
 		}
-		entry, exists := metadata[string(name)]
-		if !exists || entry.Mode != fields[0] || entry.Type != fields[1] {
-			return nil, fmt.Errorf("%w: API tree differs from Git tree at %q", ErrUnsupportedSource, name)
+		path := string(name)
+		if !workspace.ValidCheckoutPath(path) {
+			return nil, fmt.Errorf("%w: unsafe source path %q", ErrUnsupportedSource, path)
 		}
-		delete(metadata, string(name))
-		mode, err := strconv.ParseUint(entry.Mode, 8, 32)
+		if seen[path] {
+			return nil, fmt.Errorf("%w: duplicate source path %q", ErrUnsupportedSource, path)
+		}
+		seen[path] = true
+		mode, err := strconv.ParseUint(fields[0], 8, 32)
 		if err != nil {
 			return nil, fmt.Errorf("%w: invalid source mode", ErrUnsupportedSource)
 		}
-		source := sourceEntry{file: workspace.File{Path: entry.Path, Mode: uint32(mode)}, sha: fields[2], omitted: entry.Type == "commit" || entry.Mode == "120000"}
+		switch fields[1] {
+		case "tree":
+			if fields[0] != "040000" || fields[3] != "-" {
+				return nil, fmt.Errorf("%w: unsupported tree entry at %q", ErrUnsupportedSource, path)
+			}
+			continue
+		case "commit":
+			if fields[0] != "160000" || fields[3] != "-" {
+				return nil, fmt.Errorf("%w: unsupported gitlink entry at %q", ErrUnsupportedSource, path)
+			}
+		case "blob":
+			if fields[0] != "100644" && fields[0] != "100755" && fields[0] != "120000" {
+				return nil, fmt.Errorf("%w: unsupported blob mode %q at %q", ErrUnsupportedSource, fields[0], path)
+			}
+		default:
+			return nil, fmt.Errorf("%w: unknown Git tree entry type %q", ErrUnsupportedSource, fields[1])
+		}
+		if len(entries) >= workspace.MaxFiles {
+			return nil, fmt.Errorf("%w: more than %d paths", ErrCheckoutTooLarge, workspace.MaxFiles)
+		}
+		source := sourceEntry{file: workspace.File{Path: path, Mode: uint32(mode)}, sha: fields[2], omitted: fields[1] == "commit" || fields[0] == "120000"}
 		file := source.file
 		if source.omitted {
 			file.Mode = workspace.Regular
-		} else {
-			source.size = *entry.Size
+		}
+		// A gitlink has no blob; all blob sizes, including symlinks, count.
+		if fields[1] == "blob" {
+			source.size, err = strconv.ParseInt(fields[3], 10, 64)
+			if err != nil || source.size < 0 {
+				return nil, fmt.Errorf("%w: blob size is unavailable", ErrUnsupportedSource)
+			}
+			if source.size > workspace.MaxBytes-total {
+				return nil, fmt.Errorf("%w: more than %d bytes", ErrCheckoutTooLarge, workspace.MaxBytes)
+			}
+			total += source.size
 		}
 		validation = append(validation, file)
 		entries = append(entries, source)
-	}
-	if len(metadata) != 0 {
-		return nil, fmt.Errorf("%w: API tree has unmatched entries", ErrUnsupportedSource)
 	}
 	if err := workspace.ValidateSnapshot(workspace.Snapshot{Head: ref, Files: validation}); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrUnsupportedSource, err)
@@ -142,7 +153,7 @@ func (c *Checkout) sourceFiles(ctx context.Context, entries []sourceEntry) (file
 		return nil, nil, err
 	}
 	if truncated {
-		return nil, nil, fmt.Errorf("%w: Git blobs exceed API-declared sizes", ErrUnsupportedSource)
+		return nil, nil, fmt.Errorf("%w: Git blobs exceed tree-declared sizes", ErrUnsupportedSource)
 	}
 	files, err = readBatchBlobs(output, requested)
 	return files, omitted, err

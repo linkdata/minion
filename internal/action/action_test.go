@@ -249,8 +249,6 @@ func TestReviewEchoDoesNotSuppressSecurityAuditInMonitor(t *testing.T) {
 			_, _ = fmt.Fprint(w, publicRepositoryJSON)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/pulls/7":
 			_, _ = fmt.Fprintf(w, `{"title":"PR","base":{"ref":"main"},"head":{"sha":%q}}`, head)
-		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/o/r/git/trees/"):
-			writeTreeFixture(t, w, strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/"))
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7/comments":
 			_ = json.NewEncoder(w).Encode(comments)
 		case r.Method == http.MethodPost && r.URL.Path == "/graphql":
@@ -561,8 +559,6 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 			var rulesetChecks int
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch {
-				case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/o/r/git/trees/"):
-					writeTreeFixture(t, w, strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/"), baseline...)
 				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7":
 					_, _ = fmt.Fprint(w, `{"node_id":"issue-node","title":"Bug","body":"Details"}`)
 				case r.Method == http.MethodPost && r.URL.Path == "/graphql":
@@ -740,9 +736,6 @@ func TestReviewMarksOnlyPostModelPublicationFailure(t *testing.T) {
 			_, _ = fmt.Fprint(w, publicRepositoryJSON)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/pulls/7":
 			_, _ = fmt.Fprintf(w, `{"title":%q,"body":%q,"user":{"id":8,"login":"outsider"},"base":{"ref":"main"},"head":{"sha":%q}}`, title, description, head)
-		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/o/r/git/trees/"):
-			sha := strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/")
-			writeTreeFixture(t, w, sha)
 		case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/pulls/7/reviews":
 			postCalls++
 			http.Error(w, "unavailable", http.StatusBadGateway)

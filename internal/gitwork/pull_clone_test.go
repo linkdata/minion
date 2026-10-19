@@ -9,7 +9,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -75,7 +74,7 @@ func TestSnapshotRejectsUnrelatedPullRequestHistories(t *testing.T) {
 	fixture.git(fixture.source, "commit", "-m", "unrelated root")
 	head := fixture.git(fixture.source, "rev-parse", "HEAD")
 	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/pull/7/head")
-	checkout := fixture.keepCheckout(clonePullRequestFromURL(context.Background(), t.TempDir(), fixture.remote, 7, "main", head, localTreeMetadata(fixture.source)))
+	checkout := fixture.keepCheckout(clonePullRequestFromURL(context.Background(), t.TempDir(), fixture.remote, 7, "main", head))
 	_, err := checkout.Snapshot(context.Background())
 	if !errors.Is(err, ErrUnsupportedSource) || !strings.Contains(err.Error(), "no common ancestor") {
 		t.Fatalf("unrelated histories were retryable: %v", err)
@@ -89,44 +88,28 @@ func TestClonePullRequestSkipsUnusedBaseTipPreflight(t *testing.T) {
 	fixture.git(fixture.source, "checkout", "--detach", fixture.base)
 	unused := "base-only"
 	path := filepath.Join(fixture.source, unused)
-	writeFile(t, path, "unused base-tip blob\n")
+	if err := os.WriteFile(path, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(path, workspace.MaxBytes+1); err != nil {
+		t.Fatal(err)
+	}
 	fixture.git(fixture.source, "add", ".")
 	fixture.git(fixture.source, "commit", "-m", "advance base")
 	base := fixture.git(fixture.source, "rev-parse", "HEAD")
-	baseTree := fixture.git(fixture.source, "rev-parse", "HEAD^{tree}")
+	blob := fixture.git(fixture.source, "rev-parse", "HEAD:"+unused)
 	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/heads/main")
-	lookup := localTreeMetadata(fixture.source)
-	baseLookups := 0
-	metadata := func(ctx context.Context, sha string) (github.GitTree, error) {
-		tree, err := lookup(ctx, sha)
-		if sha == baseTree {
-			baseLookups++
-			for i := range tree.Tree {
-				if tree.Tree[i].Path == unused {
-					size := int64(workspace.MaxBytes + 1)
-					tree.Tree[i].Size = &size
-				}
-			}
-		}
-		return tree, err
-	}
 	url := "file://" + fixture.remote
-	if checkout, err := cloneFromURL(context.Background(), t.TempDir(), url, "main", metadata, true); !errors.Is(err, ErrCheckoutTooLarge) {
+	if checkout, err := cloneFromURL(context.Background(), t.TempDir(), url, "main", true); !errors.Is(err, ErrCheckoutTooLarge) {
 		if checkout != nil {
 			_ = checkout.Close()
 		}
 		t.Fatalf("default clone error=%v want=%v", err, ErrCheckoutTooLarge)
 	}
-	if baseLookups != 1 {
-		t.Fatalf("default clone skipped base preflight: lookups=%d", baseLookups)
-	}
-	checkout := fixture.keepCheckout(clonePullRequestFromURL(context.Background(), t.TempDir(), url, 7, "main", head, metadata))
+	checkout := fixture.keepCheckout(clonePullRequestFromURL(context.Background(), t.TempDir(), url, 7, "main", head))
 	snapshot, err := checkout.Snapshot(context.Background())
 	if err != nil || snapshot.Head != head || snapshot.Base != base || snapshot.MergeBase != fixture.base || len(snapshot.Files) != 1 || string(snapshot.Files[0].Data) != "PR head\n" {
 		t.Fatalf("PR snapshot=%+v error=%v", snapshot, err)
-	}
-	if baseLookups != 1 {
-		t.Fatalf("unused base tip was validated during PR preparation: lookups=%d", baseLookups)
 	}
 	if _, err := os.Lstat(filepath.Join(checkout.path, unused)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("unused base path materialized: %v", err)
@@ -135,7 +118,7 @@ func TestClonePullRequestSkipsUnusedBaseTipPreflight(t *testing.T) {
 	assertModelRepositoryGit(t, source, head+"\n", "rev-parse", "HEAD")
 	assertModelRepositoryGit(t, source, base+"\n", "rev-parse", "refs/remotes/origin/main")
 	assertModelRepositoryGit(t, source, fixture.base+"\n", "merge-base", "HEAD", "refs/remotes/origin/main")
-	assertModelRepositoryGit(t, source, "unused base-tip blob\n", "show", "refs/remotes/origin/main:"+unused)
+	assertModelRepositoryGit(t, source, blob+"\n", "rev-parse", "refs/remotes/origin/main:"+unused)
 }
 
 func TestPullRequestRejectsDeletedMergeBaseMetadataAliasBeforeContent(t *testing.T) {
@@ -154,7 +137,7 @@ func TestPullRequestRejectsDeletedMergeBaseMetadataAliasBeforeContent(t *testing
 	fixture.git(fixture.source, "commit", "-m", "remove unsupported path")
 	head := fixture.git(fixture.source, "rev-parse", "HEAD")
 	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/pull/7/head")
-	checkout := fixture.keepCheckout(clonePullRequestFromURL(context.Background(), t.TempDir(), "file://"+fixture.remote, 7, "main", head, localTreeMetadata(fixture.source)))
+	checkout := fixture.keepCheckout(clonePullRequestFromURL(context.Background(), t.TempDir(), "file://"+fixture.remote, 7, "main", head))
 	assertBlobPresent(fixture, checkout.path, blob)
 	if err := os.Rename(fixture.remote, fixture.remote+".offline"); err != nil {
 		t.Fatal(err)
@@ -180,11 +163,7 @@ func TestPullRequestInputGatesBeforeClone(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			root := t.TempDir()
-			lookup := func(context.Context, string) (github.GitTree, error) {
-				t.Fatal("input refusal reached tree lookup")
-				return github.GitTree{}, nil
-			}
-			if c, err := ClonePullRequest(context.Background(), root, "owner/repo", tt.number, tt.base, tt.head, lookup); err == nil || c != nil {
+			if c, err := ClonePullRequest(context.Background(), root, "owner/repo", tt.number, tt.base, tt.head); err == nil || c != nil {
 				t.Fatalf("invalid input accepted: %v,%v", c, err)
 			}
 			entries, err := os.ReadDir(root)
@@ -220,7 +199,7 @@ func TestClonePullRequestRemovesCheckoutAfterHeadMoves(t *testing.T) {
 	writeFile(t, filepath.Join(f.source, "change.txt"), "new PR head\n")
 	head := f.commit("refs/pull/7/head", "PR head")
 	root := t.TempDir()
-	checkout, err := clonePullRequestFromURL(context.Background(), root, f.remote, 7, "main", f.base, localTreeMetadata(f.source))
+	checkout, err := clonePullRequestFromURL(context.Background(), root, f.remote, 7, "main", f.base)
 	if checkout != nil || err == nil || !strings.Contains(err.Error(), "pull request head changed: expected "+f.base+", fetched "+head) {
 		t.Fatalf("moved head returned checkout=%v error=%v", checkout, err)
 	}

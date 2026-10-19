@@ -18,7 +18,6 @@ import (
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/cleanup"
-	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/processgroup"
 	"github.com/linkdata/minion/internal/workspace"
 )
@@ -33,6 +32,8 @@ const (
 
 	// maxPathListBytes bounds source and PR path listings including Git record metadata.
 	maxPathListBytes = workspace.MaxFiles * (workspace.MaxPathBytes + 128)
+	// Bound local metadata independently of source contents and repository history.
+	maxSourceTreeListBytes = workspace.MaxBytes
 )
 
 var (
@@ -58,7 +59,6 @@ type Checkout struct {
 	configDigest   [sha256.Size]byte
 	expectedHead   string
 	comparisonBase string
-	lookupTree     func(context.Context, string) (github.GitTree, error)
 	sourceTrees    map[string][]sourceEntry
 }
 
@@ -66,27 +66,27 @@ type Checkout struct {
 // The Git remote is always derived from a validated owner/name; GitHub CLI's
 // credential helper supplies authentication without embedding a token in URLs.
 // Clones complete history; checkoutFiles materializes the trusted fix worktree.
-func Clone(ctx context.Context, workRoot, repo, defaultBranch string, lookupTree func(context.Context, string) (github.GitTree, error), checkoutFiles bool) (*Checkout, error) {
+func Clone(ctx context.Context, workRoot, repo, defaultBranch string, checkoutFiles bool) (*Checkout, error) {
 	url, err := repositoryURL(repo)
 	if err != nil {
 		return nil, err
 	}
-	return cloneFromURL(ctx, workRoot, url, defaultBranch, lookupTree, checkoutFiles)
+	return cloneFromURL(ctx, workRoot, url, defaultBranch, checkoutFiles)
 }
 
 // ClonePullRequest pins the verified PR head without materializing its worktree. Full base history
 // is cloned for comparison and model use, without validating or materializing the unused base tip tree.
-func ClonePullRequest(ctx context.Context, workRoot, repo string, number int, baseRef, expectedHeadSHA string, lookupTree func(context.Context, string) (github.GitTree, error)) (*Checkout, error) {
+func ClonePullRequest(ctx context.Context, workRoot, repo string, number int, baseRef, expectedHeadSHA string) (*Checkout, error) {
 	url, err := repositoryURL(repo)
 	if err != nil {
 		return nil, err
 	}
-	return clonePullRequestFromURL(ctx, workRoot, url, number, baseRef, expectedHeadSHA, lookupTree)
+	return clonePullRequestFromURL(ctx, workRoot, url, number, baseRef, expectedHeadSHA)
 }
 
 // URL constructors let local fixtures exercise production preparation without network calls.
-func cloneFromURL(ctx context.Context, workRoot, url, defaultBranch string, lookupTree func(context.Context, string) (github.GitTree, error), checkoutFiles bool) (*Checkout, error) {
-	c, err := cloneRepository(ctx, workRoot, url, defaultBranch, lookupTree)
+func cloneFromURL(ctx context.Context, workRoot, url, defaultBranch string, checkoutFiles bool) (*Checkout, error) {
+	c, err := cloneRepository(ctx, workRoot, url, defaultBranch)
 	if err != nil {
 		return nil, err
 	}
@@ -100,14 +100,14 @@ func cloneFromURL(ctx context.Context, workRoot, url, defaultBranch string, look
 	return c, nil
 }
 
-func clonePullRequestFromURL(ctx context.Context, workRoot, url string, number int, baseRef, expectedHeadSHA string, lookupTree func(context.Context, string) (github.GitTree, error)) (*Checkout, error) {
+func clonePullRequestFromURL(ctx context.Context, workRoot, url string, number int, baseRef, expectedHeadSHA string) (*Checkout, error) {
 	if number <= 0 {
 		return nil, fmt.Errorf("invalid pull request number %d", number)
 	}
 	if !workspace.ValidSHA(expectedHeadSHA) {
 		return nil, fmt.Errorf("invalid expected pull request SHA %q", expectedHeadSHA)
 	}
-	c, err := cloneRepository(ctx, workRoot, url, baseRef, lookupTree)
+	c, err := cloneRepository(ctx, workRoot, url, baseRef)
 	if err != nil {
 		return nil, err
 	}
@@ -118,12 +118,9 @@ func clonePullRequestFromURL(ctx context.Context, workRoot, url string, number i
 }
 
 // cloneRepository fetches complete history and configures a trusted checkout before materialization.
-func cloneRepository(ctx context.Context, workRoot, url, defaultBranch string, lookupTree func(context.Context, string) (github.GitTree, error)) (_ *Checkout, err error) {
+func cloneRepository(ctx context.Context, workRoot, url, defaultBranch string) (_ *Checkout, err error) {
 	if err := validateBranch(defaultBranch); err != nil {
 		return nil, err
-	}
-	if lookupTree == nil {
-		return nil, errors.New("source tree metadata lookup is missing")
 	}
 	workRoot, err = workspace.CanonicalPath(workRoot)
 	if err != nil {
@@ -144,7 +141,7 @@ func cloneRepository(ctx context.Context, workRoot, url, defaultBranch string, l
 	if _, err := runGit(ctx, workRoot, "clone", "--template=", "--reject-shallow", "--no-local", "--no-checkout", "--branch", defaultBranch, "--", url, path); err != nil {
 		return nil, err
 	}
-	c := &Checkout{path: path, lookupTree: lookupTree}
+	c := &Checkout{path: path}
 	if err := disableAttributes(filepath.Join(c.path, ".git")); err != nil {
 		return nil, err
 	}
@@ -217,57 +214,6 @@ func (c *Checkout) checkoutSource(ctx context.Context, head string, checkoutFile
 		return err
 	}
 	c.expectedHead = head
-	return nil
-}
-
-// Check expanded blobs and gitlinks, including repeated object references,
-// against GitHub metadata before materializing source contents.
-func checkSourceTree(tree github.GitTree, expectedSHA string) error {
-	if len(tree.Tree) > workspace.MaxEntries {
-		return fmt.Errorf("%w: more than %d metadata entries", ErrCheckoutTooLarge, workspace.MaxEntries)
-	}
-	if tree.Truncated != nil && *tree.Truncated {
-		return fmt.Errorf("%w: GitHub tree metadata is truncated", ErrCheckoutTooLarge)
-	}
-	if tree.SHA != expectedSHA || !workspace.ValidSHA(tree.SHA) || tree.Truncated == nil || tree.Tree == nil {
-		return fmt.Errorf("%w: incomplete or mismatched tree metadata", ErrUnsupportedSource)
-	}
-	var files int
-	var total int64
-	for _, entry := range tree.Tree {
-		if !workspace.ValidCheckoutPath(entry.Path) {
-			return fmt.Errorf("%w: unsafe source path %q", ErrUnsupportedSource, entry.Path)
-		}
-		switch entry.Type {
-		case "tree":
-			if entry.Mode != "040000" {
-				return fmt.Errorf("%w: unsupported tree mode %q at %q", ErrUnsupportedSource, entry.Mode, entry.Path)
-			}
-			continue
-		case "commit": // A submodule gitlink writes no blob into the checkout.
-			if entry.Mode != "160000" {
-				return fmt.Errorf("%w: unsupported gitlink mode %q at %q", ErrUnsupportedSource, entry.Mode, entry.Path)
-			}
-		case "blob":
-			// Snapshots declare symlinks as omitted and never follow their targets.
-			if entry.Mode != "100644" && entry.Mode != "100755" && entry.Mode != "120000" {
-				return fmt.Errorf("%w: unsupported blob mode %q at %q", ErrUnsupportedSource, entry.Mode, entry.Path)
-			}
-			if entry.Size == nil || *entry.Size < 0 {
-				return fmt.Errorf("%w: blob size is unavailable", ErrUnsupportedSource)
-			}
-			if *entry.Size > workspace.MaxBytes-total {
-				return fmt.Errorf("%w: more than %d bytes", ErrCheckoutTooLarge, workspace.MaxBytes)
-			}
-			total += *entry.Size
-		default:
-			return fmt.Errorf("%w: unknown Git tree entry type %q", ErrUnsupportedSource, entry.Type)
-		}
-		files++
-		if files > workspace.MaxFiles {
-			return fmt.Errorf("%w: more than %d paths", ErrCheckoutTooLarge, workspace.MaxFiles)
-		}
-	}
 	return nil
 }
 
@@ -547,7 +493,7 @@ func cleanGitEnvironment() []string {
 	return append(env, hardeningEnv()...)
 }
 
-// hardeningEnv adds trusted prompt and locale settings to the model Git environment.
+// hardeningEnv adds prompt and locale settings to Minion-run Git.
 func hardeningEnv() []string {
 	return append(aicli.ModelGitEnvironment(),
 		"GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=/bin/false",

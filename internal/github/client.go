@@ -4,7 +4,6 @@ package github
 import (
 	"bytes"
 	"context"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,11 +16,6 @@ import (
 )
 
 const defaultBaseURL = "https://api.github.com"
-
-const maxTreeResponseBytes = 8 << 20
-
-// ErrResponseTooLarge identifies a refused bounded API response.
-var ErrResponseTooLarge = errors.New("GitHub response exceeds byte limit")
 
 // Client calls GitHub with a user token. BaseURL and HTTPClient may be changed
 // before the first request, which also makes the client usable with httptest.
@@ -138,20 +132,6 @@ type Branch struct {
 	Commit BranchCommit `json:"commit"`
 }
 
-// GitTree is GitHub's recursive listing of a content-addressed tree.
-type GitTree struct {
-	SHA       string
-	Truncated *bool
-	Tree      []GitTreeEntry
-}
-
-type GitTreeEntry struct {
-	Path string
-	Type string
-	Mode string
-	Size *int64
-}
-
 type repositoryRuleset struct {
 	ID           int64              `json:"id"`
 	Target       string             `json:"target"`
@@ -186,10 +166,6 @@ func (e *StatusError) Error() string {
 }
 
 func (c *Client) request(ctx context.Context, method, path string, input, output any, extra http.Header, expected ...int) (http.Header, int, error) {
-	return c.requestBounded(ctx, method, path, input, output, extra, 0, expected...)
-}
-
-func (c *Client) requestBounded(ctx context.Context, method, path string, input, output any, extra http.Header, maxBytes int64, expected ...int) (http.Header, int, error) {
 	if c == nil {
 		return nil, 0, errors.New("nil GitHub client")
 	}
@@ -239,18 +215,7 @@ func (c *Client) requestBounded(ctx context.Context, method, path string, input,
 	for _, code := range expected {
 		if resp.StatusCode == code {
 			if output != nil && resp.StatusCode != http.StatusNotModified {
-				if maxBytes > 0 {
-					data, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
-					if err != nil {
-						return resp.Header, resp.StatusCode, fmt.Errorf("read GitHub %s %s response: %w", method, path, err)
-					}
-					if int64(len(data)) > maxBytes {
-						return resp.Header, resp.StatusCode, fmt.Errorf("%w: %s %s allows %d bytes", ErrResponseTooLarge, method, path, maxBytes)
-					}
-					if err := json.Unmarshal(data, output); err != nil {
-						return resp.Header, resp.StatusCode, fmt.Errorf("decode GitHub %s %s response: %w", method, path, err)
-					}
-				} else if err := json.NewDecoder(resp.Body).Decode(output); err != nil {
+				if err := json.NewDecoder(resp.Body).Decode(output); err != nil {
 					return resp.Header, resp.StatusCode, fmt.Errorf("decode GitHub %s %s response: %w", method, path, err)
 				}
 			}
@@ -266,23 +231,6 @@ func (c *Client) requestBounded(ctx context.Context, method, path string, input,
 		message = ghErr.Message
 	}
 	return resp.Header, resp.StatusCode, &StatusError{Method: method, Path: path, StatusCode: resp.StatusCode, Message: message}
-}
-
-// GitTree returns bounded size metadata without downloading blob contents.
-func (c *Client) GitTree(ctx context.Context, repo, treeSHA string) (GitTree, error) {
-	var tree GitTree
-	path, err := repoPath(repo)
-	if err != nil {
-		return tree, err
-	}
-	if len(treeSHA) != 40 {
-		return tree, errors.New("invalid Git tree SHA")
-	}
-	if _, err := hex.DecodeString(treeSHA); err != nil {
-		return tree, errors.New("invalid Git tree SHA")
-	}
-	_, _, err = c.requestBounded(ctx, http.MethodGet, path+"/git/trees/"+treeSHA+"?recursive=1", nil, &tree, nil, maxTreeResponseBytes, http.StatusOK)
-	return tree, err
 }
 
 // ReactEyes acknowledges the exact GitHub item containing a command. GraphQL

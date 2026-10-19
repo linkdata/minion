@@ -49,7 +49,7 @@ type Orchestrator struct {
 	Store                     *state.Store
 	Usage                     *usage.Store
 	Logger                    *log.Logger
-	// CheckWorkRoot verifies the work filesystem before a job and after failure.
+	// CheckWorkRoot gates a job before work and logs a second check after failure.
 	//
 	// A nil function disables these checks.
 	CheckWorkRoot func() error

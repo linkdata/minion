@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -78,6 +79,9 @@ if $resume; then printf '%s\n' '`+doubled+`'; else printf '%s\n' '`+successfulRe
 		return args[at+1]
 	}
 	firstID := option(firstArgs, "--session-id")
+	if !regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`).MatchString(firstID) {
+		t.Fatalf("session ID is not a version-4 UUID: %q", firstID)
+	}
 	if firstID == "" || option(secondArgs, "--resume") != firstID || option(thirdArgs, "--session-id") == firstID {
 		t.Fatal("conversation selection did not continue then start fresh")
 	}
@@ -108,6 +112,9 @@ if $resume; then printf '%s\n' '`+doubled+`'; else printf '%s\n' '`+successfulRe
 		}
 		if policy.AutoMemory == nil || *policy.AutoMemory || slices.Contains(policy.Sandbox.Filesystem.AllowRead, session.authDir) || slices.Contains(policy.Sandbox.Filesystem.AllowWrite, session.authDir) {
 			t.Fatal("native memory or private authentication exposed")
+		}
+		if !slices.Contains(policy.Sandbox.Filesystem.DenyWrite, filepath.Join(session.runtimeDir, ".git")) {
+			t.Fatal("runtime Git metadata is writable")
 		}
 		for _, grant := range []string{oldGrant, newGrant} {
 			want := i == 0 && grant == oldGrant || i == 1 && grant == newGrant
@@ -377,9 +384,10 @@ esac
 	}
 }
 
-func TestSessionNativeTempRecreatedBeforeResume(t *testing.T) {
+func TestSessionCleansNativeScratchBeforeResume(t *testing.T) {
 	fakeExecutable(t, "claude", `cat >/dev/null
 [ -d "$CLAUDE_CODE_TMPDIR" ] && [ ! -L "$CLAUDE_CODE_TMPDIR" ] || exit 4
+[ ! -e "$PWD/.git" ] && [ ! -L "$PWD/.git" ] || exit 5
 printf '%s\n' '`+successfulResult+`'
 `)
 	var session Session
@@ -393,6 +401,13 @@ printf '%s\n' '`+successfulResult+`'
 		t.Fatal(err)
 	}
 	tmp := filepath.Join(session.runtimeDir, "tmp")
+	gitDir := filepath.Join(session.runtimeDir, ".git")
+	if err := os.Mkdir(gitDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gitDir, "config"), []byte("[core]\n\tfsmonitor = /tmp/not-run\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	outside := t.TempDir()
 	canary := filepath.Join(outside, "canary")
 	if err := os.WriteFile(canary, []byte("unchanged"), 0600); err != nil {
@@ -407,14 +422,26 @@ printf '%s\n' '`+successfulResult+`'
 	if _, err := session.Run(context.Background(), source, "resume", false, "", config.ClaudeConfig{}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := os.Lstat(gitDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("planted Git metadata survived resume: %v", err)
+	}
 	if data, err := os.ReadFile(canary); err != nil || string(data) != "unchanged" {
 		t.Fatalf("native temp followed planted target: %q,%v", data, err)
 	}
 	if err := os.WriteFile(filepath.Join(tmp, "plant"), []byte("old"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Symlink(outside, gitDir); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := session.Run(context.Background(), source, "again", false, "", config.ClaudeConfig{}); err != nil {
 		t.Fatal(err)
+	}
+	if _, err := os.Lstat(gitDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("planted Git symlink survived resume: %v", err)
+	}
+	if data, err := os.ReadFile(canary); err != nil || string(data) != "unchanged" {
+		t.Fatalf("Git cleanup followed planted target: %q,%v", data, err)
 	}
 	if _, err := os.Stat(filepath.Join(tmp, "plant")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("native temp plant survived: %v", err)

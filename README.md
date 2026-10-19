@@ -65,7 +65,7 @@ Minion posts a fixed reply after terminal failure or exhausted attempts. Its rep
 
 ## Setup
 
-Minion requires Linux. Non-Linux builds receive compile/vet coverage only; they are not supported service or executor runtimes. Install Go 1.23 or newer, `gh`, Git 2.45.1 or newer (minimum untested; no startup version check), and the CLI for each enabled model role on the host that will run the service (`codex` by default). Security audits also need Node.js 20 or newer for the [permission model](https://nodejs.org/download/release/v24.20.0/docs/api/permissions.html) used by the skill's report validators, plus a main model with sub-agent support for that skill. Minion selects the supported permission flag at runtime. Keep the configuration and standard native login/configuration paths outside model read grants, including unused providers' stored credentials. Startup and per-action admission check their resolved locations, including symlink targets; selected public binary and skill subtrees remain usable. Copy the sample configuration, set its bot login and repository whitelist, then authenticate as that bot in the same operating-system account or service environment. Add `invitation_owners` only if the bot should accept invitations from those owners:
+Minion requires Linux. CI compiles and vets Darwin as a portability check; non-Linux service and executor runtimes are unsupported. Install Go 1.23 or newer, `gh`, Git 2.45.1 or newer (minimum untested; no startup version check), and the CLI for each enabled model role on the host that will run the service (`codex` by default). Security audits also need Node.js 20 or newer for the [permission model](https://nodejs.org/download/release/v24.20.0/docs/api/permissions.html) used by the skill's report validators, plus a main model with sub-agent support for that skill. Minion selects the supported permission flag at runtime. Keep the configuration and standard native login/configuration paths outside model read grants, including unused providers' stored credentials. Startup and per-action admission check their resolved locations, including symlink targets; selected public binary and skill subtrees remain usable. Copy the sample configuration, set its bot login and repository whitelist, then authenticate as that bot in the same operating-system account or service environment. Add `invitation_owners` only if the bot should accept invitations from those owners:
 
 ```sh
 cp -n config.json config.local.json
@@ -201,7 +201,7 @@ Key contract and execution limits:
 | Title; combined title/description/notes | 1 KiB; 64 MiB |
 | Identity segments / diagnostic codes | 1–100 ASCII characters from `[A-Za-z0-9._-]`, except `.` and `..` |
 | Requester login | Same base spelling, optionally followed by one `[bot]` suffix; numeric identity and repository authorization remain required |
-| Model/effort; skills | 128 UTF-8 bytes each, no NUL/CR/LF; 64 required+always-on sources per role, 4096 bytes per source |
+| Model/effort; skills | Model and effort: 128 UTF-8 bytes each, no space, tab, CR, LF or NUL. Skills: 64 required+always-on sources per role, 4096 bytes per source |
 | Job runtime; critic budget | Greater than zero, at most 24 hours (configuration: 1–1440 minutes); 1–20 proposals with a critic, nonblocking threshold 0 through the configured `critic_max_rounds` |
 | Diagnostics | 100 per Result and Status contract (Status is defined but not emitted; production/transport is #96 work); 8 KiB per UTF-8 message, no NUL |
 | Complete audit | Seven named regular files; 5 MiB per non-summary file; `REPORT.md` uses the published-text limit |
@@ -210,9 +210,9 @@ Key contract and execution limits:
 | Comparison diff; complete Git repository bundle | 1 MiB; separate 64 MiB. Oversized bundles are refused, never truncated. |
 | Complete default/head/merge-base tree | 10,000 blob/gitlink paths, 64 MiB declared blob bytes, 100,000 metadata entries |
 | Materialized Git metadata | 128 MiB total, 64 MiB per file, 100,000 entries counting directories and the `.git` root itself |
-| GitHub tree metadata response | 8 MiB |
+| Local complete-tree listing | 64 MiB per tree, before parsing metadata or reading blobs |
 | Fix result; binary patch | 100 changes, 1 MiB of full changed-file contents including mode-only changes; separate 1 MiB patch limit includes removed/deleted contents and encoding overhead |
-| Fix control files / source scans | 64 MiB per `.gitignore`/`.gitattributes` before fix collection; 100,000 combined file and distinct ancestor-directory entries per admitted layout, and 100,000 visited entries in fix/frozen-input walks |
+| Fix control files / source scans | 64 MiB per `.gitignore`/`.gitattributes`; 1 MiB total of new or changed control-file contents before Git reads them. Unchanged supplied controls are exempt. Scans allow 100,000 combined file and distinct ancestor-directory entries per admitted layout, and 100,000 visited entries in fix/frozen-input walks. |
 | Provider stream | 64 MiB, 100,000 records; 4 MiB per raw JSONL line before LF, including a preceding CR |
 | Codex model catalogue | 4 MiB per line after removing CR/LF; exact-cap LF, CRLF and EOF accepted |
 | Codex rollout accounting | 128 MiB per rollout per pass; 512 MiB per collection pass, plus a separate 512 MiB baseline pass on resume; 100,000 retained turn IDs and response IDs each per rollout |

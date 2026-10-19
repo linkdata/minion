@@ -172,11 +172,6 @@ func TestGitHubContextLimitAcrossActions(t *testing.T) {
 							Title: title, Body: description,
 							Base: github.PullRequestRef{Ref: "main"}, Head: github.PullRequestRef{SHA: head},
 						})
-					case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/o/r/git/trees/"):
-						respond(w, map[string]any{
-							"sha":       strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/"),
-							"truncated": false, "tree": []any{},
-						})
 					case r.Method == http.MethodPost && r.URL.Path == "/graphql":
 						var input struct {
 							Query string `json:"query"`

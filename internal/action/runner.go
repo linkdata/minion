@@ -184,6 +184,7 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 			}
 		}
 	}
+	// Model sessions close before review snapshots; snapshots may add paths to outer cleanup.
 	defer closeReview()
 	observe := configured.aroundModel
 	configured.aroundModel = func(ctx context.Context, request modelRun, next modelCall) (aicli.Result, error) {
@@ -210,11 +211,9 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 			}
 			if review.outputDir != "" {
 				mapping += fmt.Sprintf("\n\nFrozen reports are at %q, copied from %q; original paths in raw report metadata identify that original report directory.", review.outputDir, outputDir)
-			}
-			request.dir, request.prompt = review.source, request.criticPrompt(mapping, review.outputDir)
-			if review.outputDir != "" {
 				request.readOnlyDirs = []string{review.outputDir}
 			}
+			request.dir, request.prompt = review.source, request.criticPrompt(mapping, review.outputDir)
 		}
 		request.readOnlyDirs = append(request.readOnlyDirs, contextDir)
 		if len(request.refutations) != 0 {

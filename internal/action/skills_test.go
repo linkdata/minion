@@ -125,7 +125,6 @@ func TestRunnerRequiresEverySkillAndLoadsOptionalSkills(t *testing.T) {
 		Commands: map[string]config.CommandMapping{
 			"inspect": {Action: "review", Skills: []string{testReviewSkillURL, extraURL}},
 		},
-
 		AlwaysOnSkills: []string{optionalURL},
 	}
 	if err := orchestrator.validateCommand(job); err != nil {
@@ -167,7 +166,6 @@ func TestValidateCommandRequiresSupportedMainWorkflow(t *testing.T) {
 			Commands: map[string]config.CommandMapping{
 				"inspect": {Action: "security-audit", Skills: []string{testAuditSkillURL}},
 			},
-
 			Main: main,
 		}
 		err := e.validateCommand(job)

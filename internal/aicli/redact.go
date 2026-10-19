@@ -10,29 +10,35 @@ import (
 
 // RedactText replaces literal, Go-quoted and JSON-encoded secret content.
 func RedactText(text, secret string) string {
+	redacted, _ := redactText(text, secret)
+	return redacted
+}
+
+func redactText(text, secret string) (string, int) {
 	if secret == "" {
-		return text
+		return text, 0
 	}
 	quoted := strconv.Quote(secret)
 	encoded, _ := json.Marshal(secret)
+	forms := [3]string{string(encoded[1 : len(encoded)-1]), quoted[1 : len(quoted)-1], secret}
+	var replacements [6]string
+	longest := 0
+	for i, form := range forms {
+		replacements[2*i], replacements[2*i+1] = form, "[redacted]"
+		longest = max(longest, len(form))
+	}
 	// Encoded forms precede literals; replacement text is not rescanned.
-	return strings.NewReplacer(
-		string(encoded[1:len(encoded)-1]), "[redacted]",
-		quoted[1:len(quoted)-1], "[redacted]",
-		secret, "[redacted]",
-	).Replace(text)
+	return strings.NewReplacer(replacements[:]...).Replace(text), longest
 }
 
 // RedactTail keeps useful trailing diagnostics without exposing a key cut at the tail boundary.
 func RedactTail(tail *bounded.Tail, secret string) string {
-	text := RedactText(strings.TrimSpace(tail.String()), secret)
+	text, longest := redactText(strings.TrimSpace(tail.String()), secret)
 	if secret == "" || !tail.Truncated {
 		return text
 	}
-	quoted := strconv.Quote(secret)
-	encoded, _ := json.Marshal(secret)
 	// Complete matches are gone; discard any encoded-key suffix at the cut.
-	discard := max(len(quoted)-2, len(encoded)-2) - 1
+	discard := longest - 1
 	if discard >= len(text) {
 		return ""
 	}

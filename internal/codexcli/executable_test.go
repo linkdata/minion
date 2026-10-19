@@ -30,6 +30,8 @@ func TestMain(m *testing.M) {
 	case "exec":
 		fmt.Println(`{"type":"item.completed","item":{"type":"agent_message","text":"shim answer"}}`)
 		fmt.Println(`{"type":"turn.completed"}`)
+	case "login":
+		return
 	case "debug":
 		text := "MINION_TRUSTED_PROMPT_78"
 		if _, err := os.Stat(".minion-codex-root"); err != nil {
@@ -153,5 +155,10 @@ func TestCanonicalExecutablePreservesMulticallNameInRunAndPreflight(t *testing.T
 	}
 	if err := ValidateInstructionBoundary(context.Background()); err != nil {
 		t.Fatalf("multicall instruction preflight: %v", err)
+	}
+	t.Setenv("CODEX_API_KEY", "")
+	t.Setenv("CODEX_ACCESS_TOKEN", "")
+	if err := CheckLogin(context.Background(), config.CodexConfig{}); err != nil {
+		t.Fatalf("multicall login preflight: %v", err)
 	}
 }

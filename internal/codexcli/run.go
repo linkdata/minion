@@ -26,6 +26,8 @@ const (
 	instructionRoot  = ".minion-codex-root"
 )
 
+var runtimeMetadataNames = [...]string{".git", ".agents", ".codex"}
+
 // SystemReadPaths lists the Linux roots expanded by :minimal in Codex 0.160.0.
 // Admission checks use these paths; the native special path preserves OS aliases.
 func SystemReadPaths() []string {
@@ -112,7 +114,7 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 		filesystemRules = append(filesystemRules, fmt.Sprintf(`%s="read"`, strconv.Quote(filepath.Join(workspace, name))))
 	}
 	// Runtime is also the persistent project root; models must not plant Git metadata, skills or config.
-	for _, name := range []string{".git", ".agents", ".codex"} {
+	for _, name := range runtimeMetadataNames {
 		filesystemRules = append(filesystemRules, fmt.Sprintf(`%s="read"`, strconv.Quote(filepath.Join(runtimeDir, name))))
 	}
 	filesystemRules = append(filesystemRules, fmt.Sprintf(`%s="read"`, strconv.Quote(realBinary)))

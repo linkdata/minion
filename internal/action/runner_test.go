@@ -41,6 +41,9 @@ func TestRunnerUsesSuppliedSourceAndContext(t *testing.T) {
 					t.Fatalf("wrong model request: %+v", request)
 				}
 				assertModelRepository(t, request.dir, job.Source.Head)
+				if got := strings.TrimSpace(modelGit(t, request.dir, "rev-parse", "refs/tags/fixture-tag")); got != job.Source.Head {
+					t.Fatalf("fixture tag points to %q, want %q", got, job.Source.Head)
+				}
 				if len(request.readOnlyDirs) != 1 {
 					t.Fatalf("missing read-only context grant: %v", request.readOnlyDirs)
 				}

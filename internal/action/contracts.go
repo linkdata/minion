@@ -160,7 +160,7 @@ func (r RoleSettings) Validate() error {
 	if r.Provider != "codex" && r.Provider != "claude" {
 		return errors.New("unsupported action provider")
 	}
-	if !boundedText(r.Model, maxModelSettingBytes) || !boundedText(r.Effort, maxModelSettingBytes) || strings.ContainsAny(r.Model+r.Effort, "\r\n") || len(r.Skills)+len(r.AlwaysOnSkills) > config.MaxSkillsPerRole {
+	if !boundedText(r.Model, maxModelSettingBytes) || !boundedText(r.Effort, maxModelSettingBytes) || strings.ContainsAny(r.Model+r.Effort, " \t\r\n") || len(r.Skills)+len(r.AlwaysOnSkills) > config.MaxSkillsPerRole {
 		return errors.New("invalid action model or skills")
 	}
 	for _, source := range slices.Concat(r.Skills, r.AlwaysOnSkills) {

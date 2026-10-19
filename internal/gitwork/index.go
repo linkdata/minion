@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha1" // #nosec G505 -- Git object identity, not a security signature.
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -34,6 +35,7 @@ const (
 type OfflineIndex struct {
 	dir, source, binary, baseline string
 	tracked                       map[string]int64
+	controls                      map[string][sha256.Size]byte
 }
 
 // NewOfflineIndex creates private Git metadata for a materialized source snapshot.
@@ -46,9 +48,13 @@ func NewOfflineIndex(ctx context.Context, dir, source string, files []workspace.
 	if err != nil {
 		return nil, fmt.Errorf("offline fix index requires git: %w", err)
 	}
-	index := &OfflineIndex{dir: dir, source: source, binary: binary, tracked: make(map[string]int64, len(files))}
+	index := &OfflineIndex{dir: dir, source: source, binary: binary, tracked: make(map[string]int64, len(files)), controls: make(map[string][sha256.Size]byte)}
 	for _, file := range files {
 		index.tracked[file.Path] = int64(len(file.Data))
+		switch path.Base(file.Path) {
+		case ".gitignore", ".gitattributes":
+			index.controls[file.Path] = sha256.Sum256(file.Data)
+		}
 	}
 	if _, err := index.run(ctx, 1024, nil, "init", "--quiet", "--template=", "--object-format=sha1"); err != nil {
 		return nil, err
@@ -198,6 +204,7 @@ func (index *OfflineIndex) checkControlFiles(ctx context.Context) error {
 		ignored      bool
 	}
 	dirs, entries := []directory{{name: "."}}, 0
+	changedControlBytes := int64(0)
 	for len(dirs) != 0 {
 		var next []directory
 		var candidates []directory
@@ -246,7 +253,8 @@ func (index *OfflineIndex) checkControlFiles(ctx context.Context) error {
 			absolute := filepath.Join(index.source, filepath.FromSlash(dir))
 			for _, control := range []string{".gitignore", ".gitattributes"} {
 				name := path.Join(dir, control)
-				info, err := os.Lstat(filepath.Join(absolute, control))
+				filename := filepath.Join(absolute, control)
+				info, err := os.Lstat(filename)
 				if errors.Is(err, os.ErrNotExist) {
 					continue
 				}
@@ -255,6 +263,20 @@ func (index *OfflineIndex) checkControlFiles(ctx context.Context) error {
 				}
 				if !info.Mode().IsRegular() || info.Size() > workspace.MaxBytes {
 					return fmt.Errorf("fix control file %q must be regular and bounded to %d bytes", name, workspace.MaxBytes)
+				}
+				unchanged := false
+				if baseline, tracked := index.controls[name]; tracked && info.Size() == index.tracked[name] {
+					data, err := workspace.ReadRegular(filename, workspace.MaxBytes)
+					if err != nil {
+						return fmt.Errorf("fix control file %q: %w", name, err)
+					}
+					unchanged = sha256.Sum256(data) == baseline
+				}
+				if !unchanged {
+					if info.Size() > int64(workspace.MaxChangeBytes)-changedControlBytes {
+						return fmt.Errorf("fix control file %q exceeds changed byte limit", name)
+					}
+					changedControlBytes += info.Size()
 				}
 				if _, tracked := index.tracked[name]; control == ".gitignore" && !tracked && !current.ignored {
 					controls[name] = true

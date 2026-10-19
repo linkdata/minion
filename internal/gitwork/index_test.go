@@ -114,7 +114,7 @@ func TestFixIndexQuotesGitDiagnostic(t *testing.T) {
 
 func TestFixIndexBoundsControlFilesBeforeGitReadsThem(t *testing.T) {
 	for _, control := range []string{".gitignore", ".gitattributes"} {
-		for _, size := range []int64{workspace.MaxBytes, workspace.MaxBytes + 1} {
+		for _, size := range []int64{workspace.MaxChangeBytes, workspace.MaxChangeBytes + 1, workspace.MaxBytes + 1} {
 			t.Run(fmt.Sprintf("%s/%d", control, size), func(t *testing.T) {
 				index, source := offlineIndexFixture(t, nil)
 				name := filepath.Join(source, control)
@@ -126,11 +126,15 @@ func TestFixIndexBoundsControlFilesBeforeGitReadsThem(t *testing.T) {
 				}
 				marker := filepath.Join(t.TempDir(), "called")
 				const command = "git-control-probe"
-				// No Git process reads the sparse file, including the exact-limit control.
+				// Git reads an exact-limit control, but not an oversized sparse file.
 				index.binary = filepath.Join(fakeOnPath(t, command, "#!/bin/sh\nprintf called > "+shellQuote(marker)+"\nexit 91\n"), command)
 				_, err := index.Changes(context.Background())
-				if size > workspace.MaxBytes {
-					if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("fix control file %q must be regular and bounded", control)) {
+				if size > workspace.MaxChangeBytes {
+					want := fmt.Sprintf("fix control file %q exceeds changed byte limit", control)
+					if size > workspace.MaxBytes {
+						want = fmt.Sprintf("fix control file %q must be regular and bounded", control)
+					}
+					if err == nil || !strings.Contains(err.Error(), want) {
 						t.Fatalf("oversized control reached later collection: %v", err)
 					}
 					if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
@@ -147,6 +151,52 @@ func TestFixIndexBoundsControlFilesBeforeGitReadsThem(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestFixIndexBoundsAggregateControlBytesBeforeGit(t *testing.T) {
+	index, source := offlineIndexFixture(t, nil)
+	for _, control := range []string{".gitignore", ".gitattributes"} {
+		name := filepath.Join(source, control)
+		if err := os.WriteFile(name, nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Truncate(name, workspace.MaxChangeBytes/2+1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	marker := filepath.Join(t.TempDir(), "called")
+	index.binary = filepath.Join(fakeOnPath(t, "git-control-probe", "#!/bin/sh\nprintf called > "+shellQuote(marker)+"\nexit 91\n"), "git-control-probe")
+	if _, err := index.Changes(context.Background()); err == nil || !strings.Contains(err.Error(), `fix control file ".gitattributes" exceeds changed byte limit`) {
+		t.Fatalf("aggregate control bytes were accepted: %v", err)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("oversized aggregate reached Git: %v", err)
+	}
+}
+
+func TestFixIndexChargesSameSizeTrackedControlRewrite(t *testing.T) {
+	baseline := bytes.Repeat([]byte{' '}, workspace.MaxChangeBytes+1)
+	index, source := offlineIndexFixture(t, []workspace.File{{Path: ".gitignore", Mode: workspace.Regular, Data: baseline}})
+	marker := filepath.Join(t.TempDir(), "called")
+	index.binary = filepath.Join(fakeOnPath(t, "git-control-probe", "#!/bin/sh\nprintf called > "+shellQuote(marker)+"\nexit 91\n"), "git-control-probe")
+	if _, err := index.Changes(context.Background()); err == nil {
+		t.Fatal("unchanged tracked control did not reach Git")
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("unchanged tracked control was refused before Git: %v", err)
+	}
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, ".gitignore"), bytes.Repeat([]byte{'a'}, len(baseline)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := index.Changes(context.Background()); err == nil || !strings.Contains(err.Error(), `fix control file ".gitignore" exceeds changed byte limit`) {
+		t.Fatalf("same-size control rewrite was accepted: %v", err)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("same-size control rewrite reached Git: %v", err)
 	}
 }
 

@@ -1,54 +1,18 @@
 package gitwork
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/linkdata/minion/internal/aicli"
-	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/workspace"
 )
-
-// Fixtures provide the same tree metadata as the GitHub lookup.
-func localTreeMetadata(dir string) func(context.Context, string) (github.GitTree, error) {
-	return func(ctx context.Context, sha string) (github.GitTree, error) {
-		cmd := exec.CommandContext(ctx, "git", "-C", dir, "ls-tree", "-r", "-l", "-z", sha)
-		cmd.Env = cleanGitEnvironment()
-		output, err := cmd.Output()
-		if err != nil {
-			return github.GitTree{}, err
-		}
-		tree := completeTree(sha, []github.GitTreeEntry{})
-		for _, line := range bytes.Split(bytes.TrimSuffix(output, []byte{0}), []byte{0}) {
-			if len(line) == 0 {
-				continue
-			}
-			metadata, name, ok := bytes.Cut(line, []byte{'\t'})
-			fields := strings.Fields(string(metadata))
-			if !ok || len(fields) != 4 {
-				return github.GitTree{}, errors.New("invalid fixture tree")
-			}
-			entry := github.GitTreeEntry{Path: string(name), Mode: fields[0], Type: fields[1]}
-			if entry.Type == "blob" {
-				size, err := strconv.ParseInt(fields[3], 10, 64)
-				if err != nil {
-					return github.GitTree{}, err
-				}
-				entry.Size = &size
-			}
-			tree.Tree = append(tree.Tree, entry)
-		}
-		return tree, nil
-	}
-}
 
 func TestResolveCredentialHelperPreservesSymlinkName(t *testing.T) {
 	gitPath, err := exec.LookPath("git")
@@ -150,14 +114,11 @@ func TestRepositoryAndRefValidation(t *testing.T) {
 			t.Errorf("validateBranch(%q) should fail", branch)
 		}
 	}
-	if _, err := Clone(context.Background(), t.TempDir(), "../bad", "main", nil, true); err == nil {
+	if _, err := Clone(context.Background(), t.TempDir(), "../bad", "main", true); err == nil {
 		t.Fatal("Clone accepted an invalid repository")
 	}
-	if _, err := Clone(context.Background(), t.TempDir(), "owner/repo", "bad..branch", nil, true); err == nil {
+	if _, err := Clone(context.Background(), t.TempDir(), "owner/repo", "bad..branch", true); err == nil {
 		t.Fatal("Clone accepted an invalid default branch")
-	}
-	if _, err := Clone(context.Background(), t.TempDir(), "owner/repo", "main", nil, true); err == nil {
-		t.Fatal("Clone accepted missing tree metadata lookup")
 	}
 }
 
@@ -252,25 +213,21 @@ func TestCheckoutPullRequestBoundsAliasedTreeEntries(t *testing.T) {
 	}
 }
 
-func completeTree(sha string, entries []github.GitTreeEntry) github.GitTree {
-	truncated := false
-	return github.GitTree{SHA: sha, Truncated: &truncated, Tree: entries}
-}
-
 func TestCheckoutPullRequestRejectsOversizedHeadMetadata(t *testing.T) {
 	fixture := newFixture(t)
-	writeFile(t, filepath.Join(fixture.source, "new.dat"), "local PR blob\n")
+	name := filepath.Join(fixture.source, "new.dat")
+	if err := os.WriteFile(name, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(name, workspace.MaxBytes+1); err != nil {
+		t.Fatal(err)
+	}
 	fixture.git(fixture.source, "add", "new.dat")
 	fixture.git(fixture.source, "commit", "-m", "new blob")
 	head := fixture.git(fixture.source, "rev-parse", "HEAD")
 	blob := fixture.git(fixture.source, "rev-parse", "HEAD:new.dat")
 	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/pull/7/head")
-	checkout := fixture.keepCheckout(cloneFromURL(context.Background(), t.TempDir(), "file://"+fixture.remote, "main", localTreeMetadata(fixture.source), true))
-	oversized := func(_ context.Context, sha string) (github.GitTree, error) {
-		size := int64(workspace.MaxBytes + 1)
-		return completeTree(sha, []github.GitTreeEntry{{Path: "new.dat", Type: "blob", Mode: "100644", Size: &size}}), nil
-	}
-	checkout.lookupTree = oversized
+	checkout := fixture.keepCheckout(cloneFromURL(context.Background(), t.TempDir(), "file://"+fixture.remote, "main", true))
 	if err := checkout.checkoutPullRequest(context.Background(), 7, "main", head); !errors.Is(err, ErrCheckoutTooLarge) {
 		t.Fatalf("oversized PR error = %v, want checkout limit", err)
 	}
@@ -285,7 +242,7 @@ func TestCloneFailureRemovesOwnedDirectoryAndPreservesCause(t *testing.T) {
 	root := t.TempDir()
 	// A failed clone can leave data inside the directory it was given.
 	fakeOnPath(t, "git", "#!/bin/sh\nfor arg do destination=$arg; done\nprintf retained > \"$destination/partial\"\nprintf 'clone fixture failure' >&2\nexit 7\n")
-	checkout, err := cloneRepository(context.Background(), root, fixture.remote, "main", localTreeMetadata(fixture.source))
+	checkout, err := cloneRepository(context.Background(), root, fixture.remote, "main")
 	var exit *exec.ExitError
 	if checkout != nil || !errors.As(err, &exit) || exit.ExitCode() != 7 || !strings.Contains(err.Error(), "clone fixture failure") {
 		t.Fatalf("failed clone lost its cause: checkout=%v error=%v", checkout, err)
@@ -511,7 +468,7 @@ func newFixture(t *testing.T) gitFixture {
 	path := filepath.Join(root, "checkout")
 	fixture.git("", "clone", "--no-checkout", "--branch", "main", fixture.remote, path)
 	fixture.git(path, "checkout", "--detach", "refs/remotes/origin/main")
-	fixture.checkout = &Checkout{path: path, expectedHead: fixture.base, lookupTree: localTreeMetadata(path)}
+	fixture.checkout = &Checkout{path: path, expectedHead: fixture.base}
 	if err := disableAttributes(filepath.Join(path, ".git")); err != nil {
 		t.Fatal(err)
 	}
@@ -527,12 +484,12 @@ func (f gitFixture) git(dir string, args ...string) string {
 
 func (f gitFixture) clone() *Checkout {
 	f.t.Helper()
-	return f.keepCheckout(cloneFromURL(context.Background(), f.t.TempDir(), f.remote, "main", localTreeMetadata(f.source), true))
+	return f.keepCheckout(cloneFromURL(context.Background(), f.t.TempDir(), f.remote, "main", true))
 }
 
 func (f gitFixture) clonePullRequest(head string) *Checkout {
 	f.t.Helper()
-	return f.keepCheckout(clonePullRequestFromURL(context.Background(), f.t.TempDir(), f.remote, 7, "main", head, localTreeMetadata(f.source)))
+	return f.keepCheckout(clonePullRequestFromURL(context.Background(), f.t.TempDir(), f.remote, 7, "main", head))
 }
 
 func (f gitFixture) keepCheckout(checkout *Checkout, err error) *Checkout {

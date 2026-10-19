@@ -3,7 +3,6 @@ package gitwork
 import (
 	"bytes"
 	"context"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -12,7 +11,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -133,7 +131,7 @@ func TestCloneRejectsShallowSource(t *testing.T) {
 	fixture := newFixture(t)
 	writeFile(t, filepath.Join(fixture.remote, "shallow"), fixture.base+"\n")
 	root := t.TempDir()
-	checkout, err := cloneFromURL(context.Background(), root, "file://"+fixture.remote, "main", localTreeMetadata(fixture.source), true)
+	checkout, err := cloneFromURL(context.Background(), root, "file://"+fixture.remote, "main", true)
 	if checkout != nil || err == nil || !strings.Contains(err.Error(), "source repository is shallow") {
 		t.Fatalf("shallow source returned checkout=%v error=%v", checkout, err)
 	}
@@ -160,17 +158,16 @@ func TestSourceFilesBoundsDistinctOmittedUnion(t *testing.T) {
 
 func TestSnapshotRejectsGitConfigChangedDuringPreparation(t *testing.T) {
 	fixture := newFixture(t)
-	lookup := fixture.checkout.lookupTree
-	changed := false
-	fixture.checkout.lookupTree = func(ctx context.Context, sha string) (github.GitTree, error) {
-		tree, err := lookup(ctx, sha)
-		fixture.git(fixture.checkout.path, "config", "minion.probe", "changed")
-		changed = true
-		return tree, err
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
 	}
-	_, err := fixture.checkout.Snapshot(context.Background())
-	if !changed || err == nil || !strings.Contains(err.Error(), "Git config changed") {
-		t.Fatalf("mid-preparation config change: changed=%v error=%v", changed, err)
+	marker := filepath.Join(t.TempDir(), "changed")
+	script := "#!/bin/sh\nfor arg do if [ \"$arg\" = ls-tree ]; then " + shellQuote(realGit) + " -C " + shellQuote(fixture.checkout.path) + " config minion.probe changed; touch " + shellQuote(marker) + "; break; fi; done\nexec " + shellQuote(realGit) + " \"$@\"\n"
+	fakeOnPath(t, "git", script)
+	_, err = fixture.checkout.Snapshot(context.Background())
+	if _, markerErr := os.Stat(marker); markerErr != nil || err == nil || !strings.Contains(err.Error(), "Git config changed") {
+		t.Fatalf("mid-preparation config change: marker=%v error=%v", markerErr, err)
 	}
 }
 
@@ -249,19 +246,22 @@ func TestImportRejectsIdentityAndMetadataAndPreservesBytes(t *testing.T) {
 
 func TestSnapshotReusesValidatedTreesByCommit(t *testing.T) {
 	fixture := newFixture(t)
-	lookups := 0
-	lookup := localTreeMetadata(fixture.source)
-	checkout := fixture.keepCheckout(cloneFromURL(context.Background(), t.TempDir(), fixture.remote, "main", func(ctx context.Context, sha string) (github.GitTree, error) {
-		lookups++
-		return lookup(ctx, sha)
-	}, true))
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(t.TempDir(), "tree-calls")
+	script := "#!/bin/sh\nfor arg do if [ \"$arg\" = ls-tree ]; then printf x >> " + shellQuote(marker) + "; fi; done\nexec " + shellQuote(realGit) + " \"$@\"\n"
+	fakeOnPath(t, "git", script)
+	checkout := fixture.keepCheckout(cloneFromURL(context.Background(), t.TempDir(), fixture.remote, "main", true))
 	for i := 0; i < 2; i++ {
 		if _, err := checkout.Snapshot(context.Background()); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if lookups != 1 {
-		t.Fatalf("default clone/snapshot metadata lookups=%d, want 1", lookups)
+	data, err := os.ReadFile(marker)
+	if err != nil || len(data) != 1 {
+		t.Fatalf("default tree reads=%q error=%v, want one", data, err)
 	}
 	writeFile(t, filepath.Join(fixture.source, "README.md"), "PR source\n")
 	head := fixture.commit("refs/pull/7/head", "PR source")
@@ -274,8 +274,9 @@ func TestSnapshotReusesValidatedTreesByCommit(t *testing.T) {
 			t.Fatalf("snapshot=%+v error=%v", snapshot, err)
 		}
 	}
-	if lookups != 2 {
-		t.Fatalf("PR checkout/snapshot metadata lookups=%d, want 2 total", lookups)
+	data, err = os.ReadFile(marker)
+	if err != nil || len(data) != 2 {
+		t.Fatalf("PR tree reads=%q error=%v, want two", data, err)
 	}
 }
 
@@ -412,96 +413,29 @@ func TestSnapshotPreservesGitLegalSourceNames(t *testing.T) {
 	}
 }
 
-func TestSourceEntriesCrossChecksGitMetadata(t *testing.T) {
+func TestSourceEntriesReadLocalSymlink(t *testing.T) {
 	fixture := newFixture(t)
-	root := fixture.checkout.path
-	if err := os.Symlink("README.md", filepath.Join(root, "link")); err != nil {
+	if err := os.Symlink("README.md", filepath.Join(fixture.checkout.path, "link")); err != nil {
 		t.Fatal(err)
 	}
-	fixture.git(root, "add", "link")
-	fixture.git(root, "commit", "-m", "symlink metadata fixture")
-	head := fixture.git(root, "rev-parse", "HEAD")
-	treeSHA := fixture.git(root, "rev-parse", "HEAD^{tree}")
-	tree, err := localTreeMetadata(root)(context.Background(), treeSHA)
+	fixture.git(fixture.checkout.path, "add", "link")
+	fixture.git(fixture.checkout.path, "commit", "-m", "symlink metadata fixture")
+	head := fixture.git(fixture.checkout.path, "rev-parse", "HEAD")
+	entries, err := fixture.checkout.sourceTree(context.Background(), head)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, test := range []struct {
-		name   string
-		mutate func(*github.GitTree)
-	}{
-		{"valid", func(*github.GitTree) {}},
-		{"regular mode", func(tree *github.GitTree) { tree.Tree[0].Mode = "100755" }},
-		{"symlink as regular", func(tree *github.GitTree) { tree.Tree[1].Mode = "100644" }},
-		{"missing", func(tree *github.GitTree) { tree.Tree = tree.Tree[:1] }},
-		{"unmatched", func(tree *github.GitTree) {
-			size := int64(0)
-			tree.Tree = append(tree.Tree, github.GitTreeEntry{Path: "extra", Mode: "100644", Type: "blob", Size: &size})
-		}},
-		{"duplicate", func(tree *github.GitTree) { tree.Tree = append(tree.Tree, tree.Tree[0]) }},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			changed := tree
-			changed.Tree = append([]github.GitTreeEntry(nil), tree.Tree...)
-			test.mutate(&changed)
-			_, err := fixture.checkout.sourceEntries(context.Background(), head, changed, treeSHA)
-			if test.name == "valid" {
-				if err != nil {
-					t.Fatal(err)
-				}
-			} else if !errors.Is(err, ErrUnsupportedSource) {
-				t.Fatalf("metadata mismatch classification: %v", err)
+	found := false
+	for _, entry := range entries {
+		if entry.file.Path == "link" {
+			if !entry.omitted || entry.file.Mode != 0120000 || entry.size != int64(len("README.md")) {
+				t.Fatalf("local symlink entry=%+v", entry)
 			}
-		})
+			found = true
+		}
 	}
-}
-
-func TestSourceEntriesRejectsAncestorCollisionWithoutDirectoryMetadata(t *testing.T) {
-	fixture := newFixture(t)
-	blob := fixture.git(fixture.source, "rev-parse", "HEAD:README.md")
-	subtree := fixture.gitInput(fixture.source, "100644 blob "+blob+"\tb\n", "mktree")
-	blobBytes, err := hex.DecodeString(blob)
-	if err != nil {
-		t.Fatal(err)
-	}
-	treeBytes, err := hex.DecodeString(subtree)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// A malformed tree can name both a file and a directory "a". The recursive
-	// metadata fixture, like a partial API response, lists only a and a/b.
-	raw := "100644 a\x00" + string(blobBytes) + "40000 a\x00" + string(treeBytes)
-	treeSHA := fixture.gitInput(fixture.source, raw, "hash-object", "--literally", "-w", "-t", "tree", "--stdin")
-	tree, err := localTreeMetadata(fixture.source)(context.Background(), treeSHA)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := checkSourceTree(tree, treeSHA); err != nil {
-		t.Fatalf("fixture failed before ancestor-layout validation: %v", err)
-	}
-	checkout := &Checkout{path: fixture.source}
-	_, err = checkout.sourceEntries(context.Background(), treeSHA, tree, treeSHA)
-	if !errors.Is(err, ErrUnsupportedSource) || !strings.Contains(err.Error(), "file/directory collision") {
-		t.Fatalf("accepted incomplete directory metadata: %v", err)
-	}
-}
-
-func TestSourceTreeListingOverflowIsMetadataMismatch(t *testing.T) {
-	fixture := newFixture(t)
-	treeSHA := fixture.git(fixture.checkout.path, "rev-parse", "HEAD^{tree}")
-	tree, err := localTreeMetadata(fixture.checkout.path)(context.Background(), treeSHA)
-	if err != nil {
-		t.Fatal(err)
-	}
-	realGit, err := exec.LookPath("git")
-	if err != nil {
-		t.Fatal(err)
-	}
-	script := fmt.Sprintf("#!/bin/sh\ncase \" $* \" in *' ls-tree '*) head -c %d /dev/zero;; *) exec %s \"$@\";; esac\n", maxPathListBytes+1, shellQuote(realGit))
-	fakeOnPath(t, "git", script)
-	_, err = fixture.checkout.sourceEntries(context.Background(), fixture.base, tree, treeSHA)
-	if !errors.Is(err, ErrUnsupportedSource) || errors.Is(err, ErrCheckoutTooLarge) {
-		t.Fatalf("listing mismatch error=%v", err)
+	if !found {
+		t.Fatal("local symlink missing from tree")
 	}
 }
 

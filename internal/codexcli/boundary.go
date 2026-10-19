@@ -64,13 +64,14 @@ func ValidateInstructionBoundary(ctx context.Context) (resultErr error) {
 	}
 	// #nosec G204 -- Git receives one generated path as an argument, without a shell.
 	git := exec.CommandContext(ctx, "git", "init", "-q", repo)
-	git.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + probeHome, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null"}
+	git.Env = append([]string{"PATH=" + os.Getenv("PATH"), "HOME=" + probeHome}, aicli.ModelGitEnvironment()...)
 	if err := git.Run(); err != nil {
 		return fmt.Errorf("create Codex instruction probe repository: %w", err)
 	}
 	// A visible control proves this CLI exposes both instruction sources to
 	// prompt-input. The isolated renders then check project-root isolation and
 	// the production skill-catalogue setting separately.
+	env := childEnvironment([]string{"PATH=" + os.Getenv("PATH"), "HOME=" + probeHome, "CODEX_HOME=" + probeHome}, runtimeDir, runtimeDir, probeHome, false)
 	for _, check := range []struct {
 		dir        string
 		config     []string
@@ -82,7 +83,6 @@ func ValidateInstructionBoundary(ctx context.Context) (resultErr error) {
 	} {
 		args := append([]string{"debug", "prompt-input"}, check.config...)
 		args = append(args, probePrompt)
-		env := childEnvironment([]string{"PATH=" + os.Getenv("PATH"), "HOME=" + probeHome, "CODEX_HOME=" + probeHome}, runtimeDir, runtimeDir, probeHome, false)
 		output, err := aicli.Probe(ctx, binary, "codex", args, check.dir, env, "", "")
 		if err != nil {
 			return fmt.Errorf("render Codex instruction probe: %w", err)

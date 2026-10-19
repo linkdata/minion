@@ -39,9 +39,7 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	result.UsageComplete = true
 	defer func() {
 		runError = aicli.RedactError(runError, settings.APIKey)
-		if settings.APIKey != "" {
-			result.Answer = aicli.RedactText(result.Answer, settings.APIKey)
-		}
+		result.Answer = aicli.RedactText(result.Answer, settings.APIKey)
 	}()
 	if strings.TrimSpace(prompt) == "" {
 		return result, errors.New("claude: prompt is empty")
@@ -202,7 +200,7 @@ func SystemReadPaths() []string {
 func sandboxSettings(workspace, runtimeDir string, writable bool, outputDir string, settings config.ClaudeConfig, skillPaths []string, authDir string) (string, error) {
 	reads := append(SystemReadPaths(), workspace, runtimeDir)
 	writes := []string{runtimeDir}
-	deniedWrites := []string{}
+	deniedWrites := []string{filepath.Join(runtimeDir, ".git")}
 	if writable {
 		writes = append(writes, workspace)
 		for _, name := range []string{".git", ".agents", ".codex", ".claude"} {
@@ -272,7 +270,7 @@ func childEnvironment(env []string, runtimeDir, cacheDir, authDir, configDir str
 		if key == strings.ToLower(key) && (proxyKey == "HTTP_PROXY" || proxyKey == "HTTPS_PROXY" || proxyKey == "ALL_PROXY" || proxyKey == "NO_PROXY") {
 			key = proxyKey
 		}
-		if authDir != "" && (key == "ANTHROPIC_API_KEY" || key == "CLAUDE_CODE_OAUTH_TOKEN" || key == "CLAUDE_CONFIG_DIR") {
+		if authDir != "" && (key == "ANTHROPIC_API_KEY" || key == "CLAUDE_CODE_OAUTH_TOKEN") {
 			continue
 		}
 		// Native credential denial removes values from the shell environment,

@@ -71,8 +71,6 @@ func TestSecurityAuditIssueAndPullRequest(t *testing.T) {
 					if _, err := fmt.Fprintf(w, `{"title":%q,"body":%q,"base":{"ref":"main"},"head":{"sha":%q}}`, title, description, apiHead); err != nil {
 						t.Error(err)
 					}
-				case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/o/r/git/trees/"):
-					writeTreeFixture(t, w, strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/"))
 				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7/comments":
 					if err := json.NewEncoder(w).Encode(comments); err != nil {
 						t.Error(err)

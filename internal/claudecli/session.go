@@ -115,6 +115,10 @@ func (s *Session) prepare(workspace string, writable bool, outputDir string, set
 		}
 		s.reset = false
 	}
+	// Do not let a previous model call supply Git config to native startup.
+	if err := cleanup.RemoveAll(filepath.Join(s.runtimeDir, ".git")); err != nil {
+		return fmt.Errorf("claude runtime Git metadata cleanup: %w", err)
+	}
 	// Native startup must not follow temp paths planted by the previous model call.
 	// Earlier CLI temp outputs are intentionally discarded; native transcripts stay outside tmp.
 	tmp := filepath.Join(s.runtimeDir, "tmp")

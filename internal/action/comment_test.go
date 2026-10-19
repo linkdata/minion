@@ -40,8 +40,6 @@ func TestCommentCommandReportsIssueAndPullRequest(t *testing.T) {
 					_, _ = fmt.Fprintf(w, `{"title":%q,"body":%q}`, title, description)
 				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/pulls/7":
 					_, _ = fmt.Fprintf(w, `{"title":%q,"body":%q,"user":{"id":8,"login":"outsider"},"base":{"ref":"main"},"head":{"sha":%q}}`, title, description, pullHead)
-				case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/o/r/git/trees/"):
-					writeTreeFixture(t, w, strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/"))
 				case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/issues/7/comments":
 					captureComment(t, w, r, &published)
 				default:

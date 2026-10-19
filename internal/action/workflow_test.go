@@ -270,3 +270,44 @@ func TestPreparedIssueCommentCarriesPinnedRepositoryBundle(t *testing.T) {
 		t.Fatalf("complete repository header lacks pinned origin/main: %s", header)
 	}
 }
+
+func TestPrepareRejectsInactiveRepositoriesBeforeClone(t *testing.T) {
+	for _, action := range []command.Action{command.Review, command.SecurityAudit} {
+		for _, test := range []struct {
+			name string
+			repo github.Repository
+		}{
+			{"archived", github.Repository{ID: 1, FullName: "o/r", Owner: github.User{ID: 2}, DefaultBranch: "main", Archived: true}},
+			{"no default branch", github.Repository{ID: 1, FullName: "o/r", Owner: github.User{ID: 2}}},
+		} {
+			t.Run(string(action)+"/"+test.name, func(t *testing.T) {
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.Method != http.MethodGet || r.URL.Path != "/repos/o/r" {
+						t.Errorf("unexpected preparation request: %s %s", r.Method, r.URL.Path)
+						http.NotFound(w, r)
+						return
+					}
+					if err := json.NewEncoder(w).Encode(test.repo); err != nil {
+						t.Error(err)
+					}
+				}))
+				defer server.Close()
+				root := t.TempDir()
+				request := usageJob()
+				request.Command = command.Command{Name: string(action), Action: action}
+				if action == command.Review {
+					request.SubjectType = "PullRequest"
+				}
+				orchestrator := attemptFixture(&Orchestrator{WorkRoot: root, GitHub: testGitHub(server, "token")})
+				prepared, err := orchestrator.prepare(testActionContext(t), request)
+				if prepared != nil || err == nil || !strings.Contains(err.Error(), "archived or has no default branch") {
+					t.Fatalf("inactive repository preparation = %+v, %v", prepared, err)
+				}
+				entries, err := os.ReadDir(root)
+				if err != nil || len(entries) != 0 {
+					t.Fatalf("inactive repository created checkout: %v, %v", entries, err)
+				}
+			})
+		}
+	}
+}

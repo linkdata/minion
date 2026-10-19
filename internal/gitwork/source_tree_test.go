@@ -6,51 +6,74 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
-func TestCheckSourceTree(t *testing.T) {
-	sha := strings.Repeat("a", 40)
-	size, fullSize, oversized := int64(1), int64(workspace.MaxBytes), int64(workspace.MaxBytes+1)
-	truncated := true
-	entries := func(count int, kind, mode string) github.GitTree {
-		items := make([]github.GitTreeEntry, count)
-		for i := range items {
-			items[i] = github.GitTreeEntry{Path: fmt.Sprintf("entry-%d", i), Type: kind, Mode: mode}
-		}
-		return completeTree(sha, items)
-	}
+func treeLine(mode, kind, size, name string) string {
+	return fmt.Sprintf("%s %s %s %s\t%s\x00", mode, kind, strings.Repeat("a", 40), size, name)
+}
+
+func TestParseSourceEntries(t *testing.T) {
+	sha := strings.Repeat("b", 40)
 	for _, tc := range []struct {
-		name string
-		tree github.GitTree
-		want error
+		name, raw string
+		want      error
+		files     int
 	}{
-		{"wrong identity", completeTree(strings.Repeat("b", 40), []github.GitTreeEntry{{Path: "x", Type: "blob", Mode: "100644", Size: &size}}), ErrUnsupportedSource},
-		{"missing completeness with empty tree", github.GitTree{SHA: sha, Tree: []github.GitTreeEntry{}}, ErrUnsupportedSource},
-		{"missing tree", completeTree(sha, nil), ErrUnsupportedSource},
-		{"missing size", completeTree(sha, []github.GitTreeEntry{{Path: "x", Type: "blob", Mode: "100644"}}), ErrUnsupportedSource},
-		{"unknown type", completeTree(sha, []github.GitTreeEntry{{Path: "x", Type: "blob", Mode: "100644", Size: &size}, {Path: "y", Type: "unknown"}}), ErrUnsupportedSource},
-		{"missing mode", completeTree(sha, []github.GitTreeEntry{{Path: "x", Type: "blob", Size: &size}}), ErrUnsupportedSource},
-		{"invalid blob mode", completeTree(sha, []github.GitTreeEntry{{Path: "x", Type: "blob", Mode: "100664", Size: &size}}), ErrUnsupportedSource},
-		{"invalid tree mode", completeTree(sha, []github.GitTreeEntry{{Path: "x", Type: "tree", Mode: "120000"}}), ErrUnsupportedSource},
-		{"invalid gitlink mode", completeTree(sha, []github.GitTreeEntry{{Path: "x", Type: "commit", Mode: "100644"}}), ErrUnsupportedSource},
-		{"symlink", completeTree(sha, []github.GitTreeEntry{{Path: ".agents/skills/escape", Type: "blob", Mode: "120000", Size: &size}}), nil},
-		{"regular", completeTree(sha, []github.GitTreeEntry{{Path: "x", Type: "blob", Mode: "100644", Size: &size}}), nil},
-		{"executable", completeTree(sha, []github.GitTreeEntry{{Path: "x", Type: "blob", Mode: "100755", Size: &size}}), nil},
-		// Size/completeness gates precede the invalid or missing first entry.
-		{"truncated", github.GitTree{SHA: sha, Truncated: &truncated}, ErrCheckoutTooLarge},
-		{"too many entries before invalid path", completeTree(sha, make([]github.GitTreeEntry, workspace.MaxEntries+1)), ErrCheckoutTooLarge},
-		{"exact files", entries(workspace.MaxFiles, "commit", "160000"), nil},
-		{"exact entries", entries(workspace.MaxEntries, "tree", "040000"), nil},
-		{"exact bytes", completeTree(sha, []github.GitTreeEntry{{Path: "full", Type: "blob", Mode: "100644", Size: &fullSize}}), nil},
-		{"omitted symlink bytes", completeTree(sha, []github.GitTreeEntry{{Path: "link", Type: "blob", Mode: "120000", Size: &oversized}}), ErrCheckoutTooLarge},
-		{"too many gitlinks", entries(workspace.MaxFiles+1, "commit", "160000"), ErrCheckoutTooLarge},
+		{name: "empty", files: 0},
+		{name: "regular", raw: treeLine("100644", "blob", "1", "x"), files: 1},
+		{name: "executable", raw: treeLine("100755", "blob", "1", "x"), files: 1},
+		{name: "symlink", raw: treeLine("120000", "blob", "1", "link"), files: 1},
+		{name: "gitlink", raw: treeLine("160000", "commit", "-", "sub"), files: 1},
+		{name: "tree and file", raw: treeLine("040000", "tree", "-", "dir") + treeLine("100644", "blob", "1", "dir/x"), files: 1},
+		{name: "unterminated", raw: strings.TrimSuffix(treeLine("100644", "blob", "1", "x"), "\x00"), want: ErrUnsupportedSource},
+		{name: "missing size", raw: "100644 blob " + strings.Repeat("a", 40) + "\tx\x00", want: ErrUnsupportedSource},
+		{name: "bad size", raw: treeLine("100644", "blob", "-", "x"), want: ErrUnsupportedSource},
+		{name: "negative size", raw: treeLine("100644", "blob", "-1", "x"), want: ErrUnsupportedSource},
+		{name: "bad hash", raw: "100644 blob z 1\tx\x00", want: ErrUnsupportedSource},
+		{name: "unknown type", raw: treeLine("100644", "unknown", "1", "x"), want: ErrUnsupportedSource},
+		{name: "invalid blob mode", raw: treeLine("100664", "blob", "1", "x"), want: ErrUnsupportedSource},
+		{name: "invalid tree mode", raw: treeLine("120000", "tree", "-", "x"), want: ErrUnsupportedSource},
+		{name: "invalid gitlink mode", raw: treeLine("100644", "commit", "-", "x"), want: ErrUnsupportedSource},
+		{name: "unsafe metadata alias", raw: treeLine("100644", "blob", "1", "git~1/config"), want: ErrUnsupportedSource},
+		{name: "duplicate", raw: treeLine("100644", "blob", "1", "x") + treeLine("100644", "blob", "1", "x"), want: ErrUnsupportedSource},
+		{name: "ancestor collision", raw: treeLine("100644", "blob", "1", "a") + treeLine("040000", "tree", "-", "a") + treeLine("100644", "blob", "1", "a/b"), want: ErrUnsupportedSource},
+		{name: "file-directory collision without tree entry", raw: treeLine("100644", "blob", "1", "a") + treeLine("100644", "blob", "1", "a/b"), want: ErrUnsupportedSource},
+		{name: "exact bytes", raw: treeLine("100644", "blob", fmt.Sprint(workspace.MaxBytes), "x"), files: 1},
+		{name: "oversized symlink", raw: treeLine("120000", "blob", fmt.Sprint(workspace.MaxBytes+1), "link"), want: ErrCheckoutTooLarge},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := checkSourceTree(tc.tree, sha)
-			if !errors.Is(err, tc.want) || errors.Is(err, ErrUnsupportedSource) && tc.want != ErrUnsupportedSource || errors.Is(err, ErrCheckoutTooLarge) && tc.want != ErrCheckoutTooLarge {
-				t.Fatalf("metadata error=%v, want %v", err, tc.want)
+			entries, err := parseSourceEntries(sha, []byte(tc.raw))
+			if !errors.Is(err, tc.want) || len(entries) != tc.files {
+				t.Fatalf("entries=%d error=%v, want entries=%d error=%v", len(entries), err, tc.files, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseSourceEntriesCountsFilesAndMetadata(t *testing.T) {
+	sha := strings.Repeat("b", 40)
+	for _, tc := range []struct {
+		name, line string
+		count      int
+		want       error
+	}{
+		{"exact files", treeLine("160000", "commit", "-", "x"), workspace.MaxFiles, nil},
+		{"too many files", treeLine("160000", "commit", "-", "x"), workspace.MaxFiles + 1, ErrCheckoutTooLarge},
+		{"exact entries", treeLine("040000", "tree", "-", "x"), workspace.MaxEntries, nil},
+		{"too many entries", treeLine("040000", "tree", "-", "x"), workspace.MaxEntries + 1, ErrCheckoutTooLarge},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var raw strings.Builder
+			for i := range tc.count {
+				raw.WriteString(strings.Replace(tc.line, "\tx\x00", fmt.Sprintf("\tentry-%06d\x00", i), 1))
+			}
+			entries, err := parseSourceEntries(sha, []byte(raw.String()))
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("count=%d entries=%d error=%v, want %v", tc.count, len(entries), err, tc.want)
+			}
+			if tc.want == nil && len(entries) > workspace.MaxFiles {
+				t.Fatalf("too many files accepted: %d", len(entries))
 			}
 		})
 	}

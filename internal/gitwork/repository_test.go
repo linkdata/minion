@@ -70,7 +70,7 @@ func TestRepositoryCarriesCompleteHistoryOffline(t *testing.T) {
 	tagOnly := fixture.gitInput(fixture.source, "tag-only root\n", "commit-tree", tagTree)
 	fixture.git(fixture.source, "tag", "--annotate", "orphan-tag", "--message", "tag-only history", tagOnly)
 	fixture.git(fixture.source, "push", fixture.remote, "main", "other", "--tags")
-	checkout := fixture.keepCheckout(cloneFromURL(context.Background(), t.TempDir(), "file://"+fixture.remote, "main", localTreeMetadata(fixture.source), false))
+	checkout := fixture.keepCheckout(cloneFromURL(context.Background(), t.TempDir(), "file://"+fixture.remote, "main", false))
 	// Preparation and all later inspection must work after the remote disappears.
 	if err := os.Rename(fixture.remote, fixture.remote+".offline"); err != nil {
 		t.Fatal(err)

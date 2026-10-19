@@ -123,11 +123,10 @@ func (e *Orchestrator) prepare(ctx context.Context, request monitor.Job) (prepar
 	if err := e.checkGitHubContext(request, title, description); err != nil {
 		return nil, err
 	}
-	lookupTree := e.treeLookup(repo.FullName)
 	if pullHead != "" {
-		p.checkout, err = gitwork.ClonePullRequest(ctx, e.WorkRoot, repo.FullName, request.Number, branch, pullHead, lookupTree)
+		p.checkout, err = gitwork.ClonePullRequest(ctx, e.WorkRoot, repo.FullName, request.Number, branch, pullHead)
 	} else {
-		p.checkout, err = gitwork.Clone(ctx, e.WorkRoot, repo.FullName, branch, lookupTree, false)
+		p.checkout, err = gitwork.Clone(ctx, e.WorkRoot, repo.FullName, branch, false)
 	}
 	if err != nil {
 		return nil, err
@@ -158,12 +157,6 @@ func newAttemptID() (string, error) {
 		return "", fmt.Errorf("create action attempt ID: %w", err)
 	}
 	return hex.EncodeToString(id[:]), nil
-}
-
-func (e *Orchestrator) treeLookup(repo string) func(context.Context, string) (github.GitTree, error) {
-	return func(ctx context.Context, sha string) (github.GitTree, error) {
-		return e.GitHub.GitTree(ctx, repo, sha)
-	}
 }
 
 func (e *Orchestrator) portableJob(ctx context.Context, p *preparedAction, title, description string) (Job, error) {
@@ -364,7 +357,7 @@ func (e *Orchestrator) prepareFix(ctx context.Context, p *preparedAction) (*prep
 	if err := e.checkGitHubContext(request, "", content.BodyText); err != nil {
 		return nil, err
 	}
-	p.checkout, err = gitwork.Clone(ctx, e.WorkRoot, repo.FullName, repo.DefaultBranch, e.treeLookup(repo.FullName), true)
+	p.checkout, err = gitwork.Clone(ctx, e.WorkRoot, repo.FullName, repo.DefaultBranch, true)
 	if err != nil {
 		return nil, err
 	}

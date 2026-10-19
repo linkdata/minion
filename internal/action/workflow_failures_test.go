@@ -115,8 +115,8 @@ func TestFixedRepliesSkipWorkspaceAndModel(t *testing.T) {
 	}
 }
 
-func TestExecuteSourceFailuresAndInvalidIncompleteResultsAreTerminal(t *testing.T) {
-	for _, scenario := range []string{"oversized source", "unsupported source", "invalid incomplete result", "output limit", "too many files", "diff too large"} {
+func TestExecuteNativeLimitsAndInvalidIncompleteResultsAreTerminal(t *testing.T) {
+	for _, scenario := range []string{"invalid incomplete result", "output limit", "too many files", "diff too large"} {
 		t.Run(scenario, func(t *testing.T) {
 			gitFixtureRemote(t)
 			installActionTestSkills(t, testReviewSkillURL)
@@ -130,16 +130,6 @@ func TestExecuteSourceFailuresAndInvalidIncompleteResultsAreTerminal(t *testing.
 					writes++
 					t.Errorf("unexpected write %s %s", r.Method, r.URL.Path)
 					http.NotFound(w, r)
-				case strings.HasPrefix(r.URL.Path, "/repos/o/r/git/trees/"):
-					sha := strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/")
-					switch scenario {
-					case "oversized source":
-						_, _ = fmt.Fprintf(w, `{"sha":%q,"truncated":true,"tree":[]}`, sha)
-					case "unsupported source":
-						_, _ = fmt.Fprintf(w, `{"sha":%q,"truncated":false,"tree":[{"path":"source","type":"blob","mode":"100600","size":0}]}`, sha)
-					default:
-						writeTreeFixture(t, w, sha)
-					}
 				case serveIssueFixture(t, w, r):
 				default:
 					t.Errorf("unexpected request %s", r.URL)
@@ -165,14 +155,6 @@ func TestExecuteSourceFailuresAndInvalidIncompleteResultsAreTerminal(t *testing.
 			}
 			wantCalls := 0
 			switch scenario {
-			case "oversized source":
-				if !errors.Is(err, gitwork.ErrCheckoutTooLarge) || errors.Is(err, gitwork.ErrUnsupportedSource) {
-					t.Fatalf("source size cause lost: %v", err)
-				}
-			case "unsupported source":
-				if !errors.Is(err, gitwork.ErrUnsupportedSource) || errors.Is(err, gitwork.ErrCheckoutTooLarge) {
-					t.Fatalf("unsupported source cause lost: %v", err)
-				}
 			case "output limit", "too many files", "diff too large":
 				wantCalls = 1
 				if !errors.Is(err, limitCause) {
@@ -203,7 +185,7 @@ func TestPrepareFixClassifiesUnsupportedLayoutBeforeBranchOrModels(t *testing.T)
 	store := openState(t, time.Now())
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case serveFixFlowFixture(t, w, r, files...):
+		case serveFixFlowFixture(t, w, r):
 		default:
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 			http.NotFound(w, r)
@@ -236,29 +218,20 @@ func TestPrepareRetainsCheckoutForRetryAfterCleanupFailure(t *testing.T) {
 		t.Skip("root bypasses directory permissions")
 	}
 	base, _, _ := gitFixtureRemote(t)
+	delegatedGit, err := aicli.AbsoluteExecutable("git")
+	if err != nil {
+		t.Fatal(err)
+	}
 	root := t.TempDir()
+	lsTreeMarker := filepath.Join(t.TempDir(), "ls-tree-hook")
+	fakeOnPath(t, "git", fmt.Sprintf("#!/bin/sh\ncase \" $* \" in\n  *\" ls-tree -r -t -l -z \"*)\n    %s \"$@\"\n    status=$?\n    if [ \"$status\" -eq 0 ]; then\n      printf fired > %s\n      chmod 0500 %s\n    fi\n    exit \"$status\"\n    ;;\nesac\nexec %s \"$@\"\n",
+		shellQuote(delegatedGit), shellQuote(lsTreeMarker), shellQuote(root), shellQuote(delegatedGit)))
 	t.Cleanup(func() {
 		if err := os.Chmod(root, 0700); err != nil {
 			t.Error(err)
 		}
 	})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/o/r/git/trees/") {
-			entries, err := os.ReadDir(root)
-			if err != nil || len(entries) != 1 || !entries[0].IsDir() || !strings.HasPrefix(entries[0].Name(), "minion-checkout-") {
-				t.Errorf("metadata requested without isolated checkout: entries=%v error=%v", entries, err)
-				http.Error(w, "missing fixture checkout", http.StatusInternalServerError)
-				return
-			}
-			// Snapshot work can still use the checkout; only removing its parent entry fails.
-			if err := os.Chmod(root, 0500); err != nil {
-				t.Error(err)
-				http.Error(w, "cannot restrict fixture parent", http.StatusInternalServerError)
-				return
-			}
-			writeTreeFixture(t, w, strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/"))
-			return
-		}
 		if !serveIssueFixture(t, w, r) {
 			t.Errorf("unexpected preparation request: %s %s", r.Method, r.URL.Path)
 			http.NotFound(w, r)
@@ -272,6 +245,9 @@ func TestPrepareRetainsCheckoutForRetryAfterCleanupFailure(t *testing.T) {
 		Commands: map[string]config.CommandMapping{"inspect": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}},
 	})
 	prepared, err := orchestrator.prepare(testActionContext(t), request)
+	if data, hookErr := os.ReadFile(lsTreeMarker); hookErr != nil || string(data) != "fired" {
+		t.Fatalf("post-clone metadata hook did not run: %q, %v", data, hookErr)
+	}
 	if err != nil || prepared == nil || prepared.checkout == nil || !prepared.needsExecution() {
 		t.Fatalf("cleanup failure discarded prepared work or retry handle: prepared=%+v error=%v", prepared, err)
 	}
