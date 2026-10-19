@@ -39,7 +39,7 @@ func TestCollectionRefusesSymlinkParents(t *testing.T) {
 		t.Fatalf("read outside source through parent: %q", data)
 	}
 	visited := false
-	if err := walk(context.Background(), parent, func(string, fs.DirEntry) error { visited = true; return nil }); err == nil || visited {
+	if err := walk(context.Background(), parent, false, func(string, fs.DirEntry) error { visited = true; return nil }); err == nil || visited {
 		t.Fatalf("walk followed root symlink: visited=%v error=%v", visited, err)
 	}
 }
@@ -134,7 +134,7 @@ func TestWalkRefusesDirectoryReplacedAfterQueueing(t *testing.T) {
 		t.Fatal(err)
 	}
 	visitedOutside := false
-	err := walk(context.Background(), root, func(name string, entry fs.DirEntry) error {
+	err := walk(context.Background(), root, false, func(name string, entry fs.DirEntry) error {
 		if name == parent {
 			if err := os.Rename(parent, filepath.Join(root, "original")); err != nil {
 				return err

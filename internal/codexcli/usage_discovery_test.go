@@ -53,7 +53,7 @@ func TestUsageWalkContinuesAfterLocalFailureButHonorsStops(t *testing.T) {
 	}
 }
 
-func TestCollectUsageKeepsKnownHelpersAcrossUnreadableUnrelatedDirectory(t *testing.T) {
+func TestCollectUsageKeepsCurrentHelpersAcrossUnreadableUnrelatedDirectory(t *testing.T) {
 	home := t.TempDir()
 	blocked := filepath.Join(home, "sessions", "unrelated")
 	if err := os.MkdirAll(blocked, 0700); err != nil {
@@ -76,7 +76,7 @@ func TestCollectUsageKeepsKnownHelpersAcrossUnreadableUnrelatedDirectory(t *test
 	started := time.Now()
 	writeUsageRollout(t, home, "root", "", usageEvent("task_started", "root-turn"), usageRecord("root", "root-turn", "r", 10, 0, 1), usageEvent("task_complete", "root-turn"))
 	writeUsageRollout(t, home, "child", "root", usageEvent("task_started", "child-turn"), usageRecord("child", "child-turn", "c", 20, 0, 2), usageEvent("task_complete", "child-turn"))
-	tokens, complete, childError := collectUsage(context.Background(), home, "root", started, nil, []string{"child"})
+	tokens, complete, childError := (&usageSession{}).collectUsage(context.Background(), home, "root", started, nil, []string{"child"}, nil)
 	if tokens != (usage.Tokens{Input: 30, Output: 3}) || complete || childError != nil {
 		t.Fatalf("local scan failure lost known helper evidence: tokens=%+v complete=%t childError=%v", tokens, complete, childError)
 	}
@@ -118,7 +118,7 @@ func TestCollectUsagePrunesHistoricalDaysBeforeCurrentRootAndHelper(t *testing.T
 			if err != nil {
 				t.Fatal(err)
 			}
-			tokens, complete, childError := collectUsage(context.Background(), home, "root", started, nil, []string{"child"})
+			tokens, complete, childError := (&usageSession{}).collectUsage(context.Background(), home, "root", started, nil, []string{"child"}, nil)
 			if tokens != (usage.Tokens{Input: 30, Output: 3}) || complete != done || (childError != nil) == done {
 				t.Fatalf("current helper lost behind dated history: tokens=%+v complete=%v childError=%v", tokens, complete, childError)
 			}
@@ -186,7 +186,7 @@ func TestCollectUsageHeaderAcceptsExactLimitAndRejectsNextByte(t *testing.T) {
 				if err := os.WriteFile(path, []byte(header), 0600); err != nil {
 					t.Fatal(err)
 				}
-				tokens, complete, childError := collectUsage(context.Background(), home, "root", started, nil, nil)
+				tokens, complete, childError := (&usageSession{}).collectUsage(context.Background(), home, "root", started, nil, nil, nil)
 				if tokens != (usage.Tokens{Input: 10, Output: 1}) || complete != (size == maxUsageHeaderBytes) || childError != nil {
 					t.Fatalf("header boundary changed: tokens=%+v complete=%v childError=%v", tokens, complete, childError)
 				}

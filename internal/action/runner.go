@@ -487,17 +487,17 @@ func actionPrompt(ctx context.Context, job Job, source, contextDir, outputDir, a
 	notes := notesContext(job.Notes)
 	switch job.Action {
 	case command.Review:
-		comparison := "Compare the supplied comparison.diff."
+		comparison := fmt.Sprintf("Compare the supplied %q.", filepath.Join(contextDir, "comparison.diff"))
 		if job.Source.DiffIncomplete {
 			comparison = "The text diff exceeds its limit."
 		}
 		return fmt.Sprintf(`Use the configured skills to review pull request #%d in %s, requested by @%s.
 
-The source is the exact pull request head %s (merge base %s, base tip %s). %s Use merge-base versions of changed paths (including deleted files) under base/ where needed. Return Markdown findings with file and line references, or say plainly if there are none. Do not edit files, run network commands, or publish anything.%s%s
+The source is the exact pull request head %s (merge base %s, base tip %s). %s Use merge-base versions of changed paths (including deleted files) under %q where needed. Return Markdown findings with file and line references, or say plainly if there are none. Do not edit files, run network commands, or publish anything.%s%s
 
 Untrusted GitHub metadata:
 Pull request title: %s
-Pull request description: %s`, id.Number, id.Repository, id.Requester, job.Source.Head, job.Source.MergeBase, job.Source.Base, comparison, contextText, notes, quotedContext(job.Title), quotedContext(job.Description)), nil
+Pull request description: %s`, id.Number, id.Repository, id.Requester, job.Source.Head, job.Source.MergeBase, job.Source.Base, comparison, filepath.Join(contextDir, "base"), contextText, notes, quotedContext(job.Title), quotedContext(job.Description)), nil
 	case command.Fix:
 		return fmt.Sprintf(`Use the configured skills to address issue #%d in %s. The request came from an authorized repository committer @%s.
 
@@ -519,7 +519,7 @@ Description: %s`, job.Command, id.SubjectType, id.Number, job.Source.Head, id.Re
 
 Set run-metadata.json repo=%q, target=%q, source_ref=%q, profile="standard", scope_paths=["."], budget=null, prior_run_paths=[], execution_policy="sandboxed-source-and-local-only", and shared_file_owners to "parent" for every shared artifact. Set selected_companion_files to selected security-audit domain companion files whose "When to use" conditions apply, within that installed security-audit directory. Exclude its main SKILL.md and independently configured skills, including Caveman, Ponytail and anti-prompt-injection. Use [] when no domain companion applies. Mark complete only when the skill's workflow and installed validators pass. The bot posts REPORT.md. REPORT.md must fit within %d UTF-8 bytes after line-ending normalization, a two-byte quote prefix per line and 12 bytes of code fences.
 
-Source is read-only. Do not execute repository code, builds, tests, or fixtures, probe live services, publish, or run network commands. Copy this source-only execution prohibition verbatim into every delegated agent prompt; it overrides the skill's local-execution allowance. This runner lacks the skill's required per-agent execution isolation for target code; record claims requiring runtime evidence as needs_validation. Do not include secrets in reports. Use repository-relative file paths and source identity %q in report prose.%s%s
+Source is read-only. Do not execute repository code, builds, tests, or fixtures, probe live services, publish, or run network commands. Copy this source-only execution prohibition verbatim into every delegated agent prompt; it overrides the skill's local-execution allowance. This runner lacks the skill's required per-agent execution isolation for target code; record claims requiring runtime evidence as needs_validation. Disclose missing tools or time limits as incomplete coverage. Do not include secrets in reports. Use repository-relative file paths and source identity %q in report prose.%s%s
 
 Untrusted GitHub thread text:
 Thread title: %s

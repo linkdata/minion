@@ -51,12 +51,18 @@ func writeUsageRolloutBoundary(t *testing.T, home, id, parent string, boundary *
 	return path
 }
 
-func usageEvent(kind, turn string) string {
-	return fmt.Sprintf(`{"ordinal":20,"type":"event_msg","payload":{"type":%q,"turn_id":%q}}`, kind, turn)
+func usageEvent(kind, turn string) string { return usageEventAt(20, kind, turn) }
+
+func usageEventAt(ordinal int, kind, turn string) string {
+	return fmt.Sprintf(`{"ordinal":%d,"type":"event_msg","payload":{"type":%q,"turn_id":%q}}`, ordinal, kind, turn)
 }
 
 func usageRecord(thread, turn, response string, input, cached, output int64) string {
-	return fmt.Sprintf(`{"ordinal":15,"type":"token_usage_record","payload":{"thread_id":%q,"session_id":"root","turn_id":%q,"response_id":%q,"usage":{"input_tokens":%d,"cached_input_tokens":%d,"output_tokens":%d}}}`, thread, turn, response, input, cached, output)
+	return usageRecordAt(15, thread, turn, response, input, cached, output)
+}
+
+func usageRecordAt(ordinal int, thread, turn, response string, input, cached, output int64) string {
+	return fmt.Sprintf(`{"ordinal":%d,"type":"token_usage_record","payload":{"thread_id":%q,"session_id":"root","turn_id":%q,"response_id":%q,"usage":{"input_tokens":%d,"cached_input_tokens":%d,"output_tokens":%d}}}`, ordinal, thread, turn, response, input, cached, output)
 }
 
 func usageSnapshot(ordinal, input, cached, output int64) string {
@@ -87,9 +93,9 @@ func TestCollectUsageIncludesNestedHelpersWithoutInheritedOrDuplicateResponses(t
 		t.Fatal(err)
 	}
 	fallback := usage.Tokens{Input: 300, CachedInput: 150, Output: 30}
-	got, complete, _ := collectUsage(context.Background(), home, "root", started, &fallback, []string{"child"})
+	got, complete, err := (&usageSession{}).collectUsage(context.Background(), home, "root", started, &fallback, []string{"child"}, nil)
 	want := usage.Tokens{Input: 410, CachedInput: 175, Output: 41}
-	if got != want || !complete {
+	if got != want || !complete || err != nil {
 		t.Fatalf("collectUsage() = %+v, %v; want %+v, complete", got, complete, want)
 	}
 }
@@ -105,7 +111,7 @@ func TestRepeatedHelperActivityRetainsLaterCountersAndCompletion(t *testing.T) {
 				child = append(child, usageEvent("task_complete", "child-turn"))
 			}
 			writeUsageRollout(t, home, "child", "root", child...)
-			tokens, complete, childError := collectUsage(context.Background(), home, "root", time.Now(), nil, []string{"child"})
+			tokens, complete, childError := (&usageSession{}).collectUsage(context.Background(), home, "root", time.Now(), nil, []string{"child"}, nil)
 			if tokens != (usage.Tokens{Input: 1030, Output: 103}) || complete != done || (childError != nil) == done {
 				t.Fatalf("repeated activity lost counters/lifecycle: tokens=%+v complete=%t childError=%v", tokens, complete, childError)
 			}
@@ -131,7 +137,7 @@ func TestUsageAgentBoundsCountUniqueIDsAndRejectOverflow(t *testing.T) {
 		}
 		for _, fallback := range []*usage.Tokens{nil, {Input: 100, CachedInput: 10, Output: 7}} {
 			for range 3 {
-				tokens, complete, childError := collectUsage(context.Background(), home, "root", time.Now(), fallback, nil)
+				tokens, complete, childError := (&usageSession{}).collectUsage(context.Background(), home, "root", time.Now(), fallback, nil, nil)
 				if tokens != want || complete || !errors.Is(childError, aicli.ErrOutputLimit) {
 					t.Fatalf("overflow discarded or randomized known counters: tokens=%+v want=%+v complete=%t error=%v", tokens, want, complete, childError)
 				}
@@ -146,7 +152,7 @@ func TestUsageAgentBoundsCountUniqueIDsAndRejectOverflow(t *testing.T) {
 		}
 		events = append(events, usageEvent("task_started", "root-turn"), usageRecord("root", "root-turn", "later-response", 1000, 0, 100), usageEvent("task_complete", "root-turn"))
 		writeUsageRollout(t, home, "root", "", events...)
-		tokens, complete, childError := collectUsage(context.Background(), home, "root", time.Now(), nil, nil)
+		tokens, complete, childError := (&usageSession{}).collectUsage(context.Background(), home, "root", time.Now(), nil, nil, nil)
 		if tokens != (usage.Tokens{Input: 1000, Output: 100}) || complete || !errors.Is(childError, aicli.ErrOutputLimit) {
 			t.Fatalf("overflow lost later counters or accepted work: tokens=%+v complete=%t error=%v", tokens, complete, childError)
 		}
@@ -159,9 +165,9 @@ func TestCollectUsageUsesLatestCumulativeSnapshotAndSubtractsInheritedBaseline(t
 		usageSnapshot(12, 100, 20, 10), usageSnapshot(13, 250, 80, 30), usageEvent("task_complete", "root-turn"))
 	writeUsageRollout(t, home, "child", "root", usageSnapshot(8, 100, 20, 10),
 		usageEvent("task_started", "child-turn"), usageSnapshot(12, 130, 30, 12), usageSnapshot(13, 160, 40, 20), usageEvent("task_complete", "child-turn"))
-	got, complete, _ := collectUsage(context.Background(), home, "root", time.Now(), nil, nil)
+	got, complete, err := (&usageSession{}).collectUsage(context.Background(), home, "root", time.Now(), nil, nil, nil)
 	want := usage.Tokens{Input: 310, CachedInput: 100, Output: 40}
-	if got != want || !complete {
+	if got != want || !complete || err != nil {
 		t.Fatalf("collectUsage() = %+v, %v; want %+v, complete", got, complete, want)
 	}
 }
@@ -179,9 +185,13 @@ func TestCollectUsagePartialRunsPreserveKnownTokens(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			home := t.TempDir()
-			writeUsageRollout(t, home, "root", "", usageEvent("task_started", "root-turn"), usageRecord("root", "root-turn", "known", 60, 40, 3), test.ending)
-			got, complete, _ := collectUsage(context.Background(), home, "root", time.Now(), nil, nil)
-			if got != (usage.Tokens{Input: 60, CachedInput: 40, Output: 3}) || complete {
+			events := []string{usageEvent("task_started", "root-turn"), usageRecord("root", "root-turn", "known", 60, 40, 3), test.ending}
+			if test.name != "interrupted" && test.name != "unterminated" {
+				events = append(events, usageEvent("task_complete", "root-turn"))
+			}
+			writeUsageRollout(t, home, "root", "", events...)
+			got, complete, err := (&usageSession{}).collectUsage(context.Background(), home, "root", time.Now(), nil, nil, nil)
+			if got != (usage.Tokens{Input: 60, CachedInput: 40, Output: 3}) || complete || err != nil {
 				t.Fatalf("partial run = %+v, %v", got, complete)
 			}
 		})
@@ -198,8 +208,8 @@ func TestCollectUsageTruncatedCompleteEventIsIncomplete(t *testing.T) {
 	if err := os.WriteFile(root, data[:len(data)-1], 0600); err != nil {
 		t.Fatal(err)
 	}
-	got, complete, _ := collectUsage(context.Background(), home, "root", time.Now(), nil, nil)
-	if got != (usage.Tokens{Input: 10, Output: 1}) || complete {
+	got, complete, err := (&usageSession{}).collectUsage(context.Background(), home, "root", time.Now(), nil, nil, nil)
+	if got != (usage.Tokens{Input: 10, Output: 1}) || complete || err != nil {
 		t.Fatalf("truncated complete event usage=%+v complete=%t", got, complete)
 	}
 }
@@ -208,57 +218,68 @@ func TestCollectUsageRequiresExplicitTokenFields(t *testing.T) {
 	home := t.TempDir()
 	record := strings.Replace(usageRecord("root", "turn", "response", 10, 0, 2), `"input_tokens":10,`, "", 1)
 	writeUsageRollout(t, home, "root", "", usageEvent("task_started", "turn"), record, usageEvent("task_complete", "turn"))
-	got, complete, _ := collectUsage(context.Background(), home, "root", time.Now(), nil, nil)
-	if got != (usage.Tokens{}) || complete {
+	got, complete, err := (&usageSession{}).collectUsage(context.Background(), home, "root", time.Now(), nil, nil, nil)
+	if got != (usage.Tokens{}) || complete || err != nil {
 		t.Fatalf("missing required field = %+v, %v; want unknown", got, complete)
 	}
 }
 
 func TestCollectUsageDetectsMissingNestedHelper(t *testing.T) {
-	for _, spawn := range []string{
-		`{"ordinal":17,"type":"event_msg","payload":{"type":"item_completed","thread_id":"child","item":{"type":"SubAgentActivity","kind":"started","agent_thread_id":"missing-grandchild"}}}`,
-		`{"ordinal":17,"type":"event_msg","payload":{"type":"collab_agent_spawn_end","new_thread_id":"missing-grandchild"}}`,
+	for _, test := range []struct{ name, spawn string }{
+		{"native activity", `{"ordinal":17,"type":"event_msg","payload":{"type":"item_completed","thread_id":"child","item":{"type":"SubAgentActivity","kind":"started","agent_thread_id":"missing-grandchild"}}}`},
+		{"legacy spawn", `{"ordinal":17,"type":"event_msg","payload":{"type":"collab_agent_spawn_end","new_thread_id":"missing-grandchild"}}`},
 	} {
-		home := t.TempDir()
-		writeUsageRollout(t, home, "root", "", usageEvent("task_started", "root-turn"), usageRecord("root", "root-turn", "root-response", 10, 0, 1), usageEvent("task_complete", "root-turn"))
-		writeUsageRollout(t, home, "child", "root", usageEvent("task_started", "child-turn"), usageRecord("child", "child-turn", "child-response", 20, 0, 2), spawn, usageEvent("task_complete", "child-turn"))
-		got, complete, _ := collectUsage(context.Background(), home, "root", time.Now(), nil, []string{"child"})
-		if got != (usage.Tokens{Input: 30, Output: 3}) || complete {
-			t.Fatalf("missing nested helper = %+v, %v; want known tokens, incomplete", got, complete)
-		}
+		t.Run(test.name, func(t *testing.T) {
+			home := t.TempDir()
+			writeUsageRollout(t, home, "root", "", usageEvent("task_started", "root-turn"), usageRecord("root", "root-turn", "root-response", 10, 0, 1), usageEvent("task_complete", "root-turn"))
+			writeUsageRollout(t, home, "child", "root", usageEvent("task_started", "child-turn"), usageRecord("child", "child-turn", "child-response", 20, 0, 2), test.spawn, usageEvent("task_complete", "child-turn"))
+			got, complete, err := (&usageSession{}).collectUsage(context.Background(), home, "root", time.Now(), nil, []string{"child"}, nil)
+			if got != (usage.Tokens{Input: 30, Output: 3}) || complete || !errors.Is(err, errUnverifiedChildren) {
+				t.Fatalf("missing nested helper = %+v, %v, %v; want known tokens, unverified", got, complete, err)
+			}
+		})
 	}
 }
 
 func TestCollectUsageDetectsMissingResponseRecords(t *testing.T) {
 	home := t.TempDir()
 	writeUsageRollout(t, home, "root", "", usageEvent("task_started", "turn"), usageRecord("root", "turn", "response", 10, 0, 1), usageSnapshot(18, 25, 10, 3), usageEvent("task_complete", "turn"))
-	got, complete, _ := collectUsage(context.Background(), home, "root", time.Now(), nil, nil)
-	if got != (usage.Tokens{Input: 25, CachedInput: 10, Output: 3}) || complete {
+	got, complete, err := (&usageSession{}).collectUsage(context.Background(), home, "root", time.Now(), nil, nil, nil)
+	if got != (usage.Tokens{Input: 25, CachedInput: 10, Output: 3}) || complete || err != nil {
 		t.Fatalf("mismatched cumulative counter = %+v, %v; want snapshot, incomplete", got, complete)
 	}
 }
 
 func TestCollectUsageNeverAddsUnverifiedInheritedChildCounters(t *testing.T) {
-	for _, withRecord := range []bool{false, true} {
-		home := t.TempDir()
-		writeUsageRollout(t, home, "root", "", usageEvent("task_started", "root-turn"), usageRecord("root", "root-turn", "root-response", 10, 0, 1), usageEvent("task_complete", "root-turn"))
-		child := []string{`corrupt inherited baseline`, usageEvent("task_started", "child-turn")}
-		if withRecord {
-			child = append(child, usageRecord("child", "child-turn", "child-response", 20, 5, 2))
-		}
-		child = append(child, usageSnapshot(18, 1020, 500, 100), usageEvent("task_complete", "child-turn"))
-		writeUsageRollout(t, home, "child", "root", child...)
-		got, complete, _ := collectUsage(context.Background(), home, "root", time.Now(), nil, nil)
-		want := usage.Tokens{Input: 10, Output: 1}
-		if withRecord {
-			var ok bool
-			want, ok = want.AddChecked(usage.Tokens{Input: 20, CachedInput: 5, Output: 2})
-			if !ok {
-				t.Fatal("fixture counter overflow")
-			}
-		}
-		if got != want || complete {
-			t.Fatalf("unverified child baseline (own records=%v) = %+v, %v; want %+v, incomplete", withRecord, got, complete, want)
+	for _, damage := range []struct{ name, content string }{{"corrupt", "corrupt inherited baseline"}, {"oversized", strings.Repeat("x", aicli.MaxEventBytes+1)}} {
+		for _, withRecord := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/own=%t", damage.name, withRecord), func(t *testing.T) {
+				home := t.TempDir()
+				writeUsageRollout(t, home, "root", "", usageEvent("task_started", "root-turn"), usageRecord("root", "root-turn", "root-response", 10, 0, 1), usageEvent("task_complete", "root-turn"))
+				child := []string{damage.content, usageEvent("task_started", "child-turn")}
+				want := usage.Tokens{}
+				if withRecord {
+					child = append(child, usageRecord("child", "child-turn", "own-response", 20, 5, 2))
+					want = usage.Tokens{Input: 20, CachedInput: 5, Output: 2}
+				}
+				child = append(child, usageSnapshot(18, 1020, 500, 100), usageEvent("task_complete", "child-turn"))
+				path := writeUsageRollout(t, home, "child", "root", child...)
+				info, err := os.Stat(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				budget, start := info.Size()+100, int64(9)
+				got, complete, _, err := readRolloutUsage(context.Background(), rolloutMeta{ID: "child", path: path, HistoryStart: &start}, "root", &budget)
+				if got != want || complete || budget != 100 || !errors.Is(err, errUnverifiedChildren) {
+					t.Fatalf("damaged child: %+v complete=%t budget=%d err=%v want=%+v", got, complete, budget, err, want)
+				}
+				want.Input += 10
+				want.Output++
+				got, complete, err = (&usageSession{}).collectUsage(context.Background(), home, "root", time.Now(), nil, nil, nil)
+				if got != want || complete || !errors.Is(err, errUnverifiedChildren) {
+					t.Fatalf("damaged tree: %+v complete=%t err=%v want=%+v", got, complete, err, want)
+				}
+			})
 		}
 	}
 }
@@ -271,8 +292,8 @@ func TestCollectUsageBoundsScanningAndHonorsCancellation(t *testing.T) {
 	t.Run("canceled", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
-		got, complete, _ := collectUsage(ctx, home, "root", time.Now(), &fallback, nil)
-		if got != fallback || complete {
+		got, complete, err := (&usageSession{}).collectUsage(ctx, home, "root", time.Now(), &fallback, nil, nil)
+		if got != fallback || complete || err != nil {
 			t.Fatalf("canceled scan = %+v, %t; want fallback, incomplete", got, complete)
 		}
 	})
@@ -292,8 +313,8 @@ func TestCollectUsageBoundsScanningAndHonorsCancellation(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		got, complete, _ := collectUsage(context.Background(), home, "root", time.Now(), &fallback, nil)
-		if got != fallback || complete {
+		got, complete, err := (&usageSession{}).collectUsage(context.Background(), home, "root", time.Now(), &fallback, nil, nil)
+		if got != fallback || complete || err != nil {
 			t.Fatalf("too many rollout files = %+v, %t; want fallback, incomplete", got, complete)
 		}
 	})
@@ -319,39 +340,14 @@ func TestRolloutUsageSkipsOversizedLinesAndDebitsBytes(t *testing.T) {
 	}
 	writeUsageRollout(t, home, "late-child", "root", usageEvent("task_started", "child-turn"),
 		usageRecord("late-child", "child-turn", "child-response", 40, 2, 4), usageEvent("task_complete", "child-turn"))
-	got, complete, _ = collectUsage(context.Background(), home, "root", time.Now(), nil, nil)
+	got, complete, err = (&usageSession{}).collectUsage(context.Background(), home, "root", time.Now(), nil, nil, nil)
 	var ok bool
 	want, ok = want.AddChecked(usage.Tokens{Input: 40, CachedInput: 2, Output: 4})
 	if !ok {
 		t.Fatal("fixture counter overflow")
 	}
-	if got != want || complete {
+	if got != want || complete || err != nil {
 		t.Fatalf("later completed helper lost or incomplete reset: got=%+v complete=%t want=%+v", got, complete, want)
-	}
-}
-
-func TestOversizedChildBaselineCountsOnlyOwnedResponses(t *testing.T) {
-	for _, withRecord := range []bool{false, true} {
-		t.Run(fmt.Sprint(withRecord), func(t *testing.T) {
-			events := []string{strings.Repeat("x", aicli.MaxEventBytes+1), usageEvent("task_started", "child-turn")}
-			want := usage.Tokens{}
-			if withRecord {
-				events = append(events, usageRecord("child", "child-turn", "own-response", 20, 5, 2))
-				want = usage.Tokens{Input: 20, CachedInput: 5, Output: 2}
-			}
-			events = append(events, usageSnapshot(18, 1020, 500, 100), usageEvent("task_complete", "child-turn"))
-			path := writeUsageRollout(t, t.TempDir(), "child", "root", events...)
-			info, err := os.Stat(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			budget := info.Size() + 100
-			start := int64(9)
-			got, complete, _, _ := readRolloutUsage(context.Background(), rolloutMeta{ID: "child", path: path, HistoryStart: &start}, "root", &budget)
-			if got != want || complete || budget != 100 {
-				t.Fatalf("lost child baseline inflated totals: own=%t got=%+v complete=%t budget=%d want=%+v", withRecord, got, complete, budget, want)
-			}
-		})
 	}
 }
 
@@ -399,6 +395,9 @@ func TestOversizedRolloutStillExhaustsOriginalBudget(t *testing.T) {
 }
 
 func TestRolloutSessionCapPrecedesLargerTreeBudget(t *testing.T) {
+	if testing.Short() {
+		t.Skip("scans the real 128 MiB per-rollout boundary")
+	}
 	const sessionBytes int64 = 128 << 20
 	const treeBytes int64 = 512 << 20
 	path := writeUsageRollout(t, t.TempDir(), "root", "", usageEvent("task_started", "turn"),
@@ -464,7 +463,7 @@ func TestCollectUsageMergesRootLowerBoundsByComponent(t *testing.T) {
 			}
 			events = append(events, usageEvent("task_complete", "turn"))
 			writeUsageRollout(t, home, "root", "", events...)
-			got, complete, err := collectUsage(context.Background(), home, "root", time.Now(), fallback, nil)
+			got, complete, err := (&usageSession{}).collectUsage(context.Background(), home, "root", time.Now(), fallback, nil, nil)
 			if got != (usage.Tokens{Input: 100, CachedInput: 20, Output: 20}) || complete || err != nil {
 				t.Fatalf("component lower bounds lost: %+v complete=%t err=%v", got, complete, err)
 			}
@@ -491,7 +490,7 @@ func TestCollectUsageRetainsValidCountersOnOverflow(t *testing.T) {
 			}
 			events = append(events, usageEvent("task_complete", "turn"))
 			writeUsageRollout(t, home, "root", "", events...)
-			got, complete, err := collectUsage(context.Background(), home, "root", time.Now(), fallback, nil)
+			got, complete, err := (&usageSession{}).collectUsage(context.Background(), home, "root", time.Now(), fallback, nil, nil)
 			if got != known || !got.Valid() || complete || err != nil {
 				t.Fatalf("overflow discarded valid counters: %+v complete=%t err=%v", got, complete, err)
 			}

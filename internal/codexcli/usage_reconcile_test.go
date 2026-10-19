@@ -199,11 +199,14 @@ func TestUsageSessionAmbiguousHistoricalIdentityCannotCertifyAnUnchangedHelper(t
 
 func TestUsageSessionKnownHelperIdentityLossCannotDisappearFromReconcile(t *testing.T) {
 	for _, timing := range []string{"before begin", "between begin and collect"} {
-		for _, change := range []string{"unchanged", "removed", "unreadable", "malformed header", "reparented header", "changed parent only", "changed session only", "changed history boundary", "changed header ID", "equivalent parent header"} {
+		for _, change := range []string{"unchanged", "removed", "unreadable", "malformed header", "reparented header", "changed parent only", "changed session only", "changed history boundary", "added history boundary", "removed history boundary", "changed header ID", "equivalent parent header"} {
 			t.Run(timing+"/"+change, func(t *testing.T) {
 				ctx, home := context.Background(), t.TempDir()
 				root := writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "old-root", "r1", 100)...)
 				child := writeUsageRollout(t, home, "child", "root", completedUsageTurn("child", "old-child", "c1", 40)...)
+				if change == "added history boundary" {
+					child = writeUsageRolloutBoundary(t, home, "child", "root", nil, completedUsageTurn("child", "old-child", "c1", 40)...)
+				}
 				t.Cleanup(func() {
 					if err := os.Chmod(child, 0600); err != nil && !errors.Is(err, os.ErrNotExist) {
 						t.Error(err)
@@ -231,7 +234,7 @@ func TestUsageSessionKnownHelperIdentityLossCannotDisappearFromReconcile(t *test
 						} else if !errors.Is(err, os.ErrPermission) {
 							t.Fatal(err)
 						}
-					case "malformed header", "reparented header", "changed parent only", "changed session only", "changed history boundary", "changed header ID", "equivalent parent header":
+					case "malformed header", "reparented header", "changed parent only", "changed session only", "changed history boundary", "added history boundary", "removed history boundary", "changed header ID", "equivalent parent header":
 						data, err := os.ReadFile(child)
 						if err != nil {
 							t.Fatal(err)
@@ -250,6 +253,10 @@ func TestUsageSessionKnownHelperIdentityLossCannotDisappearFromReconcile(t *test
 							header = `{"type":"session_meta","payload":{"id":"child","session_id":"other-root","source":{"subagent":{"thread_spawn":{"parent_thread_id":"root"}}},"subagent_history_start_ordinal":9}}`
 						case "changed history boundary":
 							header = `{"type":"session_meta","payload":{"id":"child","session_id":"root","source":{"subagent":{"thread_spawn":{"parent_thread_id":"root"}}},"subagent_history_start_ordinal":10}}`
+						case "added history boundary":
+							header = `{"type":"session_meta","payload":{"id":"child","session_id":"root","source":{"subagent":{"thread_spawn":{"parent_thread_id":"root"}}},"subagent_history_start_ordinal":9}}`
+						case "removed history boundary":
+							header = `{"type":"session_meta","payload":{"id":"child","session_id":"root","source":{"subagent":{"thread_spawn":{"parent_thread_id":"root"}}}}}`
 						case "changed header ID":
 							header = `{"type":"session_meta","payload":{"id":"replacement-child","session_id":"root","source":{"subagent":{"thread_spawn":{"parent_thread_id":"root"}}},"subagent_history_start_ordinal":9}}`
 						case "equivalent parent header":

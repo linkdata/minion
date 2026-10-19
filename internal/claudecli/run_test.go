@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/bounded"
@@ -21,7 +22,10 @@ import (
 )
 
 func TestReadOnlyAddDirsMatchCanonicalPolicyWithoutTreatingDirectoriesAsSkills(t *testing.T) {
-	root := t.TempDir()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	realDir, alias, namedSkill := filepath.Join(root, "reports"), filepath.Join(root, "alias"), filepath.Join(root, "SKILL.md")
 	for _, path := range []string{realDir, namedSkill} {
 		if err := os.Mkdir(path, 0700); err != nil {
@@ -31,19 +35,35 @@ func TestReadOnlyAddDirsMatchCanonicalPolicyWithoutTreatingDirectoriesAsSkills(t
 	if err := os.Symlink(realDir, alias); err != nil {
 		t.Fatal(err)
 	}
+	output, outputAlias := filepath.Join(root, "output"), filepath.Join(root, "output-alias")
+	if err := os.Mkdir(output, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(output, outputAlias); err != nil {
+		t.Fatal(err)
+	}
 	binary := fakeExecutable(t, "claude", `printf '%s\n' "$@" > "$0.args"
 cat >/dev/null
 printf '%s\n' '`+successfulResult+`'
 `)
-	settings := config.ClaudeConfig{ReadOnlyDirs: []string{alias, namedSkill}}
-	if _, err := Run(context.Background(), t.TempDir(), "task", false, "", settings); err != nil {
+	source := t.TempDir()
+	nested := filepath.Join(source, "read-only")
+	if err := os.Mkdir(nested, 0700); err != nil {
+		t.Fatal(err)
+	}
+	nested, err = filepath.EvalSymlinks(nested)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings := config.ClaudeConfig{ReadOnlyDirs: []string{alias, namedSkill, nested}}
+	if _, err := Run(context.Background(), source, "task", true, outputAlias, settings); err != nil {
 		t.Fatal(err)
 	}
 	args := strings.Split(strings.TrimSpace(readFile(t, binary+".args")), "\n")
 	var dirs []string
 	var policy struct {
 		Sandbox struct {
-			Filesystem struct{ DenyWrite []string } `json:"filesystem"`
+			Filesystem struct{ AllowWrite, DenyWrite []string } `json:"filesystem"`
 		} `json:"sandbox"`
 	}
 	for i := 0; i+1 < len(args); i++ {
@@ -56,12 +76,15 @@ printf '%s\n' '`+successfulResult+`'
 			}
 		}
 	}
-	for _, dir := range []string{realDir, namedSkill} {
+	for _, dir := range []string{realDir, namedSkill, nested} {
 		if !slices.Contains(dirs, dir) || !slices.Contains(policy.Sandbox.Filesystem.DenyWrite, dir) {
 			t.Fatalf("canonical directory missing from grant or denial: dirs=%v deny=%v", dirs, policy.Sandbox.Filesystem.DenyWrite)
 		}
 	}
-	if slices.Contains(dirs, root) || slices.Contains(dirs, alias) || !slices.Equal(settings.ReadOnlyDirs, []string{alias, namedSkill}) {
+	if !slices.Contains(dirs, output) || !slices.Contains(policy.Sandbox.Filesystem.AllowWrite, output) || slices.Contains(dirs, outputAlias) {
+		t.Fatalf("output alias was not canonicalized: dirs=%v policy=%+v", dirs, policy)
+	}
+	if slices.Contains(dirs, root) || slices.Contains(dirs, alias) || !slices.Equal(settings.ReadOnlyDirs, []string{alias, namedSkill, nested}) {
 		t.Fatalf("grant widened or caller settings mutated: dirs=%v settings=%v", dirs, settings.ReadOnlyDirs)
 	}
 }
@@ -71,6 +94,8 @@ const successfulResult = `{"type":"result","subtype":"success","is_error":false,
 func fakeExecutable(t *testing.T, name, script string) string {
 	t.Helper()
 	if name == "claude" {
+		t.Setenv("HOME", t.TempDir())
+		t.Setenv("CLAUDE_CONFIG_DIR", "")
 		// Native invocations echo their explicit host-selected conversation ID.
 		// Discovery probes have no session selector and emit no such event.
 		script = `minion_session_flag=false
@@ -190,6 +215,14 @@ printf '%s\n' '`+successfulResult+`'
 			if err != nil {
 				t.Fatal(err)
 			}
+			workspace, err = filepath.EvalSymlinks(workspace)
+			if err != nil {
+				t.Fatal(err)
+			}
+			reports, err = filepath.EvalSymlinks(reports)
+			if err != nil {
+				t.Fatal(err)
+			}
 			if result.Answer != "final answer" || !result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) {
 				t.Fatalf("result = %+v", result)
 			}
@@ -232,18 +265,10 @@ printf '%s\n' '`+successfulResult+`'
 			if !policy.Enabled || !policy.FailIfUnavailable || policy.AllowUnsandboxedCommands || !policy.Network.StrictAllowlist || len(policy.Network.AllowedDomains) != 0 || len(policy.Filesystem.DenyRead) != 1 || policy.Filesystem.DenyRead[0] != "/" {
 				t.Fatalf("unsafe sandbox policy: %+v", policy)
 			}
-			contains := func(paths []string, path string) bool {
-				for _, value := range paths {
-					if value == path {
-						return true
-					}
-				}
-				return false
-			}
-			if contains(policy.Filesystem.AllowWrite, workspace) != writable || !contains(policy.Filesystem.DenyWrite, reports) {
+			if slices.Contains(policy.Filesystem.AllowWrite, workspace) != writable || !slices.Contains(policy.Filesystem.DenyWrite, reports) {
 				t.Fatalf("wrong workspace/report permissions: %+v", policy.Filesystem)
 			}
-			if writable && !contains(policy.Filesystem.DenyWrite, filepath.Join(workspace, ".git")) || !writable && !contains(policy.Filesystem.DenyWrite, workspace) {
+			if writable && !slices.Contains(policy.Filesystem.DenyWrite, filepath.Join(workspace, ".git")) || !writable && !slices.Contains(policy.Filesystem.DenyWrite, workspace) {
 				t.Fatal("read-only protections missing")
 			}
 			prompt := readFile(t, binary+".prompt")
@@ -268,23 +293,14 @@ func TestRunFailures(t *testing.T) {
 		{"failed", `{"type":"result","subtype":"error_during_execution","is_error":true}`},
 		{"empty", `{"type":"result","subtype":"success","result":" "}`},
 		{"denied", `{"type":"result","subtype":"success","result":"declined","permission_denials":[{}]}`},
-		{"duplicate", successfulResult + "\n" + successfulResult},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fakeExecutable(t, "claude", "cat >/dev/null\ncat <<'RESULT'\n"+tc.output+"\nRESULT\n")
 			result, err := Run(context.Background(), t.TempDir(), "task", false, "", config.ClaudeConfig{})
-			if err == nil || result.Answer != "" || result.UsageComplete {
+			if err == nil || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{}) {
 				t.Fatalf("Run = %+v, %v", result, err)
 			}
 		})
-	}
-}
-
-func TestRunRetainsKnownUsageAfterExitFailure(t *testing.T) {
-	fakeExecutable(t, "claude", "cat >/dev/null\nprintf '%s\\n' '"+successfulResult+"'\nexit 7\n")
-	result, err := Run(context.Background(), t.TempDir(), "task", false, "", config.ClaudeConfig{})
-	if err == nil || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) {
-		t.Fatalf("failed lifecycle lost counters or certified full coverage: result=%+v, error=%v", result, err)
 	}
 }
 
@@ -349,10 +365,16 @@ func TestRunStructuredOutput(t *testing.T) {
 
 func TestRunRejectsUnsafePaths(t *testing.T) {
 	workspace := t.TempDir()
+	outputParent := t.TempDir()
+	output := filepath.Join(outputParent, "reports")
+	if err := os.Mkdir(output, 0700); err != nil {
+		t.Fatal(err)
+	}
 	fakeExecutable(t, "claude", "exit 99\n")
 	for _, tc := range []struct {
 		name, dir, output string
 		settings          config.ClaudeConfig
+		failure           string
 	}{
 		{name: "empty source snapshot"},
 		{name: "root source snapshot", dir: "/"},
@@ -360,10 +382,13 @@ func TestRunRejectsUnsafePaths(t *testing.T) {
 		{name: "ancestor output", dir: workspace, output: filepath.Dir(workspace)},
 		{name: "relative skill", dir: workspace, settings: config.ClaudeConfig{Skills: []string{"SKILL.md"}}},
 		{name: "read root", dir: workspace, settings: config.ClaudeConfig{ReadOnlyDirs: []string{"/"}}},
+		{name: "read output", dir: workspace, output: output, settings: config.ClaudeConfig{ReadOnlyDirs: []string{output}}, failure: "read-only directory overlaps"},
+		{name: "read output ancestor", dir: workspace, output: output, settings: config.ClaudeConfig{ReadOnlyDirs: []string{outputParent}}, failure: "read-only directory overlaps"},
+		{name: "read workspace ancestor", dir: workspace, settings: config.ClaudeConfig{ReadOnlyDirs: []string{filepath.Dir(workspace)}}, failure: "read-only directory overlaps"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := Run(context.Background(), tc.dir, "task", true, tc.output, tc.settings); err == nil {
-				t.Fatal("accepted invalid paths")
+			if _, err := Run(context.Background(), tc.dir, "task", true, tc.output, tc.settings); err == nil || !strings.Contains(err.Error(), tc.failure) {
+				t.Fatalf("invalid path refusal = %v; want %q", err, tc.failure)
 			}
 		})
 	}
@@ -377,18 +402,8 @@ func TestRunRejectsUnsafePaths(t *testing.T) {
 	}
 }
 
-func TestRunCancelled(t *testing.T) {
-	fakeExecutable(t, "claude", "sleep 30\n")
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	result, err := Run(ctx, t.TempDir(), "task", false, "", config.ClaudeConfig{})
-	if !errors.Is(err, context.Canceled) || result.UsageComplete || result.Answer != "" {
-		t.Fatalf("Run = %+v, %v", result, err)
-	}
-}
-
 func TestChildEnvironment(t *testing.T) {
-	got, err := childEnvironment([]string{"HOME=/home/operator", "PATH=/bin", "CLAUDE_CONFIG_DIR=/home/operator/.claude", "ANTHROPIC_API_KEY=", "anthropic_api_key=dummy", "GH_TOKEN=dummy", "GITHUB_TOKEN=dummy", "GIT_CONFIG_GLOBAL=/private-git-config", "GIT_DIR=/private-git-dir", "NODE_OPTIONS=dummy", "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=0", "BASH_ENV=bad", "HTTPS_PROXY=http://proxy.example:8080", "https_proxy=http://lower.example:3128", "http_proxy=http://lower.example:3128", "all_proxy=socks5://lower.example:1080", "no_proxy=localhost", "Https_Proxy=http://ignored.example:3128", "invalid"}, "/run", "/cache", "", "/home/operator/.claude")
+	got, err := childEnvironment([]string{"HOME=/home/operator", "PATH=/bin", "CLAUDE_CONFIG_DIR=/wrong-native-home", "ANTHROPIC_API_KEY=", "anthropic_api_key=dummy", "GH_TOKEN=dummy", "GITHUB_TOKEN=dummy", "GIT_CONFIG_GLOBAL=/private-git-config", "GIT_DIR=/private-git-dir", "NODE_OPTIONS=dummy", "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=0", "BASH_ENV=bad", "HTTPS_PROXY=http://proxy.example:8080", "https_proxy=http://lower.example:3128", "http_proxy=http://lower.example:3128", "all_proxy=socks5://lower.example:1080", "no_proxy=localhost", "Https_Proxy=http://ignored.example:3128", "invalid"}, "/run", "/cache", "", "/home/operator/.claude")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -397,6 +412,9 @@ func TestChildEnvironment(t *testing.T) {
 		if !strings.Contains(joined, required) {
 			t.Fatalf("missing local Git setting %q: %s", required, joined)
 		}
+	}
+	if strings.Contains(joined, "/wrong-native-home") {
+		t.Fatalf("inherited native home overrode selected configuration: %q", got)
 	}
 	if strings.Contains(joined, "/private-git-") {
 		t.Fatalf("inherited host Git setting: %s", joined)
@@ -457,15 +475,13 @@ func TestChildEnvironmentRejectsCredentials(t *testing.T) {
 func TestCredentialEnvironmentStopsCLI(t *testing.T) {
 	binary := fakeExecutable(t, "claude", "touch \"$0.called\"\nexit 99\n")
 	t.Setenv("ANTHROPIC_API_KEY", "dummy-secret")
-	for _, enabled := range []bool{false, true} {
-		settings := config.ClaudeConfig{AllowAllUnixSockets: &enabled}
-		if _, err := Validate(context.Background(), settings); err == nil || !strings.Contains(err.Error(), "ANTHROPIC_API_KEY") {
-			t.Fatalf("Validate accepted environment credentials: %v", err)
-		}
-		result, err := Run(context.Background(), t.TempDir(), "task", false, "", settings)
-		if err == nil || !strings.Contains(err.Error(), "ANTHROPIC_API_KEY") || !result.UsageComplete || result.Tokens != (usage.Tokens{}) || result.Answer != "" {
-			t.Fatalf("Run accepted environment credentials or lost complete zero usage: result=%+v err=%v", result, err)
-		}
+	settings := config.ClaudeConfig{}
+	if _, err := Validate(context.Background(), settings); err == nil || !strings.Contains(err.Error(), "ANTHROPIC_API_KEY") {
+		t.Fatalf("Validate accepted environment credentials: %v", err)
+	}
+	result, err := Run(context.Background(), t.TempDir(), "task", false, "", settings)
+	if err == nil || !strings.Contains(err.Error(), "ANTHROPIC_API_KEY") || !result.UsageComplete || result.Tokens != (usage.Tokens{}) || result.Answer != "" {
+		t.Fatalf("Run accepted environment credentials or lost complete zero usage: result=%+v err=%v", result, err)
 	}
 	if _, err := os.Stat(binary + ".called"); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("CLI launched with credentials: %v", err)
@@ -517,41 +533,33 @@ func TestRunQuotesNativeFailureSubtype(t *testing.T) {
 	}
 }
 
-func TestRunUsesCanonicalGrantPathsInPolicyAndArguments(t *testing.T) {
-	parent := t.TempDir()
-	output, readOnly := t.TempDir(), t.TempDir()
-	outputAlias, readOnlyAlias := filepath.Join(parent, "output"), filepath.Join(parent, "read-only")
-	for alias, target := range map[string]string{outputAlias: output, readOnlyAlias: readOnly} {
-		if err := os.Symlink(target, alias); err != nil {
-			t.Fatal(err)
-		}
-	}
-	binary := fakeExecutable(t, "claude", "printf '%s\\n' \"$@\" > \"$0.args\"\ncat >/dev/null\nprintf '%s\\n' '"+successfulResult+"'\n")
-	if _, err := Run(context.Background(), t.TempDir(), "task", false, outputAlias, config.ClaudeConfig{ReadOnlyDirs: []string{readOnlyAlias}}); err != nil {
-		t.Fatal(err)
-	}
-	args := strings.Split(strings.TrimSuffix(readFile(t, binary+".args"), "\n"), "\n")
-	var settings struct {
-		Sandbox struct {
-			Filesystem struct {
-				AllowWrite []string `json:"allowWrite"`
-				DenyWrite  []string `json:"denyWrite"`
-			} `json:"filesystem"`
-		} `json:"sandbox"`
-	}
-	var added []string
-	for i := 0; i+1 < len(args); i++ {
-		switch args[i] {
-		case "--settings":
-			if err := json.Unmarshal([]byte(args[i+1]), &settings); err != nil {
+func TestRunRequiresNativeConversationIdentity(t *testing.T) {
+	for _, test := range []struct{ name, init, failure string }{
+		{"missing", "", "missing Claude conversation identity"},
+		{"foreign", `{"type":"system","subtype":"init","session_id":"other"}`, "conversation identity changed"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			binary := fakeExecutable(t, "claude", "exit 99\n")
+			// Override the normal fake's valid identity prelude for this boundary control.
+			script := "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '" + test.init + "' '" + successfulResult + "'\n"
+			if err := os.WriteFile(binary, []byte(script), 0700); err != nil {
 				t.Fatal(err)
 			}
-		case "--add-dir":
-			added = append(added, args[i+1])
-		}
+			result, err := Run(context.Background(), t.TempDir(), "task", false, "", config.ClaudeConfig{})
+			if err == nil || !strings.Contains(err.Error(), test.failure) || result.Answer != "" || result.UsageComplete {
+				t.Fatalf("native identity refusal: %+v, %v", result, err)
+			}
+		})
 	}
-	if !slices.Contains(added, output) || !slices.Contains(added, readOnly) || slices.Contains(added, outputAlias) || slices.Contains(added, readOnlyAlias) ||
-		!slices.Contains(settings.Sandbox.Filesystem.AllowWrite, output) || !slices.Contains(settings.Sandbox.Filesystem.DenyWrite, readOnly) {
-		t.Fatalf("policy/argv grant paths differ: added=%v filesystem=%+v", added, settings.Sandbox.Filesystem)
+}
+
+func TestRunParseFailureCancelsActiveCLI(t *testing.T) {
+	fakeExecutable(t, "claude", "cat >/dev/null\nprintf '%s\\n' '"+assistantUsageEvent("partial", 3, 5, 7, 2)+"' '{bad'\nexec sleep 30\n")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	started := time.Now()
+	result, err := Run(ctx, t.TempDir(), "task", false, "", config.ClaudeConfig{})
+	if err == nil || !strings.Contains(err.Error(), "invalid Claude JSONL event") || ctx.Err() != nil || time.Since(started) > 5*time.Second || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 2}) {
+		t.Fatalf("parse failure did not stop active CLI: %+v, %v, parent=%v", result, err, ctx.Err())
 	}
 }

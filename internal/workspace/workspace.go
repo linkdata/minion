@@ -290,7 +290,8 @@ func CheckRoot(root string) error {
 	return dir.Close()
 }
 
-// CheckPrivateRoot requires a private directory without following a final symlink.
+// CheckPrivateRoot checks directory type and permissions without following a final symlink.
+// Callers must provide trusted placement for root and its parents.
 func CheckPrivateRoot(root string) error {
 	info, err := os.Lstat(root)
 	if err != nil {
@@ -419,15 +420,12 @@ func checkUnchanged(ctx context.Context, root string, base []File, repository bo
 	for _, file := range base {
 		prior[file.Path] = file
 	}
-	err := walk(ctx, root, func(name string, entry fs.DirEntry) error {
+	err := walk(ctx, root, repository, func(name string, entry fs.DirEntry) error {
 		rel, err := filepath.Rel(root, name)
 		if err != nil {
 			return err
 		}
 		rel = filepath.ToSlash(rel)
-		if repository && rel == ".git" && entry.IsDir() {
-			return filepath.SkipDir
-		}
 		if !validSourcePath(rel) {
 			return fmt.Errorf("unsafe workspace path %q", rel)
 		}
@@ -495,8 +493,9 @@ func ReadChanges(ctx context.Context, root string, selected []Change) ([]Change,
 	return changes, nil
 }
 
-// walk visits bounded entries without following directory symlinks.
-func walk(ctx context.Context, root string, visit func(string, fs.DirEntry) error) error {
+// walk visits bounded source entries without following directory symlinks.
+// Repository mode excludes only the separately verified top-level .git directory.
+func walk(ctx context.Context, root string, repository bool, visit func(string, fs.DirEntry) error) error {
 	root = filepath.Clean(root)
 	type directory struct{ parent, name string }
 	dirs := []directory{{name: root}}
@@ -522,15 +521,15 @@ func walk(ctx context.Context, root string, visit func(string, fs.DirEntry) erro
 					return readErr
 				}
 				for _, entry := range batch {
+					if repository && dir == root && entry.Name() == ".git" && entry.IsDir() {
+						continue
+					}
 					entries++
 					if entries > MaxEntries {
 						return errors.New("workspace scan exceeds entry limit")
 					}
 					name := filepath.Join(dir, entry.Name())
 					if err := visit(name, entry); err != nil {
-						if err == filepath.SkipDir && entry.IsDir() {
-							continue
-						}
 						return err
 					}
 					if entry.IsDir() {
@@ -553,16 +552,21 @@ func ValidateChanges(changes []Change) error {
 	if len(changes) > MaxChanges {
 		return errors.New("result exceeds changed file limit")
 	}
-	seen := map[string][]Change{}
+	type identity struct {
+		path    string
+		deleted bool
+		count   uint8
+	}
+	seen := make(map[string]identity, len(changes))
 	var paths []string
 	total := 0
 	for _, change := range changes {
 		key := FoldPath(change.Path)
 		prior := seen[key]
-		if !ValidPath(change.Path) || len(prior) > 1 || (len(prior) == 1 && (prior[0].Path == change.Path || prior[0].Delete == change.Delete)) {
+		if !ValidPath(change.Path) || prior.count > 1 || (prior.count == 1 && (prior.path == change.Path || prior.deleted == change.Delete)) {
 			return fmt.Errorf("unsafe or duplicate changed path %q", change.Path)
 		}
-		seen[key] = append(prior, change)
+		seen[key] = identity{path: change.Path, deleted: change.Delete, count: prior.count + 1}
 		if change.Delete {
 			if change.Mode != 0 || len(change.Data) != 0 {
 				return fmt.Errorf("deleted file %q has content or mode", change.Path)
@@ -583,9 +587,6 @@ func ValidateChanges(changes []Change) error {
 
 // ValidateChangedPaths checks the final layout of an already validated base and changes.
 func ValidateChangedPaths(base []string, changes []Change) error {
-	if len(changes) == 0 {
-		return nil
-	}
 	_, err := changedPaths(base, changes)
 	return err
 }

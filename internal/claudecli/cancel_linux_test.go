@@ -30,6 +30,7 @@ wait
 	}
 	done := make(chan outcome, 1)
 	go func() {
+		defer close(done)
 		result, err := Run(ctx, workspace, "task", false, "", config.ClaudeConfig{})
 		done <- outcome{result, err}
 	}()
@@ -39,6 +40,8 @@ wait
 	defer stopWait()
 	child, err := testsupport.WaitForProcess(waitCtx, binary+".pid", done)
 	if err != nil {
+		cancel()
+		<-done
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {

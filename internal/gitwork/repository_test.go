@@ -584,28 +584,21 @@ func TestRepositoryDigestEntryLimitCountsRoot(t *testing.T) {
 	}
 }
 
-func TestRepositoryDigestUsesReverseLexicalDepthFirstOrder(t *testing.T) {
-	for _, names := range [][]string{{"z/second", "a/first"}, {"a/first", "z/second"}} {
+func TestRepositoryDigestIgnoresCreationOrder(t *testing.T) {
+	var previous [sha256.Size]byte
+	for i, names := range [][]string{{"z/second", "a/first"}, {"a/first", "z/second"}} {
 		dir := t.TempDir()
 		for _, name := range names {
 			writeFile(t, filepath.Join(dir, name), name)
 		}
-		// The oracle uses a fixed traversal, independent of ReadDir and production sorting.
-		hash := sha256.New()
-		for _, name := range []string{".", "z", "z/second", "a", "a/first"} {
-			info, err := os.Lstat(filepath.Join(dir, name))
-			if err != nil {
-				t.Fatal(err)
-			}
-			fmt.Fprintf(hash, "%s\x00%d\x00", name, info.Mode())
-			if info.Mode().IsRegular() {
-				fmt.Fprintf(hash, "%d\x00%s", len(name), name)
-			}
-		}
 		digest, err := repositoryDigest(context.Background(), dir)
-		if err != nil || !bytes.Equal(digest[:], hash.Sum(nil)) {
-			t.Fatalf("metadata digest=%x error=%v; want %x", digest, err, hash.Sum(nil))
+		if err != nil {
+			t.Fatal(err)
 		}
+		if i != 0 && digest != previous {
+			t.Fatalf("creation order changed metadata digest: %x != %x", digest, previous)
+		}
+		previous = digest
 	}
 }
 

@@ -122,11 +122,11 @@ func (s Store) Save(record Record) error {
 	if err := record.validate(); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(s.Dir, 0700); err != nil {
-		return err
-	}
 	data, err := json.Marshal(record)
 	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(s.Dir, 0700); err != nil {
 		return err
 	}
 	return workspace.WriteAtomic(filepath.Join(s.Dir, record.ID+".json"), append(data, '\n'), filepath.Dir(s.Dir))

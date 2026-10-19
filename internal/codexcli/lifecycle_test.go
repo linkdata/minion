@@ -96,12 +96,13 @@ func TestRunChecksLatestOwnedChildTurn(t *testing.T) {
 	for _, scenario := range []struct {
 		name, events string
 		fails        bool
+		want         usage.Tokens
 	}{
-		{"aborted then completed", first + "\n" + usageEvent("turn_aborted", "first") + "\n" + second + "\n" + usageEvent("task_complete", "second"), false},
-		{"completed then new open turn", first + "\n" + usageEvent("task_complete", "first") + "\n" + second, true},
-		{"old abort after newer completion", first + "\n" + second + "\n" + usageEvent("task_complete", "second") + "\n" + usageEvent("turn_aborted", "first"), false},
-		{"old completion cannot close newer turn", first + "\n" + second + "\n" + usageEvent("task_complete", "first"), true},
-		{"observed latest abort before unreadable tail", first + "\n" + usageEvent("turn_aborted", "first") + "\n{damaged", true},
+		{"aborted then completed", first + "\n" + usageEvent("turn_aborted", "first") + "\n" + second + "\n" + usageEvent("task_complete", "second"), false, usage.Tokens{Input: 60, Output: 6}},
+		{"completed then new open turn", first + "\n" + usageEvent("task_complete", "first") + "\n" + second, true, usage.Tokens{Input: 60, Output: 6}},
+		{"old abort after newer completion", first + "\n" + second + "\n" + usageEvent("task_complete", "second") + "\n" + usageEvent("turn_aborted", "first"), false, usage.Tokens{Input: 60, Output: 6}},
+		{"old completion cannot close newer turn", first + "\n" + second + "\n" + usageEvent("task_complete", "first"), true, usage.Tokens{Input: 60, Output: 6}},
+		{"observed latest abort before unreadable tail", first + "\n" + usageEvent("turn_aborted", "first") + "\n{damaged", true, usage.Tokens{Input: 30, Output: 3}},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			installFakeCodex(t, "#!/bin/sh\ncat <<'EVENTS'\n"+`{"type":"thread.started","thread_id":"root"}
@@ -112,7 +113,7 @@ func TestRunChecksLatestOwnedChildTurn(t *testing.T) {
 			writeUsageRollout(t, home, "root", "", usageEvent("task_started", "root-turn"), usageRecord("root", "root-turn", "root-response", 10, 0, 1), usageEvent("task_complete", "root-turn"))
 			writeUsageRollout(t, home, "child", "root", strings.Split(scenario.events, "\n")...)
 			result, err := Run(context.Background(), t.TempDir(), "task", false, "", config.CodexConfig{})
-			if (err != nil) != scenario.fails || scenario.fails && (!strings.Contains(err.Error(), "helper agent work did not complete") || result.Answer != "") || !scenario.fails && result.Answer != "answer" || result.UsageComplete || result.Tokens.Input < 30 {
+			if (err != nil) != scenario.fails || scenario.fails && (!strings.Contains(err.Error(), "helper agent work did not complete") || result.Answer != "") || !scenario.fails && result.Answer != "answer" || result.UsageComplete || result.Tokens != scenario.want {
 				t.Fatalf("latest child turn misclassified: result=%+v error=%v", result, err)
 			}
 		})
@@ -167,7 +168,7 @@ func TestRunRejectsKnownUnfinishedChildrenWithoutRejectingAccountingGaps(t *test
 			if (err != nil) != fails || fails && (result.Answer != "" || result.UsageComplete || !strings.Contains(err.Error(), "helper agent work did not complete")) || !fails && result.Answer != "completed response" {
 				t.Fatalf("child lifecycle conflated with accounting: result=%+v error=%v", result, err)
 			}
-			if result.Tokens.Input < 10 || result.UsageComplete != (scenario == "complete") {
+			if result.Tokens.Input < 10 || result.UsageComplete != (scenario == "complete") || scenario == "complete" && result.Tokens != (usage.Tokens{Input: 30, Output: 3}) {
 				t.Fatalf("lost accounting distinction: %+v", result)
 			}
 		})

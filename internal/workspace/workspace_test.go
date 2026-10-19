@@ -194,33 +194,42 @@ func TestSourcePreservesGitLegalCaseAndBackslashPaths(t *testing.T) {
 }
 
 func TestCaseOnlyRenameAppliesDeletionBeforeCreation(t *testing.T) {
-	root := privateRoot(t)
-	base := []File{{Path: "Foo/a", Mode: Regular, Data: []byte("before")}}
-	if err := Materialize(root, base); err != nil {
-		t.Fatal(err)
-	}
-	changes := []Change{{Path: "Foo/a", Delete: true}, {Path: "foo/a", Mode: Regular, Data: []byte("after")}}
-	if err := ValidateChanges(changes); err != nil {
-		t.Fatal(err)
-	}
-	if err := ValidateChangedPaths([]string{"Foo/a"}, changes); err != nil {
-		t.Fatal(err)
-	}
-	if err := Apply(root, changes); err != nil {
-		t.Fatal(err)
-	}
-	entries, err := os.ReadDir(root)
-	if err != nil || len(entries) != 1 || entries[0].Name() != "foo" {
-		t.Fatalf("renamed root entries=%v,%v", entries, err)
-	}
-	if err := CheckUnchanged(context.Background(), root, []File{{Path: "foo/a", Mode: Regular, Data: []byte("after")}}); err != nil {
-		t.Fatalf("renamed source=%v", err)
+	for _, addFirst := range []bool{false, true} {
+		t.Run(map[bool]string{false: "deletion first", true: "creation first"}[addFirst], func(t *testing.T) {
+			root := privateRoot(t)
+			base := []File{{Path: "Foo/a", Mode: Regular, Data: []byte("before")}}
+			if err := Materialize(root, base); err != nil {
+				t.Fatal(err)
+			}
+			changes := []Change{{Path: "Foo/a", Delete: true}, {Path: "foo/a", Mode: Regular, Data: []byte("after")}}
+			if addFirst {
+				changes[0], changes[1] = changes[1], changes[0]
+			}
+			if err := ValidateChanges(changes); err != nil {
+				t.Fatal(err)
+			}
+			if err := ValidateChangedPaths([]string{"Foo/a"}, changes); err != nil {
+				t.Fatal(err)
+			}
+			if err := Apply(root, changes); err != nil {
+				t.Fatal(err)
+			}
+			entries, err := os.ReadDir(root)
+			if err != nil || len(entries) != 1 || entries[0].Name() != "foo" {
+				t.Fatalf("renamed root entries=%v,%v", entries, err)
+			}
+			if err := CheckUnchanged(context.Background(), root, []File{{Path: "foo/a", Mode: Regular, Data: []byte("after")}}); err != nil {
+				t.Fatalf("renamed source=%v", err)
+			}
+		})
 	}
 	for _, invalid := range [][]Change{
 		{{Path: "Foo/a", Delete: true}, {Path: "Foo/a", Mode: Regular}},
 		{{Path: "Foo/a", Delete: true}, {Path: "foo/a", Delete: true}},
 		{{Path: "Foo/a", Mode: Regular}, {Path: "foo/a", Mode: Regular}},
 		{{Path: "Foo/a", Delete: true}, {Path: "foo/a", Mode: Regular}, {Path: "FOO/a", Delete: true}},
+		{{Path: "Foo/a", Delete: true}, {Path: "foo/a", Mode: Regular}, {Path: "foo/a", Mode: Regular}},
+		{{Path: "foo/a", Mode: Regular}, {Path: "Foo/a", Delete: true}, {Path: "Foo/a", Delete: true}},
 	} {
 		if err := ValidateChanges(invalid); err == nil {
 			t.Fatalf("accepted duplicated rename operations: %+v", invalid)
@@ -479,11 +488,35 @@ func TestWalkBoundsEntries(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	visited := 0
-	err := walk(context.Background(), root, func(string, os.DirEntry) error { visited++; return nil })
-	if err == nil || !strings.Contains(err.Error(), "entry limit") || visited != MaxEntries {
-		t.Fatalf("entry-bound walk: visited=%d error=%v", visited, err)
+	check := func(repository, overflow bool) {
+		t.Helper()
+		visited := 0
+		err := walk(context.Background(), root, repository, func(string, os.DirEntry) error {
+			visited++
+			return nil
+		})
+		if visited != MaxEntries || (err != nil) != overflow || (err != nil && !strings.Contains(err.Error(), "entry limit")) {
+			t.Fatalf("entry-bound walk: repository=%t overflow=%t visited=%d error=%v", repository, overflow, visited, err)
+		}
 	}
+	check(false, true)
+	extra := filepath.Join(root, "0")
+	if err := os.Remove(extra); err != nil {
+		t.Fatal(err)
+	}
+	check(false, false)
+	metadata := filepath.Join(root, ".git")
+	if err := os.Mkdir(metadata, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(metadata, "config"), []byte("separately verified metadata"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	check(true, false)
+	if err := os.WriteFile(extra, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	check(true, true)
 }
 
 func TestValidSHA(t *testing.T) {

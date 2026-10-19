@@ -60,7 +60,7 @@ func (c *Checkout) sourceEntries(ctx context.Context, ref string, tree github.Gi
 	seen := map[string]bool{}
 	for _, entry := range tree.Tree {
 		if seen[entry.Path] {
-			return nil, fmt.Errorf("%w: unsafe or duplicate source path %q", ErrUnsupportedSource, entry.Path)
+			return nil, fmt.Errorf("%w: duplicate source path %q", ErrUnsupportedSource, entry.Path)
 		}
 		seen[entry.Path] = true
 		if entry.Type != "tree" {

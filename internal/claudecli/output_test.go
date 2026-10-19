@@ -288,6 +288,7 @@ func TestUsageValidation(t *testing.T) {
 		{"zero", eventUsage{Input: &zero, Created: &zero, Cached: &zero, Output: &zero}, true},
 		{"negative", eventUsage{Input: &negative, Created: &zero, Cached: &zero, Output: &zero}, false},
 		{"input overflow", eventUsage{Input: &maximum, Created: &one, Cached: &zero, Output: &zero}, false},
+		{"cached input overflow", eventUsage{Input: &zero, Created: &maximum, Cached: &one, Output: &zero}, false},
 		{"total overflow", eventUsage{Input: &maximum, Created: &zero, Cached: &zero, Output: &one}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

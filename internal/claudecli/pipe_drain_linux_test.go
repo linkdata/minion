@@ -32,11 +32,14 @@ exit 0
 	done := make(chan outcome, 1)
 	workspace := t.TempDir()
 	go func() {
+		defer close(done)
 		result, err := Run(ctx, workspace, "task", false, "", config.ClaudeConfig{})
 		done <- outcome{result, err}
 	}()
 	child, err := testsupport.WaitForProcess(ctx, binary+".pid", done)
 	if err != nil {
+		cancel()
+		<-done
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {

@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -95,8 +96,12 @@ func main() {
 	if err := os.WriteFile(source, []byte(program), 0600); err != nil {
 		t.Fatal(err)
 	}
-	build := exec.Command("go", "build", "-o", target, source)
-	build.Env = append(os.Environ(), "GOWORK=off", "GOTOOLCHAIN=local", "GOENV=off", "GOFLAGS=")
+	build := exec.Command(filepath.Join(runtime.GOROOT(), "bin", "go"), "build", "-o", target, source)
+	build.Dir = root
+	build.Env = append(os.Environ(),
+		"GOROOT="+runtime.GOROOT(), "GOOS="+runtime.GOOS, "GOARCH="+runtime.GOARCH, "CGO_ENABLED=0",
+		"GO111MODULE=off", "GOWORK=off", "GOTOOLCHAIN=local", "GOENV=off", "GOFLAGS=",
+	)
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("compile multicall fixture: %s %v", output, err)
 	}

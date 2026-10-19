@@ -100,7 +100,7 @@ func TestOutputAcceptsNativeUserStringContent(t *testing.T) {
 		_, _ = o.Write([]byte(`{"type":"user","isSynthetic":true,"message":{"content":` + content + "}}\n" + successfulResult + "\n"))
 		o.finish()
 		if o.err != nil || o.result.Answer != "final answer" {
-			t.Fatalf("valid user content refused: %+v error=%v", o.result, o.err)
+			t.Fatalf("valid user content %s refused: %+v error=%v", content, o.result, o.err)
 		}
 	}
 }

@@ -72,7 +72,25 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 		if err != nil {
 			return result, fmt.Errorf("codex exec: resolve output directory: %w", err)
 		}
+		if workspacefs.Within(workspace, outputDir) || workspacefs.Within(outputDir, workspace) {
+			return result, errors.New("codex exec: output directory must be separate from the source snapshot")
+		}
 	}
+	readOnlyDirs := make([]string, 0, len(settings.ReadOnlyDirs))
+	for _, path := range settings.ReadOnlyDirs {
+		path, err = aicli.Directory(path)
+		if err != nil {
+			return result, fmt.Errorf("codex exec: resolve read-only directory: %w", err)
+		}
+		if workspacefs.Within(workspace, path) || workspacefs.Within(path, workspace) {
+			return result, errors.New("codex exec: read-only directory must be separate from the source snapshot")
+		}
+		if outputDir != "" && (workspacefs.Within(path, outputDir) || workspacefs.Within(outputDir, path)) {
+			return result, errors.New("codex exec: read-only directory overlaps the output directory")
+		}
+		readOnlyDirs = append(readOnlyDirs, path)
+	}
+
 	if err := s.prepare(workspace, realBinary, codexHome, outputDir, writable, settings); err != nil {
 		return result, err
 	}
@@ -99,22 +117,9 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	}
 	filesystemRules = append(filesystemRules, fmt.Sprintf(`%s="read"`, strconv.Quote(realBinary)))
 	if outputDir != "" {
-		if workspacefs.Within(workspace, outputDir) || workspacefs.Within(outputDir, workspace) {
-			return result, errors.New("codex exec: output directory must be separate from the source snapshot")
-		}
 		filesystemRules = append(filesystemRules, fmt.Sprintf(`%s="write"`, strconv.Quote(outputDir)))
 	}
-	for _, path := range settings.ReadOnlyDirs {
-		path, err = aicli.Directory(path)
-		if err != nil {
-			return result, fmt.Errorf("codex exec: resolve read-only directory: %w", err)
-		}
-		if workspacefs.Within(workspace, path) || workspacefs.Within(path, workspace) {
-			return result, errors.New("codex exec: read-only directory must be separate from the source snapshot")
-		}
-		if outputDir != "" && (workspacefs.Within(path, outputDir) || workspacefs.Within(outputDir, path)) {
-			return result, errors.New("codex exec: read-only directory overlaps the output directory")
-		}
+	for _, path := range readOnlyDirs {
 		filesystemRules = append(filesystemRules, fmt.Sprintf(`%s="read"`, strconv.Quote(path)))
 	}
 
@@ -197,8 +202,11 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 
 	started := time.Now()
 	s.accounting.begin(ctx, codexHome, s.threadID, started)
-	s.used = true
 	runErr := cmd.Run()
+	if cmd.Process == nil {
+		return aicli.Result{UsageComplete: true}, fmt.Errorf("codex exec: %w", errors.Join(ctx.Err(), runErr))
+	}
+	s.used = true
 	output.stream.Finish()
 	if s.threadID == "" && output.stopErr == nil {
 		s.threadID = output.threadID

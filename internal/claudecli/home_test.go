@@ -13,12 +13,16 @@ import (
 
 func TestHomePathUsesNativeVariableAndDefault(t *testing.T) {
 	root := t.TempDir()
+	realRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("HOME", root)
 	for _, override := range []string{"", filepath.Join(root, "explicit")} {
 		t.Setenv("CLAUDE_CONFIG_DIR", override)
-		want := override
-		if want == "" {
-			want = filepath.Join(root, ".claude")
+		want := filepath.Join(realRoot, "explicit")
+		if override == "" {
+			want = filepath.Join(realRoot, ".claude")
 		}
 		if got, err := HomePath(); err != nil || got != want {
 			t.Fatalf("native home=%q, %v; want %q", got, err, want)
@@ -91,7 +95,11 @@ fi
 					base := t.TempDir()
 					t.Setenv("HOME", base)
 					home := filepath.Join(base, ".claude")
-					wantEnv := "x," + home
+					realBase, err := filepath.EvalSymlinks(base)
+					if err != nil {
+						t.Fatal(err)
+					}
+					wantEnv := "x," + filepath.Join(realBase, ".claude")
 					cwd, err := os.Getwd()
 					if err != nil {
 						t.Fatal(err)

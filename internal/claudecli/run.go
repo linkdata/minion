@@ -142,9 +142,11 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	}}
 	cmd.Stdout, cmd.Stderr = &output, io.MultiWriter(&diagnostics, &ceiling)
 	err = cmd.Run()
-	if cmd.Process != nil {
-		s.started = true
+	if cmd.Process == nil {
+		// No CLI started, so no provider usage or resumable turn exists.
+		return result, fmt.Errorf("claude: %w", err)
 	}
+	s.started = true
 	ceiling.Finish()
 	// Preserve crash/startup stderr before finish adds a generic missing-result
 	// error; native structured failures retain their safer diagnostic instead.
@@ -156,15 +158,13 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 		failureTimer.Stop()
 	}
 	result = output.result
-	if cmd.Process != nil {
-		s.usageGap = !output.hasCumulative || output.err != nil
-		if output.hasCumulative {
-			s.baseline = output.cumulative
-		} else if floor, valid := s.baseline.AddChecked(result.Tokens); valid {
-			s.baseline = floor
-		} else {
-			err = errors.Join(err, errors.New("claude session usage totals overflow"))
-		}
+	s.usageGap = !output.hasCumulative || output.err != nil
+	if output.hasCumulative {
+		s.baseline = output.cumulative
+	} else if floor, valid := s.baseline.AddChecked(result.Tokens); valid {
+		s.baseline = floor
+	} else {
+		err = errors.Join(err, errors.New("claude session usage totals overflow"))
 	}
 	if ctx.Err() != nil {
 		err = errors.Join(ctx.Err(), output.err, err)

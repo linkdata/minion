@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 
 	"github.com/linkdata/minion/internal/aicli"
@@ -59,11 +60,15 @@ func (s *Session) Close() error {
 }
 
 func (s *Session) prepare(workspace, binary, home, output string, writable bool, settings config.CodexConfig) error {
+	bound := settings
+	bound.ReadOnlyDirs = nil // Phase evidence grants do not bind the conversation.
+	if len(bound.Skills) == 0 {
+		bound.Skills = nil // Preserve slices.Equal's nil/empty equivalence.
+	}
 	if s.bound {
 		if workspace != s.workspace || binary != s.binary || home != s.home || output != s.output || writable != s.writable ||
 			os.Getenv("HOME") != s.homeEnv || os.Getenv("CODEX_HOME") != s.overrideEnv ||
-			settings.Model != s.settings.Model || settings.ReasoningEffort != s.settings.ReasoningEffort || settings.APIKey != s.settings.APIKey ||
-			settings.OutputSchema != s.settings.OutputSchema || !slices.Equal(settings.Skills, s.settings.Skills) {
+			!reflect.DeepEqual(bound, s.settings) {
 			return errors.New("codex exec: session source, output or host settings changed")
 		}
 		if s.used && s.threadID == "" {
@@ -73,9 +78,8 @@ func (s *Session) prepare(workspace, binary, home, output string, writable bool,
 		s.bound = true
 		s.workspace, s.binary, s.home, s.output, s.writable = workspace, binary, home, output, writable
 		s.homeEnv, s.overrideEnv = os.Getenv("HOME"), os.Getenv("CODEX_HOME")
-		s.settings = settings
-		s.settings.Skills = slices.Clone(settings.Skills)
-		s.settings.ReadOnlyDirs = nil
+		s.settings = bound
+		s.settings.Skills = slices.Clone(bound.Skills)
 	}
 	if s.runtimeDir == "" {
 		var err error

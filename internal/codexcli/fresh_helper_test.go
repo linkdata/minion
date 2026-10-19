@@ -2,7 +2,6 @@ package codexcli
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -16,21 +15,9 @@ import (
 )
 
 func TestRunFreshAndBoundaryHelpers(t *testing.T) {
-	ordinal := func(event string, n int) string {
-		var fields map[string]any
-		if err := json.Unmarshal([]byte(event), &fields); err != nil {
-			t.Fatal(err)
-		}
-		fields["ordinal"] = n
-		data, err := json.Marshal(fields)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return string(data)
-	}
-	start := ordinal(usageEvent("task_started", "child-turn"), 1)
-	record := ordinal(usageRecord("child", "child-turn", "response", 20, 5, 2), 2)
-	done := ordinal(usageEvent("task_complete", "child-turn"), 3)
+	start := usageEventAt(1, "task_started", "child-turn")
+	record := usageRecordAt(2, "child", "child-turn", "response", 20, 5, 2)
+	done := usageEventAt(3, "task_complete", "child-turn")
 	inherited := `{"ordinal":1,"type":"session_meta","payload":{"id":"root","source":"exec"}}`
 	boundary := int64(1)
 	for _, scenario := range []struct {
@@ -43,11 +30,11 @@ func TestRunFreshAndBoundaryHelpers(t *testing.T) {
 		{name: "fresh", events: []string{start, record, done}, childInput: 20},
 		{name: "fresh missing counters", events: []string{start, done}, incomplete: true},
 		{name: "inclusive first own lifecycle", boundary: &boundary, events: []string{start, record, done}, childInput: 20},
-		{name: "inclusive first own response", boundary: &boundary, events: []string{ordinal(record, 1), done}, childInput: 20},
+		{name: "inclusive first own response", boundary: &boundary, events: []string{usageRecordAt(1, "child", "child-turn", "response", 20, 5, 2), done}, childInput: 20},
 		{name: "fresh inherited header", events: []string{inherited, start, record, done}, fails: true, incomplete: true, childInput: 20},
 		{name: "late inherited header", events: []string{start, record, done, inherited}, fails: true, incomplete: true, childInput: 20},
-		{name: "fresh latest turn open", events: []string{start, record, done, ordinal(usageEvent("task_started", "later"), 4)}, fails: true, incomplete: true, childInput: 20},
-		{name: "inclusive nested spawn", boundary: &boundary, events: []string{`{"ordinal":1,"type":"event_msg","payload":{"type":"collab_agent_spawn_end","new_thread_id":"missing-grandchild"}}`, ordinal(start, 2), ordinal(record, 3), ordinal(done, 4)}, fails: true, incomplete: true, childInput: 20},
+		{name: "fresh latest turn open", events: []string{start, record, done, usageEventAt(4, "task_started", "later")}, fails: true, incomplete: true, childInput: 20},
+		{name: "inclusive nested spawn", boundary: &boundary, events: []string{`{"ordinal":1,"type":"event_msg","payload":{"type":"collab_agent_spawn_end","new_thread_id":"missing-grandchild"}}`, usageEventAt(2, "task_started", "child-turn"), usageRecordAt(3, "child", "child-turn", "response", 20, 5, 2), usageEventAt(4, "task_complete", "child-turn")}, fails: true, incomplete: true, childInput: 20},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			installFakeCodex(t, "#!/bin/sh\ncat <<'EVENTS'\n"+`{"type":"thread.started","thread_id":"root"}
@@ -70,7 +57,7 @@ func TestRunFreshAndBoundaryHelpers(t *testing.T) {
 }
 
 func TestRunCancelsMalformedOutputAndRetainsParseCause(t *testing.T) {
-	installFakeCodex(t, "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"root\"}' '{damaged'\nsleep 30\n")
+	installFakeCodex(t, "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"root\"}' '{damaged'\nexec sleep 30\n")
 	writeUsageRollout(t, os.Getenv("CODEX_HOME"), "root", "", usageEvent("task_started", "root-turn"), usageRecord("root", "root-turn", "response", 10, 0, 1), usageEvent("task_complete", "root-turn"))
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

@@ -80,14 +80,16 @@ func TestValidateInstructionBoundaryRejectsUntrustedContent(t *testing.T) {
 		name string
 		text string
 		want string
+		role string
 	}{
-		{name: "agents", text: probePrompt + " " + probeAgent, want: "loaded source snapshot instructions"},
-		{name: "skill", text: probePrompt + " " + probeSkill, want: "loaded source snapshot instructions"},
-		{name: "missing prompt", text: "unrelated", want: "omitted the trusted"},
+		{role: "user", name: "agents", text: probePrompt + " " + probeAgent, want: "loaded source snapshot instructions"},
+		{role: "user", name: "skill", text: probePrompt + " " + probeSkill, want: "loaded source snapshot instructions"},
+		{role: "user", name: "missing prompt", text: "unrelated", want: "omitted the trusted"},
+		{role: "system", name: "trusted prompt only in system role", text: probePrompt, want: "omitted the trusted"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			output, err := json.Marshal([]map[string]any{{
-				"role": "user", "content": []map[string]string{{"text": test.text}},
+				"role": test.role, "content": []map[string]string{{"text": test.text}},
 			}})
 			if err != nil {
 				t.Fatal(err)
@@ -101,10 +103,27 @@ func TestValidateInstructionBoundaryRejectsUntrustedContent(t *testing.T) {
 }
 
 func TestInstalledCodexInstructionBoundary(t *testing.T) {
+	if os.Getenv("MINION_LIVE_CODEX_BOUNDARY") != "1" {
+		t.Skip("set MINION_LIVE_CODEX_BOUNDARY=1 for installed-CLI verification")
+	}
 	if _, err := exec.LookPath("codex"); err != nil {
 		t.Skip("installed Codex CLI is unavailable")
 	}
 	if err := ValidateInstructionBoundary(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestInstructionBoundaryRejectsVacuousOrInvalidControl(t *testing.T) {
+	for _, test := range []struct{ name, output, want string }{
+		{"missing canaries", `[{"role":"user","content":[{"text":"` + probePrompt + `"}]}]`, "cannot observe repository instructions"},
+		{"invalid JSON", probePrompt + " " + probeAgent + " " + probeSkill, "decode Codex instruction probe"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			installFakeCodex(t, "#!/bin/sh\ncat <<'EVENTS'\n"+test.output+"\nEVENTS\n")
+			if err := ValidateInstructionBoundary(context.Background()); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("vacuous control accepted: %v", err)
+			}
+		})
 	}
 }

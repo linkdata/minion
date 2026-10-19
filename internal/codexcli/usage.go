@@ -32,6 +32,37 @@ const (
 
 var errUnverifiedChildren = errors.New("helper agent work did not complete or completion could not be verified")
 
+// joinUsageErrors emits exact shared sentinels once across joined usage errors.
+// Wrapped/opaque causes stay intact; sentinels inside them are not rewritten.
+func joinUsageErrors(errs ...error) error {
+	var causes []error
+	unverified := false
+	var add func(error)
+	add = func(err error) {
+		if err == nil {
+			return
+		}
+		if err == errUnverifiedChildren {
+			unverified = true
+			return
+		}
+		if joined, ok := err.(interface{ Unwrap() []error }); ok {
+			for _, cause := range joined.Unwrap() {
+				add(cause)
+			}
+			return
+		}
+		causes = append(causes, err)
+	}
+	for _, err := range errs {
+		add(err)
+	}
+	if unverified {
+		causes = append(causes, errUnverifiedChildren)
+	}
+	return errors.Join(causes...)
+}
+
 type rolloutMeta struct {
 	ID           string          `json:"id"`
 	SessionID    string          `json:"session_id"`
@@ -68,7 +99,7 @@ func collectUsageFiles(ctx context.Context, rootID string, fallback *usage.Token
 	for _, id := range expectedChildren {
 		if _, selectedChild := selected[id]; !selectedChild {
 			complete = false
-			childError = errors.Join(childError, errUnverifiedChildren)
+			childError = joinUsageErrors(childError, errUnverifiedChildren)
 		}
 	}
 	ids := make([]string, 0, len(selected)-1)
@@ -87,13 +118,13 @@ func collectUsageFiles(ctx context.Context, rootID string, fallback *usage.Token
 				total = *fallback
 			}
 			if len(ids) > 1 {
-				childError = errors.Join(childError, errUnverifiedChildren)
+				childError = joinUsageErrors(childError, errUnverifiedChildren)
 			}
 			break
 		}
 		meta, exists := files[id]
 		if id != rootID && ambiguous[id] {
-			childError = errors.Join(childError, errUnverifiedChildren)
+			childError = joinUsageErrors(childError, errUnverifiedChildren)
 		}
 		if !exists {
 			complete = false
@@ -103,12 +134,12 @@ func collectUsageFiles(ctx context.Context, rootID string, fallback *usage.Token
 			continue
 		}
 		tokens, ok, children, workError := readRolloutUsage(ctx, meta, rootID, &budget)
-		childError = errors.Join(childError, workError)
+		childError = joinUsageErrors(childError, workError)
 		for _, child := range children {
 			_, selectedChild := selected[child]
 			if _, exists := files[child]; !exists || !selectedChild {
 				ok = false
-				childError = errors.Join(childError, errUnverifiedChildren)
+				childError = joinUsageErrors(childError, errUnverifiedChildren)
 			}
 		}
 		if id == rootID && fallback != nil && tokens != *fallback {
@@ -393,6 +424,31 @@ func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, 
 	turns := map[string]bool{}
 	abortedTurns := map[string]bool{}
 	ownedTurns := map[string]bool{}
+	lifecycleCapped := false
+	admitIdentity := func(size int) bool {
+		if size < maxUsageRecords {
+			return true
+		}
+		complete = false
+		if capture != nil {
+			capture.valid = false
+		}
+		return false
+	}
+	// Lifecycle, response ownership and boundary capture share one turn-ID budget.
+	turnCount := 0
+	admitTurn := func(id string) bool {
+		_, lifecycle := turns[id]
+		if lifecycle || ownedTurns[id] || (capture != nil && capture.turns[id]) {
+			return true
+		}
+		if !admitIdentity(turnCount) {
+			lifecycleCapped = true
+			return false
+		}
+		turnCount++
+		return true
+	}
 	latestOwnTurn := ""
 	latestOwnDone := false
 	var children []string
@@ -466,7 +522,7 @@ func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, 
 				complete = false
 			}
 			tokens, valid := rolloutTokens(record.Usage)
-			if capture != nil && record.TurnID != "" {
+			if capture != nil && record.TurnID != "" && admitTurn(record.TurnID) {
 				capture.rememberTurn(record.TurnID)
 			}
 			if record.SessionID != rootID || record.ResponseID == "" || record.TurnID == "" || !valid {
@@ -493,6 +549,10 @@ func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, 
 						}
 						continue
 					}
+					if !admitIdentity(len(responses)) {
+						snapshotKnown = false
+						continue
+					}
 					responses[record.ResponseID] = tokens
 					responseTurns[record.ResponseID] = record.TurnID
 					lateOld, valid = lateOld.AddChecked(tokens)
@@ -500,12 +560,18 @@ func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, 
 					continue
 				}
 			}
+			if !admitTurn(record.TurnID) {
+				continue
+			}
 			ownedTurns[record.TurnID] = true
 			if old, exists := responses[record.ResponseID]; exists {
 				complete = complete && old == tokens
 				if before != nil && responseTurns[record.ResponseID] != record.TurnID {
 					complete, snapshotKnown = false, false
 				}
+				continue
+			}
+			if !admitIdentity(len(responses)) {
 				continue
 			}
 			responses[record.ResponseID] = tokens
@@ -539,7 +605,7 @@ func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, 
 			}
 			own := meta.ID == rootID || (!inheritedWithoutBoundary && (meta.HistoryStart == nil || event.Ordinal >= *meta.HistoryStart))
 			if own && (payload.ThreadID == "" || payload.ThreadID == meta.ID) && payload.TurnID != "" {
-				if capture != nil {
+				if capture != nil && admitTurn(payload.TurnID) {
 					capture.rememberTurn(payload.TurnID)
 				}
 				if before != nil && before.turns[payload.TurnID] {
@@ -580,6 +646,9 @@ func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, 
 			if payload.TurnID != "" && (payload.ThreadID == "" || payload.ThreadID == meta.ID) && (own || ownedTurns[payload.TurnID]) {
 				switch payload.Type {
 				case "task_started", "task_complete", "turn_aborted":
+					if !admitTurn(payload.TurnID) {
+						continue
+					}
 					done := payload.Type == "task_complete"
 					turns[payload.TurnID] = done
 					if own {
@@ -617,14 +686,10 @@ func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, 
 		// Byte identity is independent of whether old token fields are usable.
 		capture.prefixKnown = reader.N > 0 && scanner.Err() == nil && closeErr == nil && ctx.Err() == nil
 		capture.size = consumed
-		if len(responses) <= maxUsageRecords {
-			capture.responses = responses
-		} else {
-			capture.valid = false
-		}
+		capture.responses = responses
 		copy(capture.hash[:], hash.Sum(nil))
 		capture.snapshot, capture.hasSnapshot = latest, seenSnapshot
-		capture.completed = latestOwnTurn != "" && latestOwnDone && !inheritedWithoutBoundary
+		capture.completed = latestOwnTurn != "" && latestOwnDone && !inheritedWithoutBoundary && !lifecycleCapped
 		for turn, done := range turns {
 			capture.unfinished = capture.unfinished || (!done && !abortedTurns[turn])
 		}
@@ -651,11 +716,11 @@ func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, 
 	complete = complete && readable && (meta.ID == rootID || seenHeader)
 	// Known helpers require a fully read, attributable completed latest turn.
 	// Missing counters alone do not prevent that lifecycle proof.
-	if seenHeader && readable && ctx.Err() == nil && !inheritedWithoutBoundary && latestOwnTurn != "" && latestOwnDone {
+	if seenHeader && readable && ctx.Err() == nil && !inheritedWithoutBoundary && !lifecycleCapped && latestOwnTurn != "" && latestOwnDone {
 		childError = nil
 	}
 	if tooManyChildren {
-		childError = errors.Join(childError, fmt.Errorf("%w: Codex usage agent count exceeded the limit", aicli.ErrOutputLimit))
+		childError = joinUsageErrors(childError, fmt.Errorf("%w: Codex usage agent count exceeded the limit", aicli.ErrOutputLimit))
 	}
 	if !seenRecord {
 		if meta.ID != rootID && !complete {
@@ -687,7 +752,7 @@ func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, 
 	for turn := range ownedTurns {
 		complete = complete && turns[turn]
 		if _, observed := turns[turn]; !observed && meta.ID != rootID {
-			childError = errors.Join(childError, errUnverifiedChildren)
+			childError = joinUsageErrors(childError, errUnverifiedChildren)
 			break
 		}
 	}

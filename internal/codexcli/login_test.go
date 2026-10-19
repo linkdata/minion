@@ -12,6 +12,7 @@ import (
 )
 
 func TestCheckLoginUsesPrivateCwdAndNativeEnvironment(t *testing.T) {
+	t.Setenv("TMPDIR", canonicalTempDir(t))
 	t.Setenv("CODEX_API_KEY", "")
 	t.Setenv("CODEX_ACCESS_TOKEN", "")
 	binary := installFakeCodex(t, `#!/bin/sh
@@ -21,7 +22,7 @@ printf '%s,%s,%s,%s\n' "${GH_TOKEN-absent}" "${GITHUB_TOKEN-absent}" "$TMPDIR" "
 `)
 	t.Setenv("GH_TOKEN", "dummy-github-token")
 	t.Setenv("GITHUB_TOKEN", "dummy-github-token")
-	home := filepath.Join(t.TempDir(), "not-created")
+	home := filepath.Join(canonicalTempDir(t), "not-created")
 	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
@@ -94,5 +95,19 @@ func TestCheckLoginKeepsImplicitNativeHome(t *testing.T) {
 	t.Setenv("CODEX_HOME", "")
 	if err := CheckLogin(context.Background(), config.CodexConfig{}); err != nil {
 		t.Fatalf("stored login injected a missing implicit home: %v", err)
+	}
+}
+
+func TestCheckLoginRequiresKnownNativeHome(t *testing.T) {
+	binary := installFakeCodex(t, "#!/bin/sh\ntouch \"$0.called\"\n")
+	t.Setenv("HOME", "")
+	t.Setenv("CODEX_HOME", "")
+	t.Setenv("CODEX_API_KEY", "")
+	t.Setenv("CODEX_ACCESS_TOKEN", "")
+	if err := CheckLogin(context.Background(), config.CodexConfig{}); err == nil || !strings.Contains(err.Error(), "resolve CODEX_HOME home") {
+		t.Fatalf("unknown login home accepted: %v", err)
+	}
+	if _, err := os.Stat(binary + ".called"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unknown home launched login: %v", err)
 	}
 }

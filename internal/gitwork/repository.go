@@ -19,7 +19,7 @@ import (
 // Repository owns sanitized, immutable model-visible Git metadata.
 type Repository struct {
 	dir    string
-	digest [32]byte
+	digest [sha256.Size]byte
 }
 
 // MaterializeRepository imports only objects/refs into fresh offline metadata; it never checks out source or copies configuration.
@@ -192,7 +192,7 @@ func (r *Repository) Verify(ctx context.Context) error {
 	return nil
 }
 
-func repositoryDigest(ctx context.Context, dir string) (sum [32]byte, err error) {
+func repositoryDigest(ctx context.Context, dir string) (sum [sha256.Size]byte, err error) {
 	hash := sha256.New()
 	type entry struct{ parent, name string }
 	pending, count, total := []entry{{name: dir}}, 1, 0
@@ -261,6 +261,6 @@ func repositoryDigest(ctx context.Context, dir string) (sum [32]byte, err error)
 		fmt.Fprintf(hash, "%d\x00", len(data))
 		hash.Write(data)
 	}
-	copy(sum[:], hash.Sum(nil))
+	hash.Sum(sum[:0])
 	return sum, nil
 }

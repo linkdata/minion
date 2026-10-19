@@ -170,7 +170,7 @@ func (s *usageSession) collectUsage(ctx context.Context, home, rootID string, st
 		}
 		if len(visited) >= maxUsageAgents {
 			complete = false
-			childError = errors.Join(childError, fmt.Errorf("%w: Codex usage agent count exceeded the limit", aicli.ErrOutputLimit))
+			childError = joinUsageErrors(childError, fmt.Errorf("%w: Codex usage agent count exceeded the limit", aicli.ErrOutputLimit))
 			break
 		}
 		visited[id] = true
@@ -186,10 +186,10 @@ func (s *usageSession) collectUsage(ctx context.Context, home, rootID string, st
 			var children []string
 			var workError error
 			tokens, ok, children, workError = readRolloutUsageFrom(ctx, meta, rootID, &s.budget, boundary, currentRoot, spawned, id != rootID && observationOnly[id])
-			childError = errors.Join(childError, workError)
+			childError = joinUsageErrors(childError, workError)
 			queue = append(queue, children...)
 		} else if id != rootID {
-			childError = errors.Join(childError, errUnverifiedChildren)
+			childError = joinUsageErrors(childError, errUnverifiedChildren)
 		}
 		if currentRoot != nil && currentRoot.hasSnapshot && currentRoot.snapshot != *fallback {
 			// Resume stdout is cumulative for the root, not this invocation
@@ -207,7 +207,7 @@ func (s *usageSession) collectUsage(ctx context.Context, home, rootID string, st
 		meta := owned[id]
 		if !visited[id] && (ambiguous[id] || !unchangedUsageRollout(ctx, meta.path, s.before[id], &s.budget)) {
 			complete = false
-			childError = errors.Join(childError, errUnverifiedChildren)
+			childError = joinUsageErrors(childError, errUnverifiedChildren)
 			break
 		}
 	}

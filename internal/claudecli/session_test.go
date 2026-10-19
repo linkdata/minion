@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -56,6 +57,14 @@ if $resume; then printf '%s\n' '`+doubled+`'; else printf '%s\n' '`+successfulRe
 		if err != nil || !result.UsageComplete || result.Tokens != known {
 			t.Fatalf("call%d: %+v, %v", call, result, err)
 		}
+	}
+	oldGrant, err := filepath.EvalSymlinks(oldGrant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newGrant, err = filepath.EvalSymlinks(newGrant)
+	if err != nil {
+		t.Fatal(err)
 	}
 	firstArgs := strings.Split(readFile(t, binary+".1.args"), "\n")
 	secondArgs := strings.Split(readFile(t, binary+".2.args"), "\n")
@@ -127,17 +136,21 @@ if $resume; then printf '%s\n' '`+doubled+`'; else printf '%s\n' '`+successfulRe
 func TestSessionRejectsChangedIdentityAndSettingsBeforeNativeCall(t *testing.T) {
 	for _, test := range []struct {
 		name   string
-		change func(*string, *bool, *string, *config.ClaudeConfig)
+		change func(*testing.T, *string, *bool, *string, *config.ClaudeConfig)
 	}{
-		{"source", func(dir *string, _ *bool, _ *string, _ *config.ClaudeConfig) { *dir = t.TempDir() }},
-		{"output", func(_ *string, _ *bool, out *string, _ *config.ClaudeConfig) { *out = t.TempDir() }},
-		{"writable", func(_ *string, writable *bool, _ *string, _ *config.ClaudeConfig) { *writable = true }},
-		{"model", func(_ *string, _ *bool, _ *string, cfg *config.ClaudeConfig) { cfg.Model = "other" }},
-		{"effort", func(_ *string, _ *bool, _ *string, cfg *config.ClaudeConfig) { cfg.Effort = "other" }},
-		{"key", func(_ *string, _ *bool, _ *string, cfg *config.ClaudeConfig) { cfg.APIKey = "other" }},
-		{"skill", func(_ *string, _ *bool, _ *string, cfg *config.ClaudeConfig) { cfg.Skills[0] = "builtin://other" }},
-		{"socket policy", func(_ *string, _ *bool, _ *string, cfg *config.ClaudeConfig) { *cfg.AllowAllUnixSockets = false }},
-		{"schema", func(_ *string, _ *bool, _ *string, cfg *config.ClaudeConfig) { cfg.OutputSchema = `{}` }},
+		{"source", func(t *testing.T, dir *string, _ *bool, _ *string, _ *config.ClaudeConfig) { *dir = t.TempDir() }},
+		{"output", func(t *testing.T, _ *string, _ *bool, out *string, _ *config.ClaudeConfig) { *out = t.TempDir() }},
+		{"writable", func(_ *testing.T, _ *string, writable *bool, _ *string, _ *config.ClaudeConfig) { *writable = true }},
+		{"model", func(_ *testing.T, _ *string, _ *bool, _ *string, cfg *config.ClaudeConfig) { cfg.Model = "other" }},
+		{"effort", func(_ *testing.T, _ *string, _ *bool, _ *string, cfg *config.ClaudeConfig) { cfg.Effort = "other" }},
+		{"key", func(_ *testing.T, _ *string, _ *bool, _ *string, cfg *config.ClaudeConfig) { cfg.APIKey = "other" }},
+		{"skill", func(_ *testing.T, _ *string, _ *bool, _ *string, cfg *config.ClaudeConfig) {
+			cfg.Skills[0] = "builtin://other"
+		}},
+		{"socket policy", func(_ *testing.T, _ *string, _ *bool, _ *string, cfg *config.ClaudeConfig) {
+			*cfg.AllowAllUnixSockets = false
+		}},
+		{"schema", func(_ *testing.T, _ *string, _ *bool, _ *string, cfg *config.ClaudeConfig) { cfg.OutputSchema = `{}` }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			binary := fakeExecutable(t, "claude", "cat >/dev/null\nprintf called >>\"$0.calls\"\nprintf '%s\\n' '"+successfulResult+"'\n")
@@ -153,7 +166,7 @@ func TestSessionRejectsChangedIdentityAndSettingsBeforeNativeCall(t *testing.T) 
 			if _, err := session.Run(context.Background(), dir, "first", writable, output, settings); err != nil {
 				t.Fatal(err)
 			}
-			test.change(&dir, &writable, &output, &settings)
+			test.change(t, &dir, &writable, &output, &settings)
 			if _, err := session.Run(context.Background(), dir, "second", writable, output, settings); err == nil || !strings.Contains(err.Error(), "changed") {
 				t.Fatalf("changed bound inputs accepted: %v", err)
 			}
@@ -263,7 +276,7 @@ func TestSessionRejectsForeignNativeConversation(t *testing.T) {
 		output := jsonlOutput{sessionID: "expected"}
 		writeChunks(t, &output, stream+"\n")
 		if output.err == nil || !strings.Contains(output.err.Error(), "identity changed") || output.result.Answer != "" || output.result.UsageComplete {
-			t.Fatalf("foreign conversation accepted: %+v,%v", output.result, output.err)
+			t.Fatalf("foreign conversation %s accepted: %+v,%v", stream, output.result, output.err)
 		}
 	}
 }
@@ -300,17 +313,18 @@ func TestSessionScratchAndCloseFailuresAreVisible(t *testing.T) {
 func TestSessionRequiresItsOwnRootIdentity(t *testing.T) {
 	for _, test := range []struct {
 		name, stream string
-		fails        bool
+		failure      string
 	}{
-		{"missing", successfulResult, true},
-		{"tagged helper only", strings.TrimSuffix(successfulResult, "}") + `,"session_id":"helper","parent_tool_use_id":"parent"}`, true},
-		{"tagged helper then root", `{"type":"system","subtype":"init","session_id":"helper","parent_tool_use_id":"parent"}` + "\n" + strings.TrimSuffix(successfulResult, "}") + `,"session_id":"expected"}`, false},
+		{"missing", successfulResult, "missing Claude conversation identity"},
+		{"tagged helper only", strings.TrimSuffix(successfulResult, "}") + `,"session_id":"helper","parent_tool_use_id":"parent"}`, "missing Claude conversation identity"},
+		{"tagged helper then root", `{"type":"system","subtype":"init","session_id":"helper","parent_tool_use_id":"parent"}` + "\n" + strings.TrimSuffix(successfulResult, "}") + `,"session_id":"expected"}`, ""},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			output := jsonlOutput{sessionID: "expected"}
 			writeChunks(t, &output, test.stream+"\n")
 			output.finish()
-			if (output.err != nil) != test.fails || output.result.UsageComplete == test.fails || test.fails && output.result.Answer != "" {
+			fails := test.failure != ""
+			if (output.err != nil) != fails || fails && !strings.Contains(output.err.Error(), test.failure) || output.result.UsageComplete == fails || fails && output.result.Answer != "" {
 				t.Fatalf("root identity: %+v,%v", output.result, output.err)
 			}
 		})
@@ -454,5 +468,147 @@ func TestLateCoveredBlockKeepsExactCumulativeBaseline(t *testing.T) {
 	output.finish()
 	if output.err != nil || !output.result.UsageComplete || !output.hasCumulative || output.cumulative != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) {
 		t.Fatalf("covered duplicate invalidated exact baseline: %+v,%v", output, output.err)
+	}
+}
+
+func TestSessionUnlaunchedCallKeepsConversation(t *testing.T) {
+	for _, failure := range []string{"cancelled", "missing interpreter"} {
+		t.Run(failure, func(t *testing.T) {
+			binary := fakeExecutable(t, "claude", "printf '%s\\n' \"$@\" > \"$0.args\"\ncat >/dev/null\nprintf '%s\\n' '"+successfulResult+"'\n")
+			original, err := os.ReadFile(binary)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			wantError := context.Canceled
+			if failure == "cancelled" {
+				cancel()
+			} else {
+				if err := os.WriteFile(binary, []byte("#!/minion-no-such-interpreter\n"), 0700); err != nil {
+					t.Fatal(err)
+				}
+				wantError = os.ErrNotExist
+			}
+			var session Session
+			t.Cleanup(func() {
+				if err := session.Close(); err != nil {
+					t.Error(err)
+				}
+			})
+			source := t.TempDir()
+			result, err := session.Run(ctx, source, "not launched", false, "", config.ClaudeConfig{})
+			if !errors.Is(err, wantError) || !result.UsageComplete || result.Tokens != (usage.Tokens{}) || result.Answer != "" || session.started {
+				t.Fatalf("unlaunched call: %+v, %v, started=%t", result, err, session.started)
+			}
+			id := session.id
+			if err := os.WriteFile(binary, original, 0700); err != nil {
+				t.Fatal(err)
+			}
+			result, err = session.Run(context.Background(), source, "first native call", false, "", config.ClaudeConfig{})
+			args := readFile(t, binary+".args")
+			if err != nil || !result.UsageComplete || !strings.Contains(args, "--session-id\n"+id+"\n") || strings.Contains(args, "--resume\n") {
+				t.Fatalf("first native call resumed an unlaunched turn: %+v, %v, args=%q", result, err, args)
+			}
+			baseline, gap := session.baseline, session.usageGap
+			if failure == "missing interpreter" {
+				if err := os.WriteFile(binary, []byte("#!/minion-no-such-interpreter\n"), 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			result, err = session.Run(ctx, source, "resume not launched", false, "", config.ClaudeConfig{})
+			if !errors.Is(err, wantError) || !result.UsageComplete || result.Tokens != (usage.Tokens{}) || !session.started || session.baseline != baseline || session.usageGap != gap {
+				t.Fatalf("unlaunched resume changed prior accounting: %+v, %v, baseline=%+v gap=%t", result, err, session.baseline, session.usageGap)
+			}
+			if err := os.WriteFile(binary, original, 0700); err != nil {
+				t.Fatal(err)
+			}
+			result, err = session.Run(context.Background(), source, "resume", false, "", config.ClaudeConfig{})
+			if err != nil || !result.UsageComplete || result.Tokens != (usage.Tokens{}) || !strings.Contains(readFile(t, binary+".args"), "--resume\n"+id+"\n") {
+				t.Fatalf("unlaunched resume lost its prior conversation: %+v, %v", result, err)
+			}
+		})
+	}
+}
+
+func TestNewConversationClearsIncompleteUsageBaseline(t *testing.T) {
+	const partial = `{"type":"result","subtype":"success","result":"partial","usage":{"input_tokens":3,"cache_creation_input_tokens":5,"cache_read_input_tokens":7,"output_tokens":11}}`
+	fakeExecutable(t, "claude", `cat >/dev/null
+if [ -f "$0.first" ]; then
+  printf '%s\n' '`+successfulResult+`'
+else
+  touch "$0.first"
+  printf '%s\n' '`+partial+`'
+fi
+`)
+	var session Session
+	t.Cleanup(func() {
+		if err := session.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	source := t.TempDir()
+	first, err := session.Run(context.Background(), source, "first", false, "", config.ClaudeConfig{})
+	if err != nil || first.UsageComplete {
+		t.Fatalf("missing aggregate was not incomplete: %+v, %v", first, err)
+	}
+	session.NewConversation()
+	fresh, err := session.Run(context.Background(), source, "independent", false, "", config.ClaudeConfig{})
+	if err != nil || !fresh.UsageComplete || fresh.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) {
+		t.Fatalf("old usage gap survived independent conversation: %+v, %v", fresh, err)
+	}
+}
+
+func TestSessionInitializationFailureStaysBound(t *testing.T) {
+	binary := fakeExecutable(t, "claude", "touch \"$0.called\"\nexit 99\n")
+	skill := filepath.Join(t.TempDir(), "SKILL.md")
+	settings := config.ClaudeConfig{Skills: []string{skill}}
+	var session Session
+	t.Cleanup(func() {
+		if err := session.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	source := t.TempDir()
+	_, first := session.Run(context.Background(), source, "first", false, "", settings)
+	if first == nil || !strings.Contains(first.Error(), "claude skills") {
+		t.Fatalf("missing skill did not fail initialization: %v", first)
+	}
+	if err := os.WriteFile(skill, []byte("now present"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := session.Run(context.Background(), source, "retry", false, "", settings); !errors.Is(err, first) {
+		t.Fatalf("partially initialized session forgot its error: %v; want %v", err, first)
+	}
+	if _, err := os.Stat(binary + ".called"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("partially initialized session reached CLI: %v", err)
+	}
+}
+
+func TestSessionUsageFloorOverflowRetainsPreviousBaseline(t *testing.T) {
+	const maximum = `{"type":"result","subtype":"success","result":"first","modelUsage":{"main":{"inputTokens":9223372036854775807,"cacheCreationInputTokens":0,"cacheReadInputTokens":0,"outputTokens":0}}}`
+	const partial = `{"type":"result","subtype":"success","result":"second","usage":{"input_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0}}`
+	fakeExecutable(t, "claude", `cat >/dev/null
+if [ -f "$0.first" ]; then
+  printf '%s\n' '`+partial+`'
+else
+  touch "$0.first"
+  printf '%s\n' '`+maximum+`'
+fi
+`)
+	var session Session
+	t.Cleanup(func() {
+		if err := session.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	source := t.TempDir()
+	first, err := session.Run(context.Background(), source, "first", false, "", config.ClaudeConfig{})
+	if err != nil || !first.UsageComplete || first.Tokens != (usage.Tokens{Input: math.MaxInt64}) {
+		t.Fatalf("at-limit baseline refused: %+v, %v", first, err)
+	}
+	second, err := session.Run(context.Background(), source, "second", false, "", config.ClaudeConfig{})
+	if err == nil || !strings.Contains(err.Error(), "session usage totals overflow") || second.Answer != "" || second.UsageComplete || second.Tokens != (usage.Tokens{Input: 1}) || session.baseline != first.Tokens {
+		t.Fatalf("overflow corrupted prior baseline: %+v, %v, baseline=%+v", second, err, session.baseline)
 	}
 }

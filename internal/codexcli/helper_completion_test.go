@@ -27,7 +27,7 @@ func TestKnownHelpersRequireLifecycleAccess(t *testing.T) {
 			case "canceled scan":
 				cancel()
 			}
-			tokens, complete, err := collectUsage(ctx, home, rootID, time.Now(), &fallback, []string{"child"})
+			tokens, complete, err := (&usageSession{}).collectUsage(ctx, home, rootID, time.Now(), &fallback, []string{"child"}, nil)
 			if tokens != fallback || complete || !errors.Is(err, errUnverifiedChildren) {
 				t.Fatalf("unknown lifecycle accepted: tokens=%+v complete=%t err=%v", tokens, complete, err)
 			}
@@ -41,6 +41,7 @@ func TestKnownHelpersRequireLifecycleAccess(t *testing.T) {
 			case "missing file":
 				path += "/missing.jsonl"
 			case "exhausted budget":
+				path = writeUsageRollout(t, t.TempDir(), "child", "root", completedUsageTurn("child", "turn", "response", 5)...)
 				budget = 0
 			}
 			_, complete, _, err := readRolloutUsage(context.Background(), rolloutMeta{ID: "child", path: path}, "root", &budget)
@@ -62,7 +63,7 @@ func TestDuplicateHelperRolloutsCannotAttestCompletion(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(filepath.Dir(path), "duplicate.jsonl"), data, 0600); err != nil {
 		t.Fatal(err)
 	}
-	tokens, complete, err := collectUsage(context.Background(), home, "root", time.Now(), nil, []string{"child"})
+	tokens, complete, err := (&usageSession{}).collectUsage(context.Background(), home, "root", time.Now(), nil, []string{"child"}, nil)
 	if tokens != (usage.Tokens{Input: 30, Output: 3}) || complete || !errors.Is(err, errUnverifiedChildren) {
 		t.Fatalf("ambiguous helper accepted or double-counted: tokens=%+v complete=%t err=%v", tokens, complete, err)
 	}

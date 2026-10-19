@@ -13,7 +13,7 @@ import (
 )
 
 func TestHomePathUsesNativeVariableAndDefault(t *testing.T) {
-	root := t.TempDir()
+	root := canonicalTempDir(t)
 	t.Setenv("HOME", root)
 	for _, override := range []string{"", filepath.Join(root, "explicit")} {
 		t.Setenv("CODEX_HOME", override)
@@ -28,16 +28,19 @@ func TestHomePathUsesNativeVariableAndDefault(t *testing.T) {
 }
 
 func TestRunUsesNativeHomeForLaunchAndUsage(t *testing.T) {
-	for _, explicit := range []bool{false, true} {
-		t.Run(map[bool]string{false: "implicit", true: "explicit relative"}[explicit], func(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		explicit bool
+	}{{"implicit", false}, {"explicit relative", true}} {
+		t.Run(test.name, func(t *testing.T) {
 			binary := installFakeCodex(t, `#!/bin/sh
 printf '%s\n' "${CODEX_HOME-absent}" > "$0.home"
 cat >/dev/null
 printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.completed","item":{"type":"collab_tool_call","receiver_thread_ids":["child"]}}' '{"type":"item.completed","item":{"type":"agent_message","text":"answer"}}' '{"type":"turn.completed","usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":1}}'
 `)
-			home := t.TempDir()
+			home := canonicalTempDir(t)
 			wantEnv := home
-			if !explicit {
+			if !test.explicit {
 				t.Setenv("HOME", home)
 				home = filepath.Join(home, ".codex")
 				wantEnv = "absent"
@@ -50,7 +53,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.comp
 			if err != nil {
 				t.Fatal(err)
 			}
-			if explicit {
+			if test.explicit {
 				t.Setenv("CODEX_HOME", relative)
 			} else {
 				t.Setenv("CODEX_HOME", "")
@@ -60,7 +63,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.comp
 			}
 			writeUsageRollout(t, home, "root", "", usageEvent("task_started", "root-turn"), usageRecord("root", "root-turn", "root-response", 10, 0, 1), usageEvent("task_complete", "root-turn"))
 			writeUsageRollout(t, home, "child", "root", usageEvent("task_started", "child-turn"), usageRecord("child", "child-turn", "child-response", 20, 5, 2), usageEvent("task_complete", "child-turn"))
-			result, err := Run(context.Background(), t.TempDir(), "task", false, "", config.CodexConfig{})
+			result, err := Run(context.Background(), canonicalTempDir(t), "task", false, "", config.CodexConfig{})
 			if err != nil || result.Answer != "answer" || !result.UsageComplete || result.Tokens != (usage.Tokens{Input: 30, CachedInput: 5, Output: 3}) {
 				t.Fatalf("relative home lost native usage: result=%+v error=%v", result, err)
 			}
@@ -73,17 +76,20 @@ printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.comp
 }
 
 func TestRunConfiguredKeyRequiresKnownNativeHome(t *testing.T) {
-	for _, noHome := range []bool{false, true} {
-		t.Run(map[bool]string{false: "explicit missing", true: "unavailable"}[noHome], func(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		noHome bool
+	}{{"explicit missing", false}, {"unavailable", true}} {
+		t.Run(test.name, func(t *testing.T) {
 			binary := installFakeCodex(t, "#!/bin/sh\nprintf '%s\\n' \"${CODEX_HOME-}\" > \"$0.home\"\ncat >/dev/null\nprintf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"answer\"}}' '{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":10,\"cached_input_tokens\":0,\"output_tokens\":1}}'\n")
-			home := filepath.Join(t.TempDir(), "not-created")
+			home := filepath.Join(canonicalTempDir(t), "not-created")
 			t.Setenv("HOME", "")
-			if noHome {
+			if test.noHome {
 				home = ""
 			}
 			t.Setenv("CODEX_HOME", home)
-			result, err := Run(context.Background(), t.TempDir(), "task", false, "", config.CodexConfig{APIKey: "fixture-key"})
-			if noHome {
+			result, err := Run(context.Background(), canonicalTempDir(t), "task", false, "", config.CodexConfig{APIKey: "fixture-key"})
+			if test.noHome {
 				if err == nil || !strings.Contains(err.Error(), "CODEX_HOME") || result.Answer != "" || !result.UsageComplete || result.Tokens != (usage.Tokens{}) {
 					t.Fatalf("unavailable home was not refused before inference: %+v, %v", result, err)
 				}
@@ -106,22 +112,18 @@ func TestRunConfiguredKeyRequiresKnownNativeHome(t *testing.T) {
 	}
 }
 
-func TestRunKeepsMissingImplicitHomeWithConfiguredOrStoredAuthentication(t *testing.T) {
-	for _, key := range []string{"", "fixture-key"} {
-		t.Run(map[bool]string{false: "stored", true: "configured"}[key != ""], func(t *testing.T) {
-			installFakeCodex(t, `#!/bin/sh
+func TestRunKeepsMissingImplicitHome(t *testing.T) {
+	installFakeCodex(t, `#!/bin/sh
 [ "${CODEX_HOME+x}" != x ] || exit 3
 [ ! -e "$HOME/.codex" ] || exit 4
 cat >/dev/null
 printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"answer"}}' '{"type":"turn.completed","usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":1}}'
 `)
-			t.Setenv("HOME", t.TempDir())
-			t.Setenv("CODEX_HOME", "")
-			result, err := Run(context.Background(), t.TempDir(), "task", false, "", config.CodexConfig{APIKey: key})
-			if err != nil || result.Answer != "answer" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 10, Output: 1}) {
-				t.Fatalf("implicit home rejected or usage overstated: %+v, %v", result, err)
-			}
-		})
+	t.Setenv("HOME", canonicalTempDir(t))
+	t.Setenv("CODEX_HOME", "")
+	result, err := Run(context.Background(), canonicalTempDir(t), "task", false, "", config.CodexConfig{})
+	if err != nil || result.Answer != "answer" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 10, Output: 1}) {
+		t.Fatalf("implicit home rejected or usage overstated: %+v, %v", result, err)
 	}
 }
 

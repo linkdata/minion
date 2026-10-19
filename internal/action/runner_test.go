@@ -68,7 +68,7 @@ func TestRunnerUsesSuppliedSourceAndContext(t *testing.T) {
 				if err != nil || string(data) != "source\n" {
 					t.Fatalf("source = %q, %v", data, err)
 				}
-				for _, want := range []string{job.Source.Head, job.Source.Base, job.Source.MergeBase, contextDir, "complete history, including historical file contents, branches and tags", "no remotes or GitHub credentials", "Use local Git commands to investigate history", quotedContext(job.Title), quotedContext(job.Notes), "Report missing context or dependencies rather than fetching them"} {
+				for _, want := range []string{job.Source.Head, job.Source.Base, job.Source.MergeBase, contextDir, fmt.Sprintf("Compare the supplied %q.", filepath.Join(contextDir, "comparison.diff")), fmt.Sprintf("under %q where needed", filepath.Join(contextDir, "base")), "complete history, including historical file contents, branches and tags", "no remotes or GitHub credentials", "Use local Git commands to investigate history", quotedContext(job.Title), quotedContext(job.Notes), "Report missing context or dependencies rather than fetching them"} {
 					if !strings.Contains(request.prompt, want) {
 						t.Fatalf("prompt lacks %q: %s", want, request.prompt)
 					}

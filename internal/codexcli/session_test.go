@@ -32,7 +32,7 @@ printf '{"type":"thread.started","thread_id":"%s"}\n' "$id"
 printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}' '{"type":"turn.completed"}'
 `)
 	ctx := context.Background()
-	dir, output, first, second := t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()
+	dir, output, first, second := canonicalTempDir(t), canonicalTempDir(t), canonicalTempDir(t), canonicalTempDir(t)
 	settings := config.CodexConfig{Model: "model", ReasoningEffort: "high", OutputSchema: `{"type":"object"}`, Skills: []string{skills.BuiltinAntiPromptInjection}, ReadOnlyDirs: []string{first}}
 	var session Session
 	t.Cleanup(func() {
@@ -111,7 +111,7 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
 }
 
 func TestSessionBindsImmutableSettingsBeforeNativeDispatch(t *testing.T) {
-	for _, field := range []string{"source", "output", "writable", "model", "effort", "key", "skills", "schema", "home", "binary"} {
+	for _, field := range []string{"source", "output", "writable", "model", "effort", "key", "skills", "schema", "home", "HOME only", "binary"} {
 		t.Run(field, func(t *testing.T) {
 			bin := installFakeCodex(t, "#!/bin/sh\ncat >/dev/null\nprintf called >> \"$0.calls\"\nprintf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"root\"}' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"done\"}}' '{\"type\":\"turn.completed\"}'\n")
 			dir, output := t.TempDir(), t.TempDir()
@@ -145,6 +145,8 @@ func TestSessionBindsImmutableSettingsBeforeNativeDispatch(t *testing.T) {
 				settings.OutputSchema = `{"type":"string"}`
 			case "home":
 				t.Setenv("CODEX_HOME", t.TempDir())
+			case "HOME only":
+				t.Setenv("HOME", t.TempDir())
 			case "binary":
 				replacement := t.TempDir()
 				if err := os.WriteFile(filepath.Join(replacement, "codex"), []byte("#!/bin/sh\nexit 9\n"), 0700); err != nil {
@@ -187,7 +189,8 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
 				t.Fatal(err)
 			}
 			result, err := session.Run(context.Background(), dir, "second", false, "", config.CodexConfig{})
-			if err == nil || result.Answer != "" || identity != "missing first" && result.UsageComplete {
+			wantError := map[string]string{"missing first": "did not identify a resumable thread", "missing resume": "resume did not identify its expected thread", "different resume": "resumed a different thread"}[identity]
+			if err == nil || !strings.Contains(err.Error(), wantError) || result.Answer != "" || identity != "missing first" && result.UsageComplete {
 				t.Fatalf("unbound resume accepted: %+v %v", result, err)
 			}
 			want := "calledcalled"
@@ -327,7 +330,7 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
 		t.Fatal(err)
 	}
 	result, err := session.Run(context.Background(), source, "second", false, "", config.CodexConfig{})
-	if err == nil || result.Answer != "" || result.UsageComplete || result.Tokens.Input != 20 || session.accounting.known["root"].path != root {
+	if err == nil || !strings.Contains(err.Error(), "resume did not identify its expected thread") || result.Answer != "" || result.UsageComplete || result.Tokens.Input != 20 || session.accounting.known["root"].path != root {
 		t.Fatalf("resume lost owned usage: %+v,%v,%+v", result, err, session.accounting.known)
 	}
 }
@@ -392,5 +395,73 @@ printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.comp
 				t.Fatalf("runtime cleanup changed %s: %q,%v", path, data, err)
 			}
 		}
+	}
+}
+
+func TestSessionEmptySkillsRemainEquivalent(t *testing.T) {
+	installFakeCodex(t, "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"root\"}' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"done\"}}' '{\"type\":\"turn.completed\"}'\n")
+	var session Session
+	t.Cleanup(func() {
+		if err := session.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	dir := t.TempDir()
+	for _, selected := range [][]string{nil, {}, nil} {
+		if _, err := session.Run(context.Background(), dir, "same empty skills", false, "", config.CodexConfig{Skills: selected}); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestSessionRejectsPlantedBuildCache(t *testing.T) {
+	for _, kind := range []string{"file", "symlink"} {
+		t.Run(kind, func(t *testing.T) {
+			binary := installFakeCodex(t, "#!/bin/sh\ncat >/dev/null\nprintf called >>\"$0.calls\"\nprintf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"root\"}' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"done\"}}' '{\"type\":\"turn.completed\"}'\n")
+			var session Session
+			t.Cleanup(func() {
+				if err := session.Close(); err != nil {
+					t.Error(err)
+				}
+			})
+			dir := t.TempDir()
+			if _, err := session.Run(context.Background(), dir, "first", false, "", config.CodexConfig{}); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(session.cacheDir); err != nil {
+				t.Fatal(err)
+			}
+			if kind == "file" {
+				if err := os.WriteFile(session.cacheDir, []byte("plant"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if err := os.Symlink(t.TempDir(), session.cacheDir); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := session.Run(context.Background(), dir, "second", false, "", config.CodexConfig{}); err == nil || !strings.Contains(err.Error(), "build cache is not a directory") {
+				t.Fatalf("planted cache accepted: %v", err)
+			}
+			if got, err := os.ReadFile(binary + ".calls"); err != nil || string(got) != "called" {
+				t.Fatalf("planted cache reached CLI: %q %v", got, err)
+			}
+		})
+	}
+}
+
+func TestSessionCloseFailureRetainsOwnedPathAndRedactsKey(t *testing.T) {
+	const key = "fixture-private-key"
+	runtime := t.TempDir()
+	session := Session{runtimeDir: "invalid-" + key + "\x00", settings: config.CodexConfig{APIKey: key}}
+	if err := session.Close(); err == nil || strings.Contains(err.Error(), key) || session.runtimeDir == "" {
+		t.Fatalf("cleanup lost path or secret: %v path=%q", err, session.runtimeDir)
+	}
+	session.runtimeDir = runtime
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(runtime); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("cleanup retry retained resource: %v", err)
 	}
 }

@@ -58,6 +58,8 @@ func TestReviewPromptsRequireCompleteInvestigationInEveryPhase(t *testing.T) {
 			"do not stop after the first few findings or after checking only blockers",
 			"Await all delegated reviews and background checks",
 			"final coverage pass for missed areas",
+			"Read every changed code and test body within the assigned scope",
+			"file inventories, test names and sampled bodies do not establish coverage",
 			"identify the unchecked scope and reason instead of claiming a complete review",
 		} {
 			if !strings.Contains(prompt, rule) {

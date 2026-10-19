@@ -29,7 +29,7 @@ func TestRunInvokesCodexAndReturnsFinalMessage(t *testing.T) {
 		{name: "fix", writable: true, access: "write"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			dir := t.TempDir()
+			dir := canonicalTempDir(t)
 			fakeCodex := installFakeCodex(t, `#!/bin/sh
 printf '%s\n' "$@" > "$0.args"
 pwd > "$0.cwd"
@@ -570,7 +570,7 @@ func TestJSONLOutputBindsRootThreadIdentity(t *testing.T) {
 	}
 }
 
-func TestJSONLOutputStopsAtCardinalityLimits(t *testing.T) {
+func TestJSONLOutputStopsAtChildLimit(t *testing.T) {
 	cancelled := false
 	output := jsonlOutput{cancel: func() { cancelled = true }}
 	ids := make([]string, maxCodexChildren+1)
@@ -627,6 +627,19 @@ func TestRunRejectsExecutableFromSourceSnapshot(t *testing.T) {
 
 func installFakeCodex(t *testing.T, script string) string {
 	t.Helper()
-	t.Setenv("CODEX_HOME", t.TempDir())
-	return filepath.Join(testsupport.FakeOnPath(t, "codex", script), "codex")
+	t.Setenv("CODEX_HOME", canonicalTempDir(t))
+	path, err := filepath.EvalSymlinks(filepath.Join(testsupport.FakeOnPath(t, "codex", script), "codex"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func canonicalTempDir(t *testing.T) string {
+	t.Helper()
+	path, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return path
 }

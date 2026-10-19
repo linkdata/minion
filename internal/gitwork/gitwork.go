@@ -273,13 +273,10 @@ func checkSourceTree(tree github.GitTree, expectedSHA string) error {
 
 // NewBranch creates a branch at the current, verified checkout commit.
 func (c *Checkout) NewBranch(ctx context.Context, name string) error {
-	if err := c.ready(); err != nil {
-		return err
-	}
 	if err := validateBranch(name); err != nil {
 		return err
 	}
-	if err := c.assertHead(ctx); err != nil {
+	if _, err := c.verifiedHead(ctx); err != nil {
 		return err
 	}
 	if _, err := runGit(ctx, c.path, "switch", "--create", name); err != nil {
@@ -486,6 +483,7 @@ func gitFailure(prefix, operation, message string, contextErr, err error) error 
 		}
 	} else {
 		// Best-effort C-locale errno suffixes avoid matching phrases embedded in quoted paths.
+	findErrno:
 		for _, line := range strings.Split(message, "\n") {
 			switch {
 			case strings.HasSuffix(line, ": No space left on device"):
@@ -495,7 +493,7 @@ func gitFailure(prefix, operation, message string, contextErr, err error) error 
 			default:
 				continue
 			}
-			break
+			break findErrno
 		}
 		err = classifyPathError(operation, message, err)
 	}

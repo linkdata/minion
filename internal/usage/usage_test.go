@@ -87,6 +87,7 @@ func TestSaveEncodeAndRenameFailuresKeepDirectoryClean(t *testing.T) {
 			record := testRecord()
 			wantFiles := 0
 			if failure == "no write on encode error" {
+				dir = filepath.Join(dir, "not-created")
 				record.StartedAt = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
 				record.Status, record.FinishedAt = "running", nil
 			} else {
@@ -100,6 +101,12 @@ func TestSaveEncodeAndRenameFailuresKeepDirectoryClean(t *testing.T) {
 			var renameErr *os.LinkError
 			if failure == "no write on encode error" && !errors.As(err, &marshalErr) || failure == "rename" && !errors.As(err, &renameErr) {
 				t.Fatalf("Save() = %v; want %s error", err, failure)
+			}
+			if failure == "no write on encode error" {
+				if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("usage directory created before encoding: %v", err)
+				}
+				return
 			}
 			files, err := os.ReadDir(dir)
 			if err != nil || len(files) != wantFiles {

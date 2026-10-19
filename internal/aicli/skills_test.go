@@ -31,16 +31,29 @@ func TestMaterializeSkillsKeepsPartialCleanupOwnership(t *testing.T) {
 				t.Fatal(err)
 			}
 			external := filepath.Join(t.TempDir(), "SKILL.md")
+			var expectedExternal string
 			if invalid {
 				external = "relative/SKILL.md"
-			} else if err := os.WriteFile(external, []byte("trusted skill"), 0600); err != nil {
-				t.Fatal(err)
+			} else {
+				if err := os.WriteFile(external, []byte("trusted skill"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				alias := filepath.Join(t.TempDir(), "skill-alias")
+				if err := os.Symlink(filepath.Dir(external), alias); err != nil {
+					t.Fatal(err)
+				}
+				external = filepath.Join(alias, "SKILL.md")
+				var err error
+				expectedExternal, err = filepath.EvalSymlinks(external)
+				if err != nil {
+					t.Fatal(err)
+				}
 			}
 			paths, owned, err := MaterializeSkills(source, []string{skills.BuiltinAntiPromptInjection, external})
 			if (err != nil) != invalid || owned == "" {
 				t.Fatalf("owned=%q err=%v", owned, err)
 			}
-			if !invalid && (len(paths) != 2 || paths[1] != external) {
+			if !invalid && (len(paths) != 2 || paths[1] != expectedExternal) {
 				t.Fatalf("paths=%v", paths)
 			}
 			builtin := filepath.Join(owned, "anti-prompt-injection", "SKILL.md")
@@ -63,5 +76,26 @@ func TestMaterializeSkillsKeepsPartialCleanupOwnership(t *testing.T) {
 				t.Fatalf("caller cleanup failed: %v %v", entries, err)
 			}
 		})
+	}
+}
+
+func TestMaterializeSkillsRefusesResolvedSourcePaths(t *testing.T) {
+	source, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	inside := filepath.Join(source, "SKILL.md")
+	if err := os.WriteFile(inside, []byte("untrusted instructions"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(t.TempDir(), "source-alias")
+	if err := os.Symlink(source, alias); err != nil {
+		t.Fatal(err)
+	}
+	for _, selected := range []string{inside, filepath.Join(alias, "SKILL.md")} {
+		paths, owned, err := MaterializeSkills(source, []string{selected})
+		if err == nil || !strings.Contains(err.Error(), "inside the untrusted source snapshot") || len(paths) != 0 || owned != "" {
+			t.Fatalf("source skill %q: paths=%v owned=%q err=%v", selected, paths, owned, err)
+		}
 	}
 }

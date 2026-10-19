@@ -24,10 +24,9 @@ type reviewSnapshot struct {
 
 // Freeze outside the main model's writable grants. The caller owns the partial snapshot even on failure.
 func freezeReviewSnapshot(ctx context.Context, workRoot string, job Job, source, outputDir string, index *gitwork.OfflineIndex) (*reviewSnapshot, error) {
-	s := &reviewSnapshot{}
+	s := &reviewSnapshot{base: job.Source.Files}
 	// Bind the action once; refresh only frozen bytes between model calls.
 	s.refresh = func(ctx context.Context) error {
-		s.base = job.Source.Files
 		var err error
 		if job.Action == command.Fix {
 			if s.changes, err = index.Changes(ctx); err != nil {

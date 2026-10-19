@@ -13,32 +13,48 @@ import (
 )
 
 func TestNewAssistantParentageCannotPreserveStaleResult(t *testing.T) {
-	for _, parent := range []string{"", `null`, `"delegate"`, `""`, `0`, `false`, `{}`, `[]`} {
-		for _, stopped := range []bool{false, true} {
-			for _, freshResult := range []bool{false, true} {
-				name := fmt.Sprintf("parent=%s/stopped=%t/result=%t", parent, stopped, freshResult)
-				t.Run(name, func(t *testing.T) {
-					data := successfulResult + "\n"
-					if stopped {
-						data += `{"type":"system","subtype":"task_notification","status":"stopped"}` + "\n"
-					}
-					field := ""
-					if parent != "" {
-						field = `,"parent_tool_use_id":` + parent
-					}
-					data += `{"type":"assistant"` + field + `,"message":{"id":"new"}}` + "\n"
-					if freshResult {
-						data += successfulResult + "\n"
-					}
-					o := jsonlOutput{}
-					writeChunks(t, &o, numberResultEvents(data))
-					o.finish()
-					wantComplete := (!stopped && (freshResult || parent == `"delegate"`)) || (stopped && parent == `null` && freshResult)
-					if o.completed != wantComplete || (o.err == nil) != wantComplete || !wantComplete && o.result.Answer != "" || o.result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) {
-						t.Fatalf("stale completion or lost usage: result=%+v completed=%t error=%v", o.result, o.completed, o.err)
-					}
-				})
-			}
+	for _, parent := range []struct {
+		name, value                 string
+		oldResult, stoppedNewResult bool
+	}{
+		{"omitted", "", false, false},
+		{"root", `null`, false, true},
+		{"delegate", `"delegate"`, true, false},
+		{"empty", `""`, false, false},
+		{"number", `0`, false, false},
+		{"boolean", `false`, false, false},
+		{"object", `{}`, false, false},
+		{"array", `[]`, false, false},
+	} {
+		for _, test := range []struct {
+			name                 string
+			stopped, fresh, want bool
+		}{
+			{"old result", false, false, parent.oldResult},
+			{"fresh result", false, true, true},
+			{"stopped old result", true, false, false},
+			{"stopped fresh result", true, true, parent.stoppedNewResult},
+		} {
+			t.Run(parent.name+"/"+test.name, func(t *testing.T) {
+				data := successfulResult + "\n"
+				if test.stopped {
+					data += `{"type":"system","subtype":"task_notification","status":"stopped"}` + "\n"
+				}
+				field := ""
+				if parent.value != "" {
+					field = `,"parent_tool_use_id":` + parent.value
+				}
+				data += `{"type":"assistant"` + field + `,"message":{"id":"new"}}` + "\n"
+				if test.fresh {
+					data += successfulResult + "\n"
+				}
+				o := jsonlOutput{}
+				writeChunks(t, &o, numberResultEvents(data))
+				o.finish()
+				if o.completed != test.want || (o.err == nil) != test.want || !test.want && o.result.Answer != "" || o.result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) {
+					t.Fatalf("stale completion or lost usage: result=%+v completed=%t error=%v", o.result, o.completed, o.err)
+				}
+			})
 		}
 	}
 }
@@ -136,16 +152,16 @@ func TestOutputUsageGraceStartsOnlyOnce(t *testing.T) {
 		o := jsonlOutput{fatal: func() { calls++ }}
 		_, _ = o.Write([]byte(paid + "\n"))
 		if calls != 0 {
-			t.Fatal("usable overage started cancellation grace")
+			t.Fatalf("usable overage started cancellation grace before %q", events)
 		}
 		_, _ = o.Write([]byte(events + "\n"))
 		if calls != 1 || o.err != nil {
-			t.Fatalf("grace calls=%d error=%v", calls, o.err)
+			t.Fatalf("events=%q grace calls=%d error=%v", events, calls, o.err)
 		}
 		_, _ = o.Write([]byte(successfulResult + "\n"))
 		o.finish()
 		if o.err == nil || o.result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) {
-			t.Fatalf("late result usage lost: %+v error=%v", o.result, o.err)
+			t.Fatalf("events=%q late result usage lost: %+v error=%v", events, o.result, o.err)
 		}
 	}
 }
@@ -159,7 +175,7 @@ func TestRunFatalGraceStopsWatchdogAndKeepsObservedUsage(t *testing.T) {
 			t.Run(fmt.Sprintf("%s/result=%t", scenario.name, resultFollows), func(t *testing.T) {
 				script := "cat >/dev/null\ncat <<'EVENTS'\n" + assistantUsageEvent("root", 3, 5, 7, 2) + "\n" + `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"worker"}]}` + "\n" + scenario.event + "\nEVENTS\n"
 				if resultFollows {
-					script += "sleep 0.1\ncat <<'RESULT'\n" + successfulResult + "\nRESULT\n"
+					script += "cat <<'RESULT'\n" + successfulResult + "\nRESULT\n"
 				}
 				script += "sleep 30\n"
 				fakeExecutable(t, "claude", script)

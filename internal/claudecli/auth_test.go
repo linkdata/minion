@@ -53,7 +53,11 @@ func TestAuthenticationCanonicalParent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if filepath.Dir(dir) != parent {
+	expectedParent, err := filepath.EvalSymlinks(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Dir(dir) != expectedParent {
 		t.Fatal("credential path is not canonical for sandbox grant checks")
 	}
 }

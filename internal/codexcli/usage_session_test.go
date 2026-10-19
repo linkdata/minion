@@ -202,7 +202,7 @@ func TestUsageSessionSnapshotResetKeepsOnlyAttributedNewResponses(t *testing.T) 
 	var session usageSession
 	session.begin(ctx, home, "root", time.Now())
 	appendUsageEvents(t, root, append(completedUsageTurn("root", "new", "r2", 20), usageSnapshot(25, 20, 0, 0))...)
-	got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 120}, nil, nil)
+	got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 20}, nil, nil)
 	if got.Input != 20 || complete || err != nil {
 		t.Fatalf("reset = %+v, %v, %v", got, complete, err)
 	}
@@ -454,8 +454,12 @@ func TestUsageBoundaryEarlyReadFailuresAreInvalid(t *testing.T) {
 			if cause == "cancel" {
 				cancel()
 			}
+			path := writeUsageRollout(t, t.TempDir(), "root", "", completedUsageTurn("root", "turn", "response", 10)...)
+			if cause == "open" {
+				path = filepath.Join(t.TempDir(), "missing")
+			}
 			capture := &usageBoundary{valid: true, turns: map[string]bool{}}
-			_, complete, _, _ := readRolloutUsageFrom(ctx, rolloutMeta{ID: "root", path: filepath.Join(t.TempDir(), "missing")}, "root", &budget, nil, capture, nil, false)
+			_, complete, _, _ := readRolloutUsageFrom(ctx, rolloutMeta{ID: "root", path: path}, "root", &budget, nil, capture, nil, false)
 			if capture.valid || capture.prefixKnown || complete {
 				t.Fatalf("failed read left valid boundary: %+v,%v", capture, complete)
 			}
@@ -475,7 +479,7 @@ func TestCollectUsageMissingRootKeepsDirectParentOwnership(t *testing.T) {
 	if err := os.WriteFile(path, data, 0600); err != nil {
 		t.Fatal(err)
 	}
-	got, complete, err := collectUsage(context.Background(), home, "root", time.Now(), &usage.Tokens{Input: 20}, []string{"child"})
+	got, complete, err := (&usageSession{}).collectUsage(context.Background(), home, "root", time.Now(), &usage.Tokens{Input: 20}, []string{"child"}, nil)
 	if got != (usage.Tokens{Input: 25}) || complete || err != nil {
 		t.Fatalf("missing-root ownership changed: %+v,%v,%v", got, complete, err)
 	}
