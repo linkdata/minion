@@ -3,21 +3,27 @@ package codexcli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/linkdata/minion/internal/config"
 )
 
 // The test binary is a multicall Codex stub when production sets argv[0] to codex.
 func TestMain(m *testing.M) {
-	if os.Args[0] != "codex" {
+	if len(os.Args) < 2 || strings.HasPrefix(os.Args[1], "-test.") {
 		os.Exit(m.Run())
+	}
+	if os.Args[0] != "codex" {
+		os.Exit(7)
 	}
 	switch os.Args[1] {
 	case "exec":
@@ -54,6 +60,23 @@ func TestMain(m *testing.M) {
 		}
 	default:
 		os.Exit(8)
+	}
+}
+
+func TestMulticallStubRejectsWrongArgv0(t *testing.T) {
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	// --help makes a broken guard exit the test runner before it can run tests recursively.
+	cmd := exec.CommandContext(ctx, binary, "--help")
+	cmd.Args[0] = "wrong-codex"
+	err = cmd.Run()
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != 7 {
+		t.Fatalf("wrong argv0 exit = %v; want exit 7", err)
 	}
 }
 
