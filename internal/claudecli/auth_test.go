@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/config"
 	workspacepath "github.com/linkdata/minion/internal/workspace"
 )
@@ -171,6 +172,19 @@ exit 1
 				t.Fatalf("failed CLI retained credentials: %v", err)
 			}
 		})
+	}
+}
+
+func TestAPIKeyEncodedStderrRedaction(t *testing.T) {
+	key := `fixture"secret`
+	encoded, err := json.Marshal(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fakeExecutable(t, "claude", "printf '%s\\n' "+aicli.ShellQuote(string(encoded[1:len(encoded)-1]))+" >&2\nexit 1\n")
+	_, err = Run(context.Background(), t.TempDir(), "task", false, "", config.ClaudeConfig{APIKey: key})
+	if err == nil || strings.Contains(err.Error(), "fixture") || !strings.Contains(err.Error(), "[redacted]") {
+		t.Fatalf("encoded configured key escaped in quoted error: %v", err)
 	}
 }
 

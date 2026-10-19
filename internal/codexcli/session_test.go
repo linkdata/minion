@@ -396,6 +396,17 @@ printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.comp
 			}
 		}
 	}
+	gitdir := filepath.Join(session.runtimeDir, ".git")
+	if err := os.WriteFile(gitdir, []byte("gitdir: "+outside+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	run()
+	if _, err := os.Lstat(gitdir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("runtime gitdir pointer survived: %v", err)
+	}
+	if data, err := os.ReadFile(canary); err != nil || string(data) != "outside" {
+		t.Fatalf("runtime gitdir cleanup changed external file: %q,%v", data, err)
+	}
 }
 
 func TestSessionEmptySkillsRemainEquivalent(t *testing.T) {

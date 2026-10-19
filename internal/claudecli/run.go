@@ -152,7 +152,7 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	// Preserve crash/startup stderr before finish adds a generic missing-result
 	// error; native structured failures retain their safer diagnostic instead.
 	if err != nil && output.err == nil && output.usageLimit == nil && output.taskFailure == nil && !ceilingMatched {
-		err = fmt.Errorf("%w: %q", err, cmp.Or(strings.TrimSpace(diagnostics.String()), "no further diagnostics"))
+		err = fmt.Errorf("%w: %q", err, aicli.RedactText(cmp.Or(strings.TrimSpace(diagnostics.String()), "no further diagnostics"), settings.APIKey))
 	}
 	output.finish()
 	if failureTimer != nil {

@@ -193,7 +193,7 @@ func TestCheckoutPullRequestVerifiesHead(t *testing.T) {
 	}
 }
 
-func TestCheckoutPullRequestPreservesAliasedTreeEntries(t *testing.T) {
+func TestCheckoutPullRequestBoundsAliasedTreeEntries(t *testing.T) {
 	for _, test := range []struct {
 		name, reason            string
 		width, depth, blobBytes int

@@ -11,14 +11,15 @@ import (
 
 func TestCollectUsageFreshHelperEvidenceWithRootFallback(t *testing.T) {
 	for _, tc := range []struct {
-		name, child string
-		expected    []string
-		want        usage.Tokens
-		complete    bool
+		name, child   string
+		fallbackInput int64
+		expected      []string
+		want          usage.Tokens
+		complete      bool
 	}{
-		{name: "unreferenced completed control", child: "complete", want: usage.Tokens{Input: 30, Output: 3}, complete: true},
-		{name: "unreferenced unfinished child", child: "unfinished", want: usage.Tokens{Input: 30, Output: 3}},
-		{name: "missing referenced child", expected: []string{"child"}, want: usage.Tokens{Input: 10, Output: 1}},
+		{name: "unreferenced completed control", child: "complete", fallbackInput: 10, want: usage.Tokens{Input: 30, Output: 3}, complete: true},
+		{name: "unreferenced unfinished child", child: "unfinished", fallbackInput: 15, want: usage.Tokens{Input: 35, Output: 3}},
+		{name: "missing referenced child", fallbackInput: 10, expected: []string{"child"}, want: usage.Tokens{Input: 10, Output: 1}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			home := t.TempDir()
@@ -30,7 +31,7 @@ func TestCollectUsageFreshHelperEvidenceWithRootFallback(t *testing.T) {
 				}
 				writeUsageRollout(t, home, "child", "root", events...)
 			}
-			fallback := usage.Tokens{Input: 10, Output: 1}
+			fallback := usage.Tokens{Input: tc.fallbackInput, Output: 1}
 			got, complete, err := (&usageSession{}).collectUsage(context.Background(), home, "root", time.Now(), &fallback, tc.expected, nil)
 			wantUnverified := !tc.complete
 			if got != tc.want || complete != tc.complete || errors.Is(err, errUnverifiedChildren) != wantUnverified || (err != nil) != wantUnverified {

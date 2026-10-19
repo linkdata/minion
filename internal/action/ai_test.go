@@ -512,10 +512,11 @@ func TestCommentPublishesOnlyCriticAcceptedResult(t *testing.T) {
 	for _, tt := range []struct {
 		name, verdict string
 		wantError     bool
+		wantErrorText string
 	}{
 		{name: "approved", verdict: approvedCritiqueJSON},
 		{name: "rejected", verdict: `{"approved":false,"has_blockers":true,"feedback":"A defect remains."}`, wantError: true},
-		{name: "invalid", verdict: "approved", wantError: true},
+		{name: "invalid", verdict: "approved", wantError: true, wantErrorText: "invalid critic verdict"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			const answer = "Proposed report"
@@ -571,7 +572,7 @@ func TestCommentPublishesOnlyCriticAcceptedResult(t *testing.T) {
 			}
 			err := attemptFixture(e).perform(testActionContext(t), job)
 			if tt.wantError {
-				if !errors.Is(err, monitor.ErrTerminalJob) || published != "" {
+				if !errors.Is(err, monitor.ErrTerminalJob) || published != "" || tt.wantErrorText != "" && !strings.Contains(err.Error(), tt.wantErrorText) {
 					t.Fatalf("unapproved result published: error=%v body=%q", err, published)
 				}
 			} else if err != nil || criticCalls != 3 || mainCalls != 2 || !strings.Contains(published, inertModelOutput(answer)) || strings.Contains(published, "[truncated]") || strings.Contains(published, `"approved"`) || strings.Contains(published, "refutations") || strings.Contains(published, "PRIVATE_REFUTATION") {

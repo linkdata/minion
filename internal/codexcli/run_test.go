@@ -524,6 +524,19 @@ func TestRunRedactsConfiguredAPIKey(t *testing.T) {
 	}
 }
 
+func TestRunRedactsEncodedKeyBeforeQuotingFailure(t *testing.T) {
+	key := `fixture"secret`
+	encoded, err := json.Marshal(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	installFakeCodex(t, "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' "+aicli.ShellQuote(string(encoded[1:len(encoded)-1]))+" >&2\nexit 1\n")
+	_, err = Run(context.Background(), t.TempDir(), "Review this checkout", false, "", config.CodexConfig{APIKey: key})
+	if err == nil || strings.Contains(err.Error(), "fixture") || !strings.Contains(err.Error(), "[redacted]") {
+		t.Fatalf("encoded configured key escaped in quoted error: %v", err)
+	}
+}
+
 func TestRunReportsCodexFailure(t *testing.T) {
 	installFakeCodex(t, `#!/bin/sh
 printf '%s\n' '{"type":"turn.failed","error":{"message":"model request failed"}}'

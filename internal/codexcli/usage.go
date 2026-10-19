@@ -100,6 +100,7 @@ func collectUsageFiles(ctx context.Context, rootID string, fallback *usage.Token
 		return total, false, nil
 	}
 	selected := ownedUsageFiles(files, rootID)
+	// Count the root against the agent limit even if its transcript is missing.
 	selected[rootID] = files[rootID]
 	var childError error
 	if len(selected) > maxUsageAgents {

@@ -236,14 +236,14 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 		return result, fmt.Errorf("codex exec output: %w", errors.Join(output.parseErr, runErr))
 	}
 	if runErr != nil || output.failed {
-		reason := cmp.Or(output.failureReason, strings.TrimSpace(stderr.String()), "no further diagnostics")
+		reason := aicli.RedactText(cmp.Or(output.failureReason, strings.TrimSpace(stderr.String()), "no further diagnostics"), settings.APIKey)
 		if runErr != nil {
 			return result, fmt.Errorf("codex exec failed (%w): %q", runErr, reason)
 		}
 		return result, fmt.Errorf("codex exec failed: %q", reason)
 	}
 	if !output.completed {
-		reason := cmp.Or(output.failureReason, strings.TrimSpace(stderr.String()), "missing turn.completed event")
+		reason := aicli.RedactText(cmp.Or(output.failureReason, strings.TrimSpace(stderr.String()), "missing turn.completed event"), settings.APIKey)
 		return result, fmt.Errorf("codex exec did not complete: %q", reason)
 	}
 	if output.finalMessage == "" {

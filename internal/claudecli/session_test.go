@@ -627,5 +627,8 @@ func TestSessionTreatsNilAndEmptySkillsAsTheSameSelection(t *testing.T) {
 		if err != nil || result.Answer != "final answer" {
 			t.Fatalf("call %d changed the empty skill selection: %+v %v", call, result, err)
 		}
+		if len(session.skillPaths) != 0 {
+			t.Fatalf("call %d retained empty skill paths: %v", call, session.skillPaths)
+		}
 	}
 }
