@@ -50,6 +50,29 @@ func TestRedactErrorKnownSecretEncodings(t *testing.T) {
 	}
 }
 
+func TestRedactJavaScriptJSONForms(t *testing.T) {
+	for _, tc := range []struct{ name, secret, encoded string }{
+		{"HTML and control", "<\x1bZ", "<\\u001bZ"},
+		{"line separator and control", "\u2028\x1bZ", "\u2028\\u001bZ"},
+		{"paragraph separator and control", "\u2029\x1bZ", "\u2029\\u001bZ"},
+		{"literal backslash-u and HTML", "\\u003c<\x1bZ", "\\\\u003c<\\u001bZ"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			text := "prefix " + tc.encoded + " suffix"
+			if got := RedactText(text, tc.secret); got != "prefix [redacted] suffix" {
+				t.Fatalf("JavaScript JSON key survived text redaction: %q", got)
+			}
+			var tail bounded.Tail
+			if _, err := tail.Write([]byte(text)); err != nil || tail.Truncated {
+				t.Fatalf("unexpected diagnostic tail state: %v, %t", err, tail.Truncated)
+			}
+			if got := RedactTail(&tail, tc.secret); got != "prefix [redacted] suffix" {
+				t.Fatalf("JavaScript JSON key survived diagnostic redaction: %q", got)
+			}
+		})
+	}
+}
+
 func TestRedactTailCutsPartialKnownEncodings(t *testing.T) {
 	secret := "AB<\vCD"
 	quoted := strconv.Quote(secret)
@@ -61,6 +84,7 @@ func TestRedactTailCutsPartialKnownEncodings(t *testing.T) {
 		{"literal", secret},
 		{"Go quoted", quoted[1 : len(quoted)-1]},
 		{"JSON encoded", string(encoded[1 : len(encoded)-1])},
+		{"JavaScript JSON", "AB<\\u000bCD"},
 	}
 	for _, form := range forms {
 		t.Run(form.name, func(t *testing.T) {
@@ -85,5 +109,34 @@ func TestRedactTailCutsPartialKnownEncodings(t *testing.T) {
 	}
 	if got := RedactTail(&whole, secret); got != "prefix [redacted] suffix" {
 		t.Fatalf("nontruncated key survived: %q", got)
+	}
+}
+
+func TestRedactTailCutsEscapedBackslashSecret(t *testing.T) {
+	const secret = `\\`
+	const encoded = `\\\\`
+	const note = "rate limit reached"
+	fragment := encoded[1:]
+	fill := strings.Repeat("x", bounded.DiagnosticBytes-len(fragment)-len(note))
+	var tail bounded.Tail
+	if _, err := tail.Write([]byte(encoded + fill + note)); err != nil || !tail.Truncated {
+		t.Fatalf("expected truncated escaped key: %v, %t", err, tail.Truncated)
+	}
+	if got := RedactTail(&tail, secret); strings.TrimLeft(got, "x") != note {
+		t.Fatalf("partial escaped key survived or later diagnostic lost: %q", got)
+	}
+}
+
+func TestRedactTailMasksCompleteKeyAcrossCut(t *testing.T) {
+	const secret = "ABC"
+	const note = "rate limit reached"
+	fill := strings.Repeat("x", bounded.DiagnosticBytes-len("x"+secret)-len(note))
+	var tail bounded.Tail
+	if _, err := tail.Write([]byte("zx" + secret + fill + note)); err != nil || !tail.Truncated {
+		t.Fatalf("expected truncated tail: %v, %t", err, tail.Truncated)
+	}
+	got := RedactTail(&tail, secret)
+	if strings.Contains(got, "BC") || !strings.HasSuffix(got, note) || len(got) > bounded.DiagnosticBytes {
+		t.Fatalf("complete key crossed cut or diagnostic bound: %q", got)
 	}
 }

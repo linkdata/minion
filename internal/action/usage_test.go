@@ -101,6 +101,22 @@ func TestUsageTracksBothModelRoles(t *testing.T) {
 	}
 }
 
+func TestUsageDefaultsUnspecifiedModelLabels(t *testing.T) {
+	store := &usage.Store{Dir: filepath.Join(t.TempDir(), "usage")}
+	tracked := attemptFixture(&Orchestrator{Usage: store, Main: "claude", Adversarial: "codex"})
+	finish, err := tracked.trackUsage(usageJob())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := finish(nil); err != nil {
+		t.Fatal(err)
+	}
+	records, err := usage.ReadAll(store.Dir)
+	if err != nil || len(records) != 1 || records[0].Model != "default" || records[0].CriticModel != "default" {
+		t.Fatalf("empty models lost their default usage labels: records=%+v err=%v", records, err)
+	}
+}
+
 func TestUsageAccumulatesCriticRevisions(t *testing.T) {
 	store := &usage.Store{Dir: filepath.Join(t.TempDir(), "usage")}
 	var critiques int
@@ -146,12 +162,15 @@ func TestUsagePersistenceFailureStopsModelsOrPublication(t *testing.T) {
 	modelErr := errors.New("model error")
 	for _, tt := range []struct {
 		name     string
+		provider string
 		before   bool
 		modelErr error
 		critic   bool
 	}{
-		{"before call", true, modelErr, false}, {"after failed call", false, modelErr, false}, {"after successful call", false, nil, false},
-		{"after critic call", false, nil, true},
+		{"codex main/before call", "codex", true, modelErr, false}, {"claude main/before call", "claude", true, modelErr, false},
+		{"codex main/after failed call", "codex", false, modelErr, false}, {"claude main/after failed call", "claude", false, modelErr, false},
+		{"codex main/after successful call", "codex", false, nil, false}, {"claude main/after successful call", "claude", false, nil, false},
+		{"codex main/after critic call", "codex", false, nil, true}, {"claude main/after critic call", "claude", false, nil, true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			root := t.TempDir()
@@ -161,7 +180,7 @@ func TestUsagePersistenceFailureStopsModelsOrPublication(t *testing.T) {
 			}
 			store := &usage.Store{Dir: originalDir}
 			calls := 0
-			tracked := attemptFixture(&Orchestrator{Usage: store, Main: "codex", Runner: Runner{runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+			tracked := attemptFixture(&Orchestrator{Usage: store, Main: tt.provider, Runner: Runner{runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 				calls++
 				if tt.critic && request.role == roleMain {
 					return aicli.Result{Answer: proposalJSON("Candidate answer", ""), Tokens: usage.Tokens{Input: 10, Output: 2}, UsageComplete: true}, nil
@@ -180,8 +199,12 @@ func TestUsagePersistenceFailureStopsModelsOrPublication(t *testing.T) {
 				store.Dir = blocked
 			}
 			job := testJob(command.Comment)
+			job.Main.Provider = tt.provider
 			if tt.critic {
 				job = withClaudeCritic(job)
+				if tt.provider == "claude" {
+					job.Critic.Provider = "codex"
+				}
 			}
 			tracked.Runner.WorkRoot = t.TempDir()
 			result, err := tracked.Runner.Run(context.Background(), job)
@@ -312,6 +335,7 @@ func TestExecuteRecordsNoModelAndSkipsAcknowledged(t *testing.T) {
 }
 
 func TestUsagePreservesWorkerModelSkillsAndContext(t *testing.T) {
+	t.Setenv("CODEX_HOME", t.TempDir())
 	installActionTestSkills(t, testReviewSkillURL)
 	root := t.TempDir()
 	argsPath, promptPath := filepath.Join(root, "args"), filepath.Join(root, "prompt")

@@ -2,6 +2,7 @@ package aicli
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 
@@ -58,7 +59,7 @@ func Directory(path string) (string, error) {
 		return "", err
 	}
 	if !info.IsDir() || resolved == string(os.PathSeparator) {
-		return "", errors.New("expected a non-root directory")
+		return "", fmt.Errorf("expected a non-root directory: %s", resolved)
 	}
 	return resolved, nil
 }

@@ -113,6 +113,28 @@ func TestRunnerSeparatesMainAndCriticSkills(t *testing.T) {
 	}
 }
 
+func TestPortableJobCarriesAlwaysOnSkillsToBothRoles(t *testing.T) {
+	gitFixtureRemote(t)
+	checkout := cloneFixture(t, t.TempDir())
+	request := usageJob()
+	request.Command = command.Command{Name: "inspect", Action: command.Comment}
+	orchestrator := &Orchestrator{
+		Main: "codex", Adversarial: "claude",
+		AlwaysOnSkills: []string{skills.BuiltinAntiPromptInjection},
+		Commands: map[string]config.CommandMapping{
+			"inspect": {Action: "comment", Skills: []string{testReviewSkillURL}},
+		},
+	}
+	job, err := attemptFixture(orchestrator).portableJob(testActionContext(t), &preparedAction{checkout: checkout, request: request}, "title", "body")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.Critic == nil || !slices.Equal(job.Main.Skills, []string{testReviewSkillURL}) || len(job.Critic.Skills) != 0 ||
+		!slices.Equal(job.Main.AlwaysOnSkills, orchestrator.AlwaysOnSkills) || !slices.Equal(job.Critic.AlwaysOnSkills, orchestrator.AlwaysOnSkills) {
+		t.Fatalf("portable role skills: main=%+v critic=%+v", job.Main, job.Critic)
+	}
+}
+
 func TestRunnerRequiresEverySkillAndLoadsOptionalSkills(t *testing.T) {
 	const extraURL = "https://github.com/example/skills/tree/main/skills/extra"
 	const optionalURL = "https://github.com/example/skills/tree/main/skills/optional"

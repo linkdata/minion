@@ -10,39 +10,83 @@ import (
 
 // RedactText replaces literal, Go-quoted and JSON-encoded secret content.
 func RedactText(text, secret string) string {
-	redacted, _ := redactText(text, secret)
-	return redacted
+	return redactText(text, secret, false)
 }
 
-func redactText(text, secret string) (string, int) {
+func redactText(text, secret string, truncated bool) string {
 	if secret == "" {
-		return text, 0
+		return text
 	}
 	quoted := strconv.Quote(secret)
 	encoded, _ := json.Marshal(secret)
-	forms := [3]string{string(encoded[1 : len(encoded)-1]), quoted[1 : len(quoted)-1], secret}
-	var replacements [6]string
+	jsonContent := string(encoded[1 : len(encoded)-1])
+	forms := [4]string{jsonContent, javascriptJSONContent(jsonContent), quoted[1 : len(quoted)-1], secret}
+	var replacements [8]string
 	longest := 0
 	for i, form := range forms {
-		replacements[2*i], replacements[2*i+1] = form, "[redacted]"
+		mask := "[redacted]"
+		if truncated {
+			mask = strings.Repeat("\x00", len(form))
+		}
+		replacements[2*i], replacements[2*i+1] = form, mask
 		longest = max(longest, len(form))
 	}
 	// Encoded forms precede literals; replacement text is not rescanned.
-	return strings.NewReplacer(replacements[:]...).Replace(text), longest
+	text = strings.NewReplacer(replacements[:]...).Replace(text)
+	if truncated {
+		// Equal-length masks keep complete keys hidden while the cut removes partial ones.
+		discard := longest - 1
+		if discard >= len(text) {
+			return ""
+		}
+		return strings.ReplaceAll(text[discard:], "\x00", "[redacted]")
+	}
+	return text
+}
+
+// javascriptJSONContent removes escapes Go adds to otherwise valid JSON strings.
+func javascriptJSONContent(encoded string) string {
+	var result strings.Builder
+	result.Grow(len(encoded))
+	for i := 0; i < len(encoded); {
+		if encoded[i] == '\\' && i+1 < len(encoded) {
+			if encoded[i+1] == '\\' {
+				result.WriteString(encoded[i : i+2])
+				i += 2
+				continue
+			}
+			if encoded[i+1] == 'u' && i+6 <= len(encoded) {
+				switch encoded[i+2 : i+6] {
+				case "003c":
+					result.WriteByte('<')
+				case "003e":
+					result.WriteByte('>')
+				case "0026":
+					result.WriteByte('&')
+				case "2028":
+					result.WriteRune('\u2028')
+				case "2029":
+					result.WriteRune('\u2029')
+				default:
+					result.WriteString(encoded[i : i+6])
+				}
+				i += 6
+				continue
+			}
+		}
+		result.WriteByte(encoded[i])
+		i++
+	}
+	return result.String()
 }
 
 // RedactTail keeps useful trailing diagnostics without exposing a key cut at the tail boundary.
 func RedactTail(tail *bounded.Tail, secret string) string {
-	text, longest := redactText(strings.TrimSpace(tail.String()), secret)
-	if secret == "" || !tail.Truncated {
-		return text
+	text := strings.TrimSpace(redactText(tail.String(), secret, tail.Truncated))
+	if len(text) > bounded.DiagnosticBytes {
+		text = text[len(text)-bounded.DiagnosticBytes:]
 	}
-	// Complete matches are gone; discard any encoded-key suffix at the cut.
-	discard := longest - 1
-	if discard >= len(text) {
-		return ""
-	}
-	return strings.TrimSpace(text[discard:])
+	return text
 }
 
 // RedactError redacts secret content in an error's displayed message.

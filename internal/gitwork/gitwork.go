@@ -30,7 +30,7 @@ const (
 	// maxChangedPathListBytes bounds a changed-path listing with Git's record metadata.
 	maxChangedPathListBytes = (workspace.MaxChanges + 1) * (workspace.MaxPathBytes + 128)
 
-	// maxPathListBytes bounds source and PR path listings including Git record metadata.
+	// maxPathListBytes bounds PR comparison changed-path listings.
 	maxPathListBytes = workspace.MaxFiles * (workspace.MaxPathBytes + 128)
 	// Bound local metadata independently of source contents and repository history.
 	maxSourceTreeListBytes = workspace.MaxBytes

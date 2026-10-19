@@ -254,7 +254,7 @@ func TestGitFailureClassificationIsSpecificAndPreservesCancellation(t *testing.T
 		t.Fatalf("cancelled checkout error=%v", err)
 	}
 	if _, err := runGit(context.Background(), filepath.Join(root, "missing"), "checkout"); !errors.Is(err, os.ErrNotExist) || errors.Is(err, ErrUnsupportedSource) {
-		t.Fatalf("checkout I/O error=%v", err)
+		t.Fatalf("checkout launch chdir error=%v", err)
 	}
 }
 

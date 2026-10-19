@@ -323,10 +323,14 @@ func TestRepositoryPinsFilesRefFormat(t *testing.T) {
 	}
 	proxy := filepath.Join(fakeOnPath(t, "git", "#!/bin/sh\nGIT_DEFAULT_REF_FORMAT=reftable exec "+shellQuote(realGit)+" \"$@\"\n"), "git")
 	control := filepath.Join(t.TempDir(), "control")
-	if output, err := exec.Command(proxy, "init", "--quiet", "--template=", control).CombinedOutput(); err != nil {
+	cmd := exec.Command(proxy, "init", "--quiet", "--template=", control)
+	cmd.Env = testsupport.GitEnvironment(t.TempDir())
+	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("initialize reftable control: %q, %v", output, err)
 	}
-	if output, err := exec.Command(realGit, "-C", control, "rev-parse", "--show-ref-format").CombinedOutput(); err != nil || string(output) != "reftable\n" {
+	cmd = exec.Command(realGit, "-C", control, "rev-parse", "--show-ref-format")
+	cmd.Env = testsupport.GitEnvironment(t.TempDir())
+	if output, err := cmd.CombinedOutput(); err != nil || string(output) != "reftable\n" {
 		t.Fatalf("control did not select reftable: %q, %v", output, err)
 	}
 	source, _ := repositoryFixture(t, snapshot)

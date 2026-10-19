@@ -55,10 +55,14 @@ func TestFixIndexPinsSHA1WhenGitDefaultsToSHA256(t *testing.T) {
 	bin := fakeOnPath(t, "git", "#!/bin/sh\nGIT_DEFAULT_HASH=sha256 exec "+shellQuote(realGit)+" \"$@\"\n")
 	proxy := filepath.Join(bin, "git")
 	control := filepath.Join(t.TempDir(), "control")
-	if output, err := exec.Command(proxy, "init", "--quiet", "--template=", control).CombinedOutput(); err != nil {
+	cmd := exec.Command(proxy, "init", "--quiet", "--template=", control)
+	cmd.Env = testsupport.GitEnvironment(t.TempDir())
+	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("initialize SHA256 control: %s,%v", output, err)
 	}
-	if output, err := exec.Command(realGit, "-C", control, "rev-parse", "--show-object-format").Output(); err != nil || strings.TrimSpace(string(output)) != "sha256" {
+	cmd = exec.Command(realGit, "-C", control, "rev-parse", "--show-object-format")
+	cmd.Env = testsupport.GitEnvironment(t.TempDir())
+	if output, err := cmd.Output(); err != nil || strings.TrimSpace(string(output)) != "sha256" {
 		t.Fatalf("control did not select SHA256: %q,%v", output, err)
 	}
 	index, source := offlineIndexFixture(t, []workspace.File{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("before")}})
@@ -84,7 +88,7 @@ func TestFixIndexBaselineIsTreeWithoutCommit(t *testing.T) {
 	}
 }
 
-func TestFixIndexRejectsBaselineMetadataAliasWithoutHidingIOFailures(t *testing.T) {
+func TestFixIndexRejectsBaselineMetadataAliasWithoutHidingLaunchErrors(t *testing.T) {
 	for _, name := range []string{"GIT~1/file", ".git./file"} {
 		t.Run(name, func(t *testing.T) {
 			source, metadata := t.TempDir(), t.TempDir()
@@ -99,7 +103,7 @@ func TestFixIndexRejectsBaselineMetadataAliasWithoutHidingIOFailures(t *testing.
 	index, _ := offlineIndexFixture(t, nil)
 	index.dir = filepath.Join(t.TempDir(), "missing")
 	if _, err := index.run(context.Background(), 1024, nil, "add", "--all", "--", "."); !errors.Is(err, os.ErrNotExist) || errors.Is(err, ErrUnsupportedSource) {
-		t.Fatalf("offline Git I/O error=%v", err)
+		t.Fatalf("offline Git launch chdir error=%v", err)
 	}
 }
 
@@ -452,9 +456,6 @@ func TestFixIndexBoundsActualControlScanBeforeStaging(t *testing.T) {
 	if err := os.Remove(marker); err != nil {
 		t.Fatalf("exact-bound control did not stage output: %v", err)
 	}
-	if _, err := index.run(context.Background(), 1024, nil, "read-tree", index.baseline); err != nil {
-		t.Fatal(err)
-	}
 	if err := os.Rename(filepath.Join(source, "fix.txt"), filepath.Join(source, "next.txt")); err != nil {
 		t.Fatal(err)
 	}
@@ -685,17 +686,11 @@ func TestFixIndexIgnoresUnusedRulesUnderIgnoredTrackedDirectory(t *testing.T) {
 }
 
 func TestFixIndexPathListOverflowIsTooManyFiles(t *testing.T) {
-	for _, stage := range []struct {
-		arg   string
-		limit int
-	}{
-		{"ls-files", maxChangedPathListBytes},
-		{"--raw", maxChangedPathListBytes},
-	} {
-		t.Run(stage.arg, func(t *testing.T) {
+	for _, arg := range []string{"ls-files", "--raw"} {
+		t.Run(arg, func(t *testing.T) {
 			index, source := offlineIndexFixture(t, []workspace.File{{Path: "source", Mode: workspace.Regular, Data: []byte("before")}})
 			writeIndexFixture(t, source, "source", []byte("after"))
-			script := fmt.Sprintf("#!/bin/sh\nfor arg do\nif [ \"$arg\" = %s ]; then\nhead -c %d /dev/zero\nexit\nfi\ndone\nexec %s \"$@\"\n", shellQuote(stage.arg), stage.limit+1, shellQuote(index.binary))
+			script := fmt.Sprintf("#!/bin/sh\nfor arg do\nif [ \"$arg\" = %s ]; then\nhead -c %d /dev/zero\nexit\nfi\ndone\nexec %s \"$@\"\n", shellQuote(arg), maxChangedPathListBytes+1, shellQuote(index.binary))
 			index.binary = filepath.Join(fakeOnPath(t, "git-path-list", script), "git-path-list")
 			if _, err := index.Changes(context.Background()); !errors.Is(err, ErrTooManyFiles) || errors.Is(err, ErrCheckoutTooLarge) || errors.Is(err, ErrDiffTooLarge) {
 				t.Fatalf("result path overflow misclassified: %v", err)

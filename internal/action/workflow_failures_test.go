@@ -153,21 +153,18 @@ func TestExecuteLimitCausesAndInvalidIncompleteResultsAreTerminal(t *testing.T) 
 			if !errors.Is(err, monitor.ErrTerminalJob) || writes != 0 {
 				t.Fatalf("source/result failure not terminal: calls=%d writes=%d err=%v", calls, writes, err)
 			}
-			wantCalls := 0
 			switch scenario {
 			case "output limit", "too many files", "diff too large", "checkout too large":
-				wantCalls = 1
 				if !errors.Is(err, limitCause) {
 					t.Fatalf("terminal native limit lost cause: %v", err)
 				}
 			default:
-				wantCalls = 1
 				if !errors.Is(err, modelErr) || !strings.Contains(err.Error(), "invalid incomplete action result") {
 					t.Fatalf("incomplete worker cause lost: %v", err)
 				}
 			}
-			if calls != wantCalls {
-				t.Fatalf("model calls=%d want%d", calls, wantCalls)
+			if calls != 1 {
+				t.Fatalf("model calls=%d want1", calls)
 			}
 		})
 	}

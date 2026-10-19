@@ -151,14 +151,15 @@ func TestPullRequestInputGatesBeforeClone(t *testing.T) {
 		name       string
 		number     int
 		base, head string
+		want       string
 	}{
-		{"zero number", 0, "main", strings.Repeat("a", 40)},
-		{"refspec injection", 1, "main:refs/heads/other", strings.Repeat("a", 40)},
-		{"invalid SHA", 1, "main", "missing"},
+		{"zero number", 0, "main", strings.Repeat("a", 40), "invalid pull request number 0"},
+		{"refspec injection", 1, "main:refs/heads/other", strings.Repeat("a", 40), "invalid branch \"main:refs/heads/other\""},
+		{"invalid SHA", 1, "main", "missing", "invalid expected pull request SHA \"missing\""},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			root := t.TempDir()
-			if c, err := ClonePullRequest(context.Background(), root, "owner/repo", tt.number, tt.base, tt.head); err == nil || c != nil {
+			if c, err := ClonePullRequest(context.Background(), root, "owner/repo", tt.number, tt.base, tt.head); err == nil || c != nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("invalid input accepted: %v,%v", c, err)
 			}
 			entries, err := os.ReadDir(root)
@@ -173,8 +174,8 @@ func TestNewBranchRejectsInvalidNameBeforeGit(t *testing.T) {
 	f := newFixture(t)
 	before := f.git(f.checkout.path, "for-each-ref", "--format=%(refname) %(objectname)")
 	const name = "bad:ref"
-	if err := f.checkout.NewBranch(context.Background(), name); err == nil {
-		t.Fatalf("invalid branch accepted: %q", name)
+	if err := f.checkout.NewBranch(context.Background(), name); err == nil || !strings.Contains(err.Error(), "invalid branch \"bad:ref\"") {
+		t.Fatalf("invalid branch error=%v", err)
 	}
 	if after := f.git(f.checkout.path, "for-each-ref", "--format=%(refname) %(objectname)"); after != before {
 		t.Fatalf("invalid branch changed refs: %s", after)

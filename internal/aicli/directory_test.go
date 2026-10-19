@@ -18,6 +18,9 @@ func TestDirectoryRequiresAnExistingNonRootDirectory(t *testing.T) {
 			t.Fatalf("accepted %q", path)
 		}
 	}
+	if _, err := Directory(string(os.PathSeparator)); err == nil || err.Error() != "expected a non-root directory: "+string(os.PathSeparator) {
+		t.Fatalf("root error lost its path: %v", err)
+	}
 	alias := filepath.Join(root, "alias")
 	if err := os.Symlink(root, alias); err != nil {
 		t.Fatal(err)
@@ -56,8 +59,8 @@ func TestDirectoryResolvesSymlinksBeforeParentComponents(t *testing.T) {
 		t.Fatalf("directory resolved=%q error=%v", got, err)
 	}
 	file := alias + "/../file"
-	if _, err := Directory(file); err == nil {
-		t.Fatal("accepted the actual file as the lexical decoy directory")
+	if _, err := Directory(file); err == nil || err.Error() != "expected a non-root directory: "+filepath.Join(actual, "file") {
+		t.Fatalf("accepted the actual file or lost its canonical path: %v", err)
 	}
 }
 

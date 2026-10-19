@@ -46,7 +46,7 @@ func TestReviewPromptsRequireCompleteInvestigationInEveryPhase(t *testing.T) {
 			t.Errorf("%s can waive an unfinished review as nonblocking", phase)
 		}
 	}
-	for _, action := range []command.Action{command.Review, command.Comment, command.SecurityAudit} {
+	for _, action := range []command.Action{command.Review, command.Fix, command.Comment, command.SecurityAudit} {
 		prompt, err := actionPrompt(context.Background(), testJob(action), "/source", "/context", "/reports", "/installed/SKILL.md")
 		if err != nil {
 			t.Fatal(err)
@@ -454,6 +454,7 @@ func TestRunAIFailsWithoutReturningProposal(t *testing.T) {
 		{rounds: 2, name: "critic fails", failureCall: 2, wantCalls: 2, wantError: modelErr},
 		{rounds: 2, name: "revision fails", verdict: `{"approved":false,"has_blockers":true,"feedback":"Repair the defect."}`, failureCall: 3, wantCalls: 3, wantError: modelErr},
 		{rounds: 2, name: "cancel before critic", cancelCall: 1, wantCalls: 1, wantError: context.Canceled},
+		{rounds: 2, name: "cancel before revision", verdict: `{"approved":false,"has_blockers":true,"feedback":"Repair the defect."}`, cancelCall: 2, wantCalls: 2, wantError: context.Canceled},
 		{rounds: 2, name: "oversized proposal", largeProposal: true, wantCalls: 1, wantError: monitor.ErrTerminalJob},
 	} {
 		t.Run(tt.name, func(t *testing.T) {

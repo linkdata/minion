@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/linkdata/minion/internal/testsupport"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -341,7 +342,9 @@ func TestCloneIgnoresHostTemplateExclusions(t *testing.T) {
 	template := t.TempDir()
 	writeFile(t, filepath.Join(template, "info", "exclude"), "notes.local\n")
 	control := filepath.Join(t.TempDir(), "control")
-	if output, err := exec.Command(realGit, "-c", "init.templateDir="+template, "clone", "--no-checkout", "--branch", "main", fixture.remote, control).CombinedOutput(); err != nil {
+	cmd := exec.Command(realGit, "-c", "init.templateDir="+template, "clone", "--no-checkout", "--branch", "main", fixture.remote, control)
+	cmd.Env = testsupport.GitEnvironment(t.TempDir())
+	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("clone host-template control: %s,%v", output, err)
 	}
 	if data, err := os.ReadFile(filepath.Join(control, ".git", "info", "exclude")); err != nil || string(data) != "notes.local\n" {

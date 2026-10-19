@@ -70,7 +70,6 @@ type usageSession struct {
 	// cap: historical helpers must not consume current helper slots.
 	known            map[string]rolloutMeta
 	before           map[string]*usageBoundary
-	budget           int64
 	baselineComplete bool
 }
 
@@ -99,7 +98,7 @@ func ownedUsageFiles(files map[string]rolloutMeta, rootID string) map[string]rol
 // lifetime baseline or rejecting a call before its provider runs.
 func (s *usageSession) begin(ctx context.Context, home, rootID string, started time.Time) {
 	s.before = nil
-	s.budget = maxUsageScanBytes
+	budget := int64(maxUsageScanBytes)
 	s.baselineComplete = true
 	if rootID == "" {
 		s.known = nil
@@ -127,7 +126,7 @@ func (s *usageSession) begin(ctx context.Context, home, rootID string, started t
 			b.valid = false
 			continue
 		}
-		_, _, _, _ = readRolloutUsageFrom(ctx, meta, rootID, &s.budget, nil, b, nil, false)
+		_, _, _, _ = readRolloutUsageFrom(ctx, meta, rootID, &budget, nil, b, nil, false)
 	}
 }
 
@@ -138,7 +137,7 @@ func (s *usageSession) collectUsage(ctx context.Context, home, rootID string, st
 		s.known = ownedUsageFiles(files, rootID)
 		return tokens, complete, err
 	}
-	s.budget = maxUsageScanBytes // Collection has its own bound after the baseline pass.
+	budget := int64(maxUsageScanBytes) // Collection has its own bound after the baseline pass.
 	files, ambiguous, complete := usageFiles(ctx, home, rootID, started, s.known)
 	complete = complete && s.baselineComplete
 	owned := ownedUsageFiles(files, rootID)
@@ -175,7 +174,7 @@ func (s *usageSession) collectUsage(ctx context.Context, home, rootID string, st
 		if exists && !ambiguous[id] && (prior || spawned[id]) {
 			var children []string
 			var workError error
-			tokens, ok, children, workError = readRolloutUsageFrom(ctx, meta, rootID, &s.budget, boundary, currentRoot, spawned, id != rootID && observationOnly[id])
+			tokens, ok, children, workError = readRolloutUsageFrom(ctx, meta, rootID, &budget, boundary, currentRoot, spawned, id != rootID && observationOnly[id])
 			childError = joinUsageErrors(childError, workError)
 			queue = append(queue, children...)
 		} else if id != rootID {
@@ -195,7 +194,7 @@ func (s *usageSession) collectUsage(ctx context.Context, home, rootID string, st
 	// completion rather than silently certifying that omitted evidence.
 	for _, id := range slices.Sorted(maps.Keys(owned)) {
 		meta := owned[id]
-		if !visited[id] && (ambiguous[id] || !unchangedUsageRollout(ctx, meta.path, s.before[id], &s.budget)) {
+		if !visited[id] && (ambiguous[id] || !unchangedUsageRollout(ctx, meta.path, s.before[id], &budget)) {
 			complete = false
 			childError = joinUsageErrors(childError, errUnverifiedChildren)
 			break

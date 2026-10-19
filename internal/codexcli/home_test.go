@@ -90,7 +90,7 @@ func TestRunConfiguredKeyRequiresKnownNativeHome(t *testing.T) {
 			t.Setenv("CODEX_HOME", home)
 			result, err := Run(context.Background(), canonicalTempDir(t), "task", false, "", config.CodexConfig{APIKey: "fixture-key"})
 			if test.noHome {
-				if err == nil || !strings.Contains(err.Error(), "CODEX_HOME") || result.Answer != "" || !result.UsageComplete || result.Tokens != (usage.Tokens{}) {
+				if err == nil || !strings.HasPrefix(err.Error(), "codex exec: ") || !strings.Contains(err.Error(), "CODEX_HOME") || result.Answer != "" || !result.UsageComplete || result.Tokens != (usage.Tokens{}) {
 					t.Fatalf("unavailable home was not refused before inference: %+v, %v", result, err)
 				}
 				if _, err := os.Stat(binary + ".home"); !errors.Is(err, os.ErrNotExist) {

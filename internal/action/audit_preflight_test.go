@@ -162,7 +162,7 @@ func TestAuditMissingInputsFailBeforeValidatorExecution(t *testing.T) {
 	})
 }
 
-func TestAuditValidatorDiagnosticsStayOutOfErrorsAndJournal(t *testing.T) {
+func TestAuditValidatorDiagnosticsStayOutOfErrors(t *testing.T) {
 	job := testJob(command.SecurityAudit)
 	const diagnostic = "PRIVATE_VALIDATOR_FINDING\nforged journal line \"quoted\"\n"
 	script := "#!/bin/sh\nprintf '%s' " + shellQuote(diagnostic) + " >&2\nexit 23\n"

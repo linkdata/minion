@@ -432,6 +432,11 @@ func (o *jsonlOutput) recordAssistantUsage(raw, parent json.RawMessage) {
 		Usage json.RawMessage `json:"usage"`
 	}
 	if json.Unmarshal(raw, &message) != nil || message.ID == "" {
+		o.hasCumulative = false
+		o.uncovered = o.aggregateGeneration != 0
+		if o.results != 0 {
+			o.completed, o.result.Answer, o.result.UsageComplete = false, "", false
+		}
 		return
 	}
 	root := bytes.Equal(bytes.TrimSpace(parent), []byte("null"))

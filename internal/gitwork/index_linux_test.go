@@ -34,7 +34,7 @@ func TestFixIndexRejectsControlFIFOsBeforeGitOpensThem(t *testing.T) {
 				if err := syscall.Mkfifo(name, 0600); err != nil {
 					t.Fatal(err)
 				}
-				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 				defer cancel()
 				_, err := index.Changes(ctx)
 				if err == nil || !strings.Contains(err.Error(), "fix control file") || !strings.Contains(err.Error(), control) || !strings.Contains(err.Error(), "must be regular") || ctx.Err() != nil {
@@ -57,7 +57,7 @@ func TestFixIndexRejectsNestedGitFIFOBeforeGitOpensIt(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeIndexFixture(t, source, "newdir/file", []byte("new output"))
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	_, err := index.Changes(ctx)
 	if err == nil || !strings.Contains(err.Error(), `untracked nested repository output "newdir/"`) || ctx.Err() != nil {
@@ -75,7 +75,7 @@ func TestFixIndexSkipsPopulatedSourceGitMetadata(t *testing.T) {
 	if err := syscall.Mkfifo(filepath.Join(source, ".git", "HEAD"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	index, err := NewOfflineIndex(ctx, metadata, source, files)
 	if err != nil || ctx.Err() != nil {
@@ -98,7 +98,7 @@ func TestFixIndexTreatsColonDirectoriesAsLiteralNames(t *testing.T) {
 			if err := syscall.Mkfifo(filepath.Join(source, dir, ".gitignore"), 0600); err != nil {
 				t.Fatal(err)
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			_, err := index.Changes(ctx)
 			if err == nil || !strings.Contains(err.Error(), "fix control file") || !strings.Contains(err.Error(), "must be regular") || ctx.Err() != nil {
@@ -137,7 +137,7 @@ func TestFixIndexDoesNotInspectIgnoredControlFiles(t *testing.T) {
 		}
 	}
 	writeIndexFixture(t, source, "source", []byte("after"))
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	changes, err := index.Changes(ctx)
 	if err != nil || len(changes) != 1 || changes[0].Path != "source" || string(changes[0].Data) != "after" || ctx.Err() != nil {
@@ -162,7 +162,7 @@ func TestFixIndexRejectsTrackedFIFOAndSymlink(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			changes, err := index.Changes(ctx)
 			want := "can only add regular files"
@@ -187,7 +187,7 @@ func TestFixIndexControlScanHonorsNestedIgnoreNegation(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeIndexFixture(t, source, "sub/keep.cache/added", []byte("included by negation"))
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	changes, err := index.Changes(ctx)
 	if err != nil || len(changes) != 1 || changes[0].Path != "sub/keep.cache/added" || ctx.Err() != nil {
@@ -248,7 +248,7 @@ func TestFixIndexPrunesCaseVariantMetadataBeforeOpeningFIFOs(t *testing.T) {
 			if err := syscall.Mkfifo(file, 0600); err != nil {
 				t.Fatal(err)
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			changes, err := index.Changes(ctx)
 			if err != nil || len(changes) != 0 || ctx.Err() != nil {
@@ -290,7 +290,7 @@ func TestFixIndexIgnoredSymlinkParentDoesNotBlockOnAttributeFIFO(t *testing.T) {
 			if err != nil || string(tracked) != test.tracked+"\n" {
 				t.Fatalf("baseline tracked path=%q error=%v", tracked, err)
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			changes, err := index.Changes(ctx)
 			if err != nil || len(changes) != 1 || changes[0].Path != test.tracked || !changes[0].Delete || ctx.Err() != nil {

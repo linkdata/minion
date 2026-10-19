@@ -65,7 +65,7 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	}
 	codexHome, err := HomePath()
 	if err != nil {
-		return result, err
+		return result, fmt.Errorf("codex exec: %w", err)
 	}
 	if outputDir != "" {
 		outputDir, err = aicli.Directory(outputDir)

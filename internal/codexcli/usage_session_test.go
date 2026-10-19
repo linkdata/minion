@@ -426,14 +426,12 @@ func TestUsageSessionOnlyObservesUnchangedCompletedPriorHelper(t *testing.T) {
 	}
 }
 
-func TestUsageSessionCollectionHasIndependentBaselineBudget(t *testing.T) {
+func TestUsageSessionCollectionAfterBaseline(t *testing.T) {
 	ctx, home := context.Background(), t.TempDir()
 	root := writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "old-root", "r1", 100)...)
 	child := writeUsageRollout(t, home, "child", "root", completedUsageTurn("child", "old-child", "c1", 40)...)
 	var session usageSession
 	session.begin(ctx, home, "root", time.Now())
-	// Model a baseline pass that used nearly its entire allowed tree budget.
-	session.budget = 1
 	appendUsageEvents(t, root, completedUsageTurn("root", "new-root", "r2", 20)...)
 	appendUsageEvents(t, child, completedUsageTurn("child", "new-child", "c2", 5)...)
 	got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 20}, []string{"child"}, nil)

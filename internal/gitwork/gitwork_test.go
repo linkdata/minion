@@ -122,6 +122,16 @@ func TestRepositoryAndRefValidation(t *testing.T) {
 	}
 }
 
+func TestGitErrorLabelsCommandAfterConfigOptions(t *testing.T) {
+	fixture := newFixture(t)
+	_, err := runGit(context.Background(), fixture.checkout.path,
+		"-c", "user.name=example-bot", "-c", "user.email=example-bot@users.noreply.github.com",
+		"commit", "--not-a-real-option")
+	if err == nil || !strings.Contains(err.Error(), "git commit:") {
+		t.Fatalf("runGit() error = %v, want git commit error", err)
+	}
+}
+
 func TestHeadRejectsMovedCheckout(t *testing.T) {
 	fixture := newFixture(t)
 	ctx := context.Background()

@@ -50,6 +50,26 @@ func TestOutputRetainsDeduplicatedAssistantUsageBeforeResult(t *testing.T) {
 	}
 }
 
+func TestOutputInvalidAssistantMessageAfterResult(t *testing.T) {
+	for _, tc := range []struct{ name, message string }{
+		{"missing ID", `{}`},
+		{"malformed message", `"invalid"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			o := jsonlOutput{}
+			data := successfulResult + "\n" + `{"type":"assistant","parent_tool_use_id":null,"message":` + tc.message + `}` + "\n"
+			writeChunks(t, &o, data)
+			if o.completed || o.result.Answer != "" || o.result.UsageComplete || o.hasCumulative {
+				t.Fatalf("invalid assistant kept completed result: %+v completed=%t cumulative=%t", o.result, o.completed, o.hasCumulative)
+			}
+			o.finish()
+			if o.err == nil || o.result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) {
+				t.Fatalf("invalid assistant lost accounting or returned success: %+v error=%v", o.result, o.err)
+			}
+		})
+	}
+}
+
 func TestOutputRetainsNewCallsAfterProvisionalAggregate(t *testing.T) {
 	const pending = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"worker"}]}`
 	const clear = `{"type":"system","subtype":"background_tasks_changed","tasks":[]}`

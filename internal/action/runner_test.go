@@ -180,7 +180,7 @@ func TestRunnerUsesLocalHistoryWhenComparisonDiffIsIncomplete(t *testing.T) {
 	}
 }
 
-func TestRunnerKeepsCriticReadOnlyAndRefutationsPrivate(t *testing.T) {
+func TestRunnerKeepsCriticReadOnlyAndPrivateReasoning(t *testing.T) {
 	forbidNetworkGit(t)
 	job := testJob(command.Fix)
 	job.Source.Files = append(job.Source.Files, workspace.File{Path: "deleted.txt", Mode: workspace.Regular, Data: []byte("original deleted file")})

@@ -96,7 +96,7 @@ func TestOutputTaskListsAreScopedAndRequired(t *testing.T) {
 		name, event string
 		invalid     bool
 	}{
-		{"unrelated tasks", `{"type":"assistant","tasks":["unrelated"]}`, false},
+		{"unrelated tasks", `{"type":"user","tasks":["unrelated"]}`, false},
 		{"unrelated errors", `{"type":"system","errors":{"unrelated":true}}`, false},
 		{"missing", `{"type":"system","subtype":"background_tasks_changed"}`, true},
 		{"null", `{"type":"system","subtype":"background_tasks_changed","tasks":null}`, true},
@@ -172,7 +172,7 @@ func TestOutputBackgroundTasks(t *testing.T) {
 		{name: "work after result needs new answer", after: pending + "\n" + empty, fails: true},
 		{name: "answer after new work", before: successfulResult + "\n" + pending + "\n" + empty},
 		{name: "failed command recovered", before: `{"type":"system","subtype":"task_notification","task_id":"test","status":"failed"}`},
-		{name: "assistant text is not task state", after: `{"type":"assistant","subtype":"background_tasks_changed","tasks":[{"task_id":"reviewer"}]}`},
+		{name: "user text is not task state", after: `{"type":"user","subtype":"background_tasks_changed","tasks":[{"task_id":"reviewer"}]}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cancelled := false

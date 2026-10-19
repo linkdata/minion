@@ -286,45 +286,78 @@ func TestStatusRejectsNegativeRoundsForTerminalAndCleanupPhases(t *testing.T) {
 	}
 }
 
-func TestRunnerDeadlineDuringSessionCleanupClearsValidatedAnswer(t *testing.T) {
+func TestRunnerDeadlineDuringSessionCleanupClearsValidatedResult(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root bypasses directory permissions")
 	}
-	installActionTestSkills(t)
-	t.Setenv("CODEX_HOME", t.TempDir())
-	root := t.TempDir()
-	t.Cleanup(func() {
-		if err := os.Chmod(root, 0700); err != nil {
-			t.Error(err)
-		}
-	})
-	fakeOnPath(t, "codex", `#!/bin/sh
+	for _, test := range []struct {
+		name   string
+		action command.Action
+		expire bool
+	}{
+		{name: "comment deadline", action: command.Comment, expire: true},
+		{name: "fix before deadline", action: command.Fix},
+		{name: "fix deadline", action: command.Fix, expire: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			action := test.action
+			installActionTestSkills(t)
+			t.Setenv("CODEX_HOME", t.TempDir())
+			root := t.TempDir()
+			t.Cleanup(func() {
+				if err := os.Chmod(root, 0700); err != nil {
+					t.Error(err)
+				}
+			})
+			fakeOnPath(t, "codex", `#!/bin/sh
 set -eu
 cat >/dev/null
 printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.completed","item":{"type":"agent_message","text":"Done."}}' '{"type":"turn.completed"}'
 /bin/chmod 0500 `+shellQuote(root)+"\n")
-	job := testJob(command.Comment)
-	job.RuntimeBudget = 2 * time.Second
-	var modelContext context.Context
-	journal := &cleanupRetryLog{root: root, onRetry: func() error {
-		if modelContext == nil {
-			return errors.New("cleanup ran before a model context was captured")
-		}
-		// This retry runs only after Run assigned and validated its result.
-		// Expire the action here so only the final deadline defer can clear it.
-		<-modelContext.Done()
-		return os.Chmod(root, 0700)
-	}}
-	runner := Runner{WorkRoot: root, Logger: log.New(journal, "", 0), aroundModel: func(ctx context.Context, request modelRun, next modelCall) (aicli.Result, error) {
-		modelContext = ctx
-		return next(ctx, request)
-	}}
-	result, err := runner.Run(context.Background(), job)
-	wantError := errors.Join(monitor.ErrTerminalJob, context.DeadlineExceeded).Error()
-	if err == nil || err.Error() != wantError || !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, monitor.ErrTerminalJob) || result.Answer != "" || len(result.Changes) != 0 || len(result.Calls) != 1 || len(result.Diagnostics) != 0 || journal.err != nil || strings.Count(journal.String(), "model session cleanup retry scheduled") != 1 {
-		t.Fatalf("deadline after result validation was publishable: %+v, %v; cleanup=%v log=%q", result, err, journal.err, journal.String())
-	}
-	if entries, err := os.ReadDir(root); err != nil || len(entries) != 0 {
-		t.Fatalf("deadline cleanup leaked: %v,%v", entries, err)
+			job := testJob(action)
+			job.RuntimeBudget = 10 * time.Second
+			var modelContext context.Context
+			var changedSource string
+			journal := &cleanupRetryLog{root: root, onRetry: func() error {
+				if modelContext == nil {
+					return errors.New("cleanup ran before a model context was captured")
+				}
+				if action == command.Fix {
+					data, err := os.ReadFile(filepath.Join(changedSource, "source.txt"))
+					if err != nil || string(data) != "fixed source" {
+						return fmt.Errorf("cleanup ran without a changed fix source: %q, %v", data, err)
+					}
+				}
+				// This retry runs only after Run assigned and validated its result.
+				// Expire the action here so only the final deadline defer can clear it.
+				if test.expire {
+					<-modelContext.Done()
+				}
+				return os.Chmod(root, 0700)
+			}}
+			runner := Runner{WorkRoot: root, Logger: log.New(journal, "", 0), aroundModel: func(ctx context.Context, request modelRun, next modelCall) (aicli.Result, error) {
+				modelContext = ctx
+				if action == command.Fix {
+					changedSource = request.dir
+					writeFixtureFile(t, changedSource, "source.txt", []byte("fixed source"))
+				}
+				return next(ctx, request)
+			}}
+			result, err := runner.Run(context.Background(), job)
+			if !test.expire {
+				if err != nil || result.Answer != "Done." || len(result.Changes) != 1 || string(result.Changes[0].Data) != "fixed source" || journal.err != nil {
+					t.Fatalf("changed fix did not produce a publishable result before the deadline: %+v, %v; cleanup=%v", result, err, journal.err)
+				}
+				assertEmptyDir(t, root)
+				return
+			}
+			wantError := errors.Join(monitor.ErrTerminalJob, context.DeadlineExceeded).Error()
+			if err == nil || err.Error() != wantError || !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, monitor.ErrTerminalJob) || result.Answer != "" || len(result.Changes) != 0 || len(result.Calls) != 1 || len(result.Diagnostics) != 0 || journal.err != nil || strings.Count(journal.String(), "model session cleanup retry scheduled") != 1 {
+				t.Fatalf("deadline after result validation was publishable: %+v, %v; cleanup=%v log=%q", result, err, journal.err, journal.String())
+			}
+			if entries, err := os.ReadDir(root); err != nil || len(entries) != 0 {
+				t.Fatalf("deadline cleanup leaked: %v,%v", entries, err)
+			}
+		})
 	}
 }

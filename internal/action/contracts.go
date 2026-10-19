@@ -16,7 +16,7 @@ import (
 	"github.com/linkdata/minion/internal/workspace"
 )
 
-// ProtocolVersion 2 carries complete Git history instead of bounded history excerpts.
+// ProtocolVersion identifies the complete-history Job, Result and Status contract.
 const ProtocolVersion = 2
 
 const (

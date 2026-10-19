@@ -2,6 +2,7 @@ package aicli
 
 // ModelGitEnvironment disables global/system Git config, system attributes,
 // implicit bare repositories, replacement objects, lazy fetching and optional metadata writes.
+// Repository-local config, hooks, excludes, and attributes still apply.
 // Callers must first remove inherited GIT_* entries.
 func ModelGitEnvironment() []string {
 	return []string{

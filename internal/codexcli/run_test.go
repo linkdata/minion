@@ -681,14 +681,14 @@ func TestRunHonorsCancellation(t *testing.T) {
 }
 
 func TestRunRejectsExecutableFromSourceSnapshot(t *testing.T) {
-	dir := t.TempDir()
+	dir := canonicalTempDir(t)
 	path := filepath.Join(dir, "codex")
 	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	_, err := Run(context.Background(), dir, "Review", false, "", config.CodexConfig{})
-	if err == nil || !strings.Contains(err.Error(), "executable is inside the untrusted source snapshot") {
+	if err == nil || !strings.Contains(err.Error(), "codex executable "+path+" is inside the untrusted source snapshot") {
 		t.Fatalf("Run() error = %v, want source snapshot executable rejection", err)
 	}
 }

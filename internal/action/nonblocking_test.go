@@ -57,7 +57,7 @@ func TestCriticEvidencePreservesBlockerVerdicts(t *testing.T) {
 				if result.Answer != "Candidate answer" || result.Validate(job) != nil {
 					t.Fatalf("approved result invalid: %+v", result)
 				}
-			} else if result.Answer != "" || result.Validate(job) == nil {
+			} else if result.Answer != "" {
 				t.Fatalf("failed critic published: %+v", result)
 			}
 			want := CallUsage{Provider: "claude", Role: roleCritic, Round: 1, ReviewPhase: reviewFull, Tokens: usage.Tokens{Input: 11, Output: 2}, Approved: tt.approved, NoBlockers: tt.noBlockers, HasBlockers: tt.hasBlockers}

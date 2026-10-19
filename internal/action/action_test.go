@@ -542,8 +542,9 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			gitConfig := "url." + forkRemote + ".insteadOf=https://github.com/linkdataminion/r.git"
-			wrapper := fmt.Sprintf("#!/bin/sh\nexec %s -c %s \"$@\"\n", shellQuote(baseWrapper), shellQuote(gitConfig))
+			gitConfig := filepath.Join(scratch, "fork-gitconfig")
+			fixtureGit("config", "--file", gitConfig, "url."+forkRemote+".insteadOf", "https://github.com/linkdataminion/r.git")
+			wrapper := fmt.Sprintf("#!/bin/sh\nexec %s -c %s \"$@\"\n", shellQuote(baseWrapper), shellQuote("include.path="+gitConfig))
 			fakeOnPath(t, "git", wrapper)
 			job := monitor.Job{
 				Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"fix"}}, SubjectType: "Issue", Number: 7,
