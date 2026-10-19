@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -150,6 +151,7 @@ func TestRunAIRedactsNoncanonicalEscapesAfterDecoding(t *testing.T) {
 	for _, provider := range []string{"codex", "claude"} {
 		t.Run(provider, func(t *testing.T) {
 			key := `fixture"secret`
+			quotedKey := strconv.Quote(key)
 			runner := Runner{}
 			criticProvider := "claude"
 			if provider == "codex" {
@@ -163,7 +165,7 @@ func TestRunAIRedactsNoncanonicalEscapesAfterDecoding(t *testing.T) {
 					return aicli.Result{Answer: `{"answer":"public fixture\u0022secret","refutations":"private fixture\u0022secret"}`}, nil
 				}
 				prompt := request.criticPrompt("", "")
-				if strings.Contains(prompt, key) || !strings.Contains(prompt, "public [redacted]") {
+				if strings.Contains(prompt, quotedKey[1:len(quotedKey)-1]) || !strings.Contains(prompt, "public [redacted]") {
 					t.Fatalf("decoded main key reached critic prompt: %q", prompt)
 				}
 				return aicli.Result{Answer: approvedCritiqueJSON}, nil
@@ -179,13 +181,14 @@ func TestRunAIRedactsNoncanonicalEscapesAfterDecoding(t *testing.T) {
 
 func TestRunAIRedactsDecodedCriticFeedback(t *testing.T) {
 	mainKey, criticKey := `main"secret`, `critic"secret`
+	quotedMain, quotedCritic := strconv.Quote(mainKey), strconv.Quote(criticKey)
 	mainCalls, criticCalls := 0, 0
 	runner := Runner{Codex: config.CodexConfig{APIKey: mainKey}, Claude: config.ClaudeConfig{APIKey: criticKey}}
 	runner.runModel = func(_ context.Context, request modelRun) (aicli.Result, error) {
 		if request.role == roleMain {
 			mainCalls++
 			if mainCalls == 2 {
-				if strings.Contains(request.prompt, criticKey) || !strings.Contains(request.prompt, "[redacted]") {
+				if strings.Contains(request.prompt, quotedCritic[1:len(quotedCritic)-1]) || !strings.Contains(request.prompt, "[redacted]") {
 					t.Fatalf("decoded critic key reached revision prompt: %q", request.prompt)
 				}
 				return aicli.Result{Answer: `{"answer":"answer2","refutations":"main\u0022secret"}`}, nil
@@ -195,7 +198,7 @@ func TestRunAIRedactsDecodedCriticFeedback(t *testing.T) {
 		criticCalls++
 		if request.reviewPhase == reviewVerification {
 			message := request.criticPrompt("", "")
-			if strings.Contains(message, mainKey) || strings.Contains(message, criticKey) || !strings.Contains(message, "[redacted]") || len(request.refutations) != 1 || request.refutations[0].Text != "[redacted]" {
+			if strings.Contains(message, quotedMain[1:len(quotedMain)-1]) || strings.Contains(message, quotedCritic[1:len(quotedCritic)-1]) || !strings.Contains(message, "[redacted]") || len(request.refutations) != 1 || request.refutations[0].Text != "[redacted]" {
 				t.Fatalf("decoded keys reached verification prompt/refutations: %q, %+v", message, request.refutations)
 			}
 		}

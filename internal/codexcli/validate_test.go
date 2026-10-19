@@ -296,14 +296,14 @@ func TestValidateKeepsImplicitNativeHome(t *testing.T) {
 
 func TestValidateRedactsKeyBeforeClippingCatalogueError(t *testing.T) {
 	key := "KEYPREFIX__LEAKSUFFIX"
-	message := strings.Repeat("x", bounded.DiagnosticBytes-len(key)+2) + key
+	message := strings.Repeat("x", bounded.DiagnosticBytes-len(key)+2) + key + strings.Repeat("y", 300)
 	response, err := json.Marshal(map[string]any{"id": 0, "error": map[string]string{"message": message}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	installFakeCodex(t, catalogueScriptFor(t.TempDir(), string(response), ""))
 	_, err = Validate(context.Background(), config.CodexConfig{APIKey: key})
-	if err == nil || strings.Contains(err.Error(), "KEYPREFIX__LEAK") || !strings.Contains(err.Error(), "[redacted]") || len(err.Error()) > bounded.DiagnosticBytes+200 {
+	if err == nil || strings.Contains(err.Error(), "KEYPREFIX__LEAK") || !strings.Contains(err.Error(), "[redacted]") || !strings.Contains(err.Error(), "y...") || len(err.Error()) > bounded.DiagnosticBytes+200 {
 		t.Fatalf("clipped catalogue error exposed key fragment or lost bound: %v", err)
 	}
 }

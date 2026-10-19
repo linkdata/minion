@@ -541,7 +541,7 @@ func TestRunRedactsEncodedKeyBeforeQuotingFailure(t *testing.T) {
 func TestRunDoesNotExposeKeyFragmentsAtDiagnosticLimit(t *testing.T) {
 	key := "KEYPREFIX__LEAKSUFFIX"
 	stderr := key + strings.Repeat("x", bounded.DiagnosticBytes-len("LEAKSUFFIX")-len("rate limit reached")) + "rate limit reached"
-	eventMessage := strings.Repeat("x", bounded.DiagnosticBytes-len(key)+2) + key
+	eventMessage := strings.Repeat("x", bounded.DiagnosticBytes-len(key)+2) + key + strings.Repeat("y", 300)
 	event, err := json.Marshal(map[string]any{"type": "turn.failed", "error": map[string]string{"message": eventMessage}})
 	if err != nil {
 		t.Fatal(err)
@@ -553,7 +553,7 @@ func TestRunDoesNotExposeKeyFragmentsAtDiagnosticLimit(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			installFakeCodex(t, "#!/bin/sh\ncat >/dev/null\n"+tc.script)
 			_, err := Run(context.Background(), t.TempDir(), "task", false, "", config.CodexConfig{APIKey: key})
-			if err == nil || strings.Contains(err.Error(), tc.forbidden) || tc.name == "stderr tail" && !strings.Contains(err.Error(), "rate limit reached") || tc.name == "event prefix" && (!strings.Contains(err.Error(), "[redacted]") || len(err.Error()) > bounded.DiagnosticBytes+200) {
+			if err == nil || strings.Contains(err.Error(), tc.forbidden) || tc.name == "stderr tail" && !strings.Contains(err.Error(), "rate limit reached") || tc.name == "event prefix" && (!strings.Contains(err.Error(), "[redacted]") || !strings.Contains(err.Error(), "y...") || len(err.Error()) > bounded.DiagnosticBytes+200) {
 				t.Fatalf("key fragment escaped or limit diagnostic lost in %s: %v", tc.name, err)
 			}
 		})
