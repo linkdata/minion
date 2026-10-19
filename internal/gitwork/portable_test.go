@@ -217,6 +217,8 @@ func TestImportRejectsIdentityAndMetadataAndPreservesBytes(t *testing.T) {
 		{Path: "binary", Mode: workspace.Executable, Data: []byte{0, 255, 1}},
 		{Path: ".gitattributes", Mode: workspace.Regular, Data: []byte("binary filter=returned\n")},
 		{Path: "hooks/post-commit", Mode: workspace.Executable, Data: []byte("#!/bin/sh\nprintf hook >> " + shellQuote(marker) + "\n")},
+		{Path: "hooks/pre-commit", Mode: workspace.Executable, Data: []byte("#!/bin/sh\nprintf pre-commit >> " + shellQuote(marker) + "\nexit 1\n")},
+		{Path: "hooks/pre-push", Mode: workspace.Executable, Data: []byte("#!/bin/sh\nprintf pre-push >> " + shellQuote(marker) + "\nexit 1\n")},
 	}
 	if err := fixture.checkout.Import(ctx, fixture.base, changes); err != nil {
 		t.Fatal(err)
@@ -241,7 +243,7 @@ func TestImportRejectsIdentityAndMetadataAndPreservesBytes(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("returned control files executed during commit: %v", err)
+		t.Fatalf("returned control files executed during publication: %v", err)
 	}
 }
 

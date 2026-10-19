@@ -1,6 +1,7 @@
 package action
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -74,6 +75,7 @@ func TestPrivateHostPathsCannotBeExposedByModelGrants(t *testing.T) {
 }
 
 func TestWorkRootIsolationUsesPhysicalGrantParents(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
 	root := t.TempDir()
 	physical := filepath.Join(root, "physical")
 	for _, dir := range []string{filepath.Join(physical, "nested"), filepath.Join(physical, "target"), filepath.Join(root, "target")} {
@@ -98,9 +100,14 @@ func TestExecuteCriticAdmissionUsesControlledWorkRoot(t *testing.T) {
 	for _, critic := range []bool{false, true} {
 		for _, unsafe := range []bool{false, true} {
 			t.Run(fmt.Sprintf("critic_%t/unsafe_%t", critic, unsafe), func(t *testing.T) {
+				t.Setenv("PATH", gitOnlyPath(t))
 				gitFixtureRemote(t)
 				root, other := filepath.Join(t.TempDir(), "controlled"), t.TempDir()
 				if err := os.Mkdir(root, 0700); err != nil {
+					t.Fatal(err)
+				}
+				root, err := filepath.EvalSymlinks(root)
+				if err != nil {
 					t.Fatal(err)
 				}
 				calls := 0
@@ -128,7 +135,7 @@ func TestExecuteCriticAdmissionUsesControlledWorkRoot(t *testing.T) {
 				request := usageJob()
 				request.Command = command.Command{Name: "comment", Action: command.Comment}
 				request.Repository.Actions = []string{"comment"}
-				err := e.Execute(context.Background(), request)
+				err = e.Execute(context.Background(), request)
 				if unsafe {
 					if !errors.Is(err, workroot.ErrUnsafe) || errors.Is(err, monitor.ErrTerminalJob) || calls != 0 {
 						t.Fatalf("admission classification: calls=%d error=%v", calls, err)
@@ -173,7 +180,7 @@ func TestReviewEvidenceInitialCheckpointIsNotTerminalBeforeModels(t *testing.T) 
 }
 
 func TestPrivateReviewRejectsChangedSavedCheckpoint(t *testing.T) {
-	for _, kind := range []string{"corrupt", "identity", "source", "policy", "calls", "symlink"} {
+	for _, kind := range []string{"corrupt", "identity", "source", "policy", "max rounds", "calls", "symlink", "hardlink"} {
 		t.Run(kind, func(t *testing.T) {
 			job := withClaudeCritic(testJob(command.Comment))
 			result := privateReviewResult(job)
@@ -192,9 +199,11 @@ func TestPrivateReviewRejectsChangedSavedCheckpoint(t *testing.T) {
 				saved.SourceRef = strings.Repeat("b", 40)
 			case "policy":
 				saved.CriticNonblockingRounds++
+			case "max rounds":
+				saved.CriticMaxRounds++
 			case "calls":
 				saved.Calls[1].HasBlockers, saved.Calls[1].NoBlockers = false, true
-			case "symlink":
+			case "symlink", "hardlink":
 				var err error
 				data, err = json.Marshal(saved)
 				if err != nil {
@@ -204,37 +213,69 @@ func TestPrivateReviewRejectsChangedSavedCheckpoint(t *testing.T) {
 				if err := os.Remove(path); err != nil {
 					t.Fatal(err)
 				}
-				if err := os.Symlink(outside, path); err != nil {
+				link := os.Symlink
+				if kind == "hardlink" {
+					link = os.Link
+				}
+				if err := link(outside, path); err != nil {
 					t.Fatal(err)
 				}
 			}
-			if kind != "corrupt" && kind != "symlink" {
+			if kind != "corrupt" && kind != "symlink" && kind != "hardlink" {
 				var err error
 				data, err = json.Marshal(saved)
 				if err != nil {
 					t.Fatal(err)
 				}
 			}
-			if kind != "symlink" {
+			if kind != "symlink" && kind != "hardlink" {
 				if err := os.WriteFile(path, data, 0600); err != nil {
 					t.Fatal(err)
 				}
 			}
-			err := e.retainReviewEvidence(job, result)
+			before, err := os.Lstat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var outsideBefore os.FileInfo
+			if kind == "symlink" || kind == "hardlink" {
+				outsideBefore, err = os.Stat(outside)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			err = e.retainReviewEvidence(job, result)
 			if !errors.Is(err, monitor.ErrTerminalJob) {
 				t.Fatalf("tampered checkpoint accepted: %v", err)
 			}
 			if kind == "corrupt" && !strings.Contains(err.Error(), "saved review evidence is invalid") {
 				t.Fatalf("corruption lost: %v", err)
 			}
-			if kind == "identity" || kind == "source" || kind == "policy" || kind == "calls" {
+			if kind == "identity" || kind == "source" || kind == "policy" || kind == "max rounds" || kind == "calls" {
 				if !strings.Contains(err.Error(), "changed or discarded a saved prefix") {
 					t.Fatalf("checkpoint binding lost: %v", err)
 				}
 			}
+			if kind == "hardlink" && !strings.Contains(err.Error(), "exactly one hard link") {
+				t.Fatalf("checkpoint hardlink lost single-link cause: %v", err)
+			}
+			if after, statErr := os.Lstat(path); statErr != nil || !os.SameFile(before, after) || before.Mode() != after.Mode() || !before.ModTime().Equal(after.ModTime()) {
+				t.Fatalf("refused checkpoint was replaced or rewritten: %v", statErr)
+			}
+			if got, readErr := os.ReadFile(path); readErr != nil || !bytes.Equal(got, data) {
+				t.Fatalf("refused checkpoint bytes changed: %q,%v", got, readErr)
+			}
 			if kind == "symlink" {
-				if got, err := os.ReadFile(outside); err != nil || string(got) != string(data) {
+				if !errors.Is(err, syscall.ELOOP) {
+					t.Fatalf("checkpoint symlink lost no-follow cause: %v", err)
+				}
+			}
+			if kind == "symlink" || kind == "hardlink" {
+				if got, err := os.ReadFile(outside); err != nil || !bytes.Equal(got, data) {
 					t.Fatalf("outside checkpoint touched: %q,%v", got, err)
+				}
+				if after, err := os.Stat(outside); err != nil || !os.SameFile(outsideBefore, after) || !outsideBefore.ModTime().Equal(after.ModTime()) {
+					t.Fatalf("outside checkpoint replaced or rewritten: %v", err)
 				}
 			}
 		})

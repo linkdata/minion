@@ -71,6 +71,9 @@ func (s *Session) prepare(workspace string, writable bool, outputDir string, set
 	}
 	bound := settings
 	bound.ReadOnlyDirs = nil // Evidence grants are selected afresh for each phase.
+	if len(bound.Skills) == 0 {
+		bound.Skills = nil
+	}
 	if s.workspace != "" {
 		if s.workspace != workspace || s.outputDir != outputDir || s.writable != writable || !reflect.DeepEqual(s.settings, bound) {
 			return errors.New("claude session source, role or settings changed")
@@ -96,7 +99,7 @@ func (s *Session) prepare(workspace string, writable bool, outputDir string, set
 		}
 	} else {
 		s.workspace, s.outputDir, s.writable, s.settings = workspace, outputDir, writable, bound
-		s.settings.Skills = slices.Clone(settings.Skills)
+		s.settings.Skills = slices.Clone(bound.Skills)
 		if settings.AllowAllUnixSockets != nil {
 			allow := *settings.AllowAllUnixSockets
 			s.settings.AllowAllUnixSockets = &allow

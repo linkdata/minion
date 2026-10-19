@@ -64,7 +64,7 @@ func TestProbeExactBoundAndCallerCancellation(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err = Probe(ctx, binary, "", nil, t.TempDir(), os.Environ(), ""); !errors.Is(err, context.Canceled) || errors.Is(err, ErrOutputLimit) {
+	if _, err = Probe(ctx, binary, "", nil, t.TempDir(), os.Environ(), ""); !errors.Is(err, context.Canceled) || errors.Is(err, ErrOutputLimit) || err.Error() != context.Canceled.Error() {
 		t.Fatalf("caller cancellation cause changed: %v", err)
 	}
 }

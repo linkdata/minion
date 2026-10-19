@@ -40,6 +40,7 @@ func TestRunnerWorkRootIsolation(t *testing.T) {
 					runner.Claude.Skills = []string{skill}
 				}
 			case "system read":
+				t.Setenv("PATH", t.TempDir())
 				work = "/usr"
 			}
 			if err := runner.CheckWorkRootIsolation(work, job.Main.Provider, job.Critic.Provider); err == nil || !strings.Contains(err.Error(), "work root overlaps") {

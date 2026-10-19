@@ -380,12 +380,12 @@ func TestRunRejectsUnsafePaths(t *testing.T) {
 		settings          config.ClaudeConfig
 		failure           string
 	}{
-		{name: "empty source snapshot"},
-		{name: "root source snapshot", dir: "/"},
-		{name: "same output", dir: workspace, output: workspace},
-		{name: "ancestor output", dir: workspace, output: filepath.Dir(workspace)},
-		{name: "relative skill", dir: workspace, settings: config.ClaudeConfig{Skills: []string{"SKILL.md"}}},
-		{name: "read root", dir: workspace, settings: config.ClaudeConfig{ReadOnlyDirs: []string{"/"}}},
+		{name: "empty source snapshot", failure: "path is required"},
+		{name: "root source snapshot", dir: "/", failure: "non-root directory"},
+		{name: "same output", dir: workspace, output: workspace, failure: "must be separate from source snapshot"},
+		{name: "ancestor output", dir: workspace, output: filepath.Dir(workspace), failure: "must be separate from source snapshot"},
+		{name: "relative skill", dir: workspace, settings: config.ClaudeConfig{Skills: []string{"SKILL.md"}}, failure: "absolute SKILL.md"},
+		{name: "read root", dir: workspace, settings: config.ClaudeConfig{ReadOnlyDirs: []string{"/"}}, failure: "non-root directory"},
 		{name: "read output", dir: workspace, output: output, settings: config.ClaudeConfig{ReadOnlyDirs: []string{output}}, failure: "read-only directory overlaps"},
 		{name: "read output ancestor", dir: workspace, output: output, settings: config.ClaudeConfig{ReadOnlyDirs: []string{outputParent}}, failure: "read-only directory overlaps"},
 		{name: "read inside output", dir: workspace, output: output, settings: config.ClaudeConfig{ReadOnlyDirs: []string{outputChild}}, failure: "read-only directory overlaps"},
@@ -402,8 +402,8 @@ func TestRunRejectsUnsafePaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", workspace)
-	if _, err := Run(context.Background(), workspace, "task", false, "", config.ClaudeConfig{}); err == nil {
-		t.Fatal("accepted executable inside source snapshot")
+	if _, err := Run(context.Background(), workspace, "task", false, "", config.ClaudeConfig{}); err == nil || !strings.Contains(err.Error(), "inside the untrusted source snapshot") {
+		t.Fatalf("executable inside source snapshot refusal = %v", err)
 	}
 }
 
@@ -566,5 +566,22 @@ func TestRunParseFailureCancelsActiveCLI(t *testing.T) {
 	result, err := Run(ctx, t.TempDir(), "task", false, "", config.ClaudeConfig{})
 	if err == nil || !strings.Contains(err.Error(), "invalid Claude JSONL event") || ctx.Err() != nil || time.Since(started) > 5*time.Second || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 2}) {
 		t.Fatalf("parse failure did not stop active CLI: %+v, %v, parent=%v", result, err, ctx.Err())
+	}
+}
+
+func TestRunFinalUnterminatedFailureKeepsSafeDiagnosticAndUsage(t *testing.T) {
+	for _, tc := range []struct{ name, event, failure string }{
+		{"quota", `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected"}}`, "provider usage limit reached"},
+		{"pressure", `{"type":"system","subtype":"task_notification","status":"stopped","summary":"Background command \"tests\" was stopped because the system is running low on memory"}`, "provider memory pressure"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			script := "cat >/dev/null\nprintf '%s\\n' " + aicli.ShellQuote(assistantUsageEvent("root", 3, 5, 7, 2)) + "\nprintf '%s' " + aicli.ShellQuote(tc.event) + "\nprintf 'PRIVATE_STDERR' >&2\nexit 7\n"
+			fakeExecutable(t, "claude", script)
+			result, err := Run(context.Background(), t.TempDir(), "task", false, "", config.ClaudeConfig{})
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) || exit.ExitCode() != 7 || !strings.Contains(err.Error(), tc.failure) || strings.Contains(err.Error(), "PRIVATE_STDERR") || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 2}) {
+				t.Fatalf("result=%+v error=%v", result, err)
+			}
+		})
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -21,6 +22,9 @@ func TestInvalidResultKeepsOnlyValidatedEvidence(t *testing.T) {
 			result := completeAuditResult(job)
 			result.Calls = append(result.Calls, CallUsage{Provider: "claude", Role: roleCritic, Round: 1, ReviewPhase: reviewFull, Approved: true, NoBlockers: true})
 			result.Diagnostics = []Diagnostic{{Code: "cleanup_failed", Message: "PRIVATE cleanup details"}}
+			if err := result.Validate(job); err != nil {
+				t.Fatalf("invalid baseline audit result: %v", err)
+			}
 			switch scenario {
 			case "invalid calls":
 				result.Calls[0].Tokens.Input = -1
@@ -44,14 +48,29 @@ func TestInvalidResultKeepsOnlyValidatedEvidence(t *testing.T) {
 			if strings.Contains(text, "PRIVATE") || strings.Contains(text, "forged") || strings.Contains(text, "FOREIGN") {
 				t.Fatalf("unvalidated/private text reached journal: %s", text)
 			}
-			if got, want := strings.Contains(text, "code=cleanup_failed"), scenario != "invalid diagnostics"; got != want {
+			if got, want := strings.Contains(text, "code=cleanup_failed"), scenario != "invalid diagnostics" && scenario != "foreign identity"; got != want {
 				t.Fatalf("validated cleanup diagnostic present=%t want=%t: %s", got, want, text)
 			}
 			if got, want := strings.Contains(text, "role=critic round=1 review_phase=full"), scenario != "invalid calls" && scenario != "foreign identity"; got != want {
 				t.Fatalf("validated phase metadata present=%t want=%t: %s", got, want, text)
 			}
-			if !strings.Contains(text, "attempt="+job.Identity.AttemptID) {
+			if scenario == "foreign identity" {
+				if text != "" {
+					t.Fatalf("foreign result reached journal: %s", text)
+				}
+			} else if !strings.Contains(text, "attempt="+job.Identity.AttemptID) {
 				t.Fatalf("accepted attempt identity missing: %s", text)
+			}
+			if scenario == "invalid calls" || scenario == "foreign identity" {
+				path := filepath.Join(root, "reviews", job.Identity.AttemptID+".json")
+				if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("unvalidated review evidence retained: %v", err)
+				}
+			} else {
+				record := readPrivateReview(t, root)
+				if record.Identity != job.Identity || record.SourceRef != job.Source.Head || record.CriticMaxRounds != job.CriticMaxRounds || record.CriticNonblockingRounds != job.CriticNonblockingRounds || !reflect.DeepEqual(record.Calls, result.Calls) || !reflect.DeepEqual(record.Refutations, result.Refutations) {
+					t.Fatalf("validated private review evidence changed: %+v", record)
+				}
 			}
 			entries, readErr := os.ReadDir(filepath.Join(root, "audits"))
 			if scenario == "foreign identity" || scenario == "invalid artifact" {

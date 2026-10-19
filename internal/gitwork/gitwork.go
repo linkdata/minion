@@ -483,17 +483,15 @@ func gitFailure(prefix, operation, message string, contextErr, err error) error 
 		}
 	} else {
 		// Best-effort C-locale errno suffixes avoid matching phrases embedded in quoted paths.
-	findErrno:
 		for _, line := range strings.Split(message, "\n") {
-			switch {
-			case strings.HasSuffix(line, ": No space left on device"):
+			if strings.HasSuffix(line, ": No space left on device") {
 				err = fmt.Errorf("%w: %w", syscall.ENOSPC, err)
-			case strings.HasSuffix(line, ": Disk quota exceeded"), strings.HasSuffix(line, ": Quota exceeded"):
-				err = fmt.Errorf("%w: %w", syscall.EDQUOT, err)
-			default:
-				continue
+				break
 			}
-			break findErrno
+			if strings.HasSuffix(line, ": Disk quota exceeded") || strings.HasSuffix(line, ": Quota exceeded") {
+				err = fmt.Errorf("%w: %w", syscall.EDQUOT, err)
+				break
+			}
 		}
 		err = classifyPathError(operation, message, err)
 	}

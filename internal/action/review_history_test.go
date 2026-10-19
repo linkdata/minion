@@ -114,12 +114,13 @@ func TestReviewHistoryGrantFailureIsTerminalAfterPaidWork(t *testing.T) {
 	}
 }
 
-func checkRefutations(t *testing.T, request modelRun, want []Refutation) {
+func checkRefutations(t *testing.T, request modelRun, want []Refutation) string {
 	t.Helper()
 	if !reflect.DeepEqual(request.refutations, want) {
 		t.Fatalf("%s/%d/%s refutations=%+v, want %+v", request.role, request.round, request.reviewPhase, request.refutations, want)
 	}
 	grants := 0
+	var historyDir string
 	for _, dir := range request.readOnlyDirs {
 		path := filepath.Join(dir, "refutations.json")
 		data, err := os.ReadFile(path)
@@ -130,6 +131,7 @@ func checkRefutations(t *testing.T, request modelRun, want []Refutation) {
 			t.Fatal(err)
 		}
 		grants++
+		historyDir = dir
 		var got []Refutation
 		decoder := json.NewDecoder(bytes.NewReader(data))
 		decoder.DisallowUnknownFields()
@@ -166,6 +168,7 @@ func checkRefutations(t *testing.T, request modelRun, want []Refutation) {
 			}
 		}
 	}
+	return historyDir
 }
 
 func TestRefutationsSurviveOmissionWithoutRememberingImplementedChanges(t *testing.T) {
@@ -185,14 +188,11 @@ func TestRefutationsSurviveOmissionWithoutRememberingImplementedChanges(t *testi
 		if request.reviewPhase == reviewFull {
 			want = nil
 		}
-		checkRefutations(t, request, want)
-		for _, dir := range request.readOnlyDirs {
-			if _, err := os.Stat(filepath.Join(dir, "refutations.json")); err == nil {
-				if historyDir != "" && historyDir != dir {
-					t.Fatalf("refutations path changed within the action: %s -> %s", historyDir, dir)
-				}
-				historyDir = dir
+		if dir := checkRefutations(t, request, want); dir != "" {
+			if historyDir != "" && historyDir != dir {
+				t.Fatalf("refutations path changed within the action: %s -> %s", historyDir, dir)
 			}
+			historyDir = dir
 		}
 		if request.role == roleMain {
 			text, content := "", "initial source\n"

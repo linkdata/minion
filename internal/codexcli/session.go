@@ -97,8 +97,8 @@ func (s *Session) prepare(workspace, binary, home, output string, writable bool,
 		}
 		s.reset = false
 	}
-	// Do not carry model-planted project instructions or config into native startup.
-	for _, name := range []string{".agents", ".codex"} {
+	// Do not carry model-planted Git metadata, project instructions or config into native startup.
+	for _, name := range []string{".git", ".agents", ".codex"} {
 		if err := cleanup.RemoveAll(filepath.Join(s.runtimeDir, name)); err != nil {
 			return fmt.Errorf("codex exec: remove runtime metadata %s: %w", name, err)
 		}

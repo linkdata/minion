@@ -605,7 +605,7 @@ func TestRelativePathByteLimit(t *testing.T) {
 	}
 }
 
-func TestCollectionSeparatesGitModesAndReadOnlyPermissions(t *testing.T) {
+func TestCollectionUsesOwnerExecuteBitForGitMode(t *testing.T) {
 	for _, mode := range []os.FileMode{0644, 0645, 0755} {
 		t.Run(fmt.Sprintf("%o", mode), func(t *testing.T) {
 			root := privateRoot(t)

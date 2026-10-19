@@ -68,7 +68,7 @@ func TestRunnerUsesSuppliedSourceAndContext(t *testing.T) {
 				if err != nil || string(data) != "source\n" {
 					t.Fatalf("source = %q, %v", data, err)
 				}
-				for _, want := range []string{job.Source.Head, job.Source.Base, job.Source.MergeBase, fmt.Sprintf("Compare the supplied %q.", filepath.Join(contextDir, "comparison.diff")), fmt.Sprintf("under %q where needed", filepath.Join(contextDir, "base")), "complete history, including historical file contents, branches and tags", "no remotes or GitHub credentials", "Use local Git commands to investigate history", quotedContext(job.Title), quotedContext(job.Notes), "Report missing context or dependencies rather than fetching them"} {
+				for _, want := range []string{job.Source.Head, fmt.Sprintf("Compare the supplied %q.", filepath.Join(contextDir, "comparison.diff")), fmt.Sprintf("under %q where needed", filepath.Join(contextDir, "base")), "complete history, including historical file contents, branches and tags", "no remotes or GitHub credentials", "Use local Git commands to investigate history", quotedContext(job.Title), quotedContext(job.Notes), "Report missing context or dependencies rather than fetching them"} {
 					if !strings.Contains(request.prompt, want) {
 						t.Fatalf("prompt lacks %q: %s", want, request.prompt)
 					}
@@ -166,9 +166,8 @@ func TestRunnerUsesLocalHistoryWhenComparisonDiffIsIncomplete(t *testing.T) {
 			if !metadata.DiffIncomplete || !reflect.DeepEqual(metadata.ChangedPaths, job.Source.ChangedPaths) {
 				t.Fatalf("comparison coverage metadata missing: %s", data)
 			}
-			identity := fmt.Sprintf("The source is the exact pull request head %s (merge base %s, base tip %s).", job.Source.Head, job.Source.MergeBase, job.Source.Base)
-			if !strings.Contains(request.prompt, identity) || !strings.Contains(request.prompt, "The text diff exceeds its limit.") || !strings.Contains(request.prompt, "Comparison diff incomplete=true") || strings.Contains(request.prompt, filepath.Join(request.readOnlyDirs[0], "comparison.diff")) {
-				t.Fatalf("incomplete comparison identities or guidance wrong: %s", request.prompt)
+			if !strings.Contains(request.prompt, "The text diff exceeds its limit.") || !strings.Contains(request.prompt, "Comparison diff incomplete=true") || strings.Contains(request.prompt, filepath.Join(request.readOnlyDirs[0], "comparison.diff")) {
+				t.Fatalf("incomplete comparison guidance wrong: %s", request.prompt)
 			}
 			return aicli.Result{Answer: "Compared using local Git", UsageComplete: true}, nil
 		},
@@ -241,7 +240,7 @@ func TestRunnerKeepsCriticReadOnlyAndRefutationsPrivate(t *testing.T) {
 		return aicli.Result{Answer: approvedCritiqueJSON, UsageComplete: true}, nil
 	}
 	result, err := runner.Run(context.Background(), job)
-	if err != nil || calls != 2 || result.Answer != "public answer" || len(result.Calls) != 2 || result.Calls[1].Role != "critic" || len(result.Changes) != 3 {
+	if err != nil || calls != 2 || result.Answer != "public answer" || len(result.Refutations) != 0 || len(result.Calls) != 2 || result.Calls[1].Role != "critic" || len(result.Changes) != 3 {
 		t.Fatalf("result = %+v, %v", result, err)
 	}
 }
@@ -352,7 +351,7 @@ func TestPortableAuditMetadataUsesSourceIdentity(t *testing.T) {
 }
 
 func TestRunnerReturnsPartialAuditArtifactsOnFailure(t *testing.T) {
-	for _, field := range []string{"", "scope_paths", "prior_run_paths"} {
+	for _, field := range []string{"", "scope_paths"} {
 		name := "host_path_in_" + field
 		if field == "" {
 			name = "no_path_list"

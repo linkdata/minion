@@ -612,3 +612,20 @@ fi
 		t.Fatalf("overflow corrupted prior baseline: %+v, %v, baseline=%+v", second, err, session.baseline)
 	}
 }
+
+func TestSessionTreatsNilAndEmptySkillsAsTheSameSelection(t *testing.T) {
+	fakeExecutable(t, "claude", "cat >/dev/null\nprintf '%s\\n' '"+successfulResult+"'\n")
+	var session Session
+	t.Cleanup(func() {
+		if err := session.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	dir := t.TempDir()
+	for call, selected := range [][]string{{}, nil, {}} {
+		result, err := session.Run(context.Background(), dir, "task", false, "", config.ClaudeConfig{Skills: selected})
+		if err != nil || result.Answer != "final answer" {
+			t.Fatalf("call %d changed the empty skill selection: %+v %v", call, result, err)
+		}
+	}
+}

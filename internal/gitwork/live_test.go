@@ -82,6 +82,10 @@ func TestLiveCloneAndPullRequest(t *testing.T) {
 			t.Error(err)
 		}
 	}()
+	base, err := runGit(ctx, checkout.path, "rev-parse", "--verify", "refs/remotes/origin/"+pull.Base.Ref+"^{commit}")
+	if err != nil || !workspace.ValidSHA(base) {
+		t.Fatalf("captured pull request base ref is unavailable: %q, %v", base, err)
+	}
 	if head, err := checkout.verifiedHead(ctx); err != nil || head != pull.Head.SHA {
 		t.Fatalf("pull request HEAD = %q, %v; want %s", head, err, pull.Head.SHA)
 	}
@@ -89,7 +93,7 @@ func TestLiveCloneAndPullRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.Head != pull.Head.SHA || snapshot.Base != checkout.comparisonBase || !workspace.ValidSHA(snapshot.MergeBase) {
+	if snapshot.Head != pull.Head.SHA || snapshot.Base != base || !workspace.ValidSHA(snapshot.MergeBase) {
 		t.Fatalf("pull request snapshot identities = head:%q base:%q merge-base:%q", snapshot.Head, snapshot.Base, snapshot.MergeBase)
 	}
 }

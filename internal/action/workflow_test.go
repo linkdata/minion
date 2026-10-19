@@ -24,7 +24,7 @@ import (
 	"github.com/linkdata/minion/internal/skills"
 )
 
-func TestPreparedActionRejectsWrongVersionBeforePublication(t *testing.T) {
+func TestPortableClaudeCommentRoundTripRejectsWrongVersion(t *testing.T) {
 	base, _, _ := gitFixtureRemote(t)
 	installActionTestSkills(t, testReviewSkillURL)
 	writeActionTestSkills(t, os.Getenv("HOME"), ".claude", testReviewSkillURL)
@@ -43,7 +43,7 @@ func TestPreparedActionRejectsWrongVersionBeforePublication(t *testing.T) {
 	}))
 	defer server.Close()
 	client := testGitHub(server, "github-secret")
-	e := &Orchestrator{WorkRoot: t.TempDir(), GitHub: client, Main: "claude", ClaudeModel: "portable-claude-model", ClaudeEffort: "high", Timeout: 2 * time.Minute,
+	e := &Orchestrator{WorkRoot: t.TempDir(), GitHub: client, Main: "claude", ClaudeModel: "portable-claude-model", ClaudeEffort: "high",
 		BotLogin: "linkdataminion",
 		Commands: map[string]config.CommandMapping{"audit": {Action: "comment", Skills: []string{testReviewSkillURL}}},
 		Runner: Runner{
@@ -83,7 +83,7 @@ func TestPreparedActionRejectsWrongVersionBeforePublication(t *testing.T) {
 		t.Fatalf("read-only preparation clone was not removed: %v, %v", entries, err)
 	}
 	if prepared.job.RuntimeBudget <= 0 || prepared.job.RuntimeBudget > time.Minute {
-		t.Fatalf("accepted budget %s exceeds context deadline despite 2m configured timeout", prepared.job.RuntimeBudget)
+		t.Fatalf("accepted budget %s exceeds context deadline", prepared.job.RuntimeBudget)
 	}
 	if prepared.job.Main.Provider != "claude" || prepared.job.Main.Model != "portable-claude-model" || prepared.job.Main.Effort != "high" {
 		t.Fatalf("portableJob lost Claude model/effort: %+v", prepared.job.Main)
@@ -246,7 +246,7 @@ func TestPortableJobPreservesElapsedDeadlineCause(t *testing.T) {
 	}
 }
 
-func TestPreparedIssueCommentCarriesCompleteRepository(t *testing.T) {
+func TestPreparedIssueCommentCarriesPinnedRepositoryBundle(t *testing.T) {
 	base, _, _ := gitFixtureRemote(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !serveIssueFixture(t, w, r) {

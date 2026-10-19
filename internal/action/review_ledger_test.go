@@ -44,8 +44,8 @@ func TestRefutationsRequireOrderedMainRoundsButPermitEmptyOrSparseMemory(t *test
 	if err := validateRefutations(job, calls[:1], nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := validateRefutations(job, calls[:1], []Refutation{{Round: 1, Text: "No critic"}}); err == nil {
-		t.Fatal("accepted refutation memory without critic")
+	if err := validateRefutations(job, []CallUsage{calls[0], calls[2]}, []Refutation{{Round: 2, Text: "No critic"}}); err == nil || !strings.Contains(err.Error(), "unexpected refutations without a critic") {
+		t.Fatalf("no-critic refutation guard lost: %v", err)
 	}
 }
 

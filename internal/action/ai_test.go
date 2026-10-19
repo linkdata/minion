@@ -481,6 +481,13 @@ func TestParseCritique(t *testing.T) {
 		{name: "approval with blockers", input: `{"approved":true,"has_blockers":true,"feedback":""}`},
 		{name: "empty nonblocking rejection", input: `{"approved":false,"has_blockers":false,"feedback":""}`},
 		{name: "duplicate blocker classification", input: `{"approved":false,"has_blockers":true,"has_blockers":false,"feedback":"Fix."}`},
+		{name: "not an object", input: `[]`},
+		{name: "duplicate feedback", input: `{"approved":true,"has_blockers":false,"feedback":"discard","feedback":""}`},
+		{name: "escaped duplicate approval", input: `{"approved":false,"\u0061pproved":true,"has_blockers":false,"feedback":""}`},
+		{name: "unknown field", input: `{"approved":true,"has_blockers":false,"feedback":"","instruction":"publish"}`},
+		{name: "trailing object", input: approvedCritiqueJSON + `{}`},
+		{name: "incomplete object", input: `{"approved":true,"has_blockers":false,"feedback":""`},
+		{name: "markdown fence", input: "```json\n" + approvedCritiqueJSON + "\n```"},
 		{name: "missing feedback", input: `{"approved":true,"has_blockers":false}`},
 		{name: "null approval", input: `{"approved":null,"has_blockers":false,"feedback":""}`},
 		{name: "string approval", input: `{"approved":"true","has_blockers":false,"feedback":""}`},
@@ -508,6 +515,7 @@ func TestCommentPublishesOnlyCriticAcceptedResult(t *testing.T) {
 	}{
 		{name: "approved", verdict: approvedCritiqueJSON},
 		{name: "rejected", verdict: `{"approved":false,"has_blockers":true,"feedback":"A defect remains."}`, wantError: true},
+		{name: "invalid", verdict: "approved", wantError: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			const answer = "Proposed report"

@@ -145,6 +145,12 @@ func TestFixPreparationChecksDurablePrerequisitesBeforeGitHub(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "no durable state or valid ID") {
 		t.Fatalf("fix prerequisites: %v", err)
 	}
+	request.ID = "short"
+	orchestrator := Orchestrator{Store: openState(t, time.Now())}
+	_, err = orchestrator.prepareFix(context.Background(), &preparedAction{request: request})
+	if err == nil || !strings.Contains(err.Error(), "no durable state or valid ID") {
+		t.Fatalf("short fix ID reached GitHub: %v", err)
+	}
 }
 
 func TestAuditResultRejectsDuplicateAllowedArtifact(t *testing.T) {

@@ -201,6 +201,17 @@ func TestUsagePersistenceFailureStopsModelsOrPublication(t *testing.T) {
 					t.Fatalf("post-native save failure lost parsed critic evidence: %+v", result)
 				}
 			}
+			if tt.before {
+				store.Dir = originalDir
+				if finalErr := finish(err); finalErr != err {
+					t.Fatalf("final save changed the original action error: %v", finalErr)
+				}
+				records, readErr := usage.ReadAll(originalDir)
+				if readErr != nil || len(records) != 1 || records[0].Status != "failed" || records[0].FinishedAt == nil || records[0].CodexCalls != 0 || records[0].ClaudeCalls != 0 || !records[0].UsageComplete || records[0].Tokens != (usage.Tokens{}) {
+					t.Fatalf("undispatched reservation was not rolled back: records=%+v error=%v", records, readErr)
+				}
+				return
+			}
 			if finalErr := finish(err); finalErr == nil || !strings.Contains(finalErr.Error(), "save action usage") {
 				t.Fatalf("final save failure missing: %v", finalErr)
 			}

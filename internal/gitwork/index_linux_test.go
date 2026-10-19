@@ -102,7 +102,12 @@ func TestFixIndexDoesNotInspectIgnoredControlFiles(t *testing.T) {
 		if err := os.Mkdir(filepath.Join(source, dir), 0700); err != nil {
 			t.Fatal(err)
 		}
-		for _, control := range []string{".gitignore", ".gitattributes"} {
+		for _, child := range []string{"objects", "refs"} {
+			if err := os.MkdirAll(filepath.Join(source, dir, ".git", child), 0700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, control := range []string{".gitignore", ".gitattributes", ".git/HEAD"} {
 			if err := syscall.Mkfifo(filepath.Join(source, dir, control), 0600); err != nil {
 				t.Fatal(err)
 			}

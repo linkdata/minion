@@ -168,6 +168,13 @@ func TestReviewSnapshotRejectsOversizedReports(t *testing.T) {
 	}
 	writeFixtureFile(t, output, "findings.json", make([]byte, maxAuditArtifactBytes+1))
 	snapshot, err := freezeReviewSnapshot(context.Background(), workRoot, job, source, output, nil)
+	if snapshot != nil {
+		t.Cleanup(func() {
+			if err := snapshot.close(); err != nil {
+				t.Error(err)
+			}
+		})
+	}
 	if err == nil || snapshot == nil || !strings.Contains(err.Error(), "limit") {
 		t.Fatalf("oversized reports accepted: %+v,%v", snapshot, err)
 	}

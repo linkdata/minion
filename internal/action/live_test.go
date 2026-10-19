@@ -65,6 +65,11 @@ func TestLiveFixPublishesBranch(t *testing.T) {
 		t.Fatalf("issue #%d is not an owner-authored fixture: %v", cfg.IssueNumber, err)
 	}
 
+	base, err := owner.Branch(ctx, liveFixRepository, repo.DefaultBranch)
+	if err != nil || len(base.Commit.SHA) != 40 {
+		t.Fatalf("default branch HEAD is unavailable: %v", err)
+	}
+
 	var randomID [32]byte
 	if _, err := rand.Read(randomID[:]); err != nil {
 		t.Fatal(err)
@@ -113,6 +118,7 @@ func TestLiveFixPublishesBranch(t *testing.T) {
 				if !writable || outputDir != "" {
 					return aicli.Result{}, errors.New("unexpected model invocation for live fix")
 				}
+				assertModelRepository(t, dir, base.Commit.SHA)
 				name := "minion-live-fix-" + id[:12] + ".txt"
 				err := os.WriteFile(filepath.Join(dir, name), []byte("Minion live fix test fixture.\n"), 0o600)
 				return aicli.Result{Answer: "Live fix fixture created."}, err

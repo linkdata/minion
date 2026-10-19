@@ -47,7 +47,7 @@ func SystemReadPaths() []string {
 func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, outputDir string, settings config.CodexConfig) (result aicli.Result, runError error) {
 	defer func() {
 		if settings.APIKey != "" {
-			result.Answer = strings.ReplaceAll(result.Answer, settings.APIKey, "[redacted]")
+			result.Answer = aicli.RedactText(result.Answer, settings.APIKey)
 			runError = aicli.RedactError(runError, settings.APIKey)
 		}
 	}()
@@ -111,8 +111,8 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	for _, name := range []string{".git", ".agents", ".codex", ".claude"} {
 		filesystemRules = append(filesystemRules, fmt.Sprintf(`%s="read"`, strconv.Quote(filepath.Join(workspace, name))))
 	}
-	// Runtime is also the persistent project root; models must not plant skills or config.
-	for _, name := range []string{".agents", ".codex"} {
+	// Runtime is also the persistent project root; models must not plant Git metadata, skills or config.
+	for _, name := range []string{".git", ".agents", ".codex"} {
 		filesystemRules = append(filesystemRules, fmt.Sprintf(`%s="read"`, strconv.Quote(filepath.Join(runtimeDir, name))))
 	}
 	filesystemRules = append(filesystemRules, fmt.Sprintf(`%s="read"`, strconv.Quote(realBinary)))

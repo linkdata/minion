@@ -495,6 +495,9 @@ func TestRunOnceRejectsInlineArgumentsAndDeduplicatesCommand(t *testing.T) {
 	if handler.jobs[0].Command.Name != "review" || handler.jobs[0].Source.Body != "@linkdataminion review" {
 		t.Fatalf("standalone command lost or inline arguments accepted: %+v", handler.jobs[0])
 	}
+	if len(gh.reactions) != 1 || gh.checks != 1 || gh.currentChecks != 1 || len(gh.comments) != 0 {
+		t.Fatalf("rejected or duplicate command caused side effects: reactions=%v permission=%d current=%d comments=%v", gh.reactions, gh.checks, gh.currentChecks, gh.comments)
+	}
 }
 
 func TestRunOnceBoundsFailedExecutions(t *testing.T) {

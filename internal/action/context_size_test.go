@@ -57,7 +57,7 @@ func TestCheckGitHubContext(t *testing.T) {
 	}
 	large := strings.Repeat("é", config.DefaultMaxGitHubContextBytes/2+1)
 	quoted := quotedContext(large)
-	if text, err := strconv.Unquote(quoted); err != nil || text != large || strings.Contains(quoted, "[truncated]") {
+	if text, err := strconv.Unquote(quoted); err != nil || text != large {
 		t.Fatalf("quoted context was clipped: bytes=%d, err=%v", len(text), err)
 	}
 }

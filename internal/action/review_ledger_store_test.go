@@ -159,7 +159,7 @@ func TestPrivateReviewRetainsPrefixAndRejectsRollback(t *testing.T) {
 }
 
 func TestPrivateReviewBoundaryBeforeStorageOrPublication(t *testing.T) {
-	for _, scenario := range []string{"foreign identity", "foreign source", "malformed history", "oversized history", "invalid calls", "refutations without critic", "invalid answer", "invalid changes", "storage failure", "public root", "symlink root"} {
+	for _, scenario := range []string{"foreign identity", "foreign source", "malformed history", "oversized history", "invalid calls", "refutations without critic", "invalid answer", "read-only source changes", "storage failure", "public root", "symlink root"} {
 		t.Run(scenario, func(t *testing.T) {
 			job := withClaudeCritic(testJob(command.Comment))
 			result := privateReviewResult(job)
@@ -182,7 +182,7 @@ func TestPrivateReviewBoundaryBeforeStorageOrPublication(t *testing.T) {
 				result.Calls = result.Calls[:1]
 			case "invalid answer":
 				result.Answer, safeHistory = "", true
-			case "invalid changes":
+			case "read-only source changes":
 				result.Changes, safeHistory = []workspace.Change{{Path: "../escape", Delete: true}}, true
 			case "storage failure":
 				root = filepath.Join(t.TempDir(), "blocked")
@@ -201,6 +201,12 @@ func TestPrivateReviewBoundaryBeforeStorageOrPublication(t *testing.T) {
 			}
 			if err := e.publish(context.Background(), &preparedAction{job: job}, result); !errors.Is(err, monitor.ErrTerminalJob) {
 				t.Fatalf("unsafe publication was not stopped: %v", err)
+			}
+			if scenario == "storage failure" {
+				if data, err := os.ReadFile(root); err != nil || string(data) != "blocked" {
+					t.Fatalf("blocking state file changed: %q,%v", data, err)
+				}
+				return
 			}
 			if safeHistory {
 				if got := readPrivateReview(t, root); len(got.Refutations) != 1 {
@@ -317,6 +323,9 @@ func TestPerformCheckpointsPrivateReviewBeforeLaterCalls(t *testing.T) {
 			}
 			if outcome == "provider and storage failure" && (!errors.Is(runErr, os.ErrPermission) || !errors.Is(runErr, monitor.ErrTerminalJob)) {
 				t.Fatalf("retention failure lost joined causes: %v", runErr)
+			}
+			if outcome == "provider failure" && errors.Is(runErr, monitor.ErrTerminalJob) {
+				t.Fatalf("retained provider outage became terminal: %v", runErr)
 			}
 			wantCalls := 3
 			if outcome == "provider failure" {

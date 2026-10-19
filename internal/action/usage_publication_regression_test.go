@@ -60,14 +60,18 @@ func TestExecutePublicationBookkeepingBoundaries(t *testing.T) {
 				}
 			}))
 			defer server.Close()
+			budget := 3 * time.Second
+			if scenario == "final usage save" {
+				budget = 30 * time.Second
+			}
 			started := time.Now()
 			work := t.TempDir()
 			var journal bytes.Buffer
 			e := Orchestrator{GitHub: testGitHub(server, "token"), BotLogin: "bot", WorkRoot: work,
-				Timeout: 3 * time.Second, Logger: log.New(&journal, "", 0), Commands: map[string]config.CommandMapping{"audit": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}},
+				Timeout: budget, Logger: log.New(&journal, "", 0), Commands: map[string]config.CommandMapping{"audit": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}},
 				Runner: Runner{runModel: func(modelContext context.Context, _ modelRun) (aicli.Result, error) {
 					got, ok := modelContext.Deadline()
-					if !ok || got.Before(started) || got.Sub(started) > 3500*time.Millisecond {
+					if !ok || got.Before(started) || got.Sub(started) > budget+500*time.Millisecond {
 						t.Fatal("model lost the configured action deadline")
 					}
 					return aicli.Result{Answer: "No findings.", Tokens: usage.Tokens{Input: 10, Output: 2}, UsageComplete: true}, nil

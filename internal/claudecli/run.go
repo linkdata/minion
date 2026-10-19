@@ -40,7 +40,7 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	defer func() {
 		runError = aicli.RedactError(runError, settings.APIKey)
 		if settings.APIKey != "" {
-			result.Answer = strings.ReplaceAll(result.Answer, settings.APIKey, "[redacted]")
+			result.Answer = aicli.RedactText(result.Answer, settings.APIKey)
 		}
 	}()
 	if strings.TrimSpace(prompt) == "" {
@@ -148,6 +148,7 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	}
 	s.started = true
 	ceiling.Finish()
+	output.stream.Finish()
 	// Preserve crash/startup stderr before finish adds a generic missing-result
 	// error; native structured failures retain their safer diagnostic instead.
 	if err != nil && output.err == nil && output.usageLimit == nil && output.taskFailure == nil && !ceilingMatched {

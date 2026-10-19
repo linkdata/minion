@@ -135,8 +135,10 @@ func TestRepositoryAndRefValidation(t *testing.T) {
 	if err != nil || url != "https://github.com/Acme/project.name.git" {
 		t.Fatalf("repositoryURL() = (%q, %v)", url, err)
 	}
-	if _, err := repositoryURL("owner/repo space"); err == nil {
-		t.Fatal("repositoryURL accepted an invalid repository")
+	for _, repo := range []string{"owner/repo space", "owner:token/repo", "owner/repo?x=1"} {
+		if _, err := repositoryURL(repo); err == nil {
+			t.Errorf("repositoryURL accepted invalid repository %q", repo)
+		}
 	}
 	for _, branch := range []string{"main", "release/v1.2", "minion/fix-123"} {
 		if err := validateBranch(branch); err != nil {
@@ -192,40 +194,61 @@ func TestCheckoutPullRequestVerifiesHead(t *testing.T) {
 }
 
 func TestCheckoutPullRequestPreservesAliasedTreeEntries(t *testing.T) {
-	const width, depth, blobBytes = 4, 2, 1024
-	fixture := newFixture(t)
-	blobPath := filepath.Join(fixture.source, "aliased-blob")
-	writeFile(t, blobPath, strings.Repeat("x", blobBytes))
-	blob := fixture.git(fixture.source, "hash-object", "-w", blobPath)
-	if err := os.Remove(blobPath); err != nil {
-		t.Fatal(err)
-	}
-	tree := fixture.gitInput(fixture.source, fmt.Sprintf("100644 blob %s\tpayload\n", blob), "mktree")
-	for level := 0; level < depth; level++ {
-		var entries strings.Builder
-		for i := 0; i < width; i++ {
-			fmt.Fprintf(&entries, "040000 tree %s\td%02d\n", tree, i)
-		}
-		tree = fixture.gitInput(fixture.source, entries.String(), "mktree")
-	}
-	head := fixture.gitInput(fixture.source, "aliased PR head\n", "commit-tree", tree, "-p", fixture.base)
-	fixture.git(fixture.source, "push", fixture.remote, head+":refs/pull/7/head")
-	checkout := fixture.clonePullRequest(head)
-	path := checkout.path
-	for level := 0; level < depth; level++ {
-		path = filepath.Join(path, "d00")
-	}
-	if _, err := os.Stat(filepath.Join(path, "payload")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("PR worktree materialized: %v", err)
-	}
-	snapshot, err := checkout.Snapshot(context.Background())
-	if err != nil || len(snapshot.Files) != width*width {
-		t.Fatalf("aliased tree snapshot files=%d error=%v", len(snapshot.Files), err)
-	}
-	for _, file := range snapshot.Files {
-		if len(file.Data) != blobBytes {
-			t.Fatalf("snapshot file %q bytes=%d", file.Path, len(file.Data))
-		}
+	for _, test := range []struct {
+		name, reason            string
+		width, depth, blobBytes int
+	}{
+		{"small", "", 4, 2, 1024},
+		{"expanded paths", "paths", 11, 4, 1},
+		{"expanded bytes", "bytes", 8, 2, workspace.MaxBytes/64 + 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			width, depth, blobBytes := test.width, test.depth, test.blobBytes
+			fixture := newFixture(t)
+			blobPath := filepath.Join(fixture.source, "aliased-blob")
+			writeFile(t, blobPath, strings.Repeat("x", blobBytes))
+			blob := fixture.git(fixture.source, "hash-object", "-w", blobPath)
+			if err := os.Remove(blobPath); err != nil {
+				t.Fatal(err)
+			}
+			tree := fixture.gitInput(fixture.source, fmt.Sprintf("100644 blob %s\tpayload\n", blob), "mktree")
+			for level := 0; level < depth; level++ {
+				var entries strings.Builder
+				for i := 0; i < width; i++ {
+					fmt.Fprintf(&entries, "040000 tree %s\td%02d\n", tree, i)
+				}
+				tree = fixture.gitInput(fixture.source, entries.String(), "mktree")
+			}
+			head := fixture.gitInput(fixture.source, "aliased PR head\n", "commit-tree", tree, "-p", fixture.base)
+			fixture.git(fixture.source, "push", fixture.remote, head+":refs/pull/7/head")
+			if test.reason != "" {
+				err := fixture.checkout.checkoutPullRequest(context.Background(), 7, "main", head)
+				if !errors.Is(err, ErrCheckoutTooLarge) || errors.Is(err, ErrUnsupportedSource) || !strings.Contains(err.Error(), test.reason) {
+					t.Fatalf("expanded tree was not refused by %s bound: %v", test.reason, err)
+				}
+				if got := fixture.git(fixture.checkout.path, "rev-parse", "HEAD"); got != fixture.base {
+					t.Fatalf("refused tree moved HEAD: %s", got)
+				}
+				return
+			}
+			checkout := fixture.clonePullRequest(head)
+			path := checkout.path
+			for level := 0; level < depth; level++ {
+				path = filepath.Join(path, "d00")
+			}
+			if _, err := os.Stat(filepath.Join(path, "payload")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("PR worktree materialized: %v", err)
+			}
+			snapshot, err := checkout.Snapshot(context.Background())
+			if err != nil || len(snapshot.Files) != width*width {
+				t.Fatalf("aliased tree snapshot files=%d error=%v", len(snapshot.Files), err)
+			}
+			for _, file := range snapshot.Files {
+				if len(file.Data) != blobBytes {
+					t.Fatalf("snapshot file %q bytes=%d", file.Path, len(file.Data))
+				}
+			}
+		})
 	}
 }
 

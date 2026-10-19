@@ -71,6 +71,7 @@ func Validate(ctx context.Context, settings config.ClaudeConfig) (validated conf
 			return validated, fmt.Errorf("claude sandbox dependency %s: %w", name, err)
 		}
 	}
+	settings.ReadOnlyDirs = nil
 	policy, err := sandboxSettings(dir, dir, false, "", settings, nil, authDir)
 	if err != nil {
 		return validated, err

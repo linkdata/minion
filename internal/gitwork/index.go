@@ -30,6 +30,7 @@ const (
 
 // OfflineIndex runs offline Git against explicitly selected metadata and source.
 // NewOfflineIndex refuses metadata overlapping the model source.
+// MaterializeRepository reuses the command runner for metadata in source/.git.
 type OfflineIndex struct {
 	dir, source, binary, baseline string
 	tracked                       map[string]int64

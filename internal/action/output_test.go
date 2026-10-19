@@ -52,7 +52,7 @@ func TestInertModelOutputPreservesOverBudgetContent(t *testing.T) {
 	input := strings.Repeat("a\n", 25000)
 	got := inertModelOutput(input)
 	want := "```text\n> " + strings.ReplaceAll(strings.TrimSpace(input), "\n", "\n> ") + "\n```"
-	if modelOutputFits(input) || len(got) <= maxOutputBytes || got != want || strings.Contains(got, "[truncated]") {
+	if modelOutputFits(input) || len(got) <= maxOutputBytes || got != want {
 		t.Fatalf("renderer silently dropped content or size check missed expansion: %d bytes", len(got))
 	}
 }

@@ -160,7 +160,6 @@ func TestRunnerCancellationDuringInstalledAuditValidatorPreservesCause(t *testin
 		return aicli.Result{Answer: "completed model answer"}, nil
 	}}
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	started := make(chan error, 1)
 	go func() {
 		var signal [7]byte
@@ -176,8 +175,13 @@ func TestRunnerCancellationDuringInstalledAuditValidatorPreservesCause(t *testin
 	}
 	done := make(chan outcome, 1)
 	go func() {
+		defer close(done)
 		result, err := runner.Run(ctx, job)
 		done <- outcome{result, err}
+	}()
+	defer func() {
+		cancel()
+		<-done
 	}()
 	guard := time.NewTimer(10 * time.Second)
 	defer guard.Stop()

@@ -63,7 +63,7 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
 	}
 	for call := 1; call <= 3; call++ {
 		args := read(".args." + strconv.Itoa(call))
-		for _, required := range []string{"--ignore-user-config\n", "--ignore-rules\n", "--strict-config\n", "--skip-git-repo-check\n", "approval_policy=never\n", "permissions.minion.network.enabled=false\n", `":root"="deny"`, `":tmpdir"="write"`, strconv.Quote(dir) + `="write"`, strconv.Quote(output) + `="write"`, strconv.Quote(filepath.Join(session.runtimeDir, ".agents")) + `="read"`, strconv.Quote(filepath.Join(session.runtimeDir, ".codex")) + `="read"`, "--disable\nmemories\n", "--disable\nhooks\n", "--disable\nskill_search\n", "--model\nmodel\n", `model_reasoning_effort="high"`, "--output-schema\n" + filepath.Join(session.runtimeDir, "output-schema.json") + "\n"} {
+		for _, required := range []string{"--ignore-user-config\n", "--ignore-rules\n", "--strict-config\n", "--skip-git-repo-check\n", "approval_policy=never\n", "permissions.minion.network.enabled=false\n", `":root"="deny"`, `":tmpdir"="write"`, strconv.Quote(dir) + `="write"`, strconv.Quote(output) + `="write"`, strconv.Quote(filepath.Join(session.runtimeDir, ".git")) + `="read"`, strconv.Quote(filepath.Join(session.runtimeDir, ".agents")) + `="read"`, strconv.Quote(filepath.Join(session.runtimeDir, ".codex")) + `="read"`, "--disable\nmemories\n", "--disable\nhooks\n", "--disable\nskill_search\n", "--model\nmodel\n", `model_reasoning_effort="high"`, "--output-schema\n" + filepath.Join(session.runtimeDir, "output-schema.json") + "\n"} {
 			if !strings.Contains(args, required) {
 				t.Fatalf("call%d missing policy %q in %s", call, required, args)
 			}
@@ -338,7 +338,7 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
 func TestSessionClearsRuntimeMetadataBeforeResume(t *testing.T) {
 	installFakeCodex(t, `#!/bin/sh
 set -eu
-for name in .agents .codex; do
+for name in .git .agents .codex; do
   test ! -e "$TMPDIR/$name"
   test ! -L "$TMPDIR/$name"
 done
@@ -368,8 +368,8 @@ printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.comp
 	if err := os.WriteFile(keep, []byte("retained"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	for _, linked := range []string{".agents", ".codex"} {
-		for _, name := range []string{".agents", ".codex"} {
+	for _, linked := range []string{".git", ".agents", ".codex"} {
+		for _, name := range []string{".git", ".agents", ".codex"} {
 			path := filepath.Join(session.runtimeDir, name)
 			if name == linked {
 				if err := os.Symlink(outside, path); err != nil {
@@ -385,7 +385,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.comp
 			}
 		}
 		run()
-		for _, name := range []string{".agents", ".codex"} {
+		for _, name := range []string{".git", ".agents", ".codex"} {
 			if _, err := os.Lstat(filepath.Join(session.runtimeDir, name)); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("runtime metadata survived: %s: %v", name, err)
 			}

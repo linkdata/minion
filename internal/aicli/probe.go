@@ -26,8 +26,10 @@ func Probe(ctx context.Context, binary, argv0 string, args []string, dir string,
 	output := bounded.Buffer{Limit: MaxEventBytes, Cancel: cancel}
 	diagnostics := bounded.Tail{}
 	cmd.Stdout, cmd.Stderr = &output, &diagnostics
-	runErr := cmd.Run()
-	err := errors.Join(ctx.Err(), runErr)
+	err := cmd.Run()
+	if contextErr := ctx.Err(); contextErr != nil && !errors.Is(err, contextErr) {
+		err = errors.Join(contextErr, err)
+	}
 	if output.Exceeded {
 		err = errors.Join(ErrOutputLimit, err)
 	}

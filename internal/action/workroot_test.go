@@ -5,12 +5,13 @@ import (
 	"context"
 	"errors"
 	"log"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
-	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/workroot"
 )
@@ -27,8 +28,13 @@ func TestExecuteChecksWorkRootBeforeGitHub(t *testing.T) {
 func TestExecuteRechecksWorkRootAfterActionError(t *testing.T) {
 	checks := 0
 	var logs bytes.Buffer
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected GitHub request: %s %s", r.Method, r.URL.Path)
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
 	e := &Orchestrator{
-		GitHub: github.New(""),
+		GitHub: testGitHub(server, "fixture"),
 		Logger: log.New(&logs, "", 0),
 		CheckWorkRoot: func() error {
 			checks++

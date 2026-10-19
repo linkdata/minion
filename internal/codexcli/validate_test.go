@@ -293,3 +293,20 @@ func TestValidateKeepsImplicitNativeHome(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateRedactsQuotedConfiguredKeyFromProviderError(t *testing.T) {
+	for _, key := range []string{`fixture"secret`, `fixture\secret`} {
+		t.Run(key, func(t *testing.T) {
+			dir := t.TempDir()
+			response, err := json.Marshal(map[string]any{"id": 0, "error": map[string]string{"message": "provider rejected " + key}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			installFakeCodex(t, catalogueScriptFor(dir, string(response), ""))
+			_, err = Validate(context.Background(), config.CodexConfig{APIKey: key})
+			if err == nil || err.Error() != `cannot validate Codex settings: Codex account/login/start: "provider rejected [redacted]"` {
+				t.Fatalf("provider error did not redact the configured key: %v", err)
+			}
+		})
+	}
+}

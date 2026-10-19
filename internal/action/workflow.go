@@ -266,7 +266,7 @@ func (e *Orchestrator) publish(ctx context.Context, p *preparedAction, result Re
 
 func (e *Orchestrator) logResult(job Job, result Result) {
 	id := job.Identity
-	if validDiagnostics(result.Diagnostics) == nil {
+	if result.matchesJob(job) && validDiagnostics(result.Diagnostics) == nil {
 		for _, diagnostic := range result.Diagnostics {
 			// Full private messages belong in restricted action records, never journal text.
 			e.logf("action diagnostic job=%s attempt=%s executor=%s code=%s", id.JobID, id.AttemptID, id.ExecutorID, diagnostic.Code)

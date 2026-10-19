@@ -17,18 +17,19 @@ func TestRunnerKeepsRoleSessionsWithinEachAction(t *testing.T) {
 	job := withClaudeCritic(testJob(command.Comment))
 	job.CriticMaxRounds = 3
 	var actions [][]modelRun
+	var calls []modelRun
+	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+		calls = append(calls, request)
+		if request.role == roleMain {
+			return aicli.Result{Answer: proposalJSON(fmt.Sprintf("proposal%d", request.round), "")}, nil
+		}
+		if request.reviewPhase == reviewFull && request.round < 3 {
+			return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"feedback":"Correct the proposal."}`}, nil
+		}
+		return aicli.Result{Answer: approvedCritiqueJSON}, nil
+	}}
 	for range 2 {
-		var calls []modelRun
-		runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
-			calls = append(calls, request)
-			if request.role == roleMain {
-				return aicli.Result{Answer: proposalJSON(fmt.Sprintf("proposal%d", request.round), "")}, nil
-			}
-			if request.reviewPhase == reviewFull && request.round < 3 {
-				return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"feedback":"Correct the proposal."}`}, nil
-			}
-			return aicli.Result{Answer: approvedCritiqueJSON}, nil
-		}}
+		calls = nil
 		result, err := runner.Run(context.Background(), job)
 		if err != nil || result.Answer != "proposal3" || len(calls) != 8 {
 			t.Fatalf("answer=%q calls=%d error=%v", result.Answer, len(calls), err)

@@ -77,6 +77,7 @@ func TestExecuteSourceFailuresAndInvalidIncompleteResultsAreTerminal(t *testing.
 			installActionTestSkills(t, testReviewSkillURL)
 			calls, writes := 0, 0
 			modelErr := errors.New("worker failed with invalid usage")
+			// Inject native/CommitAndPush causes to isolate Execute terminal classification.
 			limitCause := map[string]error{"output limit": aicli.ErrOutputLimit, "too many files": gitwork.ErrTooManyFiles, "diff too large": gitwork.ErrDiffTooLarge}[scenario]
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch {
@@ -346,7 +347,6 @@ case " $* " in
 esac
 exec %s "$@"
 `, shellQuote(stage), shellQuote(seen), shellQuote(stage), shellQuote(seen), shellQuote(stage), shellQuote(seen), shellQuote(publication), shellQuote(git))
-			fakeOnPath(t, "git", script)
 			writes := 0
 			repo := github.Repository{ID: 1, FullName: "o/r", Owner: github.User{ID: 2}, DefaultBranch: "main", Visibility: "public"}
 			fork := github.Repository{ID: 3, FullName: "bot/r", Fork: true, Parent: &repo, Source: &repo, DefaultBranch: "main", Visibility: "public"}
@@ -382,6 +382,7 @@ exec %s "$@"
 			if err := checkout.NewBranch(context.Background(), branch); err != nil {
 				t.Fatal(err)
 			}
+			fakeOnPath(t, "git", script)
 			job := testJob(command.Fix)
 			job.Source.Head = base
 			prepared := &preparedAction{job: job, checkout: checkout, repository: repo, fork: fork, branch: branch, request: monitor.Job{ID: strings.Repeat("a", 64), Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2}, Command: command.Command{Name: "fix", Action: command.Fix}}}
