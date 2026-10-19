@@ -23,6 +23,7 @@ func TestMain(m *testing.M) {
 		os.Exit(m.Run())
 	}
 	if os.Args[0] != "codex" {
+		fmt.Fprintln(os.Stderr, "codex stub invoked as", os.Args[0])
 		os.Exit(7)
 	}
 	switch os.Args[1] {
@@ -73,10 +74,10 @@ func TestMulticallStubRejectsWrongArgv0(t *testing.T) {
 	// --help makes a broken guard exit the test runner before it can run tests recursively.
 	cmd := exec.CommandContext(ctx, binary, "--help")
 	cmd.Args[0] = "wrong-codex"
-	err = cmd.Run()
+	output, err := cmd.CombinedOutput()
 	var exit *exec.ExitError
-	if !errors.As(err, &exit) || exit.ExitCode() != 7 {
-		t.Fatalf("wrong argv0 exit = %v; want exit 7", err)
+	if !errors.As(err, &exit) || exit.ExitCode() != 7 || !strings.Contains(string(output), "codex stub invoked as wrong-codex") {
+		t.Fatalf("wrong argv0 exit = %v, output = %q; want exit 7 and the argv0 diagnostic", err, output)
 	}
 }
 
