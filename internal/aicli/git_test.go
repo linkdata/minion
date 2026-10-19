@@ -29,6 +29,9 @@ func TestModelGitEnvironmentRejectsImplicitBareRepository(t *testing.T) {
 	if output, err := run("-C", bare, "rev-parse", "--is-bare-repository"); err == nil || !strings.Contains(output, "bare repository") {
 		t.Fatalf("implicitly discovered bare repository was accepted: output=%q err=%v", output, err)
 	}
+	if output, err := run("--git-dir="+bare, "rev-parse", "--is-bare-repository"); err != nil || strings.TrimSpace(output) != "true" {
+		t.Fatalf("explicit bare repository was refused: output=%q err=%v", output, err)
+	}
 	regular := filepath.Join(root, "regular")
 	if output, err := run("init", "--quiet", "--template=", regular); err != nil {
 		t.Fatalf("init regular: %s: %v", output, err)

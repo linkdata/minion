@@ -156,6 +156,8 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 		"-c", "approval_policy=never",
 		"-c", `web_search="disabled"`,
 		"-c", "shell_environment_policy.ignore_default_excludes=false",
+		// Codex excludes *KEY* before filters; set restores only this fixed Git config key.
+		"-c", `shell_environment_policy.set.GIT_CONFIG_KEY_0="safe.bareRepository"`,
 		"-c", "shell_environment_policy.filters={"+strings.Join(filters, ",")+"}",
 		"-c", `default_permissions="minion"`,
 		"-c", filesystemRule,
