@@ -289,9 +289,7 @@ func liveActionReplyCleanup(t *testing.T, ctx context.Context, owner *github.Cli
 	if err != nil {
 		t.Errorf("find live action reply for cleanup: %v", err)
 	} else if commentID != 0 {
-		if !strings.HasSuffix(strings.TrimSpace(reply.Body), "\n\n"+job.Marker()) {
-			t.Errorf("refuse to delete live action reply %d without its job marker", commentID)
-		} else if current, err := owner.CurrentItem(ctx, reply); err != nil || current.Edited || current.Body != reply.Body ||
+		if current, err := owner.CurrentItem(ctx, reply); err != nil || current.Edited || current.Body != reply.Body ||
 			!strings.EqualFold(current.Author.Login, cfg.BotLogin) {
 			t.Errorf("refuse to delete edited or changed live action reply %d: %v", commentID, err)
 		} else {

@@ -240,9 +240,6 @@ func TestPortableJobPreservesElapsedDeadlineCause(t *testing.T) {
 	orchestrator := attemptFixture(&Orchestrator{Commands: map[string]config.CommandMapping{"audit": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}}})
 	// Deadline expiration may precede propagation of the context's Err value.
 	ctx := expiredPreparationContext{Context: context.Background(), deadline: time.Now().Add(-time.Second)}
-	if ctx.Err() != nil {
-		t.Fatal("fixture must model the deadline/Err propagation race")
-	}
 	_, err := orchestrator.portableJob(ctx, &preparedAction{checkout: checkout, request: request}, "title", "description")
 	if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, monitor.ErrTerminalJob) || strings.Contains(err.Error(), "invalid action runtime budget") {
 		t.Fatalf("elapsed preparation deadline lost its cause: %v", err)

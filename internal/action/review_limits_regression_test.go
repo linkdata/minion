@@ -69,12 +69,12 @@ func TestEveryActionPromptDeclaresRenderedPublicationBudget(t *testing.T) {
 					t.Fatal("action prompt omits background completion requirements")
 				}
 				if critic {
-					if !strings.Contains(mainPrompt(prompt), "source changes") {
+					if !strings.Contains(mainPrompt(prompt), "Keep Minion main/critic review commentary and critic-finding disposition logs out of answer, source changes and report artifacts") {
 						t.Fatal("main prompt omits private-commentary restriction")
 					}
 					for _, phase := range []string{reviewFull, reviewVerification} {
 						critique := criticPrompt(phase, prompt, "Candidate", "", "", "/frozen-reports")
-						for _, requirement := range []string{"Await every delegated review and background check before your final verdict", "inspect their results and handle failures instead of ending with a waiting or progress message", "source changes", "The complete JSON object must fit within 65536 UTF-8 bytes, including syntax and escaping", "without omitting actionable issues or truncating the verdict"} {
+						for _, requirement := range []string{"Await every delegated review and background check before your final verdict", "inspect their results and handle failures instead of ending with a waiting or progress message", "report as a finding any Minion main/critic review commentary or critic-finding disposition log copied into answer, source changes or report artifacts", "The complete JSON object must fit within 65536 UTF-8 bytes, including syntax and escaping", "without omitting actionable issues or truncating the verdict"} {
 							if !strings.Contains(critique, requirement) {
 								t.Fatalf("%s critic omits %q", phase, requirement)
 							}

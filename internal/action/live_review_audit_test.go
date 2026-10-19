@@ -102,12 +102,6 @@ func TestLiveSecurityAuditAction(t *testing.T) {
 				defer cleanupCancel()
 				liveActionReplyCleanup(t, cleanupCtx, fixture.owner, fixture.ownerToken, fixture.cfg, job)
 			})
-			skillDir := filepath.Join(os.Getenv("HOME"), ".agents", "skills", "security-audit")
-			for _, name := range []string{"validate-findings.cjs", "validate-coverage-ledger.cjs"} {
-				if err := os.WriteFile(filepath.Join(skillDir, name), []byte(`const fs = require('fs'); if (!Array.isArray(JSON.parse(fs.readFileSync(process.argv[2], 'utf8')))) process.exit(1);`), 0o600); err != nil {
-					t.Fatal(err)
-				}
-			}
 			report := "Minion live audit fixture " + job.ID[:12] + ".\n"
 			var calls int
 			orchestrator := &Orchestrator{WorkRoot: t.TempDir(), GitHub: fixture.bot,

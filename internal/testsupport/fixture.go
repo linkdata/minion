@@ -20,6 +20,11 @@ func FakeOnPath(t *testing.T, name, script string) string {
 	return bin
 }
 
+// GitEnvironment isolates scratch paths and disables ambient Git configuration.
+func GitEnvironment(scratch string) []string {
+	return append([]string{"PATH=" + os.Getenv("PATH"), "HOME=" + scratch, "TMPDIR=" + scratch, "LC_ALL=C"}, aicli.ModelGitEnvironment()...)
+}
+
 // ModelGit uses plain Git with isolated scratch paths and the model's Git environment.
 func ModelGit(t *testing.T, dir string, args ...string) ([]byte, error) {
 	t.Helper()
@@ -30,6 +35,6 @@ func ModelGit(t *testing.T, dir string, args ...string) ([]byte, error) {
 	scratch := t.TempDir()
 	cmd := exec.Command(binary, args...)
 	cmd.Dir = dir
-	cmd.Env = append([]string{"PATH=" + os.Getenv("PATH"), "HOME=" + scratch, "TMPDIR=" + scratch, "LC_ALL=C"}, aicli.ModelGitEnvironment()...)
+	cmd.Env = GitEnvironment(scratch)
 	return cmd.CombinedOutput()
 }

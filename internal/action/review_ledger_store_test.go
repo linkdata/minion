@@ -23,25 +23,33 @@ import (
 	"github.com/linkdata/minion/internal/workspace"
 )
 
-func readPrivateReview(t *testing.T, root string) retainedReview {
-	t.Helper()
+func loadPrivateReview(root string) (retainedReview, error) {
 	paths, err := filepath.Glob(filepath.Join(root, "reviews", "*.json"))
 	if err != nil || len(paths) != 1 {
-		t.Fatalf("private records=%v error=%v", paths, err)
+		return retainedReview{}, fmt.Errorf("private records=%v error=%v", paths, err)
 	}
 	data, err := os.ReadFile(paths[0])
 	if err != nil {
-		t.Fatal(err)
+		return retainedReview{}, err
 	}
 	var record retainedReview
 	if err := json.Unmarshal(data, &record); err != nil {
-		t.Fatal(err)
+		return retainedReview{}, err
 	}
 	for path, want := range map[string]os.FileMode{paths[0]: 0600, filepath.Dir(paths[0]): 0700} {
 		info, err := os.Stat(path)
 		if err != nil || info.Mode().Perm() != want {
-			t.Fatalf("private mode %s: %v error=%v", path, info, err)
+			return retainedReview{}, fmt.Errorf("private mode %s: %v error=%v", path, info, err)
 		}
+	}
+	return record, nil
+}
+
+func readPrivateReview(t *testing.T, root string) retainedReview {
+	t.Helper()
+	record, err := loadPrivateReview(root)
+	if err != nil {
+		t.Fatal(err)
 	}
 	return record
 }
@@ -64,8 +72,13 @@ func TestPublishRetainsPrivateReviewBeforeGitHubWrites(t *testing.T) {
 			var body, journal bytes.Buffer
 			writes := 0
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				record := readPrivateReview(t, root)
-				if len(record.Refutations) != 1 || record.Calls[len(record.Calls)-1].Approved != test.approved || record.CriticNonblockingRounds != 1 || record.SourceRef != job.Source.Head {
+				record, err := loadPrivateReview(root)
+				if err != nil {
+					t.Error(err)
+					http.Error(w, "private review unavailable", http.StatusInternalServerError)
+					return
+				}
+				if len(record.Refutations) != 1 || len(record.Calls) == 0 || record.Calls[len(record.Calls)-1].Approved != test.approved || record.CriticNonblockingRounds != 1 || record.SourceRef != job.Source.Head {
 					t.Errorf("private evidence/policy lost: %+v", record)
 				}
 				if r.Method == http.MethodGet && r.URL.Path == "/repos/o/r" {
@@ -197,7 +210,7 @@ func TestPrivateReviewBoundaryBeforeStorageOrPublication(t *testing.T) {
 				t.Fatalf("untrusted/unretained history written: %v error=%v", paths, err)
 			}
 			switch scenario {
-			case "foreign identity", "foreign source", "malformed history", "oversized history", "invalid calls":
+			case "foreign identity", "foreign source", "malformed history", "oversized history", "invalid calls", "refutations without critic":
 				if entries, err := os.ReadDir(root); err != nil || len(entries) != 0 {
 					t.Fatalf("untrusted evidence touched storage: %v", err)
 				}
@@ -295,8 +308,8 @@ func TestPerformCheckpointsPrivateReviewBeforeLaterCalls(t *testing.T) {
 				if !errors.Is(runErr, monitor.ErrTerminalJob) || !errors.Is(runErr, os.ErrPermission) || calls != 4 {
 					t.Fatalf("checkpoint failure allowed another call: calls=%d error=%v", calls, runErr)
 				}
-				if got := readPrivateReview(t, root); len(got.Refutations) != 1 {
-					t.Fatal("checkpoint failure destroyed the previous durable prefix")
+				if got := readPrivateReview(t, root); len(got.Refutations) != 1 || len(got.Calls) != 3 {
+					t.Fatalf("checkpoint failure destroyed the previous durable prefix: %+v", got)
 				}
 				return
 			} else if !errors.Is(runErr, failure) || calls != 4 {

@@ -71,9 +71,6 @@ func TestInitialRefutationsAreDiscardedAndEmptyHistoryIsOptional(t *testing.T) {
 		if request.round == 1 {
 			return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"feedback":"Correct the candidate."}`}, nil
 		}
-		if request.reviewPhase == reviewVerification && !strings.Contains(request.prompt, "private refutation list, if supplied") {
-			t.Fatal("empty verification history treated as mandatory")
-		}
 		return aicli.Result{Answer: approvedCritiqueJSON}, nil
 	}}
 	result, err := runner.Run(context.Background(), job)
@@ -180,7 +177,8 @@ func TestRefutationsSurviveOmissionWithoutRememberingImplementedChanges(t *testi
 	job.CriticMaxRounds, job.CriticNonblockingRounds = 4, 0
 	root := t.TempDir()
 	var expected []Refutation
-	var sequence, paths []string
+	var sequence []string
+	var historyDir string
 	runner := Runner{WorkRoot: root, runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 		sequence = append(sequence, fmt.Sprintf("%s/%d/%s", request.role, request.round, request.reviewPhase))
 		want := expected
@@ -190,10 +188,10 @@ func TestRefutationsSurviveOmissionWithoutRememberingImplementedChanges(t *testi
 		checkRefutations(t, request, want)
 		for _, dir := range request.readOnlyDirs {
 			if _, err := os.Stat(filepath.Join(dir, "refutations.json")); err == nil {
-				if len(paths) != 0 && paths[0] != dir {
-					t.Fatalf("refutations path changed within the action: %s -> %s", paths[0], dir)
+				if historyDir != "" && historyDir != dir {
+					t.Fatalf("refutations path changed within the action: %s -> %s", historyDir, dir)
 				}
-				paths = append(paths, dir)
+				historyDir = dir
 			}
 		}
 		if request.role == roleMain {

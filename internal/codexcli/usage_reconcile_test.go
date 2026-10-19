@@ -160,9 +160,9 @@ func TestUsageBoundaryIdentityRequiresAnUncappedPhysicalRead(t *testing.T) {
 				budget--
 			}
 			capture := &usageBoundary{valid: true, turns: map[string]bool{}}
-			_, complete, _, _ := readRolloutUsageFrom(ctx, rolloutMeta{ID: "root", path: name}, "root", &budget, nil, capture, nil, false)
-			if capture.valid || complete || capture.prefixKnown == capped {
-				t.Fatalf("counter/byte validity conflated: %+v complete=%t capped=%t", capture, complete, capped)
+			_, complete, _, err := readRolloutUsageFrom(ctx, rolloutMeta{ID: "root", path: name}, "root", &budget, nil, capture, nil, false)
+			if capture.valid || complete || capture.prefixKnown == capped || err != nil {
+				t.Fatalf("counter/byte validity conflated: %+v complete=%t capped=%t err=%v", capture, complete, capped, err)
 			}
 		})
 	}

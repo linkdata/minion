@@ -12,7 +12,7 @@ func TestLoadModelProviders(t *testing.T) {
 	for _, tt := range []struct {
 		name, fields, main, adversarial string
 		rounds                          int
-		wantError                       bool
+		wantError                       string
 	}{
 		{name: "existing config", main: "codex", rounds: 5},
 		{name: "codex only", fields: `,"main":"codex"`, main: "codex", rounds: 5},
@@ -24,19 +24,19 @@ func TestLoadModelProviders(t *testing.T) {
 		{name: "ten rounds", fields: `,"critic_max_rounds":10`, main: "codex", rounds: 10},
 		{name: "maximum rounds", fields: `,"critic_max_rounds":20`, main: "codex", rounds: 20},
 		{name: "zero rounds", fields: `,"critic_max_rounds":0`, main: "codex", rounds: 5},
-		{name: "unknown main", fields: `,"main":"other"`, wantError: true},
-		{name: "unknown critic", fields: `,"adversarial":"other"`, wantError: true},
-		{name: "same default provider", fields: `,"adversarial":"codex"`, wantError: true},
-		{name: "same explicit provider", fields: `,"main":"claude","adversarial":"claude"`, wantError: true},
-		{name: "negative rounds", fields: `,"critic_max_rounds":-1`, wantError: true},
-		{name: "too many rounds", fields: `,"critic_max_rounds":21`, wantError: true},
-		{name: "claude model whitespace", fields: `,"claude":{"model":"bad model"}`, wantError: true},
-		{name: "claude effort whitespace", fields: `,"claude":{"effort":"high\nlow"}`, wantError: true},
-		{name: "claude runtime skills", fields: `,"claude":{"skills":["/tmp/SKILL.md"]}`, wantError: true},
-		{name: "claude runtime directories", fields: `,"claude":{"read_only_dirs":["/tmp"]}`, wantError: true},
-		{name: "codex runtime directories", fields: `,"codex":{"read_only_dirs":["/tmp"]}`, wantError: true},
-		{name: "claude runtime schema", fields: `,"claude":{"output_schema":"{}"}`, wantError: true},
-		{name: "codex runtime schema", fields: `,"codex":{"output_schema":"{}"}`, wantError: true},
+		{name: "unknown main", fields: `,"main":"other"`, wantError: "main must be"},
+		{name: "unknown critic", fields: `,"adversarial":"other"`, wantError: "adversarial must be"},
+		{name: "same default provider", fields: `,"adversarial":"codex"`, wantError: "adversarial must differ"},
+		{name: "same explicit provider", fields: `,"main":"claude","adversarial":"claude"`, wantError: "adversarial must differ"},
+		{name: "negative rounds", fields: `,"critic_max_rounds":-1`, wantError: "critic_max_rounds"},
+		{name: "too many rounds", fields: `,"critic_max_rounds":21`, wantError: "critic_max_rounds"},
+		{name: "claude model whitespace", fields: `,"claude":{"model":"bad model"}`, wantError: "claude model and effort"},
+		{name: "claude effort whitespace", fields: `,"claude":{"effort":"high\nlow"}`, wantError: "claude model and effort"},
+		{name: "claude runtime skills", fields: `,"claude":{"skills":["/tmp/SKILL.md"]}`, wantError: "unknown field"},
+		{name: "claude runtime directories", fields: `,"claude":{"read_only_dirs":["/tmp"]}`, wantError: "unknown field"},
+		{name: "codex runtime directories", fields: `,"codex":{"read_only_dirs":["/tmp"]}`, wantError: "unknown field"},
+		{name: "claude runtime schema", fields: `,"claude":{"output_schema":"{}"}`, wantError: "unknown field"},
+		{name: "codex runtime schema", fields: `,"codex":{"output_schema":"{}"}`, wantError: "unknown field"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "config.json")
@@ -45,9 +45,9 @@ func TestLoadModelProviders(t *testing.T) {
 				t.Fatal(err)
 			}
 			cfg, err := Load(path)
-			if tt.wantError {
-				if err == nil {
-					t.Fatal("accepted invalid model configuration")
+			if tt.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+					t.Fatalf("invalid model configuration error: %v", err)
 				}
 				return
 			}

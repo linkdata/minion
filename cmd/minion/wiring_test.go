@@ -1,7 +1,10 @@
 package main
 
 import (
+	"context"
 	"errors"
+	"io"
+	"log"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -9,7 +12,10 @@ import (
 	"time"
 
 	"github.com/linkdata/minion/internal/config"
+	"github.com/linkdata/minion/internal/github"
+	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/skills"
+	"github.com/linkdata/minion/internal/state"
 )
 
 func TestServiceWiringPreservesAdmissionAndHostPolicy(t *testing.T) {
@@ -26,7 +32,14 @@ func TestServiceWiringPreservesAdmissionAndHostPolicy(t *testing.T) {
 		Claude:         config.ClaudeConfig{APIKey: "claude-test-key", Model: "claude-pinned", Effort: "medium", AllowAllUnixSockets: &sockets, Skills: []string{"stale-host-skill"}},
 	}
 	admissionErr := errors.New("admission sentinel")
-	orchestrator := newOrchestrator(cfg, nil, nil, nil, func() error { return admissionErr })
+	client, store, logger := &github.Client{}, &state.Store{}, log.New(io.Discard, "", 0)
+	orchestrator := newOrchestrator(cfg, client, store, logger, func() error { return admissionErr })
+	if orchestrator.GitHub != client || orchestrator.Store != store || orchestrator.Logger != logger || orchestrator.Runner.Logger != logger {
+		t.Fatal("service lost client, state or logger")
+	}
+	if err := orchestrator.Execute(context.Background(), monitor.Job{}); !errors.Is(err, admissionErr) {
+		t.Fatalf("wired admission did not stop execution: %v", err)
+	}
 	if orchestrator.WorkRoot != cfg.WorkRoot || !errors.Is(orchestrator.CheckWorkRoot(), admissionErr) ||
 		orchestrator.CriticNonblockingRounds == nil || *orchestrator.CriticNonblockingRounds != 0 {
 		t.Fatal("service lost controlled admission or strict review policy")

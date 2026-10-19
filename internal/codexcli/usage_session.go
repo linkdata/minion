@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
-	"fmt"
 	"hash"
 	"io"
 	"maps"
@@ -13,7 +12,6 @@ import (
 	"slices"
 	"time"
 
-	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/usage"
 )
 
@@ -26,14 +24,6 @@ type usageBoundary struct {
 	turns                                                  map[string]bool
 	responses                                              map[string]usage.Tokens
 	snapshot                                               usage.Tokens
-}
-
-func (b *usageBoundary) rememberTurn(id string) {
-	if len(b.turns) >= maxUsageRecords && !b.turns[id] {
-		b.valid = false
-		return
-	}
-	b.turns[id] = true
 }
 
 func matchUsagePrefix(ctx context.Context, r io.Reader, before *usageBoundary, h hash.Hash) bool {
@@ -170,7 +160,7 @@ func (s *usageSession) collectUsage(ctx context.Context, home, rootID string, st
 		}
 		if len(visited) >= maxUsageAgents {
 			complete = false
-			childError = joinUsageErrors(childError, fmt.Errorf("%w: Codex usage agent count exceeded the limit", aicli.ErrOutputLimit))
+			childError = joinUsageErrors(childError, errUsageAgentLimit)
 			break
 		}
 		visited[id] = true

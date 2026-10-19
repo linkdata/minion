@@ -76,64 +76,54 @@ func TestUsageSessionOverflowRetainsCurrentInvocationLowerBound(t *testing.T) {
 	}
 }
 
-func TestUsageRecordAndRememberedTurnLimits(t *testing.T) {
-	t.Run("response records", func(t *testing.T) {
-		var events strings.Builder
-		events.WriteString(usageEvent("task_started", "turn") + "\n")
-		for i := range maxUsageRecords {
-			events.WriteString(usageRecord("root", "turn", fmt.Sprint(i), 1, 0, 0) + "\n")
+func TestUsageRecordLimit(t *testing.T) {
+	if testing.Short() {
+		t.Skip("scans the actual 100000-record identity boundary")
+	}
+	var events strings.Builder
+	events.WriteString(usageEvent("task_started", "turn") + "\n")
+	for i := range maxUsageRecords {
+		events.WriteString(usageRecord("root", "turn", fmt.Sprint(i), 1, 0, 0) + "\n")
+	}
+	events.WriteString(usageEvent("task_complete", "turn"))
+	path := writeUsageRollout(t, t.TempDir(), "root", "", events.String())
+	appendUsageEvents(t, path, usageRecord("root", "turn", "0", 1, 0, 0), usageEvent("task_complete", "turn"))
+	for _, extra := range []bool{false, true} {
+		if extra {
+			appendUsageEvents(t, path, usageRecord("root", "turn", "one-more", 1, 0, 0), usageEvent("task_complete", "turn"))
 		}
-		events.WriteString(usageEvent("task_complete", "turn"))
-		path := writeUsageRollout(t, t.TempDir(), "root", "", events.String())
-		appendUsageEvents(t, path, usageRecord("root", "turn", "0", 1, 0, 0), usageEvent("task_complete", "turn"))
-		for _, extra := range []bool{false, true} {
-			if extra {
-				appendUsageEvents(t, path, usageRecord("root", "turn", "one-more", 1, 0, 0), usageEvent("task_complete", "turn"))
-			}
-			budget := int64(maxUsageScanBytes)
-			capture := &usageBoundary{valid: true, turns: map[string]bool{}}
-			got, complete, _, err := readRolloutUsageFrom(context.Background(), rolloutMeta{ID: "root", path: path}, "root", &budget, nil, capture, nil, false)
-			if got != (usage.Tokens{Input: maxUsageRecords}) || complete == extra || err != nil {
-				t.Fatalf("record cap: %+v complete=%t extra=%t err=%v", got, complete, extra, err)
-			}
-			if len(capture.responses) != maxUsageRecords || capture.valid == extra || !capture.prefixKnown || !capture.completed {
-				t.Fatalf("response cap lost bounded history or physical/lifecycle proof: responses=%d valid=%t prefixKnown=%t completed=%t", len(capture.responses), capture.valid, capture.prefixKnown, capture.completed)
-			}
-		}
-		// Logical retention limits must not stop a later trustworthy root floor.
-		appendUsageEvents(t, path, usageSnapshot(30, maxUsageRecords+17, 0, 0))
 		budget := int64(maxUsageScanBytes)
-		got, complete, _, err := readRolloutUsage(context.Background(), rolloutMeta{ID: "root", path: path}, "root", &budget)
-		if got != (usage.Tokens{Input: maxUsageRecords + 17}) || complete || err != nil {
-			t.Fatalf("record cap lost later root lower bound: %+v complete=%t err=%v", got, complete, err)
+		capture := &usageBoundary{valid: true, turns: map[string]bool{}}
+		got, complete, _, err := readRolloutUsageFrom(context.Background(), rolloutMeta{ID: "root", path: path}, "root", &budget, nil, capture, nil, false)
+		if got != (usage.Tokens{Input: maxUsageRecords}) || complete == extra || err != nil {
+			t.Fatalf("record cap: %+v complete=%t extra=%t err=%v", got, complete, extra, err)
 		}
-		// Losing counters must not by itself revoke known helper completion.
-		childEvents := strings.ReplaceAll(events.String(), `"thread_id":"root"`, `"thread_id":"child"`)
-		child := writeUsageRollout(t, t.TempDir(), "child", "root", childEvents, usageRecord("child", "turn", "one-more", 1, 0, 0), usageEvent("task_complete", "turn"))
-		boundary := int64(9)
-		budget = maxUsageScanBytes
-		got, complete, _, err = readRolloutUsage(context.Background(), rolloutMeta{ID: "child", path: child, HistoryStart: &boundary}, "root", &budget)
-		if got != (usage.Tokens{Input: maxUsageRecords}) || complete || err != nil {
-			t.Fatalf("counter-only cap revoked helper lifecycle proof: %+v complete=%t err=%v", got, complete, err)
+		if len(capture.responses) != maxUsageRecords || capture.valid == extra || !capture.prefixKnown || !capture.completed {
+			t.Fatalf("response cap lost bounded history or physical/lifecycle proof: responses=%d valid=%t prefixKnown=%t completed=%t", len(capture.responses), capture.valid, capture.prefixKnown, capture.completed)
 		}
-	})
-	t.Run("remembered turns", func(t *testing.T) {
-		boundary := usageBoundary{valid: true, turns: map[string]bool{}}
-		for i := range maxUsageRecords {
-			boundary.rememberTurn(fmt.Sprint(i))
-		}
-		boundary.rememberTurn("0")
-		if !boundary.valid || len(boundary.turns) != maxUsageRecords {
-			t.Fatal("existing turn consumed a new slot")
-		}
-		boundary.rememberTurn("new")
-		if boundary.valid || len(boundary.turns) != maxUsageRecords {
-			t.Fatal("new turn exceeded bounded history")
-		}
-	})
+	}
+	// Logical retention limits must not stop a later trustworthy root floor.
+	appendUsageEvents(t, path, usageSnapshot(30, maxUsageRecords+17, 0, 0))
+	budget := int64(maxUsageScanBytes)
+	got, complete, _, err := readRolloutUsage(context.Background(), rolloutMeta{ID: "root", path: path}, "root", &budget)
+	if got != (usage.Tokens{Input: maxUsageRecords + 17}) || complete || err != nil {
+		t.Fatalf("record cap lost later root lower bound: %+v complete=%t err=%v", got, complete, err)
+	}
+	// Losing counters must not by itself revoke known helper completion.
+	childEvents := strings.ReplaceAll(events.String(), `"thread_id":"root"`, `"thread_id":"child"`)
+	child := writeUsageRollout(t, t.TempDir(), "child", "root", childEvents, usageRecord("child", "turn", "one-more", 1, 0, 0), usageEvent("task_complete", "turn"))
+	boundary := int64(9)
+	budget = maxUsageScanBytes
+	got, complete, _, err = readRolloutUsage(context.Background(), rolloutMeta{ID: "child", path: child, HistoryStart: &boundary}, "root", &budget)
+	if got != (usage.Tokens{Input: maxUsageRecords}) || complete || err != nil {
+		t.Fatalf("counter-only cap revoked helper lifecycle proof: %+v complete=%t err=%v", got, complete, err)
+	}
 }
 
 func TestUsageLifecycleTurnLimitDoesNotCertifyCappedHelper(t *testing.T) {
+	if testing.Short() {
+		t.Skip("scans the actual 100000-record identity boundary")
+	}
 	var events strings.Builder
 	events.WriteString(usageRecord("child", "0", "response", 7, 0, 0) + "\n")
 	for i := range maxUsageRecords {
@@ -160,6 +150,9 @@ func TestUsageLifecycleTurnLimitDoesNotCertifyCappedHelper(t *testing.T) {
 }
 
 func TestUsageTurnLimitCountsLifecycleAndResponseIdentitiesTogether(t *testing.T) {
+	if testing.Short() {
+		t.Skip("scans the actual 100000-record identity boundary")
+	}
 	var events strings.Builder
 	for i := range maxUsageRecords / 2 {
 		events.WriteString(usageEvent("task_complete", fmt.Sprintf("lifecycle-%d", i)) + "\n")
@@ -182,6 +175,9 @@ func TestUsageTurnLimitCountsLifecycleAndResponseIdentitiesTogether(t *testing.T
 }
 
 func TestUsageLateOldResponseLimitPreservesSubtractionCertainty(t *testing.T) {
+	if testing.Short() {
+		t.Skip("scans the actual 100000-record identity boundary")
+	}
 	ctx := context.Background()
 	path := writeUsageRollout(t, t.TempDir(), "root", "", append(completedUsageTurn("root", "old", "baseline", 0), usageSnapshot(25, 0, 0, 0))...)
 	before := &usageBoundary{valid: true, turns: map[string]bool{}}
@@ -213,6 +209,9 @@ func TestUsageLateOldResponseLimitPreservesSubtractionCertainty(t *testing.T) {
 }
 
 func TestUsageCappedBaselineCannotAttributeDroppedOldIdentity(t *testing.T) {
+	if testing.Short() {
+		t.Skip("scans the actual 100000-record identity boundary")
+	}
 	ctx := context.Background()
 	var events strings.Builder
 	for i := range maxUsageRecords + 1 {
@@ -294,12 +293,12 @@ func TestUsageDiscoveryExactWalkLimitAndNextEntry(t *testing.T) {
 	}
 }
 
-func TestUsageErrorJoinDeduplicatesOnlySharedSentinel(t *testing.T) {
+func TestUsageErrorJoinDeduplicatesOnlySharedSentinels(t *testing.T) {
 	pathErr := &os.PathError{Op: "read", Path: "fixture", Err: os.ErrPermission}
 	limit := fmt.Errorf("fixture limit: %w", aicli.ErrOutputLimit)
-	got := joinUsageErrors(errUnverifiedChildren, errors.Join(errUnverifiedChildren, limit), errors.Join(context.Canceled, pathErr, errUnverifiedChildren))
+	got := joinUsageErrors(errUnverifiedChildren, errUsageAgentLimit, errors.Join(errUnverifiedChildren, errUsageAgentLimit, limit), errors.Join(context.Canceled, pathErr, errUnverifiedChildren, limit))
 	var retained *os.PathError
-	if strings.Count(got.Error(), errUnverifiedChildren.Error()) != 1 || !errors.Is(got, errUnverifiedChildren) || !errors.Is(got, aicli.ErrOutputLimit) || !errors.Is(got, context.Canceled) || !errors.As(got, &retained) || retained != pathErr {
+	if strings.Count(got.Error(), errUnverifiedChildren.Error()) != 1 || strings.Count(got.Error(), errUsageAgentLimit.Error()) != 1 || strings.Count(got.Error(), limit.Error()) != 2 || !errors.Is(got, errUnverifiedChildren) || !errors.Is(got, errUsageAgentLimit) || !errors.Is(got, aicli.ErrOutputLimit) || !errors.Is(got, context.Canceled) || !errors.As(got, &retained) || retained != pathErr {
 		t.Fatalf("joined cause lost or duplicated: %v", got)
 	}
 }

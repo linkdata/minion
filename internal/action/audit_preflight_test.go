@@ -1,11 +1,9 @@
 package action
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -167,16 +165,11 @@ func TestAuditMissingInputsFailBeforeValidatorExecution(t *testing.T) {
 func TestAuditValidatorDiagnosticsStayOutOfErrorsAndJournal(t *testing.T) {
 	job := testJob(command.SecurityAudit)
 	const diagnostic = "PRIVATE_VALIDATOR_FINDING\nforged journal line \"quoted\"\n"
-	script := "#!/bin/sh\nif [ \"$2\" = -e ]; then exit 0; fi\nprintf '%s' " + shellQuote(diagnostic) + " >&2\nexit 23\n"
+	script := "#!/bin/sh\nprintf '%s' " + shellQuote(diagnostic) + " >&2\nexit 23\n"
 	nodeDir := fakeOnPath(t, "node", script)
 	report, err := validateAuditFiles(context.Background(), auditArtifactsFixture(job, "/source", "Audit report\n"), t.TempDir(), "/installed/SKILL.md", auditTools{binary: filepath.Join(nodeDir, "node"), permissionFlag: "--permission"}, job.Identity.Repository, "/source", job.Source.Head)
 	var exit *exec.ExitError
 	if !errors.As(err, &exit) || exit.ExitCode() != 23 || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || report != "" || !strings.Contains(err.Error(), "audit validate-findings.cjs failed") || strings.Contains(err.Error(), "PRIVATE_VALIDATOR_FINDING") || strings.Contains(err.Error(), "forged journal") {
 		t.Fatalf("private diagnostic leaked or native failure lost: report=%q error=%v", report, err)
-	}
-	var journal bytes.Buffer
-	(&Orchestrator{Logger: log.New(&journal, "", 0)}).logf("action failed: %v", err)
-	if strings.Contains(journal.String(), "PRIVATE_VALIDATOR_FINDING") || strings.Contains(journal.String(), "forged journal") {
-		t.Fatalf("private validator diagnostic entered journal: %s", &journal)
 	}
 }

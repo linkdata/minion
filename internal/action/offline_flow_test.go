@@ -167,6 +167,11 @@ func TestOfflineReviewPollRecoversAfterPublication(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 	store.Data.NextInviteCheckAt = now.Add(time.Hour)
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
@@ -212,15 +217,11 @@ func TestOfflineReviewPollRecoversAfterPublication(t *testing.T) {
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	store, err = state.Open(statePath, time.Time{})
+	reopenedStore, err := state.Open(statePath, time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() {
-		if err := store.Close(); err != nil {
-			t.Error(err)
-		}
-	}()
+	store = reopenedStore
 	if len(store.Data.Processed) != 0 {
 		t.Fatalf("crash simulation retained completion checkpoint: %v", store.Data.Processed)
 	}

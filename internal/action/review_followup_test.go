@@ -18,17 +18,13 @@ import (
 	"github.com/linkdata/minion/internal/workspace"
 )
 
-var defaultActionTestCommands = map[string]command.Action{
-	"review": command.Review, "fix": command.Fix, "audit": command.Comment, "security-audit": command.SecurityAudit,
-}
-
 func TestRunnerNativeCleanupKeepsAcceptedAnswer(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root bypasses directory permissions")
 	}
 	for _, provider := range []string{"codex", "claude"} {
-		for _, recover := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/recover=%t", provider, recover), func(t *testing.T) {
+		for _, recovers := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/recover=%t", provider, recovers), func(t *testing.T) {
 				installActionTestSkills(t)
 				t.Setenv("CODEX_HOME", t.TempDir())
 				for _, key := range []string{"CLAUDE_CONFIG_DIR", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"} {
@@ -56,7 +52,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"terminal_r
 				runner := Runner{WorkRoot: root, Claude: config.ClaudeConfig{APIKey: "inert-test-key"}}
 				journal := &cleanupRetryLog{root: root}
 				removed := 0
-				if !recover {
+				if !recovers {
 					journal.onRetry = func() (err error) {
 						if err = os.Chmod(root, 0700); err != nil {
 							return err
@@ -91,7 +87,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"terminal_r
 				if journal.err != nil || strings.Count(journal.String(), "model session cleanup retry scheduled") != 1 {
 					t.Fatalf("session cleanup retry was not exercised: %v, %q", journal.err, journal.String())
 				}
-				if recover {
+				if recovers {
 					if len(result.Diagnostics) != 0 {
 						t.Fatalf("cleanup retry did not recover: %+v,%v", result, journal.err)
 					}
@@ -197,9 +193,8 @@ func TestRevisionInstructionsEvaluateProposedChanges(t *testing.T) {
 		{criticPrompt(reviewFull, "Task", "Answer", "", "", ""), "Evaluate the candidate's changes and the main model's refutations against the current code, connected callers, tests and task constraints"},
 		{criticPrompt(reviewVerification, "Task", "Answer", "Earlier", "Finding", ""), "Evaluate the candidate's changes and the main model's refutations against the current code, connected callers, tests and task constraints"},
 	} {
-		prompt := test.prompt
-		if !strings.Contains(prompt, test.rule) {
-			t.Fatalf("missing change-evaluation instruction: %s", prompt)
+		if !strings.Contains(test.prompt, test.rule) {
+			t.Fatalf("missing change-evaluation instruction: %s", test.prompt)
 		}
 	}
 }
@@ -295,7 +290,7 @@ cat >/dev/null
 printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.completed","item":{"type":"agent_message","text":"Done."}}' '{"type":"turn.completed"}'
 /bin/chmod 0500 `+shellQuote(root)+"\n")
 	job := testJob(command.Comment)
-	job.RuntimeBudget = 5 * time.Second
+	job.RuntimeBudget = 2 * time.Second
 	var modelContext context.Context
 	journal := &cleanupRetryLog{root: root, onRetry: func() error {
 		if modelContext == nil {

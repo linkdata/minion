@@ -68,7 +68,7 @@ func TestRunnerUsesSuppliedSourceAndContext(t *testing.T) {
 				if err != nil || string(data) != "source\n" {
 					t.Fatalf("source = %q, %v", data, err)
 				}
-				for _, want := range []string{job.Source.Head, job.Source.Base, job.Source.MergeBase, contextDir, fmt.Sprintf("Compare the supplied %q.", filepath.Join(contextDir, "comparison.diff")), fmt.Sprintf("under %q where needed", filepath.Join(contextDir, "base")), "complete history, including historical file contents, branches and tags", "no remotes or GitHub credentials", "Use local Git commands to investigate history", quotedContext(job.Title), quotedContext(job.Notes), "Report missing context or dependencies rather than fetching them"} {
+				for _, want := range []string{job.Source.Head, job.Source.Base, job.Source.MergeBase, fmt.Sprintf("Compare the supplied %q.", filepath.Join(contextDir, "comparison.diff")), fmt.Sprintf("under %q where needed", filepath.Join(contextDir, "base")), "complete history, including historical file contents, branches and tags", "no remotes or GitHub credentials", "Use local Git commands to investigate history", quotedContext(job.Title), quotedContext(job.Notes), "Report missing context or dependencies rather than fetching them"} {
 					if !strings.Contains(request.prompt, want) {
 						t.Fatalf("prompt lacks %q: %s", want, request.prompt)
 					}
@@ -79,14 +79,39 @@ func TestRunnerUsesSuppliedSourceAndContext(t *testing.T) {
 			if err != nil || len(result.Refutations) != 0 || calls != 1 || result.Answer != "No findings" || len(result.Calls) != 1 || !result.Calls[0].Complete {
 				t.Fatalf("Run = %+v, %v; calls %d", result, err, calls)
 			}
-			entries, err := os.ReadDir(root)
-			if err != nil || len(entries) != 0 {
-				t.Fatalf("execution workspace retained: %v, %v", entries, err)
-			}
+			assertEmptyDir(t, root)
 			if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("executor invoked gh: %v", err)
 			}
 		})
+	}
+}
+
+func TestReviewContextPreservesDistinctRevisionIdentities(t *testing.T) {
+	job := testJob(command.Review)
+	job.Source.Head = strings.Repeat("a", 40)
+	job.Source.Base = strings.Repeat("b", 40)
+	job.Source.MergeBase = strings.Repeat("c", 40)
+	root := t.TempDir()
+	if err := materializeContext(root, job.Source); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "source.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var metadata struct {
+		Head      string
+		Base      string
+		MergeBase string `json:"merge_base"`
+	}
+	if err := json.Unmarshal(data, &metadata); err != nil || metadata.Head != job.Source.Head || metadata.Base != job.Source.Base || metadata.MergeBase != job.Source.MergeBase {
+		t.Fatalf("revision identity projection: %s, %v", data, err)
+	}
+	prompt, err := actionPrompt(context.Background(), job, "/source", root, "", "")
+	want := fmt.Sprintf("head %s (merge base %s, base tip %s)", job.Source.Head, job.Source.MergeBase, job.Source.Base)
+	if err != nil || !strings.Contains(prompt, want) {
+		t.Fatalf("revision identity prompt: %q, %v; want %q", prompt, err, want)
 	}
 }
 
@@ -142,7 +167,7 @@ func TestRunnerUsesLocalHistoryWhenComparisonDiffIsIncomplete(t *testing.T) {
 				t.Fatalf("comparison coverage metadata missing: %s", data)
 			}
 			identity := fmt.Sprintf("The source is the exact pull request head %s (merge base %s, base tip %s).", job.Source.Head, job.Source.MergeBase, job.Source.Base)
-			if !strings.Contains(request.prompt, identity) || strings.Count(request.prompt, "disclose any remaining comparison limitation") != 1 {
+			if !strings.Contains(request.prompt, identity) || !strings.Contains(request.prompt, "The text diff exceeds its limit.") || !strings.Contains(request.prompt, "Comparison diff incomplete=true") || strings.Contains(request.prompt, filepath.Join(request.readOnlyDirs[0], "comparison.diff")) {
 				t.Fatalf("comparison identities or guidance misplaced/duplicated: %s", request.prompt)
 			}
 			return aicli.Result{Answer: "Compared using local Git", UsageComplete: true}, nil
@@ -309,7 +334,16 @@ func TestPortableAuditMetadataUsesSourceIdentity(t *testing.T) {
 	}
 	for i := range files {
 		if files[i].Path == "run-metadata.json" {
-			files[i].Data = []byte(`{"repo":"owner/repo","target":"other","source_ref":"` + job.Source.Head + `"}`)
+			var metadata map[string]json.RawMessage
+			if err := json.Unmarshal(files[i].Data, &metadata); err != nil {
+				t.Fatal(err)
+			}
+			metadata["target"] = json.RawMessage(`"other"`)
+			var err error
+			files[i].Data, err = json.Marshal(metadata)
+			if err != nil {
+				t.Fatal(err)
+			}
 		}
 	}
 	if validateResultArtifacts(job, files, true) == nil {
@@ -318,16 +352,13 @@ func TestPortableAuditMetadataUsesSourceIdentity(t *testing.T) {
 }
 
 func TestRunnerReturnsPartialAuditArtifactsOnFailure(t *testing.T) {
-	fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
 	for _, field := range []string{"", "scope_paths", "prior_run_paths"} {
 		name := "host_path_in_" + field
 		if field == "" {
 			name = "no_path_list"
 		}
 		t.Run(name, func(t *testing.T) {
-			installActionTestSkills(t, testAuditSkillURL)
-			job := testJob(command.SecurityAudit)
-			job.Main.Skills = []string{testAuditSkillURL}
+			job := auditRunnerJob(t)
 			failure := errors.New("provider stopped after writing partial report")
 			runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 				if err := os.WriteFile(filepath.Join(request.outputDir, "REPORT.md"), []byte("Incomplete source findings"), 0600); err != nil {

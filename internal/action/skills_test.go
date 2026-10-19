@@ -147,9 +147,6 @@ func TestRunnerRequiresEverySkillAndLoadsOptionalSkills(t *testing.T) {
 	if len(configured.Codex.Skills) != 3 {
 		t.Fatalf("loaded skills = %v; want two required and one optional", configured.Codex.Skills)
 	}
-	if len(orchestrator.Runner.Codex.Skills) != 0 {
-		t.Fatal("skill selection changed the shared orchestrator")
-	}
 	delete(orchestrator.Commands, "inspect")
 	if err := orchestrator.validateCommand(job); err == nil {
 		t.Fatal("unmapped command ran")

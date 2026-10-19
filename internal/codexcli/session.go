@@ -63,7 +63,7 @@ func (s *Session) prepare(workspace, binary, home, output string, writable bool,
 	bound := settings
 	bound.ReadOnlyDirs = nil // Phase evidence grants do not bind the conversation.
 	if len(bound.Skills) == 0 {
-		bound.Skills = nil // Preserve slices.Equal's nil/empty equivalence.
+		bound.Skills = nil // Normalize empty skills for reflect.DeepEqual.
 	}
 	if s.bound {
 		if workspace != s.workspace || binary != s.binary || home != s.home || output != s.output || writable != s.writable ||

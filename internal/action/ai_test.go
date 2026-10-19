@@ -194,7 +194,7 @@ func TestRunAIRevisionPreservesWorkAndBoundaries(t *testing.T) {
 							t.Fatalf("initial task changed: %q", request.prompt)
 						}
 					case 3:
-						if !slices.Equal(request.refutations, []Refutation(nil)) {
+						if len(request.refutations) != 0 {
 							t.Fatalf("revision refutations=%+v", request.refutations)
 						}
 						content, err := os.ReadFile(file)
@@ -243,7 +243,7 @@ func TestRunAIRevisionPreservesWorkAndBoundaries(t *testing.T) {
 				}
 				content, err := os.ReadFile(file)
 				if err != nil || request.criticPrompt("", outputDir) != criticPrompt(request.reviewPhase, task, string(content), priorAnswer, priorFeedback, outputDir) {
-					t.Fatalf("critic prompt lacks current task context: %q, %v", request.prompt, err)
+					t.Fatalf("critic prompt lacks current task context: %q, %v", request.criticPrompt("", outputDir), err)
 				}
 				if request.criticPrompt("Frozen task", "frozen-reports") != criticPrompt(request.reviewPhase, task+"Frozen task", string(content), priorAnswer, priorFeedback, "frozen-reports") {
 					t.Fatal("critic prompt cannot bind to immutable source and report context")
@@ -366,7 +366,6 @@ func TestRunAIFailsWithoutReturningProposal(t *testing.T) {
 	modelErr := errors.New("model unavailable")
 	for _, tt := range []struct {
 		name, verdict string
-		mainOutput    string
 		rounds        int
 		failureCall   int
 		cancelCall    int
@@ -401,9 +400,6 @@ func TestRunAIFailsWithoutReturningProposal(t *testing.T) {
 				}
 				if request.provider == "claude" {
 					return aicli.Result{Answer: tt.verdict}, nil
-				}
-				if tt.mainOutput != "" {
-					return aicli.Result{Answer: tt.mainOutput}, nil
 				}
 				answer := "unapproved proposal"
 				if tt.largeProposal {
@@ -455,6 +451,7 @@ func TestParseProposal(t *testing.T) {
 		{name: "decoded limit", input: proposalJSON(strings.Repeat("x", maxOutputBytes+1), private)},
 		{name: "combined limit", input: proposalJSON(strings.Repeat("x", maxOutputBytes), "x")},
 		{name: "answer budget", input: proposalJSON(strings.Repeat("x", maxOutputBytes-14), ""), answer: strings.Repeat("x", maxOutputBytes-14), valid: true},
+		{name: "answer budget exceeded", input: proposalJSON(strings.Repeat("x", maxOutputBytes-13), "")},
 		{name: "line prefix budget", input: proposalJSON(strings.Repeat("a\n", 25000), "")},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -569,7 +566,7 @@ func TestCommentPublishesOnlyCriticAcceptedResult(t *testing.T) {
 				if !errors.Is(err, monitor.ErrTerminalJob) || published != "" {
 					t.Fatalf("unapproved result published: error=%v body=%q", err, published)
 				}
-			} else if err != nil || !strings.Contains(published, inertModelOutput(answer)) || strings.Contains(published, "[truncated]") || strings.Contains(published, `"approved"`) || strings.Contains(published, "refutations") || strings.Contains(published, "PRIVATE_REFUTATION") {
+			} else if err != nil || criticCalls != 3 || mainCalls != 2 || !strings.Contains(published, inertModelOutput(answer)) || strings.Contains(published, "[truncated]") || strings.Contains(published, `"approved"`) || strings.Contains(published, "refutations") || strings.Contains(published, "PRIVATE_REFUTATION") {
 				t.Fatalf("wrong published result: error=%v body=%q", err, published)
 			}
 		})

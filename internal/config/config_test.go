@@ -38,24 +38,26 @@ func TestSkillListsFitPortableRoleLimits(t *testing.T) {
 		name               string
 		required, optional []string
 		valid              bool
+		wantError          string
 	}{
-		{"exact combined count", urls[:32], urls[32:64], true},
-		{"combined overflow", urls[:32], urls[32:], false},
-		{"required overflow", urls, []string{}, false},
-		{"optional overflow", urls[:1], urls, false},
-		{"source exact bytes", []string{sourceAtLimit}, []string{}, true},
-		{"source exact bytes with slash", []string{sourceAtLimit + "/"}, []string{}, true},
-		{"optional exact bytes with slash", urls[:1], []string{sourceAtLimit + "/"}, true},
-		{"normalized source too long", []string{strings.Replace(sourceAtLimit, "/tree/", "/tree/x", 1) + "/"}, []string{}, false},
-		{"double trailing slash", []string{urls[0] + "//"}, []string{}, false},
-		{"builtin trailing slash", []string{defaultAntiInjectionSkill + "/"}, []string{}, false},
-		{"source too long", []string{"https://github.com/o/r/tree/" + strings.Repeat("x", MaxSkillURLBytes) + "/skills/one"}, []string{}, false},
-		{"optional source too long", urls[:1], []string{"https://github.com/o/r/tree/" + strings.Repeat("x", MaxSkillURLBytes) + "/skills/one"}, false},
+		{"exact combined count", urls[:32], urls[32:64], true, ""},
+		{"combined overflow", urls[:32], urls[32:], false, "required and always-on skills"},
+		{"required overflow", urls, []string{}, false, "required and always-on skills"},
+		{"default always-on overflow", urls[:63], nil, false, "required and always-on skills"},
+		{"optional overflow", urls[:1], urls, false, "always_on_skills exceeds"},
+		{"source exact bytes", []string{sourceAtLimit}, []string{}, true, ""},
+		{"source exact bytes with slash", []string{sourceAtLimit + "/"}, []string{}, true, ""},
+		{"optional exact bytes with slash", urls[:1], []string{sourceAtLimit + "/"}, true, ""},
+		{"normalized source too long", []string{strings.Replace(sourceAtLimit, "/tree/", "/tree/x", 1) + "/"}, []string{}, false, "skill URL exceeds"},
+		{"double trailing slash", []string{urls[0] + "//"}, []string{}, false, "invalid skill URL"},
+		{"builtin trailing slash", []string{defaultAntiInjectionSkill + "/"}, []string{}, false, "invalid skill URL"},
+		{"source too long", []string{"https://github.com/o/r/tree/" + strings.Repeat("x", MaxSkillURLBytes) + "/skills/one"}, []string{}, false, "skill URL exceeds"},
+		{"optional source too long", urls[:1], []string{"https://github.com/o/r/tree/" + strings.Repeat("x", MaxSkillURLBytes) + "/skills/one"}, false, "skill URL exceeds"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			cfg := Config{BotLogin: "bot", Commands: map[string]CommandMapping{"review": {Action: "review", Skills: test.required}}, AlwaysOnSkills: test.optional,
 				Repositories: []Repository{{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"review"}}}}
-			if err := cfg.Validate(t.TempDir()); (err == nil) != test.valid {
+			if err := cfg.Validate(t.TempDir()); (err == nil) != test.valid || err != nil && !strings.Contains(err.Error(), test.wantError) {
 				t.Fatalf("skill bounds: %v; valid=%t", err, test.valid)
 			}
 			if test.valid {
@@ -68,6 +70,18 @@ func TestSkillListsFitPortableRoleLimits(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestAlwaysOnSkillLimitWithoutCommands(t *testing.T) {
+	urls := make([]string, MaxSkillsPerRole+1)
+	for i := range urls {
+		urls[i] = fmt.Sprintf("https://github.com/o/r/tree/main/skills/skill-%d", i)
+	}
+	cfg := Config{BotLogin: "bot", Commands: map[string]CommandMapping{}, AlwaysOnSkills: urls,
+		Repositories: []Repository{{Name: "o/r", ID: 1, OwnerID: 2}}}
+	if err := cfg.Validate(t.TempDir()); err == nil || !strings.Contains(err.Error(), "always_on_skills exceeds") {
+		t.Fatalf("standalone always-on limit: %v", err)
 	}
 }
 
@@ -131,6 +145,12 @@ func TestLoadValidatesWhitelistAndResolvesPaths(t *testing.T) {
 	}
 	if _, err := Load(path); err == nil {
 		t.Fatal("accepted repository outside whitelist syntax")
+	}
+	if err := os.WriteFile(path, []byte(strings.Replace(data, "example-owner/example-repo", "owner/"+strings.Repeat("x", 100), 1)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err != nil {
+		t.Fatalf("exact-limit repository name rejected: %v", err)
 	}
 	for _, name := range []string{"../repo", "owner/..", "owner/" + strings.Repeat("x", 101)} {
 		bad = strings.Replace(data, "example-owner/example-repo", name, 1)
@@ -263,8 +283,9 @@ func TestCommandMappingsValidateWithoutInstalledSkills(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			copy := base
 			copy.Commands = tt.mapping
-			if err := copy.Validate(t.TempDir()); err == nil {
-				t.Fatal("accepted invalid command mapping")
+			err := copy.Validate(t.TempDir())
+			if err == nil || tt.name == "security audit without validator skill" && !strings.Contains(err.Error(), "requires a security-audit skill") {
+				t.Fatalf("invalid command mapping error: %v", err)
 			}
 		})
 	}
@@ -450,7 +471,7 @@ func TestCommandNameMatchesPortableLimit(t *testing.T) {
 			cfg := Config{BotLogin: "bot", Commands: map[string]CommandMapping{name: {Action: "comment", Skills: []string{defaultAntiInjectionSkill}}}, Repositories: []Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{name}}}}
 			err := cfg.Validate(t.TempDir())
 			if (err != nil) != (length > 100) {
-				t.Fatalf("command length%d validation=%v", length, err)
+				t.Fatalf("command length %d validation=%v", length, err)
 			}
 			if length > 100 && !strings.Contains(err.Error(), "invalid command name") {
 				t.Fatalf("wrong long-name refusal: %v", err)
@@ -469,7 +490,8 @@ func TestCriticNonblockingRoundsDefaultsAndExplicitZero(t *testing.T) {
 		{name: "default", want: 4},
 		{name: "critic default", fields: `,"adversarial":"claude"`, want: 4},
 		{name: "one round defaults strict", fields: `,"critic_max_rounds":1`, want: 0},
-		{name: "custom maximum", fields: `,"critic_max_rounds":10`, want: 9},
+		{name: "ten rounds", fields: `,"critic_max_rounds":10`, want: 9},
+		{name: "hard maximum", fields: `,"critic_max_rounds":20`, want: 19},
 		{name: "zero disables", fields: `,"critic_nonblocking_rounds":0`, explicit: true},
 		{name: "first round", fields: `,"critic_nonblocking_rounds":1`, want: 1, explicit: true},
 		{name: "last round", fields: `,"critic_max_rounds":3,"critic_nonblocking_rounds":3`, want: 3, explicit: true},
@@ -485,8 +507,8 @@ func TestCriticNonblockingRoundsDefaultsAndExplicitZero(t *testing.T) {
 				err = cfg.Validate(t.TempDir())
 			}
 			if tt.invalid {
-				if err == nil {
-					t.Fatal("accepted invalid nonblocking threshold")
+				if err == nil || !strings.Contains(err.Error(), "critic_nonblocking_rounds") {
+					t.Fatalf("invalid nonblocking threshold error: %v", err)
 				}
 				return
 			}

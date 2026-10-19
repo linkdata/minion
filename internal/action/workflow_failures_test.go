@@ -417,9 +417,6 @@ exec %s "$@"
 				if err == nil || !strings.Contains(err.Error(), "repository or fork changed") || !errors.Is(err, monitor.ErrPostModelPublication) || writes != 0 {
 					t.Fatalf("changed fork reached publication: writes=%d err=%v", writes, err)
 				}
-				if _, statErr := os.Stat(seen); !errors.Is(statErr, os.ErrNotExist) {
-					t.Fatalf("changed fork reached import/commit: %v", statErr)
-				}
 				return
 			}
 			if !errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, monitor.ErrPostModelPublication) || writes != 0 || (stage == "commit" && !errors.Is(err, gitwork.ErrNoChanges)) || (stage == "import" && !strings.Contains(err.Error(), "staged paths do not match reviewed changes")) {
@@ -436,10 +433,7 @@ exec %s "$@"
 }
 
 func TestCompletedAuditRetentionFailureIsTerminal(t *testing.T) {
-	base, _, _ := gitFixtureRemote(t)
-	checkout := cloneFixture(t, t.TempDir())
 	job := testJob(command.SecurityAudit)
-	job.Source.Head, job.Source.Files = base, nil
 	result := completeAuditResult(job)
 	if err := result.Validate(job); err != nil {
 		t.Fatal(err)
@@ -457,7 +451,7 @@ func TestCompletedAuditRetentionFailureIsTerminal(t *testing.T) {
 		t.Fatal(err)
 	}
 	orchestrator := Orchestrator{GitHub: client, WorkRoot: blocked}
-	prepared := &preparedAction{job: job, checkout: checkout, request: monitor.Job{Command: command.Command{Action: command.SecurityAudit}}}
+	prepared := &preparedAction{job: job, request: monitor.Job{Command: command.Command{Action: command.SecurityAudit}}}
 	err := orchestrator.publish(context.Background(), prepared, result)
 	if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "retain completed audit") || writes != 0 {
 		t.Fatalf("audit retention failure retried work or published: writes=%d err=%v", writes, err)

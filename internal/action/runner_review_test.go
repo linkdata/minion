@@ -59,9 +59,7 @@ func TestRunnerSnapshotCleanupRetryKeepsValidatedResult(t *testing.T) {
 	if err != nil || journal.err != nil || calls != 2 || result.Answer != "Done." || len(result.Diagnostics) != 0 || strings.Count(journal.String(), "cleanup retry scheduled") != 1 {
 		t.Fatalf("recovered snapshot cleanup: calls=%d result=%+v err=%v restore=%v log=%q", calls, result, err, journal.err, journal.String())
 	}
-	if entries, err := os.ReadDir(root); err != nil || len(entries) != 0 {
-		t.Fatalf("retry leaked snapshots: %v,%v", entries, err)
-	}
+	assertEmptyDir(t, root)
 }
 
 func TestRunnerAuditValidationCleanupRestoresRestrictedDirectory(t *testing.T) {
@@ -69,7 +67,8 @@ func TestRunnerAuditValidationCleanupRestoresRestrictedDirectory(t *testing.T) {
 		t.Skip("root bypasses directory permissions")
 	}
 	installActionTestSkills(t, testAuditSkillURL)
-	fakeOnPath(t, "node", "#!/bin/sh\ncase \"$*\" in *validate-coverage-ledger.cjs*) /bin/chmod 000 .;; esac\nexit 0\n")
+	marker := filepath.Join(t.TempDir(), "restricted")
+	fakeOnPath(t, "node", "#!/bin/sh\nset -eu\ncase \"$*\" in *validate-coverage-ledger.cjs*) /bin/chmod 000 .; printf changed > "+shellQuote(marker)+";; esac\nexit 0\n")
 	job := testJob(command.SecurityAudit)
 	job.Main.Skills = []string{testAuditSkillURL}
 	root := t.TempDir()
@@ -83,10 +82,10 @@ func TestRunnerAuditValidationCleanupRestoresRestrictedDirectory(t *testing.T) {
 	if err != nil || result.Answer != "Audit report\n" || len(result.Artifacts) != len(auditArtifacts) || len(result.Diagnostics) != 0 {
 		t.Fatalf("cleanup discarded validated audit: %+v,%v", result, err)
 	}
-	entries, err := os.ReadDir(root)
-	if err != nil || len(entries) != 0 {
-		t.Fatalf("validation directory survived cleanup: %v,%v", entries, err)
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("validator never restricted its directory: %v", err)
 	}
+	assertEmptyDir(t, root)
 }
 
 func TestRunnerReviewRevisionsFreezeCleanIndependentInputs(t *testing.T) {
@@ -146,10 +145,7 @@ func TestRunnerReviewRevisionsFreezeCleanIndependentInputs(t *testing.T) {
 	if !slices.Equal(events, want) || len(result.Calls) != len(want) {
 		t.Fatalf("review sequence=%q calls=%+v", events, result.Calls)
 	}
-	entries, err := os.ReadDir(root)
-	if err != nil || len(entries) != 0 {
-		t.Fatalf("review workspaces leaked=%v,%v", entries, err)
-	}
+	assertEmptyDir(t, root)
 }
 
 func TestRunnerReviewExportsFrozenSourceDespiteLiveChanges(t *testing.T) {
@@ -192,15 +188,11 @@ func TestRunnerReviewExportsFrozenSourceDespiteLiveChanges(t *testing.T) {
 func TestRunnerAuditReviewFreezesAndExportsRawReports(t *testing.T) {
 	for _, scenario := range []string{"approved", "mutated during critic", "mutated during validation", "empty architecture repaired"} {
 		t.Run(scenario, func(t *testing.T) {
-			installActionTestSkills(t, testAuditSkillURL)
-			job := testJob(command.SecurityAudit)
-			job = withClaudeCritic(job)
-			job.Main.Skills = []string{testAuditSkillURL}
+			job := withClaudeCritic(auditRunnerJob(t))
 			var source, reports string
 			var rawMetadata []byte
 			criticCalls := 0
 			var armedReports, changed string
-			fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
 			if scenario == "mutated during validation" {
 				markers := t.TempDir()
 				armedReports, changed = filepath.Join(markers, "reports"), filepath.Join(markers, "changed")
@@ -271,9 +263,7 @@ func TestRunnerAuditReviewFreezesAndExportsRawReports(t *testing.T) {
 					t.Fatalf("late report mutation did not execute: %v", err)
 				}
 			}
-			if entries, err := os.ReadDir(root); err != nil || len(entries) != 0 {
-				t.Fatalf("audit critic workspaces leaked: %v,%v", entries, err)
-			}
+			assertEmptyDir(t, root)
 			for _, artifact := range result.Artifacts {
 				if artifact.Path == "REPORT.md" && string(artifact.Data) != "approved report" {
 					t.Fatalf("exported mutable live report: %q", artifact.Data)

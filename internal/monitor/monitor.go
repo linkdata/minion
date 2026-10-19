@@ -87,6 +87,8 @@ func (m *Monitor) logf(format string, args ...any) {
 //
 // It persists each completed command before advancing that repository's cursor.
 // Failed threads remain queued for retries without blocking other repositories.
+// Parent cancellation preserves earlier failures and unprocessed retry state/cursors.
+// Executions reporting parent cancellation refund their attempt unless publication has begun.
 func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, error) {
 	if err := ctx.Err(); err != nil {
 		return store.Data.NextPollAt, err
@@ -156,7 +158,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		since := store.Data.RepositoryCursors[repo.Name]
 		notifications, githubInterval, err := m.GitHub.ListRepositoryNotifications(ctx, repo.Name, since)
 		if ctx.Err() != nil {
-			return stop()
+			return stop(err)
 		}
 		if githubInterval > minInterval {
 			minInterval = githubInterval
@@ -222,7 +224,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		}
 		liveRepo, err := m.GitHub.Repository(ctx, repo.Name)
 		if ctx.Err() != nil {
-			return stop()
+			return stop(err)
 		}
 		if err != nil {
 			failures = append(failures, fmt.Errorf("verify %s repository identity: %w", repo.Name, err))
@@ -250,7 +252,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		firstFailure := len(failures)
 		items, err := m.GitHub.ThreadItems(ctx, repo.Name, notification.Subject.Type, number, entry.since)
 		if ctx.Err() != nil {
-			return stop()
+			return stop(err)
 		}
 		if err != nil {
 			failures = append(failures, fmt.Errorf("%s %s #%d: %w", repo.Name, notification.Subject.Type, number, err))
@@ -276,7 +278,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			}
 			current, err := m.GitHub.CurrentItem(ctx, item)
 			if ctx.Err() != nil {
-				return stop()
+				return stop(err)
 			}
 			if err != nil {
 				failures = append(failures, fmt.Errorf("verify command in %s: %w", itemLocation(item), err))
@@ -329,7 +331,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			}
 			permission, err := m.GitHub.Permission(ctx, repo.Name, item.Author.Login)
 			if ctx.Err() != nil {
-				return stop()
+				return stop(err)
 			}
 			if err != nil {
 				failures = append(failures, fmt.Errorf("check @%s permission in %s: %w", item.Author.Login, repo.Name, err))
@@ -363,7 +365,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			}
 			err = m.GitHub.ReactEyes(ctx, item.NodeID)
 			if ctx.Err() != nil {
-				return stop()
+				return stop(err)
 			}
 			if err != nil {
 				failures = append(failures, fmt.Errorf("react to %s: %w", item.HTMLURL, err))
@@ -378,6 +380,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			}
 			m.logf("run %s from @%s in %s #%d", cmd.Action, item.Author.Login, repo.Name, number)
 			if err := m.Handler.Execute(ctx, job); err != nil {
+				failureErr := fmt.Errorf("%s from %s: %w", cmd.Action, item.HTMLURL, err)
 				publicationFailure := errors.Is(err, ErrPostModelPublication)
 				interrupted := ctx.Err() != nil && errors.Is(err, context.Canceled) && !publicationFailure
 				switch {
@@ -390,11 +393,11 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				}
 				store.Data.JobFailures[job.ID] = jobFailure
 				if saveErr := store.Save(); saveErr != nil {
-					return stop(err, saveErr)
+					return stop(failureErr, saveErr)
 				}
 				if interrupted {
 					m.logf("%s from %s interrupted: %v", cmd.Action, item.HTMLURL, err)
-					return stop(err)
+					return stop(failureErr)
 				}
 				m.logf("%s from %s failed (attempt %d/%d): %v", cmd.Action, item.HTMLURL, jobFailure.Attempts, maxJobAttempts, err)
 				if jobFailure.Attempts >= maxJobAttempts {
@@ -403,10 +406,10 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 					}
 				}
 				if ctx.Err() != nil {
-					return stop(err)
+					return stop(failureErr)
 				}
 				if jobFailure.Attempts < maxJobAttempts {
-					failures = append(failures, fmt.Errorf("%s from %s: %w", cmd.Action, item.HTMLURL, err))
+					failures = append(failures, failureErr)
 				}
 				continue
 			}

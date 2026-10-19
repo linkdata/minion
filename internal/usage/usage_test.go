@@ -35,7 +35,7 @@ func TestStoreAtomicUpdates(t *testing.T) {
 	if err != nil || info.Mode().Perm() != 0600 {
 		t.Fatalf("record permissions: info=%v err=%v", info, err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, ".usage-interrupted"), []byte("partial"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, ".record-interrupted"), []byte("partial"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	done := make(chan error, 1)
@@ -85,7 +85,6 @@ func TestSaveEncodeAndRenameFailuresKeepDirectoryClean(t *testing.T) {
 		t.Run(failure, func(t *testing.T) {
 			dir := t.TempDir()
 			record := testRecord()
-			wantFiles := 0
 			if failure == "no write on encode error" {
 				dir = filepath.Join(dir, "not-created")
 				record.StartedAt = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -94,7 +93,6 @@ func TestSaveEncodeAndRenameFailuresKeepDirectoryClean(t *testing.T) {
 				if err := os.Mkdir(filepath.Join(dir, record.ID+".json"), 0700); err != nil {
 					t.Fatal(err)
 				}
-				wantFiles = 1
 			}
 			err := (Store{Dir: dir}).Save(record)
 			var marshalErr *json.MarshalerError
@@ -109,7 +107,7 @@ func TestSaveEncodeAndRenameFailuresKeepDirectoryClean(t *testing.T) {
 				return
 			}
 			files, err := os.ReadDir(dir)
-			if err != nil || len(files) != wantFiles {
+			if err != nil || len(files) != 1 {
 				t.Fatalf("temporary usage file retained: %v, %v", files, err)
 			}
 		})

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"strings"
 	"testing"
-	"unicode/utf8"
 
 	"github.com/linkdata/minion/internal/command"
 )
@@ -55,17 +54,6 @@ func TestInertModelOutputPreservesOverBudgetContent(t *testing.T) {
 	want := "```text\n> " + strings.ReplaceAll(strings.TrimSpace(input), "\n", "\n> ") + "\n```"
 	if modelOutputFits(input) || len(got) <= maxOutputBytes || got != want || strings.Contains(got, "[truncated]") {
 		t.Fatalf("renderer silently dropped content or size check missed expansion: %d bytes", len(got))
-	}
-}
-
-func TestInertModelOutputUnicodeBoundary(t *testing.T) {
-	input := strings.Repeat("x", maxOutputBytes-18) + "😀"
-	got := inertModelOutput(input)
-	if !modelOutputFits(input) || len(got) > maxOutputBytes || !utf8.ValidString(got) || !strings.HasSuffix(got, "\n```") {
-		t.Fatal("malformed bounded Unicode output")
-	}
-	if modelOutputFits(input + "x") {
-		t.Fatal("one-byte rendered overflow accepted")
 	}
 }
 

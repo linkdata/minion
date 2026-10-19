@@ -26,6 +26,64 @@ type cancelDiscoveryGitHub struct {
 	repositoryCalls int
 }
 
+func (f *cancelDiscoveryGitHub) call(stage string) error {
+	f.calls = append(f.calls, stage)
+	if stage == "repository" {
+		f.repositoryCalls++
+	}
+	if stage == f.stage || f.stage == "reply" && stage == "repository" && f.repositoryCalls == 2 {
+		f.cancel()
+		return f.err
+	}
+	return nil
+}
+
+func (f *cancelDiscoveryGitHub) ListRepositoryNotifications(ctx context.Context, repo string, since time.Time) ([]github.Notification, time.Duration, error) {
+	if err := f.call("notifications"); err != nil {
+		return nil, 5 * time.Minute, err
+	}
+	notifications, interval, err := f.fakeGitHub.ListRepositoryNotifications(ctx, repo, since)
+	if f.stage == "notifications" {
+		interval = 5 * time.Minute
+	}
+	return notifications, interval, err
+}
+
+func (f *cancelDiscoveryGitHub) Repository(ctx context.Context, repo string) (github.Repository, error) {
+	if err := f.call("repository"); err != nil {
+		return github.Repository{}, err
+	}
+	return f.fakeGitHub.Repository(ctx, repo)
+}
+
+func (f *cancelDiscoveryGitHub) ThreadItems(ctx context.Context, repo, subject string, number int, since time.Time) ([]github.Item, error) {
+	if err := f.call("thread"); err != nil {
+		return nil, err
+	}
+	return f.fakeGitHub.ThreadItems(ctx, repo, subject, number, since)
+}
+
+func (f *cancelDiscoveryGitHub) CurrentItem(ctx context.Context, item github.Item) (github.Item, error) {
+	if err := f.call("current"); err != nil {
+		return github.Item{}, err
+	}
+	return f.fakeGitHub.CurrentItem(ctx, item)
+}
+
+func (f *cancelDiscoveryGitHub) Permission(ctx context.Context, repo, login string) (github.Permission, error) {
+	if err := f.call("permission"); err != nil {
+		return github.Permission{}, err
+	}
+	return f.fakeGitHub.Permission(ctx, repo, login)
+}
+
+func (f *cancelDiscoveryGitHub) ReactEyes(ctx context.Context, nodeID string) error {
+	if err := f.call("reaction"); err != nil {
+		return err
+	}
+	return f.fakeGitHub.ReactEyes(ctx, nodeID)
+}
+
 func seedShutdownPending(store *state.Store, first, tail github.Notification, since time.Time) (string, state.PendingNotification) {
 	pending := state.PendingNotification{Repository: tail.Repository.FullName, RepositoryID: 1, OwnerID: 2, SubjectType: tail.Subject.Type, SubjectURL: tail.Subject.URL,
 		Since: since, UpdatedAt: tail.UpdatedAt, RetryAt: first.UpdatedAt.Add(-time.Second), Failures: 5}
@@ -42,7 +100,7 @@ func TestRunOnceStopsCanceledFailureReplyWithoutDeferring(t *testing.T) {
 		replies int
 	}{
 		{name: "reply succeeds", replies: 1},
-		{name: "repository fails", err: context.Canceled},
+		{name: "repository fails", err: errors.New("repository unavailable")},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
@@ -64,7 +122,7 @@ func TestRunOnceStopsCanceledFailureReplyWithoutDeferring(t *testing.T) {
 			id := jobID(item.Key, cmd.Name)
 			store.Data.JobFailures[id] = state.JobFailure{Attempts: maxJobAttempts}
 			key, pending := seedShutdownPending(store, first, tail, initial)
-			if _, err := m.RunOnce(ctx, store); !errors.Is(err, context.Canceled) {
+			if _, err := m.RunOnce(ctx, store); !errors.Is(err, context.Canceled) || test.err != nil && !errors.Is(err, test.err) {
 				t.Fatalf("canceled failure reply lost cancellation: %v", err)
 			}
 			if gh.repositoryCalls != 2 || len(handler.jobs) != 0 || len(store.Data.PendingNotifications) != 1 || store.Data.PendingNotifications[key] != pending ||
@@ -117,13 +175,14 @@ func TestRunOnceCanceledExecutionPreservesEarlierFailure(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			statePath := filepath.Join(t.TempDir(), "state.json")
+			retainedStateDir := filepath.Join(t.TempDir(), "retained-state")
 			store := openStateAt(t, statePath, initial)
 			var calls [4]int
 			handler := &fakeHandler{onExecute: func() {
 				calls = [4]int{gh.repoChecks, gh.threadCalls, gh.checks, gh.currentChecks}
 				cancel()
 				if test.saveFails {
-					if err := os.RemoveAll(filepath.Dir(statePath)); err != nil {
+					if err := os.Rename(filepath.Dir(statePath), retainedStateDir); err != nil {
 						t.Fatal(err)
 					}
 				}
@@ -154,7 +213,7 @@ func TestRunOnceCanceledExecutionPreservesEarlierFailure(t *testing.T) {
 				!store.Data.Cursor.Equal(initial) || !store.Data.RepositoryCursors[first.Repository.FullName].Equal(initial) {
 				t.Fatalf("canceled execution continued discovery or changed backoff/cursors: jobs=%d state=%+v", len(handler.jobs), store.Data)
 			}
-			if !test.terminal && ([4]int{gh.repoChecks, gh.threadCalls, gh.checks, gh.currentChecks}) != calls {
+			if ([4]int{gh.repoChecks, gh.threadCalls, gh.checks, gh.currentChecks}) != calls {
 				t.Fatalf("discovery continued after cancellation: got=%v want=%v", [4]int{gh.repoChecks, gh.threadCalls, gh.checks, gh.currentChecks}, calls)
 			}
 			if test.wantLog != "" {
@@ -168,6 +227,15 @@ func TestRunOnceCanceledExecutionPreservesEarlierFailure(t *testing.T) {
 			if processed != test.processed || remains == test.processed || failure.Attempts != test.attempts {
 				t.Fatalf("cancellation changed completion/attempt policy: processed=%t failure=%+v remains=%t", processed, failure, remains)
 			}
+			if test.saveFails {
+				if err := store.Close(); err != nil {
+					t.Fatal(err)
+				}
+				reopened := openStateAt(t, filepath.Join(retainedStateDir, "state.json"), initial)
+				if reopened.Data.JobFailures[id].Attempts != 1 || len(reopened.Data.Processed) != 0 {
+					t.Fatalf("failed completion save changed durable attempt: %+v", reopened.Data)
+				}
+			}
 			if test.resume {
 				handler.onExecute, handler.executeErr = nil, nil
 				gh.currentItem, gh.items = nil, []github.Item{item}
@@ -178,60 +246,6 @@ func TestRunOnceCanceledExecutionPreservesEarlierFailure(t *testing.T) {
 			}
 		})
 	}
-}
-
-func (f *cancelDiscoveryGitHub) call(stage string) error {
-	f.calls = append(f.calls, stage)
-	if stage == "repository" {
-		f.repositoryCalls++
-	}
-	if stage == f.stage || f.stage == "reply" && stage == "repository" && f.repositoryCalls == 2 {
-		f.cancel()
-		return f.err
-	}
-	return nil
-}
-
-func (f *cancelDiscoveryGitHub) ListRepositoryNotifications(ctx context.Context, repo string, since time.Time) ([]github.Notification, time.Duration, error) {
-	if err := f.call("notifications"); err != nil {
-		return nil, 0, err
-	}
-	return f.fakeGitHub.ListRepositoryNotifications(ctx, repo, since)
-}
-
-func (f *cancelDiscoveryGitHub) Repository(ctx context.Context, repo string) (github.Repository, error) {
-	if err := f.call("repository"); err != nil {
-		return github.Repository{}, err
-	}
-	return f.fakeGitHub.Repository(ctx, repo)
-}
-
-func (f *cancelDiscoveryGitHub) ThreadItems(ctx context.Context, repo, subject string, number int, since time.Time) ([]github.Item, error) {
-	if err := f.call("thread"); err != nil {
-		return nil, err
-	}
-	return f.fakeGitHub.ThreadItems(ctx, repo, subject, number, since)
-}
-
-func (f *cancelDiscoveryGitHub) CurrentItem(ctx context.Context, item github.Item) (github.Item, error) {
-	if err := f.call("current"); err != nil {
-		return github.Item{}, err
-	}
-	return f.fakeGitHub.CurrentItem(ctx, item)
-}
-
-func (f *cancelDiscoveryGitHub) Permission(ctx context.Context, repo, login string) (github.Permission, error) {
-	if err := f.call("permission"); err != nil {
-		return github.Permission{}, err
-	}
-	return f.fakeGitHub.Permission(ctx, repo, login)
-}
-
-func (f *cancelDiscoveryGitHub) ReactEyes(ctx context.Context, nodeID string) error {
-	if err := f.call("reaction"); err != nil {
-		return err
-	}
-	return f.fakeGitHub.ReactEyes(ctx, nodeID)
 }
 
 func TestRunOnceStopsCanceledDiscoveryWithoutDeferring(t *testing.T) {
@@ -265,7 +279,7 @@ func TestRunOnceStopsCanceledDiscoveryWithoutDeferring(t *testing.T) {
 					gh.items = nil
 				}
 				if returnError {
-					gh.err = context.Canceled
+					gh.err = errors.New("discovery unavailable")
 				}
 				path := filepath.Join(t.TempDir(), "state.json")
 				store := openStateAt(t, path, initial)
@@ -278,15 +292,20 @@ func TestRunOnceStopsCanceledDiscoveryWithoutDeferring(t *testing.T) {
 					store.Data.NextInviteCheckAt = time.Time{}
 					gh.beforeList = cancel
 				}
+				inviteCheckAt := store.Data.NextInviteCheckAt
 				if err := store.Save(); err != nil {
 					t.Fatal(err)
 				}
 				handler := &fakeHandler{}
 				m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Now: func() time.Time { return now }}
-				if _, err := m.RunOnce(ctx, store); !errors.Is(err, context.Canceled) {
+				if _, err := m.RunOnce(ctx, store); !errors.Is(err, context.Canceled) || gh.err != nil && !errors.Is(err, gh.err) {
 					t.Fatalf("canceled discovery: %v", err)
 				}
-				if want := stages[:slices.Index(stages, gh.stage)+1]; !slices.Equal(gh.calls, want) {
+				var want []string
+				if index := slices.Index(stages, gh.stage); index >= 0 {
+					want = stages[:index+1]
+				}
+				if !slices.Equal(gh.calls, want) {
 					t.Fatalf("discovery continued after cancellation: got %v, want %v", gh.calls, want)
 				}
 				if len(handler.jobs) != 0 || len(gh.comments) != 0 {
@@ -294,6 +313,12 @@ func TestRunOnceStopsCanceledDiscoveryWithoutDeferring(t *testing.T) {
 				}
 				checkState := func(data state.Data) {
 					t.Helper()
+					if stage == "notifications" && !data.NextPollAt.Equal(now.Add(time.Minute)) {
+						t.Fatalf("canceled poll persisted returned interval: %s", data.NextPollAt)
+					}
+					if !data.NextInviteCheckAt.Equal(inviteCheckAt) {
+						t.Fatalf("shutdown advanced invitation check: %s", data.NextInviteCheckAt)
+					}
 					if len(data.PendingNotifications) != 1 || data.PendingNotifications[key] != pending {
 						t.Fatalf("shutdown changed retry state: %+v", data.PendingNotifications)
 					}

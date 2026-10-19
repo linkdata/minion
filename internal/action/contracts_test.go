@@ -49,7 +49,7 @@ func TestResultArtifactContracts(t *testing.T) {
 					r.Artifacts[i].Data = []byte(r.Answer)
 				}
 			}
-		}, "answer", ""},
+		}, "action answer", ""},
 		{"partial report exact limit", func(_ *Job, r *Result) {
 			r.Answer, r.Calls = "", nil
 			r.Artifacts = []workspace.File{{Path: "REPORT.md", Mode: workspace.Regular, Data: bytes.Repeat([]byte("x"), maxOutputBytes)}}
@@ -176,7 +176,7 @@ func TestJobValidate(t *testing.T) {
 		{"skill path", func(j *Job) { j.Main.Skills = []string{"/tmp/skill/SKILL.md"} }, "skill URL"},
 		{"provider", func(j *Job) { j.Main.Provider = "unknown" }, "unsupported action provider"},
 		{"file bound", func(j *Job) { j.Source.Files[0].Data = make([]byte, workspace.MaxBytes+1) }, "source exceeds byte limit"},
-		{"model bound", func(j *Job) { j.Main.Model = strings.Repeat("m", 129) }, "invalid action model or skills"},
+		{"model bound", func(j *Job) { j.Main.Model = strings.Repeat("m", maxModelSettingBytes+1) }, "invalid action model or skills"},
 		{"model NUL", func(j *Job) { j.Main.Model = "a\x00b" }, "invalid action model or skills"},
 		{"model CR", func(j *Job) { j.Main.Model = "a\rb" }, "invalid action model or skills"},
 		{"model LF", func(j *Job) { j.Main.Model = "a\nb" }, "invalid action model or skills"},
@@ -240,7 +240,7 @@ func TestJobValidate(t *testing.T) {
 		{"critic maximum rounds", func(j *Job) { j.Critic, j.CriticMaxRounds = critic, config.MaxCriticMaxRounds }},
 		{"critic threshold at budget", func(j *Job) { j.Critic, j.CriticMaxRounds, j.CriticNonblockingRounds = critic, 2, 2 }},
 		{"maximum settings", func(j *Job) {
-			j.Main.Model, j.Main.Effort = strings.Repeat("m", 128), strings.Repeat("e", 128)
+			j.Main.Model, j.Main.Effort = strings.Repeat("m", maxModelSettingBytes), strings.Repeat("e", maxModelSettingBytes)
 			j.RuntimeBudget = config.MaxJobTimeout
 		}},
 	} {
@@ -258,9 +258,11 @@ func TestResultJSONRoundTripPreservesValidatedPayload(t *testing.T) {
 	job := testJob(command.Fix)
 	job.Critic, job.CriticMaxRounds = &RoleSettings{Provider: "claude"}, 3
 	result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Done.",
-		Changes: []workspace.Change{{Path: "binary", Mode: workspace.Executable, Data: []byte{0, 0xff, '\n'}}},
+		Changes:     []workspace.Change{{Path: "binary", Mode: workspace.Executable, Data: []byte{0, 0xff, '\n'}}},
+		Refutations: []Refutation{{Round: 2, Text: "Private refutation."}},
+		Diagnostics: []Diagnostic{{Code: "incomplete_usage", Message: "Provider omitted usage."}},
 		Calls: []CallUsage{
-			{Provider: job.Main.Provider, Role: roleMain, Round: 1},
+			{Provider: job.Main.Provider, Role: roleMain, Round: 1, Tokens: usage.Tokens{Input: 11, CachedInput: 2, Output: 3}},
 			{Provider: job.Critic.Provider, Role: roleCritic, Round: 1, ReviewPhase: reviewFull, HasBlockers: true, Complete: true},
 			{Provider: job.Main.Provider, Role: roleMain, Round: 2, Complete: true},
 			{Provider: job.Critic.Provider, Role: roleCritic, Round: 2, ReviewPhase: reviewVerification, NoBlockers: true},
@@ -298,8 +300,8 @@ func TestStatusUsesConfiguredRoundBudget(t *testing.T) {
 			t.Fatalf("valid round %d: %v", limit, err)
 		}
 		status.Round++
-		if err := status.Validate(job); err == nil {
-			t.Fatal("accepted status beyond configured rounds")
+		if err := status.Validate(job); err == nil || err.Error() != "invalid action status" {
+			t.Fatalf("status beyond configured rounds: %v", err)
 		}
 	}
 }
@@ -486,17 +488,16 @@ func TestResultCallUsageRejectsCriticsAndRepeatedMainWithoutCritic(t *testing.T)
 
 func TestResultCallUsageHonorsConfiguredRoundLimits(t *testing.T) {
 	for _, test := range []struct {
-		name   string
-		limit  int
-		rounds int
+		name  string
+		limit int
 	}{
-		{"explicit", 2, 2}, {"configured default", config.DefaultCriticMaxRounds, config.DefaultCriticMaxRounds}, {"maximum", config.MaxCriticMaxRounds, config.MaxCriticMaxRounds},
+		{"explicit", 2}, {"configured default", config.DefaultCriticMaxRounds}, {"maximum", config.MaxCriticMaxRounds},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			job := testJob(command.Comment)
 			job.Critic, job.CriticMaxRounds = &RoleSettings{Provider: "claude"}, test.limit
 			result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Answer."}
-			for round := 1; round <= test.rounds+1; round++ {
+			for round := 1; round <= test.limit+1; round++ {
 				result.Calls = nil
 				for proposal := 1; proposal <= round; proposal++ {
 					result.Calls = append(result.Calls, CallUsage{Provider: job.Main.Provider, Role: "main", Round: proposal})
@@ -505,7 +506,7 @@ func TestResultCallUsageHonorsConfiguredRoundLimits(t *testing.T) {
 					}
 					result.Calls = append(result.Calls, CallUsage{Provider: job.Critic.Provider, Role: "critic", Round: proposal, ReviewPhase: "full", Approved: proposal == round, NoBlockers: proposal == round, HasBlockers: proposal != round})
 				}
-				if err := result.Validate(job); (err == nil) != (round <= test.rounds) {
+				if err := result.Validate(job); (err == nil) != (round <= test.limit) {
 					t.Fatalf("round=%d limit=%d result validation=%v", round, test.limit, err)
 				}
 			}
@@ -690,7 +691,7 @@ func TestStatusRequiresMeaningfulStatePhasePairs(t *testing.T) {
 
 func TestResultAndStatusShareDiagnosticBounds(t *testing.T) {
 	job := testJob(command.Comment)
-	tooMany := make([]Diagnostic, 101)
+	tooMany := make([]Diagnostic, maxDiagnostics+1)
 	for i := range tooMany {
 		tooMany[i] = Diagnostic{Code: "code", Message: "message"}
 	}
@@ -700,13 +701,13 @@ func TestResultAndStatusShareDiagnosticBounds(t *testing.T) {
 		want        string
 	}{
 		{"valid", []Diagnostic{{Code: "incomplete_usage", Message: "Provider omitted usage."}}, ""},
-		{"maximum count", tooMany[:100], ""},
-		{"maximum message", []Diagnostic{{Code: "code", Message: strings.Repeat("x", 8<<10)}}, ""},
+		{"maximum count", tooMany[:maxDiagnostics], ""},
+		{"maximum message", []Diagnostic{{Code: "code", Message: strings.Repeat("x", maxDiagnosticMessageBytes)}}, ""},
 		{"empty code", []Diagnostic{{Code: "", Message: "message"}}, "invalid action diagnostic"},
 		{"unsafe code", []Diagnostic{{Code: "../private", Message: "message"}}, "invalid action diagnostic"},
 		{"nul message", []Diagnostic{{Code: "code", Message: "nul\x00message"}}, "invalid action diagnostic"},
 		{"invalid UTF8 message", []Diagnostic{{Code: "code", Message: string([]byte{0xff})}}, "invalid action diagnostic"},
-		{"oversized message", []Diagnostic{{Code: "code", Message: strings.Repeat("x", (8<<10)+1)}}, "invalid action diagnostic"},
+		{"oversized message", []Diagnostic{{Code: "code", Message: strings.Repeat("x", maxDiagnosticMessageBytes+1)}}, "invalid action diagnostic"},
 		{"too many", tooMany, "too many action diagnostics"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -812,26 +813,28 @@ func TestResultEmptyAnswerContract(t *testing.T) {
 		changed bool
 		valid   bool
 	}{{command.Fix, false, true, true}, {command.Fix, false, false, false}, {command.Fix, true, false, false}, {command.Fix, true, true, false}, {command.Comment, false, false, false}, {command.Review, false, false, false}, {command.SecurityAudit, false, false, false}} {
-		job := testJob(test.action)
-		if test.critic {
-			job = withClaudeCritic(job)
-		}
-		result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Calls: []CallUsage{{Provider: job.Main.Provider, Role: "main", Round: 1}}}
-		if test.critic {
-			result.Calls = append(result.Calls, CallUsage{Provider: job.Critic.Provider, Role: roleCritic, Round: 1, ReviewPhase: reviewFull, Approved: true, NoBlockers: true})
-		}
-		if test.changed {
-			result.Changes = []workspace.Change{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("fixed source")}}
-		}
-		if test.critic && test.changed {
-			result.Answer = "Fixed source."
-			if err := result.Validate(job); err != nil {
-				t.Fatalf("invalid changed-fix critic positive control: %v", err)
+		t.Run(fmt.Sprintf("%s/critic=%t/changed=%t", test.action, test.critic, test.changed), func(t *testing.T) {
+			job := testJob(test.action)
+			if test.critic {
+				job = withClaudeCritic(job)
 			}
-			result.Answer = ""
-		}
-		if err := result.Validate(job); (err == nil) != test.valid || (!test.valid && !strings.Contains(err.Error(), "action answer")) {
-			t.Fatalf("empty %s answer with critic=%t: %v", test.action, test.critic, err)
-		}
+			result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Calls: []CallUsage{{Provider: job.Main.Provider, Role: "main", Round: 1}}}
+			if test.critic {
+				result.Calls = append(result.Calls, CallUsage{Provider: job.Critic.Provider, Role: roleCritic, Round: 1, ReviewPhase: reviewFull, Approved: true, NoBlockers: true})
+			}
+			if test.changed {
+				result.Changes = []workspace.Change{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("fixed source")}}
+			}
+			if test.critic && test.changed {
+				result.Answer = "Fixed source."
+				if err := result.Validate(job); err != nil {
+					t.Fatalf("invalid changed-fix critic positive control: %v", err)
+				}
+				result.Answer = ""
+			}
+			if err := result.Validate(job); (err == nil) != test.valid || (!test.valid && !strings.Contains(err.Error(), "action answer")) {
+				t.Fatalf("empty %s answer with critic=%t: %v", test.action, test.critic, err)
+			}
+		})
 	}
 }

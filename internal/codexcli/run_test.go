@@ -182,7 +182,7 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
 
 func TestRunPassesConfiguredModelEffortAndSkills(t *testing.T) {
 	dir := t.TempDir()
-	skillPath := filepath.Join(t.TempDir(), "SKILL.md")
+	skillPath := filepath.Join(canonicalTempDir(t), "SKILL.md")
 	if err := os.WriteFile(skillPath, []byte("---\nname: test\n---\nUse this skill."), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -321,8 +321,8 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
 }
 
 func TestRunAllowsSeparateAuditReportsWithoutSourceWrites(t *testing.T) {
-	workspace := t.TempDir()
-	output := t.TempDir()
+	workspace := canonicalTempDir(t)
+	output := canonicalTempDir(t)
 	fakeCodex := installFakeCodex(t, `#!/bin/sh
 printf '%s\n' "$@" > "$0.args"
 cat >/dev/null
@@ -363,7 +363,7 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"a
 }
 
 func TestRunAllowsCriticToReadReportsWithoutWriting(t *testing.T) {
-	root := t.TempDir()
+	root := canonicalTempDir(t)
 	workspace, reports := filepath.Join(root, "repo"), filepath.Join(root, "reports")
 	for _, dir := range []string{workspace, reports} {
 		if err := os.Mkdir(dir, 0o700); err != nil {
@@ -387,9 +387,15 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"a
 			t.Fatalf("critic lacks read-only access to %s: %s", dir, args)
 		}
 	}
-	for _, dir := range []string{root, workspace, string(os.PathSeparator), filepath.Join(root, "missing")} {
-		if _, err := Run(context.Background(), workspace, "Critique reports", false, "", config.CodexConfig{ReadOnlyDirs: []string{dir}}); err == nil {
-			t.Fatalf("accepted unsafe or missing report directory %s", dir)
+	for _, test := range []struct{ dir, failure string }{
+		{root, "separate from the source snapshot"},
+		{workspace, "separate from the source snapshot"},
+		{string(os.PathSeparator), "expected a non-root directory"},
+		{filepath.Join(root, "missing"), ""},
+	} {
+		_, err := Run(context.Background(), workspace, "Critique reports", false, "", config.CodexConfig{ReadOnlyDirs: []string{test.dir}})
+		if err == nil || test.failure != "" && !strings.Contains(err.Error(), test.failure) || test.failure == "" && !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("unsafe or missing report directory %s: %v; want %q", test.dir, err, test.failure)
 		}
 	}
 }

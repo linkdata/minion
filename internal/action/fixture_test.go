@@ -28,6 +28,10 @@ import (
 	"github.com/linkdata/minion/internal/workspace"
 )
 
+var defaultActionTestCommands = map[string]command.Action{
+	"review": command.Review, "fix": command.Fix, "audit": command.Comment, "security-audit": command.SecurityAudit,
+}
+
 func testGitHub(server *httptest.Server, token string) *github.Client {
 	client := github.New(token)
 	client.BaseURL, client.HTTPClient = server.URL, server.Client()
@@ -85,6 +89,22 @@ func testJob(action command.Action) Job {
 	return job
 }
 
+func auditRunnerJob(t *testing.T) Job {
+	t.Helper()
+	installActionTestSkills(t, testAuditSkillURL)
+	fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
+	job := testJob(command.SecurityAudit)
+	job.Main.Skills = []string{testAuditSkillURL}
+	return job
+}
+
+func assertEmptyDir(t *testing.T, root string) {
+	t.Helper()
+	if entries, err := os.ReadDir(root); err != nil || len(entries) != 0 {
+		t.Fatalf("directory %q not empty: %v, %v", root, entries, err)
+	}
+}
+
 func gitFixtureRemote(t *testing.T, files ...workspace.File) (base, head, remote string) {
 	t.Helper()
 	realGit, err := exec.LookPath("git")
@@ -94,7 +114,7 @@ func gitFixtureRemote(t *testing.T, files ...workspace.File) (base, head, remote
 	root := t.TempDir()
 	source, remote := filepath.Join(root, "source"), filepath.Join(root, "remote.git")
 	scratch := t.TempDir()
-	env := fixtureGitEnv(scratch)
+	env := testsupport.GitEnvironment(scratch)
 	git := func(args ...string) string {
 		t.Helper()
 		cmd := exec.Command(realGit, args...)
@@ -128,7 +148,7 @@ func gitFixtureRemote(t *testing.T, files ...workspace.File) (base, head, remote
 	// Config keys may contain '=' from t.TempDir subtest names; -c key=value cannot encode those keys.
 	rewrite := filepath.Join(root, "gitconfig")
 	git("config", "--file", rewrite, "url."+remote+".insteadOf", "https://github.com/o/r.git")
-	wrapper := fmt.Sprintf("#!/bin/sh\nGIT_ALLOW_PROTOCOL=file exec %s -c %s \"$@\"\n", shellQuote(realGit), shellQuote("include.path="+rewrite))
+	wrapper := fmt.Sprintf("#!/bin/sh\nexec %s -c protocol.https.allow=never -c protocol.http.allow=never -c protocol.ssh.allow=never -c protocol.git.allow=never -c %s \"$@\"\n", shellQuote(realGit), shellQuote("include.path="+rewrite))
 	fakeOnPath(t, "git", wrapper)
 	return base, head, remote
 }
@@ -194,7 +214,7 @@ func forbidNetworkGit(t *testing.T) {
 		t.Fatal(err)
 	}
 	marker := filepath.Join(t.TempDir(), "network-command")
-	script := fmt.Sprintf("#!/bin/sh\nfor arg do\n case \"$arg\" in fetch|clone|push|remote|ls-remote|pull|submodule) printf forbidden > %s; exit 77;; esac\ndone\nexec %s \"$@\"\n", shellQuote(marker), shellQuote(realGit))
+	script := fmt.Sprintf("#!/bin/sh\nfor arg do\n case \"$arg\" in fetch|clone|push|remote|ls-remote|pull|submodule|archive|fetch-pack|send-pack|http-fetch) printf forbidden > %s; exit 77;; esac\ndone\nexec %s \"$@\"\n", shellQuote(marker), shellQuote(realGit))
 	fakeOnPath(t, "git", script)
 	t.Cleanup(func() {
 		if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
@@ -216,7 +236,7 @@ func attachRepository(t *testing.T, job *Job) {
 	git := func(args ...string) []byte {
 		t.Helper()
 		cmd := exec.Command("git", append([]string{"-C", root, "-c", "core.hooksPath=/dev/null"}, args...)...)
-		cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + root, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_ATTR_NOSYSTEM=1", "GIT_NO_LAZY_FETCH=1", "GIT_AUTHOR_DATE=1767225600 +0000", "GIT_COMMITTER_DATE=1767225600 +0000", "GIT_AUTHOR_NAME=Fixture", "GIT_AUTHOR_EMAIL=fixture@example.invalid", "GIT_COMMITTER_NAME=Fixture", "GIT_COMMITTER_EMAIL=fixture@example.invalid"}
+		cmd.Env = append(testsupport.GitEnvironment(root), "GIT_AUTHOR_DATE=1767225600 +0000", "GIT_COMMITTER_DATE=1767225600 +0000", "GIT_AUTHOR_NAME=Fixture", "GIT_AUTHOR_EMAIL=fixture@example.invalid", "GIT_COMMITTER_NAME=Fixture", "GIT_COMMITTER_EMAIL=fixture@example.invalid")
 		var diagnostic bytes.Buffer
 		cmd.Stderr = &diagnostic
 		data, err := cmd.Output()
@@ -294,10 +314,10 @@ func withClaudeCritic(job Job) Job {
 	return job
 }
 
-func cloneFixture(t *testing.T, root string, files ...workspace.File) *gitwork.Checkout {
+func cloneFixture(t *testing.T, root string) *gitwork.Checkout {
 	t.Helper()
 	metadata := func(_ context.Context, sha string) (github.GitTree, error) {
-		return gitTreeFixture(sha, files...), nil
+		return gitTreeFixture(sha), nil
 	}
 	checkout, err := gitwork.Clone(context.Background(), root, "o/r", "main", metadata, true)
 	if err != nil {
@@ -411,10 +431,6 @@ func gitOnlyPath(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return dir
-}
-
-func fixtureGitEnv(scratch string) []string {
-	return append([]string{"PATH=" + os.Getenv("PATH"), "HOME=" + scratch, "TMPDIR=" + scratch, "LC_ALL=C"}, aicli.ModelGitEnvironment()...)
 }
 
 func proposalJSON(answer, refutations string) string {

@@ -367,7 +367,8 @@ func TestRunRejectsUnsafePaths(t *testing.T) {
 	workspace := t.TempDir()
 	outputParent := t.TempDir()
 	output := filepath.Join(outputParent, "reports")
-	if err := os.Mkdir(output, 0700); err != nil {
+	outputChild := filepath.Join(output, "sub")
+	if err := os.MkdirAll(outputChild, 0700); err != nil {
 		t.Fatal(err)
 	}
 	fakeExecutable(t, "claude", "exit 99\n")
@@ -384,6 +385,7 @@ func TestRunRejectsUnsafePaths(t *testing.T) {
 		{name: "read root", dir: workspace, settings: config.ClaudeConfig{ReadOnlyDirs: []string{"/"}}},
 		{name: "read output", dir: workspace, output: output, settings: config.ClaudeConfig{ReadOnlyDirs: []string{output}}, failure: "read-only directory overlaps"},
 		{name: "read output ancestor", dir: workspace, output: output, settings: config.ClaudeConfig{ReadOnlyDirs: []string{outputParent}}, failure: "read-only directory overlaps"},
+		{name: "read inside output", dir: workspace, output: output, settings: config.ClaudeConfig{ReadOnlyDirs: []string{outputChild}}, failure: "read-only directory overlaps"},
 		{name: "read workspace ancestor", dir: workspace, settings: config.ClaudeConfig{ReadOnlyDirs: []string{filepath.Dir(workspace)}}, failure: "read-only directory overlaps"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

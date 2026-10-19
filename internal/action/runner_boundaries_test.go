@@ -64,10 +64,7 @@ func TestRunnerRejectsBlankNoChangeFix(t *testing.T) {
 func TestRunnerAuditCollectionAndNormalizationFailuresAreTerminal(t *testing.T) {
 	for _, stage := range []string{"collection", "normalization"} {
 		t.Run(stage, func(t *testing.T) {
-			installActionTestSkills(t, testAuditSkillURL)
-			fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
-			job := testJob(command.SecurityAudit)
-			job.Main.Skills = []string{testAuditSkillURL}
+			job := auditRunnerJob(t)
 			expected := make(map[string]workspace.File)
 			runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 				for _, file := range auditArtifactsFixture(job, request.dir, "Audit report\n") {
@@ -150,7 +147,7 @@ func TestRunnerCancellationDuringInstalledAuditValidatorPreservesCause(t *testin
 			t.Error(err)
 		}
 	}()
-	script := fmt.Sprintf("#!/bin/sh\nif [ \"$2\" = -e ]; then exit 0; fi\nprintf started > %q\nexec /bin/cat < %q\n", startedPath, holdPath)
+	script := fmt.Sprintf("#!/bin/sh\nif [ \"$2\" = -e ]; then exit 0; fi\nprintf started > %s\nexec /bin/cat < %s\n", shellQuote(startedPath), shellQuote(holdPath))
 	fakeOnPath(t, "node", script)
 	job := testJob(command.SecurityAudit)
 	job.Main.Skills = []string{testAuditSkillURL}
@@ -255,7 +252,7 @@ func TestRunnerStripsNULBeforeCriticAndResult(t *testing.T) {
 					return aicli.Result{Answer: proposalJSON("answer\x00hidden", "")}, nil
 				}
 				criticCalls++
-				if !strings.Contains(request.prompt, "Main model's proposed response (untrusted): "+quotedContext("answerhidden")) || strings.Contains(request.prompt, `answer\u0000hidden`) {
+				if !strings.Contains(request.prompt, "Main model's proposed response (untrusted): "+quotedContext("answerhidden")) {
 					t.Fatal("critic did not receive the normalized publication candidate")
 				}
 				return aicli.Result{Answer: approvedCritiqueJSON}, nil
@@ -365,11 +362,8 @@ func TestRunnerReportsOwnedAndCriticCleanupFailures(t *testing.T) {
 }
 
 func TestRunnerRefusesRenderedReportOverflowBeforeCritic(t *testing.T) {
-	fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
-	installActionTestSkills(t, testAuditSkillURL)
-	job := withClaudeCritic(testJob(command.SecurityAudit))
+	job := withClaudeCritic(auditRunnerJob(t))
 	job.CriticMaxRounds = 1
-	job.Main.Skills = []string{testAuditSkillURL}
 	text := strings.Repeat("a\n", 25000)
 	calls := 0
 	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
@@ -447,9 +441,7 @@ esac
 					t.Fatalf("private-index native refusal lost evidence: %q,%v", stage, err)
 				}
 			}
-			if entries, err := os.ReadDir(root); err != nil || len(entries) != 0 {
-				t.Fatalf("private index preparation leaked: %v,%v", entries, err)
-			}
+			assertEmptyDir(t, root)
 		})
 	}
 }

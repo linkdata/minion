@@ -30,13 +30,16 @@ const (
 	maxUsageScanBytes    = 512 << 20
 )
 
-var errUnverifiedChildren = errors.New("helper agent work did not complete or completion could not be verified")
+var (
+	errUnverifiedChildren = errors.New("helper agent work did not complete or completion could not be verified")
+	errUsageAgentLimit    = fmt.Errorf("%w: Codex usage agent count exceeded the limit", aicli.ErrOutputLimit)
+)
 
 // joinUsageErrors emits exact shared sentinels once across joined usage errors.
-// Wrapped/opaque causes stay intact; sentinels inside them are not rewritten.
+// Multi-error containers are flattened; single-cause wrappers and opaque causes stay intact.
 func joinUsageErrors(errs ...error) error {
 	var causes []error
-	unverified := false
+	unverified, agentLimit := false, false
 	var add func(error)
 	add = func(err error) {
 		if err == nil {
@@ -44,6 +47,10 @@ func joinUsageErrors(errs ...error) error {
 		}
 		if err == errUnverifiedChildren {
 			unverified = true
+			return
+		}
+		if err == errUsageAgentLimit {
+			agentLimit = true
 			return
 		}
 		if joined, ok := err.(interface{ Unwrap() []error }); ok {
@@ -59,6 +66,9 @@ func joinUsageErrors(errs ...error) error {
 	}
 	if unverified {
 		causes = append(causes, errUnverifiedChildren)
+	}
+	if agentLimit {
+		causes = append(causes, errUsageAgentLimit)
 	}
 	return errors.Join(causes...)
 }
@@ -94,7 +104,7 @@ func collectUsageFiles(ctx context.Context, rootID string, fallback *usage.Token
 	var childError error
 	if len(selected) > maxUsageAgents {
 		complete = false
-		childError = fmt.Errorf("%w: Codex usage agent count exceeded the limit", aicli.ErrOutputLimit)
+		childError = errUsageAgentLimit
 	}
 	for _, id := range expectedChildren {
 		if _, selectedChild := selected[id]; !selectedChild {
@@ -523,7 +533,7 @@ func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, 
 			}
 			tokens, valid := rolloutTokens(record.Usage)
 			if capture != nil && record.TurnID != "" && admitTurn(record.TurnID) {
-				capture.rememberTurn(record.TurnID)
+				capture.turns[record.TurnID] = true
 			}
 			if record.SessionID != rootID || record.ResponseID == "" || record.TurnID == "" || !valid {
 				complete = false
@@ -606,7 +616,7 @@ func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, 
 			own := meta.ID == rootID || (!inheritedWithoutBoundary && (meta.HistoryStart == nil || event.Ordinal >= *meta.HistoryStart))
 			if own && (payload.ThreadID == "" || payload.ThreadID == meta.ID) && payload.TurnID != "" {
 				if capture != nil && admitTurn(payload.TurnID) {
-					capture.rememberTurn(payload.TurnID)
+					capture.turns[payload.TurnID] = true
 				}
 				if before != nil && before.turns[payload.TurnID] {
 					continue
@@ -720,7 +730,7 @@ func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, 
 		childError = nil
 	}
 	if tooManyChildren {
-		childError = joinUsageErrors(childError, fmt.Errorf("%w: Codex usage agent count exceeded the limit", aicli.ErrOutputLimit))
+		childError = joinUsageErrors(childError, errUsageAgentLimit)
 	}
 	if !seenRecord {
 		if meta.ID != rootID && !complete {

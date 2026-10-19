@@ -18,6 +18,8 @@ import (
 func TestCheckModelsRequiresOnlySelectedProvider(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "")
 	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "")
+	t.Setenv("CODEX_API_KEY", "")
+	t.Setenv("CODEX_ACCESS_TOKEN", "")
 	for _, key := range []string{"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"} {
 		t.Setenv(key, "")
 	}
@@ -108,5 +110,52 @@ fi
 				}
 			})
 		}
+	}
+}
+
+func TestCheckModelsBoundsResolvedCodexCatalogueModel(t *testing.T) {
+	for _, size := range []int{128, 129} {
+		t.Run(fmt.Sprint(size), func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			for _, key := range []string{"CODEX_HOME", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN"} {
+				t.Setenv(key, "")
+			}
+			model := strings.Repeat("m", size)
+			catalogue := fmt.Sprintf(`{"id":2,"result":{"data":[{"model":%q,"isDefault":true,"defaultReasoningEffort":"medium","supportedReasoningEfforts":[{"reasoningEffort":"medium"}]}]}}`, model)
+			testsupport.FakeOnPath(t, "codex", `#!/bin/sh
+case "$1" in
+login) exit 0 ;;
+debug)
+  text='MINION_TRUSTED_PROMPT_78'
+  if [ ! -f "$PWD/.minion-codex-root" ]; then
+    text="$text MINION_UNTRUSTED_AGENTS_78 MINION_UNTRUSTED_SKILL_78"
+  fi
+  printf '[{"role":"user","content":[{"text":"%s"}]}]\n' "$text"
+  ;;
+app-server)
+  IFS= read -r request
+  printf '%s\n' '{"id":1,"result":{}}'
+  IFS= read -r request
+  IFS= read -r request
+  printf '%s\n' '`+catalogue+`'
+  /bin/cat >/dev/null
+  ;;
+*) exit 90 ;;
+esac
+`)
+			cfg := config.Config{Main: "codex"}
+			var output bytes.Buffer
+			err := checkModels(context.Background(), &cfg, log.New(&output, "", 0))
+			if cfg.Codex.Model != model {
+				t.Fatalf("preflight did not resolve Codex catalogue model: model=%q error=%v", cfg.Codex.Model, err)
+			}
+			if size == 128 {
+				if err != nil {
+					t.Fatalf("exact-limit resolved model rejected: %v", err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), "codex settings: invalid action model or skills") {
+				t.Fatalf("over-limit resolved model reached jobs: %v", err)
+			}
+		})
 	}
 }

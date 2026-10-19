@@ -24,6 +24,7 @@ import (
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/state"
+	"github.com/linkdata/minion/internal/testsupport"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -77,9 +78,7 @@ func TestAlreadyAcknowledgedRequiresOwnTrailingMarker(t *testing.T) {
 			var provenanceCalls int
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
-				case "/repos/o/r/pulls/7":
-					_, _ = fmt.Fprint(w, `{}`)
-				case "/repos/o/r/issues/7/comments", "/repos/o/r/pulls/7/comments":
+				case "/repos/o/r/issues/7/comments":
 					_, _ = fmt.Fprint(w, `[]`)
 				case "/graphql":
 					var input struct {
@@ -243,6 +242,7 @@ func TestReviewEchoDoesNotSuppressSecurityAuditInMonitor(t *testing.T) {
 	}
 	var reviews []github.Review
 	var comments []github.Comment
+	var timelineCalls int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
@@ -253,9 +253,8 @@ func TestReviewEchoDoesNotSuppressSecurityAuditInMonitor(t *testing.T) {
 			writeTreeFixture(t, w, strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/"))
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7/comments":
 			_ = json.NewEncoder(w).Encode(comments)
-		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/pulls/7/comments":
-			_, _ = fmt.Fprint(w, `[]`)
 		case r.Method == http.MethodPost && r.URL.Path == "/graphql":
+			timelineCalls++
 			nodes := make([]map[string]any, 0, len(reviews))
 			for _, review := range reviews {
 				nodes = append(nodes, map[string]any{"id": review.NodeID, "fullDatabaseId": fmt.Sprint(review.ID),
@@ -318,10 +317,10 @@ func TestReviewEchoDoesNotSuppressSecurityAuditInMonitor(t *testing.T) {
 	if _, err := m.RunOnce(context.Background(), store); err != nil {
 		t.Fatal(err)
 	}
-	if reviewRuns != 1 || auditRuns != 1 || len(reviews) != 1 || len(comments) != 1 || len(store.Data.Processed) != 2 ||
+	if timelineCalls != 1 || reviewRuns != 1 || auditRuns != 1 || len(reviews) != 1 || len(comments) != 1 || len(store.Data.Processed) != 2 ||
 		!strings.Contains(reviews[0].Body, auditMarker) || !strings.Contains(comments[0].Body, "Verified audit report") ||
 		!strings.HasSuffix(strings.TrimSpace(comments[0].Body), auditMarker) {
-		t.Fatalf("review echo suppressed audit: reviews=%d audits=%d review posts=%d comments=%d processed=%d; log=%s", reviewRuns, auditRuns, len(reviews), len(comments), len(store.Data.Processed), &journal)
+		t.Fatalf("review echo suppressed audit: timeline calls=%d reviews=%d audits=%d review posts=%d comments=%d processed=%d; log=%s", timelineCalls, reviewRuns, auditRuns, len(reviews), len(comments), len(store.Data.Processed), &journal)
 	}
 	if _, err := command.ParseForLoginCommands(reviews[0].Body, "secondbot", defaultActionTestCommands); !errors.Is(err, command.ErrNoCommand) {
 		t.Fatalf("review relayed a live second-bot command: %v", err)
@@ -374,27 +373,29 @@ func TestFixRefusesIssueEditedAfterRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	if comments != 1 || len(store.Data.PendingFixes) != 0 || !strings.Contains(refusal, "changed after this `fix` request") {
-		t.Fatalf("edited issue created fix state or missed refusal: comments=%d pending=%v", comments, store.Data.PendingFixes)
+		t.Fatalf("edited issue created fix state or missed refusal: comments=%d pending=%v refusal=%q", comments, store.Data.PendingFixes, refusal)
 	}
 }
 
 func TestFixRecoversOnlyRecordedBranch(t *testing.T) {
 	for _, tt := range []struct {
-		name           string
-		remoteSHA      string
-		existingUser   string
-		existingID     int64
-		existingSHA    string
-		oversizedNotes bool
-		wantComment    bool
-		wantError      string
+		name                string
+		remoteSHA           string
+		existingUser        string
+		existingID          int64
+		existingSHA         string
+		oversizedNotes      bool
+		wantComment         bool
+		wantPostPublication bool
+		wantError           string
 	}{
 		{name: "recorded commit", remoteSHA: strings.Repeat("a", 40), wantComment: true},
 		{name: "recorded commit with oversized notes", remoteSHA: strings.Repeat("a", 40), oversizedNotes: true, wantComment: true},
 		{name: "changed branch", remoteSHA: strings.Repeat("b", 40), wantError: "without a matching recorded bot commit"},
-		{name: "other PR creator", remoteSHA: strings.Repeat("a", 40), existingUser: "other-writer", existingID: 8, existingSHA: strings.Repeat("a", 40), wantError: "without matching requester authorship"},
-		{name: "changed PR head", remoteSHA: strings.Repeat("a", 40), existingUser: "writer", existingID: 7, existingSHA: strings.Repeat("b", 40), wantError: "without matching requester authorship"},
-		{name: "bot PR", remoteSHA: strings.Repeat("a", 40), existingUser: "linkdataminion", existingID: 9, existingSHA: strings.Repeat("a", 40), wantError: "without matching requester authorship"},
+		{name: "PR without branch", existingUser: "writer", existingID: 7, existingSHA: strings.Repeat("a", 40), wantError: "has a pull request but no remote branch"},
+		{name: "other PR creator", wantPostPublication: true, remoteSHA: strings.Repeat("a", 40), existingUser: "other-writer", existingID: 8, existingSHA: strings.Repeat("a", 40), wantError: "without matching requester authorship"},
+		{name: "changed PR head", wantPostPublication: true, remoteSHA: strings.Repeat("a", 40), existingUser: "writer", existingID: 7, existingSHA: strings.Repeat("b", 40), wantError: "without matching requester authorship"},
+		{name: "bot PR", wantPostPublication: true, remoteSHA: strings.Repeat("a", 40), existingUser: "linkdataminion", existingID: 9, existingSHA: strings.Repeat("a", 40), wantError: "without matching requester authorship"},
 		{name: "requester PR recovery", remoteSHA: strings.Repeat("a", 40), existingUser: "writer", existingID: 7, existingSHA: strings.Repeat("a", 40), wantComment: true},
 		{name: "renamed requester PR", remoteSHA: strings.Repeat("a", 40), existingUser: "new-login", existingID: 7, existingSHA: strings.Repeat("a", 40), wantComment: true},
 	} {
@@ -490,6 +491,9 @@ func TestFixRecoversOnlyRecordedBranch(t *testing.T) {
 			} else if err != nil {
 				t.Fatal(err)
 			}
+			if errors.Is(err, monitor.ErrPostModelPublication) != tt.wantPostPublication {
+				t.Fatalf("fix() publication classification = %v, want post-publication=%t", err, tt.wantPostPublication)
+			}
 			if (commentBody != "") != tt.wantComment {
 				t.Fatalf("comment = %q, want comment=%t", commentBody, tt.wantComment)
 			}
@@ -520,7 +524,7 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 			scratch := t.TempDir()
 			fixtureGitCommand := func(args ...string) *exec.Cmd {
 				cmd := exec.Command("git", args...)
-				cmd.Env = fixtureGitEnv(scratch)
+				cmd.Env = testsupport.GitEnvironment(scratch)
 				return cmd
 			}
 			fixtureGit := func(args ...string) []byte {
@@ -792,14 +796,20 @@ func TestReviewMarksOnlyPostModelPublicationFailure(t *testing.T) {
 
 func TestFixForkRefusesUnsafePublication(t *testing.T) {
 	for _, tt := range []struct {
-		name, fork, actions, policy, want string
-		baseID                            int64
+		name, base, fork, actions, policy, want, botLogin string
+		baseID                                            int64
 	}{
 		{name: "reclaimed base name", baseID: 9, want: "repository ID or owner ID"},
+		{name: "archived base", base: strings.TrimSuffix(privateRepositoryJSON, "}") + `,"archived":true}`, want: "archived or has no default branch"},
+		{name: "base without default branch", base: strings.Replace(privateRepositoryJSON, `"default_branch":"main"`, `"default_branch":""`, 1), want: "archived or has no default branch"},
+		{name: "bot-owned base", botLogin: "o", want: "requires a separate bot-owned fork"},
+		{name: "empty base visibility", base: strings.Replace(privateRepositoryJSON, `"visibility":"private"`, `"visibility":""`, 1), fork: strings.Replace(privateForkRepositoryJSON, `"visibility":"private"`, `"visibility":""`, 1), want: "matching visibility"},
 		{name: "missing fork", want: "bot-owned fork"},
 		{name: "unrelated repository", fork: `{"id":2,"full_name":"linkdataminion/r","private":true,"visibility":"private"}`, want: "not an active fork"},
-		{name: "different parent ID", fork: `{"id":2,"full_name":"linkdataminion/r","fork":true,"parent":{"id":3,"full_name":"o/r"},"private":true,"visibility":"private"}`, want: "not an active fork"},
-		{name: "public fork of private base", fork: `{"id":2,"full_name":"linkdataminion/r","fork":true,"parent":{"id":1,"full_name":"o/r"},"source":{"id":1,"full_name":"o/r"},"visibility":"public"}`, want: "matching visibility"},
+		{name: "different parent ID", fork: `{"id":2,"full_name":"linkdataminion/r","fork":true,"parent":{"id":3,"full_name":"o/r"},"source":{"id":1,"full_name":"o/r"},"private":true,"visibility":"private"}`, want: "not an active fork"},
+		{name: "public fork of private base", fork: `{"id":2,"full_name":"linkdataminion/r","fork":true,"parent":{"id":1,"full_name":"o/r"},"source":{"id":1,"full_name":"o/r"},"private":true,"visibility":"public"}`, want: "matching visibility"},
+		{name: "private flag mismatch", fork: `{"id":2,"full_name":"linkdataminion/r","fork":true,"parent":{"id":1,"full_name":"o/r"},"source":{"id":1,"full_name":"o/r"},"visibility":"private"}`, want: "matching visibility"},
+		{name: "archived fork", fork: strings.TrimSuffix(privateForkRepositoryJSON, "}") + `,"archived":true}`, want: "not an active fork"},
 		{name: "fork Actions enabled", fork: privateForkRepositoryJSON, actions: `{"enabled":true}`, want: "must be disabled"},
 		{name: "fork Actions status absent", fork: privateForkRepositoryJSON, actions: `{}`, want: "omitted enabled"},
 		{name: "private PR gets secrets", fork: privateForkRepositoryJSON, actions: `{"enabled":false}`, policy: `{"send_write_tokens_to_workflows":false,"send_secrets_and_variables":true}`, want: "secrets or write tokens"},
@@ -810,6 +820,10 @@ func TestFixForkRefusesUnsafePublication(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
 				case "/repos/o/r":
+					if tt.base != "" {
+						_, _ = fmt.Fprint(w, tt.base)
+						return
+					}
 					baseID := tt.baseID
 					if baseID == 0 {
 						baseID = 1
@@ -832,9 +846,13 @@ func TestFixForkRefusesUnsafePublication(t *testing.T) {
 			}))
 			defer server.Close()
 			client := testGitHub(server, "test-token")
+			botLogin := tt.botLogin
+			if botLogin == "" {
+				botLogin = "linkdataminion"
+			}
 			orchestrator := &Orchestrator{
 				GitHub:   client,
-				BotLogin: "linkdataminion",
+				BotLogin: botLogin,
 			}
 			if _, _, err := orchestrator.fixFork(context.Background(), config.Repository{Name: "o/r", ID: 1, OwnerID: 2}); err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("fixFork() = %v, want %q", err, tt.want)
@@ -845,13 +863,15 @@ func TestFixForkRefusesUnsafePublication(t *testing.T) {
 
 func TestFixForkChecksNetworkRootPushRules(t *testing.T) {
 	for _, tt := range []struct {
-		name, forkSource, rootRules, want string
-		rootStatus                        int
-		wantRootQueries                   int
+		name, forkSource, currentRoot, rootRules, want string
+		rootStatus                                     int
+		wantRootQueries                                int
 	}{
 		{name: "no inherited restrictions", wantRootQueries: 1, forkSource: `{"id":9,"full_name":"upstream/r"}`},
 		{name: "root bypass rule", wantRootQueries: 1, forkSource: `{"id":9,"full_name":"upstream/r"}`, rootRules: `[{"id":42}]`, want: "can be bypassed"},
 		{name: "root ruleset API blocked", wantRootQueries: 1, forkSource: `{"id":9,"full_name":"upstream/r"}`, rootStatus: http.StatusForbidden, want: "403"},
+		{name: "root ID changed", forkSource: `{"id":9,"full_name":"upstream/r"}`, currentRoot: `{"id":10,"full_name":"upstream/r"}`, want: "root repository for o/r changed"},
+		{name: "root became a fork", forkSource: `{"id":9,"full_name":"upstream/r"}`, currentRoot: `{"id":9,"full_name":"upstream/r","fork":true}`, want: "root repository for o/r changed"},
 		{name: "fork source mismatch", forkSource: `{"id":8,"full_name":"upstream/r"}`, want: "not an active fork"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -864,7 +884,11 @@ func TestFixForkChecksNetworkRootPushRules(t *testing.T) {
 				case "/repos/o/r":
 					_, _ = fmt.Fprint(w, `{"id":1,"full_name":"o/r","owner":{"id":2,"login":"o"},"fork":true,"source":{"id":9,"full_name":"upstream/r"},"default_branch":"main","private":true,"visibility":"private"}`)
 				case "/repos/upstream/r":
-					_, _ = fmt.Fprint(w, `{"id":9,"full_name":"upstream/r","private":true,"visibility":"private"}`)
+					if tt.currentRoot != "" {
+						_, _ = fmt.Fprint(w, tt.currentRoot)
+					} else {
+						_, _ = fmt.Fprint(w, `{"id":9,"full_name":"upstream/r","private":true,"visibility":"private"}`)
+					}
 				case "/repos/linkdataminion/r":
 					_, _ = fmt.Fprintf(w, `{"id":2,"full_name":"linkdataminion/r","fork":true,"parent":{"id":1,"full_name":"o/r"},"source":%s,"private":true,"visibility":"private"}`, tt.forkSource)
 				case "/repos/upstream/r/rulesets":

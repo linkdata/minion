@@ -199,7 +199,6 @@ func TestImportAttestsUnsortedBinaryEmptyModeAndDeletionChanges(t *testing.T) {
 
 func TestSourceAliasesAreUnsupportedForDefaultAndPullRequestCheckout(t *testing.T) {
 	const path = "git~1/hooks/test"
-	t.Parallel()
 	fixture := newFixture(t)
 	alias := filepath.Join(fixture.source, filepath.FromSlash(path))
 	writeFile(t, alias, "not Git metadata")

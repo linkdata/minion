@@ -27,6 +27,7 @@ type notificationCall struct {
 	since time.Time
 }
 
+// Most fake methods return their configured result even after cancellation, exercising the monitor's post-call guards.
 type fakeGitHub struct {
 	notifications      []github.Notification
 	notificationErrors map[string]error
@@ -324,15 +325,19 @@ func openStateAt(t *testing.T, path string, initial time.Time) *state.Store {
 	return s
 }
 
+func advanceToRetry(clock time.Time, store *state.Store) time.Time {
+	clock = clock.Add(time.Minute)
+	for _, pending := range store.Data.PendingNotifications {
+		clock = pending.RetryAt
+	}
+	return clock
+}
+
 func TestRunOnceKeepsFailedRepositoryWindowAndRetriesPendingThreads(t *testing.T) {
 	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
 	initial := now.Add(-time.Minute)
 	path := filepath.Join(t.TempDir(), "state.json")
-	store, err := state.Open(path, initial)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
+	store := openStateAt(t, path, initial)
 
 	notification := func(repo string, number int, at time.Time) github.Notification {
 		return github.Notification{
@@ -378,10 +383,7 @@ func TestRunOnceKeepsFailedRepositoryWindowAndRetriesPendingThreads(t *testing.T
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	store, err = state.Open(path, initial)
-	if err != nil {
-		t.Fatal(err)
-	}
+	store = openStateAt(t, path, initial)
 	gh.notificationErrors = nil
 	gh.notifications = append(gh.notifications, notification("a/one", 9, now.Add(30*time.Second)))
 	clock = now.Add(time.Minute)
@@ -528,10 +530,7 @@ func TestRunOnceBoundsFailedExecutions(t *testing.T) {
 				if len(handler.jobs) != attempt {
 					t.Fatalf("attempt %d executed %d jobs", attempt, len(handler.jobs))
 				}
-				clock = clock.Add(time.Minute)
-				for _, pending := range store.Data.PendingNotifications {
-					clock = pending.RetryAt
-				}
+				clock = advanceToRetry(clock, store)
 			}
 			if len(gh.comments) != 1 || !strings.HasSuffix(gh.comments[0].Body, "\n\n"+handler.jobs[0].Marker()) {
 				t.Fatalf("failure reply missing job marker: %+v", gh.comments)
@@ -572,10 +571,7 @@ func TestRunOnceDoesNotExhaustJobsDuringInfrastructureFailure(t *testing.T) {
 				if _, err := m.RunOnce(context.Background(), store); err == nil {
 					t.Fatal("infrastructure failure was not surfaced")
 				}
-				clock = clock.Add(time.Minute)
-				for _, pending := range store.Data.PendingNotifications {
-					clock = pending.RetryAt
-				}
+				clock = advanceToRetry(clock, store)
 			}
 			if len(handler.jobs) != maxJobAttempts+1 || len(gh.comments) != 0 || len(store.Data.Processed) != 0 || store.Data.JobFailures[handler.jobs[0].ID].Attempts != 0 {
 				t.Fatalf("temporary outage consumed retry limit: jobs=%d comments=%d state=%+v", len(handler.jobs), len(gh.comments), store.Data)
@@ -634,10 +630,7 @@ func TestRunOnceBoundsPublicationFailuresAfterModel(t *testing.T) {
 		if attempt < maxJobAttempts && store.Data.JobFailures[handler.jobs[0].ID].Attempts != attempt {
 			t.Fatalf("publication failure refunded attempt %d: %+v", attempt, store.Data.JobFailures)
 		}
-		clock = clock.Add(time.Minute)
-		for _, pending := range store.Data.PendingNotifications {
-			clock = pending.RetryAt
-		}
+		clock = advanceToRetry(clock, store)
 	}
 	if len(gh.comments) != 1 || len(store.Data.Processed) != 1 {
 		t.Fatalf("publication failure did not finish: comments=%d state=%+v", len(gh.comments), store.Data)
@@ -695,10 +688,7 @@ func TestRunOnceStopsAfterFailedReplyAttempts(t *testing.T) {
 				t.Fatalf("failure disposition was not saved: %+v", failure)
 			}
 		}
-		clock = clock.Add(time.Minute)
-		for _, pending := range store.Data.PendingNotifications {
-			clock = pending.RetryAt
-		}
+		clock = advanceToRetry(clock, store)
 	}
 	if len(handler.jobs) != 1 || gh.commentCalls != maxFailureReplyAttempts || len(store.Data.Processed) != 1 || !store.Data.Cursor.After(now.Add(-time.Minute)) {
 		t.Fatalf("failed reply pinned job: jobs=%d replies=%d state=%+v", len(handler.jobs), gh.commentCalls, store.Data)
@@ -809,10 +799,7 @@ func TestRunOnceRetriesFailedThreadAfterCursorAdvances(t *testing.T) {
 	cfg.Repositories = append(cfg.Repositories, config.Repository{Name: "other/repo", ID: 1, OwnerID: 4, Actions: []string{"review"}})
 	var logs bytes.Buffer
 	path := filepath.Join(t.TempDir(), "state.json")
-	store, err := state.Open(path, initial)
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := openStateAt(t, path, initial)
 	clock := now
 	m := &Monitor{Config: cfg, GitHub: gh, Handler: &fakeHandler{}, Logger: log.New(&logs, "", 0), Now: func() time.Time { return clock }}
 	if _, err := m.RunOnce(context.Background(), store); err == nil || !strings.Contains(err.Error(), badItem.HTMLURL) {
@@ -824,15 +811,7 @@ func TestRunOnceRetriesFailedThreadAfterCursorAdvances(t *testing.T) {
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	store, err = state.Open(path, initial)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := store.Close(); err != nil {
-			t.Error(err)
-		}
-	}()
+	store = openStateAt(t, path, initial)
 	gh.notifications = nil
 	clock = clock.Add(time.Minute)
 	if _, err := m.RunOnce(context.Background(), store); err == nil {
@@ -1234,7 +1213,7 @@ func TestReclaimedRepositoryCannotTriggerCommandOrRetry(t *testing.T) {
 		{"live owner ID", func(gh *fakeGitHub, _ *state.Store) {
 			gh.liveRepo = &github.Repository{ID: 1, Owner: github.User{ID: 9}}
 		}},
-		{"legacy pending retry", func(gh *fakeGitHub, store *state.Store) {
+		{"pending retry without IDs", func(gh *fakeGitHub, store *state.Store) {
 			gh.notifications = nil
 			notification := testNotification(now)
 			store.Data.PendingNotifications[notificationKey(notification)] = state.PendingNotification{
@@ -1325,8 +1304,12 @@ func TestReclaimedInvitationOwnerCannotRegisterOrAccept(t *testing.T) {
 }
 
 func TestRunOnceCountsInternalCancellation(t *testing.T) {
-	for _, terminal := range []bool{false, true} {
-		t.Run(fmt.Sprint(terminal), func(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		terminal bool
+	}{{"retryable", false}, {"terminal", true}} {
+		t.Run(test.name, func(t *testing.T) {
+			terminal := test.terminal
 			now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
 			item := github.Item{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}, HTMLURL: "https://github.com/example-owner/example-repo/pull/7#issuecomment-1"}
 			gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}, items: []github.Item{item}, permission: github.Permission{Permission: "write"}}

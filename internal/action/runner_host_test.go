@@ -124,12 +124,10 @@ func TestRunnerEnforcesSuppliedRuntimeBudget(t *testing.T) {
 			parent, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			job := testJob(action)
-			job.RuntimeBudget = 2 * time.Second
 			if action == command.SecurityAudit {
-				installActionTestSkills(t, testAuditSkillURL)
-				job.Main.Skills = []string{testAuditSkillURL}
-				fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
+				job = auditRunnerJob(t)
 			}
+			job.RuntimeBudget = 2 * time.Second
 			calls := 0
 			var reports string
 			root := t.TempDir()
@@ -160,9 +158,7 @@ func TestRunnerEnforcesSuppliedRuntimeBudget(t *testing.T) {
 					t.Fatalf("expired audit lost final diagnostic or pre-cleanup artifact: %+v", result)
 				}
 			}
-			if entries, err := os.ReadDir(root); err != nil || len(entries) != 0 {
-				t.Fatalf("expired execution left workspaces: %v,%v", entries, err)
-			}
+			assertEmptyDir(t, root)
 		})
 	}
 }
@@ -192,7 +188,7 @@ func TestRunnerOmittedSourceWriteIsTerminal(t *testing.T) {
 		return aicli.Result{Answer: "Done."}, nil
 	}}
 	result, err := runner.Run(context.Background(), job)
-	if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "omitted source path") {
+	if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "omitted source path") || len(result.Calls) != 1 || len(result.Changes) != 0 {
 		t.Fatalf("omitted write must not rerun the model: %v", err)
 	}
 	if err := result.validate(job, false); err != nil {

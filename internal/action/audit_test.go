@@ -83,7 +83,9 @@ func TestSecurityAuditIssueAndPullRequest(t *testing.T) {
 					}
 				case r.Method == http.MethodPost && r.URL.Path == "/graphql":
 					if len(comments) != 1 {
-						t.Fatalf("provenance requested before audit comment: %+v", comments)
+						t.Errorf("provenance requested before audit comment: %+v", comments)
+						http.Error(w, "early provenance", http.StatusInternalServerError)
+						return
 					}
 					_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"node": map[string]any{"body": comments[0].Body, "author": map[string]string{"login": "linkdataminion"}}}})
 				case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/issues/7/comments":
@@ -115,11 +117,6 @@ func TestSecurityAuditIssueAndPullRequest(t *testing.T) {
 			installActionTestSkills(t, testAuditSkillURL)
 			skillDir := filepath.Join(os.Getenv("HOME"), ".agents", "skills", "security-audit")
 			skill := filepath.Join(skillDir, "SKILL.md")
-			for _, name := range []string{"validate-findings.cjs", "validate-coverage-ledger.cjs"} {
-				if err := os.WriteFile(filepath.Join(skillDir, name), []byte(`const fs = require('fs'); if (!Array.isArray(JSON.parse(fs.readFileSync(process.argv[2], 'utf8')))) process.exit(1);`), 0600); err != nil {
-					t.Fatal(err)
-				}
-			}
 			var calls int
 			var sourceDir, reportsDir string
 			e := &Orchestrator{WorkRoot: t.TempDir(), GitHub: client,
@@ -338,7 +335,6 @@ JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 	validate("run-metadata.json is missing or empty")
 	write("run-metadata.json", strings.Replace(metadata, `"complete"`, `"incomplete"`, 1))
 	validate("complete standard run")
-	write("run-metadata.json", metadata)
 	write("run-metadata.json", strings.Replace(metadata, `"budget":null,`, "", 1))
 	validate("complete standard run")
 	write("run-metadata.json", strings.Replace(metadata, `"run-metadata.json":"parent",`, "", 1))
@@ -351,6 +347,8 @@ JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 	validate("no coverage units")
 	write("coverage-ledger.json", `[{"status":"planned"}]`)
 	validate("unfinished planned unit")
+	write("coverage-ledger.json", `[{"status":"in_progress"}]`)
+	validate("unfinished in_progress unit")
 	write("coverage-ledger.json", `[{"status":"blocked"}]`)
 	validate("")
 	write("coverage-ledger.json", `[{"status":"deferred"}]`)

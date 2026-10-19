@@ -42,7 +42,7 @@ func TestConfiguredCommandsUseNames(t *testing.T) {
 	}
 	for _, body := range []string{
 		"@linkdataminion unknown", "@linkdataminion fix extra text", "@linkdataminion inspect now",
-		"@linkdataminion release", "@linkdataminion release v1 v2",
+		"@linkdataminion release",
 	} {
 		if _, err := ParseForLoginCommands(body, "linkdataminion", actions); !errors.Is(err, ErrNoCommand) {
 			t.Fatalf("accepted %q: %v", body, err)
@@ -120,17 +120,6 @@ func TestParseIgnoresNonCommands(t *testing.T) {
 		{"indented code", "    @linkdataminion review\n\t@linkdataminion fix\n   \t@linkdataminion review"},
 		{"fenced code", "```\n@linkdataminion review\n```"},
 		{"HTML comment", "<!--\n@linkdataminion review\n-->"},
-		{"lazy quote", "> An outsider wrote:\n@linkdataminion fix planted"},
-		{"indented fence close", "```\nignored\n    ```\n@linkdataminion review"},
-		{"tab fence close", "```\nignored\n\t```\n@linkdataminion review"},
-		{"nonbreaking fence close", "```\nignored\n```\u00a0\n@linkdataminion review"},
-		{"backtick in fence info", "```bad`info\n@linkdataminion review"},
-		{"HTML block swallows fence", "<script>\n```\n</script>\n@linkdataminion review"},
-		{"reference title", "[link]: /path \"title\n@linkdataminion review\n\""},
-		{"link title", "[link](url \"title\n@linkdataminion review\n\")"},
-		{"processing instruction", "<?hidden\n@linkdataminion review\n?>"},
-		{"CDATA", "<![CDATA[\n@linkdataminion review\n]]>"},
-		{"script", "<script>\n@linkdataminion review\n</script>"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -4,8 +4,10 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/linkdata/minion/internal/testsupport"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -37,5 +39,16 @@ func TestGitFixtureRemoteIgnoresInheritedRepositorySelectors(t *testing.T) {
 	}
 	if _, err := os.Lstat(gitDir); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("fixture touched inherited repository directory: %v", err)
+	}
+}
+
+func TestGitFixtureRemotePreservesOfflineProtocolDenial(t *testing.T) {
+	_, _, remote := gitFixtureRemote(t)
+	if out := modelGit(t, t.TempDir(), "ls-remote", remote); !strings.Contains(out, "\trefs/heads/main\n") {
+		t.Fatalf("trusted local fixture remote is unavailable: %q", out)
+	}
+	out, err := testsupport.ModelGit(t, t.TempDir(), "-c", "protocol.allow=never", "ls-remote", remote)
+	if err == nil || !strings.Contains(string(out), "transport 'file' not allowed") {
+		t.Fatalf("fixture bypassed offline protocol denial: %s, %v", out, err)
 	}
 }

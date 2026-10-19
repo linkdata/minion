@@ -61,7 +61,7 @@ func TestPrivateHostPathsCannotBeExposedByModelGrants(t *testing.T) {
 					} else {
 						runner.Claude.Skills, runner.Claude.ReadOnlyDirs = []string{skill}, []string{test.grant}
 					}
-					if err := runner.CheckPrivatePaths([]string{test.protected}, provider); (err != nil) != test.refuse {
+					if err := runner.CheckPrivatePaths([]string{test.protected}, provider); (err != nil) != test.refuse || (test.refuse && err != nil && !strings.Contains(err.Error(), "is visible through model filesystem grant")) {
 						t.Fatalf("private-path admission error=%v want refusal=%t", err, test.refuse)
 					}
 				})
@@ -195,7 +195,12 @@ func TestPrivateReviewRejectsChangedSavedCheckpoint(t *testing.T) {
 			case "calls":
 				saved.Calls[1].HasBlockers, saved.Calls[1].NoBlockers = false, true
 			case "symlink":
-				writeFixtureFile(t, filepath.Dir(outside), filepath.Base(outside), []byte("outside sentinel"))
+				var err error
+				data, err = json.Marshal(saved)
+				if err != nil {
+					t.Fatal(err)
+				}
+				writeFixtureFile(t, filepath.Dir(outside), filepath.Base(outside), data)
 				if err := os.Remove(path); err != nil {
 					t.Fatal(err)
 				}
@@ -228,8 +233,8 @@ func TestPrivateReviewRejectsChangedSavedCheckpoint(t *testing.T) {
 				}
 			}
 			if kind == "symlink" {
-				if data, err := os.ReadFile(outside); err != nil || string(data) != "outside sentinel" {
-					t.Fatalf("outside checkpoint touched: %q,%v", data, err)
+				if got, err := os.ReadFile(outside); err != nil || string(got) != string(data) {
+					t.Fatalf("outside checkpoint touched: %q,%v", got, err)
 				}
 			}
 		})

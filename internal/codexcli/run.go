@@ -204,7 +204,7 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	s.accounting.begin(ctx, codexHome, s.threadID, started)
 	runErr := cmd.Run()
 	if cmd.Process == nil {
-		return aicli.Result{UsageComplete: true}, fmt.Errorf("codex exec: %w", errors.Join(ctx.Err(), runErr))
+		return result, fmt.Errorf("codex exec: %w", runErr)
 	}
 	s.used = true
 	output.stream.Finish()

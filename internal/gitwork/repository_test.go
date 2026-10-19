@@ -585,6 +585,7 @@ func TestRepositoryDigestEntryLimitCountsRoot(t *testing.T) {
 }
 
 func TestRepositoryDigestIgnoresCreationOrder(t *testing.T) {
+	// Sorting coverage depends on the filesystem enumerating these directories differently.
 	var previous [sha256.Size]byte
 	for i, names := range [][]string{{"z/second", "a/first"}, {"a/first", "z/second"}} {
 		dir := t.TempDir()

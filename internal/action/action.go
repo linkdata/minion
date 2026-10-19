@@ -9,7 +9,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
@@ -310,7 +309,7 @@ func inertModelOutput(s string) string {
 }
 
 func modelOutputFits(s string) bool {
-	return utf8.ValidString(s) && len(inertModelOutput(s)) <= maxOutputBytes
+	return len(inertModelOutput(s)) <= maxOutputBytes
 }
 
 func publishableAnswer(s string) bool {

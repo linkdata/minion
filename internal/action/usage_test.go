@@ -144,7 +144,6 @@ func TestUsageAccumulatesCriticRevisions(t *testing.T) {
 
 func TestUsagePersistenceFailureStopsModelsOrPublication(t *testing.T) {
 	modelErr := errors.New("model error")
-	const provider = "codex"
 	for _, tt := range []struct {
 		name     string
 		before   bool
@@ -154,7 +153,7 @@ func TestUsagePersistenceFailureStopsModelsOrPublication(t *testing.T) {
 		{"before call", true, modelErr, false}, {"after failed call", false, modelErr, false}, {"after successful call", false, nil, false},
 		{"after critic call", false, nil, true},
 	} {
-		t.Run(provider+"/"+tt.name, func(t *testing.T) {
+		t.Run(tt.name, func(t *testing.T) {
 			root := t.TempDir()
 			originalDir, blocked := filepath.Join(root, "usage"), filepath.Join(root, "blocked")
 			if err := os.WriteFile(blocked, []byte("not a directory"), 0600); err != nil {
@@ -162,7 +161,7 @@ func TestUsagePersistenceFailureStopsModelsOrPublication(t *testing.T) {
 			}
 			store := &usage.Store{Dir: originalDir}
 			calls := 0
-			tracked := attemptFixture(&Orchestrator{Usage: store, Main: provider, Runner: Runner{runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+			tracked := attemptFixture(&Orchestrator{Usage: store, Main: "codex", Runner: Runner{runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 				calls++
 				if tt.critic && request.role == roleMain {
 					return aicli.Result{Answer: proposalJSON("Candidate answer", ""), Tokens: usage.Tokens{Input: 10, Output: 2}, UsageComplete: true}, nil
@@ -181,7 +180,6 @@ func TestUsagePersistenceFailureStopsModelsOrPublication(t *testing.T) {
 				store.Dir = blocked
 			}
 			job := testJob(command.Comment)
-			job.Main.Provider = provider
 			if tt.critic {
 				job = withClaudeCritic(job)
 			}
@@ -239,7 +237,9 @@ func TestExecuteRecordsNoModelAndSkipsAcknowledged(t *testing.T) {
 					}
 				case r.Method == http.MethodPost && r.URL.Path == "/graphql":
 					if len(comments) != 1 {
-						t.Fatalf("provenance requested before completion reply: %+v", comments)
+						t.Errorf("provenance requested before completion reply: %+v", comments)
+						http.Error(w, "early provenance", http.StatusInternalServerError)
+						return
 					}
 					_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"node": map[string]any{"body": comments[0].Body, "author": map[string]string{"login": "bot"}}}})
 				case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/issues/7/comments":
@@ -343,7 +343,7 @@ printf '%%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"
 		t.Fatal(err)
 	}
 	installed := filepath.Join(os.Getenv("HOME"), ".agents", "skills", "ponytail-review", "SKILL.md")
-	if !strings.Contains(string(args), ".minion-context-") || !strings.Contains(string(prompt), installed) {
+	if !strings.Contains(string(args), ".minion-context-") || !strings.Contains(string(prompt), installed) || !strings.Contains(string(args), "--model\nportable-model\n") || !strings.Contains(string(args), `model_reasoning_effort="high"`) || strings.Contains(string(args), "stale-host-model") {
 		t.Fatalf("usage wrapper lost worker context or skills: args=%s prompt=%s", args, prompt)
 	}
 	records, err := usage.ReadAll(store.Dir)

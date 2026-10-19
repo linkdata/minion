@@ -5,6 +5,8 @@ scratch directory and the fixed identity/date below. The expected HEAD is
 ```sh
 (
 set -eu
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY
+unset GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT
 fixture=$(mktemp -d)
 trap 'rm -rf "$fixture"' EXIT
 export HOME="$fixture" XDG_CONFIG_HOME="$fixture"

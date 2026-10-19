@@ -12,13 +12,21 @@ import (
 	"github.com/linkdata/minion/internal/config"
 )
 
+func isolateHostPaths(t *testing.T, home string) {
+	t.Helper()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", t.TempDir())
+	for _, key := range []string{"XDG_CONFIG_HOME", "GH_CONFIG_DIR", "CODEX_HOME", "CLAUDE_CONFIG_DIR"} {
+		t.Setenv(key, "")
+	}
+}
+
 func TestWorkRootPreflightRefusesModelGrants(t *testing.T) {
 	const source = "https://github.com/owner/repo/tree/pinned/skills/example"
 	for _, kind := range []string{"required skill", "critic optional skill", "symlink root", "resolved Codex binary", "resolved Claude binary"} {
 		t.Run(kind, func(t *testing.T) {
 			root := t.TempDir()
-			t.Setenv("HOME", root)
-			t.Setenv("PATH", t.TempDir())
+			isolateHostPaths(t, root)
 			cfg := config.Config{Main: "codex", Adversarial: "claude", WorkRoot: filepath.Join(root, "work")}
 			if err := os.Mkdir(cfg.WorkRoot, 0700); err != nil {
 				t.Fatal(err)
@@ -85,38 +93,31 @@ func TestWorkRootPreflightRefusesModelGrants(t *testing.T) {
 
 func TestWorkRootPreflightKeepsMissingSkillsDisabled(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("HOME", root)
-	t.Setenv("PATH", t.TempDir())
+	isolateHostPaths(t, root)
 	cfg := config.Config{Main: "codex", WorkRoot: root, Commands: map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{"https://github.com/owner/repo/tree/pinned/skills/missing"}}}, AlwaysOnSkills: []string{"https://github.com/owner/repo/tree/pinned/skills/optional"}}
 	if err := checkIsolation(cfg, filepath.Join(root, "config.json")); err != nil {
 		t.Fatalf("missing/unselected skills changed startup: %v", err)
-	}
-	installed, err := cfg.CommandInstalled("review")
-	if err != nil || installed {
-		t.Fatalf("missing command no longer disabled: installed=%t err=%v", installed, err)
 	}
 }
 
 func TestWorkRootPreflightRequiresWorkspaceBackend(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("HOME", root)
-	t.Setenv("PATH", t.TempDir())
+	isolateHostPaths(t, root)
 	file := filepath.Join(root, "not-a-directory")
 	if err := os.WriteFile(file, nil, 0600); err != nil {
 		t.Fatal(err)
 	}
 	err := checkIsolation(config.Config{Main: "codex", WorkRoot: file}, filepath.Join(root, "config.json"))
-	if err == nil || (!errors.Is(err, syscall.ENOTDIR) && !strings.Contains(err.Error(), "requires Linux")) {
+	if !errors.Is(err, syscall.ENOTDIR) {
 		t.Fatalf("startup did not enforce the workspace backend: %v", err)
 	}
 }
 
 func TestWorkRootPreflightProtectsConfigurationAndCredentials(t *testing.T) {
-	for _, kind := range []string{"config", "codex home", "claude home", "unused claude home", "credential alias", "gh home", "default gh home", "gh credential alias"} {
+	for _, kind := range []string{"clean", "config", "codex home", "claude home", "unused claude home", "credential alias", "gh home", "default gh home", "gh credential alias"} {
 		t.Run(kind, func(t *testing.T) {
 			root := t.TempDir()
-			t.Setenv("HOME", root)
-			t.Setenv("PATH", t.TempDir())
+			isolateHostPaths(t, root)
 			work, public, native := filepath.Join(root, "work"), filepath.Join(root, "public"), filepath.Join(root, "native")
 			for _, dir := range []string{work, public, native} {
 				if err := os.Mkdir(dir, 0700); err != nil {
@@ -163,6 +164,13 @@ func TestWorkRootPreflightProtectsConfigurationAndCredentials(t *testing.T) {
 			if err := os.WriteFile(configPath, []byte("fixture only"), 0600); err != nil {
 				t.Fatal(err)
 			}
+			if kind == "clean" {
+				if err := checkIsolation(cfg, configPath); err != nil {
+					t.Fatalf("non-exposed private paths rejected: %v", err)
+				}
+				return
+			}
+
 			if err := checkIsolation(cfg, configPath); err == nil || !strings.Contains(err.Error(), "private host path") {
 				t.Fatalf("preflight accepted exposed %s: %v", kind, err)
 			}
@@ -177,8 +185,7 @@ func TestWorkRootPreflightRequiresGlobalClaudeHomeWithExplicitNativeHomes(t *tes
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			root := t.TempDir()
-			t.Setenv("HOME", test.home)
-			t.Setenv("PATH", t.TempDir())
+			isolateHostPaths(t, test.home)
 			t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 			t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 			t.Setenv("GH_CONFIG_DIR", filepath.Join(root, "gh"))
@@ -201,8 +208,7 @@ func TestPrivatePathsRejectAliasesIntoSelectedInstalledSkill(t *testing.T) {
 		for _, kind := range []string{"config", "credential"} {
 			t.Run(provider+"/"+kind, func(t *testing.T) {
 				root := t.TempDir()
-				t.Setenv("HOME", root)
-				t.Setenv("PATH", t.TempDir())
+				isolateHostPaths(t, root)
 				for key, name := range map[string]string{"CODEX_HOME": "codex", "CLAUDE_CONFIG_DIR": "claude", "GH_CONFIG_DIR": "gh", "XDG_CONFIG_HOME": "config"} {
 					t.Setenv(key, filepath.Join(root, name))
 				}
@@ -218,9 +224,8 @@ func TestPrivatePathsRejectAliasesIntoSelectedInstalledSkill(t *testing.T) {
 					}
 				}
 				for name, data := range map[string]string{
-					"SKILL.md":             "Test skill.\n",
-					".minion-install.json": fmt.Sprintf(`{"url":%q,"commit":%q}`, source, strings.Repeat("a", 40)),
-					"fixture-data":         "Synthetic fixture only.\n",
+					"SKILL.md":     "Test skill.\n",
+					"fixture-data": "Synthetic fixture only.\n",
 				} {
 					if err := os.WriteFile(filepath.Join(skill, name), []byte(data), 0600); err != nil {
 						t.Fatal(err)
@@ -233,6 +238,13 @@ func TestPrivatePathsRejectAliasesIntoSelectedInstalledSkill(t *testing.T) {
 					privatePath = configPath
 				}
 				if err := os.Symlink(filepath.Join(skill, "fixture-data"), privatePath); err != nil {
+					t.Fatal(err)
+				}
+				if err := checkIsolation(cfg, configPath); err != nil {
+					t.Fatalf("uninstalled skill changed admission: %v", err)
+				}
+				metadata := fmt.Sprintf(`{"url":%q,"commit":%q}`, source, strings.Repeat("a", 40))
+				if err := os.WriteFile(filepath.Join(skill, ".minion-install.json"), []byte(metadata), 0600); err != nil {
 					t.Fatal(err)
 				}
 				if err := checkIsolation(cfg, configPath); err == nil || !strings.Contains(err.Error(), "private host path") {

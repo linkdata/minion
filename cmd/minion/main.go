@@ -79,14 +79,16 @@ func run() int {
 	}
 	logCommandSkills(cfg, logger)
 	checkWorkRoot := func() error {
-		return workroot.Check(cfg.WorkRoot, cfg.StatePath, cfg.WorkRootMaxBytes)
+		if err := workroot.Check(cfg.WorkRoot, cfg.StatePath, cfg.WorkRootMaxBytes); err != nil {
+			return err
+		}
+		if err := checkIsolation(cfg, loadedPath); err != nil {
+			return fmt.Errorf("%w: %w", workroot.ErrUnsafe, err)
+		}
+		return nil
 	}
 	if err := checkWorkRoot(); err != nil {
 		logger.Printf("work root: %v", err)
-		return 1
-	}
-	if err := checkIsolation(cfg, loadedPath); err != nil {
-		logger.Printf("isolation: %v", err)
 		return 1
 	}
 	var store *state.Store
@@ -301,6 +303,8 @@ func githubToken(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
 	output, err := aicli.Probe(ctx, binary, "gh", []string{"auth", "token", "--hostname", "github.com"}, "", nil, "")
 	if err != nil {
 		return "", fmt.Errorf("gh auth token failed: %w", err)

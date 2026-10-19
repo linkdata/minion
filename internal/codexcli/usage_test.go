@@ -185,7 +185,10 @@ func TestCollectUsagePartialRunsPreserveKnownTokens(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			home := t.TempDir()
-			events := []string{usageEvent("task_started", "root-turn"), usageRecord("root", "root-turn", "known", 60, 40, 3), test.ending}
+			events := []string{usageEvent("task_started", "root-turn"), usageRecord("root", "root-turn", "known", 60, 40, 3)}
+			if test.ending != "" {
+				events = append(events, test.ending)
+			}
 			if test.name != "interrupted" && test.name != "unterminated" {
 				events = append(events, usageEvent("task_complete", "root-turn"))
 			}
@@ -299,9 +302,9 @@ func TestCollectUsageBoundsScanningAndHonorsCancellation(t *testing.T) {
 	})
 	t.Run("bytes", func(t *testing.T) {
 		budget := int64(10)
-		_, complete, _, _ := readRolloutUsage(context.Background(), rolloutMeta{ID: "root", path: root}, "root", &budget)
-		if complete || budget != 0 {
-			t.Fatalf("limited rollout scan = complete=%t budget=%d; want incomplete and exhausted", complete, budget)
+		_, complete, _, err := readRolloutUsage(context.Background(), rolloutMeta{ID: "root", path: root}, "root", &budget)
+		if complete || budget != 0 || err != nil {
+			t.Fatalf("limited rollout scan = complete=%t budget=%d err=%v; want incomplete and exhausted", complete, budget, err)
 		}
 	})
 	t.Run("files", func(t *testing.T) {
@@ -333,10 +336,10 @@ func TestRolloutUsageSkipsOversizedLinesAndDebitsBytes(t *testing.T) {
 		t.Fatal(err)
 	}
 	budget := info.Size() + 1024
-	got, complete, children, _ := readRolloutUsage(context.Background(), rolloutMeta{ID: "root", path: root}, "root", &budget)
+	got, complete, children, err := readRolloutUsage(context.Background(), rolloutMeta{ID: "root", path: root}, "root", &budget)
 	want := usage.Tokens{Input: 30, CachedInput: 15, Output: 3}
-	if got != want || complete || budget != 1024 || len(children) != 1 || children[0] != "late-child" {
-		t.Fatalf("skipped line lost later usage/spawn or bytes: got=%+v complete=%t budget=%d children=%v", got, complete, budget, children)
+	if got != want || complete || budget != 1024 || len(children) != 1 || children[0] != "late-child" || err != nil {
+		t.Fatalf("skipped line lost later usage/spawn or bytes: got=%+v complete=%t budget=%d children=%v err=%v", got, complete, budget, children, err)
 	}
 	writeUsageRollout(t, home, "late-child", "root", usageEvent("task_started", "child-turn"),
 		usageRecord("late-child", "child-turn", "child-response", 40, 2, 4), usageEvent("task_complete", "child-turn"))
@@ -388,9 +391,9 @@ func TestOversizedRolloutStillExhaustsOriginalBudget(t *testing.T) {
 		usageRecord("root", "turn", "before", 10, 0, 1), strings.Repeat("x", 2*aicli.MaxEventBytes+1),
 		usageRecord("root", "turn", "unreachable", 1000, 0, 100), usageEvent("task_complete", "turn"))
 	budget := int64(aicli.MaxEventBytes + (256 << 10))
-	got, complete, _, _ := readRolloutUsage(context.Background(), rolloutMeta{ID: "root", path: path}, "root", &budget)
-	if got != (usage.Tokens{Input: 10, Output: 1}) || complete || budget != 0 {
-		t.Fatalf("oversized discard bypassed budget: got=%+v complete=%t budget=%d", got, complete, budget)
+	got, complete, _, err := readRolloutUsage(context.Background(), rolloutMeta{ID: "root", path: path}, "root", &budget)
+	if got != (usage.Tokens{Input: 10, Output: 1}) || complete || budget != 0 || err != nil {
+		t.Fatalf("oversized discard bypassed budget: got=%+v complete=%t budget=%d err=%v", got, complete, budget, err)
 	}
 }
 
