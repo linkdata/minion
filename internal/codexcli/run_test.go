@@ -552,7 +552,7 @@ func TestRunDoesNotExposeKeyFragmentsAtDiagnosticLimit(t *testing.T) {
 	}
 	for _, tc := range []struct {
 		name, script, forbidden, required string
-		bounded                           bool
+		clipped                           bool
 	}{
 		{"stderr tail", "printf '%s' " + aicli.ShellQuote(stderr) + " >&2\nexit 1\n", "LEAKSUFFIX", "rate limit reached", false},
 		{"event prefix", "printf '%s\\n' " + aicli.ShellQuote(string(event)) + "\n", "KEYPREFIX__LEAK", "codex exec failed", true},
@@ -561,7 +561,7 @@ func TestRunDoesNotExposeKeyFragmentsAtDiagnosticLimit(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			installFakeCodex(t, "#!/bin/sh\ncat >/dev/null\n"+tc.script)
 			_, err := Run(context.Background(), t.TempDir(), "task", false, "", config.CodexConfig{APIKey: key})
-			if err == nil || strings.Contains(err.Error(), tc.forbidden) || !strings.Contains(err.Error(), tc.required) || tc.bounded && (!strings.Contains(err.Error(), "[redacted]") || !strings.Contains(err.Error(), "y...") || len(err.Error()) > bounded.DiagnosticBytes+200) {
+			if err == nil || strings.Contains(err.Error(), tc.forbidden) || !strings.Contains(err.Error(), tc.required) || tc.clipped && (!strings.Contains(err.Error(), "[redacted]") || !strings.Contains(err.Error(), "y...") || len(err.Error()) > bounded.DiagnosticBytes+200) {
 				t.Fatalf("key fragment escaped or limit diagnostic lost in %s: %v", tc.name, err)
 			}
 		})
