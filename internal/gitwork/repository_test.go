@@ -573,12 +573,7 @@ func TestRepositoryVerifyBoundsMetadata(t *testing.T) {
 	}
 	repo := &Repository{dir: dir, digest: digest}
 	name := filepath.Join(dir, "oversized")
-	if err := os.WriteFile(name, nil, 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Truncate(name, workspace.MaxBytes+1); err != nil {
-		t.Fatal(err)
-	}
+	writeSparse(t, name, workspace.MaxBytes+1)
 	if err := repo.Verify(context.Background()); err == nil || !strings.Contains(err.Error(), "file exceeds byte limit") {
 		t.Fatalf("oversized metadata error=%v", err)
 	}

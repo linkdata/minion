@@ -48,10 +48,8 @@ func SystemReadPaths() []string {
 // redacted from the returned answer and error text.
 func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, outputDir string, settings config.CodexConfig) (result aicli.Result, runError error) {
 	defer func() {
-		if settings.APIKey != "" {
-			result.Answer = aicli.RedactText(result.Answer, settings.APIKey)
-			runError = aicli.RedactError(runError, settings.APIKey)
-		}
+		result.Answer = aicli.RedactText(result.Answer, settings.APIKey)
+		runError = aicli.RedactError(runError, settings.APIKey)
 	}()
 	result.UsageComplete = true
 	if strings.TrimSpace(prompt) == "" {

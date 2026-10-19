@@ -216,12 +216,7 @@ func TestCheckoutPullRequestBoundsAliasedTreeEntries(t *testing.T) {
 func TestCheckoutPullRequestRejectsOversizedHeadMetadata(t *testing.T) {
 	fixture := newFixture(t)
 	name := filepath.Join(fixture.source, "new.dat")
-	if err := os.WriteFile(name, nil, 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Truncate(name, workspace.MaxBytes+1); err != nil {
-		t.Fatal(err)
-	}
+	writeSparse(t, name, workspace.MaxBytes+1)
 	fixture.git(fixture.source, "add", "new.dat")
 	fixture.git(fixture.source, "commit", "-m", "new blob")
 	head := fixture.git(fixture.source, "rev-parse", "HEAD")
@@ -536,6 +531,16 @@ func writeFile(t *testing.T, path, content string) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeSparse(t *testing.T, path string, size int64) {
+	t.Helper()
+	if err := os.WriteFile(path, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(path, size); err != nil {
 		t.Fatal(err)
 	}
 }

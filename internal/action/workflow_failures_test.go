@@ -115,15 +115,15 @@ func TestFixedRepliesSkipWorkspaceAndModel(t *testing.T) {
 	}
 }
 
-func TestExecuteNativeLimitsAndInvalidIncompleteResultsAreTerminal(t *testing.T) {
-	for _, scenario := range []string{"invalid incomplete result", "output limit", "too many files", "diff too large"} {
+func TestExecuteLimitCausesAndInvalidIncompleteResultsAreTerminal(t *testing.T) {
+	for _, scenario := range []string{"invalid incomplete result", "output limit", "too many files", "diff too large", "checkout too large"} {
 		t.Run(scenario, func(t *testing.T) {
 			gitFixtureRemote(t)
 			installActionTestSkills(t, testReviewSkillURL)
 			calls, writes := 0, 0
 			modelErr := errors.New("worker failed with invalid usage")
-			// Inject native/CommitAndPush causes to isolate Execute terminal classification.
-			limitCause := map[string]error{"output limit": aicli.ErrOutputLimit, "too many files": gitwork.ErrTooManyFiles, "diff too large": gitwork.ErrDiffTooLarge}[scenario]
+			// Inject wrapped causes to isolate Execute terminal classification.
+			limitCause := map[string]error{"output limit": aicli.ErrOutputLimit, "too many files": gitwork.ErrTooManyFiles, "diff too large": gitwork.ErrDiffTooLarge, "checkout too large": gitwork.ErrCheckoutTooLarge}[scenario]
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch {
 				case r.Method != http.MethodGet:
@@ -155,7 +155,7 @@ func TestExecuteNativeLimitsAndInvalidIncompleteResultsAreTerminal(t *testing.T)
 			}
 			wantCalls := 0
 			switch scenario {
-			case "output limit", "too many files", "diff too large":
+			case "output limit", "too many files", "diff too large", "checkout too large":
 				wantCalls = 1
 				if !errors.Is(err, limitCause) {
 					t.Fatalf("terminal native limit lost cause: %v", err)

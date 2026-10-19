@@ -413,7 +413,7 @@ func TestSnapshotPreservesGitLegalSourceNames(t *testing.T) {
 	}
 }
 
-func TestSourceEntriesReadLocalSymlink(t *testing.T) {
+func TestSourceTreeReadsLocalSymlink(t *testing.T) {
 	fixture := newFixture(t)
 	if err := os.Symlink("README.md", filepath.Join(fixture.checkout.path, "link")); err != nil {
 		t.Fatal(err)

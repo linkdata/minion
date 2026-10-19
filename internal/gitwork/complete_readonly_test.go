@@ -177,7 +177,6 @@ func TestReadOnlySnapshotPreflightsCombinedBytesBeforeContent(t *testing.T) {
 		if !found {
 			t.Fatalf("missing comparison entry at %s", ref)
 		}
-		checkout.sourceTrees[ref] = entries
 	}
 	log := recordSnapshotContentCalls(t)
 	_, err = checkout.Snapshot(context.Background())

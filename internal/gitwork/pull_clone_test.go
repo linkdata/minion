@@ -88,12 +88,7 @@ func TestClonePullRequestSkipsUnusedBaseTipPreflight(t *testing.T) {
 	fixture.git(fixture.source, "checkout", "--detach", fixture.base)
 	unused := "base-only"
 	path := filepath.Join(fixture.source, unused)
-	if err := os.WriteFile(path, nil, 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Truncate(path, workspace.MaxBytes+1); err != nil {
-		t.Fatal(err)
-	}
+	writeSparse(t, path, workspace.MaxBytes+1)
 	fixture.git(fixture.source, "add", ".")
 	fixture.git(fixture.source, "commit", "-m", "advance base")
 	base := fixture.git(fixture.source, "rev-parse", "HEAD")

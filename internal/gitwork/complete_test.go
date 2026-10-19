@@ -21,12 +21,7 @@ func assertBlobPresent(fixture gitFixture, dir, sha string) {
 func TestCloneRejectsOversizedLocalTree(t *testing.T) {
 	fixture := newFixture(t)
 	name := filepath.Join(fixture.source, "blob")
-	if err := os.WriteFile(name, nil, 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Truncate(name, workspace.MaxBytes+1); err != nil {
-		t.Fatal(err)
-	}
+	writeSparse(t, name, workspace.MaxBytes+1)
 	fixture.commit("refs/heads/main", "oversized local blob")
 	root := t.TempDir()
 	checkout, err := cloneFromURL(context.Background(), root, "file://"+fixture.remote, "main", true)
@@ -41,12 +36,7 @@ func TestCloneRejectsOversizedLocalTree(t *testing.T) {
 func TestSnapshotPreflightsMergeBaseMetadata(t *testing.T) {
 	fixture := newFixture(t)
 	name := filepath.Join(fixture.source, "old")
-	if err := os.WriteFile(name, nil, 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Truncate(name, workspace.MaxBytes+1); err != nil {
-		t.Fatal(err)
-	}
+	writeSparse(t, name, workspace.MaxBytes+1)
 	base := fixture.commit("refs/heads/main", "historical oversized blob")
 	blob := fixture.git(fixture.source, "rev-parse", "HEAD:old")
 	fixture.git(fixture.source, "rm", "old")

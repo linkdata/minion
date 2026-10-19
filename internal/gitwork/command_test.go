@@ -118,6 +118,7 @@ func TestGitEnvironmentPinsHardening(t *testing.T) {
 	settings := []struct{ key, hostile, want string }{
 		{"GIT_NO_REPLACE_OBJECTS", "0", "1"}, {"GIT_NO_LAZY_FETCH", "0", "1"}, {"GIT_ATTR_NOSYSTEM", "0", "1"}, {"LC_ALL", "sv_SE.UTF-8", "C"},
 		{"GIT_CONFIG_GLOBAL", "/hostile/config", "/dev/null"}, {"GIT_CONFIG_NOSYSTEM", "0", "1"},
+		{"GIT_CONFIG_COUNT", "2", "1"}, {"GIT_CONFIG_KEY_0", "filter.escape.clean", "safe.bareRepository"}, {"GIT_CONFIG_VALUE_0", "touch /hostile/marker", "explicit"},
 		{"GIT_TERMINAL_PROMPT", "1", "0"}, {"GIT_ASKPASS", "/hostile/askpass", "/bin/false"},
 		{"GCM_INTERACTIVE", "always", "never"}, {"GH_PROMPT_DISABLED", "0", "1"},
 		{"GIT_OPTIONAL_LOCKS", "1", "0"},

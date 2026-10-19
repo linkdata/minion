@@ -25,13 +25,13 @@ func TestGitFixtureRemoteIgnoresInheritedRepositorySelectors(t *testing.T) {
 	if !workspace.ValidSHA(base) || !workspace.ValidSHA(head) || base == head {
 		t.Fatalf("fixture failed to create distinct commits: base=%q head=%q", base, head)
 	}
-	if got := modelGit(t, remote, "rev-parse", "refs/heads/main"); got != base+"\n" {
+	if got := modelGit(t, root, "--git-dir="+remote, "rev-parse", "refs/heads/main"); got != base+"\n" {
 		t.Fatalf("fixture main ref=%q; want %s", got, base)
 	}
-	if got := modelGit(t, remote, "rev-parse", "refs/pull/7/head"); got != head+"\n" {
+	if got := modelGit(t, root, "--git-dir="+remote, "rev-parse", "refs/pull/7/head"); got != head+"\n" {
 		t.Fatalf("fixture PR ref=%q; want %s", got, head)
 	}
-	if got := modelGit(t, remote, "show", head+":fixture.txt"); got != "literal fixture contents\n" {
+	if got := modelGit(t, root, "--git-dir="+remote, "show", head+":fixture.txt"); got != "literal fixture contents\n" {
 		t.Fatalf("fixture committed unexpected source: %q", got)
 	}
 	if data, err := os.ReadFile(index); err != nil || string(data) != sentinel {
