@@ -311,6 +311,28 @@ func TestRepositoryAcceptsLegacyHistoricalDate(t *testing.T) {
 	assertModelRepositoryGit(t, source, raw, "cat-file", "commit", legacy)
 }
 
+func TestRepositoryPinsFilesRefFormat(t *testing.T) {
+	fixture := newFixture(t)
+	snapshot, err := fixture.checkout.Snapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	realGit, err := aicli.AbsoluteExecutable("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := filepath.Join(fakeOnPath(t, "git", "#!/bin/sh\nGIT_DEFAULT_REF_FORMAT=reftable exec "+shellQuote(realGit)+" \"$@\"\n"), "git")
+	control := filepath.Join(t.TempDir(), "control")
+	if output, err := exec.Command(proxy, "init", "--quiet", "--template=", control).CombinedOutput(); err != nil {
+		t.Fatalf("initialize reftable control: %q, %v", output, err)
+	}
+	if output, err := exec.Command(realGit, "-C", control, "rev-parse", "--show-ref-format").CombinedOutput(); err != nil || string(output) != "reftable\n" {
+		t.Fatalf("control did not select reftable: %q, %v", output, err)
+	}
+	source, _ := repositoryFixture(t, snapshot)
+	assertModelRepositoryGit(t, source, "files\n", "rev-parse", "--show-ref-format")
+}
+
 func TestRepositoryPacksRefsWithoutReflogs(t *testing.T) {
 	fixture := newFixture(t)
 	snapshot, err := fixture.checkout.Snapshot(context.Background())

@@ -313,8 +313,8 @@ func TestRunOnceStopsCanceledDiscoveryWithoutDeferring(t *testing.T) {
 				}
 				checkState := func(data state.Data) {
 					t.Helper()
-					if stage == "notifications" && !data.NextPollAt.Equal(now.Add(time.Minute)) {
-						t.Fatalf("canceled poll persisted returned interval: %s", data.NextPollAt)
+					if stage == "notifications" && !data.NextPollAt.Equal(now.Add(5*time.Minute)) {
+						t.Fatalf("canceled poll lost returned interval: %s", data.NextPollAt)
 					}
 					if !data.NextInviteCheckAt.Equal(inviteCheckAt) {
 						t.Fatalf("shutdown advanced invitation check: %s", data.NextInviteCheckAt)

@@ -75,12 +75,26 @@ func (s *Session) prepare(workspace, binary, home, output string, writable bool,
 			return errors.New("codex exec: previous invocation did not identify a resumable thread")
 		}
 	} else {
-		s.bound = true
 		s.workspace, s.binary, s.home, s.output, s.writable = workspace, binary, home, output, writable
 		s.homeEnv, s.overrideEnv = os.Getenv("HOME"), os.Getenv("CODEX_HOME")
 		s.settings = bound
 		s.settings.Skills = slices.Clone(bound.Skills)
 	}
+	if !s.skillsReady {
+		if s.embeddedDir != "" {
+			if err := cleanup.RemoveAll(s.embeddedDir); err != nil {
+				return fmt.Errorf("codex exec: remove incomplete embedded skill root: %w", err)
+			}
+			s.embeddedDir = ""
+		}
+		var err error
+		s.skillPaths, s.embeddedDir, err = aicli.MaterializeSkills(workspace, settings.Skills)
+		if err != nil {
+			return fmt.Errorf("codex exec: skills: %w", err)
+		}
+		s.skillsReady = true
+	}
+	s.bound = true
 	if s.runtimeDir == "" {
 		var err error
 		s.runtimeDir, err = os.MkdirTemp(filepath.Dir(workspace), ".minion-codex-")
@@ -118,20 +132,6 @@ func (s *Session) prepare(workspace, binary, home, output string, writable bool,
 		if !info.IsDir() {
 			return errors.New("codex exec: build cache is not a directory")
 		}
-	}
-	if !s.skillsReady {
-		if s.embeddedDir != "" {
-			if err := cleanup.RemoveAll(s.embeddedDir); err != nil {
-				return fmt.Errorf("codex exec: remove incomplete embedded skill root: %w", err)
-			}
-			s.embeddedDir = ""
-		}
-		var err error
-		s.skillPaths, s.embeddedDir, err = aicli.MaterializeSkills(workspace, settings.Skills)
-		if err != nil {
-			return fmt.Errorf("codex exec: skills: %w", err)
-		}
-		s.skillsReady = true
 	}
 	return nil
 }

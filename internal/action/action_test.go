@@ -579,8 +579,6 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 					_, _ = fmt.Fprint(w, `[]`)
 				case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/linkdataminion/r/branches/minion/"):
 					http.NotFound(w, r)
-				case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/o/r/branches/minion/"):
-					http.NotFound(w, r)
 				case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/issues/7/comments":
 					captureComment(t, w, r, &commentBody)
 				default:

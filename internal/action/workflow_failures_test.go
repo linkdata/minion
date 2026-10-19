@@ -70,6 +70,51 @@ func TestReplyFailureClassificationBeforeAndAfterModel(t *testing.T) {
 	}
 }
 
+func TestFixedRepliesSkipWorkspaceAndModel(t *testing.T) {
+	for _, tc := range []struct {
+		name, subject, reply string
+		action               command.Action
+	}{
+		{"review on issue", "Issue", "`review` applies to pull requests.", command.Review},
+		{"fix on pull request", "PullRequest", "`fix` currently applies to issue threads. It pushes a branch for the requester to open a pull request.", command.Fix},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var body string
+			lookups, comments := 0, 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
+					lookups++
+					_, _ = fmt.Fprint(w, publicRepositoryJSON)
+				case captureComment(t, w, r, &body):
+					comments++
+				default:
+					t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+			request := usageJob()
+			request.SubjectType = tc.subject
+			request.Command = command.Command{Name: string(tc.action), Action: tc.action}
+			root := filepath.Join(t.TempDir(), "uncreated")
+			orchestrator := &Orchestrator{
+				GitHub: testGitHub(server, "fixture-token"), WorkRoot: root,
+				Runner: Runner{runModel: forbidModel(t)},
+			}
+			if err := attemptFixture(orchestrator).perform(testActionContext(t), request); err != nil {
+				t.Fatal(err)
+			}
+			if lookups != 1 || comments != 1 || body != tc.reply+"\n\n"+request.Marker() {
+				t.Fatalf("fixed reply: lookups=%d comments=%d body=%q", lookups, comments, body)
+			}
+			if _, err := os.Stat(root); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("fixed reply touched work root: %v", err)
+			}
+		})
+	}
+}
+
 func TestExecuteSourceFailuresAndInvalidIncompleteResultsAreTerminal(t *testing.T) {
 	for _, scenario := range []string{"oversized source", "unsupported source", "invalid incomplete result", "output limit", "too many files", "diff too large"} {
 		t.Run(scenario, func(t *testing.T) {

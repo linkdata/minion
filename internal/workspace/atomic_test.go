@@ -49,3 +49,20 @@ func TestWriteAtomicReportsSyncFailureAfterReplacement(t *testing.T) {
 		t.Fatalf("temporary record leaked: %v,%v", entries, err)
 	}
 }
+
+func TestWriteAtomicCleansTemporaryAfterRenameFailure(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "occupied")
+	if err := os.Mkdir(path, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "child"), []byte("keep"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteAtomic(path, []byte("new")); err == nil {
+		t.Fatal("replaced non-empty directory with a record")
+	}
+	if entries, err := os.ReadDir(root); err != nil || len(entries) != 1 || entries[0].Name() != "occupied" {
+		t.Fatalf("temporary record leaked after rename failure: %v,%v", entries, err)
+	}
+}

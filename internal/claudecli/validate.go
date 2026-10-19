@@ -51,7 +51,7 @@ func Validate(ctx context.Context, settings config.ClaudeConfig) (validated conf
 	if err != nil {
 		return validated, err
 	}
-	configDir, err := configDirectory(authDir)
+	configDir, _, err := configDirectory(authDir)
 	if err != nil {
 		return validated, err
 	}

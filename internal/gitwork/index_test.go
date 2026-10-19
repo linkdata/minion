@@ -547,6 +547,9 @@ func TestFixIndexExcludesModelCreatedGitMetadata(t *testing.T) {
 	index, source := offlineIndexFixture(t, []workspace.File{{Path: "tracked/source", Mode: workspace.Regular, Data: []byte("before")}})
 	writeIndexFixture(t, source, ".GIT/config", []byte("untrusted metadata"))
 	writeIndexFixture(t, source, "tracked/.Git/config", []byte("untrusted nested metadata"))
+	if _, err := runGit(context.Background(), filepath.Join(source, "tracked"), "init", "--quiet", "--template="); err != nil {
+		t.Fatal(err)
+	}
 	writeIndexFixture(t, source, "tracked/source", []byte("after"))
 	changes, err := index.Changes(context.Background())
 	want := []workspace.Change{{Path: "tracked/source", Mode: workspace.Regular, Data: []byte("after")}}
@@ -777,6 +780,8 @@ func TestFixIndexBatchesIgnoreQueriesAcrossDirectories(t *testing.T) {
 		if err := os.MkdirAll(filepath.Join(source, fmt.Sprint(i), "child"), 0700); err != nil {
 			t.Fatal(err)
 		}
+		writeIndexFixture(t, source, fmt.Sprintf("%d/.gitignore", i), nil)
+		writeIndexFixture(t, source, fmt.Sprintf("%d/child/.gitignore", i), nil)
 	}
 	marker := filepath.Join(t.TempDir(), "queries")
 	script := "#!/bin/sh\nfor arg do\n if [ \"$arg\" = check-ignore ]; then printf 'query\\n' >> " + shellQuote(marker) + "; fi\ndone\nexec " + shellQuote(index.binary) + " \"$@\"\n"
@@ -785,8 +790,8 @@ func TestFixIndexBatchesIgnoreQueriesAcrossDirectories(t *testing.T) {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(marker)
-	if err != nil || bytes.Count(data, []byte("query\n")) != 6 {
-		t.Fatalf("ignore queries=%q error=%v; want six bounded batches across two levels", data, err)
+	if err != nil || bytes.Count(data, []byte("query\n")) != 11 {
+		t.Fatalf("ignore queries=%q error=%v; want eleven bounded directory/control batches", data, err)
 	}
 }
 

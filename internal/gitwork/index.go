@@ -202,8 +202,9 @@ func (index *OfflineIndex) checkControlFiles(ctx context.Context) error {
 		var next []directory
 		var candidates []directory
 		var input []byte
+		controls := map[string]bool{}
 		flush := func() error {
-			if len(candidates) == 0 {
+			if len(input) == 0 {
 				return nil
 			}
 			// No trailing slash: Git must not open a child's unchecked .gitignore.
@@ -217,7 +218,11 @@ func (index *OfflineIndex) checkControlFiles(ctx context.Context) error {
 			}
 			skip := map[string]bool{}
 			for _, name := range names {
-				skip[strings.TrimPrefix(string(name), ":(top)")] = true
+				path := strings.TrimPrefix(string(name), ":(top)")
+				if controls[path] {
+					return fmt.Errorf("ignored untracked fix control file %q must be removed or tracked", path)
+				}
+				skip[path] = true
 			}
 			for _, candidate := range candidates {
 				name := path.Join(candidate.parent, candidate.name)
@@ -227,6 +232,7 @@ func (index *OfflineIndex) checkControlFiles(ctx context.Context) error {
 				}
 			}
 			candidates, input = nil, nil
+			clear(controls)
 			return nil
 		}
 		for _, current := range dirs {
@@ -251,13 +257,12 @@ func (index *OfflineIndex) checkControlFiles(ctx context.Context) error {
 					return fmt.Errorf("fix control file %q must be regular and bounded to %d bytes", name, workspace.MaxBytes)
 				}
 				if _, tracked := index.tracked[name]; control == ".gitignore" && !tracked && !current.ignored {
-					input := []byte(":(top)" + name + "\x00")
-					ignored, err := index.run(ctx, len(input), input, "check-ignore", "--no-index", "-z", "--stdin")
-					if err != nil {
-						return err
-					}
-					if len(ignored) != 0 {
-						return fmt.Errorf("ignored untracked fix control file %q must be removed or tracked", name)
+					controls[name] = true
+					input = append(input, []byte(":(top)"+name+"\x00")...)
+					if len(candidates)+len(controls) == 128 {
+						if err := flush(); err != nil {
+							return err
+						}
 					}
 				}
 			}
@@ -306,7 +311,7 @@ func (index *OfflineIndex) checkControlFiles(ctx context.Context) error {
 						input = append(input, ":(top)"...)
 						input = append(input, name...)
 						input = append(input, 0)
-						if len(candidates) == 128 {
+						if len(candidates)+len(controls) == 128 {
 							if err := flush(); err != nil {
 								return err
 							}

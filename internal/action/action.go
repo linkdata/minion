@@ -117,7 +117,13 @@ func (e *Orchestrator) Execute(ctx context.Context, job monitor.Job) (resultErr 
 	if errors.Is(resultErr, errGitHubContextTooLarge) {
 		// Give the fixed refusal its own deadline even when the action timed out.
 		replyCtx, replyCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-		resultErr = e.acknowledge(replyCtx, job, fmt.Sprintf("Request exceeds the GitHub context limits: %d UTF-8 bytes combined and %d bytes per title. Shorten the title, thread text or requester notes included in this action, then post a new command.", e.githubContextLimit(), maxActionTitleBytes))
+		limits := fmt.Sprintf("%d UTF-8 bytes combined", e.githubContextLimit())
+		shorten := "the thread text or requester notes"
+		if job.Command.Action != command.Fix {
+			limits += fmt.Sprintf(" and %d bytes per title", maxActionTitleBytes)
+			shorten = "the title, thread text or requester notes"
+		}
+		resultErr = e.acknowledge(replyCtx, job, fmt.Sprintf("Request exceeds the GitHub context limits: %s. Shorten %s included in this action, then post a new command.", limits, shorten))
 		replyCancel()
 		returned = true
 		return resultErr
@@ -303,7 +309,7 @@ func (e *Orchestrator) checkGitHubContext(job monitor.Job, title, body string) e
 // line-command parsers that do not understand Markdown fences. Callers check
 // modelOutputFits before publication; rendering never truncates the text.
 func inertModelOutput(s string) string {
-	s = normalizedModelOutput(s)
+	s = strings.TrimSpace(modelLineBreaks.Replace(s))
 	quoted := "> " + strings.ReplaceAll(s, "\n", "\n> ")
 	return "```text\n" + quoted + "\n```"
 }
@@ -314,10 +320,6 @@ func modelOutputFits(s string) bool {
 
 func publishableAnswer(s string) bool {
 	return boundedText(s, maxOutputBytes) && modelOutputFits(s)
-}
-
-func normalizedModelOutput(s string) string {
-	return strings.TrimSpace(modelLineBreaks.Replace(s))
 }
 
 func isNotFound(err error) bool {

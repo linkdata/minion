@@ -81,18 +81,12 @@ func (s *Session) prepare(workspace string, writable bool, outputDir string, set
 		if s.initErr != nil {
 			return s.initErr
 		}
-		selected, err := configDirectory(s.authDir)
+		selected, home, err := configDirectory(s.authDir)
 		if err != nil {
 			return err
 		}
-		if s.authDir == "" {
-			home, err := HomePath()
-			if err != nil {
-				return err
-			}
-			if home != s.nativeHome {
-				return errors.New("claude session native home changed")
-			}
+		if s.authDir == "" && home != s.nativeHome {
+			return errors.New("claude session native home changed")
 		}
 		if selected != s.configDir {
 			return errors.New("claude session native configuration changed")
@@ -140,13 +134,8 @@ func (s *Session) initialize() (err error) {
 	if s.authDir, err = authentication(filepath.Dir(s.workspace), s.settings.APIKey); err != nil {
 		return
 	}
-	if s.configDir, err = configDirectory(s.authDir); err != nil {
+	if s.configDir, s.nativeHome, err = configDirectory(s.authDir); err != nil {
 		return
-	}
-	if s.authDir == "" {
-		if s.nativeHome, err = HomePath(); err != nil {
-			return
-		}
 	}
 	s.cacheDir = filepath.Join(s.runtimeDir, "go-build")
 	if err = os.Mkdir(s.cacheDir, 0700); err != nil {

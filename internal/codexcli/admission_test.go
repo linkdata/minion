@@ -110,3 +110,27 @@ func TestSessionRejectsReadGrantBeforeBinding(t *testing.T) {
 		t.Fatalf("invalid read grant bound session: %+v %v", result, err)
 	}
 }
+
+func TestSessionRejectsSkillBeforeBinding(t *testing.T) {
+	installFakeCodex(t, "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"root\"}' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"done\"}}' '{\"type\":\"turn.completed\"}'\n")
+	var session Session
+	t.Cleanup(func() {
+		if err := session.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	dir := t.TempDir()
+	skill := filepath.Join(dir, "SKILL.md")
+	if err := os.WriteFile(skill, []byte("untrusted"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := session.Run(context.Background(), dir, "invalid", false, "", config.CodexConfig{Skills: []string{skill}}); err == nil || !strings.Contains(err.Error(), "skill is inside the untrusted source snapshot") {
+		t.Fatalf("source skill accepted: %v", err)
+	}
+	if session.bound || session.runtimeDir != "" {
+		t.Fatalf("invalid skill bound session or allocated runtime scratch: bound=%t runtime=%q", session.bound, session.runtimeDir)
+	}
+	if result, err := session.Run(context.Background(), dir, "corrected", false, "", config.CodexConfig{}); err != nil || result.Answer != "done" {
+		t.Fatalf("invalid skill blocked corrected retry: %+v %v", result, err)
+	}
+}

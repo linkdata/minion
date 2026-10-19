@@ -253,7 +253,13 @@ func TestGitHubContextLimitAcrossActions(t *testing.T) {
 				mu.Lock()
 				got := append([]github.Comment(nil), replies...)
 				mu.Unlock()
-				want := fmt.Sprintf("Request exceeds the GitHub context limits: %d UTF-8 bytes combined and %d bytes per title. Shorten the title, thread text or requester notes included in this action, then post a new command.\n\n%s", limit, maxActionTitleBytes, job.Marker())
+				limits := fmt.Sprintf("%d UTF-8 bytes combined", limit)
+				shorten := "the thread text or requester notes"
+				if tt.action != command.Fix {
+					limits += fmt.Sprintf(" and %d bytes per title", maxActionTitleBytes)
+					shorten = "the title, thread text or requester notes"
+				}
+				want := fmt.Sprintf("Request exceeds the GitHub context limits: %s. Shorten %s included in this action, then post a new command.\n\n%s", limits, shorten, job.Marker())
 				if len(got) != 1 || got[0].Body != want {
 					t.Fatalf("refusal replies = %+v; want %q", got, want)
 				}

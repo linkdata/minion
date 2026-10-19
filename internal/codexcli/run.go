@@ -282,7 +282,7 @@ func childEnvironment(env []string, runtimeDir, cacheDir, codexHome string, conf
 			clean = append(clean, entry)
 		}
 	}
-	if explicitHome && codexHome != "" {
+	if explicitHome {
 		clean = append(clean, "CODEX_HOME="+codexHome)
 	}
 	clean = append(clean, "TMPDIR="+runtimeDir, "TMP="+runtimeDir, "TEMP="+runtimeDir, "GOCACHE="+cacheDir)

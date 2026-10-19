@@ -157,9 +157,6 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 	for _, repo := range m.Config.Repositories {
 		since := store.Data.RepositoryCursors[repo.Name]
 		notifications, githubInterval, err := m.GitHub.ListRepositoryNotifications(ctx, repo.Name, since)
-		if ctx.Err() != nil {
-			return stop(err)
-		}
 		if githubInterval > minInterval {
 			minInterval = githubInterval
 			next = started.Add(minInterval)
@@ -167,6 +164,9 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			if err := store.Save(); err != nil {
 				return stop(err)
 			}
+		}
+		if ctx.Err() != nil {
+			return stop(err)
 		}
 		if err != nil {
 			failures = append(failures, fmt.Errorf("list %s notifications: %w", repo.Name, err))

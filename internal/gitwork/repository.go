@@ -44,7 +44,7 @@ func MaterializeRepository(ctx context.Context, source string, snapshot workspac
 	}
 	index := &OfflineIndex{dir: dir, source: source, binary: binary}
 	run := func(args ...string) ([]byte, error) { return index.run(ctx, workspace.MaxBytes, nil, args...) }
-	if _, err := run("init", "--quiet", "--template=", "--object-format=sha1"); err != nil {
+	if _, err := run("init", "--quiet", "--template=", "--object-format=sha1", "--ref-format=files"); err != nil {
 		return nil, err
 	}
 	if err := disableAttributes(dir); err != nil {

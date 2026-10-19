@@ -65,6 +65,29 @@ func TestFixIndexRejectsNestedGitFIFOBeforeGitOpensIt(t *testing.T) {
 	}
 }
 
+func TestFixIndexSkipsPopulatedSourceGitMetadata(t *testing.T) {
+	files := []workspace.File{{Path: "source", Mode: workspace.Regular, Data: []byte("before")}}
+	source := repositorySource(t, files)
+	metadata := t.TempDir()
+	if err := os.Mkdir(filepath.Join(source, ".git"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(filepath.Join(source, ".git", "HEAD"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	index, err := NewOfflineIndex(ctx, metadata, source, files)
+	if err != nil || ctx.Err() != nil {
+		t.Fatalf("source Git metadata affected index creation: %v; deadline=%v", err, ctx.Err())
+	}
+	writeIndexFixture(t, source, "source", []byte("after"))
+	changes, err := index.Changes(ctx)
+	if err != nil || len(changes) != 1 || changes[0].Path != "source" || string(changes[0].Data) != "after" || ctx.Err() != nil {
+		t.Fatalf("source Git metadata affected selected contents: %+v, %v; deadline=%v", changes, err, ctx.Err())
+	}
+}
+
 func TestFixIndexTreatsColonDirectoriesAsLiteralNames(t *testing.T) {
 	for _, dir := range []string{":build", ":(top)build", ":!build", ":(icase)build"} {
 		t.Run(dir, func(t *testing.T) {

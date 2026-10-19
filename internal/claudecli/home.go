@@ -12,16 +12,16 @@ func HomePath() (string, error) {
 	return aicli.HomePath("CLAUDE_CONFIG_DIR", ".claude")
 }
 
-func configDirectory(authDir string) (string, error) {
+func configDirectory(authDir string) (string, string, error) {
 	if authDir != "" {
-		return authDir, nil
+		return authDir, "", nil
 	}
 	home, err := HomePath()
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	if os.Getenv("CLAUDE_CONFIG_DIR") != "" {
-		return home, nil
+		return home, home, nil
 	}
-	return "", nil
+	return "", home, nil
 }
