@@ -146,6 +146,13 @@ func TestSessionRejectsChangedIdentityAndSettingsBeforeNativeCall(t *testing.T) 
 		change func(*testing.T, *string, *bool, *string, *config.ClaudeConfig)
 	}{
 		{"source", func(t *testing.T, dir *string, _ *bool, _ *string, _ *config.ClaudeConfig) { *dir = t.TempDir() }},
+		{"binary", func(t *testing.T, _ *string, _ *bool, _ *string, _ *config.ClaudeConfig) {
+			other := t.TempDir()
+			if err := os.WriteFile(filepath.Join(other, "claude"), []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", other+string(os.PathListSeparator)+os.Getenv("PATH"))
+		}},
 		{"output", func(t *testing.T, _ *string, _ *bool, out *string, _ *config.ClaudeConfig) { *out = t.TempDir() }},
 		{"writable", func(_ *testing.T, _ *string, writable *bool, _ *string, _ *config.ClaudeConfig) { *writable = true }},
 		{"model", func(_ *testing.T, _ *string, _ *bool, _ *string, cfg *config.ClaudeConfig) { cfg.Model = "other" }},

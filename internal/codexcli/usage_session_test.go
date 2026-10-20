@@ -340,6 +340,50 @@ func TestUsageSessionUnfinishedBaselineCannotCertifySnapshotDelta(t *testing.T) 
 	}
 }
 
+func TestUsageSessionUnreadableRootKeepsTrustedStdoutLowerBound(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		events []string
+		stdout int64
+		want   int64
+	}{
+		{"trusted snapshot", append(completedUsageTurn("root", "old", "r1", 100), usageSnapshot(22, 100, 0, 0)), 127, 27},
+		{"no snapshot", completedUsageTurn("root", "old", "r1", 100), 127, 0},
+		{"unfinished baseline", []string{usageEvent("task_started", "old"), usageRecord("root", "old", "r1", 100, 0, 0), usageSnapshot(22, 100, 0, 0)}, 127, 0},
+		{"counter below baseline", append(completedUsageTurn("root", "old", "r1", 100), usageSnapshot(22, 100, 0, 0)), 90, 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, home := context.Background(), t.TempDir()
+			writeUsageRollout(t, home, "root", "", test.events...)
+			var session usageSession
+			session.begin(ctx, home, "root", time.Now())
+			if boundary := session.before["root"]; boundary == nil || !boundary.valid || !boundary.prefixKnown {
+				t.Fatalf("invalid baseline fixture: %+v", boundary)
+			}
+			cancelled, cancel := context.WithCancel(ctx)
+			cancel()
+			got, complete, err := session.collectUsage(cancelled, home, "root", time.Now(), &usage.Tokens{Input: test.stdout}, nil, nil)
+			if got != (usage.Tokens{Input: test.want}) || complete || err != nil {
+				t.Fatalf("unreadable root = %+v, complete=%t, err=%v; want input %d, incomplete", got, complete, err, test.want)
+			}
+		})
+	}
+}
+
+func TestUsageSessionBaselineFileCap(t *testing.T) {
+	home := t.TempDir()
+	path := writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "old", "r1", 100)...)
+	session := usageSession{known: map[string]rolloutMeta{"root": {ID: "root", path: path}}}
+	for i := range maxUsageFiles {
+		id := fmt.Sprintf("child-%04d", i)
+		session.known[id] = rolloutMeta{ID: id, ParentID: "root", path: path}
+	}
+	session.begin(context.Background(), home, "root", time.Now())
+	if len(session.before) != maxUsageFiles || session.before[fmt.Sprintf("child-%04d", maxUsageFiles-1)] != nil || session.baselineComplete {
+		t.Fatalf("baseline cap = %d histories, complete=%t", len(session.before), session.baselineComplete)
+	}
+}
+
 func TestUsageSessionDuplicateResponseAcrossOldAndNewTurnsIsIncomplete(t *testing.T) {
 	oldRecord := usageRecord("root", "old", "shared", 5, 0, 0)
 	newRecord := usageRecord("root", "new", "shared", 5, 0, 0)

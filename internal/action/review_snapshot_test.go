@@ -175,7 +175,7 @@ func TestReviewSnapshotRejectsOversizedReports(t *testing.T) {
 			}
 		})
 	}
-	if err == nil || snapshot == nil || !strings.Contains(err.Error(), "limit") {
+	if err == nil || snapshot == nil || !strings.Contains(err.Error(), "invalid audit findings.json") {
 		t.Fatalf("oversized reports accepted: %+v,%v", snapshot, err)
 	}
 }

@@ -263,7 +263,7 @@ func TestRunnerRejectsHostReadGrantBeforeModels(t *testing.T) {
 				runner.Claude.ReadOnlyDirs = []string{missing}
 			}
 			result, err := runner.Run(context.Background(), job)
-			if !errors.Is(err, workroot.ErrUnsafe) || errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "host-level model read grants are unsupported") || calls != 0 || len(result.Calls) != 0 {
+			if errors.Is(err, workroot.ErrUnsafe) || !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "host-level model read grants are unsupported") || calls != 0 || len(result.Calls) != 0 {
 				t.Fatalf("unsupported host grant result: native calls=%d recorded calls=%d error=%v", calls, len(result.Calls), err)
 			}
 		})

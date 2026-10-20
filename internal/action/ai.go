@@ -132,12 +132,12 @@ func (r *Runner) runAI(ctx context.Context, job Job, dir, prompt, outputDir stri
 		request.prompt, request.outputSchema = mainPrompt(prompt), mainOutputSchema
 	}
 	var priorAnswer, priorFeedback string
-	redactDecoded := func(text, provider string) string {
-		secret := r.Codex.APIKey
-		if provider == "claude" {
-			secret = r.Claude.APIKey
-		}
-		return redactActionText(text, secret)
+	mainSecret, criticSecret := r.Codex.APIKey, r.Codex.APIKey
+	if job.Main.Provider == "claude" {
+		mainSecret = r.Claude.APIKey
+	}
+	if job.Critic != nil && job.Critic.Provider == "claude" {
+		criticSecret = r.Claude.APIKey
 	}
 	for round := 1; round <= rounds; round++ {
 		request.round = round
@@ -146,15 +146,15 @@ func (r *Runner) runAI(ctx context.Context, job Job, dir, prompt, outputDir stri
 			return
 		}
 		if job.Critic == nil {
-			answer = redactDecoded(proposed.Answer, request.provider)
+			answer = redactActionText(proposed.Answer, mainSecret)
 			return
 		}
 		candidate, refutations, parseErr := parseProposal(proposed.Answer, job.Action == command.Fix || job.Action == command.SecurityAudit)
 		if parseErr != nil {
 			return "", fmt.Errorf("%w: invalid main proposal: %w", monitor.ErrTerminalJob, parseErr)
 		}
-		candidate = redactDecoded(candidate, request.provider)
-		refutations = redactDecoded(refutations, request.provider)
+		candidate = redactActionText(candidate, mainSecret)
+		refutations = redactActionText(refutations, mainSecret)
 		if round > 1 && strings.TrimSpace(refutations) != "" {
 			history = append(history, Refutation{Round: round, Text: refutations})
 		}
@@ -181,7 +181,7 @@ func (r *Runner) runAI(ctx context.Context, job Job, dir, prompt, outputDir stri
 			if approved, hasBlockers, feedback, err = parseCritique(review.Answer); err != nil {
 				return "", fmt.Errorf("%w: invalid critic verdict: %w", monitor.ErrTerminalJob, err)
 			}
-			feedback = redactDecoded(feedback, critic.provider)
+			feedback = redactActionText(feedback, criticSecret)
 			if err = record(); err != nil {
 				return "", err
 			}

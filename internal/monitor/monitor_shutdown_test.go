@@ -26,6 +26,38 @@ type cancelDiscoveryGitHub struct {
 	repositoryCalls int
 }
 
+type intervalErrorGitHub struct {
+	*fakeGitHub
+	beforeReturn func()
+	err          error
+}
+
+func (f *intervalErrorGitHub) ListRepositoryNotifications(context.Context, string, time.Time) ([]github.Notification, time.Duration, error) {
+	f.beforeReturn()
+	return nil, 5 * time.Minute, f.err
+}
+
+func TestRunOnceLabelsListErrorWhenIntervalSaveFails(t *testing.T) {
+	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	store := openStateAt(t, statePath, now.Add(-time.Minute))
+	store.Data.NextInviteCheckAt = now.Add(time.Hour)
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	listErr := errors.New("list failed")
+	gh := &intervalErrorGitHub{fakeGitHub: &fakeGitHub{}, err: listErr, beforeReturn: func() {
+		if err := os.Rename(filepath.Dir(statePath), filepath.Join(t.TempDir(), "retained-state")); err != nil {
+			t.Fatal(err)
+		}
+	}}
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: &fakeHandler{}, Now: func() time.Time { return now }}
+	_, err := m.RunOnce(context.Background(), store)
+	if !errors.Is(err, listErr) || !errors.Is(err, os.ErrNotExist) || !strings.Contains(err.Error(), "list example-owner/example-repo notifications: list failed") {
+		t.Fatalf("list and save errors lost context: %v", err)
+	}
+}
+
 func (f *cancelDiscoveryGitHub) call(stage string) error {
 	f.calls = append(f.calls, stage)
 	if stage == "repository" {
@@ -147,12 +179,14 @@ func TestRunOnceCanceledExecutionPreservesEarlierFailure(t *testing.T) {
 		executeErr error
 		terminal   bool
 		processed  bool
+		prior      int
 		attempts   int
 		saveFails  bool
 		wantLog    string
 		resume     bool
 	}{
 		{name: "interrupted", executeErr: context.Canceled, wantLog: " interrupted: "},
+		{name: "interrupted after prior failure", executeErr: context.Canceled, prior: 1, attempts: 1, wantLog: " interrupted: "},
 		{name: "interrupted terminal", executeErr: errors.Join(ErrTerminalJob, context.Canceled), wantLog: " interrupted: ", resume: true},
 		{name: "completed", processed: true},
 		{name: "publication", executeErr: errors.Join(ErrPostModelPublication, context.Canceled), attempts: 1, wantLog: "failed (attempt 1/3)"},
@@ -198,6 +232,9 @@ func TestRunOnceCanceledExecutionPreservesEarlierFailure(t *testing.T) {
 				t.Fatal(err)
 			}
 			id := jobID(item.Key, cmd.Name)
+			if test.prior > 0 {
+				store.Data.JobFailures[id] = state.JobFailure{Attempts: test.prior}
+			}
 			if test.terminal {
 				store.Data.JobFailures[id] = state.JobFailure{Attempts: maxJobAttempts - 1}
 				gh.items = append(gh.items, github.Item{Body: "failure\n\n" + (Job{ID: id}).Marker(), Author: github.User{Login: m.Config.BotLogin}})

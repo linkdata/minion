@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -172,6 +173,9 @@ fi
 						if provider == "codex" {
 							if !strings.Contains(args, fmt.Sprintf("model_reasoning_effort=%q\n", role.Effort)) {
 								t.Fatalf("Codex call%d lost native role effort: %s", call, args)
+							}
+							if !regexp.MustCompile(`"[^"\n]*/\.minion-context-[^"\n]+"="read"`).MatchString(args) {
+								t.Fatalf("Codex call%d lacks a read-only context grant: %s", call, args)
 							}
 						} else {
 							arguments, values, contextDir := strings.Split(args, "\n"), map[string]string{}, ""

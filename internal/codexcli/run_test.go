@@ -485,10 +485,13 @@ func TestChildEnvironmentIsolatesCodexSessionButKeepsAuthentication(t *testing.T
 		"CODEX_APP_TOOLS_PIPE_PATH=parent-app", "CODEX_SANDBOX_NETWORK_DISABLED=1",
 		"CODEX_HOME=/trusted/codex", "CODEX_API_KEY=test-key", "CODEX_ACCESS_TOKEN=test-access-token",
 		"GH_TOKEN=secret", "GITHUB_TOKEN=secret", "OPENAI_API_KEY=secret", "PGPASSWORD=secret",
-		"PATH=/usr/bin", "HOME=/trusted/home", "HTTPS_PROXY=http://proxy", "SSL_CERT_FILE=/cert",
+		"PATH=/usr/bin::.:rel", "HOME=/trusted/home", "HTTPS_PROXY=http://proxy", "SSL_CERT_FILE=/cert",
 		"TMPDIR=/host-tmp", "GOCACHE=/host-cache", "GIT_CONFIG_GLOBAL=/private-git-config", "GIT_DIR=/private-git-dir",
 	}, "/runtime", "/cache", "/trusted/codex", false)
 	joined := strings.Join(env, "\n")
+	if !slices.Contains(env, "PATH=/usr/bin") {
+		t.Fatalf("unsafe CLI PATH: %q", env)
+	}
 	for _, denied := range []string{"unsafe-parent-profile", "CODEX_THREAD_ID", "CODEX_SESSION_ID", "CODEX_APP_TOOLS_PIPE_PATH", "CODEX_SANDBOX_NETWORK_DISABLED", "GH_TOKEN", "GITHUB_TOKEN", "OPENAI_API_KEY", "PGPASSWORD", "/host-tmp", "/host-cache", "/private-git-"} {
 		if strings.Contains(joined, denied) {
 			t.Fatalf("inherited parent session state: %s", joined)

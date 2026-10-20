@@ -62,7 +62,7 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 		}
 		outputDir = resolved
 	}
-	if err := s.prepare(workspace, writable, outputDir, settings); err != nil {
+	if err := s.prepare(workspace, binary, writable, outputDir, settings); err != nil {
 		return result, err
 	}
 	runtimeDir, authDir, cacheDir := s.runtimeDir, s.authDir, s.cacheDir
@@ -121,7 +121,7 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	// #nosec G204 -- The resolved executable is outside the source snapshot; arguments do not pass through a shell.
 	cmd := exec.CommandContext(runCtx, binary, args...)
 	cmd.Dir = runtimeDir
-	cmd.Env, err = childEnvironment(os.Environ(), runtimeDir, cacheDir, authDir, configDir)
+	cmd.Env, err = childEnvironment(os.Environ(), runtimeDir, cacheDir, authDir, configDir, workspace, outputDir)
 	if err != nil {
 		return result, err
 	}
@@ -256,13 +256,14 @@ func credentialDenials() []map[string]string {
 	return rules
 }
 
-func childEnvironment(env []string, runtimeDir, cacheDir, authDir, configDir string) ([]string, error) {
+func childEnvironment(env []string, runtimeDir, cacheDir, authDir, configDir string, writablePaths ...string) ([]string, error) {
 	allowed := map[string]bool{
 		"PATH": true, "HOME": true, "LANG": true, "LC_ALL": true, "LC_CTYPE": true, "TERM": true,
 		"SSL_CERT_FILE": true, "SSL_CERT_DIR": true, "NODE_EXTRA_CA_CERTS": true,
 		"HTTP_PROXY": true, "HTTPS_PROXY": true, "ALL_PROXY": true, "NO_PROXY": true,
 	}
 	clean := make([]string, 0, len(env))
+	writablePaths = append([]string{runtimeDir}, writablePaths...)
 	for _, entry := range env {
 		key, value, ok := strings.Cut(entry, "=")
 		originalKey := key
@@ -293,6 +294,9 @@ func childEnvironment(env []string, runtimeDir, cacheDir, authDir, configDir str
 			}
 		}
 		if ok && allowed[key] {
+			if key == "PATH" {
+				entry = "PATH=" + aicli.SafePath(value, writablePaths...)
+			}
 			clean = append(clean, entry)
 		}
 	}

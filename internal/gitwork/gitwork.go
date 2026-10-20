@@ -162,7 +162,7 @@ func (c *Checkout) verifiedHead(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if c.expectedHead == "" || head != c.expectedHead {
+	if head != c.expectedHead {
 		return "", fmt.Errorf("checkout HEAD moved: expected %s, found %s", c.expectedHead, head)
 	}
 	return c.expectedHead, nil
@@ -479,7 +479,7 @@ func cleanGitEnvironment() []string {
 		}
 		env = append(env, entry)
 	}
-	env = append(env, "PATH="+safePath(os.Getenv("PATH")))
+	env = append(env, "PATH="+aicli.SafePath(os.Getenv("PATH")))
 	return append(env, hardeningEnv()...)
 }
 
@@ -489,18 +489,4 @@ func hardeningEnv() []string {
 		"GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=/bin/false",
 		"GCM_INTERACTIVE=never", "GH_PROMPT_DISABLED=1", "LC_ALL=C",
 	)
-}
-
-// safePath excludes checkout-relative command lookup, including credential helpers.
-func safePath(value string) string {
-	var absolute []string
-	for _, dir := range filepath.SplitList(value) {
-		if filepath.IsAbs(dir) {
-			absolute = append(absolute, dir)
-		}
-	}
-	if len(absolute) == 0 {
-		return "/usr/local/bin:/usr/bin:/bin"
-	}
-	return strings.Join(absolute, string(os.PathListSeparator))
 }

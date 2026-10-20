@@ -249,6 +249,15 @@ func (index *OfflineIndex) checkControlFiles(ctx context.Context) error {
 			clear(controls)
 			return nil
 		}
+		enqueue := func(name string) error {
+			input = append(input, ":(top)"...)
+			input = append(input, name...)
+			input = append(input, 0)
+			if len(candidates)+len(controls) == 128 {
+				return flush()
+			}
+			return nil
+		}
 		for _, current := range dirs {
 			if err := ctx.Err(); err != nil {
 				return err
@@ -287,11 +296,8 @@ func (index *OfflineIndex) checkControlFiles(ctx context.Context) error {
 				}
 				if _, tracked := index.tracked[name]; control == ".gitignore" && !tracked && !current.ignored {
 					controls[name] = true
-					input = append(input, []byte(":(top)"+name+"\x00")...)
-					if len(candidates)+len(controls) == 128 {
-						if err := flush(); err != nil {
-							return err
-						}
+					if err := enqueue(name); err != nil {
+						return err
 					}
 				}
 			}
@@ -337,13 +343,8 @@ func (index *OfflineIndex) checkControlFiles(ctx context.Context) error {
 						}
 						name := path.Join(dir, entry.Name())
 						candidates = append(candidates, directory{parent: dir, name: entry.Name()})
-						input = append(input, ":(top)"...)
-						input = append(input, name...)
-						input = append(input, 0)
-						if len(candidates)+len(controls) == 128 {
-							if err := flush(); err != nil {
-								return err
-							}
+						if err := enqueue(name); err != nil {
+							return err
 						}
 					}
 					if errors.Is(err, io.EOF) {
@@ -410,7 +411,7 @@ func (index *OfflineIndex) run(ctx context.Context, limit int, input []byte, arg
 	defer cancel()
 	gitArgs := []string{"--git-dir=" + index.dir, "--work-tree=" + index.source,
 		"-c", "credential.helper=", "-c", "protocol.allow=never"}
-	env := append([]string{"PATH=" + safePath(os.Getenv("PATH")), "HOME=" + index.dir, "TMPDIR=" + index.dir}, hardeningEnv()...)
+	env := append([]string{"PATH=" + aicli.SafePath(os.Getenv("PATH")), "HOME=" + index.dir, "TMPDIR=" + index.dir}, hardeningEnv()...)
 	dir := index.dir
 	// A metadata directory inside source would scope path commands to .git/.
 	if workspace.Within(index.source, dir) {

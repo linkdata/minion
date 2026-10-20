@@ -176,13 +176,13 @@ func TestJobValidate(t *testing.T) {
 		{"skill path", func(j *Job) { j.Main.Skills = []string{"/tmp/skill/SKILL.md"} }, "skill URL"},
 		{"provider", func(j *Job) { j.Main.Provider = "unknown" }, "unsupported action provider"},
 		{"file bound", func(j *Job) { j.Source.Files[0].Data = make([]byte, workspace.MaxBytes+1) }, "source exceeds byte limit"},
-		{"model bound", func(j *Job) { j.Main.Model = strings.Repeat("m", maxModelSettingBytes+1) }, "invalid action model or skills"},
+		{"model bound", func(j *Job) { j.Main.Model = strings.Repeat("m", config.MaxModelSettingBytes+1) }, "invalid action model or skills"},
 		{"model NUL", func(j *Job) { j.Main.Model = "a\x00b" }, "invalid action model or skills"},
 		{"model CR", func(j *Job) { j.Main.Model = "a\rb" }, "invalid action model or skills"},
 		{"model LF", func(j *Job) { j.Main.Model = "a\nb" }, "invalid action model or skills"},
 		{"model space", func(j *Job) { j.Main.Model = "a b" }, "invalid action model or skills"},
 		{"model tab", func(j *Job) { j.Main.Model = "a\tb" }, "invalid action model or skills"},
-		{"effort bound", func(j *Job) { j.Main.Effort = strings.Repeat("e", maxModelSettingBytes+1) }, "invalid action model or skills"},
+		{"effort bound", func(j *Job) { j.Main.Effort = strings.Repeat("e", config.MaxModelSettingBytes+1) }, "invalid action model or skills"},
 		{"effort CR", func(j *Job) { j.Main.Effort = "a\rb" }, "invalid action model or skills"},
 		{"effort LF", func(j *Job) { j.Main.Effort = "a\nb" }, "invalid action model or skills"},
 		{"effort space", func(j *Job) { j.Main.Effort = "a b" }, "invalid action model or skills"},
@@ -195,7 +195,7 @@ func TestJobValidate(t *testing.T) {
 		{"critic model", func(j *Job) { j.Critic = &RoleSettings{Provider: "claude", Model: "a\x00b"}; j.CriticMaxRounds = 1 }, "invalid action model or skills"},
 		{"critic model space", func(j *Job) { j.Critic = &RoleSettings{Provider: "claude", Model: "a b"}; j.CriticMaxRounds = 1 }, "invalid action model or skills"},
 		{"critic model bound", func(j *Job) {
-			j.Critic = &RoleSettings{Provider: "claude", Model: strings.Repeat("m", maxModelSettingBytes+1)}
+			j.Critic = &RoleSettings{Provider: "claude", Model: strings.Repeat("m", config.MaxModelSettingBytes+1)}
 			j.CriticMaxRounds = 1
 		}, "invalid action model or skills"},
 		{"critic always-on skill", func(j *Job) {
@@ -245,7 +245,7 @@ func TestJobValidate(t *testing.T) {
 		{"critic maximum rounds", func(j *Job) { j.Critic, j.CriticMaxRounds = critic, config.MaxCriticMaxRounds }},
 		{"critic threshold at budget", func(j *Job) { j.Critic, j.CriticMaxRounds, j.CriticNonblockingRounds = critic, 2, 2 }},
 		{"maximum settings", func(j *Job) {
-			j.Main.Model, j.Main.Effort = strings.Repeat("m", maxModelSettingBytes), strings.Repeat("e", maxModelSettingBytes)
+			j.Main.Model, j.Main.Effort = strings.Repeat("m", config.MaxModelSettingBytes), strings.Repeat("e", config.MaxModelSettingBytes)
 			j.RuntimeBudget = config.MaxJobTimeout
 		}},
 	} {

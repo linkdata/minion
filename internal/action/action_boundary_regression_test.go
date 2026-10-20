@@ -138,7 +138,7 @@ func TestExecuteCriticAdmissionUsesControlledWorkRoot(t *testing.T) {
 				request.Repository.Actions = []string{"comment"}
 				err = e.Execute(context.Background(), request)
 				if unsafe {
-					if !errors.Is(err, workroot.ErrUnsafe) || errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "host-level model read grants are unsupported") || calls != 0 {
+					if errors.Is(err, workroot.ErrUnsafe) || !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "host-level model read grants are unsupported") || calls != 0 {
 						t.Fatalf("admission classification: calls=%d error=%v", calls, err)
 					}
 					if _, err := os.Stat(filepath.Join(root, "reviews")); !errors.Is(err, os.ErrNotExist) {

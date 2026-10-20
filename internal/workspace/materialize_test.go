@@ -178,15 +178,14 @@ func TestMaterializeChangesValidatesBeforeWriting(t *testing.T) {
 			t.Fatalf("invalid candidate wrote files: %v, %v", entries, err)
 		}
 	}
-	for _, name := range []string{"literal\\backslash"} {
-		root := privateRoot(t)
-		if err := MaterializeChanges(root, []File{{Path: name, Mode: Regular}}, nil); err == nil || !strings.Contains(err.Error(), "unsafe fix source path") {
-			t.Fatalf("unsafe candidate baseline %q accepted: %v", name, err)
-		}
-		entries, err := os.ReadDir(root)
-		if err != nil || len(entries) != 0 {
-			t.Fatalf("invalid baseline wrote files: %v, %v", entries, err)
-		}
+	const name = "literal\\backslash"
+	root := privateRoot(t)
+	if err := MaterializeChanges(root, []File{{Path: name, Mode: Regular}}, nil); err == nil || !strings.Contains(err.Error(), "unsafe fix source path") {
+		t.Fatalf("unsafe candidate baseline %q accepted: %v", name, err)
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("invalid baseline wrote files: %v, %v", entries, err)
 	}
 }
 

@@ -27,7 +27,7 @@ type notificationCall struct {
 	since time.Time
 }
 
-// Most fake methods return their configured result even after cancellation, exercising the monitor's post-call guards.
+// Except Repository and CreateIssueComment, fake methods return configured results after cancellation to exercise post-call guards.
 type fakeGitHub struct {
 	notifications      []github.Notification
 	notificationErrors map[string]error

@@ -20,7 +20,6 @@ import (
 const ProtocolVersion = 2
 
 const (
-	maxModelSettingBytes      = 128
 	maxDiagnostics            = 100
 	maxDiagnosticMessageBytes = 8 << 10
 )
@@ -126,7 +125,7 @@ func (r RoleSettings) Validate() error {
 	if r.Provider != "codex" && r.Provider != "claude" {
 		return errors.New("unsupported action provider")
 	}
-	if !boundedText(r.Model, maxModelSettingBytes) || !boundedText(r.Effort, maxModelSettingBytes) || strings.ContainsAny(r.Model+r.Effort, " \t\r\n") || len(r.Skills)+len(r.AlwaysOnSkills) > config.MaxSkillsPerRole {
+	if !boundedText(r.Model, config.MaxModelSettingBytes) || !boundedText(r.Effort, config.MaxModelSettingBytes) || strings.ContainsAny(r.Model+r.Effort, " \t\r\n") || len(r.Skills)+len(r.AlwaysOnSkills) > config.MaxSkillsPerRole {
 		return errors.New("invalid action model or skills")
 	}
 	for _, source := range slices.Concat(r.Skills, r.AlwaysOnSkills) {

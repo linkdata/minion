@@ -148,7 +148,7 @@ func (s *usageSession) collectUsage(ctx context.Context, home, rootID string, st
 	queue := []string{rootID}
 	// Current stream references are checked even when the rollout omitted the
 	// matching activity event. They never select unrelated historical helpers.
-	expected := append([]string(nil), expectedChildren...)
+	expected := slices.Clone(expectedChildren)
 	for len(queue) != 0 || len(expected) != 0 {
 		if len(queue) == 0 {
 			queue, expected = expected, nil
@@ -186,12 +186,18 @@ func (s *usageSession) collectUsage(ctx context.Context, home, rootID string, st
 		}
 		if currentRoot != nil {
 			// Resume stdout is cumulative for the root, not this invocation
-			// or its helpers. Compare like counters without enlarging the delta.
+			// or its helpers. Retain a trusted floor when rollout evidence is unreadable.
+			trustedBaseline := boundary != nil && boundary.valid && boundary.prefixKnown && boundary.hasSnapshot && !boundary.counterGap && !boundary.unfinished
 			if currentRoot.hasSnapshot {
 				ok = ok && currentRoot.snapshot == *fallback
-			} else if boundary != nil && boundary.valid && boundary.prefixKnown && boundary.hasSnapshot && !boundary.counterGap && !boundary.unfinished {
+			} else if trustedBaseline {
 				cumulative, added := boundary.snapshot.AddChecked(tokens)
 				ok = ok && added && cumulative == *fallback
+			}
+			if !ok && tokens == (usage.Tokens{}) && trustedBaseline {
+				if delta := fallback.Sub(boundary.snapshot); delta.Valid() {
+					tokens = delta
+				}
 			}
 		}
 		var added bool
@@ -201,9 +207,10 @@ func (s *usageSession) collectUsage(ctx context.Context, home, rootID string, st
 	// Lifetime ownership alone cannot attribute unreferenced new or changed
 	// helper work to this invocation. Preserve the known lower bound and refuse
 	// completion rather than silently certifying that omitted evidence.
+	proofBudget := int64(maxUsageScanBytes)
 	for _, id := range slices.Sorted(maps.Keys(owned)) {
 		meta := owned[id]
-		if !visited[id] && (ambiguous[id] || !unchangedUsageRollout(ctx, meta.path, s.before[id], &budget)) {
+		if !visited[id] && (ambiguous[id] || !unchangedUsageRollout(ctx, meta.path, s.before[id], &proofBudget)) {
 			complete = false
 			childError = joinUsageErrors(childError, errUnverifiedChildren)
 			break

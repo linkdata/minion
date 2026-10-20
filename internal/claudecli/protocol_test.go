@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"os"
 	"strings"
 	"testing"
 
@@ -160,13 +159,9 @@ func TestOutputReportsSafeNativeAPIErrorFields(t *testing.T) {
 	}
 }
 
-func TestRunPrelaunchFailuresHaveCompleteZeroUsage(t *testing.T) {
-	binary := fakeExecutable(t, "claude", "touch \"$0.called\"\nexit 99\n")
+func TestEmptyPromptHasCompleteZeroUsage(t *testing.T) {
 	result, err := Run(context.Background(), t.TempDir(), "", false, "", config.ClaudeConfig{})
 	if err == nil || !result.UsageComplete || result.Tokens != (usage.Tokens{}) || result.Answer != "" {
 		t.Fatalf("prelaunch failure=%+v error=%v", result, err)
-	}
-	if _, err := os.Stat(binary + ".called"); !os.IsNotExist(err) {
-		t.Fatalf("prelaunch failure started CLI: %v", err)
 	}
 }

@@ -325,25 +325,33 @@ func TestFixChangesRejectConfiguredKeysWithoutRejectingBinary(t *testing.T) {
 			}
 		})
 	}
-	for _, critic := range []bool{false, true} {
-		t.Run("critic="+strconv.FormatBool(critic), func(t *testing.T) {
-			job := testJob(command.Fix)
-			if critic {
-				job = withClaudeCritic(job)
-			}
-			calls := 0
-			runner := Runner{WorkRoot: t.TempDir(), Codex: config.CodexConfig{APIKey: key}, runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
-				calls++
-				if request.role != roleMain {
-					t.Fatal("critic received a fix containing a configured key")
+	for _, test := range []struct {
+		name, path, data, codexKey, claudeKey string
+	}{
+		{name: "Codex key in data", path: "source.txt", data: `{"note":"fixture-\u0073ecret"}`, codexKey: key},
+		{name: "Codex key in filename", path: key + ".txt", data: "safe", codexKey: key},
+		{name: "Claude key in data", path: "source.txt", data: `{"note":"fixture-\u0073ecret"}`, claudeKey: key},
+	} {
+		for _, critic := range []bool{false, true} {
+			t.Run(test.name+"/critic="+strconv.FormatBool(critic), func(t *testing.T) {
+				job := testJob(command.Fix)
+				if critic {
+					job = withClaudeCritic(job)
 				}
-				writeFixtureFile(t, request.dir, "source.txt", []byte(`{"note":"fixture-\u0073ecret"}`))
-				return aicli.Result{Answer: proposalJSON("Done", "")}, nil
-			}}
-			result, err := runner.Run(context.Background(), job)
-			if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "configured provider key") || calls != 1 || result.Answer != "" || len(result.Changes) != 0 {
-				t.Fatalf("configured key reached fix result: calls=%d result=%+v error=%v", calls, result, err)
-			}
-		})
+				calls := 0
+				runner := Runner{WorkRoot: t.TempDir(), Codex: config.CodexConfig{APIKey: test.codexKey}, Claude: config.ClaudeConfig{APIKey: test.claudeKey}, runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+					calls++
+					if request.role != roleMain {
+						t.Fatal("critic received a fix containing a configured key")
+					}
+					writeFixtureFile(t, request.dir, test.path, []byte(test.data))
+					return aicli.Result{Answer: proposalJSON("Done", "")}, nil
+				}}
+				result, err := runner.Run(context.Background(), job)
+				if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "configured provider key") || calls != 1 || result.Answer != "" || len(result.Changes) != 0 {
+					t.Fatalf("configured key reached fix result: calls=%d result=%+v error=%v", calls, result, err)
+				}
+			})
+		}
 	}
 }

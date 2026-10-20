@@ -76,12 +76,20 @@ func TestGitCredentialHelperIgnoresCheckoutRelativePath(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			wantPath := trustedBin
 			if name == "empty PATH" || name == "all relative" {
-				wantPath = "/usr/local/bin:/usr/bin:/bin"
+				var canonical []string
+				for _, dir := range []string{"/usr/local/bin", "/usr/bin", "/bin"} {
+					resolved, err := aicli.ResolvePath(dir)
+					if err != nil {
+						t.Fatal(err)
+					}
+					canonical = append(canonical, resolved)
+				}
+				wantPath = strings.Join(canonical, string(os.PathListSeparator))
 			} else if name == "absolute checkout path" {
 				wantPath = checkout + string(os.PathListSeparator) + trustedBin
 			}
-			if got := safePath(path); got != wantPath {
-				t.Fatalf("safePath(%q) = %q, want %q", path, got, wantPath)
+			if got := aicli.SafePath(path); got != wantPath {
+				t.Fatalf("aicli.SafePath(%q) = %q, want %q", path, got, wantPath)
 			}
 			t.Setenv("PATH", path)
 			cmd := exec.Command(realGit, "-c", "credential.helper=", "-c", credentialHelperConfig(filepath.Join(trustedBin, "gh")), "credential", "fill")
@@ -542,7 +550,7 @@ func (f gitFixture) gitInput(dir, input string, args ...string) string {
 	cmd := exec.Command("git", append(hardeningArgs(), args...)...)
 	cmd.Dir = dir
 	cmd.Stdin = strings.NewReader(input)
-	cmd.Env = append(append([]string{"PATH=" + safePath(os.Getenv("PATH")), "HOME=" + f.home, "TMPDIR=" + os.TempDir()}, hardeningEnv()...),
+	cmd.Env = append(append([]string{"PATH=" + aicli.SafePath(os.Getenv("PATH")), "HOME=" + f.home, "TMPDIR=" + os.TempDir()}, hardeningEnv()...),
 		"GIT_AUTHOR_NAME=Test", "GIT_AUTHOR_EMAIL=test@example.invalid", "GIT_AUTHOR_DATE=2026-01-01T00:00:00Z",
 		"GIT_COMMITTER_NAME=Test", "GIT_COMMITTER_EMAIL=test@example.invalid", "GIT_COMMITTER_DATE=2026-01-01T00:00:00Z",
 	)

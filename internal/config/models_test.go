@@ -30,6 +30,13 @@ func TestLoadModelProviders(t *testing.T) {
 		{name: "same explicit provider", fields: `,"main":"claude","adversarial":"claude"`, wantError: "adversarial must differ"},
 		{name: "negative rounds", fields: `,"critic_max_rounds":-1`, wantError: "critic_max_rounds"},
 		{name: "too many rounds", fields: `,"critic_max_rounds":21`, wantError: "critic_max_rounds"},
+		{name: "model and effort at limit", fields: fmt.Sprintf(`,"codex":{"model":%q,"reasoning_effort":%q},"claude":{"model":%q,"effort":%q}`, strings.Repeat("m", MaxModelSettingBytes), strings.Repeat("e", MaxModelSettingBytes), strings.Repeat("m", MaxModelSettingBytes), strings.Repeat("e", MaxModelSettingBytes)), main: "codex", rounds: 5},
+		{name: "codex model too long", fields: fmt.Sprintf(`,"codex":{"model":%q}`, strings.Repeat("m", MaxModelSettingBytes+1)), wantError: "codex model and reasoning_effort"},
+		{name: "codex effort too long", fields: fmt.Sprintf(`,"codex":{"reasoning_effort":%q}`, strings.Repeat("e", MaxModelSettingBytes+1)), wantError: "codex model and reasoning_effort"},
+		{name: "claude model too long", fields: fmt.Sprintf(`,"claude":{"model":%q}`, strings.Repeat("m", MaxModelSettingBytes+1)), wantError: "claude model and effort"},
+		{name: "claude effort too long", fields: fmt.Sprintf(`,"claude":{"effort":%q}`, strings.Repeat("e", MaxModelSettingBytes+1)), wantError: "claude model and effort"},
+		{name: "codex model NUL", fields: `,"codex":{"model":"bad\u0000model"}`, wantError: "codex model and reasoning_effort"},
+		{name: "claude effort NUL", fields: `,"claude":{"effort":"bad\u0000effort"}`, wantError: "claude model and effort"},
 		{name: "claude model whitespace", fields: `,"claude":{"model":"bad model"}`, wantError: "claude model and effort"},
 		{name: "claude effort whitespace", fields: `,"claude":{"effort":"high\nlow"}`, wantError: "claude model and effort"},
 		{name: "claude runtime skills", fields: `,"claude":{"skills":["/tmp/SKILL.md"]}`, wantError: "unknown field"},
@@ -55,6 +62,17 @@ func TestLoadModelProviders(t *testing.T) {
 				t.Fatalf("Load() providers = %q, %q, %d, %v; want %q, %q, %d", cfg.Main, cfg.Adversarial, cfg.CriticMaxRounds, err, tt.main, tt.adversarial, tt.rounds)
 			}
 		})
+	}
+}
+
+func TestValidateRejectsInvalidModelUTF8(t *testing.T) {
+	cfg := Config{
+		BotLogin:     "bot",
+		Codex:        CodexConfig{Model: string([]byte{0xff})},
+		Repositories: []Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"review"}}},
+	}
+	if err := cfg.Validate(t.TempDir()); err == nil || !strings.Contains(err.Error(), "codex model and reasoning_effort") {
+		t.Fatalf("invalid UTF-8 setting accepted: %v", err)
 	}
 }
 

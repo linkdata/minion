@@ -20,15 +20,15 @@ import (
 // Stored-login transcripts follow the CLI's normal private retention policy.
 // Minion never resumes this Session for another action or role.
 type Session struct {
-	workspace, outputDir string
-	writable             bool
-	settings             config.ClaudeConfig
-	runtimeDir, cacheDir string
-	authDir, configDir   string
-	nativeHome           string
-	embeddedDir          string
-	skillPaths           []string
-	id                   string
+	workspace, binary, outputDir string
+	writable                     bool
+	settings                     config.ClaudeConfig
+	runtimeDir, cacheDir         string
+	authDir, configDir           string
+	nativeHome                   string
+	embeddedDir                  string
+	skillPaths                   []string
+	id                           string
 	// A missing snapshot leaves only a cumulative floor until a covering snapshot arrives.
 	baseline       usage.Tokens
 	usageGap       bool
@@ -65,7 +65,7 @@ func (s *Session) Close() error {
 	return aicli.RedactError(err, s.settings.APIKey)
 }
 
-func (s *Session) prepare(workspace string, writable bool, outputDir string, settings config.ClaudeConfig) error {
+func (s *Session) prepare(workspace, binary string, writable bool, outputDir string, settings config.ClaudeConfig) error {
 	if s.closed {
 		return errors.New("claude session is closed")
 	}
@@ -75,7 +75,7 @@ func (s *Session) prepare(workspace string, writable bool, outputDir string, set
 		bound.Skills = nil
 	}
 	if s.workspace != "" {
-		if s.workspace != workspace || s.outputDir != outputDir || s.writable != writable || !reflect.DeepEqual(s.settings, bound) {
+		if s.workspace != workspace || s.binary != binary || s.outputDir != outputDir || s.writable != writable || !reflect.DeepEqual(s.settings, bound) {
 			return errors.New("claude session source, role or settings changed")
 		}
 		if s.initErr != nil {
@@ -92,7 +92,7 @@ func (s *Session) prepare(workspace string, writable bool, outputDir string, set
 			return errors.New("claude session native configuration changed")
 		}
 	} else {
-		s.workspace, s.outputDir, s.writable, s.settings = workspace, outputDir, writable, bound
+		s.workspace, s.binary, s.outputDir, s.writable, s.settings = workspace, binary, outputDir, writable, bound
 		s.settings.Skills = slices.Clone(bound.Skills)
 		if settings.AllowAllUnixSockets != nil {
 			allow := *settings.AllowAllUnixSockets

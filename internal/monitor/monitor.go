@@ -168,6 +168,9 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			next = started.Add(minInterval)
 			store.Data.NextPollAt = next
 			if saveErr := store.Save(); saveErr != nil {
+				if err != nil {
+					err = fmt.Errorf("list %s notifications: %w", repo.Name, err)
+				}
 				return stop(err, saveErr)
 			}
 		}

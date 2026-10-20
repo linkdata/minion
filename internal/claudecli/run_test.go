@@ -458,11 +458,18 @@ func TestRunRejectsUnsafePaths(t *testing.T) {
 }
 
 func TestChildEnvironment(t *testing.T) {
-	got, err := childEnvironment([]string{"HOME=/home/operator", "PATH=/bin", "CLAUDE_CONFIG_DIR=/wrong-native-home", "ANTHROPIC_API_KEY=", "anthropic_api_key=dummy", "GH_TOKEN=dummy", "GITHUB_TOKEN=dummy", "GIT_CONFIG_GLOBAL=/private-git-config", "GIT_DIR=/private-git-dir", "NODE_OPTIONS=dummy", "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=0", "BASH_ENV=bad", "HTTPS_PROXY=http://proxy.example:8080", "https_proxy=http://lower.example:3128", "http_proxy=http://lower.example:3128", "all_proxy=socks5://lower.example:1080", "no_proxy=localhost", "Https_Proxy=http://ignored.example:3128", "invalid"}, "/run", "/cache", "", "/home/operator/.claude")
+	got, err := childEnvironment([]string{"HOME=/home/operator", "PATH=/bin::.:rel", "CLAUDE_CONFIG_DIR=/wrong-native-home", "ANTHROPIC_API_KEY=", "anthropic_api_key=dummy", "GH_TOKEN=dummy", "GITHUB_TOKEN=dummy", "GIT_CONFIG_GLOBAL=/private-git-config", "GIT_DIR=/private-git-dir", "NODE_OPTIONS=dummy", "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=0", "BASH_ENV=bad", "HTTPS_PROXY=http://proxy.example:8080", "https_proxy=http://lower.example:3128", "http_proxy=http://lower.example:3128", "all_proxy=socks5://lower.example:1080", "no_proxy=localhost", "Https_Proxy=http://ignored.example:3128", "invalid"}, "/run", "/cache", "", "/home/operator/.claude")
 	if err != nil {
 		t.Fatal(err)
 	}
 	joined := strings.Join(got, "\n")
+	bin, err := aicli.ResolvePath("/bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(got, "PATH="+bin) {
+		t.Fatalf("unsafe CLI PATH: %q", got)
+	}
 	for _, required := range []string{"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=safe.bareRepository", "GIT_CONFIG_VALUE_0=explicit", "GIT_ATTR_NOSYSTEM=1", "GIT_NO_REPLACE_OBJECTS=1", "GIT_NO_LAZY_FETCH=1", "GIT_OPTIONAL_LOCKS=0"} {
 		if !strings.Contains(joined, required) {
 			t.Fatalf("missing local Git setting %q: %s", required, joined)

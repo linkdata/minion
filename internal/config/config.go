@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/workroot"
@@ -37,6 +38,8 @@ const (
 	MaxSkillsPerRole = 64
 	// MaxSkillURLBytes is the portable action limit for one skill source.
 	MaxSkillURLBytes = 4096
+	// MaxModelSettingBytes is the portable limit for each model and effort setting.
+	MaxModelSettingBytes = 128
 
 	defaultReviewSkill        = "https://github.com/DietrichGebert/ponytail/tree/main/skills/ponytail-review"
 	defaultFixSkill           = "https://github.com/DietrichGebert/ponytail/tree/main/skills/ponytail"
@@ -200,6 +203,10 @@ func decode(r io.Reader) (Config, error) {
 	return cfg, nil
 }
 
+func validModelSetting(value string) bool {
+	return len(value) <= MaxModelSettingBytes && utf8.ValidString(value) && !strings.ContainsAny(value, " \t\r\n\x00")
+}
+
 // Validate checks configuration and resolves paths relative to configDir.
 //
 // It normalizes repository names, account logins, identity pin keys, and skill URLs.
@@ -238,13 +245,13 @@ func (c *Config) Validate(configDir string) error {
 	}
 	c.Codex.Model = strings.TrimSpace(c.Codex.Model)
 	c.Codex.ReasoningEffort = strings.TrimSpace(c.Codex.ReasoningEffort)
-	if strings.ContainsAny(c.Codex.Model, " \t\r\n") || strings.ContainsAny(c.Codex.ReasoningEffort, " \t\r\n") {
-		return fmt.Errorf("codex model and reasoning_effort must not contain whitespace")
+	if !validModelSetting(c.Codex.Model) || !validModelSetting(c.Codex.ReasoningEffort) {
+		return fmt.Errorf("codex model and reasoning_effort must be at most %d UTF-8 bytes without whitespace or NUL", MaxModelSettingBytes)
 	}
 	c.Claude.Model = strings.TrimSpace(c.Claude.Model)
 	c.Claude.Effort = strings.TrimSpace(c.Claude.Effort)
-	if strings.ContainsAny(c.Claude.Model, " \t\r\n") || strings.ContainsAny(c.Claude.Effort, " \t\r\n") {
-		return fmt.Errorf("claude model and effort must not contain whitespace")
+	if !validModelSetting(c.Claude.Model) || !validModelSetting(c.Claude.Effort) {
+		return fmt.Errorf("claude model and effort must be at most %d UTF-8 bytes without whitespace or NUL", MaxModelSettingBytes)
 	}
 	if c.AlwaysOnSkills == nil {
 		c.AlwaysOnSkills = []string{defaultAntiInjectionSkill, defaultCavemanSkill}

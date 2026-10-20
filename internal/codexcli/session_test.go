@@ -281,6 +281,16 @@ func TestSessionRuntimeControlFilesDoNotFollowPriorModelSymlinks(t *testing.T) {
 	if data, err := os.ReadFile(outside); err != nil || string(data) != "original" {
 		t.Fatalf("prior model symlink target overwritten: %q %v", data, err)
 	}
+	for name, want := range map[string]string{instructionRoot: "", "output-schema.json": settings.OutputSchema} {
+		path := filepath.Join(session.runtimeDir, name)
+		info, err := os.Lstat(path)
+		if err != nil || !info.Mode().IsRegular() {
+			t.Fatalf("runtime control %s was not recreated as a regular file: %v", name, err)
+		}
+		if data, err := os.ReadFile(path); err != nil || string(data) != want {
+			t.Fatalf("runtime control %s content = %q, %v", name, data, err)
+		}
+	}
 }
 
 func TestSessionFreshScratchResetFailureDoesNotDispatch(t *testing.T) {

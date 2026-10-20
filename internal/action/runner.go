@@ -28,6 +28,8 @@ import (
 	"github.com/linkdata/minion/internal/workspace"
 )
 
+var errUnsupportedModelReadGrants = errors.New("host-level model read grants are unsupported")
+
 // Runner computes an action using supplied files and installed tools only.
 // Authentication belongs to this host configuration, never to Job or Result.
 type Runner struct {
@@ -103,6 +105,9 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 	if err := configured.CheckWorkRootIsolation(workRoot, providers...); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return result, err
+		}
+		if errors.Is(err, errUnsupportedModelReadGrants) {
+			return result, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
 		}
 		return result, fmt.Errorf("%w: %w", workroot.ErrUnsafe, err)
 	}
@@ -448,7 +453,7 @@ func (r *Runner) CheckPrivatePaths(paths []string, providers ...string) error {
 
 func (r *Runner) modelReadPaths(providers ...string) ([]string, error) {
 	if len(r.Codex.ReadOnlyDirs) != 0 || len(r.Claude.ReadOnlyDirs) != 0 {
-		return nil, errors.New("host-level model read grants are unsupported")
+		return nil, errUnsupportedModelReadGrants
 	}
 	var grants []string
 	for _, provider := range providers {

@@ -190,7 +190,7 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	cmd := exec.CommandContext(runCtx, realBinary, args...)
 	cmd.Args[0] = "codex"
 	cmd.Dir = runtimeDir
-	cmd.Env = childEnvironment(os.Environ(), runtimeDir, cacheDir, codexHome, settings.APIKey != "")
+	cmd.Env = childEnvironment(os.Environ(), runtimeDir, cacheDir, codexHome, settings.APIKey != "", workspace, outputDir)
 	if settings.APIKey != "" {
 		cmd.Env = append(cmd.Env, "CODEX_API_KEY="+settings.APIKey)
 	}
@@ -260,7 +260,7 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 // The runner holds GitHub and other service credentials; Codex only needs its
 // own authentication and ordinary process/network settings. Configured
 // authentication removes inherited credentials before the caller supplies it.
-func childEnvironment(env []string, runtimeDir, cacheDir, codexHome string, configuredAuth bool) []string {
+func childEnvironment(env []string, runtimeDir, cacheDir, codexHome string, configuredAuth bool, writablePaths ...string) []string {
 	allowed := map[string]bool{
 		"PATH": true, "HOME": true, "LANG": true, "LC_ALL": true, "LC_CTYPE": true, "TERM": true,
 		"CODEX_API_KEY": true, "CODEX_ACCESS_TOKEN": true,
@@ -269,6 +269,7 @@ func childEnvironment(env []string, runtimeDir, cacheDir, codexHome string, conf
 		"HTTP_PROXY": true, "HTTPS_PROXY": true, "ALL_PROXY": true, "NO_PROXY": true,
 	}
 	clean := make([]string, 0, len(env))
+	writablePaths = append([]string{runtimeDir}, writablePaths...)
 	explicitHome := false
 	for _, entry := range env {
 		key, value, ok := strings.Cut(entry, "=")
@@ -283,6 +284,9 @@ func childEnvironment(env []string, runtimeDir, cacheDir, codexHome string, conf
 			continue
 		}
 		if allowed[strings.ToUpper(key)] {
+			if key == "PATH" {
+				entry = "PATH=" + aicli.SafePath(value, writablePaths...)
+			}
 			clean = append(clean, entry)
 		}
 	}

@@ -465,7 +465,7 @@ func TestRepositoryIgnoresHostGitDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	// This regression deliberately supplies a nonempty synthetic HOME instead of the shared helper's empty HOME.
-	env := append([]string{"PATH=" + safePath(os.Getenv("PATH")), "HOME=" + home, "TMPDIR=" + home, "LC_ALL=C"}, aicli.ModelGitEnvironment()...)
+	env := append([]string{"PATH=" + aicli.SafePath(os.Getenv("PATH")), "HOME=" + home, "TMPDIR=" + home, "LC_ALL=C"}, aicli.ModelGitEnvironment()...)
 	for _, check := range []struct {
 		args []string
 		want string
