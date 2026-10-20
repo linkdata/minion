@@ -26,13 +26,14 @@ import (
 type preparedAction struct {
 	job Job
 
-	request    monitor.Job
-	checkout   *gitwork.Checkout
-	repository github.Repository
-	fork       github.Repository
-	branch     string
-	existing   *github.PullRequest
-	reply      string
+	request     monitor.Job
+	issueNodeID string
+	checkout    *gitwork.Checkout
+	repository  github.Repository
+	fork        github.Repository
+	branch      string
+	existing    *github.PullRequest
+	reply       string
 }
 
 // needsExecution distinguishes supplied work from fixed replies and publication recovery.
@@ -303,6 +304,21 @@ func (e *Orchestrator) retainAudit(p *preparedAction, result Result, complete bo
 	return nil
 }
 
+var errFixIssueChanged = errors.New("issue changed after fix request")
+
+const fixIssueChangedReply = "The issue changed after this `fix` request, so no branch was created. Review its current text and post a new `fix` command."
+
+func (e *Orchestrator) currentFixIssue(ctx context.Context, p *preparedAction) (github.IssueContent, error) {
+	content, err := e.GitHub.CurrentIssueContent(ctx, p.issueNodeID)
+	if err != nil {
+		return github.IssueContent{}, err
+	}
+	if p.request.Source.UpdatedAt.IsZero() || content.LastEditedAt != nil && !content.LastEditedAt.Before(p.request.Source.UpdatedAt) {
+		return github.IssueContent{}, errFixIssueChanged
+	}
+	return content, nil
+}
+
 func (e *Orchestrator) prepareFix(ctx context.Context, p *preparedAction) (*preparedAction, error) {
 	request := p.request
 	if request.SubjectType != "Issue" {
@@ -316,6 +332,7 @@ func (e *Orchestrator) prepareFix(ctx context.Context, p *preparedAction) (*prep
 	if err != nil {
 		return nil, err
 	}
+	p.issueNodeID = issue.NodeID
 	repo, fork, err := e.fixFork(ctx, request.Repository)
 	if err != nil {
 		return nil, err
@@ -346,13 +363,13 @@ func (e *Orchestrator) prepareFix(ctx context.Context, p *preparedAction) (*prep
 			return nil, fmt.Errorf("clear failed fork push checkpoint: %w", err)
 		}
 	}
-	content, err := e.GitHub.CurrentIssueContent(ctx, issue.NodeID)
+	content, err := e.currentFixIssue(ctx, p)
+	if errors.Is(err, errFixIssueChanged) {
+		p.reply = fixIssueChangedReply
+		return p, nil
+	}
 	if err != nil {
 		return nil, err
-	}
-	if request.Source.UpdatedAt.IsZero() || content.LastEditedAt != nil && !content.LastEditedAt.Before(request.Source.UpdatedAt) {
-		p.reply = "The issue changed after this `fix` request, so no branch was created. Review its current text and post a new `fix` command."
-		return p, nil
 	}
 	if err := e.checkGitHubContext(request, "", content.BodyText); err != nil {
 		return nil, err
@@ -379,6 +396,11 @@ func (e *Orchestrator) publishFix(ctx context.Context, p *preparedAction, result
 	}()
 	request := p.request
 	if len(result.Changes) == 0 {
+		if _, err := e.currentFixIssue(ctx, p); errors.Is(err, errFixIssueChanged) {
+			return e.acknowledge(ctx, request, fixIssueChangedReply)
+		} else if err != nil {
+			return err
+		}
 		return e.acknowledge(ctx, request, "AI completed the request without changing files.\n\n"+inertModelOutput(result.Answer))
 	}
 	currentRepo, currentFork, err := e.fixFork(ctx, request.Repository)
@@ -396,9 +418,15 @@ func (e *Orchestrator) publishFix(ctx context.Context, p *preparedAction, result
 		return fmt.Errorf("%w: import action result: %w", monitor.ErrTerminalJob, err)
 	}
 	if err := p.checkout.CommitAndPush(ctx, fork.FullName, p.branch, e.BotLogin, fmt.Sprintf("Fix #%d via %s", request.Number, e.BotLogin), func(sha string) error {
+		if _, err := e.currentFixIssue(ctx, p); err != nil {
+			return err
+		}
 		e.Store.Data.PendingFixes[request.ID] = sha
 		return e.Store.Save()
 	}); err != nil {
+		if errors.Is(err, errFixIssueChanged) {
+			return e.acknowledge(ctx, request, fixIssueChangedReply)
+		}
 		if errors.Is(err, gitwork.ErrNoChanges) {
 			return fmt.Errorf("%w: reviewed changes produced no commit: %w", monitor.ErrTerminalJob, err)
 		}

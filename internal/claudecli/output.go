@@ -301,16 +301,29 @@ func (o *jsonlOutput) finishLine(line []byte) {
 	if complete {
 		cumulative := tokens
 		tokens = tokens.Sub(o.baseline)
+		var rawRoot eventUsage
+		root, rootValid := usage.Tokens{}, json.Unmarshal(e.Usage, &rawRoot) == nil
+		if rootValid {
+			root, rootValid = rawRoot.tokens()
+		}
 		// An exact snapshot must cover the prior cumulative floor plus all
 		// attributable current counters before it can become the next baseline.
 		lower, valid := o.assistantLowerBound()
-		complete = tokens.Valid() && valid && covers(tokens, lower)
+		complete = tokens.Valid() && valid && covers(tokens, lower) && (!rootValid || covers(tokens, root))
 		if complete {
 			o.cumulative, o.hasCumulative = cumulative, true
 		}
 		if o.baselineUnknown || !tokens.Valid() {
 			// An uncertain prior baseline cannot identify this invocation's delta.
 			tokens, complete = usage.Tokens{}, false
+		}
+		if rootValid && !covers(tokens, root) {
+			if merged := tokens.Max(root); merged.Valid() {
+				tokens = merged
+			} else {
+				tokens = root
+			}
+			complete = false
 		}
 	}
 	// Native modelUsage is cumulative across result turns. A later partial

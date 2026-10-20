@@ -496,6 +496,70 @@ func TestAuditArtifactReadModesPreserveFailurePolicies(t *testing.T) {
 	}
 }
 
+func TestInvalidUTF8AuditArtifactBoundaries(t *testing.T) {
+	job := testJob(command.SecurityAudit)
+	invalidJSON := []byte{'"', 0xff, '"'}
+	if !json.Valid(invalidJSON) {
+		t.Fatal("invalid-byte JSON fixture must pass Go's syntax check")
+	}
+	for _, name := range []string{"run-metadata.json", "coverage-ledger.json", "findings.json", "architecture.md", "FINDINGS-DETAIL.md", "NEEDS-VALIDATION.md"} {
+		t.Run(name, func(t *testing.T) {
+			invalidData := []byte{0xff}
+			if strings.HasSuffix(name, ".json") {
+				invalidData = invalidJSON
+			}
+			root := t.TempDir()
+			for _, file := range auditArtifactsFixture(job, sourceIdentity(job), "Audit report\n") {
+				if file.Path == name {
+					file.Data = invalidData
+				}
+				writeFixtureFile(t, root, file.Path, file.Data)
+			}
+			if _, _, err := readAuditArtifacts(root, false, ""); err == nil || !strings.Contains(err.Error(), "invalid audit "+name) || !strings.Contains(err.Error(), "UTF-8") {
+				t.Fatalf("completed audit accepted invalid %s: %v", name, err)
+			}
+			files, diagnostics, err := readAuditArtifacts(root, true, "")
+			if err != nil || len(files) != len(auditArtifacts)-1 || len(diagnostics) != 1 ||
+				diagnostics[0].Code != "artifact_unavailable" || !strings.Contains(diagnostics[0].Message, name) {
+				t.Fatalf("partial collection files=%d diagnostics=%+v error=%v", len(files), diagnostics, err)
+			}
+			for _, file := range files {
+				if file.Path == name {
+					t.Fatalf("partial collection retained invalid %s", name)
+				}
+			}
+			partial := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Artifacts: files, Diagnostics: diagnostics}
+			if err := partial.validate(job, false); err != nil {
+				t.Fatalf("partial audit lost valid artifacts: %v", err)
+			}
+			result := completeAuditResult(job)
+			for i := range result.Artifacts {
+				if result.Artifacts[i].Path == name {
+					result.Artifacts[i].Data = invalidData
+				}
+			}
+			if err := result.Validate(job); err == nil || !strings.Contains(err.Error(), name) || !strings.Contains(err.Error(), "encoding") {
+				t.Fatalf("completed result accepted invalid %s: %v", name, err)
+			}
+			if err := result.validate(job, false); err == nil || !strings.Contains(err.Error(), name) || !strings.Contains(err.Error(), "encoding") {
+				t.Fatalf("partial result accepted invalid %s: %v", name, err)
+			}
+		})
+	}
+	result := completeAuditResult(job)
+	for i := range result.Artifacts {
+		if result.Artifacts[i].Path == "REPORT.md" {
+			result.Artifacts[i].Data = []byte{0xff}
+		}
+	}
+	if err := result.validate(job, false); err != nil {
+		t.Fatalf("partial result rejected raw invalid REPORT.md: %v", err)
+	}
+	if err := result.Validate(job); err == nil || !strings.Contains(err.Error(), "REPORT.md") {
+		t.Fatalf("completed result accepted invalid REPORT.md: %v", err)
+	}
+}
+
 func TestRunnerRejectsBlankAuditReportBeforeCritic(t *testing.T) {
 	for _, tt := range []struct{ name, report string }{
 		{name: "empty", report: ""},

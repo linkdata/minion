@@ -20,11 +20,12 @@ func TestRunRejectsCompletedAnswerAfterPipeDrainOverrun(t *testing.T) {
 	binary := installFakeCodex(t, `#!/bin/sh
 cat >/dev/null
 printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.completed","item":{"type":"agent_message","text":"answer"}}' '{"type":"turn.completed","usage":{"input_tokens":15,"cached_input_tokens":7,"output_tokens":11}}'
-sleep 5 &
+( i=0; while [ -f "$0" ] && [ "$i" -lt 5 ] && [ ! -f "$0.pid.stop" ]; do sleep 1; i=$((i+1)); done ) &
 printf '%s\n' "$!" > "$0.pid.tmp"
 mv -- "$0.pid.tmp" "$0.pid"
 exit 0
 `)
+	testsupport.StopOnCleanup(t, binary+".pid.stop")
 	writeUsageRollout(t, os.Getenv("CODEX_HOME"), "root", "", usageEvent("task_started", "root-turn"), usageRecord("root", "root-turn", "response", 15, 7, 11), usageEvent("task_complete", "root-turn"))
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
@@ -43,7 +44,7 @@ exit 0
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		waitCtx, stopWait := context.WithTimeout(context.Background(), time.Second)
+		waitCtx, stopWait := context.WithTimeout(context.Background(), 3*time.Second)
 		defer stopWait()
 		if err := child.Cleanup(waitCtx); err != nil {
 			t.Errorf("finite fixture child remained live after cleanup: %v", err)

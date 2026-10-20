@@ -3,10 +3,14 @@
 package testsupport
 
 import (
+	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -91,5 +95,49 @@ func TestWaitForProcessRetriesUnpublishedPID(t *testing.T) {
 	child, err := WaitForProcess(ctx, path, make(chan struct{}))
 	if child != nil || !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "fixture child did not start") {
 		t.Fatalf("unpublished PID stopped polling before startup deadline: %v, %v", child, err)
+	}
+}
+
+func TestCleanupDoesNotSignalStalePID(t *testing.T) {
+	runCtx, stop := context.WithTimeout(context.Background(), 3*time.Second)
+	cmd := exec.CommandContext(runCtx, "/bin/sh", "-c", "IFS= read -r value; printf '%s\\n' \"$value\"")
+	input, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		stop()
+		_ = input.Close()
+		_ = cmd.Wait()
+	})
+
+	pidFile := filepath.Join(t.TempDir(), "stale.pid")
+	if err := os.WriteFile(pidFile, []byte(strconv.Itoa(cmd.Process.Pid)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	child, err := PinProcess(pidFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := child.Cleanup(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cleanup of unrelated process: %v", err)
+	}
+	if _, err := fmt.Fprintln(input, "still alive"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := bufio.NewReader(output).ReadString('\n'); err != nil || got != "still alive\n" {
+		t.Fatalf("unrelated process did not respond after cleanup: %q, %v", got, err)
+	}
+	if _, err := os.Stat(pidFile + ".stop"); err != nil {
+		t.Fatalf("stop marker was not written: %v", err)
 	}
 }

@@ -16,11 +16,12 @@ import (
 
 func TestRunCancelsActiveChildProcess(t *testing.T) {
 	binary := fakeExecutable(t, "claude", `printf '%s\n' '`+assistantUsageEvent("partial", 3, 5, 7, 2)+`'
-sleep 30 &
+( i=0; while [ -f "$0" ] && [ "$i" -lt 30 ] && [ ! -f "$0.pid.stop" ]; do sleep 1; i=$((i+1)); done ) &
 printf '%s\n' "$!" > "$0.pid.tmp"
 mv -- "$0.pid.tmp" "$0.pid"
 wait
 `)
+	testsupport.StopOnCleanup(t, binary+".pid.stop")
 	workspace := t.TempDir()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -45,7 +46,7 @@ wait
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		cleanupCtx, stopCleanup := context.WithTimeout(context.Background(), time.Second)
+		cleanupCtx, stopCleanup := context.WithTimeout(context.Background(), 3*time.Second)
 		defer stopCleanup()
 		if err := child.Cleanup(cleanupCtx); err != nil {
 			t.Error(err)

@@ -185,7 +185,12 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
 					t.Error(err)
 				}
 			})
-			if _, err := session.Run(context.Background(), dir, "first", false, "", config.CodexConfig{}); err != nil {
+			first, err := session.Run(context.Background(), dir, "first", false, "", config.CodexConfig{})
+			if identity == "missing first" {
+				if err == nil || !strings.Contains(err.Error(), "did not identify a resumable thread") || first.Answer != "" || first.UsageComplete {
+					t.Fatalf("first call accepted without a thread: %+v %v", first, err)
+				}
+			} else if err != nil {
 				t.Fatal(err)
 			}
 			result, err := session.Run(context.Background(), dir, "second", false, "", config.CodexConfig{})

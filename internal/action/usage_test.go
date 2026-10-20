@@ -342,7 +342,7 @@ func TestUsagePreservesWorkerModelSkillsAndContext(t *testing.T) {
 	script := fmt.Sprintf(`#!/bin/sh
 printf '%%s\n' "$@" > %q
 cat > %q
-printf '%%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"No findings."}}' '{"type":"turn.completed","usage":{"input_tokens":3,"cached_input_tokens":1,"output_tokens":2}}'
+printf '%%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.completed","item":{"type":"agent_message","text":"No findings."}}' '{"type":"turn.completed","usage":{"input_tokens":3,"cached_input_tokens":1,"output_tokens":2}}'
 `, argsPath, promptPath)
 	fakeOnPath(t, "codex", script)
 	store := &usage.Store{Dir: filepath.Join(root, "usage")}

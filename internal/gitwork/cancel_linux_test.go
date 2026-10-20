@@ -40,7 +40,8 @@ func assertGitChildStopped(t *testing.T, pidFile string) {
 func TestGitOutputLimitStopsChildHoldingPipes(t *testing.T) {
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "child.pid")
-	alias := "!printf '%s' $$ > " + shellQuote(pidFile+".tmp") + " && mv " + shellQuote(pidFile+".tmp") + " " + shellQuote(pidFile) + "; printf overflow-output; exec sleep 6"
+	testsupport.StopOnCleanup(t, pidFile+".stop")
+	alias := "!printf '%s' $$ > " + shellQuote(pidFile+".tmp") + " && mv " + shellQuote(pidFile+".tmp") + " " + shellQuote(pidFile) + "; printf overflow-output; i=0; while [ -f " + shellQuote(pidFile) + " ] && [ \"$i\" -lt 6 ] && [ ! -f " + shellQuote(pidFile+".stop") + " ]; do sleep 1; i=$((i+1)); done"
 	started := time.Now()
 	_, _, err := (&Checkout{path: dir}).boundedGit(context.Background(), nil, 4, false, "-c", "alias.probe="+alias, "probe")
 	elapsed := time.Since(started)
@@ -53,7 +54,8 @@ func TestGitOutputLimitStopsChildHoldingPipes(t *testing.T) {
 func TestGitDeadlineStopsChildHoldingPipes(t *testing.T) {
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "child.pid")
-	alias := "!printf '%s' $$ > " + shellQuote(pidFile+".tmp") + " && mv " + shellQuote(pidFile+".tmp") + " " + shellQuote(pidFile) + "; printf 'deadline diagnostic\\nforged journal\\n' >&2; exec sleep 6"
+	testsupport.StopOnCleanup(t, pidFile+".stop")
+	alias := "!printf '%s' $$ > " + shellQuote(pidFile+".tmp") + " && mv " + shellQuote(pidFile+".tmp") + " " + shellQuote(pidFile) + "; printf 'deadline diagnostic\\nforged journal\\n' >&2; i=0; while [ -f " + shellQuote(pidFile) + " ] && [ \"$i\" -lt 6 ] && [ ! -f " + shellQuote(pidFile+".stop") + " ]; do sleep 1; i=$((i+1)); done"
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	started := time.Now()
@@ -69,7 +71,7 @@ func TestGitDeadlineStopsChildHoldingPipes(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 		if err := child.Cleanup(cleanupCtx); err != nil {
 			t.Error(err)

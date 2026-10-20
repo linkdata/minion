@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/processgroup"
@@ -59,8 +60,10 @@ func readAuditArtifacts(outputDir string, partial bool, secrets ...string) ([]wo
 		if err == nil {
 			if strings.HasSuffix(name, ".json") {
 				data, err = redactAuditJSON(data, secrets...)
-			} else {
+			} else if (name == "REPORT.md" && partial) || utf8.Valid(data) {
 				data = []byte(redactActionText(string(data), secrets...))
+			} else {
+				err = errors.New("audit Markdown is not valid UTF-8")
 			}
 			if err == nil && int64(len(data)) > limit {
 				err = errors.New("redacted artifact exceeds byte limit")
@@ -82,6 +85,9 @@ func readAuditArtifacts(outputDir string, partial bool, secrets ...string) ([]wo
 
 // Decode JSON escapes before redaction so consumers cannot reconstruct a configured key.
 func redactAuditJSON(data []byte, secrets ...string) ([]byte, error) {
+	if !utf8.Valid(data) {
+		return nil, errors.New("audit JSON is not valid UTF-8")
+	}
 	if !json.Valid(data) {
 		return nil, errors.New("audit JSON is invalid")
 	}

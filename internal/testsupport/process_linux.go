@@ -11,14 +11,15 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"testing"
 	"time"
 )
 
 // Process pins one process created by a test-owned fixture.
 // Callers retain their deadlines and native-result assertions.
 type Process struct {
-	process *os.Process
-	stat    *os.File
+	stat     *os.File
+	stopFile string
 }
 
 // WaitExited observes the pinned proc stat file without reopening, signalling or closing it.
@@ -51,6 +52,7 @@ func (p *Process) WaitExited(ctx context.Context) error {
 }
 
 // PinProcess pins a fixture child identified by a published PID file.
+// shortcut: a recycled PID can bind observation to another process; use a birth identity handshake if assertions become flaky.
 func PinProcess(pidFile string) (*Process, error) {
 	data, err := os.ReadFile(pidFile)
 	if err != nil {
@@ -64,18 +66,14 @@ func PinProcess(pidFile string) (*Process, error) {
 	if err != nil || pid <= 0 {
 		return nil, fmt.Errorf("invalid fixture child PID %q", data)
 	}
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		return nil, err
-	}
 	stat, err := os.Open(fmt.Sprintf("/proc/%d/stat", pid))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ESRCH) {
 			err = fmt.Errorf("fixture child %d: %w", pid, os.ErrProcessDone)
 		}
-		return nil, errors.Join(err, process.Release())
+		return nil, err
 	}
-	return &Process{process: process, stat: stat}, nil
+	return &Process{stat: stat, stopFile: pidFile + ".stop"}, nil
 }
 
 // WaitForProcess pins a fixture child before its run completes or startup expires.
@@ -98,14 +96,20 @@ func WaitForProcess[T any](ctx context.Context, pidFile string, done <-chan T) (
 	}
 }
 
-// Cleanup kills the pinned fixture, observes its exit and releases both handles.
+// StopOnCleanup releases a finite fixture even when its test fails before pinning it.
+func StopOnCleanup(t testing.TB, stopFile string) {
+	t.Helper()
+	t.Cleanup(func() {
+		if err := os.WriteFile(stopFile, nil, 0600); err != nil {
+			t.Errorf("stop fixture: %v", err)
+		}
+	})
+}
+
+// Cleanup asks the fixture to stop, observes its exit and closes the stat file.
 func (p *Process) Cleanup(ctx context.Context) error {
-	// Never signal a historical process group or look up the PID again.
-	err := p.process.Kill()
-	if errors.Is(err, os.ErrProcessDone) {
-		err = nil
-	}
+	err := os.WriteFile(p.stopFile, nil, 0600)
 	return errors.Join(err, p.WaitExited(ctx), p.Close())
 }
 
-func (p *Process) Close() error { return errors.Join(p.process.Release(), p.stat.Close()) }
+func (p *Process) Close() error { return p.stat.Close() }

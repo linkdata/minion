@@ -81,7 +81,7 @@ func TestRunConfiguredKeyRequiresKnownNativeHome(t *testing.T) {
 		noHome bool
 	}{{"explicit missing", false}, {"unavailable", true}} {
 		t.Run(test.name, func(t *testing.T) {
-			binary := installFakeCodex(t, "#!/bin/sh\nprintf '%s\\n' \"${CODEX_HOME-}\" > \"$0.home\"\ncat >/dev/null\nprintf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"answer\"}}' '{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":10,\"cached_input_tokens\":0,\"output_tokens\":1}}'\n")
+			binary := installFakeCodex(t, "#!/bin/sh\nprintf '%s\\n' \"${CODEX_HOME-}\" > \"$0.home\"\ncat >/dev/null\nprintf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"root\"}' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"answer\"}}' '{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":10,\"cached_input_tokens\":0,\"output_tokens\":1}}'\n")
 			home := filepath.Join(canonicalTempDir(t), "not-created")
 			t.Setenv("HOME", "")
 			if test.noHome {
@@ -117,7 +117,7 @@ func TestRunKeepsMissingImplicitHome(t *testing.T) {
 [ "${CODEX_HOME+x}" != x ] || exit 3
 [ ! -e "$HOME/.codex" ] || exit 4
 cat >/dev/null
-printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"answer"}}' '{"type":"turn.completed","usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":1}}'
+printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.completed","item":{"type":"agent_message","text":"answer"}}' '{"type":"turn.completed","usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":1}}'
 `)
 	t.Setenv("HOME", canonicalTempDir(t))
 	t.Setenv("CODEX_HOME", "")

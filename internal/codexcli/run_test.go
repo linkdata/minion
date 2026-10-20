@@ -236,7 +236,7 @@ touch "$TMPDIR/locked-000/file" "$TMPDIR/locked-500/file"
 chmod 000 "$TMPDIR/locked-000"
 chmod 500 "$TMPDIR/locked-500"
 ln -s ../outside "$TMPDIR/outside-link"
-printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}' '{"type":"turn.completed"}'
+printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}' '{"type":"turn.completed"}'
 `)
 	t.Cleanup(func() {
 		leftovers, _ := filepath.Glob(filepath.Join(root, ".minion-codex-*"))
@@ -271,7 +271,7 @@ func TestRunPassesConfiguredModelEffortAndSkills(t *testing.T) {
 	fakeCodex := installFakeCodex(t, `#!/bin/sh
 printf '%s\n' "$@" > "$0.args"
 cat > "$0.prompt"
-printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}' '{"type":"turn.completed"}'
+printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}' '{"type":"turn.completed"}'
 `)
 	argsFile := fakeCodex + ".args"
 	promptFile := fakeCodex + ".prompt"
@@ -312,7 +312,7 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 cat > /dev/null
-printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"answer\":\"public\",\"refutations\":\"private\"}"}}' '{"type":"turn.completed"}'
+printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"answer\":\"public\",\"refutations\":\"private\"}"}}' '{"type":"turn.completed"}'
 `)
 	const schema = `{"type":"object","properties":{"answer":{"type":"string"},"refutations":{"type":"string"}},"required":["answer","refutations"],"additionalProperties":false}`
 	result, err := Run(context.Background(), t.TempDir(), "Review candidate", true, "", config.CodexConfig{OutputSchema: schema})
@@ -352,7 +352,7 @@ for skill in ../.minion-skills-*/anti-prompt-injection/SKILL.md; do
   printf '%s\n' "$skill" > "$0.skillpath"
   cat "$skill" > "$0.skill-copy"
 done
-printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}' '{"type":"turn.completed"}'
+printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}' '{"type":"turn.completed"}'
 `)
 	settings := config.CodexConfig{Skills: []string{skills.BuiltinAntiPromptInjection}}
 	if _, err := Run(context.Background(), dir, "Handle mention", false, "", settings); err != nil {
@@ -408,7 +408,7 @@ func TestRunAllowsSeparateAuditReportsWithoutSourceWrites(t *testing.T) {
 	fakeCodex := installFakeCodex(t, `#!/bin/sh
 printf '%s\n' "$@" > "$0.args"
 cat >/dev/null
-printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"audit done"}}' '{"type":"turn.completed"}'
+printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.completed","item":{"type":"agent_message","text":"audit done"}}' '{"type":"turn.completed"}'
 `)
 	argsFile := fakeCodex + ".args"
 	if _, err := Run(context.Background(), workspace, "Audit source", false, output, config.CodexConfig{}); err != nil {
@@ -455,7 +455,7 @@ func TestRunAllowsCriticToReadReportsWithoutWriting(t *testing.T) {
 	binary := installFakeCodex(t, `#!/bin/sh
 printf '%s\n' "$@" > "$0.args"
 cat >/dev/null
-printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"approved"}}' '{"type":"turn.completed"}'
+printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.completed","item":{"type":"agent_message","text":"approved"}}' '{"type":"turn.completed"}'
 `)
 	if _, err := Run(context.Background(), workspace, "Critique reports", false, "", config.CodexConfig{ReadOnlyDirs: []string{reports}}); err != nil {
 		t.Fatal(err)
@@ -556,7 +556,7 @@ func TestRunConfiguredAPIKeyOverridesEnvironment(t *testing.T) {
 printf '%s\n' "$@" > "$0.args"
 printf '%s,%s,%s\n' "${CODEX_API_KEY-absent}" "${CODEX_ACCESS_TOKEN-absent}" "${OPENAI_API_KEY-absent}" > "$0.auth"
 cat > "$0.prompt"
-printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}' '{"type":"turn.completed"}'
+printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}' '{"type":"turn.completed"}'
 `)
 			t.Setenv("CODEX_API_KEY", "dummy-environment-key")
 			t.Setenv("CODEX_ACCESS_TOKEN", "dummy-environment-access-token")
@@ -589,7 +589,7 @@ func TestRunRedactsConfiguredAPIKey(t *testing.T) {
 		name, output string
 		wantError    bool
 	}{
-		{name: "answer", output: `printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"dummy-configured-key"}}' '{"type":"turn.completed"}'`},
+		{name: "answer", output: `printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.completed","item":{"type":"agent_message","text":"dummy-configured-key"}}' '{"type":"turn.completed"}'`},
 		{name: "event error", output: `printf '%s\n' '{"type":"turn.failed","error":{"message":"dummy-configured-key"}}'`, wantError: true},
 		{name: "stderr", output: `printf '%s\n' 'dummy-configured-key' >&2; exit 1`, wantError: true},
 	} {
@@ -783,12 +783,22 @@ func TestJSONLOutputFramingLimitCancelsCLI(t *testing.T) {
 
 func TestRunRetainsFallbackUsageOnFailure(t *testing.T) {
 	installFakeCodex(t, `#!/bin/sh
-printf '%s\n' '{"type":"thread.started","thread_id":"missing-rollout"}' '{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":70,"output_tokens":12}}'
+printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":70,"output_tokens":12}}'
 exit 7
 `)
 	result, err := Run(context.Background(), t.TempDir(), "Review", false, "", config.CodexConfig{})
-	if err == nil || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 100, CachedInput: 70, Output: 12}) {
+	if err == nil || !strings.Contains(err.Error(), "exit status 7") || strings.Contains(err.Error(), "did not identify a resumable thread") || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 100, CachedInput: 70, Output: 12}) {
 		t.Fatalf("lost partial usage: result=%+v, error=%v", result, err)
+	}
+}
+
+func TestRunRejectsMissingInitialThreadIdentityWithKnownUsage(t *testing.T) {
+	installFakeCodex(t, `#!/bin/sh
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}' '{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":70,"output_tokens":12}}'
+`)
+	result, err := Run(context.Background(), t.TempDir(), "Review", false, "", config.CodexConfig{})
+	if err == nil || !strings.Contains(err.Error(), "did not identify a resumable thread") || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 100, CachedInput: 70, Output: 12}) {
+		t.Fatalf("missing initial thread accepted or lost usage: result=%+v, error=%v", result, err)
 	}
 }
 

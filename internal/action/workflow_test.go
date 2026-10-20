@@ -197,6 +197,8 @@ func TestPublishFixWithoutChangesPostsNormalReply(t *testing.T) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
 			_, _ = fmt.Fprint(w, publicRepositoryJSON)
+		case r.Method == http.MethodPost && r.URL.Path == "/graphql":
+			_, _ = fmt.Fprint(w, `{"data":{"node":{"title":"Bug","bodyText":"Original task","lastEditedAt":null}}}`)
 		case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/issues/7/comments":
 			captureComment(t, w, r, &body)
 		default:
@@ -208,9 +210,9 @@ func TestPublishFixWithoutChangesPostsNormalReply(t *testing.T) {
 	client := testGitHub(server, "token")
 	e := Orchestrator{GitHub: client}
 	request := usageJob()
-	request.Source = github.Item{}
+	request.Source = github.Item{UpdatedAt: time.Now()}
 	request.Command = command.Command{Name: "fix", Action: command.Fix}
-	if err := e.publishFix(context.Background(), &preparedAction{request: request}, Result{Answer: "Tests passed."}); err != nil {
+	if err := e.publishFix(context.Background(), &preparedAction{request: request, issueNodeID: "issue-node"}, Result{Answer: "Tests passed."}); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(body, "without changing files") || !strings.Contains(body, "Tests passed.") || !strings.Contains(body, request.Marker()) {

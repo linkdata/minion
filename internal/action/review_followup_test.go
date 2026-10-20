@@ -39,7 +39,7 @@ func TestRunnerNativeCleanupKeepsAcceptedAnswer(t *testing.T) {
 						t.Error(err)
 					}
 				})
-				event := `printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"Done."}}' '{"type":"turn.completed","usage":{"input_tokens":3,"cached_input_tokens":0,"output_tokens":2}}'`
+				event := `printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.completed","item":{"type":"agent_message","text":"Done."}}' '{"type":"turn.completed","usage":{"input_tokens":3,"cached_input_tokens":0,"output_tokens":2}}'`
 				if provider == "claude" {
 					event = `previous=""; session=""
 for arg do

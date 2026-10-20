@@ -6,8 +6,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
 	"os/exec"
-	"syscall"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -15,20 +16,20 @@ import (
 func TestLeaderExitBoundsPipeDrain(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", "sleep 30 &\nexit 0\n")
+	fixtureDir := t.TempDir()
+	stopFile := filepath.Join(fixtureDir, "stop")
+	t.Cleanup(func() {
+		if err := os.WriteFile(stopFile, nil, 0600); err != nil {
+			t.Error(err)
+		}
+	})
+	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", "( i=0; while [ -d \"$2\" ] && [ \"$i\" -lt 30 ] && [ ! -f \"$1\" ]; do sleep 1; i=$((i+1)); done ) &\nexit 0\n", "sh", stopFile, fixtureDir)
 	Configure(cmd)
 	var output bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &output, &output
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	// Normal leader exit does not kill descendants. Always clean this owned
-	// group even when WaitDelay or a test assertion fails.
-	defer func() {
-		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
-			t.Error(err)
-		}
-	}()
 	started := time.Now()
 	err := cmd.Wait()
 	if !errors.Is(err, exec.ErrWaitDelay) || ctx.Err() != nil || time.Since(started) > 5*time.Second {

@@ -35,6 +35,10 @@ func TestReplyFailureClassificationBeforeAndAfterModel(t *testing.T) {
 					_, _ = fmt.Fprint(w, publicRepositoryJSON)
 					return
 				}
+				if r.Method == http.MethodPost && r.URL.Path == "/graphql" {
+					_, _ = fmt.Fprint(w, `{"data":{"node":{"title":"Bug","bodyText":"Original task","lastEditedAt":null}}}`)
+					return
+				}
 				if r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/issues/7/comments" {
 					w.WriteHeader(http.StatusBadGateway)
 					return
@@ -46,9 +50,9 @@ func TestReplyFailureClassificationBeforeAndAfterModel(t *testing.T) {
 			store := openState(t, time.Now())
 			client := testGitHub(server, "fixture-token")
 			request := usageJob()
-			request.Source = github.Item{}
+			request.Source = github.Item{UpdatedAt: time.Now()}
 			request.Command = command.Command{Action: command.Fix}
-			prepared := &preparedAction{request: request, repository: github.Repository{FullName: "o/r", DefaultBranch: "main"}, fork: github.Repository{FullName: "bot/r"}}
+			prepared := &preparedAction{request: request, issueNodeID: "issue-node", repository: github.Repository{FullName: "o/r", DefaultBranch: "main"}, fork: github.Repository{FullName: "bot/r"}}
 			orchestrator := Orchestrator{GitHub: client, Store: store, BotLogin: "bot"}
 			var err error
 			switch kind {

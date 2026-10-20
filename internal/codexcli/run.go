@@ -215,8 +215,12 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 		s.threadID = output.threadID
 	}
 	clean := runErr == nil && ctx.Err() == nil && !output.failed && output.parseErr == nil && output.completed && output.finalMessage != ""
-	if output.expectedID != "" && output.threadID == "" && clean {
-		output.stop(errors.New("Codex resume did not identify its expected thread")) //nolint:staticcheck // -- Codex is a proper noun.
+	if output.threadID == "" && clean {
+		if output.expectedID != "" {
+			output.stop(errors.New("Codex resume did not identify its expected thread")) //nolint:staticcheck // -- Codex is a proper noun.
+		} else {
+			output.stop(errors.New("Codex did not identify a resumable thread")) //nolint:staticcheck // -- Codex is a proper noun.
+		}
 		clean = false
 	}
 	var childError error

@@ -278,6 +278,7 @@ func TestSessionRejectsSwitchToExplicitDefaultConfig(t *testing.T) {
 
 func TestResumedUsageKeepsOnlyNewWholeTreeCounters(t *testing.T) {
 	known := usage.Tokens{Input: 15, CachedInput: 7, Output: 11}
+	const aggregateOnly = `{"type":"result","subtype":"success","result":"final answer","modelUsage":{"claude-main":{"inputTokens":3,"cacheCreationInputTokens":5,"cacheReadInputTokens":7,"outputTokens":11}}}`
 	doubled := strings.ReplaceAll(strings.ReplaceAll(strings.ReplaceAll(strings.ReplaceAll(successfulResult, `"inputTokens":3`, `"inputTokens":6`), `"cacheCreationInputTokens":5`, `"cacheCreationInputTokens":10`), `"cacheReadInputTokens":7`, `"cacheReadInputTokens":14`), `"outputTokens":11`, `"outputTokens":22`)
 	withHelper := strings.TrimSuffix(successfulResult, "}}") + `,"helper":{"inputTokens":29,"cacheCreationInputTokens":31,"cacheReadInputTokens":37,"outputTokens":41}}}`
 	for _, test := range []struct {
@@ -286,12 +287,13 @@ func TestResumedUsageKeepsOnlyNewWholeTreeCounters(t *testing.T) {
 		complete, failed bool
 	}{
 		{"new counters", doubled, known, known, true, false},
-		{"prior totals repeated", successfulResult, known, usage.Tokens{}, true, false},
+		{"prior totals repeated without current root usage", aggregateOnly, known, usage.Tokens{}, true, false},
+		{"stale cumulative with current root usage", successfulResult, known, known, false, false},
 		{"helper total", withHelper, known, usage.Tokens{Input: 97, CachedInput: 37, Output: 41}, true, false},
 		{"repeated result snapshots", numberResultEvents(doubled + "\n" + doubled), known, known, true, false},
 		{"root fallback is current turn", `{"type":"result","subtype":"success","result":"answer","usage":{"input_tokens":3,"cache_creation_input_tokens":5,"cache_read_input_tokens":7,"output_tokens":11}}`, known, known, false, false},
 		{"missing usage", `{"type":"result","subtype":"success","result":"answer"}`, known, usage.Tokens{}, false, false},
-		{"decreasing aggregate", successfulResult, usage.Tokens{Input: 30, CachedInput: 14, Output: 22}, usage.Tokens{}, false, false},
+		{"decreasing aggregate without current root usage", aggregateOnly, usage.Tokens{Input: 30, CachedInput: 14, Output: 22}, usage.Tokens{}, false, false},
 		{"decreasing aggregate retains current assistant", assistantUsageEvent("current", 3, 5, 7, 11) + "\n" + successfulResult, usage.Tokens{Input: 30, CachedInput: 14, Output: 22}, known, false, false},
 		{"failed new counters", strings.Replace(doubled, `"is_error":false`, `"is_error":true`, 1), known, known, false, true},
 	} {
@@ -375,6 +377,7 @@ func TestSessionIncompleteUsageDoesNotBecomeNextCallUsage(t *testing.T) {
 		fails       bool
 	}{
 		{"missing aggregate", `{"type":"result","subtype":"success","result":"done","usage":{"input_tokens":3,"cache_creation_input_tokens":5,"cache_read_input_tokens":7,"output_tokens":11}}`, false},
+		{"zero aggregate with current root usage", `{"type":"result","subtype":"success","result":"done","usage":{"input_tokens":3,"cache_creation_input_tokens":5,"cache_read_input_tokens":7,"output_tokens":11},"modelUsage":{"main":{"inputTokens":0,"cacheCreationInputTokens":0,"cacheReadInputTokens":0,"outputTokens":0}}}`, false},
 		{"late delegate", successfulResult + "\n" + strings.Replace(assistantUsageEvent("late", 20, 0, 0, 5), `"parent_tool_use_id":null`, `"parent_tool_use_id":"helper"`, 1), false},
 		{"stream error after snapshot", successfulResult + "\n{", true},
 	} {
@@ -530,9 +533,10 @@ func TestLateCoveredBlockKeepsExactCumulativeBaseline(t *testing.T) {
 }
 
 func TestSessionUnlaunchedCallKeepsConversation(t *testing.T) {
+	const aggregateOnly = `{"type":"result","subtype":"success","result":"final answer","modelUsage":{"claude-main":{"inputTokens":3,"cacheCreationInputTokens":5,"cacheReadInputTokens":7,"outputTokens":11}}}`
 	for _, failure := range []string{"cancelled", "missing interpreter"} {
 		t.Run(failure, func(t *testing.T) {
-			binary := fakeExecutable(t, "claude", "printf '%s\\n' \"$@\" > \"$0.args\"\ncat >/dev/null\nprintf '%s\\n' '"+successfulResult+"'\n")
+			binary := fakeExecutable(t, "claude", "printf '%s\\n' \"$@\" > \"$0.args\"\ncat >/dev/null\nprintf '%s\\n' '"+aggregateOnly+"'\n")
 			original, err := os.ReadFile(binary)
 			if err != nil {
 				t.Fatal(err)

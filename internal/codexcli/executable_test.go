@@ -28,6 +28,7 @@ func TestMain(m *testing.M) {
 	}
 	switch os.Args[1] {
 	case "exec":
+		fmt.Println(`{"type":"thread.started","thread_id":"root"}`)
 		fmt.Println(`{"type":"item.completed","item":{"type":"agent_message","text":"shim answer"}}`)
 		fmt.Println(`{"type":"turn.completed"}`)
 	case "login":

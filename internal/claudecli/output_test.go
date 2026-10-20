@@ -312,7 +312,9 @@ func TestOutputWholeTreeUsage(t *testing.T) {
 	}{
 		{"root and helper models", root, models, usage.Tokens{Input: 146, CachedInput: 56, Output: 64}, true},
 		{"aggregate ignores malformed root", `"bad"`, models, usage.Tokens{Input: 146, CachedInput: 56, Output: 64}, true},
-		{"zero aggregate", root, `{"main":{"inputTokens":0,"cacheCreationInputTokens":0,"cacheReadInputTokens":0,"outputTokens":0}}`, usage.Tokens{}, true},
+		{"zero aggregate with current root usage", root, `{"main":{"inputTokens":0,"cacheCreationInputTokens":0,"cacheReadInputTokens":0,"outputTokens":0}}`, fallback, false},
+		{"zero aggregate with zero root usage", `{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0}`, `{"main":{"inputTokens":0,"cacheCreationInputTokens":0,"cacheReadInputTokens":0,"outputTokens":0}}`, usage.Tokens{}, true},
+		{"partial aggregate keeps root counters", root, `{"main":{"inputTokens":20,"cacheCreationInputTokens":0,"cacheReadInputTokens":0,"outputTokens":5}}`, usage.Tokens{Input: 20, CachedInput: 7, Output: 11}, false},
 		{"absent aggregate", root, "", fallback, false},
 		{"empty aggregate", root, "{}", fallback, false},
 		{"malformed aggregate", root, `"bad"`, fallback, false},

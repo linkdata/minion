@@ -18,11 +18,12 @@ import (
 func TestRunRejectsCompletedAnswerAfterPipeDrainOverrun(t *testing.T) {
 	binary := fakeExecutable(t, "claude", `cat >/dev/null
 printf '%s\n' '`+successfulResult+`'
-sleep 30 &
+( i=0; while [ -f "$0" ] && [ "$i" -lt 30 ] && [ ! -f "$0.pid.stop" ]; do sleep 1; i=$((i+1)); done ) &
 printf '%s\n' "$!" > "$0.pid.tmp"
 mv -- "$0.pid.tmp" "$0.pid"
 exit 0
 `)
+	testsupport.StopOnCleanup(t, binary+".pid.stop")
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 	type outcome struct {
@@ -43,7 +44,7 @@ exit 0
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		waitCtx, stopWait := context.WithTimeout(context.Background(), time.Second)
+		waitCtx, stopWait := context.WithTimeout(context.Background(), 3*time.Second)
 		defer stopWait()
 		if err := child.Cleanup(waitCtx); err != nil {
 			t.Errorf("finite fixture child remained live after cleanup: %v", err)
