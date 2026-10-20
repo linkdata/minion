@@ -56,12 +56,32 @@ func TestLiveCloneAndPullRequest(t *testing.T) {
 		t.Fatalf("%s gh credential belongs to %s", cfg.BotLogin, user.Login)
 	}
 	t.Setenv("GH_TOKEN", botToken)
+	remote, err := client.Repository(ctx, repoName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if remote.DefaultBranch == "" {
+		t.Fatal("test repository has no default branch")
+	}
 	pull, err := client.PullRequestDetails(ctx, repoName, cfg.PullRequestNumber)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if pull.Number != cfg.PullRequestNumber || pull.Base.Ref == "" || len(pull.Head.SHA) != 40 {
 		t.Fatalf("pull request metadata = %+v", pull)
+	}
+
+	defaultCheckout, err := Clone(ctx, t.TempDir(), repoName, remote.DefaultBranch, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := defaultCheckout.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	if head, err := defaultCheckout.verifiedHead(ctx); err != nil || !workspace.ValidSHA(head) {
+		t.Fatalf("cloned default-branch HEAD = %q, %v", head, err)
 	}
 
 	checkout, err := ClonePullRequest(ctx, t.TempDir(), repoName, pull.Number, pull.Base.Ref, pull.Head.SHA)
@@ -86,6 +106,13 @@ func TestLiveCloneAndPullRequest(t *testing.T) {
 	}
 	if snapshot.Head != pull.Head.SHA || snapshot.Base != base || !workspace.ValidSHA(snapshot.MergeBase) {
 		t.Fatalf("pull request snapshot identities = head:%q base:%q merge-base:%q", snapshot.Head, snapshot.Base, snapshot.MergeBase)
+	}
+	materialized, err := MaterializeRepository(ctx, repositorySource(t, snapshot.Files), snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := materialized.Verify(ctx); err != nil {
+		t.Fatal(err)
 	}
 }
 

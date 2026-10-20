@@ -397,7 +397,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				case !publicationFailure && (errors.Is(err, workroot.ErrUnsafe) || infrastructureFailure(err)):
 					jobFailure.Attempts--
 				}
-				if jobFailure.Attempts == 0 && jobFailure.ReplyAttempts == 0 {
+				if jobFailure.Attempts == 0 {
 					delete(store.Data.JobFailures, job.ID)
 				} else {
 					store.Data.JobFailures[job.ID] = jobFailure

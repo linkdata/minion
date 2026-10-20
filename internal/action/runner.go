@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strings"
 	"syscall"
 	"time"
 
@@ -200,6 +202,9 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 				} else {
 					err = review.refresh(ctx)
 				}
+				if err == nil && job.Action == command.Fix {
+					err = rejectConfiguredKeyChanges(review.changes, configured.Codex.APIKey, configured.Claude.APIKey)
+				}
 				reviewCurrent = err == nil
 			}
 			if err != nil {
@@ -311,6 +316,9 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 			return result, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
 		}
 	}
+	if err := rejectConfiguredKeyChanges(changes, configured.Codex.APIKey, configured.Claude.APIKey); err != nil {
+		return result, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
+	}
 	result.Changes = changes
 	// A changed fix publishes a trusted branch reply; an oversized unused summary need not discard it.
 	if job.Action == command.Fix && len(changes) != 0 && !publishableAnswer(answer) {
@@ -344,6 +352,43 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 		return result, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
 	}
 	return result, nil
+}
+
+func rejectConfiguredKeyChanges(changes []workspace.Change, keys ...string) error {
+	for _, change := range changes {
+		for _, key := range keys {
+			if key != "" && (containsConfiguredKey([]byte(change.Path), key) || containsConfiguredKey(change.Data, key)) {
+				return errors.New("fix change contains a configured provider key")
+			}
+		}
+	}
+	return nil
+}
+
+func containsConfiguredKey(data []byte, key string) bool {
+	text := strings.ReplaceAll(string(data), "\x00", "")
+	if aicli.RedactText(text, key) != text {
+		return true
+	}
+	if !json.Valid([]byte(text)) {
+		return false
+	}
+	decoder := json.NewDecoder(strings.NewReader(text))
+	for {
+		token, err := decoder.Token()
+		if err == io.EOF {
+			return false
+		}
+		if err != nil {
+			return true
+		}
+		if value, ok := token.(string); ok {
+			value = strings.ReplaceAll(value, "\x00", "")
+			if aicli.RedactText(value, key) != value {
+				return true
+			}
+		}
+	}
 }
 
 // Before model work, freeing host capacity or installing a missing executable can make preparation succeed.

@@ -216,8 +216,8 @@ type Summary struct {
 	TotalTokens     int64  `json:"total_tokens"`
 }
 
-// Summarize aggregates validated records, as returned by ReadAll. It rejects
-// invalid filters, groups, status values and unrepresentable aggregate counts.
+// Summarize aggregates matching records and rejects invalid matches, filters, groups
+// and unrepresentable aggregate counts.
 func Summarize(records []Record, filter Filter, groupBy []string) ([]Summary, error) {
 	if !filter.Since.IsZero() && !filter.Until.IsZero() && !filter.Since.Before(filter.Until) {
 		return nil, fmt.Errorf("since must precede until")
@@ -234,6 +234,9 @@ func Summarize(records []Record, filter Filter, groupBy []string) ([]Summary, er
 	for _, record := range records {
 		if !filter.Match(record) {
 			continue
+		}
+		if err := record.validate(); err != nil {
+			return nil, err
 		}
 		values := [5]string{strings.ToLower(record.Repo), strings.ToLower(record.User), record.Action, record.StartedAt.UTC().Format("2006-01-02"), record.StartedAt.UTC().Format("2006-01")}
 		var key [5]string

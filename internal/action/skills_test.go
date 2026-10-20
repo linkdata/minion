@@ -164,6 +164,9 @@ func TestRunnerRequiresEverySkillAndLoadsOptionalSkills(t *testing.T) {
 	if err := orchestrator.validateCommand(job); err != nil {
 		t.Fatal(err)
 	}
+	if len(orchestrator.Runner.Codex.Skills) != 0 {
+		t.Fatal("command validation changed the shared runner")
+	}
 	configured := orchestrator.Runner
 	if err := configured.ConfigureRole(role); err != nil {
 		t.Fatal(err)

@@ -180,43 +180,59 @@ func TestRunAIRedactsNoncanonicalEscapesAfterDecoding(t *testing.T) {
 }
 
 func TestRunAIRedactsDecodedCriticFeedback(t *testing.T) {
-	mainKey, criticKey := `main"secret`, `critic"secret`
-	quotedMain, quotedCritic := strconv.Quote(mainKey), strconv.Quote(criticKey)
-	mainCalls, criticCalls := 0, 0
-	runner := Runner{Codex: config.CodexConfig{APIKey: mainKey}, Claude: config.ClaudeConfig{APIKey: criticKey}}
-	runner.runModel = func(_ context.Context, request modelRun) (aicli.Result, error) {
-		if request.role == roleMain {
-			mainCalls++
-			if mainCalls == 2 {
-				if strings.Contains(request.prompt, quotedCritic[1:len(quotedCritic)-1]) || !strings.Contains(request.prompt, "[redacted]") {
-					t.Fatalf("decoded critic key reached revision prompt: %q", request.prompt)
+	for _, test := range []struct {
+		name, mainKey, criticKey, firstProposal, revisedProposal, firstCritique, wantAnswer, wantRefutation string
+		firstRedacted                                                                                       bool
+	}{
+		{"JSON escape", `main"secret`, `critic"secret`, proposalJSON("answer1", ""), `{"answer":"answer2","refutations":"main\u0022secret"}`, `{"approved":false,"has_blockers":true,"feedback":"critic\u0022secret"}`, "answer2", "[redacted]", false},
+		{"NUL split", "main-secret", "critic-secret", proposalJSON("candidate main-\x00secret", ""), proposalJSON("revised", "finding main-\x00secret"), `{"approved":false,"has_blockers":true,"feedback":"critic-\u0000secret"}`, "revised", "finding [redacted]", true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			mainCalls, criticCalls := 0, 0
+			containsKey := func(text, key string) bool {
+				quoted := strconv.Quote(key)
+				return strings.Contains(text, key) || strings.Contains(text, quoted[1:len(quoted)-1])
+			}
+			runner := Runner{Codex: config.CodexConfig{APIKey: test.mainKey}, Claude: config.ClaudeConfig{APIKey: test.criticKey}}
+			runner.runModel = func(_ context.Context, request modelRun) (aicli.Result, error) {
+				if request.role == roleMain {
+					mainCalls++
+					if mainCalls == 1 {
+						return aicli.Result{Answer: test.firstProposal}, nil
+					}
+					if containsKey(request.prompt, test.criticKey) || strings.Contains(request.prompt, "\x00") || !strings.Contains(request.prompt, "[redacted]") {
+						t.Fatalf("decoded critic key reached revision prompt: %q", request.prompt)
+					}
+					return aicli.Result{Answer: test.revisedProposal}, nil
 				}
-				return aicli.Result{Answer: `{"answer":"answer2","refutations":"main\u0022secret"}`}, nil
+				criticCalls++
+				message := request.criticPrompt("", "")
+				if containsKey(message, test.mainKey) || containsKey(message, test.criticKey) || strings.Contains(message, "\x00") || containsKey(request.proposedAnswer, test.mainKey) || strings.Contains(request.proposedAnswer, "\x00") {
+					t.Fatalf("decoded keys reached critic: %q, %+v", message, request)
+				}
+				if criticCalls == 1 {
+					if test.firstRedacted && !strings.Contains(request.proposedAnswer, "[redacted]") {
+						t.Fatalf("decoded main key reached critic candidate: %q", request.proposedAnswer)
+					}
+					return aicli.Result{Answer: test.firstCritique}, nil
+				}
+				if request.reviewPhase == reviewVerification && (!strings.Contains(message, "[redacted]") || len(request.refutations) != 1 || request.refutations[0].Text != test.wantRefutation) {
+					t.Fatalf("decoded keys reached verification prompt/refutations: %q, %+v", message, request.refutations)
+				}
+				return aicli.Result{Answer: approvedCritiqueJSON}, nil
 			}
-			return aicli.Result{Answer: proposalJSON("answer1", "")}, nil
-		}
-		criticCalls++
-		if request.reviewPhase == reviewVerification {
-			message := request.criticPrompt("", "")
-			if strings.Contains(message, quotedMain[1:len(quotedMain)-1]) || strings.Contains(message, quotedCritic[1:len(quotedCritic)-1]) || !strings.Contains(message, "[redacted]") || len(request.refutations) != 1 || request.refutations[0].Text != "[redacted]" {
-				t.Fatalf("decoded keys reached verification prompt/refutations: %q, %+v", message, request.refutations)
+			job := Job{Main: RoleSettings{Provider: "codex"}, Critic: &RoleSettings{Provider: "claude"}, CriticMaxRounds: 2}
+			checkpoint := func(history []Refutation) error {
+				if len(history) > 0 && (len(history) != 1 || history[0].Text != test.wantRefutation) {
+					t.Fatalf("decoded main key reached durable refutations: %+v", history)
+				}
+				return nil
 			}
-		}
-		if criticCalls == 1 {
-			return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"feedback":"critic\u0022secret"}`}, nil
-		}
-		return aicli.Result{Answer: approvedCritiqueJSON}, nil
-	}
-	job := Job{Main: RoleSettings{Provider: "codex"}, Critic: &RoleSettings{Provider: "claude"}, CriticMaxRounds: 2}
-	checkpoint := func(history []Refutation) error {
-		if len(history) > 0 && (len(history) != 1 || history[0].Text != "[redacted]") {
-			t.Fatalf("decoded main key reached durable refutations: %+v", history)
-		}
-		return nil
-	}
-	answer, err := runner.runAI(context.Background(), job, t.TempDir(), "task", "", checkpoint, &modelSessions{})
-	if err != nil || answer != "answer2" || mainCalls != 2 || criticCalls != 3 {
-		t.Fatalf("decoded critic feedback: answer=%q error=%v main=%d critic=%d", answer, err, mainCalls, criticCalls)
+			answer, err := runner.runAI(context.Background(), job, t.TempDir(), "task", "", checkpoint, &modelSessions{})
+			if err != nil || answer != test.wantAnswer || mainCalls != 2 || criticCalls != 3 {
+				t.Fatalf("decoded critic feedback: answer=%q error=%v main=%d critic=%d", answer, err, mainCalls, criticCalls)
+			}
+		})
 	}
 }
 

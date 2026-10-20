@@ -95,6 +95,25 @@ func TestJSONLAcceptsExactTotalLimits(t *testing.T) {
 	}
 }
 
+func TestJSONLDispatchesCompleteEventsBeforeTotalLimit(t *testing.T) {
+	var lines []string
+	failures := 0
+	output := JSONL{total: maxJSONLOutputBytes - 7, Line: func(p []byte) { lines = append(lines, string(p)) }, Fail: func(err error) {
+		if !errors.Is(err, ErrOutputLimit) {
+			t.Fatalf("wrong failure: %v", err)
+		}
+		failures++
+	}}
+	data := []byte("{}\n{}\nxyz")
+	if n, err := output.Write(data); n != len(data) || err != nil {
+		t.Fatalf("write=%d,%v", n, err)
+	}
+	output.Finish()
+	if !slices.Equal(lines, []string{"{}", "{}"}) || failures != 1 || output.total != maxJSONLOutputBytes {
+		t.Fatalf("lines=%q failures=%d total=%d", lines, failures, output.total)
+	}
+}
+
 func TestJSONLCRLFAtExactEventByteLimit(t *testing.T) {
 	for _, extra := range []int{0, 1} {
 		t.Run(map[int]string{0: "exact", 1: "one byte over"}[extra], func(t *testing.T) {

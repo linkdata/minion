@@ -168,7 +168,14 @@ func TestRunRejectsKnownUnfinishedChildrenWithoutRejectingAccountingGaps(t *test
 			if (err != nil) != fails || fails && (result.Answer != "" || result.UsageComplete || !strings.Contains(err.Error(), "helper agent work did not complete")) || !fails && result.Answer != "completed response" {
 				t.Fatalf("child lifecycle conflated with accounting: result=%+v error=%v", result, err)
 			}
-			if result.Tokens.Input < 10 || result.UsageComplete != (scenario == "complete") || scenario == "complete" && result.Tokens != (usage.Tokens{Input: 30, Output: 3}) {
+			want := usage.Tokens{Input: 30, Output: 3}
+			switch scenario {
+			case "missing counters", "missing log", "inherited turn":
+				want = usage.Tokens{Input: 10, Output: 1}
+			case "completed then new response only":
+				want = usage.Tokens{Input: 60, Output: 6}
+			}
+			if result.Tokens != want || result.UsageComplete != (scenario == "complete") {
 				t.Fatalf("lost accounting distinction: %+v", result)
 			}
 		})

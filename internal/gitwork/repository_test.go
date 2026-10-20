@@ -337,6 +337,38 @@ func TestRepositoryPinsFilesRefFormat(t *testing.T) {
 	assertModelRepositoryGit(t, source, "files\n", "rev-parse", "--show-ref-format")
 }
 
+func TestRepositoryRejectsTooManyBundleRefsBeforeUpdate(t *testing.T) {
+	fixture := newFixture(t)
+	snapshot, err := fixture.checkout.Snapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	header, pack, ok := bytes.Cut(snapshot.Repository, []byte("\n\n"))
+	if !ok {
+		t.Fatal("valid bundle is missing its pack separator")
+	}
+	var refs strings.Builder
+	refs.Write(header)
+	refs.WriteByte('\n')
+	for i := 0; i <= workspace.MaxEntries; i++ {
+		fmt.Fprintf(&refs, "%s refs/heads/many/branch-%06d\n", snapshot.Head, i)
+	}
+	snapshot.Repository = append([]byte(refs.String()+"\n"), pack...)
+	realGit, err := aicli.AbsoluteExecutable("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(t.TempDir(), "update-ref-called")
+	fakeOnPath(t, "git", "#!/bin/sh\nfor arg do\n if [ \"$arg\" = update-ref ]; then printf called > "+shellQuote(marker)+"; exit 91; fi\ndone\nexec "+shellQuote(realGit)+" \"$@\"\n")
+	repo, err := MaterializeRepository(context.Background(), repositorySource(t, snapshot.Files), snapshot)
+	if repo != nil || !errors.Is(err, ErrCheckoutTooLarge) || !strings.Contains(err.Error(), "repository references") {
+		t.Fatalf("over-limit refs returned repository=%v error=%v", repo, err)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("update-ref ran before the reference limit: %v", err)
+	}
+}
+
 func TestRepositoryPacksRefsWithoutReflogs(t *testing.T) {
 	fixture := newFixture(t)
 	snapshot, err := fixture.checkout.Snapshot(context.Background())
@@ -475,6 +507,14 @@ func TestRepositoryRefreshesOriginalIndexAndPreservesCandidateChanges(t *testing
 			if err := repo.Verify(context.Background()); err != nil {
 				t.Fatal(err)
 			}
+			want := ""
+			if candidate {
+				want = " M README.md\n D deleted\n?? added\n"
+			}
+			assertModelRepositoryGit(t, source, want, "status", "--porcelain")
+			if err := repo.Verify(context.Background()); err != nil {
+				t.Fatalf("writable repository status changed metadata: %v", err)
+			}
 			dir := filepath.Join(source, ".git")
 			t.Cleanup(func() {
 				if err := filepath.WalkDir(dir, func(name string, entry fs.DirEntry, err error) error {
@@ -500,10 +540,6 @@ func TestRepositoryRefreshesOriginalIndexAndPreservesCandidateChanges(t *testing
 				return os.Chmod(name, mode)
 			}); err != nil {
 				t.Fatal(err)
-			}
-			want := ""
-			if candidate {
-				want = " M README.md\n D deleted\n?? added\n"
 			}
 			assertModelRepositoryGit(t, source, want, "status", "--porcelain")
 			for _, args := range [][]string{{"diff-index", "--quiet", "HEAD"}, {"diff-files", "--quiet"}, {"diff", "--quiet"}} {

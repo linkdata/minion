@@ -47,7 +47,7 @@ func TestMaterializeChangesCreatesOnlyFinalFiles(t *testing.T) {
 	}
 }
 
-func TestMaterializeChangesRefusesFilesystemAliases(t *testing.T) {
+func TestMaterializeChangesHandlesUnicodeAliasesOnHostFilesystem(t *testing.T) {
 	root := privateRoot(t)
 	base := []File{{Path: "é", Mode: Regular, Data: []byte("baseline")}}
 	changes := []Change{{Path: "e\u0301", Mode: Regular, Data: []byte("candidate")}}

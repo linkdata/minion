@@ -133,13 +133,11 @@ func (r *Runner) runAI(ctx context.Context, job Job, dir, prompt, outputDir stri
 	}
 	var priorAnswer, priorFeedback string
 	redactDecoded := func(text, provider string) string {
-		switch provider {
-		case "codex":
-			return redactActionText(text, r.Codex.APIKey)
-		case "claude":
-			return redactActionText(text, r.Claude.APIKey)
+		secret := r.Codex.APIKey
+		if provider == "claude" {
+			secret = r.Claude.APIKey
 		}
-		return strings.ReplaceAll(text, "\x00", "")
+		return redactActionText(text, secret)
 	}
 	for round := 1; round <= rounds; round++ {
 		request.round = round

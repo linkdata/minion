@@ -183,7 +183,9 @@ func TestCheckoutPullRequestBoundsAliasedTreeEntries(t *testing.T) {
 				t.Fatal(err)
 			}
 			tree := fixture.gitInput(fixture.source, fmt.Sprintf("100644 blob %s\tpayload\n", blob), "mktree")
+			wantFiles := 1
 			for level := 0; level < depth; level++ {
+				wantFiles *= width
 				var entries strings.Builder
 				for i := 0; i < width; i++ {
 					fmt.Fprintf(&entries, "040000 tree %s\td%02d\n", tree, i)
@@ -211,7 +213,7 @@ func TestCheckoutPullRequestBoundsAliasedTreeEntries(t *testing.T) {
 				t.Fatalf("PR worktree materialized: %v", err)
 			}
 			snapshot, err := checkout.Snapshot(context.Background())
-			if err != nil || len(snapshot.Files) != width*width {
+			if err != nil || len(snapshot.Files) != wantFiles {
 				t.Fatalf("aliased tree snapshot files=%d error=%v", len(snapshot.Files), err)
 			}
 			for _, file := range snapshot.Files {

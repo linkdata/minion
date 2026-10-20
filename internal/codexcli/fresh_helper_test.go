@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -68,5 +69,16 @@ func TestRunCancelsMalformedOutputAndRetainsParseCause(t *testing.T) {
 	var native *exec.ExitError
 	if !errors.As(err, &native) {
 		t.Fatalf("native exit cause lost: %v", err)
+	}
+}
+
+func TestRunCancelsJSONLOutputLimit(t *testing.T) {
+	installFakeCodex(t, "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"root\"}'\nprintf '%*s\\n' "+strconv.Itoa(aicli.MaxEventBytes+1)+" ''\nexec sleep 30\n")
+	writeUsageRollout(t, os.Getenv("CODEX_HOME"), "root", "", usageEvent("task_started", "root-turn"), usageRecord("root", "root-turn", "response", 10, 0, 1), usageEvent("task_complete", "root-turn"))
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	result, err := Run(ctx, t.TempDir(), "task", false, "", config.CodexConfig{})
+	if !errors.Is(err, aicli.ErrOutputLimit) || ctx.Err() != nil || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 10, Output: 1}) {
+		t.Fatalf("JSONL limit did not cancel CLI with known usage: result=%+v err=%v parent=%v", result, err, ctx.Err())
 	}
 }

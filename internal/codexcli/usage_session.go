@@ -181,10 +181,15 @@ func (s *usageSession) collectUsage(ctx context.Context, home, rootID string, st
 		} else if id != rootID {
 			childError = joinUsageErrors(childError, errUnverifiedChildren)
 		}
-		if currentRoot != nil && currentRoot.hasSnapshot && currentRoot.snapshot != *fallback {
+		if currentRoot != nil {
 			// Resume stdout is cumulative for the root, not this invocation
 			// or its helpers. Compare like counters without enlarging the delta.
-			ok = false
+			if currentRoot.hasSnapshot {
+				ok = ok && currentRoot.snapshot == *fallback
+			} else if boundary != nil && boundary.valid && boundary.prefixKnown && boundary.hasSnapshot && !boundary.counterGap && !boundary.unfinished {
+				cumulative, added := boundary.snapshot.AddChecked(tokens)
+				ok = ok && added && cumulative == *fallback
+			}
 		}
 		var added bool
 		total, added = total.AddChecked(tokens)

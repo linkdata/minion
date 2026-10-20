@@ -304,7 +304,7 @@ cat >/dev/null
 printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.completed","item":{"type":"agent_message","text":"Done."}}' '{"type":"turn.completed"}'
 /bin/chmod 0500 `+shellQuote(root)+"\n")
 			job := testJob(action)
-			job.RuntimeBudget = 10 * time.Second
+			job.RuntimeBudget = 5 * time.Second
 			var modelContext context.Context
 			var changedSource string
 			journal := &cleanupRetryLog{root: root, onRetry: func() error {

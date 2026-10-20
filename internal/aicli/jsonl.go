@@ -30,11 +30,11 @@ func (o *JSONL) Write(p []byte) (int, error) {
 	if o.limited {
 		return n, nil
 	}
-	if int64(n) > maxJSONLOutputBytes-o.total {
-		o.stop("output exceeded the size limit")
-		return n, nil
+	overLimit := int64(n) > maxJSONLOutputBytes-o.total
+	if overLimit {
+		p = p[:int(maxJSONLOutputBytes-o.total)]
 	}
-	o.total += int64(n)
+	o.total += int64(len(p))
 	if o.lines.Line == nil {
 		o.lines = bounded.Lines{Limit: MaxEventBytes, Line: func(p []byte) {
 			p = bytes.TrimSpace(p)
@@ -50,6 +50,9 @@ func (o *JSONL) Write(p []byte) (int, error) {
 		}, Overflow: func() { o.stop("event exceeded the size limit") }}
 	}
 	_, _ = o.lines.Write(p)
+	if overLimit {
+		o.stop("output exceeded the size limit")
+	}
 	return n, nil
 }
 

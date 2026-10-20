@@ -236,6 +236,11 @@ printf '%s\n' '`+successfulResult+`'
 			if !slices.Contains(args, "--setting-sources=") {
 				t.Fatalf("empty setting-source selection missing: %q", args)
 			}
+			for _, flag := range []string{"--safe-mode", "--strict-mcp-config", "--disable-slash-commands", "--no-chrome"} {
+				if !slices.Contains(args, flag) {
+					t.Fatalf("missing Claude hardening flag %q: %q", flag, args)
+				}
+			}
 			values := map[string]string{}
 			for i, arg := range args[:len(args)-1] {
 				values[arg] = args[i+1]
@@ -246,18 +251,27 @@ printf '%s\n' '`+successfulResult+`'
 				}
 			}
 			var settings struct {
-				Sandbox struct {
-					Enabled                  bool `json:"enabled"`
-					FailIfUnavailable        bool `json:"failIfUnavailable"`
-					AllowUnsandboxedCommands bool `json:"allowUnsandboxedCommands"`
-					Filesystem               struct {
+				DisableClaudeAIConnectors bool  `json:"disableClaudeAiConnectors"`
+				AutoMemoryEnabled         *bool `json:"autoMemoryEnabled"`
+				Sandbox                   struct {
+					Enabled                      bool     `json:"enabled"`
+					FailIfUnavailable            bool     `json:"failIfUnavailable"`
+					AllowUnsandboxedCommands     bool     `json:"allowUnsandboxedCommands"`
+					EnableWeakerNestedSandbox    *bool    `json:"enableWeakerNestedSandbox"`
+					EnableWeakerNetworkIsolation *bool    `json:"enableWeakerNetworkIsolation"`
+					ExcludedCommands             []string `json:"excludedCommands"`
+					Credentials                  struct {
+						EnvVars []struct{ Name, Mode string } `json:"envVars"`
+					} `json:"credentials"`
+					Filesystem struct {
 						DenyRead   []string `json:"denyRead"`
 						DenyWrite  []string `json:"denyWrite"`
 						AllowWrite []string `json:"allowWrite"`
 					} `json:"filesystem"`
 					Network struct {
-						AllowedDomains  []string `json:"allowedDomains"`
-						StrictAllowlist bool     `json:"strictAllowlist"`
+						AllowedDomains    []string `json:"allowedDomains"`
+						StrictAllowlist   bool     `json:"strictAllowlist"`
+						AllowLocalBinding *bool    `json:"allowLocalBinding"`
 					} `json:"network"`
 				} `json:"sandbox"`
 			}
@@ -265,8 +279,25 @@ printf '%s\n' '`+successfulResult+`'
 				t.Fatal(err)
 			}
 			policy := settings.Sandbox
+			if !settings.DisableClaudeAIConnectors || settings.AutoMemoryEnabled == nil || *settings.AutoMemoryEnabled {
+				t.Fatalf("Claude connected tools or memory enabled: %+v", settings)
+			}
 			if !policy.Enabled || !policy.FailIfUnavailable || policy.AllowUnsandboxedCommands || !policy.Network.StrictAllowlist || len(policy.Network.AllowedDomains) != 0 || len(policy.Filesystem.DenyRead) != 1 || policy.Filesystem.DenyRead[0] != "/" {
 				t.Fatalf("unsafe sandbox policy: %+v", policy)
+			}
+			if policy.EnableWeakerNestedSandbox == nil || *policy.EnableWeakerNestedSandbox || policy.EnableWeakerNetworkIsolation == nil || *policy.EnableWeakerNetworkIsolation || policy.Network.AllowLocalBinding == nil || *policy.Network.AllowLocalBinding || policy.ExcludedCommands == nil || len(policy.ExcludedCommands) != 0 {
+				t.Fatalf("sandbox weakened: %+v", policy)
+			}
+			wantDenials := []string{"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CONFIG_DIR", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy"}
+			var denials []string
+			for _, rule := range policy.Credentials.EnvVars {
+				if rule.Mode != "deny" {
+					t.Fatalf("credential environment rule is not denied: %+v", rule)
+				}
+				denials = append(denials, rule.Name)
+			}
+			if !slices.Equal(denials, wantDenials) {
+				t.Fatalf("credential environment denials = %v, want %v", denials, wantDenials)
 			}
 			if slices.Contains(policy.Filesystem.AllowWrite, workspace) != writable || !slices.Contains(policy.Filesystem.DenyWrite, reports) {
 				t.Fatalf("wrong workspace/report permissions: %+v", policy.Filesystem)

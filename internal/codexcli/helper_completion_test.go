@@ -89,7 +89,7 @@ func TestRunRetainsHelperFailureAlongsideProviderFailure(t *testing.T) {
 			writeUsageRollout(t, home, "root", "", usageEvent("task_started", "root-turn"), usageRecord("root", "root-turn", "root-response", 10, 0, 1), usageEvent("task_complete", "root-turn"))
 			writeUsageRollout(t, home, "child", "root", usageEvent("task_started", "child-turn"), usageRecord("child", "child-turn", "child-response", 20, 0, 2))
 			result, err := Run(context.Background(), t.TempDir(), "task", false, "", config.CodexConfig{})
-			if !errors.Is(err, errUnverifiedChildren) || !strings.Contains(err.Error(), scenario.failure) || result.Answer != "" || result.UsageComplete || result.Tokens.Input != 30 {
+			if !errors.Is(err, errUnverifiedChildren) || !strings.Contains(err.Error(), scenario.failure) || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 30, Output: 3}) {
 				t.Fatalf("provider/helper cause lost: result=%+v err=%v", result, err)
 			}
 			if scenario.name == "exit" {

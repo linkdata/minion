@@ -131,7 +131,7 @@ func TestExecuteCriticAdmissionUsesControlledWorkRoot(t *testing.T) {
 					e.Adversarial = "claude"
 				}
 				if unsafe {
-					e.Runner.Codex.ReadOnlyDirs = []string{filepath.Dir(root)}
+					e.Runner.Codex.ReadOnlyDirs = []string{"/"}
 				}
 				request := usageJob()
 				request.Command = command.Command{Name: "comment", Action: command.Comment}
@@ -204,12 +204,15 @@ func TestPrivateReviewRejectsChangedSavedCheckpoint(t *testing.T) {
 				saved.CriticMaxRounds++
 			case "calls":
 				saved.Calls[1].HasBlockers, saved.Calls[1].NoBlockers = false, true
-			case "symlink", "hardlink":
+			}
+			if kind != "corrupt" {
 				var err error
 				data, err = json.Marshal(saved)
 				if err != nil {
 					t.Fatal(err)
 				}
+			}
+			if kind == "symlink" || kind == "hardlink" {
 				writeFixtureFile(t, filepath.Dir(outside), filepath.Base(outside), data)
 				if err := os.Remove(path); err != nil {
 					t.Fatal(err)
@@ -221,15 +224,7 @@ func TestPrivateReviewRejectsChangedSavedCheckpoint(t *testing.T) {
 				if err := link(outside, path); err != nil {
 					t.Fatal(err)
 				}
-			}
-			if kind != "corrupt" && kind != "symlink" && kind != "hardlink" {
-				var err error
-				data, err = json.Marshal(saved)
-				if err != nil {
-					t.Fatal(err)
-				}
-			}
-			if kind != "symlink" && kind != "hardlink" {
+			} else {
 				if err := os.WriteFile(path, data, 0600); err != nil {
 					t.Fatal(err)
 				}

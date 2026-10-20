@@ -12,6 +12,7 @@ import (
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/monitor"
+	"github.com/linkdata/minion/internal/workroot"
 )
 
 func TestRunnerWorkRootIsolation(t *testing.T) {
@@ -117,7 +118,7 @@ func TestRunnerEnforcesSuppliedRuntimeBudget(t *testing.T) {
 			if action == command.SecurityAudit {
 				job = auditRunnerJob(t)
 			}
-			job.RuntimeBudget = 10 * time.Second
+			job.RuntimeBudget = 5 * time.Second
 			calls := 0
 			var reports string
 			root := t.TempDir()
@@ -218,6 +219,15 @@ func TestWorkRootIsolationRejectsResolvedExecutableTarget(t *testing.T) {
 			}
 			if err := runner.CheckWorkRootIsolation(work, other); err != nil {
 				t.Fatalf("unused %s executable affected %s admission: %v", provider, other, err)
+			}
+			job := testJob(command.Comment)
+			job.Main.Provider = other
+			job.Critic = &RoleSettings{Provider: provider}
+			job.CriticMaxRounds = 1
+			runner.WorkRoot, runner.runModel = work, forbidModel(t)
+			result, err := runner.Run(context.Background(), job)
+			if !errors.Is(err, workroot.ErrUnsafe) || !strings.Contains(err.Error(), "work root overlaps") || !strings.Contains(err.Error(), want) || len(result.Calls) != 0 {
+				t.Fatalf("critic executable escaped Run admission: calls=%d error=%v", len(result.Calls), err)
 			}
 		})
 	}

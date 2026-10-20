@@ -273,6 +273,8 @@ func TestSummarize(t *testing.T) {
 	fourth := first
 	fourth.Repo, fourth.User, fourth.Action = "another-owner/other", "another-user", "audit"
 	fourth.StartedAt = time.Date(2026, 11, 1, 0, 30, 0, 0, time.FixedZone("UTC+2", 2*60*60))
+	finishedAt := fourth.StartedAt.Add(time.Minute)
+	fourth.FinishedAt = &finishedAt
 	records := []Record{first, second, third, fourth}
 	groups, err := Summarize(records, Filter{}, []string{"repo", "user"})
 	if err != nil {
@@ -328,6 +330,11 @@ func TestSummarizeRejectsInvalidOptions(t *testing.T) {
 	record.Status = "unknown"
 	if _, err := Summarize([]Record{record}, Filter{}, nil); err == nil {
 		t.Fatal("unknown status accepted")
+	}
+	record = testRecord()
+	record.CodexCalls = -1
+	if _, err := Summarize([]Record{record}, Filter{}, nil); err == nil {
+		t.Fatal("negative call count accepted")
 	}
 }
 
@@ -401,7 +408,7 @@ func TestSummarizeAggregateBounds(t *testing.T) {
 		{name: "exact token maximum", first: Tokens{Input: math.MaxInt64 / 2}, second: Tokens{Input: math.MaxInt64/2 + 1}, wantTokens: math.MaxInt64},
 		{name: "token maximum plus one", first: Tokens{Input: math.MaxInt64/2 + 1}, second: Tokens{Input: math.MaxInt64/2 + 1}, wantError: "token counts"},
 		{name: "total overflow without component overflow", first: Tokens{Input: math.MaxInt64}, second: Tokens{Output: 1}, wantError: "token counts"},
-		{name: "invalid tokens", second: Tokens{Input: -1}, wantError: "token counts"},
+		{name: "invalid tokens", second: Tokens{Input: -1}, wantError: "invalid counts"},
 		{name: "exact codex call maximum", codex: [2]int{math.MaxInt / 2, math.MaxInt/2 + 1}, wantCodex: math.MaxInt},
 		{name: "codex call overflow", codex: [2]int{math.MaxInt, 1}, wantError: "call counts"},
 		{name: "exact claude call maximum", claude: [2]int{math.MaxInt / 2, math.MaxInt/2 + 1}, wantClaude: math.MaxInt},

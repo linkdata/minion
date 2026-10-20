@@ -108,7 +108,7 @@ func redactAuditJSON(data []byte, secret string) ([]byte, error) {
 		data = bytes.TrimSuffix(output.Bytes(), []byte("\n"))
 	}
 	final := string(data)
-	if redactActionText(final, secret) != final || secret != "" && strings.Contains(final, secret) {
+	if redactActionText(final, secret) != final {
 		return nil, errors.New("audit JSON contains a configured key in source syntax")
 	}
 	return data, nil

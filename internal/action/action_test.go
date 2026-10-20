@@ -146,8 +146,8 @@ func TestPrecheckDeadlineStopsJobBeforeModel(t *testing.T) {
 		Commands: map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{testReviewSkillURL}}},
 		Runner:   Runner{runModel: forbidModel(t)},
 	}
-	job := monitor.Job{Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"review"}}, SubjectType: "Issue", Number: 7, ID: strings.Repeat("a", 64), Command: command.Command{Name: "review", Action: command.Review}}
-	if err := orchestrator.Execute(context.Background(), job); !errors.Is(err, monitor.ErrTerminalJob) {
+	job := monitor.Job{Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"review"}}, SubjectType: "PullRequest", Number: 7, ID: strings.Repeat("a", 64), Command: command.Command{Name: "review", Action: command.Review}}
+	if err := orchestrator.Execute(context.Background(), job); !errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("precheck deadline was refundable: %v", err)
 	}
 }

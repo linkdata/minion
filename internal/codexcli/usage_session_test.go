@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -84,11 +85,15 @@ func TestUsageSessionPriorHelperNeedsANewCompletedTurn(t *testing.T) {
 				}
 			}
 			got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 20}, []string{"child"}, nil)
+			want := usage.Tokens{Input: 25}
+			if state == "unchanged" {
+				want = usage.Tokens{Input: 20}
+			}
 			if state == "complete" {
-				if got.Input != 25 || !complete || err != nil {
+				if got != want || !complete || err != nil {
 					t.Fatalf("completed = %+v, %v, %v", got, complete, err)
 				}
-			} else if !errors.Is(err, errUnverifiedChildren) || complete {
+			} else if got != want || !errors.Is(err, errUnverifiedChildren) || complete {
 				t.Fatalf("unsafe helper accepted: %+v, %v, %v", got, complete, err)
 			}
 		})
@@ -191,6 +196,32 @@ func TestUsageSessionSnapshotOnlyDeltaAndCumulativeStdout(t *testing.T) {
 			got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: fallback}, nil, nil)
 			if got.Input != 20 || complete != (fallback == 120) || err != nil {
 				t.Fatalf("snapshot delta = %+v, %v, %v", got, complete, err)
+			}
+		})
+	}
+}
+
+func TestUsageSessionNoCurrentSnapshotChecksCumulativeStdout(t *testing.T) {
+	for _, test := range []struct {
+		name              string
+		baseline, current int64
+		stdout            int64
+		complete          bool
+	}{
+		{"matching", 100, 20, 120, true},
+		{"missing record", 100, 20, 127, false},
+		{"scoped stdout", 100, 20, 20, false},
+		{"sum overflow", math.MaxInt64 - 10, 20, 20, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, home := context.Background(), t.TempDir()
+			root := writeUsageRollout(t, home, "root", "", append(completedUsageTurn("root", "old", "r1", test.baseline), usageSnapshot(22, test.baseline, 0, 0))...)
+			var session usageSession
+			session.begin(ctx, home, "root", time.Now())
+			appendUsageEvents(t, root, completedUsageTurn("root", "new", "r2", test.current)...)
+			got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: test.stdout}, nil, nil)
+			if got != (usage.Tokens{Input: test.current}) || complete != test.complete || err != nil {
+				t.Fatalf("resumed delta = %+v, complete=%t, err=%v", got, complete, err)
 			}
 		})
 	}
@@ -379,7 +410,7 @@ func TestUsageSessionNativeCumulativeStdoutPreservesCompleteDeltas(t *testing.T)
 	}
 }
 
-func TestUsageSessionOnlyObservesUnchangedCompletedPriorHelper(t *testing.T) {
+func TestUsageSessionObservationOnlyHonorsToolAndHelperLifecycle(t *testing.T) {
 	for _, test := range []struct {
 		name, tools, before, after string
 		accepted                   bool
@@ -424,15 +455,15 @@ func TestUsageSessionOnlyObservesUnchangedCompletedPriorHelper(t *testing.T) {
 				_, _ = output.Write([]byte(fmt.Sprintf(`{"type":"item.completed","item":{"type":"collab_tool_call","tool":%q,"receiver_thread_ids":["child"]}}`+"\n", tool)))
 			}
 			got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 20}, output.children, output.observationOnly)
+			want := usage.Tokens{Input: 20}
+			if test.after == "complete" {
+				want.Input = 25
+			}
 			if test.accepted {
-				want := int64(20)
-				if test.after == "complete" {
-					want = 25
-				}
-				if got != (usage.Tokens{Input: want}) || !complete || err != nil {
+				if got != want || !complete || err != nil {
 					t.Fatalf("finished observation = %+v,%v,%v", got, complete, err)
 				}
-			} else if complete || !errors.Is(err, errUnverifiedChildren) {
+			} else if got != want || complete || !errors.Is(err, errUnverifiedChildren) {
 				t.Fatalf("unverified helper accepted: %+v,%v,%v", got, complete, err)
 			}
 		})

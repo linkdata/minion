@@ -220,7 +220,13 @@ func TestWorkRootPreflightRequiresGlobalClaudeHomeWithExplicitNativeHomes(t *tes
 func TestPrivatePathsRejectAliasesIntoSelectedInstalledSkill(t *testing.T) {
 	const source = "https://github.com/owner/repo/tree/pinned/skills/example"
 	for _, provider := range []string{"codex", "claude"} {
-		for _, kind := range []string{"config", "credential", "git credentials", "git config", "netrc", "xdg git credentials", "xdg git config", "ssh home"} {
+		for _, kind := range []string{
+			"config", "credential", "git credentials", "git config", "netrc",
+			"xdg git credentials", "xdg git config", "ssh home",
+			"default codex auth", "default codex config", "default claude credentials",
+			"default claude settings", "default xdg git credentials", "default xdg git config",
+			"default gh credentials",
+		} {
 			t.Run(provider+"/"+kind, func(t *testing.T) {
 				root := t.TempDir()
 				isolateHostPaths(t, root)
@@ -264,6 +270,20 @@ func TestPrivatePathsRejectAliasesIntoSelectedInstalledSkill(t *testing.T) {
 					privatePath = filepath.Join(root, "config", "git", "config")
 				case "ssh home":
 					privatePath = filepath.Join(root, ".ssh")
+				case "default codex auth":
+					privatePath = filepath.Join(root, ".codex", "auth.json")
+				case "default codex config":
+					privatePath = filepath.Join(root, ".codex", "config.toml")
+				case "default claude credentials":
+					privatePath = filepath.Join(root, ".claude", ".credentials.json")
+				case "default claude settings":
+					privatePath = filepath.Join(root, ".claude", "settings.json")
+				case "default xdg git credentials":
+					privatePath = filepath.Join(root, ".config", "git", "credentials")
+				case "default xdg git config":
+					privatePath = filepath.Join(root, ".config", "git", "config")
+				case "default gh credentials":
+					privatePath = filepath.Join(root, ".config", "gh", "hosts.yml")
 				}
 				if err := os.MkdirAll(filepath.Dir(privatePath), 0700); err != nil {
 					t.Fatal(err)

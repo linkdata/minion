@@ -253,11 +253,22 @@ func checkIsolation(cfg config.Config, configPath string) (resultErr error) {
 		return errors.New("resolve default Claude home: HOME must be absolute")
 	}
 	private = append(private,
+		filepath.Join(userHome, ".codex"),
+		filepath.Join(userHome, ".codex", "auth.json"),
+		filepath.Join(userHome, ".codex", "config.toml"),
+		filepath.Join(userHome, ".claude"),
+		filepath.Join(userHome, ".claude", ".credentials.json"),
+		filepath.Join(userHome, ".claude", ".claude.json"),
+		filepath.Join(userHome, ".claude", "settings.json"),
 		filepath.Join(userHome, ".claude.json"),
 		filepath.Join(userHome, ".git-credentials"),
 		filepath.Join(userHome, ".gitconfig"),
 		filepath.Join(userHome, ".netrc"),
 		filepath.Join(userHome, ".ssh"),
+		filepath.Join(userHome, ".config", "git", "credentials"),
+		filepath.Join(userHome, ".config", "git", "config"),
+		filepath.Join(userHome, ".config", "gh"),
+		filepath.Join(userHome, ".config", "gh", "hosts.yml"),
 	)
 	configHome, err := os.UserConfigDir()
 	if err != nil {
@@ -328,6 +339,8 @@ func githubToken(ctx context.Context) (string, error) {
 
 func checkModels(ctx context.Context, cfg *config.Config, logger *log.Logger) (err error) {
 	for _, provider := range []string{cfg.Main, cfg.Adversarial} {
+		role := action.RoleSettings{Provider: provider}
+		var label, effortName string
 		switch provider {
 		case "codex":
 			if err = codexcli.CheckLogin(ctx, cfg.Codex); err == nil {
@@ -339,28 +352,24 @@ func checkModels(ctx context.Context, cfg *config.Config, logger *log.Logger) (e
 				//lint:ignore ST1005 Codex is a proper noun.
 				return fmt.Errorf("Codex: %w", err) //nolint:staticcheck // -- Codex is a proper noun.
 			}
+			role.Model, role.Effort = cfg.Codex.Model, cfg.Codex.ReasoningEffort
+			label, effortName = "Codex", "reasoning_effort"
 		case "claude":
 			if cfg.Claude, err = claudecli.Validate(ctx, cfg.Claude); err != nil {
 				//lint:ignore ST1005 Claude is a proper noun.
 				return fmt.Errorf("Claude: %w", err) //nolint:staticcheck // -- Claude is a proper noun.
 			}
+			role.Model, role.Effort = cfg.Claude.Model, cfg.Claude.Effort
+			label, effortName = "Claude", "effort"
 		case "":
 			continue
 		default:
 			return fmt.Errorf("unsupported AI provider %q", provider)
 		}
-		role := action.RoleSettings{Provider: provider, Model: cfg.Codex.Model, Effort: cfg.Codex.ReasoningEffort}
-		if provider == "claude" {
-			role.Model, role.Effort = cfg.Claude.Model, cfg.Claude.Effort
-		}
 		if err := role.Validate(); err != nil {
 			return fmt.Errorf("%s settings: %w", provider, err)
 		}
-		if provider == "codex" {
-			logger.Printf("Codex settings: model=%s reasoning_effort=%s", role.Model, role.Effort)
-		} else {
-			logger.Printf("Claude settings: model=%s effort=%s", role.Model, role.Effort)
-		}
+		logger.Printf("%s settings: model=%s %s=%s", label, role.Model, effortName, role.Effort)
 	}
 	logger.Printf("AI roles: main=%s adversarial=%s job_timeout_minutes=%d", cfg.Main, cfg.Adversarial, cfg.JobTimeoutMinutes)
 	if cfg.Adversarial != "" {

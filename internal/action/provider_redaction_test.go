@@ -14,6 +14,7 @@ import (
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
+	"github.com/linkdata/minion/internal/monitor"
 )
 
 func TestNativeProposalRedactsEncodedConfiguredKey(t *testing.T) {
@@ -63,7 +64,12 @@ done
 						t.Error(err)
 					}
 				})
-				runner := Runner{Codex: config.CodexConfig{APIKey: tc.key}, Claude: config.ClaudeConfig{APIKey: tc.key}}
+				runner := Runner{}
+				if provider == "codex" {
+					runner.Codex.APIKey = tc.key
+				} else {
+					runner.Claude.APIKey = tc.key
+				}
 				result, err := runner.runNative(context.Background(), modelRun{session: &session, provider: provider, dir: t.TempDir(), prompt: mainPrompt("inert fixture"), outputSchema: mainOutputSchema})
 				if err != nil {
 					t.Fatal(err)
@@ -74,47 +80,6 @@ done
 				}
 			})
 		}
-	}
-}
-
-func TestRunAIRedactsNULSplitSecretsInCriticEvidence(t *testing.T) {
-	const key = "fixture-secret"
-	const splitKey = "fixture-\x00secret"
-	mainCalls, criticCalls := 0, 0
-	runner := Runner{Codex: config.CodexConfig{APIKey: key}, Claude: config.ClaudeConfig{APIKey: key}}
-	runner.runModel = func(_ context.Context, request modelRun) (aicli.Result, error) {
-		if request.role == roleMain {
-			mainCalls++
-			if mainCalls == 1 {
-				return aicli.Result{Answer: proposalJSON("candidate "+splitKey, "")}, nil
-			}
-			if strings.Contains(request.prompt, key) || strings.Contains(request.prompt, "\x00") || !strings.Contains(request.prompt, "[redacted]") {
-				t.Fatalf("critic feedback reached revision prompt: %q", request.prompt)
-			}
-			return aicli.Result{Answer: proposalJSON("revised", "finding "+splitKey)}, nil
-		}
-		criticCalls++
-		if strings.Contains(request.proposedAnswer, key) || strings.Contains(request.proposedAnswer, "\x00") || strings.Contains(request.criticPrompt("", ""), key) || strings.Contains(request.criticPrompt("", ""), "\x00") {
-			t.Fatalf("critic received configured key: %+v", request)
-		}
-		if request.reviewPhase == reviewVerification && (len(request.refutations) != 1 || request.refutations[0].Text != "finding [redacted]") {
-			t.Fatalf("private refutation reached verification: %+v", request.refutations)
-		}
-		if criticCalls == 1 {
-			return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"feedback":"feedback fixture-\u0000secret"}`}, nil
-		}
-		return aicli.Result{Answer: approvedCritiqueJSON}, nil
-	}
-	job := Job{Main: RoleSettings{Provider: "codex"}, Critic: &RoleSettings{Provider: "claude"}, CriticMaxRounds: 2}
-	checkpoint := func(history []Refutation) error {
-		if len(history) > 0 && (len(history) != 1 || history[0].Text != "finding [redacted]") {
-			t.Fatalf("private refutation reached checkpoint: %+v", history)
-		}
-		return nil
-	}
-	answer, err := runner.runAI(context.Background(), job, t.TempDir(), "task", "", checkpoint, &modelSessions{})
-	if err != nil || answer != "revised" || mainCalls != 2 || criticCalls != 3 {
-		t.Fatalf("NUL-split redaction: answer=%q main=%d critic=%d error=%v", answer, mainCalls, criticCalls, err)
 	}
 }
 
@@ -325,12 +290,58 @@ func TestRunnerRedactsReassembledSecretWithoutCritic(t *testing.T) {
 		t.Run(provider, func(t *testing.T) {
 			job := testJob(command.Comment)
 			job.Main.Provider = provider
-			runner := Runner{WorkRoot: t.TempDir(), Codex: config.CodexConfig{APIKey: "fixture-secret"}, Claude: config.ClaudeConfig{APIKey: "fixture-secret"}, runModel: func(context.Context, modelRun) (aicli.Result, error) {
+			runner := Runner{WorkRoot: t.TempDir(), runModel: func(context.Context, modelRun) (aicli.Result, error) {
 				return aicli.Result{Answer: "public fixture-\x00secret text"}, nil
 			}}
+			if provider == "codex" {
+				runner.Codex.APIKey = "fixture-secret"
+			} else {
+				runner.Claude.APIKey = "fixture-secret"
+			}
 			result, err := runner.Run(context.Background(), job)
 			if err != nil || result.Answer != "public [redacted] text" {
 				t.Fatalf("NUL-split key was exposed: answer=%q error=%v", result.Answer, err)
+			}
+		})
+	}
+}
+
+func TestFixChangesRejectConfiguredKeysWithoutRejectingBinary(t *testing.T) {
+	const key = "fixture-secret"
+	for _, test := range []struct {
+		name, key, data string
+		want            bool
+	}{
+		{"literal", key, "prefix " + key, true},
+		{"NUL split", key, "fixture-\x00secret", true},
+		{"JSON escaped", key, `{"note":"fixture-\u0073ecret"}`, true},
+		{"marker-like key", "redacted", "[redacted]", true},
+		{"benign binary", key, "x\x00y", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := containsConfiguredKey([]byte(test.data), test.key); got != test.want {
+				t.Fatalf("configured key detection = %t, want %t", got, test.want)
+			}
+		})
+	}
+	for _, critic := range []bool{false, true} {
+		t.Run("critic="+strconv.FormatBool(critic), func(t *testing.T) {
+			job := testJob(command.Fix)
+			if critic {
+				job = withClaudeCritic(job)
+			}
+			calls := 0
+			runner := Runner{WorkRoot: t.TempDir(), Codex: config.CodexConfig{APIKey: key}, runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+				calls++
+				if request.role != roleMain {
+					t.Fatal("critic received a fix containing a configured key")
+				}
+				writeFixtureFile(t, request.dir, "source.txt", []byte(`{"note":"fixture-\u0073ecret"}`))
+				return aicli.Result{Answer: proposalJSON("Done", "")}, nil
+			}}
+			result, err := runner.Run(context.Background(), job)
+			if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "configured provider key") || calls != 1 || result.Answer != "" || len(result.Changes) != 0 {
+				t.Fatalf("configured key reached fix result: calls=%d result=%+v error=%v", calls, result, err)
 			}
 		})
 	}

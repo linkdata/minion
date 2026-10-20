@@ -145,6 +145,7 @@ func TestParseAcceptsTrailingNotes(t *testing.T) {
 		{"@linkdataminion fix", "The test fails on Windows."},
 		{"@linkdataminion fix", "Inspect the regression's history.\nTrace its original cause."},
 		{"@linkdataminion review", "@otherbot review\n```\nExample text\n```"},
+		{"@linkdataminion review", "> @linkdataminion fix"},
 	} {
 		plain, err := parseDefault(tt.command)
 		if err != nil {
@@ -164,6 +165,8 @@ func TestParseRejectsMultipleCommands(t *testing.T) {
 		"@linkdataminion review\n@LinkDataMinion\tFIX",
 		"@linkdataminion audit\n@linkdataminion fix",
 		"@linkdataminion review\n```\n@linkdataminion fix\n```",
+		"@linkdataminion review\n<!--\n@linkdataminion fix\n-->",
+		"@linkdataminion review\n    @linkdataminion fix",
 	} {
 		got, err := parseDefault(body)
 		if !errors.Is(err, ErrAmbiguous) {

@@ -81,12 +81,17 @@ auto = false
 		return nil, err
 	}
 	var updates strings.Builder
+	refCount := 0
 	for _, line := range strings.Split(strings.TrimSpace(string(refs)), "\n") {
 		sha, name, ok := strings.Cut(line, " ")
 		if !ok || !workspace.ValidSHA(sha) || (name != "HEAD" && !strings.HasPrefix(name, "refs/")) || strings.ContainsAny(name, "\r\n\x00 ") {
 			return nil, errors.New("invalid repository reference")
 		}
 		if name != "HEAD" {
+			refCount++
+			if refCount > workspace.MaxEntries {
+				return nil, fmt.Errorf("%w: more than %d repository references", ErrCheckoutTooLarge, workspace.MaxEntries)
+			}
 			fmt.Fprintf(&updates, "create %s %s\n", name, sha)
 		}
 	}
