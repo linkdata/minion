@@ -201,6 +201,7 @@ func TestRun(t *testing.T) {
 		t.Run(map[bool]string{false: "review", true: "fix"}[writable], func(t *testing.T) {
 			workspace := t.TempDir()
 			reports := t.TempDir()
+			output := t.TempDir()
 			binary := fakeExecutable(t, "claude", `printf '%s\n' "$@" > "$0.args"
 pwd > "$0.cwd"
 printf '%s\n' "${GH_TOKEN-absent},${GITHUB_TOKEN-absent},${NODE_OPTIONS-absent},${CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS-absent}" > "$0.env"
@@ -211,7 +212,7 @@ printf '%s\n' '`+successfulResult+`'
 			t.Setenv("GITHUB_TOKEN", "dummy-token")
 			t.Setenv("NODE_OPTIONS", "dummy-option")
 			t.Setenv("CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS", "600000")
-			result, err := Run(context.Background(), workspace, "Handle task", writable, "", config.ClaudeConfig{Model: "claude-test", Effort: "high", Skills: []string{skills.BuiltinAntiPromptInjection}, ReadOnlyDirs: []string{reports}})
+			result, err := Run(context.Background(), workspace, "Handle task", writable, output, config.ClaudeConfig{Model: "claude-test", Effort: "high", Skills: []string{skills.BuiltinAntiPromptInjection}, ReadOnlyDirs: []string{reports}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -220,6 +221,10 @@ printf '%s\n' '`+successfulResult+`'
 				t.Fatal(err)
 			}
 			reports, err = filepath.EvalSymlinks(reports)
+			if err != nil {
+				t.Fatal(err)
+			}
+			output, err = filepath.EvalSymlinks(output)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -243,10 +248,14 @@ printf '%s\n' '`+successfulResult+`'
 			}
 			values := map[string]string{}
 			skillDir := ""
+			var addDirs []string
 			for i, arg := range args[:len(args)-1] {
 				values[arg] = args[i+1]
-				if arg == "--add-dir" && args[i+1] != workspace && args[i+1] != reports {
-					skillDir = args[i+1]
+				if arg == "--add-dir" {
+					addDirs = append(addDirs, args[i+1])
+					if args[i+1] != workspace && args[i+1] != reports && args[i+1] != output {
+						skillDir = args[i+1]
+					}
 				}
 			}
 			for key, want := range map[string]string{"--permission-mode": "dontAsk", "--tools": "Bash", "--allowedTools": "Bash", "--permission-prompts": "none", "--model": "claude-test", "--effort": "high", "--mcp-config": `{"mcpServers":{}}`} {
@@ -270,6 +279,7 @@ printf '%s\n' '`+successfulResult+`'
 					Filesystem struct {
 						DenyRead   []string `json:"denyRead"`
 						DenyWrite  []string `json:"denyWrite"`
+						AllowRead  []string `json:"allowRead"`
 						AllowWrite []string `json:"allowWrite"`
 					} `json:"filesystem"`
 					Network struct {
@@ -309,6 +319,25 @@ printf '%s\n' '`+successfulResult+`'
 			if filepath.Base(skillDir) != "anti-prompt-injection" || !slices.Contains(policy.Filesystem.DenyWrite, skillDir) {
 				t.Fatalf("skill --add-dir lacks denyWrite: skill=%q permissions=%+v", skillDir, policy.Filesystem)
 			}
+			wantAddDirs := []string{workspace, output, reports, skillDir}
+			slices.Sort(addDirs)
+			slices.Sort(wantAddDirs)
+			if !slices.Equal(addDirs, wantAddDirs) {
+				t.Fatalf("--add-dir grants = %v, want %v", addDirs, wantAddDirs)
+			}
+			cwd := strings.TrimSpace(readFile(t, binary+".cwd"))
+			wantReads := append(SystemReadPaths(), workspace, cwd, output, reports, skillDir)
+			wantWrites := []string{cwd, output}
+			if writable {
+				wantWrites = append(wantWrites, workspace)
+			}
+			slices.Sort(wantReads)
+			slices.Sort(wantWrites)
+			slices.Sort(policy.Filesystem.AllowRead)
+			slices.Sort(policy.Filesystem.AllowWrite)
+			if !slices.Equal(policy.Filesystem.AllowRead, wantReads) || !slices.Equal(policy.Filesystem.AllowWrite, wantWrites) {
+				t.Fatalf("sandbox grants: read=%v want=%v, write=%v want=%v", policy.Filesystem.AllowRead, wantReads, policy.Filesystem.AllowWrite, wantWrites)
+			}
 			if writable {
 				for _, name := range []string{".git", ".agents", ".codex", ".claude"} {
 					if !slices.Contains(policy.Filesystem.DenyWrite, filepath.Join(workspace, name)) {
@@ -322,7 +351,6 @@ printf '%s\n' '`+successfulResult+`'
 			if !strings.Contains(prompt, "Source snapshot: ") || !strings.Contains(prompt, workspace) || !strings.Contains(prompt, "SKILL.md") || !strings.HasSuffix(prompt, "Handle task") {
 				t.Fatalf("prompt = %q", prompt)
 			}
-			cwd := strings.TrimSpace(readFile(t, binary+".cwd"))
 			if cwd == workspace || filepath.Dir(cwd) != filepath.Dir(workspace) {
 				t.Fatalf("runtime directory = %q", cwd)
 			}

@@ -56,6 +56,7 @@ type rolloutMeta struct {
 	HistoryStart *int64          `json:"subagent_history_start_ordinal"`
 	Source       json.RawMessage `json:"source"`
 	path         string
+	duplicate    bool // Confirmed identity collisions remain unsafe after their files age out of discovery.
 }
 
 type rolloutEvent struct {
@@ -66,11 +67,11 @@ type rolloutEvent struct {
 
 func collectUsageFiles(ctx context.Context, rootID string, fallback *usage.Tokens, expectedChildren []string, files map[string]rolloutMeta, ambiguous map[string]bool, complete bool) (usage.Tokens, bool, error) {
 	var total usage.Tokens
-	if rootID == "" || ctx.Err() != nil {
+	if rootID == "" || ctx.Err() != nil || ambiguous[rootID] {
 		if fallback != nil {
 			total = *fallback
 		}
-		if len(expectedChildren) != 0 {
+		if ambiguous[rootID] || len(expectedChildren) != 0 {
 			return total, false, errUnverifiedChildren
 		}
 		return total, false, nil
@@ -111,7 +112,9 @@ func collectUsageFiles(ctx context.Context, rootID string, fallback *usage.Token
 		}
 		meta, exists := files[id]
 		if id != rootID && ambiguous[id] {
+			complete = false
 			childError = joinUsageErrors(childError, errUnverifiedChildren)
+			continue
 		}
 		if !exists {
 			complete = false
@@ -150,6 +153,7 @@ func usageFiles(ctx context.Context, home, rootID string, started time.Time, kno
 	complete := true
 	entries, candidates := 0, 0
 	visited := map[string]bool{}
+	confirmed := map[string]bool{}
 	// Failed or cancelled rediscovery must not erase known ownership obligations.
 	for id, meta := range known {
 		files[id], ambiguous[id] = meta, true
@@ -197,21 +201,31 @@ func usageFiles(ctx context.Context, home, rootID string, started time.Time, kno
 		meta.path = path
 		if expectedID != "" {
 			before := known[expectedID]
+			meta.duplicate = before.duplicate
 			sameBoundary := before.HistoryStart == nil && meta.HistoryStart == nil || before.HistoryStart != nil && meta.HistoryStart != nil && *before.HistoryStart == *meta.HistoryStart
 			if meta.ID != expectedID || meta.SessionID != before.SessionID || meta.ParentID != before.ParentID || !sameBoundary {
 				complete = false
 				return
 			}
 			files[expectedID] = meta
-			delete(ambiguous, expectedID)
+			confirmed[expectedID] = true
+			if !meta.duplicate {
+				delete(ambiguous, expectedID)
+			}
 			return
 		}
-		if _, exists := files[meta.ID]; exists {
+		if prior, exists := files[meta.ID]; exists {
 			complete = false
+			if confirmed[meta.ID] {
+				prior.duplicate = true
+				files[meta.ID] = prior
+			}
+			confirmed[meta.ID] = true
 			ambiguous[meta.ID] = true
 			return
 		}
 		files[meta.ID] = meta
+		confirmed[meta.ID] = true
 	}
 	for id, meta := range known {
 		if ctx.Err() != nil {

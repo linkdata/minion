@@ -36,7 +36,9 @@ func TestRemoveAllRestrictedTreeDoesNotFollowSymlinks(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.RemoveAll(root); !errors.Is(err, os.ErrPermission) {
+	if err := os.RemoveAll(root); err == nil {
+		t.Skip("plain RemoveAll bypassed directory permissions")
+	} else if !errors.Is(err, os.ErrPermission) {
 		t.Fatalf("fixture did not reach permission repair: %v", err)
 	}
 	if err := RemoveAll(root); err != nil {

@@ -220,6 +220,9 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		return scans[i].notification.UpdatedAt.Before(scans[j].notification.UpdatedAt)
 	})
 	for _, entry := range scans {
+		if ctx.Err() != nil {
+			return stop()
+		}
 		notification := entry.notification
 		repo, ok := m.Config.Repository(notification.Repository.FullName)
 		if !ok {

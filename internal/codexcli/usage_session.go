@@ -183,7 +183,7 @@ func (s *usageSession) collectUsage(ctx context.Context, home, rootID string, st
 			tokens, ok, children, workError = readRolloutUsageFrom(ctx, meta, rootID, &budget, mode)
 			childError = joinUsageErrors(childError, workError)
 			queue = append(queue, children...)
-		} else if id != rootID {
+		} else if id != rootID || meta.duplicate {
 			childError = joinUsageErrors(childError, errUnverifiedChildren)
 		}
 		if id == rootID && fallback != nil {

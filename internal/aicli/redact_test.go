@@ -118,6 +118,14 @@ func TestRedactMarkerCannotReformSecretAtBoundary(t *testing.T) {
 	}
 }
 
+func TestRedactTextKeepsJSONValidAfterReformedSecret(t *testing.T) {
+	const secret = "]!"
+	got := RedactText(`{"answer":"]]!!","refutations":""}`, secret)
+	if !json.Valid([]byte(got)) || strings.Contains(got, secret) {
+		t.Fatalf("redaction broke JSON or exposed the key: %q", got)
+	}
+}
+
 func TestRedactJavaScriptJSONForms(t *testing.T) {
 	for _, tc := range []struct{ name, secret, encoded string }{
 		{"HTML and control", "<\x1bZ", "<\\u001bZ"},

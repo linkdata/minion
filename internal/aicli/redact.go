@@ -29,6 +29,10 @@ func removeReformedSecrets(text string, forms [4]string) string {
 			continue
 		}
 		for marker := byte('!'); marker <= '~'; marker++ {
+			// The separator may be inserted inside a JSON string.
+			if marker == '"' || marker == '\\' {
+				continue
+			}
 			safe := true
 			for _, known := range forms {
 				if strings.IndexByte(known, marker) >= 0 {

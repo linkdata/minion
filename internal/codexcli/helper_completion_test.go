@@ -61,12 +61,101 @@ func TestDuplicateHelperRolloutsCannotAttestCompletion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(filepath.Dir(path), "duplicate.jsonl"), data, 0600); err != nil {
+	duplicate := strings.Replace(string(data), `"input_tokens":20`, `"input_tokens":900`, 1)
+	if duplicate == string(data) {
+		t.Fatal("fixture must change duplicate usage")
+	}
+	if err := os.WriteFile(filepath.Join(filepath.Dir(path), "duplicate.jsonl"), []byte(duplicate), 0600); err != nil {
 		t.Fatal(err)
 	}
 	tokens, complete, err := (&usageSession{}).collectUsage(context.Background(), home, "root", time.Now(), nil, []string{"child"}, nil)
-	if tokens != (usage.Tokens{Input: 30, Output: 3}) || complete || !errors.Is(err, errUnverifiedChildren) {
+	if tokens != (usage.Tokens{Input: 10, Output: 1}) || complete || !errors.Is(err, errUnverifiedChildren) {
 		t.Fatalf("ambiguous helper accepted or double-counted: tokens=%+v complete=%t err=%v", tokens, complete, err)
+	}
+}
+
+func TestDuplicateRootRolloutsCannotInflateFreshUsage(t *testing.T) {
+	home := t.TempDir()
+	root := writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "turn", "response", 100)...)
+	data, err := os.ReadFile(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	duplicate := strings.Replace(string(data), `"input_tokens":100`, `"input_tokens":900`, 1)
+	if duplicate == string(data) {
+		t.Fatal("fixture must change duplicate usage")
+	}
+	if err := os.WriteFile(filepath.Join(filepath.Dir(root), "duplicate-root.jsonl"), []byte(duplicate), 0600); err != nil {
+		t.Fatal(err)
+	}
+	fallback := usage.Tokens{Input: 7}
+	for _, tc := range []struct {
+		name     string
+		fallback *usage.Tokens
+		want     usage.Tokens
+	}{
+		{"stdout", &fallback, fallback},
+		{"no stdout", nil, usage.Tokens{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, complete, err := (&usageSession{}).collectUsage(context.Background(), home, "root", time.Now(), tc.fallback, nil, nil)
+			if got != tc.want || complete || !errors.Is(err, errUnverifiedChildren) {
+				t.Fatalf("ambiguous root usage = %+v, complete=%t, err=%v; want %+v, incomplete and unverified", got, complete, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestResumedDuplicateRootCannotAttestCompletion(t *testing.T) {
+	ctx, home := context.Background(), t.TempDir()
+	root := writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "old", "r1", 100)...)
+	var session usageSession
+	session.begin(ctx, home, "root", time.Now())
+	data, err := os.ReadFile(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	duplicate := filepath.Join(filepath.Dir(root), "duplicate-root.jsonl")
+	if err := os.WriteFile(duplicate, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	appendUsageEvents(t, root, completedUsageTurn("root", "new", "r2", 20)...)
+	got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), nil, nil, nil)
+	if got != (usage.Tokens{}) || complete || !errors.Is(err, errUnverifiedChildren) {
+		t.Fatalf("resumed ambiguous root accepted: tokens=%+v complete=%t err=%v", got, complete, err)
+	}
+	old := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(duplicate, old, old); err != nil {
+		t.Fatal(err)
+	}
+	session.begin(ctx, home, "root", time.Now())
+	appendUsageEvents(t, root, completedUsageTurn("root", "later", "r3", 5)...)
+	got, complete, err = session.collectUsage(ctx, home, "root", time.Now(), nil, nil, nil)
+	if got != (usage.Tokens{}) || complete || !errors.Is(err, errUnverifiedChildren) {
+		t.Fatalf("aged duplicate root accepted: tokens=%+v complete=%t err=%v", got, complete, err)
+	}
+}
+
+func TestRunRejectsDuplicateRootWithoutStreamedHelper(t *testing.T) {
+	installFakeCodex(t, `#!/bin/sh
+cat <<'EVENTS'
+{"type":"thread.started","thread_id":"root"}
+{"type":"item.completed","item":{"type":"agent_message","text":"answer"}}
+{"type":"turn.completed"}
+EVENTS
+`)
+	home := os.Getenv("CODEX_HOME")
+	root := writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "turn", "r1", 10)...)
+	data, err := os.ReadFile(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(filepath.Dir(root), "duplicate-root.jsonl"), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := Run(context.Background(), t.TempDir(), "task", false, "", config.CodexConfig{})
+	if !errors.Is(err, errUnverifiedChildren) || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{}) {
+		t.Fatalf("ambiguous root published answer: result=%+v err=%v", result, err)
 	}
 }
 
