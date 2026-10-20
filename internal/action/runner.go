@@ -59,6 +59,7 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 	}
 	ctx, cancel := context.WithTimeout(ctx, job.RuntimeBudget)
 	defer cancel()
+	// Final status runs after resource cleanup so cleanup diagnostics survive.
 	defer func() {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			result.Answer, result.Changes = "", nil
@@ -117,6 +118,7 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 	}
 	owned := []string{source}
 	cleanupFailed := false
+	// Remove owned paths after sessions, report collection, and review snapshots close.
 	defer func() {
 		failed := cleanupFailed
 		for _, dir := range owned {
@@ -134,7 +136,7 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 	}
 	owned = append(owned, contextDir)
 	if err := workspace.CheckRoot(source); err != nil {
-		return result, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
+		return result, preparationFailure("check source workspace", err)
 	}
 	if err := workspace.Materialize(source, job.Source.Files); err != nil {
 		return result, preparationFailure("materialize source", err)
@@ -278,6 +280,7 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 		return call, err
 	}
 	if job.Action == command.SecurityAudit {
+		// Collect partial reports before the outer workspace cleanup.
 		defer func() {
 			if resultErr != nil && len(result.Artifacts) == 0 {
 				files, diagnostics := collectPartialAuditArtifacts(outputDir, job, auditSkill, configured.Codex.APIKey)
@@ -297,6 +300,7 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 		}
 	}
 	var sessions modelSessions
+	// Close sessions before collecting partial reports or releasing review snapshots.
 	defer func() {
 		if err := sessions.close(); err != nil {
 			configured.logf("model session cleanup retry scheduled job=%s attempt=%s", job.Identity.JobID, job.Identity.AttemptID)

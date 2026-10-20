@@ -247,9 +247,6 @@ func (c *Checkout) CommitAndPush(ctx context.Context, repo, branch, botLogin, me
 
 // The URL entry point lets local fixtures exercise publication without network calls.
 func (c *Checkout) commitAndPush(ctx context.Context, pushURL, branch, botLogin, message string, beforePush func(string) error) error {
-	if err := c.ready(); err != nil {
-		return err
-	}
 	if beforePush == nil {
 		return errors.New("before-push recorder is required")
 	}
@@ -259,7 +256,7 @@ func (c *Checkout) commitAndPush(ctx context.Context, pushURL, branch, botLogin,
 	if strings.TrimSpace(message) == "" || strings.ContainsRune(message, 0) {
 		return errors.New("commit message is empty or contains NUL")
 	}
-	if err := c.assertHead(ctx); err != nil {
+	if _, err := c.verifiedHead(ctx); err != nil {
 		return err
 	}
 	currentBranch, err := runGit(ctx, c.path, "symbolic-ref", "--quiet", "HEAD")

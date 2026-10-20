@@ -385,11 +385,18 @@ func rolloutTokens(raw json.RawMessage) (usage.Tokens, bool) {
 }
 
 func readRolloutUsage(ctx context.Context, meta rolloutMeta, rootID string, budget *int64) (usage.Tokens, bool, []string, error) {
-	return readRolloutUsageFrom(ctx, meta, rootID, budget, nil, nil, nil, false)
+	return readRolloutUsageFrom(ctx, meta, rootID, budget, rolloutUsageMode{})
+}
+
+type rolloutUsageMode struct {
+	before, capture *usageBoundary
+	spawned         map[string]bool
+	allowUnchanged  bool
 }
 
 // A boundary excludes previous turns even when their final records arrive late.
-func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, budget *int64, before, capture *usageBoundary, spawned map[string]bool, allowUnchanged bool) (usage.Tokens, bool, []string, error) {
+func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, budget *int64, mode rolloutUsageMode) (usage.Tokens, bool, []string, error) {
+	before, capture, spawned, allowUnchanged := mode.before, mode.capture, mode.spawned, mode.allowUnchanged
 	var childError error
 	if meta.ID != rootID {
 		childError = errUnverifiedChildren

@@ -271,14 +271,11 @@ func (c *Checkout) Snapshot(ctx context.Context) (s workspace.Snapshot, err erro
 // Import applies data-only changes to the original orchestrator-owned checkout.
 // The caller must validate the complete action result, including omitted-source overlap.
 func (c *Checkout) Import(ctx context.Context, expectedHead string, changes []workspace.Change) error {
-	if err := c.ready(); err != nil {
+	if _, err := c.verifiedHead(ctx); err != nil {
 		return err
 	}
 	if expectedHead != c.expectedHead {
 		return errors.New("result source commit does not match checkout")
-	}
-	if err := c.assertHead(ctx); err != nil {
-		return err
 	}
 	if err := workspace.Apply(c.path, changes); err != nil {
 		return err

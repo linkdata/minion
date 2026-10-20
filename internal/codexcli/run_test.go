@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -21,6 +22,9 @@ import (
 )
 
 func TestRunInvokesCodexAndReturnsFinalMessage(t *testing.T) {
+	if !slices.Contains(aicli.ModelGitEnvironment(), "GIT_CONFIG_KEY_0=safe.bareRepository") {
+		t.Fatal("Codex shell Git key diverged from the shared model Git environment")
+	}
 	for _, tt := range []struct {
 		name     string
 		writable bool
@@ -127,6 +131,37 @@ printf '%s\n' '{"type":"thread.started","thread_id":"test"}' '{"type":"item.comp
 				t.Fatalf("GOCACHE = %q", strings.TrimSpace(string(cache)))
 			}
 		})
+	}
+}
+
+func TestSessionDoesNotBindThreadAfterOutputStop(t *testing.T) {
+	bin := installFakeCodex(t, `#!/bin/sh
+cat >/dev/null
+n=1
+if [ -f "$0.count" ]; then n=$(( $(cat "$0.count") + 1 )); fi
+printf '%s' "$n" > "$0.count"
+if [ "$n" -eq 1 ]; then
+  printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"thread.started","thread_id":"other"}'
+else
+  printf '%s\n' '{"type":"thread.started","thread_id":"fresh"}' '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}' '{"type":"turn.completed"}'
+fi
+`)
+	var session Session
+	t.Cleanup(func() { _ = session.Close() })
+	source := t.TempDir()
+	if _, err := session.Run(context.Background(), source, "first", false, "", config.CodexConfig{}); err == nil || !strings.Contains(err.Error(), "identity changed within one call") || session.threadID != "" {
+		t.Fatalf("stopped output bound a thread: thread=%q err=%v", session.threadID, err)
+	}
+	if _, err := session.Run(context.Background(), source, "second", false, "", config.CodexConfig{}); err == nil || !strings.Contains(err.Error(), "previous invocation did not identify a resumable thread") {
+		t.Fatalf("stopped output resumed: %v", err)
+	}
+	if calls, err := os.ReadFile(bin + ".count"); err != nil || string(calls) != "1" {
+		t.Fatalf("stopped output redispatched: %q %v", calls, err)
+	}
+	session.NewConversation()
+	result, err := session.Run(context.Background(), source, "fresh", false, "", config.CodexConfig{})
+	if err != nil || result.Answer != "done" || session.threadID != "fresh" {
+		t.Fatalf("fresh conversation failed: %+v thread=%q err=%v", result, session.threadID, err)
 	}
 }
 

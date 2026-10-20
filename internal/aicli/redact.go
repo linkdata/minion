@@ -22,6 +22,33 @@ func redactionMarker(secret string) string {
 	return marker
 }
 
+// A replacement marker can join untouched text into another key occurrence.
+func removeReformedSecrets(text string, forms [4]string) string {
+	for _, form := range forms {
+		if !strings.Contains(text, form) {
+			continue
+		}
+		for marker := byte('!'); marker <= '~'; marker++ {
+			safe := true
+			for _, known := range forms {
+				if strings.IndexByte(known, marker) >= 0 {
+					safe = false
+					break
+				}
+			}
+			if safe {
+				for _, known := range forms {
+					text = strings.ReplaceAll(text, known, string(marker))
+				}
+				return text
+			}
+		}
+		// No printable marker is safe; discard the diagnostic rather than expose a key.
+		return ""
+	}
+	return text
+}
+
 func redactText(text, secret string, truncated bool) string {
 	if secret == "" {
 		return text
@@ -58,9 +85,9 @@ func redactText(text, secret string, truncated bool) string {
 		for strings.Contains(text, "\x00\x00") {
 			text = strings.ReplaceAll(text, "\x00\x00", "\x00")
 		}
-		return strings.ReplaceAll(text, "\x00", marker)
+		text = strings.ReplaceAll(text, "\x00", marker)
 	}
-	return text
+	return removeReformedSecrets(text, forms)
 }
 
 // javascriptJSONContent removes escapes Go adds to otherwise valid JSON strings.

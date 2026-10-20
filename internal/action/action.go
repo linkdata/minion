@@ -146,6 +146,7 @@ func (e *Orchestrator) validateCommand(job monitor.Job) error {
 		return fmt.Errorf("%w: action %q is not supported with %s as main", monitor.ErrTerminalJob, mapping.Action, e.mainProvider())
 	}
 	configured := e.Runner
+	configured.Logger = nil // Execution logs optional skill skips once after validation.
 	if err := configured.ConfigureRole(e.roleSettings(e.mainProvider(), mapping.Skills)); err != nil {
 		return err
 	}

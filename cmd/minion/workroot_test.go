@@ -101,6 +101,20 @@ func TestWorkRootPreflightIgnoresMissingSkills(t *testing.T) {
 	}
 }
 
+func TestWorkRootPreflightRejectsApplicationReadGrants(t *testing.T) {
+	root := t.TempDir()
+	isolateHostPaths(t, root)
+	work := filepath.Join(root, "work")
+	if err := os.Mkdir(work, 0700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Config{Main: "codex", WorkRoot: work}
+	cfg.Codex.ReadOnlyDirs = []string{root}
+	if err := checkIsolation(cfg, filepath.Join(root, "config.json")); !errors.Is(err, workroot.ErrUnsafe) || !strings.Contains(err.Error(), "host-level model read grants are unsupported") {
+		t.Fatalf("preflight accepted application read grant: %v", err)
+	}
+}
+
 func TestWorkRootPreflightRequiresWorkspaceBackend(t *testing.T) {
 	root := t.TempDir()
 	isolateHostPaths(t, root)

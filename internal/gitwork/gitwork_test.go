@@ -74,6 +74,15 @@ func TestGitCredentialHelperIgnoresCheckoutRelativePath(t *testing.T) {
 		"absolute checkout path": checkout + ":" + trustedBin,
 	} {
 		t.Run(name, func(t *testing.T) {
+			wantPath := trustedBin
+			if name == "empty PATH" || name == "all relative" {
+				wantPath = "/usr/local/bin:/usr/bin:/bin"
+			} else if name == "absolute checkout path" {
+				wantPath = checkout + string(os.PathListSeparator) + trustedBin
+			}
+			if got := safePath(path); got != wantPath {
+				t.Fatalf("safePath(%q) = %q, want %q", path, got, wantPath)
+			}
 			t.Setenv("PATH", path)
 			cmd := exec.Command(realGit, "-c", "credential.helper=", "-c", credentialHelperConfig(filepath.Join(trustedBin, "gh")), "credential", "fill")
 			cmd.Dir = checkout

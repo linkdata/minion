@@ -84,7 +84,7 @@ auto = false
 	refCount := 0
 	for _, line := range strings.Split(strings.TrimSpace(string(refs)), "\n") {
 		sha, name, ok := strings.Cut(line, " ")
-		if !ok || !workspace.ValidSHA(sha) || (name != "HEAD" && !strings.HasPrefix(name, "refs/")) || strings.ContainsAny(name, "\r\n\x00 ") {
+		if !ok || !workspace.ValidSHA(sha) || (name != "HEAD" && !strings.HasPrefix(name, "refs/")) || strings.ContainsAny(name, "\r\x00 ") {
 			return nil, errors.New("invalid repository reference")
 		}
 		if name != "HEAD" {

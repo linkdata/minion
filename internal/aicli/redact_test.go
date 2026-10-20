@@ -86,6 +86,38 @@ func TestRedactMarkerCannotContainSecret(t *testing.T) {
 	}
 }
 
+func TestRedactMarkerCannotReformSecretAtBoundary(t *testing.T) {
+	for _, tc := range []struct{ secret, text, forbidden string }{
+		{"]x", "]]xx", "]x"},
+		{"x[", "xx[[", "x["},
+		{"]#", "]]##", "]#"},
+		{"]\n", `]]\n\n`, `]\n`},
+	} {
+		if got := RedactText(tc.text, tc.secret); strings.Contains(got, tc.forbidden) {
+			t.Errorf("text still contains %q after redaction: %q", tc.forbidden, got)
+		}
+		cause := errors.New(tc.text)
+		if got := RedactError(cause, tc.secret); strings.Contains(got.Error(), tc.forbidden) || !errors.Is(got, cause) {
+			t.Errorf("error exposed %q or lost its cause: %q", tc.forbidden, got.Error())
+		}
+		var tail bounded.Tail
+		if _, err := tail.Write([]byte(strings.Repeat("z", bounded.DiagnosticBytes) + tc.text + " diagnostic")); err != nil || !tail.Truncated {
+			t.Fatalf("unexpected diagnostic tail state: %v, %t", err, tail.Truncated)
+		}
+		if got := RedactTail(&tail, tc.secret); strings.Contains(got, tc.forbidden) || !strings.HasSuffix(got, "diagnostic") {
+			t.Errorf("tail exposed %q or lost the diagnostic: length=%d, suffix=%q", tc.forbidden, len(got), got[max(0, len(got)-64):])
+		}
+	}
+	var printable strings.Builder
+	for marker := byte('!'); marker <= '~'; marker++ {
+		printable.WriteByte(marker)
+	}
+	secret := "]" + printable.String()
+	if got := RedactText("]"+secret+printable.String(), secret); got != "" {
+		t.Fatalf("diagnostic with no safe separator was not discarded: %q", got)
+	}
+}
+
 func TestRedactJavaScriptJSONForms(t *testing.T) {
 	for _, tc := range []struct{ name, secret, encoded string }{
 		{"HTML and control", "<\x1bZ", "<\\u001bZ"},

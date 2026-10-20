@@ -100,6 +100,22 @@ func TestCollectUsageIncludesNestedHelpersWithoutInheritedOrDuplicateResponses(t
 	}
 }
 
+func TestCollectUsageCountsEventsAtHistoryStart(t *testing.T) {
+	home := t.TempDir()
+	start := int64(9)
+	path := writeUsageRolloutBoundary(t, home, "child", "root", &start,
+		usageSnapshot(8, 100, 0, 0),
+		usageEventAt(9, "task_started", "child-turn"),
+		usageRecordAt(9, "child", "child-turn", "response", 7, 0, 0),
+		usageSnapshot(9, 107, 0, 0),
+		usageEventAt(9, "task_complete", "child-turn"))
+	budget := int64(maxUsageScanBytes)
+	got, complete, _, err := readRolloutUsage(context.Background(), rolloutMeta{ID: "child", path: path, HistoryStart: &start}, "root", &budget)
+	if got != (usage.Tokens{Input: 7}) || !complete || err != nil {
+		t.Fatalf("history boundary = %+v, complete=%t, err=%v", got, complete, err)
+	}
+}
+
 func TestRepeatedHelperActivityRetainsLaterCountersAndCompletion(t *testing.T) {
 	for _, done := range []bool{false, true} {
 		t.Run(fmt.Sprint(done), func(t *testing.T) {

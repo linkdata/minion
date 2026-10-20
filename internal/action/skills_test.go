@@ -45,6 +45,28 @@ const (
 	testAuditSkillURL  = "https://github.com/cloudflare/security-audit-skill/tree/main/skills/security-audit"
 )
 
+func TestValidationDoesNotDuplicateOptionalSkillWarning(t *testing.T) {
+	var journal bytes.Buffer
+	orchestrator := &Orchestrator{
+		Runner:         Runner{Logger: log.New(&journal, "", 0)},
+		Main:           "codex",
+		AlwaysOnSkills: []string{"invalid skill URL"},
+		Commands: map[string]config.CommandMapping{
+			"inspect": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}},
+		},
+	}
+	job := monitor.Job{
+		Repository: config.Repository{Name: "owner/repo", Actions: []string{"inspect"}},
+		Command:    command.Command{Name: "inspect", Action: command.Comment},
+	}
+	if err := orchestrator.validateCommand(job); err != nil || journal.Len() != 0 {
+		t.Fatalf("validation logged optional skill skip: err=%v log=%q", err, journal.String())
+	}
+	if err := orchestrator.Runner.ConfigureRole(orchestrator.roleSettings("codex", orchestrator.Commands["inspect"].Skills)); err != nil || strings.Count(journal.String(), "skip unavailable codex always-on skill invalid skill URL:") != 1 {
+		t.Fatalf("execution warning count changed: err=%v log=%q", err, journal.String())
+	}
+}
+
 func TestRunnerSeparatesMainAndCriticSkills(t *testing.T) {
 	const optional = "https://github.com/example/skills/tree/main/skills/optional"
 	const missing = "https://github.com/example/skills/tree/main/skills/missing"

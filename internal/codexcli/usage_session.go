@@ -127,7 +127,7 @@ func (s *usageSession) begin(ctx context.Context, home, rootID string, started t
 			b.valid = false
 			continue
 		}
-		_, _, _, _ = readRolloutUsageFrom(ctx, meta, rootID, &budget, nil, b, nil, false)
+		_, _, _, _ = readRolloutUsageFrom(ctx, meta, rootID, &budget, rolloutUsageMode{capture: b})
 	}
 }
 
@@ -175,7 +175,10 @@ func (s *usageSession) collectUsage(ctx context.Context, home, rootID string, st
 		if exists && !ambiguous[id] && (prior || spawned[id]) {
 			var children []string
 			var workError error
-			tokens, ok, children, workError = readRolloutUsageFrom(ctx, meta, rootID, &budget, boundary, currentRoot, spawned, id != rootID && observationOnly[id])
+			tokens, ok, children, workError = readRolloutUsageFrom(ctx, meta, rootID, &budget, rolloutUsageMode{
+				before: boundary, capture: currentRoot, spawned: spawned,
+				allowUnchanged: id != rootID && observationOnly[id],
+			})
 			childError = joinUsageErrors(childError, workError)
 			queue = append(queue, children...)
 		} else if id != rootID {

@@ -53,6 +53,10 @@ func (f *cancelDiscoveryGitHub) Repository(ctx context.Context, repo string) (gi
 	if err := f.call("repository"); err != nil {
 		return github.Repository{}, err
 	}
+	if f.stage == "repository" && f.err == nil {
+		// Simulate a completed API call returning success after local cancellation.
+		ctx = context.WithoutCancel(ctx)
+	}
 	return f.fakeGitHub.Repository(ctx, repo)
 }
 

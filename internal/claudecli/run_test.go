@@ -242,8 +242,12 @@ printf '%s\n' '`+successfulResult+`'
 				}
 			}
 			values := map[string]string{}
+			skillDir := ""
 			for i, arg := range args[:len(args)-1] {
 				values[arg] = args[i+1]
+				if arg == "--add-dir" && args[i+1] != workspace && args[i+1] != reports {
+					skillDir = args[i+1]
+				}
 			}
 			for key, want := range map[string]string{"--permission-mode": "dontAsk", "--tools": "Bash", "--allowedTools": "Bash", "--permission-prompts": "none", "--model": "claude-test", "--effort": "high", "--mcp-config": `{"mcpServers":{}}`} {
 				if got, ok := values[key]; !ok || got != want {
@@ -302,8 +306,17 @@ printf '%s\n' '`+successfulResult+`'
 			if slices.Contains(policy.Filesystem.AllowWrite, workspace) != writable || !slices.Contains(policy.Filesystem.DenyWrite, reports) {
 				t.Fatalf("wrong workspace/report permissions: %+v", policy.Filesystem)
 			}
-			if writable && !slices.Contains(policy.Filesystem.DenyWrite, filepath.Join(workspace, ".git")) || !writable && !slices.Contains(policy.Filesystem.DenyWrite, workspace) {
-				t.Fatal("read-only protections missing")
+			if filepath.Base(skillDir) != "anti-prompt-injection" || !slices.Contains(policy.Filesystem.DenyWrite, skillDir) {
+				t.Fatalf("skill --add-dir lacks denyWrite: skill=%q permissions=%+v", skillDir, policy.Filesystem)
+			}
+			if writable {
+				for _, name := range []string{".git", ".agents", ".codex", ".claude"} {
+					if !slices.Contains(policy.Filesystem.DenyWrite, filepath.Join(workspace, name)) {
+						t.Fatalf("fix workspace permits writing %s: %+v", name, policy.Filesystem)
+					}
+				}
+			} else if !slices.Contains(policy.Filesystem.DenyWrite, workspace) {
+				t.Fatal("read-only workspace protection missing")
 			}
 			prompt := readFile(t, binary+".prompt")
 			if !strings.Contains(prompt, "Source snapshot: ") || !strings.Contains(prompt, workspace) || !strings.Contains(prompt, "SKILL.md") || !strings.HasSuffix(prompt, "Handle task") {

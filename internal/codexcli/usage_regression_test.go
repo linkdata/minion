@@ -94,7 +94,7 @@ func TestUsageRecordLimit(t *testing.T) {
 		}
 		budget := int64(maxUsageScanBytes)
 		capture := &usageBoundary{valid: true, turns: map[string]bool{}}
-		got, complete, _, err := readRolloutUsageFrom(context.Background(), rolloutMeta{ID: "root", path: path}, "root", &budget, nil, capture, nil, false)
+		got, complete, _, err := readRolloutUsageFrom(context.Background(), rolloutMeta{ID: "root", path: path}, "root", &budget, rolloutUsageMode{capture: capture})
 		if got != (usage.Tokens{Input: maxUsageRecords}) || complete == extra || err != nil {
 			t.Fatalf("record cap: %+v complete=%t extra=%t err=%v", got, complete, extra, err)
 		}
@@ -139,7 +139,7 @@ func TestUsageLifecycleTurnLimitDoesNotCertifyCappedHelper(t *testing.T) {
 		}
 		budget := int64(maxUsageScanBytes)
 		capture := &usageBoundary{valid: true, turns: map[string]bool{}}
-		got, complete, _, err := readRolloutUsageFrom(context.Background(), meta, "root", &budget, nil, capture, nil, false)
+		got, complete, _, err := readRolloutUsageFrom(context.Background(), meta, "root", &budget, rolloutUsageMode{capture: capture})
 		if got != (usage.Tokens{Input: 7}) || complete == extra || errors.Is(err, errUnverifiedChildren) != extra || (err != nil && !extra) {
 			t.Fatalf("helper lifecycle cap: %+v complete=%t extra=%t err=%v", got, complete, extra, err)
 		}
@@ -182,7 +182,7 @@ func TestUsageLateOldResponseLimitPreservesSubtractionCertainty(t *testing.T) {
 	path := writeUsageRollout(t, t.TempDir(), "root", "", append(completedUsageTurn("root", "old", "baseline", 0), usageSnapshot(25, 0, 0, 0))...)
 	before := &usageBoundary{valid: true, turns: map[string]bool{}}
 	budget := int64(maxUsageScanBytes)
-	_, complete, _, err := readRolloutUsageFrom(ctx, rolloutMeta{ID: "root", path: path}, "root", &budget, nil, before, nil, false)
+	_, complete, _, err := readRolloutUsageFrom(ctx, rolloutMeta{ID: "root", path: path}, "root", &budget, rolloutUsageMode{capture: before})
 	if !complete || !before.valid || err != nil {
 		t.Fatalf("invalid baseline fixture: complete=%t valid=%t err=%v", complete, before.valid, err)
 	}
@@ -197,7 +197,7 @@ func TestUsageLateOldResponseLimitPreservesSubtractionCertainty(t *testing.T) {
 			appendUsageEvents(t, path, usageRecord("root", "old", "one-more", 1, 0, 0), usageSnapshot(31, maxUsageRecords+21, 0, 0), usageEvent("task_complete", "new"))
 		}
 		budget := int64(maxUsageScanBytes)
-		got, complete, _, err := readRolloutUsageFrom(ctx, rolloutMeta{ID: "root", path: path}, "root", &budget, before, nil, nil, false)
+		got, complete, _, err := readRolloutUsageFrom(ctx, rolloutMeta{ID: "root", path: path}, "root", &budget, rolloutUsageMode{before: before})
 		want := usage.Tokens{Input: 20}
 		if extra {
 			want = usage.Tokens{}
@@ -223,7 +223,7 @@ func TestUsageCappedBaselineCannotAttributeDroppedOldIdentity(t *testing.T) {
 	meta := rolloutMeta{ID: "root", path: path}
 	before := &usageBoundary{valid: true, turns: map[string]bool{}}
 	budget := int64(maxUsageScanBytes)
-	_, complete, _, err := readRolloutUsageFrom(ctx, meta, "root", &budget, nil, before, nil, false)
+	_, complete, _, err := readRolloutUsageFrom(ctx, meta, "root", &budget, rolloutUsageMode{capture: before})
 	if complete || before.valid || !before.prefixKnown || len(before.turns) != maxUsageRecords || len(before.responses) != maxUsageRecords || err != nil {
 		t.Fatalf("capped baseline fixture: complete=%t valid=%t prefixKnown=%t turns=%d responses=%d err=%v", complete, before.valid, before.prefixKnown, len(before.turns), len(before.responses), err)
 	}
@@ -234,7 +234,7 @@ func TestUsageCappedBaselineCannotAttributeDroppedOldIdentity(t *testing.T) {
 	// The dropped last ID is historical, even though the bounded maps lack it.
 	appendUsageEvents(t, path, usageRecord("root", fmt.Sprint(maxUsageRecords), fmt.Sprint(maxUsageRecords), 1, 0, 0), usageEvent("task_started", "new"), usageRecord("root", "new", "new", 20, 0, 0), usageSnapshot(30, maxUsageRecords+21, 0, 0), usageEvent("task_complete", "new"))
 	budget = maxUsageScanBytes
-	got, complete, _, err := readRolloutUsageFrom(ctx, meta, "root", &budget, before, nil, nil, false)
+	got, complete, _, err := readRolloutUsageFrom(ctx, meta, "root", &budget, rolloutUsageMode{before: before})
 	if got != (usage.Tokens{}) || complete || err != nil {
 		t.Fatalf("capped baseline treated an unknown old ID as current: %+v complete=%t err=%v", got, complete, err)
 	}

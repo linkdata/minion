@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -16,6 +17,34 @@ func TestInstructionProbePreservesOutputLimit(t *testing.T) {
 	installFakeCodex(t, "#!/bin/sh\nhead -c 4194305 /dev/zero\nexec sleep 30\n")
 	if err := ValidateInstructionBoundary(context.Background()); !errors.Is(err, aicli.ErrOutputLimit) {
 		t.Fatalf("probe limit cause changed: %v", err)
+	}
+}
+
+func TestInstructionProbeRejectsRelativeGitExecutable(t *testing.T) {
+	fakeCodex := installFakeCodex(t, "#!/bin/sh\nexit 0\n")
+	root := t.TempDir()
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(root); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(old) })
+	if err := os.Mkdir("relbin", 0700); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(root, "git-ran")
+	if err := os.WriteFile(filepath.Join("relbin", "git"), []byte("#!/bin/sh\ntouch "+marker+"\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GODEBUG", "execerrdot=0")
+	t.Setenv("PATH", "relbin"+string(os.PathListSeparator)+filepath.Dir(fakeCodex))
+	if err := ValidateInstructionBoundary(context.Background()); err == nil || !strings.Contains(err.Error(), "git binary must have an absolute path") {
+		t.Fatalf("relative Git executable accepted: %v", err)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("relative Git executable ran: %v", err)
 	}
 }
 

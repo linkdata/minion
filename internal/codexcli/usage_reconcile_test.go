@@ -275,7 +275,7 @@ func TestUsageBoundaryIdentityRequiresAnUncappedPhysicalRead(t *testing.T) {
 				budget--
 			}
 			capture := &usageBoundary{valid: true, turns: map[string]bool{}}
-			_, complete, _, err := readRolloutUsageFrom(ctx, rolloutMeta{ID: "root", path: name}, "root", &budget, nil, capture, nil, false)
+			_, complete, _, err := readRolloutUsageFrom(ctx, rolloutMeta{ID: "root", path: name}, "root", &budget, rolloutUsageMode{capture: capture})
 			if capture.valid == capped || !capture.counterGap || complete || capture.prefixKnown == capped || err != nil {
 				t.Fatalf("counter/byte validity conflated: %+v complete=%t capped=%t err=%v", capture, complete, capped, err)
 			}

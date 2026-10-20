@@ -115,6 +115,9 @@ func TestCloneIncludesTagsAndPublicationAcceptsAmbiguousShortName(t *testing.T) 
 }
 
 func TestGitEnvironmentPinsHardening(t *testing.T) {
+	for _, key := range []string{"GIT_DIR", "GIT_INDEX_FILE"} {
+		t.Setenv(key, "/hostile/"+key)
+	}
 	settings := []struct{ key, hostile, want string }{
 		{"GIT_NO_REPLACE_OBJECTS", "0", "1"}, {"GIT_NO_LAZY_FETCH", "0", "1"}, {"GIT_ATTR_NOSYSTEM", "0", "1"}, {"LC_ALL", "sv_SE.UTF-8", "C"},
 		{"GIT_CONFIG_GLOBAL", "/hostile/config", "/dev/null"}, {"GIT_CONFIG_NOSYSTEM", "0", "1"},
@@ -127,6 +130,11 @@ func TestGitEnvironmentPinsHardening(t *testing.T) {
 		t.Setenv(setting.key, setting.hostile)
 	}
 	env := cleanGitEnvironment()
+	for _, entry := range env {
+		if strings.HasPrefix(entry, "GIT_DIR=") || strings.HasPrefix(entry, "GIT_INDEX_FILE=") {
+			t.Fatalf("inherited Git path reached trusted Git: %q", entry)
+		}
+	}
 	for _, setting := range settings {
 		var matches []string
 		for _, entry := range env {

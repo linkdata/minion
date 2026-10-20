@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/linkdata/minion/internal/aicli"
+	"github.com/linkdata/minion/internal/processgroup"
 )
 
 const (
@@ -64,8 +65,13 @@ func ValidateInstructionBoundary(ctx context.Context) (resultErr error) {
 			return err
 		}
 	}
+	gitBinary, err := aicli.AbsoluteExecutable("git")
+	if err != nil {
+		return err
+	}
 	// #nosec G204 -- Git receives one generated path as an argument, without a shell.
-	git := exec.CommandContext(ctx, "git", "init", "-q", repo)
+	git := exec.CommandContext(ctx, gitBinary, "init", "-q", repo)
+	processgroup.Configure(git)
 	git.Env = append([]string{"PATH=" + os.Getenv("PATH"), "HOME=" + probeHome}, aicli.ModelGitEnvironment()...)
 	if err := git.Run(); err != nil {
 		return fmt.Errorf("create Codex instruction probe repository: %w", err)

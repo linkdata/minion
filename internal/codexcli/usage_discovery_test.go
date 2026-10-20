@@ -53,6 +53,28 @@ func TestUsageWalkContinuesAfterLocalFailureButHonorsStops(t *testing.T) {
 	}
 }
 
+func TestUsageDiscoverySkipsSymlinksAndNonRegularEntries(t *testing.T) {
+	home, outside := t.TempDir(), t.TempDir()
+	root := writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "root-turn", "response", 10)...)
+	child := writeUsageRollout(t, outside, "child", "root", completedUsageTurn("child", "child-turn", "response", 20)...)
+	sessions := filepath.Join(home, "sessions")
+	for link, target := range map[string]string{
+		filepath.Join(filepath.Dir(root), "linked.jsonl"): child,
+		filepath.Join(sessions, "linked-directory"):       filepath.Dir(child),
+	} {
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Mkdir(filepath.Join(filepath.Dir(root), "directory.jsonl"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	files, ambiguous, complete := usageFiles(context.Background(), home, "root", time.Now(), nil)
+	if !complete || len(files) != 1 || files["root"].path != root || len(ambiguous) != 0 {
+		t.Fatalf("discovered non-regular rollout: files=%v ambiguous=%v complete=%t", files, ambiguous, complete)
+	}
+}
+
 func TestCollectUsageKeepsCurrentHelpersAcrossUnreadableUnrelatedDirectory(t *testing.T) {
 	home := t.TempDir()
 	blocked := filepath.Join(home, "sessions", "unrelated")

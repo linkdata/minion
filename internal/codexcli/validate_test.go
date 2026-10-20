@@ -36,13 +36,12 @@ cat >/dev/null
 `
 
 func catalogueScriptFor(dir, page1, page2 string) string {
-	quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }
 	return strings.NewReplacer(
-		"@ARGS@", quote(filepath.Join(dir, "args")),
-		"@ENV@", quote(filepath.Join(dir, "env")),
-		"@REQUESTS@", quote(filepath.Join(dir, "requests")),
-		"@PAGE1@", quote(page1),
-		"@PAGE2@", quote(page2),
+		"@ARGS@", aicli.ShellQuote(filepath.Join(dir, "args")),
+		"@ENV@", aicli.ShellQuote(filepath.Join(dir, "env")),
+		"@REQUESTS@", aicli.ShellQuote(filepath.Join(dir, "requests")),
+		"@PAGE1@", aicli.ShellQuote(page1),
+		"@PAGE2@", aicli.ShellQuote(page2),
 	).Replace(catalogueScript)
 }
 

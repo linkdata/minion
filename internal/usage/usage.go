@@ -256,8 +256,6 @@ func Summarize(records []Record, filter Filter, groupBy []string) ([]Summary, er
 			summary.Failed++
 		case "running":
 			summary.Running++
-		default:
-			return nil, fmt.Errorf("usage record %s has invalid status %q", record.ID, record.Status)
 		}
 		if record.CodexCalls > math.MaxInt-summary.CodexCalls || record.ClaudeCalls > math.MaxInt-summary.ClaudeCalls {
 			return nil, errors.New("usage call counts exceed integer limit")

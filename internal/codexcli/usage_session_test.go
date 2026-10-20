@@ -49,6 +49,23 @@ func TestUsageSessionDoesNotRecountPreviousTurnsOrUnreferencedHelpers(t *testing
 	}
 }
 
+func TestUsageSessionUnreferencedHelperWithoutByteProofFailsClosed(t *testing.T) {
+	ctx, home := context.Background(), t.TempDir()
+	root := writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "old-root", "r1", 100)...)
+	writeUsageRollout(t, home, "child", "root", completedUsageTurn("child", "old-child", "c1", 40)...)
+	var session usageSession
+	session.begin(ctx, home, "root", time.Now())
+	// A capped baseline cannot prove that an unreferenced helper stayed idle.
+	session.before["child"].prefixKnown = false
+	session.before["child"].valid = false
+	session.baselineComplete = false
+	appendUsageEvents(t, root, completedUsageTurn("root", "new-root", "r2", 20)...)
+	got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 20}, nil, nil)
+	if got != (usage.Tokens{Input: 20}) || complete || !errors.Is(err, errUnverifiedChildren) {
+		t.Fatalf("unverified historical helper = %+v, complete=%t, err=%v", got, complete, err)
+	}
+}
+
 func TestUsageSessionSubtractsSnapshotBaselineAndLateOldRecords(t *testing.T) {
 	ctx, home := context.Background(), t.TempDir()
 	root := writeUsageRollout(t, home, "root", "", append(completedUsageTurn("root", "old", "old-response", 100), usageSnapshot(22, 100, 0, 0))...)
@@ -351,7 +368,7 @@ func TestUsageSessionSpawnProvenanceIsBounded(t *testing.T) {
 	path := writeUsageRollout(t, home, "root", "", usageEvent("task_started", "new"), fmt.Sprintf(`{"type":"event_msg","payload":{"type":"item_completed","turn_id":"new","item":{"type":"CollabAgentToolCall","tool":"spawn_agent","status":"completed","receiver_thread_ids":%s}}}`, raw), usageEvent("task_complete", "new"))
 	budget := int64(maxUsageScanBytes)
 	spawned := map[string]bool{}
-	_, complete, _, err := readRolloutUsageFrom(context.Background(), rolloutMeta{ID: "root", path: path}, "root", &budget, nil, nil, spawned, false)
+	_, complete, _, err := readRolloutUsageFrom(context.Background(), rolloutMeta{ID: "root", path: path}, "root", &budget, rolloutUsageMode{spawned: spawned})
 	if len(spawned) != maxCodexChildren || complete || !errors.Is(err, aicli.ErrOutputLimit) {
 		t.Fatalf("spawn bound = %d, %v, %v", len(spawned), complete, err)
 	}
@@ -488,7 +505,7 @@ func TestUsageBoundaryEarlyReadFailuresAreInvalid(t *testing.T) {
 				path = filepath.Join(t.TempDir(), "missing")
 			}
 			capture := &usageBoundary{valid: true, turns: map[string]bool{}}
-			_, complete, _, err := readRolloutUsageFrom(ctx, rolloutMeta{ID: "root", path: path}, "root", &budget, nil, capture, nil, false)
+			_, complete, _, err := readRolloutUsageFrom(ctx, rolloutMeta{ID: "root", path: path}, "root", &budget, rolloutUsageMode{capture: capture})
 			if capture.valid || capture.prefixKnown || complete || err != nil || cause == "cancel" && budget != maxUsageScanBytes {
 				t.Fatalf("failed read left valid boundary or debited canceled budget: %+v complete=%t budget=%d err=%v", capture, complete, budget, err)
 			}
