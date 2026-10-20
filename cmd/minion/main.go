@@ -252,13 +252,19 @@ func checkIsolation(cfg config.Config, configPath string) (resultErr error) {
 	if !filepath.IsAbs(userHome) {
 		return errors.New("resolve default Claude home: HOME must be absolute")
 	}
-	private = append(private, filepath.Join(userHome, ".claude.json"))
+	private = append(private,
+		filepath.Join(userHome, ".claude.json"),
+		filepath.Join(userHome, ".git-credentials"),
+		filepath.Join(userHome, ".gitconfig"),
+		filepath.Join(userHome, ".ssh"),
+	)
+	configHome, err := os.UserConfigDir()
+	if err != nil {
+		return err
+	}
+	private = append(private, filepath.Join(configHome, "git", "credentials"), filepath.Join(configHome, "git", "config"))
 	ghHome := os.Getenv("GH_CONFIG_DIR")
 	if ghHome == "" {
-		configHome, err := os.UserConfigDir()
-		if err != nil {
-			return err
-		}
 		ghHome = filepath.Join(configHome, "gh")
 	}
 	// Match gh's filepath.Join cleaning before checking aliases of hosts.yml.

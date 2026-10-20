@@ -375,17 +375,21 @@ func TestRunRejectsUnsafePaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	fakeExecutable(t, "claude", "exit 99\n")
+	const pathSecret = "dummy-secret"
 	for _, tc := range []struct {
 		name, dir, output string
 		settings          config.ClaudeConfig
 		failure           string
+		cause             error
 	}{
 		{name: "empty source snapshot", failure: "path is required"},
 		{name: "root source snapshot", dir: "/", failure: "non-root directory"},
 		{name: "same output", dir: workspace, output: workspace, failure: "must be separate from source snapshot"},
 		{name: "ancestor output", dir: workspace, output: filepath.Dir(workspace), failure: "must be separate from source snapshot"},
+		{name: "missing output", dir: workspace, output: filepath.Join(outputParent, pathSecret), settings: config.ClaudeConfig{APIKey: pathSecret}, failure: "claude output directory", cause: os.ErrNotExist},
 		{name: "relative skill", dir: workspace, settings: config.ClaudeConfig{Skills: []string{"SKILL.md"}}, failure: "absolute SKILL.md"},
 		{name: "read root", dir: workspace, settings: config.ClaudeConfig{ReadOnlyDirs: []string{"/"}}, failure: "non-root directory"},
+		{name: "missing read", dir: workspace, settings: config.ClaudeConfig{APIKey: pathSecret, ReadOnlyDirs: []string{filepath.Join(outputParent, pathSecret)}}, failure: "claude read-only directory", cause: os.ErrNotExist},
 		{name: "read output", dir: workspace, output: output, settings: config.ClaudeConfig{ReadOnlyDirs: []string{output}}, failure: "read-only directory overlaps"},
 		{name: "read output ancestor", dir: workspace, output: output, settings: config.ClaudeConfig{ReadOnlyDirs: []string{outputParent}}, failure: "read-only directory overlaps"},
 		{name: "read inside output", dir: workspace, output: output, settings: config.ClaudeConfig{ReadOnlyDirs: []string{outputChild}}, failure: "read-only directory overlaps"},
@@ -394,6 +398,8 @@ func TestRunRejectsUnsafePaths(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := Run(context.Background(), tc.dir, "task", true, tc.output, tc.settings); err == nil || !strings.Contains(err.Error(), tc.failure) {
 				t.Fatalf("invalid path refusal = %v; want %q", err, tc.failure)
+			} else if tc.cause != nil && (!errors.Is(err, tc.cause) || strings.Contains(err.Error(), pathSecret) || !strings.Contains(err.Error(), "[redacted]")) {
+				t.Fatalf("path refusal lost cause or redaction: %v", err)
 			}
 		})
 	}
@@ -438,7 +444,7 @@ func TestChildEnvironment(t *testing.T) {
 			t.Fatalf("proxy spelling/value was not preserved: %q", got)
 		}
 	}
-	for _, key := range []string{"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy"} {
+	for _, key := range []string{"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CONFIG_DIR", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy"} {
 		found := false
 		for _, rule := range credentialDenials() {
 			if rule["name"] == key && rule["mode"] == "deny" {

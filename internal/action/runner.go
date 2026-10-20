@@ -348,6 +348,9 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 
 // Before model work, freeing host capacity or installing a missing executable can make preparation succeed.
 func preparationFailure(stage string, err error) error {
+	if errors.Is(err, syscall.EACCES) || errors.Is(err, syscall.EROFS) {
+		return fmt.Errorf("%w: %s: %w", workroot.ErrUnsafe, stage, err)
+	}
 	if errors.Is(err, exec.ErrNotFound) || errors.Is(err, syscall.ENOSPC) || errors.Is(err, syscall.EDQUOT) {
 		return fmt.Errorf("%s: %w", stage, err)
 	}
@@ -589,7 +592,7 @@ func normalizeAuditArtifacts(files []workspace.File, job Job, skill string) ([]w
 				}
 				metadata["selected_companion_files"], _ = json.Marshal(companions)
 			}
-			for _, source := range job.Main.Skills {
+			for _, source := range slices.Concat(job.Main.Skills, job.Main.AlwaysOnSkills) {
 				if name, err := skills.Name(source); err == nil && name == "security-audit" {
 					metadata["skill_source"], _ = json.Marshal(source)
 					break

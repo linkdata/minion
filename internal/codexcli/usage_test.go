@@ -300,6 +300,14 @@ func TestCollectUsageBoundsScanningAndHonorsCancellation(t *testing.T) {
 			t.Fatalf("canceled scan = %+v, %t, error=%v; want fallback, incomplete", got, complete, err)
 		}
 	})
+	t.Run("canceled with expected child", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		got, complete, err := (&usageSession{}).collectUsage(ctx, home, "root", time.Now(), &fallback, []string{"child"}, nil)
+		if got != fallback || complete || !errors.Is(err, errUnverifiedChildren) {
+			t.Fatalf("canceled child scan = %+v, %t, error=%v; want fallback, incomplete, unverified child", got, complete, err)
+		}
+	})
 	t.Run("bytes", func(t *testing.T) {
 		budget := int64(10)
 		_, complete, _, err := readRolloutUsage(context.Background(), rolloutMeta{ID: "root", path: root}, "root", &budget)

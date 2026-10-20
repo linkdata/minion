@@ -153,7 +153,7 @@ func TestCheckoutPullRequestVerifiesHead(t *testing.T) {
 		t.Fatalf("mismatched PR head error = %v", err)
 	}
 	if err := fixture.checkout.checkoutPullRequest(ctx, 7, "main", head); err != nil {
-		t.Fatalf("CheckoutPullRequest() error = %v", err)
+		t.Fatalf("checkoutPullRequest() error = %v", err)
 	}
 	got := fixture.git(fixture.checkout.path, "rev-parse", "HEAD")
 	if got != head {

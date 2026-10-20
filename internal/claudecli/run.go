@@ -55,7 +55,7 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	if outputDir != "" {
 		resolved, err := aicli.Directory(outputDir)
 		if err != nil {
-			return result, err
+			return result, fmt.Errorf("claude output directory: %w", err)
 		}
 		if workspacefs.Within(workspace, resolved) || workspacefs.Within(resolved, workspace) {
 			return result, errors.New("claude output directory must be separate from source snapshot")
@@ -71,7 +71,7 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	for _, path := range settings.ReadOnlyDirs {
 		resolved, err := aicli.Directory(path)
 		if err != nil {
-			return result, err
+			return result, fmt.Errorf("claude read-only directory: %w", err)
 		}
 		if workspacefs.Within(resolved, workspace) || workspacefs.Within(resolved, runtimeDir) || outputDir != "" && (workspacefs.Within(resolved, outputDir) || workspacefs.Within(outputDir, resolved)) {
 			return result, errors.New("claude read-only directory overlaps a writable grant")

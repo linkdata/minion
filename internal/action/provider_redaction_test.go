@@ -75,18 +75,63 @@ done
 	}
 }
 
-func TestAuditReportRedactsConfiguredKeyBeforeCriticAndPublication(t *testing.T) {
+func TestRunAIRedactsNULSplitSecretsInCriticEvidence(t *testing.T) {
+	const key = "fixture-secret"
+	const splitKey = "fixture-\x00secret"
+	mainCalls, criticCalls := 0, 0
+	runner := Runner{Codex: config.CodexConfig{APIKey: key}, Claude: config.ClaudeConfig{APIKey: key}}
+	runner.runModel = func(_ context.Context, request modelRun) (aicli.Result, error) {
+		if request.role == roleMain {
+			mainCalls++
+			if mainCalls == 1 {
+				return aicli.Result{Answer: proposalJSON("candidate "+splitKey, "")}, nil
+			}
+			if strings.Contains(request.prompt, key) || strings.Contains(request.prompt, "\x00") || !strings.Contains(request.prompt, "[redacted]") {
+				t.Fatalf("critic feedback reached revision prompt: %q", request.prompt)
+			}
+			return aicli.Result{Answer: proposalJSON("revised", "finding "+splitKey)}, nil
+		}
+		criticCalls++
+		if strings.Contains(request.proposedAnswer, key) || strings.Contains(request.proposedAnswer, "\x00") || strings.Contains(request.criticPrompt("", ""), key) || strings.Contains(request.criticPrompt("", ""), "\x00") {
+			t.Fatalf("critic received configured key: %+v", request)
+		}
+		if request.reviewPhase == reviewVerification && (len(request.refutations) != 1 || request.refutations[0].Text != "finding [redacted]") {
+			t.Fatalf("private refutation reached verification: %+v", request.refutations)
+		}
+		if criticCalls == 1 {
+			return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"feedback":"feedback fixture-\u0000secret"}`}, nil
+		}
+		return aicli.Result{Answer: approvedCritiqueJSON}, nil
+	}
+	job := Job{Main: RoleSettings{Provider: "codex"}, Critic: &RoleSettings{Provider: "claude"}, CriticMaxRounds: 2}
+	checkpoint := func(history []Refutation) error {
+		if len(history) > 0 && (len(history) != 1 || history[0].Text != "finding [redacted]") {
+			t.Fatalf("private refutation reached checkpoint: %+v", history)
+		}
+		return nil
+	}
+	answer, err := runner.runAI(context.Background(), job, t.TempDir(), "task", "", checkpoint, &modelSessions{})
+	if err != nil || answer != "revised" || mainCalls != 2 || criticCalls != 3 {
+		t.Fatalf("NUL-split redaction: answer=%q main=%d critic=%d error=%v", answer, mainCalls, criticCalls, err)
+	}
+}
+
+func TestAuditReportRedactsNULSplitConfiguredKeyBeforeCriticAndPublication(t *testing.T) {
 	job := withClaudeCritic(auditRunnerJob(t))
 	job.CriticMaxRounds = 1
 	const key = "fixture-audit-secret"
-	report := "Audit evidence includes " + key + " and remains readable.\n"
+	const splitKey = "fixture-audit-\x00secret"
+	report := "Audit evidence includes " + splitKey + " and remains readable.\n"
 	want := "Audit evidence includes [redacted] and remains readable.\n"
 	criticSawReports := false
 	runner := Runner{WorkRoot: t.TempDir(), Codex: config.CodexConfig{APIKey: key}, runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 		if request.role == roleMain {
 			for _, file := range auditArtifactsFixture(job, request.dir, report) {
 				if file.Path == "architecture.md" {
-					file.Data = []byte("Architecture includes " + key)
+					file.Data = []byte("Architecture includes " + splitKey)
+				}
+				if file.Path == "coverage-ledger.json" {
+					file.Data = []byte(`[{"status":"covered","note":"fixture-audit-\u0000secret"}]`)
 				}
 				writeFixtureFile(t, request.outputDir, file.Path, file.Data)
 			}
@@ -101,12 +146,16 @@ func TestAuditReportRedactsConfiguredKeyBeforeCriticAndPublication(t *testing.T)
 				t.Fatal(err)
 			}
 			criticSawReports = true
-			if string(data) != want || strings.Contains(request.prompt, key) {
+			if string(data) != want || strings.Contains(request.prompt, key) || strings.Contains(request.prompt, "\x00") {
 				t.Fatalf("critic received secret: report=%q prompt=%q", data, request.prompt)
 			}
 			architecture, err := os.ReadFile(filepath.Join(dir, "architecture.md"))
 			if err != nil || string(architecture) != "Architecture includes [redacted]" {
 				t.Fatalf("critic received raw architecture artifact: %q, %v", architecture, err)
+			}
+			ledger, err := os.ReadFile(filepath.Join(dir, "coverage-ledger.json"))
+			if err != nil || !redactedAuditLedger(ledger) {
+				t.Fatalf("critic received NUL-split JSON secret: %q, %v", ledger, err)
 			}
 		}
 		return aicli.Result{Answer: approvedCritiqueJSON}, nil
@@ -116,7 +165,7 @@ func TestAuditReportRedactsConfiguredKeyBeforeCriticAndPublication(t *testing.T)
 		t.Fatalf("audit result: critic saw reports=%t answer=%q error=%v", criticSawReports, result.Answer, err)
 	}
 	for _, file := range result.Artifacts {
-		if strings.Contains(string(file.Data), key) {
+		if strings.Contains(string(file.Data), key) || strings.Contains(string(file.Data), "\x00") {
 			t.Fatalf("published artifact contains configured key: %s", file.Path)
 		}
 		if file.Path == "REPORT.md" && string(file.Data) != want {
@@ -125,7 +174,17 @@ func TestAuditReportRedactsConfiguredKeyBeforeCriticAndPublication(t *testing.T)
 		if file.Path == "architecture.md" && string(file.Data) != "Architecture includes [redacted]" {
 			t.Fatalf("published architecture artifact contains configured key: %q", file.Data)
 		}
+		if file.Path == "coverage-ledger.json" && !redactedAuditLedger(file.Data) {
+			t.Fatalf("published JSON artifact contains configured key: %q", file.Data)
+		}
 	}
+}
+
+func redactedAuditLedger(data []byte) bool {
+	var ledger []struct {
+		Note string `json:"note"`
+	}
+	return json.Unmarshal(data, &ledger) == nil && len(ledger) == 1 && ledger[0].Note == "[redacted]"
 }
 
 func TestIncompleteAuditReportRedactsConfiguredKey(t *testing.T) {

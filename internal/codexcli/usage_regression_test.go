@@ -202,8 +202,8 @@ func TestUsageLateOldResponseLimitPreservesSubtractionCertainty(t *testing.T) {
 		if extra {
 			want = usage.Tokens{}
 		}
-		if got != want || complete == extra || err != nil {
-			t.Fatalf("late-old cap must not invent current usage: %+v want=%+v complete=%t extra=%t err=%v", got, want, complete, extra, err)
+		if got != want || complete || err != nil {
+			t.Fatalf("late-old cap must not certify incomplete usage: %+v want=%+v complete=%t extra=%t err=%v", got, want, complete, extra, err)
 		}
 	}
 }

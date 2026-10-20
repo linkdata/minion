@@ -60,7 +60,7 @@ func TestUsageSessionSubtractsSnapshotBaselineAndLateOldRecords(t *testing.T) {
 		usageEvent("task_started", "new"), usageRecord("root", "new", "new-response", 20, 0, 0),
 		usageSnapshot(25, 127, 0, 0), usageEvent("task_complete", "new"))
 	got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 127}, nil, nil)
-	if got != (usage.Tokens{Input: 20}) || !complete || err != nil {
+	if got != (usage.Tokens{Input: 20}) || complete || err != nil {
 		t.Fatalf("resumed = %+v, %v, %v", got, complete, err)
 	}
 }

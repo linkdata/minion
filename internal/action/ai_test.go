@@ -225,8 +225,8 @@ func TestRunAIRevisionPreservesWorkAndBoundaries(t *testing.T) {
 		name, main, critic string
 		reports            bool
 	}{
-		{name: "codex fix", main: "codex", critic: "claude"},
-		{name: "claude audit", main: "claude", critic: "codex", reports: true},
+		{name: "codex audit", main: "codex", critic: "claude", reports: true},
+		{name: "claude fix", main: "claude", critic: "codex"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			dir, outputDir := t.TempDir(), ""

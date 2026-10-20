@@ -85,7 +85,7 @@ func TestOutputCountsUniqueHelpersAcrossRepeatedWaits(t *testing.T) {
 	}
 	_, _ = o.Write([]byte(`{"type":"item.completed","item":{"type":"agent_message","text":"answer"}}` + "\n" + `{"type":"turn.completed"}` + "\n"))
 	o.stream.Finish()
-	if o.stopErr != nil || o.failed || !o.completed || len(o.children) != 1 || o.children[0] != "child" || len(o.seenChildren) != 1 {
+	if o.stopErr != nil || o.failed || !o.completed || len(o.children) != 1 || o.children[0] != "child" || len(o.observationOnly) != 1 || o.observationOnly["child"] {
 		t.Fatalf("repeated waits consumed helper capacity: stop=%v failed=%t complete=%t children=%v", o.stopErr, o.failed, o.completed, o.children)
 	}
 }

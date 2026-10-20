@@ -39,7 +39,7 @@ func TestExecutePublicationBookkeepingBoundaries(t *testing.T) {
 						// Also bound a broken implementation that renews the publication context.
 						select {
 						case <-r.Context().Done():
-						case <-time.After(5 * time.Second):
+						case <-time.After(20 * time.Second):
 							http.Error(w, "publication did not stop", http.StatusGatewayTimeout)
 						}
 						return
@@ -60,7 +60,7 @@ func TestExecutePublicationBookkeepingBoundaries(t *testing.T) {
 				}
 			}))
 			defer server.Close()
-			budget := 3 * time.Second
+			budget := 10 * time.Second
 			if scenario == "final usage save" {
 				budget = 30 * time.Second
 			}

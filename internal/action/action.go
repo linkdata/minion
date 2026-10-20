@@ -145,6 +145,15 @@ func (e *Orchestrator) validateCommand(job monitor.Job) error {
 	if !mapping.SupportsProvider(e.mainProvider()) {
 		return fmt.Errorf("%w: action %q is not supported with %s as main", monitor.ErrTerminalJob, mapping.Action, e.mainProvider())
 	}
+	configured := e.Runner
+	if err := configured.ConfigureRole(e.roleSettings(e.mainProvider(), mapping.Skills)); err != nil {
+		return err
+	}
+	if e.Adversarial != "" {
+		if err := configured.ConfigureRole(e.roleSettings(e.Adversarial, nil)); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

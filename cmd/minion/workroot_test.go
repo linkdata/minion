@@ -206,7 +206,7 @@ func TestWorkRootPreflightRequiresGlobalClaudeHomeWithExplicitNativeHomes(t *tes
 func TestPrivatePathsRejectAliasesIntoSelectedInstalledSkill(t *testing.T) {
 	const source = "https://github.com/owner/repo/tree/pinned/skills/example"
 	for _, provider := range []string{"codex", "claude"} {
-		for _, kind := range []string{"config", "credential"} {
+		for _, kind := range []string{"config", "credential", "git credentials", "git config", "xdg git credentials", "xdg git config", "ssh home"} {
 			t.Run(provider+"/"+kind, func(t *testing.T) {
 				root := t.TempDir()
 				isolateHostPaths(t, root)
@@ -235,10 +235,28 @@ func TestPrivatePathsRejectAliasesIntoSelectedInstalledSkill(t *testing.T) {
 				cfg := config.Config{Main: provider, WorkRoot: work, Commands: map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{source}}}}
 				configPath := filepath.Join(root, "config.json")
 				privatePath := credential
-				if kind == "config" {
+				switch kind {
+				case "config":
 					privatePath = configPath
+				case "git credentials":
+					privatePath = filepath.Join(root, ".git-credentials")
+				case "git config":
+					privatePath = filepath.Join(root, ".gitconfig")
+				case "xdg git credentials":
+					privatePath = filepath.Join(root, "config", "git", "credentials")
+				case "xdg git config":
+					privatePath = filepath.Join(root, "config", "git", "config")
+				case "ssh home":
+					privatePath = filepath.Join(root, ".ssh")
 				}
-				if err := os.Symlink(filepath.Join(skill, "fixture-data"), privatePath); err != nil {
+				if err := os.MkdirAll(filepath.Dir(privatePath), 0700); err != nil {
+					t.Fatal(err)
+				}
+				target := filepath.Join(skill, "fixture-data")
+				if kind == "ssh home" {
+					target = skill
+				}
+				if err := os.Symlink(target, privatePath); err != nil {
 					t.Fatal(err)
 				}
 				if err := checkIsolation(cfg, configPath); err != nil {
@@ -254,7 +272,11 @@ func TestPrivatePathsRejectAliasesIntoSelectedInstalledSkill(t *testing.T) {
 				if err := os.Remove(privatePath); err != nil {
 					t.Fatal(err)
 				}
-				if err := os.WriteFile(privatePath, []byte("Synthetic fixture only.\n"), 0600); err != nil {
+				if kind == "ssh home" {
+					if err := os.Mkdir(privatePath, 0700); err != nil {
+						t.Fatal(err)
+					}
+				} else if err := os.WriteFile(privatePath, []byte("Synthetic fixture only.\n"), 0600); err != nil {
 					t.Fatal(err)
 				}
 				if err := checkIsolation(cfg, configPath); err != nil {

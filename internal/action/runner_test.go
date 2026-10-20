@@ -353,6 +353,33 @@ func TestPortableAuditMetadataUsesSourceIdentity(t *testing.T) {
 	}
 }
 
+func TestPortableAuditMetadataUsesAlwaysOnSkillSource(t *testing.T) {
+	job := testJob(command.SecurityAudit)
+	job.Main.AlwaysOnSkills = []string{testAuditSkillURL}
+	if err := job.Validate(); err != nil {
+		t.Fatalf("standalone portable audit job: %v", err)
+	}
+	files, err := normalizeAuditArtifacts(auditArtifactsFixture(job, "/worker/source", "Audit report\n"), job, "/installed/security-audit/SKILL.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateResultArtifacts(job, files, true); err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range files {
+		if file.Path == "run-metadata.json" {
+			var metadata struct {
+				SkillSource string `json:"skill_source"`
+			}
+			if err := json.Unmarshal(file.Data, &metadata); err != nil || metadata.SkillSource != testAuditSkillURL {
+				t.Fatalf("portable audit skill source=%q error=%v", metadata.SkillSource, err)
+			}
+			return
+		}
+	}
+	t.Fatal("audit metadata missing")
+}
+
 func TestRunnerReturnsPartialAuditArtifactsOnFailure(t *testing.T) {
 	for _, field := range []string{"", "scope_paths"} {
 		name := "host_path_in_" + field

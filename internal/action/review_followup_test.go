@@ -17,6 +17,7 @@ import (
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/monitor"
+	"github.com/linkdata/minion/internal/workroot"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -193,7 +194,7 @@ func TestRunnerScratchCreationUsesPreparationFailureClass(t *testing.T) {
 		}
 	})
 	result, err := (&Runner{WorkRoot: root, runModel: forbidModel(t)}).Run(context.Background(), testJob(command.Comment))
-	if !errors.Is(err, os.ErrPermission) || !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "create source workspace") || len(result.Calls) != 0 {
+	if !errors.Is(err, os.ErrPermission) || !errors.Is(err, workroot.ErrUnsafe) || errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "create source workspace") || len(result.Calls) != 0 {
 		t.Fatalf("scratch creation classification: %+v,%v", result, err)
 	}
 	if entries, err := os.ReadDir(root); err != nil || len(entries) != 0 {

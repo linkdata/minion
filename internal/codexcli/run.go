@@ -328,7 +328,6 @@ type jsonlOutput struct {
 	expectedID      string
 	tokens          *usage.Tokens
 	children        []string
-	seenChildren    map[string]bool
 	observationOnly map[string]bool
 	stopErr         error
 	stream          aicli.JSONL
@@ -378,20 +377,16 @@ func (o *jsonlOutput) acceptLine(line []byte) {
 
 func (o *jsonlOutput) accept(event codexEvent) {
 	if event.Item != nil && event.Item.Type == "collab_tool_call" {
-		if o.seenChildren == nil {
-			o.seenChildren = make(map[string]bool)
-		}
-		if !appendChildIDs(&o.children, o.seenChildren, event.Item.ReceiverThreadIDs...) {
-			o.stop(fmt.Errorf("%w: Codex child agent count exceeded the limit", aicli.ErrOutputLimit))
-			return
-		}
 		if o.observationOnly == nil {
 			o.observationOnly = make(map[string]bool)
 		}
+		if !appendChildIDs(&o.children, o.observationOnly, event.Item.ReceiverThreadIDs...) {
+			o.stop(fmt.Errorf("%w: Codex child agent count exceeded the limit", aicli.ErrOutputLimit))
+			return
+		}
 		observation := event.Item.Tool == "wait" || event.Item.Tool == "close_agent"
 		for _, id := range event.Item.ReceiverThreadIDs {
-			prior, seen := o.observationOnly[id]
-			o.observationOnly[id] = observation && (!seen || prior)
+			o.observationOnly[id] = observation && o.observationOnly[id]
 		}
 	}
 	switch event.Type {
@@ -447,7 +442,7 @@ func eventReason(event codexEvent) string {
 func appendChildIDs(children *[]string, seen map[string]bool, ids ...string) bool {
 	complete := true
 	for _, id := range ids {
-		if seen[id] {
+		if _, exists := seen[id]; exists {
 			continue
 		}
 		if len(*children) == maxCodexChildren {

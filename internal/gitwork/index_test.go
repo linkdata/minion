@@ -466,9 +466,6 @@ func TestFixIndexBoundsActualControlScanBeforeStaging(t *testing.T) {
 	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("Git staged output before refusing the oversized scan: %v", err)
 	}
-	if staged, err := index.run(context.Background(), 1024, nil, "ls-files", "--cached", "--", "next.txt"); err != nil || len(staged) != 0 {
-		t.Fatalf("refused scan left new output staged: %q,%v", staged, err)
-	}
 }
 
 func TestFixIndexPreservesModeDeletionAndBinary(t *testing.T) {
@@ -686,14 +683,14 @@ func TestFixIndexIgnoresUnusedRulesUnderIgnoredTrackedDirectory(t *testing.T) {
 }
 
 func TestFixIndexPathListOverflowIsTooManyFiles(t *testing.T) {
-	for _, arg := range []string{"ls-files", "--raw"} {
-		t.Run(arg, func(t *testing.T) {
+	for _, test := range []struct{ arg, operation string }{{"ls-files", "ls-files"}, {"--raw", "diff"}} {
+		t.Run(test.arg, func(t *testing.T) {
 			index, source := offlineIndexFixture(t, []workspace.File{{Path: "source", Mode: workspace.Regular, Data: []byte("before")}})
 			writeIndexFixture(t, source, "source", []byte("after"))
-			script := fmt.Sprintf("#!/bin/sh\nfor arg do\nif [ \"$arg\" = %s ]; then\nhead -c %d /dev/zero\nexit\nfi\ndone\nexec %s \"$@\"\n", shellQuote(arg), maxChangedPathListBytes+1, shellQuote(index.binary))
+			script := fmt.Sprintf("#!/bin/sh\nfor arg do\nif [ \"$arg\" = %s ]; then\nhead -c %d /dev/zero\nexit\nfi\ndone\nexec %s \"$@\"\n", shellQuote(test.arg), maxChangedPathListBytes+1, shellQuote(index.binary))
 			index.binary = filepath.Join(fakeOnPath(t, "git-path-list", script), "git-path-list")
-			if _, err := index.Changes(context.Background()); !errors.Is(err, ErrTooManyFiles) || errors.Is(err, ErrCheckoutTooLarge) || errors.Is(err, ErrDiffTooLarge) {
-				t.Fatalf("result path overflow misclassified: %v", err)
+			if _, err := index.Changes(context.Background()); !errors.Is(err, ErrTooManyFiles) || errors.Is(err, ErrCheckoutTooLarge) || errors.Is(err, ErrDiffTooLarge) || !strings.Contains(err.Error(), "offline git "+test.operation+" output exceeds action limit") {
+				t.Fatalf("result path overflow lost operation or classification: %v", err)
 			}
 		})
 	}

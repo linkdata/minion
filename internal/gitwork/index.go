@@ -129,7 +129,7 @@ func (index *OfflineIndex) Changes(ctx context.Context) ([]workspace.Change, err
 	untracked, err := index.run(ctx, maxChangedPathListBytes, nil, "ls-files", "-z", "--others", "--exclude-standard", "--", ".", excludeGit, excludeGitContents)
 	if err != nil {
 		if errors.Is(err, ErrCheckoutTooLarge) {
-			return nil, ErrTooManyFiles
+			return nil, fmt.Errorf("%w: %v", ErrTooManyFiles, err)
 		}
 		return nil, err
 	}
@@ -164,7 +164,7 @@ func (index *OfflineIndex) Changes(ctx context.Context) ([]workspace.Change, err
 	raw, err := index.run(ctx, maxChangedPathListBytes, nil, "diff", "--cached", "--raw", "-z", "--no-abbrev", "--no-renames", "--no-ext-diff", "--no-textconv", index.baseline, "--")
 	if err != nil {
 		if errors.Is(err, ErrCheckoutTooLarge) {
-			return nil, ErrTooManyFiles
+			return nil, fmt.Errorf("%w: %v", ErrTooManyFiles, err)
 		}
 		return nil, err
 	}

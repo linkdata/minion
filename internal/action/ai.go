@@ -112,6 +112,10 @@ func (s *modelSessions) close() error {
 	return errors.Join(s.main.close(), s.critic.close())
 }
 
+func redactActionText(text, secret string) string {
+	return aicli.RedactText(strings.ReplaceAll(text, "\x00", ""), secret)
+}
+
 func (r *Runner) runAI(ctx context.Context, job Job, dir, prompt, outputDir string, checkpoint func([]Refutation) error, sessions *modelSessions) (answer string, err error) {
 	var history []Refutation
 	record := func() error {
@@ -131,11 +135,11 @@ func (r *Runner) runAI(ctx context.Context, job Job, dir, prompt, outputDir stri
 	redactDecoded := func(text, provider string) string {
 		switch provider {
 		case "codex":
-			return aicli.RedactText(text, r.Codex.APIKey)
+			return redactActionText(text, r.Codex.APIKey)
 		case "claude":
-			return aicli.RedactText(text, r.Claude.APIKey)
+			return redactActionText(text, r.Claude.APIKey)
 		}
-		return text
+		return strings.ReplaceAll(text, "\x00", "")
 	}
 	for round := 1; round <= rounds; round++ {
 		request.round = round
@@ -144,7 +148,7 @@ func (r *Runner) runAI(ctx context.Context, job Job, dir, prompt, outputDir stri
 			return
 		}
 		if job.Critic == nil {
-			answer = redactDecoded(strings.ReplaceAll(proposed.Answer, "\x00", ""), request.provider)
+			answer = redactDecoded(proposed.Answer, request.provider)
 			return
 		}
 		candidate, refutations, parseErr := parseProposal(proposed.Answer, job.Action == command.Fix || job.Action == command.SecurityAudit)

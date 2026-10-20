@@ -130,6 +130,7 @@ func TestAlreadyAcknowledgedRequiresOwnTrailingMarker(t *testing.T) {
 }
 
 func TestPrecheckDeadlineStopsJobBeforeModel(t *testing.T) {
+	installActionTestSkills(t, testReviewSkillURL)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/repos/o/r/issues/7/comments" {
 			t.Errorf("unexpected request: %s", r.URL)
@@ -218,9 +219,7 @@ func (f *actionMonitorGitHub) CreateIssueComment(context.Context, string, int, s
 }
 
 func TestReviewEchoDoesNotSuppressSecurityAuditInMonitor(t *testing.T) {
-	if _, err := exec.LookPath("node"); err != nil {
-		t.Skip("audit validators require node")
-	}
+	fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
 	_, head, _ := gitFixtureRemote(t)
 	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
 	reviewItem := github.Item{Key: "review-request", NodeID: "review-request-node", Body: "@linkdataminion review", Author: github.User{ID: 7, Login: "writer"}, UpdatedAt: now}

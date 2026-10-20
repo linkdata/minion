@@ -190,6 +190,7 @@ func assertModelRepository(t *testing.T, dir, head string) {
 	}
 }
 
+// shortcut: This PATH wrapper sees top-level Git calls only; use process isolation if nested Git subprocesses matter.
 func forbidNetworkGit(t *testing.T) {
 	t.Helper()
 	realGit, err := aicli.AbsoluteExecutable("git")

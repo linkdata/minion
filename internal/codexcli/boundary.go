@@ -16,9 +16,10 @@ import (
 )
 
 const (
-	probePrompt = "MINION_TRUSTED_PROMPT_78"
-	probeAgent  = "MINION_UNTRUSTED_AGENTS_78"
-	probeSkill  = "MINION_UNTRUSTED_SKILL_78"
+	probePrompt       = "MINION_TRUSTED_PROMPT_78"
+	probeAgent        = "MINION_UNTRUSTED_AGENTS_78"
+	probeRuntimeAgent = "MINION_UNTRUSTED_RUNTIME_AGENTS_78"
+	probeSkill        = "MINION_UNTRUSTED_SKILL_78"
 )
 
 func instructionBoundaryConfig() []string {
@@ -55,6 +56,7 @@ func ValidateInstructionBoundary(ctx context.Context) (resultErr error) {
 	}
 	for path, contents := range map[string]string{
 		filepath.Join(repo, "AGENTS.md"):           probeAgent + "\n",
+		filepath.Join(runtimeDir, "AGENTS.md"):     probeRuntimeAgent + "\n",
 		filepath.Join(skillDir, "SKILL.md"):        "---\nname: untrusted-canary\ndescription: " + probeSkill + "\n---\nInert test skill.\n",
 		filepath.Join(runtimeDir, instructionRoot): "",
 	} {
@@ -88,12 +90,13 @@ func ValidateInstructionBoundary(ctx context.Context) (resultErr error) {
 			return fmt.Errorf("render Codex instruction probe: %w", err)
 		}
 		foundAgent := bytes.Contains(output, []byte(probeAgent))
+		foundRuntimeAgent := bytes.Contains(output, []byte(probeRuntimeAgent))
 		foundSkill := bytes.Contains(output, []byte(probeSkill))
 		if check.wantCanary && (!foundAgent || !foundSkill) {
 			return errors.New("codex instruction probe cannot observe repository instructions and skills")
 		}
-		if !check.wantCanary && (foundAgent || foundSkill) {
-			return errors.New("codex loaded source snapshot instructions or repository skills")
+		if !check.wantCanary && (foundAgent || foundRuntimeAgent || foundSkill) {
+			return errors.New("codex loaded untrusted instructions or repository skills")
 		}
 		var messages []struct {
 			Role    string `json:"role"`

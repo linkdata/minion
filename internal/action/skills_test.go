@@ -2,8 +2,11 @@ package action
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"log"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -149,8 +152,8 @@ func TestRunnerRequiresEverySkillAndLoadsOptionalSkills(t *testing.T) {
 		},
 		AlwaysOnSkills: []string{optionalURL},
 	}
-	if err := orchestrator.validateCommand(job); err != nil {
-		t.Fatalf("logical command depends on execution-host skills: %v", err)
+	if err := orchestrator.validateCommand(job); err == nil || errors.Is(err, monitor.ErrTerminalJob) {
+		t.Fatalf("missing required skill should fail before preparation and remain retryable: %v", err)
 	}
 	role := RoleSettings{Provider: "codex", Skills: orchestrator.Commands["inspect"].Skills,
 		AlwaysOnSkills: orchestrator.AlwaysOnSkills}
@@ -178,7 +181,33 @@ func TestRunnerRequiresEverySkillAndLoadsOptionalSkills(t *testing.T) {
 	}
 }
 
+func TestExecuteMissingRequiredSkillDoesNotClone(t *testing.T) {
+	installActionTestSkills(t, testReviewSkillURL)
+	root := t.TempDir()
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		http.Error(w, "unexpected GitHub request", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	orchestrator := &Orchestrator{
+		WorkRoot: root, GitHub: testGitHub(server, "token"),
+		Commands: map[string]config.CommandMapping{
+			"inspect": {Action: "comment", Skills: []string{testReviewSkillURL, "https://github.com/example/skills/tree/main/skills/missing"}},
+		},
+	}
+	job := usageJob()
+	job.Repository.Actions = []string{"inspect"}
+	job.Command = command.Command{Name: "inspect", Action: command.Comment}
+	err := orchestrator.Execute(context.Background(), job)
+	if err == nil || !strings.Contains(err.Error(), "skill is not installed") || errors.Is(err, monitor.ErrTerminalJob) || requests != 0 {
+		t.Fatalf("missing skill reached preparation: requests=%d error=%v", requests, err)
+	}
+	assertEmptyDir(t, root)
+}
+
 func TestValidateCommandRequiresSupportedMainWorkflow(t *testing.T) {
+	installActionTestSkills(t, testAuditSkillURL)
 	job := monitor.Job{
 		Repository: config.Repository{Name: "owner/repo", Actions: []string{"inspect"}},
 		Command:    command.Command{Name: "inspect", Action: command.SecurityAudit},

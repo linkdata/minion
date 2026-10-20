@@ -26,6 +26,7 @@ pwd > "$0.cwd"
 printf '%s\n' "$@" >> "$0.args"
 printf 'END\n' >> "$0.args"
 if test -f "$PWD/.minion-codex-root"; then
+  test -f "$PWD/AGENTS.md" || exit 3
   test -f "$PWD/../../../AGENTS.md" || exit 3
   test -f "$PWD/../../../.agents/skills/untrusted-canary/SKILL.md" || exit 3
   test -d "$PWD/../../../.git" || exit 3
@@ -82,8 +83,9 @@ func TestValidateInstructionBoundaryRejectsUntrustedContent(t *testing.T) {
 		want string
 		role string
 	}{
-		{role: "user", name: "agents", text: probePrompt + " " + probeAgent, want: "loaded source snapshot instructions"},
-		{role: "user", name: "skill", text: probePrompt + " " + probeSkill, want: "loaded source snapshot instructions"},
+		{role: "user", name: "agents", text: probePrompt + " " + probeAgent, want: "loaded untrusted instructions"},
+		{role: "user", name: "runtime agents", text: probePrompt + " " + probeRuntimeAgent, want: "loaded untrusted instructions"},
+		{role: "user", name: "skill", text: probePrompt + " " + probeSkill, want: "loaded untrusted instructions"},
 		{role: "user", name: "missing prompt", text: "unrelated", want: "omitted the trusted"},
 		{role: "system", name: "trusted prompt only in system role", text: probePrompt, want: "omitted the trusted"},
 	} {

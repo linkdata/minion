@@ -153,7 +153,7 @@ func TestUsageSessionCounterGapKeepsNewRootDelta(t *testing.T) {
 	appendUsageEvents(t, root, usageRecord("root", "old", "r1", 100, 0, 0), usageRecord("root", "old", "late-old", 7, 0, 0))
 	appendUsageEvents(t, root, append(completedUsageTurn("root", "new", "r2", 20), usageSnapshot(30, 127, 0, 0))...)
 	got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 127}, nil, nil)
-	if got != (usage.Tokens{Input: 20}) || !complete || err != nil {
+	if got != (usage.Tokens{Input: 20}) || complete || err != nil {
 		t.Fatalf("old counter correction or cumulative snapshot hid new root delta: %+v complete=%t err=%v", got, complete, err)
 	}
 }

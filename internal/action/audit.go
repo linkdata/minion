@@ -1,6 +1,7 @@
 package action
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -56,10 +57,13 @@ func readAuditArtifacts(outputDir string, partial bool, secret string) ([]worksp
 			continue
 		}
 		if err == nil {
-			data = []byte(aicli.RedactText(string(data), secret))
-			if int64(len(data)) > limit {
+			data = []byte(redactActionText(string(data), secret))
+			if strings.HasSuffix(name, ".json") && bytes.Contains(data, []byte(`\u0000`)) {
+				data, err = redactAuditJSON(data, secret)
+			}
+			if err == nil && int64(len(data)) > limit {
 				err = errors.New("redacted artifact exceeds byte limit")
-			} else if name == "REPORT.md" && !partial && !publishableAnswer(string(data)) {
+			} else if err == nil && name == "REPORT.md" && !partial && !publishableAnswer(string(data)) {
 				err = errors.New("audit REPORT.md is invalid or exceeds publication limit")
 			}
 		}
@@ -73,6 +77,38 @@ func readAuditArtifacts(outputDir string, partial bool, secret string) ([]worksp
 		files = append(files, workspace.File{Path: name, Mode: workspace.Regular, Data: data})
 	}
 	return files, diagnostics, nil
+}
+
+// Decode escaped NULs before redaction so JSON consumers cannot reconstruct a split key.
+func redactAuditJSON(data []byte, secret string) ([]byte, error) {
+	if !json.Valid(data) {
+		return nil, errors.New("audit JSON is invalid")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return nil, err
+	}
+	return json.Marshal(redactAuditJSONValue(value, secret))
+}
+
+func redactAuditJSONValue(value any, secret string) any {
+	switch value := value.(type) {
+	case string:
+		return redactActionText(value, secret)
+	case []any:
+		for i := range value {
+			value[i] = redactAuditJSONValue(value[i], secret)
+		}
+	case map[string]any:
+		redacted := make(map[string]any, len(value))
+		for key, entry := range value {
+			redacted[redactActionText(key, secret)] = redactAuditJSONValue(entry, secret)
+		}
+		return redacted
+	}
+	return value
 }
 
 func auditArtifactMayBeEmpty(name string) bool {

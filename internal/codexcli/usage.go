@@ -217,6 +217,7 @@ func usageFiles(ctx context.Context, home, rootID string, started time.Time, kno
 				meta.ParentID = source.Subagent.Spawn.ParentID
 			}
 		}
+		meta.Source = nil
 		meta.path = path
 		if expectedID != "" {
 			before := known[expectedID]
@@ -734,7 +735,7 @@ func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, 
 	if before != nil {
 		var added bool
 		inherited, added = inherited.AddChecked(lateOld)
-		complete = complete && added
+		complete = complete && added && lateOld == (usage.Tokens{})
 		snapshotKnown = snapshotKnown && added
 		// Snapshots can disprove missing records even when old counter gaps prevent using them as the delta.
 		if before.counterGap && before.hasSnapshot && seenSnapshot && latest.Sub(inherited) != total {

@@ -255,7 +255,7 @@ func TestExecuteRecordsNoModelAndSkipsAcknowledged(t *testing.T) {
 			job := usageJob()
 			job.Command.Name = "review"
 			job.Repository.Actions = []string{"review"}
-			t.Setenv("HOME", t.TempDir())
+			installActionTestSkills(t, testReviewSkillURL)
 			var comments []github.Comment
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch {

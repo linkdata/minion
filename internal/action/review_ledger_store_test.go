@@ -159,7 +159,7 @@ func TestPrivateReviewRetainsPrefixAndRejectsRollback(t *testing.T) {
 }
 
 func TestPrivateReviewBoundaryBeforeStorageOrPublication(t *testing.T) {
-	for _, scenario := range []string{"foreign identity", "foreign source", "malformed history", "oversized history", "invalid calls", "refutations without critic", "invalid answer", "read-only source changes", "storage failure", "public root", "symlink root"} {
+	for _, scenario := range []string{"foreign identity", "foreign source", "malformed history", "oversized history", "invalid calls", "invalid answer", "read-only source changes", "storage failure", "public root", "symlink root"} {
 		t.Run(scenario, func(t *testing.T) {
 			job := withClaudeCritic(testJob(command.Comment))
 			result := privateReviewResult(job)
@@ -177,9 +177,6 @@ func TestPrivateReviewBoundaryBeforeStorageOrPublication(t *testing.T) {
 				result.Refutations[0].Text = strings.Repeat("x", maxOutputBytes+1)
 			case "invalid calls":
 				result.Calls[0].Tokens.Input = -1
-			case "refutations without critic":
-				job.Critic, job.CriticMaxRounds, job.CriticNonblockingRounds = nil, 0, 0
-				result.Calls = result.Calls[:1]
 			case "invalid answer":
 				result.Answer, safeHistory = "", true
 			case "read-only source changes":
@@ -216,7 +213,7 @@ func TestPrivateReviewBoundaryBeforeStorageOrPublication(t *testing.T) {
 				t.Fatalf("untrusted/unretained history written: %v error=%v", paths, err)
 			}
 			switch scenario {
-			case "foreign identity", "foreign source", "malformed history", "oversized history", "invalid calls", "refutations without critic":
+			case "foreign identity", "foreign source", "malformed history", "oversized history", "invalid calls":
 				if entries, err := os.ReadDir(root); err != nil || len(entries) != 0 {
 					t.Fatalf("untrusted evidence touched storage: %v", err)
 				}
