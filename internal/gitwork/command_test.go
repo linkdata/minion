@@ -91,6 +91,24 @@ func TestImportPreservesExecutableModeAndCommitIgnoresUnstagedFiles(t *testing.T
 	}
 }
 
+func TestCommitAndPushPreservesUnicodeBranchSuffix(t *testing.T) {
+	fixture := newFixture(t)
+	ctx := context.Background()
+	const branch = "minion/fix-nbsp\u00a0"
+	if err := fixture.checkout.NewBranch(ctx, branch); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.checkout.Import(ctx, fixture.base, []workspace.Change{{Path: "README.md", Mode: workspace.Regular, Data: []byte("reviewed\n")}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.checkout.commitAndPush(ctx, fixture.remote, branch, "bot", "reviewed", func(string) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if got := fixture.git("", "--git-dir="+fixture.remote, "show", "refs/heads/"+branch+":README.md"); got != "reviewed" {
+		t.Fatalf("wrong published branch: %q", got)
+	}
+}
+
 func TestCloneIncludesTagsAndPublicationAcceptsAmbiguousShortName(t *testing.T) {
 	fixture := newFixture(t)
 	const branch = "minion/fix-same-tag"

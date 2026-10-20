@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/linkdata/minion/internal/bounded"
 )
@@ -67,6 +68,7 @@ func redactText(text, secret string, truncated bool) string {
 		text = strings.ReplaceAll(text, "\x00", "?")
 		forms[3] = strings.ReplaceAll(secret, "\x00", "?")
 	}
+	text = redactJSONEscapes(text, secret, marker, truncated)
 	var replacements [8]string
 	longest := 0
 	for i, form := range forms {
@@ -76,6 +78,22 @@ func redactText(text, secret string, truncated bool) string {
 		}
 		replacements[2*i], replacements[2*i+1] = form, mask
 		longest = max(longest, len(form))
+	}
+	if truncated {
+		// Every Unicode scalar can occupy six bytes per UTF-16 code unit.
+		encodedLength := 0
+		for _, r := range secret {
+			width := 6
+			if r > 0xffff {
+				width = 12
+			}
+			encodedLength += width
+			if encodedLength > len(text) {
+				encodedLength = len(text) + 1
+				break
+			}
+		}
+		longest = max(longest, encodedLength)
 	}
 	// Encoded forms precede literals; replacement text is not rescanned.
 	text = strings.NewReplacer(replacements[:]...).Replace(text)
@@ -91,7 +109,154 @@ func redactText(text, secret string, truncated bool) string {
 		}
 		text = strings.ReplaceAll(text, "\x00", marker)
 	}
-	return removeReformedSecrets(text, forms)
+	text = removeReformedSecrets(text, forms)
+	// A replacement can join fragments into an escaped key unknown to the fixed forms.
+	if redactJSONEscapes(text, secret, marker, false) != text {
+		return ""
+	}
+	return text
+}
+
+// redactJSONEscapes compares JSON-decoded escapes with the secret while replacing
+// original spans, so unrelated diagnostics keep their exact spelling.
+func redactJSONEscapes(text, secret, marker string, truncated bool) string {
+	if secret == "" || len(secret) > len(text) || !strings.ContainsRune(text, '\\') {
+		return text
+	}
+	// Raw quotes delimit content only in a complete JSON document. In freeform
+	// diagnostics they may be literal bytes within a partly escaped key.
+	jsonDocument := !truncated && strings.ContainsRune(text, '"') && json.Valid([]byte(text))
+	needle := []byte(secret)
+	prefix := make([]int, len(needle))
+	for i, matched := 1, 0; i < len(needle); i++ {
+		for matched > 0 && needle[i] != needle[matched] {
+			matched = prefix[matched-1]
+		}
+		if needle[i] == needle[matched] {
+			matched++
+		}
+		prefix[i] = matched
+	}
+	starts := make([]int, len(needle))
+	var result strings.Builder
+	matched, decoded, last := 0, 0, 0
+	changed := false
+	for i := 0; i < len(text); {
+		if jsonDocument && text[i] == '"' {
+			// Only escaped quotes can be JSON string content.
+			matched = 0
+			i++
+			continue
+		}
+		begin := i
+		var part [utf8.UTFMax]byte
+		width := 0
+		if text[i] == '\\' {
+			if r, consumed := jsonEscape(text[i:]); consumed != 0 {
+				width = utf8.EncodeRune(part[:], r)
+				i += consumed
+			}
+		}
+		if width == 0 {
+			part[0] = text[i]
+			i++
+			width = 1
+		}
+		for j := 0; j < width; j++ {
+			b := part[j]
+			starts[decoded%len(needle)] = begin
+			for matched > 0 && needle[matched] != b {
+				matched = prefix[matched-1]
+			}
+			if needle[matched] == b {
+				matched++
+			}
+			if matched == len(needle) {
+				sourceStart := starts[(decoded+1)%len(needle)]
+				// Leave plain literal matches to the existing form replacer.
+				if sourceStart >= last && i-sourceStart > len(needle) {
+					if !changed {
+						result.Grow(len(text))
+						changed = true
+					}
+					result.WriteString(text[last:sourceStart])
+					if truncated {
+						for n := sourceStart; n < i; n++ {
+							result.WriteByte(0)
+						}
+					} else {
+						result.WriteString(marker)
+					}
+					last = i
+				}
+				matched = prefix[matched-1]
+			}
+			decoded++
+		}
+	}
+	if !changed {
+		return text
+	}
+	result.WriteString(text[last:])
+	return result.String()
+}
+
+func jsonEscape(text string) (r rune, width int) {
+	if len(text) < 2 || text[0] != '\\' {
+		return 0, 0
+	}
+	switch text[1] {
+	case '"', '\\', '/':
+		return rune(text[1]), 2
+	case 'b':
+		return '\b', 2
+	case 'f':
+		return '\f', 2
+	case 'n':
+		return '\n', 2
+	case 'r':
+		return '\r', 2
+	case 't':
+		return '\t', 2
+	case 'u':
+		if len(text) < 6 {
+			return 0, 0
+		}
+		r, ok := jsonHex4(text[2:6])
+		if !ok {
+			return 0, 0
+		}
+		if r >= 0xd800 && r <= 0xdbff && len(text) >= 12 && text[6:8] == `\u` {
+			low, ok := jsonHex4(text[8:12])
+			if ok && low >= 0xdc00 && low <= 0xdfff {
+				return 0x10000 + (r-0xd800)*0x400 + low - 0xdc00, 12
+			}
+		}
+		if r >= 0xd800 && r <= 0xdfff {
+			return utf8.RuneError, 6
+		}
+		return r, 6
+	}
+	return 0, 0
+}
+
+func jsonHex4(text string) (rune, bool) {
+	var value rune
+	for i := 0; i < 4; i++ {
+		var digit byte
+		switch c := text[i]; {
+		case c >= '0' && c <= '9':
+			digit = c - '0'
+		case c >= 'a' && c <= 'f':
+			digit = c - 'a' + 10
+		case c >= 'A' && c <= 'F':
+			digit = c - 'A' + 10
+		default:
+			return 0, false
+		}
+		value = value<<4 | rune(digit)
+	}
+	return value, true
 }
 
 // javascriptJSONContent removes escapes Go adds to otherwise valid JSON strings.

@@ -224,7 +224,7 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 		clean = false
 	}
 	var childError error
-	result.Tokens, result.UsageComplete, childError = s.accounting.collectUsage(ctx, codexHome, cmp.Or(output.threadID, output.expectedID), started, output.tokens, output.children, output.observationOnly)
+	result.Tokens, result.UsageComplete, childError = s.accounting.collectUsage(ctx, codexHome, cmp.Or(output.threadID, output.expectedID), started, output.tokens, output.children, output.observationOnly, output.spawns)
 	defer func() {
 		if childError != nil {
 			result.Answer, result.UsageComplete = "", false
@@ -339,6 +339,7 @@ type jsonlOutput struct {
 	tokens          *usage.Tokens
 	children        []string
 	observationOnly map[string]bool
+	spawns          map[string]bool
 	stopErr         error
 	stream          aicli.JSONL
 	parseErr        error
@@ -397,6 +398,14 @@ func (o *jsonlOutput) accept(event codexEvent) {
 		observation := event.Item.Tool == "wait" || event.Item.Tool == "close_agent"
 		for _, id := range event.Item.ReceiverThreadIDs {
 			o.observationOnly[id] = observation && o.observationOnly[id]
+		}
+		if event.Type == "item.completed" && event.Item.Tool == "spawn_agent" {
+			if o.spawns == nil {
+				o.spawns = make(map[string]bool)
+			}
+			for _, id := range event.Item.ReceiverThreadIDs {
+				o.spawns[id] = true
+			}
 		}
 	}
 	switch event.Type {

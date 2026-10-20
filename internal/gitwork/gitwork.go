@@ -372,7 +372,8 @@ func runGit(ctx context.Context, dir string, args ...string) (string, error) {
 	if err := runGitInputTo(ctx, dir, nil, &output, args...); err != nil {
 		return "", err
 	}
-	return strings.TrimSpace(output.String()), nil
+	// Unicode whitespace is valid in refnames; remove only Git line endings.
+	return strings.TrimRight(output.String(), "\r\n"), nil
 }
 
 // Credentials and network policy are supplied explicitly by each trusted/offline caller.

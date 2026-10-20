@@ -149,6 +149,99 @@ func TestRedactJavaScriptJSONForms(t *testing.T) {
 	}
 }
 
+func TestRedactEquivalentJSONEscapes(t *testing.T) {
+	for _, tc := range []struct{ name, secret, encoded string }{
+		{"escaped slash", "a/b", `a\/b`},
+		{"letter in marker", "a", `\u0061`},
+		{"escaped ASCII", "a/b", `\u0061/b`},
+		{"mixed escapes", "a/b", `\u0061\/\u0062`},
+		{"Unicode slash", "a/b", `\u0061\u002F\u0062`},
+		{"Unicode backslash", `a\b`, `a\u005Cb`},
+		{"mixed hex case", "sk-key", `s\u006B-\u006bey`},
+		{"escaped quote", `a"b`, `a\u0022b`},
+		{"surrogate pair", "😀/x", `\uD83d\uDE00\/x`},
+		{"unpaired surrogate", "�/x", `\uD800\/x`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			marker := redactionMarker(tc.secret)
+			text := "prefix " + tc.encoded + " suffix"
+			if got := RedactText(text, tc.secret); got != "prefix "+marker+" suffix" {
+				t.Fatalf("equivalent JSON encoding survived: %q", got)
+			}
+			cause := errors.New(text)
+			if got := RedactError(cause, tc.secret); got.Error() != "prefix "+marker+" suffix" || !errors.Is(got, cause) {
+				t.Fatalf("error kept encoded key or lost cause: %v", got)
+			}
+			var tail bounded.Tail
+			if _, err := tail.Write([]byte(text)); err != nil || tail.Truncated {
+				t.Fatalf("unexpected diagnostic tail: %v, %t", err, tail.Truncated)
+			}
+			if got := RedactTail(&tail, tc.secret); got != "prefix "+marker+" suffix" {
+				t.Fatalf("diagnostic kept encoded key: %q", got)
+			}
+			document := `{"error":"` + tc.encoded + `","hint":"limit hit"}`
+			got := RedactText(document, tc.secret)
+			if !json.Valid([]byte(got)) || got != `{"error":"`+marker+`","hint":"limit hit"}` {
+				t.Fatalf("redaction broke JSON or unrelated diagnostic: %q", got)
+			}
+		})
+	}
+	if got := RedactText(`a\u0061a\u0062`, "aab"); got != "a[redacted]" {
+		t.Fatalf("overlapping decoded prefixes hid an encoded key: %q", got)
+	}
+	if got := RedactText(`prefix \u0061"b suffix`, `a"b`); got != "prefix [redacted] suffix" {
+		t.Fatalf("freeform diagnostic kept a mixed escaped key: %q", got)
+	}
+	const adjacentDelimiter = `{"x":"\u0061"}`
+	if got := RedactText(adjacentDelimiter, `a"`); got != adjacentDelimiter || !json.Valid([]byte(got)) {
+		t.Fatalf("matched through a structural JSON quote: %q", got)
+	}
+	const escapedQuote = `{"x":"\u0061\""}`
+	if got := RedactText(escapedQuote, `a"`); got != `{"x":"[redacted]"}` || !json.Valid([]byte(got)) {
+		t.Fatalf("missed an escaped quote inside JSON content: %q", got)
+	}
+}
+
+func TestRedactTailCutsPartialEquivalentJSONEscapes(t *testing.T) {
+	const note = "rate limit reached"
+	for _, tc := range []struct{ name, secret, encoded string }{
+		{"ASCII", "a/b", `\u0061\/\u0062`},
+		{"surrogate pair", "😀/x", `\uD83D\uDE00\/x`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for cut := 1; cut < len(tc.encoded); cut++ {
+				fill := strings.Repeat("x", bounded.DiagnosticBytes-len(tc.encoded[cut:])-len(note))
+				var tail bounded.Tail
+				if _, err := tail.Write([]byte(tc.encoded + fill + note)); err != nil || !tail.Truncated {
+					t.Fatalf("cut %d: unexpected diagnostic tail: %v, %t", cut, err, tail.Truncated)
+				}
+				if got := RedactTail(&tail, tc.secret); strings.TrimLeft(got, "x") != note {
+					t.Fatalf("cut %d: partial encoded key survived or diagnostic lost: %q", cut, got)
+				}
+			}
+		})
+	}
+}
+
+func TestRedactEquivalentJSONEscapesInLargeAnswer(t *testing.T) {
+	const secret = "a/b"
+	t.Run("freeform", func(t *testing.T) {
+		prefix := strings.Repeat(`\q`, (64<<20)/2)
+		got := RedactText(prefix+`a\/b`, secret)
+		if len(got) != len(prefix)+len("[redacted]") || !strings.HasSuffix(got, "[redacted]") {
+			t.Fatalf("large escaped answer was not redacted: length=%d, suffix=%q", len(got), got[len(got)-min(len(got), 20):])
+		}
+	})
+	t.Run("JSON", func(t *testing.T) {
+		prefix := strings.Repeat(`\\`, (64<<20)/2)
+		document := `{"answer":"` + prefix + `a\/b"}`
+		got := RedactText(document, secret)
+		if len(got) != len(document)-len(`a\/b`)+len("[redacted]") || !strings.HasSuffix(got, `[redacted]"}`) || !json.Valid([]byte(got)) {
+			t.Fatalf("large JSON answer was not safely redacted: length=%d, suffix=%q", len(got), got[len(got)-min(len(got), 20):])
+		}
+	})
+}
+
 func TestRedactTailCutsPartialKnownEncodings(t *testing.T) {
 	secret := "AB<\vCD"
 	quoted := strconv.Quote(secret)
@@ -212,7 +305,7 @@ func TestRedactTailMasksCompleteKeyAcrossCut(t *testing.T) {
 		t.Fatalf("expected truncated tail: %v, %t", err, tail.Truncated)
 	}
 	got := RedactTail(&tail, secret)
-	if want := fill + note; got != want {
+	if want := fill[6*len(secret)-1-len("x"+secret):] + note; got != want {
 		t.Fatalf("complete key crossed cut or diagnostic changed: prefix %q, length %d; want length %d", got[:min(20, len(got))], len(got), len(want))
 	}
 }

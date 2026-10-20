@@ -69,6 +69,33 @@ func usageSnapshot(ordinal, input, cached, output int64) string {
 	return fmt.Sprintf(`{"ordinal":%d,"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":%d,"cached_input_tokens":%d,"output_tokens":%d}}}}`, ordinal, input, cached, output)
 }
 
+func TestCollectUsageIgnoresForeignThreadSnapshot(t *testing.T) {
+	home := t.TempDir()
+	writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "root-turn", "root-response", 20)...)
+	writeUsageRolloutBoundary(t, home, "child", "root", nil,
+		usageEvent("task_started", "child-turn"),
+		`{"ordinal":25,"type":"event_msg","payload":{"type":"token_count","thread_id":"root","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0}}}}`,
+		usageEvent("task_complete", "child-turn"))
+	got, complete, err := (&usageSession{}).collectUsage(context.Background(), home, "root", time.Now(), nil, nil, nil)
+	if got != (usage.Tokens{Input: 20}) || complete || err != nil {
+		t.Fatalf("foreign parent snapshot counted as child usage: tokens=%+v complete=%t err=%v", got, complete, err)
+	}
+}
+
+func TestCollectUsageIgnoresMalformedForeignThreadSnapshot(t *testing.T) {
+	home := t.TempDir()
+	writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "root-turn", "root-response", 20)...)
+	writeUsageRolloutBoundary(t, home, "child", "root", nil,
+		usageEvent("task_started", "child-turn"),
+		usageSnapshot(24, 5, 0, 0),
+		`{"ordinal":25,"type":"event_msg","payload":{"type":"token_count","thread_id":"root","info":{"total_token_usage":{"output_tokens":1}}}}`,
+		usageEvent("task_complete", "child-turn"))
+	got, complete, err := (&usageSession{}).collectUsage(context.Background(), home, "root", time.Now(), nil, nil, nil)
+	if got != (usage.Tokens{Input: 25}) || !complete || err != nil {
+		t.Fatalf("malformed foreign snapshot poisoned child usage: tokens=%+v complete=%t err=%v", got, complete, err)
+	}
+}
+
 func TestCollectUsageIncludesNestedHelpersWithoutInheritedOrDuplicateResponses(t *testing.T) {
 	home := t.TempDir()
 	started := time.Now()
@@ -440,8 +467,11 @@ func TestRolloutScannerEventBoundaryAndPartialEOF(t *testing.T) {
 		complete  bool
 	}{
 		{"exact boundary", aicli.MaxEventBytes, "\n", 1, true},
+		{"exact CRLF boundary", aicli.MaxEventBytes, "\r\n", 1, true},
 		{"exact partial EOF", aicli.MaxEventBytes, "", 1, false},
+		{"exact CR partial EOF", aicli.MaxEventBytes, "\r", 1, false},
 		{"oversized then valid", aicli.MaxEventBytes + 1, "\n{}\n", 1, false},
+		{"oversized CRLF then valid", aicli.MaxEventBytes + 1, "\r\n{}\n", 1, false},
 		{"oversized partial EOF", aicli.MaxEventBytes + 1, "", 0, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {

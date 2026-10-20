@@ -349,7 +349,14 @@ func rolloutScanner(ctx context.Context, r io.Reader, complete *bool) *bufio.Sca
 			return 0, nil, err
 		}
 		newline := bytes.IndexByte(data, '\n')
-		if dropping || newline > aicli.MaxEventBytes || (newline < 0 && len(data) > aicli.MaxEventBytes) {
+		lineEnd := len(data)
+		if newline >= 0 {
+			lineEnd = newline
+		}
+		if lineEnd > 0 && data[lineEnd-1] == '\r' {
+			lineEnd--
+		}
+		if dropping || lineEnd > aicli.MaxEventBytes {
 			*complete = false
 			if newline >= 0 {
 				dropping = false
@@ -381,6 +388,7 @@ func readRolloutUsage(ctx context.Context, meta rolloutMeta, rootID string, budg
 type rolloutUsageMode struct {
 	before, capture *usageBoundary
 	spawned         map[string]bool
+	currentSpawns   map[string]bool
 	allowUnchanged  bool
 	latest          *usage.Tokens
 	seenLatest      *bool
@@ -465,6 +473,7 @@ func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, 
 	var children []string
 	seenChildren := map[string]bool{}
 	tooManyChildren := false
+	unattributedSpawn := false
 	appendChildren := func(ids ...string) {
 		if !appendChildIDs(&children, seenChildren, ids...) {
 			tooManyChildren, complete = true, false
@@ -485,6 +494,21 @@ func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, 
 			}
 			spawned[id] = true
 		}
+	}
+	appendSpawnProof := func(turnID string, ids ...string) {
+		if before != nil && turnID == "" {
+			// A late prior-turn event has no turn identity to exclude on resume.
+			for _, id := range ids {
+				if mode.currentSpawns[id] {
+					appendSpawned(id)
+				} else {
+					unattributedSpawn = true
+					appendChildren(id)
+				}
+			}
+			return
+		}
+		appendSpawned(ids...)
 	}
 	for scanner.Scan() {
 		if ctx.Err() != nil {
@@ -653,24 +677,24 @@ func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, 
 			}
 			if own && ownThread {
 				if payload.Type == "collab_agent_spawn_end" && payload.NewThreadID != "" {
-					appendSpawned(payload.NewThreadID)
+					appendSpawnProof(payload.TurnID, payload.NewThreadID)
 				}
 				if payload.Type == "item_completed" && payload.Item != nil {
 					if payload.Item.Type == "SubAgentActivity" {
 						if payload.Item.AgentID == "" {
 							complete = false
 						} else if payload.Item.Kind == "started" {
-							appendSpawned(payload.Item.AgentID)
+							appendSpawnProof(payload.TurnID, payload.Item.AgentID)
 						} else {
 							appendChildren(payload.Item.AgentID)
 						}
 					}
 					if payload.Item.Type == "CollabAgentToolCall" && payload.Item.Tool == "spawn_agent" && payload.Item.Status == "completed" {
-						appendSpawned(payload.Item.ReceiverID...)
+						appendSpawnProof(payload.TurnID, payload.Item.ReceiverID...)
 					}
 				}
 			}
-			if payload.Type == "token_count" && payload.Info != nil {
+			if payload.Type == "token_count" && payload.Info != nil && (!own || ownThread) {
 				tokens, valid := rolloutTokens(payload.Info.Total)
 				if !valid {
 					complete = false
@@ -771,6 +795,10 @@ func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, 
 	// Missing counters alone do not prevent that lifecycle proof.
 	if seenHeader && readable && ctx.Err() == nil && !inheritedWithoutBoundary && !lifecycleCapped && latestOwnTurn != "" && latestOwnDone && !unfinished {
 		childError = nil
+	}
+	if unattributedSpawn {
+		complete = false
+		childError = joinUsageErrors(childError, errUnverifiedChildren)
 	}
 	if tooManyChildren {
 		childError = joinUsageErrors(childError, errUsageAgentLimit)

@@ -475,25 +475,37 @@ func (o *jsonlOutput) recordAssistantUsage(raw, parent json.RawMessage) {
 			o.completed, o.result.Answer = false, ""
 		}
 	}
-	var rawUsage eventUsage
-	if json.Unmarshal(message.Usage, &rawUsage) != nil {
-		return
+	markUsageUncertain := func() {
+		if o.aggregateGeneration != 0 {
+			// A post-result block may revise previously covered counters. If its
+			// usage cannot be incorporated, the result no longer proves coverage.
+			o.hasCumulative, o.uncovered, o.result.UsageComplete = false, true, false
+		}
 	}
-	tokens, valid := rawUsage.tokens()
+	var rawUsage eventUsage
+	valid := json.Unmarshal(message.Usage, &rawUsage) == nil
+	var tokens usage.Tokens
+	if valid {
+		tokens, valid = rawUsage.tokens()
+	}
 	if !valid {
+		markUsageUncertain()
 		return
 	}
 	tokens = old.tokens.Max(tokens)
 	if !tokens.Valid() {
+		markUsageUncertain()
 		return
 	}
 	total, valid := o.assistantTokens.Sub(old.tokens).AddChecked(tokens)
 	if !valid {
+		markUsageUncertain()
 		return
 	}
 	if old.root && old.generation == o.aggregateGeneration {
 		rootTotal, valid := o.rootTokens.Sub(old.tokens).AddChecked(tokens)
 		if !valid {
+			markUsageUncertain()
 			return
 		}
 		o.rootTokens = rootTotal

@@ -131,7 +131,7 @@ func (s *usageSession) begin(ctx context.Context, home, rootID string, started t
 	}
 }
 
-func (s *usageSession) collectUsage(ctx context.Context, home, rootID string, started time.Time, fallback *usage.Tokens, expectedChildren []string, observationOnly map[string]bool) (usage.Tokens, bool, error) {
+func (s *usageSession) collectUsage(ctx context.Context, home, rootID string, started time.Time, fallback *usage.Tokens, expectedChildren []string, observationOnly map[string]bool, currentSpawns ...map[string]bool) (usage.Tokens, bool, error) {
 	defer func() { s.before = nil }()
 	if s.before == nil {
 		files, ambiguous, complete := usageFiles(ctx, home, rootID, started, nil)
@@ -146,6 +146,11 @@ func (s *usageSession) collectUsage(ctx context.Context, home, rootID string, st
 	var total usage.Tokens
 	var childError error
 	visited, spawned := map[string]bool{}, map[string]bool{}
+	var stdoutSpawns map[string]bool
+	if len(currentSpawns) != 0 {
+		stdoutSpawns = currentSpawns[0]
+		maps.Copy(spawned, stdoutSpawns)
+	}
 	queue := []string{rootID}
 	// Current stream references are checked even when the rollout omitted the
 	// matching activity event. They never select unrelated historical helpers.
@@ -174,7 +179,7 @@ func (s *usageSession) collectUsage(ctx context.Context, home, rootID string, st
 			var children []string
 			var workError error
 			mode := rolloutUsageMode{
-				before: boundary, spawned: spawned,
+				before: boundary, spawned: spawned, currentSpawns: stdoutSpawns,
 				allowUnchanged: id != rootID && observationOnly[id],
 			}
 			if id == rootID && fallback != nil {

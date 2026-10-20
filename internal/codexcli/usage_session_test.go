@@ -145,6 +145,97 @@ func TestUsageSessionOnlyCountsNewHelpersWithCurrentSpawnProof(t *testing.T) {
 	}
 }
 
+func TestUsageSessionNoTurnSpawnOnResumeCannotCertifyLateOldHelper(t *testing.T) {
+	for _, test := range []struct{ name, event string }{
+		{"legacy spawn", `{"ordinal":25,"type":"event_msg","payload":{"type":"collab_agent_spawn_end","new_thread_id":"child"}}`},
+		{"native activity", `{"ordinal":25,"type":"event_msg","payload":{"type":"item_completed","thread_id":"root","item":{"type":"SubAgentActivity","kind":"started","agent_thread_id":"child"}}}`},
+		{"spawn tool call", `{"ordinal":25,"type":"event_msg","payload":{"type":"item_completed","thread_id":"root","item":{"type":"CollabAgentToolCall","tool":"spawn_agent","status":"completed","receiver_thread_ids":["child"]}}}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, home := context.Background(), t.TempDir()
+			root := writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "old-root", "r1", 100)...)
+			var session usageSession
+			session.begin(ctx, home, "root", time.Now())
+			appendUsageEvents(t, root, usageEvent("task_started", "new-root"), usageRecord("root", "new-root", "r2", 20, 0, 0), test.event, usageEvent("task_complete", "new-root"))
+			writeUsageRollout(t, home, "child", "root", completedUsageTurn("child", "old-child", "c1", 5)...)
+			got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), nil, nil, nil)
+			if got != (usage.Tokens{Input: 20}) || complete || !errors.Is(err, errUnverifiedChildren) {
+				t.Fatalf("unattributed late helper was certified: tokens=%+v complete=%t err=%v", got, complete, err)
+			}
+		})
+		t.Run(test.name+" fresh", func(t *testing.T) {
+			path := writeUsageRollout(t, t.TempDir(), "root", "", usageEvent("task_started", "new-root"), test.event,
+				usageRecord("root", "new-root", "r1", 20, 0, 0), usageEvent("task_complete", "new-root"))
+			budget := int64(maxUsageScanBytes)
+			spawned := map[string]bool{}
+			got, complete, children, err := readRolloutUsageFrom(context.Background(), rolloutMeta{ID: "root", path: path}, "root", &budget, rolloutUsageMode{spawned: spawned})
+			if got != (usage.Tokens{Input: 20}) || !complete || err != nil || !spawned["child"] || len(children) != 1 || children[0] != "child" {
+				t.Fatalf("fresh no-turn spawn lost: tokens=%+v complete=%t children=%v spawned=%v err=%v", got, complete, children, spawned, err)
+			}
+		})
+	}
+}
+
+func TestUsageSessionCurrentStdoutSpawnCertifiesNoTurnHelper(t *testing.T) {
+	for _, activity := range []struct{ name, event string }{
+		{"stdout only", ""},
+		{"legacy spawn", `{"ordinal":25,"type":"event_msg","payload":{"type":"collab_agent_spawn_end","new_thread_id":"child"}}`},
+		{"native activity", `{"ordinal":25,"type":"event_msg","payload":{"type":"item_completed","thread_id":"root","item":{"type":"SubAgentActivity","kind":"started","agent_thread_id":"child"}}}`},
+		{"spawn tool call", `{"ordinal":25,"type":"event_msg","payload":{"type":"item_completed","thread_id":"root","item":{"type":"CollabAgentToolCall","tool":"spawn_agent","status":"completed","receiver_thread_ids":["child"]}}}`},
+	} {
+		for _, receipt := range []struct {
+			name, kind, tool string
+			proved           bool
+		}{
+			{"completed spawn", "item.completed", "spawn_agent", true},
+			{"started spawn", "item.started", "spawn_agent", false},
+			{"other tool", "item.completed", "send_input", false},
+		} {
+			t.Run(activity.name+"/"+receipt.name, func(t *testing.T) {
+				ctx, home := context.Background(), t.TempDir()
+				root := writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "old-root", "r1", 100)...)
+				var session usageSession
+				session.begin(ctx, home, "root", time.Now())
+				events := []string{usageEvent("task_started", "new-root"), usageRecord("root", "new-root", "r2", 20, 0, 0)}
+				if activity.event != "" {
+					events = append(events, activity.event)
+				}
+				appendUsageEvents(t, root, append(events, usageEvent("task_complete", "new-root"))...)
+				writeUsageRollout(t, home, "child", "root", completedUsageTurn("child", "child-turn", "c1", 5)...)
+				var output jsonlOutput
+				line := fmt.Sprintf(`{"type":%q,"item":{"type":"collab_tool_call","tool":%q,"receiver_thread_ids":["child"]}}`+"\n", receipt.kind, receipt.tool)
+				_, _ = output.Write([]byte(line))
+				got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), nil, output.children, output.observationOnly, output.spawns)
+				want := usage.Tokens{Input: 20}
+				if receipt.proved {
+					want.Input = 25
+				}
+				if got != want || complete != receipt.proved || receipt.proved && err != nil || !receipt.proved && !errors.Is(err, errUnverifiedChildren) {
+					t.Fatalf("current spawn proof: tokens=%+v complete=%t err=%v want=%+v proved=%t", got, complete, err, want, receipt.proved)
+				}
+			})
+		}
+	}
+}
+
+func TestUsageSessionUnrelatedStdoutSpawnDoesNotCertifyLateOldNoTurn(t *testing.T) {
+	ctx, home := context.Background(), t.TempDir()
+	root := writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "old-root", "r1", 100)...)
+	writeUsageRollout(t, home, "old-child", "root", completedUsageTurn("old-child", "old-turn", "c1", 5)...)
+	var session usageSession
+	session.begin(ctx, home, "root", time.Now())
+	appendUsageEvents(t, root, usageEvent("task_started", "new-root"), usageRecord("root", "new-root", "r2", 20, 0, 0),
+		`{"ordinal":25,"type":"event_msg","payload":{"type":"item_completed","thread_id":"root","item":{"type":"SubAgentActivity","kind":"started","agent_thread_id":"old-child"}}}`,
+		usageEvent("task_complete", "new-root"))
+	writeUsageRollout(t, home, "new-child", "root", completedUsageTurn("new-child", "new-turn", "c2", 3)...)
+	var output jsonlOutput
+	_, _ = output.Write([]byte(`{"type":"item.completed","item":{"type":"collab_tool_call","tool":"spawn_agent","receiver_thread_ids":["new-child"]}}` + "\n"))
+	got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), nil, output.children, output.observationOnly, output.spawns)
+	if got != (usage.Tokens{Input: 23}) || complete || !errors.Is(err, errUnverifiedChildren) {
+		t.Fatalf("unrelated receipt certified late old helper: tokens=%+v complete=%t err=%v", got, complete, err)
+	}
+}
+
 func TestUsageSessionKnownPathSurvivesOldDateAndMtime(t *testing.T) {
 	ctx, home := context.Background(), t.TempDir()
 	root := writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "old", "r1", 100)...)

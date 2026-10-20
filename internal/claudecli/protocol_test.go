@@ -69,6 +69,71 @@ func TestOutputInvalidAssistantMessageAfterResult(t *testing.T) {
 	}
 }
 
+func TestOutputLateInvalidUsageForCoveredAssistant(t *testing.T) {
+	const known = `{"type":"result","subtype":"success","result":"answer","modelUsage":{"main":{"inputTokens":3,"cacheCreationInputTokens":5,"cacheReadInputTokens":7,"outputTokens":11}}}`
+	for _, tc := range []struct {
+		name, message string
+	}{
+		{"malformed usage", `{"id":"old","usage":{"input_tokens":"bad"}}`},
+		{"missing usage", `{"id":"old"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, recovered := range []bool{false, true} {
+				t.Run(fmt.Sprintf("recovered=%t", recovered), func(t *testing.T) {
+					o := jsonlOutput{}
+					data := assistantUsageEvent("old", 3, 5, 7, 2) + "\n" + known + "\n" +
+						`{"type":"assistant","parent_tool_use_id":null,"message":` + tc.message + `}` + "\n"
+					writeChunks(t, &o, numberResultEvents(data))
+					if o.result.UsageComplete || o.hasCumulative {
+						t.Fatalf("invalid late usage retained exact coverage: %+v cumulative=%t", o.result, o.hasCumulative)
+					}
+					if recovered {
+						writeChunks(t, &o, strings.TrimSuffix(known, "}")+`,"result_index":1}`+"\n")
+					}
+					o.finish()
+					if o.err != nil || o.result.Answer != "answer" || o.result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) || o.result.UsageComplete != recovered || o.hasCumulative != recovered {
+						t.Fatalf("late usage recovery=%t result=%+v cumulative=%t error=%v", recovered, o.result, o.hasCumulative, o.err)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestOutputLateOverflowForCoveredAssistant(t *testing.T) {
+	for _, tc := range []struct {
+		name, initial, late string
+		output              int64
+	}{
+		{
+			name:    "component maxima overflow",
+			initial: assistantUsageEvent("old", math.MaxInt64-20, 0, 0, 1),
+			late:    assistantUsageEvent("old", 1, 0, 0, math.MaxInt64-2),
+			output:  1,
+		},
+		{
+			name:    "assistant sum overflow",
+			initial: assistantUsageEvent("other", math.MaxInt64-20, 0, 0, 1) + "\n" + assistantUsageEvent("old", 0, 0, 0, 9),
+			late:    assistantUsageEvent("old", 0, 0, 0, 30),
+			output:  10,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			want := usage.Tokens{Input: math.MaxInt64 - 20, Output: tc.output}
+			result := fmt.Sprintf(`{"type":"result","subtype":"success","result":"answer","modelUsage":{"main":{"inputTokens":%d,"outputTokens":%d}}}`, want.Input, want.Output)
+			o := jsonlOutput{}
+			writeChunks(t, &o, numberResultEvents(tc.initial+"\n"+result+"\n"+tc.late+"\n"))
+			if o.result.UsageComplete || o.hasCumulative {
+				t.Fatalf("overflow retained exact coverage: %+v cumulative=%t", o.result, o.hasCumulative)
+			}
+			o.finish()
+			if o.err != nil || o.result.Answer != "answer" || o.result.Tokens != want || o.result.UsageComplete {
+				t.Fatalf("overflow lost known usage or retained exact coverage: %+v error=%v", o.result, o.err)
+			}
+		})
+	}
+}
+
 func TestOutputRetainsNewCallsAfterProvisionalAggregate(t *testing.T) {
 	const pending = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"worker"}]}`
 	const clear = `{"type":"system","subtype":"background_tasks_changed","tasks":[]}`
