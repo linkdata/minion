@@ -15,11 +15,11 @@ import (
 // Configured and native environment credentials bypass the stored-login check.
 // Model discovery runs separately.
 func CheckLogin(ctx context.Context, settings config.CodexConfig) (resultErr error) {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
 	if settings.APIKey != "" || os.Getenv("CODEX_API_KEY") != "" || os.Getenv("CODEX_ACCESS_TOKEN") != "" {
 		return nil
 	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
 	binary, err := aicli.ExecutablePath("codex")
 	if err != nil {
 		return err

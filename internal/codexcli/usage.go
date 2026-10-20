@@ -555,7 +555,7 @@ func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, 
 				}
 				if before.turns[record.TurnID] {
 					if old, exists := responses[record.ResponseID]; exists {
-						if old != tokens {
+						if old != tokens || responseTurns[record.ResponseID] != record.TurnID {
 							complete, snapshotKnown = false, false
 						}
 						continue
@@ -615,7 +615,8 @@ func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, 
 				continue
 			}
 			own := meta.ID == rootID || (!inheritedWithoutBoundary && (meta.HistoryStart == nil || event.Ordinal >= *meta.HistoryStart))
-			if own && (payload.ThreadID == "" || payload.ThreadID == meta.ID) && payload.TurnID != "" {
+			ownThread := payload.ThreadID == "" || payload.ThreadID == meta.ID
+			if own && ownThread && payload.TurnID != "" {
 				if capture != nil && admitTurn(payload.TurnID) {
 					capture.turns[payload.TurnID] = true
 				}
@@ -623,7 +624,7 @@ func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, 
 					continue
 				}
 			}
-			if own && (payload.ThreadID == "" || payload.ThreadID == meta.ID) {
+			if own && ownThread {
 				if payload.Type == "collab_agent_spawn_end" && payload.NewThreadID != "" {
 					appendSpawned(payload.NewThreadID)
 				}
@@ -654,7 +655,7 @@ func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, 
 					inherited = tokens
 				}
 			}
-			if payload.TurnID != "" && (payload.ThreadID == "" || payload.ThreadID == meta.ID) && (own || ownedTurns[payload.TurnID]) {
+			if payload.TurnID != "" && ownThread && (own || ownedTurns[payload.TurnID]) {
 				switch payload.Type {
 				case "task_started", "task_complete", "turn_aborted":
 					if !admitTurn(payload.TurnID) {

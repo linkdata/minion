@@ -551,12 +551,12 @@ func TestParseIndexChangesRejectsMalformedRecords(t *testing.T) {
 		raw  []byte
 		want string
 	}{
-		{"missing terminator", []byte(":100644"), "invalid offline git diff"},
-		{"odd field count", []byte("record\x00"), "invalid offline git diff"},
-		{"invalid record", []byte("wrong\x00changed\x00"), "invalid offline git change record"},
-		{"invalid identity", []byte(":100644 100644 short " + current + " M\x00changed\x00"), "invalid offline git change record"},
-		{"invalid mode", record("100888", "M"), "invalid offline git file mode"},
-		{"unknown", record("100644", "X"), `unsupported offline git change at "changed"`},
+		{"missing terminator", []byte(":100644"), "invalid Git index diff"},
+		{"odd field count", []byte("record\x00"), "invalid Git index diff"},
+		{"invalid record", []byte("wrong\x00changed\x00"), "invalid Git index change record"},
+		{"invalid identity", []byte(":100644 100644 short " + current + " M\x00changed\x00"), "invalid Git index change record"},
+		{"invalid mode", record("100888", "M"), "invalid Git index file mode"},
+		{"unknown", record("100644", "X"), `unsupported Git index change at "changed"`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			changes, objects, err := parseIndexChanges(test.raw)

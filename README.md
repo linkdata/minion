@@ -155,7 +155,7 @@ The critic's actual approval and blocker attestations stay separate from the app
 
 `job_timeout_minutes` covers preparation, model calls and publication per execution attempt and defaults to 240 minutes when omitted or 0; configuration bounds are listed under [Action boundary](#action-boundary). Each retry receives a fresh budget until [#97](https://github.com/linkdata/minion/issues/97) adds a persisted deadline. Admission, the reaction, cleanup and short fixed refusal/failure-reply budgets can run outside this deadline. The sequential service pauses notification polling and invitation checks during a job, so a stall can occupy that full budget. Replacing this setting with separate inactivity and max-runtime knobs remains [#97](https://github.com/linkdata/minion/issues/97) work.
 
-With a critic, both CLIs receive schemas for main proposals and critic verdicts; Minion validates their contents. Decoded main answer/refutations share 58 KiB, raw proposal JSON allows 6×58 KiB+128 bytes for escaping, and critic JSON allows 64 KiB. NULs are stripped from main answers; a blank answer cannot complete a review, comment, audit or critic-reviewed fix. Without a critic, the main model keeps its ordinary response format. Every task states the rendered publication budget. Oversized output is refused; a no-critic fix with valid changes can discard its unused summary.
+With a critic, both CLIs receive schemas for main proposals and critic verdicts; Minion validates their contents. Decoded main answer/refutations share 58 KiB, raw proposal JSON allows 6×58 KiB+128 bytes for escaping, and critic JSON allows 64 KiB. NULs are stripped from main answers; a blank answer cannot complete a review, comment, audit or no-change fix. Without a critic, the main model keeps its ordinary response format. Every task states the rendered publication budget. Oversized published output is refused; a fix with valid changes can discard its unused summary.
 
 Codex uses a private temporary project root per action/role beside the supplied source snapshot and reads source through its absolute path. Source `AGENTS.md` files are not loaded as project instructions, and source `.agents/skills` are not offered as skills. The automatic skills catalogue is hidden; only skills selected by Minion's config are named in its prompt. The source includes a sanitized local `.git` directory with complete object history. Even writable jobs can only read the source's `.agents`, `.codex`, and `.claude` paths; both CLIs protect the top-level `.git` from writes. Startup checks instruction and skill discovery with inert files using the installed Codex CLI, without an inference turn, and stops if those files enter an isolated job prompt. Repository source text remains untrusted context that can influence model output; inspect generated fixes and reports before relying on them.
 
@@ -191,7 +191,7 @@ Invitation checks become due every 15 minutes and run when the sequential monito
 
 ## Action boundary
 
-The AI CLIs enforce model-command sandboxing. Minion configures their grants, validates supplied inputs and returned results, and controls action lifecycle. The orchestrator prepares source and controls GitHub writes. The local `Runner` consumes a bounded, credential-free `Job` and returns changes, reports, usage and diagnostics in `Result`. These are local Go values; transport, strict decoding, authenticated delivery, remote failure-class serialization and cross-message `Status` ordering remain [#96](https://github.com/linkdata/minion/issues/96) work.
+The AI CLIs enforce model-command sandboxing. Minion configures their grants, validates supplied inputs and returned results, and controls action lifecycle. The orchestrator prepares source and controls GitHub writes. The local `Runner` consumes a bounded, credential-free `Job` and returns changes, reports, usage and diagnostics in `Result`. These are local Go values; transport, strict decoding, authenticated delivery, remote failure-class serialization and progress status ordering remain [#96](https://github.com/linkdata/minion/issues/96) work.
 
 Key contract and execution limits:
 
@@ -203,7 +203,7 @@ Key contract and execution limits:
 | Requester login | Same base spelling, optionally followed by one `[bot]` suffix; numeric identity and repository authorization remain required |
 | Model/effort; skills | Model and effort: 128 UTF-8 bytes each, no space, tab, CR, LF or NUL. Skills: 64 required+always-on sources per role, 4096 bytes per source |
 | Job runtime; critic budget | Greater than zero, at most 24 hours (configuration: 1–1440 minutes); 1–20 proposals with a critic, nonblocking threshold 0 through the configured `critic_max_rounds` |
-| Diagnostics | 100 per Result and Status contract (Status is defined but not emitted; production/transport is #96 work); 8 KiB per UTF-8 message, no NUL |
+| Diagnostics | 100 per Result; 8 KiB per UTF-8 message, no NUL |
 | Complete audit | Seven named regular files; 5 MiB per non-summary file; `REPORT.md` uses the published-text limit |
 | Transferred head / merge-base regular files | 10,000 per list; 64 MiB of contents across both |
 | Changed paths; omissions | 10,000 changed paths; 10,000 total distinct omissions across head and merge base |

@@ -275,6 +275,8 @@ if (process.env.GH_TOKEN) process.exit(10);
 const fs = require('fs');
 try { fs.readFileSync('/etc/passwd'); process.exit(11); }
 catch (error) { if (error.code !== 'ERR_ACCESS_DENIED') throw error; }
+try { require('child_process').execFileSync('/bin/true'); process.exit(12); }
+catch (error) { if (error.code !== 'ERR_ACCESS_DENIED') throw error; }
 JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 `), 0600); err != nil {
 			t.Fatal(err)

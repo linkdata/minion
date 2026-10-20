@@ -13,11 +13,12 @@ const modelCatalogue = `{"type":"control_response","response":{"subtype":"succes
 func TestValidate(t *testing.T) {
 	fakeExecutable(t, "bwrap", "exit 99\n")
 	fakeExecutable(t, "socat", "exit 99\n")
-	fakeExecutable(t, "claude", `if [ "$1" = '--version' ]; then
+	binary := fakeExecutable(t, "claude", `if [ "$1" = '--version' ]; then
   printf '%s\n' '2.1.302 (Claude Code)'
 elif [ "$3" = 'auth' ]; then
   printf '%s\n' '{"loggedIn":true}'
 else
+	printf '%s\n' "$@" > "$0.args"
   cat > "$0.input"
   printf '%s\n' '`+modelCatalogue+`'
 fi
@@ -36,6 +37,9 @@ fi
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg, err := Validate(context.Background(), config.ClaudeConfig{Model: tc.model, Effort: tc.effort})
+			if args := readFile(t, binary+".args"); !strings.Contains(args, "--no-session-persistence\n") || !strings.Contains(args, "--input-format\nstream-json\n") {
+				t.Fatalf("model discovery retained a session or lost initialization framing: %q", args)
+			}
 			if tc.fails {
 				if err == nil {
 					t.Fatal("expected invalid model configuration to fail")

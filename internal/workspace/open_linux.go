@@ -22,7 +22,7 @@ func sameChangeTime(before, after os.FileInfo) bool {
 }
 
 // Pin each parent directory before opening its child; a worker may still rename paths.
-// Collection re-resolves entries from /; entry/path bounds cap O(entries × depth) opens.
+// shortcut: re-resolve entries from / for simple race-safe opens; switch to walk-relative dirfds if bounded O(entries × depth) scans become slow.
 func openPath(name string, directory bool) (file *os.File, resultErr error) {
 	defer func() {
 		if resultErr != nil {

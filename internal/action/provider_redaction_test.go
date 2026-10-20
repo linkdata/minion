@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/linkdata/minion/internal/aicli"
+	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
 )
 
@@ -60,11 +62,27 @@ done
 				if err != nil {
 					t.Fatal(err)
 				}
-				answer, refutations, err := parseProposal(result.Answer)
+				answer, refutations, err := parseProposal(result.Answer, false)
 				if err != nil || answer != "public [redacted]" || refutations != "private [redacted]" {
 					t.Fatalf("decoded answer=%q refutations=%q error=%v", answer, refutations, err)
 				}
 			})
 		}
+	}
+}
+
+func TestRunnerRedactsReassembledSecretWithoutCritic(t *testing.T) {
+	for _, provider := range []string{"codex", "claude"} {
+		t.Run(provider, func(t *testing.T) {
+			job := testJob(command.Comment)
+			job.Main.Provider = provider
+			runner := Runner{WorkRoot: t.TempDir(), Codex: config.CodexConfig{APIKey: "fixture-secret"}, Claude: config.ClaudeConfig{APIKey: "fixture-secret"}, runModel: func(context.Context, modelRun) (aicli.Result, error) {
+				return aicli.Result{Answer: "public fixture-\x00secret text"}, nil
+			}}
+			result, err := runner.Run(context.Background(), job)
+			if err != nil || result.Answer != "public [redacted] text" {
+				t.Fatalf("NUL-split key was exposed: answer=%q error=%v", result.Answer, err)
+			}
+		})
 	}
 }

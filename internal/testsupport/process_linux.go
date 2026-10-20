@@ -14,6 +14,13 @@ import (
 	"time"
 )
 
+// Process pins one process created by a test-owned fixture.
+// Callers retain their deadlines and native-result assertions.
+type Process struct {
+	process *os.Process
+	stat    *os.File
+}
+
 // WaitExited observes the pinned proc stat file without reopening, signalling or closing it.
 func (p *Process) WaitExited(ctx context.Context) error {
 	ticker := time.NewTicker(5 * time.Millisecond)
@@ -43,13 +50,7 @@ func (p *Process) WaitExited(ctx context.Context) error {
 	}
 }
 
-// Process pins one process created by a test-owned fixture.
-// Callers retain their deadlines and native-result assertions.
-type Process struct {
-	process *os.Process
-	stat    *os.File
-}
-
+// PinProcess pins a fixture child identified by a published PID file.
 func PinProcess(pidFile string) (*Process, error) {
 	data, err := os.ReadFile(pidFile)
 	if err != nil {

@@ -163,3 +163,34 @@ func TestNoCriticRunnerKeepsChangedFixWithUnpublishedOversizedSummary(t *testing
 		}
 	}
 }
+
+func TestCriticRunnerKeepsChangedFixWithUnpublishedOversizedSummary(t *testing.T) {
+	for _, changed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("changed=%t", changed), func(t *testing.T) {
+			job := withClaudeCritic(testJob(command.Fix))
+			job.CriticMaxRounds = 1
+			calls := 0
+			runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+				calls++
+				if request.role == roleCritic {
+					return aicli.Result{Answer: approvedCritiqueJSON}, nil
+				}
+				if changed {
+					writeFixtureFile(t, request.dir, "source.txt", []byte("changed\n"))
+				}
+				return aicli.Result{Answer: proposalJSON(strings.Repeat("a\n", 20000), "")}, nil
+			}}
+			result, err := runner.Run(context.Background(), job)
+			if calls != 2 || len(result.Calls) != 2 {
+				t.Fatalf("review did not complete: calls=%d result=%+v error=%v", calls, result, err)
+			}
+			if changed {
+				if err != nil || result.Validate(job) != nil || result.Answer != "" || len(result.Changes) != 1 || string(result.Changes[0].Data) != "changed\n" {
+					t.Fatalf("reviewed fix discarded with unused summary: result=%+v error=%v", result, err)
+				}
+			} else if !errors.Is(err, monitor.ErrTerminalJob) || result.Answer != "" || len(result.Changes) != 0 {
+				t.Fatalf("unpublishable no-change answer accepted: result=%+v error=%v", result, err)
+			}
+		})
+	}
+}

@@ -21,6 +21,11 @@ func redactText(text, secret string, truncated bool) string {
 	encoded, _ := json.Marshal(secret)
 	jsonContent := string(encoded[1 : len(encoded)-1])
 	forms := [4]string{jsonContent, javascriptJSONContent(jsonContent), quoted[1 : len(quoted)-1], secret}
+	if truncated {
+		// Reserve NUL for masks; normalize literal NULs before matching.
+		text = strings.ReplaceAll(text, "\x00", "?")
+		forms[3] = strings.ReplaceAll(secret, "\x00", "?")
+	}
 	var replacements [8]string
 	longest := 0
 	for i, form := range forms {
@@ -39,7 +44,11 @@ func redactText(text, secret string, truncated bool) string {
 		if discard >= len(text) {
 			return ""
 		}
-		return strings.ReplaceAll(text[discard:], "\x00", "[redacted]")
+		text = text[discard:]
+		for strings.Contains(text, "\x00\x00") {
+			text = strings.ReplaceAll(text, "\x00\x00", "\x00")
+		}
+		return strings.ReplaceAll(text, "\x00", "[redacted]")
 	}
 	return text
 }
@@ -84,7 +93,11 @@ func javascriptJSONContent(encoded string) string {
 func RedactTail(tail *bounded.Tail, secret string) string {
 	text := strings.TrimSpace(redactText(tail.String(), secret, tail.Truncated))
 	if len(text) > bounded.DiagnosticBytes {
-		text = text[len(text)-bounded.DiagnosticBytes:]
+		cut := len(text) - bounded.DiagnosticBytes
+		if marker := strings.LastIndex(text[:min(len(text), cut+len("[redacted]"))], "[redacted]"); marker >= 0 && marker < cut && marker+len("[redacted]") > cut {
+			cut = marker + len("[redacted]")
+		}
+		text = text[cut:]
 	}
 	return text
 }

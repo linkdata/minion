@@ -264,14 +264,27 @@ func TestUsageSessionUnfinishedBaselineCannotCertifySnapshotDelta(t *testing.T) 
 }
 
 func TestUsageSessionDuplicateResponseAcrossOldAndNewTurnsIsIncomplete(t *testing.T) {
-	ctx, home := context.Background(), t.TempDir()
-	root := writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "old", "r1", 100)...)
-	var session usageSession
-	session.begin(ctx, home, "root", time.Now())
-	appendUsageEvents(t, root, usageRecord("root", "old", "shared", 5, 0, 0), usageEvent("task_started", "new"), usageRecord("root", "new", "shared", 5, 0, 0), usageEvent("task_complete", "new"))
-	got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), nil, nil, nil)
-	if got.Input != 0 || complete || err != nil {
-		t.Fatalf("cross-turn duplicate = %+v, %v, %v", got, complete, err)
+	oldRecord := usageRecord("root", "old", "shared", 5, 0, 0)
+	newRecord := usageRecord("root", "new", "shared", 5, 0, 0)
+	for _, test := range []struct {
+		name    string
+		records []string
+		want    int64
+	}{
+		{"old first", []string{oldRecord, newRecord}, 0},
+		{"new first", []string{newRecord, oldRecord}, 5},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, home := context.Background(), t.TempDir()
+			root := writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "old", "r1", 100)...)
+			var session usageSession
+			session.begin(ctx, home, "root", time.Now())
+			appendUsageEvents(t, root, append(append([]string{usageEvent("task_started", "new")}, test.records...), usageEvent("task_complete", "new"))...)
+			got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), nil, nil, nil)
+			if got.Input != test.want || complete || err != nil {
+				t.Fatalf("cross-turn duplicate = %+v, %v, %v; want input %d, incomplete", got, complete, err, test.want)
+			}
+		})
 	}
 }
 

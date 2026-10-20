@@ -293,7 +293,7 @@ func (c *Checkout) commitAndPush(ctx context.Context, pushURL, branch, botLogin,
 	if err := beforePush(c.expectedHead); err != nil {
 		return fmt.Errorf("record commit before push: %w", err)
 	}
-	_, err = runGit(ctx, c.path, "push", "--no-verify", "--", pushURL, "HEAD:refs/heads/"+branch)
+	_, err = runGit(ctx, c.path, "push", "--no-verify", "--force-with-lease=refs/heads/"+branch+":", "--", pushURL, "HEAD:refs/heads/"+branch)
 	return err
 }
 

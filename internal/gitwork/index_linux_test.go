@@ -65,6 +65,48 @@ func TestFixIndexRejectsNestedGitFIFOBeforeGitOpensIt(t *testing.T) {
 	}
 }
 
+func TestFixIndexRejectsIgnoredTrackedDirectoryWithGitMetadata(t *testing.T) {
+	for _, kind := range []string{"directory with FIFO HEAD", "gitfile"} {
+		t.Run(kind, func(t *testing.T) {
+			index, source := offlineIndexFixture(t, []workspace.File{
+				{Path: ".gitignore", Mode: workspace.Regular, Data: []byte("*.log\n")},
+				{Path: "tracked.log", Mode: workspace.Regular, Data: []byte("before")},
+			})
+			name := filepath.Join(source, "tracked.log")
+			if err := os.Remove(name); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(name, 0700); err != nil {
+				t.Fatal(err)
+			}
+			metadata := filepath.Join(name, ".git")
+			if kind == "gitfile" {
+				if err := os.WriteFile(metadata, []byte("gitdir: /tmp/untrusted\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if err := os.Mkdir(metadata, 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := syscall.Mkfifo(filepath.Join(metadata, "HEAD"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			marker := filepath.Join(t.TempDir(), "add-ran")
+			index.binary = filepath.Join(fakeOnPath(t, "git-proxy", "#!/bin/sh\nfor argument do\n if [ \"$argument\" = add ]; then touch "+shellQuote(marker)+"; exit 1; fi\ndone\nexec "+shellQuote(index.binary)+" \"$@\"\n"), "git-proxy")
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			_, err := index.Changes(ctx)
+			if err == nil || !strings.Contains(err.Error(), `tracked fix path "tracked.log" contains nested Git metadata`) || ctx.Err() != nil {
+				t.Fatalf("ignored tracked directory reached Git metadata: %v; deadline=%v", err, ctx.Err())
+			}
+			if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("Git add ran before metadata refusal: %v", err)
+			}
+		})
+	}
+}
+
 func TestFixIndexSkipsPopulatedSourceGitMetadata(t *testing.T) {
 	files := []workspace.File{{Path: "source", Mode: workspace.Regular, Data: []byte("before")}}
 	source := repositorySource(t, files)
@@ -167,7 +209,7 @@ func TestFixIndexRejectsTrackedFIFOAndSymlink(t *testing.T) {
 			changes, err := index.Changes(ctx)
 			want := "can only add regular files"
 			if kind == "symlink" {
-				want = `unsupported offline git change at "file"`
+				want = `unsupported Git index change at "file"`
 			}
 			if err == nil || !strings.Contains(err.Error(), want) || len(changes) != 0 || ctx.Err() != nil {
 				t.Fatalf("tracked %s returned %+v, %v; deadline=%v", kind, changes, err, ctx.Err())

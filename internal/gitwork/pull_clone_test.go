@@ -111,6 +111,7 @@ func TestClonePullRequestSkipsUnusedBaseTipPreflight(t *testing.T) {
 	}
 	source, _ := repositoryFixture(t, snapshot)
 	assertModelRepositoryGit(t, source, head+"\n", "rev-parse", "HEAD")
+	assertModelRepositoryGit(t, source, head+"\n", "rev-parse", "refs/remotes/minion/pr-head")
 	assertModelRepositoryGit(t, source, base+"\n", "rev-parse", "refs/remotes/origin/main")
 	assertModelRepositoryGit(t, source, fixture.base+"\n", "merge-base", "HEAD", "refs/remotes/origin/main")
 	assertModelRepositoryGit(t, source, blob+"\n", "rev-parse", "refs/remotes/origin/main:"+unused)

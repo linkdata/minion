@@ -231,6 +231,34 @@ func TestCommitAndPushPreservesDivergentRemote(t *testing.T) {
 	}
 }
 
+func TestCommitAndPushPreservesPreexistingAncestorRemote(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	const branch = "minion/fix-preexisting"
+	f.git(f.source, "push", f.remote, f.base+":refs/heads/"+branch)
+	if err := f.checkout.NewBranch(ctx, branch); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.checkout.Import(ctx, f.base, []workspace.Change{{Path: "fix.txt", Mode: workspace.Regular, Data: []byte("local fix\n")}}); err != nil {
+		t.Fatal(err)
+	}
+	var recorded string
+	err := f.checkout.commitAndPush(ctx, f.remote, branch, "bot", "local fix", func(sha string) error {
+		recorded = sha
+		return nil
+	})
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || !strings.Contains(err.Error(), "git push") || !strings.Contains(err.Error(), "[rejected]") {
+		t.Fatalf("create-only push accepted preexisting branch: %v", err)
+	}
+	if got := f.git(f.checkout.path, "rev-parse", "HEAD"); recorded == "" || recorded == f.base || recorded != got {
+		t.Fatalf("rejected push lost commit checkpoint: recorded=%s local=%s", recorded, got)
+	}
+	if got := f.git("", "--git-dir="+f.remote, "rev-parse", "refs/heads/"+branch); got != f.base {
+		t.Fatalf("rejected push changed remote: got=%s want=%s", got, f.base)
+	}
+}
+
 func TestStagedPathCountClassifiesPathListTruncation(t *testing.T) {
 	f := newFixture(t)
 	realGit, err := exec.LookPath("git")

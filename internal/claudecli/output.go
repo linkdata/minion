@@ -16,9 +16,7 @@ import (
 	"github.com/linkdata/minion/internal/usage"
 )
 
-const (
-	maxResetTimestamp = 253402300799 // 9999-12-31T23:59:59Z, the last RFC3339 year.
-)
+const maxResetTimestamp = 253402300799 // 9999-12-31T23:59:59Z, the last RFC3339 year.
 
 type eventUsage struct {
 	Input   *int64 `json:"input_tokens"`

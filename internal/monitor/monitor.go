@@ -270,7 +270,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				continue
 			}
 			if err != nil {
-				m.logf("skip command in %s: %v", item.HTMLURL, err)
+				m.logf("skip command in %s: %v", itemLocation(item), err)
 				continue
 			}
 			if _, done := store.Data.Processed[jobID(item.Key, preliminary.Name)]; done {
@@ -297,7 +297,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				continue
 			}
 			if err != nil {
-				m.logf("skip command in %s: %v", item.HTMLURL, err)
+				m.logf("skip command in %s: %v", itemLocation(item), err)
 				continue
 			}
 			job := Job{
@@ -314,7 +314,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			if item.Edited {
 				// The latest editor may not be the actor who introduced a
 				// retained command. Do not run commands from edited content.
-				m.logf("ignore edited command in %s (last editor @%s)", item.HTMLURL, item.Editor.Login)
+				m.logf("ignore edited command in %s (last editor @%s)", itemLocation(item), item.Editor.Login)
 				store.Data.Processed[job.ID] = started
 				if err := store.Save(); err != nil {
 					return stop(err)
@@ -368,7 +368,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				return stop(err)
 			}
 			if err != nil {
-				failures = append(failures, fmt.Errorf("react to %s: %w", item.HTMLURL, err))
+				failures = append(failures, fmt.Errorf("react to %s: %w", itemLocation(item), err))
 				continue
 			}
 			// Count an interrupted execution before starting it, so a crash cannot
@@ -391,7 +391,11 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				case !publicationFailure && (errors.Is(err, workroot.ErrUnsafe) || infrastructureFailure(err)):
 					jobFailure.Attempts--
 				}
-				store.Data.JobFailures[job.ID] = jobFailure
+				if jobFailure.Attempts == 0 && jobFailure.ReplyAttempts == 0 {
+					delete(store.Data.JobFailures, job.ID)
+				} else {
+					store.Data.JobFailures[job.ID] = jobFailure
+				}
 				if saveErr := store.Save(); saveErr != nil {
 					return stop(failureErr, saveErr)
 				}
@@ -544,12 +548,12 @@ func (m *Monitor) finishFailedJob(ctx context.Context, store *state.Store, job J
 				if saveErr := store.Save(); saveErr != nil {
 					return errors.Join(err, saveErr)
 				}
-				return fmt.Errorf("post failure reply to %s: %w", job.Source.HTMLURL, err)
+				return fmt.Errorf("post failure reply to %s: %w", itemLocation(job.Source), err)
 			}
-			m.logf("could not post failure reply to %s after %d attempts: %v", job.Source.HTMLURL, failure.ReplyAttempts, err)
+			m.logf("could not post failure reply to %s after %d attempts: %v", itemLocation(job.Source), failure.ReplyAttempts, err)
 		}
 	}
-	m.logf("stop retrying failed %s from %s", job.Command.Action, job.Source.HTMLURL)
+	m.logf("stop retrying failed %s from %s", job.Command.Action, itemLocation(job.Source))
 	store.Data.Processed[job.ID] = at
 	delete(store.Data.JobFailures, job.ID)
 	return store.Save()

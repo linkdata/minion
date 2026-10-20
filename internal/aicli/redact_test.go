@@ -136,7 +136,31 @@ func TestRedactTailMasksCompleteKeyAcrossCut(t *testing.T) {
 		t.Fatalf("expected truncated tail: %v, %t", err, tail.Truncated)
 	}
 	got := RedactTail(&tail, secret)
-	if strings.Contains(got, "BC") || !strings.HasSuffix(got, note) || len(got) > bounded.DiagnosticBytes {
-		t.Fatalf("complete key crossed cut or diagnostic bound: %q", got)
+	if want := fill + note; got != want {
+		t.Fatalf("complete key crossed cut or diagnostic changed: prefix %q, length %d; want length %d", got[:min(20, len(got))], len(got), len(want))
+	}
+}
+
+func TestRedactTailKeepsDiagnosticsBeforeAdjacentKeys(t *testing.T) {
+	const secret = "long-key-secret"
+	const note = "rate limit reached"
+	var tail bounded.Tail
+	if _, err := tail.Write([]byte(strings.Repeat("x", bounded.DiagnosticBytes) + note + strings.Repeat(secret, 100))); err != nil || !tail.Truncated {
+		t.Fatalf("expected truncated tail: %v, %t", err, tail.Truncated)
+	}
+	got := RedactTail(&tail, secret)
+	if !strings.HasSuffix(got, note+"[redacted]") || len(got) > bounded.DiagnosticBytes {
+		t.Fatalf("diagnostic lost to mask expansion: %q", got)
+	}
+}
+
+func TestRedactTailNormalizesLiteralNULBeforeMasking(t *testing.T) {
+	const secret = "a\x00b"
+	var tail bounded.Tail
+	if _, err := tail.Write([]byte(strings.Repeat("x", bounded.DiagnosticBytes) + "diagnostic\x00" + secret + " kept")); err != nil || !tail.Truncated {
+		t.Fatalf("expected truncated tail: %v, %t", err, tail.Truncated)
+	}
+	if got := RedactTail(&tail, secret); !strings.HasSuffix(got, "diagnostic?[redacted] kept") || strings.ContainsRune(got, '\x00') {
+		t.Fatalf("literal NUL hid the key or was mistaken for a mask: %q", got)
 	}
 }

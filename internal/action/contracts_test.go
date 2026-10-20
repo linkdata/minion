@@ -296,55 +296,6 @@ func TestResultJSONRoundTripPreservesValidatedPayload(t *testing.T) {
 	}
 }
 
-func TestStatusUsesConfiguredRoundBudget(t *testing.T) {
-	job := withClaudeCritic(testJob(command.Comment))
-	for _, limit := range []int{config.DefaultCriticMaxRounds, config.MaxCriticMaxRounds} {
-		job.CriticMaxRounds = limit
-		status := Status{Version: ProtocolVersion, Identity: job.Identity, State: StatusRunning, Phase: PhaseCritic, Round: limit, ReviewPhase: "full"}
-		if err := status.Validate(job); err != nil {
-			t.Fatalf("valid round %d: %v", limit, err)
-		}
-		status.Round++
-		if err := status.Validate(job); err == nil || err.Error() != "invalid action status" {
-			t.Fatalf("status beyond configured rounds: %v", err)
-		}
-	}
-}
-
-func TestStatusDistinguishesReviewPhases(t *testing.T) {
-	job := withClaudeCritic(testJob(command.Comment))
-	for _, tt := range []struct {
-		name        string
-		phase       StatusPhase
-		round       int
-		reviewPhase string
-		valid       bool
-	}{
-		{"initial full", PhaseCritic, 1, "full", true},
-		{"revised full", PhaseCritic, 2, "full", true},
-		{"finding verification", PhaseCritic, 2, "verification", true},
-		{"main", PhaseMain, 1, "", true},
-		{"missing critic phase", PhaseCritic, 1, "", false},
-		{"unknown critic phase", PhaseCritic, 1, "focused", false},
-		{"initial verification", PhaseCritic, 1, "verification", false},
-		{"unstarted review", PhaseCritic, 0, "full", false},
-		{"review phase on main", PhaseMain, 1, "full", false},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			status := Status{Version: ProtocolVersion, Identity: job.Identity, State: StatusRunning, Phase: tt.phase, Round: tt.round, ReviewPhase: tt.reviewPhase}
-			if err := status.Validate(job); (err == nil) != tt.valid {
-				t.Fatalf("status validation=%v; want valid=%v", err, tt.valid)
-			}
-		})
-	}
-	job.Critic = nil
-	job.CriticMaxRounds = 0
-	status := Status{Version: ProtocolVersion, Identity: job.Identity, State: StatusRunning, Phase: PhaseCritic, Round: 1, ReviewPhase: "full"}
-	if err := status.Validate(job); err == nil || !strings.Contains(err.Error(), "review phase") {
-		t.Fatalf("allowed critic status without a critic: %v", err)
-	}
-}
-
 func TestFixJobRejectsUnsupportedLayoutBeforeExecution(t *testing.T) {
 	for _, test := range []struct {
 		name    string
@@ -550,28 +501,6 @@ func TestPortableContractsRejectMismatches(t *testing.T) {
 			}
 		})
 	}
-	status := Status{Version: ProtocolVersion, Identity: job.Identity, State: "running", Phase: "main", Round: 1, ProgressSequence: 2, LogSequence: 3}
-	if err := status.Validate(job); err != nil {
-		t.Fatal(err)
-	}
-	for _, test := range []struct {
-		name, want string
-		change     func(*Status)
-	}{
-		{"negative progress age", "invalid action status", func(s *Status) { s.ProgressAge = -time.Nanosecond }},
-		{"version", "action status version or identity differs from job", func(s *Status) { s.Version++ }},
-		{"identity", "action status version or identity differs from job", func(s *Status) { s.Identity.AttemptID = "stale" }},
-		{"state", "invalid action status state", func(s *Status) { s.State = "unknown" }},
-		{"phase", "invalid action status phase", func(s *Status) { s.Phase = "unknown" }},
-	} {
-		t.Run("status/"+test.name, func(t *testing.T) {
-			changed := status
-			test.change(&changed)
-			if err := changed.Validate(job); err == nil || err.Error() != test.want {
-				t.Fatalf("status mismatch=%v want%q", err, test.want)
-			}
-		})
-	}
 }
 
 func TestResultRejectsInvalidRawAnswer(t *testing.T) {
@@ -654,47 +583,7 @@ func TestFixResultValidatesFinalLayoutAgainstOriginalSource(t *testing.T) {
 	}
 }
 
-func TestStatusRequiresMeaningfulStatePhasePairs(t *testing.T) {
-	job := testJob(command.Comment)
-	for _, test := range []struct {
-		state StatusState
-		phase StatusPhase
-		round int
-		valid bool
-	}{
-		{StatusReady, PhasePreparing, 0, true},
-		{StatusRunning, PhasePreparing, 0, true},
-		{StatusRunning, PhaseMain, 1, true},
-		{StatusRunning, PhaseCollecting, 1, true},
-		{StatusRunning, PhaseUploading, 1, true},
-		{StatusStopping, PhaseCleanup, 0, true},
-		{StatusCompleted, PhaseFinished, 1, true},
-		{StatusFailed, PhaseFinished, 0, true},
-		{StatusUnavailable, PhaseFinished, 0, true},
-		{StatusReady, PhaseMain, 1, false},
-		{StatusReady, PhasePreparing, 1, false},
-		{StatusRunning, PhaseFinished, 1, false},
-		{StatusStopping, PhaseFinished, 1, false},
-		{StatusCompleted, PhaseMain, 1, false},
-		{StatusFailed, PhaseMain, 1, false},
-		{StatusUnavailable, PhaseCleanup, 1, false},
-		{StatusCompleted, PhaseFinished, 0, false},
-		{StatusRunning, PhasePreparing, 1, false},
-		{StatusRunning, PhaseMain, 0, false},
-		{StatusRunning, PhaseCollecting, 0, false},
-		{StatusRunning, PhaseUploading, 0, false},
-	} {
-		t.Run(fmt.Sprintf("%s-%s-%d", test.state, test.phase, test.round), func(t *testing.T) {
-			status := Status{Version: ProtocolVersion, Identity: job.Identity, State: test.state, Phase: test.phase, Round: test.round}
-			err := status.Validate(job)
-			if (err == nil) != test.valid || (err != nil && !strings.Contains(err.Error(), "state and phase")) {
-				t.Fatalf("status pair validation=%v want valid=%t", err, test.valid)
-			}
-		})
-	}
-}
-
-func TestResultAndStatusShareDiagnosticBounds(t *testing.T) {
+func TestResultDiagnosticBounds(t *testing.T) {
 	job := testJob(command.Comment)
 	tooMany := make([]Diagnostic, maxDiagnostics+1)
 	for i := range tooMany {
@@ -718,11 +607,8 @@ func TestResultAndStatusShareDiagnosticBounds(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Answer.",
 				Calls: []CallUsage{{Provider: job.Main.Provider, Role: "main", Round: 1}}, Diagnostics: test.diagnostics}
-			status := Status{Version: ProtocolVersion, Identity: job.Identity, State: StatusRunning, Phase: PhaseMain, Round: 1, Diagnostics: test.diagnostics}
-			for name, err := range map[string]error{"result": result.Validate(job), "status": status.Validate(job)} {
-				if (err == nil) != (test.want == "") || (err != nil && !strings.Contains(err.Error(), test.want)) {
-					t.Fatalf("%s diagnostics validation=%v want%q", name, err, test.want)
-				}
+			if err := result.Validate(job); (err == nil) != (test.want == "") || (err != nil && !strings.Contains(err.Error(), test.want)) {
+				t.Fatalf("diagnostics validation=%v want%q", err, test.want)
 			}
 		})
 	}
@@ -783,41 +669,13 @@ func TestJobJSONRoundTrip(t *testing.T) {
 	}
 }
 
-func TestStatusBoundsRemainingRuntimeWithoutRenewingBudget(t *testing.T) {
-	job := testJob(command.Comment)
-	job.RuntimeBudget = time.Minute
-	for _, remaining := range []time.Duration{-1, 0, time.Nanosecond, time.Minute, time.Minute + 1} {
-		status := Status{Version: ProtocolVersion, Identity: job.Identity, State: StatusRunning, Phase: PhaseMain, Round: 1, RuntimeRemaining: remaining}
-		valid := remaining >= 0 && remaining <= job.RuntimeBudget
-		if err := status.Validate(job); (err == nil) != valid {
-			t.Fatalf("remaining=%s validation=%v want valid=%t", remaining, err, valid)
-		}
-		if !valid {
-			continue
-		}
-		data, err := json.Marshal(status)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var decoded Status
-		if err := json.Unmarshal(data, &decoded); err != nil || decoded.RuntimeRemaining != remaining || decoded.Validate(job) != nil || !strings.Contains(string(data), `"runtime_remaining_ns":`) {
-			t.Fatalf("remaining runtime lost in transport: %s,%v", data, err)
-		}
-	}
-	job.RuntimeBudget = time.Nanosecond
-	status := Status{Version: ProtocolVersion, Identity: job.Identity, State: StatusReady, Phase: PhasePreparing, RuntimeRemaining: 2 * time.Nanosecond}
-	if status.Validate(job) == nil {
-		t.Fatal("status renewed the supplied runtime budget")
-	}
-}
-
 func TestResultEmptyAnswerContract(t *testing.T) {
 	for _, test := range []struct {
 		action  command.Action
 		critic  bool
 		changed bool
 		valid   bool
-	}{{command.Fix, false, true, true}, {command.Fix, false, false, false}, {command.Fix, true, false, false}, {command.Fix, true, true, false}, {command.Comment, false, false, false}, {command.Review, false, false, false}, {command.SecurityAudit, false, false, false}} {
+	}{{command.Fix, false, true, true}, {command.Fix, false, false, false}, {command.Fix, true, false, false}, {command.Fix, true, true, true}, {command.Comment, false, false, false}, {command.Review, false, false, false}, {command.SecurityAudit, false, false, false}} {
 		t.Run(fmt.Sprintf("%s/critic=%t/changed=%t", test.action, test.critic, test.changed), func(t *testing.T) {
 			job := testJob(test.action)
 			if test.critic {

@@ -530,7 +530,7 @@ func TestParseProposal(t *testing.T) {
 		{name: "line prefix budget", input: proposalJSON(strings.Repeat("a\n", 25000), "")},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			answer, refutations, err := parseProposal(tt.input)
+			answer, refutations, err := parseProposal(tt.input, false)
 			if tt.valid {
 				if err != nil || answer != tt.answer || refutations != tt.refutations {
 					t.Fatalf("parseProposal() = %q, %q, %v", answer, refutations, err)

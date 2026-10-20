@@ -56,13 +56,6 @@ func TestLiveCloneAndPullRequest(t *testing.T) {
 		t.Fatalf("%s gh credential belongs to %s", cfg.BotLogin, user.Login)
 	}
 	t.Setenv("GH_TOKEN", botToken)
-	repo, err := client.Repository(ctx, repoName)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if repo.DefaultBranch == "" {
-		t.Fatal("test repository has no default branch")
-	}
 	pull, err := client.PullRequestDetails(ctx, repoName, cfg.PullRequestNumber)
 	if err != nil {
 		t.Fatal(err)

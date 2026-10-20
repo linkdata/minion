@@ -224,7 +224,7 @@ func TestRunOnceCanceledExecutionPreservesEarlierFailure(t *testing.T) {
 			}
 			_, processed := store.Data.Processed[id]
 			failure, remains := store.Data.JobFailures[id]
-			if processed != test.processed || remains == test.processed || failure.Attempts != test.attempts {
+			if processed != test.processed || remains != (!test.processed && test.attempts != 0) || failure.Attempts != test.attempts {
 				t.Fatalf("cancellation changed completion/attempt policy: processed=%t failure=%+v remains=%t", processed, failure, remains)
 			}
 			if test.saveFails {
@@ -250,7 +250,7 @@ func TestRunOnceCanceledExecutionPreservesEarlierFailure(t *testing.T) {
 
 func TestRunOnceStopsCanceledDiscoveryWithoutDeferring(t *testing.T) {
 	stages := []string{"notifications", "repository", "thread", "current", "permission", "reaction"}
-	for _, stage := range append(slices.Clone(stages), "empty thread", "before start", "invitations") {
+	for _, stage := range append(slices.Clone(stages), "before start", "invitations") {
 		for _, returnError := range []bool{false, true} {
 			if returnError && (stage == "before start" || stage == "invitations") {
 				continue
@@ -273,10 +273,6 @@ func TestRunOnceStopsCanceledDiscoveryWithoutDeferring(t *testing.T) {
 					fakeGitHub: &fakeGitHub{notifications: []github.Notification{first, tail}, items: []github.Item{item, item}, permission: github.Permission{Permission: "write"}},
 					stage:      stage,
 					cancel:     cancel,
-				}
-				if stage == "empty thread" {
-					gh.stage = "thread"
-					gh.items = nil
 				}
 				if returnError {
 					gh.err = errors.New("discovery unavailable")

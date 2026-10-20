@@ -310,7 +310,7 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 	}
 	result.Changes = changes
 	// A changed fix publishes a trusted branch reply; an oversized unused summary need not discard it.
-	if job.Action == command.Fix && job.Critic == nil && len(changes) != 0 && !publishableAnswer(answer) {
+	if job.Action == command.Fix && len(changes) != 0 && !publishableAnswer(answer) {
 		answer = ""
 	}
 	if job.Action == command.SecurityAudit {

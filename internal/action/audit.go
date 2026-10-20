@@ -93,8 +93,6 @@ func validateAuditFiles(ctx context.Context, files []workspace.File, validationD
 		if err := os.WriteFile(filepath.Join(validationDir, validator.artifact), byPath[validator.artifact], 0600); err != nil {
 			return "", fmt.Errorf("copy audit %s for validation: %w", validator.artifact, err)
 		}
-	}
-	for _, validator := range auditValidators {
 		script := filepath.Join(filepath.Dir(skill), validator.script)
 		// #nosec G204 -- the installed skill path and validation directory are checked paths; arguments bypass a shell.
 		cmd := auditNodeCommand(ctx, validationDir, tools.binary, tools.permissionFlag,

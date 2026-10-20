@@ -16,7 +16,7 @@ import (
 	"github.com/linkdata/minion/internal/workspace"
 )
 
-// ProtocolVersion identifies the complete-history Job, Result and Status contract.
+// ProtocolVersion identifies the complete-history Job and Result contract.
 const ProtocolVersion = 2
 
 const (
@@ -103,40 +103,6 @@ type Result struct {
 	Calls       []CallUsage        `json:"calls,omitempty"`
 	Refutations []Refutation       `json:"refutations,omitempty"`
 	Diagnostics []Diagnostic       `json:"diagnostics,omitempty"`
-}
-
-type StatusState string
-type StatusPhase string
-
-const (
-	StatusReady       StatusState = "ready"
-	StatusRunning     StatusState = "running"
-	StatusStopping    StatusState = "stopping"
-	StatusCompleted   StatusState = "completed"
-	StatusFailed      StatusState = "failed"
-	StatusUnavailable StatusState = "unavailable"
-	PhasePreparing    StatusPhase = "preparing"
-	PhaseMain         StatusPhase = roleMain
-	PhaseCritic       StatusPhase = roleCritic
-	PhaseCollecting   StatusPhase = "collecting"
-	PhaseUploading    StatusPhase = "uploading"
-	PhaseCleanup      StatusPhase = "cleanup"
-	PhaseFinished     StatusPhase = "finished"
-)
-
-type Status struct {
-	Version     int         `json:"version"`
-	Identity    Identity    `json:"identity"`
-	State       StatusState `json:"state"`
-	Phase       StatusPhase `json:"phase"`
-	Round       int         `json:"round"`
-	ReviewPhase string      `json:"review_phase,omitempty"`
-	// Transport receivers must compare sequences with the previous accepted status for this attempt.
-	ProgressSequence uint64        `json:"progress_sequence"`
-	LogSequence      uint64        `json:"log_sequence"`
-	ProgressAge      time.Duration `json:"progress_age_ns"`
-	RuntimeRemaining time.Duration `json:"runtime_remaining_ns"`
-	Diagnostics      []Diagnostic  `json:"diagnostics,omitempty"`
 }
 
 func (id Identity) validate() error {
@@ -271,7 +237,7 @@ func (r Result) validate(j Job, complete bool) error {
 	if !r.matchesJob(j) {
 		return errors.New("action result version, identity or source differs from job")
 	}
-	requiresAnswer := j.Action != command.Fix || j.Critic != nil || len(r.Changes) == 0
+	requiresAnswer := j.Action != command.Fix || len(r.Changes) == 0
 	invalidCompleteAnswer := complete && (!publishableAnswer(r.Answer) || (requiresAnswer && strings.TrimSpace(r.Answer) == ""))
 	if (!complete && !boundedText(r.Answer, maxOutputBytes)) || invalidCompleteAnswer {
 		return errors.New("action answer is blank, invalid or exceeds limit")
@@ -425,48 +391,4 @@ func validateResultArtifacts(j Job, files []workspace.File, complete bool) error
 		}
 	}
 	return nil
-}
-
-func (s Status) Validate(j Job) error {
-	if err := j.Validate(); err != nil {
-		return err
-	}
-	if s.Version != ProtocolVersion || s.Identity != j.Identity {
-		return errors.New("action status version or identity differs from job")
-	}
-	switch s.State {
-	case StatusReady, StatusRunning, StatusStopping, StatusCompleted, StatusFailed, StatusUnavailable:
-	default:
-		return errors.New("invalid action status state")
-	}
-	switch s.Phase {
-	case PhasePreparing, PhaseMain, PhaseCritic, PhaseCollecting, PhaseUploading, PhaseCleanup, PhaseFinished:
-	default:
-		return errors.New("invalid action status phase")
-	}
-	validPair := false
-	switch s.State {
-	case StatusReady:
-		validPair = s.Phase == PhasePreparing && s.Round == 0
-	case StatusRunning, StatusStopping:
-		validPair = s.Phase != PhaseFinished
-	case StatusCompleted, StatusFailed, StatusUnavailable:
-		validPair = s.Phase == PhaseFinished
-	}
-	if !validPair || (s.State == StatusCompleted && s.Round == 0) ||
-		(s.Phase == PhasePreparing && s.Round != 0) ||
-		((s.Phase == PhaseMain || s.Phase == PhaseCollecting || s.Phase == PhaseUploading) && s.Round < 1) {
-		return errors.New("invalid action status state and phase")
-	}
-	if s.Phase == PhaseCritic {
-		if j.Critic == nil || s.Round < 1 || (s.ReviewPhase != reviewFull && s.ReviewPhase != reviewVerification) || (s.ReviewPhase == reviewVerification && s.Round == 1) {
-			return errors.New("invalid action status review phase")
-		}
-	} else if s.ReviewPhase != "" {
-		return errors.New("unexpected action status review phase")
-	}
-	if s.Round < 0 || s.Round > j.rounds() || s.ProgressAge < 0 || s.RuntimeRemaining < 0 || s.RuntimeRemaining > j.RuntimeBudget {
-		return errors.New("invalid action status")
-	}
-	return validDiagnostics(s.Diagnostics)
 }

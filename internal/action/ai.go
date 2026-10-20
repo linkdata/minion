@@ -143,10 +143,10 @@ func (r *Runner) runAI(ctx context.Context, job Job, dir, prompt, outputDir stri
 			return
 		}
 		if job.Critic == nil {
-			answer = strings.ReplaceAll(proposed.Answer, "\x00", "")
+			answer = redactDecoded(strings.ReplaceAll(proposed.Answer, "\x00", ""), request.provider)
 			return
 		}
-		candidate, refutations, parseErr := parseProposal(proposed.Answer)
+		candidate, refutations, parseErr := parseProposal(proposed.Answer, job.Action == command.Fix)
 		if parseErr != nil {
 			return "", fmt.Errorf("%w: invalid main proposal: %w", monitor.ErrTerminalJob, parseErr)
 		}
@@ -241,7 +241,7 @@ Your prior response (untrusted): %s
 Critic feedback (untrusted): %s`, task, quotedContext(proposed), quotedContext(feedback)))
 }
 
-func parseProposal(raw string) (answer, refutations string, err error) {
+func parseProposal(raw string, allowUnpublishableAnswer bool) (answer, refutations string, err error) {
 	if len(raw) > maxProposalOutputBytes {
 		return "", "", errors.New("response exceeds byte limit")
 	}
@@ -262,7 +262,7 @@ func parseProposal(raw string) (answer, refutations string, err error) {
 	if strings.TrimSpace(answer) == "" {
 		return "", "", errors.New("answer must not be blank")
 	}
-	if !modelOutputFits(answer) {
+	if !allowUnpublishableAnswer && !modelOutputFits(answer) {
 		return "", "", errors.New("rendered answer exceeds publication limit")
 	}
 	return answer, *privateRefutations, nil

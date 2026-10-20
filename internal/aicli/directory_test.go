@@ -97,6 +97,7 @@ func TestResolvePathKeepsFilesystemSemanticsWithoutCreating(t *testing.T) {
 		{"relative missing suffix", relative + "/../new/home", filepath.Join(actual, "new", "home")},
 		{"missing suffix dot", root + "/missing/./x", filepath.Join(root, "missing", "x")},
 		{"missing suffix trailing dot", root + "/missing/.", filepath.Join(root, "missing")},
+		{"missing suffix trailing separator", root + "/missing/", filepath.Join(root, "missing")},
 		{"dangling link", dangling + "/home", ""},
 		{"unknown parent", root + "/absent/../target", ""},
 	} {

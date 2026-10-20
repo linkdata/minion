@@ -157,7 +157,6 @@ func BenchmarkDeepSharedPaths(b *testing.B) {
 			}
 		}
 	})
-
 }
 
 func TestFoldPathMatchesUnicodeSimpleCaseFolding(t *testing.T) {

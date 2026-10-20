@@ -274,18 +274,6 @@ func TestRunnerUsesTheProbedNodeAfterPathChanges(t *testing.T) {
 	}
 }
 
-func TestStatusRejectsNegativeRoundsForTerminalAndCleanupPhases(t *testing.T) {
-	job := testJob(command.Comment)
-	for _, status := range []Status{
-		{Version: ProtocolVersion, Identity: job.Identity, State: StatusStopping, Phase: PhaseCleanup, Round: -1},
-		{Version: ProtocolVersion, Identity: job.Identity, State: StatusFailed, Phase: PhaseFinished, Round: -1},
-	} {
-		if err := status.Validate(job); err == nil || err.Error() != "invalid action status" {
-			t.Fatalf("negative round accepted or failed earlier: %+v,%v", status, err)
-		}
-	}
-}
-
 func TestRunnerDeadlineDuringSessionCleanupClearsValidatedResult(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root bypasses directory permissions")

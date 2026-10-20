@@ -22,7 +22,6 @@ func TestWritablePathsRejectGitMetadataAliases(t *testing.T) {
 			if ValidPath(name) {
 				t.Fatalf("accepted writable Git metadata alias %q", name)
 			}
-
 		}
 	}
 	alias := ".g\u200cit/config"

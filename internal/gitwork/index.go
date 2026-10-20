@@ -103,6 +103,13 @@ func (index *OfflineIndex) Changes(ctx context.Context) ([]workspace.Change, err
 		if err != nil {
 			return nil, fmt.Errorf("tracked fix path %q: %w", name, err)
 		}
+		if info.IsDir() {
+			if _, err := os.Lstat(filepath.Join(filename, ".git")); err == nil {
+				return nil, fmt.Errorf("tracked fix path %q contains nested Git metadata", name)
+			} else if !errors.Is(err, os.ErrNotExist) {
+				return nil, fmt.Errorf("tracked fix path %q nested Git metadata: %w", name, err)
+			}
+		}
 		if !info.Mode().IsRegular() {
 			// Git diagnoses type changes; no data is opened here.
 			continue
@@ -359,10 +366,10 @@ func (index *OfflineIndex) checkControlFiles(ctx context.Context) error {
 func parseIndexChanges(raw []byte) ([]workspace.Change, []string, error) {
 	parts, err := splitNUL(raw)
 	if err != nil {
-		return nil, nil, fmt.Errorf("invalid offline git diff: %w", err)
+		return nil, nil, fmt.Errorf("invalid Git index diff: %w", err)
 	}
 	if len(parts)%2 != 0 {
-		return nil, nil, errors.New("invalid offline git diff")
+		return nil, nil, errors.New("invalid Git index diff")
 	}
 	if len(parts)/2 > workspace.MaxChanges {
 		return nil, nil, fmt.Errorf("%w: fix result exceeds changed file limit", ErrTooManyFiles)
@@ -371,11 +378,11 @@ func parseIndexChanges(raw []byte) ([]workspace.Change, []string, error) {
 	for i := 0; i < len(parts); i += 2 {
 		fields := strings.Fields(string(parts[i]))
 		if len(fields) != 5 || len(fields[0]) != 7 || fields[0][0] != ':' || len(fields[1]) != 6 || !workspace.ValidSHA(fields[2]) || !workspace.ValidSHA(fields[3]) {
-			return nil, nil, errors.New("invalid offline git change record")
+			return nil, nil, errors.New("invalid Git index change record")
 		}
 		mode, err := strconv.ParseUint(fields[1], 8, 32)
 		if err != nil {
-			return nil, nil, errors.New("invalid offline git file mode")
+			return nil, nil, errors.New("invalid Git index file mode")
 		}
 		change := workspace.Change{Path: string(parts[i+1]), Mode: uint32(mode)}
 		switch fields[4] {
@@ -383,7 +390,7 @@ func parseIndexChanges(raw []byte) ([]workspace.Change, []string, error) {
 			change.Delete, change.Mode = true, 0
 		case "A", "M":
 		default:
-			return nil, nil, fmt.Errorf("unsupported offline git change at %q", change.Path)
+			return nil, nil, fmt.Errorf("unsupported Git index change at %q", change.Path)
 		}
 		changes, objects = append(changes, change), append(objects, fields[3])
 	}
