@@ -2,6 +2,7 @@ package claudecli
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 
@@ -18,7 +19,7 @@ func TestValidate(t *testing.T) {
 elif [ "$3" = 'auth' ]; then
   printf '%s\n' '{"loggedIn":true}'
 else
-	printf '%s\n' "$@" > "$0.args"
+  printf '%s\n' "$@" > "$0.args"
   cat > "$0.input"
   printf '%s\n' '`+modelCatalogue+`'
 fi
@@ -36,6 +37,9 @@ fi
 		{name: "unsupported effort", effort: "max", fails: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			if err := os.Remove(binary + ".args"); err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
 			cfg, err := Validate(context.Background(), config.ClaudeConfig{Model: tc.model, Effort: tc.effort})
 			if args := readFile(t, binary+".args"); !strings.Contains(args, "--no-session-persistence\n") || !strings.Contains(args, "--input-format\nstream-json\n") {
 				t.Fatalf("model discovery retained a session or lost initialization framing: %q", args)

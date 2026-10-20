@@ -141,7 +141,7 @@ func TestGitEnvironmentPinsHardening(t *testing.T) {
 }
 
 func TestCommitAndPushRefusesInvalidArgumentsAndHead(t *testing.T) {
-	for _, kind := range []string{"branch", "blank message", "NUL message", "moved HEAD", "detached HEAD", "wrong branch"} {
+	for _, kind := range []string{"branch", "blank message", "NUL message", "moved HEAD", "detached HEAD", "wrong branch", "nil recorder"} {
 		t.Run(kind, func(t *testing.T) {
 			f := newFixture(t)
 			ctx := context.Background()
@@ -168,15 +168,21 @@ func TestCommitAndPushRefusesInvalidArgumentsAndHead(t *testing.T) {
 			case "wrong branch":
 				f.git(f.checkout.path, "switch", "--create", "other-branch")
 				want = "does not match push branch"
+			case "nil recorder":
+				want = "before-push recorder is required"
 			}
 			head := f.git(f.checkout.path, "rev-parse", "HEAD")
 			refs := f.git(f.checkout.path, "for-each-ref", "--format=%(refname) %(objectname)")
 			stage := f.git(f.checkout.path, "diff", "--cached", "--raw")
 			remoteRefs := f.git("", "--git-dir="+f.remote, "for-each-ref", "--format=%(refname) %(objectname)")
-			err := f.checkout.commitAndPush(ctx, f.remote, pushBranch, "bot", message, func(string) error {
+			recorder := func(string) error {
 				t.Fatal("invalid publication reached before-push recorder")
 				return nil
-			})
+			}
+			if kind == "nil recorder" {
+				recorder = nil
+			}
+			err := f.checkout.commitAndPush(ctx, f.remote, pushBranch, "bot", message, recorder)
 			if err == nil || !strings.Contains(err.Error(), want) {
 				t.Fatalf("%s was not refused: %v", kind, err)
 			}

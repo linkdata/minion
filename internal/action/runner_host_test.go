@@ -11,13 +11,11 @@ import (
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
-	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/monitor"
-	"github.com/linkdata/minion/internal/workroot"
 )
 
 func TestRunnerWorkRootIsolation(t *testing.T) {
-	for _, kind := range []string{"main read", "critic read", "main skill", "critic skill", "system read"} {
+	for _, kind := range []string{"main skill", "critic skill", "system read"} {
 		t.Run(kind, func(t *testing.T) {
 			root := t.TempDir()
 			work := filepath.Join(root, "work")
@@ -27,10 +25,6 @@ func TestRunnerWorkRootIsolation(t *testing.T) {
 			runner := Runner{}
 			job := withClaudeCritic(testJob(command.Comment))
 			switch kind {
-			case "main read":
-				runner.Codex.ReadOnlyDirs = []string{root}
-			case "critic read":
-				runner.Claude.ReadOnlyDirs = []string{root}
 			case "main skill", "critic skill":
 				skill := filepath.Join(work, "skill", "SKILL.md")
 				writeFixtureFile(t, work, "skill/SKILL.md", []byte("trusted skill"))
@@ -48,13 +42,8 @@ func TestRunnerWorkRootIsolation(t *testing.T) {
 			}
 		})
 	}
-	overlap := t.TempDir()
-	runner := Runner{WorkRoot: overlap, Codex: config.CodexConfig{ReadOnlyDirs: []string{overlap}}, runModel: forbidModel(t)}
-	if _, err := runner.Run(context.Background(), testJob(command.Comment)); !errors.Is(err, workroot.ErrUnsafe) || errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "work root overlaps") {
-		t.Fatalf("unsafe root=%v", err)
-	}
 	missing := filepath.Join(t.TempDir(), "missing")
-	runner = Runner{WorkRoot: missing, runModel: forbidModel(t)}
+	runner := Runner{WorkRoot: missing, runModel: forbidModel(t)}
 	if result, err := runner.Run(context.Background(), testJob(command.Comment)); !errors.Is(err, os.ErrNotExist) || errors.Is(err, monitor.ErrTerminalJob) || len(result.Calls) != 0 {
 		t.Fatalf("missing trusted root recreated or used: %+v,%v", result, err)
 	}

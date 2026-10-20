@@ -115,21 +115,36 @@ func TestWorkRootPreflightRequiresWorkspaceBackend(t *testing.T) {
 }
 
 func TestWorkRootPreflightProtectsConfigurationAndCredentials(t *testing.T) {
+	const source = "https://github.com/owner/repo/tree/pinned/skills/example"
 	for _, kind := range []string{"clean", "config", "codex home", "claude home", "unused claude home", "credential alias", "gh home", "default gh home", "gh credential alias"} {
 		t.Run(kind, func(t *testing.T) {
 			root := t.TempDir()
 			isolateHostPaths(t, root)
-			work, public, native := filepath.Join(root, "work"), filepath.Join(root, "public"), filepath.Join(root, "native")
-			for _, dir := range []string{work, public, native} {
+			parent := ".agents"
+			if kind == "claude home" {
+				parent = ".claude"
+			}
+			work, public, native := filepath.Join(root, "work"), filepath.Join(root, parent, "skills", "example"), filepath.Join(root, "native")
+			for _, dir := range []string{work, native} {
 				if err := os.Mkdir(dir, 0700); err != nil {
 					t.Fatal(err)
 				}
+			}
+			if err := os.MkdirAll(public, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(public, "SKILL.md"), []byte("Test skill.\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			metadata := fmt.Sprintf(`{"url":%q,"commit":%q}`, source, strings.Repeat("a", 40))
+			if err := os.WriteFile(filepath.Join(public, ".minion-install.json"), []byte(metadata), 0600); err != nil {
+				t.Fatal(err)
 			}
 			t.Setenv("CODEX_HOME", native)
 			t.Setenv("CLAUDE_CONFIG_DIR", native)
 			t.Setenv("GH_CONFIG_DIR", native)
 			t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
-			cfg := config.Config{Main: "codex", WorkRoot: work, Codex: config.CodexConfig{ReadOnlyDirs: []string{public}}}
+			cfg := config.Config{Main: "codex", WorkRoot: work, Commands: map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{source}}}}
 			configPath := filepath.Join(root, "config.json")
 			switch kind {
 			case "config":
@@ -138,7 +153,6 @@ func TestWorkRootPreflightProtectsConfigurationAndCredentials(t *testing.T) {
 				t.Setenv("CODEX_HOME", public)
 			case "claude home":
 				cfg.Main = "claude"
-				cfg.Claude.ReadOnlyDirs = []string{public}
 				t.Setenv("CLAUDE_CONFIG_DIR", public)
 			case "unused claude home":
 				t.Setenv("CLAUDE_CONFIG_DIR", public)
@@ -206,7 +220,7 @@ func TestWorkRootPreflightRequiresGlobalClaudeHomeWithExplicitNativeHomes(t *tes
 func TestPrivatePathsRejectAliasesIntoSelectedInstalledSkill(t *testing.T) {
 	const source = "https://github.com/owner/repo/tree/pinned/skills/example"
 	for _, provider := range []string{"codex", "claude"} {
-		for _, kind := range []string{"config", "credential", "git credentials", "git config", "xdg git credentials", "xdg git config", "ssh home"} {
+		for _, kind := range []string{"config", "credential", "git credentials", "git config", "netrc", "xdg git credentials", "xdg git config", "ssh home"} {
 			t.Run(provider+"/"+kind, func(t *testing.T) {
 				root := t.TempDir()
 				isolateHostPaths(t, root)
@@ -242,6 +256,8 @@ func TestPrivatePathsRejectAliasesIntoSelectedInstalledSkill(t *testing.T) {
 					privatePath = filepath.Join(root, ".git-credentials")
 				case "git config":
 					privatePath = filepath.Join(root, ".gitconfig")
+				case "netrc":
+					privatePath = filepath.Join(root, ".netrc")
 				case "xdg git credentials":
 					privatePath = filepath.Join(root, "config", "git", "credentials")
 				case "xdg git config":

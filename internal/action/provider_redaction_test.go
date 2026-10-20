@@ -1,11 +1,13 @@
 package action
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -131,7 +133,7 @@ func TestAuditReportRedactsNULSplitConfiguredKeyBeforeCriticAndPublication(t *te
 					file.Data = []byte("Architecture includes " + splitKey)
 				}
 				if file.Path == "coverage-ledger.json" {
-					file.Data = []byte(`[{"status":"covered","note":"fixture-audit-\u0000secret"}]`)
+					file.Data = []byte(`[{"status":"covered","note":"fixture-audit-\u0000secret","fixture-audit-\u0073ecret":"fixture-audit-\u0073ecret","safe":"<safe>"}]`)
 				}
 				writeFixtureFile(t, request.outputDir, file.Path, file.Data)
 			}
@@ -181,10 +183,81 @@ func TestAuditReportRedactsNULSplitConfiguredKeyBeforeCriticAndPublication(t *te
 }
 
 func redactedAuditLedger(data []byte) bool {
-	var ledger []struct {
-		Note string `json:"note"`
+	var ledger []map[string]any
+	return json.Unmarshal(data, &ledger) == nil && len(ledger) == 1 &&
+		ledger[0]["note"] == "[redacted]" && ledger[0]["[redacted]"] == "[redacted]" &&
+		ledger[0]["safe"] == "<safe>" && bytes.Contains(data, []byte("<safe>"))
+}
+
+func TestUnchangedAuditJSONPreservesOriginalBytes(t *testing.T) {
+	root := t.TempDir()
+	original := []byte(" [ { \"status\": \"covered\", \"note\": \"\\u0061 <safe>\", \"number\": 123, \"flag\": false, \"missing\": null } ]\n")
+	writeFixtureFile(t, root, "coverage-ledger.json", original)
+	files, diagnostics, err := readAuditArtifacts(root, false, "fixture-audit-secret")
+	if err != nil || len(diagnostics) != 0 || len(files) != 1 || !bytes.Equal(files[0].Data, original) {
+		t.Fatalf("unchanged JSON bytes=%q diagnostics=%+v error=%v", files, diagnostics, err)
 	}
-	return json.Unmarshal(data, &ledger) == nil && len(ledger) == 1 && ledger[0].Note == "[redacted]"
+}
+
+func TestAuditJSONScalarConfiguredKeysAreRedacted(t *testing.T) {
+	for _, literal := range []string{"123", "true", "false", "null"} {
+		t.Run(literal, func(t *testing.T) {
+			root := t.TempDir()
+			writeFixtureFile(t, root, "coverage-ledger.json", []byte(`{"value":[`+literal+`]}`))
+			files, diagnostics, err := readAuditArtifacts(root, false, literal)
+			if err != nil || len(diagnostics) != 0 || len(files) != 1 || bytes.Contains(files[0].Data, []byte(literal)) {
+				t.Fatalf("scalar redaction: files=%v diagnostics=%+v error=%v", files, diagnostics, err)
+			}
+			var parsed struct {
+				Value []any `json:"value"`
+			}
+			if err := json.Unmarshal(files[0].Data, &parsed); err != nil || len(parsed.Value) != 1 || parsed.Value[0] != "[redacted]" {
+				t.Fatalf("scalar key survived JSON redaction: %s, %+v, %v", files[0].Data, parsed, err)
+			}
+		})
+	}
+}
+
+func TestAuditJSONRejectsUnsafeKeyEncodings(t *testing.T) {
+	for _, test := range []struct {
+		name, secret, source, want string
+	}{
+		{"nested escaped duplicate", "fixture-audit-secret", `{"outer":[{"note":"fixture-audit-\u0073ecret","n\u006fte":"safe"}]}`, "duplicate object keys"},
+		{"redacted key collision", "fixture-audit-secret", `{"fixture-audit-secret":"A","[redacted]":"B"}`, "keys collide after redaction"},
+		{"key in raw Unicode escape", "1234", `{"note":"\u1234"}`, "configured key in source syntax"},
+		{"key in JSON punctuation", ":", `{"note":"safe"}`, "configured key in source syntax"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeFixtureFile(t, root, "coverage-ledger.json", []byte(test.source))
+			if _, _, err := readAuditArtifacts(root, false, test.secret); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("unsafe JSON was accepted: %v", err)
+			}
+			files, diagnostics, err := readAuditArtifacts(root, true, test.secret)
+			if err != nil || len(files) != 0 || len(diagnostics) != 1 || diagnostics[0].Code != "artifact_unavailable" {
+				t.Fatalf("unsafe partial JSON retained: files=%d diagnostics=%+v error=%v", len(files), diagnostics, err)
+			}
+		})
+	}
+}
+
+func TestAuditJSONRedactsMarkerLikeConfiguredKeys(t *testing.T) {
+	for _, secret := range []string{"redacted", "[redacted]"} {
+		t.Run(secret, func(t *testing.T) {
+			root := t.TempDir()
+			writeFixtureFile(t, root, "coverage-ledger.json", []byte(`{"note":`+strconv.Quote(secret)+`}`))
+			files, diagnostics, err := readAuditArtifacts(root, false, secret)
+			if err != nil || len(diagnostics) != 0 || len(files) != 1 || bytes.Contains(files[0].Data, []byte(secret)) {
+				t.Fatalf("configured key survived JSON redaction: files=%v diagnostics=%+v error=%v", files, diagnostics, err)
+			}
+			var parsed struct {
+				Note string `json:"note"`
+			}
+			if err := json.Unmarshal(files[0].Data, &parsed); err != nil || parsed.Note == "" || strings.Contains(parsed.Note, secret) {
+				t.Fatalf("JSON redaction result=%q error=%v", files[0].Data, err)
+			}
+		})
+	}
 }
 
 func TestIncompleteAuditReportRedactsConfiguredKey(t *testing.T) {
@@ -220,6 +293,30 @@ func TestAuditReportRedactionRechecksByteLimit(t *testing.T) {
 	files, diagnostics, err := readAuditArtifacts(root, true, "x")
 	if err != nil || len(files) != 0 || len(diagnostics) != 1 || diagnostics[0].Code != "artifact_unavailable" {
 		t.Fatalf("oversized partial report retained: files=%v diagnostics=%+v error=%v", files, diagnostics, err)
+	}
+}
+
+func TestAuditJSONRedactionRechecksByteLimit(t *testing.T) {
+	root := t.TempDir()
+	writeFixtureFile(t, root, "coverage-ledger.json", []byte(`{"note":"`+strings.Repeat("x", maxAuditArtifactBytes/3)+`"}`))
+	if _, _, err := readAuditArtifacts(root, false, "x"); err == nil {
+		t.Fatal("expanded JSON exceeded artifact byte limit")
+	}
+	files, diagnostics, err := readAuditArtifacts(root, true, "x")
+	if err != nil || len(files) != 0 || len(diagnostics) != 1 || diagnostics[0].Code != "artifact_unavailable" {
+		t.Fatalf("oversized partial JSON retained: files=%v diagnostics=%+v error=%v", files, diagnostics, err)
+	}
+}
+
+func TestInvalidAuditJSONIsOmittedFromPartialArtifacts(t *testing.T) {
+	root := t.TempDir()
+	writeFixtureFile(t, root, "coverage-ledger.json", []byte(`{"note":"fixture-audit-\u0073ecret"`))
+	if _, _, err := readAuditArtifacts(root, false, "fixture-audit-secret"); err == nil || !strings.Contains(err.Error(), "audit JSON is invalid") {
+		t.Fatalf("invalid complete audit JSON: %v", err)
+	}
+	files, diagnostics, err := readAuditArtifacts(root, true, "fixture-audit-secret")
+	if err != nil || len(files) != 0 || len(diagnostics) != 1 || diagnostics[0].Code != "artifact_unavailable" {
+		t.Fatalf("invalid partial JSON retained: files=%d diagnostics=%+v error=%v", len(files), diagnostics, err)
 	}
 }
 

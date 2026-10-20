@@ -32,7 +32,6 @@ func TestRedactErrorKnownSecretEncodings(t *testing.T) {
 		{"Go control escape", "fixture\x1bsecret", `fixture\x1bsecret`},
 		{"JSON control escape", "fixture\x1bsecret", `fixture\u001bsecret`},
 		{"JSON HTML escape", "fixture<secret", `fixture\u003csecret`},
-		{"replacement not rescanned", "redacted", "redacted"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cause := errors.New("provider: " + tc.encoded)
@@ -47,6 +46,43 @@ func TestRedactErrorKnownSecretEncodings(t *testing.T) {
 	var typed *strconv.NumError
 	if redacted.Error() != `strconv.ParseInt: parsing "[redacted]": invalid syntax` || !errors.As(redacted, &typed) || typed != cause || !errors.Is(redacted, strconv.ErrSyntax) {
 		t.Fatalf("quoted redaction lost the typed cause: %v", redacted)
+	}
+}
+
+func TestRedactMarkerCannotContainSecret(t *testing.T) {
+	if got := RedactText("#", "#"); got != "[redacted]" {
+		t.Fatalf("alternate marker key survived: %q", got)
+	}
+	for _, tc := range []struct{ name, secret string }{
+		{"word", "redacted"},
+		{"whole marker", "[redacted]"},
+		{"letter", "a"},
+		{"bracket", "["},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := RedactText("PFX "+tc.secret+" SFX", tc.secret); got != "PFX # SFX" || strings.Contains(got, tc.secret) {
+				t.Fatalf("literal key survived: %q", got)
+			}
+			encoded, err := json.Marshal(tc.secret)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := RedactText("PFX "+string(encoded)+" SFX", tc.secret); got != `PFX "#" SFX` || strings.Contains(got, tc.secret) {
+				t.Fatalf("JSON key survived: %q", got)
+			}
+			cause := errors.New("CLI: " + tc.secret)
+			if got := RedactError(cause, tc.secret); got.Error() != "CLI: #" || !errors.Is(got, cause) {
+				t.Fatalf("error key survived or cause changed: %v", got)
+			}
+			var tail bounded.Tail
+			if _, err := tail.Write([]byte(strings.Repeat("X", bounded.DiagnosticBytes) + "PFX " + tc.secret + " SFX")); err != nil || !tail.Truncated {
+				t.Fatalf("unexpected diagnostic tail state: %v, %t", err, tail.Truncated)
+			}
+			got := RedactTail(&tail, tc.secret)
+			if !strings.HasSuffix(got, "PFX # SFX") || strings.Contains(got, tc.secret) || len(got) > bounded.DiagnosticBytes {
+				t.Fatalf("truncated diagnostic key survived or exceeded bound: %q", got)
+			}
+		})
 	}
 }
 

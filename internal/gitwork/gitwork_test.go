@@ -17,7 +17,7 @@ import (
 func TestResolveCredentialHelperPreservesSymlinkName(t *testing.T) {
 	gitPath, err := exec.LookPath("git")
 	if err != nil {
-		t.Skip("git is unavailable")
+		t.Fatal("git is unavailable")
 	}
 	bin := t.TempDir()
 	launcher := filepath.Join(bin, "launcher")
@@ -46,7 +46,7 @@ func TestResolveCredentialHelperPreservesSymlinkName(t *testing.T) {
 func TestGitCredentialHelperIgnoresCheckoutRelativePath(t *testing.T) {
 	realGit, err := exec.LookPath("git")
 	if err != nil {
-		t.Skip("git is unavailable")
+		t.Fatal("git is unavailable")
 	}
 	checkout := t.TempDir()
 	trustedBin := filepath.Join(t.TempDir(), "trusted' bin")
@@ -326,6 +326,12 @@ func TestCommitAndPushPublishesRecordedBotCommit(t *testing.T) {
 	if err := fixture.checkout.Close(); err != nil {
 		t.Fatalf("second Close() error = %v", err)
 	}
+	if _, err := fixture.checkout.Snapshot(ctx); err == nil || !strings.Contains(err.Error(), "checkout is closed or uninitialized") {
+		t.Fatalf("closed checkout snapshot: %v", err)
+	}
+	if err := fixture.checkout.Import(ctx, fixture.base, nil); err == nil || !strings.Contains(err.Error(), "checkout is closed or uninitialized") {
+		t.Fatalf("closed checkout import: %v", err)
+	}
 }
 
 func TestImportAndCommitBoundsChanges(t *testing.T) {
@@ -453,6 +459,7 @@ func TestCommitAndPushStopsWhenRecordFails(t *testing.T) {
 
 type gitFixture struct {
 	t        *testing.T
+	home     string
 	remote   string
 	source   string
 	base     string
@@ -462,10 +469,10 @@ type gitFixture struct {
 func newFixture(t *testing.T) gitFixture {
 	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git is unavailable")
+		t.Fatal("git is unavailable")
 	}
 	root := t.TempDir()
-	fixture := gitFixture{t: t, remote: filepath.Join(root, "remote.git"), source: filepath.Join(root, "source")}
+	fixture := gitFixture{t: t, home: t.TempDir(), remote: filepath.Join(root, "remote.git"), source: filepath.Join(root, "source")}
 	fixture.git("", "init", "--bare", "--initial-branch=main", fixture.remote)
 	fixture.git("", "init", "--initial-branch=main", fixture.source)
 	writeFile(t, filepath.Join(fixture.source, "README.md"), "fixture\n")
@@ -524,7 +531,7 @@ func (f gitFixture) gitInput(dir, input string, args ...string) string {
 	cmd := exec.Command("git", append(hardeningArgs(), args...)...)
 	cmd.Dir = dir
 	cmd.Stdin = strings.NewReader(input)
-	cmd.Env = append(append([]string{"PATH=" + safePath(os.Getenv("PATH")), "HOME=" + f.t.TempDir(), "TMPDIR=" + os.TempDir()}, hardeningEnv()...),
+	cmd.Env = append(append([]string{"PATH=" + safePath(os.Getenv("PATH")), "HOME=" + f.home, "TMPDIR=" + os.TempDir()}, hardeningEnv()...),
 		"GIT_AUTHOR_NAME=Test", "GIT_AUTHOR_EMAIL=test@example.invalid", "GIT_AUTHOR_DATE=2026-01-01T00:00:00Z",
 		"GIT_COMMITTER_NAME=Test", "GIT_COMMITTER_EMAIL=test@example.invalid", "GIT_COMMITTER_DATE=2026-01-01T00:00:00Z",
 	)

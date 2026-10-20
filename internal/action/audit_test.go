@@ -343,7 +343,7 @@ JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 	validate("lacks parent ownership")
 	write("run-metadata.json", metadata)
 	write("findings.json", "not JSON")
-	validate("validate-findings.cjs")
+	validate("audit JSON is invalid")
 	write("findings.json", "[]")
 	write("coverage-ledger.json", "[]")
 	validate("no coverage units")

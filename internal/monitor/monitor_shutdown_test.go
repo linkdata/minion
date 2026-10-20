@@ -294,8 +294,20 @@ func TestRunOnceStopsCanceledDiscoveryWithoutDeferring(t *testing.T) {
 				}
 				handler := &fakeHandler{}
 				m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Now: func() time.Time { return now }}
-				if _, err := m.RunOnce(ctx, store); !errors.Is(err, context.Canceled) || gh.err != nil && !errors.Is(err, gh.err) {
-					t.Fatalf("canceled discovery: %v", err)
+				_, runErr := m.RunOnce(ctx, store)
+				if !errors.Is(runErr, context.Canceled) || gh.err != nil && !errors.Is(runErr, gh.err) {
+					t.Fatalf("canceled discovery: %v", runErr)
+				}
+				locations := map[string]string{
+					"notifications": "list example-owner/example-repo notifications",
+					"repository":    "verify example-owner/example-repo repository identity",
+					"thread":        "example-owner/example-repo PullRequest #7",
+					"current":       "verify command in comment:1",
+					"permission":    "check @writer permission in example-owner/example-repo",
+					"reaction":      "react to comment:1",
+				}
+				if location := locations[stage]; location != "" && !strings.Contains(runErr.Error(), location) {
+					t.Fatalf("canceled discovery lost %s context: %v", stage, runErr)
 				}
 				var want []string
 				if index := slices.Index(stages, gh.stage); index >= 0 {

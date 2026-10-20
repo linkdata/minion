@@ -482,6 +482,22 @@ func TestCollectUsageMergesRootLowerBoundsByComponent(t *testing.T) {
 	}
 }
 
+func TestCollectUsageWithoutRootRetainsStdoutFallback(t *testing.T) {
+	fallback := usage.Tokens{Input: 10, CachedInput: 2, Output: 1}
+	for _, rootID := range []string{"root", ""} {
+		name := "missing root rollout"
+		if rootID == "" {
+			name = "empty root ID"
+		}
+		t.Run(name, func(t *testing.T) {
+			got, complete, err := (&usageSession{}).collectUsage(context.Background(), t.TempDir(), rootID, time.Now(), &fallback, nil, nil)
+			if got != fallback || complete || err != nil {
+				t.Fatalf("missing root lost stdout fallback: tokens=%+v complete=%t error=%v", got, complete, err)
+			}
+		})
+	}
+}
+
 func TestCollectUsageRetainsValidCountersOnOverflow(t *testing.T) {
 	for _, source := range []string{"response", "helper", "stdout maximum", "snapshot maximum"} {
 		t.Run(source, func(t *testing.T) {

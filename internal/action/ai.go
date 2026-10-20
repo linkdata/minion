@@ -84,7 +84,7 @@ func (r *Runner) runNative(ctx context.Context, request modelRun) (aicli.Result,
 	case "codex":
 		settings := r.Codex
 		settings.Model, settings.ReasoningEffort = request.model, request.effort
-		settings.ReadOnlyDirs = slices.Concat(settings.ReadOnlyDirs, request.readOnlyDirs)
+		settings.ReadOnlyDirs = slices.Clone(request.readOnlyDirs)
 		settings.OutputSchema = request.outputSchema
 		if request.freshConversation {
 			request.session.codex.NewConversation()
@@ -93,7 +93,7 @@ func (r *Runner) runNative(ctx context.Context, request modelRun) (aicli.Result,
 	case "claude":
 		settings := r.Claude
 		settings.Model, settings.Effort = request.model, request.effort
-		settings.ReadOnlyDirs = slices.Concat(settings.ReadOnlyDirs, request.readOnlyDirs)
+		settings.ReadOnlyDirs = slices.Clone(request.readOnlyDirs)
 		settings.OutputSchema = request.outputSchema
 		if request.freshConversation {
 			request.session.claude.NewConversation()

@@ -153,6 +153,12 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		}
 		return next, err
 	}
+	stopAt := func(location string, err error) (time.Time, error) {
+		if err == nil {
+			err = ctx.Err()
+		}
+		return stop(fmt.Errorf("%s: %w", location, err))
+	}
 	var polled []string
 	for _, repo := range m.Config.Repositories {
 		since := store.Data.RepositoryCursors[repo.Name]
@@ -166,7 +172,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			}
 		}
 		if ctx.Err() != nil {
-			return stop(err)
+			return stopAt("list "+repo.Name+" notifications", err)
 		}
 		if err != nil {
 			failures = append(failures, fmt.Errorf("list %s notifications: %w", repo.Name, err))
@@ -224,7 +230,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		}
 		liveRepo, err := m.GitHub.Repository(ctx, repo.Name)
 		if ctx.Err() != nil {
-			return stop(err)
+			return stopAt("verify "+repo.Name+" repository identity", err)
 		}
 		if err != nil {
 			failures = append(failures, fmt.Errorf("verify %s repository identity: %w", repo.Name, err))
@@ -252,7 +258,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		firstFailure := len(failures)
 		items, err := m.GitHub.ThreadItems(ctx, repo.Name, notification.Subject.Type, number, entry.since)
 		if ctx.Err() != nil {
-			return stop(err)
+			return stopAt(fmt.Sprintf("%s %s #%d", repo.Name, notification.Subject.Type, number), err)
 		}
 		if err != nil {
 			failures = append(failures, fmt.Errorf("%s %s #%d: %w", repo.Name, notification.Subject.Type, number, err))
@@ -278,7 +284,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			}
 			current, err := m.GitHub.CurrentItem(ctx, item)
 			if ctx.Err() != nil {
-				return stop(err)
+				return stopAt("verify command in "+itemLocation(item), err)
 			}
 			if err != nil {
 				failures = append(failures, fmt.Errorf("verify command in %s: %w", itemLocation(item), err))
@@ -331,7 +337,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			}
 			permission, err := m.GitHub.Permission(ctx, repo.Name, item.Author.Login)
 			if ctx.Err() != nil {
-				return stop(err)
+				return stopAt(fmt.Sprintf("check @%s permission in %s", item.Author.Login, repo.Name), err)
 			}
 			if err != nil {
 				failures = append(failures, fmt.Errorf("check @%s permission in %s: %w", item.Author.Login, repo.Name, err))
@@ -365,7 +371,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			}
 			err = m.GitHub.ReactEyes(ctx, item.NodeID)
 			if ctx.Err() != nil {
-				return stop(err)
+				return stopAt("react to "+itemLocation(item), err)
 			}
 			if err != nil {
 				failures = append(failures, fmt.Errorf("react to %s: %w", itemLocation(item), err))

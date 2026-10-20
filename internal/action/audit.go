@@ -57,9 +57,10 @@ func readAuditArtifacts(outputDir string, partial bool, secret string) ([]worksp
 			continue
 		}
 		if err == nil {
-			data = []byte(redactActionText(string(data), secret))
-			if strings.HasSuffix(name, ".json") && bytes.Contains(data, []byte(`\u0000`)) {
+			if strings.HasSuffix(name, ".json") {
 				data, err = redactAuditJSON(data, secret)
+			} else {
+				data = []byte(redactActionText(string(data), secret))
 			}
 			if err == nil && int64(len(data)) > limit {
 				err = errors.New("redacted artifact exceeds byte limit")
@@ -79,10 +80,13 @@ func readAuditArtifacts(outputDir string, partial bool, secret string) ([]worksp
 	return files, diagnostics, nil
 }
 
-// Decode escaped NULs before redaction so JSON consumers cannot reconstruct a split key.
+// Decode JSON escapes before redaction so consumers cannot reconstruct a configured key.
 func redactAuditJSON(data []byte, secret string) ([]byte, error) {
 	if !json.Valid(data) {
 		return nil, errors.New("audit JSON is invalid")
+	}
+	if err := rejectDuplicateAuditJSONKeys(data); err != nil {
+		return nil, err
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.UseNumber()
@@ -90,25 +94,112 @@ func redactAuditJSON(data []byte, secret string) ([]byte, error) {
 	if err := decoder.Decode(&value); err != nil {
 		return nil, err
 	}
-	return json.Marshal(redactAuditJSONValue(value, secret))
+	redacted, changed, err := redactAuditJSONValue(value, secret)
+	if err != nil {
+		return nil, err
+	}
+	if changed {
+		var output bytes.Buffer
+		encoder := json.NewEncoder(&output)
+		encoder.SetEscapeHTML(false)
+		if err := encoder.Encode(redacted); err != nil {
+			return nil, err
+		}
+		data = bytes.TrimSuffix(output.Bytes(), []byte("\n"))
+	}
+	final := string(data)
+	if redactActionText(final, secret) != final || secret != "" && strings.Contains(final, secret) {
+		return nil, errors.New("audit JSON contains a configured key in source syntax")
+	}
+	return data, nil
 }
 
-func redactAuditJSONValue(value any, secret string) any {
+func rejectDuplicateAuditJSONKeys(data []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	var visit func() error
+	visit = func() error {
+		token, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		switch token {
+		case json.Delim('{'):
+			seen := make(map[string]bool)
+			for decoder.More() {
+				token, err := decoder.Token()
+				if err != nil {
+					return err
+				}
+				key, ok := token.(string)
+				if !ok {
+					return errors.New("audit JSON object key is invalid")
+				}
+				if seen[key] {
+					return errors.New("audit JSON has duplicate object keys")
+				}
+				seen[key] = true
+				if err := visit(); err != nil {
+					return err
+				}
+			}
+			_, err = decoder.Token()
+			return err
+		case json.Delim('['):
+			for decoder.More() {
+				if err := visit(); err != nil {
+					return err
+				}
+			}
+			_, err = decoder.Token()
+			return err
+		}
+		return nil
+	}
+	return visit()
+}
+
+func redactAuditJSONValue(value any, secret string) (any, bool, error) {
 	switch value := value.(type) {
 	case string:
-		return redactActionText(value, secret)
-	case []any:
-		for i := range value {
-			value[i] = redactAuditJSONValue(value[i], secret)
+		redacted := redactActionText(value, secret)
+		return redacted, redacted != value, nil
+	case json.Number, bool, nil:
+		literal := fmt.Sprint(value)
+		if value == nil {
+			literal = "null"
 		}
+		if redacted := redactActionText(literal, secret); redacted != literal {
+			return redacted, true, nil
+		}
+	case []any:
+		changed := false
+		for i := range value {
+			redacted, dirty, err := redactAuditJSONValue(value[i], secret)
+			if err != nil {
+				return nil, false, err
+			}
+			value[i] = redacted
+			changed = changed || dirty
+		}
+		return value, changed, nil
 	case map[string]any:
 		redacted := make(map[string]any, len(value))
+		changed := false
 		for key, entry := range value {
-			redacted[redactActionText(key, secret)] = redactAuditJSONValue(entry, secret)
+			redactedKey := redactActionText(key, secret)
+			if _, present := redacted[redactedKey]; present {
+				return nil, false, errors.New("audit JSON keys collide after redaction")
+			}
+			redactedEntry, dirty, err := redactAuditJSONValue(entry, secret)
+			if err != nil {
+				return nil, false, err
+			}
+			redacted[redactedKey] = redactedEntry
+			changed = changed || redactedKey != key || dirty
 		}
-		return redacted
+		return redacted, changed, nil
 	}
-	return value
+	return value, false, nil
 }
 
 func auditArtifactMayBeEmpty(name string) bool {

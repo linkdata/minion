@@ -398,19 +398,22 @@ func (r *Runner) CheckPrivatePaths(paths []string, providers ...string) error {
 }
 
 func (r *Runner) modelReadPaths(providers ...string) ([]string, error) {
+	if len(r.Codex.ReadOnlyDirs) != 0 || len(r.Claude.ReadOnlyDirs) != 0 {
+		return nil, errors.New("host-level model read grants are unsupported")
+	}
 	var grants []string
 	for _, provider := range providers {
 		if provider == "" {
 			continue
 		}
-		var systemReads, readOnly, selected []string
+		var systemReads, selected []string
 		switch provider {
 		case "codex":
 			systemReads = codexcli.SystemReadPaths()
-			readOnly, selected = r.Codex.ReadOnlyDirs, r.Codex.Skills
+			selected = r.Codex.Skills
 		case "claude":
 			systemReads = claudecli.SystemReadPaths()
-			readOnly, selected = r.Claude.ReadOnlyDirs, r.Claude.Skills
+			selected = r.Claude.Skills
 		default:
 			return nil, fmt.Errorf("unsupported AI provider %q", provider)
 		}
@@ -427,7 +430,6 @@ func (r *Runner) modelReadPaths(providers ...string) ([]string, error) {
 				return nil, err
 			}
 		}
-		grants = append(grants, readOnly...)
 		for _, skill := range selected {
 			if filepath.IsAbs(skill) {
 				grants = append(grants, filepath.Dir(skill))

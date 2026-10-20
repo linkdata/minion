@@ -36,8 +36,6 @@ func TestPrivateHostPathsCannotBeExposedByModelGrants(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Setenv("PATH", public)
-			skill := filepath.Join(public, "SKILL.md")
-			writeFixtureFile(t, public, "SKILL.md", []byte("public skill"))
 			secret := filepath.Join(outside, "auth.json")
 			writeFixtureFile(t, outside, "auth.json", nil)
 			linked := filepath.Join(home, "auth.json")
@@ -56,11 +54,13 @@ func TestPrivateHostPathsCannotBeExposedByModelGrants(t *testing.T) {
 				{"future auth exposure", future, outside, true},
 			} {
 				t.Run(test.name, func(t *testing.T) {
+					writeFixtureFile(t, test.grant, "SKILL.md", []byte("public skill"))
+					skill := filepath.Join(test.grant, "SKILL.md")
 					runner := Runner{}
 					if provider == "codex" {
-						runner.Codex.Skills, runner.Codex.ReadOnlyDirs = []string{skill}, []string{test.grant}
+						runner.Codex.Skills = []string{skill}
 					} else {
-						runner.Claude.Skills, runner.Claude.ReadOnlyDirs = []string{skill}, []string{test.grant}
+						runner.Claude.Skills = []string{skill}
 					}
 					if err := runner.CheckPrivatePaths([]string{test.protected}, provider); (err != nil) != test.refuse || (test.refuse && !strings.Contains(err.Error(), "is visible through model filesystem grant")) {
 						t.Fatalf("private-path admission error=%v want refusal=%t", err, test.refuse)
@@ -78,7 +78,7 @@ func TestWorkRootIsolationUsesPhysicalGrantParents(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 	root := t.TempDir()
 	physical := filepath.Join(root, "physical")
-	for _, dir := range []string{filepath.Join(physical, "nested"), filepath.Join(physical, "target"), filepath.Join(root, "target")} {
+	for _, dir := range []string{filepath.Join(physical, "nested"), filepath.Join(root, "nested")} {
 		if err := os.MkdirAll(dir, 0700); err != nil {
 			t.Fatal(err)
 		}
@@ -87,12 +87,13 @@ func TestWorkRootIsolationUsesPhysicalGrantParents(t *testing.T) {
 	if err := os.Symlink(filepath.Join(physical, "nested"), alias); err != nil {
 		t.Fatal(err)
 	}
-	runner := Runner{Codex: config.CodexConfig{ReadOnlyDirs: []string{alias + "/../target"}}}
-	if err := runner.CheckWorkRootIsolation(filepath.Join(physical, "target"), "codex"); err == nil || !strings.Contains(err.Error(), "overlaps") {
-		t.Fatalf("physical grant overlap accepted: %v", err)
+	writeFixtureFile(t, filepath.Join(physical, "nested"), "SKILL.md", []byte("public skill"))
+	runner := Runner{Codex: config.CodexConfig{Skills: []string{filepath.Join(alias, "SKILL.md")}}}
+	if err := runner.CheckWorkRootIsolation(filepath.Join(physical, "nested"), "codex"); err == nil || !strings.Contains(err.Error(), "overlaps") {
+		t.Fatalf("physical skill grant overlap accepted: %v", err)
 	}
-	if err := runner.CheckWorkRootIsolation(filepath.Join(root, "target"), "codex"); err != nil {
-		t.Fatalf("logical decoy substituted for physical grant: %v", err)
+	if err := runner.CheckWorkRootIsolation(filepath.Join(root, "nested"), "codex"); err != nil {
+		t.Fatalf("logical decoy substituted for physical skill grant: %v", err)
 	}
 }
 
@@ -137,7 +138,7 @@ func TestExecuteCriticAdmissionUsesControlledWorkRoot(t *testing.T) {
 				request.Repository.Actions = []string{"comment"}
 				err = e.Execute(context.Background(), request)
 				if unsafe {
-					if !errors.Is(err, workroot.ErrUnsafe) || errors.Is(err, monitor.ErrTerminalJob) || calls != 0 {
+					if !errors.Is(err, workroot.ErrUnsafe) || errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "host-level model read grants are unsupported") || calls != 0 {
 						t.Fatalf("admission classification: calls=%d error=%v", calls, err)
 					}
 					if _, err := os.Stat(filepath.Join(root, "reviews")); !errors.Is(err, os.ErrNotExist) {

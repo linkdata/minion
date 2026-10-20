@@ -532,7 +532,12 @@ func toolSandboxFailure(content json.RawMessage) bool {
 func sandboxFailure(text string) bool {
 	// Bare bwrap/apply-seccomp output can come from repository commands.
 	const prefix = "Sandbox is required but failed to initialize:"
-	return strings.HasPrefix(text, prefix) || strings.Contains(text, "\n"+prefix)
+	if strings.HasPrefix(text, prefix) {
+		return true
+	}
+	header, rest, ok := strings.Cut(text, "\n")
+	code, valid := strings.CutPrefix(header, "Exit code ")
+	return ok && valid && code != "" && strings.Trim(code, "0123456789") == "" && strings.HasPrefix(rest, prefix)
 }
 
 func isWaitCeilingStop(line []byte) bool {

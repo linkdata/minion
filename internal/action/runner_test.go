@@ -290,6 +290,12 @@ func TestPortableAuditMetadataUsesSourceIdentity(t *testing.T) {
 	root := t.TempDir()
 	for _, name := range auditArtifacts {
 		data := []byte("content")
+		switch name {
+		case "coverage-ledger.json":
+			data = []byte(`[{"status":"covered"}]`)
+		case "findings.json":
+			data = []byte("[]")
+		}
 		if name == "run-metadata.json" {
 			owners := strings.TrimSuffix(auditTestOwners, "}") + `,"/worker/local/extra-owner":"/worker/local/child"}`
 			data = []byte(fmt.Sprintf(`{"run_id":"test-run","repo":"owner/repo","target":"/worker/local/source","source_ref":%q,"profile":"standard","scope_paths":["."],"budget":null,"selected_companion_files":["/installed/security-audit/WEB-PROTOCOL-AND-AUTH.md"],"prior_run_paths":[],"shared_file_owners":%s,"execution_policy":"sandboxed-source-and-local-only","run_status":"complete","output_dir":"/worker/local/reports","extra":{"run_dir":"/worker/local/runtime"}}`, job.Source.Head, owners))

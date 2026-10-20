@@ -181,23 +181,19 @@ func TestAPIKeyEncodedStderrRedaction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fakeExecutable(t, "claude", "printf '%s\\n' "+aicli.ShellQuote(string(encoded[1:len(encoded)-1]))+" >&2\nexit 1\n")
-	_, err = Run(context.Background(), t.TempDir(), "task", false, "", config.ClaudeConfig{APIKey: key})
-	if err == nil || strings.Contains(err.Error(), "fixture") || !strings.Contains(err.Error(), "[redacted]") {
-		t.Fatalf("encoded configured key escaped in quoted error: %v", err)
-	}
-}
-
-func TestValidateRedactsProbeDiagnosticsBeforeQuoting(t *testing.T) {
-	key := `fixture"secret`
-	encoded, err := json.Marshal(key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	fakeExecutable(t, "claude", "printf '%s\\n' "+aicli.ShellQuote(string(encoded[1:len(encoded)-1]))+" >&2\nexit 1\n")
-	_, err = Validate(context.Background(), config.ClaudeConfig{APIKey: key})
-	if err == nil || strings.Contains(err.Error(), "fixture") || !strings.Contains(err.Error(), "[redacted]") {
-		t.Fatalf("encoded key escaped probe diagnostics: %v", err)
+	for _, validate := range []bool{false, true} {
+		t.Run(map[bool]string{false: "run", true: "validate"}[validate], func(t *testing.T) {
+			fakeExecutable(t, "claude", "printf '%s\\n' "+aicli.ShellQuote(string(encoded[1:len(encoded)-1]))+" >&2\nexit 1\n")
+			var err error
+			if validate {
+				_, err = Validate(context.Background(), config.ClaudeConfig{APIKey: key})
+			} else {
+				_, err = Run(context.Background(), t.TempDir(), "task", false, "", config.ClaudeConfig{APIKey: key})
+			}
+			if err == nil || strings.Contains(err.Error(), "fixture") || !strings.Contains(err.Error(), "[redacted]") {
+				t.Fatalf("encoded configured key escaped in CLI error: %v", err)
+			}
+		})
 	}
 }
 

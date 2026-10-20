@@ -207,7 +207,7 @@ func TestRunnerCancellationDuringInstalledAuditValidatorPreservesCause(t *testin
 	}
 }
 
-func TestRunnerMissingConfiguredReadGrantIsNotTerminalBeforeModels(t *testing.T) {
+func TestRunnerRejectsHostReadGrantBeforeModels(t *testing.T) {
 	for _, scenario := range []struct{ provider, role string }{{"codex", "main"}, {"claude", "critic"}} {
 		provider, role := scenario.provider, scenario.role
 		t.Run(provider+"/"+role, func(t *testing.T) {
@@ -233,8 +233,8 @@ func TestRunnerMissingConfiguredReadGrantIsNotTerminalBeforeModels(t *testing.T)
 				runner.Claude.ReadOnlyDirs = []string{missing}
 			}
 			result, err := runner.Run(context.Background(), job)
-			if !errors.Is(err, os.ErrNotExist) || errors.Is(err, monitor.ErrTerminalJob) || calls != 0 || len(result.Calls) != 0 {
-				t.Fatalf("missing host grant result: native calls=%d recorded calls=%d error=%v", calls, len(result.Calls), err)
+			if !errors.Is(err, workroot.ErrUnsafe) || errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "host-level model read grants are unsupported") || calls != 0 || len(result.Calls) != 0 {
+				t.Fatalf("unsupported host grant result: native calls=%d recorded calls=%d error=%v", calls, len(result.Calls), err)
 			}
 		})
 	}
@@ -314,6 +314,38 @@ func TestRunnerJobValidationRejectsMetadataAliasBeforeModels(t *testing.T) {
 	if !errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, gitwork.ErrUnsupportedSource) || !strings.Contains(err.Error(), "unsafe fix source path") || len(result.Calls) != 0 {
 		t.Fatalf("unsupported source was retryable: %v", err)
 	}
+}
+
+func TestRunnerRemovesRestrictedModelDirectory(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions")
+	}
+	root := t.TempDir()
+	var restricted string
+	t.Cleanup(func() { _ = os.Chmod(restricted, 0700) })
+	runner := Runner{WorkRoot: root, runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+		restricted = filepath.Join(request.dir, "restricted")
+		if err := os.Mkdir(restricted, 0700); err != nil {
+			return aicli.Result{}, err
+		}
+		if err := os.WriteFile(filepath.Join(restricted, "file"), []byte("fixture"), 0600); err != nil {
+			return aicli.Result{}, err
+		}
+		if err := os.Chmod(restricted, 0000); err != nil {
+			return aicli.Result{}, err
+		}
+		return aicli.Result{Answer: "Done."}, nil
+	}}
+	result, err := runner.Run(context.Background(), testJob(command.Comment))
+	if err != nil || result.Answer != "Done." {
+		t.Fatalf("restricted workspace result=%+v error=%v", result, err)
+	}
+	for _, diagnostic := range result.Diagnostics {
+		if diagnostic.Code == "cleanup_failed" {
+			t.Fatalf("restricted directory prevented cleanup: %+v", result.Diagnostics)
+		}
+	}
+	assertEmptyDir(t, root)
 }
 
 func TestRunnerReportsOwnedAndCriticCleanupFailures(t *testing.T) {

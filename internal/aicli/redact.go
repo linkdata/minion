@@ -13,10 +13,20 @@ func RedactText(text, secret string) string {
 	return redactText(text, secret, false)
 }
 
+func redactionMarker(secret string) string {
+	const marker = "[redacted]"
+	if secret != "" && strings.Contains(marker, secret) {
+		// '#' cannot contain any nonempty substring of the normal marker.
+		return "#"
+	}
+	return marker
+}
+
 func redactText(text, secret string, truncated bool) string {
 	if secret == "" {
 		return text
 	}
+	marker := redactionMarker(secret)
 	quoted := strconv.Quote(secret)
 	encoded, _ := json.Marshal(secret)
 	jsonContent := string(encoded[1 : len(encoded)-1])
@@ -29,7 +39,7 @@ func redactText(text, secret string, truncated bool) string {
 	var replacements [8]string
 	longest := 0
 	for i, form := range forms {
-		mask := "[redacted]"
+		mask := marker
 		if truncated {
 			mask = strings.Repeat("\x00", len(form))
 		}
@@ -48,7 +58,7 @@ func redactText(text, secret string, truncated bool) string {
 		for strings.Contains(text, "\x00\x00") {
 			text = strings.ReplaceAll(text, "\x00\x00", "\x00")
 		}
-		return strings.ReplaceAll(text, "\x00", "[redacted]")
+		return strings.ReplaceAll(text, "\x00", marker)
 	}
 	return text
 }
@@ -91,11 +101,12 @@ func javascriptJSONContent(encoded string) string {
 
 // RedactTail keeps useful trailing diagnostics without exposing a key cut at the tail boundary.
 func RedactTail(tail *bounded.Tail, secret string) string {
+	marker := redactionMarker(secret)
 	text := strings.TrimSpace(redactText(tail.String(), secret, tail.Truncated))
 	if len(text) > bounded.DiagnosticBytes {
 		cut := len(text) - bounded.DiagnosticBytes
-		if marker := strings.LastIndex(text[:min(len(text), cut+len("[redacted]"))], "[redacted]"); marker >= 0 && marker < cut && marker+len("[redacted]") > cut {
-			cut = marker + len("[redacted]")
+		if start := strings.LastIndex(text[:min(len(text), cut+len(marker))], marker); start >= 0 && start < cut && start+len(marker) > cut {
+			cut = start + len(marker)
 		}
 		text = text[cut:]
 	}

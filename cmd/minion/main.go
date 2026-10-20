@@ -256,6 +256,7 @@ func checkIsolation(cfg config.Config, configPath string) (resultErr error) {
 		filepath.Join(userHome, ".claude.json"),
 		filepath.Join(userHome, ".git-credentials"),
 		filepath.Join(userHome, ".gitconfig"),
+		filepath.Join(userHome, ".netrc"),
 		filepath.Join(userHome, ".ssh"),
 	)
 	configHome, err := os.UserConfigDir()

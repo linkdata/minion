@@ -60,7 +60,7 @@ func TestExecutePublicationBookkeepingBoundaries(t *testing.T) {
 				}
 			}))
 			defer server.Close()
-			budget := 10 * time.Second
+			budget := 5 * time.Second
 			if scenario == "final usage save" {
 				budget = 30 * time.Second
 			}
