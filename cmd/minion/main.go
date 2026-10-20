@@ -247,10 +247,10 @@ func checkIsolation(cfg config.Config, configPath string) (resultErr error) {
 	private = append(private, claudeHome, filepath.Join(claudeHome, ".credentials.json"), filepath.Join(claudeHome, ".claude.json"), filepath.Join(claudeHome, "settings.json"))
 	userHome, err := os.UserHomeDir()
 	if err != nil {
-		return fmt.Errorf("resolve default Claude home: %w", err)
+		return fmt.Errorf("resolve user home: %w", err)
 	}
 	if !filepath.IsAbs(userHome) {
-		return errors.New("resolve default Claude home: HOME must be absolute")
+		return errors.New("resolve user home: HOME must be absolute")
 	}
 	private = append(private,
 		filepath.Join(userHome, ".codex"),

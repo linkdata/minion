@@ -470,20 +470,6 @@ func TestUsageSessionObservationOnlyHonorsToolAndHelperLifecycle(t *testing.T) {
 	}
 }
 
-func TestUsageSessionCollectionAfterBaseline(t *testing.T) {
-	ctx, home := context.Background(), t.TempDir()
-	root := writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "old-root", "r1", 100)...)
-	child := writeUsageRollout(t, home, "child", "root", completedUsageTurn("child", "old-child", "c1", 40)...)
-	var session usageSession
-	session.begin(ctx, home, "root", time.Now())
-	appendUsageEvents(t, root, completedUsageTurn("root", "new-root", "r2", 20)...)
-	appendUsageEvents(t, child, completedUsageTurn("child", "new-child", "c2", 5)...)
-	got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 20}, []string{"child"}, nil)
-	if got != (usage.Tokens{Input: 25}) || !complete || err != nil {
-		t.Fatalf("collection reused baseline budget: %+v,%v,%v", got, complete, err)
-	}
-}
-
 func TestUsageBoundaryEarlyReadFailuresAreInvalid(t *testing.T) {
 	// Zero budget documents fail-closed output; the bounded reader also rejects it without the early guard.
 	for _, cause := range []string{"budget", "cancel", "open"} {

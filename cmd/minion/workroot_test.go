@@ -193,7 +193,7 @@ func TestWorkRootPreflightProtectsConfigurationAndCredentials(t *testing.T) {
 	}
 }
 
-func TestWorkRootPreflightRequiresGlobalClaudeHomeWithExplicitNativeHomes(t *testing.T) {
+func TestWorkRootPreflightRequiresUserHomeWithExplicitNativeHomes(t *testing.T) {
 	for _, test := range []struct{ name, home string }{
 		{"missing", ""},
 		{"relative", "relative-home"},
@@ -210,8 +210,8 @@ func TestWorkRootPreflightRequiresGlobalClaudeHomeWithExplicitNativeHomes(t *tes
 				t.Fatal(err)
 			}
 			err := checkIsolation(config.Config{Main: "codex", WorkRoot: work}, filepath.Join(root, "config.json"))
-			if err == nil || !strings.Contains(err.Error(), "default Claude home") || test.home != "" && !strings.Contains(err.Error(), "HOME must be absolute") {
-				t.Fatalf("invalid global Claude configuration was skipped: %v", err)
+			if err == nil || !strings.Contains(err.Error(), "resolve user home") || test.home != "" && !strings.Contains(err.Error(), "HOME must be absolute") {
+				t.Fatalf("invalid user home was skipped: %v", err)
 			}
 		})
 	}
