@@ -9,7 +9,10 @@ import (
 )
 
 func TestHomePathKeepsNativeSelectionAndMissingDirectories(t *testing.T) {
-	root := t.TempDir()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("HOME", root)
 	t.Setenv("MINION_TEST_AI_HOME", "")
 	if got, err := HomePath("MINION_TEST_AI_HOME", ".fixture"); err != nil || got != filepath.Join(root, ".fixture") {
@@ -70,7 +73,10 @@ func TestHomePathRejectsRelativeDefaultHome(t *testing.T) {
 	if got, err := HomePath("MINION_TEST_AI_HOME", ".fixture"); err == nil || got != "" || !strings.Contains(err.Error(), "HOME must be absolute") {
 		t.Fatalf("relative default accepted: %q,%v", got, err)
 	}
-	explicit := t.TempDir()
+	explicit, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("MINION_TEST_AI_HOME", explicit)
 	if got, err := HomePath("MINION_TEST_AI_HOME", ".fixture"); err != nil || got != explicit {
 		t.Fatalf("explicit native directory lost: %q,%v", got, err)

@@ -75,7 +75,7 @@ func TestUsageSessionNativeSubAgentActivityNewSpawnOnResume(t *testing.T) {
 			}
 			// No legacy stdout receiver UUID is invented. Discovery must come
 			// from the current owned rollout's observed native activity shape.
-			got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 20}, nil, nil)
+			got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), nil, nil, nil)
 			if got != (usage.Tokens{Input: test.want}) || complete != test.complete || errors.Is(err, errUnverifiedChildren) != test.unverified || (!test.unverified && err != nil) {
 				t.Fatalf("native activity accounting: tokens=%+v complete=%t error=%v; want input=%d complete=%t unverified=%t", got, complete, err, test.want, test.complete, test.unverified)
 			}
@@ -98,7 +98,7 @@ func TestUsageSessionNativeInheritedActivityDoesNotGrantGrandchild(t *testing.T)
 	childEvents = append(childEvents, completedUsageTurn("child", "child-turn", "c1", 5)...)
 	writeUsageRolloutBoundary(t, home, "child", "root", &boundary, childEvents...)
 	writeUsageRolloutBoundary(t, home, "grandchild", "child", nil, completedUsageTurn("grandchild", "grandchild-turn", "g1", 7)...)
-	got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 20}, nil, nil)
+	got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), nil, nil, nil)
 	if got != (usage.Tokens{Input: 25}) || complete || !errors.Is(err, errUnverifiedChildren) {
 		t.Fatalf("inherited native activity certified unverified grandchild work: %+v,%t,%v", got, complete, err)
 	}

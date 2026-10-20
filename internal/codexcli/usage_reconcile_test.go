@@ -83,9 +83,9 @@ func TestUsageSessionUnvisitedRolloutsRequireUnchangedOwnedBaseline(t *testing.T
 					t.Fatal(err)
 				}
 			}
-			// There is no current root/stdout reference to this lifetime-owned
+			// There is no current root reference to this lifetime-owned
 			// history. Do not invent current usage from its metadata alone.
-			got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 20}, nil, nil)
+			got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), nil, nil, nil)
 			unverified := test.owned && test.change != "unchanged"
 			if got != (usage.Tokens{Input: 20}) || complete == unverified || errors.Is(err, errUnverifiedChildren) != unverified || (!unverified && err != nil) {
 				t.Fatalf("unvisited rollout: %+v complete=%t error=%v; want root-only usage, complete=%t unverified=%t", got, complete, err, !unverified, unverified)
@@ -103,7 +103,7 @@ func TestUsageSessionObservationCannotCertifyUnchangedRoot(t *testing.T) {
 			session.begin(ctx, home, "root", time.Now())
 			var output jsonlOutput
 			_, _ = output.Write([]byte(fmt.Sprintf(`{"type":"item.completed","item":{"type":"collab_tool_call","tool":%q,"receiver_thread_ids":["root"]}}`+"\n", tool)))
-			got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 20}, output.children, output.observationOnly)
+			got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), nil, output.children, output.observationOnly)
 			if got != (usage.Tokens{}) || complete || err != nil {
 				t.Fatalf("root observation bypassed current-turn proof: %+v complete=%t error=%v", got, complete, err)
 			}
@@ -132,7 +132,7 @@ func TestUsageSessionMalformedHistoricalCountersDoNotPoisonResume(t *testing.T) 
 			t.Fatalf("fixture must capture old attribution and exact bytes despite invalid counters: %+v", boundary)
 		}
 		appendUsageEvents(t, root, completedUsageTurn("root", fmt.Sprintf("new-root-%d", round), fmt.Sprintf("r%d", round+1), 20)...)
-		got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 20}, nil, nil)
+		got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), nil, nil, nil)
 		if got != (usage.Tokens{Input: 20}) || !complete || err != nil {
 			t.Fatalf("unchanged old counter gap poisoned resume%d: %+v complete=%t error=%v", round, got, complete, err)
 		}
@@ -204,7 +204,7 @@ func TestUsageSessionCounterGapAllowsWaitOnCompletedHelper(t *testing.T) {
 	appendUsageEvents(t, root, completedUsageTurn("root", "new-root", "r2", 20)...)
 	var output jsonlOutput
 	_, _ = output.Write([]byte(`{"type":"item.completed","item":{"type":"collab_tool_call","tool":"wait","receiver_thread_ids":["child"]}}` + "\n"))
-	got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 20}, output.children, output.observationOnly)
+	got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), nil, output.children, output.observationOnly)
 	if got != (usage.Tokens{Input: 20}) || !complete || err != nil {
 		t.Fatalf("wait on unchanged completed helper refused: %+v complete=%t err=%v", got, complete, err)
 	}
@@ -227,7 +227,7 @@ func TestUsageBoundaryCounterGapStillRequiresExactPrefix(t *testing.T) {
 		t.Fatal(err)
 	}
 	appendUsageEvents(t, root, completedUsageTurn("root", "new", "r2", 20)...)
-	got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 20}, nil, nil)
+	got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), nil, nil, nil)
 	if got != (usage.Tokens{}) || complete || err != nil {
 		t.Fatalf("rewritten old counter bypassed exact prefix: %+v complete=%t err=%v", got, complete, err)
 	}
@@ -306,7 +306,7 @@ func TestUsageSessionAmbiguousHistoricalIdentityCannotCertifyAnUnchangedHelper(t
 		t.Fatal(err)
 	}
 	appendUsageEvents(t, root, completedUsageTurn("root", "new-root", "r2", 20)...)
-	got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 20}, nil, nil)
+	got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), nil, nil, nil)
 	if got != (usage.Tokens{Input: 20}) || complete || !errors.Is(err, errUnverifiedChildren) {
 		t.Fatalf("ambiguous old identity was accepted: %+v complete=%t error=%v", got, complete, err)
 	}
@@ -390,7 +390,7 @@ func TestUsageSessionKnownHelperIdentityLossCannotDisappearFromReconcile(t *test
 					mutate()
 				}
 				appendUsageEvents(t, root, completedUsageTurn("root", "new-root", "r2", 20)...)
-				got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 20}, nil, nil)
+				got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), nil, nil, nil)
 				unverified := change != "unchanged" && !(timing == "before begin" && change == "equivalent parent header")
 				if got != (usage.Tokens{Input: 20}) || complete == unverified || errors.Is(err, errUnverifiedChildren) != unverified || (!unverified && err != nil) {
 					t.Fatalf("known helper identity loss: %+v complete=%t error=%v; want complete=%t unverified=%t", got, complete, err, !unverified, unverified)
@@ -425,7 +425,7 @@ func TestUsageSessionHeaderAliasesDoNotGrowKnownOwnership(t *testing.T) {
 		}
 		session.begin(ctx, home, "root", time.Now())
 		appendUsageEvents(t, root, completedUsageTurn("root", fmt.Sprintf("bad-turn-%d", round), fmt.Sprintf("bad-response-%d", round), 20)...)
-		if got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 20}, nil, nil); got != (usage.Tokens{Input: 20}) || complete || !errors.Is(err, errUnverifiedChildren) {
+		if got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), nil, nil, nil); got != (usage.Tokens{Input: 20}) || complete || !errors.Is(err, errUnverifiedChildren) {
 			t.Fatalf("alias round %d: %+v complete=%t error=%v", round, got, complete, err)
 		}
 		if len(session.known) != 2 || session.known["child"].path != child || session.known[alias].ID != "" {
@@ -436,7 +436,7 @@ func TestUsageSessionHeaderAliasesDoNotGrowKnownOwnership(t *testing.T) {
 		}
 		session.begin(ctx, home, "root", time.Now())
 		appendUsageEvents(t, root, completedUsageTurn("root", fmt.Sprintf("good-turn-%d", round), fmt.Sprintf("good-response-%d", round), 20)...)
-		if got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 20}, nil, nil); got != (usage.Tokens{Input: 20}) || !complete || err != nil {
+		if got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), nil, nil, nil); got != (usage.Tokens{Input: 20}) || !complete || err != nil {
 			t.Fatalf("recovered round %d: %+v complete=%t error=%v", round, got, complete, err)
 		}
 		if len(session.known) != 2 {
@@ -490,7 +490,7 @@ func TestUsageSessionCancellationDoesNotForgetKnownHelperIdentity(t *testing.T) 
 				}
 				session.begin(ctx, home, "root", time.Now())
 				appendUsageEvents(t, root, completedUsageTurn("root", "new-root", "r2", 20)...)
-				got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 20}, nil, nil)
+				got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), nil, nil, nil)
 				unverified := change != "unchanged"
 				if got != (usage.Tokens{Input: 20}) || complete == unverified || errors.Is(err, errUnverifiedChildren) != unverified || (!unverified && err != nil) {
 					t.Fatalf("cancelled call forgot a known identity: %+v complete=%t error=%v; want complete=%t unverified=%t", got, complete, err, !unverified, unverified)

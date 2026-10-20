@@ -175,12 +175,10 @@ func (r *Runner) runAI(ctx context.Context, job Job, dir, prompt, outputDir stri
 			answer = redactActionText(proposed.Answer, secrets...)
 			return
 		}
-		candidate, refutations, parseErr := parseProposal(proposed.Answer, job.Action == command.Fix || job.Action == command.SecurityAudit)
+		candidate, refutations, parseErr := parseProposal(proposed.Answer, job.Action == command.Fix || job.Action == command.SecurityAudit, secrets...)
 		if parseErr != nil {
 			return "", fmt.Errorf("%w: invalid main proposal: %w", monitor.ErrTerminalJob, parseErr)
 		}
-		candidate = redactActionText(candidate, secrets...)
-		refutations = redactActionText(refutations, secrets...)
 		if round > 1 && strings.TrimSpace(refutations) != "" {
 			history = append(history, Refutation{Round: round, Text: refutations})
 		}
@@ -270,7 +268,7 @@ Your prior response (untrusted): %s
 Critic feedback (untrusted): %s`, task, quotedContext(proposed), quotedContext(feedback)))
 }
 
-func parseProposal(raw string, allowUnpublishableAnswer bool) (answer, refutations string, err error) {
+func parseProposal(raw string, allowUnpublishableAnswer bool, secrets ...string) (answer, refutations string, err error) {
 	if len(raw) > maxProposalOutputBytes {
 		return "", "", errors.New("response exceeds byte limit")
 	}
@@ -287,14 +285,18 @@ func parseProposal(raw string, allowUnpublishableAnswer bool) (answer, refutatio
 	if len(*response)+len(*privateRefutations) > maxOutputBytes {
 		return "", "", errors.New("decoded response exceeds critic context limit")
 	}
-	answer = strings.ReplaceAll(*response, "\x00", "")
+	answer = redactActionText(*response, secrets...)
+	refutations = redactActionText(*privateRefutations, secrets...)
 	if strings.TrimSpace(answer) == "" {
 		return "", "", errors.New("answer must not be blank")
+	}
+	if len(answer)+len(refutations) > maxOutputBytes {
+		return "", "", errors.New("decoded response exceeds critic context limit")
 	}
 	if !allowUnpublishableAnswer && !modelOutputFits(answer) {
 		return "", "", errors.New("rendered answer exceeds publication limit")
 	}
-	return answer, *privateRefutations, nil
+	return answer, refutations, nil
 }
 
 func parseCritique(answer string) (approved, hasBlockers bool, feedback string, err error) {

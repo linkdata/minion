@@ -404,7 +404,7 @@ func TestValidateAuditMetadataRejectsCaseVariantKeys(t *testing.T) {
 }
 
 func TestAuditArtifactReadModesPreserveFailurePolicies(t *testing.T) {
-	for _, scenario := range []string{"missing core", "empty core", "unsafe core", "oversized report", "invalid UTF-8 report", "NUL report", "blank report"} {
+	for _, scenario := range []string{"missing core", "empty core", "unsafe core", "oversized report", "invalid UTF-8 report", "NUL report", "empty report", "blank report"} {
 		for _, partial := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/partial-%t", scenario, partial), func(t *testing.T) {
 				job := testJob(command.SecurityAudit)
@@ -437,11 +437,13 @@ func TestAuditArtifactReadModesPreserveFailurePolicies(t *testing.T) {
 					writeFixtureFile(t, root, artifact, []byte{0xff})
 				case "NUL report":
 					writeFixtureFile(t, root, artifact, []byte("Report\x00text"))
+				case "empty report":
+					writeFixtureFile(t, root, artifact, nil)
 				case "blank report":
 					writeFixtureFile(t, root, artifact, []byte(" \t\r\n"))
 				}
 				files, diagnostics, err := readAuditArtifacts(root, partial, "")
-				wantError := !partial && (scenario == "unsafe core" || artifact == "REPORT.md" && scenario != "blank report" && scenario != "NUL report")
+				wantError := !partial && (scenario == "unsafe core" || artifact == "REPORT.md" && scenario != "NUL report")
 				if (err != nil) != wantError {
 					t.Fatalf("files=%v diagnostics=%v error=%v want error=%t", files, diagnostics, err, wantError)
 				}
@@ -491,5 +493,47 @@ func TestAuditArtifactReadModesPreserveFailurePolicies(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestRunnerRejectsBlankAuditReportBeforeCritic(t *testing.T) {
+	for _, tt := range []struct{ name, report string }{
+		{name: "empty", report: ""},
+		{name: "whitespace", report: " \t\r\n"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			job := withClaudeCritic(auditRunnerJob(t))
+			job.CriticMaxRounds = 1
+			criticCalls := 0
+			runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+				if request.role == roleCritic {
+					criticCalls++
+					return aicli.Result{Answer: approvedCritiqueJSON}, nil
+				}
+				for _, file := range auditArtifactsFixture(job, request.dir, tt.report) {
+					writeFixtureFile(t, request.outputDir, file.Path, file.Data)
+				}
+				return aicli.Result{Answer: proposalJSON("Model summary", "")}, nil
+			}}
+			result, err := runner.Run(context.Background(), job)
+			if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "invalid audit REPORT.md") || criticCalls != 0 || len(result.Calls) != 1 {
+				t.Fatalf("blank report reached critic or escaped terminal rejection: calls=%+v critic calls=%d error=%v", result.Calls, criticCalls, err)
+			}
+			if err := result.validate(job, false); err != nil {
+				t.Fatalf("partial audit artifacts invalid: %v", err)
+			}
+			if len(result.Artifacts) != len(auditArtifacts) {
+				t.Fatalf("partial audit lost artifacts: %d", len(result.Artifacts))
+			}
+			for _, file := range result.Artifacts {
+				if file.Path == "REPORT.md" {
+					if string(file.Data) != tt.report {
+						t.Fatalf("partial report changed: %q", file.Data)
+					}
+					return
+				}
+			}
+			t.Fatal("partial audit lost REPORT.md")
+		})
 	}
 }

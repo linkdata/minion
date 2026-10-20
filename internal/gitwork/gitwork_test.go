@@ -292,17 +292,22 @@ func TestCloneFailureRemovesOwnedDirectoryAndPreservesCause(t *testing.T) {
 	}
 }
 
-func TestNewBranchPreservesOmittedGitlink(t *testing.T) {
+func TestNewBranchPreservesOmittedGitlinkAndSymlink(t *testing.T) {
 	fixture := newFixture(t)
 	fixture.git(fixture.source, "update-index", "--add", "--cacheinfo", "160000,"+fixture.base+",sub")
-	fixture.git(fixture.source, "commit", "-m", "add gitlink")
+	if err := os.Symlink("README.md", filepath.Join(fixture.source, "omitted-link")); err != nil {
+		t.Fatal(err)
+	}
+	fixture.git(fixture.source, "add", "omitted-link")
+	fixture.git(fixture.source, "commit", "-m", "add gitlink and symlink")
+	linkBlob := fixture.git(fixture.source, "rev-parse", "HEAD:omitted-link")
 	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/heads/main")
 
 	checkout := fixture.clone()
 	ctx := context.Background()
 	snapshot, err := checkout.Snapshot(ctx)
-	if err != nil || len(snapshot.Omitted) != 1 || snapshot.Omitted[0] != "sub" {
-		t.Fatalf("gitlink snapshot=%+v error=%v", snapshot, err)
+	if err != nil || len(snapshot.Omitted) != 2 || snapshot.Omitted[0] != "omitted-link" || snapshot.Omitted[1] != "sub" {
+		t.Fatalf("omitted snapshot=%+v error=%v", snapshot, err)
 	}
 	const branch = "minion/fix-gitlink"
 	if err := checkout.NewBranch(ctx, branch); err != nil {
@@ -316,6 +321,9 @@ func TestNewBranchPreservesOmittedGitlink(t *testing.T) {
 	}
 	if got := fixture.git("", "--git-dir="+fixture.remote, "ls-tree", "refs/heads/"+branch, "sub"); got != "160000 commit "+fixture.base+"\tsub" {
 		t.Fatalf("published gitlink changed: %q", got)
+	}
+	if got := fixture.git("", "--git-dir="+fixture.remote, "ls-tree", "refs/heads/"+branch, "omitted-link"); got != "120000 blob "+linkBlob+"\tomitted-link" {
+		t.Fatalf("published symlink changed: %q", got)
 	}
 }
 

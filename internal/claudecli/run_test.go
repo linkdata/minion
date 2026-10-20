@@ -333,6 +333,52 @@ printf '%s\n' '`+successfulResult+`'
 	}
 }
 
+func TestRunFiltersWritablePATHEntries(t *testing.T) {
+	workspace, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	binary, err := filepath.EvalSymlinks(fakeExecutable(t, "claude", `printf '%s\n' "$PATH" > "$0.path"
+cat >/dev/null
+printf '%s\n' '`+successfulResult+`'
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var session Session
+	t.Cleanup(func() {
+		if err := session.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	if err := session.prepare(workspace, binary, true, output, config.ClaudeConfig{}); err != nil {
+		t.Fatal(err)
+	}
+	blocked := []string{filepath.Join(session.runtimeDir, "bin"), filepath.Join(workspace, "bin"), filepath.Join(output, "bin")}
+	for _, dir := range blocked {
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", strings.Join(append(blocked, filepath.Dir(binary), "/usr/bin"), string(os.PathListSeparator)))
+	if result, err := session.Run(context.Background(), workspace, "task", true, output, config.ClaudeConfig{}); err != nil || result.Answer != "final answer" {
+		t.Fatalf("Run() = %+v, %v", result, err)
+	}
+	path := filepath.SplitList(strings.TrimSpace(readFile(t, binary+".path")))
+	for _, dir := range blocked {
+		if slices.Contains(path, dir) {
+			t.Fatalf("model-writable PATH entry %q reached Claude: %q", dir, path)
+		}
+	}
+	if !slices.Contains(path, filepath.Dir(binary)) {
+		t.Fatalf("trusted CLI bin missing from PATH: %q", path)
+	}
+}
+
 func TestRunFailures(t *testing.T) {
 	for _, tc := range []struct{ name, output string }{
 		{"missing", ""},
@@ -537,16 +583,20 @@ func TestChildEnvironmentRejectsCredentials(t *testing.T) {
 func TestCredentialEnvironmentStopsCLI(t *testing.T) {
 	binary := fakeExecutable(t, "claude", "touch \"$0.called\"\nexit 99\n")
 	t.Setenv("ANTHROPIC_API_KEY", "dummy-secret")
-	settings := config.ClaudeConfig{}
-	if _, err := Validate(context.Background(), settings); err == nil || !strings.Contains(err.Error(), "ANTHROPIC_API_KEY") {
-		t.Fatalf("Validate accepted environment credentials: %v", err)
-	}
-	result, err := Run(context.Background(), t.TempDir(), "task", false, "", settings)
-	if err == nil || !strings.Contains(err.Error(), "ANTHROPIC_API_KEY") || !result.UsageComplete || result.Tokens != (usage.Tokens{}) || result.Answer != "" {
-		t.Fatalf("Run accepted environment credentials or lost complete zero usage: result=%+v err=%v", result, err)
-	}
-	if _, err := os.Stat(binary + ".called"); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("CLI launched with credentials: %v", err)
+	for _, allow := range []bool{false, true} {
+		t.Run(fmt.Sprint(allow), func(t *testing.T) {
+			settings := config.ClaudeConfig{AllowAllUnixSockets: &allow}
+			if _, err := Validate(context.Background(), settings); err == nil || !strings.Contains(err.Error(), "ANTHROPIC_API_KEY") {
+				t.Fatalf("Validate accepted environment credentials: %v", err)
+			}
+			result, err := Run(context.Background(), t.TempDir(), "task", false, "", settings)
+			if err == nil || !strings.Contains(err.Error(), "ANTHROPIC_API_KEY") || !result.UsageComplete || result.Tokens != (usage.Tokens{}) || result.Answer != "" {
+				t.Fatalf("Run accepted environment credentials or lost complete zero usage: result=%+v err=%v", result, err)
+			}
+			if _, err := os.Stat(binary + ".called"); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("CLI launched with credentials: %v", err)
+			}
+		})
 	}
 }
 

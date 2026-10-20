@@ -134,6 +134,51 @@ printf '%s\n' '{"type":"thread.started","thread_id":"test"}' '{"type":"item.comp
 	}
 }
 
+func TestRunFiltersWritablePATHEntries(t *testing.T) {
+	workspace, output := canonicalTempDir(t), canonicalTempDir(t)
+	binary := installFakeCodex(t, `#!/bin/sh
+printf '%s\n' "$PATH" > "$0.path"
+cat >/dev/null
+printf '%s\n' '{"type":"thread.started","thread_id":"test"}' '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}' '{"type":"turn.completed"}'
+`)
+	var session Session
+	t.Cleanup(func() {
+		if err := session.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	home, err := HomePath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := session.prepare(workspace, binary, home, output, true, config.CodexConfig{}); err != nil {
+		t.Fatal(err)
+	}
+	blocked := []string{filepath.Join(session.runtimeDir, "bin"), filepath.Join(workspace, "bin"), filepath.Join(output, "bin")}
+	for _, dir := range blocked {
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", strings.Join(append(blocked, filepath.Dir(binary), "/usr/bin"), string(os.PathListSeparator)))
+	if result, err := session.Run(context.Background(), workspace, "task", true, output, config.CodexConfig{}); err != nil || result.Answer != "done" {
+		t.Fatalf("Run() = %+v, %v", result, err)
+	}
+	data, err := os.ReadFile(binary + ".path")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.SplitList(strings.TrimSpace(string(data)))
+	for _, dir := range blocked {
+		if slices.Contains(path, dir) {
+			t.Fatalf("model-writable PATH entry %q reached Codex: %q", dir, path)
+		}
+	}
+	if !slices.Contains(path, filepath.Dir(binary)) {
+		t.Fatalf("trusted CLI bin missing from PATH: %q", path)
+	}
+}
+
 func TestSessionDoesNotBindThreadAfterOutputStop(t *testing.T) {
 	bin := installFakeCodex(t, `#!/bin/sh
 cat >/dev/null

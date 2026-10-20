@@ -64,7 +64,7 @@ func readAuditArtifacts(outputDir string, partial bool, secrets ...string) ([]wo
 			}
 			if err == nil && int64(len(data)) > limit {
 				err = errors.New("redacted artifact exceeds byte limit")
-			} else if err == nil && name == "REPORT.md" && !partial && !publishableAnswer(string(data)) {
+			} else if err == nil && name == "REPORT.md" && !partial && (!publishableAnswer(string(data)) || strings.TrimSpace(string(data)) == "") {
 				err = errors.New("audit REPORT.md is invalid or exceeds publication limit")
 			}
 		}

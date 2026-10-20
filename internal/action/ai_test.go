@@ -265,6 +265,40 @@ func TestRedactActionTextFailsClosedWhenMarkersReformAnotherKey(t *testing.T) {
 	}
 }
 
+func TestRedactActionErrorFallbackPreservesCause(t *testing.T) {
+	cause := errors.New("private # and redacted")
+	err := redactActionError(cause, "#", "redacted")
+	if err == nil || err.Error() != "action error could not be safely displayed" || !errors.Is(err, cause) {
+		t.Fatalf("fallback error lost safe message or cause: %v", err)
+	}
+}
+
+func TestRunAIRejectsInvalidProposalAfterRedaction(t *testing.T) {
+	for _, tt := range []struct {
+		name, answer, refutations, codexKey, claudeKey, wantError string
+	}{
+		{name: "blank answer", answer: "private # and redacted", codexKey: "#", claudeKey: "redacted", wantError: "answer must not be blank"},
+		{name: "expanded critic context", answer: "public", refutations: strings.Repeat("x", maxOutputBytes/10+1), codexKey: "x", wantError: "decoded response exceeds critic context limit"},
+		{name: "expanded rendered answer", answer: strings.Repeat("y", maxOutputBytes-15) + "x", codexKey: "x", wantError: "rendered answer exceeds publication limit"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			calls := 0
+			runner := Runner{Codex: config.CodexConfig{APIKey: tt.codexKey}, Claude: config.ClaudeConfig{APIKey: tt.claudeKey}, runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+				calls++
+				if request.role != roleMain {
+					t.Fatal("invalid redacted proposal reached critic")
+				}
+				return aicli.Result{Answer: proposalJSON(tt.answer, tt.refutations)}, nil
+			}}
+			job := Job{Action: command.Comment, Main: RoleSettings{Provider: "codex"}, Critic: &RoleSettings{Provider: "claude"}, CriticMaxRounds: 1}
+			answer, err := runner.runAI(context.Background(), job, t.TempDir(), "task", "", nil, &modelSessions{})
+			if answer != "" || !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), tt.wantError) || calls != 1 {
+				t.Fatalf("invalid redacted proposal: answer=%q calls=%d error=%v", answer, calls, err)
+			}
+		})
+	}
+}
+
 func TestRunAIRevisionPreservesWorkAndBoundaries(t *testing.T) {
 	for _, tt := range []struct {
 		name, main, critic string
