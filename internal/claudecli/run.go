@@ -134,10 +134,10 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 		failureTimer = time.AfterFunc(time.Second, cancel)
 	}}
 	diagnostics := bounded.Tail{}
-	ceilingMatched := false
+	ceilingMatched, ceilingOverflow := false, false
 	ceiling := bounded.Lines{Limit: bounded.DiagnosticBytes, Line: func(line []byte) {
 		ceilingMatched = ceilingMatched || isWaitCeilingStop(line)
-	}}
+	}, Overflow: func() { ceilingOverflow = true }}
 	cmd.Stdout, cmd.Stderr = &output, io.MultiWriter(&diagnostics, &ceiling)
 	err = cmd.Run()
 	if cmd.Process == nil {
@@ -169,6 +169,8 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 		err = errors.Join(ctx.Err(), output.err, err)
 	} else if ceilingMatched {
 		err = errors.Join(errors.New("background tasks stopped by Claude's wait ceiling"), output.err, err)
+	} else if ceilingOverflow {
+		err = errors.Join(errors.New("stderr line exceeded diagnostic limit; background task wait ceiling cannot be ruled out"), output.err, err)
 	} else if output.err != nil {
 		err = errors.Join(output.err, err)
 	}

@@ -526,6 +526,16 @@ func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, 
 			}
 			// Forks can retain parent history and cumulative counters. Per-response
 			// records carry their actual owner, so inherited work is counted once.
+			if record.ThreadID == "" {
+				if before == nil && meta.ID != rootID && meta.HistoryStart != nil && event.Ordinal > 0 && event.Ordinal < *meta.HistoryStart {
+					continue
+				}
+				complete, snapshotKnown = false, false
+				if capture != nil {
+					capture.valid = false
+				}
+				continue
+			}
 			if record.ThreadID != meta.ID {
 				continue
 			}
@@ -689,9 +699,7 @@ func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, 
 						}
 					}
 					if payload.Type == "turn_aborted" {
-						if capture != nil {
-							abortedTurns[payload.TurnID] = true
-						}
+						abortedTurns[payload.TurnID] = true
 						complete = false
 					}
 				}
@@ -711,6 +719,13 @@ func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, 
 	if scanner.Err() != nil {
 		readable = false
 	}
+	unfinished := before != nil && before.unfinished
+	for turn, done := range turns {
+		unfinished = unfinished || (!done && !abortedTurns[turn])
+	}
+	for turn := range ownedTurns {
+		unfinished = unfinished || (!turns[turn] && !abortedTurns[turn])
+	}
 	if capture != nil {
 		// Byte identity is independent of whether old token fields are usable.
 		capture.prefixKnown = reader.N > 0 && scanner.Err() == nil && closeErr == nil && ctx.Err() == nil
@@ -719,12 +734,7 @@ func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, 
 		copy(capture.hash[:], hash.Sum(nil))
 		capture.snapshot, capture.hasSnapshot = latest, seenSnapshot
 		capture.completed = latestOwnTurn != "" && latestOwnDone && !inheritedWithoutBoundary && !lifecycleCapped
-		for turn, done := range turns {
-			capture.unfinished = capture.unfinished || (!done && !abortedTurns[turn])
-		}
-		for turn := range ownedTurns {
-			capture.unfinished = capture.unfinished || (!turns[turn] && !abortedTurns[turn])
-		}
+		capture.unfinished = capture.unfinished || unfinished
 		capture.valid = capture.valid && readable && seenHeader && ctx.Err() == nil
 	}
 	if mode.latest != nil {
@@ -738,6 +748,9 @@ func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, 
 		return usage.Tokens{}, true, children, nil
 	}
 	if before != nil {
+		if meta.ID != rootID && before.unfinished {
+			complete = false
+		}
 		var added bool
 		inherited, added = inherited.AddChecked(lateOld)
 		complete = complete && added && lateOld == (usage.Tokens{})
@@ -756,7 +769,7 @@ func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, 
 	complete = complete && readable && (meta.ID == rootID || seenHeader)
 	// Known helpers require a fully read, attributable completed latest turn.
 	// Missing counters alone do not prevent that lifecycle proof.
-	if seenHeader && readable && ctx.Err() == nil && !inheritedWithoutBoundary && !lifecycleCapped && latestOwnTurn != "" && latestOwnDone {
+	if seenHeader && readable && ctx.Err() == nil && !inheritedWithoutBoundary && !lifecycleCapped && latestOwnTurn != "" && latestOwnDone && !unfinished {
 		childError = nil
 	}
 	if tooManyChildren {

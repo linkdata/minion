@@ -434,6 +434,8 @@ func TestRunBackgroundWaitCeiling(t *testing.T) {
 		fails, outputLimit                         bool
 	}{
 		{name: "native ceiling", stderr: waitCeilingDiagnostic, script: emit(successfulResult), tokens: known, fails: true},
+		{name: "oversized native ceiling", stderr: waitCeilingDiagnostic + strings.Repeat(" ", bounded.DiagnosticBytes), script: emit(successfulResult), tokens: known, fails: true, extraFailure: "stderr line exceeded"},
+		{name: "oversized stderr cannot certify completion", stderr: strings.Repeat("x", bounded.DiagnosticBytes+1), script: emit(successfulResult), tokens: known, fails: true, extraFailure: "stderr line exceeded"},
 		{name: "answer text", script: emit(strings.Replace(successfulResult, "final answer", waitCeilingDiagnostic, 1)), answer: waitCeilingDiagnostic, tokens: known},
 		{name: "early diagnostic outlives tail", stderr: waitCeilingDiagnostic + "\n" + strings.Repeat("later diagnostic\n", 2000), script: emit(successfulResult), tokens: known, fails: true},
 		{name: "diagnostic after oversized line", stderr: strings.Repeat("x", bounded.DiagnosticBytes+1) + "\n" + waitCeilingDiagnostic, script: emit(successfulResult), tokens: known, fails: true},

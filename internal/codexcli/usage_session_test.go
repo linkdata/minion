@@ -502,6 +502,33 @@ func TestUsageSessionNativeCumulativeStdoutPreservesCompleteDeltas(t *testing.T)
 	}
 }
 
+func TestUsageSessionLateInheritedUnknownOwnerDoesNotUseSnapshotAsCurrentUsage(t *testing.T) {
+	ctx, home := context.Background(), t.TempDir()
+	root := writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "old-root", "r1", 100)...)
+	start := int64(9)
+	child := writeUsageRolloutBoundary(t, home, "child", "root", &start,
+		usageSnapshot(8, 100, 0, 0),
+		usageEventAt(9, "task_started", "old-child"),
+		usageRecordAt(10, "child", "old-child", "c1", 10, 0, 0),
+		usageSnapshot(12, 110, 0, 0),
+		usageEventAt(13, "task_complete", "old-child"))
+	var session usageSession
+	session.begin(ctx, home, "root", time.Now())
+	if before := session.before["child"]; before == nil || !before.valid || !before.hasSnapshot || before.snapshot.Input != 110 {
+		t.Fatalf("invalid child snapshot baseline: %+v", before)
+	}
+	appendUsageEvents(t, root, completedUsageTurn("root", "new-root", "r2", 20)...)
+	appendUsageEvents(t, child,
+		usageRecordAt(8, "", "inherited", "late-inherited", 20, 0, 0),
+		usageEventAt(24, "task_started", "new-child"),
+		usageSnapshot(25, 130, 0, 0),
+		usageEventAt(26, "task_complete", "new-child"))
+	got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), nil, []string{"child"}, nil)
+	if got != (usage.Tokens{Input: 20}) || complete || err != nil {
+		t.Fatalf("late inherited ownerless record certified snapshot delta: %+v, complete=%t, err=%v", got, complete, err)
+	}
+}
+
 func TestUsageSessionObservationOnlyHonorsToolAndHelperLifecycle(t *testing.T) {
 	for _, test := range []struct {
 		name, tools, before, after string
@@ -515,7 +542,9 @@ func TestUsageSessionObservationOnlyHonorsToolAndHelperLifecycle(t *testing.T) {
 		{"input then wait", "send_input,wait", "complete", "", false},
 		{"wait then input", "wait,send_input", "complete", "", false},
 		{"wait unfinished", "wait", "started", "", false},
+		{"wait unfinished then new completed", "wait", "started", "complete", false},
 		{"close aborted", "close_agent", "aborted", "", false},
+		{"wait aborted then new completed", "wait", "aborted", "complete", true},
 		{"wait new unfinished", "wait", "complete", "started", false},
 		{"wait new completed", "wait", "complete", "complete", true},
 		{"wait invalid baseline", "wait", "invalid", "", false},

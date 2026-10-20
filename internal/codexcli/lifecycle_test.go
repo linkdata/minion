@@ -100,6 +100,9 @@ func TestRunChecksLatestOwnedChildTurn(t *testing.T) {
 	}{
 		{"aborted then completed", first + "\n" + usageEvent("turn_aborted", "first") + "\n" + second + "\n" + usageEvent("task_complete", "second"), false, usage.Tokens{Input: 60, Output: 6}},
 		{"completed then new open turn", first + "\n" + usageEvent("task_complete", "first") + "\n" + second, true, usage.Tokens{Input: 60, Output: 6}},
+		{"earlier turn still open after latest completes", first + "\n" + second + "\n" + usageEvent("task_complete", "second"), true, usage.Tokens{Input: 60, Output: 6}},
+		{"earlier turn still open without counters", usageEvent("task_started", "first") + "\n" + usageEvent("task_started", "second") + "\n" + usageEvent("task_complete", "second"), true, usage.Tokens{Input: 10, Output: 1}},
+		{"aborted then completed without counters", usageEvent("task_started", "first") + "\n" + usageEvent("turn_aborted", "first") + "\n" + usageEvent("task_started", "second") + "\n" + usageEvent("task_complete", "second"), false, usage.Tokens{Input: 10, Output: 1}},
 		{"old abort after newer completion", first + "\n" + second + "\n" + usageEvent("task_complete", "second") + "\n" + usageEvent("turn_aborted", "first"), false, usage.Tokens{Input: 60, Output: 6}},
 		{"old completion cannot close newer turn", first + "\n" + second + "\n" + usageEvent("task_complete", "first"), true, usage.Tokens{Input: 60, Output: 6}},
 		{"observed latest abort before unreadable tail", first + "\n" + usageEvent("turn_aborted", "first") + "\n{damaged", true, usage.Tokens{Input: 30, Output: 3}},

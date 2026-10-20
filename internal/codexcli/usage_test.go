@@ -100,6 +100,58 @@ func TestCollectUsageIncludesNestedHelpersWithoutInheritedOrDuplicateResponses(t
 	}
 }
 
+func TestRolloutUsageRejectsRecordsWithoutThreadOwnership(t *testing.T) {
+	for _, scenario := range []struct {
+		name, id, parent, recordThread string
+		wantComplete                   bool
+	}{
+		{"root unknown owner", "root", "", "", false},
+		{"child unknown owner", "child", "root", "", false},
+		{"child inherited owner", "child", "root", "root", true},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			path := writeUsageRollout(t, t.TempDir(), scenario.id, scenario.parent,
+				usageEvent("task_started", "turn"),
+				usageRecord(scenario.id, "turn", "owned", 10, 0, 1),
+				usageRecord(scenario.recordThread, "turn", "uncertain", 20, 0, 2),
+				usageEvent("task_complete", "turn"))
+			budget := int64(maxUsageScanBytes)
+			capture := &usageBoundary{valid: true, turns: map[string]bool{}}
+			got, complete, _, err := readRolloutUsageFrom(context.Background(), rolloutMeta{ID: scenario.id, path: path}, "root", &budget, rolloutUsageMode{capture: capture})
+			if got != (usage.Tokens{Input: 10, Output: 1}) || complete != scenario.wantComplete || capture.valid != scenario.wantComplete || err != nil {
+				t.Fatalf("record ownership = %+v, complete=%t, baseline valid=%t, error=%v", got, complete, capture.valid, err)
+			}
+		})
+	}
+}
+
+func TestRolloutUsageUnknownOwnerAtChildHistoryBoundary(t *testing.T) {
+	for _, scenario := range []struct {
+		name         string
+		ordinal      int
+		wantComplete bool
+	}{
+		{"before boundary", 8, true},
+		{"at boundary", 9, false},
+		{"zero ordinal", 0, false},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			start := int64(9)
+			path := writeUsageRolloutBoundary(t, t.TempDir(), "child", "root", &start,
+				usageRecordAt(scenario.ordinal, "", "uncertain-turn", "uncertain-response", 20, 0, 2),
+				usageEventAt(9, "task_started", "child-turn"),
+				usageRecordAt(10, "child", "child-turn", "response", 10, 0, 1),
+				usageEventAt(12, "task_complete", "child-turn"))
+			budget := int64(maxUsageScanBytes)
+			capture := &usageBoundary{valid: true, turns: map[string]bool{}}
+			got, complete, _, err := readRolloutUsageFrom(context.Background(), rolloutMeta{ID: "child", path: path, HistoryStart: &start}, "root", &budget, rolloutUsageMode{capture: capture})
+			if got != (usage.Tokens{Input: 10, Output: 1}) || complete != scenario.wantComplete || capture.valid != scenario.wantComplete || err != nil {
+				t.Fatalf("unknown-owner record at history boundary: %+v, complete=%t, baseline valid=%t, error=%v", got, complete, capture.valid, err)
+			}
+		})
+	}
+}
+
 func TestCollectUsageCountsEventsAtHistoryStart(t *testing.T) {
 	home := t.TempDir()
 	start := int64(9)
