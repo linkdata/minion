@@ -69,7 +69,7 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			result.Answer, result.Changes = "", nil
 			resultErr = errors.Join(monitor.ErrTerminalJob, ctx.Err(), resultErr)
-		} else if ctx.Err() != nil && resultErr != nil && !errors.Is(resultErr, monitor.ErrTerminalJob) {
+		} else if ctx.Err() != nil && !errors.Is(resultErr, monitor.ErrTerminalJob) {
 			resultErr = errors.Join(ctx.Err(), resultErr)
 		}
 		if job.Action == command.SecurityAudit && resultErr != nil {

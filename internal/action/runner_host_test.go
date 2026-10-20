@@ -76,6 +76,35 @@ func TestRunnerRejectsCanceledContextBeforePreparation(t *testing.T) {
 	}
 }
 
+func TestRunnerReturnsParentCancellationAfterFinalReview(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	job := withClaudeCritic(testJob(command.Comment))
+	root := t.TempDir()
+	calls := 0
+	runner := Runner{
+		WorkRoot: root,
+		runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+			calls++
+			if request.role == roleMain {
+				return aicli.Result{Answer: proposalJSON("Done.", "")}, nil
+			}
+			return aicli.Result{Answer: approvedCritiqueJSON}, nil
+		},
+		recordReview: func(receipts []CallUsage, _ []Refutation) error {
+			if len(receipts) == 2 {
+				cancel() // After the last model and repository verification, before Run returns.
+			}
+			return nil
+		},
+	}
+	result, err := runner.Run(ctx, job)
+	if !errors.Is(err, context.Canceled) || errors.Is(err, monitor.ErrTerminalJob) || calls != 2 || len(result.Calls) != 2 {
+		t.Fatalf("canceled after final review: result=%+v calls=%d error=%v", result, calls, err)
+	}
+	assertEmptyDir(t, root)
+}
+
 func TestRunnerPreparationFailuresAreTerminalBeforeModels(t *testing.T) {
 	longPath := strings.TrimSuffix(strings.Repeat(strings.Repeat("a", 255)+"/", 16), "/")
 	for _, test := range []struct {
