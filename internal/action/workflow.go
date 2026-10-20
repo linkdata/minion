@@ -235,7 +235,7 @@ func (e *Orchestrator) publish(ctx context.Context, p *preparedAction, result Re
 	}
 	request := p.request
 	var err error
-	switch request.Command.Action {
+	switch p.job.Action {
 	case command.Review:
 		if _, err = e.verifiedRepository(ctx, request.Repository); err != nil {
 			break

@@ -212,10 +212,7 @@ func checkIsolation(cfg config.Config, configPath string) (resultErr error) {
 	if err := workspace.CheckRoot(root); err != nil {
 		return err
 	}
-	runner := action.Runner{
-		Codex:  config.CodexConfig{ReadOnlyDirs: cfg.Codex.ReadOnlyDirs},
-		Claude: config.ClaudeConfig{ReadOnlyDirs: cfg.Claude.ReadOnlyDirs},
-	}
+	runner := action.Runner{}
 	for _, provider := range []string{cfg.Main, cfg.Adversarial} {
 		if provider == "" {
 			continue

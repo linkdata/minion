@@ -202,6 +202,35 @@ func TestUsageSessionChangedOrIncompletePrefixDoesNotRecountHistory(t *testing.T
 	}
 }
 
+func TestUsageSessionDamagedRootCannotVerifyFreshHelper(t *testing.T) {
+	ctx, home := context.Background(), t.TempDir()
+	root := writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "old", "r1", 100)...)
+	var session usageSession
+	session.begin(ctx, home, "root", time.Now())
+	data, err := os.ReadFile(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	damaged := strings.Replace(string(data), "r1", "xx", 1)
+	if damaged == string(data) {
+		t.Fatal("old response missing from root fixture")
+	}
+	if err := os.WriteFile(root, []byte(damaged), 0600); err != nil {
+		t.Fatal(err)
+	}
+	appendUsageEvents(t, root,
+		usageEvent("task_started", "new"),
+		usageRecord("root", "new", "r2", 20, 0, 0),
+		`{"ordinal":25,"type":"event_msg","payload":{"type":"collab_agent_spawn_end","turn_id":"new","new_thread_id":"child"}}`,
+		usageEvent("task_complete", "new"),
+	)
+	writeUsageRollout(t, home, "child", "root", completedUsageTurn("child", "child-turn", "c1", 5)...)
+	got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 20}, []string{"child"}, nil)
+	if got != (usage.Tokens{}) || complete || !errors.Is(err, errUnverifiedChildren) {
+		t.Fatalf("damaged root accepted fresh helper: tokens=%+v complete=%t err=%v", got, complete, err)
+	}
+}
+
 func TestUsageSessionSnapshotOnlyDeltaAndCumulativeStdout(t *testing.T) {
 	for _, fallback := range []int64{20, 120} {
 		t.Run(map[int64]string{20: "scoped-stdout", 120: "cumulative-stdout"}[fallback], func(t *testing.T) {

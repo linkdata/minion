@@ -118,6 +118,9 @@ func TestRunnerReviewRevisionsFreezeCleanIndependentInputs(t *testing.T) {
 		if request.dir == source || request.writable || request.outputDir != "" {
 			t.Fatalf("critic received mutable main workspace: dir=%q writable=%t output=%q", request.dir, request.writable, request.outputDir)
 		}
+		if !strings.Contains(request.prompt, fmt.Sprintf(`inspect the frozen source at \"%s\"`, request.dir)) {
+			t.Fatalf("critic prompt lacks frozen source path %q", request.dir)
+		}
 		data, err := workspace.ReadRegular(filepath.Join(request.dir, "source.txt"), workspace.MaxBytes)
 		if err != nil || string(data) != fmt.Sprintf("candidate %d", request.round) {
 			t.Fatalf("critic source=%q,%v", data, err)
@@ -230,6 +233,9 @@ func TestRunnerAuditReviewFreezesAndExportsRawReports(t *testing.T) {
 				}
 				if request.dir != source || request.outputDir != "" || request.writable || frozenReports == "" || frozenReports == reports || slices.Contains(request.readOnlyDirs, reports) {
 					t.Fatalf("audit critic received mutable grants: dir=%q writable=%t output=%q grants=%q", request.dir, request.writable, request.outputDir, request.readOnlyDirs)
+				}
+				if !strings.Contains(request.prompt, fmt.Sprintf(`Frozen reports are at \"%s\"`, frozenReports)) {
+					t.Fatalf("audit critic prompt lacks frozen reports path %q", frozenReports)
 				}
 				data, err := workspace.ReadRegular(filepath.Join(frozenReports, "run-metadata.json"), maxAuditArtifactBytes)
 				if err != nil || !bytes.Equal(data, rawMetadata) {

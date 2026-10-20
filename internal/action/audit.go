@@ -134,10 +134,11 @@ func rejectDuplicateAuditJSONKeys(data []byte) error {
 				if !ok {
 					return errors.New("audit JSON object key is invalid")
 				}
-				if seen[key] {
+				folded := workspace.FoldPath(key)
+				if seen[folded] {
 					return errors.New("audit JSON has duplicate object keys")
 				}
-				seen[key] = true
+				seen[folded] = true
 				if err := visit(); err != nil {
 					return err
 				}

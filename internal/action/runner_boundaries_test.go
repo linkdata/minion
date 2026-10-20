@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -45,6 +46,35 @@ func TestPartialAuditMetadataPathListsStayPortable(t *testing.T) {
 				}
 			}
 		}
+	}
+	for _, test := range []struct {
+		name, path, want, wantErr string
+	}{
+		{"inside installed skill", "/installed/companion.md", "companion.md", ""},
+		{"portable relative", "extras/companion.md", "extras/companion.md", ""},
+		{"outside installed skill", "/etc/passwd", "", "outside the installed skill"},
+		{"absolute escape", "/installed/../outside", "", "outside the installed skill"},
+		{"relative escape", "../outside", "", "path is invalid"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			data, err := json.Marshal(map[string]any{"selected_companion_files": []string{test.path}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			files, err := normalizeAuditArtifacts([]workspace.File{{Path: "run-metadata.json", Mode: workspace.Regular, Data: data}}, job, "/installed/SKILL.md")
+			if test.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+					t.Fatalf("companion %q error = %v; want %q", test.path, err, test.wantErr)
+				}
+				return
+			}
+			var metadata struct {
+				SelectedCompanionFiles []string `json:"selected_companion_files"`
+			}
+			if err != nil || len(files) != 1 || json.Unmarshal(files[0].Data, &metadata) != nil || !slices.Equal(metadata.SelectedCompanionFiles, []string{test.want}) {
+				t.Fatalf("companion %q normalization = %+v, %v", test.path, files, err)
+			}
+		})
 	}
 }
 

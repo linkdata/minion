@@ -167,8 +167,8 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			minInterval = githubInterval
 			next = started.Add(minInterval)
 			store.Data.NextPollAt = next
-			if err := store.Save(); err != nil {
-				return stop(err)
+			if saveErr := store.Save(); saveErr != nil {
+				return stop(err, saveErr)
 			}
 		}
 		if ctx.Err() != nil {

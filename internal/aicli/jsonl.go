@@ -14,6 +14,7 @@ const (
 )
 
 // JSONL frames bounded provider output; adapters retain their own event policy.
+// Line receives a borrowed byte slice that is only valid until the callback returns.
 type JSONL struct {
 	Line    func([]byte)
 	Fail    func(error)

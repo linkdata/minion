@@ -64,7 +64,7 @@ func TestGitFailurePreservesDiskCapacityCauses(t *testing.T) {
 }
 
 func TestImportRequiresExactlyReviewedPaths(t *testing.T) {
-	for _, scenario := range []string{"no-op", "ignored", "undeclared", "unsorted", "mode-only"} {
+	for _, scenario := range []string{"no-op", "ignored", "undeclared", "substituted", "unsorted", "mode-only"} {
 		t.Run(scenario, func(t *testing.T) {
 			fixture := newFixture(t)
 			changes := []workspace.Change{{Path: "README.md", Mode: workspace.Regular, Data: []byte("changed\n")}}
@@ -76,6 +76,10 @@ func TestImportRequiresExactlyReviewedPaths(t *testing.T) {
 				changes = append(changes, workspace.Change{Path: "ignored.txt", Mode: workspace.Regular, Data: []byte("reviewed\n")})
 			case "undeclared":
 				writeFile(t, filepath.Join(fixture.checkout.path, "extra.txt"), "not reviewed\n")
+			case "substituted":
+				writeFile(t, filepath.Join(fixture.checkout.path, ".git", "info", "exclude"), "ignored.txt\n")
+				writeFile(t, filepath.Join(fixture.checkout.path, "extra.txt"), "not reviewed\n")
+				changes = []workspace.Change{{Path: "ignored.txt", Mode: workspace.Regular, Data: []byte("reviewed\n")}}
 			case "unsorted":
 				changes = append([]workspace.Change{{Path: "z.txt", Mode: workspace.Regular, Data: []byte("reviewed\n")}}, changes...)
 			case "mode-only":

@@ -702,10 +702,10 @@ func TestFixIndexPatchOverflowClassificationPreservesOtherErrors(t *testing.T) {
 			index, source := offlineIndexFixture(t, []workspace.File{{Path: "source", Mode: workspace.Regular, Data: []byte("before")}})
 			writeIndexFixture(t, source, "source", []byte("after"))
 			marker := filepath.Join(t.TempDir(), "patch-started")
-			behavior := fmt.Sprintf("head -c %d /dev/zero", maxPatchBytes)
+			behavior := fmt.Sprintf("head -c %d /dev/zero", MaxPatchBytes)
 			switch kind {
 			case "overflow":
-				behavior = fmt.Sprintf("head -c %d /dev/zero", maxPatchBytes+1)
+				behavior = fmt.Sprintf("head -c %d /dev/zero", MaxPatchBytes+1)
 			case "failure":
 				behavior = "printf 'fixture failure' >&2; exit 7"
 			case "canceled":

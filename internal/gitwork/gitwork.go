@@ -25,8 +25,8 @@ import (
 const (
 	gitAttributes = "* -text -ident -filter -working-tree-encoding !diff\n"
 
-	// maxPatchBytes bounds a published fix's binary patch independently of model context.
-	maxPatchBytes = 1 << 20
+	// MaxPatchBytes bounds a published fix's binary patch independently of model context.
+	MaxPatchBytes = 1 << 20
 	// maxChangedPathListBytes bounds a changed-path listing with Git's record metadata.
 	maxChangedPathListBytes = (workspace.MaxChanges + 1) * (workspace.MaxPathBytes + 128)
 
@@ -158,8 +158,12 @@ func (c *Checkout) verifiedHead(ctx context.Context) (string, error) {
 	if err := c.ready(); err != nil {
 		return "", err
 	}
-	if err := c.assertHead(ctx); err != nil {
+	head, err := c.head(ctx)
+	if err != nil {
 		return "", err
+	}
+	if c.expectedHead == "" || head != c.expectedHead {
+		return "", fmt.Errorf("checkout HEAD moved: expected %s, found %s", c.expectedHead, head)
 	}
 	return c.expectedHead, nil
 }
@@ -322,7 +326,7 @@ func splitNUL(data []byte) ([][]byte, error) {
 }
 
 func (c *Checkout) checkPatchSize(ctx context.Context) error {
-	_, truncated, err := c.boundedGit(ctx, nil, maxPatchBytes, true, patchDiffArgs()...)
+	_, truncated, err := c.boundedGit(ctx, nil, MaxPatchBytes, true, patchDiffArgs()...)
 	if truncated {
 		return ErrDiffTooLarge
 	}
@@ -335,17 +339,6 @@ func patchDiffArgs() []string {
 
 func (c *Checkout) head(ctx context.Context) (string, error) {
 	return runGit(ctx, c.path, "rev-parse", "--verify", "HEAD^{commit}")
-}
-
-func (c *Checkout) assertHead(ctx context.Context) error {
-	head, err := c.head(ctx)
-	if err != nil {
-		return err
-	}
-	if c.expectedHead == "" || head != c.expectedHead {
-		return fmt.Errorf("checkout HEAD moved: expected %s, found %s", c.expectedHead, head)
-	}
-	return nil
 }
 
 func (c *Checkout) recordConfig() error {
@@ -453,7 +446,7 @@ func classifyPathError(operation, message string, err error) error {
 	return err
 }
 
-// disableAttributes disables repository transformations on trusted and offline indexes.
+// disableAttributes disables transformations on trusted checkouts, offline indexes and model repository metadata.
 func disableAttributes(gitDir string) error {
 	if err := os.MkdirAll(filepath.Join(gitDir, "info"), 0700); err != nil {
 		return err

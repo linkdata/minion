@@ -53,6 +53,37 @@ func TestUsageWalkContinuesAfterLocalFailureButHonorsStops(t *testing.T) {
 	}
 }
 
+func TestUsageWalkKeepsDiscoveredChildrenAfterLocalFailure(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"one", "two"} {
+		path := filepath.Join(root, name)
+		if err := os.Mkdir(path, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(path, "event.jsonl"), nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	local := errors.New("local discovery failure")
+	first, seen := "", ""
+	err := walkUsageFiles(context.Background(), root, time.Now(), func(path string, entry fs.DirEntry) error {
+		if entry.IsDir() && filepath.Dir(path) == root {
+			if first == "" {
+				first = path
+				return nil
+			}
+			return local
+		}
+		if !entry.IsDir() {
+			seen = path
+		}
+		return nil
+	})
+	if !errors.Is(err, local) || first == "" || seen != filepath.Join(first, "event.jsonl") {
+		t.Fatalf("partial directory scan lost a child: first=%q seen=%q err=%v", first, seen, err)
+	}
+}
+
 func TestUsageDiscoverySkipsSymlinksAndNonRegularEntries(t *testing.T) {
 	home, outside := t.TempDir(), t.TempDir()
 	root := writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "root-turn", "response", 10)...)

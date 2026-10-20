@@ -213,9 +213,10 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	if s.threadID == "" && output.stopErr == nil {
 		s.threadID = output.threadID
 	}
-	if output.expectedID != "" && output.threadID == "" && runErr == nil && ctx.Err() == nil &&
-		!output.failed && output.parseErr == nil && output.completed && output.finalMessage != "" {
+	clean := runErr == nil && ctx.Err() == nil && !output.failed && output.parseErr == nil && output.completed && output.finalMessage != ""
+	if output.expectedID != "" && output.threadID == "" && clean {
 		output.stop(errors.New("Codex resume did not identify its expected thread")) //nolint:staticcheck // -- Codex is a proper noun.
+		clean = false
 	}
 	var childError error
 	result.Tokens, result.UsageComplete, childError = s.accounting.collectUsage(ctx, codexHome, cmp.Or(output.threadID, output.expectedID), started, output.tokens, output.children, output.observationOnly)
@@ -225,7 +226,7 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 			runError = errors.Join(runError, fmt.Errorf("codex exec: %w", childError))
 		}
 	}()
-	if runErr != nil || ctx.Err() != nil || output.failed || output.parseErr != nil || !output.completed || output.finalMessage == "" {
+	if !clean || ctx.Err() != nil {
 		// Keep known counters; a failed lifecycle cannot certify full coverage.
 		result.UsageComplete = false
 	}
@@ -238,16 +239,16 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	if output.parseErr != nil {
 		return result, fmt.Errorf("codex exec output: %w", errors.Join(output.parseErr, runErr))
 	}
-	if runErr != nil || output.failed {
-		reason := bounded.Text(cmp.Or(aicli.RedactText(output.failureReason, settings.APIKey), aicli.RedactTail(&stderr, settings.APIKey), "no further diagnostics"))
-		if runErr != nil {
-			return result, fmt.Errorf("codex exec failed (%w): %q", runErr, reason)
+	if runErr != nil || output.failed || !output.completed {
+		detail := cmp.Or(aicli.RedactText(output.failureReason, settings.APIKey), aicli.RedactTail(&stderr, settings.APIKey))
+		if runErr != nil || output.failed {
+			reason := bounded.Text(cmp.Or(detail, "no further diagnostics"))
+			if runErr != nil {
+				return result, fmt.Errorf("codex exec failed (%w): %q", runErr, reason)
+			}
+			return result, fmt.Errorf("codex exec failed: %q", reason)
 		}
-		return result, fmt.Errorf("codex exec failed: %q", reason)
-	}
-	if !output.completed {
-		reason := bounded.Text(cmp.Or(aicli.RedactText(output.failureReason, settings.APIKey), aicli.RedactTail(&stderr, settings.APIKey), "missing turn.completed event"))
-		return result, fmt.Errorf("codex exec did not complete: %q", reason)
+		return result, fmt.Errorf("codex exec did not complete: %q", bounded.Text(cmp.Or(detail, "missing turn.completed event")))
 	}
 	if output.finalMessage == "" {
 		return result, errors.New("codex exec completed without a final agent message")
@@ -359,7 +360,7 @@ func (o *jsonlOutput) stop(err error) {
 }
 
 func (o *jsonlOutput) acceptLine(line []byte) {
-	if o.stopErr != nil {
+	if o.stopErr != nil || o.parseErr != nil {
 		return
 	}
 	var event codexEvent

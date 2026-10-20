@@ -101,20 +101,6 @@ func TestWorkRootPreflightIgnoresMissingSkills(t *testing.T) {
 	}
 }
 
-func TestWorkRootPreflightRejectsApplicationReadGrants(t *testing.T) {
-	root := t.TempDir()
-	isolateHostPaths(t, root)
-	work := filepath.Join(root, "work")
-	if err := os.Mkdir(work, 0700); err != nil {
-		t.Fatal(err)
-	}
-	cfg := config.Config{Main: "codex", WorkRoot: work}
-	cfg.Codex.ReadOnlyDirs = []string{root}
-	if err := checkIsolation(cfg, filepath.Join(root, "config.json")); !errors.Is(err, workroot.ErrUnsafe) || !strings.Contains(err.Error(), "host-level model read grants are unsupported") {
-		t.Fatalf("preflight accepted application read grant: %v", err)
-	}
-}
-
 func TestWorkRootPreflightRequiresWorkspaceBackend(t *testing.T) {
 	root := t.TempDir()
 	isolateHostPaths(t, root)
@@ -181,7 +167,12 @@ func TestWorkRootPreflightProtectsConfigurationAndCredentials(t *testing.T) {
 				t.Setenv("GH_CONFIG_DIR", public)
 			case "default gh home":
 				t.Setenv("GH_CONFIG_DIR", "")
-				t.Setenv("XDG_CONFIG_HOME", public)
+				if err := os.MkdirAll(filepath.Join(root, "config"), 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(public, filepath.Join(root, "config", "gh")); err != nil {
+					t.Fatal(err)
+				}
 			case "gh credential alias":
 				if err := os.WriteFile(filepath.Join(public, "hosts.yml"), []byte("fixture only"), 0600); err != nil {
 					t.Fatal(err)
@@ -200,7 +191,7 @@ func TestWorkRootPreflightProtectsConfigurationAndCredentials(t *testing.T) {
 				return
 			}
 
-			if err := checkIsolation(cfg, configPath); !errors.Is(err, workroot.ErrUnsafe) || !strings.Contains(err.Error(), "private host path") {
+			if err := checkIsolation(cfg, configPath); !errors.Is(err, workroot.ErrUnsafe) || !strings.Contains(err.Error(), "private host path") || kind == "default gh home" && !strings.Contains(err.Error(), filepath.Join(root, "config", "gh")) {
 				t.Fatalf("preflight accepted exposed %s: %v", kind, err)
 			}
 		})

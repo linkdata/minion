@@ -13,6 +13,7 @@ import (
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
+	"github.com/linkdata/minion/internal/gitwork"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/workspace"
 )
@@ -89,9 +90,9 @@ func TestEveryActionPromptDeclaresRenderedPublicationBudget(t *testing.T) {
 				}
 				if action == command.Fix {
 					for _, requirement := range []string{
-						"complete contents of all changed files, including mode-only changes, must fit 1 MiB",
-						"Git binary patch must also fit 1 MiB, including removed lines, deleted-file contents and binary encoding overhead",
-						"All changes, including deletions, are limited to 100 paths",
+						fmt.Sprintf("complete contents of all changed files, including mode-only changes, must fit %d bytes", workspace.MaxChangeBytes),
+						fmt.Sprintf("Git binary patch must also fit %d bytes, including removed lines, deleted-file contents and binary encoding overhead", gitwork.MaxPatchBytes),
+						fmt.Sprintf("All changes, including deletions, are limited to %d paths", workspace.MaxChanges),
 					} {
 						if !strings.Contains(prompt, requirement) {
 							t.Fatalf("fix prompt omits %q", requirement)

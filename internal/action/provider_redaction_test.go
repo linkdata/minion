@@ -188,6 +188,7 @@ func TestAuditJSONRejectsUnsafeKeyEncodings(t *testing.T) {
 		name, secret, source, want string
 	}{
 		{"nested escaped duplicate", "fixture-audit-secret", `{"outer":[{"note":"fixture-audit-\u0073ecret","n\u006fte":"safe"}]}`, "duplicate object keys"},
+		{"case-folded status duplicate", "fixture-audit-secret", `{"status":"planned","STATUS":"covered"}`, "duplicate object keys"},
 		{"redacted key collision", "fixture-audit-secret", `{"fixture-audit-secret":"A","[redacted]":"B"}`, "keys collide after redaction"},
 		{"key in raw Unicode escape", "1234", `{"note":"\u1234"}`, "configured key in source syntax"},
 		{"key in JSON punctuation", ":", `{"note":"safe"}`, "configured key in source syntax"},

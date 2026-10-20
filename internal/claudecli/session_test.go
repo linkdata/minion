@@ -82,7 +82,7 @@ if $resume; then printf '%s\n' '`+doubled+`'; else printf '%s\n' '`+successfulRe
 	if !regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`).MatchString(firstID) {
 		t.Fatalf("session ID is not a version-4 UUID: %q", firstID)
 	}
-	if firstID == "" || option(secondArgs, "--resume") != firstID || option(thirdArgs, "--session-id") == firstID {
+	if option(secondArgs, "--resume") != firstID || option(thirdArgs, "--session-id") == firstID {
 		t.Fatal("conversation selection did not continue then start fresh")
 	}
 	paths := readFile(t, binary+".1.paths")
@@ -242,6 +242,30 @@ func TestSessionNativeHomeCannotChange(t *testing.T) {
 				t.Fatal("changed native home executed")
 			}
 		})
+	}
+}
+
+func TestSessionRejectsSwitchToExplicitDefaultConfig(t *testing.T) {
+	binary := fakeExecutable(t, "claude", "cat >/dev/null\nprintf called >>\"$0.calls\"\nprintf '%s\\n' '"+successfulResult+"'\n")
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	var session Session
+	t.Cleanup(func() {
+		if err := session.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	dir := t.TempDir()
+	if _, err := session.Run(context.Background(), dir, "first", false, "", config.ClaudeConfig{}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, ".claude"))
+	if _, err := session.Run(context.Background(), dir, "second", false, "", config.ClaudeConfig{}); err == nil || !strings.Contains(err.Error(), "native configuration changed") {
+		t.Fatalf("default configuration switched to explicit: %v", err)
+	}
+	if readFile(t, binary+".calls") != "called" {
+		t.Fatal("changed native configuration reached CLI")
 	}
 }
 

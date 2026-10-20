@@ -182,7 +182,7 @@ func (index *OfflineIndex) Changes(ctx context.Context) ([]workspace.Change, err
 			return nil, fmt.Errorf("fix file %q changed after indexing", change.Path)
 		}
 	}
-	if _, err := index.run(ctx, maxPatchBytes, nil, append(patchDiffArgs(), index.baseline, "--")...); err != nil {
+	if _, err := index.run(ctx, MaxPatchBytes, nil, append(patchDiffArgs(), index.baseline, "--")...); err != nil {
 		if errors.Is(err, ErrCheckoutTooLarge) {
 			return nil, ErrDiffTooLarge
 		}

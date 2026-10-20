@@ -673,6 +673,16 @@ func TestJSONLOutputBindsRootThreadIdentity(t *testing.T) {
 	}
 }
 
+func TestJSONLOutputKeepsFirstParseFailure(t *testing.T) {
+	cancellations := 0
+	output := jsonlOutput{cancel: func() { cancellations++ }}
+	_, _ = output.Write([]byte("{\"type\":\"thread.started\",\"thread_id\":\"root\"}\n{damaged\n{\"type\":\"thread.started\",\"thread_id\":\"other\"}\n"))
+	output.stream.Finish()
+	if output.parseErr == nil || output.stopErr != nil || output.threadID != "root" || cancellations != 1 {
+		t.Fatalf("parse failure was replaced by a later event: parse=%v stop=%v thread=%q cancellations=%d", output.parseErr, output.stopErr, output.threadID, cancellations)
+	}
+}
+
 func TestJSONLOutputStopsAtChildLimit(t *testing.T) {
 	cancelled := false
 	output := jsonlOutput{cancel: func() { cancelled = true }}

@@ -258,9 +258,6 @@ func (c *Checkout) Snapshot(ctx context.Context) (s workspace.Snapshot, err erro
 		if s.Diff, s.DiffIncomplete, err = c.boundedGit(ctx, nil, workspace.MaxContextBytes, true, "-c", "core.quotePath=false", "diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--no-color", s.MergeBase, s.Head, "--"); err != nil {
 			return s, err
 		}
-		if s.DiffIncomplete {
-			s.Diff = nil
-		}
 	}
 	if err := c.ready(); err != nil {
 		return s, err
@@ -328,7 +325,7 @@ func (c *Checkout) boundedGit(ctx context.Context, stdin io.Reader, limit int, t
 	}
 	if output.Exceeded {
 		if truncate {
-			return output.Bytes(), true, nil
+			return nil, true, nil
 		}
 		return nil, false, fmt.Errorf("%w: Git %s output exceeds %d bytes", ErrCheckoutTooLarge, args[0], limit)
 	}

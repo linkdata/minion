@@ -349,6 +349,8 @@ JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 	validate("no coverage units")
 	write("coverage-ledger.json", `[{"status":"planned"}]`)
 	validate("unfinished planned unit")
+	write("coverage-ledger.json", `[{"status":"planned","STATUS":"covered"}]`)
+	validate("duplicate object keys")
 	write("coverage-ledger.json", `[{"status":"in_progress"}]`)
 	validate("unfinished in_progress unit")
 	write("coverage-ledger.json", `[{"status":"blocked"}]`)

@@ -150,11 +150,6 @@ func (e *Orchestrator) validateCommand(job monitor.Job) error {
 	if err := configured.ConfigureRole(e.roleSettings(e.mainProvider(), mapping.Skills)); err != nil {
 		return err
 	}
-	if e.Adversarial != "" {
-		if err := configured.ConfigureRole(e.roleSettings(e.Adversarial, nil)); err != nil {
-			return err
-		}
-	}
 	return nil
 }
 
