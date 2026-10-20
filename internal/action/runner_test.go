@@ -148,6 +148,19 @@ func TestRunnerReturnsFileChangesAndPartialUsage(t *testing.T) {
 	}
 }
 
+func TestRunnerRedactsBothConfiguredKeysInReturnedError(t *testing.T) {
+	const codexKey, claudeKey = "fixture-codex-key", "fixture-claude-key"
+	cause := errors.New("provider failed with " + codexKey + " and " + claudeKey)
+	runner := Runner{WorkRoot: t.TempDir(), Codex: config.CodexConfig{APIKey: codexKey}, Claude: config.ClaudeConfig{APIKey: claudeKey}}
+	runner.runModel = func(context.Context, modelRun) (aicli.Result, error) {
+		return aicli.Result{}, fmt.Errorf("model call: %w", cause)
+	}
+	result, err := runner.Run(context.Background(), testJob(command.Comment))
+	if !errors.Is(err, cause) || err.Error() != "model call: provider failed with [redacted] and [redacted]" || len(result.Calls) != 1 {
+		t.Fatalf("returned error lost redaction or cause: %+v, %v", result, err)
+	}
+}
+
 func TestRunnerUsesLocalHistoryWhenComparisonDiffIsIncomplete(t *testing.T) {
 	job := testJob(command.Review)
 	job.Source.Diff, job.Source.DiffIncomplete = nil, true

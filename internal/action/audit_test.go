@@ -385,6 +385,24 @@ JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 	validate("finding without candidate")
 }
 
+func TestValidateAuditMetadataRejectsCaseVariantKeys(t *testing.T) {
+	job := testJob(command.SecurityAudit)
+	target := sourceIdentity(job)
+	metadata := string(auditArtifactsFixture(job, target, "Audit report\n")[0].Data)
+	if _, err := validateAuditMetadata([]byte(metadata), job.Identity.Repository, target, job.Source.Head); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"run_id", "repo", "target", "source_ref", "profile", "scope_paths", "budget", "selected_companion_files", "prior_run_paths", "shared_file_owners", "execution_policy", "run_status"} {
+		mutated := strings.Replace(metadata, `"`+name+`":`, `"`+strings.ToUpper(name)+`":`, 1)
+		if mutated == metadata {
+			t.Fatalf("metadata fixture lacks %q", name)
+		}
+		if _, err := validateAuditMetadata([]byte(mutated), job.Identity.Repository, target, job.Source.Head); err == nil || !strings.Contains(err.Error(), "noncanonical key") {
+			t.Errorf("%s case variant: %v", name, err)
+		}
+	}
+}
+
 func TestAuditArtifactReadModesPreserveFailurePolicies(t *testing.T) {
 	for _, scenario := range []string{"missing core", "empty core", "unsafe core", "oversized report", "invalid UTF-8 report", "NUL report", "blank report"} {
 		for _, partial := range []bool{false, true} {

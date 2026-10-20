@@ -206,6 +206,7 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	s.accounting.begin(ctx, codexHome, s.threadID, started)
 	runErr := cmd.Run()
 	if cmd.Process == nil {
+		s.accounting.before = nil
 		return result, fmt.Errorf("codex exec: %w", runErr)
 	}
 	s.used = true

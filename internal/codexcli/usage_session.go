@@ -132,6 +132,7 @@ func (s *usageSession) begin(ctx context.Context, home, rootID string, started t
 }
 
 func (s *usageSession) collectUsage(ctx context.Context, home, rootID string, started time.Time, fallback *usage.Tokens, expectedChildren []string, observationOnly map[string]bool) (usage.Tokens, bool, error) {
+	defer func() { s.before = nil }()
 	if s.before == nil {
 		files, ambiguous, complete := usageFiles(ctx, home, rootID, started, nil)
 		tokens, complete, err := collectUsageFiles(ctx, rootID, fallback, expectedChildren, files, ambiguous, complete)
@@ -166,38 +167,34 @@ func (s *usageSession) collectUsage(ctx context.Context, home, rootID string, st
 		visited[id] = true
 		meta, exists := owned[id]
 		boundary, prior := s.before[id]
-		var tokens usage.Tokens
-		var currentRoot *usageBoundary
-		if id == rootID && fallback != nil {
-			currentRoot = &usageBoundary{valid: true, turns: map[string]bool{}}
-		}
+		var tokens, latest usage.Tokens
+		var seenLatest bool
 		ok := false
 		if exists && !ambiguous[id] && (prior || spawned[id]) {
 			var children []string
 			var workError error
-			tokens, ok, children, workError = readRolloutUsageFrom(ctx, meta, rootID, &budget, rolloutUsageMode{
-				before: boundary, capture: currentRoot, spawned: spawned,
+			mode := rolloutUsageMode{
+				before: boundary, spawned: spawned,
 				allowUnchanged: id != rootID && observationOnly[id],
-			})
+			}
+			if id == rootID && fallback != nil {
+				mode.latest, mode.seenLatest = &latest, &seenLatest
+			}
+			tokens, ok, children, workError = readRolloutUsageFrom(ctx, meta, rootID, &budget, mode)
 			childError = joinUsageErrors(childError, workError)
 			queue = append(queue, children...)
 		} else if id != rootID {
 			childError = joinUsageErrors(childError, errUnverifiedChildren)
 		}
-		if currentRoot != nil {
+		if id == rootID && fallback != nil {
 			// Resume stdout is cumulative for the root, not this invocation
-			// or its helpers. Retain a trusted floor when rollout evidence is unreadable.
+			// or its helpers. Only verified rollout records contribute usage.
 			trustedBaseline := boundary != nil && boundary.valid && boundary.prefixKnown && boundary.hasSnapshot && !boundary.counterGap && !boundary.unfinished
-			if currentRoot.hasSnapshot {
-				ok = ok && currentRoot.snapshot == *fallback
+			if seenLatest {
+				ok = ok && latest == *fallback
 			} else if trustedBaseline {
 				cumulative, added := boundary.snapshot.AddChecked(tokens)
 				ok = ok && added && cumulative == *fallback
-			}
-			if !ok && tokens == (usage.Tokens{}) && trustedBaseline {
-				if delta := fallback.Sub(boundary.snapshot); delta.Valid() {
-					tokens = delta
-				}
 			}
 		}
 		var added bool

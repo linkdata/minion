@@ -160,7 +160,7 @@ func TestPullRequestInputGatesBeforeClone(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			root := t.TempDir()
-			if c, err := ClonePullRequest(context.Background(), root, "owner/repo", tt.number, tt.base, tt.head); err == nil || c != nil || !strings.Contains(err.Error(), tt.want) {
+			if c, err := clonePullRequestFromURL(context.Background(), root, "file://"+filepath.Join(t.TempDir(), "missing.git"), tt.number, tt.base, tt.head); err == nil || c != nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("invalid input accepted: %v,%v", c, err)
 			}
 			entries, err := os.ReadDir(root)

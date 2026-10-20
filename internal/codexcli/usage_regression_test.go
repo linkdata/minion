@@ -293,13 +293,10 @@ func TestUsageDiscoveryExactWalkLimitAndNextEntry(t *testing.T) {
 	}
 }
 
-func TestUsageErrorJoinDeduplicatesOnlySharedSentinels(t *testing.T) {
-	pathErr := &os.PathError{Op: "read", Path: "fixture", Err: os.ErrPermission}
-	limit := fmt.Errorf("fixture limit: %w", aicli.ErrOutputLimit)
-	got := joinUsageErrors(errUnverifiedChildren, errUsageAgentLimit, errors.Join(errUnverifiedChildren, errUsageAgentLimit, limit), errors.Join(context.Canceled, pathErr, errUnverifiedChildren, limit))
-	var retained *os.PathError
-	if strings.Count(got.Error(), errUnverifiedChildren.Error()) != 1 || strings.Count(got.Error(), errUsageAgentLimit.Error()) != 1 || strings.Count(got.Error(), limit.Error()) != 2 || !errors.Is(got, errUnverifiedChildren) || !errors.Is(got, errUsageAgentLimit) || !errors.Is(got, aicli.ErrOutputLimit) || !errors.Is(got, context.Canceled) || !errors.As(got, &retained) || retained != pathErr {
-		t.Fatalf("joined cause lost or duplicated: %v", got)
+func TestUsageErrorJoinDeduplicatesSharedSentinels(t *testing.T) {
+	got := joinUsageErrors(errUnverifiedChildren, errUsageAgentLimit, errors.Join(errUnverifiedChildren, errUsageAgentLimit))
+	if strings.Count(got.Error(), errUnverifiedChildren.Error()) != 1 || strings.Count(got.Error(), errUsageAgentLimit.Error()) != 1 || !errors.Is(got, errUnverifiedChildren) || !errors.Is(got, errUsageAgentLimit) || !errors.Is(got, aicli.ErrOutputLimit) {
+		t.Fatalf("joined completion causes lost or duplicated: %v", got)
 	}
 }
 

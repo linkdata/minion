@@ -43,6 +43,25 @@ func TestResolveCredentialHelperPreservesSymlinkName(t *testing.T) {
 	}
 }
 
+func TestResolveCredentialHelperRejectsRelativePath(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkout := t.TempDir()
+	if err := os.WriteFile(filepath.Join(checkout, "gh"), []byte("#!/bin/sh\nexit 99\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	relative, err := filepath.Rel(cwd, checkout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", relative)
+	if got := resolveCredentialHelperGH(); got != "/bin/false" {
+		t.Fatalf("relative credential helper was selected: %q", got)
+	}
+}
+
 func TestGitCredentialHelperIgnoresCheckoutRelativePath(t *testing.T) {
 	realGit, err := exec.LookPath("git")
 	if err != nil {
@@ -116,7 +135,7 @@ func TestRepositoryAndRefValidation(t *testing.T) {
 	if err != nil || url != "https://github.com/Acme/project.name.git" {
 		t.Fatalf("repositoryURL() = (%q, %v)", url, err)
 	}
-	for _, repo := range []string{"owner/repo space", "owner:token/repo", "owner/repo?x=1"} {
+	for _, repo := range []string{"../bad", "owner/repo space", "owner:token/repo", "owner/repo?x=1"} {
 		if _, err := repositoryURL(repo); err == nil {
 			t.Errorf("repositoryURL accepted invalid repository %q", repo)
 		}
@@ -131,11 +150,8 @@ func TestRepositoryAndRefValidation(t *testing.T) {
 			t.Errorf("validateBranch(%q) should fail", branch)
 		}
 	}
-	if _, err := Clone(context.Background(), t.TempDir(), "../bad", "main", true); err == nil {
-		t.Fatal("Clone accepted an invalid repository")
-	}
-	if _, err := Clone(context.Background(), t.TempDir(), "owner/repo", "bad..branch", true); err == nil {
-		t.Fatal("Clone accepted an invalid default branch")
+	if _, err := cloneFromURL(context.Background(), t.TempDir(), "file://"+filepath.Join(t.TempDir(), "missing.git"), "bad..branch", true); err == nil || !strings.Contains(err.Error(), "invalid branch") {
+		t.Fatalf("cloneFromURL invalid default branch error = %v", err)
 	}
 }
 

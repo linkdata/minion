@@ -44,7 +44,7 @@ func checkAuditTools(ctx context.Context, dir, skill string) (auditTools, error)
 	return auditTools{binary: binary, permissionFlag: flag}, err
 }
 
-func readAuditArtifacts(outputDir string, partial bool, secret string) ([]workspace.File, []Diagnostic, error) {
+func readAuditArtifacts(outputDir string, partial bool, secrets ...string) ([]workspace.File, []Diagnostic, error) {
 	var files []workspace.File
 	var diagnostics []Diagnostic
 	for _, name := range auditArtifacts {
@@ -58,9 +58,9 @@ func readAuditArtifacts(outputDir string, partial bool, secret string) ([]worksp
 		}
 		if err == nil {
 			if strings.HasSuffix(name, ".json") {
-				data, err = redactAuditJSON(data, secret)
+				data, err = redactAuditJSON(data, secrets...)
 			} else {
-				data = []byte(redactActionText(string(data), secret))
+				data = []byte(redactActionText(string(data), secrets...))
 			}
 			if err == nil && int64(len(data)) > limit {
 				err = errors.New("redacted artifact exceeds byte limit")
@@ -81,7 +81,7 @@ func readAuditArtifacts(outputDir string, partial bool, secret string) ([]worksp
 }
 
 // Decode JSON escapes before redaction so consumers cannot reconstruct a configured key.
-func redactAuditJSON(data []byte, secret string) ([]byte, error) {
+func redactAuditJSON(data []byte, secrets ...string) ([]byte, error) {
 	if !json.Valid(data) {
 		return nil, errors.New("audit JSON is invalid")
 	}
@@ -94,7 +94,7 @@ func redactAuditJSON(data []byte, secret string) ([]byte, error) {
 	if err := decoder.Decode(&value); err != nil {
 		return nil, err
 	}
-	redacted, changed, err := redactAuditJSONValue(value, secret)
+	redacted, changed, err := redactAuditJSONValue(value, secrets...)
 	if err != nil {
 		return nil, err
 	}
@@ -108,7 +108,7 @@ func redactAuditJSON(data []byte, secret string) ([]byte, error) {
 		data = bytes.TrimSuffix(output.Bytes(), []byte("\n"))
 	}
 	final := string(data)
-	if redactActionText(final, secret) != final {
+	if redactActionText(final, secrets...) != final {
 		return nil, errors.New("audit JSON contains a configured key in source syntax")
 	}
 	return data, nil
@@ -159,23 +159,23 @@ func rejectDuplicateAuditJSONKeys(data []byte) error {
 	return visit()
 }
 
-func redactAuditJSONValue(value any, secret string) (any, bool, error) {
+func redactAuditJSONValue(value any, secrets ...string) (any, bool, error) {
 	switch value := value.(type) {
 	case string:
-		redacted := redactActionText(value, secret)
+		redacted := redactActionText(value, secrets...)
 		return redacted, redacted != value, nil
 	case json.Number, bool, nil:
 		literal := fmt.Sprint(value)
 		if value == nil {
 			literal = "null"
 		}
-		if redacted := redactActionText(literal, secret); redacted != literal {
+		if redacted := redactActionText(literal, secrets...); redacted != literal {
 			return redacted, true, nil
 		}
 	case []any:
 		changed := false
 		for i := range value {
-			redacted, dirty, err := redactAuditJSONValue(value[i], secret)
+			redacted, dirty, err := redactAuditJSONValue(value[i], secrets...)
 			if err != nil {
 				return nil, false, err
 			}
@@ -187,11 +187,11 @@ func redactAuditJSONValue(value any, secret string) (any, bool, error) {
 		redacted := make(map[string]any, len(value))
 		changed := false
 		for key, entry := range value {
-			redactedKey := redactActionText(key, secret)
+			redactedKey := redactActionText(key, secrets...)
 			if _, present := redacted[redactedKey]; present {
 				return nil, false, errors.New("audit JSON keys collide after redaction")
 			}
-			redactedEntry, dirty, err := redactAuditJSONValue(entry, secret)
+			redactedEntry, dirty, err := redactAuditJSONValue(entry, secrets...)
 			if err != nil {
 				return nil, false, err
 			}
@@ -304,6 +304,9 @@ func validateAuditFiles(ctx context.Context, files []workspace.File, validationD
 }
 
 func validateAuditMetadata(metadataBytes []byte, repo, target, head string) ([]string, error) {
+	if err := rejectDuplicateAuditJSONKeys(metadataBytes); err != nil {
+		return nil, err
+	}
 	var metadata struct {
 		RunID                  string            `json:"run_id"`
 		Repo                   string            `json:"repo"`
@@ -320,6 +323,17 @@ func validateAuditMetadata(metadataBytes []byte, repo, target, head string) ([]s
 	}
 	if err := json.Unmarshal(metadataBytes, &metadata); err != nil {
 		return nil, fmt.Errorf("decode audit metadata: %w", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(metadataBytes, &fields); err != nil {
+		return nil, fmt.Errorf("decode audit metadata fields: %w", err)
+	}
+	for name := range fields {
+		for _, canonical := range []string{"run_id", "repo", "target", "source_ref", "profile", "scope_paths", "budget", "selected_companion_files", "prior_run_paths", "shared_file_owners", "execution_policy", "run_status"} {
+			if name != canonical && strings.EqualFold(name, canonical) {
+				return nil, fmt.Errorf("audit metadata uses noncanonical key %q", name)
+			}
+		}
 	}
 	if strings.TrimSpace(metadata.RunID) == "" || metadata.Repo != repo || metadata.Target != target || metadata.SourceRef != head ||
 		metadata.Profile != "standard" || len(metadata.ScopePaths) != 1 || metadata.ScopePaths[0] != "." ||

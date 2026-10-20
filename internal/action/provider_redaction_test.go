@@ -88,17 +88,18 @@ func TestAuditReportRedactsNULSplitConfiguredKeyBeforeCriticAndPublication(t *te
 	job.CriticMaxRounds = 1
 	const key = "fixture-audit-secret"
 	const splitKey = "fixture-audit-\x00secret"
-	report := "Audit evidence includes " + splitKey + " and remains readable.\n"
-	want := "Audit evidence includes [redacted] and remains readable.\n"
+	const criticKey = "fixture-critic-secret"
+	report := "Audit evidence includes " + splitKey + " and " + criticKey + ".\n"
+	want := "Audit evidence includes [redacted] and [redacted].\n"
 	criticSawReports := false
-	runner := Runner{WorkRoot: t.TempDir(), Codex: config.CodexConfig{APIKey: key}, runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+	runner := Runner{WorkRoot: t.TempDir(), Codex: config.CodexConfig{APIKey: key}, Claude: config.ClaudeConfig{APIKey: criticKey}, runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 		if request.role == roleMain {
 			for _, file := range auditArtifactsFixture(job, request.dir, report) {
 				if file.Path == "architecture.md" {
-					file.Data = []byte("Architecture includes " + splitKey)
+					file.Data = []byte("Architecture includes " + splitKey + " and " + criticKey)
 				}
 				if file.Path == "coverage-ledger.json" {
-					file.Data = []byte(`[{"status":"covered","note":"fixture-audit-\u0000secret","fixture-audit-\u0073ecret":"fixture-audit-\u0073ecret","safe":"<safe>"}]`)
+					file.Data = []byte(`[{"status":"covered","note":"fixture-audit-\u0000secret","fixture-audit-\u0073ecret":"fixture-audit-\u0073ecret","critic":"fixture-critic-secret","safe":"<safe>"}]`)
 				}
 				writeFixtureFile(t, request.outputDir, file.Path, file.Data)
 			}
@@ -113,11 +114,11 @@ func TestAuditReportRedactsNULSplitConfiguredKeyBeforeCriticAndPublication(t *te
 				t.Fatal(err)
 			}
 			criticSawReports = true
-			if string(data) != want || strings.Contains(request.prompt, key) || strings.Contains(request.prompt, "\x00") {
+			if string(data) != want || strings.Contains(request.prompt, key) || strings.Contains(request.prompt, criticKey) || strings.Contains(request.prompt, "\x00") {
 				t.Fatalf("critic received secret: report=%q prompt=%q", data, request.prompt)
 			}
 			architecture, err := os.ReadFile(filepath.Join(dir, "architecture.md"))
-			if err != nil || string(architecture) != "Architecture includes [redacted]" {
+			if err != nil || string(architecture) != "Architecture includes [redacted] and [redacted]" {
 				t.Fatalf("critic received raw architecture artifact: %q, %v", architecture, err)
 			}
 			ledger, err := os.ReadFile(filepath.Join(dir, "coverage-ledger.json"))
@@ -132,13 +133,13 @@ func TestAuditReportRedactsNULSplitConfiguredKeyBeforeCriticAndPublication(t *te
 		t.Fatalf("audit result: critic saw reports=%t answer=%q error=%v", criticSawReports, result.Answer, err)
 	}
 	for _, file := range result.Artifacts {
-		if strings.Contains(string(file.Data), key) || strings.Contains(string(file.Data), "\x00") {
+		if strings.Contains(string(file.Data), key) || strings.Contains(string(file.Data), criticKey) || strings.Contains(string(file.Data), "\x00") {
 			t.Fatalf("published artifact contains configured key: %s", file.Path)
 		}
 		if file.Path == "REPORT.md" && string(file.Data) != want {
 			t.Fatalf("published report contains configured key: %q", file.Data)
 		}
-		if file.Path == "architecture.md" && string(file.Data) != "Architecture includes [redacted]" {
+		if file.Path == "architecture.md" && string(file.Data) != "Architecture includes [redacted] and [redacted]" {
 			t.Fatalf("published architecture artifact contains configured key: %q", file.Data)
 		}
 		if file.Path == "coverage-ledger.json" && !redactedAuditLedger(file.Data) {
@@ -147,10 +148,62 @@ func TestAuditReportRedactsNULSplitConfiguredKeyBeforeCriticAndPublication(t *te
 	}
 }
 
+func TestAuditRejectsConfiguredKeyInNormalizedSkillSource(t *testing.T) {
+	const key = "fixture-source-key"
+	skillURL := "https://github.com/example/" + key + "/tree/main/skills/security-audit"
+	installActionTestSkills(t, skillURL)
+	fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
+	job := testJob(command.SecurityAudit)
+	job.Main.Skills = []string{skillURL}
+	runner := Runner{WorkRoot: t.TempDir(), Claude: config.ClaudeConfig{APIKey: key}, runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+		for _, file := range auditArtifactsFixture(job, request.dir, "Audit report\n") {
+			writeFixtureFile(t, request.outputDir, file.Path, file.Data)
+		}
+		return aicli.Result{Answer: "Model summary"}, nil
+	}}
+	result, err := runner.Run(context.Background(), job)
+	if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "normalized audit metadata contains a configured provider key") || result.Answer != "" || len(result.Artifacts) != len(auditArtifacts)-1 {
+		t.Fatalf("normalized skill source accepted: %+v, %v", result, err)
+	}
+	for _, file := range result.Artifacts {
+		if file.Path == "run-metadata.json" || strings.Contains(string(file.Data), key) {
+			t.Fatalf("private partial audit retained configured key: %s", file.Path)
+		}
+	}
+	for _, diagnostic := range result.Diagnostics {
+		if diagnostic.Code == "artifact_metadata_invalid" {
+			return
+		}
+	}
+	t.Fatalf("partial audit lacks metadata diagnostic: %+v", result.Diagnostics)
+}
+
+func TestPartialAuditDropsMetadataWhenNormalizedTargetContainsKey(t *testing.T) {
+	job := auditRunnerJob(t)
+	key := job.Identity.Repository
+	failure := errors.New("provider stopped")
+	runner := Runner{WorkRoot: t.TempDir(), Codex: config.CodexConfig{APIKey: key}, runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+		writeFixtureFile(t, request.outputDir, "run-metadata.json", []byte(`{}`))
+		writeFixtureFile(t, request.outputDir, "REPORT.md", []byte("Partial report\n"))
+		return aicli.Result{}, failure
+	}}
+	result, err := runner.Run(context.Background(), job)
+	if !errors.Is(err, failure) || len(result.Artifacts) != 1 || result.Artifacts[0].Path != "REPORT.md" {
+		t.Fatalf("partial audit retained unsafe metadata: %+v, %v", result, err)
+	}
+	for _, diagnostic := range result.Diagnostics {
+		if diagnostic.Code == "artifact_metadata_invalid" {
+			return
+		}
+	}
+	t.Fatalf("partial audit lacks metadata diagnostic: %+v", result.Diagnostics)
+}
+
 func redactedAuditLedger(data []byte) bool {
 	var ledger []map[string]any
 	return json.Unmarshal(data, &ledger) == nil && len(ledger) == 1 &&
 		ledger[0]["note"] == "[redacted]" && ledger[0]["[redacted]"] == "[redacted]" &&
+		ledger[0]["critic"] == "[redacted]" &&
 		ledger[0]["safe"] == "<safe>" && bytes.Contains(data, []byte("<safe>"))
 }
 

@@ -47,6 +47,9 @@ func TestUsageSessionDoesNotRecountPreviousTurnsOrUnreferencedHelpers(t *testing
 	if got != (usage.Tokens{Input: 20}) || !complete || err != nil {
 		t.Fatalf("resumed = %+v, %v, %v", got, complete, err)
 	}
+	if session.before != nil || session.known["root"].path != root {
+		t.Fatalf("retained baseline or lost root ownership: before=%v known=%v", session.before != nil, session.known["root"].path)
+	}
 }
 
 func TestUsageSessionUnreferencedHelperWithoutByteProofFailsClosed(t *testing.T) {
@@ -55,10 +58,9 @@ func TestUsageSessionUnreferencedHelperWithoutByteProofFailsClosed(t *testing.T)
 	writeUsageRollout(t, home, "child", "root", completedUsageTurn("child", "old-child", "c1", 40)...)
 	var session usageSession
 	session.begin(ctx, home, "root", time.Now())
-	// A capped baseline cannot prove that an unreferenced helper stayed idle.
+	// A damaged child baseline cannot prove that an unreferenced helper stayed idle.
 	session.before["child"].prefixKnown = false
 	session.before["child"].valid = false
-	session.baselineComplete = false
 	appendUsageEvents(t, root, completedUsageTurn("root", "new-root", "r2", 20)...)
 	got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 20}, nil, nil)
 	if got != (usage.Tokens{Input: 20}) || complete || !errors.Is(err, errUnverifiedChildren) {
@@ -340,17 +342,17 @@ func TestUsageSessionUnfinishedBaselineCannotCertifySnapshotDelta(t *testing.T) 
 	}
 }
 
-func TestUsageSessionUnreadableRootKeepsTrustedStdoutLowerBound(t *testing.T) {
+func TestUsageSessionUnreadableRootDoesNotAttributeResumedStdout(t *testing.T) {
 	for _, test := range []struct {
 		name   string
 		events []string
 		stdout int64
-		want   int64
 	}{
-		{"trusted snapshot", append(completedUsageTurn("root", "old", "r1", 100), usageSnapshot(22, 100, 0, 0)), 127, 27},
-		{"no snapshot", completedUsageTurn("root", "old", "r1", 100), 127, 0},
-		{"unfinished baseline", []string{usageEvent("task_started", "old"), usageRecord("root", "old", "r1", 100, 0, 0), usageSnapshot(22, 100, 0, 0)}, 127, 0},
-		{"counter below baseline", append(completedUsageTurn("root", "old", "r1", 100), usageSnapshot(22, 100, 0, 0)), 90, 0},
+		// The 27-token stdout increase can include late old-turn work (7) and current work (20).
+		{"trusted snapshot with ambiguous increase", append(completedUsageTurn("root", "old", "r1", 100), usageSnapshot(22, 100, 0, 0)), 127},
+		{"no snapshot", completedUsageTurn("root", "old", "r1", 100), 127},
+		{"unfinished baseline", []string{usageEvent("task_started", "old"), usageRecord("root", "old", "r1", 100, 0, 0), usageSnapshot(22, 100, 0, 0)}, 127},
+		{"counter below baseline", append(completedUsageTurn("root", "old", "r1", 100), usageSnapshot(22, 100, 0, 0)), 90},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			ctx, home := context.Background(), t.TempDir()
@@ -363,8 +365,8 @@ func TestUsageSessionUnreadableRootKeepsTrustedStdoutLowerBound(t *testing.T) {
 			cancelled, cancel := context.WithCancel(ctx)
 			cancel()
 			got, complete, err := session.collectUsage(cancelled, home, "root", time.Now(), &usage.Tokens{Input: test.stdout}, nil, nil)
-			if got != (usage.Tokens{Input: test.want}) || complete || err != nil {
-				t.Fatalf("unreadable root = %+v, complete=%t, err=%v; want input %d, incomplete", got, complete, err, test.want)
+			if got != (usage.Tokens{}) || complete || err != nil {
+				t.Fatalf("unreadable root = %+v, complete=%t, err=%v; want zero incomplete", got, complete, err)
 			}
 		})
 	}

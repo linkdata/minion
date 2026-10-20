@@ -74,7 +74,7 @@ if $resume; then printf '%s\n' '`+doubled+`'; else printf '%s\n' '`+successfulRe
 		t.Helper()
 		at := slices.Index(args, flag)
 		if at < 0 || at+1 == len(args) {
-			t.Fatalf("missing%s: %q", flag, args)
+			t.Fatalf("missing %s: %q", flag, args)
 		}
 		return args[at+1]
 	}
@@ -95,7 +95,7 @@ if $resume; then printf '%s\n' '`+doubled+`'; else printf '%s\n' '`+successfulRe
 	for i, args := range [][]string{firstArgs, secondArgs, thirdArgs} {
 		for _, forbidden := range []string{"--continue", "--fork-session", "--no-session-persistence"} {
 			if slices.Contains(args, forbidden) {
-				t.Fatalf("call%d used%s", i+1, forbidden)
+				t.Fatalf("call%d used %s", i+1, forbidden)
 			}
 		}
 		if option(args, "--permission-mode") != "dontAsk" || option(args, "--model") != settings.Model || option(args, "--effort") != settings.Effort || !slices.Contains(args, "--safe-mode") {
@@ -119,7 +119,7 @@ if $resume; then printf '%s\n' '`+doubled+`'; else printf '%s\n' '`+successfulRe
 		for _, grant := range []string{oldGrant, newGrant} {
 			want := i == 0 && grant == oldGrant || i == 1 && grant == newGrant
 			if slices.Contains(args, grant) != want || slices.Contains(policy.Sandbox.Filesystem.AllowRead, grant) != want {
-				t.Fatalf("call%d retained stale/wrong grant%s", i+1, grant)
+				t.Fatalf("call%d retained stale/wrong grant %s", i+1, grant)
 			}
 		}
 	}
@@ -129,7 +129,7 @@ if $resume; then printf '%s\n' '`+doubled+`'; else printf '%s\n' '`+successfulRe
 	}
 	for _, path := range owned {
 		if _, err := os.Lstat(path); !os.IsNotExist(err) {
-			t.Fatalf("owned resource remains%s: %v", path, err)
+			t.Fatalf("owned resource remains %s: %v", path, err)
 		}
 	}
 	if err := session.Close(); err != nil {
@@ -300,7 +300,7 @@ func TestResumedUsageKeepsOnlyNewWholeTreeCounters(t *testing.T) {
 			writeChunks(t, &output, test.stream+"\n")
 			output.finish()
 			if output.result.Tokens != test.want || output.result.UsageComplete != test.complete || (output.err != nil) != test.failed {
-				t.Fatalf("resumed usage: %+v,%v; want%+v complete=%t failed=%t", output.result, output.err, test.want, test.complete, test.failed)
+				t.Fatalf("resumed usage: %+v,%v; want %+v complete=%t failed=%t", output.result, output.err, test.want, test.complete, test.failed)
 			}
 		})
 	}

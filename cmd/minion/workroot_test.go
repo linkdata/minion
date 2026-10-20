@@ -17,7 +17,7 @@ func isolateHostPaths(t *testing.T, home string) {
 	t.Helper()
 	t.Setenv("HOME", home)
 	t.Setenv("PATH", t.TempDir())
-	for _, key := range []string{"XDG_CONFIG_HOME", "GH_CONFIG_DIR", "CODEX_HOME", "CLAUDE_CONFIG_DIR"} {
+	for _, key := range []string{"XDG_CONFIG_HOME", "GH_CONFIG_DIR", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG"} {
 		t.Setenv(key, "")
 	}
 }
@@ -226,7 +226,7 @@ func TestPrivatePathsRejectAliasesIntoSelectedInstalledSkill(t *testing.T) {
 	const source = "https://github.com/owner/repo/tree/pinned/skills/example"
 	for _, provider := range []string{"codex", "claude"} {
 		for _, kind := range []string{
-			"config", "credential", "git credentials", "git config", "netrc",
+			"config", "credential", "git credentials", "git config", "overridden git config", "overridden system git config", "overridden legacy git config", "netrc",
 			"xdg git credentials", "xdg git config", "ssh home",
 			"default codex auth", "default codex config", "default claude credentials",
 			"default claude settings", "default xdg git credentials", "default xdg git config",
@@ -267,6 +267,15 @@ func TestPrivatePathsRejectAliasesIntoSelectedInstalledSkill(t *testing.T) {
 					privatePath = filepath.Join(root, ".git-credentials")
 				case "git config":
 					privatePath = filepath.Join(root, ".gitconfig")
+				case "overridden git config":
+					privatePath = filepath.Join(root, "gitconfig-override")
+					t.Setenv("GIT_CONFIG_GLOBAL", privatePath)
+				case "overridden system git config":
+					privatePath = filepath.Join(root, "gitconfig-system-override")
+					t.Setenv("GIT_CONFIG_SYSTEM", privatePath)
+				case "overridden legacy git config":
+					privatePath = filepath.Join(root, "gitconfig-legacy-override")
+					t.Setenv("GIT_CONFIG", privatePath)
 				case "netrc":
 					privatePath = filepath.Join(root, ".netrc")
 				case "xdg git credentials":

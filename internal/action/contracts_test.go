@@ -90,6 +90,24 @@ func TestResultArtifactContracts(t *testing.T) {
 	}
 }
 
+func TestResultValidateRejectsDuplicateAuditMetadataKeys(t *testing.T) {
+	job := testJob(command.SecurityAudit)
+	result := completeAuditResult(job)
+	if err := result.Validate(job); err != nil {
+		t.Fatal(err)
+	}
+	for i := range result.Artifacts {
+		if result.Artifacts[i].Path == "run-metadata.json" {
+			data := string(result.Artifacts[i].Data)
+			result.Artifacts[i].Data = []byte(strings.Replace(data, `"run_id":"test-run",`, `"run_id":"test-run","run_id":"test-run",`, 1))
+			break
+		}
+	}
+	if err := result.Validate(job); err == nil || !strings.Contains(err.Error(), "duplicate object keys") {
+		t.Fatalf("duplicate metadata accepted: %v", err)
+	}
+}
+
 func TestAuditCompanionsStayInsideInstalledSkillAndPortableResult(t *testing.T) {
 	job := testJob(command.SecurityAudit)
 	for _, companion := range []string{"DOMAIN.md", "/installed/security-audit/DOMAIN.md", "../outside.md", "/etc/passwd", "bad\\path"} {

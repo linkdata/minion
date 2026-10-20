@@ -35,40 +35,16 @@ var (
 	errUsageAgentLimit    = fmt.Errorf("%w: Codex usage agent count exceeded the limit", aicli.ErrOutputLimit)
 )
 
-// joinUsageErrors emits exact shared sentinels once across joined usage errors.
-// Multi-error containers are flattened; single-cause wrappers and opaque causes stay intact.
+// joinUsageErrors emits each shared completion cause once.
 func joinUsageErrors(errs ...error) error {
 	var causes []error
-	unverified, agentLimit := false, false
-	var add func(error)
-	add = func(err error) {
-		if err == nil {
-			return
-		}
-		if err == errUnverifiedChildren {
-			unverified = true
-			return
-		}
-		if err == errUsageAgentLimit {
-			agentLimit = true
-			return
-		}
-		if joined, ok := err.(interface{ Unwrap() []error }); ok {
-			for _, cause := range joined.Unwrap() {
-				add(cause)
+	for _, sentinel := range []error{errUnverifiedChildren, errUsageAgentLimit} {
+		for _, err := range errs {
+			if errors.Is(err, sentinel) {
+				causes = append(causes, sentinel)
+				break
 			}
-			return
 		}
-		causes = append(causes, err)
-	}
-	for _, err := range errs {
-		add(err)
-	}
-	if unverified {
-		causes = append(causes, errUnverifiedChildren)
-	}
-	if agentLimit {
-		causes = append(causes, errUsageAgentLimit)
 	}
 	return errors.Join(causes...)
 }
@@ -392,6 +368,8 @@ type rolloutUsageMode struct {
 	before, capture *usageBoundary
 	spawned         map[string]bool
 	allowUnchanged  bool
+	latest          *usage.Tokens
+	seenLatest      *bool
 }
 
 // A boundary excludes previous turns even when their final records arrive late.
@@ -734,6 +712,12 @@ func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, 
 			capture.unfinished = capture.unfinished || (!turns[turn] && !abortedTurns[turn])
 		}
 		capture.valid = capture.valid && readable && seenHeader && ctx.Err() == nil
+	}
+	if mode.latest != nil {
+		*mode.latest = latest
+	}
+	if mode.seenLatest != nil {
+		*mode.seenLatest = seenSnapshot
 	}
 	// Observation-only references need no new turn when the finished baseline is unchanged.
 	if allowUnchanged && before != nil && before.valid && before.completed && !before.unfinished && consumed == before.size && complete && readable && ctx.Err() == nil {

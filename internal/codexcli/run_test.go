@@ -624,6 +624,22 @@ func TestRunRedactsEncodedKeyFromFailedEvent(t *testing.T) {
 	}
 }
 
+func TestRunStartFailureReleasesUsageBaseline(t *testing.T) {
+	installFakeCodex(t, "#!"+filepath.Join(t.TempDir(), "missing-interpreter")+"\n")
+	root := writeUsageRollout(t, os.Getenv("CODEX_HOME"), "root", "", completedUsageTurn("root", "old", "r1", 100)...)
+	var session Session
+	session.threadID = "root"
+	t.Cleanup(func() {
+		if err := session.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	_, err := session.Run(context.Background(), canonicalTempDir(t), "Review", false, "", config.CodexConfig{})
+	if err == nil || session.used || session.accounting.before != nil || session.accounting.known["root"].path != root {
+		t.Fatalf("start failure retained baseline or lost known rollout: err=%v used=%t before=%v known=%v", err, session.used, session.accounting.before != nil, session.accounting.known["root"].path)
+	}
+}
+
 func TestRunReportsCodexFailure(t *testing.T) {
 	installFakeCodex(t, `#!/bin/sh
 printf '%s\n' '{"type":"turn.failed","error":{"message":"model request failed"}}'

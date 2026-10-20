@@ -31,6 +31,9 @@ func TestSafePathExcludesRelativeAndWritableDirectories(t *testing.T) {
 	if got := SafePath(".:tools"); got != strings.Join([]string{canonical("/usr/local/bin"), canonical("/usr/bin"), canonical("/bin")}, string(os.PathListSeparator)) {
 		t.Fatalf("relative-only PATH used current directory: %q", got)
 	}
+	if got := SafePath(".", "/"); got != "/dev/null" {
+		t.Fatalf("blocked PATH used executable lookup: %q", got)
+	}
 }
 
 func TestSafePathPinsSymlinkTraversalOutsideWritableRoot(t *testing.T) {

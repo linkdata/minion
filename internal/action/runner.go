@@ -53,6 +53,9 @@ func (r *Runner) logf(format string, args ...any) {
 // Fix exports use a separate private index. Failed calls still return accounted usage.
 func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr error) {
 	result = Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head}
+	defer func() {
+		resultErr = redactActionError(resultErr, r.Codex.APIKey, r.Claude.APIKey)
+	}()
 	if err := job.Validate(); err != nil {
 		return result, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
 	}
@@ -205,7 +208,7 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 			var err error
 			if !reviewCurrent {
 				if review == nil {
-					review, err = freezeReviewSnapshot(ctx, workRoot, job, source, outputDir, index, configured.Codex.APIKey)
+					review, err = freezeReviewSnapshot(ctx, workRoot, job, source, outputDir, index, configured.Codex.APIKey, configured.Claude.APIKey)
 				} else {
 					err = review.refresh(ctx)
 				}
@@ -288,7 +291,7 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 		// Collect partial reports before the outer workspace cleanup.
 		defer func() {
 			if resultErr != nil && len(result.Artifacts) == 0 {
-				files, diagnostics := collectPartialAuditArtifacts(outputDir, job, auditSkill, configured.Codex.APIKey)
+				files, diagnostics := collectPartialAuditArtifacts(outputDir, job, auditSkill, configured.Codex.APIKey, configured.Claude.APIKey)
 				result.Artifacts = files
 				result.Diagnostics = append(result.Diagnostics, diagnostics...)
 			}
@@ -338,7 +341,7 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 		if review != nil {
 			files = review.artifacts
 		} else {
-			files, _, err = readAuditArtifacts(outputDir, false, configured.Codex.APIKey)
+			files, _, err = readAuditArtifacts(outputDir, false, configured.Codex.APIKey, configured.Claude.APIKey)
 			if err != nil {
 				return result, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
 			}
@@ -351,7 +354,7 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 		if answer, err = validateAuditFiles(ctx, files, validationDir, auditSkill, tools, job.Identity.Repository, source, job.Source.Head); err != nil {
 			return result, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
 		}
-		if result.Artifacts, err = normalizeAuditArtifacts(files, job, auditSkill); err != nil {
+		if result.Artifacts, err = normalizeAuditArtifacts(files, job, auditSkill, configured.Codex.APIKey, configured.Claude.APIKey); err != nil {
 			return result, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
 		}
 	}
@@ -589,7 +592,7 @@ Thread description: %s`, auditSkill, id.Repository, job.Source.Head, source, out
 	return "", errors.New("unsupported action")
 }
 
-func normalizeAuditArtifacts(files []workspace.File, job Job, skill string) ([]workspace.File, error) {
+func normalizeAuditArtifacts(files []workspace.File, job Job, skill string, secrets ...string) ([]workspace.File, error) {
 	files = slices.Clone(files)
 	for i, file := range files {
 		if file.Path == "run-metadata.json" {
@@ -661,18 +664,23 @@ func normalizeAuditArtifacts(files []workspace.File, job Job, skill string) ([]w
 			if len(data) > maxAuditArtifactBytes {
 				return nil, errors.New("normalized audit metadata exceeds byte limit")
 			}
+			for _, secret := range secrets {
+				if secret != "" && containsConfiguredKey(data, secret) {
+					return nil, errors.New("normalized audit metadata contains a configured provider key")
+				}
+			}
 			files[i].Data = data
 		}
 	}
 	return files, nil
 }
 
-func collectPartialAuditArtifacts(outputDir string, job Job, skill, secret string) ([]workspace.File, []Diagnostic) {
-	read, diagnostics, _ := readAuditArtifacts(outputDir, true, secret)
+func collectPartialAuditArtifacts(outputDir string, job Job, skill string, secrets ...string) ([]workspace.File, []Diagnostic) {
+	read, diagnostics, _ := readAuditArtifacts(outputDir, true, secrets...)
 	var files []workspace.File
 	for _, file := range read {
 		if file.Path == "run-metadata.json" {
-			normalized, err := normalizeAuditArtifacts([]workspace.File{file}, job, skill)
+			normalized, err := normalizeAuditArtifacts([]workspace.File{file}, job, skill, secrets...)
 			if err != nil {
 				diagnostics = append(diagnostics, Diagnostic{Code: "artifact_metadata_invalid", Message: "Incomplete audit metadata could not be made portable."})
 				continue

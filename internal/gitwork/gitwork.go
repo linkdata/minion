@@ -483,7 +483,7 @@ func cleanGitEnvironment() []string {
 	return append(env, hardeningEnv()...)
 }
 
-// hardeningEnv adds prompt and locale settings to Minion-run Git.
+// hardeningEnv isolates Git configuration and disables prompts for Minion-run Git.
 func hardeningEnv() []string {
 	return append(aicli.ModelGitEnvironment(),
 		"GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=/bin/false",

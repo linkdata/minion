@@ -275,6 +275,11 @@ func checkIsolation(cfg config.Config, configPath string) (resultErr error) {
 		return err
 	}
 	private = append(private, filepath.Join(configHome, "git", "credentials"), filepath.Join(configHome, "git", "config"))
+	for _, key := range []string{"GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG"} {
+		if path := os.Getenv(key); path != "" {
+			private = append(private, path)
+		}
+	}
 	ghHome := os.Getenv("GH_CONFIG_DIR")
 	if ghHome == "" {
 		ghHome = filepath.Join(configHome, "gh")

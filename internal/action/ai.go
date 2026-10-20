@@ -112,9 +112,41 @@ func (s *modelSessions) close() error {
 	return errors.Join(s.main.close(), s.critic.close())
 }
 
-func redactActionText(text, secret string) string {
-	return aicli.RedactText(strings.ReplaceAll(text, "\x00", ""), secret)
+func redactActionText(text string, secrets ...string) string {
+	text = strings.ReplaceAll(text, "\x00", "")
+	for _, secret := range secrets {
+		text = aicli.RedactText(text, secret)
+	}
+	for _, secret := range secrets {
+		if aicli.RedactText(text, secret) != text {
+			// A later replacement can recreate an earlier key; discard the text.
+			return ""
+		}
+	}
+	return text
 }
+
+func redactActionError(err error, secrets ...string) error {
+	if err == nil {
+		return nil
+	}
+	message := redactActionText(err.Error(), secrets...)
+	if message == err.Error() {
+		return err
+	}
+	if message == "" {
+		message = "action error could not be safely displayed"
+	}
+	return redactedActionError{cause: err, message: message}
+}
+
+type redactedActionError struct {
+	cause   error
+	message string
+}
+
+func (e redactedActionError) Error() string { return e.message }
+func (e redactedActionError) Unwrap() error { return e.cause }
 
 func (r *Runner) runAI(ctx context.Context, job Job, dir, prompt, outputDir string, checkpoint func([]Refutation) error, sessions *modelSessions) (answer string, err error) {
 	var history []Refutation
@@ -132,13 +164,7 @@ func (r *Runner) runAI(ctx context.Context, job Job, dir, prompt, outputDir stri
 		request.prompt, request.outputSchema = mainPrompt(prompt), mainOutputSchema
 	}
 	var priorAnswer, priorFeedback string
-	mainSecret, criticSecret := r.Codex.APIKey, r.Codex.APIKey
-	if job.Main.Provider == "claude" {
-		mainSecret = r.Claude.APIKey
-	}
-	if job.Critic != nil && job.Critic.Provider == "claude" {
-		criticSecret = r.Claude.APIKey
-	}
+	secrets := []string{r.Codex.APIKey, r.Claude.APIKey}
 	for round := 1; round <= rounds; round++ {
 		request.round = round
 		var proposed aicli.Result
@@ -146,15 +172,15 @@ func (r *Runner) runAI(ctx context.Context, job Job, dir, prompt, outputDir stri
 			return
 		}
 		if job.Critic == nil {
-			answer = redactActionText(proposed.Answer, mainSecret)
+			answer = redactActionText(proposed.Answer, secrets...)
 			return
 		}
 		candidate, refutations, parseErr := parseProposal(proposed.Answer, job.Action == command.Fix || job.Action == command.SecurityAudit)
 		if parseErr != nil {
 			return "", fmt.Errorf("%w: invalid main proposal: %w", monitor.ErrTerminalJob, parseErr)
 		}
-		candidate = redactActionText(candidate, mainSecret)
-		refutations = redactActionText(refutations, mainSecret)
+		candidate = redactActionText(candidate, secrets...)
+		refutations = redactActionText(refutations, secrets...)
 		if round > 1 && strings.TrimSpace(refutations) != "" {
 			history = append(history, Refutation{Round: round, Text: refutations})
 		}
@@ -181,7 +207,7 @@ func (r *Runner) runAI(ctx context.Context, job Job, dir, prompt, outputDir stri
 			if approved, hasBlockers, feedback, err = parseCritique(review.Answer); err != nil {
 				return "", fmt.Errorf("%w: invalid critic verdict: %w", monitor.ErrTerminalJob, err)
 			}
-			feedback = redactActionText(feedback, criticSecret)
+			feedback = redactActionText(feedback, secrets...)
 			if err = record(); err != nil {
 				return "", err
 			}
