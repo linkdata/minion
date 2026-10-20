@@ -213,7 +213,8 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	if s.threadID == "" && output.stopErr == nil {
 		s.threadID = output.threadID
 	}
-	if output.expectedID != "" && output.threadID == "" {
+	if output.expectedID != "" && output.threadID == "" && runErr == nil && ctx.Err() == nil &&
+		!output.failed && output.parseErr == nil && output.completed && output.finalMessage != "" {
 		output.stop(errors.New("Codex resume did not identify its expected thread")) //nolint:staticcheck // -- Codex is a proper noun.
 	}
 	var childError error

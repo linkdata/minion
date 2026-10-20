@@ -56,6 +56,7 @@ type modelRun struct {
 	refutations       []Refutation
 	outputSchema      string
 	criticPrompt      func(mapping, outputDir string) string
+	proposedAnswer    string
 	model, effort     string
 }
 
@@ -146,7 +147,7 @@ func (r *Runner) runAI(ctx context.Context, job Job, dir, prompt, outputDir stri
 			answer = redactDecoded(strings.ReplaceAll(proposed.Answer, "\x00", ""), request.provider)
 			return
 		}
-		candidate, refutations, parseErr := parseProposal(proposed.Answer, job.Action == command.Fix)
+		candidate, refutations, parseErr := parseProposal(proposed.Answer, job.Action == command.Fix || job.Action == command.SecurityAudit)
 		if parseErr != nil {
 			return "", fmt.Errorf("%w: invalid main proposal: %w", monitor.ErrTerminalJob, parseErr)
 		}
@@ -162,7 +163,7 @@ func (r *Runner) runAI(ctx context.Context, job Job, dir, prompt, outputDir stri
 		var feedback string
 		for _, phase := range reviewPhases(round) {
 			previousAnswer, previousFeedback := "", ""
-			critic := modelRun{session: &sessions.critic, freshConversation: phase == reviewFull, role: roleCritic, round: round, reviewPhase: phase, provider: job.Critic.Provider, model: job.Critic.Model, effort: job.Critic.Effort, outputSchema: criticOutputSchema}
+			critic := modelRun{session: &sessions.critic, freshConversation: phase == reviewFull, role: roleCritic, round: round, reviewPhase: phase, provider: job.Critic.Provider, model: job.Critic.Model, effort: job.Critic.Effort, outputSchema: criticOutputSchema, proposedAnswer: candidate}
 			if phase == reviewVerification {
 				previousAnswer, previousFeedback = priorAnswer, priorFeedback
 				critic.refutations = slices.Clone(history)

@@ -308,7 +308,7 @@ JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 	}
 	validate := func(wantError string) {
 		t.Helper()
-		files, _, err := readAuditArtifacts(root, false)
+		files, _, err := readAuditArtifacts(root, false, "")
 		var report string
 		if err == nil {
 			report, err = validateAuditFiles(context.Background(), files, validationDir, filepath.Join(skillDir, "SKILL.md"), tools, "o/r", target, head)
@@ -417,7 +417,7 @@ func TestAuditArtifactReadModesPreserveFailurePolicies(t *testing.T) {
 				case "blank report":
 					writeFixtureFile(t, root, artifact, []byte(" \t\r\n"))
 				}
-				files, diagnostics, err := readAuditArtifacts(root, partial)
+				files, diagnostics, err := readAuditArtifacts(root, partial, "")
 				wantError := !partial && (scenario == "unsafe core" || artifact == "REPORT.md" && scenario != "blank report")
 				if (err != nil) != wantError {
 					t.Fatalf("files=%v diagnostics=%v error=%v want error=%t", files, diagnostics, err, wantError)

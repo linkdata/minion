@@ -301,7 +301,7 @@ func TestPortableAuditMetadataUsesSourceIdentity(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	files, _, err := readAuditArtifacts(root, false)
+	files, _, err := readAuditArtifacts(root, false, "")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -43,7 +43,7 @@ func checkAuditTools(ctx context.Context, dir, skill string) (auditTools, error)
 	return auditTools{binary: binary, permissionFlag: flag}, err
 }
 
-func readAuditArtifacts(outputDir string, partial bool) ([]workspace.File, []Diagnostic, error) {
+func readAuditArtifacts(outputDir string, partial bool, secret string) ([]workspace.File, []Diagnostic, error) {
 	var files []workspace.File
 	var diagnostics []Diagnostic
 	for _, name := range auditArtifacts {
@@ -55,8 +55,13 @@ func readAuditArtifacts(outputDir string, partial bool) ([]workspace.File, []Dia
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
-		if err == nil && !partial && name == "REPORT.md" && !publishableAnswer(string(data)) {
-			err = errors.New("audit REPORT.md is invalid or exceeds publication limit")
+		if err == nil {
+			data = []byte(aicli.RedactText(string(data), secret))
+			if int64(len(data)) > limit {
+				err = errors.New("redacted artifact exceeds byte limit")
+			} else if name == "REPORT.md" && !partial && !publishableAnswer(string(data)) {
+				err = errors.New("audit REPORT.md is invalid or exceeds publication limit")
+			}
 		}
 		if err != nil {
 			if !partial {
@@ -85,7 +90,6 @@ func validateAuditFiles(ctx context.Context, files []workspace.File, validationD
 			return "", fmt.Errorf("audit %s is missing or empty", name)
 		}
 	}
-	reportBytes := byPath["REPORT.md"]
 	if _, err := validateAuditMetadata(byPath["run-metadata.json"], repo, target, head); err != nil {
 		return "", err
 	}
@@ -168,7 +172,7 @@ func validateAuditFiles(ctx context.Context, files []workspace.File, validationD
 			return "", errors.New("audit findings.json has a finding without candidate")
 		}
 	}
-	return string(reportBytes), nil
+	return string(byPath["REPORT.md"]), nil
 }
 
 func validateAuditMetadata(metadataBytes []byte, repo, target, head string) ([]string, error) {

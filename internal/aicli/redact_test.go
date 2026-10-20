@@ -164,3 +164,15 @@ func TestRedactTailNormalizesLiteralNULBeforeMasking(t *testing.T) {
 		t.Fatalf("literal NUL hid the key or was mistaken for a mask: %q", got)
 	}
 }
+
+func TestRedactTailDoesNotCutThroughExpandedMarker(t *testing.T) {
+	var tail bounded.Tail
+	if _, err := tail.Write([]byte(strings.Repeat("x", bounded.DiagnosticBytes))); err != nil || tail.Truncated {
+		t.Fatalf("unexpected tail state: %v, %t", err, tail.Truncated)
+	}
+	got := RedactTail(&tail, "x")
+	want := strings.Repeat("[redacted]", bounded.DiagnosticBytes/len("[redacted]"))
+	if got != want {
+		t.Fatalf("expanded redaction marker was cut: prefix=%q length=%d, want length=%d", got[:min(20, len(got))], len(got), len(want))
+	}
+}

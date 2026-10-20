@@ -429,7 +429,7 @@ func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, 
 		inherited = before.snapshot
 	}
 	lateOld := usage.Tokens{}
-	snapshotKnown := before == nil || (before.hasSnapshot && !before.unfinished)
+	snapshotKnown := before == nil || (before.hasSnapshot && !before.counterGap && !before.unfinished)
 	responses := map[string]usage.Tokens{}
 	responseTurns := map[string]string{}
 	turns := map[string]bool{}
@@ -536,7 +536,7 @@ func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, 
 			if capture != nil && record.TurnID != "" && admitTurn(record.TurnID) {
 				capture.turns[record.TurnID] = true
 			}
-			if record.SessionID != rootID || record.ResponseID == "" || record.TurnID == "" || !valid {
+			if record.SessionID != rootID || record.ResponseID == "" || record.TurnID == "" {
 				complete = false
 				if capture != nil {
 					capture.valid = false
@@ -546,9 +546,26 @@ func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, 
 				}
 				continue
 			}
+			if !valid {
+				complete = false
+				if capture != nil {
+					capture.counterGap = true
+					if _, exists := responses[record.ResponseID]; !exists && admitIdentity(len(responses)) {
+						responses[record.ResponseID] = usage.Tokens{}
+						if capture.counterResponses == nil {
+							capture.counterResponses = map[string]bool{}
+						}
+						capture.counterResponses[record.ResponseID] = true
+					}
+				}
+				if before != nil {
+					snapshotKnown = false
+				}
+				continue
+			}
 			if before != nil {
 				if old, exists := before.responses[record.ResponseID]; exists {
-					if old != tokens || !before.turns[record.TurnID] {
+					if !before.turns[record.TurnID] || (old != tokens && !before.counterResponses[record.ResponseID]) {
 						complete, snapshotKnown = false, false
 					}
 					continue
@@ -717,9 +734,14 @@ func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, 
 	if before != nil {
 		var added bool
 		inherited, added = inherited.AddChecked(lateOld)
+		complete = complete && added
 		snapshotKnown = snapshotKnown && added
+		// Snapshots can disprove missing records even when old counter gaps prevent using them as the delta.
+		if before.counterGap && before.hasSnapshot && seenSnapshot && latest.Sub(inherited) != total {
+			complete = false
+		}
 		if !snapshotKnown {
-			if seenSnapshot {
+			if seenSnapshot && (!before.counterGap || !before.hasSnapshot || before.unfinished) {
 				complete = false
 			}
 			seenSnapshot = false

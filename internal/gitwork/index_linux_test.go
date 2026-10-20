@@ -341,3 +341,57 @@ func TestFixIndexIgnoredSymlinkParentDoesNotBlockOnAttributeFIFO(t *testing.T) {
 		})
 	}
 }
+
+func TestFixIndexHandlesGitFIFOInsideTrackedDirectory(t *testing.T) {
+	index, source := offlineIndexFixture(t, []workspace.File{
+		{Path: "tracked/file", Mode: workspace.Regular, Data: []byte("before")},
+	})
+	if err := syscall.Mkfifo(filepath.Join(source, "tracked", ".git"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	writeIndexFixture(t, source, "tracked/file", []byte("after"))
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	changes, err := index.Changes(ctx)
+	if err != nil || ctx.Err() != nil || len(changes) != 1 || changes[0].Path != "tracked/file" || string(changes[0].Data) != "after" {
+		t.Fatalf("tracked directory FIFO changed selection or blocked Git: %+v, %v; deadline=%v", changes, err, ctx.Err())
+	}
+}
+
+func TestCaseOnlyRenamePassesChangesAndImport(t *testing.T) {
+	index, source := offlineIndexFixture(t, []workspace.File{
+		{Path: "README.md", Mode: workspace.Regular, Data: []byte("fixture\n")},
+	})
+	if err := os.Rename(filepath.Join(source, "README.md"), filepath.Join(source, "readme.md")); err != nil {
+		t.Fatal(err)
+	}
+	changes, err := index.Changes(context.Background())
+	if err != nil || len(changes) != 2 {
+		t.Fatalf("case-only rename changes=%+v error=%v", changes, err)
+	}
+	found := map[string]bool{}
+	for _, change := range changes {
+		switch change.Path {
+		case "README.md":
+			found[change.Path] = change.Delete
+		case "readme.md":
+			found[change.Path] = !change.Delete && change.Mode == workspace.Regular && string(change.Data) == "fixture\n"
+		}
+	}
+	if !found["README.md"] || !found["readme.md"] {
+		t.Fatalf("case-only rename lost deletion or creation: %+v", changes)
+	}
+	fixture := newFixture(t)
+	if err := fixture.checkout.Import(context.Background(), fixture.base, changes); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(fixture.checkout.path, "README.md")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("old spelling remains: %v", err)
+	}
+	if data, err := os.ReadFile(filepath.Join(fixture.checkout.path, "readme.md")); err != nil || string(data) != "fixture\n" {
+		t.Fatalf("new spelling data=%q error=%v", data, err)
+	}
+	if got := fixture.git(fixture.checkout.path, "diff", "--cached", "--name-status", "--no-renames"); got != "D\tREADME.md\nA\treadme.md" {
+		t.Fatalf("case-only rename was not staged as exact paths: %q", got)
+	}
+}

@@ -18,12 +18,13 @@ import (
 // usageBoundary records an exact prefix, rather than relying on timestamps or
 // event ordinals. Old turns remain old when their last records arrive late.
 type usageBoundary struct {
-	valid, prefixKnown, hasSnapshot, unfinished, completed bool
-	size                                                   int64
-	hash                                                   [32]byte
-	turns                                                  map[string]bool
-	responses                                              map[string]usage.Tokens
-	snapshot                                               usage.Tokens
+	valid, prefixKnown, hasSnapshot, counterGap, unfinished, completed bool
+	size                                                               int64
+	hash                                                               [32]byte
+	turns                                                              map[string]bool
+	responses                                                          map[string]usage.Tokens
+	counterResponses                                                   map[string]bool
+	snapshot                                                           usage.Tokens
 }
 
 func matchUsagePrefix(ctx context.Context, r io.Reader, before *usageBoundary, h hash.Hash) bool {

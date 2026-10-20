@@ -23,7 +23,7 @@ type reviewSnapshot struct {
 }
 
 // Freeze outside the main model's writable grants. The caller owns the partial snapshot even on failure.
-func freezeReviewSnapshot(ctx context.Context, workRoot string, job Job, source, outputDir string, index *gitwork.OfflineIndex) (*reviewSnapshot, error) {
+func freezeReviewSnapshot(ctx context.Context, workRoot string, job Job, source, outputDir string, index *gitwork.OfflineIndex, secret string) (*reviewSnapshot, error) {
 	s := &reviewSnapshot{base: job.Source.Files}
 	// Bind the action once; refresh only frozen bytes between model calls.
 	s.refresh = func(ctx context.Context) error {
@@ -49,7 +49,7 @@ func freezeReviewSnapshot(ctx context.Context, workRoot string, job Job, source,
 			s.source = source
 		}
 		if outputDir != "" {
-			if s.artifacts, _, err = readAuditArtifacts(outputDir, false); err != nil {
+			if s.artifacts, _, err = readAuditArtifacts(outputDir, false, secret); err != nil {
 				return err
 			}
 			if s.outputDir, err = resetReviewDirectory(s.outputDir, workRoot, ".minion-review-reports-"); err != nil {

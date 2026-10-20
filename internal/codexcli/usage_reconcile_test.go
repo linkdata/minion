@@ -128,8 +128,8 @@ func TestUsageSessionMalformedHistoricalCountersDoNotPoisonResume(t *testing.T) 
 	for round := 1; round <= 2; round++ {
 		session.begin(ctx, home, "root", time.Now())
 		boundary := session.before["child"]
-		if boundary == nil || boundary.valid || !boundary.completed || boundary.size != int64(len(before)) || boundary.hash != sha256.Sum256(before) {
-			t.Fatalf("fixture must capture exact bytes despite invalid old counters: %+v", boundary)
+		if boundary == nil || !boundary.valid || !boundary.counterGap || !boundary.counterResponses["c1"] || !boundary.completed || boundary.size != int64(len(before)) || boundary.hash != sha256.Sum256(before) {
+			t.Fatalf("fixture must capture old attribution and exact bytes despite invalid counters: %+v", boundary)
 		}
 		appendUsageEvents(t, root, completedUsageTurn("root", fmt.Sprintf("new-root-%d", round), fmt.Sprintf("r%d", round+1), 20)...)
 		got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 20}, nil, nil)
@@ -139,6 +139,121 @@ func TestUsageSessionMalformedHistoricalCountersDoNotPoisonResume(t *testing.T) 
 	}
 	if after, err := os.ReadFile(child); err != nil || string(after) != string(before) {
 		t.Fatalf("historical helper changed during fixture: %q error=%v", after, err)
+	}
+}
+
+func TestUsageSessionCounterGapKeepsNewRootDelta(t *testing.T) {
+	ctx, home := context.Background(), t.TempDir()
+	root := writeUsageRollout(t, home, "root", "", append(completedUsageTurn("root", "old", "r1", -1), usageSnapshot(22, 100, 0, 0))...)
+	var session usageSession
+	session.begin(ctx, home, "root", time.Now())
+	if before := session.before["root"]; before == nil || !before.valid || !before.counterGap || !before.counterResponses["r1"] || !before.prefixKnown {
+		t.Fatalf("old root attribution lost: %+v", before)
+	}
+	appendUsageEvents(t, root, usageRecord("root", "old", "r1", 100, 0, 0), usageRecord("root", "old", "late-old", 7, 0, 0))
+	appendUsageEvents(t, root, append(completedUsageTurn("root", "new", "r2", 20), usageSnapshot(30, 127, 0, 0))...)
+	got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 127}, nil, nil)
+	if got != (usage.Tokens{Input: 20}) || !complete || err != nil {
+		t.Fatalf("old counter correction or cumulative snapshot hid new root delta: %+v complete=%t err=%v", got, complete, err)
+	}
+}
+
+func TestUsageSessionCounterGapSnapshotDetectsMissingNewResponse(t *testing.T) {
+	ctx, home := context.Background(), t.TempDir()
+	root := writeUsageRollout(t, home, "root", "", append(completedUsageTurn("root", "old", "r1", -1), usageSnapshot(22, 100, 0, 0))...)
+	var session usageSession
+	session.begin(ctx, home, "root", time.Now())
+	appendUsageEvents(t, root, append(completedUsageTurn("root", "new", "r2", 20), usageSnapshot(30, 140, 0, 0))...)
+	got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 140}, nil, nil)
+	if got != (usage.Tokens{Input: 20}) || complete || err != nil {
+		t.Fatalf("old counter gap hid missing current response: %+v complete=%t err=%v", got, complete, err)
+	}
+}
+
+func TestUsageSessionCounterGapNeedsTrustworthySnapshotBaseline(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		old  []string
+	}{
+		{"unfinished old turn", []string{usageEvent("task_started", "old"), usageRecord("root", "old", "r1", -1, 0, 0), usageSnapshot(22, 100, 0, 0)}},
+		{"no old snapshot", completedUsageTurn("root", "old", "r1", -1)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, home := context.Background(), t.TempDir()
+			root := writeUsageRollout(t, home, "root", "", tc.old...)
+			var session usageSession
+			session.begin(ctx, home, "root", time.Now())
+			if before := session.before["root"]; before == nil || !before.counterGap {
+				t.Fatalf("fixture has no counter gap: %+v", before)
+			}
+			appendUsageEvents(t, root, append(completedUsageTurn("root", "new", "r2", 20), usageSnapshot(30, 120, 0, 0))...)
+			got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 120}, nil, nil)
+			if got != (usage.Tokens{Input: 20}) || complete || err != nil {
+				t.Fatalf("untrusted snapshot baseline certified new delta: %+v complete=%t err=%v", got, complete, err)
+			}
+		})
+	}
+}
+
+func TestUsageSessionCounterGapAllowsWaitOnCompletedHelper(t *testing.T) {
+	ctx, home := context.Background(), t.TempDir()
+	root := writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "old-root", "r1", 100)...)
+	writeUsageRollout(t, home, "child", "root", completedUsageTurn("child", "old-child", "c1", -1)...)
+	var session usageSession
+	session.begin(ctx, home, "root", time.Now())
+	appendUsageEvents(t, root, completedUsageTurn("root", "new-root", "r2", 20)...)
+	var output jsonlOutput
+	_, _ = output.Write([]byte(`{"type":"item.completed","item":{"type":"collab_tool_call","tool":"wait","receiver_thread_ids":["child"]}}` + "\n"))
+	got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 20}, output.children, output.observationOnly)
+	if got != (usage.Tokens{Input: 20}) || !complete || err != nil {
+		t.Fatalf("wait on unchanged completed helper refused: %+v complete=%t err=%v", got, complete, err)
+	}
+}
+
+func TestUsageBoundaryCounterGapStillRequiresExactPrefix(t *testing.T) {
+	ctx, home := context.Background(), t.TempDir()
+	root := writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "old", "r1", -1)...)
+	var session usageSession
+	session.begin(ctx, home, "root", time.Now())
+	data, err := os.ReadFile(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := strings.Replace(string(data), `"input_tokens":-1`, `"input_tokens":-2`, 1)
+	if changed == string(data) || len(changed) != len(data) {
+		t.Fatal("fixture must rewrite old counter without changing byte count")
+	}
+	if err := os.WriteFile(root, []byte(changed), 0600); err != nil {
+		t.Fatal(err)
+	}
+	appendUsageEvents(t, root, completedUsageTurn("root", "new", "r2", 20)...)
+	got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 20}, nil, nil)
+	if got != (usage.Tokens{}) || complete || err != nil {
+		t.Fatalf("rewritten old counter bypassed exact prefix: %+v complete=%t err=%v", got, complete, err)
+	}
+}
+
+func TestUsageBoundaryCounterGapDoesNotExcuseMissingIdentity(t *testing.T) {
+	for _, tc := range []struct{ name, old, replacement string }{
+		{"missing turn", `"turn_id":"turn"`, `"turn_id":""`},
+		{"missing response", `"response_id":"response"`, `"response_id":""`},
+		{"missing session", `"session_id":"root"`, `"session_id":""`},
+		{"malformed payload", `"response_id":"response"`, `"response_id":42`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, home := context.Background(), t.TempDir()
+			record := usageRecord("root", "turn", "response", -1, 0, 0)
+			changed := strings.Replace(record, tc.old, tc.replacement, 1)
+			if changed == record {
+				t.Fatal("fixture did not change record")
+			}
+			writeUsageRollout(t, home, "root", "", usageEvent("task_started", "turn"), changed, usageEvent("task_complete", "turn"))
+			var session usageSession
+			session.begin(ctx, home, "root", time.Now())
+			if before := session.before["root"]; before == nil || before.valid || !before.prefixKnown {
+				t.Fatalf("invalid record identity or structure accepted: %+v", before)
+			}
+		})
 	}
 }
 
@@ -161,7 +276,7 @@ func TestUsageBoundaryIdentityRequiresAnUncappedPhysicalRead(t *testing.T) {
 			}
 			capture := &usageBoundary{valid: true, turns: map[string]bool{}}
 			_, complete, _, err := readRolloutUsageFrom(ctx, rolloutMeta{ID: "root", path: name}, "root", &budget, nil, capture, nil, false)
-			if capture.valid || complete || capture.prefixKnown == capped || err != nil {
+			if capture.valid == capped || !capture.counterGap || complete || capture.prefixKnown == capped || err != nil {
 				t.Fatalf("counter/byte validity conflated: %+v complete=%t capped=%t err=%v", capture, complete, capped, err)
 			}
 		})

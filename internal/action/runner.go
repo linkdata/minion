@@ -196,7 +196,7 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 			var err error
 			if !reviewCurrent {
 				if review == nil {
-					review, err = freezeReviewSnapshot(ctx, workRoot, job, source, outputDir, index)
+					review, err = freezeReviewSnapshot(ctx, workRoot, job, source, outputDir, index, configured.Codex.APIKey)
 				} else {
 					err = review.refresh(ctx)
 				}
@@ -204,6 +204,9 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 			}
 			if err != nil {
 				return aicli.Result{}, terminalUnlessCanceled(ctx, fmt.Errorf("freeze critic input: %w", err))
+			}
+			if job.Action == command.Fix && len(review.changes) == 0 && !publishableAnswer(request.proposedAnswer) {
+				return aicli.Result{}, terminalUnlessCanceled(ctx, errors.New("rendered answer exceeds publication limit for no-change fix"))
 			}
 			mapping := ""
 			if review.source != source {
@@ -272,7 +275,7 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 	if job.Action == command.SecurityAudit {
 		defer func() {
 			if resultErr != nil && len(result.Artifacts) == 0 {
-				files, diagnostics := collectPartialAuditArtifacts(outputDir, job, auditSkill)
+				files, diagnostics := collectPartialAuditArtifacts(outputDir, job, auditSkill, configured.Codex.APIKey)
 				result.Artifacts = files
 				result.Diagnostics = append(result.Diagnostics, diagnostics...)
 			}
@@ -318,7 +321,7 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 		if review != nil {
 			files = review.artifacts
 		} else {
-			files, _, err = readAuditArtifacts(outputDir, false)
+			files, _, err = readAuditArtifacts(outputDir, false, configured.Codex.APIKey)
 			if err != nil {
 				return result, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
 			}
@@ -605,8 +608,8 @@ func normalizeAuditArtifacts(files []workspace.File, job Job, skill string) ([]w
 	return files, nil
 }
 
-func collectPartialAuditArtifacts(outputDir string, job Job, skill string) ([]workspace.File, []Diagnostic) {
-	read, diagnostics, _ := readAuditArtifacts(outputDir, true)
+func collectPartialAuditArtifacts(outputDir string, job Job, skill, secret string) ([]workspace.File, []Diagnostic) {
+	read, diagnostics, _ := readAuditArtifacts(outputDir, true, secret)
 	var files []workspace.File
 	for _, file := range read {
 		if file.Path == "run-metadata.json" {

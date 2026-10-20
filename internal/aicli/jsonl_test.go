@@ -94,3 +94,28 @@ func TestJSONLAcceptsExactTotalLimits(t *testing.T) {
 		})
 	}
 }
+
+func TestJSONLCRLFAtExactEventByteLimit(t *testing.T) {
+	for _, extra := range []int{0, 1} {
+		t.Run(map[int]string{0: "exact", 1: "one byte over"}[extra], func(t *testing.T) {
+			var lines []string
+			var failures []error
+			output := JSONL{
+				Line: func(p []byte) { lines = append(lines, string(p)) },
+				Fail: func(err error) { failures = append(failures, err) },
+			}
+			event := strings.Repeat("x", MaxEventBytes-1+extra) + "\r\n"
+			if count, err := output.Write([]byte(event)); count != len(event) || err != nil {
+				t.Fatalf("write=%d,%v", count, err)
+			}
+			output.Finish()
+			if extra == 0 {
+				if len(failures) != 0 || len(lines) != 1 || lines[0] != strings.TrimSpace(event) {
+					t.Fatalf("exact CRLF event: lines=%d failures=%v", len(lines), failures)
+				}
+			} else if len(lines) != 0 || len(failures) != 1 || !errors.Is(failures[0], ErrOutputLimit) {
+				t.Fatalf("oversized CRLF event: lines=%d failures=%v", len(lines), failures)
+			}
+		})
+	}
+}

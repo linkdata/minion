@@ -650,7 +650,7 @@ func TestCommentPublishesOnlyCriticAcceptedResult(t *testing.T) {
 				if !errors.Is(err, monitor.ErrTerminalJob) || published != "" || tt.wantErrorText != "" && !strings.Contains(err.Error(), tt.wantErrorText) {
 					t.Fatalf("unapproved result published: error=%v body=%q", err, published)
 				}
-			} else if err != nil || criticCalls != 3 || mainCalls != 2 || !strings.Contains(published, inertModelOutput(answer)) || strings.Contains(published, "[truncated]") || strings.Contains(published, `"approved"`) || strings.Contains(published, "refutations") || strings.Contains(published, "PRIVATE_REFUTATION") {
+			} else if err != nil || criticCalls != 3 || mainCalls != 2 || !strings.Contains(published, inertModelOutput(answer)) || strings.Contains(published, `"approved"`) || strings.Contains(published, "refutations") || strings.Contains(published, "PRIVATE_REFUTATION") {
 				t.Fatalf("wrong published result: error=%v body=%q", err, published)
 			}
 		})

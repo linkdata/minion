@@ -140,11 +140,11 @@ func (index *OfflineIndex) Changes(ctx context.Context) ([]workspace.Change, err
 	if len(paths) > workspace.MaxChanges {
 		return nil, fmt.Errorf("%w: fix result exceeds changed file limit", ErrTooManyFiles)
 	}
-	for _, path := range paths {
+	for _, record := range paths {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		name := string(path)
+		name := string(record)
 		if !workspace.ValidPath(name) {
 			return nil, fmt.Errorf("fix output %q is not a portable regular-file path", name)
 		}
@@ -232,11 +232,11 @@ func (index *OfflineIndex) checkControlFiles(ctx context.Context) error {
 			}
 			skip := map[string]bool{}
 			for _, name := range names {
-				path := strings.TrimPrefix(string(name), ":(top)")
-				if controls[path] {
-					return fmt.Errorf("ignored untracked fix control file %q must be removed or tracked", path)
+				candidate := strings.TrimPrefix(string(name), ":(top)")
+				if controls[candidate] {
+					return fmt.Errorf("ignored untracked fix control file %q must be removed or tracked", candidate)
 				}
-				skip[path] = true
+				skip[candidate] = true
 			}
 			for _, candidate := range candidates {
 				name := path.Join(candidate.parent, candidate.name)

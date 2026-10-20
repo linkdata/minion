@@ -261,6 +261,7 @@ func CanonicalPath(root string) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("resolve path: %w", err)
 		}
+		// Preserve ".." until EvalSymlinks resolves each component in order.
 		root = cwd + string(os.PathSeparator) + root
 	}
 	root, err := filepath.EvalSymlinks(root)
@@ -497,15 +498,13 @@ func ReadChanges(ctx context.Context, root string, selected []Change) ([]Change,
 // Repository mode excludes only the separately verified top-level .git directory.
 func walk(ctx context.Context, root string, repository bool, visit func(string, fs.DirEntry) error) error {
 	root = filepath.Clean(root)
-	type directory struct{ parent, name string }
-	dirs := []directory{{name: root}}
+	dirs := []string{root}
 	entries := 0
 	for len(dirs) > 0 {
 		last := len(dirs) - 1
-		current := dirs[last]
-		dirs[last] = directory{}
+		dir := dirs[last]
+		dirs[last] = ""
 		dirs = dirs[:last]
-		dir := filepath.Join(current.parent, current.name)
 		err := func() (resultErr error) {
 			f, err := openPath(dir, true)
 			if err != nil {
@@ -533,7 +532,7 @@ func walk(ctx context.Context, root string, repository bool, visit func(string, 
 						return err
 					}
 					if entry.IsDir() {
-						dirs = append(dirs, directory{parent: dir, name: entry.Name()})
+						dirs = append(dirs, name)
 					}
 				}
 				if errors.Is(readErr, io.EOF) {
@@ -704,7 +703,8 @@ func writeFile(f *os.File, data []byte, mode fs.FileMode) error {
 	return errors.Join(err, f.Close())
 }
 
-// ReadRegular opens one bounded, singly linked regular file without following path symlinks.
+// ReadRegular opens one singly linked regular file without following path symlinks.
+// limit must be between 0 and MaxBytes, inclusive.
 func ReadRegular(name string, limit int64) ([]byte, error) {
 	data, _, err := readFile(name, limit)
 	return data, err

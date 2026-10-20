@@ -313,7 +313,7 @@ func cloneFixture(t *testing.T, root string) *gitwork.Checkout {
 
 func mustFreeze(t *testing.T, ctx context.Context, root string, job Job, source, output string, index *gitwork.OfflineIndex) *reviewSnapshot {
 	t.Helper()
-	snapshot, err := freezeReviewSnapshot(ctx, root, job, source, output, index)
+	snapshot, err := freezeReviewSnapshot(ctx, root, job, source, output, index, "")
 	if err != nil {
 		t.Fatal(err)
 	}

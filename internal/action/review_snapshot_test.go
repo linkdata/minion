@@ -167,7 +167,7 @@ func TestReviewSnapshotRejectsOversizedReports(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeFixtureFile(t, output, "findings.json", make([]byte, maxAuditArtifactBytes+1))
-	snapshot, err := freezeReviewSnapshot(context.Background(), workRoot, job, source, output, nil)
+	snapshot, err := freezeReviewSnapshot(context.Background(), workRoot, job, source, output, nil, "")
 	if snapshot != nil {
 		t.Cleanup(func() {
 			if err := snapshot.close(); err != nil {
@@ -196,7 +196,7 @@ func TestReviewSnapshotCleansFailedFixCandidateMaterialization(t *testing.T) {
 			if stage == "addition" {
 				writeFixtureFile(t, source, name, []byte("added"))
 			}
-			control, err := freezeReviewSnapshot(context.Background(), t.TempDir(), job, source, "", index)
+			control, err := freezeReviewSnapshot(context.Background(), t.TempDir(), job, source, "", index, "")
 			if err != nil {
 				t.Fatalf("valid candidate failed under short root: %v", err)
 			}
@@ -210,7 +210,7 @@ func TestReviewSnapshotCleansFailedFixCandidateMaterialization(t *testing.T) {
 			if err := os.MkdirAll(workRoot, 0700); err != nil {
 				t.Fatal(err)
 			}
-			failed, err := freezeReviewSnapshot(context.Background(), workRoot, job, source, "", index)
+			failed, err := freezeReviewSnapshot(context.Background(), workRoot, job, source, "", index, "")
 			if failed == nil || !failed.ownedSource || !errors.Is(err, syscall.ENAMETOOLONG) {
 				t.Fatalf("expected %s filesystem failure: snapshot=%v error=%v", stage, failed, err)
 			}

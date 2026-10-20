@@ -204,6 +204,51 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
 	}
 }
 
+func TestSessionFailedResumeKeepsNativeDiagnosticsAndAllowsNewConversation(t *testing.T) {
+	for _, tc := range []struct {
+		name, resume, diagnostic string
+	}{
+		{"nonzero exit", `printf 'native failure' >&2; exit 42`, "native failure"},
+		{"malformed stream", `printf '%s\n' '{damaged'`, "invalid JSONL event"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			installFakeCodex(t, `#!/bin/sh
+cat >/dev/null
+if [ "$2" = resume ]; then
+`+tc.resume+`
+else
+  id=root
+  if [ -f "$0.fresh" ]; then id=fresh; else : > "$0.fresh"; fi
+  printf '{"type":"thread.started","thread_id":"%s"}\n' "$id"
+  printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}' '{"type":"turn.completed"}'
+fi
+`)
+			var session Session
+			t.Cleanup(func() {
+				if err := session.Close(); err != nil {
+					t.Error(err)
+				}
+			})
+			source := t.TempDir()
+			if _, err := session.Run(context.Background(), source, "first", false, "", config.CodexConfig{}); err != nil {
+				t.Fatal(err)
+			}
+			result, err := session.Run(context.Background(), source, "resume", false, "", config.CodexConfig{})
+			if err == nil || !strings.Contains(err.Error(), tc.diagnostic) || strings.Contains(err.Error(), "did not identify its expected thread") || result.Answer != "" || result.UsageComplete {
+				t.Fatalf("resume diagnostics lost: %+v err=%v", result, err)
+			}
+			if tc.name == "nonzero exit" && !strings.Contains(err.Error(), "exit status 42") {
+				t.Fatalf("native exit status lost: %v", err)
+			}
+			session.NewConversation()
+			result, err = session.Run(context.Background(), source, "fresh", false, "", config.CodexConfig{})
+			if err != nil || result.Answer != "done" || session.threadID != "fresh" {
+				t.Fatalf("fresh conversation did not clear refusal: %+v err=%v thread=%q", result, err, session.threadID)
+			}
+		})
+	}
+}
+
 func TestSessionRuntimeControlFilesDoNotFollowPriorModelSymlinks(t *testing.T) {
 	installFakeCodex(t, "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"root\"}' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"done\"}}' '{\"type\":\"turn.completed\"}'\n")
 	dir := t.TempDir()

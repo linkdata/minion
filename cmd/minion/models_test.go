@@ -152,3 +152,46 @@ esac
 		})
 	}
 }
+
+func TestGitHubTokenSelectionAndEmptyCLIResult(t *testing.T) {
+	t.Run("missing CLI", func(t *testing.T) {
+		t.Setenv("GH_TOKEN", "")
+		t.Setenv("GITHUB_TOKEN", "")
+		t.Setenv("PATH", t.TempDir())
+		if token, err := githubToken(context.Background()); token != "" || err == nil || !strings.Contains(err.Error(), "executable file not found") {
+			t.Fatalf("missing gh returned token=%q error=%v", token, err)
+		}
+	})
+	for _, test := range []struct {
+		name, ghToken, githubToken, output, want, wantError string
+		callCLI                                             bool
+	}{
+		{name: "GH_TOKEN wins", ghToken: "  preferred \n", githubToken: " secondary ", want: "preferred"},
+		{name: "GITHUB_TOKEN fallback", githubToken: " \tsecondary\r\n", want: "secondary"},
+		{name: "CLI fallback", output: "  cli-token \r\n", want: "cli-token", callCLI: true},
+		{name: "empty CLI result", output: " \r\n", wantError: "gh auth token returned an empty token", callCLI: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			t.Setenv("PATH", dir)
+			t.Setenv("GH_TOKEN", test.ghToken)
+			t.Setenv("GITHUB_TOKEN", test.githubToken)
+			marker := filepath.Join(dir, "gh.called")
+			script := "#!/bin/sh\n"
+			script += "printf called > \"$0.called\"\n"
+			script += "if [ \"$1\" != auth ] || [ \"$2\" != token ] || [ \"$3\" != --hostname ] || [ \"$4\" != github.com ]; then exit 91; fi\n"
+			script += "printf '%s' '" + test.output + "'\n"
+			if err := os.WriteFile(filepath.Join(dir, "gh"), []byte(script), 0700); err != nil {
+				t.Fatal(err)
+			}
+			got, err := githubToken(context.Background())
+			if got != test.want || (test.wantError == "" && err != nil) || (test.wantError != "" && (err == nil || !strings.Contains(err.Error(), test.wantError))) {
+				t.Fatalf("token=%q error=%v; want %q, %q", got, err, test.want, test.wantError)
+			}
+			_, markerErr := os.Stat(marker)
+			if test.callCLI != (markerErr == nil) {
+				t.Fatalf("CLI called=%t, marker error=%v", markerErr == nil, markerErr)
+			}
+		})
+	}
+}
