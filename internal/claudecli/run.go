@@ -126,7 +126,6 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 		return result, err
 	}
 	cmd.Stdin = strings.NewReader(prompt)
-	processgroup.Configure(cmd)
 	var failureTimer *time.Timer
 	output := jsonlOutput{sessionID: s.id, apiKey: settings.APIKey, baseline: s.baseline, baselineUnknown: s.usageGap, cancel: cancel, structured: settings.OutputSchema != "", fatal: func() {
 		// Let the CLI flush a final result and cumulative accounting, then stop
@@ -139,7 +138,7 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 		ceilingMatched = ceilingMatched || isWaitCeilingStop(line)
 	}, Overflow: func() { ceilingOverflow = true }}
 	cmd.Stdout, cmd.Stderr = &output, io.MultiWriter(&diagnostics, &ceiling)
-	err = cmd.Run()
+	err = processgroup.Run(cmd)
 	if cmd.Process == nil {
 		// No CLI started, so no provider usage or resumable turn exists.
 		return result, fmt.Errorf("claude: %w", err)

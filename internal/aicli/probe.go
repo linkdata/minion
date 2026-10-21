@@ -23,11 +23,10 @@ func Probe(ctx context.Context, binary, argv0 string, args []string, dir string,
 		cmd.Args[0] = argv0
 	}
 	cmd.Dir, cmd.Env, cmd.Stdin = dir, env, strings.NewReader(input)
-	processgroup.Configure(cmd)
 	output := bounded.Buffer{Limit: MaxEventBytes, Cancel: cancel}
 	diagnostics := bounded.Tail{}
 	cmd.Stdout, cmd.Stderr = &output, &diagnostics
-	err := cmd.Run()
+	err := processgroup.Run(cmd)
 	if contextErr := ctx.Err(); contextErr != nil && !errors.Is(err, contextErr) {
 		err = errors.Join(contextErr, err)
 	}

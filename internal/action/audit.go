@@ -236,7 +236,7 @@ func validateAuditFiles(ctx context.Context, files []workspace.File, validationD
 		cmd := auditNodeCommand(ctx, validationDir, tools.binary, tools.permissionFlag,
 			"--allow-fs-read="+filepath.Dir(skill), "--allow-fs-read="+validationDir,
 			script, filepath.Join(validationDir, validator.artifact))
-		if err := cmd.Run(); err != nil {
+		if err := processgroup.Run(cmd); err != nil {
 			if cause := ctx.Err(); cause != nil && !errors.Is(err, cause) {
 				err = errors.Join(cause, err)
 			}
@@ -360,8 +360,10 @@ func auditNodePermissionFlag(ctx context.Context, dir, binary string) (string, e
 	for _, flag := range []string{"--permission", "--experimental-permission"} {
 		// #nosec G204 -- the flags and probe program are fixed strings, passed without a shell.
 		cmd := auditNodeCommand(ctx, dir, binary, flag, "-e", `if (!process.permission || process.permission.has('fs.read', '/etc/passwd')) process.exit(1)`)
-		if err := cmd.Run(); err == nil {
+		if err := processgroup.Run(cmd); err == nil {
 			return flag, nil
+		} else if errors.Is(err, processgroup.ErrDescendants) || errors.Is(err, processgroup.ErrUnconfirmed) {
+			return "", err
 		}
 		if err := ctx.Err(); err != nil {
 			return "", err
@@ -374,6 +376,5 @@ func auditNodeCommand(ctx context.Context, dir, binary string, args ...string) *
 	cmd := exec.CommandContext(ctx, binary, args...)
 	cmd.Dir = dir
 	cmd.Env = []string{"HOME=" + dir, "PATH=/usr/bin:/bin"}
-	processgroup.Configure(cmd)
 	return cmd
 }

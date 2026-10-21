@@ -18,6 +18,7 @@ import (
 	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/gitwork"
 	"github.com/linkdata/minion/internal/monitor"
+	"github.com/linkdata/minion/internal/processgroup"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -39,12 +40,16 @@ type preparedAction struct {
 // needsExecution distinguishes supplied work from fixed replies and publication recovery.
 func (p *preparedAction) needsExecution() bool { return p.job.Version != 0 }
 
-func (e *Orchestrator) perform(ctx context.Context, request monitor.Job) error {
+func (e *Orchestrator) perform(ctx context.Context, request monitor.Job) (resultErr error) {
 	prepared, err := e.prepare(ctx, request)
 	if err != nil {
 		return err
 	}
 	defer func() {
+		if errors.Is(resultErr, processgroup.ErrUnconfirmed) {
+			e.logf("preserve prepared checkout after unconfirmed process cleanup job=%s", request.ID)
+			return
+		}
 		if err := prepared.checkout.Close(); err != nil {
 			e.logf("close prepared action: %v", err)
 		}
@@ -82,7 +87,11 @@ func (e *Orchestrator) prepare(ctx context.Context, request monitor.Job) (prepar
 	p := &preparedAction{request: request}
 	defer func() {
 		if resultErr != nil {
-			resultErr = errors.Join(resultErr, p.checkout.Close())
+			if errors.Is(resultErr, processgroup.ErrUnconfirmed) {
+				e.logf("preserve prepared checkout after unconfirmed process cleanup job=%s", request.ID)
+			} else {
+				resultErr = errors.Join(resultErr, p.checkout.Close())
+			}
 		}
 	}()
 	if request.Command.Action == command.Fix {

@@ -12,8 +12,26 @@ import (
 	"testing"
 	"time"
 
+	"github.com/linkdata/minion/internal/processgroup"
 	"github.com/linkdata/minion/internal/testsupport"
 )
+
+func TestBoundedGitRejectsSuccessfulLeaderWithDescendants(t *testing.T) {
+	if err := processgroup.Check(); err != nil {
+		t.Skipf("delegated process ownership unavailable: %v", err)
+	}
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "child.pid")
+	testsupport.StopOnCleanup(t, pidFile+".stop")
+	script := "#!/bin/sh\n(while [ ! -f " + shellQuote(pidFile+".stop") + " ]; do sleep 1; done) </dev/null >/dev/null 2>&1 &\n" +
+		"printf '%s' \"$!\" > " + shellQuote(pidFile) + "\nprintf ok\n"
+	fakeOnPath(t, "git", script)
+	output, truncated, err := (&Checkout{path: dir}).boundedGit(context.Background(), nil, 128, true, "status")
+	if len(output) != 0 || truncated || !errors.Is(err, processgroup.ErrDescendants) {
+		t.Fatalf("bounded Git accepted surviving child: output=%q truncated=%t error=%v", output, truncated, err)
+	}
+	assertGitChildStopped(t, pidFile)
+}
 
 func assertGitChildStopped(t *testing.T, pidFile string) {
 	t.Helper()

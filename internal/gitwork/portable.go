@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/linkdata/minion/internal/bounded"
+	"github.com/linkdata/minion/internal/processgroup"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -321,6 +322,9 @@ func (c *Checkout) boundedGit(ctx context.Context, stdin io.Reader, limit int, t
 		if !errors.Is(err, contextErr) {
 			err = errors.Join(err, contextErr)
 		}
+		return nil, false, err
+	}
+	if errors.Is(err, processgroup.ErrDescendants) || errors.Is(err, processgroup.ErrUnconfirmed) {
 		return nil, false, err
 	}
 	if output.Exceeded {

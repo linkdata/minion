@@ -68,6 +68,64 @@ func TestCronPassSkipsPreflightWhenStateLocked(t *testing.T) {
 	}
 }
 
+func TestRunStopsBeforePreflightWhenProcessRecoveryIsPending(t *testing.T) {
+	for _, check := range []bool{false, true} {
+		t.Run(fmt.Sprintf("check=%t", check), func(t *testing.T) {
+			isolateHostPaths(t, t.TempDir())
+			statePath := filepath.Join(t.TempDir(), "state.json")
+			cfg := config.Config{
+				BotLogin: "fixture", StatePath: statePath, WorkRoot: mountedWorkRoot(t, statePath), WorkRootMaxBytes: 1 << 62,
+				Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{},
+				Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2}},
+			}
+			configPath := filepath.Join(t.TempDir(), "config.json")
+			data, err := json.Marshal(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(configPath, data, 0600); err != nil {
+				t.Fatal(err)
+			}
+			store, err := state.Open(statePath, time.Now().UTC())
+			if err != nil {
+				t.Fatal(err)
+			}
+			store.Data.UnconfirmedProcessJob = "pending-job"
+			if err := store.Save(); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			oldFlags, oldArgs, oldStderr := flag.CommandLine, os.Args, os.Stderr
+			t.Cleanup(func() { flag.CommandLine, os.Args, os.Stderr = oldFlags, oldArgs, oldStderr })
+			flag.CommandLine = flag.NewFlagSet("minion", flag.ContinueOnError)
+			os.Args = []string{"minion", "-config", configPath}
+			if check {
+				os.Args = append(os.Args, "-check")
+			}
+			logPath := filepath.Join(t.TempDir(), "stderr.log")
+			logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY, 0600)
+			if err != nil {
+				t.Fatal(err)
+			}
+			os.Stderr = logFile
+			code := run()
+			os.Stderr = oldStderr
+			if err := logFile.Close(); err != nil {
+				t.Fatal(err)
+			}
+			logText, err := os.ReadFile(logPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if code != 1 || !strings.Contains(string(logText), "process cleanup from pending-job is unconfirmed") || strings.Contains(string(logText), "AI preflight:") {
+				t.Fatalf("recovery latch did not stop preflight: exit=%d log=%q", code, logText)
+			}
+		})
+	}
+}
+
 func TestRunRejectsUnsafeGrantBeforeStateOpen(t *testing.T) {
 	const source = "https://github.com/owner/repo/tree/pinned/skills/example"
 	for _, kind := range []string{"selected executable", "selected installed skill"} {

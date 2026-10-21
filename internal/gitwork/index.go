@@ -21,6 +21,7 @@ import (
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/bounded"
+	"github.com/linkdata/minion/internal/processgroup"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -420,8 +421,11 @@ func (index *OfflineIndex) run(ctx context.Context, limit int, input []byte, arg
 	cmd := gitCommand(runCtx, index.binary, dir, env, append(gitArgs, args...)...)
 	output, diagnostic := bounded.Buffer{Limit: limit, Cancel: cancel}, bounded.Buffer{Limit: bounded.DiagnosticBytes}
 	cmd.Stdout, cmd.Stderr, cmd.Stdin = &output, &diagnostic, bytes.NewReader(input)
-	err := cmd.Run()
+	err := processgroup.Run(cmd)
 	contextErr := ctx.Err()
+	if errors.Is(err, processgroup.ErrDescendants) || errors.Is(err, processgroup.ErrUnconfirmed) {
+		return nil, gitFailure("offline git", args[0], diagnostic.String(), contextErr, err)
+	}
 	if output.Exceeded && contextErr == nil {
 		return nil, fmt.Errorf("offline git %s output exceeds action limit: %w", args[0], ErrCheckoutTooLarge)
 	}

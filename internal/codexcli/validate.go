@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/linkdata/minion/internal/aicli"
@@ -89,7 +90,9 @@ func listModels(ctx context.Context, settings config.CodexConfig) (models []mode
 		return nil, err
 	}
 	defer func() {
-		err = errors.Join(err, os.RemoveAll(dir))
+		if !errors.Is(err, processgroup.ErrUnconfirmed) {
+			err = errors.Join(err, os.RemoveAll(dir))
+		}
 	}()
 	// app-server has no --ignore-user-config flag. Select exec's built-in
 	// provider explicitly and avoid repository config by using a temporary cwd.
@@ -108,7 +111,6 @@ func listModels(ctx context.Context, settings config.CodexConfig) (models []mode
 	cmd.Args[0] = "codex"
 	cmd.Dir = dir
 	cmd.Env = childEnvironment(os.Environ(), dir, dir, home, settings.APIKey != "")
-	processgroup.Configure(cmd)
 	diagnostics := bounded.Tail{}
 	cmd.Stderr = &diagnostics
 	stdin, err := cmd.StdinPipe()
@@ -125,21 +127,30 @@ func listModels(ctx context.Context, settings config.CodexConfig) (models []mode
 	if err != nil {
 		return nil, err
 	}
-	if err := cmd.Start(); err != nil {
+	handle, err := processgroup.Start(cmd)
+	if handle == nil {
 		return nil, err
 	}
 	defer func() {
 		contextErr := ctx.Err()
 		cancel()
-		_ = cmd.Wait()
+		if waitErr := handle.Wait(); !expectedDiscoveryStop(waitErr) {
+			err = errors.Join(err, waitErr)
+		}
+		if contextErr != nil && !errors.Is(err, contextErr) {
+			err = errors.Join(contextErr, err)
+		}
 		if err != nil {
 			if contextErr != nil {
-				err = fmt.Errorf("Codex model discovery: %w", contextErr) //nolint:staticcheck // -- Codex is a proper noun.
+				err = fmt.Errorf("Codex model discovery: %w", err) //nolint:staticcheck // -- Codex is a proper noun.
 			} else if detail := aicli.RedactTail(&diagnostics, settings.APIKey); detail != "" {
 				err = fmt.Errorf("%w: %q", err, detail)
 			}
 		}
 	}()
+	if err != nil {
+		return nil, err
+	}
 	encoder := json.NewEncoder(stdin)
 	// Catalogue limits count the logical line after ScanLines removes CR/LF.
 	scanner := bufio.NewScanner(stdout)
@@ -230,4 +241,32 @@ func listModels(ctx context.Context, settings config.CodexConfig) (models []mode
 		cursor = result.NextCursor
 	}
 	return nil, errors.New("too many Codex model catalogue pages")
+}
+
+// The app-server is deliberately canceled after its last catalogue response.
+// Keep ownership failures and unexpected exits even when cancellation is expected.
+func expectedDiscoveryStop(err error) bool {
+	if err == nil {
+		return true
+	}
+	if errors.Is(err, processgroup.ErrDescendants) || errors.Is(err, processgroup.ErrUnconfirmed) {
+		return false
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		for _, cause := range joined.Unwrap() {
+			if !expectedDiscoveryStop(cause) {
+				return false
+			}
+		}
+		return true
+	}
+	if errors.Is(err, context.Canceled) {
+		return true
+	}
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) {
+		return false
+	}
+	status, ok := exit.Sys().(syscall.WaitStatus)
+	return ok && status.Signaled() && status.Signal() == syscall.SIGKILL
 }

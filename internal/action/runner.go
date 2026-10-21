@@ -23,6 +23,7 @@ import (
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/gitwork"
 	"github.com/linkdata/minion/internal/monitor"
+	"github.com/linkdata/minion/internal/processgroup"
 	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/workroot"
 	"github.com/linkdata/minion/internal/workspace"
@@ -128,6 +129,11 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 	cleanupFailed := false
 	// Remove owned paths after sessions, report collection, and review snapshots close.
 	defer func() {
+		if errors.Is(resultErr, processgroup.ErrUnconfirmed) {
+			result.Diagnostics = append(result.Diagnostics, Diagnostic{Code: "process_cleanup_unconfirmed", Message: "Owned processes could not be confirmed stopped; execution workspaces were preserved for operator recovery."})
+			r.logf("preserve action workspaces after unconfirmed process cleanup job=%s attempt=%s", job.Identity.JobID, job.Identity.AttemptID)
+			return
+		}
 		failed := cleanupFailed
 		for _, dir := range owned {
 			if err := cleanup.RemoveAll(dir); err != nil {
@@ -197,7 +203,11 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 		}
 	}
 	// Model sessions close before review snapshots; snapshots may add paths to outer cleanup.
-	defer closeReview()
+	defer func() {
+		if !errors.Is(resultErr, processgroup.ErrUnconfirmed) {
+			closeReview()
+		}
+	}()
 	observe := configured.aroundModel
 	configured.aroundModel = func(ctx context.Context, request modelRun, next modelCall) (aicli.Result, error) {
 		if request.role == roleMain {
@@ -290,6 +300,9 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 	if job.Action == command.SecurityAudit {
 		// Collect partial reports before the outer workspace cleanup.
 		defer func() {
+			if errors.Is(resultErr, processgroup.ErrUnconfirmed) {
+				return
+			}
 			if resultErr != nil && len(result.Artifacts) == 0 {
 				files, diagnostics := collectPartialAuditArtifacts(outputDir, job, auditSkill, configured.Codex.APIKey, configured.Claude.APIKey)
 				result.Artifacts = files
@@ -310,6 +323,9 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 	var sessions modelSessions
 	// Close sessions before collecting partial reports or releasing review snapshots.
 	defer func() {
+		if errors.Is(resultErr, processgroup.ErrUnconfirmed) {
+			return
+		}
 		if err := sessions.close(); err != nil {
 			configured.logf("model session cleanup retry scheduled job=%s attempt=%s", job.Identity.JobID, job.Identity.AttemptID)
 			cleanupFailed = sessions.close() != nil
@@ -694,6 +710,9 @@ func collectPartialAuditArtifacts(outputDir string, job Job, skill string, secre
 
 func terminalUnlessCanceled(ctx context.Context, err error) error {
 	if ctx.Err() != nil {
+		if errors.Is(err, processgroup.ErrUnconfirmed) {
+			return errors.Join(ctx.Err(), err)
+		}
 		return ctx.Err()
 	}
 	return fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)

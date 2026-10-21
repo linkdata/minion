@@ -21,6 +21,7 @@ import (
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/monitor"
+	"github.com/linkdata/minion/internal/processgroup"
 	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/state"
 	"github.com/linkdata/minion/internal/usage"
@@ -89,32 +90,48 @@ func run() int {
 		return 1
 	}
 	var store *state.Store
-	if !*check {
-		initial := time.Now().UTC()
-		if cfg.StartAt != "" {
-			initial, _ = time.Parse(time.RFC3339, cfg.StartAt)
+	initial := time.Now().UTC()
+	if cfg.StartAt != "" {
+		initial, _ = time.Parse(time.RFC3339, cfg.StartAt)
+	}
+	store, err = state.Open(cfg.StatePath, initial)
+	if errors.Is(err, state.ErrLocked) && !*loop && !*check {
+		logger.Printf("another run is active; skipping this cron pass")
+		return 0
+	}
+	if err != nil {
+		logger.Printf("state: %v", err)
+		return 1
+	}
+	defer func() {
+		if err := store.Close(); err != nil {
+			logger.Printf("close state: %v", err)
 		}
-		store, err = state.Open(cfg.StatePath, initial)
-		if errors.Is(err, state.ErrLocked) && !*loop {
-			logger.Printf("another run is active; skipping this cron pass")
-			return 0
-		}
-		if err != nil {
-			logger.Printf("state: %v", err)
-			return 1
-		}
-		defer func() {
-			if err := store.Close(); err != nil {
-				logger.Printf("close state: %v", err)
+	}()
+	if store.Data.UnconfirmedProcessJob != "" {
+		logger.Printf("process cleanup from %s is unconfirmed; operator recovery required", store.Data.UnconfirmedProcessJob)
+		return 1
+	}
+	latchProcessError := func(stage string, runErr error) {
+		if errors.Is(runErr, processgroup.ErrUnconfirmed) {
+			store.Data.UnconfirmedProcessJob = stage
+			if saveErr := store.Save(); saveErr != nil {
+				logger.Printf("save unconfirmed process cleanup: %v", saveErr)
 			}
-		}()
+		}
+	}
+	if err := processgroup.Check(); err != nil {
+		logger.Printf("process ownership: %v", err)
+		return 1
 	}
 	if err := checkModels(ctx, &cfg, logger); err != nil {
+		latchProcessError("AI preflight", err)
 		logger.Printf("AI preflight: %v", err)
 		return 1
 	}
 	token, err := githubToken(ctx)
 	if err != nil {
+		latchProcessError("GitHub authentication", err)
 		logger.Printf("GitHub authentication: %v", err)
 		return 1
 	}
@@ -147,7 +164,7 @@ func run() int {
 			} else {
 				logger.Printf("poll: %v", err)
 			}
-			if !*loop {
+			if !*loop || errors.Is(err, processgroup.ErrUnconfirmed) {
 				return 1
 			}
 		}

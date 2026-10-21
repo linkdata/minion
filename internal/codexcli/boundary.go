@@ -45,7 +45,11 @@ func ValidateInstructionBoundary(ctx context.Context) (resultErr error) {
 	if err != nil {
 		return err
 	}
-	defer func() { resultErr = errors.Join(resultErr, os.RemoveAll(root)) }()
+	defer func() {
+		if !errors.Is(resultErr, processgroup.ErrUnconfirmed) {
+			resultErr = errors.Join(resultErr, os.RemoveAll(root))
+		}
+	}()
 	repo := filepath.Join(root, "repo")
 	runtimeDir := filepath.Join(repo, "var", "work", "runtime")
 	skillDir := filepath.Join(repo, ".agents", "skills", "untrusted-canary")
@@ -71,9 +75,8 @@ func ValidateInstructionBoundary(ctx context.Context) (resultErr error) {
 	}
 	// #nosec G204 -- Git receives one generated path as an argument, without a shell.
 	git := exec.CommandContext(ctx, gitBinary, "init", "-q", repo)
-	processgroup.Configure(git)
 	git.Env = append([]string{"PATH=" + os.Getenv("PATH"), "HOME=" + probeHome}, aicli.ModelGitEnvironment()...)
-	if err := git.Run(); err != nil {
+	if err := processgroup.Run(git); err != nil {
 		return fmt.Errorf("create Codex instruction probe repository: %w", err)
 	}
 	// A visible control proves this CLI exposes both instruction sources to

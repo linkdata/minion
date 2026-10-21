@@ -18,6 +18,7 @@ import (
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/github"
+	"github.com/linkdata/minion/internal/processgroup"
 	"github.com/linkdata/minion/internal/state"
 	"github.com/linkdata/minion/internal/workroot"
 )
@@ -92,6 +93,9 @@ func (m *Monitor) logf(format string, args ...any) {
 func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, error) {
 	if err := ctx.Err(); err != nil {
 		return store.Data.NextPollAt, err
+	}
+	if store.Data.UnconfirmedProcessJob != "" {
+		return store.Data.NextPollAt, fmt.Errorf("%w: job %s requires operator recovery", processgroup.ErrUnconfirmed, store.Data.UnconfirmedProcessJob)
 	}
 	now := time.Now
 	if m.Now != nil {
@@ -394,11 +398,15 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			if err := m.Handler.Execute(ctx, job); err != nil {
 				failureErr := fmt.Errorf("%s from %s: %w", cmd.Action, itemLocation(item), err)
 				publicationFailure := errors.Is(err, ErrPostModelPublication)
-				interrupted := ctx.Err() != nil && errors.Is(err, context.Canceled) && !publicationFailure
+				unconfirmedProcesses := errors.Is(err, processgroup.ErrUnconfirmed)
+				interrupted := !unconfirmedProcesses && ctx.Err() != nil && errors.Is(err, context.Canceled) && !publicationFailure
 				switch {
+				case unconfirmedProcesses:
+					jobFailure.Attempts = maxJobAttempts
+					store.Data.UnconfirmedProcessJob = job.ID
 				case interrupted:
 					jobFailure.Attempts--
-				case errors.Is(err, ErrTerminalJob):
+				case errors.Is(err, ErrTerminalJob), errors.Is(err, processgroup.ErrDescendants):
 					jobFailure.Attempts = maxJobAttempts
 				case !publicationFailure && (errors.Is(err, workroot.ErrUnsafe) || infrastructureFailure(err)):
 					jobFailure.Attempts--
@@ -413,6 +421,10 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				}
 				if interrupted {
 					m.logf("%s from %s interrupted: %v", cmd.Action, itemLocation(item), err)
+					return stop(failureErr)
+				}
+				if unconfirmedProcesses {
+					m.logf("%s from %s stopped: process cleanup is unconfirmed; operator recovery required: %v", cmd.Action, itemLocation(item), err)
 					return stop(failureErr)
 				}
 				m.logf("%s from %s failed (attempt %d/%d): %v", cmd.Action, itemLocation(item), jobFailure.Attempts, maxJobAttempts, err)

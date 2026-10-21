@@ -12,8 +12,27 @@ import (
 	"testing"
 	"time"
 
+	"github.com/linkdata/minion/internal/processgroup"
+	"github.com/linkdata/minion/internal/testsupport"
 	"github.com/linkdata/minion/internal/workspace"
 )
+
+func TestOfflineCheckIgnoreDoesNotAcceptSurvivingChild(t *testing.T) {
+	if err := processgroup.Check(); err != nil {
+		t.Skipf("delegated process ownership unavailable: %v", err)
+	}
+	index, _ := offlineIndexFixture(t, nil)
+	pidFile := filepath.Join(t.TempDir(), "child.pid")
+	testsupport.StopOnCleanup(t, pidFile+".stop")
+	script := "#!/bin/sh\n(while [ ! -f " + shellQuote(pidFile+".stop") + " ]; do sleep 1; done) </dev/null >/dev/null 2>&1 &\n" +
+		"printf '%s' \"$!\" > " + shellQuote(pidFile) + "\nexit 1\n"
+	index.binary = filepath.Join(fakeOnPath(t, "git-ignore-child", script), "git-ignore-child")
+	output, err := index.run(context.Background(), 1024, nil, "check-ignore", "--", "ignored")
+	if len(output) != 0 || !errors.Is(err, processgroup.ErrDescendants) {
+		t.Fatalf("check-ignore accepted surviving child: output=%q error=%v", output, err)
+	}
+	assertGitChildStopped(t, pidFile)
+}
 
 func TestFixIndexRejectsControlFIFOsBeforeGitOpensThem(t *testing.T) {
 	for _, control := range []string{".gitignore", ".gitattributes"} {

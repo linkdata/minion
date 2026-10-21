@@ -18,6 +18,7 @@ import (
 
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/github"
+	"github.com/linkdata/minion/internal/processgroup"
 	"github.com/linkdata/minion/internal/state"
 	"github.com/linkdata/minion/internal/workroot"
 )
@@ -547,6 +548,27 @@ func TestRunOnceBoundsFailedExecutions(t *testing.T) {
 				t.Fatalf("processed job reran: err=%v jobs=%d replies=%d", err, len(handler.jobs), len(gh.comments))
 			}
 		})
+	}
+}
+
+func TestRunOnceStopsUntilUnconfirmedProcessCleanupIsResolved(t *testing.T) {
+	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	item := github.Item{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}}
+	gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}, items: []github.Item{item}, permission: github.Permission{Permission: "write"}}
+	handler := &fakeHandler{executeErr: processgroup.ErrUnconfirmed}
+	store := openState(t, now.Add(-time.Minute))
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Now: func() time.Time { return now }}
+	if _, err := m.RunOnce(context.Background(), store); !errors.Is(err, processgroup.ErrUnconfirmed) {
+		t.Fatalf("unconfirmed cleanup error = %v", err)
+	}
+	if len(handler.jobs) != 1 || store.Data.UnconfirmedProcessJob != handler.jobs[0].ID ||
+		store.Data.JobFailures[handler.jobs[0].ID].Attempts != maxJobAttempts || len(gh.comments) != 0 || len(store.Data.Processed) != 0 {
+		t.Fatalf("unconfirmed cleanup was not held for recovery: jobs=%d replies=%d state=%+v", len(handler.jobs), len(gh.comments), store.Data)
+	}
+	requests := len(gh.notificationCalls)
+	handler.executeErr = nil
+	if _, err := m.RunOnce(context.Background(), store); !errors.Is(err, processgroup.ErrUnconfirmed) || len(handler.jobs) != 1 || len(gh.notificationCalls) != requests || len(gh.comments) != 0 {
+		t.Fatalf("later pass resumed before recovery: err=%v jobs=%d polls=%d replies=%d", err, len(handler.jobs), len(gh.notificationCalls), len(gh.comments))
 	}
 }
 

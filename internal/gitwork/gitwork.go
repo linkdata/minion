@@ -95,6 +95,9 @@ func cloneFromURL(ctx context.Context, workRoot, url, defaultBranch string, chec
 		err = c.checkoutSource(ctx, head, checkoutFiles)
 	}
 	if err != nil {
+		if errors.Is(err, processgroup.ErrUnconfirmed) {
+			return nil, err
+		}
 		return nil, errors.Join(err, c.Close())
 	}
 	return c, nil
@@ -112,6 +115,9 @@ func clonePullRequestFromURL(ctx context.Context, workRoot, url string, number i
 		return nil, err
 	}
 	if err := c.checkoutPullRequest(ctx, number, baseRef, expectedHeadSHA); err != nil {
+		if errors.Is(err, processgroup.ErrUnconfirmed) {
+			return nil, err
+		}
 		return nil, errors.Join(err, c.Close())
 	}
 	return c, nil
@@ -132,7 +138,7 @@ func cloneRepository(ctx context.Context, workRoot, url, defaultBranch string) (
 	}
 	removeOnError := true
 	defer func() {
-		if removeOnError {
+		if removeOnError && !errors.Is(err, processgroup.ErrUnconfirmed) {
 			err = errors.Join(err, cleanup.RemoveAll(path))
 		}
 	}()
@@ -379,7 +385,6 @@ func runGit(ctx context.Context, dir string, args ...string) (string, error) {
 // Credentials and network policy are supplied explicitly by each trusted/offline caller.
 func gitCommand(ctx context.Context, binary, dir string, env []string, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, binary, append(hardeningArgs(), args...)...)
-	processgroup.Configure(cmd)
 	cmd.Dir, cmd.Env = dir, env
 	return cmd
 }
@@ -402,7 +407,7 @@ func runGitInputTo(ctx context.Context, dir string, stdin io.Reader, stdout io.W
 	cmd.Stdout = stdout
 	diagnostic := bounded.Buffer{Limit: bounded.DiagnosticBytes}
 	cmd.Stderr = &diagnostic
-	if err := cmd.Run(); err != nil {
+	if err := processgroup.Run(cmd); err != nil {
 		operation := args[0]
 		for i := 0; i+2 < len(args) && args[i] == "-c"; i += 2 {
 			operation = args[i+2]

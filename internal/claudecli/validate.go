@@ -16,6 +16,7 @@ import (
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/config"
+	"github.com/linkdata/minion/internal/processgroup"
 )
 
 // Validate checks Claude's prerequisites and resolves model settings.
@@ -39,10 +40,18 @@ func Validate(ctx context.Context, settings config.ClaudeConfig) (validated conf
 	if err != nil {
 		return validated, err
 	}
-	defer func() { resultErr = errors.Join(resultErr, os.RemoveAll(dir)) }()
+	defer func() {
+		if !errors.Is(resultErr, processgroup.ErrUnconfirmed) {
+			resultErr = errors.Join(resultErr, os.RemoveAll(dir))
+		}
+	}()
 	authDir, err := authentication(filepath.Dir(dir), settings.APIKey)
 	if authDir != "" {
-		defer func() { resultErr = errors.Join(resultErr, os.RemoveAll(authDir)) }()
+		defer func() {
+			if !errors.Is(resultErr, processgroup.ErrUnconfirmed) {
+				resultErr = errors.Join(resultErr, os.RemoveAll(authDir))
+			}
+		}()
 	}
 	if err != nil {
 		return validated, err

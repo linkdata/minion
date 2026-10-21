@@ -1,2 +1,2 @@
-// Package processgroup bounds pipe draining and, on Linux, kills a command's process group on cancellation.
+// Package processgroup owns a command's Linux cgroup through exit and cleanup.
 package processgroup

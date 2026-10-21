@@ -195,8 +195,6 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 		cmd.Env = append(cmd.Env, "CODEX_API_KEY="+settings.APIKey)
 	}
 	cmd.Stdin = strings.NewReader(prompt)
-	processgroup.Configure(cmd)
-
 	output := jsonlOutput{cancel: cancelRun, expectedID: s.threadID}
 	stderr := bounded.Tail{}
 	cmd.Stdout = &output
@@ -204,7 +202,7 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 
 	started := time.Now()
 	s.accounting.begin(ctx, codexHome, s.threadID, started)
-	runErr := cmd.Run()
+	runErr := processgroup.Run(cmd)
 	if cmd.Process == nil {
 		s.accounting.before = nil
 		return result, fmt.Errorf("codex exec: %w", runErr)
@@ -236,10 +234,10 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 		result.UsageComplete = false
 	}
 	if err := ctx.Err(); err != nil {
-		return result, fmt.Errorf("codex exec: %w", err)
+		return result, fmt.Errorf("codex exec: %w", errors.Join(err, runErr))
 	}
 	if output.stopErr != nil {
-		return result, fmt.Errorf("codex exec: %w", output.stopErr)
+		return result, fmt.Errorf("codex exec: %w", errors.Join(output.stopErr, runErr))
 	}
 	if output.parseErr != nil {
 		return result, fmt.Errorf("codex exec output: %w", errors.Join(output.parseErr, runErr))

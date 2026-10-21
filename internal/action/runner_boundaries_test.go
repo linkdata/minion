@@ -22,6 +22,7 @@ import (
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/gitwork"
 	"github.com/linkdata/minion/internal/monitor"
+	"github.com/linkdata/minion/internal/processgroup"
 	"github.com/linkdata/minion/internal/workroot"
 	"github.com/linkdata/minion/internal/workspace"
 )
@@ -376,6 +377,25 @@ func TestRunnerRemovesRestrictedModelDirectory(t *testing.T) {
 		}
 	}
 	assertEmptyDir(t, root)
+}
+
+func TestRunnerPreservesWorkspaceAfterUnconfirmedProcessCleanup(t *testing.T) {
+	root := t.TempDir()
+	var source string
+	runner := Runner{WorkRoot: root, runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+		source = request.dir
+		return aicli.Result{}, processgroup.ErrUnconfirmed
+	}}
+	result, err := runner.Run(context.Background(), testJob(command.Comment))
+	if !errors.Is(err, processgroup.ErrUnconfirmed) || source == "" {
+		t.Fatalf("unconfirmed process result: source=%q err=%v", source, err)
+	}
+	if _, statErr := os.Stat(source); statErr != nil {
+		t.Fatalf("workspace removed before process recovery: %v", statErr)
+	}
+	if !slices.ContainsFunc(result.Diagnostics, func(d Diagnostic) bool { return d.Code == "process_cleanup_unconfirmed" }) {
+		t.Fatalf("missing process recovery diagnostic: %+v", result.Diagnostics)
+	}
 }
 
 func TestRunnerReportsOwnedAndCriticCleanupFailures(t *testing.T) {

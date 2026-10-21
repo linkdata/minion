@@ -40,7 +40,18 @@ jobs:
           fi
 
       - name: Test
-        run: go test -race -coverprofile=coverage.out ./...
+        run: |
+          runner_uid="$(id -u)"
+          sudo systemd-run --scope --quiet --collect --same-dir --uid="$runner_uid" \
+            -p Delegate=yes -p TasksMax=256 -p MemoryMax=4G -- \
+            /usr/bin/env "HOME=$HOME" "PATH=$PATH" "MINION_RUN_UID=$runner_uid" bash -euc '
+              test "$(id -u)" = "$MINION_RUN_UID"
+              cgroup="$(sed -n "s/^0:://p" /proc/self/cgroup)"
+              test -n "$cgroup"
+              mkdir "/sys/fs/cgroup$cgroup/minion-ci-probe"
+              rmdir "/sys/fs/cgroup$cgroup/minion-ci-probe"
+              go test -race -coverprofile=coverage.out ./...
+            '
 
       - name: Coverage
         id: coverage
