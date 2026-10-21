@@ -92,21 +92,13 @@ func TestLiveClientReadOnly(t *testing.T) {
 		}
 	})
 
-	t.Run("branch and tree", func(t *testing.T) {
+	t.Run("branch", func(t *testing.T) {
 		branch, err := bot.Branch(ctx, cfg.Repo, repo.DefaultBranch)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if branch.Name != repo.DefaultBranch || len(branch.Commit.SHA) != 40 {
 			t.Fatalf("default branch = %+v", branch)
-		}
-		treeSHA := liveAPIField(t, ctx, cfg.BotLogin, "repos/"+cfg.Repo+"/git/commits/"+branch.Commit.SHA, ".tree.sha")
-		tree, err := bot.GitTree(ctx, cfg.Repo, treeSHA)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if tree.SHA != treeSHA || tree.Truncated == nil || *tree.Truncated || len(tree.Tree) == 0 {
-			t.Fatalf("recursive tree = %+v", tree)
 		}
 	})
 

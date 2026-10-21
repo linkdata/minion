@@ -27,6 +27,9 @@ jobs:
       - name: Go vet
         run: go vet ./...
 
+      - name: Vet darwin build
+        run: GOOS=darwin go vet ./...
+
       - name: Check gofmt
         run: |
           unformatted="$(gofmt -l .)"
@@ -37,7 +40,22 @@ jobs:
           fi
 
       - name: Test
-        run: go test -race -coverprofile=coverage.out ./...
+        run: |
+          runner_uid="$(id -u)"
+          runner_env=("HOME=$HOME" "PATH=$PATH" "MINION_RUN_UID=$runner_uid")
+          if [ "${GOTOOLCHAIN+x}" = x ]; then
+            runner_env+=("GOTOOLCHAIN=$GOTOOLCHAIN")
+          fi
+          sudo systemd-run --quiet --wait --pipe --collect --same-dir --uid="$runner_uid" \
+            -p Type=exec -p Delegate=yes -p KillMode=mixed -p TasksMax=256 -p MemoryMax=4G -- \
+            /usr/bin/env "${runner_env[@]}" bash -euc '
+              test "$(id -u)" = "$MINION_RUN_UID"
+              cgroup="$(sed -n "s/^0:://p" /proc/self/cgroup)"
+              test -n "$cgroup"
+              mkdir "/sys/fs/cgroup$cgroup/minion-ci-probe"
+              rmdir "/sys/fs/cgroup$cgroup/minion-ci-probe"
+              go test -race -coverprofile=coverage.out ./...
+            '
 
       - name: Coverage
         id: coverage

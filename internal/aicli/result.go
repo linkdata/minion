@@ -1,4 +1,4 @@
-// Package aicli contains results shared by the supported AI command-line runners.
+// Package aicli shares AI invocation results, bounded output and trusted host-command helpers.
 package aicli
 
 import (

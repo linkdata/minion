@@ -11,20 +11,35 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/workroot"
+	"github.com/linkdata/minion/internal/workspace"
 )
 
 var (
-	repoNamePattern  = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
 	ownerNamePattern = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$`)
-	commandPattern   = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
+	commandPattern   = regexp.MustCompile(`^[a-z][a-z0-9-]{0,99}$`)
 )
 
 const (
 	// DefaultMaxGitHubContextBytes is the default GitHub text budget for an AI action.
 	DefaultMaxGitHubContextBytes = 32 << 10
+	// DefaultJobTimeout is the runtime budget for each execution attempt.
+	DefaultJobTimeout = 4 * time.Hour
+	// MaxJobTimeout is the largest configurable per-attempt runtime budget.
+	MaxJobTimeout = 24 * time.Hour
+	// DefaultCriticMaxRounds is the default proposal/revision round limit.
+	DefaultCriticMaxRounds = 5
+	// MaxCriticMaxRounds is the largest configurable proposal/revision round limit.
+	MaxCriticMaxRounds = 20
+	// MaxSkillsPerRole bounds the combined required and always-on skill list.
+	MaxSkillsPerRole = 64
+	// MaxSkillURLBytes is the portable action limit for one skill source.
+	MaxSkillURLBytes = 4096
+	// MaxModelSettingBytes is the portable limit for each model and effort setting.
+	MaxModelSettingBytes = 128
 
 	defaultReviewSkill        = "https://github.com/DietrichGebert/ponytail/tree/main/skills/ponytail-review"
 	defaultFixSkill           = "https://github.com/DietrichGebert/ponytail/tree/main/skills/ponytail"
@@ -115,10 +130,13 @@ type Config struct {
 	Main string `json:"main,omitempty"`
 	// Adversarial optionally selects the other provider as a read-only critic.
 	Adversarial string `json:"adversarial,omitempty"`
-	// CriticMaxRounds limits critic reviews; zero selects three rounds.
-	CriticMaxRounds int          `json:"critic_max_rounds,omitempty"`
-	Codex           CodexConfig  `json:"codex,omitempty"`
-	Claude          ClaudeConfig `json:"claude,omitempty"`
+	// CriticMaxRounds limits proposal/revision rounds; zero selects [DefaultCriticMaxRounds].
+	CriticMaxRounds int `json:"critic_max_rounds,omitempty"`
+	// CriticNonblockingRounds permits remaining nonblocking findings from this proposal round onward.
+	// Nil selects CriticMaxRounds-1; zero requires every finding cleared until the hard limit.
+	CriticNonblockingRounds *int         `json:"critic_nonblocking_rounds,omitempty"`
+	Codex                   CodexConfig  `json:"codex,omitempty"`
+	Claude                  ClaudeConfig `json:"claude,omitempty"`
 	// Nil Commands selects defaults; an empty map disables all commands.
 	Commands map[string]CommandMapping `json:"commands"`
 	// Nil AlwaysOnSkills selects anti-prompt-injection and caveman; an empty list disables always-on skills.
@@ -136,6 +154,14 @@ type Config struct {
 	InvitationOwners      []string         `json:"invitation_owners,omitempty"`
 	InvitationOwnerIDs    map[string]int64 `json:"invitation_owner_ids,omitempty"`
 	Repositories          []Repository     `json:"repositories"`
+}
+
+// ResolveCriticNonblockingRounds preserves explicit zero and defaults an omitted threshold.
+func ResolveCriticNonblockingRounds(maxRounds int, configured *int) int {
+	if configured != nil {
+		return *configured
+	}
+	return maxRounds - 1
 }
 
 // Load reads and validates configuration.
@@ -177,6 +203,10 @@ func decode(r io.Reader) (Config, error) {
 	return cfg, nil
 }
 
+func validModelSetting(value string) bool {
+	return len(value) <= MaxModelSettingBytes && utf8.ValidString(value) && !strings.ContainsAny(value, " \t\r\n\x00")
+}
+
 // Validate checks configuration and resolves paths relative to configDir.
 //
 // It normalizes repository names, account logins, identity pin keys, and skill URLs.
@@ -202,23 +232,35 @@ func (c *Config) Validate(configDir string) error {
 		return fmt.Errorf("adversarial must differ from main")
 	}
 	if c.CriticMaxRounds == 0 {
-		c.CriticMaxRounds = 3
+		c.CriticMaxRounds = DefaultCriticMaxRounds
 	}
-	if c.CriticMaxRounds < 1 || c.CriticMaxRounds > 10 {
-		return fmt.Errorf("critic_max_rounds must be between 1 and 10")
+	if c.CriticMaxRounds < 1 || c.CriticMaxRounds > MaxCriticMaxRounds {
+		return fmt.Errorf("critic_max_rounds must be between 1 and %d", MaxCriticMaxRounds)
+	}
+	if rounds := ResolveCriticNonblockingRounds(c.CriticMaxRounds, c.CriticNonblockingRounds); rounds < 0 || rounds > c.CriticMaxRounds {
+		return fmt.Errorf("critic_nonblocking_rounds must be between 0 and %d", c.CriticMaxRounds)
 	}
 	if strings.ContainsAny(c.Codex.APIKey, " \t\r\n\x00") || strings.ContainsAny(c.Claude.APIKey, " \t\r\n\x00") {
 		return fmt.Errorf("provider api_key must not contain whitespace or NUL")
 	}
 	c.Codex.Model = strings.TrimSpace(c.Codex.Model)
 	c.Codex.ReasoningEffort = strings.TrimSpace(c.Codex.ReasoningEffort)
-	if strings.ContainsAny(c.Codex.Model, " \t\r\n") || strings.ContainsAny(c.Codex.ReasoningEffort, " \t\r\n") {
-		return fmt.Errorf("codex model and reasoning_effort must not contain whitespace")
+	if !validModelSetting(c.Codex.Model) || !validModelSetting(c.Codex.ReasoningEffort) {
+		return fmt.Errorf("codex model and reasoning_effort must be at most %d UTF-8 bytes without whitespace or NUL", MaxModelSettingBytes)
 	}
 	c.Claude.Model = strings.TrimSpace(c.Claude.Model)
 	c.Claude.Effort = strings.TrimSpace(c.Claude.Effort)
-	if strings.ContainsAny(c.Claude.Model, " \t\r\n") || strings.ContainsAny(c.Claude.Effort, " \t\r\n") {
-		return fmt.Errorf("claude model and effort must not contain whitespace")
+	if !validModelSetting(c.Claude.Model) || !validModelSetting(c.Claude.Effort) {
+		return fmt.Errorf("claude model and effort must be at most %d UTF-8 bytes without whitespace or NUL", MaxModelSettingBytes)
+	}
+	if c.AlwaysOnSkills == nil {
+		c.AlwaysOnSkills = []string{defaultAntiInjectionSkill, defaultCavemanSkill}
+	}
+	if len(c.AlwaysOnSkills) > MaxSkillsPerRole {
+		return fmt.Errorf("always_on_skills exceeds %d skills", MaxSkillsPerRole)
+	}
+	if err := validateSkillURLs(c.AlwaysOnSkills); err != nil {
+		return fmt.Errorf("always_on_skills: %w", err)
 	}
 	if c.Commands == nil {
 		c.Commands = defaultCommands()
@@ -235,6 +277,9 @@ func (c *Config) Validate(configDir string) error {
 		if len(mapping.Skills) == 0 {
 			return fmt.Errorf("command %q must have at least one skill", name)
 		}
+		if len(mapping.Skills)+len(c.AlwaysOnSkills) > MaxSkillsPerRole {
+			return fmt.Errorf("command %q exceeds %d required and always-on skills", name, MaxSkillsPerRole)
+		}
 		if err := validateSkillURLs(mapping.Skills); err != nil {
 			return fmt.Errorf("command %q: %w", name, err)
 		}
@@ -250,12 +295,6 @@ func (c *Config) Validate(configDir string) error {
 				return fmt.Errorf("command %q requires a security-audit skill", name)
 			}
 		}
-	}
-	if c.AlwaysOnSkills == nil {
-		c.AlwaysOnSkills = []string{defaultAntiInjectionSkill, defaultCavemanSkill}
-	}
-	if err := validateSkillURLs(c.AlwaysOnSkills); err != nil {
-		return fmt.Errorf("always_on_skills: %w", err)
 	}
 	sourceByName := make(map[string]struct{ name, url string })
 	addSkill := func(rawURL string) error {
@@ -291,16 +330,16 @@ func (c *Config) Validate(configDir string) error {
 		return fmt.Errorf("poll_interval_seconds must be at least 60")
 	}
 	if c.JobTimeoutMinutes == 0 {
-		c.JobTimeoutMinutes = 30
+		c.JobTimeoutMinutes = int(DefaultJobTimeout / time.Minute)
 	}
-	if c.JobTimeoutMinutes < 1 || c.JobTimeoutMinutes > 240 {
-		return fmt.Errorf("job_timeout_minutes must be between 1 and 240")
+	if c.JobTimeoutMinutes < 1 || c.JobTimeoutMinutes > int(MaxJobTimeout/time.Minute) {
+		return fmt.Errorf("job_timeout_minutes must be between 1 and %d", int(MaxJobTimeout/time.Minute))
 	}
 	if c.MaxGitHubContextBytes == 0 {
 		c.MaxGitHubContextBytes = DefaultMaxGitHubContextBytes
 	}
-	if c.MaxGitHubContextBytes < 0 {
-		return fmt.Errorf("max_github_context_bytes must be positive")
+	if c.MaxGitHubContextBytes < 0 || c.MaxGitHubContextBytes > workspace.MaxBytes {
+		return fmt.Errorf("max_github_context_bytes must be between 1 and %d", workspace.MaxBytes)
 	}
 	if c.StatePath == "" {
 		c.StatePath = "var/state.json"
@@ -354,8 +393,7 @@ func (c *Config) Validate(configDir string) error {
 	seen := map[string]bool{}
 	for i := range c.Repositories {
 		repo := &c.Repositories[i]
-		parts := strings.Split(repo.Name, "/")
-		if !repoNamePattern.MatchString(repo.Name) || parts[0] == "." || parts[0] == ".." || parts[1] == "." || parts[1] == ".." {
+		if !workspace.ValidRepository(repo.Name) {
 			return fmt.Errorf("invalid repository name %q (use owner/repo)", repo.Name)
 		}
 		repo.Name = strings.ToLower(repo.Name)
@@ -408,6 +446,10 @@ func (c *Config) Validate(configDir string) error {
 func validateSkillURLs(urls []string) error {
 	seenNames := make(map[string]bool, len(urls))
 	for i, rawURL := range urls {
+		normalized := strings.TrimSuffix(rawURL, "/")
+		if len(normalized) > MaxSkillURLBytes {
+			return fmt.Errorf("skill URL exceeds %d bytes", MaxSkillURLBytes)
+		}
 		name, err := skills.Name(rawURL)
 		if err != nil {
 			return fmt.Errorf("invalid skill URL %q: %w", rawURL, err)
@@ -417,7 +459,7 @@ func validateSkillURLs(urls []string) error {
 			return fmt.Errorf("duplicate skill %q", name)
 		}
 		seenNames[key] = true
-		urls[i] = strings.TrimSuffix(rawURL, "/")
+		urls[i] = normalized
 	}
 	return nil
 }

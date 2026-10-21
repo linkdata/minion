@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/linkdata/minion/internal/codexcli"
+	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/github"
@@ -33,32 +33,33 @@ func TestLiveReviewAction(t *testing.T) {
 	pull := liveReviewAuditPull(t, ctx, fixture.owner, fixture.cfg)
 	job := liveReviewAuditJob(t, fixture.cfg, fixture.repo, fixture.ownerUser, command.Review, "PullRequest", pull.Number, pull.HTMLURL)
 	var calls int
-	executor := &Executor{
-		GitHub: fixture.bot, BotLogin: fixture.cfg.BotLogin, WorkRoot: t.TempDir(),
+	orchestrator := &Orchestrator{WorkRoot: t.TempDir(), GitHub: fixture.bot,
+		BotLogin: fixture.cfg.BotLogin,
 		Commands: map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{testReviewSkillURL}}},
-		RunCodex: func(ctx context.Context, dir, prompt string, writable bool, outputDir string) (codexcli.Result, error) {
-			calls++
-			if writable || outputDir != "" || !strings.Contains(prompt, pull.Head.SHA) {
-				return codexcli.Result{}, fmt.Errorf("live review did not use the expected read-only pull request")
-			}
-			if head := liveReviewAuditHead(t, ctx, dir); head != pull.Head.SHA {
-				t.Fatalf("review checkout HEAD = %s, want %s", head, pull.Head.SHA)
-			}
-			return codexcli.Result{Answer: "Live review fixture " + job.ID[:12] + "."}, nil
+		Runner: Runner{
+			runModel: func(ctx context.Context, modelRequest modelRun) (aicli.Result, error) {
+				dir, prompt, writable, outputDir := modelRequest.dir, modelRequest.prompt, modelRequest.writable, modelRequest.outputDir
+				calls++
+				if writable || outputDir != "" || !strings.Contains(prompt, pull.Head.SHA) {
+					return aicli.Result{}, fmt.Errorf("live review did not use the expected read-only pull request")
+				}
+				assertModelRepository(t, dir, pull.Head.SHA)
+				return aicli.Result{Answer: "Live review fixture " + job.ID[:12] + "."}, nil
+			},
 		},
 	}
-	if err := executor.Execute(ctx, job); err != nil {
+	if err := orchestrator.Execute(ctx, job); err != nil {
 		t.Fatal(err)
 	}
 	if calls != 1 {
-		t.Fatalf("review Codex calls = %d, want 1", calls)
+		t.Fatalf("review model calls = %d, want 1", calls)
 	}
 	review := liveReviewAuditSubmittedReview(t, ctx, fixture.ownerToken, fixture.cfg, job, pull.Head.SHA)
-	if err := executor.Execute(ctx, job); err != nil {
+	if err := orchestrator.Execute(ctx, job); err != nil {
 		t.Fatal(err)
 	}
 	if calls != 1 || liveReviewAuditSubmittedReview(t, ctx, fixture.ownerToken, fixture.cfg, job, pull.Head.SHA).ID != review.ID {
-		t.Fatal("repeat review execution published another review or reran Codex")
+		t.Fatal("repeat review execution published another review or reran the model")
 	}
 	t.Logf("submitted review remains: %s", review.HTMLURL)
 }
@@ -101,58 +102,48 @@ func TestLiveSecurityAuditAction(t *testing.T) {
 				defer cleanupCancel()
 				liveActionReplyCleanup(t, cleanupCtx, fixture.owner, fixture.ownerToken, fixture.cfg, job)
 			})
-			skillDir := filepath.Join(os.Getenv("HOME"), ".agents", "skills", "security-audit")
-			skill := filepath.Join(skillDir, "SKILL.md")
-			if err := os.WriteFile(skill, []byte("# Live audit test validator fixture\n"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			for _, name := range []string{"validate-findings.cjs", "validate-coverage-ledger.cjs"} {
-				if err := os.WriteFile(filepath.Join(skillDir, name), []byte(`const fs = require('fs'); if (!Array.isArray(JSON.parse(fs.readFileSync(process.argv[2], 'utf8')))) process.exit(1);`), 0o600); err != nil {
-					t.Fatal(err)
-				}
-			}
 			report := "Minion live audit fixture " + job.ID[:12] + ".\n"
 			var calls int
-			executor := &Executor{
-				GitHub: fixture.bot, BotLogin: fixture.cfg.BotLogin, WorkRoot: t.TempDir(),
-				Codex:    config.CodexConfig{Skills: []string{skill}},
+			orchestrator := &Orchestrator{WorkRoot: t.TempDir(), GitHub: fixture.bot,
+				BotLogin: fixture.cfg.BotLogin,
 				Commands: map[string]config.CommandMapping{"security-audit": {Action: "security-audit", Skills: []string{testAuditSkillURL}}},
-				RunCodex: func(ctx context.Context, dir, prompt string, writable bool, outputDir string) (codexcli.Result, error) {
-					calls++
-					if writable || outputDir == "" || strings.HasPrefix(outputDir, dir+string(os.PathSeparator)) || !strings.Contains(prompt, test.head) {
-						return codexcli.Result{}, fmt.Errorf("live audit did not use a separate report directory and expected commit")
-					}
-					if head := liveReviewAuditHead(t, ctx, dir); head != test.head {
-						t.Fatalf("audit checkout HEAD = %s, want %s", head, test.head)
-					}
-					metadata := fmt.Sprintf(`{"run_id":%q,"repo":%q,"target":%q,"source_ref":%q,"profile":"standard","scope_paths":["."],"budget":null,"selected_companion_files":[],"prior_run_paths":[],"shared_file_owners":%s,"execution_policy":"sandboxed-source-and-local-only","run_status":"complete"}`, job.ID, liveFixRepository, dir, test.head, auditTestOwners)
-					for name, content := range map[string]string{
-						"run-metadata.json": metadata, "architecture.md": "Test fixture architecture.\n",
-						"coverage-ledger.json": `[{"status":"covered"}]`, "findings.json": "[]",
-						"REPORT.md": report, "FINDINGS-DETAIL.md": "No findings.\n", "NEEDS-VALIDATION.md": "No validation leads.\n",
-					} {
-						if err := os.WriteFile(filepath.Join(outputDir, name), []byte(content), 0o600); err != nil {
-							return codexcli.Result{}, err
+				Runner: Runner{
+					runModel: func(ctx context.Context, modelRequest modelRun) (aicli.Result, error) {
+						dir, prompt, writable, outputDir := modelRequest.dir, modelRequest.prompt, modelRequest.writable, modelRequest.outputDir
+						calls++
+						if writable || outputDir == "" || strings.HasPrefix(outputDir, dir+string(os.PathSeparator)) || !strings.Contains(prompt, test.head) {
+							return aicli.Result{}, fmt.Errorf("live audit did not use a separate report directory and expected commit")
 						}
-					}
-					return codexcli.Result{Answer: "Untrusted final answer"}, nil
+						assertModelRepository(t, dir, test.head)
+						metadata := fmt.Sprintf(`{"run_id":%q,"repo":%q,"target":%q,"source_ref":%q,"profile":"standard","scope_paths":["."],"budget":null,"selected_companion_files":[],"prior_run_paths":[],"shared_file_owners":%s,"execution_policy":"sandboxed-source-and-local-only","run_status":"complete"}`, job.ID, liveFixRepository, dir, test.head, auditTestOwners)
+						for name, content := range map[string]string{
+							"run-metadata.json": metadata, "architecture.md": "Test fixture architecture.\n",
+							"coverage-ledger.json": `[{"status":"covered"}]`, "findings.json": "[]",
+							"REPORT.md": report, "FINDINGS-DETAIL.md": "No findings.\n", "NEEDS-VALIDATION.md": "No validation leads.\n",
+						} {
+							if err := os.WriteFile(filepath.Join(outputDir, name), []byte(content), 0o600); err != nil {
+								return aicli.Result{}, err
+							}
+						}
+						return aicli.Result{Answer: "Untrusted final answer"}, nil
+					},
 				},
 			}
-			if err := executor.Execute(ctx, job); err != nil {
+			if err := orchestrator.Execute(ctx, job); err != nil {
 				t.Fatal(err)
 			}
 			if calls != 1 {
-				t.Fatalf("audit Codex calls = %d, want 1", calls)
+				t.Fatalf("audit model calls = %d, want 1", calls)
 			}
 			commentID, reply, err := liveActionReply(ctx, fixture.owner, fixture.cfg, job)
 			if err != nil || commentID == 0 || !strings.Contains(reply.Body, test.head) || !strings.Contains(reply.Body, strings.TrimSpace(report)) || strings.Contains(reply.Body, "Untrusted final answer") {
 				t.Fatalf("live audit acknowledgement does not contain the validated report at %s: %v", test.head, err)
 			}
-			if err := executor.Execute(ctx, job); err != nil {
+			if err := orchestrator.Execute(ctx, job); err != nil {
 				t.Fatal(err)
 			}
 			if calls != 1 {
-				t.Fatalf("repeat audit reran Codex: %d calls", calls)
+				t.Fatalf("repeat audit reran the model: %d calls", calls)
 			}
 			if repeatID, _, err := liveActionReply(ctx, fixture.owner, fixture.cfg, job); err != nil || repeatID != commentID {
 				t.Fatalf("repeat audit published another reply: id = %d, want %d: %v", repeatID, commentID, err)
@@ -185,15 +176,6 @@ func liveReviewAuditPull(t *testing.T, ctx context.Context, owner *github.Client
 		t.Fatalf("pull request #%d is not an open owner-authored draft: %v", cfg.PullRequestNumber, err)
 	}
 	return pull
-}
-
-func liveReviewAuditHead(t *testing.T, ctx context.Context, dir string) string {
-	t.Helper()
-	output, err := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "HEAD").Output()
-	if err != nil {
-		t.Fatal(err)
-	}
-	return strings.TrimSpace(string(output))
 }
 
 func liveReviewAuditSubmittedReview(t *testing.T, ctx context.Context, ownerToken string, cfg liveFixConfig, job monitor.Job, head string) github.Review {

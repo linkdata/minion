@@ -19,13 +19,14 @@ type Data struct {
 	Cursor time.Time `json:"cursor"`
 	// RepositoryCursors tracks each repository's durable notification cursor.
 	// Missing entries start at Cursor when that repository is first polled.
-	RepositoryCursors    map[string]time.Time           `json:"repository_cursors,omitempty"`
-	NextPollAt           time.Time                      `json:"next_poll_at,omitempty"`
-	NextInviteCheckAt    time.Time                      `json:"next_invite_check_at,omitempty"`
-	Processed            map[string]time.Time           `json:"processed"`
-	JobFailures          map[string]JobFailure          `json:"job_failures,omitempty"`
-	PendingNotifications map[string]PendingNotification `json:"pending_notifications,omitempty"`
-	PendingFixes         map[string]string              `json:"pending_fixes,omitempty"`
+	RepositoryCursors     map[string]time.Time           `json:"repository_cursors,omitempty"`
+	NextPollAt            time.Time                      `json:"next_poll_at,omitempty"`
+	NextInviteCheckAt     time.Time                      `json:"next_invite_check_at,omitempty"`
+	Processed             map[string]time.Time           `json:"processed"`
+	JobFailures           map[string]JobFailure          `json:"job_failures,omitempty"`
+	UnconfirmedProcessJob string                         `json:"unconfirmed_process_job,omitempty"`
+	PendingNotifications  map[string]PendingNotification `json:"pending_notifications,omitempty"`
+	PendingFixes          map[string]string              `json:"pending_fixes,omitempty"`
 }
 
 // PendingNotification retains a failed thread after its repository cursor advances.
@@ -83,12 +84,7 @@ func Open(path string, initialCursor time.Time) (*Store, error) {
 	}
 	decoder := json.NewDecoder(f)
 	decoder.DisallowUnknownFields()
-	// Release checkpoints are read only to retire them, never to resume writes.
-	var saved struct {
-		Data
-		PendingReleases map[string]json.RawMessage `json:"pending_releases"`
-	}
-	if err = decoder.Decode(&saved); err != nil {
+	if err = decoder.Decode(&store.Data); err != nil {
 		err = fmt.Errorf("decode state: %w", err)
 	}
 	if err == nil {
@@ -101,7 +97,6 @@ func Open(path string, initialCursor time.Time) (*Store, error) {
 	if err != nil {
 		return nil, errors.Join(err, store.Close())
 	}
-	store.Data = saved.Data
 	if store.Data.Cursor.IsZero() {
 		return nil, errors.Join(fmt.Errorf("state cursor is missing"), store.Close())
 	}
@@ -119,18 +114,6 @@ func Open(path string, initialCursor time.Time) (*Store, error) {
 	}
 	if store.Data.PendingFixes == nil {
 		store.Data.PendingFixes = map[string]string{}
-	}
-	if saved.PendingReleases != nil {
-		retiredAt := time.Now().UTC()
-		for id := range saved.PendingReleases {
-			if _, done := store.Data.Processed[id]; !done {
-				store.Data.Processed[id] = retiredAt
-			}
-			delete(store.Data.JobFailures, id)
-		}
-		if err := store.Save(); err != nil {
-			return nil, errors.Join(err, store.Close())
-		}
 	}
 	return store, nil
 }

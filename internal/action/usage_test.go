@@ -13,7 +13,6 @@ import (
 	"testing"
 
 	"github.com/linkdata/minion/internal/aicli"
-	"github.com/linkdata/minion/internal/codexcli"
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/github"
@@ -21,88 +20,62 @@ import (
 	"github.com/linkdata/minion/internal/usage"
 )
 
-func usageJob() monitor.Job {
-	return monitor.Job{
-		ID: strings.Repeat("a", 64), Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2}, SubjectType: "Issue", Number: 7,
-		Source: github.Item{Author: github.User{Login: "writer"}}, Command: command.Command{Action: command.Review},
-	}
-}
-
-func TestUsageAccumulatesPartialResults(t *testing.T) {
+func TestUsageDoesNotCountCanceledDispatch(t *testing.T) {
 	store := &usage.Store{Dir: filepath.Join(t.TempDir(), "usage")}
-	runErr := errors.New("model interrupted")
-	var calls int
-	e := &Executor{
-		Usage: store, Codex: config.CodexConfig{Model: "test-model"},
-		RunCodex: func(context.Context, string, string, bool, string) (codexcli.Result, error) {
-			calls++
-			if calls == 2 {
-				return codexcli.Result{Tokens: usage.Tokens{Input: 10, CachedInput: 8, Output: 2}}, runErr
-			}
-			return codexcli.Result{Answer: "answer", Tokens: usage.Tokens{Input: 100, CachedInput: 80, Output: 20}, UsageComplete: true}, nil
-		},
-	}
-	tracked, finish, err := e.trackUsage(usageJob())
+	tracked := attemptFixture(&Orchestrator{Usage: store})
+	finish, err := tracked.trackUsage(usageJob())
 	if err != nil {
 		t.Fatal(err)
 	}
-	for i := 1; i <= 3; i++ {
-		answer, err := tracked.runAI(context.Background(), "dir", "prompt", false, "")
-		if i == 2 {
-			if !errors.Is(err, runErr) {
-				t.Fatalf("lost model error: %v", err)
-			}
-		} else if err != nil || answer != "answer" {
-			t.Fatalf("answer=%q err=%v", answer, err)
-		}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = tracked.Runner.aroundModel(ctx, modelRun{provider: "codex", role: roleMain}, forbidModel(t))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled dispatch: %v", err)
 	}
-	if err := finish(runErr); !errors.Is(err, runErr) {
-		t.Fatalf("lost action failure: %v", err)
+	if err := finish(err); !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
 	}
 	records, err := usage.ReadAll(store.Dir)
 	if err != nil || len(records) != 1 {
 		t.Fatalf("records=%+v err=%v", records, err)
 	}
-	got := records[0]
-	if got.CodexCalls != 3 || got.Status != "failed" || got.UsageComplete || got.Tokens != (usage.Tokens{Input: 210, CachedInput: 168, Output: 42}) {
-		t.Fatalf("partial usage lost or marked complete: %+v", got)
+	if got := records[0]; got.CodexCalls != 0 || got.ClaudeCalls != 0 || !got.UsageComplete || got.Tokens != (usage.Tokens{}) {
+		t.Fatalf("counted an undispatched call: %+v", got)
 	}
 }
 
 func TestUsageTracksBothModelRoles(t *testing.T) {
-	for _, main := range []string{"codex", "claude"} {
-		t.Run(main, func(t *testing.T) {
+	codex := RoleSettings{Provider: "codex", Model: "codex-model", Effort: "high"}
+	claude := RoleSettings{Provider: "claude", Model: "claude-model", Effort: "medium"}
+	for _, roles := range [][2]RoleSettings{{codex, claude}, {claude, codex}} {
+		main, critic := roles[0], roles[1]
+		t.Run(main.Provider, func(t *testing.T) {
 			store := &usage.Store{Dir: filepath.Join(t.TempDir(), "usage")}
-			critic := "claude"
-			if main == "claude" {
-				critic = "codex"
-			}
 			runErr := context.Canceled
-			runner := func(provider string) func(context.Context, string, string, bool, string) (aicli.Result, error) {
-				return func(context.Context, string, string, bool, string) (aicli.Result, error) {
+			e := &Orchestrator{Usage: store, Main: main.Provider, Adversarial: critic.Provider,
+				CodexModel: "codex-model", CodexEffort: "high", ClaudeModel: "claude-model", ClaudeEffort: "medium",
+				Runner: Runner{runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 					checkpoint, err := usage.ReadAll(store.Dir)
 					if err != nil || len(checkpoint) != 1 || checkpoint[0].UsageComplete {
 						t.Fatalf("call has no durable incomplete checkpoint: %+v, %v", checkpoint, err)
 					}
-					if provider == critic {
+					if request.provider == critic.Provider {
 						return aicli.Result{Tokens: usage.Tokens{Input: 10, CachedInput: 8, Output: 2}}, runErr
 					}
 					return aicli.Result{Answer: "answer", Tokens: usage.Tokens{Input: 100, CachedInput: 80, Output: 20}, UsageComplete: true}, nil
-				}
-			}
-			e := &Executor{
-				Usage: store, Main: main, Adversarial: critic,
-				Codex:    config.CodexConfig{Model: "codex-model", ReasoningEffort: "high"},
-				Claude:   config.ClaudeConfig{Effort: "medium"},
-				RunCodex: runner("codex"), RunClaude: runner("claude"),
-			}
-			tracked, finish, err := e.trackUsage(usageJob())
+				}}}
+			tracked := attemptFixture(e)
+			finish, err := tracked.trackUsage(usageJob())
 			if err != nil {
 				t.Fatal(err)
 			}
-			for _, provider := range []string{main, critic, main} {
-				result, err := tracked.runOnce(context.Background(), modelRun{provider: provider, dir: "dir", prompt: "prompt"})
-				if provider == critic {
+			for _, call := range []struct {
+				role     string
+				settings RoleSettings
+			}{{"main", main}, {"critic", critic}, {"main", main}} {
+				result, err := tracked.Runner.runOnce(context.Background(), modelRun{role: call.role, provider: call.settings.Provider, model: call.settings.Model, effort: call.settings.Effort, dir: "dir", prompt: "prompt"})
+				if call.role == "critic" {
 					if !errors.Is(err, runErr) {
 						t.Fatalf("lost critic error: %v", err)
 					}
@@ -118,42 +91,57 @@ func TestUsageTracksBothModelRoles(t *testing.T) {
 				t.Fatalf("records=%+v err=%v", records, err)
 			}
 			got := records[0]
-			if got.Provider != main || got.CriticProvider != critic || got.Status != "failed" || got.UsageComplete || got.Tokens != (usage.Tokens{Input: 210, CachedInput: 168, Output: 42}) {
+			if got.Provider != main.Provider || got.CriticProvider != critic.Provider || got.Model != main.Model || got.Effort != main.Effort || got.CriticModel != critic.Model || got.CriticEffort != critic.Effort || got.Status != "failed" || got.UsageComplete || got.Tokens != (usage.Tokens{Input: 210, CachedInput: 168, Output: 42}) {
 				t.Fatalf("inaccurate mixed usage: %+v", got)
 			}
-			if main == "codex" {
-				if got.CodexCalls != 2 || got.ClaudeCalls != 1 || got.Model != "codex-model" || got.Effort != "high" || got.CriticModel != "default" || got.CriticEffort != "medium" {
-					t.Fatalf("wrong Codex main metadata or counters: %+v", got)
-				}
-			} else if got.ClaudeCalls != 2 || got.CodexCalls != 1 || got.Model != "default" || got.Effort != "medium" || got.CriticModel != "codex-model" || got.CriticEffort != "high" {
-				t.Fatalf("wrong Claude main metadata or counters: %+v", got)
+			if main.Provider == "codex" && (got.CodexCalls != 2 || got.ClaudeCalls != 1) || main.Provider == "claude" && (got.ClaudeCalls != 2 || got.CodexCalls != 1) {
+				t.Fatalf("wrong provider counts: %+v", got)
 			}
 		})
+	}
+}
+
+func TestUsageDefaultsUnspecifiedModelLabels(t *testing.T) {
+	store := &usage.Store{Dir: filepath.Join(t.TempDir(), "usage")}
+	tracked := attemptFixture(&Orchestrator{Usage: store, Main: "claude", Adversarial: "codex"})
+	finish, err := tracked.trackUsage(usageJob())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := finish(nil); err != nil {
+		t.Fatal(err)
+	}
+	records, err := usage.ReadAll(store.Dir)
+	if err != nil || len(records) != 1 || records[0].Model != "default" || records[0].CriticModel != "default" {
+		t.Fatalf("empty models lost their default usage labels: records=%+v err=%v", records, err)
 	}
 }
 
 func TestUsageAccumulatesCriticRevisions(t *testing.T) {
 	store := &usage.Store{Dir: filepath.Join(t.TempDir(), "usage")}
 	var critiques int
-	e := &Executor{
-		Usage: store, Main: "claude", Adversarial: "codex",
-		RunClaude: func(context.Context, string, string, bool, string) (aicli.Result, error) {
-			return aicli.Result{Answer: proposalJSON("proposal", "Private evidence"), Tokens: usage.Tokens{Input: 100, Output: 20}, UsageComplete: true}, nil
-		},
-		RunCodex: func(context.Context, string, string, bool, string) (codexcli.Result, error) {
-			critiques++
-			answer := `{"approved":true,"feedback":""}`
-			if critiques == 1 {
-				answer = `{"approved":false,"feedback":"Check the error path."}`
+	e := &Orchestrator{
+		Usage:       store,
+		Main:        "claude",
+		Adversarial: "codex",
+		Runner: Runner{runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+			if request.provider == "claude" {
+				return aicli.Result{Answer: proposalJSON("proposal", "Private evidence"), Tokens: usage.Tokens{Input: 100, Output: 20}, UsageComplete: true}, nil
 			}
-			return codexcli.Result{Answer: answer, Tokens: usage.Tokens{Input: 10, Output: 2}, UsageComplete: true}, nil
-		},
+			critiques++
+			answer := approvedCritiqueJSON
+			if critiques == 1 {
+				answer = `{"approved":false,"has_blockers":true,"feedback":"Check the error path."}`
+			}
+			return aicli.Result{Answer: answer, Tokens: usage.Tokens{Input: 10, Output: 2}, UsageComplete: true}, nil
+		}},
 	}
-	tracked, finish, err := e.trackUsage(usageJob())
+	tracked := attemptFixture(e)
+	finish, err := tracked.trackUsage(usageJob())
 	if err != nil {
 		t.Fatal(err)
 	}
-	answer, err := tracked.runAI(context.Background(), "dir", "prompt", false, "")
+	answer, err := tracked.Runner.runAI(context.Background(), Job{Main: RoleSettings{Provider: "claude"}, Critic: &RoleSettings{Provider: "codex"}, CriticMaxRounds: config.DefaultCriticMaxRounds}, "dir", "prompt", "", nil, &modelSessions{})
 	if err != nil || answer != "proposal" {
 		t.Fatalf("answer=%q err=%v", answer, err)
 	}
@@ -165,67 +153,103 @@ func TestUsageAccumulatesCriticRevisions(t *testing.T) {
 		t.Fatalf("records=%+v err=%v", records, err)
 	}
 	got := records[0]
-	if got.CodexCalls != 2 || got.ClaudeCalls != 2 || got.Status != "succeeded" || !got.UsageComplete || got.Tokens != (usage.Tokens{Input: 220, Output: 44}) {
+	if got.CodexCalls != 3 || got.ClaudeCalls != 2 || got.Status != "succeeded" || !got.UsageComplete || got.Tokens != (usage.Tokens{Input: 230, Output: 46}) {
 		t.Fatalf("revision usage not accumulated: %+v", got)
 	}
 }
 
 func TestUsagePersistenceFailureStopsModelsOrPublication(t *testing.T) {
-	for _, provider := range []string{"codex", "claude"} {
-		t.Run(provider, func(t *testing.T) {
-			for _, stage := range []string{"before call", "after call"} {
-				t.Run(stage, func(t *testing.T) {
-					root := t.TempDir()
-					originalDir := filepath.Join(root, "usage")
-					blocked := filepath.Join(root, "blocked")
-					if err := os.WriteFile(blocked, []byte("not a directory"), 0600); err != nil {
-						t.Fatal(err)
-					}
-					store := &usage.Store{Dir: originalDir}
-					modelErr := errors.New("model error")
-					var calls int
-					run := func(context.Context, string, string, bool, string) (aicli.Result, error) {
-						calls++
-						store.Dir = blocked
-						return aicli.Result{Tokens: usage.Tokens{Input: 10, Output: 2}}, modelErr
-					}
-					e := &Executor{
-						Usage: store, Main: provider, Codex: config.CodexConfig{Model: "test-model"}, RunCodex: run, RunClaude: run,
-					}
-					tracked, finish, err := e.trackUsage(usageJob())
-					if err != nil {
-						t.Fatal(err)
-					}
-					if stage == "before call" {
-						store.Dir = blocked
-					}
-					_, err = tracked.runAI(context.Background(), "dir", "prompt", false, "")
-					if err == nil || !strings.Contains(err.Error(), "save action usage") {
-						t.Fatalf("storage failure not returned: %v", err)
-					}
-					if stage == "before call" && calls != 0 {
-						t.Fatal("model ran without durable checkpoint")
-					}
-					if stage == "after call" && (calls != 1 || !errors.Is(err, modelErr)) {
-						t.Fatalf("model failure missing: calls=%d error=%v", calls, err)
-					}
-					if finalErr := finish(err); finalErr == nil || !strings.Contains(finalErr.Error(), "save action usage") {
-						t.Fatalf("final save failure missing: %v", finalErr)
-					}
-					records, readErr := usage.ReadAll(originalDir)
-					if readErr != nil || len(records) != 1 || records[0].Status != "running" {
-						t.Fatalf("last durable checkpoint missing: records=%+v err=%v", records, readErr)
-					}
-					if stage == "after call" && records[0].UsageComplete {
-						t.Fatal("interrupted usage claimed complete")
-					}
-				})
+	modelErr := errors.New("model error")
+	for _, tt := range []struct {
+		name     string
+		provider string
+		before   bool
+		modelErr error
+		critic   bool
+	}{
+		{"codex main/before call", "codex", true, modelErr, false}, {"claude main/before call", "claude", true, modelErr, false},
+		{"codex main/after failed call", "codex", false, modelErr, false}, {"claude main/after failed call", "claude", false, modelErr, false},
+		{"codex main/after successful call", "codex", false, nil, false}, {"claude main/after successful call", "claude", false, nil, false},
+		{"codex main/after critic call", "codex", false, nil, true}, {"claude main/after critic call", "claude", false, nil, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			originalDir, blocked := filepath.Join(root, "usage"), filepath.Join(root, "blocked")
+			if err := os.WriteFile(blocked, []byte("not a directory"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			store := &usage.Store{Dir: originalDir}
+			calls := 0
+			tracked := attemptFixture(&Orchestrator{Usage: store, Main: tt.provider, Runner: Runner{runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+				calls++
+				if tt.critic && request.role == roleMain {
+					return aicli.Result{Answer: proposalJSON("Candidate answer", ""), Tokens: usage.Tokens{Input: 10, Output: 2}, UsageComplete: true}, nil
+				}
+				store.Dir = blocked
+				if tt.critic {
+					return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"feedback":"Blocking failure."}`, Tokens: usage.Tokens{Input: 11, Output: 3}, UsageComplete: true}, nil
+				}
+				return aicli.Result{Answer: "completed paid work", Tokens: usage.Tokens{Input: 10, Output: 2}, UsageComplete: tt.modelErr == nil}, tt.modelErr
+			}}})
+			finish, err := tracked.trackUsage(usageJob())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tt.before {
+				store.Dir = blocked
+			}
+			job := testJob(command.Comment)
+			job.Main.Provider = tt.provider
+			if tt.critic {
+				job = withClaudeCritic(job)
+				if tt.provider == "claude" {
+					job.Critic.Provider = "codex"
+				}
+			}
+			tracked.Runner.WorkRoot = t.TempDir()
+			result, err := tracked.Runner.Run(context.Background(), job)
+			answer := result.Answer
+			wantCalls := 1
+			if tt.before {
+				wantCalls = 0
+			} else if tt.critic {
+				wantCalls = 2
+			}
+			if err == nil || !strings.Contains(err.Error(), "save action usage") || errors.Is(err, monitor.ErrTerminalJob) == tt.before || calls != wantCalls || len(result.Calls) != wantCalls || answer != "" || (!tt.before && tt.modelErr != nil && !errors.Is(err, tt.modelErr)) {
+				t.Fatalf("storage failure: calls=%d answer=%q error=%v", calls, answer, err)
+			}
+			if tt.critic {
+				last := result.Calls[1]
+				if !last.HasBlockers || last.Approved || last.NoBlockers || last.Tokens != (usage.Tokens{Input: 11, Output: 3}) || !last.Complete || result.validate(job, false) != nil {
+					t.Fatalf("post-native save failure lost parsed critic evidence: %+v", result)
+				}
+			}
+			if tt.before {
+				store.Dir = originalDir
+				if finalErr := finish(err); finalErr != err {
+					t.Fatalf("final save changed the original action error: %v", finalErr)
+				}
+				records, readErr := usage.ReadAll(originalDir)
+				if readErr != nil || len(records) != 1 || records[0].Status != "failed" || records[0].FinishedAt == nil || records[0].CodexCalls != 0 || records[0].ClaudeCalls != 0 || !records[0].UsageComplete || records[0].Tokens != (usage.Tokens{}) {
+					t.Fatalf("undispatched reservation was not rolled back: records=%+v error=%v", records, readErr)
+				}
+				return
+			}
+			if finalErr := finish(err); finalErr == nil || !strings.Contains(finalErr.Error(), "save action usage") {
+				t.Fatalf("final save failure missing: %v", finalErr)
+			}
+			records, readErr := usage.ReadAll(originalDir)
+			if readErr != nil || len(records) != 1 || records[0].Status != "running" || (!tt.before && records[0].UsageComplete) {
+				t.Fatalf("last durable checkpoint lost: records=%+v error=%v", records, readErr)
+			}
+			if tt.critic && (records[0].CodexCalls != 1 || records[0].ClaudeCalls != 1 || records[0].Tokens != (usage.Tokens{Input: 10, Output: 2})) {
+				t.Fatalf("last pre-critic usage checkpoint changed: %+v", records[0])
 			}
 		})
 	}
 }
 
-func TestExecuteRecordsNoCodexAndSkipsAcknowledged(t *testing.T) {
+func TestExecuteRecordsNoModelAndSkipsAcknowledged(t *testing.T) {
 	for _, failInitialSave := range []bool{false, true} {
 		t.Run(fmt.Sprintf("fail initial save %t", failInitialSave), func(t *testing.T) {
 			job := usageJob()
@@ -247,7 +271,9 @@ func TestExecuteRecordsNoCodexAndSkipsAcknowledged(t *testing.T) {
 					}
 				case r.Method == http.MethodPost && r.URL.Path == "/graphql":
 					if len(comments) != 1 {
-						t.Fatalf("provenance requested before completion reply: %+v", comments)
+						t.Errorf("provenance requested before completion reply: %+v", comments)
+						http.Error(w, "early provenance", http.StatusInternalServerError)
+						return
 					}
 					_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"node": map[string]any{"body": comments[0].Body, "author": map[string]string{"login": "bot"}}}})
 				case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/issues/7/comments":
@@ -266,25 +292,26 @@ func TestExecuteRecordsNoCodexAndSkipsAcknowledged(t *testing.T) {
 				}
 			}))
 			defer server.Close()
-			client := github.New("test-token")
-			client.BaseURL, client.HTTPClient = server.URL, server.Client()
+			client := testGitHub(server, "test-token")
 			dir := filepath.Join(t.TempDir(), "usage")
 			if failInitialSave {
 				if err := os.WriteFile(dir, []byte("not a directory"), 0600); err != nil {
 					t.Fatal(err)
 				}
 			}
-			e := &Executor{
-				GitHub: client, BotLogin: "bot", Usage: &usage.Store{Dir: dir}, Codex: config.CodexConfig{Model: "test-model"},
-				Commands: map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{testReviewSkillURL}}},
-				RunCodex: func(context.Context, string, string, bool, string) (codexcli.Result, error) {
-					t.Fatal("review on an issue must not invoke Codex")
-					return codexcli.Result{}, nil
+			e := &Orchestrator{
+				GitHub:     client,
+				BotLogin:   "bot",
+				Usage:      &usage.Store{Dir: dir},
+				Commands:   map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{testReviewSkillURL}}},
+				CodexModel: "test-model",
+				Runner: Runner{
+					runModel: forbidModel(t),
 				},
 			}
 			err := e.Execute(context.Background(), job)
 			if failInitialSave {
-				if err == nil || !strings.Contains(err.Error(), "save action usage") || len(comments) != 0 {
+				if err == nil || errors.Is(err, monitor.ErrTerminalJob) || errors.Is(err, monitor.ErrPostModelPublication) || !strings.Contains(err.Error(), "save action usage") || len(comments) != 0 {
 					t.Fatalf("action ran without initial usage record: err=%v comments=%+v", err, comments)
 				}
 				return
@@ -304,5 +331,58 @@ func TestExecuteRecordsNoCodexAndSkipsAcknowledged(t *testing.T) {
 				t.Fatalf("incorrect no-Codex record: %+v", record)
 			}
 		})
+	}
+}
+
+func TestUsagePreservesWorkerModelSkillsAndContext(t *testing.T) {
+	t.Setenv("CODEX_HOME", t.TempDir())
+	installActionTestSkills(t, testReviewSkillURL)
+	root := t.TempDir()
+	argsPath, promptPath := filepath.Join(root, "args"), filepath.Join(root, "prompt")
+	script := fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$@" > %q
+cat > %q
+printf '%%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.completed","item":{"type":"agent_message","text":"No findings."}}' '{"type":"turn.completed","usage":{"input_tokens":3,"cached_input_tokens":1,"output_tokens":2}}'
+`, argsPath, promptPath)
+	fakeOnPath(t, "codex", script)
+	store := &usage.Store{Dir: filepath.Join(root, "usage")}
+	work := t.TempDir()
+	orchestrator := &Orchestrator{WorkRoot: work, Usage: store,
+		CodexModel: "portable-model", CodexEffort: "high",
+		Runner: Runner{
+			WorkRoot: work,
+			Codex:    config.CodexConfig{Model: "stale-host-model", ReasoningEffort: "low"},
+		},
+	}
+	tracked := attemptFixture(orchestrator)
+	finish, err := tracked.trackUsage(usageJob())
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := testJob(command.Comment)
+	job.Main.Model, job.Main.Effort = "portable-model", "high"
+	job.Main.Skills = []string{testReviewSkillURL}
+	result, err := tracked.Runner.Run(context.Background(), job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := finish(nil); err != nil {
+		t.Fatal(err)
+	}
+	args, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt, err := os.ReadFile(promptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	installed := filepath.Join(os.Getenv("HOME"), ".agents", "skills", "ponytail-review", "SKILL.md")
+	if !strings.Contains(string(args), ".minion-context-") || !strings.Contains(string(prompt), installed) || !strings.Contains(string(args), "--model\nportable-model\n") || !strings.Contains(string(args), `model_reasoning_effort="high"`) || strings.Contains(string(args), "stale-host-model") {
+		t.Fatalf("usage wrapper lost worker context or skills: args=%s prompt=%s", args, prompt)
+	}
+	records, err := usage.ReadAll(store.Dir)
+	if err != nil || len(records) != 1 || records[0].Model != "portable-model" || records[0].CodexCalls != 1 || records[0].Tokens.Total() != 5 || len(result.Calls) != 1 {
+		t.Fatalf("usage counted dispatch incorrectly: records=%+v calls=%+v err=%v", records, result.Calls, err)
 	}
 }

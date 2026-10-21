@@ -25,7 +25,7 @@ func saveReportFixture(t *testing.T, dir string) {
 			t.Fatal(err)
 		}
 		finish := start.Add(time.Minute)
-		record := usage.Record{ID: fmt.Sprintf("%032x", i+1), JobID: fmt.Sprintf("job-%d", i), Repo: "example-owner/example-repo", User: "alice", Action: actions[i], Number: 1, Model: "test-model", Effort: "high", StartedAt: start, FinishedAt: &finish, Status: statuses[i], CodexCalls: 1, UsageComplete: true}
+		record := usage.Record{ID: fmt.Sprintf("%032x", i+1), JobID: fmt.Sprintf("job-%d", i), Repo: "example-owner/example-repo", User: "alice", Action: actions[i], Number: 1, Provider: "codex", Model: "test-model", Effort: "high", StartedAt: start, FinishedAt: &finish, Status: statuses[i], CodexCalls: 1, UsageComplete: true}
 		switch i {
 		case 0:
 			record.Tokens = usage.Tokens{Input: 100, CachedInput: 40, Output: 20}

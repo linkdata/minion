@@ -14,8 +14,8 @@ const DefaultMaxBytes int64 = 8 << 30
 
 const minFreeBytes int64 = 64 << 20
 
-// ErrUnsafe indicates that the work filesystem fails a safety check.
-var ErrUnsafe = errors.New("work_root is not a bounded, separate filesystem")
+// ErrUnsafe indicates that the work root cannot safely accept or continue job work.
+var ErrUnsafe = errors.New("unsafe or unavailable work root")
 
 // Check verifies that workRoot is bounded and separate from statePath.
 //

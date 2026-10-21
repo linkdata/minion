@@ -7,20 +7,21 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/config"
+	"github.com/linkdata/minion/internal/processgroup"
 )
 
 // Validate checks Claude's prerequisites and resolves model settings.
 //
-// It requires Linux, Claude Code 2.1.295 or later, authenticated CLI state,
+// It requires Linux, Claude Code 2.1.302 or later, authenticated CLI state,
 // bubblewrap, and socat. Model discovery uses the CLI's initialization protocol
 // without an inference turn. These checks do not execute a sandboxed command;
 // deployments must validate runtime isolation.
@@ -39,43 +40,56 @@ func Validate(ctx context.Context, settings config.ClaudeConfig) (validated conf
 	if err != nil {
 		return validated, err
 	}
-	defer func() { resultErr = errors.Join(resultErr, os.RemoveAll(dir)) }()
+	defer func() {
+		if !errors.Is(resultErr, processgroup.ErrUnconfirmed) {
+			resultErr = errors.Join(resultErr, os.RemoveAll(dir))
+		}
+	}()
 	authDir, err := authentication(filepath.Dir(dir), settings.APIKey)
-	if err != nil {
-		return validated, err
-	}
 	if authDir != "" {
-		defer func() { resultErr = errors.Join(resultErr, os.RemoveAll(authDir)) }()
+		defer func() {
+			if !errors.Is(resultErr, processgroup.ErrUnconfirmed) {
+				resultErr = errors.Join(resultErr, os.RemoveAll(authDir))
+			}
+		}()
 	}
-	binary, err := executable("claude", "")
 	if err != nil {
 		return validated, err
 	}
-	env, err := childEnvironment(os.Environ(), dir, dir, authDir)
+	binary, err := aicli.ExecutablePath("claude")
 	if err != nil {
 		return validated, err
 	}
-	version, err := probe(ctx, binary, []string{"--version"}, dir, env, "")
+	configDir, _, err := configDirectory(authDir)
+	if err != nil {
+		return validated, err
+	}
+	env, err := childEnvironment(os.Environ(), dir, dir, authDir, configDir)
+	if err != nil {
+		return validated, err
+	}
+	version, err := aicli.Probe(ctx, binary, "", []string{"--version"}, dir, env, "", settings.APIKey)
 	if err != nil {
 		return validated, err
 	}
 	if !supportedVersion(string(version)) {
-		return validated, errors.New("claude isolation requires Claude Code 2.1.295 or later")
+		return validated, errors.New("claude isolation requires Claude Code 2.1.302 or later")
 	}
 	for _, name := range []string{"bwrap", "socat"} {
-		if _, err := executable(name, ""); err != nil {
+		if _, err := aicli.ExecutablePath(name); err != nil {
 			return validated, fmt.Errorf("claude sandbox dependency %s: %w", name, err)
 		}
 	}
+	settings.ReadOnlyDirs = nil
 	policy, err := sandboxSettings(dir, dir, false, "", settings, nil, authDir)
 	if err != nil {
 		return validated, err
 	}
-	authArgs := []string{"--safe-mode", "--setting-sources", ""}
+	authArgs := []string{"--safe-mode", "--setting-sources="}
 	if authDir != "" {
 		authArgs = append(authArgs, "--settings", policy)
 	}
-	auth, err := probe(ctx, binary, append(authArgs, "auth", "status", "--json"), dir, env, "")
+	auth, err := aicli.Probe(ctx, binary, "", append(authArgs, "auth", "status", "--json"), dir, env, "", settings.APIKey)
 	if err != nil {
 		return validated, fmt.Errorf("claude authentication: %w", err)
 	}
@@ -85,8 +99,8 @@ func Validate(ctx context.Context, settings config.ClaudeConfig) (validated conf
 	if json.Unmarshal(auth, &status) != nil || !status.LoggedIn {
 		return validated, errors.New("claude is not authenticated; configure claude.api_key or run claude auth login")
 	}
-	args := append(arguments(policy), "--input-format", "stream-json")
-	data, err := probe(ctx, binary, args, dir, env, "{\"type\":\"control_request\",\"request_id\":\"minion-initialize\",\"request\":{\"subtype\":\"initialize\"}}\n")
+	args := append(arguments(policy), "--no-session-persistence", "--input-format", "stream-json")
+	data, err := aicli.Probe(ctx, binary, "", args, dir, env, "{\"type\":\"control_request\",\"request_id\":\"minion-initialize\",\"request\":{\"subtype\":\"initialize\"}}\n", settings.APIKey)
 	if err != nil {
 		return validated, fmt.Errorf("claude model discovery: %w", err)
 	}
@@ -106,13 +120,8 @@ func Validate(ctx context.Context, settings config.ClaudeConfig) (validated conf
 			return validated, errors.New("claude model catalogue omitted the resolved model")
 		}
 		validated.Model = model.ResolvedModel
-		if validated.Effort == "" {
+		if validated.Effort == "" || slices.Contains(model.Efforts, validated.Effort) {
 			return validated, nil
-		}
-		for _, effort := range model.Efforts {
-			if validated.Effort == effort {
-				return validated, nil
-			}
 		}
 		return validated, fmt.Errorf("claude effort %q is unsupported for model %q", validated.Effort, validated.Model)
 	}
@@ -162,7 +171,6 @@ func supportedVersion(version string) bool {
 	if len(parts) != 3 {
 		return false
 	}
-	minimum := []int{2, 1, 295}
 	numbers := make([]int, len(parts))
 	for i, part := range parts {
 		n, err := strconv.Atoi(part)
@@ -171,43 +179,5 @@ func supportedVersion(version string) bool {
 		}
 		numbers[i] = n
 	}
-	for i, n := range numbers {
-		if n != minimum[i] {
-			return n > minimum[i]
-		}
-	}
-	return true
-}
-
-type probeOutput struct {
-	data   bytes.Buffer
-	cancel context.CancelFunc
-}
-
-func (b *probeOutput) Write(p []byte) (int, error) {
-	if len(p) > maxEventBytes-b.data.Len() {
-		b.cancel()
-		return 0, aicli.ErrOutputLimit
-	}
-	return b.data.Write(p)
-}
-
-func probe(ctx context.Context, binary string, args []string, dir string, env []string, input string) ([]byte, error) {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	// #nosec G204 -- Callers pass trusted installed executables and fixed argument shapes without a shell.
-	cmd := exec.CommandContext(ctx, binary, args...)
-	cmd.Dir, cmd.Env, cmd.Stdin = dir, env, strings.NewReader(input)
-	cmd.WaitDelay = 2 * time.Second
-	configureCancellation(cmd)
-	output := probeOutput{cancel: cancel}
-	var diagnostics tailBuffer
-	cmd.Stdout, cmd.Stderr = &output, &diagnostics
-	if err := cmd.Run(); err != nil {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		return nil, fmt.Errorf("%w: %s", err, strings.TrimSpace(diagnostics.String()))
-	}
-	return output.data.Bytes(), nil
+	return slices.Compare(numbers, []int{2, 1, 302}) >= 0
 }

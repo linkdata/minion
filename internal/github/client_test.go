@@ -21,30 +21,6 @@ func testClient(server *httptest.Server) *Client {
 	return c
 }
 
-func TestGitTreeUsesExactSHAAndBoundsResponse(t *testing.T) {
-	sha := strings.Repeat("a", 40)
-	response := fmt.Sprintf(`{"sha":%q,"truncated":false,"tree":[{"path":"file","type":"blob","mode":"100644","size":23}]}`, sha)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || r.URL.Path != "/repos/o/r/git/trees/"+sha || r.URL.Query().Get("recursive") != "1" {
-			t.Errorf("unexpected tree request: %s %s", r.Method, r.URL.String())
-		}
-		_, _ = fmt.Fprint(w, response)
-	}))
-	defer server.Close()
-	client := testClient(server)
-	tree, err := client.GitTree(context.Background(), "o/r", sha)
-	if err != nil || tree.SHA != sha || len(tree.Tree) != 1 || tree.Tree[0].Mode != "100644" || tree.Tree[0].Size == nil || *tree.Tree[0].Size != 23 {
-		t.Fatalf("GitTree() = (%+v, %v)", tree, err)
-	}
-	if _, err := client.GitTree(context.Background(), "o/r", strings.Repeat("/", 40)); err == nil {
-		t.Fatal("invalid tree SHA accepted")
-	}
-	response = fmt.Sprintf(`{"sha":%q,"truncated":false,"tree":[]}`, sha) + strings.Repeat(" ", maxTreeResponseBytes)
-	if _, err := client.GitTree(context.Background(), "o/r", sha); err == nil || !strings.Contains(err.Error(), "exceeds") {
-		t.Fatalf("oversized tree response error = %v", err)
-	}
-}
-
 func TestReactEyesUsesExactNodeAndChecksGraphQLErrors(t *testing.T) {
 	var calls int
 	response := `{"data":{"addReaction":{"subject":{"reactions":{"viewerHasReacted":true}}}}}`

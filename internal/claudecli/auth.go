@@ -4,7 +4,9 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
+
+	"github.com/linkdata/minion/internal/aicli"
+	"github.com/linkdata/minion/internal/workspace"
 )
 
 // authentication keeps the key outside every tool-readable directory. A fresh
@@ -14,26 +16,22 @@ func authentication(parent, key string) (dir string, err error) {
 		return
 	}
 	// Sandbox grant checks compare canonical absolute paths.
-	if parent, err = filepath.EvalSymlinks(parent); err != nil {
-		return
-	}
-	if parent, err = filepath.Abs(parent); err != nil {
+	if parent, err = workspace.CanonicalPath(parent); err != nil {
 		return
 	}
 	if dir, err = os.MkdirTemp(parent, ".minion-claude-auth-"); err == nil {
 		if err = os.WriteFile(filepath.Join(dir, "api-key"), []byte(key), 0o600); err == nil {
 			return
 		}
-		err = errors.Join(err, os.RemoveAll(dir))
-		dir = ""
+		removeErr := os.RemoveAll(dir)
+		err = errors.Join(err, removeErr)
+		if removeErr == nil {
+			dir = ""
+		}
 	}
 	return
 }
 
 func apiKeyHelper(dir string) string {
-	return "/bin/cat -- " + shellQuote(filepath.Join(dir, "api-key"))
-}
-
-func shellQuote(value string) string {
-	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+	return "/bin/cat -- " + aicli.ShellQuote(filepath.Join(dir, "api-key"))
 }

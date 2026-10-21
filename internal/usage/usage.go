@@ -5,12 +5,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/linkdata/minion/internal/workspace"
 )
 
 type Tokens struct {
@@ -19,19 +23,39 @@ type Tokens struct {
 	Output      int64 `json:"output_tokens"`
 }
 
+// Valid checks nonnegative counters, cached-input inclusion and total overflow.
+func (t Tokens) Valid() bool {
+	return t.Input >= 0 && t.CachedInput >= 0 && t.CachedInput <= t.Input && t.Output >= 0 && t.Output <= math.MaxInt64-t.Input
+}
+
 // Cached input is a subset of input tokens.
 func (t Tokens) Total() int64 { return t.Input + t.Output }
 
-func (t *Tokens) Add(other Tokens) {
+// AddChecked sums normalized counters, retaining the receiver on overflow.
+func (t Tokens) AddChecked(other Tokens) (Tokens, bool) {
+	if !t.Valid() || !other.Valid() || other.Total() > math.MaxInt64-t.Total() {
+		return t, false
+	}
 	t.Input += other.Input
 	t.CachedInput += other.CachedInput
 	t.Output += other.Output
+	return t, true
+}
+
+// Sub returns raw component differences; callers validate the resulting delta.
+func (t Tokens) Sub(other Tokens) Tokens {
+	return Tokens{Input: t.Input - other.Input, CachedInput: t.CachedInput - other.CachedInput, Output: t.Output - other.Output}
+}
+
+// Max returns component maxima; callers validate that the combined total fits.
+func (t Tokens) Max(other Tokens) Tokens {
+	return Tokens{Input: max(t.Input, other.Input), CachedInput: max(t.CachedInput, other.CachedInput), Output: max(t.Output, other.Output)}
 }
 
 // Record contains the usage reported by all model calls in one action attempt.
 //
-// Model and Effort describe the main model. An empty Provider denotes Codex;
-// the model name "default" denotes the provider CLI's selected default.
+// Model and Effort describe the main model. The model name "default" denotes
+// the provider CLI's selected default.
 type Record struct {
 	ID             string     `json:"id"`
 	JobID          string     `json:"job_id"`
@@ -40,7 +64,7 @@ type Record struct {
 	Action         string     `json:"action"`
 	Number         int        `json:"number"`
 	SourceURL      string     `json:"source_url,omitempty"`
-	Provider       string     `json:"provider,omitempty"`
+	Provider       string     `json:"provider"`
 	Model          string     `json:"model"`
 	Effort         string     `json:"reasoning_effort,omitempty"`
 	CriticProvider string     `json:"critic_provider,omitempty"`
@@ -64,10 +88,11 @@ func (r Record) validate() error {
 	if r.JobID == "" || r.Repo == "" || r.User == "" || r.Action == "" || r.Model == "" || r.StartedAt.IsZero() {
 		return fmt.Errorf("usage record %s is missing required metadata", r.ID)
 	}
-	for _, provider := range []string{r.Provider, r.CriticProvider} {
-		if provider != "" && provider != "codex" && provider != "claude" {
-			return fmt.Errorf("usage record %s has invalid provider %q", r.ID, provider)
-		}
+	if r.Provider != "codex" && r.Provider != "claude" {
+		return fmt.Errorf("usage record %s has invalid provider %q", r.ID, r.Provider)
+	}
+	if r.CriticProvider != "" && r.CriticProvider != "codex" && r.CriticProvider != "claude" {
+		return fmt.Errorf("usage record %s has invalid critic provider %q", r.ID, r.CriticProvider)
 	}
 	switch r.Status {
 	case "running":
@@ -81,7 +106,7 @@ func (r Record) validate() error {
 	default:
 		return fmt.Errorf("usage record %s has invalid status %q", r.ID, r.Status)
 	}
-	if r.CodexCalls < 0 || r.ClaudeCalls < 0 || r.Tokens.Input < 0 || r.Tokens.CachedInput < 0 || r.Tokens.Output < 0 || r.Tokens.CachedInput > r.Tokens.Input {
+	if r.CodexCalls < 0 || r.ClaudeCalls < 0 || !r.Tokens.Valid() {
 		return fmt.Errorf("usage record %s has invalid counts", r.ID)
 	}
 	return nil
@@ -89,43 +114,22 @@ func (r Record) validate() error {
 
 type Store struct{ Dir string }
 
-// Save atomically replaces one attempt and syncs its directory.
+// Save atomically replaces one attempt and syncs its directory and parent.
 //
 // The caller serializes updates to an ID. An error after replacement can leave
 // the new attempt in place.
-func (s Store) Save(record Record) (err error) {
+func (s Store) Save(record Record) error {
 	if err := record.validate(); err != nil {
+		return err
+	}
+	data, err := json.Marshal(record)
+	if err != nil {
 		return err
 	}
 	if err := os.MkdirAll(s.Dir, 0700); err != nil {
 		return err
 	}
-	f, err := os.CreateTemp(s.Dir, ".usage-*")
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if removeErr := os.Remove(f.Name()); !errors.Is(removeErr, os.ErrNotExist) {
-			err = errors.Join(err, removeErr)
-		}
-	}()
-	err = json.NewEncoder(f).Encode(record)
-	if err == nil {
-		err = f.Sync()
-	}
-	err = errors.Join(err, f.Close())
-	if err != nil {
-		return
-	}
-	if err := os.Rename(f.Name(), filepath.Join(s.Dir, record.ID+".json")); err != nil {
-		return err
-	}
-	dir, err := os.Open(s.Dir)
-	if err != nil {
-		return err
-	}
-	err = errors.Join(dir.Sync(), dir.Close())
-	return
+	return workspace.WriteAtomic(filepath.Join(s.Dir, record.ID+".json"), append(data, '\n'), filepath.Dir(s.Dir))
 }
 
 // ReadAll reads complete usage records from dir.
@@ -212,29 +216,27 @@ type Summary struct {
 	TotalTokens     int64  `json:"total_tokens"`
 }
 
+// Summarize aggregates matching records and rejects invalid matches, filters, groups
+// and unrepresentable aggregate counts.
 func Summarize(records []Record, filter Filter, groupBy []string) ([]Summary, error) {
 	if !filter.Since.IsZero() && !filter.Until.IsZero() && !filter.Since.Before(filter.Until) {
 		return nil, fmt.Errorf("since must precede until")
 	}
 	indices := make([]int, 0, len(groupBy))
-	used := map[string]bool{}
 	for _, group := range groupBy {
-		index := -1
-		for i, name := range []string{"repo", "user", "action", "day", "month"} {
-			if group == name {
-				index = i
-			}
-		}
-		if index < 0 || used[group] {
+		index := slices.Index([]string{"repo", "user", "action", "day", "month"}, group)
+		if index < 0 || slices.Contains(indices, index) {
 			return nil, fmt.Errorf("invalid or duplicate usage group %q", group)
 		}
-		used[group] = true
 		indices = append(indices, index)
 	}
 	groups := map[[5]string]*Summary{}
 	for _, record := range records {
 		if !filter.Match(record) {
 			continue
+		}
+		if err := record.validate(); err != nil {
+			return nil, err
 		}
 		values := [5]string{strings.ToLower(record.Repo), strings.ToLower(record.User), record.Action, record.StartedAt.UTC().Format("2006-01-02"), record.StartedAt.UTC().Format("2006-01")}
 		var key [5]string
@@ -254,16 +256,21 @@ func Summarize(records []Record, filter Filter, groupBy []string) ([]Summary, er
 			summary.Failed++
 		case "running":
 			summary.Running++
-		default:
-			return nil, fmt.Errorf("usage record %s has invalid status %q", record.ID, record.Status)
+		}
+		if record.CodexCalls > math.MaxInt-summary.CodexCalls || record.ClaudeCalls > math.MaxInt-summary.ClaudeCalls {
+			return nil, errors.New("usage call counts exceed integer limit")
 		}
 		summary.CodexCalls += record.CodexCalls
 		summary.ClaudeCalls += record.ClaudeCalls
 		if !record.UsageComplete || record.Status == "running" {
 			summary.IncompleteUsage++
 		}
-		summary.Tokens.Add(record.Tokens)
-		summary.TotalTokens = summary.Tokens.Total()
+		tokens, valid := summary.Tokens.AddChecked(record.Tokens)
+		if !valid {
+			return nil, errors.New("usage token counts are invalid or exceed integer limit")
+		}
+		summary.Tokens = tokens
+		summary.TotalTokens = tokens.Total()
 	}
 	keys := make([][5]string, 0, len(groups))
 	for key := range groups {

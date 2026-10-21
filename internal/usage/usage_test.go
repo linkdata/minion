@@ -3,6 +3,7 @@ package usage
 import (
 	"encoding/json"
 	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -16,7 +17,7 @@ func testRecord() Record {
 	finished := started.Add(time.Minute)
 	return Record{
 		ID: "0123456789abcdef0123456789abcdef", JobID: "github:123", Repo: "linkdata/minion", User: "example",
-		Action: "review", Number: 1, Model: "example-model", StartedAt: started, FinishedAt: &finished,
+		Action: "review", Number: 1, Provider: "codex", Model: "example-model", StartedAt: started, FinishedAt: &finished,
 		Status: "succeeded", CodexCalls: 1, Tokens: Tokens{Input: 100, CachedInput: 80, Output: 20}, UsageComplete: true,
 	}
 }
@@ -34,7 +35,7 @@ func TestStoreAtomicUpdates(t *testing.T) {
 	if err != nil || info.Mode().Perm() != 0600 {
 		t.Fatalf("record permissions: info=%v err=%v", info, err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, ".usage-interrupted"), []byte("partial"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, ".record-interrupted"), []byte("partial"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	done := make(chan error, 1)
@@ -79,29 +80,34 @@ func TestReadAllMissingDirectory(t *testing.T) {
 	}
 }
 
-func TestSaveFailureCleansTemporaryFile(t *testing.T) {
-	for _, failure := range []string{"encoding", "rename"} {
+func TestSaveEncodeAndRenameFailuresKeepDirectoryClean(t *testing.T) {
+	for _, failure := range []string{"no write on encode error", "rename"} {
 		t.Run(failure, func(t *testing.T) {
 			dir := t.TempDir()
 			record := testRecord()
-			wantFiles := 0
-			if failure == "encoding" {
+			if failure == "no write on encode error" {
+				dir = filepath.Join(dir, "not-created")
 				record.StartedAt = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
 				record.Status, record.FinishedAt = "running", nil
 			} else {
 				if err := os.Mkdir(filepath.Join(dir, record.ID+".json"), 0700); err != nil {
 					t.Fatal(err)
 				}
-				wantFiles = 1
 			}
 			err := (Store{Dir: dir}).Save(record)
 			var marshalErr *json.MarshalerError
 			var renameErr *os.LinkError
-			if failure == "encoding" && !errors.As(err, &marshalErr) || failure == "rename" && !errors.As(err, &renameErr) {
+			if failure == "no write on encode error" && !errors.As(err, &marshalErr) || failure == "rename" && !errors.As(err, &renameErr) {
 				t.Fatalf("Save() = %v; want %s error", err, failure)
 			}
+			if failure == "no write on encode error" {
+				if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("usage directory created before encoding: %v", err)
+				}
+				return
+			}
 			files, err := os.ReadDir(dir)
-			if err != nil || len(files) != wantFiles {
+			if err != nil || len(files) != 1 {
 				t.Fatalf("temporary usage file retained: %v, %v", files, err)
 			}
 		})
@@ -123,6 +129,7 @@ func TestSaveRejectsInvalidRecords(t *testing.T) {
 		"running finish":          func(r *Record) { r.Status = "running" },
 		"negative calls":          func(r *Record) { r.CodexCalls = -1 },
 		"negative Claude calls":   func(r *Record) { r.ClaudeCalls = -1 },
+		"missing main provider":   func(r *Record) { r.Provider = "" },
 		"invalid main provider":   func(r *Record) { r.Provider = "unknown" },
 		"invalid critic provider": func(r *Record) { r.CriticProvider = "unknown" },
 		"negative input":          func(r *Record) { r.Tokens.Input = -1 },
@@ -161,9 +168,12 @@ func TestStoreProviderMetadata(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			for _, field := range []string{"provider", "critic_provider", "critic_model", "critic_effort", "claude_calls"} {
+			if !strings.Contains(string(data), `"provider":"codex"`) {
+				t.Fatalf("record is missing its main provider: %s", data)
+			}
+			for _, field := range []string{"critic_provider", "critic_model", "critic_effort", "claude_calls"} {
 				if strings.Contains(string(data), `"`+field+`"`) {
-					t.Fatalf("legacy record contains unexpected field %s: %s", field, data)
+					t.Fatalf("single-provider record contains unexpected field %s: %s", field, data)
 				}
 			}
 		}
@@ -183,6 +193,7 @@ func TestReadAllRejectsMalformedRecords(t *testing.T) {
 	for name, content := range map[string]string{
 		"bad JSON":         "{",
 		"missing fields":   "{}",
+		"missing provider": strings.Replace(string(valid), `"provider":"codex",`, "", 1),
 		"trailing data":    string(valid) + " {}",
 		"unknown field":    strings.TrimSuffix(string(valid), "}") + `,"typo":1}`,
 		"wrong ID":         strings.ReplaceAll(string(valid), record.ID, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
@@ -262,6 +273,8 @@ func TestSummarize(t *testing.T) {
 	fourth := first
 	fourth.Repo, fourth.User, fourth.Action = "another-owner/other", "another-user", "audit"
 	fourth.StartedAt = time.Date(2026, 11, 1, 0, 30, 0, 0, time.FixedZone("UTC+2", 2*60*60))
+	finishedAt := fourth.StartedAt.Add(time.Minute)
+	fourth.FinishedAt = &finishedAt
 	records := []Record{first, second, third, fourth}
 	groups, err := Summarize(records, Filter{}, []string{"repo", "user"})
 	if err != nil {
@@ -318,12 +331,110 @@ func TestSummarizeRejectsInvalidOptions(t *testing.T) {
 	if _, err := Summarize([]Record{record}, Filter{}, nil); err == nil {
 		t.Fatal("unknown status accepted")
 	}
+	record = testRecord()
+	record.CodexCalls = -1
+	if _, err := Summarize([]Record{record}, Filter{}, nil); err == nil {
+		t.Fatal("negative call count accepted")
+	}
 }
 
-func TestTokensCachedInputIsNotDoubleCounted(t *testing.T) {
-	tokens := Tokens{Input: 100, CachedInput: 80, Output: 20}
-	tokens.Add(Tokens{Input: 50, CachedInput: 10, Output: 30})
-	if tokens != (Tokens{Input: 150, CachedInput: 90, Output: 50}) || tokens.Total() != 200 {
-		t.Fatalf("tokens=%+v total=%d", tokens, tokens.Total())
+func TestTokensValidBoundsAndComponentOperations(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		tokens Tokens
+		valid  bool
+	}{
+		{"zero", Tokens{}, true},
+		{"exact total", Tokens{Input: math.MaxInt64 - 1, CachedInput: 3, Output: 1}, true},
+		{"total overflow", Tokens{Input: math.MaxInt64, Output: 1}, false},
+		{"negative input", Tokens{Input: -1}, false},
+		{"negative output", Tokens{Output: -1}, false},
+		{"negative cache", Tokens{CachedInput: -1}, false},
+		{"cache outside input", Tokens{Input: 1, CachedInput: 2}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.tokens.Valid(); got != tc.valid {
+				t.Fatalf("Valid=%v want=%v", got, tc.valid)
+			}
+		})
+	}
+	a, b := Tokens{Input: 100, CachedInput: 80, Output: 2}, Tokens{Input: 90, CachedInput: 70, Output: 30}
+	if got := a.Sub(b); got != (Tokens{Input: 10, CachedInput: 10, Output: -28}) || got.Valid() {
+		t.Fatalf("raw delta=%+v", got)
+	}
+	if got := a.Max(b); got != (Tokens{Input: 100, CachedInput: 80, Output: 30}) || !got.Valid() {
+		t.Fatalf("component maximum=%+v", got)
+	}
+	// Individually valid snapshots can have a component maximum whose total overflows.
+	if got := (Tokens{Input: math.MaxInt64 - 1, Output: 1}).Max(Tokens{Input: 1, Output: math.MaxInt64 - 1}); got.Valid() {
+		t.Fatalf("overflowing maximum accepted: %+v", got)
+	}
+}
+
+func TestTokensCheckedAdditionPreservesKnownUsage(t *testing.T) {
+	base := Tokens{Input: 100, CachedInput: 80, Output: 20}
+	for _, tc := range []struct {
+		name  string
+		other Tokens
+		want  Tokens
+		valid bool
+	}{
+		{"normal", Tokens{Input: 50, CachedInput: 10, Output: 30}, Tokens{Input: 150, CachedInput: 90, Output: 50}, true},
+		{"exact total", Tokens{Input: math.MaxInt64 - 121, Output: 1}, Tokens{Input: math.MaxInt64 - 21, CachedInput: 80, Output: 21}, true},
+		{"total overflow", Tokens{Input: math.MaxInt64 - 120, Output: 1}, base, false},
+		{"component overflow", Tokens{Input: math.MaxInt64}, base, false},
+		{"invalid cache", Tokens{Input: 1, CachedInput: 2}, base, false},
+		{"negative", Tokens{Output: -1}, base, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := base.AddChecked(tc.other)
+			if got != tc.want || ok != tc.valid {
+				t.Fatalf("addition=%+v valid=%v want=%+v valid=%v", got, ok, tc.want, tc.valid)
+			}
+		})
+	}
+}
+
+func TestSummarizeAggregateBounds(t *testing.T) {
+	for _, scenario := range []struct {
+		name          string
+		first, second Tokens
+		codex, claude [2]int
+		wantTokens    int64
+		wantCodex     int
+		wantClaude    int
+		wantError     string
+	}{
+		{name: "exact token maximum", first: Tokens{Input: math.MaxInt64 / 2}, second: Tokens{Input: math.MaxInt64/2 + 1}, wantTokens: math.MaxInt64},
+		{name: "token maximum plus one", first: Tokens{Input: math.MaxInt64/2 + 1}, second: Tokens{Input: math.MaxInt64/2 + 1}, wantError: "token counts"},
+		{name: "total overflow without component overflow", first: Tokens{Input: math.MaxInt64}, second: Tokens{Output: 1}, wantError: "token counts"},
+		{name: "invalid tokens", second: Tokens{Input: -1}, wantError: "invalid counts"},
+		{name: "exact codex call maximum", codex: [2]int{math.MaxInt / 2, math.MaxInt/2 + 1}, wantCodex: math.MaxInt},
+		{name: "codex call overflow", codex: [2]int{math.MaxInt, 1}, wantError: "call counts"},
+		{name: "exact claude call maximum", claude: [2]int{math.MaxInt / 2, math.MaxInt/2 + 1}, wantClaude: math.MaxInt},
+		{name: "claude call overflow", claude: [2]int{math.MaxInt, 1}, wantError: "call counts"},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			first, second := testRecord(), testRecord()
+			first.Tokens, second.Tokens = scenario.first, scenario.second
+			first.CodexCalls, second.CodexCalls = scenario.codex[0], scenario.codex[1]
+			first.ClaudeCalls, second.ClaudeCalls = scenario.claude[0], scenario.claude[1]
+			groups, err := Summarize([]Record{first, second}, Filter{}, nil)
+			if scenario.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), scenario.wantError) || groups != nil {
+					t.Fatalf("invalid aggregate emitted: groups=%+v err=%v", groups, err)
+				}
+				// A filtered-out record cannot poison an otherwise representable report.
+				second.User = "excluded"
+				groups, err = Summarize([]Record{first, second}, Filter{User: first.User}, nil)
+				if err != nil || len(groups) != 1 || groups[0].Tokens != first.Tokens || groups[0].CodexCalls != first.CodexCalls || groups[0].ClaudeCalls != first.ClaudeCalls {
+					t.Fatalf("excluded record poisoned report: groups=%+v err=%v", groups, err)
+				}
+				return
+			}
+			if err != nil || len(groups) != 1 || groups[0].TotalTokens != scenario.wantTokens || groups[0].CodexCalls != scenario.wantCodex || groups[0].ClaudeCalls != scenario.wantClaude || !groups[0].Tokens.Valid() {
+				t.Fatalf("exact aggregate boundary failed: groups=%+v err=%v", groups, err)
+			}
+		})
 	}
 }

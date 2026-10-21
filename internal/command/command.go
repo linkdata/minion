@@ -2,8 +2,6 @@
 package command
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"strings"
 )
@@ -32,46 +30,16 @@ var (
 )
 
 // Command is a directive on its own Markdown line.
-//
-// Key is a deterministic SHA-256 digest of the name and history modifier; callers
-// should include the GitHub item's identity when using it as an idempotency key.
 type Command struct {
-	Key    string
 	Name   string
 	Action Action
-	// History reports the modifier; source selection does not use it yet (see #91).
-	History bool
-}
-
-// Parse finds exactly one directive for @linkdataminion in markdown.
-func Parse(markdown string) (Command, error) {
-	return ParseForLogin(markdown, "linkdataminion")
-}
-
-// ParseForLogin finds exactly one directive for login.
-//
-// It accepts these default standalone forms (ASCII case-insensitively):
-//
-//	@<login> review [history]
-//	@<login> audit [history]
-//	@<login> fix [history]
-//	@<login> security-audit [history]
-//
-// The directive must be the first nonblank line. Later text is not a command
-// argument; callers may use it as task context after authorization. A second
-// configured directive returns [ErrAmbiguous].
-func ParseForLogin(markdown, login string) (Command, error) {
-	return ParseForLoginCommands(markdown, login, map[string]Action{
-		"review": Review, "fix": Fix, "audit": Comment, "security-audit": SecurityAudit,
-	})
 }
 
 // ParseForLoginCommands finds exactly one configured standalone directive for login.
 //
 // The directive must be the first nonblank line. Later text may be used as
 // task context after authorization; a second configured directive returns
-// [ErrAmbiguous]. A single optional history modifier immediately follows the
-// command name. Other modifiers are rejected.
+// [ErrAmbiguous]. Inline arguments are rejected.
 func ParseForLoginCommands(markdown, login string, actions map[string]Action) (Command, error) {
 	if !validLogin(login) {
 		return Command{}, ErrInvalidLogin
@@ -109,20 +77,16 @@ func parseLine(line, handle string, actions map[string]Action) (Command, bool) {
 		return Command{}, false
 	}
 
-	verb, args := splitFirst(strings.Trim(line[len(handle):], " \t"))
-	args = strings.Trim(args, " \t")
+	verb := strings.Trim(line[len(handle):], " \t")
+	if strings.ContainsAny(verb, " \t") {
+		return Command{}, false
+	}
 	name := strings.ToLower(verb)
 	action, ok := actions[name]
 	if !ok || !equalASCIIFold(verb, name) {
 		return Command{}, false
 	}
-	if args != "" && !equalASCIIFold(args, "history") {
-		return Command{}, false
-	}
-	args = strings.ToLower(args)
-
-	keyBytes := sha256.Sum256([]byte(name + "\x00" + args))
-	return Command{Key: hex.EncodeToString(keyBytes[:]), Name: name, Action: action, History: args != ""}, true
+	return Command{Name: name, Action: action}, true
 }
 
 func validLogin(login string) bool {
@@ -158,15 +122,6 @@ func equalASCIIFold(a, b string) bool {
 		}
 	}
 	return true
-}
-
-func splitFirst(s string) (string, string) {
-	for i, c := range s {
-		if c == ' ' || c == '\t' {
-			return s[:i], s[i+1:]
-		}
-	}
-	return s, ""
 }
 
 func isIndentedCode(line string) bool {

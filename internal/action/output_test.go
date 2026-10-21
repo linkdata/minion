@@ -2,9 +2,9 @@ package action
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
-	"unicode/utf8"
 
 	"github.com/linkdata/minion/internal/command"
 )
@@ -43,29 +43,30 @@ func TestInertModelOutput(t *testing.T) {
 			t.Errorf("lost model text %q: %q", want, got)
 		}
 	}
-	if _, err := command.ParseForLogin(got, "secondbot"); !errors.Is(err, command.ErrNoCommand) {
+	if _, err := command.ParseForLoginCommands(got, "secondbot", defaultActionTestCommands); !errors.Is(err, command.ErrNoCommand) {
 		t.Fatalf("model output contains a live bot command: %v", err)
 	}
 }
 
-func TestInertModelOutputFitsLimit(t *testing.T) {
-	// Both Markdown fence characters and line prefixes can expand an answer.
-	input := strings.Repeat("`", maxOutputBytes/3) + "\n" + strings.Repeat("~", maxOutputBytes/3) + "\n" + strings.Repeat("@secondbot fix\n", maxOutputBytes/15)
+func TestInertModelOutputPreservesOverBudgetContent(t *testing.T) {
+	input := strings.Repeat("a\n", 25000)
 	got := inertModelOutput(input)
-	if len(got) > maxOutputBytes || !strings.Contains(got, "[truncated]") || !utf8.ValidString(got) {
-		t.Fatalf("expanded output was not bounded: %d bytes", len(got))
-	}
-	if _, err := command.ParseForLogin(got, "secondbot"); !errors.Is(err, command.ErrNoCommand) {
-		t.Fatalf("bounded output contains a live bot command: %v", err)
+	want := "```text\n> " + strings.ReplaceAll(strings.TrimSpace(input), "\n", "\n> ") + "\n```"
+	if modelOutputFits(input) || len(got) <= maxOutputBytes || got != want {
+		t.Fatalf("renderer silently dropped content or size check missed expansion: %d bytes", len(got))
 	}
 }
 
-func TestInertModelOutputUnicodeBoundary(t *testing.T) {
-	for pad := range 5 {
-		input := strings.Repeat("x", maxOutputBytes-20+pad) + "😀" + strings.Repeat("😀", 10)
-		got := inertModelOutput(input)
-		if len(got) > maxOutputBytes || !utf8.ValidString(got) || !strings.HasSuffix(got, "\n```") {
-			t.Fatalf("pad %d: malformed bounded output", pad)
-		}
+func TestModelOutputFitMatchesNormalizedRendererBoundary(t *testing.T) {
+	for _, separator := range []string{"\n", "\r", "\r\n", "\v", "\f", "\x1c", "\x1d", "\x1e", "\u0085", "\u2028", "\u2029"} {
+		t.Run(fmt.Sprintf("%x", separator), func(t *testing.T) {
+			input := strings.Repeat("x", maxOutputBytes-18) + separator + "a"
+			if !modelOutputFits(input) || len(inertModelOutput(input)) != maxOutputBytes {
+				t.Fatalf("normalized exact boundary refused or wrong size: fit=%t size=%d", modelOutputFits(input), len(inertModelOutput(input)))
+			}
+			if modelOutputFits(input+"x") || len(inertModelOutput(input+"x")) != maxOutputBytes+1 {
+				t.Fatal("one-byte rendered overflow was accepted or truncated")
+			}
+		})
 	}
 }

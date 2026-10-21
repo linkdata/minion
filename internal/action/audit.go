@@ -1,205 +1,245 @@
 package action
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
+	"unicode/utf8"
 
-	"github.com/linkdata/minion/internal/gitwork"
-	"github.com/linkdata/minion/internal/monitor"
+	"github.com/linkdata/minion/internal/aicli"
+	"github.com/linkdata/minion/internal/processgroup"
+	"github.com/linkdata/minion/internal/workspace"
 )
 
-func (e *Executor) securityAudit(ctx context.Context, job monitor.Job) error {
-	skill := e.Codex.SecurityAuditSkill()
-	if skill == "" {
-		return errors.New("security audit requires an installed security-audit skill")
-	}
-	repo, err := e.verifiedRepository(ctx, job.Repository)
-	if err != nil {
-		return err
-	}
-	if repo.Archived || repo.DefaultBranch == "" {
-		return fmt.Errorf("repository %s is archived or has no default branch", repo.FullName)
-	}
-	branch := repo.DefaultBranch
-	var title, description, head string
-	switch job.SubjectType {
-	case "Issue":
-		issue, err := e.GitHub.IssueDetails(ctx, job.Repository.Name, job.Number)
-		if err != nil {
-			return err
-		}
-		title, description = issue.Title, issue.Body
-	case "PullRequest":
-		pull, err := e.GitHub.PullRequestDetails(ctx, job.Repository.Name, job.Number)
-		if err != nil {
-			return err
-		}
-		if pull.Base.Ref == "" || pull.Head.SHA == "" {
-			return errors.New("pull request is missing base ref or head SHA")
-		}
-		branch, head = pull.Base.Ref, pull.Head.SHA
-		title, description = pull.Title, pull.Body
-	default:
-		return fmt.Errorf("cannot audit from %s", job.SubjectType)
-	}
-	if err := e.checkGitHubContext(job, title, description); err != nil {
-		return err
-	}
-	checkout, err := gitwork.Clone(ctx, e.WorkRoot, repo.FullName, branch)
-	if err != nil {
-		return err
-	}
-	defer e.closeCheckout(checkout)
-	if job.SubjectType == "PullRequest" {
-		if err := e.checkoutPullRequest(ctx, checkout, job.Repository.Name, job.Number, branch, head); err != nil {
-			return err
-		}
-	}
-	head, err = checkout.Head(ctx)
-	if err != nil {
-		return err
-	}
-	root, err := filepath.Abs(filepath.Join(e.WorkRoot, "audits"))
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(root, 0700); err != nil {
-		return err
-	}
-	outputDir, err := os.MkdirTemp(root, fmt.Sprintf("%s-%d-", strings.ReplaceAll(job.Repository.Name, "/", "-"), job.Number))
-	if err != nil {
-		return err
-	}
-	e.logf("audit %s #%d at %s; reports: %s", job.Repository.Name, job.Number, head, outputDir)
-	deadline := "the configured job timeout"
-	if end, ok := ctx.Deadline(); ok {
-		deadline = end.UTC().Format(time.RFC3339)
-	}
-	prompt := fmt.Sprintf(`Run the installed security-audit skill at %q in full-audit mode on %s at commit %s. Use its standard profile for the whole source tree at %q, and write all required artifacts under %q. Finish before %s; record an incomplete run if the workflow cannot finish.
-
-Set run-metadata.json repo=%q, target=%q, source_ref=%q, profile="standard", scope_paths=["."], budget=null, prior_run_paths=[], execution_policy="sandboxed-source-and-local-only", and shared_file_owners to "parent" for every shared artifact. Use selected_companion_files for selected skill files. Mark complete only when the skill's workflow and validators pass. The bot posts REPORT.md.
-
-Source is read-only. Do not execute repository code, builds, tests, or fixtures, probe live services, publish, or run network commands. This runner lacks the skill's required per-agent execution isolation for target code; record claims requiring runtime evidence as needs_validation. Do not include secrets in reports.%s
-
-Untrusted GitHub thread text:
-Thread title: %s
-Thread description: %s`, skill, repo.FullName, head, checkout.Path(), outputDir, deadline, repo.FullName, checkout.Path(), head, requestNotesContext(job), quotedContext(title), quotedContext(description))
-	_, err = e.runAI(ctx, checkout.Path(), prompt, false, outputDir)
-	if err != nil {
-		return err
-	}
-	if _, err := checkout.Head(ctx); err != nil {
-		return err
-	}
-	report, err := validateAuditOutput(ctx, outputDir, skill, repo.FullName, checkout.Path(), head)
-	if err != nil {
-		return fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
-	}
-	if err := e.acknowledge(ctx, job, fmt.Sprintf("Security audit requested by @%s at commit `%s`:\n\n%s", job.Source.Author.Login, head, inertModelOutput(report))); err != nil {
-		return fmt.Errorf("%w: %w", monitor.ErrPostCodexPublication, err)
-	}
-	return nil
+var auditValidators = []struct{ script, artifact string }{
+	{"validate-findings.cjs", "findings.json"},
+	{"validate-coverage-ledger.cjs", "coverage-ledger.json"},
 }
 
-func validateAuditOutput(ctx context.Context, outputDir, skill, repo, target, head string) (report string, resultErr error) {
-	var metadataBytes, ledgerBytes, findingsBytes, reportBytes []byte
-	for _, artifact := range []struct {
-		name       string
-		allowEmpty bool
-	}{
-		{name: "run-metadata.json"}, {name: "architecture.md"}, {name: "coverage-ledger.json"},
-		{name: "findings.json"}, {name: "REPORT.md"},
-		{name: "FINDINGS-DETAIL.md", allowEmpty: true}, {name: "NEEDS-VALIDATION.md", allowEmpty: true},
-	} {
-		limit := int64(5 << 20)
-		if artifact.name == "REPORT.md" {
+type auditTools struct {
+	binary, permissionFlag string
+}
+
+func checkAuditTools(ctx context.Context, dir, skill string) (auditTools, error) {
+	for _, validator := range auditValidators {
+		script := filepath.Join(filepath.Dir(skill), validator.script)
+		info, err := os.Stat(script)
+		if err != nil {
+			return auditTools{}, fmt.Errorf("audit validator %q: %w", script, err)
+		}
+		if !info.Mode().IsRegular() {
+			return auditTools{}, fmt.Errorf("audit validator %q is not a regular file", script)
+		}
+	}
+	binary, err := aicli.AbsoluteExecutable("node")
+	if err != nil {
+		return auditTools{}, fmt.Errorf("audit requires node: %w", err)
+	}
+	flag, err := auditNodePermissionFlag(ctx, dir, binary)
+	return auditTools{binary: binary, permissionFlag: flag}, err
+}
+
+func readAuditArtifacts(outputDir string, partial bool, secrets ...string) ([]workspace.File, []Diagnostic, error) {
+	var files []workspace.File
+	var diagnostics []Diagnostic
+	for _, name := range auditArtifacts {
+		limit := int64(maxAuditArtifactBytes)
+		if name == "REPORT.md" {
 			limit = maxOutputBytes
 		}
-		data, err := readAuditArtifact(filepath.Join(outputDir, artifact.name), limit, artifact.allowEmpty)
+		data, err := workspace.ReadRegular(filepath.Join(outputDir, name), limit)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err == nil {
+			if strings.HasSuffix(name, ".json") {
+				data, err = redactAuditJSON(data, secrets...)
+			} else if (name == "REPORT.md" && partial) || utf8.Valid(data) {
+				data = []byte(redactActionText(string(data), secrets...))
+			} else {
+				err = errors.New("audit Markdown is not valid UTF-8")
+			}
+			if err == nil && int64(len(data)) > limit {
+				err = errors.New("redacted artifact exceeds byte limit")
+			} else if err == nil && name == "REPORT.md" && !partial && (!publishableAnswer(string(data)) || strings.TrimSpace(string(data)) == "") {
+				err = errors.New("audit REPORT.md is invalid or exceeds publication limit")
+			}
+		}
 		if err != nil {
-			return "", fmt.Errorf("invalid audit %s: %w", artifact.name, err)
+			if !partial {
+				return nil, nil, fmt.Errorf("invalid audit %s: %w", name, err)
+			}
+			diagnostics = append(diagnostics, Diagnostic{Code: "artifact_unavailable", Message: "Incomplete audit artifact " + name + " could not be safely collected."})
+			continue
 		}
-		switch artifact.name {
-		case "run-metadata.json":
-			metadataBytes = data
-		case "coverage-ledger.json":
-			ledgerBytes = data
-		case "findings.json":
-			findingsBytes = data
-		case "REPORT.md":
-			reportBytes = data
-		}
+		files = append(files, workspace.File{Path: name, Mode: workspace.Regular, Data: data})
 	}
-	var metadata struct {
-		RunID                  string            `json:"run_id"`
-		Repo                   string            `json:"repo"`
-		Target                 string            `json:"target"`
-		SourceRef              string            `json:"source_ref"`
-		Profile                string            `json:"profile"`
-		ScopePaths             []string          `json:"scope_paths"`
-		Budget                 json.RawMessage   `json:"budget"`
-		SelectedCompanionFiles []string          `json:"selected_companion_files"`
-		PriorRunPaths          []string          `json:"prior_run_paths"`
-		SharedFileOwners       map[string]string `json:"shared_file_owners"`
-		ExecutionPolicy        string            `json:"execution_policy"`
-		RunStatus              string            `json:"run_status"`
+	return files, diagnostics, nil
+}
+
+// Decode JSON escapes before redaction so consumers cannot reconstruct a configured key.
+func redactAuditJSON(data []byte, secrets ...string) ([]byte, error) {
+	if !utf8.Valid(data) {
+		return nil, errors.New("audit JSON is not valid UTF-8")
 	}
-	if err := json.Unmarshal(metadataBytes, &metadata); err != nil {
-		return "", fmt.Errorf("decode audit metadata: %w", err)
+	if !json.Valid(data) {
+		return nil, errors.New("audit JSON is invalid")
 	}
-	if strings.TrimSpace(metadata.RunID) == "" || metadata.Repo != repo || metadata.Target != target || metadata.SourceRef != head ||
-		metadata.Profile != "standard" || len(metadata.ScopePaths) != 1 || metadata.ScopePaths[0] != "." ||
-		string(metadata.Budget) != "null" || metadata.SelectedCompanionFiles == nil || metadata.PriorRunPaths == nil || len(metadata.PriorRunPaths) != 0 ||
-		metadata.ExecutionPolicy != "sandboxed-source-and-local-only" || metadata.RunStatus != "complete" {
-		return "", fmt.Errorf("audit metadata does not confirm a complete standard run of %s at %s", repo, head)
+	if err := rejectDuplicateAuditJSONKeys(data); err != nil {
+		return nil, err
 	}
-	for _, name := range []string{"run-metadata.json", "architecture.md", "coverage-ledger.json", "findings.json", "REPORT.md", "FINDINGS-DETAIL.md", "NEEDS-VALIDATION.md"} {
-		if metadata.SharedFileOwners[name] != "parent" {
-			return "", fmt.Errorf("audit metadata lacks parent ownership of %s", name)
-		}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return nil, err
 	}
-	if strings.TrimSpace(string(reportBytes)) == "" {
-		return "", errors.New("audit REPORT.md is empty")
-	}
-	validationDir, err := os.MkdirTemp(filepath.Dir(outputDir), ".audit-validation-")
+	redacted, changed, err := redactAuditJSONValue(value, secrets...)
 	if err != nil {
-		return "", fmt.Errorf("create audit validation directory: %w", err)
+		return nil, err
 	}
-	defer func() {
-		if err := os.RemoveAll(validationDir); err != nil {
-			report = ""
-			resultErr = errors.Join(resultErr, fmt.Errorf("remove audit validation directory: %w", err))
+	if changed {
+		var output bytes.Buffer
+		encoder := json.NewEncoder(&output)
+		encoder.SetEscapeHTML(false)
+		if err := encoder.Encode(redacted); err != nil {
+			return nil, err
 		}
-	}()
-	for name, data := range map[string][]byte{"findings.json": findingsBytes, "coverage-ledger.json": ledgerBytes} {
-		if err := os.WriteFile(filepath.Join(validationDir, name), data, 0600); err != nil {
-			return "", fmt.Errorf("copy audit %s for validation: %w", name, err)
+		data = bytes.TrimSuffix(output.Bytes(), []byte("\n"))
+	}
+	final := string(data)
+	if redactActionText(final, secrets...) != final {
+		return nil, errors.New("audit JSON contains a configured key in source syntax")
+	}
+	return data, nil
+}
+
+func rejectDuplicateAuditJSONKeys(data []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	var visit func() error
+	visit = func() error {
+		token, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		switch token {
+		case json.Delim('{'):
+			seen := make(map[string]bool)
+			for decoder.More() {
+				token, err := decoder.Token()
+				if err != nil {
+					return err
+				}
+				key, ok := token.(string)
+				if !ok {
+					return errors.New("audit JSON object key is invalid")
+				}
+				folded := workspace.FoldPath(key)
+				if seen[folded] {
+					return errors.New("audit JSON has duplicate object keys")
+				}
+				seen[folded] = true
+				if err := visit(); err != nil {
+					return err
+				}
+			}
+			_, err = decoder.Token()
+			return err
+		case json.Delim('['):
+			for decoder.More() {
+				if err := visit(); err != nil {
+					return err
+				}
+			}
+			_, err = decoder.Token()
+			return err
+		}
+		return nil
+	}
+	return visit()
+}
+
+func redactAuditJSONValue(value any, secrets ...string) (any, bool, error) {
+	switch value := value.(type) {
+	case string:
+		redacted := redactActionText(value, secrets...)
+		return redacted, redacted != value, nil
+	case json.Number, bool, nil:
+		literal := fmt.Sprint(value)
+		if value == nil {
+			literal = "null"
+		}
+		if redacted := redactActionText(literal, secrets...); redacted != literal {
+			return redacted, true, nil
+		}
+	case []any:
+		changed := false
+		for i := range value {
+			redacted, dirty, err := redactAuditJSONValue(value[i], secrets...)
+			if err != nil {
+				return nil, false, err
+			}
+			value[i] = redacted
+			changed = changed || dirty
+		}
+		return value, changed, nil
+	case map[string]any:
+		redacted := make(map[string]any, len(value))
+		changed := false
+		for key, entry := range value {
+			redactedKey := redactActionText(key, secrets...)
+			if _, present := redacted[redactedKey]; present {
+				return nil, false, errors.New("audit JSON keys collide after redaction")
+			}
+			redactedEntry, dirty, err := redactAuditJSONValue(entry, secrets...)
+			if err != nil {
+				return nil, false, err
+			}
+			redacted[redactedKey] = redactedEntry
+			changed = changed || redactedKey != key || dirty
+		}
+		return redacted, changed, nil
+	}
+	return value, false, nil
+}
+
+func auditArtifactMayBeEmpty(name string) bool {
+	return name == "FINDINGS-DETAIL.md" || name == "NEEDS-VALIDATION.md"
+}
+
+func validateAuditFiles(ctx context.Context, files []workspace.File, validationDir, skill string, tools auditTools, repo, target, head string) (string, error) {
+	byPath := make(map[string][]byte, len(files))
+	for _, file := range files {
+		byPath[file.Path] = file.Data
+	}
+	for _, name := range auditArtifacts {
+		data, present := byPath[name]
+		if !present || len(data) == 0 && !auditArtifactMayBeEmpty(name) || name == "REPORT.md" && strings.TrimSpace(string(data)) == "" {
+			return "", fmt.Errorf("audit %s is missing or empty", name)
 		}
 	}
-	permissionFlag, err := auditNodePermissionFlag(ctx, validationDir)
-	if err != nil {
+	if _, err := validateAuditMetadata(byPath["run-metadata.json"], repo, target, head); err != nil {
 		return "", err
 	}
-	for _, validator := range []struct{ script, artifact string }{
-		{"validate-findings.cjs", "findings.json"},
-		{"validate-coverage-ledger.cjs", "coverage-ledger.json"},
-	} {
+	for _, validator := range auditValidators {
+		if err := os.WriteFile(filepath.Join(validationDir, validator.artifact), byPath[validator.artifact], 0600); err != nil {
+			return "", fmt.Errorf("copy audit %s for validation: %w", validator.artifact, err)
+		}
 		script := filepath.Join(filepath.Dir(skill), validator.script)
 		// #nosec G204 -- the installed skill path and validation directory are checked paths; arguments bypass a shell.
-		cmd := exec.CommandContext(ctx, "node", permissionFlag,
+		cmd := auditNodeCommand(ctx, validationDir, tools.binary, tools.permissionFlag,
 			"--allow-fs-read="+filepath.Dir(skill), "--allow-fs-read="+validationDir,
 			script, filepath.Join(validationDir, validator.artifact))
-		cmd.Dir = validationDir
-		cmd.Env = []string{"HOME=" + validationDir, "PATH=/usr/bin:/bin"}
-		if err := cmd.Run(); err != nil {
+		if err := processgroup.Run(cmd); err != nil {
+			if cause := ctx.Err(); cause != nil && !errors.Is(err, cause) {
+				err = errors.Join(cause, err)
+			}
 			return "", fmt.Errorf("audit %s failed: %w", validator.script, err)
 		}
 	}
@@ -213,13 +253,13 @@ func validateAuditOutput(ctx context.Context, outputDir, skill, repo, target, he
 			Unresolved         []string `json:"unresolved"`
 		} `json:"attempts"`
 	}
-	if err := json.Unmarshal(ledgerBytes, &units); err != nil || len(units) == 0 {
+	if err := json.Unmarshal(byPath["coverage-ledger.json"], &units); err != nil || len(units) == 0 {
 		return "", errors.New("audit coverage-ledger.json has no coverage units")
 	}
 	var findings []struct {
 		Fingerprint string `json:"fingerprint"`
 	}
-	if err := json.Unmarshal(findingsBytes, &findings); err != nil {
+	if err := json.Unmarshal(byPath["findings.json"], &findings); err != nil {
 		return "", fmt.Errorf("decode audit findings: %w", err)
 	}
 	final := make(map[string]bool, len(findings))
@@ -239,7 +279,7 @@ func validateAuditOutput(ctx context.Context, outputDir, skill, repo, target, he
 		for _, fingerprint := range fingerprints {
 			candidates[fingerprint] = true
 			if !final[fingerprint] {
-				return fmt.Errorf("audit coverage-ledger.json has candidate %s without final finding", fingerprint)
+				return errors.New("audit coverage-ledger.json has a candidate without final finding")
 			}
 		}
 		return nil
@@ -263,21 +303,67 @@ func validateAuditOutput(ctx context.Context, outputDir, skill, repo, target, he
 	}
 	for fingerprint := range final {
 		if !candidates[fingerprint] {
-			return "", fmt.Errorf("audit findings.json has finding %s without candidate", fingerprint)
+			return "", errors.New("audit findings.json has a finding without candidate")
 		}
 	}
-	return string(reportBytes), nil
+	return string(byPath["REPORT.md"]), nil
 }
 
-func auditNodePermissionFlag(ctx context.Context, dir string) (string, error) {
+func validateAuditMetadata(metadataBytes []byte, repo, target, head string) ([]string, error) {
+	if err := rejectDuplicateAuditJSONKeys(metadataBytes); err != nil {
+		return nil, err
+	}
+	var metadata struct {
+		RunID                  string            `json:"run_id"`
+		Repo                   string            `json:"repo"`
+		Target                 string            `json:"target"`
+		SourceRef              string            `json:"source_ref"`
+		Profile                string            `json:"profile"`
+		ScopePaths             []string          `json:"scope_paths"`
+		Budget                 json.RawMessage   `json:"budget"`
+		SelectedCompanionFiles []string          `json:"selected_companion_files"`
+		PriorRunPaths          []string          `json:"prior_run_paths"`
+		SharedFileOwners       map[string]string `json:"shared_file_owners"`
+		ExecutionPolicy        string            `json:"execution_policy"`
+		RunStatus              string            `json:"run_status"`
+	}
+	if err := json.Unmarshal(metadataBytes, &metadata); err != nil {
+		return nil, fmt.Errorf("decode audit metadata: %w", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(metadataBytes, &fields); err != nil {
+		return nil, fmt.Errorf("decode audit metadata fields: %w", err)
+	}
+	for name := range fields {
+		for _, canonical := range []string{"run_id", "repo", "target", "source_ref", "profile", "scope_paths", "budget", "selected_companion_files", "prior_run_paths", "shared_file_owners", "execution_policy", "run_status"} {
+			if name != canonical && strings.EqualFold(name, canonical) {
+				return nil, fmt.Errorf("audit metadata uses noncanonical key %q", name)
+			}
+		}
+	}
+	if strings.TrimSpace(metadata.RunID) == "" || metadata.Repo != repo || metadata.Target != target || metadata.SourceRef != head ||
+		metadata.Profile != "standard" || len(metadata.ScopePaths) != 1 || metadata.ScopePaths[0] != "." ||
+		string(metadata.Budget) != "null" || metadata.SelectedCompanionFiles == nil || metadata.PriorRunPaths == nil || len(metadata.PriorRunPaths) != 0 ||
+		metadata.ExecutionPolicy != "sandboxed-source-and-local-only" || metadata.RunStatus != "complete" {
+		return nil, fmt.Errorf("audit metadata does not confirm a complete standard run of %s at %s", repo, head)
+	}
+	for _, name := range auditArtifacts {
+		if metadata.SharedFileOwners[name] != "parent" {
+			return nil, fmt.Errorf("audit metadata lacks parent ownership of %s", name)
+		}
+	}
+	return metadata.SelectedCompanionFiles, nil
+}
+
+func auditNodePermissionFlag(ctx context.Context, dir, binary string) (string, error) {
 	// Prefer the stable flag; Node 20 requires the experimental spelling.
 	for _, flag := range []string{"--permission", "--experimental-permission"} {
 		// #nosec G204 -- the flags and probe program are fixed strings, passed without a shell.
-		cmd := exec.CommandContext(ctx, "node", flag, "-e", `if (!process.permission || process.permission.has('fs.read', '/etc/passwd')) process.exit(1)`)
-		cmd.Dir = dir
-		cmd.Env = []string{"HOME=" + dir, "PATH=/usr/bin:/bin"}
-		if err := cmd.Run(); err == nil {
+		cmd := auditNodeCommand(ctx, dir, binary, flag, "-e", `if (!process.permission || process.permission.has('fs.read', '/etc/passwd')) process.exit(1)`)
+		if err := processgroup.Run(cmd); err == nil {
 			return flag, nil
+		} else if errors.Is(err, processgroup.ErrDescendants) || errors.Is(err, processgroup.ErrUnconfirmed) {
+			return "", err
 		}
 		if err := ctx.Err(); err != nil {
 			return "", err
@@ -286,36 +372,9 @@ func auditNodePermissionFlag(ctx context.Context, dir string) (string, error) {
 	return "", errors.New("node permission model is unavailable")
 }
 
-func readAuditArtifact(path string, limit int64, allowEmpty bool) (data []byte, err error) {
-	entry, err := os.Lstat(path)
-	if err != nil {
-		return nil, err
-	}
-	if !entry.Mode().IsRegular() || entry.Size() > limit || (!allowEmpty && entry.Size() == 0) {
-		return nil, errors.New("must be a regular file within the size limit")
-	}
-	f, err := openAuditArtifact(path)
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		if closeErr := f.Close(); closeErr != nil {
-			data = nil
-			err = errors.Join(err, closeErr)
-		}
-	}()
-	opened, err := f.Stat()
-	if err != nil || !opened.Mode().IsRegular() || !os.SameFile(entry, opened) {
-		return nil, errors.New("audit artifact changed before reading")
-	}
-	data, err = io.ReadAll(io.LimitReader(f, limit+1))
-	if err != nil {
-		return nil, err
-	}
-	after, err := f.Stat()
-	if err != nil || int64(len(data)) != opened.Size() || int64(len(data)) > limit ||
-		!os.SameFile(opened, after) || after.Size() != opened.Size() || !after.ModTime().Equal(opened.ModTime()) {
-		return nil, errors.New("audit artifact changed while reading")
-	}
-	return data, nil
+func auditNodeCommand(ctx context.Context, dir, binary string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, binary, args...)
+	cmd.Dir = dir
+	cmd.Env = []string{"HOME=" + dir, "PATH=/usr/bin:/bin"}
+	return cmd
 }

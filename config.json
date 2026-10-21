@@ -2,7 +2,8 @@
   "bot_login": "example-bot",
   "main": "codex",
   "adversarial": "",
-  "critic_max_rounds": 3,
+  "critic_max_rounds": 5,
+  "critic_nonblocking_rounds": null,
   "codex": {
     "api_key": ""
   },
@@ -33,7 +34,7 @@
     "https://github.com/JuliusBrussee/caveman/tree/main/skills/caveman"
   ],
   "poll_interval_seconds": 60,
-  "job_timeout_minutes": 30,
+  "job_timeout_minutes": 240,
   "max_github_context_bytes": 32768,
   "state_path": "var/state.json",
   "work_root": "var/work",

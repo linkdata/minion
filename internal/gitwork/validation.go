@@ -3,35 +3,22 @@ package gitwork
 import (
 	"fmt"
 	"strings"
+
+	"github.com/linkdata/minion/internal/workspace"
 )
 
 func repositoryURL(repo string) (string, error) {
-	parts := strings.Split(repo, "/")
-	if len(parts) != 2 || !validRepositorySegment(parts[0]) || !validRepositorySegment(parts[1]) {
+	if !workspace.ValidRepository(repo) {
 		return "", fmt.Errorf("invalid repository %q: want owner/name", repo)
 	}
-	return "https://github.com/" + parts[0] + "/" + parts[1] + ".git", nil
-}
-
-func validRepositorySegment(s string) bool {
-	if s == "" || s == "." || s == ".." {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '_' && c != '.' && c != '-' {
-			return false
-		}
-	}
-	return true
+	return "https://github.com/" + repo + ".git", nil
 }
 
 // validateBranch applies Git's refname restrictions before the value is used
 // in a command argument or refspec. A branch must never be an option or a ref
 // expression such as @{...}.
 func validateBranch(branch string) error {
-	if branch == "" || branch == "@" || strings.HasPrefix(branch, "-") || strings.HasPrefix(branch, "/") ||
-		strings.HasSuffix(branch, "/") || strings.HasSuffix(branch, ".") || strings.Contains(branch, "//") ||
+	if branch == "@" || strings.HasPrefix(branch, "-") || strings.HasSuffix(branch, ".") ||
 		strings.Contains(branch, "..") || strings.Contains(branch, "@{") {
 		return fmt.Errorf("invalid branch %q", branch)
 	}
@@ -47,17 +34,4 @@ func validateBranch(branch string) error {
 		}
 	}
 	return nil
-}
-
-func validSHA(s string) bool {
-	if len(s) != 40 && len(s) != 64 {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') {
-			return false
-		}
-	}
-	return true
 }

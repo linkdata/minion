@@ -4,12 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/linkdata/minion/internal/aicli"
+	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/config"
 )
 
@@ -33,13 +36,12 @@ cat >/dev/null
 `
 
 func catalogueScriptFor(dir, page1, page2 string) string {
-	quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }
 	return strings.NewReplacer(
-		"@ARGS@", quote(filepath.Join(dir, "args")),
-		"@ENV@", quote(filepath.Join(dir, "env")),
-		"@REQUESTS@", quote(filepath.Join(dir, "requests")),
-		"@PAGE1@", quote(page1),
-		"@PAGE2@", quote(page2),
+		"@ARGS@", aicli.ShellQuote(filepath.Join(dir, "args")),
+		"@ENV@", aicli.ShellQuote(filepath.Join(dir, "env")),
+		"@REQUESTS@", aicli.ShellQuote(filepath.Join(dir, "requests")),
+		"@PAGE1@", aicli.ShellQuote(page1),
+		"@PAGE2@", aicli.ShellQuote(page2),
 	).Replace(catalogueScript)
 }
 
@@ -222,5 +224,112 @@ func TestValidateReportsCleanupFailure(t *testing.T) {
 	// Go 1.23 predates testing.T.Context.
 	if _, err := Validate(context.Background(), config.CodexConfig{}); !errors.Is(err, os.ErrPermission) {
 		t.Fatalf("Validate() = %v; want cleanup permission error", err)
+	}
+}
+
+func TestModelPreflightQuotesStderr(t *testing.T) {
+	installFakeCodex(t, "#!/bin/sh\nprintf 'private\\nforged journal line' >&2\nprintf '%s\\n' '{not json'\n")
+	_, err := listModels(context.Background(), config.CodexConfig{})
+	if err == nil || strings.Contains(err.Error(), "\nforged journal line") || !strings.Contains(err.Error(), `private\nforged journal line`) {
+		t.Fatalf("unsafe preflight stderr: %v", err)
+	}
+}
+
+func TestCatalogueProviderErrorIsBoundedAndQuoted(t *testing.T) {
+	dir := t.TempDir()
+	message := "first\nforged journal line " + strings.Repeat("x", 10000)
+	response, err := json.Marshal(map[string]any{"id": 2, "error": map[string]string{"message": message}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	installFakeCodex(t, catalogueScriptFor(dir, string(response), ""))
+	_, err = Validate(context.Background(), config.CodexConfig{})
+	if err == nil || strings.Contains(err.Error(), "\nforged journal line") || !strings.Contains(err.Error(), `first\nforged journal line`) || len(err.Error()) > bounded.DiagnosticBytes+200 || !strings.Contains(err.Error(), "...") {
+		t.Fatalf("unsafe/unbounded provider error: %v", err)
+	}
+}
+
+func TestCatalogueEventAcceptsExactLimitAndRejectsNextByte(t *testing.T) {
+	const prefix = `{"id":2,"result":{"data":[{"model":"fixture","isDefault":true}]},"padding":"`
+	const suffix = `"}`
+	for _, size := range []int{aicli.MaxEventBytes, aicli.MaxEventBytes + 1, aicli.MaxEventBytes + 10} {
+		for _, ending := range []string{"\n", "\r\n", ""} {
+			t.Run(fmt.Sprintf("bytes%d/ending%q", size, ending), func(t *testing.T) {
+				binary := installFakeCodex(t, "#!/bin/sh\nIFS= read -r request\nprintf '%s\\n' '{\"id\":1,\"result\":{}}'\nIFS= read -r request\nIFS= read -r request\ncat \"$0.response\"\n")
+				response := prefix + strings.Repeat("x", size-len(prefix)-len(suffix)) + suffix + ending
+				if err := os.WriteFile(binary+".response", []byte(response), 0600); err != nil {
+					t.Fatal(err)
+				}
+				models, err := listModels(context.Background(), config.CodexConfig{})
+				if size == aicli.MaxEventBytes {
+					if err != nil || len(models) != 1 || models[0].Model != "fixture" {
+						t.Fatalf("exact-cap catalogue=%+v err=%v", models, err)
+					}
+				} else if !errors.Is(err, aicli.ErrOutputLimit) {
+					t.Fatalf("oversized catalogue accepted or unclassified: models=%+v err=%v", models, err)
+				}
+			})
+		}
+	}
+}
+
+func TestValidateKeepsImplicitNativeHome(t *testing.T) {
+	for _, key := range []string{"", "fixture-key"} {
+		t.Run(fmt.Sprint(key != ""), func(t *testing.T) {
+			dir := t.TempDir()
+			page := `{"id":2,"result":{"data":[{"model":"fixture","isDefault":true,"defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high"}]}]}}`
+			script := catalogueScriptFor(dir, page, "")
+			if key != "" {
+				script = strings.Replace(script, "printf '%s\\n' '{\"method\":\"test/notification\",\"params\":{}}'", "printf '%s\\n' '{\"id\":0,\"result\":{\"type\":\"apiKey\"}}'\nIFS= read -r request\nprintf '%s\\n'", 1)
+			}
+			script = strings.Replace(script, "#!/bin/sh\n", "#!/bin/sh\n[ \"${CODEX_HOME+x}\" != x ] || exit 3\n[ ! -e \"$HOME/.codex\" ] || exit 4\n", 1)
+			installFakeCodex(t, script)
+			t.Setenv("HOME", t.TempDir())
+			t.Setenv("CODEX_HOME", "")
+			if _, err := Validate(context.Background(), config.CodexConfig{APIKey: key}); err != nil {
+				t.Fatalf("model discovery injected a missing implicit home: %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateRedactsKeyBeforeClippingCatalogueError(t *testing.T) {
+	key := "KEYPREFIX__LEAKSUFFIX"
+	message := strings.Repeat("x", bounded.DiagnosticBytes-len(key)+2) + key + strings.Repeat("y", 300)
+	response, err := json.Marshal(map[string]any{"id": 0, "error": map[string]string{"message": message}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	installFakeCodex(t, catalogueScriptFor(t.TempDir(), string(response), ""))
+	_, err = Validate(context.Background(), config.CodexConfig{APIKey: key})
+	if err == nil || strings.Contains(err.Error(), "KEYPREFIX__LEAK") || !strings.Contains(err.Error(), "[redacted]") || !strings.Contains(err.Error(), "y...") || len(err.Error()) > bounded.DiagnosticBytes+200 {
+		t.Fatalf("clipped catalogue error exposed key fragment or lost bound: %v", err)
+	}
+}
+
+func TestValidateRedactsQuotedConfiguredKeyFromProviderError(t *testing.T) {
+	for _, key := range []string{`fixture"secret`, `fixture\secret`} {
+		for _, escaped := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%q/escaped=%t", key, escaped), func(t *testing.T) {
+				dir := t.TempDir()
+				message := "provider rejected " + key
+				if escaped {
+					encoded, err := json.Marshal(key)
+					if err != nil {
+						t.Fatal(err)
+					}
+					message = "provider rejected " + string(encoded[1:len(encoded)-1])
+				}
+				response, err := json.Marshal(map[string]any{"id": 0, "error": map[string]string{"message": message}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				installFakeCodex(t, catalogueScriptFor(dir, string(response), ""))
+				_, err = Validate(context.Background(), config.CodexConfig{APIKey: key})
+				if err == nil || err.Error() != `cannot validate Codex settings: Codex account/login/start: "provider rejected [redacted]"` {
+					t.Fatalf("provider error did not redact the configured key: %v", err)
+				}
+			})
+		}
 	}
 }

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/linkdata/minion/internal/github"
+	"github.com/linkdata/minion/internal/workspace"
 )
 
 func TestLiveCloneAndPullRequest(t *testing.T) {
@@ -55,11 +56,11 @@ func TestLiveCloneAndPullRequest(t *testing.T) {
 		t.Fatalf("%s gh credential belongs to %s", cfg.BotLogin, user.Login)
 	}
 	t.Setenv("GH_TOKEN", botToken)
-	repo, err := client.Repository(ctx, repoName)
+	remote, err := client.Repository(ctx, repoName)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if repo.DefaultBranch == "" {
+	if remote.DefaultBranch == "" {
 		t.Fatal("test repository has no default branch")
 	}
 	pull, err := client.PullRequestDetails(ctx, repoName, cfg.PullRequestNumber)
@@ -70,7 +71,20 @@ func TestLiveCloneAndPullRequest(t *testing.T) {
 		t.Fatalf("pull request metadata = %+v", pull)
 	}
 
-	checkout, err := Clone(ctx, t.TempDir(), repoName, repo.DefaultBranch)
+	defaultCheckout, err := Clone(ctx, t.TempDir(), repoName, remote.DefaultBranch, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := defaultCheckout.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	if head, err := defaultCheckout.verifiedHead(ctx); err != nil || !workspace.ValidSHA(head) {
+		t.Fatalf("cloned default-branch HEAD = %q, %v", head, err)
+	}
+
+	checkout, err := ClonePullRequest(ctx, t.TempDir(), repoName, pull.Number, pull.Base.Ref, pull.Head.SHA)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,16 +93,26 @@ func TestLiveCloneAndPullRequest(t *testing.T) {
 			t.Error(err)
 		}
 	}()
-	if head, err := checkout.Head(ctx); err != nil || len(head) != 40 {
-		t.Fatalf("cloned default-branch HEAD = %q, %v", head, err)
+	base, err := runGit(ctx, checkout.path, "rev-parse", "--verify", "refs/remotes/origin/"+pull.Base.Ref+"^{commit}")
+	if err != nil || !workspace.ValidSHA(base) {
+		t.Fatalf("captured pull request base ref is unavailable: %q, %v", base, err)
 	}
-	if err := checkout.CheckoutPullRequest(ctx, pull.Number, pull.Base.Ref, pull.Head.SHA, func(ctx context.Context, treeSHA string) (github.GitTree, error) {
-		return client.GitTree(ctx, repoName, treeSHA)
-	}); err != nil {
+	if head, err := checkout.verifiedHead(ctx); err != nil || head != pull.Head.SHA {
+		t.Fatalf("pull request HEAD = %q, %v; want %s", head, err, pull.Head.SHA)
+	}
+	snapshot, err := checkout.Snapshot(ctx)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if head, err := checkout.Head(ctx); err != nil || !strings.EqualFold(head, pull.Head.SHA) {
-		t.Fatalf("pull request HEAD = %q, %v; want %s", head, err, pull.Head.SHA)
+	if snapshot.Head != pull.Head.SHA || snapshot.Base != base || !workspace.ValidSHA(snapshot.MergeBase) {
+		t.Fatalf("pull request snapshot identities = head:%q base:%q merge-base:%q", snapshot.Head, snapshot.Base, snapshot.MergeBase)
+	}
+	materialized, err := MaterializeRepository(ctx, repositorySource(t, snapshot.Files), snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := materialized.Verify(ctx); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -178,7 +202,7 @@ func TestLiveCommitAndPush(t *testing.T) {
 		}
 	})
 	t.Setenv("GH_TOKEN", botToken)
-	checkout, err := Clone(ctx, t.TempDir(), repoName, repo.DefaultBranch)
+	checkout, err := Clone(ctx, t.TempDir(), repoName, repo.DefaultBranch, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,40 +211,31 @@ func TestLiveCommitAndPush(t *testing.T) {
 			t.Error(err)
 		}
 	})
-	base, err := checkout.Head(ctx)
+	base, err := checkout.verifiedHead(ctx)
 	if err != nil || len(base) != 40 {
 		t.Fatalf("cloned default-branch HEAD = %q: %v", base, err)
 	}
 	if err := checkout.NewBranch(ctx, branch); err != nil {
 		t.Fatal(err)
 	}
-	if err := checkout.SetPushRepository(forkName); err != nil {
-		t.Fatal(err)
-	}
-	changed, err := checkout.HasChanges(ctx)
-	if err != nil || changed {
-		t.Fatalf("new branch HasChanges = %t, %v; want false", changed, err)
+	if err := checkout.CommitAndPush(ctx, forkName, branch, cfg.BotLogin, "test: unchanged branch", func(string) error { t.Fatal("unchanged tree reached push"); return nil }); !errors.Is(err, ErrNoChanges) {
+		t.Fatalf("unchanged branch=%v", err)
 	}
 	name := "minion-live-gitwork-" + id + ".txt"
-	if err := os.WriteFile(filepath.Join(checkout.Path(), name), []byte("Minion live Gitwork test.\n"), 0o600); err != nil {
+	if err := checkout.Import(ctx, base, []workspace.Change{{Path: name, Mode: workspace.Regular, Data: []byte("Minion live Gitwork test.\n")}}); err != nil {
 		t.Fatal(err)
 	}
-	changed, err = checkout.HasChanges(ctx)
-	if err != nil || !changed {
-		t.Fatalf("modified branch HasChanges = %t, %v; want true", changed, err)
-	}
-	if err := checkout.CommitAndPush(ctx, branch, cfg.BotLogin, "test: Gitwork live publish "+id, func(sha string) error {
+	if err := checkout.CommitAndPush(ctx, forkName, branch, cfg.BotLogin, "test: Gitwork live publish "+id, func(sha string) error {
 		recordedHead = sha
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if head, err := checkout.Head(ctx); err != nil || head != recordedHead || head == base {
+	if head, err := checkout.verifiedHead(ctx); err != nil || head != recordedHead || head == base {
 		t.Fatalf("committed HEAD = %q, recorded = %q, base = %q: %v", head, recordedHead, base, err)
 	}
-	changed, err = checkout.HasChanges(ctx)
-	if err != nil || changed {
-		t.Fatalf("committed branch HasChanges = %t, %v; want false", changed, err)
+	if err := checkout.CommitAndPush(ctx, forkName, branch, cfg.BotLogin, "test: unchanged branch", func(string) error { t.Fatal("unchanged committed tree reached push"); return nil }); !errors.Is(err, ErrNoChanges) {
+		t.Fatalf("committed branch=%v", err)
 	}
 	remote, err := bot.Branch(ctx, forkName, branch)
 	if err != nil || remote.Commit.SHA != recordedHead {
@@ -229,7 +244,7 @@ func TestLiveCommitAndPush(t *testing.T) {
 	if _, err := owner.Branch(ctx, repoName, branch); !liveGitworkNotFound(err) {
 		t.Fatalf("base repository unexpectedly received a test branch: %v", err)
 	}
-	identity, err := runGit(ctx, checkout.Path(), "show", "-s", "--format=%an <%ae>|%cn <%ce>", "HEAD")
+	identity, err := runGit(ctx, checkout.path, "show", "-s", "--format=%an <%ae>|%cn <%ce>", "HEAD")
 	wantIdentity := cfg.BotLogin + " <" + cfg.BotLogin + "@users.noreply.github.com>"
 	if err != nil || identity != wantIdentity+"|"+wantIdentity {
 		t.Fatalf("committed identity = %q, want %q: %v", identity, wantIdentity+"|"+wantIdentity, err)

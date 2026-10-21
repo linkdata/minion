@@ -22,7 +22,12 @@ func TestStoreLocksAndPersistsCompletedCommands(t *testing.T) {
 	}
 	store.Data.Processed["job"] = initial
 	store.Data.JobFailures["failed"] = JobFailure{Attempts: 2, ReplyAttempts: 1}
+	store.Data.UnconfirmedProcessJob = "unsafe-job"
 	store.Data.NextInviteCheckAt = initial.Add(time.Hour)
+	store.Data.RepositoryCursors["owner/repo"] = initial.Add(time.Minute)
+	store.Data.NextPollAt = initial.Add(2 * time.Minute)
+	store.Data.PendingNotifications["thread"] = PendingNotification{Repository: "owner/repo", Since: initial}
+	store.Data.PendingFixes["fix-job"] = "verified-sha"
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}
@@ -39,8 +44,11 @@ func TestStoreLocksAndPersistsCompletedCommands(t *testing.T) {
 			t.Error(err)
 		}
 	}()
-	if _, ok := reopened.Data.Processed["job"]; !ok || reopened.Data.JobFailures["failed"] != (JobFailure{Attempts: 2, ReplyAttempts: 1}) || !reopened.Data.Cursor.Equal(initial) || !reopened.Data.NextInviteCheckAt.Equal(initial.Add(time.Hour)) {
-		t.Fatalf("lost persisted state: %+v", reopened.Data)
+	got := reopened.Data
+	if _, ok := got.Processed["job"]; !ok || got.JobFailures["failed"] != (JobFailure{Attempts: 2, ReplyAttempts: 1}) || !got.Cursor.Equal(initial) ||
+		!got.RepositoryCursors["owner/repo"].Equal(initial.Add(time.Minute)) || !got.NextPollAt.Equal(initial.Add(2*time.Minute)) || !got.NextInviteCheckAt.Equal(initial.Add(time.Hour)) ||
+		got.PendingNotifications["thread"] != (PendingNotification{Repository: "owner/repo", Since: initial}) || got.PendingFixes["fix-job"] != "verified-sha" || got.UnconfirmedProcessJob != "unsafe-job" {
+		t.Fatalf("lost persisted state: %+v", got)
 	}
 	info, err := os.Stat(path)
 	if err != nil {
@@ -77,57 +85,6 @@ func TestOpenFailureReleasesLock(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
-	}
-}
-
-func TestOpenRetiresPendingReleases(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "state.json")
-	initial := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
-	saved := map[string]any{
-		"cursor":                initial,
-		"repository_cursors":    map[string]time.Time{"owner/repo": initial.Add(time.Minute)},
-		"next_poll_at":          initial.Add(2 * time.Minute),
-		"next_invite_check_at":  initial.Add(time.Hour),
-		"processed":             map[string]time.Time{"completed": initial},
-		"job_failures":          map[string]JobFailure{"release-job": {Attempts: 1}, "failed": {Attempts: 2}},
-		"pending_notifications": map[string]PendingNotification{"thread": {Repository: "owner/repo", Since: initial}},
-		"pending_fixes":         map[string]string{"fix-job": "verified-sha"},
-		"pending_releases": map[string]any{
-			"release-job": map[string]string{"tag": "v1", "target": "old-sha", "notes": "Do not publish these notes."},
-			"completed":   map[string]string{"tag": "v2"},
-		},
-	}
-	data, err := json.Marshal(saved)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, data, 0600); err != nil {
-		t.Fatal(err)
-	}
-	for range 2 {
-		store, err := Open(path, initial.Add(24*time.Hour))
-		if err != nil {
-			t.Fatal(err)
-		}
-		got := store.Data
-		if err := store.Close(); err != nil {
-			t.Fatal(err)
-		}
-		if !got.Cursor.Equal(initial) || !got.RepositoryCursors["owner/repo"].Equal(initial.Add(time.Minute)) ||
-			!got.NextPollAt.Equal(initial.Add(2*time.Minute)) || !got.NextInviteCheckAt.Equal(initial.Add(time.Hour)) ||
-			!got.Processed["completed"].Equal(initial) || got.Processed["release-job"].IsZero() || len(got.Processed) != 2 ||
-			len(got.JobFailures) != 1 || got.JobFailures["failed"].Attempts != 2 ||
-			len(got.PendingNotifications) != 1 || !got.PendingNotifications["thread"].Since.Equal(initial) ||
-			len(got.PendingFixes) != 1 || got.PendingFixes["fix-job"] != "verified-sha" {
-			t.Fatalf("retirement changed unrelated state: %+v", got)
-		}
-		data, err = os.ReadFile(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if bytes.Contains(data, []byte("pending_releases")) || bytes.Contains(data, []byte("Do not publish these notes.")) {
-			t.Fatalf("retired checkpoint retained: %s", data)
-		}
 	}
 }
 

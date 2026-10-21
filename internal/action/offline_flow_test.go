@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/linkdata/minion/internal/codexcli"
+	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/github"
@@ -23,19 +23,19 @@ import (
 	"github.com/linkdata/minion/internal/state"
 )
 
-// Exercise the real API client, monitor, executor, and Git checkout together.
+// Exercise the real API client, monitor, orchestrator, and Git checkout together.
 // All GitHub responses come from this local server; Git uses a local bare repo.
 func TestOfflineReviewPollRecoversAfterPublication(t *testing.T) {
-	_, head := auditGitFixture(t)
+	_, head, _ := gitFixtureRemote(t)
 
 	now := time.Date(2026, 10, 9, 8, 1, 0, 0, time.UTC)
 	requestAt := now.Add(-time.Second) // Remains inside the next poll's cursor overlap.
 	requestBody := "@linkdataminion review"
-	parsed, err := command.ParseForLogin(requestBody, "linkdataminion")
+	parsed, err := command.ParseForLoginCommands(requestBody, "linkdataminion", defaultActionTestCommands)
 	if err != nil {
 		t.Fatal(err)
 	}
-	jobID := sha256.Sum256([]byte("o/r#issue-comment:42\x00" + parsed.Key))
+	jobID := sha256.Sum256([]byte("o/r#issue-comment:42\x00" + parsed.Name))
 	marker := fmt.Sprintf("<!-- linkdataminion:%x -->", jobID)
 	request := github.Comment{
 		ID: 42, NodeID: "request-node", Body: requestBody,
@@ -132,9 +132,6 @@ func TestOfflineReviewPollRecoversAfterPublication(t *testing.T) {
 			_, _ = fmt.Fprint(w, `{"permission":"write","user":{"login":"writer","id":7}}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
 			_, _ = fmt.Fprint(w, `{"id":1,"full_name":"o/r","owner":{"id":2,"login":"o"},"default_branch":"main","private":true}`)
-		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/o/r/git/trees/"):
-			sha := strings.TrimPrefix(r.URL.Path, "/repos/o/r/git/trees/")
-			_, _ = fmt.Fprintf(w, `{"sha":%q,"truncated":false,"tree":[]}`, sha)
 		case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/pulls/7/reviews":
 			var input struct {
 				Body     string `json:"body"`
@@ -167,6 +164,11 @@ func TestOfflineReviewPollRecoversAfterPublication(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 	store.Data.NextInviteCheckAt = now.Add(time.Hour)
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
@@ -175,27 +177,32 @@ func TestOfflineReviewPollRecoversAfterPublication(t *testing.T) {
 	commands := map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{testReviewSkillURL}}}
 	run := func(at time.Time, store *state.Store) {
 		t.Helper()
-		client := github.New("offline-token")
-		client.BaseURL, client.HTTPClient = server.URL, server.Client()
-		executor := &Executor{GitHub: client, BotLogin: "linkdataminion", Store: store, WorkRoot: t.TempDir(), Commands: commands,
-			RunCodex: func(_ context.Context, dir, prompt string, writable bool, outputDir string) (codexcli.Result, error) {
-				if _, err := os.Stat(dir); err != nil || writable || outputDir != "" || !strings.Contains(prompt, head) {
-					return codexcli.Result{}, fmt.Errorf("unexpected Codex invocation: dir=%q writable=%t output=%q stat=%v", dir, writable, outputDir, err)
-				}
-				record("codex")
-				return codexcli.Result{Answer: "No findings."}, nil
+		client := testGitHub(server, "offline-token")
+		orchestrator := &Orchestrator{WorkRoot: t.TempDir(), GitHub: client,
+			BotLogin: "linkdataminion",
+			Store:    store,
+			Commands: commands,
+			Runner: Runner{
+				runModel: func(_ context.Context, modelRequest modelRun) (aicli.Result, error) {
+					dir, prompt, writable, outputDir := modelRequest.dir, modelRequest.prompt, modelRequest.writable, modelRequest.outputDir
+					if _, err := os.Stat(dir); err != nil || writable || outputDir != "" || !strings.Contains(prompt, head) {
+						return aicli.Result{}, fmt.Errorf("unexpected model invocation: dir=%q writable=%t output=%q stat=%v", dir, writable, outputDir, err)
+					}
+					record("model")
+					return aicli.Result{Answer: "No findings."}, nil
+				},
 			},
 		}
 		m := monitor.Monitor{Config: config.Config{BotLogin: "linkdataminion", PollIntervalSeconds: 60, Commands: commands,
 			Repositories: []config.Repository{{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"review"}, AllowedActors: []string{"writer"}, AllowedActorIDs: map[string]int64{"writer": 7}}}},
-			GitHub: client, Executor: executor, Now: func() time.Time { return at }}
+			GitHub: client, Handler: orchestrator, Now: func() time.Time { return at }}
 		if _, err := m.RunOnce(context.Background(), store); err != nil {
 			t.Fatal(err)
 		}
 	}
 	run(now, store)
 	firstEvents, firstReviews := snapshot()
-	if !slices.Equal(firstEvents, []string{"verify request", "permission", "reaction", "codex", "publish"}) ||
+	if !slices.Equal(firstEvents, []string{"verify request", "permission", "reaction", "model", "publish"}) ||
 		len(firstReviews) != 1 || !strings.Contains(firstReviews[0].Body, "No findings.") || len(store.Data.Processed) != 1 {
 		t.Fatalf("first poll: events=%v reviews=%v processed=%v", firstEvents, firstReviews, store.Data.Processed)
 	}
@@ -207,21 +214,17 @@ func TestOfflineReviewPollRecoversAfterPublication(t *testing.T) {
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	store, err = state.Open(statePath, time.Time{})
+	reopenedStore, err := state.Open(statePath, time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() {
-		if err := store.Close(); err != nil {
-			t.Error(err)
-		}
-	}()
+	store = reopenedStore
 	if len(store.Data.Processed) != 0 {
 		t.Fatalf("crash simulation retained completion checkpoint: %v", store.Data.Processed)
 	}
 	run(now.Add(time.Minute), store)
 	allEvents, allReviews := snapshot()
-	if !slices.Equal(allEvents, []string{"verify request", "permission", "reaction", "codex", "publish",
+	if !slices.Equal(allEvents, []string{"verify request", "permission", "reaction", "model", "publish",
 		"verify request", "permission", "reaction", "verify review"}) || len(allReviews) != 1 || len(store.Data.Processed) != 1 {
 		t.Fatalf("replayed poll: events=%v reviews=%v processed=%v", allEvents, allReviews, store.Data.Processed)
 	}

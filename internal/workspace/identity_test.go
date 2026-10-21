@@ -1,0 +1,33 @@
+package workspace
+
+import (
+	"strings"
+	"testing"
+)
+
+func TestIdentitySegmentBounds(t *testing.T) {
+	for _, value := range []string{"", ".", "..", "a/b", "a\nb", "café", strings.Repeat("a", 101)} {
+		if ValidIdentitySegment(value) {
+			t.Fatalf("accepted identifier %q", value)
+		}
+	}
+	if !ValidIdentitySegment(strings.Repeat("a", 100)) || !ValidIdentitySegment("owner.repo_1-2") {
+		t.Fatal("valid identifier refused")
+	}
+}
+
+func TestRepositoryIdentity(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		valid bool
+	}{
+		{"owner/repo.name_1-2", true},
+		{strings.Repeat("a", 100) + "/" + strings.Repeat("b", 100), true},
+		{"", false}, {"owner", false}, {"/repo", false}, {"owner/", false},
+		{"owner/repo/extra", false}, {"../repo", false}, {"owner/..", false},
+	} {
+		if got := ValidRepository(test.name); got != test.valid {
+			t.Errorf("ValidRepository(%q)=%t, want %t", test.name, got, test.valid)
+		}
+	}
+}

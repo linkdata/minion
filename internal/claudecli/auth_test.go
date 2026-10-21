@@ -9,9 +9,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
+	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/config"
+	workspacepath "github.com/linkdata/minion/internal/workspace"
 )
 
 const dummyAPIKey = "minion-dummy-config-api-key"
@@ -53,7 +54,11 @@ func TestAuthenticationCanonicalParent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if filepath.Dir(dir) != parent {
+	expectedParent, err := filepath.EvalSymlinks(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Dir(dir) != expectedParent {
 		t.Fatal("credential path is not canonical for sandbox grant checks")
 	}
 }
@@ -67,7 +72,7 @@ func TestAPIKeyConfiguration(t *testing.T) {
 test "$(cat "$CLAUDE_CONFIG_DIR/api-key")" = '`+dummyAPIKey+`' || exit 3
 printf '%s\n' "$CLAUDE_CONFIG_DIR" >> "$0.authdirs"
 if [ "$1" = '--version' ]; then
-  printf '%s\n' '2.1.295 (Claude Code)'
+  printf '%s\n' '2.1.302 (Claude Code)'
   exit
 fi
 printf '%s\n' "$@" >> "$0.args"
@@ -128,7 +133,7 @@ esac
 					t.Fatal("missing explicit configured-key helper")
 				}
 				for _, grant := range append(policy.Sandbox.Filesystem.Read, policy.Sandbox.Filesystem.Write...) {
-					if within(grant, dirs[0]) {
+					if workspacepath.Within(grant, dirs[0]) {
 						t.Fatal("credential helper is exposed to sandbox tools")
 					}
 				}
@@ -170,6 +175,28 @@ exit 1
 	}
 }
 
+func TestAPIKeyEncodedStderrRedaction(t *testing.T) {
+	key := `fixture"secret`
+	encoded, err := json.Marshal(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, validate := range []bool{false, true} {
+		t.Run(map[bool]string{false: "run", true: "validate"}[validate], func(t *testing.T) {
+			fakeExecutable(t, "claude", "printf '%s\\n' "+aicli.ShellQuote(string(encoded[1:len(encoded)-1]))+" >&2\nexit 1\n")
+			var err error
+			if validate {
+				_, err = Validate(context.Background(), config.ClaudeConfig{APIKey: key})
+			} else {
+				_, err = Run(context.Background(), t.TempDir(), "task", false, "", config.ClaudeConfig{APIKey: key})
+			}
+			if err == nil || strings.Contains(err.Error(), "fixture") || !strings.Contains(err.Error(), "[redacted]") {
+				t.Fatalf("encoded configured key escaped in CLI error: %v", err)
+			}
+		})
+	}
+}
+
 func TestAPIKeyAnswerRedaction(t *testing.T) {
 	fakeExecutable(t, "claude", "cat >/dev/null\nprintf '%s\\n' '"+strings.ReplaceAll(successfulResult, "final answer", dummyAPIKey)+"'\n")
 	result, err := Run(context.Background(), t.TempDir(), "task", false, "", config.ClaudeConfig{APIKey: dummyAPIKey})
@@ -197,22 +224,4 @@ func TestAPIKeyGrantOverlap(t *testing.T) {
 	if err != nil || len(entries) != 2 {
 		t.Fatalf("failed validation retained temporary files: %v, %v", entries, err)
 	}
-}
-
-func FuzzShellQuote(f *testing.F) {
-	for _, value := range []string{"", "plain", "space ' apostrophe", "$PATH $(printf expanded)", "`printf expanded`", "line\nbreak", "'; printf expanded; '", "\xff"} {
-		f.Add(value)
-	}
-	f.Fuzz(func(t *testing.T, value string) {
-		if strings.ContainsRune(value, 0) || len(value) > 4096 {
-			t.Skip("shell arguments cannot contain NUL; keep subprocess input bounded")
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		// #nosec G204 -- This test verifies that shellQuote preserves arbitrary input literally.
-		data, err := exec.CommandContext(ctx, "/bin/sh", "-c", "printf '%s' "+shellQuote(value)).Output()
-		if err != nil || string(data) != value {
-			t.Fatalf("shell quote changed input %q: %q, %v", value, data, err)
-		}
-	})
 }

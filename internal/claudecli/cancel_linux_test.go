@@ -5,76 +5,64 @@ package claudecli
 import (
 	"context"
 	"errors"
-	"fmt"
-	"os"
-	"strconv"
-	"strings"
 	"testing"
 	"time"
 
+	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/config"
+	"github.com/linkdata/minion/internal/testsupport"
+	"github.com/linkdata/minion/internal/usage"
 )
 
 func TestRunCancelsActiveChildProcess(t *testing.T) {
-	binary := fakeExecutable(t, "claude", `sleep 30 &
-printf '%s\n' "$!" > "$0.pid"
+	binary := fakeExecutable(t, "claude", `printf '%s\n' '`+assistantUsageEvent("partial", 3, 5, 7, 2)+`'
+( i=0; while [ -f "$0" ] && [ "$i" -lt 30 ] && [ ! -f "$0.pid.stop" ]; do sleep 1; i=$((i+1)); done ) &
+printf '%s\n' "$!" > "$0.pid.tmp"
+mv -- "$0.pid.tmp" "$0.pid"
 wait
 `)
+	testsupport.StopOnCleanup(t, binary+".pid.stop")
 	workspace := t.TempDir()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	done := make(chan error, 1)
+	type outcome struct {
+		result aicli.Result
+		err    error
+	}
+	done := make(chan outcome, 1)
 	go func() {
-		_, err := Run(ctx, workspace, "task", false, "", config.ClaudeConfig{})
-		done <- err
+		defer close(done)
+		result, err := Run(ctx, workspace, "task", false, "", config.ClaudeConfig{})
+		done <- outcome{result, err}
 	}()
 	// The real subprocess must start before cancellation; a synthetic clock
 	// cannot establish whether its process group has actually been created.
-	ticker := time.NewTicker(5 * time.Millisecond)
-	defer ticker.Stop()
-	deadline := time.NewTimer(5 * time.Second)
-	defer deadline.Stop()
-	var pid int
-start:
-	for {
-		select {
-		case <-ticker.C:
-			if data, err := os.ReadFile(binary + ".pid"); err == nil {
-				if pid, err = strconv.Atoi(strings.TrimSpace(string(data))); err == nil {
-					break start
-				}
-			}
-		case err := <-done:
-			t.Fatalf("run exited before child started: %v", err)
-		case <-deadline.C:
-			t.Fatal("child process did not start")
-		}
+	waitCtx, stopWait := context.WithTimeout(context.Background(), 5*time.Second)
+	defer stopWait()
+	child, err := testsupport.WaitForProcess(waitCtx, binary+".pid", done)
+	if err != nil {
+		cancel()
+		<-done
+		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		cleanupCtx, stopCleanup := context.WithTimeout(context.Background(), 3*time.Second)
+		defer stopCleanup()
+		if err := child.Cleanup(cleanupCtx); err != nil {
+			t.Error(err)
+		}
+	})
 	cancel()
 	select {
-	case err := <-done:
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("Run = %v, want cancellation", err)
+	case got := <-done:
+		if !errors.Is(got.err, context.Canceled) || got.result.Answer != "" || got.result.UsageComplete || got.result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 2}) {
+			t.Fatalf("canceled Run lost partial usage: result=%+v error=%v", got.result, got.err)
 		}
-	case <-deadline.C:
+	case <-waitCtx.Done():
 		t.Fatal("cancellation did not finish the run")
 	}
-	for {
-		data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
-		if errors.Is(err, os.ErrNotExist) {
-			return
-		}
-		if err != nil {
-			t.Fatal(err)
-		}
-		fields := strings.Fields(string(data))
-		if len(fields) > 2 && fields[2] == "Z" {
-			return // A killed child can await reaping by the container's init.
-		}
-		select {
-		case <-ticker.C:
-		case <-deadline.C:
-			t.Fatal("child survived process-group cancellation")
-		}
+	// Keep observing this child after cancellation, even if its PID is recycled.
+	if err := child.WaitExited(waitCtx); err != nil {
+		t.Fatalf("child survived process-group cancellation: %v", err)
 	}
 }

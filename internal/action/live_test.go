@@ -3,6 +3,7 @@ package action
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -16,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/linkdata/minion/internal/codexcli"
+	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/github"
@@ -64,6 +65,11 @@ func TestLiveFixPublishesBranch(t *testing.T) {
 		t.Fatalf("issue #%d is not an owner-authored fixture: %v", cfg.IssueNumber, err)
 	}
 
+	base, err := owner.Branch(ctx, liveFixRepository, repo.DefaultBranch)
+	if err != nil || len(base.Commit.SHA) != 40 {
+		t.Fatalf("default branch HEAD is unavailable: %v", err)
+	}
+
 	var randomID [32]byte
 	if _, err := rand.Read(randomID[:]); err != nil {
 		t.Fatal(err)
@@ -100,36 +106,50 @@ func TestLiveFixPublishesBranch(t *testing.T) {
 	}
 	t.Cleanup(func() { liveFixCleanup(t, owner, bot, fixture.ownerToken, fixture.botToken, cfg, job, branch, store) })
 	t.Setenv("GH_TOKEN", fixture.botToken)
-	codexCalls := 0
-	executor := &Executor{
-		GitHub: bot, BotLogin: cfg.BotLogin, Store: store, WorkRoot: t.TempDir(),
+	modelCalls := 0
+	orchestrator := &Orchestrator{WorkRoot: t.TempDir(), GitHub: bot,
+		BotLogin: cfg.BotLogin,
+		Store:    store,
 		Commands: map[string]config.CommandMapping{"fix": {Action: "fix", Skills: []string{testFixSkillURL}}},
-		RunCodex: func(_ context.Context, dir, _ string, writable bool, outputDir string) (codexcli.Result, error) {
-			codexCalls++
-			if !writable || outputDir != "" {
-				return codexcli.Result{}, errors.New("unexpected Codex invocation for live fix")
-			}
-			name := "minion-live-fix-" + id[:12] + ".txt"
-			err := os.WriteFile(filepath.Join(dir, name), []byte("Minion live fix test fixture.\n"), 0o600)
-			return codexcli.Result{Answer: "Live fix fixture created."}, err
+		Runner: Runner{
+			runModel: func(_ context.Context, modelRequest modelRun) (aicli.Result, error) {
+				dir, writable, outputDir := modelRequest.dir, modelRequest.writable, modelRequest.outputDir
+				modelCalls++
+				if !writable || outputDir != "" {
+					return aicli.Result{}, errors.New("unexpected model invocation for live fix")
+				}
+				assertModelRepository(t, dir, base.Commit.SHA)
+				name := "minion-live-fix-" + id[:12] + ".txt"
+				err := os.WriteFile(filepath.Join(dir, name), []byte("Minion live fix test fixture.\n"), 0o600)
+				return aicli.Result{Answer: "Live fix fixture created."}, err
+			},
 		},
 	}
-	if err := executor.CheckFixFork(ctx, job.Repository); err != nil {
+	if err := orchestrator.CheckFixFork(ctx, job.Repository); err != nil {
 		t.Fatal(err)
 	}
-	if err := executor.Execute(ctx, job); err != nil {
+	if err := orchestrator.Execute(ctx, job); err != nil {
 		t.Fatal(err)
 	}
-	if codexCalls != 1 {
-		t.Fatalf("Codex calls = %d, want 1", codexCalls)
+	if modelCalls != 1 {
+		t.Fatalf("model calls = %d, want 1", modelCalls)
 	}
 	sha := store.Data.PendingFixes[job.ID]
 	if len(sha) != 40 {
 		t.Fatalf("fix did not record a commit SHA: %q", sha)
 	}
 	remote, err := bot.Branch(ctx, liveFixFork, branch)
-	if err != nil || remote.Name != branch || !strings.EqualFold(remote.Commit.SHA, sha) {
+	if err != nil || remote.Name != branch || remote.Commit.SHA != sha {
 		t.Fatalf("live fix branch does not match recorded SHA: %v", err)
+	}
+	var pushedFile struct{ Type, Encoding, Content string }
+	status, err := liveFixAPIRepo(ctx, fixture.botToken, liveFixFork, http.MethodGet, "/contents/minion-live-fix-"+id[:12]+".txt?ref="+sha, &pushedFile)
+	if err != nil || status != http.StatusOK || pushedFile.Type != "file" || pushedFile.Encoding != "base64" {
+		t.Fatalf("read pushed fix bytes: HTTP%d,%v", status, err)
+	}
+	pushedBytes, err := base64.StdEncoding.DecodeString(pushedFile.Content)
+	if err != nil || string(pushedBytes) != "Minion live fix test fixture.\n" {
+		t.Fatalf("pushed fixture bytes differ: %q,%v", pushedBytes, err)
 	}
 	if _, err := owner.Branch(ctx, liveFixRepository, branch); !liveFixNotFound(err) {
 		t.Fatalf("base repository unexpectedly received a fix branch: %v", err)
@@ -141,11 +161,11 @@ func TestLiveFixPublishesBranch(t *testing.T) {
 	if pull, err := owner.FindPullRequestByHead(ctx, liveFixRepository, repo.DefaultBranch, cfg.BotLogin+":"+branch); err != nil || pull != nil {
 		t.Fatalf("fix unexpectedly opened a pull request: %v", err)
 	}
-	if err := executor.Execute(ctx, job); err != nil {
+	if err := orchestrator.Execute(ctx, job); err != nil {
 		t.Fatal(err)
 	}
-	if codexCalls != 1 || store.Data.PendingFixes[job.ID] != sha {
-		t.Fatalf("repeat execution changed the fix: Codex calls = %d, recorded SHA = %q", codexCalls, store.Data.PendingFixes[job.ID])
+	if modelCalls != 1 || store.Data.PendingFixes[job.ID] != sha {
+		t.Fatalf("repeat execution changed the fix: model calls = %d, recorded SHA = %q", modelCalls, store.Data.PendingFixes[job.ID])
 	}
 	if repeatID, _, err := liveActionReply(ctx, owner, cfg, job); err != nil || repeatID != commentID {
 		t.Fatalf("repeat execution changed the acknowledgement: id = %d, want %d: %v", repeatID, commentID, err)
@@ -255,7 +275,7 @@ func liveFixCleanup(t *testing.T, owner, bot *github.Client, ownerToken, botToke
 		return
 	}
 	sha := store.Data.PendingFixes[job.ID]
-	if len(sha) != 40 || remote.Name != branch || !strings.EqualFold(remote.Commit.SHA, sha) {
+	if len(sha) != 40 || remote.Name != branch || remote.Commit.SHA != sha {
 		t.Errorf("refuse to delete changed or unrecorded live fix branch %s", branch)
 		return
 	}
@@ -275,9 +295,7 @@ func liveActionReplyCleanup(t *testing.T, ctx context.Context, owner *github.Cli
 	if err != nil {
 		t.Errorf("find live action reply for cleanup: %v", err)
 	} else if commentID != 0 {
-		if !strings.HasSuffix(strings.TrimSpace(reply.Body), "\n\n"+job.Marker()) {
-			t.Errorf("refuse to delete live action reply %d without its job marker", commentID)
-		} else if current, err := owner.CurrentItem(ctx, reply); err != nil || current.Edited || current.Body != reply.Body ||
+		if current, err := owner.CurrentItem(ctx, reply); err != nil || current.Edited || current.Body != reply.Body ||
 			!strings.EqualFold(current.Author.Login, cfg.BotLogin) {
 			t.Errorf("refuse to delete edited or changed live action reply %d: %v", commentID, err)
 		} else {

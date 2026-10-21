@@ -12,29 +12,38 @@ func TestLoadModelProviders(t *testing.T) {
 	for _, tt := range []struct {
 		name, fields, main, adversarial string
 		rounds                          int
-		wantError                       bool
+		wantError                       string
 	}{
-		{name: "existing config", main: "codex", rounds: 3},
-		{name: "codex only", fields: `,"main":"codex"`, main: "codex", rounds: 3},
-		{name: "claude only", fields: `,"main":"claude"`, main: "claude", rounds: 3},
-		{name: "claude critic", fields: `,"adversarial":"claude"`, main: "codex", adversarial: "claude", rounds: 3},
-		{name: "codex critic", fields: `,"main":" claude ","adversarial":" codex "`, main: "claude", adversarial: "codex", rounds: 3},
+		{name: "existing config", main: "codex", rounds: 5},
+		{name: "codex only", fields: `,"main":"codex"`, main: "codex", rounds: 5},
+		{name: "claude only", fields: `,"main":"claude"`, main: "claude", rounds: 5},
+		{name: "claude critic", fields: `,"adversarial":"claude"`, main: "codex", adversarial: "claude", rounds: 5},
+		{name: "codex critic", fields: `,"main":" claude ","adversarial":" codex "`, main: "claude", adversarial: "codex", rounds: 5},
 		{name: "one round", fields: `,"critic_max_rounds":1`, main: "codex", rounds: 1},
+		{name: "three rounds", fields: `,"critic_max_rounds":3`, main: "codex", rounds: 3},
 		{name: "ten rounds", fields: `,"critic_max_rounds":10`, main: "codex", rounds: 10},
-		{name: "zero rounds", fields: `,"critic_max_rounds":0`, main: "codex", rounds: 3},
-		{name: "unknown main", fields: `,"main":"other"`, wantError: true},
-		{name: "unknown critic", fields: `,"adversarial":"other"`, wantError: true},
-		{name: "same default provider", fields: `,"adversarial":"codex"`, wantError: true},
-		{name: "same explicit provider", fields: `,"main":"claude","adversarial":"claude"`, wantError: true},
-		{name: "negative rounds", fields: `,"critic_max_rounds":-1`, wantError: true},
-		{name: "too many rounds", fields: `,"critic_max_rounds":11`, wantError: true},
-		{name: "claude model whitespace", fields: `,"claude":{"model":"bad model"}`, wantError: true},
-		{name: "claude effort whitespace", fields: `,"claude":{"effort":"high\nlow"}`, wantError: true},
-		{name: "claude runtime skills", fields: `,"claude":{"skills":["/tmp/SKILL.md"]}`, wantError: true},
-		{name: "claude runtime directories", fields: `,"claude":{"read_only_dirs":["/tmp"]}`, wantError: true},
-		{name: "codex runtime directories", fields: `,"codex":{"read_only_dirs":["/tmp"]}`, wantError: true},
-		{name: "claude runtime schema", fields: `,"claude":{"output_schema":"{}"}`, wantError: true},
-		{name: "codex runtime schema", fields: `,"codex":{"output_schema":"{}"}`, wantError: true},
+		{name: "maximum rounds", fields: `,"critic_max_rounds":20`, main: "codex", rounds: 20},
+		{name: "zero rounds", fields: `,"critic_max_rounds":0`, main: "codex", rounds: 5},
+		{name: "unknown main", fields: `,"main":"other"`, wantError: "main must be"},
+		{name: "unknown critic", fields: `,"adversarial":"other"`, wantError: "adversarial must be"},
+		{name: "same default provider", fields: `,"adversarial":"codex"`, wantError: "adversarial must differ"},
+		{name: "same explicit provider", fields: `,"main":"claude","adversarial":"claude"`, wantError: "adversarial must differ"},
+		{name: "negative rounds", fields: `,"critic_max_rounds":-1`, wantError: "critic_max_rounds"},
+		{name: "too many rounds", fields: `,"critic_max_rounds":21`, wantError: "critic_max_rounds"},
+		{name: "model and effort at limit", fields: fmt.Sprintf(`,"codex":{"model":%q,"reasoning_effort":%q},"claude":{"model":%q,"effort":%q}`, strings.Repeat("m", MaxModelSettingBytes), strings.Repeat("e", MaxModelSettingBytes), strings.Repeat("m", MaxModelSettingBytes), strings.Repeat("e", MaxModelSettingBytes)), main: "codex", rounds: 5},
+		{name: "codex model too long", fields: fmt.Sprintf(`,"codex":{"model":%q}`, strings.Repeat("m", MaxModelSettingBytes+1)), wantError: "codex model and reasoning_effort"},
+		{name: "codex effort too long", fields: fmt.Sprintf(`,"codex":{"reasoning_effort":%q}`, strings.Repeat("e", MaxModelSettingBytes+1)), wantError: "codex model and reasoning_effort"},
+		{name: "claude model too long", fields: fmt.Sprintf(`,"claude":{"model":%q}`, strings.Repeat("m", MaxModelSettingBytes+1)), wantError: "claude model and effort"},
+		{name: "claude effort too long", fields: fmt.Sprintf(`,"claude":{"effort":%q}`, strings.Repeat("e", MaxModelSettingBytes+1)), wantError: "claude model and effort"},
+		{name: "codex model NUL", fields: `,"codex":{"model":"bad\u0000model"}`, wantError: "codex model and reasoning_effort"},
+		{name: "claude effort NUL", fields: `,"claude":{"effort":"bad\u0000effort"}`, wantError: "claude model and effort"},
+		{name: "claude model whitespace", fields: `,"claude":{"model":"bad model"}`, wantError: "claude model and effort"},
+		{name: "claude effort whitespace", fields: `,"claude":{"effort":"high\nlow"}`, wantError: "claude model and effort"},
+		{name: "claude runtime skills", fields: `,"claude":{"skills":["/tmp/SKILL.md"]}`, wantError: "unknown field"},
+		{name: "claude runtime directories", fields: `,"claude":{"read_only_dirs":["/tmp"]}`, wantError: "unknown field"},
+		{name: "codex runtime directories", fields: `,"codex":{"read_only_dirs":["/tmp"]}`, wantError: "unknown field"},
+		{name: "claude runtime schema", fields: `,"claude":{"output_schema":"{}"}`, wantError: "unknown field"},
+		{name: "codex runtime schema", fields: `,"codex":{"output_schema":"{}"}`, wantError: "unknown field"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "config.json")
@@ -43,9 +52,9 @@ func TestLoadModelProviders(t *testing.T) {
 				t.Fatal(err)
 			}
 			cfg, err := Load(path)
-			if tt.wantError {
-				if err == nil {
-					t.Fatal("accepted invalid model configuration")
+			if tt.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+					t.Fatalf("invalid model configuration error: %v", err)
 				}
 				return
 			}
@@ -53,6 +62,17 @@ func TestLoadModelProviders(t *testing.T) {
 				t.Fatalf("Load() providers = %q, %q, %d, %v; want %q, %q, %d", cfg.Main, cfg.Adversarial, cfg.CriticMaxRounds, err, tt.main, tt.adversarial, tt.rounds)
 			}
 		})
+	}
+}
+
+func TestValidateRejectsInvalidModelUTF8(t *testing.T) {
+	cfg := Config{
+		BotLogin:     "bot",
+		Codex:        CodexConfig{Model: string([]byte{0xff})},
+		Repositories: []Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"review"}}},
+	}
+	if err := cfg.Validate(t.TempDir()); err == nil || !strings.Contains(err.Error(), "codex model and reasoning_effort") {
+		t.Fatalf("invalid UTF-8 setting accepted: %v", err)
 	}
 }
 

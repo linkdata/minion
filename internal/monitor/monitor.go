@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/github"
+	"github.com/linkdata/minion/internal/processgroup"
 	"github.com/linkdata/minion/internal/state"
 	"github.com/linkdata/minion/internal/workroot"
 )
@@ -35,13 +37,13 @@ type GitHub interface {
 	CreateIssueComment(context.Context, string, int, string) (github.Comment, error)
 }
 
-// ErrTerminalJob marks a failed execution that cannot succeed by rerunning Codex.
+// ErrTerminalJob marks a failed execution that cannot succeed by rerunning the models.
 var ErrTerminalJob = errors.New("terminal job failure")
 
-// ErrPostCodexPublication marks a failed GitHub write after Codex completed.
+// ErrPostModelPublication marks publication failure for completed or previously completed model work.
 //
 // Retrying it must consume a job attempt even when the write error is transient.
-var ErrPostCodexPublication = errors.New("post-Codex publication failure")
+var ErrPostModelPublication = errors.New("post-model publication failure")
 
 const (
 	maxJobAttempts          = 3
@@ -49,7 +51,8 @@ const (
 	failureReply            = "Minion could not complete this request. No further automatic attempts will run. Check the service log and post a new command after the cause is fixed."
 )
 
-type Executor interface {
+// ActionHandler runs the trusted orchestration and publication workflow.
+type ActionHandler interface {
 	Execute(context.Context, Job) error
 }
 
@@ -70,7 +73,7 @@ type Monitor struct {
 	Config     config.Config
 	ConfigPath string
 	GitHub     GitHub
-	Executor   Executor
+	Handler    ActionHandler
 	Logger     *log.Logger
 	Now        func() time.Time
 }
@@ -85,7 +88,15 @@ func (m *Monitor) logf(format string, args ...any) {
 //
 // It persists each completed command before advancing that repository's cursor.
 // Failed threads remain queued for retries without blocking other repositories.
+// Parent cancellation preserves earlier failures and unprocessed retry state/cursors.
+// Executions reporting parent cancellation refund their attempt unless publication has begun.
 func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, error) {
+	if err := ctx.Err(); err != nil {
+		return store.Data.NextPollAt, err
+	}
+	if store.Data.UnconfirmedProcessJob != "" {
+		return store.Data.NextPollAt, fmt.Errorf("%w: job %s requires operator recovery", processgroup.ErrUnconfirmed, store.Data.UnconfirmedProcessJob)
+	}
 	now := time.Now
 	if m.Now != nil {
 		now = m.Now
@@ -95,6 +106,9 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			// Invitation failures should be visible, but should not stop scans of
 			// repositories for which this account already has access.
 			m.logf("invitation check: %v", err)
+		}
+		if err := ctx.Err(); err != nil {
+			return store.Data.NextPollAt, err
 		}
 		store.Data.NextInviteCheckAt = now().UTC().Add(15 * time.Minute)
 		if err := store.Save(); err != nil {
@@ -116,7 +130,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 	}
 	for _, repo := range m.Config.Repositories {
 		if _, ok := store.Data.RepositoryCursors[repo.Name]; !ok {
-			// Migrate the old account cursor before any repository poll can fail.
+			// Seed newly whitelisted repositories from the account cursor.
 			store.Data.RepositoryCursors[repo.Name] = store.Data.Cursor
 		}
 	}
@@ -136,6 +150,19 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 	var scans []scan
 	seen := make(map[string]bool)
 	var failures []error
+	stop := func(errs ...error) (time.Time, error) {
+		err := errors.Join(slices.Concat(failures, errs)...)
+		if canceled := ctx.Err(); canceled != nil && !errors.Is(err, canceled) {
+			err = errors.Join(err, canceled)
+		}
+		return next, err
+	}
+	stopAt := func(location string, err error) (time.Time, error) {
+		if err == nil {
+			err = ctx.Err()
+		}
+		return stop(fmt.Errorf("%s: %w", location, err))
+	}
 	var polled []string
 	for _, repo := range m.Config.Repositories {
 		since := store.Data.RepositoryCursors[repo.Name]
@@ -144,9 +171,15 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			minInterval = githubInterval
 			next = started.Add(minInterval)
 			store.Data.NextPollAt = next
-			if err := store.Save(); err != nil {
-				return next, err
+			if saveErr := store.Save(); saveErr != nil {
+				if err != nil {
+					err = fmt.Errorf("list %s notifications: %w", repo.Name, err)
+				}
+				return stop(err, saveErr)
 			}
+		}
+		if ctx.Err() != nil {
+			return stopAt("list "+repo.Name+" notifications", err)
 		}
 		if err != nil {
 			failures = append(failures, fmt.Errorf("list %s notifications: %w", repo.Name, err))
@@ -191,6 +224,9 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		return scans[i].notification.UpdatedAt.Before(scans[j].notification.UpdatedAt)
 	})
 	for _, entry := range scans {
+		if ctx.Err() != nil {
+			return stop()
+		}
 		notification := entry.notification
 		repo, ok := m.Config.Repository(notification.Repository.FullName)
 		if !ok {
@@ -203,10 +239,13 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			continue
 		}
 		liveRepo, err := m.GitHub.Repository(ctx, repo.Name)
+		if ctx.Err() != nil {
+			return stopAt("verify "+repo.Name+" repository identity", err)
+		}
 		if err != nil {
 			failures = append(failures, fmt.Errorf("verify %s repository identity: %w", repo.Name, err))
 			if err := m.deferNotification(store, entry.key, notification, entry.since, started); err != nil {
-				return next, err
+				return stop(err)
 			}
 			continue
 		}
@@ -228,10 +267,13 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		}
 		firstFailure := len(failures)
 		items, err := m.GitHub.ThreadItems(ctx, repo.Name, notification.Subject.Type, number, entry.since)
+		if ctx.Err() != nil {
+			return stopAt(fmt.Sprintf("%s %s #%d", repo.Name, notification.Subject.Type, number), err)
+		}
 		if err != nil {
 			failures = append(failures, fmt.Errorf("%s %s #%d: %w", repo.Name, notification.Subject.Type, number, err))
 			if err := m.deferNotification(store, entry.key, notification, entry.since, started); err != nil {
-				return next, err
+				return stop(err)
 			}
 			continue
 		}
@@ -244,13 +286,16 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				continue
 			}
 			if err != nil {
-				m.logf("skip command in %s: %v", item.HTMLURL, err)
+				m.logf("skip command in %s: %v", itemLocation(item), err)
 				continue
 			}
-			if _, done := store.Data.Processed[jobID(item.Key, preliminary.Key)]; done {
+			if _, done := store.Data.Processed[jobID(item.Key, preliminary.Name)]; done {
 				continue
 			}
 			current, err := m.GitHub.CurrentItem(ctx, item)
+			if ctx.Err() != nil {
+				return stopAt("verify command in "+itemLocation(item), err)
+			}
 			if err != nil {
 				failures = append(failures, fmt.Errorf("verify command in %s: %w", itemLocation(item), err))
 				continue
@@ -268,7 +313,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				continue
 			}
 			if err != nil {
-				m.logf("skip command in %s: %v", item.HTMLURL, err)
+				m.logf("skip command in %s: %v", itemLocation(item), err)
 				continue
 			}
 			job := Job{
@@ -277,7 +322,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				Number:      number,
 				Source:      item,
 				Command:     cmd,
-				ID:          jobID(item.Key, cmd.Key),
+				ID:          jobID(item.Key, cmd.Name),
 			}
 			if _, done := store.Data.Processed[job.ID]; done {
 				continue
@@ -285,10 +330,10 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			if item.Edited {
 				// The latest editor may not be the actor who introduced a
 				// retained command. Do not run commands from edited content.
-				m.logf("ignore edited command in %s (last editor @%s)", item.HTMLURL, item.Editor.Login)
+				m.logf("ignore edited command in %s (last editor @%s)", itemLocation(item), item.Editor.Login)
 				store.Data.Processed[job.ID] = started
 				if err := store.Save(); err != nil {
-					return next, err
+					return stop(err)
 				}
 				continue
 			}
@@ -296,11 +341,14 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				m.logf("ignore %s from @%s in %s: disabled action or actor", cmd.Action, item.Author.Login, repo.Name)
 				store.Data.Processed[job.ID] = started
 				if err := store.Save(); err != nil {
-					return next, err
+					return stop(err)
 				}
 				continue
 			}
 			permission, err := m.GitHub.Permission(ctx, repo.Name, item.Author.Login)
+			if ctx.Err() != nil {
+				return stopAt(fmt.Sprintf("check @%s permission in %s", item.Author.Login, repo.Name), err)
+			}
 			if err != nil {
 				failures = append(failures, fmt.Errorf("check @%s permission in %s: %w", item.Author.Login, repo.Name, err))
 				continue
@@ -309,7 +357,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				m.logf("ignore %s from @%s in %s: permission identity differs", cmd.Action, item.Author.Login, repo.Name)
 				store.Data.Processed[job.ID] = started
 				if err := store.Save(); err != nil {
-					return next, err
+					return stop(err)
 				}
 				continue
 			}
@@ -317,7 +365,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				m.logf("ignore %s from @%s in %s: permission %q", cmd.Action, item.Author.Login, repo.Name, permission.Permission)
 				store.Data.Processed[job.ID] = started
 				if err := store.Save(); err != nil {
-					return next, err
+					return stop(err)
 				}
 				continue
 			}
@@ -326,10 +374,17 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				if err := m.finishFailedJob(ctx, store, job, items, started, jobFailure); err != nil {
 					failures = append(failures, err)
 				}
+				if ctx.Err() != nil {
+					return stop()
+				}
 				continue
 			}
-			if err := m.GitHub.ReactEyes(ctx, item.NodeID); err != nil {
-				failures = append(failures, fmt.Errorf("react to %s: %w", item.HTMLURL, err))
+			err = m.GitHub.ReactEyes(ctx, item.NodeID)
+			if ctx.Err() != nil {
+				return stopAt("react to "+itemLocation(item), err)
+			}
+			if err != nil {
+				failures = append(failures, fmt.Errorf("react to %s: %w", itemLocation(item), err))
 				continue
 			}
 			// Count an interrupted execution before starting it, so a crash cannot
@@ -337,48 +392,78 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			jobFailure.Attempts++
 			store.Data.JobFailures[job.ID] = jobFailure
 			if err := store.Save(); err != nil {
-				return next, err
+				return stop(err)
 			}
 			m.logf("run %s from @%s in %s #%d", cmd.Action, item.Author.Login, repo.Name, number)
-			if err := m.Executor.Execute(ctx, job); err != nil {
-				if errors.Is(err, ErrTerminalJob) {
+			if err := m.Handler.Execute(ctx, job); err != nil {
+				failureErr := fmt.Errorf("%s from %s: %w", cmd.Action, itemLocation(item), err)
+				publicationFailure := errors.Is(err, ErrPostModelPublication)
+				unconfirmedProcesses := errors.Is(err, processgroup.ErrUnconfirmed)
+				interrupted := !unconfirmedProcesses && ctx.Err() != nil && errors.Is(err, context.Canceled) && !publicationFailure
+				switch {
+				case unconfirmedProcesses:
 					jobFailure.Attempts = maxJobAttempts
-				} else if errors.Is(err, workroot.ErrUnsafe) && !errors.Is(err, ErrPostCodexPublication) {
+					store.Data.UnconfirmedProcessJob = job.ID
+				case interrupted:
 					jobFailure.Attempts--
-				} else if !errors.Is(err, ErrPostCodexPublication) && infrastructureFailure(err) {
+				case errors.Is(err, ErrTerminalJob), errors.Is(err, processgroup.ErrDescendants):
+					jobFailure.Attempts = maxJobAttempts
+				case !publicationFailure && (errors.Is(err, workroot.ErrUnsafe) || infrastructureFailure(err)):
 					jobFailure.Attempts--
 				}
-				store.Data.JobFailures[job.ID] = jobFailure
+				if jobFailure.Attempts == 0 {
+					delete(store.Data.JobFailures, job.ID)
+				} else {
+					store.Data.JobFailures[job.ID] = jobFailure
+				}
 				if saveErr := store.Save(); saveErr != nil {
-					return next, errors.Join(err, saveErr)
+					return stop(failureErr, saveErr)
 				}
-				m.logf("%s from %s failed (attempt %d/%d): %v", cmd.Action, item.HTMLURL, jobFailure.Attempts, maxJobAttempts, err)
+				if interrupted {
+					m.logf("%s from %s interrupted: %v", cmd.Action, itemLocation(item), err)
+					return stop(failureErr)
+				}
+				if unconfirmedProcesses {
+					m.logf("%s from %s stopped: process cleanup is unconfirmed; operator recovery required: %v", cmd.Action, itemLocation(item), err)
+					return stop(failureErr)
+				}
+				m.logf("%s from %s failed (attempt %d/%d): %v", cmd.Action, itemLocation(item), jobFailure.Attempts, maxJobAttempts, err)
 				if jobFailure.Attempts >= maxJobAttempts {
 					if replyErr := m.finishFailedJob(ctx, store, job, items, started, jobFailure); replyErr != nil {
 						failures = append(failures, replyErr)
 					}
-					continue
 				}
-				failures = append(failures, fmt.Errorf("%s from %s: %w", cmd.Action, item.HTMLURL, err))
+				if ctx.Err() != nil {
+					return stop(failureErr)
+				}
+				if jobFailure.Attempts < maxJobAttempts {
+					failures = append(failures, failureErr)
+				}
 				continue
 			}
 			store.Data.Processed[job.ID] = started
 			delete(store.Data.JobFailures, job.ID)
 			delete(store.Data.PendingFixes, job.ID)
 			if err := store.Save(); err != nil {
-				return next, err
+				return stop(err)
+			}
+			if ctx.Err() != nil {
+				return stop()
 			}
 		}
 		if len(failures) != firstFailure {
 			if err := m.deferNotification(store, entry.key, notification, entry.since, started); err != nil {
-				return next, err
+				return stop(err)
 			}
 		} else if _, pending := store.Data.PendingNotifications[entry.key]; pending {
 			delete(store.Data.PendingNotifications, entry.key)
 			if err := store.Save(); err != nil {
-				return next, err
+				return stop(err)
 			}
 		}
+	}
+	if ctx.Err() != nil {
+		return stop()
 	}
 	// GitHub timestamps have second precision. Keep a two-second overlap so an
 	// update racing with this poll cannot fall on the exclusive since boundary.
@@ -392,9 +477,9 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		store.Data.Cursor = newCursor
 	}
 	if err := store.Save(); err != nil {
-		return next, err
+		return stop(err)
 	}
-	return next, errors.Join(failures...)
+	return stop()
 }
 
 func (m *Monitor) availableCommands(repo config.Repository) map[string]command.Action {
@@ -451,9 +536,6 @@ func (m *Monitor) deferNotification(store *state.Store, key string, notification
 }
 
 func infrastructureFailure(err error) bool {
-	if errors.Is(err, context.Canceled) {
-		return true
-	}
 	var status *github.StatusError
 	if errors.As(err, &status) && (status.StatusCode == http.StatusUnauthorized || status.StatusCode == http.StatusForbidden ||
 		status.StatusCode == http.StatusRequestTimeout || status.StatusCode == http.StatusTooManyRequests || status.StatusCode >= http.StatusInternalServerError) {
@@ -473,16 +555,16 @@ func (m *Monitor) finishFailedJob(ctx context.Context, store *state.Store, job J
 		}
 	}
 	if !replied {
-		repo, err := m.GitHub.Repository(ctx, job.Repository.Name)
+		replyCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		repo, err := m.GitHub.Repository(replyCtx, job.Repository.Name)
 		if err != nil {
 			return fmt.Errorf("verify %s before failure reply: %w", job.Repository.Name, err)
 		}
 		if !job.Repository.MatchesIdentity(repo.ID, repo.Owner.ID) {
 			return fmt.Errorf("%s identity changed before failure reply", job.Repository.Name)
 		}
-		replyCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		_, err = m.GitHub.CreateIssueComment(replyCtx, job.Repository.Name, job.Number, failureReply+"\n\n"+marker)
-		cancel()
 		if err != nil {
 			failure.ReplyAttempts++
 			if failure.ReplyAttempts < maxFailureReplyAttempts {
@@ -490,12 +572,12 @@ func (m *Monitor) finishFailedJob(ctx context.Context, store *state.Store, job J
 				if saveErr := store.Save(); saveErr != nil {
 					return errors.Join(err, saveErr)
 				}
-				return fmt.Errorf("post failure reply to %s: %w", job.Source.HTMLURL, err)
+				return fmt.Errorf("post failure reply to %s: %w", itemLocation(job.Source), err)
 			}
-			m.logf("could not post failure reply to %s after %d attempts: %v", job.Source.HTMLURL, failure.ReplyAttempts, err)
+			m.logf("could not post failure reply to %s after %d attempts: %v", itemLocation(job.Source), failure.ReplyAttempts, err)
 		}
 	}
-	m.logf("stop retrying failed %s from %s", job.Command.Action, job.Source.HTMLURL)
+	m.logf("stop retrying failed %s from %s", job.Command.Action, itemLocation(job.Source))
 	store.Data.Processed[job.ID] = at
 	delete(store.Data.JobFailures, job.ID)
 	return store.Save()
@@ -616,8 +698,8 @@ func invitationActionsBlocked(err error) bool {
 		(status.StatusCode == http.StatusForbidden || status.StatusCode == http.StatusTooManyRequests)
 }
 
-func jobID(itemKey, commandKey string) string {
-	sum := sha256.Sum256([]byte(itemKey + "\x00" + commandKey))
+func jobID(itemKey, commandName string) string {
+	sum := sha256.Sum256([]byte(itemKey + "\x00" + commandName))
 	return hex.EncodeToString(sum[:])
 }
 
