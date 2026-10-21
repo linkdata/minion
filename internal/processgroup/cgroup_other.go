@@ -10,7 +10,8 @@ import (
 
 var (
 	ErrDescendants = errors.New("command left descendant processes")
-	ErrUnconfirmed = errors.New("command process cleanup unconfirmed")
+	// ErrUnconfirmed means command ownership, limit observation, or cleanup could not be proved.
+	ErrUnconfirmed = errors.New("command process safety unconfirmed")
 )
 
 const (

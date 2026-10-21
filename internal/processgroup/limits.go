@@ -13,16 +13,17 @@ var ErrScopeUnconfirmed = errors.New("command scope release unconfirmed")
 
 // Exhaustion describes observed cgroup events and the ceilings that were hit.
 type Exhaustion struct {
-	MaxTasks           int
-	MaxMemoryBytes     int64
-	PIDEventsMax       uint64
-	MemoryEventsMax    uint64
-	MemoryOOM          uint64
-	MemoryOOMKill      uint64
-	MemoryOOMGroupKill uint64
-	Stop               string
-	Released           bool
-	Scope              string
+	MaxTasks            int
+	MaxMemoryBytes      int64
+	PIDEventsMax        uint64
+	MemoryEventsMax     uint64
+	MemorySwapEventsMax uint64
+	MemoryOOM           uint64
+	MemoryOOMKill       uint64
+	MemoryOOMGroupKill  uint64
+	Stop                string
+	Released            bool
+	Scope               string
 }
 
 func (e *Exhaustion) Error() string {
@@ -30,8 +31,8 @@ func (e *Exhaustion) Error() string {
 	if e.Released {
 		release = "confirmed"
 	}
-	message := fmt.Sprintf("%v: pids.max=%d pids.events:max=%d memory.max=%d memory.events:max=%d oom=%d oom_kill=%d oom_group_kill=%d stop=%s release=%s",
-		ErrExhausted, e.MaxTasks, e.PIDEventsMax, e.MaxMemoryBytes, e.MemoryEventsMax, e.MemoryOOM, e.MemoryOOMKill, e.MemoryOOMGroupKill, e.Stop, release)
+	message := fmt.Sprintf("%v: pids.max=%d pids.events:max=%d memory.max=%d memory.swap.max=0 memory.events:max=%d memory.swap.events:max=%d oom=%d oom_kill=%d oom_group_kill=%d stop=%s release=%s",
+		ErrExhausted, e.MaxTasks, e.PIDEventsMax, e.MaxMemoryBytes, e.MemoryEventsMax, e.MemorySwapEventsMax, e.MemoryOOM, e.MemoryOOMKill, e.MemoryOOMGroupKill, e.Stop, release)
 	if !e.Released && e.Scope != "" {
 		message += " scope=" + e.Scope
 	}

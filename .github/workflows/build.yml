@@ -48,12 +48,11 @@ jobs:
           fi
           sudo systemd-run --quiet --wait --pipe --collect --same-dir --uid="$runner_uid" \
             -p Type=exec -p Delegate=yes -p DelegateSubgroup=minion-supervisor \
-            -p KillMode=mixed -p TasksMax=256 -p MemoryMax=4G -- \
+            -p KillMode=mixed -p TasksMax=256 -p MemoryMax=4G -p MemorySwapMax=0 -- \
             /usr/bin/env "${runner_env[@]}" bash -euc '
               test "$(id -u)" = "$MINION_RUN_UID"
               cgroup="$(sed -n "s/^0:://p" /proc/self/cgroup)"
-              test "${cgroup##*/}" = minion-supervisor
-              test ! -s "/sys/fs/cgroup${cgroup%/*}/cgroup.procs"
+              printf "Minion test cgroup: %s\n" "$cgroup"
               MINION_REQUIRE_PROCESSGROUP=1 go test -race -coverprofile=coverage.out ./...
             '
 

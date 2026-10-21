@@ -41,14 +41,14 @@ func Validate(ctx context.Context, settings config.ClaudeConfig) (validated conf
 		return validated, err
 	}
 	defer func() {
-		if !errors.Is(resultErr, processgroup.ErrUnconfirmed) {
+		if !errors.Is(resultErr, processgroup.ErrScopeUnconfirmed) {
 			resultErr = errors.Join(resultErr, os.RemoveAll(dir))
 		}
 	}()
 	authDir, err := authentication(filepath.Dir(dir), settings.APIKey)
 	if authDir != "" {
 		defer func() {
-			if !errors.Is(resultErr, processgroup.ErrUnconfirmed) {
+			if !errors.Is(resultErr, processgroup.ErrScopeUnconfirmed) {
 				resultErr = errors.Join(resultErr, os.RemoveAll(authDir))
 			}
 		}()

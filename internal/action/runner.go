@@ -65,7 +65,6 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 				message = event.Error()
 			}
 			result.Diagnostics = append(result.Diagnostics, Diagnostic{Code: "process_limit_exhausted", Message: message})
-			r.logf("process limit job=%s attempt=%s: %s", job.Identity.JobID, job.Identity.AttemptID, message)
 			resultErr = errors.Join(monitor.ErrTerminalJob, resultErr)
 		}
 	}()
@@ -141,9 +140,9 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 	cleanupFailed := false
 	// Remove owned paths after sessions, report collection, and review snapshots close.
 	defer func() {
-		if errors.Is(resultErr, processgroup.ErrUnconfirmed) {
-			result.Diagnostics = append(result.Diagnostics, Diagnostic{Code: "process_cleanup_unconfirmed", Message: "Owned processes could not be confirmed stopped; execution workspaces were preserved for operator recovery."})
-			r.logf("preserve action workspaces after unconfirmed process cleanup job=%s attempt=%s", job.Identity.JobID, job.Identity.AttemptID)
+		if errors.Is(resultErr, processgroup.ErrScopeUnconfirmed) {
+			result.Diagnostics = append(result.Diagnostics, Diagnostic{Code: "process_cleanup_unconfirmed", Message: "Command scope release could not be confirmed; execution workspaces were preserved for operator recovery."})
+			r.logf("preserve action workspaces after unconfirmed scope release job=%s attempt=%s", job.Identity.JobID, job.Identity.AttemptID)
 			return
 		}
 		failed := cleanupFailed
@@ -216,7 +215,7 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 	}
 	// Model sessions close before review snapshots; snapshots may add paths to outer cleanup.
 	defer func() {
-		if !errors.Is(resultErr, processgroup.ErrUnconfirmed) {
+		if !errors.Is(resultErr, processgroup.ErrScopeUnconfirmed) {
 			closeReview()
 		}
 	}()
@@ -312,7 +311,7 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 	if job.Action == command.SecurityAudit {
 		// Collect partial reports before the outer workspace cleanup.
 		defer func() {
-			if errors.Is(resultErr, processgroup.ErrUnconfirmed) {
+			if errors.Is(resultErr, processgroup.ErrScopeUnconfirmed) {
 				return
 			}
 			if resultErr != nil && len(result.Artifacts) == 0 {
@@ -335,7 +334,7 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 	var sessions modelSessions
 	// Close sessions before collecting partial reports or releasing review snapshots.
 	defer func() {
-		if errors.Is(resultErr, processgroup.ErrUnconfirmed) {
+		if errors.Is(resultErr, processgroup.ErrScopeUnconfirmed) {
 			return
 		}
 		if err := sessions.close(); err != nil {

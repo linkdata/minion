@@ -46,7 +46,7 @@ func ValidateInstructionBoundary(ctx context.Context) (resultErr error) {
 		return err
 	}
 	defer func() {
-		if !errors.Is(resultErr, processgroup.ErrUnconfirmed) {
+		if !errors.Is(resultErr, processgroup.ErrScopeUnconfirmed) {
 			resultErr = errors.Join(resultErr, os.RemoveAll(root))
 		}
 	}()

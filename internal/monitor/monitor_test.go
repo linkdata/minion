@@ -551,11 +551,11 @@ func TestRunOnceBoundsFailedExecutions(t *testing.T) {
 	}
 }
 
-func TestRunOnceStopsUntilUnconfirmedProcessCleanupIsResolved(t *testing.T) {
+func TestRunOnceStopsUntilUnconfirmedScopeReleaseIsResolved(t *testing.T) {
 	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
 	item := github.Item{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}}
 	gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}, items: []github.Item{item}, permission: github.Permission{Permission: "write"}}
-	handler := &fakeHandler{executeErr: processgroup.ErrUnconfirmed}
+	handler := &fakeHandler{executeErr: errors.Join(processgroup.ErrUnconfirmed, processgroup.ErrScopeUnconfirmed)}
 	store := openState(t, now.Add(-time.Minute))
 	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Now: func() time.Time { return now }}
 	if _, err := m.RunOnce(context.Background(), store); !errors.Is(err, processgroup.ErrUnconfirmed) {
@@ -567,8 +567,26 @@ func TestRunOnceStopsUntilUnconfirmedProcessCleanupIsResolved(t *testing.T) {
 	}
 	requests := len(gh.notificationCalls)
 	handler.executeErr = nil
-	if _, err := m.RunOnce(context.Background(), store); !errors.Is(err, processgroup.ErrUnconfirmed) || len(handler.jobs) != 1 || len(gh.notificationCalls) != requests || len(gh.comments) != 0 {
+	if _, err := m.RunOnce(context.Background(), store); !errors.Is(err, processgroup.ErrScopeUnconfirmed) || len(handler.jobs) != 1 || len(gh.notificationCalls) != requests || len(gh.comments) != 0 {
 		t.Fatalf("later pass resumed before recovery: err=%v jobs=%d polls=%d replies=%d", err, len(handler.jobs), len(gh.notificationCalls), len(gh.comments))
+	}
+}
+
+func TestRunOnceStopsWithoutLatchAfterReleasedScopeObservationFailure(t *testing.T) {
+	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	items := []github.Item{
+		{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}},
+		{Key: "comment:2", NodeID: "node:2", Body: "@linkdataminion review", Author: github.User{Login: "writer"}},
+	}
+	gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}, items: items, permission: github.Permission{Permission: "write"}}
+	handler := &fakeHandler{executeErr: processgroup.ErrUnconfirmed}
+	store := openState(t, now.Add(-time.Minute))
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Now: func() time.Time { return now }}
+	if _, err := m.RunOnce(context.Background(), store); !errors.Is(err, processgroup.ErrUnconfirmed) {
+		t.Fatalf("released-scope observation failure: %v", err)
+	}
+	if len(handler.jobs) != 1 || len(gh.reactions) != 1 || store.Data.UnconfirmedProcessJob != "" || len(gh.comments) != 0 || len(store.Data.Processed) != 0 || store.Data.JobFailures[handler.jobs[0].ID].Attempts != maxJobAttempts {
+		t.Fatalf("released-scope failure continued or latched: jobs=%d reactions=%d replies=%d state=%+v", len(handler.jobs), len(gh.reactions), len(gh.comments), store.Data)
 	}
 }
 

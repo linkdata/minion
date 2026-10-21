@@ -109,14 +109,14 @@ func run() int {
 		}
 	}()
 	if store.Data.UnconfirmedProcessJob != "" {
-		logger.Printf("process cleanup from %s is unconfirmed; operator recovery required", store.Data.UnconfirmedProcessJob)
+		logger.Printf("command scope release for %s is unconfirmed; operator recovery required", store.Data.UnconfirmedProcessJob)
 		return 1
 	}
 	latchProcessError := func(stage string, runErr error) {
-		if errors.Is(runErr, processgroup.ErrUnconfirmed) || errors.Is(runErr, processgroup.ErrScopeUnconfirmed) {
+		if errors.Is(runErr, processgroup.ErrScopeUnconfirmed) {
 			store.Data.UnconfirmedProcessJob = stage
 			if saveErr := store.Save(); saveErr != nil {
-				logger.Printf("save unconfirmed process cleanup: %v", saveErr)
+				logger.Printf("save unconfirmed command scope release: %v", saveErr)
 			}
 		}
 	}
@@ -171,7 +171,7 @@ func run() int {
 			} else {
 				logger.Printf("poll: %v", err)
 			}
-			if !*loop || errors.Is(err, processgroup.ErrUnconfirmed) {
+			if !*loop || errors.Is(err, processgroup.ErrUnconfirmed) || errors.Is(err, processgroup.ErrScopeUnconfirmed) {
 				return 1
 			}
 		}

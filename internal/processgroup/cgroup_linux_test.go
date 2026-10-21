@@ -29,6 +29,50 @@ func TestCgroupReadinessRequired(t *testing.T) {
 	}
 }
 
+func TestCgroupCheckWithTightConfiguredLimits(t *testing.T) {
+	if err := Check(); err != nil {
+		t.Skipf("delegated cgroup unavailable: %v", err)
+	}
+	setTestLimits(t, 1, 1<<20)
+	if err := Check(); err != nil {
+		t.Fatalf("readiness probe rejected verified tight limits: %v", err)
+	}
+}
+
+func TestCgroupLimitEventAttribution(t *testing.T) {
+	tests := []struct {
+		name, pids, memory, swap       string
+		wantExhausted, wantUnconfirmed bool
+	}{
+		{"none", "max 0\n", "max 0\noom 0\noom_kill 0\noom_group_kill 0\n", "max 0\n", false, false},
+		{"pids", "max 1\n", "max 0\noom 0\noom_kill 0\noom_group_kill 0\n", "max 0\n", true, false},
+		{"memory", "max 0\n", "max 1\noom 1\noom_kill 1\noom_group_kill 0\n", "max 0\n", true, false},
+		{"swap", "max 0\n", "max 0\noom 0\noom_kill 0\noom_group_kill 0\n", "max 1\n", true, false},
+		{"external OOM", "max 0\n", "max 0\noom 0\noom_kill 1\noom_group_kill 0\n", "max 0\n", false, true},
+		{"missing swap counter", "max 0\n", "max 0\noom 0\noom_kill 0\noom_group_kill 0\n", "fail 0\n", false, true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			for name, data := range map[string]string{"pids.events": test.pids, "memory.events": test.memory, "memory.swap.events": test.swap} {
+				if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err := readExhaustion(dir, limits{tasks: 4, memory: 64 << 20})
+			if errors.Is(err, ErrExhausted) != test.wantExhausted || errors.Is(err, ErrUnconfirmed) != test.wantUnconfirmed {
+				t.Fatalf("unexpected event result: %v", err)
+			}
+			if test.name == "swap" {
+				var event *Exhaustion
+				if !errors.As(err, &event) || event.MemorySwapEventsMax != 1 {
+					t.Fatalf("swap exhaustion not recorded: %v", err)
+				}
+			}
+		})
+	}
+}
+
 func TestUnreleasedScopeKeepsRecoveryReference(t *testing.T) {
 	dir := t.TempDir()
 	err := unreleasedScope(dir, ErrUnconfirmed)
@@ -173,7 +217,7 @@ func TestCgroupLimitsBeforeActionAndGracefulCancellation(t *testing.T) {
 	}
 	t.Cleanup(func() { cancel(); _ = h.Wait() })
 	got := strings.Split(strings.TrimSpace(waitForReport(t, report)), "\n")
-	want := []string{strings.TrimPrefix(h.dir, cgroupMount), "64", strconv.FormatInt(512<<20, 10), "1", "0"}
+	want := []string{strings.TrimPrefix(h.dir, cgroupMount), "64", strconv.FormatInt(512<<20, 10), "0", "1", "0"}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("child acted without configured cgroup limits: got %q, want %q", got, want)
 	}
@@ -436,7 +480,7 @@ func TestProcessgroupHelperProcess(t *testing.T) {
 		}
 		dir := filepath.Join(cgroupMount, strings.TrimPrefix(current, "/"))
 		values := []string{current}
-		for _, name := range []string{"pids.max", "memory.max", "memory.oom.group", "cgroup.max.descendants"} {
+		for _, name := range []string{"pids.max", "memory.max", "memory.swap.max", "memory.oom.group", "cgroup.max.descendants"} {
 			value, err := os.ReadFile(filepath.Join(dir, name))
 			if err != nil {
 				os.Exit(2)

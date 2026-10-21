@@ -95,7 +95,7 @@ func cloneFromURL(ctx context.Context, workRoot, url, defaultBranch string, chec
 		err = c.checkoutSource(ctx, head, checkoutFiles)
 	}
 	if err != nil {
-		if errors.Is(err, processgroup.ErrUnconfirmed) {
+		if errors.Is(err, processgroup.ErrScopeUnconfirmed) {
 			return nil, err
 		}
 		return nil, errors.Join(err, c.Close())
@@ -115,7 +115,7 @@ func clonePullRequestFromURL(ctx context.Context, workRoot, url string, number i
 		return nil, err
 	}
 	if err := c.checkoutPullRequest(ctx, number, baseRef, expectedHeadSHA); err != nil {
-		if errors.Is(err, processgroup.ErrUnconfirmed) {
+		if errors.Is(err, processgroup.ErrScopeUnconfirmed) {
 			return nil, err
 		}
 		return nil, errors.Join(err, c.Close())
@@ -138,7 +138,7 @@ func cloneRepository(ctx context.Context, workRoot, url, defaultBranch string) (
 	}
 	removeOnError := true
 	defer func() {
-		if removeOnError && !errors.Is(err, processgroup.ErrUnconfirmed) {
+		if removeOnError && !errors.Is(err, processgroup.ErrScopeUnconfirmed) {
 			err = errors.Join(err, cleanup.RemoveAll(path))
 		}
 	}()

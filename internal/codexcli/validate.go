@@ -90,7 +90,7 @@ func listModels(ctx context.Context, settings config.CodexConfig) (models []mode
 		return nil, err
 	}
 	defer func() {
-		if !errors.Is(err, processgroup.ErrUnconfirmed) {
+		if !errors.Is(err, processgroup.ErrScopeUnconfirmed) {
 			err = errors.Join(err, os.RemoveAll(dir))
 		}
 	}()

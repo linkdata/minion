@@ -119,7 +119,7 @@ func TestRunStopsBeforePreflightWhenProcessRecoveryIsPending(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if code != 1 || !strings.Contains(string(logText), "process cleanup from pending-job is unconfirmed") || strings.Contains(string(logText), "AI preflight:") {
+			if code != 1 || !strings.Contains(string(logText), "command scope release for pending-job is unconfirmed") || strings.Contains(string(logText), "AI preflight:") {
 				t.Fatalf("recovery latch did not stop preflight: exit=%d log=%q", code, logText)
 			}
 		})

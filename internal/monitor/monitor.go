@@ -95,7 +95,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		return store.Data.NextPollAt, err
 	}
 	if store.Data.UnconfirmedProcessJob != "" {
-		return store.Data.NextPollAt, fmt.Errorf("%w: job %s requires operator recovery", processgroup.ErrUnconfirmed, store.Data.UnconfirmedProcessJob)
+		return store.Data.NextPollAt, fmt.Errorf("%w: %w: job %s requires operator recovery", processgroup.ErrUnconfirmed, processgroup.ErrScopeUnconfirmed, store.Data.UnconfirmedProcessJob)
 	}
 	now := time.Now
 	if m.Now != nil {
@@ -398,15 +398,16 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			if err := m.Handler.Execute(ctx, job); err != nil {
 				failureErr := fmt.Errorf("%s from %s: %w", cmd.Action, itemLocation(item), err)
 				publicationFailure := errors.Is(err, ErrPostModelPublication)
-				unconfirmedProcesses := errors.Is(err, processgroup.ErrUnconfirmed)
+				scopeUnconfirmed := errors.Is(err, processgroup.ErrScopeUnconfirmed)
+				unconfirmedProcesses := errors.Is(err, processgroup.ErrUnconfirmed) || scopeUnconfirmed
 				interrupted := !unconfirmedProcesses && !errors.Is(err, processgroup.ErrExhausted) && ctx.Err() != nil && errors.Is(err, context.Canceled) && !publicationFailure
 				switch {
-				case unconfirmedProcesses:
+				case scopeUnconfirmed:
 					jobFailure.Attempts = maxJobAttempts
 					store.Data.UnconfirmedProcessJob = job.ID
 				case interrupted:
 					jobFailure.Attempts--
-				case errors.Is(err, ErrTerminalJob), errors.Is(err, processgroup.ErrDescendants), errors.Is(err, processgroup.ErrExhausted):
+				case unconfirmedProcesses, errors.Is(err, ErrTerminalJob), errors.Is(err, processgroup.ErrDescendants), errors.Is(err, processgroup.ErrExhausted):
 					jobFailure.Attempts = maxJobAttempts
 				case !publicationFailure && (errors.Is(err, workroot.ErrUnsafe) || infrastructureFailure(err)):
 					jobFailure.Attempts--
@@ -423,8 +424,12 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 					m.logf("%s from %s interrupted: %v", cmd.Action, itemLocation(item), err)
 					return stop(failureErr)
 				}
+				if scopeUnconfirmed {
+					m.logf("%s from %s stopped: command scope release unconfirmed; operator recovery required: %v", cmd.Action, itemLocation(item), err)
+					return stop(failureErr)
+				}
 				if unconfirmedProcesses {
-					m.logf("%s from %s stopped: process cleanup is unconfirmed; operator recovery required: %v", cmd.Action, itemLocation(item), err)
+					m.logf("%s from %s stopped: process safety proof failed; restart requires a fresh readiness check: %v", cmd.Action, itemLocation(item), err)
 					return stop(failureErr)
 				}
 				m.logf("%s from %s failed (attempt %d/%d): %v", cmd.Action, itemLocation(item), jobFailure.Attempts, maxJobAttempts, err)

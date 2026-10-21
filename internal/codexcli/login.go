@@ -34,7 +34,7 @@ func CheckLogin(ctx context.Context, settings config.CodexConfig) (resultErr err
 		return err
 	}
 	defer func() {
-		if !errors.Is(resultErr, processgroup.ErrUnconfirmed) {
+		if !errors.Is(resultErr, processgroup.ErrScopeUnconfirmed) {
 			resultErr = errors.Join(resultErr, os.RemoveAll(dir))
 		}
 	}()

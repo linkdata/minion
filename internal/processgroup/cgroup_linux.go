@@ -21,8 +21,8 @@ var (
 	// ErrDescendants means the command's leader exited while processes remained
 	// in its cgroup. The descendants were stopped, but the result is rejected.
 	ErrDescendants = errors.New("command left descendant processes")
-	// ErrUnconfirmed means process cleanup or quiescence could not be proved.
-	ErrUnconfirmed = errors.New("command process cleanup unconfirmed")
+	// ErrUnconfirmed means command ownership, limit observation, or cleanup could not be proved.
+	ErrUnconfirmed = errors.New("command process safety unconfirmed")
 )
 
 const (
@@ -89,9 +89,33 @@ func Run(cmd *exec.Cmd) error {
 
 // Check proves placement, detached-descendant stopping, and scope release.
 func Check() error {
-	cmd := exec.Command("/bin/sh", "-c", "/usr/bin/setsid -f /bin/sleep 30 </dev/null >/dev/null 2>&1 &")
+	setsid, err := exec.LookPath("setsid")
+	if err != nil {
+		return fmt.Errorf("process probe requires setsid: %w", err)
+	}
+	sleep, err := exec.LookPath("sleep")
+	if err != nil {
+		return fmt.Errorf("process probe requires sleep: %w", err)
+	}
+	cmd := exec.Command(setsid, "-f", sleep, "30")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	h, err := Start(cmd)
+	limit := configuredLimits()
+	probeLimits := limit
+	probeLimits.tasks = max(probeLimits.tasks, 4)
+	probeLimits.memory = max(probeLimits.memory, 64<<20)
+	if limit != probeLimits {
+		// Prove the requested ceilings, then allow enough room to test detached cleanup.
+		dir, group, err := newCgroup(limit)
+		if err != nil {
+			return fmt.Errorf("process probe configured ceilings: %w", err)
+		}
+		closeErr := group.Close()
+		removeErr := unreleasedScope(dir, removeEmptyCgroup(dir))
+		if closeErr != nil || removeErr != nil {
+			return errors.Join(fmt.Errorf("%w: process probe configured ceilings", ErrUnconfirmed), closeErr, removeErr)
+		}
+	}
+	h, err := start(cmd, probeLimits)
 	if err != nil {
 		return fmt.Errorf("process probe start: %w", err)
 	}
@@ -109,7 +133,10 @@ func Start(cmd *exec.Cmd) (*Handle, error) {
 	if cmd == nil {
 		return nil, errors.New("nil command")
 	}
-	limit := configuredLimits()
+	return start(cmd, configuredLimits())
+}
+
+func start(cmd *exec.Cmd, limit limits) (*Handle, error) {
 	dir, group, err := newCgroup(limit)
 	if err != nil {
 		return nil, err
@@ -152,7 +179,7 @@ func Start(cmd *exec.Cmd) (*Handle, error) {
 			}
 		}
 		if cleanupErr != nil {
-			return nil, errors.Join(err, limitErr, fmt.Errorf("%w: remove cgroup %s after start failure: %v", ErrUnconfirmed, dir, cleanupErr))
+			return nil, errors.Join(err, limitErr, fmt.Errorf("%w: remove cgroup %s after start failure: %w", ErrUnconfirmed, dir, cleanupErr))
 		}
 		return nil, errors.Join(err, limitErr)
 	}
@@ -285,6 +312,7 @@ func setCgroupLimits(dir string, limit limits) error {
 	for _, setting := range []struct{ name, value string }{
 		{"pids.max", strconv.Itoa(limit.tasks)},
 		{"memory.max", strconv.FormatInt(limit.memory, 10)},
+		{"memory.swap.max", "0"},
 		{"memory.oom.group", "1"},
 		{"cgroup.max.descendants", "0"},
 	} {
@@ -309,23 +337,32 @@ func readExhaustion(dir string, limit limits) error {
 	if err != nil {
 		return fmt.Errorf("%w: read limit events in %s: %v", ErrUnconfirmed, dir, err)
 	}
-	for _, key := range []string{"max"} {
-		if _, ok := pids[key]; !ok {
-			return fmt.Errorf("%w: pids.events in %s lacks %s", ErrUnconfirmed, dir, key)
-		}
+	swap, err := readCounters(filepath.Join(dir, "memory.swap.events"))
+	if err != nil {
+		return fmt.Errorf("%w: read limit events in %s: %v", ErrUnconfirmed, dir, err)
+	}
+	if _, ok := pids["max"]; !ok {
+		return fmt.Errorf("%w: pids.events in %s lacks max", ErrUnconfirmed, dir)
 	}
 	for _, key := range []string{"max", "oom", "oom_kill"} {
 		if _, ok := memory[key]; !ok {
 			return fmt.Errorf("%w: memory.events in %s lacks %s", ErrUnconfirmed, dir, key)
 		}
 	}
-	if pids["max"] == 0 && memory["max"] == 0 && memory["oom"] == 0 && memory["oom_kill"] == 0 && memory["oom_group_kill"] == 0 {
+	if _, ok := swap["max"]; !ok {
+		return fmt.Errorf("%w: memory.swap.events in %s lacks max", ErrUnconfirmed, dir)
+	}
+	if (memory["oom_kill"] != 0 || memory["oom_group_kill"] != 0) && memory["max"] == 0 && memory["oom"] == 0 {
+		return fmt.Errorf("%w: cgroup %s observed OOM kill without reaching memory.max", ErrUnconfirmed, dir)
+	}
+	if pids["max"] == 0 && memory["max"] == 0 && memory["oom"] == 0 && swap["max"] == 0 {
 		return nil
 	}
 	return &Exhaustion{
 		MaxTasks: limit.tasks, MaxMemoryBytes: limit.memory,
 		PIDEventsMax: pids["max"], MemoryEventsMax: memory["max"],
-		MemoryOOM: memory["oom"], MemoryOOMKill: memory["oom_kill"], MemoryOOMGroupKill: memory["oom_group_kill"],
+		MemorySwapEventsMax: swap["max"],
+		MemoryOOM:           memory["oom"], MemoryOOMKill: memory["oom_kill"], MemoryOOMGroupKill: memory["oom_group_kill"],
 	}
 }
 
