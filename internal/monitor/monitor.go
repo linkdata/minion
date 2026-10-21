@@ -399,14 +399,14 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				failureErr := fmt.Errorf("%s from %s: %w", cmd.Action, itemLocation(item), err)
 				publicationFailure := errors.Is(err, ErrPostModelPublication)
 				unconfirmedProcesses := errors.Is(err, processgroup.ErrUnconfirmed)
-				interrupted := !unconfirmedProcesses && ctx.Err() != nil && errors.Is(err, context.Canceled) && !publicationFailure
+				interrupted := !unconfirmedProcesses && !errors.Is(err, processgroup.ErrExhausted) && ctx.Err() != nil && errors.Is(err, context.Canceled) && !publicationFailure
 				switch {
 				case unconfirmedProcesses:
 					jobFailure.Attempts = maxJobAttempts
 					store.Data.UnconfirmedProcessJob = job.ID
 				case interrupted:
 					jobFailure.Attempts--
-				case errors.Is(err, ErrTerminalJob), errors.Is(err, processgroup.ErrDescendants):
+				case errors.Is(err, ErrTerminalJob), errors.Is(err, processgroup.ErrDescendants), errors.Is(err, processgroup.ErrExhausted):
 					jobFailure.Attempts = maxJobAttempts
 				case !publicationFailure && (errors.Is(err, workroot.ErrUnsafe) || infrastructureFailure(err)):
 					jobFailure.Attempts--

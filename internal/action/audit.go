@@ -362,7 +362,7 @@ func auditNodePermissionFlag(ctx context.Context, dir, binary string) (string, e
 		cmd := auditNodeCommand(ctx, dir, binary, flag, "-e", `if (!process.permission || process.permission.has('fs.read', '/etc/passwd')) process.exit(1)`)
 		if err := processgroup.Run(cmd); err == nil {
 			return flag, nil
-		} else if errors.Is(err, processgroup.ErrDescendants) || errors.Is(err, processgroup.ErrUnconfirmed) {
+		} else if errors.Is(err, processgroup.ErrDescendants) || errors.Is(err, processgroup.ErrUnconfirmed) || errors.Is(err, processgroup.ErrExhausted) {
 			return "", err
 		}
 		if err := ctx.Err(); err != nil {

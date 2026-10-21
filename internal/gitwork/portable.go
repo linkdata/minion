@@ -199,7 +199,8 @@ func (c *Checkout) Snapshot(ctx context.Context) (s workspace.Snapshot, err erro
 	if s.Base = c.comparisonBase; s.Base != "" {
 		if s.MergeBase, err = runGit(ctx, c.path, "merge-base", s.Base, s.Head); err != nil {
 			var exit *exec.ExitError
-			if ctx.Err() == nil && errors.As(err, &exit) && exit.ExitCode() == 1 {
+			if ctx.Err() == nil && !errors.Is(err, processgroup.ErrDescendants) && !errors.Is(err, processgroup.ErrUnconfirmed) &&
+				!errors.Is(err, processgroup.ErrExhausted) && errors.As(err, &exit) && exit.ExitCode() == 1 {
 				return s, fmt.Errorf("%w: pull request histories have no common ancestor: %w", ErrUnsupportedSource, err)
 			}
 			return s, err
@@ -324,7 +325,7 @@ func (c *Checkout) boundedGit(ctx context.Context, stdin io.Reader, limit int, t
 		}
 		return nil, false, err
 	}
-	if errors.Is(err, processgroup.ErrDescendants) || errors.Is(err, processgroup.ErrUnconfirmed) {
+	if errors.Is(err, processgroup.ErrDescendants) || errors.Is(err, processgroup.ErrUnconfirmed) || errors.Is(err, processgroup.ErrExhausted) {
 		return nil, false, err
 	}
 	if output.Exceeded {

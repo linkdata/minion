@@ -57,6 +57,18 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 	defer func() {
 		resultErr = redactActionError(resultErr, r.Codex.APIKey, r.Claude.APIKey)
 	}()
+	defer func() {
+		if errors.Is(resultErr, processgroup.ErrExhausted) {
+			message := processgroup.ErrExhausted.Error()
+			var event *processgroup.Exhaustion
+			if errors.As(resultErr, &event) {
+				message = event.Error()
+			}
+			result.Diagnostics = append(result.Diagnostics, Diagnostic{Code: "process_limit_exhausted", Message: message})
+			r.logf("process limit job=%s attempt=%s: %s", job.Identity.JobID, job.Identity.AttemptID, message)
+			resultErr = errors.Join(monitor.ErrTerminalJob, resultErr)
+		}
+	}()
 	if err := job.Validate(); err != nil {
 		return result, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
 	}
@@ -710,7 +722,7 @@ func collectPartialAuditArtifacts(outputDir string, job Job, skill string, secre
 
 func terminalUnlessCanceled(ctx context.Context, err error) error {
 	if ctx.Err() != nil {
-		if errors.Is(err, processgroup.ErrUnconfirmed) {
+		if errors.Is(err, processgroup.ErrUnconfirmed) || errors.Is(err, processgroup.ErrExhausted) {
 			return errors.Join(ctx.Err(), err)
 		}
 		return ctx.Err()

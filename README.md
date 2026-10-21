@@ -55,11 +55,13 @@ A failed request gets at most three execution attempts, with these exceptions:
 | Failure | Policy |
 | --- | --- |
 | Graceful SIGINT/SIGTERM cancellation before publication; unsafe work-root or private-path admission; executor workspace preparation EACCES/EROFS; GitHub API HTTP 401/403/408/429/5xx or request transport errors (`*url.Error`) before publication | Retry on later polls without consuming an attempt. An unsafe-admission request stays queued without a failure reply until admission passes. Crashes and hard kills consume the recorded attempt. |
-| Action timeout; unsupported or oversized source; executor workspace preparation (directories, source/context/repository materialization, private index) or initial review-evidence save failure, except missing executables, EACCES/EROFS, or ENOSPC/EDQUOT; source-root anchoring failure; invalid job, prompt, main proposal, critic verdict or result; invalid collection/import or audit report validation; oversized model/fix output; supplied Git metadata or frozen critic input mutation; critic snapshot/review-history preparation failure after model work; exhausted critic rounds; a fix producing no commit; post-call usage or review-evidence save failure; completed-audit retention failure | No further attempts. |
+| Action timeout; command PID/memory limit event; unsupported or oversized source; executor workspace preparation (directories, source/context/repository materialization, private index) or initial review-evidence save failure, except missing executables, EACCES/EROFS, or ENOSPC/EDQUOT; source-root anchoring failure; invalid job, prompt, main proposal, critic verdict or result; invalid collection/import or audit report validation; oversized model/fix output; supplied Git metadata or frozen critic input mutation; critic snapshot/review-history preparation failure after model work; exhausted critic rounds; a fix producing no commit; post-call usage or review-evidence save failure; completed-audit retention failure | No further attempts. |
 | Other provider, missing executor Git, Git transport, audit-tool prerequisite, commit/push/publication, response-body read/decode or initial/pre-call usage save failures; executor workspace preparation or initial review-evidence save ENOSPC/EDQUOT | Consume an attempt and may repeat model work. Publication of model results, including recovery of an already pushed fix, consumes an attempt even when shutdown interrupts it. Fixed replies and refusals follow the pre-publication rules. |
 | Final usage save failure after successful publication | Log a warning and retain the last durable counters; the published action stays successful. |
 
-An external command that leaves processes in its cgroup after leader exit has those processes stopped; its result is rejected without another attempt. If cgroup cleanup cannot be confirmed, Minion records `unconfirmed_process_job`, stops polling, and requires operator recovery as described below. The same latch applies to AI or GitHub authentication preflight subprocesses.
+An external command that leaves processes in its cgroup after leader exit has those processes stopped; its result is rejected without another attempt. If cgroup cleanup cannot be confirmed, Minion records `unconfirmed_process_job`, stops polling, and requires operator recovery as described below. The same latch applies to the startup process probe and AI or GitHub authentication preflight subprocesses.
+
+During an action, a command PID or memory limit event ends the attempt without a retry. Minion logs the job and attempt IDs, configured ceilings, event counters, and stop/release outcome, and adds an action diagnostic. If scope release cannot be confirmed, operator recovery takes precedence over the terminal failure.
 
 Graceful signal refunds require a supervisor that signals only Minion first, as the shipped `KillMode=mixed` service does; signalling children directly can race cancellation reporting. Before publication, when the service context is canceled and execution returns `context.Canceled`, that interruption refunds the attempt even if the error also carries `ErrTerminalJob`. An action-only timeout or internal cancellation still consumes an attempt. After default signal handling is restored, another signal can terminate shutdown immediately; normal crash/hard-kill accounting then applies.
 
@@ -81,12 +83,28 @@ go build -buildvcs=false -o bin/minion ./cmd/minion
 mkdir -p var
 # Provision and mount a dedicated, bounded filesystem at var/work (see below).
 systemd-run --user --wait --collect --pipe --same-dir \
-  -p Type=exec -p Delegate=yes -p KillMode=mixed \
+  -p Type=exec -p Delegate=yes -p DelegateSubgroup=minion-supervisor -p KillMode=mixed \
   -p TasksMax=256 -p MemoryMax=4G -E HOME -E PATH -- \
   ./bin/minion -config ./config.local.json -check
 ```
 
-Run `-check` while the persistent service is stopped; it now takes the state lock. The transient service above also stops any surviving command processes when Minion exits. If the persistent service uses environment-based credentials, add its protected `-p EnvironmentFile=/absolute/path/to/private.env` to this command.
+Run `-check` while the persistent service is stopped; it takes the state lock. Use the transient service above, not a `systemd-run --scope` process, so systemd places Minion in the delegated supervisor subgroup. It also stops any surviving command processes when Minion exits. If the persistent service uses environment-based credentials, add its protected `-p EnvironmentFile=/absolute/path/to/private.env` to this command.
+
+For scheduled one-pass runs, use the same transient service without `-check`; a direct cron launch lacks the required delegation. Enable lingering for the Minion user. Save this as an executable `/path/to/minion/run-once.sh`, adjusting the checkout and CLI paths:
+
+```sh
+#!/bin/sh
+set -eu
+export XDG_RUNTIME_DIR=/run/user/$(id -u)
+export PATH=/usr/local/bin:/usr/bin:/bin
+cd /path/to/minion
+exec systemd-run --user --wait --collect --pipe --same-dir \
+  -p Type=exec -p Delegate=yes -p DelegateSubgroup=minion-supervisor -p KillMode=mixed \
+  -p TasksMax=256 -p MemoryMax=4G -E HOME -E PATH -- \
+  ./bin/minion -config ./config.local.json
+```
+
+Add `*/5 * * * * /path/to/minion/run-once.sh` to that user's crontab. `XDG_RUNTIME_DIR` connects the cron process to the lingering user manager; use the same credential environment as the persistent service.
 
 The `gh` token needs access to [GitHub notifications](https://docs.github.com/en/rest/activity/notifications?apiVersion=2022-11-28) and the whitelisted repositories. GitHub's notifications endpoint requires a classic personal access token or OAuth token; fine-grained tokens and GitHub App tokens do not work there. The bot needs repository **write** access so it can query [collaborator permission](https://docs.github.com/en/rest/collaborators/collaborators?apiVersion=2022-11-28) and push fix branches to its fork. Fixes also need access to the base repository's private fork PR policy and the fork's Actions settings; an unreadable policy causes refusal. GitHub requires the classic token's `repo` scope for those settings; its fine-grained equivalent is repository Administration (read), though fine-grained tokens cannot poll notifications. When push rulesets exist, the token needs ruleset write access for GitHub to include their bypass lists. `-check` verifies notification and repository access, including fork and push-rule safety when `fix` is enabled. GitHub credentials are read from `GH_TOKEN`/`GITHUB_TOKEN` or `gh auth token`. AI provider API keys can be set in `codex.api_key` and `claude.api_key` in the ignored `config.local.json`; see authentication below. Keep real keys out of the checked-in sample and set `chmod 600 config.local.json`.
 
@@ -170,9 +188,9 @@ Codex uses a private temporary project root per action/role beside the supplied 
 
 When Codex is selected for either role, every startup, including `-check`, verifies its instruction boundary, queries the installed Codex CLI's [model catalogue](https://learn.chatgpt.com/docs/app-server#models), and validates the model and its supported reasoning efforts. Omitted values are resolved from that catalogue and pinned for the life of the service. Invalid model settings, an incompatible Codex protocol, a failed instruction check, or a failed catalogue lookup stop startup before notification polling. A first start may already have created the state file and saved its cursor (see `start_at` above). The log includes the rejected value and supported choices when available. Missing required skills disable their mapped commands; missing always-on skills are skipped. Model discovery has a 30-second timeout and does not start an inference turn. The systemd service retries failed startups every 30 seconds, so a removed model or effort requires correcting `config.local.json` or the Codex installation before work resumes. Restart Minion after upgrading Codex or installing skills to revalidate. Catalogue validation checks compatibility, not future API availability or account quota.
 
-Minion requires a writable delegated cgroup v2 subtree for `-check` and normal execution. It refuses startup if the subtree is unavailable. The shipped user service delegates its cgroup and sets `TasksMax=256` and `MemoryMax=4G`; a parent cgroup may impose lower effective limits. Each external command starts in its own child cgroup. After the command leader exits, Minion stops processes still in that cgroup and rejects the result. It will not publish or start the next action until cleanup is confirmed. Both `-check` and normal execution lock and open state before AI or GitHub authentication checks, so an unconfirmed cleanup during preflight also blocks future starts. The AI CLIs still enforce model-tool filesystem and network access.
+Minion requires a writable delegated cgroup v2 subtree for `-check` and normal execution. The shipped service and documented `-check` command require [systemd 254 or newer](https://www.freedesktop.org/software/systemd/man/latest/systemd.resource-control.html) for `DelegateSubgroup=minion-supervisor`. This places Minion in a supervisor leaf beside its command children. The service sets outer `TasksMax=256` and `MemoryMax=4G`; a parent cgroup may impose lower effective limits. `command_max_tasks` (128 by default, 1–4096) and `command_max_memory_mib` (3072 by default, 1–1048576) cap each external command's processes/threads and memory. Set the outer service limits above the per-command limits to leave room for Minion and other service processes. Startup refuses missing delegation or unusable controllers before notification polling. After the command leader exits, Minion stops processes still in its cgroup and rejects the result. It will not publish or start the next action until cleanup is confirmed. Both `-check` and normal execution lock and open state before AI or GitHub authentication checks, so an unconfirmed cleanup during preflight also blocks future starts. The AI CLIs still enforce model-tool filesystem and network access.
 
-For continuous operation, copy [`deploy/minion.service`](deploy/minion.service) to `~/.config/systemd/user/minion.service`. Set its absolute checkout path in `WorkingDirectory` and `ExecStart`, and add the installed `gh` and selected AI CLI directories to `PATH` if needed. Keep `Delegate=yes` and the task and memory limits. Then run `systemctl --user daemon-reload` and `systemctl --user enable --now minion.service`. Enable user lingering if it must continue after logout. After rebuilding the binary, restart it:
+For continuous operation, copy [`deploy/minion.service`](deploy/minion.service) to `~/.config/systemd/user/minion.service`. Set its absolute checkout path in `WorkingDirectory` and `ExecStart`, and add the installed `gh` and selected AI CLI directories to `PATH` if needed. Keep `Delegate=yes`, `DelegateSubgroup=minion-supervisor`, and the outer task and memory limits. Then run `systemctl --user daemon-reload` and `systemctl --user enable --now minion.service`. Enable user lingering if it must continue after logout. After rebuilding the binary, restart it:
 
 ```sh
 systemctl --user restart minion.service
@@ -204,6 +222,7 @@ Key contract and execution limits:
 | Requester login | Same base spelling, optionally followed by one `[bot]` suffix; numeric identity and repository authorization remain required |
 | Model/effort; skills | Model and effort: 128 UTF-8 bytes each, no space, tab, CR, LF or NUL. Skills: 64 required+always-on sources per role, 4096 bytes per source |
 | Job runtime; critic budget | Greater than zero, at most 24 hours (configuration: 1–1440 minutes); 1–20 proposals with a critic, nonblocking threshold 0 through the configured `critic_max_rounds` |
+| External command tasks; memory | 1–4096 processes/threads; 1–1048576 MiB of memory, bounded further by the service and parent cgroups |
 | Diagnostics | 100 per Result; 8 KiB per UTF-8 message, no NUL |
 | Complete audit | Seven named regular files; 5 MiB per non-summary file; `REPORT.md` uses the published-text limit |
 | Transferred head / merge-base regular files | 10,000 per list; 64 MiB of contents across both |

@@ -10,13 +10,38 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 )
+
+func TestCgroupReadinessRequired(t *testing.T) {
+	if os.Getenv("MINION_REQUIRE_PROCESSGROUP") != "1" {
+		t.Skip("CI requires a delegated service")
+	}
+	if err := Check(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestUnreleasedScopeKeepsRecoveryReference(t *testing.T) {
+	dir := t.TempDir()
+	err := unreleasedScope(dir, ErrUnconfirmed)
+	if !errors.Is(err, ErrScopeUnconfirmed) || !strings.Contains(err.Error(), dir) {
+		t.Fatalf("unreleased scope lost recovery reference: %v", err)
+	}
+	if err := os.Remove(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := unreleasedScope(dir, ErrUnconfirmed); errors.Is(err, ErrScopeUnconfirmed) {
+		t.Fatalf("released scope remained latched: %v", err)
+	}
+}
 
 func TestCgroupRunSuccess(t *testing.T) {
 	if err := Check(); err != nil {
@@ -91,10 +116,14 @@ func TestCgroupCommandContextCancellation(t *testing.T) {
 	t.Cleanup(func() { cancel(); _ = h.Wait() })
 	child := waitForHelper(t, pidFile)
 	defer child.Close()
+	started := time.Now()
 	cancel()
 	err = h.Wait()
 	if err == nil || errors.Is(err, ErrUnconfirmed) || errors.Is(err, ErrDescendants) {
 		t.Fatalf("cancellation not confirmed: %v", err)
+	}
+	if time.Since(started) > 3*time.Second {
+		t.Fatalf("forced cancellation exceeded bound: %v", time.Since(started))
 	}
 	waitCtx, stopWait := context.WithTimeout(context.Background(), 2*time.Second)
 	defer stopWait()
@@ -126,6 +155,156 @@ func TestCgroupStartFailureRemovesGroup(t *testing.T) {
 	if fmt.Sprint(before) != fmt.Sprint(after) {
 		t.Fatalf("start failure leaked a cgroup: before=%v after=%v", before, after)
 	}
+}
+
+func TestCgroupLimitsBeforeActionAndGracefulCancellation(t *testing.T) {
+	if err := Check(); err != nil {
+		t.Skipf("delegated cgroup unavailable: %v", err)
+	}
+	setTestLimits(t, 64, 512<<20)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	report := filepath.Join(t.TempDir(), "limits")
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestProcessgroupHelperProcess$")
+	cmd.Env = append(os.Environ(), "MINION_PROCESSGROUP_TEST_MODE=limits-block", "MINION_PROCESSGROUP_TEST_PID_FILE="+report)
+	h, err := Start(cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cancel(); _ = h.Wait() })
+	got := strings.Split(strings.TrimSpace(waitForReport(t, report)), "\n")
+	want := []string{strings.TrimPrefix(h.dir, cgroupMount), "64", strconv.FormatInt(512<<20, 10), "1", "0"}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("child acted without configured cgroup limits: got %q, want %q", got, want)
+	}
+	nested := filepath.Join(h.dir, "nested")
+	if err := os.Mkdir(nested, 0700); err == nil {
+		_ = os.Remove(nested)
+		t.Fatal("command could create a nested cgroup despite cgroup.max.descendants=0")
+	}
+	started := time.Now()
+	cancel()
+	if err := h.Wait(); err == nil || errors.Is(err, ErrUnconfirmed) || errors.Is(err, ErrExhausted) || errors.Is(err, ErrDescendants) {
+		t.Fatalf("graceful cancellation was not confirmed: %v", err)
+	}
+	if time.Since(started) > 3*time.Second {
+		t.Fatalf("graceful cancellation exceeded bound: %v", time.Since(started))
+	}
+	if got := waitForReport(t, report+".term"); got != "term" {
+		t.Fatalf("helper did not acknowledge SIGTERM: %q", got)
+	}
+	if _, err := os.Stat(h.dir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("cgroup not removed after cancellation: %v", err)
+	}
+}
+
+func TestCgroupPIDLimitReportsExhaustion(t *testing.T) {
+	if err := Check(); err != nil {
+		t.Skipf("delegated cgroup unavailable: %v", err)
+	}
+	setTestLimits(t, 1, 512<<20)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", "/bin/sleep 1 & wait")
+	h, err := Start(cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = h.Wait()
+	var event *Exhaustion
+	if !errors.Is(err, ErrExhausted) || !errors.As(err, &event) || event.PIDEventsMax == 0 || event.MaxTasks != 1 || errors.Is(err, ErrUnconfirmed) {
+		t.Fatalf("PID ceiling was not reported as confirmed exhaustion: %v", err)
+	}
+	if _, err := os.Stat(h.dir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("cgroup not removed after PID exhaustion: %v", err)
+	}
+}
+
+func TestCgroupWrongTopologyFailsClosed(t *testing.T) {
+	if err := Check(); err != nil {
+		t.Skipf("delegated cgroup unavailable: %v", err)
+	}
+	parent, err := delegatedParent()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrong, err := os.MkdirTemp(parent, "minion-test-wrong-leaf-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := os.Remove(wrong); err != nil {
+			t.Errorf("remove wrong-topology cgroup: %v", err)
+		}
+	}()
+	group, err := os.Open(wrong)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer group.Close()
+	cmd := helperCommand("reject-topology", "", false)
+	cmd.SysProcAttr = &syscall.SysProcAttr{UseCgroupFD: true, CgroupFD: int(group.Fd())}
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("wrong topology was accepted or not checked: %v: %s", err, output)
+	}
+}
+
+// This probe is opt-in so a caller can place the entire test under independent
+// systemd MemoryMax and RuntimeMaxSec bounds before deliberately causing OOM.
+func TestCgroupMemoryLimitReportsOOM(t *testing.T) {
+	if os.Getenv("MINION_PROCESSGROUP_LIVE_OOM") != "1" {
+		t.Skip("requires an independently bounded delegated systemd service")
+	}
+	if err := Check(); err != nil {
+		t.Skipf("delegated cgroup unavailable: %v", err)
+	}
+	setTestLimits(t, 64, 96<<20)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestProcessgroupHelperProcess$")
+	cmd.Env = append(os.Environ(), "MINION_PROCESSGROUP_TEST_MODE=memory-exhaust")
+	h, err := Start(cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = h.Wait()
+	var event *Exhaustion
+	if !errors.Is(err, ErrExhausted) || !errors.As(err, &event) || event.MemoryOOMKill == 0 || event.MaxMemoryBytes != 96<<20 || errors.Is(err, ErrUnconfirmed) {
+		t.Fatalf("memory OOM was not reported as confirmed exhaustion: %v", err)
+	}
+	if _, err := os.Stat(h.dir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("cgroup not removed after memory OOM: %v", err)
+	}
+}
+
+func setTestLimits(t *testing.T, tasks int, memory int64) {
+	t.Helper()
+	previous := configuredLimits()
+	if err := Configure(tasks, memory); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := Configure(previous.tasks, previous.memory); err != nil {
+			t.Error(err)
+		}
+	})
+}
+
+func waitForReport(t *testing.T, path string) string {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(path)
+		if err == nil {
+			return strings.TrimSpace(string(data))
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("helper failed to publish %s", path)
+	return ""
 }
 
 func helperCommand(mode, pidFile string, holdPipe bool) *exec.Cmd {
@@ -188,18 +367,11 @@ func waitForHelper(t *testing.T, pidFile string) *pinnedProcess {
 
 func testCgroups(t *testing.T) []string {
 	t.Helper()
-	data, err := os.ReadFile("/proc/self/cgroup")
+	parent, err := delegatedParent()
 	if err != nil {
 		t.Fatal(err)
 	}
-	var path string
-	for _, line := range strings.Split(string(data), "\n") {
-		if strings.HasPrefix(line, "0::") {
-			path = strings.TrimPrefix(line, "0::")
-			break
-		}
-	}
-	entries, err := os.ReadDir(filepath.Join(cgroupMount, strings.TrimPrefix(path, "/")))
+	entries, err := os.ReadDir(parent)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -244,6 +416,59 @@ func TestProcessgroupHelperProcess(t *testing.T) {
 			os.Exit(2)
 		}
 		time.Sleep(20 * time.Second)
+		os.Exit(0)
+	case "limits-block":
+		term := make(chan os.Signal, 1)
+		signal.Notify(term, syscall.SIGTERM)
+		data, err := os.ReadFile("/proc/self/cgroup")
+		if err != nil {
+			os.Exit(2)
+		}
+		var current string
+		for _, line := range strings.Split(string(data), "\n") {
+			if strings.HasPrefix(line, "0::") {
+				current = strings.TrimPrefix(line, "0::")
+				break
+			}
+		}
+		if !filepath.IsAbs(current) {
+			os.Exit(2)
+		}
+		dir := filepath.Join(cgroupMount, strings.TrimPrefix(current, "/"))
+		values := []string{current}
+		for _, name := range []string{"pids.max", "memory.max", "memory.oom.group", "cgroup.max.descendants"} {
+			value, err := os.ReadFile(filepath.Join(dir, name))
+			if err != nil {
+				os.Exit(2)
+			}
+			values = append(values, strings.TrimSpace(string(value)))
+		}
+		if err := os.WriteFile(pidFile, []byte(strings.Join(values, "\n")), 0600); err != nil {
+			os.Exit(2)
+		}
+		select {
+		case <-term:
+			if err := os.WriteFile(pidFile+".term", []byte("term"), 0600); err != nil {
+				os.Exit(2)
+			}
+			os.Exit(0)
+		case <-time.After(20 * time.Second):
+			os.Exit(2)
+		}
+	case "reject-topology":
+		if err := Check(); !errors.Is(err, ErrUnconfirmed) {
+			os.Exit(2)
+		}
+		if h, err := Start(exec.Command("/bin/true")); h != nil || !errors.Is(err, ErrUnconfirmed) {
+			os.Exit(2)
+		}
+		os.Exit(0)
+	case "memory-exhaust":
+		block := make([]byte, 256<<20)
+		for offset := 0; offset < len(block); offset += 4096 {
+			block[offset] = 1
+		}
+		runtime.KeepAlive(block)
 		os.Exit(0)
 	default:
 		os.Exit(2)

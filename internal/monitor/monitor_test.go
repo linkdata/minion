@@ -696,6 +696,28 @@ func TestRunOnceTerminalFailureRepliesWithFreshContext(t *testing.T) {
 	}
 }
 
+func TestRunOnceExhaustedCancellationIsTerminal(t *testing.T) {
+	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	item := github.Item{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}}
+	gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}, items: []github.Item{item}, permission: github.Permission{Permission: "write"}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	handler := &fakeHandler{onExecute: cancel, executeErr: errors.Join(processgroup.ErrExhausted, context.Canceled)}
+	store := openState(t, now.Add(-time.Minute))
+	var logs bytes.Buffer
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Logger: log.New(&logs, "", 0), Now: func() time.Time { return now }}
+	if _, err := m.RunOnce(ctx, store); !errors.Is(err, processgroup.ErrExhausted) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("resource exhaustion lost its cause or parent cancellation: %v", err)
+	}
+	if len(handler.jobs) != 1 || len(gh.comments) != 1 || len(store.Data.Processed) != 1 || len(store.Data.JobFailures) != 0 || !strings.Contains(logs.String(), "failed (attempt 3/3)") || strings.Contains(logs.String(), " interrupted: ") {
+		t.Fatalf("resource exhaustion was retried or mislabeled: jobs=%d comments=%d logs=%q state=%+v", len(handler.jobs), len(gh.comments), logs.String(), store.Data)
+	}
+	m.Now = func() time.Time { return now.Add(time.Minute) }
+	if _, err := m.RunOnce(context.Background(), store); err != nil || len(handler.jobs) != 1 {
+		t.Fatalf("completed resource-exhausted job reran: err=%v jobs=%d", err, len(handler.jobs))
+	}
+}
+
 func TestRunOnceStopsAfterFailedReplyAttempts(t *testing.T) {
 	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
 	item := github.Item{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}, HTMLURL: "https://github.com/example-owner/example-repo/pull/7#issuecomment-1"}

@@ -423,7 +423,7 @@ func (index *OfflineIndex) run(ctx context.Context, limit int, input []byte, arg
 	cmd.Stdout, cmd.Stderr, cmd.Stdin = &output, &diagnostic, bytes.NewReader(input)
 	err := processgroup.Run(cmd)
 	contextErr := ctx.Err()
-	if errors.Is(err, processgroup.ErrDescendants) || errors.Is(err, processgroup.ErrUnconfirmed) {
+	if errors.Is(err, processgroup.ErrDescendants) || errors.Is(err, processgroup.ErrUnconfirmed) || errors.Is(err, processgroup.ErrExhausted) {
 		return nil, gitFailure("offline git", args[0], diagnostic.String(), contextErr, err)
 	}
 	if output.Exceeded && contextErr == nil {

@@ -21,6 +21,7 @@ func TestCheckedInConfigIsSample(t *testing.T) {
 		cfg.Codex.Model != "" || cfg.Codex.ReasoningEffort != "" ||
 		cfg.Claude.Model != "" || cfg.Claude.Effort != "" ||
 		cfg.Main != "codex" || cfg.Adversarial != "" || cfg.CriticMaxRounds != 5 || cfg.CriticNonblockingRounds != nil || cfg.JobTimeoutMinutes != 240 ||
+		cfg.CommandMaxTasks != DefaultCommandMaxTasks || cfg.CommandMaxMemoryMiB != DefaultCommandMaxMemoryMiB ||
 		len(cfg.Commands) != 4 || len(cfg.AlwaysOnSkills) != 2 ||
 		cfg.MaxGitHubContextBytes != DefaultMaxGitHubContextBytes ||
 		cfg.AlwaysOnSkills[0] != defaultAntiInjectionSkill || cfg.AlwaysOnSkills[1] != defaultCavemanSkill {
@@ -472,6 +473,41 @@ func TestValidateJobTimeoutMinutes(t *testing.T) {
 			}
 			if err != nil || cfg.JobTimeoutMinutes != tt.want {
 				t.Fatalf("Validate() timeout=%d, error=%v; want %d", cfg.JobTimeoutMinutes, err, tt.want)
+			}
+		})
+	}
+}
+
+func TestValidateCommandLimits(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		tasks      int
+		memoryMiB  int
+		wantTasks  int
+		wantMemory int
+		wantError  string
+	}{
+		{name: "defaults", wantTasks: DefaultCommandMaxTasks, wantMemory: DefaultCommandMaxMemoryMiB},
+		{name: "custom", tasks: 64, memoryMiB: 2048, wantTasks: 64, wantMemory: 2048},
+		{name: "minimum", tasks: 1, memoryMiB: 1, wantTasks: 1, wantMemory: 1},
+		{name: "maximum", tasks: MaxCommandMaxTasks, memoryMiB: MaxCommandMaxMemoryMiB, wantTasks: MaxCommandMaxTasks, wantMemory: MaxCommandMaxMemoryMiB},
+		{name: "negative tasks", tasks: -1, wantError: "command_max_tasks"},
+		{name: "excess tasks", tasks: MaxCommandMaxTasks + 1, wantError: "command_max_tasks"},
+		{name: "negative memory", memoryMiB: -1, wantError: "command_max_memory_mib"},
+		{name: "excess memory", memoryMiB: MaxCommandMaxMemoryMiB + 1, wantError: "command_max_memory_mib"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Config{BotLogin: "bot", CommandMaxTasks: tt.tasks, CommandMaxMemoryMiB: tt.memoryMiB,
+				Repositories: []Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"review"}}}}
+			err := cfg.Validate(t.TempDir())
+			if tt.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+					t.Fatalf("Validate() error=%v, want %s validation error", err, tt.wantError)
+				}
+				return
+			}
+			if err != nil || cfg.CommandMaxTasks != tt.wantTasks || cfg.CommandMaxMemoryMiB != tt.wantMemory {
+				t.Fatalf("Validate() tasks=%d memoryMiB=%d error=%v; want %d/%d", cfg.CommandMaxTasks, cfg.CommandMaxMemoryMiB, err, tt.wantTasks, tt.wantMemory)
 			}
 		})
 	}

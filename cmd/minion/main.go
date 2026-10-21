@@ -113,14 +113,21 @@ func run() int {
 		return 1
 	}
 	latchProcessError := func(stage string, runErr error) {
-		if errors.Is(runErr, processgroup.ErrUnconfirmed) {
+		if errors.Is(runErr, processgroup.ErrUnconfirmed) || errors.Is(runErr, processgroup.ErrScopeUnconfirmed) {
 			store.Data.UnconfirmedProcessJob = stage
 			if saveErr := store.Save(); saveErr != nil {
 				logger.Printf("save unconfirmed process cleanup: %v", saveErr)
 			}
 		}
 	}
+	if err := processgroup.Configure(cfg.CommandMaxTasks, int64(cfg.CommandMaxMemoryMiB)<<20); err != nil {
+		logger.Printf("process limits: %v", err)
+		return 1
+	}
 	if err := processgroup.Check(); err != nil {
+		if errors.Is(err, processgroup.ErrScopeUnconfirmed) {
+			latchProcessError("process probe", err)
+		}
 		logger.Printf("process ownership: %v", err)
 		return 1
 	}
@@ -400,7 +407,7 @@ func checkModels(ctx context.Context, cfg *config.Config, logger *log.Logger) (e
 		}
 		logger.Printf("%s settings: model=%s %s=%s", label, role.Model, effortName, role.Effort)
 	}
-	logger.Printf("AI roles: main=%s adversarial=%s job_timeout_minutes=%d", cfg.Main, cfg.Adversarial, cfg.JobTimeoutMinutes)
+	logger.Printf("AI roles: main=%s adversarial=%s job_timeout_minutes=%d command_max_tasks=%d command_max_memory_mib=%d", cfg.Main, cfg.Adversarial, cfg.JobTimeoutMinutes, cfg.CommandMaxTasks, cfg.CommandMaxMemoryMiB)
 	if cfg.Adversarial != "" {
 		logger.Printf("critic policy: critic_max_rounds=%d critic_nonblocking_rounds=%d", cfg.CriticMaxRounds, config.ResolveCriticNonblockingRounds(cfg.CriticMaxRounds, cfg.CriticNonblockingRounds))
 	}

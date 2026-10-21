@@ -398,6 +398,37 @@ func TestRunnerPreservesWorkspaceAfterUnconfirmedProcessCleanup(t *testing.T) {
 	}
 }
 
+func TestRunnerReportsProcessExhaustion(t *testing.T) {
+	root := t.TempDir()
+	var journal bytes.Buffer
+	runner := Runner{WorkRoot: root, Logger: log.New(&journal, "", 0), runModel: func(context.Context, modelRun) (aicli.Result, error) {
+		return aicli.Result{}, &processgroup.Exhaustion{MaxTasks: 2, MaxMemoryBytes: 256 << 20, PIDEventsMax: 1, Stop: "natural", Released: true}
+	}}
+	job := testJob(command.Comment)
+	result, err := runner.Run(context.Background(), job)
+	if !errors.Is(err, processgroup.ErrExhausted) || !errors.Is(err, monitor.ErrTerminalJob) {
+		t.Fatalf("exhaustion must be terminal: %v", err)
+	}
+	if !slices.ContainsFunc(result.Diagnostics, func(d Diagnostic) bool {
+		return d.Code == "process_limit_exhausted" && strings.Contains(d.Message, "pids.events:max=1") && strings.Contains(d.Message, "release=confirmed")
+	}) {
+		t.Fatalf("missing bounded limit diagnostic: %+v", result.Diagnostics)
+	}
+	if !strings.Contains(journal.String(), "job="+job.Identity.JobID+" attempt="+job.Identity.AttemptID) {
+		t.Fatalf("journal lacks action identity: %s", journal.String())
+	}
+	assertEmptyDir(t, root)
+}
+
+func TestTerminalUnlessCanceledPreservesProcessExhaustion(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := terminalUnlessCanceled(ctx, processgroup.ErrExhausted)
+	if !errors.Is(err, context.Canceled) || !errors.Is(err, processgroup.ErrExhausted) {
+		t.Fatalf("cancellation concealed process exhaustion: %v", err)
+	}
+}
+
 func TestRunnerReportsOwnedAndCriticCleanupFailures(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root bypasses directory permissions")

@@ -46,3 +46,23 @@ func TestAuditPermissionProbeDoesNotRetryAfterDescendants(t *testing.T) {
 		t.Fatalf("audit probe child survived: %v", err)
 	}
 }
+
+func TestAuditPermissionProbeDoesNotRetryAfterExhaustion(t *testing.T) {
+	if err := processgroup.Check(); err != nil {
+		t.Skipf("delegated process ownership unavailable: %v", err)
+	}
+	dir := t.TempDir()
+	calls := filepath.Join(dir, "calls")
+	bin := fakeOnPath(t, "node", "#!/bin/sh\nprintf '%s\\n' \"$1\" >> "+shellQuote(calls)+"\n/bin/true\nexit 1\n")
+	if err := processgroup.Configure(1, processgroup.DefaultMaxMemoryMiB<<20); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = processgroup.Configure(processgroup.DefaultMaxTasks, processgroup.DefaultMaxMemoryMiB<<20) })
+	flag, err := auditNodePermissionFlag(context.Background(), bin, filepath.Join(bin, "node"))
+	if flag != "" || !errors.Is(err, processgroup.ErrExhausted) {
+		t.Fatalf("permission probe hid process exhaustion: flag=%q error=%v", flag, err)
+	}
+	if calls, readErr := os.ReadFile(calls); readErr != nil || string(calls) != "--permission\n" {
+		t.Fatalf("permission probe retried after exhaustion: calls=%q error=%v", calls, readErr)
+	}
+}
