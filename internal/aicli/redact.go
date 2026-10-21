@@ -29,29 +29,36 @@ func removeReformedSecrets(text string, forms [4]string) string {
 		if !strings.Contains(text, form) {
 			continue
 		}
-		for marker := byte('!'); marker <= '~'; marker++ {
-			// The separator may be inserted inside a JSON string.
-			if marker == '"' || marker == '\\' {
-				continue
-			}
-			safe := true
+		if marker := safeRedactionSeparator(forms); marker != 0 {
 			for _, known := range forms {
-				if strings.IndexByte(known, marker) >= 0 {
-					safe = false
-					break
-				}
+				text = strings.ReplaceAll(text, known, string(marker))
 			}
-			if safe {
-				for _, known := range forms {
-					text = strings.ReplaceAll(text, known, string(marker))
-				}
-				return text
-			}
+			return text
 		}
 		// No printable marker is safe; discard the diagnostic rather than expose a key.
 		return ""
 	}
 	return text
+}
+
+func safeRedactionSeparator(forms [4]string) byte {
+	for marker := byte('!'); marker <= '~'; marker++ {
+		// The separator may be inserted inside a JSON string.
+		if marker == '"' || marker == '\\' {
+			continue
+		}
+		safe := true
+		for _, known := range forms {
+			if strings.IndexByte(known, marker) >= 0 {
+				safe = false
+				break
+			}
+		}
+		if safe {
+			return marker
+		}
+	}
+	return 0
 }
 
 func redactText(text, secret string, truncated bool) string {
@@ -68,7 +75,33 @@ func redactText(text, secret string, truncated bool) string {
 		text = strings.ReplaceAll(text, "\x00", "?")
 		forms[3] = strings.ReplaceAll(secret, "\x00", "?")
 	}
-	text = redactJSONEscapes(text, secret, marker, truncated)
+	jsonDocument := !truncated && json.Valid([]byte(text))
+	if jsonDocument && text == secret {
+		// Callers also pass standalone scalar text before encoding it into JSON.
+		switch strings.TrimSpace(text)[0] {
+		case '{', '[', '"':
+		default:
+			return marker
+		}
+	}
+	text = redactJSONEscapes(text, secret, marker, truncated, jsonDocument)
+	if jsonDocument {
+		// A marker can join adjacent content into another decoded key.
+		if redactJSONEscapes(text, secret, marker, false, true) != text {
+			separator := safeRedactionSeparator(forms)
+			if separator == 0 {
+				return ""
+			}
+			text = redactJSONEscapes(text, secret, string(separator), false, true)
+		}
+		// Raw matches left across JSON syntax cannot be replaced without corrupting it.
+		for _, form := range forms {
+			if strings.Contains(text, form) {
+				return ""
+			}
+		}
+		return text
+	}
 	var replacements [8]string
 	longest := 0
 	for i, form := range forms {
@@ -111,21 +144,18 @@ func redactText(text, secret string, truncated bool) string {
 	}
 	text = removeReformedSecrets(text, forms)
 	// A replacement can join fragments into an escaped key unknown to the fixed forms.
-	if redactJSONEscapes(text, secret, marker, false) != text {
+	if strings.ContainsRune(text, '\\') && redactJSONEscapes(text, secret, marker, false, json.Valid([]byte(text))) != text {
 		return ""
 	}
 	return text
 }
 
-// redactJSONEscapes compares JSON-decoded escapes with the secret while replacing
-// original spans, so unrelated diagnostics keep their exact spelling.
-func redactJSONEscapes(text, secret, marker string, truncated bool) string {
-	if secret == "" || len(secret) > len(text) || !strings.ContainsRune(text, '\\') {
+// redactJSONEscapes compares decoded JSON string content with the secret while
+// replacing original spans, so unrelated diagnostics keep their exact spelling.
+func redactJSONEscapes(text, secret, marker string, truncated, jsonDocument bool) string {
+	if secret == "" || (!jsonDocument && (len(secret) > len(text) || !strings.ContainsRune(text, '\\'))) {
 		return text
 	}
-	// Raw quotes delimit content only in a complete JSON document. In freeform
-	// diagnostics they may be literal bytes within a partly escaped key.
-	jsonDocument := !truncated && strings.ContainsRune(text, '"') && json.Valid([]byte(text))
 	needle := []byte(secret)
 	prefix := make([]int, len(needle))
 	for i, matched := 1, 0; i < len(needle); i++ {
@@ -140,13 +170,21 @@ func redactJSONEscapes(text, secret, marker string, truncated bool) string {
 	starts := make([]int, len(needle))
 	var result strings.Builder
 	matched, decoded, last := 0, 0, 0
+	inString := false
 	changed := false
 	for i := 0; i < len(text); {
-		if jsonDocument && text[i] == '"' {
-			// Only escaped quotes can be JSON string content.
-			matched = 0
-			i++
-			continue
+		if jsonDocument {
+			if text[i] == '"' {
+				// Raw quotes delimit JSON strings; escaped quotes are content.
+				inString = !inString
+				matched = 0
+				i++
+				continue
+			}
+			if !inString {
+				i++
+				continue
+			}
 		}
 		begin := i
 		var part [utf8.UTFMax]byte
@@ -158,9 +196,16 @@ func redactJSONEscapes(text, secret, marker string, truncated bool) string {
 			}
 		}
 		if width == 0 {
-			part[0] = text[i]
-			i++
-			width = 1
+			if jsonDocument && text[i] >= utf8.RuneSelf {
+				// JSON decoding replaces malformed UTF-8 with the replacement rune.
+				r, size := utf8.DecodeRuneInString(text[i:])
+				width = utf8.EncodeRune(part[:], r)
+				i += size
+			} else {
+				part[0] = text[i]
+				i++
+				width = 1
+			}
 		}
 		for j := 0; j < width; j++ {
 			b := part[j]
@@ -173,8 +218,8 @@ func redactJSONEscapes(text, secret, marker string, truncated bool) string {
 			}
 			if matched == len(needle) {
 				sourceStart := starts[(decoded+1)%len(needle)]
-				// Leave plain literal matches to the existing form replacer.
-				if sourceStart >= last && i-sourceStart > len(needle) {
+				// Freeform plain matches stay with the existing form replacer.
+				if sourceStart >= last && (jsonDocument || i-sourceStart > len(needle)) {
 					if !changed {
 						result.Grow(len(text))
 						changed = true

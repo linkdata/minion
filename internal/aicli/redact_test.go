@@ -120,9 +120,48 @@ func TestRedactMarkerCannotReformSecretAtBoundary(t *testing.T) {
 
 func TestRedactTextKeepsJSONValidAfterReformedSecret(t *testing.T) {
 	const secret = "]!"
-	got := RedactText(`{"answer":"]]!!","refutations":""}`, secret)
-	if !json.Valid([]byte(got)) || strings.Contains(got, secret) {
-		t.Fatalf("redaction broke JSON or exposed the key: %q", got)
+	for _, text := range []string{
+		`{"answer":"]]!!","refutations":""}`,
+		`{"answer":"]\u005d!!","refutations":""}`,
+	} {
+		got := RedactText(text, secret)
+		var decoded map[string]string
+		if err := json.Unmarshal([]byte(got), &decoded); err != nil || strings.Contains(got, secret) || strings.Contains(decoded["answer"], secret) {
+			t.Fatalf("redaction broke JSON or exposed the key: %q (error: %v)", got, err)
+		}
+	}
+}
+
+func TestRedactTextPreservesJSONBoundaries(t *testing.T) {
+	for _, tc := range []struct{ name, text, secret, want string }{
+		{"plain content", `{"x":"a/b"}`, "a/b", `{"x":"[redacted]"}`},
+		{"escaped quote in content", `{"x":"a\""}`, `a"`, `{"x":"[redacted]"}`},
+		{"malformed UTF-8 decoded as replacement", "{\"x\":\"\xff\"}", "�", `{"x":"[redacted]"}`},
+		{"decoded content longer than source", "\"\xff\xff\"", "��", `"[redacted]"`},
+		{"structural quote", `{"x":"a"}`, `a"`, ""},
+		{"structural comma and quote", `{"a":1,"b":2}`, `,"`, ""},
+		{"JSON literal", `false`, "a", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := RedactText(tc.text, tc.secret)
+			if got != tc.want || (got != "" && !json.Valid([]byte(got))) {
+				t.Fatalf("redaction broke JSON or exposed the key: got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRedactTextStandaloneJSONScalarKeys(t *testing.T) {
+	for _, secret := range []string{"123", "true", "false", "null"} {
+		t.Run(secret, func(t *testing.T) {
+			got := RedactText(secret, secret)
+			if got != "[redacted]" || RedactText(got, secret) != got {
+				t.Fatalf("standalone scalar was not stably redacted: %q", got)
+			}
+		})
+	}
+	if got := RedactText("1234", "123"); got != "" {
+		t.Fatalf("partial scalar match was not discarded: %q", got)
 	}
 }
 

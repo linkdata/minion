@@ -226,7 +226,7 @@ func TestPrivatePathsRejectAliasesIntoSelectedInstalledSkill(t *testing.T) {
 	const source = "https://github.com/owner/repo/tree/pinned/skills/example"
 	for _, provider := range []string{"codex", "claude"} {
 		for _, kind := range []string{
-			"config", "credential", "git credentials", "git config", "overridden git config", "overridden system git config", "overridden legacy git config", "netrc",
+			"config", "state", "state lock", "usage", "credential", "git credentials", "git config", "overridden git config", "overridden system git config", "overridden legacy git config", "netrc",
 			"xdg git credentials", "xdg git config", "ssh home",
 			"default codex auth", "default codex config", "default claude credentials",
 			"default claude settings", "default xdg git credentials", "default xdg git config",
@@ -263,6 +263,14 @@ func TestPrivatePathsRejectAliasesIntoSelectedInstalledSkill(t *testing.T) {
 				switch kind {
 				case "config":
 					privatePath = configPath
+				case "state", "state lock", "usage":
+					cfg.StatePath = filepath.Join(root, parent, "state.json")
+					privatePath = cfg.StatePath
+					if kind == "state lock" {
+						privatePath += ".lock"
+					} else if kind == "usage" {
+						privatePath = filepath.Join(filepath.Dir(cfg.StatePath), "usage")
+					}
 				case "git credentials":
 					privatePath = filepath.Join(root, ".git-credentials")
 				case "git config":
@@ -303,7 +311,7 @@ func TestPrivatePathsRejectAliasesIntoSelectedInstalledSkill(t *testing.T) {
 					t.Fatal(err)
 				}
 				target := filepath.Join(skill, "fixture-data")
-				if kind == "ssh home" {
+				if kind == "ssh home" || kind == "usage" {
 					target = skill
 				}
 				if err := os.Symlink(target, privatePath); err != nil {
@@ -322,7 +330,7 @@ func TestPrivatePathsRejectAliasesIntoSelectedInstalledSkill(t *testing.T) {
 				if err := os.Remove(privatePath); err != nil {
 					t.Fatal(err)
 				}
-				if kind == "ssh home" {
+				if kind == "ssh home" || kind == "usage" {
 					if err := os.Mkdir(privatePath, 0700); err != nil {
 						t.Fatal(err)
 					}

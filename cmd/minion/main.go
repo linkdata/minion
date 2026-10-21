@@ -251,6 +251,13 @@ func checkIsolation(cfg config.Config, configPath string) (resultErr error) {
 		return err
 	}
 	private := []string{configPath}
+	if cfg.StatePath != "" {
+		private = append(private,
+			cfg.StatePath,
+			cfg.StatePath+".lock",
+			filepath.Join(filepath.Dir(cfg.StatePath), "usage"),
+		)
+	}
 	// Shared system reads can expose stored credentials even for an unused provider.
 	codexHome, err := codexcli.HomePath()
 	if err != nil {
