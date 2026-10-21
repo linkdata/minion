@@ -33,6 +33,22 @@ func TestBoundedGitRejectsSuccessfulLeaderWithDescendants(t *testing.T) {
 	assertGitChildStopped(t, pidFile)
 }
 
+func TestBoundedGitDoesNotTruncateProcessExhaustion(t *testing.T) {
+	if err := processgroup.Check(); err != nil {
+		t.Skipf("delegated process ownership unavailable: %v", err)
+	}
+	dir := t.TempDir()
+	fakeOnPath(t, "git", "#!/bin/sh\n/bin/true\nprintf overflow-output\n")
+	if err := processgroup.Configure(1, processgroup.DefaultMaxMemoryMiB<<20); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = processgroup.Configure(processgroup.DefaultMaxTasks, processgroup.DefaultMaxMemoryMiB<<20) })
+	output, truncated, err := (&Checkout{path: dir}).boundedGit(context.Background(), nil, 4, true, "status")
+	if len(output) != 0 || truncated || !errors.Is(err, processgroup.ErrExhausted) || errors.Is(err, ErrCheckoutTooLarge) {
+		t.Fatalf("bounded Git truncated process exhaustion: output=%q truncated=%t error=%v", output, truncated, err)
+	}
+}
+
 func assertGitChildStopped(t *testing.T, pidFile string) {
 	t.Helper()
 	child, err := testsupport.PinProcess(pidFile)

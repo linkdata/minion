@@ -10,8 +10,21 @@ import (
 
 var (
 	ErrDescendants = errors.New("command left descendant processes")
-	ErrUnconfirmed = errors.New("command process cleanup unconfirmed")
+	// ErrUnconfirmed means command ownership, limit observation, or cleanup could not be proved.
+	ErrUnconfirmed = errors.New("command process safety unconfirmed")
 )
+
+const (
+	DefaultMaxTasks     = 128
+	DefaultMaxMemoryMiB = 3072
+)
+
+func Configure(maxTasks int, maxMemoryBytes int64) error {
+	if maxTasks < 1 || maxMemoryBytes < 1 {
+		return errors.New("command process and memory ceilings must be positive")
+	}
+	return nil
+}
 
 // Handle is unavailable without Linux cgroup v2 process ownership.
 type Handle struct{}

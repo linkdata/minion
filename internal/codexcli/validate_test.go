@@ -14,7 +14,14 @@ import (
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/config"
+	"github.com/linkdata/minion/internal/processgroup"
 )
+
+func TestExpectedDiscoveryStopPreservesResourceExhaustion(t *testing.T) {
+	if expectedDiscoveryStop(errors.Join(context.Canceled, processgroup.ErrExhausted)) {
+		t.Fatal("resource exhaustion was accepted as an expected discovery stop")
+	}
+}
 
 const catalogueScript = `#!/bin/sh
 printf '%s\n' "$@" > @ARGS@

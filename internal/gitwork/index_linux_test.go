@@ -34,6 +34,22 @@ func TestOfflineCheckIgnoreDoesNotAcceptSurvivingChild(t *testing.T) {
 	assertGitChildStopped(t, pidFile)
 }
 
+func TestOfflineCheckIgnoreDoesNotAcceptProcessExhaustion(t *testing.T) {
+	if err := processgroup.Check(); err != nil {
+		t.Skipf("delegated process ownership unavailable: %v", err)
+	}
+	index, _ := offlineIndexFixture(t, nil)
+	index.binary = filepath.Join(fakeOnPath(t, "git-ignore-exhausted", "#!/bin/sh\n/bin/true\nexit 1\n"), "git-ignore-exhausted")
+	if err := processgroup.Configure(1, processgroup.DefaultMaxMemoryMiB<<20); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = processgroup.Configure(processgroup.DefaultMaxTasks, processgroup.DefaultMaxMemoryMiB<<20) })
+	output, err := index.run(context.Background(), 1024, nil, "check-ignore", "--", "ignored")
+	if len(output) != 0 || !errors.Is(err, processgroup.ErrExhausted) {
+		t.Fatalf("check-ignore accepted process exhaustion: output=%q error=%v", output, err)
+	}
+}
+
 func TestFixIndexRejectsControlFIFOsBeforeGitOpensThem(t *testing.T) {
 	for _, control := range []string{".gitignore", ".gitattributes"} {
 		for _, dir := range []string{".", "untracked", "ignored-tracked"} {

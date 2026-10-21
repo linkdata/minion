@@ -379,12 +379,12 @@ func TestRunnerRemovesRestrictedModelDirectory(t *testing.T) {
 	assertEmptyDir(t, root)
 }
 
-func TestRunnerPreservesWorkspaceAfterUnconfirmedProcessCleanup(t *testing.T) {
+func TestRunnerPreservesWorkspaceAfterUnconfirmedScopeRelease(t *testing.T) {
 	root := t.TempDir()
 	var source string
 	runner := Runner{WorkRoot: root, runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 		source = request.dir
-		return aicli.Result{}, processgroup.ErrUnconfirmed
+		return aicli.Result{}, errors.Join(processgroup.ErrUnconfirmed, processgroup.ErrScopeUnconfirmed)
 	}}
 	result, err := runner.Run(context.Background(), testJob(command.Comment))
 	if !errors.Is(err, processgroup.ErrUnconfirmed) || source == "" {
@@ -395,6 +395,53 @@ func TestRunnerPreservesWorkspaceAfterUnconfirmedProcessCleanup(t *testing.T) {
 	}
 	if !slices.ContainsFunc(result.Diagnostics, func(d Diagnostic) bool { return d.Code == "process_cleanup_unconfirmed" }) {
 		t.Fatalf("missing process recovery diagnostic: %+v", result.Diagnostics)
+	}
+}
+
+func TestRunnerCleansWorkspaceAfterConfirmedScopeRelease(t *testing.T) {
+	root := t.TempDir()
+	var source string
+	runner := Runner{WorkRoot: root, runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+		source = request.dir
+		return aicli.Result{}, processgroup.ErrUnconfirmed
+	}}
+	result, err := runner.Run(context.Background(), testJob(command.Comment))
+	if !errors.Is(err, processgroup.ErrUnconfirmed) || source == "" {
+		t.Fatalf("process result: source=%q err=%v", source, err)
+	}
+	if _, statErr := os.Stat(source); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("released workspace remains: %v", statErr)
+	}
+	if slices.ContainsFunc(result.Diagnostics, func(d Diagnostic) bool { return d.Code == "process_cleanup_unconfirmed" }) {
+		t.Fatalf("false process recovery diagnostic: %+v", result.Diagnostics)
+	}
+	assertEmptyDir(t, root)
+}
+
+func TestRunnerReportsProcessExhaustion(t *testing.T) {
+	root := t.TempDir()
+	runner := Runner{WorkRoot: root, runModel: func(context.Context, modelRun) (aicli.Result, error) {
+		return aicli.Result{}, &processgroup.Exhaustion{MaxTasks: 2, MaxMemoryBytes: 256 << 20, PIDEventsMax: 1, Stop: "natural", Released: true}
+	}}
+	job := testJob(command.Comment)
+	result, err := runner.Run(context.Background(), job)
+	if !errors.Is(err, processgroup.ErrExhausted) || !errors.Is(err, monitor.ErrTerminalJob) {
+		t.Fatalf("exhaustion must be terminal: %v", err)
+	}
+	if !slices.ContainsFunc(result.Diagnostics, func(d Diagnostic) bool {
+		return d.Code == "process_limit_exhausted" && strings.Contains(d.Message, "pids.events:max=1") && strings.Contains(d.Message, "release=confirmed")
+	}) {
+		t.Fatalf("missing bounded limit diagnostic: %+v", result.Diagnostics)
+	}
+	assertEmptyDir(t, root)
+}
+
+func TestTerminalUnlessCanceledPreservesProcessExhaustion(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := terminalUnlessCanceled(ctx, processgroup.ErrExhausted)
+	if !errors.Is(err, context.Canceled) || !errors.Is(err, processgroup.ErrExhausted) {
+		t.Fatalf("cancellation concealed process exhaustion: %v", err)
 	}
 }
 

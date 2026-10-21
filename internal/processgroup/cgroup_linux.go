@@ -8,6 +8,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,24 +21,59 @@ var (
 	// ErrDescendants means the command's leader exited while processes remained
 	// in its cgroup. The descendants were stopped, but the result is rejected.
 	ErrDescendants = errors.New("command left descendant processes")
-	// ErrUnconfirmed means process cleanup or quiescence could not be proved.
-	ErrUnconfirmed = errors.New("command process cleanup unconfirmed")
+	// ErrUnconfirmed means command ownership, limit observation, or cleanup could not be proved.
+	ErrUnconfirmed = errors.New("command process safety unconfirmed")
 )
 
 const (
-	cgroupMount  = "/sys/fs/cgroup"
-	cgroup2Magic = 0x63677270
-	cleanupWait  = 5 * time.Second
-	settleWait   = 100 * time.Millisecond
+	DefaultMaxTasks     = 128
+	DefaultMaxMemoryMiB = 3072
+	cgroupMount         = "/sys/fs/cgroup"
+	cgroup2Magic        = 0x63677270
+	supervisorLeaf      = "minion-supervisor"
+	cleanupWait         = 5 * time.Second
+	graceWait           = time.Second
+	settleWait          = 100 * time.Millisecond
 )
+
+type limits struct {
+	tasks  int
+	memory int64
+}
+
+var (
+	limitsMu      sync.RWMutex
+	commandLimits = limits{DefaultMaxTasks, DefaultMaxMemoryMiB << 20}
+)
+
+// Configure sets finite per-command ceilings before startup preflight.
+func Configure(maxTasks int, maxMemoryBytes int64) error {
+	if maxTasks < 1 || maxMemoryBytes < 1 {
+		return errors.New("command process and memory ceilings must be positive")
+	}
+	limitsMu.Lock()
+	commandLimits = limits{maxTasks, maxMemoryBytes}
+	limitsMu.Unlock()
+	return nil
+}
+
+func configuredLimits() limits {
+	limitsMu.RLock()
+	defer limitsMu.RUnlock()
+	return commandLimits
+}
 
 // Handle owns the unique cgroup of a started command. Wait must be called to
 // reap the leader, stop remaining descendants, and remove the cgroup.
 type Handle struct {
 	cmd       *exec.Cmd
 	dir       string
+	limits    limits
 	startErr  error
 	cancelled atomic.Bool
+	forced    atomic.Bool
+	cancelMu  sync.Mutex
+	cancelErr error
 	once      sync.Once
 	err       error
 }
@@ -50,25 +87,42 @@ func Run(cmd *exec.Cmd) error {
 	return h.Wait()
 }
 
-// Check verifies that this process can create and remove a delegated cgroup.
-// Start is the definitive check that the kernel allows atomic placement.
+// Check proves placement, detached-descendant stopping, and scope release.
 func Check() error {
-	dir, group, err := newCgroup()
+	setsid, err := exec.LookPath("setsid")
 	if err != nil {
-		return err
+		return fmt.Errorf("process probe requires setsid: %w", err)
 	}
-	closeErr := group.Close()
-	killFile, openErr := os.OpenFile(filepath.Join(dir, "cgroup.kill"), os.O_WRONLY, 0)
-	if openErr == nil {
-		openErr = killFile.Close()
+	sleep, err := exec.LookPath("sleep")
+	if err != nil {
+		return fmt.Errorf("process probe requires sleep: %w", err)
 	}
-	populated, readErr := cgroupPopulated(dir)
-	if populated && readErr == nil {
-		readErr = errors.New("new cgroup unexpectedly populated")
+	cmd := exec.Command(setsid, "-f", sleep, "30")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	limit := configuredLimits()
+	probeLimits := limit
+	probeLimits.tasks = max(probeLimits.tasks, 4)
+	probeLimits.memory = max(probeLimits.memory, 64<<20)
+	if limit != probeLimits {
+		// Prove the requested ceilings, then allow enough room to test detached cleanup.
+		dir, group, err := newCgroup(limit)
+		if err != nil {
+			return fmt.Errorf("process probe configured ceilings: %w", err)
+		}
+		closeErr := group.Close()
+		removeErr := unreleasedScope(dir, removeEmptyCgroup(dir))
+		if closeErr != nil || removeErr != nil {
+			return errors.Join(fmt.Errorf("%w: process probe configured ceilings", ErrUnconfirmed), closeErr, removeErr)
+		}
 	}
-	removeErr := removeEmptyCgroup(dir)
-	if err := errors.Join(closeErr, openErr, readErr, removeErr); err != nil {
-		return fmt.Errorf("%w: check delegated cgroup: %v", ErrUnconfirmed, err)
+	h, err := start(cmd, probeLimits)
+	if err != nil {
+		return fmt.Errorf("process probe start: %w", err)
+	}
+	err = h.Wait()
+	if !errors.Is(err, ErrDescendants) || errors.Is(err, ErrUnconfirmed) || errors.Is(err, ErrExhausted) ||
+		cmd.ProcessState == nil || !cmd.ProcessState.Success() {
+		return errors.Join(fmt.Errorf("%w: process probe did not prove detached descendant cleanup", ErrUnconfirmed), err)
 	}
 	return nil
 }
@@ -79,7 +133,11 @@ func Start(cmd *exec.Cmd) (*Handle, error) {
 	if cmd == nil {
 		return nil, errors.New("nil command")
 	}
-	dir, group, err := newCgroup()
+	return start(cmd, configuredLimits())
+}
+
+func start(cmd *exec.Cmd, limit limits) (*Handle, error) {
+	dir, group, err := newCgroup(limit)
 	if err != nil {
 		return nil, err
 	}
@@ -88,7 +146,7 @@ func Start(cmd *exec.Cmd) (*Handle, error) {
 		attr = *cmd.SysProcAttr
 	}
 	previousAttr, previousCancel := cmd.SysProcAttr, cmd.Cancel
-	h := &Handle{cmd: cmd, dir: dir}
+	h := &Handle{cmd: cmd, dir: dir, limits: limit}
 	attr.UseCgroupFD, attr.CgroupFD = true, int(group.Fd())
 	cmd.SysProcAttr = &attr
 	if cmd.WaitDelay <= 0 || cmd.WaitDelay > 2*time.Second {
@@ -97,7 +155,12 @@ func Start(cmd *exec.Cmd) (*Handle, error) {
 	if previousCancel != nil {
 		cmd.Cancel = func() error {
 			h.cancelled.Store(true)
-			return killCgroup(dir)
+			forced, stopErr := stopCgroupGracefully(cmd, dir)
+			h.forced.Store(forced)
+			h.cancelMu.Lock()
+			h.cancelErr = stopErr
+			h.cancelMu.Unlock()
+			return stopErr
 		}
 	}
 	err = cmd.Start()
@@ -107,11 +170,18 @@ func Start(cmd *exec.Cmd) (*Handle, error) {
 	}
 	closeErr := group.Close()
 	if err != nil {
-		cleanupErr := cleanupStartFailure(dir)
-		if cleanupErr != nil {
-			return nil, errors.Join(err, fmt.Errorf("%w: remove cgroup after start failure: %v", ErrUnconfirmed, cleanupErr))
+		limitErr := readExhaustion(dir, limit)
+		cleanupErr := unreleasedScope(dir, cleanupStartFailure(dir))
+		if event, ok := limitErr.(*Exhaustion); ok {
+			event.Stop, event.Released = "start_failed", !errors.Is(cleanupErr, ErrScopeUnconfirmed)
+			if !event.Released {
+				event.Scope = dir
+			}
 		}
-		return nil, err
+		if cleanupErr != nil {
+			return nil, errors.Join(err, limitErr, fmt.Errorf("%w: remove cgroup %s after start failure: %w", ErrUnconfirmed, dir, cleanupErr))
+		}
+		return nil, errors.Join(err, limitErr)
 	}
 	// Once started, ownership always passes to a Handle. Report a descriptor
 	// close error from Wait so a caller never discards a live command on error.
@@ -136,22 +206,64 @@ func cleanupStartFailure(dir string) error {
 // A successful leader exit is rejected if any descendants survived it.
 func (h *Handle) Wait() error {
 	h.once.Do(func() {
-		h.err = errors.Join(h.startErr, h.cmd.Wait(), cleanupCgroup(h.dir, h.cancelled.Load()))
+		cmdErr := h.cmd.Wait()
+		h.cancelMu.Lock()
+		cancelErr := h.cancelErr
+		h.cancelMu.Unlock()
+		limitErr := readExhaustion(h.dir, h.limits)
+		cleanupErr := unreleasedScope(h.dir, cleanupCgroup(h.dir, h.cancelled.Load()))
+		if event, ok := limitErr.(*Exhaustion); ok {
+			event.Stop = "natural"
+			if h.cancelled.Load() {
+				event.Stop = "graceful"
+				if h.forced.Load() {
+					event.Stop = "forced"
+				}
+			} else if errors.Is(cleanupErr, ErrDescendants) || errors.Is(cleanupErr, ErrUnconfirmed) {
+				event.Stop = "forced"
+			}
+			event.Released = !errors.Is(cleanupErr, ErrScopeUnconfirmed)
+			if !event.Released {
+				event.Scope = h.dir
+			}
+		}
+		h.err = errors.Join(h.startErr, cmdErr, cancelErr, limitErr, cleanupErr)
 	})
 	return h.err
 }
 
-func newCgroup() (string, *os.File, error) {
+func newCgroup(limit limits) (string, *os.File, error) {
+	parent, err := delegatedParent()
+	if err != nil {
+		return "", nil, err
+	}
+	dir, err := os.MkdirTemp(parent, cgroupNamePrefix())
+	if err != nil {
+		return "", nil, fmt.Errorf("%w: create delegated cgroup under %s: %v", ErrUnconfirmed, parent, err)
+	}
+	if err := setCgroupLimits(dir, limit); err != nil {
+		removeErr := os.Remove(dir)
+		return "", nil, unreleasedScope(dir, errors.Join(fmt.Errorf("%w: configure cgroup %s: %v", ErrUnconfirmed, dir, err), removeErr))
+	}
+	group, err := os.Open(dir)
+	if err != nil {
+		removeErr := os.Remove(dir)
+		return "", nil, unreleasedScope(dir, errors.Join(fmt.Errorf("%w: open delegated cgroup %s: %v", ErrUnconfirmed, dir, err), removeErr))
+	}
+	return dir, group, nil
+}
+
+func delegatedParent() (string, error) {
 	var stat syscall.Statfs_t
 	if err := syscall.Statfs(cgroupMount, &stat); err != nil {
-		return "", nil, fmt.Errorf("%w: cgroup v2 mount unavailable: %v", ErrUnconfirmed, err)
+		return "", fmt.Errorf("%w: cgroup v2 mount unavailable: %v", ErrUnconfirmed, err)
 	}
 	if uint64(stat.Type) != cgroup2Magic {
-		return "", nil, fmt.Errorf("%w: %s is not a cgroup v2 mount", ErrUnconfirmed, cgroupMount)
+		return "", fmt.Errorf("%w: %s is not a cgroup v2 mount", ErrUnconfirmed, cgroupMount)
 	}
 	data, err := os.ReadFile("/proc/self/cgroup")
 	if err != nil {
-		return "", nil, fmt.Errorf("%w: read current cgroup: %v", ErrUnconfirmed, err)
+		return "", fmt.Errorf("%w: read current cgroup: %v", ErrUnconfirmed, err)
 	}
 	var current string
 	for _, line := range strings.Split(string(data), "\n") {
@@ -160,24 +272,139 @@ func newCgroup() (string, *os.File, error) {
 			break
 		}
 	}
-	if !filepath.IsAbs(current) || filepath.Clean(current) != current {
-		return "", nil, fmt.Errorf("%w: invalid current cgroup %q", ErrUnconfirmed, current)
+	if !filepath.IsAbs(current) || filepath.Clean(current) != current || filepath.Base(current) != supervisorLeaf || filepath.Dir(current) == "/" {
+		return "", fmt.Errorf("%w: current cgroup %q must be a %s leaf below a delegated service", ErrUnconfirmed, current, supervisorLeaf)
 	}
-	parent := filepath.Join(cgroupMount, strings.TrimPrefix(current, "/"))
-	dir, err := os.MkdirTemp(parent, cgroupNamePrefix())
+	parent := filepath.Join(cgroupMount, strings.TrimPrefix(filepath.Dir(current), "/"))
+	procs, err := os.ReadFile(filepath.Join(parent, "cgroup.procs"))
+	if err != nil || len(strings.TrimSpace(string(procs))) != 0 {
+		return "", fmt.Errorf("%w: delegated parent %s must have no direct processes: %v", ErrUnconfirmed, parent, err)
+	}
+	controllers, err := os.ReadFile(filepath.Join(parent, "cgroup.controllers"))
 	if err != nil {
-		return "", nil, fmt.Errorf("%w: create delegated cgroup: %v", ErrUnconfirmed, err)
+		return "", fmt.Errorf("%w: read controllers of %s: %v", ErrUnconfirmed, parent, err)
 	}
-	group, err := os.Open(dir)
+	for _, name := range []string{"memory", "pids"} {
+		if !slices.Contains(strings.Fields(string(controllers)), name) {
+			return "", fmt.Errorf("%w: %s controller unavailable in %s", ErrUnconfirmed, name, parent)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(parent, "cgroup.subtree_control"), []byte("+memory +pids"), 0); err != nil {
+		return "", fmt.Errorf("%w: enable memory and pids controllers in %s: %v", ErrUnconfirmed, parent, err)
+	}
+	enabled, err := os.ReadFile(filepath.Join(parent, "cgroup.subtree_control"))
 	if err != nil {
-		removeErr := os.Remove(dir)
-		return "", nil, errors.Join(fmt.Errorf("%w: open delegated cgroup: %v", ErrUnconfirmed, err), removeErr)
+		return "", fmt.Errorf("%w: verify controllers in %s: %v", ErrUnconfirmed, parent, err)
 	}
-	return dir, group, nil
+	for _, name := range []string{"memory", "pids"} {
+		if !slices.Contains(strings.Fields(string(enabled)), name) {
+			return "", fmt.Errorf("%w: %s controller not enabled in %s", ErrUnconfirmed, name, parent)
+		}
+	}
+	return parent, nil
 }
 
 func cgroupNamePrefix() string {
 	return fmt.Sprintf("minion-%d-", os.Getpid())
+}
+
+func setCgroupLimits(dir string, limit limits) error {
+	for _, setting := range []struct{ name, value string }{
+		{"pids.max", strconv.Itoa(limit.tasks)},
+		{"memory.max", strconv.FormatInt(limit.memory, 10)},
+		{"memory.swap.max", "0"},
+		{"memory.oom.group", "1"},
+		{"cgroup.max.descendants", "0"},
+	} {
+		path := filepath.Join(dir, setting.name)
+		if err := os.WriteFile(path, []byte(setting.value), 0); err != nil {
+			return fmt.Errorf("write %s: %w", path, err)
+		}
+		actual, err := os.ReadFile(path)
+		if err != nil || strings.TrimSpace(string(actual)) != setting.value {
+			return fmt.Errorf("verify %s=%s: got %q, error %v", path, setting.value, strings.TrimSpace(string(actual)), err)
+		}
+	}
+	return nil
+}
+
+func readExhaustion(dir string, limit limits) error {
+	pids, err := readCounters(filepath.Join(dir, "pids.events"))
+	if err != nil {
+		return fmt.Errorf("%w: read limit events in %s: %v", ErrUnconfirmed, dir, err)
+	}
+	memory, err := readCounters(filepath.Join(dir, "memory.events"))
+	if err != nil {
+		return fmt.Errorf("%w: read limit events in %s: %v", ErrUnconfirmed, dir, err)
+	}
+	swap, err := readCounters(filepath.Join(dir, "memory.swap.events"))
+	if err != nil {
+		return fmt.Errorf("%w: read limit events in %s: %v", ErrUnconfirmed, dir, err)
+	}
+	if _, ok := pids["max"]; !ok {
+		return fmt.Errorf("%w: pids.events in %s lacks max", ErrUnconfirmed, dir)
+	}
+	for _, key := range []string{"max", "oom", "oom_kill"} {
+		if _, ok := memory[key]; !ok {
+			return fmt.Errorf("%w: memory.events in %s lacks %s", ErrUnconfirmed, dir, key)
+		}
+	}
+	if _, ok := swap["max"]; !ok {
+		return fmt.Errorf("%w: memory.swap.events in %s lacks max", ErrUnconfirmed, dir)
+	}
+	if (memory["oom_kill"] != 0 || memory["oom_group_kill"] != 0) && memory["max"] == 0 && memory["oom"] == 0 {
+		return fmt.Errorf("%w: cgroup %s observed OOM kill without reaching memory.max", ErrUnconfirmed, dir)
+	}
+	if pids["max"] == 0 && memory["max"] == 0 && memory["oom"] == 0 && swap["max"] == 0 {
+		return nil
+	}
+	return &Exhaustion{
+		MaxTasks: limit.tasks, MaxMemoryBytes: limit.memory,
+		PIDEventsMax: pids["max"], MemoryEventsMax: memory["max"],
+		MemorySwapEventsMax: swap["max"],
+		MemoryOOM:           memory["oom"], MemoryOOMKill: memory["oom_kill"], MemoryOOMGroupKill: memory["oom_group_kill"],
+	}
+}
+
+func readCounters(path string) (map[string]uint64, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	values := make(map[string]uint64)
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			return nil, fmt.Errorf("invalid counter %q", line)
+		}
+		value, err := strconv.ParseUint(fields[1], 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid counter %q: %w", line, err)
+		}
+		values[fields[0]] = value
+	}
+	return values, nil
+}
+
+func stopCgroupGracefully(cmd *exec.Cmd, dir string) (bool, error) {
+	signalErr := cmd.Process.Signal(syscall.SIGTERM)
+	if errors.Is(signalErr, os.ErrProcessDone) {
+		signalErr = nil
+	}
+	deadline := time.Now().Add(graceWait)
+	for {
+		populated, err := cgroupPopulated(dir)
+		if err == nil && !populated {
+			return false, signalErr
+		}
+		if err != nil || time.Now().After(deadline) {
+			if killErr := killCgroup(dir); killErr != nil {
+				return true, errors.Join(signalErr, fmt.Errorf("%w: force-stop cgroup %s: %v", ErrUnconfirmed, dir, killErr))
+			}
+			return true, signalErr
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 func cleanupCgroup(dir string, cancelled bool) error {
@@ -191,18 +418,21 @@ func cleanupCgroup(dir string, cancelled bool) error {
 		// If observation failed, stop the group anyway before attempting proof.
 		killErr := killCgroup(dir)
 		if err := waitEmptyCgroup(dir); err != nil {
-			return errors.Join(fmt.Errorf("%w: await empty cgroup: %v", ErrUnconfirmed, err), readErr, killErr)
+			return errors.Join(fmt.Errorf("%w: await empty cgroup %s: %v", ErrUnconfirmed, dir, err), readErr, killErr)
 		}
 		if err := removeEmptyCgroup(dir); err != nil {
-			return errors.Join(fmt.Errorf("%w: remove empty cgroup: %v", ErrUnconfirmed, err), readErr, killErr)
+			return errors.Join(fmt.Errorf("%w: remove empty cgroup %s: %v", ErrUnconfirmed, dir, err), readErr, killErr)
 		}
 		if readErr != nil {
-			return fmt.Errorf("%w: inspect cgroup after wait: %v", ErrUnconfirmed, readErr)
+			return fmt.Errorf("%w: inspect cgroup %s after wait: %v", ErrUnconfirmed, dir, readErr)
+		}
+		if killErr != nil {
+			return errors.Join(ErrUnconfirmed, ErrDescendants, killErr)
 		}
 		if cancelled {
-			return killErr
+			return nil
 		}
-		return errors.Join(ErrDescendants, killErr)
+		return ErrDescendants
 	}
 	if err := removeEmptyCgroup(dir); err != nil {
 		// An apparently empty group can become busy before removal. Stop it
@@ -210,7 +440,7 @@ func cleanupCgroup(dir string, cancelled bool) error {
 		killErr := killCgroup(dir)
 		emptyErr := waitEmptyCgroup(dir)
 		removeErr := removeEmptyCgroup(dir)
-		return errors.Join(fmt.Errorf("%w: remove empty cgroup: %v", ErrUnconfirmed, err), killErr, emptyErr, removeErr)
+		return errors.Join(fmt.Errorf("%w: remove empty cgroup %s: %v", ErrUnconfirmed, dir, err), killErr, emptyErr, removeErr)
 	}
 	return nil
 }
@@ -264,16 +494,15 @@ func waitEmptyCgroup(dir string) error {
 }
 
 func removeEmptyCgroup(dir string) error {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return err
-	}
-	for _, entry := range entries {
-		if entry.IsDir() {
-			if err := removeEmptyCgroup(filepath.Join(dir, entry.Name())); err != nil {
-				return err
-			}
-		}
-	}
 	return os.Remove(dir)
+}
+
+func unreleasedScope(dir string, err error) error {
+	if err == nil {
+		return nil
+	}
+	if _, statErr := os.Stat(dir); !errors.Is(statErr, os.ErrNotExist) {
+		return errors.Join(err, fmt.Errorf("%w: %s", ErrScopeUnconfirmed, dir), statErr)
+	}
+	return err
 }

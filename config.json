@@ -35,6 +35,8 @@
   ],
   "poll_interval_seconds": 60,
   "job_timeout_minutes": 240,
+  "command_max_tasks": 128,
+  "command_max_memory_mib": 3072,
   "max_github_context_bytes": 32768,
   "state_path": "var/state.json",
   "work_root": "var/work",
