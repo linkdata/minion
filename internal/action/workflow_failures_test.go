@@ -23,6 +23,7 @@ import (
 	"github.com/linkdata/minion/internal/gitwork"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/skills"
+	"github.com/linkdata/minion/internal/state"
 	"github.com/linkdata/minion/internal/usage"
 	"github.com/linkdata/minion/internal/workspace"
 )
@@ -61,10 +62,10 @@ func TestReplyFailureClassificationBeforeAndAfterModel(t *testing.T) {
 				err = orchestrator.publish(context.Background(), prepared, Result{})
 			case "recovery":
 				prepared.branch = "minion/fix-recorded"
-				store.Data.PendingFixes[request.ID] = strings.Repeat("b", 40)
+				store.Data.PendingFixes[request.ID] = state.PendingFix{SHA: strings.Repeat("b", 40)}
 				err = orchestrator.publish(context.Background(), prepared, Result{})
 			default:
-				err = orchestrator.publishFix(context.Background(), prepared, Result{Answer: "No changes."})
+				err = orchestrator.publishFix(context.Background(), prepared, Result{Answer: "No changes."}, publication{answer: "No changes."})
 			}
 			var status *github.StatusError
 			if errors.Is(err, monitor.ErrPostModelPublication) != (kind != "fixed reply") || errors.Is(err, monitor.ErrTerminalJob) || !errors.As(err, &status) || status.StatusCode != http.StatusBadGateway {
@@ -351,7 +352,7 @@ func TestPublishFixRevalidatesForkAndImportBeforePush(t *testing.T) {
 			}
 			bin := t.TempDir()
 			seen := filepath.Join(bin, "staged")
-			publication := filepath.Join(bin, "publication")
+			publicationMarker := filepath.Join(bin, "publication")
 			script := fmt.Sprintf(`#!/bin/sh
 case " $* " in
  *" add --all "*)
@@ -368,7 +369,7 @@ case " $* " in
   ;;
 esac
 exec %s "$@"
-`, shellQuote(stage), shellQuote(seen), shellQuote(stage), shellQuote(seen), shellQuote(stage), shellQuote(seen), shellQuote(publication), shellQuote(git))
+`, shellQuote(stage), shellQuote(seen), shellQuote(stage), shellQuote(seen), shellQuote(stage), shellQuote(seen), shellQuote(publicationMarker), shellQuote(git))
 			writes := 0
 			repo := github.Repository{ID: 1, FullName: "o/r", Owner: github.User{ID: 2}, DefaultBranch: "main", Visibility: "public"}
 			fork := github.Repository{ID: 3, FullName: "bot/r", Fork: true, Parent: &repo, Source: &repo, DefaultBranch: "main", Visibility: "public"}
@@ -429,7 +430,7 @@ exec %s "$@"
 					}
 				}()
 			}
-			err = orchestrator.publishFix(ctx, prepared, result)
+			err = orchestrator.publishFix(ctx, prepared, result, publication{answer: result.Answer})
 			if stage == "canceled import" {
 				if !errors.Is(err, context.Canceled) || errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, monitor.ErrPostModelPublication) || writes != 0 {
 					t.Fatalf("interrupted import became terminal: writes=%d err=%v", writes, err)
@@ -448,7 +449,7 @@ exec %s "$@"
 			if _, err := os.Stat(seen); err != nil {
 				t.Fatalf("fixture did not drop the %s diff: %v", stage, err)
 			}
-			if _, err := os.Stat(publication); !errors.Is(err, os.ErrNotExist) {
+			if _, err := os.Stat(publicationMarker); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("dropped %s changes reached commit or push: %v", stage, err)
 			}
 		})

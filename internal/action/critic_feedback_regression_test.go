@@ -73,7 +73,7 @@ func TestRunnerRejectsCriticFeedbackBlankAfterSanitization(t *testing.T) {
 					var journal bytes.Buffer
 					orchestrator := Orchestrator{WorkRoot: runner.WorkRoot, Logger: log.New(&journal, "", 0)}
 					orchestrator.logResult(job, result)
-					wantLast := "review_phase=" + phase + ` approved=false no_blockers=false has_blockers=false review_complete=false verdict_allows_full=false no_blocker_verdict_streak=0 policy_met=false stop_reason=""`
+					wantLast := "review_phase=" + phase + ` approved=false no_blockers=false has_blockers=false review_complete=false policy_allows_full=false no_blocker_verdict_streak=0 policy_met=false stop_reason=""`
 					lines := strings.Split(strings.TrimSpace(journal.String()), "\n")
 					if len(lines) != len(wantSequence) || !strings.Contains(lines[len(lines)-1], wantLast) || strings.Contains(journal.String(), "policy_met=true") {
 						t.Fatalf("journal promoted invalid sanitized feedback: %s", journal.String())

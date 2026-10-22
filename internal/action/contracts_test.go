@@ -489,7 +489,7 @@ func TestResultCallUsageRejectsCriticsAndRepeatedMainWithoutCritic(t *testing.T)
 	}
 }
 
-func TestProtocolRejectsVersionThree(t *testing.T) {
+func TestProtocolRejectsEarlierCriticContracts(t *testing.T) {
 	job := testJob(command.Comment)
 	result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Complete answer", Calls: []CallUsage{{Provider: job.Main.Provider, Role: roleMain, Round: 1}}}
 	status := Status{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Sequence: 1, WorkerState: "busy", Phase: "prepare"}
@@ -499,17 +499,19 @@ func TestProtocolRejectsVersionThree(t *testing.T) {
 	if err := status.Validate(job); err != nil {
 		t.Fatal(err)
 	}
-	oldJob := job
-	oldJob.Version = 3
-	result.Version, status.Version = 3, 3
-	if err := oldJob.Validate(); err == nil || !strings.Contains(err.Error(), "unsupported action protocol version") {
-		t.Fatalf("version 3 job accepted: %v", err)
-	}
-	if err := result.Validate(job); err == nil || !strings.Contains(err.Error(), "version, identity or source") {
-		t.Fatalf("version 3 result accepted: %v", err)
-	}
-	if err := status.Validate(job); err == nil || !strings.Contains(err.Error(), "version, identity or source") {
-		t.Fatalf("version 3 status accepted: %v", err)
+	for _, version := range []int{3, 4} {
+		oldJob := job
+		oldJob.Version = version
+		result.Version, status.Version = version, version
+		if err := oldJob.Validate(); err == nil || !strings.Contains(err.Error(), "unsupported action protocol version") {
+			t.Fatalf("version %d job accepted: %v", version, err)
+		}
+		if err := result.Validate(job); err == nil || !strings.Contains(err.Error(), "version, identity or source") {
+			t.Fatalf("version %d result accepted: %v", version, err)
+		}
+		if err := status.Validate(job); err == nil || !strings.Contains(err.Error(), "version, identity or source") {
+			t.Fatalf("version %d status accepted: %v", version, err)
+		}
 	}
 }
 

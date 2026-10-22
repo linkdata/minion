@@ -256,8 +256,8 @@ func TestRefutationsSurviveOmissionWithoutRememberingImplementedChanges(t *testi
 	}
 }
 
-func TestRefutationsRetainSuccessfulMainPrefixAfterFailure(t *testing.T) {
-	for _, failure := range []string{"main provider", "critic provider", "main malformed", "critic malformed", "round limit"} {
+func TestRefutationsRetainSuccessfulMainPrefixAfterStop(t *testing.T) {
+	for _, failure := range []string{"main provider", "critic provider", "main malformed", "critic malformed", "round cap"} {
 		t.Run(failure, func(t *testing.T) {
 			job := withClaudeCritic(testJob(command.Comment))
 			job.CriticMaxRounds, job.CriticNonblockingRounds = 3, 0
@@ -297,14 +297,25 @@ func TestRefutationsRetainSuccessfulMainPrefixAfterFailure(t *testing.T) {
 				return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"review_complete":true,"feedback":"PRIVATE_BLOCKER: correction required."}`}, nil
 			}}
 			result, err := runner.Run(context.Background(), job)
-			if err == nil || result.Answer != "" || !reflect.DeepEqual(result.Refutations, expected) {
+			capped := failure == "round cap"
+			if (err == nil) != capped || !reflect.DeepEqual(result.Refutations, expected) {
 				t.Fatalf("successful refutations lost/failed text promoted: %+v expected=%+v error=%v", result, expected, err)
 			}
+			if capped {
+				if result.Answer != "Public candidate" || result.CriticStopReason != "round_cap" || result.Validate(job) != nil {
+					t.Fatalf("completed capped candidate lost: %+v, %v", result, err)
+				}
+			} else if result.Answer != "" || result.CriticStopReason != "" {
+				t.Fatalf("failed proposal was promoted: %+v, %v", result, err)
+			}
 			providerFailure := strings.HasSuffix(failure, "provider")
-			if errors.Is(err, providerErr) != providerFailure || errors.Is(err, monitor.ErrTerminalJob) != !providerFailure {
+			if errors.Is(err, providerErr) != providerFailure || errors.Is(err, monitor.ErrTerminalJob) != (!providerFailure && !capped) {
 				t.Fatalf("failure class changed: %v", err)
 			}
 			wantRefs, wantCalls := 2, 6
+			if capped {
+				wantCalls = 7
+			}
 			if strings.HasPrefix(failure, "main ") {
 				wantRefs, wantCalls = 1, 5
 			}

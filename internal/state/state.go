@@ -26,7 +26,20 @@ type Data struct {
 	JobFailures           map[string]JobFailure          `json:"job_failures,omitempty"`
 	UnconfirmedProcessJob string                         `json:"unconfirmed_process_job,omitempty"`
 	PendingNotifications  map[string]PendingNotification `json:"pending_notifications,omitempty"`
-	PendingFixes          map[string]string              `json:"pending_fixes,omitempty"`
+	PendingFixes          map[string]PendingFix          `json:"pending_fixes,omitempty"`
+}
+
+// PendingFix retains the commit and its publication caveat before a push.
+type PendingFix struct {
+	SHA string     `json:"sha"`
+	Cap *CriticCap `json:"cap,omitempty"`
+}
+
+// CriticCap preserves the original final-candidate facts for publication retries.
+type CriticCap struct {
+	MaxRounds    int  `json:"max_rounds"`
+	HasBlockers  bool `json:"has_blockers"`
+	FullApproved bool `json:"full_approved"`
 }
 
 // PendingNotification retains a failed thread after its repository cursor advances.
@@ -73,7 +86,7 @@ func Open(path string, initialCursor time.Time) (*Store, error) {
 	store := &Store{path: path, lock: lock}
 	f, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
-		store.Data = Data{Cursor: initialCursor.UTC(), RepositoryCursors: map[string]time.Time{}, Processed: map[string]time.Time{}, JobFailures: map[string]JobFailure{}, PendingNotifications: map[string]PendingNotification{}, PendingFixes: map[string]string{}}
+		store.Data = Data{Cursor: initialCursor.UTC(), RepositoryCursors: map[string]time.Time{}, Processed: map[string]time.Time{}, JobFailures: map[string]JobFailure{}, PendingNotifications: map[string]PendingNotification{}, PendingFixes: map[string]PendingFix{}}
 		if err := store.Save(); err != nil {
 			return nil, errors.Join(err, store.Close())
 		}
@@ -113,7 +126,7 @@ func Open(path string, initialCursor time.Time) (*Store, error) {
 		store.Data.PendingNotifications = map[string]PendingNotification{}
 	}
 	if store.Data.PendingFixes == nil {
-		store.Data.PendingFixes = map[string]string{}
+		store.Data.PendingFixes = map[string]PendingFix{}
 	}
 	return store, nil
 }

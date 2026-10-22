@@ -43,6 +43,9 @@ func TestReviewPromptsRequireCompleteInvestigationInEveryPhase(t *testing.T) {
 		if phase == reviewVerification && !strings.Contains(prompts[phase], "The Git HEAD baseline is the original input, not the previous candidate") {
 			t.Error("verification lost the original Git baseline")
 		}
+		if phase == reviewVerification && !strings.Contains(prompts[phase], "A separate fresh full review follows when the application advances this candidate; verification never decides publication") {
+			t.Error("verification prompt disagrees with final-round full review policy")
+		}
 		if !strings.Contains(prompts[phase], "unfinished assigned review scope is a blocking task failure: set review_complete=false, approved=false and has_blockers=true") ||
 			!strings.Contains(prompts[phase], "Set review_complete=true only after completing this phase's entire assigned scope, all delegated reviews and background checks, and the final coverage pass") ||
 			!strings.Contains(prompts[phase], "This attests review coverage, not token-accounting completeness") {
@@ -531,10 +534,12 @@ func TestRunAIVerificationRejectionFeedsNextRevision(t *testing.T) {
 	}
 }
 
-func TestRunAIFailsWithoutReturningProposal(t *testing.T) {
+func TestRunAICompletionAndFailureBoundaries(t *testing.T) {
 	modelErr := errors.New("model unavailable")
 	for _, tt := range []struct {
 		name, verdict string
+		wantAnswer    string
+		wantReason    string
 		rounds        int
 		failureCall   int
 		cancelCall    int
@@ -542,8 +547,8 @@ func TestRunAIFailsWithoutReturningProposal(t *testing.T) {
 		wantCalls     int
 		wantError     error
 	}{
-		{name: "round limit", verdict: `{"review_complete":true,"approved":false,"has_blockers":true,"feedback":"Repair the defect."}`, rounds: 2, wantCalls: 4, wantError: monitor.ErrTerminalJob},
-		{name: "configured default round limit", rounds: config.DefaultCriticMaxRounds, verdict: `{"review_complete":true,"approved":false,"has_blockers":true,"feedback":"Repair the defect."}`, wantCalls: 2 * config.DefaultCriticMaxRounds, wantError: monitor.ErrTerminalJob},
+		{name: "round cap", verdict: `{"review_complete":true,"approved":false,"has_blockers":true,"feedback":"Repair the defect."}`, rounds: 2, wantCalls: 5, wantAnswer: "unapproved proposal", wantReason: "round_cap"},
+		{name: "configured default round cap", rounds: config.DefaultCriticMaxRounds, verdict: `{"review_complete":true,"approved":false,"has_blockers":true,"feedback":"Repair the defect."}`, wantCalls: 2*config.DefaultCriticMaxRounds + 1, wantAnswer: "unapproved proposal", wantReason: "round_cap"},
 		{rounds: 2, name: "malformed verdict", verdict: "looks fine", wantCalls: 2, wantError: monitor.ErrTerminalJob},
 		{rounds: 2, name: "main fails", failureCall: 1, wantCalls: 1, wantError: modelErr},
 		{rounds: 2, name: "critic fails", failureCall: 2, wantCalls: 2, wantError: modelErr},
@@ -578,8 +583,8 @@ func TestRunAIFailsWithoutReturningProposal(t *testing.T) {
 				return aicli.Result{Answer: proposalJSON(answer, "Private rationale")}, nil
 			}
 			answer, stopReason, err := e.runAI(ctx, job, t.TempDir(), "task", "", nil, &modelSessions{})
-			if answer != "" || stopReason != "" || !errors.Is(err, tt.wantError) || calls != tt.wantCalls {
-				t.Fatalf("runAI() = %q, %q, %v; calls = %d; want no answer, %v, %d calls", answer, stopReason, err, calls, tt.wantError, tt.wantCalls)
+			if answer != tt.wantAnswer || stopReason != tt.wantReason || !errors.Is(err, tt.wantError) || calls != tt.wantCalls {
+				t.Fatalf("runAI() = %q, %q, %v; calls = %d; want %q, %q, %v, %d calls", answer, stopReason, err, calls, tt.wantAnswer, tt.wantReason, tt.wantError, tt.wantCalls)
 			}
 		})
 	}
@@ -707,15 +712,16 @@ func TestParseCritique(t *testing.T) {
 	}
 }
 
-func TestCommentPublishesOnlyCriticAcceptedResult(t *testing.T) {
+func TestCommentPublishesCompletedCriticResultWithActualOutcome(t *testing.T) {
 	zero := 0
 	for _, tt := range []struct {
 		name, verdict string
 		wantError     bool
 		wantErrorText string
+		capped        bool
 	}{
 		{name: "approved", verdict: approvedCritiqueJSON},
-		{name: "rejected", verdict: `{"review_complete":true,"approved":false,"has_blockers":true,"feedback":"A defect remains."}`, wantError: true},
+		{name: "rejected at cap", verdict: `{"review_complete":true,"approved":false,"has_blockers":true,"feedback":"A defect remains."}`, capped: true},
 		{name: "invalid", verdict: "approved", wantError: true, wantErrorText: "invalid critic verdict"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -739,7 +745,7 @@ func TestCommentPublishesOnlyCriticAcceptedResult(t *testing.T) {
 				Adversarial:    "claude",
 				CriticStopping: config.CriticStopping{MaxRounds: 1, NonblockingAfterRound: &zero},
 			}
-			if !tt.wantError {
+			if !tt.wantError && !tt.capped {
 				e.CriticStopping.MaxRounds = 2
 			}
 			const privateRefutations = "PRIVATE_REFUTATION: the task excludes the requested change."
@@ -747,7 +753,7 @@ func TestCommentPublishesOnlyCriticAcceptedResult(t *testing.T) {
 			e.Runner.runModel = func(_ context.Context, request modelRun) (aicli.Result, error) {
 				if request.provider == "claude" {
 					criticCalls++
-					if !tt.wantError {
+					if !tt.wantError && !tt.capped {
 						if criticCalls == 1 {
 							return aicli.Result{Answer: `{"review_complete":true,"approved":false,"has_blockers":true,"feedback":"Justify the unchanged result."}`}, nil
 						}
@@ -774,8 +780,17 @@ func TestCommentPublishesOnlyCriticAcceptedResult(t *testing.T) {
 				if !errors.Is(err, monitor.ErrTerminalJob) || published != "" || tt.wantErrorText != "" && !strings.Contains(err.Error(), tt.wantErrorText) {
 					t.Fatalf("unapproved result published: error=%v body=%q", err, published)
 				}
-			} else if err != nil || criticCalls != 3 || mainCalls != 2 || !strings.Contains(published, inertModelOutput(answer)) || strings.Contains(published, `"approved"`) || strings.Contains(published, "refutations") || strings.Contains(published, "PRIVATE_REFUTATION") {
-				t.Fatalf("wrong published result: error=%v body=%q", err, published)
+			} else {
+				wantMain, wantCritic := 2, 3
+				if tt.capped {
+					wantMain, wantCritic = 1, 1
+				}
+				if err != nil || criticCalls != wantCritic || mainCalls != wantMain || !strings.Contains(published, "> "+answer) || strings.Contains(published, `"approved"`) || strings.Contains(published, "refutations") || strings.Contains(published, "PRIVATE_REFUTATION") || strings.Contains(published, "A defect remains.") {
+					t.Fatalf("wrong published result: error=%v body=%q", err, published)
+				}
+				if strings.Contains(published, "Critic round limit reached (1).") != tt.capped {
+					t.Fatalf("publication lost its actual capped outcome: capped=%t body=%q", tt.capped, published)
+				}
 			}
 		})
 	}

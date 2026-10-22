@@ -18,6 +18,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/linkdata/minion/internal/workspace"
 )
 
 func TestCgroupReadinessRequired(t *testing.T) {
@@ -456,7 +458,7 @@ func TestProcessgroupHelperProcess(t *testing.T) {
 		}
 		os.Exit(0)
 	case "child":
-		if err := os.WriteFile(pidFile, []byte(strconv.Itoa(os.Getpid())), 0600); err != nil {
+		if err := workspace.WriteAtomic(pidFile, []byte(strconv.Itoa(os.Getpid()))); err != nil {
 			os.Exit(2)
 		}
 		time.Sleep(20 * time.Second)
@@ -487,12 +489,12 @@ func TestProcessgroupHelperProcess(t *testing.T) {
 			}
 			values = append(values, strings.TrimSpace(string(value)))
 		}
-		if err := os.WriteFile(pidFile, []byte(strings.Join(values, "\n")), 0600); err != nil {
+		if err := workspace.WriteAtomic(pidFile, []byte(strings.Join(values, "\n"))); err != nil {
 			os.Exit(2)
 		}
 		select {
 		case <-term:
-			if err := os.WriteFile(pidFile+".term", []byte("term"), 0600); err != nil {
+			if err := workspace.WriteAtomic(pidFile+".term", []byte("term")); err != nil {
 				os.Exit(2)
 			}
 			os.Exit(0)

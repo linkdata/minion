@@ -17,7 +17,7 @@ import (
 )
 
 // ProtocolVersion identifies the versioned Job, Result, and Status contracts.
-const ProtocolVersion = 4
+const ProtocolVersion = 5
 
 const (
 	maxDiagnostics            = 100
@@ -62,7 +62,7 @@ type Job struct {
 	Main            RoleSettings       `json:"main"`
 	Critic          *RoleSettings      `json:"critic,omitempty"`
 	CriticMaxRounds int                `json:"critic_max_rounds"`
-	// CriticNonblockingRounds is resolved by the orchestrator; zero keeps strict approval.
+	// CriticNonblockingRounds is resolved by the orchestrator; zero keeps strict normal approval.
 	CriticNonblockingRounds int `json:"critic_nonblocking_rounds"`
 	// CriticConsecutiveNoBlockerRounds is resolved; zero bypasses only the streak requirement.
 	CriticConsecutiveNoBlockerRounds int `json:"critic_consecutive_no_blocker_rounds"`
@@ -107,7 +107,7 @@ type Result struct {
 	Refutations []Refutation       `json:"refutations,omitempty"`
 	Diagnostics []Diagnostic       `json:"diagnostics,omitempty"`
 
-	// CriticStopReason records an acceptance decision reached after call integrity checks.
+	// CriticStopReason records approved, nonblocking or round_cap after call integrity checks.
 	CriticStopReason string `json:"critic_stop_reason,omitempty"`
 }
 
@@ -374,7 +374,7 @@ func (r Result) validateCalls(j Job, complete bool) error {
 		}
 		last := r.Calls[len(r.Calls)-1]
 		if last.Role != roleCritic || last.ReviewPhase != reviewFull || stopReason == "" || r.CriticStopReason == "" {
-			return errors.New("action result lacks an accepted final full review")
+			return errors.New("action result lacks a completed final full review and publication decision")
 		}
 	}
 	if complete && j.Critic == nil && len(r.Calls) != 1 {
