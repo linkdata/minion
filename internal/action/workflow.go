@@ -55,10 +55,10 @@ func (e *Orchestrator) perform(ctx context.Context, request monitor.Job) (result
 	}()
 	var result Result
 	if prepared.needsExecution() {
-		runner := e.Runner
-		runner.WorkRoot = e.WorkRoot
 		executor := e.Executor
 		if executor == nil {
+			runner := e.Runner
+			runner.WorkRoot = e.WorkRoot
 			executor = &runner
 		}
 		checkpoints := newExecutionCheckpoints(e, prepared.job)
