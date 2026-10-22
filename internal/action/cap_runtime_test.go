@@ -75,6 +75,10 @@ func TestCappedDecisionRequiresOriginalFinalCompleteEvidence(t *testing.T) {
 			job := withClaudeCritic(testJob(command.Comment))
 			job.CriticMaxRounds, job.CriticNonblockingRounds = 2, 1
 			result := cappedResultFixture(job)
+			for i := range result.Calls {
+				result.Calls[i].Tokens = usage.Tokens{Input: int64(11 + i), CachedInput: int64(i), Output: int64(3 + i)}
+				result.Calls[i].Complete = i%2 == 0
+			}
 			if err := result.Validate(job); err != nil {
 				t.Fatalf("invalid baseline: %v", err)
 			}
@@ -96,6 +100,16 @@ func TestCappedDecisionRequiresOriginalFinalCompleteEvidence(t *testing.T) {
 				t.Fatalf("journal inferred actual cap decision from flags: %s", journal.String())
 			}
 			if test.complete {
+				lines := strings.Split(strings.TrimSpace(journal.String()), "\n")
+				if len(lines) != len(result.Calls) {
+					t.Fatalf("capped journal lost call usage: %s", journal.String())
+				}
+				for i, call := range result.Calls {
+					want := fmt.Sprintf(" input_tokens=%d cached_input_tokens=%d output_tokens=%d complete=%t", call.Tokens.Input, call.Tokens.CachedInput, call.Tokens.Output, call.Complete)
+					if !strings.HasSuffix(lines[i], want) {
+						t.Fatalf("capped journal changed per-call usage: got=%s want suffix=%s", lines[i], want)
+					}
+				}
 				data, err := json.Marshal(result)
 				if err != nil {
 					t.Fatal(err)
