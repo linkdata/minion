@@ -96,7 +96,7 @@ func TestRunnerStopsOnIncompleteCriticReview(t *testing.T) {
 				orchestrator.logResult(job, result)
 				lines := strings.Split(strings.TrimSpace(journal.String()), "\n")
 				last := lines[len(lines)-1]
-				wantVerdict := "review_phase=" + position.phase + ` approved=false no_blockers=false has_blockers=true review_complete=false verdict_allows_full=false no_blocker_verdict_streak=0 policy_met=false stop_reason=""`
+				wantVerdict := "review_phase=" + position.phase + ` approved=false no_blockers=false has_blockers=true review_complete=false policy_allows_full=false no_blocker_verdict_streak=0 policy_met=false stop_reason=""`
 				if len(lines) != len(position.sequence) || !strings.Contains(last, wantVerdict) || !strings.HasSuffix(last, fmt.Sprintf(" complete=%t", usageComplete)) || strings.Contains(journal.String(), "policy_met=true") {
 					t.Fatalf("journal confused incomplete coverage with accounting or acceptance: %s", journal.String())
 				}
@@ -166,7 +166,7 @@ func TestRunnerProviderErrorDoesNotAttestReviewCompletion(t *testing.T) {
 			var journal bytes.Buffer
 			orchestrator := Orchestrator{WorkRoot: runner.WorkRoot, Logger: log.New(&journal, "", 0)}
 			orchestrator.logResult(job, result)
-			if !strings.Contains(journal.String(), `approved=false no_blockers=false has_blockers=false review_complete=false verdict_allows_full=false no_blocker_verdict_streak=0 policy_met=false stop_reason=""`) || !strings.HasSuffix(strings.TrimSpace(journal.String()), " complete=true") {
+			if !strings.Contains(journal.String(), `approved=false no_blockers=false has_blockers=false review_complete=false policy_allows_full=false no_blocker_verdict_streak=0 policy_met=false stop_reason=""`) || !strings.HasSuffix(strings.TrimSpace(journal.String()), " complete=true") {
 				t.Fatalf("journal promoted failed provider output: %s", journal.String())
 			}
 			if err := orchestrator.retainReviewEvidence(job, result); err != nil {

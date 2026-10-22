@@ -86,8 +86,8 @@ func TestJournalPolicyIsNotPublication(t *testing.T) {
 	var output bytes.Buffer
 	(&Orchestrator{Logger: log.New(&output, "", 0)}).logResult(job, result)
 	text := output.String()
-	if !strings.Contains(text, `review_phase=verification approved=false no_blockers=true has_blockers=false review_complete=true verdict_allows_full=true no_blocker_verdict_streak=0 policy_met=false stop_reason=""`) ||
-		!strings.Contains(text, `review_phase=full approved=false no_blockers=false has_blockers=true review_complete=true verdict_allows_full=false no_blocker_verdict_streak=0 policy_met=false stop_reason=""`) || strings.Contains(text, "accepted=") {
+	if !strings.Contains(text, `review_phase=verification approved=false no_blockers=true has_blockers=false review_complete=true policy_allows_full=true no_blocker_verdict_streak=0 policy_met=false stop_reason=""`) ||
+		!strings.Contains(text, `review_phase=full approved=false no_blockers=false has_blockers=true review_complete=true policy_allows_full=false no_blocker_verdict_streak=0 policy_met=false stop_reason=""`) || strings.Contains(text, "accepted=") {
 		t.Fatalf("journal blurred verdict policy and publication: %s", text)
 	}
 	if err := result.Validate(job); err == nil || !strings.Contains(err.Error(), "final full review") {
