@@ -134,7 +134,7 @@ func TestLiveFixPublishesBranch(t *testing.T) {
 	if modelCalls != 1 {
 		t.Fatalf("model calls = %d, want 1", modelCalls)
 	}
-	sha := store.Data.PendingFixes[job.ID]
+	sha := store.Data.PendingFixes[job.ID].SHA
 	if len(sha) != 40 {
 		t.Fatalf("fix did not record a commit SHA: %q", sha)
 	}
@@ -164,8 +164,8 @@ func TestLiveFixPublishesBranch(t *testing.T) {
 	if err := orchestrator.Execute(ctx, job); err != nil {
 		t.Fatal(err)
 	}
-	if modelCalls != 1 || store.Data.PendingFixes[job.ID] != sha {
-		t.Fatalf("repeat execution changed the fix: model calls = %d, recorded SHA = %q", modelCalls, store.Data.PendingFixes[job.ID])
+	if modelCalls != 1 || store.Data.PendingFixes[job.ID].SHA != sha {
+		t.Fatalf("repeat execution changed the fix: model calls = %d, recorded SHA = %q", modelCalls, store.Data.PendingFixes[job.ID].SHA)
 	}
 	if repeatID, _, err := liveActionReply(ctx, owner, cfg, job); err != nil || repeatID != commentID {
 		t.Fatalf("repeat execution changed the acknowledgement: id = %d, want %d: %v", repeatID, commentID, err)
@@ -274,7 +274,7 @@ func liveFixCleanup(t *testing.T, owner, bot *github.Client, ownerToken, botToke
 		t.Errorf("find live fix branch for cleanup: %v", err)
 		return
 	}
-	sha := store.Data.PendingFixes[job.ID]
+	sha := store.Data.PendingFixes[job.ID].SHA
 	if len(sha) != 40 || remote.Name != branch || remote.Commit.SHA != sha {
 		t.Errorf("refuse to delete changed or unrecorded live fix branch %s", branch)
 		return

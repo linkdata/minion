@@ -47,15 +47,20 @@ func TestCriticEvidencePreservesBlockerVerdicts(t *testing.T) {
 				return aicli.Result{Answer: tt.answer, Tokens: usage.Tokens{Input: 11, Output: 2}}, tt.err
 			}}
 			result, err := runner.Run(context.Background(), job)
-			if (err == nil) != tt.approved || (tt.err != nil && !errors.Is(err, tt.err)) || len(result.Calls) != 2 || result.validate(job, false) != nil {
+			validVerdict := tt.approved || tt.noBlockers || tt.hasBlockers
+			if (err == nil) != validVerdict || (tt.err != nil && !errors.Is(err, tt.err)) || len(result.Calls) != 2 || result.validate(job, false) != nil {
 				t.Fatalf("invalid critic outcome: result=%+v err=%v", result, err)
 			}
-			if !tt.approved && tt.err == nil && !errors.Is(err, monitor.ErrTerminalJob) {
+			if !validVerdict && tt.err == nil && !errors.Is(err, monitor.ErrTerminalJob) {
 				t.Fatalf("critic rejection or invalid verdict was retryable: %v", err)
 			}
-			if tt.approved {
-				if result.CriticStopReason != "approved" || result.Answer != "Candidate answer" || result.Validate(job) != nil {
-					t.Fatalf("approved result invalid: %+v", result)
+			if validVerdict {
+				reason := "round_cap"
+				if tt.approved {
+					reason = "approved"
+				}
+				if result.CriticStopReason != reason || result.Answer != "Candidate answer" || result.Validate(job) != nil {
+					t.Fatalf("completed result invalid or verdict relabeled: %+v", result)
 				}
 			} else if result.CriticStopReason != "" || result.Answer != "" {
 				t.Fatalf("failed critic published: %+v", result)
@@ -85,7 +90,7 @@ func TestJournalPolicyIsNotPublication(t *testing.T) {
 		!strings.Contains(text, `review_phase=full approved=false no_blockers=false has_blockers=true review_complete=true verdict_allows_full=false no_blocker_verdict_streak=0 policy_met=false stop_reason=""`) || strings.Contains(text, "accepted=") {
 		t.Fatalf("journal blurred verdict policy and publication: %s", text)
 	}
-	if err := result.Validate(job); err == nil || !strings.Contains(err.Error(), "accepted final full review") {
+	if err := result.Validate(job); err == nil || !strings.Contains(err.Error(), "final full review") {
 		t.Fatalf("verification policy was mistaken for an accepted final result: %v", err)
 	}
 }
@@ -98,14 +103,14 @@ func TestRunnerNonblockingThresholdRequiresFreshFullReview(t *testing.T) {
 		verificationBlockers bool
 		missingBlockers      bool
 		wantCalls            int
-		wantSuccess          bool
+		wantReason           string
 	}{
-		{name: "first full at hard maximum can accept nits", threshold: 1, rounds: 1, wantCalls: 2, wantSuccess: true},
-		{name: "threshold follows required revision", threshold: 2, rounds: 5, wantCalls: 5, wantSuccess: true},
-		{name: "last allowed proposal can accept", threshold: 3, rounds: 3, wantCalls: 8, wantSuccess: true},
-		{name: "zero remains strict", rounds: 2, wantCalls: 5},
-		{name: "full blockers remain blocking", threshold: 1, rounds: 2, fullBlockers: true, wantCalls: 5},
-		{name: "verification blockers require revision", threshold: 1, rounds: 2, fullBlockers: true, verificationBlockers: true, wantCalls: 4},
+		{name: "first full at hard maximum can accept nits", threshold: 1, rounds: 1, wantCalls: 2, wantReason: "nonblocking"},
+		{name: "threshold follows required revision", threshold: 2, rounds: 5, wantCalls: 5, wantReason: "nonblocking"},
+		{name: "last allowed proposal can accept", threshold: 3, rounds: 3, wantCalls: 8, wantReason: "nonblocking"},
+		{name: "strict nits publish capped", rounds: 2, wantCalls: 5, wantReason: "round_cap"},
+		{name: "full blockers publish capped", threshold: 1, rounds: 2, fullBlockers: true, wantCalls: 5, wantReason: "round_cap"},
+		{name: "final verification blockers still get full", threshold: 1, rounds: 2, fullBlockers: true, verificationBlockers: true, wantCalls: 5, wantReason: "round_cap"},
 		{name: "missing blocker field fails closed", threshold: 1, rounds: 5, missingBlockers: true, wantCalls: 2},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -130,17 +135,17 @@ func TestRunnerNonblockingThresholdRequiresFreshFullReview(t *testing.T) {
 				return aicli.Result{Answer: fmt.Sprintf(`{"review_complete":true,"approved":false,"has_blockers":%t,"feedback":"Remaining finding"}`, blocking)}, nil
 			}}
 			result, err := runner.Run(context.Background(), job)
-			if (err == nil) != tt.wantSuccess || len(phases) != tt.wantCalls {
+			if (err == nil) != (tt.wantReason != "") || len(phases) != tt.wantCalls {
 				t.Fatalf("policy result=%q error=%v phases=%v", result.Answer, err, phases)
 			}
-			if !tt.wantSuccess {
+			if tt.wantReason == "" {
 				if result.CriticStopReason != "" || result.Answer != "" || !errors.Is(err, monitor.ErrTerminalJob) {
 					t.Fatalf("failed review leaked an answer or became retryable: %+v, %v", result, err)
 				}
 				return
 			}
 			last := result.Calls[len(result.Calls)-1]
-			if result.CriticStopReason != "nonblocking" || last.ReviewPhase != reviewFull || last.Approved || !last.NoBlockers || result.Answer != "Complete answer" {
+			if result.CriticStopReason != tt.wantReason || last.ReviewPhase != reviewFull || last.Approved || last.HasBlockers != tt.fullBlockers || last.NoBlockers == tt.fullBlockers || result.Answer != "Complete answer" {
 				t.Fatalf("policy acceptance falsified the actual critic verdict: %+v", result)
 			}
 			if err := result.Validate(job); err != nil {

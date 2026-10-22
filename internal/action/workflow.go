@@ -17,6 +17,7 @@ import (
 	"github.com/linkdata/minion/internal/gitwork"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/processgroup"
+	"github.com/linkdata/minion/internal/state"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -232,8 +233,12 @@ func (e *Orchestrator) publish(ctx context.Context, p *preparedAction, result Re
 	if err := result.validate(p.job, true); err != nil {
 		return errors.Join(fmt.Errorf("%w: invalid action result: %w", monitor.ErrTerminalJob, err), e.retainIncompleteAudit(p, result))
 	}
+	published, err := projectPublication(p.job, result)
+	if err != nil {
+		return errors.Join(fmt.Errorf("%w: publication projection: %w", monitor.ErrTerminalJob, err), e.retainIncompleteAudit(p, result))
+	}
 	if p.job.Action == command.SecurityAudit {
-		if err := e.retainAudit(p, result, true); err != nil {
+		if err := e.retainAudit(p, published.artifacts, true); err != nil {
 			return fmt.Errorf("%w: retain completed audit: %w", monitor.ErrTerminalJob, err)
 		}
 	}
@@ -241,20 +246,19 @@ func (e *Orchestrator) publish(ctx context.Context, p *preparedAction, result Re
 		return err
 	}
 	request := p.request
-	var err error
 	switch p.job.Action {
 	case command.Review:
 		if _, err = e.verifiedRepository(ctx, request.Repository); err != nil {
 			break
 		}
-		body := fmt.Sprintf("Automated review requested by @%s:\n\n%s\n\n%s", request.Source.Author.Login, inertModelOutput(result.Answer), request.Marker())
+		body := fmt.Sprintf("Automated review requested by @%s:\n\n%s\n\n%s", request.Source.Author.Login, inertModelOutput(published.answer), request.Marker())
 		_, err = e.GitHub.CreatePullRequestReview(ctx, request.Repository.Name, request.Number, body, p.job.Source.Head)
 	case command.Comment:
-		err = e.acknowledge(ctx, request, fmt.Sprintf("`%s` requested by @%s at commit `%s`:\n\n%s", request.Command.Name, request.Source.Author.Login, p.job.Source.Head, inertModelOutput(result.Answer)))
+		err = e.acknowledge(ctx, request, fmt.Sprintf("`%s` requested by @%s at commit `%s`:\n\n%s", request.Command.Name, request.Source.Author.Login, p.job.Source.Head, inertModelOutput(published.answer)))
 	case command.SecurityAudit:
-		err = e.acknowledge(ctx, request, fmt.Sprintf("Security audit requested by @%s at commit `%s`:\n\n%s", request.Source.Author.Login, p.job.Source.Head, inertModelOutput(result.Answer)))
+		err = e.acknowledge(ctx, request, fmt.Sprintf("Security audit requested by @%s at commit `%s`:\n\n%s", request.Source.Author.Login, p.job.Source.Head, inertModelOutput(published.answer)))
 	case command.Fix:
-		return e.publishFix(ctx, p, result)
+		return e.publishFix(ctx, p, result, published)
 	default:
 		return fmt.Errorf("unsupported action %q", request.Command.Action)
 	}
@@ -274,13 +278,16 @@ func (e *Orchestrator) logResult(job Job, result Result) {
 	}
 	if result.matchesJob(job) && result.validateCalls(job, false) == nil {
 		policy := criticPolicy{job: job}
+		cap := cappedReview(job, result)
 		for i, call := range result.Calls {
 			advance, _ := policy.observe(call)
 			reason := ""
 			if i == len(result.Calls)-1 {
 				reason = result.CriticStopReason
 			}
-			e.logf("action call job=%s attempt=%s executor=%s provider=%s role=%s round=%d review_phase=%s approved=%t no_blockers=%t has_blockers=%t review_complete=%t verdict_allows_full=%t no_blocker_verdict_streak=%d policy_met=%t stop_reason=%q model=%q effort=%q complete=%t", id.JobID, id.AttemptID, id.ExecutorID, call.Provider, call.Role, call.Round, call.ReviewPhase, call.Approved, call.NoBlockers, call.HasBlockers, call.ReviewComplete, advance, policy.noBlockerRounds, reason != "", reason, call.Model, call.Effort, call.Complete)
+			capped := reason == "round_cap"
+			policyMet := reason == "approved" || reason == "nonblocking"
+			e.logf("action call job=%s attempt=%s executor=%s provider=%s role=%s round=%d review_phase=%s approved=%t no_blockers=%t has_blockers=%t review_complete=%t verdict_allows_full=%t no_blocker_verdict_streak=%d policy_met=%t stop_reason=%q capped=%t critic_max_rounds=%d cap_has_blockers=%t model=%q effort=%q complete=%t", id.JobID, id.AttemptID, id.ExecutorID, call.Provider, call.Role, call.Round, call.ReviewPhase, call.Approved, call.NoBlockers, call.HasBlockers, call.ReviewComplete, advance, policy.noBlockerRounds, policyMet, reason, capped, job.CriticMaxRounds, capped && cap != nil && cap.HasBlockers, call.Model, call.Effort, call.Complete)
 		}
 	}
 }
@@ -289,10 +296,10 @@ func (e *Orchestrator) retainIncompleteAudit(p *preparedAction, result Result) e
 	if p.job.Action != command.SecurityAudit || len(result.Artifacts) == 0 || !result.matchesJob(p.job) || validateResultArtifacts(p.job, result.Artifacts, false) != nil {
 		return nil
 	}
-	return e.retainAudit(p, result, false)
+	return e.retainAudit(p, result.Artifacts, false)
 }
 
-func (e *Orchestrator) retainAudit(p *preparedAction, result Result, complete bool) error {
+func (e *Orchestrator) retainAudit(p *preparedAction, files []workspace.File, complete bool) error {
 	root, err := privateRecordsDir(e.WorkRoot, "audits")
 	if err != nil {
 		return err
@@ -305,7 +312,6 @@ func (e *Orchestrator) retainAudit(p *preparedAction, result Result, complete bo
 	if err != nil {
 		return err
 	}
-	files := result.Artifacts
 	if !complete {
 		files = slices.Concat(files, []workspace.File{{Path: "INCOMPLETE.txt", Mode: workspace.Regular, Data: []byte("The audit failed. These partial artifacts are incomplete and must not be published.\n")}})
 	}
@@ -358,7 +364,7 @@ func (e *Orchestrator) prepareFix(ctx context.Context, p *preparedAction) (*prep
 	expected := e.Store.Data.PendingFixes[request.ID]
 	remote, err := e.GitHub.Branch(ctx, fork.FullName, p.branch)
 	if err == nil {
-		if remote.Name != p.branch || expected == "" || remote.Commit.SHA != expected {
+		if remote.Name != p.branch || expected.SHA == "" || remote.Commit.SHA != expected.SHA {
 			return nil, fmt.Errorf("branch %s exists without a matching recorded bot commit; refusing to reuse it", p.branch)
 		}
 		return p, nil
@@ -369,7 +375,7 @@ func (e *Orchestrator) prepareFix(ctx context.Context, p *preparedAction) (*prep
 	if p.existing != nil {
 		return nil, fmt.Errorf("branch %s has a pull request but no remote branch", p.branch)
 	}
-	if expected != "" {
+	if expected.SHA != "" {
 		delete(e.Store.Data.PendingFixes, request.ID)
 		if err := e.Store.Save(); err != nil {
 			return nil, fmt.Errorf("clear failed fork push checkpoint: %w", err)
@@ -400,7 +406,7 @@ func (e *Orchestrator) prepareFix(ctx context.Context, p *preparedAction) (*prep
 	return p, nil
 }
 
-func (e *Orchestrator) publishFix(ctx context.Context, p *preparedAction, result Result) (resultErr error) {
+func (e *Orchestrator) publishFix(ctx context.Context, p *preparedAction, result Result, published publication) (resultErr error) {
 	defer func() {
 		if resultErr != nil {
 			resultErr = fmt.Errorf("%w: %w", monitor.ErrPostModelPublication, resultErr)
@@ -413,7 +419,7 @@ func (e *Orchestrator) publishFix(ctx context.Context, p *preparedAction, result
 		} else if err != nil {
 			return err
 		}
-		return e.acknowledge(ctx, request, "AI completed the request without changing files.\n\n"+inertModelOutput(result.Answer))
+		return e.acknowledge(ctx, request, "AI completed the request without changing files.\n\n"+inertModelOutput(published.answer))
 	}
 	currentRepo, currentFork, err := e.fixFork(ctx, request.Repository)
 	if err != nil {
@@ -433,7 +439,7 @@ func (e *Orchestrator) publishFix(ctx context.Context, p *preparedAction, result
 		if _, err := e.currentFixIssue(ctx, p); err != nil {
 			return err
 		}
-		e.Store.Data.PendingFixes[request.ID] = sha
+		e.Store.Data.PendingFixes[request.ID] = state.PendingFix{SHA: sha, Cap: published.cap}
 		return e.Store.Save()
 	}); err != nil {
 		if errors.Is(err, errFixIssueChanged) {
@@ -450,14 +456,27 @@ func (e *Orchestrator) publishFix(ctx context.Context, p *preparedAction, result
 func (e *Orchestrator) publishFixReply(ctx context.Context, p *preparedAction) error {
 	request, repo, fork, branch := p.request, p.repository, p.fork, p.branch
 	expected := e.Store.Data.PendingFixes[request.ID]
+	notice, err := criticCapNotice(expected.Cap)
+	if err != nil {
+		return fmt.Errorf("%w: invalid saved fix outcome: %w", monitor.ErrTerminalJob, err)
+	}
+	if cap := expected.Cap; cap != nil {
+		e.logf("fix publication attempt job=%s capped=true critic_max_rounds=%d cap_has_blockers=%t full_approved=%t", request.ID, cap.MaxRounds, cap.HasBlockers, cap.FullApproved)
+	}
+	var reply string
 	if existing := p.existing; existing != nil {
 		if existing.State != "open" || request.Source.Author.ID == 0 || existing.User.ID != request.Source.Author.ID ||
 			existing.Head.Ref != branch || existing.Head.Repo == nil || !strings.EqualFold(existing.Head.Repo.FullName, fork.FullName) ||
-			existing.Head.SHA != expected || existing.Base.Ref != repo.DefaultBranch {
+			existing.Head.SHA != expected.SHA || existing.Base.Ref != repo.DefaultBranch {
 			return fmt.Errorf("branch %s has a pull request without matching requester authorship and recorded head", branch)
 		}
-		return e.acknowledge(ctx, request, fmt.Sprintf("Fix branch `%s` at `%s` has a pull request opened by @%s: %s", branch, expected, existing.User.Login, existing.HTMLURL))
+		reply = fmt.Sprintf("Fix branch `%s` at `%s` has a pull request opened by @%s: %s", branch, expected.SHA, existing.User.Login, existing.HTMLURL)
+	} else {
+		compare := fmt.Sprintf("https://github.com/%s/compare/%s...%s?expand=1", repo.FullName, url.PathEscape(repo.DefaultBranch), url.PathEscape(e.BotLogin+":"+branch))
+		reply = fmt.Sprintf("Fix branch `%s` is ready in `%s` at `%s`. @%s, [open the pull request yourself](%s) after reviewing the diff. Repository review rules, when enabled, can then evaluate your authorship.", branch, fork.FullName, expected.SHA, request.Source.Author.Login, compare)
 	}
-	compare := fmt.Sprintf("https://github.com/%s/compare/%s...%s?expand=1", repo.FullName, url.PathEscape(repo.DefaultBranch), url.PathEscape(e.BotLogin+":"+branch))
-	return e.acknowledge(ctx, request, fmt.Sprintf("Fix branch `%s` is ready in `%s` at `%s`. @%s, [open the pull request yourself](%s) after reviewing the diff. Repository review rules, when enabled, can then evaluate your authorship.", branch, fork.FullName, expected, request.Source.Author.Login, compare))
+	if notice != "" {
+		reply = notice + "\n\n" + reply
+	}
+	return e.acknowledge(ctx, request, reply)
 }

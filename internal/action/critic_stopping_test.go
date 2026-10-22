@@ -3,7 +3,6 @@ package action
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"log"
 	"reflect"
@@ -12,7 +11,6 @@ import (
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
-	"github.com/linkdata/minion/internal/monitor"
 )
 
 func TestRunnerCriticStoppingReplaysFullReviewStreak(t *testing.T) {
@@ -31,13 +29,18 @@ func TestRunnerCriticStoppingReplaysFullReviewStreak(t *testing.T) {
 	}{
 		{name: "streak starts before threshold", maximum: 5, after: 4, consecutive: 2, lastRound: 4, wantStreak: 4, stopReason: "nonblocking"},
 		{name: "threshold waits for second full", maximum: 3, after: 1, consecutive: 2, lastRound: 2, wantStreak: 2, stopReason: "nonblocking"},
-		{name: "verification does not count", maximum: 2, after: 1, consecutive: 2, full: map[int]string{1: "blockers"}, lastRound: 2, wantStreak: 1},
+		{name: "verification does not count", maximum: 2, after: 1, consecutive: 2, full: map[int]string{1: "blockers"}, lastRound: 2, wantStreak: 1, stopReason: "round_cap"},
 		{name: "full blockers reset", maximum: 5, after: 2, consecutive: 2, full: map[int]string{2: "blockers"}, lastRound: 4, wantStreak: 2, stopReason: "nonblocking"},
 		{name: "blocking verification skips full and resets", maximum: 5, after: 2, consecutive: 2, verification: map[int]string{2: "blockers"}, lastRound: 4, skippedFull: 1, wantStreak: 2, stopReason: "nonblocking"},
 		{name: "zero bypasses streak", maximum: 1, after: 1, lastRound: 1, wantStreak: 1, stopReason: "nonblocking"},
-		{name: "streak above budget fails at cap", maximum: 2, after: 1, consecutive: 3, lastRound: 2, wantStreak: 2},
+		{name: "streak above budget publishes at cap", maximum: 2, after: 1, consecutive: 3, lastRound: 2, wantStreak: 2, stopReason: "round_cap"},
+		{name: "single blocked full publishes at cap", maximum: 1, full: map[int]string{1: "blockers"}, lastRound: 1, stopReason: "round_cap"},
+		{name: "single strict nit publishes at cap", maximum: 1, lastRound: 1, wantStreak: 1, stopReason: "round_cap"},
 		{name: "approval bypasses threshold and streak", maximum: 2, after: 2, consecutive: 20, full: map[int]string{1: "approved"}, lastRound: 1, wantStreak: 1, stopReason: "approved"},
-		{name: "strict verification nits survive full approval", maximum: 2, full: map[int]string{1: "blockers", 2: "approved"}, lastRound: 2, wantStreak: 1},
+		{name: "strict verification nits survive full approval", maximum: 2, full: map[int]string{1: "blockers", 2: "approved"}, lastRound: 2, wantStreak: 1, stopReason: "round_cap"},
+		{name: "final verification blockers force blocked full", maximum: 2, after: 1, verification: map[int]string{2: "blockers"}, full: map[int]string{1: "blockers", 2: "blockers"}, lastRound: 2, stopReason: "round_cap"},
+		{name: "final verification blockers prevent full approval acceptance", maximum: 2, after: 1, verification: map[int]string{2: "blockers"}, full: map[int]string{1: "blockers", 2: "approved"}, lastRound: 2, wantStreak: 1, stopReason: "round_cap"},
+		{name: "final verification blockers prevent threshold acceptance", maximum: 2, after: 1, verification: map[int]string{2: "blockers"}, full: map[int]string{1: "blockers"}, lastRound: 2, wantStreak: 1, stopReason: "round_cap"},
 		{name: "cleared verification permits approval", maximum: 3, consecutive: 20, full: map[int]string{1: "blockers", 2: "approved", 3: "approved"}, verification: map[int]string{3: "approved"}, lastRound: 3, wantStreak: 2, stopReason: "approved"},
 		{name: "streak permits verification nits", maximum: 3, after: 2, consecutive: 2, full: map[int]string{1: "blockers", 2: "approved", 3: "approved"}, lastRound: 3, wantStreak: 2, stopReason: "nonblocking"},
 	} {
@@ -53,7 +56,7 @@ func TestRunnerCriticStoppingReplaysFullReviewStreak(t *testing.T) {
 				}
 				verdict := test.verification[request.round]
 				if request.reviewPhase == reviewFull {
-					if request.round > 1 && verdict == "blockers" {
+					if request.round > 1 && request.round < test.maximum && verdict == "blockers" {
 						t.Fatal("blocking verification advanced to full review")
 					}
 					verdict = test.full[request.round]
@@ -73,8 +76,6 @@ func TestRunnerCriticStoppingReplaysFullReviewStreak(t *testing.T) {
 				if result.Answer != fmt.Sprintf("Candidate %d", test.lastRound) {
 					t.Fatalf("accepted wrong proposal: %+v", result)
 				}
-			} else if !errors.Is(err, monitor.ErrTerminalJob) || result.Answer != "" {
-				t.Fatalf("exhausted policy was retryable or returned a proposal: %+v, %v", result, err)
 			}
 			if err := result.validate(job, false); err != nil {
 				t.Fatalf("runtime produced invalid replay evidence: %v", err)
@@ -96,13 +97,17 @@ func TestRunnerCriticStoppingReplaysFullReviewStreak(t *testing.T) {
 			orchestrator.logResult(job, result)
 			lines := strings.Split(strings.TrimSpace(journal.String()), "\n")
 			last := lines[len(lines)-1]
-			wantFinal := fmt.Sprintf("no_blocker_verdict_streak=%d policy_met=%t stop_reason=%q", test.wantStreak, wantSuccess, test.stopReason)
+			policyMet := test.stopReason == "approved" || test.stopReason == "nonblocking"
+			wantFinal := fmt.Sprintf("no_blocker_verdict_streak=%d policy_met=%t", test.wantStreak, policyMet)
 			wantStops := 0
-			if wantSuccess {
+			if policyMet {
 				wantStops = 1
 			}
-			if len(lines) != wantCalls || !strings.Contains(last, wantFinal) || strings.Count(journal.String(), "policy_met=true") != wantStops {
+			if len(lines) != wantCalls || !strings.Contains(last, wantFinal) || !strings.Contains(last, fmt.Sprintf("stop_reason=%q", test.stopReason)) || strings.Count(journal.String(), "policy_met=true") != wantStops {
 				t.Fatalf("journal did not replay stopping evidence: %s; want final %s", journal.String(), wantFinal)
+			}
+			if test.stopReason == "round_cap" && !strings.Contains(last, "capped=true") {
+				t.Fatalf("journal hid capped publication eligibility: %s", last)
 			}
 			if err := orchestrator.retainReviewEvidence(job, result); err != nil {
 				t.Fatal(err)

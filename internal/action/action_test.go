@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -377,6 +378,8 @@ func TestFixRefusesIssueEditedAfterRequest(t *testing.T) {
 func TestFixRecoversOnlyRecordedBranch(t *testing.T) {
 	for _, tt := range []struct {
 		name                string
+		cap                 *state.CriticCap
+		retryReply          bool
 		remoteSHA           string
 		existingUser        string
 		existingID          int64
@@ -387,6 +390,10 @@ func TestFixRecoversOnlyRecordedBranch(t *testing.T) {
 		wantError           string
 	}{
 		{name: "recorded commit", remoteSHA: strings.Repeat("a", 40), wantComment: true},
+		{name: "capped branch", remoteSHA: strings.Repeat("a", 40), wantComment: true, retryReply: true, cap: &state.CriticCap{MaxRounds: 2, HasBlockers: true}},
+		{name: "capped branch full approved", remoteSHA: strings.Repeat("a", 40), wantComment: true, retryReply: true, cap: &state.CriticCap{MaxRounds: 2, HasBlockers: true, FullApproved: true}},
+		{name: "capped requester PR", remoteSHA: strings.Repeat("a", 40), existingUser: "writer", existingID: 7, existingSHA: strings.Repeat("a", 40), wantComment: true, retryReply: true, cap: &state.CriticCap{MaxRounds: 2, HasBlockers: true}},
+		{name: "capped requester PR full approved", remoteSHA: strings.Repeat("a", 40), existingUser: "writer", existingID: 7, existingSHA: strings.Repeat("a", 40), wantComment: true, retryReply: true, cap: &state.CriticCap{MaxRounds: 2, HasBlockers: true, FullApproved: true}},
 		{name: "recorded commit with oversized notes", remoteSHA: strings.Repeat("a", 40), oversizedNotes: true, wantComment: true},
 		{name: "changed branch", remoteSHA: strings.Repeat("b", 40), wantError: "without a matching recorded bot commit"},
 		{name: "PR without branch", existingUser: "writer", existingID: 7, existingSHA: strings.Repeat("a", 40), wantError: "has a pull request but no remote branch"},
@@ -410,7 +417,7 @@ func TestFixRecoversOnlyRecordedBranch(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			store.Data.PendingFixes[job.ID] = strings.Repeat("a", 40)
+			store.Data.PendingFixes[job.ID] = state.PendingFix{SHA: strings.Repeat("a", 40), Cap: tt.cap}
 			if err := store.Save(); err != nil {
 				t.Fatal(err)
 			}
@@ -428,7 +435,8 @@ func TestFixRecoversOnlyRecordedBranch(t *testing.T) {
 			}()
 
 			branch := "minion/fix-7-aaaaaaaaaaaa"
-			var commentBody string
+			var commentBody, failedBody string
+			commentAttempts := 0
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch {
 				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7":
@@ -462,7 +470,23 @@ func TestFixRecoversOnlyRecordedBranch(t *testing.T) {
 						t.Error(err)
 					}
 				case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/issues/7/comments":
-					captureComment(t, w, r, &commentBody)
+					if tt.retryReply {
+						commentAttempts++
+						var payload struct{ Body string }
+						if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+							t.Error(err)
+						}
+						commentBody = payload.Body
+						if commentAttempts == 1 {
+							failedBody = commentBody
+							http.Error(w, "reply unavailable", http.StatusBadGateway)
+							return
+						}
+						w.WriteHeader(http.StatusCreated)
+						_, _ = fmt.Fprint(w, `{"id":1}`)
+					} else {
+						captureComment(t, w, r, &commentBody)
+					}
 				default:
 					t.Errorf("unexpected request: %s %s", r.Method, r.URL.String())
 					http.NotFound(w, r)
@@ -470,17 +494,53 @@ func TestFixRecoversOnlyRecordedBranch(t *testing.T) {
 			}))
 			defer server.Close()
 			client := testGitHub(server, "token")
+			modelCalls := 0
 			orchestrator := &Orchestrator{
 				GitHub:   client,
 				BotLogin: "linkdataminion",
 				Store:    store,
-				Runner:   Runner{runModel: forbidModel(t)},
+				Runner: Runner{runModel: func(context.Context, modelRun) (aicli.Result, error) {
+					modelCalls++
+					t.Fatal("recorded-branch recovery dispatched a model")
+					return aicli.Result{}, nil
+				}},
 			}
 			if tt.oversizedNotes {
 				job.Source.Body = "@linkdataminion fix\nOversized notes"
 				orchestrator.MaxGitHubContextBytes = 1
 			}
 			err = attemptFixture(orchestrator).perform(testActionContext(t), job)
+			if tt.retryReply {
+				if !errors.Is(err, monitor.ErrPostModelPublication) || errors.Is(err, monitor.ErrTerminalJob) || commentAttempts != 1 {
+					t.Fatalf("reply failure lost recovery state/classification: attempts=%d error=%v", commentAttempts, err)
+				}
+				if err := store.Close(); err != nil {
+					t.Fatal(err)
+				}
+				store, err = state.Open(statePath, time.Now())
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := state.PendingFix{SHA: strings.Repeat("a", 40), Cap: tt.cap}
+				if !reflect.DeepEqual(store.Data.PendingFixes[job.ID], want) {
+					t.Fatalf("reply failure changed durable cap outcome: got=%+v want=%+v", store.Data.PendingFixes[job.ID], want)
+				}
+				orchestrator.Store = store
+				orchestrator.CriticStopping = config.CriticStopping{MaxRounds: 9}
+				err = attemptFixture(orchestrator).perform(testActionContext(t), job)
+				if err != nil || commentAttempts != 2 || commentBody != failedBody {
+					t.Fatalf("restart/config change altered the original reply: attempts=%d first=%q recovered=%q error=%v", commentAttempts, failedBody, commentBody, err)
+				}
+				if strings.Count(commentBody, "Critic round limit reached (2). Normal critic acceptance was not reached; unresolved findings may remain.") != 1 || strings.Count(commentBody, "A critic review phase of the final candidate reported blockers.") != 1 {
+					t.Fatalf("recovered reply lost original maximum or blocker warning: %q", commentBody)
+				}
+				if strings.Contains(commentBody, "The fresh full critic reported approval, but required verification findings were not cleared.") != tt.cap.FullApproved || strings.Contains(commentBody, "The fresh full critic did not approve.") == tt.cap.FullApproved {
+					t.Fatalf("recovered reply misreported actual full approval: cap=%+v reply=%q", tt.cap, commentBody)
+				}
+			}
+			if modelCalls != 0 {
+				t.Fatalf("recovery called models %d times", modelCalls)
+			}
 			if tt.wantError != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantError) {
 					t.Fatalf("fix() error = %v, want %q", err, tt.wantError)
@@ -510,8 +570,17 @@ func TestFixRecoversOnlyRecordedBranch(t *testing.T) {
 }
 
 func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
-	for _, withCritic := range []bool{false, true} {
-		t.Run(fmt.Sprintf("critic_%t", withCritic), func(t *testing.T) {
+	for _, test := range []struct {
+		name                        string
+		critic, capped, saveFailure bool
+	}{
+		{name: "no critic"},
+		{name: "approved", critic: true},
+		{name: "capped blockers", critic: true, capped: true},
+		{name: "capped save failure", critic: true, capped: true, saveFailure: true},
+	} {
+		withCritic := test.critic
+		t.Run(test.name, func(t *testing.T) {
 			baseline := []workspace.File{
 				{Path: ".gitignore", Mode: workspace.Regular, Data: []byte("*.log\n")},
 				{Path: "deleted.txt", Mode: workspace.Regular, Data: []byte("remove this file\n")},
@@ -543,15 +612,25 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 			}
 			gitConfig := filepath.Join(scratch, "fork-gitconfig")
 			fixtureGit("config", "--file", gitConfig, "url."+forkRemote+".insteadOf", "https://github.com/linkdataminion/r.git")
-			wrapper := fmt.Sprintf("#!/bin/sh\nexec %s -c %s \"$@\"\n", shellQuote(baseWrapper), shellQuote("include.path="+gitConfig))
+			statePath := filepath.Join(scratch, "state.json")
+			beforePushState := filepath.Join(scratch, "before-push-state.json")
+			wrapper := fmt.Sprintf("#!/bin/sh\nset -eu\ncase \" $* \" in *\" push --no-verify \"*) cat %s > %s ;; esac\nexec %s -c %s \"$@\"\n", shellQuote(statePath), shellQuote(beforePushState), shellQuote(baseWrapper), shellQuote("include.path="+gitConfig))
 			fakeOnPath(t, "git", wrapper)
 			job := monitor.Job{
 				Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"fix"}}, SubjectType: "Issue", Number: 7,
 				ID: strings.Repeat("a", 64), Source: github.Item{Author: github.User{ID: 7, Login: "writer"}, Body: "@linkdataminion fix\n\nCheck the failing error path.", HTMLURL: "https://github.com/o/r/issues/7#issuecomment-1", UpdatedAt: time.Now()},
 				Command: command.Command{Name: "fix", Action: command.Fix},
 			}
-			store := openState(t, time.Now())
-			store.Data.PendingFixes[job.ID] = strings.Repeat("f", 40) // Simulate a recorded commit whose fork push failed.
+			store, err := state.Open(statePath, time.Now())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := store.Close(); err != nil {
+					t.Error(err)
+				}
+			})
+			store.Data.PendingFixes[job.ID] = state.PendingFix{SHA: strings.Repeat("f", 40), Cap: &state.CriticCap{MaxRounds: 3, HasBlockers: true}} // Simulate a recorded commit whose fork push failed.
 			if err := store.Save(); err != nil {
 				t.Fatal(err)
 			}
@@ -631,6 +710,12 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 								t.Fatalf("late live edit not exercised: %q,%v", data, err)
 							}
 							liveMutated = true
+							if test.saveFailure {
+								store.Data.Cursor = time.Date(10000, time.January, 1, 0, 0, 0, 0, time.UTC)
+							}
+							if test.capped {
+								return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"review_complete":true,"feedback":"Blocking defect remains."}`}, nil
+							}
 							return aicli.Result{Answer: approvedCritiqueJSON}, nil
 						}
 						mainCalls++
@@ -667,7 +752,20 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 			if withCritic {
 				orchestrator.Adversarial = "claude"
 			}
-			if err := attemptFixture(orchestrator).perform(testActionContext(t), job); err != nil {
+			err = attemptFixture(orchestrator).perform(testActionContext(t), job)
+			if test.saveFailure {
+				if err == nil || !errors.Is(err, monitor.ErrPostModelPublication) || !strings.Contains(err.Error(), "record commit before push") || commentBody != "" {
+					t.Fatalf("checkpoint save failure did not stop publication: %v", err)
+				}
+				if _, err := os.Stat(beforePushState); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("push ran after checkpoint save failure: %v", err)
+				}
+				if output, err := fixtureGitCommand("--git-dir", forkRemote, "rev-parse", "refs/heads/minion/fix-7-aaaaaaaaaaaa").CombinedOutput(); err == nil {
+					t.Fatalf("failed checkpoint reached remote branch: %s", output)
+				}
+				return
+			}
+			if err != nil {
 				t.Fatal(err)
 			}
 			wantCriticCalls := 0
@@ -681,7 +779,19 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 				t.Fatal("late live mutation did not execute")
 			}
 			branch := "minion/fix-7-aaaaaaaaaaaa"
-			sha := store.Data.PendingFixes[job.ID]
+			sha := store.Data.PendingFixes[job.ID].SHA
+			wantPending := state.PendingFix{SHA: sha}
+			if test.capped {
+				wantPending.Cap = &state.CriticCap{MaxRounds: 1, HasBlockers: true}
+			}
+			data, err := os.ReadFile(beforePushState)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var checkpoint state.Data
+			if err := json.Unmarshal(data, &checkpoint); err != nil || !reflect.DeepEqual(checkpoint.PendingFixes[job.ID], wantPending) || !reflect.DeepEqual(store.Data.PendingFixes[job.ID], wantPending) {
+				t.Fatalf("original outcome was not durable before push or retained stale cap: checkpoint=%+v current=%+v want=%+v error=%v", checkpoint.PendingFixes[job.ID], store.Data.PendingFixes[job.ID], wantPending, err)
+			}
 			if len(sha) != 40 || !strings.Contains(commentBody, branch) || !strings.Contains(commentBody, sha) ||
 				!strings.Contains(commentBody, "https://github.com/o/r/compare/main...linkdataminion:minion%2Ffix-7-aaaaaaaaaaaa?expand=1") ||
 				!strings.HasSuffix(commentBody, job.Marker()) {
@@ -689,6 +799,13 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 			}
 			if strings.Contains(commentBody, "@secondbot") || strings.Contains(commentBody, "![pixel]") || strings.Contains(commentBody, "Closes #123") {
 				t.Fatalf("branch reply published model output: %q", commentBody)
+			}
+			if test.capped {
+				if strings.Count(commentBody, "Critic round limit reached (1).") != 1 || !strings.Contains(commentBody, "The fresh full critic did not approve.") || !strings.Contains(commentBody, "A critic review phase of the final candidate reported blockers.") {
+					t.Fatalf("capped branch reply lost durable warning: %q", commentBody)
+				}
+			} else if strings.Contains(commentBody, "Critic round limit reached") {
+				t.Fatalf("ordinary fix inherited a stale cap warning: %q", commentBody)
 			}
 			if rulesetChecks != 4 {
 				t.Fatalf("push rulesets checked %d times, want base and fork before model execution and before push", rulesetChecks)

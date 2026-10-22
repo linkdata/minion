@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -27,7 +28,9 @@ func TestStoreLocksAndPersistsCompletedCommands(t *testing.T) {
 	store.Data.RepositoryCursors["owner/repo"] = initial.Add(time.Minute)
 	store.Data.NextPollAt = initial.Add(2 * time.Minute)
 	store.Data.PendingNotifications["thread"] = PendingNotification{Repository: "owner/repo", Since: initial}
-	store.Data.PendingFixes["fix-job"] = "verified-sha"
+	pending := PendingFix{SHA: "verified-sha", Cap: &CriticCap{MaxRounds: 5, HasBlockers: true, FullApproved: true}}
+	store.Data.PendingFixes["fix-job"] = pending
+	store.Data.PendingFixes["normal-fix"] = PendingFix{SHA: "normal-sha"}
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +50,8 @@ func TestStoreLocksAndPersistsCompletedCommands(t *testing.T) {
 	got := reopened.Data
 	if _, ok := got.Processed["job"]; !ok || got.JobFailures["failed"] != (JobFailure{Attempts: 2, ReplyAttempts: 1}) || !got.Cursor.Equal(initial) ||
 		!got.RepositoryCursors["owner/repo"].Equal(initial.Add(time.Minute)) || !got.NextPollAt.Equal(initial.Add(2*time.Minute)) || !got.NextInviteCheckAt.Equal(initial.Add(time.Hour)) ||
-		got.PendingNotifications["thread"] != (PendingNotification{Repository: "owner/repo", Since: initial}) || got.PendingFixes["fix-job"] != "verified-sha" || got.UnconfirmedProcessJob != "unsafe-job" {
+		got.PendingNotifications["thread"] != (PendingNotification{Repository: "owner/repo", Since: initial}) || !reflect.DeepEqual(got.PendingFixes["fix-job"], pending) ||
+		got.PendingFixes["normal-fix"] != (PendingFix{SHA: "normal-sha"}) || got.UnconfirmedProcessJob != "unsafe-job" {
 		t.Fatalf("lost persisted state: %+v", got)
 	}
 	info, err := os.Stat(path)
@@ -61,10 +65,12 @@ func TestStoreLocksAndPersistsCompletedCommands(t *testing.T) {
 
 func TestOpenFailureReleasesLock(t *testing.T) {
 	for name, content := range map[string]string{
-		"malformed":      "{",
-		"trailing data":  `{"cursor":"2026-10-09T08:00:00Z"} {}`,
-		"missing cursor": `{}`,
-		"unknown field":  `{"cursor":"2026-10-09T08:00:00Z","unsupported":true}`,
+		"malformed":         "{",
+		"trailing data":     `{"cursor":"2026-10-09T08:00:00Z"} {}`,
+		"missing cursor":    `{}`,
+		"unknown field":     `{"cursor":"2026-10-09T08:00:00Z","unsupported":true}`,
+		"old pending fix":   `{"cursor":"2026-10-09T08:00:00Z","pending_fixes":{"job":"old-sha"}}`,
+		"unknown cap field": `{"cursor":"2026-10-09T08:00:00Z","pending_fixes":{"job":{"sha":"sha","cap":{"max_rounds":3,"unsupported":true}}}}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "state.json")

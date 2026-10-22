@@ -25,9 +25,11 @@ func TestFixRefusesIssueEditedDuringModel(t *testing.T) {
 	for _, tc := range []struct {
 		name, change string
 		queryFailure bool
+		capped       bool
 	}{
 		{name: "no changes"},
 		{name: "changed files", change: "fixed\n"},
+		{name: "capped changed files", change: "fixed\n", capped: true},
 		{name: "final query fails", change: "fixed\n", queryFailure: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -78,14 +80,24 @@ func TestFixRefusesIssueEditedDuringModel(t *testing.T) {
 				BotLogin: "linkdataminion", Store: store,
 				Commands: map[string]config.CommandMapping{"fix": {Action: "fix", Skills: []string{skills.BuiltinAntiPromptInjection}}},
 				Runner: Runner{runModel: func(_ context.Context, modelRequest modelRun) (aicli.Result, error) {
+					if modelRequest.role == roleCritic {
+						return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"review_complete":true,"feedback":"Blocking defect remains."}`}, nil
+					}
 					if tc.change != "" {
 						if err := os.WriteFile(filepath.Join(modelRequest.dir, "fixed.txt"), []byte(tc.change), 0600); err != nil {
 							return aicli.Result{}, err
 						}
 					}
 					modelRan.Store(true)
+					if tc.capped {
+						return aicli.Result{Answer: proposalJSON("stale model answer", "")}, nil
+					}
 					return aicli.Result{Answer: "stale model answer"}, nil
 				}},
+			}
+			if tc.capped {
+				orchestrator.Adversarial = "claude"
+				orchestrator.CriticStopping = config.CriticStopping{MaxRounds: 1, NonblockingAfterRound: new(int)}
 			}
 			err := attemptFixture(orchestrator).perform(testActionContext(t), request)
 			if tc.queryFailure {
