@@ -281,7 +281,7 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 			call, err := next(ctx, request)
 			entry := CallUsage{Provider: request.provider, Role: request.role, Round: request.round, ReviewPhase: request.reviewPhase, Model: request.model, Effort: request.effort, Tokens: call.Tokens, Complete: call.UsageComplete}
 			if err == nil && request.role == roleCritic {
-				approved, hasBlockers, _, parseErr := parseCritique(call.Answer)
+				approved, hasBlockers, _, parseErr := parseCritique(call.Answer, configured.Codex.APIKey, configured.Claude.APIKey)
 				entry.Approved = parseErr == nil && approved
 				entry.NoBlockers = parseErr == nil && !hasBlockers
 				entry.HasBlockers = parseErr == nil && hasBlockers

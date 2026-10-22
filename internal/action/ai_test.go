@@ -624,11 +624,22 @@ func TestParseProposal(t *testing.T) {
 func TestParseCritique(t *testing.T) {
 	for _, tt := range []struct {
 		name, input, feedback        string
+		secrets                      []string
+		errText                      string
 		approved, hasBlockers, valid bool
 	}{
 		{name: "approval", input: approvedCritiqueJSON, approved: true, valid: true},
 		{name: "rejection", input: `{"feedback":" Repair the defect. ","approved":false,"has_blockers":true}`, feedback: "Repair the defect.", hasBlockers: true, valid: true},
 		{name: "nonblocking findings", input: `{"approved":false,"has_blockers":false,"feedback":"Nit: simplify the loop."}`, feedback: "Nit: simplify the loop.", valid: true},
+		{name: "mixed NUL feedback", input: `{"approved":false,"has_blockers":true,"feedback":"Repair\u0000 the defect."}`, feedback: "Repair the defect.", hasBlockers: true, valid: true},
+		{name: "NUL-only rejection", input: `{"approved":false,"has_blockers":true,"feedback":"\u0000"}`, errText: "rejection feedback is blank after redaction"},
+		{name: "whitespace and NUL rejection", input: `{"approved":false,"has_blockers":false,"feedback":" \t\u0000\n "}`, errText: "rejection feedback is blank after redaction"},
+		{name: "feedback redaction fails closed", input: `{"approved":false,"has_blockers":true,"feedback":"private # and redacted"}`, secrets: []string{"#", "redacted"}, errText: "rejection feedback is blank after redaction"},
+		{name: "mixed NUL split keys", input: `{"approved":false,"has_blockers":true,"feedback":"Repair main-\u0000secret and critic-\u0000secret."}`, secrets: []string{"main-secret", "critic-secret"}, feedback: "Repair [redacted] and [redacted].", hasBlockers: true, valid: true},
+		{name: "redacted feedback stays nonblank", input: `{"approved":false,"has_blockers":false,"feedback":"main-secret"}`, secrets: []string{"main-secret"}, feedback: "[redacted]", valid: true},
+		{name: "approval unaffected by redaction keys", input: approvedCritiqueJSON, secrets: []string{"#", "redacted"}, approved: true, valid: true},
+		{name: "approval with NUL feedback remains inconsistent", input: `{"approved":true,"has_blockers":false,"feedback":"\u0000"}`, errText: "expected approval without blockers or feedback"},
+		{name: "approval with emptied key feedback remains inconsistent", input: `{"approved":true,"has_blockers":false,"feedback":"private # and redacted"}`, secrets: []string{"#", "redacted"}, errText: "expected approval without blockers or feedback"},
 		{name: "missing approval", input: `{"has_blockers":false,"feedback":""}`},
 		{name: "missing blocker classification", input: `{"approved":true,"feedback":""}`},
 		{name: "string blocker classification", input: `{"approved":false,"has_blockers":"false","feedback":"Nit."}`},
@@ -653,8 +664,12 @@ func TestParseCritique(t *testing.T) {
 		{name: "oversized verdict", input: strings.Repeat(" ", maxCriticOutputBytes+1)},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			approved, hasBlockers, feedback, err := parseCritique(tt.input)
-			if (err == nil) != tt.valid || (tt.valid && (approved != tt.approved || hasBlockers != tt.hasBlockers || feedback != tt.feedback)) {
+			approved, hasBlockers, feedback, err := parseCritique(tt.input, tt.secrets...)
+			if tt.valid {
+				if err != nil || approved != tt.approved || hasBlockers != tt.hasBlockers || feedback != tt.feedback {
+					t.Fatalf("parseCritique() = %t, %t, %q, %v", approved, hasBlockers, feedback, err)
+				}
+			} else if err == nil || approved || hasBlockers || feedback != "" || (tt.errText != "" && !strings.Contains(err.Error(), tt.errText)) {
 				t.Fatalf("parseCritique() = %t, %t, %q, %v", approved, hasBlockers, feedback, err)
 			}
 		})

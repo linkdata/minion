@@ -205,10 +205,9 @@ func (r *Runner) runAI(ctx context.Context, job Job, dir, prompt, outputDir stri
 			}
 			var approved, hasBlockers bool
 			var feedback string
-			if approved, hasBlockers, feedback, err = parseCritique(review.Answer); err != nil {
+			if approved, hasBlockers, feedback, err = parseCritique(review.Answer, secrets...); err != nil {
 				return "", "", fmt.Errorf("%w: invalid critic verdict: %w", monitor.ErrTerminalJob, err)
 			}
-			feedback = redactActionText(feedback, secrets...)
 			if !approved {
 				rejectedFeedback = append(rejectedFeedback, phase+" review:\n"+feedback)
 			}
@@ -306,7 +305,7 @@ func parseProposal(raw string, allowUnpublishableAnswer bool, secrets ...string)
 	return answer, refutations, nil
 }
 
-func parseCritique(answer string) (approved, hasBlockers bool, feedback string, err error) {
+func parseCritique(answer string, secrets ...string) (approved, hasBlockers bool, feedback string, err error) {
 	if len(answer) > maxCriticOutputBytes {
 		return false, false, "", errors.New("response exceeds byte limit")
 	}
@@ -328,6 +327,10 @@ func parseCritique(answer string) (approved, hasBlockers bool, feedback string, 
 	approved, hasBlockers, feedback = *verdict, *blockers, strings.TrimSpace(*message)
 	if approved != (feedback == "") || (approved && hasBlockers) {
 		return false, false, "", errors.New("expected approval without blockers or feedback, or rejection with feedback")
+	}
+	feedback = redactActionText(feedback, secrets...)
+	if !approved && strings.TrimSpace(feedback) == "" {
+		return false, false, "", errors.New("rejection feedback is blank after redaction")
 	}
 	return approved, hasBlockers, feedback, nil
 }
