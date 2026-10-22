@@ -354,7 +354,7 @@ func TestRunAIRevisionPreservesWorkAndBoundaries(t *testing.T) {
 						if err != nil || string(content) != "first proposal" {
 							t.Fatalf("revision lost prior work: %q, %v", content, err)
 						}
-						if request.prompt != revisionPrompt(task, "first proposal", feedback) {
+						if request.prompt != revisionPrompt(task, "first proposal", "full review:\n"+feedback) {
 							t.Fatalf("revision changed task or exposed unquoted feedback: %q", request.prompt)
 						}
 					default:
@@ -378,7 +378,7 @@ func TestRunAIRevisionPreservesWorkAndBoundaries(t *testing.T) {
 				priorAnswer, priorFeedback := "", ""
 				var wantRefutations []Refutation
 				if calls == 4 {
-					priorAnswer, priorFeedback = "first proposal", feedback
+					priorAnswer, priorFeedback = "first proposal", "full review:\n"+feedback
 					wantRefutations = []Refutation{{Round: 2, Text: revisedNotes}}
 					if request.reviewPhase != "verification" || request.round != 2 {
 						t.Fatalf("wrong verification metadata: %+v", request)
@@ -431,7 +431,7 @@ func TestRunAIFreshReviewFindingsUseRemainingRounds(t *testing.T) {
 				if request.round == 3 {
 					finding = missedFinding
 				}
-				if !strings.Contains(request.prompt, quotedContext(finding)) {
+				if !strings.Contains(request.prompt, quotedContext("full review:\n"+finding)) {
 					t.Fatalf("revision lacks latest finding: %+v", request)
 				}
 			}
@@ -479,7 +479,7 @@ func TestRunAIVerificationRejectionFeedsNextRevision(t *testing.T) {
 	runner := Runner{runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 		calls = append(calls, request)
 		if request.role == "main" {
-			if request.round == 3 && (!strings.Contains(request.prompt, quotedContext(verificationFinding)) || !strings.Contains(request.prompt, quotedContext("candidate 2"))) {
+			if request.round == 3 && (!strings.Contains(request.prompt, quotedContext("verification review:\n"+verificationFinding)) || !strings.Contains(request.prompt, quotedContext("candidate 2"))) {
 				t.Fatal("third revision lost the rejected correction or verification feedback")
 			}
 			return aicli.Result{Answer: proposalJSON(fmt.Sprintf("candidate %d", request.round), "private rationale")}, nil
@@ -494,7 +494,7 @@ func TestRunAIVerificationRejectionFeedsNextRevision(t *testing.T) {
 			return aicli.Result{Answer: fmt.Sprintf(`{"approved":false,"has_blockers":true,"feedback":%q}`, verificationFinding)}, nil
 		}
 		if request.reviewPhase == "verification" {
-			for _, want := range []string{quotedContext(verificationFinding), quotedContext("candidate 2")} {
+			for _, want := range []string{quotedContext("verification review:\n" + verificationFinding), quotedContext("candidate 2")} {
 				if !strings.Contains(request.criticPrompt("", ""), want) {
 					t.Fatalf("third verification lost prior correction context %q", want)
 				}
@@ -689,13 +689,12 @@ func TestCommentPublishesOnlyCriticAcceptedResult(t *testing.T) {
 			defer server.Close()
 			client := testGitHub(server, "test-token")
 			e := &Orchestrator{WorkRoot: t.TempDir(), GitHub: client,
-				Commands:                map[string]config.CommandMapping{"audit": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}},
-				Adversarial:             "claude",
-				CriticMaxRounds:         1,
-				CriticNonblockingRounds: &zero,
+				Commands:       map[string]config.CommandMapping{"audit": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}},
+				Adversarial:    "claude",
+				CriticStopping: config.CriticStopping{MaxRounds: 1, NonblockingAfterRound: &zero},
 			}
 			if !tt.wantError {
-				e.CriticMaxRounds = 2
+				e.CriticStopping.MaxRounds = 2
 			}
 			const privateRefutations = "PRIVATE_REFUTATION: the task excludes the requested change."
 			mainCalls, criticCalls := 0, 0

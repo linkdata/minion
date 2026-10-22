@@ -175,9 +175,14 @@ func TestJobValidate(t *testing.T) {
 		{"combined role skills over", func(j *Job) { j.Main.Skills, j.Main.AlwaysOnSkills = roleSkills[:1], roleSkills }, "invalid action model or skills"},
 		{"inactive critic budget", func(j *Job) { j.CriticMaxRounds = 1 }, "invalid critic round limit"},
 		{"inactive critic threshold", func(j *Job) { j.CriticNonblockingRounds = 1 }, "invalid critic round limit"},
+		{"inactive critic streak", func(j *Job) { j.CriticConsecutiveNoBlockerRounds = 1 }, "invalid critic round limit"},
 		{"zero critic budget", func(j *Job) { j.Critic = critic }, "invalid critic round limit"},
 		{"critic budget over maximum", func(j *Job) { j.Critic, j.CriticMaxRounds = critic, config.MaxCriticMaxRounds+1 }, "invalid critic round limit"},
 		{"negative critic threshold", func(j *Job) { j.Critic, j.CriticMaxRounds, j.CriticNonblockingRounds = critic, 2, -1 }, "invalid critic round limit"},
+		{"negative critic streak", func(j *Job) { j.Critic, j.CriticMaxRounds, j.CriticConsecutiveNoBlockerRounds = critic, 2, -1 }, "invalid critic round limit"},
+		{"critic streak exceeds maximum", func(j *Job) {
+			j.Critic, j.CriticMaxRounds, j.CriticConsecutiveNoBlockerRounds = critic, 2, config.MaxCriticConsecutiveNoBlockerRounds+1
+		}, "invalid critic round limit"},
 		{"critic threshold exceeds budget", func(j *Job) { j.Critic, j.CriticMaxRounds, j.CriticNonblockingRounds = critic, 2, 3 }, "invalid critic round limit"},
 		{"version", func(j *Job) { j.Version++ }, "unsupported action protocol version"},
 		{"source", func(j *Job) { j.Source.Head = "untrusted" }, "snapshot has invalid source commits"},
@@ -262,6 +267,10 @@ func TestJobValidate(t *testing.T) {
 		{"critic one round", func(j *Job) { j.Critic, j.CriticMaxRounds = critic, 1 }},
 		{"critic maximum rounds", func(j *Job) { j.Critic, j.CriticMaxRounds = critic, config.MaxCriticMaxRounds }},
 		{"critic threshold at budget", func(j *Job) { j.Critic, j.CriticMaxRounds, j.CriticNonblockingRounds = critic, 2, 2 }},
+		{"critic streak above budget", func(j *Job) { j.Critic, j.CriticMaxRounds, j.CriticConsecutiveNoBlockerRounds = critic, 2, 3 }},
+		{"critic maximum streak", func(j *Job) {
+			j.Critic, j.CriticMaxRounds, j.CriticConsecutiveNoBlockerRounds = critic, 2, config.MaxCriticConsecutiveNoBlockerRounds
+		}},
 		{"maximum settings", func(j *Job) {
 			j.Main.Model, j.Main.Effort = strings.Repeat("m", config.MaxModelSettingBytes), strings.Repeat("e", config.MaxModelSettingBytes)
 			j.RuntimeBudget = config.MaxJobTimeout
@@ -289,6 +298,7 @@ func TestResultJSONRoundTripPreservesValidatedPayload(t *testing.T) {
 			{Provider: job.Critic.Provider, Role: roleCritic, Round: 1, ReviewPhase: reviewFull, HasBlockers: true, Complete: true},
 			{Provider: job.Main.Provider, Role: roleMain, Round: 2, Complete: true},
 			{Provider: job.Critic.Provider, Role: roleCritic, Round: 2, ReviewPhase: reviewVerification, NoBlockers: true},
+			{Provider: job.Critic.Provider, Role: roleCritic, Round: 2, ReviewPhase: reviewFull, HasBlockers: true},
 			{Provider: job.Main.Provider, Role: roleMain, Round: 3},
 			{Provider: job.Critic.Provider, Role: roleCritic, Round: 3, ReviewPhase: reviewVerification, Approved: true, NoBlockers: true, Complete: true},
 			{Provider: job.Critic.Provider, Role: roleCritic, Round: 3, ReviewPhase: reviewFull, Approved: true, NoBlockers: true},
@@ -370,6 +380,10 @@ func TestResultCallUsageRequiresOrderedReviewPhases(t *testing.T) {
 		{"first full review", []CallUsage{main(1), critic(1, "full", approved)}, 0, true, true},
 		{"rejected full review", []CallUsage{main(1), critic(1, "full", blocking)}, 0, false, true},
 		{"revised full review", []CallUsage{main(1), critic(1, "full", blocking), main(2), critic(2, "verification", approved), critic(2, "full", approved)}, 0, true, true},
+		{"strict verification nits survive full approval", []CallUsage{main(1), critic(1, reviewFull, blocking), main(2), critic(2, reviewVerification, nits), critic(2, reviewFull, approved)}, 0, false, true},
+		{"strict verification nits can revise after approved full", []CallUsage{main(1), critic(1, reviewFull, blocking), main(2), critic(2, reviewVerification, nits), critic(2, reviewFull, approved), main(3), critic(3, reviewVerification, approved), critic(3, reviewFull, approved)}, 0, true, true},
+		{"verification nits remain before threshold", []CallUsage{main(1), critic(1, reviewFull, blocking), main(2), critic(2, reviewVerification, nits), critic(2, reviewFull, approved)}, 3, false, true},
+		{"threshold waives verification nits", []CallUsage{main(1), critic(1, reviewFull, blocking), main(2), critic(2, reviewVerification, nits), critic(2, reviewFull, approved)}, 2, true, true},
 		{"rejected verification then revision", []CallUsage{main(1), critic(1, "full", blocking), main(2), critic(2, "verification", blocking), main(3), critic(3, "verification", approved), critic(3, "full", approved)}, 0, true, true},
 		{"unapproved verification followed by full", []CallUsage{main(1), critic(1, "full", blocking), main(2), critic(2, "verification", blocking), critic(2, "full", approved)}, 0, false, false},
 		{"approved verification skips full", []CallUsage{main(1), critic(1, "full", blocking), main(2), critic(2, "verification", approved), main(3)}, 0, false, false},
@@ -669,6 +683,7 @@ func TestJobJSONRoundTrip(t *testing.T) {
 	job := testJob(command.Review)
 	job.Critic = &RoleSettings{Provider: "claude", Model: "critic-model", Effort: "high"}
 	job.CriticMaxRounds = config.DefaultCriticMaxRounds
+	job.CriticNonblockingRounds, job.CriticConsecutiveNoBlockerRounds = 4, 2
 	job.Source.Omitted = []string{"omitted-link"}
 	job.Source.ChangedPaths = []string{`back\slash`, "case", "CASE"}
 	data, err := json.Marshal(job)

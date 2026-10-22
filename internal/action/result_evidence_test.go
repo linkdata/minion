@@ -68,7 +68,7 @@ func TestInvalidResultKeepsOnlyValidatedEvidence(t *testing.T) {
 				}
 			} else {
 				record := readPrivateReview(t, root)
-				if record.Identity != job.Identity || record.SourceRef != job.Source.Head || record.CriticMaxRounds != job.CriticMaxRounds || record.CriticNonblockingRounds != job.CriticNonblockingRounds || !reflect.DeepEqual(record.Calls, result.Calls) || !reflect.DeepEqual(record.Refutations, result.Refutations) {
+				if record.Identity != job.Identity || record.SourceRef != job.Source.Head || record.CriticMaxRounds != job.CriticMaxRounds || record.CriticNonblockingRounds != job.CriticNonblockingRounds || record.CriticConsecutiveNoBlockerRounds != job.CriticConsecutiveNoBlockerRounds || !reflect.DeepEqual(record.Calls, result.Calls) || !reflect.DeepEqual(record.Refutations, result.Refutations) {
 					t.Fatalf("validated private review evidence changed: %+v", record)
 				}
 			}

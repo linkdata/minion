@@ -181,7 +181,7 @@ func TestReviewEvidenceInitialCheckpointIsNotTerminalBeforeModels(t *testing.T) 
 }
 
 func TestPrivateReviewRejectsChangedSavedCheckpoint(t *testing.T) {
-	for _, kind := range []string{"corrupt", "identity", "source", "policy", "max rounds", "calls", "symlink", "hardlink"} {
+	for _, kind := range []string{"corrupt", "identity", "source", "policy", "max rounds", "consecutive rounds", "calls", "symlink", "hardlink"} {
 		t.Run(kind, func(t *testing.T) {
 			job := withClaudeCritic(testJob(command.Comment))
 			result := privateReviewResult(job)
@@ -202,6 +202,8 @@ func TestPrivateReviewRejectsChangedSavedCheckpoint(t *testing.T) {
 				saved.CriticNonblockingRounds++
 			case "max rounds":
 				saved.CriticMaxRounds++
+			case "consecutive rounds":
+				saved.CriticConsecutiveNoBlockerRounds++
 			case "calls":
 				saved.Calls[1].HasBlockers, saved.Calls[1].NoBlockers = false, true
 			}

@@ -81,8 +81,8 @@ func TestJournalPolicyIsNotPublication(t *testing.T) {
 	var output bytes.Buffer
 	(&Orchestrator{Logger: log.New(&output, "", 0)}).logResult(job, result)
 	text := output.String()
-	if !strings.Contains(text, "review_phase=verification approved=false no_blockers=true has_blockers=false policy_met=true") ||
-		!strings.Contains(text, "review_phase=full approved=false no_blockers=false has_blockers=true policy_met=false") || strings.Contains(text, "accepted=") {
+	if !strings.Contains(text, `review_phase=verification approved=false no_blockers=true has_blockers=false advance_to_full=true no_blocker_rounds=0 policy_met=false stop_reason=""`) ||
+		!strings.Contains(text, `review_phase=full approved=false no_blockers=false has_blockers=true advance_to_full=false no_blocker_rounds=0 policy_met=false stop_reason=""`) || strings.Contains(text, "accepted=") {
 		t.Fatalf("journal blurred verdict policy and publication: %s", text)
 	}
 	if err := result.Validate(job); err == nil || !strings.Contains(err.Error(), "accepted final full review") {
@@ -102,8 +102,8 @@ func TestRunnerNonblockingThresholdRequiresFreshFullReview(t *testing.T) {
 	}{
 		{name: "first full at hard maximum can accept nits", threshold: 1, rounds: 1, wantCalls: 2, wantSuccess: true},
 		{name: "threshold follows required revision", threshold: 2, rounds: 5, wantCalls: 5, wantSuccess: true},
-		{name: "last allowed proposal can accept", threshold: 3, rounds: 3, wantCalls: 7, wantSuccess: true},
-		{name: "zero remains strict", rounds: 2, wantCalls: 4},
+		{name: "last allowed proposal can accept", threshold: 3, rounds: 3, wantCalls: 8, wantSuccess: true},
+		{name: "zero remains strict", rounds: 2, wantCalls: 5},
 		{name: "full blockers remain blocking", threshold: 1, rounds: 2, fullBlockers: true, wantCalls: 5},
 		{name: "verification blockers require revision", threshold: 1, rounds: 2, fullBlockers: true, verificationBlockers: true, wantCalls: 4},
 		{name: "missing blocker field fails closed", threshold: 1, rounds: 5, missingBlockers: true, wantCalls: 2},
@@ -150,41 +150,35 @@ func TestRunnerNonblockingThresholdRequiresFreshFullReview(t *testing.T) {
 	}
 }
 
-func TestPortableJobResolvesNonblockingThreshold(t *testing.T) {
+func TestPortableJobResolvesCriticStopping(t *testing.T) {
 	gitFixtureRemote(t)
 	checkout := cloneFixture(t, t.TempDir())
-	zero, one := 0, 1
+	zero, one, three := 0, 1, 3
 	for _, tt := range []struct {
-		name       string
-		maximum    int
-		configured *int
-		critic     bool
-		want       int
+		name                                string
+		stopping                            config.CriticStopping
+		critic                              bool
+		wantMax, wantAfter, wantConsecutive int
 	}{
-		{name: "default", critic: true, want: 4},
-		{name: "custom maximum", maximum: 3, critic: true, want: 2},
-		{name: "single round", maximum: 1, critic: true},
-		{name: "two round default", maximum: 2, critic: true, want: 1},
-		{name: "strict zero", configured: &zero, critic: true},
-		{name: "explicit first round", configured: &one, critic: true, want: 1},
-		{name: "disabled critic", configured: &one},
+		{name: "default", critic: true, wantMax: 5, wantAfter: 4, wantConsecutive: 2},
+		{name: "custom maximum", stopping: config.CriticStopping{MaxRounds: 3}, critic: true, wantMax: 3, wantAfter: 2, wantConsecutive: 2},
+		{name: "single round", stopping: config.CriticStopping{MaxRounds: 1}, critic: true, wantMax: 1, wantConsecutive: 2},
+		{name: "two round default", stopping: config.CriticStopping{MaxRounds: 2}, critic: true, wantMax: 2, wantAfter: 1, wantConsecutive: 2},
+		{name: "strict zero", stopping: config.CriticStopping{NonblockingAfterRound: &zero}, critic: true, wantMax: 5, wantConsecutive: 2},
+		{name: "explicit first round", stopping: config.CriticStopping{NonblockingAfterRound: &one}, critic: true, wantMax: 5, wantAfter: 1, wantConsecutive: 2},
+		{name: "explicit zero streak", stopping: config.CriticStopping{ConsecutiveNoBlockerRounds: &zero}, critic: true, wantMax: 5, wantAfter: 4},
+		{name: "streak above budget", stopping: config.CriticStopping{MaxRounds: 2, ConsecutiveNoBlockerRounds: &three}, critic: true, wantMax: 2, wantAfter: 1, wantConsecutive: 3},
+		{name: "disabled critic", stopping: config.CriticStopping{MaxRounds: 3, NonblockingAfterRound: &one, ConsecutiveNoBlockerRounds: &three}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			orchestrator := Orchestrator{CriticMaxRounds: tt.maximum, CriticNonblockingRounds: tt.configured, Commands: map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}}}
+			orchestrator := Orchestrator{CriticStopping: tt.stopping, Commands: map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}}}
 			if tt.critic {
 				orchestrator.Adversarial = "claude"
 			}
 			request := monitor.Job{ID: "job", SubjectType: "Issue", Number: 7, Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2}, Source: github.Item{Author: github.User{ID: 3, Login: "writer"}}, Command: command.Command{Name: "comment", Action: command.Comment}}
 			job, err := attemptFixture(&orchestrator).portableJob(testActionContext(t), &preparedAction{checkout: checkout, request: request}, "title", "body")
-			wantRounds := 0
-			if tt.critic {
-				wantRounds = tt.maximum
-				if wantRounds == 0 {
-					wantRounds = config.DefaultCriticMaxRounds
-				}
-			}
-			if err != nil || job.CriticNonblockingRounds != tt.want || job.CriticMaxRounds != wantRounds {
-				t.Fatalf("portable threshold=%d hard=%d err=%v; want %d", job.CriticNonblockingRounds, job.CriticMaxRounds, err, tt.want)
+			if err != nil || job.CriticMaxRounds != tt.wantMax || job.CriticNonblockingRounds != tt.wantAfter || job.CriticConsecutiveNoBlockerRounds != tt.wantConsecutive {
+				t.Fatalf("portable max=%d threshold=%d consecutive=%d err=%v; want %d/%d/%d", job.CriticMaxRounds, job.CriticNonblockingRounds, job.CriticConsecutiveNoBlockerRounds, err, tt.wantMax, tt.wantAfter, tt.wantConsecutive)
 			}
 		})
 	}

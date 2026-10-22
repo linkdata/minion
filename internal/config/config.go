@@ -43,6 +43,10 @@ const (
 	DefaultCriticMaxRounds = 5
 	// MaxCriticMaxRounds is the largest configurable proposal/revision round limit.
 	MaxCriticMaxRounds = 20
+	// DefaultCriticConsecutiveNoBlockerRounds is the default no-blocker review streak.
+	DefaultCriticConsecutiveNoBlockerRounds = 2
+	// MaxCriticConsecutiveNoBlockerRounds is the largest configurable no-blocker review streak.
+	MaxCriticConsecutiveNoBlockerRounds = 20
 	// MaxSkillsPerRole bounds the combined required and always-on skill list.
 	MaxSkillsPerRole = 64
 	// MaxSkillURLBytes is the portable action limit for one skill source.
@@ -132,20 +136,43 @@ func (c CodexConfig) SecurityAuditSkill() string {
 	return ""
 }
 
+// CriticStopping sets the proposal limit and conditions for accepting nonblocking findings.
+type CriticStopping struct {
+	// MaxRounds limits proposal/revision rounds; zero selects [DefaultCriticMaxRounds].
+	MaxRounds int `json:"max_rounds,omitempty"`
+	// NonblockingAfterRound defaults to MaxRounds-1; zero requires every finding cleared.
+	NonblockingAfterRound *int `json:"nonblocking_after_round,omitempty"`
+	// ConsecutiveNoBlockerRounds defaults to two; zero disables the streak requirement.
+	ConsecutiveNoBlockerRounds *int `json:"consecutive_no_blocker_rounds,omitempty"`
+}
+
+// Resolve returns effective stopping settings without replacing omitted values.
+func (s CriticStopping) Resolve() (maxRounds, nonblockingAfterRound, consecutiveNoBlockerRounds int) {
+	maxRounds = s.MaxRounds
+	if maxRounds == 0 {
+		maxRounds = DefaultCriticMaxRounds
+	}
+	nonblockingAfterRound = maxRounds - 1
+	if s.NonblockingAfterRound != nil {
+		nonblockingAfterRound = *s.NonblockingAfterRound
+	}
+	consecutiveNoBlockerRounds = DefaultCriticConsecutiveNoBlockerRounds
+	if s.ConsecutiveNoBlockerRounds != nil {
+		consecutiveNoBlockerRounds = *s.ConsecutiveNoBlockerRounds
+	}
+	return
+}
+
 // Config defines monitored repositories and the commands they accept.
 type Config struct {
 	BotLogin string `json:"bot_login"`
 	// Main selects codex or claude; an empty value selects codex.
 	Main string `json:"main,omitempty"`
 	// Adversarial optionally selects the other provider as a read-only critic.
-	Adversarial string `json:"adversarial,omitempty"`
-	// CriticMaxRounds limits proposal/revision rounds; zero selects [DefaultCriticMaxRounds].
-	CriticMaxRounds int `json:"critic_max_rounds,omitempty"`
-	// CriticNonblockingRounds permits remaining nonblocking findings from this proposal round onward.
-	// Nil selects CriticMaxRounds-1; zero requires every finding cleared until the hard limit.
-	CriticNonblockingRounds *int         `json:"critic_nonblocking_rounds,omitempty"`
-	Codex                   CodexConfig  `json:"codex,omitempty"`
-	Claude                  ClaudeConfig `json:"claude,omitempty"`
+	Adversarial    string         `json:"adversarial,omitempty"`
+	CriticStopping CriticStopping `json:"critic_stopping,omitempty"`
+	Codex          CodexConfig    `json:"codex,omitempty"`
+	Claude         ClaudeConfig   `json:"claude,omitempty"`
 	// Nil Commands selects defaults; an empty map disables all commands.
 	Commands map[string]CommandMapping `json:"commands"`
 	// Nil AlwaysOnSkills selects anti-prompt-injection and caveman; an empty list disables always-on skills.
@@ -166,14 +193,6 @@ type Config struct {
 	InvitationOwners      []string         `json:"invitation_owners,omitempty"`
 	InvitationOwnerIDs    map[string]int64 `json:"invitation_owner_ids,omitempty"`
 	Repositories          []Repository     `json:"repositories"`
-}
-
-// ResolveCriticNonblockingRounds preserves explicit zero and defaults an omitted threshold.
-func ResolveCriticNonblockingRounds(maxRounds int, configured *int) int {
-	if configured != nil {
-		return *configured
-	}
-	return maxRounds - 1
 }
 
 // Load reads and validates configuration.
@@ -243,14 +262,16 @@ func (c *Config) Validate(configDir string) error {
 	if c.Adversarial == c.Main {
 		return fmt.Errorf("adversarial must differ from main")
 	}
-	if c.CriticMaxRounds == 0 {
-		c.CriticMaxRounds = DefaultCriticMaxRounds
+	maxRounds, nonblockingAfterRound, consecutiveNoBlockerRounds := c.CriticStopping.Resolve()
+	c.CriticStopping.MaxRounds = maxRounds
+	if maxRounds < 1 || maxRounds > MaxCriticMaxRounds {
+		return fmt.Errorf("critic_stopping.max_rounds must be between 1 and %d", MaxCriticMaxRounds)
 	}
-	if c.CriticMaxRounds < 1 || c.CriticMaxRounds > MaxCriticMaxRounds {
-		return fmt.Errorf("critic_max_rounds must be between 1 and %d", MaxCriticMaxRounds)
+	if nonblockingAfterRound < 0 || nonblockingAfterRound > maxRounds {
+		return fmt.Errorf("critic_stopping.nonblocking_after_round must be between 0 and %d", maxRounds)
 	}
-	if rounds := ResolveCriticNonblockingRounds(c.CriticMaxRounds, c.CriticNonblockingRounds); rounds < 0 || rounds > c.CriticMaxRounds {
-		return fmt.Errorf("critic_nonblocking_rounds must be between 0 and %d", c.CriticMaxRounds)
+	if consecutiveNoBlockerRounds < 0 || consecutiveNoBlockerRounds > MaxCriticConsecutiveNoBlockerRounds {
+		return fmt.Errorf("critic_stopping.consecutive_no_blocker_rounds must be between 0 and %d", MaxCriticConsecutiveNoBlockerRounds)
 	}
 	if strings.ContainsAny(c.Codex.APIKey, " \t\r\n\x00") || strings.ContainsAny(c.Claude.APIKey, " \t\r\n\x00") {
 		return fmt.Errorf("provider api_key must not contain whitespace or NUL")

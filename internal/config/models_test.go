@@ -19,17 +19,17 @@ func TestLoadModelProviders(t *testing.T) {
 		{name: "claude only", fields: `,"main":"claude"`, main: "claude", rounds: 5},
 		{name: "claude critic", fields: `,"adversarial":"claude"`, main: "codex", adversarial: "claude", rounds: 5},
 		{name: "codex critic", fields: `,"main":" claude ","adversarial":" codex "`, main: "claude", adversarial: "codex", rounds: 5},
-		{name: "one round", fields: `,"critic_max_rounds":1`, main: "codex", rounds: 1},
-		{name: "three rounds", fields: `,"critic_max_rounds":3`, main: "codex", rounds: 3},
-		{name: "ten rounds", fields: `,"critic_max_rounds":10`, main: "codex", rounds: 10},
-		{name: "maximum rounds", fields: `,"critic_max_rounds":20`, main: "codex", rounds: 20},
-		{name: "zero rounds", fields: `,"critic_max_rounds":0`, main: "codex", rounds: 5},
+		{name: "one round", fields: `,"critic_stopping":{"max_rounds":1}`, main: "codex", rounds: 1},
+		{name: "three rounds", fields: `,"critic_stopping":{"max_rounds":3}`, main: "codex", rounds: 3},
+		{name: "ten rounds", fields: `,"critic_stopping":{"max_rounds":10}`, main: "codex", rounds: 10},
+		{name: "maximum rounds", fields: `,"critic_stopping":{"max_rounds":20}`, main: "codex", rounds: 20},
+		{name: "zero rounds", fields: `,"critic_stopping":{"max_rounds":0}`, main: "codex", rounds: 5},
 		{name: "unknown main", fields: `,"main":"other"`, wantError: "main must be"},
 		{name: "unknown critic", fields: `,"adversarial":"other"`, wantError: "adversarial must be"},
 		{name: "same default provider", fields: `,"adversarial":"codex"`, wantError: "adversarial must differ"},
 		{name: "same explicit provider", fields: `,"main":"claude","adversarial":"claude"`, wantError: "adversarial must differ"},
-		{name: "negative rounds", fields: `,"critic_max_rounds":-1`, wantError: "critic_max_rounds"},
-		{name: "too many rounds", fields: `,"critic_max_rounds":21`, wantError: "critic_max_rounds"},
+		{name: "negative rounds", fields: `,"critic_stopping":{"max_rounds":-1}`, wantError: "critic_stopping.max_rounds"},
+		{name: "too many rounds", fields: `,"critic_stopping":{"max_rounds":21}`, wantError: "critic_stopping.max_rounds"},
 		{name: "model and effort at limit", fields: fmt.Sprintf(`,"codex":{"model":%q,"reasoning_effort":%q},"claude":{"model":%q,"effort":%q}`, strings.Repeat("m", MaxModelSettingBytes), strings.Repeat("e", MaxModelSettingBytes), strings.Repeat("m", MaxModelSettingBytes), strings.Repeat("e", MaxModelSettingBytes)), main: "codex", rounds: 5},
 		{name: "codex model too long", fields: fmt.Sprintf(`,"codex":{"model":%q}`, strings.Repeat("m", MaxModelSettingBytes+1)), wantError: "codex model and reasoning_effort"},
 		{name: "codex effort too long", fields: fmt.Sprintf(`,"codex":{"reasoning_effort":%q}`, strings.Repeat("e", MaxModelSettingBytes+1)), wantError: "codex model and reasoning_effort"},
@@ -58,8 +58,8 @@ func TestLoadModelProviders(t *testing.T) {
 				}
 				return
 			}
-			if err != nil || cfg.Main != tt.main || cfg.Adversarial != tt.adversarial || cfg.CriticMaxRounds != tt.rounds {
-				t.Fatalf("Load() providers = %q, %q, %d, %v; want %q, %q, %d", cfg.Main, cfg.Adversarial, cfg.CriticMaxRounds, err, tt.main, tt.adversarial, tt.rounds)
+			if err != nil || cfg.Main != tt.main || cfg.Adversarial != tt.adversarial || cfg.CriticStopping.MaxRounds != tt.rounds {
+				t.Fatalf("Load() providers = %q, %q, %d, %v; want %q, %q, %d", cfg.Main, cfg.Adversarial, cfg.CriticStopping.MaxRounds, err, tt.main, tt.adversarial, tt.rounds)
 			}
 		})
 	}

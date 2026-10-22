@@ -596,10 +596,10 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 			liveMutated := false
 			mainCalls, criticCalls, strict := 0, 0, 0
 			orchestrator := &Orchestrator{WorkRoot: t.TempDir(), GitHub: client,
-				Commands:        map[string]config.CommandMapping{"fix": {Action: "fix", Skills: []string{skills.BuiltinAntiPromptInjection}}},
-				BotLogin:        "linkdataminion",
-				Store:           store,
-				CriticMaxRounds: 1, CriticNonblockingRounds: &strict,
+				Commands:       map[string]config.CommandMapping{"fix": {Action: "fix", Skills: []string{skills.BuiltinAntiPromptInjection}}},
+				BotLogin:       "linkdataminion",
+				Store:          store,
+				CriticStopping: config.CriticStopping{MaxRounds: 1, NonblockingAfterRound: &strict},
 				Runner: Runner{
 					runModel: func(_ context.Context, modelRequest modelRun) (aicli.Result, error) {
 						dir, prompt := modelRequest.dir, modelRequest.prompt

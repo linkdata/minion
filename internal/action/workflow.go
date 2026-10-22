@@ -1,7 +1,6 @@
 package action
 
 import (
-	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -14,7 +13,6 @@ import (
 	"time"
 
 	"github.com/linkdata/minion/internal/command"
-	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/gitwork"
 	"github.com/linkdata/minion/internal/monitor"
@@ -202,8 +200,7 @@ func (e *Orchestrator) portableJob(ctx context.Context, p *preparedAction, title
 	if e.Adversarial != "" {
 		critic := e.roleSettings(e.Adversarial, nil)
 		job.Critic = &critic
-		job.CriticMaxRounds = cmp.Or(e.CriticMaxRounds, config.DefaultCriticMaxRounds)
-		job.CriticNonblockingRounds = config.ResolveCriticNonblockingRounds(job.CriticMaxRounds, e.CriticNonblockingRounds)
+		job.CriticMaxRounds, job.CriticNonblockingRounds, job.CriticConsecutiveNoBlockerRounds = e.CriticStopping.Resolve()
 	}
 	if err := job.Validate(); err != nil {
 		return Job{}, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
@@ -276,8 +273,10 @@ func (e *Orchestrator) logResult(job Job, result Result) {
 		}
 	}
 	if result.matchesJob(job) && result.validateCalls(job, false) == nil {
+		policy := criticPolicy{job: job}
 		for _, call := range result.Calls {
-			e.logf("action call job=%s attempt=%s executor=%s provider=%s role=%s round=%d review_phase=%s approved=%t no_blockers=%t has_blockers=%t policy_met=%t model=%q effort=%q complete=%t", id.JobID, id.AttemptID, id.ExecutorID, call.Provider, call.Role, call.Round, call.ReviewPhase, call.Approved, call.NoBlockers, call.HasBlockers, call.Role == roleCritic && job.acceptsCritique(call.Round, call.Approved, call.NoBlockers), call.Model, call.Effort, call.Complete)
+			advance, reason := policy.observe(call)
+			e.logf("action call job=%s attempt=%s executor=%s provider=%s role=%s round=%d review_phase=%s approved=%t no_blockers=%t has_blockers=%t advance_to_full=%t no_blocker_rounds=%d policy_met=%t stop_reason=%q model=%q effort=%q complete=%t", id.JobID, id.AttemptID, id.ExecutorID, call.Provider, call.Role, call.Round, call.ReviewPhase, call.Approved, call.NoBlockers, call.HasBlockers, advance, policy.noBlockerRounds, reason != "", reason, call.Model, call.Effort, call.Complete)
 		}
 	}
 }

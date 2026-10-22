@@ -78,7 +78,7 @@ func TestPublishRetainsPrivateReviewBeforeGitHubWrites(t *testing.T) {
 					http.Error(w, "private review unavailable", http.StatusInternalServerError)
 					return
 				}
-				if len(record.Refutations) != 1 || len(record.Calls) == 0 || record.Calls[len(record.Calls)-1].Approved != test.approved || record.CriticNonblockingRounds != 1 || record.SourceRef != job.Source.Head {
+				if len(record.Refutations) != 1 || len(record.Calls) == 0 || record.Calls[len(record.Calls)-1].Approved != test.approved || record.CriticNonblockingRounds != 1 || record.CriticConsecutiveNoBlockerRounds != job.CriticConsecutiveNoBlockerRounds || record.SourceRef != job.Source.Head {
 					t.Errorf("private evidence/policy lost: %+v", record)
 				}
 				if r.Method == http.MethodGet && r.URL.Path == "/repos/o/r" {
@@ -245,7 +245,7 @@ func TestPerformCheckpointsPrivateReviewBeforeLaterCalls(t *testing.T) {
 			defer server.Close()
 			failure := errors.New("provider stopped")
 			calls := 0
-			e := attemptFixture(&Orchestrator{WorkRoot: root, GitHub: testGitHub(server, "fixture"), Main: "codex", Adversarial: "claude", CriticNonblockingRounds: new(int),
+			e := attemptFixture(&Orchestrator{WorkRoot: root, GitHub: testGitHub(server, "fixture"), Main: "codex", Adversarial: "claude", CriticStopping: config.CriticStopping{NonblockingAfterRound: new(int)},
 				Commands: map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}},
 				Runner: Runner{runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 					calls++
