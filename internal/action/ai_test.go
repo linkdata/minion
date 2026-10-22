@@ -139,9 +139,9 @@ func TestRunAIWithoutCriticSelectsMain(t *testing.T) {
 				return aicli.Result{Answer: provider + " result"}, nil
 			}}
 			job := Job{Action: command.Fix, Main: RoleSettings{Provider: provider}}
-			answer, err := runner.runAI(context.Background(), job, "checkout", "task", "reports", nil, &modelSessions{})
-			if err != nil || answer != provider+" result" || len(calls) != 1 || calls[0] != provider {
-				t.Fatalf("runAI() = %q, %v; calls = %v", answer, err, calls)
+			answer, stopReason, err := runner.runAI(context.Background(), job, "checkout", "task", "reports", nil, &modelSessions{})
+			if err != nil || answer != provider+" result" || stopReason != "" || len(calls) != 1 || calls[0] != provider {
+				t.Fatalf("runAI() = %q, %q, %v; calls = %v", answer, stopReason, err, calls)
 			}
 		})
 	}
@@ -171,9 +171,9 @@ func TestRunAIRedactsNoncanonicalEscapesAfterDecoding(t *testing.T) {
 				return aicli.Result{Answer: approvedCritiqueJSON}, nil
 			}
 			job := Job{Main: RoleSettings{Provider: provider}, Critic: &RoleSettings{Provider: criticProvider}, CriticMaxRounds: 1}
-			answer, err := runner.runAI(context.Background(), job, t.TempDir(), "task", "", nil, &modelSessions{})
-			if err != nil || answer != "public [redacted]" {
-				t.Fatalf("decoded main key reached accepted answer: %q,%v", answer, err)
+			answer, stopReason, err := runner.runAI(context.Background(), job, t.TempDir(), "task", "", nil, &modelSessions{})
+			if err != nil || answer != "public [redacted]" || stopReason != "approved" {
+				t.Fatalf("decoded main key reached accepted answer: %q,%q,%v", answer, stopReason, err)
 			}
 		})
 	}
@@ -234,9 +234,9 @@ func TestRunAIRedactsDecodedCriticFeedback(t *testing.T) {
 					}
 					return nil
 				}
-				answer, err := runner.runAI(context.Background(), job, t.TempDir(), "task", "", checkpoint, &modelSessions{})
-				if err != nil || answer != test.wantAnswer || mainCalls != 2 || criticCalls != 3 {
-					t.Fatalf("decoded critic feedback: answer=%q error=%v main=%d critic=%d", answer, err, mainCalls, criticCalls)
+				answer, stopReason, err := runner.runAI(context.Background(), job, t.TempDir(), "task", "", checkpoint, &modelSessions{})
+				if err != nil || answer != test.wantAnswer || stopReason != "approved" || mainCalls != 2 || criticCalls != 3 {
+					t.Fatalf("decoded critic feedback: answer=%q stop=%q error=%v main=%d critic=%d", answer, stopReason, err, mainCalls, criticCalls)
 				}
 			})
 		}
@@ -251,9 +251,9 @@ func TestRunAIRedactsBothConfiguredKeys(t *testing.T) {
 			runner.runModel = func(context.Context, modelRun) (aicli.Result, error) {
 				return aicli.Result{Answer: "Answer " + codexKey + " and " + claudeKey}, nil
 			}
-			answer, err := runner.runAI(context.Background(), Job{Main: RoleSettings{Provider: provider}}, t.TempDir(), "task", "", nil, &modelSessions{})
-			if err != nil || answer != "Answer [redacted] and [redacted]" {
-				t.Fatalf("configured keys in answer: %q, %v", answer, err)
+			answer, stopReason, err := runner.runAI(context.Background(), Job{Main: RoleSettings{Provider: provider}}, t.TempDir(), "task", "", nil, &modelSessions{})
+			if err != nil || answer != "Answer [redacted] and [redacted]" || stopReason != "" {
+				t.Fatalf("configured keys in answer: %q, %q, %v", answer, stopReason, err)
 			}
 		})
 	}
@@ -291,9 +291,9 @@ func TestRunAIRejectsInvalidProposalAfterRedaction(t *testing.T) {
 				return aicli.Result{Answer: proposalJSON(tt.answer, tt.refutations)}, nil
 			}}
 			job := Job{Action: command.Comment, Main: RoleSettings{Provider: "codex"}, Critic: &RoleSettings{Provider: "claude"}, CriticMaxRounds: 1}
-			answer, err := runner.runAI(context.Background(), job, t.TempDir(), "task", "", nil, &modelSessions{})
-			if answer != "" || !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), tt.wantError) || calls != 1 {
-				t.Fatalf("invalid redacted proposal: answer=%q calls=%d error=%v", answer, calls, err)
+			answer, stopReason, err := runner.runAI(context.Background(), job, t.TempDir(), "task", "", nil, &modelSessions{})
+			if answer != "" || stopReason != "" || !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), tt.wantError) || calls != 1 {
+				t.Fatalf("invalid redacted proposal: answer=%q stop=%q calls=%d error=%v", answer, stopReason, calls, err)
 			}
 		})
 	}
@@ -354,7 +354,7 @@ func TestRunAIRevisionPreservesWorkAndBoundaries(t *testing.T) {
 						if err != nil || string(content) != "first proposal" {
 							t.Fatalf("revision lost prior work: %q, %v", content, err)
 						}
-						if request.prompt != revisionPrompt(task, "first proposal", feedback) {
+						if request.prompt != revisionPrompt(task, "first proposal", "full review:\n"+feedback) {
 							t.Fatalf("revision changed task or exposed unquoted feedback: %q", request.prompt)
 						}
 					default:
@@ -378,7 +378,7 @@ func TestRunAIRevisionPreservesWorkAndBoundaries(t *testing.T) {
 				priorAnswer, priorFeedback := "", ""
 				var wantRefutations []Refutation
 				if calls == 4 {
-					priorAnswer, priorFeedback = "first proposal", feedback
+					priorAnswer, priorFeedback = "first proposal", "full review:\n"+feedback
 					wantRefutations = []Refutation{{Round: 2, Text: revisedNotes}}
 					if request.reviewPhase != "verification" || request.round != 2 {
 						t.Fatalf("wrong verification metadata: %+v", request)
@@ -406,9 +406,9 @@ func TestRunAIRevisionPreservesWorkAndBoundaries(t *testing.T) {
 				}
 				return aicli.Result{Answer: approvedCritiqueJSON}, nil
 			}
-			answer, err := e.runAI(ctx, job, dir, task, outputDir, nil, &modelSessions{})
-			if err != nil || answer != "revised proposal" || calls != 5 {
-				t.Fatalf("runAI() = %q, %v; calls = %d", answer, err, calls)
+			answer, stopReason, err := e.runAI(ctx, job, dir, task, outputDir, nil, &modelSessions{})
+			if err != nil || answer != "revised proposal" || stopReason != "approved" || calls != 5 {
+				t.Fatalf("runAI() = %q, %q, %v; calls = %d", answer, stopReason, err, calls)
 			}
 		})
 	}
@@ -431,7 +431,7 @@ func TestRunAIFreshReviewFindingsUseRemainingRounds(t *testing.T) {
 				if request.round == 3 {
 					finding = missedFinding
 				}
-				if !strings.Contains(request.prompt, quotedContext(finding)) {
+				if !strings.Contains(request.prompt, quotedContext("full review:\n"+finding)) {
 					t.Fatalf("revision lacks latest finding: %+v", request)
 				}
 			}
@@ -460,9 +460,9 @@ func TestRunAIFreshReviewFindingsUseRemainingRounds(t *testing.T) {
 		}
 		return aicli.Result{Answer: approvedCritiqueJSON}, nil
 	}
-	answer, err := e.runAI(context.Background(), job, t.TempDir(), task, "", nil, &modelSessions{})
-	if err != nil || answer != "candidate 3" || len(calls) != 8 {
-		t.Fatalf("runAI() = %q, %v; calls=%+v", answer, err, calls)
+	answer, stopReason, err := e.runAI(context.Background(), job, t.TempDir(), task, "", nil, &modelSessions{})
+	if err != nil || answer != "candidate 3" || stopReason != "approved" || len(calls) != 8 {
+		t.Fatalf("runAI() = %q, %q, %v; calls=%+v", answer, stopReason, err, calls)
 	}
 	want := []string{"main/1/", "critic/1/full", "main/2/", "critic/2/verification", "critic/2/full", "main/3/", "critic/3/verification", "critic/3/full"}
 	for i, call := range calls {
@@ -479,7 +479,7 @@ func TestRunAIVerificationRejectionFeedsNextRevision(t *testing.T) {
 	runner := Runner{runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 		calls = append(calls, request)
 		if request.role == "main" {
-			if request.round == 3 && (!strings.Contains(request.prompt, quotedContext(verificationFinding)) || !strings.Contains(request.prompt, quotedContext("candidate 2"))) {
+			if request.round == 3 && (!strings.Contains(request.prompt, quotedContext("verification review:\n"+verificationFinding)) || !strings.Contains(request.prompt, quotedContext("candidate 2"))) {
 				t.Fatal("third revision lost the rejected correction or verification feedback")
 			}
 			return aicli.Result{Answer: proposalJSON(fmt.Sprintf("candidate %d", request.round), "private rationale")}, nil
@@ -494,7 +494,7 @@ func TestRunAIVerificationRejectionFeedsNextRevision(t *testing.T) {
 			return aicli.Result{Answer: fmt.Sprintf(`{"approved":false,"has_blockers":true,"feedback":%q}`, verificationFinding)}, nil
 		}
 		if request.reviewPhase == "verification" {
-			for _, want := range []string{quotedContext(verificationFinding), quotedContext("candidate 2")} {
+			for _, want := range []string{quotedContext("verification review:\n" + verificationFinding), quotedContext("candidate 2")} {
 				if !strings.Contains(request.criticPrompt("", ""), want) {
 					t.Fatalf("third verification lost prior correction context %q", want)
 				}
@@ -503,10 +503,10 @@ func TestRunAIVerificationRejectionFeedsNextRevision(t *testing.T) {
 		return aicli.Result{Answer: approvedCritiqueJSON}, nil
 	}}
 	job := Job{Main: RoleSettings{Provider: "codex"}, Critic: &RoleSettings{Provider: "claude"}, CriticMaxRounds: 3}
-	answer, err := runner.runAI(context.Background(), job, t.TempDir(), "selected task", "", nil, &modelSessions{})
+	answer, stopReason, err := runner.runAI(context.Background(), job, t.TempDir(), "selected task", "", nil, &modelSessions{})
 	want := []string{"main/1/", "critic/1/full", "main/2/", "critic/2/verification", "main/3/", "critic/3/verification", "critic/3/full"}
-	if err != nil || answer != "candidate 3" || len(calls) != len(want) {
-		t.Fatalf("verification rejection: answer=%q calls=%+v error=%v", answer, calls, err)
+	if err != nil || answer != "candidate 3" || stopReason != "approved" || len(calls) != len(want) {
+		t.Fatalf("verification rejection: answer=%q stop=%q calls=%+v error=%v", answer, stopReason, calls, err)
 	}
 	for i, request := range calls {
 		if got := fmt.Sprintf("%s/%d/%s", request.role, request.round, request.reviewPhase); got != want[i] {
@@ -561,9 +561,9 @@ func TestRunAIFailsWithoutReturningProposal(t *testing.T) {
 				}
 				return aicli.Result{Answer: proposalJSON(answer, "Private rationale")}, nil
 			}
-			answer, err := e.runAI(ctx, job, t.TempDir(), "task", "", nil, &modelSessions{})
-			if answer != "" || !errors.Is(err, tt.wantError) || calls != tt.wantCalls {
-				t.Fatalf("runAI() = %q, %v; calls = %d; want no answer, %v, %d calls", answer, err, calls, tt.wantError, tt.wantCalls)
+			answer, stopReason, err := e.runAI(ctx, job, t.TempDir(), "task", "", nil, &modelSessions{})
+			if answer != "" || stopReason != "" || !errors.Is(err, tt.wantError) || calls != tt.wantCalls {
+				t.Fatalf("runAI() = %q, %q, %v; calls = %d; want no answer, %v, %d calls", answer, stopReason, err, calls, tt.wantError, tt.wantCalls)
 			}
 		})
 	}
@@ -624,11 +624,22 @@ func TestParseProposal(t *testing.T) {
 func TestParseCritique(t *testing.T) {
 	for _, tt := range []struct {
 		name, input, feedback        string
+		secrets                      []string
+		errText                      string
 		approved, hasBlockers, valid bool
 	}{
 		{name: "approval", input: approvedCritiqueJSON, approved: true, valid: true},
 		{name: "rejection", input: `{"feedback":" Repair the defect. ","approved":false,"has_blockers":true}`, feedback: "Repair the defect.", hasBlockers: true, valid: true},
 		{name: "nonblocking findings", input: `{"approved":false,"has_blockers":false,"feedback":"Nit: simplify the loop."}`, feedback: "Nit: simplify the loop.", valid: true},
+		{name: "mixed NUL feedback", input: `{"approved":false,"has_blockers":true,"feedback":"Repair\u0000 the defect."}`, feedback: "Repair the defect.", hasBlockers: true, valid: true},
+		{name: "NUL-only rejection", input: `{"approved":false,"has_blockers":true,"feedback":"\u0000"}`, errText: "rejection feedback is blank after redaction"},
+		{name: "whitespace and NUL rejection", input: `{"approved":false,"has_blockers":false,"feedback":" \t\u0000\n "}`, errText: "rejection feedback is blank after redaction"},
+		{name: "feedback redaction fails closed", input: `{"approved":false,"has_blockers":true,"feedback":"private # and redacted"}`, secrets: []string{"#", "redacted"}, errText: "rejection feedback is blank after redaction"},
+		{name: "mixed NUL split keys", input: `{"approved":false,"has_blockers":true,"feedback":"Repair main-\u0000secret and critic-\u0000secret."}`, secrets: []string{"main-secret", "critic-secret"}, feedback: "Repair [redacted] and [redacted].", hasBlockers: true, valid: true},
+		{name: "redacted feedback stays nonblank", input: `{"approved":false,"has_blockers":false,"feedback":"main-secret"}`, secrets: []string{"main-secret"}, feedback: "[redacted]", valid: true},
+		{name: "approval unaffected by redaction keys", input: approvedCritiqueJSON, secrets: []string{"#", "redacted"}, approved: true, valid: true},
+		{name: "approval with NUL feedback remains inconsistent", input: `{"approved":true,"has_blockers":false,"feedback":"\u0000"}`, errText: "expected approval without blockers or feedback"},
+		{name: "approval with emptied key feedback remains inconsistent", input: `{"approved":true,"has_blockers":false,"feedback":"private # and redacted"}`, secrets: []string{"#", "redacted"}, errText: "expected approval without blockers or feedback"},
 		{name: "missing approval", input: `{"has_blockers":false,"feedback":""}`},
 		{name: "missing blocker classification", input: `{"approved":true,"feedback":""}`},
 		{name: "string blocker classification", input: `{"approved":false,"has_blockers":"false","feedback":"Nit."}`},
@@ -653,8 +664,12 @@ func TestParseCritique(t *testing.T) {
 		{name: "oversized verdict", input: strings.Repeat(" ", maxCriticOutputBytes+1)},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			approved, hasBlockers, feedback, err := parseCritique(tt.input)
-			if (err == nil) != tt.valid || (tt.valid && (approved != tt.approved || hasBlockers != tt.hasBlockers || feedback != tt.feedback)) {
+			approved, hasBlockers, feedback, err := parseCritique(tt.input, tt.secrets...)
+			if tt.valid {
+				if err != nil || approved != tt.approved || hasBlockers != tt.hasBlockers || feedback != tt.feedback {
+					t.Fatalf("parseCritique() = %t, %t, %q, %v", approved, hasBlockers, feedback, err)
+				}
+			} else if err == nil || approved || hasBlockers || feedback != "" || (tt.errText != "" && !strings.Contains(err.Error(), tt.errText)) {
 				t.Fatalf("parseCritique() = %t, %t, %q, %v", approved, hasBlockers, feedback, err)
 			}
 		})
@@ -689,13 +704,12 @@ func TestCommentPublishesOnlyCriticAcceptedResult(t *testing.T) {
 			defer server.Close()
 			client := testGitHub(server, "test-token")
 			e := &Orchestrator{WorkRoot: t.TempDir(), GitHub: client,
-				Commands:                map[string]config.CommandMapping{"audit": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}},
-				Adversarial:             "claude",
-				CriticMaxRounds:         1,
-				CriticNonblockingRounds: &zero,
+				Commands:       map[string]config.CommandMapping{"audit": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}},
+				Adversarial:    "claude",
+				CriticStopping: config.CriticStopping{MaxRounds: 1, NonblockingAfterRound: &zero},
 			}
 			if !tt.wantError {
-				e.CriticMaxRounds = 2
+				e.CriticStopping.MaxRounds = 2
 			}
 			const privateRefutations = "PRIVATE_REFUTATION: the task excludes the requested change."
 			mainCalls, criticCalls := 0, 0

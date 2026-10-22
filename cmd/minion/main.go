@@ -194,25 +194,24 @@ func run() int {
 
 func newOrchestrator(cfg config.Config, client *github.Client, store *state.Store, logger *log.Logger, checkWorkRoot func() error) *action.Orchestrator {
 	return &action.Orchestrator{
-		WorkRoot:                cfg.WorkRoot,
-		Logger:                  logger,
-		GitHub:                  client,
-		BotLogin:                cfg.BotLogin,
-		Store:                   store,
-		Usage:                   &usage.Store{Dir: filepath.Join(filepath.Dir(cfg.StatePath), "usage")},
-		CheckWorkRoot:           checkWorkRoot,
-		Timeout:                 time.Duration(cfg.JobTimeoutMinutes) * time.Minute,
-		MaxGitHubContextBytes:   cfg.MaxGitHubContextBytes,
-		Commands:                cfg.Commands,
-		Main:                    cfg.Main,
-		Adversarial:             cfg.Adversarial,
-		CriticMaxRounds:         cfg.CriticMaxRounds,
-		CriticNonblockingRounds: cfg.CriticNonblockingRounds,
-		AlwaysOnSkills:          cfg.AlwaysOnSkills,
-		CodexModel:              cfg.Codex.Model,
-		CodexEffort:             cfg.Codex.ReasoningEffort,
-		ClaudeModel:             cfg.Claude.Model,
-		ClaudeEffort:            cfg.Claude.Effort,
+		WorkRoot:              cfg.WorkRoot,
+		Logger:                logger,
+		GitHub:                client,
+		BotLogin:              cfg.BotLogin,
+		Store:                 store,
+		Usage:                 &usage.Store{Dir: filepath.Join(filepath.Dir(cfg.StatePath), "usage")},
+		CheckWorkRoot:         checkWorkRoot,
+		Timeout:               time.Duration(cfg.JobTimeoutMinutes) * time.Minute,
+		MaxGitHubContextBytes: cfg.MaxGitHubContextBytes,
+		Commands:              cfg.Commands,
+		Main:                  cfg.Main,
+		Adversarial:           cfg.Adversarial,
+		CriticStopping:        cfg.CriticStopping,
+		AlwaysOnSkills:        cfg.AlwaysOnSkills,
+		CodexModel:            cfg.Codex.Model,
+		CodexEffort:           cfg.Codex.ReasoningEffort,
+		ClaudeModel:           cfg.Claude.Model,
+		ClaudeEffort:          cfg.Claude.Effort,
 		// Jobs override model, effort and skills; the runner keeps host credentials and sandbox grants.
 		Runner: action.Runner{
 			Codex:  config.CodexConfig{APIKey: cfg.Codex.APIKey},
@@ -409,7 +408,8 @@ func checkModels(ctx context.Context, cfg *config.Config, logger *log.Logger) (e
 	}
 	logger.Printf("AI roles: main=%s adversarial=%s job_timeout_minutes=%d command_max_tasks=%d command_max_memory_mib=%d", cfg.Main, cfg.Adversarial, cfg.JobTimeoutMinutes, cfg.CommandMaxTasks, cfg.CommandMaxMemoryMiB)
 	if cfg.Adversarial != "" {
-		logger.Printf("critic policy: critic_max_rounds=%d critic_nonblocking_rounds=%d", cfg.CriticMaxRounds, config.ResolveCriticNonblockingRounds(cfg.CriticMaxRounds, cfg.CriticNonblockingRounds))
+		maxRounds, nonblockingAfterRound, consecutiveNoBlockerRounds := cfg.CriticStopping.Resolve()
+		logger.Printf("critic policy: max_rounds=%d nonblocking_after_round=%d consecutive_no_blocker_rounds=%d", maxRounds, nonblockingAfterRound, consecutiveNoBlockerRounds)
 	}
 	return
 }

@@ -20,7 +20,8 @@ func TestCheckedInConfigIsSample(t *testing.T) {
 		len(cfg.Repositories) != 1 || cfg.Repositories[0].Name != "example-owner/example-repo" ||
 		cfg.Codex.Model != "" || cfg.Codex.ReasoningEffort != "" ||
 		cfg.Claude.Model != "" || cfg.Claude.Effort != "" ||
-		cfg.Main != "codex" || cfg.Adversarial != "" || cfg.CriticMaxRounds != 5 || cfg.CriticNonblockingRounds != nil || cfg.JobTimeoutMinutes != 240 ||
+		cfg.Main != "codex" || cfg.Adversarial != "" || cfg.CriticStopping.MaxRounds != 5 ||
+		cfg.CriticStopping.NonblockingAfterRound != nil || cfg.CriticStopping.ConsecutiveNoBlockerRounds != nil || cfg.JobTimeoutMinutes != 240 ||
 		cfg.CommandMaxTasks != DefaultCommandMaxTasks || cfg.CommandMaxMemoryMiB != DefaultCommandMaxMemoryMiB ||
 		len(cfg.Commands) != 4 || len(cfg.AlwaysOnSkills) != 2 ||
 		cfg.MaxGitHubContextBytes != DefaultMaxGitHubContextBytes ||
@@ -529,57 +530,95 @@ func TestCommandNameMatchesPortableLimit(t *testing.T) {
 	}
 }
 
-func TestCriticNonblockingRoundsDefaultsAndExplicitZero(t *testing.T) {
+func TestCriticStoppingDefaultsAndExplicitZero(t *testing.T) {
 	for _, tt := range []struct {
-		name, fields string
-		want         int
-		explicit     bool
-		invalid      bool
+		name, fields                      string
+		want                              [3]int
+		explicitThreshold, explicitStreak bool
 	}{
-		{name: "default", want: 4},
-		{name: "critic default", fields: `,"adversarial":"claude"`, want: 4},
-		{name: "one round defaults strict", fields: `,"critic_max_rounds":1`, want: 0},
-		{name: "ten rounds", fields: `,"critic_max_rounds":10`, want: 9},
-		{name: "hard maximum", fields: `,"critic_max_rounds":20`, want: 19},
-		{name: "zero disables", fields: `,"critic_nonblocking_rounds":0`, explicit: true},
-		{name: "first round", fields: `,"critic_nonblocking_rounds":1`, want: 1, explicit: true},
-		{name: "last round", fields: `,"critic_max_rounds":3,"critic_nonblocking_rounds":3`, want: 3, explicit: true},
-		{name: "null is omitted", fields: `,"critic_nonblocking_rounds":null`, want: 4},
-		{name: "negative", fields: `,"critic_nonblocking_rounds":-1`, invalid: true},
-		{name: "over hard limit", fields: `,"critic_max_rounds":3,"critic_nonblocking_rounds":4`, invalid: true},
-		{name: "fraction", fields: `,"critic_nonblocking_rounds":1.5`, invalid: true},
-		{name: "string", fields: `,"critic_nonblocking_rounds":"1"`, invalid: true},
+		{name: "omitted", want: [3]int{5, 4, 2}},
+		{name: "critic default", fields: `,"adversarial":"claude"`, want: [3]int{5, 4, 2}},
+		{name: "empty section", fields: `,"critic_stopping":{}`, want: [3]int{5, 4, 2}},
+		{name: "null section", fields: `,"critic_stopping":null`, want: [3]int{5, 4, 2}},
+		{name: "zero maximum", fields: `,"critic_stopping":{"max_rounds":0}`, want: [3]int{5, 4, 2}},
+		{name: "one round defaults strict", fields: `,"critic_stopping":{"max_rounds":1}`, want: [3]int{1, 0, 2}},
+		{name: "ten rounds", fields: `,"critic_stopping":{"max_rounds":10}`, want: [3]int{10, 9, 2}},
+		{name: "hard maximum", fields: `,"critic_stopping":{"max_rounds":20}`, want: [3]int{20, 19, 2}},
+		{name: "zero threshold disables", fields: `,"critic_stopping":{"nonblocking_after_round":0}`, want: [3]int{5, 0, 2}, explicitThreshold: true},
+		{name: "first round", fields: `,"critic_stopping":{"nonblocking_after_round":1}`, want: [3]int{5, 1, 2}, explicitThreshold: true},
+		{name: "last round", fields: `,"critic_stopping":{"max_rounds":3,"nonblocking_after_round":3}`, want: [3]int{3, 3, 2}, explicitThreshold: true},
+		{name: "null settings are omitted", fields: `,"critic_stopping":{"nonblocking_after_round":null,"consecutive_no_blocker_rounds":null}`, want: [3]int{5, 4, 2}},
+		{name: "zero streak disables", fields: `,"critic_stopping":{"nonblocking_after_round":1,"consecutive_no_blocker_rounds":0}`, want: [3]int{5, 1, 0}, explicitThreshold: true, explicitStreak: true},
+		{name: "both disabled", fields: `,"critic_stopping":{"nonblocking_after_round":0,"consecutive_no_blocker_rounds":0}`, want: [3]int{5, 0, 0}, explicitThreshold: true, explicitStreak: true},
+		{name: "one no-blocker round", fields: `,"critic_stopping":{"consecutive_no_blocker_rounds":1}`, want: [3]int{5, 4, 1}, explicitStreak: true},
+		{name: "streak above maximum", fields: `,"critic_stopping":{"max_rounds":1,"consecutive_no_blocker_rounds":20}`, want: [3]int{1, 0, 20}, explicitStreak: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := decode(strings.NewReader(`{"bot_login":"bot","repositories":[{"name":"owner/repo","id":1,"owner_id":2,"actions":["review"]}]` + tt.fields + `}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			maxRounds, threshold, streak := cfg.CriticStopping.Resolve()
+			if got := [3]int{maxRounds, threshold, streak}; got != tt.want {
+				t.Fatalf("Resolve() = %v; want %v", got, tt.want)
+			}
+			if err := cfg.Validate(t.TempDir()); err != nil || cfg.CriticStopping.MaxRounds != tt.want[0] {
+				t.Fatalf("Validate() maximum=%d err=%v; want %d", cfg.CriticStopping.MaxRounds, err, tt.want[0])
+			}
+			if (cfg.CriticStopping.NonblockingAfterRound != nil) != tt.explicitThreshold || (cfg.CriticStopping.ConsecutiveNoBlockerRounds != nil) != tt.explicitStreak {
+				t.Fatalf("Validate() replaced omitted settings: %+v", cfg.CriticStopping)
+			}
+			data, err := json.Marshal(cfg)
+			if err != nil || strings.Contains(string(data), `"nonblocking_after_round":`) != tt.explicitThreshold || strings.Contains(string(data), `"consecutive_no_blocker_rounds":`) != tt.explicitStreak {
+				t.Fatalf("explicit zero/omission lost: %s, %v", data, err)
+			}
+			decoded, err := decode(strings.NewReader(string(data)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			maxRounds, threshold, streak = decoded.CriticStopping.Resolve()
+			if got := [3]int{maxRounds, threshold, streak}; got != tt.want {
+				t.Fatalf("JSON roundtrip = %v; want %v", got, tt.want)
+			}
+			if !tt.explicitThreshold {
+				decoded.CriticStopping.MaxRounds = 2
+				_, threshold, _ = decoded.CriticStopping.Resolve()
+				if err := decoded.Validate(t.TempDir()); err != nil || threshold != 1 {
+					t.Fatalf("omitted threshold stopped following maximum: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestCriticStoppingRejectsInvalidSettingsAndOldKeys(t *testing.T) {
+	for _, tt := range []struct {
+		name, fields, wantError string
+	}{
+		{"negative maximum", `,"critic_stopping":{"max_rounds":-1}`, "critic_stopping.max_rounds"},
+		{"excess maximum", `,"critic_stopping":{"max_rounds":21}`, "critic_stopping.max_rounds"},
+		{"negative threshold", `,"critic_stopping":{"nonblocking_after_round":-1}`, "critic_stopping.nonblocking_after_round"},
+		{"threshold above maximum", `,"critic_stopping":{"max_rounds":3,"nonblocking_after_round":4}`, "critic_stopping.nonblocking_after_round"},
+		{"negative streak", `,"critic_stopping":{"consecutive_no_blocker_rounds":-1}`, "critic_stopping.consecutive_no_blocker_rounds"},
+		{"excess streak", `,"critic_stopping":{"consecutive_no_blocker_rounds":21}`, "critic_stopping.consecutive_no_blocker_rounds"},
+		{"fraction maximum", `,"critic_stopping":{"max_rounds":1.5}`, "max_rounds"},
+		{"fraction threshold", `,"critic_stopping":{"nonblocking_after_round":1.5}`, "nonblocking_after_round"},
+		{"fraction streak", `,"critic_stopping":{"consecutive_no_blocker_rounds":1.5}`, "consecutive_no_blocker_rounds"},
+		{"string threshold", `,"critic_stopping":{"nonblocking_after_round":"1"}`, "nonblocking_after_round"},
+		{"string streak", `,"critic_stopping":{"consecutive_no_blocker_rounds":"2"}`, "consecutive_no_blocker_rounds"},
+		{"unknown nested key", `,"critic_stopping":{"max_round":2}`, `unknown field "max_round"`},
+		{"old maximum", `,"critic_max_rounds":5`, `unknown field "critic_max_rounds"`},
+		{"old threshold", `,"critic_nonblocking_rounds":0`, `unknown field "critic_nonblocking_rounds"`},
+		{"old maximum with new section", `,"critic_max_rounds":5,"critic_stopping":{"max_rounds":5}`, `unknown field "critic_max_rounds"`},
+		{"old threshold with new section", `,"critic_stopping":{"nonblocking_after_round":0},"critic_nonblocking_rounds":0`, `unknown field "critic_nonblocking_rounds"`},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg, err := decode(strings.NewReader(`{"bot_login":"bot","repositories":[{"name":"owner/repo","id":1,"owner_id":2,"actions":["review"]}]` + tt.fields + `}`))
 			if err == nil {
 				err = cfg.Validate(t.TempDir())
 			}
-			if tt.invalid {
-				if err == nil || !strings.Contains(err.Error(), "critic_nonblocking_rounds") {
-					t.Fatalf("invalid nonblocking threshold error: %v", err)
-				}
-				return
-			}
-			if err != nil || ResolveCriticNonblockingRounds(cfg.CriticMaxRounds, cfg.CriticNonblockingRounds) != tt.want {
-				t.Fatalf("threshold=%v maximum=%d err=%v; want %d", cfg.CriticNonblockingRounds, cfg.CriticMaxRounds, err, tt.want)
-			}
-			data, err := json.Marshal(cfg)
-			if err != nil || strings.Contains(string(data), `"critic_nonblocking_rounds":`) != tt.explicit {
-				t.Fatalf("explicit zero/omission lost: %s, %v", data, err)
-			}
-			var decoded Config
-			if err := json.Unmarshal(data, &decoded); err != nil {
-				t.Fatal(err)
-			}
-			if ResolveCriticNonblockingRounds(decoded.CriticMaxRounds, decoded.CriticNonblockingRounds) != tt.want {
-				t.Fatal("JSON roundtrip changed threshold")
-			}
-			if !tt.explicit {
-				cfg.CriticMaxRounds = 2
-				if err := cfg.Validate(t.TempDir()); err != nil || ResolveCriticNonblockingRounds(cfg.CriticMaxRounds, cfg.CriticNonblockingRounds) != 1 {
-					t.Fatalf("omitted threshold stopped following maximum: %v", err)
-				}
+			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("invalid critic stopping error=%v; want %q", err, tt.wantError)
 			}
 		})
 	}

@@ -35,13 +35,10 @@ var modelLineBreaks = strings.NewReplacer(
 type Orchestrator struct {
 	attemptID string
 
-	Runner            Runner
-	WorkRoot          string
-	Main, Adversarial string
-	// CriticMaxRounds selects config.DefaultCriticMaxRounds when zero.
-	CriticMaxRounds int
-	// CriticNonblockingRounds: nil selects the resolved round maximum minus one; zero keeps strict approval.
-	CriticNonblockingRounds   *int
+	Runner                    Runner
+	WorkRoot                  string
+	Main, Adversarial         string
+	CriticStopping            config.CriticStopping
 	AlwaysOnSkills            []string
 	CodexModel, CodexEffort   string
 	ClaudeModel, ClaudeEffort string

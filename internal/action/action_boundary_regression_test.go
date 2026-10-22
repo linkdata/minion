@@ -167,21 +167,21 @@ func TestExecuteCriticAdmissionUsesControlledWorkRoot(t *testing.T) {
 func TestReviewEvidenceInitialCheckpointIsNotTerminalBeforeModels(t *testing.T) {
 	job := withClaudeCritic(testJob(command.Comment))
 	checkpoints := 0
-	runner := Runner{WorkRoot: t.TempDir(), recordReview: func(receipts []CallUsage, refs []Refutation) error {
+	runner := Runner{WorkRoot: t.TempDir(), recordReview: func(receipts []CallUsage, refs []Refutation, stopReason string) error {
 		checkpoints++
-		if len(receipts) != 0 || len(refs) != 0 {
-			t.Fatalf("initial checkpoint carried model evidence: calls=%+v refutations=%+v", receipts, refs)
+		if len(receipts) != 0 || len(refs) != 0 || stopReason != "" {
+			t.Fatalf("initial checkpoint carried model evidence: calls=%+v refutations=%+v stop=%q", receipts, refs, stopReason)
 		}
 		return &os.PathError{Op: "write", Path: "private-review", Err: syscall.ENOSPC}
 	}, runModel: forbidModel(t)}
 	result, err := runner.Run(context.Background(), job)
-	if !errors.Is(err, syscall.ENOSPC) || errors.Is(err, monitor.ErrTerminalJob) || checkpoints != 1 || len(result.Calls) != 0 || len(result.Refutations) != 0 || result.Answer != "" {
+	if !errors.Is(err, syscall.ENOSPC) || errors.Is(err, monitor.ErrTerminalJob) || checkpoints != 1 || len(result.Calls) != 0 || len(result.Refutations) != 0 || result.Answer != "" || result.CriticStopReason != "" {
 		t.Fatalf("initial checkpoint policy: checkpoints=%d result=%+v error=%v", checkpoints, result, err)
 	}
 }
 
 func TestPrivateReviewRejectsChangedSavedCheckpoint(t *testing.T) {
-	for _, kind := range []string{"corrupt", "identity", "source", "policy", "max rounds", "calls", "symlink", "hardlink"} {
+	for _, kind := range []string{"corrupt", "identity", "source", "policy", "max rounds", "consecutive rounds", "stop reason", "calls", "symlink", "hardlink"} {
 		t.Run(kind, func(t *testing.T) {
 			job := withClaudeCritic(testJob(command.Comment))
 			result := privateReviewResult(job)
@@ -202,6 +202,10 @@ func TestPrivateReviewRejectsChangedSavedCheckpoint(t *testing.T) {
 				saved.CriticNonblockingRounds++
 			case "max rounds":
 				saved.CriticMaxRounds++
+			case "consecutive rounds":
+				saved.CriticConsecutiveNoBlockerRounds++
+			case "stop reason":
+				saved.CriticStopReason = "nonblocking"
 			case "calls":
 				saved.Calls[1].HasBlockers, saved.Calls[1].NoBlockers = false, true
 			}

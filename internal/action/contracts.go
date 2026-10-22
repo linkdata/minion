@@ -17,7 +17,7 @@ import (
 )
 
 // ProtocolVersion identifies the versioned Job, Result, and Status contracts.
-const ProtocolVersion = 2
+const ProtocolVersion = 3
 
 const (
 	maxDiagnostics            = 100
@@ -64,6 +64,8 @@ type Job struct {
 	CriticMaxRounds int                `json:"critic_max_rounds"`
 	// CriticNonblockingRounds is resolved by the orchestrator; zero keeps strict approval.
 	CriticNonblockingRounds int `json:"critic_nonblocking_rounds"`
+	// CriticConsecutiveNoBlockerRounds is resolved; zero bypasses only the streak requirement.
+	CriticConsecutiveNoBlockerRounds int `json:"critic_consecutive_no_blocker_rounds"`
 	// RuntimeBudget is remaining local time; a future transport must subtract transit time.
 	RuntimeBudget time.Duration `json:"runtime_budget_ns"`
 }
@@ -102,6 +104,9 @@ type Result struct {
 	Calls       []CallUsage        `json:"calls,omitempty"`
 	Refutations []Refutation       `json:"refutations,omitempty"`
 	Diagnostics []Diagnostic       `json:"diagnostics,omitempty"`
+
+	// CriticStopReason records an acceptance decision reached after call integrity checks.
+	CriticStopReason string `json:"critic_stop_reason,omitempty"`
 }
 
 // Status reports one observation of an attempt. It does not authorize publication
@@ -208,9 +213,10 @@ func (j Job) Validate() error {
 			return errors.New("main and critic currently require different providers")
 		}
 	}
-	unexpectedRounds := j.Critic == nil && (j.CriticMaxRounds != 0 || j.CriticNonblockingRounds != 0)
+	unexpectedRounds := j.Critic == nil && (j.CriticMaxRounds != 0 || j.CriticNonblockingRounds != 0 || j.CriticConsecutiveNoBlockerRounds != 0)
 	invalidRounds := j.Critic != nil && (j.CriticMaxRounds < 1 || j.CriticMaxRounds > config.MaxCriticMaxRounds || j.CriticNonblockingRounds < 0 || j.CriticNonblockingRounds > j.CriticMaxRounds)
-	if unexpectedRounds || invalidRounds {
+	invalidStreak := j.CriticConsecutiveNoBlockerRounds < 0 || j.CriticConsecutiveNoBlockerRounds > config.MaxCriticConsecutiveNoBlockerRounds
+	if unexpectedRounds || invalidRounds || invalidStreak {
 		return errors.New("invalid critic round limit")
 	}
 	if len(j.Source.Repository) == 0 {
@@ -232,10 +238,6 @@ func (j Job) rounds() int {
 		return 1
 	}
 	return j.CriticMaxRounds
-}
-
-func (j Job) acceptsCritique(round int, approved, noBlockers bool) bool {
-	return noBlockers && (approved || (j.CriticNonblockingRounds > 0 && round >= j.CriticNonblockingRounds))
 }
 
 func sourceIdentity(j Job) string { return j.Identity.Repository + "@" + j.Source.Head }
@@ -331,6 +333,9 @@ func (r Result) matchesJob(j Job) bool {
 
 func (r Result) validateCalls(j Job, complete bool) error {
 	rounds := j.rounds()
+	policy := criticPolicy{job: j}
+	var advanceToFull bool
+	var stopReason string
 	for i, call := range r.Calls {
 		role := j.Main
 		if call.Role == roleCritic && j.Critic != nil {
@@ -341,13 +346,12 @@ func (r Result) validateCalls(j Job, complete bool) error {
 		validOrder := i == 0 && call.Role == roleMain && call.Round == 1 && call.ReviewPhase == ""
 		if i > 0 && j.Critic != nil {
 			previous := r.Calls[i-1]
-			accepted := j.acceptsCritique(previous.Round, previous.Approved, previous.NoBlockers)
 			if call.Role == roleMain {
-				validOrder = previous.Role == roleCritic && (previous.NoBlockers || previous.HasBlockers) && !accepted && call.Round == previous.Round+1 && call.ReviewPhase == ""
+				validOrder = previous.Role == roleCritic && (previous.NoBlockers || previous.HasBlockers) && !advanceToFull && stopReason == "" && call.Round == previous.Round+1 && call.ReviewPhase == ""
 			} else if previous.Role == roleMain {
 				validOrder = call.Round == previous.Round && call.ReviewPhase == reviewPhases(call.Round)[0]
 			} else {
-				validOrder = previous.ReviewPhase == reviewVerification && accepted && call.Round == previous.Round && call.ReviewPhase == reviewFull
+				validOrder = previous.ReviewPhase == reviewVerification && advanceToFull && call.Round == previous.Round && call.ReviewPhase == reviewFull
 			}
 		}
 		invalidVerdict := ((call.Approved || call.NoBlockers || call.HasBlockers) && call.Role != roleCritic) || (call.Approved && !call.NoBlockers) || (call.HasBlockers && call.NoBlockers)
@@ -355,13 +359,17 @@ func (r Result) validateCalls(j Job, complete bool) error {
 		if !validOrder || call.Round > rounds || invalidVerdict || wrongModel || !call.Tokens.Valid() {
 			return errors.New("invalid model call usage")
 		}
+		advanceToFull, stopReason = policy.observe(call)
+	}
+	if r.CriticStopReason != "" && (j.Critic == nil || r.CriticStopReason != stopReason) {
+		return errors.New("invalid recorded critic stop reason")
 	}
 	if complete && j.Critic != nil {
 		if len(r.Calls) == 0 {
 			return errors.New("action result lacks a final full review")
 		}
 		last := r.Calls[len(r.Calls)-1]
-		if last.Role != roleCritic || last.ReviewPhase != reviewFull || !j.acceptsCritique(last.Round, last.Approved, last.NoBlockers) {
+		if last.Role != roleCritic || last.ReviewPhase != reviewFull || stopReason == "" || r.CriticStopReason == "" {
 			return errors.New("action result lacks an accepted final full review")
 		}
 	}

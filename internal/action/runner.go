@@ -41,7 +41,7 @@ type Runner struct {
 	Logger      *log.Logger
 	WorkRoot    string
 	// recordReview synchronously persists borrowed evidence without mutating it.
-	recordReview func([]CallUsage, []Refutation) error
+	recordReview func([]CallUsage, []Refutation, string) error
 }
 
 func (r *Runner) logf(format string, args ...any) {
@@ -92,7 +92,7 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 	checkpointReview := func(history []Refutation) error {
 		result.Refutations = history
 		if r.recordReview != nil {
-			return r.recordReview(result.Calls, result.Refutations)
+			return r.recordReview(result.Calls, result.Refutations, result.CriticStopReason)
 		}
 		return nil
 	}
@@ -281,7 +281,7 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 			call, err := next(ctx, request)
 			entry := CallUsage{Provider: request.provider, Role: request.role, Round: request.round, ReviewPhase: request.reviewPhase, Model: request.model, Effort: request.effort, Tokens: call.Tokens, Complete: call.UsageComplete}
 			if err == nil && request.role == roleCritic {
-				approved, hasBlockers, _, parseErr := parseCritique(call.Answer)
+				approved, hasBlockers, _, parseErr := parseCritique(call.Answer, configured.Codex.APIKey, configured.Claude.APIKey)
 				entry.Approved = parseErr == nil && approved
 				entry.NoBlockers = parseErr == nil && !hasBlockers
 				entry.HasBlockers = parseErr == nil && hasBlockers
@@ -342,7 +342,14 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 			cleanupFailed = sessions.close() != nil
 		}
 	}()
-	answer, runErr := configured.runAI(ctx, job, source, prompt, outputDir, checkpointReview, &sessions)
+	var answer string
+	var runErr error
+	answer, result.CriticStopReason, runErr = configured.runAI(ctx, job, source, prompt, outputDir, checkpointReview, &sessions)
+	if result.CriticStopReason != "" {
+		if err := checkpointReview(result.Refutations); err != nil {
+			return result, fmt.Errorf("%w: checkpoint critic decision: %w", monitor.ErrTerminalJob, err)
+		}
+	}
 	if runErr != nil {
 		return result, runErr
 	}

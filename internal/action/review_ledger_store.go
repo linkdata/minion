@@ -15,12 +15,14 @@ import (
 
 // retainedReview contains review evidence only, never a publication outcome.
 type retainedReview struct {
-	Identity                Identity     `json:"identity"`
-	SourceRef               string       `json:"source_ref"`
-	CriticMaxRounds         int          `json:"critic_max_rounds"`
-	CriticNonblockingRounds int          `json:"critic_nonblocking_rounds"`
-	Calls                   []CallUsage  `json:"calls"`
-	Refutations             []Refutation `json:"refutations"`
+	CriticStopReason                 string       `json:"critic_stop_reason,omitempty"`
+	Identity                         Identity     `json:"identity"`
+	SourceRef                        string       `json:"source_ref"`
+	CriticMaxRounds                  int          `json:"critic_max_rounds"`
+	CriticNonblockingRounds          int          `json:"critic_nonblocking_rounds"`
+	CriticConsecutiveNoBlockerRounds int          `json:"critic_consecutive_no_blocker_rounds"`
+	Calls                            []CallUsage  `json:"calls"`
+	Refutations                      []Refutation `json:"refutations"`
 }
 
 // retainReviewEvidence saves private history after Runner validates the job and admits its root.
@@ -68,9 +70,11 @@ func saveReviewEvidence(workRoot string, job Job, result Result, logger *log.Log
 		return err
 	}
 	record := retainedReview{
-		Identity: job.Identity, SourceRef: job.Source.Head,
+		CriticStopReason: result.CriticStopReason,
+		Identity:         job.Identity, SourceRef: job.Source.Head,
 		CriticMaxRounds: job.CriticMaxRounds, CriticNonblockingRounds: job.CriticNonblockingRounds,
-		Calls: result.Calls, Refutations: result.Refutations,
+		CriticConsecutiveNoBlockerRounds: job.CriticConsecutiveNoBlockerRounds,
+		Calls:                            result.Calls, Refutations: result.Refutations,
 	}
 	data, err := json.Marshal(record)
 	if err != nil {
@@ -90,13 +94,15 @@ func saveReviewEvidence(workRoot string, job Job, result Result, logger *log.Log
 		if err := json.Unmarshal(previous, &saved); err != nil {
 			return errors.New("saved review evidence is invalid")
 		}
-		if saved.Identity != record.Identity || saved.SourceRef != record.SourceRef ||
+		if (saved.CriticStopReason != "" && saved.CriticStopReason != record.CriticStopReason) ||
+			saved.Identity != record.Identity || saved.SourceRef != record.SourceRef ||
 			saved.CriticMaxRounds != record.CriticMaxRounds || saved.CriticNonblockingRounds != record.CriticNonblockingRounds ||
+			saved.CriticConsecutiveNoBlockerRounds != record.CriticConsecutiveNoBlockerRounds ||
 			len(saved.Calls) > len(record.Calls) || len(saved.Refutations) > len(record.Refutations) ||
 			!slices.Equal(saved.Calls, record.Calls[:len(saved.Calls)]) || !slices.Equal(saved.Refutations, record.Refutations[:len(saved.Refutations)]) {
 			return errors.New("review evidence changed or discarded a saved prefix")
 		}
-		if len(saved.Calls) == len(record.Calls) && len(saved.Refutations) == len(record.Refutations) {
+		if saved.CriticStopReason == record.CriticStopReason && len(saved.Calls) == len(record.Calls) && len(saved.Refutations) == len(record.Refutations) {
 			return nil
 		}
 	}

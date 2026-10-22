@@ -20,11 +20,12 @@ import (
 
 func TestServiceWiringPreservesAdmissionAndHostPolicy(t *testing.T) {
 	strict := 0
+	consecutive := 7
 	sockets := true
 	cfg := config.Config{
 		WorkRoot: "/private/work", StatePath: "/private/state.json", BotLogin: "bot",
-		Main: "claude", Adversarial: "codex", CriticNonblockingRounds: &strict,
-		CriticMaxRounds:   5,
+		Main: "claude", Adversarial: "codex",
+		CriticStopping:    config.CriticStopping{MaxRounds: 5, NonblockingAfterRound: &strict, ConsecutiveNoBlockerRounds: &consecutive},
 		JobTimeoutMinutes: 7, MaxGitHubContextBytes: 1234,
 		AlwaysOnSkills: []string{skills.BuiltinAntiPromptInjection},
 		Commands:       map[string]config.CommandMapping{"inspect": {Action: "review"}},
@@ -41,10 +42,10 @@ func TestServiceWiringPreservesAdmissionAndHostPolicy(t *testing.T) {
 		t.Fatalf("wired admission did not stop execution: %v", err)
 	}
 	if orchestrator.WorkRoot != cfg.WorkRoot || !errors.Is(orchestrator.CheckWorkRoot(), admissionErr) ||
-		orchestrator.CriticNonblockingRounds == nil || *orchestrator.CriticNonblockingRounds != 0 {
+		orchestrator.CriticStopping.NonblockingAfterRound == nil || *orchestrator.CriticStopping.NonblockingAfterRound != 0 {
 		t.Fatal("service lost controlled admission or strict review policy")
 	}
-	if orchestrator.Main != cfg.Main || orchestrator.Adversarial != cfg.Adversarial || orchestrator.CriticMaxRounds != cfg.CriticMaxRounds ||
+	if orchestrator.Main != cfg.Main || orchestrator.Adversarial != cfg.Adversarial || !reflect.DeepEqual(orchestrator.CriticStopping, cfg.CriticStopping) ||
 		orchestrator.CodexModel != cfg.Codex.Model || orchestrator.CodexEffort != cfg.Codex.ReasoningEffort ||
 		orchestrator.ClaudeModel != cfg.Claude.Model || orchestrator.ClaudeEffort != cfg.Claude.Effort {
 		t.Fatal("service lost pinned provider roles, models, efforts or critic budget")

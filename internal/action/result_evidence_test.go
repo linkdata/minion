@@ -20,6 +20,7 @@ func TestInvalidResultKeepsOnlyValidatedEvidence(t *testing.T) {
 		t.Run(scenario, func(t *testing.T) {
 			job := withClaudeCritic(testJob(command.SecurityAudit))
 			result := completeAuditResult(job)
+			result.CriticStopReason = "approved"
 			result.Calls = append(result.Calls, CallUsage{Provider: "claude", Role: roleCritic, Round: 1, ReviewPhase: reviewFull, Approved: true, NoBlockers: true})
 			result.Diagnostics = []Diagnostic{{Code: "cleanup_failed", Message: "PRIVATE cleanup details"}}
 			if err := result.Validate(job); err != nil {
@@ -68,7 +69,7 @@ func TestInvalidResultKeepsOnlyValidatedEvidence(t *testing.T) {
 				}
 			} else {
 				record := readPrivateReview(t, root)
-				if record.Identity != job.Identity || record.SourceRef != job.Source.Head || record.CriticMaxRounds != job.CriticMaxRounds || record.CriticNonblockingRounds != job.CriticNonblockingRounds || !reflect.DeepEqual(record.Calls, result.Calls) || !reflect.DeepEqual(record.Refutations, result.Refutations) {
+				if record.CriticStopReason != result.CriticStopReason || record.Identity != job.Identity || record.SourceRef != job.Source.Head || record.CriticMaxRounds != job.CriticMaxRounds || record.CriticNonblockingRounds != job.CriticNonblockingRounds || record.CriticConsecutiveNoBlockerRounds != job.CriticConsecutiveNoBlockerRounds || !reflect.DeepEqual(record.Calls, result.Calls) || !reflect.DeepEqual(record.Refutations, result.Refutations) {
 					t.Fatalf("validated private review evidence changed: %+v", record)
 				}
 			}

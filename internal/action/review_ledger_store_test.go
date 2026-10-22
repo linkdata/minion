@@ -67,6 +67,7 @@ func TestPublishRetainsPrivateReviewBeforeGitHubWrites(t *testing.T) {
 			result := privateReviewResult(job)
 			if !test.approved {
 				result.Calls[len(result.Calls)-1].Approved = false
+				result.CriticStopReason = "nonblocking"
 			}
 			root := t.TempDir()
 			var body, journal bytes.Buffer
@@ -78,7 +79,7 @@ func TestPublishRetainsPrivateReviewBeforeGitHubWrites(t *testing.T) {
 					http.Error(w, "private review unavailable", http.StatusInternalServerError)
 					return
 				}
-				if len(record.Refutations) != 1 || len(record.Calls) == 0 || record.Calls[len(record.Calls)-1].Approved != test.approved || record.CriticNonblockingRounds != 1 || record.SourceRef != job.Source.Head {
+				if len(record.Refutations) != 1 || len(record.Calls) == 0 || record.Calls[len(record.Calls)-1].Approved != test.approved || record.CriticStopReason != result.CriticStopReason || record.CriticNonblockingRounds != 1 || record.CriticConsecutiveNoBlockerRounds != job.CriticConsecutiveNoBlockerRounds || record.SourceRef != job.Source.Head {
 					t.Errorf("private evidence/policy lost: %+v", record)
 				}
 				if r.Method == http.MethodGet && r.URL.Path == "/repos/o/r" {
@@ -124,6 +125,7 @@ func TestPrivateReviewRetainsPrefixAndRejectsRollback(t *testing.T) {
 	result := privateReviewResult(job)
 	e := Orchestrator{WorkRoot: t.TempDir()}
 	first := result
+	first.CriticStopReason = ""
 	first.Calls, first.Refutations = first.Calls[:3], first.Refutations[:1]
 	if err := e.retainReviewEvidence(job, first); err != nil {
 		t.Fatal(err)
@@ -155,6 +157,36 @@ func TestPrivateReviewRetainsPrefixAndRejectsRollback(t *testing.T) {
 	}
 	if got := readPrivateReview(t, e.WorkRoot); len(got.Refutations) != 1 || got.Refutations[0].Text != "PRIVATE_MAIN_REFUTATION" {
 		t.Fatalf("saved prefix was lost: %+v", got)
+	}
+}
+
+func TestPrivateReviewRecordsDecisionAfterVerdictCheckpoint(t *testing.T) {
+	job := withClaudeCritic(testJob(command.Comment))
+	result := privateReviewResult(job)
+	orchestrator := Orchestrator{WorkRoot: t.TempDir()}
+	beforeDecision := result
+	beforeDecision.CriticStopReason = ""
+	if err := orchestrator.retainReviewEvidence(job, beforeDecision); err != nil {
+		t.Fatal(err)
+	}
+	if saved := readPrivateReview(t, orchestrator.WorkRoot); saved.CriticStopReason != "" || !saved.Calls[len(saved.Calls)-1].Approved {
+		t.Fatalf("verdict checkpoint fabricated or lost evidence: %+v", saved)
+	}
+	if err := orchestrator.retainReviewEvidence(job, result); err != nil {
+		t.Fatal(err)
+	}
+	if saved := readPrivateReview(t, orchestrator.WorkRoot); saved.CriticStopReason != "approved" {
+		t.Fatalf("decision with unchanged call prefix was not persisted: %+v", saved)
+	}
+	for _, reason := range []string{"", "nonblocking"} {
+		changed := result
+		changed.CriticStopReason = reason
+		if err := orchestrator.retainReviewEvidence(job, changed); err == nil {
+			t.Fatalf("saved decision changed from approved to %q", reason)
+		}
+	}
+	if saved := readPrivateReview(t, orchestrator.WorkRoot); saved.CriticStopReason != "approved" {
+		t.Fatalf("saved decision changed after rejected update: %+v", saved)
 	}
 }
 
@@ -245,7 +277,7 @@ func TestPerformCheckpointsPrivateReviewBeforeLaterCalls(t *testing.T) {
 			defer server.Close()
 			failure := errors.New("provider stopped")
 			calls := 0
-			e := attemptFixture(&Orchestrator{WorkRoot: root, GitHub: testGitHub(server, "fixture"), Main: "codex", Adversarial: "claude", CriticNonblockingRounds: new(int),
+			e := attemptFixture(&Orchestrator{WorkRoot: root, GitHub: testGitHub(server, "fixture"), Main: "codex", Adversarial: "claude", CriticStopping: config.CriticStopping{NonblockingAfterRound: new(int)},
 				Commands: map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}},
 				Runner: Runner{runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 					calls++

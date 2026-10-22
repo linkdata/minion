@@ -373,10 +373,10 @@ func TestRefutationCheckpointFailureStopsBeforeNextCall(t *testing.T) {
 	checkpointErr := errors.New("private refutation checkpoint unavailable")
 	calls, checkpoints := 0, 0
 	var expected, lastCheckpoint []Refutation
-	runner := Runner{WorkRoot: t.TempDir(), recordReview: func(receipts []CallUsage, refs []Refutation) error {
+	runner := Runner{WorkRoot: t.TempDir(), recordReview: func(receipts []CallUsage, refs []Refutation, stopReason string) error {
 		checkpoints++
-		if len(receipts) != checkpoints-1 || !reflect.DeepEqual(refs, expected) {
-			t.Fatalf("checkpoint evidence lost: calls=%+v refutations=%+v", receipts, refs)
+		if len(receipts) != checkpoints-1 || !reflect.DeepEqual(refs, expected) || stopReason != "" {
+			t.Fatalf("checkpoint evidence lost: calls=%+v refutations=%+v stop=%q", receipts, refs, stopReason)
 		}
 		lastCheckpoint = append([]Refutation(nil), refs...)
 		if checkpoints == 4 {
@@ -396,10 +396,49 @@ func TestRefutationCheckpointFailureStopsBeforeNextCall(t *testing.T) {
 		return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"feedback":"PRIVATE_BLOCKER"}`}, nil
 	}}
 	result, err := runner.Run(context.Background(), job)
-	if !errors.Is(err, checkpointErr) || !errors.Is(err, monitor.ErrTerminalJob) || calls != 3 || checkpoints != 4 || result.Answer != "" || !reflect.DeepEqual(result.Refutations, expected) || !reflect.DeepEqual(lastCheckpoint, expected) {
+	if !errors.Is(err, checkpointErr) || !errors.Is(err, monitor.ErrTerminalJob) || calls != 3 || checkpoints != 4 || result.Answer != "" || result.CriticStopReason != "" || !reflect.DeepEqual(result.Refutations, expected) || !reflect.DeepEqual(lastCheckpoint, expected) {
 		t.Fatalf("checkpoint failure lost evidence/continued: calls=%d checkpoints=%d result=%+v error=%v", calls, checkpoints, result, err)
 	}
 	if err := result.validate(job, false); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRunnerCheckpointsCriticDecisionAfterVerifiedVerdict(t *testing.T) {
+	checkpointErr := errors.New("critic decision checkpoint unavailable")
+	for _, failDecision := range []bool{false, true} {
+		t.Run(fmt.Sprintf("checkpoint failure=%t", failDecision), func(t *testing.T) {
+			job := withClaudeCritic(testJob(command.Comment))
+			var checkpoints []string
+			runner := Runner{WorkRoot: t.TempDir(), recordReview: func(receipts []CallUsage, refs []Refutation, stopReason string) error {
+				checkpoints = append(checkpoints, fmt.Sprintf("%d/%s", len(receipts), stopReason))
+				if len(refs) != 0 || len(receipts) == 2 && (!receipts[1].Approved || !receipts[1].NoBlockers) {
+					t.Fatalf("checkpoint lost native verdict: calls=%+v refutations=%+v", receipts, refs)
+				}
+				if failDecision && stopReason != "" {
+					return checkpointErr
+				}
+				return nil
+			}, runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+				if request.role == roleMain {
+					return aicli.Result{Answer: proposalJSON("Done.", "")}, nil
+				}
+				return aicli.Result{Answer: approvedCritiqueJSON}, nil
+			}}
+			result, err := runner.Run(context.Background(), job)
+			if !reflect.DeepEqual(checkpoints, []string{"0/", "1/", "2/", "2/approved"}) || result.CriticStopReason != "approved" {
+				t.Fatalf("critic decision preceded policy acceptance: checkpoints=%v result=%+v error=%v", checkpoints, result, err)
+			}
+			if failDecision {
+				if !errors.Is(err, checkpointErr) || !errors.Is(err, monitor.ErrTerminalJob) || result.Answer != "" {
+					t.Fatalf("decision checkpoint failure accepted: result=%+v error=%v", result, err)
+				}
+				if err := result.validate(job, false); err != nil {
+					t.Fatalf("invalid accepted verdict evidence after checkpoint failure: %v", err)
+				}
+			} else if err != nil || result.Answer != "Done." || result.Validate(job) != nil {
+				t.Fatalf("verified decision lost: result=%+v error=%v", result, err)
+			}
+		})
 	}
 }

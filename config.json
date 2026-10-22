@@ -2,8 +2,11 @@
   "bot_login": "example-bot",
   "main": "codex",
   "adversarial": "",
-  "critic_max_rounds": 5,
-  "critic_nonblocking_rounds": null,
+  "critic_stopping": {
+    "max_rounds": 5,
+    "nonblocking_after_round": null,
+    "consecutive_no_blocker_rounds": null
+  },
   "codex": {
     "api_key": ""
   },
