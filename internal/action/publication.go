@@ -25,8 +25,7 @@ func projectPublication(job Job, result Result) (publication, error) {
 		return publication{}, err
 	}
 	if job.Action == command.Fix && len(result.Changes) != 0 {
-		projected.answer = notice
-		return projected, nil
+		return publication{cap: projected.cap}, nil
 	}
 	if notice == "" {
 		return projected, nil

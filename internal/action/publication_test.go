@@ -179,8 +179,8 @@ func TestProjectPublicationNormalAndChangedFix(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		notice, err := criticCapNotice(projected.cap)
-		if err != nil || projected.answer != notice || result.Answer != original {
+		_, err = criticCapNotice(projected.cap)
+		if err != nil || projected.answer != "" || result.Answer != original {
 			t.Fatalf("changed fix projected unused summary: %+v, error=%v", projected, err)
 		}
 	}
