@@ -215,7 +215,7 @@ func TestPublishFixWithoutChangesPostsNormalReply(t *testing.T) {
 	if err := e.publishFix(context.Background(), &preparedAction{request: request, issueNodeID: "issue-node"}, Result{Answer: "Tests passed."}, publication{answer: "Tests passed."}); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(body, "without changing files") || !strings.Contains(body, "Tests passed.") || !strings.Contains(body, request.Marker()) {
+	if !strings.HasPrefix(body, "AI returned a response without changing files.\n\n") || !strings.Contains(body, "Tests passed.") || !strings.Contains(body, request.Marker()) {
 		t.Fatalf("no-change reply=%q", body)
 	}
 }

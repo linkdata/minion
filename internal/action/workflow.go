@@ -419,7 +419,7 @@ func (e *Orchestrator) publishFix(ctx context.Context, p *preparedAction, result
 		} else if err != nil {
 			return err
 		}
-		return e.acknowledge(ctx, request, "AI completed the request without changing files.\n\n"+inertModelOutput(published.answer))
+		return e.acknowledge(ctx, request, "AI returned a response without changing files.\n\n"+inertModelOutput(published.answer))
 	}
 	currentRepo, currentFork, err := e.fixFork(ctx, request.Repository)
 	if err != nil {

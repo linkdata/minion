@@ -97,6 +97,9 @@ func TestCappedPublicationProjectsEveryPublicBodyAndRetainedAudit(t *testing.T) 
 				if strings.Contains(posted, "reported blockers.") != (verdict != "only nits") || strings.Contains(posted, "fresh full critic reported approval") != (verdict == "verification blockers with full approval") || strings.Contains(posted, "fresh full critic did not approve") != (verdict != "verification blockers with full approval") {
 					t.Fatalf("public caveat falsified final phase verdicts: %s", posted)
 				}
+				if action == command.Fix && !strings.HasPrefix(posted, "AI returned a response without changing files.\n\n") {
+					t.Fatalf("capped no-change fix claimed task completion: %q", posted)
+				}
 				if _, err := command.ParseForLoginCommands(posted, "otherbot", defaultActionTestCommands); !errors.Is(err, command.ErrNoCommand) {
 					t.Fatalf("capped publication activated model command: %v", err)
 				}

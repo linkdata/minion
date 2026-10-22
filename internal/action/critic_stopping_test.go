@@ -67,23 +67,20 @@ func TestRunnerCriticStoppingReplaysFullReviewStreak(t *testing.T) {
 				return aicli.Result{Answer: verdicts[verdict]}, nil
 			}}
 			result, err := runner.Run(context.Background(), job)
-			wantSuccess := test.stopReason != ""
 			wantCalls := 3*test.lastRound - 1 - test.skippedFull
-			if result.CriticStopReason != test.stopReason || (err == nil) != wantSuccess || calls != wantCalls || len(result.Calls) != wantCalls {
-				t.Fatalf("stopping result: calls=%d result=%+v error=%v; want calls=%d success=%t", calls, result, err, wantCalls, wantSuccess)
+			if err != nil || result.CriticStopReason != test.stopReason || calls != wantCalls || len(result.Calls) != wantCalls {
+				t.Fatalf("stopping result: calls=%d result=%+v error=%v; want calls=%d", calls, result, err, wantCalls)
 			}
-			if wantSuccess {
-				if result.Answer != fmt.Sprintf("Candidate %d", test.lastRound) {
-					t.Fatalf("accepted wrong proposal: %+v", result)
-				}
+			if result.Answer != fmt.Sprintf("Candidate %d", test.lastRound) {
+				t.Fatalf("accepted wrong proposal: %+v", result)
 			}
 			if err := result.validate(job, false); err != nil {
 				t.Fatalf("runtime produced invalid replay evidence: %v", err)
 			}
 			replay := result
 			replay.Answer = "Complete answer"
-			if err := replay.Validate(job); (err == nil) != wantSuccess {
-				t.Fatalf("replayed policy acceptance=%v; want success=%t", err, wantSuccess)
+			if err := replay.Validate(job); err != nil {
+				t.Fatalf("replayed stopping result invalid: %v", err)
 			}
 			if test.stopReason == "nonblocking" {
 				strict := job
