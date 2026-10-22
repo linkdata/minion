@@ -23,7 +23,7 @@ type Checkpoints interface {
 	Review(ReviewCheckpoint) error
 }
 
-// CallCheckpoint carries pinned metadata before dispatch and the raw receipt afterward.
+// CallCheckpoint carries pinned dispatch metadata, then returned usage and parsed verdict attestations.
 type CallCheckpoint struct {
 	Version   int
 	Identity  Identity

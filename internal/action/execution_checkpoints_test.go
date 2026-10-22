@@ -278,13 +278,15 @@ func TestExecutionDecisionSaveFailureKeepsAcknowledgedPrefix(t *testing.T) {
 			if err != nil || !bytes.Equal(before, after) || f.sink.review.CriticStopReason != "" || !slices.Equal(f.sink.review.Calls, calls) || len(f.sink.review.Refutations) != 0 {
 				t.Fatalf("failed decision write changed durable/acknowledged prefix: review=%+v error=%v", f.sink.review, err)
 			}
-			partial := f.result(calls, nil, test.reason)
-			partial.Answer = ""
-			if err := f.sink.finish(partial, decisionErr); !errors.Is(err, decisionErr) || !errors.Is(err, monitor.ErrTerminalJob) {
+			result := f.result(calls, nil, test.reason)
+			if err := result.Validate(f.job); err != nil {
+				t.Fatalf("fixture must be an otherwise publishable result: %v", err)
+			}
+			if err := f.sink.finish(result, decisionErr); !errors.Is(err, decisionErr) || !errors.Is(err, monitor.ErrTerminalJob) {
 				t.Fatalf("failed decision permitted successful execution: %v", err)
 			}
-			if partial.CriticStopReason != test.reason || !slices.Equal(partial.Calls, calls) || partial.validate(f.job, false) != nil || partial.Validate(f.job) == nil {
-				t.Fatalf("partial result lost reached decision/raw verdict or became publishable: %+v", partial)
+			if err := f.sink.finish(result, nil); !errors.Is(err, decisionErr) || !errors.Is(err, monitor.ErrTerminalJob) {
+				t.Fatalf("ignored failed decision was accepted from a valid Result: %v", err)
 			}
 		})
 	}

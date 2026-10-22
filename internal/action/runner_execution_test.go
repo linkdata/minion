@@ -185,6 +185,47 @@ func TestRunnerExecuteCallCheckpointFailurePreservesReturnedFacts(t *testing.T) 
 	}
 }
 
+func TestRunnerExecuteStopsAfterPaidReviewCheckpointFailure(t *testing.T) {
+	job := withClaudeCritic(testJob(command.Comment))
+	reviewErr := errors.New("paid review checkpoint failed")
+	tokens := usage.Tokens{Input: 23, CachedInput: 7, Output: 4}
+	var captured []CallUsage
+	var reviewed []int
+	nativeCalls := 0
+	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+		nativeCalls++
+		if nativeCalls != 1 || request.role != roleMain {
+			t.Fatal("critic dispatched after paid review checkpoint failure")
+		}
+		return aicli.Result{Answer: proposalJSON("Candidate answer", ""), Tokens: tokens, UsageComplete: true}, nil
+	}}
+	result, err := runner.Execute(context.Background(), job, runnerExecutionCheckpoints{
+		after: func(value CallCheckpoint) error {
+			captured = append(captured, value.Call)
+			return nil
+		},
+		review: func(value ReviewCheckpoint) error {
+			reviewed = append(reviewed, len(value.Calls))
+			if value.CriticStopReason != "" {
+				t.Fatal("review decision reached after paid review checkpoint failure")
+			}
+			if len(value.Calls) == 0 {
+				return nil
+			}
+			if len(value.Calls) != 1 || !slices.Equal(value.Calls, captured) {
+				t.Fatalf("review checkpoint lost the paid main receipt: %+v", value)
+			}
+			return reviewErr
+		},
+	})
+	if !errors.Is(err, reviewErr) || !errors.Is(err, monitor.ErrTerminalJob) || nativeCalls != 1 || !slices.Equal(reviewed, []int{0, 1}) || len(result.Calls) != 1 || !slices.Equal(result.Calls, captured) || result.Answer != "" || result.CriticStopReason != "" {
+		t.Fatalf("paid review checkpoint failure continued or erased evidence: result=%+v captured=%+v calls=%d reviews=%v error=%v", result, captured, nativeCalls, reviewed, err)
+	}
+	if call := result.Calls[0]; call.Role != roleMain || call.Tokens != tokens || !call.Complete {
+		t.Fatalf("paid review checkpoint failure changed the returned receipt: %+v", call)
+	}
+}
+
 func TestRunnerExecuteAfterCallRunsAfterNativeCancellation(t *testing.T) {
 	job := testJob(command.Comment)
 	ctx, cancel := context.WithCancel(context.Background())

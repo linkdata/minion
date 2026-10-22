@@ -25,7 +25,7 @@ type retainedReview struct {
 	Refutations                      []Refutation `json:"refutations"`
 }
 
-// retainReviewEvidence saves private history after Runner validates the job and admits its root.
+// retainReviewEvidence validates and saves private review history for an accepted Job.
 // A failed call may leave a valid prefix; answer/change validation must not erase it.
 func (e *Orchestrator) retainReviewEvidence(job Job, result Result) error {
 	if job.Critic == nil {
