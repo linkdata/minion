@@ -194,6 +194,45 @@ func TestExecutionCriticRequiresInitialPrefixAndSeparateDecision(t *testing.T) {
 	}
 }
 
+func TestExecutionRejectsForeignAfterAndReviewBindings(t *testing.T) {
+	for _, method := range []string{"AfterCall", "Review"} {
+		for _, field := range []string{"version", "identity", "source"} {
+			t.Run(method+"/"+field, func(t *testing.T) {
+				f := newExecutionAdapterFixture(t, withClaudeCritic(testJob(command.Comment)))
+				f.saveReview(nil, nil, "")
+				path := filepath.Join(f.owner.WorkRoot, "reviews", f.job.Identity.AttemptID+".json")
+				before, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				fact := f.call(CallUsage{Provider: f.job.Main.Provider, Role: roleMain, Round: 1})
+				if method == "AfterCall" {
+					if err := f.sink.BeforeCall(fact); err != nil {
+						t.Fatal(err)
+					}
+				}
+				switch field {
+				case "version":
+					fact.Version++
+				case "identity":
+					fact.Identity.AttemptID = "foreign"
+				case "source":
+					fact.SourceRef = strings.Repeat("b", 40)
+				}
+				if method == "AfterCall" {
+					err = f.sink.AfterCall(fact)
+				} else {
+					err = f.sink.Review(ReviewCheckpoint{Version: fact.Version, Identity: fact.Identity, SourceRef: fact.SourceRef})
+				}
+				after, readErr := os.ReadFile(path)
+				if !errors.Is(err, monitor.ErrTerminalJob) || readErr != nil || !bytes.Equal(before, after) || len(f.sink.calls) != 0 || f.sink.returned != nil || !f.sink.reviewed || len(f.sink.review.Calls) != 0 {
+					t.Fatalf("foreign facts changed checkpoint state: calls=%+v review=%+v error=%v read=%v", f.sink.calls, f.sink.review, err, readErr)
+				}
+			})
+		}
+	}
+}
+
 func TestExecutionDecisionSaveFailureKeepsAcknowledgedPrefix(t *testing.T) {
 	for _, test := range []struct {
 		reason   string
