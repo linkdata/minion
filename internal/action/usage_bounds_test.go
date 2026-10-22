@@ -30,9 +30,10 @@ func TestUsageAggregateBounds(t *testing.T) {
 			store := &usage.Store{Dir: filepath.Join(t.TempDir(), "usage")}
 			var journal bytes.Buffer
 			var native []usage.Tokens
+			work := t.TempDir()
 			orchestrator := attemptFixture(&Orchestrator{
-				Usage: store, Main: "codex", Adversarial: "claude", Logger: log.New(&journal, "", 0),
-				Runner: Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+				Usage: store, Main: "codex", Adversarial: "claude", WorkRoot: work, Logger: log.New(&journal, "", 0),
+				Runner: Runner{WorkRoot: work, runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 					input := int64(1)
 					switch len(native) {
 					case 0:
@@ -57,7 +58,8 @@ func TestUsageAggregateBounds(t *testing.T) {
 				t.Fatal(err)
 			}
 			job := withClaudeCritic(testJob(command.Comment))
-			result, err := orchestrator.Runner.Run(context.Background(), job)
+			job.Identity.AttemptID = orchestrator.attemptID
+			result, err := orchestrator.Runner.Execute(context.Background(), job, newExecutionCheckpoints(orchestrator, job))
 			if err != nil {
 				t.Fatalf("valid paid work failed on aggregate usage: %v", err)
 			}
@@ -89,8 +91,17 @@ func TestUsageAggregateBounds(t *testing.T) {
 			if !scenario.complete {
 				wantWarnings = 1
 			}
-			if strings.Count(journal.String(), warning) != wantWarnings || journal.Len() > 256 {
+			var warnings []string
+			for _, line := range strings.Split(journal.String(), "\n") {
+				if strings.HasPrefix(line, warning) {
+					warnings = append(warnings, line)
+				}
+			}
+			if len(warnings) != wantWarnings || len(strings.Join(warnings, "\n")) > 256 {
 				t.Fatalf("overflow warning missing or unbounded: %q", journal.String())
+			}
+			if saved := readPrivateReview(t, work); saved.CriticStopReason != result.CriticStopReason || len(saved.Calls) != wantCalls {
+				t.Fatalf("usage checkpoints bypassed required critic evidence: %+v", saved)
 			}
 		})
 	}

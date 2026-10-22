@@ -22,14 +22,17 @@ import (
 
 func TestUsageDoesNotCountCanceledDispatch(t *testing.T) {
 	store := &usage.Store{Dir: filepath.Join(t.TempDir(), "usage")}
-	tracked := attemptFixture(&Orchestrator{Usage: store})
+	work := t.TempDir()
+	tracked := attemptFixture(&Orchestrator{Usage: store, WorkRoot: work, Runner: Runner{WorkRoot: work, runModel: forbidModel(t)}})
 	finish, err := tracked.trackUsage(usageJob())
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err = tracked.Runner.aroundModel(ctx, modelRun{provider: "codex", role: roleMain}, forbidModel(t))
+	job := testJob(command.Comment)
+	job.Identity.AttemptID = tracked.attemptID
+	_, err = tracked.Runner.Execute(ctx, job, newExecutionCheckpoints(tracked, job))
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled dispatch: %v", err)
 	}
@@ -55,16 +58,7 @@ func TestUsageTracksBothModelRoles(t *testing.T) {
 			runErr := context.Canceled
 			e := &Orchestrator{Usage: store, Main: main.Provider, Adversarial: critic.Provider,
 				CodexModel: "codex-model", CodexEffort: "high", ClaudeModel: "claude-model", ClaudeEffort: "medium",
-				Runner: Runner{runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
-					checkpoint, err := usage.ReadAll(store.Dir)
-					if err != nil || len(checkpoint) != 1 || checkpoint[0].UsageComplete {
-						t.Fatalf("call has no durable incomplete checkpoint: %+v, %v", checkpoint, err)
-					}
-					if request.provider == critic.Provider {
-						return aicli.Result{Tokens: usage.Tokens{Input: 10, CachedInput: 8, Output: 2}}, runErr
-					}
-					return aicli.Result{Answer: "answer", Tokens: usage.Tokens{Input: 100, CachedInput: 80, Output: 20}, UsageComplete: true}, nil
-				}}}
+			}
 			tracked := attemptFixture(e)
 			finish, err := tracked.trackUsage(usageJob())
 			if err != nil {
@@ -74,13 +68,20 @@ func TestUsageTracksBothModelRoles(t *testing.T) {
 				role     string
 				settings RoleSettings
 			}{{"main", main}, {"critic", critic}, {"main", main}} {
-				result, err := tracked.Runner.runOnce(context.Background(), modelRun{role: call.role, provider: call.settings.Provider, model: call.settings.Model, effort: call.settings.Effort, dir: "dir", prompt: "prompt"})
+				receipt := CallUsage{Role: call.role, Provider: call.settings.Provider, Model: call.settings.Model, Effort: call.settings.Effort}
+				if err := tracked.usageCheckpoint.beforeCall(receipt); err != nil {
+					t.Fatal(err)
+				}
+				checkpoint, err := usage.ReadAll(store.Dir)
+				if err != nil || len(checkpoint) != 1 || checkpoint[0].UsageComplete {
+					t.Fatalf("call has no durable incomplete checkpoint: %+v, %v", checkpoint, err)
+				}
+				receipt.Tokens, receipt.Complete = usage.Tokens{Input: 100, CachedInput: 80, Output: 20}, true
 				if call.role == "critic" {
-					if !errors.Is(err, runErr) {
-						t.Fatalf("lost critic error: %v", err)
-					}
-				} else if err != nil || result.Answer != "answer" {
-					t.Fatalf("main result=%+v err=%v", result, err)
+					receipt.Tokens, receipt.Complete = usage.Tokens{Input: 10, CachedInput: 8, Output: 2}, false
+				}
+				if err := tracked.usageCheckpoint.afterCall(receipt); err != nil {
+					t.Fatal(err)
 				}
 			}
 			if err := finish(runErr); !errors.Is(err, runErr) {
@@ -119,12 +120,14 @@ func TestUsageDefaultsUnspecifiedModelLabels(t *testing.T) {
 
 func TestUsageAccumulatesCriticRevisions(t *testing.T) {
 	store := &usage.Store{Dir: filepath.Join(t.TempDir(), "usage")}
+	work := t.TempDir()
 	var critiques int
 	e := &Orchestrator{
 		Usage:       store,
 		Main:        "claude",
 		Adversarial: "codex",
-		Runner: Runner{runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+		WorkRoot:    work,
+		Runner: Runner{WorkRoot: work, runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 			if request.provider == "claude" {
 				return aicli.Result{Answer: proposalJSON("proposal", "Private evidence"), Tokens: usage.Tokens{Input: 100, Output: 20}, UsageComplete: true}, nil
 			}
@@ -141,9 +144,12 @@ func TestUsageAccumulatesCriticRevisions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	answer, stopReason, err := tracked.Runner.runAI(context.Background(), Job{Main: RoleSettings{Provider: "claude"}, Critic: &RoleSettings{Provider: "codex"}, CriticMaxRounds: config.DefaultCriticMaxRounds}, "dir", "prompt", "", nil, &modelSessions{})
-	if err != nil || answer != "proposal" || stopReason != "approved" {
-		t.Fatalf("answer=%q stop=%q err=%v", answer, stopReason, err)
+	job := withClaudeCritic(testJob(command.Comment))
+	job.Identity.AttemptID = tracked.attemptID
+	job.Main.Provider, job.Critic.Provider = "claude", "codex"
+	result, err := tracked.Runner.Execute(context.Background(), job, newExecutionCheckpoints(tracked, job))
+	if err != nil || result.Answer != "proposal" || result.CriticStopReason != "approved" {
+		t.Fatalf("answer=%q stop=%q err=%v", result.Answer, result.CriticStopReason, err)
 	}
 	if err := finish(nil); err != nil {
 		t.Fatal(err)
@@ -161,16 +167,18 @@ func TestUsageAccumulatesCriticRevisions(t *testing.T) {
 func TestUsagePersistenceFailureStopsModelsOrPublication(t *testing.T) {
 	modelErr := errors.New("model error")
 	for _, tt := range []struct {
-		name     string
-		provider string
-		before   bool
-		modelErr error
-		critic   bool
+		name           string
+		provider       string
+		before         bool
+		modelErr       error
+		critic         bool
+		approvedCritic bool
 	}{
-		{"codex main/before call", "codex", true, modelErr, false}, {"claude main/before call", "claude", true, modelErr, false},
-		{"codex main/after failed call", "codex", false, modelErr, false}, {"claude main/after failed call", "claude", false, modelErr, false},
-		{"codex main/after successful call", "codex", false, nil, false}, {"claude main/after successful call", "claude", false, nil, false},
-		{"codex main/after critic call", "codex", false, nil, true}, {"claude main/after critic call", "claude", false, nil, true},
+		{"codex main/before call", "codex", true, modelErr, false, false}, {"claude main/before call", "claude", true, modelErr, false, false},
+		{"codex main/after failed call", "codex", false, modelErr, false, false}, {"claude main/after failed call", "claude", false, modelErr, false, false},
+		{"codex main/after successful call", "codex", false, nil, false, false}, {"claude main/after successful call", "claude", false, nil, false, false},
+		{"codex main/after critic call", "codex", false, nil, true, false}, {"claude main/after critic call", "claude", false, nil, true, false},
+		{"codex main/after approving critic call", "codex", false, nil, true, true}, {"claude main/after approving critic call", "claude", false, nil, true, true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			root := t.TempDir()
@@ -187,7 +195,11 @@ func TestUsagePersistenceFailureStopsModelsOrPublication(t *testing.T) {
 				}
 				store.Dir = blocked
 				if tt.critic {
-					return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"review_complete":true,"feedback":"Blocking failure."}`, Tokens: usage.Tokens{Input: 11, Output: 3}, UsageComplete: true}, nil
+					answer := `{"approved":false,"has_blockers":true,"review_complete":true,"feedback":"Blocking failure."}`
+					if tt.approvedCritic {
+						answer = approvedCritiqueJSON
+					}
+					return aicli.Result{Answer: answer, Tokens: usage.Tokens{Input: 11, Output: 3}, UsageComplete: true}, nil
 				}
 				return aicli.Result{Answer: "completed paid work", Tokens: usage.Tokens{Input: 10, Output: 2}, UsageComplete: tt.modelErr == nil}, tt.modelErr
 			}}})
@@ -199,6 +211,7 @@ func TestUsagePersistenceFailureStopsModelsOrPublication(t *testing.T) {
 				store.Dir = blocked
 			}
 			job := testJob(command.Comment)
+			job.Identity.AttemptID = tracked.attemptID
 			job.Main.Provider = tt.provider
 			if tt.critic {
 				job = withClaudeCritic(job)
@@ -206,8 +219,9 @@ func TestUsagePersistenceFailureStopsModelsOrPublication(t *testing.T) {
 					job.Critic.Provider = "codex"
 				}
 			}
-			tracked.Runner.WorkRoot = t.TempDir()
-			result, err := tracked.Runner.Run(context.Background(), job)
+			tracked.WorkRoot = t.TempDir()
+			tracked.Runner.WorkRoot = tracked.WorkRoot
+			result, err := tracked.Runner.Execute(context.Background(), job, newExecutionCheckpoints(tracked, job))
 			answer := result.Answer
 			wantCalls := 1
 			if tt.before {
@@ -220,7 +234,7 @@ func TestUsagePersistenceFailureStopsModelsOrPublication(t *testing.T) {
 			}
 			if tt.critic {
 				last := result.Calls[1]
-				if !last.HasBlockers || last.Approved || last.NoBlockers || !last.ReviewComplete || last.Tokens != (usage.Tokens{Input: 11, Output: 3}) || !last.Complete || result.validate(job, false) != nil {
+				if last.HasBlockers == tt.approvedCritic || last.Approved != tt.approvedCritic || last.NoBlockers != tt.approvedCritic || !last.ReviewComplete || last.Tokens != (usage.Tokens{Input: 11, Output: 3}) || !last.Complete || result.CriticStopReason != "" || result.validate(job, false) != nil {
 					t.Fatalf("post-native save failure lost parsed critic evidence: %+v", result)
 				}
 			}
@@ -360,9 +374,10 @@ printf '%%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.com
 		t.Fatal(err)
 	}
 	job := testJob(command.Comment)
+	job.Identity.AttemptID = tracked.attemptID
 	job.Main.Model, job.Main.Effort = "portable-model", "high"
 	job.Main.Skills = []string{testReviewSkillURL}
-	result, err := tracked.Runner.Run(context.Background(), job)
+	result, err := tracked.Runner.Execute(context.Background(), job, newExecutionCheckpoints(tracked, job))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -379,7 +394,7 @@ printf '%%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.com
 	}
 	installed := filepath.Join(os.Getenv("HOME"), ".agents", "skills", "ponytail-review", "SKILL.md")
 	if !strings.Contains(string(args), ".minion-context-") || !strings.Contains(string(prompt), installed) || !strings.Contains(string(args), "--model\nportable-model\n") || !strings.Contains(string(args), `model_reasoning_effort="high"`) || strings.Contains(string(args), "stale-host-model") {
-		t.Fatalf("usage wrapper lost worker context or skills: args=%s prompt=%s", args, prompt)
+		t.Fatalf("usage checkpoints lost worker context or skills: args=%s prompt=%s", args, prompt)
 	}
 	records, err := usage.ReadAll(store.Dir)
 	if err != nil || len(records) != 1 || records[0].Model != "portable-model" || records[0].CodexCalls != 1 || records[0].Tokens.Total() != 5 || len(result.Calls) != 1 {

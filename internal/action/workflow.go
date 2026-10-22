@@ -22,7 +22,7 @@ import (
 )
 
 // preparedAction owns orchestration-only publication state. Job and Result are portable data;
-// usage/evidence checkpoints use in-process orchestrator callbacks until #96.
+// Checkpoints cross the execution seam; publication resources stay here.
 type preparedAction struct {
 	job Job
 
@@ -57,16 +57,18 @@ func (e *Orchestrator) perform(ctx context.Context, request monitor.Job) (result
 	if prepared.needsExecution() {
 		runner := e.Runner
 		runner.WorkRoot = e.WorkRoot
-		if prepared.job.Critic != nil {
-			workRoot, logger, job := e.WorkRoot, e.Logger, prepared.job
-			runner.recordReview = func(calls []CallUsage, refutations []Refutation, stopReason string) error {
-				return saveReviewEvidence(workRoot, job, Result{
-					Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head,
-					Calls: calls, Refutations: refutations, CriticStopReason: stopReason,
-				}, logger)
-			}
+		executor := e.Executor
+		if executor == nil {
+			executor = &runner
 		}
-		result, err = runner.Run(ctx, prepared.job)
+		checkpoints := newExecutionCheckpoints(e, prepared.job)
+		job := prepared.job
+		if job.Critic != nil {
+			critic := *job.Critic
+			job.Critic = &critic
+		}
+		result, err = executor.Execute(ctx, job, checkpoints)
+		err = checkpoints.finish(result, err)
 		if err != nil {
 			e.logResult(prepared.job, result)
 			if len(result.Calls) != 0 {
