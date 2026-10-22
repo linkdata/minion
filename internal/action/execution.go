@@ -7,7 +7,6 @@ import (
 	"slices"
 
 	"github.com/linkdata/minion/internal/monitor"
-	"github.com/linkdata/minion/internal/usage"
 )
 
 // Executor computes one accepted Job; supplied input is borrowed read-only.
@@ -26,20 +25,20 @@ type Checkpoints interface {
 
 // CallCheckpoint carries pinned metadata before dispatch and the raw receipt afterward.
 type CallCheckpoint struct {
-	Version   int       `json:"version"`
-	Identity  Identity  `json:"identity"`
-	SourceRef string    `json:"source_ref"`
-	Call      CallUsage `json:"call"`
+	Version   int
+	Identity  Identity
+	SourceRef string
+	Call      CallUsage
 }
 
 // ReviewCheckpoint carries private evidence; a nonblank decision acknowledges an already saved prefix.
 type ReviewCheckpoint struct {
-	Version          int          `json:"version"`
-	Identity         Identity     `json:"identity"`
-	SourceRef        string       `json:"source_ref"`
-	Calls            []CallUsage  `json:"calls"`
-	Refutations      []Refutation `json:"refutations"`
-	CriticStopReason string       `json:"critic_stop_reason,omitempty"`
+	Version          int
+	Identity         Identity
+	SourceRef        string
+	Calls            []CallUsage
+	Refutations      []Refutation
+	CriticStopReason string
 }
 
 // executionCheckpoints binds local persistence and acknowledgements to one attempt.
@@ -91,11 +90,7 @@ func (c *executionCheckpoints) BeforeCall(fact CallCheckpoint) error {
 	if c.job.Critic != nil && (!c.reviewed || !slices.Equal(c.review.Calls, c.calls)) {
 		return c.fail(checkpointContractError())
 	}
-	// Admission checks metadata/order; paid counters retain their raw values for accounting.
 	calls := append(slices.Clone(c.calls), fact.Call)
-	for i := range calls {
-		calls[i].Tokens = usage.Tokens{}
-	}
 	if err := (Result{Calls: calls}).validateCalls(c.job, false); err != nil {
 		return c.fail(fmt.Errorf("%w: %w", checkpointContractError(), err))
 	}
@@ -107,6 +102,16 @@ func (c *executionCheckpoints) BeforeCall(fact CallCheckpoint) error {
 	call := fact.Call
 	c.pending = &call
 	return nil
+}
+
+// failureEvidence never promotes rejected Result fields into checkpoint facts.
+func (c *executionCheckpoints) failureEvidence() Result {
+	result := Result{Version: c.job.Version, Identity: c.job.Identity, SourceRef: c.job.Source.Head,
+		Calls: slices.Clone(c.calls), Refutations: slices.Clone(c.review.Refutations), CriticStopReason: c.review.CriticStopReason}
+	if c.returned != nil {
+		result.Calls = append(result.Calls, *c.returned)
+	}
+	return result
 }
 
 func (c *executionCheckpoints) AfterCall(fact CallCheckpoint) error {

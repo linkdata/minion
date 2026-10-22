@@ -70,9 +70,13 @@ func (e *Orchestrator) perform(ctx context.Context, request monitor.Job) (result
 		result, err = executor.Execute(ctx, job, checkpoints)
 		err = checkpoints.finish(result, err)
 		if err != nil {
-			e.logResult(prepared.job, result)
-			if len(result.Calls) != 0 {
-				err = errors.Join(err, e.retainReviewEvidence(prepared.job, result))
+			evidence := checkpoints.failureEvidence()
+			if result.matchesJob(prepared.job) {
+				evidence.Diagnostics = result.Diagnostics
+			}
+			e.logResult(prepared.job, evidence)
+			if len(evidence.Calls) != 0 {
+				err = errors.Join(err, e.retainReviewEvidence(prepared.job, evidence))
 			}
 			err = errors.Join(err, e.retainIncompleteAudit(prepared, result))
 			if validationErr := result.validate(prepared.job, false); validationErr != nil {

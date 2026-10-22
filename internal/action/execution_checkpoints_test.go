@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/linkdata/minion/internal/command"
@@ -194,9 +195,6 @@ func TestExecutionCriticRequiresInitialPrefixAndSeparateDecision(t *testing.T) {
 }
 
 func TestExecutionDecisionSaveFailureKeepsAcknowledgedPrefix(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root bypasses directory permissions")
-	}
 	for _, test := range []struct {
 		reason   string
 		approved bool
@@ -226,19 +224,18 @@ func TestExecutionDecisionSaveFailureKeepsAcknowledgedPrefix(t *testing.T) {
 			if saved.CriticStopReason != "" || !slices.Equal(saved.Calls, calls) {
 				t.Fatalf("receipt checkpoint already contained a decision: %+v", saved)
 			}
-			t.Cleanup(func() {
-				if err := os.Chmod(dir, 0700); err != nil {
-					t.Error(err)
-				}
-			})
-			if err := os.Chmod(dir, 0500); err != nil {
+			durableDir := dir + "-durable"
+			if err := os.Rename(dir, durableDir); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(dir, []byte("not a directory"), 0600); err != nil {
 				t.Fatal(err)
 			}
 			decisionErr := f.sink.Review(f.review(calls, nil, test.reason))
-			if !errors.Is(decisionErr, monitor.ErrTerminalJob) {
+			if !errors.Is(decisionErr, monitor.ErrTerminalJob) || !errors.Is(decisionErr, syscall.ENOTDIR) {
 				t.Fatalf("failed decision save was acknowledged: %v", decisionErr)
 			}
-			after, err := os.ReadFile(path)
+			after, err := os.ReadFile(filepath.Join(durableDir, filepath.Base(path)))
 			if err != nil || !bytes.Equal(before, after) || f.sink.review.CriticStopReason != "" || !slices.Equal(f.sink.review.Calls, calls) || len(f.sink.review.Refutations) != 0 {
 				t.Fatalf("failed decision write changed durable/acknowledged prefix: review=%+v error=%v", f.sink.review, err)
 			}
@@ -397,44 +394,5 @@ func TestExecutionPaidReviewFailureJoinsDifferentExecutorError(t *testing.T) {
 	runErr := errors.New("different executor error")
 	if err := f.sink.finish(f.result([]CallUsage{call}, nil, ""), runErr); !errors.Is(err, runErr) || !errors.Is(err, reviewErr) || !errors.Is(err, monitor.ErrTerminalJob) {
 		t.Fatalf("executor error erased the first paid checkpoint failure: %v", err)
-	}
-}
-
-func TestExecutionMetadataReplayPreservesInvalidRawCountersAndLowerBound(t *testing.T) {
-	for _, test := range []struct {
-		name   string
-		tokens usage.Tokens
-	}{{"negative input", usage.Tokens{Input: -1}}, {"cache exceeds input", usage.Tokens{Input: 1, CachedInput: 2}}} {
-		t.Run(test.name, func(t *testing.T) {
-			f := newExecutionAdapterFixture(t, withClaudeCritic(testJob(command.Comment)))
-			store := f.startUsage()
-			// Isolate metadata admission; strict review persistence still rejects these raw counters.
-			prefix := []CallUsage{
-				{Provider: "codex", Role: roleMain, Round: 1, Tokens: test.tokens, Complete: true},
-				{Provider: "claude", Role: roleCritic, Round: 1, ReviewPhase: reviewFull, Tokens: usage.Tokens{Input: 10}, Complete: true, HasBlockers: true, ReviewComplete: true},
-			}
-			f.sink.calls = slices.Clone(prefix)
-			f.sink.reviewed = true
-			f.sink.review = f.review(slices.Clone(prefix), nil, "")
-			u := f.owner.usageCheckpoint
-			u.record.CodexCalls, u.record.ClaudeCalls = 1, 1
-			u.record.Tokens, u.record.UsageComplete = usage.Tokens{Input: 10}, false
-			if err := u.save(); err != nil {
-				t.Fatal(err)
-			}
-			next := CallUsage{Provider: "codex", Role: roleMain, Round: 2, Tokens: usage.Tokens{Input: 3}, Complete: true}
-			f.ack(next)
-			if !slices.Equal(f.sink.calls[:2], prefix) || !slices.Equal(f.sink.review.Calls, prefix) {
-				t.Fatalf("temporary metadata replay changed raw evidence: calls=%+v review=%+v", f.sink.calls, f.sink.review.Calls)
-			}
-			records, err := usage.ReadAll(store.Dir)
-			if err != nil || len(records) != 1 || records[0].Tokens != (usage.Tokens{Input: 13}) || records[0].UsageComplete || records[0].CodexCalls != 2 || records[0].ClaudeCalls != 1 {
-				t.Fatalf("later representable delta was blocked/lost or completeness reset: records=%+v error=%v", records, err)
-			}
-			result := f.result(f.sink.calls, nil, "")
-			if result.validateCalls(f.job, false) == nil || saveReviewEvidence(f.owner.WorkRoot, f.job, result, nil) == nil {
-				t.Fatal("metadata sanitization weakened strict raw evidence validation")
-			}
-		})
 	}
 }
