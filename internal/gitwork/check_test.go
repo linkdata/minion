@@ -30,7 +30,12 @@ func TestSupportedGitVersion(t *testing.T) {
 		{"git version 3.0.0", true},
 		{"git version 2.45.1.windows.1", true},
 		{"git version 2.45.1 (Vendor Git-1)", true},
+		{"git version 2.45.1 (Vendor Git-1)\n", true},
 		{"git version 2.45.1 (Apple Git-154)", true},
+		{"git version 2.45.1 (Vendor\x00 Git-1)", false},
+		{"git version 2.45.1 (Vendor\tGit-1)", false},
+		{"git version 2.45.1 (Vendor\x1bGit-1)", false},
+		{"git version 2.45.1 (Vendor\x7fGit-1)", false},
 		{"git version 2.46.0.rc0", false},
 		{"git version 2.45.1.rc0", false},
 		{"git version 2.45.1-rc1", false},
@@ -93,7 +98,7 @@ for argument do
   case "$argument" in
     --git-dir=*) metadata=${argument#--git-dir=} ;;
     --work-tree=*) source=${argument#--work-tree=} ;;
-    --version|init|add|write-tree|hash-object|update-ref|bundle|pack-refs|cat-file|fsck|read-tree|ls-files|update-index|check-ignore|diff) operation=$argument ;;
+    --version|init|add|write-tree|hash-object|update-ref|bundle|pack-refs|cat-file|fsck|merge-base|read-tree|ls-files|update-index|check-ignore|diff) operation=$argument ;;
   esac
 done
 case "$metadata" in ` + shellQuote(canonical+"/.minion-git-check-") + `*) ;; *) exit 81 ;; esac
@@ -118,7 +123,7 @@ exec ` + shellQuote(realGit) + ` "$@"
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, operation := range []string{"--version", "write-tree", "hash-object", "bundle", "fsck", "read-tree", "diff"} {
+	for _, operation := range []string{"--version", "write-tree", "hash-object", "bundle", "fsck", "merge-base", "read-tree", "diff"} {
 		if !slices.Contains(strings.Fields(string(data)), operation) {
 			t.Errorf("readiness did not exercise %s: %s", operation, data)
 		}
@@ -143,6 +148,7 @@ func TestCheckGitFailuresRetainCauseAndCleanOwnedFiles(t *testing.T) {
 		{name: "commit identity", match: " hash-object ", action: "printf 'not-a-commit\\n'; exit 0", want: "invalid commit identity"},
 		{name: "bundle output bound", match: " bundle create ", action: fmt.Sprintf("exec head -c %d /dev/zero", maxGitCheckBundleBytes+1), want: "offline git bundle output exceeds action limit", limit: true},
 		{name: "import capability", match: " --ref-format=files ", action: "printf 'import unavailable' >&2; exit 8", want: "git readiness import:", exit: 8},
+		{name: "merge-base capability", match: " merge-base ", action: "printf 'merge-base unavailable' >&2; exit 10", want: "git readiness import: offline git merge-base:", exit: 10},
 		{name: "missing index change", match: " --raw ", action: "exit 0", want: "index did not preserve the synthetic change"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
