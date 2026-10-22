@@ -17,7 +17,7 @@ import (
 )
 
 // ProtocolVersion identifies the versioned Job, Result, and Status contracts.
-const ProtocolVersion = 3
+const ProtocolVersion = 4
 
 const (
 	maxDiagnostics            = 100
@@ -84,6 +84,8 @@ type CallUsage struct {
 	NoBlockers bool `json:"no_blockers,omitempty"`
 	// HasBlockers attests an explicit has_blockers=true; both false means no valid verdict.
 	HasBlockers bool `json:"has_blockers,omitempty"`
+	// ReviewComplete attests completed assigned critic scope, separately from token accounting.
+	ReviewComplete bool `json:"review_complete,omitempty"`
 	// Complete confirms accounting coverage; interrupted or failed native runs are conservative.
 	Complete bool `json:"complete"`
 }
@@ -347,14 +349,16 @@ func (r Result) validateCalls(j Job, complete bool) error {
 		if i > 0 && j.Critic != nil {
 			previous := r.Calls[i-1]
 			if call.Role == roleMain {
-				validOrder = previous.Role == roleCritic && (previous.NoBlockers || previous.HasBlockers) && !advanceToFull && stopReason == "" && call.Round == previous.Round+1 && call.ReviewPhase == ""
+				validOrder = previous.Role == roleCritic && previous.ReviewComplete && (previous.NoBlockers || previous.HasBlockers) && !advanceToFull && stopReason == "" && call.Round == previous.Round+1 && call.ReviewPhase == ""
 			} else if previous.Role == roleMain {
 				validOrder = call.Round == previous.Round && call.ReviewPhase == reviewPhases(call.Round)[0]
 			} else {
 				validOrder = previous.ReviewPhase == reviewVerification && advanceToFull && call.Round == previous.Round && call.ReviewPhase == reviewFull
 			}
 		}
-		invalidVerdict := ((call.Approved || call.NoBlockers || call.HasBlockers) && call.Role != roleCritic) || (call.Approved && !call.NoBlockers) || (call.HasBlockers && call.NoBlockers)
+		invalidVerdict := ((call.Approved || call.NoBlockers || call.HasBlockers || call.ReviewComplete) && call.Role != roleCritic) ||
+			(call.Approved && !call.NoBlockers) || (call.HasBlockers && call.NoBlockers) ||
+			(call.ReviewComplete && !call.NoBlockers && !call.HasBlockers) || (!call.ReviewComplete && (call.Approved || call.NoBlockers))
 		wrongModel := call.Provider != role.Provider || call.Model != role.Model || call.Effort != role.Effort
 		if !validOrder || call.Round > rounds || invalidVerdict || wrongModel || !call.Tokens.Valid() {
 			return errors.New("invalid model call usage")

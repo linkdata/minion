@@ -373,7 +373,7 @@ func captureComment(t *testing.T, w http.ResponseWriter, r *http.Request, body *
 	return true
 }
 
-const approvedCritiqueJSON = `{"approved":true,"has_blockers":false,"feedback":""}`
+const approvedCritiqueJSON = `{"review_complete":true,"approved":true,"has_blockers":false,"feedback":""}`
 
 func serveFixFlowFixture(t *testing.T, w http.ResponseWriter, r *http.Request) bool {
 	t.Helper()
@@ -468,10 +468,10 @@ func privateReviewResult(job Job) Result {
 	return Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Public answer.", CriticStopReason: "approved",
 		Calls: []CallUsage{
 			{Provider: job.Main.Provider, Role: roleMain, Round: 1},
-			{Provider: job.Critic.Provider, Role: roleCritic, Round: 1, ReviewPhase: reviewFull, HasBlockers: true},
+			{Provider: job.Critic.Provider, Role: roleCritic, ReviewComplete: true, Round: 1, ReviewPhase: reviewFull, HasBlockers: true},
 			{Provider: job.Main.Provider, Role: roleMain, Round: 2},
-			{Provider: job.Critic.Provider, Role: roleCritic, Round: 2, ReviewPhase: reviewVerification, Approved: true, NoBlockers: true},
-			{Provider: job.Critic.Provider, Role: roleCritic, Round: 2, ReviewPhase: reviewFull, Approved: true, NoBlockers: true},
+			{Provider: job.Critic.Provider, Role: roleCritic, ReviewComplete: true, Round: 2, ReviewPhase: reviewVerification, Approved: true, NoBlockers: true},
+			{Provider: job.Critic.Provider, Role: roleCritic, ReviewComplete: true, Round: 2, ReviewPhase: reviewFull, Approved: true, NoBlockers: true},
 		},
 		Refutations: []Refutation{{Round: 2, Text: "PRIVATE_MAIN_REFUTATION"}},
 	}

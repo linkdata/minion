@@ -280,7 +280,7 @@ func (e *Orchestrator) logResult(job Job, result Result) {
 			if i == len(result.Calls)-1 {
 				reason = result.CriticStopReason
 			}
-			e.logf("action call job=%s attempt=%s executor=%s provider=%s role=%s round=%d review_phase=%s approved=%t no_blockers=%t has_blockers=%t verdict_allows_full=%t no_blocker_verdict_streak=%d policy_met=%t stop_reason=%q model=%q effort=%q complete=%t", id.JobID, id.AttemptID, id.ExecutorID, call.Provider, call.Role, call.Round, call.ReviewPhase, call.Approved, call.NoBlockers, call.HasBlockers, advance, policy.noBlockerRounds, reason != "", reason, call.Model, call.Effort, call.Complete)
+			e.logf("action call job=%s attempt=%s executor=%s provider=%s role=%s round=%d review_phase=%s approved=%t no_blockers=%t has_blockers=%t review_complete=%t verdict_allows_full=%t no_blocker_verdict_streak=%d policy_met=%t stop_reason=%q model=%q effort=%q complete=%t", id.JobID, id.AttemptID, id.ExecutorID, call.Provider, call.Role, call.Round, call.ReviewPhase, call.Approved, call.NoBlockers, call.HasBlockers, call.ReviewComplete, advance, policy.noBlockerRounds, reason != "", reason, call.Model, call.Effort, call.Complete)
 		}
 	}
 }

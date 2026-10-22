@@ -29,7 +29,7 @@ func TestReviewRoundBudgetIncludesEveryFreshFullRejection(t *testing.T) {
 				if request.role == roleMain {
 					answer = proposalJSON("Candidate", "")
 				} else if request.reviewPhase == reviewFull {
-					answer = `{"approved":false,"has_blockers":true,"feedback":"Fresh full finding."}`
+					answer = `{"approved":false,"has_blockers":true,"review_complete":true,"feedback":"Fresh full finding."}`
 				}
 				return aicli.Result{Answer: answer}, nil
 			}}

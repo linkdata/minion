@@ -131,7 +131,7 @@ func TestUsageAccumulatesCriticRevisions(t *testing.T) {
 			critiques++
 			answer := approvedCritiqueJSON
 			if critiques == 1 {
-				answer = `{"approved":false,"has_blockers":true,"feedback":"Check the error path."}`
+				answer = `{"approved":false,"has_blockers":true,"review_complete":true,"feedback":"Check the error path."}`
 			}
 			return aicli.Result{Answer: answer, Tokens: usage.Tokens{Input: 10, Output: 2}, UsageComplete: true}, nil
 		}},
@@ -187,7 +187,7 @@ func TestUsagePersistenceFailureStopsModelsOrPublication(t *testing.T) {
 				}
 				store.Dir = blocked
 				if tt.critic {
-					return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"feedback":"Blocking failure."}`, Tokens: usage.Tokens{Input: 11, Output: 3}, UsageComplete: true}, nil
+					return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"review_complete":true,"feedback":"Blocking failure."}`, Tokens: usage.Tokens{Input: 11, Output: 3}, UsageComplete: true}, nil
 				}
 				return aicli.Result{Answer: "completed paid work", Tokens: usage.Tokens{Input: 10, Output: 2}, UsageComplete: tt.modelErr == nil}, tt.modelErr
 			}}})
@@ -220,7 +220,7 @@ func TestUsagePersistenceFailureStopsModelsOrPublication(t *testing.T) {
 			}
 			if tt.critic {
 				last := result.Calls[1]
-				if !last.HasBlockers || last.Approved || last.NoBlockers || last.Tokens != (usage.Tokens{Input: 11, Output: 3}) || !last.Complete || result.validate(job, false) != nil {
+				if !last.HasBlockers || last.Approved || last.NoBlockers || !last.ReviewComplete || last.Tokens != (usage.Tokens{Input: 11, Output: 3}) || !last.Complete || result.validate(job, false) != nil {
 					t.Fatalf("post-native save failure lost parsed critic evidence: %+v", result)
 				}
 			}

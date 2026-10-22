@@ -79,7 +79,7 @@ func TestPublishRetainsPrivateReviewBeforeGitHubWrites(t *testing.T) {
 					http.Error(w, "private review unavailable", http.StatusInternalServerError)
 					return
 				}
-				if len(record.Refutations) != 1 || len(record.Calls) == 0 || record.Calls[len(record.Calls)-1].Approved != test.approved || record.CriticStopReason != result.CriticStopReason || record.CriticNonblockingRounds != 1 || record.CriticConsecutiveNoBlockerRounds != job.CriticConsecutiveNoBlockerRounds || record.SourceRef != job.Source.Head {
+				if len(record.Refutations) != 1 || len(record.Calls) == 0 || record.Calls[len(record.Calls)-1].Approved != test.approved || !record.Calls[len(record.Calls)-1].ReviewComplete || record.CriticStopReason != result.CriticStopReason || record.CriticNonblockingRounds != 1 || record.CriticConsecutiveNoBlockerRounds != job.CriticConsecutiveNoBlockerRounds || record.SourceRef != job.Source.Head {
 					t.Errorf("private evidence/policy lost: %+v", record)
 				}
 				if r.Method == http.MethodGet && r.URL.Path == "/repos/o/r" {
@@ -160,6 +160,43 @@ func TestPrivateReviewRetainsPrefixAndRejectsRollback(t *testing.T) {
 	}
 }
 
+func TestPrivateReviewRejectsRewrittenCoverage(t *testing.T) {
+	for _, reviewComplete := range []bool{false, true} {
+		t.Run(fmt.Sprintf("saved review complete=%t", reviewComplete), func(t *testing.T) {
+			job := withClaudeCritic(testJob(command.Comment))
+			result := privateReviewResult(job)
+			result.Calls, result.Refutations = result.Calls[:2], nil
+			result.Answer, result.CriticStopReason = "", ""
+			result.Calls[1].ReviewComplete = reviewComplete
+			if err := result.validate(job, false); err != nil {
+				t.Fatalf("invalid saved prefix: %v", err)
+			}
+			orchestrator := Orchestrator{WorkRoot: t.TempDir()}
+			if err := orchestrator.retainReviewEvidence(job, result); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(orchestrator.WorkRoot, "reviews", job.Identity.AttemptID+".json")
+			before, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			changed := result
+			changed.Calls = append([]CallUsage(nil), result.Calls...)
+			changed.Calls[1].ReviewComplete = !reviewComplete
+			if err := changed.validate(job, false); err != nil {
+				t.Fatalf("invalid replacement prefix: %v", err)
+			}
+			if err := orchestrator.retainReviewEvidence(job, changed); !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "changed or discarded a saved prefix") {
+				t.Fatalf("saved coverage was rewritten: %v", err)
+			}
+			after, err := os.ReadFile(path)
+			if err != nil || !bytes.Equal(before, after) || readPrivateReview(t, orchestrator.WorkRoot).Calls[1].ReviewComplete != reviewComplete {
+				t.Fatalf("rejected coverage update changed retained evidence: %s error=%v", after, err)
+			}
+		})
+	}
+}
+
 func TestPrivateReviewRecordsDecisionAfterVerdictCheckpoint(t *testing.T) {
 	job := withClaudeCritic(testJob(command.Comment))
 	result := privateReviewResult(job)
@@ -169,7 +206,7 @@ func TestPrivateReviewRecordsDecisionAfterVerdictCheckpoint(t *testing.T) {
 	if err := orchestrator.retainReviewEvidence(job, beforeDecision); err != nil {
 		t.Fatal(err)
 	}
-	if saved := readPrivateReview(t, orchestrator.WorkRoot); saved.CriticStopReason != "" || !saved.Calls[len(saved.Calls)-1].Approved {
+	if saved := readPrivateReview(t, orchestrator.WorkRoot); saved.CriticStopReason != "" || !saved.Calls[len(saved.Calls)-1].Approved || !saved.Calls[len(saved.Calls)-1].ReviewComplete {
 		t.Fatalf("verdict checkpoint fabricated or lost evidence: %+v", saved)
 	}
 	if err := orchestrator.retainReviewEvidence(job, result); err != nil {
@@ -295,7 +332,7 @@ func TestPerformCheckpointsPrivateReviewBeforeLaterCalls(t *testing.T) {
 						return aicli.Result{Answer: proposalJSON("Public answer", "")}, nil
 					}
 					if calls == 2 {
-						return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"feedback":"PRIVATE_CRITIC_FINDING"}`}, nil
+						return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"review_complete":true,"feedback":"PRIVATE_CRITIC_FINDING"}`}, nil
 					}
 					if calls == 3 {
 						return aicli.Result{Answer: proposalJSON("Public answer", "PRIVATE_LATER_REFUTATION")}, nil
@@ -304,7 +341,7 @@ func TestPerformCheckpointsPrivateReviewBeforeLaterCalls(t *testing.T) {
 						if err := os.Chmod(filepath.Join(root, "reviews"), 0500); err != nil {
 							t.Fatal(err)
 						}
-						return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"feedback":"PRIVATE_CRITIC_FINDING"}`}, nil
+						return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"review_complete":true,"feedback":"PRIVATE_CRITIC_FINDING"}`}, nil
 					}
 					if outcome == "panic" {
 						panic("simulated interruption")
@@ -361,7 +398,7 @@ func TestPerformCheckpointsPrivateReviewBeforeLaterCalls(t *testing.T) {
 				wantCalls = 4
 			}
 			record := readPrivateReview(t, root)
-			if len(record.Refutations) != 1 || record.Refutations[0].Text != "PRIVATE_LATER_REFUTATION" || len(record.Calls) != wantCalls || !record.Calls[1].HasBlockers {
+			if len(record.Refutations) != 1 || record.Refutations[0].Text != "PRIVATE_LATER_REFUTATION" || len(record.Calls) != wantCalls || !record.Calls[1].HasBlockers || !record.Calls[1].ReviewComplete {
 				t.Fatalf("failed/interrupted action lost earlier evidence: %+v", record)
 			}
 		})

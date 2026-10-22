@@ -69,7 +69,7 @@ func TestInitialRefutationsAreDiscardedAndEmptyHistoryIsOptional(t *testing.T) {
 			return aicli.Result{Answer: proposalJSON("Revised candidate", "")}, nil
 		}
 		if request.round == 1 {
-			return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"feedback":"Correct the candidate."}`}, nil
+			return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"review_complete":true,"feedback":"Correct the candidate."}`}, nil
 		}
 		return aicli.Result{Answer: approvedCritiqueJSON}, nil
 	}}
@@ -95,7 +95,7 @@ func TestReviewHistoryGrantFailureIsTerminalAfterPaidWork(t *testing.T) {
 	runner := Runner{WorkRoot: root, runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 		calls++
 		if request.role == roleCritic {
-			return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"feedback":"Correct the candidate."}`}, nil
+			return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"review_complete":true,"feedback":"Correct the candidate."}`}, nil
 		}
 		if request.round == 1 {
 			return aicli.Result{Answer: proposalJSON("First candidate", "")}, nil
@@ -235,7 +235,7 @@ func TestRefutationsSurviveOmissionWithoutRememberingImplementedChanges(t *testi
 		default:
 			t.Fatalf("unexpected critic call: %+v", request)
 		}
-		return aicli.Result{Answer: fmt.Sprintf(`{"approved":%t,"has_blockers":%t,"feedback":%q}`, approved, blockers, feedback)}, nil
+		return aicli.Result{Answer: fmt.Sprintf(`{"approved":%t,"has_blockers":%t,"review_complete":true,"feedback":%q}`, approved, blockers, feedback)}, nil
 	}}
 	result, err := runner.Run(context.Background(), job)
 	wantSequence := []string{"main/1/", "critic/1/full", "main/2/", "critic/2/verification", "critic/2/full", "main/3/", "critic/3/verification", "main/4/", "critic/4/verification", "critic/4/full"}
@@ -294,7 +294,7 @@ func TestRefutationsRetainSuccessfulMainPrefixAfterFailure(t *testing.T) {
 						return aicli.Result{Answer: "unparsed critic"}, nil
 					}
 				}
-				return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"feedback":"PRIVATE_BLOCKER: correction required."}`}, nil
+				return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"review_complete":true,"feedback":"PRIVATE_BLOCKER: correction required."}`}, nil
 			}}
 			result, err := runner.Run(context.Background(), job)
 			if err == nil || result.Answer != "" || !reflect.DeepEqual(result.Refutations, expected) {
@@ -310,6 +310,12 @@ func TestRefutationsRetainSuccessfulMainPrefixAfterFailure(t *testing.T) {
 			}
 			if len(result.Refutations) != wantRefs || len(result.Calls) != wantCalls {
 				t.Fatalf("prefix length refs=%d calls=%d", len(result.Refutations), len(result.Calls))
+			}
+			for i, call := range result.Calls {
+				wantReviewComplete := call.Role == roleCritic && !(i == len(result.Calls)-1 && (failure == "critic provider" || failure == "critic malformed"))
+				if call.ReviewComplete != wantReviewComplete {
+					t.Fatalf("failed/unparsed output changed review coverage at call %d: %+v", i, call)
+				}
 			}
 			if err := result.validate(job, false); err != nil {
 				t.Fatal(err)
@@ -346,7 +352,7 @@ func TestRefutationsRemainPrivateFromAuditArtifacts(t *testing.T) {
 			return aicli.Result{Answer: proposalJSON("Public model summary", text)}, nil
 		}
 		if request.round == 1 {
-			return aicli.Result{Answer: `{"approved":false,"has_blockers":false,"feedback":"PRIVATE_AUDIT_FINDING: report concern."}`}, nil
+			return aicli.Result{Answer: `{"approved":false,"has_blockers":false,"review_complete":true,"feedback":"PRIVATE_AUDIT_FINDING: report concern."}`}, nil
 		}
 		return aicli.Result{Answer: approvedCritiqueJSON}, nil
 	}}
@@ -393,7 +399,7 @@ func TestRefutationCheckpointFailureStopsBeforeNextCall(t *testing.T) {
 			}
 			return aicli.Result{Answer: proposalJSON("Public answer", text)}, nil
 		}
-		return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"feedback":"PRIVATE_BLOCKER"}`}, nil
+		return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"review_complete":true,"feedback":"PRIVATE_BLOCKER"}`}, nil
 	}}
 	result, err := runner.Run(context.Background(), job)
 	if !errors.Is(err, checkpointErr) || !errors.Is(err, monitor.ErrTerminalJob) || calls != 3 || checkpoints != 4 || result.Answer != "" || result.CriticStopReason != "" || !reflect.DeepEqual(result.Refutations, expected) || !reflect.DeepEqual(lastCheckpoint, expected) {
@@ -412,7 +418,7 @@ func TestRunnerCheckpointsCriticDecisionAfterVerifiedVerdict(t *testing.T) {
 			var checkpoints []string
 			runner := Runner{WorkRoot: t.TempDir(), recordReview: func(receipts []CallUsage, refs []Refutation, stopReason string) error {
 				checkpoints = append(checkpoints, fmt.Sprintf("%d/%s", len(receipts), stopReason))
-				if len(refs) != 0 || len(receipts) == 2 && (!receipts[1].Approved || !receipts[1].NoBlockers) {
+				if len(refs) != 0 || len(receipts) == 2 && (!receipts[1].Approved || !receipts[1].NoBlockers || !receipts[1].ReviewComplete) {
 					t.Fatalf("checkpoint lost native verdict: calls=%+v refutations=%+v", receipts, refs)
 				}
 				if failDecision && stopReason != "" {

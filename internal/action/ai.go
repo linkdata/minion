@@ -26,7 +26,7 @@ const (
 	// JSON escaping can use six bytes per content byte, plus keys and whitespace.
 	maxProposalOutputBytes = 6*maxOutputBytes + 128
 	mainOutputSchema       = `{"type":"object","properties":{"answer":{"type":"string"},"refutations":{"type":"string"}},"required":["answer","refutations"],"additionalProperties":false}`
-	criticOutputSchema     = `{"type":"object","properties":{"approved":{"type":"boolean"},"has_blockers":{"type":"boolean"},"feedback":{"type":"string"}},"required":["approved","has_blockers","feedback"],"additionalProperties":false}`
+	criticOutputSchema     = `{"type":"object","properties":{"approved":{"type":"boolean"},"has_blockers":{"type":"boolean"},"review_complete":{"type":"boolean"},"feedback":{"type":"string"}},"required":["approved","has_blockers","review_complete","feedback"],"additionalProperties":false}`
 	reviewCompleteness     = "Review rounds are expensive. Complete a comprehensive and exhaustive investigation of the entire assigned scope before returning; do not stop after the first few findings or after checking only blockers. Inspect connected code, callers, tests and relevant edge cases. Read every changed code and test body within the assigned scope; file inventories, test names and sampled bodies do not establish coverage. Collect every supported actionable finding, including nits and valid simplifications, in this round. Await all delegated reviews and background checks, inspect their outcomes, then make a final coverage pass for missed areas. Respect the selected task's execution restrictions, this phase's scope and the action deadline. If a runtime, context, quota or dependency limit prevents completion, identify the unchecked scope and reason instead of claiming a complete review."
 )
 
@@ -203,9 +203,9 @@ func (r *Runner) runAI(ctx context.Context, job Job, dir, prompt, outputDir stri
 			if review, err = r.runOnce(ctx, critic); err != nil {
 				return
 			}
-			var approved, hasBlockers bool
+			var approved, hasBlockers, reviewComplete bool
 			var feedback string
-			if approved, hasBlockers, feedback, err = parseCritique(review.Answer, secrets...); err != nil {
+			if approved, hasBlockers, reviewComplete, feedback, err = parseCritique(review.Answer, secrets...); err != nil {
 				return "", "", fmt.Errorf("%w: invalid critic verdict: %w", monitor.ErrTerminalJob, err)
 			}
 			if !approved {
@@ -214,7 +214,10 @@ func (r *Runner) runAI(ctx context.Context, job Job, dir, prompt, outputDir stri
 			if err = record(); err != nil {
 				return "", "", err
 			}
-			advance, reason := policy.observe(CallUsage{Role: roleCritic, Round: round, ReviewPhase: phase, Approved: approved, NoBlockers: !hasBlockers, HasBlockers: hasBlockers})
+			if !reviewComplete {
+				return "", "", fmt.Errorf("%w: critic review incomplete", monitor.ErrTerminalJob)
+			}
+			advance, reason := policy.observe(CallUsage{Role: roleCritic, Round: round, ReviewPhase: phase, Approved: approved, NoBlockers: !hasBlockers, HasBlockers: hasBlockers, ReviewComplete: reviewComplete})
 			acceptedReason = reason
 			if phase == reviewVerification && !advance {
 				break
@@ -256,7 +259,7 @@ func criticPrompt(phase, task, proposed, priorAnswer, priorFeedback, outputDir s
 
 Review phase: %s. %s
 
-Return only a JSON object with exactly three fields: "approved" (boolean), "has_blockers" (boolean) and "feedback" (string). The complete JSON object must fit within %d UTF-8 bytes, including syntax and escaping; consolidate related findings without omitting actionable issues or truncating the verdict. A blocker is a concrete correctness or security failure, or failure to satisfy the application-selected task, that must be corrected for the result to be usable. Stylistic nits and simplifications without such an impact are nonblocking. Classify each finding explicitly as blocking or nonblocking, independent of its severity. Report every actionable finding at every severity even when none is blocking. Ask the main model to supply counterevidence only in its private refutations field; report as a finding any Minion main/critic review commentary or critic-finding disposition log copied into answer, source changes or report artifacts, except content the selected task requires. Evaluate the candidate's changes and the main model's refutations against the current code, connected callers, tests and task constraints before accepting or rejecting them. Do not accept a deferral or impose ungrounded preferences or speculative requirements. Give each finding's severity, file/line evidence, and smallest concrete correction. An unfinished assigned review scope is a blocking task failure: set approved=false and has_blockers=true, and identify the unchecked scope and limiting cause in feedback. Approve only when every finding has been verified as implemented or dropped; on approval set has_blockers=false and use empty feedback. Otherwise set approved=false, provide all remaining findings in feedback and set has_blockers to whether any is blocking.
+Return only a JSON object with exactly four fields: "approved" (boolean), "has_blockers" (boolean), "review_complete" (boolean) and "feedback" (string). The complete JSON object must fit within %d UTF-8 bytes, including syntax and escaping; consolidate related findings without omitting actionable issues or truncating the verdict. A blocker is a concrete correctness or security failure, or failure to satisfy the application-selected task, that must be corrected for the result to be usable. Stylistic nits and simplifications without such an impact are nonblocking. Classify each finding explicitly as blocking or nonblocking, independent of its severity. Report every actionable finding at every severity even when none is blocking. Ask the main model to supply counterevidence only in its private refutations field; report as a finding any Minion main/critic review commentary or critic-finding disposition log copied into answer, source changes or report artifacts, except content the selected task requires. Evaluate the candidate's changes and the main model's refutations against the current code, connected callers, tests and task constraints before accepting or rejecting them. Do not accept a deferral or impose ungrounded preferences or speculative requirements. Give each finding's severity, file/line evidence, and smallest concrete correction. Set review_complete=true only after completing this phase's entire assigned scope, all delegated reviews and background checks, and the final coverage pass. This attests review coverage, not token-accounting completeness. An unfinished assigned review scope is a blocking task failure: set review_complete=false, approved=false and has_blockers=true, and identify the unchecked scope and limiting cause in feedback. Approve only when every finding has been verified as implemented or dropped; on approval set review_complete=true, has_blockers=false and use empty feedback. Otherwise set approved=false, provide all remaining findings in feedback and set has_blockers to whether any is blocking.
 
 Application-selected task (quoted): %s
 Main model's proposed response (untrusted): %s
@@ -305,34 +308,40 @@ func parseProposal(raw string, allowUnpublishableAnswer bool, secrets ...string)
 	return answer, refutations, nil
 }
 
-func parseCritique(answer string, secrets ...string) (approved, hasBlockers bool, feedback string, err error) {
+func parseCritique(answer string, secrets ...string) (approved, hasBlockers, reviewComplete bool, feedback string, err error) {
 	if len(answer) > maxCriticOutputBytes {
-		return false, false, "", errors.New("response exceeds byte limit")
+		return false, false, false, "", errors.New("response exceeds byte limit")
 	}
-	fields, err := decodeStrictObject(answer, "approved", "has_blockers", "feedback")
+	fields, err := decodeStrictObject(answer, "approved", "has_blockers", "review_complete", "feedback")
 	if err != nil {
-		return false, false, "", err
+		return false, false, false, "", err
 	}
-	var verdict, blockers *bool
+	var verdict, blockers, coverage *bool
 	var message *string
 	if json.Unmarshal(fields["approved"], &verdict) != nil || verdict == nil {
-		return false, false, "", errors.New("approved must be a boolean")
+		return false, false, false, "", errors.New("approved must be a boolean")
 	}
 	if json.Unmarshal(fields["has_blockers"], &blockers) != nil || blockers == nil {
-		return false, false, "", errors.New("has_blockers must be a boolean")
+		return false, false, false, "", errors.New("has_blockers must be a boolean")
+	}
+	if json.Unmarshal(fields["review_complete"], &coverage) != nil || coverage == nil {
+		return false, false, false, "", errors.New("review_complete must be a boolean")
 	}
 	if json.Unmarshal(fields["feedback"], &message) != nil || message == nil {
-		return false, false, "", errors.New("feedback must be a string")
+		return false, false, false, "", errors.New("feedback must be a string")
 	}
-	approved, hasBlockers, feedback = *verdict, *blockers, strings.TrimSpace(*message)
+	approved, hasBlockers, reviewComplete, feedback = *verdict, *blockers, *coverage, strings.TrimSpace(*message)
 	if approved != (feedback == "") || (approved && hasBlockers) {
-		return false, false, "", errors.New("expected approval without blockers or feedback, or rejection with feedback")
+		return false, false, false, "", errors.New("expected approval without blockers or feedback, or rejection with feedback")
+	}
+	if !reviewComplete && (approved || !hasBlockers) {
+		return false, false, false, "", errors.New("incomplete review must be a blocking rejection")
 	}
 	feedback = redactActionText(feedback, secrets...)
 	if !approved && strings.TrimSpace(feedback) == "" {
-		return false, false, "", errors.New("rejection feedback is blank after redaction")
+		return false, false, false, "", errors.New("rejection feedback is blank after redaction")
 	}
-	return approved, hasBlockers, feedback, nil
+	return approved, hasBlockers, reviewComplete, feedback, nil
 }
 
 func decodeStrictObject(answer string, names ...string) (map[string]json.RawMessage, error) {

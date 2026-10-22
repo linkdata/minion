@@ -26,12 +26,12 @@ func TestCriticEvidencePreservesBlockerVerdicts(t *testing.T) {
 		approved, noBlockers, hasBlockers bool
 	}{
 		{name: "approved", answer: approvedCritiqueJSON, approved: true, noBlockers: true},
-		{name: "nonblocking rejection", answer: `{"approved":false,"has_blockers":false,"feedback":"Nonblocking nit."}`, noBlockers: true},
-		{name: "blocking rejection", answer: `{"approved":false,"has_blockers":true,"feedback":"Blocking failure."}`, hasBlockers: true},
+		{name: "nonblocking rejection", answer: `{"review_complete":true,"approved":false,"has_blockers":false,"feedback":"Nonblocking nit."}`, noBlockers: true},
+		{name: "blocking rejection", answer: `{"review_complete":true,"approved":false,"has_blockers":true,"feedback":"Blocking failure."}`, hasBlockers: true},
 		{name: "invalid verdict", answer: `garbage`},
 		{name: "failed approval", answer: approvedCritiqueJSON, err: failed},
-		{name: "failed nonblocking", answer: `{"approved":false,"has_blockers":false,"feedback":"Nonblocking nit."}`, err: failed},
-		{name: "failed blocking", answer: `{"approved":false,"has_blockers":true,"feedback":"Blocking failure."}`, err: failed},
+		{name: "failed nonblocking", answer: `{"review_complete":true,"approved":false,"has_blockers":false,"feedback":"Nonblocking nit."}`, err: failed},
+		{name: "failed blocking", answer: `{"review_complete":true,"approved":false,"has_blockers":true,"feedback":"Blocking failure."}`, err: failed},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			job := testJob(command.Comment)
@@ -60,7 +60,7 @@ func TestCriticEvidencePreservesBlockerVerdicts(t *testing.T) {
 			} else if result.CriticStopReason != "" || result.Answer != "" {
 				t.Fatalf("failed critic published: %+v", result)
 			}
-			want := CallUsage{Provider: "claude", Role: roleCritic, Round: 1, ReviewPhase: reviewFull, Tokens: usage.Tokens{Input: 11, Output: 2}, Approved: tt.approved, NoBlockers: tt.noBlockers, HasBlockers: tt.hasBlockers}
+			want := CallUsage{Provider: "claude", Role: roleCritic, Round: 1, ReviewPhase: reviewFull, ReviewComplete: tt.noBlockers || tt.hasBlockers, Tokens: usage.Tokens{Input: 11, Output: 2}, Approved: tt.approved, NoBlockers: tt.noBlockers, HasBlockers: tt.hasBlockers}
 			if result.Calls[1] != want {
 				t.Fatalf("native verdict lost: got=%+v want=%+v", result.Calls[1], want)
 			}
@@ -73,16 +73,16 @@ func TestJournalPolicyIsNotPublication(t *testing.T) {
 	job.Critic, job.CriticMaxRounds, job.CriticNonblockingRounds = &RoleSettings{Provider: "claude"}, 2, 2
 	result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Complete answer", Calls: []CallUsage{
 		{Provider: job.Main.Provider, Role: roleMain, Round: 1},
-		{Provider: "claude", Role: roleCritic, Round: 1, ReviewPhase: reviewFull, HasBlockers: true},
+		{Provider: "claude", Role: roleCritic, ReviewComplete: true, Round: 1, ReviewPhase: reviewFull, HasBlockers: true},
 		{Provider: job.Main.Provider, Role: roleMain, Round: 2},
-		{Provider: "claude", Role: roleCritic, Round: 2, ReviewPhase: reviewVerification, NoBlockers: true},
-		{Provider: "claude", Role: roleCritic, Round: 2, ReviewPhase: reviewFull, HasBlockers: true},
+		{Provider: "claude", Role: roleCritic, ReviewComplete: true, Round: 2, ReviewPhase: reviewVerification, NoBlockers: true},
+		{Provider: "claude", Role: roleCritic, ReviewComplete: true, Round: 2, ReviewPhase: reviewFull, HasBlockers: true},
 	}}
 	var output bytes.Buffer
 	(&Orchestrator{Logger: log.New(&output, "", 0)}).logResult(job, result)
 	text := output.String()
-	if !strings.Contains(text, `review_phase=verification approved=false no_blockers=true has_blockers=false verdict_allows_full=true no_blocker_verdict_streak=0 policy_met=false stop_reason=""`) ||
-		!strings.Contains(text, `review_phase=full approved=false no_blockers=false has_blockers=true verdict_allows_full=false no_blocker_verdict_streak=0 policy_met=false stop_reason=""`) || strings.Contains(text, "accepted=") {
+	if !strings.Contains(text, `review_phase=verification approved=false no_blockers=true has_blockers=false review_complete=true verdict_allows_full=true no_blocker_verdict_streak=0 policy_met=false stop_reason=""`) ||
+		!strings.Contains(text, `review_phase=full approved=false no_blockers=false has_blockers=true review_complete=true verdict_allows_full=false no_blocker_verdict_streak=0 policy_met=false stop_reason=""`) || strings.Contains(text, "accepted=") {
 		t.Fatalf("journal blurred verdict policy and publication: %s", text)
 	}
 	if err := result.Validate(job); err == nil || !strings.Contains(err.Error(), "accepted final full review") {
@@ -124,10 +124,10 @@ func TestRunnerNonblockingThresholdRequiresFreshFullReview(t *testing.T) {
 					t.Fatal("critic was led toward threshold acceptance or omitted lower severities")
 				}
 				if tt.missingBlockers {
-					return aicli.Result{Answer: `{"approved":false,"feedback":"Remaining finding"}`}, nil
+					return aicli.Result{Answer: `{"review_complete":true,"approved":false,"feedback":"Remaining finding"}`}, nil
 				}
 				blocking := (tt.fullBlockers && request.reviewPhase == reviewFull) || (tt.verificationBlockers && request.reviewPhase == reviewVerification)
-				return aicli.Result{Answer: fmt.Sprintf(`{"approved":false,"has_blockers":%t,"feedback":"Remaining finding"}`, blocking)}, nil
+				return aicli.Result{Answer: fmt.Sprintf(`{"review_complete":true,"approved":false,"has_blockers":%t,"feedback":"Remaining finding"}`, blocking)}, nil
 			}}
 			result, err := runner.Run(context.Background(), job)
 			if (err == nil) != tt.wantSuccess || len(phases) != tt.wantCalls {

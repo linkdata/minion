@@ -295,13 +295,13 @@ func TestResultJSONRoundTripPreservesValidatedPayload(t *testing.T) {
 		Diagnostics: []Diagnostic{{Code: "incomplete_usage", Message: "Provider omitted usage."}},
 		Calls: []CallUsage{
 			{Provider: job.Main.Provider, Role: roleMain, Round: 1, Tokens: usage.Tokens{Input: 11, CachedInput: 2, Output: 3}},
-			{Provider: job.Critic.Provider, Role: roleCritic, Round: 1, ReviewPhase: reviewFull, HasBlockers: true, Complete: true},
+			{Provider: job.Critic.Provider, Role: roleCritic, ReviewComplete: true, Round: 1, ReviewPhase: reviewFull, HasBlockers: true, Complete: true},
 			{Provider: job.Main.Provider, Role: roleMain, Round: 2, Complete: true},
-			{Provider: job.Critic.Provider, Role: roleCritic, Round: 2, ReviewPhase: reviewVerification, NoBlockers: true},
-			{Provider: job.Critic.Provider, Role: roleCritic, Round: 2, ReviewPhase: reviewFull, HasBlockers: true},
+			{Provider: job.Critic.Provider, Role: roleCritic, ReviewComplete: true, Round: 2, ReviewPhase: reviewVerification, NoBlockers: true},
+			{Provider: job.Critic.Provider, Role: roleCritic, ReviewComplete: true, Round: 2, ReviewPhase: reviewFull, HasBlockers: true},
 			{Provider: job.Main.Provider, Role: roleMain, Round: 3},
-			{Provider: job.Critic.Provider, Role: roleCritic, Round: 3, ReviewPhase: reviewVerification, Approved: true, NoBlockers: true, Complete: true},
-			{Provider: job.Critic.Provider, Role: roleCritic, Round: 3, ReviewPhase: reviewFull, Approved: true, NoBlockers: true},
+			{Provider: job.Critic.Provider, Role: roleCritic, ReviewComplete: true, Round: 3, ReviewPhase: reviewVerification, Approved: true, NoBlockers: true, Complete: true},
+			{Provider: job.Critic.Provider, Role: roleCritic, ReviewComplete: true, Round: 3, ReviewPhase: reviewFull, Approved: true, NoBlockers: true},
 		}}
 	if err := result.Validate(job); err != nil {
 		t.Fatal(err)
@@ -310,7 +310,7 @@ func TestResultJSONRoundTripPreservesValidatedPayload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, field := range []string{`"critic_stop_reason":"approved"`, `"approved":true`, `"no_blockers":true`, `"has_blockers":true`, `"complete":true`, `"complete":false`} {
+	for _, field := range []string{`"review_complete":true`, `"critic_stop_reason":"approved"`, `"approved":true`, `"no_blockers":true`, `"has_blockers":true`, `"complete":true`, `"complete":false`} {
 		if !bytes.Contains(data, []byte(field)) {
 			t.Fatalf("attestation %s missing from wire result: %s", field, data)
 		}
@@ -365,11 +365,12 @@ func TestResultCallUsageRequiresOrderedReviewPhases(t *testing.T) {
 		return CallUsage{Provider: job.Main.Provider, Model: job.Main.Model, Effort: job.Main.Effort, Role: "main", Round: round, Complete: true}
 	}
 	critic := func(round int, phase string, verdict CallUsage) CallUsage {
-		return CallUsage{Provider: job.Critic.Provider, Model: job.Critic.Model, Effort: job.Critic.Effort, Role: roleCritic, Round: round, ReviewPhase: phase, Approved: verdict.Approved, NoBlockers: verdict.NoBlockers, HasBlockers: verdict.HasBlockers, Complete: true}
+		return CallUsage{Provider: job.Critic.Provider, Model: job.Critic.Model, Effort: job.Critic.Effort, Role: roleCritic, Round: round, ReviewPhase: phase, ReviewComplete: verdict.ReviewComplete, Approved: verdict.Approved, NoBlockers: verdict.NoBlockers, HasBlockers: verdict.HasBlockers, Complete: true}
 	}
-	approved := CallUsage{Approved: true, NoBlockers: true}
-	blocking := CallUsage{HasBlockers: true}
-	nits := CallUsage{NoBlockers: true}
+	approved := CallUsage{ReviewComplete: true, Approved: true, NoBlockers: true}
+	blocking := CallUsage{ReviewComplete: true, HasBlockers: true}
+	nits := CallUsage{ReviewComplete: true, NoBlockers: true}
+	incomplete := CallUsage{HasBlockers: true}
 	for _, test := range []struct {
 		name              string
 		calls             []CallUsage
@@ -380,6 +381,18 @@ func TestResultCallUsageRequiresOrderedReviewPhases(t *testing.T) {
 		{"no review calls", nil, 0, "", false, true},
 		{"first full review", []CallUsage{main(1), critic(1, "full", approved)}, 0, "approved", true, true},
 		{"rejected full review", []CallUsage{main(1), critic(1, "full", blocking)}, 0, "", false, true},
+		{"incomplete first full review", []CallUsage{main(1), critic(1, reviewFull, incomplete)}, 1, "", false, true},
+		{"incomplete verification", []CallUsage{main(1), critic(1, reviewFull, nits), main(2), critic(2, reviewVerification, incomplete)}, 2, "", false, true},
+		{"incomplete full after verification", []CallUsage{main(1), critic(1, reviewFull, blocking), main(2), critic(2, reviewVerification, approved), critic(2, reviewFull, incomplete)}, 2, "", false, true},
+		{"incomplete first full cannot revise", []CallUsage{main(1), critic(1, reviewFull, incomplete), main(2)}, 1, "", false, false},
+		{"incomplete verification cannot revise", []CallUsage{main(1), critic(1, reviewFull, blocking), main(2), critic(2, reviewVerification, incomplete), main(3)}, 0, "", false, false},
+		{"incomplete verification cannot advance full", []CallUsage{main(1), critic(1, reviewFull, blocking), main(2), critic(2, reviewVerification, incomplete), critic(2, reviewFull, approved)}, 0, "", false, false},
+		{"incomplete full after verification cannot revise", []CallUsage{main(1), critic(1, reviewFull, blocking), main(2), critic(2, reviewVerification, approved), critic(2, reviewFull, incomplete), main(3)}, 0, "", false, false},
+		{"incomplete full cannot claim approval", []CallUsage{main(1), critic(1, reviewFull, incomplete)}, 1, "approved", false, false},
+		{"incomplete full cannot claim nonblocking acceptance", []CallUsage{main(1), critic(1, reviewFull, incomplete)}, 1, "nonblocking", false, false},
+		{"coverage without parsed verdict", []CallUsage{main(1), critic(1, reviewFull, CallUsage{ReviewComplete: true})}, 0, "", false, false},
+		{"incomplete approving verdict", []CallUsage{main(1), critic(1, reviewFull, CallUsage{Approved: true, NoBlockers: true})}, 1, "", false, false},
+		{"incomplete no-blocker verdict", []CallUsage{main(1), critic(1, reviewFull, CallUsage{NoBlockers: true})}, 1, "", false, false},
 		{"revised full review", []CallUsage{main(1), critic(1, "full", blocking), main(2), critic(2, "verification", approved), critic(2, "full", approved)}, 0, "approved", true, true},
 		{"strict verification nits survive full approval", []CallUsage{main(1), critic(1, reviewFull, blocking), main(2), critic(2, reviewVerification, nits), critic(2, reviewFull, approved)}, 0, "", false, true},
 		{"strict verification nits can revise after approved full", []CallUsage{main(1), critic(1, reviewFull, blocking), main(2), critic(2, reviewVerification, nits), critic(2, reviewFull, approved), main(3), critic(3, reviewVerification, approved), critic(3, reviewFull, approved)}, 0, "approved", true, true},
@@ -406,8 +419,8 @@ func TestResultCallUsageRequiresOrderedReviewPhases(t *testing.T) {
 		{"fresh full still has blockers", []CallUsage{main(1), critic(1, reviewFull, nits), main(2), critic(2, reviewVerification, nits), critic(2, reviewFull, blocking)}, 2, "", false, true},
 		{"unparsed verdict cannot finish", []CallUsage{main(1), critic(1, reviewFull, CallUsage{})}, 2, "", false, true},
 		{"unparsed verdict cannot revise", []CallUsage{main(1), critic(1, reviewFull, CallUsage{}), main(2), critic(2, reviewVerification, approved), critic(2, reviewFull, approved)}, 2, "", false, false},
-		{"approval without no-blocker attestation", []CallUsage{main(1), critic(1, reviewFull, CallUsage{Approved: true})}, 2, "", false, false},
-		{"contradictory blocker attestations", []CallUsage{main(1), critic(1, reviewFull, CallUsage{HasBlockers: true, NoBlockers: true})}, 2, "", false, false},
+		{"approval without no-blocker attestation", []CallUsage{main(1), critic(1, reviewFull, CallUsage{ReviewComplete: true, Approved: true})}, 2, "", false, false},
+		{"contradictory blocker attestations", []CallUsage{main(1), critic(1, reviewFull, CallUsage{ReviewComplete: true, HasBlockers: true, NoBlockers: true})}, 2, "", false, false},
 		{"accepted verification cannot skip full", []CallUsage{main(1), critic(1, reviewFull, nits), main(2), critic(2, reviewVerification, nits), main(3)}, 2, "", false, false},
 		{"accepted full cannot revise again", []CallUsage{main(1), critic(1, reviewFull, nits), main(2), critic(2, reviewVerification, nits), critic(2, reviewFull, nits), main(3)}, 2, "", false, false},
 		{"blocker verification cannot advance", []CallUsage{main(1), critic(1, reviewFull, nits), main(2), critic(2, reviewVerification, blocking), critic(2, reviewFull, approved)}, 2, "", false, false},
@@ -431,6 +444,7 @@ func TestResultCallUsageRequiresOrderedReviewPhases(t *testing.T) {
 		{"main approval", func(call *CallUsage) { call.Approved = true }},
 		{"main cannot attest no blockers", func(call *CallUsage) { call.NoBlockers = true }},
 		{"main cannot attest blockers", func(call *CallUsage) { call.HasBlockers = true }},
+		{"main cannot attest review coverage", func(call *CallUsage) { call.ReviewComplete = true }},
 		{"provider attribution", func(call *CallUsage) { call.Provider = "claude" }},
 		{"model attribution", func(call *CallUsage) { call.Model = "different-model" }},
 		{"effort attribution", func(call *CallUsage) { call.Effort = "low" }},
@@ -475,6 +489,30 @@ func TestResultCallUsageRejectsCriticsAndRepeatedMainWithoutCritic(t *testing.T)
 	}
 }
 
+func TestProtocolRejectsVersionThree(t *testing.T) {
+	job := testJob(command.Comment)
+	result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Complete answer", Calls: []CallUsage{{Provider: job.Main.Provider, Role: roleMain, Round: 1}}}
+	status := Status{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Sequence: 1, WorkerState: "busy", Phase: "prepare"}
+	if err := result.Validate(job); err != nil {
+		t.Fatal(err)
+	}
+	if err := status.Validate(job); err != nil {
+		t.Fatal(err)
+	}
+	oldJob := job
+	oldJob.Version = 3
+	result.Version, status.Version = 3, 3
+	if err := oldJob.Validate(); err == nil || !strings.Contains(err.Error(), "unsupported action protocol version") {
+		t.Fatalf("version 3 job accepted: %v", err)
+	}
+	if err := result.Validate(job); err == nil || !strings.Contains(err.Error(), "version, identity or source") {
+		t.Fatalf("version 3 result accepted: %v", err)
+	}
+	if err := status.Validate(job); err == nil || !strings.Contains(err.Error(), "version, identity or source") {
+		t.Fatalf("version 3 status accepted: %v", err)
+	}
+}
+
 func TestResultCallUsageHonorsConfiguredRoundLimits(t *testing.T) {
 	for _, test := range []struct {
 		name  string
@@ -491,9 +529,9 @@ func TestResultCallUsageHonorsConfiguredRoundLimits(t *testing.T) {
 				for proposal := 1; proposal <= round; proposal++ {
 					result.Calls = append(result.Calls, CallUsage{Provider: job.Main.Provider, Role: "main", Round: proposal})
 					if proposal > 1 {
-						result.Calls = append(result.Calls, CallUsage{Provider: job.Critic.Provider, Role: "critic", Round: proposal, ReviewPhase: "verification", Approved: true, NoBlockers: true})
+						result.Calls = append(result.Calls, CallUsage{Provider: job.Critic.Provider, Role: "critic", ReviewComplete: true, Round: proposal, ReviewPhase: "verification", Approved: true, NoBlockers: true})
 					}
-					result.Calls = append(result.Calls, CallUsage{Provider: job.Critic.Provider, Role: "critic", Round: proposal, ReviewPhase: "full", Approved: proposal == round, NoBlockers: proposal == round, HasBlockers: proposal != round})
+					result.Calls = append(result.Calls, CallUsage{Provider: job.Critic.Provider, Role: "critic", ReviewComplete: true, Round: proposal, ReviewPhase: "full", Approved: proposal == round, NoBlockers: proposal == round, HasBlockers: proposal != round})
 				}
 				if err := result.Validate(job); (err == nil) != (round <= test.limit) {
 					t.Fatalf("round=%d limit=%d result validation=%v", round, test.limit, err)
@@ -718,7 +756,7 @@ func TestResultEmptyAnswerContract(t *testing.T) {
 			result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Calls: []CallUsage{{Provider: job.Main.Provider, Role: "main", Round: 1}}}
 			if test.critic {
 				result.CriticStopReason = "approved"
-				result.Calls = append(result.Calls, CallUsage{Provider: job.Critic.Provider, Role: roleCritic, Round: 1, ReviewPhase: reviewFull, Approved: true, NoBlockers: true})
+				result.Calls = append(result.Calls, CallUsage{Provider: job.Critic.Provider, Role: roleCritic, ReviewComplete: true, Round: 1, ReviewPhase: reviewFull, Approved: true, NoBlockers: true})
 			}
 			if test.changed {
 				result.Changes = []workspace.Change{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("fixed source")}}
