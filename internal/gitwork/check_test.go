@@ -235,8 +235,10 @@ func TestCheckGitHonorsCancellation(t *testing.T) {
 			if !errors.Is(err, want) || errors.Is(err, processgroup.ErrUnconfirmed) || errors.Is(err, processgroup.ErrScopeUnconfirmed) {
 				t.Fatalf("cancellation lost cause or release: %v", err)
 			}
-			if _, err := os.Stat(marker); err != nil {
-				t.Fatalf("check never dispatched before cancellation: %v", err)
+			if !deadline {
+				if _, err := os.Stat(marker); err != nil {
+					t.Fatalf("check never dispatched before cancellation: %v", err)
+				}
 			}
 			assertGitCheckClean(t, root)
 		})

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/linkdata/minion/internal/config"
+	"github.com/linkdata/minion/internal/processgroup"
 	"github.com/linkdata/minion/internal/state"
 	"github.com/linkdata/minion/internal/workroot"
 )
@@ -52,6 +54,11 @@ func assertNoStartupCommands(t *testing.T, markers map[string]string) {
 
 func runStartupFixture(t *testing.T, cfg config.Config, args ...string) (int, string) {
 	t.Helper()
+	return runStartupFixtureWithRun(t, cfg, run, args...)
+}
+
+func runStartupFixtureWithRun(t *testing.T, cfg config.Config, start func() int, args ...string) (int, string) {
+	t.Helper()
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	data, err := json.Marshal(cfg)
 	if err != nil {
@@ -71,7 +78,7 @@ func runStartupFixture(t *testing.T, cfg config.Config, args ...string) (int, st
 	flag.CommandLine = flag.NewFlagSet("minion", flag.ContinueOnError)
 	os.Args = append([]string{"minion", "-config", configPath}, args...)
 	os.Stderr = logFile
-	code := run()
+	code := start()
 	os.Stderr = oldStderr
 	if err := logFile.Close(); err != nil {
 		t.Fatal(err)
@@ -163,6 +170,63 @@ func TestRunStopsBeforePreflightWhenProcessRecoveryIsPending(t *testing.T) {
 			assertNoStartupCommands(t, markers)
 		})
 	}
+}
+
+func TestRunLatchesUnconfirmedGitScopeBeforeRestart(t *testing.T) {
+	if os.Getenv("MINION_REQUIRE_PROCESSGROUP") != "1" {
+		t.Skip("startup Git proof requires the delegated check service")
+	}
+	tools := make(map[string]string)
+	for _, name := range []string{"setsid", "sleep"} {
+		path, err := exec.LookPath(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tools[name] = path
+	}
+	isolateHostPaths(t, t.TempDir())
+	markers := startupCommandMarkers(t)
+	for name, path := range tools {
+		if err := os.Symlink(path, filepath.Join(os.Getenv("PATH"), name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	cfg := config.Config{Main: "codex", BotLogin: "fixture", StatePath: statePath,
+		WorkRoot: mountedWorkRoot(t, statePath), WorkRootMaxBytes: 1 << 62,
+		Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{},
+		Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2}},
+	}
+	checks := 0
+	start := func() int {
+		return runWithGitCheck(func(ctx context.Context, workRoot string) error {
+			checks++
+			if ctx.Err() != nil || workRoot != cfg.WorkRoot {
+				t.Fatalf("Git check lost startup context/root: error=%v root=%q", ctx.Err(), workRoot)
+			}
+			return fmt.Errorf("fixture Git cleanup: %w", processgroup.ErrScopeUnconfirmed)
+		})
+	}
+	code, output := runStartupFixtureWithRun(t, cfg, start)
+	if code != 1 || checks != 1 || !strings.Contains(output, "Git preflight: fixture Git cleanup:") || !strings.Contains(output, processgroup.ErrScopeUnconfirmed.Error()) || strings.Contains(output, "AI preflight:") {
+		t.Fatalf("unconfirmed Git scope did not stop startup: exit=%d checks=%d log=%q", code, checks, output)
+	}
+	assertNoStartupCommands(t, markers)
+	store, err := state.Open(statePath, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if store.Data.UnconfirmedProcessJob != "Git preflight" {
+		t.Fatalf("Git cleanup failure was not persisted: %+v", store.Data)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	code, output = runStartupFixture(t, cfg, "-check")
+	if code != 1 || !strings.Contains(output, "command scope release for Git preflight is unconfirmed") || strings.Contains(output, "Git preflight:") || strings.Contains(output, "AI preflight:") {
+		t.Fatalf("restart bypassed persisted Git recovery latch: exit=%d log=%q", code, output)
+	}
+	assertNoStartupCommands(t, markers)
 }
 
 func TestRunRejectsUnsafeGrantBeforeStateOpen(t *testing.T) {
