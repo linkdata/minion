@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
@@ -21,6 +22,18 @@ import (
 )
 
 func TestExecuteOrdersAccountingReviewAndPublicationCheckpoints(t *testing.T) {
+	for _, overHTTP := range []bool{false, true} {
+		for _, capped := range []bool{false, true} {
+			t.Run(fmt.Sprintf("HTTP=%t/capped=%t", overHTTP, capped), func(t *testing.T) { testExecuteOrdersCheckpoints(t, overHTTP, capped) })
+		}
+	}
+}
+
+func testExecuteOrdersCheckpoints(t *testing.T, overHTTP, capped bool) {
+	maxRounds, stopReason := 3, "approved"
+	if capped {
+		maxRounds, stopReason = 2, "round_cap"
+	}
 	sourceHead, _, _ := gitFixtureRemote(t)
 	work := t.TempDir()
 	store := &usage.Store{Dir: filepath.Join(t.TempDir(), "usage")}
@@ -33,6 +46,9 @@ func TestExecuteOrdersAccountingReviewAndPublicationCheckpoints(t *testing.T) {
 		{Provider: "codex", Role: roleMain, Round: 2, Model: mainModel, Effort: "high", Tokens: usage.Tokens{Input: 20, CachedInput: 2, Output: 4}, Complete: true},
 		{Provider: "claude", Role: roleCritic, Round: 2, ReviewPhase: reviewVerification, Model: criticModel, Effort: "medium", Tokens: usage.Tokens{Input: 5, CachedInput: 1, Output: 1}, Complete: true, Approved: true, NoBlockers: true, ReviewComplete: true},
 		{Provider: "claude", Role: roleCritic, Round: 2, ReviewPhase: reviewFull, Model: criticModel, Effort: "medium", Tokens: usage.Tokens{Input: 7, CachedInput: 2, Output: 2}, Complete: true, Approved: true, NoBlockers: true, ReviewComplete: true},
+	}
+	if capped {
+		expected[4].Approved, expected[4].NoBlockers, expected[4].HasBlockers = false, false, true
 	}
 	wantTokens := usage.Tokens{Input: 45, CachedInput: 7, Output: 10}
 	wantRefutations := []Refutation{{Round: 2, Text: refutation}}
@@ -61,7 +77,7 @@ func TestExecuteOrdersAccountingReviewAndPublicationCheckpoints(t *testing.T) {
 			return
 		}
 		review, err := loadPrivateReview(work)
-		if err != nil || review.Identity.JobID != request.ID || review.Identity.AttemptID != record.ID || review.SourceRef != sourceHead || review.CriticStopReason != "approved" || review.CriticMaxRounds != 3 || review.CriticNonblockingRounds != 0 || review.CriticConsecutiveNoBlockerRounds != 0 || !slices.Equal(review.Calls, expected) || !slices.Equal(review.Refutations, wantRefutations) {
+		if err != nil || review.Identity.JobID != request.ID || review.Identity.AttemptID != record.ID || review.SourceRef != sourceHead || review.CriticStopReason != stopReason || review.CriticMaxRounds != maxRounds || review.CriticNonblockingRounds != 0 || review.CriticConsecutiveNoBlockerRounds != 0 || !slices.Equal(review.Calls, expected) || !slices.Equal(review.Refutations, wantRefutations) {
 			t.Errorf("publication preceded the acknowledged review decision: review=%+v error=%v", review, err)
 			http.Error(w, "review decision missing", http.StatusInternalServerError)
 			return
@@ -71,6 +87,9 @@ func TestExecuteOrdersAccountingReviewAndPublicationCheckpoints(t *testing.T) {
 			t.Error(err)
 			http.Error(w, "invalid publication", http.StatusBadRequest)
 			return
+		}
+		if strings.Contains(payload.Body, "Critic round limit reached (2).") != capped {
+			t.Errorf("HTTP cap decision lost its public caveat: %q", payload.Body)
 		}
 		if !strings.Contains(payload.Body, answer) || strings.Contains(payload.Body, finding) || strings.Contains(payload.Body, refutation) {
 			t.Errorf("publication lost the answer or exposed private review text: %s", payload.Body)
@@ -92,21 +111,21 @@ func TestExecuteOrdersAccountingReviewAndPublicationCheckpoints(t *testing.T) {
 	zero, calls := 0, 0
 	e := Orchestrator{WorkRoot: work, GitHub: testGitHub(server, "fixture"), BotLogin: "bot", Usage: store, Logger: log.New(&journal, "", 0),
 		Main: "codex", Adversarial: "claude", CodexModel: mainModel, CodexEffort: "high", ClaudeModel: criticModel, ClaudeEffort: "medium",
-		CriticStopping: config.CriticStopping{MaxRounds: 3, NonblockingAfterRound: &zero, ConsecutiveNoBlockerRounds: &zero},
+		CriticStopping: config.CriticStopping{MaxRounds: maxRounds, NonblockingAfterRound: &zero, ConsecutiveNoBlockerRounds: &zero},
 		Commands:       map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}},
 		Runner: Runner{runModel: func(_ context.Context, native modelRun) (aicli.Result, error) {
 			index := calls
 			calls++
 			if index >= len(expected) {
-				t.Fatalf("unexpected additional model call: %+v", native)
+				return aicli.Result{}, fmt.Errorf("unexpected additional model call: %+v", native)
 			}
 			want := expected[index]
 			if native.provider != want.Provider || native.role != want.Role || native.round != want.Round || native.reviewPhase != want.ReviewPhase || native.model != want.Model || native.effort != want.Effort || native.freshConversation != (want.Role == roleCritic && want.ReviewPhase == reviewFull) {
-				t.Fatalf("model call order/settings changed at %d: %+v", index, native)
+				return aicli.Result{}, fmt.Errorf("model call order/settings changed at %d: %+v", index, native)
 			}
 			records, err := usage.ReadAll(store.Dir)
 			if err != nil || len(records) != 1 {
-				t.Fatalf("native call lacks durable reservation: records=%+v error=%v", records, err)
+				return aicli.Result{}, fmt.Errorf("native call lacks durable reservation: records=%+v error=%v", records, err)
 			}
 			record := records[0]
 			var priorTokens usage.Tokens
@@ -124,15 +143,18 @@ func TestExecuteOrdersAccountingReviewAndPublicationCheckpoints(t *testing.T) {
 				}
 			}
 			if record.Status != "running" || record.FinishedAt != nil || record.UsageComplete || record.CodexCalls != codexCalls || record.ClaudeCalls != claudeCalls || record.Tokens != priorTokens {
-				t.Fatalf("native call %d preceded incomplete accounting reservation: %+v", index, record)
+				return aicli.Result{}, fmt.Errorf("native call %d preceded incomplete accounting reservation: %+v", index, record)
 			}
-			review := readPrivateReview(t, work)
+			review, err := loadPrivateReview(work)
+			if err != nil {
+				return aicli.Result{}, fmt.Errorf("native call lacks private prefix: %w", err)
+			}
 			var priorRefutations []Refutation
 			if index >= 3 {
 				priorRefutations = wantRefutations
 			}
-			if review.Identity.JobID != request.ID || review.Identity.AttemptID != record.ID || review.SourceRef != sourceHead || review.CriticStopReason != "" || review.CriticMaxRounds != 3 || review.CriticNonblockingRounds != 0 || review.CriticConsecutiveNoBlockerRounds != 0 || !slices.Equal(review.Calls, expected[:index]) || !slices.Equal(review.Refutations, priorRefutations) {
-				t.Fatalf("native call %d preceded its private review prefix: %+v", index, review)
+			if review.Identity.JobID != request.ID || review.Identity.AttemptID != record.ID || review.SourceRef != sourceHead || review.CriticStopReason != "" || review.CriticMaxRounds != maxRounds || review.CriticNonblockingRounds != 0 || review.CriticConsecutiveNoBlockerRounds != 0 || !slices.Equal(review.Calls, expected[:index]) || !slices.Equal(review.Refutations, priorRefutations) {
+				return aicli.Result{}, fmt.Errorf("native call %d preceded its private review prefix: %+v", index, review)
 			}
 			response := approvedCritiqueJSON
 			switch index {
@@ -142,12 +164,48 @@ func TestExecuteOrdersAccountingReviewAndPublicationCheckpoints(t *testing.T) {
 				response = criticFeedbackJSON(true, finding)
 			case 2:
 				response = proposalJSON(answer, refutation)
+			case 4:
+				if capped {
+					response = criticFeedbackJSON(true, finding)
+				}
 			}
 			return aicli.Result{Answer: response, Tokens: want.Tokens, UsageComplete: true}, nil
 		}},
 	}
+	var workerDone chan error
+	var remote *HTTPExecutor
+	if overHTTP {
+		var err error
+		remote, err = NewHTTPExecutor("local")
+		if err != nil {
+			t.Fatal(err)
+		}
+		transport := httptest.NewServer(remote)
+		t.Cleanup(transport.Close)
+		workerCtx, cancelWorker := context.WithCancel(context.Background())
+		t.Cleanup(func() { cancelWorker(); _ = remote.Close() })
+		worker := e.Runner
+		worker.WorkRoot = t.TempDir()
+		workerDone = make(chan error, 1)
+		go func() { workerDone <- RunHTTP(workerCtx, transport.Client(), transport.URL, "local", &worker) }()
+		e.Executor = remote
+	}
 	if err := e.Execute(context.Background(), request); err != nil {
 		t.Fatal(err)
+	}
+	if overHTTP {
+		select {
+		case err := <-workerDone:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("HTTP worker did not receive outcome acknowledgement")
+		}
+		status, ok := remote.Status()
+		if !ok || status.Sequence != 2 || status.Phase != "upload" || status.Identity.JobID != request.ID || status.SourceRef != sourceHead {
+			t.Fatalf("HTTP observations lost binding or own sequence: %+v present=%t", status, ok)
+		}
 	}
 	if calls != len(expected) {
 		t.Fatalf("native calls=%d want=%d", calls, len(expected))
