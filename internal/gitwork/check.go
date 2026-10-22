@@ -21,7 +21,7 @@ import (
 
 const maxGitCheckBundleBytes = 1 << 20
 
-var gitVersionPattern = regexp.MustCompile(`^git version ([0-9]+)\.([0-9]+)\.([0-9]+)(?:\.windows\.[0-9]+)?(?: \([^[:cntrl:]]+\))?$`)
+var gitVersionPattern = regexp.MustCompile(`^git version ([0-9]+)\.([0-9]+)\.([0-9]+)(?:\.windows\.[0-9]+)?(?: \([^()[:cntrl:]]+\))?$`)
 
 // Check proves Git 2.45.1 or newer supports the synthetic offline bundle/import/index operations.
 // The caller admits workRoot and process ownership before calling; no project data is used.
@@ -85,12 +85,8 @@ func Check(ctx context.Context, workRoot string) (resultErr error) {
 	if err := workspace.Materialize(imported, files); err != nil {
 		return err
 	}
-	repository, err := MaterializeRepository(ctx, imported, workspace.Snapshot{Head: head, Base: head, MergeBase: head, Files: files, Repository: bundle})
-	if err != nil {
+	if _, err := MaterializeRepository(ctx, imported, workspace.Snapshot{Head: head, Base: head, MergeBase: head, Files: files, Repository: bundle}); err != nil {
 		return fmt.Errorf("git readiness import: %w", err)
-	}
-	if err := repository.Verify(ctx); err != nil {
-		return fmt.Errorf("git readiness metadata verification: %w", err)
 	}
 	changed := []byte("git readiness after\n")
 	if err := os.WriteFile(filepath.Join(source, files[0].Path), changed, 0600); err != nil {

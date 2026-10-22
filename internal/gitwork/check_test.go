@@ -32,6 +32,8 @@ func TestSupportedGitVersion(t *testing.T) {
 		{"git version 2.45.1 (Vendor Git-1)", true},
 		{"git version 2.45.1 (Vendor Git-1)\n", true},
 		{"git version 2.45.1 (Apple Git-154)", true},
+		{"git version 2.45.1 (Vendor) extra)", false},
+		{"git version 2.45.1 (Vendor (nested))", false},
 		{"git version 2.45.1 (Vendor\x00 Git-1)", false},
 		{"git version 2.45.1 (Vendor\tGit-1)", false},
 		{"git version 2.45.1 (Vendor\x1bGit-1)", false},
