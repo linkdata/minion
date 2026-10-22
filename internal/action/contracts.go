@@ -16,7 +16,7 @@ import (
 	"github.com/linkdata/minion/internal/workspace"
 )
 
-// ProtocolVersion identifies the complete-history Job and Result contract.
+// ProtocolVersion identifies the versioned Job, Result, and Status contracts.
 const ProtocolVersion = 2
 
 const (
@@ -102,6 +102,22 @@ type Result struct {
 	Calls       []CallUsage        `json:"calls,omitempty"`
 	Refutations []Refutation       `json:"refutations,omitempty"`
 	Diagnostics []Diagnostic       `json:"diagnostics,omitempty"`
+}
+
+// Status reports one observation of an attempt. It does not authorize publication
+// or prove that a worker has released its resources.
+type Status struct {
+	Version          int           `json:"version"`
+	Identity         Identity      `json:"identity"`
+	SourceRef        string        `json:"source_ref"`
+	Sequence         uint64        `json:"sequence"`
+	ProgressSequence uint64        `json:"progress_sequence"`
+	ProgressAge      time.Duration `json:"progress_age_ns"`
+	LogSequence      uint64        `json:"log_sequence"`
+	WorkerState      string        `json:"worker_state"`
+	Phase            string        `json:"phase"`
+	Round            int           `json:"round,omitempty"`
+	ReviewPhase      string        `json:"review_phase,omitempty"`
 }
 
 func (id Identity) validate() error {
@@ -223,6 +239,46 @@ func (j Job) acceptsCritique(round int, approved, noBlockers bool) bool {
 }
 
 func sourceIdentity(j Job) string { return j.Identity.Repository + "@" + j.Source.Head }
+
+// Validate checks a Status and its Job. Transport ordering, authentication,
+// and log acknowledgements belong to the orchestrator receiver.
+func (s Status) Validate(j Job) error {
+	if err := j.Validate(); err != nil {
+		return err
+	}
+	if s.Version != ProtocolVersion || s.Identity != j.Identity || s.SourceRef != j.Source.Head {
+		return errors.New("action status version, identity or source differs from job")
+	}
+	if s.Sequence == 0 || s.ProgressAge < 0 {
+		return errors.New("invalid action status sequence or progress age")
+	}
+	switch s.WorkerState {
+	case "busy", "stopping":
+	case "ready", "unclean":
+		if s.Phase != "cleanup" {
+			return errors.New("terminal worker state requires cleanup phase")
+		}
+	default:
+		return errors.New("invalid action worker state")
+	}
+	switch s.Phase {
+	case "prepare", "upload", "cleanup":
+		if s.Round != 0 || s.ReviewPhase != "" {
+			return errors.New("invalid action status phase or round")
+		}
+	case "main":
+		if s.Round < 1 || s.Round > j.rounds() || s.ReviewPhase != "" {
+			return errors.New("invalid action status phase or round")
+		}
+	case "critic":
+		if j.Critic == nil || s.Round < 1 || s.Round > j.rounds() || !slices.Contains(reviewPhases(s.Round), s.ReviewPhase) {
+			return errors.New("invalid action status review phase or round")
+		}
+	default:
+		return errors.New("invalid action status phase")
+	}
+	return nil
+}
 
 func (r Result) Validate(j Job) error {
 	if err := j.Validate(); err != nil {
