@@ -52,7 +52,19 @@ func (r *Runner) logf(format string, args ...any) {
 
 // Run uses supplied complete Git history without fetching or publication rights.
 // Fix exports use a separate private index. Failed calls still return accounted usage.
-func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr error) {
+func (r *Runner) Run(ctx context.Context, job Job) (Result, error) {
+	return r.run(ctx, job, nil)
+}
+
+// Execute requires synchronous checkpoints while using the same supplied-data pipeline as Run.
+func (r *Runner) Execute(ctx context.Context, job Job, checkpoints Checkpoints) (Result, error) {
+	if checkpoints == nil {
+		return Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head}, fmt.Errorf("%w: execution checkpoints are required", monitor.ErrTerminalJob)
+	}
+	return r.run(ctx, job, checkpoints)
+}
+
+func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (result Result, resultErr error) {
 	result = Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head}
 	defer func() {
 		resultErr = redactActionError(resultErr, r.Codex.APIKey, r.Claude.APIKey)
@@ -91,6 +103,12 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 	configured := *r
 	checkpointReview := func(history []Refutation) error {
 		result.Refutations = history
+		if checkpoints != nil {
+			return checkpoints.Review(ReviewCheckpoint{
+				Version: result.Version, Identity: result.Identity, SourceRef: result.SourceRef,
+				Calls: result.Calls, Refutations: result.Refutations, CriticStopReason: result.CriticStopReason,
+			})
+		}
 		if r.recordReview != nil {
 			return r.recordReview(result.Calls, result.Refutations, result.CriticStopReason)
 		}
@@ -278,8 +296,15 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 			if err := ctx.Err(); err != nil {
 				return aicli.Result{}, err
 			}
+			entry := CallUsage{Provider: request.provider, Role: request.role, Round: request.round, ReviewPhase: request.reviewPhase, Model: request.model, Effort: request.effort}
+			checkpoint := CallCheckpoint{Version: result.Version, Identity: result.Identity, SourceRef: result.SourceRef, Call: entry}
+			if checkpoints != nil {
+				if err := checkpoints.BeforeCall(checkpoint); err != nil {
+					return aicli.Result{}, err
+				}
+			}
 			call, err := next(ctx, request)
-			entry := CallUsage{Provider: request.provider, Role: request.role, Round: request.round, ReviewPhase: request.reviewPhase, Model: request.model, Effort: request.effort, Tokens: call.Tokens, Complete: call.UsageComplete}
+			entry.Tokens, entry.Complete = call.Tokens, call.UsageComplete
 			if err == nil && request.role == roleCritic {
 				approved, hasBlockers, reviewComplete, _, parseErr := parseCritique(call.Answer, configured.Codex.APIKey, configured.Claude.APIKey)
 				entry.Approved = parseErr == nil && approved
@@ -288,6 +313,12 @@ func (r *Runner) Run(ctx context.Context, job Job) (result Result, resultErr err
 				entry.ReviewComplete = parseErr == nil && reviewComplete
 			}
 			result.Calls = append(result.Calls, entry)
+			if checkpoints != nil {
+				checkpoint.Call = entry
+				if checkpointErr := checkpoints.AfterCall(checkpoint); checkpointErr != nil {
+					err = errors.Join(err, fmt.Errorf("%w: checkpoint model usage: %w", monitor.ErrTerminalJob, checkpointErr))
+				}
+			}
 			return call, err
 		}
 		var call aicli.Result

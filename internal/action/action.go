@@ -33,8 +33,10 @@ var modelLineBreaks = strings.NewReplacer(
 
 // Orchestrator prepares portable actions and publishes results through trusted Git/GitHub access.
 type Orchestrator struct {
-	attemptID string
+	attemptID       string
+	usageCheckpoint *usageCheckpoint
 
+	Executor                  Executor
 	Runner                    Runner
 	WorkRoot                  string
 	Main, Adversarial         string
@@ -95,6 +97,7 @@ func (e *Orchestrator) Execute(ctx context.Context, job monitor.Job) (resultErr 
 	}
 	attempt := *e
 	e = &attempt
+	e.usageCheckpoint = nil
 	if e.attemptID, err = newAttemptID(); err != nil {
 		return err
 	}
