@@ -20,6 +20,7 @@ import (
 	"github.com/linkdata/minion/internal/codexcli"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/github"
+	"github.com/linkdata/minion/internal/gitwork"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/processgroup"
 	"github.com/linkdata/minion/internal/skills"
@@ -129,6 +130,11 @@ func run() int {
 			latchProcessError("process probe", err)
 		}
 		logger.Printf("process ownership: %v", err)
+		return 1
+	}
+	if err := gitwork.Check(ctx, cfg.WorkRoot); err != nil {
+		latchProcessError("Git preflight", err)
+		logger.Printf("Git preflight: %v", err)
 		return 1
 	}
 	if err := checkModels(ctx, &cfg, logger); err != nil {
