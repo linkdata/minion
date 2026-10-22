@@ -20,6 +20,7 @@ import (
 	"github.com/linkdata/minion/internal/codexcli"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/github"
+	"github.com/linkdata/minion/internal/gitwork"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/processgroup"
 	"github.com/linkdata/minion/internal/skills"
@@ -37,9 +38,13 @@ func main() {
 }
 
 func run() int {
+	return runWithGitCheck(gitwork.Check)
+}
+
+func runWithGitCheck(checkGit func(context.Context, string) error) int {
 	configPath := flag.String("config", "config.local.json", "path to JSON configuration")
 	loop := flag.Bool("loop", false, "poll continuously; default is one cron-friendly pass")
-	check := flag.Bool("check", false, "verify AI settings, authentication, and repository access, then exit")
+	check := flag.Bool("check", false, "verify Git readiness, AI settings, authentication, and repository access, then exit")
 	installSkills := flag.Bool("install-skills", false, "download configured skills for Codex and Claude, then exit")
 	flag.Parse()
 	logger := log.New(os.Stderr, "minion: ", log.LstdFlags|log.LUTC)
@@ -129,6 +134,11 @@ func run() int {
 			latchProcessError("process probe", err)
 		}
 		logger.Printf("process ownership: %v", err)
+		return 1
+	}
+	if err := checkGit(ctx, cfg.WorkRoot); err != nil {
+		latchProcessError("Git preflight", err)
+		logger.Printf("Git preflight: %v", err)
 		return 1
 	}
 	if err := checkModels(ctx, &cfg, logger); err != nil {
