@@ -66,7 +66,7 @@ func TestAddRepositoryPreservesSettingsAndExistingRestrictions(t *testing.T) {
 	}
 }
 
-func TestAddRepositoryPreservesCriticStoppingOmissionAndValues(t *testing.T) {
+func TestAddRepositoryPreservesCriticStoppingValues(t *testing.T) {
 	for _, tt := range []struct {
 		name, fields string
 	}{

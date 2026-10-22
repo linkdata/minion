@@ -139,9 +139,9 @@ func TestRunAIWithoutCriticSelectsMain(t *testing.T) {
 				return aicli.Result{Answer: provider + " result"}, nil
 			}}
 			job := Job{Action: command.Fix, Main: RoleSettings{Provider: provider}}
-			answer, err := runner.runAI(context.Background(), job, "checkout", "task", "reports", nil, &modelSessions{})
-			if err != nil || answer != provider+" result" || len(calls) != 1 || calls[0] != provider {
-				t.Fatalf("runAI() = %q, %v; calls = %v", answer, err, calls)
+			answer, stopReason, err := runner.runAI(context.Background(), job, "checkout", "task", "reports", nil, &modelSessions{})
+			if err != nil || answer != provider+" result" || stopReason != "" || len(calls) != 1 || calls[0] != provider {
+				t.Fatalf("runAI() = %q, %q, %v; calls = %v", answer, stopReason, err, calls)
 			}
 		})
 	}
@@ -171,9 +171,9 @@ func TestRunAIRedactsNoncanonicalEscapesAfterDecoding(t *testing.T) {
 				return aicli.Result{Answer: approvedCritiqueJSON}, nil
 			}
 			job := Job{Main: RoleSettings{Provider: provider}, Critic: &RoleSettings{Provider: criticProvider}, CriticMaxRounds: 1}
-			answer, err := runner.runAI(context.Background(), job, t.TempDir(), "task", "", nil, &modelSessions{})
-			if err != nil || answer != "public [redacted]" {
-				t.Fatalf("decoded main key reached accepted answer: %q,%v", answer, err)
+			answer, stopReason, err := runner.runAI(context.Background(), job, t.TempDir(), "task", "", nil, &modelSessions{})
+			if err != nil || answer != "public [redacted]" || stopReason != "approved" {
+				t.Fatalf("decoded main key reached accepted answer: %q,%q,%v", answer, stopReason, err)
 			}
 		})
 	}
@@ -234,9 +234,9 @@ func TestRunAIRedactsDecodedCriticFeedback(t *testing.T) {
 					}
 					return nil
 				}
-				answer, err := runner.runAI(context.Background(), job, t.TempDir(), "task", "", checkpoint, &modelSessions{})
-				if err != nil || answer != test.wantAnswer || mainCalls != 2 || criticCalls != 3 {
-					t.Fatalf("decoded critic feedback: answer=%q error=%v main=%d critic=%d", answer, err, mainCalls, criticCalls)
+				answer, stopReason, err := runner.runAI(context.Background(), job, t.TempDir(), "task", "", checkpoint, &modelSessions{})
+				if err != nil || answer != test.wantAnswer || stopReason != "approved" || mainCalls != 2 || criticCalls != 3 {
+					t.Fatalf("decoded critic feedback: answer=%q stop=%q error=%v main=%d critic=%d", answer, stopReason, err, mainCalls, criticCalls)
 				}
 			})
 		}
@@ -251,9 +251,9 @@ func TestRunAIRedactsBothConfiguredKeys(t *testing.T) {
 			runner.runModel = func(context.Context, modelRun) (aicli.Result, error) {
 				return aicli.Result{Answer: "Answer " + codexKey + " and " + claudeKey}, nil
 			}
-			answer, err := runner.runAI(context.Background(), Job{Main: RoleSettings{Provider: provider}}, t.TempDir(), "task", "", nil, &modelSessions{})
-			if err != nil || answer != "Answer [redacted] and [redacted]" {
-				t.Fatalf("configured keys in answer: %q, %v", answer, err)
+			answer, stopReason, err := runner.runAI(context.Background(), Job{Main: RoleSettings{Provider: provider}}, t.TempDir(), "task", "", nil, &modelSessions{})
+			if err != nil || answer != "Answer [redacted] and [redacted]" || stopReason != "" {
+				t.Fatalf("configured keys in answer: %q, %q, %v", answer, stopReason, err)
 			}
 		})
 	}
@@ -291,9 +291,9 @@ func TestRunAIRejectsInvalidProposalAfterRedaction(t *testing.T) {
 				return aicli.Result{Answer: proposalJSON(tt.answer, tt.refutations)}, nil
 			}}
 			job := Job{Action: command.Comment, Main: RoleSettings{Provider: "codex"}, Critic: &RoleSettings{Provider: "claude"}, CriticMaxRounds: 1}
-			answer, err := runner.runAI(context.Background(), job, t.TempDir(), "task", "", nil, &modelSessions{})
-			if answer != "" || !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), tt.wantError) || calls != 1 {
-				t.Fatalf("invalid redacted proposal: answer=%q calls=%d error=%v", answer, calls, err)
+			answer, stopReason, err := runner.runAI(context.Background(), job, t.TempDir(), "task", "", nil, &modelSessions{})
+			if answer != "" || stopReason != "" || !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), tt.wantError) || calls != 1 {
+				t.Fatalf("invalid redacted proposal: answer=%q stop=%q calls=%d error=%v", answer, stopReason, calls, err)
 			}
 		})
 	}
@@ -406,9 +406,9 @@ func TestRunAIRevisionPreservesWorkAndBoundaries(t *testing.T) {
 				}
 				return aicli.Result{Answer: approvedCritiqueJSON}, nil
 			}
-			answer, err := e.runAI(ctx, job, dir, task, outputDir, nil, &modelSessions{})
-			if err != nil || answer != "revised proposal" || calls != 5 {
-				t.Fatalf("runAI() = %q, %v; calls = %d", answer, err, calls)
+			answer, stopReason, err := e.runAI(ctx, job, dir, task, outputDir, nil, &modelSessions{})
+			if err != nil || answer != "revised proposal" || stopReason != "approved" || calls != 5 {
+				t.Fatalf("runAI() = %q, %q, %v; calls = %d", answer, stopReason, err, calls)
 			}
 		})
 	}
@@ -460,9 +460,9 @@ func TestRunAIFreshReviewFindingsUseRemainingRounds(t *testing.T) {
 		}
 		return aicli.Result{Answer: approvedCritiqueJSON}, nil
 	}
-	answer, err := e.runAI(context.Background(), job, t.TempDir(), task, "", nil, &modelSessions{})
-	if err != nil || answer != "candidate 3" || len(calls) != 8 {
-		t.Fatalf("runAI() = %q, %v; calls=%+v", answer, err, calls)
+	answer, stopReason, err := e.runAI(context.Background(), job, t.TempDir(), task, "", nil, &modelSessions{})
+	if err != nil || answer != "candidate 3" || stopReason != "approved" || len(calls) != 8 {
+		t.Fatalf("runAI() = %q, %q, %v; calls=%+v", answer, stopReason, err, calls)
 	}
 	want := []string{"main/1/", "critic/1/full", "main/2/", "critic/2/verification", "critic/2/full", "main/3/", "critic/3/verification", "critic/3/full"}
 	for i, call := range calls {
@@ -503,10 +503,10 @@ func TestRunAIVerificationRejectionFeedsNextRevision(t *testing.T) {
 		return aicli.Result{Answer: approvedCritiqueJSON}, nil
 	}}
 	job := Job{Main: RoleSettings{Provider: "codex"}, Critic: &RoleSettings{Provider: "claude"}, CriticMaxRounds: 3}
-	answer, err := runner.runAI(context.Background(), job, t.TempDir(), "selected task", "", nil, &modelSessions{})
+	answer, stopReason, err := runner.runAI(context.Background(), job, t.TempDir(), "selected task", "", nil, &modelSessions{})
 	want := []string{"main/1/", "critic/1/full", "main/2/", "critic/2/verification", "main/3/", "critic/3/verification", "critic/3/full"}
-	if err != nil || answer != "candidate 3" || len(calls) != len(want) {
-		t.Fatalf("verification rejection: answer=%q calls=%+v error=%v", answer, calls, err)
+	if err != nil || answer != "candidate 3" || stopReason != "approved" || len(calls) != len(want) {
+		t.Fatalf("verification rejection: answer=%q stop=%q calls=%+v error=%v", answer, stopReason, calls, err)
 	}
 	for i, request := range calls {
 		if got := fmt.Sprintf("%s/%d/%s", request.role, request.round, request.reviewPhase); got != want[i] {
@@ -561,9 +561,9 @@ func TestRunAIFailsWithoutReturningProposal(t *testing.T) {
 				}
 				return aicli.Result{Answer: proposalJSON(answer, "Private rationale")}, nil
 			}
-			answer, err := e.runAI(ctx, job, t.TempDir(), "task", "", nil, &modelSessions{})
-			if answer != "" || !errors.Is(err, tt.wantError) || calls != tt.wantCalls {
-				t.Fatalf("runAI() = %q, %v; calls = %d; want no answer, %v, %d calls", answer, err, calls, tt.wantError, tt.wantCalls)
+			answer, stopReason, err := e.runAI(ctx, job, t.TempDir(), "task", "", nil, &modelSessions{})
+			if answer != "" || stopReason != "" || !errors.Is(err, tt.wantError) || calls != tt.wantCalls {
+				t.Fatalf("runAI() = %q, %q, %v; calls = %d; want no answer, %v, %d calls", answer, stopReason, err, calls, tt.wantError, tt.wantCalls)
 			}
 		})
 	}

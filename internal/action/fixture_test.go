@@ -465,7 +465,7 @@ func usageJob() monitor.Job {
 }
 
 func privateReviewResult(job Job) Result {
-	return Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Public answer.",
+	return Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Public answer.", CriticStopReason: "approved",
 		Calls: []CallUsage{
 			{Provider: job.Main.Provider, Role: roleMain, Round: 1},
 			{Provider: job.Critic.Provider, Role: roleCritic, Round: 1, ReviewPhase: reviewFull, HasBlockers: true},

@@ -66,7 +66,7 @@ func TestRunnerCriticStoppingReplaysFullReviewStreak(t *testing.T) {
 			result, err := runner.Run(context.Background(), job)
 			wantSuccess := test.stopReason != ""
 			wantCalls := 3*test.lastRound - 1 - test.skippedFull
-			if (err == nil) != wantSuccess || calls != wantCalls || len(result.Calls) != wantCalls {
+			if result.CriticStopReason != test.stopReason || (err == nil) != wantSuccess || calls != wantCalls || len(result.Calls) != wantCalls {
 				t.Fatalf("stopping result: calls=%d result=%+v error=%v; want calls=%d success=%t", calls, result, err, wantCalls, wantSuccess)
 			}
 			if wantSuccess {
@@ -96,7 +96,7 @@ func TestRunnerCriticStoppingReplaysFullReviewStreak(t *testing.T) {
 			orchestrator.logResult(job, result)
 			lines := strings.Split(strings.TrimSpace(journal.String()), "\n")
 			last := lines[len(lines)-1]
-			wantFinal := fmt.Sprintf("no_blocker_rounds=%d policy_met=%t stop_reason=%q", test.wantStreak, wantSuccess, test.stopReason)
+			wantFinal := fmt.Sprintf("no_blocker_verdict_streak=%d policy_met=%t stop_reason=%q", test.wantStreak, wantSuccess, test.stopReason)
 			wantStops := 0
 			if wantSuccess {
 				wantStops = 1
@@ -108,7 +108,7 @@ func TestRunnerCriticStoppingReplaysFullReviewStreak(t *testing.T) {
 				t.Fatal(err)
 			}
 			saved := readPrivateReview(t, root)
-			if saved.CriticMaxRounds != test.maximum || saved.CriticNonblockingRounds != test.after || saved.CriticConsecutiveNoBlockerRounds != test.consecutive || !reflect.DeepEqual(saved.Calls, result.Calls) {
+			if saved.CriticStopReason != test.stopReason || saved.CriticMaxRounds != test.maximum || saved.CriticNonblockingRounds != test.after || saved.CriticConsecutiveNoBlockerRounds != test.consecutive || !reflect.DeepEqual(saved.Calls, result.Calls) {
 				t.Fatalf("retained evidence lost replay policy or verdicts: %+v", saved)
 			}
 		})
@@ -145,8 +145,58 @@ func TestRunAIPreservesRejectedVerificationAndFullFeedback(t *testing.T) {
 		}
 		return aicli.Result{Answer: approvedCritiqueJSON}, nil
 	}}
-	answer, err := runner.runAI(context.Background(), job, t.TempDir(), "Complete the task", "", nil, &modelSessions{})
-	if err != nil || answer != "Candidate 3" || calls != 8 {
+	answer, reason, err := runner.runAI(context.Background(), job, t.TempDir(), "Complete the task", "", nil, &modelSessions{})
+	if err != nil || reason != "approved" || answer != "Candidate 3" || calls != 8 {
 		t.Fatalf("dual feedback revision: answer=%q calls=%d error=%v", answer, calls, err)
+	}
+}
+
+func TestResultCriticStopReasonRequiresMatchingDecisionEvidence(t *testing.T) {
+	for _, test := range []struct {
+		name, reason      string
+		nits, noCritic    bool
+		verificationOnly  bool
+		complete, partial bool
+	}{
+		{name: "approved decision", reason: "approved", complete: true, partial: true},
+		{name: "approval flags without decision", partial: true},
+		{name: "wrong approved reason", reason: "nonblocking"},
+		{name: "unknown reason", reason: "approved\nforged journal"},
+		{name: "nonblocking decision", reason: "nonblocking", nits: true, complete: true, partial: true},
+		{name: "nonblocking flags without decision", nits: true, partial: true},
+		{name: "wrong nonblocking reason", reason: "approved", nits: true},
+		{name: "verification is not a decision", reason: "approved", verificationOnly: true},
+		{name: "no critic cannot decide", reason: "approved", noCritic: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			job := withClaudeCritic(testJob(command.Comment))
+			result := privateReviewResult(job)
+			result.CriticStopReason = test.reason
+			if test.nits {
+				job.CriticNonblockingRounds = 1
+				result.Calls[len(result.Calls)-1].Approved = false
+			}
+			if test.verificationOnly {
+				result.Calls = result.Calls[:4]
+			}
+			if test.noCritic {
+				job.Critic, job.CriticMaxRounds = nil, 0
+				result.Calls, result.Refutations = result.Calls[:1], nil
+			}
+			if err := result.Validate(job); (err == nil) != test.complete {
+				t.Fatalf("complete decision validation=%v; want valid=%t", err, test.complete)
+			}
+			if err := result.validate(job, false); (err == nil) != test.partial {
+				t.Fatalf("partial decision validation=%v; want valid=%t", err, test.partial)
+			}
+			var journal bytes.Buffer
+			(&Orchestrator{Logger: log.New(&journal, "", 0)}).logResult(job, result)
+			if !test.partial && journal.Len() != 0 {
+				t.Fatalf("unvalidated decision reached journal: %s", journal.String())
+			}
+			if test.partial && test.reason == "" && (strings.Contains(journal.String(), "policy_met=true") || strings.Contains(journal.String(), `stop_reason="approved"`) || strings.Contains(journal.String(), `stop_reason="nonblocking"`)) {
+				t.Fatalf("journal inferred a decision from verdict flags: %s", journal.String())
+			}
+		})
 	}
 }

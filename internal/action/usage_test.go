@@ -141,9 +141,9 @@ func TestUsageAccumulatesCriticRevisions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	answer, err := tracked.Runner.runAI(context.Background(), Job{Main: RoleSettings{Provider: "claude"}, Critic: &RoleSettings{Provider: "codex"}, CriticMaxRounds: config.DefaultCriticMaxRounds}, "dir", "prompt", "", nil, &modelSessions{})
-	if err != nil || answer != "proposal" {
-		t.Fatalf("answer=%q err=%v", answer, err)
+	answer, stopReason, err := tracked.Runner.runAI(context.Background(), Job{Main: RoleSettings{Provider: "claude"}, Critic: &RoleSettings{Provider: "codex"}, CriticMaxRounds: config.DefaultCriticMaxRounds}, "dir", "prompt", "", nil, &modelSessions{})
+	if err != nil || answer != "proposal" || stopReason != "approved" {
+		t.Fatalf("answer=%q stop=%q err=%v", answer, stopReason, err)
 	}
 	if err := finish(nil); err != nil {
 		t.Fatal(err)

@@ -1,9 +1,11 @@
 package action
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -226,8 +228,15 @@ func TestReviewSnapshotCleansFailedFixCandidateMaterialization(t *testing.T) {
 }
 
 func TestReviewSnapshotRejectsCriticCopyMutation(t *testing.T) {
-	for _, phase := range []string{reviewFull, reviewVerification} {
-		t.Run(phase, func(t *testing.T) {
+	for _, test := range []struct {
+		name, phase string
+		approveFull bool
+	}{
+		{name: "rejecting full", phase: reviewFull},
+		{name: "approving full", phase: reviewFull, approveFull: true},
+		{name: "approving verification", phase: reviewVerification},
+	} {
+		t.Run(test.name, func(t *testing.T) {
 			job := testJob(command.Fix)
 			job.Critic, job.CriticMaxRounds = &RoleSettings{Provider: "claude"}, 2
 			calls, fullReviews := 0, 0
@@ -242,22 +251,22 @@ func TestReviewSnapshotRejectsCriticCopyMutation(t *testing.T) {
 				if request.reviewPhase == reviewFull {
 					fullReviews++
 				}
-				if request.reviewPhase == phase {
+				if request.reviewPhase == test.phase {
 					if err := os.WriteFile(filepath.Join(request.dir, "source.txt"), []byte("tampered by critic"), 0644); err != nil {
 						t.Fatal(err)
 					}
 				}
-				if request.reviewPhase == reviewFull {
+				if request.reviewPhase == reviewFull && !test.approveFull {
 					return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"feedback":"Revise the candidate."}`}, nil
 				}
 				return aicli.Result{Answer: approvedCritiqueJSON}, nil
 			}}
 			result, err := runner.Run(context.Background(), job)
 			wantCalls := 2
-			if phase == reviewVerification {
+			if test.phase == reviewVerification {
 				wantCalls = 4
 			}
-			if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "frozen candidate source changed") || calls != wantCalls || fullReviews != 1 || result.Answer != "" || len(result.Changes) != 0 {
+			if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "frozen candidate source changed") || calls != wantCalls || fullReviews != 1 || result.Answer != "" || len(result.Changes) != 0 || result.CriticStopReason != "" {
 				t.Fatalf("mutated critic copy reached a subsequent call or successful export: calls=%d full=%d result=%+v error=%v", calls, fullReviews, result, err)
 			}
 			if len(result.Calls) != wantCalls {
@@ -266,9 +275,21 @@ func TestReviewSnapshotRejectsCriticCopyMutation(t *testing.T) {
 			if err := result.validate(job, false); err != nil {
 				t.Fatalf("invalid partial evidence after integrity failure: %v", err)
 			}
-			last, wantApproval := result.Calls[len(result.Calls)-1], phase == reviewVerification
-			if last.Approved != wantApproval || last.NoBlockers != wantApproval || last.HasBlockers != (phase == reviewFull) {
+			last, wantApproval := result.Calls[len(result.Calls)-1], test.approveFull || test.phase == reviewVerification
+			if last.Approved != wantApproval || last.NoBlockers != wantApproval || last.HasBlockers == wantApproval {
 				t.Fatalf("lost native critic verdict after integrity failure: %+v", last)
+			}
+			var journal bytes.Buffer
+			orchestrator := Orchestrator{WorkRoot: runner.WorkRoot, Logger: log.New(&journal, "", 0)}
+			orchestrator.logResult(job, result)
+			if strings.Count(journal.String(), "action call ") != wantCalls || strings.Count(journal.String(), `policy_met=false stop_reason=""`) != wantCalls {
+				t.Fatalf("journal promoted a verdict after integrity failure: %s", journal.String())
+			}
+			if err := orchestrator.retainReviewEvidence(job, result); err != nil {
+				t.Fatalf("integrity failure evidence was rejected: %v", err)
+			}
+			if saved := readPrivateReview(t, runner.WorkRoot); saved.CriticStopReason != "" || len(saved.Calls) != wantCalls {
+				t.Fatalf("retained ledger promoted a verdict after integrity failure: %+v", saved)
 			}
 		})
 	}
@@ -292,10 +313,10 @@ func TestReviewSnapshotCancellationKeepsVerdictWithoutIntegrityFailure(t *testin
 			}}
 			result, err := runner.Run(ctx, job)
 			if interrupted {
-				if !errors.Is(err, context.Canceled) || errors.Is(err, monitor.ErrTerminalJob) || strings.Contains(err.Error(), "frozen") || result.Answer != "" || len(result.Changes) != 0 {
+				if !errors.Is(err, context.Canceled) || errors.Is(err, monitor.ErrTerminalJob) || strings.Contains(err.Error(), "frozen") || result.Answer != "" || len(result.Changes) != 0 || result.CriticStopReason != "" {
 					t.Fatalf("cancellation reported as an integrity failure: result=%+v error=%v", result, err)
 				}
-			} else if err != nil || result.Answer != "Completed fix." || len(result.Changes) != 1 {
+			} else if err != nil || result.Answer != "Completed fix." || len(result.Changes) != 1 || result.CriticStopReason != "approved" {
 				t.Fatalf("valid candidate refused: result=%+v error=%v", result, err)
 			}
 			if len(result.Calls) != 2 || !result.Calls[1].Approved {

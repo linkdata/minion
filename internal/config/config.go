@@ -170,7 +170,7 @@ type Config struct {
 	Main string `json:"main,omitempty"`
 	// Adversarial optionally selects the other provider as a read-only critic.
 	Adversarial    string         `json:"adversarial,omitempty"`
-	CriticStopping CriticStopping `json:"critic_stopping,omitempty"`
+	CriticStopping CriticStopping `json:"critic_stopping"`
 	Codex          CodexConfig    `json:"codex,omitempty"`
 	Claude         ClaudeConfig   `json:"claude,omitempty"`
 	// Nil Commands selects defaults; an empty map disables all commands.

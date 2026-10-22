@@ -22,7 +22,7 @@ func TestRefutationsRequireOrderedMainRoundsButPermitEmptyOrSparseMemory(t *test
 		{Provider: job.Critic.Provider, Role: roleCritic, Round: 3, ReviewPhase: reviewFull, Approved: true, NoBlockers: true},
 	}
 	for _, refs := range [][]Refutation{nil, {{Round: 2, Text: "One refutation; implemented changes are intentionally absent."}}, {{Round: 2, Text: "Earlier refutation."}, {Round: 3, Text: "Independent later refutation."}}} {
-		result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Complete answer", Calls: calls, Refutations: refs}
+		result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Complete answer", CriticStopReason: "approved", Calls: calls, Refutations: refs}
 		if err := result.Validate(job); err != nil {
 			t.Fatalf("empty/sparse memory refused: %+v: %v", refs, err)
 		}

@@ -54,10 +54,10 @@ func TestCriticEvidencePreservesBlockerVerdicts(t *testing.T) {
 				t.Fatalf("critic rejection or invalid verdict was retryable: %v", err)
 			}
 			if tt.approved {
-				if result.Answer != "Candidate answer" || result.Validate(job) != nil {
+				if result.CriticStopReason != "approved" || result.Answer != "Candidate answer" || result.Validate(job) != nil {
 					t.Fatalf("approved result invalid: %+v", result)
 				}
-			} else if result.Answer != "" {
+			} else if result.CriticStopReason != "" || result.Answer != "" {
 				t.Fatalf("failed critic published: %+v", result)
 			}
 			want := CallUsage{Provider: "claude", Role: roleCritic, Round: 1, ReviewPhase: reviewFull, Tokens: usage.Tokens{Input: 11, Output: 2}, Approved: tt.approved, NoBlockers: tt.noBlockers, HasBlockers: tt.hasBlockers}
@@ -81,8 +81,8 @@ func TestJournalPolicyIsNotPublication(t *testing.T) {
 	var output bytes.Buffer
 	(&Orchestrator{Logger: log.New(&output, "", 0)}).logResult(job, result)
 	text := output.String()
-	if !strings.Contains(text, `review_phase=verification approved=false no_blockers=true has_blockers=false advance_to_full=true no_blocker_rounds=0 policy_met=false stop_reason=""`) ||
-		!strings.Contains(text, `review_phase=full approved=false no_blockers=false has_blockers=true advance_to_full=false no_blocker_rounds=0 policy_met=false stop_reason=""`) || strings.Contains(text, "accepted=") {
+	if !strings.Contains(text, `review_phase=verification approved=false no_blockers=true has_blockers=false verdict_allows_full=true no_blocker_verdict_streak=0 policy_met=false stop_reason=""`) ||
+		!strings.Contains(text, `review_phase=full approved=false no_blockers=false has_blockers=true verdict_allows_full=false no_blocker_verdict_streak=0 policy_met=false stop_reason=""`) || strings.Contains(text, "accepted=") {
 		t.Fatalf("journal blurred verdict policy and publication: %s", text)
 	}
 	if err := result.Validate(job); err == nil || !strings.Contains(err.Error(), "accepted final full review") {
@@ -134,13 +134,13 @@ func TestRunnerNonblockingThresholdRequiresFreshFullReview(t *testing.T) {
 				t.Fatalf("policy result=%q error=%v phases=%v", result.Answer, err, phases)
 			}
 			if !tt.wantSuccess {
-				if result.Answer != "" || !errors.Is(err, monitor.ErrTerminalJob) {
+				if result.CriticStopReason != "" || result.Answer != "" || !errors.Is(err, monitor.ErrTerminalJob) {
 					t.Fatalf("failed review leaked an answer or became retryable: %+v, %v", result, err)
 				}
 				return
 			}
 			last := result.Calls[len(result.Calls)-1]
-			if last.ReviewPhase != reviewFull || last.Approved || !last.NoBlockers || result.Answer != "Complete answer" {
+			if result.CriticStopReason != "nonblocking" || last.ReviewPhase != reviewFull || last.Approved || !last.NoBlockers || result.Answer != "Complete answer" {
 				t.Fatalf("policy acceptance falsified the actual critic verdict: %+v", result)
 			}
 			if err := result.Validate(job); err != nil {

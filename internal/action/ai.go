@@ -148,7 +148,7 @@ type redactedActionError struct {
 func (e redactedActionError) Error() string { return e.message }
 func (e redactedActionError) Unwrap() error { return e.cause }
 
-func (r *Runner) runAI(ctx context.Context, job Job, dir, prompt, outputDir string, checkpoint func([]Refutation) error, sessions *modelSessions) (answer string, err error) {
+func (r *Runner) runAI(ctx context.Context, job Job, dir, prompt, outputDir string, checkpoint func([]Refutation) error, sessions *modelSessions) (answer, stopReason string, err error) {
 	var history []Refutation
 	record := func() error {
 		if checkpoint != nil {
@@ -179,15 +179,15 @@ func (r *Runner) runAI(ctx context.Context, job Job, dir, prompt, outputDir stri
 		}
 		candidate, refutations, parseErr := parseProposal(proposed.Answer, job.Action == command.Fix || job.Action == command.SecurityAudit, secrets...)
 		if parseErr != nil {
-			return "", fmt.Errorf("%w: invalid main proposal: %w", monitor.ErrTerminalJob, parseErr)
+			return "", "", fmt.Errorf("%w: invalid main proposal: %w", monitor.ErrTerminalJob, parseErr)
 		}
 		if round > 1 && strings.TrimSpace(refutations) != "" {
 			history = append(history, Refutation{Round: round, Text: refutations})
 		}
 		if err = record(); err != nil {
-			return "", err
+			return "", "", err
 		}
-		var accepted bool
+		var acceptedReason string
 		var rejectedFeedback []string
 		for _, phase := range reviewPhases(round) {
 			previousAnswer, previousFeedback := "", ""
@@ -206,23 +206,23 @@ func (r *Runner) runAI(ctx context.Context, job Job, dir, prompt, outputDir stri
 			var approved, hasBlockers bool
 			var feedback string
 			if approved, hasBlockers, feedback, err = parseCritique(review.Answer); err != nil {
-				return "", fmt.Errorf("%w: invalid critic verdict: %w", monitor.ErrTerminalJob, err)
+				return "", "", fmt.Errorf("%w: invalid critic verdict: %w", monitor.ErrTerminalJob, err)
 			}
 			feedback = redactActionText(feedback, secrets...)
 			if !approved {
 				rejectedFeedback = append(rejectedFeedback, phase+" review:\n"+feedback)
 			}
 			if err = record(); err != nil {
-				return "", err
+				return "", "", err
 			}
 			advance, reason := policy.observe(CallUsage{Role: roleCritic, Round: round, ReviewPhase: phase, Approved: approved, NoBlockers: !hasBlockers, HasBlockers: hasBlockers})
-			accepted = reason != ""
+			acceptedReason = reason
 			if phase == reviewVerification && !advance {
 				break
 			}
 		}
-		if accepted {
-			answer = candidate
+		if acceptedReason != "" {
+			answer, stopReason = candidate, acceptedReason
 			return
 		}
 		feedback := strings.Join(rejectedFeedback, "\n\n")
@@ -230,7 +230,7 @@ func (r *Runner) runAI(ctx context.Context, job Job, dir, prompt, outputDir stri
 		request.prompt = revisionPrompt(prompt, candidate, feedback)
 		request.refutations = slices.Clone(history)
 	}
-	return "", fmt.Errorf("%w: critic did not meet acceptance policy after %d round(s)", monitor.ErrTerminalJob, rounds)
+	return "", "", fmt.Errorf("%w: critic did not meet acceptance policy after %d round(s)", monitor.ErrTerminalJob, rounds)
 }
 
 func reviewPhases(round int) []string {

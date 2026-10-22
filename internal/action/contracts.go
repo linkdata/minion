@@ -104,6 +104,9 @@ type Result struct {
 	Calls       []CallUsage        `json:"calls,omitempty"`
 	Refutations []Refutation       `json:"refutations,omitempty"`
 	Diagnostics []Diagnostic       `json:"diagnostics,omitempty"`
+
+	// CriticStopReason records an acceptance decision reached after call integrity checks.
+	CriticStopReason string `json:"critic_stop_reason,omitempty"`
 }
 
 // Status reports one observation of an attempt. It does not authorize publication
@@ -358,12 +361,15 @@ func (r Result) validateCalls(j Job, complete bool) error {
 		}
 		advanceToFull, stopReason = policy.observe(call)
 	}
+	if r.CriticStopReason != "" && (j.Critic == nil || r.CriticStopReason != stopReason) {
+		return errors.New("invalid recorded critic stop reason")
+	}
 	if complete && j.Critic != nil {
 		if len(r.Calls) == 0 {
 			return errors.New("action result lacks a final full review")
 		}
 		last := r.Calls[len(r.Calls)-1]
-		if last.Role != roleCritic || last.ReviewPhase != reviewFull || stopReason == "" {
+		if last.Role != roleCritic || last.ReviewPhase != reviewFull || stopReason == "" || r.CriticStopReason == "" {
 			return errors.New("action result lacks an accepted final full review")
 		}
 	}

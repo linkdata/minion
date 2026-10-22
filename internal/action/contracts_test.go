@@ -289,7 +289,7 @@ func TestJobValidate(t *testing.T) {
 func TestResultJSONRoundTripPreservesValidatedPayload(t *testing.T) {
 	job := testJob(command.Fix)
 	job.Critic, job.CriticMaxRounds = &RoleSettings{Provider: "claude"}, 3
-	result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Done.",
+	result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Done.", CriticStopReason: "approved",
 		Changes:     []workspace.Change{{Path: "binary", Mode: workspace.Executable, Data: []byte{0, 0xff, '\n'}}},
 		Refutations: []Refutation{{Round: 2, Text: "Private refutation."}},
 		Diagnostics: []Diagnostic{{Code: "incomplete_usage", Message: "Provider omitted usage."}},
@@ -310,7 +310,7 @@ func TestResultJSONRoundTripPreservesValidatedPayload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, field := range []string{`"approved":true`, `"no_blockers":true`, `"has_blockers":true`, `"complete":true`, `"complete":false`} {
+	for _, field := range []string{`"critic_stop_reason":"approved"`, `"approved":true`, `"no_blockers":true`, `"has_blockers":true`, `"complete":true`, `"complete":false`} {
 		if !bytes.Contains(data, []byte(field)) {
 			t.Fatalf("attestation %s missing from wire result: %s", field, data)
 		}
@@ -374,46 +374,47 @@ func TestResultCallUsageRequiresOrderedReviewPhases(t *testing.T) {
 		name              string
 		calls             []CallUsage
 		threshold         int
+		reason            string
 		complete, partial bool
 	}{
-		{"no review calls", nil, 0, false, true},
-		{"first full review", []CallUsage{main(1), critic(1, "full", approved)}, 0, true, true},
-		{"rejected full review", []CallUsage{main(1), critic(1, "full", blocking)}, 0, false, true},
-		{"revised full review", []CallUsage{main(1), critic(1, "full", blocking), main(2), critic(2, "verification", approved), critic(2, "full", approved)}, 0, true, true},
-		{"strict verification nits survive full approval", []CallUsage{main(1), critic(1, reviewFull, blocking), main(2), critic(2, reviewVerification, nits), critic(2, reviewFull, approved)}, 0, false, true},
-		{"strict verification nits can revise after approved full", []CallUsage{main(1), critic(1, reviewFull, blocking), main(2), critic(2, reviewVerification, nits), critic(2, reviewFull, approved), main(3), critic(3, reviewVerification, approved), critic(3, reviewFull, approved)}, 0, true, true},
-		{"verification nits remain before threshold", []CallUsage{main(1), critic(1, reviewFull, blocking), main(2), critic(2, reviewVerification, nits), critic(2, reviewFull, approved)}, 3, false, true},
-		{"threshold waives verification nits", []CallUsage{main(1), critic(1, reviewFull, blocking), main(2), critic(2, reviewVerification, nits), critic(2, reviewFull, approved)}, 2, true, true},
-		{"rejected verification then revision", []CallUsage{main(1), critic(1, "full", blocking), main(2), critic(2, "verification", blocking), main(3), critic(3, "verification", approved), critic(3, "full", approved)}, 0, true, true},
-		{"unapproved verification followed by full", []CallUsage{main(1), critic(1, "full", blocking), main(2), critic(2, "verification", blocking), critic(2, "full", approved)}, 0, false, false},
-		{"approved verification skips full", []CallUsage{main(1), critic(1, "full", blocking), main(2), critic(2, "verification", approved), main(3)}, 0, false, false},
-		{"approved full followed by main", []CallUsage{main(1), critic(1, "full", approved), main(2)}, 0, false, false},
-		{"interrupted first main", []CallUsage{main(1)}, 0, false, true},
-		{"interrupted revision", []CallUsage{main(1), critic(1, "full", blocking), main(2)}, 0, false, true},
-		{"interrupted verification", []CallUsage{main(1), critic(1, "full", blocking), main(2), critic(2, "verification", blocking)}, 0, false, true},
-		{"critic first", []CallUsage{critic(1, "full", approved)}, 0, false, false},
-		{"missing first full", []CallUsage{main(1), critic(1, "verification", approved)}, 0, false, false},
-		{"missing revision verification", []CallUsage{main(1), critic(1, "full", blocking), main(2), critic(2, "full", approved)}, 0, false, false},
-		{"repeated full", []CallUsage{main(1), critic(1, "full", approved), critic(1, "full", approved)}, 0, false, false},
-		{"main before critic", []CallUsage{main(1), main(2)}, 0, false, false},
-		{"skipped round", []CallUsage{main(1), critic(1, "full", blocking), main(3)}, 0, false, false},
-		{"critic round mismatch", []CallUsage{main(1), critic(2, "full", approved)}, 0, false, false},
-		{"unknown phase", []CallUsage{main(1), critic(1, "focused", approved)}, 0, false, false},
-		{"nits before threshold", []CallUsage{main(1), critic(1, reviewFull, nits)}, 2, false, true},
-		{"nits at threshold", []CallUsage{main(1), critic(1, reviewFull, nits), main(2), critic(2, reviewVerification, nits), critic(2, reviewFull, nits)}, 2, true, true},
-		{"verification cannot finish", []CallUsage{main(1), critic(1, reviewFull, nits), main(2), critic(2, reviewVerification, nits)}, 2, false, true},
-		{"fresh full still has blockers", []CallUsage{main(1), critic(1, reviewFull, nits), main(2), critic(2, reviewVerification, nits), critic(2, reviewFull, blocking)}, 2, false, true},
-		{"unparsed verdict cannot finish", []CallUsage{main(1), critic(1, reviewFull, CallUsage{})}, 2, false, true},
-		{"unparsed verdict cannot revise", []CallUsage{main(1), critic(1, reviewFull, CallUsage{}), main(2), critic(2, reviewVerification, approved), critic(2, reviewFull, approved)}, 2, false, false},
-		{"approval without no-blocker attestation", []CallUsage{main(1), critic(1, reviewFull, CallUsage{Approved: true})}, 2, false, false},
-		{"contradictory blocker attestations", []CallUsage{main(1), critic(1, reviewFull, CallUsage{HasBlockers: true, NoBlockers: true})}, 2, false, false},
-		{"accepted verification cannot skip full", []CallUsage{main(1), critic(1, reviewFull, nits), main(2), critic(2, reviewVerification, nits), main(3)}, 2, false, false},
-		{"accepted full cannot revise again", []CallUsage{main(1), critic(1, reviewFull, nits), main(2), critic(2, reviewVerification, nits), critic(2, reviewFull, nits), main(3)}, 2, false, false},
-		{"blocker verification cannot advance", []CallUsage{main(1), critic(1, reviewFull, nits), main(2), critic(2, reviewVerification, blocking), critic(2, reviewFull, approved)}, 2, false, false},
+		{"no review calls", nil, 0, "", false, true},
+		{"first full review", []CallUsage{main(1), critic(1, "full", approved)}, 0, "approved", true, true},
+		{"rejected full review", []CallUsage{main(1), critic(1, "full", blocking)}, 0, "", false, true},
+		{"revised full review", []CallUsage{main(1), critic(1, "full", blocking), main(2), critic(2, "verification", approved), critic(2, "full", approved)}, 0, "approved", true, true},
+		{"strict verification nits survive full approval", []CallUsage{main(1), critic(1, reviewFull, blocking), main(2), critic(2, reviewVerification, nits), critic(2, reviewFull, approved)}, 0, "", false, true},
+		{"strict verification nits can revise after approved full", []CallUsage{main(1), critic(1, reviewFull, blocking), main(2), critic(2, reviewVerification, nits), critic(2, reviewFull, approved), main(3), critic(3, reviewVerification, approved), critic(3, reviewFull, approved)}, 0, "approved", true, true},
+		{"verification nits remain before threshold", []CallUsage{main(1), critic(1, reviewFull, blocking), main(2), critic(2, reviewVerification, nits), critic(2, reviewFull, approved)}, 3, "", false, true},
+		{"threshold waives verification nits", []CallUsage{main(1), critic(1, reviewFull, blocking), main(2), critic(2, reviewVerification, nits), critic(2, reviewFull, approved)}, 2, "nonblocking", true, true},
+		{"rejected verification then revision", []CallUsage{main(1), critic(1, "full", blocking), main(2), critic(2, "verification", blocking), main(3), critic(3, "verification", approved), critic(3, "full", approved)}, 0, "approved", true, true},
+		{"unapproved verification followed by full", []CallUsage{main(1), critic(1, "full", blocking), main(2), critic(2, "verification", blocking), critic(2, "full", approved)}, 0, "", false, false},
+		{"approved verification skips full", []CallUsage{main(1), critic(1, "full", blocking), main(2), critic(2, "verification", approved), main(3)}, 0, "", false, false},
+		{"approved full followed by main", []CallUsage{main(1), critic(1, "full", approved), main(2)}, 0, "", false, false},
+		{"interrupted first main", []CallUsage{main(1)}, 0, "", false, true},
+		{"interrupted revision", []CallUsage{main(1), critic(1, "full", blocking), main(2)}, 0, "", false, true},
+		{"interrupted verification", []CallUsage{main(1), critic(1, "full", blocking), main(2), critic(2, "verification", blocking)}, 0, "", false, true},
+		{"critic first", []CallUsage{critic(1, "full", approved)}, 0, "", false, false},
+		{"missing first full", []CallUsage{main(1), critic(1, "verification", approved)}, 0, "", false, false},
+		{"missing revision verification", []CallUsage{main(1), critic(1, "full", blocking), main(2), critic(2, "full", approved)}, 0, "", false, false},
+		{"repeated full", []CallUsage{main(1), critic(1, "full", approved), critic(1, "full", approved)}, 0, "", false, false},
+		{"main before critic", []CallUsage{main(1), main(2)}, 0, "", false, false},
+		{"skipped round", []CallUsage{main(1), critic(1, "full", blocking), main(3)}, 0, "", false, false},
+		{"critic round mismatch", []CallUsage{main(1), critic(2, "full", approved)}, 0, "", false, false},
+		{"unknown phase", []CallUsage{main(1), critic(1, "focused", approved)}, 0, "", false, false},
+		{"nits before threshold", []CallUsage{main(1), critic(1, reviewFull, nits)}, 2, "", false, true},
+		{"nits at threshold", []CallUsage{main(1), critic(1, reviewFull, nits), main(2), critic(2, reviewVerification, nits), critic(2, reviewFull, nits)}, 2, "nonblocking", true, true},
+		{"verification cannot finish", []CallUsage{main(1), critic(1, reviewFull, nits), main(2), critic(2, reviewVerification, nits)}, 2, "", false, true},
+		{"fresh full still has blockers", []CallUsage{main(1), critic(1, reviewFull, nits), main(2), critic(2, reviewVerification, nits), critic(2, reviewFull, blocking)}, 2, "", false, true},
+		{"unparsed verdict cannot finish", []CallUsage{main(1), critic(1, reviewFull, CallUsage{})}, 2, "", false, true},
+		{"unparsed verdict cannot revise", []CallUsage{main(1), critic(1, reviewFull, CallUsage{}), main(2), critic(2, reviewVerification, approved), critic(2, reviewFull, approved)}, 2, "", false, false},
+		{"approval without no-blocker attestation", []CallUsage{main(1), critic(1, reviewFull, CallUsage{Approved: true})}, 2, "", false, false},
+		{"contradictory blocker attestations", []CallUsage{main(1), critic(1, reviewFull, CallUsage{HasBlockers: true, NoBlockers: true})}, 2, "", false, false},
+		{"accepted verification cannot skip full", []CallUsage{main(1), critic(1, reviewFull, nits), main(2), critic(2, reviewVerification, nits), main(3)}, 2, "", false, false},
+		{"accepted full cannot revise again", []CallUsage{main(1), critic(1, reviewFull, nits), main(2), critic(2, reviewVerification, nits), critic(2, reviewFull, nits), main(3)}, 2, "", false, false},
+		{"blocker verification cannot advance", []CallUsage{main(1), critic(1, reviewFull, nits), main(2), critic(2, reviewVerification, blocking), critic(2, reviewFull, approved)}, 2, "", false, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			job.CriticNonblockingRounds = test.threshold
-			result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Answer.", Calls: test.calls}
+			result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Answer.", CriticStopReason: test.reason, Calls: test.calls}
 			if err := result.Validate(job); (err == nil) != test.complete || (len(test.calls) == 0 && !strings.Contains(err.Error(), "final full review")) {
 				t.Fatalf("complete validation=%v, want valid=%v", err, test.complete)
 			}
@@ -484,7 +485,7 @@ func TestResultCallUsageHonorsConfiguredRoundLimits(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			job := testJob(command.Comment)
 			job.Critic, job.CriticMaxRounds = &RoleSettings{Provider: "claude"}, test.limit
-			result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Answer."}
+			result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Answer.", CriticStopReason: "approved"}
 			for round := 1; round <= test.limit+1; round++ {
 				result.Calls = nil
 				for proposal := 1; proposal <= round; proposal++ {
@@ -716,6 +717,7 @@ func TestResultEmptyAnswerContract(t *testing.T) {
 			}
 			result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Calls: []CallUsage{{Provider: job.Main.Provider, Role: "main", Round: 1}}}
 			if test.critic {
+				result.CriticStopReason = "approved"
 				result.Calls = append(result.Calls, CallUsage{Provider: job.Critic.Provider, Role: roleCritic, Round: 1, ReviewPhase: reviewFull, Approved: true, NoBlockers: true})
 			}
 			if test.changed {

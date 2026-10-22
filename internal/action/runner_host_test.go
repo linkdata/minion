@@ -91,15 +91,15 @@ func TestRunnerReturnsParentCancellationAfterFinalReview(t *testing.T) {
 			}
 			return aicli.Result{Answer: approvedCritiqueJSON}, nil
 		},
-		recordReview: func(receipts []CallUsage, _ []Refutation) error {
-			if len(receipts) == 2 {
+		recordReview: func(receipts []CallUsage, _ []Refutation, stopReason string) error {
+			if len(receipts) == 2 && stopReason == "approved" {
 				cancel() // After the last model and repository verification, before Run returns.
 			}
 			return nil
 		},
 	}
 	result, err := runner.Run(ctx, job)
-	if !errors.Is(err, context.Canceled) || errors.Is(err, monitor.ErrTerminalJob) || calls != 2 || len(result.Calls) != 2 {
+	if !errors.Is(err, context.Canceled) || errors.Is(err, monitor.ErrTerminalJob) || calls != 2 || len(result.Calls) != 2 || result.CriticStopReason != "approved" {
 		t.Fatalf("canceled after final review: result=%+v calls=%d error=%v", result, calls, err)
 	}
 	assertEmptyDir(t, root)
