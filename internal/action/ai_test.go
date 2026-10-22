@@ -2,6 +2,7 @@ package action
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -42,7 +43,9 @@ func TestReviewPromptsRequireCompleteInvestigationInEveryPhase(t *testing.T) {
 		if phase == reviewVerification && !strings.Contains(prompts[phase], "The Git HEAD baseline is the original input, not the previous candidate") {
 			t.Error("verification lost the original Git baseline")
 		}
-		if !strings.Contains(prompts[phase], "unfinished assigned review scope is a blocking task failure: set approved=false and has_blockers=true") {
+		if !strings.Contains(prompts[phase], "unfinished assigned review scope is a blocking task failure: set review_complete=false, approved=false and has_blockers=true") ||
+			!strings.Contains(prompts[phase], "Set review_complete=true only after completing this phase's entire assigned scope, all delegated reviews and background checks, and the final coverage pass") ||
+			!strings.Contains(prompts[phase], "This attests review coverage, not token-accounting completeness") {
 			t.Errorf("%s can waive an unfinished review as nonblocking", phase)
 		}
 	}
@@ -67,6 +70,19 @@ func TestReviewPromptsRequireCompleteInvestigationInEveryPhase(t *testing.T) {
 				t.Errorf("%s omitted review requirement %q", name, rule)
 			}
 		}
+	}
+}
+
+func TestCriticSchemaRequiresReviewCoverage(t *testing.T) {
+	var schema struct {
+		Properties map[string]struct{ Type string }
+		Required   []string
+	}
+	if err := json.Unmarshal([]byte(criticOutputSchema), &schema); err != nil {
+		t.Fatal(err)
+	}
+	if schema.Properties["review_complete"].Type != "boolean" || !slices.Contains(schema.Required, "review_complete") {
+		t.Fatalf("native schema permits missing or nonboolean review coverage: %s", criticOutputSchema)
 	}
 }
 
@@ -185,8 +201,8 @@ func TestRunAIRedactsDecodedCriticFeedback(t *testing.T) {
 			name, mainKey, criticKey, firstProposal, revisedProposal, firstCritique, wantAnswer, wantRefutation string
 			firstRedacted                                                                                       bool
 		}{
-			{"JSON escape", `main"secret`, `critic"secret`, proposalJSON("answer1", ""), `{"answer":"answer2","refutations":"main\u0022secret critic\u0022secret"}`, `{"approved":false,"has_blockers":true,"feedback":"critic\u0022secret main\u0022secret"}`, "answer2", "[redacted] [redacted]", false},
-			{"NUL split", "main-secret", "critic-secret", proposalJSON("candidate main-\x00secret critic-\x00secret", ""), proposalJSON("revised", "finding main-\x00secret critic-\x00secret"), `{"approved":false,"has_blockers":true,"feedback":"critic-\u0000secret main-\u0000secret"}`, "revised", "finding [redacted] [redacted]", true},
+			{"JSON escape", `main"secret`, `critic"secret`, proposalJSON("answer1", ""), `{"answer":"answer2","refutations":"main\u0022secret critic\u0022secret"}`, `{"review_complete":true,"approved":false,"has_blockers":true,"feedback":"critic\u0022secret main\u0022secret"}`, "answer2", "[redacted] [redacted]", false},
+			{"NUL split", "main-secret", "critic-secret", proposalJSON("candidate main-\x00secret critic-\x00secret", ""), proposalJSON("revised", "finding main-\x00secret critic-\x00secret"), `{"review_complete":true,"approved":false,"has_blockers":true,"feedback":"critic-\u0000secret main-\u0000secret"}`, "revised", "finding [redacted] [redacted]", true},
 		} {
 			t.Run(providers.main+"/"+test.name, func(t *testing.T) {
 				mainCalls, criticCalls := 0, 0
@@ -402,7 +418,7 @@ func TestRunAIRevisionPreservesWorkAndBoundaries(t *testing.T) {
 					t.Fatal("critic prompt cannot bind to immutable source and report context")
 				}
 				if calls == 2 {
-					return aicli.Result{Answer: fmt.Sprintf(`{"approved":false,"has_blockers":true,"feedback":%q}`, feedback)}, nil
+					return aicli.Result{Answer: fmt.Sprintf(`{"review_complete":true,"approved":false,"has_blockers":true,"feedback":%q}`, feedback)}, nil
 				}
 				return aicli.Result{Answer: approvedCritiqueJSON}, nil
 			}
@@ -449,7 +465,7 @@ func TestRunAIFreshReviewFindingsUseRemainingRounds(t *testing.T) {
 			case 3:
 				return aicli.Result{Answer: approvedCritiqueJSON}, nil
 			}
-			return aicli.Result{Answer: fmt.Sprintf(`{"approved":false,"has_blockers":true,"feedback":%q}`, feedback)}, nil
+			return aicli.Result{Answer: fmt.Sprintf(`{"review_complete":true,"approved":false,"has_blockers":true,"feedback":%q}`, feedback)}, nil
 		}
 		var wantRefutations []Refutation
 		for round := 2; round <= request.round; round++ {
@@ -486,12 +502,12 @@ func TestRunAIVerificationRejectionFeedsNextRevision(t *testing.T) {
 		}
 		switch request.round {
 		case 1:
-			return aicli.Result{Answer: fmt.Sprintf(`{"approved":false,"has_blockers":true,"feedback":%q}`, firstFinding)}, nil
+			return aicli.Result{Answer: fmt.Sprintf(`{"review_complete":true,"approved":false,"has_blockers":true,"feedback":%q}`, firstFinding)}, nil
 		case 2:
 			if request.reviewPhase != "verification" {
 				t.Fatal("rejected verification was followed by a full review")
 			}
-			return aicli.Result{Answer: fmt.Sprintf(`{"approved":false,"has_blockers":true,"feedback":%q}`, verificationFinding)}, nil
+			return aicli.Result{Answer: fmt.Sprintf(`{"review_complete":true,"approved":false,"has_blockers":true,"feedback":%q}`, verificationFinding)}, nil
 		}
 		if request.reviewPhase == "verification" {
 			for _, want := range []string{quotedContext("verification review:\n" + verificationFinding), quotedContext("candidate 2")} {
@@ -526,14 +542,14 @@ func TestRunAIFailsWithoutReturningProposal(t *testing.T) {
 		wantCalls     int
 		wantError     error
 	}{
-		{name: "round limit", verdict: `{"approved":false,"has_blockers":true,"feedback":"Repair the defect."}`, rounds: 2, wantCalls: 4, wantError: monitor.ErrTerminalJob},
-		{name: "configured default round limit", rounds: config.DefaultCriticMaxRounds, verdict: `{"approved":false,"has_blockers":true,"feedback":"Repair the defect."}`, wantCalls: 2 * config.DefaultCriticMaxRounds, wantError: monitor.ErrTerminalJob},
+		{name: "round limit", verdict: `{"review_complete":true,"approved":false,"has_blockers":true,"feedback":"Repair the defect."}`, rounds: 2, wantCalls: 4, wantError: monitor.ErrTerminalJob},
+		{name: "configured default round limit", rounds: config.DefaultCriticMaxRounds, verdict: `{"review_complete":true,"approved":false,"has_blockers":true,"feedback":"Repair the defect."}`, wantCalls: 2 * config.DefaultCriticMaxRounds, wantError: monitor.ErrTerminalJob},
 		{rounds: 2, name: "malformed verdict", verdict: "looks fine", wantCalls: 2, wantError: monitor.ErrTerminalJob},
 		{rounds: 2, name: "main fails", failureCall: 1, wantCalls: 1, wantError: modelErr},
 		{rounds: 2, name: "critic fails", failureCall: 2, wantCalls: 2, wantError: modelErr},
-		{rounds: 2, name: "revision fails", verdict: `{"approved":false,"has_blockers":true,"feedback":"Repair the defect."}`, failureCall: 3, wantCalls: 3, wantError: modelErr},
+		{rounds: 2, name: "revision fails", verdict: `{"review_complete":true,"approved":false,"has_blockers":true,"feedback":"Repair the defect."}`, failureCall: 3, wantCalls: 3, wantError: modelErr},
 		{rounds: 2, name: "cancel before critic", cancelCall: 1, wantCalls: 1, wantError: context.Canceled},
-		{rounds: 2, name: "cancel before revision", verdict: `{"approved":false,"has_blockers":true,"feedback":"Repair the defect."}`, cancelCall: 2, wantCalls: 2, wantError: context.Canceled},
+		{rounds: 2, name: "cancel before revision", verdict: `{"review_complete":true,"approved":false,"has_blockers":true,"feedback":"Repair the defect."}`, cancelCall: 2, wantCalls: 2, wantError: context.Canceled},
 		{rounds: 2, name: "oversized proposal", largeProposal: true, wantCalls: 1, wantError: monitor.ErrTerminalJob},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -623,54 +639,69 @@ func TestParseProposal(t *testing.T) {
 
 func TestParseCritique(t *testing.T) {
 	for _, tt := range []struct {
-		name, input, feedback        string
-		secrets                      []string
-		errText                      string
-		approved, hasBlockers, valid bool
+		name, input, feedback                        string
+		secrets                                      []string
+		errText                                      string
+		approved, hasBlockers, reviewComplete, valid bool
 	}{
-		{name: "approval", input: approvedCritiqueJSON, approved: true, valid: true},
-		{name: "rejection", input: `{"feedback":" Repair the defect. ","approved":false,"has_blockers":true}`, feedback: "Repair the defect.", hasBlockers: true, valid: true},
-		{name: "nonblocking findings", input: `{"approved":false,"has_blockers":false,"feedback":"Nit: simplify the loop."}`, feedback: "Nit: simplify the loop.", valid: true},
-		{name: "mixed NUL feedback", input: `{"approved":false,"has_blockers":true,"feedback":"Repair\u0000 the defect."}`, feedback: "Repair the defect.", hasBlockers: true, valid: true},
-		{name: "NUL-only rejection", input: `{"approved":false,"has_blockers":true,"feedback":"\u0000"}`, errText: "rejection feedback is blank after redaction"},
-		{name: "whitespace and NUL rejection", input: `{"approved":false,"has_blockers":false,"feedback":" \t\u0000\n "}`, errText: "rejection feedback is blank after redaction"},
-		{name: "feedback redaction fails closed", input: `{"approved":false,"has_blockers":true,"feedback":"private # and redacted"}`, secrets: []string{"#", "redacted"}, errText: "rejection feedback is blank after redaction"},
-		{name: "mixed NUL split keys", input: `{"approved":false,"has_blockers":true,"feedback":"Repair main-\u0000secret and critic-\u0000secret."}`, secrets: []string{"main-secret", "critic-secret"}, feedback: "Repair [redacted] and [redacted].", hasBlockers: true, valid: true},
-		{name: "redacted feedback stays nonblank", input: `{"approved":false,"has_blockers":false,"feedback":"main-secret"}`, secrets: []string{"main-secret"}, feedback: "[redacted]", valid: true},
-		{name: "approval unaffected by redaction keys", input: approvedCritiqueJSON, secrets: []string{"#", "redacted"}, approved: true, valid: true},
-		{name: "approval with NUL feedback remains inconsistent", input: `{"approved":true,"has_blockers":false,"feedback":"\u0000"}`, errText: "expected approval without blockers or feedback"},
-		{name: "approval with emptied key feedback remains inconsistent", input: `{"approved":true,"has_blockers":false,"feedback":"private # and redacted"}`, secrets: []string{"#", "redacted"}, errText: "expected approval without blockers or feedback"},
-		{name: "missing approval", input: `{"has_blockers":false,"feedback":""}`},
-		{name: "missing blocker classification", input: `{"approved":true,"feedback":""}`},
-		{name: "string blocker classification", input: `{"approved":false,"has_blockers":"false","feedback":"Nit."}`},
-		{name: "approval with blockers", input: `{"approved":true,"has_blockers":true,"feedback":""}`},
-		{name: "empty nonblocking rejection", input: `{"approved":false,"has_blockers":false,"feedback":""}`},
-		{name: "duplicate blocker classification", input: `{"approved":false,"has_blockers":true,"has_blockers":false,"feedback":"Fix."}`},
+		{name: "approval", input: approvedCritiqueJSON, approved: true, reviewComplete: true, valid: true},
+		{name: "rejection", input: `{"review_complete":true,"feedback":" Repair the defect. ","approved":false,"has_blockers":true}`, feedback: "Repair the defect.", hasBlockers: true, reviewComplete: true, valid: true},
+		{name: "nonblocking findings", input: `{"review_complete":true,"approved":false,"has_blockers":false,"feedback":"Nit: simplify the loop."}`, feedback: "Nit: simplify the loop.", reviewComplete: true, valid: true},
+		{name: "incomplete blocking review", input: `{"review_complete":false,"approved":false,"has_blockers":true,"feedback":"Delegate has not finished."}`, feedback: "Delegate has not finished.", hasBlockers: true, valid: true},
+		{name: "incomplete sanitized review", input: `{"review_complete":false,"approved":false,"has_blockers":true,"feedback":"Inspect main-\u0000secret."}`, secrets: []string{"main-secret"}, feedback: "Inspect [redacted].", hasBlockers: true, valid: true},
+		{name: "missing review completion", input: `{"approved":true,"has_blockers":false,"feedback":""}`, errText: "missing required field"},
+		{name: "null review completion", input: `{"review_complete":null,"approved":true,"has_blockers":false,"feedback":""}`, errText: "review_complete must be a boolean"},
+		{name: "string review completion", input: `{"review_complete":"true","approved":true,"has_blockers":false,"feedback":""}`, errText: "review_complete must be a boolean"},
+		{name: "numeric review completion", input: `{"review_complete":1,"approved":true,"has_blockers":false,"feedback":""}`, errText: "review_complete must be a boolean"},
+		{name: "duplicate review completion", input: `{"review_complete":true,"review_complete":false,"approved":true,"has_blockers":false,"feedback":""}`, errText: "duplicate"},
+		{name: "escaped duplicate review completion", input: `{"review_complete":true,"\u0072eview_complete":false,"approved":true,"has_blockers":false,"feedback":""}`, errText: "duplicate"},
+		{name: "accounting flag is not review coverage", input: `{"review_complete":true,"complete":true,"approved":true,"has_blockers":false,"feedback":""}`, errText: "unknown field"},
+		{name: "incomplete approval", input: `{"review_complete":false,"approved":true,"has_blockers":false,"feedback":""}`, errText: "incomplete review must be a blocking rejection"},
+		{name: "incomplete no-blocker rejection", input: `{"review_complete":false,"approved":false,"has_blockers":false,"feedback":"Unfinished review."}`, errText: "incomplete review must be a blocking rejection"},
+		{name: "incomplete approval with blockers", input: `{"review_complete":false,"approved":true,"has_blockers":true,"feedback":""}`, errText: "expected approval without blockers or feedback"},
+		{name: "incomplete empty feedback", input: `{"review_complete":false,"approved":false,"has_blockers":true,"feedback":" "}`, errText: "expected approval without blockers or feedback"},
+		{name: "incomplete NUL-only feedback", input: `{"review_complete":false,"approved":false,"has_blockers":true,"feedback":"\u0000"}`, errText: "rejection feedback is blank after redaction"},
+		{name: "incomplete emptied feedback", input: `{"review_complete":false,"approved":false,"has_blockers":true,"feedback":"private # and redacted"}`, secrets: []string{"#", "redacted"}, errText: "rejection feedback is blank after redaction"},
+		{name: "mixed NUL feedback", input: `{"review_complete":true,"approved":false,"has_blockers":true,"feedback":"Repair\u0000 the defect."}`, feedback: "Repair the defect.", hasBlockers: true, reviewComplete: true, valid: true},
+		{name: "NUL-only rejection", input: `{"review_complete":true,"approved":false,"has_blockers":true,"feedback":"\u0000"}`, errText: "rejection feedback is blank after redaction"},
+		{name: "whitespace and NUL rejection", input: `{"review_complete":true,"approved":false,"has_blockers":false,"feedback":" \t\u0000\n "}`, errText: "rejection feedback is blank after redaction"},
+		{name: "feedback redaction fails closed", input: `{"review_complete":true,"approved":false,"has_blockers":true,"feedback":"private # and redacted"}`, secrets: []string{"#", "redacted"}, errText: "rejection feedback is blank after redaction"},
+		{name: "mixed NUL split keys", input: `{"review_complete":true,"approved":false,"has_blockers":true,"feedback":"Repair main-\u0000secret and critic-\u0000secret."}`, secrets: []string{"main-secret", "critic-secret"}, feedback: "Repair [redacted] and [redacted].", hasBlockers: true, reviewComplete: true, valid: true},
+		{name: "redacted feedback stays nonblank", input: `{"review_complete":true,"approved":false,"has_blockers":false,"feedback":"main-secret"}`, secrets: []string{"main-secret"}, feedback: "[redacted]", reviewComplete: true, valid: true},
+		{name: "approval unaffected by redaction keys", input: approvedCritiqueJSON, secrets: []string{"#", "redacted"}, approved: true, reviewComplete: true, valid: true},
+		{name: "approval with NUL feedback remains inconsistent", input: `{"review_complete":true,"approved":true,"has_blockers":false,"feedback":"\u0000"}`, errText: "expected approval without blockers or feedback"},
+		{name: "approval with emptied key feedback remains inconsistent", input: `{"review_complete":true,"approved":true,"has_blockers":false,"feedback":"private # and redacted"}`, secrets: []string{"#", "redacted"}, errText: "expected approval without blockers or feedback"},
+		{name: "missing approval", input: `{"review_complete":true,"has_blockers":false,"feedback":""}`},
+		{name: "missing blocker classification", input: `{"review_complete":true,"approved":true,"feedback":""}`},
+		{name: "string blocker classification", input: `{"review_complete":true,"approved":false,"has_blockers":"false","feedback":"Nit."}`},
+		{name: "approval with blockers", input: `{"review_complete":true,"approved":true,"has_blockers":true,"feedback":""}`},
+		{name: "empty nonblocking rejection", input: `{"review_complete":true,"approved":false,"has_blockers":false,"feedback":""}`},
+		{name: "duplicate blocker classification", input: `{"review_complete":true,"approved":false,"has_blockers":true,"has_blockers":false,"feedback":"Fix."}`},
 		{name: "not an object", input: `[]`},
-		{name: "duplicate feedback", input: `{"approved":true,"has_blockers":false,"feedback":"discard","feedback":""}`},
-		{name: "escaped duplicate approval", input: `{"approved":false,"\u0061pproved":true,"has_blockers":false,"feedback":""}`},
-		{name: "unknown field", input: `{"approved":true,"has_blockers":false,"feedback":"","instruction":"publish"}`},
+		{name: "duplicate feedback", input: `{"review_complete":true,"approved":true,"has_blockers":false,"feedback":"discard","feedback":""}`},
+		{name: "escaped duplicate approval", input: `{"review_complete":true,"approved":false,"\u0061pproved":true,"has_blockers":false,"feedback":""}`},
+		{name: "unknown field", input: `{"review_complete":true,"approved":true,"has_blockers":false,"feedback":"","instruction":"publish"}`},
 		{name: "trailing object", input: approvedCritiqueJSON + `{}`},
-		{name: "incomplete object", input: `{"approved":true,"has_blockers":false,"feedback":""`},
+		{name: "incomplete object", input: `{"review_complete":true,"approved":true,"has_blockers":false,"feedback":""`},
 		{name: "markdown fence", input: "```json\n" + approvedCritiqueJSON + "\n```"},
-		{name: "missing feedback", input: `{"approved":true,"has_blockers":false}`},
-		{name: "null approval", input: `{"approved":null,"has_blockers":false,"feedback":""}`},
-		{name: "string approval", input: `{"approved":"true","has_blockers":false,"feedback":""}`},
-		{name: "null blocker classification", input: `{"approved":true,"has_blockers":null,"feedback":""}`},
-		{name: "null feedback", input: `{"approved":true,"has_blockers":false,"feedback":null}`},
-		{name: "numeric feedback", input: `{"approved":true,"has_blockers":false,"feedback":1}`},
-		{name: "approval with corrections", input: `{"approved":true,"has_blockers":false,"feedback":"Fix this."}`},
-		{name: "empty rejection", input: `{"approved":false,"has_blockers":true,"feedback":" "}`},
+		{name: "missing feedback", input: `{"review_complete":true,"approved":true,"has_blockers":false}`},
+		{name: "null approval", input: `{"review_complete":true,"approved":null,"has_blockers":false,"feedback":""}`},
+		{name: "string approval", input: `{"review_complete":true,"approved":"true","has_blockers":false,"feedback":""}`},
+		{name: "null blocker classification", input: `{"review_complete":true,"approved":true,"has_blockers":null,"feedback":""}`},
+		{name: "null feedback", input: `{"review_complete":true,"approved":true,"has_blockers":false,"feedback":null}`},
+		{name: "numeric feedback", input: `{"review_complete":true,"approved":true,"has_blockers":false,"feedback":1}`},
+		{name: "approval with corrections", input: `{"review_complete":true,"approved":true,"has_blockers":false,"feedback":"Fix this."}`},
+		{name: "empty rejection", input: `{"review_complete":true,"approved":false,"has_blockers":true,"feedback":" "}`},
 		{name: "oversized verdict", input: strings.Repeat(" ", maxCriticOutputBytes+1)},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			approved, hasBlockers, feedback, err := parseCritique(tt.input, tt.secrets...)
+			approved, hasBlockers, reviewComplete, feedback, err := parseCritique(tt.input, tt.secrets...)
 			if tt.valid {
-				if err != nil || approved != tt.approved || hasBlockers != tt.hasBlockers || feedback != tt.feedback {
-					t.Fatalf("parseCritique() = %t, %t, %q, %v", approved, hasBlockers, feedback, err)
+				if err != nil || approved != tt.approved || hasBlockers != tt.hasBlockers || reviewComplete != tt.reviewComplete || feedback != tt.feedback {
+					t.Fatalf("parseCritique() = %t, %t, %t, %q, %v", approved, hasBlockers, reviewComplete, feedback, err)
 				}
-			} else if err == nil || approved || hasBlockers || feedback != "" || (tt.errText != "" && !strings.Contains(err.Error(), tt.errText)) {
-				t.Fatalf("parseCritique() = %t, %t, %q, %v", approved, hasBlockers, feedback, err)
+			} else if err == nil || approved || hasBlockers || reviewComplete || feedback != "" || (tt.errText != "" && !strings.Contains(err.Error(), tt.errText)) {
+				t.Fatalf("parseCritique() = %t, %t, %t, %q, %v", approved, hasBlockers, reviewComplete, feedback, err)
 			}
 		})
 	}
@@ -684,7 +715,7 @@ func TestCommentPublishesOnlyCriticAcceptedResult(t *testing.T) {
 		wantErrorText string
 	}{
 		{name: "approved", verdict: approvedCritiqueJSON},
-		{name: "rejected", verdict: `{"approved":false,"has_blockers":true,"feedback":"A defect remains."}`, wantError: true},
+		{name: "rejected", verdict: `{"review_complete":true,"approved":false,"has_blockers":true,"feedback":"A defect remains."}`, wantError: true},
 		{name: "invalid", verdict: "approved", wantError: true, wantErrorText: "invalid critic verdict"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -718,7 +749,7 @@ func TestCommentPublishesOnlyCriticAcceptedResult(t *testing.T) {
 					criticCalls++
 					if !tt.wantError {
 						if criticCalls == 1 {
-							return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"feedback":"Justify the unchanged result."}`}, nil
+							return aicli.Result{Answer: `{"review_complete":true,"approved":false,"has_blockers":true,"feedback":"Justify the unchanged result."}`}, nil
 						}
 						if request.reviewPhase == "verification" {
 							checkRefutations(t, request, []Refutation{{Round: 2, Text: privateRefutations}})

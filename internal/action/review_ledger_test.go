@@ -14,12 +14,12 @@ func TestRefutationsRequireOrderedMainRoundsButPermitEmptyOrSparseMemory(t *test
 	job.CriticMaxRounds = 3
 	calls := []CallUsage{
 		{Provider: job.Main.Provider, Role: roleMain, Round: 1},
-		{Provider: job.Critic.Provider, Role: roleCritic, Round: 1, ReviewPhase: reviewFull, HasBlockers: true},
+		{Provider: job.Critic.Provider, Role: roleCritic, ReviewComplete: true, Round: 1, ReviewPhase: reviewFull, HasBlockers: true},
 		{Provider: job.Main.Provider, Role: roleMain, Round: 2},
-		{Provider: job.Critic.Provider, Role: roleCritic, Round: 2, ReviewPhase: reviewVerification, HasBlockers: true},
+		{Provider: job.Critic.Provider, Role: roleCritic, ReviewComplete: true, Round: 2, ReviewPhase: reviewVerification, HasBlockers: true},
 		{Provider: job.Main.Provider, Role: roleMain, Round: 3},
-		{Provider: job.Critic.Provider, Role: roleCritic, Round: 3, ReviewPhase: reviewVerification, Approved: true, NoBlockers: true},
-		{Provider: job.Critic.Provider, Role: roleCritic, Round: 3, ReviewPhase: reviewFull, Approved: true, NoBlockers: true},
+		{Provider: job.Critic.Provider, Role: roleCritic, ReviewComplete: true, Round: 3, ReviewPhase: reviewVerification, Approved: true, NoBlockers: true},
+		{Provider: job.Critic.Provider, Role: roleCritic, ReviewComplete: true, Round: 3, ReviewPhase: reviewFull, Approved: true, NoBlockers: true},
 	}
 	for _, refs := range [][]Refutation{nil, {{Round: 2, Text: "One refutation; implemented changes are intentionally absent."}}, {{Round: 2, Text: "Earlier refutation."}, {Round: 3, Text: "Independent later refutation."}}} {
 		result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Complete answer", CriticStopReason: "approved", Calls: calls, Refutations: refs}

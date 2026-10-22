@@ -36,7 +36,7 @@ func TestRunnerNativeDispatchContinuesRolesAndRefreshesFullCritic(t *testing.T) 
 				job.Main.Model, job.Main.Effort, job.Main.Skills = "portable-"+job.Main.Provider, "high", []string{testReviewSkillURL}
 				job.Critic.Model, job.Critic.Effort, job.Critic.AlwaysOnSkills = "portable-"+job.Critic.Provider, "medium", []string{testReviewSkillURL}
 				for _, provider := range []string{"codex", "claude"} {
-					first, later := `{"approved":false,"has_blockers":true,"feedback":"Clarify the response."}`, approvedCritiqueJSON
+					first, later := `{"approved":false,"has_blockers":true,"review_complete":true,"feedback":"Clarify the response."}`, approvedCritiqueJSON
 					if provider == mainProvider {
 						first, later = proposalJSON("First proposal.", ""), proposalJSON("Second proposal.", "Counterevidence for the earlier finding.")
 					}
@@ -224,11 +224,11 @@ fi
 					} else if call.Role != roleMain {
 						t.Fatalf("unexpected native call role: %+v", call)
 					}
-					if call.Provider != role.Provider || call.Model != role.Model || call.Effort != role.Effort || !call.Complete || call.Tokens != (usage.Tokens{Input: 3, Output: 2}) {
+					if call.Provider != role.Provider || call.Model != role.Model || call.Effort != role.Effort || !call.Complete || call.ReviewComplete != (call.Role == roleCritic) || call.Tokens != (usage.Tokens{Input: 3, Output: 2}) {
 						t.Fatalf("lost per-invocation accounting/attribution at the native dispatch seam: %+v", call)
 					}
 				}
-				if last := result.Calls[len(result.Calls)-1]; !last.Approved || !last.NoBlockers || last.HasBlockers {
+				if last := result.Calls[len(result.Calls)-1]; !last.Approved || !last.NoBlockers || last.HasBlockers || !last.ReviewComplete {
 					t.Fatalf("native structured critic verdict lost: %+v", last)
 				}
 				if entries, err := os.ReadDir(root); err != nil || len(entries) != 0 {

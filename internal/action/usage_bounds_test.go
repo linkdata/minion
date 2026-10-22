@@ -46,7 +46,7 @@ func TestUsageAggregateBounds(t *testing.T) {
 					if request.role == roleCritic {
 						answer = approvedCritiqueJSON
 						if scenario.revise && request.round == 1 {
-							answer = `{"approved":false,"has_blockers":true,"feedback":"Check the remaining detail."}`
+							answer = `{"approved":false,"has_blockers":true,"review_complete":true,"feedback":"Check the remaining detail."}`
 						}
 					}
 					return aicli.Result{Answer: answer, Tokens: tokens, UsageComplete: true}, nil
@@ -72,7 +72,7 @@ func TestUsageAggregateBounds(t *testing.T) {
 				t.Fatalf("native work repeated or lost: answer=%q calls=%d evidence=%d", result.Answer, len(native), len(result.Calls))
 			}
 			for i, call := range result.Calls {
-				if call.Tokens != native[i] || !call.Complete {
+				if call.Tokens != native[i] || !call.Complete || call.ReviewComplete != (call.Role == roleCritic) {
 					t.Fatalf("native per-call evidence changed at %d: %+v, want %+v", i, call, native[i])
 				}
 			}

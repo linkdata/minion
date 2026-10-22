@@ -257,7 +257,7 @@ func TestReviewSnapshotRejectsCriticCopyMutation(t *testing.T) {
 					}
 				}
 				if request.reviewPhase == reviewFull && !test.approveFull {
-					return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"feedback":"Revise the candidate."}`}, nil
+					return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"review_complete":true,"feedback":"Revise the candidate."}`}, nil
 				}
 				return aicli.Result{Answer: approvedCritiqueJSON}, nil
 			}}
@@ -276,7 +276,7 @@ func TestReviewSnapshotRejectsCriticCopyMutation(t *testing.T) {
 				t.Fatalf("invalid partial evidence after integrity failure: %v", err)
 			}
 			last, wantApproval := result.Calls[len(result.Calls)-1], test.approveFull || test.phase == reviewVerification
-			if last.Approved != wantApproval || last.NoBlockers != wantApproval || last.HasBlockers == wantApproval {
+			if last.Approved != wantApproval || last.NoBlockers != wantApproval || last.HasBlockers == wantApproval || !last.ReviewComplete {
 				t.Fatalf("lost native critic verdict after integrity failure: %+v", last)
 			}
 			var journal bytes.Buffer
@@ -288,7 +288,7 @@ func TestReviewSnapshotRejectsCriticCopyMutation(t *testing.T) {
 			if err := orchestrator.retainReviewEvidence(job, result); err != nil {
 				t.Fatalf("integrity failure evidence was rejected: %v", err)
 			}
-			if saved := readPrivateReview(t, runner.WorkRoot); saved.CriticStopReason != "" || len(saved.Calls) != wantCalls {
+			if saved := readPrivateReview(t, runner.WorkRoot); saved.CriticStopReason != "" || len(saved.Calls) != wantCalls || !saved.Calls[len(saved.Calls)-1].ReviewComplete {
 				t.Fatalf("retained ledger promoted a verdict after integrity failure: %+v", saved)
 			}
 		})
@@ -319,7 +319,7 @@ func TestReviewSnapshotCancellationKeepsVerdictWithoutIntegrityFailure(t *testin
 			} else if err != nil || result.Answer != "Completed fix." || len(result.Changes) != 1 || result.CriticStopReason != "approved" {
 				t.Fatalf("valid candidate refused: result=%+v error=%v", result, err)
 			}
-			if len(result.Calls) != 2 || !result.Calls[1].Approved {
+			if len(result.Calls) != 2 || !result.Calls[1].Approved || !result.Calls[1].ReviewComplete {
 				t.Fatalf("lost actual critic verdict: %+v", result.Calls)
 			}
 		})

@@ -24,7 +24,7 @@ func TestRunnerKeepsRoleSessionsWithinEachAction(t *testing.T) {
 			return aicli.Result{Answer: proposalJSON(fmt.Sprintf("proposal%d", request.round), "")}, nil
 		}
 		if request.reviewPhase == reviewFull && request.round < 3 {
-			return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"feedback":"Correct the proposal."}`}, nil
+			return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"review_complete":true,"feedback":"Correct the proposal."}`}, nil
 		}
 		return aicli.Result{Answer: approvedCritiqueJSON}, nil
 	}}
@@ -112,7 +112,7 @@ func TestRunnerKeepsSourceCriticContextAndRefutationPaths(t *testing.T) {
 				t.Fatal("independent full review received the private refutation grant")
 			}
 			if request.round < 3 {
-				return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"feedback":"Revise source.txt."}`}, nil
+				return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"review_complete":true,"feedback":"Revise source.txt."}`}, nil
 			}
 		}
 		return aicli.Result{Answer: approvedCritiqueJSON}, nil

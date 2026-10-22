@@ -127,7 +127,7 @@ func TestRunnerReviewRevisionsFreezeCleanIndependentInputs(t *testing.T) {
 		}
 		if request.round == 1 {
 			firstReview = request.dir
-			return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"feedback":"Implement the missing edge case."}`}, nil
+			return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"review_complete":true,"feedback":"Implement the missing edge case."}`}, nil
 		}
 		if request.reviewPhase == "verification" {
 			revisionReview = request.dir
@@ -174,7 +174,7 @@ func TestRunnerReviewExportsFrozenSourceDespiteLiveChanges(t *testing.T) {
 				if !accepted {
 					feedback = "Fix the candidate."
 				}
-				return aicli.Result{Answer: fmt.Sprintf(`{"approved":%t,"has_blockers":%t,"feedback":%q}`, accepted, !accepted, feedback)}, nil
+				return aicli.Result{Answer: fmt.Sprintf(`{"approved":%t,"has_blockers":%t,"review_complete":true,"feedback":%q}`, accepted, !accepted, feedback)}, nil
 			}}
 			result, err := runner.Run(context.Background(), job)
 			wantCalls, round := 2, 1
@@ -245,7 +245,7 @@ func TestRunnerAuditReviewFreezesAndExportsRawReports(t *testing.T) {
 					if data, err := os.ReadFile(filepath.Join(frozenReports, "architecture.md")); err != nil || len(data) != 0 {
 						t.Fatalf("critic could not inspect the empty artifact: %q,%v", data, err)
 					}
-					return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"feedback":"Fill architecture.md with the required architecture report."}`}, nil
+					return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"review_complete":true,"feedback":"Fill architecture.md with the required architecture report."}`}, nil
 				}
 				if scenario == "mutated during critic" {
 					writeFixtureFile(t, reports, "REPORT.md", []byte("concurrent report edit"))

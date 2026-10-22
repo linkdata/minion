@@ -18,8 +18,8 @@ import (
 func TestRunnerCriticStoppingReplaysFullReviewStreak(t *testing.T) {
 	verdicts := map[string]string{
 		"approved": approvedCritiqueJSON,
-		"nits":     `{"approved":false,"has_blockers":false,"feedback":"Nonblocking nit."}`,
-		"blockers": `{"approved":false,"has_blockers":true,"feedback":"Blocking defect."}`,
+		"nits":     `{"review_complete":true,"approved":false,"has_blockers":false,"feedback":"Nonblocking nit."}`,
+		"blockers": `{"review_complete":true,"approved":false,"has_blockers":true,"feedback":"Blocking defect."}`,
 	}
 	for _, test := range []struct {
 		name                               string
@@ -131,14 +131,14 @@ func TestRunAIPreservesRejectedVerificationAndFullFeedback(t *testing.T) {
 			return aicli.Result{Answer: proposalJSON(fmt.Sprintf("Candidate %d", request.round), "")}, nil
 		}
 		if request.round == 1 {
-			return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"feedback":"Initial defect."}`}, nil
+			return aicli.Result{Answer: `{"review_complete":true,"approved":false,"has_blockers":true,"feedback":"Initial defect."}`}, nil
 		}
 		if request.round == 2 {
 			feedback, blockers := verificationFinding, false
 			if request.reviewPhase == reviewFull {
 				feedback, blockers = fullFinding, true
 			}
-			return aicli.Result{Answer: fmt.Sprintf(`{"approved":false,"has_blockers":%t,"feedback":%q}`, blockers, feedback)}, nil
+			return aicli.Result{Answer: fmt.Sprintf(`{"review_complete":true,"approved":false,"has_blockers":%t,"feedback":%q}`, blockers, feedback)}, nil
 		}
 		if request.reviewPhase == reviewVerification && request.criticPrompt("", "") != criticPrompt(reviewVerification, "Complete the task", "Candidate 3", "Candidate 2", combined, "") {
 			t.Fatal("verification lost either previous phase's rejection")
@@ -198,5 +198,23 @@ func TestResultCriticStopReasonRequiresMatchingDecisionEvidence(t *testing.T) {
 				t.Fatalf("journal inferred a decision from verdict flags: %s", journal.String())
 			}
 		})
+	}
+}
+
+func TestCriticPolicyRequiresReviewCoverage(t *testing.T) {
+	job := withClaudeCritic(testJob(command.Comment))
+	job.CriticNonblockingRounds = 1
+	for _, phase := range []string{reviewFull, reviewVerification} {
+		for _, verdict := range []CallUsage{{HasBlockers: true}, {NoBlockers: true}, {Approved: true, NoBlockers: true}} {
+			t.Run(fmt.Sprintf("%s/approved=%t/no-blockers=%t", phase, verdict.Approved, verdict.NoBlockers), func(t *testing.T) {
+				// Coverage gates the policy independently of the parser's tuple validation.
+				policy := criticPolicy{job: job, verificationApproved: true, noBlockerRounds: 2}
+				verdict.Role, verdict.Round, verdict.ReviewPhase, verdict.Complete = roleCritic, 2, phase, true
+				advance, reason := policy.observe(verdict)
+				if advance || reason != "" || policy.noBlockerRounds != 0 {
+					t.Fatalf("incomplete coverage advanced or stopped policy: advance=%t reason=%q streak=%d", advance, reason, policy.noBlockerRounds)
+				}
+			})
+		}
 	}
 }

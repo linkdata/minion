@@ -15,6 +15,10 @@ func (p *criticPolicy) observe(call CallUsage) (advanceToFull bool, stopReason s
 	if call.Role != roleCritic {
 		return false, ""
 	}
+	if !call.ReviewComplete {
+		p.noBlockerRounds = 0
+		return false, ""
+	}
 	if call.ReviewPhase == reviewVerification {
 		p.verificationApproved = call.Approved
 		if !call.NoBlockers {

@@ -17,7 +17,7 @@ import (
 )
 
 func criticFeedbackJSON(hasBlockers bool, feedback string) string {
-	data, _ := json.Marshal(map[string]any{"approved": false, "has_blockers": hasBlockers, "feedback": feedback})
+	data, _ := json.Marshal(map[string]any{"approved": false, "has_blockers": hasBlockers, "review_complete": true, "feedback": feedback})
 	return string(data)
 }
 
@@ -59,7 +59,7 @@ func TestRunnerRejectsCriticFeedbackBlankAfterSanitization(t *testing.T) {
 						t.Fatalf("blank sanitized verdict continued or published: sequence=%v result=%+v error=%v", sequence, result, err)
 					}
 					last := result.Calls[len(result.Calls)-1]
-					if last.ReviewPhase != phase || last.Approved || last.NoBlockers || last.HasBlockers {
+					if last.ReviewPhase != phase || last.Approved || last.NoBlockers || last.HasBlockers || last.ReviewComplete {
 						t.Fatalf("invalid sanitized verdict acquired dispatch flags: %+v", last)
 					}
 					if err := result.validate(job, false); err != nil {
@@ -73,7 +73,7 @@ func TestRunnerRejectsCriticFeedbackBlankAfterSanitization(t *testing.T) {
 					var journal bytes.Buffer
 					orchestrator := Orchestrator{WorkRoot: runner.WorkRoot, Logger: log.New(&journal, "", 0)}
 					orchestrator.logResult(job, result)
-					wantLast := "review_phase=" + phase + ` approved=false no_blockers=false has_blockers=false verdict_allows_full=false no_blocker_verdict_streak=0 policy_met=false stop_reason=""`
+					wantLast := "review_phase=" + phase + ` approved=false no_blockers=false has_blockers=false review_complete=false verdict_allows_full=false no_blocker_verdict_streak=0 policy_met=false stop_reason=""`
 					lines := strings.Split(strings.TrimSpace(journal.String()), "\n")
 					if len(lines) != len(wantSequence) || !strings.Contains(lines[len(lines)-1], wantLast) || strings.Contains(journal.String(), "policy_met=true") {
 						t.Fatalf("journal promoted invalid sanitized feedback: %s", journal.String())
@@ -140,7 +140,7 @@ func TestRunnerPreservesSanitizedCriticFeedbackIntoRevision(t *testing.T) {
 				t.Fatal(err)
 			}
 			verdict := result.Calls[2*targetRound-1]
-			if verdict.Approved || verdict.NoBlockers || !verdict.HasBlockers {
+			if verdict.Approved || verdict.NoBlockers || !verdict.HasBlockers || !verdict.ReviewComplete {
 				t.Fatalf("valid sanitized rejection lost its blocker verdict: %+v", verdict)
 			}
 			var journal bytes.Buffer
