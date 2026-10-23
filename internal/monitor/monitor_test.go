@@ -784,8 +784,8 @@ func TestRunOnceExecutorErrorCannotForgeLogLines(t *testing.T) {
 			}
 		}
 	}
-	if !strings.Contains(logs.String(), "failed (attempt 1/3)") {
-		t.Fatalf("trusted retry summary was hidden: %q", logs.String())
+	if strings.Count(logs.String(), "failed (attempt 1/3)") != 1 {
+		t.Fatalf("expected one trusted retry summary: %q", logs.String())
 	}
 }
 

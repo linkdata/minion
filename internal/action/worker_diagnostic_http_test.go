@@ -357,6 +357,12 @@ func TestHTTPWorkerFailureThroughOrchestratorAndMonitor(t *testing.T) {
 		if (err == nil) != (attempt == 3) || len(jobs) != attempt || store.Data.UnconfirmedProcessJob != "" {
 			t.Fatalf("worker claims changed retry policy at attempt %d: jobs=%d state=%+v error=%v", attempt, len(jobs), store.Data, err)
 		}
+		if attempt < 3 && len(gh.replies) != 0 {
+			t.Fatalf("worker failure replied before final attempt %d: replies=%q", attempt, gh.replies)
+		}
+		if count := strings.Count(journal.String(), fmt.Sprintf("failed (attempt %d/3)", attempt)); count != 1 {
+			t.Fatalf("worker failure logged %d times at attempt %d: %q", count, attempt, journal.String())
+		}
 		clock = clock.Add(10 * time.Minute)
 	}
 	if len(gh.replies) != 1 || !strings.Contains(gh.replies[0], "could not complete this request") ||
