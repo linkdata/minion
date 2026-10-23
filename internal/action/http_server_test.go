@@ -861,47 +861,98 @@ func (w httpServerFailWrite) Unwrap() http.ResponseWriter { return w.ResponseWri
 func (w httpServerFailWrite) Write([]byte) (int, error)   { return 0, io.ErrClosedPipe }
 
 func TestHTTPExecutorRequiredReplyFailureCannotBecomeSuccess(t *testing.T) {
-	for _, path := range []string{"/next", "/after"} {
+	for _, path := range []string{"/next", "/before", "/after", "/review"} {
 		t.Run(path, func(t *testing.T) {
-			owner := newExecutionAdapterFixture(t, testJob(command.Comment))
+			job := testJob(command.Comment)
+			if path == "/review" {
+				job = withClaudeCritic(job)
+			}
+			owner := newExecutionAdapterFixture(t, job)
 			store := owner.startUsage()
+			var failReply atomic.Bool
+			failReply.Store(path != "/review")
 			f := newHTTPServerTest(t, context.Background(), owner.job, owner.sink, func(next http.Handler) http.Handler {
 				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					if r.URL.Path == path {
+					if r.URL.Path == path && failReply.Load() {
 						w = httpServerFailWrite{w}
 					}
 					next.ServeHTTP(w, r)
 				})
 			})
 			outcome := f.outcome(1, nil)
-			if path == "/next" {
+			switch path {
+			case "/next":
 				if reply := f.request(path, httpPull{Version: ProtocolVersion, ExecutorID: owner.job.Identity.ExecutorID}); reply.err == nil {
 					t.Fatalf("assignment delivery unexpectedly succeeded: %+v", reply)
 				}
-			} else {
+			case "/before", "/after":
 				f.pull(t)
 				before := f.call(1)
-				f.ack(t, "/before", before, http.StatusOK, 1)
+				if path == "/before" {
+					if reply := f.request(path, before); reply.err == nil {
+						t.Fatalf("call admission acknowledgement unexpectedly succeeded: %+v", reply)
+					}
+				} else {
+					f.ack(t, "/before", before, http.StatusOK, 1)
+				}
 				paid := f.call(2)
 				paid.Checkpoint.Call.Tokens, paid.Checkpoint.Call.Complete = usage.Tokens{Input: 9, Output: 2}, true
-				if reply := f.request(path, paid); reply.err == nil {
+				if path == "/before" {
+					f.ack(t, "/after", paid, http.StatusOK, 2)
+				} else if reply := f.request(path, paid); reply.err == nil {
 					t.Fatalf("paid callback acknowledgement unexpectedly succeeded: %+v", reply)
 				}
 				outcome.Sequence = 3
 				outcome.Result.Calls = []CallUsage{paid.Checkpoint.Call}
+			case "/review":
+				f.pull(t)
+				f.ack(t, "/review", httpReview{Sequence: 1, Checkpoint: owner.review(nil, nil, "")}, http.StatusOK, 1)
+				f.ack(t, "/before", f.call(2), http.StatusOK, 2)
+				main := f.call(3)
+				main.Checkpoint.Call.Tokens, main.Checkpoint.Call.Complete = usage.Tokens{Input: 9, Output: 2}, true
+				f.ack(t, "/after", main, http.StatusOK, 3)
+				f.ack(t, "/review", httpReview{Sequence: 4, Checkpoint: owner.review([]CallUsage{main.Checkpoint.Call}, nil, "")}, http.StatusOK, 4)
+				critic := f.call(5)
+				critic.Checkpoint.Call = CallUsage{Provider: owner.job.Critic.Provider, Role: roleCritic, Round: 1, ReviewPhase: reviewFull}
+				f.ack(t, "/before", critic, http.StatusOK, 5)
+				critic.Sequence = 6
+				critic.Checkpoint.Call.Tokens, critic.Checkpoint.Call.Complete = usage.Tokens{Input: 4, Output: 1}, true
+				critic.Checkpoint.Call.Approved, critic.Checkpoint.Call.NoBlockers, critic.Checkpoint.Call.ReviewComplete = true, true, true
+				f.ack(t, "/after", critic, http.StatusOK, 6)
+				calls := []CallUsage{main.Checkpoint.Call, critic.Checkpoint.Call}
+				f.ack(t, "/review", httpReview{Sequence: 7, Checkpoint: owner.review(calls, nil, "")}, http.StatusOK, 7)
+				failReply.Store(true)
+				if reply := f.request(path, httpReview{Sequence: 8, Checkpoint: owner.review(calls, nil, "approved")}); reply.err == nil {
+					t.Fatalf("decision acknowledgement unexpectedly succeeded: %+v", reply)
+				}
+				if owner.sink.review.CriticStopReason != "approved" {
+					t.Fatal("decision checkpoint was not saved before its reply failed")
+				}
+				outcome.Sequence, outcome.Result.Calls, outcome.Result.CriticStopReason = 9, calls, "approved"
 			}
 			outcome.Result.Answer = "Forged success after failed required reply"
+			if path != "/next" {
+				if err := outcome.Result.Validate(owner.job); err != nil {
+					t.Fatalf("success claim is not otherwise publishable: %v", err)
+				}
+			}
 			f.ack(t, "/outcome", outcome, http.StatusOK, outcome.Sequence)
 			got := f.result(t)
 			if !reflect.DeepEqual(got.result, outcome.Result) || !errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || !errors.Is(owner.sink.finish(got.result, got.err), monitor.ErrExecutionOutcomeUnknown) {
 				t.Fatalf("failed required reply became publishable: result=%+v error=%v", got.result, got.err)
 			}
 			records, err := usage.ReadAll(store.Dir)
-			wantCalls := 0
-			if path == "/after" {
-				wantCalls = 1
+			wantCodex, wantClaude := 0, 0
+			wantTokens := usage.Tokens{}
+			if path != "/next" {
+				wantCodex = 1
+				wantTokens = usage.Tokens{Input: 9, Output: 2}
 			}
-			if err != nil || len(records) != 1 || records[0].CodexCalls != wantCalls {
+			if path == "/review" {
+				wantClaude = 1
+				wantTokens = usage.Tokens{Input: 13, Output: 3}
+			}
+			if err != nil || len(records) != 1 || records[0].CodexCalls != wantCodex || records[0].ClaudeCalls != wantClaude || records[0].Tokens != wantTokens {
 				t.Fatalf("required reply failure lost saved usage: records=%+v error=%v", records, err)
 			}
 			if _, err := f.executor.Execute(context.Background(), f.job, owner.sink); err == nil {
@@ -1158,9 +1209,13 @@ func TestHTTPExecutorConcurrentBoundBeforeSurvivesWatchOutcome(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("concurrent Before did not reach the receiver")
 	}
-	// Hold the save briefly after arrival so the old busy-rejection path is exercised.
-	releaseTimer := time.AfterFunc(100*time.Millisecond, unblock)
-	defer releaseTimer.Stop()
+	// A concurrent callback must wait for the held save, not take the old busy-rejection path.
+	select {
+	case before := <-beforeReply:
+		t.Fatalf("concurrent Before replied while After save was held: %+v", before)
+	case <-time.After(100 * time.Millisecond):
+	}
+	unblock()
 	var before httpServerTestExchange
 	select {
 	case before = <-beforeReply:
