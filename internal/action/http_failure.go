@@ -3,6 +3,7 @@ package action
 import (
 	"context"
 	"errors"
+	"net/url"
 	"os/exec"
 	"strings"
 	"syscall"
@@ -32,6 +33,7 @@ type httpFailure struct {
 	ScopeUnconfirmed  bool                     `json:"scope_unconfirmed,omitempty"`
 	Exhausted         bool                     `json:"exhausted,omitempty"`
 	OutcomeUnknown    bool                     `json:"outcome_unknown,omitempty"`
+	RequestTransport  bool                     `json:"request_transport,omitempty"`
 	MissingExecutable bool                     `json:"missing_executable,omitempty"`
 	NoSpace           bool                     `json:"no_space,omitempty"`
 	QuotaExceeded     bool                     `json:"quota_exceeded,omitempty"`
@@ -43,6 +45,7 @@ func newHTTPFailure(err error) *httpFailure {
 	if err == nil {
 		return nil
 	}
+	var network *url.Error
 	failure := &httpFailure{
 		Message:  httpFailureDiagnostic(err.Error()),
 		Terminal: errors.Is(err, monitor.ErrTerminalJob), Canceled: errors.Is(err, context.Canceled),
@@ -50,6 +53,7 @@ func newHTTPFailure(err error) *httpFailure {
 		Descendants: errors.Is(err, processgroup.ErrDescendants), Unconfirmed: errors.Is(err, processgroup.ErrUnconfirmed),
 		ScopeUnconfirmed: errors.Is(err, processgroup.ErrScopeUnconfirmed), Exhausted: errors.Is(err, processgroup.ErrExhausted),
 		OutcomeUnknown:    errors.Is(err, monitor.ErrExecutionOutcomeUnknown),
+		RequestTransport:  errors.Is(err, monitor.ErrRequestTransport) || errors.As(err, &network),
 		MissingExecutable: errors.Is(err, exec.ErrNotFound), NoSpace: errors.Is(err, syscall.ENOSPC),
 		QuotaExceeded: errors.Is(err, syscall.EDQUOT), OutputLimit: errors.Is(err, aicli.ErrOutputLimit),
 	}
@@ -119,6 +123,7 @@ func (f *httpFailure) err() error {
 		{f.Descendants, processgroup.ErrDescendants}, {f.Unconfirmed, processgroup.ErrUnconfirmed},
 		{f.ScopeUnconfirmed, processgroup.ErrScopeUnconfirmed}, {f.Exhausted, processgroup.ErrExhausted},
 		{f.OutcomeUnknown, monitor.ErrExecutionOutcomeUnknown},
+		{f.RequestTransport, monitor.ErrRequestTransport},
 		{f.MissingExecutable, exec.ErrNotFound}, {f.NoSpace, syscall.ENOSPC},
 		{f.QuotaExceeded, syscall.EDQUOT}, {f.OutputLimit, aicli.ErrOutputLimit},
 	} {

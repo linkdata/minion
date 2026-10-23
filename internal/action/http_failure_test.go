@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
+	"net/url"
 	"os"
 	"os/exec"
 	"strings"
@@ -33,6 +35,7 @@ func TestHTTPFailurePreservesFiniteCauses(t *testing.T) {
 		{"scope unconfirmed", processgroup.ErrScopeUnconfirmed},
 		{"exhausted", processgroup.ErrExhausted},
 		{"outcome unknown", monitor.ErrExecutionOutcomeUnknown},
+		{"request transport", monitor.ErrRequestTransport},
 		{"missing executable", exec.ErrNotFound},
 		{"no space", syscall.ENOSPC},
 		{"quota exceeded", syscall.EDQUOT},
@@ -77,6 +80,23 @@ func TestHTTPFailurePreservesFiniteCauses(t *testing.T) {
 	var absent *httpFailure
 	if newHTTPFailure(nil) != nil || absent.validate() != nil || absent.err() != nil {
 		t.Fatal("nil failure became a wire failure")
+	}
+}
+
+func TestHTTPFailurePreservesRequestTransportPolicyWithoutReconstructingURL(t *testing.T) {
+	for _, unknown := range []bool{false, true} {
+		t.Run(fmt.Sprint(unknown), func(t *testing.T) {
+			var source error = fmt.Errorf("watch admission: %w", &url.Error{Op: "Post", URL: "https://executor.invalid/cancel", Err: io.ErrUnexpectedEOF})
+			if unknown {
+				source = errors.Join(source, monitor.ErrExecutionOutcomeUnknown)
+			}
+			failure := roundTripHTTPFailure(t, newHTTPFailure(source))
+			got := failure.err()
+			var network *url.Error
+			if !failure.RequestTransport || !errors.Is(got, monitor.ErrRequestTransport) || errors.Is(got, monitor.ErrExecutionOutcomeUnknown) != unknown || errors.As(got, &network) {
+				t.Fatalf("finite request policy was lost or an arbitrary URL error was invented: failure=%+v error=%v", failure, got)
+			}
+		})
 	}
 }
 
@@ -219,7 +239,7 @@ func TestHTTPFailureEscapedMaximumFitsControlBody(t *testing.T) {
 	failure := &httpFailure{
 		Message:  strings.Repeat("\x01", httpFailureMessageLimit),
 		Terminal: true, Canceled: true, Deadline: true, Unsafe: true, Descendants: true,
-		Unconfirmed: true, ScopeUnconfirmed: true, Exhausted: true, OutcomeUnknown: true,
+		Unconfirmed: true, ScopeUnconfirmed: true, Exhausted: true, OutcomeUnknown: true, RequestTransport: true,
 		Exhaustion: &processgroup.Exhaustion{
 			MaxTasks: int(^uint(0) >> 1), MaxMemoryBytes: math.MaxInt64,
 			PIDEventsMax: math.MaxUint64, MemoryEventsMax: math.MaxUint64, MemorySwapEventsMax: math.MaxUint64,

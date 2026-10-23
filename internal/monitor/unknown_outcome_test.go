@@ -28,6 +28,8 @@ func TestRunOnceConsumesUnknownExecutionOutcome(t *testing.T) {
 		{name: "internal cancellation", cause: context.Canceled},
 		{name: "parent cancellation", cause: context.Canceled, cancelParent: true},
 		{name: "network failure", cause: networkErr},
+		{name: "request transport marker", cause: ErrRequestTransport},
+		{name: "request transport marker after parent cancellation", cause: ErrRequestTransport, cancelParent: true},
 		{name: "network failure after parent cancellation", cause: networkErr, cancelParent: true},
 		{name: "canceled network failure", cause: canceledNetworkErr, cancelParent: true},
 	} {

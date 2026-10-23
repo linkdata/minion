@@ -177,7 +177,13 @@ func RunHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	}
 	outcomeErr := checkpoints.outcome(result, runErr)
 	stopWatch(errHTTPWatchStopped)
-	return errors.Join(runErr, outcomeErr, <-watchDone)
+	watchErr := <-watchDone
+	if outcomeErr == nil && context.Cause(watchCtx) == errHTTPWatchStopped && errors.Is(watchErr, monitor.ErrExecutionOutcomeUnknown) {
+		// Receipt is known; an earlier watch failure remains in runErr.
+		runner.logf("HTTP cancellation watch: %q", httpFailureDiagnostic(watchErr.Error()))
+		watchErr = nil
+	}
+	return errors.Join(runErr, outcomeErr, watchErr)
 }
 
 func httpClientUnknown(kind string, err error) error {

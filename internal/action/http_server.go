@@ -120,6 +120,9 @@ func (e *HTTPExecutor) Execute(ctx context.Context, job Job, sink Checkpoints) (
 	if sink == nil {
 		return result, fmt.Errorf("%w: execution checkpoints are required", monitor.ErrTerminalJob)
 	}
+	if err := httpExecutionContextError(actionCtx); err != nil {
+		return result, err
+	}
 	if err := job.Validate(); err != nil {
 		return result, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
 	}
@@ -133,10 +136,7 @@ func (e *HTTPExecutor) Execute(ctx context.Context, job Job, sink Checkpoints) (
 	if err != nil {
 		return result, fmt.Errorf("%w: encode HTTP assignment: %w", monitor.ErrTerminalJob, err)
 	}
-	if err := actionCtx.Err(); err != nil {
-		if errors.Is(err, context.DeadlineExceeded) {
-			err = errors.Join(monitor.ErrTerminalJob, err)
-		}
+	if err := httpExecutionContextError(actionCtx); err != nil {
 		return result, err
 	}
 	tx.mu.Lock()
@@ -155,10 +155,7 @@ func (e *HTTPExecutor) Execute(ctx context.Context, job Job, sink Checkpoints) (
 	delivered := tx.delivered
 	tx.mu.Unlock()
 	if !delivered {
-		if errors.Is(actionCtx.Err(), context.DeadlineExceeded) {
-			return result, errors.Join(monitor.ErrTerminalJob, actionCtx.Err())
-		}
-		return result, actionCtx.Err()
+		return result, httpExecutionContextError(actionCtx)
 	}
 	timer := time.NewTimer(httpControlTimeout)
 	defer timer.Stop()
@@ -166,10 +163,15 @@ func (e *HTTPExecutor) Execute(ctx context.Context, job Job, sink Checkpoints) (
 	case <-tx.done:
 	case <-timer.C:
 	}
-	if errors.Is(actionCtx.Err(), context.DeadlineExceeded) {
-		return result, errors.Join(monitor.ErrTerminalJob, actionCtx.Err())
+	return result, httpExecutionContextError(actionCtx)
+}
+
+func httpExecutionContextError(ctx context.Context) error {
+	err := ctx.Err()
+	if errors.Is(err, context.DeadlineExceeded) {
+		err = errors.Join(monitor.ErrTerminalJob, err)
 	}
-	return result, actionCtx.Err()
+	return err
 }
 
 func (e *HTTPExecutor) Close() error {

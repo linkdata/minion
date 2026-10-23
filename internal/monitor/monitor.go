@@ -44,6 +44,9 @@ var ErrTerminalJob = errors.New("terminal job failure")
 // Such work must not be automatically repeated.
 var ErrExecutionOutcomeUnknown = errors.New("execution outcome unknown")
 
+// ErrRequestTransport retains a request failure's infrastructure retry classification.
+var ErrRequestTransport = errors.New("request transport failure")
+
 // ErrPostModelPublication marks publication failure for completed or previously completed model work.
 //
 // Retrying it must consume a job attempt even when the write error is transient.
@@ -552,7 +555,7 @@ func infrastructureFailure(err error) bool {
 		return true
 	}
 	var network *url.Error
-	return errors.As(err, &network)
+	return errors.Is(err, ErrRequestTransport) || errors.As(err, &network)
 }
 
 func (m *Monitor) finishFailedJob(ctx context.Context, store *state.Store, job Job, items []github.Item, at time.Time, failure state.JobFailure) error {

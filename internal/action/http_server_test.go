@@ -19,6 +19,7 @@ import (
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/usage"
+	"github.com/linkdata/minion/internal/workspace"
 )
 
 type httpServerTestResult struct {
@@ -429,6 +430,36 @@ func TestHTTPExecutorCanceledPullDoesNotClaimReadyAssignment(t *testing.T) {
 	f.ack(t, "/outcome", f.outcome(1, nil), http.StatusOK, 1)
 	if got := f.result(t); got.err != nil {
 		t.Fatalf("live pull lost the unclaimed assignment: %v", got.err)
+	}
+}
+
+func TestHTTPExecutorChecksCancellationBeforeAssignmentWork(t *testing.T) {
+	job := testJob(command.Comment)
+	job.Description = strings.Repeat("d", workspace.MaxBytes-len(job.Title)-len(job.Notes))
+	if err := job.Validate(); err != nil || httpJobBound(job) <= httpJobBytes {
+		t.Fatalf("fixture must be a valid Job above the conservative wire bound: %v", err)
+	}
+	for _, deadline := range []bool{false, true} {
+		t.Run(fmt.Sprintf("deadline=%t", deadline), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			if deadline {
+				cancel()
+				ctx, cancel = context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+			}
+			cancel()
+			executor, err := NewHTTPExecutor(job.Identity.ExecutorID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer executor.Close()
+			result, err := executor.Execute(ctx, job, runnerExecutionCheckpoints{})
+			if !errors.Is(err, ctx.Err()) || errors.Is(err, monitor.ErrTerminalJob) != deadline || errors.Is(err, errHTTPBodyLimit) || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || !result.matchesJob(job) {
+				t.Fatalf("canceled work reached assignment preparation or changed classification: result=%+v error=%v", result, err)
+			}
+			if executor.transaction() != nil || executor.unavailable {
+				t.Fatal("unclaimed canceled work retained or quarantined the active slot")
+			}
+		})
 	}
 }
 

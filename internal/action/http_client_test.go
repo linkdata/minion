@@ -654,6 +654,130 @@ func TestRunHTTPStalledStatusCannotConsumeOutcomeGrace(t *testing.T) {
 	}
 }
 
+func TestRunHTTPOutcomeACKPreservesKnownReceiptAfterWatchFailure(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		early         bool
+		truncated     bool
+		malformedACK  bool
+		externalCause bool
+	}{
+		{name: "malformed watch after ACK"},
+		{name: "truncated watch after ACK", truncated: true},
+		{name: "watch failure stops Runner", early: true},
+		{name: "malformed final ACK stays unknown", malformedACK: true},
+		{name: "external caller cause after ACK", externalCause: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newExecutionAdapterFixture(t, testJob(command.Comment))
+			store := f.startUsage()
+			parent := newHTTPServerTest(t, context.Background(), f.job, f.sink, nil)
+			started := make(chan struct{})
+			ctx, cancel := context.WithCancelCause(context.Background())
+			externalCause := errors.Join(processgroup.ErrScopeUnconfirmed, monitor.ErrExecutionOutcomeUnknown)
+			var native, outcomes, faultReads atomic.Int32
+			client := *parent.server.Client()
+			client.Timeout = 0
+			underlying := client.Transport
+			client.Transport = httpClientTestTransport(func(r *http.Request) (*http.Response, error) {
+				if r.URL.Path == "/outcome" {
+					outcomes.Add(1)
+				}
+				response, err := underlying.RoundTrip(r)
+				if err == nil && r.URL.Path == "/cancel" {
+					trigger := r.Context().Done() // RunHTTP stops the watch after its outcome exchange.
+					if test.early {
+						trigger = started
+					}
+					var reader io.Reader = strings.NewReader("{")
+					if test.truncated {
+						reader = iotest.ErrReader(io.ErrUnexpectedEOF)
+					} else if test.externalCause {
+						reader = iotest.ErrReader(context.Canceled)
+					}
+					response.Body = httpClientGatedWatchBody{ReadCloser: response.Body, reader: reader, trigger: trigger, reads: &faultReads}
+				}
+				if err == nil && r.URL.Path == "/outcome" && test.externalCause {
+					// post closes the actual ACK after decoding it, before RunHTTP stops its watch.
+					response.Body = httpClientCancelOnCloseBody{ReadCloser: response.Body, cancel: cancel, cause: externalCause}
+				}
+				if err == nil && r.URL.Path == "/outcome" && test.malformedACK {
+					_ = response.Body.Close()
+					response.Body = io.NopCloser(strings.NewReader("{"))
+				}
+				return response, err
+			})
+			tokens := usage.Tokens{Input: 19, CachedInput: 2, Output: 3}
+			runner := &Runner{WorkRoot: t.TempDir(), runModel: func(ctx context.Context, _ modelRun) (aicli.Result, error) {
+				if native.Add(1) != 1 {
+					return aicli.Result{}, errors.New("watch failure repeated native work")
+				}
+				close(started)
+				if test.early {
+					<-ctx.Done()
+					return aicli.Result{Tokens: tokens}, ctx.Err()
+				}
+				return aicli.Result{Answer: "Known candidate", Tokens: tokens, UsageComplete: true}, nil
+			}}
+			done := make(chan error, 1)
+			finished := false
+			t.Cleanup(func() {
+				cancel(context.Canceled)
+				if !finished {
+					select {
+					case <-done:
+					case <-time.After(5 * time.Second):
+						t.Error("worker did not drain after watch fixture cancellation")
+					}
+				}
+			})
+			go func() { done <- RunHTTP(ctx, &client, parent.server.URL, f.job.Identity.ExecutorID, runner) }()
+			var workerErr error
+			select {
+			case workerErr = <-done:
+				finished = true
+			case <-time.After(5 * time.Second):
+				t.Fatal("worker did not drain its outcome and gated watch")
+			}
+			got := parent.result(t)
+			unknown := test.early || test.malformedACK || test.externalCause
+			if errors.Is(workerErr, monitor.ErrExecutionOutcomeUnknown) != unknown || !unknown && workerErr != nil || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) != test.early || !test.early && got.err != nil || native.Load() != 1 || outcomes.Load() != 1 || faultReads.Load() == 0 || len(got.result.Calls) != 1 {
+				t.Fatalf("watch drain changed known receipt or erased earlier failure: worker=%v parent=%v result=%+v native=%d outcomes=%d reads=%d", workerErr, got.err, got.result, native.Load(), outcomes.Load(), faultReads.Load())
+			}
+			if test.externalCause && (!errors.Is(workerErr, externalCause) || !errors.Is(workerErr, processgroup.ErrScopeUnconfirmed) || context.Cause(ctx) != externalCause) {
+				t.Fatalf("known receipt erased original caller cause: worker=%v caller=%v", workerErr, context.Cause(ctx))
+			}
+			call := got.result.Calls[0]
+			if call.Tokens != tokens || call.Complete == test.early || !slices.Equal(f.sink.calls, got.result.Calls) || f.sink.pending != nil {
+				t.Fatalf("watch fault lost acknowledged paid facts: call=%+v saved=%+v pending=%+v", call, f.sink.calls, f.sink.pending)
+			}
+			if test.early {
+				if !errors.Is(workerErr, context.Canceled) || got.result.Answer != "" || !errors.Is(f.sink.finish(got.result, got.err), monitor.ErrExecutionOutcomeUnknown) {
+					t.Fatalf("watch error that stopped Runner became success: worker=%v parent=%v result=%+v", workerErr, got.err, got.result)
+				}
+			} else if got.result.Answer != "Known candidate" || got.result.Validate(f.job) != nil || f.sink.finish(got.result, got.err) != nil {
+				t.Fatalf("known parent receipt was altered by independent watch failure: result=%+v parent=%v", got.result, got.err)
+			}
+			records, err := usage.ReadAll(store.Dir)
+			if err != nil || len(records) != 1 || records[0].Tokens != tokens || records[0].CodexCalls != 1 || records[0].ClaudeCalls != 0 || records[0].UsageComplete == test.early {
+				t.Fatalf("watch failure lost exact durable accounting: records=%+v error=%v", records, err)
+			}
+		})
+	}
+}
+
+type httpClientCancelOnCloseBody struct {
+	io.ReadCloser
+	cancel context.CancelCauseFunc
+	cause  error
+}
+
+func (b httpClientCancelOnCloseBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.cancel(b.cause)
+	return err
+}
+
 type httpClientTestTransport func(*http.Request) (*http.Response, error)
 
 func (f httpClientTestTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
@@ -668,6 +792,19 @@ func (b httpClientPipeBody) Read([]byte) (int, error) {
 	<-b.trigger
 	b.reads.Add(1)
 	return 0, io.ErrClosedPipe
+}
+
+type httpClientGatedWatchBody struct {
+	io.ReadCloser
+	reader  io.Reader
+	trigger <-chan struct{}
+	reads   *atomic.Int32
+}
+
+func (b httpClientGatedWatchBody) Read(p []byte) (int, error) {
+	<-b.trigger
+	b.reads.Add(1)
+	return b.reader.Read(p)
 }
 
 type httpClientFailedWatchHeaders struct{ http.ResponseWriter }
