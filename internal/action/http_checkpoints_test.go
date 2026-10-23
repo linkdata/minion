@@ -153,3 +153,136 @@ func TestHTTPCheckpointsKeepActualStoreRefusalsAndDurablePrefix(t *testing.T) {
 		})
 	}
 }
+
+func TestHTTPRejectsMalformedCompletedCallBeforeSavingUsage(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		change func(*CallUsage)
+	}{
+		{"invalid tokens", func(call *CallUsage) { call.Tokens.Input = -1 }},
+		{"main claims critic verdict", func(call *CallUsage) { call.Approved, call.NoBlockers, call.ReviewComplete = true, true, true }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			owner := newExecutionAdapterFixture(t, testJob(command.Comment))
+			store := owner.startUsage()
+			f := newHTTPServerTest(t, context.Background(), owner.job, owner.sink, nil)
+			f.pull(t)
+			f.ack(t, "/before", f.call(1), http.StatusOK, 1)
+			usagePath := filepath.Join(store.Dir, owner.job.Identity.AttemptID+".json")
+			before, err := os.ReadFile(usagePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			paid := f.call(2)
+			test.change(&paid.Checkpoint.Call)
+			ack := f.ack(t, "/after", paid, http.StatusInternalServerError, 2)
+			if ack.Failure == nil || !errors.Is(ack.Failure.err(), monitor.ErrTerminalJob) || owner.sink.returned != nil || len(owner.sink.calls) != 0 {
+				t.Fatalf("malformed completed call reached saved receipts: ack=%+v returned=%+v calls=%+v", ack, owner.sink.returned, owner.sink.calls)
+			}
+			after, err := os.ReadFile(usagePath)
+			if err != nil || !bytes.Equal(before, after) {
+				t.Fatalf("malformed completed call changed pre-dispatch usage: error=%v", err)
+			}
+			outcome := f.outcome(3, errors.New("worker stopped after rejected receipt"))
+			f.ack(t, "/outcome", outcome, http.StatusOK, 3)
+			got := f.result(t)
+			if err := owner.sink.finish(got.result, got.err); !errors.Is(err, monitor.ErrTerminalJob) {
+				t.Fatalf("rejected paid callback permitted a final result: %v", err)
+			}
+			records, err := usage.ReadAll(store.Dir)
+			if err != nil || len(records) != 1 || records[0].CodexCalls != 1 || records[0].Tokens != (usage.Tokens{}) || records[0].UsageComplete {
+				t.Fatalf("rejected paid callback changed the durable lower bound: records=%+v error=%v", records, err)
+			}
+		})
+	}
+}
+
+func TestHTTPFailedOutcomeCannotChangeAcknowledgedReview(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		change func(*Result)
+	}{
+		{"change refutation", func(result *Result) { result.Refutations[0].Text = "FORGED_REFUTATION" }},
+		{"omit refutation", func(result *Result) { result.Refutations = nil }},
+		{"omit decision", func(result *Result) { result.CriticStopReason = "" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			owner := newExecutionAdapterFixture(t, withClaudeCritic(testJob(command.Comment)))
+			store := owner.startUsage()
+			want := privateReviewResult(owner.job)
+			f := newHTTPServerTest(t, context.Background(), owner.job, owner.sink, nil)
+			f.pull(t)
+			sequence := uint64(1)
+			f.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: owner.review(nil, nil, "")}, http.StatusOK, sequence)
+			sequence++
+			for i, call := range want.Calls {
+				f.ack(t, "/before", httpCall{Sequence: sequence, Checkpoint: owner.call(callMetadata(call))}, http.StatusOK, sequence)
+				sequence++
+				f.ack(t, "/after", httpCall{Sequence: sequence, Checkpoint: owner.call(call)}, http.StatusOK, sequence)
+				sequence++
+				var refs []Refutation
+				if call.Round >= 2 {
+					refs = want.Refutations
+				}
+				f.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: owner.review(want.Calls[:i+1], refs, "")}, http.StatusOK, sequence)
+				sequence++
+			}
+			f.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: owner.review(want.Calls, want.Refutations, want.CriticStopReason)}, http.StatusOK, sequence)
+			sequence++
+			reviewPath := filepath.Join(owner.owner.WorkRoot, "reviews", owner.job.Identity.AttemptID+".json")
+			usagePath := filepath.Join(store.Dir, owner.job.Identity.AttemptID+".json")
+			beforeReview, err := os.ReadFile(reviewPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			beforeUsage, err := os.ReadFile(usagePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			outcome := f.outcome(sequence, errors.New("worker stopped after review"))
+			outcome.Result = want
+			outcome.Result.Calls = slices.Clone(want.Calls)
+			outcome.Result.Refutations = slices.Clone(want.Refutations)
+			test.change(&outcome.Result)
+			if err := outcome.Result.validate(owner.job, false); err != nil {
+				t.Fatalf("hostile outcome must otherwise satisfy the partial Result contract: %v", err)
+			}
+			f.ack(t, "/outcome", outcome, http.StatusOK, sequence)
+			got := f.result(t)
+			if err := owner.sink.finish(got.result, got.err); !errors.Is(err, monitor.ErrTerminalJob) {
+				t.Fatalf("failed outcome changed acknowledged review: error=%v result=%+v", err, got.result)
+			}
+			afterReview, reviewErr := os.ReadFile(reviewPath)
+			afterUsage, usageErr := os.ReadFile(usagePath)
+			if reviewErr != nil || usageErr != nil || !bytes.Equal(beforeReview, afterReview) || !bytes.Equal(beforeUsage, afterUsage) || !slices.Equal(owner.sink.review.Refutations, want.Refutations) || owner.sink.review.CriticStopReason != want.CriticStopReason {
+				t.Fatalf("hostile outcome replaced saved evidence: review=%v usage=%v acknowledged=%+v", reviewErr, usageErr, owner.sink.review)
+			}
+		})
+	}
+}
+
+func TestHTTPFailedOutcomeWithoutCriticCannotInventReview(t *testing.T) {
+	for _, field := range []string{"refutation", "decision"} {
+		t.Run(field, func(t *testing.T) {
+			owner := newExecutionAdapterFixture(t, testJob(command.Comment))
+			f := newHTTPServerTest(t, context.Background(), owner.job, owner.sink, nil)
+			f.pull(t)
+			f.ack(t, "/before", f.call(1), http.StatusOK, 1)
+			paid := f.call(2)
+			paid.Checkpoint.Call.Tokens, paid.Checkpoint.Call.Complete = usage.Tokens{Input: 3}, true
+			f.ack(t, "/after", paid, http.StatusOK, 2)
+			outcome := f.outcome(3, errors.New("worker stopped after paid call"))
+			outcome.Result.Calls = []CallUsage{paid.Checkpoint.Call}
+			if field == "refutation" {
+				outcome.Result.Refutations = []Refutation{{Round: 2, Text: "FORGED_REFUTATION"}}
+			} else {
+				outcome.Result.CriticStopReason = "approved"
+			}
+			f.ack(t, "/outcome", outcome, http.StatusOK, 3)
+			got := f.result(t)
+			if err := owner.sink.finish(got.result, got.err); !errors.Is(err, monitor.ErrTerminalJob) || len(owner.sink.failureEvidence().Refutations) != 0 || owner.sink.failureEvidence().CriticStopReason != "" {
+				t.Fatalf("failed outcome invented review evidence: error=%v evidence=%+v", err, owner.sink.failureEvidence())
+			}
+		})
+	}
+}

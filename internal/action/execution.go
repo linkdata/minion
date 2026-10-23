@@ -121,6 +121,9 @@ func (c *executionCheckpoints) AfterCall(fact CallCheckpoint) error {
 	if !c.bound(fact.Version, fact.Identity, fact.SourceRef) || c.pending == nil || callMetadata(fact.Call) != *c.pending {
 		return c.fail(checkpointContractError())
 	}
+	if err := (Result{Calls: append(slices.Clone(c.calls), fact.Call)}).validateCalls(c.job, false); err != nil {
+		return c.fail(fmt.Errorf("%w: %w", checkpointContractError(), err))
+	}
 	call := fact.Call
 	c.returned = &call
 	if c.owner.usageCheckpoint != nil {
@@ -171,7 +174,8 @@ func (c *executionCheckpoints) finish(result Result, runErr error) error {
 		if c.returned != nil {
 			calls = append(slices.Clone(calls), *c.returned)
 		}
-		if !result.matchesJob(c.job) || (c.pending != nil && c.returned == nil) || !slices.Equal(result.Calls, calls) {
+		if !result.matchesJob(c.job) || (c.pending != nil && c.returned == nil) || !slices.Equal(result.Calls, calls) ||
+			!slices.Equal(result.Refutations, c.review.Refutations) || result.CriticStopReason != c.review.CriticStopReason {
 			return errors.Join(runErr, checkpointContractError())
 		}
 		return runErr
