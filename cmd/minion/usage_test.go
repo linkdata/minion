@@ -25,7 +25,8 @@ func saveReportFixture(t *testing.T, dir string) {
 			t.Fatal(err)
 		}
 		finish := start.Add(time.Minute)
-		record := usage.Record{ID: fmt.Sprintf("%032x", i+1), JobID: fmt.Sprintf("job-%d", i), Repo: "example-owner/example-repo", User: "alice", Action: actions[i], Number: 1, Provider: "codex", Model: "test-model", Effort: "high", StartedAt: start, FinishedAt: &finish, Status: statuses[i], CodexCalls: 1, UsageComplete: true}
+		record := usage.Record{ID: fmt.Sprintf("%032x", i+1), JobID: fmt.Sprintf("job-%d", i), Repo: "example-owner/example-repo", User: "alice", Action: actions[i], Number: 1, Provider: "codex", Model: "test-model", Effort: "high", StartedAt: start, FinishedAt: &finish, Status: statuses[i], CodexCalls: 1, UsageComplete: true,
+			ExecutorID: "local", SourceRef: strings.Repeat("a", 40), UsageSource: "executor_reported"}
 		switch i {
 		case 0:
 			record.Tokens = usage.Tokens{Input: 100, CachedInput: 40, Output: 20}
@@ -39,6 +40,7 @@ func saveReportFixture(t *testing.T, dir string) {
 			record.FinishedAt = nil // A crash after a call can leave running usage marked complete.
 		case 3:
 			record.CodexCalls = 0
+			record.UsageSource = ""
 		}
 		if err := (usage.Store{Dir: dir}).Save(record); err != nil {
 			t.Fatal(err)
@@ -90,6 +92,9 @@ func TestUsageDetailsAndTables(t *testing.T) {
 	if len(output.Groups) != 0 || len(output.GroupBy) != 0 || len(output.Attempts) != 4 || output.Attempts[0].TotalTokens != 120 || output.Attempts[1].UsageComplete || output.Attempts[2].UsageComplete {
 		t.Fatalf("wrong detail report: %+v", output)
 	}
+	if attempt := output.Attempts[0]; attempt.ExecutorID != "local" || attempt.SourceRef != strings.Repeat("a", 40) || attempt.UsageSource != "executor_reported" || !strings.Contains(output.TokenNote, "executor-reported claims") {
+		t.Fatalf("details lost claim provenance: %+v", attempt)
+	}
 	if attempt := output.Attempts[1]; attempt.Provider != "claude" || attempt.CriticProvider != "codex" || attempt.CriticModel != "critic-model" || attempt.ClaudeCalls != 3 {
 		t.Fatalf("details lost model roles: %+v", attempt)
 	}
@@ -98,7 +103,7 @@ func TestUsageDetailsAndTables(t *testing.T) {
 		if code := runUsageWithOutput([]string{"-dir", dir, "-group-by", grouping}, &stdout, &stderr); code != 0 {
 			t.Fatalf("exit %d: %s", code, &stderr)
 		}
-		for _, text := range []string{"example-owner/example-repo", "175 total", "2 attempts with incomplete usage", "included in input", "lower bounds", "CODEX CALLS", "CLAUDE CALLS", "4 Codex calls, 3 Claude calls"} {
+		for _, text := range []string{"example-owner/example-repo", "175 total", "2 attempts with incomplete usage", "included in input", "may omit unknown token counts", "CODEX CALLS", "CLAUDE CALLS", "4 Codex calls, 3 Claude calls"} {
 			if !strings.Contains(stdout.String(), text) {
 				t.Errorf("%q output lacks %q: %s", grouping, text, &stdout)
 			}

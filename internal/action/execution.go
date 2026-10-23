@@ -95,6 +95,8 @@ func (c *executionCheckpoints) BeforeCall(fact CallCheckpoint) error {
 		return c.fail(fmt.Errorf("%w: %w", checkpointContractError(), err))
 	}
 	if c.owner.usageCheckpoint != nil {
+		c.owner.usageCheckpoint.record.ExecutorID = c.job.Identity.ExecutorID
+		c.owner.usageCheckpoint.record.SourceRef = c.job.Source.Head
 		if err := c.owner.usageCheckpoint.beforeCall(fact.Call); err != nil {
 			return c.fail(err)
 		}
@@ -121,6 +123,9 @@ func (c *executionCheckpoints) AfterCall(fact CallCheckpoint) error {
 	if !c.bound(fact.Version, fact.Identity, fact.SourceRef) || c.pending == nil || callMetadata(fact.Call) != *c.pending {
 		return c.fail(checkpointContractError())
 	}
+	if err := (Result{Calls: append(slices.Clone(c.calls), fact.Call)}).validateCalls(c.job, false); err != nil {
+		return c.fail(fmt.Errorf("%w: %w", checkpointContractError(), err))
+	}
 	call := fact.Call
 	c.returned = &call
 	if c.owner.usageCheckpoint != nil {
@@ -143,6 +148,12 @@ func (c *executionCheckpoints) Review(fact ReviewCheckpoint) error {
 	// A reached decision acknowledges an already saved receipt/refutation prefix.
 	if fact.CriticStopReason != "" && (!c.reviewed || !slices.Equal(fact.Calls, c.review.Calls) || !slices.Equal(fact.Refutations, c.review.Refutations)) {
 		return c.fail(checkpointContractError())
+	}
+	if added := len(fact.Refutations) - len(c.review.Refutations); added > 0 {
+		if added != 1 || len(c.calls) == 0 || len(c.review.Calls) == len(c.calls) ||
+			c.calls[len(c.calls)-1].Role != roleMain || fact.Refutations[len(fact.Refutations)-1].Round != c.calls[len(c.calls)-1].Round {
+			return c.fail(checkpointContractError())
+		}
 	}
 	result := Result{Version: fact.Version, Identity: fact.Identity, SourceRef: fact.SourceRef, Calls: fact.Calls, Refutations: fact.Refutations, CriticStopReason: fact.CriticStopReason}
 	if err := saveReviewEvidence(c.owner.WorkRoot, c.job, result, c.owner.Logger); err != nil {
@@ -171,7 +182,8 @@ func (c *executionCheckpoints) finish(result Result, runErr error) error {
 		if c.returned != nil {
 			calls = append(slices.Clone(calls), *c.returned)
 		}
-		if !result.matchesJob(c.job) || (c.pending != nil && c.returned == nil) || !slices.Equal(result.Calls, calls) {
+		if !result.matchesJob(c.job) || (c.pending != nil && c.returned == nil) || !slices.Equal(result.Calls, calls) ||
+			!slices.Equal(result.Refutations, c.review.Refutations) || result.CriticStopReason != c.review.CriticStopReason {
 			return errors.Join(runErr, checkpointContractError())
 		}
 		return runErr

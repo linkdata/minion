@@ -64,6 +64,9 @@ type Record struct {
 	Action         string     `json:"action"`
 	Number         int        `json:"number"`
 	SourceURL      string     `json:"source_url,omitempty"`
+	ExecutorID     string     `json:"executor_id,omitempty"`
+	SourceRef      string     `json:"source_ref,omitempty"`
+	UsageSource    string     `json:"usage_source,omitempty"`
 	Provider       string     `json:"provider"`
 	Model          string     `json:"model"`
 	Effort         string     `json:"reasoning_effort,omitempty"`
@@ -94,6 +97,12 @@ func (r Record) validate() error {
 	if r.CriticProvider != "" && r.CriticProvider != "codex" && r.CriticProvider != "claude" {
 		return fmt.Errorf("usage record %s has invalid critic provider %q", r.ID, r.CriticProvider)
 	}
+	if (r.ExecutorID == "") != (r.SourceRef == "") ||
+		(r.ExecutorID != "" && !workspace.ValidIdentitySegment(r.ExecutorID)) ||
+		(r.SourceRef != "" && !workspace.ValidSHA(r.SourceRef)) ||
+		(r.UsageSource != "" && r.UsageSource != "executor_reported") {
+		return fmt.Errorf("usage record %s has invalid provenance", r.ID)
+	}
 	switch r.Status {
 	case "running":
 		if r.FinishedAt != nil {
@@ -108,6 +117,14 @@ func (r Record) validate() error {
 	}
 	if r.CodexCalls < 0 || r.ClaudeCalls < 0 || !r.Tokens.Valid() {
 		return fmt.Errorf("usage record %s has invalid counts", r.ID)
+	}
+	counted := r.CodexCalls > 0 || r.ClaudeCalls > 0
+	hasTokens := r.Tokens != (Tokens{})
+	// A pending call has a counter before its returned usage claim exists.
+	if (!counted && (hasTokens || r.UsageSource != "")) ||
+		(counted && r.ExecutorID == "") ||
+		(counted && (hasTokens || r.UsageComplete || r.Status == "succeeded") && r.UsageSource != "executor_reported") {
+		return fmt.Errorf("usage record %s has unattributed usage", r.ID)
 	}
 	return nil
 }

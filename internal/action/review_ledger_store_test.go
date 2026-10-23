@@ -79,7 +79,7 @@ func TestPublishRetainsPrivateReviewBeforeGitHubWrites(t *testing.T) {
 					http.Error(w, "private review unavailable", http.StatusInternalServerError)
 					return
 				}
-				if len(record.Refutations) != 1 || len(record.Calls) == 0 || record.Calls[len(record.Calls)-1].Approved != test.approved || !record.Calls[len(record.Calls)-1].ReviewComplete || record.CriticStopReason != result.CriticStopReason || record.CriticNonblockingRounds != 1 || record.CriticConsecutiveNoBlockerRounds != job.CriticConsecutiveNoBlockerRounds || record.SourceRef != job.Source.Head {
+				if record.ReviewClaimOrigin != "executor_reported" || len(record.Refutations) != 1 || len(record.Calls) == 0 || record.Calls[len(record.Calls)-1].Approved != test.approved || !record.Calls[len(record.Calls)-1].ReviewComplete || record.CriticStopReason != result.CriticStopReason || record.CriticNonblockingRounds != 1 || record.CriticConsecutiveNoBlockerRounds != job.CriticConsecutiveNoBlockerRounds || record.SourceRef != job.Source.Head {
 					t.Errorf("private evidence/policy lost: %+v", record)
 				}
 				if r.Method == http.MethodGet && r.URL.Path == "/repos/o/r" {
@@ -111,7 +111,7 @@ func TestPublishRetainsPrivateReviewBeforeGitHubWrites(t *testing.T) {
 			} else if !errors.Is(publishErr, monitor.ErrPostModelPublication) {
 				t.Fatalf("publication failure cause lost: %v", publishErr)
 			}
-			if writes != 1 || !strings.Contains(body.String(), result.Answer) || strings.Contains(body.String(), "PRIVATE") || strings.Contains(journal.String(), "PRIVATE") {
+			if writes != 1 || !strings.Contains(body.String(), result.Answer) || !strings.Contains(journal.String(), "call_claim_origin=executor_reported") || strings.Contains(body.String(), "PRIVATE") || strings.Contains(journal.String(), "PRIVATE") {
 				t.Fatalf("private evidence leaked or publication lost: writes=%d body=%s journal=%s", writes, &body, &journal)
 			}
 		})
@@ -201,18 +201,25 @@ func TestPrivateReviewRecordsDecisionAfterVerdictCheckpoint(t *testing.T) {
 	job := withClaudeCritic(testJob(command.Comment))
 	result := privateReviewResult(job)
 	orchestrator := Orchestrator{WorkRoot: t.TempDir()}
+	initial := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head}
+	if err := orchestrator.retainReviewEvidence(job, initial); err != nil {
+		t.Fatal(err)
+	}
+	if saved := readPrivateReview(t, orchestrator.WorkRoot); saved.ReviewClaimOrigin != "" {
+		t.Fatalf("metadata-only checkpoint claimed a worker verdict: %+v", saved)
+	}
 	beforeDecision := result
 	beforeDecision.CriticStopReason = ""
 	if err := orchestrator.retainReviewEvidence(job, beforeDecision); err != nil {
 		t.Fatal(err)
 	}
-	if saved := readPrivateReview(t, orchestrator.WorkRoot); saved.CriticStopReason != "" || !saved.Calls[len(saved.Calls)-1].Approved || !saved.Calls[len(saved.Calls)-1].ReviewComplete {
+	if saved := readPrivateReview(t, orchestrator.WorkRoot); saved.ReviewClaimOrigin != "executor_reported" || saved.CriticStopReason != "" || !saved.Calls[len(saved.Calls)-1].Approved || !saved.Calls[len(saved.Calls)-1].ReviewComplete {
 		t.Fatalf("verdict checkpoint fabricated or lost evidence: %+v", saved)
 	}
 	if err := orchestrator.retainReviewEvidence(job, result); err != nil {
 		t.Fatal(err)
 	}
-	if saved := readPrivateReview(t, orchestrator.WorkRoot); saved.CriticStopReason != "approved" {
+	if saved := readPrivateReview(t, orchestrator.WorkRoot); saved.ReviewClaimOrigin != "executor_reported" || saved.CriticStopReason != "approved" {
 		t.Fatalf("decision with unchanged call prefix was not persisted: %+v", saved)
 	}
 	for _, reason := range []string{"", "nonblocking"} {

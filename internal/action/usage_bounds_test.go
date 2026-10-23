@@ -86,7 +86,7 @@ func TestUsageAggregateBounds(t *testing.T) {
 			if got.Status != "succeeded" || got.FinishedAt == nil || got.Tokens != (usage.Tokens{Input: scenario.want}) || got.UsageComplete != scenario.complete || got.CodexCalls+got.ClaudeCalls != wantCalls {
 				t.Fatalf("usage did not retain/finalize the representable bound: %+v", got)
 			}
-			const warning = "action usage counters invalid or overflowed; retaining lower bound for attempt "
+			const warning = "action usage counters invalid or overflowed; retaining previous reported totals for attempt "
 			wantWarnings := 0
 			if !scenario.complete {
 				wantWarnings = 1
