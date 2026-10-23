@@ -107,13 +107,6 @@ func TestHostileHTTPResultValidationErrorRedactsProviderKey(t *testing.T) {
 					review.CriticStopReason = result.CriticStopReason
 					f.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: review}, http.StatusOK, sequence)
 					sequence++
-					var err error
-					review.ContentDigest, err = contentDigest(result.Answer, result.Changes, result.Artifacts)
-					if err != nil {
-						t.Fatal(err)
-					}
-					f.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: review}, http.StatusOK, sequence)
-					sequence++
 				}
 				outcome := f.outcome(sequence, nil)
 				outcome.Result = result

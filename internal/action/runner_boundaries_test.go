@@ -161,6 +161,28 @@ func TestRunnerAuditCollectionAndNormalizationFailuresAreTerminal(t *testing.T) 
 	}
 }
 
+func TestRunnerInvalidReviewedAuditMetadataSkipsCritic(t *testing.T) {
+	job := withClaudeCritic(auditRunnerJob(t))
+	criticCalls := 0
+	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+		if request.role == roleCritic {
+			criticCalls++
+			return aicli.Result{Answer: approvedCritiqueJSON}, nil
+		}
+		for _, file := range auditArtifactsFixture(job, request.dir, "Audit report\n") {
+			if file.Path == "run-metadata.json" {
+				file.Data = bytes.Replace(file.Data, []byte(`"run_id":"test-run"`), []byte(`"run_id":"`+strings.Repeat("<", maxAuditArtifactBytes/5)+`"`), 1)
+			}
+			writeFixtureFile(t, request.outputDir, file.Path, file.Data)
+		}
+		return aicli.Result{Answer: proposalJSON("main response", "")}, nil
+	}}
+	result, err := runner.Run(t.Context(), job)
+	if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "normalized audit metadata exceeds byte limit") || criticCalls != 0 || len(result.Calls) != 1 {
+		t.Fatalf("invalid audit metadata spent a critic call: calls=%d receipts=%d error=%v", criticCalls, len(result.Calls), err)
+	}
+}
+
 func TestRunnerCancellationDuringInstalledAuditValidatorPreservesCause(t *testing.T) {
 	installActionTestSkills(t, testAuditSkillURL)
 	bin := t.TempDir()

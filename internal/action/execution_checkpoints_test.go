@@ -178,15 +178,6 @@ func TestExecutionCriticRequiresInitialPrefixAndSeparateDecision(t *testing.T) {
 			f.saveReview(calls, nil, "")
 			if scenario == "complete" {
 				f.saveReview(calls, nil, "approved")
-				digest, err := contentDigest("Candidate", nil, nil)
-				if err != nil {
-					t.Fatal(err)
-				}
-				fact := f.review(calls, nil, "approved")
-				fact.ContentDigest = digest
-				if err := f.sink.Review(fact); err != nil {
-					t.Fatal(err)
-				}
 			}
 			err := f.sink.finish(f.result(calls, nil, "approved"), nil)
 			if scenario == "missing decision" {

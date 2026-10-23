@@ -26,8 +26,8 @@ var auditValidators = []struct{ script, artifact string }{
 	{"validate-coverage-ledger.cjs", "coverage-ledger.json"},
 }
 
-var auditCleanClaim = regexp.MustCompile(`\b(?:no|zero|0) (?:findings|vulnerabilities|security issues)(?: (?:found|identified|detected|reported))?(?:[.!?;:]|$)`)
-var auditNoConfirmedClaim = regexp.MustCompile(`\b(?:no|zero|0) confirmed (?:findings|vulnerabilities|security issues)(?: (?:found|identified|detected|reported))?(?:[.!?;:]|$)`)
+var auditCleanClaim = regexp.MustCompile(`\b(?:no|zero|0) (?:findings|vulnerabilities|security issues)(?: (?:found|identified|detected|reported))?(?:[,.!?;:]|$)`)
+var auditNoConfirmedClaim = regexp.MustCompile(`\b(?:no|zero|0) confirmed (?:findings|vulnerabilities|security issues)(?: (?:found|identified|detected|reported))?(?:[,.!?;:]|$)`)
 
 type auditTools struct {
 	binary, permissionFlag string
@@ -283,6 +283,7 @@ type auditCoverageEvidence struct {
 	ReassignmentReason string               `json:"reassignment_reason"`
 }
 
+// This checks the worker's report for internal consistency and links source claims to the assigned snapshot; it cannot prove a reviewer ran.
 func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes, detailsBytes, needsBytes []byte, source *workspace.Snapshot) error {
 	if err := rejectDuplicateAuditJSONKeys(ledgerBytes,
 		"coverage_id", "canonical_refs", "surface", "boundary", "subsystem", "attack_class", "lifecycle", "starting_paths",
@@ -441,15 +442,16 @@ func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes, detailsBytes
 		findingPaths[finding.Fingerprint] = citedPaths
 	}
 	candidates := make(map[string]bool)
-	checkedCitations := make(map[string]map[string]bool)
+	checkedCitations := make(map[string]map[string]map[string]bool)
+	candidateOwners := make(map[string]map[string]bool)
 	checkCandidate := func(e auditCoverageEvidence) error {
 		if len(e.ResultFingerprints) == 0 {
 			return errors.New("audit coverage-ledger.json has candidate without fingerprint")
 		}
-		var verifierPaths []string
+		hasVerifier := false
 		for _, check := range e.LocalChecks {
 			if check.AgentID != e.AgentID {
-				verifierPaths = append(verifierPaths, check.ReviewedPaths...)
+				hasVerifier = true
 			}
 		}
 		for _, reason := range e.Unresolved {
@@ -465,22 +467,35 @@ func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes, detailsBytes
 			if !final[fingerprint] {
 				return errors.New("audit coverage-ledger.json has a candidate without final finding")
 			}
-			if checkedCitations[fingerprint] == nil {
-				checkedCitations[fingerprint] = make(map[string]bool, len(findingPaths[fingerprint]))
+			if candidateOwners[fingerprint] == nil {
+				candidateOwners[fingerprint] = make(map[string]bool)
 			}
-			for _, path := range verifierPaths {
-				if findingPaths[fingerprint][path] {
-					checkedCitations[fingerprint][path] = true
+			candidateOwners[fingerprint][e.AgentID] = true
+			if checkedCitations[fingerprint] == nil {
+				checkedCitations[fingerprint] = make(map[string]map[string]bool)
+			}
+			for _, check := range e.LocalChecks {
+				if check.AgentID == e.AgentID {
+					continue
+				}
+				if checkedCitations[fingerprint][check.AgentID] == nil {
+					checkedCitations[fingerprint][check.AgentID] = make(map[string]bool, len(findingPaths[fingerprint]))
+				}
+				for _, path := range check.ReviewedPaths {
+					if findingPaths[fingerprint][path] {
+						checkedCitations[fingerprint][check.AgentID][path] = true
+					}
 				}
 			}
 		}
-		if len(verifierPaths) == 0 {
-			return errors.New("audit coverage-ledger.json has candidate without independent verifier check")
+		if !hasVerifier {
+			return errors.New("audit coverage-ledger.json has candidate without separately attributed source check")
 		}
 		return nil
 	}
 	seenIDs := make(map[string]bool, len(units))
 	blocked := 0
+	reviewedCoverage := false
 	for _, unit := range units {
 		switch unit.Status {
 		case "planned", "in_progress", "deferred":
@@ -489,10 +504,12 @@ func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes, detailsBytes
 		default:
 			return errors.New("audit coverage-ledger.json has invalid unit status")
 		}
+		reviewedCoverage = reviewedCoverage || unit.Status == "covered" || unit.Status == "candidate"
 		for _, attempt := range unit.Attempts {
 			if attempt.Status != "covered" && attempt.Status != "candidate" && attempt.Status != "blocked" {
 				return errors.New("audit coverage-ledger.json has invalid attempt status")
 			}
+			reviewedCoverage = reviewedCoverage || attempt.Status == "covered" || attempt.Status == "candidate"
 			if attempt.Status == "candidate" {
 				if err := checkCandidate(attempt); err != nil {
 					return err
@@ -578,7 +595,7 @@ func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes, detailsBytes
 		}
 		if unit.Status == "covered" || unit.Status == "candidate" {
 			if !auditSeedsChecked(unit.StartingPaths, unit.ReviewedPaths, sourceLines) {
-				return errors.New("audit coverage-ledger.json has starting path without checked evidence")
+				return errors.New("audit coverage-ledger.json has starting path without a declared reviewed file")
 			}
 		}
 		if !auditPositiveInteger(unit.Wave) {
@@ -592,7 +609,7 @@ func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes, detailsBytes
 			}
 			if attempt.Status == "covered" || attempt.Status == "candidate" {
 				if !auditSeedsChecked(unit.StartingPaths, attempt.ReviewedPaths, sourceLines) {
-					return errors.New("audit coverage-ledger.json has archived starting path without checked evidence")
+					return errors.New("audit coverage-ledger.json has archived starting path without a declared reviewed file")
 				}
 			}
 			if !auditPositiveInteger(attempt.Wave) || attempt.Wave <= previousWave || attempt.Wave >= unit.Wave || strings.TrimSpace(attempt.ReassignmentReason) == "" {
@@ -621,15 +638,44 @@ func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes, detailsBytes
 			}
 		}
 	}
+	if !reviewedCoverage {
+		return errors.New("audit coverage-ledger.json declares no reviewed coverage")
+	}
 	for fingerprint := range final {
 		if !candidates[fingerprint] {
 			return errors.New("audit findings.json has a finding without candidate")
 		}
-		if len(checkedCitations[fingerprint]) != len(findingPaths[fingerprint]) {
-			return errors.New("audit findings.json has a cited file without connected review evidence")
+		verified := false
+		for agentID, paths := range checkedCitations[fingerprint] {
+			if !candidateOwners[fingerprint][agentID] && len(paths) == len(findingPaths[fingerprint]) {
+				verified = true
+				break
+			}
+		}
+		if !verified {
+			return errors.New("audit findings.json has a cited file without one declared verifier path set")
 		}
 	}
 	// shortcut: Free Markdown can still contradict records in other words; render public prose from records when exact agreement is required.
+	boundaries := make(map[string]map[string]bool)
+	addBoundaries := func(boundary string, evidence auditCoverageEvidence) {
+		for _, fingerprint := range evidence.ResultFingerprints {
+			if boundaries[fingerprint] == nil {
+				boundaries[fingerprint] = make(map[string]bool)
+			}
+			boundaries[fingerprint][auditReportCell(boundary)] = true
+		}
+	}
+	for _, unit := range units {
+		if unit.Status == "candidate" {
+			addBoundaries(unit.Boundary, unit.auditCoverageEvidence)
+		}
+		for _, attempt := range unit.Attempts {
+			if attempt.Status == "candidate" {
+				addBoundaries(unit.Boundary, attempt)
+			}
+		}
+	}
 	report := strings.ToLower(string(reportBytes))
 	reportable := false
 	confirmed := false
@@ -640,15 +686,18 @@ func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes, detailsBytes
 		}
 		reportable = true
 		confirmed = confirmed || finding.Verdict == "confirmed"
-		title := strings.ToLower(strings.Join(strings.Fields(finding.Title), " "))
+		title := auditReportCell(finding.Title)
 		found := false
 		for _, line := range strings.Split(report, "\n") {
 			if finding.Verdict == "confirmed" {
-				cells := strings.Split(strings.Trim(line, " |\t"), "|")
-				if len(cells) < 4 || strings.Trim(strings.TrimSpace(cells[0]), "*_` ") != finding.Severity.Overall {
+				cells := auditTableCells(line)
+				if len(cells) != 4 || strings.Trim(strings.TrimSpace(cells[0]), "*_` ") != finding.Severity.Overall ||
+					auditReportCell(cells[1]) != title || !boundaries[finding.Fingerprint][auditReportCell(cells[2])] ||
+					auditReportCell(cells[3]) != auditReportCell(finding.Execution.ObservedResult) {
 					continue
 				}
-				line = cells[1]
+				found = true
+				break
 			}
 			if strings.Contains(strings.Join(strings.Fields(line), " "), title) {
 				found = true
@@ -656,14 +705,17 @@ func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes, detailsBytes
 			}
 		}
 		if !found {
-			return errors.New("audit REPORT.md omits a final finding title or severity")
+			if finding.Verdict == "confirmed" {
+				return errors.New("audit REPORT.md omits or contradicts a confirmed finding table row")
+			}
+			return errors.New("audit REPORT.md omits a final finding title")
 		}
 		if finding.Verdict == "confirmed" && auditSeverityRank(finding.Severity.Overall) >= auditSeverityRank("medium") {
-			requiredDetails = append(requiredDetails, []string{finding.Title, finding.Trace[0].File,
+			requiredDetails = append(requiredDetails, []string{finding.Fingerprint + ": " + finding.Title, finding.Trace[0].File,
 				finding.Execution.ObservedResult, finding.Remediation.Strategy})
 		}
 		if finding.Verdict == "needs_validation" {
-			fields := []string{finding.Title, finding.Trace[0].File}
+			fields := []string{finding.Fingerprint + ": " + finding.Title, finding.Trace[0].File}
 			fields = append(fields, finding.Blockers...)
 			if finding.ValidationPlan.Local != "" {
 				fields = append(fields, finding.ValidationPlan.Local)
@@ -672,6 +724,29 @@ func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes, detailsBytes
 				fields = append(fields, finding.ValidationPlan.Deployment)
 			}
 			requiredNeeds = append(requiredNeeds, fields)
+		}
+	}
+	for _, line := range strings.Split(report, "\n") {
+		cells := auditTableCells(line)
+		if len(cells) != 4 || auditReportCell(cells[0]) == "severity" {
+			continue
+		}
+		title := auditReportCell(cells[1])
+		mentioned, matched := false, false
+		for _, finding := range findings {
+			if finding.Verdict != "confirmed" || auditReportCell(finding.Title) != title {
+				continue
+			}
+			mentioned = true
+			if strings.Trim(strings.TrimSpace(cells[0]), "*_` ") == finding.Severity.Overall &&
+				boundaries[finding.Fingerprint][auditReportCell(cells[2])] &&
+				auditReportCell(cells[3]) == auditReportCell(finding.Execution.ObservedResult) {
+				matched = true
+				break
+			}
+		}
+		if mentioned && !matched {
+			return errors.New("audit REPORT.md contradicts a confirmed finding table row")
 		}
 	}
 	flatReport := strings.Join(strings.Fields(report), " ")
@@ -690,34 +765,142 @@ func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes, detailsBytes
 	return nil
 }
 
-func auditReportHasClaim(report string, claim *regexp.Regexp) bool {
-	if claim.MatchString(strings.Join(strings.Fields(report), " ")) {
-		return true
-	}
-	for _, line := range strings.Split(report, "\n") {
-		if claim.MatchString(strings.TrimFunc(line, func(r rune) bool {
-			return unicode.IsSpace(r) || strings.ContainsRune("#*_|>`-", r)
-		})) {
-			return true
+func auditReportCell(text string) string {
+	return strings.ToLower(strings.Join(strings.Fields(text), " "))
+}
+
+func auditTableCells(line string) []string {
+	line = strings.TrimSpace(line)
+	line = strings.TrimPrefix(line, "|")
+	var cells []string
+	var cell strings.Builder
+	escaped := false
+	trailingSeparator := false
+	for _, r := range line {
+		if escaped {
+			if r != '|' {
+				cell.WriteByte('\\')
+			}
+			cell.WriteRune(r)
+			escaped = false
+			trailingSeparator = false
+			continue
+		}
+		switch r {
+		case '\\':
+			escaped = true
+			trailingSeparator = false
+		case '|':
+			cells = append(cells, cell.String())
+			cell.Reset()
+			trailingSeparator = true
+		default:
+			cell.WriteRune(r)
+			trailingSeparator = false
 		}
 	}
-	return false
+	if escaped {
+		cell.WriteByte('\\')
+	}
+	if !trailingSeparator {
+		cells = append(cells, cell.String())
+	}
+	return cells
+}
+
+func auditReportHasClaim(report string, claim *regexp.Regexp) bool {
+	startsWithClaim := func(text string) bool {
+		text = strings.TrimFunc(text, func(r rune) bool {
+			return unicode.IsSpace(r) || strings.ContainsRune("#*_|>`-", r)
+		})
+		location := claim.FindStringIndex(text)
+		return location != nil && location[0] == 0
+	}
+	var paragraph strings.Builder
+	flush := func() bool {
+		found := startsWithClaim(strings.Join(strings.Fields(paragraph.String()), " "))
+		paragraph.Reset()
+		return found
+	}
+	inFence := false
+	for _, line := range strings.Split(report, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "```") {
+			if flush() {
+				return true
+			}
+			inFence = !inFence
+			continue
+		}
+		if inFence || trimmed == "" || strings.HasPrefix(trimmed, ">") {
+			if flush() {
+				return true
+			}
+			continue
+		}
+		if startsWithClaim(trimmed) {
+			return true
+		}
+		if strings.HasPrefix(trimmed, "#") {
+			if flush() {
+				return true
+			}
+			continue
+		}
+		paragraph.WriteString(line)
+		paragraph.WriteByte(' ')
+	}
+	return flush()
 }
 
 func validateAuditProse(prose []byte, records [][]string) error {
 	if len(records) == 0 {
 		return nil
 	}
+	sections := make(map[string]string, len(records))
+	var body strings.Builder
+	current := ""
+	finish := func() error {
+		if current == "" {
+			return nil
+		}
+		if _, duplicate := sections[current]; duplicate {
+			return errors.New("has duplicate finding section")
+		}
+		sections[current] = auditReportCell(body.String())
+		body.Reset()
+		return nil
+	}
+	for _, line := range strings.Split(string(prose), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "## ") {
+			if err := finish(); err != nil {
+				return err
+			}
+			current = auditReportCell(strings.TrimPrefix(trimmed, "## "))
+			continue
+		}
+		if current != "" {
+			body.WriteString(line)
+			body.WriteByte('\n')
+		}
+	}
+	if err := finish(); err != nil {
+		return err
+	}
 	const maxScanBytes = 1 << 30
 	budget := int64(maxScanBytes)
-	normalized := strings.Join(strings.Fields(strings.ToLower(string(prose))), " ")
 	for _, record := range records {
-		for _, field := range record {
-			if int64(len(normalized)) > budget {
+		section, present := sections[auditReportCell(record[0])]
+		if !present {
+			return errors.New("omits required finding section")
+		}
+		for _, field := range record[1:] {
+			if int64(len(section)) > budget {
 				return errors.New("detail scan limit exceeded")
 			}
-			budget -= int64(len(normalized))
-			if !strings.Contains(normalized, strings.ToLower(strings.Join(strings.Fields(field), " "))) {
+			budget -= int64(len(section))
+			if !strings.Contains(section, auditReportCell(field)) {
 				return errors.New("omits required finding detail")
 			}
 		}
@@ -929,7 +1112,7 @@ func validateAuditMetadata(metadataBytes []byte, repo, target, head string) ([]s
 		metadata.Profile != "standard" || len(metadata.ScopePaths) != 1 || metadata.ScopePaths[0] != "." ||
 		string(metadata.Budget) != "null" || metadata.SelectedCompanionFiles == nil || metadata.PriorRunPaths == nil || len(metadata.PriorRunPaths) != 0 ||
 		metadata.ExecutionPolicy != "sandboxed-source-and-local-only" || metadata.RunStatus != "complete" {
-		return nil, fmt.Errorf("audit metadata does not confirm a complete standard run of %s at %s", repo, head)
+		return nil, fmt.Errorf("audit metadata does not declare a complete standard run of %s at %s", repo, head)
 	}
 	for _, name := range auditArtifacts {
 		if metadata.SharedFileOwners[name] != "parent" {

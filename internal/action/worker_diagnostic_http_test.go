@@ -395,56 +395,60 @@ func TestHTTPWorkerFailureThroughOrchestratorAndMonitor(t *testing.T) {
 	}
 }
 
-func TestHTTPNULOnlyRefutationCannotBecomePublication(t *testing.T) {
-	owner := newExecutionAdapterFixture(t, withClaudeCritic(testJob(command.Comment)))
-	want := privateReviewResult(owner.job)
-	transport := newHTTPServerTest(t, t.Context(), owner.job, owner.sink, nil)
-	transport.pull(t)
-	sequence := uint64(1)
-	transport.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: owner.review(nil, nil, "")}, http.StatusOK, sequence)
-	for i, call := range want.Calls[:3] {
-		sequence++
-		transport.ack(t, "/before", httpCall{Sequence: sequence, Checkpoint: owner.call(callMetadata(call))}, http.StatusOK, sequence)
-		sequence++
-		transport.ack(t, "/after", httpCall{Sequence: sequence, Checkpoint: owner.call(call)}, http.StatusOK, sequence)
-		sequence++
-		if i != 2 {
-			transport.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: owner.review(want.Calls[:i+1], nil, "")}, http.StatusOK, sequence)
-			continue
-		}
-		path := filepath.Join(owner.owner.WorkRoot, "reviews", owner.job.Identity.AttemptID+".json")
-		before, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		invalid := owner.review(want.Calls[:i+1], []Refutation{{Round: 2, Text: "\x00"}}, "")
-		ack := transport.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: invalid}, http.StatusInternalServerError, sequence)
-		if ack.Failure == nil || !errors.Is(ack.Failure.err(), monitor.ErrTerminalJob) {
-			t.Fatalf("NUL-only refutation reached private ledger: %+v", ack)
-		}
-		after, err := os.ReadFile(path)
-		if err != nil || !bytes.Equal(before, after) || len(owner.sink.review.Refutations) != 0 {
-			t.Fatalf("rejected refutation changed private ledger: error=%v", err)
-		}
-	}
-	sequence++
-	outcome := transport.outcome(sequence, errors.New("worker stopped after rejected review"))
-	outcome.Result.Calls = want.Calls[:3]
-	transport.ack(t, "/outcome", outcome, http.StatusOK, sequence)
-	got := transport.result(t)
-	if err := owner.sink.finish(got.result, got.err); !errors.Is(err, monitor.ErrTerminalJob) {
-		t.Fatalf("invalid review permitted completed result: %v", err)
-	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Errorf("invalid review caused GitHub write: %s %s", r.Method, r.URL.Path)
-		http.NotFound(w, r)
-	}))
-	defer server.Close()
-	owner.owner.GitHub = testGitHub(server, "fixture-token")
-	request := usageJob()
-	request.Command = command.Command{Name: "comment", Action: command.Comment}
-	if err := owner.owner.publish(t.Context(), &preparedAction{job: owner.job, request: request}, got.result); !errors.Is(err, monitor.ErrTerminalJob) {
-		t.Fatalf("invalid review result crossed publication boundary: %v", err)
+func TestHTTPInvisibleRefutationCannotBecomePublication(t *testing.T) {
+	for _, test := range []struct{ name, text string }{{"NUL", "\x00"}, {"zero-width space", "\u200b"}} {
+		t.Run(test.name, func(t *testing.T) {
+			owner := newExecutionAdapterFixture(t, withClaudeCritic(testJob(command.Comment)))
+			want := privateReviewResult(owner.job)
+			transport := newHTTPServerTest(t, t.Context(), owner.job, owner.sink, nil)
+			transport.pull(t)
+			sequence := uint64(1)
+			transport.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: owner.review(nil, nil, "")}, http.StatusOK, sequence)
+			for i, call := range want.Calls[:3] {
+				sequence++
+				transport.ack(t, "/before", httpCall{Sequence: sequence, Checkpoint: owner.call(callMetadata(call))}, http.StatusOK, sequence)
+				sequence++
+				transport.ack(t, "/after", httpCall{Sequence: sequence, Checkpoint: owner.call(call)}, http.StatusOK, sequence)
+				sequence++
+				if i != 2 {
+					transport.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: owner.review(want.Calls[:i+1], nil, "")}, http.StatusOK, sequence)
+					continue
+				}
+				path := filepath.Join(owner.owner.WorkRoot, "reviews", owner.job.Identity.AttemptID+".json")
+				before, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				invalid := owner.review(want.Calls[:i+1], []Refutation{{Round: 2, Text: test.text}}, "")
+				ack := transport.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: invalid}, http.StatusInternalServerError, sequence)
+				if ack.Failure == nil || !errors.Is(ack.Failure.err(), monitor.ErrTerminalJob) {
+					t.Fatalf("invisible refutation reached private ledger: %+v", ack)
+				}
+				after, err := os.ReadFile(path)
+				if err != nil || !bytes.Equal(before, after) || len(owner.sink.review.Refutations) != 0 {
+					t.Fatalf("rejected refutation changed private ledger: error=%v", err)
+				}
+			}
+			sequence++
+			outcome := transport.outcome(sequence, errors.New("worker stopped after rejected review"))
+			outcome.Result.Calls = want.Calls[:3]
+			transport.ack(t, "/outcome", outcome, http.StatusOK, sequence)
+			got := transport.result(t)
+			if err := owner.sink.finish(got.result, got.err); !errors.Is(err, monitor.ErrTerminalJob) {
+				t.Fatalf("invalid review permitted completed result: %v", err)
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				t.Errorf("invalid review caused GitHub write: %s %s", r.Method, r.URL.Path)
+				http.NotFound(w, r)
+			}))
+			defer server.Close()
+			owner.owner.GitHub = testGitHub(server, "fixture-token")
+			request := usageJob()
+			request.Command = command.Command{Name: "comment", Action: command.Comment}
+			if err := owner.owner.publish(t.Context(), &preparedAction{job: owner.job, request: request}, got.result); !errors.Is(err, monitor.ErrTerminalJob) {
+				t.Fatalf("invalid review result crossed publication boundary: %v", err)
+			}
+		})
 	}
 }
 
@@ -495,14 +499,6 @@ func TestHTTPPrivateRefutationAtWireLimitStaysInReviewRecord(t *testing.T) {
 	}
 	sequence++
 	transport.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: f.review(result.Calls, result.Refutations, result.CriticStopReason)}, http.StatusOK, sequence)
-	digest, err := contentDigest(result.Answer, result.Changes, result.Artifacts)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sequence++
-	finalReview := f.review(result.Calls, result.Refutations, result.CriticStopReason)
-	finalReview.ContentDigest = digest
-	transport.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: finalReview}, http.StatusOK, sequence)
 	sequence++
 	transport.ack(t, "/outcome", httpOutcome{Sequence: sequence, Result: result}, http.StatusOK, sequence)
 	got := transport.result(t)
@@ -532,7 +528,7 @@ func TestHTTPPrivateRefutationAtWireLimitStaysInReviewRecord(t *testing.T) {
 	}
 }
 
-func TestHTTPMatchingDigestCannotPublishPrivateRefutation(t *testing.T) {
+func TestHTTPResultCannotPublishPrivateRefutation(t *testing.T) {
 	for _, test := range []struct {
 		name, private, answer string
 	}{
@@ -544,6 +540,8 @@ func TestHTTPMatchingDigestCannotPublishPrivateRefutation(t *testing.T) {
 		{"short private token in prose", "ABC123 is private", "Public reply. ABC123"},
 		{"short private token with edge punctuation", "Token: -ABC123_", "Public reply. ABC123"},
 		{"Unicode simple fold", "PRIVATE Σ MARKER", "PRIVATE ς MARKER"},
+		{"canonical Unicode composition", "PRIVATE café OBJECTION", "Public reply. PRIVATE cafe\u0301 OBJECTION"},
+		{"HTML entity in Fix Markdown", "Private objection", "Private&#32;objection"},
 		{"case changed", "PRIVATE_MAIN_REFUTATION", "Public reply.\nprivate_main_refutation"},
 		{"bare Markdown quote leaders", "PRIVATE reviewer\nNOTES", "Public reply.\n>PRIVATE reviewer\n>NOTES"},
 		{"nested indented quote leaders", "PRIVATE reviewer\nNOTES", "Public reply.\n  > >PRIVATE reviewer\n > >NOTES"},
@@ -555,13 +553,21 @@ func TestHTTPMatchingDigestCannotPublishPrivateRefutation(t *testing.T) {
 		{"Unicode escape in single-quoted source", "The private refutation describes a missing access control check.\nThe same account cannot act for another user.", "Public reply.\n```js\n" + `const memo = '{"memo":"The sa\u006de account cannot act for another user."}'` + "\n```"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			job := withClaudeCritic(testJob(command.Comment))
+			action := command.Comment
+			if test.name == "HTML entity in Fix Markdown" {
+				action = command.Fix
+			}
+			job := withClaudeCritic(testJob(action))
 			f := newExecutionAdapterFixture(t, job)
 			var journal bytes.Buffer
 			f.owner.Logger = log.New(&journal, "", 0)
 			result := privateReviewResult(f.job)
 			result.Refutations[0].Text = test.private
 			result.Answer = test.answer
+			if action == command.Fix {
+				result.Answer = "Public reply."
+				result.Changes = []workspace.Change{{Path: "README.md", Mode: workspace.Regular, Data: []byte(test.answer)}}
+			}
 			if err := result.Validate(f.job); err != nil {
 				t.Fatal(err)
 			}
@@ -583,21 +589,13 @@ func TestHTTPMatchingDigestCannotPublishPrivateRefutation(t *testing.T) {
 			}
 			sequence++
 			transport.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: f.review(result.Calls, result.Refutations, result.CriticStopReason)}, http.StatusOK, sequence)
-			digest, err := contentDigest(result.Answer, result.Changes, result.Artifacts)
-			if err != nil {
-				t.Fatal(err)
-			}
-			sequence++
-			finalReview := f.review(result.Calls, result.Refutations, result.CriticStopReason)
-			finalReview.ContentDigest = digest
-			transport.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: finalReview}, http.StatusOK, sequence)
 			sequence++
 			transport.ack(t, "/outcome", httpOutcome{Sequence: sequence, Result: result}, http.StatusOK, sequence)
 			got := transport.result(t)
 			if got.err != nil || f.sink.finish(got.result, got.err) != nil {
-				t.Fatalf("matching-digest private result was not accepted by HTTP: %+v", got)
+				t.Fatalf("private result was not accepted by HTTP: %+v", got)
 			}
-			if saved := readPrivateReview(t, f.owner.WorkRoot); !reflect.DeepEqual(saved.Refutations, result.Refutations) || saved.ContentDigest != digest {
+			if saved := readPrivateReview(t, f.owner.WorkRoot); !reflect.DeepEqual(saved.Refutations, result.Refutations) {
 				t.Fatalf("private review checkpoint was not retained: %+v", saved)
 			}
 			var posted string
@@ -616,8 +614,8 @@ func TestHTTPMatchingDigestCannotPublishPrivateRefutation(t *testing.T) {
 			defer server.Close()
 			f.owner.GitHub = testGitHub(server, "fixture-token")
 			request := usageJob()
-			request.Command = command.Command{Name: "comment", Action: command.Comment}
-			err = f.owner.publish(t.Context(), &preparedAction{job: f.job, request: request}, got.result)
+			request.Command = command.Command{Name: string(action), Action: action}
+			err := f.owner.publish(t.Context(), &preparedAction{job: f.job, request: request}, got.result)
 			if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "publication contains private review evidence") || writes != 0 ||
 				posted != "" || strings.Contains(err.Error(), result.Refutations[0].Text) || strings.Contains(journal.String(), result.Refutations[0].Text) {
 				t.Fatalf("private refutation crossed publication boundary: error=%v writes=%d posted=%q journal=%q", err, writes, posted, journal.String())

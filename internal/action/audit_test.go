@@ -23,20 +23,35 @@ import (
 )
 
 func TestAuditProseRequiresRecordFields(t *testing.T) {
-	prose := []byte("## First finding\nDetails.\n## SECOND  finding\nMore details.\n")
-	if err := validateAuditProse(prose, [][]string{{"First finding", "Details"}, {"Second finding", "More details"}}); err != nil {
+	prose := []byte("## F1: First finding\nDetails.\n## F2: SECOND  finding\nMore details.\n")
+	if err := validateAuditProse(prose, [][]string{{"F1: First finding", "Details"}, {"F2: Second finding", "More details"}}); err != nil {
 		t.Fatalf("present record fields rejected: %v", err)
 	}
-	if err := validateAuditProse(prose, [][]string{{"First finding", "Missing detail"}}); err == nil {
+	if err := validateAuditProse(prose, [][]string{{"F1: First finding", "Missing detail"}}); err == nil {
 		t.Fatal("detail artifact accepted an absent record field")
 	}
-	large := []byte(strings.Repeat("x", 5<<20))
-	records := make([][]string, 205)
-	for i := range records {
-		records[i] = []string{"x"}
+	swapped := []byte("## F1: First finding\nSecond result.\n## F2: Second finding\nFirst result.\n")
+	if err := validateAuditProse(swapped, [][]string{{"F1: First finding", "First result"}, {"F2: Second finding", "Second result"}}); err == nil {
+		t.Fatal("detail artifact accepted fields under the wrong findings")
 	}
-	if err := validateAuditProse(large, records); err == nil || !strings.Contains(err.Error(), "scan limit") {
+	if err := validateAuditProse([]byte("## F1: First finding\nDetails.\n## F1: First finding\nMore details.\n"), [][]string{{"F1: First finding", "Details"}}); err == nil {
+		t.Fatal("detail artifact accepted duplicate finding sections")
+	}
+	large := []byte("## F: Large\n" + strings.Repeat("x", 5<<20))
+	record := make([]string, 206)
+	record[0] = "F: Large"
+	for i := 1; i < len(record); i++ {
+		record[i] = "x"
+	}
+	if err := validateAuditProse(large, [][]string{record}); err == nil || !strings.Contains(err.Error(), "scan limit") {
 		t.Fatalf("detail scan was not bounded: %v", err)
+	}
+}
+
+func TestAuditTableCellsEscapedPipe(t *testing.T) {
+	cells := auditTableCells(`| medium | Missing guard | Boundary | result \| |`)
+	if len(cells) != 4 || strings.TrimSpace(cells[3]) != "result |" {
+		t.Fatalf("escaped table pipe was split or lost: %q", cells)
 	}
 }
 

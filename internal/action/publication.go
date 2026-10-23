@@ -4,9 +4,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"slices"
 	"strings"
 	"unicode"
+
+	"golang.org/x/text/unicode/norm"
 
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
@@ -48,7 +51,7 @@ func projectPublication(job Job, result Result) (publication, error) {
 	return projected, nil
 }
 
-// Refutations are private even when an executor supplies a matching reviewed-content digest.
+// This catches direct and common encoded copies of reported refutations, not arbitrary leaks from a hostile executor.
 func rejectPublishedRefutations(job Job, result Result, projected publication) error {
 	if len(result.Refutations) == 0 {
 		return nil
@@ -270,29 +273,34 @@ func foldPublicationSpace(text string) string {
 		result.WriteRune(folded)
 		space = false
 	}
-	return result.String()
+	return norm.NFC.String(result.String())
 }
 
 func publicationTextVariants(text string) []string {
 	text = modelLineBreaks.Replace(text)
 	variants := []string{text}
-	if !strings.Contains(text, ">") {
-		return variants
+	if decoded := html.UnescapeString(text); decoded != text {
+		variants = append(variants, decoded)
 	}
-	lines := strings.Split(text, "\n")
-	changed := false
-	for i, line := range lines {
-		for {
-			trimmed := strings.TrimLeft(line, " \t")
-			if !strings.HasPrefix(trimmed, ">") {
-				break
-			}
-			line, changed = strings.TrimLeft(trimmed[1:], " \t"), true
+	for _, candidate := range variants {
+		if !strings.Contains(candidate, ">") {
+			continue
 		}
-		lines[i] = line
-	}
-	if changed {
-		variants = append(variants, strings.Join(lines, "\n"))
+		lines := strings.Split(candidate, "\n")
+		changed := false
+		for i, line := range lines {
+			for {
+				trimmed := strings.TrimLeft(line, " \t")
+				if !strings.HasPrefix(trimmed, ">") {
+					break
+				}
+				line, changed = strings.TrimLeft(trimmed[1:], " \t"), true
+			}
+			lines[i] = line
+		}
+		if changed {
+			variants = append(variants, strings.Join(lines, "\n"))
+		}
 	}
 	return variants
 }

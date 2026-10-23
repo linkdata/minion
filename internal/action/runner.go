@@ -100,16 +100,13 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 		}
 	}()
 	configured := *r
-	checkpointReview := func(history []Refutation, digest string) error {
+	checkpointReview := func(history []Refutation) error {
 		result.Refutations = history
 		if checkpoints != nil {
 			return checkpoints.Review(ReviewCheckpoint{
 				Version: result.Version, Identity: result.Identity, SourceRef: result.SourceRef,
-				Calls: result.Calls, Refutations: result.Refutations, CriticStopReason: result.CriticStopReason, ContentDigest: digest,
+				Calls: result.Calls, Refutations: result.Refutations, CriticStopReason: result.CriticStopReason,
 			})
-		}
-		if digest != "" {
-			return nil
 		}
 		if r.recordReview != nil {
 			return r.recordReview(result.Calls, result.Refutations, result.CriticStopReason)
@@ -147,7 +144,7 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 		return result, fmt.Errorf("%w: %w", workroot.ErrUnsafe, err)
 	}
 	if job.Critic != nil {
-		if err := checkpointReview(nil, ""); err != nil {
+		if err := checkpointReview(nil); err != nil {
 			return result, preparationFailure("prepare private review ledger", err)
 		}
 	}
@@ -219,8 +216,6 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 	}
 	var review *reviewSnapshot
 	reviewCurrent := false
-	var reviewedDigest string
-	var reviewedDigestErr error
 	historyDir := ""
 	closeReview := func() {
 		if review != nil {
@@ -246,7 +241,6 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 		if request.role == roleMain {
 			closeReview()
 			reviewCurrent = false
-			reviewedDigest, reviewedDigestErr = "", nil
 		}
 		if request.role == roleCritic {
 			var err error
@@ -267,8 +261,11 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 			if job.Action == command.Fix && len(review.changes) == 0 && !publishableAnswer(request.proposedAnswer) {
 				return aicli.Result{}, terminalUnlessCanceled(ctx, errors.New("rendered answer exceeds publication limit for no-change fix"))
 			}
-			if request.reviewPhase == reviewFull {
-				reviewedDigest, reviewedDigestErr = reviewedContentDigest(job, request.proposedAnswer, review, auditSkill, configured.Codex.APIKey, configured.Claude.APIKey)
+			if request.reviewPhase == reviewFull && job.Action == command.SecurityAudit {
+				_, err = normalizeAuditArtifacts(review.artifacts, job, auditSkill, configured.Codex.APIKey, configured.Claude.APIKey)
+				if err != nil {
+					return aicli.Result{}, terminalUnlessCanceled(ctx, fmt.Errorf("validate frozen audit artifacts: %w", err))
+				}
 			}
 			mapping := ""
 			if review.source != source {
@@ -385,10 +382,10 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 	var answer string
 	var runErr error
 	answer, result.CriticStopReason, runErr = configured.runAI(ctx, job, source, prompt, outputDir, func(history []Refutation) error {
-		return checkpointReview(history, "")
+		return checkpointReview(history)
 	}, &sessions)
 	if result.CriticStopReason != "" {
-		if err := checkpointReview(result.Refutations, ""); err != nil {
+		if err := checkpointReview(result.Refutations); err != nil {
 			return result, fmt.Errorf("%w: checkpoint critic decision: %w", monitor.ErrTerminalJob, err)
 		}
 	}
@@ -438,21 +435,6 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 	if err := result.validate(job, true); err != nil {
 		result.Changes, result.Answer = nil, ""
 		return result, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
-	}
-	if job.Critic != nil {
-		if reviewedDigestErr != nil {
-			return result, fmt.Errorf("%w: derive reviewed content digest: %w", monitor.ErrTerminalJob, reviewedDigestErr)
-		}
-		if reviewedDigest == "" {
-			return result, fmt.Errorf("%w: missing final full review content digest", monitor.ErrTerminalJob)
-		}
-		actualDigest, err := contentDigest(result.Answer, result.Changes, result.Artifacts)
-		if err != nil || actualDigest != reviewedDigest {
-			return result, fmt.Errorf("%w: final result differs from frozen critic input", monitor.ErrTerminalJob)
-		}
-		if err := checkpointReview(result.Refutations, reviewedDigest); err != nil {
-			return result, fmt.Errorf("%w: checkpoint reviewed content: %w", monitor.ErrTerminalJob, err)
-		}
 	}
 	return result, nil
 }
@@ -672,7 +654,7 @@ Description: %s`, job.Command, id.SubjectType, id.Number, job.Source.Head, id.Re
 		}
 		return fmt.Sprintf(`Run the installed security-audit skill at %q in full-audit mode on %s at commit %s. Use its standard profile for the whole source tree at %q, and write all required artifacts under %q. Record an incomplete run if the workflow cannot finish.
 
-Set run-metadata.json repo=%q, target=%q, source_ref=%q, profile="standard", scope_paths=["."], budget=null, prior_run_paths=[], execution_policy="sandboxed-source-and-local-only", and shared_file_owners to "parent" for every shared artifact. Set selected_companion_files to selected security-audit domain companion files whose "When to use" conditions apply, within that installed security-audit directory. Exclude its main SKILL.md and independently configured skills, including Caveman, Ponytail and anti-prompt-injection. Use [] when no domain companion applies. Mark complete only when the skill's workflow and installed validators pass. The bot posts REPORT.md. REPORT.md must fit within %d UTF-8 bytes after line-ending normalization, a two-byte quote prefix per line, visible control/formatting-character escapes and 12 bytes of code fences. In FINDINGS-DETAIL.md, copy each confirmed medium-or-higher record's exact title, first trace file, execution observed_result and remediation strategy from findings.json. In NEEDS-VALIDATION.md, copy each needs_validation record's exact title, first trace file, every blocker and each nonempty local or deployment validation plan. The parent checks these literal fields, so do not paraphrase or style the copied strings; explanatory prose may follow.
+Set run-metadata.json repo=%q, target=%q, source_ref=%q, profile="standard", scope_paths=["."], budget=null, prior_run_paths=[], execution_policy="sandboxed-source-and-local-only", and shared_file_owners to "parent" for every shared artifact. Set selected_companion_files to selected security-audit domain companion files whose "When to use" conditions apply, within that installed security-audit directory. Exclude its main SKILL.md and independently configured skills, including Caveman, Ponytail and anti-prompt-injection. Use [] when no domain companion applies. Mark complete only when the skill's workflow and installed validators pass. The bot posts REPORT.md. REPORT.md must fit within %d UTF-8 bytes after line-ending normalization, a two-byte quote prefix per line, visible control/formatting-character escapes and 12 bytes of code fences. In each confirmed-finding table row of REPORT.md, copy the exact title, a linked coverage-ledger boundary label, and execution observed_result from findings.json into their respective cells; escape literal table pipes. State this audit's own clean/no-findings claim at the start of a summary line, not as an unattributed quotation. In FINDINGS-DETAIL.md, give each confirmed medium-or-higher record exactly one level-two heading "## <fingerprint>: <title>" and put its exact first trace file, execution observed_result and remediation strategy from findings.json under that heading. In NEEDS-VALIDATION.md, give each needs_validation record exactly one such heading and put its exact first trace file, every blocker and each nonempty local or deployment validation plan under it. Use lower-level headings inside a finding section. The parent checks these literal fields, so do not paraphrase or style the copied strings; explanatory prose may follow.
 
 Source is read-only. Do not execute repository code, builds, tests, or fixtures, probe live services, publish, or run network commands. Copy this source-only execution prohibition verbatim into every delegated agent prompt; it overrides the skill's local-execution allowance. This runner lacks the skill's required per-agent execution isolation for target code; record claims requiring runtime evidence as needs_validation. Disclose missing tools or time limits as incomplete coverage. Do not include secrets in reports. Use repository-relative file paths and source identity %q in report prose.%s%s
 

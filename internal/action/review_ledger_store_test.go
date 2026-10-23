@@ -234,43 +234,6 @@ func TestPrivateReviewRecordsDecisionAfterVerdictCheckpoint(t *testing.T) {
 	}
 }
 
-func TestPrivateReviewContentDigestExtendsDecisionOnce(t *testing.T) {
-	job := withClaudeCritic(testJob(command.Comment))
-	result := privateReviewResult(job)
-	e := Orchestrator{WorkRoot: t.TempDir()}
-	digest, err := contentDigest(result.Answer, nil, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := saveReviewEvidence(e.WorkRoot, job, result, digest, nil); err == nil {
-		t.Fatal("review content digest created evidence without a saved decision")
-	}
-	if err := e.retainReviewEvidence(job, result); err != nil {
-		t.Fatal(err)
-	}
-	if err := saveReviewEvidence(e.WorkRoot, job, result, digest, nil); err != nil {
-		t.Fatal(err)
-	}
-	if saved := readPrivateReview(t, e.WorkRoot); saved.ContentDigest != digest {
-		t.Fatalf("decision digest was not retained: %+v", saved)
-	}
-	path := filepath.Join(e.WorkRoot, "reviews", job.Identity.AttemptID+".json")
-	before, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := e.retainReviewEvidence(job, result); err != nil {
-		t.Fatalf("final result retention discarded its acknowledged digest: %v", err)
-	}
-	after, err := os.ReadFile(path)
-	if err != nil || !bytes.Equal(before, after) {
-		t.Fatalf("identical result rewrote the content digest: %v", err)
-	}
-	if err := saveReviewEvidence(e.WorkRoot, job, result, strings.Repeat("b", 64), nil); err == nil {
-		t.Fatal("review evidence replaced its content digest")
-	}
-}
-
 func TestPrivateReviewBoundaryBeforeStorageOrPublication(t *testing.T) {
 	for _, scenario := range []string{"foreign identity", "foreign source", "malformed history", "oversized history", "invalid calls", "invalid answer", "read-only source changes", "storage failure", "public root", "symlink root"} {
 		t.Run(scenario, func(t *testing.T) {

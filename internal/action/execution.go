@@ -39,7 +39,6 @@ type ReviewCheckpoint struct {
 	Calls            []CallUsage  `json:"calls,omitempty"`
 	Refutations      []Refutation `json:"refutations,omitempty"`
 	CriticStopReason string       `json:"critic_stop_reason,omitempty"`
-	ContentDigest    string       `json:"content_digest,omitempty"`
 }
 
 // executionCheckpoints binds local persistence and acknowledgements to one attempt.
@@ -150,10 +149,6 @@ func (c *executionCheckpoints) Review(fact ReviewCheckpoint) error {
 	if fact.CriticStopReason != "" && (!c.reviewed || !slices.Equal(fact.Calls, c.review.Calls) || !slices.Equal(fact.Refutations, c.review.Refutations)) {
 		return c.fail(checkpointContractError())
 	}
-	if (fact.ContentDigest != "" && (!validContentDigest(fact.ContentDigest) || !c.reviewed || c.review.CriticStopReason == "" || fact.CriticStopReason != c.review.CriticStopReason)) ||
-		(c.review.ContentDigest != "" && fact.ContentDigest != c.review.ContentDigest) {
-		return c.fail(checkpointContractError())
-	}
 	if added := len(fact.Refutations) - len(c.review.Refutations); added > 0 {
 		if added != 1 || len(c.calls) == 0 || len(c.review.Calls) == len(c.calls) ||
 			c.calls[len(c.calls)-1].Role != roleMain || fact.Refutations[len(fact.Refutations)-1].Round != c.calls[len(c.calls)-1].Round {
@@ -161,7 +156,7 @@ func (c *executionCheckpoints) Review(fact ReviewCheckpoint) error {
 		}
 	}
 	result := Result{Version: fact.Version, Identity: fact.Identity, SourceRef: fact.SourceRef, Calls: fact.Calls, Refutations: fact.Refutations, CriticStopReason: fact.CriticStopReason}
-	if err := saveReviewEvidence(c.owner.WorkRoot, c.job, result, fact.ContentDigest, c.owner.Logger); err != nil {
+	if err := saveReviewEvidence(c.owner.WorkRoot, c.job, result, c.owner.Logger); err != nil {
 		if len(c.calls) == 0 {
 			err = preparationFailure("prepare private review ledger", err)
 		} else {
@@ -197,15 +192,11 @@ func (c *executionCheckpoints) finish(result Result, runErr error) error {
 		return errors.Join(runErr, checkpointContractError())
 	}
 	if c.job.Critic != nil {
-		if !c.reviewed || c.review.CriticStopReason == "" || c.review.ContentDigest == "" || result.CriticStopReason != c.review.CriticStopReason || !slices.Equal(result.Calls, c.review.Calls) || !slices.Equal(result.Refutations, c.review.Refutations) {
+		if !c.reviewed || c.review.CriticStopReason == "" || result.CriticStopReason != c.review.CriticStopReason || !slices.Equal(result.Calls, c.review.Calls) || !slices.Equal(result.Refutations, c.review.Refutations) {
 			return checkpointContractError()
 		}
 		if err := result.validate(c.job, true); err != nil {
 			return errors.Join(checkpointContractError(), err)
-		}
-		digest, err := contentDigest(result.Answer, result.Changes, result.Artifacts)
-		if err != nil || digest != c.review.ContentDigest {
-			return checkpointContractError()
 		}
 	}
 	return nil

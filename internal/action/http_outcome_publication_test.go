@@ -32,8 +32,6 @@ func TestExecuteRejectsHostileHTTPOutcomeBeforePublication(t *testing.T) {
 		{"changed acknowledged usage", "usage", false, true},
 		{"changed acknowledged refutation", "refutation", true, true},
 		{"changed acknowledged decision", "decision", true, false},
-		{"changed approved answer", "answer", true, true},
-		{"approved critic omits content digest", "missing digest", true, true},
 		{"incomplete critic receipt forged approval", "incomplete critic", true, true},
 		{"failed outcome after paid call", "failed outcome", false, true},
 		{"comment returns source changes", "changes", false, false},
@@ -60,7 +58,6 @@ func TestExecuteRejectsHostileHTTPOutcomeBeforePublication(t *testing.T) {
 			defer server.Close()
 			workRoot, usageDir := t.TempDir(), filepath.Join(t.TempDir(), "usage")
 			var acknowledged Result
-			var acknowledgedDigest string
 			executed := false
 			name, action, skill := "comment", command.Comment, skills.BuiltinAntiPromptInjection
 			if scenario.change == "audit" || scenario.change == "audit coverage" || scenario.change == "audit false covered" {
@@ -124,16 +121,6 @@ func TestExecuteRejectsHostileHTTPOutcomeBeforePublication(t *testing.T) {
 						review.CriticStopReason = result.CriticStopReason
 						f.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: review}, http.StatusOK, sequence)
 						sequence++
-						if scenario.change != "missing digest" {
-							digest, err := contentDigest(result.Answer, result.Changes, result.Artifacts)
-							if err != nil {
-								t.Fatal(err)
-							}
-							review.ContentDigest = digest
-							acknowledgedDigest = digest
-							f.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: review}, http.StatusOK, sequence)
-							sequence++
-						}
 					}
 				}
 				acknowledged = result
@@ -161,8 +148,6 @@ func TestExecuteRejectsHostileHTTPOutcomeBeforePublication(t *testing.T) {
 					outcome.Result.Refutations[0].Text = "FORGED_REFUTATION"
 				case "decision":
 					outcome.Result.CriticStopReason = ""
-				case "answer":
-					outcome.Result.Answer = "FORGED_CONTENT"
 				case "incomplete critic":
 					outcome.Result.Calls = slices.Clone(result.Calls)
 					last := &outcome.Result.Calls[len(outcome.Result.Calls)-1]
@@ -231,7 +216,7 @@ func TestExecuteRejectsHostileHTTPOutcomeBeforePublication(t *testing.T) {
 			}
 			if scenario.critic {
 				saved := readPrivateReview(t, workRoot)
-				if !slices.Equal(saved.Calls, acknowledged.Calls) || !slices.Equal(saved.Refutations, acknowledged.Refutations) || saved.CriticStopReason != acknowledged.CriticStopReason || saved.ContentDigest != acknowledgedDigest || saved.ReviewClaimOrigin != executorClaimOrigin {
+				if !slices.Equal(saved.Calls, acknowledged.Calls) || !slices.Equal(saved.Refutations, acknowledged.Refutations) || saved.CriticStopReason != acknowledged.CriticStopReason || saved.ReviewClaimOrigin != executorClaimOrigin {
 					t.Fatalf("hostile result replaced acknowledged review: %+v", saved)
 				}
 			}
