@@ -29,6 +29,9 @@ func Configure(maxTasks int, maxMemoryBytes int64) error {
 // Handle is unavailable without Linux cgroup v2 process ownership.
 type Handle struct{}
 
+// WorkerHandle is unavailable without Linux cgroup v2 process ownership.
+type WorkerHandle struct{}
+
 func unsupported() error {
 	return fmt.Errorf("%w: cgroup v2 process ownership requires Linux", ErrUnconfirmed)
 }
@@ -40,3 +43,7 @@ func Start(*exec.Cmd) (*Handle, error) { return nil, unsupported() }
 func Run(*exec.Cmd) error { return unsupported() }
 
 func (*Handle) Wait() error { return unsupported() }
+
+func StartWorker(*exec.Cmd, func(string) error) (*WorkerHandle, error) { return nil, unsupported() }
+
+func (*WorkerHandle) Wait() (bool, error) { return false, unsupported() }

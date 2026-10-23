@@ -8,7 +8,7 @@ import (
 // ErrExhausted means a command reached its configured process or memory ceiling.
 var ErrExhausted = errors.New("command resource ceiling reached")
 
-// ErrScopeUnconfirmed means a created command scope may still exist after cleanup.
+// ErrScopeUnconfirmed means a created process scope may still exist after cleanup.
 var ErrScopeUnconfirmed = errors.New("command scope release unconfirmed")
 
 // Exhaustion describes observed cgroup events and the ceilings that were hit.

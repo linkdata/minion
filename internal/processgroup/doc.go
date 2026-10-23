@@ -1,2 +1,2 @@
-// Package processgroup owns a command's Linux cgroup through exit and cleanup.
+// Package processgroup owns Linux command and worker cgroups through exit and cleanup.
 package processgroup
