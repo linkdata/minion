@@ -369,7 +369,7 @@ func (e *HTTPExecutor) serveStatus(w http.ResponseWriter, r *http.Request) {
 		httpServerReject(w, "status", code, binding, status.Sequence, err)
 		return
 	}
-	_ = httpServerWrite(w, code, httpAcknowledgement{httpBinding: binding, Kind: "status", Sequence: status.Sequence, Failure: newHTTPFailure(err)})
+	_ = httpServerWrite(w, code, httpAcknowledgement{httpBinding: binding, Kind: "status", Sequence: status.Sequence})
 }
 
 // stopExecution begins control grace; a known store refusal need not cancel the worker before its error returns.
