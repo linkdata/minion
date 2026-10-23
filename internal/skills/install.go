@@ -4,7 +4,6 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -38,7 +37,6 @@ type skillFile struct {
 type skillBundle struct {
 	source source
 	commit string
-	digest string
 	files  []skillFile
 	bytes  int64
 	seen   map[string]bool
@@ -103,7 +101,6 @@ func (i *installer) install(ctx context.Context, urls []string) (err error) {
 		if src.builtin {
 			content, _ := BuiltinContent(src.url)
 			bundle.files = []skillFile{{name: "SKILL.md", data: content, mode: 0o600}}
-			bundle.digest = fmt.Sprintf("sha256:%x", sha256.Sum256(content))
 			continue
 		}
 		key := src.owner + "/" + src.repo + "/" + src.ref
@@ -421,8 +418,7 @@ func stage(root, workDir string, bundle *skillBundle) (item *stagedInstall, err 
 	metadata, err := json.MarshalIndent(struct {
 		URL    string `json:"url"`
 		Commit string `json:"commit,omitempty"`
-		Digest string `json:"digest,omitempty"`
-	}{bundle.source.url, bundle.commit, bundle.digest}, "", "  ")
+	}{bundle.source.url, bundle.commit}, "", "  ")
 	if err != nil {
 		return nil, err
 	}

@@ -4,7 +4,6 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -275,7 +274,6 @@ func TestInstallBuiltinForBothAgentsWithoutNetwork(t *testing.T) {
 		t.Fatal(err)
 	}
 	want, _ := BuiltinContent(BuiltinAntiPromptInjection)
-	wantDigest := fmt.Sprintf("sha256:%x", sha256.Sum256(want))
 	for _, root := range []string{filepath.Join(home, ".agents", "skills"), filepath.Join(home, ".claude", "skills")} {
 		dir := filepath.Join(root, "anti-prompt-injection")
 		got, err := os.ReadFile(filepath.Join(dir, "SKILL.md"))
@@ -287,10 +285,9 @@ func TestInstallBuiltinForBothAgentsWithoutNetwork(t *testing.T) {
 			t.Fatal(err)
 		}
 		var recorded struct {
-			URL    string `json:"url"`
-			Digest string `json:"digest"`
+			URL string `json:"url"`
 		}
-		if err := json.Unmarshal(metadata, &recorded); err != nil || recorded.URL != BuiltinAntiPromptInjection || recorded.Digest != wantDigest {
+		if err := json.Unmarshal(metadata, &recorded); err != nil || recorded.URL != BuiltinAntiPromptInjection {
 			t.Fatalf("embedded install metadata = %q, %v", metadata, err)
 		}
 	}
