@@ -1,10 +1,12 @@
 package action
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -147,6 +149,9 @@ func TestUnixEndpointRejectsUnsafeDirectoryAndLongPath(t *testing.T) {
 			if err == nil || endpoint != nil {
 				t.Fatalf("unsafe pathname accepted: %q endpoint=%v error=%v", dir, endpoint, err)
 			}
+			if kind == "overlong socket" && (!strings.Contains(err.Error(), fmt.Sprintf("%q", dir)) || !strings.Contains(err.Error(), fmt.Sprintf("%q", filepath.Join(dir, "execution.sock")))) {
+				t.Fatalf("failed bind lost its concrete runtime/socket references: %v", err)
+			}
 			if beforeErr == nil {
 				after, err := os.Lstat(dir)
 				if err != nil || !os.SameFile(before, after) || before.Mode() != after.Mode() {
@@ -184,9 +189,12 @@ func TestUnixEndpointClosePreservesReplacement(t *testing.T) {
 				if err := os.Remove(path); err != nil {
 					t.Fatal(err)
 				}
-				if err := os.WriteFile(path, []byte("replacement"), 0600); err != nil {
+				replacement, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+				if err != nil {
 					t.Fatal(err)
 				}
+				replacement.SetUnlinkOnClose(false)
+				t.Cleanup(func() { _ = replacement.Close() })
 			} else {
 				moved := dir + "-moved"
 				if err := os.Rename(dir, moved); err != nil {
@@ -205,9 +213,15 @@ func TestUnixEndpointClosePreservesReplacement(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			if kind == "socket" && (before.Mode()&os.ModeSocket == 0 || os.SameFile(original, before)) {
+				t.Fatal("replacement fixture did not bind a distinct socket")
+			}
 			closeErr := endpoint.Close()
 			if closeErr == nil || !strings.Contains(closeErr.Error(), dir) {
 				t.Fatalf("replacement did not retain a concrete cleanup error: %v", closeErr)
+			}
+			if kind == "socket" && !strings.Contains(closeErr.Error(), "socket identity changed") {
+				t.Fatalf("replacement did not reach the socket identity check: %v", closeErr)
 			}
 			if again := endpoint.Close(); again != closeErr {
 				t.Fatalf("Close did not cache replacement error: first=%v next=%v", closeErr, again)
@@ -306,6 +320,118 @@ func TestUnixEndpointServesActualHTTPTransaction(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Unix HTTP transaction did not finish")
+	}
+}
+
+func TestUnixEndpointRejectsIncompleteBodiesWithoutBlockingClose(t *testing.T) {
+	for _, test := range []struct {
+		name, request, kind string
+		status              int
+		active              bool
+	}{
+		{"unknown route", "POST /unknown HTTP/1.1\r\nHost: minion\r\nContent-Length: 1\r\n\r\n", "error", http.StatusNotFound, false},
+		{"wrong content type", "POST /next HTTP/1.1\r\nHost: minion\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\n\r\n1\r\n", "next", http.StatusBadRequest, false},
+		{"bounded read cleared its deadline", fmt.Sprintf("POST /next HTTP/1.1\r\nHost: minion\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", httpControlBytes+2, strings.Repeat(" ", httpControlBytes+1)), "next", http.StatusRequestEntityTooLarge, false},
+		{"active status wrong content type", "POST /status HTTP/1.1\r\nHost: minion\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\n\r\n1\r\n", "status", http.StatusBadRequest, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := unixTestDirectory(t)
+			directory, err := os.Stat(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			core := unixTestCore(t)
+			endpoint, err := ListenUnixExecution(dir, core)
+			if err != nil {
+				t.Fatal(err)
+			}
+			unixTestCleanupEndpoint(t, endpoint)
+			job := testJob(command.Comment)
+			var client *http.Client
+			var tx *httpTransaction
+			var done chan httpServerTestResult
+			if test.active {
+				client, err = NewUnixExecutionClient(endpoint.SocketPath())
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer client.CloseIdleConnections()
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				done = make(chan httpServerTestResult, 1)
+				go func() {
+					result, err := core.Execute(ctx, job, runnerExecutionCheckpoints{})
+					done <- httpServerTestResult{result, err}
+				}()
+				unixTestPull(t, client, job)
+				tx = unixTestReady(t, core)
+			}
+			peer, err := net.DialTimeout("unix", endpoint.SocketPath(), 5*time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Close our peer before endpoint cleanup even when a BEFORE rejection is stuck draining it.
+			t.Cleanup(func() { _ = peer.Close() })
+			if err := peer.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+				_ = peer.Close()
+				t.Fatal(err)
+			}
+			if _, err := peer.Write([]byte(test.request)); err != nil {
+				_ = peer.Close()
+				t.Fatal(err)
+			}
+			response, err := http.ReadResponse(bufio.NewReader(peer), &http.Request{Method: http.MethodPost})
+			if err != nil {
+				_ = peer.Close()
+				t.Fatalf("incomplete request withheld its finite rejection: %v", err)
+			}
+			var ack httpAcknowledgement
+			decodeErr := httpDecode(response.Body, httpControlBytes, &ack)
+			_ = response.Body.Close()
+			if decodeErr != nil || response.StatusCode != test.status || !response.Close || ack.Kind != test.kind || ack.Sequence != 0 || ack.Failure == nil || ack.Failure.validate() != nil {
+				_ = peer.Close()
+				t.Fatalf("incomplete request rejection: status=%d close=%t ack=%+v error=%v", response.StatusCode, response.Close, ack, decodeErr)
+			}
+			// The peer still has not completed its advertised body or sent EOF.
+			closed := make(chan error, 1)
+			go func() { closed <- endpoint.Close() }()
+			if test.active {
+				select {
+				case <-tx.budget.Done():
+				case <-time.After(5 * time.Second):
+					_ = peer.Close()
+					t.Fatal("Close did not stop the delivered status fixture")
+				}
+				result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head}
+				unixTestAck(t, client, "/outcome", httpOutcome{Sequence: 1, Result: result, Failure: newHTTPFailure(context.Canceled)}, 1)
+				select {
+				case got := <-done:
+					if !errors.Is(got.err, context.Canceled) || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || len(got.result.Calls) != 0 {
+						_ = peer.Close()
+						t.Fatalf("status rejection changed the known no-work outcome: %+v error=%v", got.result, got.err)
+					}
+				case <-time.After(5 * time.Second):
+					_ = peer.Close()
+					t.Fatal("status fixture outcome did not finish")
+				}
+			}
+			select {
+			case err := <-closed:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(5 * time.Second):
+				_ = peer.Close()
+				t.Fatal("Close waited for an incomplete rejected request body")
+			}
+			if _, err := os.Lstat(endpoint.SocketPath()); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("rejected request retained the owned socket: %v", err)
+			}
+			current, err := os.Stat(dir)
+			if err != nil || !os.SameFile(directory, current) {
+				t.Fatalf("rejected request removed the borrowed runtime directory: %v", err)
+			}
+		})
 	}
 }
 
@@ -440,6 +566,10 @@ func TestUnixEndpointCloseKeepsPaidSaveAndReceiptGraceAvailable(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("endpoint did not join paid handler drain")
+	}
+	afterClose, err := usage.ReadAll(store.Dir)
+	if err != nil || !reflect.DeepEqual(afterClose, records) {
+		t.Fatalf("Close changed durable paid accounting: before=%+v after=%+v error=%v", records, afterClose, err)
 	}
 	saved := readPrivateReview(t, f.owner.WorkRoot)
 	if !slices.Equal(saved.Calls, calls) || saved.CriticStopReason != "" || len(saved.Refutations) != 0 {

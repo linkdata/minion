@@ -365,6 +365,10 @@ func (e *HTTPExecutor) serveStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	tx.observation.Unlock()
 	// Observation delivery never admits paid work or changes its sequence or outcome.
+	if err != nil {
+		httpServerReject(w, "status", code, binding, status.Sequence, err)
+		return
+	}
 	_ = httpServerWrite(w, code, httpAcknowledgement{httpBinding: binding, Kind: "status", Sequence: status.Sequence, Failure: newHTTPFailure(err)})
 }
 
@@ -592,6 +596,9 @@ func httpInputStatus(err error) int {
 }
 
 func httpServerReject(w http.ResponseWriter, kind string, status int, binding httpBinding, sequence uint64, err error) {
+	// Do not let net/http drain an unfinished rejected body before or after the ACK.
+	w.Header().Set("Connection", "close")
+	err = errors.Join(err, http.NewResponseController(w).SetReadDeadline(time.Now()))
 	_ = httpServerWrite(w, status, httpAcknowledgement{httpBinding: binding, Kind: kind, Sequence: sequence, Failure: newHTTPFailure(err)})
 }
 
