@@ -38,6 +38,8 @@ func TestHostileHTTPAuditSchemaCannotPublish(t *testing.T) {
 		{name: "blocked coverage falsely clean", artifact: "REPORT.md", data: "No findings.", ledger: blockedLedger, want: "contradicts final findings"},
 		{name: "empty confirmed detail", artifact: "FINDINGS-DETAIL.md", data: "", findings: auditConfirmedFindingFixture, report: "| medium | Missing guard | Boundary | Result |", want: "FINDINGS-DETAIL.md omits", candidate: true},
 		{name: "empty unresolved detail", artifact: "NEEDS-VALIDATION.md", data: "", findings: auditCandidateFindingFixture, want: "NEEDS-VALIDATION.md omits", candidate: true},
+		{name: "confirmed title without detail", artifact: "FINDINGS-DETAIL.md", data: "## Missing guard\n", findings: auditConfirmedFindingFixture, report: "| medium | Missing guard | Boundary | Result |", want: "FINDINGS-DETAIL.md omits", candidate: true},
+		{name: "unresolved title without detail", artifact: "NEEDS-VALIDATION.md", data: "## Unverified boundary\n", findings: auditCandidateFindingFixture, want: "NEEDS-VALIDATION.md omits", candidate: true},
 		{name: "missing candidate validation plan", artifact: "findings.json", data: strings.Replace(auditCandidateFindingFixture,
 			`,"validation_plan":{"local":"Inspect the guard path in an approved test."}`, ``, 1), want: "incomplete needs_validation finding", candidate: true},
 		{name: "rejected without reason", artifact: "findings.json", data: rejectedWithoutReason, want: "incomplete rejected finding", candidate: true},
@@ -54,6 +56,10 @@ func TestHostileHTTPAuditSchemaCannotPublish(t *testing.T) {
 			`"method":"local","result":"The guard is present","artifact":"agents/hunter/artifacts/proof.txt"`, 1), want: "unsupported local check method"},
 		{name: "report omits final lead", artifact: "REPORT.md", data: "Reviewed security audit.", findings: auditCandidateFindingFixture, want: "omits a final finding title", candidate: true},
 		{name: "report contradicts final lead", artifact: "REPORT.md", data: "No findings. Unverified boundary.", findings: auditCandidateFindingFixture, want: "contradicts final findings", candidate: true},
+		{name: "clean heading contradicts unresolved lead", artifact: "REPORT.md", data: "## No findings\nUnverified boundary.", findings: auditCandidateFindingFixture, want: "contradicts final findings", candidate: true},
+		{name: "nonbreaking-space clean heading contradicts unresolved lead", artifact: "REPORT.md", data: "## No findings\u00a0\nUnverified boundary.", findings: auditCandidateFindingFixture, want: "contradicts final findings", candidate: true},
+		{name: "clean heading contradicts confirmed finding", artifact: "REPORT.md", data: "## No confirmed findings\n| medium | Missing guard | Boundary | Result |", findings: auditConfirmedFindingFixture, want: "contradicts final findings", candidate: true},
+		{name: "nonbreaking-space clean heading contradicts confirmed finding", artifact: "REPORT.md", data: "## No confirmed findings\u00a0\n| medium | Missing guard | Boundary | Result |", findings: auditConfirmedFindingFixture, want: "contradicts final findings", candidate: true},
 		{name: "confirmed severity omitted", artifact: "REPORT.md", data: "Missing guard.", findings: auditConfirmedFindingFixture, want: "omits a final finding title or severity", candidate: true},
 		{name: "confirmed severity elsewhere", artifact: "REPORT.md", data: "Missing guard (low).\nMedium confidence.", findings: auditConfirmedFindingFixture, want: "omits a final finding title or severity", candidate: true},
 		{name: "confirmed severity wrong table cell", artifact: "REPORT.md", data: "| low | Missing guard | Boundary | medium confidence |", findings: auditConfirmedFindingFixture, want: "omits a final finding title or severity", candidate: true},
@@ -121,6 +127,12 @@ func TestHostileHTTPAuditSchemaCannotPublish(t *testing.T) {
 					for i := range outcome.Result.Artifacts {
 						if outcome.Result.Artifacts[i].Path == "findings.json" {
 							outcome.Result.Artifacts[i].Data = []byte(test.findings)
+						}
+						if outcome.Result.Artifacts[i].Path == "FINDINGS-DETAIL.md" && strings.Contains(test.findings, `"verdict":"confirmed"`) {
+							outcome.Result.Artifacts[i].Data = []byte(auditConfirmedDetailFixture)
+						}
+						if outcome.Result.Artifacts[i].Path == "NEEDS-VALIDATION.md" && strings.Contains(test.findings, `"verdict":"needs_validation"`) {
+							outcome.Result.Artifacts[i].Data = []byte(auditNeedsDetailFixture)
 						}
 					}
 				}

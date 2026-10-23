@@ -30,14 +30,17 @@ func TestCompleteAuditResultValidatesCoverage(t *testing.T) {
 	withContext = strings.Replace(withContext, `"selected_companion_blocks":[]`, `"selected_companion_blocks":["Companion A"]`, 1)
 	withContext = strings.Replace(withContext, `"excluded_blocks":[]`, `"excluded_blocks":[{"block":"Companion B","reason":"Outside this boundary."}]`, 1)
 	for _, test := range []struct {
-		name, ledger, findings, report, want string
-		blankDetails, blankNeeds             bool
+		name, ledger, findings, report, want                       string
+		blankDetails, blankNeeds, titleOnlyDetails, titleOnlyNeeds bool
 	}{
 		{name: "covered"},
 		{name: "blocked disclosed", ledger: blockedLedger, report: "Coverage summary: 1 blocked unit; investigate boundary."},
 		{name: "blocked omitted", ledger: blockedLedger, want: "omits blocked coverage count"},
 		{name: "blocked count must match", ledger: blockedLedger, report: "Coverage summary: 10 blocked units.", want: "omits blocked coverage count"},
 		{name: "blocked with clean claim", ledger: blockedLedger, report: "No findings. Coverage summary: 1 blocked unit.", want: "contradicts final findings"},
+		{name: "blocked with clean heading", ledger: blockedLedger, report: "## No findings\nCoverage summary: 1 blocked unit.", want: "contradicts final findings"},
+		{name: "blocked with nonbreaking-space clean heading", ledger: blockedLedger, report: "## No findings\u00a0\nCoverage summary: 1 blocked unit.", want: "contradicts final findings"},
+		{name: "blocked with soft-wrapped clean claim", ledger: blockedLedger, report: "No\nfindings. Coverage summary: 1 blocked unit.", want: "contradicts final findings"},
 		{name: "covered with populated context", ledger: withContext},
 		{name: "covered with archived attempt and distinct check owners", ledger: withAttempt},
 		{name: "unsupported local check in current evidence", ledger: strings.Replace(validLedger, sourceCheck, localCheck, 1), want: "unsupported local check method"},
@@ -52,7 +55,12 @@ func TestCompleteAuditResultValidatesCoverage(t *testing.T) {
 		{name: "needs_validation finding", ledger: confirmedLedger, findings: auditCandidateFindingFixture},
 		{name: "confirmed detail missing", ledger: confirmedLedger, findings: auditConfirmedFindingFixture, blankDetails: true, want: "FINDINGS-DETAIL.md omits"},
 		{name: "unresolved detail missing", ledger: confirmedLedger, findings: auditCandidateFindingFixture, blankNeeds: true, want: "NEEDS-VALIDATION.md omits"},
+		{name: "confirmed title without detail", ledger: confirmedLedger, findings: auditConfirmedFindingFixture, titleOnlyDetails: true, want: "FINDINGS-DETAIL.md omits"},
+		{name: "unresolved title without detail", ledger: confirmedLedger, findings: auditCandidateFindingFixture, titleOnlyNeeds: true, want: "NEEDS-VALIDATION.md omits"},
 		{name: "confirmed with false clean claim", ledger: confirmedLedger, findings: auditConfirmedFindingFixture, report: "No confirmed findings.\n| medium | Missing guard | Boundary | Result |", want: "contradicts final findings"},
+		{name: "confirmed with false clean heading", ledger: confirmedLedger, findings: auditConfirmedFindingFixture, report: "## No confirmed findings\n| medium | Missing guard | Boundary | Result |", want: "contradicts final findings"},
+		{name: "confirmed with nonbreaking-space clean heading", ledger: confirmedLedger, findings: auditConfirmedFindingFixture, report: "## No confirmed findings\u00a0\n| medium | Missing guard | Boundary | Result |", want: "contradicts final findings"},
+		{name: "confirmed with soft-wrapped clean claim", ledger: confirmedLedger, findings: auditConfirmedFindingFixture, report: "No\nconfirmed findings.\n| medium | Missing guard | Boundary | Result |", want: "contradicts final findings"},
 		{name: "confirmed severity belongs to another line", ledger: confirmedLedger, findings: auditConfirmedFindingFixture, report: "Missing guard (low).\nMedium confidence.", want: "omits a final finding title or severity"},
 		{name: "confirmed severity is not confidence text", ledger: confirmedLedger, findings: auditConfirmedFindingFixture, report: "| low | Missing guard | Boundary | medium confidence |", want: "omits a final finding title or severity"},
 		{name: "no findings were omitted is not a clean claim", ledger: confirmedLedger, findings: auditCandidateFindingFixture, report: "No findings were omitted. Unverified boundary."},
@@ -150,11 +158,17 @@ func TestCompleteAuditResultValidatesCoverage(t *testing.T) {
 					}
 				case "FINDINGS-DETAIL.md":
 					if strings.Contains(test.findings, `"verdict":"confirmed"`) && !test.blankDetails {
-						result.Artifacts[i].Data = []byte("Missing guard: source.txt changes the protected object.\n")
+						result.Artifacts[i].Data = []byte(auditConfirmedDetailFixture)
+						if test.titleOnlyDetails {
+							result.Artifacts[i].Data = []byte("## Missing guard\n")
+						}
 					}
 				case "NEEDS-VALIDATION.md":
 					if strings.Contains(test.findings, `"verdict":"needs_validation"`) && !test.blankNeeds {
-						result.Artifacts[i].Data = []byte("Unverified boundary: source.txt requires validation.\n")
+						result.Artifacts[i].Data = []byte(auditNeedsDetailFixture)
+						if test.titleOnlyNeeds {
+							result.Artifacts[i].Data = []byte("## Unverified boundary\n")
+						}
 					}
 				}
 			}

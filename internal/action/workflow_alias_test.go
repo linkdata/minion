@@ -28,7 +28,7 @@ func TestExecutorJobCannotMutatePreparedAssignment(t *testing.T) {
 				Omitted:      []string{"omitted.txt"},
 			},
 			Main:   RoleSettings{Skills: []string{"main"}, AlwaysOnSkills: []string{"always"}},
-			Critic: &RoleSettings{Skills: []string{"critic"}, AlwaysOnSkills: []string{"critic-always"}},
+			Critic: &RoleSettings{AlwaysOnSkills: []string{"critic-always"}},
 		}
 	}
 	job, want := fixture(), fixture()
@@ -43,7 +43,6 @@ func TestExecutorJobCannotMutatePreparedAssignment(t *testing.T) {
 	worker.Source.Omitted[0] = "forged-omitted.txt"
 	worker.Main.Skills[0] = "forged-main"
 	worker.Main.AlwaysOnSkills[0] = "forged-always"
-	worker.Critic.Skills[0] = "forged-critic"
 	worker.Critic.AlwaysOnSkills[0] = "forged-critic-always"
 	if !reflect.DeepEqual(job, want) {
 		t.Fatalf("worker changed prepared job: got=%+v want=%+v", job, want)

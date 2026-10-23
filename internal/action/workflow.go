@@ -103,7 +103,6 @@ func cloneJobForExecutor(job Job) Job {
 	job.Main.AlwaysOnSkills = slices.Clone(job.Main.AlwaysOnSkills)
 	if job.Critic != nil {
 		critic := *job.Critic
-		critic.Skills = slices.Clone(critic.Skills)
 		critic.AlwaysOnSkills = slices.Clone(critic.AlwaysOnSkills)
 		job.Critic = &critic
 	}

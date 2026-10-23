@@ -395,6 +395,59 @@ func TestHTTPWorkerFailureThroughOrchestratorAndMonitor(t *testing.T) {
 	}
 }
 
+func TestHTTPNULOnlyRefutationCannotBecomePublication(t *testing.T) {
+	owner := newExecutionAdapterFixture(t, withClaudeCritic(testJob(command.Comment)))
+	want := privateReviewResult(owner.job)
+	transport := newHTTPServerTest(t, t.Context(), owner.job, owner.sink, nil)
+	transport.pull(t)
+	sequence := uint64(1)
+	transport.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: owner.review(nil, nil, "")}, http.StatusOK, sequence)
+	for i, call := range want.Calls[:3] {
+		sequence++
+		transport.ack(t, "/before", httpCall{Sequence: sequence, Checkpoint: owner.call(callMetadata(call))}, http.StatusOK, sequence)
+		sequence++
+		transport.ack(t, "/after", httpCall{Sequence: sequence, Checkpoint: owner.call(call)}, http.StatusOK, sequence)
+		sequence++
+		if i != 2 {
+			transport.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: owner.review(want.Calls[:i+1], nil, "")}, http.StatusOK, sequence)
+			continue
+		}
+		path := filepath.Join(owner.owner.WorkRoot, "reviews", owner.job.Identity.AttemptID+".json")
+		before, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		invalid := owner.review(want.Calls[:i+1], []Refutation{{Round: 2, Text: "\x00"}}, "")
+		ack := transport.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: invalid}, http.StatusInternalServerError, sequence)
+		if ack.Failure == nil || !errors.Is(ack.Failure.err(), monitor.ErrTerminalJob) {
+			t.Fatalf("NUL-only refutation reached private ledger: %+v", ack)
+		}
+		after, err := os.ReadFile(path)
+		if err != nil || !bytes.Equal(before, after) || len(owner.sink.review.Refutations) != 0 {
+			t.Fatalf("rejected refutation changed private ledger: error=%v", err)
+		}
+	}
+	sequence++
+	outcome := transport.outcome(sequence, errors.New("worker stopped after rejected review"))
+	outcome.Result.Calls = want.Calls[:3]
+	transport.ack(t, "/outcome", outcome, http.StatusOK, sequence)
+	got := transport.result(t)
+	if err := owner.sink.finish(got.result, got.err); !errors.Is(err, monitor.ErrTerminalJob) {
+		t.Fatalf("invalid review permitted completed result: %v", err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("invalid review caused GitHub write: %s %s", r.Method, r.URL.Path)
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	owner.owner.GitHub = testGitHub(server, "fixture-token")
+	request := usageJob()
+	request.Command = command.Command{Name: "comment", Action: command.Comment}
+	if err := owner.owner.publish(t.Context(), &preparedAction{job: owner.job, request: request}, got.result); !errors.Is(err, monitor.ErrTerminalJob) {
+		t.Fatalf("invalid review result crossed publication boundary: %v", err)
+	}
+}
+
 func TestHTTPPrivateRefutationAtWireLimitStaysInReviewRecord(t *testing.T) {
 	job := withClaudeCritic(testJob(command.Comment))
 	f := newExecutionAdapterFixture(t, job)
@@ -484,6 +537,13 @@ func TestHTTPMatchingDigestCannotPublishPrivateRefutation(t *testing.T) {
 		name, private, answer string
 	}{
 		{"exact copy", "PRIVATE_MAIN_REFUTATION", "Public reply.\nPRIVATE_MAIN_REFUTATION"},
+		{"rendered quote leader", "> UNIQUE_PRIVATE_PHRASE", "UNIQUE_PRIVATE_PHRASE"},
+		{"short private token", "Token: ABC123", "Public reply. ABC123"},
+		{"short private token with comma", "Token: ABC123,", "Public reply. ABC123"},
+		{"short private token in quotes", `Token: "ABC123"`, "Public reply. ABC123"},
+		{"short private token in prose", "ABC123 is private", "Public reply. ABC123"},
+		{"short private token with edge punctuation", "Token: -ABC123_", "Public reply. ABC123"},
+		{"Unicode simple fold", "PRIVATE Σ MARKER", "PRIVATE ς MARKER"},
 		{"case changed", "PRIVATE_MAIN_REFUTATION", "Public reply.\nprivate_main_refutation"},
 		{"bare Markdown quote leaders", "PRIVATE reviewer\nNOTES", "Public reply.\n>PRIVATE reviewer\n>NOTES"},
 		{"nested indented quote leaders", "PRIVATE reviewer\nNOTES", "Public reply.\n  > >PRIVATE reviewer\n > >NOTES"},

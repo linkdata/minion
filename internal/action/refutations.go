@@ -24,7 +24,7 @@ func validateRefutations(job Job, calls []CallUsage, refutations []Refutation) e
 		if entry.Round < 2 || entry.Round <= previous || !slices.ContainsFunc(calls, func(call CallUsage) bool { return call.Role == roleMain && call.Round == entry.Round }) {
 			return errors.New("refutation does not match an ordered main call")
 		}
-		if strings.TrimSpace(entry.Text) == "" || len(entry.Text) > maxOutputBytes || !utf8.ValidString(entry.Text) {
+		if len(entry.Text) > maxOutputBytes || !utf8.ValidString(entry.Text) || strings.TrimSpace(entry.Text) == "" || foldPublicationSpace(entry.Text) == "" {
 			return errors.New("refutation text is blank, invalid or exceeds limit")
 		}
 		previous = entry.Round

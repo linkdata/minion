@@ -64,8 +64,22 @@ func rejectPublishedRefutations(job Job, result Result, projected publication) e
 				matcher.add(segment)
 			}
 		}
+		// shortcut: Short plain words stay unindexed to avoid unrelated-reply rejects; use structured privacy markers if they must be protected.
+		for _, token := range strings.FieldsFunc(text, func(r rune) bool {
+			return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_' && r != '-'
+		}) {
+			if len(token) >= 6 && strings.IndexFunc(token, unicode.IsDigit) >= 0 {
+				matcher.add(foldPublicationSpace(token))
+				if trimmed := strings.Trim(token, "_-"); trimmed != token && len(trimmed) >= 6 {
+					matcher.add(foldPublicationSpace(trimmed))
+				}
+			}
+		}
 	}
 	public := publicationTextVariants(projected.answer)
+	if projected.answer != "" {
+		public = append(public, publicationTextVariants(inertModelOutput(projected.answer))...)
+	}
 	for _, file := range projected.artifacts {
 		public = append(public, publicationTextVariants(string(file.Data))...)
 	}
@@ -247,7 +261,13 @@ func foldPublicationSpace(text string) string {
 		if space && result.Len() != 0 {
 			result.WriteByte(' ')
 		}
-		result.WriteRune(unicode.ToLower(r))
+		folded := r
+		for next := unicode.SimpleFold(r); next != r; next = unicode.SimpleFold(next) {
+			if next < folded {
+				folded = next
+			}
+		}
+		result.WriteRune(folded)
 		space = false
 	}
 	return result.String()

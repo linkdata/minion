@@ -633,7 +633,7 @@ func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes, detailsBytes
 	report := strings.ToLower(string(reportBytes))
 	reportable := false
 	confirmed := false
-	var requiredDetails, requiredNeeds []string
+	var requiredDetails, requiredNeeds [][]string
 	for _, finding := range findings {
 		if finding.Verdict == "rejected" {
 			continue
@@ -659,39 +659,70 @@ func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes, detailsBytes
 			return errors.New("audit REPORT.md omits a final finding title or severity")
 		}
 		if finding.Verdict == "confirmed" && auditSeverityRank(finding.Severity.Overall) >= auditSeverityRank("medium") {
-			requiredDetails = append(requiredDetails, finding.Title)
+			requiredDetails = append(requiredDetails, []string{finding.Title, finding.Trace[0].File,
+				finding.Execution.ObservedResult, finding.Remediation.Strategy})
 		}
 		if finding.Verdict == "needs_validation" {
-			requiredNeeds = append(requiredNeeds, finding.Title)
+			fields := []string{finding.Title, finding.Trace[0].File}
+			fields = append(fields, finding.Blockers...)
+			if finding.ValidationPlan.Local != "" {
+				fields = append(fields, finding.ValidationPlan.Local)
+			}
+			if finding.ValidationPlan.Deployment != "" {
+				fields = append(fields, finding.ValidationPlan.Deployment)
+			}
+			requiredNeeds = append(requiredNeeds, fields)
 		}
 	}
 	flatReport := strings.Join(strings.Fields(report), " ")
-	if (reportable || blocked > 0) && auditCleanClaim.MatchString(flatReport) || confirmed && auditNoConfirmedClaim.MatchString(flatReport) {
+	if (reportable || blocked > 0) && auditReportHasClaim(report, auditCleanClaim) || confirmed && auditReportHasClaim(report, auditNoConfirmedClaim) {
 		return errors.New("audit REPORT.md contradicts final findings")
 	}
 	if blocked > 0 && !regexp.MustCompile(fmt.Sprintf(`\b(?:blocked:\s*%d|%d\s+blocked)\b`, blocked, blocked)).MatchString(flatReport) {
 		return errors.New("audit REPORT.md omits blocked coverage count")
 	}
-	if !auditProseHasTitles(detailsBytes, requiredDetails) {
-		return errors.New("audit FINDINGS-DETAIL.md omits a confirmed medium-or-higher finding")
+	if err := validateAuditProse(detailsBytes, requiredDetails); err != nil {
+		return fmt.Errorf("audit FINDINGS-DETAIL.md %w", err)
 	}
-	if !auditProseHasTitles(needsBytes, requiredNeeds) {
-		return errors.New("audit NEEDS-VALIDATION.md omits an unresolved finding")
+	if err := validateAuditProse(needsBytes, requiredNeeds); err != nil {
+		return fmt.Errorf("audit NEEDS-VALIDATION.md %w", err)
 	}
 	return nil
 }
 
-func auditProseHasTitles(prose []byte, titles []string) bool {
-	if len(titles) == 0 {
+func auditReportHasClaim(report string, claim *regexp.Regexp) bool {
+	if claim.MatchString(strings.Join(strings.Fields(report), " ")) {
 		return true
 	}
-	normalized := strings.Join(strings.Fields(strings.ToLower(string(prose))), " ")
-	for _, title := range titles {
-		if !strings.Contains(normalized, strings.ToLower(strings.Join(strings.Fields(title), " "))) {
-			return false
+	for _, line := range strings.Split(report, "\n") {
+		if claim.MatchString(strings.TrimFunc(line, func(r rune) bool {
+			return unicode.IsSpace(r) || strings.ContainsRune("#*_|>`-", r)
+		})) {
+			return true
 		}
 	}
-	return true
+	return false
+}
+
+func validateAuditProse(prose []byte, records [][]string) error {
+	if len(records) == 0 {
+		return nil
+	}
+	const maxScanBytes = 1 << 30
+	budget := int64(maxScanBytes)
+	normalized := strings.Join(strings.Fields(strings.ToLower(string(prose))), " ")
+	for _, record := range records {
+		for _, field := range record {
+			if int64(len(normalized)) > budget {
+				return errors.New("detail scan limit exceeded")
+			}
+			budget -= int64(len(normalized))
+			if !strings.Contains(normalized, strings.ToLower(strings.Join(strings.Fields(field), " "))) {
+				return errors.New("omits required finding detail")
+			}
+		}
+	}
+	return nil
 }
 
 func auditSourceInventory(source *workspace.Snapshot) (map[string]bool, map[string]int) {

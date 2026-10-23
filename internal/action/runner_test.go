@@ -118,6 +118,19 @@ func TestReviewContextPreservesDistinctRevisionIdentities(t *testing.T) {
 	}
 }
 
+func TestAuditPromptMatchesDetailValidation(t *testing.T) {
+	job := testJob(command.SecurityAudit)
+	prompt, err := actionPrompt(t.Context(), job, "/source", "/context", "/reports", "/installed/security-audit/SKILL.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"exact title, first trace file, execution observed_result and remediation strategy", "exact title, first trace file, every blocker and each nonempty local or deployment validation plan", "do not paraphrase or style the copied strings"} {
+		if !strings.Contains(prompt, field) {
+			t.Fatalf("audit prompt omits detail requirement %q", field)
+		}
+	}
+}
+
 func TestRunnerReturnsFileChangesAndPartialUsage(t *testing.T) {
 	job := testJob(command.Fix)
 	runner := Runner{WorkRoot: t.TempDir()}

@@ -75,7 +75,7 @@ func TestCompleteAuditClaimsBindToCurrentSource(t *testing.T) {
 					}
 				case "NEEDS-VALIDATION.md":
 					if strings.Contains(test.findings, `"verdict":"needs_validation"`) {
-						result.Artifacts[i].Data = []byte("Unverified boundary: source.txt requires validation.\n")
+						result.Artifacts[i].Data = []byte(auditNeedsDetailFixture)
 					}
 				}
 			}

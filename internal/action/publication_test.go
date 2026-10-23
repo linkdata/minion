@@ -237,3 +237,17 @@ func TestPublishedRefutationsCheckOnlyActualPublication(t *testing.T) {
 		t.Fatalf("JSON-escaped private refutation in report was accepted: %v", err)
 	}
 }
+
+func TestPublishedRefutationsAllowCommonShortWords(t *testing.T) {
+	job := withClaudeCritic(testJob(command.Comment))
+	result := privateReviewResult(job)
+	result.Refutations[0].Text = "Affected path: src/app; helper: safe_identifier"
+	result.Answer = "Public reply about src/app and safe_identifier."
+	projected, err := projectPublication(job, result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rejectPublishedRefutations(job, result, projected); err != nil {
+		t.Fatalf("common short word blocked public reply: %v", err)
+	}
+}

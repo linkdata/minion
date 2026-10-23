@@ -22,13 +22,21 @@ import (
 	"github.com/linkdata/minion/internal/workspace"
 )
 
-func TestAuditProseHasTitles(t *testing.T) {
+func TestAuditProseRequiresRecordFields(t *testing.T) {
 	prose := []byte("## First finding\nDetails.\n## SECOND  finding\nMore details.\n")
-	if !auditProseHasTitles(prose, []string{"First finding", "Second finding"}) {
-		t.Fatal("detail artifact omitted a present title")
+	if err := validateAuditProse(prose, [][]string{{"First finding", "Details"}, {"Second finding", "More details"}}); err != nil {
+		t.Fatalf("present record fields rejected: %v", err)
 	}
-	if auditProseHasTitles(prose, []string{"First finding", "Missing finding"}) {
-		t.Fatal("detail artifact accepted an absent title")
+	if err := validateAuditProse(prose, [][]string{{"First finding", "Missing detail"}}); err == nil {
+		t.Fatal("detail artifact accepted an absent record field")
+	}
+	large := []byte(strings.Repeat("x", 5<<20))
+	records := make([][]string, 205)
+	for i := range records {
+		records[i] = []string{"x"}
+	}
+	if err := validateAuditProse(large, records); err == nil || !strings.Contains(err.Error(), "scan limit") {
+		t.Fatalf("detail scan was not bounded: %v", err)
 	}
 }
 
@@ -385,7 +393,7 @@ JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 	write("coverage-ledger.json", `[{"status":"candidate","result_fingerprints":["F"],"unresolved":[]}]`)
 	validate("without final finding")
 	write("findings.json", auditCandidateFindingFixture)
-	write("NEEDS-VALIDATION.md", "Unverified boundary: source.txt requires validation.\n")
+	write("NEEDS-VALIDATION.md", auditNeedsDetailFixture)
 	write("coverage-ledger.json", candidateLedger)
 	reportText = "Verified audit report: Unverified boundary\n"
 	write("REPORT.md", reportText)
