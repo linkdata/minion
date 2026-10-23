@@ -813,9 +813,8 @@ func TestHTTPExecutorFencesAdmissionAndDrainsEnteredFailedSave(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("After did not enter store")
 	}
-	if busy := f.request("/review", httpReview{Sequence: 2}); busy.err != nil || busy.status != http.StatusConflict {
-		t.Fatalf("concurrent mutation queued behind store: %+v", busy)
-	}
+	blocked := make(chan httpServerTestExchange, 1)
+	go func() { blocked <- f.request("/review", httpReview{Sequence: 2}) }()
 	// Drive the private grace fence without sleeping through the production 30-second grace.
 	f.tx.mu.Lock()
 	f.tx.fenced = true
@@ -828,6 +827,14 @@ func TestHTTPExecutorFencesAdmissionAndDrainsEnteredFailedSave(t *testing.T) {
 	default:
 	}
 	unblock()
+	select {
+	case reply := <-blocked:
+		if reply.err != nil || reply.status != http.StatusConflict {
+			t.Fatalf("fenced concurrent mutation: %+v", reply)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("fenced concurrent mutation did not drain")
+	}
 	select {
 	case ack := <-acknowledged:
 		if ack.err != nil || ack.status != http.StatusInternalServerError || ack.ack.Sequence != 1 || ack.ack.Failure == nil || ack.ack.Failure.Message != storeErr.Error() {
@@ -1054,6 +1061,146 @@ func TestHTTPExecutorKnownOutcomeResolvesWatchTransportCancellation(t *testing.T
 	f.executor.mu.Unlock()
 	if unavailable {
 		t.Fatal("resolved transport ambiguity invented a quarantine fact")
+	}
+}
+
+func TestHTTPExecutorRejectedBoundBeforeSurvivesWatchOutcome(t *testing.T) {
+	for _, foreign := range []bool{false, true} {
+		t.Run(fmt.Sprintf("foreign=%t", foreign), func(t *testing.T) {
+			owner := newExecutionAdapterFixture(t, testJob(command.Comment))
+			store := owner.startUsage()
+			f := newHTTPServerTest(t, context.Background(), owner.job, owner.sink, nil)
+			f.pull(t)
+			f.ack(t, "/before", f.call(1), http.StatusOK, 1)
+			paid := f.call(2)
+			paid.Checkpoint.Call.Tokens, paid.Checkpoint.Call.Complete = usage.Tokens{Input: 11, Output: 3}, true
+			f.ack(t, "/after", paid, http.StatusOK, 2)
+			f.tx.stopExecution(io.ErrClosedPipe, true)
+			<-f.tx.ctx.Done()
+			before := f.call(3)
+			if foreign {
+				before.Checkpoint.Identity.AttemptID += "-other"
+			}
+			f.ack(t, "/before", before, http.StatusConflict, 3)
+			sequence := uint64(4)
+			if foreign {
+				sequence = 3
+			}
+			outcome := f.outcome(sequence, nil)
+			outcome.Result.Calls = []CallUsage{paid.Checkpoint.Call}
+			outcome.Result.Answer = "Claimed complete answer"
+			if err := outcome.Result.validate(owner.job, true); err != nil {
+				t.Fatalf("fixture did not produce a publishable complete Result: %v", err)
+			}
+			f.ack(t, "/outcome", outcome, http.StatusOK, sequence)
+			got := f.result(t)
+			finalErr := owner.sink.finish(got.result, got.err)
+			if !reflect.DeepEqual(got.result, outcome.Result) || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) == foreign || errors.Is(finalErr, monitor.ErrExecutionOutcomeUnknown) == foreign || (got.err == nil) != foreign || (finalErr == nil) != foreign {
+				t.Fatalf("bound refusal was erased or foreign request poisoned outcome: result=%+v error=%v finish=%v", got.result, got.err, finalErr)
+			}
+			records, err := usage.ReadAll(store.Dir)
+			if err != nil || len(records) != 1 || records[0].CodexCalls != 1 || records[0].Tokens != paid.Checkpoint.Call.Tokens {
+				t.Fatalf("saved paid receipt changed: records=%+v error=%v", records, err)
+			}
+			f.executor.mu.Lock()
+			unavailable := f.executor.unavailable
+			f.executor.mu.Unlock()
+			if unavailable == foreign {
+				t.Fatalf("worker capacity disagrees with bound refusal: unavailable=%t foreign=%t", unavailable, foreign)
+			}
+		})
+	}
+}
+
+func TestHTTPExecutorConcurrentBoundBeforeSurvivesWatchOutcome(t *testing.T) {
+	owner := newExecutionAdapterFixture(t, testJob(command.Comment))
+	store := owner.startUsage()
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	defer unblock()
+	sink := runnerExecutionCheckpoints{
+		before: owner.sink.BeforeCall,
+		after: func(value CallCheckpoint) error {
+			close(entered)
+			<-release
+			return owner.sink.AfterCall(value)
+		},
+		review: owner.sink.Review,
+	}
+	arrived := make(chan struct{})
+	var beforeCount atomic.Int32
+	f := newHTTPServerTest(t, context.Background(), owner.job, sink, func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/before" && beforeCount.Add(1) == 2 {
+				close(arrived)
+			}
+			next.ServeHTTP(w, r)
+		})
+	})
+	f.pull(t)
+	f.ack(t, "/before", f.call(1), http.StatusOK, 1)
+	paid := f.call(2)
+	paid.Checkpoint.Call.Tokens, paid.Checkpoint.Call.Complete = usage.Tokens{Input: 11, Output: 3}, true
+	afterReply := make(chan httpServerTestExchange, 1)
+	go func() { afterReply <- f.request("/after", paid) }()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("After did not enter its save")
+	}
+	f.tx.stopExecution(io.ErrClosedPipe, true)
+	<-f.tx.ctx.Done()
+	beforeReply := make(chan httpServerTestExchange, 1)
+	go func() { beforeReply <- f.request("/before", f.call(3)) }()
+	select {
+	case <-arrived:
+	case <-time.After(5 * time.Second):
+		t.Fatal("concurrent Before did not reach the receiver")
+	}
+	// Hold the save briefly after arrival so the old busy-rejection path is exercised.
+	releaseTimer := time.AfterFunc(100*time.Millisecond, unblock)
+	defer releaseTimer.Stop()
+	var before httpServerTestExchange
+	select {
+	case before = <-beforeReply:
+	case <-time.After(5 * time.Second):
+		t.Fatal("concurrent Before did not finish after save")
+	}
+	if before.err != nil || before.status != http.StatusConflict {
+		t.Fatalf("concurrent Before response: %+v", before)
+	}
+	select {
+	case after := <-afterReply:
+		if after.err != nil || after.status != http.StatusOK || after.ack.Sequence != 2 {
+			t.Fatalf("saved After response: %+v", after)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("saved After did not finish")
+	}
+	f.tx.mu.Lock()
+	sequence := f.tx.sequence + 1
+	f.tx.mu.Unlock()
+	outcome := f.outcome(sequence, nil)
+	outcome.Result.Calls = []CallUsage{paid.Checkpoint.Call}
+	outcome.Result.Answer = "Claimed complete answer"
+	if err := outcome.Result.validate(owner.job, true); err != nil {
+		t.Fatalf("fixture did not produce a publishable Result: %v", err)
+	}
+	f.ack(t, "/outcome", outcome, http.StatusOK, sequence)
+	got := f.result(t)
+	if !reflect.DeepEqual(got.result, outcome.Result) || !errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || !errors.Is(owner.sink.finish(got.result, got.err), monitor.ErrExecutionOutcomeUnknown) {
+		t.Fatalf("concurrent required refusal became publishable: result=%+v error=%v", got.result, got.err)
+	}
+	records, err := usage.ReadAll(store.Dir)
+	if err != nil || len(records) != 1 || records[0].CodexCalls != 1 || records[0].Tokens != paid.Checkpoint.Call.Tokens {
+		t.Fatalf("saved paid receipt changed: records=%+v error=%v", records, err)
+	}
+	f.executor.mu.Lock()
+	unavailable := f.executor.unavailable
+	f.executor.mu.Unlock()
+	if !unavailable {
+		t.Fatal("concurrent required refusal released worker capacity")
 	}
 }
 

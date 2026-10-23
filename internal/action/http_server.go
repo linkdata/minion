@@ -44,23 +44,23 @@ type httpTransaction struct {
 	stopBudget context.CancelFunc
 	body       []byte
 
-	ready               bool
-	delivered           bool
-	fenced              bool
-	watch               bool
-	sequence            uint64
-	statusSeq           uint64
-	stopping            bool
-	stop                chan struct{}
-	done                chan struct{}
-	finished            chan struct{}
-	transportErr        error
-	requiredDeliveryErr error
-	checkpointErr       error
-	outcome             bool
-	result              Result
-	runErr              error
-	quarantine          bool
+	ready              bool
+	delivered          bool
+	fenced             bool
+	watch              bool
+	sequence           uint64
+	statusSeq          uint64
+	stopping           bool
+	stop               chan struct{}
+	done               chan struct{}
+	finished           chan struct{}
+	transportErr       error
+	requiredControlErr error
+	checkpointErr      error
+	outcome            bool
+	result             Result
+	runErr             error
+	quarantine         bool
 }
 
 func NewHTTPExecutor(executorID string) (*HTTPExecutor, error) {
@@ -110,8 +110,8 @@ func (e *HTTPExecutor) Execute(ctx context.Context, job Job, sink Checkpoints) (
 			runErr = errors.Join(runErr, monitor.ErrExecutionOutcomeUnknown, tx.transportErr, tx.checkpointErr, actionCtx.Err())
 			tx.quarantine = true
 		}
-		if tx.requiredDeliveryErr != nil {
-			runErr = errors.Join(runErr, monitor.ErrExecutionOutcomeUnknown, tx.requiredDeliveryErr)
+		if tx.requiredControlErr != nil {
+			runErr = errors.Join(runErr, monitor.ErrExecutionOutcomeUnknown, tx.requiredControlErr)
 		}
 		quarantine := tx.quarantine
 		tx.mu.Unlock()
@@ -310,11 +310,18 @@ func (tx *httpTransaction) enter(binding httpBinding, sequence uint64, kind stri
 		return false, tx.checkpointErr
 	}
 	if kind == "before" {
-		if err := httpExecutionContextError(tx.ctx); err != nil {
-			return false, err
+		err := httpExecutionContextError(tx.ctx)
+		if err == nil && tx.stopping {
+			err = errors.New("HTTP execution is stopping; no new call is admitted")
 		}
-		if tx.stopping {
-			return false, errors.New("HTTP execution is stopping; no new call is admitted")
+		if err != nil {
+			if tx.transportErr != nil && httpExecutionContextError(tx.budget) == nil {
+				if tx.requiredControlErr == nil {
+					tx.requiredControlErr = errors.Join(fmt.Errorf("HTTP before admission failed: %w", err), tx.transportErr)
+				}
+				tx.quarantine = true
+			}
+			return false, err
 		}
 	}
 	return gap, nil
@@ -394,8 +401,8 @@ func (tx *httpTransaction) stopExecution(err error, cancel bool) {
 
 func (tx *httpTransaction) stopRequiredDelivery(err error) {
 	tx.mu.Lock()
-	if tx.requiredDeliveryErr == nil {
-		tx.requiredDeliveryErr = err
+	if tx.requiredControlErr == nil {
+		tx.requiredControlErr = err
 	}
 	tx.quarantine = true
 	tx.mu.Unlock()
@@ -405,10 +412,11 @@ func (tx *httpTransaction) stopRequiredDelivery(err error) {
 func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 	kind := strings.TrimPrefix(r.URL.Path, "/")
 	tx := e.transaction()
-	if tx == nil || !tx.mutation.TryLock() {
+	if tx == nil {
 		httpServerReject(w, kind, http.StatusConflict, httpBinding{}, 0, errors.New("HTTP execution has no mutation slot"))
 		return
 	}
+	tx.mutation.Lock()
 	tx.mu.Lock()
 	if tx.fenced || !tx.delivered {
 		tx.mu.Unlock()
