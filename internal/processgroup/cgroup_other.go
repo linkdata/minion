@@ -8,12 +8,6 @@ import (
 	"os/exec"
 )
 
-var (
-	ErrDescendants = errors.New("command left descendant processes")
-	// ErrUnconfirmed means command ownership, limit observation, or cleanup could not be proved.
-	ErrUnconfirmed = errors.New("command process safety unconfirmed")
-)
-
 const (
 	DefaultMaxTasks     = 128
 	DefaultMaxMemoryMiB = 3072

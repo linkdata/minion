@@ -27,23 +27,27 @@ const (
 // WorkerHandle owns a worker and its command scopes. Every nonnil handle must
 // reach Wait, even when StartWorker returned an error.
 type WorkerHandle struct {
-	cmd       *exec.Cmd
-	dir       string
-	parent    *os.File
-	root      *os.File
-	started   bool
-	startErr  error
-	cancelled atomic.Bool
-	cancelMu  sync.Mutex
-	cancelErr error
-	once      sync.Once
-	released  bool
-	err       error
+	cmd                *exec.Cmd
+	dir                string
+	parent             *os.File
+	root               *os.File
+	supervisor         *os.File
+	supervisorRequired bool
+	started            bool
+	startErr           error
+	cancelled          atomic.Bool
+	cancelMu           sync.Mutex
+	cancelErr          error
+	once               sync.Once
+	released           bool
+	err                error
 }
 
 // StartWorker records ownership before atomically placing the worker in its
 // supervisor leaf. Any created root returns a handle, including on error;
 // the caller must call Wait and retain both the start and wait errors.
+// The caller keeps cgroup mutation under trusted host control; live identity
+// checks reject observed replacements.
 func StartWorker(cmd *exec.Cmd, record func(scope string) error) (h *WorkerHandle, resultErr error) {
 	if cmd == nil || record == nil {
 		return nil, errors.New("worker command and ownership recorder are required")
@@ -59,10 +63,11 @@ func StartWorker(cmd *exec.Cmd, record func(scope string) error) (h *WorkerHandl
 	if err != nil {
 		return nil, fmt.Errorf("%w: pin worker parent: %w", ErrUnconfirmed, err)
 	}
-	dir, err := os.MkdirTemp(parentPath, cgroupNamePrefix()+"worker-")
+	dir, err := os.MkdirTemp(workerDirectoryPath(parent, ""), cgroupNamePrefix()+"worker-")
 	if err != nil {
 		return nil, errors.Join(fmt.Errorf("%w: create worker root: %w", ErrUnconfirmed, err), parent.Close())
 	}
+	dir = filepath.Join(parentPath, filepath.Base(dir))
 	h = &WorkerHandle{cmd: cmd, dir: dir, parent: parent}
 	defer func() { h.startErr = resultErr }()
 	h.root, err = openWorkerDirectory(parent, filepath.Base(dir))
@@ -94,27 +99,25 @@ func StartWorker(cmd *exec.Cmd, record func(scope string) error) (h *WorkerHandl
 		}
 	}
 	if err := syscall.Mkdirat(int(h.root.Fd()), supervisorLeaf, 0700); err != nil {
+		h.supervisorRequired = errors.Is(err, syscall.EEXIST)
 		return h, err
 	}
-	group, err := openWorkerDirectory(h.root, supervisorLeaf)
+	h.supervisorRequired = true
+	h.supervisor, err = openWorkerDirectory(h.root, supervisorLeaf)
 	if err != nil {
 		return h, err
 	}
-	defer func() { resultErr = errors.Join(resultErr, group.Close()) }()
-	if err := writeWorkerControl(group, "cgroup.max.descendants", "0"); err != nil {
+	if err := writeWorkerControl(h.supervisor, "cgroup.max.descendants", "0"); err != nil {
 		return h, err
 	}
-	if value, err := readWorkerControl(group, "cgroup.max.descendants"); err != nil || strings.TrimSpace(value) != "0" {
+	if value, err := readWorkerControl(h.supervisor, "cgroup.max.descendants"); err != nil || strings.TrimSpace(value) != "0" {
 		return h, errors.Join(errors.New("worker supervisor descendants bound was not applied"), err)
 	}
 	if err := record(dir); err != nil {
 		return h, err
 	}
 	// The callback may have waited on a context-free save; recheck live ownership.
-	if err := h.verifyRoot(); err != nil {
-		return h, err
-	}
-	if err := sameWorkerDirectory(h.root, supervisorLeaf, group); err != nil {
+	if err := h.verifyWorker(); err != nil {
 		return h, err
 	}
 	attr := syscall.SysProcAttr{}
@@ -122,7 +125,7 @@ func StartWorker(cmd *exec.Cmd, record func(scope string) error) (h *WorkerHandl
 		attr = *cmd.SysProcAttr
 	}
 	previousAttr, previousCancel := cmd.SysProcAttr, cmd.Cancel
-	attr.UseCgroupFD, attr.CgroupFD = true, int(group.Fd())
+	attr.UseCgroupFD, attr.CgroupFD = true, int(h.supervisor.Fd())
 	cmd.SysProcAttr = &attr
 	if cmd.WaitDelay <= 0 || cmd.WaitDelay > 2*time.Second {
 		cmd.WaitDelay = 2 * time.Second
@@ -150,12 +153,8 @@ func StartWorker(cmd *exec.Cmd, record func(scope string) error) (h *WorkerHandl
 // positive cleanup evidence, independent of start, exit and descriptor errors.
 func (h *WorkerHandle) Wait() (released bool, err error) {
 	h.once.Do(func() {
-		var cmdErr, stopErr error
+		var cmdErr error
 		if h.started {
-			if h.startErr != nil {
-				h.cancelled.Store(true)
-				stopErr = h.stop()
-			}
 			// Cmd.Wait joins its context watcher, so Cancel cannot race FD cleanup.
 			cmdErr = h.cmd.Wait()
 		}
@@ -167,13 +166,16 @@ func (h *WorkerHandle) Wait() (released bool, err error) {
 			err = errors.Join(err, ErrUnconfirmed, fmt.Errorf("%w: %s", ErrScopeUnconfirmed, h.dir))
 		}
 		var closeErr error
+		if h.supervisor != nil {
+			closeErr = h.supervisor.Close()
+		}
 		if h.root != nil {
-			closeErr = h.root.Close()
+			closeErr = errors.Join(closeErr, h.root.Close())
 		}
 		if h.parent != nil {
 			closeErr = errors.Join(closeErr, h.parent.Close())
 		}
-		h.err = errors.Join(h.startErr, cmdErr, stopErr, cancelErr, err, closeErr)
+		h.err = errors.Join(h.startErr, cmdErr, cancelErr, err, closeErr)
 	})
 	return h.released, h.err
 }
@@ -227,6 +229,19 @@ func (h *WorkerHandle) verifyRoot() error {
 	return sameWorkerDirectory(h.parent, filepath.Base(h.dir), h.root)
 }
 
+func (h *WorkerHandle) verifyWorker() error {
+	if err := h.verifyRoot(); err != nil {
+		return err
+	}
+	if !h.supervisorRequired {
+		return nil
+	}
+	if h.supervisor == nil {
+		return errors.New("worker supervisor is not pinned")
+	}
+	return sameWorkerDirectory(h.root, supervisorLeaf, h.supervisor)
+}
+
 func readWorkerControl(dir *os.File, name string) (value string, resultErr error) {
 	fd, err := syscall.Openat(int(dir.Fd()), name, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
 	if err != nil {
@@ -270,19 +285,19 @@ func (h *WorkerHandle) populated() (bool, error) {
 }
 
 func (h *WorkerHandle) kill() error {
-	if err := h.verifyRoot(); err != nil {
+	if err := h.verifyWorker(); err != nil {
 		return err
 	}
 	return writeWorkerControl(h.root, "cgroup.kill", "1")
 }
 
 func (h *WorkerHandle) stop() error {
+	if err := h.verifyWorker(); err != nil {
+		return fmt.Errorf("%w: stop worker: %w", ErrUnconfirmed, err)
+	}
 	signalErr := h.cmd.Process.Signal(syscall.SIGTERM)
 	if errors.Is(signalErr, os.ErrProcessDone) {
 		signalErr = nil
-	}
-	if err := h.verifyRoot(); err != nil {
-		return errors.Join(signalErr, fmt.Errorf("%w: stop worker: %w", ErrUnconfirmed, err))
 	}
 	deadline := time.Now().Add(graceWait)
 	for {
@@ -302,7 +317,7 @@ func (h *WorkerHandle) stop() error {
 }
 
 func (h *WorkerHandle) release() (released bool, resultErr error) {
-	if err := h.verifyRoot(); err != nil {
+	if err := h.verifyWorker(); err != nil {
 		return false, err
 	}
 	populated, readErr := h.populated()
@@ -312,28 +327,26 @@ func (h *WorkerHandle) release() (released bool, resultErr error) {
 		populated, readErr = h.populated()
 	}
 	if populated || readErr != nil {
-		if killErr := h.kill(); killErr != nil {
-			return false, errors.Join(readErr, killErr)
+		killErr := h.kill()
+		if readErr != nil || killErr != nil {
+			resultErr = errors.Join(ErrUnconfirmed, readErr, killErr)
 		}
 		deadline := time.Now().Add(cleanupWait)
 		for {
 			busy, err := h.populated()
 			if err != nil {
-				return false, errors.Join(readErr, err)
+				return false, errors.Join(resultErr, err)
 			}
 			if !busy {
 				break
 			}
 			if !time.Now().Before(deadline) {
-				return false, errors.Join(readErr, errors.New("worker remained populated after kill"))
+				return false, errors.Join(resultErr, errors.New("worker remained populated after kill"))
 			}
 			time.Sleep(20 * time.Millisecond)
 		}
-		if !h.cancelled.Load() && h.started {
-			resultErr = ErrDescendants
-		}
-		if readErr != nil {
-			resultErr = errors.Join(resultErr, ErrUnconfirmed, readErr)
+		if populated && readErr == nil && !h.cancelled.Load() && h.started {
+			resultErr = errors.Join(resultErr, ErrDescendants)
 		}
 	}
 	// Only direct supervisor/command leaves are valid; inspect finite chunks.
@@ -400,6 +413,14 @@ func (h *WorkerHandle) removeLeaf(name string, leaf *os.File, entries *int) erro
 	}
 	if err := h.verifyRoot(); err != nil {
 		return err
+	}
+	if name == supervisorLeaf {
+		if h.supervisor == nil {
+			return errors.New("worker supervisor is not pinned")
+		}
+		if err := sameWorkerDirectory(h.root, name, h.supervisor); err != nil {
+			return err
+		}
 	}
 	if err := sameWorkerDirectory(h.root, name, leaf); err != nil {
 		return err

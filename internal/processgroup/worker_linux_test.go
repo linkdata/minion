@@ -60,7 +60,7 @@ func TestWorkerRequiresRecordBeforeStart(t *testing.T) {
 		t.Fatalf("refused record lost ownership or started child: handle=%v calls=%d process=%v scope=%q error=%v", h, calls, cmd.Process, recorded, startErr)
 	}
 	released, waitErr := h.Wait()
-	if !released || !errors.Is(errors.Join(startErr, waitErr), refused) || errors.Is(waitErr, ErrScopeUnconfirmed) {
+	if !released || !errors.Is(waitErr, refused) || errors.Is(waitErr, ErrScopeUnconfirmed) {
 		t.Fatalf("refused record root was not released with original cause: released=%t error=%v", released, waitErr)
 	}
 	if _, err := os.Stat(report); !errors.Is(err, os.ErrNotExist) {
@@ -97,6 +97,9 @@ func TestWorkerFailedExecRetainsOwnership(t *testing.T) {
 			wantCause := syscall.ENOENT
 			if path == invalid {
 				wantCause = syscall.ENOEXEC
+			}
+			if !errors.Is(startErr, wantCause) {
+				t.Fatalf("failed exec lost its returned start cause: got %v want %v", startErr, wantCause)
 			}
 			released, waitErr := h.Wait()
 			if !released || !errors.Is(waitErr, wantCause) || errors.Is(waitErr, ErrScopeUnconfirmed) {
@@ -236,19 +239,23 @@ func TestWorkerCrashDrainsRealCommandAndPreservesSibling(t *testing.T) {
 				t.Fatalf("start worker: %v", err)
 			}
 			paths := strings.Split(waitForReport(t, report), "\n")
-			if len(paths) != 2 || paths[0] != filepath.Join(h.dir, supervisorLeaf) || filepath.Dir(paths[1]) != h.dir {
-				t.Fatalf("crash helper did not create an owned ordinary scope: %q", paths)
+			if len(paths) != 3 || paths[0] != filepath.Join(h.dir, supervisorLeaf) || filepath.Dir(paths[1]) != h.dir || filepath.Dir(paths[2]) != h.dir || paths[1] == paths[2] {
+				t.Fatalf("crash helper did not create two owned ordinary scopes: %q", paths)
 			}
 			leader := waitForHelper(t, report+".command.pid")
 			defer leader.Close()
 			child := waitForHelper(t, report+".child.pid")
 			defer child.Close()
+			secondLeader := waitForHelper(t, report+".second.command.pid")
+			defer secondLeader.Close()
+			secondChild := waitForHelper(t, report+".second.child.pid")
+			defer secondChild.Close()
 			if err := workspace.WriteAtomic(report+".release", []byte("crash")); err != nil {
 				t.Fatal(err)
 			}
 			released, waitErr := h.Wait()
 			var exitErr *exec.ExitError
-			if !released || !errors.As(waitErr, &exitErr) || exitErr.ExitCode() != 23 || errors.Is(waitErr, ErrScopeUnconfirmed) || errors.Is(waitErr, ErrUnconfirmed) {
+			if !released || !errors.As(waitErr, &exitErr) || exitErr.ExitCode() != 23 || !errors.Is(waitErr, ErrDescendants) || errors.Is(waitErr, ErrScopeUnconfirmed) || errors.Is(waitErr, ErrUnconfirmed) {
 				t.Fatalf("crash lost exit cause or full release: released=%t error=%v output=%q", released, waitErr, output.String())
 			}
 			if againReleased, againErr := h.Wait(); !againReleased || againErr != waitErr {
@@ -256,7 +263,7 @@ func TestWorkerCrashDrainsRealCommandAndPreservesSibling(t *testing.T) {
 			}
 			waitCtx, stopWait := context.WithTimeout(context.Background(), 2*time.Second)
 			defer stopWait()
-			for _, process := range []*pinnedProcess{leader, child} {
+			for _, process := range []*pinnedProcess{leader, child, secondLeader, secondChild} {
 				if err := process.WaitExited(waitCtx); err != nil {
 					t.Fatalf("ordinary command survived worker crash: %v", err)
 				}
@@ -316,6 +323,276 @@ func TestWorkerCancellationDrainsInheritedPipes(t *testing.T) {
 	assertWorkerRemoved(t, h)
 }
 
+func TestWorkerKillErrorStillAllowsEmptyRelease(t *testing.T) {
+	if err := Check(); err != nil {
+		t.Skipf("delegated cgroup unavailable: %v", err)
+	}
+	for _, test := range []struct {
+		name    string
+		release bool
+	}{{"survivor exits within proof bound", true}, {"survivor remains", false}} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			report := filepath.Join(t.TempDir(), "worker")
+			cmd := workerHelperCommand(ctx, "kill-error", report, false)
+			h, err := StartWorker(cmd, func(string) error { return nil })
+			if h != nil {
+				t.Cleanup(func() { cancel(); _, _ = h.Wait() })
+			}
+			if err != nil || h == nil {
+				t.Fatalf("start worker: %v", err)
+			}
+			paths := strings.Split(waitForReport(t, report), "\n")
+			if len(paths) != 2 || paths[0] != filepath.Join(h.dir, supervisorLeaf) || filepath.Dir(paths[1]) != h.dir {
+				t.Fatalf("kill-error helper did not create an owned command scope: %q", paths)
+			}
+			survivor := waitForHelper(t, report+".survivor")
+			defer survivor.Close()
+			stat, err := os.Open(fmt.Sprintf("/proc/%d/stat", cmd.Process.Pid))
+			if err != nil {
+				t.Fatal(err)
+			}
+			worker := &pinnedProcess{stat: stat}
+			defer worker.Close()
+			waitCtx, stopWait := context.WithTimeout(context.Background(), 2*time.Second)
+			defer stopWait()
+			if err := worker.WaitExited(waitCtx); err != nil {
+				t.Fatalf("kill-error fixture worker still alive: %v", err)
+			}
+			var pins []*os.File
+			for _, path := range []string{h.dir, paths[0], paths[1]} {
+				pin, err := os.Open(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = pin.Close() })
+				pins = append(pins, pin)
+			}
+			killControl, err := os.OpenFile(filepath.Join(h.dir, "cgroup.kill"), os.O_WRONLY, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = killControl.Close() })
+			killInfo, err := killControl.Stat()
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				pinned, pinErr := pins[0].Stat()
+				current, statErr := os.Stat(h.dir)
+				if errors.Is(statErr, os.ErrNotExist) {
+					return
+				}
+				if pinErr != nil || statErr != nil || !os.SameFile(pinned, current) {
+					t.Errorf("kill-error fixture lost root identity: pin=%v stat=%v", pinErr, statErr)
+					return
+				}
+				if err := killControl.Chmod(killInfo.Mode().Perm()); err != nil {
+					t.Errorf("restore independently owned kill permission: %v", err)
+					return
+				}
+				if _, err := killControl.WriteString("1"); err != nil {
+					t.Errorf("stop independently owned fixture tree: %v", err)
+					return
+				}
+				if err := waitEmptyCgroup(h.dir); err != nil {
+					t.Errorf("drain independently owned fixture tree: %v", err)
+					return
+				}
+				cleanupPinnedWorkerFixture(t, pins[0], pins[1:]...)
+			})
+			if err := killControl.Chmod(0); err != nil {
+				t.Fatal(err)
+			}
+			denied, denyErr := os.OpenFile(filepath.Join(h.dir, "cgroup.kill"), os.O_WRONLY, 0)
+			if denyErr == nil {
+				_ = denied.Close()
+				if err := killControl.Chmod(killInfo.Mode().Perm()); err != nil {
+					t.Fatal(err)
+				}
+				t.Skip("host privileges bypass the real kill-permission fault")
+			}
+			if !errors.Is(denyErr, syscall.EACCES) {
+				t.Fatalf("fixture did not deny a new kill writer: %v", denyErr)
+			}
+			var gateDone chan struct{}
+			var gateErr error
+			if test.release {
+				gateDone = make(chan struct{})
+				// Permit exit after settling and within cleanupWait; EACCES below proves the failed kill actually occurred.
+				timer := time.AfterFunc(time.Second, func() {
+					gateErr = workspace.WriteAtomic(report+".survivor.release", []byte("exit"))
+					close(gateDone)
+				})
+				t.Cleanup(func() {
+					if !timer.Stop() {
+						<-gateDone
+					}
+				})
+			}
+			released, waitErr := h.Wait()
+			var exitErr *exec.ExitError
+			if released != test.release || !errors.Is(waitErr, syscall.EACCES) || !errors.Is(waitErr, ErrUnconfirmed) || errors.Is(waitErr, ErrScopeUnconfirmed) == test.release || !errors.As(waitErr, &exitErr) || exitErr.ExitCode() != 23 {
+				t.Errorf("failed kill lost cause or later release proof: released=%t error=%v", released, waitErr)
+			}
+			if againReleased, againErr := h.Wait(); againReleased != released || againErr != waitErr {
+				t.Errorf("repeated kill-error Wait changed result: released=%t error=%v", againReleased, againErr)
+			}
+			if !test.release {
+				if waitErr == nil || !strings.Contains(waitErr.Error(), h.dir) {
+					t.Errorf("persistent survivor lost its owned reference: %v", waitErr)
+				}
+				if populated, err := cgroupPopulated(h.dir); err != nil || !populated {
+					t.Errorf("persistent survivor fixture did not remain populated: populated=%t error=%v", populated, err)
+				}
+				return
+			}
+			if !errors.Is(waitErr, ErrDescendants) {
+				t.Errorf("positive survivor observation lost classification: %v", waitErr)
+			}
+			<-gateDone
+			if gateErr != nil {
+				t.Errorf("release survivor fixture gate: %v", gateErr)
+			}
+			survivorCtx, stopSurvivorWait := context.WithTimeout(context.Background(), 2*time.Second)
+			defer stopSurvivorWait()
+			if err := survivor.WaitExited(survivorCtx); err != nil {
+				t.Errorf("gated survivor did not exit: %v", err)
+			}
+			if _, err := os.Stat(h.dir); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("positively released worker tree remains: %v", err)
+			}
+		})
+	}
+}
+
+func TestWorkerSupervisorReplacementPreservesForeignDirectory(t *testing.T) {
+	if err := Check(); err != nil {
+		t.Skipf("delegated cgroup unavailable: %v", err)
+	}
+	for _, test := range []struct {
+		name         string
+		duringRecord bool
+		refuseRecord bool
+	}{
+		{name: "during successful record", duringRecord: true},
+		{name: "during refused record", duringRecord: true, refuseRecord: true},
+		{name: "after worker exit"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			report := filepath.Join(t.TempDir(), "worker")
+			cmd := workerHelperCommand(ctx, "exit-error", report, false)
+			refused := errors.New("replacement fixture record refused")
+			var rootPin, replacementPin *os.File
+			replace := func(scope string) error {
+				var err error
+				rootPin, err = os.Open(scope)
+				if err != nil {
+					return err
+				}
+				t.Cleanup(func() { _ = rootPin.Close() })
+				leaf := filepath.Join(scope, supervisorLeaf)
+				original, err := os.Open(leaf)
+				if err != nil {
+					return err
+				}
+				t.Cleanup(func() { _ = original.Close() })
+				if err := os.Remove(leaf); err != nil {
+					return err
+				}
+				if err := os.Mkdir(leaf, 0700); err != nil {
+					return err
+				}
+				replacementPin, err = os.Open(leaf)
+				if err != nil {
+					return err
+				}
+				t.Cleanup(func() { _ = replacementPin.Close() })
+				t.Cleanup(func() { cleanupPinnedWorkerFixture(t, rootPin, replacementPin) })
+				oldInfo, oldErr := original.Stat()
+				newInfo, newErr := replacementPin.Stat()
+				if oldErr != nil || newErr != nil || os.SameFile(oldInfo, newInfo) {
+					return fmt.Errorf("fixture failed to replace supervisor identity: old=%v new=%v", oldErr, newErr)
+				}
+				return nil
+			}
+			var fixtureErr error
+			h, startErr := StartWorker(cmd, func(scope string) error {
+				if test.duringRecord {
+					fixtureErr = replace(scope)
+				}
+				if test.refuseRecord {
+					return errors.Join(fixtureErr, refused)
+				}
+				return fixtureErr
+			})
+			if h != nil {
+				t.Cleanup(func() { cancel(); _, _ = h.Wait() })
+			}
+			if fixtureErr != nil || h == nil {
+				t.Fatalf("replacement fixture failed: setup=%v handle=%v start=%v", fixtureErr, h, startErr)
+			}
+			if test.duringRecord {
+				if startErr == nil || cmd.Process != nil {
+					t.Fatalf("replaced supervisor allowed child start: process=%v error=%v", cmd.Process, startErr)
+				}
+				if test.refuseRecord && !errors.Is(startErr, refused) {
+					t.Fatalf("replacement erased recording refusal: %v", startErr)
+				}
+				if _, err := os.Stat(report); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("replaced supervisor worker acted: %v", err)
+				}
+			} else {
+				if startErr != nil {
+					t.Fatalf("start worker before replacement: %v", startErr)
+				}
+				_ = waitForReport(t, report)
+				stat, err := os.Open(fmt.Sprintf("/proc/%d/stat", cmd.Process.Pid))
+				if err != nil {
+					t.Fatal(err)
+				}
+				worker := &pinnedProcess{stat: stat}
+				defer worker.Close()
+				waitCtx, stopWait := context.WithTimeout(context.Background(), 2*time.Second)
+				defer stopWait()
+				if err := worker.WaitExited(waitCtx); err != nil {
+					t.Fatalf("replacement fixture worker still alive: %v", err)
+				}
+				if err := replace(h.dir); err != nil {
+					t.Fatal(err)
+				}
+			}
+			released, waitErr := h.Wait()
+			if released || !errors.Is(waitErr, ErrScopeUnconfirmed) || !strings.Contains(waitErr.Error(), h.dir) {
+				t.Errorf("supervisor replacement falsely released: released=%t error=%v", released, waitErr)
+			}
+			if waitErr == nil || !strings.Contains(waitErr.Error(), "worker directory identity changed") {
+				t.Errorf("supervisor replacement lost identity failure: %v", waitErr)
+			}
+			if test.refuseRecord && !errors.Is(waitErr, refused) {
+				t.Errorf("Wait erased recording refusal after replacement: %v", waitErr)
+			}
+			if !test.duringRecord {
+				var exitErr *exec.ExitError
+				if !errors.As(waitErr, &exitErr) || exitErr.ExitCode() != 23 || cmd.ProcessState == nil {
+					t.Errorf("replacement lost original worker exit or reaping: %v", waitErr)
+				}
+			}
+			pinned, pinErr := replacementPin.Stat()
+			current, statErr := os.Stat(replacementPin.Name())
+			if pinErr != nil || statErr != nil || !os.SameFile(pinned, current) {
+				t.Errorf("cleanup removed or replaced foreign supervisor: pin=%v stat=%v", pinErr, statErr)
+			}
+			if againReleased, againErr := h.Wait(); againReleased != released || againErr != waitErr {
+				t.Errorf("repeated replacement Wait changed result: released=%t error=%v", againReleased, againErr)
+			}
+		})
+	}
+}
+
 func TestWorkerLostRootPinRetainsUncertaintyAndExitCause(t *testing.T) {
 	if err := Check(); err != nil {
 		t.Skipf("delegated cgroup unavailable: %v", err)
@@ -342,27 +619,7 @@ func TestWorkerLostRootPinRetainsUncertaintyAndExitCause(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = leafPin.Close() })
 	// These independent live pins authorize only fixture cleanup after proof is deliberately lost.
-	t.Cleanup(func() {
-		for _, owned := range []struct {
-			path string
-			pin  *os.File
-		}{{leaf, leafPin}, {h.dir, rootPin}} {
-			pinned, pinErr := owned.pin.Stat()
-			current, statErr := os.Stat(owned.path)
-			if pinErr != nil || statErr != nil || !os.SameFile(pinned, current) {
-				t.Errorf("independent fixture cleanup lost identity for %s: pin=%v stat=%v", owned.path, pinErr, statErr)
-				return
-			}
-			if populated, err := cgroupPopulated(owned.path); err != nil || populated {
-				t.Errorf("independent fixture scope is not empty: %s populated=%t error=%v", owned.path, populated, err)
-				return
-			}
-			if err := os.Remove(owned.path); err != nil {
-				t.Errorf("remove independently pinned fixture scope %s: %v", owned.path, err)
-				return
-			}
-		}
-	})
+	t.Cleanup(func() { cleanupPinnedWorkerFixture(t, rootPin, leafPin) })
 	stat, err := os.Open(fmt.Sprintf("/proc/%d/stat", cmd.Process.Pid))
 	if err != nil {
 		t.Fatal(err)
@@ -382,14 +639,38 @@ func TestWorkerLostRootPinRetainsUncertaintyAndExitCause(t *testing.T) {
 	if released || !errors.Is(waitErr, ErrScopeUnconfirmed) || !strings.Contains(waitErr.Error(), h.dir) || !errors.As(waitErr, &exitErr) || exitErr.ExitCode() != 23 {
 		t.Fatalf("lost pin falsely released or erased original exit: released=%t error=%v", released, waitErr)
 	}
-	if !errors.Is(waitErr, os.ErrClosed) && !errors.Is(waitErr, syscall.EBADF) {
-		t.Fatalf("lost pin erased descriptor failure: %v", waitErr)
+	var verificationErr *os.PathError
+	if !errors.As(waitErr, &verificationErr) || verificationErr.Op != "stat" || !errors.Is(verificationErr, os.ErrClosed) {
+		t.Fatalf("lost pin erased identity verification failure: %v", waitErr)
 	}
 	if cmd.ProcessState == nil || cmd.ProcessState.ExitCode() != 23 {
 		t.Fatalf("uncertain ownership skipped child reaping: %v", cmd.ProcessState)
 	}
 	if againReleased, againErr := h.Wait(); againReleased || againErr != waitErr {
 		t.Fatalf("repeated uncertain Wait changed evidence: released=%t error=%v", againReleased, againErr)
+	}
+}
+
+func cleanupPinnedWorkerFixture(t *testing.T, root *os.File, leaves ...*os.File) {
+	t.Helper()
+	for _, pin := range append(leaves, root) {
+		pinned, pinErr := pin.Stat()
+		current, statErr := os.Stat(pin.Name())
+		if errors.Is(statErr, os.ErrNotExist) {
+			continue
+		}
+		if pinErr != nil || statErr != nil || !os.SameFile(pinned, current) {
+			t.Errorf("independent fixture cleanup lost identity for %s: pin=%v stat=%v", pin.Name(), pinErr, statErr)
+			return
+		}
+		if populated, err := cgroupPopulated(pin.Name()); err != nil || populated {
+			t.Errorf("independent fixture scope is not empty: %s populated=%t error=%v", pin.Name(), populated, err)
+			return
+		}
+		if err := os.Remove(pin.Name()); err != nil {
+			t.Errorf("remove independently pinned fixture scope %s: %v", pin.Name(), err)
+			return
+		}
 	}
 }
 
@@ -413,6 +694,21 @@ func TestWorkerHelperProcess(t *testing.T) {
 		return
 	}
 	report := os.Getenv("MINION_WORKER_TEST_REPORT")
+	if mode == "gated-survivor" {
+		if err := workspace.WriteAtomic(report, []byte(strconv.Itoa(os.Getpid()))); err != nil {
+			t.Fatal(err)
+		}
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			if _, err := os.Stat(report + ".release"); err == nil {
+				os.Exit(0)
+			} else if !errors.Is(err, os.ErrNotExist) {
+				t.Fatal(err)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatal("survivor fixture was not released")
+	}
 	data, err := os.ReadFile("/proc/self/cgroup")
 	if err != nil {
 		t.Fatal(err)
@@ -435,7 +731,7 @@ func TestWorkerHelperProcess(t *testing.T) {
 		}
 		os.Exit(0)
 	}
-	if mode != "nested-clean" && mode != "crash-command" && mode != "block-command" {
+	if mode != "nested-clean" && mode != "crash-command" && mode != "block-command" && mode != "kill-error" {
 		t.Fatalf("unknown worker fixture mode %q", mode)
 	}
 	if err := Configure(64, 512<<20); err != nil {
@@ -453,6 +749,8 @@ func TestWorkerHelperProcess(t *testing.T) {
 		}
 		cmd = exec.CommandContext(ctx, os.Args[0], "-test.run=^TestProcessgroupHelperProcess$")
 		cmd.Env = append(os.Environ(), "MINION_PROCESSGROUP_TEST_MODE=limits-block", "MINION_PROCESSGROUP_TEST_PID_FILE="+report+".limits")
+	} else if mode == "kill-error" {
+		cmd = workerHelperCommand(ctx, "gated-survivor", report+".survivor", false)
 	} else {
 		cmd = helperCommand("leader-block", report+".child.pid", os.Getenv("MINION_WORKER_TEST_HOLD_PIPE") == "true")
 		if os.Getenv("MINION_WORKER_TEST_HOLD_PIPE") == "true" {
@@ -468,11 +766,32 @@ func TestWorkerHelperProcess(t *testing.T) {
 	}
 	if mode == "nested-clean" {
 		_ = waitForReport(t, report+".limits")
+	} else if mode == "kill-error" {
+		_ = waitForReport(t, report+".survivor")
 	} else {
 		_ = waitForReport(t, report+".child.pid")
 	}
-	if err := workspace.WriteAtomic(report, []byte(supervisor+"\n"+h.dir)); err != nil {
+	paths := []string{supervisor, h.dir}
+	if mode == "crash-command" {
+		second := helperCommand("leader-block", report+".second.child.pid", os.Getenv("MINION_WORKER_TEST_HOLD_PIPE") == "true")
+		if os.Getenv("MINION_WORKER_TEST_HOLD_PIPE") == "true" {
+			second.Stdout, second.Stderr = os.Stdout, os.Stderr
+		}
+		secondHandle, err := Start(second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := workspace.WriteAtomic(report+".second.command.pid", []byte(strconv.Itoa(second.Process.Pid))); err != nil {
+			t.Fatal(err)
+		}
+		_ = waitForReport(t, report+".second.child.pid")
+		paths = append(paths, secondHandle.dir)
+	}
+	if err := workspace.WriteAtomic(report, []byte(strings.Join(paths, "\n"))); err != nil {
 		t.Fatal(err)
+	}
+	if mode == "kill-error" {
+		os.Exit(23)
 	}
 	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {

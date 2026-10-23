@@ -5,11 +5,18 @@ import (
 	"fmt"
 )
 
+// ErrDescendants means the leader exited while processes remained in its cgroup.
+// The descendants were stopped, but the result is rejected.
+var ErrDescendants = errors.New("process scope left descendant processes")
+
+// ErrUnconfirmed means process ownership, limit observation, or cleanup could not be proved.
+var ErrUnconfirmed = errors.New("process safety unconfirmed")
+
 // ErrExhausted means a command reached its configured process or memory ceiling.
 var ErrExhausted = errors.New("command resource ceiling reached")
 
 // ErrScopeUnconfirmed means a created process scope may still exist after cleanup.
-var ErrScopeUnconfirmed = errors.New("command scope release unconfirmed")
+var ErrScopeUnconfirmed = errors.New("process scope release unconfirmed")
 
 // Exhaustion describes observed cgroup events and the ceilings that were hit.
 type Exhaustion struct {

@@ -164,7 +164,7 @@ func TestRunStopsBeforePreflightWhenProcessRecoveryIsPending(t *testing.T) {
 				args = append(args, "-check")
 			}
 			code, output := runStartupFixture(t, cfg, args...)
-			if code != 1 || !strings.Contains(output, "command scope release for "+pending.stage+" is unconfirmed") || strings.Contains(output, "Git preflight:") || strings.Contains(output, "AI preflight:") {
+			if code != 1 || !strings.Contains(output, "process scope release for "+pending.stage+" is unconfirmed") || strings.Contains(output, "Git preflight:") || strings.Contains(output, "AI preflight:") {
 				t.Fatalf("recovery latch did not stop preflight: exit=%d log=%q", code, output)
 			}
 			assertNoStartupCommands(t, markers)
@@ -223,7 +223,7 @@ func TestRunLatchesUnconfirmedGitScopeBeforeRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	code, output = runStartupFixture(t, cfg, "-check")
-	if code != 1 || !strings.Contains(output, "command scope release for Git preflight is unconfirmed") || strings.Contains(output, "Git preflight:") || strings.Contains(output, "AI preflight:") {
+	if code != 1 || !strings.Contains(output, "process scope release for Git preflight is unconfirmed") || strings.Contains(output, "Git preflight:") || strings.Contains(output, "AI preflight:") {
 		t.Fatalf("restart bypassed persisted Git recovery latch: exit=%d log=%q", code, output)
 	}
 	assertNoStartupCommands(t, markers)
