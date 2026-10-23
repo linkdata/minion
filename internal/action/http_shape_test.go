@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/usage"
 	"github.com/linkdata/minion/internal/workspace"
@@ -50,7 +51,7 @@ func TestHTTPShapeTextByteBounds(t *testing.T) {
 				{"UTF-8 at byte limit", strings.Repeat("é", field.limit/2) + strings.Repeat("x", field.limit%2), true},
 				{"limit plus one", strings.Repeat("x", field.limit+1), false},
 				{"invalid UTF-8", strings.Repeat("x", field.limit-1) + "\xff", false},
-				{"NUL", strings.Repeat("x", field.limit-1) + "\x00", false},
+				{"NUL", strings.Repeat("x", field.limit-1) + "\x00", field.name == "refutation"},
 			} {
 				t.Run(test.name, func(t *testing.T) {
 					err := field.validate(test.value)
@@ -60,6 +61,38 @@ func TestHTTPShapeTextByteBounds(t *testing.T) {
 				})
 			}
 		})
+	}
+}
+
+func TestHTTPPrivateRefutationControlsMatchLocalContract(t *testing.T) {
+	job := withClaudeCritic(testJob(command.Comment))
+	result := privateReviewResult(job)
+	result.Refutations = []Refutation{{Round: 2, Text: "Private refutation\x00\n\t\"quoted\"\\path"}}
+	if err := result.validate(job, false); err != nil {
+		t.Fatalf("fixture violates the local private-refutation contract: %v", err)
+	}
+	review := ReviewCheckpoint{Version: result.Version, Identity: result.Identity, SourceRef: result.SourceRef, Calls: result.Calls, Refutations: result.Refutations, CriticStopReason: result.CriticStopReason}
+	if err := httpReviewShape(review); err != nil {
+		t.Fatalf("HTTP rejected locally valid private review controls: %v", err)
+	}
+	if err := httpResultShape(result); err != nil {
+		t.Fatalf("HTTP rejected locally valid private Result controls: %v", err)
+	}
+	encoded, err := httpEncode(review, httpReviewBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decodedReview ReviewCheckpoint
+	if err := httpDecode(bytes.NewReader(encoded), httpReviewBytes, &decodedReview); err != nil || !reflect.DeepEqual(decodedReview, review) {
+		t.Fatalf("private Review bytes changed on the wire: got=%+v error=%v", decodedReview, err)
+	}
+	encoded, err = httpEncode(result, httpOutcomeBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decodedResult Result
+	if err := httpDecode(bytes.NewReader(encoded), httpOutcomeBytes, &decodedResult); err != nil || !reflect.DeepEqual(decodedResult, result) || decodedResult.validate(job, false) != nil {
+		t.Fatalf("private Result bytes changed on the wire: got=%+v error=%v", decodedResult, err)
 	}
 }
 

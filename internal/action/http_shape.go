@@ -2,6 +2,7 @@ package action
 
 import (
 	"errors"
+	"unicode/utf8"
 
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/workspace"
@@ -48,7 +49,7 @@ func httpReviewShape(review ReviewCheckpoint) error {
 		}
 	}
 	for _, refutation := range review.Refutations {
-		if !boundedText(refutation.Text, maxOutputBytes) {
+		if len(refutation.Text) > maxOutputBytes || !utf8.ValidString(refutation.Text) {
 			return errHTTPShape
 		}
 	}

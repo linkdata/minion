@@ -71,19 +71,25 @@ func RunHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	if deadline, ok := ctx.Deadline(); ok && deadline.Before(expires) {
 		expires = deadline
 	}
-	if assignment.Expires <= 0 || !time.Now().Before(expires) {
-		return httpClientUnknown("next", errors.Join(monitor.ErrTerminalJob, context.DeadlineExceeded))
+	if assignment.Expires <= 0 {
+		return httpClientUnknown("next", errors.New("invalid assignment expiry"))
+	}
+	checkpoints := &httpClientCheckpoints{transport: transport, control: context.WithoutCancel(ctx), job: job, binding: httpJobBinding(job)}
+	if !time.Now().Before(expires) {
+		err := errors.Join(monitor.ErrTerminalJob, context.DeadlineExceeded)
+		result := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head}
+		return errors.Join(err, checkpoints.outcome(result, err))
 	}
 	deadlineCtx, stopDeadline := context.WithDeadline(ctx, expires)
 	defer stopDeadline()
 	actionCtx, cancelAction := context.WithCancelCause(deadlineCtx)
 	defer cancelAction(context.Canceled)
-	checkpoints := &httpClientCheckpoints{transport: transport, control: context.WithoutCancel(ctx), action: actionCtx, job: job, binding: httpJobBinding(job)}
+	checkpoints.action = actionCtx
 	watchCtx, stopWatch := context.WithCancelCause(ctx)
 	watchBody, err := httpEncode(checkpoints.binding, httpControlBytes)
 	if err != nil {
 		stopWatch(errHTTPWatchStopped)
-		return httpClientUnknown("cancel", err)
+		return fmt.Errorf("encode cancellation admission: %w", err)
 	}
 	// Bound admission only; the held body must survive model expiry for paid receipts.
 	headerErr := fmt.Errorf("cancellation watch admission timed out: %w", context.DeadlineExceeded)
@@ -92,7 +98,7 @@ func RunHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 		stopWatch(headerErr)
 		close(headerDone)
 	})
-	watchResponse, err := transport.open(watchCtx, "cancel", watchBody, checkpoints.binding, 0)
+	watchResponse, err := transport.open(watchCtx, "cancel", watchBody, checkpoints.binding, 0, true)
 	if !headerTimer.Stop() {
 		<-headerDone
 	}
@@ -100,14 +106,14 @@ func RunHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 		if watchResponse != nil {
 			_ = watchResponse.Body.Close()
 		}
-		err = httpClientUnknown("cancel", headerErr)
+		err = headerErr
 		if !time.Now().Before(expires) {
 			err = errors.Join(monitor.ErrTerminalJob, err)
 		}
 	}
 	if err == nil && watchResponse.StatusCode != http.StatusOK {
 		_ = watchResponse.Body.Close()
-		err = httpClientUnknown("cancel", errors.New("watch admission requires HTTP 200"))
+		err = errors.New("watch admission requires HTTP 200")
 	}
 	if err != nil {
 		stopWatch(errHTTPWatchStopped)
@@ -135,20 +141,23 @@ func RunHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 		watchDone <- err
 	}()
 	result := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head}
-	runErr := checkpoints.status("prepare", 1)
+	if err := checkpoints.status("prepare", 1); err != nil {
+		runner.logf("HTTP prepare observation: %v", err)
+	}
+	var runErr error
 	ran := false
-	if runErr == nil {
-		// Preparation and status transfer consume the same accepted runtime.
-		job.RuntimeBudget = time.Until(expires)
-		if job.RuntimeBudget <= 0 {
-			runErr = errors.Join(monitor.ErrTerminalJob, context.DeadlineExceeded)
-		} else {
-			ran = true
-			result, runErr = runner.Execute(actionCtx, job, checkpoints)
-		}
+	// Preparation and status transfer consume the same accepted runtime.
+	job.RuntimeBudget = time.Until(expires)
+	if job.RuntimeBudget <= 0 {
+		runErr = errors.Join(monitor.ErrTerminalJob, context.DeadlineExceeded)
+	} else {
+		ran = true
+		result, runErr = runner.Execute(actionCtx, job, checkpoints)
 	}
 	if ran {
-		runErr = errors.Join(runErr, checkpoints.status("upload", 2))
+		if err := checkpoints.status("upload", 2); err != nil {
+			runner.logf("HTTP upload observation: %v", err)
+		}
 	}
 	if cause := context.Cause(actionCtx); errors.Is(cause, context.DeadlineExceeded) {
 		// A parent deadline reply can cancel the native call just before its local timer.
@@ -166,7 +175,7 @@ func httpClientUnknown(kind string, err error) error {
 }
 
 func (c *httpExecutionClient) post(ctx context.Context, kind string, data []byte, limit int, result any, binding httpBinding, sequence uint64) error {
-	response, err := c.open(ctx, kind, data, binding, sequence)
+	response, err := c.open(ctx, kind, data, binding, sequence, false)
 	if err != nil {
 		return err
 	}
@@ -179,12 +188,18 @@ func (c *httpExecutionClient) post(ctx context.Context, kind string, data []byte
 
 // open returns only after success headers. The held cancellation body is read
 // separately, so a registered watch is an admission barrier before Runner starts.
-func (c *httpExecutionClient) open(ctx context.Context, kind string, data []byte, binding httpBinding, sequence uint64) (*http.Response, error) {
+func (c *httpExecutionClient) open(ctx context.Context, kind string, data []byte, binding httpBinding, sequence uint64, knownNoWork bool) (*http.Response, error) {
+	failure := func(err error) error {
+		if knownNoWork {
+			return fmt.Errorf("HTTP %s admission: %w", kind, err)
+		}
+		return httpClientUnknown(kind, err)
+	}
 	endpoint := *c.base
 	endpoint.Path, endpoint.RawPath = strings.TrimRight(endpoint.Path, "/")+"/"+kind, ""
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), bytes.NewReader(data))
 	if err != nil {
-		return nil, httpClientUnknown(kind, err)
+		return nil, failure(err)
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Accept", "application/json")
@@ -200,26 +215,26 @@ func (c *httpExecutionClient) open(ctx context.Context, kind string, data []byte
 		if kind == "cancel" && ctx.Err() != nil && (errors.Is(err, ctx.Err()) || errors.Is(err, context.Cause(ctx))) {
 			return nil, ctx.Err()
 		}
-		return nil, httpClientUnknown(kind, err)
+		return nil, failure(err)
 	}
 	media, _, mediaErr := mime.ParseMediaType(response.Header.Get("Content-Type"))
 	encodings := response.Header.Values("Content-Encoding")
 	invalidEncoding := len(encodings) > 1 || len(encodings) == 1 && encodings[0] != "" && !strings.EqualFold(strings.TrimSpace(encodings[0]), "identity")
 	if mediaErr != nil || media != "application/json" || response.Uncompressed || invalidEncoding {
 		_ = response.Body.Close()
-		return nil, httpClientUnknown(kind, errors.New("response must be uncompressed JSON"))
+		return nil, failure(errors.New("response must be uncompressed JSON"))
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		defer response.Body.Close()
 		var ack httpAcknowledgement
 		if err := httpDecode(response.Body, httpControlBytes, &ack); err != nil {
-			return nil, httpClientUnknown(kind, err)
+			return nil, failure(err)
 		}
 		if ack.httpBinding != binding || ack.Sequence != sequence || ack.Kind != kind || ack.Failure == nil {
-			return nil, httpClientUnknown(kind, errors.New("invalid failure acknowledgement"))
+			return nil, failure(errors.New("invalid failure acknowledgement"))
 		}
 		if err := ack.Failure.validate(); err != nil {
-			return nil, httpClientUnknown(kind, err)
+			return nil, failure(err)
 		}
 		return nil, ack.Failure.err()
 	}
@@ -256,7 +271,9 @@ func (c *httpExecutionClient) watch(ctx context.Context, response *http.Response
 func (c *httpClientCheckpoints) acknowledge(kind string, data []byte, sequence uint64) error {
 	ctx, cancel := context.WithTimeout(c.control, httpControlTimeout)
 	defer cancel()
-	c.sequence = sequence
+	if kind != "status" {
+		c.sequence = sequence
+	}
 	var ack httpAcknowledgement
 	if err := c.transport.post(ctx, kind, data, httpControlBytes, &ack, c.binding, sequence); err != nil {
 		return err
@@ -325,13 +342,12 @@ func (c *httpClientCheckpoints) Review(value ReviewCheckpoint) error {
 }
 
 func (c *httpClientCheckpoints) status(phase string, observation uint64) error {
-	sequence := c.sequence + 1
 	status := Status{Version: c.binding.Version, Identity: c.binding.Identity, SourceRef: c.binding.SourceRef, Sequence: observation, WorkerState: "busy", Phase: phase}
-	data, err := httpEncode(httpObservation{Sequence: sequence, Status: status}, httpControlBytes)
+	data, err := httpEncode(httpObservation{Status: status}, httpControlBytes)
 	if err != nil {
 		return httpClientUnknown("status", err)
 	}
-	return c.acknowledge("status", data, sequence)
+	return c.acknowledge("status", data, observation)
 }
 
 func (c *httpClientCheckpoints) outcome(result Result, runErr error) error {

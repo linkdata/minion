@@ -224,15 +224,15 @@ func TestHTTPExecutorBindingSequenceAndRawCheckpointFacts(t *testing.T) {
 	f.ack(t, "/review", httpReview{Sequence: 3, Checkpoint: foreign}, http.StatusConflict, 3)
 	f.ack(t, "/review", httpReview{Sequence: 3, Checkpoint: checkpoint}, http.StatusOK, 3)
 	status := Status{Version: ProtocolVersion, Identity: f.job.Identity, SourceRef: f.job.Source.Head, Sequence: 1, WorkerState: "busy", Phase: "prepare"}
-	f.ack(t, "/status", httpObservation{Sequence: 4, Status: status}, http.StatusOK, 4)
+	f.ack(t, "/status", httpObservation{Status: status}, http.StatusOK, 1)
 	status.Sequence, status.Phase = 2, "upload"
-	f.ack(t, "/status", httpObservation{Sequence: 5, Status: status}, http.StatusOK, 5)
+	f.ack(t, "/status", httpObservation{Status: status}, http.StatusOK, 2)
 	if got, ok := f.executor.Status(); !ok || got != status {
 		t.Fatalf("Status did not preserve its independent observation sequence: %+v %v", got, ok)
 	}
-	outcome := f.outcome(6, errors.New("known failed result"))
+	outcome := f.outcome(4, errors.New("known failed result"))
 	outcome.Result.Calls = []CallUsage{call.Checkpoint.Call}
-	f.ack(t, "/outcome", outcome, http.StatusOK, 6)
+	f.ack(t, "/outcome", outcome, http.StatusOK, 4)
 	got := f.result(t)
 	if got.err == nil || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || !reflect.DeepEqual(got.result, outcome.Result) || before.Load() != 1 || after.Load() != 1 || review.Load() != 1 {
 		t.Fatalf("known outcome or checkpoint count changed: %+v error=%v counts=%d/%d/%d", got.result, got.err, before.Load(), after.Load(), review.Load())
@@ -248,6 +248,8 @@ func TestHTTPExecutorEncodedRequestBoundary(t *testing.T) {
 		limit int
 	}{
 		{"/before", httpControlBytes},
+		{"/after", httpControlBytes},
+		{"/status", httpControlBytes},
 		{"/review", httpReviewBytes},
 		{"/outcome", httpOutcomeBytes},
 	} {
@@ -255,11 +257,15 @@ func TestHTTPExecutorEncodedRequestBoundary(t *testing.T) {
 			var saves atomic.Int32
 			f := newHTTPServerTest(t, context.Background(), testJob(command.Comment), runnerExecutionCheckpoints{
 				before: func(CallCheckpoint) error { saves.Add(1); return nil },
+				after:  func(CallCheckpoint) error { saves.Add(1); return nil },
 				review: func(ReviewCheckpoint) error { saves.Add(1); return nil },
 			}, nil)
+			f.server.Client().Timeout = httpControlTimeout + 5*time.Second
 			f.pull(t)
 			var value any = f.call(1)
-			if route.path == "/review" {
+			if route.path == "/status" {
+				value = httpObservation{Status: Status{Version: ProtocolVersion, Identity: f.job.Identity, SourceRef: f.job.Source.Head, Sequence: 1, WorkerState: "busy", Phase: "prepare"}}
+			} else if route.path == "/review" {
 				value = httpReview{Sequence: 1, Checkpoint: ReviewCheckpoint{Version: ProtocolVersion, Identity: f.job.Identity, SourceRef: f.job.Source.Head}}
 			} else if route.path == "/outcome" {
 				value = f.outcome(1, errors.New("known failure"))
@@ -275,18 +281,113 @@ func TestHTTPExecutorEncodedRequestBoundary(t *testing.T) {
 			}
 			exact := f.raw(route.path, io.MultiReader(bytes.NewReader(body), bytes.NewReader(padding[:len(padding)-1])))
 			if exact.err != nil || exact.status != http.StatusOK || exact.ack.Failure != nil || exact.ack.Sequence != 1 {
-				t.Fatalf("exact-limit body was refused: %+v", exact)
+				t.Fatalf("exact-limit body was refused: status=%d ack=%+v error=%v", exact.status, exact.ack, exact.err)
 			}
 			if route.path != "/outcome" {
-				if saves.Load() != 1 {
+				wantSaves, nextSequence := int32(1), uint64(2)
+				if route.path == "/status" {
+					wantSaves, nextSequence = 0, 1
+				}
+				if saves.Load() != wantSaves {
 					t.Fatalf("exact-limit body reached sink %d times", saves.Load())
 				}
-				f.ack(t, "/outcome", f.outcome(2, errors.New("known failure")), http.StatusOK, 2)
+				f.ack(t, "/outcome", f.outcome(nextSequence, errors.New("known failure")), http.StatusOK, nextSequence)
 			}
 			if got := f.result(t); got.err == nil || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) {
 				t.Fatalf("known outcome was lost after body-bound rejection: %v", got.err)
 			}
 		})
+	}
+}
+
+func TestHTTPExecutorPullAndCancelEncodedRequestBoundary(t *testing.T) {
+	for _, path := range []string{"/next", "/cancel"} {
+		t.Run(path, func(t *testing.T) {
+			f := newHTTPServerTest(t, context.Background(), testJob(command.Comment), runnerExecutionCheckpoints{}, nil)
+			var value any = httpPull{Version: ProtocolVersion, ExecutorID: f.job.Identity.ExecutorID}
+			if path == "/cancel" {
+				f.pull(t)
+				value = f.tx.binding
+			}
+			body, err := json.Marshal(value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			padding := strings.Repeat(" ", httpControlBytes-len(body))
+			oversize := f.raw(path, io.MultiReader(bytes.NewReader(body), strings.NewReader(padding+" ")))
+			if oversize.err != nil || oversize.status != http.StatusRequestEntityTooLarge || oversize.ack.Failure == nil {
+				t.Fatalf("limit+1 %s was not rejected: status=%d error=%v ack=%+v", path, oversize.status, oversize.err, oversize.ack)
+			}
+			response, err := f.server.Client().Post(f.server.URL+path, "application/json", io.MultiReader(bytes.NewReader(body), strings.NewReader(padding)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer response.Body.Close()
+			if response.StatusCode != http.StatusOK {
+				t.Fatalf("exact-limit %s refused: %d", path, response.StatusCode)
+			}
+			if path == "/next" {
+				var assignment httpAssignment
+				if err := httpDecode(response.Body, httpJobBytes, &assignment); err != nil || !reflect.DeepEqual(assignment.Job, f.job) {
+					t.Fatalf("exact pull did not preserve supplied assignment: error=%v", err)
+				}
+			}
+			f.ack(t, "/outcome", f.outcome(1, nil), http.StatusOK, 1)
+			if path == "/cancel" {
+				var cancellation httpCancellation
+				if err := httpDecode(response.Body, httpControlBytes, &cancellation); err != nil || cancellation.httpBinding != f.tx.binding || cancellation.Reason != "completed" {
+					t.Fatalf("exact watch lost bound completion: %+v error=%v", cancellation, err)
+				}
+			}
+			if got := f.result(t); got.err != nil {
+				t.Fatal(got.err)
+			}
+		})
+	}
+}
+
+type httpStatusHeldBody struct {
+	io.ReadCloser
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (b *httpStatusHeldBody) Read(p []byte) (int, error) {
+	b.once.Do(func() { close(b.entered); <-b.release })
+	return b.ReadCloser.Read(p)
+}
+
+func TestHTTPExecutorReadingStatusDoesNotHoldPaidCallbackSlot(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	f := newHTTPServerTest(t, context.Background(), testJob(command.Comment), runnerExecutionCheckpoints{}, func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/status" {
+				r.Body = &httpStatusHeldBody{ReadCloser: r.Body, entered: entered, release: release}
+			}
+			next.ServeHTTP(w, r)
+		})
+	})
+	t.Cleanup(unblock)
+	f.pull(t)
+	observation := httpObservation{Status: Status{Version: ProtocolVersion, Identity: f.job.Identity, SourceRef: f.job.Source.Head, Sequence: 1, WorkerState: "busy", Phase: "prepare"}}
+	done := make(chan httpServerTestExchange, 1)
+	go func() { done <- f.request("/status", observation) }()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("observation did not enter its bounded body read")
+	}
+	f.ack(t, "/before", f.call(1), http.StatusOK, 1)
+	unblock()
+	if got := <-done; got.err != nil || got.status != http.StatusOK {
+		t.Fatalf("observation did not drain: status=%d error=%v", got.status, got.err)
+	}
+	f.ack(t, "/outcome", f.outcome(2, nil), http.StatusOK, 2)
+	if got := f.result(t); got.err != nil {
+		t.Fatal(got.err)
 	}
 }
 
@@ -302,6 +403,78 @@ func TestHTTPExecutorBusyAndSingleAssignment(t *testing.T) {
 	f.ack(t, "/outcome", f.outcome(1, nil), http.StatusOK, 1)
 	if result := f.result(t); result.err != nil {
 		t.Fatal(result.err)
+	}
+}
+
+func TestHTTPExecutorFailedOutcomeAcrossMissingCallbackPreservesOnlyRawFacts(t *testing.T) {
+	var after atomic.Int32
+	f := newHTTPServerTest(t, context.Background(), testJob(command.Comment), runnerExecutionCheckpoints{after: func(CallCheckpoint) error { after.Add(1); return nil }}, nil)
+	f.pull(t)
+	f.ack(t, "/before", f.call(1), http.StatusOK, 1)
+	// Sequence 2 was the returned paid receipt, lost before reaching this handler.
+	outcome := f.outcome(3, nil)
+	outcome.Result.Calls = []CallUsage{{Provider: "codex", Role: roleMain, Round: 1, Tokens: usage.Tokens{Input: 17, Output: 4}, Complete: true}}
+	f.ack(t, "/outcome", outcome, http.StatusConflict, 3)
+	outcome.Failure = newHTTPFailure(errors.New("paid receipt transport failed"))
+	f.ack(t, "/outcome", outcome, http.StatusOK, 3)
+	got := f.result(t)
+	if !errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || !reflect.DeepEqual(got.result, outcome.Result) || after.Load() != 0 {
+		t.Fatalf("raw failed outcome lost facts or acknowledged an unseen receipt: result=%+v error=%v after=%d", got.result, got.err, after.Load())
+	}
+	f.executor.mu.Lock()
+	unavailable := f.executor.unavailable
+	f.executor.mu.Unlock()
+	if !unavailable {
+		t.Fatal("a failed outcome across an unacknowledged checkpoint gap released capacity")
+	}
+}
+
+func TestHTTPExecutorStatusIsIndependentAndAllowsObservationGaps(t *testing.T) {
+	var before atomic.Int32
+	f := newHTTPServerTest(t, context.Background(), testJob(command.Comment), runnerExecutionCheckpoints{before: func(CallCheckpoint) error { before.Add(1); return nil }}, func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/status" {
+				w = httpServerFailWrite{w}
+			}
+			next.ServeHTTP(w, r)
+		})
+	})
+	f.pull(t)
+	status := Status{Version: ProtocolVersion, Identity: f.job.Identity, SourceRef: f.job.Source.Head, Sequence: 2, WorkerState: "busy", Phase: "upload"}
+	if got := f.request("/status", httpObservation{Status: status}); got.err == nil {
+		t.Fatal("injected observation ACK failure unexpectedly succeeded")
+	}
+	if got, ok := f.executor.Status(); !ok || got != status || f.tx.ctx.Err() != nil {
+		t.Fatalf("lost observation 1 or ACK changed action admission: status=%+v present=%t ctx=%v", got, ok, f.tx.ctx.Err())
+	}
+	f.ack(t, "/before", f.call(1), http.StatusOK, 1)
+	f.ack(t, "/outcome", f.outcome(2, nil), http.StatusOK, 2)
+	if got := f.result(t); got.err != nil || before.Load() != 1 {
+		t.Fatalf("status failure altered required checkpoint/outcome stream: error=%v before=%d", got.err, before.Load())
+	}
+	f.executor.mu.Lock()
+	unavailable := f.executor.unavailable
+	f.executor.mu.Unlock()
+	if unavailable {
+		t.Fatal("observation ACK failure quarantined a conclusive transaction")
+	}
+}
+
+func TestHTTPExecutorRejectsStaleAndForeignStatusWithoutChangingPaidSequence(t *testing.T) {
+	f := newHTTPServerTest(t, context.Background(), testJob(command.Comment), runnerExecutionCheckpoints{}, nil)
+	f.pull(t)
+	status := Status{Version: ProtocolVersion, Identity: f.job.Identity, SourceRef: f.job.Source.Head, Sequence: 2, WorkerState: "busy", Phase: "upload"}
+	f.ack(t, "/status", httpObservation{Status: status}, http.StatusOK, 2)
+	f.ack(t, "/status", httpObservation{Status: status}, http.StatusConflict, 2)
+	foreign := status
+	foreign.Sequence, foreign.Identity.AttemptID = 3, "foreign"
+	f.ack(t, "/status", httpObservation{Status: foreign}, http.StatusConflict, 3)
+	if got, ok := f.executor.Status(); !ok || got != status || f.tx.ctx.Err() != nil {
+		t.Fatalf("rejected observation changed accepted status or canceled action: %+v %t %v", got, ok, f.tx.ctx.Err())
+	}
+	f.ack(t, "/outcome", f.outcome(1, nil), http.StatusOK, 1)
+	if got := f.result(t); got.err != nil {
+		t.Fatal(got.err)
 	}
 }
 
@@ -325,9 +498,9 @@ func TestHTTPExecutorCanceledBeforeConsumesOnlyBoundSequence(t *testing.T) {
 		t.Fatalf("canceled Before reached paid admission or lost its known cause: %+v saves=%d", ack, before.Load())
 	}
 	status := Status{Version: ProtocolVersion, Identity: f.job.Identity, SourceRef: f.job.Source.Head, Sequence: 1, WorkerState: "busy", Phase: "upload"}
-	f.ack(t, "/status", httpObservation{Sequence: 2, Status: status}, http.StatusOK, 2)
-	outcome := f.outcome(3, context.Canceled)
-	f.ack(t, "/outcome", outcome, http.StatusOK, 3)
+	f.ack(t, "/status", httpObservation{Status: status}, http.StatusOK, 1)
+	outcome := f.outcome(2, context.Canceled)
+	f.ack(t, "/outcome", outcome, http.StatusOK, 2)
 	got := f.result(t)
 	if !errors.Is(got.err, context.Canceled) || errors.Is(got.err, monitor.ErrTerminalJob) || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || !reflect.DeepEqual(got.result, outcome.Result) {
 		t.Fatalf("known unpaid cancellation became ambiguous: %+v error=%v", got.result, got.err)

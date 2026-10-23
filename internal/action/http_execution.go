@@ -35,8 +35,7 @@ type httpReview struct {
 }
 
 type httpObservation struct {
-	Sequence uint64 `json:"sequence"`
-	Status   Status `json:"status"`
+	Status Status `json:"status"`
 }
 
 type httpOutcome struct {

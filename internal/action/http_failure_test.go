@@ -7,10 +7,13 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"os/exec"
 	"strings"
+	"syscall"
 	"testing"
 	"unicode/utf8"
 
+	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/processgroup"
 	"github.com/linkdata/minion/internal/workroot"
@@ -30,6 +33,10 @@ func TestHTTPFailurePreservesFiniteCauses(t *testing.T) {
 		{"scope unconfirmed", processgroup.ErrScopeUnconfirmed},
 		{"exhausted", processgroup.ErrExhausted},
 		{"outcome unknown", monitor.ErrExecutionOutcomeUnknown},
+		{"missing executable", exec.ErrNotFound},
+		{"no space", syscall.ENOSPC},
+		{"quota exceeded", syscall.EDQUOT},
+		{"output limit", aicli.ErrOutputLimit},
 	}
 	for _, cause := range causes {
 		t.Run(cause.name, func(t *testing.T) {

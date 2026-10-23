@@ -3,9 +3,12 @@ package action
 import (
 	"context"
 	"errors"
+	"os/exec"
 	"strings"
+	"syscall"
 	"unicode/utf8"
 
+	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/processgroup"
 	"github.com/linkdata/minion/internal/workroot"
@@ -19,17 +22,21 @@ const (
 // httpFailure carries only the policy facts used across one execution transaction.
 // Message is a private diagnostic; original parent callback errors remain local.
 type httpFailure struct {
-	Message          string                   `json:"message"`
-	Terminal         bool                     `json:"terminal,omitempty"`
-	Canceled         bool                     `json:"canceled,omitempty"`
-	Deadline         bool                     `json:"deadline,omitempty"`
-	Unsafe           bool                     `json:"unsafe,omitempty"`
-	Descendants      bool                     `json:"descendants,omitempty"`
-	Unconfirmed      bool                     `json:"unconfirmed,omitempty"`
-	ScopeUnconfirmed bool                     `json:"scope_unconfirmed,omitempty"`
-	Exhausted        bool                     `json:"exhausted,omitempty"`
-	OutcomeUnknown   bool                     `json:"outcome_unknown,omitempty"`
-	Exhaustion       *processgroup.Exhaustion `json:"exhaustion,omitempty"`
+	Message           string                   `json:"message"`
+	Terminal          bool                     `json:"terminal,omitempty"`
+	Canceled          bool                     `json:"canceled,omitempty"`
+	Deadline          bool                     `json:"deadline,omitempty"`
+	Unsafe            bool                     `json:"unsafe,omitempty"`
+	Descendants       bool                     `json:"descendants,omitempty"`
+	Unconfirmed       bool                     `json:"unconfirmed,omitempty"`
+	ScopeUnconfirmed  bool                     `json:"scope_unconfirmed,omitempty"`
+	Exhausted         bool                     `json:"exhausted,omitempty"`
+	OutcomeUnknown    bool                     `json:"outcome_unknown,omitempty"`
+	MissingExecutable bool                     `json:"missing_executable,omitempty"`
+	NoSpace           bool                     `json:"no_space,omitempty"`
+	QuotaExceeded     bool                     `json:"quota_exceeded,omitempty"`
+	OutputLimit       bool                     `json:"output_limit,omitempty"`
+	Exhaustion        *processgroup.Exhaustion `json:"exhaustion,omitempty"`
 }
 
 func newHTTPFailure(err error) *httpFailure {
@@ -42,7 +49,9 @@ func newHTTPFailure(err error) *httpFailure {
 		Deadline: errors.Is(err, context.DeadlineExceeded), Unsafe: errors.Is(err, workroot.ErrUnsafe),
 		Descendants: errors.Is(err, processgroup.ErrDescendants), Unconfirmed: errors.Is(err, processgroup.ErrUnconfirmed),
 		ScopeUnconfirmed: errors.Is(err, processgroup.ErrScopeUnconfirmed), Exhausted: errors.Is(err, processgroup.ErrExhausted),
-		OutcomeUnknown: errors.Is(err, monitor.ErrExecutionOutcomeUnknown),
+		OutcomeUnknown:    errors.Is(err, monitor.ErrExecutionOutcomeUnknown),
+		MissingExecutable: errors.Is(err, exec.ErrNotFound), NoSpace: errors.Is(err, syscall.ENOSPC),
+		QuotaExceeded: errors.Is(err, syscall.EDQUOT), OutputLimit: errors.Is(err, aicli.ErrOutputLimit),
 	}
 	var exhaustion *processgroup.Exhaustion
 	if errors.As(err, &exhaustion) && exhaustion != nil {
@@ -110,6 +119,8 @@ func (f *httpFailure) err() error {
 		{f.Descendants, processgroup.ErrDescendants}, {f.Unconfirmed, processgroup.ErrUnconfirmed},
 		{f.ScopeUnconfirmed, processgroup.ErrScopeUnconfirmed}, {f.Exhausted, processgroup.ErrExhausted},
 		{f.OutcomeUnknown, monitor.ErrExecutionOutcomeUnknown},
+		{f.MissingExecutable, exec.ErrNotFound}, {f.NoSpace, syscall.ENOSPC},
+		{f.QuotaExceeded, syscall.EDQUOT}, {f.OutputLimit, aicli.ErrOutputLimit},
 	} {
 		if fact.present {
 			causes = append(causes, fact.cause)

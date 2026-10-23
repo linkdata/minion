@@ -5,12 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -24,12 +26,13 @@ import (
 func TestExecuteOrdersAccountingReviewAndPublicationCheckpoints(t *testing.T) {
 	for _, overHTTP := range []bool{false, true} {
 		for _, capped := range []bool{false, true} {
-			t.Run(fmt.Sprintf("HTTP=%t/capped=%t", overHTTP, capped), func(t *testing.T) { testExecuteOrdersCheckpoints(t, overHTTP, capped) })
+			t.Run(fmt.Sprintf("HTTP=%t/capped=%t", overHTTP, capped), func(t *testing.T) { testExecuteOrdersCheckpoints(t, overHTTP, capped, false) })
 		}
 	}
+	t.Run("HTTP optional observations lost", func(t *testing.T) { testExecuteOrdersCheckpoints(t, true, false, true) })
 }
 
-func testExecuteOrdersCheckpoints(t *testing.T, overHTTP, capped bool) {
+func testExecuteOrdersCheckpoints(t *testing.T, overHTTP, capped, loseObservations bool) {
 	maxRounds, stopReason := 3, "approved"
 	if capped {
 		maxRounds, stopReason = 2, "round_cap"
@@ -186,8 +189,25 @@ func testExecuteOrdersCheckpoints(t *testing.T, overHTTP, capped bool) {
 		t.Cleanup(func() { cancelWorker(); _ = remote.Close() })
 		worker := e.Runner
 		worker.WorkRoot = t.TempDir()
+		client := transport.Client()
+		if loseObservations {
+			underlying := client.Transport
+			var observations atomic.Int32
+			client.Transport = httpClientTestTransport(func(r *http.Request) (*http.Response, error) {
+				if r.URL.Path == "/status" && observations.Add(1) == 1 {
+					_ = r.Body.Close()
+					return nil, io.ErrUnexpectedEOF // Prepare never reaches parent; upload sequence 2 must remain valid.
+				}
+				response, err := underlying.RoundTrip(r)
+				if r.URL.Path == "/status" && err == nil {
+					_ = response.Body.Close()
+					response.Body = io.NopCloser(strings.NewReader("{")) // Parent retained upload; its ACK was malformed.
+				}
+				return response, err
+			})
+		}
 		workerDone = make(chan error, 1)
-		go func() { workerDone <- RunHTTP(workerCtx, transport.Client(), transport.URL, "local", &worker) }()
+		go func() { workerDone <- RunHTTP(workerCtx, client, transport.URL, "local", &worker) }()
 		e.Executor = remote
 	}
 	if err := e.Execute(context.Background(), request); err != nil {

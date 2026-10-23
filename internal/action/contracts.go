@@ -66,7 +66,7 @@ type Job struct {
 	CriticNonblockingRounds int `json:"critic_nonblocking_rounds"`
 	// CriticConsecutiveNoBlockerRounds is resolved; zero bypasses only the streak requirement.
 	CriticConsecutiveNoBlockerRounds int `json:"critic_consecutive_no_blocker_rounds"`
-	// RuntimeBudget is remaining local time; a future transport must subtract transit time.
+	// RuntimeBudget is remaining execution time; HTTP subtracts validation and transit time before Runner admission.
 	RuntimeBudget time.Duration `json:"runtime_budget_ns"`
 }
 

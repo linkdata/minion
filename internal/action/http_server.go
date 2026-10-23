@@ -30,9 +30,10 @@ type HTTPExecutor struct {
 }
 
 type httpTransaction struct {
-	mu       sync.Mutex
-	mutation sync.Mutex
-	handlers sync.WaitGroup
+	mu          sync.Mutex
+	mutation    sync.Mutex
+	observation sync.Mutex
+	handlers    sync.WaitGroup
 
 	job     Job
 	binding httpBinding
@@ -200,7 +201,9 @@ func (e *HTTPExecutor) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		e.serveNext(w, r)
 	case "/cancel":
 		e.serveCancel(w, r)
-	case "/before", "/after", "/review", "/status", "/outcome":
+	case "/status":
+		e.serveStatus(w, r)
+	case "/before", "/after", "/review", "/outcome":
 		e.serveMutation(w, r)
 	default:
 		httpServerReject(w, "error", http.StatusNotFound, httpBinding{}, 0, errors.New("unknown HTTP execution route"))
@@ -281,26 +284,74 @@ func (e *HTTPExecutor) transaction() *httpTransaction {
 	return e.active
 }
 
-func (tx *httpTransaction) enter(binding httpBinding, sequence uint64, kind string) error {
+func (tx *httpTransaction) enter(binding httpBinding, sequence uint64, kind string, failedOutcome bool) (bool, error) {
 	tx.mu.Lock()
 	defer tx.mu.Unlock()
-	if !tx.delivered || binding != tx.binding || sequence == 0 || sequence != tx.sequence+1 {
-		return errors.New("HTTP checkpoint binding, sequence or admission differs")
+	gap := sequence > tx.sequence+1
+	if !tx.delivered || binding != tx.binding || sequence == 0 || sequence <= tx.sequence || (gap && !failedOutcome) {
+		return false, errors.New("HTTP checkpoint binding, sequence or admission differs")
 	}
 	// A bound request consumes its sequence even when model admission is refused.
 	tx.sequence = sequence
 	if kind == "before" {
 		if err := tx.ctx.Err(); err != nil {
 			if errors.Is(err, context.DeadlineExceeded) {
-				return errors.Join(monitor.ErrTerminalJob, err)
+				return false, errors.Join(monitor.ErrTerminalJob, err)
 			}
-			return err
+			return false, err
 		}
 		if tx.stopping {
-			return errors.New("HTTP execution is stopping; no new call is admitted")
+			return false, errors.New("HTTP execution is stopping; no new call is admitted")
 		}
 	}
-	return nil
+	return gap, nil
+}
+
+func (e *HTTPExecutor) serveStatus(w http.ResponseWriter, r *http.Request) {
+	tx := e.transaction()
+	if tx == nil || !tx.observation.TryLock() {
+		httpServerReject(w, "status", http.StatusConflict, httpBinding{}, 0, errors.New("HTTP execution has no observation slot"))
+		return
+	}
+	tx.mu.Lock()
+	if tx.fenced || !tx.delivered {
+		tx.mu.Unlock()
+		tx.observation.Unlock()
+		httpServerReject(w, "status", http.StatusConflict, httpBinding{}, 0, errors.New("HTTP execution has closed observation admission"))
+		return
+	}
+	tx.handlers.Add(1)
+	tx.mu.Unlock()
+	defer tx.handlers.Done()
+	var observation httpObservation
+	err := httpServerRead(w, r, httpControlBytes, &observation)
+	status := observation.Status
+	binding := httpBinding{status.Version, status.Identity, status.SourceRef}
+	code := httpInputStatus(err)
+	if err == nil {
+		err = status.Validate(tx.job)
+		if err == nil {
+			tx.mu.Lock()
+			if status.Sequence <= tx.statusSeq {
+				err = errors.New("HTTP Status sequence is stale")
+			} else {
+				tx.statusSeq = status.Sequence
+			}
+			tx.mu.Unlock()
+		}
+		if err != nil {
+			code = http.StatusConflict
+		}
+	}
+	if err == nil {
+		e.mu.Lock()
+		e.status, e.hasStatus = status, true
+		e.mu.Unlock()
+		code = http.StatusOK
+	}
+	tx.observation.Unlock()
+	// Observation delivery never admits paid work or changes its sequence or outcome.
+	_ = httpServerWrite(w, code, httpAcknowledgement{httpBinding: binding, Kind: "status", Sequence: status.Sequence, Failure: newHTTPFailure(err)})
 }
 
 // stopExecution begins control grace; a known store refusal need not cancel the worker before its error returns.
@@ -344,6 +395,7 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 	}()
 	var binding httpBinding
 	var sequence uint64
+	var failedOutcome, sequenceGap bool
 	var apply func() error
 	var err error
 	switch kind {
@@ -368,26 +420,6 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 			err = httpReviewShape(review.Checkpoint)
 		}
 		apply = func() error { return tx.sink.Review(review.Checkpoint) }
-	case "status":
-		var observation httpObservation
-		err = httpServerRead(w, r, httpControlBytes, &observation)
-		binding, sequence = httpBinding{observation.Status.Version, observation.Status.Identity, observation.Status.SourceRef}, observation.Sequence
-		if err == nil {
-			err = observation.Status.Validate(tx.job)
-		}
-		apply = func() error {
-			tx.mu.Lock()
-			if observation.Status.Sequence != tx.statusSeq+1 {
-				tx.mu.Unlock()
-				return errors.New("HTTP Status sequence differs")
-			}
-			tx.statusSeq = observation.Status.Sequence
-			tx.mu.Unlock()
-			e.mu.Lock()
-			e.status, e.hasStatus = observation.Status, true
-			e.mu.Unlock()
-			return nil
-		}
 	case "outcome":
 		var outcome httpOutcome
 		err = httpServerRead(w, r, httpOutcomeBytes, &outcome)
@@ -398,9 +430,15 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 		if err == nil {
 			err = outcome.Failure.validate()
 		}
+		failedOutcome = outcome.Failure != nil
 		apply = func() error {
 			tx.mu.Lock()
 			tx.result, tx.runErr = outcome.Result, outcome.Failure.err()
+			// A missing callback cannot be acknowledged from raw outcome claims.
+			if sequenceGap {
+				tx.runErr = errors.Join(tx.runErr, monitor.ErrExecutionOutcomeUnknown)
+				tx.quarantine = true
+			}
 			// Preserve late paid facts without accepting a success beyond the fixed expiry.
 			if err := tx.budget.Err(); err != nil {
 				tx.runErr = errors.Join(tx.runErr, err)
@@ -426,7 +464,8 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 		httpServerReject(w, kind, httpInputStatus(err), httpBinding{}, sequence, err)
 		return
 	}
-	if err := tx.enter(binding, sequence, kind); err != nil {
+	sequenceGap, err = tx.enter(binding, sequence, kind, failedOutcome)
+	if err != nil {
 		tx.mutation.Unlock()
 		locked = false
 		httpServerReject(w, kind, http.StatusConflict, binding, sequence, err)
@@ -481,9 +520,6 @@ func (e *HTTPExecutor) serveCancel(w http.ResponseWriter, r *http.Request) {
 	tx.mu.Unlock()
 	defer tx.handlers.Done()
 	if err := httpServerWatchHeaders(w); err != nil {
-		tx.mu.Lock()
-		tx.quarantine = true
-		tx.mu.Unlock()
 		tx.stopExecution(err, true)
 		return
 	}

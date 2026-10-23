@@ -29,10 +29,14 @@ func TestRunHTTPReportsActualObservationsAndRawPaidReceipts(t *testing.T) {
 		name            string
 		invalidCounters bool
 		holdWatch       bool
+		lostStatus      string
+		malformedStatus bool
 	}{
 		{name: "complete"},
 		{name: "invalid signed counters", invalidCounters: true},
 		{name: "intentional held watch stop", holdWatch: true},
+		{name: "lost prepare observation ACK", lostStatus: "prepare"},
+		{name: "malformed upload observation ACK", lostStatus: "upload", malformedStatus: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			job := testJob(command.Comment)
@@ -94,8 +98,22 @@ func TestRunHTTPReportsActualObservationsAndRawPaidReceipts(t *testing.T) {
 					if value.Status.Sequence != want {
 						t.Errorf("status sequence reused transport sequence: %+v", value)
 					}
-					requestSequence = value.Sequence
+					requestSequence = value.Status.Sequence
 					events <- "status/" + value.Status.Phase
+					if value.Status.Phase == test.lostStatus {
+						if test.malformedStatus {
+							w.Header().Set("Content-Type", "application/json")
+							_, _ = fmt.Fprint(w, "{")
+						} else {
+							connection, _, err := w.(http.Hijacker).Hijack()
+							if err != nil {
+								t.Error(err)
+							} else {
+								_ = connection.Close()
+							}
+						}
+						return
+					}
 				case "before", "after":
 					var value httpCall
 					if err := httpDecode(r.Body, httpControlBytes, &value); err != nil {
@@ -120,7 +138,7 @@ func TestRunHTTPReportsActualObservationsAndRawPaidReceipts(t *testing.T) {
 					http.NotFound(w, r)
 					return
 				}
-				if requestSequence != sequence.Add(1) {
+				if kind != "status" && requestSequence != sequence.Add(1) {
 					t.Errorf("transport sequence skipped or repeated: %d", requestSequence)
 				}
 				httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: binding, Sequence: requestSequence, Kind: kind})
@@ -240,7 +258,7 @@ func TestHTTPClientRequiresExactAcknowledgementAndNeverRetries(t *testing.T) {
 }
 
 func TestRunHTTPRejectsAssignmentBeforeWatchOrRunner(t *testing.T) {
-	for _, name := range []string{"version", "executor", "expired", "missing expiry", "trailing JSON"} {
+	for _, name := range []string{"version", "executor", "expired", "expired outcome ACK lost", "missing expiry", "trailing JSON"} {
 		t.Run(name, func(t *testing.T) {
 			job := testJob(command.Comment)
 			assignment := httpAssignment{Job: job, Expires: time.Now().Add(job.RuntimeBudget).UnixNano()}
@@ -249,24 +267,47 @@ func TestRunHTTPRejectsAssignmentBeforeWatchOrRunner(t *testing.T) {
 				assignment.Job.Version++
 			case "executor":
 				assignment.Job.Identity.ExecutorID = "foreign"
-			case "expired":
+			case "expired", "expired outcome ACK lost":
 				assignment.Expires = time.Now().Add(-time.Minute).UnixNano()
 			case "missing expiry":
 				assignment.Expires = 0
 			}
 			var requests atomic.Int32
+			outcomes := make(chan httpOutcome, 1)
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if requests.Add(1) != 1 || r.URL.Path != "/next" {
-					t.Error("invalid assignment advanced beyond its one pull")
-				}
-				httpClientTestJSON(t, w, assignment)
-				if name == "trailing JSON" {
-					_, _ = fmt.Fprint(w, "{}")
+				requests.Add(1)
+				switch r.URL.Path {
+				case "/next":
+					httpClientTestJSON(t, w, assignment)
+					if name == "trailing JSON" {
+						_, _ = fmt.Fprint(w, "{}")
+					}
+				case "/outcome":
+					var outcome httpOutcome
+					if err := httpDecode(r.Body, httpOutcomeBytes, &outcome); err != nil {
+						t.Error(err)
+					}
+					outcomes <- outcome
+					w.Header().Set("Content-Type", "application/json")
+					if name != "expired outcome ACK lost" {
+						httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: httpJobBinding(job), Kind: "outcome", Sequence: outcome.Sequence})
+					}
+				default:
+					t.Errorf("invalid or expired assignment advanced to %s", r.URL.Path)
+					http.NotFound(w, r)
 				}
 			}))
 			defer server.Close()
 			err := RunHTTP(context.Background(), server.Client(), server.URL, job.Identity.ExecutorID, &Runner{runModel: forbidModel(t)})
-			if !errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || requests.Load() != 1 {
+			if name == "expired" || name == "expired outcome ACK lost" {
+				if !errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, context.DeadlineExceeded) || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) != (name == "expired outcome ACK lost") || requests.Load() != 2 || len(outcomes) != 1 {
+					t.Fatalf("expired known assignment lost its bound no-work outcome: error=%v requests=%d outcomes=%d", err, requests.Load(), len(outcomes))
+				}
+				outcome := <-outcomes
+				if outcome.Sequence != 1 || !outcome.Result.matchesJob(job) || outcome.Result.Answer != "" || len(outcome.Result.Calls) != 0 || outcome.Failure == nil || !outcome.Failure.Terminal || !outcome.Failure.Deadline || outcome.Failure.OutcomeUnknown {
+					t.Fatalf("expired assignment fabricated work or unknown execution: %+v", outcome)
+				}
+			} else if !errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || requests.Load() != 1 || len(outcomes) != 0 {
 				t.Fatalf("invalid assignment ran or became repeatable: error=%v requests=%d", err, requests.Load())
 			}
 		})
@@ -274,7 +315,7 @@ func TestRunHTTPRejectsAssignmentBeforeWatchOrRunner(t *testing.T) {
 }
 
 func TestRunHTTPRequiresWatchAdmissionBeforeRunner(t *testing.T) {
-	for _, name := range []string{"known negative ACK", "invalid headers"} {
+	for _, name := range []string{"known negative ACK", "parent unknown failure", "invalid headers"} {
 		t.Run(name, func(t *testing.T) {
 			job := testJob(command.Comment)
 			binding := httpJobBinding(job)
@@ -284,10 +325,14 @@ func TestRunHTTPRequiresWatchAdmissionBeforeRunner(t *testing.T) {
 				case "/next":
 					httpClientTestJSON(t, w, httpAssignment{Job: job, Expires: time.Now().Add(job.RuntimeBudget).UnixNano()})
 				case "/cancel":
-					if name == "known negative ACK" {
+					if name != "invalid headers" {
+						failure := workroot.ErrUnsafe
+						if name == "parent unknown failure" {
+							failure = errors.Join(monitor.ErrExecutionOutcomeUnknown, processgroup.ErrUnconfirmed, processgroup.ErrScopeUnconfirmed)
+						}
 						w.Header().Set("Content-Type", "application/json")
 						w.WriteHeader(http.StatusConflict)
-						httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: binding, Kind: "cancel", Failure: newHTTPFailure(workroot.ErrUnsafe)})
+						httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: binding, Kind: "cancel", Failure: newHTTPFailure(failure)})
 					} else {
 						w.Header().Set("Content-Type", "text/plain")
 					}
@@ -305,13 +350,16 @@ func TestRunHTTPRequiresWatchAdmissionBeforeRunner(t *testing.T) {
 			}))
 			defer server.Close()
 			err := RunHTTP(context.Background(), server.Client(), server.URL, job.Identity.ExecutorID, &Runner{runModel: forbidModel(t)})
-			unknown := name == "invalid headers"
-			if err == nil || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) != unknown || (!unknown && !errors.Is(err, workroot.ErrUnsafe)) || len(outcomes) != 1 {
+			unknown := name == "parent unknown failure"
+			if err == nil || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) != unknown || name == "known negative ACK" && !errors.Is(err, workroot.ErrUnsafe) || len(outcomes) != 1 {
 				t.Fatalf("watch admission failure lost its cause or failed outcome: error=%v outcomes=%d", err, len(outcomes))
 			}
 			outcome := <-outcomes
-			if outcome.Failure == nil || outcome.Failure.OutcomeUnknown != unknown || len(outcome.Result.Calls) != 0 || outcome.Result.Answer != "" {
+			if outcome.Sequence != 1 || !outcome.Result.matchesJob(job) || outcome.Failure == nil || outcome.Failure.OutcomeUnknown != unknown || len(outcome.Result.Calls) != 0 || outcome.Result.Answer != "" {
 				t.Fatalf("watch startup failure fabricated execution: %+v", outcome)
+			}
+			if unknown && (!errors.Is(err, processgroup.ErrUnconfirmed) || !errors.Is(err, processgroup.ErrScopeUnconfirmed) || !outcome.Failure.Unconfirmed || !outcome.Failure.ScopeUnconfirmed) {
+				t.Fatalf("known no-work transport mode erased supplied parent failure flags: error=%v outcome=%+v", err, outcome)
 			}
 		})
 	}
@@ -349,13 +397,73 @@ func TestRunHTTPBoundsStalledWatchHeadersByAcceptedExpiry(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	err := RunHTTP(ctx, server.Client(), server.URL, job.Identity.ExecutorID, &Runner{runModel: forbidModel(t)})
-	if !errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, monitor.ErrTerminalJob) || ctx.Err() != nil || len(watchEntered) != 1 || len(outcomes) != 1 {
+	if errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, monitor.ErrTerminalJob) || ctx.Err() != nil || len(watchEntered) != 1 || len(outcomes) != 1 {
 		t.Fatalf("stalled watch outlived the accepted runtime or ran models: error=%v caller=%v watch=%d outcome=%d", err, ctx.Err(), len(watchEntered), len(outcomes))
 	}
 	outcome := <-outcomes
-	if outcome.Failure == nil || !outcome.Failure.OutcomeUnknown || !outcome.Failure.Deadline || !outcome.Failure.Terminal || len(outcome.Result.Calls) != 0 || outcome.Result.Answer != "" {
+	if outcome.Failure == nil || outcome.Failure.OutcomeUnknown || !outcome.Failure.Deadline || !outcome.Failure.Terminal || len(outcome.Result.Calls) != 0 || outcome.Result.Answer != "" {
 		t.Fatalf("stalled watch fabricated execution or lost its admission deadline: %+v", outcome)
 	}
+}
+
+func TestRunHTTPKnownNoWorkOutcomeReleasesParentCapacity(t *testing.T) {
+	for _, expired := range []bool{false, true} {
+		t.Run(fmt.Sprintf("expired assignment=%t", expired), func(t *testing.T) {
+			job := testJob(command.Comment)
+			if expired {
+				job.RuntimeBudget = time.Second
+			}
+			var callbacks atomic.Int32
+			sink := runnerExecutionCheckpoints{
+				before: func(CallCheckpoint) error { callbacks.Add(1); return nil },
+				after:  func(CallCheckpoint) error { callbacks.Add(1); return nil },
+				review: func(ReviewCheckpoint) error { callbacks.Add(1); return nil },
+			}
+			f := newHTTPServerTest(t, context.Background(), job, sink, func(next http.Handler) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if !expired && r.URL.Path == "/cancel" {
+						w = httpClientFailedWatchHeaders{w}
+					}
+					next.ServeHTTP(w, r)
+				})
+			})
+			client := *f.server.Client()
+			transport := client.Transport
+			client.Transport = httpClientTestTransport(func(r *http.Request) (*http.Response, error) {
+				response, err := transport.RoundTrip(r)
+				if expired && r.URL.Path == "/next" && err == nil {
+					<-f.tx.budget.Done() // Deliver the valid assignment only after its fixed expiry.
+				}
+				return response, err
+			})
+			err := RunHTTP(context.Background(), &client, f.server.URL, job.Identity.ExecutorID, &Runner{runModel: forbidModel(t)})
+			got := f.result(t)
+			if err == nil || got.err == nil || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || callbacks.Load() != 0 || !got.result.matchesJob(job) || len(got.result.Calls) != 0 || got.result.Answer != "" {
+				t.Fatalf("conclusive no-work outcome became unknown or fabricated work: worker=%v parent=%v result=%+v callbacks=%d", err, got.err, got.result, callbacks.Load())
+			}
+			if expired && (!errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, context.DeadlineExceeded) || !errors.Is(got.err, monitor.ErrTerminalJob) || !errors.Is(got.err, context.DeadlineExceeded)) {
+				t.Fatalf("expired assignment lost its known deadline cause: worker=%v parent=%v", err, got.err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			if _, err := f.executor.Execute(ctx, job, sink); !errors.Is(err, context.Canceled) || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) {
+				t.Fatalf("known no-work outcome quarantined reusable parent capacity: %v", err)
+			}
+		})
+	}
+}
+
+type httpClientTestTransport func(*http.Request) (*http.Response, error)
+
+func (f httpClientTestTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+type httpClientFailedWatchHeaders struct{ http.ResponseWriter }
+
+func (w httpClientFailedWatchHeaders) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+func (w httpClientFailedWatchHeaders) FlushError() error           { return io.ErrClosedPipe }
+func (w httpClientFailedWatchHeaders) WriteHeader(status int) {
+	w.Header().Set("Content-Type", "text/plain")
+	w.ResponseWriter.WriteHeader(status)
 }
 
 func TestHTTPClientWatchDistinguishesLocalStopFromParsedReplies(t *testing.T) {
@@ -411,7 +519,7 @@ func TestRunHTTPDeliversPaidFactsAfterCancellationWatchStopsAction(t *testing.T)
 			watchContexts := make(chan context.Context, 1)
 			after := make(chan CallUsage, 1)
 			outcome := make(chan httpOutcome, 1)
-			var native, requests atomic.Uint64
+			var native, requests, mutationSequence atomic.Uint64
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				kind := strings.TrimPrefix(r.URL.Path, "/")
 				var sequence uint64
@@ -457,7 +565,7 @@ func TestRunHTTPDeliversPaidFactsAfterCancellationWatchStopsAction(t *testing.T)
 					if err := httpDecode(r.Body, httpControlBytes, &value); err != nil {
 						t.Error(err)
 					}
-					sequence = value.Sequence
+					sequence = value.Status.Sequence
 				case "before", "after":
 					var value httpCall
 					if err := httpDecode(r.Body, httpControlBytes, &value); err != nil {
@@ -484,7 +592,8 @@ func TestRunHTTPDeliversPaidFactsAfterCancellationWatchStopsAction(t *testing.T)
 				default:
 					t.Errorf("unexpected request: %s", r.URL.Path)
 				}
-				if sequence != requests.Add(1) {
+				requests.Add(1)
+				if kind != "status" && sequence != mutationSequence.Add(1) {
 					t.Errorf("request sequence changed after cancellation: %d", sequence)
 				}
 				httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: binding, Sequence: sequence, Kind: kind})
