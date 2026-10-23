@@ -602,6 +602,7 @@ func TestRunOnceDoesNotExhaustJobsDuringInfrastructureFailure(t *testing.T) {
 		{"server error", &github.StatusError{StatusCode: http.StatusInternalServerError}},
 		{"bad gateway", &github.StatusError{StatusCode: http.StatusBadGateway}},
 		{"connection", &url.Error{Op: "Get", URL: "https://api.example.invalid", Err: io.EOF}},
+		{"request transport marker", ErrRequestTransport},
 		{"work root", workroot.ErrUnsafe},
 	} {
 		t.Run(test.name, func(t *testing.T) {

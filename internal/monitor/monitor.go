@@ -40,6 +40,13 @@ type GitHub interface {
 // ErrTerminalJob marks a failed execution that cannot succeed by rerunning the models.
 var ErrTerminalJob = errors.New("terminal job failure")
 
+// ErrExecutionOutcomeUnknown marks paid execution or returned facts whose outcome cannot be established.
+// Such work must not be automatically repeated.
+var ErrExecutionOutcomeUnknown = errors.New("execution outcome unknown")
+
+// ErrRequestTransport retains a request failure's infrastructure retry classification.
+var ErrRequestTransport = errors.New("request transport failure")
+
 // ErrPostModelPublication marks publication failure for completed or previously completed model work.
 //
 // Retrying it must consume a job attempt even when the write error is transient.
@@ -89,7 +96,7 @@ func (m *Monitor) logf(format string, args ...any) {
 // It persists each completed command before advancing that repository's cursor.
 // Failed threads remain queued for retries without blocking other repositories.
 // Parent cancellation preserves earlier failures and unprocessed retry state/cursors.
-// Executions reporting parent cancellation refund their attempt unless publication has begun.
+// Executions reporting parent cancellation refund their attempt unless publication has begun or the execution outcome is unknown.
 func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, error) {
 	if err := ctx.Err(); err != nil {
 		return store.Data.NextPollAt, err
@@ -398,16 +405,17 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			if err := m.Handler.Execute(ctx, job); err != nil {
 				failureErr := fmt.Errorf("%s from %s: %w", cmd.Action, itemLocation(item), err)
 				publicationFailure := errors.Is(err, ErrPostModelPublication)
+				outcomeUnknown := errors.Is(err, ErrExecutionOutcomeUnknown)
 				scopeUnconfirmed := errors.Is(err, processgroup.ErrScopeUnconfirmed)
 				unconfirmedProcesses := errors.Is(err, processgroup.ErrUnconfirmed) || scopeUnconfirmed
-				interrupted := !unconfirmedProcesses && !errors.Is(err, processgroup.ErrExhausted) && ctx.Err() != nil && errors.Is(err, context.Canceled) && !publicationFailure
+				interrupted := !outcomeUnknown && !unconfirmedProcesses && !errors.Is(err, processgroup.ErrExhausted) && ctx.Err() != nil && errors.Is(err, context.Canceled) && !publicationFailure
 				switch {
 				case scopeUnconfirmed:
 					jobFailure.Attempts = maxJobAttempts
 					store.Data.UnconfirmedProcessJob = job.ID
 				case interrupted:
 					jobFailure.Attempts--
-				case unconfirmedProcesses, errors.Is(err, ErrTerminalJob), errors.Is(err, processgroup.ErrDescendants), errors.Is(err, processgroup.ErrExhausted):
+				case outcomeUnknown, unconfirmedProcesses, errors.Is(err, ErrTerminalJob), errors.Is(err, processgroup.ErrDescendants), errors.Is(err, processgroup.ErrExhausted):
 					jobFailure.Attempts = maxJobAttempts
 				case !publicationFailure && (errors.Is(err, workroot.ErrUnsafe) || infrastructureFailure(err)):
 					jobFailure.Attempts--
@@ -547,7 +555,7 @@ func infrastructureFailure(err error) bool {
 		return true
 	}
 	var network *url.Error
-	return errors.As(err, &network)
+	return errors.Is(err, ErrRequestTransport) || errors.As(err, &network)
 }
 
 func (m *Monitor) finishFailedJob(ctx context.Context, store *state.Store, job Job, items []github.Item, at time.Time, failure state.JobFailure) error {

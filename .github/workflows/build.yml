@@ -53,6 +53,8 @@ jobs:
               test "$(id -u)" = "$MINION_RUN_UID"
               cgroup="$(sed -n "s/^0:://p" /proc/self/cgroup)"
               printf "Minion test cgroup: %s\n" "$cgroup"
+              # Maximum-size wire fixtures exceed the race memory budget.
+              MINION_REQUIRE_PROCESSGROUP=1 go test -count=1 -run "^TestHTTPWireRouteCapsUseActualJSONBytes$" ./internal/action
               MINION_REQUIRE_PROCESSGROUP=1 go test -race -coverprofile=coverage.out ./...
             '
 

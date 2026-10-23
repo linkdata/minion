@@ -25,20 +25,20 @@ type Checkpoints interface {
 
 // CallCheckpoint carries pinned dispatch metadata, then returned usage and parsed verdict attestations.
 type CallCheckpoint struct {
-	Version   int
-	Identity  Identity
-	SourceRef string
-	Call      CallUsage
+	Version   int       `json:"version"`
+	Identity  Identity  `json:"identity"`
+	SourceRef string    `json:"source_ref"`
+	Call      CallUsage `json:"call"`
 }
 
 // ReviewCheckpoint carries private evidence; a nonblank decision acknowledges an already saved prefix.
 type ReviewCheckpoint struct {
-	Version          int
-	Identity         Identity
-	SourceRef        string
-	Calls            []CallUsage
-	Refutations      []Refutation
-	CriticStopReason string
+	Version          int          `json:"version"`
+	Identity         Identity     `json:"identity"`
+	SourceRef        string       `json:"source_ref"`
+	Calls            []CallUsage  `json:"calls,omitempty"`
+	Refutations      []Refutation `json:"refutations,omitempty"`
+	CriticStopReason string       `json:"critic_stop_reason,omitempty"`
 }
 
 // executionCheckpoints binds local persistence and acknowledgements to one attempt.
