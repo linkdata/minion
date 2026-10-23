@@ -459,9 +459,6 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 			}
 			// Preserve late paid facts without accepting a success beyond the fixed expiry.
 			tx.runErr = errors.Join(tx.runErr, httpExecutionContextError(tx.budget))
-			if outcome.Failure != nil && (outcome.Failure.OutcomeUnknown || outcome.Failure.Unconfirmed || outcome.Failure.ScopeUnconfirmed) {
-				tx.quarantine = true
-			}
 			tx.outcome, tx.fenced = true, true
 			close(tx.done)
 			tx.mu.Unlock()

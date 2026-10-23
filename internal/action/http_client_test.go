@@ -789,9 +789,9 @@ func TestRunHTTPOutcomeACKPreservesKnownReceiptAfterWatchFailure(t *testing.T) {
 			got := parent.result(t)
 			callerFailure := test.externalCause || test.callerBeforeOutcome
 			workerUnknown := test.early || test.malformedACK || callerFailure || test.processFailure
-			parentUnknown := test.early || test.callerBeforeOutcome || test.processFailure
-			workerFailed, parentFailed := workerUnknown || test.expiredAfterWatch, parentUnknown || test.expiredAfterWatch
-			if errors.Is(workerErr, monitor.ErrExecutionOutcomeUnknown) != workerUnknown || (workerErr != nil) != workerFailed || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) != parentUnknown || (got.err != nil) != parentFailed || native.Load() != 1 || outcomes.Load() != 1 || faultReads.Load() == 0 || len(got.result.Calls) != 1 || test.duringUpload && observations.Load() != 2 {
+			workerFailed := workerUnknown || test.expiredAfterWatch
+			parentFailed := test.early || test.callerBeforeOutcome || test.processFailure || test.expiredAfterWatch
+			if errors.Is(workerErr, monitor.ErrExecutionOutcomeUnknown) != workerUnknown || (workerErr != nil) != workerFailed || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || (got.err != nil) != parentFailed || native.Load() != 1 || outcomes.Load() != 1 || faultReads.Load() == 0 || len(got.result.Calls) != 1 || test.duringUpload && observations.Load() != 2 {
 				t.Fatalf("watch drain changed known receipt or erased earlier failure: worker=%v parent=%v result=%+v native=%d outcomes=%d reads=%d", workerErr, got.err, got.result, native.Load(), outcomes.Load(), faultReads.Load())
 			}
 			if callerFailure && (!errors.Is(workerErr, externalCause) || context.Cause(ctx) != externalCause) {
@@ -808,7 +808,7 @@ func TestRunHTTPOutcomeACKPreservesKnownReceiptAfterWatchFailure(t *testing.T) {
 				t.Fatalf("watch fault lost acknowledged paid facts: call=%+v saved=%+v pending=%+v", call, f.sink.calls, f.sink.pending)
 			}
 			if test.early {
-				if !errors.Is(workerErr, context.Canceled) || got.result.Answer != "" || !errors.Is(f.sink.finish(got.result, got.err), monitor.ErrExecutionOutcomeUnknown) {
+				if !errors.Is(workerErr, context.Canceled) || got.result.Answer != "" || f.sink.finish(got.result, got.err) == nil {
 					t.Fatalf("watch error that stopped Runner became success: worker=%v parent=%v result=%+v", workerErr, got.err, got.result)
 				}
 			} else if got.result.Answer != "Known candidate" || got.result.Validate(f.job) != nil || (f.sink.finish(got.result, got.err) != nil) != parentFailed {

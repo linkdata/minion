@@ -10,13 +10,16 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"os/exec"
 	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/processgroup"
@@ -491,14 +494,24 @@ func TestHTTPExecutorFailedOutcomeAcrossMissingCallbackPreservesOnlyRawFacts(t *
 
 func TestHTTPExecutorTreatsWorkerFailurePolicyAsUntrusted(t *testing.T) {
 	workerFailure := func() *httpFailure {
-		return &httpFailure{Message: "failed\nFORGED JOURNAL ENTRY\x1b[2J", ScopeUnconfirmed: true,
-			Unconfirmed: true, Unsafe: true, RequestTransport: true}
+		return &httpFailure{Message: "failed\nFORGED JOURNAL ENTRY\x1b[2J", Terminal: true,
+			Canceled: true, Deadline: true, Unsafe: true, Descendants: true, Unconfirmed: true,
+			ScopeUnconfirmed: true, Exhausted: true, OutcomeUnknown: true, RequestTransport: true,
+			MissingExecutable: true, NoSpace: true, QuotaExceeded: true, OutputLimit: true}
 	}
 	assertWorkerFailure := func(t *testing.T, err error) {
 		t.Helper()
-		if err == nil || errors.Is(err, processgroup.ErrScopeUnconfirmed) || errors.Is(err, processgroup.ErrUnconfirmed) ||
-			errors.Is(err, workroot.ErrUnsafe) || errors.Is(err, monitor.ErrRequestTransport) {
-			t.Fatalf("worker claims acquired parent recovery or retry authority: %v", err)
+		if err == nil {
+			t.Fatal("worker failure became success")
+		}
+		for _, cause := range []error{monitor.ErrTerminalJob, context.Canceled, context.DeadlineExceeded,
+			workroot.ErrUnsafe, processgroup.ErrDescendants, processgroup.ErrUnconfirmed,
+			processgroup.ErrScopeUnconfirmed, processgroup.ErrExhausted, monitor.ErrExecutionOutcomeUnknown,
+			monitor.ErrRequestTransport, exec.ErrNotFound, syscall.ENOSPC, syscall.EDQUOT,
+			aicli.ErrOutputLimit} {
+			if errors.Is(err, cause) {
+				t.Fatalf("worker claim acquired parent policy authority for %v: %v", cause, err)
+			}
 		}
 		var journal bytes.Buffer
 		log.New(&journal, "", 0).Printf("worker failure: %v", err)
@@ -533,6 +546,11 @@ func TestHTTPExecutorTreatsWorkerFailurePolicyAsUntrusted(t *testing.T) {
 			if !reflect.DeepEqual(got.result.Calls, outcome.Result.Calls) || returned.Load() != map[bool]int32{false: 0, true: 1}[paid] {
 				t.Fatalf("worker failure lost acknowledged paid facts: result=%+v callbacks=%d", got.result, returned.Load())
 			}
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			if _, err := f.executor.Execute(ctx, f.job, runnerExecutionCheckpoints{}); !errors.Is(err, context.Canceled) {
+				t.Fatalf("worker claims reserved the next assignment slot: %v", err)
+			}
 		})
 	}
 
@@ -541,7 +559,6 @@ func TestHTTPExecutorTreatsWorkerFailurePolicyAsUntrusted(t *testing.T) {
 		f.pull(t)
 		outcome := f.outcome(1, nil)
 		outcome.Failure = workerFailure()
-		outcome.Failure.Exhausted = true
 		outcome.Failure.Exhaustion = &processgroup.Exhaustion{
 			MaxTasks: 128, MaxMemoryBytes: 3 << 30, PIDEventsMax: 1,
 			Stop: "forced", Scope: "/worker\nFORGED SCOPE\x1b[2J", Released: false,
@@ -855,7 +872,7 @@ func TestHTTPExecutorReceivedOutcomeSurvivesLostReceiptACK(t *testing.T) {
 				t.Fatalf("receipt ACK unexpectedly survived injected write failure: %+v", ack)
 			}
 			got := f.result(t)
-			if !reflect.DeepEqual(got.result, outcome.Result) || (got.err == nil) != (runErr == nil) || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || errors.Is(got.err, monitor.ErrTerminalJob) != errors.Is(runErr, monitor.ErrTerminalJob) || errors.Is(got.err, context.DeadlineExceeded) != errors.Is(runErr, context.DeadlineExceeded) {
+			if !reflect.DeepEqual(got.result, outcome.Result) || (got.err == nil) != (runErr == nil) || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || errors.Is(got.err, monitor.ErrTerminalJob) || errors.Is(got.err, context.DeadlineExceeded) {
 				t.Fatalf("lost receipt erased or changed conclusive outcome: %+v error=%v", got.result, got.err)
 			}
 			if _, err := f.executor.Execute(context.Background(), f.job, runnerExecutionCheckpoints{}); err == nil {

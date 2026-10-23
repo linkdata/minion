@@ -96,14 +96,14 @@ func TestHTTPFailureFallbackPreservesCoreWithoutAcknowledgingRawClaims(t *testin
 			workerErr := client.outcome(result, nil)
 			got := transport.result(t)
 			finalErr := f.sink.finish(got.result, got.err)
-			if !errors.Is(workerErr, monitor.ErrExecutionOutcomeUnknown) || !errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || !got.result.matchesJob(f.job) || got.result.Answer != "" || !slices.Equal(got.result.Calls, result.Calls) || !slices.Equal(got.result.Refutations, result.Refutations) || got.result.CriticStopReason != result.CriticStopReason || !reflect.DeepEqual(result, original) {
+			if !errors.Is(workerErr, monitor.ErrExecutionOutcomeUnknown) || got.err == nil || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || !got.result.matchesJob(f.job) || got.result.Answer != "" || !slices.Equal(got.result.Calls, result.Calls) || !slices.Equal(got.result.Refutations, result.Refutations) || got.result.CriticStopReason != result.CriticStopReason || !reflect.DeepEqual(result, original) {
 				t.Fatalf("bounded failure lost exact raw core or mutated original: worker=%v parent=%v raw=%+v", workerErr, got.err, got.result)
 			}
 			if acknowledged {
 				if finalErr != got.err || errors.Is(finalErr, monitor.ErrTerminalJob) {
 					t.Fatalf("matching core gained a checkpoint mismatch: parent=%v finish=%v", got.err, finalErr)
 				}
-			} else if !errors.Is(finalErr, monitor.ErrExecutionOutcomeUnknown) || !errors.Is(finalErr, monitor.ErrTerminalJob) || !strings.Contains(finalErr.Error(), "execution checkpoint contract violated") || f.sink.pending == nil || f.sink.returned != nil {
+			} else if errors.Is(finalErr, monitor.ErrExecutionOutcomeUnknown) || !errors.Is(finalErr, monitor.ErrTerminalJob) || !strings.Contains(finalErr.Error(), "execution checkpoint contract violated") || f.sink.pending == nil || f.sink.returned != nil {
 				t.Fatalf("unacknowledged raw claim passed the publication checkpoint gate: %v", finalErr)
 			}
 			if finalErr == nil || got.result.Validate(f.job) == nil {
@@ -137,8 +137,8 @@ func TestHTTPFailureFallbackPreservesCoreWithoutAcknowledgingRawClaims(t *testin
 			transport.executor.mu.Lock()
 			unavailable := transport.executor.unavailable
 			transport.executor.mu.Unlock()
-			if !unavailable {
-				t.Fatal("omitted primary payload did not quarantine unknown fallback capacity")
+			if unavailable {
+				t.Fatal("worker-only fallback uncertainty quarantined parent capacity")
 			}
 		})
 	}

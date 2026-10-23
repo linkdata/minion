@@ -21,8 +21,8 @@ const (
 	httpFailureScopeLimit   = 4096
 )
 
-// httpFailure carries only the policy facts used across one execution transaction.
-// Message is a private diagnostic; original parent callback errors remain local.
+// httpFailure carries finite wire details. Parent ACKs keep typed causes;
+// worker outcome fields are diagnostic claims at the receiver.
 type httpFailure struct {
 	Message           string                   `json:"message"`
 	Terminal          bool                     `json:"terminal,omitempty"`
@@ -147,7 +147,7 @@ func (f *httpFailure) err() error {
 	return errors.Join(causes...)
 }
 
-// Worker diagnostics do not establish parent process or retry policy.
+// Worker diagnostics do not establish parent process, retry or capacity policy.
 func (f *httpFailure) workerErr() error {
 	if f == nil {
 		return nil
@@ -155,23 +155,8 @@ func (f *httpFailure) workerErr() error {
 	if err := f.validate(); err != nil {
 		return err
 	}
-	claim := *f
-	claim.Message = httpFailureDiagnostic(strconv.Quote(f.Message))
-	claim.ScopeUnconfirmed, claim.Unconfirmed = false, false
-	claim.Unsafe, claim.RequestTransport = false, false
-	if claim.Exhaustion != nil && !claim.Exhaustion.Released {
-		claim.Exhaustion = nil // Its unproved release scope is also a worker claim.
-	}
-	return workerFailureError{message: claim.Message, cause: claim.err()}
+	return errors.New("worker execution failed: " + httpFailureDiagnostic(strconv.Quote(f.Message)))
 }
-
-type workerFailureError struct {
-	message string
-	cause   error
-}
-
-func (e workerFailureError) Error() string { return "worker execution failed: " + e.message }
-func (e workerFailureError) Unwrap() error { return e.cause }
 
 func httpFailureDiagnostic(message string) string {
 	truncated := len(message) > httpFailureMessageLimit
