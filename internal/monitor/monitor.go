@@ -433,7 +433,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 					return stop(failureErr)
 				}
 				if scopeUnconfirmed {
-					m.logf("%s from %s stopped: command scope release unconfirmed; operator recovery required: %v", cmd.Action, itemLocation(item), err)
+					m.logf("%s from %s stopped: process scope release unconfirmed; operator recovery required: %v", cmd.Action, itemLocation(item), err)
 					return stop(failureErr)
 				}
 				if unconfirmedProcesses {
