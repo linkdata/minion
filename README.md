@@ -347,7 +347,8 @@ The service starts recording usage after command validation, duplicate-reply che
 # Daily totals by repository.
 ./bin/minion usage -group-by day,repo
 
-# Export individual attempts, with their model, effort, outcome, source URL, executor, and source commit.
+# Export attempts with model, effort, outcome and source URL.
+# Executor and source commit are present when a model call was recorded.
 ./bin/minion usage -group-by none -json > usage.json
 
 # Read records directly if configuration is unavailable or invalid.
