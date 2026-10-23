@@ -234,7 +234,8 @@ func validateAuditFiles(ctx context.Context, files []workspace.File, validationD
 	}
 	for _, name := range auditArtifacts {
 		data, present := byPath[name]
-		if !present || len(data) == 0 && !auditArtifactMayBeEmpty(name) || name == "REPORT.md" && strings.TrimSpace(string(data)) == "" {
+		if !present || len(data) == 0 && !auditArtifactMayBeEmpty(name) || name == "REPORT.md" && strings.TrimSpace(string(data)) == "" ||
+			name == "architecture.md" && !auditVisibleText(string(data)) {
 			return "", fmt.Errorf("audit %s is missing or empty", name)
 		}
 	}
@@ -680,6 +681,19 @@ func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes, detailsBytes
 		}
 	}
 	report := strings.ToLower(string(reportBytes))
+	reportLines, codeLines, err := auditCheckedProseLines(report)
+	if err != nil {
+		return err
+	}
+	visibleLines := make([]string, 0, len(reportLines))
+	for i, line := range reportLines {
+		if codeLines[i] {
+			visibleLines = append(visibleLines, "") // Keep a paragraph break across code.
+			continue
+		}
+		visibleLines = append(visibleLines, line)
+	}
+	visibleReport := strings.Join(visibleLines, "\n")
 	reportable := false
 	confirmed := false
 	var requiredDetails, requiredNeeds [][]string
@@ -691,7 +705,7 @@ func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes, detailsBytes
 		confirmed = confirmed || finding.Verdict == "confirmed"
 		title := auditReportCell(finding.Title)
 		found := false
-		for _, line := range strings.Split(report, "\n") {
+		for _, line := range visibleLines {
 			if finding.Verdict == "confirmed" {
 				cells := auditTableCells(line)
 				if len(cells) != 4 || strings.Trim(strings.TrimSpace(cells[0]), "*_` ") != finding.Severity.Overall ||
@@ -729,7 +743,7 @@ func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes, detailsBytes
 			requiredNeeds = append(requiredNeeds, fields)
 		}
 	}
-	for _, line := range strings.Split(report, "\n") {
+	for _, line := range visibleLines {
 		cells := auditTableCells(line)
 		if len(cells) != 4 || auditReportCell(cells[0]) == "severity" {
 			continue
@@ -752,8 +766,8 @@ func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes, detailsBytes
 			return errors.New("audit REPORT.md contradicts a confirmed finding table row")
 		}
 	}
-	flatReport := strings.Join(strings.Fields(report), " ")
-	if (reportable || blocked > 0) && auditReportHasClaim(report, auditCleanClaim) || confirmed && auditReportHasClaim(report, auditNoConfirmedClaim) {
+	flatReport := strings.Join(strings.Fields(strings.ReplaceAll(visibleReport, "\n\n", "\n#\n")), " ")
+	if (reportable || blocked > 0) && auditReportHasClaim(visibleReport, auditCleanClaim) || confirmed && auditReportHasClaim(visibleReport, auditNoConfirmedClaim) {
 		return errors.New("audit REPORT.md contradicts final findings")
 	}
 	if blocked > 0 && !regexp.MustCompile(fmt.Sprintf(`\b(?:blocked:\s*%d|%d\s+blocked)\b`, blocked, blocked)).MatchString(flatReport) {
@@ -770,6 +784,49 @@ func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes, detailsBytes
 
 func auditReportCell(text string) string {
 	return strings.ToLower(strings.Join(strings.Fields(text), " "))
+}
+
+// auditCodeLines marks code that cannot satisfy the report's required prose and table rows.
+func auditCodeLines(lines []string) []bool {
+	code := make([]bool, len(lines))
+	var fence byte
+	width := 0
+	for i, line := range lines {
+		spaces := 0
+		for spaces < len(line) && line[spaces] == ' ' {
+			spaces++
+		}
+		text := line[spaces:]
+		if spaces <= 3 && len(text) >= 3 && (text[0] == '`' || text[0] == '~') {
+			n := 0
+			for n < len(text) && text[n] == text[0] {
+				n++
+			}
+			if n >= 3 {
+				if fence == 0 && (text[0] != '`' || !strings.Contains(text[n:], "`")) {
+					fence, width, code[i] = text[0], n, true
+					continue
+				}
+				if fence == text[0] && n >= width && strings.TrimSpace(text[n:]) == "" {
+					fence, width, code[i] = 0, 0, true
+					continue
+				}
+			}
+		}
+		code[i] = fence != 0 || spaces >= 4 || strings.HasPrefix(text, "\t")
+	}
+	return code
+}
+
+func auditCheckedProseLines(prose string) ([]string, []bool, error) {
+	lines := strings.Split(prose, "\n")
+	code := auditCodeLines(lines)
+	for i, line := range lines {
+		if !code[i] && strings.Contains(line, "<!--") {
+			return nil, nil, errors.New("audit report prose contains an HTML comment")
+		}
+	}
+	return lines, code, nil
 }
 
 func auditTableCells(line string) []string {
@@ -858,6 +915,10 @@ func auditReportHasClaim(report string, claim *regexp.Regexp) bool {
 }
 
 func validateAuditProse(prose []byte, records [][]string) error {
+	lines, code, err := auditCheckedProseLines(string(prose))
+	if err != nil {
+		return err
+	}
 	if len(records) == 0 {
 		return nil
 	}
@@ -875,9 +936,9 @@ func validateAuditProse(prose []byte, records [][]string) error {
 		body.Reset()
 		return nil
 	}
-	for _, line := range strings.Split(string(prose), "\n") {
+	for i, line := range lines {
 		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "## ") {
+		if !code[i] && strings.HasPrefix(trimmed, "## ") {
 			if err := finish(); err != nil {
 				return err
 			}

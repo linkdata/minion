@@ -35,7 +35,6 @@ func TestHTTPWorkerDiagnosticsRemainPrivateThroughPublication(t *testing.T) {
 			if action == command.SecurityAudit {
 				installActionTestSkills(t, testAuditSkillURL)
 				fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
-				job.Main.Skills = []string{testAuditSkillURL}
 			}
 			job.Identity.Repository = "o/r"
 			f := newHTTPServerTest(t, t.Context(), job, runnerExecutionCheckpoints{}, nil)

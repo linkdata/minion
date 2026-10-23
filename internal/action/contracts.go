@@ -480,6 +480,9 @@ func validateResultArtifacts(j Job, files []workspace.File, complete bool) error
 		if complete && len(file.Data) == 0 && !auditArtifactMayBeEmpty(file.Path) {
 			return fmt.Errorf("empty action report artifact %q", file.Path)
 		}
+		if complete && file.Path == "architecture.md" && !auditVisibleText(string(file.Data)) {
+			return errors.New("audit architecture.md has no visible content")
+		}
 		if (complete || file.Path != "REPORT.md") && !utf8.Valid(file.Data) {
 			return fmt.Errorf("invalid action report artifact %q encoding", file.Path)
 		}

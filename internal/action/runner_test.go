@@ -387,6 +387,7 @@ func TestPortableAuditMetadataUsesSourceIdentity(t *testing.T) {
 
 func TestPortableAuditMetadataUsesAlwaysOnSkillSource(t *testing.T) {
 	job := testJob(command.SecurityAudit)
+	job.Main.Skills = []string{skills.BuiltinAntiPromptInjection}
 	job.Main.AlwaysOnSkills = []string{testAuditSkillURL}
 	if err := job.Validate(); err != nil {
 		t.Fatalf("standalone portable audit job: %v", err)

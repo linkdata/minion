@@ -460,7 +460,6 @@ func TestCompletedAuditRetentionFailureIsTerminal(t *testing.T) {
 	installActionTestSkills(t, testAuditSkillURL)
 	fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
 	job := testJob(command.SecurityAudit)
-	job.Main.Skills = []string{testAuditSkillURL}
 	result := completeAuditResult(job)
 	if err := result.Validate(job); err != nil {
 		t.Fatal(err)
@@ -492,7 +491,6 @@ func TestCanceledPublicationRetainsIncompleteAudit(t *testing.T) {
 			installActionTestSkills(t, testAuditSkillURL)
 			fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
 			job := testJob(command.SecurityAudit)
-			job.Main.Skills = []string{testAuditSkillURL}
 			result := completeAuditResult(job)
 			if !valid {
 				result.Calls[0].Provider = "unknown"

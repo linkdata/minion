@@ -97,7 +97,7 @@ func TestRunnerExecuteCheckpointsInsideObserverAndSeparatesDecision(t *testing.T
 			}
 			critic := value.Call.Role == roleCritic
 			if value.Call.Approved != critic || value.Call.NoBlockers != critic || value.Call.HasBlockers || value.Call.ReviewComplete != critic {
-				t.Fatalf("after-call lost parsed verdict attestations: %+v", value.Call)
+				t.Fatalf("after-call lost parsed verdict claims: %+v", value.Call)
 			}
 			calls = append(calls, value.Call)
 			events = append(events, "after/"+value.Call.Role)
@@ -107,8 +107,7 @@ func TestRunnerExecuteCheckpointsInsideObserverAndSeparatesDecision(t *testing.T
 			if value.Version != ProtocolVersion || value.Identity != job.Identity || value.SourceRef != job.Source.Head || !slices.Equal(value.Calls, calls) || len(value.Refutations) != 0 {
 				t.Fatalf("review checkpoint changed the captured prefix: %+v", value)
 			}
-			stage := value.CriticStopReason
-			events = append(events, fmt.Sprintf("review/%d/%s", len(value.Calls), stage))
+			events = append(events, fmt.Sprintf("review/%d/%s", len(value.Calls), value.CriticStopReason))
 			return nil
 		},
 	}

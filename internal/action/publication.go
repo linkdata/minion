@@ -51,7 +51,7 @@ func projectPublication(job Job, result Result) (publication, error) {
 	return projected, nil
 }
 
-// This catches accidental copies of substantial reported refutation text, not leaks from a hostile executor.
+// This catches exact whole-refutation or complete-sentence copies, not rewrites or hostile disclosures.
 func rejectPublishedRefutations(job Job, result Result, projected publication) error {
 	if len(result.Refutations) == 0 {
 		return nil
