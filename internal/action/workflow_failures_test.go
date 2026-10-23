@@ -457,7 +457,10 @@ exec %s "$@"
 }
 
 func TestCompletedAuditRetentionFailureIsTerminal(t *testing.T) {
+	installActionTestSkills(t, testAuditSkillURL)
+	fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
 	job := testJob(command.SecurityAudit)
+	job.Main.Skills = []string{testAuditSkillURL}
 	result := completeAuditResult(job)
 	if err := result.Validate(job); err != nil {
 		t.Fatal(err)
@@ -470,11 +473,12 @@ func TestCompletedAuditRetentionFailureIsTerminal(t *testing.T) {
 	}))
 	defer server.Close()
 	client := testGitHub(server, "token")
-	blocked := filepath.Join(t.TempDir(), "file")
+	root := t.TempDir()
+	blocked := filepath.Join(root, "audits")
 	if err := os.WriteFile(blocked, []byte("not a directory"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	orchestrator := Orchestrator{GitHub: client, WorkRoot: blocked}
+	orchestrator := Orchestrator{GitHub: client, WorkRoot: root}
 	prepared := &preparedAction{job: job, request: monitor.Job{Command: command.Command{Action: command.SecurityAudit}}}
 	err := orchestrator.publish(context.Background(), prepared, result)
 	if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "retain completed audit") || writes != 0 {
@@ -482,10 +486,13 @@ func TestCompletedAuditRetentionFailureIsTerminal(t *testing.T) {
 	}
 }
 
-func TestCanceledPublicationRetainsValidatedAudit(t *testing.T) {
+func TestCanceledPublicationRetainsIncompleteAudit(t *testing.T) {
 	for _, valid := range []bool{true, false} {
 		t.Run(fmt.Sprintf("valid=%t", valid), func(t *testing.T) {
+			installActionTestSkills(t, testAuditSkillURL)
+			fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
 			job := testJob(command.SecurityAudit)
+			job.Main.Skills = []string{testAuditSkillURL}
 			result := completeAuditResult(job)
 			if !valid {
 				result.Calls[0].Provider = "unknown"
@@ -507,11 +514,7 @@ func TestCanceledPublicationRetainsValidatedAudit(t *testing.T) {
 				t.Fatalf("canceled audit: valid=%t writes=%d err=%v", valid, writes, err)
 			}
 			dirs, err := os.ReadDir(filepath.Join(e.WorkRoot, "audits"))
-			wantPrefix := "incomplete-"
-			if valid {
-				wantPrefix = "complete-"
-			}
-			if err != nil || len(dirs) != 1 || !strings.HasPrefix(dirs[0].Name(), wantPrefix) {
+			if err != nil || len(dirs) != 1 || !strings.HasPrefix(dirs[0].Name(), "incomplete-") {
 				t.Fatalf("audit retention: dirs=%v err=%v", dirs, err)
 			}
 			data, err := os.ReadFile(filepath.Join(e.WorkRoot, "audits", dirs[0].Name(), "REPORT.md"))

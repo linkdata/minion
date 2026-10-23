@@ -74,7 +74,7 @@ func TestInvalidResultKeepsOnlyValidatedEvidence(t *testing.T) {
 				}
 			}
 			entries, readErr := os.ReadDir(filepath.Join(root, "audits"))
-			if scenario == "foreign identity" || scenario == "invalid artifact" {
+			if scenario == "foreign identity" {
 				if !errors.Is(readErr, os.ErrNotExist) {
 					t.Fatalf("unsafe artifacts retained: %v, %v", entries, readErr)
 				}

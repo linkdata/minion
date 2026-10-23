@@ -29,6 +29,11 @@ func TestHTTPWorkerDiagnosticsRemainPrivateThroughPublication(t *testing.T) {
 	for _, action := range []command.Action{command.Comment, command.Review, command.SecurityAudit, command.Fix} {
 		t.Run(string(action), func(t *testing.T) {
 			job := testJob(action)
+			if action == command.SecurityAudit {
+				installActionTestSkills(t, testAuditSkillURL)
+				fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
+				job.Main.Skills = []string{testAuditSkillURL}
+			}
 			job.Identity.Repository = "o/r"
 			f := newHTTPServerTest(t, context.Background(), job, runnerExecutionCheckpoints{}, nil)
 			f.pull(t)

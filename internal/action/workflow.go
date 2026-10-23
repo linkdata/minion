@@ -246,6 +246,11 @@ func (e *Orchestrator) publish(ctx context.Context, p *preparedAction, result Re
 	if err := rejectConfiguredKeyResult(result, e.Runner.Codex.APIKey, e.Runner.Claude.APIKey); err != nil {
 		return errors.Join(fmt.Errorf("%w: invalid action result: %w", monitor.ErrTerminalJob, err), e.retainIncompleteAudit(p, result))
 	}
+	if p.job.Action == command.SecurityAudit {
+		if err := e.validateAuditForPublication(ctx, p.job, result.Artifacts); err != nil {
+			return errors.Join(fmt.Errorf("%w: invalid audit report: %w", monitor.ErrTerminalJob, err), e.retainIncompleteAudit(p, result))
+		}
+	}
 	published, err := projectPublication(p.job, result)
 	if err != nil {
 		return errors.Join(fmt.Errorf("%w: publication projection: %w", monitor.ErrTerminalJob, err), e.retainIncompleteAudit(p, result))
@@ -292,13 +297,22 @@ func rejectConfiguredKeyResult(result Result, keys ...string) error {
 		if containsConfiguredKey([]byte(result.Answer), key) {
 			return errors.New("answer contains a configured provider key")
 		}
-		for _, file := range result.Artifacts {
-			if containsConfiguredKey([]byte(file.Path), key) || containsConfiguredKey(file.Data, key) {
-				return errors.New("audit artifact contains a configured provider key")
-			}
+	}
+	for _, file := range result.Artifacts {
+		if artifactContainsConfiguredKey(file, keys...) {
+			return errors.New("audit artifact contains a configured provider key")
 		}
 	}
 	return nil
+}
+
+func artifactContainsConfiguredKey(file workspace.File, keys ...string) bool {
+	for _, key := range keys {
+		if key != "" && (containsConfiguredKey([]byte(file.Path), key) || containsConfiguredKey(file.Data, key)) {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *Orchestrator) logResult(job Job, result Result) {
@@ -320,13 +334,17 @@ func (e *Orchestrator) logResult(job Job, result Result) {
 }
 
 func (e *Orchestrator) retainIncompleteAudit(p *preparedAction, result Result) error {
-	if p.job.Action != command.SecurityAudit || len(result.Artifacts) == 0 || !result.matchesJob(p.job) || validateResultArtifacts(p.job, result.Artifacts, false) != nil {
+	if p.job.Action != command.SecurityAudit || len(result.Artifacts) == 0 || !result.matchesJob(p.job) {
 		return nil
 	}
-	if rejectConfiguredKeyResult(result, e.Runner.Codex.APIKey, e.Runner.Claude.APIKey) != nil {
-		return e.retainAudit(p, nil, false)
+	var safe []workspace.File
+	for _, file := range result.Artifacts {
+		if artifactContainsConfiguredKey(file, e.Runner.Codex.APIKey, e.Runner.Claude.APIKey) || validateResultArtifacts(p.job, append(safe, file), false) != nil {
+			continue
+		}
+		safe = append(safe, file)
 	}
-	return e.retainAudit(p, result.Artifacts, false)
+	return e.retainAudit(p, safe, false)
 }
 
 func (e *Orchestrator) retainAudit(p *preparedAction, files []workspace.File, complete bool) error {

@@ -25,10 +25,12 @@ func TestHostileHTTPResultCannotPublishConfiguredProviderKey(t *testing.T) {
 	for _, tc := range []struct {
 		name, content string
 		audit         bool
+		answerOnly    bool
 	}{
 		{name: "answer with other provider key", content: "public " + claudeKey},
 		{name: "encoded answer key", content: `public fixture-claude-\u0073ecret`},
-		{name: "audit artifact with NUL-split key", content: "public fixture-codex-\x00secret", audit: true},
+		{name: "audit answer key preserves safe artifacts", content: "public " + claudeKey, audit: true, answerOnly: true},
+		{name: "audit mixed safe and NUL-split artifact", content: "public fixture-codex-\x00secret", audit: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.audit {
@@ -68,15 +70,23 @@ func TestHostileHTTPResultCannotPublishConfiguredProviderKey(t *testing.T) {
 				outcome.Result = Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Safe result", Calls: []CallUsage{call}}
 				if tc.audit {
 					outcome.Result.Artifacts = auditArtifactsFixture(job, sourceIdentity(job), outcome.Result.Answer)
-					for i := range outcome.Result.Artifacts {
-						if outcome.Result.Artifacts[i].Path == "architecture.md" {
-							outcome.Result.Artifacts[i].Data = []byte(tc.content)
+					if tc.answerOnly {
+						outcome.Result.Answer = tc.content
+					} else {
+						for i := range outcome.Result.Artifacts {
+							if outcome.Result.Artifacts[i].Path == "architecture.md" {
+								outcome.Result.Artifacts[i].Data = []byte(tc.content)
+							}
 						}
 					}
 				} else {
 					outcome.Result.Answer = tc.content
 				}
-				if err := outcome.Result.Validate(job); err != nil {
+				if err := outcome.Result.Validate(job); tc.answerOnly {
+					if err == nil || !strings.Contains(err.Error(), "answer differs from REPORT.md") {
+						t.Fatalf("answer-only fixture lost its mismatch: %v", err)
+					}
+				} else if err != nil {
 					t.Fatalf("hostile result was not otherwise publishable: %v", err)
 				}
 				f.ack(t, "/outcome", outcome, http.StatusOK, 3)
@@ -87,7 +97,7 @@ func TestHostileHTTPResultCannotPublishConfiguredProviderKey(t *testing.T) {
 			request.Command = command.Command{Name: name, Action: action}
 			request.Repository.Actions = []string{name}
 			err := e.Execute(context.Background(), request)
-			if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "configured provider key") || writes.Load() != 0 {
+			if !errors.Is(err, monitor.ErrTerminalJob) || !tc.answerOnly && !strings.Contains(err.Error(), "configured provider key") || writes.Load() != 0 {
 				t.Fatalf("hostile result crossed publication boundary: error=%v writes=%d", err, writes.Load())
 			}
 			records, err := usage.ReadAll(usageDir)
@@ -105,8 +115,25 @@ func TestHostileHTTPResultCannotPublishConfiguredProviderKey(t *testing.T) {
 				if marker, err := os.ReadFile(filepath.Join(paths[0], "INCOMPLETE.txt")); err != nil || !strings.Contains(string(marker), "must not be published") {
 					t.Fatalf("private incomplete audit marker missing: %q error=%v", marker, err)
 				}
-				if files, err := os.ReadDir(paths[0]); err != nil || len(files) != 1 || files[0].Name() != "INCOMPLETE.txt" {
-					t.Fatalf("secret-bearing artifacts retained in private audit: files=%v error=%v", files, err)
+				files, err := os.ReadDir(paths[0])
+				wantFiles := len(auditArtifacts) + 1
+				if !tc.answerOnly {
+					wantFiles--
+				}
+				if err != nil || len(files) != wantFiles {
+					t.Fatalf("safe partial audit evidence lost: files=%v error=%v want=%d", files, err, wantFiles)
+				}
+				for _, file := range files {
+					data, err := os.ReadFile(filepath.Join(paths[0], file.Name()))
+					if err != nil || containsConfiguredKey(data, codexKey) || containsConfiguredKey(data, claudeKey) {
+						t.Fatalf("private audit retained a configured key in %q: %v", file.Name(), err)
+					}
+				}
+				if _, err := os.Stat(filepath.Join(paths[0], "REPORT.md")); err != nil {
+					t.Fatalf("safe report was lost: %v", err)
+				}
+				if _, err := os.Stat(filepath.Join(paths[0], "architecture.md")); tc.answerOnly && err != nil || !tc.answerOnly && !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("safe/unsafe architecture retention differs: %v", err)
 				}
 			}
 		})
@@ -129,5 +156,26 @@ func TestRejectConfiguredKeyResultFields(t *testing.T) {
 				t.Fatalf("secret reached publication boundary: %v", err)
 			}
 		})
+	}
+}
+
+func TestIncompleteAuditRetainsMarkerWhenEveryArtifactContainsKey(t *testing.T) {
+	const key = "fixture-secret"
+	job := testJob(command.SecurityAudit)
+	result := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head,
+		Artifacts: []workspace.File{{Path: "REPORT.md", Mode: workspace.Regular, Data: []byte(key)}},
+	}
+	root := t.TempDir()
+	e := Orchestrator{WorkRoot: root, Runner: Runner{Codex: config.CodexConfig{APIKey: key}}}
+	if err := e.retainIncompleteAudit(&preparedAction{job: job}, result); err != nil {
+		t.Fatal(err)
+	}
+	paths, err := filepath.Glob(filepath.Join(root, "audits", "incomplete-*"))
+	if err != nil || len(paths) != 1 {
+		t.Fatalf("incomplete audit marker missing: paths=%v error=%v", paths, err)
+	}
+	files, err := os.ReadDir(paths[0])
+	if err != nil || len(files) != 1 || files[0].Name() != "INCOMPLETE.txt" {
+		t.Fatalf("unsafe artifact retained: files=%v error=%v", files, err)
 	}
 }

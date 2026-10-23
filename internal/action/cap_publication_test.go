@@ -26,6 +26,10 @@ func TestCappedPublicationProjectsEveryPublicBodyAndRetainedAudit(t *testing.T) 
 		for _, verdict := range []string{"full blockers", "verification blockers with full approval", "only nits"} {
 			t.Run(string(action)+"/"+verdict, func(t *testing.T) {
 				job := withClaudeCritic(testJob(action))
+				if action == command.SecurityAudit {
+					installActionTestSkills(t, testAuditSkillURL)
+					job.Main.Skills = []string{testAuditSkillURL}
+				}
 				job.Identity.Repository = "o/r"
 				job.CriticMaxRounds = 2
 				result := cappedResultFixture(job)
@@ -139,6 +143,10 @@ func TestCappedPublicationRefusesInvalidRawResultAndProjectionOverflow(t *testin
 		for _, failure := range []string{"invalid raw", "projected overflow"} {
 			t.Run(string(action)+"/"+failure, func(t *testing.T) {
 				job := withClaudeCritic(testJob(action))
+				if action == command.SecurityAudit {
+					installActionTestSkills(t, testAuditSkillURL)
+					job.Main.Skills = []string{testAuditSkillURL}
+				}
 				job.CriticMaxRounds = 1
 				result := cappedResultFixture(job)
 				result.Answer = strings.Repeat("x", maxOutputBytes-14)
