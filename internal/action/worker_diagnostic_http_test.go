@@ -36,12 +36,23 @@ func TestHTTPWorkerDiagnosticsRemainPrivateThroughPublication(t *testing.T) {
 			outcome := f.outcome(3, nil)
 			outcome.Result.Answer = "@linkdataminion fix\n![image](https://example.test/track)\n\x1b[2J\u202e"
 			outcome.Result.Calls = []CallUsage{paid.Checkpoint.Call}
-			outcome.Result.Diagnostics = []Diagnostic{{Code: "SECRET_CODE_123", Message: "PRIVATE diagnostic\n\x1b[2JFORGED JOURNAL ENTRY"}}
+			prefix := "PRIVATE diagnostic\n\x1b[2JFORGED JOURNAL ENTRY"
+			outcome.Result.Diagnostics = []Diagnostic{{Code: "SECRET_CODE_123", Message: prefix + strings.Repeat("x", maxDiagnosticMessageBytes-len(prefix))}}
+			if len(outcome.Result.Diagnostics[0].Message) != maxDiagnosticMessageBytes {
+				t.Fatal("diagnostic fixture is not at its wire limit")
+			}
 			if action == command.SecurityAudit {
 				outcome.Result.Artifacts = auditArtifactsFixture(job, sourceIdentity(job), outcome.Result.Answer)
 			}
 			if err := outcome.Result.Validate(job); err != nil {
 				t.Fatalf("invalid successful worker result: %v", err)
+			}
+			if action == command.Comment {
+				invalid := outcome
+				invalid.Result.Diagnostics = []Diagnostic{{Code: "SECRET_CODE_123", Message: outcome.Result.Diagnostics[0].Message + "x"}}
+				if got := f.request("/outcome", invalid); got.err != nil || got.status != http.StatusBadRequest {
+					t.Fatalf("over-cap worker diagnostic accepted: %+v", got)
+				}
 			}
 			f.ack(t, "/outcome", outcome, http.StatusOK, 3)
 			got := f.result(t)
@@ -85,8 +96,9 @@ func TestHTTPWorkerDiagnosticsRemainPrivateThroughPublication(t *testing.T) {
 			if writes != 1 || !strings.Contains(posted, "```text\n> @linkdataminion fix") ||
 				!strings.Contains(posted, `\x1b`) || !strings.Contains(posted, `\u202e`) || strings.ContainsRune(posted, '\x1b') || strings.ContainsRune(posted, '\u202e') ||
 				!errors.Is(parseErr, command.ErrNoCommand) ||
-				strings.Contains(posted, "PRIVATE") || strings.Contains(posted, "SECRET_CODE_123") ||
-				strings.Contains(journal.String(), "PRIVATE") || strings.Contains(journal.String(), "SECRET_CODE_123") {
+				strings.Contains(posted, "PRIVATE") || strings.Contains(posted, "SECRET_CODE_123") || strings.Contains(posted, "FORGED JOURNAL ENTRY") ||
+				strings.Contains(journal.String(), "PRIVATE") || strings.Contains(journal.String(), "SECRET_CODE_123") ||
+				strings.Contains(journal.String(), "FORGED JOURNAL ENTRY") || strings.ContainsRune(journal.String(), '\x1b') {
 				t.Fatalf("worker diagnostic escaped or answer bypassed inert publication: writes=%d posted=%q journal=%q", writes, posted, journal.String())
 			}
 			path := filepath.Join(owner.WorkRoot, "worker-diagnostics", job.Identity.AttemptID+".json")
@@ -109,6 +121,42 @@ func TestHTTPWorkerDiagnosticsRemainPrivateThroughPublication(t *testing.T) {
 				t.Fatalf("operator cannot locate private diagnostic record: %q", journal.String())
 			}
 		})
+	}
+}
+
+func TestHTTPOverRenderedAnswerRefusedBeforePublication(t *testing.T) {
+	job := testJob(command.Comment)
+	f := newHTTPServerTest(t, context.Background(), job, runnerExecutionCheckpoints{}, nil)
+	f.pull(t)
+	f.ack(t, "/before", f.call(1), http.StatusOK, 1)
+	paid := f.call(2)
+	paid.Checkpoint.Call.Complete = true
+	f.ack(t, "/after", paid, http.StatusOK, 2)
+	outcome := f.outcome(3, nil)
+	outcome.Result.Answer = strings.Repeat("x", maxOutputBytes-len(inertModelOutput("\x1b"))+1) + "\x1b"
+	outcome.Result.Calls = []CallUsage{paid.Checkpoint.Call}
+	if len(outcome.Result.Answer) > maxOutputBytes || len(inertModelOutput(outcome.Result.Answer)) != maxOutputBytes+1 ||
+		outcome.Result.validate(job, false) != nil {
+		t.Fatal("fixture does not isolate rendered publication overflow")
+	}
+	f.ack(t, "/outcome", outcome, http.StatusOK, 3)
+	got := f.result(t)
+	if got.err != nil || !reflect.DeepEqual(got.result, outcome.Result) {
+		t.Fatalf("receiver changed raw worker result: %+v", got)
+	}
+	writes := 0
+	githubServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writes++
+		t.Errorf("over-rendered answer reached GitHub: %s %s", r.Method, r.URL.Path)
+		http.Error(w, "unexpected request", http.StatusInternalServerError)
+	}))
+	defer githubServer.Close()
+	var journal bytes.Buffer
+	owner := Orchestrator{WorkRoot: t.TempDir(), GitHub: testGitHub(githubServer, "fixture-token"), Logger: log.New(&journal, "", 0)}
+	err := owner.publish(context.Background(), &preparedAction{job: job}, got.result)
+	if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "invalid action result") || writes != 0 ||
+		strings.ContainsRune(journal.String(), '\x1b') {
+		t.Fatalf("over-rendered answer bypassed publication gate: writes=%d error=%v journal=%q", writes, err, journal.String())
 	}
 }
 
