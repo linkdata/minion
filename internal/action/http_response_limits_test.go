@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/linkdata/minion/internal/command"
+	"github.com/linkdata/minion/internal/monitor"
 )
 
 func TestHTTPControlResponseEncodedBoundary(t *testing.T) {
@@ -58,10 +59,10 @@ func TestHTTPControlResponseEncodedBoundary(t *testing.T) {
 					}
 					transport := &httpExecutionClient{client: server.Client(), base: base}
 					if negative {
-						_, err = transport.open(context.Background(), kind, []byte(`{}`), binding, 1, false)
+						_, err = transport.open(context.Background(), kind, []byte(`{}`), binding, 1)
 					} else if kind == "cancel" {
 						var response *http.Response
-						response, err = transport.open(context.Background(), kind, []byte(`{}`), binding, 0, false)
+						response, err = transport.open(context.Background(), kind, []byte(`{}`), binding, 0)
 						if err == nil {
 							err = transport.watch(context.Background(), response, binding)
 						}
@@ -77,6 +78,10 @@ func TestHTTPControlResponseEncodedBoundary(t *testing.T) {
 						}
 					} else if wantCanceled && !errors.Is(err, context.Canceled) || !wantCanceled && err != nil {
 						t.Fatalf("exact control response changed known outcome: error=%v", err)
+					}
+					unknown := extra == 1 && !(kind == "cancel" && negative)
+					if errors.Is(err, monitor.ErrExecutionOutcomeUnknown) != unknown {
+						t.Fatalf("response changed pre-admission versus held-watch uncertainty: error=%v wantUnknown=%t", err, unknown)
 					}
 				}
 			})

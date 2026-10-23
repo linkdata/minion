@@ -114,7 +114,7 @@ func RunHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 		stopWatch(headerErr)
 		close(headerDone)
 	})
-	watchResponse, err := transport.open(watchCtx, "cancel", watchBody, checkpoints.binding, 0, true)
+	watchResponse, err := transport.open(watchCtx, "cancel", watchBody, checkpoints.binding, 0)
 	if !headerTimer.Stop() {
 		<-headerDone
 	}
@@ -185,7 +185,7 @@ func httpClientUnknown(kind string, err error) error {
 }
 
 func (c *httpExecutionClient) post(ctx context.Context, kind string, data []byte, limit int, result any, binding httpBinding, sequence uint64) error {
-	response, err := c.open(ctx, kind, data, binding, sequence, false)
+	response, err := c.open(ctx, kind, data, binding, sequence)
 	if err != nil {
 		return err
 	}
@@ -198,7 +198,7 @@ func (c *httpExecutionClient) post(ctx context.Context, kind string, data []byte
 
 // open returns only after success headers. The held cancellation body is read
 // separately, so a registered watch is an admission barrier before Runner starts.
-func (c *httpExecutionClient) open(ctx context.Context, kind string, data []byte, binding httpBinding, sequence uint64, knownNoWork bool) (*http.Response, error) {
+func (c *httpExecutionClient) open(ctx context.Context, kind string, data []byte, binding httpBinding, sequence uint64) (*http.Response, error) {
 	var pullCancel context.CancelCauseFunc
 	if kind == "next" {
 		ctx, pullCancel = context.WithCancelCause(ctx)
@@ -209,7 +209,7 @@ func (c *httpExecutionClient) open(ctx context.Context, kind string, data []byte
 		}
 	}()
 	failure := func(err error) error {
-		if knownNoWork {
+		if kind == "cancel" {
 			return fmt.Errorf("HTTP %s admission: %w", kind, err)
 		}
 		return httpClientUnknown(kind, err)
