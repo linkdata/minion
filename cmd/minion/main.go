@@ -177,9 +177,9 @@ func runWithGitCheck(checkGit func(context.Context, string) error) int {
 		next, err := watcher.RunOnce(ctx, store)
 		if err != nil {
 			if ctx.Err() != nil {
-				logger.Printf("poll interrupted: %v", err)
+				logger.Printf("poll interrupted: %s", monitor.InertLogText(err.Error()))
 			} else {
-				logger.Printf("poll: %v", err)
+				logger.Printf("poll: %s", monitor.InertLogText(err.Error()))
 			}
 			if !*loop || errors.Is(err, processgroup.ErrUnconfirmed) || errors.Is(err, processgroup.ErrScopeUnconfirmed) {
 				return 1

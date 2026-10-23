@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -35,11 +36,17 @@ func TestWorkerDiagnosticsStayInPrivateAttemptRecord(t *testing.T) {
 		t.Fatalf("worker text reached journal or record location is hidden: %q", journal.String())
 	}
 	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
 	var record retainedWorkerDiagnostics
-	if err != nil || json.Unmarshal(data, &record) != nil || record.Identity != job.Identity || record.SourceRef != job.Source.Head ||
-		record.WorkerReportedFailure == nil || record.WorkerReportedFailure.Message != "SECRET failure\nFORGED ENTRY" ||
+	if err := json.Unmarshal(data, &record); err != nil {
+		t.Fatal(err)
+	}
+	if record.Identity != job.Identity || record.SourceRef != job.Source.Head ||
+		!reflect.DeepEqual(record.WorkerReportedFailure, &httpFailure{Message: "SECRET failure\nFORGED ENTRY", Unsafe: true}) ||
 		len(record.WorkerReportedDiagnostics) != 1 || record.WorkerReportedDiagnostics[0] != result.Diagnostics[0] {
-		t.Fatalf("private worker evidence changed: record=%+v error=%v", record, err)
+		t.Fatalf("private worker evidence changed: record=%+v", record)
 	}
 	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0600 {
 		t.Fatalf("private record permissions: %v, %v", info, err)
