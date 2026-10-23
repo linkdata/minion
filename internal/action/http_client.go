@@ -44,7 +44,6 @@ type httpClientCheckpoints struct {
 	transport *httpExecutionClient
 	control   context.Context
 	action    context.Context
-	job       Job
 	binding   httpBinding
 	sequence  uint64
 	failure   error
@@ -90,7 +89,7 @@ func RunHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	if assignment.Expires <= 0 {
 		return httpClientUnknown("next", errors.New("invalid assignment expiry"))
 	}
-	checkpoints := &httpClientCheckpoints{transport: transport, control: context.WithoutCancel(ctx), job: job, binding: httpJobBinding(job)}
+	checkpoints := &httpClientCheckpoints{transport: transport, control: context.WithoutCancel(ctx), binding: httpJobBinding(job)}
 	if !time.Now().Before(expires) {
 		err := errors.Join(monitor.ErrTerminalJob, context.DeadlineExceeded)
 		result := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head}
@@ -410,7 +409,8 @@ func (c *httpClientCheckpoints) outcome(result Result, runErr error) error {
 	sequence := c.sequence + 1
 	outcome := httpOutcome{Sequence: sequence, Result: result, Failure: newHTTPFailure(runErr)}
 	shapeErr := httpResultShape(result)
-	if !result.matchesJob(c.job) {
+	matchingBinding := (httpBinding{Version: result.Version, Identity: result.Identity, SourceRef: result.SourceRef}) == c.binding
+	if !matchingBinding {
 		shapeErr = errors.Join(shapeErr, errors.New("outcome binding differs from assignment"))
 	}
 	var data []byte
@@ -424,7 +424,7 @@ func (c *httpClientCheckpoints) outcome(result Result, runErr error) error {
 		// Encode the one fallback before sending anything. Already acknowledged
 		// receipts remain the parent's evidence; no After is inferred from Result.
 		fallback := Result{Version: c.binding.Version, Identity: c.binding.Identity, SourceRef: c.binding.SourceRef}
-		if result.matchesJob(c.job) {
+		if matchingBinding {
 			core := ReviewCheckpoint{Version: c.binding.Version, Identity: c.binding.Identity, SourceRef: c.binding.SourceRef, Calls: result.Calls}
 			if httpReviewShape(core) == nil {
 				fallback.Calls = result.Calls

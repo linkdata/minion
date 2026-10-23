@@ -129,7 +129,7 @@ func (f *httpFailure) err() error {
 		{f.Terminal, monitor.ErrTerminalJob}, {f.Canceled, context.Canceled},
 		{f.Deadline, context.DeadlineExceeded}, {f.Unsafe, workroot.ErrUnsafe},
 		{f.Descendants, processgroup.ErrDescendants}, {f.Unconfirmed, processgroup.ErrUnconfirmed},
-		{f.ScopeUnconfirmed, processgroup.ErrScopeUnconfirmed}, {f.Exhausted, processgroup.ErrExhausted},
+		{f.ScopeUnconfirmed, processgroup.ErrScopeUnconfirmed}, {f.Exhausted && f.Exhaustion == nil, processgroup.ErrExhausted},
 		{f.OutcomeUnknown, monitor.ErrExecutionOutcomeUnknown},
 		{f.RequestTransport, monitor.ErrRequestTransport},
 		{f.MissingExecutable, exec.ErrNotFound}, {f.NoSpace, syscall.ENOSPC},

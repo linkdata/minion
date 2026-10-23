@@ -35,13 +35,14 @@ type httpTransaction struct {
 	observation sync.Mutex
 	handlers    sync.WaitGroup
 
-	job     Job
-	binding httpBinding
-	sink    Checkpoints
-	ctx     context.Context
-	budget  context.Context
-	cancel  context.CancelFunc
-	body    []byte
+	job        Job
+	binding    httpBinding
+	sink       Checkpoints
+	ctx        context.Context
+	budget     context.Context
+	cancel     context.CancelFunc
+	stopBudget context.CancelFunc
+	body       []byte
 
 	ready         bool
 	delivered     bool
@@ -83,7 +84,7 @@ func (e *HTTPExecutor) Execute(ctx context.Context, job Job, sink Checkpoints) (
 	budgetCtx, stopBudget := context.WithDeadline(ctx, expires)
 	defer stopBudget()
 	actionCtx, cancel := context.WithCancel(budgetCtx)
-	tx := &httpTransaction{job: job, binding: httpJobBinding(job), sink: sink, ctx: actionCtx, budget: budgetCtx, cancel: cancel,
+	tx := &httpTransaction{job: job, binding: httpJobBinding(job), sink: sink, ctx: actionCtx, budget: budgetCtx, cancel: cancel, stopBudget: stopBudget,
 		stop: make(chan struct{}), done: make(chan struct{}), finished: make(chan struct{})}
 	e.mu.Lock()
 	if e.closed || e.unavailable || e.active != nil {
@@ -186,7 +187,7 @@ func (e *HTTPExecutor) Close() error {
 	e.notifyLocked()
 	e.mu.Unlock()
 	if tx != nil {
-		tx.cancel()
+		tx.stopBudget()
 		<-tx.finished
 	}
 	return nil

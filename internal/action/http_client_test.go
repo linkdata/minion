@@ -274,7 +274,7 @@ func TestHTTPClientRequiresExactAcknowledgementAndNeverRetries(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			checkpoints := &httpClientCheckpoints{transport: &httpExecutionClient{client: server.Client(), base: base}, control: context.Background(), action: context.Background(), job: job, binding: binding}
+			checkpoints := &httpClientCheckpoints{transport: &httpExecutionClient{client: server.Client(), base: base}, control: context.Background(), action: context.Background(), binding: binding}
 			call := CallCheckpoint{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head, Call: CallUsage{Provider: job.Main.Provider, Role: roleMain, Round: 1}}
 			err = checkpoints.BeforeCall(call)
 			if name == "known failure" {
@@ -1100,7 +1100,7 @@ func TestHTTPClientSendsOneBoundFailureForUnrepresentableOutcome(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				checkpoints := &httpClientCheckpoints{transport: &httpExecutionClient{client: server.Client(), base: base}, control: context.Background(), job: job, binding: binding}
+				checkpoints := &httpClientCheckpoints{transport: &httpExecutionClient{client: server.Client(), base: base}, control: context.Background(), binding: binding}
 				// Craft the invalid primary field at the wire boundary, not as a Runner response.
 				result := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head, Answer: strings.Repeat("x", maxOutputBytes+1),
 					Calls:       []CallUsage{{Provider: "codex", Role: roleMain, Round: 1, Tokens: usage.Tokens{Input: 13, CachedInput: -2}, Approved: true, HasBlockers: true}},

@@ -888,55 +888,67 @@ func TestHTTPExecutorKnownOutcomeResolvesInternalTransportCancellation(t *testin
 }
 
 func TestHTTPExecutorCloseKeepsWatchAndPaidReceiptGraceAvailable(t *testing.T) {
-	paid := make(chan CallUsage, 1)
-	f := newHTTPServerTest(t, context.Background(), testJob(command.Comment), runnerExecutionCheckpoints{after: func(value CallCheckpoint) error {
-		paid <- value.Call
-		return nil
-	}}, nil)
-	f.pull(t)
-	body, err := json.Marshal(f.tx.binding)
-	if err != nil {
-		t.Fatal(err)
-	}
-	response, err := f.server.Client().Post(f.server.URL+"/cancel", "application/json", bytes.NewReader(body))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK || response.Header.Get("Content-Type") != "application/json" {
-		t.Fatalf("watch admission headers were not flushed: %d %v", response.StatusCode, response.Header)
-	}
-	if duplicate := f.request("/cancel", f.tx.binding); duplicate.err != nil || duplicate.status != http.StatusConflict {
-		t.Fatalf("concurrent cancellation watch was admitted: %+v", duplicate)
-	}
-	closed := make(chan error, 1)
-	go func() { closed <- f.executor.Close() }()
-	var cancellation httpCancellation
-	if err := httpDecode(response.Body, httpControlBytes, &cancellation); err != nil || cancellation.httpBinding != f.tx.binding || cancellation.Reason != "canceled" {
-		t.Fatalf("Close did not deliver bound known cancellation: %+v error=%v", cancellation, err)
-	}
-	select {
-	case err := <-closed:
-		t.Fatalf("Close ended before receipt grace and outcome: %v", err)
-	default:
-	}
-	call := f.call(1)
-	call.Checkpoint.Call.Tokens = usage.Tokens{Input: 31, Output: 2}
-	f.ack(t, "/after", call, http.StatusOK, 1)
-	if got := <-paid; got != call.Checkpoint.Call {
-		t.Fatalf("Close lost a paid receipt in grace: %+v", got)
-	}
-	f.ack(t, "/outcome", f.outcome(2, context.Canceled), http.StatusOK, 2)
-	if got := f.result(t); !errors.Is(got.err, context.Canceled) || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) {
-		t.Fatalf("known Close cancellation became ambiguous: %v", got.err)
-	}
-	select {
-	case err := <-closed:
-		if err != nil {
-			t.Fatal(err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("Close did not join completed HTTP handlers")
+	for _, test := range []struct {
+		name    string
+		failure error
+	}{
+		{name: "worker reports cancellation", failure: context.Canceled},
+		{name: "worker reports success"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			paid := make(chan CallUsage, 1)
+			f := newHTTPServerTest(t, context.Background(), testJob(command.Comment), runnerExecutionCheckpoints{after: func(value CallCheckpoint) error {
+				paid <- value.Call
+				return nil
+			}}, nil)
+			f.pull(t)
+			body, err := json.Marshal(f.tx.binding)
+			if err != nil {
+				t.Fatal(err)
+			}
+			response, err := f.server.Client().Post(f.server.URL+"/cancel", "application/json", bytes.NewReader(body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer response.Body.Close()
+			if response.StatusCode != http.StatusOK || response.Header.Get("Content-Type") != "application/json" {
+				t.Fatalf("watch admission headers were not flushed: %d %v", response.StatusCode, response.Header)
+			}
+			if duplicate := f.request("/cancel", f.tx.binding); duplicate.err != nil || duplicate.status != http.StatusConflict {
+				t.Fatalf("concurrent cancellation watch was admitted: %+v", duplicate)
+			}
+			closed := make(chan error, 1)
+			go func() { closed <- f.executor.Close() }()
+			var cancellation httpCancellation
+			if err := httpDecode(response.Body, httpControlBytes, &cancellation); err != nil || cancellation.httpBinding != f.tx.binding || cancellation.Reason != "canceled" {
+				t.Fatalf("Close did not deliver bound known cancellation: %+v error=%v", cancellation, err)
+			}
+			select {
+			case err := <-closed:
+				t.Fatalf("Close ended before receipt grace and outcome: %v", err)
+			default:
+			}
+			call := f.call(1)
+			call.Checkpoint.Call.Tokens, call.Checkpoint.Call.Complete = usage.Tokens{Input: 31, Output: 2}, true
+			f.ack(t, "/after", call, http.StatusOK, 1)
+			if got := <-paid; got != call.Checkpoint.Call {
+				t.Fatalf("Close lost a paid receipt in grace: %+v", got)
+			}
+			outcome := f.outcome(2, test.failure)
+			outcome.Result.Answer, outcome.Result.Calls = "Completed paid result", []CallUsage{call.Checkpoint.Call}
+			f.ack(t, "/outcome", outcome, http.StatusOK, 2)
+			if got := f.result(t); !errors.Is(got.err, context.Canceled) || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || errors.Is(got.err, monitor.ErrTerminalJob) || !reflect.DeepEqual(got.result, outcome.Result) {
+				t.Fatalf("Close lost host cancellation or paid facts: result=%+v error=%v", got.result, got.err)
+			}
+			select {
+			case err := <-closed:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("Close did not join completed HTTP handlers")
+			}
+		})
 	}
 }
 

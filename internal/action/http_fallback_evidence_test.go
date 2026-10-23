@@ -35,7 +35,7 @@ func TestHTTPFailureFallbackPreservesCoreWithoutAcknowledgingRawClaims(t *testin
 			if err != nil {
 				t.Fatal(err)
 			}
-			client := &httpClientCheckpoints{transport: &httpExecutionClient{client: transport.server.Client(), base: base}, control: ctx, action: ctx, job: f.job, binding: httpJobBinding(f.job)}
+			client := &httpClientCheckpoints{transport: &httpExecutionClient{client: transport.server.Client(), base: base}, control: ctx, action: ctx, binding: httpJobBinding(f.job)}
 			result := privateReviewResult(f.job)
 			for i := range result.Calls {
 				result.Calls[i].Tokens = usage.Tokens{Input: int64(i+1) * 10, CachedInput: int64(i % 2), Output: int64(i + 1)}
