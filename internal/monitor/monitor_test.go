@@ -746,6 +746,17 @@ func TestRunOnceExecutorErrorCannotForgeLogLines(t *testing.T) {
 	if got := InertLogText(strings.Repeat("a", bounded.DiagnosticBytes-3) + "\né"); !utf8.ValidString(got) || len(got) > bounded.DiagnosticBytes+3 || !strings.HasSuffix(got, "...") {
 		t.Fatalf("truncated log text split a rune: bytes=%d text=%q", len(got), got)
 	}
+	for _, tc := range []struct {
+		prefix int
+		suffix string
+	}{
+		{bounded.DiagnosticBytes - 1, "\nx"},
+		{bounded.DiagnosticBytes - 3, "\u202ex"},
+	} {
+		if got, want := InertLogText(strings.Repeat("a", tc.prefix)+tc.suffix), strings.Repeat("a", tc.prefix)+"..."; got != want {
+			t.Fatalf("truncated log text split an escape: got=%q want=%q", got, want)
+		}
+	}
 	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
 	item := github.Item{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}}
 	gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}, items: []github.Item{item}, permission: github.Permission{Permission: "write"}}

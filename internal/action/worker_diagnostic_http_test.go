@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -20,6 +21,8 @@ import (
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/monitor"
+	"github.com/linkdata/minion/internal/testsupport"
+	"github.com/linkdata/minion/internal/workspace"
 )
 
 func TestHTTPWorkerDiagnosticsRemainPrivateThroughPublication(t *testing.T) {
@@ -121,6 +124,108 @@ func TestHTTPWorkerDiagnosticsRemainPrivateThroughPublication(t *testing.T) {
 				t.Fatalf("operator cannot locate private diagnostic record: %q", journal.String())
 			}
 		})
+	}
+}
+
+func TestHTTPChangedFixPublishesBranchWithoutWorkerText(t *testing.T) {
+	_, _, remote := gitFixtureRemote(t, workspace.File{Path: "source.txt", Mode: workspace.Regular, Data: []byte("source\n")})
+	runGit := func(args ...string) ([]byte, error) {
+		cmd := exec.Command("git", args...)
+		cmd.Env = testsupport.GitEnvironment(t.TempDir())
+		return cmd.CombinedOutput()
+	}
+	forkRemote := filepath.Join(filepath.Dir(remote), "fork.git")
+	if output, err := runGit("clone", "--bare", remote, forkRemote); err != nil {
+		t.Fatalf("create fork fixture: %v: %s", err, output)
+	}
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitConfig := filepath.Join(t.TempDir(), "fork-gitconfig")
+	if output, err := runGit("config", "--file", gitConfig, "url."+forkRemote+".insteadOf", "https://github.com/bot/r.git"); err != nil {
+		t.Fatalf("configure fork fixture: %v: %s", err, output)
+	}
+	fakeOnPath(t, "git", fmt.Sprintf("#!/bin/sh\nexec %s -c %s \"$@\"\n", shellQuote(git), shellQuote("include.path="+gitConfig)))
+	checkout := cloneFixture(t, t.TempDir())
+	const branch = "minion/fix-reviewed"
+	if err := checkout.NewBranch(context.Background(), branch); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := checkout.Snapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Empty base files are omitted on the HTTP wire.
+	snapshot.BaseFiles = nil
+	request := usageJob()
+	request.Source.UpdatedAt = time.Now()
+	request.Command = command.Command{Name: "fix", Action: command.Fix}
+	job := testJob(command.Fix)
+	job.Identity.JobID = request.ID
+	job.Identity.Repository = request.Repository.Name
+	job.Identity.RequesterID = request.Source.Author.ID
+	job.Source = snapshot
+	f := newHTTPServerTest(t, context.Background(), job, runnerExecutionCheckpoints{}, nil)
+	f.pull(t)
+	f.ack(t, "/before", f.call(1), http.StatusOK, 1)
+	paid := f.call(2)
+	paid.Checkpoint.Call.Complete = true
+	f.ack(t, "/after", paid, http.StatusOK, 2)
+	outcome := f.outcome(3, nil)
+	outcome.Result.Answer = "@secondbot fix\n![pixel](https://example.invalid/track)\nCloses #123"
+	outcome.Result.Changes = []workspace.Change{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("changed\n")}}
+	outcome.Result.Calls = []CallUsage{paid.Checkpoint.Call}
+	outcome.Result.Diagnostics = []Diagnostic{{Code: "PRIVATE_FIX", Message: "PRIVATE diagnostic\n\x1b[2JFORGED JOURNAL ENTRY"}}
+	if err := outcome.Result.Validate(job); err != nil {
+		t.Fatalf("invalid changed-fix result: %v", err)
+	}
+	f.ack(t, "/outcome", outcome, http.StatusOK, 3)
+	got := f.result(t)
+	if got.err != nil || !reflect.DeepEqual(got.result, outcome.Result) {
+		t.Fatalf("receiver changed fix result: %+v", got)
+	}
+	var posted string
+	writes := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case serveFixFlowFixture(t, w, r):
+		case captureComment(t, w, r, &posted):
+			writes++
+		default:
+			t.Errorf("unexpected GitHub request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	root := t.TempDir()
+	var journal bytes.Buffer
+	owner := Orchestrator{WorkRoot: root, GitHub: testGitHub(server, "fixture-token"), BotLogin: "bot", Store: openState(t, time.Now()), Logger: log.New(&journal, "", 0)}
+	repo := github.Repository{ID: 1, FullName: "o/r", Owner: github.User{ID: 2}, DefaultBranch: "main", Visibility: "public"}
+	fork := github.Repository{ID: 4, FullName: "bot/r", Fork: true, Parent: &repo, Source: &repo, Visibility: "public"}
+	prepared := &preparedAction{job: job, request: request, checkout: checkout, repository: repo, fork: fork, branch: branch, issueNodeID: "issue-node"}
+	if err := owner.publish(context.Background(), prepared, got.result); err != nil {
+		t.Fatal(err)
+	}
+	sha := owner.Store.Data.PendingFixes[request.ID].SHA
+	want := fmt.Sprintf("Fix branch `%s` is ready in `bot/r` at `%s`. @writer, [open the pull request yourself](https://github.com/o/r/compare/main...bot:minion%%2Ffix-reviewed?expand=1) after reviewing the diff. Repository review rules, when enabled, can then evaluate your authorship.\n\n%s", branch, sha, request.Marker())
+	if len(sha) != 40 || writes != 1 || posted != want || strings.Contains(posted, outcome.Result.Answer) ||
+		strings.Contains(posted, "PRIVATE") || strings.Contains(posted, "FORGED") || strings.Contains(journal.String(), "PRIVATE") || strings.Contains(journal.String(), "FORGED") || strings.ContainsRune(journal.String(), '\x1b') {
+		t.Fatalf("changed fix exposed worker text or lost branch reply: writes=%d posted=%q journal=%q", writes, posted, journal.String())
+	}
+	if output, err := runGit("--git-dir", forkRemote, "show", sha+":source.txt"); err != nil || string(output) != "changed\n" {
+		t.Fatalf("receiver change was not pushed: %q, %v", output, err)
+	}
+	if output, err := runGit("--git-dir", forkRemote, "rev-parse", "refs/heads/"+branch); err != nil || strings.TrimSpace(string(output)) != sha {
+		t.Fatalf("pushed branch does not point to recorded fix: %q, %v", output, err)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "worker-diagnostics", job.Identity.AttemptID+".json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var record retainedWorkerDiagnostics
+	if err := json.Unmarshal(data, &record); err != nil || !reflect.DeepEqual(record.WorkerReportedDiagnostics, outcome.Result.Diagnostics) {
+		t.Fatalf("changed-fix diagnostic was not retained privately: %+v, %v", record, err)
 	}
 }
 

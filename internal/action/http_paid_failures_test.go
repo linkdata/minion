@@ -283,7 +283,10 @@ func TestHTTPPaidOutputLimitPreservesUsageWithoutTrustingWorkerPolicy(t *testing
 	path := filepath.Join(orchestrator.WorkRoot, "worker-diagnostics", records[0].ID+".json")
 	data, err := os.ReadFile(path)
 	var private retainedWorkerDiagnostics
-	if err != nil || json.Unmarshal(data, &private) != nil || private.Identity.JobID != request.ID || private.Identity.AttemptID != records[0].ID || private.WorkerReportedFailure == nil || !strings.Contains(private.WorkerReportedFailure.Message, "paid native event limit") {
+	if err == nil {
+		err = json.Unmarshal(data, &private)
+	}
+	if err != nil || private.Identity.JobID != request.ID || private.Identity.AttemptID != records[0].ID || private.WorkerReportedFailure == nil || !strings.Contains(private.WorkerReportedFailure.Message, "paid native event limit") {
 		t.Fatalf("paid worker detail was not retained privately: path=%q record=%+v error=%v", path, private, err)
 	}
 }

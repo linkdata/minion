@@ -101,7 +101,11 @@ func InertLogText(s string) string {
 		return visible
 	}
 	visible = visible[:bounded.DiagnosticBytes]
-	for !utf8.ValidString(visible) {
+	for {
+		_, err := strconv.Unquote("\"" + visible + "\"")
+		if err == nil && utf8.ValidString(visible) {
+			break
+		}
 		visible = visible[:len(visible)-1]
 	}
 	return visible + "..."
