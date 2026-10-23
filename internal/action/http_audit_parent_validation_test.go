@@ -67,6 +67,8 @@ if (findings.some(finding => finding.unexpected === true)) process.exit(17);
 			case "coverage-ledger.json":
 				ledger := strings.Replace(auditCoveredLedgerFixture, `"status":"covered"`, `"status":"candidate"`, 1)
 				outcome.Result.Artifacts[i].Data = []byte(strings.Replace(ledger, `"result_fingerprints":[]`, `"result_fingerprints":["F"]`, 1))
+			case "NEEDS-VALIDATION.md":
+				outcome.Result.Artifacts[i].Data = []byte(auditNeedsDetailFixture)
 			}
 		}
 		if err := outcome.Result.Validate(job); err != nil {

@@ -397,7 +397,7 @@ JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 	blockedLedger = strings.Replace(blockedLedger, `"coverage_id":"source::boundary::`, `"coverage_id":"source::blocked::`, 1)
 	blockedLedger = strings.Replace(blockedLedger, `"boundary":"boundary"`, `"boundary":"blocked"`, 1)
 	blockedLedger = strings.Replace(blockedLedger, `"boundary":"Boundary"`, `"boundary":"Blocked boundary"`, 1)
-	write("coverage-ledger.json", "["+strings.Trim(coveredLedger, "[]")+","+strings.Trim(blockedLedger, "[]")+"]")
+	write("coverage-ledger.json", "["+strings.Trim(blockedLedger, "[]")+","+strings.Trim(coveredLedger, "[]")+"]")
 	validate("omits blocked coverage count")
 	reportText = "Coverage summary: 1 blocked unit; investigate boundary.\n"
 	write("REPORT.md", reportText)

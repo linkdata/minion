@@ -36,7 +36,7 @@ func TestCompleteAuditResultValidatesCoverage(t *testing.T) {
 	secondBlocked := strings.Replace(blockedLedger, `"coverage_id":"source::boundary::`, `"coverage_id":"source::blocked::`, 1)
 	secondBlocked = strings.Replace(secondBlocked, `"boundary":"boundary"`, `"boundary":"blocked"`, 1)
 	secondBlocked = strings.Replace(secondBlocked, `"boundary":"Boundary"`, `"boundary":"Blocked boundary"`, 1)
-	blockedAndCovered := "[" + strings.Trim(validLedger, "[]") + "," + strings.Trim(secondBlocked, "[]") + "]"
+	blockedAndCovered := "[" + strings.Trim(secondBlocked, "[]") + "," + strings.Trim(validLedger, "[]") + "]"
 	selfCheckedCandidate := strings.Replace(confirmedLedger, `"local_checks":[{"agent_id":"verifier"`, `"local_checks":[{"agent_id":"hunter"`, 1)
 	rejectedFinding := `[{"verdict":"rejected","fingerprint":"F","title":"Guard bypass refuted","description":"The alleged bypass does not reach the operation.","claimed_root_cause":"The guard was claimed to be absent.","trace":[{"kind":"entrypoint","file":"source.txt","line":1,"scope":"source","description":"The request reaches the guard."}],"evidence":[{"file":"source.txt","line":1,"description":"The guard executes before the operation."}],"reason":"The request is stopped by the guard."}]`
 	withContext := strings.Replace(validLedger, `"ordinary_attack_class_block":null`, `"ordinary_attack_class_block":"The ordinary attack path is covered."`, 1)

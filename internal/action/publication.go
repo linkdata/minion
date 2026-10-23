@@ -96,6 +96,17 @@ func rejectPublishedRefutations(job Job, result Result, projected publication) e
 					return errors.New("publication contains private review evidence")
 				}
 			}
+			for line := range strings.SplitSeq(variant, "\n") {
+				line = strings.TrimLeft(line, " \t")
+				if len(line) < minCopyRunes+2 || !strings.ContainsAny(line[:1], "-*+") || line[1] != ' ' && line[1] != '\t' {
+					continue
+				}
+				for _, sentence := range strings.FieldsFunc(line[2:], publicationSentenceBreak) {
+					if sentences[foldPublicationSpace(sentence)] {
+						return errors.New("publication contains private review evidence")
+					}
+				}
+			}
 		}
 	}
 	return nil

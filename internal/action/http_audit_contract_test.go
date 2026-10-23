@@ -37,7 +37,7 @@ func TestHostileHTTPAuditSchemaCannotPublish(t *testing.T) {
 	secondBlocked := strings.Replace(blockedLedger, `"coverage_id":"source::boundary::`, `"coverage_id":"source::blocked::`, 1)
 	secondBlocked = strings.Replace(secondBlocked, `"boundary":"boundary"`, `"boundary":"blocked"`, 1)
 	secondBlocked = strings.Replace(secondBlocked, `"boundary":"Boundary"`, `"boundary":"Blocked boundary"`, 1)
-	blockedAndCovered := "[" + strings.Trim(auditCoveredLedgerFixture, "[]") + "," + strings.Trim(secondBlocked, "[]") + "]"
+	blockedAndCovered := "[" + strings.Trim(secondBlocked, "[]") + "," + strings.Trim(auditCoveredLedgerFixture, "[]") + "]"
 	for _, test := range []struct {
 		name, artifact, data, findings, ledger, report, want string
 		candidate, incompleteReason                          bool
