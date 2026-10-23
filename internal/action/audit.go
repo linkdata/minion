@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/linkdata/minion/internal/aicli"
@@ -120,7 +121,11 @@ func redactAuditJSON(data []byte, secrets ...string) ([]byte, error) {
 	return data, nil
 }
 
-func rejectDuplicateAuditJSONKeys(data []byte) error {
+func rejectDuplicateAuditJSONKeys(data []byte, canonicalKeys ...string) error {
+	canonical := make(map[string]string, len(canonicalKeys))
+	for _, key := range canonicalKeys {
+		canonical[workspace.FoldPath(key)] = key
+	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	var visit func() error
 	visit = func() error {
@@ -141,6 +146,9 @@ func rejectDuplicateAuditJSONKeys(data []byte) error {
 					return errors.New("audit JSON object key is invalid")
 				}
 				folded := workspace.FoldPath(key)
+				if want := canonical[folded]; want != "" && key != want {
+					return fmt.Errorf("audit JSON uses noncanonical key %q", key)
+				}
 				if seen[folded] {
 					return errors.New("audit JSON has duplicate object keys")
 				}
@@ -259,19 +267,29 @@ type auditCoverageCheck struct {
 }
 
 type auditCoverageEvidence struct {
+	Wave               int                  `json:"wave"`
 	Status             string               `json:"status"`
 	AgentID            string               `json:"agent_id"`
 	ReviewedPaths      []string             `json:"reviewed_paths"`
 	LocalChecks        []auditCoverageCheck `json:"local_checks"`
 	ResultFingerprints []string             `json:"result_fingerprints"`
 	Unresolved         []string             `json:"unresolved"`
+	ReassignmentReason string               `json:"reassignment_reason"`
 }
 
 func validateAuditCoverage(ledgerBytes, findingsBytes []byte) error {
-	if err := rejectDuplicateAuditJSONKeys(ledgerBytes); err != nil {
+	if err := rejectDuplicateAuditJSONKeys(ledgerBytes,
+		"coverage_id", "canonical_refs", "surface", "boundary", "subsystem", "attack_class", "lifecycle", "starting_paths",
+		"ordinary_attack_class_block", "selected_companion_blocks", "excluded_blocks", "prior_status", "attempts", "wave", "status",
+		"agent_id", "reviewed_paths", "local_checks", "result_fingerprints", "unresolved", "reassignment_reason",
+		"invariant", "method", "result", "artifact"); err != nil {
 		return fmt.Errorf("audit coverage-ledger.json: %w", err)
 	}
-	if err := rejectDuplicateAuditJSONKeys(findingsBytes); err != nil {
+	if err := rejectDuplicateAuditJSONKeys(findingsBytes,
+		"verdict", "fingerprint", "title", "description", "root_cause", "intended_behavior", "trace", "evidence", "conditions",
+		"execution", "remediation", "severity", "confidence", "claimed_root_cause", "blockers", "validation_plan", "reason",
+		"kind", "file", "line", "scope", "attacker_perspective", "payloads", "instructions", "observed_result", "strategy",
+		"code_changes", "file_name", "fixed_code", "likelihood", "impact", "score", "overall_severity", "local", "deployment"); err != nil {
 		return fmt.Errorf("audit findings.json: %w", err)
 	}
 	var units []struct {
@@ -290,11 +308,13 @@ func validateAuditCoverage(ledgerBytes, findingsBytes []byte) error {
 		return errors.New("audit coverage-ledger.json has no coverage units")
 	}
 	var findings []struct {
-		Fingerprint string `json:"fingerprint"`
-		Verdict     string `json:"verdict"`
-		Title       string `json:"title"`
-		Description string `json:"description"`
-		Trace       []struct {
+		Fingerprint      string `json:"fingerprint"`
+		Verdict          string `json:"verdict"`
+		Title            string `json:"title"`
+		Description      string `json:"description"`
+		RootCause        string `json:"root_cause"`
+		IntendedBehavior string `json:"intended_behavior"`
+		Trace            []struct {
 			Kind, File, Scope, Description string
 			Line                           int
 		} `json:"trace"`
@@ -302,6 +322,25 @@ func validateAuditCoverage(ledgerBytes, findingsBytes []byte) error {
 			File, Description string
 			Line              int
 		} `json:"evidence"`
+		Conditions []struct {
+			Kind        string `json:"kind"`
+			Description string `json:"description"`
+		} `json:"conditions"`
+		Execution struct {
+			AttackerPerspective string   `json:"attacker_perspective"`
+			Payloads            []string `json:"payloads"`
+			Instructions        []string `json:"instructions"`
+			ObservedResult      string   `json:"observed_result"`
+		} `json:"execution"`
+		Remediation struct {
+			Strategy string `json:"strategy"`
+		} `json:"remediation"`
+		Severity struct {
+			Likelihood struct{ Score, Reason string } `json:"likelihood"`
+			Impact     struct{ Score, Reason string } `json:"impact"`
+			Overall    string                         `json:"overall_severity"`
+		} `json:"severity"`
+		Confidence struct{ Score, Reason string } `json:"confidence"`
 	}
 	if err := json.Unmarshal(findingsBytes, &findings); err != nil {
 		return fmt.Errorf("decode audit findings: %w", err)
@@ -320,6 +359,26 @@ func validateAuditCoverage(ledgerBytes, findingsBytes []byte) error {
 		if finding.Verdict != "confirmed" && finding.Verdict != "needs_validation" && finding.Verdict != "rejected" ||
 			strings.TrimSpace(finding.Title) == "" || strings.TrimSpace(finding.Description) == "" || len(finding.Trace) == 0 || len(finding.Evidence) == 0 {
 			return errors.New("audit findings.json has an incomplete finding")
+		}
+		if finding.Verdict == "confirmed" {
+			invalid := !auditVisibleText(finding.RootCause) || !auditVisibleText(finding.IntendedBehavior) ||
+				finding.Conditions == nil || !auditVisibleText(finding.Execution.AttackerPerspective) || len(finding.Execution.Payloads) == 0 ||
+				len(finding.Execution.Instructions) == 0 || !auditVisibleText(finding.Execution.ObservedResult) ||
+				!auditVisibleText(finding.Remediation.Strategy) ||
+				!auditVisibleText(finding.Severity.Likelihood.Reason) || !auditVisibleText(finding.Severity.Impact.Reason) ||
+				!auditVisibleText(finding.Confidence.Reason) ||
+				(finding.Confidence.Score != "low" && finding.Confidence.Score != "medium" && finding.Confidence.Score != "high")
+			for _, condition := range finding.Conditions {
+				invalid = invalid || !auditConditionKind(condition.Kind) || !auditVisibleText(condition.Description)
+			}
+			for _, instruction := range finding.Execution.Instructions {
+				invalid = invalid || !auditVisibleText(instruction)
+			}
+			impact := auditSeverityRank(finding.Severity.Impact.Score)
+			if invalid || auditSeverityRank(finding.Severity.Likelihood.Score) < 0 || impact < 0 ||
+				auditSeverityRank(finding.Severity.Overall) < 0 || auditSeverityRank(finding.Severity.Overall) > impact {
+				return errors.New("audit findings.json has an incomplete confirmed finding")
+			}
 		}
 		for _, trace := range finding.Trace {
 			if (trace.Kind != "entrypoint" && trace.Kind != "propagation" && trace.Kind != "sink") || !workspace.ValidPath(trace.File) ||
@@ -425,9 +484,51 @@ func validateAuditCoverage(ledgerBytes, findingsBytes []byte) error {
 		if err := validateAuditCoverageEvidence(unit.auditCoverageEvidence); err != nil {
 			return err
 		}
+		if unit.Wave < 1 {
+			return errors.New("audit coverage-ledger.json has invalid current wave")
+		}
+		previousWave := 0
+		priorOwners := make(map[string]bool, len(unit.Attempts))
+		priorArtifacts := make(map[string]bool)
 		for _, attempt := range unit.Attempts {
 			if err := validateAuditCoverageEvidence(attempt); err != nil {
 				return err
+			}
+			if attempt.Wave <= previousWave || attempt.Wave >= unit.Wave || strings.TrimSpace(attempt.ReassignmentReason) == "" {
+				return errors.New("audit coverage-ledger.json has invalid archived attempt wave or reassignment")
+			}
+			if priorOwners[attempt.AgentID] {
+				return errors.New("audit coverage-ledger.json reuses an archived assignment owner")
+			}
+			for _, check := range attempt.LocalChecks {
+				if priorOwners[check.AgentID] {
+					return errors.New("audit coverage-ledger.json reuses an archived assignment check owner")
+				}
+				if check.Method == "local" {
+					var artifact string
+					_ = json.Unmarshal(check.Artifact, &artifact) // validateAuditCoverageEvidence already checked the artifact.
+					if priorArtifacts[artifact] {
+						return errors.New("audit coverage-ledger.json reuses an archived local check artifact")
+					}
+					priorArtifacts[artifact] = true
+				}
+			}
+			previousWave = attempt.Wave
+			priorOwners[attempt.AgentID] = true
+		}
+		if priorOwners[unit.AgentID] {
+			return errors.New("audit coverage-ledger.json reuses an archived assignment owner")
+		}
+		for _, check := range unit.LocalChecks {
+			if priorOwners[check.AgentID] {
+				return errors.New("audit coverage-ledger.json reuses an archived assignment check owner")
+			}
+			if check.Method == "local" {
+				var artifact string
+				_ = json.Unmarshal(check.Artifact, &artifact) // validateAuditCoverageEvidence already checked the artifact.
+				if priorArtifacts[artifact] {
+					return errors.New("audit coverage-ledger.json reuses an archived local check artifact")
+				}
 			}
 		}
 	}
@@ -437,6 +538,43 @@ func validateAuditCoverage(ledgerBytes, findingsBytes []byte) error {
 		}
 	}
 	return nil
+}
+
+func auditSeverityRank(score string) int {
+	switch score {
+	case "informational":
+		return 0
+	case "low":
+		return 1
+	case "medium":
+		return 2
+	case "high":
+		return 3
+	case "critical":
+		return 4
+	default:
+		return -1
+	}
+}
+
+func auditConditionKind(kind string) bool {
+	switch kind {
+	case "authentication_level", "authorization_role", "user_interaction", "system_configuration", "network_routing",
+		"environmental_dependency", "data_state", "timing_dependency", "third_party_dependency":
+		return true
+	default:
+		return false
+	}
+}
+
+func auditVisibleText(s string) bool {
+	for _, r := range s {
+		if !unicode.IsSpace(r) && !unicode.IsControl(r) && !unicode.Is(unicode.Cf, r) &&
+			!unicode.Is(unicode.Other_Default_Ignorable_Code_Point, r) && !unicode.Is(unicode.Variation_Selector, r) {
+			return true
+		}
+	}
+	return false
 }
 
 func validateAuditCoverageEvidence(e auditCoverageEvidence) error {

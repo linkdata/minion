@@ -243,6 +243,9 @@ func (e *Orchestrator) publish(ctx context.Context, p *preparedAction, result Re
 	if err := result.validate(p.job, true); err != nil {
 		return errors.Join(fmt.Errorf("%w: invalid action result: %w", monitor.ErrTerminalJob, err), e.retainIncompleteAudit(p, result))
 	}
+	if err := rejectConfiguredKeyResult(result, e.Runner.Codex.APIKey, e.Runner.Claude.APIKey); err != nil {
+		return errors.Join(fmt.Errorf("%w: invalid action result: %w", monitor.ErrTerminalJob, err), e.retainIncompleteAudit(p, result))
+	}
 	published, err := projectPublication(p.job, result)
 	if err != nil {
 		return errors.Join(fmt.Errorf("%w: publication projection: %w", monitor.ErrTerminalJob, err), e.retainIncompleteAudit(p, result))
@@ -278,6 +281,26 @@ func (e *Orchestrator) publish(ctx context.Context, p *preparedAction, result Re
 	return nil
 }
 
+func rejectConfiguredKeyResult(result Result, keys ...string) error {
+	if err := rejectConfiguredKeyChanges(result.Changes, keys...); err != nil {
+		return err
+	}
+	for _, key := range keys {
+		if key == "" {
+			continue
+		}
+		if containsConfiguredKey([]byte(result.Answer), key) {
+			return errors.New("answer contains a configured provider key")
+		}
+		for _, file := range result.Artifacts {
+			if containsConfiguredKey([]byte(file.Path), key) || containsConfiguredKey(file.Data, key) {
+				return errors.New("audit artifact contains a configured provider key")
+			}
+		}
+	}
+	return nil
+}
+
 func (e *Orchestrator) logResult(job Job, result Result) {
 	id := job.Identity
 	if result.matchesJob(job) && result.validateCalls(job, false) == nil {
@@ -299,6 +322,9 @@ func (e *Orchestrator) logResult(job Job, result Result) {
 func (e *Orchestrator) retainIncompleteAudit(p *preparedAction, result Result) error {
 	if p.job.Action != command.SecurityAudit || len(result.Artifacts) == 0 || !result.matchesJob(p.job) || validateResultArtifacts(p.job, result.Artifacts, false) != nil {
 		return nil
+	}
+	if rejectConfiguredKeyResult(result, e.Runner.Codex.APIKey, e.Runner.Claude.APIKey) != nil {
+		return e.retainAudit(p, nil, false)
 	}
 	return e.retainAudit(p, result.Artifacts, false)
 }

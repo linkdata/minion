@@ -33,6 +33,7 @@ func TestExecuteRejectsHostileHTTPOutcomeBeforePublication(t *testing.T) {
 		{"changed acknowledged refutation", "refutation", true, true},
 		{"changed acknowledged decision", "decision", true, false},
 		{"changed approved answer", "answer", true, true},
+		{"approved critic omits content digest", "missing digest", true, true},
 		{"incomplete critic receipt forged approval", "incomplete critic", true, true},
 		{"failed outcome after paid call", "failed outcome", false, true},
 		{"comment returns source changes", "changes", false, false},
@@ -123,14 +124,16 @@ func TestExecuteRejectsHostileHTTPOutcomeBeforePublication(t *testing.T) {
 						review.CriticStopReason = result.CriticStopReason
 						f.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: review}, http.StatusOK, sequence)
 						sequence++
-						digest, err := contentDigest(result.Answer, result.Changes, result.Artifacts)
-						if err != nil {
-							t.Fatal(err)
+						if scenario.change != "missing digest" {
+							digest, err := contentDigest(result.Answer, result.Changes, result.Artifacts)
+							if err != nil {
+								t.Fatal(err)
+							}
+							review.ContentDigest = digest
+							acknowledgedDigest = digest
+							f.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: review}, http.StatusOK, sequence)
+							sequence++
 						}
-						review.ContentDigest = digest
-						acknowledgedDigest = digest
-						f.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: review}, http.StatusOK, sequence)
-						sequence++
 					}
 				}
 				acknowledged = result

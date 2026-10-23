@@ -377,7 +377,7 @@ JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 	validate("finding without candidate")
 	archivedAttempt := `{"wave":1,"status":"candidate","agent_id":"older","reviewed_paths":["source.txt"],"local_checks":[{"agent_id":"older","reviewed_paths":["source.txt"],"invariant":"Access is checked","method":"source","result":"The guard is present","artifact":null}],"result_fingerprints":["F"],"unresolved":[],"reassignment_reason":"Rechecked"}`
 	coveredWithAttempt := strings.Replace(coveredLedger, `"attempts":[]`, `"attempts":[`+archivedAttempt+`]`, 1)
-	coveredWithAttempt = strings.Replace(coveredWithAttempt, `"wave":1,"status":"covered"`, `"wave":2,"status":"covered"`, 1)
+	coveredWithAttempt = strings.Replace(coveredWithAttempt, `"wave":1,"status":"covered","agent_id":"hunter"`, `"wave":2,"status":"covered","agent_id":"hunter"`, 1)
 	write("coverage-ledger.json", coveredWithAttempt)
 	validate("")
 	write("findings.json", "[]")
