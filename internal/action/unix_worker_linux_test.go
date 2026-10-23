@@ -51,17 +51,14 @@ func TestUnixExecutionOwnedWorker(t *testing.T) {
 	report := filepath.Join(base, "worker")
 	workRoot := filepath.Join(base, "work")
 	var endpoint *UnixEndpoint
+	var core *HTTPExecutor
 	var worker *processgroup.WorkerHandle
 	var cancel context.CancelFunc
+	var output bytes.Buffer
 	closed, released := false, false
 	defer func() {
-		socketClosed := closed || endpoint == nil
-		if endpoint != nil && !closed {
-			if err := endpoint.Close(); err != nil {
-				t.Errorf("retain unproved Unix socket in %s: %v", runtimeDir, err)
-			} else {
-				socketClosed = true
-			}
+		if core != nil {
+			_ = core.Close()
 		}
 		if cancel != nil {
 			cancel()
@@ -73,6 +70,19 @@ func TestUnixExecutionOwnedWorker(t *testing.T) {
 				t.Errorf("cleanup owned worker: released=%t error=%v", released, waitErr)
 			}
 		}
+		if endpoint != nil && !closed {
+			if worker != nil && !released {
+				_ = endpoint.server.Close() // Keep the socket path for operator recovery.
+			} else if err := endpoint.Close(); err != nil {
+				t.Errorf("retain unproved Unix socket in %s: %v", runtimeDir, err)
+			} else {
+				closed = true
+			}
+		}
+		if released && t.Failed() {
+			t.Logf("owned worker output: %s", output.String())
+		}
+		socketClosed := closed || endpoint == nil
 		if !socketClosed || worker != nil && !released {
 			t.Logf("retaining runtime directory without proved socket closure and worker release: %s", runtimeDir)
 			return
@@ -117,7 +127,7 @@ func TestUnixExecutionOwnedWorker(t *testing.T) {
 	if err := selected.CheckPrivatePaths([]string{runtimeDir, filepath.Join(runtimeDir, "execution.sock")}, selectedJob.Main.Provider, selectedJob.Critic.Provider); err == nil || !strings.Contains(err.Error(), "visible through model filesystem grant") {
 		t.Fatalf("selected parent grant did not refuse readiness: %v", err)
 	}
-	core, err := NewHTTPExecutor("local")
+	core, err = NewHTTPExecutor("local")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +147,6 @@ func TestUnixExecutionOwnedWorker(t *testing.T) {
 	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestUnixExecutionWorkerHelper$")
 	cmd.Env = append(os.Environ(), "MINION_UNIX_WORKER_HELPER=1", "MINION_UNIX_WORKER_SOCKET="+endpoint.SocketPath(),
 		"MINION_UNIX_WORKER_REPORT="+report, "MINION_UNIX_WORKER_WORKROOT="+workRoot)
-	var output bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &output, &output
 	var recorded string
 	worker, startErr := processgroup.StartWorker(cmd, func(scope string) error {
@@ -159,6 +168,25 @@ func TestUnixExecutionOwnedWorker(t *testing.T) {
 
 	store := &usage.Store{Dir: filepath.Join(t.TempDir(), "usage")}
 	tokens := usage.Tokens{Input: 9, CachedInput: 2, Output: 4}
+	awaitResult := func(done <-chan httpServerTestResult, label string) httpServerTestResult {
+		t.Helper()
+		ticker := time.NewTicker(10 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case got := <-done:
+				return got
+			case <-ctx.Done():
+				t.Fatalf("%s did not complete: %v", label, ctx.Err())
+			case <-ticker.C:
+				if _, err := os.Stat(report + ".failed"); err == nil {
+					t.Fatalf("worker failed before %s completed; output follows after worker release", label)
+				} else if !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("inspect worker failure marker: %v", err)
+				}
+			}
+		}
+	}
 	for index, digit := range []string{"a", "b"} {
 		job := withClaudeCritic(testJob(command.Comment))
 		job.Identity.JobID = strings.Repeat(strconv.Itoa(index+1), 64)
@@ -187,12 +215,7 @@ func TestUnixExecutionOwnedWorker(t *testing.T) {
 			result, err := core.Execute(ctx, fixture.job, fixture.sink)
 			done <- httpServerTestResult{result, err}
 		}()
-		var got httpServerTestResult
-		select {
-		case got = <-done:
-		case <-ctx.Done():
-			t.Fatalf("assignment %d did not complete: %v", index+1, ctx.Err())
-		}
+		got := awaitResult(done, fmt.Sprintf("assignment %d", index+1))
 		finalErr := fixture.sink.finish(got.result, got.err)
 		wantCalls := []CallUsage{
 			{Provider: "codex", Role: roleMain, Round: 1, Tokens: tokens, Complete: true},
@@ -272,7 +295,7 @@ func TestUnixExecutionOwnedWorker(t *testing.T) {
 	closeDone := make(chan error, 1)
 	go func() {
 		close(closeStarted)
-		closeDone <- endpoint.Close()
+		closeDone <- core.Close()
 	}()
 	<-closeStarted
 	if witness := unixWorkerReport(t, ctx, report, ".cancel-seen"); witness != context.Canceled.Error() || ctx.Err() != nil {
@@ -285,12 +308,7 @@ func TestUnixExecutionOwnedWorker(t *testing.T) {
 	}
 	close(release)
 	gateReleased = true
-	var got httpServerTestResult
-	select {
-	case got = <-thirdDone:
-	case <-ctx.Done():
-		t.Fatalf("canceled paid assignment did not return: %v", ctx.Err())
-	}
+	got := awaitResult(thirdDone, "canceled paid assignment")
 	wantMain := CallUsage{Provider: "codex", Role: roleMain, Round: 1, Tokens: tokens, Complete: true}
 	if !errors.Is(got.err, context.Canceled) || errors.Is(got.err, context.DeadlineExceeded) || errors.Is(got.err, monitor.ErrTerminalJob) || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || errors.Is(got.err, processgroup.ErrUnconfirmed) || !got.result.matchesJob(third.job) || !slices.Equal(got.result.Calls, []CallUsage{wantMain}) || got.result.Answer != "" || got.result.CriticStopReason != "" || len(got.result.Refutations) != 0 {
 		t.Fatalf("canceled paid assignment lost its known raw main receipt: result=%+v error=%v", got.result, got.err)
@@ -300,9 +318,11 @@ func TestUnixExecutionOwnedWorker(t *testing.T) {
 		t.Fatalf("canceled paid assignment failed durable completion: %v", finalErr)
 	}
 	if err := <-closeDone; err != nil {
-		t.Fatalf("drain endpoint after paid ACK: %v", err)
+		t.Fatalf("drain core after paid ACK: %v", err)
 	}
-	closed = true
+	if _, err := os.Lstat(endpoint.SocketPath()); err != nil {
+		t.Fatalf("core drain removed socket before worker release: %v", err)
+	}
 	if got := unixWorkerReport(t, ctx, report, ".third"); got != fmt.Sprintf("%d:5", cmd.Process.Pid) {
 		t.Fatalf("canceled assignment ran in another worker or invoked critic: %q", got)
 	}
@@ -329,6 +349,13 @@ func TestUnixExecutionOwnedWorker(t *testing.T) {
 	released, waitErr := worker.Wait()
 	if !released || waitErr != nil || cmd.ProcessState == nil || !cmd.ProcessState.Success() {
 		t.Fatalf("worker scope or nested commands survived: released=%t error=%v state=%v output=%s", released, waitErr, cmd.ProcessState, output.String())
+	}
+	if err := endpoint.Close(); err != nil {
+		t.Fatalf("close endpoint after whole-worker release: %v", err)
+	}
+	closed = true
+	if _, err := os.Lstat(endpoint.SocketPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("released worker left owned socket: %v", err)
 	}
 	if entries, err := os.ReadDir(workRoot); err != nil || len(entries) != 0 {
 		t.Fatalf("worker work root was not cleaned: entries=%v error=%v", entries, err)

@@ -158,6 +158,10 @@ func TestUnixEndpointRejectsUnsafeDirectoryAndLongPath(t *testing.T) {
 				if err != nil || !os.SameFile(before, after) || before.Mode() != after.Mode() {
 					t.Fatalf("failed admission changed caller placement: %v", err)
 				}
+			} else if kind == "missing" {
+				if _, err := os.Lstat(dir); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("failed admission created missing caller directory: %v", err)
+				}
 			}
 			if kind != "regular file" {
 				if _, err := os.Lstat(filepath.Join(dir, "execution.sock")); !errors.Is(err, os.ErrNotExist) {
