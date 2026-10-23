@@ -79,7 +79,7 @@ func saveReviewEvidence(workRoot string, job Job, result Result, logger *log.Log
 		CriticConsecutiveNoBlockerRounds: job.CriticConsecutiveNoBlockerRounds,
 		Calls:                            result.Calls, Refutations: result.Refutations,
 	}
-	if len(record.Calls) != 0 || len(record.Refutations) != 0 || record.CriticStopReason != "" {
+	if len(record.Calls) != 0 {
 		record.ReviewClaimOrigin = executorClaimOrigin
 	}
 	data, err := json.Marshal(record)
