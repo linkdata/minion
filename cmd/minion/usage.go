@@ -17,7 +17,7 @@ import (
 	"github.com/linkdata/minion/internal/usage"
 )
 
-const usageTokenNote = "Cached input tokens are included in input tokens; total tokens = input + output. Incomplete usage means some or all tokens are unknown, so totals are lower bounds."
+const usageTokenNote = "Returned-call token counts and completion flags are executor-reported claims, not verified billing. Cached input tokens are included in input tokens; total tokens = input + output. Incomplete usage means some or all tokens are unknown, so totals are lower bounds."
 
 type usageAttempt struct {
 	usage.Record

@@ -64,6 +64,9 @@ type Record struct {
 	Action         string     `json:"action"`
 	Number         int        `json:"number"`
 	SourceURL      string     `json:"source_url,omitempty"`
+	ExecutorID     string     `json:"executor_id,omitempty"`
+	SourceRef      string     `json:"source_ref,omitempty"`
+	UsageSource    string     `json:"usage_source,omitempty"`
 	Provider       string     `json:"provider"`
 	Model          string     `json:"model"`
 	Effort         string     `json:"reasoning_effort,omitempty"`
@@ -93,6 +96,12 @@ func (r Record) validate() error {
 	}
 	if r.CriticProvider != "" && r.CriticProvider != "codex" && r.CriticProvider != "claude" {
 		return fmt.Errorf("usage record %s has invalid critic provider %q", r.ID, r.CriticProvider)
+	}
+	if (r.ExecutorID == "") != (r.SourceRef == "") ||
+		(r.ExecutorID != "" && !workspace.ValidIdentitySegment(r.ExecutorID)) ||
+		(r.SourceRef != "" && !workspace.ValidSHA(r.SourceRef)) ||
+		(r.UsageSource != "" && r.UsageSource != "executor_reported") {
+		return fmt.Errorf("usage record %s has invalid provenance", r.ID)
 	}
 	switch r.Status {
 	case "running":

@@ -29,6 +29,7 @@ func saveReportFixture(t *testing.T, dir string) {
 		switch i {
 		case 0:
 			record.Tokens = usage.Tokens{Input: 100, CachedInput: 40, Output: 20}
+			record.ExecutorID, record.SourceRef, record.UsageSource = "local", strings.Repeat("a", 40), "executor_reported"
 		case 1:
 			record.Tokens = usage.Tokens{Input: 50, CachedInput: 10, Output: 5}
 			record.CodexCalls, record.UsageComplete = 2, false
@@ -89,6 +90,9 @@ func TestUsageDetailsAndTables(t *testing.T) {
 	output := reportJSON(t, "-dir", dir, "-group-by", "none")
 	if len(output.Groups) != 0 || len(output.GroupBy) != 0 || len(output.Attempts) != 4 || output.Attempts[0].TotalTokens != 120 || output.Attempts[1].UsageComplete || output.Attempts[2].UsageComplete {
 		t.Fatalf("wrong detail report: %+v", output)
+	}
+	if attempt := output.Attempts[0]; attempt.ExecutorID != "local" || attempt.SourceRef != strings.Repeat("a", 40) || attempt.UsageSource != "executor_reported" || !strings.Contains(output.TokenNote, "executor-reported claims") {
+		t.Fatalf("details lost claim provenance: %+v", attempt)
 	}
 	if attempt := output.Attempts[1]; attempt.Provider != "claude" || attempt.CriticProvider != "codex" || attempt.CriticModel != "critic-model" || attempt.ClaudeCalls != 3 {
 		t.Fatalf("details lost model roles: %+v", attempt)

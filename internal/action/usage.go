@@ -37,6 +37,7 @@ func (c *usageCheckpoint) afterCall(call CallUsage) error {
 	tokens, valid := c.record.Tokens.AddChecked(call.Tokens)
 	c.record.Tokens = tokens
 	c.record.UsageComplete = c.previousComplete && call.Complete && valid
+	c.record.UsageSource = "executor_reported"
 	if !valid {
 		c.logf("action usage counters invalid or overflowed; retaining lower bound for attempt %s", c.record.ID)
 	}

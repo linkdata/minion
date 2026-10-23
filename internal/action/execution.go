@@ -95,6 +95,8 @@ func (c *executionCheckpoints) BeforeCall(fact CallCheckpoint) error {
 		return c.fail(fmt.Errorf("%w: %w", checkpointContractError(), err))
 	}
 	if c.owner.usageCheckpoint != nil {
+		c.owner.usageCheckpoint.record.ExecutorID = c.job.Identity.ExecutorID
+		c.owner.usageCheckpoint.record.SourceRef = c.job.Source.Head
 		if err := c.owner.usageCheckpoint.beforeCall(fact.Call); err != nil {
 			return c.fail(err)
 		}

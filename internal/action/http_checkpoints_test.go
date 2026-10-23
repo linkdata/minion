@@ -265,12 +265,22 @@ func TestHTTPFailedOutcomeWithoutCriticCannotInventReview(t *testing.T) {
 	for _, field := range []string{"refutation", "decision"} {
 		t.Run(field, func(t *testing.T) {
 			owner := newExecutionAdapterFixture(t, testJob(command.Comment))
+			store := owner.startUsage()
 			f := newHTTPServerTest(t, context.Background(), owner.job, owner.sink, nil)
 			f.pull(t)
 			f.ack(t, "/before", f.call(1), http.StatusOK, 1)
 			paid := f.call(2)
 			paid.Checkpoint.Call.Tokens, paid.Checkpoint.Call.Complete = usage.Tokens{Input: 3}, true
 			f.ack(t, "/after", paid, http.StatusOK, 2)
+			records, err := usage.ReadAll(store.Dir)
+			if err != nil || len(records) != 1 || records[0].ExecutorID != owner.job.Identity.ExecutorID || records[0].SourceRef != owner.job.Source.Head || records[0].UsageSource != "executor_reported" {
+				t.Fatalf("saved usage lacks parent binding or claim provenance: records=%+v error=%v", records, err)
+			}
+			usagePath := filepath.Join(store.Dir, owner.job.Identity.AttemptID+".json")
+			beforeUsage, err := os.ReadFile(usagePath)
+			if err != nil {
+				t.Fatal(err)
+			}
 			outcome := f.outcome(3, errors.New("worker stopped after paid call"))
 			outcome.Result.Calls = []CallUsage{paid.Checkpoint.Call}
 			if field == "refutation" {
@@ -282,6 +292,10 @@ func TestHTTPFailedOutcomeWithoutCriticCannotInventReview(t *testing.T) {
 			got := f.result(t)
 			if err := owner.sink.finish(got.result, got.err); !errors.Is(err, monitor.ErrTerminalJob) || len(owner.sink.failureEvidence().Refutations) != 0 || owner.sink.failureEvidence().CriticStopReason != "" {
 				t.Fatalf("failed outcome invented review evidence: error=%v evidence=%+v", err, owner.sink.failureEvidence())
+			}
+			afterUsage, err := os.ReadFile(usagePath)
+			if err != nil || !bytes.Equal(beforeUsage, afterUsage) {
+				t.Fatalf("failed outcome changed acknowledged usage: error=%v", err)
 			}
 		})
 	}
