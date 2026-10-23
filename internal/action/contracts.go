@@ -250,6 +250,10 @@ func (s Status) Validate(j Job) error {
 	if err := j.Validate(); err != nil {
 		return err
 	}
+	return s.validate(j)
+}
+
+func (s Status) validate(j Job) error {
 	if s.Version != ProtocolVersion || s.Identity != j.Identity || s.SourceRef != j.Source.Head {
 		return errors.New("action status version, identity or source differs from job")
 	}
@@ -280,6 +284,41 @@ func (s Status) Validate(j Job) error {
 		}
 	default:
 		return errors.New("invalid action status phase")
+	}
+	return nil
+}
+
+func (s Status) order(rounds int) int {
+	switch s.Phase {
+	case "prepare":
+		return 0
+	case "main":
+		return 3*s.Round - 2
+	case "critic":
+		if s.ReviewPhase == reviewVerification {
+			return 3*s.Round - 1
+		}
+		return 3 * s.Round
+	case "upload":
+		return 3*rounds + 1
+	default: // cleanup; validate has already checked the phase.
+		return 3*rounds + 2
+	}
+}
+
+func (s Status) follows(previous Status, rounds int) error {
+	if s.Sequence <= previous.Sequence {
+		return errors.New("HTTP Status sequence is stale")
+	}
+	if s.ProgressSequence < previous.ProgressSequence || s.LogSequence < previous.LogSequence ||
+		(s.ProgressSequence == previous.ProgressSequence && s.ProgressAge < previous.ProgressAge) {
+		return errors.New("HTTP Status progress or log sequence regressed")
+	}
+	if s.order(rounds) < previous.order(rounds) {
+		return errors.New("HTTP Status phase regressed")
+	}
+	if previous.WorkerState == "ready" || previous.WorkerState == "unclean" || previous.WorkerState == "stopping" && s.WorkerState == "busy" {
+		return errors.New("HTTP Status worker state regressed or restarted after termination")
 	}
 	return nil
 }

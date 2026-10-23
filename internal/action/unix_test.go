@@ -732,7 +732,7 @@ func TestUnixEndpointCloseKeepsPaidSaveAndReceiptGraceAvailable(t *testing.T) {
 		t.Fatalf("Close removed the endpoint before callback drain: %v", err)
 	}
 	defer probe.CloseIdleConnections()
-	status := Status{Version: ProtocolVersion, Identity: f.job.Identity, SourceRef: f.job.Source.Head, Sequence: 1, WorkerState: "busy", Phase: "upload"}
+	status := Status{Version: ProtocolVersion, Identity: f.job.Identity, SourceRef: f.job.Source.Head, Sequence: 1, WorkerState: "busy", Phase: "main", Round: 1}
 	unixTestAck(t, probe, "/status", httpObservation{Status: status}, 1)
 	releaseOnce.Do(func() { close(release) })
 	select {
