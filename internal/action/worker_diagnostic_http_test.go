@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -21,7 +22,9 @@ import (
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/monitor"
+	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/testsupport"
+	"github.com/linkdata/minion/internal/usage"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -532,25 +535,16 @@ func TestHTTPResultCannotPublishPrivateRefutation(t *testing.T) {
 	for _, test := range []struct {
 		name, private, answer string
 	}{
-		{"exact copy", "PRIVATE_MAIN_REFUTATION", "Public reply.\nPRIVATE_MAIN_REFUTATION"},
-		{"rendered quote leader", "> UNIQUE_PRIVATE_PHRASE", "UNIQUE_PRIVATE_PHRASE"},
-		{"short private token", "Token: ABC123", "Public reply. ABC123"},
-		{"short private token with comma", "Token: ABC123,", "Public reply. ABC123"},
-		{"short private token in quotes", `Token: "ABC123"`, "Public reply. ABC123"},
-		{"short private token in prose", "ABC123 is private", "Public reply. ABC123"},
-		{"short private token with edge punctuation", "Token: -ABC123_", "Public reply. ABC123"},
-		{"Unicode simple fold", "PRIVATE Σ MARKER", "PRIVATE ς MARKER"},
-		{"canonical Unicode composition", "PRIVATE café OBJECTION", "Public reply. PRIVATE cafe\u0301 OBJECTION"},
-		{"HTML entity in Fix Markdown", "Private objection", "Private&#32;objection"},
-		{"case changed", "PRIVATE_MAIN_REFUTATION", "Public reply.\nprivate_main_refutation"},
-		{"bare Markdown quote leaders", "PRIVATE reviewer\nNOTES", "Public reply.\n>PRIVATE reviewer\n>NOTES"},
-		{"nested indented quote leaders", "PRIVATE reviewer\nNOTES", "Public reply.\n  > >PRIVATE reviewer\n > >NOTES"},
+		{"whole copy", "PRIVATE_MAIN_REFUTATION_TEXT", "Public reply.\nPRIVATE_MAIN_REFUTATION_TEXT"},
+		{"rendered quote leader", "> UNIQUE_PRIVATE_PHRASE_STAYS_HERE", "UNIQUE_PRIVATE_PHRASE_STAYS_HERE"},
+		{"Unicode simple fold", "PRIVATE Σ MARKER MUST STAY HERE", "PRIVATE ς MARKER MUST STAY HERE"},
+		{"canonical Unicode composition", "PRIVATE café OBJECTION MUST STAY HERE", "Public reply. PRIVATE cafe\u0301 OBJECTION MUST STAY HERE"},
+		{"HTML entity in Fix Markdown", "Private objection must stay out of this change", "Private&#32;objection must stay out of this change"},
+		{"case changed", "PRIVATE_MAIN_REFUTATION_TEXT", "Public reply.\nprivate_main_refutation_text"},
+		{"bare Markdown quote leaders", "PRIVATE reviewer notes must stay private", "Public reply.\n>PRIVATE reviewer notes must stay private"},
+		{"nested indented quote leaders", "PRIVATE reviewer notes must stay private", "Public reply.\n  > >PRIVATE reviewer notes must stay private"},
 		{"collapsed whitespace", "The private refutation describes a missing access control check.\nThe same account cannot act for another user.", "Public reply. The private refutation describes a missing access control check. The same account cannot act for another user."},
 		{"one substantive sentence", "The private refutation describes a missing access control check.\nThe same account cannot act for another user.", "Public reply. The same account cannot act for another user."},
-		{"JSON escaped sentence", "The private refutation describes a missing access control check.\nThe same account cannot act for another user.", `{"memo":"The sa\u006de account cannot act for another user."}`},
-		{"JSON escaped sentence in Markdown", "The private refutation describes a missing access control check.\nThe same account cannot act for another user.", "Public reply.\n```json\n" + `{"memo":"The sa\u006de account cannot act for another user."}` + "\n```"},
-		{"nested JSON string in source", "The private refutation describes a missing access control check.\nThe same account cannot act for another user.", "Public reply.\n```go\n" + `const memo = "{\"memo\":\"The sa\\u006de account cannot act for another user.\"}"` + "\n```"},
-		{"Unicode escape in single-quoted source", "The private refutation describes a missing access control check.\nThe same account cannot act for another user.", "Public reply.\n```js\n" + `const memo = '{"memo":"The sa\u006de account cannot act for another user."}'` + "\n```"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			action := command.Comment
@@ -624,35 +618,81 @@ func TestHTTPResultCannotPublishPrivateRefutation(t *testing.T) {
 	}
 }
 
-func TestPublicationSegmentsCollisionBudgetFailsClosed(t *testing.T) {
-	const prefix = "SAME_PREFIX_1234"
-	const count = 1024
-	public := prefix + "PUBLIC"
-	private := prefix + "private entry 0000"
-	matcher := publicationSegments{
-		prefixes: make(map[string][]string),
-		budget:   int64(len(public) + 4*len(private)),
+func TestHTTPEchoedRoundTwoRefutationStopsOrchestratorPublication(t *testing.T) {
+	gitFixtureRemote(t)
+	const private = "Private reviewer finding must not enter the public reply."
+	var writes atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if serveIssueFixture(t, w, r) {
+			return
+		}
+		if r.Method != http.MethodGet {
+			writes.Add(1)
+		}
+		t.Errorf("unexpected GitHub request: %s %s", r.Method, r.URL.Path)
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	workRoot, usageDir := t.TempDir(), filepath.Join(t.TempDir(), "usage")
+	var journal bytes.Buffer
+	e := &Orchestrator{WorkRoot: workRoot, Usage: &usage.Store{Dir: usageDir}, GitHub: testGitHub(server, "token"), BotLogin: "bot", Adversarial: "claude",
+		Logger:   log.New(&journal, "", 0),
+		Commands: map[string]config.CommandMapping{"comment": {Action: string(command.Comment), Skills: []string{skills.BuiltinAntiPromptInjection}}},
 	}
-	for i := range count {
-		matcher.add(prefix + fmt.Sprintf("private entry %04d", i))
+	e.Executor = executorFunc(func(ctx context.Context, job Job, checkpoints Checkpoints) (Result, error) {
+		transport := newHTTPServerTest(t, ctx, job, checkpoints, nil)
+		transport.pull(t)
+		result := privateReviewResult(job)
+		result.Refutations[0].Text = private
+		result.Answer = "Public reply. " + private
+		for i := range result.Calls {
+			result.Calls[i].Tokens, result.Calls[i].Complete = usage.Tokens{Input: int64(i + 1), Output: 1}, true
+		}
+		if err := result.Validate(job); err != nil {
+			t.Fatalf("invalid refutation echo fixture: %v", err)
+		}
+		sequence := uint64(1)
+		binding := CallCheckpoint{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head}
+		review := ReviewCheckpoint{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head}
+		transport.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: review}, http.StatusOK, sequence)
+		sequence++
+		for i, call := range result.Calls {
+			binding.Call = callMetadata(call)
+			transport.ack(t, "/before", httpCall{Sequence: sequence, Checkpoint: binding}, http.StatusOK, sequence)
+			sequence++
+			binding.Call = call
+			transport.ack(t, "/after", httpCall{Sequence: sequence, Checkpoint: binding}, http.StatusOK, sequence)
+			sequence++
+			review.Calls = result.Calls[:i+1]
+			if call.Round >= 2 {
+				review.Refutations = result.Refutations
+			}
+			transport.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: review}, http.StatusOK, sequence)
+			sequence++
+		}
+		review.CriticStopReason = result.CriticStopReason
+		transport.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: review}, http.StatusOK, sequence)
+		sequence++
+		outcome := transport.outcome(sequence, nil)
+		outcome.Result = result
+		transport.ack(t, "/outcome", outcome, http.StatusOK, sequence)
+		got := transport.result(t)
+		return got.result, got.err
+	})
+	request := usageJob()
+	request.Command = command.Command{Name: "comment", Action: command.Comment}
+	request.Repository.Actions = []string{"comment"}
+	err := e.Execute(t.Context(), request)
+	if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "publication contains private review evidence") || writes.Load() != 0 ||
+		strings.Contains(err.Error(), private) || strings.Contains(journal.String(), private) {
+		t.Fatalf("refutation echo crossed publication boundary: error=%v writes=%d journal=%q", err, writes.Load(), journal.String())
 	}
-	if !matcher.contains(public) || matcher.budget != 0 {
-		t.Fatalf("colliding private prefixes did not exhaust the bounded matcher and fail closed: remaining=%d", matcher.budget)
+	if saved := readPrivateReview(t, workRoot); len(saved.Refutations) != 1 || saved.Refutations[0].Text != private || len(saved.Calls) != 5 {
+		t.Fatalf("private review evidence was lost: %+v", saved)
 	}
-}
-
-func TestPublicationJSONScanBudgetFailsClosed(t *testing.T) {
-	text := `"` + strings.Repeat(`\"`, 100)
-	matcher := publicationSegments{budget: int64(len(text) + 32)}
-	if !matcher.containsJSONStrings(text, 0) || matcher.budget != 0 {
-		t.Fatalf("repeated escaped quotes did not exhaust the bounded JSON scan: remaining=%d", matcher.budget)
-	}
-}
-
-func TestPublicationPrivateTextCannotBeNULSplit(t *testing.T) {
-	matcher := publicationSegments{prefixes: make(map[string][]string), budget: 1024}
-	matcher.add("private raw text")
-	if !matcher.contains(foldPublicationSpace("private \x00raw text")) {
-		t.Fatal("NUL split private text was not detected")
+	records, err := usage.ReadAll(usageDir)
+	if err != nil || len(records) != 1 || records[0].Status != "failed" || records[0].Tokens != (usage.Tokens{Input: 15, Output: 5}) ||
+		records[0].CodexCalls != 2 || records[0].ClaudeCalls != 3 || !records[0].UsageComplete {
+		t.Fatalf("paid usage evidence was lost: records=%+v error=%v", records, err)
 	}
 }

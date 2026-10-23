@@ -1,13 +1,13 @@
 package action
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"html"
 	"slices"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"golang.org/x/text/unicode/norm"
 
@@ -51,202 +51,58 @@ func projectPublication(job Job, result Result) (publication, error) {
 	return projected, nil
 }
 
-// This catches direct and common encoded copies of reported refutations, not arbitrary leaks from a hostile executor.
+// This catches accidental copies of substantial reported refutation text, not leaks from a hostile executor.
 func rejectPublishedRefutations(job Job, result Result, projected publication) error {
 	if len(result.Refutations) == 0 {
 		return nil
 	}
-	matcher := publicationSegments{prefixes: make(map[string][]string), budget: 1 << 30}
+	const minCopyRunes = 24
+	var whole []string
+	sentences := make(map[string]bool)
 	for _, refutation := range result.Refutations {
-		text := modelLineBreaks.Replace(refutation.Text)
-		matcher.add(foldPublicationSpace(text))
-		for _, sentence := range strings.FieldsFunc(text, func(r rune) bool {
-			return r == '\n' || r == '.' || r == ';' || r == ':' || r == '!' || r == '?'
-		}) {
-			if segment := foldPublicationSpace(sentence); len(segment) >= 24 {
-				matcher.add(segment)
+		for _, variant := range publicationTextVariants(refutation.Text) {
+			if text := foldPublicationSpace(variant); utf8.RuneCountInString(text) >= minCopyRunes {
+				whole = append(whole, text)
 			}
-		}
-		// shortcut: Short plain words stay unindexed to avoid unrelated-reply rejects; use structured privacy markers if they must be protected.
-		for _, token := range strings.FieldsFunc(text, func(r rune) bool {
-			return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_' && r != '-'
-		}) {
-			if len(token) >= 6 && strings.IndexFunc(token, unicode.IsDigit) >= 0 {
-				matcher.add(foldPublicationSpace(token))
-				if trimmed := strings.Trim(token, "_-"); trimmed != token && len(trimmed) >= 6 {
-					matcher.add(foldPublicationSpace(trimmed))
+			for _, sentence := range strings.FieldsFunc(variant, publicationSentenceBreak) {
+				if text := foldPublicationSpace(sentence); utf8.RuneCountInString(text) >= minCopyRunes {
+					sentences[text] = true
 				}
 			}
 		}
 	}
-	public := publicationTextVariants(projected.answer)
-	if projected.answer != "" {
-		public = append(public, publicationTextVariants(inertModelOutput(projected.answer))...)
+	if len(whole) == 0 && len(sentences) == 0 {
+		return nil
 	}
+	public := []string{projected.answer}
 	for _, file := range projected.artifacts {
-		public = append(public, publicationTextVariants(string(file.Data))...)
+		public = append(public, string(file.Data))
 	}
 	if job.Action == command.Fix {
 		for _, change := range result.Changes {
-			public = append(public, change.Path)
-			public = append(public, publicationTextVariants(string(change.Data))...)
+			public = append(public, change.Path, string(change.Data))
 		}
 	}
 	for _, text := range public {
-		if matcher.contains(foldPublicationSpace(text)) {
-			return matcher.rejection()
-		}
-		if strings.ContainsRune(text, '\\') && (matcher.containsJSONStrings(text, 0) || matcher.containsUnicodeEscapes(text)) {
-			return matcher.rejection()
+		for _, variant := range publicationTextVariants(text) {
+			folded := foldPublicationSpace(variant)
+			for _, private := range whole {
+				if strings.Contains(folded, private) {
+					return errors.New("publication contains private review evidence")
+				}
+			}
+			for _, sentence := range strings.FieldsFunc(variant, publicationSentenceBreak) {
+				if sentences[foldPublicationSpace(sentence)] {
+					return errors.New("publication contains private review evidence")
+				}
+			}
 		}
 	}
 	return nil
 }
 
-type publicationSegments struct {
-	all      []string
-	prefixes map[string][]string
-	budget   int64
-	limited  bool
-}
-
-func (m *publicationSegments) add(text string) {
-	m.all = append(m.all, text)
-	if len(text) >= 16 {
-		m.prefixes[text[:16]] = append(m.prefixes[text[:16]], text)
-	}
-}
-
-func (m *publicationSegments) spend(bytes int) bool {
-	if int64(bytes) > m.budget {
-		m.limited = true
-		return false
-	}
-	m.budget -= int64(bytes)
-	return true
-}
-
-func (m publicationSegments) rejection() error {
-	if m.limited {
-		return errors.New("publication privacy scan limit reached")
-	}
-	return errors.New("publication contains private review evidence")
-}
-
-func (m *publicationSegments) contains(text string) bool {
-	// An exhausted budget rejects publication, including hostile prefix collisions.
-	if !m.spend(len(text)) {
-		return true
-	}
-	if len(m.all) <= 8 {
-		for _, segment := range m.all {
-			if !m.spend(len(text)) {
-				return true
-			}
-			if strings.Contains(text, segment) {
-				return true
-			}
-		}
-		return false
-	}
-	for _, segment := range m.all {
-		if len(segment) < 16 {
-			if !m.spend(len(text)) || strings.Contains(text, segment) {
-				return true
-			}
-		}
-	}
-	for i := 0; i+16 <= len(text); i++ {
-		for _, segment := range m.prefixes[text[i:i+16]] {
-			if !m.spend(len(segment)) {
-				return true
-			}
-			if strings.HasPrefix(text[i:], segment) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func (m *publicationSegments) containsJSONStrings(text string, depth int) bool {
-	if !m.spend(len(text)) {
-		return true
-	}
-	for offset := 0; offset < len(text); {
-		start := strings.IndexByte(text[offset:], '"')
-		if start < 0 {
-			return false
-		}
-		start += offset
-		offset = start + 1
-		end := offset
-		for end < len(text) && text[end] != '"' {
-			if !m.spend(1) {
-				return true
-			}
-			if text[end] == '\\' {
-				end++
-				if !m.spend(1) {
-					return true
-				}
-			}
-			end++
-		}
-		if end >= len(text) || !strings.ContainsRune(text[offset:end], '\\') {
-			continue
-		}
-		if !m.spend(end - start + 1) {
-			return true
-		}
-		var value string
-		if json.Unmarshal([]byte(text[start:end+1]), &value) == nil {
-			if m.contains(foldPublicationSpace(value)) {
-				return true
-			}
-			if strings.ContainsRune(value, '\\') {
-				if depth == 4 {
-					m.limited = true
-					return true
-				}
-				if m.containsJSONStrings(value, depth+1) {
-					return true
-				}
-			}
-		}
-	}
-	return false
-}
-
-func (m *publicationSegments) containsUnicodeEscapes(text string) bool {
-	if !strings.Contains(text, `\u`) {
-		return false
-	}
-	if !m.spend(len(text)) {
-		return true
-	}
-	var decoded strings.Builder
-	decoded.Grow(len(text))
-	for i := 0; i < len(text); {
-		if i+6 <= len(text) && text[i:i+2] == `\u` {
-			if !m.spend(64) {
-				return true
-			}
-			end := i + 6
-			if end+6 <= len(text) && text[end:end+2] == `\u` {
-				end += 6
-			}
-			var value string
-			if json.Unmarshal([]byte(`"`+text[i:end]+`"`), &value) == nil {
-				decoded.WriteString(value)
-				i = end
-				continue
-			}
-		}
-		decoded.WriteByte(text[i])
-		i++
-	}
-	return m.contains(foldPublicationSpace(decoded.String()))
+func publicationSentenceBreak(r rune) bool {
+	return r == '.' || r == ';' || r == ':' || r == '!' || r == '?'
 }
 
 func foldPublicationSpace(text string) string {

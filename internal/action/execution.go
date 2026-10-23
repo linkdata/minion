@@ -195,9 +195,6 @@ func (c *executionCheckpoints) finish(result Result, runErr error) error {
 		if !c.reviewed || c.review.CriticStopReason == "" || result.CriticStopReason != c.review.CriticStopReason || !slices.Equal(result.Calls, c.review.Calls) || !slices.Equal(result.Refutations, c.review.Refutations) {
 			return checkpointContractError()
 		}
-		if err := result.validate(c.job, true); err != nil {
-			return errors.Join(checkpointContractError(), err)
-		}
 	}
 	return nil
 }

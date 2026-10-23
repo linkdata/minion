@@ -3,6 +3,7 @@ package action
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -218,10 +219,6 @@ func TestPublishedRefutationsCheckOnlyActualPublication(t *testing.T) {
 	if rejectPublishedRefutations(job, result, projected) == nil {
 		t.Fatal("private refutation in changed source was accepted")
 	}
-	result.Changes[0].Data = []byte(`{"memo":"Private objection\nand evidence."}`)
-	if rejectPublishedRefutations(job, result, projected) == nil {
-		t.Fatal("JSON-escaped private refutation in changed source was accepted")
-	}
 
 	job.Action = command.SecurityAudit
 	result.Changes = nil
@@ -231,23 +228,40 @@ func TestPublishedRefutationsCheckOnlyActualPublication(t *testing.T) {
 	if err != nil || rejectPublishedRefutations(job, result, projected) == nil {
 		t.Fatalf("private refutation in retained report was accepted: %v", err)
 	}
-	result.Artifacts[0].Data = []byte(`{"memo":"Private objection\nand evidence."}`)
-	projected, err = projectPublication(job, result)
-	if err != nil || rejectPublishedRefutations(job, result, projected) == nil {
-		t.Fatalf("JSON-escaped private refutation in report was accepted: %v", err)
-	}
 }
 
 func TestPublishedRefutationsAllowCommonShortWords(t *testing.T) {
 	job := withClaudeCritic(testJob(command.Comment))
 	result := privateReviewResult(job)
-	result.Refutations[0].Text = "Affected path: src/app; helper: safe_identifier"
-	result.Answer = "Public reply about src/app and safe_identifier."
+	for _, test := range []struct{ private, answer string }{
+		{"a", "A public reply about the task."},
+		{"Affected path: src/app; helper: safe_identifier", "Public reply about src/app and safe_identifier."},
+	} {
+		result.Refutations[0].Text, result.Answer = test.private, test.answer
+		projected, err := projectPublication(job, result)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := rejectPublishedRefutations(job, result, projected); err != nil {
+			t.Fatalf("unrelated public reply blocked by %q: %v", test.private, err)
+		}
+	}
+}
+
+func TestPublishedRefutationsAllowLargeUnrelatedArtifact(t *testing.T) {
+	job := withClaudeCritic(testJob(command.SecurityAudit))
+	result := privateReviewResult(job)
+	var private strings.Builder
+	for n := 100000; n < 100205; n++ {
+		fmt.Fprintf(&private, "%d ", n)
+	}
+	result.Refutations[0].Text = private.String()
+	result.Artifacts = []workspace.File{{Path: "architecture.md", Mode: workspace.Regular, Data: []byte(strings.Repeat("ordinary public report text ", (5<<20)/len("ordinary public report text ")))}}
 	projected, err := projectPublication(job, result)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := rejectPublishedRefutations(job, result, projected); err != nil {
-		t.Fatalf("common short word blocked public reply: %v", err)
+		t.Fatalf("large unrelated artifact blocked: %v", err)
 	}
 }

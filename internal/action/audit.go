@@ -26,8 +26,8 @@ var auditValidators = []struct{ script, artifact string }{
 	{"validate-coverage-ledger.cjs", "coverage-ledger.json"},
 }
 
-var auditCleanClaim = regexp.MustCompile(`\b(?:no|zero|0) (?:findings|vulnerabilities|security issues)(?: (?:found|identified|detected|reported))?(?:[,.!?;:]|$)`)
-var auditNoConfirmedClaim = regexp.MustCompile(`\b(?:no|zero|0) confirmed (?:findings|vulnerabilities|security issues)(?: (?:found|identified|detected|reported))?(?:[,.!?;:]|$)`)
+var auditCleanClaim = regexp.MustCompile(`\b(?:no|zero|0) (?:findings|vulnerabilities|security issues)(?: (?:were )?(?:found|identified|detected|reported))?(?:[,.!?;:]|$)`)
+var auditNoConfirmedClaim = regexp.MustCompile(`\b(?:no|zero|0) confirmed (?:findings|vulnerabilities|security issues)(?: (?:were )?(?:found|identified|detected|reported))?(?:[,.!?;:]|$)`)
 
 type auditTools struct {
 	binary, permissionFlag string
@@ -813,6 +813,7 @@ func auditReportHasClaim(report string, claim *regexp.Regexp) bool {
 		text = strings.TrimFunc(text, func(r rune) bool {
 			return unicode.IsSpace(r) || strings.ContainsRune("#*_|>`-", r)
 		})
+		text = strings.TrimSpace(strings.TrimPrefix(text, "summary:"))
 		location := claim.FindStringIndex(text)
 		return location != nil && location[0] == 0
 	}
@@ -995,7 +996,7 @@ func auditPositiveInteger(n float64) bool {
 
 func validateAuditCoverageEvidence(e auditCoverageEvidence, sourcePaths map[string]bool) error {
 	for _, reason := range e.Unresolved {
-		if strings.TrimSpace(reason) == "" {
+		if !auditVisibleText(reason) {
 			return errors.New("audit coverage-ledger.json has empty unresolved reason")
 		}
 	}
@@ -1024,7 +1025,7 @@ func validateAuditCoverageEvidence(e auditCoverageEvidence, sourcePaths map[stri
 		paths[path] = false
 	}
 	for _, check := range e.LocalChecks {
-		if !validAuditCoverageAgent(check.AgentID) || strings.TrimSpace(check.Invariant) == "" || strings.TrimSpace(check.Result) == "" || len(check.ReviewedPaths) == 0 {
+		if !validAuditCoverageAgent(check.AgentID) || !auditVisibleText(check.Invariant) || !auditVisibleText(check.Result) || len(check.ReviewedPaths) == 0 {
 			return errors.New("audit coverage-ledger.json has incomplete local check")
 		}
 		if check.Method != "source" {
@@ -1052,7 +1053,7 @@ func validAuditCoverageAgent(agent string) bool {
 	if len(agent) == 0 || len(agent) > 64 || !(agent[0] >= 'a' && agent[0] <= 'z' || agent[0] >= '0' && agent[0] <= '9') {
 		return false
 	}
-	return strings.Trim(agent, "abcdefghijklmnopqrstuvwxyz0123456789_-") == "" && workspace.ValidPath("agents/"+agent+"/artifacts/check")
+	return strings.Trim(agent, "abcdefghijklmnopqrstuvwxyz0123456789_-") == ""
 }
 
 func auditSkillSource(role RoleSettings) string {
@@ -1108,7 +1109,7 @@ func validateAuditMetadata(metadataBytes []byte, repo, target, head string) ([]s
 			}
 		}
 	}
-	if strings.TrimSpace(metadata.RunID) == "" || metadata.Repo != repo || metadata.Target != target || metadata.SourceRef != head ||
+	if !auditVisibleText(metadata.RunID) || metadata.Repo != repo || metadata.Target != target || metadata.SourceRef != head ||
 		metadata.Profile != "standard" || len(metadata.ScopePaths) != 1 || metadata.ScopePaths[0] != "." ||
 		string(metadata.Budget) != "null" || metadata.SelectedCompanionFiles == nil || metadata.PriorRunPaths == nil || len(metadata.PriorRunPaths) != 0 ||
 		metadata.ExecutionPolicy != "sandboxed-source-and-local-only" || metadata.RunStatus != "complete" {

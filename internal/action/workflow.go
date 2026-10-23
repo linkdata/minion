@@ -263,12 +263,12 @@ func (e *Orchestrator) publish(ctx context.Context, p *preparedAction, result Re
 	if err := result.validate(p.job, true); err != nil {
 		return errors.Join(fmt.Errorf("%w: invalid action result: %w", monitor.ErrTerminalJob, err), e.retainIncompleteAudit(p, result))
 	}
-	if err := rejectConfiguredKeyResult(result, e.Runner.Codex.APIKey, e.Runner.Claude.APIKey); err != nil {
-		return errors.Join(fmt.Errorf("%w: invalid action result: %w", monitor.ErrTerminalJob, err), e.retainIncompleteAudit(p, result))
-	}
 	published, err := projectPublication(p.job, result)
 	if err != nil {
 		return errors.Join(fmt.Errorf("%w: publication projection: %w", monitor.ErrTerminalJob, err), e.retainIncompleteAudit(p, result))
+	}
+	if err := rejectConfiguredKeyPublication(published, result.Changes, e.Runner.Codex.APIKey, e.Runner.Claude.APIKey); err != nil {
+		return errors.Join(fmt.Errorf("%w: invalid action result: %w", monitor.ErrTerminalJob, err), e.retainIncompleteAudit(p, result))
 	}
 	if err := rejectPublishedRefutations(p.job, result, published); err != nil {
 		return errors.Join(fmt.Errorf("%w: invalid action result: %w", monitor.ErrTerminalJob, err), e.retainIncompleteAudit(p, result))
@@ -307,19 +307,19 @@ func (e *Orchestrator) publish(ctx context.Context, p *preparedAction, result Re
 	return nil
 }
 
-func rejectConfiguredKeyResult(result Result, keys ...string) error {
-	if err := rejectConfiguredKeyChanges(result.Changes, keys...); err != nil {
+func rejectConfiguredKeyPublication(published publication, changes []workspace.Change, keys ...string) error {
+	if err := rejectConfiguredKeyChanges(changes, keys...); err != nil {
 		return err
 	}
 	for _, key := range keys {
 		if key == "" {
 			continue
 		}
-		if containsConfiguredKey([]byte(result.Answer), key) {
+		if containsConfiguredKey([]byte(published.answer), key) {
 			return errors.New("answer contains a configured provider key")
 		}
 	}
-	for _, file := range result.Artifacts {
+	for _, file := range published.artifacts {
 		if artifactContainsConfiguredKey(file, keys...) {
 			return errors.New("audit artifact contains a configured provider key")
 		}

@@ -147,7 +147,7 @@ func TestHostileHTTPResultCannotPublishConfiguredProviderKey(t *testing.T) {
 	}
 }
 
-func TestRejectConfiguredKeyResultFields(t *testing.T) {
+func TestRejectConfiguredKeyPublicationFields(t *testing.T) {
 	const key = "fixture-secret"
 	for _, tc := range []struct {
 		name   string
@@ -159,10 +159,26 @@ func TestRejectConfiguredKeyResultFields(t *testing.T) {
 		{name: "audit JSON data", result: Result{Artifacts: []workspace.File{{Path: "findings.json", Mode: workspace.Regular, Data: []byte(`{"value":"fixture-\u0073ecret"}`)}}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := rejectConfiguredKeyResult(tc.result, "", key); err == nil || !strings.Contains(err.Error(), "configured provider key") {
+			if err := rejectConfiguredKeyPublication(publication{artifacts: tc.result.Artifacts}, tc.result.Changes, "", key); err == nil || !strings.Contains(err.Error(), "configured provider key") {
 				t.Fatalf("secret reached publication boundary: %v", err)
 			}
 		})
+	}
+}
+
+func TestChangedFixUnusedSummaryDoesNotRejectConfiguredKey(t *testing.T) {
+	const key = "fixture-secret"
+	changes := []workspace.Change{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("safe change\n")}}
+	published, err := projectPublication(Job{Action: command.Fix}, Result{Answer: key, Changes: changes})
+	if err != nil || published.answer != "" {
+		t.Fatalf("changed Fix retained unused summary: publication=%+v error=%v", published, err)
+	}
+	if err := rejectConfiguredKeyPublication(published, changes, key); err != nil {
+		t.Fatalf("unused summary blocked safe change: %v", err)
+	}
+	changes[0].Data = []byte(key)
+	if err := rejectConfiguredKeyPublication(published, changes, key); err == nil {
+		t.Fatal("configured key in published change was accepted")
 	}
 }
 
