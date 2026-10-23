@@ -66,7 +66,7 @@ func TestHTTPControlResponseEncodedBoundary(t *testing.T) {
 							err = transport.watch(context.Background(), response, binding)
 						}
 					} else {
-						client := httpClientCheckpoints{transport: transport, control: context.Background(), binding: binding}
+						client := httpClientCheckpoints{transport: transport, control: context.Background(), action: context.Background(), binding: binding}
 						err = client.acknowledge(kind, []byte(`{}`), 1)
 					}
 					server.Close()

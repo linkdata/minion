@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"mime"
 	"net/http"
 	"net/url"
@@ -145,16 +146,14 @@ func RunHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 		runner.logf("HTTP prepare observation: %v", err)
 	}
 	var runErr error
-	ran := false
 	// Preparation and status transfer consume the same accepted runtime.
 	job.RuntimeBudget = time.Until(expires)
 	if job.RuntimeBudget <= 0 {
 		runErr = errors.Join(monitor.ErrTerminalJob, context.DeadlineExceeded)
 	} else {
-		ran = true
 		result, runErr = runner.Execute(actionCtx, job, checkpoints)
 	}
-	if ran {
+	if runErr == nil {
 		if err := checkpoints.status("upload", 2); err != nil {
 			runner.logf("HTTP upload observation: %v", err)
 		}
@@ -245,7 +244,8 @@ func (c *httpExecutionClient) watch(ctx context.Context, response *http.Response
 	defer response.Body.Close()
 	var cancellation httpCancellation
 	if err := httpDecode(response.Body, httpControlBytes, &cancellation); err != nil {
-		if ctx.Err() != nil && (errors.Is(err, ctx.Err()) || errors.Is(err, context.Cause(ctx))) {
+		intentionalPipe := context.Cause(ctx) == errHTTPWatchStopped && errors.Is(err, io.ErrClosedPipe)
+		if ctx.Err() != nil && (errors.Is(err, ctx.Err()) || errors.Is(err, context.Cause(ctx)) || intentionalPipe) {
 			return ctx.Err()
 		}
 		return httpClientUnknown("cancel", err)
@@ -269,7 +269,11 @@ func (c *httpExecutionClient) watch(ctx context.Context, response *http.Response
 }
 
 func (c *httpClientCheckpoints) acknowledge(kind string, data []byte, sequence uint64) error {
-	ctx, cancel := context.WithTimeout(c.control, httpControlTimeout)
+	parent := c.control
+	if kind == "status" {
+		parent = c.action
+	}
+	ctx, cancel := context.WithTimeout(parent, httpControlTimeout)
 	defer cancel()
 	if kind != "status" {
 		c.sequence = sequence
@@ -367,7 +371,21 @@ func (c *httpClientCheckpoints) outcome(result Result, runErr error) error {
 	if err != nil {
 		// Encode the one fallback before sending anything. Already acknowledged
 		// receipts remain the parent's evidence; no After is inferred from Result.
-		outcome.Result = Result{Version: c.binding.Version, Identity: c.binding.Identity, SourceRef: c.binding.SourceRef}
+		fallback := Result{Version: c.binding.Version, Identity: c.binding.Identity, SourceRef: c.binding.SourceRef}
+		if result.matchesJob(c.job) {
+			core := ReviewCheckpoint{Version: c.binding.Version, Identity: c.binding.Identity, SourceRef: c.binding.SourceRef, Calls: result.Calls}
+			if httpReviewShape(core) == nil {
+				fallback.Calls = result.Calls
+			}
+			core.Calls, core.Refutations = nil, result.Refutations
+			if httpReviewShape(core) == nil {
+				fallback.Refutations = result.Refutations
+			}
+			if boundedText(result.CriticStopReason, 32) {
+				fallback.CriticStopReason = result.CriticStopReason
+			}
+		}
+		outcome.Result = fallback
 		omitted = httpClientUnknown("outcome", fmt.Errorf("primary HTTP outcome omitted: %w", err))
 		outcome.Failure = newHTTPFailure(errors.Join(runErr, omitted))
 		data, err = httpEncode(outcome, httpOutcomeBytes)

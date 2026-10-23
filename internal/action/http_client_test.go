@@ -18,6 +18,7 @@ import (
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
+	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/processgroup"
 	"github.com/linkdata/minion/internal/usage"
@@ -31,12 +32,16 @@ func TestRunHTTPReportsActualObservationsAndRawPaidReceipts(t *testing.T) {
 		holdWatch       bool
 		lostStatus      string
 		malformedStatus bool
+		afterFailure    bool
+		watchPipe       bool
 	}{
 		{name: "complete"},
 		{name: "invalid signed counters", invalidCounters: true},
 		{name: "intentional held watch stop", holdWatch: true},
+		{name: "intentional held watch pipe close", holdWatch: true, watchPipe: true},
 		{name: "lost prepare observation ACK", lostStatus: "prepare"},
 		{name: "malformed upload observation ACK", lostStatus: "upload", malformedStatus: true},
+		{name: "paid checkpoint refusal skips upload", afterFailure: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			job := testJob(command.Comment)
@@ -47,6 +52,7 @@ func TestRunHTTPReportsActualObservationsAndRawPaidReceipts(t *testing.T) {
 				tokens.Input = -1
 			}
 			var next, sequence, native atomic.Uint64
+			var pipeReads atomic.Int32
 			var watchAdmitted atomic.Bool
 			sealed := make(chan struct{})
 			events := make(chan string, 8)
@@ -141,9 +147,24 @@ func TestRunHTTPReportsActualObservationsAndRawPaidReceipts(t *testing.T) {
 				if kind != "status" && requestSequence != sequence.Add(1) {
 					t.Errorf("transport sequence skipped or repeated: %d", requestSequence)
 				}
-				httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: binding, Sequence: requestSequence, Kind: kind})
+				ack := httpAcknowledgement{httpBinding: binding, Sequence: requestSequence, Kind: kind}
+				if kind == "after" && test.afterFailure {
+					ack.Failure = newHTTPFailure(errors.Join(monitor.ErrTerminalJob, workroot.ErrUnsafe))
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusInternalServerError)
+				}
+				httpClientTestJSON(t, w, ack)
 			}))
 			defer server.Close()
+			client := *server.Client()
+			transport := client.Transport
+			client.Transport = httpClientTestTransport(func(r *http.Request) (*http.Response, error) {
+				response, err := transport.RoundTrip(r)
+				if err == nil && test.watchPipe && r.URL.Path == "/cancel" {
+					response.Body = httpClientPipeBody{ReadCloser: response.Body, trigger: r.Context().Done(), reads: &pipeReads}
+				}
+				return response, err
+			})
 			runner := &Runner{WorkRoot: t.TempDir(), runModel: func(ctx context.Context, request modelRun) (aicli.Result, error) {
 				if native.Add(1) != 1 || request.role != roleMain || !watchAdmitted.Load() {
 					t.Error("worker repeated native execution or ran before watch admission")
@@ -155,8 +176,8 @@ func TestRunHTTPReportsActualObservationsAndRawPaidReceipts(t *testing.T) {
 				}
 				return aicli.Result{Answer: "Complete answer", Tokens: tokens, UsageComplete: true}, nil
 			}}
-			err := RunHTTP(context.Background(), server.Client(), server.URL, job.Identity.ExecutorID, runner)
-			if test.invalidCounters {
+			err := RunHTTP(context.Background(), &client, server.URL, job.Identity.ExecutorID, runner)
+			if test.invalidCounters || test.afterFailure {
 				if !errors.Is(err, monitor.ErrTerminalJob) || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) {
 					t.Fatalf("known invalid usage changed failure policy: %v", err)
 				}
@@ -164,6 +185,12 @@ func TestRunHTTPReportsActualObservationsAndRawPaidReceipts(t *testing.T) {
 				t.Fatal(err)
 			}
 			wantEvents := []string{"next", "status/prepare", "before", "after", "status/upload", "outcome"}
+			if test.invalidCounters || test.afterFailure {
+				wantEvents = []string{"next", "status/prepare", "before", "after", "outcome"}
+			}
+			if test.watchPipe && pipeReads.Load() != 1 {
+				t.Fatalf("held watch did not return the injected teardown pipe error: %d", pipeReads.Load())
+			}
 			if len(events) != len(wantEvents) || len(after) != 1 || len(outcome) != 1 || next.Load() != 1 || native.Load() != 1 {
 				t.Fatalf("missing transaction observations: events=%d after=%d outcome=%d pulls=%d native=%d", len(events), len(after), len(outcome), next.Load(), native.Load())
 			}
@@ -175,9 +202,12 @@ func TestRunHTTPReportsActualObservationsAndRawPaidReceipts(t *testing.T) {
 			if !slices.Equal(gotEvents, wantEvents) || paid.Tokens != tokens || !paid.Complete || len(returned.Result.Calls) != 1 || returned.Result.Calls[0] != paid {
 				t.Fatalf("raw paid evidence or order changed: events=%v paid=%+v returned=%+v", gotEvents, paid, returned)
 			}
-			if test.invalidCounters {
+			if test.invalidCounters || test.afterFailure {
 				if returned.Failure == nil || !returned.Failure.Terminal || returned.Failure.OutcomeUnknown || returned.Result.Answer != "" {
 					t.Fatalf("invalid raw receipt was discarded or turned into success: %+v", returned)
+				}
+				if test.afterFailure && (!errors.Is(err, workroot.ErrUnsafe) || !returned.Failure.Unsafe) {
+					t.Fatalf("checkpoint refusal lost its finite failure facts: error=%v outcome=%+v", err, returned)
 				}
 			} else if returned.Failure != nil || returned.Result.Validate(job) != nil || returned.Result.Answer != "Complete answer" {
 				t.Fatalf("valid one-shot execution did not return its actual result: %+v", returned)
@@ -453,9 +483,95 @@ func TestRunHTTPKnownNoWorkOutcomeReleasesParentCapacity(t *testing.T) {
 	}
 }
 
+func TestRunHTTPStalledStatusCannotConsumeOutcomeGrace(t *testing.T) {
+	for _, phase := range []string{"prepare", "upload"} {
+		t.Run(phase, func(t *testing.T) {
+			job := testJob(command.Comment)
+			job.RuntimeBudget = 2 * time.Second
+			paid := make(chan CallUsage, 1)
+			f := newHTTPServerTest(t, context.Background(), job, runnerExecutionCheckpoints{
+				after: func(value CallCheckpoint) error { paid <- value.Call; return nil },
+			}, nil)
+			entered, release := make(chan struct{}), make(chan struct{})
+			defer close(release)
+			stopped := make(chan error, 1)
+			var observations, native atomic.Int32
+			client := *f.server.Client()
+			client.Timeout = 0 // The action context must end the stalled observation.
+			transport := client.Transport
+			client.Transport = httpClientTestTransport(func(r *http.Request) (*http.Response, error) {
+				if r.URL.Path == "/status" {
+					sequence := observations.Add(1)
+					if phase == "prepare" && sequence == 1 || phase == "upload" && sequence == 2 {
+						close(entered)
+						select {
+						case <-r.Context().Done():
+							stopped <- context.Cause(r.Context())
+							return nil, r.Context().Err()
+						case <-release:
+							return nil, errors.New("fixture released a stuck Status request")
+						}
+					}
+				}
+				return transport.RoundTrip(r)
+			})
+			tokens := usage.Tokens{Input: 17, CachedInput: 3, Output: 5}
+			runner := &Runner{WorkRoot: t.TempDir(), runModel: func(context.Context, modelRun) (aicli.Result, error) {
+				native.Add(1)
+				return aicli.Result{Answer: "Completed before upload stalled", Tokens: tokens, UsageComplete: true}, nil
+			}}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { done <- RunHTTP(ctx, &client, f.server.URL, job.Identity.ExecutorID, runner) }()
+			select {
+			case <-entered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("optional observation did not enter its stalled request")
+			}
+			var err error
+			select {
+			case err = <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("optional Status consumed required outcome grace after action expiry")
+			}
+			got := f.result(t)
+			wantCalls := 0
+			if phase == "upload" {
+				wantCalls = 1
+			}
+			if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, monitor.ErrTerminalJob) || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || !errors.Is(got.err, context.DeadlineExceeded) || !errors.Is(got.err, monitor.ErrTerminalJob) || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || native.Load() != int32(wantCalls) || len(got.result.Calls) != wantCalls || len(paid) != wantCalls || len(stopped) != 1 {
+				t.Fatalf("stalled observation lost known outcome or paid facts: worker=%v parent=%v result=%+v native=%d paid=%d stopped=%d", err, got.err, got.result, native.Load(), len(paid), len(stopped))
+			}
+			if cause := <-stopped; !errors.Is(cause, context.DeadlineExceeded) {
+				t.Fatalf("observation did not inherit the accepted action expiry: %v", cause)
+			}
+			if wantCalls == 1 {
+				if receipt := <-paid; receipt != got.result.Calls[0] || receipt.Tokens != tokens || !receipt.Complete || got.result.Answer != "Completed before upload stalled" {
+					t.Fatalf("stalled upload discarded acknowledged paid facts: receipt=%+v result=%+v", receipt, got.result)
+				}
+			} else if got.result.Answer != "" {
+				t.Fatalf("stalled preparation fabricated an answer: %+v", got.result)
+			}
+		})
+	}
+}
+
 type httpClientTestTransport func(*http.Request) (*http.Response, error)
 
 func (f httpClientTestTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+type httpClientPipeBody struct {
+	io.ReadCloser
+	trigger <-chan struct{}
+	reads   *atomic.Int32
+}
+
+func (b httpClientPipeBody) Read([]byte) (int, error) {
+	<-b.trigger
+	b.reads.Add(1)
+	return 0, io.ErrClosedPipe
+}
 
 type httpClientFailedWatchHeaders struct{ http.ResponseWriter }
 
@@ -477,6 +593,7 @@ func TestHTTPClientWatchDistinguishesLocalStopFromParsedReplies(t *testing.T) {
 	}{
 		{name: "local explicit cause", readErr: errHTTPWatchStopped, want: context.Canceled},
 		{name: "local context sentinel", readErr: context.Canceled, want: context.Canceled},
+		{name: "local pipe close", readErr: io.ErrClosedPipe, want: context.Canceled},
 		{name: "malformed body", unknown: true},
 		{name: "parent deadline", reason: "deadline", want: context.DeadlineExceeded},
 		{name: "parent cancellation", reason: "canceled", want: context.Canceled},
@@ -508,7 +625,7 @@ func TestHTTPClientWatchDistinguishesLocalStopFromParsedReplies(t *testing.T) {
 }
 
 func TestRunHTTPDeliversPaidFactsAfterCancellationWatchStopsAction(t *testing.T) {
-	for _, name := range []string{"deadline", "canceled", "completed", "malformed", "local parent cancellation", "local action deadline"} {
+	for _, name := range []string{"deadline", "canceled", "completed", "malformed", "pipe before outcome", "local parent cancellation", "local action deadline"} {
 		t.Run(name, func(t *testing.T) {
 			job := testJob(command.Comment)
 			binding := httpJobBinding(job)
@@ -520,6 +637,7 @@ func TestRunHTTPDeliversPaidFactsAfterCancellationWatchStopsAction(t *testing.T)
 			after := make(chan CallUsage, 1)
 			outcome := make(chan httpOutcome, 1)
 			var native, requests, mutationSequence atomic.Uint64
+			var pipeReads atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				kind := strings.TrimPrefix(r.URL.Path, "/")
 				var sequence uint64
@@ -541,7 +659,7 @@ func TestRunHTTPDeliversPaidFactsAfterCancellationWatchStopsAction(t *testing.T)
 					case <-r.Context().Done():
 						return
 					}
-					if name == "local parent cancellation" {
+					if name == "local parent cancellation" || name == "pipe before outcome" {
 						<-r.Context().Done()
 						return
 					}
@@ -599,6 +717,15 @@ func TestRunHTTPDeliversPaidFactsAfterCancellationWatchStopsAction(t *testing.T)
 				httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: binding, Sequence: sequence, Kind: kind})
 			}))
 			defer server.Close()
+			client := *server.Client()
+			transport := client.Transport
+			client.Transport = httpClientTestTransport(func(r *http.Request) (*http.Response, error) {
+				response, err := transport.RoundTrip(r)
+				if err == nil && name == "pipe before outcome" && r.URL.Path == "/cancel" {
+					response.Body = httpClientPipeBody{ReadCloser: response.Body, trigger: started, reads: &pipeReads}
+				}
+				return response, err
+			})
 			tokens := usage.Tokens{Input: 19, CachedInput: 2, Output: 3}
 			runner := &Runner{WorkRoot: t.TempDir(), runModel: func(ctx context.Context, _ modelRun) (aicli.Result, error) {
 				if native.Add(1) != 1 {
@@ -612,16 +739,19 @@ func TestRunHTTPDeliversPaidFactsAfterCancellationWatchStopsAction(t *testing.T)
 				<-ctx.Done()
 				return aicli.Result{Tokens: tokens}, ctx.Err()
 			}}
-			err := RunHTTP(ctx, server.Client(), server.URL, job.Identity.ExecutorID, runner)
-			unknown := name == "completed" || name == "malformed"
+			err := RunHTTP(ctx, &client, server.URL, job.Identity.ExecutorID, runner)
+			unknown := name == "completed" || name == "malformed" || name == "pipe before outcome"
 			wantCause := context.Canceled
 			if name == "local action deadline" {
 				wantCause = context.DeadlineExceeded
 			}
-			if !errors.Is(err, wantCause) || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) != unknown || native.Load() != 1 || requests.Load() != 5 || len(after) != 1 || len(outcome) != 1 {
+			if !errors.Is(err, wantCause) || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) != unknown || native.Load() != 1 || requests.Load() != 4 || len(after) != 1 || len(outcome) != 1 {
 				t.Fatalf("watch cancellation lost paid callbacks or changed policy: error=%v native=%d requests=%d after=%d outcome=%d", err, native.Load(), requests.Load(), len(after), len(outcome))
 			}
 			paid, returned := <-after, <-outcome
+			if name == "pipe before outcome" && (!errors.Is(err, io.ErrClosedPipe) || pipeReads.Load() != 1) {
+				t.Fatalf("watch failure observed before teardown was erased: error=%v pipe reads=%d", err, pipeReads.Load())
+			}
 			if paid.Tokens != tokens || paid.Complete || len(returned.Result.Calls) != 1 || returned.Result.Calls[0] != paid || returned.Result.Answer != "" || returned.Failure == nil || returned.Failure.OutcomeUnknown != unknown {
 				t.Fatalf("cancellation discarded raw paid receipt: paid=%+v outcome=%+v", paid, returned)
 			}
@@ -633,42 +763,76 @@ func TestRunHTTPDeliversPaidFactsAfterCancellationWatchStopsAction(t *testing.T)
 }
 
 func TestHTTPClientSendsOneBoundFailureForUnrepresentableOutcome(t *testing.T) {
-	for _, loseACK := range []bool{false, true} {
-		t.Run(fmt.Sprintf("lose ACK=%t", loseACK), func(t *testing.T) {
-			job := testJob(command.Comment)
-			binding := httpJobBinding(job)
-			var requests atomic.Int32
-			outcomes := make(chan httpOutcome, 1)
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if requests.Add(1) != 1 || r.URL.Path != "/outcome" {
-					t.Error("fallback resent an outcome or synthesized a callback")
+	for _, test := range []struct {
+		name       string
+		edit       func(*Result)
+		wantCalls  bool
+		wantRefs   bool
+		wantReason bool
+	}{
+		{name: "oversized answer", wantCalls: true, wantRefs: true, wantReason: true},
+		{name: "unrepresentable calls", edit: func(r *Result) { r.Calls[0].Model = strings.Repeat("x", config.MaxModelSettingBytes+1) }, wantRefs: true, wantReason: true},
+		{name: "unrepresentable refutations", edit: func(r *Result) { r.Refutations[0].Text = strings.Repeat("x", maxOutputBytes+1) }, wantCalls: true, wantReason: true},
+		{name: "unrepresentable reason", edit: func(r *Result) { r.CriticStopReason = strings.Repeat("x", 33) }, wantCalls: true, wantRefs: true},
+		{name: "foreign claims", edit: func(r *Result) { r.Identity.AttemptID = "foreign" }},
+	} {
+		for _, loseACK := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/lose ACK=%t", test.name, loseACK), func(t *testing.T) {
+				job := testJob(command.Comment)
+				binding := httpJobBinding(job)
+				var requests atomic.Int32
+				outcomes := make(chan httpOutcome, 1)
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if requests.Add(1) != 1 || r.URL.Path != "/outcome" {
+						t.Error("fallback resent an outcome or synthesized a callback")
+					}
+					var value httpOutcome
+					if err := httpDecode(r.Body, httpOutcomeBytes, &value); err != nil {
+						t.Error(err)
+					}
+					outcomes <- value
+					w.Header().Set("Content-Type", "application/json")
+					if !loseACK {
+						httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: binding, Sequence: value.Sequence, Kind: "outcome"})
+					}
+				}))
+				defer server.Close()
+				base, err := url.Parse(server.URL)
+				if err != nil {
+					t.Fatal(err)
 				}
-				var value httpOutcome
-				if err := httpDecode(r.Body, httpOutcomeBytes, &value); err != nil {
-					t.Error(err)
+				checkpoints := &httpClientCheckpoints{transport: &httpExecutionClient{client: server.Client(), base: base}, control: context.Background(), job: job, binding: binding}
+				// Craft the invalid primary field at the wire boundary, not as a Runner response.
+				result := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head, Answer: strings.Repeat("x", maxOutputBytes+1),
+					Calls:       []CallUsage{{Provider: "codex", Role: roleMain, Round: 1, Tokens: usage.Tokens{Input: 13, CachedInput: -2}, Approved: true, HasBlockers: true}},
+					Refutations: []Refutation{{Round: 2, Text: "Private raw refutation\x00\nkept exactly."}}, CriticStopReason: "round_cap"}
+				if test.edit != nil {
+					test.edit(&result)
 				}
-				outcomes <- value
-				w.Header().Set("Content-Type", "application/json")
-				if !loseACK {
-					httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: binding, Sequence: value.Sequence, Kind: "outcome"})
+				originalCalls, originalRefs := slices.Clone(result.Calls), slices.Clone(result.Refutations)
+				originalIdentity, originalReason := result.Identity, result.CriticStopReason
+				err = checkpoints.outcome(result, errors.Join(monitor.ErrTerminalJob, processgroup.ErrScopeUnconfirmed))
+				if !errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || requests.Load() != 1 || len(outcomes) != 1 || len(result.Answer) != maxOutputBytes+1 || result.Identity != originalIdentity || result.CriticStopReason != originalReason || !slices.Equal(result.Calls, originalCalls) || !slices.Equal(result.Refutations, originalRefs) {
+					t.Fatalf("fallback hid unknown outcome, retried, or mutated raw result: error=%v requests=%d", err, requests.Load())
 				}
-			}))
-			defer server.Close()
-			base, err := url.Parse(server.URL)
-			if err != nil {
-				t.Fatal(err)
-			}
-			checkpoints := &httpClientCheckpoints{transport: &httpExecutionClient{client: server.Client(), base: base}, control: context.Background(), job: job, binding: binding}
-			result := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head, Answer: strings.Repeat("x", maxOutputBytes+1), Calls: []CallUsage{{Provider: "codex", Role: roleMain, Round: 1, Tokens: usage.Tokens{Input: 13}}}}
-			err = checkpoints.outcome(result, errors.Join(monitor.ErrTerminalJob, processgroup.ErrScopeUnconfirmed))
-			if !errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || requests.Load() != 1 || len(outcomes) != 1 || len(result.Answer) != maxOutputBytes+1 {
-				t.Fatalf("fallback hid unknown outcome, retried, or mutated raw result: error=%v requests=%d", err, requests.Load())
-			}
-			got := <-outcomes
-			if !got.Result.matchesJob(job) || got.Result.Answer != "" || len(got.Result.Calls) != 0 || got.Failure == nil || !got.Failure.Terminal || !got.Failure.ScopeUnconfirmed || !got.Failure.OutcomeUnknown {
-				t.Fatalf("bounded fallback lost actual flags or invented success/receipts: %+v", got)
-			}
-		})
+				got := <-outcomes
+				var wantCalls []CallUsage
+				var wantRefs []Refutation
+				var wantReason string
+				if test.wantCalls {
+					wantCalls = originalCalls
+				}
+				if test.wantRefs {
+					wantRefs = originalRefs
+				}
+				if test.wantReason {
+					wantReason = originalReason
+				}
+				if !got.Result.matchesJob(job) || got.Result.Answer != "" || len(got.Result.Changes)+len(got.Result.Artifacts)+len(got.Result.Diagnostics) != 0 || !slices.Equal(got.Result.Calls, wantCalls) || !slices.Equal(got.Result.Refutations, wantRefs) || got.Result.CriticStopReason != wantReason || got.Failure == nil || !got.Failure.Terminal || !got.Failure.ScopeUnconfirmed || !got.Failure.OutcomeUnknown {
+					t.Fatalf("bounded fallback lost actual flags or invented success/receipts: %+v", got)
+				}
+			})
+		}
 	}
 }
 

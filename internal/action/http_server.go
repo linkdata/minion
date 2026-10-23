@@ -43,21 +43,22 @@ type httpTransaction struct {
 	cancel  context.CancelFunc
 	body    []byte
 
-	ready        bool
-	delivered    bool
-	fenced       bool
-	watch        bool
-	sequence     uint64
-	statusSeq    uint64
-	stopping     bool
-	stop         chan struct{}
-	done         chan struct{}
-	finished     chan struct{}
-	transportErr error
-	outcome      bool
-	result       Result
-	runErr       error
-	quarantine   bool
+	ready         bool
+	delivered     bool
+	fenced        bool
+	watch         bool
+	sequence      uint64
+	statusSeq     uint64
+	stopping      bool
+	stop          chan struct{}
+	done          chan struct{}
+	finished      chan struct{}
+	transportErr  error
+	checkpointErr error
+	outcome       bool
+	result        Result
+	runErr        error
+	quarantine    bool
 }
 
 func NewHTTPExecutor(executorID string) (*HTTPExecutor, error) {
@@ -104,7 +105,7 @@ func (e *HTTPExecutor) Execute(ctx context.Context, job Job, sink Checkpoints) (
 			// A received outcome resolves earlier ACK ambiguity, even if its own receipt ACK was lost.
 			result, runErr = tx.result, tx.runErr
 		} else if tx.delivered {
-			runErr = errors.Join(runErr, monitor.ErrExecutionOutcomeUnknown, tx.transportErr, actionCtx.Err())
+			runErr = errors.Join(runErr, monitor.ErrExecutionOutcomeUnknown, tx.transportErr, tx.checkpointErr, actionCtx.Err())
 			tx.quarantine = true
 		}
 		quarantine := tx.quarantine
@@ -293,6 +294,9 @@ func (tx *httpTransaction) enter(binding httpBinding, sequence uint64, kind stri
 	}
 	// A bound request consumes its sequence even when model admission is refused.
 	tx.sequence = sequence
+	if kind != "outcome" && tx.checkpointErr != nil {
+		return false, tx.checkpointErr
+	}
 	if kind == "before" {
 		if err := tx.ctx.Err(); err != nil {
 			if errors.Is(err, context.DeadlineExceeded) {
@@ -329,6 +333,11 @@ func (e *HTTPExecutor) serveStatus(w http.ResponseWriter, r *http.Request) {
 	binding := httpBinding{status.Version, status.Identity, status.SourceRef}
 	code := httpInputStatus(err)
 	if err == nil {
+		err = httpBindingShape(binding)
+	}
+	if err != nil {
+		binding = httpBinding{}
+	} else {
 		err = status.Validate(tx.job)
 		if err == nil {
 			tx.mu.Lock()
@@ -433,7 +442,7 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 		failedOutcome = outcome.Failure != nil
 		apply = func() error {
 			tx.mu.Lock()
-			tx.result, tx.runErr = outcome.Result, outcome.Failure.err()
+			tx.result, tx.runErr = outcome.Result, errors.Join(outcome.Failure.err(), tx.checkpointErr)
 			// A missing callback cannot be acknowledged from raw outcome claims.
 			if sequenceGap {
 				tx.runErr = errors.Join(tx.runErr, monitor.ErrExecutionOutcomeUnknown)
@@ -473,6 +482,11 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 	}
 	callbackErr := apply()
 	if callbackErr != nil {
+		tx.mu.Lock()
+		if tx.checkpointErr == nil {
+			tx.checkpointErr = callbackErr
+		}
+		tx.mu.Unlock()
 		tx.stopExecution(nil, false)
 	}
 	// Release mutation ownership before ACK bytes can let a sequential client send its next request.

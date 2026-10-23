@@ -429,6 +429,75 @@ func TestHTTPExecutorFailedOutcomeAcrossMissingCallbackPreservesOnlyRawFacts(t *
 	}
 }
 
+func TestHTTPExecutorStoreRefusalRemainsFinalIfWorkerContinues(t *testing.T) {
+	for _, refused := range []string{"before", "after", "review"} {
+		t.Run(refused, func(t *testing.T) {
+			storeErr := errors.New("actual parent store refusal")
+			var before, after, review atomic.Int32
+			sink := runnerExecutionCheckpoints{
+				before: func(CallCheckpoint) error {
+					before.Add(1)
+					if refused == "before" {
+						return storeErr
+					}
+					return nil
+				},
+				after: func(CallCheckpoint) error {
+					after.Add(1)
+					if refused == "after" {
+						return storeErr
+					}
+					return nil
+				},
+				review: func(ReviewCheckpoint) error {
+					review.Add(1)
+					if refused == "review" {
+						return storeErr
+					}
+					return nil
+				},
+			}
+			f := newHTTPServerTest(t, context.Background(), withClaudeCritic(testJob(command.Comment)), sink, nil)
+			f.pull(t)
+			sequence := uint64(1)
+			if refused == "after" {
+				f.ack(t, "/before", f.call(sequence), http.StatusOK, sequence)
+				sequence++
+			}
+			checkpoint := ReviewCheckpoint{Version: ProtocolVersion, Identity: f.job.Identity, SourceRef: f.job.Source.Head}
+			var failed any = f.call(sequence)
+			if refused == "review" {
+				failed = httpReview{Sequence: sequence, Checkpoint: checkpoint}
+			}
+			ack := f.ack(t, "/"+refused, failed, http.StatusInternalServerError, sequence)
+			if ack.Failure == nil || ack.Failure.Message != storeErr.Error() {
+				t.Fatalf("store refusal lost its actual cause: %+v", ack)
+			}
+			counts := []int32{before.Load(), after.Load(), review.Load()}
+			for _, kind := range []string{"before", "after", "review"} {
+				sequence++
+				var value any = f.call(sequence)
+				if kind == "review" {
+					value = httpReview{Sequence: sequence, Checkpoint: checkpoint}
+				}
+				ack := f.ack(t, "/"+kind, value, http.StatusConflict, sequence)
+				if ack.Failure == nil || ack.Failure.Message != storeErr.Error() {
+					t.Fatalf("continued callback replaced original refusal: %+v", ack)
+				}
+			}
+			sequence++
+			// A faulty worker's successful claim cannot override a parent-owned failed save.
+			outcome := f.outcome(sequence, nil)
+			outcome.Result.Answer = "Unaccepted worker claim"
+			f.ack(t, "/outcome", outcome, http.StatusOK, sequence)
+			got := f.result(t)
+			if !errors.Is(got.err, storeErr) || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || !reflect.DeepEqual(got.result, outcome.Result) || !reflect.DeepEqual(counts, []int32{before.Load(), after.Load(), review.Load()}) {
+				t.Fatalf("failed save was forgotten or later callbacks reached sink: counts=%v now=%v result=%+v error=%v", counts, []int32{before.Load(), after.Load(), review.Load()}, got.result, got.err)
+			}
+		})
+	}
+}
+
 func TestHTTPExecutorStatusIsIndependentAndAllowsObservationGaps(t *testing.T) {
 	var before atomic.Int32
 	f := newHTTPServerTest(t, context.Background(), testJob(command.Comment), runnerExecutionCheckpoints{before: func(CallCheckpoint) error { before.Add(1); return nil }}, func(next http.Handler) http.Handler {
@@ -475,6 +544,44 @@ func TestHTTPExecutorRejectsStaleAndForeignStatusWithoutChangingPaidSequence(t *
 	f.ack(t, "/outcome", f.outcome(1, nil), http.StatusOK, 1)
 	if got := f.result(t); got.err != nil {
 		t.Fatal(got.err)
+	}
+}
+
+func TestHTTPExecutorBoundsRejectedStatusBinding(t *testing.T) {
+	for _, malformed := range []string{"shape", "unknown field", "trailing value"} {
+		t.Run(malformed, func(t *testing.T) {
+			f := newHTTPServerTest(t, context.Background(), testJob(command.Comment), runnerExecutionCheckpoints{}, nil)
+			f.pull(t)
+			status := Status{Version: ProtocolVersion, Identity: f.job.Identity, SourceRef: f.job.Source.Head, Sequence: 1, WorkerState: "busy", Phase: "prepare"}
+			status.Identity.JobID = strings.Repeat("<", 30_000)
+			var buffer bytes.Buffer
+			encoder := json.NewEncoder(&buffer)
+			encoder.SetEscapeHTML(false) // Small valid input can expand beyond the ACK cap when echoed.
+			if err := encoder.Encode(httpObservation{Status: status}); err != nil {
+				t.Fatal(err)
+			}
+			body := buffer.Bytes()
+			if malformed == "unknown field" {
+				body = bytes.Replace(body, []byte(`"status":{`), []byte(`"status":{"unknown":true,`), 1)
+			} else if malformed == "trailing value" {
+				body = append(body, []byte(`{}`)...)
+			}
+			if len(body) >= httpControlBytes {
+				t.Fatal("fixture must reach shape/decode refusal rather than the encoded input cap")
+			}
+			got := f.raw("/status", bytes.NewReader(body))
+			if got.err != nil || got.status != http.StatusBadRequest || got.ack.Kind != "status" || got.ack.Sequence != status.Sequence || got.ack.Failure == nil || got.ack.httpBinding != (httpBinding{}) {
+				t.Fatalf("malformed Status caused an unbounded or successful reply: status=%d ack=%+v error=%v", got.status, got.ack, got.err)
+			}
+			if _, ok := f.executor.Status(); ok {
+				t.Fatal("rejected Status became an accepted observation")
+			}
+			f.ack(t, "/before", f.call(1), http.StatusOK, 1)
+			f.ack(t, "/outcome", f.outcome(2, nil), http.StatusOK, 2)
+			if got := f.result(t); got.err != nil {
+				t.Fatal(got.err)
+			}
+		})
 	}
 }
 
@@ -554,7 +661,7 @@ func TestHTTPExecutorFencesAdmissionAndDrainsEnteredFailedSave(t *testing.T) {
 		t.Fatal("entered After did not drain")
 	}
 	got := f.result(t)
-	if !errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || !got.result.matchesJob(f.job) || len(got.result.Calls) != 0 || saved != call.Checkpoint.Call {
+	if !errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || !errors.Is(got.err, storeErr) || !got.result.matchesJob(f.job) || len(got.result.Calls) != 0 || saved != call.Checkpoint.Call {
 		t.Fatalf("drain invented or lost paid evidence: result=%+v saved=%+v error=%v", got.result, saved, got.err)
 	}
 	if late := f.request("/after", f.call(2)); late.err != nil || late.status != http.StatusConflict {
