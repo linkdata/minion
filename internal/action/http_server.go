@@ -342,9 +342,7 @@ func (e *HTTPExecutor) serveStatus(w http.ResponseWriter, r *http.Request) {
 		httpServerReject(w, "status", http.StatusConflict, httpBinding{}, 0, errors.New("HTTP execution has closed observation admission"))
 		return
 	}
-	tx.handlers.Add(1)
 	tx.mu.Unlock()
-	defer tx.handlers.Done()
 	var observation httpObservation
 	err := httpServerRead(w, r, httpControlBytes, &observation)
 	status := observation.Status
@@ -708,6 +706,6 @@ func httpServerWriteBytes(w http.ResponseWriter, status int, body []byte) (write
 	if n != len(body) {
 		return io.ErrShortWrite
 	}
-	// Flush while the admitted handler is counted, so no buffered ACK first appears after Execute returns.
+	// Flush required ACKs while their handlers are counted, before Execute returns.
 	return controller.Flush()
 }

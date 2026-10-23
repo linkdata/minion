@@ -418,7 +418,7 @@ func TestHTTPExecutorRejectsStatusWhoseBodyFinishesAfterOutcome(t *testing.T) {
 	f.ack(t, "/status", httpObservation{Status: status}, http.StatusOK, 1)
 	hold.Store(true)
 	late := status
-	late.Sequence, late.Phase, late.Round = 2, "main", 1
+	late.Sequence = 2
 	done := make(chan httpServerTestExchange, 1)
 	go func() { done <- f.request("/status", httpObservation{Status: late}) }()
 	select {
@@ -427,12 +427,17 @@ func TestHTTPExecutorRejectsStatusWhoseBodyFinishesAfterOutcome(t *testing.T) {
 		t.Fatal("late observation did not enter its body read")
 	}
 	f.ack(t, "/outcome", f.outcome(1, nil), http.StatusOK, 1)
+	if got := f.result(t); got.err != nil {
+		t.Fatal(got.err)
+	}
+	select {
+	case got := <-done:
+		t.Fatalf("late observation body finished before release: %+v", got)
+	default:
+	}
 	unblock()
 	if got := <-done; got.err != nil || got.status != http.StatusConflict || got.ack.Failure == nil {
 		t.Fatalf("late observation was admitted after outcome: %+v", got)
-	}
-	if got := f.result(t); got.err != nil {
-		t.Fatal(got.err)
 	}
 	if got, ok := f.executor.Status(); !ok || got != status {
 		t.Fatalf("late observation replaced last accepted status: status=%+v present=%t", got, ok)
