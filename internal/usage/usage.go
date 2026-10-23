@@ -119,6 +119,14 @@ func (r Record) validate() error {
 	if r.CodexCalls < 0 || r.ClaudeCalls < 0 || !r.Tokens.Valid() {
 		return fmt.Errorf("usage record %s has invalid counts", r.ID)
 	}
+	counted := r.CodexCalls > 0 || r.ClaudeCalls > 0
+	hasTokens := r.Tokens != (Tokens{})
+	// A pending call has a counter before its returned usage claim exists.
+	if (!counted && (hasTokens || r.UsageSource != "")) ||
+		(counted && r.ExecutorID == "") ||
+		(counted && (hasTokens || r.UsageComplete || r.Status == "succeeded") && r.UsageSource != "executor_reported") {
+		return fmt.Errorf("usage record %s has unattributed usage", r.ID)
+	}
 	return nil
 }
 

@@ -25,11 +25,11 @@ func saveReportFixture(t *testing.T, dir string) {
 			t.Fatal(err)
 		}
 		finish := start.Add(time.Minute)
-		record := usage.Record{ID: fmt.Sprintf("%032x", i+1), JobID: fmt.Sprintf("job-%d", i), Repo: "example-owner/example-repo", User: "alice", Action: actions[i], Number: 1, Provider: "codex", Model: "test-model", Effort: "high", StartedAt: start, FinishedAt: &finish, Status: statuses[i], CodexCalls: 1, UsageComplete: true}
+		record := usage.Record{ID: fmt.Sprintf("%032x", i+1), JobID: fmt.Sprintf("job-%d", i), Repo: "example-owner/example-repo", User: "alice", Action: actions[i], Number: 1, Provider: "codex", Model: "test-model", Effort: "high", StartedAt: start, FinishedAt: &finish, Status: statuses[i], CodexCalls: 1, UsageComplete: true,
+			ExecutorID: "local", SourceRef: strings.Repeat("a", 40), UsageSource: "executor_reported"}
 		switch i {
 		case 0:
 			record.Tokens = usage.Tokens{Input: 100, CachedInput: 40, Output: 20}
-			record.ExecutorID, record.SourceRef, record.UsageSource = "local", strings.Repeat("a", 40), "executor_reported"
 		case 1:
 			record.Tokens = usage.Tokens{Input: 50, CachedInput: 10, Output: 5}
 			record.CodexCalls, record.UsageComplete = 2, false
@@ -40,6 +40,7 @@ func saveReportFixture(t *testing.T, dir string) {
 			record.FinishedAt = nil // A crash after a call can leave running usage marked complete.
 		case 3:
 			record.CodexCalls = 0
+			record.UsageSource = ""
 		}
 		if err := (usage.Store{Dir: dir}).Save(record); err != nil {
 			t.Fatal(err)

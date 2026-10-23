@@ -19,6 +19,7 @@ func testRecord() Record {
 		ID: "0123456789abcdef0123456789abcdef", JobID: "github:123", Repo: "linkdata/minion", User: "example",
 		Action: "review", Number: 1, Provider: "codex", Model: "example-model", StartedAt: started, FinishedAt: &finished,
 		Status: "succeeded", CodexCalls: 1, Tokens: Tokens{Input: 100, CachedInput: 80, Output: 20}, UsageComplete: true,
+		ExecutorID: "local", SourceRef: strings.Repeat("a", 40), UsageSource: "executor_reported",
 	}
 }
 
@@ -28,6 +29,7 @@ func TestStoreAtomicUpdates(t *testing.T) {
 	record := testRecord()
 	record.Status, record.FinishedAt = "running", nil
 	record.CodexCalls, record.Tokens = 0, Tokens{}
+	record.UsageSource = ""
 	if err := store.Save(record); err != nil {
 		t.Fatal(err)
 	}
@@ -43,6 +45,7 @@ func TestStoreAtomicUpdates(t *testing.T) {
 		for i := 1; i <= 30; i++ {
 			record.CodexCalls = i
 			record.Tokens = Tokens{Input: int64(i), CachedInput: int64(i / 2), Output: int64(i * 2)}
+			record.UsageSource = "executor_reported"
 			if err := store.Save(record); err != nil {
 				done <- err
 				return
@@ -70,6 +73,35 @@ func TestStoreAtomicUpdates(t *testing.T) {
 			return
 		default:
 		}
+	}
+}
+
+func TestStoreAllowsInitialAndPendingUsage(t *testing.T) {
+	for _, phase := range []string{"initial", "pending", "failed pending"} {
+		t.Run(phase, func(t *testing.T) {
+			record := testRecord()
+			record.Status, record.FinishedAt = "running", nil
+			record.CodexCalls, record.Tokens = 0, Tokens{}
+			record.ExecutorID, record.SourceRef, record.UsageSource = "", "", ""
+			if phase != "initial" {
+				record.CodexCalls = 1
+				record.ExecutorID, record.SourceRef = "local", strings.Repeat("a", 40)
+				record.UsageComplete = false
+			}
+			if phase == "failed pending" {
+				record.Status = "failed"
+				finished := record.StartedAt.Add(time.Second)
+				record.FinishedAt = &finished
+			}
+			dir := t.TempDir()
+			if err := (Store{Dir: dir}).Save(record); err != nil {
+				t.Fatal(err)
+			}
+			got, err := ReadAll(dir)
+			if err != nil || len(got) != 1 || !reflect.DeepEqual(got[0], record) {
+				t.Fatalf("usage state changed: records=%+v err=%v", got, err)
+			}
+		})
 	}
 }
 
@@ -138,13 +170,26 @@ func TestSaveRejectsInvalidRecords(t *testing.T) {
 		"invalid source ref": func(r *Record) {
 			r.ExecutorID, r.SourceRef = "local", "foreign"
 		},
-		"invalid usage source": func(r *Record) { r.UsageSource = "verified_billing" },
-		"unattributed claim":   func(r *Record) { r.UsageSource = "executor_reported" },
-		"unpaired executor":    func(r *Record) { r.ExecutorID = "local" },
-		"negative input":       func(r *Record) { r.Tokens.Input = -1 },
-		"negative cache":       func(r *Record) { r.Tokens.CachedInput = -1 },
-		"negative output":      func(r *Record) { r.Tokens.Output = -1 },
-		"cache exceeds input":  func(r *Record) { r.Tokens.CachedInput = r.Tokens.Input + 1 },
+		"invalid usage source":                  func(r *Record) { r.UsageSource = "verified_billing" },
+		"unattributed claim":                    func(r *Record) { r.ExecutorID, r.SourceRef = "", "" },
+		"missing claim origin":                  func(r *Record) { r.UsageSource = "" },
+		"incomplete token claim without origin": func(r *Record) { r.UsageComplete, r.UsageSource = false, "" },
+		"unpaired executor":                     func(r *Record) { r.SourceRef = "" },
+		"tokens without a call":                 func(r *Record) { r.CodexCalls = 0 },
+		"claim origin without a call": func(r *Record) {
+			r.CodexCalls, r.Tokens = 0, Tokens{}
+		},
+		"successful incomplete call without origin": func(r *Record) {
+			r.Tokens, r.UsageComplete, r.UsageSource = Tokens{}, false, ""
+		},
+		"unbound pending call": func(r *Record) {
+			r.Status, r.FinishedAt, r.UsageComplete, r.Tokens, r.UsageSource, r.ExecutorID, r.SourceRef = "running", nil, false, Tokens{}, "", "", ""
+		},
+		"unattributed zero-token return": func(r *Record) { r.Tokens, r.UsageSource = Tokens{}, "" },
+		"negative input":                 func(r *Record) { r.Tokens.Input = -1 },
+		"negative cache":                 func(r *Record) { r.Tokens.CachedInput = -1 },
+		"negative output":                func(r *Record) { r.Tokens.Output = -1 },
+		"cache exceeds input":            func(r *Record) { r.Tokens.CachedInput = r.Tokens.Input + 1 },
 	} {
 		t.Run(name, func(t *testing.T) {
 			dir := filepath.Join(t.TempDir(), "usage")
@@ -200,13 +245,15 @@ func TestReadAllRejectsMalformedRecords(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, content := range map[string]string{
-		"bad JSON":         "{",
-		"missing fields":   "{}",
-		"missing provider": strings.Replace(string(valid), `"provider":"codex",`, "", 1),
-		"trailing data":    string(valid) + " {}",
-		"unknown field":    strings.TrimSuffix(string(valid), "}") + `,"typo":1}`,
-		"wrong ID":         strings.ReplaceAll(string(valid), record.ID, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
-		"invalid counters": strings.Replace(string(valid), `"input_tokens":100`, `"input_tokens":-1`, 1),
+		"bad JSON":             "{",
+		"missing fields":       "{}",
+		"missing provider":     strings.Replace(string(valid), `"provider":"codex",`, "", 1),
+		"missing claim origin": strings.Replace(string(valid), `"usage_source":"executor_reported",`, "", 1),
+		"unattributed usage":   strings.Replace(strings.Replace(string(valid), `"executor_id":"local",`, "", 1), `"source_ref":"`+strings.Repeat("a", 40)+`",`, "", 1),
+		"trailing data":        string(valid) + " {}",
+		"unknown field":        strings.TrimSuffix(string(valid), "}") + `,"typo":1}`,
+		"wrong ID":             strings.ReplaceAll(string(valid), record.ID, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+		"invalid counters":     strings.Replace(string(valid), `"input_tokens":100`, `"input_tokens":-1`, 1),
 	} {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -414,10 +461,10 @@ func TestSummarizeAggregateBounds(t *testing.T) {
 		wantClaude    int
 		wantError     string
 	}{
-		{name: "exact token maximum", first: Tokens{Input: math.MaxInt64 / 2}, second: Tokens{Input: math.MaxInt64/2 + 1}, wantTokens: math.MaxInt64},
-		{name: "token maximum plus one", first: Tokens{Input: math.MaxInt64/2 + 1}, second: Tokens{Input: math.MaxInt64/2 + 1}, wantError: "token counts"},
-		{name: "total overflow without component overflow", first: Tokens{Input: math.MaxInt64}, second: Tokens{Output: 1}, wantError: "token counts"},
-		{name: "invalid tokens", second: Tokens{Input: -1}, wantError: "invalid counts"},
+		{name: "exact token maximum", first: Tokens{Input: math.MaxInt64 / 2}, second: Tokens{Input: math.MaxInt64/2 + 1}, codex: [2]int{1, 1}, wantTokens: math.MaxInt64, wantCodex: 2},
+		{name: "token maximum plus one", first: Tokens{Input: math.MaxInt64/2 + 1}, second: Tokens{Input: math.MaxInt64/2 + 1}, codex: [2]int{1, 1}, wantError: "token counts"},
+		{name: "total overflow without component overflow", first: Tokens{Input: math.MaxInt64}, second: Tokens{Output: 1}, codex: [2]int{1, 1}, wantError: "token counts"},
+		{name: "invalid tokens", second: Tokens{Input: -1}, codex: [2]int{1, 1}, wantError: "invalid counts"},
 		{name: "exact codex call maximum", codex: [2]int{math.MaxInt / 2, math.MaxInt/2 + 1}, wantCodex: math.MaxInt},
 		{name: "codex call overflow", codex: [2]int{math.MaxInt, 1}, wantError: "call counts"},
 		{name: "exact claude call maximum", claude: [2]int{math.MaxInt / 2, math.MaxInt/2 + 1}, wantClaude: math.MaxInt},
