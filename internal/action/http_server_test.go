@@ -406,6 +406,32 @@ func TestHTTPExecutorBusyAndSingleAssignment(t *testing.T) {
 	}
 }
 
+func TestHTTPExecutorCanceledPullDoesNotClaimReadyAssignment(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var canceled atomic.Bool
+	f := newHTTPServerTest(t, context.Background(), testJob(command.Comment), runnerExecutionCheckpoints{}, func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/next" && !canceled.Swap(true) {
+				r = r.WithContext(ctx)
+			}
+			next.ServeHTTP(w, r)
+		})
+	})
+	response := f.request("/next", httpPull{Version: ProtocolVersion, ExecutorID: f.job.Identity.ExecutorID})
+	f.tx.mu.Lock()
+	claimed, retained := f.tx.delivered, len(f.tx.body) != 0
+	f.tx.mu.Unlock()
+	if claimed || !retained || response.status != http.StatusOK || !errors.Is(response.err, io.EOF) {
+		t.Fatalf("canceled pull claimed or wrote the assignment: claimed=%v retained=%v response=%+v", claimed, retained, response)
+	}
+	f.pull(t)
+	f.ack(t, "/outcome", f.outcome(1, nil), http.StatusOK, 1)
+	if got := f.result(t); got.err != nil {
+		t.Fatalf("live pull lost the unclaimed assignment: %v", got.err)
+	}
+}
+
 func TestHTTPExecutorFailedOutcomeAcrossMissingCallbackPreservesOnlyRawFacts(t *testing.T) {
 	var after atomic.Int32
 	f := newHTTPServerTest(t, context.Background(), testJob(command.Comment), runnerExecutionCheckpoints{after: func(CallCheckpoint) error { after.Add(1); return nil }}, nil)

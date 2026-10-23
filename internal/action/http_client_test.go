@@ -217,7 +217,7 @@ func TestRunHTTPReportsActualObservationsAndRawPaidReceipts(t *testing.T) {
 }
 
 func TestHTTPClientRequiresExactAcknowledgementAndNeverRetries(t *testing.T) {
-	for _, name := range []string{"known failure", "empty", "malformed", "trailing", "unknown field", "foreign binding", "wrong kind", "wrong sequence", "success with failure", "content type", "encoding", "multiple encodings", "oversized"} {
+	for _, name := range []string{"known failure", "HTTP 202", "HTTP 206", "empty", "malformed", "trailing", "unknown field", "foreign binding", "wrong kind", "wrong sequence", "success with failure", "content type", "encoding", "multiple encodings", "oversized"} {
 		t.Run(name, func(t *testing.T) {
 			job := testJob(command.Comment)
 			binding := httpJobBinding(job)
@@ -227,6 +227,10 @@ func TestHTTPClientRequiresExactAcknowledgementAndNeverRetries(t *testing.T) {
 				ack := httpAcknowledgement{httpBinding: binding, Sequence: 1, Kind: "before"}
 				w.Header().Set("Content-Type", "application/json")
 				switch name {
+				case "HTTP 202":
+					w.WriteHeader(http.StatusAccepted)
+				case "HTTP 206":
+					w.WriteHeader(http.StatusPartialContent)
 				case "known failure":
 					ack.Failure = newHTTPFailure(workroot.ErrUnsafe)
 					w.WriteHeader(http.StatusConflict)
@@ -288,7 +292,7 @@ func TestHTTPClientRequiresExactAcknowledgementAndNeverRetries(t *testing.T) {
 }
 
 func TestRunHTTPRejectsAssignmentBeforeWatchOrRunner(t *testing.T) {
-	for _, name := range []string{"version", "executor", "expired", "expired outcome ACK lost", "missing expiry", "trailing JSON"} {
+	for _, name := range []string{"version", "executor", "HTTP 202", "HTTP 206", "expired", "expired outcome ACK lost", "missing expiry", "trailing JSON"} {
 		t.Run(name, func(t *testing.T) {
 			job := testJob(command.Comment)
 			assignment := httpAssignment{Job: job, Expires: time.Now().Add(job.RuntimeBudget).UnixNano()}
@@ -308,6 +312,12 @@ func TestRunHTTPRejectsAssignmentBeforeWatchOrRunner(t *testing.T) {
 				requests.Add(1)
 				switch r.URL.Path {
 				case "/next":
+					w.Header().Set("Content-Type", "application/json")
+					if name == "HTTP 202" {
+						w.WriteHeader(http.StatusAccepted)
+					} else if name == "HTTP 206" {
+						w.WriteHeader(http.StatusPartialContent)
+					}
 					httpClientTestJSON(t, w, assignment)
 					if name == "trailing JSON" {
 						_, _ = fmt.Fprint(w, "{}")
@@ -339,6 +349,93 @@ func TestRunHTTPRejectsAssignmentBeforeWatchOrRunner(t *testing.T) {
 				}
 			} else if !errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || requests.Load() != 1 || len(outcomes) != 0 {
 				t.Fatalf("invalid assignment ran or became repeatable: error=%v requests=%d", err, requests.Load())
+			}
+		})
+	}
+}
+
+func TestRunHTTPBoundsAssignmentBodyAfterHeadersAndAllowsLongPoll(t *testing.T) {
+	for _, negative := range []bool{false, true} {
+		t.Run(fmt.Sprintf("negative=%t", negative), func(t *testing.T) {
+			t.Parallel()
+			headers, drained := make(chan struct{}, 1), make(chan struct{})
+			var requests, native atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if requests.Add(1) != 1 || r.URL.Path != "/next" {
+					t.Errorf("incomplete assignment advanced or retried: %s", r.URL.Path)
+					http.NotFound(w, r)
+					return
+				}
+				defer close(drained)
+				if !negative {
+					// Waiting for assignment headers must outlive the body-only timeout.
+					timer := time.NewTimer(httpControlTimeout + time.Second)
+					defer timer.Stop()
+					select {
+					case <-timer.C:
+					case <-r.Context().Done():
+						return
+					}
+				}
+				w.Header().Set("Content-Type", "application/json")
+				if negative {
+					w.WriteHeader(http.StatusServiceUnavailable)
+				}
+				_, _ = fmt.Fprint(w, `{"incomplete":`)
+				w.(http.Flusher).Flush()
+				headers <- struct{}{}
+				<-r.Context().Done() // No EOF and no caller deadline can end the body read.
+			}))
+			client := *server.Client()
+			client.Timeout = 0
+			transport := client.Transport
+			var requestDeadline atomic.Bool
+			client.Transport = httpClientTestTransport(func(r *http.Request) (*http.Response, error) {
+				if _, ok := r.Context().Deadline(); ok {
+					requestDeadline.Store(true)
+				}
+				return transport.RoundTrip(r)
+			})
+			done := make(chan error, 1)
+			finished := false
+			defer func() {
+				server.CloseClientConnections()
+				server.Close()
+				if !finished {
+					select {
+					case <-done:
+					case <-time.After(5 * time.Second):
+						t.Error("worker did not drain after fixture cleanup")
+					}
+				}
+			}()
+			runner := &Runner{runModel: func(context.Context, modelRun) (aicli.Result, error) {
+				native.Add(1)
+				return aicli.Result{}, errors.New("incomplete assignment reached native work")
+			}}
+			go func() { done <- RunHTTP(context.Background(), &client, server.URL, "local", runner) }()
+			select {
+			case <-headers:
+			case err := <-done:
+				finished = true
+				t.Fatalf("worker bounded the intentional pre-header assignment wait: %v", err)
+			case <-time.After(httpControlTimeout + 5*time.Second):
+				t.Fatal("assignment headers did not arrive after the controlled long poll")
+			}
+			var err error
+			select {
+			case err = <-done:
+				finished = true
+			case <-time.After(httpControlTimeout + 5*time.Second):
+				t.Fatal("assignment body outlived its 30-second transfer bound")
+			}
+			if !errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || !errors.Is(err, context.DeadlineExceeded) || requests.Load() != 1 || native.Load() != 0 || requestDeadline.Load() || client.Timeout != 0 {
+				t.Fatalf("body timeout changed failure, long-poll context, or caller client: error=%v requests=%d native=%d deadline=%t timeout=%s", err, requests.Load(), native.Load(), requestDeadline.Load(), client.Timeout)
+			}
+			select {
+			case <-drained:
+			case <-time.After(5 * time.Second):
+				t.Fatal("timed-out assignment response did not drain")
 			}
 		})
 	}

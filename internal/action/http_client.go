@@ -25,6 +25,21 @@ type httpExecutionClient struct {
 	outcomeSent atomic.Bool
 }
 
+type httpPullBody struct {
+	io.ReadCloser
+	timer  *time.Timer
+	done   <-chan struct{}
+	cancel context.CancelCauseFunc
+}
+
+func (b *httpPullBody) Close() error {
+	if !b.timer.Stop() {
+		<-b.done
+	}
+	b.cancel(context.Canceled)
+	return b.ReadCloser.Close()
+}
+
 type httpClientCheckpoints struct {
 	transport *httpExecutionClient
 	control   context.Context
@@ -112,10 +127,6 @@ func RunHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 			err = errors.Join(monitor.ErrTerminalJob, err)
 		}
 	}
-	if err == nil && watchResponse.StatusCode != http.StatusOK {
-		_ = watchResponse.Body.Close()
-		err = errors.New("watch admission requires HTTP 200")
-	}
 	if err != nil {
 		stopWatch(errHTTPWatchStopped)
 		result := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head}
@@ -188,6 +199,15 @@ func (c *httpExecutionClient) post(ctx context.Context, kind string, data []byte
 // open returns only after success headers. The held cancellation body is read
 // separately, so a registered watch is an admission barrier before Runner starts.
 func (c *httpExecutionClient) open(ctx context.Context, kind string, data []byte, binding httpBinding, sequence uint64, knownNoWork bool) (*http.Response, error) {
+	var pullCancel context.CancelCauseFunc
+	if kind == "next" {
+		ctx, pullCancel = context.WithCancelCause(ctx)
+	}
+	defer func() {
+		if pullCancel != nil {
+			pullCancel(context.Canceled)
+		}
+	}()
 	failure := func(err error) error {
 		if knownNoWork {
 			return fmt.Errorf("HTTP %s admission: %w", kind, err)
@@ -216,6 +236,16 @@ func (c *httpExecutionClient) open(ctx context.Context, kind string, data []byte
 		}
 		return nil, failure(err)
 	}
+	if pullCancel != nil {
+		// The assignment wait is unbounded; only its received body uses control time.
+		cancel, done := pullCancel, make(chan struct{})
+		timer := time.AfterFunc(httpControlTimeout, func() {
+			cancel(context.DeadlineExceeded)
+			close(done)
+		})
+		response.Body = &httpPullBody{ReadCloser: response.Body, timer: timer, done: done, cancel: cancel}
+		pullCancel = nil // Response-body cleanup now owns cancellation and the timer.
+	}
 	media, _, mediaErr := mime.ParseMediaType(response.Header.Get("Content-Type"))
 	encodings := response.Header.Values("Content-Encoding")
 	invalidEncoding := len(encodings) > 1 || len(encodings) == 1 && encodings[0] != "" && !strings.EqualFold(strings.TrimSpace(encodings[0]), "identity")
@@ -236,6 +266,10 @@ func (c *httpExecutionClient) open(ctx context.Context, kind string, data []byte
 			return nil, failure(err)
 		}
 		return nil, ack.Failure.err()
+	}
+	if response.StatusCode != http.StatusOK {
+		_ = response.Body.Close()
+		return nil, failure(errors.New("positive response requires HTTP 200"))
 	}
 	return response, nil
 }

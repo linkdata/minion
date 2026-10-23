@@ -255,7 +255,7 @@ func (e *HTTPExecutor) serveNext(w http.ResponseWriter, r *http.Request) {
 				httpServerReject(w, "next", http.StatusConflict, httpBinding{}, 0, errors.New("HTTP assignment is already claimed"))
 				return
 			}
-			if tx.ready && tx.ctx.Err() == nil {
+			if tx.ready && tx.ctx.Err() == nil && r.Context().Err() == nil {
 				tx.delivered = true
 				tx.handlers.Add(1)
 				delivery = tx
