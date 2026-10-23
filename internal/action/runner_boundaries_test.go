@@ -79,6 +79,28 @@ func TestPartialAuditMetadataPathListsStayPortable(t *testing.T) {
 	}
 }
 
+func TestPartialAuditMetadataRetainsIncompleteReason(t *testing.T) {
+	job := testJob(command.SecurityAudit)
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "run-metadata.json"), []byte(`{"run_status":"incomplete","incomplete_reason":"validation_budget_exhausted","output_dir":"/worker/local"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	files, diagnostics := collectPartialAuditArtifacts(root, job, "/installed/SKILL.md")
+	if len(diagnostics) != 0 || len(files) != 1 || files[0].Path != "run-metadata.json" {
+		t.Fatalf("partial metadata = %+v, diagnostics = %+v", files, diagnostics)
+	}
+	var metadata map[string]json.RawMessage
+	if err := json.Unmarshal(files[0].Data, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if string(metadata["run_status"]) != `"incomplete"` || string(metadata["incomplete_reason"]) != `"validation_budget_exhausted"` {
+		t.Fatalf("incomplete reason was lost: %s", files[0].Data)
+	}
+	if _, present := metadata["output_dir"]; present {
+		t.Fatalf("worker-local path retained: %s", files[0].Data)
+	}
+}
+
 func TestRunnerRejectsBlankNoChangeFix(t *testing.T) {
 	for _, test := range []struct{ name, answer string }{{"empty", ""}, {"whitespace", " \n\t"}, {"NUL", "\x00"}} {
 		t.Run(test.name, func(t *testing.T) {

@@ -14,7 +14,7 @@ type Executor interface {
 	Execute(context.Context, Job, Checkpoints) (Result, error)
 }
 
-// Checkpoints acknowledges required facts before execution may continue.
+// Checkpoints acknowledges required reported data before execution may continue.
 // Methods are called sequentially; nil acknowledges applicable persistence.
 // Review slices are borrowed read-only until the synchronous method returns.
 type Checkpoints interface {
@@ -23,7 +23,7 @@ type Checkpoints interface {
 	Review(ReviewCheckpoint) error
 }
 
-// CallCheckpoint carries pinned dispatch metadata, then returned usage and parsed verdict attestations.
+// CallCheckpoint carries pinned dispatch metadata, then returned usage and parsed verdict claims.
 type CallCheckpoint struct {
 	Version   int       `json:"version"`
 	Identity  Identity  `json:"identity"`
@@ -31,7 +31,7 @@ type CallCheckpoint struct {
 	Call      CallUsage `json:"call"`
 }
 
-// ReviewCheckpoint carries private evidence; a nonblank decision acknowledges an already saved prefix.
+// ReviewCheckpoint carries private worker-reported review data; a nonblank decision acknowledges an already saved prefix.
 type ReviewCheckpoint struct {
 	Version          int          `json:"version"`
 	Identity         Identity     `json:"identity"`

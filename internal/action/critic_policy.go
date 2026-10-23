@@ -1,6 +1,6 @@
 package action
 
-// criticPolicy replays verdict evidence without treating token-accounting coverage as approval.
+// criticPolicy replays worker-reported verdicts without treating token accounting as approval.
 type criticPolicy struct {
 	job                    Job
 	verificationApproved   bool

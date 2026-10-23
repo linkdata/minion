@@ -70,6 +70,7 @@ type Job struct {
 	RuntimeBudget time.Duration `json:"runtime_budget_ns"`
 }
 
+// CallUsage contains executor claims checked against saved callbacks, not independent model evidence.
 type CallUsage struct {
 	Provider    string       `json:"provider"`
 	Role        string       `json:"role"`
@@ -78,15 +79,15 @@ type CallUsage struct {
 	Model       string       `json:"model,omitempty"`
 	Effort      string       `json:"effort,omitempty"`
 	Tokens      usage.Tokens `json:"tokens"`
-	// Approved attests a parsed approving critic verdict; false is not proof of rejection.
+	// Approved reports a parsed approving critic verdict; false is not proof of rejection.
 	Approved bool `json:"approved,omitempty"`
-	// NoBlockers attests an explicit has_blockers=false in a valid critic verdict.
+	// NoBlockers reports an explicit has_blockers=false in a valid critic verdict.
 	NoBlockers bool `json:"no_blockers,omitempty"`
-	// HasBlockers attests an explicit has_blockers=true; both false means no valid verdict.
+	// HasBlockers reports an explicit has_blockers=true; both false means no valid verdict.
 	HasBlockers bool `json:"has_blockers,omitempty"`
-	// ReviewComplete attests completed assigned critic scope, separately from token accounting.
+	// ReviewComplete claims completed assigned critic scope, separately from token accounting.
 	ReviewComplete bool `json:"review_complete,omitempty"`
-	// Complete confirms accounting coverage; interrupted or failed native runs are conservative.
+	// Complete claims accounting coverage; interrupted or failed native runs are conservative.
 	Complete bool `json:"complete"`
 }
 

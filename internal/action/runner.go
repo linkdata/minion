@@ -381,9 +381,7 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 	}()
 	var answer string
 	var runErr error
-	answer, result.CriticStopReason, runErr = configured.runAI(ctx, job, source, prompt, outputDir, func(history []Refutation) error {
-		return checkpointReview(history)
-	}, &sessions)
+	answer, result.CriticStopReason, runErr = configured.runAI(ctx, job, source, prompt, outputDir, checkpointReview, &sessions)
 	if result.CriticStopReason != "" {
 		if err := checkpointReview(result.Refutations); err != nil {
 			return result, fmt.Errorf("%w: checkpoint critic decision: %w", monitor.ErrTerminalJob, err)
@@ -674,7 +672,7 @@ func normalizeAuditArtifacts(files []workspace.File, job Job, skill string, secr
 				return nil, err
 			}
 			metadata := make(map[string]json.RawMessage)
-			for _, name := range []string{"run_id", "repo", "source_ref", "profile", "scope_paths", "budget", "selected_companion_files", "prior_run_paths", "execution_policy", "run_status"} {
+			for _, name := range []string{"run_id", "repo", "source_ref", "profile", "scope_paths", "budget", "selected_companion_files", "prior_run_paths", "execution_policy", "run_status", "incomplete_reason"} {
 				if value, present := raw[name]; present {
 					metadata[name] = value
 				}

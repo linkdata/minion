@@ -26,8 +26,8 @@ var auditValidators = []struct{ script, artifact string }{
 	{"validate-coverage-ledger.cjs", "coverage-ledger.json"},
 }
 
-var auditCleanClaim = regexp.MustCompile(`\b(?:no|zero|0) (?:findings|vulnerabilities|security issues)(?: (?:were )?(?:found|identified|detected|reported))?(?:[,.!?;:]|$)`)
-var auditNoConfirmedClaim = regexp.MustCompile(`\b(?:no|zero|0) confirmed (?:findings|vulnerabilities|security issues)(?: (?:were )?(?:found|identified|detected|reported))?(?:[,.!?;:]|$)`)
+var auditCleanClaim = regexp.MustCompile(`\b(?:(?:the|this) audit (?:found|identified|detected|reported) )?(?:no|zero|0) (?:findings|vulnerabilities|security issues)(?: (?:were )?(?:found|identified|detected|reported))?(?:[,.!?;:]|$)`)
+var auditNoConfirmedClaim = regexp.MustCompile(`\b(?:(?:the|this) audit (?:found|identified|detected|reported) )?(?:no|zero|0) confirmed (?:findings|vulnerabilities|security issues)(?: (?:were )?(?:found|identified|detected|reported))?(?:[,.!?;:]|$)`)
 
 type auditTools struct {
 	binary, permissionFlag string
@@ -365,6 +365,9 @@ func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes, detailsBytes
 	}
 	if findings == nil {
 		return errors.New("audit findings.json is not an array")
+	}
+	if len(findings) > 1000 { // The installed findings validator uses the same cap.
+		return errors.New("audit findings.json exceeds 1000 findings")
 	}
 	sourcePaths, sourceLines := auditSourceInventory(source)
 	final := make(map[string]bool, len(findings))
@@ -745,7 +748,7 @@ func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes, detailsBytes
 				break
 			}
 		}
-		if mentioned && !matched {
+		if (mentioned || auditSeverityRank(strings.Trim(strings.TrimSpace(cells[0]), "*_` ")) >= 0) && !matched {
 			return errors.New("audit REPORT.md contradicts a confirmed finding table row")
 		}
 	}
@@ -1103,11 +1106,14 @@ func validateAuditMetadata(metadataBytes []byte, repo, target, head string) ([]s
 		return nil, fmt.Errorf("decode audit metadata fields: %w", err)
 	}
 	for name := range fields {
-		for _, canonical := range []string{"run_id", "repo", "target", "source_ref", "profile", "scope_paths", "budget", "selected_companion_files", "prior_run_paths", "shared_file_owners", "execution_policy", "run_status", "skill_source"} {
+		for _, canonical := range []string{"run_id", "repo", "target", "source_ref", "profile", "scope_paths", "budget", "selected_companion_files", "prior_run_paths", "shared_file_owners", "execution_policy", "run_status", "incomplete_reason", "skill_source"} {
 			if name != canonical && strings.EqualFold(name, canonical) {
 				return nil, fmt.Errorf("audit metadata uses noncanonical key %q", name)
 			}
 		}
+	}
+	if _, incomplete := fields["incomplete_reason"]; incomplete {
+		return nil, errors.New("audit metadata declares an incomplete reason for a complete run")
 	}
 	if !auditVisibleText(metadata.RunID) || metadata.Repo != repo || metadata.Target != target || metadata.SourceRef != head ||
 		metadata.Profile != "standard" || len(metadata.ScopePaths) != 1 || metadata.ScopePaths[0] != "." ||

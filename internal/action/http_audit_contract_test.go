@@ -40,7 +40,7 @@ func TestHostileHTTPAuditSchemaCannotPublish(t *testing.T) {
 	blockedAndCovered := "[" + strings.Trim(auditCoveredLedgerFixture, "[]") + "," + strings.Trim(secondBlocked, "[]") + "]"
 	for _, test := range []struct {
 		name, artifact, data, findings, ledger, report, want string
-		candidate                                            bool
+		candidate, incompleteReason                          bool
 	}{
 		{name: "directory-only review cannot claim coverage", artifact: "coverage-ledger.json", data: strings.ReplaceAll(auditCoveredLedgerFixture, "source.txt", "src"), want: "starting path without a declared reviewed file"},
 		{name: "blocked-only ledger has no reviewed coverage", artifact: "coverage-ledger.json", data: blockedLedger, want: "no reviewed coverage"},
@@ -72,7 +72,10 @@ func TestHostileHTTPAuditSchemaCannotPublish(t *testing.T) {
 		{name: "clean identified statement contradicts unresolved lead", artifact: "REPORT.md", data: "No findings were identified. Unverified boundary.", findings: auditCandidateFindingFixture, want: "contradicts final findings", candidate: true},
 		{name: "nonbreaking-space clean heading contradicts unresolved lead", artifact: "REPORT.md", data: "## No findings\u00a0\nUnverified boundary.", findings: auditCandidateFindingFixture, want: "contradicts final findings", candidate: true},
 		{name: "clean heading contradicts confirmed finding", artifact: "REPORT.md", data: "## No confirmed findings\n| medium | Missing guard | Boundary | The other user's object changes. |", findings: auditConfirmedFindingFixture, want: "contradicts final findings", candidate: true},
+		{name: "audit clean claim contradicts confirmed finding", artifact: "REPORT.md", data: "The audit found no findings.\n| medium | Missing guard | Boundary | The other user's object changes. |", findings: auditConfirmedFindingFixture, want: "contradicts final findings", candidate: true},
 		{name: "nonbreaking-space clean heading contradicts confirmed finding", artifact: "REPORT.md", data: "## No confirmed findings\u00a0\n| medium | Missing guard | Boundary | The other user's object changes. |", findings: auditConfirmedFindingFixture, want: "contradicts final findings", candidate: true},
+		{name: "report invents confirmed finding", artifact: "REPORT.md", data: "| critical | Ghost vulnerability | Boundary | A user's object changes. |", want: "finding table row"},
+		{name: "report promotes needs_validation", artifact: "REPORT.md", data: "| critical | Unverified boundary | Boundary | A user's object changes. |", findings: auditCandidateFindingFixture, want: "finding table row", candidate: true},
 		{name: "confirmed severity omitted", artifact: "REPORT.md", data: "Missing guard.", findings: auditConfirmedFindingFixture, want: "omits or contradicts a confirmed finding table row", candidate: true},
 		{name: "confirmed severity elsewhere", artifact: "REPORT.md", data: "Missing guard (low).\nMedium confidence.", findings: auditConfirmedFindingFixture, want: "omits or contradicts a confirmed finding table row", candidate: true},
 		{name: "confirmed severity wrong table cell", artifact: "REPORT.md", data: "| low | Missing guard | Boundary | medium confidence |", findings: auditConfirmedFindingFixture, want: "omits or contradicts a confirmed finding table row", candidate: true},
@@ -82,6 +85,7 @@ func TestHostileHTTPAuditSchemaCannotPublish(t *testing.T) {
 		{name: "candidate without verifier", artifact: "coverage-ledger.json", data: selfChecked, findings: auditCandidateFindingFixture, want: "without separately attributed source check"},
 		{name: "archived candidate without verifier", artifact: "coverage-ledger.json", data: archivedSelf, findings: auditCandidateFindingFixture, want: "without separately attributed source check"},
 		{name: "prior run unsupported", artifact: "coverage-ledger.json", data: strings.Replace(auditCoveredLedgerFixture, `"prior_status":"none"`, `"prior_status":"prior_confirmed_same_source"`, 1), want: "prior run absent from metadata"},
+		{name: "complete metadata has incomplete reason", incompleteReason: true, want: "incomplete reason"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			installActionTestSkills(t, testAuditSkillURL)
@@ -154,6 +158,9 @@ func TestHostileHTTPAuditSchemaCannotPublish(t *testing.T) {
 				for i := range outcome.Result.Artifacts {
 					if outcome.Result.Artifacts[i].Path == test.artifact {
 						outcome.Result.Artifacts[i].Data = []byte(test.data)
+					}
+					if test.incompleteReason && outcome.Result.Artifacts[i].Path == "run-metadata.json" {
+						outcome.Result.Artifacts[i].Data = []byte(strings.Replace(string(outcome.Result.Artifacts[i].Data), `"run_status":"complete"`, `"run_status":"complete","incomplete_reason":"validation_budget_exhausted"`, 1))
 					}
 				}
 				if test.artifact == "REPORT.md" {

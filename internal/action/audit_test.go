@@ -461,6 +461,23 @@ func TestValidateAuditMetadataRejectsCaseVariantKeys(t *testing.T) {
 	}
 }
 
+func TestValidateAuditMetadataRejectsIncompleteReason(t *testing.T) {
+	job := testJob(command.SecurityAudit)
+	target := sourceIdentity(job)
+	metadata := string(auditArtifactsFixture(job, target, "Audit report\n")[0].Data)
+	metadata = strings.Replace(metadata, `"run_status":"complete"`, `"run_status":"complete","incomplete_reason":"validation_budget_exhausted"`, 1)
+	if _, err := validateAuditMetadata([]byte(metadata), job.Identity.Repository, target, job.Source.Head); err == nil || !strings.Contains(err.Error(), "incomplete reason") {
+		t.Fatalf("complete audit with incomplete reason: %v", err)
+	}
+}
+
+func TestValidateAuditCoverageCapsFindingsBeforeReportScan(t *testing.T) {
+	findings := "[" + strings.Repeat("{},", 1000) + "{}]"
+	if err := validateAuditCoverage([]byte(auditCoveredLedgerFixture), []byte(findings), []byte("Report"), nil, nil, nil); err == nil || !strings.Contains(err.Error(), "exceeds 1000 findings") {
+		t.Fatalf("oversized findings: %v", err)
+	}
+}
+
 func TestAuditArtifactReadModesPreserveFailurePolicies(t *testing.T) {
 	for _, scenario := range []string{"missing core", "empty core", "unsafe core", "oversized report", "invalid UTF-8 report", "NUL report", "empty report", "blank report"} {
 		for _, partial := range []bool{false, true} {
