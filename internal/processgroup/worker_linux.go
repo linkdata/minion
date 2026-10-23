@@ -161,7 +161,8 @@ func (h *WorkerHandle) Wait() (released bool, err error) {
 		h.cancelMu.Lock()
 		cancelErr := h.cancelErr
 		h.cancelMu.Unlock()
-		h.released, err = h.release()
+		workerSucceeded := h.started && h.startErr == nil && cmdErr == nil && cancelErr == nil && !h.cancelled.Load()
+		h.released, err = h.release(workerSucceeded)
 		if !h.released {
 			err = errors.Join(err, ErrUnconfirmed, fmt.Errorf("%w: %s", ErrScopeUnconfirmed, h.dir))
 		}
@@ -316,7 +317,7 @@ func (h *WorkerHandle) stop() error {
 	}
 }
 
-func (h *WorkerHandle) release() (released bool, resultErr error) {
+func (h *WorkerHandle) release(workerSucceeded bool) (released bool, resultErr error) {
 	if err := h.verifyWorker(); err != nil {
 		return false, err
 	}
@@ -378,6 +379,9 @@ func (h *WorkerHandle) release() (released bool, resultErr error) {
 				return false, errors.Join(resultErr, removeErr, closeErr)
 			}
 			resultErr = errors.Join(resultErr, closeErr)
+			if workerSucceeded && resultErr == nil && child.Name() != supervisorLeaf {
+				resultErr = fmt.Errorf("%w: worker left command scope %s", ErrUnconfirmed, filepath.Join(h.dir, child.Name()))
+			}
 		}
 		if err == io.EOF {
 			break

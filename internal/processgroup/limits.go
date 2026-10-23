@@ -5,8 +5,8 @@ import (
 	"fmt"
 )
 
-// ErrDescendants means the leader exited while processes remained in its cgroup.
-// The descendants were stopped, but the result is rejected.
+// ErrDescendants means the leader exited while processes remained in its owned cgroup tree.
+// They were stopped or observed to exit, but the result is rejected.
 var ErrDescendants = errors.New("process scope left descendant processes")
 
 // ErrUnconfirmed means process ownership, limit observation, or cleanup could not be proved.

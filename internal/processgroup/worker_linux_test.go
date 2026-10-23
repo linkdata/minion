@@ -467,7 +467,45 @@ func TestWorkerKillErrorStillAllowsEmptyRelease(t *testing.T) {
 	}
 }
 
-func TestWorkerSupervisorReplacementPreservesForeignDirectory(t *testing.T) {
+func TestWorkerEmptyUnwaitedCommandRejectsSuccess(t *testing.T) {
+	if err := Check(); err != nil {
+		t.Skipf("delegated cgroup unavailable: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	report := filepath.Join(t.TempDir(), "worker")
+	cmd := workerHelperCommand(ctx, "empty-command", report, false)
+	h, err := StartWorker(cmd, func(string) error { return nil })
+	if h != nil {
+		t.Cleanup(func() { cancel(); _, _ = h.Wait() })
+	}
+	if err != nil || h == nil {
+		t.Fatalf("start worker: %v", err)
+	}
+	paths := strings.Split(waitForReport(t, report), "\n")
+	if len(paths) != 3 || paths[0] != filepath.Join(h.dir, supervisorLeaf) || filepath.Dir(paths[1]) != h.dir || paths[2] != "23" {
+		t.Fatalf("helper did not leave the reaped failing command scope: %q", paths)
+	}
+	if populated, err := cgroupPopulated(paths[1]); err != nil || populated {
+		t.Fatalf("unwaited command scope was not empty: populated=%t error=%v", populated, err)
+	}
+	released, waitErr := h.Wait()
+	if !released || !errors.Is(waitErr, ErrUnconfirmed) || errors.Is(waitErr, ErrScopeUnconfirmed) || errors.Is(waitErr, ErrDescendants) {
+		t.Fatalf("empty unwaited command escaped rejection or release: released=%t error=%v", released, waitErr)
+	}
+	if cmd.ProcessState == nil || !cmd.ProcessState.Success() {
+		t.Fatalf("fixture worker did not exit successfully: %v", cmd.ProcessState)
+	}
+	if !strings.Contains(waitErr.Error(), paths[1]) {
+		t.Fatalf("unwaited command error lost its concrete scope: %v", waitErr)
+	}
+	if againReleased, againErr := h.Wait(); !againReleased || againErr != waitErr {
+		t.Fatalf("repeated unwaited-command Wait changed result: released=%t error=%v", againReleased, againErr)
+	}
+	assertWorkerRemoved(t, h)
+}
+
+func TestWorkerReplacementPreservesForeignDirectory(t *testing.T) {
 	if err := Check(); err != nil {
 		t.Skipf("delegated cgroup unavailable: %v", err)
 	}
@@ -475,10 +513,12 @@ func TestWorkerSupervisorReplacementPreservesForeignDirectory(t *testing.T) {
 		name         string
 		duringRecord bool
 		refuseRecord bool
+		root         bool
 	}{
 		{name: "during successful record", duringRecord: true},
 		{name: "during refused record", duringRecord: true, refuseRecord: true},
-		{name: "after worker exit"},
+		{name: "supervisor after worker exit"},
+		{name: "root after worker exit", root: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
@@ -503,19 +543,35 @@ func TestWorkerSupervisorReplacementPreservesForeignDirectory(t *testing.T) {
 				if err := os.Remove(leaf); err != nil {
 					return err
 				}
-				if err := os.Mkdir(leaf, 0700); err != nil {
+				replacedPath, originalPin := leaf, original
+				if test.root {
+					if err := waitEmptyCgroup(scope); err != nil {
+						return err
+					}
+					if err := os.Remove(scope); err != nil {
+						return err
+					}
+					replacedPath, originalPin = scope, rootPin
+				}
+				if err := os.Mkdir(replacedPath, 0700); err != nil {
 					return err
 				}
-				replacementPin, err = os.Open(leaf)
+				replacementPin, err = os.Open(replacedPath)
 				if err != nil {
 					return err
 				}
 				t.Cleanup(func() { _ = replacementPin.Close() })
-				t.Cleanup(func() { cleanupPinnedWorkerFixture(t, rootPin, replacementPin) })
-				oldInfo, oldErr := original.Stat()
+				t.Cleanup(func() {
+					if test.root {
+						cleanupPinnedWorkerFixture(t, replacementPin)
+					} else {
+						cleanupPinnedWorkerFixture(t, rootPin, replacementPin)
+					}
+				})
+				oldInfo, oldErr := originalPin.Stat()
 				newInfo, newErr := replacementPin.Stat()
 				if oldErr != nil || newErr != nil || os.SameFile(oldInfo, newInfo) {
-					return fmt.Errorf("fixture failed to replace supervisor identity: old=%v new=%v", oldErr, newErr)
+					return fmt.Errorf("fixture failed to replace directory identity: old=%v new=%v", oldErr, newErr)
 				}
 				return nil
 			}
@@ -567,10 +623,10 @@ func TestWorkerSupervisorReplacementPreservesForeignDirectory(t *testing.T) {
 			}
 			released, waitErr := h.Wait()
 			if released || !errors.Is(waitErr, ErrScopeUnconfirmed) || !strings.Contains(waitErr.Error(), h.dir) {
-				t.Errorf("supervisor replacement falsely released: released=%t error=%v", released, waitErr)
+				t.Errorf("worker replacement falsely released: released=%t error=%v", released, waitErr)
 			}
 			if waitErr == nil || !strings.Contains(waitErr.Error(), "worker directory identity changed") {
-				t.Errorf("supervisor replacement lost identity failure: %v", waitErr)
+				t.Errorf("worker replacement lost identity failure: %v", waitErr)
 			}
 			if test.refuseRecord && !errors.Is(waitErr, refused) {
 				t.Errorf("Wait erased recording refusal after replacement: %v", waitErr)
@@ -584,7 +640,7 @@ func TestWorkerSupervisorReplacementPreservesForeignDirectory(t *testing.T) {
 			pinned, pinErr := replacementPin.Stat()
 			current, statErr := os.Stat(replacementPin.Name())
 			if pinErr != nil || statErr != nil || !os.SameFile(pinned, current) {
-				t.Errorf("cleanup removed or replaced foreign supervisor: pin=%v stat=%v", pinErr, statErr)
+				t.Errorf("cleanup removed or replaced foreign directory: pin=%v stat=%v", pinErr, statErr)
 			}
 			if againReleased, againErr := h.Wait(); againReleased != released || againErr != waitErr {
 				t.Errorf("repeated replacement Wait changed result: released=%t error=%v", againReleased, againErr)
@@ -731,7 +787,7 @@ func TestWorkerHelperProcess(t *testing.T) {
 		}
 		os.Exit(0)
 	}
-	if mode != "nested-clean" && mode != "crash-command" && mode != "block-command" && mode != "kill-error" {
+	if mode != "nested-clean" && mode != "crash-command" && mode != "block-command" && mode != "kill-error" && mode != "empty-command" {
 		t.Fatalf("unknown worker fixture mode %q", mode)
 	}
 	if err := Configure(64, 512<<20); err != nil {
@@ -739,6 +795,25 @@ func TestWorkerHelperProcess(t *testing.T) {
 	}
 	if err := Check(); err != nil {
 		t.Fatalf("nested readiness: %v", err)
+	}
+	if mode == "empty-command" {
+		cmd := exec.Command("/bin/sh", "-c", "exit 23")
+		command, err := Start(cmd)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Reap the fixture process while deliberately omitting Handle.Wait and its scope/limit checks.
+		state, err := cmd.Process.Wait()
+		if err != nil || state == nil || state.ExitCode() != 23 {
+			t.Fatalf("fixture command did not fail as intended: state=%v error=%v", state, err)
+		}
+		if err := waitEmptyCgroup(command.dir); err != nil {
+			t.Fatal(err)
+		}
+		if err := workspace.WriteAtomic(report, []byte(supervisor+"\n"+command.dir+"\n"+strconv.Itoa(state.ExitCode()))); err != nil {
+			t.Fatal(err)
+		}
+		os.Exit(0)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
