@@ -26,7 +26,7 @@ type retainedReview struct {
 	Refutations                      []Refutation `json:"refutations"`
 }
 
-const reviewClaimOrigin = "executor_reported"
+const executorClaimOrigin = "executor_reported"
 
 // retainReviewEvidence validates and saves private review history for an accepted Job.
 // A failed call may leave a valid prefix; answer/change validation must not erase it.
@@ -80,7 +80,7 @@ func saveReviewEvidence(workRoot string, job Job, result Result, logger *log.Log
 		Calls:                            result.Calls, Refutations: result.Refutations,
 	}
 	if len(record.Calls) != 0 || len(record.Refutations) != 0 || record.CriticStopReason != "" {
-		record.ReviewClaimOrigin = reviewClaimOrigin
+		record.ReviewClaimOrigin = executorClaimOrigin
 	}
 	data, err := json.Marshal(record)
 	if err != nil {

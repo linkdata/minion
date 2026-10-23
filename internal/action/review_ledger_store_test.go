@@ -111,7 +111,7 @@ func TestPublishRetainsPrivateReviewBeforeGitHubWrites(t *testing.T) {
 			} else if !errors.Is(publishErr, monitor.ErrPostModelPublication) {
 				t.Fatalf("publication failure cause lost: %v", publishErr)
 			}
-			if writes != 1 || !strings.Contains(body.String(), result.Answer) || !strings.Contains(journal.String(), "review_claim_origin=executor_reported") || strings.Contains(body.String(), "PRIVATE") || strings.Contains(journal.String(), "PRIVATE") {
+			if writes != 1 || !strings.Contains(body.String(), result.Answer) || !strings.Contains(journal.String(), "call_claim_origin=executor_reported") || strings.Contains(body.String(), "PRIVATE") || strings.Contains(journal.String(), "PRIVATE") {
 				t.Fatalf("private evidence leaked or publication lost: writes=%d body=%s journal=%s", writes, &body, &journal)
 			}
 		})
