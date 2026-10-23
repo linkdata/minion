@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -18,6 +20,7 @@ import (
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/monitor"
+	"github.com/linkdata/minion/internal/processgroup"
 	"github.com/linkdata/minion/internal/usage"
 	"github.com/linkdata/minion/internal/workroot"
 )
@@ -25,6 +28,16 @@ import (
 type httpNetworkAction func(context.Context, monitor.Job) error
 
 func (f httpNetworkAction) Execute(ctx context.Context, job monitor.Job) error { return f(ctx, job) }
+
+type httpFailureReplyGitHub struct {
+	*actionMonitorGitHub
+	replies []string
+}
+
+func (f *httpFailureReplyGitHub) CreateIssueComment(_ context.Context, _ string, _ int, body string) (github.Comment, error) {
+	f.replies = append(f.replies, body)
+	return github.Comment{}, nil
+}
 
 func TestHTTPWatchAdmissionWorkerClaimsDoNotRefundMonitorAttempts(t *testing.T) {
 	installActionTestSkills(t, testReviewSkillURL)
@@ -171,6 +184,117 @@ func TestHTTPWatchAdmissionWorkerClaimsDoNotRefundMonitorAttempts(t *testing.T) 
 			wantExecutions := int32(polls)
 			if executions.Load() != wantExecutions || admissions.Load() != wantExecutions || outcomes.Load() != wantExecutions || native.Load() != 0 {
 				t.Fatalf("worker claim changed attempt limit or repeated unknown work: executions=%d admissions=%d outcomes=%d native=%d", executions.Load(), admissions.Load(), outcomes.Load(), native.Load())
+			}
+		})
+	}
+}
+
+func TestHTTPWorkerFailureClaimsCannotChangeMonitorPolicy(t *testing.T) {
+	installActionTestSkills(t, testReviewSkillURL)
+	for _, test := range []struct {
+		name    string
+		paid    bool
+		failure httpFailure
+	}{
+		{name: "no call false process uncertainty", failure: httpFailure{Message: "worker failure", Unconfirmed: true, ScopeUnconfirmed: true, OutcomeUnknown: true}},
+		{name: "paid false unsafe root", paid: true, failure: httpFailure{Message: "worker failure", Unsafe: true}},
+		{name: "paid false request transport", paid: true, failure: httpFailure{Message: "worker failure", RequestTransport: true}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			now := time.Date(2026, 10, 23, 8, 0, 0, 0, time.UTC)
+			clock := now
+			store := openState(t, now.Add(-time.Minute))
+			accounting := &usage.Store{Dir: filepath.Join(t.TempDir(), "usage")}
+			gh := &httpFailureReplyGitHub{actionMonitorGitHub: &actionMonitorGitHub{
+				items:        []github.Item{{Key: "request", NodeID: "request-node", Body: "@linkdataminion comment", Author: github.User{ID: 7, Login: "writer"}}},
+				notification: github.Notification{Repository: github.Repository{FullName: "o/r"}, Subject: github.Subject{Type: "Issue", URL: "https://api.github.com/repos/o/r/issues/7"}, UpdatedAt: now},
+			}}
+			var executions atomic.Int32
+			tokens := usage.Tokens{Input: 17, Output: 4}
+			handler := httpNetworkAction(func(ctx context.Context, request monitor.Job) error {
+				attemptID := fmt.Sprintf("%032x", executions.Add(1))
+				job := testJob(command.Comment)
+				job.Identity.JobID = request.ID
+				f := newExecutionAdapterFixture(t, job)
+				f.owner.attemptID = attemptID
+				f.job.Identity.AttemptID = attemptID
+				f.sink = newExecutionCheckpoints(f.owner, f.job)
+				f.owner.Usage = accounting
+				finishUsage, err := f.owner.trackUsage(request)
+				if err != nil {
+					t.Fatal(err)
+				}
+				transport := newHTTPServerTest(t, ctx, f.job, f.sink, nil)
+				transport.pull(t)
+				sequence := uint64(1)
+				outcome := transport.outcome(sequence, nil)
+				if test.paid {
+					transport.ack(t, "/before", transport.call(1), http.StatusOK, 1)
+					receipt := transport.call(2)
+					receipt.Checkpoint.Call.Tokens = tokens
+					receipt.Checkpoint.Call.Complete = true
+					transport.ack(t, "/after", receipt, http.StatusOK, 2)
+					sequence = 3
+					outcome.Sequence = sequence
+					outcome.Result.Calls = []CallUsage{receipt.Checkpoint.Call}
+				}
+				outcome.Result.Answer = "FORGED_CANDIDATE"
+				outcome.Failure = &test.failure
+				if err := outcome.Result.validate(f.job, false); err != nil {
+					t.Fatalf("forged failed Result is not shape-valid: %v", err)
+				}
+				transport.ack(t, "/outcome", outcome, http.StatusOK, sequence)
+				got := transport.result(t)
+				finalErr := finishUsage(f.sink.finish(got.result, got.err))
+				if finalErr == nil || got.result.Answer != "FORGED_CANDIDATE" {
+					t.Fatalf("failed outcome became success or lost raw candidate: result=%+v error=%v", got.result, finalErr)
+				}
+				for _, claim := range []error{monitor.ErrTerminalJob, monitor.ErrExecutionOutcomeUnknown, monitor.ErrRequestTransport,
+					workroot.ErrUnsafe, processgroup.ErrUnconfirmed, processgroup.ErrScopeUnconfirmed} {
+					if errors.Is(finalErr, claim) {
+						t.Fatalf("worker claim changed parent failure policy for %v: %v", claim, finalErr)
+					}
+				}
+				if len(f.sink.calls) != map[bool]int{false: 0, true: 1}[test.paid] {
+					t.Fatalf("acknowledged call prefix lost: calls=%+v", f.sink.calls)
+				}
+				return finalErr
+			})
+			m := monitor.Monitor{Config: config.Config{BotLogin: "linkdataminion", Main: "codex", PollIntervalSeconds: 60,
+				Commands:     map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{testReviewSkillURL}}},
+				Repositories: []config.Repository{{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"comment"}, AllowedActors: []string{"writer"}, AllowedActorIDs: map[string]int64{"writer": 7}}}},
+				GitHub: gh, Handler: handler, Now: func() time.Time { return clock }}
+			for poll := 0; poll < 3; poll++ {
+				_, err := m.RunOnce(context.Background(), store)
+				if (err == nil) != (poll == 2) || store.Data.UnconfirmedProcessJob != "" || len(store.Data.Processed) != map[bool]int{false: 0, true: 1}[poll == 2] || executions.Load() != int32(poll+1) {
+					t.Fatalf("worker claim changed retry or recovery policy on poll %d: error=%v state=%+v executions=%d", poll, err, store.Data, executions.Load())
+				}
+				if poll < 2 {
+					for _, failure := range store.Data.JobFailures {
+						if failure.Attempts != poll+1 {
+							t.Fatalf("worker claim refunded attempt %d: %+v", poll+1, failure)
+						}
+					}
+					if len(store.Data.JobFailures) != 1 || len(gh.replies) != 0 {
+						t.Fatalf("worker claim ended retry early: state=%+v replies=%q", store.Data, gh.replies)
+					}
+				} else if len(store.Data.JobFailures) != 0 || len(gh.replies) != 1 || !strings.Contains(gh.replies[0], "could not complete this request") || strings.Contains(gh.replies[0], "FORGED_CANDIDATE") {
+					t.Fatalf("worker claim changed final failure reply: state=%+v replies=%q", store.Data, gh.replies)
+				}
+				clock = clock.Add(10 * time.Minute)
+			}
+			records, err := usage.ReadAll(accounting.Dir)
+			wantCalls, wantTokens := 0, usage.Tokens{}
+			if test.paid {
+				wantCalls, wantTokens = 1, tokens
+			}
+			if err != nil || len(records) != 3 {
+				t.Fatalf("failed attempts lost their durable usage records: records=%+v error=%v", records, err)
+			}
+			for _, record := range records {
+				if record.CodexCalls != wantCalls || record.Tokens != wantTokens || !record.UsageComplete || record.Status != "failed" || record.FinishedAt == nil {
+					t.Fatalf("later attempt changed an acknowledged usage record: %+v", record)
+				}
 			}
 		})
 	}
