@@ -3,11 +3,13 @@ package action
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
@@ -216,8 +218,9 @@ func TestHTTPMissingGitPreparationPreservesDiagnosticBeforeNativeWork(t *testing
 		t.Fatalf("worker lost its known missing Git cause: %v", workerErr)
 	}
 	for _, err := range []error{got.err, finalErr} {
-		if err == nil || !strings.Contains(err.Error(), "executable file not found") || errors.Is(err, exec.ErrNotFound) || errors.Is(err, monitor.ErrTerminalJob) || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) {
-			t.Fatalf("remote missing Git changed parent policy or lost diagnostic: %v", err)
+		var private *workerFailureError
+		if err == nil || strings.Contains(err.Error(), "executable file not found") || !errors.As(err, &private) || !strings.Contains(private.failure.Message, "executable file not found") || errors.Is(err, exec.ErrNotFound) || errors.Is(err, monitor.ErrTerminalJob) || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) {
+			t.Fatalf("remote missing Git changed parent policy or exposed its diagnostic: %v", err)
 		}
 	}
 	records, err := usage.ReadAll(store.Dir)
@@ -268,13 +271,19 @@ func TestHTTPPaidOutputLimitPreservesUsageWithoutTrustingWorkerPolicy(t *testing
 	select {
 	case workerErr = <-workerDone:
 	case <-time.After(5 * time.Second):
-		t.Fatal("worker did not receive paid output-limit outcome receipt")
+		t.Fatalf("worker did not receive paid output-limit outcome receipt: parent=%v native=%d writes=%d", parentErr, native.Load(), writes.Load())
 	}
-	if !errors.Is(workerErr, aicli.ErrOutputLimit) || errors.Is(workerErr, monitor.ErrTerminalJob) || parentErr == nil || !strings.Contains(parentErr.Error(), "paid native event limit") || errors.Is(parentErr, aicli.ErrOutputLimit) || errors.Is(parentErr, monitor.ErrTerminalJob) || errors.Is(parentErr, monitor.ErrExecutionOutcomeUnknown) || native.Load() != 1 || writes.Load() != 0 {
+	if !errors.Is(workerErr, aicli.ErrOutputLimit) || errors.Is(workerErr, monitor.ErrTerminalJob) || parentErr == nil || strings.Contains(parentErr.Error(), "paid native event limit") || errors.Is(parentErr, aicli.ErrOutputLimit) || errors.Is(parentErr, monitor.ErrTerminalJob) || errors.Is(parentErr, monitor.ErrExecutionOutcomeUnknown) || native.Load() != 1 || writes.Load() != 0 {
 		t.Fatalf("paid worker limit changed parent policy or reached publication: native=%d writes=%d worker=%v parent=%v", native.Load(), writes.Load(), workerErr, parentErr)
 	}
 	records, err := usage.ReadAll(store.Dir)
 	if err != nil || len(records) != 1 || records[0].Status != "failed" || records[0].FinishedAt == nil || records[0].CodexCalls != 1 || records[0].Tokens != tokens || records[0].UsageComplete {
 		t.Fatalf("paid output-limit failure lost its actual durable lower bound: records=%+v error=%v", records, err)
+	}
+	path := filepath.Join(orchestrator.WorkRoot, "worker-diagnostics", records[0].ID+".json")
+	data, err := os.ReadFile(path)
+	var private retainedWorkerDiagnostics
+	if err != nil || json.Unmarshal(data, &private) != nil || private.Identity.JobID != request.ID || private.Identity.AttemptID != records[0].ID || private.WorkerReportedFailure == nil || !strings.Contains(private.WorkerReportedFailure.Message, "paid native event limit") {
+		t.Fatalf("paid worker detail was not retained privately: path=%q record=%+v error=%v", path, private, err)
 	}
 }

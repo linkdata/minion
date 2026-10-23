@@ -57,6 +57,25 @@ func TestInertModelOutputPreservesOverBudgetContent(t *testing.T) {
 	}
 }
 
+func TestInertModelOutputEscapesControlsWithoutChangingReadableText(t *testing.T) {
+	input := "café **bold**\x1b[31m\b\t\u202e\u200d\u0080\nnext"
+	want := "```text\n> café **bold**\\x1b[31m\\b\\t\\u202e\\u200d\\u0080\n> next\n```"
+	if got := inertModelOutput(input); got != want {
+		t.Fatalf("control text was not visibly inert:\n got %q\nwant %q", got, want)
+	}
+	if !publishableAnswer(input) {
+		t.Fatal("safe rendered answer was refused")
+	}
+
+	exact := strings.Repeat("x", maxOutputBytes-len(inertModelOutput("\x1b"))) + "\x1b"
+	if got := inertModelOutput(exact); len(got) != maxOutputBytes || !publishableAnswer(exact) || !strings.HasSuffix(got, "\\x1b\n```") {
+		t.Fatalf("exact rendered boundary refused or truncated: %d bytes", len(got))
+	}
+	if got := inertModelOutput(exact + "x"); len(got) != maxOutputBytes+1 || publishableAnswer(exact+"x") || !strings.HasSuffix(got, "\\x1bx\n```") {
+		t.Fatalf("one-byte rendered overflow accepted or truncated: %d bytes", len(got))
+	}
+}
+
 func TestModelOutputFitMatchesNormalizedRendererBoundary(t *testing.T) {
 	for _, separator := range []string{"\n", "\r", "\r\n", "\v", "\f", "\x1c", "\x1d", "\x1e", "\u0085", "\u2028", "\u2029"} {
 		t.Run(fmt.Sprintf("%x", separator), func(t *testing.T) {

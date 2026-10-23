@@ -49,7 +49,7 @@ func TestInvalidResultKeepsOnlyValidatedEvidence(t *testing.T) {
 			if strings.Contains(text, "PRIVATE") || strings.Contains(text, "forged") || strings.Contains(text, "FOREIGN") {
 				t.Fatalf("unvalidated/private text reached journal: %s", text)
 			}
-			if got, want := strings.Contains(text, "code=cleanup_failed"), scenario != "invalid diagnostics" && scenario != "foreign identity"; got != want {
+			if got, want := strings.Contains(text, "action worker diagnostics"), scenario != "invalid diagnostics" && scenario != "foreign identity"; got != want {
 				t.Fatalf("validated cleanup diagnostic present=%t want=%t: %s", got, want, text)
 			}
 			if got, want := strings.Contains(text, "role=critic round=1 review_phase=full"), scenario != "invalid calls" && scenario != "foreign identity"; got != want {

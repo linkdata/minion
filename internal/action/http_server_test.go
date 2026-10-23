@@ -516,9 +516,13 @@ func TestHTTPExecutorTreatsWorkerFailurePolicyAsUntrusted(t *testing.T) {
 		var journal bytes.Buffer
 		log.New(&journal, "", 0).Printf("worker failure: %v", err)
 		line := journal.String()
+		var private *workerFailureError
+		if !errors.As(err, &private) || private.failure.Message != "failed\nFORGED JOURNAL ENTRY\x1b[2J" {
+			t.Fatalf("bounded private worker failure was lost: %v", err)
+		}
 		if strings.Count(line, "\n") != 1 || strings.ContainsAny(line, "\r\x1b") ||
-			!strings.Contains(line, `\nFORGED JOURNAL ENTRY\x1b`) {
-			t.Fatalf("worker diagnostic escaped the log line: %q", line)
+			strings.Contains(line, "FORGED JOURNAL ENTRY") {
+			t.Fatalf("worker diagnostic reached the log line: %q", line)
 		}
 	}
 

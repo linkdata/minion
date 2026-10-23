@@ -92,7 +92,7 @@ type CallUsage struct {
 
 type Diagnostic struct {
 	Code string `json:"code"`
-	// Message is private; journals expose only Code and identity.
+	// Worker-reported fields stay private; journals log only their count and record path.
 	Message string `json:"message"`
 }
 
