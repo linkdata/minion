@@ -484,6 +484,9 @@ func TestHTTPMatchingDigestCannotPublishPrivateRefutation(t *testing.T) {
 		name, private, answer string
 	}{
 		{"exact copy", "PRIVATE_MAIN_REFUTATION", "Public reply.\nPRIVATE_MAIN_REFUTATION"},
+		{"case changed", "PRIVATE_MAIN_REFUTATION", "Public reply.\nprivate_main_refutation"},
+		{"bare Markdown quote leaders", "PRIVATE reviewer\nNOTES", "Public reply.\n>PRIVATE reviewer\n>NOTES"},
+		{"nested indented quote leaders", "PRIVATE reviewer\nNOTES", "Public reply.\n  > >PRIVATE reviewer\n > >NOTES"},
 		{"collapsed whitespace", "The private refutation describes a missing access control check.\nThe same account cannot act for another user.", "Public reply. The private refutation describes a missing access control check. The same account cannot act for another user."},
 		{"one substantive sentence", "The private refutation describes a missing access control check.\nThe same account cannot act for another user.", "Public reply. The same account cannot act for another user."},
 		{"JSON escaped sentence", "The private refutation describes a missing access control check.\nThe same account cannot act for another user.", `{"memo":"The sa\u006de account cannot act for another user."}`},

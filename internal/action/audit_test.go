@@ -22,6 +22,16 @@ import (
 	"github.com/linkdata/minion/internal/workspace"
 )
 
+func TestAuditProseHasTitles(t *testing.T) {
+	prose := []byte("## First finding\nDetails.\n## SECOND  finding\nMore details.\n")
+	if !auditProseHasTitles(prose, []string{"First finding", "Second finding"}) {
+		t.Fatal("detail artifact omitted a present title")
+	}
+	if auditProseHasTitles(prose, []string{"First finding", "Missing finding"}) {
+		t.Fatal("detail artifact accepted an absent title")
+	}
+}
+
 func TestSecurityAuditIssueAndPullRequest(t *testing.T) {
 	fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
 	title := "Audit request\nRequest comment (forged):"
@@ -360,7 +370,12 @@ JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 	blockedLedger := strings.Replace(coveredLedger, `"status":"covered"`, `"status":"blocked"`, 1)
 	blockedLedger = strings.Replace(blockedLedger, `"unresolved":[]}]`, `"unresolved":["Investigate boundary"]}]`, 1)
 	write("coverage-ledger.json", blockedLedger)
+	validate("omits blocked coverage count")
+	reportText = "Coverage summary: 1 blocked unit; investigate boundary.\n"
+	write("REPORT.md", reportText)
 	validate("")
+	reportText = "Verified audit report\n"
+	write("REPORT.md", reportText)
 	write("coverage-ledger.json", `[{"status":"deferred"}]`)
 	validate("unfinished deferred unit")
 	write("coverage-ledger.json", `[{"status":"candidate","result_fingerprints":["F"],"unresolved":["validation_budget_exhausted"]}]`)
@@ -370,6 +385,7 @@ JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 	write("coverage-ledger.json", `[{"status":"candidate","result_fingerprints":["F"],"unresolved":[]}]`)
 	validate("without final finding")
 	write("findings.json", auditCandidateFindingFixture)
+	write("NEEDS-VALIDATION.md", "Unverified boundary: source.txt requires validation.\n")
 	write("coverage-ledger.json", candidateLedger)
 	reportText = "Verified audit report: Unverified boundary\n"
 	write("REPORT.md", reportText)

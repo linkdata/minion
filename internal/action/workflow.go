@@ -62,12 +62,7 @@ func (e *Orchestrator) perform(ctx context.Context, request monitor.Job) (result
 			executor = &runner
 		}
 		checkpoints := newExecutionCheckpoints(e, prepared.job)
-		job := prepared.job
-		if job.Critic != nil {
-			critic := *job.Critic
-			job.Critic = &critic
-		}
-		result, err = executor.Execute(ctx, job, checkpoints)
+		result, err = executor.Execute(ctx, cloneJobForExecutor(prepared.job), checkpoints)
 		err = checkpoints.finish(result, err)
 		if err != nil {
 			evidence := checkpoints.failureEvidence()
@@ -87,6 +82,32 @@ func (e *Orchestrator) perform(ctx context.Context, request monitor.Job) (result
 		}
 	}
 	return e.publish(ctx, prepared, result)
+}
+
+// The in-process executor receives its own mutable copy of the portable job.
+// Validation and publication continue to use the prepared assignment.
+func cloneJobForExecutor(job Job) Job {
+	job.Source.Files = slices.Clone(job.Source.Files)
+	for i := range job.Source.Files {
+		job.Source.Files[i].Data = slices.Clone(job.Source.Files[i].Data)
+	}
+	job.Source.BaseFiles = slices.Clone(job.Source.BaseFiles)
+	for i := range job.Source.BaseFiles {
+		job.Source.BaseFiles[i].Data = slices.Clone(job.Source.BaseFiles[i].Data)
+	}
+	job.Source.Diff = slices.Clone(job.Source.Diff)
+	job.Source.ChangedPaths = slices.Clone(job.Source.ChangedPaths)
+	job.Source.Repository = slices.Clone(job.Source.Repository)
+	job.Source.Omitted = slices.Clone(job.Source.Omitted)
+	job.Main.Skills = slices.Clone(job.Main.Skills)
+	job.Main.AlwaysOnSkills = slices.Clone(job.Main.AlwaysOnSkills)
+	if job.Critic != nil {
+		critic := *job.Critic
+		critic.Skills = slices.Clone(critic.Skills)
+		critic.AlwaysOnSkills = slices.Clone(critic.AlwaysOnSkills)
+		job.Critic = &critic
+	}
+	return job
 }
 
 func (e *Orchestrator) prepare(ctx context.Context, request monitor.Job) (prepared *preparedAction, resultErr error) {

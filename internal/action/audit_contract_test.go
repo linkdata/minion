@@ -22,6 +22,8 @@ func TestCompleteAuditResultValidatesCoverage(t *testing.T) {
 	archivedLocalCheck := `"method":"local","result":"The guard is present","artifact":"agents/helper/artifacts/proof.txt"`
 	confirmedLedger := strings.Replace(validLedger, `"status":"covered"`, `"status":"candidate"`, 1)
 	confirmedLedger = strings.Replace(confirmedLedger, `"result_fingerprints":[]`, `"result_fingerprints":["F"]`, 1)
+	blockedLedger := strings.Replace(validLedger, `"status":"covered"`, `"status":"blocked"`, 1)
+	blockedLedger = strings.Replace(blockedLedger, `"unresolved":[]}]`, `"unresolved":["Investigate boundary"]}]`, 1)
 	selfCheckedCandidate := strings.Replace(confirmedLedger, `"local_checks":[{"agent_id":"verifier"`, `"local_checks":[{"agent_id":"hunter"`, 1)
 	rejectedFinding := `[{"verdict":"rejected","fingerprint":"F","title":"Guard bypass refuted","description":"The alleged bypass does not reach the operation.","claimed_root_cause":"The guard was claimed to be absent.","trace":[{"kind":"entrypoint","file":"source.txt","line":1,"scope":"source","description":"The request reaches the guard."}],"evidence":[{"file":"source.txt","line":1,"description":"The guard executes before the operation."}],"reason":"The request is stopped by the guard."}]`
 	withContext := strings.Replace(validLedger, `"ordinary_attack_class_block":null`, `"ordinary_attack_class_block":"The ordinary attack path is covered."`, 1)
@@ -29,8 +31,13 @@ func TestCompleteAuditResultValidatesCoverage(t *testing.T) {
 	withContext = strings.Replace(withContext, `"excluded_blocks":[]`, `"excluded_blocks":[{"block":"Companion B","reason":"Outside this boundary."}]`, 1)
 	for _, test := range []struct {
 		name, ledger, findings, report, want string
+		blankDetails, blankNeeds             bool
 	}{
 		{name: "covered"},
+		{name: "blocked disclosed", ledger: blockedLedger, report: "Coverage summary: 1 blocked unit; investigate boundary."},
+		{name: "blocked omitted", ledger: blockedLedger, want: "omits blocked coverage count"},
+		{name: "blocked count must match", ledger: blockedLedger, report: "Coverage summary: 10 blocked units.", want: "omits blocked coverage count"},
+		{name: "blocked with clean claim", ledger: blockedLedger, report: "No findings. Coverage summary: 1 blocked unit.", want: "contradicts final findings"},
 		{name: "covered with populated context", ledger: withContext},
 		{name: "covered with archived attempt and distinct check owners", ledger: withAttempt},
 		{name: "unsupported local check in current evidence", ledger: strings.Replace(validLedger, sourceCheck, localCheck, 1), want: "unsupported local check method"},
@@ -43,6 +50,9 @@ func TestCompleteAuditResultValidatesCoverage(t *testing.T) {
 		{name: "zero current wave", ledger: strings.Replace(validLedger, `"wave":1`, `"wave":0`, 1), want: "invalid current wave"},
 		{name: "confirmed finding", ledger: confirmedLedger, findings: auditConfirmedFindingFixture},
 		{name: "needs_validation finding", ledger: confirmedLedger, findings: auditCandidateFindingFixture},
+		{name: "confirmed detail missing", ledger: confirmedLedger, findings: auditConfirmedFindingFixture, blankDetails: true, want: "FINDINGS-DETAIL.md omits"},
+		{name: "unresolved detail missing", ledger: confirmedLedger, findings: auditCandidateFindingFixture, blankNeeds: true, want: "NEEDS-VALIDATION.md omits"},
+		{name: "confirmed with false clean claim", ledger: confirmedLedger, findings: auditConfirmedFindingFixture, report: "No confirmed findings.\n| medium | Missing guard | Boundary | Result |", want: "contradicts final findings"},
 		{name: "confirmed severity belongs to another line", ledger: confirmedLedger, findings: auditConfirmedFindingFixture, report: "Missing guard (low).\nMedium confidence.", want: "omits a final finding title or severity"},
 		{name: "confirmed severity is not confidence text", ledger: confirmedLedger, findings: auditConfirmedFindingFixture, report: "| low | Missing guard | Boundary | medium confidence |", want: "omits a final finding title or severity"},
 		{name: "no findings were omitted is not a clean claim", ledger: confirmedLedger, findings: auditCandidateFindingFixture, report: "No findings were omitted. Unverified boundary."},
@@ -137,6 +147,14 @@ func TestCompleteAuditResultValidatesCoverage(t *testing.T) {
 				case "findings.json":
 					if test.findings != "" {
 						result.Artifacts[i].Data = []byte(test.findings)
+					}
+				case "FINDINGS-DETAIL.md":
+					if strings.Contains(test.findings, `"verdict":"confirmed"`) && !test.blankDetails {
+						result.Artifacts[i].Data = []byte("Missing guard: source.txt changes the protected object.\n")
+					}
+				case "NEEDS-VALIDATION.md":
+					if strings.Contains(test.findings, `"verdict":"needs_validation"`) && !test.blankNeeds {
+						result.Artifacts[i].Data = []byte("Unverified boundary: source.txt requires validation.\n")
 					}
 				}
 			}

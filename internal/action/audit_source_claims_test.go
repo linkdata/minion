@@ -40,11 +40,12 @@ func TestCompleteAuditClaimsBindToCurrentSource(t *testing.T) {
 		{name: "unreviewed cited sink", ledger: candidate, findings: citesOther, files: []workspace.File{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("source\n")}, {Path: "other.txt", Mode: workspace.Regular, Data: []byte("other\n")}}, want: "cited file without connected review evidence"},
 		{name: "hunter citation with unrelated verifier", ledger: unrelatedVerifier, findings: auditCandidateFindingFixture, files: []workspace.File{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("source\n")}, {Path: "other.txt", Mode: workspace.Regular, Data: []byte("other\n")}}, want: "cited file without connected review evidence"},
 		{name: "linked candidates cover both citations", ledger: "[" + unit(other) + "," + unit(candidate) + "]", findings: citesOther, files: []workspace.File{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("source\n")}, {Path: "other.txt", Mode: workspace.Regular, Data: []byte("other\n")}}},
-		{name: "directory check cannot prove cited file", ledger: strings.ReplaceAll(candidate, "source.txt", "src"), findings: strings.ReplaceAll(auditCandidateFindingFixture, "source.txt", "src/entry.go"), files: []workspace.File{{Path: "src/entry.go", Mode: workspace.Regular, Data: []byte("entry\n")}}, want: "cited file without connected review evidence"},
+		{name: "directory check cannot prove cited file", ledger: strings.ReplaceAll(candidate, "source.txt", "src"), findings: strings.ReplaceAll(auditCandidateFindingFixture, "source.txt", "src/entry.go"), files: []workspace.File{{Path: "src/entry.go", Mode: workspace.Regular, Data: []byte("entry\n")}}, want: "starting path without checked evidence"},
 		{name: "archived candidate with current source evidence", ledger: coveredAfterArchive, findings: auditCandidateFindingFixture},
 		{name: "archived candidate misses starting file", ledger: archivedMissingSeed, findings: auditCandidateFindingFixture, files: []workspace.File{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("source\n")}, {Path: "other.txt", Mode: workspace.Regular, Data: []byte("other\n")}}, want: "archived starting path without checked evidence"},
 		{name: "covered unit misses starting file", ledger: strings.ReplaceAll(auditCoveredLedgerFixture, `"reviewed_paths":["source.txt"]`, `"reviewed_paths":["other.txt"]`), files: []workspace.File{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("source\n")}, {Path: "other.txt", Mode: workspace.Regular, Data: []byte("other\n")}}, want: "starting path without checked evidence"},
 		{name: "directory seed with checked descendant", ledger: strings.Replace(strings.ReplaceAll(auditCoveredLedgerFixture, "source.txt", "src/entry.go"), `"starting_paths":["src/entry.go"]`, `"starting_paths":["src"]`, 1), files: []workspace.File{{Path: "src/entry.go", Mode: workspace.Regular, Data: []byte("entry\n")}}},
+		{name: "directory seed with only directory check", ledger: strings.ReplaceAll(auditCoveredLedgerFixture, "source.txt", "src"), files: []workspace.File{{Path: "src/entry.go", Mode: workspace.Regular, Data: []byte("entry\n")}}, want: "starting path without checked evidence"},
 		{name: "directory prefix must end at component", ledger: strings.Replace(strings.ReplaceAll(auditCoveredLedgerFixture, "source.txt", "src2/entry.go"), `"starting_paths":["src2/entry.go"]`, `"starting_paths":["src"]`, 1), files: []workspace.File{{Path: "src/other.go", Mode: workspace.Regular, Data: []byte("other\n")}, {Path: "src2/entry.go", Mode: workspace.Regular, Data: []byte("entry\n")}}, want: "starting path without checked evidence"},
 		{name: "unsafe huge wave", ledger: strings.Replace(auditCoveredLedgerFixture, `"wave":1`, `"wave":1e308`, 1), want: "invalid current wave"},
 		{name: "maximum safe wave", ledger: strings.Replace(auditCoveredLedgerFixture, `"wave":1`, `"wave":9007199254740991`, 1)},
@@ -71,6 +72,10 @@ func TestCompleteAuditClaimsBindToCurrentSource(t *testing.T) {
 				case "findings.json":
 					if test.findings != "" {
 						result.Artifacts[i].Data = []byte(test.findings)
+					}
+				case "NEEDS-VALIDATION.md":
+					if strings.Contains(test.findings, `"verdict":"needs_validation"`) {
+						result.Artifacts[i].Data = []byte("Unverified boundary: source.txt requires validation.\n")
 					}
 				}
 			}

@@ -27,10 +27,17 @@ func TestHostileHTTPAuditSchemaCannotPublish(t *testing.T) {
 	archivedSelf = strings.Replace(auditCoveredLedgerFixture, `"attempts":[]`, `"attempts":[`+archivedSelf+`]`, 1)
 	archivedSelf = strings.Replace(archivedSelf, `"wave":1,"status":"covered","agent_id":"hunter"`, `"wave":2,"status":"covered","agent_id":"hunter"`, 1)
 	citesOther := strings.Replace(auditCandidateFindingFixture, `"description":"Input reaches the boundary."}]`, `"description":"Input reaches the boundary."},{"kind":"sink","file":"other.txt","line":1,"scope":"other","description":"The operation changes state."}]`, 1)
+	blockedLedger := strings.Replace(auditCoveredLedgerFixture, `"status":"covered"`, `"status":"blocked"`, 1)
+	blockedLedger = strings.Replace(blockedLedger, `"unresolved":[]}]`, `"unresolved":["Investigate boundary"]}]`, 1)
 	for _, test := range []struct {
-		name, artifact, data, findings, want string
-		candidate                            bool
+		name, artifact, data, findings, ledger, report, want string
+		candidate                                            bool
 	}{
+		{name: "directory-only review cannot claim coverage", artifact: "coverage-ledger.json", data: strings.ReplaceAll(auditCoveredLedgerFixture, "source.txt", "src"), want: "starting path without checked evidence"},
+		{name: "blocked coverage omitted from report", artifact: "coverage-ledger.json", data: blockedLedger, want: "omits blocked coverage count"},
+		{name: "blocked coverage falsely clean", artifact: "REPORT.md", data: "No findings.", ledger: blockedLedger, want: "contradicts final findings"},
+		{name: "empty confirmed detail", artifact: "FINDINGS-DETAIL.md", data: "", findings: auditConfirmedFindingFixture, report: "| medium | Missing guard | Boundary | Result |", want: "FINDINGS-DETAIL.md omits", candidate: true},
+		{name: "empty unresolved detail", artifact: "NEEDS-VALIDATION.md", data: "", findings: auditCandidateFindingFixture, want: "NEEDS-VALIDATION.md omits", candidate: true},
 		{name: "missing candidate validation plan", artifact: "findings.json", data: strings.Replace(auditCandidateFindingFixture,
 			`,"validation_plan":{"local":"Inspect the guard path in an approved test."}`, ``, 1), want: "incomplete needs_validation finding", candidate: true},
 		{name: "rejected without reason", artifact: "findings.json", data: rejectedWithoutReason, want: "incomplete rejected finding", candidate: true},
@@ -57,7 +64,7 @@ func TestHostileHTTPAuditSchemaCannotPublish(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			installActionTestSkills(t, testAuditSkillURL)
-			gitFixtureRemote(t, workspace.File{Path: "source.txt", Mode: workspace.Regular, Data: []byte("source\n")}, workspace.File{Path: "other.txt", Mode: workspace.Regular, Data: []byte("other\n")})
+			gitFixtureRemote(t, workspace.File{Path: "source.txt", Mode: workspace.Regular, Data: []byte("source\n")}, workspace.File{Path: "other.txt", Mode: workspace.Regular, Data: []byte("other\n")}, workspace.File{Path: "src/entry.go", Mode: workspace.Regular, Data: []byte("entry\n")})
 			var writes atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if serveIssueFixture(t, w, r) {
@@ -88,6 +95,21 @@ func TestHostileHTTPAuditSchemaCannotPublish(t *testing.T) {
 				outcome := f.outcome(3, nil)
 				outcome.Result = Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Hostile audit report: Unverified boundary; Missing guard medium.", Calls: []CallUsage{call},
 					Artifacts: auditArtifactsFixture(job, sourceIdentity(job), "Hostile audit report: Unverified boundary; Missing guard medium.")}
+				if test.report != "" {
+					outcome.Result.Answer = test.report
+					for i := range outcome.Result.Artifacts {
+						if outcome.Result.Artifacts[i].Path == "REPORT.md" {
+							outcome.Result.Artifacts[i].Data = []byte(test.report)
+						}
+					}
+				}
+				if test.ledger != "" {
+					for i := range outcome.Result.Artifacts {
+						if outcome.Result.Artifacts[i].Path == "coverage-ledger.json" {
+							outcome.Result.Artifacts[i].Data = []byte(test.ledger)
+						}
+					}
+				}
 				if test.candidate {
 					for i := range outcome.Result.Artifacts {
 						if outcome.Result.Artifacts[i].Path == "coverage-ledger.json" {

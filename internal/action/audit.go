@@ -27,6 +27,7 @@ var auditValidators = []struct{ script, artifact string }{
 }
 
 var auditCleanClaim = regexp.MustCompile(`\b(?:no|zero|0) (?:findings|vulnerabilities|security issues)(?: (?:found|identified|detected|reported))?(?:[.!?;:]|$)`)
+var auditNoConfirmedClaim = regexp.MustCompile(`\b(?:no|zero|0) confirmed (?:findings|vulnerabilities|security issues)(?: (?:found|identified|detected|reported))?(?:[.!?;:]|$)`)
 
 type auditTools struct {
 	binary, permissionFlag string
@@ -256,7 +257,7 @@ func validateAuditFiles(ctx context.Context, files []workspace.File, validationD
 			return "", fmt.Errorf("audit %s failed: %w", validator.script, err)
 		}
 	}
-	if err := validateAuditCoverage(byPath["coverage-ledger.json"], byPath["findings.json"], byPath["REPORT.md"], nil); err != nil {
+	if err := validateAuditCoverage(byPath["coverage-ledger.json"], byPath["findings.json"], byPath["REPORT.md"], byPath["FINDINGS-DETAIL.md"], byPath["NEEDS-VALIDATION.md"], nil); err != nil {
 		return "", err
 	}
 	return string(byPath["REPORT.md"]), nil
@@ -282,7 +283,7 @@ type auditCoverageEvidence struct {
 	ReassignmentReason string               `json:"reassignment_reason"`
 }
 
-func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes []byte, source *workspace.Snapshot) error {
+func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes, detailsBytes, needsBytes []byte, source *workspace.Snapshot) error {
 	if err := rejectDuplicateAuditJSONKeys(ledgerBytes,
 		"coverage_id", "canonical_refs", "surface", "boundary", "subsystem", "attack_class", "lifecycle", "starting_paths",
 		"ordinary_attack_class_block", "selected_companion_blocks", "excluded_blocks", "prior_status", "attempts", "wave", "status",
@@ -479,6 +480,7 @@ func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes []byte, sourc
 		return nil
 	}
 	seenIDs := make(map[string]bool, len(units))
+	blocked := 0
 	for _, unit := range units {
 		switch unit.Status {
 		case "planned", "in_progress", "deferred":
@@ -508,6 +510,9 @@ func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes []byte, sourc
 			return errors.New("audit coverage-ledger.json lacks unique coverage identity or starting paths")
 		}
 		seenIDs[unit.CoverageID] = true
+		if unit.Status == "blocked" {
+			blocked++
+		}
 		fields := []string{"surface", "boundary", "subsystem", "attack_class"}
 		if _, hasLifecycle := unit.CanonicalRefs["lifecycle"]; hasLifecycle {
 			fields = append(fields, "lifecycle")
@@ -572,7 +577,7 @@ func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes []byte, sourc
 			return err
 		}
 		if unit.Status == "covered" || unit.Status == "candidate" {
-			if !auditSeedsChecked(unit.StartingPaths, unit.ReviewedPaths) {
+			if !auditSeedsChecked(unit.StartingPaths, unit.ReviewedPaths, sourceLines) {
 				return errors.New("audit coverage-ledger.json has starting path without checked evidence")
 			}
 		}
@@ -586,7 +591,7 @@ func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes []byte, sourc
 				return err
 			}
 			if attempt.Status == "covered" || attempt.Status == "candidate" {
-				if !auditSeedsChecked(unit.StartingPaths, attempt.ReviewedPaths) {
+				if !auditSeedsChecked(unit.StartingPaths, attempt.ReviewedPaths, sourceLines) {
 					return errors.New("audit coverage-ledger.json has archived starting path without checked evidence")
 				}
 			}
@@ -627,11 +632,14 @@ func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes []byte, sourc
 	// shortcut: Free Markdown can still contradict records in other words; render public prose from records when exact agreement is required.
 	report := strings.ToLower(string(reportBytes))
 	reportable := false
+	confirmed := false
+	var requiredDetails, requiredNeeds []string
 	for _, finding := range findings {
 		if finding.Verdict == "rejected" {
 			continue
 		}
 		reportable = true
+		confirmed = confirmed || finding.Verdict == "confirmed"
 		title := strings.ToLower(strings.Join(strings.Fields(finding.Title), " "))
 		found := false
 		for _, line := range strings.Split(report, "\n") {
@@ -650,11 +658,40 @@ func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes []byte, sourc
 		if !found {
 			return errors.New("audit REPORT.md omits a final finding title or severity")
 		}
+		if finding.Verdict == "confirmed" && auditSeverityRank(finding.Severity.Overall) >= auditSeverityRank("medium") {
+			requiredDetails = append(requiredDetails, finding.Title)
+		}
+		if finding.Verdict == "needs_validation" {
+			requiredNeeds = append(requiredNeeds, finding.Title)
+		}
 	}
-	if reportable && auditCleanClaim.MatchString(strings.Join(strings.Fields(report), " ")) {
+	flatReport := strings.Join(strings.Fields(report), " ")
+	if (reportable || blocked > 0) && auditCleanClaim.MatchString(flatReport) || confirmed && auditNoConfirmedClaim.MatchString(flatReport) {
 		return errors.New("audit REPORT.md contradicts final findings")
 	}
+	if blocked > 0 && !regexp.MustCompile(fmt.Sprintf(`\b(?:blocked:\s*%d|%d\s+blocked)\b`, blocked, blocked)).MatchString(flatReport) {
+		return errors.New("audit REPORT.md omits blocked coverage count")
+	}
+	if !auditProseHasTitles(detailsBytes, requiredDetails) {
+		return errors.New("audit FINDINGS-DETAIL.md omits a confirmed medium-or-higher finding")
+	}
+	if !auditProseHasTitles(needsBytes, requiredNeeds) {
+		return errors.New("audit NEEDS-VALIDATION.md omits an unresolved finding")
+	}
 	return nil
+}
+
+func auditProseHasTitles(prose []byte, titles []string) bool {
+	if len(titles) == 0 {
+		return true
+	}
+	normalized := strings.Join(strings.Fields(strings.ToLower(string(prose))), " ")
+	for _, title := range titles {
+		if !strings.Contains(normalized, strings.ToLower(strings.Join(strings.Fields(title), " "))) {
+			return false
+		}
+	}
+	return true
 }
 
 func auditSourceInventory(source *workspace.Snapshot) (map[string]bool, map[string]int) {
@@ -684,11 +721,12 @@ func auditSourceInventory(source *workspace.Snapshot) (map[string]bool, map[stri
 	return paths, lines
 }
 
-func auditSeedsChecked(starting, reviewed []string) bool {
+func auditSeedsChecked(starting, reviewed []string, sourceLines map[string]int) bool {
 	for _, seed := range starting {
 		checked := false
 		for _, path := range reviewed {
-			if path == seed || strings.HasPrefix(path, seed+"/") {
+			_, isFile := sourceLines[path]
+			if (sourceLines == nil || isFile) && (path == seed || strings.HasPrefix(path, seed+"/")) {
 				checked = true
 				break
 			}

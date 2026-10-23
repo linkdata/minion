@@ -247,7 +247,7 @@ func foldPublicationSpace(text string) string {
 		if space && result.Len() != 0 {
 			result.WriteByte(' ')
 		}
-		result.WriteRune(r)
+		result.WriteRune(unicode.ToLower(r))
 		space = false
 	}
 	return result.String()
@@ -256,14 +256,18 @@ func foldPublicationSpace(text string) string {
 func publicationTextVariants(text string) []string {
 	text = modelLineBreaks.Replace(text)
 	variants := []string{text}
-	if !strings.Contains(text, "> ") {
+	if !strings.Contains(text, ">") {
 		return variants
 	}
 	lines := strings.Split(text, "\n")
 	changed := false
 	for i, line := range lines {
-		for strings.HasPrefix(line, "> ") {
-			line, changed = line[2:], true
+		for {
+			trimmed := strings.TrimLeft(line, " \t")
+			if !strings.HasPrefix(trimmed, ">") {
+				break
+			}
+			line, changed = strings.TrimLeft(trimmed[1:], " \t"), true
 		}
 		lines[i] = line
 	}
