@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
@@ -43,6 +44,52 @@ func projectPublication(job Job, result Result) (publication, error) {
 		}
 	}
 	return projected, nil
+}
+
+// Refutations are private even when an executor supplies a matching reviewed-content digest.
+func rejectPublishedRefutations(job Job, result Result, projected publication) error {
+	if len(result.Refutations) == 0 {
+		return nil
+	}
+	public := publicationTextVariants(projected.answer)
+	for _, file := range projected.artifacts {
+		public = append(public, publicationTextVariants(string(file.Data))...)
+	}
+	if job.Action == command.Fix {
+		for _, change := range result.Changes {
+			public = append(public, change.Path)
+			public = append(public, publicationTextVariants(string(change.Data))...)
+		}
+	}
+	for _, refutation := range result.Refutations {
+		private := modelLineBreaks.Replace(refutation.Text)
+		for _, text := range public {
+			if strings.Contains(text, private) || containsConfiguredKey([]byte(text), private) {
+				return errors.New("publication contains private review evidence")
+			}
+		}
+	}
+	return nil
+}
+
+func publicationTextVariants(text string) []string {
+	text = modelLineBreaks.Replace(text)
+	variants := []string{text}
+	if !strings.Contains(text, "> ") {
+		return variants
+	}
+	lines := strings.Split(text, "\n")
+	changed := false
+	for i, line := range lines {
+		for strings.HasPrefix(line, "> ") {
+			line, changed = line[2:], true
+		}
+		lines[i] = line
+	}
+	if changed {
+		variants = append(variants, strings.Join(lines, "\n"))
+	}
+	return variants
 }
 
 // cappedReview derives public facts only from an actual capped decision.

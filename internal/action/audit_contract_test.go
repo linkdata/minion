@@ -71,7 +71,7 @@ func TestCompleteAuditResultValidatesCoverage(t *testing.T) {
 		{name: "bare finding", findings: `[{"fingerprint":"F"}]`, want: "incomplete finding"},
 		{name: "noncanonical identity", ledger: strings.Replace(validLedger, `"coverage_id":"source::boundary::subsystem::attack"`, `"coverage_id":"forged"`, 1), want: "noncanonical coverage identity"},
 		{name: "missing owner", ledger: strings.Replace(validLedger, `"agent_id":"hunter","reviewed_paths"`, `"agent_id":null,"reviewed_paths"`, 1), want: "assigned review evidence"},
-		{name: "unchecked path", ledger: strings.Replace(validLedger, `"reviewed_paths":["source.txt"],"local_checks"`, `"reviewed_paths":["other.txt"],"local_checks"`, 1), want: "local check outside reviewed paths"},
+		{name: "unchecked path", ledger: strings.Replace(validLedger, `"local_checks":[{"agent_id":"hunter","reviewed_paths":["source.txt"]`, `"local_checks":[{"agent_id":"hunter","reviewed_paths":["other.txt"]`, 1), want: "local check outside reviewed paths"},
 		{name: "check without result", ledger: strings.Replace(validLedger, `"result":"The guard is present"`, `"result":""`, 1), want: "incomplete local check"},
 		{name: "covered with unresolved", ledger: strings.Replace(validLedger, `"unresolved":[]}]`, `"unresolved":["ignored"]}]`, 1), want: "inconsistent status evidence"},
 		{name: "missing ordinary block", ledger: strings.Replace(validLedger, `"ordinary_attack_class_block":null,`, ``, 1), want: "required coverage context"},

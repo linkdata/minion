@@ -494,7 +494,10 @@ func validateResultArtifacts(j Job, files []workspace.File, complete bool) error
 	if err != nil {
 		return err
 	}
-	if err := validateAuditCoverage(seen["coverage-ledger.json"], seen["findings.json"]); err != nil {
+	if err := validateAuditSkillSource(seen["run-metadata.json"], auditSkillSource(j.Main)); err != nil {
+		return err
+	}
+	if err := validateAuditCoverage(seen["coverage-ledger.json"], seen["findings.json"], &j.Source); err != nil {
 		return err
 	}
 	for _, companion := range companions {

@@ -16,6 +16,7 @@ import (
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/processgroup"
 	"github.com/linkdata/minion/internal/usage"
+	"github.com/linkdata/minion/internal/workspace"
 )
 
 func TestHostileHTTPAuditRunsPublishingHostValidator(t *testing.T) {
@@ -30,7 +31,7 @@ if (findings.some(finding => finding.unexpected === true)) process.exit(17);
 	if err := os.WriteFile(filepath.Join(skillDir, "validate-findings.cjs"), []byte(validator), 0600); err != nil {
 		t.Fatal(err)
 	}
-	gitFixtureRemote(t)
+	gitFixtureRemote(t, workspace.File{Path: "source.txt", Mode: workspace.Regular, Data: []byte("source\n")})
 	var writes atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if serveIssueFixture(t, w, r) {
@@ -48,6 +49,7 @@ if (findings.some(finding => finding.unexpected === true)) process.exit(17);
 		Commands: map[string]config.CommandMapping{"security-audit": {Action: string(command.SecurityAudit), Skills: []string{testAuditSkillURL}}},
 	}
 	e.Executor = executorFunc(func(ctx context.Context, job Job, checkpoints Checkpoints) (Result, error) {
+		job.Source.BaseFiles = nil // The issue audit has no base; preserve that across the HTTP JSON round trip.
 		f := newHTTPServerTest(t, ctx, job, checkpoints, nil)
 		f.pull(t)
 		before := f.call(1)

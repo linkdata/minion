@@ -42,7 +42,7 @@ func TestPartialAuditMetadataPathListsStayPortable(t *testing.T) {
 			}
 			if portable {
 				var normalized map[string]json.RawMessage
-				if err := json.Unmarshal(files[0].Data, &normalized); err != nil || len(normalized) != 2 {
+				if err := json.Unmarshal(files[0].Data, &normalized); err != nil || len(normalized) != 3 || string(normalized["skill_source"]) != `"`+testAuditSkillURL+`"` {
 					t.Fatalf("partial normalization invented missing fields: %s, %v", files[0].Data, err)
 				}
 			}

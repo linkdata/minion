@@ -36,7 +36,11 @@ func TestHostileHTTPResultCannotPublishConfiguredProviderKey(t *testing.T) {
 			if tc.audit {
 				installActionTestSkills(t, testAuditSkillURL)
 			}
-			gitFixtureRemote(t)
+			if tc.audit {
+				gitFixtureRemote(t, workspace.File{Path: "source.txt", Mode: workspace.Regular, Data: []byte("source\n")})
+			} else {
+				gitFixtureRemote(t)
+			}
 			var writes atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if serveIssueFixture(t, w, r) {
@@ -59,6 +63,9 @@ func TestHostileHTTPResultCannotPublishConfiguredProviderKey(t *testing.T) {
 				Commands: map[string]config.CommandMapping{name: {Action: string(action), Skills: []string{skill}}},
 			}
 			e.Executor = executorFunc(func(ctx context.Context, job Job, checkpoints Checkpoints) (Result, error) {
+				if tc.audit {
+					job.Source.BaseFiles = nil // The issue audit has no base; preserve that across the HTTP JSON round trip.
+				}
 				f := newHTTPServerTest(t, ctx, job, checkpoints, nil)
 				f.pull(t)
 				before := f.call(1)

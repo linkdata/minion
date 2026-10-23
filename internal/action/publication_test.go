@@ -185,3 +185,55 @@ func TestProjectPublicationNormalAndChangedFix(t *testing.T) {
 		}
 	}
 }
+
+func TestPublishedRefutationsCheckOnlyActualPublication(t *testing.T) {
+	const private = "Private objection\nand evidence."
+	job := withClaudeCritic(testJob(command.Comment))
+	result := privateReviewResult(job)
+	result.Refutations[0].Text = private
+	result.Answer = "Public reply\r\nPrivate objection\r\nand evidence."
+	projected, err := projectPublication(job, result)
+	if err != nil || rejectPublishedRefutations(job, result, projected) == nil {
+		t.Fatalf("line-ending-normalized private reply was accepted: %v", err)
+	}
+	result.Answer = "Public reply\n> Private objection\n> and evidence."
+	projected, err = projectPublication(job, result)
+	if err != nil || rejectPublishedRefutations(job, result, projected) == nil {
+		t.Fatalf("quoted private reply was accepted: %v", err)
+	}
+	result.Answer = "Public reply\n> > Private objection\n> > and evidence."
+	projected, err = projectPublication(job, result)
+	if err != nil || rejectPublishedRefutations(job, result, projected) == nil {
+		t.Fatalf("nested quoted private reply was accepted: %v", err)
+	}
+
+	job.Action = command.Fix
+	result.Answer = private
+	result.Changes = []workspace.Change{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("safe change\n")}}
+	projected, err = projectPublication(job, result)
+	if err != nil || rejectPublishedRefutations(job, result, projected) != nil {
+		t.Fatalf("unused Fix summary blocked a safe change: %v", err)
+	}
+	result.Changes[0].Data = []byte("Private objection\r\nand evidence.")
+	if rejectPublishedRefutations(job, result, projected) == nil {
+		t.Fatal("private refutation in changed source was accepted")
+	}
+	result.Changes[0].Data = []byte(`{"memo":"Private objection\nand evidence."}`)
+	if rejectPublishedRefutations(job, result, projected) == nil {
+		t.Fatal("JSON-escaped private refutation in changed source was accepted")
+	}
+
+	job.Action = command.SecurityAudit
+	result.Changes = nil
+	result.Answer = "Public report."
+	result.Artifacts = []workspace.File{{Path: "architecture.md", Mode: workspace.Regular, Data: []byte("Private objection\r\nand evidence.")}}
+	projected, err = projectPublication(job, result)
+	if err != nil || rejectPublishedRefutations(job, result, projected) == nil {
+		t.Fatalf("private refutation in retained report was accepted: %v", err)
+	}
+	result.Artifacts[0].Data = []byte(`{"memo":"Private objection\nand evidence."}`)
+	projected, err = projectPublication(job, result)
+	if err != nil || rejectPublishedRefutations(job, result, projected) == nil {
+		t.Fatalf("JSON-escaped private refutation in report was accepted: %v", err)
+	}
+}

@@ -221,7 +221,7 @@ func (f *actionMonitorGitHub) CreateIssueComment(context.Context, string, int, s
 
 func TestReviewEchoDoesNotSuppressSecurityAuditInMonitor(t *testing.T) {
 	fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
-	_, head, _ := gitFixtureRemote(t)
+	_, head, _ := gitFixtureRemote(t, workspace.File{Path: "source.txt", Mode: workspace.Regular, Data: []byte("source\n")})
 	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
 	reviewItem := github.Item{Key: "review-request", NodeID: "review-request-node", Body: "@linkdataminion review", Author: github.User{ID: 7, Login: "writer"}, UpdatedAt: now}
 	auditItem := github.Item{Key: "audit-request", NodeID: "audit-request-node", Body: "@linkdataminion security-audit", Author: github.User{ID: 7, Login: "writer"}, UpdatedAt: now.Add(time.Second)}

@@ -15,6 +15,7 @@ import (
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/usage"
+	"github.com/linkdata/minion/internal/workspace"
 )
 
 func TestHostileHTTPAuditSchemaCannotPublish(t *testing.T) {
@@ -28,6 +29,10 @@ func TestHostileHTTPAuditSchemaCannotPublish(t *testing.T) {
 		{name: "rejected without reason", artifact: "findings.json", data: rejectedWithoutReason, want: "incomplete rejected finding", candidate: true},
 		{name: "invalid trace order", artifact: "findings.json", data: strings.Replace(auditCandidateFindingFixture,
 			`"kind":"entrypoint"`, `"kind":"propagation"`, 1), want: "invalid trace evidence", candidate: true},
+		{name: "ghost current trace", artifact: "findings.json", data: strings.Replace(auditCandidateFindingFixture,
+			`"trace":[{"kind":"entrypoint","file":"source.txt"`, `"trace":[{"kind":"entrypoint","file":"ghost.go"`, 1), want: "trace outside current source", candidate: true},
+		{name: "line beyond current source", artifact: "findings.json", data: strings.Replace(auditCandidateFindingFixture,
+			`"evidence":[{"file":"source.txt","line":1`, `"evidence":[{"file":"source.txt","line":999999`, 1), want: "evidence outside current source", candidate: true},
 		{name: "missing coverage context", artifact: "coverage-ledger.json", data: strings.Replace(auditCoveredLedgerFixture,
 			`"ordinary_attack_class_block":null,`, ``, 1), want: "required coverage context"},
 		{name: "unverifiable local proof", artifact: "coverage-ledger.json", data: strings.Replace(auditCoveredLedgerFixture,
@@ -36,7 +41,7 @@ func TestHostileHTTPAuditSchemaCannotPublish(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			installActionTestSkills(t, testAuditSkillURL)
-			gitFixtureRemote(t)
+			gitFixtureRemote(t, workspace.File{Path: "source.txt", Mode: workspace.Regular, Data: []byte("source\n")})
 			var writes atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if serveIssueFixture(t, w, r) {
@@ -55,6 +60,7 @@ func TestHostileHTTPAuditSchemaCannotPublish(t *testing.T) {
 			}
 			executed := false
 			e.Executor = executorFunc(func(ctx context.Context, job Job, checkpoints Checkpoints) (Result, error) {
+				job.Source.BaseFiles = nil // The issue audit has no base; preserve that across the HTTP JSON round trip.
 				executed = true
 				f := newHTTPServerTest(t, ctx, job, checkpoints, nil)
 				f.pull(t)

@@ -478,3 +478,72 @@ func TestHTTPPrivateRefutationAtWireLimitStaysInReviewRecord(t *testing.T) {
 		t.Fatalf("private refutation escaped publication: posted=%q journal=%q", posted, journal.String())
 	}
 }
+
+func TestHTTPMatchingDigestCannotPublishPrivateRefutation(t *testing.T) {
+	job := withClaudeCritic(testJob(command.Comment))
+	f := newExecutionAdapterFixture(t, job)
+	var journal bytes.Buffer
+	f.owner.Logger = log.New(&journal, "", 0)
+	result := privateReviewResult(f.job)
+	result.Answer = "Public reply.\n" + result.Refutations[0].Text
+	if err := result.Validate(f.job); err != nil {
+		t.Fatal(err)
+	}
+	transport := newHTTPServerTest(t, context.Background(), f.job, f.sink, nil)
+	transport.pull(t)
+	sequence := uint64(1)
+	transport.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: f.review(nil, nil, "")}, http.StatusOK, sequence)
+	for i, call := range result.Calls {
+		sequence++
+		transport.ack(t, "/before", httpCall{Sequence: sequence, Checkpoint: f.call(callMetadata(call))}, http.StatusOK, sequence)
+		sequence++
+		transport.ack(t, "/after", httpCall{Sequence: sequence, Checkpoint: f.call(call)}, http.StatusOK, sequence)
+		sequence++
+		var refs []Refutation
+		if call.Round >= 2 {
+			refs = result.Refutations
+		}
+		transport.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: f.review(result.Calls[:i+1], refs, "")}, http.StatusOK, sequence)
+	}
+	sequence++
+	transport.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: f.review(result.Calls, result.Refutations, result.CriticStopReason)}, http.StatusOK, sequence)
+	digest, err := contentDigest(result.Answer, result.Changes, result.Artifacts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sequence++
+	finalReview := f.review(result.Calls, result.Refutations, result.CriticStopReason)
+	finalReview.ContentDigest = digest
+	transport.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: finalReview}, http.StatusOK, sequence)
+	sequence++
+	transport.ack(t, "/outcome", httpOutcome{Sequence: sequence, Result: result}, http.StatusOK, sequence)
+	got := transport.result(t)
+	if got.err != nil || f.sink.finish(got.result, got.err) != nil {
+		t.Fatalf("matching-digest private result was not accepted by HTTP: %+v", got)
+	}
+	if saved := readPrivateReview(t, f.owner.WorkRoot); !reflect.DeepEqual(saved.Refutations, result.Refutations) || saved.ContentDigest != digest {
+		t.Fatalf("private review checkpoint was not retained: %+v", saved)
+	}
+	var posted string
+	writes := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if serveIssueFixture(t, w, r) {
+			return
+		}
+		if captureComment(t, w, r, &posted) {
+			writes++
+			return
+		}
+		t.Errorf("unexpected GitHub request: %s %s", r.Method, r.URL.Path)
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	f.owner.GitHub = testGitHub(server, "fixture-token")
+	request := usageJob()
+	request.Command = command.Command{Name: "comment", Action: command.Comment}
+	err = f.owner.publish(context.Background(), &preparedAction{job: f.job, request: request}, got.result)
+	if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "publication contains private review evidence") || writes != 0 ||
+		posted != "" || strings.Contains(err.Error(), result.Refutations[0].Text) || strings.Contains(journal.String(), result.Refutations[0].Text) {
+		t.Fatalf("private refutation crossed publication boundary: error=%v writes=%d posted=%q journal=%q", err, writes, posted, journal.String())
+	}
+}

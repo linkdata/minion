@@ -12,6 +12,7 @@ import (
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/monitor"
+	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/workroot"
 )
 
@@ -116,7 +117,7 @@ func TestRunnerPreparationFailuresAreTerminalBeforeModels(t *testing.T) {
 		{"source materialization", command.Comment, func(job *Job) { job.Source.Files[0].Path = longPath }, "materialize source"},
 		{"repository materialization", command.Comment, func(job *Job) { job.Source.Files[0].Data = []byte("forged\n") }, "materialize repository"},
 		{"context materialization", command.Review, func(job *Job) { job.Source.BaseFiles[0].Path = longPath }, "materialize context"},
-		{"missing audit task skill", command.SecurityAudit, func(*Job) {}, "action prompt: security audit requires"},
+		{"missing audit task skill", command.SecurityAudit, func(job *Job) { job.Main.Skills = []string{skills.BuiltinAntiPromptInjection} }, "action prompt: security audit requires"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			job := testJob(test.action)

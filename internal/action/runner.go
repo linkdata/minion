@@ -24,7 +24,6 @@ import (
 	"github.com/linkdata/minion/internal/gitwork"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/processgroup"
-	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/workroot"
 	"github.com/linkdata/minion/internal/workspace"
 )
@@ -743,11 +742,8 @@ func normalizeAuditArtifacts(files []workspace.File, job Job, skill string, secr
 				}
 				metadata["selected_companion_files"], _ = json.Marshal(companions)
 			}
-			for _, source := range slices.Concat(job.Main.Skills, job.Main.AlwaysOnSkills) {
-				if name, err := skills.Name(source); err == nil && name == "security-audit" {
-					metadata["skill_source"], _ = json.Marshal(source)
-					break
-				}
+			if source := auditSkillSource(job.Main); source != "" {
+				metadata["skill_source"], _ = json.Marshal(source)
 			}
 			data, err := json.Marshal(metadata)
 			if err != nil {

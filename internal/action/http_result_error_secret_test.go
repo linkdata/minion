@@ -1,0 +1,148 @@
+package action
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"log"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/linkdata/minion/internal/command"
+	"github.com/linkdata/minion/internal/config"
+	"github.com/linkdata/minion/internal/monitor"
+	"github.com/linkdata/minion/internal/skills"
+	"github.com/linkdata/minion/internal/usage"
+	"github.com/linkdata/minion/internal/workspace"
+)
+
+func TestHostileHTTPResultValidationErrorRedactsProviderKey(t *testing.T) {
+	const key = "fixture-codex-secret"
+	for _, tc := range []struct {
+		name   string
+		critic bool
+		failed bool
+	}{
+		{name: "normal outcome"},
+		{name: "failed outcome", failed: true},
+		{name: "critic outcome", critic: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gitFixtureRemote(t, workspace.File{Path: "source.txt", Mode: workspace.Regular, Data: []byte("source\n")})
+			var writes atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if serveFixFlowFixture(t, w, r) || serveIssueFixture(t, w, r) {
+					return
+				}
+				if r.Method != http.MethodGet {
+					writes.Add(1)
+				}
+				t.Errorf("unexpected GitHub request: %s %s", r.Method, r.URL.Path)
+				http.NotFound(w, r)
+			}))
+			defer server.Close()
+			var journal bytes.Buffer
+			usageDir := filepath.Join(t.TempDir(), "usage")
+			e := &Orchestrator{
+				WorkRoot: t.TempDir(), Store: openState(t, time.Now()), Usage: &usage.Store{Dir: usageDir},
+				GitHub: testGitHub(server, "fixture-token"), BotLogin: "bot", Logger: log.New(&journal, "", 0),
+				Runner:   Runner{Codex: config.CodexConfig{APIKey: key}},
+				Commands: map[string]config.CommandMapping{"fix": {Action: "fix", Skills: []string{skills.BuiltinAntiPromptInjection}}},
+			}
+			if tc.critic {
+				e.Adversarial = "claude"
+			}
+			e.Executor = executorFunc(func(ctx context.Context, job Job, checkpoints Checkpoints) (Result, error) {
+				job.Source.BaseFiles = nil // The issue fix has no base; preserve that across the HTTP JSON round trip.
+				f := newHTTPServerTest(t, ctx, job, checkpoints, nil)
+				f.pull(t)
+				result := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Safe response."}
+				if tc.critic {
+					result = privateReviewResult(job)
+					for i := range result.Calls {
+						result.Calls[i].Tokens = usage.Tokens{Input: int64(i + 1), Output: 1}
+						result.Calls[i].Complete = true
+					}
+				} else {
+					call := f.call(1).Checkpoint.Call
+					call.Tokens, call.Complete = usage.Tokens{Input: 3, Output: 2}, true
+					result.Calls = []CallUsage{call}
+				}
+				result.Changes = []workspace.Change{{Path: "../" + key, Mode: workspace.Regular, Data: []byte("hostile\n")}}
+				if err := httpResultShape(result); err != nil {
+					t.Fatalf("hostile result failed HTTP bounds before parent validation: %v", err)
+				}
+				if err := result.Validate(job); err == nil || !strings.Contains(err.Error(), key) {
+					t.Fatalf("fixture no longer reaches the key-bearing validation error: %v", err)
+				}
+				sequence := uint64(1)
+				binding := CallCheckpoint{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head}
+				review := ReviewCheckpoint{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head}
+				if tc.critic {
+					f.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: review}, http.StatusOK, sequence)
+					sequence++
+				}
+				for i, call := range result.Calls {
+					binding.Call = callMetadata(call)
+					f.ack(t, "/before", httpCall{Sequence: sequence, Checkpoint: binding}, http.StatusOK, sequence)
+					sequence++
+					binding.Call = call
+					f.ack(t, "/after", httpCall{Sequence: sequence, Checkpoint: binding}, http.StatusOK, sequence)
+					sequence++
+					if tc.critic {
+						review.Calls = result.Calls[:i+1]
+						if call.Round >= 2 {
+							review.Refutations = result.Refutations
+						}
+						f.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: review}, http.StatusOK, sequence)
+						sequence++
+					}
+				}
+				if tc.critic {
+					review.CriticStopReason = result.CriticStopReason
+					f.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: review}, http.StatusOK, sequence)
+					sequence++
+					var err error
+					review.ContentDigest, err = contentDigest(result.Answer, result.Changes, result.Artifacts)
+					if err != nil {
+						t.Fatal(err)
+					}
+					f.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: review}, http.StatusOK, sequence)
+					sequence++
+				}
+				outcome := f.outcome(sequence, nil)
+				outcome.Result = result
+				if tc.failed {
+					outcome.Failure = newHTTPFailure(errors.New("worker stopped after returning evidence"))
+				}
+				f.ack(t, "/outcome", outcome, http.StatusOK, sequence)
+				got := f.result(t)
+				if (got.err != nil) != tc.failed {
+					t.Fatalf("HTTP outcome error changed: %v", got.err)
+				}
+				return got.result, got.err
+			})
+			request := usageJob()
+			request.Source.UpdatedAt = time.Now()
+			request.Command = command.Command{Name: "fix", Action: command.Fix}
+			request.Repository.Actions = []string{"fix"}
+			err := e.Execute(context.Background(), request)
+			if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "unsafe or duplicate changed path") || strings.Contains(err.Error(), key) || writes.Load() != 0 {
+				t.Fatalf("hostile result escaped error boundary or published: error=%v writes=%d", err, writes.Load())
+			}
+			log.New(&journal, "", 0).Printf("fix failed: %v", err)
+			if strings.Contains(journal.String(), key) {
+				t.Fatalf("hostile result escaped monitor-style log boundary: %s", &journal)
+			}
+			records, err := usage.ReadAll(usageDir)
+			if err != nil || len(records) != 1 || records[0].Status != "failed" {
+				t.Fatalf("failed result lost usage evidence: records=%+v error=%v", records, err)
+			}
+		})
+	}
+}

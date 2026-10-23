@@ -16,6 +16,7 @@ import (
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/processgroup"
+	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -252,7 +253,7 @@ func validateAuditFiles(ctx context.Context, files []workspace.File, validationD
 			return "", fmt.Errorf("audit %s failed: %w", validator.script, err)
 		}
 	}
-	if err := validateAuditCoverage(byPath["coverage-ledger.json"], byPath["findings.json"]); err != nil {
+	if err := validateAuditCoverage(byPath["coverage-ledger.json"], byPath["findings.json"], nil); err != nil {
 		return "", err
 	}
 	return string(byPath["REPORT.md"]), nil
@@ -278,7 +279,7 @@ type auditCoverageEvidence struct {
 	ReassignmentReason string               `json:"reassignment_reason"`
 }
 
-func validateAuditCoverage(ledgerBytes, findingsBytes []byte) error {
+func validateAuditCoverage(ledgerBytes, findingsBytes []byte, source *workspace.Snapshot) error {
 	if err := rejectDuplicateAuditJSONKeys(ledgerBytes,
 		"coverage_id", "canonical_refs", "surface", "boundary", "subsystem", "attack_class", "lifecycle", "starting_paths",
 		"ordinary_attack_class_block", "selected_companion_blocks", "excluded_blocks", "prior_status", "attempts", "wave", "status",
@@ -360,7 +361,9 @@ func validateAuditCoverage(ledgerBytes, findingsBytes []byte) error {
 	if findings == nil {
 		return errors.New("audit findings.json is not an array")
 	}
+	sourcePaths, sourceLines := auditSourceInventory(source)
 	final := make(map[string]bool, len(findings))
+	findingPaths := make(map[string]map[string]bool, len(findings))
 	for _, finding := range findings {
 		if strings.TrimSpace(finding.Fingerprint) == "" {
 			return errors.New("audit findings.json has an empty fingerprint")
@@ -407,6 +410,7 @@ func validateAuditCoverage(ledgerBytes, findingsBytes []byte) error {
 				return errors.New("audit findings.json has an incomplete rejected finding")
 			}
 		}
+		citedPaths := make(map[string]bool)
 		for i, trace := range finding.Trace {
 			if (trace.Kind != "entrypoint" && trace.Kind != "propagation" && trace.Kind != "sink") || !workspace.ValidPath(trace.File) ||
 				!auditPositiveInteger(trace.Line) || !auditVisibleText(trace.Scope) || !auditVisibleText(trace.Description) ||
@@ -415,31 +419,44 @@ func validateAuditCoverage(ledgerBytes, findingsBytes []byte) error {
 					i > 0 && i < len(finding.Trace)-1 && trace.Kind != "propagation") {
 				return errors.New("audit findings.json has invalid trace evidence")
 			}
+			if source != nil && (sourceLines[trace.File] == 0 || trace.Line > float64(sourceLines[trace.File])) {
+				return errors.New("audit findings.json has trace outside current source")
+			}
+			citedPaths[trace.File] = true
 		}
 		for _, evidence := range finding.Evidence {
 			if !workspace.ValidPath(evidence.File) || !auditPositiveInteger(evidence.Line) || !auditVisibleText(evidence.Description) {
 				return errors.New("audit findings.json has invalid source evidence")
 			}
+			if source != nil && (sourceLines[evidence.File] == 0 || evidence.Line > float64(sourceLines[evidence.File])) {
+				return errors.New("audit findings.json has evidence outside current source")
+			}
+			citedPaths[evidence.File] = true
 		}
 		final[finding.Fingerprint] = true
+		findingPaths[finding.Fingerprint] = citedPaths
 	}
 	candidates := make(map[string]bool)
-	checkCandidate := func(fingerprints, unresolved []string) error {
-		if len(fingerprints) == 0 {
+	connectedCandidates := make(map[string]bool)
+	checkCandidate := func(e auditCoverageEvidence) error {
+		if len(e.ResultFingerprints) == 0 {
 			return errors.New("audit coverage-ledger.json has candidate without fingerprint")
 		}
-		for _, reason := range unresolved {
+		for _, reason := range e.Unresolved {
 			if strings.Contains(reason, "validation_budget_exhausted") {
 				return errors.New("audit coverage-ledger.json has unvalidated candidate")
 			}
 		}
-		for _, fingerprint := range fingerprints {
+		for _, fingerprint := range e.ResultFingerprints {
 			if strings.TrimSpace(fingerprint) == "" {
 				return errors.New("audit coverage-ledger.json has candidate without fingerprint")
 			}
 			candidates[fingerprint] = true
 			if !final[fingerprint] {
 				return errors.New("audit coverage-ledger.json has a candidate without final finding")
+			}
+			if auditPathsConnect(e.ReviewedPaths, findingPaths[fingerprint]) {
+				connectedCandidates[fingerprint] = true
 			}
 		}
 		return nil
@@ -458,13 +475,13 @@ func validateAuditCoverage(ledgerBytes, findingsBytes []byte) error {
 				return errors.New("audit coverage-ledger.json has invalid attempt status")
 			}
 			if attempt.Status == "candidate" {
-				if err := checkCandidate(attempt.ResultFingerprints, attempt.Unresolved); err != nil {
+				if err := checkCandidate(attempt); err != nil {
 					return err
 				}
 			}
 		}
 		if unit.Status == "candidate" {
-			if err := checkCandidate(unit.ResultFingerprints, unit.Unresolved); err != nil {
+			if err := checkCandidate(unit.auditCoverageEvidence); err != nil {
 				return err
 			}
 		}
@@ -507,7 +524,7 @@ func validateAuditCoverage(ledgerBytes, findingsBytes []byte) error {
 			return errors.New("audit coverage-ledger.json has noncanonical coverage identity")
 		}
 		for _, path := range unit.StartingPaths {
-			if !workspace.ValidPath(path) {
+			if !workspace.ValidPath(path) || source != nil && !sourcePaths[path] {
 				return errors.New("audit coverage-ledger.json has invalid starting path")
 			}
 		}
@@ -531,8 +548,13 @@ func validateAuditCoverage(ledgerBytes, findingsBytes []byte) error {
 				return errors.New("audit coverage-ledger.json has invalid excluded block")
 			}
 		}
-		if err := validateAuditCoverageEvidence(unit.auditCoverageEvidence); err != nil {
+		if err := validateAuditCoverageEvidence(unit.auditCoverageEvidence, sourcePaths); err != nil {
 			return err
+		}
+		if unit.Status == "covered" || unit.Status == "candidate" {
+			if !auditSeedsChecked(unit.StartingPaths, unit.ReviewedPaths) {
+				return errors.New("audit coverage-ledger.json has starting path without checked evidence")
+			}
 		}
 		if !auditPositiveInteger(unit.Wave) {
 			return errors.New("audit coverage-ledger.json has invalid current wave")
@@ -540,8 +562,13 @@ func validateAuditCoverage(ledgerBytes, findingsBytes []byte) error {
 		previousWave := float64(0)
 		priorOwners := make(map[string]bool, len(unit.Attempts))
 		for _, attempt := range unit.Attempts {
-			if err := validateAuditCoverageEvidence(attempt); err != nil {
+			if err := validateAuditCoverageEvidence(attempt, sourcePaths); err != nil {
 				return err
+			}
+			if attempt.Status == "covered" || attempt.Status == "candidate" {
+				if !auditSeedsChecked(unit.StartingPaths, attempt.ReviewedPaths) {
+					return errors.New("audit coverage-ledger.json has archived starting path without checked evidence")
+				}
 			}
 			if !auditPositiveInteger(attempt.Wave) || attempt.Wave <= previousWave || attempt.Wave >= unit.Wave || strings.TrimSpace(attempt.ReassignmentReason) == "" {
 				return errors.New("audit coverage-ledger.json has invalid archived attempt wave or reassignment")
@@ -570,8 +597,65 @@ func validateAuditCoverage(ledgerBytes, findingsBytes []byte) error {
 		if !candidates[fingerprint] {
 			return errors.New("audit findings.json has a finding without candidate")
 		}
+		if !connectedCandidates[fingerprint] {
+			return errors.New("audit findings.json has a finding without connected review evidence")
+		}
 	}
 	return nil
+}
+
+func auditSourceInventory(source *workspace.Snapshot) (map[string]bool, map[string]int) {
+	if source == nil {
+		return nil, nil
+	}
+	paths := make(map[string]bool, len(source.Files))
+	lines := make(map[string]int, len(source.Files))
+	add := func(path string) {
+		paths[path] = true
+		for i := strings.LastIndexByte(path, '/'); i >= 0; i = strings.LastIndexByte(path[:i], '/') {
+			parent := path[:i]
+			if paths[parent] {
+				break
+			}
+			paths[parent] = true
+		}
+	}
+	for _, file := range source.Files {
+		add(file.Path)
+		lines[file.Path] = bytes.Count(file.Data, []byte{'\n'})
+		if len(file.Data) != 0 && file.Data[len(file.Data)-1] != '\n' {
+			lines[file.Path]++
+		}
+	}
+	// shortcut: Omitted mixes head and base links; add head-only link identity before accepting link coverage.
+	return paths, lines
+}
+
+func auditPathsConnect(reviewed []string, cited map[string]bool) bool {
+	for _, path := range reviewed {
+		for file := range cited {
+			if file == path || strings.HasPrefix(file, path+"/") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func auditSeedsChecked(starting, reviewed []string) bool {
+	for _, seed := range starting {
+		checked := false
+		for _, path := range reviewed {
+			if path == seed || strings.HasPrefix(path, seed+"/") {
+				checked = true
+				break
+			}
+		}
+		if !checked {
+			return false
+		}
+	}
+	return true
 }
 
 func auditSeverityRank(score string) int {
@@ -623,10 +707,10 @@ func auditVisibleText(s string) bool {
 }
 
 func auditPositiveInteger(n float64) bool {
-	return n >= 1 && !math.IsInf(n, 0) && math.Trunc(n) == n
+	return n >= 1 && n <= 1<<53-1 && math.Trunc(n) == n
 }
 
-func validateAuditCoverageEvidence(e auditCoverageEvidence) error {
+func validateAuditCoverageEvidence(e auditCoverageEvidence, sourcePaths map[string]bool) error {
 	for _, reason := range e.Unresolved {
 		if strings.TrimSpace(reason) == "" {
 			return errors.New("audit coverage-ledger.json has empty unresolved reason")
@@ -651,7 +735,7 @@ func validateAuditCoverageEvidence(e auditCoverageEvidence) error {
 	paths := make(map[string]bool, len(e.ReviewedPaths))
 	for _, path := range e.ReviewedPaths {
 		_, duplicate := paths[path]
-		if !workspace.ValidPath(path) || duplicate {
+		if !workspace.ValidPath(path) || duplicate || sourcePaths != nil && !sourcePaths[path] {
 			return errors.New("audit coverage-ledger.json has invalid reviewed path")
 		}
 		paths[path] = false
@@ -688,6 +772,27 @@ func validAuditCoverageAgent(agent string) bool {
 	return strings.Trim(agent, "abcdefghijklmnopqrstuvwxyz0123456789_-") == "" && workspace.ValidPath("agents/"+agent+"/artifacts/check")
 }
 
+func auditSkillSource(role RoleSettings) string {
+	for _, sources := range [][]string{role.Skills, role.AlwaysOnSkills} {
+		for _, source := range sources {
+			if name, err := skills.Name(source); err == nil && name == "security-audit" {
+				return source
+			}
+		}
+	}
+	return ""
+}
+
+func validateAuditSkillSource(metadataBytes []byte, expected string) error {
+	var metadata struct {
+		SkillSource string `json:"skill_source"`
+	}
+	if err := json.Unmarshal(metadataBytes, &metadata); err != nil || expected == "" || metadata.SkillSource != expected {
+		return errors.New("audit metadata has unexpected skill source")
+	}
+	return nil
+}
+
 func validateAuditMetadata(metadataBytes []byte, repo, target, head string) ([]string, error) {
 	if err := rejectDuplicateAuditJSONKeys(metadataBytes); err != nil {
 		return nil, err
@@ -714,7 +819,7 @@ func validateAuditMetadata(metadataBytes []byte, repo, target, head string) ([]s
 		return nil, fmt.Errorf("decode audit metadata fields: %w", err)
 	}
 	for name := range fields {
-		for _, canonical := range []string{"run_id", "repo", "target", "source_ref", "profile", "scope_paths", "budget", "selected_companion_files", "prior_run_paths", "shared_file_owners", "execution_policy", "run_status"} {
+		for _, canonical := range []string{"run_id", "repo", "target", "source_ref", "profile", "scope_paths", "budget", "selected_companion_files", "prior_run_paths", "shared_file_owners", "execution_policy", "run_status", "skill_source"} {
 			if name != canonical && strings.EqualFold(name, canonical) {
 				return nil, fmt.Errorf("audit metadata uses noncanonical key %q", name)
 			}

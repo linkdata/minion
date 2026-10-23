@@ -64,6 +64,9 @@ type Orchestrator struct {
 }
 
 func (e *Orchestrator) Execute(ctx context.Context, job monitor.Job) (resultErr error) {
+	defer func() {
+		resultErr = redactActionError(resultErr, e.Runner.Codex.APIKey, e.Runner.Claude.APIKey)
+	}()
 	if e.CheckWorkRoot != nil {
 		if err := e.CheckWorkRoot(); err != nil {
 			return err

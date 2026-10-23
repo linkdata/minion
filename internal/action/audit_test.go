@@ -38,7 +38,7 @@ func TestSecurityAuditIssueAndPullRequest(t *testing.T) {
 		{name: "moved pull request", subject: "PullRequest", movedHead: true, wantError: "pull request head changed"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			base, head, _ := gitFixtureRemote(t)
+			base, head, _ := gitFixtureRemote(t, workspace.File{Path: "source.txt", Mode: workspace.Regular, Data: []byte("source\n")})
 			expected := base
 			if tt.subject == "PullRequest" {
 				expected = head
@@ -401,7 +401,7 @@ func TestValidateAuditMetadataRejectsCaseVariantKeys(t *testing.T) {
 	if _, err := validateAuditMetadata([]byte(metadata), job.Identity.Repository, target, job.Source.Head); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"run_id", "repo", "target", "source_ref", "profile", "scope_paths", "budget", "selected_companion_files", "prior_run_paths", "shared_file_owners", "execution_policy", "run_status"} {
+	for _, name := range []string{"run_id", "repo", "target", "source_ref", "profile", "scope_paths", "budget", "selected_companion_files", "prior_run_paths", "shared_file_owners", "execution_policy", "run_status", "skill_source"} {
 		mutated := strings.Replace(metadata, `"`+name+`":`, `"`+strings.ToUpper(name)+`":`, 1)
 		if mutated == metadata {
 			t.Fatalf("metadata fixture lacks %q", name)
