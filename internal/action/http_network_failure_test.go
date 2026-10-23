@@ -26,35 +26,61 @@ func (f httpNetworkAction) Execute(ctx context.Context, job monitor.Job) error {
 
 func TestHTTPWatchAdmissionTransportFailurePreservesMonitorPolicy(t *testing.T) {
 	installActionTestSkills(t, testReviewSkillURL)
-	for _, unknown := range []bool{false, true} {
-		name := "known no work"
-		if unknown {
-			name = "transport joined with unknown"
-		}
-		t.Run(name, func(t *testing.T) {
+	for _, test := range []struct {
+		name           string
+		unknown        bool
+		controlTimeout bool
+	}{
+		{name: "known no work"},
+		{name: "transport joined with unknown", unknown: true},
+		{name: "watch header control timeout", controlTimeout: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
 			now := time.Date(2026, 10, 23, 8, 0, 0, 0, time.UTC)
 			clock := now
 			store := openState(t, now.Add(-time.Minute))
 			gh := &actionMonitorGitHub{items: []github.Item{{Key: "request", NodeID: "request-node", Body: "@linkdataminion comment", Author: github.User{ID: 7, Login: "writer"}}},
 				notification: github.Notification{Repository: github.Repository{FullName: "o/r"}, Subject: github.Subject{Type: "Issue", URL: "https://api.github.com/repos/o/r/issues/7"}, UpdatedAt: now}}
-			var executions, admissions, native atomic.Int32
+			var executions, admissions, outcomes, native atomic.Int32
 			handler := httpNetworkAction(func(ctx context.Context, request monitor.Job) error {
 				executions.Add(1)
 				job := withClaudeCritic(testJob(command.Comment))
 				job.Identity.JobID = request.ID
+				timeout := 10 * time.Second
+				if test.controlTimeout {
+					job.RuntimeBudget, timeout = 2*time.Minute, 2*time.Minute
+				}
 				f := newExecutionAdapterFixture(t, job)
 				accounting := f.startUsage()
-				ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+				ctx, cancel := context.WithTimeout(ctx, timeout)
 				defer cancel()
-				transport := newHTTPServerTest(t, ctx, f.job, f.sink, nil)
+				transport := newHTTPServerTest(t, ctx, f.job, f.sink, func(next http.Handler) http.Handler {
+					return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						if test.controlTimeout && r.URL.Path == "/cancel" {
+							admissions.Add(1)
+							var binding httpBinding
+							if err := httpDecode(r.Body, httpControlBytes, &binding); err != nil || binding != httpJobBinding(f.job) {
+								t.Errorf("invalid stalled watch: binding=%+v error=%v", binding, err)
+								return
+							}
+							<-r.Context().Done() // Exercise the real admission timer without sending headers.
+							return
+						}
+						next.ServeHTTP(w, r)
+					})
+				})
 				client := *transport.server.Client()
+				client.Timeout = 0
 				underlying := client.Transport
 				client.Transport = httpClientTestTransport(func(r *http.Request) (*http.Response, error) {
-					if r.URL.Path == "/cancel" {
+					if r.URL.Path == "/outcome" {
+						outcomes.Add(1)
+					}
+					if !test.controlTimeout && r.URL.Path == "/cancel" {
 						admissions.Add(1)
 						_ = r.Body.Close()
 						var cause error = io.ErrUnexpectedEOF
-						if unknown {
+						if test.unknown {
 							// Exercise precedence of an explicitly joined unknown fact, not a paid call.
 							cause = errors.Join(cause, monitor.ErrExecutionOutcomeUnknown)
 						}
@@ -70,12 +96,15 @@ func TestHTTPWatchAdmissionTransportFailurePreservesMonitorPolicy(t *testing.T) 
 				got := transport.result(t)
 				finalErr := f.sink.finish(got.result, got.err)
 				var network *url.Error
-				if !errors.As(workerErr, &network) || finalErr == nil || errors.Is(finalErr, monitor.ErrTerminalJob) || errors.Is(finalErr, monitor.ErrExecutionOutcomeUnknown) != unknown || !got.result.matchesJob(f.job) || len(got.result.Calls) != 0 || f.sink.pending != nil || f.sink.reviewed {
+				if !test.controlTimeout && !errors.As(workerErr, &network) || finalErr == nil || errors.Is(finalErr, monitor.ErrTerminalJob) || errors.Is(finalErr, monitor.ErrExecutionOutcomeUnknown) != test.unknown || !got.result.matchesJob(f.job) || len(got.result.Calls) != 0 || f.sink.pending != nil || f.sink.reviewed {
 					t.Fatalf("watch failure lost its known no-work outcome: worker=%v parent=%v finish=%v raw=%+v", workerErr, got.err, finalErr, got.result)
 				}
 				var restored *url.Error
 				if !errors.Is(finalErr, monitor.ErrRequestTransport) || errors.As(finalErr, &restored) {
 					t.Fatalf("parent lost finite transport policy or fabricated request metadata: %v", finalErr)
+				}
+				if test.controlTimeout && (!errors.Is(workerErr, context.DeadlineExceeded) || !errors.Is(workerErr, monitor.ErrRequestTransport) || !errors.Is(finalErr, context.DeadlineExceeded) || ctx.Err() != nil) {
+					t.Fatalf("request control timeout became an action expiry: worker=%v parent=%v caller=%v", workerErr, finalErr, ctx.Err())
 				}
 				records, err := usage.ReadAll(accounting.Dir)
 				if err != nil || len(records) != 1 || records[0].CodexCalls != 0 || records[0].ClaudeCalls != 0 || records[0].Tokens != (usage.Tokens{}) || !records[0].UsageComplete {
@@ -90,19 +119,23 @@ func TestHTTPWatchAdmissionTransportFailurePreservesMonitorPolicy(t *testing.T) 
 				Commands:     map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{testReviewSkillURL}}},
 				Repositories: []config.Repository{{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"comment"}, AllowedActors: []string{"writer"}, AllowedActorIDs: map[string]int64{"writer": 7}}}},
 				GitHub: gh, Handler: handler, Now: func() time.Time { return clock }}
-			wantProcessed, wantExecutions := 0, int32(4)
-			if unknown {
+			polls := 4
+			wantProcessed, wantExecutions := 0, int32(polls)
+			if test.controlTimeout {
+				polls, wantExecutions = 1, 1
+			}
+			if test.unknown {
 				wantProcessed, wantExecutions = 1, 1
 			}
-			for poll := 0; poll < 4; poll++ {
+			for poll := 0; poll < polls; poll++ {
 				_, err := m.RunOnce(context.Background(), store)
-				if (err == nil) != unknown || len(store.Data.JobFailures) != 0 || store.Data.UnconfirmedProcessJob != "" || len(store.Data.Processed) != wantProcessed {
+				if (err == nil) != test.unknown || len(store.Data.JobFailures) != 0 || store.Data.UnconfirmedProcessJob != "" || len(store.Data.Processed) != wantProcessed {
 					t.Fatalf("transport refund or unknown precedence changed on poll %d: error=%v state=%+v", poll, err, store.Data)
 				}
 				clock = clock.Add(10 * time.Minute)
 			}
-			if executions.Load() != wantExecutions || admissions.Load() != wantExecutions || native.Load() != 0 {
-				t.Fatalf("known failure exhausted retries or unknown work repeated: executions=%d admissions=%d native=%d", executions.Load(), admissions.Load(), native.Load())
+			if executions.Load() != wantExecutions || admissions.Load() != wantExecutions || outcomes.Load() != wantExecutions || native.Load() != 0 {
+				t.Fatalf("known failure exhausted retries or unknown work repeated: executions=%d admissions=%d outcomes=%d native=%d", executions.Load(), admissions.Load(), outcomes.Load(), native.Load())
 			}
 		})
 	}

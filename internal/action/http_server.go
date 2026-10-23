@@ -168,6 +168,11 @@ func (e *HTTPExecutor) Execute(ctx context.Context, job Job, sink Checkpoints) (
 
 func httpExecutionContextError(ctx context.Context) error {
 	err := ctx.Err()
+	if err == nil {
+		if deadline, ok := ctx.Deadline(); ok && !time.Now().Before(deadline) {
+			err = context.DeadlineExceeded
+		}
+	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		err = errors.Join(monitor.ErrTerminalJob, err)
 	}
@@ -257,7 +262,7 @@ func (e *HTTPExecutor) serveNext(w http.ResponseWriter, r *http.Request) {
 				httpServerReject(w, "next", http.StatusConflict, httpBinding{}, 0, errors.New("HTTP assignment is already claimed"))
 				return
 			}
-			if tx.ready && tx.ctx.Err() == nil && r.Context().Err() == nil {
+			if tx.ready && httpExecutionContextError(tx.ctx) == nil && r.Context().Err() == nil {
 				tx.delivered = true
 				tx.handlers.Add(1)
 				delivery = tx
@@ -300,10 +305,7 @@ func (tx *httpTransaction) enter(binding httpBinding, sequence uint64, kind stri
 		return false, tx.checkpointErr
 	}
 	if kind == "before" {
-		if err := tx.ctx.Err(); err != nil {
-			if errors.Is(err, context.DeadlineExceeded) {
-				return false, errors.Join(monitor.ErrTerminalJob, err)
-			}
+		if err := httpExecutionContextError(tx.ctx); err != nil {
 			return false, err
 		}
 		if tx.stopping {
@@ -451,12 +453,7 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 				tx.quarantine = true
 			}
 			// Preserve late paid facts without accepting a success beyond the fixed expiry.
-			if err := tx.budget.Err(); err != nil {
-				tx.runErr = errors.Join(tx.runErr, err)
-				if errors.Is(err, context.DeadlineExceeded) {
-					tx.runErr = errors.Join(monitor.ErrTerminalJob, tx.runErr)
-				}
-			}
+			tx.runErr = errors.Join(tx.runErr, httpExecutionContextError(tx.budget))
 			if outcome.Failure != nil && (outcome.Failure.OutcomeUnknown || outcome.Failure.Unconfirmed || outcome.Failure.ScopeUnconfirmed) {
 				tx.quarantine = true
 			}

@@ -125,6 +125,8 @@ func RunHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 		err = headerErr
 		if !time.Now().Before(expires) {
 			err = errors.Join(monitor.ErrTerminalJob, err)
+		} else {
+			err = errors.Join(monitor.ErrRequestTransport, err)
 		}
 	}
 	if err != nil {
@@ -179,7 +181,8 @@ func RunHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	stopWatch(errHTTPWatchStopped)
 	watchErr := <-watchDone
 	if outcomeErr == nil && context.Cause(watchCtx) == errHTTPWatchStopped && errors.Is(watchErr, monitor.ErrExecutionOutcomeUnknown) {
-		// Receipt is known; an earlier watch failure remains in runErr.
+		// Parent receipt is known. A watch-only protocol failure during upload
+		// cannot revoke it; errors already captured in runErr still propagate.
 		runner.logf("HTTP cancellation watch: %q", httpFailureDiagnostic(watchErr.Error()))
 		watchErr = nil
 	}

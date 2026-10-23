@@ -793,6 +793,81 @@ func TestHTTPExecutorLateKnownOutcomeRetainsFactsAndActualContextCause(t *testin
 	}
 }
 
+// Simulate the interval after a deadline but before its cancellation callback runs.
+type httpPendingDeadlineContext struct {
+	context.Context
+	deadline time.Time
+}
+
+func (c httpPendingDeadlineContext) Deadline() (time.Time, bool) { return c.deadline, true }
+
+func TestHTTPExecutionContextErrorPreservesPriorCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	ctx = httpPendingDeadlineContext{Context: ctx, deadline: time.Now().Add(-time.Second)}
+	if err := httpExecutionContextError(ctx); !errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, monitor.ErrTerminalJob) {
+		t.Fatalf("a later deadline replaced the original cancellation: %v", err)
+	}
+}
+
+func TestHTTPExecutorChecksDeadlineBeforeCancellationNotification(t *testing.T) {
+	for _, before := range []bool{true, false} {
+		t.Run(fmt.Sprintf("before=%t", before), func(t *testing.T) {
+			owner := newExecutionAdapterFixture(t, testJob(command.Comment))
+			store := owner.startUsage()
+			f := newHTTPServerTest(t, context.Background(), owner.job, owner.sink, nil)
+			f.pull(t)
+			sequence := uint64(1)
+			var calls []CallUsage
+			tokens := usage.Tokens{Input: 17, CachedInput: 3, Output: 5}
+			if !before {
+				f.ack(t, "/before", f.call(sequence), http.StatusOK, sequence)
+				sequence++
+				paid := f.call(sequence)
+				paid.Checkpoint.Call.Tokens, paid.Checkpoint.Call.Complete = tokens, true
+				f.ack(t, "/after", paid, http.StatusOK, sequence)
+				calls = []CallUsage{paid.Checkpoint.Call}
+				sequence++
+			}
+			f.tx.mu.Lock()
+			deadline := time.Now().Add(-time.Second)
+			f.tx.ctx = httpPendingDeadlineContext{Context: f.tx.ctx, deadline: deadline}
+			f.tx.budget = httpPendingDeadlineContext{Context: f.tx.budget, deadline: deadline}
+			err := f.tx.ctx.Err()
+			f.tx.mu.Unlock()
+			if err != nil {
+				t.Fatalf("fixture already notified cancellation: %v", err)
+			}
+			if before {
+				ack := f.ack(t, "/before", f.call(sequence), http.StatusConflict, sequence)
+				if err := ack.Failure.err(); !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, monitor.ErrTerminalJob) || owner.sink.pending != nil {
+					t.Fatalf("expired call reached the sink or lost classification: failure=%v pending=%+v", err, owner.sink.pending)
+				}
+				sequence++
+			}
+			outcome := f.outcome(sequence, nil)
+			outcome.Result.Calls = calls
+			if !before {
+				outcome.Result.Answer = "Completed paid result before late upload"
+			}
+			f.ack(t, "/outcome", outcome, http.StatusOK, sequence)
+			got := f.result(t)
+			finished := owner.sink.finish(got.result, got.err)
+			if !errors.Is(finished, context.DeadlineExceeded) || !errors.Is(finished, monitor.ErrTerminalJob) || errors.Is(finished, monitor.ErrExecutionOutcomeUnknown) || !reflect.DeepEqual(got.result, outcome.Result) {
+				t.Fatalf("expired receipt lost its cause or raw facts: result=%+v error=%v", got.result, finished)
+			}
+			records, err := usage.ReadAll(store.Dir)
+			wantTokens, wantCalls := tokens, 1
+			if before {
+				wantTokens, wantCalls = usage.Tokens{}, 0
+			}
+			if err != nil || len(records) != 1 || records[0].Tokens != wantTokens || records[0].CodexCalls != wantCalls || !records[0].UsageComplete {
+				t.Fatalf("deadline handling changed paid evidence: records=%+v error=%v", records, err)
+			}
+		})
+	}
+}
+
 func TestHTTPExecutorKnownOutcomeResolvesInternalTransportCancellation(t *testing.T) {
 	f := newHTTPServerTest(t, context.Background(), testJob(command.Comment), runnerExecutionCheckpoints{}, nil)
 	f.pull(t)

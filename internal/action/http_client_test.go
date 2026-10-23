@@ -524,11 +524,11 @@ func TestRunHTTPBoundsStalledWatchHeadersByAcceptedExpiry(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	err := RunHTTP(ctx, server.Client(), server.URL, job.Identity.ExecutorID, &Runner{runModel: forbidModel(t)})
-	if errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, monitor.ErrTerminalJob) || ctx.Err() != nil || len(watchEntered) != 1 || len(outcomes) != 1 {
+	if errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || errors.Is(err, monitor.ErrRequestTransport) || !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, monitor.ErrTerminalJob) || ctx.Err() != nil || len(watchEntered) != 1 || len(outcomes) != 1 {
 		t.Fatalf("stalled watch outlived the accepted runtime or ran models: error=%v caller=%v watch=%d outcome=%d", err, ctx.Err(), len(watchEntered), len(outcomes))
 	}
 	outcome := <-outcomes
-	if outcome.Failure == nil || outcome.Failure.OutcomeUnknown || !outcome.Failure.Deadline || !outcome.Failure.Terminal || len(outcome.Result.Calls) != 0 || outcome.Result.Answer != "" {
+	if outcome.Failure == nil || outcome.Failure.OutcomeUnknown || outcome.Failure.RequestTransport || !outcome.Failure.Deadline || !outcome.Failure.Terminal || len(outcome.Result.Calls) != 0 || outcome.Result.Answer != "" {
 		t.Fatalf("stalled watch fabricated execution or lost its admission deadline: %+v", outcome)
 	}
 }
@@ -661,9 +661,11 @@ func TestRunHTTPOutcomeACKPreservesKnownReceiptAfterWatchFailure(t *testing.T) {
 		truncated     bool
 		malformedACK  bool
 		externalCause bool
+		duringOutcome bool
 	}{
 		{name: "malformed watch after ACK"},
 		{name: "truncated watch after ACK", truncated: true},
+		{name: "malformed watch during outcome", duringOutcome: true},
 		{name: "watch failure stops Runner", early: true},
 		{name: "malformed final ACK stays unknown", malformedACK: true},
 		{name: "external caller cause after ACK", externalCause: true},
@@ -673,6 +675,7 @@ func TestRunHTTPOutcomeACKPreservesKnownReceiptAfterWatchFailure(t *testing.T) {
 			store := f.startUsage()
 			parent := newHTTPServerTest(t, context.Background(), f.job, f.sink, nil)
 			started := make(chan struct{})
+			outcomeEntered, watchClosed := make(chan struct{}), make(chan struct{})
 			ctx, cancel := context.WithCancelCause(context.Background())
 			externalCause := errors.Join(processgroup.ErrScopeUnconfirmed, monitor.ErrExecutionOutcomeUnknown)
 			var native, outcomes, faultReads atomic.Int32
@@ -682,12 +685,22 @@ func TestRunHTTPOutcomeACKPreservesKnownReceiptAfterWatchFailure(t *testing.T) {
 			client.Transport = httpClientTestTransport(func(r *http.Request) (*http.Response, error) {
 				if r.URL.Path == "/outcome" {
 					outcomes.Add(1)
+					if test.duringOutcome {
+						close(outcomeEntered)
+						select {
+						case <-watchClosed: // Decode and close the malformed watch before actual outcome delivery.
+						case <-r.Context().Done():
+							return nil, r.Context().Err()
+						}
+					}
 				}
 				response, err := underlying.RoundTrip(r)
 				if err == nil && r.URL.Path == "/cancel" {
 					trigger := r.Context().Done() // RunHTTP stops the watch after its outcome exchange.
 					if test.early {
 						trigger = started
+					} else if test.duringOutcome {
+						trigger = outcomeEntered
 					}
 					var reader io.Reader = strings.NewReader("{")
 					if test.truncated {
@@ -695,7 +708,11 @@ func TestRunHTTPOutcomeACKPreservesKnownReceiptAfterWatchFailure(t *testing.T) {
 					} else if test.externalCause {
 						reader = iotest.ErrReader(context.Canceled)
 					}
-					response.Body = httpClientGatedWatchBody{ReadCloser: response.Body, reader: reader, trigger: trigger, reads: &faultReads}
+					var closed chan struct{}
+					if test.duringOutcome {
+						closed = watchClosed
+					}
+					response.Body = httpClientGatedWatchBody{ReadCloser: response.Body, reader: reader, trigger: trigger, reads: &faultReads, closed: closed}
 				}
 				if err == nil && r.URL.Path == "/outcome" && test.externalCause {
 					// post closes the actual ACK after decoding it, before RunHTTP stops its watch.
@@ -799,12 +816,21 @@ type httpClientGatedWatchBody struct {
 	reader  io.Reader
 	trigger <-chan struct{}
 	reads   *atomic.Int32
+	closed  chan struct{}
 }
 
 func (b httpClientGatedWatchBody) Read(p []byte) (int, error) {
 	<-b.trigger
 	b.reads.Add(1)
 	return b.reader.Read(p)
+}
+
+func (b httpClientGatedWatchBody) Close() error {
+	err := b.ReadCloser.Close()
+	if b.closed != nil {
+		close(b.closed)
+	}
+	return err
 }
 
 type httpClientFailedWatchHeaders struct{ http.ResponseWriter }
