@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -181,16 +182,12 @@ func TestUnixExecutionOwnedWorker(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		type exchange struct {
-			result Result
-			err    error
-		}
-		done := make(chan exchange, 1)
+		done := make(chan httpServerTestResult, 1)
 		go func() {
 			result, err := core.Execute(ctx, fixture.job, fixture.sink)
-			done <- exchange{result, err}
+			done <- httpServerTestResult{result, err}
 		}()
-		var got exchange
+		var got httpServerTestResult
 		select {
 		case got = <-done:
 		case <-ctx.Done():
@@ -220,6 +217,7 @@ func TestUnixExecutionOwnedWorker(t *testing.T) {
 	if err != nil || len(records) != 2 {
 		t.Fatalf("durable usage records: %+v, %v", records, err)
 	}
+	sort.Slice(records, func(i, j int) bool { return records[i].ID < records[j].ID })
 	for index, record := range records {
 		if record.ID != strings.Repeat([]string{"a", "b"}[index], 32) || record.JobID != strings.Repeat(strconv.Itoa(index+1), 64) || record.Status != "succeeded" || record.CodexCalls != 1 || record.ClaudeCalls != 1 || record.Tokens != (usage.Tokens{Input: 2 * tokens.Input, CachedInput: 2 * tokens.CachedInput, Output: 2 * tokens.Output}) || !record.UsageComplete {
 			t.Fatalf("assignment %d usage checkpoint changed: %+v", index+1, record)
@@ -260,14 +258,10 @@ func TestUnixExecutionOwnedWorker(t *testing.T) {
 	if err := os.WriteFile(report+".third-go", []byte("go"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	type exchange struct {
-		result Result
-		err    error
-	}
-	thirdDone := make(chan exchange, 1)
+	thirdDone := make(chan httpServerTestResult, 1)
 	go func() {
 		result, err := core.Execute(ctx, third.job, gate)
-		thirdDone <- exchange{result, err}
+		thirdDone <- httpServerTestResult{result, err}
 	}()
 	select {
 	case <-saved:
@@ -291,7 +285,7 @@ func TestUnixExecutionOwnedWorker(t *testing.T) {
 	}
 	close(release)
 	gateReleased = true
-	var got exchange
+	var got httpServerTestResult
 	select {
 	case got = <-thirdDone:
 	case <-ctx.Done():
@@ -317,8 +311,17 @@ func TestUnixExecutionOwnedWorker(t *testing.T) {
 		t.Fatalf("canceled assignment changed initial private review ledger: %+v", private)
 	}
 	records, err = usage.ReadAll(store.Dir)
-	if err != nil || len(records) != 3 || records[2].ID != strings.Repeat("c", 32) || records[2].JobID != third.job.Identity.JobID || records[2].Status != "failed" || records[2].CodexCalls != 1 || records[2].ClaudeCalls != 0 || records[2].Tokens != tokens || !records[2].UsageComplete {
+	if err != nil || len(records) != 3 {
 		t.Fatalf("canceled assignment usage checkpoint: %+v error=%v", records, err)
+	}
+	sort.Slice(records, func(i, j int) bool { return records[i].ID < records[j].ID })
+	for index, record := range records[:2] {
+		if record.ID != strings.Repeat([]string{"a", "b"}[index], 32) || record.JobID != strings.Repeat(strconv.Itoa(index+1), 64) || record.Status != "succeeded" || record.CodexCalls != 1 || record.ClaudeCalls != 1 || record.Tokens != (usage.Tokens{Input: 2 * tokens.Input, CachedInput: 2 * tokens.CachedInput, Output: 2 * tokens.Output}) || !record.UsageComplete {
+			t.Fatalf("completed assignment %d usage changed after endpoint close: %+v", index+1, record)
+		}
+	}
+	if record := records[2]; record.ID != strings.Repeat("c", 32) || record.JobID != third.job.Identity.JobID || record.Status != "failed" || record.CodexCalls != 1 || record.ClaudeCalls != 0 || record.Tokens != tokens || !record.UsageComplete {
+		t.Fatalf("canceled assignment usage checkpoint: %+v", record)
 	}
 	if err := os.WriteFile(report+".release", []byte("release"), 0600); err != nil {
 		t.Fatal(err)

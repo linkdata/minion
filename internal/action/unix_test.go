@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -172,7 +173,7 @@ func TestUnixEndpointRejectsUnsafeDirectoryAndLongPath(t *testing.T) {
 }
 
 func TestUnixEndpointClosePreservesReplacement(t *testing.T) {
-	for _, kind := range []string{"socket", "runtime directory"} {
+	for _, kind := range []string{"socket", "runtime directory", "runtime permissions"} {
 		t.Run(kind, func(t *testing.T) {
 			dir := unixTestDirectory(t)
 			endpoint, err := ListenUnixExecution(dir, unixTestCore(t))
@@ -195,6 +196,11 @@ func TestUnixEndpointClosePreservesReplacement(t *testing.T) {
 				}
 				replacement.SetUnlinkOnClose(false)
 				t.Cleanup(func() { _ = replacement.Close() })
+			} else if kind == "runtime permissions" {
+				if err := os.Chmod(dir, 0755); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(dir, 0700) })
 			} else {
 				moved := dir + "-moved"
 				if err := os.Rename(dir, moved); err != nil {
@@ -217,11 +223,14 @@ func TestUnixEndpointClosePreservesReplacement(t *testing.T) {
 				t.Fatal("replacement fixture did not bind a distinct socket")
 			}
 			closeErr := endpoint.Close()
-			if closeErr == nil || !strings.Contains(closeErr.Error(), dir) {
+			if closeErr == nil || !strings.Contains(closeErr.Error(), path) {
 				t.Fatalf("replacement did not retain a concrete cleanup error: %v", closeErr)
 			}
 			if kind == "socket" && !strings.Contains(closeErr.Error(), "socket identity changed") {
 				t.Fatalf("replacement did not reach the socket identity check: %v", closeErr)
+			}
+			if kind == "runtime permissions" && !strings.Contains(closeErr.Error(), "0700 directory") {
+				t.Fatalf("unsafe runtime did not reach directory revalidation: %v", closeErr)
 			}
 			if again := endpoint.Close(); again != closeErr {
 				t.Fatalf("Close did not cache replacement error: first=%v next=%v", closeErr, again)
@@ -321,6 +330,167 @@ func TestUnixEndpointServesActualHTTPTransaction(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Unix HTTP transaction did not finish")
 	}
+}
+
+func TestUnixEndpointBoundsConnectionsWhileServingWatchAndControl(t *testing.T) {
+	job := testJob(command.Comment)
+	core := unixTestCore(t)
+	endpoint, err := ListenUnixExecution(unixTestDirectory(t), core)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unixTestCleanupEndpoint(t, endpoint)
+	if cap(endpoint.listener.slots) != 16 {
+		t.Fatalf("Unix connection limit = %d, want 16", cap(endpoint.listener.slots))
+	}
+	client, err := NewUnixExecutionClient(endpoint.SocketPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.CloseIdleConnections()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan httpServerTestResult, 1)
+	go func() {
+		result, err := core.Execute(ctx, job, runnerExecutionCheckpoints{})
+		done <- httpServerTestResult{result, err}
+	}()
+	unixTestPull(t, client, job)
+	tx := unixTestReady(t, core)
+	body, err := json.Marshal(httpJobBinding(job))
+	if err != nil {
+		t.Fatal(err)
+	}
+	watchRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, UnixExecutionBaseURL+"/cancel", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	watchRequest.Header.Set("Content-Type", "application/json")
+	watch, err := client.Do(watchRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer watch.Body.Close()
+	if watch.StatusCode != http.StatusOK || watch.Header.Get("Content-Type") != "application/json" {
+		t.Fatalf("watch was not admitted: status=%d headers=%v", watch.StatusCode, watch.Header)
+	}
+	var cancellation httpCancellation
+	watchDone := make(chan error, 1)
+	go func() { watchDone <- httpDecode(watch.Body, httpControlBytes, &cancellation) }()
+	call := CallUsage{Provider: job.Main.Provider, Role: roleMain, Round: 1, Tokens: usage.Tokens{Input: 7, Output: 2}, Complete: true}
+	fact := CallCheckpoint{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Call: callMetadata(call)}
+	unixTestAck(t, client, "/before", httpCall{Sequence: 1, Checkpoint: fact}, 1)
+	fact.Call = call
+	unixTestAck(t, client, "/after", httpCall{Sequence: 2, Checkpoint: fact}, 2)
+	status := Status{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Sequence: 1, WorkerState: "busy", Phase: "upload"}
+	unixTestAck(t, client, "/status", httpObservation{Status: status}, 1)
+	client.CloseIdleConnections()
+	waitSlots := func(want int) {
+		t.Helper()
+		timer := time.NewTimer(5 * time.Second)
+		defer timer.Stop()
+		tick := time.NewTicker(time.Millisecond)
+		defer tick.Stop()
+		for len(endpoint.listener.slots) != want {
+			select {
+			case <-tick.C:
+			case <-timer.C:
+				t.Fatalf("admitted Unix connections = %d, want %d", len(endpoint.listener.slots), want)
+			}
+		}
+	}
+	waitSlots(1) // Only the admitted watch remains after idle control connections close.
+	var stalled []net.Conn
+	t.Cleanup(func() {
+		// Close our incomplete headers before endpoint shutdown can wait for them.
+		for _, peer := range stalled {
+			_ = peer.Close()
+		}
+	})
+	for i := 1; i < cap(endpoint.listener.slots); i++ {
+		peer, err := net.DialTimeout("unix", endpoint.SocketPath(), 5*time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stalled = append(stalled, peer)
+		if err := peer.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := io.WriteString(peer, "POST /next HTTP/1.1\r\n"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	waitSlots(16) // Slots count only connections actually accepted by the listener.
+	overflow, err := net.DialTimeout("unix", endpoint.SocketPath(), 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer overflow.Close()
+	if err := overflow.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	var data [1]byte
+	if n, err := overflow.Read(data[:]); n != 0 || err == nil {
+		t.Fatalf("overflow connection reached HTTP serving: bytes=%q error=%v", data[:n], err)
+	} else if timeout, ok := err.(net.Error); ok && timeout.Timeout() {
+		t.Fatalf("overflow connection stayed open at the cap: %v", err)
+	}
+	if len(endpoint.listener.slots) != 16 {
+		t.Fatalf("overflow changed the admitted connection count: %d", len(endpoint.listener.slots))
+	}
+	if err := stalled[0].Close(); err != nil {
+		t.Fatal(err)
+	}
+	waitSlots(15)
+	status.Sequence = 2
+	unixTestAck(t, client, "/status", httpObservation{Status: status}, 2)
+	select {
+	case err := <-watchDone:
+		t.Fatalf("admitted watch ended before action cancellation: reply=%+v error=%v", cancellation, err)
+	default:
+	}
+	client.CloseIdleConnections()
+	waitSlots(15)
+	for _, peer := range stalled {
+		_ = peer.Close()
+	}
+	waitSlots(1)
+	closed := make(chan error, 1)
+	go func() { closed <- endpoint.Close() }()
+	select {
+	case <-tx.budget.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not stop the watched action")
+	}
+	select {
+	case err := <-watchDone:
+		if err != nil || cancellation.httpBinding != httpJobBinding(job) || cancellation.Reason != "canceled" {
+			t.Fatalf("connection pressure lost the admitted watch: reply=%+v error=%v", cancellation, err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("admitted watch did not report action cancellation")
+	}
+	_ = watch.Body.Close()
+	client.CloseIdleConnections()
+	want := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Calls: []CallUsage{call}}
+	unixTestAck(t, client, "/outcome", httpOutcome{Sequence: 3, Result: want, Failure: newHTTPFailure(context.Canceled)}, 3)
+	select {
+	case got := <-done:
+		if !errors.Is(got.err, context.Canceled) || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || !reflect.DeepEqual(got.result, want) {
+			t.Fatalf("connection pressure changed the known outcome: result=%+v error=%v", got.result, got.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("watched outcome did not finish")
+	}
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not join accepted connections")
+	}
+	waitSlots(0)
 }
 
 func TestUnixEndpointRejectsIncompleteBodiesWithoutBlockingClose(t *testing.T) {
@@ -507,7 +677,7 @@ func TestUnixEndpointCloseKeepsPaidSaveAndReceiptGraceAvailable(t *testing.T) {
 	after := make(chan httpServerTestExchange, 1)
 	go func() {
 		var ack httpAcknowledgement
-		status, err := unixTestJSON(client, "/after", httpCall{Sequence: 3, Checkpoint: f.call(call)}, &ack, httpControlBytes)
+		status, err := unixTestJSONContext(ctx, client, "/after", httpCall{Sequence: 3, Checkpoint: f.call(call)}, &ack, httpControlBytes)
 		after <- httpServerTestExchange{status: status, ack: ack, err: err}
 	}()
 	select {
@@ -625,12 +795,16 @@ func unixTestCleanupEndpoint(t *testing.T, endpoint *UnixEndpoint) {
 }
 
 func unixTestJSON(client *http.Client, path string, value, result any, limit int) (int, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return unixTestJSONContext(ctx, client, path, value, result, limit)
+}
+
+func unixTestJSONContext(ctx context.Context, client *http.Client, path string, value, result any, limit int) (int, error) {
 	body, err := json.Marshal(value)
 	if err != nil {
 		return 0, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, UnixExecutionBaseURL+path, bytes.NewReader(body))
 	if err != nil {
 		return 0, err

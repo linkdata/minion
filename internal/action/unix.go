@@ -16,10 +16,45 @@ import (
 // UnixExecutionBaseURL is the HTTP authority used by the fixed Unix client.
 const UnixExecutionBaseURL = "http://minion"
 
+const unixExecutionConnectionLimit = 16
+
+type unixExecutionListener struct {
+	*net.UnixListener
+	slots chan struct{}
+}
+
+// Bound parent connections independently of the worker's process limits.
+func (l *unixExecutionListener) Accept() (net.Conn, error) {
+	for {
+		connection, err := l.UnixListener.Accept()
+		if err != nil {
+			return nil, err
+		}
+		select {
+		case l.slots <- struct{}{}:
+			return &unixExecutionConn{Conn: connection, slots: l.slots}, nil
+		default:
+			_ = connection.Close()
+		}
+	}
+}
+
+type unixExecutionConn struct {
+	net.Conn
+	slots     chan struct{}
+	closeOnce sync.Once
+}
+
+func (c *unixExecutionConn) Close() error {
+	err := c.Conn.Close()
+	c.closeOnce.Do(func() { <-c.slots })
+	return err
+}
+
 // UnixEndpoint owns HTTP serving and its socket, but borrows the runtime directory.
 type UnixEndpoint struct {
 	executor   *HTTPExecutor
-	listener   *net.UnixListener
+	listener   *unixExecutionListener
 	server     *http.Server
 	socketPath string
 	directory  os.FileInfo
@@ -66,13 +101,14 @@ func ListenUnixExecution(runtimeDir string, executor *HTTPExecutor) (*UnixEndpoi
 		return nil, errors.Join(fmt.Errorf("prove execution socket %q; path retained: %w", socketPath, err), listener.Close())
 	}
 	e := &UnixEndpoint{
-		executor: executor, listener: listener,
+		executor:   executor,
+		listener:   &unixExecutionListener{UnixListener: listener, slots: make(chan struct{}, unixExecutionConnectionLimit)},
 		server:     &http.Server{Handler: executor, ReadHeaderTimeout: httpControlTimeout},
 		socketPath: socketPath, directory: directory, socket: socket,
 		serveDone: make(chan struct{}),
 	}
 	go func() {
-		if err := e.server.Serve(listener); !errors.Is(err, http.ErrServerClosed) {
+		if err := e.server.Serve(e.listener); !errors.Is(err, http.ErrServerClosed) {
 			e.serveErr = errors.Join(err, executor.Close())
 		}
 		close(e.serveDone)
@@ -98,7 +134,7 @@ func (e *UnixEndpoint) Close() error {
 func (e *UnixEndpoint) removeSocket() error {
 	directory, err := unixRuntimeDirectory(filepath.Dir(e.socketPath))
 	if err != nil {
-		return err
+		return fmt.Errorf("execution socket %q retained: %w", e.socketPath, err)
 	}
 	if !os.SameFile(e.directory, directory) {
 		return fmt.Errorf("execution socket %q retained: runtime directory identity changed", e.socketPath)
