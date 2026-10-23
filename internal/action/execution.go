@@ -149,6 +149,12 @@ func (c *executionCheckpoints) Review(fact ReviewCheckpoint) error {
 	if fact.CriticStopReason != "" && (!c.reviewed || !slices.Equal(fact.Calls, c.review.Calls) || !slices.Equal(fact.Refutations, c.review.Refutations)) {
 		return c.fail(checkpointContractError())
 	}
+	if added := len(fact.Refutations) - len(c.review.Refutations); added > 0 {
+		if added != 1 || len(c.calls) == 0 || len(c.review.Calls) == len(c.calls) ||
+			c.calls[len(c.calls)-1].Role != roleMain || fact.Refutations[len(fact.Refutations)-1].Round != c.calls[len(c.calls)-1].Round {
+			return c.fail(checkpointContractError())
+		}
+	}
 	result := Result{Version: fact.Version, Identity: fact.Identity, SourceRef: fact.SourceRef, Calls: fact.Calls, Refutations: fact.Refutations, CriticStopReason: fact.CriticStopReason}
 	if err := saveReviewEvidence(c.owner.WorkRoot, c.job, result, c.owner.Logger); err != nil {
 		if len(c.calls) == 0 {

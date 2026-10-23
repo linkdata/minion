@@ -261,6 +261,49 @@ func TestHTTPFailedOutcomeCannotChangeAcknowledgedReview(t *testing.T) {
 	}
 }
 
+func TestHTTPRejectsRefutationAddedAfterLaterCriticCall(t *testing.T) {
+	owner := newExecutionAdapterFixture(t, withClaudeCritic(testJob(command.Comment)))
+	want := privateReviewResult(owner.job)
+	f := newHTTPServerTest(t, context.Background(), owner.job, owner.sink, nil)
+	f.pull(t)
+	sequence := uint64(1)
+	f.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: owner.review(nil, nil, "")}, http.StatusOK, sequence)
+	sequence++
+	for i, call := range want.Calls[:4] {
+		f.ack(t, "/before", httpCall{Sequence: sequence, Checkpoint: owner.call(callMetadata(call))}, http.StatusOK, sequence)
+		sequence++
+		f.ack(t, "/after", httpCall{Sequence: sequence, Checkpoint: owner.call(call)}, http.StatusOK, sequence)
+		sequence++
+		f.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: owner.review(want.Calls[:i+1], nil, "")}, http.StatusOK, sequence)
+		sequence++
+	}
+	reviewPath := filepath.Join(owner.owner.WorkRoot, "reviews", owner.job.Identity.AttemptID+".json")
+	before, err := os.ReadFile(reviewPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	late := owner.review(want.Calls[:4], want.Refutations, "")
+	if err := (Result{Version: late.Version, Identity: late.Identity, SourceRef: late.SourceRef, Calls: late.Calls, Refutations: late.Refutations}).validate(owner.job, false); err != nil {
+		t.Fatalf("delayed refutation must otherwise satisfy the partial Result contract: %v", err)
+	}
+	ack := f.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: late}, http.StatusInternalServerError, sequence)
+	if ack.Failure == nil || !errors.Is(ack.Failure.err(), monitor.ErrTerminalJob) {
+		t.Fatalf("late refutation was acknowledged: %+v", ack)
+	}
+	after, err := os.ReadFile(reviewPath)
+	if err != nil || !bytes.Equal(before, after) || len(owner.sink.review.Refutations) != 0 {
+		t.Fatalf("late refutation changed acknowledged review: error=%v review=%+v", err, owner.sink.review)
+	}
+	sequence++
+	outcome := f.outcome(sequence, errors.New("worker stopped after rejected review"))
+	outcome.Result.Calls = slices.Clone(want.Calls[:4])
+	f.ack(t, "/outcome", outcome, http.StatusOK, sequence)
+	got := f.result(t)
+	if err := owner.sink.finish(got.result, got.err); !errors.Is(err, monitor.ErrTerminalJob) {
+		t.Fatalf("late refutation permitted a final result: %v", err)
+	}
+}
+
 func TestHTTPFailedOutcomeWithoutCriticCannotInventReview(t *testing.T) {
 	for _, field := range []string{"refutation", "decision"} {
 		t.Run(field, func(t *testing.T) {

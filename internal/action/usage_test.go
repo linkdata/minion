@@ -64,6 +64,7 @@ func TestUsageTracksBothModelRoles(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			tracked.usageCheckpoint.record.ExecutorID, tracked.usageCheckpoint.record.SourceRef = "local", strings.Repeat("a", 40)
 			for _, call := range []struct {
 				role     string
 				settings RoleSettings

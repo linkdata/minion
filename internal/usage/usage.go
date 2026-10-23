@@ -100,6 +100,7 @@ func (r Record) validate() error {
 	if (r.ExecutorID == "") != (r.SourceRef == "") ||
 		(r.ExecutorID != "" && !workspace.ValidIdentitySegment(r.ExecutorID)) ||
 		(r.SourceRef != "" && !workspace.ValidSHA(r.SourceRef)) ||
+		(r.UsageSource != "" && r.ExecutorID == "") ||
 		(r.UsageSource != "" && r.UsageSource != "executor_reported") {
 		return fmt.Errorf("usage record %s has invalid provenance", r.ID)
 	}

@@ -102,7 +102,7 @@ func TestUsageDetailsAndTables(t *testing.T) {
 		if code := runUsageWithOutput([]string{"-dir", dir, "-group-by", grouping}, &stdout, &stderr); code != 0 {
 			t.Fatalf("exit %d: %s", code, &stderr)
 		}
-		for _, text := range []string{"example-owner/example-repo", "175 total", "2 attempts with incomplete usage", "included in input", "lower bounds", "CODEX CALLS", "CLAUDE CALLS", "4 Codex calls, 3 Claude calls"} {
+		for _, text := range []string{"example-owner/example-repo", "175 total", "2 attempts with incomplete usage", "included in input", "may omit unknown token counts", "CODEX CALLS", "CLAUDE CALLS", "4 Codex calls, 3 Claude calls"} {
 			if !strings.Contains(stdout.String(), text) {
 				t.Errorf("%q output lacks %q: %s", grouping, text, &stdout)
 			}

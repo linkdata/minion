@@ -15,6 +15,7 @@ import (
 
 // retainedReview contains review evidence only, never a publication outcome.
 type retainedReview struct {
+	ReviewClaimOrigin                string       `json:"review_claim_origin,omitempty"`
 	CriticStopReason                 string       `json:"critic_stop_reason,omitempty"`
 	Identity                         Identity     `json:"identity"`
 	SourceRef                        string       `json:"source_ref"`
@@ -24,6 +25,8 @@ type retainedReview struct {
 	Calls                            []CallUsage  `json:"calls"`
 	Refutations                      []Refutation `json:"refutations"`
 }
+
+const reviewClaimOrigin = "executor_reported"
 
 // retainReviewEvidence validates and saves private review history for an accepted Job.
 // A failed call may leave a valid prefix; answer/change validation must not erase it.
@@ -76,6 +79,9 @@ func saveReviewEvidence(workRoot string, job Job, result Result, logger *log.Log
 		CriticConsecutiveNoBlockerRounds: job.CriticConsecutiveNoBlockerRounds,
 		Calls:                            result.Calls, Refutations: result.Refutations,
 	}
+	if len(record.Calls) != 0 || len(record.Refutations) != 0 || record.CriticStopReason != "" {
+		record.ReviewClaimOrigin = reviewClaimOrigin
+	}
 	data, err := json.Marshal(record)
 	if err != nil {
 		return err
@@ -94,7 +100,8 @@ func saveReviewEvidence(workRoot string, job Job, result Result, logger *log.Log
 		if err := json.Unmarshal(previous, &saved); err != nil {
 			return errors.New("saved review evidence is invalid")
 		}
-		if (saved.CriticStopReason != "" && saved.CriticStopReason != record.CriticStopReason) ||
+		if saved.ReviewClaimOrigin != record.ReviewClaimOrigin && (saved.ReviewClaimOrigin != "" || len(saved.Calls) != 0 || len(saved.Refutations) != 0 || saved.CriticStopReason != "") ||
+			(saved.CriticStopReason != "" && saved.CriticStopReason != record.CriticStopReason) ||
 			saved.Identity != record.Identity || saved.SourceRef != record.SourceRef ||
 			saved.CriticMaxRounds != record.CriticMaxRounds || saved.CriticNonblockingRounds != record.CriticNonblockingRounds ||
 			saved.CriticConsecutiveNoBlockerRounds != record.CriticConsecutiveNoBlockerRounds ||

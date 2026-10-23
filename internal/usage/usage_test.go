@@ -132,14 +132,19 @@ func TestSaveRejectsInvalidRecords(t *testing.T) {
 		"missing main provider":   func(r *Record) { r.Provider = "" },
 		"invalid main provider":   func(r *Record) { r.Provider = "unknown" },
 		"invalid critic provider": func(r *Record) { r.CriticProvider = "unknown" },
-		"invalid executor":        func(r *Record) { r.ExecutorID = "../foreign" },
-		"invalid source ref":      func(r *Record) { r.SourceRef = "foreign" },
-		"invalid usage source":    func(r *Record) { r.UsageSource = "verified_billing" },
-		"unpaired executor":       func(r *Record) { r.ExecutorID = "local" },
-		"negative input":          func(r *Record) { r.Tokens.Input = -1 },
-		"negative cache":          func(r *Record) { r.Tokens.CachedInput = -1 },
-		"negative output":         func(r *Record) { r.Tokens.Output = -1 },
-		"cache exceeds input":     func(r *Record) { r.Tokens.CachedInput = r.Tokens.Input + 1 },
+		"invalid executor": func(r *Record) {
+			r.ExecutorID, r.SourceRef = "../foreign", strings.Repeat("a", 40)
+		},
+		"invalid source ref": func(r *Record) {
+			r.ExecutorID, r.SourceRef = "local", "foreign"
+		},
+		"invalid usage source": func(r *Record) { r.UsageSource = "verified_billing" },
+		"unattributed claim":   func(r *Record) { r.UsageSource = "executor_reported" },
+		"unpaired executor":    func(r *Record) { r.ExecutorID = "local" },
+		"negative input":       func(r *Record) { r.Tokens.Input = -1 },
+		"negative cache":       func(r *Record) { r.Tokens.CachedInput = -1 },
+		"negative output":      func(r *Record) { r.Tokens.Output = -1 },
+		"cache exceeds input":  func(r *Record) { r.Tokens.CachedInput = r.Tokens.Input + 1 },
 	} {
 		t.Run(name, func(t *testing.T) {
 			dir := filepath.Join(t.TempDir(), "usage")
