@@ -171,22 +171,31 @@ func RunHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 			runner.logf("HTTP upload observation: %v", err)
 		}
 	}
-	if cause := context.Cause(actionCtx); errors.Is(cause, context.DeadlineExceeded) {
-		// A parent deadline reply can cancel the native call just before its local timer.
-		runErr = errors.Join(runErr, monitor.ErrTerminalJob, context.DeadlineExceeded)
-	} else if cause != nil {
-		runErr = errors.Join(runErr, cause)
+	cause := context.Cause(actionCtx)
+	if runErr == nil && httpWatchUncertainty(cause) {
+		// A completed result can resolve independent watch uncertainty through its receipt.
+		cause = nil
 	}
+	// A watch can cancel the child first; retain independent caller and budget failures.
+	cause = errors.Join(cause, context.Cause(ctx), httpExecutionContextError(deadlineCtx))
+	if errors.Is(cause, context.DeadlineExceeded) {
+		cause = errors.Join(cause, monitor.ErrTerminalJob)
+	}
+	runErr = errors.Join(runErr, cause)
 	outcomeErr := checkpoints.outcome(result, runErr)
 	stopWatch(errHTTPWatchStopped)
 	watchErr := <-watchDone
-	if outcomeErr == nil && context.Cause(watchCtx) == errHTTPWatchStopped && errors.Is(watchErr, monitor.ErrExecutionOutcomeUnknown) {
+	if outcomeErr == nil && context.Cause(watchCtx) == errHTTPWatchStopped && httpWatchUncertainty(watchErr) {
 		// Parent receipt is known. A watch-only protocol failure during upload
 		// cannot revoke it; errors already captured in runErr still propagate.
 		runner.logf("HTTP cancellation watch: %q", httpFailureDiagnostic(watchErr.Error()))
 		watchErr = nil
 	}
-	return errors.Join(runErr, outcomeErr, watchErr)
+	callerErr := context.Cause(ctx)
+	if errors.Is(callerErr, context.DeadlineExceeded) {
+		callerErr = errors.Join(callerErr, monitor.ErrTerminalJob)
+	}
+	return errors.Join(runErr, outcomeErr, watchErr, callerErr)
 }
 
 func httpClientUnknown(kind string, err error) error {

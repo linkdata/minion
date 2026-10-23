@@ -72,6 +72,14 @@ func newHTTPFailure(err error) *httpFailure {
 	return failure
 }
 
+// Independent control uncertainty cannot erase an actual execution or process-safety fact.
+func httpWatchUncertainty(err error) bool {
+	f := newHTTPFailure(err)
+	return f != nil && f.OutcomeUnknown && !f.Terminal && !f.Unsafe &&
+		!f.Descendants && !f.Unconfirmed && !f.ScopeUnconfirmed && !f.Exhausted &&
+		!f.MissingExecutable && !f.NoSpace && !f.QuotaExceeded && !f.OutputLimit
+}
+
 func (f *httpFailure) validate() error {
 	if f == nil {
 		return nil

@@ -656,12 +656,16 @@ func TestRunHTTPStalledStatusCannotConsumeOutcomeGrace(t *testing.T) {
 
 func TestRunHTTPOutcomeACKPreservesKnownReceiptAfterWatchFailure(t *testing.T) {
 	for _, test := range []struct {
-		name          string
-		early         bool
-		truncated     bool
-		malformedACK  bool
-		externalCause bool
-		duringOutcome bool
+		name                string
+		early               bool
+		truncated           bool
+		malformedACK        bool
+		externalCause       bool
+		duringOutcome       bool
+		duringUpload        bool
+		callerBeforeOutcome bool
+		expiredAfterWatch   bool
+		processFailure      bool
 	}{
 		{name: "malformed watch after ACK"},
 		{name: "truncated watch after ACK", truncated: true},
@@ -669,20 +673,42 @@ func TestRunHTTPOutcomeACKPreservesKnownReceiptAfterWatchFailure(t *testing.T) {
 		{name: "watch failure stops Runner", early: true},
 		{name: "malformed final ACK stays unknown", malformedACK: true},
 		{name: "external caller cause after ACK", externalCause: true},
+		{name: "malformed watch during upload Status", duringUpload: true},
+		{name: "upload watch and malformed final ACK", duringUpload: true, malformedACK: true},
+		{name: "watch first then caller cause before outcome", duringUpload: true, callerBeforeOutcome: true},
+		{name: "watch first then caller cause after ACK", duringUpload: true, externalCause: true},
+		{name: "accepted expiry after upload watch", duringUpload: true, expiredAfterWatch: true},
+		{name: "process failure during upload watch", duringUpload: true, processFailure: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			f := newExecutionAdapterFixture(t, testJob(command.Comment))
+			job := testJob(command.Comment)
+			if test.expiredAfterWatch {
+				job.RuntimeBudget = 2 * time.Second
+			}
+			f := newExecutionAdapterFixture(t, job)
 			store := f.startUsage()
 			parent := newHTTPServerTest(t, context.Background(), f.job, f.sink, nil)
 			started := make(chan struct{})
 			outcomeEntered, watchClosed := make(chan struct{}), make(chan struct{})
+			uploadEntered := make(chan struct{})
 			ctx, cancel := context.WithCancelCause(context.Background())
 			externalCause := errors.Join(processgroup.ErrScopeUnconfirmed, monitor.ErrExecutionOutcomeUnknown)
-			var native, outcomes, faultReads atomic.Int32
+			var native, outcomes, faultReads, observations atomic.Int32
 			client := *parent.server.Client()
 			client.Timeout = 0
 			underlying := client.Transport
 			client.Transport = httpClientTestTransport(func(r *http.Request) (*http.Response, error) {
+				if test.duringUpload && r.URL.Path == "/status" && observations.Add(1) == 2 {
+					close(uploadEntered)
+					<-r.Context().Done() // The watch must cancel the optional request before its cause is sampled.
+					if test.callerBeforeOutcome {
+						cancel(externalCause)
+					}
+					if test.expiredAfterWatch {
+						<-parent.tx.budget.Done() // The real accepted expiry follows the watch's child cancellation.
+					}
+					return nil, r.Context().Err()
+				}
 				if r.URL.Path == "/outcome" {
 					outcomes.Add(1)
 					if test.duringOutcome {
@@ -701,11 +727,15 @@ func TestRunHTTPOutcomeACKPreservesKnownReceiptAfterWatchFailure(t *testing.T) {
 						trigger = started
 					} else if test.duringOutcome {
 						trigger = outcomeEntered
+					} else if test.duringUpload {
+						trigger = uploadEntered
 					}
 					var reader io.Reader = strings.NewReader("{")
 					if test.truncated {
 						reader = iotest.ErrReader(io.ErrUnexpectedEOF)
-					} else if test.externalCause {
+					} else if test.processFailure {
+						reader = iotest.ErrReader(externalCause)
+					} else if test.externalCause && !test.duringUpload {
 						reader = iotest.ErrReader(context.Canceled)
 					}
 					var closed chan struct{}
@@ -757,12 +787,21 @@ func TestRunHTTPOutcomeACKPreservesKnownReceiptAfterWatchFailure(t *testing.T) {
 				t.Fatal("worker did not drain its outcome and gated watch")
 			}
 			got := parent.result(t)
-			unknown := test.early || test.malformedACK || test.externalCause
-			if errors.Is(workerErr, monitor.ErrExecutionOutcomeUnknown) != unknown || !unknown && workerErr != nil || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) != test.early || !test.early && got.err != nil || native.Load() != 1 || outcomes.Load() != 1 || faultReads.Load() == 0 || len(got.result.Calls) != 1 {
+			callerFailure := test.externalCause || test.callerBeforeOutcome
+			workerUnknown := test.early || test.malformedACK || callerFailure || test.processFailure
+			parentUnknown := test.early || test.callerBeforeOutcome || test.processFailure
+			workerFailed, parentFailed := workerUnknown || test.expiredAfterWatch, parentUnknown || test.expiredAfterWatch
+			if errors.Is(workerErr, monitor.ErrExecutionOutcomeUnknown) != workerUnknown || (workerErr != nil) != workerFailed || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) != parentUnknown || (got.err != nil) != parentFailed || native.Load() != 1 || outcomes.Load() != 1 || faultReads.Load() == 0 || len(got.result.Calls) != 1 || test.duringUpload && observations.Load() != 2 {
 				t.Fatalf("watch drain changed known receipt or erased earlier failure: worker=%v parent=%v result=%+v native=%d outcomes=%d reads=%d", workerErr, got.err, got.result, native.Load(), outcomes.Load(), faultReads.Load())
 			}
-			if test.externalCause && (!errors.Is(workerErr, externalCause) || !errors.Is(workerErr, processgroup.ErrScopeUnconfirmed) || context.Cause(ctx) != externalCause) {
+			if callerFailure && (!errors.Is(workerErr, externalCause) || context.Cause(ctx) != externalCause) {
 				t.Fatalf("known receipt erased original caller cause: worker=%v caller=%v", workerErr, context.Cause(ctx))
+			}
+			if errors.Is(workerErr, processgroup.ErrScopeUnconfirmed) != (callerFailure || test.processFailure) || errors.Is(got.err, processgroup.ErrScopeUnconfirmed) != (test.callerBeforeOutcome || test.processFailure) || test.processFailure && !errors.Is(workerErr, externalCause) {
+				t.Fatalf("watch handling erased or invented process uncertainty: worker=%v parent=%v", workerErr, got.err)
+			}
+			if test.expiredAfterWatch && (!errors.Is(workerErr, monitor.ErrTerminalJob) || !errors.Is(workerErr, context.DeadlineExceeded) || !errors.Is(got.err, monitor.ErrTerminalJob) || !errors.Is(got.err, context.DeadlineExceeded)) {
+				t.Fatalf("watch child cancellation masked accepted expiry: worker=%v parent=%v", workerErr, got.err)
 			}
 			call := got.result.Calls[0]
 			if call.Tokens != tokens || call.Complete == test.early || !slices.Equal(f.sink.calls, got.result.Calls) || f.sink.pending != nil {
@@ -772,7 +811,7 @@ func TestRunHTTPOutcomeACKPreservesKnownReceiptAfterWatchFailure(t *testing.T) {
 				if !errors.Is(workerErr, context.Canceled) || got.result.Answer != "" || !errors.Is(f.sink.finish(got.result, got.err), monitor.ErrExecutionOutcomeUnknown) {
 					t.Fatalf("watch error that stopped Runner became success: worker=%v parent=%v result=%+v", workerErr, got.err, got.result)
 				}
-			} else if got.result.Answer != "Known candidate" || got.result.Validate(f.job) != nil || f.sink.finish(got.result, got.err) != nil {
+			} else if got.result.Answer != "Known candidate" || got.result.Validate(f.job) != nil || (f.sink.finish(got.result, got.err) != nil) != parentFailed {
 				t.Fatalf("known parent receipt was altered by independent watch failure: result=%+v parent=%v", got.result, got.err)
 			}
 			records, err := usage.ReadAll(store.Dir)
