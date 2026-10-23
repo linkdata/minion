@@ -1,0 +1,558 @@
+package action
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
+	"reflect"
+	"runtime"
+	"slices"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/linkdata/minion/internal/command"
+	"github.com/linkdata/minion/internal/monitor"
+	"github.com/linkdata/minion/internal/usage"
+)
+
+func TestUnixEndpointRejectsOccupiedSocketWithoutRemovingIt(t *testing.T) {
+	for _, kind := range []string{"regular file", "stale socket", "symlink", "directory"} {
+		t.Run(kind, func(t *testing.T) {
+			dir := unixTestDirectory(t)
+			path := filepath.Join(dir, "execution.sock")
+			switch kind {
+			case "regular file":
+				if err := os.WriteFile(path, []byte("caller data"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			case "stale socket":
+				listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				listener.SetUnlinkOnClose(false)
+				if err := listener.Close(); err != nil {
+					t.Fatal(err)
+				}
+			case "symlink":
+				if err := os.Symlink("caller-target", path); err != nil {
+					t.Fatal(err)
+				}
+			case "directory":
+				if err := os.Mkdir(path, 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, err := os.Lstat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			core := unixTestCore(t)
+			endpoint, err := ListenUnixExecution(dir, core)
+			if endpoint != nil {
+				_ = endpoint.Close()
+			}
+			if err == nil || endpoint != nil || !strings.Contains(err.Error(), path) {
+				t.Fatalf("occupied socket was accepted or lost its reference: endpoint=%v error=%v", endpoint, err)
+			}
+			after, err := os.Lstat(path)
+			if err != nil || !os.SameFile(before, after) {
+				t.Fatalf("constructor removed or replaced caller entry: %v", err)
+			}
+			if kind == "regular file" {
+				if data, err := os.ReadFile(path); err != nil || string(data) != "caller data" {
+					t.Fatalf("constructor changed caller data: %q %v", data, err)
+				}
+			}
+			if kind != "stale socket" {
+				client, err := NewUnixExecutionClient(path)
+				if client != nil {
+					client.CloseIdleConnections()
+				}
+				if err == nil || client != nil {
+					t.Fatalf("Unix client accepted a non-socket entry: client=%v error=%v", client, err)
+				}
+			}
+			core.mu.Lock()
+			closed := core.closed
+			core.mu.Unlock()
+			if closed {
+				t.Fatal("failed constructor took ownership of the caller's executor")
+			}
+		})
+	}
+}
+
+func TestUnixEndpointRejectsUnsafeDirectoryAndLongPath(t *testing.T) {
+	for _, kind := range []string{"public directory", "regular file", "symlink directory", "symlink ancestor", "relative", "missing", "overlong socket"} {
+		t.Run(kind, func(t *testing.T) {
+			base := unixTestDirectory(t)
+			dir := filepath.Join(base, "runtime")
+			if err := os.Mkdir(dir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			switch kind {
+			case "public directory":
+				if err := os.Chmod(dir, 0755); err != nil {
+					t.Fatal(err)
+				}
+			case "regular file":
+				if err := os.Remove(dir); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(dir, []byte("caller"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			case "symlink directory", "symlink ancestor":
+				link := filepath.Join(base, "link")
+				if err := os.Symlink(dir, link); err != nil {
+					t.Fatal(err)
+				}
+				dir = link
+				if kind == "symlink ancestor" {
+					if err := os.Mkdir(filepath.Join(link, "child"), 0700); err != nil {
+						t.Fatal(err)
+					}
+					dir = filepath.Join(link, "child")
+				}
+			case "relative":
+				cwd, err := os.Getwd()
+				if err != nil {
+					t.Fatal(err)
+				}
+				dir, err = filepath.Rel(cwd, dir)
+				if err != nil {
+					t.Fatal(err)
+				}
+			case "missing":
+				dir = filepath.Join(base, "missing")
+			case "overlong socket":
+				dir = filepath.Join(base, strings.Repeat("x", 110))
+				if err := os.Mkdir(dir, 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, beforeErr := os.Lstat(dir)
+			endpoint, err := ListenUnixExecution(dir, unixTestCore(t))
+			if endpoint != nil {
+				_ = endpoint.Close()
+			}
+			if err == nil || endpoint != nil {
+				t.Fatalf("unsafe pathname accepted: %q endpoint=%v error=%v", dir, endpoint, err)
+			}
+			if beforeErr == nil {
+				after, err := os.Lstat(dir)
+				if err != nil || !os.SameFile(before, after) || before.Mode() != after.Mode() {
+					t.Fatalf("failed admission changed caller placement: %v", err)
+				}
+			}
+			if kind != "regular file" {
+				if _, err := os.Lstat(filepath.Join(dir, "execution.sock")); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("failed admission left a socket: %v", err)
+				}
+			}
+		})
+	}
+	dir := unixTestDirectory(t)
+	if endpoint, err := ListenUnixExecution(dir, nil); endpoint != nil || err == nil {
+		t.Fatalf("nil executor accepted: endpoint=%v error=%v", endpoint, err)
+	}
+}
+
+func TestUnixEndpointClosePreservesReplacement(t *testing.T) {
+	for _, kind := range []string{"socket", "runtime directory"} {
+		t.Run(kind, func(t *testing.T) {
+			dir := unixTestDirectory(t)
+			endpoint, err := ListenUnixExecution(dir, unixTestCore(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			unixTestCleanupEndpoint(t, endpoint)
+			path := endpoint.SocketPath()
+			original, err := os.Lstat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if kind == "socket" {
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte("replacement"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				moved := dir + "-moved"
+				if err := os.Rename(dir, moved); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.RemoveAll(moved) })
+				if err := os.Mkdir(dir, 0700); err != nil {
+					t.Fatal(err)
+				}
+				// Preserve the socket inode while replacing its directory, isolating the directory identity check.
+				if err := os.Rename(filepath.Join(moved, "execution.sock"), path); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, err := os.Lstat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			closeErr := endpoint.Close()
+			if closeErr == nil || !strings.Contains(closeErr.Error(), dir) {
+				t.Fatalf("replacement did not retain a concrete cleanup error: %v", closeErr)
+			}
+			if again := endpoint.Close(); again != closeErr {
+				t.Fatalf("Close did not cache replacement error: first=%v next=%v", closeErr, again)
+			}
+			after, err := os.Lstat(path)
+			if err != nil || !os.SameFile(before, after) {
+				t.Fatalf("Close deleted or changed replacement: %v", err)
+			}
+			if kind == "runtime directory" {
+				if !os.SameFile(original, after) {
+					t.Fatal("runtime replacement fixture lost the original socket identity")
+				}
+				if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+					t.Fatalf("Close removed replacement runtime directory: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestUnixEndpointConcurrentCloseRetainsBorrowedDirectory(t *testing.T) {
+	dir := unixTestDirectory(t)
+	before, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoint, err := ListenUnixExecution(dir, unixTestCore(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	unixTestCleanupEndpoint(t, endpoint)
+	const callers = 8
+	start, done := make(chan struct{}), make(chan error, callers)
+	for i := 0; i < callers; i++ {
+		go func() { <-start; done <- endpoint.Close() }()
+	}
+	close(start)
+	for i := 0; i < callers; i++ {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("concurrent Close did not join serving")
+		}
+	}
+	if err := endpoint.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(endpoint.SocketPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("owned socket was not removed: %v", err)
+	}
+	after, err := os.Stat(dir)
+	if err != nil || !os.SameFile(before, after) {
+		t.Fatalf("endpoint removed the borrowed directory: %v", err)
+	}
+}
+
+func TestUnixEndpointServesActualHTTPTransaction(t *testing.T) {
+	job := testJob(command.Comment)
+	core := unixTestCore(t)
+	endpoint, err := ListenUnixExecution(unixTestDirectory(t), core)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unixTestCleanupEndpoint(t, endpoint)
+	client, err := NewUnixExecutionClient(endpoint.SocketPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.CloseIdleConnections()
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok || transport.Proxy != nil || client.Timeout != 0 || transport.ResponseHeaderTimeout != 0 {
+		t.Fatal("Unix client added proxy fallback or a whole-request/held-header deadline")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan httpServerTestResult, 1)
+	go func() {
+		result, err := core.Execute(ctx, job, runnerExecutionCheckpoints{})
+		done <- httpServerTestResult{result, err}
+	}()
+	unixTestPull(t, client, job)
+	call := CallUsage{Provider: job.Main.Provider, Role: roleMain, Round: 1, Tokens: usage.Tokens{Input: 7, Output: 2}, Complete: true}
+	fact := CallCheckpoint{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Call: callMetadata(call)}
+	unixTestAck(t, client, "/before", httpCall{Sequence: 1, Checkpoint: fact}, 1)
+	fact.Call = call
+	unixTestAck(t, client, "/after", httpCall{Sequence: 2, Checkpoint: fact}, 2)
+	want := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Unix result", Calls: []CallUsage{call}}
+	unixTestAck(t, client, "/outcome", httpOutcome{Sequence: 3, Result: want}, 3)
+	select {
+	case got := <-done:
+		if got.err != nil || !reflect.DeepEqual(got.result, want) || got.result.Validate(job) != nil {
+			t.Fatalf("Unix HTTP changed the bound result: result=%+v error=%v", got.result, got.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Unix HTTP transaction did not finish")
+	}
+}
+
+func TestUnixEndpointUnexpectedListenerFailureWakesExecute(t *testing.T) {
+	core := unixTestCore(t)
+	endpoint, err := ListenUnixExecution(unixTestDirectory(t), core)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unixTestCleanupEndpoint(t, endpoint)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan httpServerTestResult, 1)
+	go func() {
+		result, err := core.Execute(ctx, testJob(command.Comment), runnerExecutionCheckpoints{})
+		done <- httpServerTestResult{result, err}
+	}()
+	_ = unixTestReady(t, core)
+	if err := endpoint.listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-done:
+		if !errors.Is(got.err, context.Canceled) || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || len(got.result.Calls) != 0 {
+			t.Fatalf("unexpected Serve exit left a pending assignment: result=%+v error=%v", got.result, got.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("unexpected listener failure did not wake pending Execute")
+	}
+	closeErr := endpoint.Close()
+	if !errors.Is(closeErr, net.ErrClosed) || endpoint.Close() != closeErr {
+		t.Fatalf("unexpected Serve error was lost or not cached: %v", closeErr)
+	}
+	if _, err := os.Lstat(endpoint.SocketPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed Serve left the still-owned socket: %v", err)
+	}
+}
+
+func TestUnixEndpointCloseKeepsPaidSaveAndReceiptGraceAvailable(t *testing.T) {
+	f := newExecutionAdapterFixture(t, withClaudeCritic(testJob(command.Comment)))
+	store := f.startUsage()
+	entered, release := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	core := unixTestCore(t)
+	endpoint, err := ListenUnixExecution(unixTestDirectory(t), core)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unixTestCleanupEndpoint(t, endpoint)
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+	client, err := NewUnixExecutionClient(endpoint.SocketPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.CloseIdleConnections()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan httpServerTestResult, 1)
+	sink := runnerExecutionCheckpoints{before: f.sink.BeforeCall, review: f.sink.Review, after: func(fact CallCheckpoint) error {
+		if err := f.sink.AfterCall(fact); err != nil {
+			return err
+		}
+		close(entered)
+		<-release
+		return nil
+	}}
+	go func() { result, err := core.Execute(ctx, f.job, sink); done <- httpServerTestResult{result, err} }()
+	unixTestPull(t, client, f.job)
+	tx := unixTestReady(t, core)
+	unixTestAck(t, client, "/review", httpReview{Sequence: 1, Checkpoint: f.review(nil, nil, "")}, 1)
+	call := CallUsage{Provider: f.job.Main.Provider, Role: roleMain, Round: 1, Tokens: usage.Tokens{Input: 31, Output: 2}, Complete: true}
+	unixTestAck(t, client, "/before", httpCall{Sequence: 2, Checkpoint: f.call(callMetadata(call))}, 2)
+	after := make(chan httpServerTestExchange, 1)
+	go func() {
+		var ack httpAcknowledgement
+		status, err := unixTestJSON(client, "/after", httpCall{Sequence: 3, Checkpoint: f.call(call)}, &ack, httpControlBytes)
+		after <- httpServerTestExchange{status: status, ack: ack, err: err}
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("paid durable save was not entered")
+	}
+	records, err := usage.ReadAll(store.Dir)
+	if err != nil || len(records) != 1 || records[0].CodexCalls != 1 || !records[0].UsageComplete || records[0].Tokens != call.Tokens {
+		t.Fatalf("entered paid callback did not retain exact accounting: records=%+v error=%v", records, err)
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- endpoint.Close() }()
+	select {
+	case <-tx.budget.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("endpoint Close did not stop the core action")
+	}
+	select {
+	case err := <-closed:
+		t.Fatalf("endpoint Close abandoned the entered paid callback: %v", err)
+	default:
+	}
+	probe, err := NewUnixExecutionClient(endpoint.SocketPath())
+	if err != nil {
+		t.Fatalf("Close removed the endpoint before callback drain: %v", err)
+	}
+	defer probe.CloseIdleConnections()
+	status := Status{Version: ProtocolVersion, Identity: f.job.Identity, SourceRef: f.job.Source.Head, Sequence: 1, WorkerState: "busy", Phase: "upload"}
+	unixTestAck(t, probe, "/status", httpObservation{Status: status}, 1)
+	releaseOnce.Do(func() { close(release) })
+	select {
+	case got := <-after:
+		if got.err != nil || got.status != http.StatusOK || got.ack.Sequence != 3 || got.ack.Failure != nil {
+			t.Fatalf("Close lost paid receipt acknowledgement: %+v", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("paid receipt did not drain after gate release")
+	}
+	calls := []CallUsage{call}
+	unixTestAck(t, client, "/review", httpReview{Sequence: 4, Checkpoint: f.review(calls, nil, "")}, 4)
+	want := f.result(calls, nil, "")
+	unixTestAck(t, client, "/outcome", httpOutcome{Sequence: 5, Result: want, Failure: newHTTPFailure(context.Canceled)}, 5)
+	select {
+	case got := <-done:
+		if !errors.Is(got.err, context.Canceled) || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || !reflect.DeepEqual(got.result, want) || !errors.Is(f.sink.finish(got.result, got.err), context.Canceled) {
+			t.Fatalf("Close lost known paid outcome: result=%+v error=%v", got.result, got.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("paid outcome did not finish")
+	}
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("endpoint did not join paid handler drain")
+	}
+	saved := readPrivateReview(t, f.owner.WorkRoot)
+	if !slices.Equal(saved.Calls, calls) || saved.CriticStopReason != "" || len(saved.Refutations) != 0 {
+		t.Fatalf("Close changed the durable private receipt prefix: %+v", saved)
+	}
+}
+
+func unixTestDirectory(t *testing.T) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("pathname Unix sockets require Unix")
+	}
+	parent, err := filepath.EvalSymlinks(os.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir, err := os.MkdirTemp(parent, "mn-u-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
+func unixTestCore(t *testing.T) *HTTPExecutor {
+	t.Helper()
+	core, err := NewHTTPExecutor("local")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = core.Close() })
+	return core
+}
+
+func unixTestCleanupEndpoint(t *testing.T, endpoint *UnixEndpoint) {
+	t.Helper()
+	t.Cleanup(func() {
+		if tx := endpoint.executor.transaction(); tx != nil {
+			// Match existing HTTP fixture failure cleanup; normal proofs use the real control grace.
+			tx.mutation.Lock()
+			tx.mu.Lock()
+			tx.fenced = true
+			select {
+			case <-tx.done:
+			default:
+				close(tx.done)
+			}
+			tx.mu.Unlock()
+			tx.mutation.Unlock()
+		}
+		_ = endpoint.Close()
+	})
+}
+
+func unixTestJSON(client *http.Client, path string, value, result any, limit int) (int, error) {
+	body, err := json.Marshal(value)
+	if err != nil {
+		return 0, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, UnixExecutionBaseURL+path, bytes.NewReader(body))
+	if err != nil {
+		return 0, err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := client.Do(request)
+	if err != nil {
+		return 0, err
+	}
+	defer response.Body.Close()
+	return response.StatusCode, httpDecode(response.Body, limit, result)
+}
+
+func unixTestAck(t *testing.T, client *http.Client, path string, value any, sequence uint64) {
+	t.Helper()
+	var ack httpAcknowledgement
+	status, err := unixTestJSON(client, path, value, &ack, httpControlBytes)
+	if err != nil || status != http.StatusOK || ack.Kind != strings.TrimPrefix(path, "/") || ack.Sequence != sequence || ack.Failure != nil {
+		t.Fatalf("Unix %s acknowledgement: status=%d ack=%+v error=%v", path, status, ack, err)
+	}
+}
+
+func unixTestPull(t *testing.T, client *http.Client, job Job) {
+	t.Helper()
+	var assignment httpAssignment
+	status, err := unixTestJSON(client, "/next", httpPull{Version: ProtocolVersion, ExecutorID: job.Identity.ExecutorID}, &assignment, httpJobBytes)
+	if err != nil || status != http.StatusOK || !reflect.DeepEqual(assignment.Job, job) || assignment.Expires <= time.Now().UnixNano() {
+		t.Fatalf("Unix assignment: status=%d job=%+v error=%v", status, assignment, err)
+	}
+}
+
+func unixTestReady(t *testing.T, core *HTTPExecutor) *httpTransaction {
+	t.Helper()
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+	for {
+		core.mu.Lock()
+		tx, changed := core.active, core.changed
+		if tx != nil {
+			tx.mu.Lock()
+			ready := tx.ready
+			tx.mu.Unlock()
+			if ready {
+				core.mu.Unlock()
+				return tx
+			}
+		}
+		core.mu.Unlock()
+		select {
+		case <-changed:
+		case <-timer.C:
+			t.Fatal("Unix assignment did not become ready")
+		}
+	}
+}
