@@ -18,22 +18,25 @@ import (
 	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/usage"
+	"github.com/linkdata/minion/internal/workroot"
 )
 
 type httpNetworkAction func(context.Context, monitor.Job) error
 
 func (f httpNetworkAction) Execute(ctx context.Context, job monitor.Job) error { return f(ctx, job) }
 
-func TestHTTPWatchAdmissionTransportFailurePreservesMonitorPolicy(t *testing.T) {
+func TestHTTPWatchAdmissionWorkerClaimsDoNotRefundMonitorAttempts(t *testing.T) {
 	installActionTestSkills(t, testReviewSkillURL)
 	for _, test := range []struct {
 		name           string
 		unknown        bool
+		unsafeClaim    bool
 		controlTimeout bool
 	}{
-		{name: "known no work"},
+		{name: "worker transport claim"},
+		{name: "worker transport and unsafe claims", unsafeClaim: true},
 		{name: "transport joined with unknown", unknown: true},
-		{name: "watch header control timeout", controlTimeout: true},
+		{name: "worker watch header control timeout", controlTimeout: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			now := time.Date(2026, 10, 23, 8, 0, 0, 0, time.UTC)
@@ -81,8 +84,11 @@ func TestHTTPWatchAdmissionTransportFailurePreservesMonitorPolicy(t *testing.T) 
 						_ = r.Body.Close()
 						var cause error = io.ErrUnexpectedEOF
 						if test.unknown {
-							// Exercise precedence of an explicitly joined unknown fact, not a paid call.
+							// Unknown outcomes remain terminal even without a paid call.
 							cause = errors.Join(cause, monitor.ErrExecutionOutcomeUnknown)
+						}
+						if test.unsafeClaim {
+							cause = errors.Join(cause, workroot.ErrUnsafe)
 						}
 						return nil, cause // http.Client wraps the real failed request in *url.Error.
 					}
@@ -100,8 +106,8 @@ func TestHTTPWatchAdmissionTransportFailurePreservesMonitorPolicy(t *testing.T) 
 					t.Fatalf("watch failure lost its known no-work outcome: worker=%v parent=%v finish=%v raw=%+v", workerErr, got.err, finalErr, got.result)
 				}
 				var restored *url.Error
-				if !errors.Is(finalErr, monitor.ErrRequestTransport) || errors.As(finalErr, &restored) {
-					t.Fatalf("parent lost finite transport policy or fabricated request metadata: %v", finalErr)
+				if errors.Is(finalErr, monitor.ErrRequestTransport) || errors.Is(finalErr, workroot.ErrUnsafe) || errors.As(finalErr, &restored) {
+					t.Fatalf("worker claim changed parent transport or unsafe policy: %v", finalErr)
 				}
 				if test.controlTimeout && (!errors.Is(workerErr, context.DeadlineExceeded) || !errors.Is(workerErr, monitor.ErrRequestTransport) || !errors.Is(finalErr, context.DeadlineExceeded) || ctx.Err() != nil) {
 					t.Fatalf("request control timeout became an action expiry: worker=%v parent=%v caller=%v", workerErr, finalErr, ctx.Err())
@@ -119,23 +125,33 @@ func TestHTTPWatchAdmissionTransportFailurePreservesMonitorPolicy(t *testing.T) 
 				Commands:     map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{testReviewSkillURL}}},
 				Repositories: []config.Repository{{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"comment"}, AllowedActors: []string{"writer"}, AllowedActorIDs: map[string]int64{"writer": 7}}}},
 				GitHub: gh, Handler: handler, Now: func() time.Time { return clock }}
-			polls := 4
-			wantProcessed, wantExecutions := 0, int32(polls)
+			polls, wantProcessed := 3, 1
 			if test.controlTimeout {
-				polls, wantExecutions = 1, 1
+				polls, wantProcessed = 1, 0
 			}
 			if test.unknown {
-				wantProcessed, wantExecutions = 1, 1
+				polls = 1
 			}
 			for poll := 0; poll < polls; poll++ {
 				_, err := m.RunOnce(context.Background(), store)
-				if (err == nil) != test.unknown || len(store.Data.JobFailures) != 0 || store.Data.UnconfirmedProcessJob != "" || len(store.Data.Processed) != wantProcessed {
-					t.Fatalf("transport refund or unknown precedence changed on poll %d: error=%v state=%+v", poll, err, store.Data)
+				wantErr := test.controlTimeout || !test.unknown && poll < polls-1
+				wantFailures, processed := 0, wantProcessed
+				if wantErr {
+					wantFailures, processed = 1, 0
+				}
+				if (err != nil) != wantErr || len(store.Data.JobFailures) != wantFailures || store.Data.UnconfirmedProcessJob != "" || len(store.Data.Processed) != processed {
+					t.Fatalf("worker claim refunded an attempt or changed unknown precedence on poll %d: error=%v state=%+v", poll, err, store.Data)
+				}
+				for _, failure := range store.Data.JobFailures {
+					if failure.Attempts != poll+1 {
+						t.Fatalf("worker claim refunded attempt %d: %+v", poll+1, failure)
+					}
 				}
 				clock = clock.Add(10 * time.Minute)
 			}
+			wantExecutions := int32(polls)
 			if executions.Load() != wantExecutions || admissions.Load() != wantExecutions || outcomes.Load() != wantExecutions || native.Load() != 0 {
-				t.Fatalf("known failure exhausted retries or unknown work repeated: executions=%d admissions=%d outcomes=%d native=%d", executions.Load(), admissions.Load(), outcomes.Load(), native.Load())
+				t.Fatalf("worker claim changed attempt limit or repeated unknown work: executions=%d admissions=%d outcomes=%d native=%d", executions.Load(), admissions.Load(), outcomes.Load(), native.Load())
 			}
 		})
 	}

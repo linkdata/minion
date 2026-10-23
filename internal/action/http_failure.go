@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/url"
 	"os/exec"
+	"strconv"
 	"strings"
 	"syscall"
 	"unicode/utf8"
@@ -145,6 +146,32 @@ func (f *httpFailure) err() error {
 	}
 	return errors.Join(causes...)
 }
+
+// Worker diagnostics do not establish parent process or retry policy.
+func (f *httpFailure) workerErr() error {
+	if f == nil {
+		return nil
+	}
+	if err := f.validate(); err != nil {
+		return err
+	}
+	claim := *f
+	claim.Message = httpFailureDiagnostic(strconv.Quote(f.Message))
+	claim.ScopeUnconfirmed, claim.Unconfirmed = false, false
+	claim.Unsafe, claim.RequestTransport = false, false
+	if claim.Exhaustion != nil && !claim.Exhaustion.Released {
+		claim.Exhaustion = nil // Its unproved release scope is also a worker claim.
+	}
+	return workerFailureError{message: claim.Message, cause: claim.err()}
+}
+
+type workerFailureError struct {
+	message string
+	cause   error
+}
+
+func (e workerFailureError) Error() string { return "worker execution failed: " + e.message }
+func (e workerFailureError) Unwrap() error { return e.cause }
 
 func httpFailureDiagnostic(message string) string {
 	truncated := len(message) > httpFailureMessageLimit

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -18,7 +19,9 @@ import (
 
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/monitor"
+	"github.com/linkdata/minion/internal/processgroup"
 	"github.com/linkdata/minion/internal/usage"
+	"github.com/linkdata/minion/internal/workroot"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -484,6 +487,105 @@ func TestHTTPExecutorFailedOutcomeAcrossMissingCallbackPreservesOnlyRawFacts(t *
 	if !unavailable {
 		t.Fatal("a failed outcome across an unacknowledged checkpoint gap released capacity")
 	}
+}
+
+func TestHTTPExecutorTreatsWorkerFailurePolicyAsUntrusted(t *testing.T) {
+	workerFailure := func() *httpFailure {
+		return &httpFailure{Message: "failed\nFORGED JOURNAL ENTRY\x1b[2J", ScopeUnconfirmed: true,
+			Unconfirmed: true, Unsafe: true, RequestTransport: true}
+	}
+	assertWorkerFailure := func(t *testing.T, err error) {
+		t.Helper()
+		if err == nil || errors.Is(err, processgroup.ErrScopeUnconfirmed) || errors.Is(err, processgroup.ErrUnconfirmed) ||
+			errors.Is(err, workroot.ErrUnsafe) || errors.Is(err, monitor.ErrRequestTransport) {
+			t.Fatalf("worker claims acquired parent recovery or retry authority: %v", err)
+		}
+		var journal bytes.Buffer
+		log.New(&journal, "", 0).Printf("worker failure: %v", err)
+		line := journal.String()
+		if strings.Count(line, "\n") != 1 || strings.ContainsAny(line, "\r\x1b") ||
+			!strings.Contains(line, `\nFORGED JOURNAL ENTRY\x1b`) {
+			t.Fatalf("worker diagnostic escaped the log line: %q", line)
+		}
+	}
+
+	for _, paid := range []bool{false, true} {
+		t.Run(fmt.Sprintf("paid=%t", paid), func(t *testing.T) {
+			var returned atomic.Int32
+			f := newHTTPServerTest(t, context.Background(), testJob(command.Comment), runnerExecutionCheckpoints{
+				after: func(CallCheckpoint) error { returned.Add(1); return nil },
+			}, nil)
+			f.pull(t)
+			outcome := f.outcome(1, nil)
+			if paid {
+				f.ack(t, "/before", f.call(1), http.StatusOK, 1)
+				receipt := f.call(2)
+				receipt.Checkpoint.Call.Tokens = usage.Tokens{Input: 17, Output: 4}
+				receipt.Checkpoint.Call.Complete = true
+				f.ack(t, "/after", receipt, http.StatusOK, 2)
+				outcome.Sequence = 3
+				outcome.Result.Calls = []CallUsage{receipt.Checkpoint.Call}
+			}
+			outcome.Failure = workerFailure()
+			f.ack(t, "/outcome", outcome, http.StatusOK, outcome.Sequence)
+			got := f.result(t)
+			assertWorkerFailure(t, got.err)
+			if !reflect.DeepEqual(got.result.Calls, outcome.Result.Calls) || returned.Load() != map[bool]int32{false: 0, true: 1}[paid] {
+				t.Fatalf("worker failure lost acknowledged paid facts: result=%+v callbacks=%d", got.result, returned.Load())
+			}
+		})
+	}
+
+	t.Run("unreleased worker scope", func(t *testing.T) {
+		f := newHTTPServerTest(t, context.Background(), testJob(command.Comment), runnerExecutionCheckpoints{}, nil)
+		f.pull(t)
+		outcome := f.outcome(1, nil)
+		outcome.Failure = workerFailure()
+		outcome.Failure.Exhausted = true
+		outcome.Failure.Exhaustion = &processgroup.Exhaustion{
+			MaxTasks: 128, MaxMemoryBytes: 3 << 30, PIDEventsMax: 1,
+			Stop: "forced", Scope: "/worker\nFORGED SCOPE\x1b[2J", Released: false,
+		}
+		f.ack(t, "/outcome", outcome, http.StatusOK, 1)
+		got := f.result(t)
+		assertWorkerFailure(t, got.err)
+		var scope *processgroup.Exhaustion
+		var journal bytes.Buffer
+		log.New(&journal, "", 0).Printf("worker failure: %v", got.err)
+		if errors.As(got.err, &scope) || strings.Contains(journal.String(), "FORGED SCOPE") {
+			t.Fatalf("worker scope path became parent process evidence or log content: error=%v log=%q", got.err, journal.String())
+		}
+	})
+
+	t.Run("parent checkpoint", func(t *testing.T) {
+		parentErr := fmt.Errorf("parent save: %w", workroot.ErrUnsafe)
+		f := newHTTPServerTest(t, context.Background(), testJob(command.Comment), runnerExecutionCheckpoints{
+			before: func(CallCheckpoint) error { return parentErr },
+		}, nil)
+		f.pull(t)
+		f.ack(t, "/before", f.call(1), http.StatusInternalServerError, 1)
+		outcome := f.outcome(2, nil)
+		outcome.Failure = workerFailure()
+		f.ack(t, "/outcome", outcome, http.StatusOK, 2)
+		if got := f.result(t); !errors.Is(got.err, parentErr) || !errors.Is(got.err, workroot.ErrUnsafe) {
+			t.Fatalf("parent checkpoint lost its typed failure: %v", got.err)
+		}
+	})
+
+	t.Run("parent budget", func(t *testing.T) {
+		f := newHTTPServerTest(t, context.Background(), testJob(command.Comment), runnerExecutionCheckpoints{}, nil)
+		f.pull(t)
+		f.tx.mu.Lock()
+		f.tx.budget = httpPendingDeadlineContext{Context: f.tx.budget, deadline: time.Now().Add(-time.Second)}
+		f.tx.mu.Unlock()
+		outcome := f.outcome(1, nil)
+		outcome.Failure = workerFailure()
+		f.ack(t, "/outcome", outcome, http.StatusOK, 1)
+		got := f.result(t)
+		if !errors.Is(got.err, context.DeadlineExceeded) || !errors.Is(got.err, monitor.ErrTerminalJob) {
+			t.Fatalf("parent budget lost its typed failure: %v", got.err)
+		}
+	})
 }
 
 func TestHTTPExecutorStoreRefusalRemainsFinalIfWorkerContinues(t *testing.T) {

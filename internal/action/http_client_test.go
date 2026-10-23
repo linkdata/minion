@@ -797,8 +797,8 @@ func TestRunHTTPOutcomeACKPreservesKnownReceiptAfterWatchFailure(t *testing.T) {
 			if callerFailure && (!errors.Is(workerErr, externalCause) || context.Cause(ctx) != externalCause) {
 				t.Fatalf("known receipt erased original caller cause: worker=%v caller=%v", workerErr, context.Cause(ctx))
 			}
-			if errors.Is(workerErr, processgroup.ErrScopeUnconfirmed) != (callerFailure || test.processFailure) || errors.Is(got.err, processgroup.ErrScopeUnconfirmed) != (test.callerBeforeOutcome || test.processFailure) || test.processFailure && !errors.Is(workerErr, externalCause) {
-				t.Fatalf("watch handling erased or invented process uncertainty: worker=%v parent=%v", workerErr, got.err)
+			if errors.Is(workerErr, processgroup.ErrScopeUnconfirmed) != (callerFailure || test.processFailure) || errors.Is(got.err, processgroup.ErrScopeUnconfirmed) || test.processFailure && !errors.Is(workerErr, externalCause) {
+				t.Fatalf("worker process claim escaped into parent policy: worker=%v parent=%v", workerErr, got.err)
 			}
 			if test.expiredAfterWatch && (!errors.Is(workerErr, monitor.ErrTerminalJob) || !errors.Is(workerErr, context.DeadlineExceeded) || !errors.Is(got.err, monitor.ErrTerminalJob) || !errors.Is(got.err, context.DeadlineExceeded)) {
 				t.Fatalf("watch child cancellation masked accepted expiry: worker=%v parent=%v", workerErr, got.err)

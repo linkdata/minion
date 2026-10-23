@@ -451,7 +451,7 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 		failedOutcome = outcome.Failure != nil
 		apply = func() error {
 			tx.mu.Lock()
-			tx.result, tx.runErr = outcome.Result, errors.Join(outcome.Failure.err(), tx.checkpointErr)
+			tx.result, tx.runErr = outcome.Result, errors.Join(outcome.Failure.workerErr(), tx.checkpointErr)
 			// A missing callback cannot be acknowledged from raw outcome claims.
 			if sequenceGap {
 				tx.runErr = errors.Join(tx.runErr, monitor.ErrExecutionOutcomeUnknown)

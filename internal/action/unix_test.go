@@ -23,6 +23,7 @@ import (
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/usage"
+	"github.com/linkdata/minion/internal/workspace"
 )
 
 func TestUnixEndpointRejectsOccupiedSocketWithoutRemovingIt(t *testing.T) {
@@ -756,7 +757,7 @@ func unixTestDirectory(t *testing.T) string {
 	if runtime.GOOS == "windows" {
 		t.Skip("pathname Unix sockets require Unix")
 	}
-	parent, err := filepath.EvalSymlinks(os.TempDir())
+	parent, err := workspace.CanonicalPath(os.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
