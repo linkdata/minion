@@ -21,7 +21,7 @@ import (
 	"github.com/linkdata/minion/internal/workspace"
 )
 
-func TestExecuteRejectsHostileSuccessfulHTTPOutcomeBeforePublication(t *testing.T) {
+func TestExecuteRejectsHostileHTTPOutcomeBeforePublication(t *testing.T) {
 	for _, scenario := range []struct {
 		name, change string
 		critic       bool
@@ -32,11 +32,16 @@ func TestExecuteRejectsHostileSuccessfulHTTPOutcomeBeforePublication(t *testing.
 		{"changed acknowledged usage", "usage", false, true},
 		{"changed acknowledged refutation", "refutation", true, true},
 		{"changed acknowledged decision", "decision", true, false},
+		{"changed approved answer", "answer", true, true},
+		{"incomplete critic receipt forged approval", "incomplete critic", true, true},
+		{"failed outcome after paid call", "failed outcome", false, true},
 		{"comment returns source changes", "changes", false, false},
 		{"audit returns empty report", "audit", false, false},
+		{"audit returns empty coverage", "audit coverage", false, false},
+		{"audit returns false covered claim", "audit false covered", false, false},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
-			if scenario.change == "audit" {
+			if scenario.change == "audit" || scenario.change == "audit coverage" || scenario.change == "audit false covered" {
 				installActionTestSkills(t, testAuditSkillURL)
 			}
 			gitFixtureRemote(t)
@@ -54,9 +59,10 @@ func TestExecuteRejectsHostileSuccessfulHTTPOutcomeBeforePublication(t *testing.
 			defer server.Close()
 			workRoot, usageDir := t.TempDir(), filepath.Join(t.TempDir(), "usage")
 			var acknowledged Result
-			var executed atomic.Bool
+			var acknowledgedDigest string
+			executed := false
 			name, action, skill := "comment", command.Comment, skills.BuiltinAntiPromptInjection
-			if scenario.change == "audit" {
+			if scenario.change == "audit" || scenario.change == "audit coverage" || scenario.change == "audit false covered" {
 				name, action, skill = "security-audit", command.SecurityAudit, testAuditSkillURL
 			}
 			e := &Orchestrator{WorkRoot: workRoot, Usage: &usage.Store{Dir: usageDir}, GitHub: testGitHub(server, "token"), BotLogin: "bot",
@@ -66,7 +72,7 @@ func TestExecuteRejectsHostileSuccessfulHTTPOutcomeBeforePublication(t *testing.
 				e.Adversarial = "claude"
 			}
 			e.Executor = executorFunc(func(ctx context.Context, job Job, checkpoints Checkpoints) (Result, error) {
-				executed.Store(true)
+				executed = true
 				f := newHTTPServerTest(t, ctx, job, checkpoints, nil)
 				f.pull(t)
 				result := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Forged publication"}
@@ -83,6 +89,11 @@ func TestExecuteRejectsHostileSuccessfulHTTPOutcomeBeforePublication(t *testing.
 				}
 				if scenario.change == "no evidence" {
 					result.Calls = nil
+				}
+				if scenario.change == "incomplete critic" {
+					last := &result.Calls[len(result.Calls)-1]
+					last.ReviewComplete, last.Approved, last.NoBlockers = false, false, false
+					result.CriticStopReason = ""
 				}
 				sequence := uint64(1)
 				binding := CallCheckpoint{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head}
@@ -108,8 +119,16 @@ func TestExecuteRejectsHostileSuccessfulHTTPOutcomeBeforePublication(t *testing.
 							sequence++
 						}
 					}
-					if scenario.critic {
+					if scenario.critic && scenario.change != "incomplete critic" {
 						review.CriticStopReason = result.CriticStopReason
+						f.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: review}, http.StatusOK, sequence)
+						sequence++
+						digest, err := contentDigest(result.Answer, result.Changes, result.Artifacts)
+						if err != nil {
+							t.Fatal(err)
+						}
+						review.ContentDigest = digest
+						acknowledgedDigest = digest
 						f.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: review}, http.StatusOK, sequence)
 						sequence++
 					}
@@ -139,21 +158,44 @@ func TestExecuteRejectsHostileSuccessfulHTTPOutcomeBeforePublication(t *testing.
 					outcome.Result.Refutations[0].Text = "FORGED_REFUTATION"
 				case "decision":
 					outcome.Result.CriticStopReason = ""
+				case "answer":
+					outcome.Result.Answer = "FORGED_CONTENT"
+				case "incomplete critic":
+					outcome.Result.Calls = slices.Clone(result.Calls)
+					last := &outcome.Result.Calls[len(outcome.Result.Calls)-1]
+					last.ReviewComplete, last.Approved, last.NoBlockers = true, true, true
+					outcome.Result.CriticStopReason = "approved"
+				case "failed outcome":
+					outcome.Failure = newHTTPFailure(errors.New("worker stopped after paid call"))
 				case "changes":
 					outcome.Result.Changes = []workspace.Change{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("forged\n")}}
 				case "audit":
 					outcome.Result.Artifacts = auditArtifactsFixture(job, sourceIdentity(job), "")
+				case "audit coverage":
+					outcome.Result.Artifacts = auditArtifactsFixture(job, sourceIdentity(job), result.Answer)
+					for i := range outcome.Result.Artifacts {
+						if outcome.Result.Artifacts[i].Path == "coverage-ledger.json" {
+							outcome.Result.Artifacts[i].Data = []byte("[]")
+						}
+					}
+				case "audit false covered":
+					outcome.Result.Artifacts = auditArtifactsFixture(job, sourceIdentity(job), result.Answer)
+					for i := range outcome.Result.Artifacts {
+						if outcome.Result.Artifacts[i].Path == "coverage-ledger.json" {
+							outcome.Result.Artifacts[i].Data = []byte(`[{"status":"covered"}]`)
+						}
+					}
 				}
 				if err := httpResultShape(outcome.Result); err != nil {
 					t.Fatalf("hostile result failed the wire shape before parent validation: %v", err)
 				}
 				validationErr := outcome.Result.Validate(job)
-				if (validationErr == nil) != scenario.validResult || scenario.change == "audit" && !strings.Contains(validationErr.Error(), "REPORT.md") || scenario.change == "changes" && !strings.Contains(validationErr.Error(), "read-only action returned source changes") {
+				if (validationErr == nil) != scenario.validResult || scenario.change == "audit" && !strings.Contains(validationErr.Error(), "REPORT.md") || (scenario.change == "audit coverage" || scenario.change == "audit false covered") && !strings.Contains(validationErr.Error(), "coverage-ledger.json") || scenario.change == "changes" && !strings.Contains(validationErr.Error(), "read-only action returned source changes") {
 					t.Fatalf("hostile result semantic fixture changed: %v", validationErr)
 				}
 				f.ack(t, "/outcome", outcome, http.StatusOK, sequence)
 				got := f.result(t)
-				if got.err != nil || !reflect.DeepEqual(got.result, outcome.Result) {
+				if (got.err != nil) != (scenario.change == "failed outcome") || !reflect.DeepEqual(got.result, outcome.Result) {
 					t.Fatalf("HTTP executor did not return the hostile result: got=%+v error=%v want=%+v", got.result, got.err, outcome.Result)
 				}
 				return got.result, got.err
@@ -161,10 +203,10 @@ func TestExecuteRejectsHostileSuccessfulHTTPOutcomeBeforePublication(t *testing.
 			request := usageJob()
 			request.Command = command.Command{Name: name, Action: action}
 			request.Repository.Actions = []string{name}
-			if err := e.Execute(context.Background(), request); !errors.Is(err, monitor.ErrTerminalJob) || writes.Load() != 0 {
-				t.Fatalf("hostile success published or lost terminal classification: error=%v writes=%d", err, writes.Load())
+			if err := e.Execute(context.Background(), request); err == nil || (scenario.change != "failed outcome" && !errors.Is(err, monitor.ErrTerminalJob)) || writes.Load() != 0 {
+				t.Fatalf("hostile outcome published or lost failure classification: error=%v writes=%d", err, writes.Load())
 			}
-			if !executed.Load() {
+			if !executed {
 				t.Fatal("orchestrator rejected the request before invoking the HTTP executor")
 			}
 			records, err := usage.ReadAll(usageDir)
@@ -186,11 +228,11 @@ func TestExecuteRejectsHostileSuccessfulHTTPOutcomeBeforePublication(t *testing.
 			}
 			if scenario.critic {
 				saved := readPrivateReview(t, workRoot)
-				if !slices.Equal(saved.Calls, acknowledged.Calls) || !slices.Equal(saved.Refutations, acknowledged.Refutations) || saved.CriticStopReason != acknowledged.CriticStopReason || saved.ReviewClaimOrigin != executorClaimOrigin {
+				if !slices.Equal(saved.Calls, acknowledged.Calls) || !slices.Equal(saved.Refutations, acknowledged.Refutations) || saved.CriticStopReason != acknowledged.CriticStopReason || saved.ContentDigest != acknowledgedDigest || saved.ReviewClaimOrigin != executorClaimOrigin {
 					t.Fatalf("hostile result replaced acknowledged review: %+v", saved)
 				}
 			}
-			if scenario.change == "audit" {
+			if scenario.change == "audit" || scenario.change == "audit coverage" || scenario.change == "audit false covered" {
 				if paths, err := filepath.Glob(filepath.Join(workRoot, "audits", "complete-*")); err != nil || len(paths) != 0 {
 					t.Fatalf("hostile report became a complete audit: paths=%v error=%v", paths, err)
 				}
@@ -203,8 +245,12 @@ func TestExecuteRejectsHostileSuccessfulHTTPOutcomeBeforePublication(t *testing.
 					t.Fatalf("incomplete audit marker=%q error=%v", marker, err)
 				}
 				report, err := os.ReadFile(filepath.Join(paths[0], "REPORT.md"))
-				if err != nil || len(report) != 0 {
-					t.Fatalf("private blank report=%q error=%v", report, err)
+				wantReport := ""
+				if scenario.change == "audit coverage" || scenario.change == "audit false covered" {
+					wantReport = "Forged publication"
+				}
+				if err != nil || string(report) != wantReport {
+					t.Fatalf("private report=%q error=%v want=%q", report, err, wantReport)
 				}
 			}
 		})

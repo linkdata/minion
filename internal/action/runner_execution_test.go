@@ -51,6 +51,10 @@ func TestRunnerExecuteRequiresCheckpoints(t *testing.T) {
 
 func TestRunnerExecuteCheckpointsInsideObserverAndSeparatesDecision(t *testing.T) {
 	job := withClaudeCritic(testJob(command.Comment))
+	wantDigest, err := contentDigest("Complete answer", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	tokens := usage.Tokens{Input: 11, CachedInput: 3, Output: 2}
 	var events []string
 	var calls []CallUsage
@@ -107,14 +111,21 @@ func TestRunnerExecuteCheckpointsInsideObserverAndSeparatesDecision(t *testing.T
 			if value.Version != ProtocolVersion || value.Identity != job.Identity || value.SourceRef != job.Source.Head || !slices.Equal(value.Calls, calls) || len(value.Refutations) != 0 {
 				t.Fatalf("review checkpoint changed the captured prefix: %+v", value)
 			}
-			events = append(events, fmt.Sprintf("review/%d/%s", len(value.Calls), value.CriticStopReason))
+			stage := value.CriticStopReason
+			if value.ContentDigest != "" {
+				if value.ContentDigest != wantDigest {
+					t.Fatalf("digest did not cover the frozen reviewed answer: got=%q want=%q", value.ContentDigest, wantDigest)
+				}
+				stage += "/content"
+			}
+			events = append(events, fmt.Sprintf("review/%d/%s", len(value.Calls), stage))
 			return nil
 		},
 	}
 	result, err := runner.Execute(context.Background(), job, checkpoints)
 	wantEvents := []string{
 		"review/0/", "observe-before/main", "before/main", "native/main", "after/main", "observe-after/main", "review/1/",
-		"observe-before/critic", "before/critic", "native/critic", "after/critic", "observe-after/critic", "review/2/", "review/2/approved",
+		"observe-before/critic", "before/critic", "native/critic", "after/critic", "observe-after/critic", "review/2/", "review/2/approved", "review/2/approved/content",
 	}
 	if err != nil || result.Answer != "Complete answer" || result.CriticStopReason != "approved" || !slices.Equal(result.Calls, calls) || !slices.Equal(events, wantEvents) {
 		t.Fatalf("execution changed checkpoint order: result=%+v error=%v events=%v", result, err, events)

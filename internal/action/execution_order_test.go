@@ -42,6 +42,10 @@ func testExecuteOrdersCheckpoints(t *testing.T, overHTTP, capped, loseObservatio
 	store := &usage.Store{Dir: filepath.Join(t.TempDir(), "usage")}
 	const finding, refutation = "PRIVATE_BLOCKER_EVIDENCE", "PRIVATE_COUNTEREVIDENCE"
 	const answer = "Public completed response."
+	wantDigest, err := contentDigest(answer, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	const mainModel, criticModel = "fixture-main", "fixture-critic"
 	expected := []CallUsage{
 		{Provider: "codex", Role: roleMain, Round: 1, Model: mainModel, Effort: "high", Tokens: usage.Tokens{Input: 10, CachedInput: 1, Output: 2}, Complete: true},
@@ -80,7 +84,7 @@ func testExecuteOrdersCheckpoints(t *testing.T, overHTTP, capped, loseObservatio
 			return
 		}
 		review, err := loadPrivateReview(work)
-		if err != nil || review.Identity.JobID != request.ID || review.Identity.AttemptID != record.ID || review.SourceRef != sourceHead || review.CriticStopReason != stopReason || review.CriticMaxRounds != maxRounds || review.CriticNonblockingRounds != 0 || review.CriticConsecutiveNoBlockerRounds != 0 || !slices.Equal(review.Calls, expected) || !slices.Equal(review.Refutations, wantRefutations) {
+		if err != nil || review.Identity.JobID != request.ID || review.Identity.AttemptID != record.ID || review.SourceRef != sourceHead || review.CriticStopReason != stopReason || review.ContentDigest != wantDigest || review.CriticMaxRounds != maxRounds || review.CriticNonblockingRounds != 0 || review.CriticConsecutiveNoBlockerRounds != 0 || !slices.Equal(review.Calls, expected) || !slices.Equal(review.Refutations, wantRefutations) {
 			t.Errorf("publication preceded the acknowledged review decision: review=%+v error=%v", review, err)
 			http.Error(w, "review decision missing", http.StatusInternalServerError)
 			return
@@ -235,10 +239,10 @@ func testExecuteOrdersCheckpoints(t *testing.T, overHTTP, capped, loseObservatio
 	default:
 		t.Fatal("action never published")
 	}
-	// Initial evidence, each parsed native receipt, and the same-prefix actual decision
+	// Initial evidence, each parsed receipt, the decision, and its content digest
 	// require distinct durable writes; final evidence retention is an idempotent no-op.
-	if got := strings.Count(journal.String(), "review evidence "); got != len(expected)+2 {
-		t.Fatalf("actual decision was not a separate checkpoint: writes=%d log=%s", got, journal.String())
+	if got := strings.Count(journal.String(), "review evidence "); got != len(expected)+3 {
+		t.Fatalf("decision or content digest was not a separate checkpoint: writes=%d log=%s", got, journal.String())
 	}
 	records, err := usage.ReadAll(store.Dir)
 	if err != nil || len(records) != 1 || records[0].Status != "succeeded" || records[0].FinishedAt == nil || !records[0].UsageComplete || records[0].CodexCalls != 2 || records[0].ClaudeCalls != 3 || records[0].Tokens != wantTokens {

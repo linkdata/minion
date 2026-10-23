@@ -17,7 +17,7 @@ import (
 )
 
 // ProtocolVersion identifies the versioned Job, Result, and Status contracts.
-const ProtocolVersion = 5
+const ProtocolVersion = 6
 
 const (
 	maxDiagnostics            = 100
@@ -492,6 +492,9 @@ func validateResultArtifacts(j Job, files []workspace.File, complete bool) error
 	}
 	companions, err := validateAuditMetadata(seen["run-metadata.json"], j.Identity.Repository, sourceIdentity(j), j.Source.Head)
 	if err != nil {
+		return err
+	}
+	if err := validateAuditCoverage(seen["coverage-ledger.json"], seen["findings.json"]); err != nil {
 		return err
 	}
 	for _, companion := range companions {

@@ -24,6 +24,7 @@ type retainedReview struct {
 	CriticConsecutiveNoBlockerRounds int          `json:"critic_consecutive_no_blocker_rounds"`
 	Calls                            []CallUsage  `json:"calls"`
 	Refutations                      []Refutation `json:"refutations"`
+	ContentDigest                    string       `json:"content_digest,omitempty"`
 }
 
 const executorClaimOrigin = "executor_reported"
@@ -34,7 +35,7 @@ func (e *Orchestrator) retainReviewEvidence(job Job, result Result) error {
 	if job.Critic == nil {
 		return nil
 	}
-	if err := saveReviewEvidence(e.WorkRoot, job, result, e.Logger); err != nil {
+	if err := saveReviewEvidence(e.WorkRoot, job, result, "", e.Logger); err != nil {
 		return fmt.Errorf("%w: retain private review evidence: %w", monitor.ErrTerminalJob, err)
 	}
 	return nil
@@ -62,7 +63,7 @@ func privateRecordsDir(workRoot, name string) (string, error) {
 }
 
 // saveReviewEvidence accepts a validated job on an admitted host work root.
-func saveReviewEvidence(workRoot string, job Job, result Result, logger *log.Logger) error {
+func saveReviewEvidence(workRoot string, job Job, result Result, digest string, logger *log.Logger) error {
 	if !result.matchesJob(job) {
 		return errors.New("review evidence does not match action identity or source")
 	}
@@ -72,19 +73,18 @@ func saveReviewEvidence(workRoot string, job Job, result Result, logger *log.Log
 	if err := validateRefutations(job, result.Calls, result.Refutations); err != nil {
 		return err
 	}
+	if digest != "" && (!validContentDigest(digest) || result.CriticStopReason == "") {
+		return errors.New("invalid reviewed content digest")
+	}
 	record := retainedReview{
 		CriticStopReason: result.CriticStopReason,
 		Identity:         job.Identity, SourceRef: job.Source.Head,
 		CriticMaxRounds: job.CriticMaxRounds, CriticNonblockingRounds: job.CriticNonblockingRounds,
 		CriticConsecutiveNoBlockerRounds: job.CriticConsecutiveNoBlockerRounds,
-		Calls:                            result.Calls, Refutations: result.Refutations,
+		Calls:                            result.Calls, Refutations: result.Refutations, ContentDigest: digest,
 	}
 	if len(record.Calls) != 0 {
 		record.ReviewClaimOrigin = executorClaimOrigin
-	}
-	data, err := json.Marshal(record)
-	if err != nil {
-		return err
 	}
 	root, err := privateRecordsDir(workRoot, "reviews")
 	if err != nil {
@@ -95,10 +95,19 @@ func saveReviewEvidence(workRoot string, job Job, result Result, logger *log.Log
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+	if errors.Is(err, os.ErrNotExist) && digest != "" {
+		return errors.New("review content digest lacks a saved decision")
+	}
 	if err == nil {
 		var saved retainedReview
 		if err := json.Unmarshal(previous, &saved); err != nil {
 			return errors.New("saved review evidence is invalid")
+		}
+		if saved.ContentDigest != "" && (!validContentDigest(saved.ContentDigest) || saved.CriticStopReason == "") {
+			return errors.New("saved review evidence has an invalid content digest")
+		}
+		if record.ContentDigest != "" && saved.CriticStopReason == "" {
+			return errors.New("review content digest lacks a saved decision")
 		}
 		if saved.ReviewClaimOrigin != record.ReviewClaimOrigin && (saved.ReviewClaimOrigin != "" || len(saved.Calls) != 0 || len(saved.Refutations) != 0 || saved.CriticStopReason != "") ||
 			(saved.CriticStopReason != "" && saved.CriticStopReason != record.CriticStopReason) ||
@@ -106,12 +115,23 @@ func saveReviewEvidence(workRoot string, job Job, result Result, logger *log.Log
 			saved.CriticMaxRounds != record.CriticMaxRounds || saved.CriticNonblockingRounds != record.CriticNonblockingRounds ||
 			saved.CriticConsecutiveNoBlockerRounds != record.CriticConsecutiveNoBlockerRounds ||
 			len(saved.Calls) > len(record.Calls) || len(saved.Refutations) > len(record.Refutations) ||
-			!slices.Equal(saved.Calls, record.Calls[:len(saved.Calls)]) || !slices.Equal(saved.Refutations, record.Refutations[:len(saved.Refutations)]) {
+			!slices.Equal(saved.Calls, record.Calls[:len(saved.Calls)]) || !slices.Equal(saved.Refutations, record.Refutations[:len(saved.Refutations)]) ||
+			saved.ContentDigest != "" && record.ContentDigest != "" && saved.ContentDigest != record.ContentDigest {
 			return errors.New("review evidence changed or discarded a saved prefix")
 		}
-		if saved.CriticStopReason == record.CriticStopReason && len(saved.Calls) == len(record.Calls) && len(saved.Refutations) == len(record.Refutations) {
+		if saved.ContentDigest != "" {
+			if saved.CriticStopReason != record.CriticStopReason || len(saved.Calls) != len(record.Calls) || len(saved.Refutations) != len(record.Refutations) {
+				return errors.New("review evidence changed after content digest")
+			}
+			record.ContentDigest = saved.ContentDigest
+		}
+		if saved.CriticStopReason == record.CriticStopReason && len(saved.Calls) == len(record.Calls) && len(saved.Refutations) == len(record.Refutations) && saved.ContentDigest == record.ContentDigest {
 			return nil
 		}
+	}
+	data, err := json.Marshal(record)
+	if err != nil {
+		return err
 	}
 	if err := workspace.WriteAtomic(path, data, filepath.Dir(root)); err != nil {
 		return err

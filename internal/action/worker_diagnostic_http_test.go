@@ -437,6 +437,14 @@ func TestHTTPPrivateRefutationAtWireLimitStaysInReviewRecord(t *testing.T) {
 	}
 	sequence++
 	transport.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: f.review(result.Calls, result.Refutations, result.CriticStopReason)}, http.StatusOK, sequence)
+	digest, err := contentDigest(result.Answer, result.Changes, result.Artifacts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sequence++
+	finalReview := f.review(result.Calls, result.Refutations, result.CriticStopReason)
+	finalReview.ContentDigest = digest
+	transport.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: finalReview}, http.StatusOK, sequence)
 	sequence++
 	transport.ack(t, "/outcome", httpOutcome{Sequence: sequence, Result: result}, http.StatusOK, sequence)
 	got := transport.result(t)

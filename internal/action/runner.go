@@ -101,13 +101,16 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 		}
 	}()
 	configured := *r
-	checkpointReview := func(history []Refutation) error {
+	checkpointReview := func(history []Refutation, digest string) error {
 		result.Refutations = history
 		if checkpoints != nil {
 			return checkpoints.Review(ReviewCheckpoint{
 				Version: result.Version, Identity: result.Identity, SourceRef: result.SourceRef,
-				Calls: result.Calls, Refutations: result.Refutations, CriticStopReason: result.CriticStopReason,
+				Calls: result.Calls, Refutations: result.Refutations, CriticStopReason: result.CriticStopReason, ContentDigest: digest,
 			})
+		}
+		if digest != "" {
+			return nil
 		}
 		if r.recordReview != nil {
 			return r.recordReview(result.Calls, result.Refutations, result.CriticStopReason)
@@ -145,7 +148,7 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 		return result, fmt.Errorf("%w: %w", workroot.ErrUnsafe, err)
 	}
 	if job.Critic != nil {
-		if err := checkpointReview(nil); err != nil {
+		if err := checkpointReview(nil, ""); err != nil {
 			return result, preparationFailure("prepare private review ledger", err)
 		}
 	}
@@ -217,6 +220,8 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 	}
 	var review *reviewSnapshot
 	reviewCurrent := false
+	var reviewedDigest string
+	var reviewedDigestErr error
 	historyDir := ""
 	closeReview := func() {
 		if review != nil {
@@ -242,6 +247,7 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 		if request.role == roleMain {
 			closeReview()
 			reviewCurrent = false
+			reviewedDigest, reviewedDigestErr = "", nil
 		}
 		if request.role == roleCritic {
 			var err error
@@ -261,6 +267,9 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 			}
 			if job.Action == command.Fix && len(review.changes) == 0 && !publishableAnswer(request.proposedAnswer) {
 				return aicli.Result{}, terminalUnlessCanceled(ctx, errors.New("rendered answer exceeds publication limit for no-change fix"))
+			}
+			if request.reviewPhase == reviewFull {
+				reviewedDigest, reviewedDigestErr = reviewedContentDigest(job, request.proposedAnswer, review, auditSkill, configured.Codex.APIKey, configured.Claude.APIKey)
 			}
 			mapping := ""
 			if review.source != source {
@@ -376,9 +385,11 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 	}()
 	var answer string
 	var runErr error
-	answer, result.CriticStopReason, runErr = configured.runAI(ctx, job, source, prompt, outputDir, checkpointReview, &sessions)
+	answer, result.CriticStopReason, runErr = configured.runAI(ctx, job, source, prompt, outputDir, func(history []Refutation) error {
+		return checkpointReview(history, "")
+	}, &sessions)
 	if result.CriticStopReason != "" {
-		if err := checkpointReview(result.Refutations); err != nil {
+		if err := checkpointReview(result.Refutations, ""); err != nil {
 			return result, fmt.Errorf("%w: checkpoint critic decision: %w", monitor.ErrTerminalJob, err)
 		}
 	}
@@ -428,6 +439,21 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 	if err := result.validate(job, true); err != nil {
 		result.Changes, result.Answer = nil, ""
 		return result, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
+	}
+	if job.Critic != nil {
+		if reviewedDigestErr != nil {
+			return result, fmt.Errorf("%w: derive reviewed content digest: %w", monitor.ErrTerminalJob, reviewedDigestErr)
+		}
+		if reviewedDigest == "" {
+			return result, fmt.Errorf("%w: missing final full review content digest", monitor.ErrTerminalJob)
+		}
+		actualDigest, err := contentDigest(result.Answer, result.Changes, result.Artifacts)
+		if err != nil || actualDigest != reviewedDigest {
+			return result, fmt.Errorf("%w: final result differs from frozen critic input", monitor.ErrTerminalJob)
+		}
+		if err := checkpointReview(result.Refutations, reviewedDigest); err != nil {
+			return result, fmt.Errorf("%w: checkpoint reviewed content: %w", monitor.ErrTerminalJob, err)
+		}
 	}
 	return result, nil
 }

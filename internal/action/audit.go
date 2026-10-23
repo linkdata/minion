@@ -243,27 +243,95 @@ func validateAuditFiles(ctx context.Context, files []workspace.File, validationD
 			return "", fmt.Errorf("audit %s failed: %w", validator.script, err)
 		}
 	}
-	var units []struct {
-		Status             string   `json:"status"`
-		ResultFingerprints []string `json:"result_fingerprints"`
-		Unresolved         []string `json:"unresolved"`
-		Attempts           []struct {
-			Status             string   `json:"status"`
-			ResultFingerprints []string `json:"result_fingerprints"`
-			Unresolved         []string `json:"unresolved"`
-		} `json:"attempts"`
+	if err := validateAuditCoverage(byPath["coverage-ledger.json"], byPath["findings.json"]); err != nil {
+		return "", err
 	}
-	if err := json.Unmarshal(byPath["coverage-ledger.json"], &units); err != nil || len(units) == 0 {
-		return "", errors.New("audit coverage-ledger.json has no coverage units")
+	return string(byPath["REPORT.md"]), nil
+}
+
+type auditCoverageCheck struct {
+	AgentID       string          `json:"agent_id"`
+	ReviewedPaths []string        `json:"reviewed_paths"`
+	Invariant     string          `json:"invariant"`
+	Method        string          `json:"method"`
+	Result        string          `json:"result"`
+	Artifact      json.RawMessage `json:"artifact"`
+}
+
+type auditCoverageEvidence struct {
+	Status             string               `json:"status"`
+	AgentID            string               `json:"agent_id"`
+	ReviewedPaths      []string             `json:"reviewed_paths"`
+	LocalChecks        []auditCoverageCheck `json:"local_checks"`
+	ResultFingerprints []string             `json:"result_fingerprints"`
+	Unresolved         []string             `json:"unresolved"`
+}
+
+func validateAuditCoverage(ledgerBytes, findingsBytes []byte) error {
+	if err := rejectDuplicateAuditJSONKeys(ledgerBytes); err != nil {
+		return fmt.Errorf("audit coverage-ledger.json: %w", err)
+	}
+	if err := rejectDuplicateAuditJSONKeys(findingsBytes); err != nil {
+		return fmt.Errorf("audit findings.json: %w", err)
+	}
+	var units []struct {
+		auditCoverageEvidence
+		CoverageID    string                  `json:"coverage_id"`
+		CanonicalRefs map[string]string       `json:"canonical_refs"`
+		Surface       string                  `json:"surface"`
+		Boundary      string                  `json:"boundary"`
+		Subsystem     string                  `json:"subsystem"`
+		AttackClass   string                  `json:"attack_class"`
+		StartingPaths []string                `json:"starting_paths"`
+		Lifecycle     string                  `json:"lifecycle"`
+		Attempts      []auditCoverageEvidence `json:"attempts"`
+	}
+	if err := json.Unmarshal(ledgerBytes, &units); err != nil || len(units) == 0 {
+		return errors.New("audit coverage-ledger.json has no coverage units")
 	}
 	var findings []struct {
 		Fingerprint string `json:"fingerprint"`
+		Verdict     string `json:"verdict"`
+		Title       string `json:"title"`
+		Description string `json:"description"`
+		Trace       []struct {
+			Kind, File, Scope, Description string
+			Line                           int
+		} `json:"trace"`
+		Evidence []struct {
+			File, Description string
+			Line              int
+		} `json:"evidence"`
 	}
-	if err := json.Unmarshal(byPath["findings.json"], &findings); err != nil {
-		return "", fmt.Errorf("decode audit findings: %w", err)
+	if err := json.Unmarshal(findingsBytes, &findings); err != nil {
+		return fmt.Errorf("decode audit findings: %w", err)
+	}
+	if findings == nil {
+		return errors.New("audit findings.json is not an array")
 	}
 	final := make(map[string]bool, len(findings))
 	for _, finding := range findings {
+		if strings.TrimSpace(finding.Fingerprint) == "" {
+			return errors.New("audit findings.json has an empty fingerprint")
+		}
+		if final[finding.Fingerprint] {
+			return errors.New("audit findings.json has duplicate fingerprint")
+		}
+		if finding.Verdict != "confirmed" && finding.Verdict != "needs_validation" && finding.Verdict != "rejected" ||
+			strings.TrimSpace(finding.Title) == "" || strings.TrimSpace(finding.Description) == "" || len(finding.Trace) == 0 || len(finding.Evidence) == 0 {
+			return errors.New("audit findings.json has an incomplete finding")
+		}
+		for _, trace := range finding.Trace {
+			if (trace.Kind != "entrypoint" && trace.Kind != "propagation" && trace.Kind != "sink") || !workspace.ValidPath(trace.File) ||
+				trace.Line < 1 || strings.TrimSpace(trace.Scope) == "" || strings.TrimSpace(trace.Description) == "" {
+				return errors.New("audit findings.json has invalid trace evidence")
+			}
+		}
+		for _, evidence := range finding.Evidence {
+			if !workspace.ValidPath(evidence.File) || evidence.Line < 1 || strings.TrimSpace(evidence.Description) == "" {
+				return errors.New("audit findings.json has invalid source evidence")
+			}
+		}
 		final[finding.Fingerprint] = true
 	}
 	candidates := make(map[string]bool)
@@ -277,6 +345,9 @@ func validateAuditFiles(ctx context.Context, files []workspace.File, validationD
 			}
 		}
 		for _, fingerprint := range fingerprints {
+			if strings.TrimSpace(fingerprint) == "" {
+				return errors.New("audit coverage-ledger.json has candidate without fingerprint")
+			}
 			candidates[fingerprint] = true
 			if !final[fingerprint] {
 				return errors.New("audit coverage-ledger.json has a candidate without final finding")
@@ -284,29 +355,156 @@ func validateAuditFiles(ctx context.Context, files []workspace.File, validationD
 		}
 		return nil
 	}
+	seenIDs := make(map[string]bool, len(units))
 	for _, unit := range units {
-		if unit.Status == "planned" || unit.Status == "in_progress" || unit.Status == "deferred" {
-			return "", fmt.Errorf("audit coverage-ledger.json has unfinished %s unit", unit.Status)
+		switch unit.Status {
+		case "planned", "in_progress", "deferred":
+			return fmt.Errorf("audit coverage-ledger.json has unfinished %s unit", unit.Status)
+		case "not_applicable", "out_of_scope", "covered", "candidate", "blocked":
+		default:
+			return errors.New("audit coverage-ledger.json has invalid unit status")
 		}
 		for _, attempt := range unit.Attempts {
+			if attempt.Status != "covered" && attempt.Status != "candidate" && attempt.Status != "blocked" {
+				return errors.New("audit coverage-ledger.json has invalid attempt status")
+			}
 			if attempt.Status == "candidate" {
 				if err := checkCandidate(attempt.ResultFingerprints, attempt.Unresolved); err != nil {
-					return "", err
+					return err
 				}
 			}
 		}
 		if unit.Status == "candidate" {
 			if err := checkCandidate(unit.ResultFingerprints, unit.Unresolved); err != nil {
-				return "", err
+				return err
+			}
+		}
+		if unit.CoverageID == "" || seenIDs[unit.CoverageID] || len(unit.StartingPaths) == 0 ||
+			strings.TrimSpace(unit.Surface) == "" || strings.TrimSpace(unit.Boundary) == "" ||
+			strings.TrimSpace(unit.Subsystem) == "" || strings.TrimSpace(unit.AttackClass) == "" {
+			return errors.New("audit coverage-ledger.json lacks unique coverage identity or starting paths")
+		}
+		seenIDs[unit.CoverageID] = true
+		fields := []string{"surface", "boundary", "subsystem", "attack_class"}
+		if _, hasLifecycle := unit.CanonicalRefs["lifecycle"]; hasLifecycle {
+			fields = append(fields, "lifecycle")
+			if strings.TrimSpace(unit.Lifecycle) == "" {
+				return errors.New("audit coverage-ledger.json lacks lifecycle identity")
+			}
+		} else if unit.Lifecycle != "" {
+			return errors.New("audit coverage-ledger.json lacks lifecycle reference")
+		}
+		if len(unit.CanonicalRefs) != len(fields) {
+			return errors.New("audit coverage-ledger.json lacks canonical coverage references")
+		}
+		var id strings.Builder
+		for i, field := range fields {
+			ref := unit.CanonicalRefs[field]
+			if ref == "" || strings.TrimSpace(ref) != ref {
+				return errors.New("audit coverage-ledger.json lacks canonical coverage references")
+			}
+			if i > 0 {
+				id.WriteString("::")
+			}
+			for _, b := range []byte(ref) {
+				if b >= 'A' && b <= 'Z' || b >= 'a' && b <= 'z' || b >= '0' && b <= '9' || b == '-' || b == '.' || b == '_' || b == '~' {
+					id.WriteByte(b)
+				} else {
+					fmt.Fprintf(&id, "%%%02X", b)
+				}
+			}
+		}
+		if unit.CoverageID != id.String() {
+			return errors.New("audit coverage-ledger.json has noncanonical coverage identity")
+		}
+		for _, path := range unit.StartingPaths {
+			if !workspace.ValidPath(path) {
+				return errors.New("audit coverage-ledger.json has invalid starting path")
+			}
+		}
+		if err := validateAuditCoverageEvidence(unit.auditCoverageEvidence); err != nil {
+			return err
+		}
+		for _, attempt := range unit.Attempts {
+			if err := validateAuditCoverageEvidence(attempt); err != nil {
+				return err
 			}
 		}
 	}
 	for fingerprint := range final {
 		if !candidates[fingerprint] {
-			return "", errors.New("audit findings.json has a finding without candidate")
+			return errors.New("audit findings.json has a finding without candidate")
 		}
 	}
-	return string(byPath["REPORT.md"]), nil
+	return nil
+}
+
+func validateAuditCoverageEvidence(e auditCoverageEvidence) error {
+	for _, reason := range e.Unresolved {
+		if strings.TrimSpace(reason) == "" {
+			return errors.New("audit coverage-ledger.json has empty unresolved reason")
+		}
+	}
+	switch e.Status {
+	case "not_applicable", "out_of_scope":
+		if e.AgentID != "" || len(e.ReviewedPaths) != 0 || len(e.LocalChecks) != 0 || len(e.ResultFingerprints) != 0 || len(e.Unresolved) == 0 {
+			return errors.New("audit coverage-ledger.json has inconsistent excluded unit evidence")
+		}
+		return nil
+	case "covered", "candidate", "blocked":
+		if !validAuditCoverageAgent(e.AgentID) || len(e.ReviewedPaths) == 0 || len(e.LocalChecks) == 0 {
+			return errors.New("audit coverage-ledger.json lacks assigned review evidence")
+		}
+	default:
+		return errors.New("audit coverage-ledger.json has invalid evidence status")
+	}
+	if e.Status != "candidate" && len(e.ResultFingerprints) != 0 || e.Status == "covered" && len(e.Unresolved) != 0 || e.Status == "blocked" && len(e.Unresolved) == 0 {
+		return errors.New("audit coverage-ledger.json has inconsistent status evidence")
+	}
+	paths := make(map[string]bool, len(e.ReviewedPaths))
+	for _, path := range e.ReviewedPaths {
+		_, duplicate := paths[path]
+		if !workspace.ValidPath(path) || duplicate {
+			return errors.New("audit coverage-ledger.json has invalid reviewed path")
+		}
+		paths[path] = false
+	}
+	for _, check := range e.LocalChecks {
+		if !validAuditCoverageAgent(check.AgentID) || strings.TrimSpace(check.Invariant) == "" || strings.TrimSpace(check.Result) == "" || len(check.ReviewedPaths) == 0 {
+			return errors.New("audit coverage-ledger.json has incomplete local check")
+		}
+		if check.Method != "source" && check.Method != "local" {
+			return errors.New("audit coverage-ledger.json has invalid local check method")
+		}
+		if check.Method == "source" && !bytes.Equal(bytes.TrimSpace(check.Artifact), []byte("null")) {
+			return errors.New("audit coverage-ledger.json has source check artifact")
+		}
+		if check.Method == "local" {
+			var artifact string
+			if json.Unmarshal(check.Artifact, &artifact) != nil || !workspace.ValidPath(artifact) || !strings.HasPrefix(artifact, "agents/"+check.AgentID+"/artifacts/") {
+				return errors.New("audit coverage-ledger.json has unowned local check artifact")
+			}
+		}
+		for _, path := range check.ReviewedPaths {
+			if _, ok := paths[path]; !ok {
+				return errors.New("audit coverage-ledger.json has local check outside reviewed paths")
+			}
+			paths[path] = true
+		}
+	}
+	for _, checked := range paths {
+		if !checked {
+			return errors.New("audit coverage-ledger.json has reviewed path without local check")
+		}
+	}
+	return nil
+}
+
+func validAuditCoverageAgent(agent string) bool {
+	if len(agent) == 0 || len(agent) > 64 || !(agent[0] >= 'a' && agent[0] <= 'z' || agent[0] >= '0' && agent[0] <= '9') {
+		return false
+	}
+	return strings.Trim(agent, "abcdefghijklmnopqrstuvwxyz0123456789_-") == "" && workspace.ValidPath("agents/"+agent+"/artifacts/check")
 }
 
 func validateAuditMetadata(metadataBytes []byte, repo, target, head string) ([]string, error) {

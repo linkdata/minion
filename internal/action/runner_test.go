@@ -305,7 +305,7 @@ func TestPortableAuditMetadataUsesSourceIdentity(t *testing.T) {
 		data := []byte("content")
 		switch name {
 		case "coverage-ledger.json":
-			data = []byte(`[{"status":"covered"}]`)
+			data = []byte(auditCoveredLedgerFixture)
 		case "findings.json":
 			data = []byte("[]")
 		}

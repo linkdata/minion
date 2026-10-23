@@ -118,7 +118,7 @@ func TestLiveSecurityAuditAction(t *testing.T) {
 						metadata := fmt.Sprintf(`{"run_id":%q,"repo":%q,"target":%q,"source_ref":%q,"profile":"standard","scope_paths":["."],"budget":null,"selected_companion_files":[],"prior_run_paths":[],"shared_file_owners":%s,"execution_policy":"sandboxed-source-and-local-only","run_status":"complete"}`, job.ID, liveFixRepository, dir, test.head, auditTestOwners)
 						for name, content := range map[string]string{
 							"run-metadata.json": metadata, "architecture.md": "Test fixture architecture.\n",
-							"coverage-ledger.json": `[{"status":"covered"}]`, "findings.json": "[]",
+							"coverage-ledger.json": auditCoveredLedgerFixture, "findings.json": "[]",
 							"REPORT.md": report, "FINDINGS-DETAIL.md": "No findings.\n", "NEEDS-VALIDATION.md": "No validation leads.\n",
 						} {
 							if err := os.WriteFile(filepath.Join(outputDir, name), []byte(content), 0o600); err != nil {

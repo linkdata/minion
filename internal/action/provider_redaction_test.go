@@ -99,7 +99,7 @@ func TestAuditReportRedactsNULSplitConfiguredKeyBeforeCriticAndPublication(t *te
 					file.Data = []byte("Architecture includes " + splitKey + " and " + criticKey)
 				}
 				if file.Path == "coverage-ledger.json" {
-					file.Data = []byte(`[{"status":"covered","note":"fixture-audit-\u0000secret","fixture-audit-\u0073ecret":"fixture-audit-\u0073ecret","critic":"fixture-critic-secret","safe":"<safe>"}]`)
+					file.Data = []byte(strings.TrimSuffix(auditCoveredLedgerFixture, "}]") + `,"note":"fixture-audit-\u0000secret","fixture-audit-\u0073ecret":"fixture-audit-\u0073ecret","critic":"fixture-critic-secret","safe":"<safe>"}]`)
 				}
 				writeFixtureFile(t, request.outputDir, file.Path, file.Data)
 			}

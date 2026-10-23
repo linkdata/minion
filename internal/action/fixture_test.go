@@ -477,6 +477,10 @@ func privateReviewResult(job Job) Result {
 	}
 }
 
+const auditCandidateFindingFixture = `[{"verdict":"needs_validation","fingerprint":"F","title":"Unverified boundary","description":"A boundary may omit a guard.","claimed_root_cause":"The guard may be absent.","trace":[{"kind":"entrypoint","file":"source.txt","line":1,"scope":"source","description":"Input reaches the boundary."}],"evidence":[{"file":"source.txt","line":1,"description":"The source path needs validation."}],"blockers":["Runtime validation is unavailable."],"validation_plan":{"local":"Inspect the guard path in an approved test."}}]`
+
+const auditCoveredLedgerFixture = `[{"coverage_id":"source::boundary::subsystem::attack","canonical_refs":{"surface":"source","boundary":"boundary","subsystem":"subsystem","attack_class":"attack"},"surface":"Source","boundary":"Boundary","subsystem":"Subsystem","attack_class":"Attack","starting_paths":["source.txt"],"ordinary_attack_class_block":null,"selected_companion_blocks":[],"excluded_blocks":[],"prior_status":"none","attempts":[],"wave":1,"status":"covered","agent_id":"hunter","reviewed_paths":["source.txt"],"local_checks":[{"agent_id":"hunter","reviewed_paths":["source.txt"],"invariant":"Access is checked","method":"source","result":"The guard is present","artifact":null}],"result_fingerprints":[],"unresolved":[]}]`
+
 func auditArtifactsFixture(job Job, target, report string) []workspace.File {
 	metadata := fmt.Sprintf(`{"run_id":"test-run","repo":%q,"target":%q,"source_ref":%q,"profile":"standard","scope_paths":["."],"budget":null,"selected_companion_files":[],"prior_run_paths":[],"shared_file_owners":%s,"execution_policy":"sandboxed-source-and-local-only","run_status":"complete"}`, job.Identity.Repository, target, job.Source.Head, auditTestOwners)
 	var files []workspace.File
@@ -490,7 +494,7 @@ func auditArtifactsFixture(job Job, target, report string) []workspace.File {
 		case "findings.json":
 			data = "[]"
 		case "coverage-ledger.json":
-			data = `[{"status":"covered"}]`
+			data = auditCoveredLedgerFixture
 		case "FINDINGS-DETAIL.md", "NEEDS-VALIDATION.md":
 			data = ""
 		}
