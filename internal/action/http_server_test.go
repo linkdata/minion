@@ -107,7 +107,7 @@ func newHTTPServerTest(t *testing.T, ctx context.Context, job Job, sink Checkpoi
 	}
 }
 
-func (f *httpServerTest) pull(t *testing.T) {
+func (f *httpServerTest) pull(t *testing.T) httpAssignment {
 	t.Helper()
 	body, err := json.Marshal(httpPull{Version: ProtocolVersion, ExecutorID: f.job.Identity.ExecutorID})
 	if err != nil {
@@ -125,6 +125,7 @@ func (f *httpServerTest) pull(t *testing.T) {
 	if !reflect.DeepEqual(assignment.Job, f.job) || assignment.Expires <= time.Now().UnixNano() {
 		t.Fatalf("assignment changed supplied Job or lost its remaining budget: %+v", assignment)
 	}
+	return assignment
 }
 
 func (f *httpServerTest) request(path string, value any) httpServerTestExchange {
@@ -398,9 +399,56 @@ func TestHTTPExecutorReadingStatusDoesNotHoldPaidCallbackSlot(t *testing.T) {
 	}
 }
 
-func TestHTTPExecutorBusyAndSingleAssignment(t *testing.T) {
-	f := newHTTPServerTest(t, context.Background(), testJob(command.Comment), runnerExecutionCheckpoints{}, nil)
+func TestHTTPExecutorRejectsStatusWhoseBodyFinishesAfterOutcome(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	var hold atomic.Bool
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	f := newHTTPServerTest(t, context.Background(), testJob(command.Comment), runnerExecutionCheckpoints{}, func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/status" && hold.Load() {
+				r.Body = &httpStatusHeldBody{ReadCloser: r.Body, entered: entered, release: release}
+			}
+			next.ServeHTTP(w, r)
+		})
+	})
+	t.Cleanup(unblock)
 	f.pull(t)
+	status := Status{Version: ProtocolVersion, Identity: f.job.Identity, SourceRef: f.job.Source.Head, Sequence: 1, WorkerState: "busy", Phase: "prepare"}
+	f.ack(t, "/status", httpObservation{Status: status}, http.StatusOK, 1)
+	hold.Store(true)
+	late := status
+	late.Sequence, late.Phase, late.Round = 2, "main", 1
+	done := make(chan httpServerTestExchange, 1)
+	go func() { done <- f.request("/status", httpObservation{Status: late}) }()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("late observation did not enter its body read")
+	}
+	f.ack(t, "/outcome", f.outcome(1, nil), http.StatusOK, 1)
+	unblock()
+	if got := <-done; got.err != nil || got.status != http.StatusConflict || got.ack.Failure == nil {
+		t.Fatalf("late observation was admitted after outcome: %+v", got)
+	}
+	if got := f.result(t); got.err != nil {
+		t.Fatal(got.err)
+	}
+	if got, ok := f.executor.Status(); !ok || got != status {
+		t.Fatalf("late observation replaced last accepted status: status=%+v present=%t", got, ok)
+	}
+}
+
+func TestHTTPExecutorBusyAndSingleAssignment(t *testing.T) {
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(30*time.Second))
+	defer cancel()
+	deadline, _ := ctx.Deadline()
+	f := newHTTPServerTest(t, ctx, testJob(command.Comment), runnerExecutionCheckpoints{}, nil)
+	f.ack(t, "/next", httpPull{Version: ProtocolVersion + 1, ExecutorID: f.job.Identity.ExecutorID}, http.StatusConflict, 0)
+	f.ack(t, "/next", httpPull{Version: ProtocolVersion, ExecutorID: "foreign"}, http.StatusConflict, 0)
+	if assignment := f.pull(t); assignment.Expires > deadline.UnixNano() {
+		t.Fatalf("assignment exceeded parent deadline: %v > %v", time.Unix(0, assignment.Expires), deadline)
+	}
 	if result, err := f.executor.Execute(context.Background(), f.job, runnerExecutionCheckpoints{}); err == nil || !result.matchesJob(f.job) {
 		t.Fatalf("busy executor admitted another action: %+v error=%v", result, err)
 	}
@@ -410,6 +458,44 @@ func TestHTTPExecutorBusyAndSingleAssignment(t *testing.T) {
 	f.ack(t, "/outcome", f.outcome(1, nil), http.StatusOK, 1)
 	if result := f.result(t); result.err != nil {
 		t.Fatal(result.err)
+	}
+}
+
+func TestHTTPExecutorCancelRequiresFullBinding(t *testing.T) {
+	f := newHTTPServerTest(t, context.Background(), testJob(command.Comment), runnerExecutionCheckpoints{}, nil)
+	f.pull(t)
+	for _, test := range []struct {
+		name string
+		edit func(*httpBinding)
+	}{
+		{"version", func(b *httpBinding) { b.Version++ }},
+		{"job", func(b *httpBinding) { b.Identity.JobID += "-other" }},
+		{"attempt", func(b *httpBinding) { b.Identity.AttemptID += "-other" }},
+		{"executor", func(b *httpBinding) { b.Identity.ExecutorID += "-other" }},
+		{"repository", func(b *httpBinding) { b.Identity.Repository = "other/repo" }},
+		{"repository ID", func(b *httpBinding) { b.Identity.RepositoryID++ }},
+		{"owner ID", func(b *httpBinding) { b.Identity.OwnerID++ }},
+		{"requester", func(b *httpBinding) { b.Identity.Requester += "-other" }},
+		{"requester ID", func(b *httpBinding) { b.Identity.RequesterID++ }},
+		{"number", func(b *httpBinding) { b.Identity.Number++ }},
+		{"subject", func(b *httpBinding) { b.Identity.SubjectType = "PullRequest" }},
+		{"source", func(b *httpBinding) { b.SourceRef = strings.Repeat("a", 40) }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			binding := f.tx.binding
+			test.edit(&binding)
+			ack := f.ack(t, "/cancel", binding, http.StatusConflict, 0)
+			f.tx.mu.Lock()
+			watch := f.tx.watch
+			f.tx.mu.Unlock()
+			if ack.Failure == nil || watch || f.tx.ctx.Err() != nil {
+				t.Fatalf("foreign watch changed bound action: ack=%+v watch=%t ctx=%v", ack, watch, f.tx.ctx.Err())
+			}
+		})
+	}
+	f.ack(t, "/outcome", f.outcome(1, nil), http.StatusOK, 1)
+	if got := f.result(t); got.err != nil {
+		t.Fatal(got.err)
 	}
 }
 
@@ -709,21 +795,71 @@ func TestHTTPExecutorStatusIsIndependentAndAllowsObservationGaps(t *testing.T) {
 	}
 }
 
-func TestHTTPExecutorRejectsStaleAndForeignStatusWithoutChangingPaidSequence(t *testing.T) {
-	f := newHTTPServerTest(t, context.Background(), testJob(command.Comment), runnerExecutionCheckpoints{}, nil)
+func TestHTTPExecutorRejectsStaleAndRegressingStatusWithoutChangingPaidSequence(t *testing.T) {
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(30*time.Second))
+	defer cancel()
+	deadline, _ := ctx.Deadline()
+	job := testJob(command.Comment)
+	job.Critic = &RoleSettings{Provider: "claude"}
+	job.CriticMaxRounds = 2
+	f := newHTTPServerTest(t, ctx, job, runnerExecutionCheckpoints{}, nil)
 	f.pull(t)
-	status := Status{Version: ProtocolVersion, Identity: f.job.Identity, SourceRef: f.job.Source.Head, Sequence: 2, WorkerState: "busy", Phase: "upload"}
+	status := Status{Version: ProtocolVersion, Identity: f.job.Identity, SourceRef: f.job.Source.Head,
+		Sequence: 2, ProgressSequence: 4, ProgressAge: 2 * time.Second, LogSequence: 3, WorkerState: "busy", Phase: "prepare"}
 	f.ack(t, "/status", httpObservation{Status: status}, http.StatusOK, 2)
-	f.ack(t, "/status", httpObservation{Status: status}, http.StatusConflict, 2)
-	foreign := status
-	foreign.Sequence, foreign.Identity.AttemptID = 3, "foreign"
-	f.ack(t, "/status", httpObservation{Status: foreign}, http.StatusConflict, 3)
-	if got, ok := f.executor.Status(); !ok || got != status || f.tx.ctx.Err() != nil {
-		t.Fatalf("rejected observation changed accepted status or canceled action: %+v %t %v", got, ok, f.tx.ctx.Err())
+	reject := func(name string, edit func(*Status)) {
+		t.Helper()
+		t.Run(name, func(t *testing.T) {
+			candidate := status
+			candidate.Sequence++
+			edit(&candidate)
+			ack := f.ack(t, "/status", httpObservation{Status: candidate}, http.StatusConflict, candidate.Sequence)
+			if got, ok := f.executor.Status(); ack.Failure == nil || !ok || got != status || f.tx.ctx.Err() != nil {
+				t.Fatalf("rejected observation changed accepted status or action: ack=%+v status=%+v present=%t ctx=%v", ack, got, ok, f.tx.ctx.Err())
+			}
+		})
+	}
+	reject("replay", func(s *Status) { s.Sequence = status.Sequence })
+	reject("stale", func(s *Status) { s.Sequence = status.Sequence - 1 })
+	reject("foreign attempt", func(s *Status) { s.Identity.AttemptID = "foreign" })
+	status.Sequence, status.Phase, status.Round, status.ReviewPhase = 5, "critic", 1, reviewFull
+	status.ProgressSequence, status.ProgressAge, status.LogSequence = 5, time.Second, 4
+	f.ack(t, "/status", httpObservation{Status: status}, http.StatusOK, 5)
+	reject("phase rollback", func(s *Status) { s.Phase, s.Round, s.ReviewPhase = "main", 1, "" })
+	reject("progress rollback", func(s *Status) { s.ProgressSequence-- })
+	reject("log rollback", func(s *Status) { s.LogSequence-- })
+	reject("progress age rollback", func(s *Status) { s.ProgressAge -= time.Second })
+	status.Sequence, status.ProgressAge, status.LogSequence = 6, 2*time.Second, 5
+	f.ack(t, "/status", httpObservation{Status: status}, http.StatusOK, 6)
+	status.Sequence, status.Phase, status.Round, status.ReviewPhase = 7, "main", 2, ""
+	status.ProgressSequence, status.ProgressAge = 6, 0
+	f.ack(t, "/status", httpObservation{Status: status}, http.StatusOK, 7)
+	reject("round rollback", func(s *Status) { s.Round = 1 })
+	status.Sequence, status.Phase, status.ReviewPhase = 8, "critic", reviewVerification
+	f.ack(t, "/status", httpObservation{Status: status}, http.StatusOK, 8)
+	status.Sequence, status.ReviewPhase = 9, reviewFull
+	f.ack(t, "/status", httpObservation{Status: status}, http.StatusOK, 9)
+	reject("review phase rollback", func(s *Status) { s.ReviewPhase = reviewVerification })
+	status.Sequence, status.Phase, status.Round, status.ReviewPhase = 10, "cleanup", 0, ""
+	status.WorkerState = "stopping"
+	f.ack(t, "/status", httpObservation{Status: status}, http.StatusOK, 10)
+	reject("worker state rollback", func(s *Status) { s.WorkerState = "busy" })
+	status.Sequence, status.WorkerState = 11, "ready"
+	f.ack(t, "/status", httpObservation{Status: status}, http.StatusOK, 11)
+	reject("terminal state rollback", func(s *Status) { s.WorkerState = "stopping" })
+	reject("terminal state changes", func(s *Status) { s.WorkerState = "unclean" })
+	if got, ok := f.tx.ctx.Deadline(); !ok || !got.Equal(deadline) {
+		t.Fatalf("observations changed parent deadline: got=%v present=%t want=%v", got, ok, deadline)
 	}
 	f.ack(t, "/outcome", f.outcome(1, nil), http.StatusOK, 1)
 	if got := f.result(t); got.err != nil {
-		t.Fatal(got.err)
+		t.Fatalf("observations changed paid sequence or outcome: %v", got.err)
+	}
+	f.executor.mu.Lock()
+	active, unavailable := f.executor.active, f.executor.unavailable
+	f.executor.mu.Unlock()
+	if got, ok := f.executor.Status(); active != nil || unavailable || !ok || got != status {
+		t.Fatalf("observations changed capacity or recoverable status: active=%v unavailable=%t status=%+v present=%t", active, unavailable, got, ok)
 	}
 }
 

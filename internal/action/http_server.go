@@ -49,7 +49,6 @@ type httpTransaction struct {
 	fenced             bool
 	watch              bool
 	sequence           uint64
-	statusSeq          uint64
 	stopping           bool
 	stop               chan struct{}
 	done               chan struct{}
@@ -354,24 +353,27 @@ func (e *HTTPExecutor) serveStatus(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		binding = httpBinding{}
 	} else {
-		err = status.Validate(tx.job)
+		// Execute validates the Job before an assignment can be delivered.
+		err = status.validate(tx.job)
 		if err == nil {
+			e.mu.Lock()
 			tx.mu.Lock()
-			if status.Sequence <= tx.statusSeq {
-				err = errors.New("HTTP Status sequence is stale")
-			} else {
-				tx.statusSeq = status.Sequence
+			if tx.fenced || !tx.delivered {
+				err = errors.New("HTTP execution has closed observation admission")
+			} else if e.hasStatus {
+				err = status.follows(e.status, tx.job.rounds())
+			}
+			if err == nil {
+				e.status, e.hasStatus = status, true
 			}
 			tx.mu.Unlock()
+			e.mu.Unlock()
 		}
 		if err != nil {
 			code = http.StatusConflict
 		}
 	}
 	if err == nil {
-		e.mu.Lock()
-		e.status, e.hasStatus = status, true
-		e.mu.Unlock()
 		code = http.StatusOK
 	}
 	tx.observation.Unlock()
