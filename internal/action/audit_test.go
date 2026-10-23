@@ -297,7 +297,8 @@ JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 	write("run-metadata.json", metadata)
 	write("architecture.md", "Architecture\n")
 	write("findings.json", "[]")
-	write("REPORT.md", "Verified audit report\n")
+	reportText := "Verified audit report\n"
+	write("REPORT.md", reportText)
 	write("FINDINGS-DETAIL.md", "")
 	write("NEEDS-VALIDATION.md", "")
 	coveredLedger := auditCoveredLedgerFixture
@@ -308,7 +309,7 @@ JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 	if err != nil {
 		t.Fatal(err)
 	}
-	tools, err := checkAuditTools(context.Background(), validationDir, filepath.Join(skillDir, "SKILL.md"))
+	tools, err := checkAuditTools(t.Context(), validationDir, filepath.Join(skillDir, "SKILL.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -317,10 +318,10 @@ JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 		files, _, err := readAuditArtifacts(root, false, "")
 		var report string
 		if err == nil {
-			report, err = validateAuditFiles(context.Background(), files, validationDir, filepath.Join(skillDir, "SKILL.md"), tools, "o/r", target, head)
+			report, err = validateAuditFiles(t.Context(), files, validationDir, filepath.Join(skillDir, "SKILL.md"), tools, "o/r", target, head)
 		}
 		if wantError == "" {
-			if err != nil || report != "Verified audit report\n" {
+			if err != nil || report != reportText {
 				t.Fatalf("valid audit output = %q, %v", report, err)
 			}
 		} else if err == nil || !strings.Contains(err.Error(), wantError) {
@@ -370,17 +371,21 @@ JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 	validate("without final finding")
 	write("findings.json", auditCandidateFindingFixture)
 	write("coverage-ledger.json", candidateLedger)
+	reportText = "Verified audit report: Unverified boundary\n"
+	write("REPORT.md", reportText)
 	validate("")
 	write("coverage-ledger.json", `[{"status":"candidate","result_fingerprints":["F"],"unresolved":["validation_budget_exhausted"]}]`)
 	validate("unvalidated candidate")
 	write("coverage-ledger.json", coveredLedger)
 	validate("finding without candidate")
-	archivedAttempt := `{"wave":1,"status":"candidate","agent_id":"older","reviewed_paths":["source.txt"],"local_checks":[{"agent_id":"older","reviewed_paths":["source.txt"],"invariant":"Access is checked","method":"source","result":"The guard is present","artifact":null}],"result_fingerprints":["F"],"unresolved":[],"reassignment_reason":"Rechecked"}`
+	archivedAttempt := `{"wave":1,"status":"candidate","agent_id":"older","reviewed_paths":["source.txt"],"local_checks":[{"agent_id":"helper","reviewed_paths":["source.txt"],"invariant":"Access is checked","method":"source","result":"The guard is present","artifact":null}],"result_fingerprints":["F"],"unresolved":[],"reassignment_reason":"Rechecked"}`
 	coveredWithAttempt := strings.Replace(coveredLedger, `"attempts":[]`, `"attempts":[`+archivedAttempt+`]`, 1)
 	coveredWithAttempt = strings.Replace(coveredWithAttempt, `"wave":1,"status":"covered","agent_id":"hunter"`, `"wave":2,"status":"covered","agent_id":"hunter"`, 1)
 	write("coverage-ledger.json", coveredWithAttempt)
 	validate("")
 	write("findings.json", "[]")
+	reportText = "Verified audit report\n"
+	write("REPORT.md", reportText)
 	validate("without final finding")
 	write("findings.json", auditCandidateFindingFixture)
 	write("coverage-ledger.json", `[{"status":"covered","attempts":[{"status":"candidate","result_fingerprints":["F"],"unresolved":["validation_budget_exhausted"]}]}]`)

@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -24,6 +25,8 @@ var auditValidators = []struct{ script, artifact string }{
 	{"validate-findings.cjs", "findings.json"},
 	{"validate-coverage-ledger.cjs", "coverage-ledger.json"},
 }
+
+var auditCleanClaim = regexp.MustCompile(`\b(?:no|zero|0) (?:findings|vulnerabilities|security issues)(?: (?:found|identified|detected|reported))?(?:[.!?;:]|$)`)
 
 type auditTools struct {
 	binary, permissionFlag string
@@ -253,7 +256,7 @@ func validateAuditFiles(ctx context.Context, files []workspace.File, validationD
 			return "", fmt.Errorf("audit %s failed: %w", validator.script, err)
 		}
 	}
-	if err := validateAuditCoverage(byPath["coverage-ledger.json"], byPath["findings.json"], nil); err != nil {
+	if err := validateAuditCoverage(byPath["coverage-ledger.json"], byPath["findings.json"], byPath["REPORT.md"], nil); err != nil {
 		return "", err
 	}
 	return string(byPath["REPORT.md"]), nil
@@ -279,7 +282,7 @@ type auditCoverageEvidence struct {
 	ReassignmentReason string               `json:"reassignment_reason"`
 }
 
-func validateAuditCoverage(ledgerBytes, findingsBytes []byte, source *workspace.Snapshot) error {
+func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes []byte, source *workspace.Snapshot) error {
 	if err := rejectDuplicateAuditJSONKeys(ledgerBytes,
 		"coverage_id", "canonical_refs", "surface", "boundary", "subsystem", "attack_class", "lifecycle", "starting_paths",
 		"ordinary_attack_class_block", "selected_companion_blocks", "excluded_blocks", "prior_status", "attempts", "wave", "status",
@@ -437,10 +440,16 @@ func validateAuditCoverage(ledgerBytes, findingsBytes []byte, source *workspace.
 		findingPaths[finding.Fingerprint] = citedPaths
 	}
 	candidates := make(map[string]bool)
-	connectedCandidates := make(map[string]bool)
+	checkedCitations := make(map[string]map[string]bool)
 	checkCandidate := func(e auditCoverageEvidence) error {
 		if len(e.ResultFingerprints) == 0 {
 			return errors.New("audit coverage-ledger.json has candidate without fingerprint")
+		}
+		var verifierPaths []string
+		for _, check := range e.LocalChecks {
+			if check.AgentID != e.AgentID {
+				verifierPaths = append(verifierPaths, check.ReviewedPaths...)
+			}
 		}
 		for _, reason := range e.Unresolved {
 			if strings.Contains(reason, "validation_budget_exhausted") {
@@ -455,9 +464,17 @@ func validateAuditCoverage(ledgerBytes, findingsBytes []byte, source *workspace.
 			if !final[fingerprint] {
 				return errors.New("audit coverage-ledger.json has a candidate without final finding")
 			}
-			if auditPathsConnect(e.ReviewedPaths, findingPaths[fingerprint]) {
-				connectedCandidates[fingerprint] = true
+			if checkedCitations[fingerprint] == nil {
+				checkedCitations[fingerprint] = make(map[string]bool, len(findingPaths[fingerprint]))
 			}
+			for _, path := range verifierPaths {
+				if findingPaths[fingerprint][path] {
+					checkedCitations[fingerprint][path] = true
+				}
+			}
+		}
+		if len(verifierPaths) == 0 {
+			return errors.New("audit coverage-ledger.json has candidate without independent verifier check")
 		}
 		return nil
 	}
@@ -529,8 +546,11 @@ func validateAuditCoverage(ledgerBytes, findingsBytes []byte, source *workspace.
 			}
 		}
 		if len(unit.OrdinaryAttackClassBlock) == 0 || unit.SelectedCompanionBlocks == nil || unit.ExcludedBlocks == nil ||
-			unit.Attempts == nil || !validAuditPriorStatus(unit.PriorStatus) {
+			unit.Attempts == nil || unit.PriorStatus == "" {
 			return errors.New("audit coverage-ledger.json lacks required coverage context")
+		}
+		if unit.PriorStatus != "none" {
+			return errors.New("audit coverage-ledger.json claims a prior run absent from metadata")
 		}
 		if !bytes.Equal(bytes.TrimSpace(unit.OrdinaryAttackClassBlock), []byte("null")) {
 			var block string
@@ -583,6 +603,9 @@ func validateAuditCoverage(ledgerBytes, findingsBytes []byte, source *workspace.
 			}
 			previousWave = attempt.Wave
 			priorOwners[attempt.AgentID] = true
+			for _, check := range attempt.LocalChecks {
+				priorOwners[check.AgentID] = true
+			}
 		}
 		if priorOwners[unit.AgentID] {
 			return errors.New("audit coverage-ledger.json reuses an archived assignment owner")
@@ -597,9 +620,39 @@ func validateAuditCoverage(ledgerBytes, findingsBytes []byte, source *workspace.
 		if !candidates[fingerprint] {
 			return errors.New("audit findings.json has a finding without candidate")
 		}
-		if !connectedCandidates[fingerprint] {
-			return errors.New("audit findings.json has a finding without connected review evidence")
+		if len(checkedCitations[fingerprint]) != len(findingPaths[fingerprint]) {
+			return errors.New("audit findings.json has a cited file without connected review evidence")
 		}
+	}
+	// shortcut: Free Markdown can still contradict records in other words; render public prose from records when exact agreement is required.
+	report := strings.ToLower(string(reportBytes))
+	reportable := false
+	for _, finding := range findings {
+		if finding.Verdict == "rejected" {
+			continue
+		}
+		reportable = true
+		title := strings.ToLower(strings.Join(strings.Fields(finding.Title), " "))
+		found := false
+		for _, line := range strings.Split(report, "\n") {
+			if finding.Verdict == "confirmed" {
+				cells := strings.Split(strings.Trim(line, " |\t"), "|")
+				if len(cells) < 4 || strings.Trim(strings.TrimSpace(cells[0]), "*_` ") != finding.Severity.Overall {
+					continue
+				}
+				line = cells[1]
+			}
+			if strings.Contains(strings.Join(strings.Fields(line), " "), title) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return errors.New("audit REPORT.md omits a final finding title or severity")
+		}
+	}
+	if reportable && auditCleanClaim.MatchString(strings.Join(strings.Fields(report), " ")) {
+		return errors.New("audit REPORT.md contradicts final findings")
 	}
 	return nil
 }
@@ -629,17 +682,6 @@ func auditSourceInventory(source *workspace.Snapshot) (map[string]bool, map[stri
 	}
 	// shortcut: Omitted mixes head and base links; add head-only link identity before accepting link coverage.
 	return paths, lines
-}
-
-func auditPathsConnect(reviewed []string, cited map[string]bool) bool {
-	for _, path := range reviewed {
-		for file := range cited {
-			if file == path || strings.HasPrefix(file, path+"/") {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 func auditSeedsChecked(starting, reviewed []string) bool {
@@ -679,17 +721,6 @@ func auditConditionKind(kind string) bool {
 	switch kind {
 	case "authentication_level", "authorization_role", "user_interaction", "system_configuration", "network_routing",
 		"environmental_dependency", "data_state", "timing_dependency", "third_party_dependency":
-		return true
-	default:
-		return false
-	}
-}
-
-func validAuditPriorStatus(status string) bool {
-	switch status {
-	case "new", "prior_confirmed_same_source", "prior_confirmed_changed_source", "prior_needs_validation", "prior_deferred",
-		"prior_blocked", "prior_out_of_scope", "prior_covered_same_source", "prior_covered_changed_source",
-		"prior_rejected_claim_changed", "none":
 		return true
 	default:
 		return false

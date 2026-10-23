@@ -131,7 +131,7 @@ func TestHostileHTTPResultValidationErrorRedactsProviderKey(t *testing.T) {
 			request.Source.UpdatedAt = time.Now()
 			request.Command = command.Command{Name: "fix", Action: command.Fix}
 			request.Repository.Actions = []string{"fix"}
-			err := e.Execute(context.Background(), request)
+			err := e.Execute(t.Context(), request)
 			if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "unsafe or duplicate changed path") || strings.Contains(err.Error(), key) || writes.Load() != 0 {
 				t.Fatalf("hostile result escaped error boundary or published: error=%v writes=%d", err, writes.Load())
 			}

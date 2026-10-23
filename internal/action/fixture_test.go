@@ -455,7 +455,7 @@ func writeActionTestSkills(t *testing.T, home, parent string, sources ...string)
 
 func testActionContext(t *testing.T) context.Context {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 	t.Cleanup(cancel)
 	return ctx
 }
@@ -484,7 +484,7 @@ const auditCandidateFindingFixture = `[{"verdict":"needs_validation","fingerprin
 
 const auditConfirmedFindingFixture = `[{"verdict":"confirmed","fingerprint":"F","title":"Missing guard","description":"An attacker can reach this operation without the intended guard.","root_cause":"The operation omits the guard before changing the object.","intended_behavior":"Only the object's owner can change it.","trace":[{"kind":"entrypoint","file":"source.txt","line":1,"scope":"source","description":"Attacker input reaches the operation."}],"evidence":[{"file":"source.txt","line":1,"description":"The source performs the operation without the guard."}],"conditions":[],"execution":{"attacker_perspective":"An unprivileged user with an account.","payloads":["Another user's object identifier."],"instructions":["Submit the identifier through the operation."],"observed_result":"The other user's object changes."},"remediation":{"strategy":"Check ownership before the state change."},"severity":{"likelihood":{"score":"medium","reason":"The operation is directly reachable."},"impact":{"score":"medium","reason":"One protected object can change."},"overall_severity":"medium"},"confidence":{"score":"high","reason":"The source path and result were reproduced."}}]`
 
-const auditCoveredLedgerFixture = `[{"coverage_id":"source::boundary::subsystem::attack","canonical_refs":{"surface":"source","boundary":"boundary","subsystem":"subsystem","attack_class":"attack"},"surface":"Source","boundary":"Boundary","subsystem":"Subsystem","attack_class":"Attack","starting_paths":["source.txt"],"ordinary_attack_class_block":null,"selected_companion_blocks":[],"excluded_blocks":[],"prior_status":"none","attempts":[],"wave":1,"status":"covered","agent_id":"hunter","reviewed_paths":["source.txt"],"local_checks":[{"agent_id":"hunter","reviewed_paths":["source.txt"],"invariant":"Access is checked","method":"source","result":"The guard is present","artifact":null}],"result_fingerprints":[],"unresolved":[]}]`
+const auditCoveredLedgerFixture = `[{"coverage_id":"source::boundary::subsystem::attack","canonical_refs":{"surface":"source","boundary":"boundary","subsystem":"subsystem","attack_class":"attack"},"surface":"Source","boundary":"Boundary","subsystem":"Subsystem","attack_class":"Attack","starting_paths":["source.txt"],"ordinary_attack_class_block":null,"selected_companion_blocks":[],"excluded_blocks":[],"prior_status":"none","attempts":[],"wave":1,"status":"covered","agent_id":"hunter","reviewed_paths":["source.txt"],"local_checks":[{"agent_id":"verifier","reviewed_paths":["source.txt"],"invariant":"Access is checked","method":"source","result":"The guard is present","artifact":null}],"result_fingerprints":[],"unresolved":[]}]`
 
 func auditArtifactsFixture(job Job, target, report string) []workspace.File {
 	metadata := fmt.Sprintf(`{"run_id":"test-run","repo":%q,"target":%q,"source_ref":%q,"profile":"standard","scope_paths":["."],"budget":null,"selected_companion_files":[],"prior_run_paths":[],"shared_file_owners":%s,"execution_policy":"sandboxed-source-and-local-only","run_status":"complete","skill_source":%q}`, job.Identity.Repository, target, job.Source.Head, auditTestOwners, auditSkillSource(job.Main))

@@ -71,7 +71,7 @@ func TestValidateModelAndEffortAgainstInstalledCatalogue(t *testing.T) {
 			installFakeCodex(t, catalogueScriptFor(dir, page1, page2))
 			t.Setenv("GH_TOKEN", "secret")
 			t.Setenv("GITHUB_TOKEN", "secret")
-			settings, err := Validate(context.Background(), config.CodexConfig{Model: tt.model, ReasoningEffort: tt.effort, Skills: []string{"/example/SKILL.md"}})
+			settings, err := Validate(t.Context(), config.CodexConfig{Model: tt.model, ReasoningEffort: tt.effort, Skills: []string{"/example/SKILL.md"}})
 			if tt.wantError != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantError) {
 					t.Fatalf("Validate() error = %v, want %q", err, tt.wantError)
@@ -121,7 +121,7 @@ func TestValidateFailsWhenCodexCannotSupplyCatalogue(t *testing.T) {
 		t.Run(response, func(t *testing.T) {
 			dir := t.TempDir()
 			installFakeCodex(t, catalogueScriptFor(dir, response, ""))
-			if _, err := Validate(context.Background(), config.CodexConfig{Model: "gpt-6-sol", ReasoningEffort: "ultra"}); err == nil {
+			if _, err := Validate(t.Context(), config.CodexConfig{Model: "gpt-6-sol", ReasoningEffort: "ultra"}); err == nil {
 				t.Fatalf("accepted unvalidated settings after response %s", response)
 			}
 		})
@@ -139,7 +139,7 @@ printf '%s\n' '{"method":"test/notification","params":{}}'`, 1)
 	fake := installFakeCodex(t, script)
 	t.Setenv("CODEX_API_KEY", "dummy-environment-key")
 	t.Setenv("CODEX_ACCESS_TOKEN", "dummy-environment-access-token")
-	settings, err := Validate(context.Background(), config.CodexConfig{APIKey: "dummy-configured-key"})
+	settings, err := Validate(t.Context(), config.CodexConfig{APIKey: "dummy-configured-key"})
 	if err != nil || settings.Model != "test" || settings.APIKey != "dummy-configured-key" {
 		t.Fatalf("Validate() failed to preserve configured authentication: %v", err)
 	}
@@ -179,7 +179,7 @@ func TestValidateRejectsFailedConfiguredLogin(t *testing.T) {
 		t.Run(response, func(t *testing.T) {
 			dir := t.TempDir()
 			installFakeCodex(t, catalogueScriptFor(dir, response, ""))
-			_, err := Validate(context.Background(), config.CodexConfig{APIKey: "dummy-configured-key"})
+			_, err := Validate(t.Context(), config.CodexConfig{APIKey: "dummy-configured-key"})
 			if err == nil || strings.Contains(err.Error(), "dummy-configured-key") {
 				t.Fatalf("configured login must fail without exposing the key: %v", err)
 			}
@@ -190,13 +190,13 @@ func TestValidateRejectsFailedConfiguredLogin(t *testing.T) {
 func TestValidateReportsCLIExitAndHonorsTimeout(t *testing.T) {
 	t.Run("unsupported CLI flag", func(t *testing.T) {
 		installFakeCodex(t, "#!/bin/sh\nprintf '%s\\n' 'unsupported flag' >&2\nexit 2\n")
-		if _, err := Validate(context.Background(), config.CodexConfig{}); err == nil || !strings.Contains(err.Error(), "unsupported flag") {
+		if _, err := Validate(t.Context(), config.CodexConfig{}); err == nil || !strings.Contains(err.Error(), "unsupported flag") {
 			t.Fatalf("missing CLI failure: %v", err)
 		}
 	})
 	t.Run("timeout", func(t *testing.T) {
 		installFakeCodex(t, "#!/bin/sh\nexec sleep 10\n")
-		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 		defer cancel()
 		started := time.Now()
 		if _, err := Validate(ctx, config.CodexConfig{}); !errors.Is(err, context.DeadlineExceeded) {
@@ -228,15 +228,14 @@ func TestValidateReportsCleanupFailure(t *testing.T) {
 			}
 		}
 	})
-	// Go 1.23 predates testing.T.Context.
-	if _, err := Validate(context.Background(), config.CodexConfig{}); !errors.Is(err, os.ErrPermission) {
+	if _, err := Validate(t.Context(), config.CodexConfig{}); !errors.Is(err, os.ErrPermission) {
 		t.Fatalf("Validate() = %v; want cleanup permission error", err)
 	}
 }
 
 func TestModelPreflightQuotesStderr(t *testing.T) {
 	installFakeCodex(t, "#!/bin/sh\nprintf 'private\\nforged journal line' >&2\nprintf '%s\\n' '{not json'\n")
-	_, err := listModels(context.Background(), config.CodexConfig{})
+	_, err := listModels(t.Context(), config.CodexConfig{})
 	if err == nil || strings.Contains(err.Error(), "\nforged journal line") || !strings.Contains(err.Error(), `private\nforged journal line`) {
 		t.Fatalf("unsafe preflight stderr: %v", err)
 	}
@@ -250,7 +249,7 @@ func TestCatalogueProviderErrorIsBoundedAndQuoted(t *testing.T) {
 		t.Fatal(err)
 	}
 	installFakeCodex(t, catalogueScriptFor(dir, string(response), ""))
-	_, err = Validate(context.Background(), config.CodexConfig{})
+	_, err = Validate(t.Context(), config.CodexConfig{})
 	if err == nil || strings.Contains(err.Error(), "\nforged journal line") || !strings.Contains(err.Error(), `first\nforged journal line`) || len(err.Error()) > bounded.DiagnosticBytes+200 || !strings.Contains(err.Error(), "...") {
 		t.Fatalf("unsafe/unbounded provider error: %v", err)
 	}
@@ -267,7 +266,7 @@ func TestCatalogueEventAcceptsExactLimitAndRejectsNextByte(t *testing.T) {
 				if err := os.WriteFile(binary+".response", []byte(response), 0600); err != nil {
 					t.Fatal(err)
 				}
-				models, err := listModels(context.Background(), config.CodexConfig{})
+				models, err := listModels(t.Context(), config.CodexConfig{})
 				if size == aicli.MaxEventBytes {
 					if err != nil || len(models) != 1 || models[0].Model != "fixture" {
 						t.Fatalf("exact-cap catalogue=%+v err=%v", models, err)
@@ -293,7 +292,7 @@ func TestValidateKeepsImplicitNativeHome(t *testing.T) {
 			installFakeCodex(t, script)
 			t.Setenv("HOME", t.TempDir())
 			t.Setenv("CODEX_HOME", "")
-			if _, err := Validate(context.Background(), config.CodexConfig{APIKey: key}); err != nil {
+			if _, err := Validate(t.Context(), config.CodexConfig{APIKey: key}); err != nil {
 				t.Fatalf("model discovery injected a missing implicit home: %v", err)
 			}
 		})
@@ -308,7 +307,7 @@ func TestValidateRedactsKeyBeforeClippingCatalogueError(t *testing.T) {
 		t.Fatal(err)
 	}
 	installFakeCodex(t, catalogueScriptFor(t.TempDir(), string(response), ""))
-	_, err = Validate(context.Background(), config.CodexConfig{APIKey: key})
+	_, err = Validate(t.Context(), config.CodexConfig{APIKey: key})
 	if err == nil || strings.Contains(err.Error(), "KEYPREFIX__LEAK") || !strings.Contains(err.Error(), "[redacted]") || !strings.Contains(err.Error(), "y...") || len(err.Error()) > bounded.DiagnosticBytes+200 {
 		t.Fatalf("clipped catalogue error exposed key fragment or lost bound: %v", err)
 	}
@@ -332,7 +331,7 @@ func TestValidateRedactsQuotedConfiguredKeyFromProviderError(t *testing.T) {
 					t.Fatal(err)
 				}
 				installFakeCodex(t, catalogueScriptFor(dir, string(response), ""))
-				_, err = Validate(context.Background(), config.CodexConfig{APIKey: key})
+				_, err = Validate(t.Context(), config.CodexConfig{APIKey: key})
 				if err == nil || err.Error() != `cannot validate Codex settings: Codex account/login/start: "provider rejected [redacted]"` {
 					t.Fatalf("provider error did not redact the configured key: %v", err)
 				}

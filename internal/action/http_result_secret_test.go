@@ -103,7 +103,7 @@ func TestHostileHTTPResultCannotPublishConfiguredProviderKey(t *testing.T) {
 			request := usageJob()
 			request.Command = command.Command{Name: name, Action: action}
 			request.Repository.Actions = []string{name}
-			err := e.Execute(context.Background(), request)
+			err := e.Execute(t.Context(), request)
 			if !errors.Is(err, monitor.ErrTerminalJob) || !tc.answerOnly && !strings.Contains(err.Error(), "configured provider key") || writes.Load() != 0 {
 				t.Fatalf("hostile result crossed publication boundary: error=%v writes=%d", err, writes.Load())
 			}

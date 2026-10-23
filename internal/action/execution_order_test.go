@@ -189,7 +189,7 @@ func testExecuteOrdersCheckpoints(t *testing.T, overHTTP, capped, loseObservatio
 		}
 		transport := httptest.NewServer(remote)
 		t.Cleanup(transport.Close)
-		workerCtx, cancelWorker := context.WithCancel(context.Background())
+		workerCtx, cancelWorker := context.WithCancel(t.Context())
 		t.Cleanup(func() { cancelWorker(); _ = remote.Close() })
 		worker := e.Runner
 		worker.WorkRoot = t.TempDir()
@@ -214,7 +214,7 @@ func testExecuteOrdersCheckpoints(t *testing.T, overHTTP, capped, loseObservatio
 		go func() { workerDone <- RunHTTP(workerCtx, client, transport.URL, "local", &worker) }()
 		e.Executor = remote
 	}
-	if err := e.Execute(context.Background(), request); err != nil {
+	if err := e.Execute(t.Context(), request); err != nil {
 		t.Fatal(err)
 	}
 	if overHTTP {

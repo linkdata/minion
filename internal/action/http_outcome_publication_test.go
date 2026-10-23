@@ -206,7 +206,7 @@ func TestExecuteRejectsHostileHTTPOutcomeBeforePublication(t *testing.T) {
 			request := usageJob()
 			request.Command = command.Command{Name: name, Action: action}
 			request.Repository.Actions = []string{name}
-			if err := e.Execute(context.Background(), request); err == nil || (scenario.change != "failed outcome" && !errors.Is(err, monitor.ErrTerminalJob)) || writes.Load() != 0 {
+			if err := e.Execute(t.Context(), request); err == nil || (scenario.change != "failed outcome" && !errors.Is(err, monitor.ErrTerminalJob)) || writes.Load() != 0 {
 				t.Fatalf("hostile outcome published or lost failure classification: error=%v writes=%d", err, writes.Load())
 			}
 			if !executed {

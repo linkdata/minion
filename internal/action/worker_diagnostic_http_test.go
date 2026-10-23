@@ -35,7 +35,7 @@ func TestHTTPWorkerDiagnosticsRemainPrivateThroughPublication(t *testing.T) {
 				job.Main.Skills = []string{testAuditSkillURL}
 			}
 			job.Identity.Repository = "o/r"
-			f := newHTTPServerTest(t, context.Background(), job, runnerExecutionCheckpoints{}, nil)
+			f := newHTTPServerTest(t, t.Context(), job, runnerExecutionCheckpoints{}, nil)
 			f.pull(t)
 			f.ack(t, "/before", f.call(1), http.StatusOK, 1)
 			paid := f.call(2)
@@ -97,7 +97,7 @@ func TestHTTPWorkerDiagnosticsRemainPrivateThroughPublication(t *testing.T) {
 			request.Source.Author = github.User{ID: job.Identity.RequesterID, Login: job.Identity.Requester}
 			request.Source.UpdatedAt = time.Now()
 			request.Command = command.Command{Name: string(action), Action: action}
-			if err := owner.publish(context.Background(), &preparedAction{job: job, request: request, issueNodeID: "issue-node"}, got.result); err != nil {
+			if err := owner.publish(t.Context(), &preparedAction{job: job, request: request, issueNodeID: "issue-node"}, got.result); err != nil {
 				t.Fatal(err)
 			}
 			_, parseErr := command.ParseForLoginCommands(posted, "linkdataminion", defaultActionTestCommands)
@@ -154,10 +154,10 @@ func TestHTTPChangedFixPublishesBranchWithoutWorkerText(t *testing.T) {
 	fakeOnPath(t, "git", fmt.Sprintf("#!/bin/sh\nexec %s -c %s \"$@\"\n", shellQuote(git), shellQuote("include.path="+gitConfig)))
 	checkout := cloneFixture(t, t.TempDir())
 	const branch = "minion/fix-reviewed"
-	if err := checkout.NewBranch(context.Background(), branch); err != nil {
+	if err := checkout.NewBranch(t.Context(), branch); err != nil {
 		t.Fatal(err)
 	}
-	snapshot, err := checkout.Snapshot(context.Background())
+	snapshot, err := checkout.Snapshot(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +171,7 @@ func TestHTTPChangedFixPublishesBranchWithoutWorkerText(t *testing.T) {
 	job.Identity.Repository = request.Repository.Name
 	job.Identity.RequesterID = request.Source.Author.ID
 	job.Source = snapshot
-	f := newHTTPServerTest(t, context.Background(), job, runnerExecutionCheckpoints{}, nil)
+	f := newHTTPServerTest(t, t.Context(), job, runnerExecutionCheckpoints{}, nil)
 	f.pull(t)
 	f.ack(t, "/before", f.call(1), http.StatusOK, 1)
 	paid := f.call(2)
@@ -209,7 +209,7 @@ func TestHTTPChangedFixPublishesBranchWithoutWorkerText(t *testing.T) {
 	repo := github.Repository{ID: 1, FullName: "o/r", Owner: github.User{ID: 2}, DefaultBranch: "main", Visibility: "public"}
 	fork := github.Repository{ID: 4, FullName: "bot/r", Fork: true, Parent: &repo, Source: &repo, Visibility: "public"}
 	prepared := &preparedAction{job: job, request: request, checkout: checkout, repository: repo, fork: fork, branch: branch, issueNodeID: "issue-node"}
-	if err := owner.publish(context.Background(), prepared, got.result); err != nil {
+	if err := owner.publish(t.Context(), prepared, got.result); err != nil {
 		t.Fatal(err)
 	}
 	sha := owner.Store.Data.PendingFixes[request.ID].SHA
@@ -236,7 +236,7 @@ func TestHTTPChangedFixPublishesBranchWithoutWorkerText(t *testing.T) {
 
 func TestHTTPOverRenderedAnswerRefusedBeforePublication(t *testing.T) {
 	job := testJob(command.Comment)
-	f := newHTTPServerTest(t, context.Background(), job, runnerExecutionCheckpoints{}, nil)
+	f := newHTTPServerTest(t, t.Context(), job, runnerExecutionCheckpoints{}, nil)
 	f.pull(t)
 	f.ack(t, "/before", f.call(1), http.StatusOK, 1)
 	paid := f.call(2)
@@ -263,7 +263,7 @@ func TestHTTPOverRenderedAnswerRefusedBeforePublication(t *testing.T) {
 	defer githubServer.Close()
 	var journal bytes.Buffer
 	owner := Orchestrator{WorkRoot: t.TempDir(), GitHub: testGitHub(githubServer, "fixture-token"), Logger: log.New(&journal, "", 0)}
-	err := owner.publish(context.Background(), &preparedAction{job: job}, got.result)
+	err := owner.publish(t.Context(), &preparedAction{job: job}, got.result)
 	if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "invalid action result") || writes != 0 ||
 		strings.ContainsRune(journal.String(), '\x1b') {
 		t.Fatalf("over-rendered answer bypassed publication gate: writes=%d error=%v journal=%q", writes, err, journal.String())
@@ -272,7 +272,7 @@ func TestHTTPOverRenderedAnswerRefusedBeforePublication(t *testing.T) {
 
 func TestHTTPFailureAtWireTextLimitRemainsPrivate(t *testing.T) {
 	job := testJob(command.Comment)
-	f := newHTTPServerTest(t, context.Background(), job, runnerExecutionCheckpoints{}, nil)
+	f := newHTTPServerTest(t, t.Context(), job, runnerExecutionCheckpoints{}, nil)
 	f.pull(t)
 	outcome := f.outcome(1, nil)
 	outcome.Failure = &httpFailure{Message: strings.Repeat("\x01", httpFailureMessageLimit)}
@@ -358,7 +358,7 @@ func TestHTTPWorkerFailureThroughOrchestratorAndMonitor(t *testing.T) {
 		Repositories: []config.Repository{{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"comment"}, AllowedActors: []string{"writer"}, AllowedActorIDs: map[string]int64{"writer": 7}}}},
 		GitHub: gh, Handler: owner, Logger: parentLogger, Now: func() time.Time { return clock }}
 	for attempt := 1; attempt <= 3; attempt++ {
-		_, err := m.RunOnce(context.Background(), store)
+		_, err := m.RunOnce(t.Context(), store)
 		if (err == nil) != (attempt == 3) || len(jobs) != attempt || store.Data.UnconfirmedProcessJob != "" {
 			t.Fatalf("worker claims changed retry policy at attempt %d: jobs=%d state=%+v error=%v", attempt, len(jobs), store.Data, err)
 		}
@@ -407,7 +407,7 @@ func TestHTTPPrivateRefutationAtWireLimitStaysInReviewRecord(t *testing.T) {
 	if err := result.Validate(f.job); err != nil {
 		t.Fatal(err)
 	}
-	transport := newHTTPServerTest(t, context.Background(), f.job, f.sink, nil)
+	transport := newHTTPServerTest(t, t.Context(), f.job, f.sink, nil)
 	transport.pull(t)
 	sequence := uint64(1)
 	transport.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: f.review(nil, nil, "")}, http.StatusOK, sequence)
@@ -471,7 +471,7 @@ func TestHTTPPrivateRefutationAtWireLimitStaysInReviewRecord(t *testing.T) {
 	f.owner.GitHub = testGitHub(server, "fixture-token")
 	request := usageJob()
 	request.Command = command.Command{Name: "comment", Action: command.Comment}
-	if err := f.owner.publish(context.Background(), &preparedAction{job: f.job, request: request}, got.result); err != nil {
+	if err := f.owner.publish(t.Context(), &preparedAction{job: f.job, request: request}, got.result); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(posted, "Public answer.") || strings.Contains(posted, "PRIVATE_REFUTATION") || strings.Contains(journal.String(), "PRIVATE_REFUTATION") {
@@ -480,70 +480,118 @@ func TestHTTPPrivateRefutationAtWireLimitStaysInReviewRecord(t *testing.T) {
 }
 
 func TestHTTPMatchingDigestCannotPublishPrivateRefutation(t *testing.T) {
-	job := withClaudeCritic(testJob(command.Comment))
-	f := newExecutionAdapterFixture(t, job)
-	var journal bytes.Buffer
-	f.owner.Logger = log.New(&journal, "", 0)
-	result := privateReviewResult(f.job)
-	result.Answer = "Public reply.\n" + result.Refutations[0].Text
-	if err := result.Validate(f.job); err != nil {
-		t.Fatal(err)
+	for _, test := range []struct {
+		name, private, answer string
+	}{
+		{"exact copy", "PRIVATE_MAIN_REFUTATION", "Public reply.\nPRIVATE_MAIN_REFUTATION"},
+		{"collapsed whitespace", "The private refutation describes a missing access control check.\nThe same account cannot act for another user.", "Public reply. The private refutation describes a missing access control check. The same account cannot act for another user."},
+		{"one substantive sentence", "The private refutation describes a missing access control check.\nThe same account cannot act for another user.", "Public reply. The same account cannot act for another user."},
+		{"JSON escaped sentence", "The private refutation describes a missing access control check.\nThe same account cannot act for another user.", `{"memo":"The sa\u006de account cannot act for another user."}`},
+		{"JSON escaped sentence in Markdown", "The private refutation describes a missing access control check.\nThe same account cannot act for another user.", "Public reply.\n```json\n" + `{"memo":"The sa\u006de account cannot act for another user."}` + "\n```"},
+		{"nested JSON string in source", "The private refutation describes a missing access control check.\nThe same account cannot act for another user.", "Public reply.\n```go\n" + `const memo = "{\"memo\":\"The sa\\u006de account cannot act for another user.\"}"` + "\n```"},
+		{"Unicode escape in single-quoted source", "The private refutation describes a missing access control check.\nThe same account cannot act for another user.", "Public reply.\n```js\n" + `const memo = '{"memo":"The sa\u006de account cannot act for another user."}'` + "\n```"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			job := withClaudeCritic(testJob(command.Comment))
+			f := newExecutionAdapterFixture(t, job)
+			var journal bytes.Buffer
+			f.owner.Logger = log.New(&journal, "", 0)
+			result := privateReviewResult(f.job)
+			result.Refutations[0].Text = test.private
+			result.Answer = test.answer
+			if err := result.Validate(f.job); err != nil {
+				t.Fatal(err)
+			}
+			transport := newHTTPServerTest(t, t.Context(), f.job, f.sink, nil)
+			transport.pull(t)
+			sequence := uint64(1)
+			transport.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: f.review(nil, nil, "")}, http.StatusOK, sequence)
+			for i, call := range result.Calls {
+				sequence++
+				transport.ack(t, "/before", httpCall{Sequence: sequence, Checkpoint: f.call(callMetadata(call))}, http.StatusOK, sequence)
+				sequence++
+				transport.ack(t, "/after", httpCall{Sequence: sequence, Checkpoint: f.call(call)}, http.StatusOK, sequence)
+				sequence++
+				var refs []Refutation
+				if call.Round >= 2 {
+					refs = result.Refutations
+				}
+				transport.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: f.review(result.Calls[:i+1], refs, "")}, http.StatusOK, sequence)
+			}
+			sequence++
+			transport.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: f.review(result.Calls, result.Refutations, result.CriticStopReason)}, http.StatusOK, sequence)
+			digest, err := contentDigest(result.Answer, result.Changes, result.Artifacts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sequence++
+			finalReview := f.review(result.Calls, result.Refutations, result.CriticStopReason)
+			finalReview.ContentDigest = digest
+			transport.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: finalReview}, http.StatusOK, sequence)
+			sequence++
+			transport.ack(t, "/outcome", httpOutcome{Sequence: sequence, Result: result}, http.StatusOK, sequence)
+			got := transport.result(t)
+			if got.err != nil || f.sink.finish(got.result, got.err) != nil {
+				t.Fatalf("matching-digest private result was not accepted by HTTP: %+v", got)
+			}
+			if saved := readPrivateReview(t, f.owner.WorkRoot); !reflect.DeepEqual(saved.Refutations, result.Refutations) || saved.ContentDigest != digest {
+				t.Fatalf("private review checkpoint was not retained: %+v", saved)
+			}
+			var posted string
+			writes := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if serveIssueFixture(t, w, r) {
+					return
+				}
+				if captureComment(t, w, r, &posted) {
+					writes++
+					return
+				}
+				t.Errorf("unexpected GitHub request: %s %s", r.Method, r.URL.Path)
+				http.NotFound(w, r)
+			}))
+			defer server.Close()
+			f.owner.GitHub = testGitHub(server, "fixture-token")
+			request := usageJob()
+			request.Command = command.Command{Name: "comment", Action: command.Comment}
+			err = f.owner.publish(t.Context(), &preparedAction{job: f.job, request: request}, got.result)
+			if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "publication contains private review evidence") || writes != 0 ||
+				posted != "" || strings.Contains(err.Error(), result.Refutations[0].Text) || strings.Contains(journal.String(), result.Refutations[0].Text) {
+				t.Fatalf("private refutation crossed publication boundary: error=%v writes=%d posted=%q journal=%q", err, writes, posted, journal.String())
+			}
+		})
 	}
-	transport := newHTTPServerTest(t, context.Background(), f.job, f.sink, nil)
-	transport.pull(t)
-	sequence := uint64(1)
-	transport.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: f.review(nil, nil, "")}, http.StatusOK, sequence)
-	for i, call := range result.Calls {
-		sequence++
-		transport.ack(t, "/before", httpCall{Sequence: sequence, Checkpoint: f.call(callMetadata(call))}, http.StatusOK, sequence)
-		sequence++
-		transport.ack(t, "/after", httpCall{Sequence: sequence, Checkpoint: f.call(call)}, http.StatusOK, sequence)
-		sequence++
-		var refs []Refutation
-		if call.Round >= 2 {
-			refs = result.Refutations
-		}
-		transport.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: f.review(result.Calls[:i+1], refs, "")}, http.StatusOK, sequence)
+}
+
+func TestPublicationSegmentsCollisionBudgetFailsClosed(t *testing.T) {
+	const prefix = "SAME_PREFIX_1234"
+	const count = 1024
+	public := prefix + "PUBLIC"
+	private := prefix + "private entry 0000"
+	matcher := publicationSegments{
+		prefixes: make(map[string][]string),
+		budget:   int64(len(public) + 4*len(private)),
 	}
-	sequence++
-	transport.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: f.review(result.Calls, result.Refutations, result.CriticStopReason)}, http.StatusOK, sequence)
-	digest, err := contentDigest(result.Answer, result.Changes, result.Artifacts)
-	if err != nil {
-		t.Fatal(err)
+	for i := range count {
+		matcher.add(prefix + fmt.Sprintf("private entry %04d", i))
 	}
-	sequence++
-	finalReview := f.review(result.Calls, result.Refutations, result.CriticStopReason)
-	finalReview.ContentDigest = digest
-	transport.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: finalReview}, http.StatusOK, sequence)
-	sequence++
-	transport.ack(t, "/outcome", httpOutcome{Sequence: sequence, Result: result}, http.StatusOK, sequence)
-	got := transport.result(t)
-	if got.err != nil || f.sink.finish(got.result, got.err) != nil {
-		t.Fatalf("matching-digest private result was not accepted by HTTP: %+v", got)
+	if !matcher.contains(public) || matcher.budget != 0 {
+		t.Fatalf("colliding private prefixes did not exhaust the bounded matcher and fail closed: remaining=%d", matcher.budget)
 	}
-	if saved := readPrivateReview(t, f.owner.WorkRoot); !reflect.DeepEqual(saved.Refutations, result.Refutations) || saved.ContentDigest != digest {
-		t.Fatalf("private review checkpoint was not retained: %+v", saved)
+}
+
+func TestPublicationJSONScanBudgetFailsClosed(t *testing.T) {
+	text := `"` + strings.Repeat(`\"`, 100)
+	matcher := publicationSegments{budget: int64(len(text) + 32)}
+	if !matcher.containsJSONStrings(text, 0) || matcher.budget != 0 {
+		t.Fatalf("repeated escaped quotes did not exhaust the bounded JSON scan: remaining=%d", matcher.budget)
 	}
-	var posted string
-	writes := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if serveIssueFixture(t, w, r) {
-			return
-		}
-		if captureComment(t, w, r, &posted) {
-			writes++
-			return
-		}
-		t.Errorf("unexpected GitHub request: %s %s", r.Method, r.URL.Path)
-		http.NotFound(w, r)
-	}))
-	defer server.Close()
-	f.owner.GitHub = testGitHub(server, "fixture-token")
-	request := usageJob()
-	request.Command = command.Command{Name: "comment", Action: command.Comment}
-	err = f.owner.publish(context.Background(), &preparedAction{job: f.job, request: request}, got.result)
-	if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "publication contains private review evidence") || writes != 0 ||
-		posted != "" || strings.Contains(err.Error(), result.Refutations[0].Text) || strings.Contains(journal.String(), result.Refutations[0].Text) {
-		t.Fatalf("private refutation crossed publication boundary: error=%v writes=%d posted=%q journal=%q", err, writes, posted, journal.String())
+}
+
+func TestPublicationPrivateTextCannotBeNULSplit(t *testing.T) {
+	matcher := publicationSegments{prefixes: make(map[string][]string), budget: 1024}
+	matcher.add("private raw text")
+	if !matcher.contains(foldPublicationSpace("private \x00raw text")) {
+		t.Fatal("NUL split private text was not detected")
 	}
 }

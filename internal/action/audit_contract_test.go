@@ -12,19 +12,23 @@ func TestCompleteAuditResultValidatesCoverage(t *testing.T) {
 	archived := `{"wave":1,"status":"covered","agent_id":"older","reviewed_paths":["source.txt"],"local_checks":[{"agent_id":"helper","reviewed_paths":["source.txt"],"invariant":"Access is checked","method":"source","result":"The guard is present","artifact":null}],"result_fingerprints":[],"unresolved":[],"reassignment_reason":"Rechecked"}`
 	withAttempt := strings.Replace(validLedger, `"attempts":[]`, `"attempts":[`+archived+`]`, 1)
 	withAttempt = strings.Replace(withAttempt, `"wave":1,"status":"covered","agent_id":"hunter"`, `"wave":2,"status":"covered","agent_id":"hunter"`, 1)
-	withAttempt = strings.Replace(withAttempt, `"local_checks":[{"agent_id":"hunter"`, `"local_checks":[{"agent_id":"verifier"`, 1)
+	archivedCandidate := strings.Replace(archived, `"status":"covered"`, `"status":"candidate"`, 1)
+	archivedCandidate = strings.Replace(archivedCandidate, `"result_fingerprints":[]`, `"result_fingerprints":["F"]`, 1)
+	archivedCandidate = strings.Replace(archivedCandidate, `"local_checks":[{"agent_id":"helper"`, `"local_checks":[{"agent_id":"older"`, 1)
+	withSelfCheckedAttempt := strings.Replace(validLedger, `"attempts":[]`, `"attempts":[`+archivedCandidate+`]`, 1)
+	withSelfCheckedAttempt = strings.Replace(withSelfCheckedAttempt, `"wave":1,"status":"covered","agent_id":"hunter"`, `"wave":2,"status":"covered","agent_id":"hunter"`, 1)
 	sourceCheck := `"method":"source","result":"The guard is present","artifact":null`
 	localCheck := `"method":"local","result":"The guard is present","artifact":"agents/hunter/artifacts/proof.txt"`
 	archivedLocalCheck := `"method":"local","result":"The guard is present","artifact":"agents/helper/artifacts/proof.txt"`
 	confirmedLedger := strings.Replace(validLedger, `"status":"covered"`, `"status":"candidate"`, 1)
 	confirmedLedger = strings.Replace(confirmedLedger, `"result_fingerprints":[]`, `"result_fingerprints":["F"]`, 1)
+	selfCheckedCandidate := strings.Replace(confirmedLedger, `"local_checks":[{"agent_id":"verifier"`, `"local_checks":[{"agent_id":"hunter"`, 1)
 	rejectedFinding := `[{"verdict":"rejected","fingerprint":"F","title":"Guard bypass refuted","description":"The alleged bypass does not reach the operation.","claimed_root_cause":"The guard was claimed to be absent.","trace":[{"kind":"entrypoint","file":"source.txt","line":1,"scope":"source","description":"The request reaches the guard."}],"evidence":[{"file":"source.txt","line":1,"description":"The guard executes before the operation."}],"reason":"The request is stopped by the guard."}]`
 	withContext := strings.Replace(validLedger, `"ordinary_attack_class_block":null`, `"ordinary_attack_class_block":"The ordinary attack path is covered."`, 1)
 	withContext = strings.Replace(withContext, `"selected_companion_blocks":[]`, `"selected_companion_blocks":["Companion A"]`, 1)
 	withContext = strings.Replace(withContext, `"excluded_blocks":[]`, `"excluded_blocks":[{"block":"Companion B","reason":"Outside this boundary."}]`, 1)
-	withContext = strings.Replace(withContext, `"prior_status":"none"`, `"prior_status":"new"`, 1)
 	for _, test := range []struct {
-		name, ledger, findings, want string
+		name, ledger, findings, report, want string
 	}{
 		{name: "covered"},
 		{name: "covered with populated context", ledger: withContext},
@@ -39,6 +43,11 @@ func TestCompleteAuditResultValidatesCoverage(t *testing.T) {
 		{name: "zero current wave", ledger: strings.Replace(validLedger, `"wave":1`, `"wave":0`, 1), want: "invalid current wave"},
 		{name: "confirmed finding", ledger: confirmedLedger, findings: auditConfirmedFindingFixture},
 		{name: "needs_validation finding", ledger: confirmedLedger, findings: auditCandidateFindingFixture},
+		{name: "confirmed severity belongs to another line", ledger: confirmedLedger, findings: auditConfirmedFindingFixture, report: "Missing guard (low).\nMedium confidence.", want: "omits a final finding title or severity"},
+		{name: "confirmed severity is not confidence text", ledger: confirmedLedger, findings: auditConfirmedFindingFixture, report: "| low | Missing guard | Boundary | medium confidence |", want: "omits a final finding title or severity"},
+		{name: "no findings were omitted is not a clean claim", ledger: confirmedLedger, findings: auditCandidateFindingFixture, report: "No findings were omitted. Unverified boundary."},
+		{name: "candidate lacks independent verifier", ledger: selfCheckedCandidate, findings: auditCandidateFindingFixture, want: "without independent verifier check"},
+		{name: "archived candidate lacks independent verifier", ledger: withSelfCheckedAttempt, findings: auditCandidateFindingFixture, want: "without independent verifier check"},
 		{name: "decimal spelling of integer line", ledger: confirmedLedger, findings: strings.Replace(auditCandidateFindingFixture, `"line":1`, `"line":1.0`, 1)},
 		{name: "exponent spelling of integer line", ledger: confirmedLedger, findings: strings.Replace(auditCandidateFindingFixture, `"line":1`, `"line":1e0`, 1)},
 		{name: "fractional trace line", ledger: confirmedLedger, findings: strings.Replace(auditCandidateFindingFixture, `"line":1`, `"line":1.5`, 1), want: "invalid trace evidence"},
@@ -71,7 +80,7 @@ func TestCompleteAuditResultValidatesCoverage(t *testing.T) {
 		{name: "bare finding", findings: `[{"fingerprint":"F"}]`, want: "incomplete finding"},
 		{name: "noncanonical identity", ledger: strings.Replace(validLedger, `"coverage_id":"source::boundary::subsystem::attack"`, `"coverage_id":"forged"`, 1), want: "noncanonical coverage identity"},
 		{name: "missing owner", ledger: strings.Replace(validLedger, `"agent_id":"hunter","reviewed_paths"`, `"agent_id":null,"reviewed_paths"`, 1), want: "assigned review evidence"},
-		{name: "unchecked path", ledger: strings.Replace(validLedger, `"local_checks":[{"agent_id":"hunter","reviewed_paths":["source.txt"]`, `"local_checks":[{"agent_id":"hunter","reviewed_paths":["other.txt"]`, 1), want: "local check outside reviewed paths"},
+		{name: "unchecked path", ledger: strings.Replace(validLedger, `"local_checks":[{"agent_id":"verifier","reviewed_paths":["source.txt"]`, `"local_checks":[{"agent_id":"verifier","reviewed_paths":["other.txt"]`, 1), want: "local check outside reviewed paths"},
 		{name: "check without result", ledger: strings.Replace(validLedger, `"result":"The guard is present"`, `"result":""`, 1), want: "incomplete local check"},
 		{name: "covered with unresolved", ledger: strings.Replace(validLedger, `"unresolved":[]}]`, `"unresolved":["ignored"]}]`, 1), want: "inconsistent status evidence"},
 		{name: "missing ordinary block", ledger: strings.Replace(validLedger, `"ordinary_attack_class_block":null,`, ``, 1), want: "required coverage context"},
@@ -81,7 +90,9 @@ func TestCompleteAuditResultValidatesCoverage(t *testing.T) {
 		{name: "missing excluded blocks", ledger: strings.Replace(validLedger, `"excluded_blocks":[],`, ``, 1), want: "required coverage context"},
 		{name: "null excluded blocks", ledger: strings.Replace(validLedger, `"excluded_blocks":[]`, `"excluded_blocks":null`, 1), want: "required coverage context"},
 		{name: "missing prior status", ledger: strings.Replace(validLedger, `"prior_status":"none",`, ``, 1), want: "required coverage context"},
-		{name: "invalid prior status", ledger: strings.Replace(validLedger, `"prior_status":"none"`, `"prior_status":"invented"`, 1), want: "required coverage context"},
+		{name: "prior run claim without metadata", ledger: strings.Replace(validLedger, `"prior_status":"none"`, `"prior_status":"prior_confirmed_same_source"`, 1), want: "prior run absent from metadata"},
+		{name: "new claim without prior ledger", ledger: strings.Replace(validLedger, `"prior_status":"none"`, `"prior_status":"new"`, 1), want: "prior run absent from metadata"},
+		{name: "invalid prior status", ledger: strings.Replace(validLedger, `"prior_status":"none"`, `"prior_status":"invented"`, 1), want: "prior run absent from metadata"},
 		{name: "missing attempts", ledger: strings.Replace(validLedger, `"attempts":[],`, ``, 1), want: "required coverage context"},
 		{name: "null attempts", ledger: strings.Replace(validLedger, `"attempts":[]`, `"attempts":null`, 1), want: "required coverage context"},
 		{name: "archived attempt without evidence", ledger: strings.Replace(validLedger, `"attempts":[]`, `"attempts":[{"status":"covered"}]`, 1), want: "assigned review evidence"},
@@ -89,6 +100,7 @@ func TestCompleteAuditResultValidatesCoverage(t *testing.T) {
 		{name: "archived attempt without reassignment", ledger: strings.Replace(withAttempt, `,"reassignment_reason":"Rechecked"`, ``, 1), want: "invalid archived attempt wave or reassignment"},
 		{name: "reused archived owner", ledger: strings.Replace(withAttempt, `"agent_id":"older"`, `"agent_id":"hunter"`, 1), want: "reuses an archived assignment owner"},
 		{name: "reused archived check owner", ledger: strings.Replace(withAttempt, `"local_checks":[{"agent_id":"verifier"`, `"local_checks":[{"agent_id":"older"`, 1), want: "reuses an archived assignment check owner"},
+		{name: "reused archived verifier", ledger: strings.Replace(withAttempt, `"local_checks":[{"agent_id":"verifier"`, `"local_checks":[{"agent_id":"helper"`, 1), want: "reuses an archived assignment check owner"},
 		{name: "current wave precedes archive", ledger: strings.Replace(withAttempt, `"wave":2,"status":"covered"`, `"wave":1,"status":"covered"`, 1), want: "invalid archived attempt wave"},
 		{name: "null unit", ledger: `[null]`, want: "invalid unit status"},
 		{name: "unknown unit status", ledger: `[{"status":"unknown"}]`, want: "invalid unit status"},
@@ -105,8 +117,19 @@ func TestCompleteAuditResultValidatesCoverage(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			job := testJob(command.SecurityAudit)
 			result := completeAuditResult(job)
+			if test.findings != "" {
+				result.Answer = "Reviewed audit report: Unverified boundary; Missing guard (medium)."
+			}
+			if strings.Contains(test.findings, `"verdict":"confirmed"`) {
+				result.Answer += "\n| Severity | Title | Boundary | Observed result |\n| --- | --- | --- | --- |\n| medium | Missing guard | Boundary | Result |"
+			}
+			if test.report != "" {
+				result.Answer = test.report
+			}
 			for i := range result.Artifacts {
 				switch result.Artifacts[i].Path {
+				case "REPORT.md":
+					result.Artifacts[i].Data = []byte(result.Answer)
 				case "coverage-ledger.json":
 					if test.ledger != "" {
 						result.Artifacts[i].Data = []byte(test.ledger)

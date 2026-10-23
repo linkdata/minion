@@ -14,9 +14,14 @@ func TestCompleteAuditClaimsBindToCurrentSource(t *testing.T) {
 	other := strings.Replace(candidate, `"coverage_id":"source::`, `"coverage_id":"other::`, 1)
 	other = strings.Replace(other, `"canonical_refs":{"surface":"source"`, `"canonical_refs":{"surface":"other"`, 1)
 	other = strings.ReplaceAll(other, "source.txt", "other.txt")
-	archived := `{"wave":1,"status":"candidate","agent_id":"older","reviewed_paths":["source.txt"],"local_checks":[{"agent_id":"older","reviewed_paths":["source.txt"],"invariant":"Access is checked","method":"source","result":"The guard is present","artifact":null}],"result_fingerprints":["F"],"unresolved":[],"reassignment_reason":"Rechecked"}`
+	archived := `{"wave":1,"status":"candidate","agent_id":"older","reviewed_paths":["source.txt"],"local_checks":[{"agent_id":"helper","reviewed_paths":["source.txt"],"invariant":"Access is checked","method":"source","result":"The guard is present","artifact":null}],"result_fingerprints":["F"],"unresolved":[],"reassignment_reason":"Rechecked"}`
 	coveredAfterArchive := strings.Replace(auditCoveredLedgerFixture, `"attempts":[]`, `"attempts":[`+archived+`]`, 1)
 	coveredAfterArchive = strings.Replace(coveredAfterArchive, `"wave":1,"status":"covered","agent_id":"hunter"`, `"wave":2,"status":"covered","agent_id":"hunter"`, 1)
+	archivedMissingSeed := strings.Replace(coveredAfterArchive, `"agent_id":"older","reviewed_paths":["source.txt"]`, `"agent_id":"older","reviewed_paths":["other.txt"]`, 1)
+	archivedMissingSeed = strings.Replace(archivedMissingSeed, `"agent_id":"helper","reviewed_paths":["source.txt"]`, `"agent_id":"helper","reviewed_paths":["other.txt"]`, 1)
+	citesOther := strings.Replace(auditCandidateFindingFixture, `"description":"Input reaches the boundary."}]`, `"description":"Input reaches the boundary."},{"kind":"sink","file":"other.txt","line":1,"scope":"other","description":"The operation changes state."}]`, 1)
+	unrelatedVerifier := strings.Replace(candidate, `"reviewed_paths":["source.txt"],"local_checks":[{"agent_id":"verifier","reviewed_paths":["source.txt"]`, `"reviewed_paths":["source.txt","other.txt"],"local_checks":[{"agent_id":"hunter","reviewed_paths":["source.txt"]`, 1)
+	unrelatedVerifier = strings.Replace(unrelatedVerifier, `"artifact":null}],"result_fingerprints"`, `"artifact":null},{"agent_id":"verifier","reviewed_paths":["other.txt"],"invariant":"Other path is checked","method":"source","result":"Other path is present","artifact":null}],"result_fingerprints"`, 1)
 	unit := func(ledger string) string { return strings.TrimSuffix(strings.TrimPrefix(ledger, "["), "]") }
 	for _, test := range []struct {
 		name, ledger, findings, want string
@@ -32,8 +37,12 @@ func TestCompleteAuditClaimsBindToCurrentSource(t *testing.T) {
 		{name: "unterminated final line exists", ledger: candidate, findings: strings.ReplaceAll(auditCandidateFindingFixture, `"line":1`, `"line":2`), files: []workspace.File{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("first\nsecond")}}},
 		{name: "unconnected single candidate", ledger: other, findings: auditCandidateFindingFixture, files: []workspace.File{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("source\n")}, {Path: "other.txt", Mode: workspace.Regular, Data: []byte("other\n")}}, want: "without connected review evidence"},
 		{name: "shared root cause across entry paths", ledger: "[" + unit(other) + "," + unit(candidate) + "]", findings: auditCandidateFindingFixture, files: []workspace.File{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("source\n")}, {Path: "other.txt", Mode: workspace.Regular, Data: []byte("other\n")}}},
+		{name: "unreviewed cited sink", ledger: candidate, findings: citesOther, files: []workspace.File{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("source\n")}, {Path: "other.txt", Mode: workspace.Regular, Data: []byte("other\n")}}, want: "cited file without connected review evidence"},
+		{name: "hunter citation with unrelated verifier", ledger: unrelatedVerifier, findings: auditCandidateFindingFixture, files: []workspace.File{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("source\n")}, {Path: "other.txt", Mode: workspace.Regular, Data: []byte("other\n")}}, want: "cited file without connected review evidence"},
+		{name: "linked candidates cover both citations", ledger: "[" + unit(other) + "," + unit(candidate) + "]", findings: citesOther, files: []workspace.File{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("source\n")}, {Path: "other.txt", Mode: workspace.Regular, Data: []byte("other\n")}}},
+		{name: "directory check cannot prove cited file", ledger: strings.ReplaceAll(candidate, "source.txt", "src"), findings: strings.ReplaceAll(auditCandidateFindingFixture, "source.txt", "src/entry.go"), files: []workspace.File{{Path: "src/entry.go", Mode: workspace.Regular, Data: []byte("entry\n")}}, want: "cited file without connected review evidence"},
 		{name: "archived candidate with current source evidence", ledger: coveredAfterArchive, findings: auditCandidateFindingFixture},
-		{name: "archived candidate misses starting file", ledger: strings.ReplaceAll(coveredAfterArchive, `"agent_id":"older","reviewed_paths":["source.txt"]`, `"agent_id":"older","reviewed_paths":["other.txt"]`), findings: auditCandidateFindingFixture, files: []workspace.File{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("source\n")}, {Path: "other.txt", Mode: workspace.Regular, Data: []byte("other\n")}}, want: "archived starting path without checked evidence"},
+		{name: "archived candidate misses starting file", ledger: archivedMissingSeed, findings: auditCandidateFindingFixture, files: []workspace.File{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("source\n")}, {Path: "other.txt", Mode: workspace.Regular, Data: []byte("other\n")}}, want: "archived starting path without checked evidence"},
 		{name: "covered unit misses starting file", ledger: strings.ReplaceAll(auditCoveredLedgerFixture, `"reviewed_paths":["source.txt"]`, `"reviewed_paths":["other.txt"]`), files: []workspace.File{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("source\n")}, {Path: "other.txt", Mode: workspace.Regular, Data: []byte("other\n")}}, want: "starting path without checked evidence"},
 		{name: "directory seed with checked descendant", ledger: strings.Replace(strings.ReplaceAll(auditCoveredLedgerFixture, "source.txt", "src/entry.go"), `"starting_paths":["src/entry.go"]`, `"starting_paths":["src"]`, 1), files: []workspace.File{{Path: "src/entry.go", Mode: workspace.Regular, Data: []byte("entry\n")}}},
 		{name: "directory prefix must end at component", ledger: strings.Replace(strings.ReplaceAll(auditCoveredLedgerFixture, "source.txt", "src2/entry.go"), `"starting_paths":["src2/entry.go"]`, `"starting_paths":["src"]`, 1), files: []workspace.File{{Path: "src/other.go", Mode: workspace.Regular, Data: []byte("other\n")}, {Path: "src2/entry.go", Mode: workspace.Regular, Data: []byte("entry\n")}}, want: "starting path without checked evidence"},
@@ -48,8 +57,13 @@ func TestCompleteAuditClaimsBindToCurrentSource(t *testing.T) {
 			}
 			job.Source.Omitted = test.omitted
 			result := completeAuditResult(job)
+			if test.findings != "" {
+				result.Answer = "Reviewed audit report: Unverified boundary."
+			}
 			for i := range result.Artifacts {
 				switch result.Artifacts[i].Path {
+				case "REPORT.md":
+					result.Artifacts[i].Data = []byte(result.Answer)
 				case "coverage-ledger.json":
 					if test.ledger != "" {
 						result.Artifacts[i].Data = []byte(test.ledger)

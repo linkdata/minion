@@ -213,7 +213,7 @@ func TestUnchangedAuditJSONPreservesOriginalBytes(t *testing.T) {
 	writeFixtureFile(t, root, "coverage-ledger.json", original)
 	files, diagnostics, err := readAuditArtifacts(root, false, "fixture-audit-secret")
 	if err != nil || len(diagnostics) != 0 || len(files) != 1 || !bytes.Equal(files[0].Data, original) {
-		t.Fatalf("unchanged JSON bytes=%q diagnostics=%+v error=%v", files, diagnostics, err)
+		t.Fatalf("unchanged JSON files=%+v diagnostics=%+v error=%v", files, diagnostics, err)
 	}
 }
 
