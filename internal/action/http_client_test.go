@@ -789,16 +789,16 @@ func TestRunHTTPOutcomeACKPreservesKnownReceiptAfterWatchFailure(t *testing.T) {
 			got := parent.result(t)
 			callerFailure := test.externalCause || test.callerBeforeOutcome
 			workerUnknown := test.early || test.malformedACK || callerFailure || test.processFailure
-			parentUnknown := test.early || test.callerBeforeOutcome || test.processFailure
-			workerFailed, parentFailed := workerUnknown || test.expiredAfterWatch, parentUnknown || test.expiredAfterWatch
-			if errors.Is(workerErr, monitor.ErrExecutionOutcomeUnknown) != workerUnknown || (workerErr != nil) != workerFailed || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) != parentUnknown || (got.err != nil) != parentFailed || native.Load() != 1 || outcomes.Load() != 1 || faultReads.Load() == 0 || len(got.result.Calls) != 1 || test.duringUpload && observations.Load() != 2 {
+			workerFailed := workerUnknown || test.expiredAfterWatch
+			parentFailed := test.early || test.callerBeforeOutcome || test.processFailure || test.expiredAfterWatch
+			if errors.Is(workerErr, monitor.ErrExecutionOutcomeUnknown) != workerUnknown || (workerErr != nil) != workerFailed || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || (got.err != nil) != parentFailed || native.Load() != 1 || outcomes.Load() != 1 || faultReads.Load() == 0 || len(got.result.Calls) != 1 || test.duringUpload && observations.Load() != 2 {
 				t.Fatalf("watch drain changed known receipt or erased earlier failure: worker=%v parent=%v result=%+v native=%d outcomes=%d reads=%d", workerErr, got.err, got.result, native.Load(), outcomes.Load(), faultReads.Load())
 			}
 			if callerFailure && (!errors.Is(workerErr, externalCause) || context.Cause(ctx) != externalCause) {
 				t.Fatalf("known receipt erased original caller cause: worker=%v caller=%v", workerErr, context.Cause(ctx))
 			}
-			if errors.Is(workerErr, processgroup.ErrScopeUnconfirmed) != (callerFailure || test.processFailure) || errors.Is(got.err, processgroup.ErrScopeUnconfirmed) != (test.callerBeforeOutcome || test.processFailure) || test.processFailure && !errors.Is(workerErr, externalCause) {
-				t.Fatalf("watch handling erased or invented process uncertainty: worker=%v parent=%v", workerErr, got.err)
+			if errors.Is(workerErr, processgroup.ErrScopeUnconfirmed) != (callerFailure || test.processFailure) || errors.Is(got.err, processgroup.ErrScopeUnconfirmed) || test.processFailure && !errors.Is(workerErr, externalCause) {
+				t.Fatalf("worker process claim escaped into parent policy: worker=%v parent=%v", workerErr, got.err)
 			}
 			if test.expiredAfterWatch && (!errors.Is(workerErr, monitor.ErrTerminalJob) || !errors.Is(workerErr, context.DeadlineExceeded) || !errors.Is(got.err, monitor.ErrTerminalJob) || !errors.Is(got.err, context.DeadlineExceeded)) {
 				t.Fatalf("watch child cancellation masked accepted expiry: worker=%v parent=%v", workerErr, got.err)
@@ -808,7 +808,7 @@ func TestRunHTTPOutcomeACKPreservesKnownReceiptAfterWatchFailure(t *testing.T) {
 				t.Fatalf("watch fault lost acknowledged paid facts: call=%+v saved=%+v pending=%+v", call, f.sink.calls, f.sink.pending)
 			}
 			if test.early {
-				if !errors.Is(workerErr, context.Canceled) || got.result.Answer != "" || !errors.Is(f.sink.finish(got.result, got.err), monitor.ErrExecutionOutcomeUnknown) {
+				if !errors.Is(workerErr, context.Canceled) || got.result.Answer != "" || f.sink.finish(got.result, got.err) == nil {
 					t.Fatalf("watch error that stopped Runner became success: worker=%v parent=%v result=%+v", workerErr, got.err, got.result)
 				}
 			} else if got.result.Answer != "Known candidate" || got.result.Validate(f.job) != nil || (f.sink.finish(got.result, got.err) != nil) != parentFailed {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/url"
 	"os/exec"
+	"strconv"
 	"strings"
 	"syscall"
 	"unicode/utf8"
@@ -20,8 +21,8 @@ const (
 	httpFailureScopeLimit   = 4096
 )
 
-// httpFailure carries only the policy facts used across one execution transaction.
-// Message is a private diagnostic; original parent callback errors remain local.
+// httpFailure carries finite wire details. Parent ACKs keep typed causes;
+// worker outcome fields are diagnostic claims at the receiver.
 type httpFailure struct {
 	Message           string                   `json:"message"`
 	Terminal          bool                     `json:"terminal,omitempty"`
@@ -144,6 +145,17 @@ func (f *httpFailure) err() error {
 		causes = append(causes, &copy)
 	}
 	return errors.Join(causes...)
+}
+
+// Worker diagnostics do not establish parent process, retry or capacity policy.
+func (f *httpFailure) workerErr() error {
+	if f == nil {
+		return nil
+	}
+	if err := f.validate(); err != nil {
+		return err
+	}
+	return errors.New("worker execution failed: " + httpFailureDiagnostic(strconv.Quote(f.Message)))
 }
 
 func httpFailureDiagnostic(message string) string {

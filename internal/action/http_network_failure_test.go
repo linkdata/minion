@@ -1,6 +1,7 @@
 package action
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -18,22 +19,27 @@ import (
 	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/usage"
+	"github.com/linkdata/minion/internal/workroot"
 )
 
 type httpNetworkAction func(context.Context, monitor.Job) error
 
 func (f httpNetworkAction) Execute(ctx context.Context, job monitor.Job) error { return f(ctx, job) }
 
-func TestHTTPWatchAdmissionTransportFailurePreservesMonitorPolicy(t *testing.T) {
+func TestHTTPWatchAdmissionWorkerClaimsDoNotRefundMonitorAttempts(t *testing.T) {
 	installActionTestSkills(t, testReviewSkillURL)
 	for _, test := range []struct {
 		name           string
-		unknown        bool
+		unknownClaim   bool
+		parentGap      bool
+		unsafeClaim    bool
 		controlTimeout bool
 	}{
-		{name: "known no work"},
-		{name: "transport joined with unknown", unknown: true},
-		{name: "watch header control timeout", controlTimeout: true},
+		{name: "worker transport claim"},
+		{name: "worker transport and unsafe claims", unsafeClaim: true},
+		{name: "worker transport and unknown claims", unknownClaim: true},
+		{name: "parent-observed outcome sequence gap", parentGap: true},
+		{name: "worker watch header control timeout", controlTimeout: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			now := time.Date(2026, 10, 23, 8, 0, 0, 0, time.UTC)
@@ -56,6 +62,22 @@ func TestHTTPWatchAdmissionTransportFailurePreservesMonitorPolicy(t *testing.T) 
 				defer cancel()
 				transport := newHTTPServerTest(t, ctx, f.job, f.sink, func(next http.Handler) http.Handler {
 					return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						if test.parentGap && r.URL.Path == "/outcome" {
+							var outcome httpOutcome
+							if err := httpDecode(r.Body, httpOutcomeBytes, &outcome); err != nil {
+								t.Errorf("decode outcome for sequence gap: %v", err)
+								return
+							}
+							outcome.Sequence++
+							body, err := httpEncode(outcome, httpOutcomeBytes)
+							if err != nil {
+								t.Errorf("encode outcome for sequence gap: %v", err)
+								return
+							}
+							_ = r.Body.Close()
+							r.Body = io.NopCloser(bytes.NewReader(body))
+							r.ContentLength = int64(len(body))
+						}
 						if test.controlTimeout && r.URL.Path == "/cancel" {
 							admissions.Add(1)
 							var binding httpBinding
@@ -80,9 +102,12 @@ func TestHTTPWatchAdmissionTransportFailurePreservesMonitorPolicy(t *testing.T) 
 						admissions.Add(1)
 						_ = r.Body.Close()
 						var cause error = io.ErrUnexpectedEOF
-						if test.unknown {
-							// Exercise precedence of an explicitly joined unknown fact, not a paid call.
+						if test.unknownClaim {
+							// A worker can claim uncertainty even without a paid call.
 							cause = errors.Join(cause, monitor.ErrExecutionOutcomeUnknown)
+						}
+						if test.unsafeClaim {
+							cause = errors.Join(cause, workroot.ErrUnsafe)
 						}
 						return nil, cause // http.Client wraps the real failed request in *url.Error.
 					}
@@ -96,15 +121,15 @@ func TestHTTPWatchAdmissionTransportFailurePreservesMonitorPolicy(t *testing.T) 
 				got := transport.result(t)
 				finalErr := f.sink.finish(got.result, got.err)
 				var network *url.Error
-				if !test.controlTimeout && !errors.As(workerErr, &network) || finalErr == nil || errors.Is(finalErr, monitor.ErrTerminalJob) || errors.Is(finalErr, monitor.ErrExecutionOutcomeUnknown) != test.unknown || !got.result.matchesJob(f.job) || len(got.result.Calls) != 0 || f.sink.pending != nil || f.sink.reviewed {
+				if !test.controlTimeout && !errors.As(workerErr, &network) || finalErr == nil || errors.Is(finalErr, monitor.ErrTerminalJob) || errors.Is(finalErr, monitor.ErrExecutionOutcomeUnknown) != test.parentGap || !got.result.matchesJob(f.job) || len(got.result.Calls) != 0 || f.sink.pending != nil || f.sink.reviewed {
 					t.Fatalf("watch failure lost its known no-work outcome: worker=%v parent=%v finish=%v raw=%+v", workerErr, got.err, finalErr, got.result)
 				}
 				var restored *url.Error
-				if !errors.Is(finalErr, monitor.ErrRequestTransport) || errors.As(finalErr, &restored) {
-					t.Fatalf("parent lost finite transport policy or fabricated request metadata: %v", finalErr)
+				if errors.Is(finalErr, monitor.ErrRequestTransport) || errors.Is(finalErr, workroot.ErrUnsafe) || errors.As(finalErr, &restored) {
+					t.Fatalf("worker claim changed parent transport or unsafe policy: %v", finalErr)
 				}
-				if test.controlTimeout && (!errors.Is(workerErr, context.DeadlineExceeded) || !errors.Is(workerErr, monitor.ErrRequestTransport) || !errors.Is(finalErr, context.DeadlineExceeded) || ctx.Err() != nil) {
-					t.Fatalf("request control timeout became an action expiry: worker=%v parent=%v caller=%v", workerErr, finalErr, ctx.Err())
+				if test.controlTimeout && (!errors.Is(workerErr, context.DeadlineExceeded) || !errors.Is(workerErr, monitor.ErrRequestTransport) || errors.Is(finalErr, context.DeadlineExceeded) || ctx.Err() != nil) {
+					t.Fatalf("worker watch timeout became a parent deadline: worker=%v parent=%v caller=%v", workerErr, finalErr, ctx.Err())
 				}
 				records, err := usage.ReadAll(accounting.Dir)
 				if err != nil || len(records) != 1 || records[0].CodexCalls != 0 || records[0].ClaudeCalls != 0 || records[0].Tokens != (usage.Tokens{}) || !records[0].UsageComplete {
@@ -119,23 +144,33 @@ func TestHTTPWatchAdmissionTransportFailurePreservesMonitorPolicy(t *testing.T) 
 				Commands:     map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{testReviewSkillURL}}},
 				Repositories: []config.Repository{{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"comment"}, AllowedActors: []string{"writer"}, AllowedActorIDs: map[string]int64{"writer": 7}}}},
 				GitHub: gh, Handler: handler, Now: func() time.Time { return clock }}
-			polls := 4
-			wantProcessed, wantExecutions := 0, int32(polls)
+			polls, wantProcessed := 3, 1
 			if test.controlTimeout {
-				polls, wantExecutions = 1, 1
+				polls, wantProcessed = 1, 0
 			}
-			if test.unknown {
-				wantProcessed, wantExecutions = 1, 1
+			if test.parentGap {
+				polls = 1
 			}
 			for poll := 0; poll < polls; poll++ {
 				_, err := m.RunOnce(context.Background(), store)
-				if (err == nil) != test.unknown || len(store.Data.JobFailures) != 0 || store.Data.UnconfirmedProcessJob != "" || len(store.Data.Processed) != wantProcessed {
-					t.Fatalf("transport refund or unknown precedence changed on poll %d: error=%v state=%+v", poll, err, store.Data)
+				wantErr := test.controlTimeout || !test.parentGap && poll < polls-1
+				wantFailures, processed := 0, wantProcessed
+				if wantErr {
+					wantFailures, processed = 1, 0
+				}
+				if (err != nil) != wantErr || len(store.Data.JobFailures) != wantFailures || store.Data.UnconfirmedProcessJob != "" || len(store.Data.Processed) != processed {
+					t.Fatalf("worker claim refunded an attempt or changed unknown precedence on poll %d: error=%v state=%+v", poll, err, store.Data)
+				}
+				for _, failure := range store.Data.JobFailures {
+					if failure.Attempts != poll+1 {
+						t.Fatalf("worker claim refunded attempt %d: %+v", poll+1, failure)
+					}
 				}
 				clock = clock.Add(10 * time.Minute)
 			}
+			wantExecutions := int32(polls)
 			if executions.Load() != wantExecutions || admissions.Load() != wantExecutions || outcomes.Load() != wantExecutions || native.Load() != 0 {
-				t.Fatalf("known failure exhausted retries or unknown work repeated: executions=%d admissions=%d outcomes=%d native=%d", executions.Load(), admissions.Load(), outcomes.Load(), native.Load())
+				t.Fatalf("worker claim changed attempt limit or repeated unknown work: executions=%d admissions=%d outcomes=%d native=%d", executions.Load(), admissions.Load(), outcomes.Load(), native.Load())
 			}
 		})
 	}

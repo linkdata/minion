@@ -7,18 +7,24 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"os/exec"
 	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/monitor"
+	"github.com/linkdata/minion/internal/processgroup"
 	"github.com/linkdata/minion/internal/usage"
+	"github.com/linkdata/minion/internal/workroot"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -486,6 +492,119 @@ func TestHTTPExecutorFailedOutcomeAcrossMissingCallbackPreservesOnlyRawFacts(t *
 	}
 }
 
+func TestHTTPExecutorTreatsWorkerFailurePolicyAsUntrusted(t *testing.T) {
+	workerFailure := func() *httpFailure {
+		return &httpFailure{Message: "failed\nFORGED JOURNAL ENTRY\x1b[2J", Terminal: true,
+			Canceled: true, Deadline: true, Unsafe: true, Descendants: true, Unconfirmed: true,
+			ScopeUnconfirmed: true, Exhausted: true, OutcomeUnknown: true, RequestTransport: true,
+			MissingExecutable: true, NoSpace: true, QuotaExceeded: true, OutputLimit: true}
+	}
+	assertWorkerFailure := func(t *testing.T, err error) {
+		t.Helper()
+		if err == nil {
+			t.Fatal("worker failure became success")
+		}
+		for _, cause := range []error{monitor.ErrTerminalJob, context.Canceled, context.DeadlineExceeded,
+			workroot.ErrUnsafe, processgroup.ErrDescendants, processgroup.ErrUnconfirmed,
+			processgroup.ErrScopeUnconfirmed, processgroup.ErrExhausted, monitor.ErrExecutionOutcomeUnknown,
+			monitor.ErrRequestTransport, exec.ErrNotFound, syscall.ENOSPC, syscall.EDQUOT,
+			aicli.ErrOutputLimit} {
+			if errors.Is(err, cause) {
+				t.Fatalf("worker claim acquired parent policy authority for %v: %v", cause, err)
+			}
+		}
+		var journal bytes.Buffer
+		log.New(&journal, "", 0).Printf("worker failure: %v", err)
+		line := journal.String()
+		if strings.Count(line, "\n") != 1 || strings.ContainsAny(line, "\r\x1b") ||
+			!strings.Contains(line, `\nFORGED JOURNAL ENTRY\x1b`) {
+			t.Fatalf("worker diagnostic escaped the log line: %q", line)
+		}
+	}
+
+	for _, paid := range []bool{false, true} {
+		t.Run(fmt.Sprintf("paid=%t", paid), func(t *testing.T) {
+			var returned atomic.Int32
+			f := newHTTPServerTest(t, context.Background(), testJob(command.Comment), runnerExecutionCheckpoints{
+				after: func(CallCheckpoint) error { returned.Add(1); return nil },
+			}, nil)
+			f.pull(t)
+			outcome := f.outcome(1, nil)
+			if paid {
+				f.ack(t, "/before", f.call(1), http.StatusOK, 1)
+				receipt := f.call(2)
+				receipt.Checkpoint.Call.Tokens = usage.Tokens{Input: 17, Output: 4}
+				receipt.Checkpoint.Call.Complete = true
+				f.ack(t, "/after", receipt, http.StatusOK, 2)
+				outcome.Sequence = 3
+				outcome.Result.Calls = []CallUsage{receipt.Checkpoint.Call}
+			}
+			outcome.Failure = workerFailure()
+			f.ack(t, "/outcome", outcome, http.StatusOK, outcome.Sequence)
+			got := f.result(t)
+			assertWorkerFailure(t, got.err)
+			if !reflect.DeepEqual(got.result.Calls, outcome.Result.Calls) || returned.Load() != map[bool]int32{false: 0, true: 1}[paid] {
+				t.Fatalf("worker failure lost acknowledged paid facts: result=%+v callbacks=%d", got.result, returned.Load())
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			if _, err := f.executor.Execute(ctx, f.job, runnerExecutionCheckpoints{}); !errors.Is(err, context.Canceled) {
+				t.Fatalf("worker claims reserved the next assignment slot: %v", err)
+			}
+		})
+	}
+
+	t.Run("unreleased worker scope", func(t *testing.T) {
+		f := newHTTPServerTest(t, context.Background(), testJob(command.Comment), runnerExecutionCheckpoints{}, nil)
+		f.pull(t)
+		outcome := f.outcome(1, nil)
+		outcome.Failure = workerFailure()
+		outcome.Failure.Exhaustion = &processgroup.Exhaustion{
+			MaxTasks: 128, MaxMemoryBytes: 3 << 30, PIDEventsMax: 1,
+			Stop: "forced", Scope: "/worker\nFORGED SCOPE\x1b[2J", Released: false,
+		}
+		f.ack(t, "/outcome", outcome, http.StatusOK, 1)
+		got := f.result(t)
+		assertWorkerFailure(t, got.err)
+		var scope *processgroup.Exhaustion
+		var journal bytes.Buffer
+		log.New(&journal, "", 0).Printf("worker failure: %v", got.err)
+		if errors.As(got.err, &scope) || strings.Contains(journal.String(), "FORGED SCOPE") {
+			t.Fatalf("worker scope path became parent process evidence or log content: error=%v log=%q", got.err, journal.String())
+		}
+	})
+
+	t.Run("parent checkpoint", func(t *testing.T) {
+		parentErr := fmt.Errorf("parent save: %w", workroot.ErrUnsafe)
+		f := newHTTPServerTest(t, context.Background(), testJob(command.Comment), runnerExecutionCheckpoints{
+			before: func(CallCheckpoint) error { return parentErr },
+		}, nil)
+		f.pull(t)
+		f.ack(t, "/before", f.call(1), http.StatusInternalServerError, 1)
+		outcome := f.outcome(2, nil)
+		outcome.Failure = workerFailure()
+		f.ack(t, "/outcome", outcome, http.StatusOK, 2)
+		if got := f.result(t); !errors.Is(got.err, parentErr) || !errors.Is(got.err, workroot.ErrUnsafe) {
+			t.Fatalf("parent checkpoint lost its typed failure: %v", got.err)
+		}
+	})
+
+	t.Run("parent budget", func(t *testing.T) {
+		f := newHTTPServerTest(t, context.Background(), testJob(command.Comment), runnerExecutionCheckpoints{}, nil)
+		f.pull(t)
+		f.tx.mu.Lock()
+		f.tx.budget = httpPendingDeadlineContext{Context: f.tx.budget, deadline: time.Now().Add(-time.Second)}
+		f.tx.mu.Unlock()
+		outcome := f.outcome(1, nil)
+		outcome.Failure = workerFailure()
+		f.ack(t, "/outcome", outcome, http.StatusOK, 1)
+		got := f.result(t)
+		if !errors.Is(got.err, context.DeadlineExceeded) || !errors.Is(got.err, monitor.ErrTerminalJob) {
+			t.Fatalf("parent budget lost its typed failure: %v", got.err)
+		}
+	})
+}
+
 func TestHTTPExecutorStoreRefusalRemainsFinalIfWorkerContinues(t *testing.T) {
 	for _, refused := range []string{"before", "after", "review"} {
 		t.Run(refused, func(t *testing.T) {
@@ -694,9 +813,8 @@ func TestHTTPExecutorFencesAdmissionAndDrainsEnteredFailedSave(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("After did not enter store")
 	}
-	if busy := f.request("/review", httpReview{Sequence: 2}); busy.err != nil || busy.status != http.StatusConflict {
-		t.Fatalf("concurrent mutation queued behind store: %+v", busy)
-	}
+	blocked := make(chan httpServerTestExchange, 1)
+	go func() { blocked <- f.request("/review", httpReview{Sequence: 2}) }()
 	// Drive the private grace fence without sleeping through the production 30-second grace.
 	f.tx.mu.Lock()
 	f.tx.fenced = true
@@ -709,6 +827,14 @@ func TestHTTPExecutorFencesAdmissionAndDrainsEnteredFailedSave(t *testing.T) {
 	default:
 	}
 	unblock()
+	select {
+	case reply := <-blocked:
+		if reply.err != nil || reply.status != http.StatusConflict {
+			t.Fatalf("fenced concurrent mutation: %+v", reply)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("fenced concurrent mutation did not drain")
+	}
 	select {
 	case ack := <-acknowledged:
 		if ack.err != nil || ack.status != http.StatusInternalServerError || ack.ack.Sequence != 1 || ack.ack.Failure == nil || ack.ack.Failure.Message != storeErr.Error() {
@@ -734,6 +860,108 @@ type httpServerFailWrite struct{ http.ResponseWriter }
 func (w httpServerFailWrite) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 func (w httpServerFailWrite) Write([]byte) (int, error)   { return 0, io.ErrClosedPipe }
 
+func TestHTTPExecutorRequiredReplyFailureCannotBecomeSuccess(t *testing.T) {
+	for _, path := range []string{"/next", "/before", "/after", "/review"} {
+		t.Run(path, func(t *testing.T) {
+			job := testJob(command.Comment)
+			if path == "/review" {
+				job = withClaudeCritic(job)
+			}
+			owner := newExecutionAdapterFixture(t, job)
+			store := owner.startUsage()
+			var failReply atomic.Bool
+			failReply.Store(path != "/review")
+			f := newHTTPServerTest(t, context.Background(), owner.job, owner.sink, func(next http.Handler) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path == path && failReply.Load() {
+						w = httpServerFailWrite{w}
+					}
+					next.ServeHTTP(w, r)
+				})
+			})
+			outcome := f.outcome(1, nil)
+			switch path {
+			case "/next":
+				if reply := f.request(path, httpPull{Version: ProtocolVersion, ExecutorID: owner.job.Identity.ExecutorID}); reply.err == nil {
+					t.Fatalf("assignment delivery unexpectedly succeeded: %+v", reply)
+				}
+			case "/before", "/after":
+				f.pull(t)
+				before := f.call(1)
+				if path == "/before" {
+					if reply := f.request(path, before); reply.err == nil {
+						t.Fatalf("call admission acknowledgement unexpectedly succeeded: %+v", reply)
+					}
+				} else {
+					f.ack(t, "/before", before, http.StatusOK, 1)
+				}
+				paid := f.call(2)
+				paid.Checkpoint.Call.Tokens, paid.Checkpoint.Call.Complete = usage.Tokens{Input: 9, Output: 2}, true
+				if path == "/before" {
+					f.ack(t, "/after", paid, http.StatusOK, 2)
+				} else if reply := f.request(path, paid); reply.err == nil {
+					t.Fatalf("paid callback acknowledgement unexpectedly succeeded: %+v", reply)
+				}
+				outcome.Sequence = 3
+				outcome.Result.Calls = []CallUsage{paid.Checkpoint.Call}
+			case "/review":
+				f.pull(t)
+				f.ack(t, "/review", httpReview{Sequence: 1, Checkpoint: owner.review(nil, nil, "")}, http.StatusOK, 1)
+				f.ack(t, "/before", f.call(2), http.StatusOK, 2)
+				main := f.call(3)
+				main.Checkpoint.Call.Tokens, main.Checkpoint.Call.Complete = usage.Tokens{Input: 9, Output: 2}, true
+				f.ack(t, "/after", main, http.StatusOK, 3)
+				f.ack(t, "/review", httpReview{Sequence: 4, Checkpoint: owner.review([]CallUsage{main.Checkpoint.Call}, nil, "")}, http.StatusOK, 4)
+				critic := f.call(5)
+				critic.Checkpoint.Call = CallUsage{Provider: owner.job.Critic.Provider, Role: roleCritic, Round: 1, ReviewPhase: reviewFull}
+				f.ack(t, "/before", critic, http.StatusOK, 5)
+				critic.Sequence = 6
+				critic.Checkpoint.Call.Tokens, critic.Checkpoint.Call.Complete = usage.Tokens{Input: 4, Output: 1}, true
+				critic.Checkpoint.Call.Approved, critic.Checkpoint.Call.NoBlockers, critic.Checkpoint.Call.ReviewComplete = true, true, true
+				f.ack(t, "/after", critic, http.StatusOK, 6)
+				calls := []CallUsage{main.Checkpoint.Call, critic.Checkpoint.Call}
+				f.ack(t, "/review", httpReview{Sequence: 7, Checkpoint: owner.review(calls, nil, "")}, http.StatusOK, 7)
+				failReply.Store(true)
+				if reply := f.request(path, httpReview{Sequence: 8, Checkpoint: owner.review(calls, nil, "approved")}); reply.err == nil {
+					t.Fatalf("decision acknowledgement unexpectedly succeeded: %+v", reply)
+				}
+				if owner.sink.review.CriticStopReason != "approved" {
+					t.Fatal("decision checkpoint was not saved before its reply failed")
+				}
+				outcome.Sequence, outcome.Result.Calls, outcome.Result.CriticStopReason = 9, calls, "approved"
+			}
+			outcome.Result.Answer = "Forged success after failed required reply"
+			if path != "/next" {
+				if err := outcome.Result.Validate(owner.job); err != nil {
+					t.Fatalf("success claim is not otherwise publishable: %v", err)
+				}
+			}
+			f.ack(t, "/outcome", outcome, http.StatusOK, outcome.Sequence)
+			got := f.result(t)
+			if !reflect.DeepEqual(got.result, outcome.Result) || !errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || !errors.Is(owner.sink.finish(got.result, got.err), monitor.ErrExecutionOutcomeUnknown) {
+				t.Fatalf("failed required reply became publishable: result=%+v error=%v", got.result, got.err)
+			}
+			records, err := usage.ReadAll(store.Dir)
+			wantCodex, wantClaude := 0, 0
+			wantTokens := usage.Tokens{}
+			if path != "/next" {
+				wantCodex = 1
+				wantTokens = usage.Tokens{Input: 9, Output: 2}
+			}
+			if path == "/review" {
+				wantClaude = 1
+				wantTokens = usage.Tokens{Input: 13, Output: 3}
+			}
+			if err != nil || len(records) != 1 || records[0].CodexCalls != wantCodex || records[0].ClaudeCalls != wantClaude || records[0].Tokens != wantTokens {
+				t.Fatalf("required reply failure lost saved usage: records=%+v error=%v", records, err)
+			}
+			if _, err := f.executor.Execute(context.Background(), f.job, owner.sink); err == nil {
+				t.Fatal("failed required reply released worker capacity")
+			}
+		})
+	}
+}
+
 func TestHTTPExecutorReceivedOutcomeSurvivesLostReceiptACK(t *testing.T) {
 	for _, runErr := range []error{nil, errors.Join(monitor.ErrTerminalJob, context.DeadlineExceeded)} {
 		t.Run(fmt.Sprint(runErr), func(t *testing.T) {
@@ -753,7 +981,7 @@ func TestHTTPExecutorReceivedOutcomeSurvivesLostReceiptACK(t *testing.T) {
 				t.Fatalf("receipt ACK unexpectedly survived injected write failure: %+v", ack)
 			}
 			got := f.result(t)
-			if !reflect.DeepEqual(got.result, outcome.Result) || (got.err == nil) != (runErr == nil) || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || errors.Is(got.err, monitor.ErrTerminalJob) != errors.Is(runErr, monitor.ErrTerminalJob) || errors.Is(got.err, context.DeadlineExceeded) != errors.Is(runErr, context.DeadlineExceeded) {
+			if !reflect.DeepEqual(got.result, outcome.Result) || (got.err == nil) != (runErr == nil) || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || errors.Is(got.err, monitor.ErrTerminalJob) || errors.Is(got.err, context.DeadlineExceeded) {
 				t.Fatalf("lost receipt erased or changed conclusive outcome: %+v error=%v", got.result, got.err)
 			}
 			if _, err := f.executor.Execute(context.Background(), f.job, runnerExecutionCheckpoints{}); err == nil {
@@ -868,7 +1096,7 @@ func TestHTTPExecutorChecksDeadlineBeforeCancellationNotification(t *testing.T) 
 	}
 }
 
-func TestHTTPExecutorKnownOutcomeResolvesInternalTransportCancellation(t *testing.T) {
+func TestHTTPExecutorKnownOutcomeResolvesWatchTransportCancellation(t *testing.T) {
 	f := newHTTPServerTest(t, context.Background(), testJob(command.Comment), runnerExecutionCheckpoints{}, nil)
 	f.pull(t)
 	f.tx.stopExecution(io.ErrClosedPipe, true)
@@ -877,13 +1105,157 @@ func TestHTTPExecutorKnownOutcomeResolvesInternalTransportCancellation(t *testin
 	outcome.Result.Answer = "Conclusive result received within the accepted budget"
 	f.ack(t, "/outcome", outcome, http.StatusOK, 1)
 	if got := f.result(t); got.err != nil || !reflect.DeepEqual(got.result, outcome.Result) {
-		t.Fatalf("internal ACK failure poisoned a conclusive received result: %+v error=%v", got.result, got.err)
+		t.Fatalf("watch transport failure poisoned a conclusive received result: %+v error=%v", got.result, got.err)
 	}
 	f.executor.mu.Lock()
 	unavailable := f.executor.unavailable
 	f.executor.mu.Unlock()
 	if unavailable {
 		t.Fatal("resolved transport ambiguity invented a quarantine fact")
+	}
+}
+
+func TestHTTPExecutorRejectedBoundBeforeSurvivesWatchOutcome(t *testing.T) {
+	for _, foreign := range []bool{false, true} {
+		t.Run(fmt.Sprintf("foreign=%t", foreign), func(t *testing.T) {
+			owner := newExecutionAdapterFixture(t, testJob(command.Comment))
+			store := owner.startUsage()
+			f := newHTTPServerTest(t, context.Background(), owner.job, owner.sink, nil)
+			f.pull(t)
+			f.ack(t, "/before", f.call(1), http.StatusOK, 1)
+			paid := f.call(2)
+			paid.Checkpoint.Call.Tokens, paid.Checkpoint.Call.Complete = usage.Tokens{Input: 11, Output: 3}, true
+			f.ack(t, "/after", paid, http.StatusOK, 2)
+			f.tx.stopExecution(io.ErrClosedPipe, true)
+			<-f.tx.ctx.Done()
+			before := f.call(3)
+			if foreign {
+				before.Checkpoint.Identity.AttemptID += "-other"
+			}
+			f.ack(t, "/before", before, http.StatusConflict, 3)
+			sequence := uint64(4)
+			if foreign {
+				sequence = 3
+			}
+			outcome := f.outcome(sequence, nil)
+			outcome.Result.Calls = []CallUsage{paid.Checkpoint.Call}
+			outcome.Result.Answer = "Claimed complete answer"
+			if err := outcome.Result.validate(owner.job, true); err != nil {
+				t.Fatalf("fixture did not produce a publishable complete Result: %v", err)
+			}
+			f.ack(t, "/outcome", outcome, http.StatusOK, sequence)
+			got := f.result(t)
+			finalErr := owner.sink.finish(got.result, got.err)
+			if !reflect.DeepEqual(got.result, outcome.Result) || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) == foreign || errors.Is(finalErr, monitor.ErrExecutionOutcomeUnknown) == foreign || (got.err == nil) != foreign || (finalErr == nil) != foreign {
+				t.Fatalf("bound refusal was erased or foreign request poisoned outcome: result=%+v error=%v finish=%v", got.result, got.err, finalErr)
+			}
+			records, err := usage.ReadAll(store.Dir)
+			if err != nil || len(records) != 1 || records[0].CodexCalls != 1 || records[0].Tokens != paid.Checkpoint.Call.Tokens {
+				t.Fatalf("saved paid receipt changed: records=%+v error=%v", records, err)
+			}
+			f.executor.mu.Lock()
+			unavailable := f.executor.unavailable
+			f.executor.mu.Unlock()
+			if unavailable == foreign {
+				t.Fatalf("worker capacity disagrees with bound refusal: unavailable=%t foreign=%t", unavailable, foreign)
+			}
+		})
+	}
+}
+
+func TestHTTPExecutorConcurrentBoundBeforeSurvivesWatchOutcome(t *testing.T) {
+	owner := newExecutionAdapterFixture(t, testJob(command.Comment))
+	store := owner.startUsage()
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	defer unblock()
+	sink := runnerExecutionCheckpoints{
+		before: owner.sink.BeforeCall,
+		after: func(value CallCheckpoint) error {
+			close(entered)
+			<-release
+			return owner.sink.AfterCall(value)
+		},
+		review: owner.sink.Review,
+	}
+	arrived := make(chan struct{})
+	var beforeCount atomic.Int32
+	f := newHTTPServerTest(t, context.Background(), owner.job, sink, func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/before" && beforeCount.Add(1) == 2 {
+				close(arrived)
+			}
+			next.ServeHTTP(w, r)
+		})
+	})
+	f.pull(t)
+	f.ack(t, "/before", f.call(1), http.StatusOK, 1)
+	paid := f.call(2)
+	paid.Checkpoint.Call.Tokens, paid.Checkpoint.Call.Complete = usage.Tokens{Input: 11, Output: 3}, true
+	afterReply := make(chan httpServerTestExchange, 1)
+	go func() { afterReply <- f.request("/after", paid) }()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("After did not enter its save")
+	}
+	f.tx.stopExecution(io.ErrClosedPipe, true)
+	<-f.tx.ctx.Done()
+	beforeReply := make(chan httpServerTestExchange, 1)
+	go func() { beforeReply <- f.request("/before", f.call(3)) }()
+	select {
+	case <-arrived:
+	case <-time.After(5 * time.Second):
+		t.Fatal("concurrent Before did not reach the receiver")
+	}
+	// A concurrent callback must wait for the held save, not take the old busy-rejection path.
+	select {
+	case before := <-beforeReply:
+		t.Fatalf("concurrent Before replied while After save was held: %+v", before)
+	case <-time.After(100 * time.Millisecond):
+	}
+	unblock()
+	var before httpServerTestExchange
+	select {
+	case before = <-beforeReply:
+	case <-time.After(5 * time.Second):
+		t.Fatal("concurrent Before did not finish after save")
+	}
+	if before.err != nil || before.status != http.StatusConflict {
+		t.Fatalf("concurrent Before response: %+v", before)
+	}
+	select {
+	case after := <-afterReply:
+		if after.err != nil || after.status != http.StatusOK || after.ack.Sequence != 2 {
+			t.Fatalf("saved After response: %+v", after)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("saved After did not finish")
+	}
+	f.tx.mu.Lock()
+	sequence := f.tx.sequence + 1
+	f.tx.mu.Unlock()
+	outcome := f.outcome(sequence, nil)
+	outcome.Result.Calls = []CallUsage{paid.Checkpoint.Call}
+	outcome.Result.Answer = "Claimed complete answer"
+	if err := outcome.Result.validate(owner.job, true); err != nil {
+		t.Fatalf("fixture did not produce a publishable Result: %v", err)
+	}
+	f.ack(t, "/outcome", outcome, http.StatusOK, sequence)
+	got := f.result(t)
+	if !reflect.DeepEqual(got.result, outcome.Result) || !errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || !errors.Is(owner.sink.finish(got.result, got.err), monitor.ErrExecutionOutcomeUnknown) {
+		t.Fatalf("concurrent required refusal became publishable: result=%+v error=%v", got.result, got.err)
+	}
+	records, err := usage.ReadAll(store.Dir)
+	if err != nil || len(records) != 1 || records[0].CodexCalls != 1 || records[0].Tokens != paid.Checkpoint.Call.Tokens {
+		t.Fatalf("saved paid receipt changed: records=%+v error=%v", records, err)
+	}
+	f.executor.mu.Lock()
+	unavailable := f.executor.unavailable
+	f.executor.mu.Unlock()
+	if !unavailable {
+		t.Fatal("concurrent required refusal released worker capacity")
 	}
 }
 

@@ -44,22 +44,23 @@ type httpTransaction struct {
 	stopBudget context.CancelFunc
 	body       []byte
 
-	ready         bool
-	delivered     bool
-	fenced        bool
-	watch         bool
-	sequence      uint64
-	statusSeq     uint64
-	stopping      bool
-	stop          chan struct{}
-	done          chan struct{}
-	finished      chan struct{}
-	transportErr  error
-	checkpointErr error
-	outcome       bool
-	result        Result
-	runErr        error
-	quarantine    bool
+	ready              bool
+	delivered          bool
+	fenced             bool
+	watch              bool
+	sequence           uint64
+	statusSeq          uint64
+	stopping           bool
+	stop               chan struct{}
+	done               chan struct{}
+	finished           chan struct{}
+	transportErr       error
+	requiredControlErr error
+	checkpointErr      error
+	outcome            bool
+	result             Result
+	runErr             error
+	quarantine         bool
 }
 
 func NewHTTPExecutor(executorID string) (*HTTPExecutor, error) {
@@ -103,11 +104,14 @@ func (e *HTTPExecutor) Execute(ctx context.Context, job Job, sink Checkpoints) (
 		tx.handlers.Wait()
 		tx.mu.Lock()
 		if tx.outcome {
-			// A received outcome resolves earlier ACK ambiguity, even if its own receipt ACK was lost.
+			// A received outcome resolves watch ambiguity, even if its own receipt ACK was lost.
 			result, runErr = tx.result, tx.runErr
 		} else if tx.delivered {
 			runErr = errors.Join(runErr, monitor.ErrExecutionOutcomeUnknown, tx.transportErr, tx.checkpointErr, actionCtx.Err())
 			tx.quarantine = true
+		}
+		if tx.requiredControlErr != nil {
+			runErr = errors.Join(runErr, monitor.ErrExecutionOutcomeUnknown, tx.requiredControlErr)
 		}
 		quarantine := tx.quarantine
 		tx.mu.Unlock()
@@ -272,7 +276,7 @@ func (e *HTTPExecutor) serveNext(w http.ResponseWriter, r *http.Request) {
 				tx.mu.Unlock()
 				e.mu.Unlock()
 				if err := httpServerWriteBytes(w, http.StatusOK, body); err != nil {
-					tx.stopExecution(err, true)
+					tx.stopRequiredDelivery(err)
 				}
 				return
 			}
@@ -306,11 +310,18 @@ func (tx *httpTransaction) enter(binding httpBinding, sequence uint64, kind stri
 		return false, tx.checkpointErr
 	}
 	if kind == "before" {
-		if err := httpExecutionContextError(tx.ctx); err != nil {
-			return false, err
+		err := httpExecutionContextError(tx.ctx)
+		if err == nil && tx.stopping {
+			err = errors.New("HTTP execution is stopping; no new call is admitted")
 		}
-		if tx.stopping {
-			return false, errors.New("HTTP execution is stopping; no new call is admitted")
+		if err != nil {
+			if tx.transportErr != nil && httpExecutionContextError(tx.budget) == nil {
+				if tx.requiredControlErr == nil {
+					tx.requiredControlErr = errors.Join(fmt.Errorf("HTTP before admission failed: %w", err), tx.transportErr)
+				}
+				tx.quarantine = true
+			}
+			return false, err
 		}
 	}
 	return gap, nil
@@ -365,7 +376,11 @@ func (e *HTTPExecutor) serveStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	tx.observation.Unlock()
 	// Observation delivery never admits paid work or changes its sequence or outcome.
-	_ = httpServerWrite(w, code, httpAcknowledgement{httpBinding: binding, Kind: "status", Sequence: status.Sequence, Failure: newHTTPFailure(err)})
+	if err != nil {
+		httpServerReject(w, "status", code, binding, status.Sequence, err)
+		return
+	}
+	_ = httpServerWrite(w, code, httpAcknowledgement{httpBinding: binding, Kind: "status", Sequence: status.Sequence})
 }
 
 // stopExecution begins control grace; a known store refusal need not cancel the worker before its error returns.
@@ -384,13 +399,24 @@ func (tx *httpTransaction) stopExecution(err error, cancel bool) {
 	}
 }
 
+func (tx *httpTransaction) stopRequiredDelivery(err error) {
+	tx.mu.Lock()
+	if tx.requiredControlErr == nil {
+		tx.requiredControlErr = err
+	}
+	tx.quarantine = true
+	tx.mu.Unlock()
+	tx.stopExecution(nil, true)
+}
+
 func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 	kind := strings.TrimPrefix(r.URL.Path, "/")
 	tx := e.transaction()
-	if tx == nil || !tx.mutation.TryLock() {
+	if tx == nil {
 		httpServerReject(w, kind, http.StatusConflict, httpBinding{}, 0, errors.New("HTTP execution has no mutation slot"))
 		return
 	}
+	tx.mutation.Lock()
 	tx.mu.Lock()
 	if tx.fenced || !tx.delivered {
 		tx.mu.Unlock()
@@ -447,7 +473,7 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 		failedOutcome = outcome.Failure != nil
 		apply = func() error {
 			tx.mu.Lock()
-			tx.result, tx.runErr = outcome.Result, errors.Join(outcome.Failure.err(), tx.checkpointErr)
+			tx.result, tx.runErr = outcome.Result, errors.Join(outcome.Failure.workerErr(), tx.checkpointErr)
 			// A missing callback cannot be acknowledged from raw outcome claims.
 			if sequenceGap {
 				tx.runErr = errors.Join(tx.runErr, monitor.ErrExecutionOutcomeUnknown)
@@ -455,9 +481,6 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 			}
 			// Preserve late paid facts without accepting a success beyond the fixed expiry.
 			tx.runErr = errors.Join(tx.runErr, httpExecutionContextError(tx.budget))
-			if outcome.Failure != nil && (outcome.Failure.OutcomeUnknown || outcome.Failure.Unconfirmed || outcome.Failure.ScopeUnconfirmed) {
-				tx.quarantine = true
-			}
 			tx.outcome, tx.fenced = true, true
 			close(tx.done)
 			tx.mu.Unlock()
@@ -503,7 +526,7 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 			tx.quarantine = true
 			tx.mu.Unlock()
 		} else {
-			tx.stopExecution(err, true)
+			tx.stopRequiredDelivery(err)
 		}
 	}
 }
@@ -592,6 +615,9 @@ func httpInputStatus(err error) int {
 }
 
 func httpServerReject(w http.ResponseWriter, kind string, status int, binding httpBinding, sequence uint64, err error) {
+	// Do not let net/http drain an unfinished rejected body before or after the ACK.
+	w.Header().Set("Connection", "close")
+	err = errors.Join(err, http.NewResponseController(w).SetReadDeadline(time.Now()))
 	_ = httpServerWrite(w, status, httpAcknowledgement{httpBinding: binding, Kind: kind, Sequence: sequence, Failure: newHTTPFailure(err)})
 }
 

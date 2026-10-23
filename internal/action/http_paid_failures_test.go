@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -127,7 +128,7 @@ func TestHTTPPaidDisconnectsKeepRawFactsSeparateFromSavedCheckpoints(t *testing.
 			if stage == "After request" || stage == "After ACK" {
 				wantCalls = 1
 			}
-			if !cut.Load() || int(native.Load()) != wantCalls || len(got.result.Calls) != wantCalls || !got.result.matchesJob(f.job) || !errors.Is(workerErr, monitor.ErrExecutionOutcomeUnknown) || !errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || !errors.Is(finalErr, monitor.ErrTerminalJob) || got.result.Answer != "" {
+			if !cut.Load() || int(native.Load()) != wantCalls || len(got.result.Calls) != wantCalls || !got.result.matchesJob(f.job) || !errors.Is(workerErr, monitor.ErrExecutionOutcomeUnknown) || !errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || finalErr == nil || errors.Is(finalErr, monitor.ErrTerminalJob) != (stage == "After request") || got.result.Answer != "" {
 				t.Fatalf("paid disconnect lost raw outcome, repeated work or passed publication gate: calls=%d raw=%+v worker=%v parent=%v finish=%v", native.Load(), got.result, workerErr, got.err, finalErr)
 			}
 			wantAfter, wantReviews := wantCalls, 1
@@ -196,7 +197,7 @@ func TestHTTPPaidDisconnectsKeepRawFactsSeparateFromSavedCheckpoints(t *testing.
 	}
 }
 
-func TestHTTPMissingGitPreparationPreservesTypedCauseBeforeNativeWork(t *testing.T) {
+func TestHTTPMissingGitPreparationPreservesDiagnosticBeforeNativeWork(t *testing.T) {
 	f := newExecutionAdapterFixture(t, withClaudeCritic(testJob(command.Comment)))
 	store := f.startUsage()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -211,9 +212,12 @@ func TestHTTPMissingGitPreparationPreservesTypedCauseBeforeNativeWork(t *testing
 	workerErr := RunHTTP(ctx, transport.server.Client(), transport.server.URL, f.job.Identity.ExecutorID, &runner)
 	got := transport.result(t)
 	finalErr := f.sink.finish(got.result, got.err)
-	for _, err := range []error{workerErr, got.err, finalErr} {
-		if !errors.Is(err, exec.ErrNotFound) || errors.Is(err, monitor.ErrTerminalJob) || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) {
-			t.Fatalf("remote missing Git lost its known preparation cause: %v", err)
+	if !errors.Is(workerErr, exec.ErrNotFound) || errors.Is(workerErr, monitor.ErrTerminalJob) || errors.Is(workerErr, monitor.ErrExecutionOutcomeUnknown) {
+		t.Fatalf("worker lost its known missing Git cause: %v", workerErr)
+	}
+	for _, err := range []error{got.err, finalErr} {
+		if err == nil || !strings.Contains(err.Error(), "executable file not found") || errors.Is(err, exec.ErrNotFound) || errors.Is(err, monitor.ErrTerminalJob) || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) {
+			t.Fatalf("remote missing Git changed parent policy or lost diagnostic: %v", err)
 		}
 	}
 	records, err := usage.ReadAll(store.Dir)
@@ -222,7 +226,7 @@ func TestHTTPMissingGitPreparationPreservesTypedCauseBeforeNativeWork(t *testing
 	}
 }
 
-func TestHTTPPaidOutputLimitReachesExistingOrchestratorTerminalGate(t *testing.T) {
+func TestHTTPPaidOutputLimitPreservesUsageWithoutTrustingWorkerPolicy(t *testing.T) {
 	gitFixtureRemote(t)
 	var writes atomic.Int32
 	githubServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -266,9 +270,8 @@ func TestHTTPPaidOutputLimitReachesExistingOrchestratorTerminalGate(t *testing.T
 	case <-time.After(5 * time.Second):
 		t.Fatal("worker did not receive paid output-limit outcome receipt")
 	}
-	// Monitor's terminal-failure regression consumes this actual parent marker without another execution.
-	if !errors.Is(workerErr, aicli.ErrOutputLimit) || errors.Is(workerErr, monitor.ErrTerminalJob) || !errors.Is(parentErr, aicli.ErrOutputLimit) || !errors.Is(parentErr, monitor.ErrTerminalJob) || errors.Is(parentErr, monitor.ErrExecutionOutcomeUnknown) || native.Load() != 1 || writes.Load() != 0 {
-		t.Fatalf("HTTP lost the sentinel required by the existing no-repeat terminal classifier: native=%d writes=%d worker=%v parent=%v", native.Load(), writes.Load(), workerErr, parentErr)
+	if !errors.Is(workerErr, aicli.ErrOutputLimit) || errors.Is(workerErr, monitor.ErrTerminalJob) || parentErr == nil || !strings.Contains(parentErr.Error(), "paid native event limit") || errors.Is(parentErr, aicli.ErrOutputLimit) || errors.Is(parentErr, monitor.ErrTerminalJob) || errors.Is(parentErr, monitor.ErrExecutionOutcomeUnknown) || native.Load() != 1 || writes.Load() != 0 {
+		t.Fatalf("paid worker limit changed parent policy or reached publication: native=%d writes=%d worker=%v parent=%v", native.Load(), writes.Load(), workerErr, parentErr)
 	}
 	records, err := usage.ReadAll(store.Dir)
 	if err != nil || len(records) != 1 || records[0].Status != "failed" || records[0].FinishedAt == nil || records[0].CodexCalls != 1 || records[0].Tokens != tokens || records[0].UsageComplete {
