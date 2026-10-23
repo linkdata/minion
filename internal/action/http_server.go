@@ -36,6 +36,7 @@ type httpTransaction struct {
 	handlers    sync.WaitGroup
 
 	job        Job
+	started    time.Time
 	binding    httpBinding
 	sink       Checkpoints
 	ctx        context.Context
@@ -49,6 +50,8 @@ type httpTransaction struct {
 	fenced             bool
 	watch              bool
 	sequence           uint64
+	phaseCeiling       int
+	uploadReady        bool
 	stopping           bool
 	stop               chan struct{}
 	done               chan struct{}
@@ -84,7 +87,7 @@ func (e *HTTPExecutor) Execute(ctx context.Context, job Job, sink Checkpoints) (
 	budgetCtx, stopBudget := context.WithDeadline(ctx, expires)
 	defer stopBudget()
 	actionCtx, cancel := context.WithCancel(budgetCtx)
-	tx := &httpTransaction{job: job, binding: httpJobBinding(job), sink: sink, ctx: actionCtx, budget: budgetCtx, cancel: cancel, stopBudget: stopBudget,
+	tx := &httpTransaction{job: job, started: started, binding: httpJobBinding(job), sink: sink, ctx: actionCtx, budget: budgetCtx, cancel: cancel, stopBudget: stopBudget,
 		stop: make(chan struct{}), done: make(chan struct{}), finished: make(chan struct{})}
 	e.mu.Lock()
 	if e.closed || e.unavailable || e.active != nil {
@@ -360,6 +363,12 @@ func (e *HTTPExecutor) serveStatus(w http.ResponseWriter, r *http.Request) {
 			tx.mu.Lock()
 			if tx.fenced || !tx.delivered {
 				err = errors.New("HTTP execution has closed observation admission")
+			} else if status.Phase == "upload" && !tx.uploadReady {
+				err = errors.New("HTTP Status upload exceeds accepted callback facts")
+			} else if status.Phase != "upload" && status.Phase != "cleanup" && status.order(tx.job.rounds()) > tx.phaseCeiling {
+				err = errors.New("HTTP Status phase exceeds accepted callback facts")
+			} else if status.ProgressAge > time.Since(tx.started) {
+				err = errors.New("HTTP Status progress age exceeds elapsed action time")
 			} else if e.hasStatus {
 				err = status.follows(e.status, tx.job.rounds())
 			}
@@ -438,6 +447,8 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 	var binding httpBinding
 	var sequence uint64
 	var failedOutcome, sequenceGap bool
+	var phaseProof int
+	var allowUpload bool
 	var apply func() error
 	var err error
 	switch kind {
@@ -447,6 +458,16 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 		binding, sequence = httpBinding{call.Checkpoint.Version, call.Checkpoint.Identity, call.Checkpoint.SourceRef}, call.Sequence
 		if err == nil {
 			err = httpCallShape(call.Checkpoint.Call)
+		}
+		if kind == "before" {
+			fact := call.Checkpoint.Call
+			phase := Status{Version: ProtocolVersion, Identity: tx.job.Identity, SourceRef: tx.job.Source.Head, Sequence: 1,
+				WorkerState: "busy", Phase: fact.Role, Round: fact.Round, ReviewPhase: fact.ReviewPhase}
+			if phase.validate(tx.job) == nil {
+				phaseProof = phase.order(tx.job.rounds())
+			}
+		} else if tx.job.Critic == nil && call.Checkpoint.Call.Role == roleMain && call.Checkpoint.Call.Round == 1 && call.Checkpoint.Call.ReviewPhase == "" {
+			allowUpload = true
 		}
 		apply = func() error {
 			if kind == "before" {
@@ -460,6 +481,9 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 		binding, sequence = httpBinding{review.Checkpoint.Version, review.Checkpoint.Identity, review.Checkpoint.SourceRef}, review.Sequence
 		if err == nil {
 			err = httpReviewShape(review.Checkpoint)
+		}
+		if tx.job.Critic != nil && review.Checkpoint.CriticStopReason != "" {
+			allowUpload = true
 		}
 		apply = func() error { return tx.sink.Review(review.Checkpoint) }
 	case "outcome":
@@ -513,6 +537,11 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 		}
 		tx.mu.Unlock()
 		tx.stopExecution(nil, false)
+	} else if phaseProof > 0 || allowUpload {
+		tx.mu.Lock()
+		tx.phaseCeiling = max(tx.phaseCeiling, phaseProof)
+		tx.uploadReady = tx.uploadReady || allowUpload
+		tx.mu.Unlock()
 	}
 	// Release mutation ownership before ACK bytes can let a sequential client send its next request.
 	tx.mutation.Unlock()

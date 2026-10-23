@@ -775,7 +775,7 @@ func TestHTTPExecutorStatusIsIndependentAndAllowsObservationGaps(t *testing.T) {
 		})
 	})
 	f.pull(t)
-	status := Status{Version: ProtocolVersion, Identity: f.job.Identity, SourceRef: f.job.Source.Head, Sequence: 2, WorkerState: "busy", Phase: "upload"}
+	status := Status{Version: ProtocolVersion, Identity: f.job.Identity, SourceRef: f.job.Source.Head, Sequence: 2, WorkerState: "busy", Phase: "prepare"}
 	if got := f.request("/status", httpObservation{Status: status}); got.err == nil {
 		t.Fatal("injected observation ACK failure unexpectedly succeeded")
 	}
@@ -805,7 +805,7 @@ func TestHTTPExecutorRejectsStaleAndRegressingStatusWithoutChangingPaidSequence(
 	f := newHTTPServerTest(t, ctx, job, runnerExecutionCheckpoints{}, nil)
 	f.pull(t)
 	status := Status{Version: ProtocolVersion, Identity: f.job.Identity, SourceRef: f.job.Source.Head,
-		Sequence: 2, ProgressSequence: 4, ProgressAge: 2 * time.Second, LogSequence: 3, WorkerState: "busy", Phase: "prepare"}
+		Sequence: 2, ProgressSequence: 4, ProgressAge: 2 * time.Nanosecond, LogSequence: 3, WorkerState: "busy", Phase: "prepare"}
 	f.ack(t, "/status", httpObservation{Status: status}, http.StatusOK, 2)
 	reject := func(name string, edit func(*Status)) {
 		t.Helper()
@@ -822,36 +822,71 @@ func TestHTTPExecutorRejectsStaleAndRegressingStatusWithoutChangingPaidSequence(
 	reject("replay", func(s *Status) { s.Sequence = status.Sequence })
 	reject("stale", func(s *Status) { s.Sequence = status.Sequence - 1 })
 	reject("foreign attempt", func(s *Status) { s.Identity.AttemptID = "foreign" })
+	reject("impossible progress age", func(s *Status) { s.ProgressAge = time.Hour })
+	reject("critic before call", func(s *Status) { s.Phase, s.Round, s.ReviewPhase = "critic", 1, reviewFull })
+	reject("upload before completion", func(s *Status) { s.Phase = "upload" })
+	var paidSequence uint64
+	var paidCalls []CallUsage
+	checkpoint := func(kind, role string, round int, phase string) {
+		t.Helper()
+		paidSequence++
+		call := f.call(paidSequence)
+		call.Checkpoint.Call.Role, call.Checkpoint.Call.Round, call.Checkpoint.Call.ReviewPhase = role, round, phase
+		if role == roleCritic {
+			call.Checkpoint.Call.Provider = f.job.Critic.Provider
+		}
+		f.ack(t, "/"+kind, call, http.StatusOK, paidSequence)
+		if kind == "after" {
+			paidCalls = append(paidCalls, call.Checkpoint.Call)
+		}
+	}
+	checkpoint("before", roleMain, 1, "")
+	checkpoint("after", roleMain, 1, "")
+	checkpoint("before", roleCritic, 1, reviewFull)
 	status.Sequence, status.Phase, status.Round, status.ReviewPhase = 5, "critic", 1, reviewFull
-	status.ProgressSequence, status.ProgressAge, status.LogSequence = 5, time.Second, 4
+	status.ProgressSequence, status.ProgressAge, status.LogSequence = 5, time.Nanosecond, 4
 	f.ack(t, "/status", httpObservation{Status: status}, http.StatusOK, 5)
 	reject("phase rollback", func(s *Status) { s.Phase, s.Round, s.ReviewPhase = "main", 1, "" })
 	reject("progress rollback", func(s *Status) { s.ProgressSequence-- })
 	reject("log rollback", func(s *Status) { s.LogSequence-- })
-	reject("progress age rollback", func(s *Status) { s.ProgressAge -= time.Second })
-	status.Sequence, status.ProgressAge, status.LogSequence = 6, 2*time.Second, 5
+	reject("progress age rollback", func(s *Status) { s.ProgressAge-- })
+	status.Sequence, status.ProgressAge, status.LogSequence = 6, 2*time.Nanosecond, 5
 	f.ack(t, "/status", httpObservation{Status: status}, http.StatusOK, 6)
+	checkpoint("after", roleCritic, 1, reviewFull)
+	checkpoint("before", roleMain, 2, "")
 	status.Sequence, status.Phase, status.Round, status.ReviewPhase = 7, "main", 2, ""
 	status.ProgressSequence, status.ProgressAge = 6, 0
 	f.ack(t, "/status", httpObservation{Status: status}, http.StatusOK, 7)
 	reject("round rollback", func(s *Status) { s.Round = 1 })
+	checkpoint("after", roleMain, 2, "")
+	checkpoint("before", roleCritic, 2, reviewVerification)
 	status.Sequence, status.Phase, status.ReviewPhase = 8, "critic", reviewVerification
 	f.ack(t, "/status", httpObservation{Status: status}, http.StatusOK, 8)
+	checkpoint("after", roleCritic, 2, reviewVerification)
+	checkpoint("before", roleCritic, 2, reviewFull)
 	status.Sequence, status.ReviewPhase = 9, reviewFull
 	f.ack(t, "/status", httpObservation{Status: status}, http.StatusOK, 9)
 	reject("review phase rollback", func(s *Status) { s.ReviewPhase = reviewVerification })
-	status.Sequence, status.Phase, status.Round, status.ReviewPhase = 10, "cleanup", 0, ""
-	status.WorkerState = "stopping"
+	checkpoint("after", roleCritic, 2, reviewFull)
+	paidSequence++
+	f.ack(t, "/review", httpReview{Sequence: paidSequence, Checkpoint: ReviewCheckpoint{
+		Version: ProtocolVersion, Identity: f.job.Identity, SourceRef: f.job.Source.Head,
+		Calls: paidCalls, CriticStopReason: "round_cap",
+	}}, http.StatusOK, paidSequence)
+	status.Sequence, status.Phase, status.Round, status.ReviewPhase = 10, "upload", 0, ""
 	f.ack(t, "/status", httpObservation{Status: status}, http.StatusOK, 10)
-	reject("worker state rollback", func(s *Status) { s.WorkerState = "busy" })
-	status.Sequence, status.WorkerState = 11, "ready"
+	status.Sequence, status.Phase = 11, "cleanup"
+	status.WorkerState = "stopping"
 	f.ack(t, "/status", httpObservation{Status: status}, http.StatusOK, 11)
+	reject("worker state rollback", func(s *Status) { s.WorkerState = "busy" })
+	status.Sequence, status.WorkerState = 12, "ready"
+	f.ack(t, "/status", httpObservation{Status: status}, http.StatusOK, 12)
 	reject("terminal state rollback", func(s *Status) { s.WorkerState = "stopping" })
 	reject("terminal state changes", func(s *Status) { s.WorkerState = "unclean" })
 	if got, ok := f.tx.ctx.Deadline(); !ok || !got.Equal(deadline) {
 		t.Fatalf("observations changed parent deadline: got=%v present=%t want=%v", got, ok, deadline)
 	}
-	f.ack(t, "/outcome", f.outcome(1, nil), http.StatusOK, 1)
+	f.ack(t, "/outcome", f.outcome(paidSequence+1, nil), http.StatusOK, paidSequence+1)
 	if got := f.result(t); got.err != nil {
 		t.Fatalf("observations changed paid sequence or outcome: %v", got.err)
 	}
@@ -863,13 +898,46 @@ func TestHTTPExecutorRejectsStaleAndRegressingStatusWithoutChangingPaidSequence(
 	}
 }
 
+func TestHTTPExecutorEarlyCriticDecisionDoesNotUnlockLaterStatusPhases(t *testing.T) {
+	job := testJob(command.Comment)
+	job.Critic = &RoleSettings{Provider: "claude"}
+	job.CriticMaxRounds = 2
+	f := newHTTPServerTest(t, context.Background(), job, runnerExecutionCheckpoints{}, nil)
+	f.pull(t)
+	main := f.call(1)
+	f.ack(t, "/before", main, http.StatusOK, 1)
+	main.Sequence = 2
+	f.ack(t, "/after", main, http.StatusOK, 2)
+	critic := f.call(3)
+	critic.Checkpoint.Call.Provider, critic.Checkpoint.Call.Role, critic.Checkpoint.Call.ReviewPhase = job.Critic.Provider, roleCritic, reviewFull
+	f.ack(t, "/before", critic, http.StatusOK, 3)
+	critic.Sequence = 4
+	critic.Checkpoint.Call.Approved, critic.Checkpoint.Call.NoBlockers, critic.Checkpoint.Call.ReviewComplete = true, true, true
+	f.ack(t, "/after", critic, http.StatusOK, 4)
+	f.ack(t, "/review", httpReview{Sequence: 5, Checkpoint: ReviewCheckpoint{
+		Version: ProtocolVersion, Identity: f.job.Identity, SourceRef: f.job.Source.Head,
+		Calls: []CallUsage{main.Checkpoint.Call, critic.Checkpoint.Call}, CriticStopReason: "approved",
+	}}, http.StatusOK, 5)
+	status := Status{Version: ProtocolVersion, Identity: f.job.Identity, SourceRef: f.job.Source.Head,
+		Sequence: 1, WorkerState: "busy", Phase: "main", Round: 2}
+	f.ack(t, "/status", httpObservation{Status: status}, http.StatusConflict, 1)
+	status.Sequence, status.Phase, status.Round = 2, "upload", 0
+	f.ack(t, "/status", httpObservation{Status: status}, http.StatusOK, 2)
+	f.ack(t, "/outcome", f.outcome(6, nil), http.StatusOK, 6)
+	if got := f.result(t); got.err != nil {
+		t.Fatal(got.err)
+	}
+}
+
 func TestHTTPExecutorBoundsRejectedStatusBinding(t *testing.T) {
 	for _, malformed := range []string{"shape", "unknown field", "trailing value"} {
 		t.Run(malformed, func(t *testing.T) {
 			f := newHTTPServerTest(t, context.Background(), testJob(command.Comment), runnerExecutionCheckpoints{}, nil)
 			f.pull(t)
 			status := Status{Version: ProtocolVersion, Identity: f.job.Identity, SourceRef: f.job.Source.Head, Sequence: 1, WorkerState: "busy", Phase: "prepare"}
-			status.Identity.JobID = strings.Repeat("<", 30_000)
+			if malformed == "shape" {
+				status.Identity.JobID = strings.Repeat("<", 30_000)
+			}
 			var buffer bytes.Buffer
 			encoder := json.NewEncoder(&buffer)
 			encoder.SetEscapeHTML(false) // Small valid input can expand beyond the ACK cap when echoed.
@@ -920,7 +988,7 @@ func TestHTTPExecutorCanceledBeforeConsumesOnlyBoundSequence(t *testing.T) {
 	if ack.httpBinding != f.tx.binding || !errors.Is(ack.Failure.err(), context.Canceled) || before.Load() != 0 {
 		t.Fatalf("canceled Before reached paid admission or lost its known cause: %+v saves=%d", ack, before.Load())
 	}
-	status := Status{Version: ProtocolVersion, Identity: f.job.Identity, SourceRef: f.job.Source.Head, Sequence: 1, WorkerState: "busy", Phase: "upload"}
+	status := Status{Version: ProtocolVersion, Identity: f.job.Identity, SourceRef: f.job.Source.Head, Sequence: 1, WorkerState: "busy", Phase: "cleanup"}
 	f.ack(t, "/status", httpObservation{Status: status}, http.StatusOK, 1)
 	outcome := f.outcome(2, context.Canceled)
 	f.ack(t, "/outcome", outcome, http.StatusOK, 2)
@@ -1525,6 +1593,8 @@ func TestHTTPExecutorMissingOutcomeClosesRealGraceAndQuarantines(t *testing.T) {
 	defer cancel()
 	f := newHTTPServerTest(t, ctx, testJob(command.Comment), runnerExecutionCheckpoints{}, nil)
 	f.pull(t)
+	ready := Status{Version: ProtocolVersion, Identity: f.job.Identity, SourceRef: f.job.Source.Head, Sequence: 1, WorkerState: "ready", Phase: "cleanup"}
+	f.ack(t, "/status", httpObservation{Status: ready}, http.StatusOK, 1)
 	cancel()
 	<-f.tx.ctx.Done()
 	select {
@@ -1545,5 +1615,8 @@ func TestHTTPExecutorMissingOutcomeClosesRealGraceAndQuarantines(t *testing.T) {
 	}
 	if _, err := f.executor.Execute(context.Background(), f.job, runnerExecutionCheckpoints{}); err == nil {
 		t.Fatal("missing outcome released unproved worker capacity")
+	}
+	if got, ok := f.executor.Status(); !ok || got != ready {
+		t.Fatalf("forged ready observation was not retained as an untrusted label: status=%+v present=%t", got, ok)
 	}
 }

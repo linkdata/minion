@@ -45,6 +45,7 @@ type httpClientCheckpoints struct {
 	control   context.Context
 	action    context.Context
 	binding   httpBinding
+	started   time.Time
 	sequence  uint64
 	failure   error
 }
@@ -72,6 +73,7 @@ func RunHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	if err := transport.post(ctx, "next", pull, httpJobBytes, &assignment, httpBinding{}, 0); err != nil {
 		return err
 	}
+	started := time.Now()
 	job := assignment.Job
 	if err := job.Validate(); err != nil {
 		return httpClientUnknown("next", err)
@@ -89,7 +91,7 @@ func RunHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	if assignment.Expires <= 0 {
 		return httpClientUnknown("next", errors.New("invalid assignment expiry"))
 	}
-	checkpoints := &httpClientCheckpoints{transport: transport, control: context.WithoutCancel(ctx), binding: httpJobBinding(job)}
+	checkpoints := &httpClientCheckpoints{transport: transport, control: context.WithoutCancel(ctx), binding: httpJobBinding(job), started: started}
 	if !time.Now().Before(expires) {
 		err := errors.Join(monitor.ErrTerminalJob, context.DeadlineExceeded)
 		result := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head}
@@ -397,7 +399,7 @@ func (c *httpClientCheckpoints) Review(value ReviewCheckpoint) error {
 }
 
 func (c *httpClientCheckpoints) status(phase string, observation uint64) error {
-	status := Status{Version: c.binding.Version, Identity: c.binding.Identity, SourceRef: c.binding.SourceRef, Sequence: observation, WorkerState: "busy", Phase: phase}
+	status := Status{Version: c.binding.Version, Identity: c.binding.Identity, SourceRef: c.binding.SourceRef, Sequence: observation, ProgressAge: time.Since(c.started), WorkerState: "busy", Phase: phase}
 	data, err := httpEncode(httpObservation{Status: status}, httpControlBytes)
 	if err != nil {
 		return httpClientUnknown("status", err)
