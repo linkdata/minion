@@ -853,6 +853,57 @@ type httpServerFailWrite struct{ http.ResponseWriter }
 func (w httpServerFailWrite) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 func (w httpServerFailWrite) Write([]byte) (int, error)   { return 0, io.ErrClosedPipe }
 
+func TestHTTPExecutorRequiredReplyFailureCannotBecomeSuccess(t *testing.T) {
+	for _, path := range []string{"/next", "/after"} {
+		t.Run(path, func(t *testing.T) {
+			owner := newExecutionAdapterFixture(t, testJob(command.Comment))
+			store := owner.startUsage()
+			f := newHTTPServerTest(t, context.Background(), owner.job, owner.sink, func(next http.Handler) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path == path {
+						w = httpServerFailWrite{w}
+					}
+					next.ServeHTTP(w, r)
+				})
+			})
+			outcome := f.outcome(1, nil)
+			if path == "/next" {
+				if reply := f.request(path, httpPull{Version: ProtocolVersion, ExecutorID: owner.job.Identity.ExecutorID}); reply.err == nil {
+					t.Fatalf("assignment delivery unexpectedly succeeded: %+v", reply)
+				}
+			} else {
+				f.pull(t)
+				before := f.call(1)
+				f.ack(t, "/before", before, http.StatusOK, 1)
+				paid := f.call(2)
+				paid.Checkpoint.Call.Tokens, paid.Checkpoint.Call.Complete = usage.Tokens{Input: 9, Output: 2}, true
+				if reply := f.request(path, paid); reply.err == nil {
+					t.Fatalf("paid callback acknowledgement unexpectedly succeeded: %+v", reply)
+				}
+				outcome.Sequence = 3
+				outcome.Result.Calls = []CallUsage{paid.Checkpoint.Call}
+			}
+			outcome.Result.Answer = "Forged success after failed required reply"
+			f.ack(t, "/outcome", outcome, http.StatusOK, outcome.Sequence)
+			got := f.result(t)
+			if !reflect.DeepEqual(got.result, outcome.Result) || !errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || !errors.Is(owner.sink.finish(got.result, got.err), monitor.ErrExecutionOutcomeUnknown) {
+				t.Fatalf("failed required reply became publishable: result=%+v error=%v", got.result, got.err)
+			}
+			records, err := usage.ReadAll(store.Dir)
+			wantCalls := 0
+			if path == "/after" {
+				wantCalls = 1
+			}
+			if err != nil || len(records) != 1 || records[0].CodexCalls != wantCalls {
+				t.Fatalf("required reply failure lost saved usage: records=%+v error=%v", records, err)
+			}
+			if _, err := f.executor.Execute(context.Background(), f.job, owner.sink); err == nil {
+				t.Fatal("failed required reply released worker capacity")
+			}
+		})
+	}
+}
+
 func TestHTTPExecutorReceivedOutcomeSurvivesLostReceiptACK(t *testing.T) {
 	for _, runErr := range []error{nil, errors.Join(monitor.ErrTerminalJob, context.DeadlineExceeded)} {
 		t.Run(fmt.Sprint(runErr), func(t *testing.T) {
@@ -987,7 +1038,7 @@ func TestHTTPExecutorChecksDeadlineBeforeCancellationNotification(t *testing.T) 
 	}
 }
 
-func TestHTTPExecutorKnownOutcomeResolvesInternalTransportCancellation(t *testing.T) {
+func TestHTTPExecutorKnownOutcomeResolvesWatchTransportCancellation(t *testing.T) {
 	f := newHTTPServerTest(t, context.Background(), testJob(command.Comment), runnerExecutionCheckpoints{}, nil)
 	f.pull(t)
 	f.tx.stopExecution(io.ErrClosedPipe, true)
@@ -996,7 +1047,7 @@ func TestHTTPExecutorKnownOutcomeResolvesInternalTransportCancellation(t *testin
 	outcome.Result.Answer = "Conclusive result received within the accepted budget"
 	f.ack(t, "/outcome", outcome, http.StatusOK, 1)
 	if got := f.result(t); got.err != nil || !reflect.DeepEqual(got.result, outcome.Result) {
-		t.Fatalf("internal ACK failure poisoned a conclusive received result: %+v error=%v", got.result, got.err)
+		t.Fatalf("watch transport failure poisoned a conclusive received result: %+v error=%v", got.result, got.err)
 	}
 	f.executor.mu.Lock()
 	unavailable := f.executor.unavailable

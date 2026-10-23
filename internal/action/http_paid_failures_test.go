@@ -128,8 +128,7 @@ func TestHTTPPaidDisconnectsKeepRawFactsSeparateFromSavedCheckpoints(t *testing.
 			if stage == "After request" || stage == "After ACK" {
 				wantCalls = 1
 			}
-			parentUnknown := stage == "After request"
-			if !cut.Load() || int(native.Load()) != wantCalls || len(got.result.Calls) != wantCalls || !got.result.matchesJob(f.job) || !errors.Is(workerErr, monitor.ErrExecutionOutcomeUnknown) || got.err == nil || finalErr == nil || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) != parentUnknown || errors.Is(finalErr, monitor.ErrTerminalJob) != parentUnknown || got.result.Answer != "" {
+			if !cut.Load() || int(native.Load()) != wantCalls || len(got.result.Calls) != wantCalls || !got.result.matchesJob(f.job) || !errors.Is(workerErr, monitor.ErrExecutionOutcomeUnknown) || !errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || finalErr == nil || errors.Is(finalErr, monitor.ErrTerminalJob) != (stage == "After request") || got.result.Answer != "" {
 				t.Fatalf("paid disconnect lost raw outcome, repeated work or passed publication gate: calls=%d raw=%+v worker=%v parent=%v finish=%v", native.Load(), got.result, workerErr, got.err, finalErr)
 			}
 			wantAfter, wantReviews := wantCalls, 1

@@ -27,23 +27,29 @@ import (
 )
 
 func TestUnixEndpointRejectsOccupiedSocketWithoutRemovingIt(t *testing.T) {
-	for _, kind := range []string{"regular file", "stale socket", "symlink", "directory"} {
+	for _, kind := range []string{"regular file", "live socket", "stale socket", "symlink", "directory"} {
 		t.Run(kind, func(t *testing.T) {
 			dir := unixTestDirectory(t)
 			path := filepath.Join(dir, "execution.sock")
+			var live *net.UnixListener
 			switch kind {
 			case "regular file":
 				if err := os.WriteFile(path, []byte("caller data"), 0600); err != nil {
 					t.Fatal(err)
 				}
-			case "stale socket":
+			case "live socket", "stale socket":
 				listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
 				if err != nil {
 					t.Fatal(err)
 				}
 				listener.SetUnlinkOnClose(false)
-				if err := listener.Close(); err != nil {
-					t.Fatal(err)
+				if kind == "stale socket" {
+					if err := listener.Close(); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					live = listener
+					t.Cleanup(func() { _ = listener.Close() })
 				}
 			case "symlink":
 				if err := os.Symlink("caller-target", path); err != nil {
@@ -70,12 +76,27 @@ func TestUnixEndpointRejectsOccupiedSocketWithoutRemovingIt(t *testing.T) {
 			if err != nil || !os.SameFile(before, after) {
 				t.Fatalf("constructor removed or replaced caller entry: %v", err)
 			}
+			if live != nil {
+				if err := live.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+					t.Fatal(err)
+				}
+				peer, err := net.DialTimeout("unix", path, 5*time.Second)
+				if err != nil {
+					t.Fatalf("constructor disabled the occupied listener: %v", err)
+				}
+				defer peer.Close()
+				accepted, err := live.Accept()
+				if err != nil {
+					t.Fatalf("occupied listener stopped accepting: %v", err)
+				}
+				_ = accepted.Close()
+			}
 			if kind == "regular file" {
 				if data, err := os.ReadFile(path); err != nil || string(data) != "caller data" {
 					t.Fatalf("constructor changed caller data: %q %v", data, err)
 				}
 			}
-			if kind != "stale socket" {
+			if kind != "stale socket" && live == nil {
 				client, err := NewUnixExecutionClient(path)
 				if client != nil {
 					client.CloseIdleConnections()
@@ -309,8 +330,8 @@ func TestUnixEndpointServesActualHTTPTransaction(t *testing.T) {
 	}
 	defer client.CloseIdleConnections()
 	transport, ok := client.Transport.(*http.Transport)
-	if !ok || transport.Proxy != nil || client.Timeout != 0 || transport.ResponseHeaderTimeout != 0 {
-		t.Fatal("Unix client added proxy fallback or a whole-request/held-header deadline")
+	if !ok || transport.Proxy != nil || client.Timeout != 0 || transport.ResponseHeaderTimeout != 0 || endpoint.server.WriteTimeout != 0 {
+		t.Fatal("Unix transport added proxy fallback or a whole-request/held-response deadline")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

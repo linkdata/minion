@@ -44,22 +44,23 @@ type httpTransaction struct {
 	stopBudget context.CancelFunc
 	body       []byte
 
-	ready         bool
-	delivered     bool
-	fenced        bool
-	watch         bool
-	sequence      uint64
-	statusSeq     uint64
-	stopping      bool
-	stop          chan struct{}
-	done          chan struct{}
-	finished      chan struct{}
-	transportErr  error
-	checkpointErr error
-	outcome       bool
-	result        Result
-	runErr        error
-	quarantine    bool
+	ready               bool
+	delivered           bool
+	fenced              bool
+	watch               bool
+	sequence            uint64
+	statusSeq           uint64
+	stopping            bool
+	stop                chan struct{}
+	done                chan struct{}
+	finished            chan struct{}
+	transportErr        error
+	requiredDeliveryErr error
+	checkpointErr       error
+	outcome             bool
+	result              Result
+	runErr              error
+	quarantine          bool
 }
 
 func NewHTTPExecutor(executorID string) (*HTTPExecutor, error) {
@@ -103,11 +104,14 @@ func (e *HTTPExecutor) Execute(ctx context.Context, job Job, sink Checkpoints) (
 		tx.handlers.Wait()
 		tx.mu.Lock()
 		if tx.outcome {
-			// A received outcome resolves earlier ACK ambiguity, even if its own receipt ACK was lost.
+			// A received outcome resolves watch ambiguity, even if its own receipt ACK was lost.
 			result, runErr = tx.result, tx.runErr
 		} else if tx.delivered {
 			runErr = errors.Join(runErr, monitor.ErrExecutionOutcomeUnknown, tx.transportErr, tx.checkpointErr, actionCtx.Err())
 			tx.quarantine = true
+		}
+		if tx.requiredDeliveryErr != nil {
+			runErr = errors.Join(runErr, monitor.ErrExecutionOutcomeUnknown, tx.requiredDeliveryErr)
 		}
 		quarantine := tx.quarantine
 		tx.mu.Unlock()
@@ -272,7 +276,7 @@ func (e *HTTPExecutor) serveNext(w http.ResponseWriter, r *http.Request) {
 				tx.mu.Unlock()
 				e.mu.Unlock()
 				if err := httpServerWriteBytes(w, http.StatusOK, body); err != nil {
-					tx.stopExecution(err, true)
+					tx.stopRequiredDelivery(err)
 				}
 				return
 			}
@@ -386,6 +390,16 @@ func (tx *httpTransaction) stopExecution(err error, cancel bool) {
 	if cancel {
 		tx.cancel()
 	}
+}
+
+func (tx *httpTransaction) stopRequiredDelivery(err error) {
+	tx.mu.Lock()
+	if tx.requiredDeliveryErr == nil {
+		tx.requiredDeliveryErr = err
+	}
+	tx.quarantine = true
+	tx.mu.Unlock()
+	tx.stopExecution(nil, true)
 }
 
 func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
@@ -504,7 +518,7 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 			tx.quarantine = true
 			tx.mu.Unlock()
 		} else {
-			tx.stopExecution(err, true)
+			tx.stopRequiredDelivery(err)
 		}
 	}
 }
