@@ -74,6 +74,7 @@ func (e *Orchestrator) perform(ctx context.Context, request monitor.Job) (result
 			if result.matchesJob(prepared.job) {
 				evidence.Diagnostics = result.Diagnostics
 			}
+			err = errors.Join(err, e.retainWorkerDiagnostics(prepared.job, result, err))
 			e.logResult(prepared.job, evidence)
 			if len(evidence.Calls) != 0 {
 				err = errors.Join(err, e.retainReviewEvidence(prepared.job, evidence))
@@ -232,6 +233,9 @@ func (e *Orchestrator) publish(ctx context.Context, p *preparedAction, result Re
 		}
 		return nil
 	}
+	if err := e.retainWorkerDiagnostics(p.job, result, nil); err != nil {
+		return err
+	}
 	e.logResult(p.job, result)
 	if err := e.retainReviewEvidence(p.job, result); err != nil {
 		return errors.Join(err, e.retainIncompleteAudit(p, result))
@@ -276,12 +280,6 @@ func (e *Orchestrator) publish(ctx context.Context, p *preparedAction, result Re
 
 func (e *Orchestrator) logResult(job Job, result Result) {
 	id := job.Identity
-	if result.matchesJob(job) && validDiagnostics(result.Diagnostics) == nil {
-		for _, diagnostic := range result.Diagnostics {
-			// Full private messages belong in restricted action records, never journal text.
-			e.logf("action diagnostic job=%s attempt=%s executor=%s code=%s", id.JobID, id.AttemptID, id.ExecutorID, diagnostic.Code)
-		}
-	}
 	if result.matchesJob(job) && result.validateCalls(job, false) == nil {
 		policy := criticPolicy{job: job}
 		cap := cappedReview(job, result)

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net/url"
 	"os/exec"
-	"strconv"
 	"strings"
 	"syscall"
 	"unicode/utf8"
@@ -147,6 +146,14 @@ func (f *httpFailure) err() error {
 	return errors.Join(causes...)
 }
 
+// workerFailureError keeps the bounded worker report available for private retention.
+// Its public error text cannot carry worker-controlled content into parent logs.
+type workerFailureError struct{ failure httpFailure }
+
+func (*workerFailureError) Error() string {
+	return "worker execution failed"
+}
+
 // Worker diagnostics do not establish parent process, retry or capacity policy.
 func (f *httpFailure) workerErr() error {
 	if f == nil {
@@ -155,7 +162,7 @@ func (f *httpFailure) workerErr() error {
 	if err := f.validate(); err != nil {
 		return err
 	}
-	return errors.New("worker execution failed: " + httpFailureDiagnostic(strconv.Quote(f.Message)))
+	return &workerFailureError{failure: *f}
 }
 
 func httpFailureDiagnostic(message string) string {

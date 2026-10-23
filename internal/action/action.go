@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
@@ -324,8 +325,22 @@ func (e *Orchestrator) checkGitHubContext(job monitor.Job, title, body string) e
 // modelOutputFits before publication; rendering never truncates the text.
 func inertModelOutput(s string) string {
 	s = strings.TrimSpace(modelLineBreaks.Replace(s))
-	quoted := "> " + strings.ReplaceAll(s, "\n", "\n> ")
-	return "```text\n" + quoted + "\n```"
+	var quoted strings.Builder
+	quoted.Grow(len(s) + 14)
+	quoted.WriteString("```text\n> ")
+	for _, r := range s {
+		switch {
+		case r == '\n':
+			quoted.WriteString("\n> ")
+		case unicode.IsControl(r) || unicode.Is(unicode.Cf, r):
+			escaped := strconv.QuoteRuneToGraphic(r)
+			quoted.WriteString(escaped[1 : len(escaped)-1])
+		default:
+			quoted.WriteRune(r)
+		}
+	}
+	quoted.WriteString("\n```")
+	return quoted.String()
 }
 
 func modelOutputFits(s string) bool {

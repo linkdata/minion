@@ -15,7 +15,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
+	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/processgroup"
@@ -734,6 +736,56 @@ func TestRunOnceExhaustedCancellationIsTerminal(t *testing.T) {
 	m.Now = func() time.Time { return now.Add(time.Minute) }
 	if _, err := m.RunOnce(context.Background(), store); err != nil || len(handler.jobs) != 1 {
 		t.Fatalf("completed resource-exhausted job reran: err=%v jobs=%d", err, len(handler.jobs))
+	}
+}
+
+func TestRunOnceExecutorErrorCannotForgeLogLines(t *testing.T) {
+	if got := InertLogText("readable åäö"); got != "readable åäö" {
+		t.Fatalf("ordinary diagnostic text changed: %q", got)
+	}
+	if got := InertLogText(strings.Repeat("a", bounded.DiagnosticBytes-3) + "\né"); !utf8.ValidString(got) || len(got) > bounded.DiagnosticBytes+3 || !strings.HasSuffix(got, "...") {
+		t.Fatalf("truncated log text split a rune: bytes=%d text=%q", len(got), got)
+	}
+	for _, tc := range []struct {
+		prefix int
+		suffix string
+	}{
+		{bounded.DiagnosticBytes - 1, "\nx"},
+		{bounded.DiagnosticBytes - 3, "\u202ex"},
+	} {
+		if got, want := InertLogText(strings.Repeat("a", tc.prefix)+tc.suffix), strings.Repeat("a", tc.prefix)+"..."; got != want {
+			t.Fatalf("truncated log text split an escape: got=%q want=%q", got, want)
+		}
+	}
+	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	item := github.Item{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}}
+	gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}, items: []github.Item{item}, permission: github.Permission{Permission: "write"}}
+	path := "worker\nFORGED\x1b[31m\u202e" + strings.Repeat("x", bounded.DiagnosticBytes)
+	workerErr := &os.PathError{Op: "write", Path: path, Err: os.ErrPermission}
+	handler := &fakeHandler{executeErr: workerErr}
+	store := openState(t, now.Add(-time.Minute))
+	var logs bytes.Buffer
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Logger: log.New(&logs, "", 0), Now: func() time.Time { return now }}
+	_, err := m.RunOnce(context.Background(), store)
+	var retained *os.PathError
+	if !errors.Is(err, os.ErrPermission) || !errors.As(err, &retained) || retained.Path != path || len(handler.jobs) != 1 {
+		t.Fatalf("executor error changed retry or typed cause: jobs=%d err=%v", len(handler.jobs), err)
+	}
+	if failure := store.Data.JobFailures[handler.jobs[0].ID]; failure.Attempts != 1 {
+		t.Fatalf("executor error changed retry count: %+v", failure)
+	}
+	for _, display := range []string{logs.String(), InertLogText(err.Error())} {
+		if strings.Contains(display, "\nFORGED") || strings.Contains(display, "\x1b") || strings.Contains(display, "\u202e") || !strings.Contains(display, `\nFORGED\x1b[31m\u202e`) {
+			t.Fatalf("executor text was not rendered inert: %q", display)
+		}
+		for _, line := range strings.Split(strings.TrimSuffix(display, "\n"), "\n") {
+			if len(line) > bounded.DiagnosticBytes+len("...") {
+				t.Fatalf("executor log line exceeded diagnostic bound: %d bytes", len(line))
+			}
+		}
+	}
+	if strings.Count(logs.String(), "failed (attempt 1/3)") != 1 {
+		t.Fatalf("expected one trusted retry summary: %q", logs.String())
 	}
 }
 

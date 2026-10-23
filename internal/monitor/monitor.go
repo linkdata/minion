@@ -14,7 +14,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
+	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/github"
@@ -87,8 +89,26 @@ type Monitor struct {
 
 func (m *Monitor) logf(format string, args ...any) {
 	if m.Logger != nil {
-		m.Logger.Printf(format, args...)
+		m.Logger.Print(InertLogText(fmt.Sprintf(format, args...)))
 	}
+}
+
+// InertLogText bounds and escapes untrusted text before it reaches a log line.
+func InertLogText(s string) string {
+	quoted := strconv.QuoteToGraphic(bounded.Text(s))
+	visible := quoted[1 : len(quoted)-1]
+	if len(visible) <= bounded.DiagnosticBytes {
+		return visible
+	}
+	visible = visible[:bounded.DiagnosticBytes]
+	for {
+		_, err := strconv.Unquote("\"" + visible + "\"")
+		if err == nil && utf8.ValidString(visible) {
+			break
+		}
+		visible = visible[:len(visible)-1]
+	}
+	return visible + "..."
 }
 
 // RunOnce processes new notifications in whitelisted repositories.
