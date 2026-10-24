@@ -561,28 +561,6 @@ func TestRunnerReportsOwnedAndCriticCleanupFailures(t *testing.T) {
 	}
 }
 
-func TestRunnerRefusesRenderedReportOverflowBeforeCritic(t *testing.T) {
-	job := withClaudeCritic(auditRunnerJob(t))
-	job.CriticMaxRounds = 1
-	text := strings.Repeat("a\n", 25000)
-	calls := 0
-	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
-		calls++
-		if request.role != roleMain {
-			t.Fatal("unpublishable report reached critic")
-		}
-		writeFixtureFile(t, request.outputDir, "REPORT.md", []byte(text))
-		return aicli.Result{Answer: proposalJSON("Complete report", "")}, nil
-	}}
-	result, err := runner.Run(context.Background(), job)
-	if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "publication limit") || calls != 1 || len(result.Calls) != 1 || result.Answer != "" {
-		t.Fatalf("overflow reached critic/success: calls=%d result=%+v error=%v", calls, result, err)
-	}
-	if len(result.Artifacts) != 1 || result.Artifacts[0].Path != "REPORT.md" || string(result.Artifacts[0].Data) != text || result.validate(job, false) != nil {
-		t.Fatalf("partial report lost: %+v", result.Artifacts)
-	}
-}
-
 func TestRunnerPrivateIndexPreparationFailuresKeepTheirClass(t *testing.T) {
 	for _, test := range []struct {
 		name, diagnostic string

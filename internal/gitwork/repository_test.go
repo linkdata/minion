@@ -283,7 +283,7 @@ func TestRepositoryOmitsLinksWithoutReportingDeletions(t *testing.T) {
 				}
 			}
 			repo, err := MaterializeRepository(context.Background(), repositorySource(t, invalid.Files), invalid)
-			if repo != nil || err == nil || !strings.Contains(err.Error(), "undeclared omitted source") {
+			if repo != nil || err == nil || !strings.Contains(err.Error(), fmt.Sprintf("head omitted source path %q is not omitted", name)) {
 				t.Fatalf("undeclared %s returned repository=%v error=%v", name, repo, err)
 			}
 		})
