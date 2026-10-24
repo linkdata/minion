@@ -248,7 +248,6 @@ func TestRunnerCancellationDuringInstalledAuditValidatorPreservesCause(t *testin
 	script := fmt.Sprintf("#!/bin/sh\nif [ \"$2\" = -e ]; then exit 0; fi\nprintf started > %s\nexec /bin/cat < %s\n", shellQuote(startedPath), shellQuote(holdPath))
 	fakeOnPath(t, "node", script)
 	job := testJob(command.SecurityAudit)
-	job.Main.Skills = []string{testAuditSkillURL}
 	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 		for _, file := range auditArtifactsFixture(job, request.dir, "Audit report\n") {
 			if err := os.WriteFile(filepath.Join(request.outputDir, file.Path), file.Data, 0600); err != nil {

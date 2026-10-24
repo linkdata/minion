@@ -96,8 +96,7 @@ func auditRunnerJob(t *testing.T) Job {
 	t.Helper()
 	installActionTestSkills(t, testAuditSkillURL)
 	fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
-	job := testJob(command.SecurityAudit)
-	return job
+	return testJob(command.SecurityAudit)
 }
 
 func assertEmptyDir(t *testing.T, root string) {

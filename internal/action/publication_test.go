@@ -438,6 +438,40 @@ func TestPublishedRefutationsFixAllowsQuotedSourceButRejectsNewCopy(t *testing.T
 	}
 }
 
+func TestPublishedRefutationsAllowSourceQuoteInPublicReply(t *testing.T) {
+	const quoted = "This quoted source sentence was already public."
+	const novel = "This novel private sentence must not be published."
+	for _, action := range []command.Action{command.Comment, command.Review} {
+		t.Run(string(action), func(t *testing.T) {
+			job := withClaudeCritic(testJob(action))
+			if action == command.Review {
+				job.Source.BaseFiles[0].Data = []byte(quoted + "\n")
+			} else {
+				job.Source.Files[0].Data = []byte(quoted + "\n")
+			}
+			result := privateReviewResult(job)
+			result.Refutations[0].Text = quoted
+			result.Answer = "Public reply: " + quoted
+			projected, err := projectPublication(job, result)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := rejectPublishedRefutations(job, result, projected); err != nil {
+				t.Fatalf("public source quote blocked: %v", err)
+			}
+			result.Refutations[0].Text = novel
+			result.Answer = "Public reply: " + novel
+			projected, err = projectPublication(job, result)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := rejectPublishedRefutations(job, result, projected); err == nil {
+				t.Fatal("novel private copy accepted")
+			}
+		})
+	}
+}
+
 func TestPublishedRefutationsFixManySourceQuotes(t *testing.T) {
 	job := withClaudeCritic(testJob(command.Fix))
 	var quotes []string
@@ -479,8 +513,8 @@ func TestPublishedRefutationsFixSourceScanBudget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := rejectPublishedRefutations(job, result, projected); err == nil || err.Error() != "private review evidence source scan budget exceeded" {
-		t.Fatalf("source scan budget did not stop valid but expensive Fix: %v", err)
+	if err := rejectPublishedRefutations(job, result, projected); err != nil {
+		t.Fatalf("best-effort source scan blocked valid Fix at its budget: %v", err)
 	}
 }
 

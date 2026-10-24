@@ -184,8 +184,45 @@ func rejectPublishedRefutations(job Job, result Result, projected publication) e
 	publicCopy := func(text string) bool {
 		return wholeReply(text) || containsCopy(text, reject)
 	}
+	// A Fix transfers full replacement files; source quotations can also appear in public prose.
+	// shortcut: Source searches stop after 1 GiB; use multi-pattern matching if fuller coverage matters at that workload.
+	const maxSourceSearchBytes int64 = 1 << 30
+	remainingSourceSearchBytes := maxSourceSearchBytes
+	inSource := make(map[string]bool)
+	var sourceText string
+	sourceBuilt, scanExhausted := false, false
+	rejectNew := func(private string) bool {
+		if public, known := inSource[private]; known {
+			return !public
+		}
+		if scanExhausted {
+			return false
+		}
+		if !sourceBuilt {
+			var source strings.Builder
+			for _, files := range [][]workspace.File{job.Source.Files, job.Source.BaseFiles} {
+				for _, file := range files {
+					for _, text := range []string{file.Path, string(file.Data)} {
+						for _, variant := range publicationTextVariants(text) {
+							source.WriteString(foldPublicationSpace(variant))
+							source.WriteByte(0) // A match cannot span source files or normalized variants.
+						}
+					}
+				}
+			}
+			sourceText, sourceBuilt = source.String(), true
+		}
+		if int64(len(sourceText)) > remainingSourceSearchBytes {
+			scanExhausted = true
+			return false
+		}
+		remainingSourceSearchBytes -= int64(len(sourceText))
+		inSource[private] = strings.Contains(sourceText, private)
+		return !inSource[private]
+	}
 	// Check executor text, not the host's cap notice; audit fields are checked below.
-	if projected.answer != "" && job.Action != command.SecurityAudit && publicCopy(result.Answer) {
+	if projected.answer != "" && job.Action != command.SecurityAudit &&
+		(wholeReply(result.Answer) || containsCopy(result.Answer, rejectNew)) {
 		return errors.New("publication contains private review evidence")
 	}
 	if job.Action == command.SecurityAudit {
@@ -206,42 +243,8 @@ func rejectPublishedRefutations(job Job, result Result, projected publication) e
 		}
 	}
 	if job.Action == command.Fix {
-		// A Fix transfers full replacement files. A quoted source passage may already be in the parent-held snapshot.
-		// shortcut: Source scans stop after 1 GiB; use multi-pattern search if valid fixes hit the limit.
-		const maxSourceSearchBytes int64 = 1 << 30
-		remainingSourceSearchBytes := maxSourceSearchBytes
-		var scanErr error
-		inSource := make(map[string]bool)
-		var sourceText string
-		rejectNew := func(private string) bool {
-			if public, known := inSource[private]; known {
-				return !public
-			}
-			if sourceText == "" {
-				var source strings.Builder
-				for _, file := range job.Source.Files {
-					for _, text := range []string{file.Path, string(file.Data)} {
-						for _, variant := range publicationTextVariants(text) {
-							source.WriteString(foldPublicationSpace(variant))
-							source.WriteByte(0) // A match cannot span source files or normalized variants.
-						}
-					}
-				}
-				sourceText = source.String()
-			}
-			if int64(len(sourceText)) > remainingSourceSearchBytes {
-				scanErr = errors.New("private review evidence source scan budget exceeded")
-				return true
-			}
-			remainingSourceSearchBytes -= int64(len(sourceText))
-			inSource[private] = strings.Contains(sourceText, private)
-			return !inSource[private]
-		}
 		for _, change := range result.Changes {
 			if containsCopy(change.Path, rejectNew) || containsCopy(string(change.Data), rejectNew) {
-				if scanErr != nil {
-					return scanErr
-				}
 				return errors.New("publication contains private review evidence")
 			}
 		}

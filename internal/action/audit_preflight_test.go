@@ -69,7 +69,6 @@ func TestRunnerChecksAuditPrerequisitesBeforeModel(t *testing.T) {
 				}
 			}
 			job := testJob(command.SecurityAudit)
-			job.Main.Skills = []string{testAuditSkillURL}
 			calls := 0
 			runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 				calls++

@@ -254,7 +254,6 @@ func TestRunnerUsesTheProbedNodeAfterPathChanges(t *testing.T) {
 	first, second := filepath.Join(t.TempDir(), "first-node"), filepath.Join(t.TempDir(), "second-node")
 	fakeOnPath(t, "node", "#!/bin/sh\nprintf '%s\\n' \"$*\" >> "+shellQuote(first)+"\n")
 	job := testJob(command.SecurityAudit)
-	job.Main.Skills = []string{testAuditSkillURL}
 	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 		fakeOnPath(t, "node", "#!/bin/sh\nprintf called > "+shellQuote(second)+"\nexit 77\n")
 		for _, file := range auditArtifactsFixture(job, request.dir, "Audit report\n") {

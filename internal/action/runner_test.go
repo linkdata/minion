@@ -316,7 +316,6 @@ func TestRunnerCanonicalizesTrustedWorkRoot(t *testing.T) {
 
 func TestPortableAuditMetadataUsesSourceIdentity(t *testing.T) {
 	job := testJob(command.SecurityAudit)
-	job.Main.Skills = []string{testAuditSkillURL}
 	root := t.TempDir()
 	for _, name := range auditArtifacts {
 		data := []byte("content")

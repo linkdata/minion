@@ -70,7 +70,6 @@ func TestRunnerAuditValidationCleanupRestoresRestrictedDirectory(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "restricted")
 	fakeOnPath(t, "node", "#!/bin/sh\nset -eu\ncase \"$*\" in *validate-coverage-ledger.cjs*) /bin/chmod 000 .; printf changed > "+shellQuote(marker)+";; esac\nexit 0\n")
 	job := testJob(command.SecurityAudit)
-	job.Main.Skills = []string{testAuditSkillURL}
 	root := t.TempDir()
 	runner := Runner{WorkRoot: root, runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 		for _, file := range auditArtifactsFixture(job, request.dir, "Audit report\n") {
