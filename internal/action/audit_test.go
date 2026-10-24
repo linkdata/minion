@@ -447,6 +447,10 @@ func TestValidateAuditMetadataRejectsIncompleteReason(t *testing.T) {
 	if _, err := validateAuditMetadata([]byte(withReason), job.Identity.Repository, target, job.Source.Head); err == nil || !strings.Contains(err.Error(), "incomplete reason") {
 		t.Fatalf("complete audit with incomplete reason: %v", err)
 	}
+	withNull := strings.Replace(metadata, `"run_status":"complete"`, `"run_status":"complete","incomplete_reason":null`, 1)
+	if _, err := validateAuditMetadata([]byte(withNull), job.Identity.Repository, target, job.Source.Head); err == nil || !strings.Contains(err.Error(), "incomplete reason") {
+		t.Fatalf("complete audit with null incomplete reason: %v", err)
+	}
 	withAlias := strings.Replace(metadata, `"run_status":"complete"`, `"run_status":"complete","INCOMPLETE_REASON":"validation_budget_exhausted"`, 1)
 	if _, err := validateAuditMetadata([]byte(withAlias), job.Identity.Repository, target, job.Source.Head); err == nil || !strings.Contains(err.Error(), "noncanonical key") {
 		t.Fatalf("noncanonical incomplete reason: %v", err)

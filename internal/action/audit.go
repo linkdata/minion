@@ -96,9 +96,6 @@ func redactAuditJSON(data []byte, secrets ...string) ([]byte, error) {
 	if !utf8.Valid(data) {
 		return nil, errors.New("audit JSON is not valid UTF-8")
 	}
-	if !json.Valid(data) {
-		return nil, errors.New("audit JSON is invalid")
-	}
 	if err := rejectDuplicateAuditJSONKeys(data); err != nil {
 		return nil, err
 	}
@@ -129,6 +126,9 @@ func redactAuditJSON(data []byte, secrets ...string) ([]byte, error) {
 }
 
 func rejectDuplicateAuditJSONKeys(data []byte, canonicalKeys ...string) error {
+	if !json.Valid(data) {
+		return errors.New("audit JSON is invalid")
+	}
 	canonical := make(map[string]string, len(canonicalKeys))
 	for _, key := range canonicalKeys {
 		canonical[workspace.FoldPath(key)] = key
@@ -922,15 +922,12 @@ func validateAuditMetadata(metadataBytes []byte, repo, target, head string) ([]s
 		SharedFileOwners       map[string]string `json:"shared_file_owners"`
 		ExecutionPolicy        string            `json:"execution_policy"`
 		RunStatus              string            `json:"run_status"`
+		IncompleteReason       json.RawMessage   `json:"incomplete_reason"`
 	}
 	if err := json.Unmarshal(metadataBytes, &metadata); err != nil {
 		return nil, fmt.Errorf("decode audit metadata: %w", err)
 	}
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(metadataBytes, &fields); err != nil {
-		return nil, fmt.Errorf("decode audit metadata fields: %w", err)
-	}
-	if _, incomplete := fields["incomplete_reason"]; incomplete {
+	if len(metadata.IncompleteReason) != 0 {
 		return nil, errors.New("audit metadata declares an incomplete reason for a complete run")
 	}
 	if !auditVisibleText(metadata.RunID) || metadata.Repo != repo || metadata.Target != target || metadata.SourceRef != head ||

@@ -213,6 +213,9 @@ func rejectPublishedRefutations(job Job, result Result, projected publication) e
 				for _, files := range [][]workspace.File{job.Source.Files, job.Source.BaseFiles} {
 					for _, file := range files {
 						for _, text := range []string{file.Path, string(file.Data)} {
+							if strings.IndexByte(text, 0) >= 0 {
+								continue
+							}
 							for _, variant := range publicationTextVariants(text) {
 								folded := foldPublicationSpace(variant)
 								if len(folded)+1 > maxCacheNormalizedBytes-source.Len() {
@@ -242,6 +245,9 @@ func rejectPublishedRefutations(job Job, result Result, projected publication) e
 		for _, files := range [][]workspace.File{job.Source.Files, job.Source.BaseFiles} {
 			for _, file := range files {
 				for _, text := range []string{file.Path, string(file.Data)} {
+					if strings.IndexByte(text, 0) >= 0 {
+						continue
+					}
 					if int64(len(text)) > remainingSourceSearchBytes {
 						scanExhausted = true
 						return false

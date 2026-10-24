@@ -67,6 +67,7 @@ func TestHostileHTTPAuditSchemaCannotPublish(t *testing.T) {
 		{name: "candidate without verifier", artifact: "coverage-ledger.json", data: selfChecked, findings: auditCandidateFindingFixture, want: "without separately attributed source check"},
 		{name: "archived candidate without verifier", artifact: "coverage-ledger.json", data: archivedSelf, findings: auditCandidateFindingFixture, want: "without separately attributed source check"},
 		{name: "prior run unsupported", artifact: "coverage-ledger.json", data: strings.Replace(auditCoveredLedgerFixture, `"prior_status":"none"`, `"prior_status":"prior_confirmed_same_source"`, 1), want: "prior run absent from metadata"},
+		{name: "audit JSON nesting exceeds decoder limit", artifact: "run-metadata.json", data: strings.Repeat("[", 10_001) + "0" + strings.Repeat("]", 10_001), want: "audit JSON is invalid"},
 		{name: "complete metadata has incomplete reason", incompleteReason: true, want: "incomplete reason"},
 	} {
 		t.Run(test.name, func(t *testing.T) {

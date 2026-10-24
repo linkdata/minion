@@ -622,6 +622,31 @@ func TestPublishedRefutationsAllowSourceQuoteInPublicReply(t *testing.T) {
 	}
 }
 
+func TestPublishedRefutationsDoNotTreatBinarySourceAsPublicQuote(t *testing.T) {
+	const quote = "This private review sentence must stay unpublished."
+	for _, padding := range []int{0, 4 << 20} {
+		t.Run(fmt.Sprint(padding), func(t *testing.T) {
+			job := withClaudeCritic(testJob(command.Comment))
+			result := privateReviewResult(job)
+			result.Refutations[0].Text = quote
+			result.Answer = "Public reply: " + quote
+			projected, err := projectPublication(job, result)
+			if err != nil {
+				t.Fatal(err)
+			}
+			prefix := strings.Repeat("x", padding)
+			job.Source.Files[0].Data = []byte(prefix + strings.Join(strings.Split(quote, ""), "\x00"))
+			if err := rejectPublishedRefutations(job, result, projected); err == nil {
+				t.Fatal("binary source falsely proved the private quote was public")
+			}
+			job.Source.Files[0].Data = []byte(prefix + quote)
+			if err := rejectPublishedRefutations(job, result, projected); err != nil {
+				t.Fatalf("text source quote was blocked: %v", err)
+			}
+		})
+	}
+}
+
 func TestPublishedRefutationsSourceSearchDoesNotJoinFiles(t *testing.T) {
 	const private = "A private sentence must not be formed by adjoining source files."
 	job := withClaudeCritic(testJob(command.Comment))

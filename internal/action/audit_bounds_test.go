@@ -41,6 +41,7 @@ func amplifiedAuditAttemptsLedger() string {
 func TestAuditCoverageBoundsAndDuplicateSeeds(t *testing.T) {
 	job := testJob(command.SecurityAudit)
 	for _, test := range []struct{ name, ledger, findings, want string }{
+		{name: "excessive JSON nesting", ledger: strings.Repeat("[", 10_001) + "0" + strings.Repeat("]", 10_001), want: "audit JSON is invalid"},
 		{name: "duplicate seed", ledger: strings.Replace(auditCoveredLedgerFixture, `"starting_paths":["source.txt"]`, `"starting_paths":["source.txt","source.txt"]`, 1), want: "duplicate starting path"},
 		{name: "excess evidence items", ledger: strings.Replace(auditCoveredLedgerFixture, `"starting_paths":["source.txt"]`, `"starting_paths":[`+strings.TrimSuffix(strings.Repeat(`"source.txt",`, 100_001), ",")+`]`, 1), want: "validation work limit"},
 		{name: "candidate cross product", ledger: amplifiedAuditLedger(), findings: auditCandidateFindingFixture, want: "repeated validation work limit"},
