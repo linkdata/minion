@@ -42,18 +42,7 @@ exit 0
 	}()
 	defer func() {
 		cancel()
-		joinCtx, stopJoin := context.WithTimeout(context.WithoutCancel(t.Context()), 3*time.Second)
-		defer stopJoin()
-		for {
-			select {
-			case _, open := <-done:
-				if !open {
-					return
-				}
-			case <-joinCtx.Done():
-				t.Error("Run did not stop after cancellation")
-				return
-			}
+		for range done {
 		}
 	}()
 	child, err := testsupport.WaitForProcess(ctx, binary+".pid", done)

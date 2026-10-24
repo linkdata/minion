@@ -35,7 +35,7 @@ func TestLiveBotCollaborationLifecycle(t *testing.T) {
 		t.Fatal("collaboration lifecycle requires no existing bot access or pending invitation")
 	}
 
-	cleanup := true
+	cleanup := false
 	t.Cleanup(func() {
 		if cleanup {
 			liveRevokeTestBot(t, owner, liveWriteRepoPath, liveWriteRepoPath+"/collaborators/linkdataminion", cfg.BotLogin)
@@ -43,12 +43,13 @@ func TestLiveBotCollaborationLifecycle(t *testing.T) {
 	})
 	_, status, err := owner.request(ctx, http.MethodPut, liveWriteRepoPath+"/collaborators/linkdataminion", map[string]string{"permission": "push"}, nil, nil, http.StatusCreated, http.StatusNoContent)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("collaborator grant not confirmed; inspect bot access before retry: %v", err)
 	}
 	if status != http.StatusCreated {
-		cleanup = false // A concurrent collaborator grant belongs to another actor.
+		// A concurrent collaborator grant belongs to another actor.
 		t.Fatal("GitHub updated an existing collaborator instead of creating an invitation")
 	}
+	cleanup = true
 	liveAcceptBotWriteInvitation(t, ctx, cfg, owner, bot, 0)
 }
 

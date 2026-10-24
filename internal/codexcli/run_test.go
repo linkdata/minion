@@ -431,6 +431,11 @@ printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.comp
 	if _, err := os.Stat(output); err != nil {
 		t.Fatalf("removed persistent reports directory: %v", err)
 	}
+}
+
+func TestRunRejectsUnsafeAuditReportDirectories(t *testing.T) {
+	workspace := canonicalTempDir(t)
+	installFakeCodexUnchecked(t, "#!/bin/sh\nexit 99\n")
 	inside := filepath.Join(workspace, "reports")
 	if err := os.Mkdir(inside, 0o700); err != nil {
 		t.Fatal(err)
@@ -471,6 +476,17 @@ printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.comp
 			t.Fatalf("critic lacks read-only access to %s: %s", dir, args)
 		}
 	}
+}
+
+func TestRunRejectsUnsafeCriticReadDirs(t *testing.T) {
+	root := canonicalTempDir(t)
+	workspace, reports := filepath.Join(root, "repo"), filepath.Join(root, "reports")
+	for _, dir := range []string{workspace, reports} {
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	installFakeCodexUnchecked(t, "#!/bin/sh\nexit 99\n")
 	for _, test := range []struct{ dir, failure string }{
 		{root, "separate from the source snapshot"},
 		{workspace, "separate from the source snapshot"},
