@@ -81,10 +81,10 @@ func TestInitialRefutationsAreDiscardedAndEmptyHistoryIsOptional(t *testing.T) {
 }
 
 func TestReviewHistoryGrantFailureIsTerminalAfterPaidWork(t *testing.T) {
-	requireActionProcessGroup(t)
 	if os.Geteuid() == 0 {
 		t.Skip("root bypasses directory permissions")
 	}
+	requireActionProcessGroup(t)
 	root := t.TempDir()
 	t.Cleanup(func() {
 		if err := os.Chmod(root, 0700); err != nil {

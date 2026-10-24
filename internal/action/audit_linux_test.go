@@ -15,9 +15,7 @@ import (
 )
 
 func TestAuditPermissionProbeDoesNotRetryAfterDescendants(t *testing.T) {
-	if err := processgroup.Check(); err != nil {
-		t.Skipf("delegated process ownership unavailable: %v", err)
-	}
+	requireActionProcessGroup(t)
 	dir := t.TempDir()
 	calls, pidFile := filepath.Join(dir, "calls"), filepath.Join(dir, "child.pid")
 	testsupport.StopOnCleanup(t, pidFile+".stop")
@@ -48,9 +46,7 @@ func TestAuditPermissionProbeDoesNotRetryAfterDescendants(t *testing.T) {
 }
 
 func TestAuditPermissionProbeDoesNotRetryAfterExhaustion(t *testing.T) {
-	if err := processgroup.Check(); err != nil {
-		t.Skipf("delegated process ownership unavailable: %v", err)
-	}
+	requireActionProcessGroup(t)
 	dir := t.TempDir()
 	calls := filepath.Join(dir, "calls")
 	bin := fakeOnPath(t, "node", "#!/bin/sh\nprintf '%s\\n' \"$1\" >> "+shellQuote(calls)+"\n/bin/true\nexit 1\n")

@@ -22,10 +22,10 @@ import (
 )
 
 func TestRunnerNativeCleanupKeepsAcceptedAnswer(t *testing.T) {
-	requireActionProcessGroup(t)
 	if os.Geteuid() == 0 {
 		t.Skip("root bypasses directory permissions")
 	}
+	requireActionProcessGroup(t)
 	for _, provider := range []string{"codex", "claude"} {
 		for _, recovers := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/recover=%t", provider, recovers), func(t *testing.T) {
@@ -279,10 +279,10 @@ func TestRunnerUsesTheProbedNodeAfterPathChanges(t *testing.T) {
 }
 
 func TestRunnerDeadlineDuringSessionCleanupClearsValidatedResult(t *testing.T) {
-	requireActionProcessGroup(t)
 	if os.Geteuid() == 0 {
 		t.Skip("root bypasses directory permissions")
 	}
+	requireActionProcessGroup(t)
 	for _, test := range []struct {
 		name   string
 		action command.Action

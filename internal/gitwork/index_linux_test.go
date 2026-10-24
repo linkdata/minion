@@ -18,9 +18,7 @@ import (
 )
 
 func TestOfflineCheckIgnoreDoesNotAcceptSurvivingChild(t *testing.T) {
-	if err := processgroup.Check(); err != nil {
-		t.Skipf("delegated process ownership unavailable: %v", err)
-	}
+	requireGitProcessGroup(t)
 	index, _ := offlineIndexFixture(t, nil)
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
 	testsupport.StopOnCleanup(t, pidFile+".stop")
@@ -35,9 +33,7 @@ func TestOfflineCheckIgnoreDoesNotAcceptSurvivingChild(t *testing.T) {
 }
 
 func TestOfflineCheckIgnoreDoesNotAcceptProcessExhaustion(t *testing.T) {
-	if err := processgroup.Check(); err != nil {
-		t.Skipf("delegated process ownership unavailable: %v", err)
-	}
+	requireGitProcessGroup(t)
 	index, _ := offlineIndexFixture(t, nil)
 	index.binary = filepath.Join(fakeOnPath(t, "git-ignore-exhausted", "#!/bin/sh\n/bin/true\nexit 1\n"), "git-ignore-exhausted")
 	if err := processgroup.Configure(1, processgroup.DefaultMaxMemoryMiB<<20); err != nil {

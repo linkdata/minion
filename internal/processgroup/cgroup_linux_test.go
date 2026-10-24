@@ -22,6 +22,16 @@ import (
 	"github.com/linkdata/minion/internal/workspace"
 )
 
+func requireProcessGroup(t *testing.T) {
+	t.Helper()
+	if err := Check(); err != nil {
+		if os.Getenv("MINION_REQUIRE_PROCESSGROUP") == "1" {
+			t.Fatal(err)
+		}
+		t.Skipf("delegated cgroup unavailable: %v", err)
+	}
+}
+
 func TestCgroupReadinessRequired(t *testing.T) {
 	if os.Getenv("MINION_REQUIRE_PROCESSGROUP") != "1" {
 		t.Skip("CI requires a delegated service")
@@ -32,9 +42,7 @@ func TestCgroupReadinessRequired(t *testing.T) {
 }
 
 func TestCgroupCheckWithTightConfiguredLimits(t *testing.T) {
-	if err := Check(); err != nil {
-		t.Skipf("delegated cgroup unavailable: %v", err)
-	}
+	requireProcessGroup(t)
 	setTestLimits(t, 1, 1<<20)
 	if err := Check(); err != nil {
 		t.Fatalf("readiness probe rejected verified tight limits: %v", err)
@@ -90,9 +98,7 @@ func TestUnreleasedScopeKeepsRecoveryReference(t *testing.T) {
 }
 
 func TestCgroupRunSuccess(t *testing.T) {
-	if err := Check(); err != nil {
-		t.Skipf("delegated cgroup unavailable: %v", err)
-	}
+	requireProcessGroup(t)
 	for i := 0; i < 5; i++ {
 		cmd := exec.Command(os.Args[0], "-test.run=^TestProcessgroupHelperProcess$")
 		cmd.WaitDelay = 10 * time.Second
@@ -106,9 +112,7 @@ func TestCgroupRunSuccess(t *testing.T) {
 }
 
 func TestCgroupCommandStopsDescendants(t *testing.T) {
-	if err := Check(); err != nil {
-		t.Skipf("delegated cgroup unavailable: %v", err)
-	}
+	requireProcessGroup(t)
 	for _, holdPipe := range []bool{false, true} {
 		name := "redirected"
 		if holdPipe {
@@ -147,9 +151,7 @@ func TestCgroupCommandStopsDescendants(t *testing.T) {
 }
 
 func TestCgroupCommandContextCancellation(t *testing.T) {
-	if err := Check(); err != nil {
-		t.Skipf("delegated cgroup unavailable: %v", err)
-	}
+	requireProcessGroup(t)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
@@ -182,9 +184,7 @@ func TestCgroupCommandContextCancellation(t *testing.T) {
 }
 
 func TestCgroupStartFailureRemovesGroup(t *testing.T) {
-	if err := Check(); err != nil {
-		t.Skipf("delegated cgroup unavailable: %v", err)
-	}
+	requireProcessGroup(t)
 	before := testCgroups(t)
 	invalid := filepath.Join(t.TempDir(), "invalid-executable")
 	if err := os.WriteFile(invalid, []byte("not an executable format\n"), 0700); err != nil {
@@ -204,9 +204,7 @@ func TestCgroupStartFailureRemovesGroup(t *testing.T) {
 }
 
 func TestCgroupLimitsBeforeActionAndGracefulCancellation(t *testing.T) {
-	if err := Check(); err != nil {
-		t.Skipf("delegated cgroup unavailable: %v", err)
-	}
+	requireProcessGroup(t)
 	setTestLimits(t, 64, 512<<20)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -245,9 +243,7 @@ func TestCgroupLimitsBeforeActionAndGracefulCancellation(t *testing.T) {
 }
 
 func TestCgroupPIDLimitReportsExhaustion(t *testing.T) {
-	if err := Check(); err != nil {
-		t.Skipf("delegated cgroup unavailable: %v", err)
-	}
+	requireProcessGroup(t)
 	setTestLimits(t, 1, 512<<20)
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
@@ -267,9 +263,7 @@ func TestCgroupPIDLimitReportsExhaustion(t *testing.T) {
 }
 
 func TestCgroupWrongTopologyFailsClosed(t *testing.T) {
-	if err := Check(); err != nil {
-		t.Skipf("delegated cgroup unavailable: %v", err)
-	}
+	requireProcessGroup(t)
 	parent, err := delegatedParent()
 	if err != nil {
 		t.Fatal(err)
@@ -301,9 +295,7 @@ func TestCgroupMemoryLimitReportsOOM(t *testing.T) {
 	if os.Getenv("MINION_PROCESSGROUP_LIVE_OOM") != "1" {
 		t.Skip("requires an independently bounded delegated systemd service")
 	}
-	if err := Check(); err != nil {
-		t.Skipf("delegated cgroup unavailable: %v", err)
-	}
+	requireProcessGroup(t)
 	setTestLimits(t, 64, 96<<20)
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()

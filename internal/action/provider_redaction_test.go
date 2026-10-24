@@ -382,7 +382,6 @@ func TestRunnerRedactsReassembledSecretWithoutCritic(t *testing.T) {
 }
 
 func TestFixChangesRejectConfiguredKeysWithoutRejectingBinary(t *testing.T) {
-	requireActionProcessGroup(t)
 	const key = "fixture-secret"
 	for _, test := range []struct {
 		name, key, data string
@@ -413,6 +412,7 @@ func TestFixChangesRejectConfiguredKeysWithoutRejectingBinary(t *testing.T) {
 	} {
 		for _, critic := range []bool{false, true} {
 			t.Run(test.name+"/critic="+strconv.FormatBool(critic), func(t *testing.T) {
+				requireActionProcessGroup(t)
 				job := testJob(command.Fix)
 				if critic {
 					job = withClaudeCritic(job)

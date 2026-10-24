@@ -8,15 +8,18 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/linkdata/minion/internal/processgroup"
 )
 
+var probeProcessGroupCheck = sync.OnceValue(processgroup.Check)
+
 func requireProbeProcessGroup(t *testing.T) {
 	t.Helper()
-	if err := processgroup.Check(); err != nil {
+	if err := probeProcessGroupCheck(); err != nil {
 		if os.Getenv("MINION_REQUIRE_PROCESSGROUP") == "1" {
 			t.Fatal(err)
 		}

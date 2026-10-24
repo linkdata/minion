@@ -17,9 +17,7 @@ import (
 )
 
 func TestBoundedGitRejectsSuccessfulLeaderWithDescendants(t *testing.T) {
-	if err := processgroup.Check(); err != nil {
-		t.Skipf("delegated process ownership unavailable: %v", err)
-	}
+	requireGitProcessGroup(t)
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "child.pid")
 	testsupport.StopOnCleanup(t, pidFile+".stop")
@@ -34,9 +32,7 @@ func TestBoundedGitRejectsSuccessfulLeaderWithDescendants(t *testing.T) {
 }
 
 func TestBoundedGitDoesNotTruncateProcessExhaustion(t *testing.T) {
-	if err := processgroup.Check(); err != nil {
-		t.Skipf("delegated process ownership unavailable: %v", err)
-	}
+	requireGitProcessGroup(t)
 	dir := t.TempDir()
 	fakeOnPath(t, "git", "#!/bin/sh\n/bin/true\nprintf overflow-output\n")
 	if err := processgroup.Configure(1, processgroup.DefaultMaxMemoryMiB<<20); err != nil {

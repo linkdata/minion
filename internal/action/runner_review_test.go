@@ -37,10 +37,10 @@ func (w *cleanupRetryLog) Write(p []byte) (int, error) {
 }
 
 func TestRunnerSnapshotCleanupRetryKeepsValidatedResult(t *testing.T) {
-	requireActionProcessGroup(t)
 	if os.Geteuid() == 0 {
 		t.Skip("root bypasses directory permissions")
 	}
+	requireActionProcessGroup(t)
 	root := t.TempDir()
 	t.Cleanup(func() { _ = os.Chmod(root, 0700) })
 	journal := &cleanupRetryLog{root: root}
@@ -64,10 +64,10 @@ func TestRunnerSnapshotCleanupRetryKeepsValidatedResult(t *testing.T) {
 }
 
 func TestRunnerAuditValidationCleanupRestoresRestrictedDirectory(t *testing.T) {
-	requireActionProcessGroup(t)
 	if os.Geteuid() == 0 {
 		t.Skip("root bypasses directory permissions")
 	}
+	requireActionProcessGroup(t)
 	installActionTestSkills(t, testAuditSkillURL)
 	marker := filepath.Join(t.TempDir(), "restricted")
 	fakeOnPath(t, "node", "#!/bin/sh\nset -eu\ncase \"$*\" in *validate-coverage-ledger.cjs*) /bin/chmod 000 .; printf changed > "+shellQuote(marker)+";; esac\nexit 0\n")

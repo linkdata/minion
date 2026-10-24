@@ -129,7 +129,7 @@ func TestEveryActionPromptDeclaresRenderedPublicationBudget(t *testing.T) {
 
 func TestNoCriticRunnerKeepsChangedFixWithUnpublishedOversizedSummary(t *testing.T) {
 	requireActionProcessGroup(t)
-	// The provider seam returns data directly; no native CLI or model is invoked.
+	// The provider seam replaces the model CLI; repository preparation still runs Git.
 	for _, summary := range []struct{ name, text string }{
 		{"raw byte overflow", strings.Repeat("x", maxOutputBytes+1)},
 		{"quote expansion overflow", strings.Repeat("a\n", 20000)},

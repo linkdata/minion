@@ -420,10 +420,10 @@ func TestRunnerJobValidationRejectsMetadataAliasBeforeModels(t *testing.T) {
 }
 
 func TestRunnerRemovesRestrictedModelDirectory(t *testing.T) {
-	requireActionProcessGroup(t)
 	if os.Geteuid() == 0 {
 		t.Skip("root bypasses directory permissions")
 	}
+	requireActionProcessGroup(t)
 	root := t.TempDir()
 	var restricted string
 	t.Cleanup(func() { _ = os.Chmod(restricted, 0700) })
@@ -522,10 +522,10 @@ func TestTerminalUnlessCanceledPreservesProcessExhaustion(t *testing.T) {
 }
 
 func TestRunnerReportsOwnedAndCriticCleanupFailures(t *testing.T) {
-	requireActionProcessGroup(t)
 	if os.Geteuid() == 0 {
 		t.Skip("root bypasses directory permissions")
 	}
+	requireActionProcessGroup(t)
 	for _, critic := range []bool{false, true} {
 		t.Run(fmt.Sprintf("critic=%t", critic), func(t *testing.T) {
 			job := testJob(command.Comment)

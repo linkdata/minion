@@ -270,6 +270,9 @@ func TestAuditNodePermissionFlag(t *testing.T) {
 func TestValidateAuditOutput(t *testing.T) {
 	requireActionProcessGroup(t)
 	if _, err := exec.LookPath("node"); err != nil {
+		if os.Getenv("MINION_REQUIRE_PROCESSGROUP") == "1" {
+			t.Fatalf("audit validators require node in CI: %v", err)
+		}
 		t.Skip("audit validators require node")
 	}
 	t.Setenv("GH_TOKEN", "validator-must-not-see-this")

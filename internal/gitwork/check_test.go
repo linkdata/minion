@@ -135,11 +135,6 @@ exec ` + shellQuote(realGit) + ` "$@"
 }
 
 func TestCheckGitFailuresRetainCauseAndCleanOwnedFiles(t *testing.T) {
-	requireGitProcessGroup(t)
-	realGit, err := aicli.AbsoluteExecutable("git")
-	if err != nil {
-		t.Fatal(err)
-	}
 	for _, test := range []struct {
 		name, match, action, want string
 		exit                      int
@@ -156,11 +151,16 @@ func TestCheckGitFailuresRetainCauseAndCleanOwnedFiles(t *testing.T) {
 		{name: "missing index change", match: " --raw ", action: "exit 0", want: "index did not preserve the synthetic change"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			requireGitProcessGroup(t)
+			realGit, err := aicli.AbsoluteExecutable("git")
+			if err != nil {
+				t.Fatal(err)
+			}
 			root := t.TempDir()
 			script := "#!/bin/sh\ncase \" $* \" in\n*" + shellQuote(test.match) + "*) " + test.action + " ;;\n" +
 				"*' --version '*) printf 'git version 2.45.1\\n'; exit 0 ;;\nesac\nexec " + shellQuote(realGit) + " \"$@\"\n"
 			testsupport.FakeOnPath(t, "git", script)
-			err := Check(t.Context(), root)
+			err = Check(t.Context(), root)
 			if err == nil || !strings.Contains(err.Error(), test.want) || strings.Contains(err.Error(), "\n") || errors.Is(err, ErrCheckoutTooLarge) != test.limit {
 				t.Fatalf("check lost failure classification: %v", err)
 			}
@@ -182,6 +182,7 @@ func TestCheckGitFailuresRetainCauseAndCleanOwnedFiles(t *testing.T) {
 		assertGitCheckClean(t, root)
 	})
 	t.Run("bounded diagnostics", func(t *testing.T) {
+		requireGitProcessGroup(t)
 		root := t.TempDir()
 		testsupport.FakeOnPath(t, "git", fmt.Sprintf("#!/bin/sh\nhead -c %d /dev/zero | tr '\\000' x >&2\nexit 9\n", bounded.DiagnosticBytes+1024))
 		err := Check(t.Context(), root)
@@ -194,7 +195,6 @@ func TestCheckGitFailuresRetainCauseAndCleanOwnedFiles(t *testing.T) {
 }
 
 func TestCheckGitHonorsCancellation(t *testing.T) {
-	requireGitProcessGroup(t)
 	t.Run("already canceled", func(t *testing.T) {
 		root := t.TempDir()
 		ctx, cancel := context.WithCancel(t.Context())
@@ -206,6 +206,7 @@ func TestCheckGitHonorsCancellation(t *testing.T) {
 	})
 	for _, deadline := range []bool{false, true} {
 		t.Run(fmt.Sprintf("deadline=%t", deadline), func(t *testing.T) {
+			requireGitProcessGroup(t)
 			root := t.TempDir()
 			marker := filepath.Join(t.TempDir(), "started")
 			testsupport.FakeOnPath(t, "git", "#!/bin/sh\nprintf x > "+shellQuote(marker)+"\nexec sleep 30\n")

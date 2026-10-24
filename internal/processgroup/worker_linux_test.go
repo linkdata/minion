@@ -20,9 +20,7 @@ import (
 )
 
 func TestWorkerRequiresRecordBeforeStart(t *testing.T) {
-	if err := Check(); err != nil {
-		t.Skipf("delegated cgroup unavailable: %v", err)
-	}
+	requireProcessGroup(t)
 	report := filepath.Join(t.TempDir(), "worker")
 	cmd := workerHelperCommand(t.Context(), "exit", report, false)
 	before := testCgroups(t)
@@ -70,9 +68,7 @@ func TestWorkerRequiresRecordBeforeStart(t *testing.T) {
 }
 
 func TestWorkerFailedExecRetainsOwnership(t *testing.T) {
-	if err := Check(); err != nil {
-		t.Skipf("delegated cgroup unavailable: %v", err)
-	}
+	requireProcessGroup(t)
 	invalid := filepath.Join(t.TempDir(), "invalid")
 	if err := os.WriteFile(invalid, []byte("not an executable format\n"), 0700); err != nil {
 		t.Fatal(err)
@@ -114,9 +110,7 @@ func TestWorkerFailedExecRetainsOwnership(t *testing.T) {
 }
 
 func TestWorkerImmediateExitIsReapedOnce(t *testing.T) {
-	if err := Check(); err != nil {
-		t.Skipf("delegated cgroup unavailable: %v", err)
-	}
+	requireProcessGroup(t)
 	cmd := workerHelperCommand(t.Context(), "exit", filepath.Join(t.TempDir(), "worker"), false)
 	h, err := StartWorker(cmd, func(string) error { return nil })
 	if h != nil {
@@ -136,9 +130,7 @@ func TestWorkerImmediateExitIsReapedOnce(t *testing.T) {
 }
 
 func TestWorkerNestedSupervisorRunsOrdinaryCommands(t *testing.T) {
-	if err := Check(); err != nil {
-		t.Skipf("delegated cgroup unavailable: %v", err)
-	}
+	requireProcessGroup(t)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	report := filepath.Join(t.TempDir(), "worker")
@@ -202,9 +194,7 @@ func TestWorkerNestedSupervisorRunsOrdinaryCommands(t *testing.T) {
 }
 
 func TestWorkerCrashDrainsRealCommandAndPreservesSibling(t *testing.T) {
-	if err := Check(); err != nil {
-		t.Skipf("delegated cgroup unavailable: %v", err)
-	}
+	requireProcessGroup(t)
 	for _, holdPipe := range []bool{false, true} {
 		t.Run(fmt.Sprintf("inherited_pipe=%t", holdPipe), func(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())
@@ -283,9 +273,7 @@ func TestWorkerCrashDrainsRealCommandAndPreservesSibling(t *testing.T) {
 }
 
 func TestWorkerCancellationDrainsInheritedPipes(t *testing.T) {
-	if err := Check(); err != nil {
-		t.Skipf("delegated cgroup unavailable: %v", err)
-	}
+	requireProcessGroup(t)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	report := filepath.Join(t.TempDir(), "worker")
@@ -324,9 +312,7 @@ func TestWorkerCancellationDrainsInheritedPipes(t *testing.T) {
 }
 
 func TestWorkerKillErrorStillAllowsEmptyRelease(t *testing.T) {
-	if err := Check(); err != nil {
-		t.Skipf("delegated cgroup unavailable: %v", err)
-	}
+	requireProcessGroup(t)
 	for _, test := range []struct {
 		name    string
 		release bool
@@ -468,9 +454,7 @@ func TestWorkerKillErrorStillAllowsEmptyRelease(t *testing.T) {
 }
 
 func TestWorkerEmptyUnwaitedCommandRejectsSuccess(t *testing.T) {
-	if err := Check(); err != nil {
-		t.Skipf("delegated cgroup unavailable: %v", err)
-	}
+	requireProcessGroup(t)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	report := filepath.Join(t.TempDir(), "worker")
@@ -506,9 +490,7 @@ func TestWorkerEmptyUnwaitedCommandRejectsSuccess(t *testing.T) {
 }
 
 func TestWorkerReplacementPreservesForeignDirectory(t *testing.T) {
-	if err := Check(); err != nil {
-		t.Skipf("delegated cgroup unavailable: %v", err)
-	}
+	requireProcessGroup(t)
 	for _, test := range []struct {
 		name         string
 		duringRecord bool
@@ -650,9 +632,7 @@ func TestWorkerReplacementPreservesForeignDirectory(t *testing.T) {
 }
 
 func TestWorkerLostRootPinRetainsUncertaintyAndExitCause(t *testing.T) {
-	if err := Check(); err != nil {
-		t.Skipf("delegated cgroup unavailable: %v", err)
-	}
+	requireProcessGroup(t)
 	report := filepath.Join(t.TempDir(), "worker")
 	cmd := workerHelperCommand(t.Context(), "exit-error", report, false)
 	h, err := StartWorker(cmd, func(string) error { return nil })
