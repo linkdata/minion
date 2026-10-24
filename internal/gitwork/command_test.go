@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -29,12 +30,16 @@ func TestGitRejectsRelativeExecutableWhenErrDotDisabled(t *testing.T) {
 	})
 	checkout := filepath.Join(root, "checkout")
 	marker := filepath.Join(root, "executed")
+	gitName := "git"
+	if runtime.GOOS == "windows" {
+		gitName += ".exe"
+	}
 	for _, dir := range []string{root, checkout} {
 		bin := filepath.Join(dir, "relbin")
 		if err := os.MkdirAll(bin, 0700); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(bin, "git"), []byte("#!/bin/sh\nprintf planted > "+shellQuote(marker)+"\n"), 0700); err != nil {
+		if err := os.WriteFile(filepath.Join(bin, gitName), []byte("#!/bin/sh\nprintf planted > "+shellQuote(marker)+"\n"), 0700); err != nil {
 			t.Fatal(err)
 		}
 	}

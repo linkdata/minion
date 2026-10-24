@@ -1,8 +1,10 @@
 package workspace
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 )
 
@@ -46,6 +48,21 @@ func TestWindowsOpenPathRejectsLink(t *testing.T) {
 	if file, err := openPath(link, false); err == nil {
 		_ = file.Close()
 		t.Fatal("opened source through a symlink")
+	}
+}
+
+func TestWindowsOpenDirectoryThroughFileReturnsENOTDIR(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(file, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{file, filepath.Join(file, "child")} {
+		if dir, err := OpenDirectory(path); !errors.Is(err, syscall.ENOTDIR) {
+			if dir != nil {
+				_ = dir.Close()
+			}
+			t.Errorf("OpenDirectory(%q) = %v, want ENOTDIR", path, err)
+		}
 	}
 }
 

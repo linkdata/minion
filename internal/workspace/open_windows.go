@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -65,6 +66,9 @@ func openPath(name string, directory bool) (file *os.File, resultErr error) {
 			return nil, err
 		}
 		last := index == len(parts)-1
+		if before.Mode().IsRegular() && (!last || directory) {
+			return nil, fmt.Errorf("path component %q is not a plain directory: %w", part, syscall.ENOTDIR)
+		}
 		if !last {
 			if !before.IsDir() || before.Mode()&os.ModeSymlink != 0 {
 				return nil, fmt.Errorf("path component %q is not a plain directory", part)
