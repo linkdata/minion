@@ -732,6 +732,10 @@ func auditSourceInventory(source *workspace.Snapshot) (map[string]bool, map[stri
 	}
 	for _, file := range source.Files {
 		add(file.Path)
+		if !utf8.Valid(file.Data) || bytes.IndexByte(file.Data, 0) >= 0 {
+			lines[file.Path] = 0 // Binary files remain reviewable but cannot supply text-line citations.
+			continue
+		}
 		lines[file.Path] = bytes.Count(file.Data, []byte{'\n'})
 		if len(file.Data) != 0 && file.Data[len(file.Data)-1] != '\n' {
 			lines[file.Path]++

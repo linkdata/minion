@@ -103,8 +103,14 @@ func TestHTTPWorkerDiagnosticsRemainPrivateThroughPublication(t *testing.T) {
 				t.Fatal(err)
 			}
 			_, parseErr := command.ParseForLoginCommands(posted, "linkdataminion", defaultActionTestCommands)
-			if writes != 1 || !strings.Contains(posted, "```text\n> @linkdataminion fix") ||
-				!strings.Contains(posted, `\x1b`) || !strings.Contains(posted, `\u202e`) || strings.ContainsRune(posted, '\x1b') || strings.ContainsRune(posted, '\u202e') ||
+			answerOK := strings.Contains(posted, "```text\n> @linkdataminion fix") &&
+				strings.Contains(posted, `\x1b`) && strings.Contains(posted, `\u202e`)
+			if action == command.SecurityAudit {
+				answerOK = strings.Contains(posted, "```text\n> Executor-reported security audit summary.") &&
+					!strings.Contains(posted, "@linkdataminion fix") && !strings.Contains(posted, "https://example.test/track") &&
+					!strings.Contains(posted, `\x1b`) && !strings.Contains(posted, `\u202e`)
+			}
+			if writes != 1 || !answerOK || strings.ContainsRune(posted, '\x1b') || strings.ContainsRune(posted, '\u202e') ||
 				!errors.Is(parseErr, command.ErrNoCommand) ||
 				strings.Contains(posted, "PRIVATE") || strings.Contains(posted, "SECRET_CODE_123") || strings.Contains(posted, "FORGED JOURNAL ENTRY") ||
 				strings.Contains(journal.String(), "PRIVATE") || strings.Contains(journal.String(), "SECRET_CODE_123") ||

@@ -152,10 +152,18 @@ func rejectPublishedRefutations(job Job, result Result, projected publication) e
 			}
 			for line := range strings.SplitSeq(variant, "\n") {
 				line = strings.TrimLeft(line, " \t")
-				if len(line) < minCopyRunes+2 || !strings.ContainsAny(line[:1], "-*+") || line[1] != ' ' && line[1] != '\t' {
+				if len(line) < minCopyRunes+2 {
 					continue
 				}
-				for _, sentence := range strings.FieldsFunc(line[2:], publicationSentenceBreak) {
+				markerEnd := strings.IndexAny(line, " \t")
+				if markerEnd < 1 || markerEnd > 6 {
+					continue
+				}
+				marker := line[:markerEnd]
+				if marker != "-" && marker != "*" && marker != "+" && marker != "//" && strings.Trim(marker, "#") != "" {
+					continue
+				}
+				for _, sentence := range strings.FieldsFunc(line[markerEnd+1:], publicationSentenceBreak) {
 					if text := foldPublicationSpace(sentence); sentences[text] && reject(text) {
 						return true
 					}

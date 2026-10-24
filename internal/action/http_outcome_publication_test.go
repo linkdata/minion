@@ -38,10 +38,9 @@ func TestExecuteRejectsHostileHTTPOutcomeBeforePublication(t *testing.T) {
 		{"comment returns source changes", "changes", false, false},
 		{"audit returns empty report", "audit", false, false},
 		{"audit returns empty coverage", "audit coverage", false, false},
-		{"audit returns false covered claim", "audit false covered", false, false},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
-			if scenario.change == "audit" || scenario.change == "audit coverage" || scenario.change == "audit false covered" {
+			if scenario.change == "audit" || scenario.change == "audit coverage" {
 				installActionTestSkills(t, testAuditSkillURL)
 			}
 			gitFixtureRemote(t)
@@ -61,7 +60,7 @@ func TestExecuteRejectsHostileHTTPOutcomeBeforePublication(t *testing.T) {
 			var acknowledged Result
 			executed := false
 			name, action, skill := "comment", command.Comment, skills.BuiltinAntiPromptInjection
-			if scenario.change == "audit" || scenario.change == "audit coverage" || scenario.change == "audit false covered" {
+			if scenario.change == "audit" || scenario.change == "audit coverage" {
 				name, action, skill = "security-audit", command.SecurityAudit, testAuditSkillURL
 			}
 			e := &Orchestrator{WorkRoot: workRoot, Usage: &usage.Store{Dir: usageDir}, GitHub: testGitHub(server, "token"), BotLogin: "bot",
@@ -169,19 +168,12 @@ func TestExecuteRejectsHostileHTTPOutcomeBeforePublication(t *testing.T) {
 							outcome.Result.Artifacts[i].Data = []byte("[]")
 						}
 					}
-				case "audit false covered":
-					outcome.Result.Artifacts = auditArtifactsFixture(job, sourceIdentity(job), result.Answer)
-					for i := range outcome.Result.Artifacts {
-						if outcome.Result.Artifacts[i].Path == "coverage-ledger.json" {
-							outcome.Result.Artifacts[i].Data = []byte(`[{"status":"covered"}]`)
-						}
-					}
 				}
 				if err := httpResultShape(outcome.Result); err != nil {
 					t.Fatalf("hostile result failed the wire shape before parent validation: %v", err)
 				}
 				validationErr := outcome.Result.Validate(job)
-				if (validationErr == nil) != scenario.validResult || scenario.change == "audit" && !strings.Contains(validationErr.Error(), "REPORT.md") || (scenario.change == "audit coverage" || scenario.change == "audit false covered") && !strings.Contains(validationErr.Error(), "coverage-ledger.json") || scenario.change == "changes" && !strings.Contains(validationErr.Error(), "read-only action returned source changes") || scenario.change == "invisible answer" && !strings.Contains(validationErr.Error(), "action answer") {
+				if (validationErr == nil) != scenario.validResult || scenario.change == "audit" && !strings.Contains(validationErr.Error(), "REPORT.md") || scenario.change == "audit coverage" && !strings.Contains(validationErr.Error(), "coverage-ledger.json") || scenario.change == "changes" && !strings.Contains(validationErr.Error(), "read-only action returned source changes") || scenario.change == "invisible answer" && !strings.Contains(validationErr.Error(), "action answer") {
 					t.Fatalf("hostile result semantic fixture changed: %v", validationErr)
 				}
 				f.ack(t, "/outcome", outcome, http.StatusOK, sequence)
@@ -223,7 +215,7 @@ func TestExecuteRejectsHostileHTTPOutcomeBeforePublication(t *testing.T) {
 					t.Fatalf("hostile result replaced acknowledged review: %+v", saved)
 				}
 			}
-			if scenario.change == "audit" || scenario.change == "audit coverage" || scenario.change == "audit false covered" {
+			if scenario.change == "audit" || scenario.change == "audit coverage" {
 				if paths, err := filepath.Glob(filepath.Join(workRoot, "audits", "complete-*")); err != nil || len(paths) != 0 {
 					t.Fatalf("hostile report became a complete audit: paths=%v error=%v", paths, err)
 				}
@@ -237,7 +229,7 @@ func TestExecuteRejectsHostileHTTPOutcomeBeforePublication(t *testing.T) {
 				}
 				report, err := os.ReadFile(filepath.Join(paths[0], "REPORT.md"))
 				wantReport := ""
-				if scenario.change == "audit coverage" || scenario.change == "audit false covered" {
+				if scenario.change == "audit coverage" {
 					wantReport = "Forged publication"
 				}
 				if err != nil || string(report) != wantReport {

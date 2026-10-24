@@ -42,6 +42,7 @@ func TestHostileHTTPAuditSchemaCannotPublish(t *testing.T) {
 	for _, test := range []struct {
 		name, artifact, data, findings, want string
 		candidate, incompleteReason          bool
+		sourceData                           []byte
 	}{
 		{name: "directory-only review cannot claim coverage", artifact: "coverage-ledger.json", data: strings.ReplaceAll(auditCoveredLedgerFixture, "source.txt", "src"), want: "starting path without a declared reviewed file"},
 		{name: "blocked-only ledger has no reviewed coverage", artifact: "coverage-ledger.json", data: blockedLedger, want: "no reviewed coverage"},
@@ -58,6 +59,7 @@ func TestHostileHTTPAuditSchemaCannotPublish(t *testing.T) {
 			`"trace":[{"kind":"entrypoint","file":"source.txt"`, `"trace":[{"kind":"entrypoint","file":"ghost.go"`, 1), want: "trace outside current source", candidate: true},
 		{name: "line beyond current source", artifact: "findings.json", data: strings.Replace(auditCandidateFindingFixture,
 			`"evidence":[{"file":"source.txt","line":1`, `"evidence":[{"file":"source.txt","line":999999`, 1), want: "evidence outside current source", candidate: true},
+		{name: "binary source citation", findings: auditCandidateFindingFixture, want: "trace outside current source", candidate: true, sourceData: []byte{'x', 0, '\n'}},
 		{name: "missing coverage context", artifact: "coverage-ledger.json", data: strings.Replace(auditCoveredLedgerFixture,
 			`"ordinary_attack_class_block":null,`, ``, 1), want: "required coverage context"},
 		{name: "unverifiable local proof", artifact: "coverage-ledger.json", data: strings.Replace(auditCoveredLedgerFixture,
@@ -71,7 +73,11 @@ func TestHostileHTTPAuditSchemaCannotPublish(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			installActionTestSkills(t, testAuditSkillURL)
-			gitFixtureRemote(t, workspace.File{Path: "source.txt", Mode: workspace.Regular, Data: []byte("source\n")}, workspace.File{Path: "other.txt", Mode: workspace.Regular, Data: []byte("other\n")}, workspace.File{Path: "src/entry.go", Mode: workspace.Regular, Data: []byte("entry\n")})
+			sourceData := test.sourceData
+			if sourceData == nil {
+				sourceData = []byte("source\n")
+			}
+			gitFixtureRemote(t, workspace.File{Path: "source.txt", Mode: workspace.Regular, Data: sourceData}, workspace.File{Path: "other.txt", Mode: workspace.Regular, Data: []byte("other\n")}, workspace.File{Path: "src/entry.go", Mode: workspace.Regular, Data: []byte("entry\n")})
 			var writes atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if serveIssueFixture(t, w, r) {

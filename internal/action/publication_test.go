@@ -339,6 +339,31 @@ func TestPublishedRefutationsFoldExpandedUnicodeCase(t *testing.T) {
 	}
 }
 
+func TestPublishedRefutationsRejectMarkedSentenceCopies(t *testing.T) {
+	const private = "The first private review sentence stays internal. The second private review sentence stays internal."
+	const copied = "The second private review sentence stays internal."
+	job := withClaudeCritic(testJob(command.Comment))
+	result := privateReviewResult(job)
+	result.Refutations[0].Text = private
+	result.Answer = "Public reply:\n# " + copied
+	projected, err := projectPublication(job, result)
+	if err != nil || rejectPublishedRefutations(job, result, projected) == nil {
+		t.Fatalf("Markdown heading copied private sentence: %v", err)
+	}
+
+	job.Action = command.Fix
+	result.Answer = "Done"
+	result.Changes = []workspace.Change{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("// " + copied + "\n")}}
+	projected, err = projectPublication(job, result)
+	if err != nil || rejectPublishedRefutations(job, result, projected) == nil {
+		t.Fatalf("source comment copied private sentence: %v", err)
+	}
+	job.Source.Files[0].Data = []byte("// " + copied + "\n")
+	if err := rejectPublishedRefutations(job, result, projected); err != nil {
+		t.Fatalf("existing source comment blocked an unchanged quote: %v", err)
+	}
+}
+
 func TestPublishedRefutationsRejectAuditQuotedTitle(t *testing.T) {
 	job := withClaudeCritic(testJob(command.SecurityAudit))
 	result := privateReviewResult(job)
