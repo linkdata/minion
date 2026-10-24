@@ -112,7 +112,7 @@ func FoldPath(name string) string {
 	}, name)
 }
 
-// validSourcePath accepts Git's case-sensitive slash paths, including literal backslashes.
+// validSourcePath accepts Git's slash paths; only Unix can retain literal backslashes.
 // Writable/import paths additionally reject HFS/NTFS aliases of Git metadata.
 func validSourcePath(name string) bool {
 	if !fs.ValidPath(name) || name == "." || len(name) >= MaxPathBytes || strings.ContainsRune(name, '\x00') || !validPlatformPath(name) {

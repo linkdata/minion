@@ -23,7 +23,6 @@ type unixExecutionListener struct {
 	slots chan struct{}
 }
 
-// Bound parent connections independently of the worker's process limits.
 func (l *unixExecutionListener) Accept() (net.Conn, error) {
 	for {
 		connection, err := l.UnixListener.Accept()
