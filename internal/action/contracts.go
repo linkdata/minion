@@ -349,13 +349,13 @@ func (r Result) validate(j Job, complete bool) error {
 	if !r.matchesJob(j) {
 		return errors.New("action result version, identity or source differs from job")
 	}
-	requiresAnswer := j.Action != command.SecurityAudit && (j.Action != command.Fix || len(r.Changes) == 0)
-	validAnswer := boundedText(r.Answer, maxOutputBytes)
-	if requiresAnswer {
+	var validAnswer bool
+	if complete && j.Action != command.SecurityAudit && (j.Action != command.Fix || len(r.Changes) == 0) {
 		validAnswer = publishableAnswer(r.Answer)
+	} else {
+		validAnswer = boundedText(r.Answer, maxOutputBytes)
 	}
-	invalidCompleteAnswer := complete && !validAnswer
-	if (!complete && !boundedText(r.Answer, maxOutputBytes)) || invalidCompleteAnswer {
+	if !validAnswer {
 		return errors.New("action answer is blank, invalid or exceeds limit")
 	}
 	if j.Action != command.Fix && len(r.Changes) != 0 {
