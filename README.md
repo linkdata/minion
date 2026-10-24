@@ -92,7 +92,7 @@ chmod 700 var/work
 ./bin/minion -config ./config.local.json -check
 ```
 
-On native Windows, use PowerShell to copy the config, create `bin` and `var/work`, and run `go build -buildvcs=false -o bin/minion.exe ./cmd/minion`; then run `bin/minion.exe` with the same flags. Install the standalone `codex.exe`; npm's `codex.cmd` launcher cannot be started directly by Minion. Keep `adversarial` empty because the only supported native Windows provider is Codex. Place `config.local.json` and provider logins outside model read grants. The operator manages the service account and work-root ACL; Minion validates paths but does not audit host directory permissions. Windows file ACLs, rather than Unix `chmod`, protect these paths.
+On native Windows, use PowerShell to copy the config, create `bin` and `var/work`, and run `go build -buildvcs=false -o bin/minion.exe ./cmd/minion`; then run `bin/minion.exe` with the same flags. Install the standalone `codex.exe`; npm's `codex.cmd` launcher cannot be started directly by Minion. Keep `adversarial` empty because the only supported native Windows provider is Codex. Native Windows fixes preserve existing Git executable modes, including case-only renames, but cannot create or change executable modes or preserve them across other renames; use Linux or macOS for those fixes. Place `config.local.json` and provider logins outside model read grants. The operator manages the service account and work-root ACL; Minion validates paths but does not audit host directory permissions. Windows file ACLs, rather than Unix `chmod`, protect these paths.
 
 Run `-check` while the persistent service is stopped; it takes the state lock. If the service uses environment-based credentials, provide the same protected environment to this check.
 

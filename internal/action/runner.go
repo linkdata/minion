@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"syscall"
@@ -455,8 +456,17 @@ func containsConfiguredKey(data []byte, key string) bool {
 
 // Before model work, freeing host capacity or installing a missing executable can make preparation succeed.
 func preparationFailure(stage string, err error) error {
-	if errors.Is(err, syscall.EACCES) || errors.Is(err, syscall.EROFS) {
+	if errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.EROFS) {
 		return fmt.Errorf("%w: %s: %w", workroot.ErrUnsafe, stage, err)
+	}
+	if runtime.GOOS == "windows" {
+		// Win32 ERROR_HANDLE_DISK_FULL, ERROR_DISK_FULL and ERROR_DISK_QUOTA_EXCEEDED.
+		switch {
+		case errors.Is(err, syscall.Errno(39)), errors.Is(err, syscall.Errno(112)):
+			err = fmt.Errorf("%w: %w", syscall.ENOSPC, err)
+		case errors.Is(err, syscall.Errno(1295)):
+			err = fmt.Errorf("%w: %w", syscall.EDQUOT, err)
+		}
 	}
 	if errors.Is(err, exec.ErrNotFound) || errors.Is(err, syscall.ENOSPC) || errors.Is(err, syscall.EDQUOT) {
 		return fmt.Errorf("%s: %w", stage, err)
@@ -598,6 +608,9 @@ func actionPrompt(ctx context.Context, job Job, source, contextDir, outputDir, a
 	contextText += fmt.Sprintf(" The whole action must finish before %s; leave time for %s. Final response text must fit within %d UTF-8 bytes after line-ending normalization, a two-byte quote prefix on every line, visible control/formatting-character escapes and 12 bytes of code fences; oversized published text is refused rather than truncated.", deadline, remainingWork, maxOutputBytes)
 	if job.Action == command.Fix {
 		contextText += fmt.Sprintf(" Use git status and git diff against HEAD to compare the current source against the original input baseline, including added and deleted files, binary content, and executable modes. Supplied .gitignore files remain visible. Delete new directories whose own untracked .gitignore ignores them (such as .pytest_cache, .ruff_cache, .mypy_cache or a venv), unless supplied ignore rules already ignore those directories. Remove non-ignored build and test outputs before finishing; only intended repository changes should remain, and the complete contents of all changed files, including mode-only changes, must fit %d bytes. The Git binary patch must also fit %d bytes, including removed lines, deleted-file contents and binary encoding overhead. All changes, including deletions, are limited to %d paths. The final path layout, including existing and omitted paths, must have no case-folding collisions. Newly created files ignored by the repository rules are build/test outputs, not exported repository additions; changes to supplied files still count even if an ignore rule matches. Do not create, change or delete omitted paths or anything beneath them, or replace their ancestor directories with files (paths are compared case-insensitively); those entries are absent from this snapshot.", workspace.MaxChangeBytes, gitwork.MaxPatchBytes, workspace.MaxChanges)
+		if runtime.GOOS == "windows" {
+			contextText += " Native Windows files cannot express Git executable-mode changes in this workspace. Do not attempt or claim a new Git-executable file, a mode-only change, or a non-case-only rename of a Git-executable file; report that limitation if the task requires one."
+		}
 	}
 	notes := notesContext(job.Notes)
 	switch job.Action {

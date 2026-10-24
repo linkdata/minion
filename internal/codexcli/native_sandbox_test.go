@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/linkdata/minion/internal/aicli"
 )
 
 // This opt-in test runs Codex's native sandbox without starting an AI turn.
@@ -21,7 +23,7 @@ func TestNativeCodexSandboxEnforcement(t *testing.T) {
 	if runtime.GOOS != "darwin" && runtime.GOOS != "windows" {
 		t.Skip("native Codex sandbox probe requires macOS or Windows")
 	}
-	cli, err := exec.LookPath("codex")
+	cli, err := aicli.ExecutablePath("codex")
 	if err != nil {
 		t.Fatalf("native Codex sandbox probe requires installed CLI: %v", err)
 	}

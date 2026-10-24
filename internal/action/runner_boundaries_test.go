@@ -296,11 +296,11 @@ func TestPreparationFailureDistinguishesCapacityFromInvalidInput(t *testing.T) {
 	for _, test := range []struct {
 		cause    error
 		terminal bool
-	}{{syscall.ENOSPC, false}, {syscall.EDQUOT, false}, {syscall.EACCES, false}, {syscall.EROFS, false}, {syscall.ENAMETOOLONG, true}, {exec.ErrNotFound, false}} {
+	}{{syscall.ENOSPC, false}, {syscall.EDQUOT, false}, {syscall.EACCES, false}, {os.ErrPermission, false}, {syscall.EROFS, false}, {syscall.ENAMETOOLONG, true}, {exec.ErrNotFound, false}} {
 		t.Run(test.cause.Error(), func(t *testing.T) {
 			native := &os.PathError{Op: "write", Path: "source", Err: test.cause}
 			err := preparationFailure("materialize source", native)
-			unsafeRoot := test.cause == syscall.EACCES || test.cause == syscall.EROFS
+			unsafeRoot := test.cause == syscall.EACCES || test.cause == os.ErrPermission || test.cause == syscall.EROFS
 			if !errors.Is(err, test.cause) || errors.Is(err, monitor.ErrTerminalJob) != test.terminal || errors.Is(err, workroot.ErrUnsafe) != unsafeRoot || !strings.Contains(err.Error(), "materialize source") {
 				t.Fatalf("preparation classification=%v, want terminal=%t unsafeRoot=%t with cause%v", err, test.terminal, unsafeRoot, test.cause)
 			}
