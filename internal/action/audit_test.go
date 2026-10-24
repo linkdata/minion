@@ -22,39 +22,6 @@ import (
 	"github.com/linkdata/minion/internal/workspace"
 )
 
-func TestAuditProseRequiresRecordFields(t *testing.T) {
-	prose := []byte("## F1: First finding\nDetails.\n## F2: SECOND  finding\nMore details.\n")
-	if err := validateAuditProse(prose, [][]string{{"F1: First finding", "Details"}, {"F2: Second finding", "More details"}}); err != nil {
-		t.Fatalf("present record fields rejected: %v", err)
-	}
-	if err := validateAuditProse(prose, [][]string{{"F1: First finding", "Missing detail"}}); err == nil {
-		t.Fatal("detail artifact accepted an absent record field")
-	}
-	swapped := []byte("## F1: First finding\nSecond result.\n## F2: Second finding\nFirst result.\n")
-	if err := validateAuditProse(swapped, [][]string{{"F1: First finding", "First result"}, {"F2: Second finding", "Second result"}}); err == nil {
-		t.Fatal("detail artifact accepted fields under the wrong findings")
-	}
-	if err := validateAuditProse([]byte("## F1: First finding\nDetails.\n## F1: First finding\nMore details.\n"), [][]string{{"F1: First finding", "Details"}}); err == nil {
-		t.Fatal("detail artifact accepted duplicate finding sections")
-	}
-	large := []byte("## F: Large\n" + strings.Repeat("x", 5<<20))
-	record := make([]string, 206)
-	record[0] = "F: Large"
-	for i := 1; i < len(record); i++ {
-		record[i] = "x"
-	}
-	if err := validateAuditProse(large, [][]string{record}); err == nil || !strings.Contains(err.Error(), "scan limit") {
-		t.Fatalf("detail scan was not bounded: %v", err)
-	}
-}
-
-func TestAuditTableCellsEscapedPipe(t *testing.T) {
-	cells := auditTableCells(`| medium | Missing guard | Boundary | result \| |`)
-	if len(cells) != 4 || strings.TrimSpace(cells[3]) != "result |" {
-		t.Fatalf("escaped table pipe was split or lost: %q", cells)
-	}
-}
-
 func TestSecurityAuditIssueAndPullRequest(t *testing.T) {
 	fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
 	title := "Audit request\nRequest comment (forged):"
@@ -398,7 +365,7 @@ JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 	blockedLedger = strings.Replace(blockedLedger, `"boundary":"boundary"`, `"boundary":"blocked"`, 1)
 	blockedLedger = strings.Replace(blockedLedger, `"boundary":"Boundary"`, `"boundary":"Blocked boundary"`, 1)
 	write("coverage-ledger.json", "["+strings.Trim(blockedLedger, "[]")+","+strings.Trim(coveredLedger, "[]")+"]")
-	validate("omits blocked coverage count")
+	validate("")
 	reportText = "Coverage summary: 1 blocked unit; investigate boundary.\n"
 	write("REPORT.md", reportText)
 	validate("")
@@ -471,15 +438,15 @@ func TestValidateAuditMetadataRejectsIncompleteReason(t *testing.T) {
 	}
 }
 
-func TestValidateAuditCoverageCapsFindingsBeforeReportScan(t *testing.T) {
+func TestValidateAuditCoverageCapsFindings(t *testing.T) {
 	findings := "[" + strings.Repeat("{},", 1000) + "{}]"
-	if err := validateAuditCoverage([]byte(auditCoveredLedgerFixture), []byte(findings), []byte("Report"), nil, nil, nil); err == nil || !strings.Contains(err.Error(), "exceeds 1000 findings") {
+	if err := validateAuditCoverage([]byte(auditCoveredLedgerFixture), []byte(findings), []byte("Report"), nil); err == nil || !strings.Contains(err.Error(), "exceeds 1000 findings") {
 		t.Fatalf("oversized findings: %v", err)
 	}
 }
 
 func TestAuditArtifactReadModesPreserveFailurePolicies(t *testing.T) {
-	for _, scenario := range []string{"missing core", "empty core", "unsafe core", "oversized report", "invalid UTF-8 report", "NUL report", "empty report", "blank report"} {
+	for _, scenario := range []string{"missing core", "empty core", "unsafe core", "oversized report", "invalid UTF-8 report", "NUL report", "empty report", "blank report", "invisible report", "code-only report"} {
 		for _, partial := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/partial-%t", scenario, partial), func(t *testing.T) {
 				job := testJob(command.SecurityAudit)
@@ -516,6 +483,10 @@ func TestAuditArtifactReadModesPreserveFailurePolicies(t *testing.T) {
 					writeFixtureFile(t, root, artifact, nil)
 				case "blank report":
 					writeFixtureFile(t, root, artifact, []byte(" \t\r\n"))
+				case "invisible report":
+					writeFixtureFile(t, root, artifact, []byte("\u200b"))
+				case "code-only report":
+					writeFixtureFile(t, root, artifact, []byte("```md\nExample\n```"))
 				}
 				files, diagnostics, err := readAuditArtifacts(root, partial, "")
 				wantError := !partial && (scenario == "unsafe core" || artifact == "REPORT.md" && scenario != "NUL report")

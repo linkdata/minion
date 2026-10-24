@@ -155,7 +155,6 @@ func TestRejectConfiguredKeyPublicationFields(t *testing.T) {
 	}{
 		{name: "fix data", result: Result{Changes: []workspace.Change{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("fixture-\x00secret")}}}},
 		{name: "fix path", result: Result{Changes: []workspace.Change{{Path: "fixture-secret", Mode: workspace.Regular}}}},
-		{name: "audit path", result: Result{Artifacts: []workspace.File{{Path: "fixture-secret", Mode: workspace.Regular}}}},
 		{name: "audit JSON data", result: Result{Artifacts: []workspace.File{{Path: "findings.json", Mode: workspace.Regular, Data: []byte(`{"value":"fixture-\u0073ecret"}`)}}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -163,6 +162,13 @@ func TestRejectConfiguredKeyPublicationFields(t *testing.T) {
 				t.Fatalf("secret reached publication boundary: %v", err)
 			}
 		})
+	}
+}
+
+func TestFixedAuditArtifactPathDoesNotCountAsConfiguredKey(t *testing.T) {
+	published := publication{artifacts: []workspace.File{{Path: "REPORT.md", Mode: workspace.Regular, Data: []byte("safe report")}}}
+	if err := rejectConfiguredKeyPublication(published, nil, "REPORT.md"); err != nil {
+		t.Fatalf("fixed audit artifact path blocked safe data: %v", err)
 	}
 }
 

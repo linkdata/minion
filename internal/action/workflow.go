@@ -329,7 +329,7 @@ func rejectConfiguredKeyPublication(published publication, changes []workspace.C
 
 func artifactContainsConfiguredKey(file workspace.File, keys ...string) bool {
 	for _, key := range keys {
-		if key != "" && (containsConfiguredKey([]byte(file.Path), key) || containsConfiguredKey(file.Data, key)) {
+		if key != "" && containsConfiguredKey(file.Data, key) {
 			return true
 		}
 	}

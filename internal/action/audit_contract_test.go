@@ -43,22 +43,14 @@ func TestCompleteAuditResultValidatesCoverage(t *testing.T) {
 	withContext = strings.Replace(withContext, `"selected_companion_blocks":[]`, `"selected_companion_blocks":["Companion A"]`, 1)
 	withContext = strings.Replace(withContext, `"excluded_blocks":[]`, `"excluded_blocks":[{"block":"Companion B","reason":"Outside this boundary."}]`, 1)
 	for _, test := range []struct {
-		name, ledger, findings, report, want                       string
-		blankDetails, blankNeeds, titleOnlyDetails, titleOnlyNeeds bool
+		name, ledger, findings, report, want string
 	}{
 		{name: "covered"},
+		{name: "invisible report", report: "\u200b", want: "no visible text outside code"},
+		{name: "code-only report", report: "```md\nExample\n```", want: "no visible text outside code"},
 		{name: "blocked-only ledger has no reviewed coverage", ledger: blockedLedger, want: "no reviewed coverage"},
 		{name: "excluded-only ledger has no reviewed coverage", ledger: excludedLedger, want: "no reviewed coverage"},
-		{name: "blocked disclosed", ledger: blockedAndCovered, report: "Coverage summary: 1 blocked unit; investigate boundary."},
-		{name: "blocked omitted", ledger: blockedAndCovered, want: "omits blocked coverage count"},
-		{name: "blocked count must match", ledger: blockedAndCovered, report: "Coverage summary: 10 blocked units.", want: "omits blocked coverage count"},
-		{name: "blocked count only in fenced code", ledger: blockedAndCovered, report: "```text\nCoverage summary: 1 blocked unit.\n```", want: "omits blocked coverage count"},
-		{name: "blocked count split by fenced code", ledger: blockedAndCovered, report: "Coverage summary: 1\n```text\nExample\n```\nblocked unit.", want: "omits blocked coverage count"},
-		{name: "blocked with clean claim", ledger: blockedAndCovered, report: "No findings. Coverage summary: 1 blocked unit.", want: "contradicts final findings"},
-		{name: "blocked with clean heading", ledger: blockedAndCovered, report: "## No findings\nCoverage summary: 1 blocked unit.", want: "contradicts final findings"},
-		{name: "blocked with nonbreaking-space clean heading", ledger: blockedAndCovered, report: "## No findings\u00a0\nCoverage summary: 1 blocked unit.", want: "contradicts final findings"},
-		{name: "blocked with soft-wrapped clean claim", ledger: blockedAndCovered, report: "No\nfindings. Coverage summary: 1 blocked unit.", want: "contradicts final findings"},
-		{name: "blocked with comma clean claim", ledger: blockedAndCovered, report: "No findings, according to this report. Coverage summary: 1 blocked unit.", want: "contradicts final findings"},
+		{name: "blocked and covered", ledger: blockedAndCovered},
 		{name: "covered with populated context", ledger: withContext},
 		{name: "covered with archived attempt and distinct check owners", ledger: withAttempt},
 		{name: "unsupported local check in current evidence", ledger: strings.Replace(validLedger, sourceCheck, localCheck, 1), want: "unsupported local check method"},
@@ -70,38 +62,8 @@ func TestCompleteAuditResultValidatesCoverage(t *testing.T) {
 		{name: "fractional current wave", ledger: strings.Replace(validLedger, `"wave":1`, `"wave":1.5`, 1), want: "invalid current wave"},
 		{name: "zero current wave", ledger: strings.Replace(validLedger, `"wave":1`, `"wave":0`, 1), want: "invalid current wave"},
 		{name: "confirmed finding", ledger: confirmedLedger, findings: auditConfirmedFindingFixture},
-		{name: "confirmed finding with second linked boundary", ledger: twoBoundaries, findings: auditConfirmedFindingFixture, report: "| medium | Missing guard | Secondary boundary | The other user's object changes. |"},
-		{name: "confirmed row hidden in HTML comment", ledger: confirmedLedger, findings: auditConfirmedFindingFixture, report: "<!--\n| medium | Missing guard | Boundary | The other user's object changes. |\n-->", want: "HTML comment"},
-		{name: "confirmed row only in fenced code", ledger: confirmedLedger, findings: auditConfirmedFindingFixture, report: "```md\n| medium | Missing guard | Boundary | The other user's object changes. |\n```", want: "omits or contradicts a confirmed finding table row"},
-		{name: "confirmed row only in indented code", ledger: confirmedLedger, findings: auditConfirmedFindingFixture, report: "    | medium | Missing guard | Boundary | The other user's object changes. |", want: "omits or contradicts a confirmed finding table row"},
-		{name: "fenced example does not contradict visible row", ledger: confirmedLedger, findings: auditConfirmedFindingFixture, report: "| medium | Missing guard | Boundary | The other user's object changes. |\n~~~md\n| critical | Missing guard | Other boundary | No object changed. |\n~~~"},
-		{name: "literal HTML comment in fenced example", ledger: confirmedLedger, findings: auditConfirmedFindingFixture, report: "| medium | Missing guard | Boundary | The other user's object changes. |\n```html\n<!-- source example -->\n```"},
-		{name: "clean claim split by fenced code is not a claim", ledger: confirmedLedger, findings: auditConfirmedFindingFixture, report: "No\n```text\nExample\n```\nfindings.\n| medium | Missing guard | Boundary | The other user's object changes. |"},
+		{name: "confirmed finding with second candidate", ledger: twoBoundaries, findings: auditConfirmedFindingFixture},
 		{name: "needs_validation finding", ledger: confirmedLedger, findings: auditCandidateFindingFixture},
-		{name: "needs_validation title only in fenced code", ledger: confirmedLedger, findings: auditCandidateFindingFixture, report: "```md\nUnverified boundary\n```", want: "omits a final finding title"},
-		{name: "report invents confirmed finding", report: "| critical | Ghost vulnerability | Boundary | A user's object changes. |", want: "finding table row"},
-		{name: "report promotes needs_validation", ledger: confirmedLedger, findings: auditCandidateFindingFixture, report: "| critical | Unverified boundary | Boundary | A user's object changes. |", want: "finding table row"},
-		{name: "confirmed detail missing", ledger: confirmedLedger, findings: auditConfirmedFindingFixture, blankDetails: true, want: "FINDINGS-DETAIL.md omits"},
-		{name: "unresolved detail missing", ledger: confirmedLedger, findings: auditCandidateFindingFixture, blankNeeds: true, want: "NEEDS-VALIDATION.md omits"},
-		{name: "confirmed title without detail", ledger: confirmedLedger, findings: auditConfirmedFindingFixture, titleOnlyDetails: true, want: "FINDINGS-DETAIL.md omits"},
-		{name: "unresolved title without detail", ledger: confirmedLedger, findings: auditCandidateFindingFixture, titleOnlyNeeds: true, want: "NEEDS-VALIDATION.md omits"},
-		{name: "confirmed with false clean claim", ledger: confirmedLedger, findings: auditConfirmedFindingFixture, report: "No confirmed findings.\n| medium | Missing guard | Boundary | The other user's object changes. |", want: "contradicts final findings"},
-		{name: "confirmed with false audit clean claim", ledger: confirmedLedger, findings: auditConfirmedFindingFixture, report: "The audit found no findings.\n| medium | Missing guard | Boundary | The other user's object changes. |", want: "contradicts final findings"},
-		{name: "confirmed with false clean heading", ledger: confirmedLedger, findings: auditConfirmedFindingFixture, report: "## No confirmed findings\n| medium | Missing guard | Boundary | The other user's object changes. |", want: "contradicts final findings"},
-		{name: "confirmed with false summary clean heading", ledger: confirmedLedger, findings: auditConfirmedFindingFixture, report: "## Summary: No confirmed findings.\n| medium | Missing guard | Boundary | The other user's object changes. |", want: "contradicts final findings"},
-		{name: "confirmed with nonbreaking-space clean heading", ledger: confirmedLedger, findings: auditConfirmedFindingFixture, report: "## No confirmed findings\u00a0\n| medium | Missing guard | Boundary | The other user's object changes. |", want: "contradicts final findings"},
-		{name: "confirmed with soft-wrapped clean claim", ledger: confirmedLedger, findings: auditConfirmedFindingFixture, report: "No\nconfirmed findings.\n| medium | Missing guard | Boundary | The other user's object changes. |", want: "contradicts final findings"},
-		{name: "confirmed with comma clean claim", ledger: confirmedLedger, findings: auditConfirmedFindingFixture, report: "No confirmed findings, according to this report.\n| medium | Missing guard | Boundary | The other user's object changes. |", want: "contradicts final findings"},
-		{name: "confirmed severity belongs to another line", ledger: confirmedLedger, findings: auditConfirmedFindingFixture, report: "Missing guard (low).\nMedium confidence.", want: "omits or contradicts a confirmed finding table row"},
-		{name: "confirmed severity is not confidence text", ledger: confirmedLedger, findings: auditConfirmedFindingFixture, report: "| low | Missing guard | Boundary | medium confidence |", want: "omits or contradicts a confirmed finding table row"},
-		{name: "confirmed table has wrong boundary", ledger: confirmedLedger, findings: auditConfirmedFindingFixture, report: "| medium | Missing guard | Other boundary | The other user's object changes. |", want: "omits or contradicts a confirmed finding table row"},
-		{name: "confirmed table has wrong observed result", ledger: confirmedLedger, findings: auditConfirmedFindingFixture, report: "| medium | Missing guard | Boundary | No object changed. |", want: "omits or contradicts a confirmed finding table row"},
-		{name: "confirmed table has correct and contradictory rows", ledger: confirmedLedger, findings: auditConfirmedFindingFixture, report: "| medium | Missing guard | Boundary | The other user's object changes. |\n| medium | Missing guard | Boundary | No object changed. |", want: "contradicts a confirmed finding table row"},
-		{name: "confirmed table with escaped pipe", ledger: confirmedLedger, findings: strings.Replace(auditConfirmedFindingFixture, "The other user's object changes.", "The other user's object changes | now.", 1), report: "| medium | Missing guard | Boundary | The other user's object changes \\| now. |", want: "FINDINGS-DETAIL.md omits"},
-		{name: "no findings were omitted is not a clean claim", ledger: confirmedLedger, findings: auditCandidateFindingFixture, report: "No findings were omitted. Unverified boundary."},
-		{name: "unresolved with false clean identified claim", ledger: confirmedLedger, findings: auditCandidateFindingFixture, report: "No findings were identified. Unverified boundary.", want: "contradicts final findings"},
-		{name: "attributed prior clean claim is not this audit's claim", ledger: confirmedLedger, findings: auditCandidateFindingFixture, report: "Prior report said \"No findings.\" That was false. Unverified boundary."},
-		{name: "attributed prior summary is not this audit's claim", ledger: confirmedLedger, findings: auditCandidateFindingFixture, report: "## Summary: Prior report said \"No findings were identified.\" That was false. Unverified boundary."},
 		{name: "candidate lacks separate check claim", ledger: selfCheckedCandidate, findings: auditCandidateFindingFixture, want: "without separately attributed source check"},
 		{name: "archived candidate lacks separate check claim", ledger: withSelfCheckedAttempt, findings: auditCandidateFindingFixture, want: "without separately attributed source check"},
 		{name: "decimal spelling of integer line", ledger: confirmedLedger, findings: strings.Replace(auditCandidateFindingFixture, `"line":1`, `"line":1.0`, 1)},
@@ -198,18 +160,12 @@ func TestCompleteAuditResultValidatesCoverage(t *testing.T) {
 						result.Artifacts[i].Data = []byte(test.findings)
 					}
 				case "FINDINGS-DETAIL.md":
-					if strings.Contains(test.findings, `"verdict":"confirmed"`) && !test.blankDetails {
+					if strings.Contains(test.findings, `"verdict":"confirmed"`) {
 						result.Artifacts[i].Data = []byte(auditConfirmedDetailFixture)
-						if test.titleOnlyDetails {
-							result.Artifacts[i].Data = []byte("## F: Missing guard\n")
-						}
 					}
 				case "NEEDS-VALIDATION.md":
-					if strings.Contains(test.findings, `"verdict":"needs_validation"`) && !test.blankNeeds {
+					if strings.Contains(test.findings, `"verdict":"needs_validation"`) {
 						result.Artifacts[i].Data = []byte(auditNeedsDetailFixture)
-						if test.titleOnlyNeeds {
-							result.Artifacts[i].Data = []byte("## F: Unverified boundary\n")
-						}
 					}
 				}
 			}
@@ -224,18 +180,20 @@ func TestCompleteAuditResultValidatesCoverage(t *testing.T) {
 	}
 }
 
-func TestAuditSupportingProseRejectsHiddenSections(t *testing.T) {
-	for _, prose := range []string{"<!--\n## F: Finding\nEvidence\n-->", "```md\n## F: Finding\nEvidence\n```"} {
-		if strings.Contains(prose, "<!--") {
-			err := validateAuditCoverage([]byte(auditCoveredLedgerFixture), []byte("[]"), []byte("Reviewed audit"), []byte(prose), nil, nil)
-			if err == nil || !strings.Contains(err.Error(), "HTML comment") {
-				t.Fatalf("hidden comment passed complete audit: %v", err)
+func TestAuditVisibleReport(t *testing.T) {
+	for _, test := range []struct{ name, report, want string }{
+		{name: "prose", report: "Reviewed audit report."},
+		{name: "prose after code", report: "```md\nExample\n```\nReviewed audit report."},
+		{name: "invisible", report: "\u200b", want: "no visible text outside code"},
+		{name: "fenced code only", report: "```md\nExample\n```", want: "no visible text outside code"},
+		{name: "indented code only", report: "    Example", want: "no visible text outside code"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := auditVisibleReport(test.report)
+			if test.want == "" && err != nil || test.want != "" && (err == nil || !strings.Contains(err.Error(), test.want)) {
+				t.Fatalf("report validation = %v, want %q", err, test.want)
 			}
-			continue
-		}
-		if err := validateAuditProse([]byte(prose), [][]string{{"F: Finding", "Evidence"}}); err == nil || !strings.Contains(err.Error(), "omits required finding section") {
-			t.Fatalf("fenced heading passed detail check: %v", err)
-		}
+		})
 	}
 }
 

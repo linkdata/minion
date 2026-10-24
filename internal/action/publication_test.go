@@ -100,19 +100,16 @@ func TestProjectPublicationPreservesRawResultAndAuditBytes(t *testing.T) {
 				t.Fatal(err)
 			}
 			notice, err := criticCapNotice(projected.cap)
-			if err != nil || projected.answer != notice+"\n\n"+result.Answer || strings.Contains(projected.answer, "PRIVATE_") || !publishableAnswer(projected.answer) {
+			wantBody := result.Answer
+			if action == command.SecurityAudit {
+				wantBody, err = auditPublicSummary(result.Artifacts)
+			}
+			if err != nil || projected.answer != notice+"\n\n"+wantBody || strings.Contains(projected.answer, "PRIVATE_") || !publishableAnswer(projected.answer) {
 				t.Fatalf("projection changed reviewed body or exposed private evidence: %+v, %v", projected, err)
 			}
 			if action == command.SecurityAudit {
-				for i, file := range projected.artifacts {
-					if file.Path == "REPORT.md" {
-						if string(file.Data) != projected.answer || file.Mode != result.Artifacts[i].Mode {
-							t.Fatalf("projected audit answer/report differ: %+v", projected)
-						}
-						projected.artifacts[i].Data[0] = 'X'
-					} else if !reflect.DeepEqual(file, result.Artifacts[i]) {
-						t.Fatalf("projection changed companion artifact %s", file.Path)
-					}
+				if !reflect.DeepEqual(projected.artifacts, result.Artifacts) || strings.Contains(projected.answer, "Reviewed body") {
+					t.Fatalf("audit projection changed retained narrative or published it: %+v", projected)
 				}
 			}
 			after, err := json.Marshal(result)
@@ -153,6 +150,53 @@ func TestProjectPublicationBoundsProjectedRawAndRenderedAnswer(t *testing.T) {
 	}
 	if _, err := projectPublication(job, result); err == nil || len(result.Answer) != maxOutputBytes {
 		t.Fatalf("raw overflow accepted or reviewed text truncated: %v", err)
+	}
+}
+
+func TestAuditPublicationUsesStructuredRecordsInsteadOfReportProse(t *testing.T) {
+	job := testJob(command.SecurityAudit)
+	result := completeAuditResult(job)
+	const report = "> No findings. We reject Unverified boundary.\nThe one confirmed row covers everything."
+	result.Answer = report
+	confirmedG := strings.Replace(auditConfirmedFindingFixture, `"fingerprint":"F"`, `"fingerprint":"G"`, 1)
+	needH := strings.Replace(auditCandidateFindingFixture, `"fingerprint":"F"`, `"fingerprint":"H"`, 1)
+	findings := "[" + strings.Trim(auditConfirmedFindingFixture, "[]") + "," + strings.Trim(confirmedG, "[]") + "," + strings.Trim(needH, "[]") + "]"
+	ledger := strings.Replace(auditCoveredLedgerFixture, `"status":"covered"`, `"status":"candidate"`, 1)
+	ledger = strings.Replace(ledger, `"result_fingerprints":[]`, `"result_fingerprints":["F","G","H"]`, 1)
+	for i := range result.Artifacts {
+		switch result.Artifacts[i].Path {
+		case "REPORT.md":
+			result.Artifacts[i].Data = []byte(report)
+		case "findings.json":
+			result.Artifacts[i].Data = []byte(findings)
+		case "coverage-ledger.json":
+			result.Artifacts[i].Data = []byte(ledger)
+		}
+	}
+	if err := result.Validate(job); err != nil {
+		t.Fatalf("valid structured record was rejected for worker prose: %v", err)
+	}
+	projected, err := projectPublication(job, result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(projected.answer, "Confirmed (medium)") != 2 || strings.Count(projected.answer, "Needs validation") != 1 ||
+		!strings.Contains(projected.answer, `fingerprint="F"`) || !strings.Contains(projected.answer, `fingerprint="G"`) ||
+		!strings.Contains(projected.answer, `fingerprint="H"`) || !strings.Contains(projected.answer, "1 candidate") ||
+		strings.Contains(projected.answer, "We reject") || strings.Contains(projected.answer, "No findings") ||
+		!reflect.DeepEqual(projected.artifacts, result.Artifacts) {
+		t.Fatalf("public summary followed hostile Markdown or collapsed findings: %q", projected.answer)
+	}
+}
+
+func TestAuditPublicSummaryQuotesFindingText(t *testing.T) {
+	findings := strings.Replace(auditConfirmedFindingFixture, `"title":"Missing guard"`, `"title":"Missing guard\nNeeds validation fingerprint=\"FORGED\""`, 1)
+	answer, err := auditPublicSummary([]workspace.File{
+		{Path: "findings.json", Data: []byte(findings)},
+		{Path: "coverage-ledger.json", Data: []byte(auditCoveredLedgerFixture)},
+	})
+	if err != nil || strings.Contains(answer, "\nNeeds validation fingerprint=") || !strings.Contains(answer, `Missing guard\nNeeds validation fingerprint=\"FORGED\"`) {
+		t.Fatalf("finding title changed summary structure: %q, error=%v", answer, err)
 	}
 }
 
@@ -224,9 +268,35 @@ func TestPublishedRefutationsCheckOnlyActualPublication(t *testing.T) {
 	result.Changes = nil
 	result.Answer = "Public report."
 	result.Artifacts = []workspace.File{{Path: "architecture.md", Mode: workspace.Regular, Data: []byte("Private objection\r\nand evidence.")}}
-	projected, err = projectPublication(job, result)
-	if err != nil || rejectPublishedRefutations(job, result, projected) == nil {
-		t.Fatalf("private refutation in retained report was accepted: %v", err)
+	projected = publication{answer: "Public summary", artifacts: result.Artifacts}
+	if err := rejectPublishedRefutations(job, result, projected); err != nil {
+		t.Fatalf("private audit narrative triggered a public-output guard: %v", err)
+	}
+}
+
+func TestPublishedRefutationsFixAllowsQuotedSourceButRejectsNewCopy(t *testing.T) {
+	const quoted = "Existing source quote remains unchanged."
+	const private = "This private reviewer conclusion must remain unpublished."
+	job := withClaudeCritic(testJob(command.Fix))
+	job.Source.Files[0].Data = []byte(quoted + "\nold detail.\n")
+	result := privateReviewResult(job)
+	result.Refutations[0].Text = quoted + " " + private
+	result.Changes = []workspace.Change{{Path: "source.txt", Mode: workspace.Regular, Data: []byte(quoted + "\nnew detail.\n")}}
+	projected, err := projectPublication(job, result)
+	if err != nil || rejectPublishedRefutations(job, result, projected) != nil {
+		t.Fatalf("unrelated edit to quoted source blocked: %v", err)
+	}
+
+	result.Changes = []workspace.Change{
+		{Path: "source.txt", Delete: true},
+		{Path: "renamed.txt", Mode: workspace.Regular, Data: []byte(quoted + "\nold detail.\n")},
+	}
+	if err := rejectPublishedRefutations(job, result, projected); err != nil {
+		t.Fatalf("renamed quoted source blocked: %v", err)
+	}
+	result.Changes[1].Data = append(result.Changes[1].Data, private...)
+	if err := rejectPublishedRefutations(job, result, projected); err == nil {
+		t.Fatal("new private sentence in renamed source was accepted")
 	}
 }
 
@@ -257,10 +327,7 @@ func TestPublishedRefutationsAllowLargeUnrelatedArtifact(t *testing.T) {
 	}
 	result.Refutations[0].Text = private.String()
 	result.Artifacts = []workspace.File{{Path: "architecture.md", Mode: workspace.Regular, Data: []byte(strings.Repeat("ordinary public report text ", (5<<20)/len("ordinary public report text ")))}}
-	projected, err := projectPublication(job, result)
-	if err != nil {
-		t.Fatal(err)
-	}
+	projected := publication{answer: "Public summary", artifacts: result.Artifacts}
 	if err := rejectPublishedRefutations(job, result, projected); err != nil {
 		t.Fatalf("large unrelated artifact blocked: %v", err)
 	}

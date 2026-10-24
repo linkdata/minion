@@ -95,8 +95,15 @@ func TestCappedPublicationProjectsEveryPublicBodyAndRetainedAudit(t *testing.T) 
 				if err := orchestrator.publish(context.Background(), &preparedAction{job: job, request: request, issueNodeID: "issue-node"}, result); err != nil {
 					t.Fatal(err)
 				}
-				if writes != 1 || strings.Count(posted, "Critic round limit reached (2).") != 1 || !strings.Contains(posted, "Normal critic acceptance was not reached; unresolved findings may remain.") || strings.Contains(posted, "PRIVATE") || !strings.Contains(posted, "\n> @otherbot fix") || !strings.Contains(posted, "\n> ![image]") || !strings.HasSuffix(posted, "\n\n"+request.Marker()) {
+				if writes != 1 || strings.Count(posted, "Critic round limit reached (2).") != 1 || !strings.Contains(posted, "Normal critic acceptance was not reached; unresolved findings may remain.") || strings.Contains(posted, "PRIVATE") || !strings.HasSuffix(posted, "\n\n"+request.Marker()) {
 					t.Fatalf("capped public response lost caveat, body or inert rendering: %q", posted)
+				}
+				if action == command.SecurityAudit {
+					if !strings.Contains(posted, "Executor-reported security audit summary") || strings.Contains(posted, "Reviewed body") || strings.Contains(posted, "@otherbot fix") {
+						t.Fatalf("audit published worker narrative instead of structured summary: %q", posted)
+					}
+				} else if !strings.Contains(posted, "\n> @otherbot fix") || !strings.Contains(posted, "\n> ![image]") {
+					t.Fatalf("capped public response lost inert worker body: %q", posted)
 				}
 				if strings.Contains(posted, "reported blockers.") != (verdict != "only nits") || strings.Contains(posted, "fresh full critic reported approval") != (verdict == "verification blockers with full approval") || strings.Contains(posted, "fresh full critic did not approve") != (verdict != "verification blockers with full approval") {
 					t.Fatalf("public caveat falsified final phase verdicts: %s", posted)
@@ -117,11 +124,7 @@ func TestCappedPublicationProjectsEveryPublicBodyAndRetainedAudit(t *testing.T) 
 						if err != nil {
 							t.Fatal(err)
 						}
-						if file.Path == "REPORT.md" {
-							if !strings.HasSuffix(string(data), body) || !strings.Contains(posted, inertModelOutput(string(data))) {
-								t.Fatalf("public answer and retained report disagree: report=%q body=%q", data, posted)
-							}
-						} else if !bytes.Equal(data, file.Data) {
+						if !bytes.Equal(data, file.Data) {
 							t.Fatalf("projection changed audit companion %s", file.Path)
 						}
 					}
@@ -152,6 +155,17 @@ func TestCappedPublicationRefusesInvalidRawResultAndProjectionOverflow(t *testin
 				result.Answer = strings.Repeat("x", maxOutputBytes-14)
 				if action == command.SecurityAudit {
 					result.Artifacts = auditArtifactsFixture(job, sourceIdentity(job), result.Answer)
+					if failure == "projected overflow" {
+						for i := range result.Artifacts {
+							switch result.Artifacts[i].Path {
+							case "coverage-ledger.json":
+								ledger := strings.Replace(auditCoveredLedgerFixture, `"status":"covered"`, `"status":"candidate"`, 1)
+								result.Artifacts[i].Data = []byte(strings.Replace(ledger, `"result_fingerprints":[]`, `"result_fingerprints":["F"]`, 1))
+							case "findings.json":
+								result.Artifacts[i].Data = []byte(strings.Replace(auditConfirmedFindingFixture, `"title":"Missing guard"`, `"title":"`+strings.Repeat("q", maxOutputBytes)+`"`, 1))
+							}
+						}
+					}
 				}
 				if err := result.Validate(job); err != nil {
 					t.Fatalf("overflow baseline must satisfy raw gates: %v", err)

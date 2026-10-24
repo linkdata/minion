@@ -118,15 +118,15 @@ func TestReviewContextPreservesDistinctRevisionIdentities(t *testing.T) {
 	}
 }
 
-func TestAuditPromptMatchesDetailValidation(t *testing.T) {
+func TestAuditPromptDescribesPublicSummary(t *testing.T) {
 	job := testJob(command.SecurityAudit)
 	prompt, err := actionPrompt(t.Context(), job, "/source", "/context", "/reports", "/installed/security-audit/SKILL.md")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, field := range []string{"linked coverage-ledger boundary label", "exactly one level-two heading", "exact first trace file, execution observed_result and remediation strategy", "exact first trace file, every blocker and each nonempty local or deployment validation plan", "do not paraphrase or style the copied strings"} {
+	for _, field := range []string{"summary rendered by the parent from validated findings.json and coverage-ledger.json", "retained privately as executor narrative", "Every reported finding must have its complete structured record and linked candidate/verifier coverage evidence"} {
 		if !strings.Contains(prompt, field) {
-			t.Fatalf("audit prompt omits detail requirement %q", field)
+			t.Fatalf("audit prompt omits public-summary requirement %q", field)
 		}
 	}
 }

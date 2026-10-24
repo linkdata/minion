@@ -34,10 +34,6 @@ func TestHostileHTTPAuditSchemaCannotPublish(t *testing.T) {
 	excludedLedger = strings.Replace(excludedLedger, `"reviewed_paths":["source.txt"]`, `"reviewed_paths":[]`, 1)
 	excludedLedger = strings.Replace(excludedLedger, `"local_checks":[{"agent_id":"verifier","reviewed_paths":["source.txt"],"invariant":"Access is checked","method":"source","result":"The guard is present","artifact":null}]`, `"local_checks":[]`, 1)
 	excludedLedger = strings.Replace(excludedLedger, `"unresolved":[]}]`, `"unresolved":["Out of scope"]}]`, 1)
-	secondBlocked := strings.Replace(blockedLedger, `"coverage_id":"source::boundary::`, `"coverage_id":"source::blocked::`, 1)
-	secondBlocked = strings.Replace(secondBlocked, `"boundary":"boundary"`, `"boundary":"blocked"`, 1)
-	secondBlocked = strings.Replace(secondBlocked, `"boundary":"Boundary"`, `"boundary":"Blocked boundary"`, 1)
-	blockedAndCovered := "[" + strings.Trim(secondBlocked, "[]") + "," + strings.Trim(auditCoveredLedgerFixture, "[]") + "]"
 	for _, test := range []struct {
 		name, artifact, data, findings, ledger, report, want string
 		candidate, incompleteReason                          bool
@@ -45,13 +41,9 @@ func TestHostileHTTPAuditSchemaCannotPublish(t *testing.T) {
 		{name: "directory-only review cannot claim coverage", artifact: "coverage-ledger.json", data: strings.ReplaceAll(auditCoveredLedgerFixture, "source.txt", "src"), want: "starting path without a declared reviewed file"},
 		{name: "blocked-only ledger has no reviewed coverage", artifact: "coverage-ledger.json", data: blockedLedger, want: "no reviewed coverage"},
 		{name: "excluded-only ledger has no reviewed coverage", artifact: "coverage-ledger.json", data: excludedLedger, want: "no reviewed coverage"},
-		{name: "blocked coverage omitted from report", artifact: "coverage-ledger.json", data: blockedAndCovered, want: "omits blocked coverage count"},
-		{name: "blocked coverage falsely clean", artifact: "REPORT.md", data: "No findings.", ledger: blockedAndCovered, want: "contradicts final findings"},
-		{name: "empty confirmed detail", artifact: "FINDINGS-DETAIL.md", data: "", findings: auditConfirmedFindingFixture, report: "| medium | Missing guard | Boundary | The other user's object changes. |", want: "FINDINGS-DETAIL.md omits", candidate: true},
-		{name: "empty unresolved detail", artifact: "NEEDS-VALIDATION.md", data: "", findings: auditCandidateFindingFixture, want: "NEEDS-VALIDATION.md omits", candidate: true},
 		{name: "blank architecture", artifact: "architecture.md", data: " \t\r\n", want: "architecture.md"},
-		{name: "confirmed title without detail", artifact: "FINDINGS-DETAIL.md", data: "## F: Missing guard\n", findings: auditConfirmedFindingFixture, report: "| medium | Missing guard | Boundary | The other user's object changes. |", want: "FINDINGS-DETAIL.md omits", candidate: true},
-		{name: "unresolved title without detail", artifact: "NEEDS-VALIDATION.md", data: "## F: Unverified boundary\n", findings: auditCandidateFindingFixture, want: "NEEDS-VALIDATION.md omits", candidate: true},
+		{name: "invisible report", artifact: "REPORT.md", data: "\u200b", want: "no visible text outside code"},
+		{name: "code-only report", artifact: "REPORT.md", data: "```md\nOnly code.\n```", want: "no visible text outside code"},
 		{name: "missing candidate validation plan", artifact: "findings.json", data: strings.Replace(auditCandidateFindingFixture,
 			`,"validation_plan":{"local":"Inspect the guard path in an approved test."}`, ``, 1), want: "incomplete needs_validation finding", candidate: true},
 		{name: "rejected without reason", artifact: "findings.json", data: rejectedWithoutReason, want: "incomplete rejected finding", candidate: true},
@@ -66,24 +58,6 @@ func TestHostileHTTPAuditSchemaCannotPublish(t *testing.T) {
 		{name: "unverifiable local proof", artifact: "coverage-ledger.json", data: strings.Replace(auditCoveredLedgerFixture,
 			`"method":"source","result":"The guard is present","artifact":null`,
 			`"method":"local","result":"The guard is present","artifact":"agents/hunter/artifacts/proof.txt"`, 1), want: "unsupported local check method"},
-		{name: "report omits final lead", artifact: "REPORT.md", data: "Reviewed security audit.", findings: auditCandidateFindingFixture, want: "omits a final finding title", candidate: true},
-		{name: "report contradicts final lead", artifact: "REPORT.md", data: "No findings. Unverified boundary.", findings: auditCandidateFindingFixture, want: "contradicts final findings", candidate: true},
-		{name: "clean heading contradicts unresolved lead", artifact: "REPORT.md", data: "## No findings\nUnverified boundary.", findings: auditCandidateFindingFixture, want: "contradicts final findings", candidate: true},
-		{name: "clean summary heading contradicts unresolved lead", artifact: "REPORT.md", data: "## Summary: No findings.\nUnverified boundary.", findings: auditCandidateFindingFixture, want: "contradicts final findings", candidate: true},
-		{name: "clean identified statement contradicts unresolved lead", artifact: "REPORT.md", data: "No findings were identified. Unverified boundary.", findings: auditCandidateFindingFixture, want: "contradicts final findings", candidate: true},
-		{name: "nonbreaking-space clean heading contradicts unresolved lead", artifact: "REPORT.md", data: "## No findings\u00a0\nUnverified boundary.", findings: auditCandidateFindingFixture, want: "contradicts final findings", candidate: true},
-		{name: "clean heading contradicts confirmed finding", artifact: "REPORT.md", data: "## No confirmed findings\n| medium | Missing guard | Boundary | The other user's object changes. |", findings: auditConfirmedFindingFixture, want: "contradicts final findings", candidate: true},
-		{name: "audit clean claim contradicts confirmed finding", artifact: "REPORT.md", data: "The audit found no findings.\n| medium | Missing guard | Boundary | The other user's object changes. |", findings: auditConfirmedFindingFixture, want: "contradicts final findings", candidate: true},
-		{name: "nonbreaking-space clean heading contradicts confirmed finding", artifact: "REPORT.md", data: "## No confirmed findings\u00a0\n| medium | Missing guard | Boundary | The other user's object changes. |", findings: auditConfirmedFindingFixture, want: "contradicts final findings", candidate: true},
-		{name: "confirmed row hidden in HTML comment", artifact: "REPORT.md", data: "<!--\n| medium | Missing guard | Boundary | The other user's object changes. |\n-->", findings: auditConfirmedFindingFixture, want: "HTML comment", candidate: true},
-		{name: "confirmed row only in fenced code", artifact: "REPORT.md", data: "```md\n| medium | Missing guard | Boundary | The other user's object changes. |\n```", findings: auditConfirmedFindingFixture, want: "omits or contradicts a confirmed finding table row", candidate: true},
-		{name: "report invents confirmed finding", artifact: "REPORT.md", data: "| critical | Ghost vulnerability | Boundary | A user's object changes. |", want: "finding table row"},
-		{name: "report promotes needs_validation", artifact: "REPORT.md", data: "| critical | Unverified boundary | Boundary | A user's object changes. |", findings: auditCandidateFindingFixture, want: "finding table row", candidate: true},
-		{name: "confirmed severity omitted", artifact: "REPORT.md", data: "Missing guard.", findings: auditConfirmedFindingFixture, want: "omits or contradicts a confirmed finding table row", candidate: true},
-		{name: "confirmed severity elsewhere", artifact: "REPORT.md", data: "Missing guard (low).\nMedium confidence.", findings: auditConfirmedFindingFixture, want: "omits or contradicts a confirmed finding table row", candidate: true},
-		{name: "confirmed severity wrong table cell", artifact: "REPORT.md", data: "| low | Missing guard | Boundary | medium confidence |", findings: auditConfirmedFindingFixture, want: "omits or contradicts a confirmed finding table row", candidate: true},
-		{name: "confirmed boundary wrong table cell", artifact: "REPORT.md", data: "| medium | Missing guard | Other boundary | The other user's object changes. |", findings: auditConfirmedFindingFixture, want: "omits or contradicts a confirmed finding table row", candidate: true},
-		{name: "confirmed observed result wrong table cell", artifact: "REPORT.md", data: "| medium | Missing guard | Boundary | No object changed. |", findings: auditConfirmedFindingFixture, want: "omits or contradicts a confirmed finding table row", candidate: true},
 		{name: "unreviewed cited sink", artifact: "findings.json", data: citesOther, want: "cited file without one declared verifier path set", candidate: true},
 		{name: "candidate without verifier", artifact: "coverage-ledger.json", data: selfChecked, findings: auditCandidateFindingFixture, want: "without separately attributed source check"},
 		{name: "archived candidate without verifier", artifact: "coverage-ledger.json", data: archivedSelf, findings: auditCandidateFindingFixture, want: "without separately attributed source check"},
