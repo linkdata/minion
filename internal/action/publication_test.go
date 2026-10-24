@@ -364,7 +364,44 @@ func TestPublishedRefutationsRejectMarkedSentenceCopies(t *testing.T) {
 	}
 }
 
-func TestPublishedRefutationsRejectAuditQuotedTitle(t *testing.T) {
+func TestPublishedRefutationsRejectQuotedAndIdeographicSentenceCopies(t *testing.T) {
+	for _, test := range []struct {
+		name, private, answer, sourceQuote string
+	}{
+		{
+			name:        "quoted sentence",
+			private:     "The first private review sentence stays internal. The second private review sentence stays internal.",
+			answer:      `Public reply: "The second private review sentence stays internal."`,
+			sourceQuote: "The second private review sentence stays internal.",
+		},
+		{
+			name:        "ideographic full stop",
+			private:     "The first private review sentence stays internal。The second private review sentence stays internal。",
+			answer:      "Public reply: The second private review sentence stays internal。",
+			sourceQuote: "The second private review sentence stays internal。",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			job := withClaudeCritic(testJob(command.Comment))
+			result := privateReviewResult(job)
+			result.Refutations[0].Text = test.private
+			result.Answer = test.answer
+			if err := result.Validate(job); err != nil {
+				t.Fatal(err)
+			}
+			projected, err := projectPublication(job, result)
+			if err != nil || rejectPublishedRefutations(job, result, projected) == nil {
+				t.Fatalf("copied private sentence reached publication: %q, %v", projected.answer, err)
+			}
+			job.Source.Files[0].Data = []byte(test.sourceQuote)
+			if err := rejectPublishedRefutations(job, result, projected); err != nil {
+				t.Fatalf("existing source quote was blocked: %v", err)
+			}
+		})
+	}
+}
+
+func TestPublishedRefutationsRejectAuditTitleCopies(t *testing.T) {
 	job := withClaudeCritic(testJob(command.SecurityAudit))
 	result := privateReviewResult(job)
 	result.Refutations[0].Text = "Private objection\nand evidence."
@@ -391,6 +428,23 @@ func TestPublishedRefutationsRejectAuditQuotedTitle(t *testing.T) {
 	projected, err := projectPublication(job, result)
 	if err != nil || !strings.Contains(projected.answer, `Private objection\nand evidence.`) || rejectPublishedRefutations(job, result, projected) == nil {
 		t.Fatalf("quoted audit title reached public reply: %q, %v", projected.answer, err)
+	}
+	result.Refutations[0].Text = "The first private audit finding stays internal。The second private audit finding stays internal。"
+	title, err = json.Marshal("The second private audit finding stays internal。")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range result.Artifacts {
+		if result.Artifacts[i].Path == "findings.json" {
+			result.Artifacts[i].Data = []byte(strings.Replace(auditCandidateFindingFixture, `"title":"Unverified boundary"`, `"title":`+string(title), 1))
+		}
+	}
+	if err := result.Validate(job); err != nil {
+		t.Fatal(err)
+	}
+	projected, err = projectPublication(job, result)
+	if err != nil || rejectPublishedRefutations(job, result, projected) == nil {
+		t.Fatalf("ideographic private sentence in audit title reached public reply: %q, %v", projected.answer, err)
 	}
 	result.Refutations[0].Text = "F"
 	if err := rejectPublishedRefutations(job, result, projected); err != nil {

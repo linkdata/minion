@@ -253,7 +253,7 @@ func rejectPublishedRefutations(job Job, result Result, projected publication) e
 }
 
 func publicationSentenceBreak(r rune) bool {
-	return r == '.' || r == ';' || r == ':' || r == '!' || r == '?'
+	return r == '.' || r == ';' || r == ':' || r == '!' || r == '?' || r == '"' || r == '。'
 }
 
 func foldPublicationSpace(text string) string {

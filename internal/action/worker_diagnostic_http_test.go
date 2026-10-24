@@ -638,9 +638,10 @@ func TestHTTPResultCannotPublishPrivateRefutation(t *testing.T) {
 	}
 }
 
-func TestHTTPEchoedRoundTwoRefutationStopsOrchestratorPublication(t *testing.T) {
+func TestHTTPQuotedRoundTwoRefutationStopsOrchestratorPublication(t *testing.T) {
 	gitFixtureRemote(t)
-	const private = "Private reviewer finding must not enter the public reply."
+	const private = "The first private reviewer finding stays internal. The second private reviewer finding must not enter the public reply."
+	const copied = "The second private reviewer finding must not enter the public reply."
 	var writes atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if serveIssueFixture(t, w, r) {
@@ -664,7 +665,7 @@ func TestHTTPEchoedRoundTwoRefutationStopsOrchestratorPublication(t *testing.T) 
 		transport.pull(t)
 		result := privateReviewResult(job)
 		result.Refutations[0].Text = private
-		result.Answer = "Public reply. " + private
+		result.Answer = `Public reply: "` + copied + `"`
 		for i := range result.Calls {
 			result.Calls[i].Tokens, result.Calls[i].Complete = usage.Tokens{Input: int64(i + 1), Output: 1}, true
 		}

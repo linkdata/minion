@@ -134,16 +134,16 @@ func TestAuditReportRedactsNULSplitConfiguredKeyBeforeCriticAndPublication(t *te
 	}
 	for _, file := range result.Artifacts {
 		if strings.Contains(string(file.Data), key) || strings.Contains(string(file.Data), criticKey) || strings.Contains(string(file.Data), "\x00") {
-			t.Fatalf("published artifact contains configured key: %s", file.Path)
+			t.Fatalf("returned artifact contains configured key: %s", file.Path)
 		}
 		if file.Path == "REPORT.md" && string(file.Data) != want {
-			t.Fatalf("published report contains configured key: %q", file.Data)
+			t.Fatalf("returned report contains configured key: %q", file.Data)
 		}
 		if file.Path == "architecture.md" && string(file.Data) != "Architecture includes [redacted] and [redacted]" {
-			t.Fatalf("published architecture artifact contains configured key: %q", file.Data)
+			t.Fatalf("returned architecture artifact contains configured key: %q", file.Data)
 		}
 		if file.Path == "coverage-ledger.json" && !redactedAuditLedger(file.Data) {
-			t.Fatalf("published JSON artifact contains configured key: %q", file.Data)
+			t.Fatalf("returned JSON artifact contains configured key: %q", file.Data)
 		}
 	}
 }
