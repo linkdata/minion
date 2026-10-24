@@ -58,6 +58,9 @@ type fakeGitHub struct {
 	comments           []github.Comment
 	threadItems        func(string, int, time.Time) ([]github.Item, error)
 	threadCalls        int
+	reviewReplies      []github.Item
+	verifiedCalls      []bool
+	beforeVerify       func(context.Context, bool) error
 	rawIDs             bool
 	liveRepo           *github.Repository
 }
@@ -171,6 +174,35 @@ func (f *fakeGitHub) CurrentItem(_ context.Context, item github.Item) (github.It
 		return f.currentItem(item)
 	}
 	return item, nil
+}
+
+func (f *fakeGitHub) HasVerifiedBotReply(ctx context.Context, _ string, _ int, since time.Time, botLogin, marker string, includeReviews bool) (bool, error) {
+	f.verifiedCalls = append(f.verifiedCalls, includeReviews)
+	if f.beforeVerify != nil {
+		if err := f.beforeVerify(ctx, includeReviews); err != nil {
+			return false, err
+		}
+	}
+	items := f.items
+	if includeReviews {
+		items = append(append([]github.Item(nil), items...), f.reviewReplies...)
+	}
+	for _, item := range items {
+		if !since.IsZero() && !item.UpdatedAt.IsZero() && item.UpdatedAt.Before(since.Add(-time.Second)) {
+			continue
+		}
+		if !strings.EqualFold(item.Author.Login, botLogin) || !strings.HasSuffix(strings.TrimSpace(item.Body), "\n\n"+marker) {
+			continue
+		}
+		current, err := f.CurrentItem(ctx, item)
+		if err != nil {
+			return false, err
+		}
+		if !current.Edited && strings.EqualFold(current.Author.Login, botLogin) && strings.HasSuffix(strings.TrimSpace(current.Body), "\n\n"+marker) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (f *fakeGitHub) Permission(_ context.Context, _, login string) (github.Permission, error) {
@@ -662,9 +694,9 @@ func TestFailureReplyGetsFreshPostBudgetAfterLookup(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
 		gh := &fakeGitHub{
-			threadItems: func(string, int, time.Time) ([]github.Item, error) {
+			beforeVerify: func(context.Context, bool) error {
 				time.Sleep(9 * time.Second)
-				return nil, nil
+				return nil
 			},
 			beforeRepository: func() { time.Sleep(2 * time.Second) },
 		}
@@ -676,13 +708,67 @@ func TestFailureReplyGetsFreshPostBudgetAfterLookup(t *testing.T) {
 			ID:          "failure-reply-budget",
 		}
 		m := &Monitor{Config: config.Config{BotLogin: "linkdataminion"}, GitHub: gh}
-		if err := m.finishFailedJob(t.Context(), store, job, nil, now, state.JobFailure{}); err != nil {
+		if err := m.finishFailedJob(t.Context(), store, job, now, state.JobFailure{}); err != nil {
 			t.Fatal(err)
 		}
 		if gh.commentCalls != 1 || len(store.Data.Processed) != 1 {
 			t.Fatalf("slow reply lookup consumed posting budget: comments=%d state=%+v", gh.commentCalls, store.Data)
 		}
 	})
+}
+
+func TestRunOncePullRequestCommentAndFixFailureReplySkipsReviewLookup(t *testing.T) {
+	for _, name := range []string{"audit", "fix"} {
+		t.Run(name, func(t *testing.T) {
+			now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+			item := github.Item{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion " + name, Author: github.User{Login: "writer"}, UpdatedAt: now}
+			gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}, items: []github.Item{item}, permission: github.Permission{Permission: "write"}}
+			gh.threadItems = func(string, int, time.Time) ([]github.Item, error) {
+				if gh.threadCalls > 1 {
+					return nil, errors.New("unrelated review GraphQL lookup failed")
+				}
+				return gh.items, nil
+			}
+			gh.beforeVerify = func(_ context.Context, includeReviews bool) error {
+				if includeReviews {
+					return errors.New("unrelated review GraphQL lookup failed")
+				}
+				return nil
+			}
+			handler := &fakeHandler{executeErr: ErrTerminalJob}
+			store := openState(t, now.Add(-time.Minute))
+			m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Now: func() time.Time { return now }}
+			if _, err := m.RunOnce(t.Context(), store); err != nil {
+				t.Fatal(err)
+			}
+			if len(handler.jobs) != 1 || gh.threadCalls != 1 || len(gh.verifiedCalls) != 1 || gh.verifiedCalls[0] || len(gh.comments) != 1 || len(store.Data.Processed) != 1 {
+				t.Fatalf("failure reply depended on review lookup: jobs=%d thread calls=%d verified calls=%v comments=%d state=%+v", len(handler.jobs), gh.threadCalls, gh.verifiedCalls, len(gh.comments), store.Data)
+			}
+		})
+	}
+}
+
+func TestRunOnceFailureReplyChecksCurrentBotProvenance(t *testing.T) {
+	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	request := github.Item{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}, UpdatedAt: now}
+	marker := (Job{ID: jobID(request.Key, "review")}).Marker()
+	stale := github.Item{Key: "comment:2", NodeID: "node:2", Body: "Earlier reply.\n\n" + marker, Author: github.User{Login: "linkdataminion"}, UpdatedAt: now}
+	gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}, items: []github.Item{request, stale}, permission: github.Permission{Permission: "write"}}
+	gh.currentItem = func(item github.Item) (github.Item, error) {
+		if item.Key == stale.Key {
+			item.Edited = true
+		}
+		return item, nil
+	}
+	store := openState(t, now.Add(-time.Minute))
+	handler := &fakeHandler{executeErr: ErrTerminalJob}
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Now: func() time.Time { return now }}
+	if _, err := m.RunOnce(t.Context(), store); err != nil {
+		t.Fatal(err)
+	}
+	if len(handler.jobs) != 1 || len(gh.comments) != 1 || len(store.Data.Processed) != 1 {
+		t.Fatalf("edited bot reply suppressed a current failure reply: jobs=%d comments=%d state=%+v", len(handler.jobs), len(gh.comments), store.Data)
+	}
 }
 
 func TestRunOnceLostPublicationResponseFindsSuccessfulReply(t *testing.T) {
@@ -693,14 +779,14 @@ func TestRunOnceLostPublicationResponseFindsSuccessfulReply(t *testing.T) {
 	id := jobID(item.Key, "review")
 	handler := &fakeHandler{executeErr: ErrPostModelPublication, onExecute: func() {
 		saveModelCallStart(t, store, id)
-		gh.items = append(gh.items, github.Item{Key: "comment:2", NodeID: "node:2", Body: "Review complete.\n\n" + (Job{ID: id}).Marker(), Author: github.User{Login: "linkdataminion"}, UpdatedAt: now})
+		gh.reviewReplies = append(gh.reviewReplies, github.Item{Key: "review:2", NodeID: "node:2", Body: "Review complete.\n\n" + (Job{ID: id}).Marker(), Author: github.User{Login: "linkdataminion"}, UpdatedAt: now})
 	}}
 	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Now: func() time.Time { return now }}
 	if _, err := m.RunOnce(t.Context(), store); err != nil {
 		t.Fatal(err)
 	}
-	if len(handler.jobs) != 1 || gh.threadCalls != 2 || gh.currentChecks != 2 || gh.commentCalls != 0 || len(store.Data.Processed) != 1 || len(store.Data.JobFailures) != 0 {
-		t.Fatalf("lost publication response posted a contradictory failure or repeated work: jobs=%d thread calls=%d current checks=%d failure replies=%d state=%+v", len(handler.jobs), gh.threadCalls, gh.currentChecks, gh.commentCalls, store.Data)
+	if len(handler.jobs) != 1 || gh.threadCalls != 1 || gh.currentChecks != 2 || gh.commentCalls != 0 || len(gh.verifiedCalls) != 1 || !gh.verifiedCalls[0] || len(store.Data.Processed) != 1 || len(store.Data.JobFailures) != 0 {
+		t.Fatalf("lost review response posted a contradictory failure or repeated work: jobs=%d thread calls=%d current checks=%d verified calls=%v failure replies=%d state=%+v", len(handler.jobs), gh.threadCalls, gh.currentChecks, gh.verifiedCalls, gh.commentCalls, store.Data)
 	}
 }
 
@@ -709,18 +795,18 @@ func TestRunOnceLostPublicationResponseRetriesFailedLookup(t *testing.T) {
 	item := github.Item{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}, UpdatedAt: now.Add(-30 * time.Second)}
 	gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}, items: []github.Item{item}, permission: github.Permission{Permission: "write"}}
 	lookupErr := errors.New("reply lookup unavailable")
-	gh.threadItems = func(string, int, time.Time) ([]github.Item, error) {
-		if gh.threadCalls == 2 {
-			return nil, lookupErr
+	gh.beforeVerify = func(context.Context, bool) error {
+		if len(gh.verifiedCalls) == 1 {
+			return lookupErr
 		}
-		return gh.items, nil
+		return nil
 	}
 	statePath := filepath.Join(t.TempDir(), "state.json")
 	store := openStateAt(t, statePath, now.Add(-time.Minute))
 	id := jobID(item.Key, "review")
 	handler := &fakeHandler{executeErr: ErrPostModelPublication, onExecute: func() {
 		saveModelCallStart(t, store, id)
-		gh.items = append(gh.items, github.Item{Key: "comment:2", NodeID: "node:2", Body: "Review complete.\n\n" + (Job{ID: id}).Marker(), Author: github.User{Login: "linkdataminion"}, UpdatedAt: now})
+		gh.reviewReplies = append(gh.reviewReplies, github.Item{Key: "review:2", NodeID: "node:2", Body: "Review complete.\n\n" + (Job{ID: id}).Marker(), Author: github.User{Login: "linkdataminion"}, UpdatedAt: now})
 	}}
 	clock := now
 	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Now: func() time.Time { return clock }}
@@ -736,7 +822,7 @@ func TestRunOnceLostPublicationResponseRetriesFailedLookup(t *testing.T) {
 	reopened := openStateAt(t, statePath, now.Add(-time.Minute))
 	handler.onExecute = func() { t.Fatal("reply lookup retry repeated paid model work") }
 	clock = advanceToRetry(clock, reopened)
-	if _, err := m.RunOnce(t.Context(), reopened); err != nil || len(handler.jobs) != 1 || gh.commentCalls != 0 || len(reopened.Data.Processed) != 1 || len(reopened.Data.JobFailures) != 0 {
+	if _, err := m.RunOnce(t.Context(), reopened); err != nil || len(handler.jobs) != 1 || gh.commentCalls != 0 || len(gh.verifiedCalls) != 2 || !gh.verifiedCalls[1] || len(reopened.Data.Processed) != 1 || len(reopened.Data.JobFailures) != 0 {
 		t.Fatalf("recovered lookup repeated work or posted failure: err=%v jobs=%d replies=%d state=%+v", err, len(handler.jobs), gh.commentCalls, reopened.Data)
 	}
 }

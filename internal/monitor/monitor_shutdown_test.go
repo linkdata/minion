@@ -254,6 +254,10 @@ func TestRunOnceCanceledExecutionPreservesEarlierFailure(t *testing.T) {
 				!store.Data.Cursor.Equal(initial) || !store.Data.RepositoryCursors[first.Repository.FullName].Equal(initial) {
 				t.Fatalf("canceled execution continued discovery or changed backoff/cursors: jobs=%d state=%+v", len(handler.jobs), store.Data)
 			}
+			if test.terminal {
+				// The existing failure reply is now verified before it suppresses another post.
+				calls[3]++
+			}
 			if ([4]int{gh.repoChecks, gh.threadCalls, gh.checks, gh.currentChecks}) != calls {
 				t.Fatalf("discovery continued after cancellation: got=%v want=%v", [4]int{gh.repoChecks, gh.threadCalls, gh.checks, gh.currentChecks}, calls)
 			}
