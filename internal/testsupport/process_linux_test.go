@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -86,16 +87,18 @@ func TestPinProcessRequiresAValidPIDFile(t *testing.T) {
 }
 
 func TestWaitForProcessRetriesUnpublishedPID(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "pid")
-	if err := os.WriteFile(path, nil, 0600); err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
-	defer cancel()
-	child, err := WaitForProcess(ctx, path, make(chan struct{}))
-	if child != nil || !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "fixture child did not start") {
-		t.Fatalf("unpublished PID stopped polling before startup deadline: %v, %v", child, err)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "pid")
+		if err := os.WriteFile(path, nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+		defer cancel()
+		child, err := WaitForProcess(ctx, path, make(chan struct{}))
+		if child != nil || !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "fixture child did not start") {
+			t.Fatalf("unpublished PID stopped polling before startup deadline: %v, %v", child, err)
+		}
+	})
 }
 
 func TestCleanupDoesNotSignalStalePID(t *testing.T) {

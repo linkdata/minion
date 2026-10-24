@@ -622,7 +622,7 @@ fi
 }
 
 func TestSessionInitializationFailureStaysBound(t *testing.T) {
-	binary := fakeExecutable(t, "claude", "touch \"$0.called\"\nexit 99\n")
+	binary := fakeExecutableUnchecked(t, "claude", "touch \"$0.called\"\nexit 99\n")
 	skill := filepath.Join(t.TempDir(), "SKILL.md")
 	settings := config.ClaudeConfig{Skills: []string{skill}}
 	var session Session

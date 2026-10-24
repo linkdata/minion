@@ -32,7 +32,7 @@ func TestHomePathUsesNativeVariableAndDefault(t *testing.T) {
 func TestUnavailableImplicitHomeStopsBeforeCLI(t *testing.T) {
 	for _, validate := range []bool{false, true} {
 		t.Run(map[bool]string{false: "run", true: "validate"}[validate], func(t *testing.T) {
-			binary := fakeExecutable(t, "claude", `touch "$0.called"; exit 99`)
+			binary := fakeExecutableUnchecked(t, "claude", `touch "$0.called"; exit 99`)
 			t.Setenv("HOME", "")
 			t.Setenv("CLAUDE_CONFIG_DIR", "")
 			var err error

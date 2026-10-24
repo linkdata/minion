@@ -105,7 +105,6 @@ func TestRunnerChecksAuditPrerequisitesBeforeModel(t *testing.T) {
 }
 
 func TestAuditMissingInputsFailBeforeValidatorExecution(t *testing.T) {
-	requireActionProcessGroup(t)
 	for _, name := range auditArtifacts {
 		for _, empty := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/empty=%t", name, empty), func(t *testing.T) {
@@ -121,10 +120,13 @@ func TestAuditMissingInputsFailBeforeValidatorExecution(t *testing.T) {
 					}
 					supplied = append(supplied, file)
 				}
+				allowed := empty && auditArtifactMayBeEmpty(name)
+				if allowed {
+					requireActionProcessGroup(t)
+				}
 				marker := filepath.Join(t.TempDir(), "node-called")
 				nodeDir := fakeOnPath(t, "node", "#!/bin/sh\nprintf called > "+shellQuote(marker)+"\nexit 0\n")
 				err := validateAuditFiles(t.Context(), supplied, t.TempDir(), "/installed/SKILL.md", auditTools{binary: filepath.Join(nodeDir, "node"), permissionFlag: "--permission"}, job.Identity.Repository, "/source", job.Source.Head)
-				allowed := empty && auditArtifactMayBeEmpty(name)
 				if allowed {
 					if err != nil {
 						t.Fatalf("allowed empty %s rejected: %v", name, err)

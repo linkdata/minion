@@ -29,11 +29,11 @@ import (
 )
 
 func TestHTTPWorkerDiagnosticsRemainPrivateThroughPublication(t *testing.T) {
-	requireActionProcessGroup(t)
 	for _, action := range []command.Action{command.Comment, command.Review, command.SecurityAudit, command.Fix} {
 		t.Run(string(action), func(t *testing.T) {
 			job := testJob(action)
 			if action == command.SecurityAudit {
+				requireActionProcessGroup(t)
 				installActionTestSkills(t, testAuditSkillURL)
 				fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
 			}

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -92,15 +93,24 @@ printf '%s\n' '`+successfulResult+`'
 
 const successfulResult = `{"type":"result","subtype":"success","is_error":false,"result":"final answer","usage":{"input_tokens":3,"cache_creation_input_tokens":5,"cache_read_input_tokens":7,"output_tokens":11},"modelUsage":{"claude-main":{"inputTokens":3,"cacheCreationInputTokens":5,"cacheReadInputTokens":7,"outputTokens":11}}}`
 
+var claudeProcessGroupCheck = sync.OnceValue(processgroup.Check)
+
 func fakeExecutable(t *testing.T, name, script string) string {
 	t.Helper()
 	if name == "claude" {
-		if err := processgroup.Check(); err != nil {
+		if err := claudeProcessGroupCheck(); err != nil {
 			if os.Getenv("MINION_REQUIRE_PROCESSGROUP") == "1" {
 				t.Fatal(err)
 			}
 			t.Skipf("native Claude tests require delegated process ownership: %v", err)
 		}
+	}
+	return fakeExecutableUnchecked(t, name, script)
+}
+
+func fakeExecutableUnchecked(t *testing.T, name, script string) string {
+	t.Helper()
+	if name == "claude" {
 		t.Setenv("HOME", t.TempDir())
 		t.Setenv("CLAUDE_CONFIG_DIR", "")
 		// Native invocations echo their explicit host-selected conversation ID.
@@ -501,7 +511,7 @@ func TestRunRejectsUnsafePaths(t *testing.T) {
 	if err := os.MkdirAll(outputChild, 0700); err != nil {
 		t.Fatal(err)
 	}
-	fakeExecutable(t, "claude", "exit 99\n")
+	fakeExecutableUnchecked(t, "claude", "exit 99\n")
 	const pathSecret = "dummy-secret"
 	for _, tc := range []struct {
 		name, dir, output string
@@ -618,7 +628,7 @@ func TestChildEnvironmentRejectsCredentials(t *testing.T) {
 }
 
 func TestCredentialEnvironmentStopsCLI(t *testing.T) {
-	binary := fakeExecutable(t, "claude", "touch \"$0.called\"\nexit 99\n")
+	binary := fakeExecutableUnchecked(t, "claude", "touch \"$0.called\"\nexit 99\n")
 	t.Setenv("ANTHROPIC_API_KEY", "dummy-secret")
 	for _, allow := range []bool{false, true} {
 		t.Run(fmt.Sprint(allow), func(t *testing.T) {

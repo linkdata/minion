@@ -108,7 +108,6 @@ func TestRunnerReturnsParentCancellationAfterFinalReview(t *testing.T) {
 }
 
 func TestRunnerPreparationFailuresAreTerminalBeforeModels(t *testing.T) {
-	requireActionProcessGroup(t)
 	longPath := strings.TrimSuffix(strings.Repeat(strings.Repeat("a", 255)+"/", 16), "/")
 	for _, test := range []struct {
 		name   string
@@ -122,6 +121,9 @@ func TestRunnerPreparationFailuresAreTerminalBeforeModels(t *testing.T) {
 		{"missing audit task skill", command.SecurityAudit, func(job *Job) { job.Main.Skills = []string{skills.BuiltinAntiPromptInjection} }, "action prompt: security audit requires"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			if test.name != "source materialization" {
+				requireActionProcessGroup(t)
+			}
 			job := testJob(test.action)
 			test.mutate(&job)
 			runner := Runner{WorkRoot: t.TempDir(), runModel: forbidModel(t)}

@@ -513,163 +513,180 @@ func TestRunHTTPRequiresWatchAdmissionBeforeRunner(t *testing.T) {
 }
 
 func TestRunHTTPBoundsStalledWatchHeadersByAcceptedExpiry(t *testing.T) {
-	job := testJob(command.Comment)
-	binding := httpJobBinding(job)
-	watchEntered := make(chan struct{}, 1)
-	outcomes := make(chan httpOutcome, 1)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/next":
-			httpClientTestJSON(t, w, httpAssignment{Job: job, Expires: time.Now().Add(time.Second).UnixNano()})
-		case "/cancel":
-			var value httpBinding
-			if err := httpDecode(r.Body, httpControlBytes, &value); err != nil || value != binding {
-				t.Errorf("invalid stalled watch: binding=%+v error=%v", value, err)
+	synctest.Test(t, func(t *testing.T) {
+		job := testJob(command.Comment)
+		binding := httpJobBinding(job)
+		watchEntered := make(chan struct{}, 1)
+		outcomes := make(chan httpOutcome, 1)
+		server := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/next":
+				httpClientTestJSON(t, w, httpAssignment{Job: job, Expires: time.Now().Add(time.Second).UnixNano()})
+			case "/cancel":
+				var value httpBinding
+				if err := httpDecode(r.Body, httpControlBytes, &value); err != nil || value != binding {
+					t.Errorf("invalid stalled watch: binding=%+v error=%v", value, err)
+				}
+				watchEntered <- struct{}{}
+				<-r.Context().Done() // Deliberately never admit the watch with response headers.
+			case "/outcome":
+				var outcome httpOutcome
+				if err := httpDecode(r.Body, httpOutcomeBytes, &outcome); err != nil {
+					t.Error(err)
+				}
+				outcomes <- outcome
+				httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: binding, Kind: "outcome", Sequence: outcome.Sequence})
+			default:
+				t.Errorf("worker continued while watch headers were stalled: %s", r.URL.Path)
+				http.NotFound(w, r)
 			}
-			watchEntered <- struct{}{}
-			<-r.Context().Done() // Deliberately never admit the watch with response headers.
-		case "/outcome":
-			var outcome httpOutcome
-			if err := httpDecode(r.Body, httpOutcomeBytes, &outcome); err != nil {
-				t.Error(err)
-			}
-			outcomes <- outcome
-			httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: binding, Kind: "outcome", Sequence: outcome.Sequence})
-		default:
-			t.Errorf("worker continued while watch headers were stalled: %s", r.URL.Path)
-			http.NotFound(w, r)
+		}))
+		defer server.Close()
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+		defer cancel()
+		err := RunHTTP(ctx, server.Client(), server.URL, job.Identity.ExecutorID, &Runner{runModel: forbidModel(t)})
+		if errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || errors.Is(err, monitor.ErrRequestTransport) || !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, monitor.ErrTerminalJob) || ctx.Err() != nil || len(watchEntered) != 1 || len(outcomes) != 1 {
+			t.Fatalf("stalled watch outlived the accepted runtime or ran models: error=%v caller=%v watch=%d outcome=%d", err, ctx.Err(), len(watchEntered), len(outcomes))
 		}
-	}))
-	defer server.Close()
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-	defer cancel()
-	err := RunHTTP(ctx, server.Client(), server.URL, job.Identity.ExecutorID, &Runner{runModel: forbidModel(t)})
-	if errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || errors.Is(err, monitor.ErrRequestTransport) || !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, monitor.ErrTerminalJob) || ctx.Err() != nil || len(watchEntered) != 1 || len(outcomes) != 1 {
-		t.Fatalf("stalled watch outlived the accepted runtime or ran models: error=%v caller=%v watch=%d outcome=%d", err, ctx.Err(), len(watchEntered), len(outcomes))
-	}
-	outcome := <-outcomes
-	if outcome.Failure == nil || outcome.Failure.OutcomeUnknown || outcome.Failure.RequestTransport || !outcome.Failure.Deadline || !outcome.Failure.Terminal || len(outcome.Result.Calls) != 0 || outcome.Result.Answer != "" {
-		t.Fatalf("stalled watch fabricated execution or lost its admission deadline: %+v", outcome)
-	}
+		outcome := <-outcomes
+		if outcome.Failure == nil || outcome.Failure.OutcomeUnknown || outcome.Failure.RequestTransport || !outcome.Failure.Deadline || !outcome.Failure.Terminal || len(outcome.Result.Calls) != 0 || outcome.Result.Answer != "" {
+			t.Fatalf("stalled watch fabricated execution or lost its admission deadline: %+v", outcome)
+		}
+	})
 }
 
 func TestRunHTTPKnownNoWorkOutcomeReleasesParentCapacity(t *testing.T) {
 	for _, expired := range []bool{false, true} {
 		t.Run(fmt.Sprintf("expired assignment=%t", expired), func(t *testing.T) {
-			job := testJob(command.Comment)
-			if expired {
-				job.RuntimeBudget = time.Second
-			}
-			var callbacks atomic.Int32
-			sink := runnerExecutionCheckpoints{
-				before: func(CallCheckpoint) error { callbacks.Add(1); return nil },
-				after:  func(CallCheckpoint) error { callbacks.Add(1); return nil },
-				review: func(ReviewCheckpoint) error { callbacks.Add(1); return nil },
-			}
-			f := newHTTPServerTest(t, t.Context(), job, sink, func(next http.Handler) http.Handler {
-				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					if !expired && r.URL.Path == "/cancel" {
-						w = httpClientFailedWatchHeaders{w}
-					}
-					next.ServeHTTP(w, r)
-				})
-			})
-			client := *f.server.Client()
-			transport := client.Transport
-			client.Transport = httpClientTestTransport(func(r *http.Request) (*http.Response, error) {
-				response, err := transport.RoundTrip(r)
-				if expired && r.URL.Path == "/next" && err == nil {
-					<-f.tx.budget.Done() // Deliver the valid assignment only after its fixed expiry.
+			synctest.Test(t, func(t *testing.T) {
+				job := testJob(command.Comment)
+				if expired {
+					job.RuntimeBudget = time.Second
 				}
-				return response, err
+				var callbacks atomic.Int32
+				sink := runnerExecutionCheckpoints{
+					before: func(CallCheckpoint) error { callbacks.Add(1); return nil },
+					after:  func(CallCheckpoint) error { callbacks.Add(1); return nil },
+					review: func(ReviewCheckpoint) error { callbacks.Add(1); return nil },
+				}
+				f := newHTTPServerTestWithServer(t, t.Context(), job, sink, func(next http.Handler) http.Handler {
+					return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						if !expired && r.URL.Path == "/cancel" {
+							w = httpClientFailedWatchHeaders{w}
+						}
+						next.ServeHTTP(w, r)
+					})
+				}, func(h http.Handler) *httptest.Server { return httptest.NewTestServer(t, h) })
+				client := *f.server.Client()
+				transport := client.Transport
+				client.Transport = httpClientTestTransport(func(r *http.Request) (*http.Response, error) {
+					response, err := transport.RoundTrip(r)
+					if expired && r.URL.Path == "/next" && err == nil {
+						<-f.tx.budget.Done() // Deliver the valid assignment only after its fixed expiry.
+					}
+					return response, err
+				})
+				err := RunHTTP(t.Context(), &client, f.server.URL, job.Identity.ExecutorID, &Runner{runModel: forbidModel(t)})
+				got := f.result(t)
+				if err == nil || got.err == nil || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || callbacks.Load() != 0 || !got.result.matchesJob(job) || len(got.result.Calls) != 0 || got.result.Answer != "" {
+					t.Fatalf("conclusive no-work outcome became unknown or fabricated work: worker=%v parent=%v result=%+v callbacks=%d", err, got.err, got.result, callbacks.Load())
+				}
+				if expired && (!errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, context.DeadlineExceeded) || !errors.Is(got.err, monitor.ErrTerminalJob) || !errors.Is(got.err, context.DeadlineExceeded)) {
+					t.Fatalf("expired assignment lost its known deadline cause: worker=%v parent=%v", err, got.err)
+				}
+				ctx, cancel := context.WithCancel(t.Context())
+				cancel()
+				if _, err := f.executor.Execute(ctx, job, sink); !errors.Is(err, context.Canceled) || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) {
+					t.Fatalf("known no-work outcome quarantined reusable parent capacity: %v", err)
+				}
 			})
-			err := RunHTTP(t.Context(), &client, f.server.URL, job.Identity.ExecutorID, &Runner{runModel: forbidModel(t)})
-			got := f.result(t)
-			if err == nil || got.err == nil || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || callbacks.Load() != 0 || !got.result.matchesJob(job) || len(got.result.Calls) != 0 || got.result.Answer != "" {
-				t.Fatalf("conclusive no-work outcome became unknown or fabricated work: worker=%v parent=%v result=%+v callbacks=%d", err, got.err, got.result, callbacks.Load())
-			}
-			if expired && (!errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, context.DeadlineExceeded) || !errors.Is(got.err, monitor.ErrTerminalJob) || !errors.Is(got.err, context.DeadlineExceeded)) {
-				t.Fatalf("expired assignment lost its known deadline cause: worker=%v parent=%v", err, got.err)
-			}
-			ctx, cancel := context.WithCancel(t.Context())
-			cancel()
-			if _, err := f.executor.Execute(ctx, job, sink); !errors.Is(err, context.Canceled) || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) {
-				t.Fatalf("known no-work outcome quarantined reusable parent capacity: %v", err)
-			}
 		})
 	}
 }
 
 func TestRunHTTPStalledStatusCannotConsumeOutcomeGrace(t *testing.T) {
-	requireActionProcessGroup(t)
 	for _, phase := range []string{"prepare", "upload"} {
 		t.Run(phase, func(t *testing.T) {
-			job := testJob(command.Comment)
-			job.RuntimeBudget = 2 * time.Second
-			paid := make(chan CallUsage, 1)
-			f := newHTTPServerTest(t, t.Context(), job, runnerExecutionCheckpoints{
-				after: func(value CallCheckpoint) error { paid <- value.Call; return nil },
-			}, nil)
-			entered, release := make(chan struct{}), make(chan struct{})
-			defer close(release)
-			stopped := make(chan error, 1)
-			var observations, native atomic.Int32
-			client := *f.server.Client()
-			client.Timeout = 0 // The action context must end the stalled observation.
-			transport := client.Transport
-			client.Transport = httpClientTestTransport(func(r *http.Request) (*http.Response, error) {
-				if r.URL.Path == "/status" {
-					sequence := observations.Add(1)
-					if phase == "prepare" && sequence == 1 || phase == "upload" && sequence == 2 {
-						close(entered)
-						select {
-						case <-r.Context().Done():
-							stopped <- context.Cause(r.Context())
-							return nil, r.Context().Err()
-						case <-release:
-							return nil, errors.New("fixture released a stuck Status request")
+			if phase == "upload" {
+				requireActionProcessGroup(t)
+			}
+			run := func(t *testing.T) {
+				job := testJob(command.Comment)
+				job.RuntimeBudget = 2 * time.Second
+				paid := make(chan CallUsage, 1)
+				newServer := httptest.NewServer
+				if phase == "prepare" {
+					newServer = func(h http.Handler) *httptest.Server { return httptest.NewTestServer(t, h) }
+				}
+				f := newHTTPServerTestWithServer(t, t.Context(), job, runnerExecutionCheckpoints{
+					after: func(value CallCheckpoint) error { paid <- value.Call; return nil },
+				}, nil, newServer)
+				entered, release := make(chan struct{}), make(chan struct{})
+				defer close(release)
+				stopped := make(chan error, 1)
+				var observations, native atomic.Int32
+				client := *f.server.Client()
+				client.Timeout = 0 // The action context must end the stalled observation.
+				transport := client.Transport
+				client.Transport = httpClientTestTransport(func(r *http.Request) (*http.Response, error) {
+					if r.URL.Path == "/status" {
+						sequence := observations.Add(1)
+						if phase == "prepare" && sequence == 1 || phase == "upload" && sequence == 2 {
+							close(entered)
+							select {
+							case <-r.Context().Done():
+								stopped <- context.Cause(r.Context())
+								return nil, r.Context().Err()
+							case <-release:
+								return nil, errors.New("fixture released a stuck Status request")
+							}
 						}
 					}
+					return transport.RoundTrip(r)
+				})
+				tokens := usage.Tokens{Input: 17, CachedInput: 3, Output: 5}
+				runner := &Runner{WorkRoot: t.TempDir(), runModel: func(context.Context, modelRun) (aicli.Result, error) {
+					native.Add(1)
+					return aicli.Result{Answer: "Completed before upload stalled", Tokens: tokens, UsageComplete: true}, nil
+				}}
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				done := make(chan error, 1)
+				go func() { done <- RunHTTP(ctx, &client, f.server.URL, job.Identity.ExecutorID, runner) }()
+				select {
+				case <-entered:
+				case <-time.After(5 * time.Second):
+					t.Fatal("optional observation did not enter its stalled request")
 				}
-				return transport.RoundTrip(r)
-			})
-			tokens := usage.Tokens{Input: 17, CachedInput: 3, Output: 5}
-			runner := &Runner{WorkRoot: t.TempDir(), runModel: func(context.Context, modelRun) (aicli.Result, error) {
-				native.Add(1)
-				return aicli.Result{Answer: "Completed before upload stalled", Tokens: tokens, UsageComplete: true}, nil
-			}}
-			ctx, cancel := context.WithCancel(t.Context())
-			defer cancel()
-			done := make(chan error, 1)
-			go func() { done <- RunHTTP(ctx, &client, f.server.URL, job.Identity.ExecutorID, runner) }()
-			select {
-			case <-entered:
-			case <-time.After(5 * time.Second):
-				t.Fatal("optional observation did not enter its stalled request")
-			}
-			var err error
-			select {
-			case err = <-done:
-			case <-time.After(5 * time.Second):
-				t.Fatal("optional Status consumed required outcome grace after action expiry")
-			}
-			got := f.result(t)
-			wantCalls := 0
-			if phase == "upload" {
-				wantCalls = 1
-			}
-			if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, monitor.ErrTerminalJob) || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || !errors.Is(got.err, context.DeadlineExceeded) || !errors.Is(got.err, monitor.ErrTerminalJob) || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || native.Load() != int32(wantCalls) || len(got.result.Calls) != wantCalls || len(paid) != wantCalls || len(stopped) != 1 {
-				t.Fatalf("stalled observation lost known outcome or paid facts: worker=%v parent=%v result=%+v native=%d paid=%d stopped=%d", err, got.err, got.result, native.Load(), len(paid), len(stopped))
-			}
-			if cause := <-stopped; !errors.Is(cause, context.DeadlineExceeded) {
-				t.Fatalf("observation did not inherit the accepted action expiry: %v", cause)
-			}
-			if wantCalls == 1 {
-				if receipt := <-paid; receipt != got.result.Calls[0] || receipt.Tokens != tokens || !receipt.Complete || got.result.Answer != "Completed before upload stalled" {
-					t.Fatalf("stalled upload discarded acknowledged paid facts: receipt=%+v result=%+v", receipt, got.result)
+				var err error
+				select {
+				case err = <-done:
+				case <-time.After(5 * time.Second):
+					t.Fatal("optional Status consumed required outcome grace after action expiry")
 				}
-			} else if got.result.Answer != "" {
-				t.Fatalf("stalled preparation fabricated an answer: %+v", got.result)
+				got := f.result(t)
+				wantCalls := 0
+				if phase == "upload" {
+					wantCalls = 1
+				}
+				if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, monitor.ErrTerminalJob) || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || !errors.Is(got.err, context.DeadlineExceeded) || !errors.Is(got.err, monitor.ErrTerminalJob) || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || native.Load() != int32(wantCalls) || len(got.result.Calls) != wantCalls || len(paid) != wantCalls || len(stopped) != 1 {
+					t.Fatalf("stalled observation lost known outcome or paid facts: worker=%v parent=%v result=%+v native=%d paid=%d stopped=%d", err, got.err, got.result, native.Load(), len(paid), len(stopped))
+				}
+				if cause := <-stopped; !errors.Is(cause, context.DeadlineExceeded) {
+					t.Fatalf("observation did not inherit the accepted action expiry: %v", cause)
+				}
+				if wantCalls == 1 {
+					if receipt := <-paid; receipt != got.result.Calls[0] || receipt.Tokens != tokens || !receipt.Complete || got.result.Answer != "Completed before upload stalled" {
+						t.Fatalf("stalled upload discarded acknowledged paid facts: receipt=%+v result=%+v", receipt, got.result)
+					}
+				} else if got.result.Answer != "" {
+					t.Fatalf("stalled preparation fabricated an answer: %+v", got.result)
+				}
+			}
+			if phase == "prepare" {
+				synctest.Test(t, run)
+			} else {
+				run(t)
 			}
 		})
 	}

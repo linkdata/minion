@@ -1218,29 +1218,31 @@ func TestHTTPExecutorReceivedOutcomeSurvivesLostReceiptACK(t *testing.T) {
 func TestHTTPExecutorLateKnownOutcomeRetainsFactsAndActualContextCause(t *testing.T) {
 	for _, deadline := range []bool{false, true} {
 		t.Run(fmt.Sprintf("deadline=%v", deadline), func(t *testing.T) {
-			var ctx context.Context
-			var cancel context.CancelFunc
-			if deadline {
-				ctx, cancel = context.WithTimeout(t.Context(), time.Second)
-			} else {
-				ctx, cancel = context.WithCancel(t.Context())
-			}
-			defer cancel()
-			f := newHTTPServerTest(t, ctx, testJob(command.Comment), runnerExecutionCheckpoints{}, nil)
-			f.pull(t)
-			if !deadline {
-				cancel()
-			}
-			<-ctx.Done()
-			<-f.tx.ctx.Done()
-			outcome := f.outcome(1, nil)
-			outcome.Result.Answer = "Received after the accepted action stopped"
-			outcome.Result.Calls = []CallUsage{{Provider: "codex", Role: roleMain, Round: 1, Tokens: usage.Tokens{Input: 23, Output: 3}, Complete: true}}
-			f.ack(t, "/outcome", outcome, http.StatusOK, 1)
-			got := f.result(t)
-			if !reflect.DeepEqual(got.result, outcome.Result) || !errors.Is(got.err, ctx.Err()) || errors.Is(got.err, monitor.ErrTerminalJob) != deadline || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) {
-				t.Fatalf("late known outcome lost paid facts or fixed expiry: %+v error=%v", got.result, got.err)
-			}
+			synctest.Test(t, func(t *testing.T) {
+				var ctx context.Context
+				var cancel context.CancelFunc
+				if deadline {
+					ctx, cancel = context.WithTimeout(t.Context(), time.Second)
+				} else {
+					ctx, cancel = context.WithCancel(t.Context())
+				}
+				defer cancel()
+				f := newHTTPServerTestInMemory(t, ctx, testJob(command.Comment), runnerExecutionCheckpoints{})
+				f.pull(t)
+				if !deadline {
+					cancel()
+				}
+				<-ctx.Done()
+				<-f.tx.ctx.Done()
+				outcome := f.outcome(1, nil)
+				outcome.Result.Answer = "Received after the accepted action stopped"
+				outcome.Result.Calls = []CallUsage{{Provider: "codex", Role: roleMain, Round: 1, Tokens: usage.Tokens{Input: 23, Output: 3}, Complete: true}}
+				f.ack(t, "/outcome", outcome, http.StatusOK, 1)
+				got := f.result(t)
+				if !reflect.DeepEqual(got.result, outcome.Result) || !errors.Is(got.err, ctx.Err()) || errors.Is(got.err, monitor.ErrTerminalJob) != deadline || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) {
+					t.Fatalf("late known outcome lost paid facts or fixed expiry: %+v error=%v", got.result, got.err)
+				}
+			})
 		})
 	}
 }
@@ -1562,46 +1564,48 @@ func (w httpServerHeldWrite) Write(body []byte) (int, error) {
 }
 
 func TestHTTPExecutorSealedOutcomeDoesNotAcquireDeadlineDuringACKDrain(t *testing.T) {
-	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
-	defer cancel()
-	entered, release := make(chan struct{}), make(chan struct{})
-	var once sync.Once
-	unblock := func() { once.Do(func() { close(release) }) }
-	f := newHTTPServerTest(t, ctx, testJob(command.Comment), runnerExecutionCheckpoints{}, func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path == "/outcome" {
-				w = httpServerHeldWrite{ResponseWriter: w, entered: entered, release: release}
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+		defer cancel()
+		entered, release := make(chan struct{}), make(chan struct{})
+		var once sync.Once
+		unblock := func() { once.Do(func() { close(release) }) }
+		f := newHTTPServerTestWithServer(t, ctx, testJob(command.Comment), runnerExecutionCheckpoints{}, func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/outcome" {
+					w = httpServerHeldWrite{ResponseWriter: w, entered: entered, release: release}
+				}
+				next.ServeHTTP(w, r)
+			})
+		}, func(h http.Handler) *httptest.Server { return httptest.NewTestServer(t, h) })
+		t.Cleanup(unblock)
+		f.pull(t)
+		outcome := f.outcome(1, nil)
+		outcome.Result.Answer = "Sealed before expiry"
+		acknowledged := make(chan httpServerTestExchange, 1)
+		go func() { acknowledged <- f.request("/outcome", outcome) }()
+		select {
+		case <-entered:
+			if ctx.Err() != nil {
+				t.Fatal("fixture did not seal outcome before parent deadline")
 			}
-			next.ServeHTTP(w, r)
-		})
-	})
-	t.Cleanup(unblock)
-	f.pull(t)
-	outcome := f.outcome(1, nil)
-	outcome.Result.Answer = "Sealed before expiry"
-	acknowledged := make(chan httpServerTestExchange, 1)
-	go func() { acknowledged <- f.request("/outcome", outcome) }()
-	select {
-	case <-entered:
-		if ctx.Err() != nil {
-			t.Fatal("fixture did not seal outcome before parent deadline")
+		case <-ctx.Done():
+			t.Fatal("outcome did not enter ACK write before deadline")
 		}
-	case <-ctx.Done():
-		t.Fatal("outcome did not enter ACK write before deadline")
-	}
-	<-ctx.Done()
-	select {
-	case result := <-f.done:
-		t.Fatalf("Execute returned while its receipt ACK was still being written: %+v", result)
-	default:
-	}
-	unblock()
-	if ack := <-acknowledged; ack.err != nil || ack.status != http.StatusOK || ack.ack.Failure != nil {
-		t.Fatalf("sealed outcome ACK did not drain: %+v", ack)
-	}
-	if got := f.result(t); got.err != nil || !reflect.DeepEqual(got.result, outcome.Result) {
-		t.Fatalf("ACK drain invented a deadline after the outcome was already sealed: %+v error=%v", got.result, got.err)
-	}
+		<-ctx.Done()
+		select {
+		case result := <-f.done:
+			t.Fatalf("Execute returned while its receipt ACK was still being written: %+v", result)
+		default:
+		}
+		unblock()
+		if ack := <-acknowledged; ack.err != nil || ack.status != http.StatusOK || ack.ack.Failure != nil {
+			t.Fatalf("sealed outcome ACK did not drain: %+v", ack)
+		}
+		if got := f.result(t); got.err != nil || !reflect.DeepEqual(got.result, outcome.Result) {
+			t.Fatalf("ACK drain invented a deadline after the outcome was already sealed: %+v error=%v", got.result, got.err)
+		}
+	})
 }
 
 func TestHTTPExecutorMissingOutcomeClosesRealGraceAndQuarantines(t *testing.T) {
@@ -1613,6 +1617,7 @@ func TestHTTPExecutorMissingOutcomeClosesRealGraceAndQuarantines(t *testing.T) {
 		ready := Status{Version: ProtocolVersion, Identity: f.job.Identity, SourceRef: f.job.Source.Head, Sequence: 1, WorkerState: "ready", Phase: "cleanup"}
 		f.ack(t, "/status", httpObservation{Status: ready}, http.StatusOK, 1)
 		cancel()
+		canceledAt := time.Now()
 		<-f.tx.ctx.Done()
 		select {
 		case got := <-f.done:
@@ -1621,6 +1626,9 @@ func TestHTTPExecutorMissingOutcomeClosesRealGraceAndQuarantines(t *testing.T) {
 		}
 		select {
 		case got := <-f.done:
+			if elapsed := time.Since(canceledAt); elapsed < httpControlTimeout {
+				t.Fatalf("missing outcome closed receipt grace after %s; want at least %s", elapsed, httpControlTimeout)
+			}
 			if !errors.Is(got.err, context.Canceled) || !errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || errors.Is(got.err, monitor.ErrTerminalJob) || !got.result.matchesJob(f.job) || len(got.result.Calls) != 0 {
 				t.Fatalf("missing outcome invented known execution facts: %+v error=%v", got.result, got.err)
 			}

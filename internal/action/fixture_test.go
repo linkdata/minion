@@ -124,6 +124,11 @@ func assertEmptyDir(t *testing.T, root string) {
 func gitFixtureRemote(t *testing.T, files ...workspace.File) (base, head, remote string) {
 	t.Helper()
 	requireActionProcessGroup(t)
+	return gitFixtureRemoteRaw(t, files...)
+}
+
+func gitFixtureRemoteRaw(t *testing.T, files ...workspace.File) (base, head, remote string) {
+	t.Helper()
 	realGit, err := exec.LookPath("git")
 	if err != nil {
 		t.Fatal(err)

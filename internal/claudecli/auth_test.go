@@ -214,7 +214,7 @@ func TestAPIKeyGrantOverlap(t *testing.T) {
 	if err := os.WriteFile(skill, []byte("dummy skill"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	fakeExecutable(t, "claude", "exit 99\n")
+	fakeExecutableUnchecked(t, "claude", "exit 99\n")
 	_, err := Run(t.Context(), workspace, "task", false, "", config.ClaudeConfig{APIKey: dummyAPIKey, Skills: []string{skill}})
 	if err == nil || !strings.Contains(err.Error(), "API key directory overlaps") {
 		t.Fatal("accepted skill read grant containing credential directory")

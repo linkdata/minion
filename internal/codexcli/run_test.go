@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -493,7 +494,7 @@ func TestRunRejectsSkillInsideSource(t *testing.T) {
 	if err := os.Symlink(skill, alias); err != nil {
 		t.Fatal(err)
 	}
-	binary := installFakeCodex(t, "#!/bin/sh\ntouch \"$0.invoked\"\nexit 99\n")
+	binary := installFakeCodexUnchecked(t, "#!/bin/sh\ntouch \"$0.invoked\"\nexit 99\n")
 	for _, path := range []string{skill, alias} {
 		if _, err := Run(t.Context(), source, "task", false, "", config.CodexConfig{Skills: []string{path}}); err == nil || !strings.Contains(err.Error(), "skill is inside the untrusted source snapshot") {
 			t.Fatalf("accepted source skill %q: %v", path, err)
@@ -514,7 +515,7 @@ func TestRunRejectsReadOnlyOutputOverlap(t *testing.T) {
 	if err := os.Symlink(output, alias); err != nil {
 		t.Fatal(err)
 	}
-	binary := installFakeCodex(t, "#!/bin/sh\ntouch \"$0.invoked\"\nexit 99\n")
+	binary := installFakeCodexUnchecked(t, "#!/bin/sh\ntouch \"$0.invoked\"\nexit 99\n")
 	for _, path := range []string{output, child, filepath.Dir(output), alias} {
 		if _, err := Run(t.Context(), source, "task", false, output, config.CodexConfig{ReadOnlyDirs: []string{path}}); err == nil || !strings.Contains(err.Error(), "read-only directory overlaps the output directory") {
 			t.Fatalf("accepted read-only/output overlap %q: %v", path, err)
@@ -830,9 +831,11 @@ func TestRunRejectsExecutableFromSourceSnapshot(t *testing.T) {
 	}
 }
 
+var codexProcessGroupCheck = sync.OnceValue(processgroup.Check)
+
 func requireCodexProcessGroup(t *testing.T) {
 	t.Helper()
-	if err := processgroup.Check(); err != nil {
+	if err := codexProcessGroupCheck(); err != nil {
 		if os.Getenv("MINION_REQUIRE_PROCESSGROUP") == "1" {
 			t.Fatal(err)
 		}
@@ -843,6 +846,11 @@ func requireCodexProcessGroup(t *testing.T) {
 func installFakeCodex(t *testing.T, script string) string {
 	t.Helper()
 	requireCodexProcessGroup(t)
+	return installFakeCodexUnchecked(t, script)
+}
+
+func installFakeCodexUnchecked(t *testing.T, script string) string {
+	t.Helper()
 	t.Setenv("CODEX_HOME", canonicalTempDir(t))
 	path, err := filepath.EvalSymlinks(filepath.Join(testsupport.FakeOnPath(t, "codex", script), "codex"))
 	if err != nil {

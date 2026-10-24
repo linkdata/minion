@@ -179,9 +179,7 @@ func TestRunStopsBeforePreflightWhenProcessRecoveryIsPending(t *testing.T) {
 }
 
 func TestRunLatchesUnconfirmedGitScopeBeforeRestart(t *testing.T) {
-	if os.Getenv("MINION_REQUIRE_PROCESSGROUP") != "1" {
-		t.Skip("startup Git proof requires the delegated check service")
-	}
+	requireCLIProcessGroup(t)
 	tools := make(map[string]string)
 	for _, name := range []string{"setsid", "sleep"} {
 		path, err := exec.LookPath(name)
@@ -332,9 +330,7 @@ func TestRunRejectsUnsafeGrantBeforeStateOpen(t *testing.T) {
 }
 
 func TestRunChecksGitBeforeProvidersAndGitHub(t *testing.T) {
-	if os.Getenv("MINION_REQUIRE_PROCESSGROUP") != "1" {
-		t.Skip("startup Git proof requires the delegated check service")
-	}
+	requireCLIProcessGroup(t)
 	tools := make(map[string]string)
 	for _, name := range []string{"git", "setsid", "sleep"} {
 		path, err := exec.LookPath(name)

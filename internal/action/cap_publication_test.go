@@ -21,12 +21,12 @@ import (
 )
 
 func TestCappedPublicationProjectsEveryPublicBodyAndRetainedAudit(t *testing.T) {
-	requireActionProcessGroup(t)
 	for _, action := range []command.Action{command.Review, command.Comment, command.SecurityAudit, command.Fix} {
 		for _, verdict := range []string{"full blockers", "verification blockers with full approval", "only nits"} {
 			t.Run(string(action)+"/"+verdict, func(t *testing.T) {
 				job := withClaudeCritic(testJob(action))
 				if action == command.SecurityAudit {
+					requireActionProcessGroup(t)
 					installActionTestSkills(t, testAuditSkillURL)
 					fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
 				}

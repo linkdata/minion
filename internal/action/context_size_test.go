@@ -62,7 +62,6 @@ func TestCheckGitHubContext(t *testing.T) {
 }
 
 func TestGitHubContextLimitAcrossActions(t *testing.T) {
-	requireActionProcessGroup(t)
 	const title, notes, exactDescription = "T", "N", "éé"
 	modelErr := errors.New("stop after observing the model prompt")
 	for _, tt := range []struct {
