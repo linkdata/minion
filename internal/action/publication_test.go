@@ -591,7 +591,7 @@ func TestPublishedRefutationsAllowAuditTitleQuotedFromSource(t *testing.T) {
 	}
 }
 
-func TestPublishedRefutationsAuditTitleNeedsSourceProofAfterScanBudget(t *testing.T) {
+func TestPublishedRefutationsAuditTitleRejectsUnprovedCopyAfterScanBudget(t *testing.T) {
 	job := withClaudeCritic(testJob(command.SecurityAudit))
 	job.CriticMaxRounds = 3
 	var quotes []string
@@ -626,8 +626,8 @@ func TestPublishedRefutationsAuditTitleNeedsSourceProofAfterScanBudget(t *testin
 	if err := result.validate(job, false); err != nil {
 		t.Fatalf("partial result and refutations are not structurally valid: %v", err)
 	}
-	if err := rejectPublishedRefutations(job, result, publication{answer: "Audit summary"}); err != nil {
-		t.Fatalf("fixture did not exhaust best-effort partial scan: %v", err)
+	if err := rejectPublishedRefutations(job, result, publication{answer: "Audit summary"}); err == nil {
+		t.Fatal("partial private audit title passed without source proof after scan budget")
 	}
 	findings = append(findings, finding{Verdict: "confirmed", Fingerprint: "private", Title: private})
 	data, err = json.Marshal(findings)
@@ -826,17 +826,18 @@ func TestPublishedRefutationsFixManySourceQuotes(t *testing.T) {
 	}
 }
 
-func TestPublishedRefutationsFixSourceScanBudget(t *testing.T) {
+func TestPublishedRefutationsFixRejectsUnprovedCopyAtSourceScanBudget(t *testing.T) {
 	job := withClaudeCritic(testJob(command.Fix))
 	var quotes []string
 	for i := range 1040 {
 		quotes = append(quotes, fmt.Sprintf("Private quote %04d was already in source.", i))
 	}
 	quoted := strings.Join(quotes, "\n")
+	const novel = "This newly introduced private review sentence must not enter a Fix."
 	job.Source.Files[0].Data = []byte(strings.Repeat("f", 1<<20) + "\n" + quoted)
 	result := privateReviewResult(job)
-	result.Refutations[0].Text = quoted
-	result.Changes = []workspace.Change{{Path: "source.txt", Mode: workspace.Regular, Data: []byte(strings.Join(quotes, "\n--;\n"))}}
+	result.Refutations[0].Text = quoted + "\n" + novel
+	result.Changes = []workspace.Change{{Path: "source.txt", Mode: workspace.Regular, Data: []byte(strings.Join(quotes, "\n--;\n") + "\n--;\n" + novel)}}
 	if err := result.Validate(job); err != nil {
 		t.Fatalf("bounded fixture cannot reach publication: %v", err)
 	}
@@ -844,8 +845,8 @@ func TestPublishedRefutationsFixSourceScanBudget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := rejectPublishedRefutations(job, result, projected); err != nil {
-		t.Fatalf("best-effort source scan blocked valid Fix at its budget: %v", err)
+	if err := rejectPublishedRefutations(job, result, projected); err == nil {
+		t.Fatal("unproved private sentence passed after the source scan budget")
 	}
 }
 

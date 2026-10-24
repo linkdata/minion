@@ -240,7 +240,7 @@ func rejectPublishedRefutations(job Job, result Result, projected publication) e
 		return false
 	}
 	// A Fix transfers full replacement files; source quotations can also appear in public prose.
-	// shortcut: Source searches stop after 1 GiB; use multi-pattern matching if fuller coverage matters at that workload.
+	// shortcut: Source searches stop after 1 GiB and reject unproved copies; use multi-pattern matching if fuller coverage matters at that workload.
 	const maxSourceSearchBytes int64 = 1 << 30
 	remainingSourceSearchBytes := maxSourceSearchBytes
 	inSource := make(map[string]bool)
@@ -254,7 +254,7 @@ func rejectPublishedRefutations(job Job, result Result, projected publication) e
 			return !public
 		}
 		if scanExhausted {
-			return false
+			return true
 		}
 		cacheable := strings.IndexByte(private, 0) < 0
 		if !cacheChecked && cacheable {
@@ -311,7 +311,7 @@ func rejectPublishedRefutations(job Job, result Result, projected publication) e
 		if sourceCached && cacheable {
 			if int64(len(sourceText)) > remainingSourceSearchBytes {
 				scanExhausted = true
-				return false
+				return true
 			}
 			remainingSourceSearchBytes -= int64(len(sourceText))
 			inSource[private] = strings.Contains(sourceText, private)
@@ -320,13 +320,13 @@ func rejectPublishedRefutations(job Job, result Result, projected publication) e
 		for _, text := range threadText {
 			if int64(len(text)) > remainingSourceSearchBytes {
 				scanExhausted = true
-				return false
+				return true
 			}
 			for _, variant := range publicationTextVariants(text) {
 				folded := foldPublicationSpace(variant)
 				if int64(len(folded)) > remainingSourceSearchBytes {
 					scanExhausted = true
-					return false
+					return true
 				}
 				remainingSourceSearchBytes -= int64(len(folded))
 				if strings.Contains(folded, private) {
@@ -340,13 +340,13 @@ func rejectPublishedRefutations(job Job, result Result, projected publication) e
 				for _, text := range []string{file.Path, string(file.Data)} {
 					if int64(len(text)) > remainingSourceSearchBytes {
 						scanExhausted = true
-						return false
+						return true
 					}
 					for _, variant := range publicationTextVariants(text) {
 						folded := foldPublicationSpace(variant)
 						if int64(len(folded)) > remainingSourceSearchBytes {
 							scanExhausted = true
-							return false
+							return true
 						}
 						remainingSourceSearchBytes -= int64(len(folded))
 						if strings.Contains(folded, private) {

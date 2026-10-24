@@ -3,6 +3,7 @@ package action
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -33,6 +34,7 @@ func TestExecuteRejectsHostileHTTPOutcomeBeforePublication(t *testing.T) {
 		{"changed acknowledged usage", "usage", false, true},
 		{"changed acknowledged refutation", "refutation", true, true},
 		{"prefixed private sentence", "prefixed refutation", true, true},
+		{"source scan budget cannot prove private sentence", "budget refutation", true, true},
 		{"changed acknowledged decision", "decision", true, false},
 		{"incomplete critic receipt forged approval", "incomplete critic", true, true},
 		{"failed outcome after paid call", "failed outcome", false, true},
@@ -44,7 +46,15 @@ func TestExecuteRejectsHostileHTTPOutcomeBeforePublication(t *testing.T) {
 			if scenario.change == "audit" || scenario.change == "audit coverage" {
 				installActionTestSkills(t, testAuditSkillURL)
 			}
-			gitFixtureRemote(t)
+			var budgetQuotes []string
+			if scenario.change == "budget refutation" {
+				for i := range 1040 {
+					budgetQuotes = append(budgetQuotes, fmt.Sprintf("Private quote %04d was already in source.", i))
+				}
+				gitFixtureRemote(t, workspace.File{Path: "source.txt", Mode: workspace.Regular, Data: []byte(strings.Repeat("f", 1<<20) + "\n" + strings.Join(budgetQuotes, "\n"))})
+			} else {
+				gitFixtureRemote(t)
+			}
 			var writes atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if serveIssueFixture(t, w, r) {
@@ -72,6 +82,9 @@ func TestExecuteRejectsHostileHTTPOutcomeBeforePublication(t *testing.T) {
 			}
 			e.Executor = executorFunc(func(ctx context.Context, job Job, checkpoints Checkpoints) (Result, error) {
 				executed = true
+				if scenario.change == "budget refutation" {
+					job.Source.BaseFiles = nil // Empty base files are omitted on the HTTP wire.
+				}
 				f := newHTTPServerTest(t, ctx, job, checkpoints, nil)
 				f.pull(t)
 				result := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Forged publication"}
@@ -97,6 +110,11 @@ func TestExecuteRejectsHostileHTTPOutcomeBeforePublication(t *testing.T) {
 				if scenario.change == "prefixed refutation" {
 					result.Refutations[0].Text = "The first private review sentence stays internal. The second private review sentence stays internal."
 					result.Answer = "Public reply The second private review sentence stays internal."
+				}
+				if scenario.change == "budget refutation" {
+					const novel = "This newly introduced private review sentence must not appear in a public reply."
+					result.Refutations[0].Text = strings.Join(budgetQuotes, "\n") + "\n" + novel
+					result.Answer = strings.Join(budgetQuotes, "\n--;\n") + "\n--;\n" + novel
 				}
 				sequence := uint64(1)
 				binding := CallCheckpoint{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head}
@@ -191,7 +209,7 @@ func TestExecuteRejectsHostileHTTPOutcomeBeforePublication(t *testing.T) {
 			request := usageJob()
 			request.Command = command.Command{Name: name, Action: action}
 			request.Repository.Actions = []string{name}
-			if err := e.Execute(t.Context(), request); err == nil || (scenario.change != "failed outcome" && !errors.Is(err, monitor.ErrTerminalJob)) || writes.Load() != 0 {
+			if err := e.Execute(t.Context(), request); err == nil || (scenario.change != "failed outcome" && !errors.Is(err, monitor.ErrTerminalJob)) || writes.Load() != 0 || (scenario.change == "budget refutation" && !strings.Contains(err.Error(), "publication contains private review evidence")) {
 				t.Fatalf("hostile outcome published or lost failure classification: error=%v writes=%d", err, writes.Load())
 			}
 			if !executed {
