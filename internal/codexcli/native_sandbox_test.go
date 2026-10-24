@@ -84,7 +84,7 @@ func TestNativeCodexSandboxEnforcement(t *testing.T) {
 		t.Fatal(err)
 	}
 	gitAlias := ""
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
 		alias := filepath.Join(workspace, ".GIT", "config")
 		original, err := os.Stat(gitFile)
 		if err != nil {

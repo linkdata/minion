@@ -28,8 +28,8 @@ func TestCheckModelsRequiresOnlySelectedProvider(t *testing.T) {
 	}
 	for _, provider := range []string{"codex", "claude"} {
 		t.Run(provider, func(t *testing.T) {
-			if provider == "claude" && runtime.GOOS != "linux" {
-				t.Skip("Claude sandbox support requires Linux")
+			if provider == "claude" && runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+				t.Skip("Claude sandbox support requires Linux or macOS")
 			}
 			dir := t.TempDir()
 			t.Setenv("PATH", dir)
@@ -66,8 +66,8 @@ func TestLogCommandSkillsReportsUnsupportedWorkflow(t *testing.T) {
 }
 
 func TestCheckModelsBoundsResolvedCatalogueModel(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("Claude sandbox support requires Linux")
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("Claude sandbox support requires Linux or macOS")
 	}
 	for _, selection := range []string{"default", "alias"} {
 		for _, size := range []int{128, 129} {

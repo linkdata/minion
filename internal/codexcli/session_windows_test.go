@@ -26,6 +26,17 @@ func TestWindowsSessionRunWithNativeFakeCodex(t *testing.T) {
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("CODEX_HOME", t.TempDir())
+	t.Setenv("CODEX_API_KEY", "")
+	t.Setenv("CODEX_ACCESS_TOKEN", "")
+	if settings, err := Validate(t.Context(), config.CodexConfig{}); err != nil || settings.Model != "fixture" {
+		t.Fatalf("native Windows model preflight: settings=%+v err=%v", settings, err)
+	}
+	if err := CheckLogin(t.Context(), config.CodexConfig{}); err != nil {
+		t.Fatalf("native Windows login preflight: %v", err)
+	}
+	if err := ValidateInstructionBoundary(t.Context()); err != nil {
+		t.Fatalf("native Windows instruction preflight: %v", err)
+	}
 
 	var session Session
 	t.Cleanup(func() {
