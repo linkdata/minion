@@ -658,6 +658,39 @@ func TestPublishedRefutationsAllowSourceQuoteInPublicReply(t *testing.T) {
 	}
 }
 
+func TestPublishedRefutationsAllowPreparedThreadQuote(t *testing.T) {
+	const quoted = "This sentence was already in the selected GitHub thread."
+	largeSource := []byte(strings.Repeat("x", 4<<20+1))
+	for _, test := range []struct {
+		name  string
+		set   func(*Job, string)
+		large bool
+	}{
+		{"title", func(j *Job, text string) { j.Title = text }, false},
+		{"description", func(j *Job, text string) { j.Description = text }, true},
+		{"notes", func(j *Job, text string) { j.Notes = text }, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			job := withClaudeCritic(testJob(command.Comment))
+			if test.large {
+				job.Source.Files[0].Data = largeSource // Use the uncached source search path.
+			}
+			test.set(&job, quoted)
+			result := privateReviewResult(job)
+			result.Refutations[0].Text = quoted
+			result.Answer = "Public reply: " + quoted
+			projected, err := projectPublication(job, result)
+			if err != nil || rejectPublishedRefutations(job, result, projected) != nil {
+				t.Fatalf("preexisting GitHub quote blocked: %v", err)
+			}
+			test.set(&job, "")
+			if err := rejectPublishedRefutations(job, result, projected); err == nil {
+				t.Fatal("new private quote accepted without thread proof")
+			}
+		})
+	}
+}
+
 func TestPublishedRefutationsDoNotTreatBinarySourceAsPublicQuote(t *testing.T) {
 	const quote = "This private review sentence must stay unpublished."
 	for _, padding := range []int{0, 4 << 20} {

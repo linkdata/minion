@@ -223,6 +223,8 @@ func rejectPublishedRefutations(job Job, result Result, projected publication) e
 	scanExhausted := false
 	var sourceText string
 	cacheChecked, sourceCached := false, false
+	// These parent-prepared GitHub fields were shown to the model with the source files.
+	threadText := [...]string{job.Title, job.Description, job.Notes}
 	rejectNew := func(private string) bool {
 		if public, known := inSource[private]; known {
 			return !public
@@ -235,6 +237,9 @@ func rejectPublishedRefutations(job Job, result Result, projected publication) e
 			cacheChecked = true
 			const maxCacheSourceBytes, maxCacheNormalizedBytes = 4 << 20, 32 << 20
 			rawBytes := 0
+			for _, text := range threadText {
+				rawBytes += len(text)
+			}
 			for _, files := range [][]workspace.File{job.Source.Files, job.Source.BaseFiles} {
 				for _, file := range files {
 					rawBytes += len(file.Path) + len(file.Data)
@@ -243,18 +248,32 @@ func rejectPublishedRefutations(job Job, result Result, projected publication) e
 			if rawBytes <= maxCacheSourceBytes {
 				var source strings.Builder
 				sourceCached = true
-			buildCache:
-				for _, files := range [][]workspace.File{job.Source.Files, job.Source.BaseFiles} {
-					for _, file := range files {
-						for _, text := range []string{file.Path, string(file.Data)} {
-							for _, variant := range publicationTextVariants(text) {
-								folded := foldPublicationSpace(variant)
-								if len(folded)+1 > maxCacheNormalizedBytes-source.Len() {
-									sourceCached = false
-									break buildCache
+			threadCache:
+				for _, text := range threadText {
+					for _, variant := range publicationTextVariants(text) {
+						folded := foldPublicationSpace(variant)
+						if len(folded)+1 > maxCacheNormalizedBytes-source.Len() {
+							sourceCached = false
+							break threadCache
+						}
+						source.WriteString(folded)
+						source.WriteByte(0)
+					}
+				}
+				if sourceCached {
+				buildCache:
+					for _, files := range [][]workspace.File{job.Source.Files, job.Source.BaseFiles} {
+						for _, file := range files {
+							for _, text := range []string{file.Path, string(file.Data)} {
+								for _, variant := range publicationTextVariants(text) {
+									folded := foldPublicationSpace(variant)
+									if len(folded)+1 > maxCacheNormalizedBytes-source.Len() {
+										sourceCached = false
+										break buildCache
+									}
+									source.WriteString(folded)
+									source.WriteByte(0) // Matches cannot span files or variants.
 								}
-								source.WriteString(folded)
-								source.WriteByte(0) // Matches cannot span files or variants.
 							}
 						}
 					}
@@ -273,6 +292,24 @@ func rejectPublishedRefutations(job Job, result Result, projected publication) e
 			remainingSourceSearchBytes -= int64(len(sourceText))
 			inSource[private] = strings.Contains(sourceText, private)
 			return !inSource[private]
+		}
+		for _, text := range threadText {
+			if int64(len(text)) > remainingSourceSearchBytes {
+				scanExhausted = true
+				return false
+			}
+			for _, variant := range publicationTextVariants(text) {
+				folded := foldPublicationSpace(variant)
+				if int64(len(folded)) > remainingSourceSearchBytes {
+					scanExhausted = true
+					return false
+				}
+				remainingSourceSearchBytes -= int64(len(folded))
+				if strings.Contains(folded, private) {
+					inSource[private] = true
+					return false
+				}
+			}
 		}
 		for _, files := range [][]workspace.File{job.Source.Files, job.Source.BaseFiles} {
 			for _, file := range files {
