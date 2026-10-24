@@ -12,6 +12,9 @@ func TestCompleteAuditResultValidatesCoverage(t *testing.T) {
 	archived := `{"wave":1,"status":"covered","agent_id":"older","reviewed_paths":["source.txt"],"local_checks":[{"agent_id":"helper","reviewed_paths":["source.txt"],"invariant":"Access is checked","method":"source","result":"The guard is present","artifact":null}],"result_fingerprints":[],"unresolved":[],"reassignment_reason":"Rechecked"}`
 	withAttempt := strings.Replace(validLedger, `"attempts":[]`, `"attempts":[`+archived+`]`, 1)
 	withAttempt = strings.Replace(withAttempt, `"wave":1,"status":"covered","agent_id":"hunter"`, `"wave":2,"status":"covered","agent_id":"hunter"`, 1)
+	withLifecycle := strings.Replace(validLedger, `"coverage_id":"source::boundary::subsystem::attack"`, `"coverage_id":"source::boundary::subsystem::attack::lifecycle"`, 1)
+	withLifecycle = strings.Replace(withLifecycle, `"attack_class":"attack"}`, `"attack_class":"attack","lifecycle":"lifecycle"}`, 1)
+	withLifecycle = strings.Replace(withLifecycle, `"attack_class":"Attack","starting_paths"`, `"attack_class":"Attack","lifecycle":"Lifecycle","starting_paths"`, 1)
 	archivedCandidate := strings.Replace(archived, `"status":"covered"`, `"status":"candidate"`, 1)
 	archivedCandidate = strings.Replace(archivedCandidate, `"result_fingerprints":[]`, `"result_fingerprints":["F"]`, 1)
 	archivedCandidate = strings.Replace(archivedCandidate, `"local_checks":[{"agent_id":"helper"`, `"local_checks":[{"agent_id":"older"`, 1)
@@ -67,6 +70,14 @@ func TestCompleteAuditResultValidatesCoverage(t *testing.T) {
 		{name: "archived attempt declares unaffordable budget", ledger: incompleteArchive, want: "incomplete audit budget"},
 		{name: "covered with populated context", ledger: withContext},
 		{name: "covered with archived attempt and distinct check owners", ledger: withAttempt},
+		{name: "covered with lifecycle", ledger: withLifecycle},
+		{name: "invisible surface label", ledger: strings.Replace(validLedger, `"surface":"Source"`, `"surface":"\u200b"`, 1), want: "lacks unique coverage identity"},
+		{name: "invisible boundary label", ledger: strings.Replace(validLedger, `"boundary":"Boundary"`, `"boundary":"\u200b"`, 1), want: "lacks unique coverage identity"},
+		{name: "invisible subsystem label", ledger: strings.Replace(validLedger, `"subsystem":"Subsystem"`, `"subsystem":"\u200b"`, 1), want: "lacks unique coverage identity"},
+		{name: "invisible attack class label", ledger: strings.Replace(validLedger, `"attack_class":"Attack"`, `"attack_class":"\u200b"`, 1), want: "lacks unique coverage identity"},
+		{name: "invisible lifecycle label", ledger: strings.Replace(withLifecycle, `"lifecycle":"Lifecycle"`, `"lifecycle":"\u200b"`, 1), want: "lacks lifecycle identity"},
+		{name: "invisible canonical reference", ledger: strings.Replace(validLedger, `"boundary":"boundary"`, `"boundary":"\u200b"`, 1), want: "lacks canonical coverage references"},
+		{name: "invisible archived reassignment reason", ledger: strings.Replace(withAttempt, `"reassignment_reason":"Rechecked"`, `"reassignment_reason":"\u200b"`, 1), want: "invalid archived attempt wave or reassignment"},
 		{name: "unsupported local check in current evidence", ledger: strings.Replace(validLedger, sourceCheck, localCheck, 1), want: "unsupported local check method"},
 		{name: "unsupported local check in archived evidence", ledger: strings.Replace(withAttempt, sourceCheck, archivedLocalCheck, 1), want: "unsupported local check method"},
 		{name: "decimal spelling of integer wave", ledger: strings.Replace(validLedger, `"wave":1`, `"wave":1.0`, 1)},

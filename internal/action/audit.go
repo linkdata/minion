@@ -567,15 +567,15 @@ func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes []byte, sourc
 			}
 		}
 		if unit.CoverageID == "" || seenIDs[unit.CoverageID] || len(unit.StartingPaths) == 0 ||
-			strings.TrimSpace(unit.Surface) == "" || strings.TrimSpace(unit.Boundary) == "" ||
-			strings.TrimSpace(unit.Subsystem) == "" || strings.TrimSpace(unit.AttackClass) == "" {
+			!auditVisibleText(unit.Surface) || !auditVisibleText(unit.Boundary) ||
+			!auditVisibleText(unit.Subsystem) || !auditVisibleText(unit.AttackClass) {
 			return errors.New("audit coverage-ledger.json lacks unique coverage identity or starting paths")
 		}
 		seenIDs[unit.CoverageID] = true
 		fields := []string{"surface", "boundary", "subsystem", "attack_class"}
 		if _, hasLifecycle := unit.CanonicalRefs["lifecycle"]; hasLifecycle {
 			fields = append(fields, "lifecycle")
-			if strings.TrimSpace(unit.Lifecycle) == "" {
+			if !auditVisibleText(unit.Lifecycle) {
 				return errors.New("audit coverage-ledger.json lacks lifecycle identity")
 			}
 		} else if unit.Lifecycle != "" {
@@ -587,7 +587,7 @@ func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes []byte, sourc
 		var id strings.Builder
 		for i, field := range fields {
 			ref := unit.CanonicalRefs[field]
-			if ref == "" || strings.TrimSpace(ref) != ref {
+			if !auditVisibleText(ref) || strings.TrimSpace(ref) != ref {
 				return errors.New("audit coverage-ledger.json lacks canonical coverage references")
 			}
 			if i > 0 {
@@ -659,7 +659,7 @@ func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes []byte, sourc
 					return errors.New("audit coverage-ledger.json has archived starting path without a declared reviewed file")
 				}
 			}
-			if !auditPositiveInteger(attempt.Wave) || attempt.Wave <= previousWave || attempt.Wave >= unit.Wave || strings.TrimSpace(attempt.ReassignmentReason) == "" {
+			if !auditPositiveInteger(attempt.Wave) || attempt.Wave <= previousWave || attempt.Wave >= unit.Wave || !auditVisibleText(attempt.ReassignmentReason) {
 				return errors.New("audit coverage-ledger.json has invalid archived attempt wave or reassignment")
 			}
 			if priorOwners[attempt.AgentID] {
