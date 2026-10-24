@@ -110,7 +110,7 @@ func auditPublicSummary(artifacts []workspace.File) (string, error) {
 }
 
 // This catches exact whole-refutation or complete-sentence copies, not rewrites or hostile disclosures.
-// Short embedded runs are ignored because they can match unrelated public text.
+// Exact short matches are limited to whole replies and audit titles; fingerprints and Fix files can contain generic short values.
 func rejectPublishedRefutations(job Job, result Result, projected publication) error {
 	if len(result.Refutations) == 0 {
 		return nil
@@ -176,7 +176,8 @@ func rejectPublishedRefutations(job Job, result Result, projected publication) e
 	publicCopy := func(text string) bool {
 		return wholeReply(text) || containsCopy(text, reject)
 	}
-	if publicCopy(projected.answer) || job.Action != command.SecurityAudit && (job.Action != command.Fix || len(result.Changes) == 0) && wholeReply(result.Answer) {
+	// Check executor text, not the host's cap notice; audit fields are checked below.
+	if projected.answer != "" && job.Action != command.SecurityAudit && publicCopy(result.Answer) {
 		return errors.New("publication contains private review evidence")
 	}
 	if job.Action == command.SecurityAudit {

@@ -308,6 +308,26 @@ func TestPublishedRefutationsRejectShortWholeReply(t *testing.T) {
 	}
 }
 
+func TestPublishedRefutationsIgnoreGeneratedCapNotice(t *testing.T) {
+	job := withClaudeCritic(testJob(command.Comment))
+	job.CriticMaxRounds = 2
+	result := privateReviewResult(job)
+	result.CriticStopReason = "round_cap"
+	result.Calls[len(result.Calls)-1].Approved = false
+	result.Refutations[0].Text = "Critic round limit reached"
+	result.Answer = "Public response unrelated to review process."
+	if err := result.Validate(job); err != nil {
+		t.Fatal(err)
+	}
+	projected, err := projectPublication(job, result)
+	if err != nil || !strings.Contains(projected.answer, result.Refutations[0].Text) {
+		t.Fatalf("capped publication omitted generated notice: %+v, %v", projected, err)
+	}
+	if err := rejectPublishedRefutations(job, result, projected); err != nil {
+		t.Fatalf("generated notice triggered private-copy guard: %v", err)
+	}
+}
+
 func TestPublishedRefutationsFoldExpandedUnicodeCase(t *testing.T) {
 	job := withClaudeCritic(testJob(command.Comment))
 	result := privateReviewResult(job)
