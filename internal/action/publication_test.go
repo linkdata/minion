@@ -474,6 +474,40 @@ func TestPublishedRefutationsRejectPrefixedSentenceCopies(t *testing.T) {
 	}
 }
 
+func TestPublishedRefutationsRejectInteriorSentenceCopies(t *testing.T) {
+	const copied = "The second private review sentence stays internal"
+	for _, action := range []command.Action{command.Comment, command.Fix} {
+		t.Run(string(action), func(t *testing.T) {
+			job := withClaudeCritic(testJob(action))
+			result := privateReviewResult(job)
+			result.Refutations[0].Text = "The first private review sentence stays internal. " + copied + "."
+			setPublic := func(text string) {
+				if action == command.Fix {
+					result.Answer = "Done"
+					result.Changes = []workspace.Change{{Path: "source.txt", Mode: workspace.Regular, Data: []byte(text)}}
+				} else {
+					result.Answer = text
+				}
+			}
+			setPublic("Public lead: " + copied + " with more public context.")
+			projected, err := projectPublication(job, result)
+			if err != nil || rejectPublishedRefutations(job, result, projected) == nil {
+				t.Fatalf("interior private sentence passed publication guard: %v", err)
+			}
+			job.Source.Files[0].Data = []byte(copied + "\n")
+			if err := rejectPublishedRefutations(job, result, projected); err != nil {
+				t.Fatalf("existing source quote was blocked: %v", err)
+			}
+			job.Source.Files[0].Data = []byte("ordinary source\n")
+			setPublic("Public lead: " + copied + "ary with more public context.")
+			projected, err = projectPublication(job, result)
+			if err != nil || rejectPublishedRefutations(job, result, projected) != nil {
+				t.Fatalf("longer public word was treated as a sentence copy: %v", err)
+			}
+		})
+	}
+}
+
 func TestPublishedRefutationsRejectInlineMarkdownSentenceCopies(t *testing.T) {
 	const private = "The first private review sentence stays internal. The second private review sentence stays internal."
 	const copied = "The second private review sentence stays internal."
@@ -871,6 +905,24 @@ func TestPublishedRefutationsFixRejectsUnprovedCopyAtSourceScanBudget(t *testing
 	}
 	if err := rejectPublishedRefutations(job, result, projected); err == nil {
 		t.Fatal("unproved private sentence passed after the source scan budget")
+	}
+}
+
+func TestPublishedRefutationsCopySearchBudgetFailsClosed(t *testing.T) {
+	job := withClaudeCritic(testJob(command.Fix))
+	result := privateReviewResult(job)
+	var sentences []string
+	for i := range 1050 {
+		sentences = append(sentences, fmt.Sprintf("Private quote %04d was already in source.", i))
+	}
+	result.Refutations[0].Text = strings.Join(sentences, "\n")
+	result.Changes = []workspace.Change{{Path: "source.txt", Mode: workspace.Regular, Data: []byte(strings.Repeat("z", workspace.MaxChangeBytes))}}
+	if err := result.Validate(job); err != nil {
+		t.Fatalf("bounded fixture cannot reach publication: %v", err)
+	}
+	projected, err := projectPublication(job, result)
+	if err != nil || rejectPublishedRefutations(job, result, projected) == nil {
+		t.Fatalf("unproved sentence search accepted after its work budget: %v", err)
 	}
 }
 

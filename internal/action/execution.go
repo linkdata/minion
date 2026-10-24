@@ -10,6 +10,7 @@ import (
 )
 
 // Executor computes one accepted Job; supplied input is borrowed read-only.
+// The caller owns the returned Result, which the implementation must not mutate afterward.
 type Executor interface {
 	Execute(context.Context, Job, Checkpoints) (Result, error)
 }

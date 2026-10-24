@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -391,11 +392,37 @@ func serveFixFlowFixture(t *testing.T, w http.ResponseWriter, r *http.Request) b
 	case r.Method == http.MethodGet && r.URL.Path == "/repos/bot/r/branches/minion/fix-7-aaaaaaaaaaaa":
 		http.NotFound(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/graphql":
+		var request struct{ Query, OperationName string }
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode expected GraphQL read: %v", err)
+			http.Error(w, "invalid GraphQL request", http.StatusBadRequest)
+			return true
+		}
+		if request.Query != `query($id: ID!) { node(id: $id) { ... on Issue { title bodyText lastEditedAt } } }` || request.OperationName != "" {
+			return false // Callers count or reject every unexpected GitHub write.
+		}
 		_, _ = fmt.Fprint(w, `{"data":{"node":{"title":"Task","bodyText":"Inspect source","lastEditedAt":null}}}`)
 	default:
 		return false
 	}
 	return true
+}
+
+func TestServeFixFlowFixtureRejectsGraphQLMutation(t *testing.T) {
+	for _, test := range []struct {
+		query, operationName string
+		handled              bool
+	}{
+		{`query($id: ID!) { node(id: $id) { ... on Issue { title bodyText lastEditedAt } } }`, "", true},
+		{`mutation($id: ID!) { addReaction(input: {subjectId: $id, content: EYES}) { clientMutationId } }`, "", false},
+		{`query($id: ID!) { node(id: $id) { ... on Issue { title bodyText lastEditedAt } } } mutation Write { deleteRepository(input: {}) { clientMutationId } }`, "Write", false},
+		{`query($id: ID!) { node(id: $id) { ... on Issue { title bodyText lastEditedAt } } }`, "Read", false},
+	} {
+		request := httptest.NewRequest(http.MethodPost, "/graphql", strings.NewReader(`{"query":`+strconv.Quote(test.query)+`,"operationName":`+strconv.Quote(test.operationName)+`}`))
+		if handled := serveFixFlowFixture(t, httptest.NewRecorder(), request); handled != test.handled {
+			t.Fatalf("query=%q handled=%t; want %t", test.query, handled, test.handled)
+		}
+	}
 }
 
 func gitOnlyPath(t *testing.T) string {

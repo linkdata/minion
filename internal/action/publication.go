@@ -118,7 +118,8 @@ func rejectPublishedRefutations(job Job, result Result, projected publication) e
 	const minCopyRunes = 24
 	var whole []string
 	exact := make(map[string]bool)
-	sentences := make(map[string]bool)
+	seenSentences := make(map[string]bool)
+	var sentences []string
 	for _, refutation := range result.Refutations {
 		privateTexts := []string{refutation.Text}
 		if withoutNUL := strings.ReplaceAll(refutation.Text, "\x00", ""); withoutNUL != refutation.Text {
@@ -127,14 +128,15 @@ func rejectPublishedRefutations(job Job, result Result, projected publication) e
 		for _, privateText := range privateTexts {
 			for _, variant := range publicationTextVariants(privateText) {
 				if text := foldPublicationSpace(variant); text != "" {
-					exact[text] = true
-					if utf8.RuneCountInString(text) >= minCopyRunes {
+					if utf8.RuneCountInString(text) >= minCopyRunes && !exact[text] {
 						whole = append(whole, text)
 					}
+					exact[text] = true
 				}
 				for _, sentence := range strings.FieldsFunc(variant, publicationSentenceBreak) {
-					if text := foldPublicationSentence(sentence); utf8.RuneCountInString(text) >= minCopyRunes {
-						sentences[text] = true
+					if text := foldPublicationSentence(sentence); utf8.RuneCountInString(text) >= minCopyRunes && !seenSentences[text] {
+						seenSentences[text] = true
+						sentences = append(sentences, text)
 					}
 				}
 			}
@@ -143,34 +145,6 @@ func rejectPublishedRefutations(job Job, result Result, projected publication) e
 	if len(exact) == 0 {
 		return nil
 	}
-	type sentenceSuffix struct {
-		first, next uint32
-		char        byte
-		terminal    bool
-	}
-	// One node per distinct byte keeps accepted private text from multiplying into per-byte maps.
-	suffixes := []sentenceSuffix{{}}
-	child := func(parent uint32, char byte) uint32 {
-		for i := suffixes[parent].first; i != 0; i = suffixes[i].next {
-			if suffixes[i].char == char {
-				return i
-			}
-		}
-		return 0
-	}
-	for text := range sentences {
-		var node uint32
-		for i := len(text) - 1; i >= 0; i-- {
-			next := child(node, text[i])
-			if next == 0 {
-				next = uint32(len(suffixes))
-				suffixes = append(suffixes, sentenceSuffix{char: text[i], next: suffixes[node].first})
-				suffixes[node].first = next
-			}
-			node = next
-		}
-		suffixes[node].terminal = true
-	}
 	wordContinuation := func(r rune) bool {
 		// Copies in unspaced scripts can start inside surrounding prose.
 		if unicode.In(r, unicode.Han, unicode.Hiragana, unicode.Katakana, unicode.Thai, unicode.Lao, unicode.Khmer, unicode.Myanmar) {
@@ -178,27 +152,44 @@ func rejectPublishedRefutations(job Job, result Result, projected publication) e
 		}
 		return unicode.IsLetter(r) || unicode.IsNumber(r) || unicode.IsMark(r) || r == '_'
 	}
+	// shortcut: Bound repeated copy searches at 1 GiB; use multi-pattern matching if large outputs routinely hit it.
+	remainingCopySearchBytes := int64(1 << 30)
+	searched := func(n int) bool {
+		remainingCopySearchBytes -= int64(n)
+		return remainingCopySearchBytes < 0
+	}
 	sentenceCopy := func(text string, reject func(string) bool) bool {
 		text = foldPublicationSentence(text)
-		var node uint32
-		for i := len(text); i > 0; {
-			i--
-			node = child(node, text[i])
-			if node == 0 {
-				break
-			}
-			if !suffixes[node].terminal {
+		for _, private := range sentences {
+			if len(private) > len(text) {
 				continue
 			}
-			if i > 0 {
-				before, _ := utf8.DecodeLastRuneInString(text[:i])
-				first, _ := utf8.DecodeRuneInString(text[i:])
-				if wordContinuation(before) && wordContinuation(first) {
-					continue
+			first, _ := utf8.DecodeRuneInString(private)
+			last, _ := utf8.DecodeLastRuneInString(private)
+			for offset := 0; offset < len(text); {
+				index := strings.Index(text[offset:], private)
+				scanned := len(text) - offset
+				if index >= 0 {
+					scanned = index + len(private)
 				}
-			}
-			if reject(text[i:]) {
-				return true
+				if searched(scanned) {
+					return true
+				}
+				if index < 0 {
+					break
+				}
+				start, end := offset+index, offset+index+len(private)
+				left, right := rune(0), rune(0)
+				if start > 0 {
+					left, _ = utf8.DecodeLastRuneInString(text[:start])
+				}
+				if end < len(text) {
+					right, _ = utf8.DecodeRuneInString(text[end:])
+				}
+				if !(wordContinuation(first) && wordContinuation(left)) && !(wordContinuation(last) && wordContinuation(right)) && reject(private) {
+					return true
+				}
+				offset = start + 1
 			}
 		}
 		return false
@@ -207,10 +198,20 @@ func rejectPublishedRefutations(job Job, result Result, projected publication) e
 		for _, variant := range publicationTextVariants(text) {
 			folded := foldPublicationSpace(variant)
 			for _, private := range whole {
+				if len(private) > len(folded) {
+					continue
+				}
 				first, _ := utf8.DecodeRuneInString(private)
 				last, _ := utf8.DecodeLastRuneInString(private)
 				for offset := 0; offset < len(folded); {
 					index := strings.Index(folded[offset:], private)
+					scanned := len(folded) - offset
+					if index >= 0 {
+						scanned = index + len(private)
+					}
+					if searched(scanned) {
+						return true
+					}
 					if index < 0 {
 						break
 					}
