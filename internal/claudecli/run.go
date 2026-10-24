@@ -220,16 +220,9 @@ func effectiveSystemReadPaths() ([]string, error) {
 	if runtime.GOOS == "linux" {
 		return paths, nil
 	}
-	resolved := make([]string, 0, len(paths))
-	for i, path := range paths {
-		absolute, err := aicli.ResolvePath(path)
-		if errors.Is(err, os.ErrNotExist) && i != 0 {
-			continue
-		}
-		if err != nil {
-			return nil, fmt.Errorf("resolve Claude system grant %q: %w", path, err)
-		}
-		resolved = append(resolved, absolute)
+	resolved, err := aicli.ResolveSystemReadPaths(paths)
+	if err != nil {
+		return nil, fmt.Errorf("resolve Claude system grants: %w", err)
 	}
 	return resolved, nil
 }

@@ -63,16 +63,9 @@ func nativeSystemReadPaths() ([]string, error) {
 	if len(paths) == 0 {
 		return nil, fmt.Errorf("Codex filesystem grants are unsupported on %s", runtime.GOOS)
 	}
-	var resolved []string
-	for i, path := range paths {
-		absolute, err := aicli.ResolvePath(path)
-		if errors.Is(err, os.ErrNotExist) && i != 0 {
-			continue
-		}
-		if err != nil {
-			return nil, fmt.Errorf("resolve Codex system grant %q: %w", path, err)
-		}
-		resolved = append(resolved, absolute)
+	resolved, err := aicli.ResolveSystemReadPaths(paths)
+	if err != nil {
+		return nil, fmt.Errorf("resolve Codex system grants: %w", err)
 	}
 	return resolved, nil
 }
