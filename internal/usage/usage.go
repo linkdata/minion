@@ -131,7 +131,7 @@ func (r Record) validate() error {
 
 type Store struct{ Dir string }
 
-// Save atomically replaces one attempt and syncs its directory and parent.
+// Save atomically replaces one attempt and syncs its directory and parent on Unix.
 //
 // The caller serializes updates to an ID. An error after replacement can leave
 // the new attempt in place.

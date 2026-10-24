@@ -360,7 +360,7 @@ Reports combine both providers and all main/critic rounds, track `succeeded`, `f
 
 Records contain metadata/counts, not prompts/replies. A `running` attempt can remain after a crash, hard kill, panic or failed final save. Graceful cancellation records `failed`. A pre-call checkpoint records dispatch intent; cancellation there can leave an incomplete call count without proving a charged request. Retries are separate attempts.
 
-Records are stored in a `usage/` directory beside `state_path` (`var/usage/` relative to the config file's directory by default), independently of notification state. Keep this directory to retain usage history. Usage saves require directory fsync support for `usage/` and its parent, so use a filesystem that supports both. `-config` loads and validates the local configuration but does not run service preflight; `-dir` bypasses configuration entirely and cannot be combined with `-config`. A missing usage directory produces an empty report.
+Records are stored in a `usage/` directory beside `state_path` (`var/usage/` relative to the config file's directory by default), independently of notification state. Keep this directory to retain usage history. On Unix, usage saves require directory fsync support for `usage/` and its parent. On Windows, Minion syncs the record before replacement but cannot sync directory metadata; crash durability remains best effort. `-config` loads and validates the local configuration but does not run service preflight; `-dir` bypasses configuration entirely and cannot be combined with `-config`. A missing usage directory produces an empty report.
 
 ## Why polling
 
