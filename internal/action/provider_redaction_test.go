@@ -148,6 +148,51 @@ func TestAuditReportRedactsNULSplitConfiguredKeyBeforeCriticAndPublication(t *te
 	}
 }
 
+func TestAuditEncodedConfiguredKeyStopsBeforeCritic(t *testing.T) {
+	const key = "fixture-audit-secret"
+	const encoded = "fixture-audit-&#x73;ecret"
+	for _, test := range []struct {
+		name, path, content string
+	}{
+		{"Markdown", "architecture.md", "Architecture includes " + encoded},
+		{"JSON", "coverage-ledger.json", strings.TrimSuffix(auditCoveredLedgerFixture, "}]") + `,"note":"` + encoded + `"}]`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			job := withClaudeCritic(auditRunnerJob(t))
+			job.CriticMaxRounds = 1
+			criticCalls := 0
+			runner := Runner{WorkRoot: t.TempDir(), Codex: config.CodexConfig{APIKey: key}, runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+				if request.role == roleCritic {
+					criticCalls++
+					return aicli.Result{Answer: approvedCritiqueJSON}, nil
+				}
+				for _, file := range auditArtifactsFixture(job, request.dir, "Safe report\n") {
+					if file.Path == test.path {
+						file.Data = []byte(test.content)
+					}
+					writeFixtureFile(t, request.outputDir, file.Path, file.Data)
+				}
+				return aicli.Result{Answer: proposalJSON("Model summary", "")}, nil
+			}}
+			result, err := runner.Run(t.Context(), job)
+			if !errors.Is(err, monitor.ErrTerminalJob) || criticCalls != 0 || len(result.Calls) != 1 {
+				t.Fatalf("encoded key reached critic or escaped terminal rejection: calls=%d receipts=%d error=%v", criticCalls, len(result.Calls), err)
+			}
+			if err := result.validate(job, false); err != nil {
+				t.Fatalf("safe partial audit is invalid: %v", err)
+			}
+			if len(result.Artifacts) != len(auditArtifacts)-1 {
+				t.Fatalf("safe partial artifacts were lost: count=%d", len(result.Artifacts))
+			}
+			for _, file := range result.Artifacts {
+				if file.Path == test.path || artifactContainsConfiguredKey(file, key) {
+					t.Fatalf("unsafe partial artifact retained: %q", file.Path)
+				}
+			}
+		})
+	}
+}
+
 func TestPartialAuditDropsMetadataWhenNormalizedTargetContainsKey(t *testing.T) {
 	job := auditRunnerJob(t)
 	key := job.Identity.Repository

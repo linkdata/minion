@@ -357,7 +357,7 @@ JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 	write("run-metadata.json", strings.Replace(metadata, `"budget":null,`, "", 1))
 	validate("complete standard run")
 	write("run-metadata.json", strings.Replace(metadata, `"run-metadata.json":"parent",`, "", 1))
-	validate("lacks parent ownership")
+	validate("does not declare parent ownership")
 	write("run-metadata.json", metadata)
 	write("findings.json", "not JSON")
 	validate("audit JSON is invalid")

@@ -296,6 +296,11 @@ func parseProposal(raw string, allowUnpublishableAnswer bool, secrets ...string)
 	}
 	answer = redactActionText(*response, secrets...)
 	refutations = redactActionText(*privateRefutations, secrets...)
+	for _, secret := range secrets {
+		if secret != "" && (containsConfiguredKey([]byte(answer), secret) || containsConfiguredKey([]byte(refutations), secret)) {
+			return "", "", errors.New("proposal contains a configured provider key")
+		}
+	}
 	if strings.TrimSpace(answer) == "" {
 		return "", "", errors.New("answer must not be blank")
 	}
@@ -338,6 +343,11 @@ func parseCritique(answer string, secrets ...string) (approved, hasBlockers, rev
 		return false, false, false, "", errors.New("incomplete review must be a blocking rejection")
 	}
 	feedback = redactActionText(feedback, secrets...)
+	for _, secret := range secrets {
+		if secret != "" && containsConfiguredKey([]byte(feedback), secret) {
+			return false, false, false, "", errors.New("critic feedback contains a configured provider key")
+		}
+	}
 	if !approved && strings.TrimSpace(feedback) == "" {
 		return false, false, false, "", errors.New("rejection feedback is blank after redaction")
 	}

@@ -67,6 +67,9 @@ func readAuditArtifacts(outputDir string, partial bool, secrets ...string) ([]wo
 			} else {
 				err = errors.New("audit Markdown is not valid UTF-8")
 			}
+			if err == nil && artifactContainsConfiguredKey(workspace.File{Data: data}, secrets...) {
+				err = errors.New("audit artifact contains a configured provider key")
+			}
 			if err == nil && int64(len(data)) > limit {
 				err = errors.New("redacted artifact exceeds byte limit")
 			} else if err == nil && name == "REPORT.md" && !partial && (!boundedText(string(data), maxOutputBytes) || auditVisibleReport(string(data)) != nil) {
@@ -918,7 +921,7 @@ func validateAuditMetadata(metadataBytes []byte, repo, target, head string) ([]s
 	}
 	for _, name := range auditArtifacts {
 		if metadata.SharedFileOwners[name] != "parent" {
-			return nil, fmt.Errorf("audit metadata lacks parent ownership of %s", name)
+			return nil, fmt.Errorf("audit metadata does not declare parent ownership of %s", name)
 		}
 	}
 	return metadata.SelectedCompanionFiles, nil

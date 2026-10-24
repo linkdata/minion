@@ -173,24 +173,23 @@ func rejectPublishedRefutations(job Job, result Result, projected publication) e
 		return false
 	}
 	reject := func(string) bool { return true }
-	wholeReply := func(text string) bool {
+	wholeReply := func(text string, reject func(string) bool) bool {
 		for _, variant := range publicationTextVariants(text) {
-			if exact[foldPublicationSpace(variant)] {
+			folded := foldPublicationSpace(variant)
+			if exact[folded] && reject(folded) {
 				return true
 			}
 		}
 		return false
-	}
-	publicCopy := func(text string) bool {
-		return wholeReply(text) || containsCopy(text, reject)
 	}
 	// A Fix transfers full replacement files; source quotations can also appear in public prose.
 	// shortcut: Source searches stop after 1 GiB; use multi-pattern matching if fuller coverage matters at that workload.
 	const maxSourceSearchBytes int64 = 1 << 30
 	remainingSourceSearchBytes := maxSourceSearchBytes
 	inSource := make(map[string]bool)
+	scanExhausted := false
 	var sourceText string
-	sourceBuilt, scanExhausted := false, false
+	cacheChecked, sourceCached := false, false
 	rejectNew := func(private string) bool {
 		if public, known := inSource[private]; known {
 			return !public
@@ -198,31 +197,79 @@ func rejectPublishedRefutations(job Job, result Result, projected publication) e
 		if scanExhausted {
 			return false
 		}
-		if !sourceBuilt {
-			var source strings.Builder
+		if !cacheChecked {
+			cacheChecked = true
+			const maxCacheSourceBytes, maxCacheNormalizedBytes = 4 << 20, 32 << 20
+			rawBytes := 0
 			for _, files := range [][]workspace.File{job.Source.Files, job.Source.BaseFiles} {
 				for _, file := range files {
-					for _, text := range []string{file.Path, string(file.Data)} {
-						for _, variant := range publicationTextVariants(text) {
-							source.WriteString(foldPublicationSpace(variant))
-							source.WriteByte(0) // A match cannot span source files or normalized variants.
+					rawBytes += len(file.Path) + len(file.Data)
+				}
+			}
+			if rawBytes <= maxCacheSourceBytes {
+				var source strings.Builder
+				sourceCached = true
+			buildCache:
+				for _, files := range [][]workspace.File{job.Source.Files, job.Source.BaseFiles} {
+					for _, file := range files {
+						for _, text := range []string{file.Path, string(file.Data)} {
+							for _, variant := range publicationTextVariants(text) {
+								folded := foldPublicationSpace(variant)
+								if len(folded)+1 > maxCacheNormalizedBytes-source.Len() {
+									sourceCached = false
+									break buildCache
+								}
+								source.WriteString(folded)
+								source.WriteByte(0) // Matches cannot span files or variants.
+							}
+						}
+					}
+				}
+				if sourceCached {
+					sourceText = source.String()
+				}
+			}
+		}
+		if sourceCached {
+			if int64(len(sourceText)) > remainingSourceSearchBytes {
+				scanExhausted = true
+				return false
+			}
+			remainingSourceSearchBytes -= int64(len(sourceText))
+			inSource[private] = strings.Contains(sourceText, private)
+			return !inSource[private]
+		}
+		for _, files := range [][]workspace.File{job.Source.Files, job.Source.BaseFiles} {
+			for _, file := range files {
+				for _, text := range []string{file.Path, string(file.Data)} {
+					if int64(len(text)) > remainingSourceSearchBytes {
+						scanExhausted = true
+						return false
+					}
+					for _, variant := range publicationTextVariants(text) {
+						folded := foldPublicationSpace(variant)
+						if int64(len(folded)) > remainingSourceSearchBytes {
+							scanExhausted = true
+							return false
+						}
+						remainingSourceSearchBytes -= int64(len(folded))
+						if strings.Contains(folded, private) {
+							inSource[private] = true
+							return false
 						}
 					}
 				}
 			}
-			sourceText, sourceBuilt = source.String(), true
 		}
-		if int64(len(sourceText)) > remainingSourceSearchBytes {
-			scanExhausted = true
-			return false
-		}
-		remainingSourceSearchBytes -= int64(len(sourceText))
-		inSource[private] = strings.Contains(sourceText, private)
-		return !inSource[private]
+		inSource[private] = false
+		return true
+	}
+	rejectUnproved := func(private string) bool {
+		return rejectNew(private) || !inSource[private]
 	}
 	// Check executor text, not the host's cap notice; audit fields are checked below.
 	if projected.answer != "" && job.Action != command.SecurityAudit &&
-		(wholeReply(result.Answer) || containsCopy(result.Answer, rejectNew)) {
+		(wholeReply(result.Answer, rejectUnproved) || containsCopy(result.Answer, rejectNew)) {
 		return errors.New("publication contains private review evidence")
 	}
 	if job.Action == command.SecurityAudit {
@@ -235,7 +282,7 @@ func rejectPublishedRefutations(job Job, result Result, projected publication) e
 				return fmt.Errorf("decode audit findings before publication: %w", err)
 			}
 			for _, finding := range findings {
-				if finding.Verdict != "rejected" && (containsCopy(finding.Fingerprint, reject) || publicCopy(finding.Title)) {
+				if finding.Verdict != "rejected" && (containsCopy(finding.Fingerprint, reject) || wholeReply(finding.Title, rejectUnproved) || containsCopy(finding.Title, rejectNew)) {
 					return errors.New("publication contains private review evidence")
 				}
 			}

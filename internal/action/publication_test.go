@@ -466,6 +466,76 @@ func TestPublishedRefutationsRejectAuditTitleCopies(t *testing.T) {
 	}
 }
 
+func TestPublishedRefutationsAllowAuditTitleQuotedFromSource(t *testing.T) {
+	const quote = "This audit title quotes existing public source text."
+	job := withClaudeCritic(testJob(command.SecurityAudit))
+	job.Source.Files[0].Data = []byte(quote + "\n")
+	result := privateReviewResult(job)
+	result.Refutations[0].Text = quote
+	result.Artifacts = auditArtifactsFixture(job, sourceIdentity(job), "Audit report\n")
+	for i := range result.Artifacts {
+		if result.Artifacts[i].Path == "findings.json" {
+			result.Artifacts[i].Data = []byte(strings.Replace(auditCandidateFindingFixture, `"title":"Unverified boundary"`, `"title":"`+quote+`"`, 1))
+		}
+	}
+	projected, err := projectPublication(job, result)
+	if err != nil || rejectPublishedRefutations(job, result, projected) != nil {
+		t.Fatalf("public source quote blocked in audit title: %v", err)
+	}
+}
+
+func TestPublishedRefutationsAuditTitleNeedsSourceProofAfterScanBudget(t *testing.T) {
+	job := withClaudeCritic(testJob(command.SecurityAudit))
+	job.CriticMaxRounds = 3
+	var quotes []string
+	for i := range 990 {
+		quotes = append(quotes, fmt.Sprintf("Existing source quote %03d is already public.", i))
+	}
+	job.Source.Files[0].Data = []byte(strings.Repeat("f", 1<<20) + "\n" + strings.Join(quotes, "\n"))
+	const private = "This private audit title must remain unpublished."
+	result := privateReviewResult(job)
+	result.Refutations = []Refutation{{Round: 2, Text: strings.Join(quotes, "\n")}, {Round: 3, Text: private}}
+	result.Calls[4].Approved, result.Calls[4].NoBlockers, result.Calls[4].HasBlockers = false, false, true
+	result.Calls = append(result.Calls,
+		CallUsage{Provider: job.Main.Provider, Role: roleMain, Round: 3},
+		CallUsage{Provider: job.Critic.Provider, Role: roleCritic, Round: 3, ReviewPhase: reviewVerification, ReviewComplete: true, Approved: true, NoBlockers: true},
+		CallUsage{Provider: job.Critic.Provider, Role: roleCritic, Round: 3, ReviewPhase: reviewFull, ReviewComplete: true, Approved: true, NoBlockers: true},
+	)
+	type finding struct{ Verdict, Fingerprint, Title string }
+	findings := make([]finding, 0, len(quotes)+2)
+	for i, quote := range quotes {
+		findings = append(findings, finding{Verdict: "confirmed", Fingerprint: fmt.Sprint(i), Title: quote})
+	}
+	findings = append(findings, finding{Verdict: "confirmed", Fingerprint: "partial", Title: "Background: " + private})
+	data, err := json.Marshal(findings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result.Artifacts = []workspace.File{{Path: "findings.json", Mode: workspace.Regular, Data: data}}
+	// This isolates the publication guard; the audit artifact set is intentionally incomplete.
+	if err := job.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := result.validate(job, false); err != nil {
+		t.Fatalf("partial result and refutations are not structurally valid: %v", err)
+	}
+	if err := rejectPublishedRefutations(job, result, publication{answer: "Audit summary"}); err != nil {
+		t.Fatalf("fixture did not exhaust best-effort partial scan: %v", err)
+	}
+	findings = append(findings, finding{Verdict: "confirmed", Fingerprint: "private", Title: private})
+	data, err = json.Marshal(findings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result.Artifacts[0].Data = data
+	if err := result.validate(job, false); err != nil {
+		t.Fatalf("final partial result and refutations are not structurally valid: %v", err)
+	}
+	if err := rejectPublishedRefutations(job, result, publication{answer: "Audit summary"}); err == nil {
+		t.Fatal("exact private audit title passed without source proof after scan budget")
+	}
+}
+
 func TestPublishedRefutationsFixAllowsQuotedSourceButRejectsNewCopy(t *testing.T) {
 	const quoted = "Existing source quote remains unchanged."
 	const private = "This private reviewer conclusion must remain unpublished."
@@ -513,6 +583,11 @@ func TestPublishedRefutationsAllowSourceQuoteInPublicReply(t *testing.T) {
 			if err := rejectPublishedRefutations(job, result, projected); err != nil {
 				t.Fatalf("public source quote blocked: %v", err)
 			}
+			result.Answer = quoted
+			projected, err = projectPublication(job, result)
+			if err != nil || rejectPublishedRefutations(job, result, projected) != nil {
+				t.Fatalf("whole reply quoted from public source was blocked: %v", err)
+			}
 			result.Refutations[0].Text = novel
 			result.Answer = "Public reply: " + novel
 			projected, err = projectPublication(job, result)
@@ -523,6 +598,22 @@ func TestPublishedRefutationsAllowSourceQuoteInPublicReply(t *testing.T) {
 				t.Fatal("novel private copy accepted")
 			}
 		})
+	}
+}
+
+func TestPublishedRefutationsSourceSearchDoesNotJoinFiles(t *testing.T) {
+	const private = "A private sentence must not be formed by adjoining source files."
+	job := withClaudeCritic(testJob(command.Comment))
+	job.Source.Files = []workspace.File{
+		{Path: "first.txt", Mode: workspace.Regular, Data: []byte("A private sentence must not be formed by ")},
+		{Path: "second.txt", Mode: workspace.Regular, Data: []byte("adjoining source files.")},
+	}
+	result := privateReviewResult(job)
+	result.Refutations[0].Text = private
+	result.Answer = "Public reply: " + private
+	projected, err := projectPublication(job, result)
+	if err != nil || rejectPublishedRefutations(job, result, projected) == nil {
+		t.Fatalf("private sentence crossing source files passed: %v", err)
 	}
 }
 

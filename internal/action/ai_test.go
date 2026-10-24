@@ -278,6 +278,53 @@ func TestRunAIRedactsBothConfiguredKeys(t *testing.T) {
 	}
 }
 
+func TestRunAIRejectsEncodedConfiguredKeyBeforePeer(t *testing.T) {
+	for _, providers := range []struct{ main, critic string }{{"codex", "claude"}, {"claude", "codex"}} {
+		for _, stage := range []string{"candidate", "refutation", "feedback"} {
+			t.Run(providers.main+"/"+stage, func(t *testing.T) {
+				const codexKey, claudeKey = "codex-fixture-secret", "claude-fixture-secret"
+				mainKey, criticKey := codexKey, claudeKey
+				if providers.main == "claude" {
+					mainKey, criticKey = claudeKey, codexKey
+				}
+				encodedMain := strings.Replace(mainKey, "secret", "&#x73;ecret", 1)
+				encodedCritic := strings.Replace(criticKey, "secret", "&#x73;ecret", 1)
+				mainCalls, criticCalls := 0, 0
+				runner := Runner{Codex: config.CodexConfig{APIKey: codexKey}, Claude: config.ClaudeConfig{APIKey: claudeKey}}
+				runner.runModel = func(_ context.Context, request modelRun) (aicli.Result, error) {
+					if request.role == roleMain {
+						mainCalls++
+						if stage == "refutation" && mainCalls == 1 || stage == "feedback" {
+							return aicli.Result{Answer: proposalJSON("Safe answer", "")}, nil
+						}
+						if stage == "candidate" {
+							return aicli.Result{Answer: proposalJSON("Public "+encodedMain, "")}, nil
+						}
+						return aicli.Result{Answer: proposalJSON("Safe revision", "Private "+encodedMain)}, nil
+					}
+					criticCalls++
+					feedback := "Please revise."
+					if stage == "feedback" {
+						feedback = "Private " + encodedCritic
+					}
+					return aicli.Result{Answer: fmt.Sprintf(`{"review_complete":true,"approved":false,"has_blockers":true,"feedback":%q}`, feedback)}, nil
+				}
+				job := Job{Main: RoleSettings{Provider: providers.main}, Critic: &RoleSettings{Provider: providers.critic}, CriticMaxRounds: 2}
+				answer, stop, err := runner.runAI(t.Context(), job, t.TempDir(), "task", "", nil, &modelSessions{})
+				wantMain, wantCritic := 1, 0
+				if stage == "refutation" {
+					wantMain, wantCritic = 2, 1
+				} else if stage == "feedback" {
+					wantCritic = 1
+				}
+				if !errors.Is(err, monitor.ErrTerminalJob) || answer != "" || stop != "" || mainCalls != wantMain || criticCalls != wantCritic {
+					t.Fatalf("encoded key crossed role boundary: main=%d/%d critic=%d/%d answer=%q stop=%q error=%v", mainCalls, wantMain, criticCalls, wantCritic, answer, stop, err)
+				}
+			})
+		}
+	}
+}
+
 func TestRedactActionTextFailsClosedWhenMarkersReformAnotherKey(t *testing.T) {
 	if got := redactActionText("private # and redacted", "#", "redacted"); got != "" {
 		t.Fatalf("configured key reformed after redaction: %q", got)
