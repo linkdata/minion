@@ -168,7 +168,7 @@ func TestRepositoryAndRefValidation(t *testing.T) {
 			t.Errorf("validateBranch(%q) should fail", branch)
 		}
 	}
-	if _, err := cloneFromURL(context.Background(), t.TempDir(), "file://"+filepath.Join(t.TempDir(), "missing.git"), "bad..branch", true); err == nil || !strings.Contains(err.Error(), "invalid branch") {
+	if _, err := cloneFromURL(context.Background(), t.TempDir(), filepath.Join(t.TempDir(), "missing.git"), "bad..branch", true); err == nil || !strings.Contains(err.Error(), "invalid branch") {
 		t.Fatalf("cloneFromURL invalid default branch error = %v", err)
 	}
 }
@@ -285,7 +285,7 @@ func TestCheckoutPullRequestRejectsOversizedHeadMetadata(t *testing.T) {
 	head := fixture.git(fixture.source, "rev-parse", "HEAD")
 	blob := fixture.git(fixture.source, "rev-parse", "HEAD:new.dat")
 	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/pull/7/head")
-	checkout := fixture.keepCheckout(cloneFromURL(context.Background(), t.TempDir(), "file://"+fixture.remote, "main", true))
+	checkout := fixture.keepCheckout(cloneFromURL(context.Background(), t.TempDir(), fixture.remote, "main", true))
 	if err := checkout.checkoutPullRequest(context.Background(), 7, "main", head); !errors.Is(err, ErrCheckoutTooLarge) {
 		t.Fatalf("oversized PR error = %v, want checkout limit", err)
 	}

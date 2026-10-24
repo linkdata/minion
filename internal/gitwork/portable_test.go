@@ -136,7 +136,7 @@ func TestCloneRejectsShallowSource(t *testing.T) {
 	fixture := newFixture(t)
 	writeFile(t, filepath.Join(fixture.remote, "shallow"), fixture.base+"\n")
 	root := t.TempDir()
-	checkout, err := cloneFromURL(context.Background(), root, "file://"+fixture.remote, "main", true)
+	checkout, err := cloneFromURL(context.Background(), root, fixture.remote, "main", true)
 	if checkout != nil || err == nil || !strings.Contains(err.Error(), "source repository is shallow") {
 		t.Fatalf("shallow source returned checkout=%v error=%v", checkout, err)
 	}

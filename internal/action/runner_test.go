@@ -152,7 +152,11 @@ func TestRunnerReturnsFileChangesAndPartialUsage(t *testing.T) {
 		return aicli.Result{Answer: "Changed two files", UsageComplete: true}, nil
 	}
 	result, err := runner.Run(context.Background(), job)
-	want := []workspace.Change{{Path: "binary", Mode: workspace.Executable, Data: []byte{0, 1, 2}}, {Path: "source.txt", Delete: true}}
+	mode := workspace.Executable
+	if runtime.GOOS == "windows" {
+		mode = workspace.Regular
+	}
+	want := []workspace.Change{{Path: "binary", Mode: mode, Data: []byte{0, 1, 2}}, {Path: "source.txt", Delete: true}}
 	if err != nil || !reflect.DeepEqual(result.Changes, want) {
 		t.Fatalf("changes = %+v, %v", result.Changes, err)
 	}
