@@ -27,9 +27,7 @@ func readOnlyFixture(t *testing.T, pull, link bool) (gitFixture, *Checkout, stri
 		}
 	}
 	if link {
-		if err := os.Symlink("base-target", filepath.Join(fixture.source, "omitted-link")); err != nil {
-			t.Fatal(err)
-		}
+		symlinkOrSkip(t, "base-target", filepath.Join(fixture.source, "omitted-link"))
 	}
 	base := fixture.commit("refs/heads/main", "base files")
 	head := base
@@ -45,9 +43,7 @@ func readOnlyFixture(t *testing.T, pull, link bool) (gitFixture, *Checkout, stri
 			if err := os.Remove(filepath.Join(fixture.source, "omitted-link")); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.Symlink("head-target", filepath.Join(fixture.source, "omitted-link")); err != nil {
-				t.Fatal(err)
-			}
+			symlinkOrSkip(t, "head-target", filepath.Join(fixture.source, "omitted-link"))
 		}
 		head = fixture.commit("refs/pull/7/head", "PR changes")
 	}

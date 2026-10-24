@@ -52,9 +52,6 @@ func privateRecordsDir(workRoot, name string) (string, error) {
 	if err := os.MkdirAll(root, 0700); err != nil {
 		return "", err
 	}
-	if err := workspace.CheckPrivateRoot(root); err != nil {
-		return "", err
-	}
 	if err := workspace.CheckRoot(root); err != nil {
 		return "", err
 	}

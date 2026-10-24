@@ -4,8 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-
-	"golang.org/x/sys/windows"
 )
 
 func TestWindowsSourcePaths(t *testing.T) {
@@ -25,34 +23,6 @@ func TestWindowsSourcePaths(t *testing.T) {
 		if got := validSourcePath(test.name); got != test.valid {
 			t.Errorf("validSourcePath(%q) = %t, want %t", test.name, got, test.valid)
 		}
-	}
-}
-
-func TestWindowsPrivateACL(t *testing.T) {
-	user, err := windows.GetCurrentProcessToken().GetTokenUser()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, test := range []struct {
-		name, sddl string
-		private    bool
-	}{
-		{"owner and system", "D:P(A;;FA;;;" + user.User.Sid.String() + ")(A;;FA;;;SY)(A;;FA;;;BA)", true},
-		{"everyone", "D:P(A;;FA;;;" + user.User.Sid.String() + ")(A;;FR;;;WD)", false},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			sd, err := windows.SecurityDescriptorFromString(test.sddl)
-			if err != nil {
-				t.Fatal(err)
-			}
-			dacl, _, err := sd.DACL()
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got := privateWindowsDACL(dacl, user.User.Sid) == nil; got != test.private {
-				t.Errorf("privateWindowsDACL(%s) = %t, want %t", test.sddl, got, test.private)
-			}
-		})
 	}
 }
 

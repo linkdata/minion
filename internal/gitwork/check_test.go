@@ -77,9 +77,7 @@ func TestCheckGitUsesSyntheticPrivateOfflinePaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	alias := filepath.Join(t.TempDir(), "work-root")
-	if err := os.Symlink(root, alias); err != nil {
-		t.Fatal(err)
-	}
+	symlinkOrSkip(t, root, alias)
 	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)

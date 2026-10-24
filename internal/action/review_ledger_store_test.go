@@ -39,7 +39,7 @@ func loadPrivateReview(root string) (retainedReview, error) {
 	}
 	for path, want := range map[string]os.FileMode{paths[0]: 0600, filepath.Dir(paths[0]): 0700} {
 		info, err := os.Stat(path)
-		if err != nil || info.Mode().Perm() != want {
+		if err != nil || runtime.GOOS != "windows" && info.Mode().Perm() != want {
 			return retainedReview{}, fmt.Errorf("private mode %s: %v error=%v", path, info, err)
 		}
 	}
@@ -277,11 +277,8 @@ func TestPrivateReviewRecordsDecisionAfterVerdictCheckpoint(t *testing.T) {
 }
 
 func TestPrivateReviewBoundaryBeforeStorageOrPublication(t *testing.T) {
-	for _, scenario := range []string{"foreign identity", "foreign source", "malformed history", "oversized history", "invalid calls", "invalid answer", "read-only source changes", "storage failure", "public root", "symlink root"} {
+	for _, scenario := range []string{"foreign identity", "foreign source", "malformed history", "oversized history", "invalid calls", "invalid answer", "read-only source changes", "storage failure", "non-directory history", "symlink root"} {
 		t.Run(scenario, func(t *testing.T) {
-			if scenario == "public root" && runtime.GOOS == "windows" {
-				t.Skip("os.Mkdir mode does not create a public ACL on native Windows")
-			}
 			job := withClaudeCritic(testJob(command.Comment))
 			result := privateReviewResult(job)
 			root := t.TempDir()
@@ -308,8 +305,8 @@ func TestPrivateReviewBoundaryBeforeStorageOrPublication(t *testing.T) {
 				if err := os.WriteFile(root, []byte("blocked"), 0600); err != nil {
 					t.Fatal(err)
 				}
-			case "public root":
-				if err := os.MkdirAll(filepath.Join(root, "reviews"), 0755); err != nil {
+			case "non-directory history":
+				if err := os.WriteFile(filepath.Join(root, "reviews"), []byte("blocked"), 0600); err != nil {
 					t.Fatal(err)
 				}
 			case "symlink root":

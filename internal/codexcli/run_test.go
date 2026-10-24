@@ -490,9 +490,7 @@ func TestRunRejectsSkillInsideSource(t *testing.T) {
 		t.Fatal(err)
 	}
 	alias := filepath.Join(t.TempDir(), "SKILL.md")
-	if err := os.Symlink(skill, alias); err != nil {
-		t.Fatal(err)
-	}
+	symlinkOrSkip(t, skill, alias)
 	binary := installFakeCodex(t, "#!/bin/sh\ntouch \"$0.invoked\"\nexit 99\n")
 	for _, path := range []string{skill, alias} {
 		if _, err := Run(context.Background(), source, "task", false, "", config.CodexConfig{Skills: []string{path}}); err == nil || !strings.Contains(err.Error(), "skill is inside the untrusted source snapshot") {
@@ -511,9 +509,7 @@ func TestRunRejectsReadOnlyOutputOverlap(t *testing.T) {
 		t.Fatal(err)
 	}
 	alias := filepath.Join(t.TempDir(), "output")
-	if err := os.Symlink(output, alias); err != nil {
-		t.Fatal(err)
-	}
+	symlinkOrSkip(t, output, alias)
 	binary := installFakeCodex(t, "#!/bin/sh\ntouch \"$0.invoked\"\nexit 99\n")
 	for _, path := range []string{output, child, filepath.Dir(output), alias} {
 		if _, err := Run(context.Background(), source, "task", false, output, config.CodexConfig{ReadOnlyDirs: []string{path}}); err == nil || !strings.Contains(err.Error(), "read-only directory overlaps the output directory") {
@@ -577,8 +573,15 @@ func TestNativeSystemGrantRules(t *testing.T) {
 		t.Fatalf("Linux grants = %v", got)
 	}
 	mac := systemReadPaths("darwin", nil)
-	if !slices.Contains(mac, "/System") || !slices.Contains(mac, "/opt/homebrew") {
+	if !slices.Contains(mac, "/System/Library") || !slices.Contains(mac, "/System/Cryptexes/OS/System/Library/dyld") || !slices.Contains(mac, "/opt/homebrew") {
 		t.Fatalf("macOS grants = %v", mac)
+	}
+	const data = "/System/Volumes/Data"
+	for _, path := range mac {
+		path = strings.TrimRight(path, "/")
+		if path == data || strings.HasPrefix(data, path+"/") || strings.HasPrefix(path, data+"/") {
+			t.Fatalf("macOS grant exposes Data volume user files: %q", path)
+		}
 	}
 	systemRoot, programFiles := t.TempDir(), t.TempDir()
 	win := systemReadPaths("windows", func(key string) string {
@@ -914,6 +917,16 @@ func installFakeCodex(t *testing.T, script string) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+func symlinkOrSkip(t *testing.T, target, link string) {
+	t.Helper()
+	if err := os.Symlink(target, link); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("Windows symlink fixture is unavailable: %v", err)
+		}
+		t.Fatal(err)
+	}
 }
 
 func canonicalTempDir(t *testing.T) string {

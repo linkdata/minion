@@ -27,7 +27,7 @@ func MaterializeRepository(ctx context.Context, source string, snapshot workspac
 	if err := workspace.ValidateSnapshot(snapshot); err != nil {
 		return nil, err
 	}
-	if err := workspace.CheckPrivateRoot(source); err != nil {
+	if err := workspace.CheckRoot(source); err != nil {
 		return nil, err
 	}
 

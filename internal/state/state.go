@@ -54,8 +54,9 @@ type PendingNotification struct {
 }
 
 type JobFailure struct {
-	Attempts      int `json:"attempts"`
-	ReplyAttempts int `json:"reply_attempts,omitempty"`
+	Attempts         int  `json:"attempts"`
+	ReplyAttempts    int  `json:"reply_attempts,omitempty"`
+	ModelCallStarted bool `json:"model_call_started,omitempty"`
 }
 
 type Store struct {

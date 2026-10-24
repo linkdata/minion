@@ -313,9 +313,7 @@ func TestCloneFailureRemovesOwnedDirectoryAndPreservesCause(t *testing.T) {
 func TestNewBranchPreservesOmittedGitlinkAndSymlink(t *testing.T) {
 	fixture := newFixture(t)
 	fixture.git(fixture.source, "update-index", "--add", "--cacheinfo", "160000,"+fixture.base+",sub")
-	if err := os.Symlink("README.md", filepath.Join(fixture.source, "omitted-link")); err != nil {
-		t.Fatal(err)
-	}
+	symlinkOrSkip(t, "README.md", filepath.Join(fixture.source, "omitted-link"))
 	fixture.git(fixture.source, "add", "omitted-link")
 	fixture.git(fixture.source, "commit", "-m", "add gitlink and symlink")
 	linkBlob := fixture.git(fixture.source, "rev-parse", "HEAD:omitted-link")
@@ -613,6 +611,16 @@ func writeFile(t *testing.T, path, content string) {
 	}
 }
 
+func symlinkOrSkip(t *testing.T, target, link string) {
+	t.Helper()
+	if err := os.Symlink(target, link); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("Windows symlink fixture is unavailable: %v", err)
+		}
+		t.Fatal(err)
+	}
+}
+
 func writeSparse(t *testing.T, path string, size int64) {
 	t.Helper()
 	if err := os.WriteFile(path, nil, 0600); err != nil {
@@ -627,8 +635,8 @@ func writeSparse(t *testing.T, path string, size int64) {
 var shellQuote = aicli.ShellQuote
 
 func TestCheckoutCloseRetainsPathForRetry(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("requires ordinary directory permission enforcement")
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("requires effective POSIX directory permissions and a non-root user")
 	}
 	root := t.TempDir()
 	name := filepath.Join(root, "checkout")

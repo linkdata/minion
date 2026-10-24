@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -578,6 +579,9 @@ func TestFixRecoversOnlyRecordedBranch(t *testing.T) {
 }
 
 func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix shell wrapper and executable mode are required")
+	}
 	for _, test := range []struct {
 		name                        string
 		critic, capped, saveFailure bool

@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -130,7 +131,7 @@ func TestHTTPWorkerDiagnosticsRemainPrivateThroughPublication(t *testing.T) {
 				len(record.WorkerReportedDiagnostics) != 1 || record.WorkerReportedDiagnostics[0] != outcome.Result.Diagnostics[0] || record.WorkerReportedFailure != nil {
 				t.Fatalf("validated diagnostic was not bound to private attempt record: %s, %+v", path, record)
 			}
-			if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0600 {
+			if info, err := os.Stat(path); err != nil || !info.Mode().IsRegular() || runtime.GOOS != "windows" && info.Mode().Perm() != 0600 {
 				t.Fatalf("private diagnostic record permissions: %v, %v", info, err)
 			}
 			if !strings.Contains(journal.String(), fmt.Sprintf("private_path=%q", path)) {

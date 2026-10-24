@@ -16,12 +16,13 @@ import (
 	"time"
 
 	"github.com/linkdata/minion/internal/config"
+	"github.com/linkdata/minion/internal/testtemp"
 )
 
 // The test binary is a multicall Codex stub when production sets argv[0] to codex.
 func TestMain(m *testing.M) {
 	if len(os.Args) < 2 || strings.HasPrefix(os.Args[1], "-test.") {
-		os.Exit(m.Run())
+		testtemp.Main(m)
 	}
 	if os.Args[0] != "codex" {
 		fmt.Fprintln(os.Stderr, "codex stub invoked as", os.Args[0])

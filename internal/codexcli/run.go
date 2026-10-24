@@ -40,7 +40,7 @@ func systemReadPaths(goos string, getenv func(string) string) []string {
 	case "linux":
 		return []string{"/bin", "/sbin", "/usr", "/etc", "/lib", "/lib64", "/nix/store", "/run/current-system/sw"}
 	case "darwin":
-		return []string{"/System", "/usr", "/bin", "/sbin", "/opt/homebrew", "/Library/Developer/CommandLineTools", "/Library/Frameworks", "/Applications/Xcode.app/Contents/Developer"}
+		return []string{"/System/Library", "/System/Cryptexes/OS/System/Library/dyld", "/usr", "/bin", "/sbin", "/opt/homebrew", "/Library/Developer/CommandLineTools", "/Library/Frameworks", "/Applications/Xcode.app/Contents/Developer"}
 	case "windows":
 		root := getenv("SystemRoot")
 		if !filepath.IsAbs(root) {

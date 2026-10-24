@@ -607,44 +607,77 @@ func TestRunOnceKeepsTerminalFailureWhenWorkRootFills(t *testing.T) {
 	}
 }
 
-func TestRunOnceCountsPublicationFailureWhenWorkRootFills(t *testing.T) {
+func TestRunOnceTerminalizesPublicationFailureWhenWorkRootFills(t *testing.T) {
 	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
 	item := github.Item{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}, HTMLURL: "https://github.com/example-owner/example-repo/pull/7#issuecomment-1"}
 	gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}, items: []github.Item{item}, permission: github.Permission{Permission: "write"}}
 	handler := &fakeHandler{executeErr: errors.Join(ErrPostModelPublication, workroot.ErrUnsafe, &github.StatusError{StatusCode: http.StatusBadGateway})}
 	store := openState(t, now.Add(-time.Minute))
+	handler.onExecute = func() { saveModelCallStart(t, store, jobID(item.Key, "review")) }
 	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Now: func() time.Time { return now }}
-	if _, err := m.RunOnce(context.Background(), store); err == nil || len(handler.jobs) != 1 {
+	if _, err := m.RunOnce(t.Context(), store); err != nil || len(handler.jobs) != 1 {
 		t.Fatalf("publication failure = %v, jobs = %d", err, len(handler.jobs))
 	}
-	if failure := store.Data.JobFailures[handler.jobs[0].ID]; failure.Attempts != 1 {
-		t.Fatalf("publication failure was refunded when work root filled: %+v", failure)
+	if len(gh.comments) != 1 || len(store.Data.Processed) != 1 || len(store.Data.JobFailures) != 0 {
+		t.Fatalf("publication failure repeated paid work when work root filled: %+v", store.Data)
 	}
 }
 
-func TestRunOnceBoundsPublicationFailuresAfterModel(t *testing.T) {
+func TestRunOncePublicationFailureRetriesOnlyFailureReply(t *testing.T) {
 	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
 	item := github.Item{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}, HTMLURL: "https://github.com/example-owner/example-repo/pull/7#issuecomment-1"}
-	gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}, items: []github.Item{item}, permission: github.Permission{Permission: "write"}}
+	replyErr := errors.New("failure reply unavailable")
+	gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}, items: []github.Item{item}, permission: github.Permission{Permission: "write"}, commentErr: replyErr}
+	handler := &fakeHandler{executeErr: errors.Join(ErrPostModelPublication, &github.StatusError{StatusCode: http.StatusBadGateway})}
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	store := openStateAt(t, statePath, now.Add(-time.Minute))
+	handler.onExecute = func() { saveModelCallStart(t, store, jobID(item.Key, "review")) }
+	clock := now
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Now: func() time.Time { return clock }}
+	if _, err := m.RunOnce(t.Context(), store); !errors.Is(err, replyErr) || len(handler.jobs) != 1 || gh.commentCalls != 1 {
+		t.Fatalf("publication failure retry included model work: err=%v jobs=%d replies=%d", err, len(handler.jobs), gh.commentCalls)
+	}
+	id := handler.jobs[0].ID
+	if failure := store.Data.JobFailures[id]; failure.Attempts != maxJobAttempts || failure.ReplyAttempts != 1 || !failure.ModelCallStarted {
+		t.Fatalf("publication failure did not retain only its failure reply: %+v", failure)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened := openStateAt(t, statePath, now.Add(-time.Minute))
+	handler.onExecute = func() { t.Fatal("publication retry repeated model work") }
+	gh.commentErr = nil
+	clock = advanceToRetry(clock, reopened)
+	if _, err := m.RunOnce(t.Context(), reopened); err != nil || len(handler.jobs) != 1 || gh.commentCalls != 2 || len(gh.comments) != 1 || len(reopened.Data.Processed) != 1 {
+		t.Fatalf("publication failure reply did not finish after restart: err=%v jobs=%d replies=%d state=%+v", err, len(handler.jobs), gh.commentCalls, reopened.Data)
+	}
+}
+
+func TestRunOnceFixedPublicationRetriesWithoutModelMarker(t *testing.T) {
+	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	item := github.Item{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion fix", Author: github.User{Login: "writer"}}
+	notification := testNotification(now)
+	notification.Subject.Type = "Issue"
+	notification.Subject.URL = "https://api.github.com/repos/example-owner/example-repo/issues/7"
+	gh := &fakeGitHub{notifications: []github.Notification{notification}, items: []github.Item{item}, permission: github.Permission{Permission: "write"}}
 	handler := &fakeHandler{executeErr: errors.Join(ErrPostModelPublication, &github.StatusError{StatusCode: http.StatusBadGateway})}
 	store := openState(t, now.Add(-time.Minute))
 	clock := now
 	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Now: func() time.Time { return clock }}
 	for attempt := 1; attempt <= maxJobAttempts; attempt++ {
-		_, err := m.RunOnce(context.Background(), store)
+		_, err := m.RunOnce(t.Context(), store)
 		if (err != nil) != (attempt < maxJobAttempts) || len(handler.jobs) != attempt {
-			t.Fatalf("attempt %d: err=%v jobs=%d", attempt, err, len(handler.jobs))
+			t.Fatalf("fixed publication attempt %d: err=%v jobs=%d", attempt, err, len(handler.jobs))
 		}
-		if attempt < maxJobAttempts && store.Data.JobFailures[handler.jobs[0].ID].Attempts != attempt {
-			t.Fatalf("publication failure refunded attempt %d: %+v", attempt, store.Data.JobFailures)
+		if attempt < maxJobAttempts {
+			if failure := store.Data.JobFailures[handler.jobs[0].ID]; failure.Attempts != attempt || failure.ModelCallStarted {
+				t.Fatalf("fixed publication changed retry state: %+v", failure)
+			}
 		}
 		clock = advanceToRetry(clock, store)
 	}
-	if len(gh.comments) != 1 || len(store.Data.Processed) != 1 {
-		t.Fatalf("publication failure did not finish: comments=%d state=%+v", len(gh.comments), store.Data)
-	}
-	if _, err := m.RunOnce(context.Background(), store); err != nil || len(handler.jobs) != maxJobAttempts {
-		t.Fatalf("finished job reran: err=%v jobs=%d", err, len(handler.jobs))
+	if len(gh.comments) != 1 || len(store.Data.Processed) != 1 || len(store.Data.JobFailures) != 0 {
+		t.Fatalf("fixed publication did not stop after bounded retries: %+v", store.Data)
 	}
 }
 

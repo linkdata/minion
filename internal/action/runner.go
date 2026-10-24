@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strings"
 	"syscall"
@@ -119,12 +118,6 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 	workRoot, err := workspace.CanonicalPath(workRoot)
 	if err != nil {
 		return result, err
-	}
-	if runtime.GOOS == "windows" {
-		// MkdirTemp inherits its parent's ACL on Windows, regardless of mode.
-		if err := workspace.CheckPrivateRoot(workRoot); err != nil {
-			return result, fmt.Errorf("%w: %w", workroot.ErrUnsafe, err)
-		}
 	}
 	providers := []string{job.Main.Provider}
 	if job.Critic != nil {

@@ -206,7 +206,7 @@ func systemReadPaths(goos string) []string {
 	case "linux":
 		return []string{"/usr", "/bin", "/lib", "/lib64", "/etc/ld.so.cache", "/etc/ld.so.conf", "/etc/ld.so.conf.d", "/etc/localtime", "/etc/nsswitch.conf", "/etc/ssl/certs"}
 	case "darwin":
-		return []string{"/System", "/usr", "/bin", "/sbin", "/opt/homebrew", "/Library/Developer/CommandLineTools", "/Library/Frameworks", "/Applications/Xcode.app/Contents/Developer", "/private/etc/ssl", "/private/etc/hosts", "/private/etc/resolv.conf", "/private/etc/localtime"}
+		return []string{"/System/Library", "/System/Cryptexes/OS/System/Library/dyld", "/usr", "/bin", "/sbin", "/opt/homebrew", "/Library/Developer/CommandLineTools", "/Library/Frameworks", "/Applications/Xcode.app/Contents/Developer", "/private/etc/ssl", "/private/etc/hosts", "/private/etc/resolv.conf", "/private/etc/localtime"}
 	default:
 		return nil
 	}

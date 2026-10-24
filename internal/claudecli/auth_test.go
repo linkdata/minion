@@ -51,9 +51,7 @@ func TestAuthentication(t *testing.T) {
 func TestAuthenticationCanonicalParent(t *testing.T) {
 	parent := t.TempDir()
 	link := filepath.Join(t.TempDir(), "auth-parent")
-	if err := os.Symlink(parent, link); err != nil {
-		t.Fatal(err)
-	}
+	symlinkOrSkip(t, parent, link)
 	dir, err := authentication(link, dummyAPIKey)
 	if err != nil {
 		t.Fatal(err)

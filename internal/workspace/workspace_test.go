@@ -180,6 +180,9 @@ func TestSnapshotHeadOmittedRequiresCurrentOmission(t *testing.T) {
 }
 
 func TestSourcePreservesGitLegalCaseAndBackslashPaths(t *testing.T) {
+	if runtime.GOOS == "windows" || !caseSensitiveTempDir(t) {
+		t.Skip("case-distinct and backslash path fixture requires a case-sensitive Unix filesystem")
+	}
 	files := []File{
 		{Path: "include/xt_connmark.h", Mode: Regular, Data: []byte("lowercase")},
 		{Path: "include/xt_CONNMARK.h", Mode: Regular, Data: []byte("uppercase")},
@@ -208,6 +211,19 @@ func TestSourcePreservesGitLegalCaseAndBackslashPaths(t *testing.T) {
 	if err := CheckUnchanged(context.Background(), root, files); err != nil {
 		t.Fatalf("unchanged Git-legal source=%v", err)
 	}
+}
+
+func caseSensitiveTempDir(t *testing.T) bool {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "case-probe"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := os.Stat(filepath.Join(root, "CASE-PROBE"))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	return errors.Is(err, os.ErrNotExist)
 }
 
 func TestCaseOnlyRenameAppliesDeletionBeforeCreation(t *testing.T) {
@@ -408,32 +424,20 @@ func TestApplyCleansRootAndKeepsRootDirectory(t *testing.T) {
 	}
 }
 
-func TestMaterializeRefusesNonprivateRoot(t *testing.T) {
-	for _, kind := range []string{"public mode", "symlink"} {
-		t.Run(kind, func(t *testing.T) {
-			if runtime.GOOS == "windows" && kind == "public mode" {
-				t.Skip("Windows privacy is controlled by ACLs, not mode bits")
-			}
-			target := privateRoot(t)
-			root := target
-			if kind == "symlink" {
-				root = filepath.Join(t.TempDir(), "link")
-				if err := os.Symlink(target, root); err != nil {
-					if runtime.GOOS == "windows" {
-						t.Skipf("Windows symlink privilege unavailable: %v", err)
-					}
-					t.Fatal(err)
-				}
-			} else if err := os.Chmod(root, 0755); err != nil {
-				t.Fatal(err)
-			}
-			if err := Materialize(root, []File{{Path: "source", Mode: Regular}}); err == nil || !strings.Contains(err.Error(), "private directory") {
-				t.Fatalf("root validation=%v", err)
-			}
-			if _, err := os.Stat(filepath.Join(target, "source")); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("refused materialization wrote source: %v", err)
-			}
-		})
+func TestMaterializeRefusesSymlinkRoot(t *testing.T) {
+	target := privateRoot(t)
+	root := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(target, root); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("Windows symlink privilege unavailable: %v", err)
+		}
+		t.Fatal(err)
+	}
+	if err := Materialize(root, []File{{Path: "source", Mode: Regular}}); err == nil {
+		t.Fatal("materialized through symlink root")
+	}
+	if _, err := os.Stat(filepath.Join(target, "source")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("refused materialization wrote source: %v", err)
 	}
 }
 

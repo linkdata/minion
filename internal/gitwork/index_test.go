@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -241,7 +242,10 @@ func TestFixIndexPreservesGitignoreAndTrackedIgnoredFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.Symlink("/outside/python", filepath.Join(source, ".venv", "bin", "python")); err != nil {
-		t.Fatal(err)
+		if runtime.GOOS != "windows" {
+			t.Fatal(err)
+		}
+		t.Logf("ignored symlink fixture is unavailable on Windows: %v", err)
 	}
 	changes, err := index.Changes(context.Background())
 	want := []workspace.Change{{Path: "tracked.log", Mode: workspace.Regular, Data: []byte("after")}}
@@ -342,14 +346,15 @@ func TestFixIndexRejectsNonIgnoredUnsafeOutput(t *testing.T) {
 		{"too many", "changed file limit"},
 	} {
 		t.Run(tt.kind, func(t *testing.T) {
+			if runtime.GOOS == "windows" && tt.kind == "unsafe path" {
+				t.Skip("backslash is a path separator on native Windows")
+			}
 			index, source := offlineIndexFixture(t, nil)
 			switch tt.kind {
 			case "unsafe path":
 				writeIndexFixture(t, source, "new\\output", []byte("data"))
 			case "symlink":
-				if err := os.Symlink("/outside/secret", filepath.Join(source, "link")); err != nil {
-					t.Fatal(err)
-				}
+				symlinkOrSkip(t, "/outside/secret", filepath.Join(source, "link"))
 			case "nested repository":
 				writeIndexFixture(t, source, "nested/file", []byte("nested source"))
 				nested := filepath.Join(source, "nested")
@@ -364,18 +369,23 @@ func TestFixIndexRejectsNonIgnoredUnsafeOutput(t *testing.T) {
 					writeIndexFixture(t, source, fmt.Sprintf("file-%d", i), nil)
 				}
 			}
-			marker := filepath.Join(t.TempDir(), "add-ran")
-			script := fmt.Sprintf("#!/bin/sh\nfor argument in \"$@\"; do\n if [ \"$argument\" = add ]; then touch %s; fi\ndone\nexec %s \"$@\"\n", shellQuote(marker), shellQuote(index.binary))
-			index.binary = filepath.Join(fakeOnPath(t, "git-proxy", script), "git-proxy")
-			changes, err := index.Changes(context.Background())
+			var marker string
+			if runtime.GOOS != "windows" {
+				marker = filepath.Join(t.TempDir(), "add-ran")
+				script := fmt.Sprintf("#!/bin/sh\nfor argument in \"$@\"; do\n if [ \"$argument\" = add ]; then touch %s; fi\ndone\nexec %s \"$@\"\n", shellQuote(marker), shellQuote(index.binary))
+				index.binary = filepath.Join(fakeOnPath(t, "git-proxy", script), "git-proxy")
+			}
+			changes, err := index.Changes(t.Context())
 			if err == nil || !strings.Contains(err.Error(), tt.cause) {
 				t.Fatalf("%s output: changes=%+v, err=%v; want %q", tt.kind, changes, err, tt.cause)
 			}
 			if tt.kind == "too many" && !errors.Is(err, ErrTooManyFiles) {
 				t.Fatalf("untracked change count lost native classification: %v", err)
 			}
-			if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("Git hashed rejected output before precheck: %v", err)
+			if marker != "" {
+				if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("Git hashed rejected output before precheck: %v", err)
+				}
 			}
 		})
 	}
@@ -470,15 +480,20 @@ func TestFixIndexBoundsActualControlScanBeforeStaging(t *testing.T) {
 
 func TestFixIndexPreservesModeDeletionAndBinary(t *testing.T) {
 	index, source := offlineIndexFixture(t, []workspace.File{{Path: "mode", Mode: workspace.Regular, Data: []byte("same")}, {Path: "deleted", Mode: workspace.Regular, Data: []byte("deleted")}})
-	if err := os.Chmod(filepath.Join(source, "mode"), 0755); err != nil {
-		t.Fatal(err)
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(filepath.Join(source, "mode"), 0755); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := os.Remove(filepath.Join(source, "deleted")); err != nil {
 		t.Fatal(err)
 	}
 	writeIndexFixture(t, source, "binary", []byte{0, 1, 2})
 	changes, err := index.Changes(context.Background())
-	want := []workspace.Change{{Path: "binary", Mode: workspace.Regular, Data: []byte{0, 1, 2}}, {Path: "deleted", Delete: true}, {Path: "mode", Mode: workspace.Executable, Data: []byte("same")}}
+	want := []workspace.Change{{Path: "binary", Mode: workspace.Regular, Data: []byte{0, 1, 2}}, {Path: "deleted", Delete: true}}
+	if runtime.GOOS != "windows" {
+		want = append(want, workspace.Change{Path: "mode", Mode: workspace.Executable, Data: []byte("same")})
+	}
 	if err != nil || !reflect.DeepEqual(changes, want) {
 		t.Fatalf("changes = %+v, %v", changes, err)
 	}
@@ -608,6 +623,9 @@ func TestFixIndexExcludesModelCreatedGitMetadata(t *testing.T) {
 }
 
 func TestFixIndexCountsModeOnlyFileContentsAgainstResultLimit(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("native Windows Chmod does not set the executable bit for Git")
+	}
 	index, source := offlineIndexFixture(t, []workspace.File{{Path: "large.sh", Mode: workspace.Regular, Data: make([]byte, workspace.MaxChangeBytes+1)}})
 	if err := os.Chmod(filepath.Join(source, "large.sh"), 0755); err != nil {
 		t.Fatal(err)
@@ -669,15 +687,15 @@ func TestFixIndexIgnoresUnusedRulesUnderIgnoredTrackedDirectory(t *testing.T) {
 			if err != nil || !reflect.DeepEqual(changes, want) {
 				t.Fatalf("unused ignored rules blocked tracked edit or included outputs: %+v,%v", changes, err)
 			}
-			if err := os.Remove(filepath.Join(source, dir, ".gitignore")); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Symlink(tracked, filepath.Join(source, dir, ".gitignore")); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := index.Changes(context.Background()); err == nil || !strings.Contains(err.Error(), "must be regular") {
-				t.Fatalf("ignored tracked-directory control shape was not checked: %v", err)
-			}
+			t.Run("symlink control", func(t *testing.T) {
+				if err := os.Remove(filepath.Join(source, dir, ".gitignore")); err != nil {
+					t.Fatal(err)
+				}
+				symlinkOrSkip(t, tracked, filepath.Join(source, dir, ".gitignore"))
+				if _, err := index.Changes(context.Background()); err == nil || !strings.Contains(err.Error(), "must be regular") {
+					t.Fatalf("ignored tracked-directory control shape was not checked: %v", err)
+				}
+			})
 		})
 	}
 }

@@ -314,19 +314,6 @@ func CheckRoot(root string) error {
 	return dir.Close()
 }
 
-// CheckPrivateRoot checks directory type and access without following a final symlink.
-// Callers must provide trusted placement for root and its parents.
-func CheckPrivateRoot(root string) error {
-	info, err := os.Lstat(root)
-	if err != nil {
-		return err
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("workspace root must be a private directory: %s (%s)", root, info.Mode())
-	}
-	return checkPrivateRoot(root, info)
-}
-
 // Materialize requires a root and parents not concurrently writable by untrusted processes.
 func Materialize(root string, files []File) error {
 	if err := validateFiles(files); err != nil {
@@ -379,7 +366,7 @@ func changedFiles(base []File, changes []Change) ([]File, error) {
 }
 
 func materialize(root string, files []File) error {
-	if err := CheckPrivateRoot(root); err != nil {
+	if err := CheckRoot(root); err != nil {
 		return err
 	}
 	dir, err := os.Open(root)

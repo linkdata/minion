@@ -146,9 +146,7 @@ func TestCheckChangesUnchangedSkipsOnlyTopLevelGitDirectory(t *testing.T) {
 					t.Fatal(err)
 				}
 			case "symlink":
-				if err := os.Symlink(privateRoot(t), name); err != nil {
-					t.Fatal(err)
-				}
+				symlinkOrSkip(t, privateRoot(t), name)
 			}
 			err := CheckChangesUnchanged(context.Background(), root, base, changes)
 			want := fmt.Sprintf("unsafe workspace path %q", test.path)

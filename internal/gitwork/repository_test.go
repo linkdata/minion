@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -692,29 +693,21 @@ func TestRepositoryDigestBoundsTotalMetadata(t *testing.T) {
 	}
 }
 
-func TestMaterializeRepositoryRequiresPrivateRoot(t *testing.T) {
+func TestMaterializeRepositoryRejectsSymlinkRoot(t *testing.T) {
 	snapshot := workspace.Snapshot{Head: strings.Repeat("a", 40), Repository: []byte("bundle")}
-	for _, kind := range []string{"public directory", "symlink"} {
-		t.Run(kind, func(t *testing.T) {
-			root := t.TempDir()
-			source := root
-			if kind == "public directory" {
-				if err := os.Chmod(source, 0755); err != nil {
-					t.Fatal(err)
-				}
-			} else {
-				source = filepath.Join(t.TempDir(), "source")
-				if err := os.Symlink(root, source); err != nil {
-					t.Fatal(err)
-				}
-			}
-			repository, err := MaterializeRepository(context.Background(), source, snapshot)
-			if repository != nil || err == nil || !strings.Contains(err.Error(), "workspace root must be a private directory") {
-				t.Fatalf("private-root check returned repository=%v error=%v", repository, err)
-			}
-			if _, err := os.Lstat(filepath.Join(root, ".git")); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("rejected root received Git metadata: %v", err)
-			}
-		})
+	root := t.TempDir()
+	source := filepath.Join(t.TempDir(), "source")
+	if err := os.Symlink(root, source); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("Windows symlink privilege unavailable: %v", err)
+		}
+		t.Fatal(err)
+	}
+	repository, err := MaterializeRepository(t.Context(), source, snapshot)
+	if repository != nil || err == nil {
+		t.Fatalf("symlink root returned repository=%v error=%v", repository, err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, ".git")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("rejected root received Git metadata: %v", err)
 	}
 }

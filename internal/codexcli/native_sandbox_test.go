@@ -62,6 +62,22 @@ func TestNativeCodexSandboxEnforcement(t *testing.T) {
 	if err := os.WriteFile(privateFile, []byte("private"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	dataAlias := ""
+	if runtime.GOOS == "darwin" {
+		alias := filepath.Join("/System/Volumes/Data", strings.TrimPrefix(privateFile, "/"))
+		original, err := os.Stat(privateFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if candidate, err := os.Stat(alias); err == nil && os.SameFile(original, candidate) {
+			if data, err := os.ReadFile(alias); err == nil && string(data) == "private" {
+				dataAlias = alias
+			}
+		}
+		if dataAlias == "" {
+			t.Log("Data volume alias is unavailable; skipping alias probe")
+		}
+	}
 	if err := os.WriteFile(gitFile, []byte("metadata"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -95,6 +111,7 @@ func TestNativeCodexSandboxEnforcement(t *testing.T) {
 		"MINION_NATIVE_SANDBOX_CHILD=1",
 		"MINION_NATIVE_SANDBOX_ALLOWED="+allowedFile,
 		"MINION_NATIVE_SANDBOX_PRIVATE="+privateFile,
+		"MINION_NATIVE_SANDBOX_DATA_ALIAS="+dataAlias,
 		"MINION_NATIVE_SANDBOX_GIT="+gitFile,
 		"MINION_NATIVE_SANDBOX_NETWORK="+listener.Addr().String(),
 	)
@@ -141,6 +158,11 @@ func TestNativeCodexSandboxProbeChild(t *testing.T) {
 	}
 	if data, err := os.ReadFile(private); err == nil {
 		t.Fatalf("private host file was readable: %q", data)
+	}
+	if alias := os.Getenv("MINION_NATIVE_SANDBOX_DATA_ALIAS"); alias != "" {
+		if data, err := os.ReadFile(alias); err == nil {
+			t.Fatalf("private host file was readable through Data volume alias: %q", data)
+		}
 	}
 	if err := os.WriteFile(filepath.Join(filepath.Dir(private), "breakout.txt"), []byte("breakout"), 0o600); err == nil {
 		t.Fatal("private host path was writable")

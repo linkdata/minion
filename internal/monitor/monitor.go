@@ -48,9 +48,9 @@ var ErrExecutionOutcomeUnknown = errors.New("execution outcome unknown")
 // ErrRequestTransport retains a request failure's infrastructure retry classification.
 var ErrRequestTransport = errors.New("request transport failure")
 
-// ErrPostModelPublication marks publication failure for completed or previously completed model work.
+// ErrPostModelPublication marks publication failure after model work or during a fixed recovery reply.
 //
-// Retrying it must consume a job attempt even when the write error is transient.
+// Without a model-call marker, retrying it consumes a job attempt even when the write error is transient.
 var ErrPostModelPublication = errors.New("post-model publication failure")
 
 const (
@@ -115,7 +115,7 @@ func InertLogText(s string) string {
 // It persists each completed command before advancing that repository's cursor.
 // Failed threads remain queued for retries without blocking other repositories.
 // Parent cancellation preserves earlier failures and unprocessed retry state/cursors.
-// Executions reporting parent cancellation refund their attempt unless publication has begun or the execution outcome is unknown.
+// Executions reporting parent cancellation refund their attempt unless a model call began, publication began, or the execution outcome is unknown.
 func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, error) {
 	if err := ctx.Err(); err != nil {
 		return store.Data.NextPollAt, err
@@ -393,6 +393,9 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				continue
 			}
 			jobFailure := store.Data.JobFailures[job.ID]
+			if jobFailure.ModelCallStarted {
+				jobFailure.Attempts = maxJobAttempts
+			}
 			if jobFailure.Attempts >= maxJobAttempts {
 				if err := m.finishFailedJob(ctx, store, job, items, started, jobFailure); err != nil {
 					failures = append(failures, err)
@@ -418,15 +421,17 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				return stop(err)
 			}
 			m.logf("run %s from @%s in %s #%d", cmd.Action, item.Author.Login, repo.Name, number)
-			if err := m.Handler.Execute(ctx, job); err != nil {
+			err = m.Handler.Execute(ctx, job)
+			jobFailure.ModelCallStarted = store.Data.JobFailures[job.ID].ModelCallStarted
+			if err != nil {
 				failureErr := fmt.Errorf("%s from %s: %w", cmd.Action, itemLocation(item), err)
 				publicationFailure := errors.Is(err, ErrPostModelPublication)
 				outcomeUnknown := errors.Is(err, ErrExecutionOutcomeUnknown)
-				interrupted := !outcomeUnknown && ctx.Err() != nil && errors.Is(err, context.Canceled) && !publicationFailure
+				interrupted := !jobFailure.ModelCallStarted && !outcomeUnknown && ctx.Err() != nil && errors.Is(err, context.Canceled) && !publicationFailure
 				switch {
 				case interrupted:
 					jobFailure.Attempts--
-				case outcomeUnknown, errors.Is(err, ErrTerminalJob):
+				case jobFailure.ModelCallStarted, outcomeUnknown, errors.Is(err, ErrTerminalJob):
 					jobFailure.Attempts = maxJobAttempts
 				case !publicationFailure && (errors.Is(err, workroot.ErrUnsafe) || infrastructureFailure(err)):
 					jobFailure.Attempts--

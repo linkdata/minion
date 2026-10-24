@@ -33,16 +33,12 @@ func TestReadOnlyAddDirsMatchCanonicalPolicyWithoutTreatingDirectoriesAsSkills(t
 			t.Fatal(err)
 		}
 	}
-	if err := os.Symlink(realDir, alias); err != nil {
-		t.Fatal(err)
-	}
+	symlinkOrSkip(t, realDir, alias)
 	output, outputAlias := filepath.Join(root, "output"), filepath.Join(root, "output-alias")
 	if err := os.Mkdir(output, 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(output, outputAlias); err != nil {
-		t.Fatal(err)
-	}
+	symlinkOrSkip(t, output, outputAlias)
 	binary := fakeExecutable(t, "claude", `printf '%s\n' "$@" > "$0.args"
 cat >/dev/null
 printf '%s\n' '`+successfulResult+`'
@@ -91,6 +87,16 @@ printf '%s\n' '`+successfulResult+`'
 }
 
 const successfulResult = `{"type":"result","subtype":"success","is_error":false,"result":"final answer","usage":{"input_tokens":3,"cache_creation_input_tokens":5,"cache_read_input_tokens":7,"output_tokens":11},"modelUsage":{"claude-main":{"inputTokens":3,"cacheCreationInputTokens":5,"cacheReadInputTokens":7,"outputTokens":11}}}`
+
+func symlinkOrSkip(t *testing.T, target, link string) {
+	t.Helper()
+	if err := os.Symlink(target, link); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("Windows symlink fixture is unavailable: %v", err)
+		}
+		t.Fatal(err)
+	}
+}
 
 func fakeExecutable(t *testing.T, name, script string) string {
 	t.Helper()
@@ -608,8 +614,15 @@ func TestClaudeSandboxSystemPaths(t *testing.T) {
 	if got := systemReadPaths("windows"); got != nil {
 		t.Fatalf("native Windows Claude must remain unsupported: %v", got)
 	}
-	if got := systemReadPaths("darwin"); !slices.Contains(got, "/System") || !slices.Contains(got, "/opt/homebrew") || slices.Contains(got, "/lib64") {
+	if got := systemReadPaths("darwin"); !slices.Contains(got, "/System/Library") || !slices.Contains(got, "/System/Cryptexes/OS/System/Library/dyld") || !slices.Contains(got, "/opt/homebrew") || slices.Contains(got, "/lib64") {
 		t.Fatalf("macOS sandbox reads = %v", got)
+	}
+	const data = "/System/Volumes/Data"
+	for _, path := range systemReadPaths("darwin") {
+		path = strings.TrimRight(path, "/")
+		if path == data || strings.HasPrefix(data, path+"/") || strings.HasPrefix(path, data+"/") {
+			t.Fatalf("macOS grant exposes Data volume user files: %q", path)
+		}
 	}
 	if !allowAllUnixSockets("linux", nil) || allowAllUnixSockets("darwin", nil) {
 		t.Fatal("Unix socket defaults must stay Linux-specific")

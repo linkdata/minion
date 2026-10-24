@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"testing"
 )
 
@@ -45,7 +46,7 @@ func TestAddRepositoryPreservesSettingsAndExistingRestrictions(t *testing.T) {
 		t.Fatalf("changed repository restrictions: %+v", raw.Repositories)
 	}
 	info, err := os.Stat(path)
-	if err != nil || info.Mode().Perm() != 0o640 {
+	if err != nil || !info.Mode().IsRegular() || runtime.GOOS != "windows" && info.Mode().Perm() != 0o640 {
 		t.Fatalf("changed config permissions: %v, %v", info, err)
 	}
 	for _, name := range []string{"EXAMPLE-OWNER/EXAMPLE-REPO", "example-owner/second-repo"} {

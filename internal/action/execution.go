@@ -102,6 +102,22 @@ func (c *executionCheckpoints) BeforeCall(fact CallCheckpoint) error {
 			return c.fail(err)
 		}
 	}
+	if c.owner.Store != nil {
+		failure, exists := c.owner.Store.Data.JobFailures[c.job.Identity.JobID]
+		if !failure.ModelCallStarted {
+			failure.ModelCallStarted = true
+			c.owner.Store.Data.JobFailures[c.job.Identity.JobID] = failure
+			if err := c.owner.Store.Save(); err != nil {
+				if exists {
+					failure.ModelCallStarted = false
+					c.owner.Store.Data.JobFailures[c.job.Identity.JobID] = failure
+				} else {
+					delete(c.owner.Store.Data.JobFailures, c.job.Identity.JobID)
+				}
+				return c.fail(fmt.Errorf("save model call start: %w", err))
+			}
+		}
+	}
 	call := fact.Call
 	c.pending = &call
 	return nil
