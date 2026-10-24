@@ -183,6 +183,7 @@ func TestAuditPublicationUsesStructuredRecordsInsteadOfReportProse(t *testing.T)
 	if strings.Count(projected.answer, "Confirmed (medium)") != 2 || strings.Count(projected.answer, "Needs validation") != 1 ||
 		!strings.Contains(projected.answer, `fingerprint="F"`) || !strings.Contains(projected.answer, `fingerprint="G"`) ||
 		!strings.Contains(projected.answer, `fingerprint="H"`) || !strings.Contains(projected.answer, "1 candidate") ||
+		strings.Contains(projected.answer, "out of scope") ||
 		strings.Contains(projected.answer, "We reject") || strings.Contains(projected.answer, "No findings") ||
 		!reflect.DeepEqual(projected.artifacts, result.Artifacts) {
 		t.Fatalf("public summary followed hostile Markdown or collapsed findings: %q", projected.answer)
@@ -638,6 +639,10 @@ func TestPublishedRefutationsDoNotTreatBinarySourceAsPublicQuote(t *testing.T) {
 			job.Source.Files[0].Data = []byte(prefix + strings.Join(strings.Split(quote, ""), "\x00"))
 			if err := rejectPublishedRefutations(job, result, projected); err == nil {
 				t.Fatal("binary source falsely proved the private quote was public")
+			}
+			job.Source.Files[0].Data = []byte(prefix + "\x00" + quote)
+			if err := rejectPublishedRefutations(job, result, projected); err != nil {
+				t.Fatalf("source quote after NUL was blocked: %v", err)
 			}
 			job.Source.Files[0].Data = []byte(prefix + quote)
 			if err := rejectPublishedRefutations(job, result, projected); err != nil {

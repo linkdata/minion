@@ -88,7 +88,7 @@ func auditPublicSummary(artifacts []workspace.File) (string, error) {
 		counts[finding.Verdict]++
 	}
 	var summary strings.Builder
-	fmt.Fprintf(&summary, "Executor-reported security audit summary. Record structure and cited source locations were checked; reviewer activity and behavior remain executor claims.\n\nCoverage units: %d covered, %d candidate, %d blocked, %d out of scope, %d not applicable.\nFindings: %d confirmed, %d need validation, %d rejected.\n", counts["covered"], counts["candidate"], counts["blocked"], counts["out_of_scope"], counts["not_applicable"], counts["confirmed"], counts["needs_validation"], counts["rejected"])
+	fmt.Fprintf(&summary, "Executor-reported security audit summary. Record structure and cited source locations were checked; reviewer activity and behavior remain executor claims.\n\nCoverage units: %d covered, %d candidate, %d blocked, %d not applicable.\nFindings: %d confirmed, %d need validation, %d rejected.\n", counts["covered"], counts["candidate"], counts["blocked"], counts["not_applicable"], counts["confirmed"], counts["needs_validation"], counts["rejected"])
 	for _, finding := range findings {
 		if finding.Verdict == "rejected" {
 			continue
@@ -213,9 +213,6 @@ func rejectPublishedRefutations(job Job, result Result, projected publication) e
 				for _, files := range [][]workspace.File{job.Source.Files, job.Source.BaseFiles} {
 					for _, file := range files {
 						for _, text := range []string{file.Path, string(file.Data)} {
-							if strings.IndexByte(text, 0) >= 0 {
-								continue
-							}
 							for _, variant := range publicationTextVariants(text) {
 								folded := foldPublicationSpace(variant)
 								if len(folded)+1 > maxCacheNormalizedBytes-source.Len() {
@@ -245,9 +242,6 @@ func rejectPublishedRefutations(job Job, result Result, projected publication) e
 		for _, files := range [][]workspace.File{job.Source.Files, job.Source.BaseFiles} {
 			for _, file := range files {
 				for _, text := range []string{file.Path, string(file.Data)} {
-					if strings.IndexByte(text, 0) >= 0 {
-						continue
-					}
 					if int64(len(text)) > remainingSourceSearchBytes {
 						scanExhausted = true
 						return false
@@ -319,6 +313,8 @@ func foldPublicationSpace(text string) string {
 	space := false
 	for _, r := range text {
 		if r == 0 {
+			result.WriteByte(0) // Source quotes cannot cross a binary boundary.
+			space = false
 			continue
 		}
 		if unicode.IsSpace(r) {
