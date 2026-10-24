@@ -319,9 +319,8 @@ JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 	validate := func(wantError string) {
 		t.Helper()
 		files, _, err := readAuditArtifacts(root, false, "")
-		var report string
 		if err == nil {
-			report, err = validateAuditFiles(t.Context(), files, validationDir, filepath.Join(skillDir, "SKILL.md"), tools, "o/r", target, head)
+			err = validateAuditFiles(t.Context(), files, validationDir, filepath.Join(skillDir, "SKILL.md"), tools, "o/r", target, head)
 		}
 		if err == nil {
 			byPath := make(map[string][]byte, len(files))
@@ -332,8 +331,8 @@ JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 			err = validateAuditCoverage(byPath["coverage-ledger.json"], byPath["findings.json"], byPath["REPORT.md"], nil)
 		}
 		if wantError == "" {
-			if err != nil || report != reportText {
-				t.Fatalf("valid audit output = %q, %v", report, err)
+			if err != nil {
+				t.Fatalf("valid audit output: %v", err)
 			}
 		} else if err == nil || !strings.Contains(err.Error(), wantError) {
 			t.Fatalf("audit output error = %v, want %q", err, wantError)

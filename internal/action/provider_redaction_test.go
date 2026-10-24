@@ -129,7 +129,7 @@ func TestAuditReportRedactsNULSplitConfiguredKeyBeforeCriticAndPublication(t *te
 		return aicli.Result{Answer: approvedCritiqueJSON}, nil
 	}}
 	result, err := runner.Run(context.Background(), job)
-	if err != nil || !criticSawReports || result.Answer != want || result.Validate(job) != nil {
+	if err != nil || !criticSawReports || result.Answer != "" || result.Validate(job) != nil {
 		t.Fatalf("audit result: critic saw reports=%t answer=%q error=%v", criticSawReports, result.Answer, err)
 	}
 	for _, file := range result.Artifacts {

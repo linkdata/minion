@@ -228,7 +228,7 @@ func auditArtifactMayBeEmpty(name string) bool {
 	return name == "FINDINGS-DETAIL.md" || name == "NEEDS-VALIDATION.md"
 }
 
-func validateAuditFiles(ctx context.Context, files []workspace.File, validationDir, skill string, tools auditTools, repo, target, head string) (string, error) {
+func validateAuditFiles(ctx context.Context, files []workspace.File, validationDir, skill string, tools auditTools, repo, target, head string) error {
 	byPath := make(map[string][]byte, len(files))
 	for _, file := range files {
 		byPath[file.Path] = file.Data
@@ -237,15 +237,15 @@ func validateAuditFiles(ctx context.Context, files []workspace.File, validationD
 		data, present := byPath[name]
 		if !present || len(data) == 0 && !auditArtifactMayBeEmpty(name) || name == "REPORT.md" && strings.TrimSpace(string(data)) == "" ||
 			name == "architecture.md" && !auditVisibleText(string(data)) {
-			return "", fmt.Errorf("audit %s is missing or empty", name)
+			return fmt.Errorf("audit %s is missing or empty", name)
 		}
 	}
 	if _, err := validateAuditMetadata(byPath["run-metadata.json"], repo, target, head); err != nil {
-		return "", err
+		return err
 	}
 	for _, validator := range auditValidators {
 		if err := os.WriteFile(filepath.Join(validationDir, validator.artifact), byPath[validator.artifact], 0600); err != nil {
-			return "", fmt.Errorf("copy audit %s for validation: %w", validator.artifact, err)
+			return fmt.Errorf("copy audit %s for validation: %w", validator.artifact, err)
 		}
 		script := filepath.Join(filepath.Dir(skill), validator.script)
 		// #nosec G204 -- the installed skill path and validation directory are checked paths; arguments bypass a shell.
@@ -256,10 +256,10 @@ func validateAuditFiles(ctx context.Context, files []workspace.File, validationD
 			if cause := ctx.Err(); cause != nil && !errors.Is(err, cause) {
 				err = errors.Join(cause, err)
 			}
-			return "", fmt.Errorf("audit %s failed: %w", validator.script, err)
+			return fmt.Errorf("audit %s failed: %w", validator.script, err)
 		}
 	}
-	return string(byPath["REPORT.md"]), nil
+	return nil
 }
 
 type auditCoverageCheck struct {

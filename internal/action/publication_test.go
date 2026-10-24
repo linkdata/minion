@@ -309,6 +309,56 @@ func TestPublishedRefutationsRejectShortWholeReply(t *testing.T) {
 	}
 }
 
+func TestPublishedRefutationsComparePrivateTextWithoutNUL(t *testing.T) {
+	job := withClaudeCritic(testJob(command.Comment))
+	result := privateReviewResult(job)
+	result.Refutations[0].Text = "The private review\x00 sentence stays internal."
+	result.Answer = "Public reply: The private review sentence stays internal."
+	if err := result.Validate(job); err != nil {
+		t.Fatal(err)
+	}
+	projected, err := projectPublication(job, result)
+	if err != nil || rejectPublishedRefutations(job, result, projected) == nil {
+		t.Fatalf("NUL-stripped private sentence reached public reply: %v", err)
+	}
+	job.Source.Files[0].Data = []byte("The private review sentence stays internal.\n")
+	if err := rejectPublishedRefutations(job, result, projected); err != nil {
+		t.Fatalf("preexisting source quote was blocked: %v", err)
+	}
+}
+
+func TestPublishedRefutationsWholeTextNeedsWordBoundaries(t *testing.T) {
+	job := withClaudeCritic(testJob(command.Comment))
+	result := privateReviewResult(job)
+	result.Refutations[0].Text = "The endpoint supports auth"
+	for _, answer := range []string{
+		"The endpoint supports authorization is useful.",
+		"PrefixThe endpoint supports auth is useful.",
+	} {
+		result.Answer = answer
+		projected, err := projectPublication(job, result)
+		if err != nil || rejectPublishedRefutations(job, result, projected) != nil {
+			t.Fatalf("longer public word was treated as a copy: %q, %v", answer, err)
+		}
+	}
+	result.Answer = "Public reply: The endpoint supports auth is useful."
+	projected, err := projectPublication(job, result)
+	if err != nil || rejectPublishedRefutations(job, result, projected) == nil {
+		t.Fatalf("whole private text with word boundaries was accepted: %v", err)
+	}
+}
+
+func TestPublishedRefutationsWholeTextInUnspacedScript(t *testing.T) {
+	job := withClaudeCritic(testJob(command.Comment))
+	result := privateReviewResult(job)
+	result.Refutations[0].Text = strings.Repeat("私人審查結論", 5)
+	result.Answer = "公開說明" + result.Refutations[0].Text + "可供參考"
+	projected, err := projectPublication(job, result)
+	if err != nil || rejectPublishedRefutations(job, result, projected) == nil {
+		t.Fatalf("private text embedded in unspaced public prose was accepted: %v", err)
+	}
+}
+
 func TestPublishedRefutationsIgnoreGeneratedCapNotice(t *testing.T) {
 	job := withClaudeCritic(testJob(command.Comment))
 	job.CriticMaxRounds = 2

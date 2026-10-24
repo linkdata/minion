@@ -262,7 +262,7 @@ func TestRunnerUsesTheProbedNodeAfterPathChanges(t *testing.T) {
 		return aicli.Result{Answer: "Audit report\n"}, nil
 	}}
 	result, err := runner.Run(context.Background(), job)
-	if err != nil || result.Answer != "Audit report\n" {
+	if err != nil || result.Answer != "" {
 		t.Fatalf("probed Node was not retained: %+v,%v", result, err)
 	}
 	data, err := os.ReadFile(first)

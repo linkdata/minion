@@ -195,7 +195,7 @@ func TestHostileHTTPFixEntityKeyCannotPublish(t *testing.T) {
 	}
 }
 
-func TestHostileHTTPFixNULRefutationCannotPublish(t *testing.T) {
+func TestHostileHTTPFixNULStrippedRefutationCannotPublish(t *testing.T) {
 	const private = "foo\x00bar is a private review conclusion that must not enter a Fix."
 	_, _, remote := gitFixtureRemote(t, workspace.File{Path: "foo", Mode: workspace.Regular, Data: []byte("bar is a private review conclusion that must not enter a Fix.\n")})
 	var writes atomic.Int32
@@ -222,7 +222,7 @@ func TestHostileHTTPFixNULRefutationCannotPublish(t *testing.T) {
 		f.pull(t)
 		result := privateReviewResult(job)
 		result.Refutations[0].Text = private
-		result.Changes = []workspace.Change{{Path: "foo", Mode: workspace.Regular, Data: []byte(private)}}
+		result.Changes = []workspace.Change{{Path: "foo", Mode: workspace.Regular, Data: []byte(strings.ReplaceAll(private, "\x00", ""))}}
 		for i := range result.Calls {
 			result.Calls[i].Tokens = usage.Tokens{Input: int64(i + 1), Output: 1}
 			result.Calls[i].Complete = true

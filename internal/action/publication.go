@@ -120,16 +120,22 @@ func rejectPublishedRefutations(job Job, result Result, projected publication) e
 	exact := make(map[string]bool)
 	sentences := make(map[string]bool)
 	for _, refutation := range result.Refutations {
-		for _, variant := range publicationTextVariants(refutation.Text) {
-			if text := foldPublicationSpace(variant); text != "" {
-				exact[text] = true
-				if utf8.RuneCountInString(text) >= minCopyRunes {
-					whole = append(whole, text)
+		privateTexts := []string{refutation.Text}
+		if withoutNUL := strings.ReplaceAll(refutation.Text, "\x00", ""); withoutNUL != refutation.Text {
+			privateTexts = append(privateTexts, withoutNUL)
+		}
+		for _, privateText := range privateTexts {
+			for _, variant := range publicationTextVariants(privateText) {
+				if text := foldPublicationSpace(variant); text != "" {
+					exact[text] = true
+					if utf8.RuneCountInString(text) >= minCopyRunes {
+						whole = append(whole, text)
+					}
 				}
-			}
-			for _, sentence := range strings.FieldsFunc(variant, publicationSentenceBreak) {
-				if text := foldPublicationSentence(sentence); utf8.RuneCountInString(text) >= minCopyRunes {
-					sentences[text] = true
+				for _, sentence := range strings.FieldsFunc(variant, publicationSentenceBreak) {
+					if text := foldPublicationSentence(sentence); utf8.RuneCountInString(text) >= minCopyRunes {
+						sentences[text] = true
+					}
 				}
 			}
 		}
@@ -190,11 +196,29 @@ func rejectPublishedRefutations(job Job, result Result, projected publication) e
 		return false
 	}
 	containsCopy := func(text string, reject func(string) bool) bool {
+		word := func(r rune) bool { return r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '_' }
 		for _, variant := range publicationTextVariants(text) {
 			folded := foldPublicationSpace(variant)
 			for _, private := range whole {
-				if strings.Contains(folded, private) && reject(private) {
-					return true
+				first, _ := utf8.DecodeRuneInString(private)
+				last, _ := utf8.DecodeLastRuneInString(private)
+				for offset := 0; offset < len(folded); {
+					index := strings.Index(folded[offset:], private)
+					if index < 0 {
+						break
+					}
+					start, end := offset+index, offset+index+len(private)
+					left, right := rune(0), rune(0)
+					if start > 0 {
+						left, _ = utf8.DecodeLastRuneInString(folded[:start])
+					}
+					if end < len(folded) {
+						right, _ = utf8.DecodeRuneInString(folded[end:])
+					}
+					if !(word(first) && word(left)) && !(word(last) && word(right)) && reject(private) {
+						return true
+					}
+					offset = start + 1
 				}
 			}
 			for _, sentence := range strings.FieldsFunc(variant, publicationSentenceBreak) {

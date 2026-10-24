@@ -37,6 +37,5 @@ func (e *Orchestrator) validateAuditForPublication(ctx context.Context, job Job,
 	if err != nil {
 		return fmt.Errorf("audit prerequisites: %w", err)
 	}
-	_, err = validateAuditFiles(ctx, files, validationDir, skill, tools, job.Identity.Repository, sourceIdentity(job), job.Source.Head)
-	return err
+	return validateAuditFiles(ctx, files, validationDir, skill, tools, job.Identity.Repository, sourceIdentity(job), job.Source.Head)
 }

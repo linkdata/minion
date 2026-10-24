@@ -420,12 +420,13 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 			return result, fmt.Errorf("%w: create audit validation directory: %w", monitor.ErrTerminalJob, err)
 		}
 		owned = append(owned, validationDir)
-		if answer, err = validateAuditFiles(ctx, files, validationDir, auditSkill, tools, job.Identity.Repository, source, job.Source.Head); err != nil {
+		if err = validateAuditFiles(ctx, files, validationDir, auditSkill, tools, job.Identity.Repository, source, job.Source.Head); err != nil {
 			return result, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
 		}
 		if result.Artifacts, err = normalizeAuditArtifacts(files, job, auditSkill, configured.Codex.APIKey, configured.Claude.APIKey); err != nil {
 			return result, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
 		}
+		answer = ""
 	}
 	result.Answer = answer
 	if err := result.validate(job, true); err != nil {

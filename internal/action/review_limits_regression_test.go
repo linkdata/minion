@@ -185,7 +185,13 @@ func TestCriticAuditUsesValidatedReportDespiteOversizedProposal(t *testing.T) {
 		return aicli.Result{Answer: proposalJSON(proposal, "")}, nil
 	}}
 	result, err := runner.Run(context.Background(), job)
-	if err != nil || result.Answer != report || calls != 2 || len(result.Calls) != 2 || result.Validate(job) != nil {
+	var savedReport string
+	for _, file := range result.Artifacts {
+		if file.Path == "REPORT.md" {
+			savedReport = string(file.Data)
+		}
+	}
+	if err != nil || result.Answer != "" || savedReport != report || calls != 2 || len(result.Calls) != 2 || result.Validate(job) != nil {
 		t.Fatalf("valid audit discarded: calls=%d result=%+v error=%v", calls, result, err)
 	}
 }

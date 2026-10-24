@@ -78,7 +78,7 @@ func TestRunnerAuditValidationCleanupRestoresRestrictedDirectory(t *testing.T) {
 		return aicli.Result{Answer: "Audit report\n"}, nil
 	}}
 	result, err := runner.Run(context.Background(), job)
-	if err != nil || result.Answer != "Audit report\n" || len(result.Artifacts) != len(auditArtifacts) || len(result.Diagnostics) != 0 {
+	if err != nil || result.Answer != "" || len(result.Artifacts) != len(auditArtifacts) || len(result.Diagnostics) != 0 {
 		t.Fatalf("cleanup discarded validated audit: %+v,%v", result, err)
 	}
 	if _, err := os.Stat(marker); err != nil {
@@ -260,7 +260,7 @@ func TestRunnerAuditReviewFreezesAndExportsRawReports(t *testing.T) {
 			if scenario == "empty architecture repaired" {
 				wantCritics = 3
 			}
-			if err != nil || result.Answer != "approved report" || criticCalls != wantCritics {
+			if err != nil || result.Answer != "" || criticCalls != wantCritics {
 				t.Fatalf("approved audit result=%+v critics=%d error=%v", result, criticCalls, err)
 			}
 			if changed != "" {
