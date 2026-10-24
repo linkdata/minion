@@ -725,7 +725,7 @@ func TestUnixEndpointCloseKeepsPaidSaveAndReceiptGraceAvailable(t *testing.T) {
 	select {
 	case err := <-closed:
 		t.Fatalf("endpoint Close abandoned the entered paid callback: %v", err)
-	default:
+	case <-time.After(100 * time.Millisecond):
 	}
 	probe, err := NewUnixExecutionClient(endpoint.SocketPath())
 	if err != nil {

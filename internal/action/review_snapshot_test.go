@@ -14,6 +14,7 @@ import (
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
+	"github.com/linkdata/minion/internal/gitwork"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/workspace"
 )
@@ -333,12 +334,16 @@ func TestReviewSnapshotChecksExactFrozenFiles(t *testing.T) {
 		for _, mutation := range []string{"special permissions", "new file", "directory"} {
 			t.Run(fmt.Sprintf("reports=%t/%s", reports, mutation), func(t *testing.T) {
 				job := testJob(command.Fix)
-				index, source := offlineIndexFixture(t, job.Source.Files)
+				var index *gitwork.OfflineIndex
+				var source string
 				output, name := "", "source.txt"
 				if reports {
 					job.Action = command.SecurityAudit
-					output, name, index = t.TempDir(), "REPORT.md", nil
+					source = t.TempDir()
+					output, name = t.TempDir(), "REPORT.md"
 					writeFixtureFile(t, output, name, []byte("reviewed report"))
+				} else {
+					index, source = offlineIndexFixture(t, job.Source.Files)
 				}
 				snapshot := mustFreeze(t, t.Context(), t.TempDir(), job, source, output, index)
 				if err := snapshot.verify(t.Context()); err != nil {

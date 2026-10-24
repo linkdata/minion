@@ -35,14 +35,28 @@ wait
 		result, err := Run(ctx, workspace, "task", false, "", config.ClaudeConfig{})
 		done <- outcome{result, err}
 	}()
+	defer func() {
+		cancel()
+		joinCtx, stopJoin := context.WithTimeout(context.WithoutCancel(t.Context()), 3*time.Second)
+		defer stopJoin()
+		for {
+			select {
+			case _, open := <-done:
+				if !open {
+					return
+				}
+			case <-joinCtx.Done():
+				t.Error("Run did not stop after cancellation")
+				return
+			}
+		}
+	}()
 	// The real subprocess must start before cancellation; a synthetic clock
 	// cannot establish whether its process group has actually been created.
 	waitCtx, stopWait := context.WithTimeout(t.Context(), 5*time.Second)
 	defer stopWait()
 	child, err := testsupport.WaitForProcess(waitCtx, binary+".pid", done)
 	if err != nil {
-		cancel()
-		<-done
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {

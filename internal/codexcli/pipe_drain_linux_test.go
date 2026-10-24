@@ -36,8 +36,25 @@ exit 0
 	done := make(chan outcome, 1)
 	workspace := t.TempDir()
 	go func() {
+		defer close(done)
 		result, err := Run(ctx, workspace, "task", false, "", config.CodexConfig{})
 		done <- outcome{result, err}
+	}()
+	defer func() {
+		cancel()
+		joinCtx, stopJoin := context.WithTimeout(context.WithoutCancel(t.Context()), 3*time.Second)
+		defer stopJoin()
+		for {
+			select {
+			case _, open := <-done:
+				if !open {
+					return
+				}
+			case <-joinCtx.Done():
+				t.Error("Run did not stop after cancellation")
+				return
+			}
+		}
 	}()
 	child, err := testsupport.WaitForProcess(ctx, binary+".pid", done)
 	if err != nil {

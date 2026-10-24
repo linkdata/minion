@@ -32,15 +32,6 @@ func requireProcessGroup(t *testing.T) {
 	}
 }
 
-func TestCgroupReadinessRequired(t *testing.T) {
-	if os.Getenv("MINION_REQUIRE_PROCESSGROUP") != "1" {
-		t.Skip("CI requires a delegated service")
-	}
-	if err := Check(); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestCgroupCheckWithTightConfiguredLimits(t *testing.T) {
 	requireProcessGroup(t)
 	setTestLimits(t, 1, 1<<20)

@@ -37,10 +37,24 @@ exit 0
 		result, err := Run(ctx, workspace, "task", false, "", config.ClaudeConfig{})
 		done <- outcome{result, err}
 	}()
+	defer func() {
+		cancel()
+		joinCtx, stopJoin := context.WithTimeout(context.WithoutCancel(t.Context()), 3*time.Second)
+		defer stopJoin()
+		for {
+			select {
+			case _, open := <-done:
+				if !open {
+					return
+				}
+			case <-joinCtx.Done():
+				t.Error("Run did not stop after cancellation")
+				return
+			}
+		}
+	}()
 	child, err := testsupport.WaitForProcess(ctx, binary+".pid", done)
 	if err != nil {
-		cancel()
-		<-done
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
