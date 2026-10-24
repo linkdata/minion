@@ -1,6 +1,7 @@
 package action
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"slices"
@@ -17,7 +18,7 @@ import (
 )
 
 // ProtocolVersion identifies the versioned Job, Result, and Status contracts.
-const ProtocolVersion = 5
+const ProtocolVersion = 7
 
 const (
 	maxDiagnostics            = 100
@@ -70,6 +71,7 @@ type Job struct {
 	RuntimeBudget time.Duration `json:"runtime_budget_ns"`
 }
 
+// CallUsage contains executor claims checked against saved callbacks, not independent model evidence.
 type CallUsage struct {
 	Provider    string       `json:"provider"`
 	Role        string       `json:"role"`
@@ -78,15 +80,15 @@ type CallUsage struct {
 	Model       string       `json:"model,omitempty"`
 	Effort      string       `json:"effort,omitempty"`
 	Tokens      usage.Tokens `json:"tokens"`
-	// Approved attests a parsed approving critic verdict; false is not proof of rejection.
+	// Approved reports a parsed approving critic verdict; false is not proof of rejection.
 	Approved bool `json:"approved,omitempty"`
-	// NoBlockers attests an explicit has_blockers=false in a valid critic verdict.
+	// NoBlockers reports an explicit has_blockers=false in a valid critic verdict.
 	NoBlockers bool `json:"no_blockers,omitempty"`
-	// HasBlockers attests an explicit has_blockers=true; both false means no valid verdict.
+	// HasBlockers reports an explicit has_blockers=true; both false means no valid verdict.
 	HasBlockers bool `json:"has_blockers,omitempty"`
-	// ReviewComplete attests completed assigned critic scope, separately from token accounting.
+	// ReviewComplete claims completed assigned critic scope, separately from token accounting.
 	ReviewComplete bool `json:"review_complete,omitempty"`
-	// Complete confirms accounting coverage; interrupted or failed native runs are conservative.
+	// Complete claims accounting coverage; interrupted or failed native runs are conservative.
 	Complete bool `json:"complete"`
 }
 
@@ -227,6 +229,18 @@ func (j Job) Validate() error {
 	if err := workspace.ValidateSnapshot(j.Source); err != nil {
 		return err
 	}
+	if j.Action == command.SecurityAudit {
+		for _, file := range j.Source.Files {
+			if !auditCitableSourcePath(file.Path) {
+				return errors.New("audit source path cannot be cited by the installed report validator")
+			}
+		}
+		for _, path := range j.Source.HeadOmitted {
+			if !auditCitableSourcePath(path) {
+				return errors.New("audit source path cannot be cited by the installed report validator")
+			}
+		}
+	}
 	if j.Action == command.Fix {
 		if err := workspace.ValidateFixPaths(j.Source.Files, j.Source.Omitted); err != nil {
 			return fmt.Errorf("%w: %w", gitwork.ErrUnsupportedSource, err)
@@ -244,8 +258,8 @@ func (j Job) rounds() int {
 
 func sourceIdentity(j Job) string { return j.Identity.Repository + "@" + j.Source.Head }
 
-// Validate checks a Status and its Job. Transport ordering, authentication,
-// and log acknowledgements belong to the orchestrator receiver.
+// Validate checks a Status and its Job. Transport ordering and log acknowledgements
+// belong to the orchestrator receiver; remote authentication is not implemented.
 func (s Status) Validate(j Job) error {
 	if err := j.Validate(); err != nil {
 		return err
@@ -335,9 +349,13 @@ func (r Result) validate(j Job, complete bool) error {
 	if !r.matchesJob(j) {
 		return errors.New("action result version, identity or source differs from job")
 	}
-	requiresAnswer := j.Action != command.Fix || len(r.Changes) == 0
-	invalidCompleteAnswer := complete && (!publishableAnswer(r.Answer) || (requiresAnswer && strings.TrimSpace(r.Answer) == ""))
-	if (!complete && !boundedText(r.Answer, maxOutputBytes)) || invalidCompleteAnswer {
+	var validAnswer bool
+	if complete && j.Action != command.SecurityAudit && (j.Action != command.Fix || len(r.Changes) == 0) {
+		validAnswer = publishableAnswer(r.Answer)
+	} else {
+		validAnswer = boundedText(r.Answer, maxOutputBytes)
+	}
+	if !validAnswer {
 		return errors.New("action answer is blank, invalid or exceeds limit")
 	}
 	if j.Action != command.Fix && len(r.Changes) != 0 {
@@ -351,13 +369,6 @@ func (r Result) validate(j Job, complete bool) error {
 	}
 	if err := validateResultArtifacts(j, r.Artifacts, complete); err != nil {
 		return err
-	}
-	if complete && j.Action == command.SecurityAudit {
-		for _, file := range r.Artifacts {
-			if file.Path == "REPORT.md" && r.Answer != string(file.Data) {
-				return errors.New("audit answer differs from REPORT.md")
-			}
-		}
 	}
 	if err := r.validateCalls(j, complete); err != nil {
 		return err
@@ -479,6 +490,12 @@ func validateResultArtifacts(j Job, files []workspace.File, complete bool) error
 		if complete && len(file.Data) == 0 && !auditArtifactMayBeEmpty(file.Path) {
 			return fmt.Errorf("empty action report artifact %q", file.Path)
 		}
+		if complete && bytes.IndexByte(file.Data, 0) >= 0 {
+			return fmt.Errorf("action report artifact %q contains NUL", file.Path)
+		}
+		if complete && file.Path == "architecture.md" && !auditVisibleText(string(file.Data)) {
+			return errors.New("audit architecture.md has no visible content")
+		}
 		if (complete || file.Path != "REPORT.md") && !utf8.Valid(file.Data) {
 			return fmt.Errorf("invalid action report artifact %q encoding", file.Path)
 		}
@@ -492,6 +509,9 @@ func validateResultArtifacts(j Job, files []workspace.File, complete bool) error
 	}
 	companions, err := validateAuditMetadata(seen["run-metadata.json"], j.Identity.Repository, sourceIdentity(j), j.Source.Head)
 	if err != nil {
+		return err
+	}
+	if err := validateAuditCoverage(seen["coverage-ledger.json"], seen["findings.json"], seen["REPORT.md"], &j.Source); err != nil {
 		return err
 	}
 	for _, companion := range companions {

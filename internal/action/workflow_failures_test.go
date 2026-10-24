@@ -59,13 +59,13 @@ func TestReplyFailureClassificationBeforeAndAfterModel(t *testing.T) {
 			switch kind {
 			case "fixed reply":
 				prepared.reply = "Review needs a pull request."
-				err = orchestrator.publish(context.Background(), prepared, Result{})
+				err = orchestrator.publish(t.Context(), prepared, Result{})
 			case "recovery":
 				prepared.branch = "minion/fix-recorded"
 				store.Data.PendingFixes[request.ID] = state.PendingFix{SHA: strings.Repeat("b", 40)}
-				err = orchestrator.publish(context.Background(), prepared, Result{})
+				err = orchestrator.publish(t.Context(), prepared, Result{})
 			default:
-				err = orchestrator.publishFix(context.Background(), prepared, Result{Answer: "No changes."}, publication{answer: "No changes."})
+				err = orchestrator.publishFix(t.Context(), prepared, Result{Answer: "No changes."}, publication{answer: "No changes."})
 			}
 			var status *github.StatusError
 			if errors.Is(err, monitor.ErrPostModelPublication) != (kind != "fixed reply") || errors.Is(err, monitor.ErrTerminalJob) || !errors.As(err, &status) || status.StatusCode != http.StatusBadGateway {
@@ -154,7 +154,7 @@ func TestExecuteLimitCausesAndInvalidIncompleteResultsAreTerminal(t *testing.T) 
 			request.Repository.Actions = []string{"audit"}
 			request.Source.Author.ID = 3
 			request.Command = command.Command{Name: "audit", Action: command.Comment}
-			err := orchestrator.Execute(context.Background(), request)
+			err := orchestrator.Execute(t.Context(), request)
 			if !errors.Is(err, monitor.ErrTerminalJob) || writes != 0 {
 				t.Fatalf("source/result failure not terminal: calls=%d writes=%d err=%v", calls, writes, err)
 			}
@@ -327,7 +327,7 @@ func TestExecuteLogsCheckoutCleanupFailureAfterSuccessfulPublication(t *testing.
 			return aicli.Result{Answer: "No change is needed."}, nil
 		}},
 	}
-	if err := orchestrator.Execute(context.Background(), request); err != nil {
+	if err := orchestrator.Execute(t.Context(), request); err != nil {
 		t.Fatalf("successful publication became a failed action: %v", err)
 	}
 	if modelCalls != 1 || comments != 1 || !strings.Contains(body, "No change is needed.") || !strings.HasSuffix(body, request.Marker()) {
@@ -402,7 +402,7 @@ exec %s "$@"
 			root := t.TempDir()
 			checkout := cloneFixture(t, root)
 			const branch = "minion/fix-reviewed"
-			if err := checkout.NewBranch(context.Background(), branch); err != nil {
+			if err := checkout.NewBranch(t.Context(), branch); err != nil {
 				t.Fatal(err)
 			}
 			fakeOnPath(t, "git", script)
@@ -411,7 +411,7 @@ exec %s "$@"
 			prepared := &preparedAction{job: job, checkout: checkout, repository: repo, fork: fork, branch: branch, request: monitor.Job{ID: strings.Repeat("a", 64), Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2}, Command: command.Command{Name: "fix", Action: command.Fix}}}
 			orchestrator := Orchestrator{GitHub: client, BotLogin: "bot", WorkRoot: root}
 			result := Result{Changes: []workspace.Change{{Path: "reviewed.txt", Mode: workspace.Regular, Data: []byte("reviewed change")}}}
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 			defer cancel()
 			if stage == "canceled import" {
 				go func() {
@@ -457,6 +457,8 @@ exec %s "$@"
 }
 
 func TestCompletedAuditRetentionFailureIsTerminal(t *testing.T) {
+	installActionTestSkills(t, testAuditSkillURL)
+	fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
 	job := testJob(command.SecurityAudit)
 	result := completeAuditResult(job)
 	if err := result.Validate(job); err != nil {
@@ -470,21 +472,24 @@ func TestCompletedAuditRetentionFailureIsTerminal(t *testing.T) {
 	}))
 	defer server.Close()
 	client := testGitHub(server, "token")
-	blocked := filepath.Join(t.TempDir(), "file")
+	root := t.TempDir()
+	blocked := filepath.Join(root, "audits")
 	if err := os.WriteFile(blocked, []byte("not a directory"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	orchestrator := Orchestrator{GitHub: client, WorkRoot: blocked}
+	orchestrator := Orchestrator{GitHub: client, WorkRoot: root}
 	prepared := &preparedAction{job: job, request: monitor.Job{Command: command.Command{Action: command.SecurityAudit}}}
-	err := orchestrator.publish(context.Background(), prepared, result)
+	err := orchestrator.publish(t.Context(), prepared, result)
 	if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "retain completed audit") || writes != 0 {
 		t.Fatalf("audit retention failure retried work or published: writes=%d err=%v", writes, err)
 	}
 }
 
-func TestCanceledPublicationRetainsValidatedAudit(t *testing.T) {
+func TestCanceledPublicationRetainsIncompleteAudit(t *testing.T) {
 	for _, valid := range []bool{true, false} {
 		t.Run(fmt.Sprintf("valid=%t", valid), func(t *testing.T) {
+			installActionTestSkills(t, testAuditSkillURL)
+			fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
 			job := testJob(command.SecurityAudit)
 			result := completeAuditResult(job)
 			if !valid {
@@ -500,18 +505,14 @@ func TestCanceledPublicationRetainsValidatedAudit(t *testing.T) {
 			client := testGitHub(server, "fixture-token")
 			var journal bytes.Buffer
 			e := Orchestrator{GitHub: client, WorkRoot: t.TempDir(), Logger: log.New(&journal, "", 0)}
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			cancel()
 			err := e.publish(ctx, &preparedAction{job: job}, result)
 			if valid && !errors.Is(err, context.Canceled) || !valid && !errors.Is(err, monitor.ErrTerminalJob) || writes != 0 {
 				t.Fatalf("canceled audit: valid=%t writes=%d err=%v", valid, writes, err)
 			}
 			dirs, err := os.ReadDir(filepath.Join(e.WorkRoot, "audits"))
-			wantPrefix := "incomplete-"
-			if valid {
-				wantPrefix = "complete-"
-			}
-			if err != nil || len(dirs) != 1 || !strings.HasPrefix(dirs[0].Name(), wantPrefix) {
+			if err != nil || len(dirs) != 1 || !strings.HasPrefix(dirs[0].Name(), "incomplete-") {
 				t.Fatalf("audit retention: dirs=%v err=%v", dirs, err)
 			}
 			data, err := os.ReadFile(filepath.Join(e.WorkRoot, "audits", dirs[0].Name(), "REPORT.md"))

@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -80,6 +81,9 @@ func testJob(action command.Action) Job {
 		Source: workspace.Snapshot{Head: portableHead, Repository: append([]byte(nil), portableRepository...), Files: []workspace.File{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("source\n")}}},
 		Main:   RoleSettings{Provider: "codex", Skills: []string{skills.BuiltinAntiPromptInjection}}, RuntimeBudget: time.Minute,
 	}
+	if action == command.SecurityAudit {
+		job.Main.Skills = []string{testAuditSkillURL}
+	}
 	if action == command.Review {
 		job.Identity.SubjectType = "PullRequest"
 		job.Source.Base, job.Source.MergeBase = portableHead, portableHead
@@ -93,9 +97,7 @@ func auditRunnerJob(t *testing.T) Job {
 	t.Helper()
 	installActionTestSkills(t, testAuditSkillURL)
 	fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
-	job := testJob(command.SecurityAudit)
-	job.Main.Skills = []string{testAuditSkillURL}
-	return job
+	return testJob(command.SecurityAudit)
 }
 
 func assertEmptyDir(t *testing.T, root string) {
@@ -390,11 +392,37 @@ func serveFixFlowFixture(t *testing.T, w http.ResponseWriter, r *http.Request) b
 	case r.Method == http.MethodGet && r.URL.Path == "/repos/bot/r/branches/minion/fix-7-aaaaaaaaaaaa":
 		http.NotFound(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/graphql":
+		var request struct{ Query, OperationName string }
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode expected GraphQL read: %v", err)
+			http.Error(w, "invalid GraphQL request", http.StatusBadRequest)
+			return true
+		}
+		if request.Query != `query($id: ID!) { node(id: $id) { ... on Issue { title bodyText lastEditedAt } } }` || request.OperationName != "" {
+			return false // Callers count or reject every unexpected GitHub write.
+		}
 		_, _ = fmt.Fprint(w, `{"data":{"node":{"title":"Task","bodyText":"Inspect source","lastEditedAt":null}}}`)
 	default:
 		return false
 	}
 	return true
+}
+
+func TestServeFixFlowFixtureRejectsGraphQLMutation(t *testing.T) {
+	for _, test := range []struct {
+		query, operationName string
+		handled              bool
+	}{
+		{`query($id: ID!) { node(id: $id) { ... on Issue { title bodyText lastEditedAt } } }`, "", true},
+		{`mutation($id: ID!) { addReaction(input: {subjectId: $id, content: EYES}) { clientMutationId } }`, "", false},
+		{`query($id: ID!) { node(id: $id) { ... on Issue { title bodyText lastEditedAt } } } mutation Write { deleteRepository(input: {}) { clientMutationId } }`, "Write", false},
+		{`query($id: ID!) { node(id: $id) { ... on Issue { title bodyText lastEditedAt } } }`, "Read", false},
+	} {
+		request := httptest.NewRequest(http.MethodPost, "/graphql", strings.NewReader(`{"query":`+strconv.Quote(test.query)+`,"operationName":`+strconv.Quote(test.operationName)+`}`))
+		if handled := serveFixFlowFixture(t, httptest.NewRecorder(), request); handled != test.handled {
+			t.Fatalf("query=%q handled=%t; want %t", test.query, handled, test.handled)
+		}
+	}
 }
 
 func gitOnlyPath(t *testing.T) string {
@@ -452,7 +480,7 @@ func writeActionTestSkills(t *testing.T, home, parent string, sources ...string)
 
 func testActionContext(t *testing.T) context.Context {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 	t.Cleanup(cancel)
 	return ctx
 }
@@ -477,6 +505,45 @@ func privateReviewResult(job Job) Result {
 	}
 }
 
+const auditCandidateFindingFixture = `[{"verdict":"needs_validation","fingerprint":"F","title":"Unverified boundary","description":"A boundary may omit a guard.","claimed_root_cause":"The guard may be absent.","trace":[{"kind":"entrypoint","file":"source.txt","line":1,"scope":"source","description":"Input reaches the boundary."}],"evidence":[{"file":"source.txt","line":1,"description":"The source path needs validation."}],"blockers":["Runtime validation is unavailable."],"validation_plan":{"local":"Inspect the guard path in an approved test."}}]`
+
+// This synthetic record tests report shape, not a vulnerability in testJob's placeholder source.
+const auditConfirmedFindingFixture = `[{"verdict":"confirmed","fingerprint":"F","title":"Missing guard","description":"An attacker can reach this operation without the intended guard.","root_cause":"The operation omits the guard before changing the object.","intended_behavior":"Only the object's owner can change it.","trace":[{"kind":"entrypoint","file":"source.txt","line":1,"scope":"source","description":"Attacker input reaches the operation."}],"evidence":[{"file":"source.txt","line":1,"description":"The source performs the operation without the guard."}],"conditions":[],"execution":{"attacker_perspective":"An unprivileged user with an account.","payloads":["Another user's object identifier."],"instructions":["Submit the identifier through the operation."],"observed_result":"The other user's object changes."},"remediation":{"strategy":"Check ownership before the state change."},"severity":{"likelihood":{"score":"medium","reason":"The operation is directly reachable."},"impact":{"score":"medium","reason":"One protected object can change."},"overall_severity":"medium"},"confidence":{"score":"high","reason":"The source path and result were reproduced."}}]`
+
+const auditConfirmedDetailFixture = "## F: Missing guard\nsource.txt. The other user's object changes. Check ownership before the state change.\n"
+const auditNeedsDetailFixture = "## F: Unverified boundary\nsource.txt. Runtime validation is unavailable. Inspect the guard path in an approved test.\n"
+
+const auditCoveredLedgerFixture = `[{"coverage_id":"source::boundary::subsystem::attack","canonical_refs":{"surface":"source","boundary":"boundary","subsystem":"subsystem","attack_class":"attack"},"surface":"Source","boundary":"Boundary","subsystem":"Subsystem","attack_class":"Attack","starting_paths":["source.txt"],"ordinary_attack_class_block":null,"selected_companion_blocks":[],"excluded_blocks":[],"prior_status":"none","attempts":[],"wave":1,"status":"covered","agent_id":"hunter","reviewed_paths":["source.txt"],"local_checks":[{"agent_id":"verifier","reviewed_paths":["source.txt"],"invariant":"Access is checked","method":"source","result":"The guard is present","artifact":null},{"agent_id":"hunter","reviewed_paths":["source.txt"],"invariant":"Access is checked","method":"source","result":"The guard is present","artifact":null}],"result_fingerprints":[],"unresolved":[]}]`
+
+func auditOutOfScopeLedgerFixture() string {
+	ledger := strings.Replace(auditCoveredLedgerFixture, `"status":"covered"`, `"status":"out_of_scope"`, 1)
+	ledger = strings.Replace(ledger, `"agent_id":"hunter"`, `"agent_id":null`, 1)
+	ledger = strings.Replace(ledger, `"reviewed_paths":["source.txt"]`, `"reviewed_paths":[]`, 1)
+	ledger = strings.Replace(ledger, `"local_checks":[{"agent_id":"verifier","reviewed_paths":["source.txt"],"invariant":"Access is checked","method":"source","result":"The guard is present","artifact":null},{"agent_id":"hunter","reviewed_paths":["source.txt"],"invariant":"Access is checked","method":"source","result":"The guard is present","artifact":null}]`, `"local_checks":[]`, 1)
+	return strings.Replace(ledger, `"unresolved":[]}]`, `"unresolved":["Out of scope"]}]`, 1)
+}
+
+func auditCoveredAndOutOfScopeLedgerFixture() string {
+	excluded := strings.Replace(auditOutOfScopeLedgerFixture(), `"coverage_id":"source::boundary::`, `"coverage_id":"source::excluded::`, 1)
+	excluded = strings.Replace(excluded, `"boundary":"boundary"`, `"boundary":"excluded"`, 1)
+	excluded = strings.Replace(excluded, `"boundary":"Boundary"`, `"boundary":"Excluded boundary"`, 1)
+	return "[" + strings.Trim(auditCoveredLedgerFixture, "[]") + "," + strings.Trim(excluded, "[]") + "]"
+}
+
+func auditArchivedCandidateNotApplicableLedgerFixture() string {
+	const archived = `{"wave":1,"status":"candidate","agent_id":"older","reviewed_paths":["source.txt"],"local_checks":[{"agent_id":"helper","reviewed_paths":["source.txt"],"invariant":"Access is checked","method":"source","result":"The guard is present","artifact":null},{"agent_id":"older","reviewed_paths":["source.txt"],"invariant":"Access is checked","method":"source","result":"The guard is present","artifact":null}],"result_fingerprints":["F"],"unresolved":[],"reassignment_reason":"Rechecked"}`
+	ledger := strings.Replace(auditCoveredAndOutOfScopeLedgerFixture(), `"status":"out_of_scope"`, `"status":"not_applicable"`, 1)
+	ledger = strings.Replace(ledger, `"attempts":[],"wave":1,"status":"not_applicable"`, `"attempts":[`+archived+`],"wave":2,"status":"not_applicable"`, 1)
+	return strings.Replace(ledger, `"unresolved":["Out of scope"]`, `"unresolved":["No longer applicable"]`, 1)
+}
+
+func auditArchivedCoveredBlockedLedgerFixture() string {
+	const archived = `{"wave":1,"status":"covered","agent_id":"older","reviewed_paths":["source.txt"],"local_checks":[{"agent_id":"helper","reviewed_paths":["source.txt"],"invariant":"Access is checked","method":"source","result":"The guard is present","artifact":null},{"agent_id":"older","reviewed_paths":["source.txt"],"invariant":"Access is checked","method":"source","result":"The guard is present","artifact":null}],"result_fingerprints":[],"unresolved":[],"reassignment_reason":"Rechecked"}`
+	ledger := strings.Replace(auditCoveredLedgerFixture, `"attempts":[]`, `"attempts":[`+archived+`]`, 1)
+	ledger = strings.Replace(ledger, `"wave":1,"status":"covered","agent_id":"hunter"`, `"wave":2,"status":"blocked","agent_id":"hunter"`, 1)
+	return strings.Replace(ledger, `"unresolved":[]}]`, `"unresolved":["Investigate boundary"]}]`, 1)
+}
+
 func auditArtifactsFixture(job Job, target, report string) []workspace.File {
 	metadata := fmt.Sprintf(`{"run_id":"test-run","repo":%q,"target":%q,"source_ref":%q,"profile":"standard","scope_paths":["."],"budget":null,"selected_companion_files":[],"prior_run_paths":[],"shared_file_owners":%s,"execution_policy":"sandboxed-source-and-local-only","run_status":"complete"}`, job.Identity.Repository, target, job.Source.Head, auditTestOwners)
 	var files []workspace.File
@@ -490,7 +557,7 @@ func auditArtifactsFixture(job Job, target, report string) []workspace.File {
 		case "findings.json":
 			data = "[]"
 		case "coverage-ledger.json":
-			data = `[{"status":"covered"}]`
+			data = auditCoveredLedgerFixture
 		case "FINDINGS-DETAIL.md", "NEEDS-VALIDATION.md":
 			data = ""
 		}

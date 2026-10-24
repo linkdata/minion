@@ -278,6 +278,53 @@ func TestRunAIRedactsBothConfiguredKeys(t *testing.T) {
 	}
 }
 
+func TestRunAIRejectsEncodedConfiguredKeyBeforePeer(t *testing.T) {
+	for _, providers := range []struct{ main, critic string }{{"codex", "claude"}, {"claude", "codex"}} {
+		for _, stage := range []string{"candidate", "refutation", "feedback"} {
+			t.Run(providers.main+"/"+stage, func(t *testing.T) {
+				const codexKey, claudeKey = "codex-fixture-secret", "claude-fixture-secret"
+				mainKey, criticKey := codexKey, claudeKey
+				if providers.main == "claude" {
+					mainKey, criticKey = claudeKey, codexKey
+				}
+				encodedMain := strings.Replace(mainKey, "secret", "&#x73;ecret", 1)
+				encodedCritic := strings.Replace(criticKey, "secret", "&#x73;ecret", 1)
+				mainCalls, criticCalls := 0, 0
+				runner := Runner{Codex: config.CodexConfig{APIKey: codexKey}, Claude: config.ClaudeConfig{APIKey: claudeKey}}
+				runner.runModel = func(_ context.Context, request modelRun) (aicli.Result, error) {
+					if request.role == roleMain {
+						mainCalls++
+						if stage == "refutation" && mainCalls == 1 || stage == "feedback" {
+							return aicli.Result{Answer: proposalJSON("Safe answer", "")}, nil
+						}
+						if stage == "candidate" {
+							return aicli.Result{Answer: proposalJSON("Public "+encodedMain, "")}, nil
+						}
+						return aicli.Result{Answer: proposalJSON("Safe revision", "Private "+encodedMain)}, nil
+					}
+					criticCalls++
+					feedback := "Please revise."
+					if stage == "feedback" {
+						feedback = "Private " + encodedCritic
+					}
+					return aicli.Result{Answer: fmt.Sprintf(`{"review_complete":true,"approved":false,"has_blockers":true,"feedback":%q}`, feedback)}, nil
+				}
+				job := Job{Main: RoleSettings{Provider: providers.main}, Critic: &RoleSettings{Provider: providers.critic}, CriticMaxRounds: 2}
+				answer, stop, err := runner.runAI(t.Context(), job, t.TempDir(), "task", "", nil, &modelSessions{})
+				wantMain, wantCritic := 1, 0
+				if stage == "refutation" {
+					wantMain, wantCritic = 2, 1
+				} else if stage == "feedback" {
+					wantCritic = 1
+				}
+				if !errors.Is(err, monitor.ErrTerminalJob) || answer != "" || stop != "" || mainCalls != wantMain || criticCalls != wantCritic {
+					t.Fatalf("encoded key crossed role boundary: main=%d/%d critic=%d/%d answer=%q stop=%q error=%v", mainCalls, wantMain, criticCalls, wantCritic, answer, stop, err)
+				}
+			})
+		}
+	}
+}
+
 func TestRedactActionTextFailsClosedWhenMarkersReformAnotherKey(t *testing.T) {
 	if got := redactActionText("private # and redacted", "#", "redacted"); got != "" {
 		t.Fatalf("configured key reformed after redaction: %q", got)
@@ -298,7 +345,8 @@ func TestRunAIRejectsInvalidProposalAfterRedaction(t *testing.T) {
 	}{
 		{name: "blank answer", answer: "private # and redacted", codexKey: "#", claudeKey: "redacted", wantError: "answer must not be blank"},
 		{name: "expanded critic context", answer: "public", refutations: strings.Repeat("x", maxOutputBytes/10+1), codexKey: "x", wantError: "decoded response exceeds critic context limit"},
-		{name: "expanded rendered answer", answer: strings.Repeat("y", maxOutputBytes-15) + "x", codexKey: "x", wantError: "rendered answer exceeds publication limit"},
+		{name: "expanded rendered answer", answer: strings.Repeat("y", maxOutputBytes-15) + "x", codexKey: "x", wantError: "exceeds publication limit"},
+		{name: "invisible answer", answer: "\u200b\u2060", wantError: "rendered answer is blank"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			calls := 0
@@ -315,6 +363,43 @@ func TestRunAIRejectsInvalidProposalAfterRedaction(t *testing.T) {
 				t.Fatalf("invalid redacted proposal: answer=%q stop=%q calls=%d error=%v", answer, stopReason, calls, err)
 			}
 		})
+	}
+}
+
+func TestRunAIRejectsInvisibleRevisionRefutationBeforeCheckpoint(t *testing.T) {
+	job := withClaudeCritic(testJob(command.Comment))
+	job.CriticMaxRounds = 2
+	calls, checkpoints := 0, 0
+	runner := Runner{runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+		calls++
+		switch calls {
+		case 1:
+			return aicli.Result{Answer: proposalJSON("First candidate", "\u200b")}, nil
+		case 2:
+			if request.role != roleCritic || request.round != 1 {
+				t.Fatalf("wrong first review: %+v", request)
+			}
+			return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"review_complete":true,"feedback":"Correct the candidate."}`}, nil
+		case 3:
+			if request.role != roleMain || request.round != 2 {
+				t.Fatalf("wrong revision: %+v", request)
+			}
+			return aicli.Result{Answer: proposalJSON("Revised candidate", "\u200b\u2060")}, nil
+		default:
+			t.Fatal("invisible refutation reached another critic call")
+			return aicli.Result{}, nil
+		}
+	}}
+	checkpoint := func(history []Refutation) error {
+		checkpoints++
+		if len(history) != 0 {
+			t.Fatalf("invisible refutation reached checkpoint: %+v", history)
+		}
+		return nil
+	}
+	answer, stopReason, err := runner.runAI(t.Context(), job, t.TempDir(), "task", "", checkpoint, &modelSessions{})
+	if answer != "" || stopReason != "" || !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "refutations have no visible content") || calls != 3 || checkpoints != 2 {
+		t.Fatalf("invalid revision: answer=%q stop=%q calls=%d checkpoints=%d error=%v", answer, stopReason, calls, checkpoints, err)
 	}
 }
 
@@ -604,6 +689,7 @@ func TestParseProposal(t *testing.T) {
 		{name: "NUL-only answer", input: proposalJSON("\x00", private)},
 		{name: "NUL cannot bypass decoded limit", input: proposalJSON(strings.Repeat("\x00", maxOutputBytes)+"x", "")},
 		{name: "blank answer", input: proposalJSON(" \n", private)},
+		{name: "invisible answer", input: proposalJSON("\u200b\u2060", private), errText: "rendered answer is blank"},
 		{name: "empty answer", input: proposalJSON("", private)},
 		{name: "preserve whitespace", input: proposalJSON("  Markdown\n", " Private refutations "), answer: "  Markdown\n", refutations: " Private refutations ", valid: true},
 		{name: "reordered fields", input: `{"refutations":"private","answer":"public"}`, answer: "public", refutations: "private", valid: true},
@@ -626,7 +712,7 @@ func TestParseProposal(t *testing.T) {
 		{name: "decoded limit", input: proposalJSON(strings.Repeat("x", maxOutputBytes+1), private)},
 		{name: "combined limit", input: proposalJSON(strings.Repeat("x", maxOutputBytes), "x")},
 		{name: "answer budget", input: proposalJSON(strings.Repeat("x", maxOutputBytes-14), ""), answer: strings.Repeat("x", maxOutputBytes-14), valid: true},
-		{name: "answer budget exceeded", input: proposalJSON(strings.Repeat("x", maxOutputBytes-13), ""), errText: "rendered answer exceeds publication limit"},
+		{name: "answer budget exceeded", input: proposalJSON(strings.Repeat("x", maxOutputBytes-13), ""), errText: "exceeds publication limit"},
 		{name: "line prefix budget", input: proposalJSON(strings.Repeat("a\n", 25000), "")},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -639,6 +725,13 @@ func TestParseProposal(t *testing.T) {
 				t.Fatalf("invalid proposal accepted or exposed private data: %q, %q, %v", answer, refutations, err)
 			}
 		})
+	}
+}
+
+func TestParseProposalAllowsDiscardableInvisibleAnswer(t *testing.T) {
+	answer, refutations, err := parseProposal(proposalJSON("\u200b\u2060", ""), true)
+	if err != nil || answer != "\u200b\u2060" || refutations != "" {
+		t.Fatalf("discardable proposal: answer=%q refutations=%q error=%v", answer, refutations, err)
 	}
 }
 
@@ -670,6 +763,7 @@ func TestParseCritique(t *testing.T) {
 		{name: "mixed NUL feedback", input: `{"review_complete":true,"approved":false,"has_blockers":true,"feedback":"Repair\u0000 the defect."}`, feedback: "Repair the defect.", hasBlockers: true, reviewComplete: true, valid: true},
 		{name: "NUL-only rejection", input: `{"review_complete":true,"approved":false,"has_blockers":true,"feedback":"\u0000"}`, errText: "rejection feedback is blank after redaction"},
 		{name: "whitespace and NUL rejection", input: `{"review_complete":true,"approved":false,"has_blockers":false,"feedback":" \t\u0000\n "}`, errText: "rejection feedback is blank after redaction"},
+		{name: "invisible rejection", input: `{"review_complete":true,"approved":false,"has_blockers":true,"feedback":"\u200b\u2060"}`, errText: "rejection feedback is blank after redaction"},
 		{name: "feedback redaction fails closed", input: `{"review_complete":true,"approved":false,"has_blockers":true,"feedback":"private # and redacted"}`, secrets: []string{"#", "redacted"}, errText: "rejection feedback is blank after redaction"},
 		{name: "mixed NUL split keys", input: `{"review_complete":true,"approved":false,"has_blockers":true,"feedback":"Repair main-\u0000secret and critic-\u0000secret."}`, secrets: []string{"main-secret", "critic-secret"}, feedback: "Repair [redacted] and [redacted].", hasBlockers: true, reviewComplete: true, valid: true},
 		{name: "redacted feedback stays nonblank", input: `{"review_complete":true,"approved":false,"has_blockers":false,"feedback":"main-secret"}`, secrets: []string{"main-secret"}, feedback: "[redacted]", reviewComplete: true, valid: true},

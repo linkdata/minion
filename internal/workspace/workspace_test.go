@@ -162,6 +162,22 @@ func TestDefaultSnapshotRejectsOmittedFileOverlap(t *testing.T) {
 	}
 }
 
+func TestSnapshotHeadOmittedRequiresCurrentOmission(t *testing.T) {
+	snapshot := Snapshot{Head: strings.Repeat("a", 40), Base: strings.Repeat("b", 40), MergeBase: strings.Repeat("b", 40), Files: []File{{Path: "source.txt", Mode: Regular}}, Omitted: []string{"head-link", "base-link"}, HeadOmitted: []string{"head-link"}}
+	if err := ValidateSnapshot(snapshot); err != nil {
+		t.Fatalf("valid head link rejected: %v", err)
+	}
+	snapshot.HeadOmitted = []string{"unknown-link"}
+	if err := ValidateSnapshot(snapshot); err == nil {
+		t.Fatal("head link absent from omitted union accepted")
+	}
+	snapshot.HeadOmitted = []string{"source.txt"}
+	snapshot.Omitted = append(snapshot.Omitted, "source.txt")
+	if err := ValidateSnapshot(snapshot); err == nil {
+		t.Fatal("head link overlapping regular source accepted")
+	}
+}
+
 func TestSourcePreservesGitLegalCaseAndBackslashPaths(t *testing.T) {
 	files := []File{
 		{Path: "include/xt_connmark.h", Mode: Regular, Data: []byte("lowercase")},

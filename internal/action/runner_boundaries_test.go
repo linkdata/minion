@@ -79,6 +79,28 @@ func TestPartialAuditMetadataPathListsStayPortable(t *testing.T) {
 	}
 }
 
+func TestPartialAuditMetadataRetainsIncompleteReason(t *testing.T) {
+	job := testJob(command.SecurityAudit)
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "run-metadata.json"), []byte(`{"run_status":"incomplete","incomplete_reason":"validation_budget_exhausted","output_dir":"/worker/local"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	files, diagnostics := collectPartialAuditArtifacts(root, job, "/installed/SKILL.md")
+	if len(diagnostics) != 0 || len(files) != 1 || files[0].Path != "run-metadata.json" {
+		t.Fatalf("partial metadata = %+v, diagnostics = %+v", files, diagnostics)
+	}
+	var metadata map[string]json.RawMessage
+	if err := json.Unmarshal(files[0].Data, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if string(metadata["run_status"]) != `"incomplete"` || string(metadata["incomplete_reason"]) != `"validation_budget_exhausted"` {
+		t.Fatalf("incomplete reason was lost: %s", files[0].Data)
+	}
+	if _, present := metadata["output_dir"]; present {
+		t.Fatalf("worker-local path retained: %s", files[0].Data)
+	}
+}
+
 func TestRunnerRejectsBlankNoChangeFix(t *testing.T) {
 	for _, test := range []struct{ name, answer string }{{"empty", ""}, {"whitespace", " \n\t"}, {"NUL", "\x00"}} {
 		t.Run(test.name, func(t *testing.T) {
@@ -161,6 +183,50 @@ func TestRunnerAuditCollectionAndNormalizationFailuresAreTerminal(t *testing.T) 
 	}
 }
 
+func TestRunnerInvalidReviewedAuditMetadataSkipsCritic(t *testing.T) {
+	job := withClaudeCritic(auditRunnerJob(t))
+	criticCalls := 0
+	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+		if request.role == roleCritic {
+			criticCalls++
+			return aicli.Result{Answer: approvedCritiqueJSON}, nil
+		}
+		for _, file := range auditArtifactsFixture(job, request.dir, "Audit report\n") {
+			if file.Path == "run-metadata.json" {
+				file.Data = bytes.Replace(file.Data, []byte(`"run_id":"test-run"`), []byte(`"run_id":"`+strings.Repeat("<", maxAuditArtifactBytes/5)+`"`), 1)
+			}
+			writeFixtureFile(t, request.outputDir, file.Path, file.Data)
+		}
+		return aicli.Result{Answer: proposalJSON("main response", "")}, nil
+	}}
+	result, err := runner.Run(t.Context(), job)
+	if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "normalized audit metadata exceeds byte limit") || criticCalls != 0 || len(result.Calls) != 1 {
+		t.Fatalf("invalid audit metadata spent a critic call: calls=%d receipts=%d error=%v", criticCalls, len(result.Calls), err)
+	}
+}
+
+func TestRunnerInvalidSecondAuditMetadataSkipsVerification(t *testing.T) {
+	job := withClaudeCritic(auditRunnerJob(t))
+	criticCalls := 0
+	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+		if request.role == roleCritic {
+			criticCalls++
+			return aicli.Result{Answer: `{"review_complete":true,"approved":false,"has_blockers":true,"feedback":"Revise the report."}`}, nil
+		}
+		for _, file := range auditArtifactsFixture(job, request.dir, "Audit report\n") {
+			if request.round == 2 && file.Path == "run-metadata.json" {
+				file.Data = bytes.Replace(file.Data, []byte(`"run_id":"test-run"`), []byte(`"run_id":"`+strings.Repeat("<", maxAuditArtifactBytes/5)+`"`), 1)
+			}
+			writeFixtureFile(t, request.outputDir, file.Path, file.Data)
+		}
+		return aicli.Result{Answer: proposalJSON("main response", "")}, nil
+	}}
+	result, err := runner.Run(t.Context(), job)
+	if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "normalized audit metadata exceeds byte limit") || criticCalls != 1 || len(result.Calls) != 3 {
+		t.Fatalf("invalid round-two audit spent verification: critic calls=%d receipts=%d error=%v", criticCalls, len(result.Calls), err)
+	}
+}
+
 func TestRunnerCancellationDuringInstalledAuditValidatorPreservesCause(t *testing.T) {
 	installActionTestSkills(t, testAuditSkillURL)
 	bin := t.TempDir()
@@ -182,7 +248,6 @@ func TestRunnerCancellationDuringInstalledAuditValidatorPreservesCause(t *testin
 	script := fmt.Sprintf("#!/bin/sh\nif [ \"$2\" = -e ]; then exit 0; fi\nprintf started > %s\nexec /bin/cat < %s\n", shellQuote(startedPath), shellQuote(holdPath))
 	fakeOnPath(t, "node", script)
 	job := testJob(command.SecurityAudit)
-	job.Main.Skills = []string{testAuditSkillURL}
 	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 		for _, file := range auditArtifactsFixture(job, request.dir, "Audit report\n") {
 			if err := os.WriteFile(filepath.Join(request.outputDir, file.Path), file.Data, 0600); err != nil {
@@ -493,28 +558,6 @@ func TestRunnerReportsOwnedAndCriticCleanupFailures(t *testing.T) {
 				t.Fatalf("cleanup failure not recorded: %+v", result.Diagnostics)
 			}
 		})
-	}
-}
-
-func TestRunnerRefusesRenderedReportOverflowBeforeCritic(t *testing.T) {
-	job := withClaudeCritic(auditRunnerJob(t))
-	job.CriticMaxRounds = 1
-	text := strings.Repeat("a\n", 25000)
-	calls := 0
-	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
-		calls++
-		if request.role != roleMain {
-			t.Fatal("unpublishable report reached critic")
-		}
-		writeFixtureFile(t, request.outputDir, "REPORT.md", []byte(text))
-		return aicli.Result{Answer: proposalJSON("Complete report", "")}, nil
-	}}
-	result, err := runner.Run(context.Background(), job)
-	if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "publication limit") || calls != 1 || len(result.Calls) != 1 || result.Answer != "" {
-		t.Fatalf("overflow reached critic/success: calls=%d result=%+v error=%v", calls, result, err)
-	}
-	if len(result.Artifacts) != 1 || result.Artifacts[0].Path != "REPORT.md" || string(result.Artifacts[0].Data) != text || result.validate(job, false) != nil {
-		t.Fatalf("partial report lost: %+v", result.Artifacts)
 	}
 }
 

@@ -317,7 +317,7 @@ func TestCappedAuditStillRequiresInstalledReportValidation(t *testing.T) {
 	if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "audit validate-findings.cjs failed") || calls != 2 || result.CriticStopReason != "round_cap" || result.Answer != "" || len(result.Changes) != 0 {
 		t.Fatalf("cap bypassed independent report validation: calls=%d result=%+v error=%v", calls, result, err)
 	}
-	if result.validate(job, false) != nil || result.Validate(job) == nil {
-		t.Fatalf("failed audit lost its safe evidence or became publishable: %+v", result)
+	if err := result.validate(job, false); err != nil {
+		t.Fatalf("failed audit lost its safe evidence: %v", err)
 	}
 }

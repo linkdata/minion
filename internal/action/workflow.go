@@ -62,18 +62,10 @@ func (e *Orchestrator) perform(ctx context.Context, request monitor.Job) (result
 			executor = &runner
 		}
 		checkpoints := newExecutionCheckpoints(e, prepared.job)
-		job := prepared.job
-		if job.Critic != nil {
-			critic := *job.Critic
-			job.Critic = &critic
-		}
-		result, err = executor.Execute(ctx, job, checkpoints)
+		result, err = executor.Execute(ctx, prepared.job, checkpoints)
 		err = checkpoints.finish(result, err)
 		if err != nil {
 			evidence := checkpoints.failureEvidence()
-			if result.matchesJob(prepared.job) {
-				evidence.Diagnostics = result.Diagnostics
-			}
 			err = errors.Join(err, e.retainWorkerDiagnostics(prepared.job, result, err))
 			e.logResult(prepared.job, evidence)
 			if len(evidence.Calls) != 0 {
@@ -247,7 +239,16 @@ func (e *Orchestrator) publish(ctx context.Context, p *preparedAction, result Re
 	if err != nil {
 		return errors.Join(fmt.Errorf("%w: publication projection: %w", monitor.ErrTerminalJob, err), e.retainIncompleteAudit(p, result))
 	}
+	if err := rejectConfiguredKeyPublication(published, result.Changes, e.Runner.Codex.APIKey, e.Runner.Claude.APIKey); err != nil {
+		return errors.Join(fmt.Errorf("%w: invalid action result: %w", monitor.ErrTerminalJob, err), e.retainIncompleteAudit(p, result))
+	}
+	if err := rejectPublishedRefutations(p.job, result, published); err != nil {
+		return errors.Join(fmt.Errorf("%w: invalid action result: %w", monitor.ErrTerminalJob, err), e.retainIncompleteAudit(p, result))
+	}
 	if p.job.Action == command.SecurityAudit {
+		if err := e.validateAuditForPublication(ctx, p.job, result.Artifacts); err != nil {
+			return errors.Join(fmt.Errorf("%w: invalid audit report: %w", monitor.ErrTerminalJob, err), e.retainIncompleteAudit(p, result))
+		}
 		if err := e.retainAudit(p, published.artifacts, true); err != nil {
 			return fmt.Errorf("%w: retain completed audit: %w", monitor.ErrTerminalJob, err)
 		}
@@ -278,6 +279,35 @@ func (e *Orchestrator) publish(ctx context.Context, p *preparedAction, result Re
 	return nil
 }
 
+func rejectConfiguredKeyPublication(published publication, changes []workspace.Change, keys ...string) error {
+	if err := rejectConfiguredKeyChanges(changes, keys...); err != nil {
+		return err
+	}
+	for _, key := range keys {
+		if key == "" {
+			continue
+		}
+		if containsConfiguredKey([]byte(published.answer), key) {
+			return errors.New("answer contains a configured provider key")
+		}
+	}
+	for _, file := range published.artifacts {
+		if artifactContainsConfiguredKey(file, keys...) {
+			return errors.New("audit artifact contains a configured provider key")
+		}
+	}
+	return nil
+}
+
+func artifactContainsConfiguredKey(file workspace.File, keys ...string) bool {
+	for _, key := range keys {
+		if key != "" && containsConfiguredKey(file.Data, key) {
+			return true
+		}
+	}
+	return false
+}
+
 func (e *Orchestrator) logResult(job Job, result Result) {
 	id := job.Identity
 	if result.matchesJob(job) && result.validateCalls(job, false) == nil {
@@ -297,10 +327,17 @@ func (e *Orchestrator) logResult(job Job, result Result) {
 }
 
 func (e *Orchestrator) retainIncompleteAudit(p *preparedAction, result Result) error {
-	if p.job.Action != command.SecurityAudit || len(result.Artifacts) == 0 || !result.matchesJob(p.job) || validateResultArtifacts(p.job, result.Artifacts, false) != nil {
+	if p.job.Action != command.SecurityAudit || len(result.Artifacts) == 0 || !result.matchesJob(p.job) {
 		return nil
 	}
-	return e.retainAudit(p, result.Artifacts, false)
+	var safe []workspace.File
+	for _, file := range result.Artifacts {
+		if artifactContainsConfiguredKey(file, e.Runner.Codex.APIKey, e.Runner.Claude.APIKey) || validateResultArtifacts(p.job, append(safe, file), false) != nil {
+			continue
+		}
+		safe = append(safe, file)
+	}
+	return e.retainAudit(p, safe, false)
 }
 
 func (e *Orchestrator) retainAudit(p *preparedAction, files []workspace.File, complete bool) error {

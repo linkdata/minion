@@ -34,7 +34,7 @@ func (e *Orchestrator) retainReviewEvidence(job Job, result Result) error {
 	if job.Critic == nil {
 		return nil
 	}
-	if err := saveReviewEvidence(e.WorkRoot, job, result, e.Logger); err != nil {
+	if err := saveReviewEvidence(e.WorkRoot, job, result, e.Logger, e.Runner.Codex.APIKey, e.Runner.Claude.APIKey); err != nil {
 		return fmt.Errorf("%w: retain private review evidence: %w", monitor.ErrTerminalJob, err)
 	}
 	return nil
@@ -62,7 +62,7 @@ func privateRecordsDir(workRoot, name string) (string, error) {
 }
 
 // saveReviewEvidence accepts a validated job on an admitted host work root.
-func saveReviewEvidence(workRoot string, job Job, result Result, logger *log.Logger) error {
+func saveReviewEvidence(workRoot string, job Job, result Result, logger *log.Logger, keys ...string) error {
 	if !result.matchesJob(job) {
 		return errors.New("review evidence does not match action identity or source")
 	}
@@ -71,6 +71,13 @@ func saveReviewEvidence(workRoot string, job Job, result Result, logger *log.Log
 	}
 	if err := validateRefutations(job, result.Calls, result.Refutations); err != nil {
 		return err
+	}
+	for _, refutation := range result.Refutations {
+		for _, key := range keys {
+			if key != "" && containsConfiguredKey([]byte(refutation.Text), key) {
+				return errors.New("review refutation contains a configured provider key")
+			}
+		}
 	}
 	record := retainedReview{
 		CriticStopReason: result.CriticStopReason,
@@ -81,10 +88,6 @@ func saveReviewEvidence(workRoot string, job Job, result Result, logger *log.Log
 	}
 	if len(record.Calls) != 0 {
 		record.ReviewClaimOrigin = executorClaimOrigin
-	}
-	data, err := json.Marshal(record)
-	if err != nil {
-		return err
 	}
 	root, err := privateRecordsDir(workRoot, "reviews")
 	if err != nil {
@@ -112,6 +115,10 @@ func saveReviewEvidence(workRoot string, job Job, result Result, logger *log.Log
 		if saved.CriticStopReason == record.CriticStopReason && len(saved.Calls) == len(record.Calls) && len(saved.Refutations) == len(record.Refutations) {
 			return nil
 		}
+	}
+	data, err := json.Marshal(record)
+	if err != nil {
+		return err
 	}
 	if err := workspace.WriteAtomic(path, data, filepath.Dir(root)); err != nil {
 		return err

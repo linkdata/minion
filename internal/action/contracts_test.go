@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/gitwork"
@@ -40,24 +41,31 @@ func TestResultArtifactContracts(t *testing.T) {
 		}, "incomplete audit artifacts", ""},
 		{"executable artifact", func(_ *Job, r *Result) { r.Artifacts[0].Mode = workspace.Executable }, "invalid action report artifact", "invalid action report artifact"},
 		{"oversized artifact", func(_ *Job, r *Result) { r.Artifacts[0].Data = make([]byte, maxAuditArtifactBytes+1) }, "invalid action report artifact", "invalid action report artifact"},
-		{"different answer", func(_ *Job, r *Result) { r.Answer = "Different unreviewed text." }, "answer differs from REPORT.md", ""},
-		{"answer trailing newline", func(_ *Job, r *Result) { r.Answer += "\n" }, "answer differs from REPORT.md", ""},
-		{"rendered report overflow", func(_ *Job, r *Result) {
+		{"NUL in completed report", func(_ *Job, r *Result) {
+			for i := range r.Artifacts {
+				if r.Artifacts[i].Path == "REPORT.md" {
+					r.Artifacts[i].Data = []byte("Report\x00text")
+				}
+			}
+		}, "contains NUL", ""},
+		{"different answer", func(_ *Job, r *Result) { r.Answer = "Different unreviewed text." }, "", ""},
+		{"blank answer", func(_ *Job, r *Result) { r.Answer = "" }, "", ""},
+		{"private report may exceed public rendering budget", func(_ *Job, r *Result) {
 			r.Answer = strings.Repeat("a\u0085", 19000)
 			for i := range r.Artifacts {
 				if r.Artifacts[i].Path == "REPORT.md" {
 					r.Artifacts[i].Data = []byte(r.Answer)
 				}
 			}
-		}, "action answer", ""},
+		}, "", ""},
 		{"partial report exact limit", func(_ *Job, r *Result) {
 			r.Answer, r.Calls = "", nil
 			r.Artifacts = []workspace.File{{Path: "REPORT.md", Mode: workspace.Regular, Data: bytes.Repeat([]byte("x"), maxOutputBytes)}}
-		}, "action answer", ""},
+		}, "incomplete audit artifacts", ""},
 		{"partial report over limit", func(_ *Job, r *Result) {
 			r.Answer, r.Calls = "", nil
 			r.Artifacts = []workspace.File{{Path: "REPORT.md", Mode: workspace.Regular, Data: bytes.Repeat([]byte("x"), maxOutputBytes+1)}}
-		}, "action answer", "report artifacts exceed limits"},
+		}, "incomplete audit artifacts", "report artifacts exceed limits"},
 	}
 	for _, empty := range auditArtifacts {
 		if !auditArtifactMayBeEmpty(empty) {
@@ -82,6 +90,12 @@ func TestResultArtifactContracts(t *testing.T) {
 			}
 			if err := result.Validate(job); (err == nil) != (test.complete == "") || (err != nil && !strings.Contains(err.Error(), test.complete)) {
 				t.Fatalf("complete artifacts=%v want%q", err, test.complete)
+			}
+			if test.name == "different answer" {
+				projected, err := projectPublication(job, result)
+				if err != nil || strings.Contains(projected.answer, result.Answer) {
+					t.Fatalf("unpublished audit answer reached public summary: %q, %v", projected.answer, err)
+				}
 			}
 			if err := result.validate(job, false); (err == nil) != (test.partial == "") || (err != nil && !strings.Contains(err.Error(), test.partial)) {
 				t.Fatalf("partial artifacts=%v want%q", err, test.partial)
@@ -283,6 +297,62 @@ func TestJobValidate(t *testing.T) {
 				t.Fatalf("valid boundary refused: %v", err)
 			}
 		})
+	}
+}
+
+func TestAuditJobRejectsUncitableSourcePathsBeforeModel(t *testing.T) {
+	for _, test := range []struct{ name, path string }{
+		{"backslash", `literal\backslash`},
+		{"colon", "segment:name"},
+		{"reserved", "CON.txt"},
+		{"trailing dot", "source."},
+		{"leading tilde", "~source"},
+		{"default ignorable", "so\u200burce"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			job := testJob(command.SecurityAudit)
+			job.Source.Files[0].Path = test.path
+			if err := workspace.ValidateSnapshot(job.Source); err != nil {
+				t.Fatalf("fixture source path is not admitted by the portable snapshot: %v", err)
+			}
+			if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "audit source path cannot be cited") || strings.Contains(err.Error(), test.path) {
+				t.Fatalf("audit path was accepted or echoed: %v", err)
+			}
+			called := false
+			runner := Runner{runModel: func(context.Context, modelRun) (aicli.Result, error) {
+				called = true
+				return aicli.Result{}, nil
+			}}
+			if _, err := runner.Run(t.Context(), job); !errors.Is(err, monitor.ErrTerminalJob) || called {
+				t.Fatalf("uncitable source reached model: called=%t error=%v", called, err)
+			}
+		})
+	}
+	job := testJob(command.SecurityAudit)
+	job.Source.Files[0].Path = "src/ordinary.go"
+	if err := job.Validate(); err != nil {
+		t.Fatalf("ordinary audit source rejected: %v", err)
+	}
+	job = testJob(command.Comment)
+	job.Source.Files[0].Path = `literal\backslash`
+	if err := job.Validate(); err != nil {
+		t.Fatalf("other action source acceptance changed: %v", err)
+	}
+	job = testJob(command.SecurityAudit)
+	job.Source.Omitted = []string{`link\source`}
+	job.Source.HeadOmitted = []string{`link\source`}
+	if err := workspace.ValidateSnapshot(job.Source); err != nil {
+		t.Fatalf("fixture omitted head path is not admitted by the portable snapshot: %v", err)
+	}
+	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "audit source path cannot be cited") {
+		t.Fatalf("uncitable current link admitted: %v", err)
+	}
+	job = testJob(command.SecurityAudit)
+	job.Identity.SubjectType = "PullRequest"
+	job.Source.Base, job.Source.MergeBase = portableHead, portableHead
+	job.Source.BaseFiles = []workspace.File{{Path: `base\source`, Mode: workspace.Regular, Data: []byte("base\n")}}
+	if err := job.Validate(); err != nil {
+		t.Fatalf("uncitable base-only source blocked current audit: %v", err)
 	}
 }
 
@@ -561,6 +631,7 @@ func TestPortableContractsRejectMismatches(t *testing.T) {
 		{"source", "action result version, identity or source differs from job", func(r *Result) { r.SourceRef = strings.Repeat("b", 40) }},
 		{"identity", "action result version, identity or source differs from job", func(r *Result) { r.Identity.AttemptID = "stale" }},
 		{"oversized answer", "action answer is blank, invalid or exceeds limit", func(r *Result) { r.Answer = strings.Repeat("x", maxOutputBytes+1) }},
+		{"invisible answer", "action answer is blank, invalid or exceeds limit", func(r *Result) { r.Answer = "\u200b\u2060" }},
 		{"read-only changes", "read-only action returned source changes", func(r *Result) { r.Changes = []workspace.Change{{Path: "added", Mode: workspace.Regular}} }},
 		{"usage", "invalid model call usage", func(r *Result) {
 			r.Calls = []CallUsage{{Provider: "codex", Role: "main", Round: 1, Tokens: usage.Tokens{Input: -1}}}
@@ -749,13 +820,16 @@ func TestResultEmptyAnswerContract(t *testing.T) {
 		critic  bool
 		changed bool
 		valid   bool
-	}{{command.Fix, false, true, true}, {command.Fix, false, false, false}, {command.Fix, true, false, false}, {command.Fix, true, true, true}, {command.Comment, false, false, false}, {command.Review, false, false, false}, {command.SecurityAudit, false, false, false}} {
+	}{{command.Fix, false, true, true}, {command.Fix, false, false, false}, {command.Fix, true, false, false}, {command.Fix, true, true, true}, {command.Comment, false, false, false}, {command.Review, false, false, false}, {command.SecurityAudit, false, false, true}} {
 		t.Run(fmt.Sprintf("%s/critic=%t/changed=%t", test.action, test.critic, test.changed), func(t *testing.T) {
 			job := testJob(test.action)
 			if test.critic {
 				job = withClaudeCritic(job)
 			}
 			result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Calls: []CallUsage{{Provider: job.Main.Provider, Role: "main", Round: 1}}}
+			if test.action == command.SecurityAudit {
+				result.Artifacts = auditArtifactsFixture(job, sourceIdentity(job), "Audit report\n")
+			}
 			if test.critic {
 				result.CriticStopReason = "approved"
 				result.Calls = append(result.Calls, CallUsage{Provider: job.Critic.Provider, Role: roleCritic, ReviewComplete: true, Round: 1, ReviewPhase: reviewFull, Approved: true, NoBlockers: true})
@@ -774,5 +848,26 @@ func TestResultEmptyAnswerContract(t *testing.T) {
 				t.Fatalf("empty %s answer with critic=%t: %v", test.action, test.critic, err)
 			}
 		})
+	}
+}
+
+func TestChangedFixDoesNotRenderUnusedAnswer(t *testing.T) {
+	job := testJob(command.Fix)
+	answer := strings.Repeat("x", maxOutputBytes)
+	if !boundedText(answer, maxOutputBytes) || modelOutputFits(answer) {
+		t.Fatal("fixture does not isolate raw text from rendering limit")
+	}
+	result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head,
+		Answer: answer, Changes: []workspace.Change{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("fixed source")}},
+		Calls: []CallUsage{{Provider: job.Main.Provider, Role: roleMain, Round: 1}}}
+	if err := result.Validate(job); err != nil {
+		t.Fatalf("unused changed-Fix answer was rejected: %v", err)
+	}
+	if projected, err := projectPublication(job, result); err != nil || projected.answer != "" {
+		t.Fatalf("changed Fix exposed its unused answer: %+v, %v", projected, err)
+	}
+	result.Changes = nil
+	if err := result.Validate(job); err == nil || !strings.Contains(err.Error(), "action answer") {
+		t.Fatalf("published no-change Fix accepted unrenderable answer: %v", err)
 	}
 }

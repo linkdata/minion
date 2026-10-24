@@ -97,7 +97,7 @@ func TestRunnerExecuteCheckpointsInsideObserverAndSeparatesDecision(t *testing.T
 			}
 			critic := value.Call.Role == roleCritic
 			if value.Call.Approved != critic || value.Call.NoBlockers != critic || value.Call.HasBlockers || value.Call.ReviewComplete != critic {
-				t.Fatalf("after-call lost parsed verdict attestations: %+v", value.Call)
+				t.Fatalf("after-call lost parsed verdict claims: %+v", value.Call)
 			}
 			calls = append(calls, value.Call)
 			events = append(events, "after/"+value.Call.Role)

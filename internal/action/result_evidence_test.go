@@ -30,7 +30,7 @@ func TestInvalidResultKeepsOnlyValidatedEvidence(t *testing.T) {
 			case "invalid calls":
 				result.Calls[0].Tokens.Input = -1
 			case "invalid answer":
-				result.Answer = ""
+				result.Answer = "invalid\x00answer"
 			case "foreign identity":
 				result.Identity.AttemptID = "FOREIGN\nforged journal line"
 			case "invalid diagnostics":
@@ -44,6 +44,9 @@ func TestInvalidResultKeepsOnlyValidatedEvidence(t *testing.T) {
 			err := e.publish(context.Background(), &preparedAction{job: job}, result)
 			if !errors.Is(err, monitor.ErrTerminalJob) {
 				t.Fatalf("invalid result was not terminal: %v", err)
+			}
+			if scenario == "invalid answer" && !strings.Contains(err.Error(), "action answer is blank, invalid or exceeds limit") {
+				t.Fatalf("invalid answer did not reach the intended validation: %v", err)
 			}
 			text := journal.String()
 			if strings.Contains(text, "PRIVATE") || strings.Contains(text, "forged") || strings.Contains(text, "FOREIGN") {
@@ -74,7 +77,7 @@ func TestInvalidResultKeepsOnlyValidatedEvidence(t *testing.T) {
 				}
 			}
 			entries, readErr := os.ReadDir(filepath.Join(root, "audits"))
-			if scenario == "foreign identity" || scenario == "invalid artifact" {
+			if scenario == "foreign identity" {
 				if !errors.Is(readErr, os.ErrNotExist) {
 					t.Fatalf("unsafe artifacts retained: %v, %v", entries, readErr)
 				}

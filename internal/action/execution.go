@@ -10,11 +10,12 @@ import (
 )
 
 // Executor computes one accepted Job; supplied input is borrowed read-only.
+// The caller owns the returned Result, which the implementation must not mutate afterward.
 type Executor interface {
 	Execute(context.Context, Job, Checkpoints) (Result, error)
 }
 
-// Checkpoints acknowledges required facts before execution may continue.
+// Checkpoints acknowledges required reported data before execution may continue.
 // Methods are called sequentially; nil acknowledges applicable persistence.
 // Review slices are borrowed read-only until the synchronous method returns.
 type Checkpoints interface {
@@ -23,7 +24,7 @@ type Checkpoints interface {
 	Review(ReviewCheckpoint) error
 }
 
-// CallCheckpoint carries pinned dispatch metadata, then returned usage and parsed verdict attestations.
+// CallCheckpoint carries pinned dispatch metadata, then returned usage and parsed verdict claims.
 type CallCheckpoint struct {
 	Version   int       `json:"version"`
 	Identity  Identity  `json:"identity"`
@@ -31,7 +32,7 @@ type CallCheckpoint struct {
 	Call      CallUsage `json:"call"`
 }
 
-// ReviewCheckpoint carries private evidence; a nonblank decision acknowledges an already saved prefix.
+// ReviewCheckpoint carries private worker-reported review data; a nonblank decision acknowledges an already saved prefix.
 type ReviewCheckpoint struct {
 	Version          int          `json:"version"`
 	Identity         Identity     `json:"identity"`
@@ -156,7 +157,7 @@ func (c *executionCheckpoints) Review(fact ReviewCheckpoint) error {
 		}
 	}
 	result := Result{Version: fact.Version, Identity: fact.Identity, SourceRef: fact.SourceRef, Calls: fact.Calls, Refutations: fact.Refutations, CriticStopReason: fact.CriticStopReason}
-	if err := saveReviewEvidence(c.owner.WorkRoot, c.job, result, c.owner.Logger); err != nil {
+	if err := saveReviewEvidence(c.owner.WorkRoot, c.job, result, c.owner.Logger, c.owner.Runner.Codex.APIKey, c.owner.Runner.Claude.APIKey); err != nil {
 		if len(c.calls) == 0 {
 			err = preparationFailure("prepare private review ledger", err)
 		} else {
@@ -191,8 +192,10 @@ func (c *executionCheckpoints) finish(result Result, runErr error) error {
 	if c.failure != nil || c.pending != nil || !result.matchesJob(c.job) || !slices.Equal(result.Calls, c.calls) {
 		return errors.Join(runErr, checkpointContractError())
 	}
-	if c.job.Critic != nil && (!c.reviewed || c.review.CriticStopReason == "" || result.CriticStopReason != c.review.CriticStopReason || !slices.Equal(result.Calls, c.review.Calls) || !slices.Equal(result.Refutations, c.review.Refutations)) {
-		return checkpointContractError()
+	if c.job.Critic != nil {
+		if !c.reviewed || c.review.CriticStopReason == "" || result.CriticStopReason != c.review.CriticStopReason || !slices.Equal(result.Calls, c.review.Calls) || !slices.Equal(result.Refutations, c.review.Refutations) {
+			return checkpointContractError()
+		}
 	}
 	return nil
 }

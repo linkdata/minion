@@ -1,9 +1,16 @@
 package action
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
-	"slices"
+	"html"
+	"strings"
+	"unicode"
+	"unicode/utf8"
+
+	"golang.org/x/text/cases"
+	"golang.org/x/text/unicode/norm"
 
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
@@ -19,7 +26,15 @@ type publication struct {
 
 // projectPublication requires a raw Result that already passed validation.
 func projectPublication(job Job, result Result) (publication, error) {
-	projected := publication{answer: result.Answer, artifacts: result.Artifacts, cap: cappedReview(job, result)}
+	answer := result.Answer
+	if job.Action == command.SecurityAudit {
+		var err error
+		answer, err = auditPublicSummary(result.Artifacts)
+		if err != nil {
+			return publication{}, err
+		}
+	}
+	projected := publication{answer: answer, artifacts: result.Artifacts, cap: cappedReview(job, result)}
 	notice, err := criticCapNotice(projected.cap)
 	if err != nil {
 		return publication{}, err
@@ -27,22 +42,422 @@ func projectPublication(job Job, result Result) (publication, error) {
 	if job.Action == command.Fix && len(result.Changes) != 0 {
 		return publication{cap: projected.cap}, nil
 	}
-	if notice == "" {
-		return projected, nil
+	if notice != "" {
+		projected.answer = notice + "\n\n" + answer
 	}
-	projected.answer = notice + "\n\n" + result.Answer
 	if !publishableAnswer(projected.answer) {
-		return publication{}, errors.New("capped publication answer is invalid or exceeds limit")
+		return publication{}, errors.New("publication answer is invalid or exceeds limit")
 	}
-	if job.Action == command.SecurityAudit {
-		projected.artifacts = slices.Clone(result.Artifacts)
-		for i := range projected.artifacts {
-			if projected.artifacts[i].Path == "REPORT.md" {
-				projected.artifacts[i].Data = []byte(projected.answer)
+	return projected, nil
+}
+
+// auditPublicSummary publishes only fields from the validated structured record.
+// The executor's Markdown report remains private narrative and may contradict it.
+func auditPublicSummary(artifacts []workspace.File) (string, error) {
+	var findingsBytes, ledgerBytes []byte
+	for _, file := range artifacts {
+		switch file.Path {
+		case "findings.json":
+			findingsBytes = file.Data
+		case "coverage-ledger.json":
+			ledgerBytes = file.Data
+		}
+	}
+	var findings []struct {
+		Verdict, Fingerprint, Title string
+		Severity                    struct {
+			Overall string `json:"overall_severity"`
+		}
+		Trace []struct {
+			File string
+			Line float64
+		}
+	}
+	var units []struct{ Status string }
+	if err := json.Unmarshal(findingsBytes, &findings); err != nil {
+		return "", fmt.Errorf("decode audit findings for publication: %w", err)
+	}
+	if err := json.Unmarshal(ledgerBytes, &units); err != nil {
+		return "", fmt.Errorf("decode audit coverage for publication: %w", err)
+	}
+	counts := make(map[string]int)
+	for _, unit := range units {
+		counts[unit.Status]++
+	}
+	for _, finding := range findings {
+		counts[finding.Verdict]++
+	}
+	var summary strings.Builder
+	fmt.Fprintf(&summary, "Executor-reported security audit summary. Record structure and cited source locations were checked; reviewer activity and behavior remain executor claims.\n\nCoverage units: %d covered, %d candidate, %d blocked, %d not applicable.\nFindings: %d confirmed, %d need validation, %d rejected.\n", counts["covered"], counts["candidate"], counts["blocked"], counts["not_applicable"], counts["confirmed"], counts["needs_validation"], counts["rejected"])
+	for _, finding := range findings {
+		if finding.Verdict == "rejected" {
+			continue
+		}
+		if len(finding.Trace) == 0 {
+			return "", errors.New("audit finding has no source trace for publication")
+		}
+		if finding.Verdict == "confirmed" {
+			fmt.Fprintf(&summary, "\nConfirmed (%s) fingerprint=%q title=%q source=%q:%.0f", finding.Severity.Overall, finding.Fingerprint, finding.Title, finding.Trace[0].File, finding.Trace[0].Line)
+		} else {
+			fmt.Fprintf(&summary, "\nNeeds validation fingerprint=%q title=%q source=%q:%.0f", finding.Fingerprint, finding.Title, finding.Trace[0].File, finding.Trace[0].Line)
+		}
+		if len(finding.Trace) > 1 {
+			sink := finding.Trace[len(finding.Trace)-1]
+			fmt.Fprintf(&summary, " sink=%q:%.0f", sink.File, sink.Line)
+		}
+	}
+	return summary.String(), nil
+}
+
+// This catches exact whole-refutation or complete-sentence copies, not rewrites or hostile disclosures.
+// Exact short matches are limited to whole replies and audit titles; fingerprints and Fix files can contain generic short values.
+func rejectPublishedRefutations(job Job, result Result, projected publication) error {
+	if len(result.Refutations) == 0 {
+		return nil
+	}
+	const minCopyRunes = 24
+	var whole []string
+	exact := make(map[string]bool)
+	seenSentences := make(map[string]bool)
+	var sentences []string
+	for _, refutation := range result.Refutations {
+		privateTexts := []string{refutation.Text}
+		if withoutNUL := strings.ReplaceAll(refutation.Text, "\x00", ""); withoutNUL != refutation.Text {
+			privateTexts = append(privateTexts, withoutNUL)
+		}
+		for _, privateText := range privateTexts {
+			for _, variant := range publicationTextVariants(privateText) {
+				if text := foldPublicationSpace(variant); text != "" {
+					if utf8.RuneCountInString(text) >= minCopyRunes && !exact[text] {
+						whole = append(whole, text)
+					}
+					exact[text] = true
+				}
+				for _, sentence := range strings.FieldsFunc(variant, publicationSentenceBreak) {
+					if text := foldPublicationSentence(sentence); utf8.RuneCountInString(text) >= minCopyRunes && !seenSentences[text] {
+						seenSentences[text] = true
+						sentences = append(sentences, text)
+					}
+				}
 			}
 		}
 	}
-	return projected, nil
+	if len(exact) == 0 {
+		return nil
+	}
+	wordContinuation := func(r rune) bool {
+		// Copies in unspaced scripts can start inside surrounding prose.
+		if unicode.In(r, unicode.Han, unicode.Hiragana, unicode.Katakana, unicode.Thai, unicode.Lao, unicode.Khmer, unicode.Myanmar) {
+			return false
+		}
+		return unicode.IsLetter(r) || unicode.IsNumber(r) || unicode.IsMark(r) || r == '_'
+	}
+	// shortcut: Bound repeated copy searches at 1 GiB; use multi-pattern matching if large outputs routinely hit it.
+	remainingCopySearchBytes := int64(1 << 30)
+	searched := func(n int) bool {
+		remainingCopySearchBytes -= int64(n)
+		return remainingCopySearchBytes < 0
+	}
+	sentenceCopy := func(text string, reject func(string) bool) bool {
+		text = foldPublicationSentence(text)
+		for _, private := range sentences {
+			if len(private) > len(text) {
+				continue
+			}
+			first, _ := utf8.DecodeRuneInString(private)
+			last, _ := utf8.DecodeLastRuneInString(private)
+			for offset := 0; offset < len(text); {
+				index := strings.Index(text[offset:], private)
+				scanned := len(text) - offset
+				if index >= 0 {
+					scanned = index + len(private)
+				}
+				if searched(scanned) {
+					return true
+				}
+				if index < 0 {
+					break
+				}
+				start, end := offset+index, offset+index+len(private)
+				left, right := rune(0), rune(0)
+				if start > 0 {
+					left, _ = utf8.DecodeLastRuneInString(text[:start])
+				}
+				if end < len(text) {
+					right, _ = utf8.DecodeRuneInString(text[end:])
+				}
+				if !(wordContinuation(first) && wordContinuation(left)) && !(wordContinuation(last) && wordContinuation(right)) && reject(private) {
+					return true
+				}
+				offset = start + 1
+			}
+		}
+		return false
+	}
+	containsCopy := func(text string, reject func(string) bool) bool {
+		for _, variant := range publicationTextVariants(text) {
+			folded := foldPublicationSpace(variant)
+			for _, private := range whole {
+				if len(private) > len(folded) {
+					continue
+				}
+				first, _ := utf8.DecodeRuneInString(private)
+				last, _ := utf8.DecodeLastRuneInString(private)
+				for offset := 0; offset < len(folded); {
+					index := strings.Index(folded[offset:], private)
+					scanned := len(folded) - offset
+					if index >= 0 {
+						scanned = index + len(private)
+					}
+					if searched(scanned) {
+						return true
+					}
+					if index < 0 {
+						break
+					}
+					start, end := offset+index, offset+index+len(private)
+					left, right := rune(0), rune(0)
+					if start > 0 {
+						left, _ = utf8.DecodeLastRuneInString(folded[:start])
+					}
+					if end < len(folded) {
+						right, _ = utf8.DecodeRuneInString(folded[end:])
+					}
+					if !(wordContinuation(first) && wordContinuation(left)) && !(wordContinuation(last) && wordContinuation(right)) && reject(private) {
+						return true
+					}
+					offset = start + 1
+				}
+			}
+			for _, sentence := range strings.FieldsFunc(variant, publicationSentenceBreak) {
+				if sentenceCopy(sentence, reject) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	reject := func(string) bool { return true }
+	wholeReply := func(text string, reject func(string) bool) bool {
+		for _, variant := range publicationTextVariants(text) {
+			folded := foldPublicationSpace(variant)
+			if exact[folded] && reject(folded) {
+				return true
+			}
+		}
+		return false
+	}
+	// A Fix transfers full replacement files; source quotations can also appear in public prose.
+	// shortcut: Source searches stop after 1 GiB and reject unproved copies; use multi-pattern matching if fuller coverage matters at that workload.
+	const maxSourceSearchBytes int64 = 1 << 30
+	remainingSourceSearchBytes := maxSourceSearchBytes
+	inSource := make(map[string]bool)
+	scanExhausted := false
+	var sourceText string
+	cacheChecked, sourceCached := false, false
+	// These parent-prepared GitHub fields were shown to the model with the source files.
+	threadText := [...]string{job.Title, job.Description, job.Notes}
+	rejectNew := func(private string) bool {
+		if public, known := inSource[private]; known {
+			return !public
+		}
+		if scanExhausted {
+			return true
+		}
+		cacheable := strings.IndexByte(private, 0) < 0
+		if !cacheChecked && cacheable {
+			cacheChecked = true
+			const maxCacheSourceBytes, maxCacheNormalizedBytes = 4 << 20, 32 << 20
+			rawBytes := 0
+			for _, text := range threadText {
+				rawBytes += len(text)
+			}
+			for _, files := range [][]workspace.File{job.Source.Files, job.Source.BaseFiles} {
+				for _, file := range files {
+					rawBytes += len(file.Path) + len(file.Data)
+				}
+			}
+			if rawBytes <= maxCacheSourceBytes {
+				var source strings.Builder
+				sourceCached = true
+			threadCache:
+				for _, text := range threadText {
+					for _, variant := range publicationTextVariants(text) {
+						folded := foldPublicationSpace(variant)
+						if len(folded)+1 > maxCacheNormalizedBytes-source.Len() {
+							sourceCached = false
+							break threadCache
+						}
+						source.WriteString(folded)
+						source.WriteByte(0)
+					}
+				}
+				if sourceCached {
+				buildCache:
+					for _, files := range [][]workspace.File{job.Source.Files, job.Source.BaseFiles} {
+						for _, file := range files {
+							for _, text := range []string{file.Path, string(file.Data)} {
+								for _, variant := range publicationTextVariants(text) {
+									folded := foldPublicationSpace(variant)
+									if len(folded)+1 > maxCacheNormalizedBytes-source.Len() {
+										sourceCached = false
+										break buildCache
+									}
+									source.WriteString(folded)
+									source.WriteByte(0) // Matches cannot span files or variants.
+								}
+							}
+						}
+					}
+				}
+				if sourceCached {
+					sourceText = source.String()
+				}
+			}
+		}
+		// NUL may occur in private evidence; the cache also uses it between source elements.
+		if sourceCached && cacheable {
+			if int64(len(sourceText)) > remainingSourceSearchBytes {
+				scanExhausted = true
+				return true
+			}
+			remainingSourceSearchBytes -= int64(len(sourceText))
+			inSource[private] = strings.Contains(sourceText, private)
+			return !inSource[private]
+		}
+		for _, text := range threadText {
+			if int64(len(text)) > remainingSourceSearchBytes {
+				scanExhausted = true
+				return true
+			}
+			for _, variant := range publicationTextVariants(text) {
+				folded := foldPublicationSpace(variant)
+				if int64(len(folded)) > remainingSourceSearchBytes {
+					scanExhausted = true
+					return true
+				}
+				remainingSourceSearchBytes -= int64(len(folded))
+				if strings.Contains(folded, private) {
+					inSource[private] = true
+					return false
+				}
+			}
+		}
+		for _, files := range [][]workspace.File{job.Source.Files, job.Source.BaseFiles} {
+			for _, file := range files {
+				for _, text := range []string{file.Path, string(file.Data)} {
+					if int64(len(text)) > remainingSourceSearchBytes {
+						scanExhausted = true
+						return true
+					}
+					for _, variant := range publicationTextVariants(text) {
+						folded := foldPublicationSpace(variant)
+						if int64(len(folded)) > remainingSourceSearchBytes {
+							scanExhausted = true
+							return true
+						}
+						remainingSourceSearchBytes -= int64(len(folded))
+						if strings.Contains(folded, private) {
+							inSource[private] = true
+							return false
+						}
+					}
+				}
+			}
+		}
+		inSource[private] = false
+		return true
+	}
+	// Check executor text, not the host's cap notice; audit fields are checked below.
+	if projected.answer != "" && job.Action != command.SecurityAudit &&
+		(wholeReply(result.Answer, rejectNew) || containsCopy(result.Answer, rejectNew)) {
+		return errors.New("publication contains private review evidence")
+	}
+	if job.Action == command.SecurityAudit {
+		for _, artifact := range result.Artifacts {
+			if artifact.Path != "findings.json" {
+				continue
+			}
+			var findings []struct{ Verdict, Fingerprint, Title string }
+			if err := json.Unmarshal(artifact.Data, &findings); err != nil {
+				return fmt.Errorf("decode audit findings before publication: %w", err)
+			}
+			for _, finding := range findings {
+				if finding.Verdict != "rejected" && (containsCopy(finding.Fingerprint, reject) || wholeReply(finding.Title, rejectNew) || containsCopy(finding.Title, rejectNew)) {
+					return errors.New("publication contains private review evidence")
+				}
+			}
+			break
+		}
+	}
+	if job.Action == command.Fix {
+		for _, change := range result.Changes {
+			if containsCopy(change.Path, rejectNew) || containsCopy(string(change.Data), rejectNew) {
+				return errors.New("publication contains private review evidence")
+			}
+		}
+	}
+	return nil
+}
+
+func publicationSentenceBreak(r rune) bool {
+	return r == '.' || r == ';' || r == ':' || r == '!' || r == '?' || r == '"' || r == '。'
+}
+
+func foldPublicationSentence(text string) string {
+	return foldPublicationSpace(strings.Trim(strings.TrimSpace(text), "*_`"))
+}
+
+func foldPublicationSpace(text string) string {
+	var result strings.Builder
+	result.Grow(len(text))
+	space := false
+	for _, r := range text {
+		if r == 0 {
+			result.WriteByte(0) // Source quotes cannot cross a binary boundary.
+			space = false
+			continue
+		}
+		if unicode.IsSpace(r) {
+			space = true
+			continue
+		}
+		if space && result.Len() != 0 {
+			result.WriteByte(' ')
+		}
+		result.WriteRune(r)
+		space = false
+	}
+	return norm.NFC.String(cases.Fold().String(result.String()))
+}
+
+func publicationTextVariants(text string) []string {
+	text = modelLineBreaks.Replace(text)
+	variants := []string{text}
+	if decoded := html.UnescapeString(text); decoded != text {
+		variants = append(variants, decoded)
+	}
+	for _, candidate := range variants {
+		if !strings.Contains(candidate, ">") {
+			continue
+		}
+		lines := strings.Split(candidate, "\n")
+		changed := false
+		for i, line := range lines {
+			for {
+				trimmed := strings.TrimLeft(line, " \t")
+				if !strings.HasPrefix(trimmed, ">") {
+					break
+				}
+				line, changed = strings.TrimLeft(trimmed[1:], " \t"), true
+			}
+			lines[i] = line
+		}
+		if changed {
+			variants = append(variants, strings.Join(lines, "\n"))
+		}
+	}
+	return variants
 }
 
 // cappedReview derives public facts only from an actual capped decision.

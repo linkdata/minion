@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"os"
 	"os/exec"
@@ -115,10 +117,34 @@ func TestLiveSecurityAuditAction(t *testing.T) {
 							return aicli.Result{}, fmt.Errorf("live audit did not use a separate report directory and expected commit")
 						}
 						assertModelRepository(t, dir, test.head)
+						var reviewedFile string
+						if err := filepath.WalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
+							if err != nil {
+								return err
+							}
+							if path == filepath.Join(dir, ".git") {
+								return fs.SkipDir
+							}
+							if entry.Type().IsRegular() {
+								reviewedFile, err = filepath.Rel(dir, path)
+								return fs.SkipAll
+							}
+							return nil
+						}); err != nil {
+							return aicli.Result{}, err
+						}
+						if reviewedFile == "" {
+							return aicli.Result{}, fmt.Errorf("live audit fixture has no regular source file")
+						}
+						encodedPath, err := json.Marshal(filepath.ToSlash(reviewedFile))
+						if err != nil {
+							return aicli.Result{}, err
+						}
+						ledger := strings.ReplaceAll(auditCoveredLedgerFixture, `"source.txt"`, string(encodedPath))
 						metadata := fmt.Sprintf(`{"run_id":%q,"repo":%q,"target":%q,"source_ref":%q,"profile":"standard","scope_paths":["."],"budget":null,"selected_companion_files":[],"prior_run_paths":[],"shared_file_owners":%s,"execution_policy":"sandboxed-source-and-local-only","run_status":"complete"}`, job.ID, liveFixRepository, dir, test.head, auditTestOwners)
 						for name, content := range map[string]string{
 							"run-metadata.json": metadata, "architecture.md": "Test fixture architecture.\n",
-							"coverage-ledger.json": `[{"status":"covered"}]`, "findings.json": "[]",
+							"coverage-ledger.json": ledger, "findings.json": "[]",
 							"REPORT.md": report, "FINDINGS-DETAIL.md": "No findings.\n", "NEEDS-VALIDATION.md": "No validation leads.\n",
 						} {
 							if err := os.WriteFile(filepath.Join(outputDir, name), []byte(content), 0o600); err != nil {
@@ -136,8 +162,15 @@ func TestLiveSecurityAuditAction(t *testing.T) {
 				t.Fatalf("audit model calls = %d, want 1", calls)
 			}
 			commentID, reply, err := liveActionReply(ctx, fixture.owner, fixture.cfg, job)
-			if err != nil || commentID == 0 || !strings.Contains(reply.Body, test.head) || !strings.Contains(reply.Body, strings.TrimSpace(report)) || strings.Contains(reply.Body, "Untrusted final answer") {
-				t.Fatalf("live audit acknowledgement does not contain the validated report at %s: %v", test.head, err)
+			if err != nil || commentID == 0 || !strings.Contains(reply.Body, test.head) || !strings.Contains(reply.Body, "Executor-reported security audit summary") || !strings.Contains(reply.Body, "Findings: 0 confirmed, 0 need validation, 0 rejected.") || strings.Contains(reply.Body, strings.TrimSpace(report)) || strings.Contains(reply.Body, "Untrusted final answer") {
+				t.Fatalf("live audit acknowledgement does not contain the structured summary at %s: %v", test.head, err)
+			}
+			retained, err := filepath.Glob(filepath.Join(orchestrator.WorkRoot, "audits", "*", "REPORT.md"))
+			if err != nil || len(retained) != 1 {
+				t.Fatalf("live audit report not retained privately: %v, %v", retained, err)
+			}
+			if data, err := os.ReadFile(retained[0]); err != nil || string(data) != report {
+				t.Fatalf("live worker narrative changed in private retention: %q, %v", data, err)
 			}
 			if err := orchestrator.Execute(ctx, job); err != nil {
 				t.Fatal(err)

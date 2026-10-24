@@ -64,6 +64,9 @@ type Orchestrator struct {
 }
 
 func (e *Orchestrator) Execute(ctx context.Context, job monitor.Job) (resultErr error) {
+	defer func() {
+		resultErr = redactActionError(resultErr, e.Runner.Codex.APIKey, e.Runner.Claude.APIKey)
+	}()
 	if e.CheckWorkRoot != nil {
 		if err := e.CheckWorkRoot(); err != nil {
 			return err
@@ -348,7 +351,7 @@ func modelOutputFits(s string) bool {
 }
 
 func publishableAnswer(s string) bool {
-	return boundedText(s, maxOutputBytes) && modelOutputFits(s)
+	return boundedText(s, maxOutputBytes) && auditVisibleText(s) && modelOutputFits(s)
 }
 
 func isNotFound(err error) bool {

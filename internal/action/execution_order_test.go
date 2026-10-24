@@ -185,7 +185,7 @@ func testExecuteOrdersCheckpoints(t *testing.T, overHTTP, capped, loseObservatio
 		}
 		transport := httptest.NewServer(remote)
 		t.Cleanup(transport.Close)
-		workerCtx, cancelWorker := context.WithCancel(context.Background())
+		workerCtx, cancelWorker := context.WithCancel(t.Context())
 		t.Cleanup(func() { cancelWorker(); _ = remote.Close() })
 		worker := e.Runner
 		worker.WorkRoot = t.TempDir()
@@ -210,7 +210,7 @@ func testExecuteOrdersCheckpoints(t *testing.T, overHTTP, capped, loseObservatio
 		go func() { workerDone <- RunHTTP(workerCtx, client, transport.URL, "local", &worker) }()
 		e.Executor = remote
 	}
-	if err := e.Execute(context.Background(), request); err != nil {
+	if err := e.Execute(t.Context(), request); err != nil {
 		t.Fatal(err)
 	}
 	if overHTTP {
@@ -235,10 +235,9 @@ func testExecuteOrdersCheckpoints(t *testing.T, overHTTP, capped, loseObservatio
 	default:
 		t.Fatal("action never published")
 	}
-	// Initial evidence, each parsed native receipt, and the same-prefix actual decision
-	// require distinct durable writes; final evidence retention is an idempotent no-op.
+	// Initial evidence, each parsed receipt and the decision require distinct durable writes.
 	if got := strings.Count(journal.String(), "review evidence "); got != len(expected)+2 {
-		t.Fatalf("actual decision was not a separate checkpoint: writes=%d log=%s", got, journal.String())
+		t.Fatalf("decision was not a separate checkpoint: writes=%d log=%s", got, journal.String())
 	}
 	records, err := usage.ReadAll(store.Dir)
 	if err != nil || len(records) != 1 || records[0].Status != "succeeded" || records[0].FinishedAt == nil || !records[0].UsageComplete || records[0].CodexCalls != 2 || records[0].ClaudeCalls != 3 || records[0].Tokens != wantTokens {

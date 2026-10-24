@@ -229,7 +229,9 @@ func (c *Checkout) Snapshot(ctx context.Context) (s workspace.Snapshot, err erro
 	var total int64
 	allEntries := slices.Clone(entries)
 	for _, entry := range entries {
-		if !entry.omitted {
+		if entry.omitted {
+			s.HeadOmitted = append(s.HeadOmitted, entry.file.Path)
+		} else {
 			headFiles++
 			total += entry.size
 		}

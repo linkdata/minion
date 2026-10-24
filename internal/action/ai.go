@@ -131,6 +131,12 @@ func redactActionError(err error, secrets ...string) error {
 		return nil
 	}
 	message := redactActionText(err.Error(), secrets...)
+	for _, secret := range secrets {
+		if secret != "" && containsConfiguredKey([]byte(message), secret) {
+			message = "action error could not be safely displayed"
+			break
+		}
+	}
 	if message == err.Error() {
 		return err
 	}
@@ -182,6 +188,9 @@ func (r *Runner) runAI(ctx context.Context, job Job, dir, prompt, outputDir stri
 			return "", "", fmt.Errorf("%w: invalid main proposal: %w", monitor.ErrTerminalJob, parseErr)
 		}
 		if round > 1 && strings.TrimSpace(refutations) != "" {
+			if !auditVisibleText(refutations) {
+				return "", "", fmt.Errorf("%w: invalid main proposal: refutations have no visible content", monitor.ErrTerminalJob)
+			}
 			history = append(history, Refutation{Round: round, Text: refutations})
 		}
 		if err = record(); err != nil {
@@ -296,14 +305,19 @@ func parseProposal(raw string, allowUnpublishableAnswer bool, secrets ...string)
 	}
 	answer = redactActionText(*response, secrets...)
 	refutations = redactActionText(*privateRefutations, secrets...)
+	for _, secret := range secrets {
+		if secret != "" && (containsConfiguredKey([]byte(answer), secret) || containsConfiguredKey([]byte(refutations), secret)) {
+			return "", "", errors.New("proposal contains a configured provider key")
+		}
+	}
 	if strings.TrimSpace(answer) == "" {
 		return "", "", errors.New("answer must not be blank")
 	}
 	if len(answer)+len(refutations) > maxOutputBytes {
 		return "", "", errors.New("decoded response exceeds critic context limit")
 	}
-	if !allowUnpublishableAnswer && !modelOutputFits(answer) {
-		return "", "", errors.New("rendered answer exceeds publication limit")
+	if !allowUnpublishableAnswer && !publishableAnswer(answer) {
+		return "", "", errors.New("rendered answer is blank, invalid or exceeds publication limit")
 	}
 	return answer, refutations, nil
 }
@@ -338,7 +352,12 @@ func parseCritique(answer string, secrets ...string) (approved, hasBlockers, rev
 		return false, false, false, "", errors.New("incomplete review must be a blocking rejection")
 	}
 	feedback = redactActionText(feedback, secrets...)
-	if !approved && strings.TrimSpace(feedback) == "" {
+	for _, secret := range secrets {
+		if secret != "" && containsConfiguredKey([]byte(feedback), secret) {
+			return false, false, false, "", errors.New("critic feedback contains a configured provider key")
+		}
+	}
+	if !approved && !auditVisibleText(feedback) {
 		return false, false, false, "", errors.New("rejection feedback is blank after redaction")
 	}
 	return approved, hasBlockers, reviewComplete, feedback, nil

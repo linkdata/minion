@@ -95,6 +95,8 @@ func TestReviewContextPreservesDistinctRevisionIdentities(t *testing.T) {
 	job.Source.Head = strings.Repeat("a", 40)
 	job.Source.Base = strings.Repeat("b", 40)
 	job.Source.MergeBase = strings.Repeat("c", 40)
+	job.Source.Omitted = []string{"base-link", "head-link"}
+	job.Source.HeadOmitted = []string{"head-link"}
 	root := t.TempDir()
 	if err := materializeContext(root, job.Source); err != nil {
 		t.Fatal(err)
@@ -104,17 +106,32 @@ func TestReviewContextPreservesDistinctRevisionIdentities(t *testing.T) {
 		t.Fatal(err)
 	}
 	var metadata struct {
-		Head      string
-		Base      string
-		MergeBase string `json:"merge_base"`
+		Head        string
+		Base        string
+		MergeBase   string   `json:"merge_base"`
+		Omitted     []string `json:"omitted"`
+		HeadOmitted []string `json:"head_omitted"`
 	}
-	if err := json.Unmarshal(data, &metadata); err != nil || metadata.Head != job.Source.Head || metadata.Base != job.Source.Base || metadata.MergeBase != job.Source.MergeBase {
+	if err := json.Unmarshal(data, &metadata); err != nil || metadata.Head != job.Source.Head || metadata.Base != job.Source.Base || metadata.MergeBase != job.Source.MergeBase || !slices.Equal(metadata.Omitted, job.Source.Omitted) || !slices.Equal(metadata.HeadOmitted, job.Source.HeadOmitted) {
 		t.Fatalf("revision identity projection: %s, %v", data, err)
 	}
 	prompt, err := actionPrompt(context.Background(), job, "/source", root, "", "")
 	want := fmt.Sprintf("head %s (merge base %s, base tip %s)", job.Source.Head, job.Source.MergeBase, job.Source.Base)
 	if err != nil || !strings.Contains(prompt, want) {
 		t.Fatalf("revision identity prompt: %q, %v; want %q", prompt, err, want)
+	}
+}
+
+func TestAuditPromptDescribesPublicSummary(t *testing.T) {
+	job := testJob(command.SecurityAudit)
+	prompt, err := actionPrompt(t.Context(), job, "/source", "/context", "/reports", "/installed/security-audit/SKILL.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"summary rendered by the parent from validated findings.json and coverage-ledger.json", "retained privately as executor narrative", "Every reported finding must have its complete structured record and linked candidate/verifier coverage evidence"} {
+		if !strings.Contains(prompt, field) {
+			t.Fatalf("audit prompt omits public-summary requirement %q", field)
+		}
 	}
 }
 
@@ -299,19 +316,18 @@ func TestRunnerCanonicalizesTrustedWorkRoot(t *testing.T) {
 
 func TestPortableAuditMetadataUsesSourceIdentity(t *testing.T) {
 	job := testJob(command.SecurityAudit)
-	job.Main.Skills = []string{testAuditSkillURL}
 	root := t.TempDir()
 	for _, name := range auditArtifacts {
 		data := []byte("content")
 		switch name {
 		case "coverage-ledger.json":
-			data = []byte(`[{"status":"covered"}]`)
+			data = []byte(auditCoveredLedgerFixture)
 		case "findings.json":
 			data = []byte("[]")
 		}
 		if name == "run-metadata.json" {
 			owners := strings.TrimSuffix(auditTestOwners, "}") + `,"/worker/local/extra-owner":"/worker/local/child"}`
-			data = []byte(fmt.Sprintf(`{"run_id":"test-run","repo":"owner/repo","target":"/worker/local/source","source_ref":%q,"profile":"standard","scope_paths":["."],"budget":null,"selected_companion_files":["/installed/security-audit/WEB-PROTOCOL-AND-AUTH.md"],"prior_run_paths":[],"shared_file_owners":%s,"execution_policy":"sandboxed-source-and-local-only","run_status":"complete","output_dir":"/worker/local/reports","extra":{"run_dir":"/worker/local/runtime"}}`, job.Source.Head, owners))
+			data = []byte(fmt.Sprintf(`{"run_id":"test-run","repo":"owner/repo","target":"/worker/local/source","source_ref":%q,"profile":"standard","scope_paths":["."],"budget":null,"selected_companion_files":["/installed/security-audit/WEB-PROTOCOL-AND-AUTH.md"],"prior_run_paths":[],"shared_file_owners":%s,"execution_policy":"sandboxed-source-and-local-only","run_status":"complete","skill_source":"worker-claim","output_dir":"/worker/local/reports","extra":{"run_dir":"/worker/local/runtime"}}`, job.Source.Head, owners))
 			if _, err := validateAuditMetadata(data, job.Identity.Repository, "/worker/local/source", job.Source.Head); err != nil {
 				t.Fatalf("invalid raw metadata control: %v", err)
 			}
@@ -344,11 +360,10 @@ func TestPortableAuditMetadataUsesSourceIdentity(t *testing.T) {
 		}
 		if file.Path == "run-metadata.json" {
 			var metadata struct {
-				RunID       string            `json:"run_id"`
-				SkillSource string            `json:"skill_source"`
-				Owners      map[string]string `json:"shared_file_owners"`
+				RunID  string            `json:"run_id"`
+				Owners map[string]string `json:"shared_file_owners"`
 			}
-			if err := json.Unmarshal(file.Data, &metadata); err != nil || metadata.RunID != "test-run" || metadata.SkillSource != testAuditSkillURL || len(metadata.Owners) != len(auditArtifacts) || strings.Contains(string(file.Data), `"output_dir"`) || strings.Contains(string(file.Data), `"extra"`) || !strings.Contains(string(raw[i].Data), `"output_dir"`) {
+			if err := json.Unmarshal(file.Data, &metadata); err != nil || metadata.RunID != "test-run" || len(metadata.Owners) != len(auditArtifacts) || strings.Contains(string(file.Data), `"skill_source"`) || strings.Contains(string(file.Data), `"output_dir"`) || strings.Contains(string(file.Data), `"extra"`) || !strings.Contains(string(raw[i].Data), `"output_dir"`) {
 				t.Fatalf("metadata projection changed supported evidence or retained extensions: %+v, %v", metadata, err)
 			}
 		}
@@ -370,33 +385,6 @@ func TestPortableAuditMetadataUsesSourceIdentity(t *testing.T) {
 	if validateResultArtifacts(job, files, true) == nil {
 		t.Fatal("accepted mismatched audit metadata")
 	}
-}
-
-func TestPortableAuditMetadataUsesAlwaysOnSkillSource(t *testing.T) {
-	job := testJob(command.SecurityAudit)
-	job.Main.AlwaysOnSkills = []string{testAuditSkillURL}
-	if err := job.Validate(); err != nil {
-		t.Fatalf("standalone portable audit job: %v", err)
-	}
-	files, err := normalizeAuditArtifacts(auditArtifactsFixture(job, "/worker/source", "Audit report\n"), job, "/installed/security-audit/SKILL.md")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := validateResultArtifacts(job, files, true); err != nil {
-		t.Fatal(err)
-	}
-	for _, file := range files {
-		if file.Path == "run-metadata.json" {
-			var metadata struct {
-				SkillSource string `json:"skill_source"`
-			}
-			if err := json.Unmarshal(file.Data, &metadata); err != nil || metadata.SkillSource != testAuditSkillURL {
-				t.Fatalf("portable audit skill source=%q error=%v", metadata.SkillSource, err)
-			}
-			return
-		}
-	}
-	t.Fatal("audit metadata missing")
 }
 
 func TestRunnerReturnsPartialAuditArtifactsOnFailure(t *testing.T) {

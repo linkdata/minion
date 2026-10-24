@@ -342,7 +342,6 @@ func TestRefutationsRemainPrivateFromAuditArtifacts(t *testing.T) {
 	installActionTestSkills(t, testAuditSkillURL)
 	fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
 	job := withClaudeCritic(testJob(command.SecurityAudit))
-	job.Main.Skills = []string{testAuditSkillURL}
 	job.CriticMaxRounds, job.CriticNonblockingRounds = 2, 0
 	var expected []Refutation
 	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {

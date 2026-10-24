@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -21,7 +22,9 @@ import (
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/monitor"
+	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/testsupport"
+	"github.com/linkdata/minion/internal/usage"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -29,8 +32,12 @@ func TestHTTPWorkerDiagnosticsRemainPrivateThroughPublication(t *testing.T) {
 	for _, action := range []command.Action{command.Comment, command.Review, command.SecurityAudit, command.Fix} {
 		t.Run(string(action), func(t *testing.T) {
 			job := testJob(action)
+			if action == command.SecurityAudit {
+				installActionTestSkills(t, testAuditSkillURL)
+				fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
+			}
 			job.Identity.Repository = "o/r"
-			f := newHTTPServerTest(t, context.Background(), job, runnerExecutionCheckpoints{}, nil)
+			f := newHTTPServerTest(t, t.Context(), job, runnerExecutionCheckpoints{}, nil)
 			f.pull(t)
 			f.ack(t, "/before", f.call(1), http.StatusOK, 1)
 			paid := f.call(2)
@@ -92,12 +99,18 @@ func TestHTTPWorkerDiagnosticsRemainPrivateThroughPublication(t *testing.T) {
 			request.Source.Author = github.User{ID: job.Identity.RequesterID, Login: job.Identity.Requester}
 			request.Source.UpdatedAt = time.Now()
 			request.Command = command.Command{Name: string(action), Action: action}
-			if err := owner.publish(context.Background(), &preparedAction{job: job, request: request, issueNodeID: "issue-node"}, got.result); err != nil {
+			if err := owner.publish(t.Context(), &preparedAction{job: job, request: request, issueNodeID: "issue-node"}, got.result); err != nil {
 				t.Fatal(err)
 			}
 			_, parseErr := command.ParseForLoginCommands(posted, "linkdataminion", defaultActionTestCommands)
-			if writes != 1 || !strings.Contains(posted, "```text\n> @linkdataminion fix") ||
-				!strings.Contains(posted, `\x1b`) || !strings.Contains(posted, `\u202e`) || strings.ContainsRune(posted, '\x1b') || strings.ContainsRune(posted, '\u202e') ||
+			answerOK := strings.Contains(posted, "```text\n> @linkdataminion fix") &&
+				strings.Contains(posted, `\x1b`) && strings.Contains(posted, `\u202e`)
+			if action == command.SecurityAudit {
+				answerOK = strings.Contains(posted, "```text\n> Executor-reported security audit summary.") &&
+					!strings.Contains(posted, "@linkdataminion fix") && !strings.Contains(posted, "https://example.test/track") &&
+					!strings.Contains(posted, `\x1b`) && !strings.Contains(posted, `\u202e`)
+			}
+			if writes != 1 || !answerOK || strings.ContainsRune(posted, '\x1b') || strings.ContainsRune(posted, '\u202e') ||
 				!errors.Is(parseErr, command.ErrNoCommand) ||
 				strings.Contains(posted, "PRIVATE") || strings.Contains(posted, "SECRET_CODE_123") || strings.Contains(posted, "FORGED JOURNAL ENTRY") ||
 				strings.Contains(journal.String(), "PRIVATE") || strings.Contains(journal.String(), "SECRET_CODE_123") ||
@@ -149,10 +162,10 @@ func TestHTTPChangedFixPublishesBranchWithoutWorkerText(t *testing.T) {
 	fakeOnPath(t, "git", fmt.Sprintf("#!/bin/sh\nexec %s -c %s \"$@\"\n", shellQuote(git), shellQuote("include.path="+gitConfig)))
 	checkout := cloneFixture(t, t.TempDir())
 	const branch = "minion/fix-reviewed"
-	if err := checkout.NewBranch(context.Background(), branch); err != nil {
+	if err := checkout.NewBranch(t.Context(), branch); err != nil {
 		t.Fatal(err)
 	}
-	snapshot, err := checkout.Snapshot(context.Background())
+	snapshot, err := checkout.Snapshot(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +179,7 @@ func TestHTTPChangedFixPublishesBranchWithoutWorkerText(t *testing.T) {
 	job.Identity.Repository = request.Repository.Name
 	job.Identity.RequesterID = request.Source.Author.ID
 	job.Source = snapshot
-	f := newHTTPServerTest(t, context.Background(), job, runnerExecutionCheckpoints{}, nil)
+	f := newHTTPServerTest(t, t.Context(), job, runnerExecutionCheckpoints{}, nil)
 	f.pull(t)
 	f.ack(t, "/before", f.call(1), http.StatusOK, 1)
 	paid := f.call(2)
@@ -204,7 +217,7 @@ func TestHTTPChangedFixPublishesBranchWithoutWorkerText(t *testing.T) {
 	repo := github.Repository{ID: 1, FullName: "o/r", Owner: github.User{ID: 2}, DefaultBranch: "main", Visibility: "public"}
 	fork := github.Repository{ID: 4, FullName: "bot/r", Fork: true, Parent: &repo, Source: &repo, Visibility: "public"}
 	prepared := &preparedAction{job: job, request: request, checkout: checkout, repository: repo, fork: fork, branch: branch, issueNodeID: "issue-node"}
-	if err := owner.publish(context.Background(), prepared, got.result); err != nil {
+	if err := owner.publish(t.Context(), prepared, got.result); err != nil {
 		t.Fatal(err)
 	}
 	sha := owner.Store.Data.PendingFixes[request.ID].SHA
@@ -231,7 +244,7 @@ func TestHTTPChangedFixPublishesBranchWithoutWorkerText(t *testing.T) {
 
 func TestHTTPOverRenderedAnswerRefusedBeforePublication(t *testing.T) {
 	job := testJob(command.Comment)
-	f := newHTTPServerTest(t, context.Background(), job, runnerExecutionCheckpoints{}, nil)
+	f := newHTTPServerTest(t, t.Context(), job, runnerExecutionCheckpoints{}, nil)
 	f.pull(t)
 	f.ack(t, "/before", f.call(1), http.StatusOK, 1)
 	paid := f.call(2)
@@ -258,7 +271,7 @@ func TestHTTPOverRenderedAnswerRefusedBeforePublication(t *testing.T) {
 	defer githubServer.Close()
 	var journal bytes.Buffer
 	owner := Orchestrator{WorkRoot: t.TempDir(), GitHub: testGitHub(githubServer, "fixture-token"), Logger: log.New(&journal, "", 0)}
-	err := owner.publish(context.Background(), &preparedAction{job: job}, got.result)
+	err := owner.publish(t.Context(), &preparedAction{job: job}, got.result)
 	if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "invalid action result") || writes != 0 ||
 		strings.ContainsRune(journal.String(), '\x1b') {
 		t.Fatalf("over-rendered answer bypassed publication gate: writes=%d error=%v journal=%q", writes, err, journal.String())
@@ -267,7 +280,7 @@ func TestHTTPOverRenderedAnswerRefusedBeforePublication(t *testing.T) {
 
 func TestHTTPFailureAtWireTextLimitRemainsPrivate(t *testing.T) {
 	job := testJob(command.Comment)
-	f := newHTTPServerTest(t, context.Background(), job, runnerExecutionCheckpoints{}, nil)
+	f := newHTTPServerTest(t, t.Context(), job, runnerExecutionCheckpoints{}, nil)
 	f.pull(t)
 	outcome := f.outcome(1, nil)
 	outcome.Failure = &httpFailure{Message: strings.Repeat("\x01", httpFailureMessageLimit)}
@@ -353,7 +366,7 @@ func TestHTTPWorkerFailureThroughOrchestratorAndMonitor(t *testing.T) {
 		Repositories: []config.Repository{{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"comment"}, AllowedActors: []string{"writer"}, AllowedActorIDs: map[string]int64{"writer": 7}}}},
 		GitHub: gh, Handler: owner, Logger: parentLogger, Now: func() time.Time { return clock }}
 	for attempt := 1; attempt <= 3; attempt++ {
-		_, err := m.RunOnce(context.Background(), store)
+		_, err := m.RunOnce(t.Context(), store)
 		if (err == nil) != (attempt == 3) || len(jobs) != attempt || store.Data.UnconfirmedProcessJob != "" {
 			t.Fatalf("worker claims changed retry policy at attempt %d: jobs=%d state=%+v error=%v", attempt, len(jobs), store.Data, err)
 		}
@@ -390,6 +403,52 @@ func TestHTTPWorkerFailureThroughOrchestratorAndMonitor(t *testing.T) {
 	}
 }
 
+func TestHTTPInvisibleRefutationCannotBecomePublication(t *testing.T) {
+	for _, test := range []struct{ name, text string }{{"NUL", "\x00"}, {"zero-width space", "\u200b"}} {
+		t.Run(test.name, func(t *testing.T) {
+			owner := newExecutionAdapterFixture(t, withClaudeCritic(testJob(command.Comment)))
+			want := privateReviewResult(owner.job)
+			transport := newHTTPServerTest(t, t.Context(), owner.job, owner.sink, nil)
+			transport.pull(t)
+			sequence := uint64(1)
+			transport.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: owner.review(nil, nil, "")}, http.StatusOK, sequence)
+			for i, call := range want.Calls[:3] {
+				sequence++
+				transport.ack(t, "/before", httpCall{Sequence: sequence, Checkpoint: owner.call(callMetadata(call))}, http.StatusOK, sequence)
+				sequence++
+				transport.ack(t, "/after", httpCall{Sequence: sequence, Checkpoint: owner.call(call)}, http.StatusOK, sequence)
+				sequence++
+				if i != 2 {
+					transport.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: owner.review(want.Calls[:i+1], nil, "")}, http.StatusOK, sequence)
+					continue
+				}
+				path := filepath.Join(owner.owner.WorkRoot, "reviews", owner.job.Identity.AttemptID+".json")
+				before, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				invalid := owner.review(want.Calls[:i+1], []Refutation{{Round: 2, Text: test.text}}, "")
+				ack := transport.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: invalid}, http.StatusInternalServerError, sequence)
+				if ack.Failure == nil || !errors.Is(ack.Failure.err(), monitor.ErrTerminalJob) {
+					t.Fatalf("invisible refutation reached private ledger: %+v", ack)
+				}
+				after, err := os.ReadFile(path)
+				if err != nil || !bytes.Equal(before, after) || len(owner.sink.review.Refutations) != 0 {
+					t.Fatalf("rejected refutation changed private ledger: error=%v", err)
+				}
+			}
+			sequence++
+			outcome := transport.outcome(sequence, errors.New("worker stopped after rejected review"))
+			outcome.Result.Calls = want.Calls[:3]
+			transport.ack(t, "/outcome", outcome, http.StatusOK, sequence)
+			got := transport.result(t)
+			if err := owner.sink.finish(got.result, got.err); !errors.Is(err, monitor.ErrTerminalJob) {
+				t.Fatalf("invalid review permitted completed result: %v", err)
+			}
+		})
+	}
+}
+
 func TestHTTPPrivateRefutationAtWireLimitStaysInReviewRecord(t *testing.T) {
 	job := withClaudeCritic(testJob(command.Comment))
 	f := newExecutionAdapterFixture(t, job)
@@ -402,7 +461,7 @@ func TestHTTPPrivateRefutationAtWireLimitStaysInReviewRecord(t *testing.T) {
 	if err := result.Validate(f.job); err != nil {
 		t.Fatal(err)
 	}
-	transport := newHTTPServerTest(t, context.Background(), f.job, f.sink, nil)
+	transport := newHTTPServerTest(t, t.Context(), f.job, f.sink, nil)
 	transport.pull(t)
 	sequence := uint64(1)
 	transport.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: f.review(nil, nil, "")}, http.StatusOK, sequence)
@@ -458,10 +517,204 @@ func TestHTTPPrivateRefutationAtWireLimitStaysInReviewRecord(t *testing.T) {
 	f.owner.GitHub = testGitHub(server, "fixture-token")
 	request := usageJob()
 	request.Command = command.Command{Name: "comment", Action: command.Comment}
-	if err := f.owner.publish(context.Background(), &preparedAction{job: f.job, request: request}, got.result); err != nil {
+	if err := f.owner.publish(t.Context(), &preparedAction{job: f.job, request: request}, got.result); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(posted, "Public answer.") || strings.Contains(posted, "PRIVATE_REFUTATION") || strings.Contains(journal.String(), "PRIVATE_REFUTATION") {
 		t.Fatalf("private refutation escaped publication: posted=%q journal=%q", posted, journal.String())
+	}
+}
+
+func TestHTTPResultCannotPublishPrivateRefutation(t *testing.T) {
+	for _, test := range []struct {
+		name, private, answer string
+	}{
+		{"whole copy", "PRIVATE_MAIN_REFUTATION_TEXT", "Public reply.\nPRIVATE_MAIN_REFUTATION_TEXT"},
+		{"short whole copy", "Secret abc123", "Secret abc123"},
+		{"audit title quoted newline", "Private objection\nand evidence.", "Audit report\n"},
+		{"audit title short whole copy", "Secret abc123", "Audit report\n"},
+		{"rendered quote leader", "> UNIQUE_PRIVATE_PHRASE_STAYS_HERE", "UNIQUE_PRIVATE_PHRASE_STAYS_HERE"},
+		{"Unicode simple fold", "PRIVATE Σ MARKER MUST STAY HERE", "PRIVATE ς MARKER MUST STAY HERE"},
+		{"Unicode expanded fold", "The private Straße example should stay in review.", "Public reply. THE PRIVATE STRASSE EXAMPLE SHOULD STAY IN REVIEW."},
+		{"canonical Unicode composition", "PRIVATE café OBJECTION MUST STAY HERE", "Public reply. PRIVATE cafe\u0301 OBJECTION MUST STAY HERE"},
+		{"HTML entity in Fix Markdown", "Private objection must stay out of this change", "Private&#32;objection must stay out of this change"},
+		{"case changed", "PRIVATE_MAIN_REFUTATION_TEXT", "Public reply.\nprivate_main_refutation_text"},
+		{"bare Markdown quote leaders", "PRIVATE reviewer notes must stay private", "Public reply.\n>PRIVATE reviewer notes must stay private"},
+		{"nested indented quote leaders", "PRIVATE reviewer notes must stay private", "Public reply.\n  > >PRIVATE reviewer notes must stay private"},
+		{"collapsed whitespace", "The private refutation describes a missing access control check.\nThe same account cannot act for another user.", "Public reply. The private refutation describes a missing access control check. The same account cannot act for another user."},
+		{"one substantive sentence", "The private refutation describes a missing access control check.\nThe same account cannot act for another user.", "Public reply. The same account cannot act for another user."},
+		{"inline Markdown sentence", "The private refutation describes a missing access control check.\nThe same account cannot act for another user.", "Public reply: **The same account cannot act for another user.**"},
+		{"Markdown bullet leader", "The private refutation describes a missing access control check.\nThe same account cannot act for another user.", "Public reply.\n- The same account cannot act for another user."},
+		{"Markdown bullet after plain line", "The private refutation describes a missing access control check.\nThe same account cannot act for another user.", "Public reply\n- The same account cannot act for another user."},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			action := command.Comment
+			switch test.name {
+			case "HTML entity in Fix Markdown":
+				action = command.Fix
+			case "audit title quoted newline", "audit title short whole copy":
+				action = command.SecurityAudit
+			}
+			job := withClaudeCritic(testJob(action))
+			f := newExecutionAdapterFixture(t, job)
+			var journal bytes.Buffer
+			f.owner.Logger = log.New(&journal, "", 0)
+			result := privateReviewResult(f.job)
+			result.Refutations[0].Text = test.private
+			result.Answer = test.answer
+			if action == command.Fix {
+				result.Answer = "Public reply."
+				result.Changes = []workspace.Change{{Path: "README.md", Mode: workspace.Regular, Data: []byte(test.answer)}}
+			} else if action == command.SecurityAudit {
+				result.Artifacts = auditArtifactsFixture(f.job, sourceIdentity(f.job), result.Answer)
+				title, err := json.Marshal(test.private)
+				if err != nil {
+					t.Fatal(err)
+				}
+				findings := strings.Replace(auditCandidateFindingFixture, `"title":"Unverified boundary"`, `"title":`+string(title), 1)
+				ledger := strings.Replace(auditCoveredLedgerFixture, `"status":"covered"`, `"status":"candidate"`, 1)
+				ledger = strings.Replace(ledger, `"result_fingerprints":[]`, `"result_fingerprints":["F"]`, 1)
+				for i := range result.Artifacts {
+					switch result.Artifacts[i].Path {
+					case "findings.json":
+						result.Artifacts[i].Data = []byte(findings)
+					case "coverage-ledger.json":
+						result.Artifacts[i].Data = []byte(ledger)
+					}
+				}
+			}
+			if err := result.Validate(f.job); err != nil {
+				t.Fatal(err)
+			}
+			transport := newHTTPServerTest(t, t.Context(), f.job, f.sink, nil)
+			transport.pull(t)
+			sequence := uint64(1)
+			transport.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: f.review(nil, nil, "")}, http.StatusOK, sequence)
+			for i, call := range result.Calls {
+				sequence++
+				transport.ack(t, "/before", httpCall{Sequence: sequence, Checkpoint: f.call(callMetadata(call))}, http.StatusOK, sequence)
+				sequence++
+				transport.ack(t, "/after", httpCall{Sequence: sequence, Checkpoint: f.call(call)}, http.StatusOK, sequence)
+				sequence++
+				var refs []Refutation
+				if call.Round >= 2 {
+					refs = result.Refutations
+				}
+				transport.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: f.review(result.Calls[:i+1], refs, "")}, http.StatusOK, sequence)
+			}
+			sequence++
+			transport.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: f.review(result.Calls, result.Refutations, result.CriticStopReason)}, http.StatusOK, sequence)
+			sequence++
+			transport.ack(t, "/outcome", httpOutcome{Sequence: sequence, Result: result}, http.StatusOK, sequence)
+			got := transport.result(t)
+			if got.err != nil || f.sink.finish(got.result, got.err) != nil {
+				t.Fatalf("private result was not accepted by HTTP: %+v", got)
+			}
+			if saved := readPrivateReview(t, f.owner.WorkRoot); !reflect.DeepEqual(saved.Refutations, result.Refutations) {
+				t.Fatalf("private review checkpoint was not retained: %+v", saved)
+			}
+			var posted string
+			writes := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if serveIssueFixture(t, w, r) {
+					return
+				}
+				if captureComment(t, w, r, &posted) {
+					writes++
+					return
+				}
+				t.Errorf("unexpected GitHub request: %s %s", r.Method, r.URL.Path)
+				http.NotFound(w, r)
+			}))
+			defer server.Close()
+			f.owner.GitHub = testGitHub(server, "fixture-token")
+			request := usageJob()
+			request.Command = command.Command{Name: string(action), Action: action}
+			err := f.owner.publish(t.Context(), &preparedAction{job: f.job, request: request}, got.result)
+			if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "publication contains private review evidence") || writes != 0 ||
+				posted != "" || strings.Contains(err.Error(), result.Refutations[0].Text) || strings.Contains(journal.String(), result.Refutations[0].Text) {
+				t.Fatalf("private refutation crossed publication boundary: error=%v writes=%d posted=%q journal=%q", err, writes, posted, journal.String())
+			}
+		})
+	}
+}
+
+func TestHTTPQuotedRoundTwoRefutationStopsOrchestratorPublication(t *testing.T) {
+	gitFixtureRemote(t)
+	const private = "The first private reviewer finding stays internal. The second private reviewer finding must not enter the public reply."
+	const copied = "The second private reviewer finding must not enter the public reply."
+	var writes atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if serveIssueFixture(t, w, r) {
+			return
+		}
+		if r.Method != http.MethodGet {
+			writes.Add(1)
+		}
+		t.Errorf("unexpected GitHub request: %s %s", r.Method, r.URL.Path)
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	workRoot, usageDir := t.TempDir(), filepath.Join(t.TempDir(), "usage")
+	var journal bytes.Buffer
+	e := &Orchestrator{WorkRoot: workRoot, Usage: &usage.Store{Dir: usageDir}, GitHub: testGitHub(server, "token"), BotLogin: "bot", Adversarial: "claude",
+		Logger:   log.New(&journal, "", 0),
+		Commands: map[string]config.CommandMapping{"comment": {Action: string(command.Comment), Skills: []string{skills.BuiltinAntiPromptInjection}}},
+	}
+	e.Executor = executorFunc(func(ctx context.Context, job Job, checkpoints Checkpoints) (Result, error) {
+		transport := newHTTPServerTest(t, ctx, job, checkpoints, nil)
+		transport.pull(t)
+		result := privateReviewResult(job)
+		result.Refutations[0].Text = private
+		result.Answer = `Public reply: "` + copied + `"`
+		for i := range result.Calls {
+			result.Calls[i].Tokens, result.Calls[i].Complete = usage.Tokens{Input: int64(i + 1), Output: 1}, true
+		}
+		if err := result.Validate(job); err != nil {
+			t.Fatalf("invalid refutation echo fixture: %v", err)
+		}
+		sequence := uint64(1)
+		binding := CallCheckpoint{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head}
+		review := ReviewCheckpoint{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head}
+		transport.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: review}, http.StatusOK, sequence)
+		sequence++
+		for i, call := range result.Calls {
+			binding.Call = callMetadata(call)
+			transport.ack(t, "/before", httpCall{Sequence: sequence, Checkpoint: binding}, http.StatusOK, sequence)
+			sequence++
+			binding.Call = call
+			transport.ack(t, "/after", httpCall{Sequence: sequence, Checkpoint: binding}, http.StatusOK, sequence)
+			sequence++
+			review.Calls = result.Calls[:i+1]
+			if call.Round >= 2 {
+				review.Refutations = result.Refutations
+			}
+			transport.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: review}, http.StatusOK, sequence)
+			sequence++
+		}
+		review.CriticStopReason = result.CriticStopReason
+		transport.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: review}, http.StatusOK, sequence)
+		sequence++
+		outcome := transport.outcome(sequence, nil)
+		outcome.Result = result
+		transport.ack(t, "/outcome", outcome, http.StatusOK, sequence)
+		got := transport.result(t)
+		return got.result, got.err
+	})
+	request := usageJob()
+	request.Command = command.Command{Name: "comment", Action: command.Comment}
+	request.Repository.Actions = []string{"comment"}
+	err := e.Execute(t.Context(), request)
+	if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "publication contains private review evidence") || writes.Load() != 0 ||
+		strings.Contains(err.Error(), private) || strings.Contains(journal.String(), private) {
+		t.Fatalf("refutation echo crossed publication boundary: error=%v writes=%d journal=%q", err, writes.Load(), journal.String())
+	}
+	if saved := readPrivateReview(t, workRoot); len(saved.Refutations) != 1 || saved.Refutations[0].Text != private || len(saved.Calls) != 5 {
+		t.Fatalf("private review evidence was lost: %+v", saved)
+	}
+	records, err := usage.ReadAll(usageDir)
+	if err != nil || len(records) != 1 || records[0].Status != "failed" || records[0].Tokens != (usage.Tokens{Input: 15, Output: 5}) ||
+		records[0].CodexCalls != 2 || records[0].ClaudeCalls != 3 || !records[0].UsageComplete {
+		t.Fatalf("paid usage evidence was lost: records=%+v error=%v", records, err)
 	}
 }

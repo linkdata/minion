@@ -101,7 +101,7 @@ func TestEveryActionPromptDeclaresRenderedPublicationBudget(t *testing.T) {
 				}
 				if action == command.SecurityAudit {
 					for _, requirement := range []string{
-						"REPORT.md must fit within 59392 UTF-8 bytes after line-ending normalization, a two-byte quote prefix per line, visible control/formatting-character escapes and 12 bytes of code fences",
+						"REPORT.md must contain non-ignorable text and fit within 59392 UTF-8 bytes",
 						"Do not execute repository code, builds, tests, or fixtures, probe live services, publish, or run network commands",
 						"Copy this source-only execution prohibition verbatim into every delegated agent prompt",
 						"it overrides the skill's local-execution allowance",
@@ -185,7 +185,13 @@ func TestCriticAuditUsesValidatedReportDespiteOversizedProposal(t *testing.T) {
 		return aicli.Result{Answer: proposalJSON(proposal, "")}, nil
 	}}
 	result, err := runner.Run(context.Background(), job)
-	if err != nil || result.Answer != report || calls != 2 || len(result.Calls) != 2 || result.Validate(job) != nil {
+	var savedReport string
+	for _, file := range result.Artifacts {
+		if file.Path == "REPORT.md" {
+			savedReport = string(file.Data)
+		}
+	}
+	if err != nil || result.Answer != "" || savedReport != report || calls != 2 || len(result.Calls) != 2 || result.Validate(job) != nil {
 		t.Fatalf("valid audit discarded: calls=%d result=%+v error=%v", calls, result, err)
 	}
 }
@@ -223,6 +229,36 @@ func TestCriticRunnerKeepsChangedFixWithUnpublishedOversizedSummary(t *testing.T
 				}
 			} else if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "publication limit") || result.Answer != "" || len(result.Changes) != 0 {
 				t.Fatalf("unpublishable no-change answer accepted: result=%+v error=%v", result, err)
+			}
+		})
+	}
+}
+
+func TestCriticRunnerRejectsInvisibleNoChangeFixBeforeCritic(t *testing.T) {
+	for _, changed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("changed=%t", changed), func(t *testing.T) {
+			job := withClaudeCritic(testJob(command.Fix))
+			calls := 0
+			runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+				calls++
+				if request.role == roleCritic {
+					if !changed {
+						t.Fatal("invisible no-change fix reached critic")
+					}
+					return aicli.Result{Answer: approvedCritiqueJSON}, nil
+				}
+				if changed {
+					writeFixtureFile(t, request.dir, "source.txt", []byte("changed\n"))
+				}
+				return aicli.Result{Answer: proposalJSON("\u200b\u2060", "")}, nil
+			}}
+			result, err := runner.Run(t.Context(), job)
+			if changed {
+				if err != nil || calls != 2 || result.Answer != "" || len(result.Changes) != 1 || result.Validate(job) != nil {
+					t.Fatalf("changed Fix with discardable answer: calls=%d result=%+v error=%v", calls, result, err)
+				}
+			} else if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "publication limit") || calls != 1 || result.Answer != "" || len(result.Changes) != 0 {
+				t.Fatalf("invisible no-change Fix reached critic: calls=%d result=%+v error=%v", calls, result, err)
 			}
 		})
 	}

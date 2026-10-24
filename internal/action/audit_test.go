@@ -38,7 +38,7 @@ func TestSecurityAuditIssueAndPullRequest(t *testing.T) {
 		{name: "moved pull request", subject: "PullRequest", movedHead: true, wantError: "pull request head changed"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			base, head, _ := gitFixtureRemote(t)
+			base, head, _ := gitFixtureRemote(t, workspace.File{Path: "source.txt", Mode: workspace.Regular, Data: []byte("source\n")})
 			expected := base
 			if tt.subject == "PullRequest" {
 				expected = head
@@ -91,8 +91,8 @@ func TestSecurityAuditIssueAndPullRequest(t *testing.T) {
 					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 						t.Error(err)
 					}
-					if !strings.Contains(payload.Body, expected) || !strings.Contains(payload.Body, inertModelOutput("Verified audit report")) || !strings.Contains(payload.Body, job.Marker()) || strings.Contains(payload.Body, "Untrusted final answer") {
-						t.Errorf("comment did not use verified report: %s", payload.Body)
+					if !strings.Contains(payload.Body, expected) || !strings.Contains(payload.Body, "Executor-reported security audit summary") || !strings.Contains(payload.Body, "Findings: 0 confirmed, 0 need validation, 0 rejected.") || !strings.Contains(payload.Body, job.Marker()) || strings.Contains(payload.Body, "Verified audit report") || strings.Contains(payload.Body, "Untrusted final answer") {
+						t.Errorf("comment did not use structured audit summary: %s", payload.Body)
 					}
 					comments = append(comments, github.Comment{NodeID: "audit-comment-1", Body: payload.Body, User: github.User{Login: "linkdataminion"}})
 					w.WriteHeader(http.StatusCreated)
@@ -188,6 +188,9 @@ func TestSecurityAuditIssueAndPullRequest(t *testing.T) {
 				retained, err := filepath.Glob(filepath.Join(e.WorkRoot, "audits", "*", "REPORT.md"))
 				if err != nil || len(retained) != 1 {
 					t.Fatalf("reports not retained: %v, %v", retained, err)
+				}
+				if data, err := os.ReadFile(retained[0]); err != nil || string(data) != "Verified audit report\n" {
+					t.Fatalf("worker narrative not retained privately: %q, %v", data, err)
 				}
 				if _, err := os.Stat(reportsDir); !errors.Is(err, os.ErrNotExist) {
 					t.Fatalf("executor reports not cleaned: %v", err)
@@ -296,29 +299,40 @@ JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 	metadata := fmt.Sprintf(`{"run_id":"test-run","repo":"o/r","target":%q,"source_ref":%q,"profile":"standard","scope_paths":["."],"budget":null,"selected_companion_files":[],"prior_run_paths":[],"shared_file_owners":%s,"execution_policy":"sandboxed-source-and-local-only","run_status":"complete"}`, target, head, auditTestOwners)
 	write("run-metadata.json", metadata)
 	write("architecture.md", "Architecture\n")
-	write("coverage-ledger.json", `[{"status":"covered"}]`)
 	write("findings.json", "[]")
-	write("REPORT.md", "Verified audit report\n")
+	reportText := "Verified audit report\n"
+	write("REPORT.md", reportText)
 	write("FINDINGS-DETAIL.md", "")
 	write("NEEDS-VALIDATION.md", "")
+	coveredLedger := auditCoveredLedgerFixture
+	write("coverage-ledger.json", coveredLedger)
+	candidateLedger := strings.Replace(coveredLedger, `"status":"covered"`, `"status":"candidate"`, 1)
+	candidateLedger = strings.Replace(candidateLedger, `"result_fingerprints":[]`, `"result_fingerprints":["F"]`, 1)
 	validationDir, err := os.MkdirTemp(t.TempDir(), ".minion-audit-validation-")
 	if err != nil {
 		t.Fatal(err)
 	}
-	tools, err := checkAuditTools(context.Background(), validationDir, filepath.Join(skillDir, "SKILL.md"))
+	tools, err := checkAuditTools(t.Context(), validationDir, filepath.Join(skillDir, "SKILL.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	validate := func(wantError string) {
 		t.Helper()
 		files, _, err := readAuditArtifacts(root, false, "")
-		var report string
 		if err == nil {
-			report, err = validateAuditFiles(context.Background(), files, validationDir, filepath.Join(skillDir, "SKILL.md"), tools, "o/r", target, head)
+			err = validateAuditFiles(t.Context(), files, validationDir, filepath.Join(skillDir, "SKILL.md"), tools, "o/r", target, head)
+		}
+		if err == nil {
+			byPath := make(map[string][]byte, len(files))
+			for _, file := range files {
+				byPath[file.Path] = file.Data
+			}
+			// The Result contract runs this with source; exercise ledger semantics here separately from Node.
+			err = validateAuditCoverage(byPath["coverage-ledger.json"], byPath["findings.json"], byPath["REPORT.md"], nil)
 		}
 		if wantError == "" {
-			if err != nil || report != "Verified audit report\n" {
-				t.Fatalf("valid audit output = %q, %v", report, err)
+			if err != nil {
+				t.Fatalf("valid audit output: %v", err)
 			}
 		} else if err == nil || !strings.Contains(err.Error(), wantError) {
 			t.Fatalf("audit output error = %v, want %q", err, wantError)
@@ -337,10 +351,12 @@ JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 	validate("run-metadata.json is missing or empty")
 	write("run-metadata.json", strings.Replace(metadata, `"complete"`, `"incomplete"`, 1))
 	validate("complete standard run")
+	write("run-metadata.json", strings.Replace(metadata, `"run_id":"test-run"`, `"run_id":"\u200b"`, 1))
+	validate("complete standard run")
 	write("run-metadata.json", strings.Replace(metadata, `"budget":null,`, "", 1))
 	validate("complete standard run")
 	write("run-metadata.json", strings.Replace(metadata, `"run-metadata.json":"parent",`, "", 1))
-	validate("lacks parent ownership")
+	validate("does not declare parent ownership")
 	write("run-metadata.json", metadata)
 	write("findings.json", "not JSON")
 	validate("audit JSON is invalid")
@@ -353,35 +369,54 @@ JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 	validate("duplicate object keys")
 	write("coverage-ledger.json", `[{"status":"in_progress"}]`)
 	validate("unfinished in_progress unit")
-	write("coverage-ledger.json", `[{"status":"blocked"}]`)
+	blockedLedger := strings.Replace(coveredLedger, `"status":"covered"`, `"status":"blocked"`, 1)
+	blockedLedger = strings.Replace(blockedLedger, `"unresolved":[]}]`, `"unresolved":["Investigate boundary"]}]`, 1)
+	blockedLedger = strings.Replace(blockedLedger, `"coverage_id":"source::boundary::`, `"coverage_id":"source::blocked::`, 1)
+	blockedLedger = strings.Replace(blockedLedger, `"boundary":"boundary"`, `"boundary":"blocked"`, 1)
+	blockedLedger = strings.Replace(blockedLedger, `"boundary":"Boundary"`, `"boundary":"Blocked boundary"`, 1)
+	write("coverage-ledger.json", "["+strings.Trim(blockedLedger, "[]")+","+strings.Trim(coveredLedger, "[]")+"]")
 	validate("")
+	reportText = "Coverage summary: 1 blocked unit; investigate boundary.\n"
+	write("REPORT.md", reportText)
+	validate("")
+	reportText = "Verified audit report\n"
+	write("REPORT.md", reportText)
 	write("coverage-ledger.json", `[{"status":"deferred"}]`)
 	validate("unfinished deferred unit")
 	write("coverage-ledger.json", `[{"status":"candidate","result_fingerprints":["F"],"unresolved":["validation_budget_exhausted"]}]`)
-	validate("unvalidated candidate")
+	validate("incomplete audit budget")
 	write("coverage-ledger.json", `[{"status":"candidate","result_fingerprints":[],"unresolved":[]}]`)
 	validate("candidate without fingerprint")
 	write("coverage-ledger.json", `[{"status":"candidate","result_fingerprints":["F"],"unresolved":[]}]`)
 	validate("without final finding")
-	write("findings.json", `[{"fingerprint":"F"}]`)
+	write("findings.json", auditCandidateFindingFixture)
+	write("NEEDS-VALIDATION.md", auditNeedsDetailFixture)
+	write("coverage-ledger.json", candidateLedger)
+	reportText = "Verified audit report: Unverified boundary\n"
+	write("REPORT.md", reportText)
 	validate("")
 	write("coverage-ledger.json", `[{"status":"candidate","result_fingerprints":["F"],"unresolved":["validation_budget_exhausted"]}]`)
-	validate("unvalidated candidate")
-	write("coverage-ledger.json", `[{"status":"covered"}]`)
+	validate("incomplete audit budget")
+	write("coverage-ledger.json", coveredLedger)
 	validate("finding without candidate")
-	write("coverage-ledger.json", `[{"status":"covered","attempts":[{"status":"candidate","result_fingerprints":["F"]}]}]`)
+	archivedAttempt := `{"wave":1,"status":"candidate","agent_id":"older","reviewed_paths":["source.txt"],"local_checks":[{"agent_id":"helper","reviewed_paths":["source.txt"],"invariant":"Access is checked","method":"source","result":"The guard is present","artifact":null},{"agent_id":"older","reviewed_paths":["source.txt"],"invariant":"Access is checked","method":"source","result":"The guard is present","artifact":null}],"result_fingerprints":["F"],"unresolved":[],"reassignment_reason":"Rechecked"}`
+	coveredWithAttempt := strings.Replace(coveredLedger, `"attempts":[]`, `"attempts":[`+archivedAttempt+`]`, 1)
+	coveredWithAttempt = strings.Replace(coveredWithAttempt, `"wave":1,"status":"covered","agent_id":"hunter"`, `"wave":2,"status":"covered","agent_id":"hunter"`, 1)
+	write("coverage-ledger.json", coveredWithAttempt)
 	validate("")
 	write("findings.json", "[]")
+	reportText = "Verified audit report\n"
+	write("REPORT.md", reportText)
 	validate("without final finding")
-	write("findings.json", `[{"fingerprint":"F"}]`)
+	write("findings.json", auditCandidateFindingFixture)
 	write("coverage-ledger.json", `[{"status":"covered","attempts":[{"status":"candidate","result_fingerprints":["F"],"unresolved":["validation_budget_exhausted"]}]}]`)
-	validate("unvalidated candidate")
+	validate("incomplete audit budget")
 	fingerprint := "F\nforged journal \"line\""
 	write("findings.json", "[]")
 	write("coverage-ledger.json", fmt.Sprintf(`[{"status":"candidate","result_fingerprints":[%q]}]`, fingerprint))
 	validate("candidate without final finding")
-	write("findings.json", fmt.Sprintf(`[{"fingerprint":%q}]`, fingerprint))
-	write("coverage-ledger.json", `[{"status":"covered"}]`)
+	write("findings.json", strings.Replace(auditCandidateFindingFixture, `"fingerprint":"F"`, fmt.Sprintf(`"fingerprint":%q`, fingerprint), 1))
+	write("coverage-ledger.json", coveredLedger)
 	validate("finding without candidate")
 }
 
@@ -403,8 +438,33 @@ func TestValidateAuditMetadataRejectsCaseVariantKeys(t *testing.T) {
 	}
 }
 
+func TestValidateAuditMetadataRejectsIncompleteReason(t *testing.T) {
+	job := testJob(command.SecurityAudit)
+	target := sourceIdentity(job)
+	metadata := string(auditArtifactsFixture(job, target, "Audit report\n")[0].Data)
+	withReason := strings.Replace(metadata, `"run_status":"complete"`, `"run_status":"complete","incomplete_reason":"validation_budget_exhausted"`, 1)
+	if _, err := validateAuditMetadata([]byte(withReason), job.Identity.Repository, target, job.Source.Head); err == nil || !strings.Contains(err.Error(), "incomplete reason") {
+		t.Fatalf("complete audit with incomplete reason: %v", err)
+	}
+	withNull := strings.Replace(metadata, `"run_status":"complete"`, `"run_status":"complete","incomplete_reason":null`, 1)
+	if _, err := validateAuditMetadata([]byte(withNull), job.Identity.Repository, target, job.Source.Head); err == nil || !strings.Contains(err.Error(), "incomplete reason") {
+		t.Fatalf("complete audit with null incomplete reason: %v", err)
+	}
+	withAlias := strings.Replace(metadata, `"run_status":"complete"`, `"run_status":"complete","INCOMPLETE_REASON":"validation_budget_exhausted"`, 1)
+	if _, err := validateAuditMetadata([]byte(withAlias), job.Identity.Repository, target, job.Source.Head); err == nil || !strings.Contains(err.Error(), "noncanonical key") {
+		t.Fatalf("noncanonical incomplete reason: %v", err)
+	}
+}
+
+func TestValidateAuditCoverageCapsFindings(t *testing.T) {
+	findings := "[" + strings.Repeat("{},", 1000) + "{}]"
+	if err := validateAuditCoverage([]byte(auditCoveredLedgerFixture), []byte(findings), []byte("Report"), nil); err == nil || !strings.Contains(err.Error(), "exceeds 1000 findings") {
+		t.Fatalf("oversized findings: %v", err)
+	}
+}
+
 func TestAuditArtifactReadModesPreserveFailurePolicies(t *testing.T) {
-	for _, scenario := range []string{"missing core", "empty core", "unsafe core", "oversized report", "invalid UTF-8 report", "NUL report", "empty report", "blank report"} {
+	for _, scenario := range []string{"missing core", "empty core", "unsafe core", "oversized report", "invalid UTF-8 report", "NUL report", "empty report", "blank report", "invisible report"} {
 		for _, partial := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/partial-%t", scenario, partial), func(t *testing.T) {
 				job := testJob(command.SecurityAudit)
@@ -441,6 +501,8 @@ func TestAuditArtifactReadModesPreserveFailurePolicies(t *testing.T) {
 					writeFixtureFile(t, root, artifact, nil)
 				case "blank report":
 					writeFixtureFile(t, root, artifact, []byte(" \t\r\n"))
+				case "invisible report":
+					writeFixtureFile(t, root, artifact, []byte("\u200b"))
 				}
 				files, diagnostics, err := readAuditArtifacts(root, partial, "")
 				wantError := !partial && (scenario == "unsafe core" || artifact == "REPORT.md" && scenario != "NUL report")
@@ -493,6 +555,19 @@ func TestAuditArtifactReadModesPreserveFailurePolicies(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestPrivateAuditReportUsesRawByteLimit(t *testing.T) {
+	report := strings.Repeat("x\n", maxOutputBytes/2)
+	if publishableAnswer(report) {
+		t.Fatal("fixture does not exceed the public rendering budget")
+	}
+	root := t.TempDir()
+	writeFixtureFile(t, root, "REPORT.md", []byte(report))
+	files, diagnostics, err := readAuditArtifacts(root, false)
+	if err != nil || len(diagnostics) != 0 || len(files) != 1 || string(files[0].Data) != report {
+		t.Fatalf("private raw-bounded report rejected: files=%d diagnostics=%v error=%v", len(files), diagnostics, err)
 	}
 }
 

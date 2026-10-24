@@ -147,7 +147,7 @@ func httpJobBound(job Job) int64 {
 	}
 	data(job.Source.Repository)
 	data(job.Source.Diff)
-	for _, paths := range [][]string{job.Source.Omitted, job.Source.ChangedPaths} {
+	for _, paths := range [][]string{job.Source.Omitted, job.Source.HeadOmitted, job.Source.ChangedPaths} {
 		for _, path := range paths {
 			text(path)
 		}

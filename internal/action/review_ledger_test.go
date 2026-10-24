@@ -57,7 +57,7 @@ func TestRefutationsBoundPrivateTextAndPreserveJSONControls(t *testing.T) {
 		valid      bool
 	}{
 		{"exact cap", strings.Repeat("x", maxOutputBytes), true}, {"over cap", strings.Repeat("x", maxOutputBytes+1), false},
-		{"empty", "", false}, {"whitespace", " \n\t", false}, {"invalid UTF8", string([]byte{0xff}), false}, {"control characters", "Private refutation\x00\n\t\"quoted\"\\path", true},
+		{"empty", "", false}, {"whitespace", " \n\t", false}, {"NUL only", "\x00", false}, {"zero-width space only", "\u200b", false}, {"invalid UTF8", string([]byte{0xff}), false}, {"control characters", "Private refutation\x00\n\t\"quoted\"\\path", true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			refs := []Refutation{{Round: 2, Text: test.text}}
