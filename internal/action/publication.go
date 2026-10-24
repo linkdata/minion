@@ -171,6 +171,13 @@ func rejectPublishedRefutations(job Job, result Result, projected publication) e
 		}
 		suffixes[node].terminal = true
 	}
+	wordContinuation := func(r rune) bool {
+		// Copies in unspaced scripts can start inside surrounding prose.
+		if unicode.In(r, unicode.Han, unicode.Hiragana, unicode.Katakana, unicode.Thai, unicode.Lao, unicode.Khmer, unicode.Myanmar) {
+			return false
+		}
+		return unicode.IsLetter(r) || unicode.IsNumber(r) || unicode.IsMark(r) || r == '_'
+	}
 	sentenceCopy := func(text string, reject func(string) bool) bool {
 		text = foldPublicationSentence(text)
 		var node uint32
@@ -185,7 +192,8 @@ func rejectPublishedRefutations(job Job, result Result, projected publication) e
 			}
 			if i > 0 {
 				before, _ := utf8.DecodeLastRuneInString(text[:i])
-				if unicode.IsLetter(before) || unicode.IsNumber(before) || unicode.IsMark(before) || before == '_' {
+				first, _ := utf8.DecodeRuneInString(text[i:])
+				if wordContinuation(before) && wordContinuation(first) {
 					continue
 				}
 			}
@@ -196,7 +204,6 @@ func rejectPublishedRefutations(job Job, result Result, projected publication) e
 		return false
 	}
 	containsCopy := func(text string, reject func(string) bool) bool {
-		word := func(r rune) bool { return r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '_' }
 		for _, variant := range publicationTextVariants(text) {
 			folded := foldPublicationSpace(variant)
 			for _, private := range whole {
@@ -215,7 +222,7 @@ func rejectPublishedRefutations(job Job, result Result, projected publication) e
 					if end < len(folded) {
 						right, _ = utf8.DecodeRuneInString(folded[end:])
 					}
-					if !(word(first) && word(left)) && !(word(last) && word(right)) && reject(private) {
+					if !(wordContinuation(first) && wordContinuation(left)) && !(wordContinuation(last) && wordContinuation(right)) && reject(private) {
 						return true
 					}
 					offset = start + 1
@@ -360,12 +367,9 @@ func rejectPublishedRefutations(job Job, result Result, projected publication) e
 		inSource[private] = false
 		return true
 	}
-	rejectUnproved := func(private string) bool {
-		return rejectNew(private) || !inSource[private]
-	}
 	// Check executor text, not the host's cap notice; audit fields are checked below.
 	if projected.answer != "" && job.Action != command.SecurityAudit &&
-		(wholeReply(result.Answer, rejectUnproved) || containsCopy(result.Answer, rejectNew)) {
+		(wholeReply(result.Answer, rejectNew) || containsCopy(result.Answer, rejectNew)) {
 		return errors.New("publication contains private review evidence")
 	}
 	if job.Action == command.SecurityAudit {
@@ -378,7 +382,7 @@ func rejectPublishedRefutations(job Job, result Result, projected publication) e
 				return fmt.Errorf("decode audit findings before publication: %w", err)
 			}
 			for _, finding := range findings {
-				if finding.Verdict != "rejected" && (containsCopy(finding.Fingerprint, reject) || wholeReply(finding.Title, rejectUnproved) || containsCopy(finding.Title, rejectNew)) {
+				if finding.Verdict != "rejected" && (containsCopy(finding.Fingerprint, reject) || wholeReply(finding.Title, rejectNew) || containsCopy(finding.Title, rejectNew)) {
 					return errors.New("publication contains private review evidence")
 				}
 			}

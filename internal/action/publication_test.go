@@ -341,6 +341,18 @@ func TestPublishedRefutationsWholeTextNeedsWordBoundaries(t *testing.T) {
 			t.Fatalf("longer public word was treated as a copy: %q, %v", answer, err)
 		}
 	}
+	for _, test := range []struct{ private, answer string }{
+		{"The endpoint supports café", "The endpoint supports cafés is useful."},
+		{"The endpoint supports Ελληνικά", "The endpoint supports Ελληνικάς is useful."},
+		{"The endpoint supports система", "The endpoint supports системами is useful."},
+	} {
+		result.Refutations[0].Text, result.Answer = test.private, test.answer
+		projected, err := projectPublication(job, result)
+		if err != nil || rejectPublishedRefutations(job, result, projected) != nil {
+			t.Fatalf("longer Unicode word was treated as a copy: %q, %v", test.answer, err)
+		}
+	}
+	result.Refutations[0].Text = "The endpoint supports auth"
 	result.Answer = "Public reply: The endpoint supports auth is useful."
 	projected, err := projectPublication(job, result)
 	if err != nil || rejectPublishedRefutations(job, result, projected) == nil {
@@ -356,6 +368,18 @@ func TestPublishedRefutationsWholeTextInUnspacedScript(t *testing.T) {
 	projected, err := projectPublication(job, result)
 	if err != nil || rejectPublishedRefutations(job, result, projected) == nil {
 		t.Fatalf("private text embedded in unspaced public prose was accepted: %v", err)
+	}
+}
+
+func TestPublishedRefutationsSentenceInUnspacedScript(t *testing.T) {
+	job := withClaudeCritic(testJob(command.Comment))
+	result := privateReviewResult(job)
+	second := strings.Repeat("第二段私人結論不可公開", 3)
+	result.Refutations[0].Text = "第一段私人審查內容。" + second
+	result.Answer = "公開說明前綴" + second
+	projected, err := projectPublication(job, result)
+	if err != nil || rejectPublishedRefutations(job, result, projected) == nil {
+		t.Fatalf("private sentence embedded in unspaced public prose was accepted: %v", err)
 	}
 }
 

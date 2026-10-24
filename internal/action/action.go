@@ -351,7 +351,7 @@ func modelOutputFits(s string) bool {
 }
 
 func publishableAnswer(s string) bool {
-	return boundedText(s, maxOutputBytes) && modelOutputFits(s)
+	return boundedText(s, maxOutputBytes) && auditVisibleText(s) && modelOutputFits(s)
 }
 
 func isNotFound(err error) bool {

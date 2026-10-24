@@ -345,7 +345,8 @@ func TestRunAIRejectsInvalidProposalAfterRedaction(t *testing.T) {
 	}{
 		{name: "blank answer", answer: "private # and redacted", codexKey: "#", claudeKey: "redacted", wantError: "answer must not be blank"},
 		{name: "expanded critic context", answer: "public", refutations: strings.Repeat("x", maxOutputBytes/10+1), codexKey: "x", wantError: "decoded response exceeds critic context limit"},
-		{name: "expanded rendered answer", answer: strings.Repeat("y", maxOutputBytes-15) + "x", codexKey: "x", wantError: "rendered answer exceeds publication limit"},
+		{name: "expanded rendered answer", answer: strings.Repeat("y", maxOutputBytes-15) + "x", codexKey: "x", wantError: "exceeds publication limit"},
+		{name: "invisible answer", answer: "\u200b\u2060", wantError: "rendered answer is blank"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			calls := 0
@@ -362,6 +363,43 @@ func TestRunAIRejectsInvalidProposalAfterRedaction(t *testing.T) {
 				t.Fatalf("invalid redacted proposal: answer=%q stop=%q calls=%d error=%v", answer, stopReason, calls, err)
 			}
 		})
+	}
+}
+
+func TestRunAIRejectsInvisibleRevisionRefutationBeforeCheckpoint(t *testing.T) {
+	job := withClaudeCritic(testJob(command.Comment))
+	job.CriticMaxRounds = 2
+	calls, checkpoints := 0, 0
+	runner := Runner{runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+		calls++
+		switch calls {
+		case 1:
+			return aicli.Result{Answer: proposalJSON("First candidate", "\u200b")}, nil
+		case 2:
+			if request.role != roleCritic || request.round != 1 {
+				t.Fatalf("wrong first review: %+v", request)
+			}
+			return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"review_complete":true,"feedback":"Correct the candidate."}`}, nil
+		case 3:
+			if request.role != roleMain || request.round != 2 {
+				t.Fatalf("wrong revision: %+v", request)
+			}
+			return aicli.Result{Answer: proposalJSON("Revised candidate", "\u200b\u2060")}, nil
+		default:
+			t.Fatal("invisible refutation reached another critic call")
+			return aicli.Result{}, nil
+		}
+	}}
+	checkpoint := func(history []Refutation) error {
+		checkpoints++
+		if len(history) != 0 {
+			t.Fatalf("invisible refutation reached checkpoint: %+v", history)
+		}
+		return nil
+	}
+	answer, stopReason, err := runner.runAI(t.Context(), job, t.TempDir(), "task", "", checkpoint, &modelSessions{})
+	if answer != "" || stopReason != "" || !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "refutations have no visible content") || calls != 3 || checkpoints != 2 {
+		t.Fatalf("invalid revision: answer=%q stop=%q calls=%d checkpoints=%d error=%v", answer, stopReason, calls, checkpoints, err)
 	}
 }
 
@@ -651,6 +689,7 @@ func TestParseProposal(t *testing.T) {
 		{name: "NUL-only answer", input: proposalJSON("\x00", private)},
 		{name: "NUL cannot bypass decoded limit", input: proposalJSON(strings.Repeat("\x00", maxOutputBytes)+"x", "")},
 		{name: "blank answer", input: proposalJSON(" \n", private)},
+		{name: "invisible answer", input: proposalJSON("\u200b\u2060", private), errText: "rendered answer is blank"},
 		{name: "empty answer", input: proposalJSON("", private)},
 		{name: "preserve whitespace", input: proposalJSON("  Markdown\n", " Private refutations "), answer: "  Markdown\n", refutations: " Private refutations ", valid: true},
 		{name: "reordered fields", input: `{"refutations":"private","answer":"public"}`, answer: "public", refutations: "private", valid: true},
@@ -673,7 +712,7 @@ func TestParseProposal(t *testing.T) {
 		{name: "decoded limit", input: proposalJSON(strings.Repeat("x", maxOutputBytes+1), private)},
 		{name: "combined limit", input: proposalJSON(strings.Repeat("x", maxOutputBytes), "x")},
 		{name: "answer budget", input: proposalJSON(strings.Repeat("x", maxOutputBytes-14), ""), answer: strings.Repeat("x", maxOutputBytes-14), valid: true},
-		{name: "answer budget exceeded", input: proposalJSON(strings.Repeat("x", maxOutputBytes-13), ""), errText: "rendered answer exceeds publication limit"},
+		{name: "answer budget exceeded", input: proposalJSON(strings.Repeat("x", maxOutputBytes-13), ""), errText: "exceeds publication limit"},
 		{name: "line prefix budget", input: proposalJSON(strings.Repeat("a\n", 25000), "")},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -686,6 +725,13 @@ func TestParseProposal(t *testing.T) {
 				t.Fatalf("invalid proposal accepted or exposed private data: %q, %q, %v", answer, refutations, err)
 			}
 		})
+	}
+}
+
+func TestParseProposalAllowsDiscardableInvisibleAnswer(t *testing.T) {
+	answer, refutations, err := parseProposal(proposalJSON("\u200b\u2060", ""), true)
+	if err != nil || answer != "\u200b\u2060" || refutations != "" {
+		t.Fatalf("discardable proposal: answer=%q refutations=%q error=%v", answer, refutations, err)
 	}
 }
 

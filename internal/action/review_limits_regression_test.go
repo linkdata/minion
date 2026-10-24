@@ -233,3 +233,33 @@ func TestCriticRunnerKeepsChangedFixWithUnpublishedOversizedSummary(t *testing.T
 		})
 	}
 }
+
+func TestCriticRunnerRejectsInvisibleNoChangeFixBeforeCritic(t *testing.T) {
+	for _, changed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("changed=%t", changed), func(t *testing.T) {
+			job := withClaudeCritic(testJob(command.Fix))
+			calls := 0
+			runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+				calls++
+				if request.role == roleCritic {
+					if !changed {
+						t.Fatal("invisible no-change fix reached critic")
+					}
+					return aicli.Result{Answer: approvedCritiqueJSON}, nil
+				}
+				if changed {
+					writeFixtureFile(t, request.dir, "source.txt", []byte("changed\n"))
+				}
+				return aicli.Result{Answer: proposalJSON("\u200b\u2060", "")}, nil
+			}}
+			result, err := runner.Run(t.Context(), job)
+			if changed {
+				if err != nil || calls != 2 || result.Answer != "" || len(result.Changes) != 1 || result.Validate(job) != nil {
+					t.Fatalf("changed Fix with discardable answer: calls=%d result=%+v error=%v", calls, result, err)
+				}
+			} else if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "publication limit") || calls != 1 || result.Answer != "" || len(result.Changes) != 0 {
+				t.Fatalf("invisible no-change Fix reached critic: calls=%d result=%+v error=%v", calls, result, err)
+			}
+		})
+	}
+}

@@ -354,7 +354,7 @@ func (r Result) validate(j Job, complete bool) error {
 	if requiresAnswer {
 		validAnswer = publishableAnswer(r.Answer)
 	}
-	invalidCompleteAnswer := complete && (!validAnswer || (requiresAnswer && !auditVisibleText(r.Answer)))
+	invalidCompleteAnswer := complete && !validAnswer
 	if (!complete && !boundedText(r.Answer, maxOutputBytes)) || invalidCompleteAnswer {
 		return errors.New("action answer is blank, invalid or exceeds limit")
 	}

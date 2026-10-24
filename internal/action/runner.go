@@ -263,7 +263,7 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 				return aicli.Result{}, terminalUnlessCanceled(ctx, fmt.Errorf("freeze critic input: %w", err))
 			}
 			if job.Action == command.Fix && len(review.changes) == 0 && !publishableAnswer(request.proposedAnswer) {
-				return aicli.Result{}, terminalUnlessCanceled(ctx, errors.New("rendered answer exceeds publication limit for no-change fix"))
+				return aicli.Result{}, terminalUnlessCanceled(ctx, errors.New("rendered answer is blank, invalid or exceeds publication limit for no-change fix"))
 			}
 			mapping := ""
 			if review.source != source {

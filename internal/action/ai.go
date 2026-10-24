@@ -188,6 +188,9 @@ func (r *Runner) runAI(ctx context.Context, job Job, dir, prompt, outputDir stri
 			return "", "", fmt.Errorf("%w: invalid main proposal: %w", monitor.ErrTerminalJob, parseErr)
 		}
 		if round > 1 && strings.TrimSpace(refutations) != "" {
+			if !auditVisibleText(refutations) {
+				return "", "", fmt.Errorf("%w: invalid main proposal: refutations have no visible content", monitor.ErrTerminalJob)
+			}
 			history = append(history, Refutation{Round: round, Text: refutations})
 		}
 		if err = record(); err != nil {
@@ -313,8 +316,8 @@ func parseProposal(raw string, allowUnpublishableAnswer bool, secrets ...string)
 	if len(answer)+len(refutations) > maxOutputBytes {
 		return "", "", errors.New("decoded response exceeds critic context limit")
 	}
-	if !allowUnpublishableAnswer && !modelOutputFits(answer) {
-		return "", "", errors.New("rendered answer exceeds publication limit")
+	if !allowUnpublishableAnswer && !publishableAnswer(answer) {
+		return "", "", errors.New("rendered answer is blank, invalid or exceeds publication limit")
 	}
 	return answer, refutations, nil
 }
