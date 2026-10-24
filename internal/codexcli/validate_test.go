@@ -14,14 +14,7 @@ import (
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/config"
-	"github.com/linkdata/minion/internal/processgroup"
 )
-
-func TestExpectedDiscoveryStopPreservesResourceExhaustion(t *testing.T) {
-	if expectedDiscoveryStop(errors.Join(context.Canceled, processgroup.ErrExhausted)) {
-		t.Fatal("resource exhaustion was accepted as an expected discovery stop")
-	}
-}
 
 const catalogueScript = `#!/bin/sh
 printf '%s\n' "$@" > @ARGS@
@@ -206,6 +199,44 @@ func TestValidateReportsCLIExitAndHonorsTimeout(t *testing.T) {
 			t.Fatal("model discovery did not stop after timeout")
 		}
 	})
+}
+
+func TestModelDiscoveryCancellationUnblocksScanner(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "started")
+	installFakeCodex(t, "#!/bin/sh\ntrap '' INT\nprintf x > "+aicli.ShellQuote(marker)+"\nexec sleep 8\n")
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := listModels(ctx, config.CodexConfig{})
+		done <- err
+	}()
+	startDeadline := time.NewTimer(2 * time.Second)
+	defer startDeadline.Stop()
+	checkStarted := time.NewTicker(time.Millisecond)
+	defer checkStarted.Stop()
+	for {
+		if _, err := os.Stat(marker); err == nil {
+			break
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("discovery exited before scanner wait: %v", err)
+		case <-startDeadline.C:
+			cancel()
+			t.Fatal("discovery process did not start")
+		case <-checkStarted.C:
+		}
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancellation cause lost: %v", err)
+		}
+	case <-time.After(4 * time.Second):
+		t.Fatal("canceled discovery scanner remained blocked")
+	}
 }
 
 func TestValidateReportsCleanupFailure(t *testing.T) {

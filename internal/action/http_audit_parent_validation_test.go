@@ -14,15 +14,11 @@ import (
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/monitor"
-	"github.com/linkdata/minion/internal/processgroup"
 	"github.com/linkdata/minion/internal/usage"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
 func TestHostileHTTPAuditRunsPublishingHostValidator(t *testing.T) {
-	if err := processgroup.Check(); err != nil {
-		t.Skipf("delegated process ownership unavailable: %v", err)
-	}
 	installActionTestSkills(t, testAuditSkillURL)
 	skillDir := filepath.Join(os.Getenv("HOME"), ".agents", "skills", "security-audit")
 	validator := `const findings = JSON.parse(require("node:fs").readFileSync(process.argv[2], "utf8"));

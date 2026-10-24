@@ -26,7 +26,7 @@ func TestProbeRetainsOutputLimitAndQuotesDiagnostics(t *testing.T) {
 		name, script, diagnostic string
 		limited                  bool
 	}{
-		{"output cap", fmt.Sprintf("head -c %d /dev/zero\nsleep 30\n", MaxEventBytes+1), "", true},
+		{"output cap", fmt.Sprintf("head -c %d /dev/zero\nexec sleep 30\n", MaxEventBytes+1), "", true},
 		{"diagnostic", "printf 'first\\nforged journal line' >&2\nexit 7\n", `first\nforged journal line`, false},
 		{"quiet failure", "exit 7\n", "", false},
 	} {

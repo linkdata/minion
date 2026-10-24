@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/linkdata/minion/internal/processgroup"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -29,9 +28,7 @@ func (e *Orchestrator) validateAuditForPublication(ctx context.Context, job Job,
 		return err
 	}
 	defer func() {
-		if !errors.Is(resultErr, processgroup.ErrScopeUnconfirmed) {
-			resultErr = errors.Join(resultErr, os.RemoveAll(validationDir))
-		}
+		resultErr = errors.Join(resultErr, os.RemoveAll(validationDir))
 	}()
 	tools, err := checkAuditTools(ctx, validationDir, skill)
 	if err != nil {

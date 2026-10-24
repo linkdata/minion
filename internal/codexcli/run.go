@@ -16,7 +16,7 @@ import (
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/config"
-	"github.com/linkdata/minion/internal/processgroup"
+	"github.com/linkdata/minion/internal/executil"
 	"github.com/linkdata/minion/internal/usage"
 	workspacefs "github.com/linkdata/minion/internal/workspace"
 )
@@ -202,7 +202,7 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 
 	started := time.Now()
 	s.accounting.begin(ctx, codexHome, s.threadID, started)
-	runErr := processgroup.Run(cmd)
+	runErr := executil.Run(cmd)
 	if cmd.Process == nil {
 		s.accounting.before = nil
 		return result, fmt.Errorf("codex exec: %w", runErr)

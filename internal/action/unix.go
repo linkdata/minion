@@ -122,7 +122,7 @@ func (e *UnixEndpoint) SocketPath() string { return e.socketPath }
 // Close drains the executor while HTTP still serves paid receipts, then joins
 // HTTP shutdown and removes only the matching socket. The caller retains the directory.
 // When a worker can write the runtime path, first call HTTPExecutor.Close while
-// HTTP serves, wait for positive worker release, and only then call Close.
+// HTTP serves, wait for the direct worker process to exit, then call Close.
 func (e *UnixEndpoint) Close() error {
 	e.closeOnce.Do(func() {
 		coreErr := e.executor.Close()

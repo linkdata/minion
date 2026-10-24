@@ -20,7 +20,6 @@ import (
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/monitor"
-	"github.com/linkdata/minion/internal/processgroup"
 	"github.com/linkdata/minion/internal/usage"
 	"github.com/linkdata/minion/internal/workroot"
 )
@@ -171,7 +170,7 @@ func TestHTTPWatchAdmissionWorkerClaimsDoNotRefundMonitorAttempts(t *testing.T) 
 				if wantErr {
 					wantFailures, processed = 1, 0
 				}
-				if (err != nil) != wantErr || len(store.Data.JobFailures) != wantFailures || store.Data.UnconfirmedProcessJob != "" || len(store.Data.Processed) != processed {
+				if (err != nil) != wantErr || len(store.Data.JobFailures) != wantFailures || len(store.Data.Processed) != processed {
 					t.Fatalf("worker claim refunded an attempt or changed unknown precedence on poll %d: error=%v state=%+v", poll, err, store.Data)
 				}
 				for _, failure := range store.Data.JobFailures {
@@ -196,7 +195,7 @@ func TestHTTPWorkerFailureClaimsCannotChangeMonitorPolicy(t *testing.T) {
 		paid    bool
 		failure httpFailure
 	}{
-		{name: "no call false process uncertainty", failure: httpFailure{Message: "worker failure", Unconfirmed: true, ScopeUnconfirmed: true, OutcomeUnknown: true}},
+		{name: "no call false outcome uncertainty", failure: httpFailure{Message: "worker failure", OutcomeUnknown: true}},
 		{name: "paid false unsafe root", paid: true, failure: httpFailure{Message: "worker failure", Unsafe: true}},
 		{name: "paid false request transport", paid: true, failure: httpFailure{Message: "worker failure", RequestTransport: true}},
 	} {
@@ -250,7 +249,7 @@ func TestHTTPWorkerFailureClaimsCannotChangeMonitorPolicy(t *testing.T) {
 					t.Fatalf("failed outcome became success or lost raw candidate: result=%+v error=%v", got.result, finalErr)
 				}
 				for _, claim := range []error{monitor.ErrTerminalJob, monitor.ErrExecutionOutcomeUnknown, monitor.ErrRequestTransport,
-					workroot.ErrUnsafe, processgroup.ErrUnconfirmed, processgroup.ErrScopeUnconfirmed} {
+					workroot.ErrUnsafe} {
 					if errors.Is(finalErr, claim) {
 						t.Fatalf("worker claim changed parent failure policy for %v: %v", claim, finalErr)
 					}
@@ -266,7 +265,7 @@ func TestHTTPWorkerFailureClaimsCannotChangeMonitorPolicy(t *testing.T) {
 				GitHub: gh, Handler: handler, Now: func() time.Time { return clock }}
 			for poll := 0; poll < 3; poll++ {
 				_, err := m.RunOnce(context.Background(), store)
-				if (err == nil) != (poll == 2) || store.Data.UnconfirmedProcessJob != "" || len(store.Data.Processed) != map[bool]int{false: 0, true: 1}[poll == 2] || executions.Load() != int32(poll+1) {
+				if (err == nil) != (poll == 2) || len(store.Data.Processed) != map[bool]int{false: 0, true: 1}[poll == 2] || executions.Load() != int32(poll+1) {
 					t.Fatalf("worker claim changed retry or recovery policy on poll %d: error=%v state=%+v executions=%d", poll, err, store.Data, executions.Load())
 				}
 				if poll < 2 {

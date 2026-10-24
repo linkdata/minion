@@ -18,7 +18,7 @@ import (
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/config"
-	"github.com/linkdata/minion/internal/processgroup"
+	"github.com/linkdata/minion/internal/executil"
 	workspacefs "github.com/linkdata/minion/internal/workspace"
 )
 
@@ -138,7 +138,7 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 		ceilingMatched = ceilingMatched || isWaitCeilingStop(line)
 	}, Overflow: func() { ceilingOverflow = true }}
 	cmd.Stdout, cmd.Stderr = &output, io.MultiWriter(&diagnostics, &ceiling)
-	err = processgroup.Run(cmd)
+	err = executil.Run(cmd)
 	if cmd.Process == nil {
 		// No CLI started, so no provider usage or resumable turn exists.
 		return result, fmt.Errorf("claude: %w", err)

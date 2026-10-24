@@ -15,7 +15,6 @@ import (
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/bounded"
-	"github.com/linkdata/minion/internal/processgroup"
 	"github.com/linkdata/minion/internal/testsupport"
 )
 
@@ -240,7 +239,7 @@ func TestCheckGitHonorsCancellation(t *testing.T) {
 			if deadline {
 				want = context.DeadlineExceeded
 			}
-			if !errors.Is(err, want) || errors.Is(err, processgroup.ErrUnconfirmed) || errors.Is(err, processgroup.ErrScopeUnconfirmed) {
+			if !errors.Is(err, want) {
 				t.Fatalf("cancellation lost cause or release: %v", err)
 			}
 			if !deadline {
@@ -253,29 +252,20 @@ func TestCheckGitHonorsCancellation(t *testing.T) {
 	}
 }
 
-func TestFinishGitCheckPreservesUncertainScopeAndCleanupErrors(t *testing.T) {
-	for _, uncertain := range []bool{false, true} {
-		t.Run(fmt.Sprintf("scope uncertain=%t", uncertain), func(t *testing.T) {
-			root := filepath.Join(t.TempDir(), "owned")
-			if err := os.Mkdir(root, 0700); err != nil {
-				t.Fatal(err)
-			}
-			event := &processgroup.Exhaustion{MaxTasks: 1, Released: !uncertain}
-			runErr := errors.Join(processgroup.ErrUnconfirmed, event)
-			if uncertain {
-				runErr = errors.Join(runErr, processgroup.ErrScopeUnconfirmed)
-			}
-			err := finishGitCheck(root, runErr)
-			var retained *processgroup.Exhaustion
-			if !errors.Is(err, runErr) || !errors.As(err, &retained) || retained != event || errors.Is(err, processgroup.ErrScopeUnconfirmed) != uncertain {
-				t.Fatalf("finalizer lost typed cause: %v", err)
-			}
-			_, statErr := os.Stat(root)
-			if uncertain && (statErr != nil || !strings.Contains(err.Error(), root)) || !uncertain && !errors.Is(statErr, os.ErrNotExist) {
-				t.Fatalf("wrong owned-root retention: exists error=%v result=%v", statErr, err)
-			}
-		})
-	}
+func TestFinishGitCheckPreservesCommandAndCleanupErrors(t *testing.T) {
+	t.Run("command error", func(t *testing.T) {
+		root := filepath.Join(t.TempDir(), "owned")
+		if err := os.Mkdir(root, 0700); err != nil {
+			t.Fatal(err)
+		}
+		runErr := errors.New("command failed")
+		if err := finishGitCheck(root, runErr); !errors.Is(err, runErr) {
+			t.Fatalf("finalizer lost command error: %v", err)
+		}
+		if _, err := os.Stat(root); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("owned root was not removed: %v", err)
+		}
+	})
 	t.Run("cleanup error joins command error", func(t *testing.T) {
 		root := filepath.Join(t.TempDir(), "invalid\x00name")
 		runErr := errors.New("command failed")

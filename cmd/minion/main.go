@@ -22,7 +22,6 @@ import (
 	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/gitwork"
 	"github.com/linkdata/minion/internal/monitor"
-	"github.com/linkdata/minion/internal/processgroup"
 	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/state"
 	"github.com/linkdata/minion/internal/usage"
@@ -85,9 +84,6 @@ func runWithGitCheck(checkGit func(context.Context, string) error) int {
 	}
 	logCommandSkills(cfg, logger)
 	checkWorkRoot := func() error {
-		if err := workroot.Check(cfg.WorkRoot, cfg.StatePath, cfg.WorkRootMaxBytes); err != nil {
-			return err
-		}
 		return checkIsolation(cfg, loadedPath)
 	}
 	if err := checkWorkRoot(); err != nil {
@@ -113,42 +109,16 @@ func runWithGitCheck(checkGit func(context.Context, string) error) int {
 			logger.Printf("close state: %v", err)
 		}
 	}()
-	if store.Data.UnconfirmedProcessJob != "" {
-		logger.Printf("process scope release for %s is unconfirmed; operator recovery required", store.Data.UnconfirmedProcessJob)
-		return 1
-	}
-	latchProcessError := func(stage string, runErr error) {
-		if errors.Is(runErr, processgroup.ErrScopeUnconfirmed) {
-			store.Data.UnconfirmedProcessJob = stage
-			if saveErr := store.Save(); saveErr != nil {
-				logger.Printf("save unconfirmed process scope release: %v", saveErr)
-			}
-		}
-	}
-	if err := processgroup.Configure(cfg.CommandMaxTasks, int64(cfg.CommandMaxMemoryMiB)<<20); err != nil {
-		logger.Printf("process limits: %v", err)
-		return 1
-	}
-	if err := processgroup.Check(); err != nil {
-		if errors.Is(err, processgroup.ErrScopeUnconfirmed) {
-			latchProcessError("process probe", err)
-		}
-		logger.Printf("process ownership: %v", err)
-		return 1
-	}
 	if err := checkGit(ctx, cfg.WorkRoot); err != nil {
-		latchProcessError("Git preflight", err)
 		logger.Printf("Git preflight: %v", err)
 		return 1
 	}
 	if err := checkModels(ctx, &cfg, logger); err != nil {
-		latchProcessError("AI preflight", err)
 		logger.Printf("AI preflight: %v", err)
 		return 1
 	}
 	token, err := githubToken(ctx)
 	if err != nil {
-		latchProcessError("GitHub authentication", err)
 		logger.Printf("GitHub authentication: %v", err)
 		return 1
 	}
@@ -181,7 +151,7 @@ func runWithGitCheck(checkGit func(context.Context, string) error) int {
 			} else {
 				logger.Printf("poll: %s", monitor.InertLogText(err.Error()))
 			}
-			if !*loop || errors.Is(err, processgroup.ErrUnconfirmed) || errors.Is(err, processgroup.ErrScopeUnconfirmed) {
+			if !*loop {
 				return 1
 			}
 		}
@@ -416,7 +386,7 @@ func checkModels(ctx context.Context, cfg *config.Config, logger *log.Logger) (e
 		}
 		logger.Printf("%s settings: model=%s %s=%s", label, role.Model, effortName, role.Effort)
 	}
-	logger.Printf("AI roles: main=%s adversarial=%s job_timeout_minutes=%d command_max_tasks=%d command_max_memory_mib=%d", cfg.Main, cfg.Adversarial, cfg.JobTimeoutMinutes, cfg.CommandMaxTasks, cfg.CommandMaxMemoryMiB)
+	logger.Printf("AI roles: main=%s adversarial=%s job_timeout_minutes=%d", cfg.Main, cfg.Adversarial, cfg.JobTimeoutMinutes)
 	if cfg.Adversarial != "" {
 		maxRounds, nonblockingAfterRound, consecutiveNoBlockerRounds := cfg.CriticStopping.Resolve()
 		logger.Printf("critic policy: max_rounds=%d nonblocking_after_round=%d consecutive_no_blocker_rounds=%d", maxRounds, nonblockingAfterRound, consecutiveNoBlockerRounds)

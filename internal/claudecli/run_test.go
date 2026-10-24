@@ -637,7 +637,7 @@ func TestRunUsageLimitKeepsSafeDiagnosticAndExitCause(t *testing.T) {
 		t.Run(fmt.Sprint(malformed), func(t *testing.T) {
 			output := "cat <<'RESULT'\n" + quota + "\n" + failed + "\nRESULT\nexit 7\n"
 			if malformed {
-				output = "printf '%s\\n' '" + assistantUsageEvent("partial", 3, 5, 7, 11) + "' '" + quota + "'\nprintf '{'\nsleep 30\n"
+				output = "printf '%s\\n' '" + assistantUsageEvent("partial", 3, 5, 7, 11) + "' '" + quota + "'\nprintf '{'\nexec sleep 30\n"
 			}
 			fakeExecutable(t, "claude", "cat >/dev/null\ncat <<'DIAG' >&2\nPRIVATE_STDERR\nforged journal line\nDIAG\n"+output)
 			result, err := Run(context.Background(), t.TempDir(), "task", false, "", config.ClaudeConfig{})

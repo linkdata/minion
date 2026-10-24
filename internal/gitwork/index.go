@@ -21,7 +21,7 @@ import (
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/bounded"
-	"github.com/linkdata/minion/internal/processgroup"
+	"github.com/linkdata/minion/internal/executil"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -158,7 +158,7 @@ func (index *OfflineIndex) Changes(ctx context.Context) ([]workspace.Change, err
 		}
 		total += info.Size()
 	}
-	// shortcut: size prechecks can race and do not cap Git I/O; the dedicated work-root filesystem bounds storage.
+	// shortcut: size prechecks can race and do not cap Git I/O; use VM or container storage limits if hard bounds become required.
 	if _, err := index.run(ctx, 1024, nil, "add", "--all", "--", ".", excludeGit, excludeGitContents); err != nil {
 		return nil, err
 	}
@@ -421,11 +421,8 @@ func (index *OfflineIndex) run(ctx context.Context, limit int, input []byte, arg
 	cmd := gitCommand(runCtx, index.binary, dir, env, append(gitArgs, args...)...)
 	output, diagnostic := bounded.Buffer{Limit: limit, Cancel: cancel}, bounded.Buffer{Limit: bounded.DiagnosticBytes}
 	cmd.Stdout, cmd.Stderr, cmd.Stdin = &output, &diagnostic, bytes.NewReader(input)
-	err := processgroup.Run(cmd)
+	err := executil.Run(cmd)
 	contextErr := ctx.Err()
-	if errors.Is(err, processgroup.ErrDescendants) || errors.Is(err, processgroup.ErrUnconfirmed) || errors.Is(err, processgroup.ErrExhausted) {
-		return nil, gitFailure("offline git", args[0], diagnostic.String(), contextErr, err)
-	}
 	if output.Exceeded && contextErr == nil {
 		return nil, fmt.Errorf("offline git %s output exceeds action limit: %w", args[0], ErrCheckoutTooLarge)
 	}

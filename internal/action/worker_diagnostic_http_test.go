@@ -324,7 +324,6 @@ func TestHTTPWorkerFailureThroughOrchestratorAndMonitor(t *testing.T) {
 	defer server.Close()
 	message := strings.Repeat("\x01", httpFailureMessageLimit-len("\nFORGED\x1b[2J")) + "\nFORGED\x1b[2J"
 	failure := &httpFailure{Message: message, Terminal: true, Canceled: true, Deadline: true, Unsafe: true,
-		Descendants: true, Unconfirmed: true, ScopeUnconfirmed: true, Exhausted: true,
 		OutcomeUnknown: true, RequestTransport: true, MissingExecutable: true, NoSpace: true,
 		QuotaExceeded: true, OutputLimit: true}
 	var journal bytes.Buffer
@@ -367,7 +366,7 @@ func TestHTTPWorkerFailureThroughOrchestratorAndMonitor(t *testing.T) {
 		GitHub: gh, Handler: owner, Logger: parentLogger, Now: func() time.Time { return clock }}
 	for attempt := 1; attempt <= 3; attempt++ {
 		_, err := m.RunOnce(t.Context(), store)
-		if (err == nil) != (attempt == 3) || len(jobs) != attempt || store.Data.UnconfirmedProcessJob != "" {
+		if (err == nil) != (attempt == 3) || len(jobs) != attempt {
 			t.Fatalf("worker claims changed retry policy at attempt %d: jobs=%d state=%+v error=%v", attempt, len(jobs), store.Data, err)
 		}
 		if attempt < 3 && len(gh.replies) != 0 {

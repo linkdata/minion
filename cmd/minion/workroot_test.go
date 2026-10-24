@@ -22,6 +22,14 @@ func isolateHostPaths(t *testing.T, home string) {
 	}
 }
 
+func TestWorkRootPreflightAllowsOrdinaryDirectory(t *testing.T) {
+	isolateHostPaths(t, t.TempDir())
+	cfg := config.Config{Main: "codex", WorkRoot: t.TempDir(), StatePath: filepath.Join(t.TempDir(), "state.json")}
+	if err := checkIsolation(cfg, filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("ordinary work directory was refused: %v", err)
+	}
+}
+
 func TestWorkRootPreflightRefusesModelGrants(t *testing.T) {
 	const source = "https://github.com/owner/repo/tree/pinned/skills/example"
 	for _, kind := range []string{"required skill", "critic optional skill", "symlink root", "resolved Codex binary", "resolved Claude binary"} {

@@ -8,15 +8,17 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/config"
-	"github.com/linkdata/minion/internal/processgroup"
+	"github.com/linkdata/minion/internal/executil"
 )
 
 type modelInfo struct {
@@ -90,9 +92,7 @@ func listModels(ctx context.Context, settings config.CodexConfig) (models []mode
 		return nil, err
 	}
 	defer func() {
-		if !errors.Is(err, processgroup.ErrScopeUnconfirmed) {
-			err = errors.Join(err, os.RemoveAll(dir))
-		}
+		err = errors.Join(err, os.RemoveAll(dir))
 	}()
 	// app-server has no --ignore-user-config flag. Select exec's built-in
 	// provider explicitly and avoid repository config by using a temporary cwd.
@@ -127,14 +127,25 @@ func listModels(ctx context.Context, settings config.CodexConfig) (models []mode
 	if err != nil {
 		return nil, err
 	}
-	handle, err := processgroup.Start(cmd)
-	if handle == nil {
+	executil.Prepare(cmd)
+	var directStopSent atomic.Bool
+	cancelCommand := cmd.Cancel
+	cmd.Cancel = func() error {
+		err := cancelCommand()
+		if err == nil {
+			directStopSent.Store(true)
+		}
+		return err
+	}
+	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
+	stopReader := context.AfterFunc(ctx, func() { _ = stdout.Close() })
+	defer stopReader()
 	defer func() {
 		contextErr := ctx.Err()
 		cancel()
-		if waitErr := handle.Wait(); !expectedDiscoveryStop(waitErr) {
+		if waitErr := cmd.Wait(); !expectedDiscoveryStop(waitErr, directStopSent.Load()) {
 			err = errors.Join(err, waitErr)
 		}
 		if contextErr != nil && !errors.Is(err, contextErr) {
@@ -148,9 +159,6 @@ func listModels(ctx context.Context, settings config.CodexConfig) (models []mode
 			}
 		}
 	}()
-	if err != nil {
-		return nil, err
-	}
 	encoder := json.NewEncoder(stdin)
 	// Catalogue limits count the logical line after ScanLines removes CR/LF.
 	scanner := bufio.NewScanner(stdout)
@@ -244,17 +252,14 @@ func listModels(ctx context.Context, settings config.CodexConfig) (models []mode
 }
 
 // The app-server is deliberately canceled after its last catalogue response.
-// Keep ownership failures and unexpected exits even when cancellation is expected.
-func expectedDiscoveryStop(err error) bool {
+// Keep unexpected exits and pipe-drain failures even when cancellation is expected.
+func expectedDiscoveryStop(err error, directStopSent bool) bool {
 	if err == nil {
 		return true
 	}
-	if errors.Is(err, processgroup.ErrDescendants) || errors.Is(err, processgroup.ErrUnconfirmed) || errors.Is(err, processgroup.ErrExhausted) {
-		return false
-	}
 	if joined, ok := err.(interface{ Unwrap() []error }); ok {
 		for _, cause := range joined.Unwrap() {
-			if !expectedDiscoveryStop(cause) {
+			if !expectedDiscoveryStop(cause, directStopSent) {
 				return false
 			}
 		}
@@ -267,6 +272,9 @@ func expectedDiscoveryStop(err error) bool {
 	if !errors.As(err, &exit) {
 		return false
 	}
+	if runtime.GOOS == "windows" {
+		return directStopSent
+	}
 	status, ok := exit.Sys().(syscall.WaitStatus)
-	return ok && status.Signaled() && (status.Signal() == syscall.SIGTERM || status.Signal() == syscall.SIGKILL)
+	return ok && status.Signaled() && (status.Signal() == syscall.SIGINT || status.Signal() == syscall.SIGTERM || status.Signal() == syscall.SIGKILL)
 }

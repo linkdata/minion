@@ -24,7 +24,6 @@ import (
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/gitwork"
 	"github.com/linkdata/minion/internal/monitor"
-	"github.com/linkdata/minion/internal/processgroup"
 	"github.com/linkdata/minion/internal/workroot"
 	"github.com/linkdata/minion/internal/workspace"
 )
@@ -68,17 +67,6 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 	result = Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head}
 	defer func() {
 		resultErr = redactActionError(resultErr, r.Codex.APIKey, r.Claude.APIKey)
-	}()
-	defer func() {
-		if errors.Is(resultErr, processgroup.ErrExhausted) {
-			message := processgroup.ErrExhausted.Error()
-			var event *processgroup.Exhaustion
-			if errors.As(resultErr, &event) {
-				message = event.Error()
-			}
-			result.Diagnostics = append(result.Diagnostics, Diagnostic{Code: "process_limit_exhausted", Message: message})
-			resultErr = errors.Join(monitor.ErrTerminalJob, resultErr)
-		}
 	}()
 	if err := job.Validate(); err != nil {
 		return result, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
@@ -158,11 +146,6 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 	cleanupFailed := false
 	// Remove owned paths after sessions, report collection, and review snapshots close.
 	defer func() {
-		if errors.Is(resultErr, processgroup.ErrScopeUnconfirmed) {
-			result.Diagnostics = append(result.Diagnostics, Diagnostic{Code: "process_cleanup_unconfirmed", Message: "Command scope release could not be confirmed; execution workspaces were preserved for operator recovery."})
-			r.logf("preserve action workspaces after unconfirmed scope release job=%s attempt=%s", job.Identity.JobID, job.Identity.AttemptID)
-			return
-		}
 		failed := cleanupFailed
 		for _, dir := range owned {
 			if err := cleanup.RemoveAll(dir); err != nil {
@@ -232,11 +215,7 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 		}
 	}
 	// Model sessions close before review snapshots; snapshots may add paths to outer cleanup.
-	defer func() {
-		if !errors.Is(resultErr, processgroup.ErrScopeUnconfirmed) {
-			closeReview()
-		}
-	}()
+	defer closeReview()
 	observe := configured.aroundModel
 	configured.aroundModel = func(ctx context.Context, request modelRun, next modelCall) (aicli.Result, error) {
 		if request.role == roleMain {
@@ -346,9 +325,6 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 	if job.Action == command.SecurityAudit {
 		// Collect partial reports before the outer workspace cleanup.
 		defer func() {
-			if errors.Is(resultErr, processgroup.ErrScopeUnconfirmed) {
-				return
-			}
 			if resultErr != nil && len(result.Artifacts) == 0 {
 				files, diagnostics := collectPartialAuditArtifacts(outputDir, job, auditSkill, configured.Codex.APIKey, configured.Claude.APIKey)
 				result.Artifacts = files
@@ -369,9 +345,6 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 	var sessions modelSessions
 	// Close sessions before collecting partial reports or releasing review snapshots.
 	defer func() {
-		if errors.Is(resultErr, processgroup.ErrScopeUnconfirmed) {
-			return
-		}
 		if err := sessions.close(); err != nil {
 			configured.logf("model session cleanup retry scheduled job=%s attempt=%s", job.Identity.JobID, job.Identity.AttemptID)
 			cleanupFailed = sessions.close() != nil
@@ -766,9 +739,6 @@ func collectPartialAuditArtifacts(outputDir string, job Job, skill string, secre
 
 func terminalUnlessCanceled(ctx context.Context, err error) error {
 	if ctx.Err() != nil {
-		if errors.Is(err, processgroup.ErrUnconfirmed) || errors.Is(err, processgroup.ErrExhausted) {
-			return errors.Join(ctx.Err(), err)
-		}
 		return ctx.Err()
 	}
 	return fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)

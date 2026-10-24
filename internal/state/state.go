@@ -19,14 +19,13 @@ type Data struct {
 	Cursor time.Time `json:"cursor"`
 	// RepositoryCursors tracks each repository's durable notification cursor.
 	// Missing entries start at Cursor when that repository is first polled.
-	RepositoryCursors     map[string]time.Time           `json:"repository_cursors,omitempty"`
-	NextPollAt            time.Time                      `json:"next_poll_at,omitempty"`
-	NextInviteCheckAt     time.Time                      `json:"next_invite_check_at,omitempty"`
-	Processed             map[string]time.Time           `json:"processed"`
-	JobFailures           map[string]JobFailure          `json:"job_failures,omitempty"`
-	UnconfirmedProcessJob string                         `json:"unconfirmed_process_job,omitempty"`
-	PendingNotifications  map[string]PendingNotification `json:"pending_notifications,omitempty"`
-	PendingFixes          map[string]PendingFix          `json:"pending_fixes,omitempty"`
+	RepositoryCursors    map[string]time.Time           `json:"repository_cursors,omitempty"`
+	NextPollAt           time.Time                      `json:"next_poll_at,omitempty"`
+	NextInviteCheckAt    time.Time                      `json:"next_invite_check_at,omitempty"`
+	Processed            map[string]time.Time           `json:"processed"`
+	JobFailures          map[string]JobFailure          `json:"job_failures,omitempty"`
+	PendingNotifications map[string]PendingNotification `json:"pending_notifications,omitempty"`
+	PendingFixes         map[string]PendingFix          `json:"pending_fixes,omitempty"`
 }
 
 // PendingFix retains the commit and its publication caveat before a push.

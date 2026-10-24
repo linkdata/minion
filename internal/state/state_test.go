@@ -23,7 +23,6 @@ func TestStoreLocksAndPersistsCompletedCommands(t *testing.T) {
 	}
 	store.Data.Processed["job"] = initial
 	store.Data.JobFailures["failed"] = JobFailure{Attempts: 2, ReplyAttempts: 1}
-	store.Data.UnconfirmedProcessJob = "unsafe-job"
 	store.Data.NextInviteCheckAt = initial.Add(time.Hour)
 	store.Data.RepositoryCursors["owner/repo"] = initial.Add(time.Minute)
 	store.Data.NextPollAt = initial.Add(2 * time.Minute)
@@ -51,7 +50,7 @@ func TestStoreLocksAndPersistsCompletedCommands(t *testing.T) {
 	if _, ok := got.Processed["job"]; !ok || got.JobFailures["failed"] != (JobFailure{Attempts: 2, ReplyAttempts: 1}) || !got.Cursor.Equal(initial) ||
 		!got.RepositoryCursors["owner/repo"].Equal(initial.Add(time.Minute)) || !got.NextPollAt.Equal(initial.Add(2*time.Minute)) || !got.NextInviteCheckAt.Equal(initial.Add(time.Hour)) ||
 		got.PendingNotifications["thread"] != (PendingNotification{Repository: "owner/repo", Since: initial}) || !reflect.DeepEqual(got.PendingFixes["fix-job"], pending) ||
-		got.PendingFixes["normal-fix"] != (PendingFix{SHA: "normal-sha"}) || got.UnconfirmedProcessJob != "unsafe-job" {
+		got.PendingFixes["normal-fix"] != (PendingFix{SHA: "normal-sha"}) {
 		t.Fatalf("lost persisted state: %+v", got)
 	}
 	info, err := os.Stat(path)

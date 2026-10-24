@@ -13,9 +13,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/linkdata/minion/internal/processgroup"
 	"github.com/linkdata/minion/internal/skills"
-	"github.com/linkdata/minion/internal/workroot"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -31,14 +29,6 @@ const (
 	DefaultJobTimeout = 4 * time.Hour
 	// MaxJobTimeout is the largest configurable per-attempt runtime budget.
 	MaxJobTimeout = 24 * time.Hour
-	// DefaultCommandMaxTasks limits processes and threads in one external command.
-	DefaultCommandMaxTasks = processgroup.DefaultMaxTasks
-	// MaxCommandMaxTasks is the largest configurable per-command task limit.
-	MaxCommandMaxTasks = 4096
-	// DefaultCommandMaxMemoryMiB limits one external command to 3 GiB of memory.
-	DefaultCommandMaxMemoryMiB = processgroup.DefaultMaxMemoryMiB
-	// MaxCommandMaxMemoryMiB is the largest configurable per-command memory limit.
-	MaxCommandMaxMemoryMiB = 1 << 20
 	// DefaultCriticMaxRounds is the default proposal/revision round limit.
 	DefaultCriticMaxRounds = 5
 	// MaxCriticMaxRounds is the largest configurable proposal/revision round limit.
@@ -179,16 +169,12 @@ type Config struct {
 	AlwaysOnSkills      []string `json:"always_on_skills"`
 	PollIntervalSeconds int      `json:"poll_interval_seconds,omitempty"`
 	JobTimeoutMinutes   int      `json:"job_timeout_minutes,omitempty"`
-	// Zero selects the defaults; both limits apply to each external command.
-	CommandMaxTasks     int `json:"command_max_tasks,omitempty"`
-	CommandMaxMemoryMiB int `json:"command_max_memory_mib,omitempty"`
 	// MaxGitHubContextBytes limits the combined UTF-8 bytes of trimmed GitHub text in one action.
 	//
 	// Zero selects [DefaultMaxGitHubContextBytes].
 	MaxGitHubContextBytes int              `json:"max_github_context_bytes,omitempty"`
 	StatePath             string           `json:"state_path,omitempty"`
 	WorkRoot              string           `json:"work_root,omitempty"`
-	WorkRootMaxBytes      int64            `json:"work_root_max_bytes,omitempty"`
 	StartAt               string           `json:"start_at,omitempty"`
 	InvitationOwners      []string         `json:"invitation_owners,omitempty"`
 	InvitationOwnerIDs    map[string]int64 `json:"invitation_owner_ids,omitempty"`
@@ -368,18 +354,6 @@ func (c *Config) Validate(configDir string) error {
 	if c.JobTimeoutMinutes < 1 || c.JobTimeoutMinutes > int(MaxJobTimeout/time.Minute) {
 		return fmt.Errorf("job_timeout_minutes must be between 1 and %d", int(MaxJobTimeout/time.Minute))
 	}
-	if c.CommandMaxTasks == 0 {
-		c.CommandMaxTasks = DefaultCommandMaxTasks
-	}
-	if c.CommandMaxTasks < 1 || c.CommandMaxTasks > MaxCommandMaxTasks {
-		return fmt.Errorf("command_max_tasks must be between 1 and %d", MaxCommandMaxTasks)
-	}
-	if c.CommandMaxMemoryMiB == 0 {
-		c.CommandMaxMemoryMiB = DefaultCommandMaxMemoryMiB
-	}
-	if c.CommandMaxMemoryMiB < 1 || c.CommandMaxMemoryMiB > MaxCommandMaxMemoryMiB {
-		return fmt.Errorf("command_max_memory_mib must be between 1 and %d", MaxCommandMaxMemoryMiB)
-	}
 	if c.MaxGitHubContextBytes == 0 {
 		c.MaxGitHubContextBytes = DefaultMaxGitHubContextBytes
 	}
@@ -391,12 +365,6 @@ func (c *Config) Validate(configDir string) error {
 	}
 	if c.WorkRoot == "" {
 		c.WorkRoot = "var/work"
-	}
-	if c.WorkRootMaxBytes == 0 {
-		c.WorkRootMaxBytes = workroot.DefaultMaxBytes
-	}
-	if c.WorkRootMaxBytes < 0 {
-		return fmt.Errorf("work_root_max_bytes must be positive")
 	}
 	if !filepath.IsAbs(c.StatePath) {
 		c.StatePath = filepath.Join(configDir, c.StatePath)
