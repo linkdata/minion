@@ -27,7 +27,7 @@ func TestLiveBotCollaborationLifecycle(t *testing.T) {
 	if os.Getenv("MINION_LIVE_WRITE") == "1" {
 		t.Skip("run collaborator lifecycle without MINION_LIVE_WRITE to avoid a second invitation")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 	defer cancel()
 	cfg, owner, bot, _ := liveBotWriteSetup(t, ctx)
 	status, pending := liveBotAccessState(t, ctx, owner, cfg)
@@ -251,7 +251,7 @@ func TestEnsureBotWriteAccess(t *testing.T) {
 			t.Cleanup(server.Close)
 			owner, bot := New("owner"), New("bot")
 			owner.BaseURL, bot.BaseURL = server.URL, server.URL
-			liveEnsureBotWriteAccess(t, context.Background(), cfg, owner, bot)
+			liveEnsureBotWriteAccess(t, t.Context(), cfg, owner, bot)
 			state.Lock()
 			defer state.Unlock()
 			if state.puts != test.wantPut || state.accepts != test.wantAccept || state.deletes != 0 || state.permission == "" || state.pending {
@@ -265,7 +265,7 @@ func TestLiveBotWriteLifecycle(t *testing.T) {
 	if os.Getenv("MINION_LIVE_WRITE") != "1" {
 		t.Skip("set MINION_LIVE_WRITE=1 to enable GitHub writes")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 	defer cancel()
 	cfg, owner, bot, repository := liveBotWriteSetup(t, ctx)
 	if cfg.IssueNumber <= 0 {
@@ -410,7 +410,7 @@ func liveWriteGit(t *testing.T, ctx context.Context, dir, key string, args ...st
 
 func liveRemoveArtifacts(t *testing.T, owner *Client, cfg liveTestConfig, artifacts *liveWriteArtifacts) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), time.Minute)
 	defer cancel()
 	const path = "/repos/linkdata/miniontesting"
 
@@ -537,7 +537,7 @@ func liveOwnerInvitations(ctx context.Context, owner *Client, path string) ([]In
 
 func liveRevokeTestBot(t *testing.T, owner *Client, path, collaboratorPath, botLogin string) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), time.Minute)
 	defer cancel()
 	invitations, err := liveOwnerInvitations(ctx, owner, path)
 	if err != nil {

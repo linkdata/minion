@@ -26,7 +26,7 @@ func TestBoundedGitRejectsSuccessfulLeaderWithDescendants(t *testing.T) {
 	script := "#!/bin/sh\n(while [ ! -f " + shellQuote(pidFile+".stop") + " ]; do sleep 1; done) </dev/null >/dev/null 2>&1 &\n" +
 		"printf '%s' \"$!\" > " + shellQuote(pidFile) + "\nprintf ok\n"
 	fakeOnPath(t, "git", script)
-	output, truncated, err := (&Checkout{path: dir}).boundedGit(context.Background(), nil, 128, true, "status")
+	output, truncated, err := (&Checkout{path: dir}).boundedGit(t.Context(), nil, 128, true, "status")
 	if len(output) != 0 || truncated || !errors.Is(err, processgroup.ErrDescendants) {
 		t.Fatalf("bounded Git accepted surviving child: output=%q truncated=%t error=%v", output, truncated, err)
 	}
@@ -43,7 +43,7 @@ func TestBoundedGitDoesNotTruncateProcessExhaustion(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = processgroup.Configure(processgroup.DefaultMaxTasks, processgroup.DefaultMaxMemoryMiB<<20) })
-	output, truncated, err := (&Checkout{path: dir}).boundedGit(context.Background(), nil, 4, true, "status")
+	output, truncated, err := (&Checkout{path: dir}).boundedGit(t.Context(), nil, 4, true, "status")
 	if len(output) != 0 || truncated || !errors.Is(err, processgroup.ErrExhausted) || errors.Is(err, ErrCheckoutTooLarge) {
 		t.Fatalf("bounded Git truncated process exhaustion: output=%q truncated=%t error=%v", output, truncated, err)
 	}
@@ -64,7 +64,7 @@ func assertGitChildStopped(t *testing.T, pidFile string) {
 		}
 	}()
 	// SIGKILL delivery precedes zombie visibility; keep observing the pinned child.
-	waitCtx, stopWait := context.WithTimeout(context.Background(), time.Second)
+	waitCtx, stopWait := context.WithTimeout(t.Context(), time.Second)
 	defer stopWait()
 	if err := child.WaitExited(waitCtx); err != nil {
 		t.Fatalf("Git child is still running: %v", err)
@@ -72,12 +72,13 @@ func assertGitChildStopped(t *testing.T, pidFile string) {
 }
 
 func TestGitOutputLimitStopsChildHoldingPipes(t *testing.T) {
+	requireGitProcessGroup(t)
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "child.pid")
 	testsupport.StopOnCleanup(t, pidFile+".stop")
 	alias := "!printf '%s' $$ > " + shellQuote(pidFile+".tmp") + " && mv " + shellQuote(pidFile+".tmp") + " " + shellQuote(pidFile) + "; printf overflow-output; i=0; while [ -f " + shellQuote(pidFile) + " ] && [ \"$i\" -lt 6 ] && [ ! -f " + shellQuote(pidFile+".stop") + " ]; do sleep 1; i=$((i+1)); done"
 	started := time.Now()
-	_, _, err := (&Checkout{path: dir}).boundedGit(context.Background(), nil, 4, false, "-c", "alias.probe="+alias, "probe")
+	_, _, err := (&Checkout{path: dir}).boundedGit(t.Context(), nil, 4, false, "-c", "alias.probe="+alias, "probe")
 	elapsed := time.Since(started)
 	assertGitChildStopped(t, pidFile)
 	if elapsed > 3*time.Second || !errors.Is(err, ErrCheckoutTooLarge) || errors.Is(err, context.Canceled) {
@@ -86,11 +87,12 @@ func TestGitOutputLimitStopsChildHoldingPipes(t *testing.T) {
 }
 
 func TestGitDeadlineStopsChildHoldingPipes(t *testing.T) {
+	requireGitProcessGroup(t)
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "child.pid")
 	testsupport.StopOnCleanup(t, pidFile+".stop")
 	alias := "!printf '%s' $$ > " + shellQuote(pidFile+".tmp") + " && mv " + shellQuote(pidFile+".tmp") + " " + shellQuote(pidFile) + "; printf 'deadline diagnostic\\nforged journal\\n' >&2; i=0; while [ -f " + shellQuote(pidFile) + " ] && [ \"$i\" -lt 6 ] && [ ! -f " + shellQuote(pidFile+".stop") + " ]; do sleep 1; i=$((i+1)); done"
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 	started := time.Now()
 	done := make(chan error, 1)
@@ -98,14 +100,14 @@ func TestGitDeadlineStopsChildHoldingPipes(t *testing.T) {
 		_, _, err := (&Checkout{path: dir}).boundedGit(ctx, nil, 1024, false, "-c", "alias.probe="+alias, "probe")
 		done <- err
 	}()
-	waitCtx, stopWait := context.WithTimeout(context.Background(), 5*time.Second)
+	waitCtx, stopWait := context.WithTimeout(t.Context(), 5*time.Second)
 	defer stopWait()
 	child, err := testsupport.WaitForProcess(waitCtx, pidFile, done)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		cleanupCtx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 		defer cancel()
 		if err := child.Cleanup(cleanupCtx); err != nil {
 			t.Error(err)

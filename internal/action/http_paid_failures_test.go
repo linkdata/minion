@@ -58,6 +58,7 @@ func (w httpLosePaidACK) Write([]byte) (int, error) {
 }
 
 func TestHTTPPaidDisconnectsKeepRawFactsSeparateFromSavedCheckpoints(t *testing.T) {
+	requireActionProcessGroup(t)
 	for _, stage := range []string{"After request", "After ACK", "critic prefix ACK", "approved decision ACK", "capped decision ACK"} {
 		t.Run(stage, func(t *testing.T) {
 			job := withClaudeCritic(testJob(command.Comment))
@@ -67,7 +68,7 @@ func TestHTTPPaidDisconnectsKeepRawFactsSeparateFromSavedCheckpoints(t *testing.
 			var cut atomic.Bool
 			var deliveredAfter atomic.Int32
 			var deliveredReview atomic.Int32
-			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 			defer cancel()
 			transport := newHTTPServerTest(t, ctx, f.job, f.sink, func(next http.Handler) http.Handler {
 				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -202,7 +203,7 @@ func TestHTTPPaidDisconnectsKeepRawFactsSeparateFromSavedCheckpoints(t *testing.
 func TestHTTPMissingGitPreparationPreservesDiagnosticBeforeNativeWork(t *testing.T) {
 	f := newExecutionAdapterFixture(t, withClaudeCritic(testJob(command.Comment)))
 	store := f.startUsage()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	transport := newHTTPServerTest(t, ctx, f.job, f.sink, nil)
 	t.Setenv("PATH", t.TempDir())
@@ -230,6 +231,7 @@ func TestHTTPMissingGitPreparationPreservesDiagnosticBeforeNativeWork(t *testing
 }
 
 func TestHTTPPaidOutputLimitPreservesUsageWithoutTrustingWorkerPolicy(t *testing.T) {
+	requireActionProcessGroup(t)
 	gitFixtureRemote(t)
 	var writes atomic.Int32
 	githubServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -250,7 +252,7 @@ func TestHTTPPaidOutputLimitPreservesUsageWithoutTrustingWorkerPolicy(t *testing
 	workerServer := httptest.NewServer(remote)
 	defer workerServer.Close()
 	defer remote.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 	defer cancel()
 	tokens := usage.Tokens{Input: 17, CachedInput: 3, Output: 5}
 	var native atomic.Int32

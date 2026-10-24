@@ -54,7 +54,7 @@ if $resume; then printf '%s\n' '`+doubled+`'; else printf '%s\n' '`+successfulRe
 			session.NewConversation()
 			settings.ReadOnlyDirs = nil
 		}
-		result, err := session.Run(context.Background(), workspace, "task", false, "", settings)
+		result, err := session.Run(t.Context(), workspace, "task", false, "", settings)
 		if err != nil || !result.UsageComplete || result.Tokens != known {
 			t.Fatalf("call%d: %+v, %v", call, result, err)
 		}
@@ -135,7 +135,7 @@ if $resume; then printf '%s\n' '`+doubled+`'; else printf '%s\n' '`+successfulRe
 	if err := session.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := session.Run(context.Background(), workspace, "task", false, "", settings); err == nil || !strings.Contains(err.Error(), "closed") {
+	if _, err := session.Run(t.Context(), workspace, "task", false, "", settings); err == nil || !strings.Contains(err.Error(), "closed") {
 		t.Fatalf("closed session ran: %v", err)
 	}
 }
@@ -177,11 +177,11 @@ func TestSessionRejectsChangedIdentityAndSettingsBeforeNativeCall(t *testing.T) 
 					t.Error(err)
 				}
 			})
-			if _, err := session.Run(context.Background(), dir, "first", writable, output, settings); err != nil {
+			if _, err := session.Run(t.Context(), dir, "first", writable, output, settings); err != nil {
 				t.Fatal(err)
 			}
 			test.change(t, &dir, &writable, &output, &settings)
-			if _, err := session.Run(context.Background(), dir, "second", writable, output, settings); err == nil || !strings.Contains(err.Error(), "changed") {
+			if _, err := session.Run(t.Context(), dir, "second", writable, output, settings); err == nil || !strings.Contains(err.Error(), "changed") {
 				t.Fatalf("changed bound inputs accepted: %v", err)
 			}
 			if readFile(t, binary+".calls") != "called" {
@@ -209,17 +209,17 @@ esac
 		}
 	})
 	dir := t.TempDir()
-	first, err := session.Run(context.Background(), dir, "first", false, "", config.ClaudeConfig{})
+	first, err := session.Run(t.Context(), dir, "first", false, "", config.ClaudeConfig{})
 	var exit *exec.ExitError
 	if !errors.As(err, &exit) || exit.ExitCode() != 7 || first.Answer != "" || first.UsageComplete || first.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) {
 		t.Fatalf("failed turn: %+v,%v", first, err)
 	}
 	id := session.id
-	second, err := session.Run(context.Background(), dir, "continue", false, "", config.ClaudeConfig{})
+	second, err := session.Run(t.Context(), dir, "continue", false, "", config.ClaudeConfig{})
 	if err != nil || second.Tokens != first.Tokens || !second.UsageComplete {
 		t.Fatalf("continued failed turn: %+v,%v", second, err)
 	}
-	third, err := session.Run(context.Background(), dir, "continue again", false, "", config.ClaudeConfig{})
+	third, err := session.Run(t.Context(), dir, "continue again", false, "", config.ClaudeConfig{})
 	if err == nil || !strings.Contains(err.Error(), "No conversation found") || third.Answer != "" || session.id != id || !strings.Contains(readFile(t, binary+".3.args"), "--resume\n"+id) || readFile(t, binary+".count") != "3" {
 		t.Fatalf("missing resume silently replaced: %+v,%v", third, err)
 	}
@@ -238,11 +238,11 @@ func TestSessionNativeHomeCannotChange(t *testing.T) {
 				}
 			})
 			dir := t.TempDir()
-			if _, err := session.Run(context.Background(), dir, "first", false, "", config.ClaudeConfig{}); err != nil {
+			if _, err := session.Run(t.Context(), dir, "first", false, "", config.ClaudeConfig{}); err != nil {
 				t.Fatal(err)
 			}
 			t.Setenv(nativeEnv, t.TempDir())
-			if _, err := session.Run(context.Background(), dir, "second", false, "", config.ClaudeConfig{}); err == nil || !strings.Contains(err.Error(), "changed") {
+			if _, err := session.Run(t.Context(), dir, "second", false, "", config.ClaudeConfig{}); err == nil || !strings.Contains(err.Error(), "changed") {
 				t.Fatalf("native configuration changed: %v", err)
 			}
 			if readFile(t, binary+".calls") != "called" {
@@ -264,11 +264,11 @@ func TestSessionRejectsSwitchToExplicitDefaultConfig(t *testing.T) {
 		}
 	})
 	dir := t.TempDir()
-	if _, err := session.Run(context.Background(), dir, "first", false, "", config.ClaudeConfig{}); err != nil {
+	if _, err := session.Run(t.Context(), dir, "first", false, "", config.ClaudeConfig{}); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, ".claude"))
-	if _, err := session.Run(context.Background(), dir, "second", false, "", config.ClaudeConfig{}); err == nil || !strings.Contains(err.Error(), "native configuration changed") {
+	if _, err := session.Run(t.Context(), dir, "second", false, "", config.ClaudeConfig{}); err == nil || !strings.Contains(err.Error(), "native configuration changed") {
 		t.Fatalf("default configuration switched to explicit: %v", err)
 	}
 	if readFile(t, binary+".calls") != "called" {
@@ -325,7 +325,7 @@ func TestSessionScratchAndCloseFailuresAreVisible(t *testing.T) {
 	binary := fakeExecutable(t, "claude", "cat >/dev/null\nprintf called >>\"$0.calls\"\nprintf '%s\\n' '"+successfulResult+"'\n")
 	var session Session
 	dir := t.TempDir()
-	if _, err := session.Run(context.Background(), dir, "first", false, "", config.ClaudeConfig{}); err != nil {
+	if _, err := session.Run(t.Context(), dir, "first", false, "", config.ClaudeConfig{}); err != nil {
 		t.Fatal(err)
 	}
 	runtime := session.runtimeDir
@@ -339,7 +339,7 @@ func TestSessionScratchAndCloseFailuresAreVisible(t *testing.T) {
 	// A malformed owned path gives a portable filesystem failure without
 	// modifying host permissions or deleting any unowned resource.
 	session.runtimeDir = "invalid\x00path"
-	if _, err := session.Run(context.Background(), dir, "new", false, "", config.ClaudeConfig{}); err == nil || !strings.Contains(err.Error(), "scratch cleanup") {
+	if _, err := session.Run(t.Context(), dir, "new", false, "", config.ClaudeConfig{}); err == nil || !strings.Contains(err.Error(), "scratch cleanup") {
 		t.Fatalf("scratch failure ignored: %v", err)
 	}
 	if readFile(t, binary+".calls") != "called" {
@@ -401,16 +401,16 @@ esac
 				}
 			})
 			source := t.TempDir()
-			initial, err := session.Run(context.Background(), source, "first", false, "", config.ClaudeConfig{})
+			initial, err := session.Run(t.Context(), source, "first", false, "", config.ClaudeConfig{})
 			if (err != nil) != test.fails || initial.UsageComplete {
 				t.Fatalf("expected incomplete first call (error=%v): %+v,%v", test.fails, initial, err)
 			}
-			second, err := session.Run(context.Background(), source, "second", false, "", config.ClaudeConfig{})
+			second, err := session.Run(t.Context(), source, "second", false, "", config.ClaudeConfig{})
 			want := usage.Tokens{Input: 4, Output: 6}
 			if err != nil || second.UsageComplete || second.Tokens != want {
 				t.Fatalf("prior usage leaked into next call: %+v,%v", second, err)
 			}
-			third, err := session.Run(context.Background(), source, "third", false, "", config.ClaudeConfig{})
+			third, err := session.Run(t.Context(), source, "third", false, "", config.ClaudeConfig{})
 			if err != nil || !third.UsageComplete || third.Tokens != want {
 				t.Fatalf("fresh cumulative baseline not recovered: %+v,%v", third, err)
 			}
@@ -431,7 +431,7 @@ printf '%s\n' '`+successfulResult+`'
 		}
 	})
 	source := t.TempDir()
-	if _, err := session.Run(context.Background(), source, "first", false, "", config.ClaudeConfig{}); err != nil {
+	if _, err := session.Run(t.Context(), source, "first", false, "", config.ClaudeConfig{}); err != nil {
 		t.Fatal(err)
 	}
 	tmp := filepath.Join(session.runtimeDir, "tmp")
@@ -453,7 +453,7 @@ printf '%s\n' '`+successfulResult+`'
 	if err := os.Symlink(outside, tmp); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := session.Run(context.Background(), source, "resume", false, "", config.ClaudeConfig{}); err != nil {
+	if _, err := session.Run(t.Context(), source, "resume", false, "", config.ClaudeConfig{}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Lstat(gitDir); !errors.Is(err, os.ErrNotExist) {
@@ -468,7 +468,7 @@ printf '%s\n' '`+successfulResult+`'
 	if err := os.Symlink(outside, gitDir); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := session.Run(context.Background(), source, "again", false, "", config.ClaudeConfig{}); err != nil {
+	if _, err := session.Run(t.Context(), source, "again", false, "", config.ClaudeConfig{}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Lstat(gitDir); !errors.Is(err, os.ErrNotExist) {
@@ -513,7 +513,7 @@ esac
 			})
 			source := t.TempDir()
 			for call, want := range []usage.Tokens{{Input: 15, CachedInput: 7, Output: 11}, {Input: 4, Output: 6}, {Input: 2, Output: 3}, {Input: 2, Output: 3}} {
-				result, err := session.Run(context.Background(), source, "task", false, "", config.ClaudeConfig{})
+				result, err := session.Run(t.Context(), source, "task", false, "", config.ClaudeConfig{})
 				complete := call == 0 || call == 3
 				if err != nil || result.Tokens != want || result.UsageComplete != complete {
 					t.Fatalf("call%d = %+v,%v want %+v complete=%v", call+1, result, err, want, complete)
@@ -541,7 +541,7 @@ func TestSessionUnlaunchedCallKeepsConversation(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			wantError := context.Canceled
 			if failure == "cancelled" {
@@ -567,7 +567,7 @@ func TestSessionUnlaunchedCallKeepsConversation(t *testing.T) {
 			if err := os.WriteFile(binary, original, 0700); err != nil {
 				t.Fatal(err)
 			}
-			result, err = session.Run(context.Background(), source, "first native call", false, "", config.ClaudeConfig{})
+			result, err = session.Run(t.Context(), source, "first native call", false, "", config.ClaudeConfig{})
 			args := readFile(t, binary+".args")
 			if err != nil || !result.UsageComplete || !strings.Contains(args, "--session-id\n"+id+"\n") || strings.Contains(args, "--resume\n") {
 				t.Fatalf("first native call resumed an unlaunched turn: %+v, %v, args=%q", result, err, args)
@@ -585,7 +585,7 @@ func TestSessionUnlaunchedCallKeepsConversation(t *testing.T) {
 			if err := os.WriteFile(binary, original, 0700); err != nil {
 				t.Fatal(err)
 			}
-			result, err = session.Run(context.Background(), source, "resume", false, "", config.ClaudeConfig{})
+			result, err = session.Run(t.Context(), source, "resume", false, "", config.ClaudeConfig{})
 			if err != nil || !result.UsageComplete || result.Tokens != (usage.Tokens{}) || !strings.Contains(readFile(t, binary+".args"), "--resume\n"+id+"\n") {
 				t.Fatalf("unlaunched resume lost its prior conversation: %+v, %v", result, err)
 			}
@@ -610,12 +610,12 @@ fi
 		}
 	})
 	source := t.TempDir()
-	first, err := session.Run(context.Background(), source, "first", false, "", config.ClaudeConfig{})
+	first, err := session.Run(t.Context(), source, "first", false, "", config.ClaudeConfig{})
 	if err != nil || first.UsageComplete {
 		t.Fatalf("missing aggregate was not incomplete: %+v, %v", first, err)
 	}
 	session.NewConversation()
-	fresh, err := session.Run(context.Background(), source, "independent", false, "", config.ClaudeConfig{})
+	fresh, err := session.Run(t.Context(), source, "independent", false, "", config.ClaudeConfig{})
 	if err != nil || !fresh.UsageComplete || fresh.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) {
 		t.Fatalf("old usage gap survived independent conversation: %+v, %v", fresh, err)
 	}
@@ -632,14 +632,14 @@ func TestSessionInitializationFailureStaysBound(t *testing.T) {
 		}
 	})
 	source := t.TempDir()
-	_, first := session.Run(context.Background(), source, "first", false, "", settings)
+	_, first := session.Run(t.Context(), source, "first", false, "", settings)
 	if first == nil || !strings.Contains(first.Error(), "claude skills") {
 		t.Fatalf("missing skill did not fail initialization: %v", first)
 	}
 	if err := os.WriteFile(skill, []byte("now present"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := session.Run(context.Background(), source, "retry", false, "", settings); !errors.Is(err, first) {
+	if _, err := session.Run(t.Context(), source, "retry", false, "", settings); !errors.Is(err, first) {
 		t.Fatalf("partially initialized session forgot its error: %v; want %v", err, first)
 	}
 	if _, err := os.Stat(binary + ".called"); !errors.Is(err, os.ErrNotExist) {
@@ -665,11 +665,11 @@ fi
 		}
 	})
 	source := t.TempDir()
-	first, err := session.Run(context.Background(), source, "first", false, "", config.ClaudeConfig{})
+	first, err := session.Run(t.Context(), source, "first", false, "", config.ClaudeConfig{})
 	if err != nil || !first.UsageComplete || first.Tokens != (usage.Tokens{Input: math.MaxInt64}) {
 		t.Fatalf("at-limit baseline refused: %+v, %v", first, err)
 	}
-	second, err := session.Run(context.Background(), source, "second", false, "", config.ClaudeConfig{})
+	second, err := session.Run(t.Context(), source, "second", false, "", config.ClaudeConfig{})
 	if err == nil || !strings.Contains(err.Error(), "session usage totals overflow") || second.Answer != "" || second.UsageComplete || second.Tokens != (usage.Tokens{Input: 1}) || session.baseline != first.Tokens {
 		t.Fatalf("overflow corrupted prior baseline: %+v, %v, baseline=%+v", second, err, session.baseline)
 	}
@@ -685,7 +685,7 @@ func TestSessionTreatsNilAndEmptySkillsAsTheSameSelection(t *testing.T) {
 	})
 	dir := t.TempDir()
 	for call, selected := range [][]string{{}, nil, {}} {
-		result, err := session.Run(context.Background(), dir, "task", false, "", config.ClaudeConfig{Skills: selected})
+		result, err := session.Run(t.Context(), dir, "task", false, "", config.ClaudeConfig{Skills: selected})
 		if err != nil || result.Answer != "final answer" {
 			t.Fatalf("call %d changed the empty skill selection: %+v %v", call, result, err)
 		}

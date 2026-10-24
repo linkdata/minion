@@ -142,7 +142,7 @@ func TestUnixExecutionOwnedWorker(t *testing.T) {
 		t.Fatalf("private socket refused with safe selected roles: %v", err)
 	}
 
-	ctx, stop := context.WithTimeout(context.Background(), 90*time.Second)
+	ctx, stop := context.WithTimeout(t.Context(), 90*time.Second)
 	cancel = stop
 	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestUnixExecutionWorkerHelper$")
 	cmd.Env = append(os.Environ(), "MINION_UNIX_WORKER_HELPER=1", "MINION_UNIX_WORKER_SOCKET="+endpoint.SocketPath(),
@@ -408,7 +408,7 @@ func TestUnixExecutionWorkerHelper(t *testing.T) {
 		}
 		return aicli.Result{Answer: answer, Tokens: usage.Tokens{Input: 9, CachedInput: 2, Output: 4}, UsageComplete: true}, nil
 	}}
-	ctx, cancel := context.WithTimeout(context.Background(), 75*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 75*time.Second)
 	defer cancel()
 	for index := 0; index < 2; index++ {
 		if index == 1 {

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"errors"
 	"io"
 	"log"
@@ -38,7 +37,7 @@ func TestServiceWiringPreservesAdmissionAndHostPolicy(t *testing.T) {
 	if orchestrator.GitHub != client || orchestrator.Store != store || orchestrator.Logger != logger || orchestrator.Runner.Logger != logger {
 		t.Fatal("service lost client, state or logger")
 	}
-	if err := orchestrator.Execute(context.Background(), monitor.Job{}); !errors.Is(err, admissionErr) {
+	if err := orchestrator.Execute(t.Context(), monitor.Job{}); !errors.Is(err, admissionErr) {
 		t.Fatalf("wired admission did not stop execution: %v", err)
 	}
 	if orchestrator.WorkRoot != cfg.WorkRoot || !errors.Is(orchestrator.CheckWorkRoot(), admissionErr) ||

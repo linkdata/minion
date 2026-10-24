@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"log"
 	"os"
@@ -12,10 +11,22 @@ import (
 	"testing"
 
 	"github.com/linkdata/minion/internal/config"
+	"github.com/linkdata/minion/internal/processgroup"
 	"github.com/linkdata/minion/internal/testsupport"
 )
 
+func requireCLIProcessGroup(t *testing.T) {
+	t.Helper()
+	if err := processgroup.Check(); err != nil {
+		if os.Getenv("MINION_REQUIRE_PROCESSGROUP") == "1" {
+			t.Fatal(err)
+		}
+		t.Skipf("CLI execution requires the delegated check service: %v", err)
+	}
+}
+
 func TestCheckModelsRequiresOnlySelectedProvider(t *testing.T) {
+	requireCLIProcessGroup(t)
 	t.Setenv("ANTHROPIC_API_KEY", "")
 	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "")
 	t.Setenv("CODEX_API_KEY", "")
@@ -38,7 +49,7 @@ func TestCheckModelsRequiresOnlySelectedProvider(t *testing.T) {
 			}
 			cfg := config.Config{Main: provider}
 			var output bytes.Buffer
-			if err := checkModels(context.Background(), &cfg, log.New(&output, "", 0)); err == nil {
+			if err := checkModels(t.Context(), &cfg, log.New(&output, "", 0)); err == nil {
 				t.Fatal("preflight accepted a broken CLI")
 			}
 			for _, name := range []string{"codex", "claude"} {
@@ -63,6 +74,7 @@ func TestLogCommandSkillsReportsUnsupportedWorkflow(t *testing.T) {
 }
 
 func TestCheckModelsBoundsResolvedCatalogueModel(t *testing.T) {
+	requireCLIProcessGroup(t)
 	if runtime.GOOS != "linux" {
 		t.Skip("Claude sandbox support requires Linux")
 	}
@@ -97,7 +109,7 @@ else
 fi
 `)
 				var output bytes.Buffer
-				err := checkModels(context.Background(), &cfg, log.New(&output, "", 0))
+				err := checkModels(t.Context(), &cfg, log.New(&output, "", 0))
 				if cfg.Claude.Model != model {
 					t.Fatalf("preflight did not resolve catalogue model: model=%q error=%v", cfg.Claude.Model, err)
 				}
@@ -114,6 +126,7 @@ fi
 }
 
 func TestCheckModelsBoundsResolvedCodexCatalogueModel(t *testing.T) {
+	requireCLIProcessGroup(t)
 	for _, size := range []int{128, 129} {
 		t.Run(fmt.Sprint(size), func(t *testing.T) {
 			t.Setenv("HOME", t.TempDir())
@@ -145,7 +158,7 @@ esac
 `)
 			cfg := config.Config{Main: "codex"}
 			var output bytes.Buffer
-			err := checkModels(context.Background(), &cfg, log.New(&output, "", 0))
+			err := checkModels(t.Context(), &cfg, log.New(&output, "", 0))
 			if cfg.Codex.Model != model {
 				t.Fatalf("preflight did not resolve Codex catalogue model: model=%q error=%v", cfg.Codex.Model, err)
 			}
@@ -165,7 +178,7 @@ func TestGitHubTokenSelectionAndEmptyCLIResult(t *testing.T) {
 		t.Setenv("GH_TOKEN", "")
 		t.Setenv("GITHUB_TOKEN", "")
 		t.Setenv("PATH", t.TempDir())
-		if token, err := githubToken(context.Background()); token != "" || err == nil || !strings.Contains(err.Error(), "executable file not found") {
+		if token, err := githubToken(t.Context()); token != "" || err == nil || !strings.Contains(err.Error(), "executable file not found") {
 			t.Fatalf("missing gh returned token=%q error=%v", token, err)
 		}
 	})
@@ -179,6 +192,9 @@ func TestGitHubTokenSelectionAndEmptyCLIResult(t *testing.T) {
 		{name: "empty CLI result", output: " \r\n", wantError: "gh auth token returned an empty token", callCLI: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			if test.callCLI {
+				requireCLIProcessGroup(t)
+			}
 			dir := t.TempDir()
 			t.Setenv("PATH", dir)
 			t.Setenv("GH_TOKEN", test.ghToken)
@@ -191,7 +207,7 @@ func TestGitHubTokenSelectionAndEmptyCLIResult(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(dir, "gh"), []byte(script), 0700); err != nil {
 				t.Fatal(err)
 			}
-			got, err := githubToken(context.Background())
+			got, err := githubToken(t.Context())
 			if got != test.want || (test.wantError == "" && err != nil) || (test.wantError != "" && (err == nil || !strings.Contains(err.Error(), test.wantError))) {
 				t.Fatalf("token=%q error=%v; want %q, %q", got, err, test.want, test.wantError)
 			}

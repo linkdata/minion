@@ -22,6 +22,7 @@ import (
 )
 
 func TestHTTPCheckpointsKeepActualStoreRefusalsAndDurablePrefix(t *testing.T) {
+	requireActionProcessGroup(t)
 	for _, stage := range []string{"before", "after", "approved decision", "capped decision", "optional usage"} {
 		t.Run(stage, func(t *testing.T) {
 			job := withClaudeCritic(testJob(command.Comment))
@@ -80,7 +81,7 @@ func TestHTTPCheckpointsKeepActualStoreRefusalsAndDurablePrefix(t *testing.T) {
 				remote.ServeHTTP(w, r)
 			}))
 			defer server.Close()
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 			defer cancel()
 			defer remote.Close()
 			type returned struct {
@@ -165,7 +166,7 @@ func TestHTTPRejectsMalformedCompletedCallBeforeSavingUsage(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			owner := newExecutionAdapterFixture(t, testJob(command.Comment))
 			store := owner.startUsage()
-			f := newHTTPServerTest(t, context.Background(), owner.job, owner.sink, nil)
+			f := newHTTPServerTest(t, t.Context(), owner.job, owner.sink, nil)
 			f.pull(t)
 			f.ack(t, "/before", f.call(1), http.StatusOK, 1)
 			usagePath := filepath.Join(store.Dir, owner.job.Identity.AttemptID+".json")
@@ -210,7 +211,7 @@ func TestHTTPFailedOutcomeCannotChangeAcknowledgedReview(t *testing.T) {
 			owner := newExecutionAdapterFixture(t, withClaudeCritic(testJob(command.Comment)))
 			store := owner.startUsage()
 			want := privateReviewResult(owner.job)
-			f := newHTTPServerTest(t, context.Background(), owner.job, owner.sink, nil)
+			f := newHTTPServerTest(t, t.Context(), owner.job, owner.sink, nil)
 			f.pull(t)
 			sequence := uint64(1)
 			f.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: owner.review(nil, nil, "")}, http.StatusOK, sequence)
@@ -264,7 +265,7 @@ func TestHTTPFailedOutcomeCannotChangeAcknowledgedReview(t *testing.T) {
 func TestHTTPRejectsRefutationAddedAfterLaterCriticCall(t *testing.T) {
 	owner := newExecutionAdapterFixture(t, withClaudeCritic(testJob(command.Comment)))
 	want := privateReviewResult(owner.job)
-	f := newHTTPServerTest(t, context.Background(), owner.job, owner.sink, nil)
+	f := newHTTPServerTest(t, t.Context(), owner.job, owner.sink, nil)
 	f.pull(t)
 	sequence := uint64(1)
 	f.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: owner.review(nil, nil, "")}, http.StatusOK, sequence)
@@ -309,7 +310,7 @@ func TestHTTPFailedOutcomeWithoutCriticCannotInventReview(t *testing.T) {
 		t.Run(field, func(t *testing.T) {
 			owner := newExecutionAdapterFixture(t, testJob(command.Comment))
 			store := owner.startUsage()
-			f := newHTTPServerTest(t, context.Background(), owner.job, owner.sink, nil)
+			f := newHTTPServerTest(t, t.Context(), owner.job, owner.sink, nil)
 			f.pull(t)
 			f.ack(t, "/before", f.call(1), http.StatusOK, 1)
 			paid := f.call(2)

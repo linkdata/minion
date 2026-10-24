@@ -16,7 +16,7 @@ func FuzzShellQuote(f *testing.F) {
 		if strings.ContainsRune(value, 0) || len(value) > 4096 {
 			t.Skip("shell arguments cannot contain NUL; keep subprocess input bounded")
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 		defer cancel()
 		// #nosec G204 -- This test verifies that ShellQuote preserves arbitrary input literally.
 		data, err := exec.CommandContext(ctx, "/bin/sh", "-c", "printf '%s' "+ShellQuote(value)).Output()

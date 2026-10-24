@@ -179,7 +179,7 @@ func TestRunFatalGraceStopsWatchdogAndKeepsObservedUsage(t *testing.T) {
 				}
 				script += "sleep 30\n"
 				fakeExecutable(t, "claude", script)
-				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 				defer cancel()
 				start := time.Now()
 				result, err := Run(ctx, t.TempDir(), "task", false, "", config.ClaudeConfig{})

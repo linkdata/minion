@@ -1,7 +1,6 @@
 package claudecli
 
 import (
-	"context"
 	"fmt"
 	"math"
 	"strings"
@@ -225,7 +224,7 @@ func TestOutputReportsSafeNativeAPIErrorFields(t *testing.T) {
 }
 
 func TestEmptyPromptHasCompleteZeroUsage(t *testing.T) {
-	result, err := Run(context.Background(), t.TempDir(), "", false, "", config.ClaudeConfig{})
+	result, err := Run(t.Context(), t.TempDir(), "", false, "", config.ClaudeConfig{})
 	if err == nil || !result.UsageComplete || result.Tokens != (usage.Tokens{}) || result.Answer != "" {
 		t.Fatalf("prelaunch failure=%+v error=%v", result, err)
 	}

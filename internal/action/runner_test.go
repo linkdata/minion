@@ -22,6 +22,7 @@ import (
 )
 
 func TestRunnerUsesSuppliedSourceAndContext(t *testing.T) {
+	requireActionProcessGroup(t)
 	for _, provider := range []string{"codex", "claude"} {
 		t.Run(provider, func(t *testing.T) {
 			forbidNetworkGit(t)
@@ -78,7 +79,7 @@ func TestRunnerUsesSuppliedSourceAndContext(t *testing.T) {
 				}
 				return aicli.Result{Answer: "No findings", Tokens: usage.Tokens{Input: 10, Output: 2}, UsageComplete: true}, nil
 			}
-			result, err := runner.Run(context.Background(), job)
+			result, err := runner.Run(t.Context(), job)
 			if err != nil || len(result.Refutations) != 0 || calls != 1 || result.Answer != "No findings" || len(result.Calls) != 1 || !result.Calls[0].Complete {
 				t.Fatalf("Run = %+v, %v; calls %d", result, err, calls)
 			}
@@ -115,7 +116,7 @@ func TestReviewContextPreservesDistinctRevisionIdentities(t *testing.T) {
 	if err := json.Unmarshal(data, &metadata); err != nil || metadata.Head != job.Source.Head || metadata.Base != job.Source.Base || metadata.MergeBase != job.Source.MergeBase || !slices.Equal(metadata.Omitted, job.Source.Omitted) || !slices.Equal(metadata.HeadOmitted, job.Source.HeadOmitted) {
 		t.Fatalf("revision identity projection: %s, %v", data, err)
 	}
-	prompt, err := actionPrompt(context.Background(), job, "/source", root, "", "")
+	prompt, err := actionPrompt(t.Context(), job, "/source", root, "", "")
 	want := fmt.Sprintf("head %s (merge base %s, base tip %s)", job.Source.Head, job.Source.MergeBase, job.Source.Base)
 	if err != nil || !strings.Contains(prompt, want) {
 		t.Fatalf("revision identity prompt: %q, %v; want %q", prompt, err, want)
@@ -136,6 +137,7 @@ func TestAuditPromptDescribesPublicSummary(t *testing.T) {
 }
 
 func TestRunnerReturnsFileChangesAndPartialUsage(t *testing.T) {
+	requireActionProcessGroup(t)
 	job := testJob(command.Fix)
 	runner := Runner{WorkRoot: t.TempDir()}
 	runner.runModel = func(_ context.Context, request modelRun) (aicli.Result, error) {
@@ -150,7 +152,7 @@ func TestRunnerReturnsFileChangesAndPartialUsage(t *testing.T) {
 		}
 		return aicli.Result{Answer: "Changed two files", UsageComplete: true}, nil
 	}
-	result, err := runner.Run(context.Background(), job)
+	result, err := runner.Run(t.Context(), job)
 	want := []workspace.Change{{Path: "binary", Mode: workspace.Executable, Data: []byte{0, 1, 2}}, {Path: "source.txt", Delete: true}}
 	if err != nil || !reflect.DeepEqual(result.Changes, want) {
 		t.Fatalf("changes = %+v, %v", result.Changes, err)
@@ -159,26 +161,28 @@ func TestRunnerReturnsFileChangesAndPartialUsage(t *testing.T) {
 	runner.runModel = func(_ context.Context, _ modelRun) (aicli.Result, error) {
 		return aicli.Result{Tokens: usage.Tokens{Input: 12, Output: 3}}, failure
 	}
-	result, err = runner.Run(context.Background(), job)
+	result, err = runner.Run(t.Context(), job)
 	if !errors.Is(err, failure) || errors.Is(err, monitor.ErrTerminalJob) || len(result.Calls) != 1 || result.Calls[0].Tokens.Input != 12 || result.Calls[0].Complete || result.Answer != "" {
 		t.Fatalf("failure lost partial usage: %+v, %v", result, err)
 	}
 }
 
 func TestRunnerRedactsBothConfiguredKeysInReturnedError(t *testing.T) {
+	requireActionProcessGroup(t)
 	const codexKey, claudeKey = "fixture-codex-key", "fixture-claude-key"
 	cause := errors.New("provider failed with " + codexKey + " and " + claudeKey)
 	runner := Runner{WorkRoot: t.TempDir(), Codex: config.CodexConfig{APIKey: codexKey}, Claude: config.ClaudeConfig{APIKey: claudeKey}}
 	runner.runModel = func(context.Context, modelRun) (aicli.Result, error) {
 		return aicli.Result{}, fmt.Errorf("model call: %w", cause)
 	}
-	result, err := runner.Run(context.Background(), testJob(command.Comment))
+	result, err := runner.Run(t.Context(), testJob(command.Comment))
 	if !errors.Is(err, cause) || err.Error() != "model call: provider failed with [redacted] and [redacted]" || len(result.Calls) != 1 {
 		t.Fatalf("returned error lost redaction or cause: %+v, %v", result, err)
 	}
 }
 
 func TestRunnerUsesLocalHistoryWhenComparisonDiffIsIncomplete(t *testing.T) {
+	requireActionProcessGroup(t)
 	job := testJob(command.Review)
 	job.Source.Diff, job.Source.DiffIncomplete = nil, true
 	job.Source.ChangedPaths = []string{"source.txt", "deleted.txt"}
@@ -205,12 +209,13 @@ func TestRunnerUsesLocalHistoryWhenComparisonDiffIsIncomplete(t *testing.T) {
 			return aicli.Result{Answer: "Compared using local Git", UsageComplete: true}, nil
 		},
 	}
-	if _, err := runner.Run(context.Background(), job); err != nil {
+	if _, err := runner.Run(t.Context(), job); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func TestRunnerKeepsCriticReadOnlyAndPrivateReasoning(t *testing.T) {
+	requireActionProcessGroup(t)
 	forbidNetworkGit(t)
 	job := testJob(command.Fix)
 	job.Source.Files = append(job.Source.Files, workspace.File{Path: "deleted.txt", Mode: workspace.Regular, Data: []byte("original deleted file")})
@@ -272,25 +277,27 @@ func TestRunnerKeepsCriticReadOnlyAndPrivateReasoning(t *testing.T) {
 		}
 		return aicli.Result{Answer: approvedCritiqueJSON, UsageComplete: true}, nil
 	}
-	result, err := runner.Run(context.Background(), job)
+	result, err := runner.Run(t.Context(), job)
 	if err != nil || calls != 2 || result.Answer != "public answer" || len(result.Refutations) != 0 || len(result.Calls) != 2 || result.Calls[1].Role != "critic" || len(result.Changes) != 3 {
 		t.Fatalf("result = %+v, %v", result, err)
 	}
 }
 
 func TestRunnerIgnoresWorkerGitMetadata(t *testing.T) {
+	requireActionProcessGroup(t)
 	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 		writeFixtureFile(t, request.dir, "nested/.GiT/config", []byte("untrusted worker metadata"))
 		writeFixtureFile(t, request.dir, "source.txt", []byte("changed"))
 		return aicli.Result{Answer: "Changed source", UsageComplete: true}, nil
 	}}
-	result, err := runner.Run(context.Background(), testJob(command.Fix))
+	result, err := runner.Run(t.Context(), testJob(command.Fix))
 	if err != nil || len(result.Changes) != 1 || result.Changes[0].Path != "source.txt" || string(result.Changes[0].Data) != "changed" {
 		t.Fatalf("metadata result=%+v,%v", result, err)
 	}
 }
 
 func TestRunnerCanonicalizesTrustedWorkRoot(t *testing.T) {
+	requireActionProcessGroup(t)
 	root := t.TempDir()
 	actual, link := filepath.Join(root, "actual"), filepath.Join(root, "linked")
 	if err := os.Mkdir(actual, 0700); err != nil {
@@ -309,7 +316,7 @@ func TestRunnerCanonicalizesTrustedWorkRoot(t *testing.T) {
 		}
 		return aicli.Result{Answer: "Read source", UsageComplete: true}, nil
 	}}
-	if _, err := runner.Run(context.Background(), testJob(command.Comment)); err != nil {
+	if _, err := runner.Run(t.Context(), testJob(command.Comment)); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -388,6 +395,7 @@ func TestPortableAuditMetadataUsesSourceIdentity(t *testing.T) {
 }
 
 func TestRunnerReturnsPartialAuditArtifactsOnFailure(t *testing.T) {
+	requireActionProcessGroup(t)
 	for _, field := range []string{"", "scope_paths"} {
 		name := "host_path_in_" + field
 		if field == "" {
@@ -412,7 +420,7 @@ func TestRunnerReturnsPartialAuditArtifactsOnFailure(t *testing.T) {
 				}
 				return aicli.Result{Tokens: usage.Tokens{Input: 9}}, failure
 			}}
-			result, err := runner.Run(context.Background(), job)
+			result, err := runner.Run(t.Context(), job)
 			wantArtifacts := 2
 			if field != "" {
 				wantArtifacts = 1
@@ -439,6 +447,7 @@ func TestRunnerReturnsPartialAuditArtifactsOnFailure(t *testing.T) {
 }
 
 func TestRunnerRejectsGitMetadataMutation(t *testing.T) {
+	requireActionProcessGroup(t)
 	mutations := []string{"HEAD contents", "config contents", "added file", "permissions", "root file", "root symlink", "hard link"}
 	for _, test := range []struct {
 		action    command.Action
@@ -518,7 +527,7 @@ func TestRunnerRejectsGitMetadataMutation(t *testing.T) {
 						}
 					}
 				}
-				result, err := runner.Run(context.Background(), job)
+				result, err := runner.Run(t.Context(), job)
 				if !errors.Is(err, monitor.ErrTerminalJob) || result.Answer != "" || len(result.Changes) != 0 || !strings.Contains(err.Error(), wantError) || calls != wantCalls || len(result.Calls) != wantCalls || result.Calls[len(result.Calls)-1].Role != role {
 					t.Fatalf("metadata mutation accepted or wrong role failed: calls=%d want=%d result=%+v error=%v want=%q", calls, wantCalls, result, err, wantError)
 				}

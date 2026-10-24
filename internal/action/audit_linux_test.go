@@ -25,7 +25,7 @@ func TestAuditPermissionProbeDoesNotRetryAfterDescendants(t *testing.T) {
 		"(while [ ! -f " + shellQuote(pidFile+".stop") + " ]; do sleep 1; done) </dev/null >/dev/null 2>&1 &\n" +
 		"printf '%s' \"$!\" > " + shellQuote(pidFile) + "\nexit 0\n"
 	bin := fakeOnPath(t, "node", script)
-	flag, err := auditNodePermissionFlag(context.Background(), bin, filepath.Join(bin, "node"))
+	flag, err := auditNodePermissionFlag(t.Context(), bin, filepath.Join(bin, "node"))
 	if flag != "" || !errors.Is(err, processgroup.ErrDescendants) {
 		t.Fatalf("permission probe accepted surviving child: flag=%q error=%v", flag, err)
 	}
@@ -40,7 +40,7 @@ func TestAuditPermissionProbeDoesNotRetryAfterDescendants(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer child.Close()
-	waitCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	waitCtx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
 	if err := child.WaitExited(waitCtx); err != nil {
 		t.Fatalf("audit probe child survived: %v", err)
@@ -58,7 +58,7 @@ func TestAuditPermissionProbeDoesNotRetryAfterExhaustion(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = processgroup.Configure(processgroup.DefaultMaxTasks, processgroup.DefaultMaxMemoryMiB<<20) })
-	flag, err := auditNodePermissionFlag(context.Background(), bin, filepath.Join(bin, "node"))
+	flag, err := auditNodePermissionFlag(t.Context(), bin, filepath.Join(bin, "node"))
 	if flag != "" || !errors.Is(err, processgroup.ErrExhausted) {
 		t.Fatalf("permission probe hid process exhaustion: flag=%q error=%v", flag, err)
 	}

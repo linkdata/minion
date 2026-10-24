@@ -23,6 +23,7 @@ import (
 )
 
 func TestExecuteRejectsHostileHTTPOutcomeBeforePublication(t *testing.T) {
+	requireActionProcessGroup(t)
 	for _, scenario := range []struct {
 		name, change string
 		critic       bool

@@ -134,7 +134,7 @@ func TestCgroupCommandStopsDescendants(t *testing.T) {
 			if time.Since(started) > 6*time.Second {
 				t.Fatalf("Wait took %v", time.Since(started))
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 			defer cancel()
 			if err := child.WaitExited(ctx); err != nil {
 				t.Fatalf("detached child survived: %v", err)
@@ -150,7 +150,7 @@ func TestCgroupCommandContextCancellation(t *testing.T) {
 	if err := Check(); err != nil {
 		t.Skipf("delegated cgroup unavailable: %v", err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
 	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestProcessgroupHelperProcess$")
@@ -171,7 +171,7 @@ func TestCgroupCommandContextCancellation(t *testing.T) {
 	if time.Since(started) > 3*time.Second {
 		t.Fatalf("forced cancellation exceeded bound: %v", time.Since(started))
 	}
-	waitCtx, stopWait := context.WithTimeout(context.Background(), 2*time.Second)
+	waitCtx, stopWait := context.WithTimeout(t.Context(), 2*time.Second)
 	defer stopWait()
 	if err := child.WaitExited(waitCtx); err != nil {
 		t.Fatalf("detached child survived cancellation: %v", err)
@@ -208,7 +208,7 @@ func TestCgroupLimitsBeforeActionAndGracefulCancellation(t *testing.T) {
 		t.Skipf("delegated cgroup unavailable: %v", err)
 	}
 	setTestLimits(t, 64, 512<<20)
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	report := filepath.Join(t.TempDir(), "limits")
 	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestProcessgroupHelperProcess$")
@@ -249,7 +249,7 @@ func TestCgroupPIDLimitReportsExhaustion(t *testing.T) {
 		t.Skipf("delegated cgroup unavailable: %v", err)
 	}
 	setTestLimits(t, 1, 512<<20)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", "/bin/sleep 1 & wait")
 	h, err := Start(cmd)
@@ -305,7 +305,7 @@ func TestCgroupMemoryLimitReportsOOM(t *testing.T) {
 		t.Skipf("delegated cgroup unavailable: %v", err)
 	}
 	setTestLimits(t, 64, 96<<20)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestProcessgroupHelperProcess$")
 	cmd.Env = append(os.Environ(), "MINION_PROCESSGROUP_TEST_MODE=memory-exhaust")

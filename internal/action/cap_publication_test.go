@@ -2,7 +2,6 @@ package action
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,6 +21,7 @@ import (
 )
 
 func TestCappedPublicationProjectsEveryPublicBodyAndRetainedAudit(t *testing.T) {
+	requireActionProcessGroup(t)
 	for _, action := range []command.Action{command.Review, command.Comment, command.SecurityAudit, command.Fix} {
 		for _, verdict := range []string{"full blockers", "verification blockers with full approval", "only nits"} {
 			t.Run(string(action)+"/"+verdict, func(t *testing.T) {
@@ -92,7 +92,7 @@ func TestCappedPublicationProjectsEveryPublicBodyAndRetainedAudit(t *testing.T) 
 					Source: github.Item{Author: github.User{ID: job.Identity.RequesterID, Login: job.Identity.Requester}, UpdatedAt: time.Now()}, Command: command.Command{Name: job.Command, Action: action}}
 				root := t.TempDir()
 				orchestrator := Orchestrator{WorkRoot: root, GitHub: testGitHub(server, "token")}
-				if err := orchestrator.publish(context.Background(), &preparedAction{job: job, request: request, issueNodeID: "issue-node"}, result); err != nil {
+				if err := orchestrator.publish(t.Context(), &preparedAction{job: job, request: request, issueNodeID: "issue-node"}, result); err != nil {
 					t.Fatal(err)
 				}
 				if writes != 1 || strings.Count(posted, "Critic round limit reached (2).") != 1 || !strings.Contains(posted, "Normal critic acceptance was not reached; unresolved findings may remain.") || strings.Contains(posted, "PRIVATE") || !strings.HasSuffix(posted, "\n\n"+request.Marker()) {
@@ -189,7 +189,7 @@ func TestCappedPublicationRefusesInvalidRawResultAndProjectionOverflow(t *testin
 				}))
 				defer server.Close()
 				root := t.TempDir()
-				err = (&Orchestrator{WorkRoot: root, GitHub: testGitHub(server, "token")}).publish(context.Background(), &preparedAction{job: job}, result)
+				err = (&Orchestrator{WorkRoot: root, GitHub: testGitHub(server, "token")}).publish(t.Context(), &preparedAction{job: job}, result)
 				wantError := "invalid action result"
 				if failure == "projected overflow" {
 					wantError = "publication projection"

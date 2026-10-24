@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -23,11 +24,24 @@ import (
 	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/gitwork"
 	"github.com/linkdata/minion/internal/monitor"
+	"github.com/linkdata/minion/internal/processgroup"
 	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/state"
 	"github.com/linkdata/minion/internal/testsupport"
 	"github.com/linkdata/minion/internal/workspace"
 )
+
+var actionProcessGroupCheck = sync.OnceValue(processgroup.Check)
+
+func requireActionProcessGroup(t *testing.T) {
+	t.Helper()
+	if err := actionProcessGroupCheck(); err != nil {
+		if os.Getenv("MINION_REQUIRE_PROCESSGROUP") == "1" {
+			t.Fatal(err)
+		}
+		t.Skipf("native action execution requires a delegated service: %v", err)
+	}
+}
 
 var defaultActionTestCommands = map[string]command.Action{
 	"review": command.Review, "fix": command.Fix, "audit": command.Comment, "security-audit": command.SecurityAudit,
@@ -109,6 +123,7 @@ func assertEmptyDir(t *testing.T, root string) {
 
 func gitFixtureRemote(t *testing.T, files ...workspace.File) (base, head, remote string) {
 	t.Helper()
+	requireActionProcessGroup(t)
 	realGit, err := exec.LookPath("git")
 	if err != nil {
 		t.Fatal(err)
@@ -251,6 +266,7 @@ const privateForkRepositoryJSON = `{"id":2,"full_name":"linkdataminion/r","fork"
 
 func offlineIndexFixture(t *testing.T, files []workspace.File) (*gitwork.OfflineIndex, string) {
 	t.Helper()
+	requireActionProcessGroup(t)
 	root := t.TempDir()
 	source, err := os.MkdirTemp(root, "source-")
 	if err != nil {
@@ -263,7 +279,7 @@ func offlineIndexFixture(t *testing.T, files []workspace.File) (*gitwork.Offline
 	if err := workspace.Materialize(source, files); err != nil {
 		t.Fatal(err)
 	}
-	index, err := gitwork.NewOfflineIndex(context.Background(), metadata, source, files)
+	index, err := gitwork.NewOfflineIndex(t.Context(), metadata, source, files)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -302,7 +318,8 @@ func withClaudeCritic(job Job) Job {
 
 func cloneFixture(t *testing.T, root string) *gitwork.Checkout {
 	t.Helper()
-	checkout, err := gitwork.Clone(context.Background(), root, "o/r", "main", true)
+	requireActionProcessGroup(t)
+	checkout, err := gitwork.Clone(t.Context(), root, "o/r", "main", true)
 	if err != nil {
 		t.Fatal(err)
 	}

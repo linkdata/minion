@@ -83,7 +83,7 @@ func TestExecutePublicationBookkeepingBoundaries(t *testing.T) {
 			request := usageJob()
 			request.Command.Name, request.Command.Action = "audit", command.Comment
 			request.Repository.Actions = []string{"audit"}
-			err := e.Execute(context.Background(), request)
+			err := e.Execute(t.Context(), request)
 			if !posted.Load() {
 				t.Fatalf("test never reached publication: %v", err)
 			}

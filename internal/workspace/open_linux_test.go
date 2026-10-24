@@ -3,7 +3,6 @@
 package workspace
 
 import (
-	"context"
 	"errors"
 	"io/fs"
 	"os"
@@ -39,7 +38,7 @@ func TestCollectionRefusesSymlinkParents(t *testing.T) {
 		t.Fatalf("read outside source through parent: %q", data)
 	}
 	visited := false
-	if err := walk(context.Background(), parent, false, func(string, fs.DirEntry) error { visited = true; return nil }); err == nil || visited {
+	if err := walk(t.Context(), parent, false, func(string, fs.DirEntry) error { visited = true; return nil }); err == nil || visited {
 		t.Fatalf("walk followed root symlink: visited=%v error=%v", visited, err)
 	}
 }
@@ -61,10 +60,10 @@ func TestCollectionRefusesHardlinkedFiles(t *testing.T) {
 	}{
 		{"regular file", func() (int, error) { data, err := ReadRegular(name, MaxBytes); return len(data), err }},
 		{"source scan", func() (int, error) {
-			return 0, CheckUnchanged(context.Background(), root, []File{{Path: "file", Mode: Regular, Data: []byte(contents)}})
+			return 0, CheckUnchanged(t.Context(), root, []File{{Path: "file", Mode: Regular, Data: []byte(contents)}})
 		}},
 		{"selected changes", func() (int, error) {
-			changes, err := ReadChanges(context.Background(), root, []Change{{Path: "file", Mode: Regular}})
+			changes, err := ReadChanges(t.Context(), root, []Change{{Path: "file", Mode: Regular}})
 			return len(changes), err
 		}},
 	} {
@@ -134,7 +133,7 @@ func TestWalkRefusesDirectoryReplacedAfterQueueing(t *testing.T) {
 		t.Fatal(err)
 	}
 	visitedOutside := false
-	err := walk(context.Background(), root, false, func(name string, entry fs.DirEntry) error {
+	err := walk(t.Context(), root, false, func(name string, entry fs.DirEntry) error {
 		if name == parent {
 			if err := os.Rename(parent, filepath.Join(root, "original")); err != nil {
 				return err
@@ -173,7 +172,7 @@ func TestCollectionTraversesExecuteOnlyParents(t *testing.T) {
 	if err != nil || string(data) != "contents" {
 		t.Fatalf("read through execute-only parent=%q,%v", data, err)
 	}
-	if err := CheckUnchanged(context.Background(), root, base); err != nil {
+	if err := CheckUnchanged(t.Context(), root, base); err != nil {
 		t.Fatalf("scan below execute-only parent=%v", err)
 	}
 }
@@ -189,7 +188,7 @@ func TestReadChangesUsesOnlySelectedRegularPaths(t *testing.T) {
 	if err := os.Symlink(outside, filepath.Join(root, "ignored")); err != nil {
 		t.Fatal(err)
 	}
-	changes, err := ReadChanges(context.Background(), root, []Change{{Path: "changed", Mode: Executable}, {Path: "deleted", Delete: true}})
+	changes, err := ReadChanges(t.Context(), root, []Change{{Path: "changed", Mode: Executable}, {Path: "deleted", Delete: true}})
 	if err != nil || len(changes) != 2 || changes[0].Mode != Executable || string(changes[0].Data) != string([]byte{0, 255}) {
 		t.Fatalf("selected changes=%+v,%v", changes, err)
 	}
@@ -203,7 +202,7 @@ func TestReadChangesUsesOnlySelectedRegularPaths(t *testing.T) {
 		{[]Change{{Path: "changed"}}, "invalid changed mode"},
 		{[]Change{{Path: "changed", Delete: true, Data: []byte("invalid")}}, "has content or mode"},
 	} {
-		if _, err := ReadChanges(context.Background(), root, test.selected); err == nil || !strings.Contains(err.Error(), test.want) {
+		if _, err := ReadChanges(t.Context(), root, test.selected); err == nil || !strings.Contains(err.Error(), test.want) {
 			t.Fatalf("selection %+v validation=%v want%q", test.selected, err, test.want)
 		}
 	}
@@ -221,10 +220,10 @@ func TestCollectionRefusesRootSymlinksEvenForDeleteOnlySelections(t *testing.T) 
 	}
 	for _, check := range []func() error{
 		func() error { return CheckRoot(root) },
-		func() error { return CheckUnchanged(context.Background(), root, base) },
-		func() error { _, err := ReadChanges(context.Background(), root, nil); return err },
+		func() error { return CheckUnchanged(t.Context(), root, base) },
+		func() error { _, err := ReadChanges(t.Context(), root, nil); return err },
 		func() error {
-			_, err := ReadChanges(context.Background(), root, []Change{{Path: "file", Delete: true}})
+			_, err := ReadChanges(t.Context(), root, []Change{{Path: "file", Delete: true}})
 			return err
 		},
 	} {

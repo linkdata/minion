@@ -44,7 +44,7 @@ func TestLiveCloneAndPullRequest(t *testing.T) {
 		t.Skip("pull_request_number is absent")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 	defer cancel()
 	botToken := liveGitworkToken(t, ctx, cfg.BotLogin)
 	client := github.New(botToken)
@@ -141,7 +141,7 @@ func TestLiveCommitAndPush(t *testing.T) {
 		t.Fatal("live Gitwork write test is restricted to linkdata/miniontesting and linkdataminion")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 	defer cancel()
 	ownerToken, botToken := liveGitworkToken(t, ctx, cfg.OwnerLogin), liveGitworkToken(t, ctx, cfg.BotLogin)
 	owner, bot := github.New(ownerToken), github.New(botToken)
@@ -181,7 +181,7 @@ func TestLiveCommitAndPush(t *testing.T) {
 		if recordedHead == "" {
 			return
 		}
-		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), time.Minute)
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(t.Context()), time.Minute)
 		defer cleanupCancel()
 		remote, err := bot.Branch(cleanupCtx, forkName, branch)
 		if liveGitworkNotFound(err) {

@@ -27,7 +27,7 @@ func TestHTTPFailureFallbackPreservesCoreWithoutAcknowledgingRawClaims(t *testin
 		t.Run(name, func(t *testing.T) {
 			f := newExecutionAdapterFixture(t, withClaudeCritic(testJob(command.Comment)))
 			store := f.startUsage()
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 			defer cancel()
 			transport := newHTTPServerTest(t, ctx, f.job, f.sink, nil)
 			transport.pull(t)

@@ -16,6 +16,7 @@ import (
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/config"
+	"github.com/linkdata/minion/internal/processgroup"
 	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/testsupport"
 	"github.com/linkdata/minion/internal/usage"
@@ -54,7 +55,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"test"}' '{"type":"item.comp
 			t.Setenv("GH_TOKEN", "secret")
 			t.Setenv("GITHUB_TOKEN", "secret")
 
-			answer, err := Run(context.Background(), dir, "Handle mention", tt.writable, "", config.CodexConfig{})
+			answer, err := Run(t.Context(), dir, "Handle mention", tt.writable, "", config.CodexConfig{})
 			if err != nil {
 				t.Fatalf("Run() error = %v", err)
 			}
@@ -161,7 +162,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"test"}' '{"type":"item.comp
 		}
 	}
 	t.Setenv("PATH", strings.Join(append(blocked, filepath.Dir(binary), "/usr/bin"), string(os.PathListSeparator)))
-	if result, err := session.Run(context.Background(), workspace, "task", true, output, config.CodexConfig{}); err != nil || result.Answer != "done" {
+	if result, err := session.Run(t.Context(), workspace, "task", true, output, config.CodexConfig{}); err != nil || result.Answer != "done" {
 		t.Fatalf("Run() = %+v, %v", result, err)
 	}
 	data, err := os.ReadFile(binary + ".path")
@@ -194,17 +195,17 @@ fi
 	var session Session
 	t.Cleanup(func() { _ = session.Close() })
 	source := t.TempDir()
-	if _, err := session.Run(context.Background(), source, "first", false, "", config.CodexConfig{}); err == nil || !strings.Contains(err.Error(), "identity changed within one call") || session.threadID != "" {
+	if _, err := session.Run(t.Context(), source, "first", false, "", config.CodexConfig{}); err == nil || !strings.Contains(err.Error(), "identity changed within one call") || session.threadID != "" {
 		t.Fatalf("stopped output bound a thread: thread=%q err=%v", session.threadID, err)
 	}
-	if _, err := session.Run(context.Background(), source, "second", false, "", config.CodexConfig{}); err == nil || !strings.Contains(err.Error(), "previous invocation did not identify a resumable thread") {
+	if _, err := session.Run(t.Context(), source, "second", false, "", config.CodexConfig{}); err == nil || !strings.Contains(err.Error(), "previous invocation did not identify a resumable thread") {
 		t.Fatalf("stopped output resumed: %v", err)
 	}
 	if calls, err := os.ReadFile(bin + ".count"); err != nil || string(calls) != "1" {
 		t.Fatalf("stopped output redispatched: %q %v", calls, err)
 	}
 	session.NewConversation()
-	result, err := session.Run(context.Background(), source, "fresh", false, "", config.CodexConfig{})
+	result, err := session.Run(t.Context(), source, "fresh", false, "", config.CodexConfig{})
 	if err != nil || result.Answer != "done" || session.threadID != "fresh" {
 		t.Fatalf("fresh conversation failed: %+v thread=%q err=%v", result, session.threadID, err)
 	}
@@ -246,7 +247,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.comp
 			_ = os.RemoveAll(path)
 		}
 	})
-	result, err := Run(context.Background(), workspace, "Review", false, "", config.CodexConfig{})
+	result, err := Run(t.Context(), workspace, "Review", false, "", config.CodexConfig{})
 	if err != nil || result.Answer != "done" {
 		t.Fatalf("Run() = %+v, %v; want the answer and successful cleanup", result, err)
 	}
@@ -276,7 +277,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.comp
 	argsFile := fakeCodex + ".args"
 	promptFile := fakeCodex + ".prompt"
 	settings := config.CodexConfig{Model: "gpt-6-sol", ReasoningEffort: "ultra", Skills: []string{skillPath}}
-	if _, err := Run(context.Background(), dir, "Handle mention", false, "", settings); err != nil {
+	if _, err := Run(t.Context(), dir, "Handle mention", false, "", settings); err != nil {
 		t.Fatal(err)
 	}
 	args, err := os.ReadFile(argsFile)
@@ -315,7 +316,7 @@ cat > /dev/null
 printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"answer\":\"public\",\"refutations\":\"private\"}"}}' '{"type":"turn.completed"}'
 `)
 	const schema = `{"type":"object","properties":{"answer":{"type":"string"},"refutations":{"type":"string"}},"required":["answer","refutations"],"additionalProperties":false}`
-	result, err := Run(context.Background(), t.TempDir(), "Review candidate", true, "", config.CodexConfig{OutputSchema: schema})
+	result, err := Run(t.Context(), t.TempDir(), "Review candidate", true, "", config.CodexConfig{OutputSchema: schema})
 	if err != nil || result.Answer != `{"answer":"public","refutations":"private"}` {
 		t.Fatalf("structured result = %q, %v", result.Answer, err)
 	}
@@ -355,7 +356,7 @@ done
 printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}' '{"type":"turn.completed"}'
 `)
 	settings := config.CodexConfig{Skills: []string{skills.BuiltinAntiPromptInjection}}
-	if _, err := Run(context.Background(), dir, "Handle mention", false, "", settings); err != nil {
+	if _, err := Run(t.Context(), dir, "Handle mention", false, "", settings); err != nil {
 		t.Fatal(err)
 	}
 	runtimeData, err := os.ReadFile(fakeCodex + ".tmpdir")
@@ -411,7 +412,7 @@ cat >/dev/null
 printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.completed","item":{"type":"agent_message","text":"audit done"}}' '{"type":"turn.completed"}'
 `)
 	argsFile := fakeCodex + ".args"
-	if _, err := Run(context.Background(), workspace, "Audit source", false, output, config.CodexConfig{}); err != nil {
+	if _, err := Run(t.Context(), workspace, "Audit source", false, output, config.CodexConfig{}); err != nil {
 		t.Fatal(err)
 	}
 	args, err := os.ReadFile(argsFile)
@@ -438,7 +439,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.comp
 		if unsafe == "/" {
 			want = "expected a non-root directory"
 		}
-		if _, err := Run(context.Background(), workspace, "Audit source", false, unsafe, config.CodexConfig{}); err == nil || !strings.Contains(err.Error(), want) {
+		if _, err := Run(t.Context(), workspace, "Audit source", false, unsafe, config.CodexConfig{}); err == nil || !strings.Contains(err.Error(), want) {
 			t.Fatalf("accepted unsafe reports directory %q: %v", unsafe, err)
 		}
 	}
@@ -457,7 +458,7 @@ printf '%s\n' "$@" > "$0.args"
 cat >/dev/null
 printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.completed","item":{"type":"agent_message","text":"approved"}}' '{"type":"turn.completed"}'
 `)
-	if _, err := Run(context.Background(), workspace, "Critique reports", false, "", config.CodexConfig{ReadOnlyDirs: []string{reports}}); err != nil {
+	if _, err := Run(t.Context(), workspace, "Critique reports", false, "", config.CodexConfig{ReadOnlyDirs: []string{reports}}); err != nil {
 		t.Fatal(err)
 	}
 	args, err := os.ReadFile(binary + ".args")
@@ -475,7 +476,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.comp
 		{string(os.PathSeparator), "expected a non-root directory"},
 		{filepath.Join(root, "missing"), ""},
 	} {
-		_, err := Run(context.Background(), workspace, "Critique reports", false, "", config.CodexConfig{ReadOnlyDirs: []string{test.dir}})
+		_, err := Run(t.Context(), workspace, "Critique reports", false, "", config.CodexConfig{ReadOnlyDirs: []string{test.dir}})
 		if err == nil || test.failure != "" && !strings.Contains(err.Error(), test.failure) || test.failure == "" && !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("unsafe or missing report directory %s: %v; want %q", test.dir, err, test.failure)
 		}
@@ -494,7 +495,7 @@ func TestRunRejectsSkillInsideSource(t *testing.T) {
 	}
 	binary := installFakeCodex(t, "#!/bin/sh\ntouch \"$0.invoked\"\nexit 99\n")
 	for _, path := range []string{skill, alias} {
-		if _, err := Run(context.Background(), source, "task", false, "", config.CodexConfig{Skills: []string{path}}); err == nil || !strings.Contains(err.Error(), "skill is inside the untrusted source snapshot") {
+		if _, err := Run(t.Context(), source, "task", false, "", config.CodexConfig{Skills: []string{path}}); err == nil || !strings.Contains(err.Error(), "skill is inside the untrusted source snapshot") {
 			t.Fatalf("accepted source skill %q: %v", path, err)
 		}
 	}
@@ -515,7 +516,7 @@ func TestRunRejectsReadOnlyOutputOverlap(t *testing.T) {
 	}
 	binary := installFakeCodex(t, "#!/bin/sh\ntouch \"$0.invoked\"\nexit 99\n")
 	for _, path := range []string{output, child, filepath.Dir(output), alias} {
-		if _, err := Run(context.Background(), source, "task", false, output, config.CodexConfig{ReadOnlyDirs: []string{path}}); err == nil || !strings.Contains(err.Error(), "read-only directory overlaps the output directory") {
+		if _, err := Run(t.Context(), source, "task", false, output, config.CodexConfig{ReadOnlyDirs: []string{path}}); err == nil || !strings.Contains(err.Error(), "read-only directory overlaps the output directory") {
 			t.Fatalf("accepted read-only/output overlap %q: %v", path, err)
 		}
 	}
@@ -567,7 +568,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.comp
 				settings.APIKey = "dummy-configured-key"
 				want = "dummy-configured-key,absent,absent\n"
 			}
-			if _, err := Run(context.Background(), t.TempDir(), "Review this checkout", false, "", settings); err != nil {
+			if _, err := Run(t.Context(), t.TempDir(), "Review this checkout", false, "", settings); err != nil {
 				t.Fatal(err)
 			}
 			auth, err := os.ReadFile(fake + ".auth")
@@ -595,7 +596,7 @@ func TestRunRedactsConfiguredAPIKey(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			installFakeCodex(t, "#!/bin/sh\ncat >/dev/null\n"+test.output+"\n")
-			result, err := Run(context.Background(), t.TempDir(), "Review this checkout", false, "", config.CodexConfig{APIKey: "dummy-configured-key"})
+			result, err := Run(t.Context(), t.TempDir(), "Review this checkout", false, "", config.CodexConfig{APIKey: "dummy-configured-key"})
 			if (err != nil) != test.wantError {
 				t.Fatalf("unexpected Run error: %v", err)
 			}
@@ -616,7 +617,7 @@ func TestRunRedactsEncodedKeyBeforeQuotingFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	installFakeCodex(t, "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' "+aicli.ShellQuote(string(encoded[1:len(encoded)-1]))+" >&2\nexit 1\n")
-	_, err = Run(context.Background(), t.TempDir(), "Review this checkout", false, "", config.CodexConfig{APIKey: key})
+	_, err = Run(t.Context(), t.TempDir(), "Review this checkout", false, "", config.CodexConfig{APIKey: key})
 	if err == nil || strings.Contains(err.Error(), "fixture") || !strings.Contains(err.Error(), "[redacted]") {
 		t.Fatalf("encoded configured key escaped in quoted error: %v", err)
 	}
@@ -644,7 +645,7 @@ func TestRunDoesNotExposeKeyFragmentsAtDiagnosticLimit(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			installFakeCodex(t, "#!/bin/sh\ncat >/dev/null\n"+tc.script)
-			_, err := Run(context.Background(), t.TempDir(), "task", false, "", config.CodexConfig{APIKey: key})
+			_, err := Run(t.Context(), t.TempDir(), "task", false, "", config.CodexConfig{APIKey: key})
 			if err == nil || strings.Contains(err.Error(), tc.forbidden) || !strings.Contains(err.Error(), tc.required) || tc.clipped && (!strings.Contains(err.Error(), "[redacted]") || !strings.Contains(err.Error(), "y...") || len(err.Error()) > bounded.DiagnosticBytes+200) {
 				t.Fatalf("key fragment escaped or limit diagnostic lost in %s: %v", tc.name, err)
 			}
@@ -663,7 +664,7 @@ func TestRunRedactsEncodedKeyFromFailedEvent(t *testing.T) {
 		t.Fatal(err)
 	}
 	installFakeCodex(t, "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' "+aicli.ShellQuote(string(event))+"\n")
-	_, err = Run(context.Background(), t.TempDir(), "task", false, "", config.CodexConfig{APIKey: key})
+	_, err = Run(t.Context(), t.TempDir(), "task", false, "", config.CodexConfig{APIKey: key})
 	if err == nil || strings.Contains(err.Error(), "fixture") || !strings.Contains(err.Error(), "[redacted]") {
 		t.Fatalf("encoded configured key escaped failed event: %v", err)
 	}
@@ -679,7 +680,7 @@ func TestRunStartFailureReleasesUsageBaseline(t *testing.T) {
 			t.Error(err)
 		}
 	})
-	_, err := session.Run(context.Background(), canonicalTempDir(t), "Review", false, "", config.CodexConfig{})
+	_, err := session.Run(t.Context(), canonicalTempDir(t), "Review", false, "", config.CodexConfig{})
 	if err == nil || session.used || session.accounting.before != nil || session.accounting.known["root"].path != root {
 		t.Fatalf("start failure retained baseline or lost known rollout: err=%v used=%t before=%v known=%v", err, session.used, session.accounting.before != nil, session.accounting.known["root"].path)
 	}
@@ -691,7 +692,7 @@ printf '%s\n' '{"type":"turn.failed","error":{"message":"model request failed"}}
 printf '%s\n' 'connection lost' >&2
 exit 7
 `)
-	_, err := Run(context.Background(), t.TempDir(), "Review", false, "", config.CodexConfig{})
+	_, err := Run(t.Context(), t.TempDir(), "Review", false, "", config.CodexConfig{})
 	if err == nil || !strings.Contains(err.Error(), "model request failed") || !strings.Contains(err.Error(), "exit status 7") {
 		t.Fatalf("Run() error = %v, want Codex failure and exit code", err)
 	}
@@ -786,7 +787,7 @@ func TestRunRetainsFallbackUsageOnFailure(t *testing.T) {
 printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":70,"output_tokens":12}}'
 exit 7
 `)
-	result, err := Run(context.Background(), t.TempDir(), "Review", false, "", config.CodexConfig{})
+	result, err := Run(t.Context(), t.TempDir(), "Review", false, "", config.CodexConfig{})
 	if err == nil || !strings.Contains(err.Error(), "exit status 7") || strings.Contains(err.Error(), "did not identify a resumable thread") || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 100, CachedInput: 70, Output: 12}) {
 		t.Fatalf("lost partial usage: result=%+v, error=%v", result, err)
 	}
@@ -796,7 +797,7 @@ func TestRunRejectsMissingInitialThreadIdentityWithKnownUsage(t *testing.T) {
 	installFakeCodex(t, `#!/bin/sh
 printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}' '{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":70,"output_tokens":12}}'
 `)
-	result, err := Run(context.Background(), t.TempDir(), "Review", false, "", config.CodexConfig{})
+	result, err := Run(t.Context(), t.TempDir(), "Review", false, "", config.CodexConfig{})
 	if err == nil || !strings.Contains(err.Error(), "did not identify a resumable thread") || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 100, CachedInput: 70, Output: 12}) {
 		t.Fatalf("missing initial thread accepted or lost usage: result=%+v, error=%v", result, err)
 	}
@@ -804,7 +805,7 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
 
 func TestRunHonorsCancellation(t *testing.T) {
 	installFakeCodex(t, "#!/bin/sh\nexec sleep 10\n")
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 	defer cancel()
 	start := time.Now()
 	_, err := Run(ctx, t.TempDir(), "Review", false, "", config.CodexConfig{})
@@ -823,14 +824,25 @@ func TestRunRejectsExecutableFromSourceSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	_, err := Run(context.Background(), dir, "Review", false, "", config.CodexConfig{})
+	_, err := Run(t.Context(), dir, "Review", false, "", config.CodexConfig{})
 	if err == nil || !strings.Contains(err.Error(), "codex executable "+path+" is inside the untrusted source snapshot") {
 		t.Fatalf("Run() error = %v, want source snapshot executable rejection", err)
 	}
 }
 
+func requireCodexProcessGroup(t *testing.T) {
+	t.Helper()
+	if err := processgroup.Check(); err != nil {
+		if os.Getenv("MINION_REQUIRE_PROCESSGROUP") == "1" {
+			t.Fatal(err)
+		}
+		t.Skipf("native Codex tests require delegated process ownership: %v", err)
+	}
+}
+
 func installFakeCodex(t *testing.T, script string) string {
 	t.Helper()
+	requireCodexProcessGroup(t)
 	t.Setenv("CODEX_HOME", canonicalTempDir(t))
 	path, err := filepath.EvalSymlinks(filepath.Join(testsupport.FakeOnPath(t, "codex", script), "codex"))
 	if err != nil {

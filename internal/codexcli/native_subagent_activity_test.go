@@ -1,7 +1,6 @@
 package codexcli
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -35,7 +34,7 @@ func TestUsageSessionNativeSubAgentActivityNewSpawnOnResume(t *testing.T) {
 		{name: "started unfinished child remains unverified", kind: "started", unfinished: true, want: 25, unverified: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			ctx, home := context.Background(), t.TempDir()
+			ctx, home := t.Context(), t.TempDir()
 			root := writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "old-root", "r1", 100)...)
 			var session usageSession
 			session.begin(ctx, home, "root", time.Now())
@@ -84,7 +83,7 @@ func TestUsageSessionNativeSubAgentActivityNewSpawnOnResume(t *testing.T) {
 }
 
 func TestUsageSessionNativeInheritedActivityDoesNotGrantGrandchild(t *testing.T) {
-	ctx, home := context.Background(), t.TempDir()
+	ctx, home := t.Context(), t.TempDir()
 	root := writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "old-root", "r1", 100)...)
 	var session usageSession
 	session.begin(ctx, home, "root", time.Now())
@@ -105,7 +104,7 @@ func TestUsageSessionNativeInheritedActivityDoesNotGrantGrandchild(t *testing.T)
 }
 
 func TestUsageSessionNativeActivityInitialCallStillCountsOwnedHelper(t *testing.T) {
-	ctx, home := context.Background(), t.TempDir()
+	ctx, home := t.Context(), t.TempDir()
 	writeUsageRollout(t, home, "root", "", usageEvent("task_started", "root-turn"), nativeActivityEvent(25, "root", "root-turn", "started", "child"), usageRecord("root", "root-turn", "r1", 20, 0, 0), nativeActivityEvent(35, "root", "root-turn", "completed", "child"), usageEvent("task_complete", "root-turn"))
 	writeUsageRolloutBoundary(t, home, "child", "root", nil, completedUsageTurn("child", "child-turn", "c1", 5)...)
 	var session usageSession

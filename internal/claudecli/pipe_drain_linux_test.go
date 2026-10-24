@@ -24,7 +24,7 @@ mv -- "$0.pid.tmp" "$0.pid"
 exit 0
 `)
 	testsupport.StopOnCleanup(t, binary+".pid.stop")
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 8*time.Second)
 	defer cancel()
 	type outcome struct {
 		result aicli.Result
@@ -44,7 +44,7 @@ exit 0
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		waitCtx, stopWait := context.WithTimeout(context.Background(), 3*time.Second)
+		waitCtx, stopWait := context.WithTimeout(context.WithoutCancel(t.Context()), 3*time.Second)
 		defer stopWait()
 		if err := child.Cleanup(waitCtx); err != nil {
 			t.Errorf("finite fixture child remained live after cleanup: %v", err)

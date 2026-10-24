@@ -33,7 +33,7 @@ func TestReviewRoundBudgetIncludesEveryFreshFullRejection(t *testing.T) {
 				}
 				return aicli.Result{Answer: answer}, nil
 			}}
-			answer, stopReason, err := runner.runAI(context.Background(), job, "source", "Complete the task.", "", nil, &modelSessions{})
+			answer, stopReason, err := runner.runAI(t.Context(), job, "source", "Complete the task.", "", nil, &modelSessions{})
 			if err != nil || answer != "Candidate" || stopReason != "round_cap" || calls != 3*rounds-1 {
 				t.Fatalf("round budget: answer=%q stop=%q error=%v calls=%d want=%d", answer, stopReason, err, calls, 3*rounds-1)
 			}
@@ -42,7 +42,7 @@ func TestReviewRoundBudgetIncludesEveryFreshFullRejection(t *testing.T) {
 }
 
 func TestEveryActionPromptDeclaresRenderedPublicationBudget(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 	defer cancel()
 	deadline, _ := ctx.Deadline()
 	for _, action := range []command.Action{command.Review, command.Fix, command.Comment, command.SecurityAudit} {
@@ -128,6 +128,7 @@ func TestEveryActionPromptDeclaresRenderedPublicationBudget(t *testing.T) {
 }
 
 func TestNoCriticRunnerKeepsChangedFixWithUnpublishedOversizedSummary(t *testing.T) {
+	requireActionProcessGroup(t)
 	// The provider seam returns data directly; no native CLI or model is invoked.
 	for _, summary := range []struct{ name, text string }{
 		{"raw byte overflow", strings.Repeat("x", maxOutputBytes+1)},
@@ -149,7 +150,7 @@ func TestNoCriticRunnerKeepsChangedFixWithUnpublishedOversizedSummary(t *testing
 					}
 					return aicli.Result{Answer: summary.text, UsageComplete: true}, nil
 				}}
-				result, err := runner.Run(context.Background(), job)
+				result, err := runner.Run(t.Context(), job)
 				if calls != 1 || len(result.Calls) != 1 || result.Calls[0].Role != roleMain {
 					t.Fatalf("unexpected dispatch evidence: calls=%d result=%+v err=%v", calls, result, err)
 				}
@@ -166,6 +167,7 @@ func TestNoCriticRunnerKeepsChangedFixWithUnpublishedOversizedSummary(t *testing
 }
 
 func TestCriticAuditUsesValidatedReportDespiteOversizedProposal(t *testing.T) {
+	requireActionProcessGroup(t)
 	job := withClaudeCritic(auditRunnerJob(t))
 	job.CriticMaxRounds = 1
 	const report = "Validated audit report\n"
@@ -184,7 +186,7 @@ func TestCriticAuditUsesValidatedReportDespiteOversizedProposal(t *testing.T) {
 		}
 		return aicli.Result{Answer: proposalJSON(proposal, "")}, nil
 	}}
-	result, err := runner.Run(context.Background(), job)
+	result, err := runner.Run(t.Context(), job)
 	var savedReport string
 	for _, file := range result.Artifacts {
 		if file.Path == "REPORT.md" {
@@ -197,6 +199,7 @@ func TestCriticAuditUsesValidatedReportDespiteOversizedProposal(t *testing.T) {
 }
 
 func TestCriticRunnerKeepsChangedFixWithUnpublishedOversizedSummary(t *testing.T) {
+	requireActionProcessGroup(t)
 	for _, changed := range []bool{false, true} {
 		t.Run(fmt.Sprintf("changed=%t", changed), func(t *testing.T) {
 			job := withClaudeCritic(testJob(command.Fix))
@@ -215,7 +218,7 @@ func TestCriticRunnerKeepsChangedFixWithUnpublishedOversizedSummary(t *testing.T
 				}
 				return aicli.Result{Answer: proposalJSON(strings.Repeat("a\n", 20000), "")}, nil
 			}}
-			result, err := runner.Run(context.Background(), job)
+			result, err := runner.Run(t.Context(), job)
 			wantCalls := 1
 			if changed {
 				wantCalls = 2
@@ -235,6 +238,7 @@ func TestCriticRunnerKeepsChangedFixWithUnpublishedOversizedSummary(t *testing.T
 }
 
 func TestCriticRunnerRejectsInvisibleNoChangeFixBeforeCritic(t *testing.T) {
+	requireActionProcessGroup(t)
 	for _, changed := range []bool{false, true} {
 		t.Run(fmt.Sprintf("changed=%t", changed), func(t *testing.T) {
 			job := withClaudeCritic(testJob(command.Fix))

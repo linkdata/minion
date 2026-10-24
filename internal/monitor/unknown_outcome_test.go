@@ -38,7 +38,7 @@ func TestRunOnceConsumesUnknownExecutionOutcome(t *testing.T) {
 			initial := now.Add(-time.Minute)
 			item := github.Item{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}}
 			gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}, items: []github.Item{item}, permission: github.Permission{Permission: "write"}}
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			statePath := filepath.Join(t.TempDir(), "state.json")
 			store := openStateAt(t, statePath, initial)
@@ -85,7 +85,7 @@ func TestRunOnceConsumesUnknownExecutionOutcome(t *testing.T) {
 			}
 			handler.onExecute = func() { t.Fatal("unknown execution automatically repeated after restart") }
 			m.Now = func() time.Time { return now.Add(time.Minute) }
-			if _, err := m.RunOnce(context.Background(), reopened); err != nil || len(handler.jobs) != 1 || gh.commentCalls != 1 {
+			if _, err := m.RunOnce(t.Context(), reopened); err != nil || len(handler.jobs) != 1 || gh.commentCalls != 1 {
 				t.Fatalf("processed unknown outcome reran or repeated its reply: error=%v jobs=%d replies=%d", err, len(handler.jobs), gh.commentCalls)
 			}
 		})
@@ -102,7 +102,7 @@ func TestRunOnceUnknownOutcomeRetainsAttemptLimitUntilFailureReply(t *testing.T)
 	statePath := filepath.Join(t.TempDir(), "state.json")
 	store := openStateAt(t, statePath, initial)
 	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Now: func() time.Time { return now }}
-	if _, err := m.RunOnce(context.Background(), store); !errors.Is(err, replyErr) || len(handler.jobs) != 1 {
+	if _, err := m.RunOnce(t.Context(), store); !errors.Is(err, replyErr) || len(handler.jobs) != 1 {
 		t.Fatalf("unknown outcome failure reply error lost: error=%v jobs=%d", err, len(handler.jobs))
 	}
 	id := handler.jobs[0].ID
@@ -120,7 +120,7 @@ func TestRunOnceUnknownOutcomeRetainsAttemptLimitUntilFailureReply(t *testing.T)
 	gh.commentErr = nil
 	retryAt := advanceToRetry(now, reopened)
 	m.Now = func() time.Time { return retryAt }
-	if _, err := m.RunOnce(context.Background(), reopened); err != nil || len(handler.jobs) != 1 || gh.commentCalls != 2 || len(gh.comments) != 1 || len(reopened.Data.Processed) != 1 || len(reopened.Data.JobFailures) != 0 || reopened.Data.UnconfirmedProcessJob != "" {
+	if _, err := m.RunOnce(t.Context(), reopened); err != nil || len(handler.jobs) != 1 || gh.commentCalls != 2 || len(gh.comments) != 1 || len(reopened.Data.Processed) != 1 || len(reopened.Data.JobFailures) != 0 || reopened.Data.UnconfirmedProcessJob != "" {
 		t.Fatalf("unknown outcome did not retry only its failure acknowledgement: error=%v jobs=%d replies=%d state=%+v", err, len(handler.jobs), gh.commentCalls, reopened.Data)
 	}
 }
@@ -130,7 +130,7 @@ func TestRunOnceUnknownOutcomePreservesScopeRecoveryPriority(t *testing.T) {
 	initial := now.Add(-time.Minute)
 	item := github.Item{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}}
 	gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}, items: []github.Item{item}, permission: github.Permission{Permission: "write"}}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	handler := &fakeHandler{onExecute: cancel, executeErr: errors.Join(ErrExecutionOutcomeUnknown, context.Canceled, processgroup.ErrUnconfirmed, processgroup.ErrScopeUnconfirmed)}
 	statePath := filepath.Join(t.TempDir(), "state.json")
@@ -151,7 +151,7 @@ func TestRunOnceUnknownOutcomePreservesScopeRecoveryPriority(t *testing.T) {
 	reopened := openStateAt(t, statePath, initial)
 	requests := len(gh.notificationCalls)
 	handler.onExecute = func() { t.Fatal("unknown execution with unreleased scope automatically repeated") }
-	if _, err := m.RunOnce(context.Background(), reopened); !errors.Is(err, processgroup.ErrScopeUnconfirmed) || len(gh.notificationCalls) != requests || len(handler.jobs) != 1 || len(gh.comments) != 0 {
+	if _, err := m.RunOnce(t.Context(), reopened); !errors.Is(err, processgroup.ErrScopeUnconfirmed) || len(gh.notificationCalls) != requests || len(handler.jobs) != 1 || len(gh.comments) != 0 {
 		t.Fatalf("actual scope uncertainty did not retain recovery priority after restart: error=%v jobs=%d polls=%d replies=%d", err, len(handler.jobs), len(gh.notificationCalls), len(gh.comments))
 	}
 }

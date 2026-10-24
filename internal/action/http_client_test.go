@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"testing/iotest"
+	"testing/synctest"
 	"time"
 
 	"github.com/linkdata/minion/internal/aicli"
@@ -26,6 +27,7 @@ import (
 )
 
 func TestRunHTTPReportsActualObservationsAndRawPaidReceipts(t *testing.T) {
+	requireActionProcessGroup(t)
 	for _, test := range []struct {
 		name            string
 		invalidCounters bool
@@ -184,7 +186,7 @@ func TestRunHTTPReportsActualObservationsAndRawPaidReceipts(t *testing.T) {
 				}
 				return aicli.Result{Answer: "Complete answer", Tokens: tokens, UsageComplete: true}, nil
 			}}
-			err := RunHTTP(context.Background(), &client, server.URL, job.Identity.ExecutorID, runner)
+			err := RunHTTP(t.Context(), &client, server.URL, job.Identity.ExecutorID, runner)
 			if test.invalidCounters || test.afterFailure {
 				if !errors.Is(err, monitor.ErrTerminalJob) || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) {
 					t.Fatalf("known invalid usage changed failure policy: %v", err)
@@ -291,7 +293,7 @@ func TestHTTPClientRequiresExactAcknowledgementAndNeverRetries(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			checkpoints := &httpClientCheckpoints{transport: &httpExecutionClient{client: server.Client(), base: base}, control: context.Background(), action: context.Background(), binding: binding}
+			checkpoints := &httpClientCheckpoints{transport: &httpExecutionClient{client: server.Client(), base: base}, control: t.Context(), action: t.Context(), binding: binding}
 			call := CallCheckpoint{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head, Call: CallUsage{Provider: job.Main.Provider, Role: roleMain, Round: 1}}
 			err = checkpoints.BeforeCall(call)
 			if name == "known failure" {
@@ -355,7 +357,7 @@ func TestRunHTTPRejectsAssignmentBeforeWatchOrRunner(t *testing.T) {
 				}
 			}))
 			defer server.Close()
-			err := RunHTTP(context.Background(), server.Client(), server.URL, job.Identity.ExecutorID, &Runner{runModel: forbidModel(t)})
+			err := RunHTTP(t.Context(), server.Client(), server.URL, job.Identity.ExecutorID, &Runner{runModel: forbidModel(t)})
 			if name == "expired" || name == "expired outcome ACK lost" {
 				if !errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, context.DeadlineExceeded) || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) != (name == "expired outcome ACK lost") || requests.Load() != 2 || len(outcomes) != 1 {
 					t.Fatalf("expired known assignment lost its bound no-work outcome: error=%v requests=%d outcomes=%d", err, requests.Load(), len(outcomes))
@@ -375,85 +377,86 @@ func TestRunHTTPBoundsAssignmentBodyAfterHeadersAndAllowsLongPoll(t *testing.T) 
 	for _, negative := range []bool{false, true} {
 		t.Run(fmt.Sprintf("negative=%t", negative), func(t *testing.T) {
 			t.Parallel()
-			headers, drained := make(chan struct{}, 1), make(chan struct{})
-			var requests, native atomic.Int32
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if requests.Add(1) != 1 || r.URL.Path != "/next" {
-					t.Errorf("incomplete assignment advanced or retried: %s", r.URL.Path)
-					http.NotFound(w, r)
-					return
-				}
-				defer close(drained)
-				if !negative {
-					// Waiting for assignment headers must outlive the body-only timeout.
-					timer := time.NewTimer(httpControlTimeout + time.Second)
-					defer timer.Stop()
-					select {
-					case <-timer.C:
-					case <-r.Context().Done():
+			synctest.Test(t, func(t *testing.T) {
+				headers, drained := make(chan struct{}, 1), make(chan struct{})
+				var requests, native atomic.Int32
+				server := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if requests.Add(1) != 1 || r.URL.Path != "/next" {
+						t.Errorf("incomplete assignment advanced or retried: %s", r.URL.Path)
+						http.NotFound(w, r)
 						return
 					}
-				}
-				w.Header().Set("Content-Type", "application/json")
-				if negative {
-					w.WriteHeader(http.StatusServiceUnavailable)
-				}
-				_, _ = fmt.Fprint(w, `{"incomplete":`)
-				w.(http.Flusher).Flush()
-				headers <- struct{}{}
-				<-r.Context().Done() // No EOF and no caller deadline can end the body read.
-			}))
-			client := *server.Client()
-			client.Timeout = 0
-			transport := client.Transport
-			var requestDeadline atomic.Bool
-			client.Transport = httpClientTestTransport(func(r *http.Request) (*http.Response, error) {
-				if _, ok := r.Context().Deadline(); ok {
-					requestDeadline.Store(true)
-				}
-				return transport.RoundTrip(r)
-			})
-			done := make(chan error, 1)
-			finished := false
-			defer func() {
-				server.CloseClientConnections()
-				server.Close()
-				if !finished {
-					select {
-					case <-done:
-					case <-time.After(5 * time.Second):
-						t.Error("worker did not drain after fixture cleanup")
+					defer close(drained)
+					if !negative {
+						// Waiting for assignment headers must outlive the body-only timeout.
+						timer := time.NewTimer(httpControlTimeout + time.Second)
+						defer timer.Stop()
+						select {
+						case <-timer.C:
+						case <-r.Context().Done():
+							return
+						}
 					}
+					w.Header().Set("Content-Type", "application/json")
+					if negative {
+						w.WriteHeader(http.StatusServiceUnavailable)
+					}
+					_, _ = fmt.Fprint(w, `{"incomplete":`)
+					w.(http.Flusher).Flush()
+					headers <- struct{}{}
+					<-r.Context().Done() // No EOF and no caller deadline can end the body read.
+				}))
+				client := *server.Client()
+				client.Timeout = 0
+				transport := client.Transport
+				var requestDeadline atomic.Bool
+				client.Transport = httpClientTestTransport(func(r *http.Request) (*http.Response, error) {
+					if _, ok := r.Context().Deadline(); ok {
+						requestDeadline.Store(true)
+					}
+					return transport.RoundTrip(r)
+				})
+				done := make(chan error, 1)
+				finished := false
+				t.Cleanup(func() {
+					server.CloseClientConnections()
+					if !finished {
+						select {
+						case <-done:
+						case <-time.After(5 * time.Second):
+							t.Error("worker did not drain after fixture cleanup")
+						}
+					}
+				})
+				runner := &Runner{runModel: func(context.Context, modelRun) (aicli.Result, error) {
+					native.Add(1)
+					return aicli.Result{}, errors.New("incomplete assignment reached native work")
+				}}
+				go func() { done <- RunHTTP(t.Context(), &client, server.URL, "local", runner) }()
+				select {
+				case <-headers:
+				case err := <-done:
+					finished = true
+					t.Fatalf("worker bounded the intentional pre-header assignment wait: %v", err)
+				case <-time.After(httpControlTimeout + 5*time.Second):
+					t.Fatal("assignment headers did not arrive after the controlled long poll")
 				}
-			}()
-			runner := &Runner{runModel: func(context.Context, modelRun) (aicli.Result, error) {
-				native.Add(1)
-				return aicli.Result{}, errors.New("incomplete assignment reached native work")
-			}}
-			go func() { done <- RunHTTP(context.Background(), &client, server.URL, "local", runner) }()
-			select {
-			case <-headers:
-			case err := <-done:
-				finished = true
-				t.Fatalf("worker bounded the intentional pre-header assignment wait: %v", err)
-			case <-time.After(httpControlTimeout + 5*time.Second):
-				t.Fatal("assignment headers did not arrive after the controlled long poll")
-			}
-			var err error
-			select {
-			case err = <-done:
-				finished = true
-			case <-time.After(httpControlTimeout + 5*time.Second):
-				t.Fatal("assignment body outlived its 30-second transfer bound")
-			}
-			if !errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || !errors.Is(err, context.DeadlineExceeded) || requests.Load() != 1 || native.Load() != 0 || requestDeadline.Load() || client.Timeout != 0 {
-				t.Fatalf("body timeout changed failure, long-poll context, or caller client: error=%v requests=%d native=%d deadline=%t timeout=%s", err, requests.Load(), native.Load(), requestDeadline.Load(), client.Timeout)
-			}
-			select {
-			case <-drained:
-			case <-time.After(5 * time.Second):
-				t.Fatal("timed-out assignment response did not drain")
-			}
+				var err error
+				select {
+				case err = <-done:
+					finished = true
+				case <-time.After(httpControlTimeout + 5*time.Second):
+					t.Fatal("assignment body outlived its 30-second transfer bound")
+				}
+				if !errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || !errors.Is(err, context.DeadlineExceeded) || requests.Load() != 1 || native.Load() != 0 || requestDeadline.Load() || client.Timeout != 0 {
+					t.Fatalf("body timeout changed failure, long-poll context, or caller client: error=%v requests=%d native=%d deadline=%t timeout=%s", err, requests.Load(), native.Load(), requestDeadline.Load(), client.Timeout)
+				}
+				select {
+				case <-drained:
+				case <-time.After(5 * time.Second):
+					t.Fatal("timed-out assignment response did not drain")
+				}
+			})
 		})
 	}
 }
@@ -493,7 +496,7 @@ func TestRunHTTPRequiresWatchAdmissionBeforeRunner(t *testing.T) {
 				}
 			}))
 			defer server.Close()
-			err := RunHTTP(context.Background(), server.Client(), server.URL, job.Identity.ExecutorID, &Runner{runModel: forbidModel(t)})
+			err := RunHTTP(t.Context(), server.Client(), server.URL, job.Identity.ExecutorID, &Runner{runModel: forbidModel(t)})
 			unknown := name == "parent unknown failure"
 			if err == nil || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) != unknown || name == "known negative ACK" && !errors.Is(err, workroot.ErrUnsafe) || len(outcomes) != 1 {
 				t.Fatalf("watch admission failure lost its cause or failed outcome: error=%v outcomes=%d", err, len(outcomes))
@@ -538,7 +541,7 @@ func TestRunHTTPBoundsStalledWatchHeadersByAcceptedExpiry(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	err := RunHTTP(ctx, server.Client(), server.URL, job.Identity.ExecutorID, &Runner{runModel: forbidModel(t)})
 	if errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || errors.Is(err, monitor.ErrRequestTransport) || !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, monitor.ErrTerminalJob) || ctx.Err() != nil || len(watchEntered) != 1 || len(outcomes) != 1 {
@@ -563,7 +566,7 @@ func TestRunHTTPKnownNoWorkOutcomeReleasesParentCapacity(t *testing.T) {
 				after:  func(CallCheckpoint) error { callbacks.Add(1); return nil },
 				review: func(ReviewCheckpoint) error { callbacks.Add(1); return nil },
 			}
-			f := newHTTPServerTest(t, context.Background(), job, sink, func(next http.Handler) http.Handler {
+			f := newHTTPServerTest(t, t.Context(), job, sink, func(next http.Handler) http.Handler {
 				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					if !expired && r.URL.Path == "/cancel" {
 						w = httpClientFailedWatchHeaders{w}
@@ -580,7 +583,7 @@ func TestRunHTTPKnownNoWorkOutcomeReleasesParentCapacity(t *testing.T) {
 				}
 				return response, err
 			})
-			err := RunHTTP(context.Background(), &client, f.server.URL, job.Identity.ExecutorID, &Runner{runModel: forbidModel(t)})
+			err := RunHTTP(t.Context(), &client, f.server.URL, job.Identity.ExecutorID, &Runner{runModel: forbidModel(t)})
 			got := f.result(t)
 			if err == nil || got.err == nil || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || callbacks.Load() != 0 || !got.result.matchesJob(job) || len(got.result.Calls) != 0 || got.result.Answer != "" {
 				t.Fatalf("conclusive no-work outcome became unknown or fabricated work: worker=%v parent=%v result=%+v callbacks=%d", err, got.err, got.result, callbacks.Load())
@@ -588,7 +591,7 @@ func TestRunHTTPKnownNoWorkOutcomeReleasesParentCapacity(t *testing.T) {
 			if expired && (!errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, context.DeadlineExceeded) || !errors.Is(got.err, monitor.ErrTerminalJob) || !errors.Is(got.err, context.DeadlineExceeded)) {
 				t.Fatalf("expired assignment lost its known deadline cause: worker=%v parent=%v", err, got.err)
 			}
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			cancel()
 			if _, err := f.executor.Execute(ctx, job, sink); !errors.Is(err, context.Canceled) || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) {
 				t.Fatalf("known no-work outcome quarantined reusable parent capacity: %v", err)
@@ -598,12 +601,13 @@ func TestRunHTTPKnownNoWorkOutcomeReleasesParentCapacity(t *testing.T) {
 }
 
 func TestRunHTTPStalledStatusCannotConsumeOutcomeGrace(t *testing.T) {
+	requireActionProcessGroup(t)
 	for _, phase := range []string{"prepare", "upload"} {
 		t.Run(phase, func(t *testing.T) {
 			job := testJob(command.Comment)
 			job.RuntimeBudget = 2 * time.Second
 			paid := make(chan CallUsage, 1)
-			f := newHTTPServerTest(t, context.Background(), job, runnerExecutionCheckpoints{
+			f := newHTTPServerTest(t, t.Context(), job, runnerExecutionCheckpoints{
 				after: func(value CallCheckpoint) error { paid <- value.Call; return nil },
 			}, nil)
 			entered, release := make(chan struct{}), make(chan struct{})
@@ -634,7 +638,7 @@ func TestRunHTTPStalledStatusCannotConsumeOutcomeGrace(t *testing.T) {
 				native.Add(1)
 				return aicli.Result{Answer: "Completed before upload stalled", Tokens: tokens, UsageComplete: true}, nil
 			}}
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			done := make(chan error, 1)
 			go func() { done <- RunHTTP(ctx, &client, f.server.URL, job.Identity.ExecutorID, runner) }()
@@ -672,6 +676,7 @@ func TestRunHTTPStalledStatusCannotConsumeOutcomeGrace(t *testing.T) {
 }
 
 func TestRunHTTPOutcomeACKPreservesKnownReceiptAfterWatchFailure(t *testing.T) {
+	requireActionProcessGroup(t)
 	for _, test := range []struct {
 		name                string
 		early               bool
@@ -704,11 +709,11 @@ func TestRunHTTPOutcomeACKPreservesKnownReceiptAfterWatchFailure(t *testing.T) {
 			}
 			f := newExecutionAdapterFixture(t, job)
 			store := f.startUsage()
-			parent := newHTTPServerTest(t, context.Background(), f.job, f.sink, nil)
+			parent := newHTTPServerTest(t, t.Context(), f.job, f.sink, nil)
 			started := make(chan struct{})
 			outcomeEntered, watchClosed := make(chan struct{}), make(chan struct{})
 			uploadEntered := make(chan struct{})
-			ctx, cancel := context.WithCancelCause(context.Background())
+			ctx, cancel := context.WithCancelCause(t.Context())
 			externalCause := errors.Join(processgroup.ErrScopeUnconfirmed, monitor.ErrExecutionOutcomeUnknown)
 			var native, outcomes, faultReads, observations atomic.Int32
 			client := *parent.server.Client()
@@ -916,7 +921,7 @@ func TestHTTPClientWatchDistinguishesLocalStopFromParsedReplies(t *testing.T) {
 		{name: "premature completed", reason: "completed", unknown: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			ctx, stop := context.WithCancelCause(context.Background())
+			ctx, stop := context.WithCancelCause(t.Context())
 			stop(errHTTPWatchStopped)
 			var reader io.Reader = strings.NewReader("{")
 			if test.readErr != nil {
@@ -941,11 +946,12 @@ func TestHTTPClientWatchDistinguishesLocalStopFromParsedReplies(t *testing.T) {
 }
 
 func TestRunHTTPDeliversPaidFactsAfterCancellationWatchStopsAction(t *testing.T) {
+	requireActionProcessGroup(t)
 	for _, name := range []string{"deadline", "canceled", "completed", "malformed", "pipe before outcome", "local parent cancellation", "local action deadline"} {
 		t.Run(name, func(t *testing.T) {
 			job := testJob(command.Comment)
 			binding := httpJobBinding(job)
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			started := make(chan struct{})
 			sealed := make(chan struct{})
@@ -1117,7 +1123,7 @@ func TestHTTPClientSendsOneBoundFailureForUnrepresentableOutcome(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				checkpoints := &httpClientCheckpoints{transport: &httpExecutionClient{client: server.Client(), base: base}, control: context.Background(), binding: binding}
+				checkpoints := &httpClientCheckpoints{transport: &httpExecutionClient{client: server.Client(), base: base}, control: t.Context(), binding: binding}
 				// Craft the invalid primary field at the wire boundary, not as a Runner response.
 				result := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head, Answer: strings.Repeat("x", maxOutputBytes+1),
 					Calls:       []CallUsage{{Provider: "codex", Role: roleMain, Round: 1, Tokens: usage.Tokens{Input: 13, CachedInput: -2}, Approved: true, HasBlockers: true}},
@@ -1163,7 +1169,7 @@ func TestRunHTTPRejectsRedirectsWithoutMutatingClient(t *testing.T) {
 	client := server.Client()
 	client.Timeout = time.Minute
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { originalPolicy.Add(1); return nil }
-	err := RunHTTP(context.Background(), client, server.URL, "local", &Runner{runModel: forbidModel(t)})
+	err := RunHTTP(t.Context(), client, server.URL, "local", &Runner{runModel: forbidModel(t)})
 	if !errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || redirects.Load() != 0 || originalPolicy.Load() != 0 || client.Timeout != time.Minute {
 		t.Fatalf("redirect was followed or caller client was changed: error=%v redirects=%d policy=%d", err, redirects.Load(), originalPolicy.Load())
 	}

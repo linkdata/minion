@@ -59,15 +59,15 @@ func TestHTTPControlResponseEncodedBoundary(t *testing.T) {
 					}
 					transport := &httpExecutionClient{client: server.Client(), base: base}
 					if negative {
-						_, err = transport.open(context.Background(), kind, []byte(`{}`), binding, 1)
+						_, err = transport.open(t.Context(), kind, []byte(`{}`), binding, 1)
 					} else if kind == "cancel" {
 						var response *http.Response
-						response, err = transport.open(context.Background(), kind, []byte(`{}`), binding, 0)
+						response, err = transport.open(t.Context(), kind, []byte(`{}`), binding, 0)
 						if err == nil {
-							err = transport.watch(context.Background(), response, binding)
+							err = transport.watch(t.Context(), response, binding)
 						}
 					} else {
-						client := httpClientCheckpoints{transport: transport, control: context.Background(), action: context.Background(), binding: binding}
+						client := httpClientCheckpoints{transport: transport, control: t.Context(), action: t.Context(), binding: binding}
 						err = client.acknowledge(kind, []byte(`{}`), 1)
 					}
 					server.Close()

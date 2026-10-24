@@ -102,12 +102,13 @@ func TestPartialAuditMetadataRetainsIncompleteReason(t *testing.T) {
 }
 
 func TestRunnerRejectsBlankNoChangeFix(t *testing.T) {
+	requireActionProcessGroup(t)
 	for _, test := range []struct{ name, answer string }{{"empty", ""}, {"whitespace", " \n\t"}, {"NUL", "\x00"}} {
 		t.Run(test.name, func(t *testing.T) {
 			runner := Runner{WorkRoot: t.TempDir(), runModel: func(context.Context, modelRun) (aicli.Result, error) {
 				return aicli.Result{Answer: test.answer}, nil
 			}}
-			result, err := runner.Run(context.Background(), testJob(command.Fix))
+			result, err := runner.Run(t.Context(), testJob(command.Fix))
 			if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "action answer is blank") || result.Answer != "" || len(result.Changes) != 0 || len(result.Calls) != 1 {
 				t.Fatalf("blank no-change fix accepted: %+v, %v", result, err)
 			}
@@ -116,6 +117,7 @@ func TestRunnerRejectsBlankNoChangeFix(t *testing.T) {
 }
 
 func TestRunnerAuditCollectionAndNormalizationFailuresAreTerminal(t *testing.T) {
+	requireActionProcessGroup(t)
 	for _, stage := range []string{"collection", "normalization"} {
 		t.Run(stage, func(t *testing.T) {
 			job := auditRunnerJob(t)
@@ -148,7 +150,7 @@ func TestRunnerAuditCollectionAndNormalizationFailuresAreTerminal(t *testing.T) 
 				}
 				return aicli.Result{Answer: "Audit complete."}, nil
 			}}
-			result, err := runner.Run(context.Background(), job)
+			result, err := runner.Run(t.Context(), job)
 			want := "invalid audit REPORT.md"
 			if stage == "normalization" {
 				want = "normalized audit metadata exceeds byte limit"
@@ -184,6 +186,7 @@ func TestRunnerAuditCollectionAndNormalizationFailuresAreTerminal(t *testing.T) 
 }
 
 func TestRunnerInvalidReviewedAuditMetadataSkipsCritic(t *testing.T) {
+	requireActionProcessGroup(t)
 	job := withClaudeCritic(auditRunnerJob(t))
 	criticCalls := 0
 	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
@@ -206,6 +209,7 @@ func TestRunnerInvalidReviewedAuditMetadataSkipsCritic(t *testing.T) {
 }
 
 func TestRunnerInvalidSecondAuditMetadataSkipsVerification(t *testing.T) {
+	requireActionProcessGroup(t)
 	job := withClaudeCritic(auditRunnerJob(t))
 	criticCalls := 0
 	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
@@ -228,6 +232,7 @@ func TestRunnerInvalidSecondAuditMetadataSkipsVerification(t *testing.T) {
 }
 
 func TestRunnerCancellationDuringInstalledAuditValidatorPreservesCause(t *testing.T) {
+	requireActionProcessGroup(t)
 	installActionTestSkills(t, testAuditSkillURL)
 	bin := t.TempDir()
 	startedPath, holdPath := filepath.Join(bin, "started"), filepath.Join(bin, "hold")
@@ -256,7 +261,7 @@ func TestRunnerCancellationDuringInstalledAuditValidatorPreservesCause(t *testin
 		}
 		return aicli.Result{Answer: "completed model answer"}, nil
 	}}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	started := make(chan error, 1)
 	go func() {
 		var signal [7]byte
@@ -328,7 +333,7 @@ func TestRunnerRejectsHostReadGrantBeforeModels(t *testing.T) {
 			} else {
 				runner.Claude.ReadOnlyDirs = []string{missing}
 			}
-			result, err := runner.Run(context.Background(), job)
+			result, err := runner.Run(t.Context(), job)
 			if errors.Is(err, workroot.ErrUnsafe) || !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "host-level model read grants are unsupported") || calls != 0 || len(result.Calls) != 0 {
 				t.Fatalf("unsupported host grant result: native calls=%d recorded calls=%d error=%v", calls, len(result.Calls), err)
 			}
@@ -337,6 +342,7 @@ func TestRunnerRejectsHostReadGrantBeforeModels(t *testing.T) {
 }
 
 func TestRunnerStripsNULBeforeCriticAndResult(t *testing.T) {
+	requireActionProcessGroup(t)
 	for _, critic := range []bool{false, true} {
 		t.Run(fmt.Sprintf("critic=%t", critic), func(t *testing.T) {
 			job := testJob(command.Comment)
@@ -358,7 +364,7 @@ func TestRunnerStripsNULBeforeCriticAndResult(t *testing.T) {
 				}
 				return aicli.Result{Answer: approvedCritiqueJSON}, nil
 			}}
-			result, err := runner.Run(context.Background(), job)
+			result, err := runner.Run(t.Context(), job)
 			wantCritic := 0
 			if critic {
 				wantCritic = 1
@@ -387,7 +393,8 @@ func TestPreparationFailureDistinguishesCapacityFromInvalidInput(t *testing.T) {
 }
 
 func TestRunnerCancellationBeforeDispatchRecordsNoCall(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	requireActionProcessGroup(t)
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	job := testJob(command.Comment)
 	calls := 0
@@ -406,13 +413,14 @@ func TestRunnerJobValidationRejectsMetadataAliasBeforeModels(t *testing.T) {
 	job := testJob(command.Fix)
 	job.Source.Files = []workspace.File{{Path: "GIT~1/x", Mode: workspace.Regular}}
 	runner := Runner{WorkRoot: t.TempDir(), runModel: forbidModel(t)}
-	result, err := runner.Run(context.Background(), job)
+	result, err := runner.Run(t.Context(), job)
 	if !errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, gitwork.ErrUnsupportedSource) || !strings.Contains(err.Error(), "unsafe fix source path") || len(result.Calls) != 0 {
 		t.Fatalf("unsupported source was retryable: %v", err)
 	}
 }
 
 func TestRunnerRemovesRestrictedModelDirectory(t *testing.T) {
+	requireActionProcessGroup(t)
 	if os.Geteuid() == 0 {
 		t.Skip("root bypasses directory permissions")
 	}
@@ -432,7 +440,7 @@ func TestRunnerRemovesRestrictedModelDirectory(t *testing.T) {
 		}
 		return aicli.Result{Answer: "Done."}, nil
 	}}
-	result, err := runner.Run(context.Background(), testJob(command.Comment))
+	result, err := runner.Run(t.Context(), testJob(command.Comment))
 	if err != nil || result.Answer != "Done." {
 		t.Fatalf("restricted workspace result=%+v error=%v", result, err)
 	}
@@ -445,13 +453,14 @@ func TestRunnerRemovesRestrictedModelDirectory(t *testing.T) {
 }
 
 func TestRunnerPreservesWorkspaceAfterUnconfirmedScopeRelease(t *testing.T) {
+	requireActionProcessGroup(t)
 	root := t.TempDir()
 	var source string
 	runner := Runner{WorkRoot: root, runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 		source = request.dir
 		return aicli.Result{}, errors.Join(processgroup.ErrUnconfirmed, processgroup.ErrScopeUnconfirmed)
 	}}
-	result, err := runner.Run(context.Background(), testJob(command.Comment))
+	result, err := runner.Run(t.Context(), testJob(command.Comment))
 	if !errors.Is(err, processgroup.ErrUnconfirmed) || source == "" {
 		t.Fatalf("unconfirmed process result: source=%q err=%v", source, err)
 	}
@@ -464,13 +473,14 @@ func TestRunnerPreservesWorkspaceAfterUnconfirmedScopeRelease(t *testing.T) {
 }
 
 func TestRunnerCleansWorkspaceAfterConfirmedScopeRelease(t *testing.T) {
+	requireActionProcessGroup(t)
 	root := t.TempDir()
 	var source string
 	runner := Runner{WorkRoot: root, runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 		source = request.dir
 		return aicli.Result{}, processgroup.ErrUnconfirmed
 	}}
-	result, err := runner.Run(context.Background(), testJob(command.Comment))
+	result, err := runner.Run(t.Context(), testJob(command.Comment))
 	if !errors.Is(err, processgroup.ErrUnconfirmed) || source == "" {
 		t.Fatalf("process result: source=%q err=%v", source, err)
 	}
@@ -484,12 +494,13 @@ func TestRunnerCleansWorkspaceAfterConfirmedScopeRelease(t *testing.T) {
 }
 
 func TestRunnerReportsProcessExhaustion(t *testing.T) {
+	requireActionProcessGroup(t)
 	root := t.TempDir()
 	runner := Runner{WorkRoot: root, runModel: func(context.Context, modelRun) (aicli.Result, error) {
 		return aicli.Result{}, &processgroup.Exhaustion{MaxTasks: 2, MaxMemoryBytes: 256 << 20, PIDEventsMax: 1, Stop: "natural", Released: true}
 	}}
 	job := testJob(command.Comment)
-	result, err := runner.Run(context.Background(), job)
+	result, err := runner.Run(t.Context(), job)
 	if !errors.Is(err, processgroup.ErrExhausted) || !errors.Is(err, monitor.ErrTerminalJob) {
 		t.Fatalf("exhaustion must be terminal: %v", err)
 	}
@@ -502,7 +513,7 @@ func TestRunnerReportsProcessExhaustion(t *testing.T) {
 }
 
 func TestTerminalUnlessCanceledPreservesProcessExhaustion(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	err := terminalUnlessCanceled(ctx, processgroup.ErrExhausted)
 	if !errors.Is(err, context.Canceled) || !errors.Is(err, processgroup.ErrExhausted) {
@@ -511,6 +522,7 @@ func TestTerminalUnlessCanceledPreservesProcessExhaustion(t *testing.T) {
 }
 
 func TestRunnerReportsOwnedAndCriticCleanupFailures(t *testing.T) {
+	requireActionProcessGroup(t)
 	if os.Geteuid() == 0 {
 		t.Skip("root bypasses directory permissions")
 	}
@@ -541,7 +553,7 @@ func TestRunnerReportsOwnedAndCriticCleanupFailures(t *testing.T) {
 				}
 				return aicli.Result{Answer: "Done."}, nil
 			}}
-			result, err := runner.Run(context.Background(), job)
+			result, err := runner.Run(t.Context(), job)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -562,6 +574,7 @@ func TestRunnerReportsOwnedAndCriticCleanupFailures(t *testing.T) {
 }
 
 func TestRunnerPrivateIndexPreparationFailuresKeepTheirClass(t *testing.T) {
+	requireActionProcessGroup(t)
 	for _, test := range []struct {
 		name, diagnostic string
 		cause            error
@@ -598,7 +611,7 @@ esac
 				t.Setenv("PATH", bin)
 			}
 			root := t.TempDir()
-			result, err := (&Runner{WorkRoot: root, runModel: forbidModel(t)}).Run(context.Background(), testJob(command.Fix))
+			result, err := (&Runner{WorkRoot: root, runModel: forbidModel(t)}).Run(t.Context(), testJob(command.Fix))
 			if err == nil || errors.Is(err, monitor.ErrTerminalJob) != test.terminal || !strings.Contains(err.Error(), "prepare private index") || len(result.Calls) != 0 || result.Answer != "" {
 				t.Fatalf("private index classification: %+v,%v; want terminal=%t", result, err, test.terminal)
 			}

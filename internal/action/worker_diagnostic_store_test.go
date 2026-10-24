@@ -2,7 +2,6 @@ package action
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -97,7 +96,7 @@ func TestPrivateWorkerDiagnosticSaveFailureBlocksPublication(t *testing.T) {
 	owner := Orchestrator{WorkRoot: root, GitHub: testGitHub(server, "fixture-token"), Logger: log.New(&journal, "", 0)}
 	request := usageJob()
 	request.Command = command.Command{Name: "comment", Action: command.Comment}
-	err := owner.publish(context.Background(), &preparedAction{job: job, request: request}, result)
+	err := owner.publish(t.Context(), &preparedAction{job: job, request: request}, result)
 	if !errors.Is(err, monitor.ErrTerminalJob) || strings.Contains(err.Error(), "SECRET") || strings.Contains(journal.String(), "SECRET") || writes.Load() != 0 {
 		t.Fatalf("private save failure did not stop publication safely: error=%v journal=%q", err, journal.String())
 	}

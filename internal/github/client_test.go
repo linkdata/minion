@@ -1,7 +1,6 @@
 package github
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -45,20 +44,20 @@ func TestReactEyesUsesExactNodeAndChecksGraphQLErrors(t *testing.T) {
 	}))
 	defer server.Close()
 	c := testClient(server)
-	if err := c.ReactEyes(context.Background(), ""); err == nil || calls != 0 {
+	if err := c.ReactEyes(t.Context(), ""); err == nil || calls != 0 {
 		t.Fatalf("missing node ID accepted or sent: %v, calls=%d", err, calls)
 	}
 	for range 2 {
-		if err := c.ReactEyes(context.Background(), "review-node-14"); err != nil {
+		if err := c.ReactEyes(t.Context(), "review-node-14"); err != nil {
 			t.Fatal(err)
 		}
 	}
 	response = `{"errors":[{"message":"Resource not accessible"}]}`
-	if err := c.ReactEyes(context.Background(), "review-node-14"); err == nil || !strings.Contains(err.Error(), "Resource not accessible") {
+	if err := c.ReactEyes(t.Context(), "review-node-14"); err == nil || !strings.Contains(err.Error(), "Resource not accessible") {
 		t.Fatalf("GraphQL error ignored: %v", err)
 	}
 	response = `{"data":{"addReaction":{"subject":{"reactions":{"viewerHasReacted":false}}}}}`
-	if err := c.ReactEyes(context.Background(), "review-node-14"); err == nil {
+	if err := c.ReactEyes(t.Context(), "review-node-14"); err == nil {
 		t.Fatal("unconfirmed reaction accepted")
 	}
 }
@@ -86,7 +85,7 @@ func TestCurrentItemUsesLiveBodyAndEditProvenance(t *testing.T) {
 	defer server.Close()
 	client := testClient(server)
 	item := Item{NodeID: "comment-node", Body: "stale body", Author: User{Login: "allowed"}}
-	current, err := client.CurrentItem(context.Background(), item)
+	current, err := client.CurrentItem(t.Context(), item)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,12 +93,12 @@ func TestCurrentItemUsesLiveBodyAndEditProvenance(t *testing.T) {
 		t.Fatalf("lost live body or editor: %+v", current)
 	}
 	response = `{"data":{"node":{"body":"@linkdataminion review","author":{"login":"allowed"},"editor":null,"lastEditedAt":null}}}`
-	current, err = client.CurrentItem(context.Background(), item)
+	current, err = client.CurrentItem(t.Context(), item)
 	if err != nil || current.Edited {
 		t.Fatalf("unedited original command rejected: item=%+v err=%v", current, err)
 	}
 	response = `{"errors":[{"message":"Resource not accessible"}]}`
-	if _, err := client.CurrentItem(context.Background(), item); err == nil {
+	if _, err := client.CurrentItem(t.Context(), item); err == nil {
 		t.Fatal("GraphQL provenance failure did not fail closed")
 	}
 }
@@ -124,15 +123,15 @@ func TestCurrentIssueContentUsesRenderedTextAndEditTime(t *testing.T) {
 	}))
 	defer server.Close()
 	client := testClient(server)
-	if _, err := client.CurrentIssueContent(context.Background(), ""); err == nil {
+	if _, err := client.CurrentIssueContent(t.Context(), ""); err == nil {
 		t.Fatal("missing issue node ID accepted")
 	}
-	content, err := client.CurrentIssueContent(context.Background(), "issue-node")
+	content, err := client.CurrentIssueContent(t.Context(), "issue-node")
 	if err != nil || content.Title != "Issue title" || content.BodyText != "Visible request" || content.LastEditedAt == nil {
 		t.Fatalf("content = %+v, error = %v", content, err)
 	}
 	response = `{"errors":[{"message":"Resource not accessible"}]}`
-	if _, err := client.CurrentIssueContent(context.Background(), "issue-node"); err == nil {
+	if _, err := client.CurrentIssueContent(t.Context(), "issue-node"); err == nil {
 		t.Fatal("GraphQL error did not fail closed")
 	}
 }
@@ -171,14 +170,14 @@ func TestListRepositoryNotificationsPaginatesAndRepeatsAfterFailedAction(t *test
 	defer server.Close()
 	c := testClient(server)
 	since := time.Date(2026, 10, 9, 7, 0, 0, 500_000_000, time.UTC)
-	rows, interval, err := c.ListRepositoryNotifications(context.Background(), "example-owner/example-repo", since)
+	rows, interval, err := c.ListRepositoryNotifications(t.Context(), "example-owner/example-repo", since)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if interval != 90*time.Second || len(rows) != 2 || rows[0].ID != "first" || rows[1].ID != "second" {
 		t.Fatalf("unexpected first response: rows=%v interval=%s", rows, interval)
 	}
-	rows, interval, err = c.ListRepositoryNotifications(context.Background(), "example-owner/example-repo", since)
+	rows, interval, err = c.ListRepositoryNotifications(t.Context(), "example-owner/example-repo", since)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,7 +197,7 @@ func TestListRepositoryNotificationsFailsClosedAfterPageLimit(t *testing.T) {
 		_, _ = fmt.Fprint(w, `[{"id":"repeat"}]`)
 	}))
 	defer server.Close()
-	rows, _, err := testClient(server).ListRepositoryNotifications(context.Background(), "o/r", time.Now())
+	rows, _, err := testClient(server).ListRepositoryNotifications(t.Context(), "o/r", time.Now())
 	if err == nil || !strings.Contains(err.Error(), "o/r") || rows != nil || pages != 20 {
 		t.Fatalf("page limit did not preserve cursor window: rows=%v pages=%d err=%v", rows, pages, err)
 	}
@@ -212,7 +211,7 @@ func TestPermissionSurfacesForbidden(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	_, err := testClient(server).Permission(context.Background(), "example-owner/example-repo", "alice")
+	_, err := testClient(server).Permission(t.Context(), "example-owner/example-repo", "alice")
 	var status *StatusError
 	if !errors.As(err, &status) || status.StatusCode != http.StatusForbidden || !strings.Contains(err.Error(), "Resource not accessible") {
 		t.Fatalf("expected a clear 403 status error, got %v", err)
@@ -233,7 +232,7 @@ func TestRepositoryNeverFollowsRedirectOutsideWhitelist(t *testing.T) {
 		w.WriteHeader(http.StatusTemporaryRedirect)
 	}))
 	defer source.Close()
-	if _, err := testClient(source).Repository(context.Background(), "example-owner/example-repo"); err == nil || redirected {
+	if _, err := testClient(source).Repository(t.Context(), "example-owner/example-repo"); err == nil || redirected {
 		t.Fatalf("redirect followed or ignored: err=%v, redirected=%v", err, redirected)
 	}
 }
@@ -245,7 +244,7 @@ func TestRepositoryRejectsMismatchedIdentity(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	if _, err := testClient(server).Repository(context.Background(), "example-owner/example-repo"); err == nil {
+	if _, err := testClient(server).Repository(t.Context(), "example-owner/example-repo"); err == nil {
 		t.Fatal("accepted a different repository under whitelisted URL")
 	}
 }
@@ -280,29 +279,29 @@ func TestRepositoryInvitationsListAndAccept(t *testing.T) {
 	}))
 	defer server.Close()
 	c := testClient(server)
-	invitations, err := c.ListRepositoryInvitations(context.Background())
+	invitations, err := c.ListRepositoryInvitations(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(invitations) != 2 || invitations[0].ID != 17 || invitations[0].Repository.FullName != "o/allowed" || invitations[0].Repository.Owner.Login != "o" || invitations[0].Permissions != "write" || invitations[0].Invitee.Login != "linkdataminion" || invitations[0].Inviter.Login != "alice" || invitations[0].CreatedAt.IsZero() || invitations[1].Repository.FullName != "o/unlisted" || !invitations[1].Expired {
 		t.Fatalf("wrong invitation metadata or pagination: %+v", invitations)
 	}
-	if err := c.AcceptRepositoryInvitation(context.Background(), invitations[0].ID); err != nil {
+	if err := c.AcceptRepositoryInvitation(t.Context(), invitations[0].ID); err != nil {
 		t.Fatal(err)
 	}
 	if accepted != 1 {
 		t.Fatalf("expected one acceptance, got %d", accepted)
 	}
-	if err := c.DeclineRepositoryInvitation(context.Background(), invitations[1].ID); err != nil {
+	if err := c.DeclineRepositoryInvitation(t.Context(), invitations[1].ID); err != nil {
 		t.Fatal(err)
 	}
 	if declined != 1 {
 		t.Fatalf("expected one decline, got %d", declined)
 	}
-	if err := c.AcceptRepositoryInvitation(context.Background(), 0); err == nil {
+	if err := c.AcceptRepositoryInvitation(t.Context(), 0); err == nil {
 		t.Fatal("expected invalid invitation ID to fail")
 	}
-	if err := c.DeclineRepositoryInvitation(context.Background(), 0); err == nil {
+	if err := c.DeclineRepositoryInvitation(t.Context(), 0); err == nil {
 		t.Fatal("expected invalid invitation ID to fail")
 	}
 }
@@ -338,7 +337,7 @@ func TestListRepositoryInvitationsKeepsFetchedPagesOnErrorAndLimit(t *testing.T)
 				_, _ = fmt.Fprintf(w, `[{"id":%d}]`, page)
 			}))
 			defer server.Close()
-			invitations, err := testClient(server).ListRepositoryInvitations(context.Background())
+			invitations, err := testClient(server).ListRepositoryInvitations(t.Context())
 			if (err != nil) != tc.wantError || len(invitations) != tc.wantPages || requests != tc.wantCalls {
 				t.Fatalf("invitations=%d, requests=%d, error=%v", len(invitations), requests, err)
 			}
@@ -354,7 +353,7 @@ func TestAcceptRepositoryInvitationSurfacesForbidden(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	err := testClient(server).AcceptRepositoryInvitation(context.Background(), 17)
+	err := testClient(server).AcceptRepositoryInvitation(t.Context(), 17)
 	var status *StatusError
 	if !errors.As(err, &status) || status.StatusCode != http.StatusForbidden {
 		t.Fatalf("expected typed 403, got %v", err)
@@ -416,7 +415,7 @@ func TestPullRequestItemsCoverEveryCommentSurface(t *testing.T) {
 	defer server.Close()
 	c := testClient(server)
 	since := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
-	items, err := c.ThreadItems(context.Background(), "o/r", "PullRequest", 7, since)
+	items, err := c.ThreadItems(t.Context(), "o/r", "PullRequest", 7, since)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -436,14 +435,14 @@ func TestPullRequestItemsCoverEveryCommentSurface(t *testing.T) {
 			t.Fatalf("item %d missing reaction node ID: %+v", i, items[i])
 		}
 	}
-	pull, err := c.PullRequestDetails(context.Background(), "o/r", 7)
+	pull, err := c.PullRequestDetails(t.Context(), "o/r", 7)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if pull.Base.Ref != "main" || pull.Head.SHA != "abc" || pull.Title != "PR title" {
 		t.Fatalf("missing pull request details: %+v", pull)
 	}
-	items, err = c.ThreadItems(context.Background(), "o/r", "PullRequest", 7, time.Time{})
+	items, err = c.ThreadItems(t.Context(), "o/r", "PullRequest", 7, time.Time{})
 	if err != nil || len(items) != 5 || items[0].NodeID != "pull-node-7" {
 		t.Fatalf("pull request body missing reaction node ID: %+v, %v", items, err)
 	}
@@ -472,7 +471,7 @@ func TestHasVerifiedBotReplyUsesCommandTimeAndStopsAtMatch(t *testing.T) {
 	}))
 	defer server.Close()
 	client := testClient(server)
-	found, err := client.HasVerifiedBotReply(context.Background(), "o/r", 7, since, "linkdataminion", marker, false)
+	found, err := client.HasVerifiedBotReply(t.Context(), "o/r", 7, since, "linkdataminion", marker, false)
 	if err != nil || !found || pages != 1 || provenance != 1 {
 		t.Fatalf("reply lookup: found=%t err=%v pages=%d provenance=%d", found, err, pages, provenance)
 	}
@@ -514,7 +513,7 @@ func TestReviewTimelineFiltersOldAndPaginatesSubmittedReviews(t *testing.T) {
 	}))
 	defer server.Close()
 	var items []Item
-	err := testClient(server).forEachReview(context.Background(), "o/r", 7, since, func(item Item) (bool, error) {
+	err := testClient(server).forEachReview(t.Context(), "o/r", 7, since, func(item Item) (bool, error) {
 		items = append(items, item)
 		return false, nil
 	})
@@ -530,7 +529,7 @@ func TestReviewTimelineCapsRecentPages(t *testing.T) {
 		_, _ = fmt.Fprintf(w, `{"data":{"repository":{"pullRequest":{"timelineItems":{"nodes":[],"pageInfo":{"hasNextPage":true,"endCursor":%q}}}}}}`, fmt.Sprint(calls))
 	}))
 	defer server.Close()
-	err := testClient(server).forEachReview(context.Background(), "o/r", 7, time.Time{}, func(Item) (bool, error) { return false, nil })
+	err := testClient(server).forEachReview(t.Context(), "o/r", 7, time.Time{}, func(Item) (bool, error) { return false, nil })
 	if err == nil || !strings.Contains(err.Error(), "too many recent") || calls != 20 {
 		t.Fatalf("review page cap: calls=%d err=%v", calls, err)
 	}
@@ -545,7 +544,7 @@ func TestReviewTimelineRejectsIncompleteResponse(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			_, _ = fmt.Fprint(w, response)
 		}))
-		err := testClient(server).forEachReview(context.Background(), "o/r", 7, time.Time{}, func(Item) (bool, error) { return false, nil })
+		err := testClient(server).forEachReview(t.Context(), "o/r", 7, time.Time{}, func(Item) (bool, error) { return false, nil })
 		server.Close()
 		if err == nil {
 			t.Fatalf("incomplete review timeline accepted: %s", response)
@@ -582,7 +581,7 @@ func TestHasVerifiedBotReplyStopsAtReviewMatch(t *testing.T) {
 	}))
 	defer server.Close()
 	since := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
-	found, err := testClient(server).HasVerifiedBotReply(context.Background(), "o/r", 7, since, "linkdataminion", marker, true)
+	found, err := testClient(server).HasVerifiedBotReply(t.Context(), "o/r", 7, since, "linkdataminion", marker, true)
 	if err != nil || !found || timelineCalls != 1 || provenanceCalls != 1 {
 		t.Fatalf("review precheck: found=%t err=%v timeline=%d provenance=%d", found, err, timelineCalls, provenanceCalls)
 	}
@@ -606,16 +605,16 @@ func TestBranchLookup(t *testing.T) {
 	}))
 	defer server.Close()
 	c := testClient(server)
-	branch, err := c.Branch(context.Background(), "o/r", "minion/fix-2")
+	branch, err := c.Branch(t.Context(), "o/r", "minion/fix-2")
 	if err != nil || branch.Name != "minion/fix-2" || branch.Commit.SHA != "abc123" {
 		t.Fatalf("branch lookup: %+v, %v", branch, err)
 	}
-	_, err = c.Branch(context.Background(), "o/r", "missing")
+	_, err = c.Branch(t.Context(), "o/r", "missing")
 	var status *StatusError
 	if !errors.As(err, &status) || status.StatusCode != http.StatusNotFound {
 		t.Fatalf("missing branch should return typed 404, got %v", err)
 	}
-	if _, err := c.Branch(context.Background(), "o/r", "bad*"); err == nil {
+	if _, err := c.Branch(t.Context(), "o/r", "bad*"); err == nil {
 		t.Fatal("branch lookup must reject wildcard names")
 	}
 }
@@ -637,15 +636,15 @@ func TestIssueBodyDoesNotReappearWhenOnlyCommentsChange(t *testing.T) {
 	}))
 	defer server.Close()
 	c := testClient(server)
-	issue, err := c.IssueDetails(context.Background(), "o/r", 2)
+	issue, err := c.IssueDetails(t.Context(), "o/r", 2)
 	if err != nil || issue.Title != "Issue title" {
 		t.Fatalf("issue details: %+v, %v", issue, err)
 	}
-	items, err := c.ThreadItems(context.Background(), "o/r", "Issue", 2, time.Date(2026, 10, 9, 7, 0, 0, 0, time.UTC))
+	items, err := c.ThreadItems(t.Context(), "o/r", "Issue", 2, time.Date(2026, 10, 9, 7, 0, 0, 0, time.UTC))
 	if err != nil || len(items) != 0 {
 		t.Fatalf("old body reappeared after unrelated update: %+v, %v", items, err)
 	}
-	items, err = c.ThreadItems(context.Background(), "o/r", "Issue", 2, time.Time{})
+	items, err = c.ThreadItems(t.Context(), "o/r", "Issue", 2, time.Time{})
 	if err != nil || len(items) != 1 || items[0].Body != "old command" || items[0].NodeID != "issue-node-2" {
 		t.Fatalf("initial body missing: %+v, %v", items, err)
 	}
@@ -684,7 +683,7 @@ func TestWritesUseSafeGitHubModes(t *testing.T) {
 	}))
 	defer server.Close()
 	c := testClient(server)
-	ctx := context.Background()
+	ctx := t.Context()
 	if _, err := c.CreateIssueComment(ctx, "o/r", 2, "done"); err != nil {
 		t.Fatal(err)
 	}
@@ -715,7 +714,7 @@ func TestRecoveryLookups(t *testing.T) {
 	}))
 	defer server.Close()
 	c := testClient(server)
-	pull, err := c.FindPullRequestByHead(context.Background(), "o/r", "main", "bot-branch")
+	pull, err := c.FindPullRequestByHead(t.Context(), "o/r", "main", "bot-branch")
 	if err != nil || pull == nil || pull.Number != 3 {
 		t.Fatalf("recover PR: %+v, %v", pull, err)
 	}
@@ -762,7 +761,7 @@ func TestSafeFixPushRules(t *testing.T) {
 				}
 			}))
 			defer server.Close()
-			err := testClient(server).SafeFixPushRules(context.Background(), "o/r")
+			err := testClient(server).SafeFixPushRules(t.Context(), "o/r")
 			if tt.want == "" && err != nil || tt.want != "" && (err == nil || !strings.Contains(err.Error(), tt.want)) {
 				t.Fatalf("SafeFixPushRules() = %v, want %q", err, tt.want)
 			}
@@ -799,7 +798,7 @@ func TestSafeFixPushRulesRequiresCompletePagination(t *testing.T) {
 				}
 			}))
 			defer server.Close()
-			err := testClient(server).SafeFixPushRules(context.Background(), "o/r")
+			err := testClient(server).SafeFixPushRules(t.Context(), "o/r")
 			if err == nil || !strings.Contains(err.Error(), "incomplete") {
 				t.Fatalf("SafeFixPushRules() = %v, want incomplete list error", err)
 			}

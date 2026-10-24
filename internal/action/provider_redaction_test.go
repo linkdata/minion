@@ -18,6 +18,7 @@ import (
 )
 
 func TestNativeProposalRedactsEncodedConfiguredKey(t *testing.T) {
+	requireActionProcessGroup(t)
 	for _, provider := range []string{"codex", "claude"} {
 		for _, tc := range []struct{ name, key string }{
 			{"quote", `fixture"secret`},
@@ -70,7 +71,7 @@ done
 				} else {
 					runner.Claude.APIKey = tc.key
 				}
-				result, err := runner.runNative(context.Background(), modelRun{session: &session, provider: provider, dir: t.TempDir(), prompt: mainPrompt("inert fixture"), outputSchema: mainOutputSchema})
+				result, err := runner.runNative(t.Context(), modelRun{session: &session, provider: provider, dir: t.TempDir(), prompt: mainPrompt("inert fixture"), outputSchema: mainOutputSchema})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -84,6 +85,7 @@ done
 }
 
 func TestAuditReportRedactsNULSplitConfiguredKeyBeforeCriticAndPublication(t *testing.T) {
+	requireActionProcessGroup(t)
 	job := withClaudeCritic(auditRunnerJob(t))
 	job.CriticMaxRounds = 1
 	const key = "fixture-audit-secret"
@@ -128,7 +130,7 @@ func TestAuditReportRedactsNULSplitConfiguredKeyBeforeCriticAndPublication(t *te
 		}
 		return aicli.Result{Answer: approvedCritiqueJSON}, nil
 	}}
-	result, err := runner.Run(context.Background(), job)
+	result, err := runner.Run(t.Context(), job)
 	if err != nil || !criticSawReports || result.Answer != "" || result.Validate(job) != nil {
 		t.Fatalf("audit result: critic saw reports=%t answer=%q error=%v", criticSawReports, result.Answer, err)
 	}
@@ -149,6 +151,7 @@ func TestAuditReportRedactsNULSplitConfiguredKeyBeforeCriticAndPublication(t *te
 }
 
 func TestAuditEncodedConfiguredKeyStopsBeforeCritic(t *testing.T) {
+	requireActionProcessGroup(t)
 	const key = "fixture-audit-secret"
 	const encoded = "fixture-audit-&#x73;ecret"
 	for _, test := range []struct {
@@ -194,6 +197,7 @@ func TestAuditEncodedConfiguredKeyStopsBeforeCritic(t *testing.T) {
 }
 
 func TestPartialAuditDropsMetadataWhenNormalizedTargetContainsKey(t *testing.T) {
+	requireActionProcessGroup(t)
 	job := auditRunnerJob(t)
 	key := job.Identity.Repository
 	failure := errors.New("provider stopped")
@@ -202,7 +206,7 @@ func TestPartialAuditDropsMetadataWhenNormalizedTargetContainsKey(t *testing.T) 
 		writeFixtureFile(t, request.outputDir, "REPORT.md", []byte("Partial report\n"))
 		return aicli.Result{}, failure
 	}}
-	result, err := runner.Run(context.Background(), job)
+	result, err := runner.Run(t.Context(), job)
 	if !errors.Is(err, failure) || len(result.Artifacts) != 1 || result.Artifacts[0].Path != "REPORT.md" {
 		t.Fatalf("partial audit retained unsafe metadata: %+v, %v", result, err)
 	}
@@ -295,6 +299,7 @@ func TestAuditJSONRedactsMarkerLikeConfiguredKeys(t *testing.T) {
 }
 
 func TestIncompleteAuditReportRedactsConfiguredKey(t *testing.T) {
+	requireActionProcessGroup(t)
 	job := auditRunnerJob(t)
 	const key = "fixture-audit-secret"
 	runner := Runner{WorkRoot: t.TempDir(), Codex: config.CodexConfig{APIKey: key}, runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
@@ -303,7 +308,7 @@ func TestIncompleteAuditReportRedactsConfiguredKey(t *testing.T) {
 		}
 		return aicli.Result{}, errors.New("fixture main failure")
 	}}
-	result, err := runner.Run(context.Background(), job)
+	result, err := runner.Run(t.Context(), job)
 	if err == nil {
 		t.Fatal("audit failure was not reported")
 	}
@@ -355,6 +360,7 @@ func TestInvalidAuditJSONIsOmittedFromPartialArtifacts(t *testing.T) {
 }
 
 func TestRunnerRedactsReassembledSecretWithoutCritic(t *testing.T) {
+	requireActionProcessGroup(t)
 	for _, provider := range []string{"codex", "claude"} {
 		t.Run(provider, func(t *testing.T) {
 			job := testJob(command.Comment)
@@ -367,7 +373,7 @@ func TestRunnerRedactsReassembledSecretWithoutCritic(t *testing.T) {
 			} else {
 				runner.Claude.APIKey = "fixture-secret"
 			}
-			result, err := runner.Run(context.Background(), job)
+			result, err := runner.Run(t.Context(), job)
 			if err != nil || result.Answer != "public [redacted] text" {
 				t.Fatalf("NUL-split key was exposed: answer=%q error=%v", result.Answer, err)
 			}
@@ -376,6 +382,7 @@ func TestRunnerRedactsReassembledSecretWithoutCritic(t *testing.T) {
 }
 
 func TestFixChangesRejectConfiguredKeysWithoutRejectingBinary(t *testing.T) {
+	requireActionProcessGroup(t)
 	const key = "fixture-secret"
 	for _, test := range []struct {
 		name, key, data string
@@ -419,7 +426,7 @@ func TestFixChangesRejectConfiguredKeysWithoutRejectingBinary(t *testing.T) {
 					writeFixtureFile(t, request.dir, test.path, []byte(test.data))
 					return aicli.Result{Answer: proposalJSON("Done", "")}, nil
 				}}
-				result, err := runner.Run(context.Background(), job)
+				result, err := runner.Run(t.Context(), job)
 				if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "configured provider key") || calls != 1 || result.Answer != "" || len(result.Changes) != 0 {
 					t.Fatalf("configured key reached fix result: calls=%d result=%+v error=%v", calls, result, err)
 				}

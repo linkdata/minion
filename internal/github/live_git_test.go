@@ -19,7 +19,7 @@ func TestLiveBotGitAccess(t *testing.T) {
 		t.Skip("bot_ssh_key is absent")
 	}
 	key := liveBotSSHKeyPath(t, cfg.BotSSHKey)
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 	defer cancel()
 
 	ssh := exec.CommandContext(ctx, "ssh", "-F", os.DevNull, "-i", key, "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none", "-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-T", "git@github.com")

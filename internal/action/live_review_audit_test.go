@@ -27,7 +27,7 @@ func TestLiveReviewAction(t *testing.T) {
 	if os.Getenv("MINION_LIVE_WRITE") != "1" || os.Getenv("MINION_LIVE_REVIEW") != "1" {
 		t.Skip("set MINION_LIVE_WRITE=1 and MINION_LIVE_REVIEW=1 to submit a persistent live review")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Minute)
 	defer cancel()
 	fixture := liveActionSetup(t, ctx)
 	installActionTestSkills(t, testReviewSkillURL)
@@ -73,7 +73,7 @@ func TestLiveSecurityAuditAction(t *testing.T) {
 	if _, err := exec.LookPath("node"); err != nil {
 		t.Skip("audit validators require node")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
 	defer cancel()
 	fixture := liveActionSetup(t, ctx)
 	installActionTestSkills(t, testAuditSkillURL)
@@ -100,7 +100,7 @@ func TestLiveSecurityAuditAction(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			job := liveReviewAuditJob(t, fixture.cfg, fixture.repo, fixture.ownerUser, command.SecurityAudit, test.subject, test.number, test.url)
 			t.Cleanup(func() {
-				cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), time.Minute)
+				cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(t.Context()), time.Minute)
 				defer cleanupCancel()
 				liveActionReplyCleanup(t, cleanupCtx, fixture.owner, fixture.ownerToken, fixture.cfg, job)
 			})

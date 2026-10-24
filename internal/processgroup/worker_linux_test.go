@@ -24,7 +24,7 @@ func TestWorkerRequiresRecordBeforeStart(t *testing.T) {
 		t.Skipf("delegated cgroup unavailable: %v", err)
 	}
 	report := filepath.Join(t.TempDir(), "worker")
-	cmd := workerHelperCommand(context.Background(), "exit", report, false)
+	cmd := workerHelperCommand(t.Context(), "exit", report, false)
 	before := testCgroups(t)
 	if h, err := StartWorker(cmd, nil); err == nil || h != nil || cmd.Process != nil {
 		if h != nil {
@@ -117,7 +117,7 @@ func TestWorkerImmediateExitIsReapedOnce(t *testing.T) {
 	if err := Check(); err != nil {
 		t.Skipf("delegated cgroup unavailable: %v", err)
 	}
-	cmd := workerHelperCommand(context.Background(), "exit", filepath.Join(t.TempDir(), "worker"), false)
+	cmd := workerHelperCommand(t.Context(), "exit", filepath.Join(t.TempDir(), "worker"), false)
 	h, err := StartWorker(cmd, func(string) error { return nil })
 	if h != nil {
 		t.Cleanup(func() { _, _ = h.Wait() })
@@ -139,7 +139,7 @@ func TestWorkerNestedSupervisorRunsOrdinaryCommands(t *testing.T) {
 	if err := Check(); err != nil {
 		t.Skipf("delegated cgroup unavailable: %v", err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	report := filepath.Join(t.TempDir(), "worker")
 	cmd := workerHelperCommand(ctx, "nested-clean", report, false)
@@ -193,7 +193,7 @@ func TestWorkerNestedSupervisorRunsOrdinaryCommands(t *testing.T) {
 	if againReleased, againErr := h.Wait(); !againReleased || againErr != nil {
 		t.Fatalf("repeated successful Wait: released=%t error=%v", againReleased, againErr)
 	}
-	waitCtx, stopWait := context.WithTimeout(context.Background(), 2*time.Second)
+	waitCtx, stopWait := context.WithTimeout(t.Context(), 2*time.Second)
 	defer stopWait()
 	if err := command.WaitExited(waitCtx); err != nil {
 		t.Fatalf("nested ordinary command survived clean exit: %v", err)
@@ -207,7 +207,7 @@ func TestWorkerCrashDrainsRealCommandAndPreservesSibling(t *testing.T) {
 	}
 	for _, holdPipe := range []bool{false, true} {
 		t.Run(fmt.Sprintf("inherited_pipe=%t", holdPipe), func(t *testing.T) {
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			siblingReport := filepath.Join(t.TempDir(), "sibling")
 			siblingCmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestProcessgroupHelperProcess$")
@@ -261,7 +261,7 @@ func TestWorkerCrashDrainsRealCommandAndPreservesSibling(t *testing.T) {
 			if againReleased, againErr := h.Wait(); !againReleased || againErr != waitErr {
 				t.Fatalf("repeated crash Wait changed result: released=%t error=%v", againReleased, againErr)
 			}
-			waitCtx, stopWait := context.WithTimeout(context.Background(), 2*time.Second)
+			waitCtx, stopWait := context.WithTimeout(t.Context(), 2*time.Second)
 			defer stopWait()
 			for _, process := range []*pinnedProcess{leader, child, secondLeader, secondChild} {
 				if err := process.WaitExited(waitCtx); err != nil {
@@ -286,7 +286,7 @@ func TestWorkerCancellationDrainsInheritedPipes(t *testing.T) {
 	if err := Check(); err != nil {
 		t.Skipf("delegated cgroup unavailable: %v", err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	report := filepath.Join(t.TempDir(), "worker")
 	cmd := workerHelperCommand(ctx, "block-command", report, true)
@@ -313,7 +313,7 @@ func TestWorkerCancellationDrainsInheritedPipes(t *testing.T) {
 	if elapsed := time.Since(started); elapsed > cleanupWait+graceWait+3*time.Second {
 		t.Fatalf("canceled worker pipe drain exceeded cleanup bound: %v", elapsed)
 	}
-	waitCtx, stopWait := context.WithTimeout(context.Background(), 2*time.Second)
+	waitCtx, stopWait := context.WithTimeout(t.Context(), 2*time.Second)
 	defer stopWait()
 	for _, process := range []*pinnedProcess{leader, child} {
 		if err := process.WaitExited(waitCtx); err != nil {
@@ -332,7 +332,7 @@ func TestWorkerKillErrorStillAllowsEmptyRelease(t *testing.T) {
 		release bool
 	}{{"survivor exits within proof bound", true}, {"survivor remains", false}} {
 		t.Run(test.name, func(t *testing.T) {
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			report := filepath.Join(t.TempDir(), "worker")
 			cmd := workerHelperCommand(ctx, "kill-error", report, false)
@@ -355,7 +355,7 @@ func TestWorkerKillErrorStillAllowsEmptyRelease(t *testing.T) {
 			}
 			worker := &pinnedProcess{stat: stat}
 			defer worker.Close()
-			waitCtx, stopWait := context.WithTimeout(context.Background(), 2*time.Second)
+			waitCtx, stopWait := context.WithTimeout(t.Context(), 2*time.Second)
 			defer stopWait()
 			if err := worker.WaitExited(waitCtx); err != nil {
 				t.Fatalf("kill-error fixture worker still alive: %v", err)
@@ -455,7 +455,7 @@ func TestWorkerKillErrorStillAllowsEmptyRelease(t *testing.T) {
 			if gateErr != nil {
 				t.Errorf("release survivor fixture gate: %v", gateErr)
 			}
-			survivorCtx, stopSurvivorWait := context.WithTimeout(context.Background(), 2*time.Second)
+			survivorCtx, stopSurvivorWait := context.WithTimeout(t.Context(), 2*time.Second)
 			defer stopSurvivorWait()
 			if err := survivor.WaitExited(survivorCtx); err != nil {
 				t.Errorf("gated survivor did not exit: %v", err)
@@ -471,7 +471,7 @@ func TestWorkerEmptyUnwaitedCommandRejectsSuccess(t *testing.T) {
 	if err := Check(); err != nil {
 		t.Skipf("delegated cgroup unavailable: %v", err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	report := filepath.Join(t.TempDir(), "worker")
 	cmd := workerHelperCommand(ctx, "empty-command", report, false)
@@ -521,7 +521,7 @@ func TestWorkerReplacementPreservesForeignDirectory(t *testing.T) {
 		{name: "root after worker exit", root: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			report := filepath.Join(t.TempDir(), "worker")
 			cmd := workerHelperCommand(ctx, "exit-error", report, false)
@@ -612,7 +612,7 @@ func TestWorkerReplacementPreservesForeignDirectory(t *testing.T) {
 				}
 				worker := &pinnedProcess{stat: stat}
 				defer worker.Close()
-				waitCtx, stopWait := context.WithTimeout(context.Background(), 2*time.Second)
+				waitCtx, stopWait := context.WithTimeout(t.Context(), 2*time.Second)
 				defer stopWait()
 				if err := worker.WaitExited(waitCtx); err != nil {
 					t.Fatalf("replacement fixture worker still alive: %v", err)
@@ -654,7 +654,7 @@ func TestWorkerLostRootPinRetainsUncertaintyAndExitCause(t *testing.T) {
 		t.Skipf("delegated cgroup unavailable: %v", err)
 	}
 	report := filepath.Join(t.TempDir(), "worker")
-	cmd := workerHelperCommand(context.Background(), "exit-error", report, false)
+	cmd := workerHelperCommand(t.Context(), "exit-error", report, false)
 	h, err := StartWorker(cmd, func(string) error { return nil })
 	if h != nil {
 		t.Cleanup(func() { _, _ = h.Wait() })
@@ -682,7 +682,7 @@ func TestWorkerLostRootPinRetainsUncertaintyAndExitCause(t *testing.T) {
 	}
 	worker := &pinnedProcess{stat: stat}
 	defer worker.Close()
-	waitCtx, stopWait := context.WithTimeout(context.Background(), 2*time.Second)
+	waitCtx, stopWait := context.WithTimeout(t.Context(), 2*time.Second)
 	defer stopWait()
 	if err := worker.WaitExited(waitCtx); err != nil {
 		t.Fatalf("fault fixture worker still alive: %v", err)
@@ -815,7 +815,7 @@ func TestWorkerHelperProcess(t *testing.T) {
 		}
 		os.Exit(0)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	var cmd *exec.Cmd
 	if mode == "nested-clean" {

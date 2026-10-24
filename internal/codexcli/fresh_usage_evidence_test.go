@@ -1,7 +1,6 @@
 package codexcli
 
 import (
-	"context"
 	"errors"
 	"testing"
 	"time"
@@ -32,7 +31,7 @@ func TestCollectUsageFreshHelperEvidenceWithRootFallback(t *testing.T) {
 				writeUsageRollout(t, home, "child", "root", events...)
 			}
 			fallback := usage.Tokens{Input: tc.fallbackInput, Output: 1}
-			got, complete, err := (&usageSession{}).collectUsage(context.Background(), home, "root", time.Now(), &fallback, tc.expected, nil)
+			got, complete, err := (&usageSession{}).collectUsage(t.Context(), home, "root", time.Now(), &fallback, tc.expected, nil)
 			wantUnverified := !tc.complete
 			if got != tc.want || complete != tc.complete || errors.Is(err, errUnverifiedChildren) != wantUnverified || (err != nil) != wantUnverified {
 				t.Fatalf("fresh helper evidence: tokens=%+v complete=%t error=%v", got, complete, err)

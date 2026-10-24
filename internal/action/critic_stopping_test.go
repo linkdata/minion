@@ -14,6 +14,7 @@ import (
 )
 
 func TestRunnerCriticStoppingReplaysFullReviewStreak(t *testing.T) {
+	requireActionProcessGroup(t)
 	verdicts := map[string]string{
 		"approved": approvedCritiqueJSON,
 		"nits":     `{"review_complete":true,"approved":false,"has_blockers":false,"feedback":"Nonblocking nit."}`,
@@ -66,7 +67,7 @@ func TestRunnerCriticStoppingReplaysFullReviewStreak(t *testing.T) {
 				}
 				return aicli.Result{Answer: verdicts[verdict]}, nil
 			}}
-			result, err := runner.Run(context.Background(), job)
+			result, err := runner.Run(t.Context(), job)
 			wantCalls := 3*test.lastRound - 1 - test.skippedFull
 			if err != nil || result.CriticStopReason != test.stopReason || calls != wantCalls || len(result.Calls) != wantCalls {
 				t.Fatalf("stopping result: calls=%d result=%+v error=%v; want calls=%d", calls, result, err, wantCalls)
@@ -147,7 +148,7 @@ func TestRunAIPreservesRejectedVerificationAndFullFeedback(t *testing.T) {
 		}
 		return aicli.Result{Answer: approvedCritiqueJSON}, nil
 	}}
-	answer, reason, err := runner.runAI(context.Background(), job, t.TempDir(), "Complete the task", "", nil, &modelSessions{})
+	answer, reason, err := runner.runAI(t.Context(), job, t.TempDir(), "Complete the task", "", nil, &modelSessions{})
 	if err != nil || reason != "approved" || answer != "Candidate 3" || calls != 8 {
 		t.Fatalf("dual feedback revision: answer=%q calls=%d error=%v", answer, calls, err)
 	}

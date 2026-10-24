@@ -1,7 +1,6 @@
 package action
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -17,6 +16,7 @@ import (
 )
 
 func TestRunnerNativeDispatchContinuesRolesAndRefreshesFullCritic(t *testing.T) {
+	requireActionProcessGroup(t)
 	for _, action := range []command.Action{command.Comment, command.Fix} {
 		for _, mainProvider := range []string{"codex", "claude"} {
 			t.Run(string(action)+"/"+mainProvider+"-main", func(t *testing.T) {
@@ -112,7 +112,7 @@ fi
 					Codex:  config.CodexConfig{Model: "stale-host-codex", ReasoningEffort: "low"},
 					Claude: config.ClaudeConfig{Model: "stale-host-claude", Effort: "low"},
 				}
-				result, err := runner.Run(context.Background(), job)
+				result, err := runner.Run(t.Context(), job)
 				if err != nil || result.Answer != "Second proposal." || len(result.Calls) != 8 || len(result.Refutations) != 2 || result.Validate(job) != nil {
 					t.Fatalf("native role sequence: result=%+v error=%v", result, err)
 				}

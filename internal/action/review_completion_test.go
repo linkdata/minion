@@ -21,6 +21,7 @@ import (
 const incompleteCritiqueJSON = `{"approved":false,"has_blockers":true,"review_complete":false,"feedback":"Assigned review remains unfinished."}`
 
 func TestRunnerStopsOnIncompleteCriticReview(t *testing.T) {
+	requireActionProcessGroup(t)
 	for _, position := range []struct {
 		name, phase string
 		round       int
@@ -68,7 +69,7 @@ func TestRunnerStopsOnIncompleteCriticReview(t *testing.T) {
 					}
 					return aicli.Result{Answer: answer, Tokens: tokens, UsageComplete: usageComplete}, nil
 				}}
-				result, err := runner.Run(context.Background(), job)
+				result, err := runner.Run(t.Context(), job)
 				if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "critic review incomplete") || !slices.Equal(sequence, position.sequence) || len(result.Calls) != len(position.sequence) || result.Answer != "" || len(result.Changes) != 0 || len(result.Artifacts) != 0 || result.CriticStopReason != "" {
 					t.Fatalf("incomplete review continued or published: sequence=%v result=%+v error=%v", sequence, result, err)
 				}
@@ -115,6 +116,7 @@ func TestRunnerStopsOnIncompleteCriticReview(t *testing.T) {
 }
 
 func TestRunnerCompletedReviewDoesNotRequireUsageCompletion(t *testing.T) {
+	requireActionProcessGroup(t)
 	job := withClaudeCritic(testJob(command.Comment))
 	calls := 0
 	tokens := usage.Tokens{Input: 11, Output: 2}
@@ -126,7 +128,7 @@ func TestRunnerCompletedReviewDoesNotRequireUsageCompletion(t *testing.T) {
 		}
 		return aicli.Result{Answer: answer, Tokens: tokens, UsageComplete: false}, nil
 	}}
-	result, err := runner.Run(context.Background(), job)
+	result, err := runner.Run(t.Context(), job)
 	if err != nil || calls != 2 || len(result.Calls) != 2 || result.Answer != "Complete answer" || result.CriticStopReason != "approved" {
 		t.Fatalf("accounting incompleteness prevented completed review approval: result=%+v calls=%d error=%v", result, calls, err)
 	}
@@ -139,6 +141,7 @@ func TestRunnerCompletedReviewDoesNotRequireUsageCompletion(t *testing.T) {
 }
 
 func TestRunnerProviderErrorDoesNotAttestReviewCompletion(t *testing.T) {
+	requireActionProcessGroup(t)
 	failure := errors.New("native provider stopped")
 	for _, verdict := range []struct{ name, answer string }{
 		{name: "completed shape", answer: approvedCritiqueJSON},
@@ -155,7 +158,7 @@ func TestRunnerProviderErrorDoesNotAttestReviewCompletion(t *testing.T) {
 				}
 				return aicli.Result{Answer: verdict.answer, Tokens: tokens, UsageComplete: true}, failure
 			}}
-			result, err := runner.Run(context.Background(), job)
+			result, err := runner.Run(t.Context(), job)
 			if !errors.Is(err, failure) || errors.Is(err, monitor.ErrTerminalJob) || calls != 2 || len(result.Calls) != 2 || result.Answer != "" || len(result.Changes) != 0 || len(result.Artifacts) != 0 || result.CriticStopReason != "" {
 				t.Fatalf("failed provider output continued or became a review decision: result=%+v calls=%d error=%v", result, calls, err)
 			}

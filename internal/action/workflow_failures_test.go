@@ -457,6 +457,7 @@ exec %s "$@"
 }
 
 func TestCompletedAuditRetentionFailureIsTerminal(t *testing.T) {
+	requireActionProcessGroup(t)
 	installActionTestSkills(t, testAuditSkillURL)
 	fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
 	job := testJob(command.SecurityAudit)
@@ -486,6 +487,7 @@ func TestCompletedAuditRetentionFailureIsTerminal(t *testing.T) {
 }
 
 func TestCanceledPublicationRetainsIncompleteAudit(t *testing.T) {
+	requireActionProcessGroup(t)
 	for _, valid := range []bool{true, false} {
 		t.Run(fmt.Sprintf("valid=%t", valid), func(t *testing.T) {
 			installActionTestSkills(t, testAuditSkillURL)

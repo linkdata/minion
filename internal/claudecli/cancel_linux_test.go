@@ -23,7 +23,7 @@ wait
 `)
 	testsupport.StopOnCleanup(t, binary+".pid.stop")
 	workspace := t.TempDir()
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	type outcome struct {
 		result aicli.Result
@@ -37,7 +37,7 @@ wait
 	}()
 	// The real subprocess must start before cancellation; a synthetic clock
 	// cannot establish whether its process group has actually been created.
-	waitCtx, stopWait := context.WithTimeout(context.Background(), 5*time.Second)
+	waitCtx, stopWait := context.WithTimeout(t.Context(), 5*time.Second)
 	defer stopWait()
 	child, err := testsupport.WaitForProcess(waitCtx, binary+".pid", done)
 	if err != nil {
@@ -46,7 +46,7 @@ wait
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		cleanupCtx, stopCleanup := context.WithTimeout(context.Background(), 3*time.Second)
+		cleanupCtx, stopCleanup := context.WithTimeout(context.WithoutCancel(t.Context()), 3*time.Second)
 		defer stopCleanup()
 		if err := child.Cleanup(cleanupCtx); err != nil {
 			t.Error(err)

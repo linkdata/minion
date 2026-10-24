@@ -1,7 +1,6 @@
 package gitwork
 
 import (
-	"context"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -34,7 +33,7 @@ func TestCommitAndPushPreservesFileDirectoryTransitions(t *testing.T) {
 				}
 				publishedPath, content = "a", "file"
 			}
-			ctx := context.Background()
+			ctx := t.Context()
 			const branch = "minion/fix-transition"
 			if err := fixture.checkout.NewBranch(ctx, branch); err != nil {
 				t.Fatal(err)

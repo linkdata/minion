@@ -18,6 +18,7 @@ import (
 )
 
 func TestCommentCommandReportsIssueAndPullRequest(t *testing.T) {
+	requireActionProcessGroup(t)
 	for _, subject := range []string{"Issue", "PullRequest"} {
 		t.Run(subject, func(t *testing.T) {
 			installActionTestSkills(t, testReviewSkillURL)
@@ -84,7 +85,7 @@ func TestCommentCommandReportsIssueAndPullRequest(t *testing.T) {
 			}
 			var err error
 			if subject == "Issue" {
-				err = orchestrator.Execute(context.Background(), job)
+				err = orchestrator.Execute(t.Context(), job)
 			} else {
 				err = attemptFixture(orchestrator).perform(testActionContext(t), job)
 			}

@@ -27,7 +27,7 @@ func TestUsageWalkContinuesAfterLocalFailureButHonorsStops(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			visited := 0
 			err := walkUsageFiles(ctx, root, time.Now(), func(_ string, entry fs.DirEntry) error {
@@ -66,7 +66,7 @@ func TestUsageWalkKeepsDiscoveredChildrenAfterLocalFailure(t *testing.T) {
 	}
 	local := errors.New("local discovery failure")
 	first, seen := "", ""
-	err := walkUsageFiles(context.Background(), root, time.Now(), func(path string, entry fs.DirEntry) error {
+	err := walkUsageFiles(t.Context(), root, time.Now(), func(path string, entry fs.DirEntry) error {
 		if entry.IsDir() && filepath.Dir(path) == root {
 			if first == "" {
 				first = path
@@ -100,7 +100,7 @@ func TestUsageDiscoverySkipsSymlinksAndNonRegularEntries(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(filepath.Dir(root), "directory.jsonl"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	files, ambiguous, complete := usageFiles(context.Background(), home, "root", time.Now(), nil)
+	files, ambiguous, complete := usageFiles(t.Context(), home, "root", time.Now(), nil)
 	if !complete || len(files) != 1 || files["root"].path != root || len(ambiguous) != 0 {
 		t.Fatalf("discovered non-regular rollout: files=%v ambiguous=%v complete=%t", files, ambiguous, complete)
 	}
@@ -129,7 +129,7 @@ func TestCollectUsageKeepsCurrentHelpersAcrossUnreadableUnrelatedDirectory(t *te
 	started := time.Now()
 	writeUsageRollout(t, home, "root", "", usageEvent("task_started", "root-turn"), usageRecord("root", "root-turn", "r", 10, 0, 1), usageEvent("task_complete", "root-turn"))
 	writeUsageRollout(t, home, "child", "root", usageEvent("task_started", "child-turn"), usageRecord("child", "child-turn", "c", 20, 0, 2), usageEvent("task_complete", "child-turn"))
-	tokens, complete, childError := (&usageSession{}).collectUsage(context.Background(), home, "root", started, nil, []string{"child"}, nil)
+	tokens, complete, childError := (&usageSession{}).collectUsage(t.Context(), home, "root", started, nil, []string{"child"}, nil)
 	if tokens != (usage.Tokens{Input: 30, Output: 3}) || complete || childError != nil {
 		t.Fatalf("local scan failure lost known helper evidence: tokens=%+v complete=%t childError=%v", tokens, complete, childError)
 	}
@@ -158,7 +158,7 @@ func TestCollectUsagePrunesHistoricalDaysBeforeCurrentRootAndHelper(t *testing.T
 				}
 			}
 			visits := 0
-			err := walkUsageFiles(context.Background(), filepath.Join(home, "sessions"), started, func(path string, entry fs.DirEntry) error {
+			err := walkUsageFiles(t.Context(), filepath.Join(home, "sessions"), started, func(path string, entry fs.DirEntry) error {
 				visits++
 				if strings.HasPrefix(path, old+string(os.PathSeparator)) {
 					t.Fatal("old day consumed a traversal entry")
@@ -171,7 +171,7 @@ func TestCollectUsagePrunesHistoricalDaysBeforeCurrentRootAndHelper(t *testing.T
 			if err != nil {
 				t.Fatal(err)
 			}
-			tokens, complete, childError := (&usageSession{}).collectUsage(context.Background(), home, "root", started, nil, []string{"child"}, nil)
+			tokens, complete, childError := (&usageSession{}).collectUsage(t.Context(), home, "root", started, nil, []string{"child"}, nil)
 			if tokens != (usage.Tokens{Input: 30, Output: 3}) || complete != done || (childError != nil) == done {
 				t.Fatalf("current helper lost behind dated history: tokens=%+v complete=%v childError=%v", tokens, complete, childError)
 			}
@@ -204,7 +204,7 @@ func TestUsageDatePruningPreservesMidnightMarginAndUnknownLayouts(t *testing.T) 
 				t.Fatal(err)
 			}
 			seen := map[string]bool{}
-			if err := walkUsageFiles(context.Background(), root, started, func(path string, entry fs.DirEntry) error {
+			if err := walkUsageFiles(t.Context(), root, started, func(path string, entry fs.DirEntry) error {
 				if !entry.IsDir() {
 					rel, _ := filepath.Rel(root, path)
 					seen[filepath.ToSlash(rel)] = true
@@ -239,7 +239,7 @@ func TestCollectUsageHeaderAcceptsExactLimitAndRejectsNextByte(t *testing.T) {
 				if err := os.WriteFile(path, []byte(header), 0600); err != nil {
 					t.Fatal(err)
 				}
-				tokens, complete, childError := (&usageSession{}).collectUsage(context.Background(), home, "root", started, nil, nil, nil)
+				tokens, complete, childError := (&usageSession{}).collectUsage(t.Context(), home, "root", started, nil, nil, nil)
 				if tokens != (usage.Tokens{Input: 10, Output: 1}) || complete != (size == maxUsageHeaderBytes) || childError != nil {
 					t.Fatalf("header boundary changed: tokens=%+v complete=%v childError=%v", tokens, complete, childError)
 				}

@@ -27,6 +27,7 @@ func (f executorFunc) Execute(ctx context.Context, job Job, checkpoints Checkpoi
 }
 
 func TestFailedExecutorRetainsOnlyCheckpointCapturedReviewEvidence(t *testing.T) {
+	requireActionProcessGroup(t)
 	for _, mode := range []string{"omitted", "unacknowledged suffix", "changed refutation", "unacknowledged decision", "failed After", "acknowledged decision"} {
 		t.Run(mode, func(t *testing.T) {
 			gitFixtureRemote(t)
@@ -107,7 +108,7 @@ func TestFailedExecutorRetainsOnlyCheckpointCapturedReviewEvidence(t *testing.T)
 			request := usageJob()
 			request.Command = command.Command{Name: "comment", Action: command.Comment}
 			request.Repository.Actions = []string{"comment"}
-			if err := e.Execute(context.Background(), request); !errors.Is(err, executorErr) || reply != "" {
+			if err := e.Execute(t.Context(), request); !errors.Is(err, executorErr) || reply != "" {
 				t.Fatalf("failed executor published or lost error: reply=%q error=%v", reply, err)
 			}
 			if len(want.Calls) == 0 {
@@ -128,6 +129,7 @@ func TestFailedExecutorRetainsOnlyCheckpointCapturedReviewEvidence(t *testing.T)
 }
 
 func TestOrchestratorRequiresExecutorAcknowledgementsBeforePublication(t *testing.T) {
+	requireActionProcessGroup(t)
 	for _, mode := range []string{"complete", "omitted", "ignored refusal"} {
 		t.Run(mode, func(t *testing.T) {
 			gitFixtureRemote(t)
@@ -183,7 +185,7 @@ func TestOrchestratorRequiresExecutorAcknowledgementsBeforePublication(t *testin
 			request := usageJob()
 			request.Command = command.Command{Name: "comment", Action: command.Comment}
 			request.Repository.Actions = []string{"comment"}
-			err := e.Execute(context.Background(), request)
+			err := e.Execute(t.Context(), request)
 			if mode == "complete" {
 				if err != nil || !strings.Contains(reply, "Public answer") {
 					t.Fatalf("acknowledged execution failed: reply=%q error=%v", reply, err)

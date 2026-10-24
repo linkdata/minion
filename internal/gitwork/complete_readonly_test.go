@@ -2,7 +2,6 @@ package gitwork
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -55,9 +54,9 @@ func readOnlyFixture(t *testing.T, pull, link bool) (gitFixture, *Checkout, stri
 	var err error
 	url := "file://" + fixture.remote
 	if pull {
-		checkout, err = clonePullRequestFromURL(context.Background(), t.TempDir(), url, 7, "main", head)
+		checkout, err = clonePullRequestFromURL(t.Context(), t.TempDir(), url, 7, "main", head)
 	} else {
-		checkout, err = cloneFromURL(context.Background(), t.TempDir(), url, "main", false)
+		checkout, err = cloneFromURL(t.Context(), t.TempDir(), url, "main", false)
 	}
 	checkout = fixture.keepCheckout(checkout, err)
 	config, err := os.ReadFile(filepath.Join(checkout.path, ".git", "config"))
@@ -100,7 +99,7 @@ func TestReadOnlySnapshotUsesLocalObjectsWithoutOrigin(t *testing.T) {
 				t.Fatal(err)
 			}
 			assertReadOnlyState(t, checkout, config)
-			snapshot, err := checkout.Snapshot(context.Background())
+			snapshot, err := checkout.Snapshot(t.Context())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -140,7 +139,7 @@ func TestReadOnlySnapshotUsesLocalObjectsWithoutOrigin(t *testing.T) {
 				t.Fatal(err)
 			}
 			assertReadOnlyState(t, checkout, config)
-			second, err := checkout.Snapshot(context.Background())
+			second, err := checkout.Snapshot(t.Context())
 			if err != nil || len(second.Repository) == 0 {
 				t.Fatalf("second snapshot failed: repository bytes=%d error=%v", len(second.Repository), err)
 			}
@@ -163,7 +162,7 @@ func TestReadOnlySnapshotPreflightsCombinedBytesBeforeContent(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, ref := range []string{head, base} {
-		entries, err := checkout.sourceTree(context.Background(), ref)
+		entries, err := checkout.sourceTree(t.Context(), ref)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -179,7 +178,7 @@ func TestReadOnlySnapshotPreflightsCombinedBytesBeforeContent(t *testing.T) {
 		}
 	}
 	log := recordSnapshotContentCalls(t)
-	_, err = checkout.Snapshot(context.Background())
+	_, err = checkout.Snapshot(t.Context())
 	if !errors.Is(err, ErrCheckoutTooLarge) || !strings.Contains(err.Error(), "combined") {
 		t.Fatalf("combined metadata preflight failed for an unrelated reason: %v", err)
 	}

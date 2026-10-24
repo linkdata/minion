@@ -1,7 +1,6 @@
 package claudecli
 
 import (
-	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -38,9 +37,9 @@ func TestUnavailableImplicitHomeStopsBeforeCLI(t *testing.T) {
 			t.Setenv("CLAUDE_CONFIG_DIR", "")
 			var err error
 			if validate {
-				_, err = Validate(context.Background(), config.ClaudeConfig{})
+				_, err = Validate(t.Context(), config.ClaudeConfig{})
 			} else {
-				_, err = Run(context.Background(), t.TempDir(), "task", false, "", config.ClaudeConfig{})
+				_, err = Run(t.Context(), t.TempDir(), "task", false, "", config.ClaudeConfig{})
 			}
 			if err == nil || !strings.Contains(err.Error(), "CLAUDE_CONFIG_DIR") {
 				t.Fatalf("unavailable implicit home accepted: %v", err)
@@ -59,7 +58,7 @@ printf '%s\n' '`+successfulResult+`'
 `)
 	t.Setenv("HOME", "")
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
-	result, err := Run(context.Background(), t.TempDir(), "task", false, "", config.ClaudeConfig{APIKey: "fixture-key"})
+	result, err := Run(t.Context(), t.TempDir(), "task", false, "", config.ClaudeConfig{APIKey: "fixture-key"})
 	if err != nil || result.Answer != "final answer" {
 		t.Fatalf("configured private home was refused: %+v, %v", result, err)
 	}
@@ -119,9 +118,9 @@ fi
 						wantEnv = ","
 					}
 					if validate {
-						_, err = Validate(context.Background(), config.ClaudeConfig{})
+						_, err = Validate(t.Context(), config.ClaudeConfig{})
 					} else {
-						_, err = Run(context.Background(), t.TempDir(), "task", false, "", config.ClaudeConfig{})
+						_, err = Run(t.Context(), t.TempDir(), "task", false, "", config.ClaudeConfig{})
 					}
 					if err != nil {
 						t.Fatal(err)

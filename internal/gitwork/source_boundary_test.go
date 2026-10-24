@@ -85,7 +85,7 @@ func TestImportRequiresExactlyReviewedPaths(t *testing.T) {
 			case "mode-only":
 				changes[0].Mode, changes[0].Data = workspace.Executable, []byte("fixture\n")
 			}
-			err := fixture.checkout.Import(context.Background(), fixture.base, changes)
+			err := fixture.checkout.Import(t.Context(), fixture.base, changes)
 			switch scenario {
 			case "unsorted", "mode-only":
 				if err != nil {
@@ -103,12 +103,12 @@ func TestImportRequiresExactlyReviewedPaths(t *testing.T) {
 func TestImportPreservesStagingIOFailure(t *testing.T) {
 	fixture := newFixture(t)
 	writeFile(t, filepath.Join(fixture.checkout.path, ".git", "index.lock"), "held by another process")
-	err := fixture.checkout.Import(context.Background(), fixture.base, []workspace.Change{{Path: "README.md", Mode: workspace.Regular, Data: []byte("changed\n")}})
+	err := fixture.checkout.Import(t.Context(), fixture.base, []workspace.Change{{Path: "README.md", Mode: workspace.Regular, Data: []byte("changed\n")}})
 	var exit *exec.ExitError
 	if err == nil || errors.Is(err, ErrUnsupportedSource) || !errors.As(err, &exit) || !strings.Contains(err.Error(), "index.lock") {
 		t.Fatalf("locked-index import error=%v", err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	if err := fixture.checkout.Import(ctx, fixture.base, nil); !errors.Is(err, context.Canceled) || errors.Is(err, ErrUnsupportedSource) {
 		t.Fatalf("cancelled import error=%v", err)
@@ -119,7 +119,7 @@ func TestImportAttestsStagedBytesAndModes(t *testing.T) {
 	for _, mismatch := range []string{"mode", "content"} {
 		t.Run(mismatch, func(t *testing.T) {
 			fixture := newFixture(t)
-			ctx := context.Background()
+			ctx := t.Context()
 			const branch = "minion/fix-staged-binding"
 			if err := fixture.checkout.NewBranch(ctx, branch); err != nil {
 				t.Fatal(err)
@@ -172,7 +172,7 @@ exec `+shellQuote(git)+` "$@"
 
 func TestImportAttestsUnsortedBinaryEmptyModeAndDeletionChanges(t *testing.T) {
 	fixture := newFixture(t)
-	if err := fixture.checkout.Import(context.Background(), fixture.base, nil); err != nil {
+	if err := fixture.checkout.Import(t.Context(), fixture.base, nil); err != nil {
 		t.Fatalf("empty import refused: %v", err)
 	}
 	changes := []workspace.Change{
@@ -180,7 +180,7 @@ func TestImportAttestsUnsortedBinaryEmptyModeAndDeletionChanges(t *testing.T) {
 		{Path: "README.md", Delete: true},
 		{Path: "binary", Mode: workspace.Executable, Data: []byte{0, 255, '\n'}},
 	}
-	if err := fixture.checkout.Import(context.Background(), fixture.base, changes); err != nil {
+	if err := fixture.checkout.Import(t.Context(), fixture.base, changes); err != nil {
 		t.Fatal(err)
 	}
 	for _, change := range changes {
@@ -195,7 +195,7 @@ func TestImportAttestsUnsortedBinaryEmptyModeAndDeletionChanges(t *testing.T) {
 			t.Fatalf("staged entry=%q want=%q", got, want)
 		}
 	}
-	if err := fixture.checkout.Import(context.Background(), fixture.base, nil); err == nil {
+	if err := fixture.checkout.Import(t.Context(), fixture.base, nil); err == nil {
 		t.Fatal("empty declaration accepted existing staged changes")
 	}
 }
@@ -212,7 +212,7 @@ func TestSourceAliasesAreUnsupportedForDefaultAndPullRequestCheckout(t *testing.
 	if listing := fixture.git(fixture.source, "ls-tree", "-r", "--name-only", "HEAD"); !strings.Contains(listing, path) {
 		t.Fatalf("fixture omitted protected path: %q", listing)
 	}
-	checkout, err := cloneFromURL(context.Background(), t.TempDir(), fixture.remote, "main", true)
+	checkout, err := cloneFromURL(t.Context(), t.TempDir(), fixture.remote, "main", true)
 	if checkout != nil {
 		defer func() {
 			if err := checkout.Close(); err != nil {
@@ -224,13 +224,14 @@ func TestSourceAliasesAreUnsupportedForDefaultAndPullRequestCheckout(t *testing.
 	if !errors.Is(err, ErrUnsupportedSource) || errors.As(err, &exit) || !strings.Contains(err.Error(), "unsafe source path") {
 		t.Fatalf("default checkout error=%v", err)
 	}
-	err = fixture.checkout.checkoutPullRequest(context.Background(), 7, "main", head)
+	err = fixture.checkout.checkoutPullRequest(t.Context(), 7, "main", head)
 	if !errors.Is(err, ErrUnsupportedSource) || errors.As(err, &exit) || !strings.Contains(err.Error(), "unsafe source path") {
 		t.Fatalf("PR checkout error=%v", err)
 	}
 }
 
 func TestGitFailureClassificationIsSpecificAndPreservesCancellation(t *testing.T) {
+	requireGitProcessGroup(t)
 	root := t.TempDir()
 	shim := "#!/bin/sh\nprintf '%s\\n' \"$MINION_TEST_GIT_DIAGNOSTIC\" >&2\nexit 1\n"
 	fakeOnPath(t, "git", shim)
@@ -246,18 +247,18 @@ func TestGitFailureClassificationIsSpecificAndPreservesCancellation(t *testing.T
 		{"checkout", "fatal: cannot read 'error: invalid path file'", false},
 	} {
 		t.Setenv("MINION_TEST_GIT_DIAGNOSTIC", tc.diagnostic)
-		_, err := runGit(context.Background(), root, "-c", "user.name=test", "-c", "user.email=test@example.invalid", tc.operation)
+		_, err := runGit(t.Context(), root, "-c", "user.name=test", "-c", "user.email=test@example.invalid", tc.operation)
 		var exit *exec.ExitError
 		if !errors.As(err, &exit) || errors.Is(err, ErrUnsupportedSource) != tc.unsupported || !strings.HasPrefix(err.Error(), "git "+tc.operation+":") || !strings.Contains(err.Error(), strconv.Quote(tc.diagnostic)) || strings.ContainsAny(err.Error(), "\r\n") {
 			t.Fatalf("operation=%s diagnostic=%q error=%v", tc.operation, tc.diagnostic, err)
 		}
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	if _, err := runGit(ctx, root, "checkout"); !errors.Is(err, context.Canceled) || errors.Is(err, ErrUnsupportedSource) {
 		t.Fatalf("cancelled checkout error=%v", err)
 	}
-	if _, err := runGit(context.Background(), filepath.Join(root, "missing"), "checkout"); !errors.Is(err, os.ErrNotExist) || errors.Is(err, ErrUnsupportedSource) {
+	if _, err := runGit(t.Context(), filepath.Join(root, "missing"), "checkout"); !errors.Is(err, os.ErrNotExist) || errors.Is(err, ErrUnsupportedSource) {
 		t.Fatalf("checkout launch chdir error=%v", err)
 	}
 }
@@ -270,7 +271,7 @@ func TestSourceTreeListingOverflowIsTerminalSizeRefusal(t *testing.T) {
 	}
 	script := fmt.Sprintf("#!/bin/sh\nfor arg do if [ \"$arg\" = ls-tree ]; then head -c %d /dev/zero; exit; fi; done\nexec %s \"$@\"\n", maxSourceTreeListBytes+1, shellQuote(realGit))
 	fakeOnPath(t, "git", script)
-	_, err = fixture.checkout.Snapshot(context.Background())
+	_, err = fixture.checkout.Snapshot(t.Context())
 	if !errors.Is(err, ErrCheckoutTooLarge) || !strings.Contains(err.Error(), "source tree listing exceeds") {
 		t.Fatalf("source listing overflow classification: %v", err)
 	}

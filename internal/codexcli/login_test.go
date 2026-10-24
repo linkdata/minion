@@ -1,7 +1,6 @@
 package codexcli
 
 import (
-	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -32,7 +31,7 @@ printf '%s,%s,%s,%s\n' "${GH_TOKEN-absent}" "${GITHUB_TOKEN-absent}" "$TMPDIR" "
 		t.Fatal(err)
 	}
 	t.Setenv("CODEX_HOME", relative)
-	if err := CheckLogin(context.Background(), config.CodexConfig{}); err != nil {
+	if err := CheckLogin(t.Context(), config.CodexConfig{}); err != nil {
 		t.Fatal(err)
 	}
 	args, err := os.ReadFile(binary + ".args")
@@ -71,7 +70,7 @@ func TestCheckLoginSelectedCredentialsDoNotInspectStoredLogin(t *testing.T) {
 			} else {
 				t.Setenv(test.key, test.value)
 			}
-			if err := CheckLogin(context.Background(), settings); err != nil {
+			if err := CheckLogin(t.Context(), settings); err != nil {
 				t.Fatalf("selected credentials checked unrelated stored login: %v", err)
 			}
 		})
@@ -82,7 +81,7 @@ func TestCheckLoginRejectsFailedStoredLogin(t *testing.T) {
 	t.Setenv("CODEX_API_KEY", "")
 	t.Setenv("CODEX_ACCESS_TOKEN", "")
 	installFakeCodex(t, "#!/bin/sh\nexit 7\n")
-	if err := CheckLogin(context.Background(), config.CodexConfig{}); err == nil || !strings.Contains(err.Error(), "codex login status failed") {
+	if err := CheckLogin(t.Context(), config.CodexConfig{}); err == nil || !strings.Contains(err.Error(), "codex login status failed") {
 		t.Fatalf("failed stored login accepted: %v", err)
 	}
 }
@@ -93,7 +92,7 @@ func TestCheckLoginKeepsImplicitNativeHome(t *testing.T) {
 	installFakeCodex(t, "#!/bin/sh\n[ \"${CODEX_HOME+x}\" != x ] || exit 3\n[ ! -e \"$HOME/.codex\" ] || exit 4\n")
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("CODEX_HOME", "")
-	if err := CheckLogin(context.Background(), config.CodexConfig{}); err != nil {
+	if err := CheckLogin(t.Context(), config.CodexConfig{}); err != nil {
 		t.Fatalf("stored login injected a missing implicit home: %v", err)
 	}
 }
@@ -104,7 +103,7 @@ func TestCheckLoginRequiresKnownNativeHome(t *testing.T) {
 	t.Setenv("CODEX_HOME", "")
 	t.Setenv("CODEX_API_KEY", "")
 	t.Setenv("CODEX_ACCESS_TOKEN", "")
-	if err := CheckLogin(context.Background(), config.CodexConfig{}); err == nil || !strings.Contains(err.Error(), "resolve CODEX_HOME home") {
+	if err := CheckLogin(t.Context(), config.CodexConfig{}); err == nil || !strings.Contains(err.Error(), "resolve CODEX_HOME home") {
 		t.Fatalf("unknown login home accepted: %v", err)
 	}
 	if _, err := os.Stat(binary + ".called"); !errors.Is(err, os.ErrNotExist) {

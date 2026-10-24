@@ -22,6 +22,7 @@ import (
 )
 
 func TestFixRefusesIssueEditedDuringModel(t *testing.T) {
+	requireActionProcessGroup(t)
 	for _, tc := range []struct {
 		name, change string
 		queryFailure bool

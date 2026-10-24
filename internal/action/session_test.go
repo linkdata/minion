@@ -14,6 +14,7 @@ import (
 )
 
 func TestRunnerKeepsRoleSessionsWithinEachAction(t *testing.T) {
+	requireActionProcessGroup(t)
 	job := withClaudeCritic(testJob(command.Comment))
 	job.CriticMaxRounds = 3
 	var actions [][]modelRun
@@ -30,7 +31,7 @@ func TestRunnerKeepsRoleSessionsWithinEachAction(t *testing.T) {
 	}}
 	for range 2 {
 		calls = nil
-		result, err := runner.Run(context.Background(), job)
+		result, err := runner.Run(t.Context(), job)
 		if err != nil || result.Answer != "proposal3" || len(calls) != 8 {
 			t.Fatalf("answer=%q calls=%d error=%v", result.Answer, len(calls), err)
 		}
@@ -55,6 +56,7 @@ func TestRunnerKeepsRoleSessionsWithinEachAction(t *testing.T) {
 }
 
 func TestRunnerKeepsSourceCriticContextAndRefutationPaths(t *testing.T) {
+	requireActionProcessGroup(t)
 	job := withClaudeCritic(testJob(command.Fix))
 	job.CriticMaxRounds = 3
 	var mainDir, criticDir, contextDir, historyDir string
@@ -117,7 +119,7 @@ func TestRunnerKeepsSourceCriticContextAndRefutationPaths(t *testing.T) {
 		}
 		return aicli.Result{Answer: approvedCritiqueJSON}, nil
 	}}
-	result, err := runner.Run(context.Background(), job)
+	result, err := runner.Run(t.Context(), job)
 	if err != nil || calls != 8 || result.Answer != "proposal3" || len(result.Changes) != 1 || string(result.Changes[0].Data) != "revision3" {
 		t.Fatalf("result=%+v calls=%d error=%v", result, calls, err)
 	}
@@ -145,13 +147,13 @@ func TestReviewSnapshotRefreshKeepsAuditPathsAndRemovesOldArtifacts(t *testing.T
 	}
 	writeFixtureFile(t, output, "REPORT.md", []byte("first"))
 	writeFixtureFile(t, output, "FINDINGS-DETAIL.md", []byte("old detail"))
-	snapshot := mustFreeze(t, context.Background(), root, job, source, output, nil)
+	snapshot := mustFreeze(t, t.Context(), root, job, source, output, nil)
 	frozenReports := snapshot.outputDir
 	writeFixtureFile(t, output, "REPORT.md", []byte("second"))
 	if err := os.Remove(filepath.Join(output, "FINDINGS-DETAIL.md")); err != nil {
 		t.Fatal(err)
 	}
-	if err := snapshot.refresh(context.Background()); err != nil {
+	if err := snapshot.refresh(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if snapshot.source != source || snapshot.outputDir != frozenReports {
@@ -164,7 +166,7 @@ func TestReviewSnapshotRefreshKeepsAuditPathsAndRemovesOldArtifacts(t *testing.T
 	if _, err := os.Lstat(filepath.Join(frozenReports, "FINDINGS-DETAIL.md")); !os.IsNotExist(err) {
 		t.Fatalf("removed artifact survives: %v", err)
 	}
-	if err := snapshot.verify(context.Background()); err != nil {
+	if err := snapshot.verify(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 }

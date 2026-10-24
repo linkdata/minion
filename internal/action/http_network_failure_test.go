@@ -165,7 +165,7 @@ func TestHTTPWatchAdmissionWorkerClaimsDoNotRefundMonitorAttempts(t *testing.T) 
 				polls = 1
 			}
 			for poll := 0; poll < polls; poll++ {
-				_, err := m.RunOnce(context.Background(), store)
+				_, err := m.RunOnce(t.Context(), store)
 				wantErr := test.controlTimeout || !test.parentGap && poll < polls-1
 				wantFailures, processed := 0, wantProcessed
 				if wantErr {
@@ -265,7 +265,7 @@ func TestHTTPWorkerFailureClaimsCannotChangeMonitorPolicy(t *testing.T) {
 				Repositories: []config.Repository{{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"comment"}, AllowedActors: []string{"writer"}, AllowedActorIDs: map[string]int64{"writer": 7}}}},
 				GitHub: gh, Handler: handler, Now: func() time.Time { return clock }}
 			for poll := 0; poll < 3; poll++ {
-				_, err := m.RunOnce(context.Background(), store)
+				_, err := m.RunOnce(t.Context(), store)
 				if (err == nil) != (poll == 2) || store.Data.UnconfirmedProcessJob != "" || len(store.Data.Processed) != map[bool]int{false: 0, true: 1}[poll == 2] || executions.Load() != int32(poll+1) {
 					t.Fatalf("worker claim changed retry or recovery policy on poll %d: error=%v state=%+v executions=%d", poll, err, store.Data, executions.Load())
 				}

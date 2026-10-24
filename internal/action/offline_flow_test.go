@@ -196,7 +196,7 @@ func TestOfflineReviewPollRecoversAfterPublication(t *testing.T) {
 		m := monitor.Monitor{Config: config.Config{BotLogin: "linkdataminion", PollIntervalSeconds: 60, Commands: commands,
 			Repositories: []config.Repository{{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"review"}, AllowedActors: []string{"writer"}, AllowedActorIDs: map[string]int64{"writer": 7}}}},
 			GitHub: client, Handler: orchestrator, Now: func() time.Time { return at }}
-		if _, err := m.RunOnce(context.Background(), store); err != nil {
+		if _, err := m.RunOnce(t.Context(), store); err != nil {
 			t.Fatal(err)
 		}
 	}

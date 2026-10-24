@@ -23,10 +23,16 @@ func mountedWorkRoot(t *testing.T, statePath string) string {
 	t.Helper()
 	for _, candidate := range []string{os.Getenv("XDG_RUNTIME_DIR"), "/dev/shm"} {
 		if candidate != "" && workroot.Check(candidate, statePath, 1<<62) == nil {
-			return candidate
+			probe, err := os.MkdirTemp(candidate, "minion-work-root-")
+			if err == nil {
+				if err := os.Remove(probe); err != nil {
+					t.Fatal(err)
+				}
+				return candidate
+			}
 		}
 	}
-	t.Skip("startup requires a separate mounted work root")
+	t.Skip("startup requires a writable separate mounted work root")
 	return ""
 }
 

@@ -1,7 +1,6 @@
 package codexcli
 
 import (
-	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -63,7 +62,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.comp
 			}
 			writeUsageRollout(t, home, "root", "", usageEvent("task_started", "root-turn"), usageRecord("root", "root-turn", "root-response", 10, 0, 1), usageEvent("task_complete", "root-turn"))
 			writeUsageRollout(t, home, "child", "root", usageEvent("task_started", "child-turn"), usageRecord("child", "child-turn", "child-response", 20, 5, 2), usageEvent("task_complete", "child-turn"))
-			result, err := Run(context.Background(), canonicalTempDir(t), "task", false, "", config.CodexConfig{})
+			result, err := Run(t.Context(), canonicalTempDir(t), "task", false, "", config.CodexConfig{})
 			if err != nil || result.Answer != "answer" || !result.UsageComplete || result.Tokens != (usage.Tokens{Input: 30, CachedInput: 5, Output: 3}) {
 				t.Fatalf("relative home lost native usage: result=%+v error=%v", result, err)
 			}
@@ -88,7 +87,7 @@ func TestRunConfiguredKeyRequiresKnownNativeHome(t *testing.T) {
 				home = ""
 			}
 			t.Setenv("CODEX_HOME", home)
-			result, err := Run(context.Background(), canonicalTempDir(t), "task", false, "", config.CodexConfig{APIKey: "fixture-key"})
+			result, err := Run(t.Context(), canonicalTempDir(t), "task", false, "", config.CodexConfig{APIKey: "fixture-key"})
 			if test.noHome {
 				if err == nil || !strings.HasPrefix(err.Error(), "codex exec: ") || !strings.Contains(err.Error(), "CODEX_HOME") || result.Answer != "" || !result.UsageComplete || result.Tokens != (usage.Tokens{}) {
 					t.Fatalf("unavailable home was not refused before inference: %+v, %v", result, err)
@@ -121,7 +120,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.comp
 `)
 	t.Setenv("HOME", canonicalTempDir(t))
 	t.Setenv("CODEX_HOME", "")
-	result, err := Run(context.Background(), canonicalTempDir(t), "task", false, "", config.CodexConfig{})
+	result, err := Run(t.Context(), canonicalTempDir(t), "task", false, "", config.CodexConfig{})
 	if err != nil || result.Answer != "answer" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 10, Output: 1}) {
 		t.Fatalf("implicit home rejected or usage overstated: %+v, %v", result, err)
 	}

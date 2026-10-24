@@ -2,7 +2,6 @@ package action
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"log"
 	"os"
@@ -41,7 +40,7 @@ func TestInvalidResultKeepsOnlyValidatedEvidence(t *testing.T) {
 			var journal bytes.Buffer
 			root := t.TempDir()
 			e := Orchestrator{WorkRoot: root, Logger: log.New(&journal, "", 0)}
-			err := e.publish(context.Background(), &preparedAction{job: job}, result)
+			err := e.publish(t.Context(), &preparedAction{job: job}, result)
 			if !errors.Is(err, monitor.ErrTerminalJob) {
 				t.Fatalf("invalid result was not terminal: %v", err)
 			}
@@ -112,7 +111,7 @@ func TestJobContextPreservesQuotedNUL(t *testing.T) {
 			if err := job.Validate(); err != nil {
 				t.Fatalf("safe quoted context rejected: %v", err)
 			}
-			prompt, err := actionPrompt(context.Background(), job, "/source", "/context", "", "")
+			prompt, err := actionPrompt(t.Context(), job, "/source", "/context", "", "")
 			if err != nil || strings.ContainsRune(prompt, 0) || !strings.Contains(prompt, `before\x00after`) {
 				t.Fatalf("context did not stay escaped: %q,%v", prompt, err)
 			}

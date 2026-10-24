@@ -46,14 +46,14 @@ func TestRunnerWorkRootIsolation(t *testing.T) {
 	}
 	missing := filepath.Join(t.TempDir(), "missing")
 	runner := Runner{WorkRoot: missing, runModel: forbidModel(t)}
-	if result, err := runner.Run(context.Background(), testJob(command.Comment)); !errors.Is(err, os.ErrNotExist) || errors.Is(err, monitor.ErrTerminalJob) || len(result.Calls) != 0 {
+	if result, err := runner.Run(t.Context(), testJob(command.Comment)); !errors.Is(err, os.ErrNotExist) || errors.Is(err, monitor.ErrTerminalJob) || len(result.Calls) != 0 {
 		t.Fatalf("missing trusted root recreated or used: %+v,%v", result, err)
 	}
 	if _, err := os.Stat(missing); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("missing trusted root was created: %v", err)
 	}
 	runner = Runner{}
-	if _, err := runner.Run(context.Background(), testJob(command.Comment)); !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "work root is required") {
+	if _, err := runner.Run(t.Context(), testJob(command.Comment)); !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "work root is required") {
 		t.Fatalf("missing root=%v", err)
 	}
 }
@@ -66,7 +66,7 @@ func TestWorkRootIsolationRejectsUnknownProvider(t *testing.T) {
 
 func TestRunnerRejectsCanceledContextBeforePreparation(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "must-not-be-created")
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	result, err := (&Runner{WorkRoot: root}).Run(ctx, testJob(command.Comment))
 	if !errors.Is(err, context.Canceled) || errors.Is(err, monitor.ErrTerminalJob) || len(result.Calls) != 0 {
@@ -78,7 +78,8 @@ func TestRunnerRejectsCanceledContextBeforePreparation(t *testing.T) {
 }
 
 func TestRunnerReturnsParentCancellationAfterFinalReview(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	requireActionProcessGroup(t)
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	job := withClaudeCritic(testJob(command.Comment))
 	root := t.TempDir()
@@ -107,6 +108,7 @@ func TestRunnerReturnsParentCancellationAfterFinalReview(t *testing.T) {
 }
 
 func TestRunnerPreparationFailuresAreTerminalBeforeModels(t *testing.T) {
+	requireActionProcessGroup(t)
 	longPath := strings.TrimSuffix(strings.Repeat(strings.Repeat("a", 255)+"/", 16), "/")
 	for _, test := range []struct {
 		name   string
@@ -123,7 +125,7 @@ func TestRunnerPreparationFailuresAreTerminalBeforeModels(t *testing.T) {
 			job := testJob(test.action)
 			test.mutate(&job)
 			runner := Runner{WorkRoot: t.TempDir(), runModel: forbidModel(t)}
-			if result, err := runner.Run(context.Background(), job); !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), test.want) || len(result.Calls) != 0 {
+			if result, err := runner.Run(t.Context(), job); !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), test.want) || len(result.Calls) != 0 {
 				t.Fatalf("preparation result=%+v error=%v", result, err)
 			}
 		})
@@ -131,6 +133,7 @@ func TestRunnerPreparationFailuresAreTerminalBeforeModels(t *testing.T) {
 }
 
 func TestRunnerEnforcesSuppliedRuntimeBudget(t *testing.T) {
+	requireActionProcessGroup(t)
 	for _, test := range []struct {
 		name        string
 		action      command.Action
@@ -142,7 +145,7 @@ func TestRunnerEnforcesSuppliedRuntimeBudget(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			action := test.action
-			parent, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			parent, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 			defer cancel()
 			job := testJob(action)
 			if action == command.SecurityAudit {
@@ -185,18 +188,20 @@ func TestRunnerEnforcesSuppliedRuntimeBudget(t *testing.T) {
 }
 
 func TestRunnerFixCanReturnEmptyAnswerWithoutCritic(t *testing.T) {
+	requireActionProcessGroup(t)
 	job := testJob(command.Fix)
 	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 		writeFixtureFile(t, request.dir, "source.txt", []byte("fixed source"))
 		return aicli.Result{}, nil
 	}}
-	result, err := runner.Run(context.Background(), job)
+	result, err := runner.Run(t.Context(), job)
 	if err != nil || result.Answer != "" || len(result.Changes) != 1 || string(result.Changes[0].Data) != "fixed source" {
 		t.Fatalf("valid fix was lost because its summary was empty: %+v,%v", result, err)
 	}
 }
 
 func TestRunnerOmittedSourceWriteIsTerminal(t *testing.T) {
+	requireActionProcessGroup(t)
 	job := testJob(command.Fix)
 	job.Source.Omitted = []string{"hidden"}
 	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
@@ -208,7 +213,7 @@ func TestRunnerOmittedSourceWriteIsTerminal(t *testing.T) {
 		}
 		return aicli.Result{Answer: "Done."}, nil
 	}}
-	result, err := runner.Run(context.Background(), job)
+	result, err := runner.Run(t.Context(), job)
 	if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "omitted source path") || len(result.Calls) != 1 || len(result.Changes) != 0 {
 		t.Fatalf("omitted write must not rerun the model: %v", err)
 	}
@@ -255,7 +260,7 @@ func TestWorkRootIsolationRejectsResolvedExecutableTarget(t *testing.T) {
 			job.Critic = &RoleSettings{Provider: provider}
 			job.CriticMaxRounds = 1
 			runner.WorkRoot, runner.runModel = work, forbidModel(t)
-			result, err := runner.Run(context.Background(), job)
+			result, err := runner.Run(t.Context(), job)
 			if !errors.Is(err, workroot.ErrUnsafe) || !strings.Contains(err.Error(), "work root overlaps") || !strings.Contains(err.Error(), want) || len(result.Calls) != 0 {
 				t.Fatalf("critic executable escaped Run admission: calls=%d error=%v", len(result.Calls), err)
 			}

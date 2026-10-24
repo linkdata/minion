@@ -10,7 +10,19 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/linkdata/minion/internal/processgroup"
 )
+
+func requireProbeProcessGroup(t *testing.T) {
+	t.Helper()
+	if err := processgroup.Check(); err != nil {
+		if os.Getenv("MINION_REQUIRE_PROCESSGROUP") == "1" {
+			t.Fatal(err)
+		}
+		t.Skipf("CLI probe requires a delegated service: %v", err)
+	}
+}
 
 func probeExecutable(t *testing.T, script string) string {
 	t.Helper()
@@ -22,6 +34,7 @@ func probeExecutable(t *testing.T, script string) string {
 }
 
 func TestProbeRetainsOutputLimitAndQuotesDiagnostics(t *testing.T) {
+	requireProbeProcessGroup(t)
 	for _, tc := range []struct {
 		name, script, diagnostic string
 		limited                  bool
@@ -32,7 +45,7 @@ func TestProbeRetainsOutputLimitAndQuotesDiagnostics(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			binary := probeExecutable(t, tc.script)
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 			defer cancel()
 			_, err := Probe(ctx, binary, "", nil, t.TempDir(), os.Environ(), "", "")
 			if tc.limited {
@@ -57,12 +70,13 @@ func TestProbeRetainsOutputLimitAndQuotesDiagnostics(t *testing.T) {
 }
 
 func TestProbeExactBoundAndCallerCancellation(t *testing.T) {
+	requireProbeProcessGroup(t)
 	binary := probeExecutable(t, fmt.Sprintf("head -c %d /dev/zero\n", MaxEventBytes))
-	output, err := Probe(context.Background(), binary, "", nil, t.TempDir(), os.Environ(), "", "")
+	output, err := Probe(t.Context(), binary, "", nil, t.TempDir(), os.Environ(), "", "")
 	if err != nil || len(output) != MaxEventBytes {
 		t.Fatalf("exact bound bytes=%d error=%v", len(output), err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	if _, err = Probe(ctx, binary, "", nil, t.TempDir(), os.Environ(), "", ""); !errors.Is(err, context.Canceled) || errors.Is(err, ErrOutputLimit) || err.Error() != context.Canceled.Error() {
 		t.Fatalf("caller cancellation cause changed: %v", err)

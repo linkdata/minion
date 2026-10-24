@@ -52,7 +52,7 @@ func TestLiveFixPublishesBranch(t *testing.T) {
 	if os.Getenv("MINION_LIVE_WRITE") != "1" {
 		t.Skip("set MINION_LIVE_WRITE=1 to test a live fix branch")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Minute)
 	defer cancel()
 	fixture := liveActionSetup(t, ctx)
 	installActionTestSkills(t, testFixSkillURL)
@@ -262,7 +262,7 @@ func liveActionReply(ctx context.Context, owner *github.Client, cfg liveFixConfi
 
 func liveFixCleanup(t *testing.T, owner, bot *github.Client, ownerToken, botToken string, cfg liveFixConfig, job monitor.Job, branch string, store *state.Store) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), time.Minute)
 	defer cancel()
 	liveActionReplyCleanup(t, ctx, owner, ownerToken, cfg, job)
 

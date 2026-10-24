@@ -52,7 +52,7 @@ func TestRunOnceLabelsListErrorWhenIntervalSaveFails(t *testing.T) {
 		}
 	}}
 	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: &fakeHandler{}, Now: func() time.Time { return now }}
-	_, err := m.RunOnce(context.Background(), store)
+	_, err := m.RunOnce(t.Context(), store)
 	if !errors.Is(err, listErr) || !errors.Is(err, os.ErrNotExist) || !strings.Contains(err.Error(), "list example-owner/example-repo notifications: list failed") {
 		t.Fatalf("list and save errors lost context: %v", err)
 	}
@@ -145,7 +145,7 @@ func TestRunOnceStopsCanceledFailureReplyWithoutDeferring(t *testing.T) {
 			first, tail := testNotification(now), testNotification(now.Add(time.Second))
 			tail.ID = "thread-2"
 			tail.Subject.URL = strings.Replace(tail.Subject.URL, "/7", "/8", 1)
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			gh := &cancelDiscoveryGitHub{stage: "reply", fakeGitHub: &fakeGitHub{notifications: []github.Notification{first, tail}, items: []github.Item{item}, permission: github.Permission{Permission: "write"}}, cancel: cancel, err: test.err}
 			store := openState(t, initial)
@@ -210,7 +210,7 @@ func TestRunOnceCanceledExecutionPreservesEarlierFailure(t *testing.T) {
 				}
 				return current, nil
 			}}
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			statePath := filepath.Join(t.TempDir(), "state.json")
 			retainedStateDir := filepath.Join(t.TempDir(), "retained-state")
@@ -281,7 +281,7 @@ func TestRunOnceCanceledExecutionPreservesEarlierFailure(t *testing.T) {
 				handler.onExecute, handler.executeErr = nil, nil
 				gh.currentItem, gh.items = nil, []github.Item{item}
 				m.Now = func() time.Time { return now.Add(time.Minute) }
-				if _, err := m.RunOnce(context.Background(), store); err != nil || len(handler.jobs) != 2 || len(store.Data.Processed) != 1 {
+				if _, err := m.RunOnce(t.Context(), store); err != nil || len(handler.jobs) != 2 || len(store.Data.Processed) != 1 {
 					t.Fatalf("refunded job did not resume: err=%v jobs=%d state=%+v", err, len(handler.jobs), store.Data)
 				}
 			}
@@ -308,7 +308,7 @@ func TestRunOnceStopsCanceledDiscoveryWithoutDeferring(t *testing.T) {
 				tail := testNotification(now.Add(time.Second))
 				tail.ID = "thread-2"
 				tail.Subject.URL = strings.Replace(tail.Subject.URL, "/7", "/8", 1)
-				ctx, cancel := context.WithCancel(context.Background())
+				ctx, cancel := context.WithCancel(t.Context())
 				defer cancel()
 				gh := &cancelDiscoveryGitHub{
 					fakeGitHub: &fakeGitHub{notifications: []github.Notification{first, tail}, items: []github.Item{item, item}, permission: github.Permission{Permission: "write"}},
@@ -396,7 +396,7 @@ func TestRunOnceDefersDiscoveryCancellationWithoutParentShutdown(t *testing.T) {
 	}}
 	store := openState(t, now.Add(-time.Minute))
 	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: &fakeHandler{}, Now: func() time.Time { return now }}
-	if _, err := m.RunOnce(context.Background(), store); !errors.Is(err, context.Canceled) {
+	if _, err := m.RunOnce(t.Context(), store); !errors.Is(err, context.Canceled) {
 		t.Fatalf("internal discovery cancellation: %v", err)
 	}
 	if pending := store.Data.PendingNotifications[notificationKey(gh.notifications[0])]; len(store.Data.PendingNotifications) != 1 || pending.Failures != 1 || !pending.RetryAt.Equal(now.Add(time.Minute)) {
@@ -435,7 +435,7 @@ func TestRunOnceCancellationAfterRetrySavePreservesCursors(t *testing.T) {
 	gh := &fakeGitHub{notifications: []github.Notification{notification, untrusted, later}, threadItems: func(string, int, time.Time) ([]github.Item, error) {
 		return nil, threadErr
 	}}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	path := filepath.Join(t.TempDir(), "state.json")
 	store := openStateAt(t, path, initial)

@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/linkdata/minion/internal/aicli"
@@ -48,6 +49,16 @@ type httpServerTest struct {
 }
 
 func newHTTPServerTest(t *testing.T, ctx context.Context, job Job, sink Checkpoints, wrap func(http.Handler) http.Handler) *httpServerTest {
+	return newHTTPServerTestWithServer(t, ctx, job, sink, wrap, httptest.NewServer)
+}
+
+func newHTTPServerTestInMemory(t *testing.T, ctx context.Context, job Job, sink Checkpoints) *httpServerTest {
+	return newHTTPServerTestWithServer(t, ctx, job, sink, nil, func(h http.Handler) *httptest.Server {
+		return httptest.NewTestServer(t, h)
+	})
+}
+
+func newHTTPServerTestWithServer(t *testing.T, ctx context.Context, job Job, sink Checkpoints, wrap func(http.Handler) http.Handler, newServer func(http.Handler) *httptest.Server) *httpServerTest {
 	t.Helper()
 	executor, err := NewHTTPExecutor(job.Identity.ExecutorID)
 	if err != nil {
@@ -57,7 +68,7 @@ func newHTTPServerTest(t *testing.T, ctx context.Context, job Job, sink Checkpoi
 	if wrap != nil {
 		handler = wrap(handler)
 	}
-	f := &httpServerTest{executor: executor, server: httptest.NewServer(handler), job: job, done: make(chan httpServerTestResult, 1)}
+	f := &httpServerTest{executor: executor, server: newServer(handler), job: job, done: make(chan httpServerTestResult, 1)}
 	f.server.Client().Timeout = 5 * time.Second
 	t.Cleanup(func() {
 		f.server.CloseClientConnections()
@@ -179,7 +190,7 @@ func (f *httpServerTest) outcome(sequence uint64, runErr error) httpOutcome {
 func TestHTTPExecutorBindingSequenceAndRawCheckpointFacts(t *testing.T) {
 	var before, after, review atomic.Int32
 	paid := make(chan CallUsage, 1)
-	f := newHTTPServerTest(t, context.Background(), testJob(command.Comment), runnerExecutionCheckpoints{
+	f := newHTTPServerTest(t, t.Context(), testJob(command.Comment), runnerExecutionCheckpoints{
 		before: func(CallCheckpoint) error { before.Add(1); return nil },
 		after:  func(value CallCheckpoint) error { after.Add(1); paid <- value.Call; return nil },
 		review: func(ReviewCheckpoint) error { review.Add(1); return nil },
@@ -263,7 +274,7 @@ func TestHTTPExecutorEncodedRequestBoundary(t *testing.T) {
 	} {
 		t.Run(route.path, func(t *testing.T) {
 			var saves atomic.Int32
-			f := newHTTPServerTest(t, context.Background(), testJob(command.Comment), runnerExecutionCheckpoints{
+			f := newHTTPServerTest(t, t.Context(), testJob(command.Comment), runnerExecutionCheckpoints{
 				before: func(CallCheckpoint) error { saves.Add(1); return nil },
 				after:  func(CallCheckpoint) error { saves.Add(1); return nil },
 				review: func(ReviewCheckpoint) error { saves.Add(1); return nil },
@@ -311,7 +322,7 @@ func TestHTTPExecutorEncodedRequestBoundary(t *testing.T) {
 func TestHTTPExecutorPullAndCancelEncodedRequestBoundary(t *testing.T) {
 	for _, path := range []string{"/next", "/cancel"} {
 		t.Run(path, func(t *testing.T) {
-			f := newHTTPServerTest(t, context.Background(), testJob(command.Comment), runnerExecutionCheckpoints{}, nil)
+			f := newHTTPServerTest(t, t.Context(), testJob(command.Comment), runnerExecutionCheckpoints{}, nil)
 			var value any = httpPull{Version: ProtocolVersion, ExecutorID: f.job.Identity.ExecutorID}
 			if path == "/cancel" {
 				f.pull(t)
@@ -370,7 +381,7 @@ func TestHTTPExecutorReadingStatusDoesNotHoldPaidCallbackSlot(t *testing.T) {
 	entered, release := make(chan struct{}), make(chan struct{})
 	var once sync.Once
 	unblock := func() { once.Do(func() { close(release) }) }
-	f := newHTTPServerTest(t, context.Background(), testJob(command.Comment), runnerExecutionCheckpoints{}, func(next http.Handler) http.Handler {
+	f := newHTTPServerTest(t, t.Context(), testJob(command.Comment), runnerExecutionCheckpoints{}, func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path == "/status" {
 				r.Body = &httpStatusHeldBody{ReadCloser: r.Body, entered: entered, release: release}
@@ -404,7 +415,7 @@ func TestHTTPExecutorRejectsStatusWhoseBodyFinishesAfterOutcome(t *testing.T) {
 	var hold atomic.Bool
 	var once sync.Once
 	unblock := func() { once.Do(func() { close(release) }) }
-	f := newHTTPServerTest(t, context.Background(), testJob(command.Comment), runnerExecutionCheckpoints{}, func(next http.Handler) http.Handler {
+	f := newHTTPServerTest(t, t.Context(), testJob(command.Comment), runnerExecutionCheckpoints{}, func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path == "/status" && hold.Load() {
 				r.Body = &httpStatusHeldBody{ReadCloser: r.Body, entered: entered, release: release}
@@ -445,7 +456,7 @@ func TestHTTPExecutorRejectsStatusWhoseBodyFinishesAfterOutcome(t *testing.T) {
 }
 
 func TestHTTPExecutorBusyAndSingleAssignment(t *testing.T) {
-	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(30*time.Second))
+	ctx, cancel := context.WithDeadline(t.Context(), time.Now().Add(30*time.Second))
 	defer cancel()
 	deadline, _ := ctx.Deadline()
 	f := newHTTPServerTest(t, ctx, testJob(command.Comment), runnerExecutionCheckpoints{}, nil)
@@ -454,7 +465,7 @@ func TestHTTPExecutorBusyAndSingleAssignment(t *testing.T) {
 	if assignment := f.pull(t); assignment.Expires > deadline.UnixNano() {
 		t.Fatalf("assignment exceeded parent deadline: %v > %v", time.Unix(0, assignment.Expires), deadline)
 	}
-	if result, err := f.executor.Execute(context.Background(), f.job, runnerExecutionCheckpoints{}); err == nil || !result.matchesJob(f.job) {
+	if result, err := f.executor.Execute(t.Context(), f.job, runnerExecutionCheckpoints{}); err == nil || !result.matchesJob(f.job) {
 		t.Fatalf("busy executor admitted another action: %+v error=%v", result, err)
 	}
 	if got := f.request("/next", httpPull{Version: ProtocolVersion, ExecutorID: f.job.Identity.ExecutorID}); got.err != nil || got.status != http.StatusConflict {
@@ -467,7 +478,7 @@ func TestHTTPExecutorBusyAndSingleAssignment(t *testing.T) {
 }
 
 func TestHTTPExecutorCancelRequiresFullBinding(t *testing.T) {
-	f := newHTTPServerTest(t, context.Background(), testJob(command.Comment), runnerExecutionCheckpoints{}, nil)
+	f := newHTTPServerTest(t, t.Context(), testJob(command.Comment), runnerExecutionCheckpoints{}, nil)
 	f.pull(t)
 	for _, test := range []struct {
 		name string
@@ -505,10 +516,10 @@ func TestHTTPExecutorCancelRequiresFullBinding(t *testing.T) {
 }
 
 func TestHTTPExecutorCanceledPullDoesNotClaimReadyAssignment(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	var canceled atomic.Bool
-	f := newHTTPServerTest(t, context.Background(), testJob(command.Comment), runnerExecutionCheckpoints{}, func(next http.Handler) http.Handler {
+	f := newHTTPServerTest(t, t.Context(), testJob(command.Comment), runnerExecutionCheckpoints{}, func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path == "/next" && !canceled.Swap(true) {
 				r = r.WithContext(ctx)
@@ -538,10 +549,10 @@ func TestHTTPExecutorChecksCancellationBeforeAssignmentWork(t *testing.T) {
 	}
 	for _, deadline := range []bool{false, true} {
 		t.Run(fmt.Sprintf("deadline=%t", deadline), func(t *testing.T) {
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			if deadline {
 				cancel()
-				ctx, cancel = context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+				ctx, cancel = context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
 			}
 			cancel()
 			executor, err := NewHTTPExecutor(job.Identity.ExecutorID)
@@ -562,7 +573,7 @@ func TestHTTPExecutorChecksCancellationBeforeAssignmentWork(t *testing.T) {
 
 func TestHTTPExecutorFailedOutcomeAcrossMissingCallbackPreservesOnlyRawFacts(t *testing.T) {
 	var after atomic.Int32
-	f := newHTTPServerTest(t, context.Background(), testJob(command.Comment), runnerExecutionCheckpoints{after: func(CallCheckpoint) error { after.Add(1); return nil }}, nil)
+	f := newHTTPServerTest(t, t.Context(), testJob(command.Comment), runnerExecutionCheckpoints{after: func(CallCheckpoint) error { after.Add(1); return nil }}, nil)
 	f.pull(t)
 	f.ack(t, "/before", f.call(1), http.StatusOK, 1)
 	// Sequence 2 was the returned paid receipt, lost before reaching this handler.
@@ -620,7 +631,7 @@ func TestHTTPExecutorTreatsWorkerFailurePolicyAsUntrusted(t *testing.T) {
 	for _, paid := range []bool{false, true} {
 		t.Run(fmt.Sprintf("paid=%t", paid), func(t *testing.T) {
 			var returned atomic.Int32
-			f := newHTTPServerTest(t, context.Background(), testJob(command.Comment), runnerExecutionCheckpoints{
+			f := newHTTPServerTest(t, t.Context(), testJob(command.Comment), runnerExecutionCheckpoints{
 				after: func(CallCheckpoint) error { returned.Add(1); return nil },
 			}, nil)
 			f.pull(t)
@@ -641,7 +652,7 @@ func TestHTTPExecutorTreatsWorkerFailurePolicyAsUntrusted(t *testing.T) {
 			if !reflect.DeepEqual(got.result.Calls, outcome.Result.Calls) || returned.Load() != map[bool]int32{false: 0, true: 1}[paid] {
 				t.Fatalf("worker failure lost acknowledged paid facts: result=%+v callbacks=%d", got.result, returned.Load())
 			}
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			cancel()
 			if _, err := f.executor.Execute(ctx, f.job, runnerExecutionCheckpoints{}); !errors.Is(err, context.Canceled) {
 				t.Fatalf("worker claims reserved the next assignment slot: %v", err)
@@ -650,7 +661,7 @@ func TestHTTPExecutorTreatsWorkerFailurePolicyAsUntrusted(t *testing.T) {
 	}
 
 	t.Run("unreleased worker scope", func(t *testing.T) {
-		f := newHTTPServerTest(t, context.Background(), testJob(command.Comment), runnerExecutionCheckpoints{}, nil)
+		f := newHTTPServerTest(t, t.Context(), testJob(command.Comment), runnerExecutionCheckpoints{}, nil)
 		f.pull(t)
 		outcome := f.outcome(1, nil)
 		outcome.Failure = workerFailure()
@@ -671,7 +682,7 @@ func TestHTTPExecutorTreatsWorkerFailurePolicyAsUntrusted(t *testing.T) {
 
 	t.Run("parent checkpoint", func(t *testing.T) {
 		parentErr := fmt.Errorf("parent save: %w", workroot.ErrUnsafe)
-		f := newHTTPServerTest(t, context.Background(), testJob(command.Comment), runnerExecutionCheckpoints{
+		f := newHTTPServerTest(t, t.Context(), testJob(command.Comment), runnerExecutionCheckpoints{
 			before: func(CallCheckpoint) error { return parentErr },
 		}, nil)
 		f.pull(t)
@@ -685,7 +696,7 @@ func TestHTTPExecutorTreatsWorkerFailurePolicyAsUntrusted(t *testing.T) {
 	})
 
 	t.Run("parent budget", func(t *testing.T) {
-		f := newHTTPServerTest(t, context.Background(), testJob(command.Comment), runnerExecutionCheckpoints{}, nil)
+		f := newHTTPServerTest(t, t.Context(), testJob(command.Comment), runnerExecutionCheckpoints{}, nil)
 		f.pull(t)
 		f.tx.mu.Lock()
 		f.tx.budget = httpPendingDeadlineContext{Context: f.tx.budget, deadline: time.Now().Add(-time.Second)}
@@ -728,7 +739,7 @@ func TestHTTPExecutorStoreRefusalRemainsFinalIfWorkerContinues(t *testing.T) {
 					return nil
 				},
 			}
-			f := newHTTPServerTest(t, context.Background(), withClaudeCritic(testJob(command.Comment)), sink, nil)
+			f := newHTTPServerTest(t, t.Context(), withClaudeCritic(testJob(command.Comment)), sink, nil)
 			f.pull(t)
 			sequence := uint64(1)
 			if refused == "after" {
@@ -771,7 +782,7 @@ func TestHTTPExecutorStoreRefusalRemainsFinalIfWorkerContinues(t *testing.T) {
 
 func TestHTTPExecutorStatusIsIndependentAndAllowsObservationGaps(t *testing.T) {
 	var before atomic.Int32
-	f := newHTTPServerTest(t, context.Background(), testJob(command.Comment), runnerExecutionCheckpoints{before: func(CallCheckpoint) error { before.Add(1); return nil }}, func(next http.Handler) http.Handler {
+	f := newHTTPServerTest(t, t.Context(), testJob(command.Comment), runnerExecutionCheckpoints{before: func(CallCheckpoint) error { before.Add(1); return nil }}, func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path == "/status" {
 				w = httpServerFailWrite{w}
@@ -801,7 +812,7 @@ func TestHTTPExecutorStatusIsIndependentAndAllowsObservationGaps(t *testing.T) {
 }
 
 func TestHTTPExecutorRejectsStaleAndRegressingStatusWithoutChangingPaidSequence(t *testing.T) {
-	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(30*time.Second))
+	ctx, cancel := context.WithDeadline(t.Context(), time.Now().Add(30*time.Second))
 	defer cancel()
 	deadline, _ := ctx.Deadline()
 	job := testJob(command.Comment)
@@ -907,7 +918,7 @@ func TestHTTPExecutorEarlyCriticDecisionDoesNotUnlockLaterStatusPhases(t *testin
 	job := testJob(command.Comment)
 	job.Critic = &RoleSettings{Provider: "claude"}
 	job.CriticMaxRounds = 2
-	f := newHTTPServerTest(t, context.Background(), job, runnerExecutionCheckpoints{}, nil)
+	f := newHTTPServerTest(t, t.Context(), job, runnerExecutionCheckpoints{}, nil)
 	f.pull(t)
 	main := f.call(1)
 	f.ack(t, "/before", main, http.StatusOK, 1)
@@ -937,7 +948,7 @@ func TestHTTPExecutorEarlyCriticDecisionDoesNotUnlockLaterStatusPhases(t *testin
 func TestHTTPExecutorBoundsRejectedStatusBinding(t *testing.T) {
 	for _, malformed := range []string{"shape", "unknown field", "trailing value"} {
 		t.Run(malformed, func(t *testing.T) {
-			f := newHTTPServerTest(t, context.Background(), testJob(command.Comment), runnerExecutionCheckpoints{}, nil)
+			f := newHTTPServerTest(t, t.Context(), testJob(command.Comment), runnerExecutionCheckpoints{}, nil)
 			f.pull(t)
 			status := Status{Version: ProtocolVersion, Identity: f.job.Identity, SourceRef: f.job.Source.Head, Sequence: 1, WorkerState: "busy", Phase: "prepare"}
 			if malformed == "shape" {
@@ -976,7 +987,7 @@ func TestHTTPExecutorBoundsRejectedStatusBinding(t *testing.T) {
 
 func TestHTTPExecutorCanceledBeforeConsumesOnlyBoundSequence(t *testing.T) {
 	var before atomic.Int32
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	f := newHTTPServerTest(t, ctx, testJob(command.Comment), runnerExecutionCheckpoints{before: func(CallCheckpoint) error { before.Add(1); return nil }}, nil)
 	f.pull(t)
@@ -1009,7 +1020,7 @@ func TestHTTPExecutorFencesAdmissionAndDrainsEnteredFailedSave(t *testing.T) {
 	unblock := func() { once.Do(func() { close(release) }) }
 	var saved CallUsage
 	storeErr := errors.New("After save failed")
-	f := newHTTPServerTest(t, context.Background(), testJob(command.Comment), runnerExecutionCheckpoints{after: func(value CallCheckpoint) error {
+	f := newHTTPServerTest(t, t.Context(), testJob(command.Comment), runnerExecutionCheckpoints{after: func(value CallCheckpoint) error {
 		close(entered)
 		<-release
 		saved = value.Call
@@ -1063,7 +1074,7 @@ func TestHTTPExecutorFencesAdmissionAndDrainsEnteredFailedSave(t *testing.T) {
 	if late := f.request("/after", f.call(2)); late.err != nil || late.status != http.StatusConflict {
 		t.Fatalf("late callback reached finalized adapter: %+v", late)
 	}
-	if _, err := f.executor.Execute(context.Background(), f.job, runnerExecutionCheckpoints{}); err == nil {
+	if _, err := f.executor.Execute(t.Context(), f.job, runnerExecutionCheckpoints{}); err == nil {
 		t.Fatal("unknown outcome released executor capacity")
 	}
 }
@@ -1084,7 +1095,7 @@ func TestHTTPExecutorRequiredReplyFailureCannotBecomeSuccess(t *testing.T) {
 			store := owner.startUsage()
 			var failReply atomic.Bool
 			failReply.Store(path != "/review")
-			f := newHTTPServerTest(t, context.Background(), owner.job, owner.sink, func(next http.Handler) http.Handler {
+			f := newHTTPServerTest(t, t.Context(), owner.job, owner.sink, func(next http.Handler) http.Handler {
 				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					if r.URL.Path == path && failReply.Load() {
 						w = httpServerFailWrite{w}
@@ -1168,7 +1179,7 @@ func TestHTTPExecutorRequiredReplyFailureCannotBecomeSuccess(t *testing.T) {
 			if err != nil || len(records) != 1 || records[0].CodexCalls != wantCodex || records[0].ClaudeCalls != wantClaude || records[0].Tokens != wantTokens {
 				t.Fatalf("required reply failure lost saved usage: records=%+v error=%v", records, err)
 			}
-			if _, err := f.executor.Execute(context.Background(), f.job, owner.sink); err == nil {
+			if _, err := f.executor.Execute(t.Context(), f.job, owner.sink); err == nil {
 				t.Fatal("failed required reply released worker capacity")
 			}
 		})
@@ -1178,7 +1189,7 @@ func TestHTTPExecutorRequiredReplyFailureCannotBecomeSuccess(t *testing.T) {
 func TestHTTPExecutorReceivedOutcomeSurvivesLostReceiptACK(t *testing.T) {
 	for _, runErr := range []error{nil, errors.Join(monitor.ErrTerminalJob, context.DeadlineExceeded)} {
 		t.Run(fmt.Sprint(runErr), func(t *testing.T) {
-			f := newHTTPServerTest(t, context.Background(), testJob(command.Comment), runnerExecutionCheckpoints{}, func(next http.Handler) http.Handler {
+			f := newHTTPServerTest(t, t.Context(), testJob(command.Comment), runnerExecutionCheckpoints{}, func(next http.Handler) http.Handler {
 				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					if r.URL.Path == "/outcome" {
 						w = httpServerFailWrite{w}
@@ -1197,7 +1208,7 @@ func TestHTTPExecutorReceivedOutcomeSurvivesLostReceiptACK(t *testing.T) {
 			if !reflect.DeepEqual(got.result, outcome.Result) || (got.err == nil) != (runErr == nil) || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || errors.Is(got.err, monitor.ErrTerminalJob) || errors.Is(got.err, context.DeadlineExceeded) {
 				t.Fatalf("lost receipt erased or changed conclusive outcome: %+v error=%v", got.result, got.err)
 			}
-			if _, err := f.executor.Execute(context.Background(), f.job, runnerExecutionCheckpoints{}); err == nil {
+			if _, err := f.executor.Execute(t.Context(), f.job, runnerExecutionCheckpoints{}); err == nil {
 				t.Fatal("lost receipt ACK released quarantined capacity")
 			}
 		})
@@ -1210,9 +1221,9 @@ func TestHTTPExecutorLateKnownOutcomeRetainsFactsAndActualContextCause(t *testin
 			var ctx context.Context
 			var cancel context.CancelFunc
 			if deadline {
-				ctx, cancel = context.WithTimeout(context.Background(), time.Second)
+				ctx, cancel = context.WithTimeout(t.Context(), time.Second)
 			} else {
-				ctx, cancel = context.WithCancel(context.Background())
+				ctx, cancel = context.WithCancel(t.Context())
 			}
 			defer cancel()
 			f := newHTTPServerTest(t, ctx, testJob(command.Comment), runnerExecutionCheckpoints{}, nil)
@@ -1243,7 +1254,7 @@ type httpPendingDeadlineContext struct {
 func (c httpPendingDeadlineContext) Deadline() (time.Time, bool) { return c.deadline, true }
 
 func TestHTTPExecutionContextErrorPreservesPriorCancellation(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	ctx = httpPendingDeadlineContext{Context: ctx, deadline: time.Now().Add(-time.Second)}
 	if err := httpExecutionContextError(ctx); !errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, monitor.ErrTerminalJob) {
@@ -1256,7 +1267,7 @@ func TestHTTPExecutorChecksDeadlineBeforeCancellationNotification(t *testing.T) 
 		t.Run(fmt.Sprintf("before=%t", before), func(t *testing.T) {
 			owner := newExecutionAdapterFixture(t, testJob(command.Comment))
 			store := owner.startUsage()
-			f := newHTTPServerTest(t, context.Background(), owner.job, owner.sink, nil)
+			f := newHTTPServerTest(t, t.Context(), owner.job, owner.sink, nil)
 			f.pull(t)
 			sequence := uint64(1)
 			var calls []CallUsage
@@ -1310,7 +1321,7 @@ func TestHTTPExecutorChecksDeadlineBeforeCancellationNotification(t *testing.T) 
 }
 
 func TestHTTPExecutorKnownOutcomeResolvesWatchTransportCancellation(t *testing.T) {
-	f := newHTTPServerTest(t, context.Background(), testJob(command.Comment), runnerExecutionCheckpoints{}, nil)
+	f := newHTTPServerTest(t, t.Context(), testJob(command.Comment), runnerExecutionCheckpoints{}, nil)
 	f.pull(t)
 	f.tx.stopExecution(io.ErrClosedPipe, true)
 	<-f.tx.ctx.Done()
@@ -1333,7 +1344,7 @@ func TestHTTPExecutorRejectedBoundBeforeSurvivesWatchOutcome(t *testing.T) {
 		t.Run(fmt.Sprintf("foreign=%t", foreign), func(t *testing.T) {
 			owner := newExecutionAdapterFixture(t, testJob(command.Comment))
 			store := owner.startUsage()
-			f := newHTTPServerTest(t, context.Background(), owner.job, owner.sink, nil)
+			f := newHTTPServerTest(t, t.Context(), owner.job, owner.sink, nil)
 			f.pull(t)
 			f.ack(t, "/before", f.call(1), http.StatusOK, 1)
 			paid := f.call(2)
@@ -1394,7 +1405,7 @@ func TestHTTPExecutorConcurrentBoundBeforeSurvivesWatchOutcome(t *testing.T) {
 	}
 	arrived := make(chan struct{})
 	var beforeCount atomic.Int32
-	f := newHTTPServerTest(t, context.Background(), owner.job, sink, func(next http.Handler) http.Handler {
+	f := newHTTPServerTest(t, t.Context(), owner.job, sink, func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path == "/before" && beforeCount.Add(1) == 2 {
 				close(arrived)
@@ -1482,7 +1493,7 @@ func TestHTTPExecutorCloseKeepsWatchAndPaidReceiptGraceAvailable(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			paid := make(chan CallUsage, 1)
-			f := newHTTPServerTest(t, context.Background(), testJob(command.Comment), runnerExecutionCheckpoints{after: func(value CallCheckpoint) error {
+			f := newHTTPServerTest(t, t.Context(), testJob(command.Comment), runnerExecutionCheckpoints{after: func(value CallCheckpoint) error {
 				paid <- value.Call
 				return nil
 			}}, nil)
@@ -1551,7 +1562,7 @@ func (w httpServerHeldWrite) Write(body []byte) (int, error) {
 }
 
 func TestHTTPExecutorSealedOutcomeDoesNotAcquireDeadlineDuringACKDrain(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
 	entered, release := make(chan struct{}), make(chan struct{})
 	var once sync.Once
@@ -1594,34 +1605,36 @@ func TestHTTPExecutorSealedOutcomeDoesNotAcquireDeadlineDuringACKDrain(t *testin
 }
 
 func TestHTTPExecutorMissingOutcomeClosesRealGraceAndQuarantines(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	f := newHTTPServerTest(t, ctx, testJob(command.Comment), runnerExecutionCheckpoints{}, nil)
-	f.pull(t)
-	ready := Status{Version: ProtocolVersion, Identity: f.job.Identity, SourceRef: f.job.Source.Head, Sequence: 1, WorkerState: "ready", Phase: "cleanup"}
-	f.ack(t, "/status", httpObservation{Status: ready}, http.StatusOK, 1)
-	cancel()
-	<-f.tx.ctx.Done()
-	select {
-	case got := <-f.done:
-		t.Fatalf("delivered action skipped receipt grace: %+v error=%v", got.result, got.err)
-	default:
-	}
-	select {
-	case got := <-f.done:
-		if !errors.Is(got.err, context.Canceled) || !errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || errors.Is(got.err, monitor.ErrTerminalJob) || !got.result.matchesJob(f.job) || len(got.result.Calls) != 0 {
-			t.Fatalf("missing outcome invented known execution facts: %+v error=%v", got.result, got.err)
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		f := newHTTPServerTestInMemory(t, ctx, testJob(command.Comment), runnerExecutionCheckpoints{})
+		f.pull(t)
+		ready := Status{Version: ProtocolVersion, Identity: f.job.Identity, SourceRef: f.job.Source.Head, Sequence: 1, WorkerState: "ready", Phase: "cleanup"}
+		f.ack(t, "/status", httpObservation{Status: ready}, http.StatusOK, 1)
+		cancel()
+		<-f.tx.ctx.Done()
+		select {
+		case got := <-f.done:
+			t.Fatalf("delivered action skipped receipt grace: %+v error=%v", got.result, got.err)
+		default:
 		}
-	case <-time.After(httpControlTimeout + 5*time.Second):
-		t.Fatal("real control grace did not close missing-outcome admission")
-	}
-	if got := f.request("/outcome", f.outcome(1, nil)); got.err != nil || got.status != http.StatusConflict {
-		t.Fatalf("outcome was accepted after grace finalization: %+v", got)
-	}
-	if _, err := f.executor.Execute(context.Background(), f.job, runnerExecutionCheckpoints{}); err == nil {
-		t.Fatal("missing outcome released unproved worker capacity")
-	}
-	if got, ok := f.executor.Status(); !ok || got != ready {
-		t.Fatalf("forged ready observation was not retained as an untrusted label: status=%+v present=%t", got, ok)
-	}
+		select {
+		case got := <-f.done:
+			if !errors.Is(got.err, context.Canceled) || !errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || errors.Is(got.err, monitor.ErrTerminalJob) || !got.result.matchesJob(f.job) || len(got.result.Calls) != 0 {
+				t.Fatalf("missing outcome invented known execution facts: %+v error=%v", got.result, got.err)
+			}
+		case <-time.After(httpControlTimeout + 5*time.Second):
+			t.Fatal("real control grace did not close missing-outcome admission")
+		}
+		if got := f.request("/outcome", f.outcome(1, nil)); got.err != nil || got.status != http.StatusConflict {
+			t.Fatalf("outcome was accepted after grace finalization: %+v", got)
+		}
+		if _, err := f.executor.Execute(t.Context(), f.job, runnerExecutionCheckpoints{}); err == nil {
+			t.Fatal("missing outcome released unproved worker capacity")
+		}
+		if got, ok := f.executor.Status(); !ok || got != ready {
+			t.Fatalf("forged ready observation was not retained as an untrusted label: status=%+v present=%t", got, ok)
+		}
+	})
 }

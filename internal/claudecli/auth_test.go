@@ -1,7 +1,6 @@
 package claudecli
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -94,9 +93,9 @@ esac
 			settings := config.ClaudeConfig{APIKey: dummyAPIKey}
 			var err error
 			if validate {
-				_, err = Validate(context.Background(), settings)
+				_, err = Validate(t.Context(), settings)
 			} else {
-				_, err = Run(context.Background(), t.TempDir(), "task", true, "", settings)
+				_, err = Run(t.Context(), t.TempDir(), "task", true, "", settings)
 			}
 			if err != nil {
 				t.Fatal(err)
@@ -160,9 +159,9 @@ exit 1
 			settings := config.ClaudeConfig{APIKey: dummyAPIKey}
 			var err error
 			if validate {
-				_, err = Validate(context.Background(), settings)
+				_, err = Validate(t.Context(), settings)
 			} else {
-				_, err = Run(context.Background(), t.TempDir(), "task", false, "", settings)
+				_, err = Run(t.Context(), t.TempDir(), "task", false, "", settings)
 			}
 			if err == nil || strings.Contains(err.Error(), dummyAPIKey) || !strings.Contains(err.Error(), "[redacted]") {
 				t.Fatal("CLI error must redact configured key")
@@ -186,9 +185,9 @@ func TestAPIKeyEncodedStderrRedaction(t *testing.T) {
 			fakeExecutable(t, "claude", "printf '%s\\n' "+aicli.ShellQuote(string(encoded[1:len(encoded)-1]))+" >&2\nexit 1\n")
 			var err error
 			if validate {
-				_, err = Validate(context.Background(), config.ClaudeConfig{APIKey: key})
+				_, err = Validate(t.Context(), config.ClaudeConfig{APIKey: key})
 			} else {
-				_, err = Run(context.Background(), t.TempDir(), "task", false, "", config.ClaudeConfig{APIKey: key})
+				_, err = Run(t.Context(), t.TempDir(), "task", false, "", config.ClaudeConfig{APIKey: key})
 			}
 			if err == nil || strings.Contains(err.Error(), "fixture") || !strings.Contains(err.Error(), "[redacted]") {
 				t.Fatalf("encoded configured key escaped in CLI error: %v", err)
@@ -199,7 +198,7 @@ func TestAPIKeyEncodedStderrRedaction(t *testing.T) {
 
 func TestAPIKeyAnswerRedaction(t *testing.T) {
 	fakeExecutable(t, "claude", "cat >/dev/null\nprintf '%s\\n' '"+strings.ReplaceAll(successfulResult, "final answer", dummyAPIKey)+"'\n")
-	result, err := Run(context.Background(), t.TempDir(), "task", false, "", config.ClaudeConfig{APIKey: dummyAPIKey})
+	result, err := Run(t.Context(), t.TempDir(), "task", false, "", config.ClaudeConfig{APIKey: dummyAPIKey})
 	if err != nil || result.Answer != "[redacted]" || !result.UsageComplete {
 		t.Fatal("successful answer must redact configured key")
 	}
@@ -216,7 +215,7 @@ func TestAPIKeyGrantOverlap(t *testing.T) {
 		t.Fatal(err)
 	}
 	fakeExecutable(t, "claude", "exit 99\n")
-	_, err := Run(context.Background(), workspace, "task", false, "", config.ClaudeConfig{APIKey: dummyAPIKey, Skills: []string{skill}})
+	_, err := Run(t.Context(), workspace, "task", false, "", config.ClaudeConfig{APIKey: dummyAPIKey, Skills: []string{skill}})
 	if err == nil || !strings.Contains(err.Error(), "API key directory overlaps") {
 		t.Fatal("accepted skill read grant containing credential directory")
 	}

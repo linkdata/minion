@@ -27,7 +27,7 @@ func TestOfflineCheckIgnoreDoesNotAcceptSurvivingChild(t *testing.T) {
 	script := "#!/bin/sh\n(while [ ! -f " + shellQuote(pidFile+".stop") + " ]; do sleep 1; done) </dev/null >/dev/null 2>&1 &\n" +
 		"printf '%s' \"$!\" > " + shellQuote(pidFile) + "\nexit 1\n"
 	index.binary = filepath.Join(fakeOnPath(t, "git-ignore-child", script), "git-ignore-child")
-	output, err := index.run(context.Background(), 1024, nil, "check-ignore", "--", "ignored")
+	output, err := index.run(t.Context(), 1024, nil, "check-ignore", "--", "ignored")
 	if len(output) != 0 || !errors.Is(err, processgroup.ErrDescendants) {
 		t.Fatalf("check-ignore accepted surviving child: output=%q error=%v", output, err)
 	}
@@ -44,7 +44,7 @@ func TestOfflineCheckIgnoreDoesNotAcceptProcessExhaustion(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = processgroup.Configure(processgroup.DefaultMaxTasks, processgroup.DefaultMaxMemoryMiB<<20) })
-	output, err := index.run(context.Background(), 1024, nil, "check-ignore", "--", "ignored")
+	output, err := index.run(t.Context(), 1024, nil, "check-ignore", "--", "ignored")
 	if len(output) != 0 || !errors.Is(err, processgroup.ErrExhausted) {
 		t.Fatalf("check-ignore accepted process exhaustion: output=%q error=%v", output, err)
 	}
@@ -69,7 +69,7 @@ func TestFixIndexRejectsControlFIFOsBeforeGitOpensThem(t *testing.T) {
 				if err := syscall.Mkfifo(name, 0600); err != nil {
 					t.Fatal(err)
 				}
-				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 				defer cancel()
 				_, err := index.Changes(ctx)
 				if err == nil || !strings.Contains(err.Error(), "fix control file") || !strings.Contains(err.Error(), control) || !strings.Contains(err.Error(), "must be regular") || ctx.Err() != nil {
@@ -92,7 +92,7 @@ func TestFixIndexRejectsNestedGitFIFOBeforeGitOpensIt(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeIndexFixture(t, source, "newdir/file", []byte("new output"))
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	_, err := index.Changes(ctx)
 	if err == nil || !strings.Contains(err.Error(), `untracked nested repository output "newdir/"`) || ctx.Err() != nil {
@@ -129,7 +129,7 @@ func TestFixIndexRejectsIgnoredTrackedDirectoryWithGitMetadata(t *testing.T) {
 			}
 			marker := filepath.Join(t.TempDir(), "add-ran")
 			index.binary = filepath.Join(fakeOnPath(t, "git-proxy", "#!/bin/sh\nfor argument do\n if [ \"$argument\" = add ]; then touch "+shellQuote(marker)+"; exit 1; fi\ndone\nexec "+shellQuote(index.binary)+" \"$@\"\n"), "git-proxy")
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 			defer cancel()
 			_, err := index.Changes(ctx)
 			if err == nil || !strings.Contains(err.Error(), `tracked fix path "tracked.log" contains nested Git metadata`) || ctx.Err() != nil {
@@ -143,6 +143,7 @@ func TestFixIndexRejectsIgnoredTrackedDirectoryWithGitMetadata(t *testing.T) {
 }
 
 func TestFixIndexSkipsPopulatedSourceGitMetadata(t *testing.T) {
+	requireGitProcessGroup(t)
 	files := []workspace.File{{Path: "source", Mode: workspace.Regular, Data: []byte("before")}}
 	source := repositorySource(t, files)
 	metadata := t.TempDir()
@@ -152,7 +153,7 @@ func TestFixIndexSkipsPopulatedSourceGitMetadata(t *testing.T) {
 	if err := syscall.Mkfifo(filepath.Join(source, ".git", "HEAD"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	index, err := NewOfflineIndex(ctx, metadata, source, files)
 	if err != nil || ctx.Err() != nil {
@@ -175,7 +176,7 @@ func TestFixIndexTreatsColonDirectoriesAsLiteralNames(t *testing.T) {
 			if err := syscall.Mkfifo(filepath.Join(source, dir, ".gitignore"), 0600); err != nil {
 				t.Fatal(err)
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 			defer cancel()
 			_, err := index.Changes(ctx)
 			if err == nil || !strings.Contains(err.Error(), "fix control file") || !strings.Contains(err.Error(), "must be regular") || ctx.Err() != nil {
@@ -214,7 +215,7 @@ func TestFixIndexDoesNotInspectIgnoredControlFiles(t *testing.T) {
 		}
 	}
 	writeIndexFixture(t, source, "source", []byte("after"))
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	changes, err := index.Changes(ctx)
 	if err != nil || len(changes) != 1 || changes[0].Path != "source" || string(changes[0].Data) != "after" || ctx.Err() != nil {
@@ -239,7 +240,7 @@ func TestFixIndexRejectsTrackedFIFOAndSymlink(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 			defer cancel()
 			changes, err := index.Changes(ctx)
 			want := "can only add regular files"
@@ -264,7 +265,7 @@ func TestFixIndexControlScanHonorsNestedIgnoreNegation(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeIndexFixture(t, source, "sub/keep.cache/added", []byte("included by negation"))
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	changes, err := index.Changes(ctx)
 	if err != nil || len(changes) != 1 || changes[0].Path != "sub/keep.cache/added" || ctx.Err() != nil {
@@ -298,7 +299,7 @@ func TestFixIndexGrowthCheckDoesNotStatThroughSymlinkedParents(t *testing.T) {
 			if err := os.Symlink(outside, filepath.Join(source, "parent")); err != nil {
 				t.Fatal(err)
 			}
-			changes, err := index.Changes(context.Background())
+			changes, err := index.Changes(t.Context())
 			if ignored {
 				if err != nil || len(changes) != 1 || changes[0].Path != "parent/file" || !changes[0].Delete {
 					t.Fatalf("ignored replacement did not export only deletion: %+v, %v", changes, err)
@@ -325,7 +326,7 @@ func TestFixIndexPrunesCaseVariantMetadataBeforeOpeningFIFOs(t *testing.T) {
 			if err := syscall.Mkfifo(file, 0600); err != nil {
 				t.Fatal(err)
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 			defer cancel()
 			changes, err := index.Changes(ctx)
 			if err != nil || len(changes) != 0 || ctx.Err() != nil {
@@ -363,11 +364,11 @@ func TestFixIndexIgnoredSymlinkParentDoesNotBlockOnAttributeFIFO(t *testing.T) {
 			if info, err := os.Lstat(filepath.Join(parent, ".gitattributes")); err != nil || info.Mode()&os.ModeNamedPipe == 0 {
 				t.Fatalf("symlink does not lead to attribute FIFO: %v, %v", info, err)
 			}
-			tracked, err := index.run(context.Background(), 1024, nil, "ls-tree", "-r", "--name-only", index.baseline, "--", test.tracked)
+			tracked, err := index.run(t.Context(), 1024, nil, "ls-tree", "-r", "--name-only", index.baseline, "--", test.tracked)
 			if err != nil || string(tracked) != test.tracked+"\n" {
 				t.Fatalf("baseline tracked path=%q error=%v", tracked, err)
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 			defer cancel()
 			changes, err := index.Changes(ctx)
 			if err != nil || len(changes) != 1 || changes[0].Path != test.tracked || !changes[0].Delete || ctx.Err() != nil {
@@ -385,7 +386,7 @@ func TestFixIndexHandlesGitFIFOInsideTrackedDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeIndexFixture(t, source, "tracked/file", []byte("after"))
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	changes, err := index.Changes(ctx)
 	if err != nil || ctx.Err() != nil || len(changes) != 1 || changes[0].Path != "tracked/file" || string(changes[0].Data) != "after" {
@@ -400,7 +401,7 @@ func TestCaseOnlyRenamePassesChangesAndImport(t *testing.T) {
 	if err := os.Rename(filepath.Join(source, "README.md"), filepath.Join(source, "readme.md")); err != nil {
 		t.Fatal(err)
 	}
-	changes, err := index.Changes(context.Background())
+	changes, err := index.Changes(t.Context())
 	if err != nil || len(changes) != 2 {
 		t.Fatalf("case-only rename changes=%+v error=%v", changes, err)
 	}
@@ -417,7 +418,7 @@ func TestCaseOnlyRenamePassesChangesAndImport(t *testing.T) {
 		t.Fatalf("case-only rename lost deletion or creation: %+v", changes)
 	}
 	fixture := newFixture(t)
-	if err := fixture.checkout.Import(context.Background(), fixture.base, changes); err != nil {
+	if err := fixture.checkout.Import(t.Context(), fixture.base, changes); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Lstat(filepath.Join(fixture.checkout.path, "README.md")); !errors.Is(err, os.ErrNotExist) {

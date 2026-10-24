@@ -19,6 +19,7 @@ import (
 )
 
 func TestHostileHTTPAuditSchemaCannotPublish(t *testing.T) {
+	requireActionProcessGroup(t)
 	const rejectedWithoutReason = `[{"verdict":"rejected","fingerprint":"F","title":"Guard bypass refuted","description":"The alleged bypass does not reach the operation.","claimed_root_cause":"The guard was claimed to be absent.","trace":[{"kind":"entrypoint","file":"source.txt","line":1,"scope":"source","description":"The request reaches the guard."}],"evidence":[{"file":"source.txt","line":1,"description":"The guard executes before the operation."}] }]`
 	candidateLedger := strings.Replace(auditCoveredLedgerFixture, `"status":"covered"`, `"status":"candidate"`, 1)
 	candidateLedger = strings.Replace(candidateLedger, `"result_fingerprints":[]`, `"result_fingerprints":["F"]`, 1)

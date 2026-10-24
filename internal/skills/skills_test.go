@@ -3,7 +3,6 @@ package skills
 import (
 	"archive/tar"
 	"compress/gzip"
-	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -233,7 +232,7 @@ func TestInstallWholeSubtreesForBothAgents(t *testing.T) {
 	})
 	i, commits, archives := testInstaller(t, home, archive)
 	auditURL := "https://github.com/example/skills/tree/main/skills/audit"
-	if err := i.install(context.Background(), []string{testURL, auditURL, testURL}); err != nil {
+	if err := i.install(t.Context(), []string{testURL, auditURL, testURL}); err != nil {
 		t.Fatal(err)
 	}
 	if *commits != 1 || *archives != 1 {
@@ -270,7 +269,7 @@ func TestInstallWholeSubtreesForBothAgents(t *testing.T) {
 func TestInstallBuiltinForBothAgentsWithoutNetwork(t *testing.T) {
 	home := t.TempDir()
 	i := &installer{home: home}
-	if err := i.install(context.Background(), []string{BuiltinAntiPromptInjection}); err != nil {
+	if err := i.install(t.Context(), []string{BuiltinAntiPromptInjection}); err != nil {
 		t.Fatal(err)
 	}
 	want, _ := BuiltinContent(BuiltinAntiPromptInjection)
@@ -291,7 +290,7 @@ func TestInstallBuiltinForBothAgentsWithoutNetwork(t *testing.T) {
 			t.Fatalf("embedded install metadata = %q, %v", metadata, err)
 		}
 	}
-	if err := i.install(context.Background(), []string{BuiltinAntiPromptInjection, "https://github.com/example/skills/tree/main/skills/anti-prompt-injection"}); err == nil {
+	if err := i.install(t.Context(), []string{BuiltinAntiPromptInjection, "https://github.com/example/skills/tree/main/skills/anti-prompt-injection"}); err == nil {
 		t.Fatal("different sources with the same skill name accepted")
 	}
 }
@@ -316,7 +315,7 @@ func TestInstallRejectsUnsafeArchiveWithoutReplacingSkill(t *testing.T) {
 			}
 			archive := tarball(t, []archiveEntry{{name: tt.path, body: "bad", kind: tt.kind}})
 			i, _, _ := testInstaller(t, home, archive)
-			if err := i.install(context.Background(), []string{testURL}); err == nil {
+			if err := i.install(t.Context(), []string{testURL}); err == nil {
 				t.Fatal("unsafe archive accepted")
 			}
 			if data, err := os.ReadFile(filepath.Join(old, "old.txt")); err != nil || string(data) != "keep" {
@@ -343,7 +342,7 @@ func TestInstallRejectsBlockedDestinationBeforeReplacing(t *testing.T) {
 		t.Fatal(err)
 	}
 	i, _, _ := testInstaller(t, home, tarball(t, []archiveEntry{{name: "prefix/skills/review/SKILL.md", body: "new"}}))
-	if err := i.install(context.Background(), []string{testURL}); err == nil {
+	if err := i.install(t.Context(), []string{testURL}); err == nil {
 		t.Fatal("existing non-directory destination accepted")
 	}
 	if data, err := os.ReadFile(filepath.Join(old, "old.txt")); err != nil || string(data) != "keep" {
@@ -381,10 +380,10 @@ func TestInstallRejectsCaseCollisions(t *testing.T) {
 		{name: "prefix/skills/review/SKILL.md", body: "Review code."},
 		{name: "prefix/skills/review/skill.md", body: "A second spelling."},
 	}))
-	if err := i.install(context.Background(), []string{testURL}); err == nil {
+	if err := i.install(t.Context(), []string{testURL}); err == nil {
 		t.Fatal("case-colliding files accepted")
 	}
-	if err := i.install(context.Background(), []string{testURL, "https://github.com/example/skills/tree/main/skills/Review"}); err == nil {
+	if err := i.install(t.Context(), []string{testURL, "https://github.com/example/skills/tree/main/skills/Review"}); err == nil {
 		t.Fatal("case-colliding skill names accepted")
 	}
 	i, _, _ = testInstaller(t, home, tarball(t, []archiveEntry{
@@ -392,7 +391,7 @@ func TestInstallRejectsCaseCollisions(t *testing.T) {
 		{name: "prefix/skills/review/scripts/first.txt", body: "first"},
 		{name: "prefix/skills/review/Scripts/second.txt", body: "second"},
 	}))
-	if err := i.install(context.Background(), []string{testURL}); err == nil {
+	if err := i.install(t.Context(), []string{testURL}); err == nil {
 		t.Fatal("case-colliding subdirectories accepted")
 	}
 }
@@ -403,7 +402,7 @@ func TestInstallIgnoresUnrelatedFilename(t *testing.T) {
 		{name: "prefix/unrelated\\file.txt", body: "unrelated"},
 		{name: "prefix/skills/review/SKILL.md", body: "Review code."},
 	}))
-	if err := i.install(context.Background(), []string{testURL}); err != nil {
+	if err := i.install(t.Context(), []string{testURL}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -414,7 +413,7 @@ func TestInstallRejectsSymlinkedParentBeforeWriting(t *testing.T) {
 		t.Fatal(err)
 	}
 	i, _, _ := testInstaller(t, home, tarball(t, []archiveEntry{{name: "prefix/skills/review/SKILL.md", body: "new"}}))
-	if err := i.install(context.Background(), []string{testURL}); err == nil {
+	if err := i.install(t.Context(), []string{testURL}); err == nil {
 		t.Fatal("symlinked skill parent accepted")
 	}
 	if _, err := os.Stat(filepath.Join(outside, "skills")); !os.IsNotExist(err) {

@@ -24,6 +24,7 @@ import (
 )
 
 func TestExecuteOrdersAccountingReviewAndPublicationCheckpoints(t *testing.T) {
+	requireActionProcessGroup(t)
 	for _, overHTTP := range []bool{false, true} {
 		for _, capped := range []bool{false, true} {
 			t.Run(fmt.Sprintf("HTTP=%t/capped=%t", overHTTP, capped), func(t *testing.T) { testExecuteOrdersCheckpoints(t, overHTTP, capped, false) })

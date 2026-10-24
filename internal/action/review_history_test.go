@@ -20,6 +20,7 @@ import (
 )
 
 func TestInitialRefutationsAreDiscardedAndEmptyHistoryIsOptional(t *testing.T) {
+	requireActionProcessGroup(t)
 	job := withClaudeCritic(testJob(command.Comment))
 	job.CriticMaxRounds, job.CriticNonblockingRounds = 2, 0
 	calls := 0
@@ -73,13 +74,14 @@ func TestInitialRefutationsAreDiscardedAndEmptyHistoryIsOptional(t *testing.T) {
 		}
 		return aicli.Result{Answer: approvedCritiqueJSON}, nil
 	}}
-	result, err := runner.Run(context.Background(), job)
+	result, err := runner.Run(t.Context(), job)
 	if err != nil || calls != 5 || len(result.Refutations) != 0 || result.Answer != "Revised candidate" {
 		t.Fatalf("preemptive refutations survived or review failed: calls=%d result=%+v error=%v", calls, result, err)
 	}
 }
 
 func TestReviewHistoryGrantFailureIsTerminalAfterPaidWork(t *testing.T) {
+	requireActionProcessGroup(t)
 	if os.Geteuid() == 0 {
 		t.Skip("root bypasses directory permissions")
 	}
@@ -105,7 +107,7 @@ func TestReviewHistoryGrantFailureIsTerminalAfterPaidWork(t *testing.T) {
 		}
 		return aicli.Result{Answer: proposalJSON("Revised candidate", "PRIVATE_REFUTATION: supplied evidence disproves the finding")}, nil
 	}}
-	result, err := runner.Run(context.Background(), job)
+	result, err := runner.Run(t.Context(), job)
 	if !errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, os.ErrPermission) || !strings.Contains(err.Error(), "prepare review history") || calls != 3 || len(result.Calls) != 3 || len(result.Refutations) != 1 || result.Refutations[0].Round != 2 || result.Answer != "" {
 		t.Fatalf("history failure repeated model work/lost cause: calls=%d result=%+v error=%v", calls, result, err)
 	}
@@ -172,6 +174,7 @@ func checkRefutations(t *testing.T, request modelRun, want []Refutation) string 
 }
 
 func TestRefutationsSurviveOmissionWithoutRememberingImplementedChanges(t *testing.T) {
+	requireActionProcessGroup(t)
 	const refutation = "PRIVATE_REFUTATION_A: source.txt is application data; this undeployed project requires no migration."
 	const findingA = "PRIVATE_FINDING_A: add a migration."
 	const findingB = "PRIVATE_BLOCKER_B: source.txt must contain fixed B."
@@ -237,7 +240,7 @@ func TestRefutationsSurviveOmissionWithoutRememberingImplementedChanges(t *testi
 		}
 		return aicli.Result{Answer: fmt.Sprintf(`{"approved":%t,"has_blockers":%t,"review_complete":true,"feedback":%q}`, approved, blockers, feedback)}, nil
 	}}
-	result, err := runner.Run(context.Background(), job)
+	result, err := runner.Run(t.Context(), job)
 	wantSequence := []string{"main/1/", "critic/1/full", "main/2/", "critic/2/verification", "critic/2/full", "main/3/", "critic/3/verification", "main/4/", "critic/4/verification", "critic/4/full"}
 	if err != nil || result.Answer != answer || !reflect.DeepEqual(sequence, wantSequence) || len(result.Calls) != 10 || !reflect.DeepEqual(result.Refutations, []Refutation{{Round: 2, Text: refutation}}) {
 		t.Fatalf("refutation-only memory/correction lost: %+v sequence=%v error=%v", result, sequence, err)
@@ -257,6 +260,7 @@ func TestRefutationsSurviveOmissionWithoutRememberingImplementedChanges(t *testi
 }
 
 func TestRefutationsRetainSuccessfulMainPrefixAfterStop(t *testing.T) {
+	requireActionProcessGroup(t)
 	for _, failure := range []string{"main provider", "critic provider", "main malformed", "critic malformed", "round cap"} {
 		t.Run(failure, func(t *testing.T) {
 			job := withClaudeCritic(testJob(command.Comment))
@@ -296,7 +300,7 @@ func TestRefutationsRetainSuccessfulMainPrefixAfterStop(t *testing.T) {
 				}
 				return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"review_complete":true,"feedback":"PRIVATE_BLOCKER: correction required."}`}, nil
 			}}
-			result, err := runner.Run(context.Background(), job)
+			result, err := runner.Run(t.Context(), job)
 			capped := failure == "round cap"
 			if (err == nil) != capped || !reflect.DeepEqual(result.Refutations, expected) {
 				t.Fatalf("successful refutations lost/failed text promoted: %+v expected=%+v error=%v", result, expected, err)
@@ -339,6 +343,7 @@ func TestRefutationsRetainSuccessfulMainPrefixAfterStop(t *testing.T) {
 }
 
 func TestRefutationsRemainPrivateFromAuditArtifacts(t *testing.T) {
+	requireActionProcessGroup(t)
 	installActionTestSkills(t, testAuditSkillURL)
 	fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
 	job := withClaudeCritic(testJob(command.SecurityAudit))
@@ -366,7 +371,7 @@ func TestRefutationsRemainPrivateFromAuditArtifacts(t *testing.T) {
 		}
 		return aicli.Result{Answer: approvedCritiqueJSON}, nil
 	}}
-	result, err := runner.Run(context.Background(), job)
+	result, err := runner.Run(t.Context(), job)
 	if err != nil || len(result.Refutations) != 1 || !reflect.DeepEqual(result.Refutations, expected) || len(result.Artifacts) != len(auditArtifacts) {
 		t.Fatalf("audit refutations=%+v error=%v", result, err)
 	}
@@ -384,6 +389,7 @@ func TestRefutationsRemainPrivateFromAuditArtifacts(t *testing.T) {
 }
 
 func TestRefutationCheckpointFailureStopsBeforeNextCall(t *testing.T) {
+	requireActionProcessGroup(t)
 	job := withClaudeCritic(testJob(command.Comment))
 	job.CriticMaxRounds, job.CriticNonblockingRounds = 2, 0
 	checkpointErr := errors.New("private refutation checkpoint unavailable")
@@ -411,7 +417,7 @@ func TestRefutationCheckpointFailureStopsBeforeNextCall(t *testing.T) {
 		}
 		return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"review_complete":true,"feedback":"PRIVATE_BLOCKER"}`}, nil
 	}}
-	result, err := runner.Run(context.Background(), job)
+	result, err := runner.Run(t.Context(), job)
 	if !errors.Is(err, checkpointErr) || !errors.Is(err, monitor.ErrTerminalJob) || calls != 3 || checkpoints != 4 || result.Answer != "" || result.CriticStopReason != "" || !reflect.DeepEqual(result.Refutations, expected) || !reflect.DeepEqual(lastCheckpoint, expected) {
 		t.Fatalf("checkpoint failure lost evidence/continued: calls=%d checkpoints=%d result=%+v error=%v", calls, checkpoints, result, err)
 	}
@@ -421,6 +427,7 @@ func TestRefutationCheckpointFailureStopsBeforeNextCall(t *testing.T) {
 }
 
 func TestRunnerCheckpointsCriticDecisionAfterVerifiedVerdict(t *testing.T) {
+	requireActionProcessGroup(t)
 	checkpointErr := errors.New("critic decision checkpoint unavailable")
 	for _, failDecision := range []bool{false, true} {
 		t.Run(fmt.Sprintf("checkpoint failure=%t", failDecision), func(t *testing.T) {
@@ -441,7 +448,7 @@ func TestRunnerCheckpointsCriticDecisionAfterVerifiedVerdict(t *testing.T) {
 				}
 				return aicli.Result{Answer: approvedCritiqueJSON}, nil
 			}}
-			result, err := runner.Run(context.Background(), job)
+			result, err := runner.Run(t.Context(), job)
 			if !reflect.DeepEqual(checkpoints, []string{"0/", "1/", "2/", "2/approved"}) || result.CriticStopReason != "approved" {
 				t.Fatalf("critic decision preceded policy acceptance: checkpoints=%v result=%+v error=%v", checkpoints, result, err)
 			}
