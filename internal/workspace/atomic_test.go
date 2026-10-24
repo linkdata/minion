@@ -45,7 +45,12 @@ func TestWriteAtomicReplacesPrivateRecordAndCleansTemporaryFile(t *testing.T) {
 func TestWriteAtomicReportsSyncFailureAfterReplacement(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "record.json")
-	if err := WriteAtomic(path, []byte("retained"), filepath.Join(root, "missing")); !errors.Is(err, os.ErrNotExist) {
+	err := WriteAtomic(path, []byte("retained"), filepath.Join(root, "missing"))
+	if runtime.GOOS == "windows" {
+		if err != nil {
+			t.Fatalf("unnecessary Windows directory open failed after replacement: %v", err)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("sync error lost: %v", err)
 	}
 	if data, err := os.ReadFile(path); err != nil || string(data) != "retained" {

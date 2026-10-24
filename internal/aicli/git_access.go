@@ -51,7 +51,15 @@ func ValidateModelGitAccess(ctx context.Context, provider string, systemReads []
 	if err != nil {
 		return fmt.Errorf("resolve Git helper path: %w", err)
 	}
-	for _, path := range []string{binary, target, execPath} {
+	// Model PATH resolves directory aliases, but leaves the executable name intact.
+	lookupDir, err := filepath.EvalSymlinks(filepath.Dir(binary))
+	if err != nil {
+		return fmt.Errorf("resolve Git lookup directory for %s model commands: %w", provider, err)
+	}
+	if !gitPathReadable(filepath.Join(lookupDir, filepath.Base(binary)), roots) {
+		return fmt.Errorf("Git path %q is outside %s model read grants; install Git under a granted system path", binary, provider)
+	}
+	for _, path := range []string{target, execPath} {
 		if !gitPathReadable(path, roots) {
 			return fmt.Errorf("Git path %q is outside %s model read grants; install Git under a granted system path", path, provider)
 		}

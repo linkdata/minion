@@ -38,3 +38,33 @@ func TestValidateModelGitAccessRejectsGitOutsideModelGrants(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateModelGitAccessAllowsDirectoryAliasButRejectsFileAlias(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell and symlink fixture is unavailable on native Windows")
+	}
+	physical := t.TempDir()
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(physical, alias); err != nil {
+		t.Fatal(err)
+	}
+	helper := filepath.Join(physical, "git-core")
+	git := filepath.Join(physical, "git")
+	if err := os.WriteFile(git, []byte("#!/bin/sh\nprintf '%s\\n' "+ShellQuote(helper)+"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := os.Getenv("PATH")
+	t.Setenv("PATH", alias+string(os.PathListSeparator)+path)
+	if err := ValidateModelGitAccess(t.Context(), "Codex", []string{physical}); err != nil {
+		t.Fatalf("directory alias to granted Git was refused: %v", err)
+	}
+	outside := t.TempDir()
+	outsideGit := filepath.Join(outside, "git")
+	if err := os.Symlink(git, outsideGit); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", outside+string(os.PathListSeparator)+path)
+	if err := ValidateModelGitAccess(t.Context(), "Codex", []string{physical}); err == nil || !strings.Contains(err.Error(), outsideGit) {
+		t.Fatalf("outside file alias was accepted: %v", err)
+	}
+}

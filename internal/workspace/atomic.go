@@ -33,17 +33,16 @@ func WriteAtomic(path string, data []byte, extraDirs ...string) (resultErr error
 		return err
 	}
 	temporary = ""
+	// shortcut: Windows directory Sync lacks write access; revisit if crash durability is required.
+	if runtime.GOOS == "windows" {
+		return nil
+	}
 	for _, directory := range append([]string{filepath.Dir(path)}, extraDirs...) {
 		file, err := os.Open(directory)
 		if err != nil {
 			return err
 		}
-		var syncErr error
-		// shortcut: Windows os.Open lacks write access for directory Sync; revisit if crash durability is required.
-		if runtime.GOOS != "windows" {
-			syncErr = file.Sync()
-		}
-		if err := errors.Join(syncErr, file.Close()); err != nil {
+		if err := errors.Join(file.Sync(), file.Close()); err != nil {
 			return err
 		}
 	}
