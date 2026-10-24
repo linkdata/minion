@@ -138,34 +138,43 @@ func rejectPublishedRefutations(job Job, result Result, projected publication) e
 		return nil
 	}
 	type sentenceSuffix struct {
-		children map[byte]*sentenceSuffix
-		terminal bool
+		first, next uint32
+		char        byte
+		terminal    bool
 	}
-	// Match sentence suffixes in one pass through each public sentence, even for large Fix files.
-	var suffixes sentenceSuffix
-	for text := range sentences {
-		node := &suffixes
-		for i := len(text) - 1; i >= 0; i-- {
-			if node.children == nil {
-				node.children = make(map[byte]*sentenceSuffix)
+	// One node per distinct byte keeps accepted private text from multiplying into per-byte maps.
+	suffixes := []sentenceSuffix{{}}
+	child := func(parent uint32, char byte) uint32 {
+		for i := suffixes[parent].first; i != 0; i = suffixes[i].next {
+			if suffixes[i].char == char {
+				return i
 			}
-			if node.children[text[i]] == nil {
-				node.children[text[i]] = new(sentenceSuffix)
-			}
-			node = node.children[text[i]]
 		}
-		node.terminal = true
+		return 0
+	}
+	for text := range sentences {
+		var node uint32
+		for i := len(text) - 1; i >= 0; i-- {
+			next := child(node, text[i])
+			if next == 0 {
+				next = uint32(len(suffixes))
+				suffixes = append(suffixes, sentenceSuffix{char: text[i], next: suffixes[node].first})
+				suffixes[node].first = next
+			}
+			node = next
+		}
+		suffixes[node].terminal = true
 	}
 	sentenceCopy := func(text string, reject func(string) bool) bool {
 		text = foldPublicationSentence(text)
-		node := &suffixes
+		var node uint32
 		for i := len(text); i > 0; {
 			i--
-			node = node.children[text[i]]
-			if node == nil {
+			node = child(node, text[i])
+			if node == 0 {
 				break
 			}
-			if !node.terminal {
+			if !suffixes[node].terminal {
 				continue
 			}
 			if i > 0 {
@@ -221,7 +230,8 @@ func rejectPublishedRefutations(job Job, result Result, projected publication) e
 		if scanExhausted {
 			return false
 		}
-		if !cacheChecked {
+		cacheable := strings.IndexByte(private, 0) < 0
+		if !cacheChecked && cacheable {
 			cacheChecked = true
 			const maxCacheSourceBytes, maxCacheNormalizedBytes = 4 << 20, 32 << 20
 			rawBytes := 0
@@ -254,7 +264,8 @@ func rejectPublishedRefutations(job Job, result Result, projected publication) e
 				}
 			}
 		}
-		if sourceCached {
+		// NUL may occur in private evidence; the cache also uses it between source elements.
+		if sourceCached && cacheable {
 			if int64(len(sourceText)) > remainingSourceSearchBytes {
 				scanExhausted = true
 				return false

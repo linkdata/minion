@@ -850,3 +850,24 @@ func TestResultEmptyAnswerContract(t *testing.T) {
 		})
 	}
 }
+
+func TestChangedFixDoesNotRenderUnusedAnswer(t *testing.T) {
+	job := testJob(command.Fix)
+	answer := strings.Repeat("x", maxOutputBytes)
+	if !boundedText(answer, maxOutputBytes) || modelOutputFits(answer) {
+		t.Fatal("fixture does not isolate raw text from rendering limit")
+	}
+	result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head,
+		Answer: answer, Changes: []workspace.Change{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("fixed source")}},
+		Calls: []CallUsage{{Provider: job.Main.Provider, Role: roleMain, Round: 1}}}
+	if err := result.Validate(job); err != nil {
+		t.Fatalf("unused changed-Fix answer was rejected: %v", err)
+	}
+	if projected, err := projectPublication(job, result); err != nil || projected.answer != "" {
+		t.Fatalf("changed Fix exposed its unused answer: %+v, %v", projected, err)
+	}
+	result.Changes = nil
+	if err := result.Validate(job); err == nil || !strings.Contains(err.Error(), "action answer") {
+		t.Fatalf("published no-change Fix accepted unrenderable answer: %v", err)
+	}
+}

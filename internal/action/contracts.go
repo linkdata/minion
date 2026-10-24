@@ -351,7 +351,7 @@ func (r Result) validate(j Job, complete bool) error {
 	}
 	requiresAnswer := j.Action != command.SecurityAudit && (j.Action != command.Fix || len(r.Changes) == 0)
 	validAnswer := boundedText(r.Answer, maxOutputBytes)
-	if j.Action != command.SecurityAudit {
+	if requiresAnswer {
 		validAnswer = publishableAnswer(r.Answer)
 	}
 	invalidCompleteAnswer := complete && (!validAnswer || (requiresAnswer && !auditVisibleText(r.Answer)))

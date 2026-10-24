@@ -34,6 +34,7 @@ func TestHostileHTTPAuditSchemaCannotPublish(t *testing.T) {
 	budgetBlocked = strings.Replace(budgetBlocked, `"boundary":"boundary"`, `"boundary":"budget"`, 1)
 	budgetBlocked = strings.Replace(budgetBlocked, `"boundary":"Boundary"`, `"boundary":"Budget boundary"`, 1)
 	budgetBlocked = "[" + strings.Trim(budgetBlocked, "[]") + "," + strings.Trim(auditCoveredLedgerFixture, "[]") + "]"
+	reservedBudgetBlocked := strings.Replace(budgetBlocked, "validation_budget_exhausted", "budget_cannot_reserve_critics_and_validation", 1)
 	excludedLedger := auditOutOfScopeLedgerFixture()
 	for _, test := range []struct {
 		name, artifact, data, findings, want string
@@ -44,6 +45,8 @@ func TestHostileHTTPAuditSchemaCannotPublish(t *testing.T) {
 		{name: "blocked-only ledger has no reviewed coverage", artifact: "coverage-ledger.json", data: blockedLedger, want: "no reviewed coverage"},
 		{name: "archived covered attempt cannot publish blocked current coverage", artifact: "coverage-ledger.json", data: auditArchivedCoveredBlockedLedgerFixture(), want: "no reviewed coverage"},
 		{name: "complete ledger declares exhausted validation budget", artifact: "coverage-ledger.json", data: budgetBlocked, want: "incomplete audit budget"},
+		{name: "complete ledger cannot reserve critics and validation", artifact: "coverage-ledger.json", data: reservedBudgetBlocked, want: "incomplete audit budget"},
+		{name: "reserved audit agent ID", artifact: "coverage-ledger.json", data: strings.Replace(auditCoveredLedgerFixture, `"agent_id":"hunter"`, `"agent_id":"con"`, 1), want: "lacks assigned review evidence"},
 		{name: "excluded-only ledger cannot be complete", artifact: "coverage-ledger.json", data: excludedLedger, want: "out-of-scope unit in complete audit"},
 		{name: "covered ledger with current out-of-scope unit cannot publish", artifact: "coverage-ledger.json", data: auditCoveredAndOutOfScopeLedgerFixture(), want: "out-of-scope unit in complete audit"},
 		{name: "blank architecture", artifact: "architecture.md", data: " \t\r\n", want: "architecture.md"},

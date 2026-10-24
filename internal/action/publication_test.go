@@ -703,6 +703,23 @@ func TestPublishedRefutationsSourceSearchDoesNotJoinFiles(t *testing.T) {
 	}
 }
 
+func TestPublishedRefutationsFixNULSourceSeparator(t *testing.T) {
+	const private = "foo\x00bar is a private review conclusion that must not enter a Fix."
+	job := withClaudeCritic(testJob(command.Fix))
+	job.Source.Files = []workspace.File{{Path: "foo", Mode: workspace.Regular, Data: []byte("bar is a private review conclusion that must not enter a Fix.\n")}}
+	result := privateReviewResult(job)
+	result.Refutations[0].Text = private
+	result.Changes = []workspace.Change{{Path: "edit.bin", Mode: workspace.Regular, Data: []byte(private)}}
+	projected, err := projectPublication(job, result)
+	if err != nil || rejectPublishedRefutations(job, result, projected) == nil {
+		t.Fatalf("cross-element NUL quote passed the Fix guard: %v", err)
+	}
+	job.Source.Files[0].Data = []byte(private)
+	if err := rejectPublishedRefutations(job, result, projected); err != nil {
+		t.Fatalf("same-element binary quote was blocked: %v", err)
+	}
+}
+
 func TestPublishedRefutationsFixManySourceQuotes(t *testing.T) {
 	job := withClaudeCritic(testJob(command.Fix))
 	var quotes []string

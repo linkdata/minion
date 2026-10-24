@@ -39,6 +39,7 @@ func TestCompleteAuditResultValidatesCoverage(t *testing.T) {
 	secondBlocked = strings.Replace(secondBlocked, `"boundary":"Boundary"`, `"boundary":"Blocked boundary"`, 1)
 	blockedAndCovered := "[" + strings.Trim(secondBlocked, "[]") + "," + strings.Trim(validLedger, "[]") + "]"
 	incompleteBlocked := strings.Replace(blockedAndCovered, `"unresolved":["Investigate boundary"]`, `"unresolved":["validation_budget_exhausted"]`, 1)
+	incompleteReservedBudget := strings.Replace(blockedAndCovered, `"unresolved":["Investigate boundary"]`, `"unresolved":["budget_cannot_reserve_critics_and_validation"]`, 1)
 	incompleteExcluded := strings.Replace(excludedLedger, `"unresolved":["Out of scope"]`, `"unresolved":["critic_budget_exhausted"]`, 1)
 	incompleteExcluded = strings.Replace(incompleteExcluded, `"coverage_id":"source::boundary::`, `"coverage_id":"source::excluded::`, 1)
 	incompleteExcluded = strings.Replace(incompleteExcluded, `"boundary":"boundary"`, `"boundary":"excluded"`, 1)
@@ -64,6 +65,8 @@ func TestCompleteAuditResultValidatesCoverage(t *testing.T) {
 		{name: "covered ledger with current out-of-scope unit is incomplete", ledger: auditCoveredAndOutOfScopeLedgerFixture(), want: "out-of-scope unit in complete audit"},
 		{name: "blocked and covered", ledger: blockedAndCovered},
 		{name: "blocked unit declares exhausted validation budget", ledger: incompleteBlocked, want: "incomplete audit budget"},
+		{name: "blocked unit cannot reserve critics and validation", ledger: incompleteReservedBudget, want: "incomplete audit budget"},
+		{name: "reserved agent ID", ledger: strings.Replace(validLedger, `"agent_id":"hunter"`, `"agent_id":"con"`, 1), want: "lacks assigned review evidence"},
 		{name: "excluded unit declares exhausted critic budget", ledger: incompleteExcluded, want: "incomplete audit budget"},
 		{name: "archived attempt declares unaffordable budget", ledger: incompleteArchive, want: "incomplete audit budget"},
 		{name: "covered with populated context", ledger: withContext},

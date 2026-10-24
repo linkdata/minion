@@ -329,7 +329,7 @@ func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes []byte, sourc
 			return errors.New("audit coverage-ledger.json exceeds validation work limit")
 		}
 		for _, reason := range e.Unresolved {
-			if strings.Contains(reason, "validation_budget_exhausted") || strings.Contains(reason, "critic_budget_exhausted") || strings.Contains(reason, "budget_cannot_fund_reconnaissance_and_reserves") {
+			if strings.Contains(reason, "validation_budget_exhausted") || strings.Contains(reason, "critic_budget_exhausted") || strings.Contains(reason, "budget_cannot_fund_reconnaissance_and_reserves") || strings.Contains(reason, "budget_cannot_reserve_critics_and_validation") {
 				return errors.New("audit coverage-ledger.json declares an incomplete audit budget")
 			}
 		}
@@ -900,7 +900,7 @@ func validAuditCoverageAgent(agent string) bool {
 	if len(agent) == 0 || len(agent) > 64 || !(agent[0] >= 'a' && agent[0] <= 'z' || agent[0] >= '0' && agent[0] <= '9') {
 		return false
 	}
-	return strings.Trim(agent, "abcdefghijklmnopqrstuvwxyz0123456789_-") == ""
+	return strings.Trim(agent, "abcdefghijklmnopqrstuvwxyz0123456789_-") == "" && !auditWindowsReservedComponent.MatchString(agent)
 }
 
 func validateAuditMetadata(metadataBytes []byte, repo, target, head string) ([]string, error) {

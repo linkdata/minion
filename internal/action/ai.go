@@ -354,7 +354,7 @@ func parseCritique(answer string, secrets ...string) (approved, hasBlockers, rev
 			return false, false, false, "", errors.New("critic feedback contains a configured provider key")
 		}
 	}
-	if !approved && strings.TrimSpace(feedback) == "" {
+	if !approved && !auditVisibleText(feedback) {
 		return false, false, false, "", errors.New("rejection feedback is blank after redaction")
 	}
 	return approved, hasBlockers, reviewComplete, feedback, nil

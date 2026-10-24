@@ -195,6 +195,90 @@ func TestHostileHTTPFixEntityKeyCannotPublish(t *testing.T) {
 	}
 }
 
+func TestHostileHTTPFixNULRefutationCannotPublish(t *testing.T) {
+	const private = "foo\x00bar is a private review conclusion that must not enter a Fix."
+	_, _, remote := gitFixtureRemote(t, workspace.File{Path: "foo", Mode: workspace.Regular, Data: []byte("bar is a private review conclusion that must not enter a Fix.\n")})
+	var writes atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if serveFixFlowFixture(t, w, r) || serveIssueFixture(t, w, r) {
+			return
+		}
+		if r.Method != http.MethodGet {
+			writes.Add(1)
+		}
+		t.Errorf("unexpected GitHub request: %s %s", r.Method, r.URL.Path)
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	workRoot, usageDir := t.TempDir(), filepath.Join(t.TempDir(), "usage")
+	e := &Orchestrator{
+		WorkRoot: workRoot, Store: openState(t, time.Now()), Usage: &usage.Store{Dir: usageDir},
+		GitHub: testGitHub(server, "token"), BotLogin: "bot", Adversarial: "claude",
+		Commands: map[string]config.CommandMapping{"fix": {Action: string(command.Fix), Skills: []string{skills.BuiltinAntiPromptInjection}}},
+	}
+	e.Executor = executorFunc(func(ctx context.Context, job Job, checkpoints Checkpoints) (Result, error) {
+		job.Source.BaseFiles = nil // The issue fix has no base across the HTTP JSON round trip.
+		f := newHTTPServerTest(t, ctx, job, checkpoints, nil)
+		f.pull(t)
+		result := privateReviewResult(job)
+		result.Refutations[0].Text = private
+		result.Changes = []workspace.Change{{Path: "foo", Mode: workspace.Regular, Data: []byte(private)}}
+		for i := range result.Calls {
+			result.Calls[i].Tokens = usage.Tokens{Input: int64(i + 1), Output: 1}
+			result.Calls[i].Complete = true
+		}
+		sequence := uint64(1)
+		binding := CallCheckpoint{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head}
+		review := ReviewCheckpoint{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head}
+		f.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: review}, http.StatusOK, sequence)
+		sequence++
+		for i, call := range result.Calls {
+			binding.Call = callMetadata(call)
+			f.ack(t, "/before", httpCall{Sequence: sequence, Checkpoint: binding}, http.StatusOK, sequence)
+			sequence++
+			binding.Call = call
+			f.ack(t, "/after", httpCall{Sequence: sequence, Checkpoint: binding}, http.StatusOK, sequence)
+			sequence++
+			review.Calls = result.Calls[:i+1]
+			if call.Round >= 2 {
+				review.Refutations = result.Refutations
+			}
+			f.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: review}, http.StatusOK, sequence)
+			sequence++
+		}
+		review.CriticStopReason = result.CriticStopReason
+		f.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: review}, http.StatusOK, sequence)
+		sequence++
+		if err := result.Validate(job); err != nil {
+			t.Fatalf("hostile Fix did not reach publication gate: %v", err)
+		}
+		outcome := f.outcome(sequence, nil)
+		outcome.Result = result
+		f.ack(t, "/outcome", outcome, http.StatusOK, sequence)
+		got := f.result(t)
+		return got.result, got.err
+	})
+	request := usageJob()
+	request.Source.UpdatedAt = time.Now()
+	request.Command = command.Command{Name: "fix", Action: command.Fix}
+	request.Repository.Actions = []string{"fix"}
+	err := e.Execute(testActionContext(t), request)
+	if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "publication contains private review evidence") || writes.Load() != 0 {
+		t.Fatalf("NUL-containing private refutation crossed publication boundary: error=%v writes=%d", err, writes.Load())
+	}
+	refs, refErr := exec.Command("git", "--git-dir", remote, "for-each-ref", "--format=%(refname)", "refs/heads/minion/").Output()
+	if refErr != nil || len(refs) != 0 {
+		t.Fatalf("hostile Fix pushed a branch: refs=%q error=%v", refs, refErr)
+	}
+	if review := readPrivateReview(t, workRoot); len(review.Refutations) != 1 || review.Refutations[0].Text != private {
+		t.Fatalf("private review evidence missing: %+v", review.Refutations)
+	}
+	records, readErr := usage.ReadAll(usageDir)
+	if readErr != nil || len(records) != 1 || records[0].Status != "failed" {
+		t.Fatalf("private failed-usage evidence missing: records=%+v error=%v", records, readErr)
+	}
+}
+
 func TestRejectConfiguredKeyPublicationFields(t *testing.T) {
 	const key = "fixture-secret"
 	for _, tc := range []struct {
