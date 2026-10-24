@@ -277,8 +277,11 @@ func expectedDiscoveryStop(err error, directStopSent bool) bool {
 	if !errors.As(err, &exit) {
 		return false
 	}
+	if !directStopSent {
+		return false
+	}
 	if runtime.GOOS == "windows" {
-		return directStopSent
+		return true
 	}
 	status, ok := exit.Sys().(syscall.WaitStatus)
 	return ok && status.Signaled() && (status.Signal() == syscall.SIGINT || status.Signal() == syscall.SIGTERM || status.Signal() == syscall.SIGKILL)
