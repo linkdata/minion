@@ -12,6 +12,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"unicode"
@@ -295,9 +296,36 @@ func CanonicalPath(root string) (string, error) {
 }
 
 // Within compares canonical absolute paths; callers resolve symlinks first.
+// On macOS, existing ancestor identity also catches case-insensitive aliases and missing suffixes.
 func Within(root, name string) bool {
 	rel, err := filepath.Rel(root, name)
-	return err == nil && filepath.IsLocal(rel)
+	if err == nil && filepath.IsLocal(rel) {
+		return true
+	}
+	if runtime.GOOS != "darwin" {
+		return false
+	}
+	rootInfo, err := os.Stat(root)
+	if errors.Is(err, os.ErrNotExist) {
+		return false // shortcut: absent roots have no identity; revisit if security grants may be absent.
+	}
+	if err != nil {
+		return true // An unverified grant cannot be treated as separate.
+	}
+	for {
+		info, err := os.Stat(name)
+		if err == nil && os.SameFile(rootInfo, info) {
+			return true
+		}
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return true
+		}
+		parent := filepath.Dir(name)
+		if parent == name {
+			return false
+		}
+		name = parent
+	}
 }
 
 // OpenDirectory anchors collection without following any symlink component.

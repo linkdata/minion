@@ -653,6 +653,62 @@ func TestRunOncePublicationFailureRetriesOnlyFailureReply(t *testing.T) {
 	}
 }
 
+func TestRunOnceLostPublicationResponseFindsSuccessfulReply(t *testing.T) {
+	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	item := github.Item{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}, UpdatedAt: now.Add(-30 * time.Second)}
+	gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}, items: []github.Item{item}, permission: github.Permission{Permission: "write"}}
+	store := openState(t, now.Add(-time.Minute))
+	id := jobID(item.Key, "review")
+	handler := &fakeHandler{executeErr: ErrPostModelPublication, onExecute: func() {
+		saveModelCallStart(t, store, id)
+		gh.items = append(gh.items, github.Item{Key: "comment:2", NodeID: "node:2", Body: "Review complete.\n\n" + (Job{ID: id}).Marker(), Author: github.User{Login: "linkdataminion"}, UpdatedAt: now})
+	}}
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Now: func() time.Time { return now }}
+	if _, err := m.RunOnce(t.Context(), store); err != nil {
+		t.Fatal(err)
+	}
+	if len(handler.jobs) != 1 || gh.threadCalls != 2 || gh.currentChecks != 2 || gh.commentCalls != 0 || len(store.Data.Processed) != 1 || len(store.Data.JobFailures) != 0 {
+		t.Fatalf("lost publication response posted a contradictory failure or repeated work: jobs=%d thread calls=%d current checks=%d failure replies=%d state=%+v", len(handler.jobs), gh.threadCalls, gh.currentChecks, gh.commentCalls, store.Data)
+	}
+}
+
+func TestRunOnceLostPublicationResponseRetriesFailedLookup(t *testing.T) {
+	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	item := github.Item{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}, UpdatedAt: now.Add(-30 * time.Second)}
+	gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}, items: []github.Item{item}, permission: github.Permission{Permission: "write"}}
+	lookupErr := errors.New("reply lookup unavailable")
+	gh.threadItems = func(string, int, time.Time) ([]github.Item, error) {
+		if gh.threadCalls == 2 {
+			return nil, lookupErr
+		}
+		return gh.items, nil
+	}
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	store := openStateAt(t, statePath, now.Add(-time.Minute))
+	id := jobID(item.Key, "review")
+	handler := &fakeHandler{executeErr: ErrPostModelPublication, onExecute: func() {
+		saveModelCallStart(t, store, id)
+		gh.items = append(gh.items, github.Item{Key: "comment:2", NodeID: "node:2", Body: "Review complete.\n\n" + (Job{ID: id}).Marker(), Author: github.User{Login: "linkdataminion"}, UpdatedAt: now})
+	}}
+	clock := now
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Now: func() time.Time { return clock }}
+	if _, err := m.RunOnce(t.Context(), store); !errors.Is(err, lookupErr) || gh.commentCalls != 0 || len(store.Data.Processed) != 0 {
+		t.Fatalf("failed lookup posted a failure or consumed job: err=%v comments=%d state=%+v", err, gh.commentCalls, store.Data)
+	}
+	if failure := store.Data.JobFailures[id]; failure.Attempts != maxJobAttempts || failure.ReplyAttempts != 0 || !failure.ModelCallStarted {
+		t.Fatalf("failed lookup did not retain terminal retry state: %+v", failure)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened := openStateAt(t, statePath, now.Add(-time.Minute))
+	handler.onExecute = func() { t.Fatal("reply lookup retry repeated paid model work") }
+	clock = advanceToRetry(clock, reopened)
+	if _, err := m.RunOnce(t.Context(), reopened); err != nil || len(handler.jobs) != 1 || gh.commentCalls != 0 || len(reopened.Data.Processed) != 1 || len(reopened.Data.JobFailures) != 0 {
+		t.Fatalf("recovered lookup repeated work or posted failure: err=%v jobs=%d replies=%d state=%+v", err, len(handler.jobs), gh.commentCalls, reopened.Data)
+	}
+}
+
 func TestRunOnceFixedPublicationRetriesWithoutModelMarker(t *testing.T) {
 	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
 	item := github.Item{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion fix", Author: github.User{Login: "writer"}}
