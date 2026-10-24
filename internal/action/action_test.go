@@ -316,9 +316,17 @@ func TestReviewEchoDoesNotSuppressSecurityAuditInMonitor(t *testing.T) {
 		t.Fatal(err)
 	}
 	if timelineCalls != 1 || reviewRuns != 1 || auditRuns != 1 || len(reviews) != 1 || len(comments) != 1 || len(store.Data.Processed) != 2 ||
-		!strings.Contains(reviews[0].Body, auditMarker) || !strings.Contains(comments[0].Body, "Verified audit report") ||
+		!strings.Contains(reviews[0].Body, auditMarker) || !strings.Contains(comments[0].Body, "Executor-reported security audit summary") ||
+		!strings.Contains(comments[0].Body, "Findings: 0 confirmed, 0 need validation, 0 rejected.") || strings.Contains(comments[0].Body, "Verified audit report") ||
 		!strings.HasSuffix(strings.TrimSpace(comments[0].Body), auditMarker) {
 		t.Fatalf("review echo suppressed audit: timeline calls=%d reviews=%d audits=%d review posts=%d comments=%d processed=%d; log=%s", timelineCalls, reviewRuns, auditRuns, len(reviews), len(comments), len(store.Data.Processed), &journal)
+	}
+	retained, err := filepath.Glob(filepath.Join(orchestrator.WorkRoot, "audits", "*", "REPORT.md"))
+	if err != nil || len(retained) != 1 {
+		t.Fatalf("audit report not retained privately: %v, %v", retained, err)
+	}
+	if data, err := os.ReadFile(retained[0]); err != nil || string(data) != "Verified audit report\n" {
+		t.Fatalf("worker narrative changed in private retention: %q, %v", data, err)
 	}
 	if _, err := command.ParseForLoginCommands(reviews[0].Body, "secondbot", defaultActionTestCommands); !errors.Is(err, command.ErrNoCommand) {
 		t.Fatalf("review relayed a live second-bot command: %v", err)

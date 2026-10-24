@@ -300,6 +300,29 @@ func TestPublishedRefutationsFixAllowsQuotedSourceButRejectsNewCopy(t *testing.T
 	}
 }
 
+func TestPublishedRefutationsFixManySourceQuotes(t *testing.T) {
+	job := withClaudeCritic(testJob(command.Fix))
+	var quotes []string
+	for i := range 300 {
+		quotes = append(quotes, fmt.Sprintf("Existing documented review sentence number %03d remains public.", i))
+	}
+	quoted := strings.Join(quotes, "\n")
+	job.Source.Files[0].Data = []byte(strings.Repeat("f", 256<<10) + "\n" + quoted + "\n")
+	result := privateReviewResult(job)
+	result.Refutations[0].Text = quoted
+	result.Changes = []workspace.Change{{Path: "source.txt", Mode: workspace.Regular, Data: []byte(quoted + "\nupdated.\n")}}
+	projected, err := projectPublication(job, result)
+	if err != nil || rejectPublishedRefutations(job, result, projected) != nil {
+		t.Fatalf("many pre-existing quotes blocked an unrelated edit: %v", err)
+	}
+	const novel = "This newly introduced private reviewer sentence must stay out of changed source."
+	result.Refutations[0].Text += "\n" + novel
+	result.Changes[0].Data = append(result.Changes[0].Data, novel...)
+	if err := rejectPublishedRefutations(job, result, projected); err == nil {
+		t.Fatal("new private quote after many pre-existing quotes was accepted")
+	}
+}
+
 func TestPublishedRefutationsAllowCommonShortWords(t *testing.T) {
 	job := withClaudeCritic(testJob(command.Comment))
 	result := privateReviewResult(job)

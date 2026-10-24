@@ -71,7 +71,7 @@ func readAuditArtifacts(outputDir string, partial bool, secrets ...string) ([]wo
 			if err == nil && int64(len(data)) > limit {
 				err = errors.New("redacted artifact exceeds byte limit")
 			} else if err == nil && name == "REPORT.md" && !partial && (!publishableAnswer(string(data)) || auditVisibleReport(string(data)) != nil) {
-				err = errors.New("audit REPORT.md is invalid or exceeds publication limit")
+				err = errors.New("audit REPORT.md is invalid or exceeds result limit")
 			}
 		}
 		if err != nil {
@@ -655,53 +655,12 @@ func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes []byte, sourc
 	return auditVisibleReport(string(reportBytes))
 }
 
-// auditVisibleReport requires non-ignorable characters outside fenced and indented code.
+// A private narrative can contain code; the public summary comes from structured records.
 func auditVisibleReport(report string) error {
-	lines := strings.Split(report, "\n")
-	code := auditCodeLines(lines)
-	visible := false
-	for i, line := range lines {
-		if code[i] {
-			continue
-		}
-		visible = visible || auditVisibleText(line)
-	}
-	if !visible {
-		return errors.New("audit REPORT.md has no visible text outside code")
+	if !auditVisibleText(report) {
+		return errors.New("audit REPORT.md has no visible content")
 	}
 	return nil
-}
-
-// auditCodeLines marks fenced and indented code in a Markdown report.
-func auditCodeLines(lines []string) []bool {
-	code := make([]bool, len(lines))
-	var fence byte
-	width := 0
-	for i, line := range lines {
-		spaces := 0
-		for spaces < len(line) && line[spaces] == ' ' {
-			spaces++
-		}
-		text := line[spaces:]
-		if spaces <= 3 && len(text) >= 3 && (text[0] == '`' || text[0] == '~') {
-			n := 0
-			for n < len(text) && text[n] == text[0] {
-				n++
-			}
-			if n >= 3 {
-				if fence == 0 && (text[0] != '`' || !strings.Contains(text[n:], "`")) {
-					fence, width, code[i] = text[0], n, true
-					continue
-				}
-				if fence == text[0] && n >= width && strings.TrimSpace(text[n:]) == "" {
-					fence, width, code[i] = 0, 0, true
-					continue
-				}
-			}
-		}
-		code[i] = fence != 0 || spaces >= 4 || strings.HasPrefix(text, "\t")
-	}
-	return code
 }
 
 func auditSourceInventory(source *workspace.Snapshot) (map[string]bool, map[string]int) {

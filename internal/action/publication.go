@@ -160,23 +160,27 @@ func rejectPublishedRefutations(job Job, result Result, projected publication) e
 	}
 	if job.Action == command.Fix {
 		// A Fix transfers full replacement files. Source text quoted in a refutation was already public.
+		// shortcut: Matching still scans the normalized source per phrase; use multi-pattern search if measured delay warrants it.
 		inSource := make(map[string]bool)
+		var sourceText string
 		rejectNew := func(private string) bool {
 			if public, known := inSource[private]; known {
 				return !public
 			}
-			for _, file := range job.Source.Files {
-				for _, text := range []string{file.Path, string(file.Data)} {
-					for _, variant := range publicationTextVariants(text) {
-						if strings.Contains(foldPublicationSpace(variant), private) {
-							inSource[private] = true
-							return false
+			if sourceText == "" {
+				var source strings.Builder
+				for _, file := range job.Source.Files {
+					for _, text := range []string{file.Path, string(file.Data)} {
+						for _, variant := range publicationTextVariants(text) {
+							source.WriteString(foldPublicationSpace(variant))
+							source.WriteByte(0) // A match cannot span source files or normalized variants.
 						}
 					}
 				}
+				sourceText = source.String()
 			}
-			inSource[private] = false
-			return true
+			inSource[private] = strings.Contains(sourceText, private)
+			return !inSource[private]
 		}
 		for _, change := range result.Changes {
 			if containsCopy(change.Path, rejectNew) || containsCopy(string(change.Data), rejectNew) {

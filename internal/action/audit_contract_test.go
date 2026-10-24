@@ -46,8 +46,8 @@ func TestCompleteAuditResultValidatesCoverage(t *testing.T) {
 		name, ledger, findings, report, want string
 	}{
 		{name: "covered"},
-		{name: "invisible report", report: "\u200b", want: "no visible text outside code"},
-		{name: "code-only report", report: "```md\nExample\n```", want: "no visible text outside code"},
+		{name: "invisible report", report: "\u200b", want: "no visible content"},
+		{name: "code-only private report", report: "```md\nExample\n```"},
 		{name: "blocked-only ledger has no reviewed coverage", ledger: blockedLedger, want: "no reviewed coverage"},
 		{name: "excluded-only ledger has no reviewed coverage", ledger: excludedLedger, want: "no reviewed coverage"},
 		{name: "blocked and covered", ledger: blockedAndCovered},
@@ -184,9 +184,10 @@ func TestAuditVisibleReport(t *testing.T) {
 	for _, test := range []struct{ name, report, want string }{
 		{name: "prose", report: "Reviewed audit report."},
 		{name: "prose after code", report: "```md\nExample\n```\nReviewed audit report."},
-		{name: "invisible", report: "\u200b", want: "no visible text outside code"},
-		{name: "fenced code only", report: "```md\nExample\n```", want: "no visible text outside code"},
-		{name: "indented code only", report: "    Example", want: "no visible text outside code"},
+		{name: "invisible", report: "\u200b", want: "no visible content"},
+		{name: "fenced code only", report: "```md\nExample\n```"},
+		{name: "indented code only", report: "    Example"},
+		{name: "blockquoted code only", report: "> ```md\n> Example\n> ```"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			err := auditVisibleReport(test.report)

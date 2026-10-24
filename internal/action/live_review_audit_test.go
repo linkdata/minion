@@ -136,8 +136,15 @@ func TestLiveSecurityAuditAction(t *testing.T) {
 				t.Fatalf("audit model calls = %d, want 1", calls)
 			}
 			commentID, reply, err := liveActionReply(ctx, fixture.owner, fixture.cfg, job)
-			if err != nil || commentID == 0 || !strings.Contains(reply.Body, test.head) || !strings.Contains(reply.Body, strings.TrimSpace(report)) || strings.Contains(reply.Body, "Untrusted final answer") {
-				t.Fatalf("live audit acknowledgement does not contain the validated report at %s: %v", test.head, err)
+			if err != nil || commentID == 0 || !strings.Contains(reply.Body, test.head) || !strings.Contains(reply.Body, "Executor-reported security audit summary") || !strings.Contains(reply.Body, "Findings: 0 confirmed, 0 need validation, 0 rejected.") || strings.Contains(reply.Body, strings.TrimSpace(report)) || strings.Contains(reply.Body, "Untrusted final answer") {
+				t.Fatalf("live audit acknowledgement does not contain the structured summary at %s: %v", test.head, err)
+			}
+			retained, err := filepath.Glob(filepath.Join(orchestrator.WorkRoot, "audits", "*", "REPORT.md"))
+			if err != nil || len(retained) != 1 {
+				t.Fatalf("live audit report not retained privately: %v, %v", retained, err)
+			}
+			if data, err := os.ReadFile(retained[0]); err != nil || string(data) != report {
+				t.Fatalf("live worker narrative changed in private retention: %q, %v", data, err)
 			}
 			if err := orchestrator.Execute(ctx, job); err != nil {
 				t.Fatal(err)

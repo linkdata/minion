@@ -91,8 +91,8 @@ func TestSecurityAuditIssueAndPullRequest(t *testing.T) {
 					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 						t.Error(err)
 					}
-					if !strings.Contains(payload.Body, expected) || !strings.Contains(payload.Body, inertModelOutput("Verified audit report")) || !strings.Contains(payload.Body, job.Marker()) || strings.Contains(payload.Body, "Untrusted final answer") {
-						t.Errorf("comment did not use verified report: %s", payload.Body)
+					if !strings.Contains(payload.Body, expected) || !strings.Contains(payload.Body, "Executor-reported security audit summary") || !strings.Contains(payload.Body, "Findings: 0 confirmed, 0 need validation, 0 rejected.") || !strings.Contains(payload.Body, job.Marker()) || strings.Contains(payload.Body, "Verified audit report") || strings.Contains(payload.Body, "Untrusted final answer") {
+						t.Errorf("comment did not use structured audit summary: %s", payload.Body)
 					}
 					comments = append(comments, github.Comment{NodeID: "audit-comment-1", Body: payload.Body, User: github.User{Login: "linkdataminion"}})
 					w.WriteHeader(http.StatusCreated)
@@ -188,6 +188,9 @@ func TestSecurityAuditIssueAndPullRequest(t *testing.T) {
 				retained, err := filepath.Glob(filepath.Join(e.WorkRoot, "audits", "*", "REPORT.md"))
 				if err != nil || len(retained) != 1 {
 					t.Fatalf("reports not retained: %v, %v", retained, err)
+				}
+				if data, err := os.ReadFile(retained[0]); err != nil || string(data) != "Verified audit report\n" {
+					t.Fatalf("worker narrative not retained privately: %q, %v", data, err)
 				}
 				if _, err := os.Stat(reportsDir); !errors.Is(err, os.ErrNotExist) {
 					t.Fatalf("executor reports not cleaned: %v", err)
@@ -446,7 +449,7 @@ func TestValidateAuditCoverageCapsFindings(t *testing.T) {
 }
 
 func TestAuditArtifactReadModesPreserveFailurePolicies(t *testing.T) {
-	for _, scenario := range []string{"missing core", "empty core", "unsafe core", "oversized report", "invalid UTF-8 report", "NUL report", "empty report", "blank report", "invisible report", "code-only report"} {
+	for _, scenario := range []string{"missing core", "empty core", "unsafe core", "oversized report", "invalid UTF-8 report", "NUL report", "empty report", "blank report", "invisible report"} {
 		for _, partial := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/partial-%t", scenario, partial), func(t *testing.T) {
 				job := testJob(command.SecurityAudit)
@@ -485,8 +488,6 @@ func TestAuditArtifactReadModesPreserveFailurePolicies(t *testing.T) {
 					writeFixtureFile(t, root, artifact, []byte(" \t\r\n"))
 				case "invisible report":
 					writeFixtureFile(t, root, artifact, []byte("\u200b"))
-				case "code-only report":
-					writeFixtureFile(t, root, artifact, []byte("```md\nExample\n```"))
 				}
 				files, diagnostics, err := readAuditArtifacts(root, partial, "")
 				wantError := !partial && (scenario == "unsafe core" || artifact == "REPORT.md" && scenario != "NUL report")
