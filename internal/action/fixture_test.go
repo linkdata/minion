@@ -486,13 +486,13 @@ const auditConfirmedFindingFixture = `[{"verdict":"confirmed","fingerprint":"F",
 const auditConfirmedDetailFixture = "## F: Missing guard\nsource.txt. The other user's object changes. Check ownership before the state change.\n"
 const auditNeedsDetailFixture = "## F: Unverified boundary\nsource.txt. Runtime validation is unavailable. Inspect the guard path in an approved test.\n"
 
-const auditCoveredLedgerFixture = `[{"coverage_id":"source::boundary::subsystem::attack","canonical_refs":{"surface":"source","boundary":"boundary","subsystem":"subsystem","attack_class":"attack"},"surface":"Source","boundary":"Boundary","subsystem":"Subsystem","attack_class":"Attack","starting_paths":["source.txt"],"ordinary_attack_class_block":null,"selected_companion_blocks":[],"excluded_blocks":[],"prior_status":"none","attempts":[],"wave":1,"status":"covered","agent_id":"hunter","reviewed_paths":["source.txt"],"local_checks":[{"agent_id":"verifier","reviewed_paths":["source.txt"],"invariant":"Access is checked","method":"source","result":"The guard is present","artifact":null}],"result_fingerprints":[],"unresolved":[]}]`
+const auditCoveredLedgerFixture = `[{"coverage_id":"source::boundary::subsystem::attack","canonical_refs":{"surface":"source","boundary":"boundary","subsystem":"subsystem","attack_class":"attack"},"surface":"Source","boundary":"Boundary","subsystem":"Subsystem","attack_class":"Attack","starting_paths":["source.txt"],"ordinary_attack_class_block":null,"selected_companion_blocks":[],"excluded_blocks":[],"prior_status":"none","attempts":[],"wave":1,"status":"covered","agent_id":"hunter","reviewed_paths":["source.txt"],"local_checks":[{"agent_id":"verifier","reviewed_paths":["source.txt"],"invariant":"Access is checked","method":"source","result":"The guard is present","artifact":null},{"agent_id":"hunter","reviewed_paths":["source.txt"],"invariant":"Access is checked","method":"source","result":"The guard is present","artifact":null}],"result_fingerprints":[],"unresolved":[]}]`
 
 func auditOutOfScopeLedgerFixture() string {
 	ledger := strings.Replace(auditCoveredLedgerFixture, `"status":"covered"`, `"status":"out_of_scope"`, 1)
 	ledger = strings.Replace(ledger, `"agent_id":"hunter"`, `"agent_id":null`, 1)
 	ledger = strings.Replace(ledger, `"reviewed_paths":["source.txt"]`, `"reviewed_paths":[]`, 1)
-	ledger = strings.Replace(ledger, `"local_checks":[{"agent_id":"verifier","reviewed_paths":["source.txt"],"invariant":"Access is checked","method":"source","result":"The guard is present","artifact":null}]`, `"local_checks":[]`, 1)
+	ledger = strings.Replace(ledger, `"local_checks":[{"agent_id":"verifier","reviewed_paths":["source.txt"],"invariant":"Access is checked","method":"source","result":"The guard is present","artifact":null},{"agent_id":"hunter","reviewed_paths":["source.txt"],"invariant":"Access is checked","method":"source","result":"The guard is present","artifact":null}]`, `"local_checks":[]`, 1)
 	return strings.Replace(ledger, `"unresolved":[]}]`, `"unresolved":["Out of scope"]}]`, 1)
 }
 
@@ -504,7 +504,7 @@ func auditCoveredAndOutOfScopeLedgerFixture() string {
 }
 
 func auditArchivedCoveredBlockedLedgerFixture() string {
-	const archived = `{"wave":1,"status":"covered","agent_id":"older","reviewed_paths":["source.txt"],"local_checks":[{"agent_id":"helper","reviewed_paths":["source.txt"],"invariant":"Access is checked","method":"source","result":"The guard is present","artifact":null}],"result_fingerprints":[],"unresolved":[],"reassignment_reason":"Rechecked"}`
+	const archived = `{"wave":1,"status":"covered","agent_id":"older","reviewed_paths":["source.txt"],"local_checks":[{"agent_id":"helper","reviewed_paths":["source.txt"],"invariant":"Access is checked","method":"source","result":"The guard is present","artifact":null},{"agent_id":"older","reviewed_paths":["source.txt"],"invariant":"Access is checked","method":"source","result":"The guard is present","artifact":null}],"result_fingerprints":[],"unresolved":[],"reassignment_reason":"Rechecked"}`
 	ledger := strings.Replace(auditCoveredLedgerFixture, `"attempts":[]`, `"attempts":[`+archived+`]`, 1)
 	ledger = strings.Replace(ledger, `"wave":1,"status":"covered","agent_id":"hunter"`, `"wave":2,"status":"blocked","agent_id":"hunter"`, 1)
 	return strings.Replace(ledger, `"unresolved":[]}]`, `"unresolved":["Investigate boundary"]}]`, 1)

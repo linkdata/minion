@@ -9,7 +9,7 @@ import (
 
 func TestCompleteAuditResultValidatesCoverage(t *testing.T) {
 	validLedger := auditCoveredLedgerFixture
-	archived := `{"wave":1,"status":"covered","agent_id":"older","reviewed_paths":["source.txt"],"local_checks":[{"agent_id":"helper","reviewed_paths":["source.txt"],"invariant":"Access is checked","method":"source","result":"The guard is present","artifact":null}],"result_fingerprints":[],"unresolved":[],"reassignment_reason":"Rechecked"}`
+	archived := `{"wave":1,"status":"covered","agent_id":"older","reviewed_paths":["source.txt"],"local_checks":[{"agent_id":"helper","reviewed_paths":["source.txt"],"invariant":"Access is checked","method":"source","result":"The guard is present","artifact":null},{"agent_id":"older","reviewed_paths":["source.txt"],"invariant":"Access is checked","method":"source","result":"The guard is present","artifact":null}],"result_fingerprints":[],"unresolved":[],"reassignment_reason":"Rechecked"}`
 	withAttempt := strings.Replace(validLedger, `"attempts":[]`, `"attempts":[`+archived+`]`, 1)
 	withAttempt = strings.Replace(withAttempt, `"wave":1,"status":"covered","agent_id":"hunter"`, `"wave":2,"status":"covered","agent_id":"hunter"`, 1)
 	withLifecycle := strings.Replace(validLedger, `"coverage_id":"source::boundary::subsystem::attack"`, `"coverage_id":"source::boundary::subsystem::attack::lifecycle"`, 1)
@@ -38,6 +38,10 @@ func TestCompleteAuditResultValidatesCoverage(t *testing.T) {
 	secondBlocked = strings.Replace(secondBlocked, `"boundary":"boundary"`, `"boundary":"blocked"`, 1)
 	secondBlocked = strings.Replace(secondBlocked, `"boundary":"Boundary"`, `"boundary":"Blocked boundary"`, 1)
 	blockedAndCovered := "[" + strings.Trim(secondBlocked, "[]") + "," + strings.Trim(validLedger, "[]") + "]"
+	ownerCheck := `,{"agent_id":"hunter","reviewed_paths":["source.txt"],"invariant":"Access is checked","method":"source","result":"The guard is present","artifact":null}`
+	verifierOnly := strings.Replace(validLedger, ownerCheck, "", 1)
+	blockedVerifierOnly := strings.Replace(blockedLedger, ownerCheck, "", 1)
+	budgetSymbolInProse := strings.Replace(blockedAndCovered, `"unresolved":["Investigate boundary"]`, `"unresolved":["Investigate source symbol validation_budget_exhausted"]`, 1)
 	incompleteBlocked := strings.Replace(blockedAndCovered, `"unresolved":["Investigate boundary"]`, `"unresolved":["validation_budget_exhausted"]`, 1)
 	incompleteReservedBudget := strings.Replace(blockedAndCovered, `"unresolved":["Investigate boundary"]`, `"unresolved":["budget_cannot_reserve_critics_and_validation"]`, 1)
 	incompleteExcluded := strings.Replace(excludedLedger, `"unresolved":["Out of scope"]`, `"unresolved":["critic_budget_exhausted"]`, 1)
@@ -64,6 +68,11 @@ func TestCompleteAuditResultValidatesCoverage(t *testing.T) {
 		{name: "excluded-only ledger cannot be complete", ledger: excludedLedger, want: "out-of-scope unit in complete audit"},
 		{name: "covered ledger with current out-of-scope unit is incomplete", ledger: auditCoveredAndOutOfScopeLedgerFixture(), want: "out-of-scope unit in complete audit"},
 		{name: "blocked and covered", ledger: blockedAndCovered},
+		{name: "covered without owner check", ledger: verifierOnly, want: "lacks assigned owner's local check"},
+		{name: "candidate without owner check", ledger: strings.Replace(confirmedLedger, ownerCheck, "", 1), findings: auditCandidateFindingFixture, want: "lacks assigned owner's local check"},
+		{name: "blocked without owner check", ledger: blockedVerifierOnly, want: "lacks assigned owner's local check"},
+		{name: "archived attempt without owner check", ledger: strings.Replace(withAttempt, `,{"agent_id":"older","reviewed_paths":["source.txt"],"invariant":"Access is checked","method":"source","result":"The guard is present","artifact":null}`, "", 1), want: "lacks assigned owner's local check"},
+		{name: "budget code inside unresolved prose", ledger: budgetSymbolInProse},
 		{name: "blocked unit declares exhausted validation budget", ledger: incompleteBlocked, want: "incomplete audit budget"},
 		{name: "blocked unit cannot reserve critics and validation", ledger: incompleteReservedBudget, want: "incomplete audit budget"},
 		{name: "reserved agent ID", ledger: strings.Replace(validLedger, `"agent_id":"hunter"`, `"agent_id":"con"`, 1), want: "lacks assigned review evidence"},
@@ -146,7 +155,7 @@ func TestCompleteAuditResultValidatesCoverage(t *testing.T) {
 		{name: "archived attempt without evidence", ledger: strings.Replace(validLedger, `"attempts":[]`, `"attempts":[{"status":"covered"}]`, 1), want: "assigned review evidence"},
 		{name: "archived attempt without wave", ledger: strings.Replace(withAttempt, `"wave":1,"status":"covered"`, `"status":"covered"`, 1), want: "invalid archived attempt wave"},
 		{name: "archived attempt without reassignment", ledger: strings.Replace(withAttempt, `,"reassignment_reason":"Rechecked"`, ``, 1), want: "invalid archived attempt wave or reassignment"},
-		{name: "reused archived owner", ledger: strings.Replace(withAttempt, `"agent_id":"older"`, `"agent_id":"hunter"`, 1), want: "reuses an archived assignment owner"},
+		{name: "reused archived owner", ledger: strings.ReplaceAll(withAttempt, `"agent_id":"older"`, `"agent_id":"hunter"`), want: "reuses an archived assignment owner"},
 		{name: "reused archived check owner", ledger: strings.Replace(withAttempt, `"local_checks":[{"agent_id":"verifier"`, `"local_checks":[{"agent_id":"older"`, 1), want: "reuses an archived assignment check owner"},
 		{name: "reused archived verifier", ledger: strings.Replace(withAttempt, `"local_checks":[{"agent_id":"verifier"`, `"local_checks":[{"agent_id":"helper"`, 1), want: "reuses an archived assignment check owner"},
 		{name: "current wave precedes archive", ledger: strings.Replace(withAttempt, `"wave":2,"status":"covered"`, `"wave":1,"status":"covered"`, 1), want: "invalid archived attempt wave"},

@@ -22,6 +22,7 @@ func TestHostileHTTPAuditSchemaCannotPublish(t *testing.T) {
 	const rejectedWithoutReason = `[{"verdict":"rejected","fingerprint":"F","title":"Guard bypass refuted","description":"The alleged bypass does not reach the operation.","claimed_root_cause":"The guard was claimed to be absent.","trace":[{"kind":"entrypoint","file":"source.txt","line":1,"scope":"source","description":"The request reaches the guard."}],"evidence":[{"file":"source.txt","line":1,"description":"The guard executes before the operation."}] }]`
 	candidateLedger := strings.Replace(auditCoveredLedgerFixture, `"status":"covered"`, `"status":"candidate"`, 1)
 	candidateLedger = strings.Replace(candidateLedger, `"result_fingerprints":[]`, `"result_fingerprints":["F"]`, 1)
+	ownerless := strings.Replace(candidateLedger, `,{"agent_id":"hunter","reviewed_paths":["source.txt"],"invariant":"Access is checked","method":"source","result":"The guard is present","artifact":null}`, "", 1)
 	selfChecked := strings.Replace(candidateLedger, `"local_checks":[{"agent_id":"verifier"`, `"local_checks":[{"agent_id":"hunter"`, 1)
 	archivedSelf := `{"wave":1,"status":"candidate","agent_id":"older","reviewed_paths":["source.txt"],"local_checks":[{"agent_id":"older","reviewed_paths":["source.txt"],"invariant":"Access is checked","method":"source","result":"The guard is present","artifact":null}],"result_fingerprints":["F"],"unresolved":[],"reassignment_reason":"Rechecked"}`
 	archivedSelf = strings.Replace(auditCoveredLedgerFixture, `"attempts":[]`, `"attempts":[`+archivedSelf+`]`, 1)
@@ -67,6 +68,7 @@ func TestHostileHTTPAuditSchemaCannotPublish(t *testing.T) {
 			`"method":"source","result":"The guard is present","artifact":null`,
 			`"method":"local","result":"The guard is present","artifact":"agents/hunter/artifacts/proof.txt"`, 1), want: "unsupported local check method"},
 		{name: "unreviewed cited sink", artifact: "findings.json", data: citesOther, want: "cited file without one declared verifier path set", candidate: true},
+		{name: "candidate without owner check", artifact: "coverage-ledger.json", data: ownerless, findings: auditCandidateFindingFixture, want: "lacks assigned owner's local check", candidate: true},
 		{name: "candidate without verifier", artifact: "coverage-ledger.json", data: selfChecked, findings: auditCandidateFindingFixture, want: "without separately attributed source check"},
 		{name: "archived candidate without verifier", artifact: "coverage-ledger.json", data: archivedSelf, findings: auditCandidateFindingFixture, want: "without separately attributed source check"},
 		{name: "prior run unsupported", artifact: "coverage-ledger.json", data: strings.Replace(auditCoveredLedgerFixture, `"prior_status":"none"`, `"prior_status":"prior_confirmed_same_source"`, 1), want: "prior run absent from metadata"},

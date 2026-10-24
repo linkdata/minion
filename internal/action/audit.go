@@ -329,7 +329,8 @@ func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes []byte, sourc
 			return errors.New("audit coverage-ledger.json exceeds validation work limit")
 		}
 		for _, reason := range e.Unresolved {
-			if strings.Contains(reason, "validation_budget_exhausted") || strings.Contains(reason, "critic_budget_exhausted") || strings.Contains(reason, "budget_cannot_fund_reconnaissance_and_reserves") || strings.Contains(reason, "budget_cannot_reserve_critics_and_validation") {
+			switch strings.TrimSpace(reason) {
+			case "validation_budget_exhausted", "critic_budget_exhausted", "budget_cannot_fund_reconnaissance_and_reserves", "budget_cannot_reserve_critics_and_validation":
 				return errors.New("audit coverage-ledger.json declares an incomplete audit budget")
 			}
 		}
@@ -871,9 +872,13 @@ func validateAuditCoverageEvidence(e auditCoverageEvidence, sourcePaths map[stri
 		}
 		paths[path] = false
 	}
+	hasOwnerCheck := false
 	for _, check := range e.LocalChecks {
 		if !validAuditCoverageAgent(check.AgentID) || !auditVisibleText(check.Invariant) || !auditVisibleText(check.Result) || len(check.ReviewedPaths) == 0 {
 			return errors.New("audit coverage-ledger.json has incomplete local check")
+		}
+		if check.AgentID == e.AgentID {
+			hasOwnerCheck = true
 		}
 		if check.Method != "source" {
 			return errors.New("audit coverage-ledger.json has unsupported local check method in source-only audit")
@@ -887,6 +892,9 @@ func validateAuditCoverageEvidence(e auditCoverageEvidence, sourcePaths map[stri
 			}
 			paths[path] = true
 		}
+	}
+	if !hasOwnerCheck {
+		return errors.New("audit coverage-ledger.json lacks assigned owner's local check")
 	}
 	for _, checked := range paths {
 		if !checked {
