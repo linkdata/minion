@@ -230,11 +230,14 @@ func (j Job) Validate() error {
 		return err
 	}
 	if j.Action == command.SecurityAudit {
-		for _, files := range [][]workspace.File{j.Source.Files, j.Source.BaseFiles} {
-			for _, file := range files {
-				if !auditCitableSourcePath(file.Path) {
-					return errors.New("audit source path cannot be cited by the installed report validator")
-				}
+		for _, file := range j.Source.Files {
+			if !auditCitableSourcePath(file.Path) {
+				return errors.New("audit source path cannot be cited by the installed report validator")
+			}
+		}
+		for _, path := range j.Source.HeadOmitted {
+			if !auditCitableSourcePath(path) {
+				return errors.New("audit source path cannot be cited by the installed report validator")
 			}
 		}
 	}

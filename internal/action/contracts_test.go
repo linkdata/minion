@@ -339,11 +339,20 @@ func TestAuditJobRejectsUncitableSourcePathsBeforeModel(t *testing.T) {
 		t.Fatalf("other action source acceptance changed: %v", err)
 	}
 	job = testJob(command.SecurityAudit)
+	job.Source.Omitted = []string{`link\source`}
+	job.Source.HeadOmitted = []string{`link\source`}
+	if err := workspace.ValidateSnapshot(job.Source); err != nil {
+		t.Fatalf("fixture omitted head path is not admitted by the portable snapshot: %v", err)
+	}
+	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "audit source path cannot be cited") {
+		t.Fatalf("uncitable current link admitted: %v", err)
+	}
+	job = testJob(command.SecurityAudit)
 	job.Identity.SubjectType = "PullRequest"
 	job.Source.Base, job.Source.MergeBase = portableHead, portableHead
 	job.Source.BaseFiles = []workspace.File{{Path: `base\source`, Mode: workspace.Regular, Data: []byte("base\n")}}
-	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "audit source path cannot be cited") {
-		t.Fatalf("uncitable base source admitted: %v", err)
+	if err := job.Validate(); err != nil {
+		t.Fatalf("uncitable base-only source blocked current audit: %v", err)
 	}
 }
 

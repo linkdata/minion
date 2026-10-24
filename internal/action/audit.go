@@ -551,7 +551,9 @@ func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes []byte, sourc
 		switch unit.Status {
 		case "planned", "in_progress", "deferred":
 			return fmt.Errorf("audit coverage-ledger.json has unfinished %s unit", unit.Status)
-		case "not_applicable", "out_of_scope", "covered", "candidate", "blocked":
+		case "out_of_scope":
+			return errors.New("audit coverage-ledger.json has out-of-scope unit in complete audit")
+		case "not_applicable", "covered", "candidate", "blocked":
 		default:
 			return errors.New("audit coverage-ledger.json has invalid unit status")
 		}

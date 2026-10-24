@@ -33,11 +33,7 @@ func TestCompleteAuditResultValidatesCoverage(t *testing.T) {
 	oneUnverifiedBoundary := "[" + strings.Trim(confirmedLedger, "[]") + "," + strings.Trim(selfCheckedSecond, "[]") + "]"
 	blockedLedger := strings.Replace(validLedger, `"status":"covered"`, `"status":"blocked"`, 1)
 	blockedLedger = strings.Replace(blockedLedger, `"unresolved":[]}]`, `"unresolved":["Investigate boundary"]}]`, 1)
-	excludedLedger := strings.Replace(validLedger, `"status":"covered"`, `"status":"out_of_scope"`, 1)
-	excludedLedger = strings.Replace(excludedLedger, `"agent_id":"hunter"`, `"agent_id":null`, 1)
-	excludedLedger = strings.Replace(excludedLedger, `"reviewed_paths":["source.txt"]`, `"reviewed_paths":[]`, 1)
-	excludedLedger = strings.Replace(excludedLedger, `"local_checks":[{"agent_id":"verifier","reviewed_paths":["source.txt"],"invariant":"Access is checked","method":"source","result":"The guard is present","artifact":null}]`, `"local_checks":[]`, 1)
-	excludedLedger = strings.Replace(excludedLedger, `"unresolved":[]}]`, `"unresolved":["Out of scope"]}]`, 1)
+	excludedLedger := auditOutOfScopeLedgerFixture()
 	secondBlocked := strings.Replace(blockedLedger, `"coverage_id":"source::boundary::`, `"coverage_id":"source::blocked::`, 1)
 	secondBlocked = strings.Replace(secondBlocked, `"boundary":"boundary"`, `"boundary":"blocked"`, 1)
 	secondBlocked = strings.Replace(secondBlocked, `"boundary":"Boundary"`, `"boundary":"Blocked boundary"`, 1)
@@ -64,7 +60,8 @@ func TestCompleteAuditResultValidatesCoverage(t *testing.T) {
 		{name: "code-only private report", report: "```md\nExample\n```"},
 		{name: "blocked-only ledger has no reviewed coverage", ledger: blockedLedger, want: "no reviewed coverage"},
 		{name: "archived covered attempt cannot satisfy blocked current coverage", ledger: auditArchivedCoveredBlockedLedgerFixture(), want: "no reviewed coverage"},
-		{name: "excluded-only ledger has no reviewed coverage", ledger: excludedLedger, want: "no reviewed coverage"},
+		{name: "excluded-only ledger cannot be complete", ledger: excludedLedger, want: "out-of-scope unit in complete audit"},
+		{name: "covered ledger with current out-of-scope unit is incomplete", ledger: auditCoveredAndOutOfScopeLedgerFixture(), want: "out-of-scope unit in complete audit"},
 		{name: "blocked and covered", ledger: blockedAndCovered},
 		{name: "blocked unit declares exhausted validation budget", ledger: incompleteBlocked, want: "incomplete audit budget"},
 		{name: "excluded unit declares exhausted critic budget", ledger: incompleteExcluded, want: "incomplete audit budget"},
