@@ -29,6 +29,11 @@ func TestHostileHTTPAuditSchemaCannotPublish(t *testing.T) {
 	citesOther := strings.Replace(auditCandidateFindingFixture, `"description":"Input reaches the boundary."}]`, `"description":"Input reaches the boundary."},{"kind":"sink","file":"other.txt","line":1,"scope":"other","description":"The operation changes state."}]`, 1)
 	blockedLedger := strings.Replace(auditCoveredLedgerFixture, `"status":"covered"`, `"status":"blocked"`, 1)
 	blockedLedger = strings.Replace(blockedLedger, `"unresolved":[]}]`, `"unresolved":["Investigate boundary"]}]`, 1)
+	budgetBlocked := strings.Replace(blockedLedger, `"unresolved":["Investigate boundary"]`, `"unresolved":["validation_budget_exhausted"]`, 1)
+	budgetBlocked = strings.Replace(budgetBlocked, `"coverage_id":"source::boundary::`, `"coverage_id":"source::budget::`, 1)
+	budgetBlocked = strings.Replace(budgetBlocked, `"boundary":"boundary"`, `"boundary":"budget"`, 1)
+	budgetBlocked = strings.Replace(budgetBlocked, `"boundary":"Boundary"`, `"boundary":"Budget boundary"`, 1)
+	budgetBlocked = "[" + strings.Trim(budgetBlocked, "[]") + "," + strings.Trim(auditCoveredLedgerFixture, "[]") + "]"
 	excludedLedger := strings.Replace(auditCoveredLedgerFixture, `"status":"covered"`, `"status":"out_of_scope"`, 1)
 	excludedLedger = strings.Replace(excludedLedger, `"agent_id":"hunter"`, `"agent_id":null`, 1)
 	excludedLedger = strings.Replace(excludedLedger, `"reviewed_paths":["source.txt"]`, `"reviewed_paths":[]`, 1)
@@ -40,6 +45,7 @@ func TestHostileHTTPAuditSchemaCannotPublish(t *testing.T) {
 	}{
 		{name: "directory-only review cannot claim coverage", artifact: "coverage-ledger.json", data: strings.ReplaceAll(auditCoveredLedgerFixture, "source.txt", "src"), want: "starting path without a declared reviewed file"},
 		{name: "blocked-only ledger has no reviewed coverage", artifact: "coverage-ledger.json", data: blockedLedger, want: "no reviewed coverage"},
+		{name: "complete ledger declares exhausted validation budget", artifact: "coverage-ledger.json", data: budgetBlocked, want: "incomplete audit budget"},
 		{name: "excluded-only ledger has no reviewed coverage", artifact: "coverage-ledger.json", data: excludedLedger, want: "no reviewed coverage"},
 		{name: "blank architecture", artifact: "architecture.md", data: " \t\r\n", want: "architecture.md"},
 		{name: "invisible report", artifact: "REPORT.md", data: "\u200b", want: "no visible content"},

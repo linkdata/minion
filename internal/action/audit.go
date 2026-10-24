@@ -322,6 +322,11 @@ func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes []byte, sourc
 		if items > maxEvidenceItems {
 			return errors.New("audit coverage-ledger.json exceeds validation work limit")
 		}
+		for _, reason := range e.Unresolved {
+			if strings.Contains(reason, "validation_budget_exhausted") || strings.Contains(reason, "critic_budget_exhausted") || strings.Contains(reason, "budget_cannot_fund_reconnaissance_and_reserves") {
+				return errors.New("audit coverage-ledger.json declares an incomplete audit budget")
+			}
+		}
 		checkPaths := 0
 		for _, check := range e.LocalChecks {
 			checkPaths += len(check.ReviewedPaths)
@@ -498,11 +503,6 @@ func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes []byte, sourc
 		for _, check := range e.LocalChecks {
 			if check.AgentID != e.AgentID {
 				hasVerifier = true
-			}
-		}
-		for _, reason := range e.Unresolved {
-			if strings.Contains(reason, "validation_budget_exhausted") {
-				return errors.New("audit coverage-ledger.json has unvalidated candidate")
 			}
 		}
 		for _, fingerprint := range e.ResultFingerprints {

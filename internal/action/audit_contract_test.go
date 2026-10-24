@@ -26,6 +26,8 @@ func TestCompleteAuditResultValidatesCoverage(t *testing.T) {
 	secondCandidate = strings.Replace(secondCandidate, `"boundary":"boundary"`, `"boundary":"second"`, 1)
 	secondCandidate = strings.Replace(secondCandidate, `"boundary":"Boundary"`, `"boundary":"Secondary boundary"`, 1)
 	twoBoundaries := "[" + strings.Trim(confirmedLedger, "[]") + "," + strings.Trim(secondCandidate, "[]") + "]"
+	selfCheckedSecond := strings.Replace(secondCandidate, `"local_checks":[{"agent_id":"verifier"`, `"local_checks":[{"agent_id":"hunter"`, 1)
+	oneUnverifiedBoundary := "[" + strings.Trim(confirmedLedger, "[]") + "," + strings.Trim(selfCheckedSecond, "[]") + "]"
 	blockedLedger := strings.Replace(validLedger, `"status":"covered"`, `"status":"blocked"`, 1)
 	blockedLedger = strings.Replace(blockedLedger, `"unresolved":[]}]`, `"unresolved":["Investigate boundary"]}]`, 1)
 	excludedLedger := strings.Replace(validLedger, `"status":"covered"`, `"status":"out_of_scope"`, 1)
@@ -37,6 +39,15 @@ func TestCompleteAuditResultValidatesCoverage(t *testing.T) {
 	secondBlocked = strings.Replace(secondBlocked, `"boundary":"boundary"`, `"boundary":"blocked"`, 1)
 	secondBlocked = strings.Replace(secondBlocked, `"boundary":"Boundary"`, `"boundary":"Blocked boundary"`, 1)
 	blockedAndCovered := "[" + strings.Trim(secondBlocked, "[]") + "," + strings.Trim(validLedger, "[]") + "]"
+	incompleteBlocked := strings.Replace(blockedAndCovered, `"unresolved":["Investigate boundary"]`, `"unresolved":["validation_budget_exhausted"]`, 1)
+	incompleteExcluded := strings.Replace(excludedLedger, `"unresolved":["Out of scope"]`, `"unresolved":["critic_budget_exhausted"]`, 1)
+	incompleteExcluded = strings.Replace(incompleteExcluded, `"coverage_id":"source::boundary::`, `"coverage_id":"source::excluded::`, 1)
+	incompleteExcluded = strings.Replace(incompleteExcluded, `"boundary":"boundary"`, `"boundary":"excluded"`, 1)
+	incompleteExcluded = "[" + strings.Trim(incompleteExcluded, "[]") + "," + strings.Trim(validLedger, "[]") + "]"
+	archivedBlocked := strings.Replace(archived, `"status":"covered"`, `"status":"blocked"`, 1)
+	archivedBlocked = strings.Replace(archivedBlocked, `"unresolved":[]`, `"unresolved":["budget_cannot_fund_reconnaissance_and_reserves"]`, 1)
+	incompleteArchive := strings.Replace(validLedger, `"attempts":[]`, `"attempts":[`+archivedBlocked+`]`, 1)
+	incompleteArchive = strings.Replace(incompleteArchive, `"wave":1,"status":"covered","agent_id":"hunter"`, `"wave":2,"status":"covered","agent_id":"hunter"`, 1)
 	selfCheckedCandidate := strings.Replace(confirmedLedger, `"local_checks":[{"agent_id":"verifier"`, `"local_checks":[{"agent_id":"hunter"`, 1)
 	rejectedFinding := `[{"verdict":"rejected","fingerprint":"F","title":"Guard bypass refuted","description":"The alleged bypass does not reach the operation.","claimed_root_cause":"The guard was claimed to be absent.","trace":[{"kind":"entrypoint","file":"source.txt","line":1,"scope":"source","description":"The request reaches the guard."}],"evidence":[{"file":"source.txt","line":1,"description":"The guard executes before the operation."}],"reason":"The request is stopped by the guard."}]`
 	withContext := strings.Replace(validLedger, `"ordinary_attack_class_block":null`, `"ordinary_attack_class_block":"The ordinary attack path is covered."`, 1)
@@ -51,6 +62,9 @@ func TestCompleteAuditResultValidatesCoverage(t *testing.T) {
 		{name: "blocked-only ledger has no reviewed coverage", ledger: blockedLedger, want: "no reviewed coverage"},
 		{name: "excluded-only ledger has no reviewed coverage", ledger: excludedLedger, want: "no reviewed coverage"},
 		{name: "blocked and covered", ledger: blockedAndCovered},
+		{name: "blocked unit declares exhausted validation budget", ledger: incompleteBlocked, want: "incomplete audit budget"},
+		{name: "excluded unit declares exhausted critic budget", ledger: incompleteExcluded, want: "incomplete audit budget"},
+		{name: "archived attempt declares unaffordable budget", ledger: incompleteArchive, want: "incomplete audit budget"},
 		{name: "covered with populated context", ledger: withContext},
 		{name: "covered with archived attempt and distinct check owners", ledger: withAttempt},
 		{name: "unsupported local check in current evidence", ledger: strings.Replace(validLedger, sourceCheck, localCheck, 1), want: "unsupported local check method"},
@@ -63,6 +77,7 @@ func TestCompleteAuditResultValidatesCoverage(t *testing.T) {
 		{name: "zero current wave", ledger: strings.Replace(validLedger, `"wave":1`, `"wave":0`, 1), want: "invalid current wave"},
 		{name: "confirmed finding", ledger: confirmedLedger, findings: auditConfirmedFindingFixture},
 		{name: "confirmed finding with second candidate", ledger: twoBoundaries, findings: auditConfirmedFindingFixture},
+		{name: "one candidate cannot borrow another candidate's verifier", ledger: oneUnverifiedBoundary, findings: auditConfirmedFindingFixture, want: "without separately attributed source check"},
 		{name: "needs_validation finding", ledger: confirmedLedger, findings: auditCandidateFindingFixture},
 		{name: "candidate lacks separate check claim", ledger: selfCheckedCandidate, findings: auditCandidateFindingFixture, want: "without separately attributed source check"},
 		{name: "archived candidate lacks separate check claim", ledger: withSelfCheckedAttempt, findings: auditCandidateFindingFixture, want: "without separately attributed source check"},
@@ -128,11 +143,11 @@ func TestCompleteAuditResultValidatesCoverage(t *testing.T) {
 		{name: "unfinished unit", ledger: `[{"status":"planned"}]`, want: "unfinished planned unit"},
 		{name: "null findings", findings: `null`, want: "not an array"},
 		{name: "empty finding fingerprint", findings: `[{"fingerprint":""}]`, want: "empty fingerprint"},
-		{name: "unvalidated candidate", ledger: `[{"status":"candidate","result_fingerprints":["F"],"unresolved":["validation_budget_exhausted"]}]`, findings: auditCandidateFindingFixture, want: "unvalidated candidate"},
+		{name: "unvalidated candidate", ledger: `[{"status":"candidate","result_fingerprints":["F"],"unresolved":["validation_budget_exhausted"]}]`, findings: auditCandidateFindingFixture, want: "incomplete audit budget"},
 		{name: "empty candidate fingerprint", ledger: `[{"status":"candidate","result_fingerprints":[""]}]`, want: "candidate without fingerprint"},
 		{name: "candidate without finding", ledger: `[{"status":"candidate","result_fingerprints":["F"]}]`, want: "candidate without final finding"},
 		{name: "finding without candidate", findings: auditCandidateFindingFixture, want: "finding without candidate"},
-		{name: "unvalidated attempt", ledger: `[{"status":"covered","attempts":[{"status":"candidate","result_fingerprints":["F"],"unresolved":["validation_budget_exhausted"]}]}]`, findings: auditCandidateFindingFixture, want: "unvalidated candidate"},
+		{name: "unvalidated attempt", ledger: `[{"status":"covered","attempts":[{"status":"candidate","result_fingerprints":["F"],"unresolved":["validation_budget_exhausted"]}]}]`, findings: auditCandidateFindingFixture, want: "incomplete audit budget"},
 		{name: "unknown attempt status", ledger: `[{"status":"covered","attempts":[{"status":"unknown"}]}]`, want: "invalid attempt status"},
 	} {
 		t.Run(test.name, func(t *testing.T) {

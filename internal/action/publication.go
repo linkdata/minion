@@ -188,7 +188,7 @@ func rejectPublishedRefutations(job Job, result Result, projected publication) e
 				return fmt.Errorf("decode audit findings before publication: %w", err)
 			}
 			for _, finding := range findings {
-				if finding.Verdict != "rejected" && (containsCopy(finding.Fingerprint, reject) || containsCopy(finding.Title, reject)) {
+				if finding.Verdict != "rejected" && (containsCopy(finding.Fingerprint, reject) || publicCopy(finding.Title)) {
 					return errors.New("publication contains private review evidence")
 				}
 			}

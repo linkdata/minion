@@ -526,6 +526,7 @@ func TestHTTPResultCannotPublishPrivateRefutation(t *testing.T) {
 		{"whole copy", "PRIVATE_MAIN_REFUTATION_TEXT", "Public reply.\nPRIVATE_MAIN_REFUTATION_TEXT"},
 		{"short whole copy", "Secret abc123", "Secret abc123"},
 		{"audit title quoted newline", "Private objection\nand evidence.", "Audit report\n"},
+		{"audit title short whole copy", "Secret abc123", "Audit report\n"},
 		{"rendered quote leader", "> UNIQUE_PRIVATE_PHRASE_STAYS_HERE", "UNIQUE_PRIVATE_PHRASE_STAYS_HERE"},
 		{"Unicode simple fold", "PRIVATE Σ MARKER MUST STAY HERE", "PRIVATE ς MARKER MUST STAY HERE"},
 		{"Unicode expanded fold", "The private Straße example should stay in review.", "Public reply. THE PRIVATE STRASSE EXAMPLE SHOULD STAY IN REVIEW."},
@@ -544,7 +545,7 @@ func TestHTTPResultCannotPublishPrivateRefutation(t *testing.T) {
 			switch test.name {
 			case "HTML entity in Fix Markdown":
 				action = command.Fix
-			case "audit title quoted newline":
+			case "audit title quoted newline", "audit title short whole copy":
 				action = command.SecurityAudit
 			}
 			job := withClaudeCritic(testJob(action))

@@ -385,7 +385,7 @@ JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 	write("coverage-ledger.json", `[{"status":"deferred"}]`)
 	validate("unfinished deferred unit")
 	write("coverage-ledger.json", `[{"status":"candidate","result_fingerprints":["F"],"unresolved":["validation_budget_exhausted"]}]`)
-	validate("unvalidated candidate")
+	validate("incomplete audit budget")
 	write("coverage-ledger.json", `[{"status":"candidate","result_fingerprints":[],"unresolved":[]}]`)
 	validate("candidate without fingerprint")
 	write("coverage-ledger.json", `[{"status":"candidate","result_fingerprints":["F"],"unresolved":[]}]`)
@@ -397,7 +397,7 @@ JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 	write("REPORT.md", reportText)
 	validate("")
 	write("coverage-ledger.json", `[{"status":"candidate","result_fingerprints":["F"],"unresolved":["validation_budget_exhausted"]}]`)
-	validate("unvalidated candidate")
+	validate("incomplete audit budget")
 	write("coverage-ledger.json", coveredLedger)
 	validate("finding without candidate")
 	archivedAttempt := `{"wave":1,"status":"candidate","agent_id":"older","reviewed_paths":["source.txt"],"local_checks":[{"agent_id":"helper","reviewed_paths":["source.txt"],"invariant":"Access is checked","method":"source","result":"The guard is present","artifact":null}],"result_fingerprints":["F"],"unresolved":[],"reassignment_reason":"Rechecked"}`
@@ -411,7 +411,7 @@ JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 	validate("without final finding")
 	write("findings.json", auditCandidateFindingFixture)
 	write("coverage-ledger.json", `[{"status":"covered","attempts":[{"status":"candidate","result_fingerprints":["F"],"unresolved":["validation_budget_exhausted"]}]}]`)
-	validate("unvalidated candidate")
+	validate("incomplete audit budget")
 	fingerprint := "F\nforged journal \"line\""
 	write("findings.json", "[]")
 	write("coverage-ledger.json", fmt.Sprintf(`[{"status":"candidate","result_fingerprints":[%q]}]`, fingerprint))

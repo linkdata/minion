@@ -351,6 +351,20 @@ func TestPublishedRefutationsRejectAuditQuotedTitle(t *testing.T) {
 	if err := rejectPublishedRefutations(job, result, projected); err != nil {
 		t.Fatalf("short generic fingerprint matched an unrelated refutation: %v", err)
 	}
+	result.Refutations[0].Text = "Secret abc123"
+	shortTitle, err := json.Marshal(result.Refutations[0].Text)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range result.Artifacts {
+		if result.Artifacts[i].Path == "findings.json" {
+			result.Artifacts[i].Data = []byte(strings.Replace(auditCandidateFindingFixture, `"title":"Unverified boundary"`, `"title":`+string(shortTitle), 1))
+		}
+	}
+	projected, err = projectPublication(job, result)
+	if err != nil || !strings.Contains(projected.answer, "Secret abc123") || rejectPublishedRefutations(job, result, projected) == nil {
+		t.Fatalf("short private audit title reached public reply: %q, %v", projected.answer, err)
+	}
 }
 
 func TestPublishedRefutationsFixAllowsQuotedSourceButRejectsNewCopy(t *testing.T) {

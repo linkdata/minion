@@ -338,9 +338,9 @@ func (r Result) validate(j Job, complete bool) error {
 		return errors.New("action result version, identity or source differs from job")
 	}
 	requiresAnswer := j.Action != command.SecurityAudit && (j.Action != command.Fix || len(r.Changes) == 0)
-	validAnswer := publishableAnswer(r.Answer)
-	if j.Action == command.SecurityAudit {
-		validAnswer = boundedText(r.Answer, maxOutputBytes)
+	validAnswer := boundedText(r.Answer, maxOutputBytes)
+	if j.Action != command.SecurityAudit {
+		validAnswer = publishableAnswer(r.Answer)
 	}
 	invalidCompleteAnswer := complete && (!validAnswer || (requiresAnswer && !auditVisibleText(r.Answer)))
 	if (!complete && !boundedText(r.Answer, maxOutputBytes)) || invalidCompleteAnswer {

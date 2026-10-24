@@ -763,13 +763,16 @@ func TestResultEmptyAnswerContract(t *testing.T) {
 		critic  bool
 		changed bool
 		valid   bool
-	}{{command.Fix, false, true, true}, {command.Fix, false, false, false}, {command.Fix, true, false, false}, {command.Fix, true, true, true}, {command.Comment, false, false, false}, {command.Review, false, false, false}, {command.SecurityAudit, false, false, false}} {
+	}{{command.Fix, false, true, true}, {command.Fix, false, false, false}, {command.Fix, true, false, false}, {command.Fix, true, true, true}, {command.Comment, false, false, false}, {command.Review, false, false, false}, {command.SecurityAudit, false, false, true}} {
 		t.Run(fmt.Sprintf("%s/critic=%t/changed=%t", test.action, test.critic, test.changed), func(t *testing.T) {
 			job := testJob(test.action)
 			if test.critic {
 				job = withClaudeCritic(job)
 			}
 			result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Calls: []CallUsage{{Provider: job.Main.Provider, Role: "main", Round: 1}}}
+			if test.action == command.SecurityAudit {
+				result.Artifacts = auditArtifactsFixture(job, sourceIdentity(job), "Audit report\n")
+			}
 			if test.critic {
 				result.CriticStopReason = "approved"
 				result.Calls = append(result.Calls, CallUsage{Provider: job.Critic.Provider, Role: roleCritic, ReviewComplete: true, Round: 1, ReviewPhase: reviewFull, Approved: true, NoBlockers: true})
