@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -23,6 +24,8 @@ var auditValidators = []struct{ script, artifact string }{
 	{"validate-findings.cjs", "findings.json"},
 	{"validate-coverage-ledger.cjs", "coverage-ledger.json"},
 }
+
+var auditWindowsReservedComponent = regexp.MustCompile(`(?i)^(?:con|prn|aux|nul|clock\$|conin\$|conout\$|com[1-9¹²³]|lpt[1-9¹²³])(?:\.|$)`)
 
 type auditTools struct {
 	binary, permissionFlag string
@@ -557,7 +560,6 @@ func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes []byte, sourc
 			if attempt.Status != "covered" && attempt.Status != "candidate" && attempt.Status != "blocked" {
 				return errors.New("audit coverage-ledger.json has invalid attempt status")
 			}
-			reviewedCoverage = reviewedCoverage || attempt.Status == "covered" || attempt.Status == "candidate"
 			if attempt.Status == "candidate" {
 				if err := checkCandidate(attempt); err != nil {
 					return err
@@ -715,6 +717,27 @@ func auditVisibleReport(report string) error {
 		return errors.New("audit REPORT.md has no visible content")
 	}
 	return nil
+}
+
+// Installed audit validators cannot cite every path that Git can store.
+func auditCitableSourcePath(path string) bool {
+	if !workspace.ValidPath(path) || !utf8.ValidString(path) || strings.TrimSpace(path) != path ||
+		strings.HasPrefix(path, "~") || strings.Contains(path, ":") {
+		return false
+	}
+	for _, r := range path {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || unicode.Is(unicode.Zl, r) ||
+			unicode.Is(unicode.Zp, r) || unicode.Is(unicode.Other_Default_Ignorable_Code_Point, r) ||
+			unicode.Is(unicode.Variation_Selector, r) {
+			return false
+		}
+	}
+	for _, part := range strings.Split(path, "/") {
+		if strings.HasSuffix(part, ".") || strings.HasSuffix(part, " ") || auditWindowsReservedComponent.MatchString(part) {
+			return false
+		}
+	}
+	return true
 }
 
 func auditSourceInventory(source *workspace.Snapshot) (map[string]bool, map[string]int) {
@@ -879,7 +902,9 @@ func validAuditCoverageAgent(agent string) bool {
 }
 
 func validateAuditMetadata(metadataBytes []byte, repo, target, head string) ([]string, error) {
-	if err := rejectDuplicateAuditJSONKeys(metadataBytes); err != nil {
+	if err := rejectDuplicateAuditJSONKeys(metadataBytes,
+		"run_id", "repo", "target", "source_ref", "profile", "scope_paths", "budget", "selected_companion_files",
+		"prior_run_paths", "shared_file_owners", "execution_policy", "run_status", "incomplete_reason"); err != nil {
 		return nil, err
 	}
 	var metadata struct {
@@ -902,13 +927,6 @@ func validateAuditMetadata(metadataBytes []byte, repo, target, head string) ([]s
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(metadataBytes, &fields); err != nil {
 		return nil, fmt.Errorf("decode audit metadata fields: %w", err)
-	}
-	for name := range fields {
-		for _, canonical := range []string{"run_id", "repo", "target", "source_ref", "profile", "scope_paths", "budget", "selected_companion_files", "prior_run_paths", "shared_file_owners", "execution_policy", "run_status", "incomplete_reason"} {
-			if name != canonical && strings.EqualFold(name, canonical) {
-				return nil, fmt.Errorf("audit metadata uses noncanonical key %q", name)
-			}
-		}
 	}
 	if _, incomplete := fields["incomplete_reason"]; incomplete {
 		return nil, errors.New("audit metadata declares an incomplete reason for a complete run")

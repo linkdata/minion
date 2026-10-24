@@ -24,13 +24,17 @@ import (
 func TestHostileHTTPResultValidationErrorRedactsProviderKey(t *testing.T) {
 	const key = "fixture-codex-secret"
 	for _, tc := range []struct {
-		name   string
-		critic bool
-		failed bool
+		name    string
+		critic  bool
+		failed  bool
+		encoded bool
 	}{
 		{name: "normal outcome"},
 		{name: "failed outcome", failed: true},
 		{name: "critic outcome", critic: true},
+		{name: "encoded normal outcome", encoded: true},
+		{name: "encoded failed outcome", failed: true, encoded: true},
+		{name: "encoded critic outcome", critic: true, encoded: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			gitFixtureRemote(t, workspace.File{Path: "source.txt", Mode: workspace.Regular, Data: []byte("source\n")})
@@ -73,11 +77,15 @@ func TestHostileHTTPResultValidationErrorRedactsProviderKey(t *testing.T) {
 					call.Tokens, call.Complete = usage.Tokens{Input: 3, Output: 2}, true
 					result.Calls = []CallUsage{call}
 				}
-				result.Changes = []workspace.Change{{Path: "../" + key, Mode: workspace.Regular, Data: []byte("hostile\n")}}
+				pathKey := key
+				if tc.encoded {
+					pathKey = strings.Replace(key, "secret", "&#x73;ecret", 1)
+				}
+				result.Changes = []workspace.Change{{Path: "../" + pathKey, Mode: workspace.Regular, Data: []byte("hostile\n")}}
 				if err := httpResultShape(result); err != nil {
 					t.Fatalf("hostile result failed HTTP bounds before parent validation: %v", err)
 				}
-				if err := result.Validate(job); err == nil || !strings.Contains(err.Error(), key) {
+				if err := result.Validate(job); err == nil || !strings.Contains(err.Error(), pathKey) {
 					t.Fatalf("fixture no longer reaches the key-bearing validation error: %v", err)
 				}
 				sequence := uint64(1)
@@ -125,11 +133,15 @@ func TestHostileHTTPResultValidationErrorRedactsProviderKey(t *testing.T) {
 			request.Command = command.Command{Name: "fix", Action: command.Fix}
 			request.Repository.Actions = []string{"fix"}
 			err := e.Execute(t.Context(), request)
-			if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "unsafe or duplicate changed path") || strings.Contains(err.Error(), key) || writes.Load() != 0 {
+			want := "unsafe or duplicate changed path"
+			if tc.encoded {
+				want = "action error could not be safely displayed"
+			}
+			if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), want) || strings.Contains(err.Error(), key) || strings.Contains(err.Error(), "&#x73;ecret") || writes.Load() != 0 {
 				t.Fatalf("hostile result escaped error boundary or published: error=%v writes=%d", err, writes.Load())
 			}
 			log.New(&journal, "", 0).Printf("fix failed: %v", err)
-			if strings.Contains(journal.String(), key) {
+			if strings.Contains(journal.String(), key) || strings.Contains(journal.String(), "&#x73;ecret") {
 				t.Fatalf("hostile result escaped monitor-style log boundary: %s", &journal)
 			}
 			records, err := usage.ReadAll(usageDir)

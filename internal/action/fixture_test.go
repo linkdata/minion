@@ -488,6 +488,13 @@ const auditNeedsDetailFixture = "## F: Unverified boundary\nsource.txt. Runtime 
 
 const auditCoveredLedgerFixture = `[{"coverage_id":"source::boundary::subsystem::attack","canonical_refs":{"surface":"source","boundary":"boundary","subsystem":"subsystem","attack_class":"attack"},"surface":"Source","boundary":"Boundary","subsystem":"Subsystem","attack_class":"Attack","starting_paths":["source.txt"],"ordinary_attack_class_block":null,"selected_companion_blocks":[],"excluded_blocks":[],"prior_status":"none","attempts":[],"wave":1,"status":"covered","agent_id":"hunter","reviewed_paths":["source.txt"],"local_checks":[{"agent_id":"verifier","reviewed_paths":["source.txt"],"invariant":"Access is checked","method":"source","result":"The guard is present","artifact":null}],"result_fingerprints":[],"unresolved":[]}]`
 
+func auditArchivedCoveredBlockedLedgerFixture() string {
+	const archived = `{"wave":1,"status":"covered","agent_id":"older","reviewed_paths":["source.txt"],"local_checks":[{"agent_id":"helper","reviewed_paths":["source.txt"],"invariant":"Access is checked","method":"source","result":"The guard is present","artifact":null}],"result_fingerprints":[],"unresolved":[],"reassignment_reason":"Rechecked"}`
+	ledger := strings.Replace(auditCoveredLedgerFixture, `"attempts":[]`, `"attempts":[`+archived+`]`, 1)
+	ledger = strings.Replace(ledger, `"wave":1,"status":"covered","agent_id":"hunter"`, `"wave":2,"status":"blocked","agent_id":"hunter"`, 1)
+	return strings.Replace(ledger, `"unresolved":[]}]`, `"unresolved":["Investigate boundary"]}]`, 1)
+}
+
 func auditArtifactsFixture(job Job, target, report string) []workspace.File {
 	metadata := fmt.Sprintf(`{"run_id":"test-run","repo":%q,"target":%q,"source_ref":%q,"profile":"standard","scope_paths":["."],"budget":null,"selected_companion_files":[],"prior_run_paths":[],"shared_file_owners":%s,"execution_policy":"sandboxed-source-and-local-only","run_status":"complete"}`, job.Identity.Repository, target, job.Source.Head, auditTestOwners)
 	var files []workspace.File

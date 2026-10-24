@@ -63,6 +63,7 @@ func TestCompleteAuditResultValidatesCoverage(t *testing.T) {
 		{name: "invisible report", report: "\u200b", want: "no visible content"},
 		{name: "code-only private report", report: "```md\nExample\n```"},
 		{name: "blocked-only ledger has no reviewed coverage", ledger: blockedLedger, want: "no reviewed coverage"},
+		{name: "archived covered attempt cannot satisfy blocked current coverage", ledger: auditArchivedCoveredBlockedLedgerFixture(), want: "no reviewed coverage"},
 		{name: "excluded-only ledger has no reviewed coverage", ledger: excludedLedger, want: "no reviewed coverage"},
 		{name: "blocked and covered", ledger: blockedAndCovered},
 		{name: "blocked unit declares exhausted validation budget", ledger: incompleteBlocked, want: "incomplete audit budget"},

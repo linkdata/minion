@@ -131,6 +131,12 @@ func redactActionError(err error, secrets ...string) error {
 		return nil
 	}
 	message := redactActionText(err.Error(), secrets...)
+	for _, secret := range secrets {
+		if secret != "" && containsConfiguredKey([]byte(message), secret) {
+			message = "action error could not be safely displayed"
+			break
+		}
+	}
 	if message == err.Error() {
 		return err
 	}

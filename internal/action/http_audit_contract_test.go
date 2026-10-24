@@ -46,6 +46,7 @@ func TestHostileHTTPAuditSchemaCannotPublish(t *testing.T) {
 	}{
 		{name: "directory-only review cannot claim coverage", artifact: "coverage-ledger.json", data: strings.ReplaceAll(auditCoveredLedgerFixture, "source.txt", "src"), want: "starting path without a declared reviewed file"},
 		{name: "blocked-only ledger has no reviewed coverage", artifact: "coverage-ledger.json", data: blockedLedger, want: "no reviewed coverage"},
+		{name: "archived covered attempt cannot publish blocked current coverage", artifact: "coverage-ledger.json", data: auditArchivedCoveredBlockedLedgerFixture(), want: "no reviewed coverage"},
 		{name: "complete ledger declares exhausted validation budget", artifact: "coverage-ledger.json", data: budgetBlocked, want: "incomplete audit budget"},
 		{name: "excluded-only ledger has no reviewed coverage", artifact: "coverage-ledger.json", data: excludedLedger, want: "no reviewed coverage"},
 		{name: "blank architecture", artifact: "architecture.md", data: " \t\r\n", want: "architecture.md"},

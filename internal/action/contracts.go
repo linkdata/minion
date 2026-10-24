@@ -229,6 +229,15 @@ func (j Job) Validate() error {
 	if err := workspace.ValidateSnapshot(j.Source); err != nil {
 		return err
 	}
+	if j.Action == command.SecurityAudit {
+		for _, files := range [][]workspace.File{j.Source.Files, j.Source.BaseFiles} {
+			for _, file := range files {
+				if !auditCitableSourcePath(file.Path) {
+					return errors.New("audit source path cannot be cited by the installed report validator")
+				}
+			}
+		}
+	}
 	if j.Action == command.Fix {
 		if err := workspace.ValidateFixPaths(j.Source.Files, j.Source.Omitted); err != nil {
 			return fmt.Errorf("%w: %w", gitwork.ErrUnsupportedSource, err)

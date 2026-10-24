@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/gitwork"
@@ -296,6 +297,53 @@ func TestJobValidate(t *testing.T) {
 				t.Fatalf("valid boundary refused: %v", err)
 			}
 		})
+	}
+}
+
+func TestAuditJobRejectsUncitableSourcePathsBeforeModel(t *testing.T) {
+	for _, test := range []struct{ name, path string }{
+		{"backslash", `literal\backslash`},
+		{"colon", "segment:name"},
+		{"reserved", "CON.txt"},
+		{"trailing dot", "source."},
+		{"leading tilde", "~source"},
+		{"default ignorable", "so\u200burce"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			job := testJob(command.SecurityAudit)
+			job.Source.Files[0].Path = test.path
+			if err := workspace.ValidateSnapshot(job.Source); err != nil {
+				t.Fatalf("fixture source path is not admitted by the portable snapshot: %v", err)
+			}
+			if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "audit source path cannot be cited") || strings.Contains(err.Error(), test.path) {
+				t.Fatalf("audit path was accepted or echoed: %v", err)
+			}
+			called := false
+			runner := Runner{runModel: func(context.Context, modelRun) (aicli.Result, error) {
+				called = true
+				return aicli.Result{}, nil
+			}}
+			if _, err := runner.Run(t.Context(), job); !errors.Is(err, monitor.ErrTerminalJob) || called {
+				t.Fatalf("uncitable source reached model: called=%t error=%v", called, err)
+			}
+		})
+	}
+	job := testJob(command.SecurityAudit)
+	job.Source.Files[0].Path = "src/ordinary.go"
+	if err := job.Validate(); err != nil {
+		t.Fatalf("ordinary audit source rejected: %v", err)
+	}
+	job = testJob(command.Comment)
+	job.Source.Files[0].Path = `literal\backslash`
+	if err := job.Validate(); err != nil {
+		t.Fatalf("other action source acceptance changed: %v", err)
+	}
+	job = testJob(command.SecurityAudit)
+	job.Identity.SubjectType = "PullRequest"
+	job.Source.Base, job.Source.MergeBase = portableHead, portableHead
+	job.Source.BaseFiles = []workspace.File{{Path: `base\source`, Mode: workspace.Regular, Data: []byte("base\n")}}
+	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "audit source path cannot be cited") {
+		t.Fatalf("uncitable base source admitted: %v", err)
 	}
 }
 

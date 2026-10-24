@@ -443,9 +443,13 @@ func TestValidateAuditMetadataRejectsIncompleteReason(t *testing.T) {
 	job := testJob(command.SecurityAudit)
 	target := sourceIdentity(job)
 	metadata := string(auditArtifactsFixture(job, target, "Audit report\n")[0].Data)
-	metadata = strings.Replace(metadata, `"run_status":"complete"`, `"run_status":"complete","incomplete_reason":"validation_budget_exhausted"`, 1)
-	if _, err := validateAuditMetadata([]byte(metadata), job.Identity.Repository, target, job.Source.Head); err == nil || !strings.Contains(err.Error(), "incomplete reason") {
+	withReason := strings.Replace(metadata, `"run_status":"complete"`, `"run_status":"complete","incomplete_reason":"validation_budget_exhausted"`, 1)
+	if _, err := validateAuditMetadata([]byte(withReason), job.Identity.Repository, target, job.Source.Head); err == nil || !strings.Contains(err.Error(), "incomplete reason") {
 		t.Fatalf("complete audit with incomplete reason: %v", err)
+	}
+	withAlias := strings.Replace(metadata, `"run_status":"complete"`, `"run_status":"complete","INCOMPLETE_REASON":"validation_budget_exhausted"`, 1)
+	if _, err := validateAuditMetadata([]byte(withAlias), job.Identity.Repository, target, job.Source.Head); err == nil || !strings.Contains(err.Error(), "noncanonical key") {
+		t.Fatalf("noncanonical incomplete reason: %v", err)
 	}
 }
 
