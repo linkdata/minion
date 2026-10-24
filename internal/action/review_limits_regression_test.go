@@ -101,7 +101,7 @@ func TestEveryActionPromptDeclaresRenderedPublicationBudget(t *testing.T) {
 				}
 				if action == command.SecurityAudit {
 					for _, requirement := range []string{
-						"REPORT.md must fit within 59392 UTF-8 bytes after line-ending normalization, a two-byte quote prefix per line, visible control/formatting-character escapes and 12 bytes of code fences",
+						"REPORT.md must contain non-ignorable text and fit within 59392 UTF-8 bytes",
 						"Do not execute repository code, builds, tests, or fixtures, probe live services, publish, or run network commands",
 						"Copy this source-only execution prohibition verbatim into every delegated agent prompt",
 						"it overrides the skill's local-execution allowance",

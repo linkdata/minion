@@ -28,10 +28,14 @@ func TestCompleteAuditClaimsBindToCurrentSource(t *testing.T) {
 		name, ledger, findings, want string
 		files                        []workspace.File
 		omitted                      []string
+		headOmitted                  []string
+		pullRequest                  bool
 	}{
 		{name: "missing current starting path", ledger: strings.ReplaceAll(auditCoveredLedgerFixture, "source.txt", "ghost.go"), want: "invalid starting path"},
 		{name: "missing current reviewed path", ledger: strings.ReplaceAll(auditCoveredLedgerFixture, `"reviewed_paths":["source.txt"]`, `"reviewed_paths":["ghost.go"]`), want: "invalid reviewed path"},
-		{name: "base-only omitted link is not current evidence", ledger: strings.ReplaceAll(auditCoveredLedgerFixture, "source.txt", "old-link"), omitted: []string{"old-link"}, want: "invalid starting path"},
+		{name: "base-only omitted link is not current evidence", ledger: strings.ReplaceAll(auditCoveredLedgerFixture, "source.txt", "old-link"), omitted: []string{"old-link"}, pullRequest: true, want: "invalid starting path"},
+		{name: "head-only omitted link is reviewed coverage", ledger: strings.ReplaceAll(auditCoveredLedgerFixture, "source.txt", "head-link"), omitted: []string{"head-link", "old-link"}, headOmitted: []string{"head-link"}, pullRequest: true},
+		{name: "head link cannot provide line citation", ledger: strings.ReplaceAll(candidate, "source.txt", "head-link"), findings: strings.ReplaceAll(auditCandidateFindingFixture, "source.txt", "head-link"), omitted: []string{"head-link"}, headOmitted: []string{"head-link"}, pullRequest: true, want: "trace outside current source"},
 		{name: "missing current trace file", ledger: candidate, findings: strings.Replace(auditCandidateFindingFixture, `"trace":[{"kind":"entrypoint","file":"source.txt"`, `"trace":[{"kind":"entrypoint","file":"ghost.go"`, 1), want: "trace outside current source"},
 		{name: "line beyond current file", ledger: candidate, findings: strings.Replace(auditCandidateFindingFixture, `"evidence":[{"file":"source.txt","line":1`, `"evidence":[{"file":"source.txt","line":999999`, 1), want: "evidence outside current source"},
 		{name: "empty current file has no lines", ledger: candidate, findings: auditCandidateFindingFixture, files: []workspace.File{{Path: "source.txt", Mode: workspace.Regular}}, want: "trace outside current source"},
@@ -59,6 +63,11 @@ func TestCompleteAuditClaimsBindToCurrentSource(t *testing.T) {
 				job.Source.Files = test.files
 			}
 			job.Source.Omitted = test.omitted
+			job.Source.HeadOmitted = test.headOmitted
+			if test.pullRequest {
+				job.Identity.SubjectType = "PullRequest"
+				job.Source.Base, job.Source.MergeBase = job.Source.Head, job.Source.Head
+			}
 			result := completeAuditResult(job)
 			if test.findings != "" {
 				result.Answer = "Reviewed audit report: Unverified boundary."

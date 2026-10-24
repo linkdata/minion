@@ -111,11 +111,15 @@ func rejectPublishedRefutations(job Job, result Result, projected publication) e
 	}
 	const minCopyRunes = 24
 	var whole []string
+	exact := make(map[string]bool)
 	sentences := make(map[string]bool)
 	for _, refutation := range result.Refutations {
 		for _, variant := range publicationTextVariants(refutation.Text) {
-			if text := foldPublicationSpace(variant); utf8.RuneCountInString(text) >= minCopyRunes {
-				whole = append(whole, text)
+			if text := foldPublicationSpace(variant); text != "" {
+				exact[text] = true
+				if utf8.RuneCountInString(text) >= minCopyRunes {
+					whole = append(whole, text)
+				}
 			}
 			for _, sentence := range strings.FieldsFunc(variant, publicationSentenceBreak) {
 				if text := foldPublicationSpace(sentence); utf8.RuneCountInString(text) >= minCopyRunes {
@@ -124,7 +128,7 @@ func rejectPublishedRefutations(job Job, result Result, projected publication) e
 			}
 		}
 	}
-	if len(whole) == 0 && len(sentences) == 0 {
+	if len(exact) == 0 && len(whole) == 0 && len(sentences) == 0 {
 		return nil
 	}
 	containsCopy := func(text string, reject func(string) bool) bool {
@@ -155,11 +159,39 @@ func rejectPublishedRefutations(job Job, result Result, projected publication) e
 		return false
 	}
 	reject := func(string) bool { return true }
-	if containsCopy(projected.answer, reject) {
+	wholeReply := func(text string) bool {
+		for _, variant := range publicationTextVariants(text) {
+			if exact[foldPublicationSpace(variant)] {
+				return true
+			}
+		}
+		return false
+	}
+	publicCopy := func(text string) bool {
+		return wholeReply(text) || containsCopy(text, reject)
+	}
+	if publicCopy(projected.answer) || job.Action != command.SecurityAudit && (job.Action != command.Fix || len(result.Changes) == 0) && wholeReply(result.Answer) {
 		return errors.New("publication contains private review evidence")
 	}
+	if job.Action == command.SecurityAudit {
+		for _, artifact := range result.Artifacts {
+			if artifact.Path != "findings.json" {
+				continue
+			}
+			var findings []struct{ Verdict, Fingerprint, Title string }
+			if err := json.Unmarshal(artifact.Data, &findings); err != nil {
+				return fmt.Errorf("decode audit findings before publication: %w", err)
+			}
+			for _, finding := range findings {
+				if finding.Verdict != "rejected" && (containsCopy(finding.Fingerprint, reject) || containsCopy(finding.Title, reject)) {
+					return errors.New("publication contains private review evidence")
+				}
+			}
+			break
+		}
+	}
 	if job.Action == command.Fix {
-		// A Fix transfers full replacement files. Source text quoted in a refutation was already public.
+		// A Fix transfers full replacement files. A quoted source passage may already be in the parent-held snapshot.
 		// shortcut: Source scans stop after 1 GiB; use multi-pattern search if valid fixes hit the limit.
 		const maxSourceSearchBytes int64 = 1 << 30
 		remainingSourceSearchBytes := maxSourceSearchBytes

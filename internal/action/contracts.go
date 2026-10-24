@@ -1,6 +1,7 @@
 package action
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"slices"
@@ -337,7 +338,11 @@ func (r Result) validate(j Job, complete bool) error {
 		return errors.New("action result version, identity or source differs from job")
 	}
 	requiresAnswer := j.Action != command.SecurityAudit && (j.Action != command.Fix || len(r.Changes) == 0)
-	invalidCompleteAnswer := complete && (!publishableAnswer(r.Answer) || (requiresAnswer && strings.TrimSpace(r.Answer) == ""))
+	validAnswer := publishableAnswer(r.Answer)
+	if j.Action == command.SecurityAudit {
+		validAnswer = boundedText(r.Answer, maxOutputBytes)
+	}
+	invalidCompleteAnswer := complete && (!validAnswer || (requiresAnswer && strings.TrimSpace(r.Answer) == ""))
 	if (!complete && !boundedText(r.Answer, maxOutputBytes)) || invalidCompleteAnswer {
 		return errors.New("action answer is blank, invalid or exceeds limit")
 	}
@@ -472,6 +477,9 @@ func validateResultArtifacts(j Job, files []workspace.File, complete bool) error
 		}
 		if complete && len(file.Data) == 0 && !auditArtifactMayBeEmpty(file.Path) {
 			return fmt.Errorf("empty action report artifact %q", file.Path)
+		}
+		if complete && bytes.IndexByte(file.Data, 0) >= 0 {
+			return fmt.Errorf("action report artifact %q contains NUL", file.Path)
 		}
 		if complete && file.Path == "architecture.md" && !auditVisibleText(string(file.Data)) {
 			return errors.New("audit architecture.md has no visible content")

@@ -369,6 +369,9 @@ func TestFixChangesRejectConfiguredKeysWithoutRejectingBinary(t *testing.T) {
 		{"literal", key, "prefix " + key, true},
 		{"NUL split", key, "fixture-\x00secret", true},
 		{"JSON escaped", key, `{"note":"fixture-\u0073ecret"}`, true},
+		{"HTML numeric entity", key, "fixture-&#x73;ecret", true},
+		{"JSON escaped entity", key, `{"note":"fixture-\u0026#x73;ecret"}`, true},
+		{"literal ampersand key", "fixture-&amp;secret", "fixture-&amp;secret", true},
 		{"marker-like key", "redacted", "[redacted]", true},
 		{"benign binary", key, "x\x00y", false},
 	} {
@@ -382,6 +385,7 @@ func TestFixChangesRejectConfiguredKeysWithoutRejectingBinary(t *testing.T) {
 		name, path, data, codexKey, claudeKey string
 	}{
 		{name: "Codex key in data", path: "source.txt", data: `{"note":"fixture-\u0073ecret"}`, codexKey: key},
+		{name: "Codex key as HTML entity", path: "README.md", data: "fixture-&#x73;ecret", codexKey: key},
 		{name: "Codex key in filename", path: key + ".txt", data: "safe", codexKey: key},
 		{name: "Claude key in data", path: "source.txt", data: `{"note":"fixture-\u0073ecret"}`, claudeKey: key},
 	} {

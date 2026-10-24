@@ -40,16 +40,23 @@ func TestResultArtifactContracts(t *testing.T) {
 		}, "incomplete audit artifacts", ""},
 		{"executable artifact", func(_ *Job, r *Result) { r.Artifacts[0].Mode = workspace.Executable }, "invalid action report artifact", "invalid action report artifact"},
 		{"oversized artifact", func(_ *Job, r *Result) { r.Artifacts[0].Data = make([]byte, maxAuditArtifactBytes+1) }, "invalid action report artifact", "invalid action report artifact"},
+		{"NUL in completed report", func(_ *Job, r *Result) {
+			for i := range r.Artifacts {
+				if r.Artifacts[i].Path == "REPORT.md" {
+					r.Artifacts[i].Data = []byte("Report\x00text")
+				}
+			}
+		}, "contains NUL", ""},
 		{"different answer", func(_ *Job, r *Result) { r.Answer = "Different unreviewed text." }, "", ""},
 		{"blank answer", func(_ *Job, r *Result) { r.Answer = "" }, "", ""},
-		{"rendered report overflow", func(_ *Job, r *Result) {
+		{"private report may exceed public rendering budget", func(_ *Job, r *Result) {
 			r.Answer = strings.Repeat("a\u0085", 19000)
 			for i := range r.Artifacts {
 				if r.Artifacts[i].Path == "REPORT.md" {
 					r.Artifacts[i].Data = []byte(r.Answer)
 				}
 			}
-		}, "action answer", ""},
+		}, "", ""},
 		{"partial report exact limit", func(_ *Job, r *Result) {
 			r.Answer, r.Calls = "", nil
 			r.Artifacts = []workspace.File{{Path: "REPORT.md", Mode: workspace.Regular, Data: bytes.Repeat([]byte("x"), maxOutputBytes)}}

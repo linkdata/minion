@@ -70,7 +70,7 @@ func readAuditArtifacts(outputDir string, partial bool, secrets ...string) ([]wo
 			}
 			if err == nil && int64(len(data)) > limit {
 				err = errors.New("redacted artifact exceeds byte limit")
-			} else if err == nil && name == "REPORT.md" && !partial && (!publishableAnswer(string(data)) || auditVisibleReport(string(data)) != nil) {
+			} else if err == nil && name == "REPORT.md" && !partial && (!boundedText(string(data), maxOutputBytes) || auditVisibleReport(string(data)) != nil) {
 				err = errors.New("audit REPORT.md is invalid or exceeds result limit")
 			}
 		}
@@ -738,7 +738,10 @@ func auditSourceInventory(source *workspace.Snapshot) (map[string]bool, map[stri
 			lines[file.Path]++
 		}
 	}
-	// shortcut: Omitted mixes head and base links; add head-only link identity before accepting link coverage.
+	for _, name := range source.HeadOmitted {
+		add(name)
+		lines[name] = 0 // Link metadata can be reviewed, but cannot supply a source line citation.
+	}
 	return paths, lines
 }
 

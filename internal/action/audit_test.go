@@ -551,6 +551,19 @@ func TestAuditArtifactReadModesPreserveFailurePolicies(t *testing.T) {
 	}
 }
 
+func TestPrivateAuditReportUsesRawByteLimit(t *testing.T) {
+	report := strings.Repeat("x\n", maxOutputBytes/2)
+	if publishableAnswer(report) {
+		t.Fatal("fixture does not exceed the public rendering budget")
+	}
+	root := t.TempDir()
+	writeFixtureFile(t, root, "REPORT.md", []byte(report))
+	files, diagnostics, err := readAuditArtifacts(root, false)
+	if err != nil || len(diagnostics) != 0 || len(files) != 1 || string(files[0].Data) != report {
+		t.Fatalf("private raw-bounded report rejected: files=%d diagnostics=%v error=%v", len(files), diagnostics, err)
+	}
+}
+
 func TestInvalidUTF8AuditArtifactBoundaries(t *testing.T) {
 	job := testJob(command.SecurityAudit)
 	invalidJSON := []byte{'"', 0xff, '"'}

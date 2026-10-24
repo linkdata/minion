@@ -535,6 +535,8 @@ func TestHTTPResultCannotPublishPrivateRefutation(t *testing.T) {
 		name, private, answer string
 	}{
 		{"whole copy", "PRIVATE_MAIN_REFUTATION_TEXT", "Public reply.\nPRIVATE_MAIN_REFUTATION_TEXT"},
+		{"short whole copy", "Secret abc123", "Secret abc123"},
+		{"audit title quoted newline", "Private objection\nand evidence.", "Audit report\n"},
 		{"rendered quote leader", "> UNIQUE_PRIVATE_PHRASE_STAYS_HERE", "UNIQUE_PRIVATE_PHRASE_STAYS_HERE"},
 		{"Unicode simple fold", "PRIVATE Σ MARKER MUST STAY HERE", "PRIVATE ς MARKER MUST STAY HERE"},
 		{"canonical Unicode composition", "PRIVATE café OBJECTION MUST STAY HERE", "Public reply. PRIVATE cafe\u0301 OBJECTION MUST STAY HERE"},
@@ -549,8 +551,11 @@ func TestHTTPResultCannotPublishPrivateRefutation(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			action := command.Comment
-			if test.name == "HTML entity in Fix Markdown" {
+			switch test.name {
+			case "HTML entity in Fix Markdown":
 				action = command.Fix
+			case "audit title quoted newline":
+				action = command.SecurityAudit
 			}
 			job := withClaudeCritic(testJob(action))
 			f := newExecutionAdapterFixture(t, job)
@@ -562,6 +567,23 @@ func TestHTTPResultCannotPublishPrivateRefutation(t *testing.T) {
 			if action == command.Fix {
 				result.Answer = "Public reply."
 				result.Changes = []workspace.Change{{Path: "README.md", Mode: workspace.Regular, Data: []byte(test.answer)}}
+			} else if action == command.SecurityAudit {
+				result.Artifacts = auditArtifactsFixture(f.job, sourceIdentity(f.job), result.Answer)
+				title, err := json.Marshal(test.private)
+				if err != nil {
+					t.Fatal(err)
+				}
+				findings := strings.Replace(auditCandidateFindingFixture, `"title":"Unverified boundary"`, `"title":`+string(title), 1)
+				ledger := strings.Replace(auditCoveredLedgerFixture, `"status":"covered"`, `"status":"candidate"`, 1)
+				ledger = strings.Replace(ledger, `"result_fingerprints":[]`, `"result_fingerprints":["F"]`, 1)
+				for i := range result.Artifacts {
+					switch result.Artifacts[i].Path {
+					case "findings.json":
+						result.Artifacts[i].Data = []byte(findings)
+					case "coverage-ledger.json":
+						result.Artifacts[i].Data = []byte(ledger)
+					}
+				}
 			}
 			if err := result.Validate(f.job); err != nil {
 				t.Fatal(err)

@@ -26,6 +26,7 @@ func TestExecutorJobCannotMutatePreparedAssignment(t *testing.T) {
 				ChangedPaths: []string{"source.txt"},
 				Repository:   []byte("bundle"),
 				Omitted:      []string{"omitted.txt"},
+				HeadOmitted:  []string{"omitted.txt"},
 			},
 			Main:   RoleSettings{Skills: []string{"main"}, AlwaysOnSkills: []string{"always"}},
 			Critic: &RoleSettings{AlwaysOnSkills: []string{"critic-always"}},
@@ -41,6 +42,7 @@ func TestExecutorJobCannotMutatePreparedAssignment(t *testing.T) {
 	worker.Source.ChangedPaths[0] = "forged.txt"
 	worker.Source.Repository[0] = 'X'
 	worker.Source.Omitted[0] = "forged-omitted.txt"
+	worker.Source.HeadOmitted[0] = "forged-head-link.txt"
 	worker.Main.Skills[0] = "forged-main"
 	worker.Main.AlwaysOnSkills[0] = "forged-always"
 	worker.Critic.AlwaysOnSkills[0] = "forged-critic-always"

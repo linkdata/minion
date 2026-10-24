@@ -6,10 +6,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
@@ -131,6 +133,65 @@ func TestHostileHTTPResultCannotPublishConfiguredProviderKey(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestHostileHTTPFixEntityKeyCannotPublish(t *testing.T) {
+	const key = "fixture-secret"
+	_, _, remote := gitFixtureRemote(t, workspace.File{Path: "source.txt", Mode: workspace.Regular, Data: []byte("source\n")})
+	var writes atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if serveFixFlowFixture(t, w, r) || serveIssueFixture(t, w, r) {
+			return
+		}
+		if r.Method != http.MethodGet {
+			writes.Add(1)
+		}
+		t.Errorf("unexpected GitHub request: %s %s", r.Method, r.URL.Path)
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	usageDir := filepath.Join(t.TempDir(), "usage")
+	e := &Orchestrator{
+		WorkRoot: t.TempDir(), Store: openState(t, time.Now()), Usage: &usage.Store{Dir: usageDir},
+		GitHub: testGitHub(server, "token"), BotLogin: "bot", Runner: Runner{Codex: config.CodexConfig{APIKey: key}},
+		Commands: map[string]config.CommandMapping{"fix": {Action: string(command.Fix), Skills: []string{skills.BuiltinAntiPromptInjection}}},
+	}
+	e.Executor = executorFunc(func(ctx context.Context, job Job, checkpoints Checkpoints) (Result, error) {
+		job.Source.BaseFiles = nil // The issue fix has no base across the HTTP JSON round trip.
+		f := newHTTPServerTest(t, ctx, job, checkpoints, nil)
+		f.pull(t)
+		before := f.call(1)
+		f.ack(t, "/before", before, http.StatusOK, 1)
+		call := before.Checkpoint.Call
+		call.Tokens, call.Complete = usage.Tokens{Input: 3, Output: 2}, true
+		f.ack(t, "/after", httpCall{Sequence: 2, Checkpoint: CallCheckpoint{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head, Call: call}}, http.StatusOK, 2)
+		result := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Safe response.", Calls: []CallUsage{call},
+			Changes: []workspace.Change{{Path: "README.md", Mode: workspace.Regular, Data: []byte("fixture-&#x73;ecret\n")}}}
+		if err := result.Validate(job); err != nil {
+			t.Fatalf("hostile Fix did not reach publication gate: %v", err)
+		}
+		outcome := f.outcome(3, nil)
+		outcome.Result = result
+		f.ack(t, "/outcome", outcome, http.StatusOK, 3)
+		got := f.result(t)
+		return got.result, got.err
+	})
+	request := usageJob()
+	request.Source.UpdatedAt = time.Now()
+	request.Command = command.Command{Name: "fix", Action: command.Fix}
+	request.Repository.Actions = []string{"fix"}
+	err := e.Execute(testActionContext(t), request)
+	if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "configured provider key") || writes.Load() != 0 {
+		t.Fatalf("entity-encoded key crossed publication boundary: error=%v writes=%d", err, writes.Load())
+	}
+	refs, refErr := exec.Command("git", "--git-dir", remote, "for-each-ref", "--format=%(refname)", "refs/heads/minion/").Output()
+	if refErr != nil || len(refs) != 0 {
+		t.Fatalf("hostile Fix pushed a branch: refs=%q error=%v", refs, refErr)
+	}
+	records, err := usage.ReadAll(usageDir)
+	if err != nil || len(records) != 1 || records[0].Status != "failed" || records[0].Tokens != (usage.Tokens{Input: 3, Output: 2}) {
+		t.Fatalf("private failed-usage evidence missing: records=%+v error=%v", records, err)
 	}
 }
 

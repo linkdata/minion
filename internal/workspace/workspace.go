@@ -54,6 +54,7 @@ type Snapshot struct {
 	ChangedPaths   []string `json:"changed_paths,omitempty"`
 	Repository     []byte   `json:"repository"`
 	Omitted        []string `json:"omitted,omitempty"`
+	HeadOmitted    []string `json:"head_omitted,omitempty"`
 }
 
 func ValidPath(name string) bool {
@@ -136,7 +137,7 @@ func ValidateSnapshot(s Snapshot) error {
 	if s.Base == "" && (len(s.Diff) != 0 || len(s.BaseFiles) != 0 || s.DiffIncomplete || len(s.ChangedPaths) != 0) {
 		return errors.New("snapshot context lacks source identity")
 	}
-	if len(s.Diff) > MaxContextBytes || len(s.Repository) > MaxBytes || len(s.Omitted) > MaxFiles {
+	if len(s.Diff) > MaxContextBytes || len(s.Repository) > MaxBytes || len(s.Omitted) > MaxFiles || len(s.HeadOmitted) > MaxFiles {
 		return errors.New("snapshot context exceeds limits")
 	}
 	total := 0
@@ -153,6 +154,28 @@ func ValidateSnapshot(s Snapshot) error {
 	}
 	if name, invalid := invalidSourcePath(s.Omitted); invalid {
 		return fmt.Errorf("invalid omitted source path %q", name)
+	}
+	if len(s.HeadOmitted) != 0 {
+		if name, invalid := invalidSourcePath(s.HeadOmitted); invalid {
+			return fmt.Errorf("invalid head omitted source path %q", name)
+		}
+		omitted := make(map[string]bool, len(s.Omitted))
+		for _, name := range s.Omitted {
+			omitted[name] = true
+		}
+		paths := make([]string, 0, len(s.Files)+len(s.HeadOmitted))
+		for _, file := range s.Files {
+			paths = append(paths, file.Path)
+		}
+		for _, name := range s.HeadOmitted {
+			if !omitted[name] {
+				return fmt.Errorf("head omitted source path %q is not omitted", name)
+			}
+			paths = append(paths, name)
+		}
+		if err := validatePaths(paths, false); err != nil {
+			return err
+		}
 	}
 	if s.Base == "" && len(s.Omitted) != 0 {
 		paths := make([]string, 0, len(s.Files)+len(s.Omitted))

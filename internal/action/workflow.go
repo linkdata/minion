@@ -99,6 +99,7 @@ func cloneJobForExecutor(job Job) Job {
 	job.Source.ChangedPaths = slices.Clone(job.Source.ChangedPaths)
 	job.Source.Repository = slices.Clone(job.Source.Repository)
 	job.Source.Omitted = slices.Clone(job.Source.Omitted)
+	job.Source.HeadOmitted = slices.Clone(job.Source.HeadOmitted)
 	job.Main.Skills = slices.Clone(job.Main.Skills)
 	job.Main.AlwaysOnSkills = slices.Clone(job.Main.AlwaysOnSkills)
 	if job.Critic != nil {

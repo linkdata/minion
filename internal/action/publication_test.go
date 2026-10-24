@@ -274,6 +274,61 @@ func TestPublishedRefutationsCheckOnlyActualPublication(t *testing.T) {
 	}
 }
 
+func TestPublishedRefutationsRejectShortWholeReply(t *testing.T) {
+	job := withClaudeCritic(testJob(command.Comment))
+	job.CriticMaxRounds = 2
+	result := privateReviewResult(job)
+	result.Refutations[0].Text = "Secret abc123"
+	result.Answer = result.Refutations[0].Text
+	for _, capped := range []bool{false, true} {
+		if capped {
+			result.CriticStopReason = "round_cap"
+			result.Calls[len(result.Calls)-1].Approved = false
+		}
+		if err := result.Validate(job); err != nil {
+			t.Fatal(err)
+		}
+		projected, err := projectPublication(job, result)
+		if err != nil || rejectPublishedRefutations(job, result, projected) == nil {
+			t.Fatalf("short whole refutation reached public reply (capped=%t): %v", capped, err)
+		}
+	}
+}
+
+func TestPublishedRefutationsRejectAuditQuotedTitle(t *testing.T) {
+	job := withClaudeCritic(testJob(command.SecurityAudit))
+	result := privateReviewResult(job)
+	result.Refutations[0].Text = "Private objection\nand evidence."
+	result.Answer = "Audit report\n"
+	result.Artifacts = auditArtifactsFixture(job, sourceIdentity(job), result.Answer)
+	title, err := json.Marshal(result.Refutations[0].Text)
+	if err != nil {
+		t.Fatal(err)
+	}
+	findings := strings.Replace(auditCandidateFindingFixture, `"title":"Unverified boundary"`, `"title":`+string(title), 1)
+	ledger := strings.Replace(auditCoveredLedgerFixture, `"status":"covered"`, `"status":"candidate"`, 1)
+	ledger = strings.Replace(ledger, `"result_fingerprints":[]`, `"result_fingerprints":["F"]`, 1)
+	for i := range result.Artifacts {
+		switch result.Artifacts[i].Path {
+		case "findings.json":
+			result.Artifacts[i].Data = []byte(findings)
+		case "coverage-ledger.json":
+			result.Artifacts[i].Data = []byte(ledger)
+		}
+	}
+	if err := result.Validate(job); err != nil {
+		t.Fatal(err)
+	}
+	projected, err := projectPublication(job, result)
+	if err != nil || !strings.Contains(projected.answer, `Private objection\nand evidence.`) || rejectPublishedRefutations(job, result, projected) == nil {
+		t.Fatalf("quoted audit title reached public reply: %q, %v", projected.answer, err)
+	}
+	result.Refutations[0].Text = "F"
+	if err := rejectPublishedRefutations(job, result, projected); err != nil {
+		t.Fatalf("short generic fingerprint matched an unrelated refutation: %v", err)
+	}
+}
+
 func TestPublishedRefutationsFixAllowsQuotedSourceButRejectsNewCopy(t *testing.T) {
 	const quoted = "Existing source quote remains unchanged."
 	const private = "This private reviewer conclusion must remain unpublished."

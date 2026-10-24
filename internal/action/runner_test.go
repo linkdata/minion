@@ -95,6 +95,8 @@ func TestReviewContextPreservesDistinctRevisionIdentities(t *testing.T) {
 	job.Source.Head = strings.Repeat("a", 40)
 	job.Source.Base = strings.Repeat("b", 40)
 	job.Source.MergeBase = strings.Repeat("c", 40)
+	job.Source.Omitted = []string{"base-link", "head-link"}
+	job.Source.HeadOmitted = []string{"head-link"}
 	root := t.TempDir()
 	if err := materializeContext(root, job.Source); err != nil {
 		t.Fatal(err)
@@ -104,11 +106,13 @@ func TestReviewContextPreservesDistinctRevisionIdentities(t *testing.T) {
 		t.Fatal(err)
 	}
 	var metadata struct {
-		Head      string
-		Base      string
-		MergeBase string `json:"merge_base"`
+		Head        string
+		Base        string
+		MergeBase   string   `json:"merge_base"`
+		Omitted     []string `json:"omitted"`
+		HeadOmitted []string `json:"head_omitted"`
 	}
-	if err := json.Unmarshal(data, &metadata); err != nil || metadata.Head != job.Source.Head || metadata.Base != job.Source.Base || metadata.MergeBase != job.Source.MergeBase {
+	if err := json.Unmarshal(data, &metadata); err != nil || metadata.Head != job.Source.Head || metadata.Base != job.Source.Base || metadata.MergeBase != job.Source.MergeBase || !slices.Equal(metadata.Omitted, job.Source.Omitted) || !slices.Equal(metadata.HeadOmitted, job.Source.HeadOmitted) {
 		t.Fatalf("revision identity projection: %s, %v", data, err)
 	}
 	prompt, err := actionPrompt(context.Background(), job, "/source", root, "", "")

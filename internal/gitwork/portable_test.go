@@ -296,8 +296,8 @@ func TestSnapshotPreservesOmittedPathSpellingsAcrossRevisions(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot, err := checkout.Snapshot(context.Background())
-	if err != nil || len(snapshot.Omitted) != 2 || snapshot.Omitted[0] != "docs" || snapshot.Omitted[1] != "Docs" {
-		t.Fatalf("omitted=%v error=%v", snapshot.Omitted, err)
+	if err != nil || len(snapshot.Omitted) != 2 || snapshot.Omitted[0] != "docs" || snapshot.Omitted[1] != "Docs" || len(snapshot.HeadOmitted) != 1 || snapshot.HeadOmitted[0] != "docs" {
+		t.Fatalf("omitted=%v head=%v error=%v", snapshot.Omitted, snapshot.HeadOmitted, err)
 	}
 }
 
