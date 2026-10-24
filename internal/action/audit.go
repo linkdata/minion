@@ -425,13 +425,13 @@ func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes []byte, sourc
 		return errors.New("audit findings.json exceeds 1000 findings")
 	}
 	sourcePaths, sourceLines := auditSourceInventory(source)
-	final := make(map[string]bool, len(findings))
+	final := make(map[string]string, len(findings))
 	findingPaths := make(map[string]map[string]bool, len(findings))
 	for _, finding := range findings {
 		if strings.TrimSpace(finding.Fingerprint) == "" {
 			return errors.New("audit findings.json has an empty fingerprint")
 		}
-		if final[finding.Fingerprint] {
+		if final[finding.Fingerprint] != "" {
 			return errors.New("audit findings.json has duplicate fingerprint")
 		}
 		if finding.Verdict != "confirmed" && finding.Verdict != "needs_validation" && finding.Verdict != "rejected" ||
@@ -496,13 +496,13 @@ func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes []byte, sourc
 			}
 			citedPaths[evidence.File] = true
 		}
-		final[finding.Fingerprint] = true
+		final[finding.Fingerprint] = finding.Verdict
 		findingPaths[finding.Fingerprint] = citedPaths
 	}
-	candidates := make(map[string]bool)
+	candidateApplicability := make(map[string]bool)
 	checkedCitations := make(map[string]map[string]map[string]bool)
 	candidateOwners := make(map[string]map[string]bool)
-	checkCandidate := func(e auditCoverageEvidence) error {
+	checkCandidate := func(e auditCoverageEvidence, applicable bool) error {
 		if len(e.ResultFingerprints) == 0 {
 			return errors.New("audit coverage-ledger.json has candidate without fingerprint")
 		}
@@ -516,9 +516,12 @@ func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes []byte, sourc
 			if strings.TrimSpace(fingerprint) == "" {
 				return errors.New("audit coverage-ledger.json has candidate without fingerprint")
 			}
-			candidates[fingerprint] = true
-			if !final[fingerprint] {
+			if final[fingerprint] == "" {
 				return errors.New("audit coverage-ledger.json has a candidate without final finding")
+			}
+			candidateApplicability[fingerprint] = candidateApplicability[fingerprint] || applicable
+			if !applicable && final[fingerprint] != "rejected" {
+				continue
 			}
 			if candidateOwners[fingerprint] == nil {
 				candidateOwners[fingerprint] = make(map[string]bool)
@@ -564,13 +567,13 @@ func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes []byte, sourc
 				return errors.New("audit coverage-ledger.json has invalid attempt status")
 			}
 			if attempt.Status == "candidate" {
-				if err := checkCandidate(attempt); err != nil {
+				if err := checkCandidate(attempt, unit.Status != "not_applicable"); err != nil {
 					return err
 				}
 			}
 		}
 		if unit.Status == "candidate" {
-			if err := checkCandidate(unit.auditCoverageEvidence); err != nil {
+			if err := checkCandidate(unit.auditCoverageEvidence, true); err != nil {
 				return err
 			}
 		}
@@ -696,9 +699,13 @@ func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes []byte, sourc
 	if !reviewedCoverage {
 		return errors.New("audit coverage-ledger.json declares no reviewed coverage")
 	}
-	for fingerprint := range final {
-		if !candidates[fingerprint] {
+	for fingerprint, verdict := range final {
+		applicable, found := candidateApplicability[fingerprint]
+		if !found {
 			return errors.New("audit findings.json has a finding without candidate")
+		}
+		if verdict != "rejected" && !applicable {
+			return errors.New("audit findings.json has a finding without applicable candidate")
 		}
 		verified := false
 		for agentID, paths := range checkedCitations[fingerprint] {

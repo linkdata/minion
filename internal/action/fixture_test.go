@@ -503,6 +503,13 @@ func auditCoveredAndOutOfScopeLedgerFixture() string {
 	return "[" + strings.Trim(auditCoveredLedgerFixture, "[]") + "," + strings.Trim(excluded, "[]") + "]"
 }
 
+func auditArchivedCandidateNotApplicableLedgerFixture() string {
+	const archived = `{"wave":1,"status":"candidate","agent_id":"older","reviewed_paths":["source.txt"],"local_checks":[{"agent_id":"helper","reviewed_paths":["source.txt"],"invariant":"Access is checked","method":"source","result":"The guard is present","artifact":null},{"agent_id":"older","reviewed_paths":["source.txt"],"invariant":"Access is checked","method":"source","result":"The guard is present","artifact":null}],"result_fingerprints":["F"],"unresolved":[],"reassignment_reason":"Rechecked"}`
+	ledger := strings.Replace(auditCoveredAndOutOfScopeLedgerFixture(), `"status":"out_of_scope"`, `"status":"not_applicable"`, 1)
+	ledger = strings.Replace(ledger, `"attempts":[],"wave":1,"status":"not_applicable"`, `"attempts":[`+archived+`],"wave":2,"status":"not_applicable"`, 1)
+	return strings.Replace(ledger, `"unresolved":["Out of scope"]`, `"unresolved":["No longer applicable"]`, 1)
+}
+
 func auditArchivedCoveredBlockedLedgerFixture() string {
 	const archived = `{"wave":1,"status":"covered","agent_id":"older","reviewed_paths":["source.txt"],"local_checks":[{"agent_id":"helper","reviewed_paths":["source.txt"],"invariant":"Access is checked","method":"source","result":"The guard is present","artifact":null},{"agent_id":"older","reviewed_paths":["source.txt"],"invariant":"Access is checked","method":"source","result":"The guard is present","artifact":null}],"result_fingerprints":[],"unresolved":[],"reassignment_reason":"Rechecked"}`
 	ledger := strings.Replace(auditCoveredLedgerFixture, `"attempts":[]`, `"attempts":[`+archived+`]`, 1)

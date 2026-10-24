@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -20,6 +21,59 @@ import (
 	"github.com/linkdata/minion/internal/usage"
 	"github.com/linkdata/minion/internal/workspace"
 )
+
+func TestHostileHTTPReviewCannotRetainConfiguredProviderKey(t *testing.T) {
+	const key = "fixture-claude-secret"
+	owner := newExecutionAdapterFixture(t, withClaudeCritic(testJob(command.Comment)))
+	owner.owner.Runner.Claude.APIKey = key
+	f := newHTTPServerTest(t, t.Context(), owner.job, owner.sink, nil)
+	f.pull(t)
+	result := privateReviewResult(owner.job)
+	result.Refutations[0].Text = "private fixture-claude-&#x73;ecret"
+	sequence := uint64(1)
+	f.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: owner.review(nil, nil, "")}, http.StatusOK, sequence)
+	sequence++
+	for i, call := range result.Calls[:3] {
+		f.ack(t, "/before", httpCall{Sequence: sequence, Checkpoint: owner.call(callMetadata(call))}, http.StatusOK, sequence)
+		sequence++
+		f.ack(t, "/after", httpCall{Sequence: sequence, Checkpoint: owner.call(call)}, http.StatusOK, sequence)
+		sequence++
+		var refs []Refutation
+		if i == 2 {
+			refs = result.Refutations
+		}
+		status := http.StatusOK
+		if i == 2 {
+			status = http.StatusInternalServerError
+		}
+		ack := f.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: owner.review(result.Calls[:i+1], refs, "")}, status, sequence)
+		if i == 2 && (ack.Failure == nil || !errors.Is(ack.Failure.err(), monitor.ErrTerminalJob) || strings.Contains(ack.Failure.err().Error(), key) || strings.Contains(ack.Failure.err().Error(), "&#x73;ecret")) {
+			t.Fatalf("key-bearing review was acknowledged or echoed: %+v", ack)
+		}
+		sequence++
+	}
+	path := filepath.Join(owner.owner.WorkRoot, "reviews", owner.job.Identity.AttemptID+".json")
+	data, err := os.ReadFile(path)
+	if err != nil || containsConfiguredKey(data, key) {
+		t.Fatalf("rejected review reached durable checkpoint: error=%v", err)
+	}
+	if saved := readPrivateReview(t, owner.owner.WorkRoot); !slices.Equal(saved.Calls, result.Calls[:2]) || len(saved.Refutations) != 0 {
+		t.Fatalf("rejected review replaced accepted prefix: %+v", saved)
+	}
+	outcome := f.outcome(sequence, errors.New("worker stopped after rejected review"))
+	outcome.Result = Result{Version: owner.job.Version, Identity: owner.job.Identity, SourceRef: owner.job.Source.Head, Calls: result.Calls[:3]}
+	f.ack(t, "/outcome", outcome, http.StatusOK, sequence)
+	got := f.result(t)
+	if err := owner.sink.finish(got.result, got.err); !errors.Is(err, monitor.ErrTerminalJob) || strings.Contains(err.Error(), key) || strings.Contains(err.Error(), "&#x73;ecret") {
+		t.Fatalf("rejected review escaped final error: %v", err)
+	}
+	if err := owner.owner.retainReviewEvidence(owner.job, owner.sink.failureEvidence()); err != nil {
+		t.Fatal(err)
+	}
+	if saved := readPrivateReview(t, owner.owner.WorkRoot); len(saved.Calls) != 3 || len(saved.Refutations) != 0 || saved.CriticStopReason != "" {
+		t.Fatalf("failed outcome lost accepted call prefix: %+v", saved)
+	}
+}
 
 func TestHostileHTTPResultCannotPublishConfiguredProviderKey(t *testing.T) {
 	const codexKey = "fixture-codex-secret"

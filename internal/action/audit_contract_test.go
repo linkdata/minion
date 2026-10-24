@@ -54,6 +54,24 @@ func TestCompleteAuditResultValidatesCoverage(t *testing.T) {
 	incompleteArchive = strings.Replace(incompleteArchive, `"wave":1,"status":"covered","agent_id":"hunter"`, `"wave":2,"status":"covered","agent_id":"hunter"`, 1)
 	selfCheckedCandidate := strings.Replace(confirmedLedger, `"local_checks":[{"agent_id":"verifier"`, `"local_checks":[{"agent_id":"hunter"`, 1)
 	rejectedFinding := `[{"verdict":"rejected","fingerprint":"F","title":"Guard bypass refuted","description":"The alleged bypass does not reach the operation.","claimed_root_cause":"The guard was claimed to be absent.","trace":[{"kind":"entrypoint","file":"source.txt","line":1,"scope":"source","description":"The request reaches the guard."}],"evidence":[{"file":"source.txt","line":1,"description":"The guard executes before the operation."}],"reason":"The request is stopped by the guard."}]`
+	archivedNotApplicable := auditArchivedCandidateNotApplicableLedgerFixture()
+	applicableCandidate := strings.Replace(archivedNotApplicable, `"status":"covered"`, `"status":"candidate"`, 1)
+	applicableCandidate = strings.Replace(applicableCandidate, `"result_fingerprints":[]`, `"result_fingerprints":["F"]`, 1)
+	for _, test := range []struct {
+		name, ledger, findings, want string
+	}{
+		{"needs validation from excluded archive", archivedNotApplicable, auditCandidateFindingFixture, "without applicable candidate"},
+		{"confirmed from excluded archive", archivedNotApplicable, auditConfirmedFindingFixture, "without applicable candidate"},
+		{"rejected from excluded archive", archivedNotApplicable, rejectedFinding, ""},
+		{"active finding with another applicable candidate", applicableCandidate, auditCandidateFindingFixture, ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateAuditCoverage([]byte(test.ledger), []byte(test.findings), []byte("Audit report"), nil)
+			if test.want == "" && err != nil || test.want != "" && (err == nil || !strings.Contains(err.Error(), test.want)) {
+				t.Fatalf("validateAuditCoverage() = %v; want %q", err, test.want)
+			}
+		})
+	}
 	withContext := strings.Replace(validLedger, `"ordinary_attack_class_block":null`, `"ordinary_attack_class_block":"The ordinary attack path is covered."`, 1)
 	withContext = strings.Replace(withContext, `"selected_companion_blocks":[]`, `"selected_companion_blocks":["Companion A"]`, 1)
 	withContext = strings.Replace(withContext, `"excluded_blocks":[]`, `"excluded_blocks":[{"block":"Companion B","reason":"Outside this boundary."}]`, 1)

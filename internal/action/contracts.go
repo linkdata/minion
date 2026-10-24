@@ -258,8 +258,8 @@ func (j Job) rounds() int {
 
 func sourceIdentity(j Job) string { return j.Identity.Repository + "@" + j.Source.Head }
 
-// Validate checks a Status and its Job. Transport ordering, authentication,
-// and log acknowledgements belong to the orchestrator receiver.
+// Validate checks a Status and its Job. Transport ordering and log acknowledgements
+// belong to the orchestrator receiver; remote authentication is not implemented.
 func (s Status) Validate(j Job) error {
 	if err := j.Validate(); err != nil {
 		return err

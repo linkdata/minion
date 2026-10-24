@@ -38,9 +38,9 @@ func TestHostileHTTPAuditSchemaCannotPublish(t *testing.T) {
 	reservedBudgetBlocked := strings.Replace(budgetBlocked, "validation_budget_exhausted", "budget_cannot_reserve_critics_and_validation", 1)
 	excludedLedger := auditOutOfScopeLedgerFixture()
 	for _, test := range []struct {
-		name, artifact, data, findings, want string
-		candidate, incompleteReason          bool
-		sourceData                           []byte
+		name, artifact, data, findings, want        string
+		candidate, incompleteReason, retainEvidence bool
+		sourceData                                  []byte
 	}{
 		{name: "directory-only review cannot claim coverage", artifact: "coverage-ledger.json", data: strings.ReplaceAll(auditCoveredLedgerFixture, "source.txt", "src"), want: "starting path without a declared reviewed file"},
 		{name: "blocked-only ledger has no reviewed coverage", artifact: "coverage-ledger.json", data: blockedLedger, want: "no reviewed coverage"},
@@ -71,6 +71,7 @@ func TestHostileHTTPAuditSchemaCannotPublish(t *testing.T) {
 		{name: "candidate without owner check", artifact: "coverage-ledger.json", data: ownerless, findings: auditCandidateFindingFixture, want: "lacks assigned owner's local check", candidate: true},
 		{name: "candidate without verifier", artifact: "coverage-ledger.json", data: selfChecked, findings: auditCandidateFindingFixture, want: "without separately attributed source check"},
 		{name: "archived candidate without verifier", artifact: "coverage-ledger.json", data: archivedSelf, findings: auditCandidateFindingFixture, want: "without separately attributed source check"},
+		{name: "archived candidate in not applicable unit", artifact: "coverage-ledger.json", data: auditArchivedCandidateNotApplicableLedgerFixture(), findings: auditCandidateFindingFixture, want: "without applicable candidate", retainEvidence: true},
 		{name: "prior run unsupported", artifact: "coverage-ledger.json", data: strings.Replace(auditCoveredLedgerFixture, `"prior_status":"none"`, `"prior_status":"prior_confirmed_same_source"`, 1), want: "prior run absent from metadata"},
 		{name: "audit JSON nesting exceeds decoder limit", artifact: "run-metadata.json", data: strings.Repeat("[", 10_001) + "0" + strings.Repeat("]", 10_001), want: "audit JSON is invalid"},
 		{name: "complete metadata has incomplete reason", incompleteReason: true, want: "incomplete reason"},
@@ -176,6 +177,14 @@ func TestHostileHTTPAuditSchemaCannotPublish(t *testing.T) {
 			marker, err := os.ReadFile(filepath.Join(incomplete[0], "INCOMPLETE.txt"))
 			if err != nil || !strings.Contains(string(marker), "must not be published") {
 				t.Fatalf("private failure marker missing: %q error=%v", marker, err)
+			}
+			if test.retainEvidence {
+				for path, want := range map[string]string{"coverage-ledger.json": test.data, "findings.json": test.findings} {
+					data, err := os.ReadFile(filepath.Join(incomplete[0], path))
+					if err != nil || string(data) != want {
+						t.Fatalf("incomplete audit lost %s: bytes=%d error=%v", path, len(data), err)
+					}
+				}
 			}
 		})
 	}
