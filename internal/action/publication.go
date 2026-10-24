@@ -101,6 +101,10 @@ func auditPublicSummary(artifacts []workspace.File) (string, error) {
 		} else {
 			fmt.Fprintf(&summary, "\nNeeds validation fingerprint=%q title=%q source=%q:%.0f", finding.Fingerprint, finding.Title, finding.Trace[0].File, finding.Trace[0].Line)
 		}
+		if len(finding.Trace) > 1 {
+			sink := finding.Trace[len(finding.Trace)-1]
+			fmt.Fprintf(&summary, " sink=%q:%.0f", sink.File, sink.Line)
+		}
 	}
 	return summary.String(), nil
 }

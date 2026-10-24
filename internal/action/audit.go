@@ -16,7 +16,6 @@ import (
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/processgroup"
-	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -872,27 +871,6 @@ func validAuditCoverageAgent(agent string) bool {
 	return strings.Trim(agent, "abcdefghijklmnopqrstuvwxyz0123456789_-") == ""
 }
 
-func auditSkillSource(role RoleSettings) string {
-	for _, sources := range [][]string{role.Skills, role.AlwaysOnSkills} {
-		for _, source := range sources {
-			if name, err := skills.Name(source); err == nil && name == "security-audit" {
-				return source
-			}
-		}
-	}
-	return ""
-}
-
-func validateAuditSkillSource(metadataBytes []byte, expected string) error {
-	var metadata struct {
-		SkillSource string `json:"skill_source"`
-	}
-	if err := json.Unmarshal(metadataBytes, &metadata); err != nil || expected == "" || metadata.SkillSource != expected {
-		return errors.New("audit metadata has unexpected skill source")
-	}
-	return nil
-}
-
 func validateAuditMetadata(metadataBytes []byte, repo, target, head string) ([]string, error) {
 	if err := rejectDuplicateAuditJSONKeys(metadataBytes); err != nil {
 		return nil, err
@@ -919,7 +897,7 @@ func validateAuditMetadata(metadataBytes []byte, repo, target, head string) ([]s
 		return nil, fmt.Errorf("decode audit metadata fields: %w", err)
 	}
 	for name := range fields {
-		for _, canonical := range []string{"run_id", "repo", "target", "source_ref", "profile", "scope_paths", "budget", "selected_companion_files", "prior_run_paths", "shared_file_owners", "execution_policy", "run_status", "incomplete_reason", "skill_source"} {
+		for _, canonical := range []string{"run_id", "repo", "target", "source_ref", "profile", "scope_paths", "budget", "selected_companion_files", "prior_run_paths", "shared_file_owners", "execution_policy", "run_status", "incomplete_reason"} {
 			if name != canonical && strings.EqualFold(name, canonical) {
 				return nil, fmt.Errorf("audit metadata uses noncanonical key %q", name)
 			}

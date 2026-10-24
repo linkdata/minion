@@ -200,6 +200,19 @@ func TestAuditPublicSummaryQuotesFindingText(t *testing.T) {
 	}
 }
 
+func TestAuditPublicSummaryIncludesSink(t *testing.T) {
+	findings := strings.Replace(auditConfirmedFindingFixture,
+		`"description":"Attacker input reaches the operation."}]`,
+		`"description":"Attacker input reaches the operation."},{"kind":"sink","file":"sink.go","line":2,"scope":"source","description":"The write occurs."}]`, 1)
+	answer, err := auditPublicSummary([]workspace.File{
+		{Path: "findings.json", Data: []byte(findings)},
+		{Path: "coverage-ledger.json", Data: []byte(auditCoveredLedgerFixture)},
+	})
+	if err != nil || !strings.Contains(answer, `source="source.txt":1 sink="sink.go":2`) {
+		t.Fatalf("public summary omitted the cited sink: %q, error=%v", answer, err)
+	}
+}
+
 func TestProjectPublicationNormalAndChangedFix(t *testing.T) {
 	job := withClaudeCritic(testJob(command.Fix))
 	job.CriticMaxRounds = 2

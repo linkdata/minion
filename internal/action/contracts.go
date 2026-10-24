@@ -342,7 +342,7 @@ func (r Result) validate(j Job, complete bool) error {
 	if j.Action == command.SecurityAudit {
 		validAnswer = boundedText(r.Answer, maxOutputBytes)
 	}
-	invalidCompleteAnswer := complete && (!validAnswer || (requiresAnswer && strings.TrimSpace(r.Answer) == ""))
+	invalidCompleteAnswer := complete && (!validAnswer || (requiresAnswer && !auditVisibleText(r.Answer)))
 	if (!complete && !boundedText(r.Answer, maxOutputBytes)) || invalidCompleteAnswer {
 		return errors.New("action answer is blank, invalid or exceeds limit")
 	}
@@ -497,9 +497,6 @@ func validateResultArtifacts(j Job, files []workspace.File, complete bool) error
 	}
 	companions, err := validateAuditMetadata(seen["run-metadata.json"], j.Identity.Repository, sourceIdentity(j), j.Source.Head)
 	if err != nil {
-		return err
-	}
-	if err := validateAuditSkillSource(seen["run-metadata.json"], auditSkillSource(j.Main)); err != nil {
 		return err
 	}
 	if err := validateAuditCoverage(seen["coverage-ledger.json"], seen["findings.json"], seen["REPORT.md"], &j.Source); err != nil {

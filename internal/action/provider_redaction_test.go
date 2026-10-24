@@ -148,36 +148,6 @@ func TestAuditReportRedactsNULSplitConfiguredKeyBeforeCriticAndPublication(t *te
 	}
 }
 
-func TestAuditRejectsConfiguredKeyInNormalizedSkillSource(t *testing.T) {
-	const key = "fixture-source-key"
-	skillURL := "https://github.com/example/" + key + "/tree/main/skills/security-audit"
-	installActionTestSkills(t, skillURL)
-	fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
-	job := testJob(command.SecurityAudit)
-	job.Main.Skills = []string{skillURL}
-	runner := Runner{WorkRoot: t.TempDir(), Claude: config.ClaudeConfig{APIKey: key}, runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
-		for _, file := range auditArtifactsFixture(job, request.dir, "Audit report\n") {
-			writeFixtureFile(t, request.outputDir, file.Path, file.Data)
-		}
-		return aicli.Result{Answer: "Model summary"}, nil
-	}}
-	result, err := runner.Run(context.Background(), job)
-	if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "normalized audit metadata contains a configured provider key") || result.Answer != "" || len(result.Artifacts) != len(auditArtifacts)-1 {
-		t.Fatalf("normalized skill source accepted: %+v, %v", result, err)
-	}
-	for _, file := range result.Artifacts {
-		if file.Path == "run-metadata.json" || strings.Contains(string(file.Data), key) {
-			t.Fatalf("private partial audit retained configured key: %s", file.Path)
-		}
-	}
-	for _, diagnostic := range result.Diagnostics {
-		if diagnostic.Code == "artifact_metadata_invalid" {
-			return
-		}
-	}
-	t.Fatalf("partial audit lacks metadata diagnostic: %+v", result.Diagnostics)
-}
-
 func TestPartialAuditDropsMetadataWhenNormalizedTargetContainsKey(t *testing.T) {
 	job := auditRunnerJob(t)
 	key := job.Identity.Repository

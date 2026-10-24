@@ -97,24 +97,3 @@ func TestCompleteAuditClaimsBindToCurrentSource(t *testing.T) {
 		})
 	}
 }
-
-func TestCompleteAuditSkillSourceMatchesJob(t *testing.T) {
-	job := testJob(command.SecurityAudit)
-	for _, test := range []struct{ name, replacement string }{
-		{name: "missing"},
-		{name: "forged", replacement: `,"skill_source":"https://github.com/other/skill/tree/main/skills/security-audit"`},
-		{name: "case variant", replacement: `,"SKILL_SOURCE":"` + testAuditSkillURL + `"`},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			result := completeAuditResult(job)
-			for i := range result.Artifacts {
-				if result.Artifacts[i].Path == "run-metadata.json" {
-					result.Artifacts[i].Data = []byte(strings.Replace(string(result.Artifacts[i].Data), `,"skill_source":"`+testAuditSkillURL+`"`, test.replacement, 1))
-				}
-			}
-			if err := result.Validate(job); err == nil || !strings.Contains(err.Error(), "skill source") && !strings.Contains(err.Error(), "noncanonical key") {
-				t.Fatalf("forged skill provenance passed: %v", err)
-			}
-		})
-	}
-}

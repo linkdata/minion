@@ -29,6 +29,7 @@ func TestExecuteRejectsHostileHTTPOutcomeBeforePublication(t *testing.T) {
 	}{
 		{"unacknowledged call and foreign bindings", "missing call", false, true},
 		{"missing model evidence", "no evidence", false, false},
+		{"invisible answer", "invisible answer", false, false},
 		{"changed acknowledged usage", "usage", false, true},
 		{"changed acknowledged refutation", "refutation", true, true},
 		{"changed acknowledged decision", "decision", true, false},
@@ -157,6 +158,8 @@ func TestExecuteRejectsHostileHTTPOutcomeBeforePublication(t *testing.T) {
 					outcome.Failure = newHTTPFailure(errors.New("worker stopped after paid call"))
 				case "changes":
 					outcome.Result.Changes = []workspace.Change{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("forged\n")}}
+				case "invisible answer":
+					outcome.Result.Answer = "\u200b\u2060"
 				case "audit":
 					outcome.Result.Artifacts = auditArtifactsFixture(job, sourceIdentity(job), "")
 				case "audit coverage":
@@ -178,7 +181,7 @@ func TestExecuteRejectsHostileHTTPOutcomeBeforePublication(t *testing.T) {
 					t.Fatalf("hostile result failed the wire shape before parent validation: %v", err)
 				}
 				validationErr := outcome.Result.Validate(job)
-				if (validationErr == nil) != scenario.validResult || scenario.change == "audit" && !strings.Contains(validationErr.Error(), "REPORT.md") || (scenario.change == "audit coverage" || scenario.change == "audit false covered") && !strings.Contains(validationErr.Error(), "coverage-ledger.json") || scenario.change == "changes" && !strings.Contains(validationErr.Error(), "read-only action returned source changes") {
+				if (validationErr == nil) != scenario.validResult || scenario.change == "audit" && !strings.Contains(validationErr.Error(), "REPORT.md") || (scenario.change == "audit coverage" || scenario.change == "audit false covered") && !strings.Contains(validationErr.Error(), "coverage-ledger.json") || scenario.change == "changes" && !strings.Contains(validationErr.Error(), "read-only action returned source changes") || scenario.change == "invisible answer" && !strings.Contains(validationErr.Error(), "action answer") {
 					t.Fatalf("hostile result semantic fixture changed: %v", validationErr)
 				}
 				f.ack(t, "/outcome", outcome, http.StatusOK, sequence)

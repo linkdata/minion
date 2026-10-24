@@ -172,7 +172,11 @@ func TestCappedPublicationRefusesInvalidRawResultAndProjectionOverflow(t *testin
 				}
 				if failure == "invalid raw" {
 					if action == command.SecurityAudit {
-						result.Answer = "Different unreviewed audit body"
+						for i := range result.Artifacts {
+							if result.Artifacts[i].Path == "REPORT.md" {
+								result.Artifacts[i].Data = []byte("Invalid\x00report")
+							}
+						}
 					} else {
 						result.Answer = ""
 					}
@@ -196,6 +200,9 @@ func TestCappedPublicationRefusesInvalidRawResultAndProjectionOverflow(t *testin
 				}
 				if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), wantError) || writes != 0 {
 					t.Fatalf("invalid cap became publishable or changed cause: %v writes=%d", err, writes)
+				}
+				if action == command.SecurityAudit && failure == "invalid raw" && !strings.Contains(err.Error(), "contains NUL") {
+					t.Fatalf("invalid audit artifact did not reach the raw result gate: %v", err)
 				}
 				if entries, err := os.ReadDir(filepath.Join(root, "audits")); err == nil {
 					for _, entry := range entries {

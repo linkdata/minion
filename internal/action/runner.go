@@ -728,9 +728,6 @@ func normalizeAuditArtifacts(files []workspace.File, job Job, skill string, secr
 				}
 				metadata["selected_companion_files"], _ = json.Marshal(companions)
 			}
-			if source := auditSkillSource(job.Main); source != "" {
-				metadata["skill_source"], _ = json.Marshal(source)
-			}
 			data, err := json.Marshal(metadata)
 			if err != nil {
 				return nil, err

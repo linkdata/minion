@@ -30,7 +30,7 @@ func TestHostileHTTPResultCannotPublishConfiguredProviderKey(t *testing.T) {
 	}{
 		{name: "answer with other provider key", content: "public " + claudeKey},
 		{name: "encoded answer key", content: `public fixture-claude-\u0073ecret`},
-		{name: "audit mixed safe and NUL-split artifact", content: "public fixture-codex-\x00secret", audit: true},
+		{name: "audit mixed safe and HTML-entity artifact", content: "public fixture-codex-&#x73;ecret", audit: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.audit {

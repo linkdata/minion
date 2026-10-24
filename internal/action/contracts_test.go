@@ -574,6 +574,7 @@ func TestPortableContractsRejectMismatches(t *testing.T) {
 		{"source", "action result version, identity or source differs from job", func(r *Result) { r.SourceRef = strings.Repeat("b", 40) }},
 		{"identity", "action result version, identity or source differs from job", func(r *Result) { r.Identity.AttemptID = "stale" }},
 		{"oversized answer", "action answer is blank, invalid or exceeds limit", func(r *Result) { r.Answer = strings.Repeat("x", maxOutputBytes+1) }},
+		{"invisible answer", "action answer is blank, invalid or exceeds limit", func(r *Result) { r.Answer = "\u200b\u2060" }},
 		{"read-only changes", "read-only action returned source changes", func(r *Result) { r.Changes = []workspace.Change{{Path: "added", Mode: workspace.Regular}} }},
 		{"usage", "invalid model call usage", func(r *Result) {
 			r.Calls = []CallUsage{{Provider: "codex", Role: "main", Round: 1, Tokens: usage.Tokens{Input: -1}}}

@@ -428,7 +428,7 @@ func TestValidateAuditMetadataRejectsCaseVariantKeys(t *testing.T) {
 	if _, err := validateAuditMetadata([]byte(metadata), job.Identity.Repository, target, job.Source.Head); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"run_id", "repo", "target", "source_ref", "profile", "scope_paths", "budget", "selected_companion_files", "prior_run_paths", "shared_file_owners", "execution_policy", "run_status", "skill_source"} {
+	for _, name := range []string{"run_id", "repo", "target", "source_ref", "profile", "scope_paths", "budget", "selected_companion_files", "prior_run_paths", "shared_file_owners", "execution_policy", "run_status"} {
 		mutated := strings.Replace(metadata, `"`+name+`":`, `"`+strings.ToUpper(name)+`":`, 1)
 		if mutated == metadata {
 			t.Fatalf("metadata fixture lacks %q", name)

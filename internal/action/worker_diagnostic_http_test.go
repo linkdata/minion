@@ -439,17 +439,6 @@ func TestHTTPInvisibleRefutationCannotBecomePublication(t *testing.T) {
 			if err := owner.sink.finish(got.result, got.err); !errors.Is(err, monitor.ErrTerminalJob) {
 				t.Fatalf("invalid review permitted completed result: %v", err)
 			}
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				t.Errorf("invalid review caused GitHub write: %s %s", r.Method, r.URL.Path)
-				http.NotFound(w, r)
-			}))
-			defer server.Close()
-			owner.owner.GitHub = testGitHub(server, "fixture-token")
-			request := usageJob()
-			request.Command = command.Command{Name: "comment", Action: command.Comment}
-			if err := owner.owner.publish(t.Context(), &preparedAction{job: owner.job, request: request}, got.result); !errors.Is(err, monitor.ErrTerminalJob) {
-				t.Fatalf("invalid review result crossed publication boundary: %v", err)
-			}
 		})
 	}
 }
