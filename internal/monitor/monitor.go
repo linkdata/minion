@@ -576,9 +576,9 @@ func (m *Monitor) finishFailedJob(ctx context.Context, store *state.Store, job J
 		}
 	}
 	if !replied {
-		replyCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-		defer cancel()
-		fresh, err := m.GitHub.ThreadItems(replyCtx, job.Repository.Name, job.SubjectType, job.Number, job.Source.UpdatedAt)
+		lookupCtx, cancelLookup := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancelLookup()
+		fresh, err := m.GitHub.ThreadItems(lookupCtx, job.Repository.Name, job.SubjectType, job.Number, job.Source.UpdatedAt)
 		if err != nil {
 			return fmt.Errorf("check existing bot replies to %s: %w", itemLocation(job.Source), err)
 		}
@@ -586,7 +586,7 @@ func (m *Monitor) finishFailedJob(ctx context.Context, store *state.Store, job J
 			if !strings.EqualFold(item.Author.Login, m.Config.BotLogin) || !strings.HasSuffix(strings.TrimSpace(item.Body), "\n\n"+marker) {
 				continue
 			}
-			current, err := m.GitHub.CurrentItem(replyCtx, item)
+			current, err := m.GitHub.CurrentItem(lookupCtx, item)
 			if err != nil {
 				return fmt.Errorf("verify existing bot reply to %s: %w", itemLocation(job.Source), err)
 			}
@@ -596,6 +596,8 @@ func (m *Monitor) finishFailedJob(ctx context.Context, store *state.Store, job J
 			}
 		}
 		if !replied {
+			replyCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			defer cancel()
 			repo, err := m.GitHub.Repository(replyCtx, job.Repository.Name)
 			if err != nil {
 				return fmt.Errorf("verify %s before failure reply: %w", job.Repository.Name, err)

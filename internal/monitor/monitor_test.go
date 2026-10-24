@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 	"unicode/utf8"
 
@@ -49,6 +50,7 @@ type fakeGitHub struct {
 	reactions          []string
 	checks             int
 	repoChecks         int
+	beforeRepository   func()
 	currentChecks      int
 	currentItem        func(github.Item) (github.Item, error)
 	commentErr         error
@@ -102,6 +104,9 @@ func fixtureRepository(repo github.Repository) github.Repository {
 
 func (f *fakeGitHub) Repository(ctx context.Context, name string) (github.Repository, error) {
 	f.repoChecks++
+	if f.beforeRepository != nil {
+		f.beforeRepository()
+	}
 	if err := ctx.Err(); err != nil {
 		return github.Repository{}, err
 	}
@@ -651,6 +656,33 @@ func TestRunOncePublicationFailureRetriesOnlyFailureReply(t *testing.T) {
 	if _, err := m.RunOnce(t.Context(), reopened); err != nil || len(handler.jobs) != 1 || gh.commentCalls != 2 || len(gh.comments) != 1 || len(reopened.Data.Processed) != 1 {
 		t.Fatalf("publication failure reply did not finish after restart: err=%v jobs=%d replies=%d state=%+v", err, len(handler.jobs), gh.commentCalls, reopened.Data)
 	}
+}
+
+func TestFailureReplyGetsFreshPostBudgetAfterLookup(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+		gh := &fakeGitHub{
+			threadItems: func(string, int, time.Time) ([]github.Item, error) {
+				time.Sleep(9 * time.Second)
+				return nil, nil
+			},
+			beforeRepository: func() { time.Sleep(2 * time.Second) },
+		}
+		store := openState(t, now)
+		job := Job{
+			Repository:  config.Repository{Name: "example-owner/example-repo", ID: 1, OwnerID: 2},
+			SubjectType: "Issue",
+			Number:      7,
+			ID:          "failure-reply-budget",
+		}
+		m := &Monitor{Config: config.Config{BotLogin: "linkdataminion"}, GitHub: gh}
+		if err := m.finishFailedJob(t.Context(), store, job, nil, now, state.JobFailure{}); err != nil {
+			t.Fatal(err)
+		}
+		if gh.commentCalls != 1 || len(store.Data.Processed) != 1 {
+			t.Fatalf("slow reply lookup consumed posting budget: comments=%d state=%+v", gh.commentCalls, store.Data)
+		}
+	})
 }
 
 func TestRunOnceLostPublicationResponseFindsSuccessfulReply(t *testing.T) {

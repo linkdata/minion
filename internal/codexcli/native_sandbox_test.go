@@ -129,6 +129,7 @@ func TestNativeCodexSandboxEnforcement(t *testing.T) {
 		"MINION_NATIVE_SANDBOX_GIT_ALIAS="+gitAlias,
 		"MINION_NATIVE_SANDBOX_NETWORK="+listener.Addr().String(),
 	)
+	cmd.WaitDelay = 2 * time.Second
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		if ctx.Err() != nil {
