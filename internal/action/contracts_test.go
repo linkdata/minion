@@ -40,8 +40,8 @@ func TestResultArtifactContracts(t *testing.T) {
 		}, "incomplete audit artifacts", ""},
 		{"executable artifact", func(_ *Job, r *Result) { r.Artifacts[0].Mode = workspace.Executable }, "invalid action report artifact", "invalid action report artifact"},
 		{"oversized artifact", func(_ *Job, r *Result) { r.Artifacts[0].Data = make([]byte, maxAuditArtifactBytes+1) }, "invalid action report artifact", "invalid action report artifact"},
-		{"different answer", func(_ *Job, r *Result) { r.Answer = "Different unreviewed text." }, "answer differs from REPORT.md", ""},
-		{"answer trailing newline", func(_ *Job, r *Result) { r.Answer += "\n" }, "answer differs from REPORT.md", ""},
+		{"different answer", func(_ *Job, r *Result) { r.Answer = "Different unreviewed text." }, "", ""},
+		{"blank answer", func(_ *Job, r *Result) { r.Answer = "" }, "", ""},
 		{"rendered report overflow", func(_ *Job, r *Result) {
 			r.Answer = strings.Repeat("a\u0085", 19000)
 			for i := range r.Artifacts {
@@ -53,11 +53,11 @@ func TestResultArtifactContracts(t *testing.T) {
 		{"partial report exact limit", func(_ *Job, r *Result) {
 			r.Answer, r.Calls = "", nil
 			r.Artifacts = []workspace.File{{Path: "REPORT.md", Mode: workspace.Regular, Data: bytes.Repeat([]byte("x"), maxOutputBytes)}}
-		}, "action answer", ""},
+		}, "incomplete audit artifacts", ""},
 		{"partial report over limit", func(_ *Job, r *Result) {
 			r.Answer, r.Calls = "", nil
 			r.Artifacts = []workspace.File{{Path: "REPORT.md", Mode: workspace.Regular, Data: bytes.Repeat([]byte("x"), maxOutputBytes+1)}}
-		}, "action answer", "report artifacts exceed limits"},
+		}, "incomplete audit artifacts", "report artifacts exceed limits"},
 	}
 	for _, empty := range auditArtifacts {
 		if !auditArtifactMayBeEmpty(empty) {
@@ -82,6 +82,12 @@ func TestResultArtifactContracts(t *testing.T) {
 			}
 			if err := result.Validate(job); (err == nil) != (test.complete == "") || (err != nil && !strings.Contains(err.Error(), test.complete)) {
 				t.Fatalf("complete artifacts=%v want%q", err, test.complete)
+			}
+			if test.name == "different answer" {
+				projected, err := projectPublication(job, result)
+				if err != nil || strings.Contains(projected.answer, result.Answer) {
+					t.Fatalf("unpublished audit answer reached public summary: %q, %v", projected.answer, err)
+				}
 			}
 			if err := result.validate(job, false); (err == nil) != (test.partial == "") || (err != nil && !strings.Contains(err.Error(), test.partial)) {
 				t.Fatalf("partial artifacts=%v want%q", err, test.partial)

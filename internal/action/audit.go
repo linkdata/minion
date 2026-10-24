@@ -254,9 +254,6 @@ func validateAuditFiles(ctx context.Context, files []workspace.File, validationD
 			return "", fmt.Errorf("audit %s failed: %w", validator.script, err)
 		}
 	}
-	if err := validateAuditCoverage(byPath["coverage-ledger.json"], byPath["findings.json"], byPath["REPORT.md"], nil); err != nil {
-		return "", err
-	}
 	return string(byPath["REPORT.md"]), nil
 }
 
@@ -317,6 +314,56 @@ func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes []byte, sourc
 	}
 	if len(units) == 0 {
 		return errors.New("audit coverage-ledger.json has no coverage units")
+	}
+	// Bound work from untrusted arrays before candidate cross-products and per-unit checks.
+	const maxEvidenceItems, maxRepeatedWork = 100_000, 250_000
+	items, repeatedWork := int64(len(units)), int64(0)
+	checkEvidence := func(e auditCoverageEvidence) error {
+		items += int64(len(e.ReviewedPaths) + len(e.LocalChecks) + len(e.ResultFingerprints) + len(e.Unresolved))
+		if items > maxEvidenceItems {
+			return errors.New("audit coverage-ledger.json exceeds validation work limit")
+		}
+		checkPaths := 0
+		for _, check := range e.LocalChecks {
+			checkPaths += len(check.ReviewedPaths)
+			items += int64(len(check.ReviewedPaths))
+			if items > maxEvidenceItems {
+				return errors.New("audit coverage-ledger.json exceeds validation work limit")
+			}
+		}
+		if e.Status == "candidate" {
+			repeatedWork += int64(len(e.ResultFingerprints)) * int64(1+len(e.LocalChecks)+checkPaths)
+			if repeatedWork > maxRepeatedWork {
+				return errors.New("audit coverage-ledger.json exceeds repeated validation work limit")
+			}
+		}
+		return nil
+	}
+	for _, unit := range units {
+		items += int64(len(unit.StartingPaths) + len(unit.Attempts) + len(unit.SelectedCompanionBlocks) + len(unit.ExcludedBlocks))
+		if items > maxEvidenceItems {
+			return errors.New("audit coverage-ledger.json exceeds validation work limit")
+		}
+		if unit.Status == "covered" || unit.Status == "candidate" {
+			repeatedWork += int64(len(unit.StartingPaths))
+		}
+		if err := checkEvidence(unit.auditCoverageEvidence); err != nil {
+			return err
+		}
+		for _, attempt := range unit.Attempts {
+			if attempt.Status == "covered" || attempt.Status == "candidate" {
+				repeatedWork += int64(len(unit.StartingPaths))
+				if repeatedWork > maxRepeatedWork {
+					return errors.New("audit coverage-ledger.json exceeds repeated validation work limit")
+				}
+			}
+			if err := checkEvidence(attempt); err != nil {
+				return err
+			}
+		}
+		if repeatedWork > maxRepeatedWork {
+			return errors.New("audit coverage-ledger.json exceeds repeated validation work limit")
+		}
 	}
 	var findings []struct {
 		Fingerprint      string                             `json:"fingerprint"`
@@ -479,7 +526,7 @@ func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes []byte, sourc
 					continue
 				}
 				if checkedCitations[fingerprint][check.AgentID] == nil {
-					checkedCitations[fingerprint][check.AgentID] = make(map[string]bool, len(findingPaths[fingerprint]))
+					checkedCitations[fingerprint][check.AgentID] = make(map[string]bool)
 				}
 				for _, path := range check.ReviewedPaths {
 					if findingPaths[fingerprint][path] {
@@ -558,10 +605,15 @@ func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes []byte, sourc
 		if unit.CoverageID != id.String() {
 			return errors.New("audit coverage-ledger.json has noncanonical coverage identity")
 		}
+		starting := make(map[string]bool, len(unit.StartingPaths))
 		for _, path := range unit.StartingPaths {
 			if !workspace.ValidPath(path) || source != nil && !sourcePaths[path] {
 				return errors.New("audit coverage-ledger.json has invalid starting path")
 			}
+			if starting[path] {
+				return errors.New("audit coverage-ledger.json has duplicate starting path")
+			}
+			starting[path] = true
 		}
 		if len(unit.OrdinaryAttackClassBlock) == 0 || unit.SelectedCompanionBlocks == nil || unit.ExcludedBlocks == nil ||
 			unit.Attempts == nil || unit.PriorStatus == "" {
@@ -691,20 +743,27 @@ func auditSourceInventory(source *workspace.Snapshot) (map[string]bool, map[stri
 }
 
 func auditSeedsChecked(starting, reviewed []string, sourceLines map[string]int) bool {
+	remaining := make(map[string]bool, len(starting))
 	for _, seed := range starting {
-		checked := false
-		for _, path := range reviewed {
-			_, isFile := sourceLines[path]
-			if (sourceLines == nil || isFile) && (path == seed || strings.HasPrefix(path, seed+"/")) {
-				checked = true
-				break
+		remaining[seed] = true
+	}
+	for _, path := range reviewed {
+		if sourceLines != nil {
+			if _, isFile := sourceLines[path]; !isFile {
+				continue
 			}
 		}
-		if !checked {
-			return false
+		delete(remaining, path)
+		for i := 0; i < len(path); i++ {
+			if path[i] == '/' {
+				delete(remaining, path[:i])
+			}
+		}
+		if len(remaining) == 0 {
+			return true
 		}
 	}
-	return true
+	return len(remaining) == 0
 }
 
 func auditSeverityRank(score string) int {

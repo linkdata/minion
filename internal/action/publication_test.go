@@ -323,6 +323,29 @@ func TestPublishedRefutationsFixManySourceQuotes(t *testing.T) {
 	}
 }
 
+func TestPublishedRefutationsFixSourceScanBudget(t *testing.T) {
+	job := withClaudeCritic(testJob(command.Fix))
+	var quotes []string
+	for i := range 1040 {
+		quotes = append(quotes, fmt.Sprintf("Private quote %04d was already in source.", i))
+	}
+	quoted := strings.Join(quotes, "\n")
+	job.Source.Files[0].Data = []byte(strings.Repeat("f", 1<<20) + "\n" + quoted)
+	result := privateReviewResult(job)
+	result.Refutations[0].Text = quoted
+	result.Changes = []workspace.Change{{Path: "source.txt", Mode: workspace.Regular, Data: []byte(strings.Join(quotes, "\n--;\n"))}}
+	if err := result.Validate(job); err != nil {
+		t.Fatalf("bounded fixture cannot reach publication: %v", err)
+	}
+	projected, err := projectPublication(job, result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rejectPublishedRefutations(job, result, projected); err == nil || err.Error() != "private review evidence source scan budget exceeded" {
+		t.Fatalf("source scan budget did not stop valid but expensive Fix: %v", err)
+	}
+}
+
 func TestPublishedRefutationsAllowCommonShortWords(t *testing.T) {
 	job := withClaudeCritic(testJob(command.Comment))
 	result := privateReviewResult(job)

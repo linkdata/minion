@@ -336,7 +336,7 @@ func (r Result) validate(j Job, complete bool) error {
 	if !r.matchesJob(j) {
 		return errors.New("action result version, identity or source differs from job")
 	}
-	requiresAnswer := j.Action != command.Fix || len(r.Changes) == 0
+	requiresAnswer := j.Action != command.SecurityAudit && (j.Action != command.Fix || len(r.Changes) == 0)
 	invalidCompleteAnswer := complete && (!publishableAnswer(r.Answer) || (requiresAnswer && strings.TrimSpace(r.Answer) == ""))
 	if (!complete && !boundedText(r.Answer, maxOutputBytes)) || invalidCompleteAnswer {
 		return errors.New("action answer is blank, invalid or exceeds limit")
@@ -352,13 +352,6 @@ func (r Result) validate(j Job, complete bool) error {
 	}
 	if err := validateResultArtifacts(j, r.Artifacts, complete); err != nil {
 		return err
-	}
-	if complete && j.Action == command.SecurityAudit {
-		for _, file := range r.Artifacts {
-			if file.Path == "REPORT.md" && r.Answer != string(file.Data) {
-				return errors.New("audit answer differs from REPORT.md")
-			}
-		}
 	}
 	if err := r.validateCalls(j, complete); err != nil {
 		return err

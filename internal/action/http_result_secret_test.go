@@ -25,11 +25,9 @@ func TestHostileHTTPResultCannotPublishConfiguredProviderKey(t *testing.T) {
 	for _, tc := range []struct {
 		name, content string
 		audit         bool
-		answerOnly    bool
 	}{
 		{name: "answer with other provider key", content: "public " + claudeKey},
 		{name: "encoded answer key", content: `public fixture-claude-\u0073ecret`},
-		{name: "audit answer key preserves safe artifacts", content: "public " + claudeKey, audit: true, answerOnly: true},
 		{name: "audit mixed safe and NUL-split artifact", content: "public fixture-codex-\x00secret", audit: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -77,23 +75,15 @@ func TestHostileHTTPResultCannotPublishConfiguredProviderKey(t *testing.T) {
 				outcome.Result = Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Safe result", Calls: []CallUsage{call}}
 				if tc.audit {
 					outcome.Result.Artifacts = auditArtifactsFixture(job, sourceIdentity(job), outcome.Result.Answer)
-					if tc.answerOnly {
-						outcome.Result.Answer = tc.content
-					} else {
-						for i := range outcome.Result.Artifacts {
-							if outcome.Result.Artifacts[i].Path == "architecture.md" {
-								outcome.Result.Artifacts[i].Data = []byte(tc.content)
-							}
+					for i := range outcome.Result.Artifacts {
+						if outcome.Result.Artifacts[i].Path == "architecture.md" {
+							outcome.Result.Artifacts[i].Data = []byte(tc.content)
 						}
 					}
 				} else {
 					outcome.Result.Answer = tc.content
 				}
-				if err := outcome.Result.Validate(job); tc.answerOnly {
-					if err == nil || !strings.Contains(err.Error(), "answer differs from REPORT.md") {
-						t.Fatalf("answer-only fixture lost its mismatch: %v", err)
-					}
-				} else if err != nil {
+				if err := outcome.Result.Validate(job); err != nil {
 					t.Fatalf("hostile result was not otherwise publishable: %v", err)
 				}
 				f.ack(t, "/outcome", outcome, http.StatusOK, 3)
@@ -104,7 +94,7 @@ func TestHostileHTTPResultCannotPublishConfiguredProviderKey(t *testing.T) {
 			request.Command = command.Command{Name: name, Action: action}
 			request.Repository.Actions = []string{name}
 			err := e.Execute(t.Context(), request)
-			if !errors.Is(err, monitor.ErrTerminalJob) || !tc.answerOnly && !strings.Contains(err.Error(), "configured provider key") || writes.Load() != 0 {
+			if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "configured provider key") || writes.Load() != 0 {
 				t.Fatalf("hostile result crossed publication boundary: error=%v writes=%d", err, writes.Load())
 			}
 			records, err := usage.ReadAll(usageDir)
@@ -123,10 +113,7 @@ func TestHostileHTTPResultCannotPublishConfiguredProviderKey(t *testing.T) {
 					t.Fatalf("private incomplete audit marker missing: %q error=%v", marker, err)
 				}
 				files, err := os.ReadDir(paths[0])
-				wantFiles := len(auditArtifacts) + 1
-				if !tc.answerOnly {
-					wantFiles--
-				}
+				wantFiles := len(auditArtifacts)
 				if err != nil || len(files) != wantFiles {
 					t.Fatalf("safe partial audit evidence lost: files=%v error=%v want=%d", files, err, wantFiles)
 				}
@@ -139,7 +126,7 @@ func TestHostileHTTPResultCannotPublishConfiguredProviderKey(t *testing.T) {
 				if _, err := os.Stat(filepath.Join(paths[0], "REPORT.md")); err != nil {
 					t.Fatalf("safe report was lost: %v", err)
 				}
-				if _, err := os.Stat(filepath.Join(paths[0], "architecture.md")); tc.answerOnly && err != nil || !tc.answerOnly && !errors.Is(err, os.ErrNotExist) {
+				if _, err := os.Stat(filepath.Join(paths[0], "architecture.md")); !errors.Is(err, os.ErrNotExist) {
 					t.Fatalf("safe/unsafe architecture retention differs: %v", err)
 				}
 			}

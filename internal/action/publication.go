@@ -160,7 +160,10 @@ func rejectPublishedRefutations(job Job, result Result, projected publication) e
 	}
 	if job.Action == command.Fix {
 		// A Fix transfers full replacement files. Source text quoted in a refutation was already public.
-		// shortcut: Matching still scans the normalized source per phrase; use multi-pattern search if measured delay warrants it.
+		// shortcut: Source scans stop after 1 GiB; use multi-pattern search if valid fixes hit the limit.
+		const maxSourceSearchBytes int64 = 1 << 30
+		remainingSourceSearchBytes := maxSourceSearchBytes
+		var scanErr error
 		inSource := make(map[string]bool)
 		var sourceText string
 		rejectNew := func(private string) bool {
@@ -179,11 +182,19 @@ func rejectPublishedRefutations(job Job, result Result, projected publication) e
 				}
 				sourceText = source.String()
 			}
+			if int64(len(sourceText)) > remainingSourceSearchBytes {
+				scanErr = errors.New("private review evidence source scan budget exceeded")
+				return true
+			}
+			remainingSourceSearchBytes -= int64(len(sourceText))
 			inSource[private] = strings.Contains(sourceText, private)
 			return !inSource[private]
 		}
 		for _, change := range result.Changes {
 			if containsCopy(change.Path, rejectNew) || containsCopy(string(change.Data), rejectNew) {
+				if scanErr != nil {
+					return scanErr
+				}
 				return errors.New("publication contains private review evidence")
 			}
 		}

@@ -323,6 +323,14 @@ JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 		if err == nil {
 			report, err = validateAuditFiles(t.Context(), files, validationDir, filepath.Join(skillDir, "SKILL.md"), tools, "o/r", target, head)
 		}
+		if err == nil {
+			byPath := make(map[string][]byte, len(files))
+			for _, file := range files {
+				byPath[file.Path] = file.Data
+			}
+			// The Result contract runs this with source; exercise ledger semantics here separately from Node.
+			err = validateAuditCoverage(byPath["coverage-ledger.json"], byPath["findings.json"], byPath["REPORT.md"], nil)
+		}
 		if wantError == "" {
 			if err != nil || report != reportText {
 				t.Fatalf("valid audit output = %q, %v", report, err)
