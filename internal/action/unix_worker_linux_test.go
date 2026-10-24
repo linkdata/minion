@@ -71,7 +71,7 @@ func TestUnixExecutionDirectWorker(t *testing.T) {
 			}
 		}
 		if waited && t.Failed() {
-			t.Logf("owned worker output: %s", output.String())
+			t.Logf("direct worker output: %s", output.String())
 		}
 		socketClosed := closed || endpoint == nil
 		if !socketClosed {

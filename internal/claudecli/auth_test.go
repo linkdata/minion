@@ -73,8 +73,9 @@ func TestAPIKeyConfiguration(t *testing.T) {
 			binary := fakeExecutable(t, "claude", `test -z "$ANTHROPIC_API_KEY$CLAUDE_CODE_OAUTH_TOKEN$ANTHROPIC_AUTH_TOKEN" || exit 2
 test "$(cat "$CLAUDE_CONFIG_DIR/api-key")" = '`+dummyAPIKey+`' || exit 3
 printf '%s\n' "$CLAUDE_CONFIG_DIR" >> "$0.authdirs"
-if [ "$1" = '--version' ]; then
-  printf '%s\n' '2.1.302 (Claude Code)'
+if [ "$1" = '--help' ]; then
+  cat <<'HELP'
+`+claudeHelp+`HELP
   exit
 fi
 printf '%s\n' "$@" >> "$0.args"

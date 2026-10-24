@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -75,10 +76,73 @@ func Validate(ctx context.Context, settings config.CodexConfig) (resolved config
 		if effort != "" && supported.ReasoningEffort == effort {
 			settings.Model = selected.Model
 			settings.ReasoningEffort = effort
+			if err := validateExecCapabilities(ctx, settings); err != nil {
+				return settings, fmt.Errorf("cannot validate Codex settings: %w", err)
+			}
 			return settings, nil
 		}
 	}
 	return settings, fmt.Errorf("codex.reasoning_effort %q is not supported for model %q; supported efforts: %s", effort, selected.Model, strings.Join(efforts, ", "))
+}
+
+// Check both exec parsers without supplying a prompt or starting an inference turn.
+func validateExecCapabilities(ctx context.Context, settings config.CodexConfig) (err error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	binary, err := aicli.ExecutablePath("codex")
+	if err != nil {
+		return err
+	}
+	home, err := HomePath()
+	if err != nil {
+		return err
+	}
+	dir, err := os.MkdirTemp("", "minion-codex-exec-check-")
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, os.RemoveAll(dir)) }()
+	schema := filepath.Join(dir, "output-schema.json")
+	env := childEnvironment(os.Environ(), dir, dir, home, true)
+	for _, command := range []struct {
+		name string
+		args []string
+	}{
+		{name: "exec", args: []string{"exec"}},
+		{name: "exec resume", args: []string{"exec", "resume"}},
+	} {
+		args := append(command.args,
+			"--json", "--ignore-user-config", "--ignore-rules", "--strict-config", "--skip-git-repo-check",
+		)
+		args = append(args, disabledFeatureArgs()...)
+		args = append(args,
+			"-c", "skills.include_instructions=false", "-c", "approval_policy=never", "--model", settings.Model,
+			"--output-schema", schema, "--help",
+		)
+		_, probeErr := aicli.Probe(ctx, binary, "codex", args, dir, env, "", settings.APIKey)
+		if probeErr != nil {
+			return fmt.Errorf("Codex %s capability check: %w", command.name, probeErr) //nolint:staticcheck // -- Codex is a proper noun.
+		}
+		invalid := append(append([]string(nil), command.args...), "--minion-unsupported-capability-probe", "--help")
+		_, probeErr = aicli.Probe(ctx, binary, "codex", invalid, dir, env, "", settings.APIKey)
+		var exitErr *exec.ExitError
+		if probeErr == nil || ctx.Err() != nil || errors.Is(probeErr, aicli.ErrOutputLimit) || !errors.As(probeErr, &exitErr) || exitErr.ExitCode() <= 0 {
+			return fmt.Errorf("Codex %s capability check did not reject an unknown option: %v", command.name, probeErr) //nolint:staticcheck // -- Codex is a proper noun.
+		}
+	}
+	return nil
+}
+
+func disabledFeatureArgs() []string {
+	var args []string
+	for _, feature := range []string{
+		"apps", "browser_use", "browser_use_external", "browser_use_full_cdp_access",
+		"computer_use", "image_generation", "plugins", "remote_plugin",
+		"shell_snapshot", "skill_mcp_dependency_install", "memories", "hooks", "skill_search",
+	} {
+		args = append(args, "--disable", feature)
+	}
+	return args
 }
 
 func listModels(ctx context.Context, settings config.CodexConfig) (models []modelInfo, err error) {
@@ -99,9 +163,14 @@ func listModels(ctx context.Context, settings config.CodexConfig) (models []mode
 	defer func() {
 		err = errors.Join(err, os.RemoveAll(dir))
 	}()
+	filesystemRule, err := sandboxFilesystemRule(dir, dir, binary, "", nil, nil, false)
+	if err != nil {
+		return nil, err
+	}
 	// app-server has no --ignore-user-config flag. Select exec's built-in
 	// provider explicitly and avoid repository config by using a temporary cwd.
-	args := []string{"app-server", "--strict-config", "--listen", "stdio://", "-c", `model_provider="openai"`}
+	args := append([]string{"app-server", "--strict-config", "--listen", "stdio://", "-c", `model_provider="openai"`}, disabledFeatureArgs()...)
+	args = append(args, execConfigArgs(filesystemRule)...)
 	if settings.APIKey != "" {
 		args = append(args, "-c", `cli_auth_credentials_store="ephemeral"`, "-c", `forced_login_method="api"`)
 	}

@@ -127,6 +127,22 @@ func sandboxFilesystemRule(workspace, runtimeDir, realBinary, outputDir string, 
 	return "permissions.minion.filesystem={" + strings.Join(rules, ",") + "}", nil
 }
 
+func execConfigArgs(filesystemRule string) []string {
+	args := instructionBoundaryConfig()
+	return append(args,
+		"-c", "skills.include_instructions=false",
+		"-c", "approval_policy=never",
+		"-c", `web_search="disabled"`,
+		"-c", "shell_environment_policy.ignore_default_excludes=false",
+		// Codex excludes *KEY* before filters; set restores only this fixed Git config key.
+		"-c", `shell_environment_policy.set.GIT_CONFIG_KEY_0="safe.bareRepository"`,
+		"-c", "shell_environment_policy.filters={"+strings.Join(shellEnvironmentFilters(runtime.GOOS), ",")+"}",
+		"-c", `default_permissions="minion"`,
+		"-c", filesystemRule,
+		"-c", "permissions.minion.network.enabled=false",
+	)
+}
+
 // Run continues this action role's Codex conversation for a source snapshot.
 //
 // A writable run may edit the snapshot; outputDir optionally grants write
@@ -207,28 +223,8 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	}
 	args = append(args, "--json", "--ignore-user-config", "--ignore-rules", "--strict-config", "--skip-git-repo-check")
 	// Untrusted jobs must not inherit connected tools, plugins, rules, or a login-shell snapshot.
-	for _, feature := range []string{
-		"apps", "browser_use", "browser_use_external", "browser_use_full_cdp_access",
-		"computer_use", "image_generation", "plugins", "remote_plugin",
-		"shell_snapshot", "skill_mcp_dependency_install", "memories", "hooks", "skill_search",
-	} {
-		args = append(args, "--disable", feature)
-	}
-	args = append(args, instructionBoundaryConfig()...)
-	filters := shellEnvironmentFilters(runtime.GOOS)
-	args = append(
-		args,
-		"-c", "skills.include_instructions=false",
-		"-c", "approval_policy=never",
-		"-c", `web_search="disabled"`,
-		"-c", "shell_environment_policy.ignore_default_excludes=false",
-		// Codex excludes *KEY* before filters; set restores only this fixed Git config key.
-		"-c", `shell_environment_policy.set.GIT_CONFIG_KEY_0="safe.bareRepository"`,
-		"-c", "shell_environment_policy.filters={"+strings.Join(filters, ",")+"}",
-		"-c", `default_permissions="minion"`,
-		"-c", filesystemRule,
-		"-c", "permissions.minion.network.enabled=false",
-	)
+	args = append(args, disabledFeatureArgs()...)
+	args = append(args, execConfigArgs(filesystemRule)...)
 	if settings.Model != "" {
 		args = append(args, "--model", settings.Model)
 	}

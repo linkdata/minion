@@ -81,13 +81,12 @@ jobs:
 
       - name: Install Codex CLI on macOS
         if: runner.os == 'macOS'
-        run: npm install --global @openai/codex@0.163.0
+        run: npm install --global @openai/codex
 
       - name: Install standalone Codex CLI on Windows
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $env:CODEX_RELEASE = '0.163.0'
           $env:CODEX_NON_INTERACTIVE = '1'
           $env:CODEX_INSTALL_DIR = Join-Path $env:LOCALAPPDATA 'Programs\OpenAI\Codex\bin'
           $installer = Join-Path $env:RUNNER_TEMP 'install-codex.ps1'

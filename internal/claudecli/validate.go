@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 
@@ -20,9 +19,9 @@ import (
 
 // Validate checks Claude's prerequisites and resolves model settings.
 //
-// It requires Linux or macOS, Claude Code 2.1.302 or later, authenticated CLI
-// state, and bubblewrap/socat on Linux. Model discovery uses the CLI's initialization protocol
-// without an inference turn. These checks do not execute a sandboxed command;
+// It requires Linux or macOS, the CLI options used by Run, authenticated CLI
+// state, and bubblewrap/socat on Linux. Model discovery uses the CLI's initialization
+// protocol without an inference turn. These checks do not execute a sandboxed command;
 // deployments must validate runtime isolation.
 //
 // APIKey overrides environment credentials and stored login. Without it,
@@ -63,12 +62,22 @@ func Validate(ctx context.Context, settings config.ClaudeConfig) (validated conf
 	if err != nil {
 		return validated, err
 	}
-	version, err := aicli.Probe(ctx, binary, "", []string{"--version"}, dir, env, "", settings.APIKey)
+	settings.ReadOnlyDirs = nil
+	policy, err := sandboxSettings(dir, dir, false, "", settings, nil, authDir)
 	if err != nil {
 		return validated, err
 	}
-	if !supportedVersion(string(version)) {
-		return validated, errors.New("claude isolation requires Claude Code 2.1.302 or later")
+	help, err := aicli.Probe(ctx, binary, "", []string{"--help"}, dir, env, "", settings.APIKey)
+	if err != nil {
+		return validated, fmt.Errorf("claude capabilities: %w", err)
+	}
+	for _, option := range append([]string{"--session-id", "--resume", "--add-dir", "--model", "--effort", "--json-schema", "--no-session-persistence", "--input-format"}, arguments(policy)...) {
+		if strings.HasPrefix(option, "-") {
+			option = strings.TrimSuffix(option, "=")
+			if !helpSupportsOption(help, option) {
+				return validated, fmt.Errorf("claude help does not list required option %s", option)
+			}
+		}
 	}
 	if runtime.GOOS == "linux" {
 		for _, name := range []string{"bwrap", "socat"} {
@@ -76,11 +85,6 @@ func Validate(ctx context.Context, settings config.ClaudeConfig) (validated conf
 				return validated, fmt.Errorf("claude sandbox dependency %s: %w", name, err)
 			}
 		}
-	}
-	settings.ReadOnlyDirs = nil
-	policy, err := sandboxSettings(dir, dir, false, "", settings, nil, authDir)
-	if err != nil {
-		return validated, err
 	}
 	authArgs := []string{"--safe-mode", "--setting-sources="}
 	if authDir != "" {
@@ -96,7 +100,7 @@ func Validate(ctx context.Context, settings config.ClaudeConfig) (validated conf
 	if json.Unmarshal(auth, &status) != nil || !status.LoggedIn {
 		return validated, errors.New("claude is not authenticated; configure claude.api_key or run claude auth login")
 	}
-	args := append(arguments(policy), "--no-session-persistence", "--input-format", "stream-json")
+	args := append(arguments(policy), "--no-session-persistence", "--input-format", "stream-json", "--json-schema", `{"type":"object"}`)
 	data, err := aicli.Probe(ctx, binary, "", args, dir, env, "{\"type\":\"control_request\",\"request_id\":\"minion-initialize\",\"request\":{\"subtype\":\"initialize\"}}\n", settings.APIKey)
 	if err != nil {
 		return validated, fmt.Errorf("claude model discovery: %w", err)
@@ -159,22 +163,21 @@ func initializationModels(data []byte) ([]modelInfo, error) {
 	return nil, errors.New("claude did not acknowledge initialization")
 }
 
-func supportedVersion(version string) bool {
-	fields := strings.Fields(version)
-	if len(fields) == 0 {
-		return false
-	}
-	parts := strings.Split(fields[0], ".")
-	if len(parts) != 3 {
-		return false
-	}
-	numbers := make([]int, len(parts))
-	for i, part := range parts {
-		n, err := strconv.Atoi(part)
-		if err != nil || n < 0 {
-			return false
+func helpSupportsOption(help []byte, option string) bool {
+	for _, line := range strings.Split(string(help), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "-") {
+			continue
 		}
-		numbers[i] = n
+		for _, field := range strings.Fields(line) {
+			if !strings.HasPrefix(field, "-") {
+				break
+			}
+			field, _, _ = strings.Cut(strings.TrimSuffix(field, ","), "=")
+			if field == option {
+				return true
+			}
+		}
 	}
-	return slices.Compare(numbers, []int{2, 1, 302}) >= 0
+	return false
 }

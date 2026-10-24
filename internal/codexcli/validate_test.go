@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +20,18 @@ import (
 )
 
 const catalogueScript = `#!/bin/sh
+if [ "$1" = exec ]; then
+  case " $* " in *' --help '*) ;; *) exit 9 ;; esac
+  printf '%s\n' '--invocation--' "$@" >> @HELP_ARGS@
+  printf '%s,%s,%s,%s\n' "${GH_TOKEN-absent}" "${GITHUB_TOKEN-absent}" "${CODEX_API_KEY-absent}" "${CODEX_ACCESS_TOKEN-absent}" >> @HELP_ENV@
+  case " $* " in *' --minion-unsupported-capability-probe '*) exit 2 ;; esac
+  if [ "$2" = resume ]; then
+    printf '%s\n' 'Usage: codex exec resume [OPTIONS] [SESSION_ID] [PROMPT]'
+  else
+    printf '%s\n' 'Usage: codex exec [OPTIONS] [PROMPT]'
+  fi
+  exit 0
+fi
 printf '%s\n' "$@" > @ARGS@
 printf '%s,%s\n' "${GH_TOKEN-absent}" "${GITHUB_TOKEN-absent}" > @ENV@
 IFS= read -r request
@@ -41,10 +54,22 @@ func catalogueScriptFor(dir, page1, page2 string) string {
 	return strings.NewReplacer(
 		"@ARGS@", aicli.ShellQuote(filepath.Join(dir, "args")),
 		"@ENV@", aicli.ShellQuote(filepath.Join(dir, "env")),
+		"@HELP_ARGS@", aicli.ShellQuote(filepath.Join(dir, "help-args")),
+		"@HELP_ENV@", aicli.ShellQuote(filepath.Join(dir, "help-env")),
 		"@REQUESTS@", aicli.ShellQuote(filepath.Join(dir, "requests")),
 		"@PAGE1@", aicli.ShellQuote(page1),
 		"@PAGE2@", aicli.ShellQuote(page2),
 	).Replace(catalogueScript)
+}
+
+func TestValidateRejectsUnsupportedDisabledFeature(t *testing.T) {
+	dir := t.TempDir()
+	script := catalogueScriptFor(dir, "", "")
+	script = strings.Replace(script, "#!/bin/sh\n", "#!/bin/sh\ncase \" $* \" in *' --disable apps '*) printf '%s\\n' 'Unknown feature flag: apps' >&2; exit 2 ;; esac\n", 1)
+	installFakeCodex(t, script)
+	if _, err := Validate(t.Context(), config.CodexConfig{}); err == nil || !strings.Contains(err.Error(), "Unknown feature flag: apps") {
+		t.Fatalf("accepted unsupported disabled feature: %v", err)
+	}
 }
 
 func TestValidateModelAndEffortAgainstInstalledCatalogue(t *testing.T) {
@@ -75,7 +100,7 @@ func TestValidateModelAndEffortAgainstInstalledCatalogue(t *testing.T) {
 				t.Fatalf("Validate() = %+v, %v", settings, err)
 			}
 			args, err := os.ReadFile(filepath.Join(dir, "args"))
-			if err != nil || !strings.HasPrefix(string(args), "app-server\n") || !strings.Contains(string(args), `model_provider="openai"`) {
+			if err != nil || !strings.HasPrefix(string(args), "app-server\n") || !strings.Contains(string(args), `model_provider="openai"`) || !strings.Contains(string(args), `default_permissions="minion"`) || !strings.Contains(string(args), "--disable\napps\n") {
 				t.Fatalf("wrong discovery command: %s, %v", args, err)
 			}
 			env, err := os.ReadFile(filepath.Join(dir, "env"))
@@ -101,6 +126,112 @@ func TestValidateModelAndEffortAgainstInstalledCatalogue(t *testing.T) {
 				t.Fatalf("wrong catalogue pagination: %+v, %v", last, err)
 			}
 		})
+	}
+}
+
+func TestValidateChecksExecAndResumeCapabilitiesWithoutCredentials(t *testing.T) {
+	dir := t.TempDir()
+	page := `{"id":2,"result":{"data":[{"model":"fixture","isDefault":true,"defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high"}]}]}}`
+	installFakeCodex(t, catalogueScriptFor(dir, page, ""))
+	for _, key := range []string{"GH_TOKEN", "GITHUB_TOKEN", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN"} {
+		t.Setenv(key, "host-secret")
+	}
+	if _, err := Validate(t.Context(), config.CodexConfig{}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "help-args"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := strings.Split(strings.TrimPrefix(string(data), "--invocation--\n"), "--invocation--\n")
+	if len(calls) != 4 {
+		t.Fatalf("expected fresh/resume help and rejection probes, got %q", data)
+	}
+	flags := []string{"--json", "--ignore-user-config", "--ignore-rules", "--strict-config", "--skip-git-repo-check"}
+	for _, feature := range []string{
+		"apps", "browser_use", "browser_use_external", "browser_use_full_cdp_access",
+		"computer_use", "image_generation", "plugins", "remote_plugin",
+		"shell_snapshot", "skill_mcp_dependency_install", "memories", "hooks", "skill_search",
+	} {
+		flags = append(flags, "--disable", feature)
+	}
+	flags = append(flags, "-c", "skills.include_instructions=false", "-c", "approval_policy=never", "--model", "fixture", "--output-schema")
+	for i, command := range [][]string{{"exec"}, {"exec", "resume"}} {
+		got := strings.Split(strings.TrimSpace(calls[2*i]), "\n")
+		if len(got) != len(command)+len(flags)+2 || !filepath.IsAbs(got[len(got)-2]) || filepath.Base(got[len(got)-2]) != "output-schema.json" {
+			t.Fatalf("probe %d omitted a temporary output schema: %q", i, got)
+		}
+		want := append(append(command, flags...), got[len(got)-2], "--help")
+		if !slices.Equal(got, want) {
+			t.Fatalf("probe %d args = %q; want %q", i, got, want)
+		}
+		rejected := strings.Split(strings.TrimSpace(calls[2*i+1]), "\n")
+		wantRejected := append(append([]string(nil), command...), "--minion-unsupported-capability-probe", "--help")
+		if !slices.Equal(rejected, wantRejected) {
+			t.Fatalf("negative probe %d args = %q; want %q", i, rejected, wantRejected)
+		}
+	}
+	env, err := os.ReadFile(filepath.Join(dir, "help-env"))
+	if err != nil || string(env) != strings.Repeat("absent,absent,absent,absent\n", 4) {
+		t.Fatalf("credentials reached capability probe: %q, %v", env, err)
+	}
+}
+
+func TestValidateRejectsUnsupportedExecResumeFlag(t *testing.T) {
+	dir := t.TempDir()
+	page := `{"id":2,"result":{"data":[{"model":"fixture","isDefault":true,"defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high"}]}]}}`
+	script := catalogueScriptFor(dir, page, "")
+	script = strings.Replace(script, "if [ \"$1\" = exec ]; then", "if [ \"$1\" = exec ] && [ \"$2\" = resume ]; then\n  case \" $* \" in *' --ignore-rules '*) printf '%s\\n' \"unexpected argument '--ignore-rules'\" >&2; exit 2 ;; esac\nfi\nif [ \"$1\" = exec ]; then", 1)
+	installFakeCodex(t, script)
+	if _, err := Validate(t.Context(), config.CodexConfig{}); err == nil || !strings.Contains(err.Error(), "Codex exec resume capability check") || !strings.Contains(err.Error(), "--ignore-rules") {
+		t.Fatalf("accepted unsupported resume flag: %v", err)
+	}
+}
+
+func TestValidateRejectsMissingOutputSchemaSupport(t *testing.T) {
+	dir := t.TempDir()
+	page := `{"id":2,"result":{"data":[{"model":"fixture","isDefault":true,"defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high"}]}]}}`
+	script := catalogueScriptFor(dir, page, "")
+	script = strings.Replace(script, "if [ \"$1\" = exec ]; then", "if [ \"$1\" = exec ]; then\n  case \" $* \" in *' --output-schema '*) printf '%s\\n' \"unexpected argument '--output-schema'\" >&2; exit 2 ;; esac\nfi\nif [ \"$1\" = exec ]; then", 1)
+	installFakeCodex(t, script)
+	if _, err := Validate(t.Context(), config.CodexConfig{}); err == nil || !strings.Contains(err.Error(), "Codex exec capability check") || !strings.Contains(err.Error(), "--output-schema") {
+		t.Fatalf("accepted CLI without output schema support: %v", err)
+	}
+}
+
+func TestValidateRejectsHelpThatIgnoresUnknownOptions(t *testing.T) {
+	dir := t.TempDir()
+	page := `{"id":2,"result":{"data":[{"model":"fixture","isDefault":true,"defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high"}]}]}}`
+	script := strings.Replace(catalogueScriptFor(dir, page, ""), "case \" $* \" in *' --minion-unsupported-capability-probe '*) exit 2 ;; esac", "", 1)
+	installFakeCodex(t, script)
+	if _, err := Validate(t.Context(), config.CodexConfig{}); err == nil || !strings.Contains(err.Error(), "Codex exec capability check did not reject an unknown option") {
+		t.Fatalf("accepted help that ignored an unknown option: %v", err)
+	}
+}
+
+func TestValidateAcceptsCompatibleExecHelpWithDifferentLabels(t *testing.T) {
+	dir := t.TempDir()
+	page := `{"id":2,"result":{"data":[{"model":"fixture","isDefault":true,"defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high"}]}]}}`
+	script := strings.NewReplacer(
+		"Usage: codex exec [OPTIONS] [PROMPT]", "Run an action",
+		"Usage: codex exec resume [OPTIONS] [SESSION_ID] [PROMPT]", "Continue an action",
+	).Replace(catalogueScriptFor(dir, page, ""))
+	installFakeCodex(t, script)
+	if _, err := Validate(t.Context(), config.CodexConfig{}); err != nil {
+		t.Fatalf("rejected compatible help labels: %v", err)
+	}
+}
+
+func TestExecCapabilityProbeHonorsCallerDeadline(t *testing.T) {
+	installFakeCodex(t, "#!/bin/sh\nexec sleep 10\n")
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	if err := validateExecCapabilities(ctx, config.CodexConfig{Model: "fixture"}); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("capability probe lost deadline: %v", err)
+	}
+	if time.Since(started) > 3*time.Second {
+		t.Fatal("capability probe did not stop after deadline")
 	}
 }
 

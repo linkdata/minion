@@ -10,12 +10,40 @@ import (
 )
 
 const modelCatalogue = `{"type":"control_response","response":{"subtype":"success","request_id":"minion-initialize","response":{"models":[{"value":"unresolved"},{"value":"default","resolvedModel":"claude-pinned","supportedEffortLevels":["low","high"]},{"value":"quick","resolvedModel":"claude-small","supportedEffortLevels":["low","high"]}]}}}`
+const claudeHelp = `Claude Code 1.0.0
+Options:
+  -p, --print
+  --verbose
+  --output-format
+  --permission-mode
+  --permission-prompts
+  --safe-mode
+  --setting-sources=<sources>
+  --disable-slash-commands
+  --strict-mcp-config
+  --mcp-config
+  --no-chrome
+  --tools
+  --allowedTools
+  --settings
+  --session-id
+  --resume
+  --add-dir
+  --model
+  --effort
+  --json-schema
+  --no-session-persistence
+  --input-format
+`
 
 func TestValidate(t *testing.T) {
 	fakeExecutable(t, "bwrap", "exit 99\n")
 	fakeExecutable(t, "socat", "exit 99\n")
-	binary := fakeExecutable(t, "claude", `if [ "$1" = '--version' ]; then
-  printf '%s\n' '2.1.302 (Claude Code)'
+	binary := fakeExecutable(t, "claude", `if [ "$1" = '--help' ]; then
+  cat <<'HELP'
+`+claudeHelp+`HELP
+elif [ "$1" = '--version' ]; then
+  exit 97
 elif [ "$3" = 'auth' ]; then
   printf '%s\n' '{"loggedIn":true}'
 else
@@ -41,7 +69,7 @@ fi
 				t.Fatal(err)
 			}
 			cfg, err := Validate(context.Background(), config.ClaudeConfig{Model: tc.model, Effort: tc.effort})
-			if args := readFile(t, binary+".args"); !strings.Contains(args, "--no-session-persistence\n") || !strings.Contains(args, "--input-format\nstream-json\n") {
+			if args := readFile(t, binary+".args"); !strings.Contains(args, "--no-session-persistence\n") || !strings.Contains(args, "--input-format\nstream-json\n") || !strings.Contains(args, "--json-schema\n{\"type\":\"object\"}\n") {
 				t.Fatalf("model discovery retained a session or lost initialization framing: %q", args)
 			}
 			if tc.fails {
@@ -60,8 +88,9 @@ fi
 func TestValidateRequiresInitialization(t *testing.T) {
 	fakeExecutable(t, "bwrap", "exit 99\n")
 	fakeExecutable(t, "socat", "exit 99\n")
-	fakeExecutable(t, "claude", `if [ "$1" = '--version' ]; then
-  printf '%s\n' '2.1.302 (Claude Code)'
+	fakeExecutable(t, "claude", `if [ "$1" = '--help' ]; then
+  cat <<'HELP'
+`+claudeHelp+`HELP
 elif [ "$3" = 'auth' ]; then
   printf '%s\n' '{"loggedIn":true}'
 else
@@ -73,25 +102,23 @@ fi
 	}
 }
 
-func TestSupportedVersion(t *testing.T) {
-	for _, tc := range []struct {
-		version string
-		want    bool
-	}{
-		{"2.1.302 (Claude Code)", true},
-		{"2.1.303", true},
-		{"3.0.0", true},
-		{"2.1.301", false},
-		{"2.1.295", false},
-		{"2.0.999", false},
-		{"", false},
-		{"3.x.y", false},
-		{"3.0", false},
-		{"2.-1.295", false},
-	} {
-		if got := supportedVersion(tc.version); got != tc.want {
-			t.Errorf("supportedVersion(%q) = %v, want %v", tc.version, got, tc.want)
-		}
+func TestValidateRequiresCapabilities(t *testing.T) {
+	fakeExecutable(t, "bwrap", "exit 99\n")
+	fakeExecutable(t, "socat", "exit 99\n")
+	for _, option := range []string{"--safe-mode", "--session-id", "--resume", "--json-schema"} {
+		t.Run(option, func(t *testing.T) {
+			help := strings.Replace(claudeHelp, "  "+option+"\n", "  "+option+"-other\n", 1)
+			fakeExecutable(t, "claude", `if [ "$1" = '--help' ]; then
+  cat <<'HELP'
+`+help+`HELP
+else
+  exit 98
+fi
+`)
+			if _, err := Validate(t.Context(), config.ClaudeConfig{}); err == nil || !strings.Contains(err.Error(), "required option "+option) {
+				t.Fatalf("Validate accepted missing %s: %v", option, err)
+			}
+		})
 	}
 }
 

@@ -87,8 +87,8 @@ func TestCheckModelsBoundsResolvedCatalogueModel(t *testing.T) {
 				}
 				catalogue := fmt.Sprintf(`{"type":"control_response","response":{"subtype":"success","request_id":"minion-initialize","response":{"models":[{"value":%q,"resolvedModel":%q}]}}}`, value, model)
 				testsupport.FakeOnPath(t, "claude", `#!/bin/sh
-if [ "$1" = '--version' ]; then
-  printf '%s\n' '2.1.302 (Claude Code)'
+if [ "$1" = '--help' ]; then
+  printf '%s\n' '--session-id --resume --add-dir --model --effort --json-schema --no-session-persistence --input-format -p --verbose --output-format --permission-mode --permission-prompts --safe-mode --setting-sources --disable-slash-commands --strict-mcp-config --mcp-config --no-chrome --tools --allowedTools --settings'
 elif [ "$3" = 'auth' ]; then
   printf '%s\n' '{"loggedIn":true}'
 else
@@ -134,6 +134,14 @@ debug)
     text="$text MINION_UNTRUSTED_AGENTS_78 MINION_UNTRUSTED_SKILL_78"
   fi
   printf '[{"role":"user","content":[{"text":"%s"}]}]\n' "$text"
+  ;;
+exec)
+  case " $* " in *' --minion-unsupported-capability-probe '*) exit 2 ;; esac
+  if [ "$2" = resume ]; then
+    printf '%s\n' 'Usage: codex exec resume [OPTIONS] [SESSION_ID] [PROMPT]'
+  else
+    printf '%s\n' 'Usage: codex exec [OPTIONS] [PROMPT]'
+  fi
   ;;
 app-server)
   IFS= read -r request

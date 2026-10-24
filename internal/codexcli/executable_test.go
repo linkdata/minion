@@ -30,6 +30,19 @@ func TestMain(m *testing.M) {
 	}
 	switch os.Args[1] {
 	case "exec":
+		for _, arg := range os.Args[2:] {
+			if arg == "--minion-unsupported-capability-probe" {
+				os.Exit(2)
+			}
+			if arg == "--help" {
+				if os.Args[2] == "resume" {
+					fmt.Println("Usage: codex exec resume [OPTIONS] [SESSION_ID] [PROMPT]")
+				} else {
+					fmt.Println("Usage: codex exec [OPTIONS] [PROMPT]")
+				}
+				return
+			}
+		}
 		fmt.Println(`{"type":"thread.started","thread_id":"root"}`)
 		fmt.Println(`{"type":"item.completed","item":{"type":"agent_message","text":"shim answer"}}`)
 		fmt.Println(`{"type":"turn.completed"}`)
