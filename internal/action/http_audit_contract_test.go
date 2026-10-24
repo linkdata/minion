@@ -40,8 +40,8 @@ func TestHostileHTTPAuditSchemaCannotPublish(t *testing.T) {
 	excludedLedger = strings.Replace(excludedLedger, `"local_checks":[{"agent_id":"verifier","reviewed_paths":["source.txt"],"invariant":"Access is checked","method":"source","result":"The guard is present","artifact":null}]`, `"local_checks":[]`, 1)
 	excludedLedger = strings.Replace(excludedLedger, `"unresolved":[]}]`, `"unresolved":["Out of scope"]}]`, 1)
 	for _, test := range []struct {
-		name, artifact, data, findings, ledger, report, want string
-		candidate, incompleteReason                          bool
+		name, artifact, data, findings, want string
+		candidate, incompleteReason          bool
 	}{
 		{name: "directory-only review cannot claim coverage", artifact: "coverage-ledger.json", data: strings.ReplaceAll(auditCoveredLedgerFixture, "source.txt", "src"), want: "starting path without a declared reviewed file"},
 		{name: "blocked-only ledger has no reviewed coverage", artifact: "coverage-ledger.json", data: blockedLedger, want: "no reviewed coverage"},
@@ -102,21 +102,6 @@ func TestHostileHTTPAuditSchemaCannotPublish(t *testing.T) {
 				outcome := f.outcome(3, nil)
 				outcome.Result = Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Hostile audit report: Unverified boundary; Missing guard medium.", Calls: []CallUsage{call},
 					Artifacts: auditArtifactsFixture(job, sourceIdentity(job), "Hostile audit report: Unverified boundary; Missing guard medium.")}
-				if test.report != "" {
-					outcome.Result.Answer = test.report
-					for i := range outcome.Result.Artifacts {
-						if outcome.Result.Artifacts[i].Path == "REPORT.md" {
-							outcome.Result.Artifacts[i].Data = []byte(test.report)
-						}
-					}
-				}
-				if test.ledger != "" {
-					for i := range outcome.Result.Artifacts {
-						if outcome.Result.Artifacts[i].Path == "coverage-ledger.json" {
-							outcome.Result.Artifacts[i].Data = []byte(test.ledger)
-						}
-					}
-				}
 				if test.candidate {
 					for i := range outcome.Result.Artifacts {
 						if outcome.Result.Artifacts[i].Path == "coverage-ledger.json" {

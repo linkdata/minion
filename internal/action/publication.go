@@ -110,6 +110,7 @@ func auditPublicSummary(artifacts []workspace.File) (string, error) {
 }
 
 // This catches exact whole-refutation or complete-sentence copies, not rewrites or hostile disclosures.
+// Short embedded runs are ignored because they can match unrelated public text.
 func rejectPublishedRefutations(job Job, result Result, projected publication) error {
 	if len(result.Refutations) == 0 {
 		return nil
@@ -133,7 +134,7 @@ func rejectPublishedRefutations(job Job, result Result, projected publication) e
 			}
 		}
 	}
-	if len(exact) == 0 && len(whole) == 0 && len(sentences) == 0 {
+	if len(exact) == 0 {
 		return nil
 	}
 	containsCopy := func(text string, reject func(string) bool) bool {
