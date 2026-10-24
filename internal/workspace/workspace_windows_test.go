@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 )
@@ -24,6 +25,15 @@ func TestWindowsSourcePaths(t *testing.T) {
 	} {
 		if got := validSourcePath(test.name); got != test.valid {
 			t.Errorf("validSourcePath(%q) = %t, want %t", test.name, got, test.valid)
+		}
+	}
+	for _, char := range []rune{'<', '>', '"', '|', '?', '*', '\x01', '\x1f'} {
+		name := "dir/file" + string(char) + ".go"
+		if validSourcePath(name) {
+			t.Errorf("accepted Windows-forbidden source path %q", name)
+		}
+		if err := ValidateSnapshot(Snapshot{Head: strings.Repeat("a", 40), Files: []File{{Path: name, Mode: Regular}}}); err == nil {
+			t.Errorf("accepted Windows-forbidden snapshot path %q", name)
 		}
 	}
 }

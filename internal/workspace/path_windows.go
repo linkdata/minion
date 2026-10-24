@@ -19,5 +19,6 @@ func validPlatformPath(name string) bool {
 
 func validWindowsComponent(part string) bool {
 	_, err := filepath.Localize(part)
-	return err == nil && strings.TrimRight(part, " .") == part
+	return err == nil && strings.TrimRight(part, " .") == part &&
+		!strings.ContainsAny(part, `<>"|?*`) && strings.IndexFunc(part, func(r rune) bool { return r < ' ' }) < 0
 }
