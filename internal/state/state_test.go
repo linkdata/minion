@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -57,8 +58,8 @@ func TestStoreLocksAndPersistsCompletedCommands(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0600 {
-		t.Fatalf("state mode %o, want 0600", info.Mode().Perm())
+	if !info.Mode().IsRegular() || runtime.GOOS == "windows" && info.Mode().Perm()&0200 == 0 || runtime.GOOS != "windows" && info.Mode().Perm() != 0600 {
+		t.Fatalf("state mode %v, want writable regular file (0600 on Unix)", info.Mode())
 	}
 }
 

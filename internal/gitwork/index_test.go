@@ -48,6 +48,102 @@ func writeIndexFixture(t *testing.T, source, name string, data []byte) {
 	writeFile(t, filepath.Join(source, name), string(data))
 }
 
+func TestFixIndexCaseOnlyRenameWithIgnoreCase(t *testing.T) {
+	for _, directory := range []bool{false, true} {
+		name := "README.md"
+		if directory {
+			name = "Docs/README.md"
+		}
+		t.Run(name, func(t *testing.T) {
+			index, source := offlineIndexFixture(t, []workspace.File{{Path: name, Mode: workspace.Regular, Data: []byte("fixture\n")}})
+			if _, err := index.run(t.Context(), 128, nil, "config", "core.ignoreCase", "true"); err != nil {
+				t.Fatal(err)
+			}
+			old, renamed := "README.md", "readme.md"
+			if directory {
+				old, renamed = "Docs", "docs"
+			}
+			intermediate := filepath.Join(source, "case-rename.tmp")
+			if err := os.Rename(filepath.Join(source, old), intermediate); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(intermediate, filepath.Join(source, renamed)); err != nil {
+				t.Fatal(err)
+			}
+			changes, err := index.Changes(t.Context())
+			if err != nil || len(changes) != 2 {
+				t.Fatalf("case-only rename changes=%+v error=%v", changes, err)
+			}
+			if changes[0].Path != name || !changes[0].Delete || changes[1].Path != strings.Replace(name, old, renamed, 1) || changes[1].Delete || string(changes[1].Data) != "fixture\n" {
+				t.Fatalf("case-only rename was not staged as deletion and addition: %+v", changes)
+			}
+		})
+	}
+}
+
+func TestFixIndexCaseOnlyRenameUsesCurrentIgnoreRules(t *testing.T) {
+	index, source := offlineIndexFixture(t, []workspace.File{
+		{Path: ".gitignore", Mode: workspace.Regular, Data: []byte("readme.md\n")},
+		{Path: "README.md", Mode: workspace.Regular, Data: []byte("fixture\n")},
+	})
+	if _, err := index.run(t.Context(), 128, nil, "config", "core.ignoreCase", "true"); err != nil {
+		t.Fatal(err)
+	}
+	intermediate := filepath.Join(source, "case-rename.tmp")
+	if err := os.Rename(filepath.Join(source, "README.md"), intermediate); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(intermediate, filepath.Join(source, "readme.md")); err != nil {
+		t.Fatal(err)
+	}
+	changes, err := index.Changes(t.Context())
+	if err != nil || len(changes) != 1 || changes[0].Path != "README.md" || !changes[0].Delete {
+		t.Fatalf("newly ignored spelling should stage only deletion: %+v, %v", changes, err)
+	}
+}
+
+func TestFixIndexCaseOnlyRenameBoundsNewPath(t *testing.T) {
+	index, source := offlineIndexFixture(t, []workspace.File{{Path: "README.md", Mode: workspace.Regular, Data: []byte("fixture\n")}})
+	if _, err := index.run(t.Context(), 128, nil, "config", "core.ignoreCase", "true"); err != nil {
+		t.Fatal(err)
+	}
+	intermediate := filepath.Join(source, "case-rename.tmp")
+	if err := os.Rename(filepath.Join(source, "README.md"), intermediate); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(intermediate, filepath.Join(source, "readme.md")); err != nil {
+		t.Fatal(err)
+	}
+	writeSparse(t, filepath.Join(source, "readme.md"), int64(workspace.MaxChangeBytes)+1)
+	if changes, err := index.Changes(t.Context()); changes != nil || err == nil || !strings.Contains(err.Error(), "byte limit") {
+		t.Fatalf("oversized renamed path reached Git hashing: %+v, %v", changes, err)
+	}
+}
+
+func TestFixIndexCaseSpellingScanSkipsIgnoredSiblings(t *testing.T) {
+	index, source := offlineIndexFixture(t, []workspace.File{
+		{Path: ".gitignore", Mode: workspace.Regular, Data: []byte("build/\n")},
+		{Path: "build/Docs/README.md", Mode: workspace.Regular, Data: []byte("fixture\n")},
+	})
+	if _, err := index.run(t.Context(), 128, nil, "config", "core.ignoreCase", "true"); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 260; i++ {
+		writeIndexFixture(t, source, fmt.Sprintf("build/%03d.tmp", i), []byte("ignored"))
+	}
+	intermediate := filepath.Join(source, "build", "case-rename.tmp")
+	if err := os.Rename(filepath.Join(source, "build", "Docs"), intermediate); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(intermediate, filepath.Join(source, "build", "docs")); err != nil {
+		t.Fatal(err)
+	}
+	changes, err := index.Changes(t.Context())
+	if err != nil || len(changes) != 1 || changes[0].Path != "build/Docs/README.md" || !changes[0].Delete {
+		t.Fatalf("ignored siblings changed case-only deletion: %+v, %v", changes, err)
+	}
+}
+
 func TestFixIndexPinsSHA1WhenGitDefaultsToSHA256(t *testing.T) {
 	realGit, err := exec.LookPath("git")
 	if err != nil {
@@ -861,6 +957,9 @@ func TestFixIndexSkipsUntrackedContentsOfIgnoredTrackedDirectory(t *testing.T) {
 		{Path: ".gitignore", Mode: workspace.Regular, Data: []byte("build/\n")},
 		{Path: "build/tracked/source", Mode: workspace.Regular, Data: []byte("before")},
 	})
+	if _, err := index.run(t.Context(), 128, nil, "config", "core.ignoreCase", "true"); err != nil {
+		t.Fatal(err)
+	}
 	for i := 0; i < workspace.MaxEntries; i++ {
 		f, err := os.Create(filepath.Join(source, "build", fmt.Sprint(i)))
 		if err != nil {
@@ -871,7 +970,7 @@ func TestFixIndexSkipsUntrackedContentsOfIgnoredTrackedDirectory(t *testing.T) {
 		}
 	}
 	writeIndexFixture(t, source, "build/tracked/source", []byte("after"))
-	changes, err := index.Changes(context.Background())
+	changes, err := index.Changes(t.Context())
 	want := []workspace.Change{{Path: "build/tracked/source", Mode: workspace.Regular, Data: []byte("after")}}
 	if err != nil || !reflect.DeepEqual(changes, want) {
 		t.Fatalf("ignored outputs changed tracked selection: %+v,%v", changes, err)

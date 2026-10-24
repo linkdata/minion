@@ -81,6 +81,19 @@ func TestNativeCodexSandboxEnforcement(t *testing.T) {
 	if err := os.WriteFile(gitFile, []byte("metadata"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	gitAlias := ""
+	if runtime.GOOS == "windows" {
+		alias := filepath.Join(workspace, ".GIT", "config")
+		original, err := os.Stat(gitFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if candidate, err := os.Stat(alias); err == nil && os.SameFile(original, candidate) {
+			gitAlias = alias
+		} else {
+			t.Log("case-insensitive .GIT alias is unavailable; skipping alias probe")
+		}
+	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("native network probe needs loopback listener: %v", err)
@@ -113,6 +126,7 @@ func TestNativeCodexSandboxEnforcement(t *testing.T) {
 		"MINION_NATIVE_SANDBOX_PRIVATE="+privateFile,
 		"MINION_NATIVE_SANDBOX_DATA_ALIAS="+dataAlias,
 		"MINION_NATIVE_SANDBOX_GIT="+gitFile,
+		"MINION_NATIVE_SANDBOX_GIT_ALIAS="+gitAlias,
 		"MINION_NATIVE_SANDBOX_NETWORK="+listener.Addr().String(),
 	)
 	output, err := cmd.CombinedOutput()
@@ -155,6 +169,14 @@ func TestNativeCodexSandboxProbeChild(t *testing.T) {
 	}
 	if err := os.WriteFile(filepath.Join(filepath.Dir(gitFile), "new"), []byte("changed"), 0o600); err == nil {
 		t.Fatal("sandboxed command created Git metadata")
+	}
+	if alias := os.Getenv("MINION_NATIVE_SANDBOX_GIT_ALIAS"); alias != "" {
+		if err := os.WriteFile(alias, []byte("changed"), 0o600); err == nil {
+			t.Fatal("sandboxed command overwrote Git metadata through .GIT alias")
+		}
+		if err := os.WriteFile(filepath.Join(filepath.Dir(alias), "new"), []byte("changed"), 0o600); err == nil {
+			t.Fatal("sandboxed command created Git metadata through .GIT alias")
+		}
 	}
 	if data, err := os.ReadFile(private); err == nil {
 		t.Fatalf("private host file was readable: %q", data)

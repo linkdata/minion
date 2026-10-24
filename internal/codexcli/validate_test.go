@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -202,8 +204,34 @@ func TestValidateReportsCLIExitAndHonorsTimeout(t *testing.T) {
 }
 
 func TestModelDiscoveryCancellationUnblocksScanner(t *testing.T) {
-	marker := filepath.Join(t.TempDir(), "started")
-	installFakeCodex(t, "#!/bin/sh\ntrap '' INT\nprintf x > "+aicli.ShellQuote(marker)+"\nexec sleep 8\n")
+	home := canonicalTempDir(t)
+	marker := filepath.Join(home, "started")
+	bin := t.TempDir()
+	source := filepath.Join(bin, "fake.go")
+	if err := os.WriteFile(source, []byte(`package main
+import (
+	"os"
+	"path/filepath"
+	"time"
+)
+func main() {
+	if err := os.WriteFile(filepath.Join(os.Getenv("CODEX_HOME"), "started"), []byte("x"), 0600); err != nil {
+		os.Exit(1)
+	}
+	time.Sleep(8 * time.Second)
+}
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	name := "codex"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	if output, err := exec.Command("go", "build", "-o", filepath.Join(bin, name), source).CombinedOutput(); err != nil {
+		t.Fatalf("build fake Codex: %v: %s", err, output)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CODEX_HOME", home)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	done := make(chan error, 1)

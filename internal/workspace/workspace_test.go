@@ -12,6 +12,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestMaterializeReadChangesAndApply(t *testing.T) {
@@ -270,7 +271,17 @@ func TestCaseOnlyRenameAppliesDeletionBeforeCreation(t *testing.T) {
 	}
 }
 
-func TestWorkspaceRefusesLinksAndNonemptyMaterialization(t *testing.T) {
+func TestMaterializeRefusesNonemptyRoot(t *testing.T) {
+	root := privateRoot(t)
+	if err := os.WriteFile(filepath.Join(root, "source"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Materialize(root, nil); err == nil || !strings.Contains(err.Error(), "not empty") {
+		t.Fatalf("nonempty root validation=%v", err)
+	}
+}
+
+func TestWorkspaceRefusesLinks(t *testing.T) {
 	root, outside := privateRoot(t), t.TempDir()
 	sentinel := filepath.Join(outside, "file")
 	if err := os.WriteFile(sentinel, []byte("outside"), 0600); err != nil {
@@ -278,14 +289,14 @@ func TestWorkspaceRefusesLinksAndNonemptyMaterialization(t *testing.T) {
 	}
 	for name, target := range map[string]string{"parent": outside, "target": sentinel} {
 		if err := os.Symlink(target, filepath.Join(root, name)); err != nil {
+			if runtime.GOOS == "windows" {
+				t.Skipf("Windows symlink fixture is unavailable: %v", err)
+			}
 			t.Fatal(err)
 		}
 	}
-	if err := CheckUnchanged(context.Background(), root, nil); err == nil || !strings.Contains(err.Error(), "workspace changed") {
+	if err := CheckUnchanged(t.Context(), root, nil); err == nil || !strings.Contains(err.Error(), "workspace changed") {
 		t.Fatalf("generated symlink validation=%v", err)
-	}
-	if err := Materialize(root, nil); err == nil || !strings.Contains(err.Error(), "not empty") {
-		t.Fatalf("nonempty root validation=%v", err)
 	}
 	for _, tc := range []struct {
 		name, path, want string
@@ -448,7 +459,7 @@ func TestApplyRootErrorDoesNotRequirePrivacy(t *testing.T) {
 		t.Fatal(err)
 	}
 	changes := []Change{{Path: "new", Mode: Regular, Data: []byte("imported")}}
-	if err := Apply(name, changes); err == nil || strings.Contains(err.Error(), "private") || runtime.GOOS != "windows" && !errors.Is(err, syscall.ENOTDIR) {
+	if err := Apply(name, changes); err == nil || strings.Contains(err.Error(), "private") || runtime.GOOS == "windows" && !strings.Contains(err.Error(), "not a plain directory") || runtime.GOOS != "windows" && !errors.Is(err, syscall.ENOTDIR) {
 		t.Fatalf("incorrect root requirement: %v", err)
 	}
 	if data, err := os.ReadFile(name); err != nil || string(data) != "unchanged" {
@@ -689,6 +700,9 @@ func TestCheckUnchangedRefusesUnsafeWorkerNames(t *testing.T) {
 			label += "-directory"
 		}
 		t.Run(label, func(t *testing.T) {
+			if runtime.GOOS == "windows" && (strings.Contains(test.name, "\\") || !utf8.ValidString(test.name)) {
+				t.Skip("Windows cannot create this literal filename")
+			}
 			root := t.TempDir()
 			name := filepath.Join(root, test.name)
 			if test.directory {
@@ -702,7 +716,7 @@ func TestCheckUnchangedRefusesUnsafeWorkerNames(t *testing.T) {
 			if test.name == "new\\output" {
 				want = "workspace changed"
 			}
-			if err := CheckUnchanged(context.Background(), root, nil); err == nil || !strings.Contains(err.Error(), want) {
+			if err := CheckUnchanged(t.Context(), root, nil); err == nil || !strings.Contains(err.Error(), want) {
 				t.Fatalf("unsafe worker name %q validation=%v", test.name, err)
 			}
 		})

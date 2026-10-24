@@ -116,27 +116,33 @@ func TestInstalledPathRequiresMatchingSafeInstallation(t *testing.T) {
 			if path, installed, err := tt.lookup(testURL); err != nil || !installed || path != filepath.Join(dir, "SKILL.md") {
 				t.Fatalf("installed skill = %q, %t, %v", path, installed, err)
 			}
-			realDir := dir + "-installed"
-			if err := os.Rename(dir, realDir); err != nil {
-				t.Fatal(err)
-			}
-			symlinkFixture(t, realDir, dir)
-			if path, installed, err := tt.lookup(testURL); err == nil || installed || path != "" || !strings.Contains(err.Error(), "must not be a symlink") {
-				t.Fatalf("symlinked skill directory = %q, %t, %v", path, installed, err)
-			}
-			if err := os.Remove(dir); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Rename(realDir, dir); err != nil {
-				t.Fatal(err)
-			}
 			if _, installed, err := tt.lookup("https://github.com/other/skills/tree/main/skills/review"); err == nil || installed {
 				t.Fatalf("mismatched source = %t, %v", installed, err)
 			}
-			symlinkFixture(t, t.TempDir(), filepath.Join(dir, "outside"))
-			if _, installed, err := tt.lookup(testURL); err == nil || installed {
-				t.Fatalf("symlink in skill = %t, %v", installed, err)
-			}
+			t.Run("symlinked directory", func(t *testing.T) {
+				realDir := dir + "-installed"
+				if err := os.Rename(dir, realDir); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() {
+					if err := os.Remove(dir); err != nil && !os.IsNotExist(err) {
+						t.Error(err)
+					}
+					if err := os.Rename(realDir, dir); err != nil {
+						t.Error(err)
+					}
+				})
+				symlinkFixture(t, realDir, dir)
+				if path, installed, err := tt.lookup(testURL); err == nil || installed || path != "" || !strings.Contains(err.Error(), "must not be a symlink") {
+					t.Fatalf("symlinked skill directory = %q, %t, %v", path, installed, err)
+				}
+			})
+			t.Run("symlink in skill", func(t *testing.T) {
+				symlinkFixture(t, t.TempDir(), filepath.Join(dir, "outside"))
+				if _, installed, err := tt.lookup(testURL); err == nil || installed {
+					t.Fatalf("symlink in skill = %t, %v", installed, err)
+				}
+			})
 		})
 	}
 }

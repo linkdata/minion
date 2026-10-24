@@ -133,7 +133,7 @@ func TestWorkRootPreflightRequiresWorkspaceBackend(t *testing.T) {
 		t.Fatal(err)
 	}
 	err := checkIsolation(config.Config{Main: "codex", WorkRoot: file}, filepath.Join(root, "config.json"))
-	if !errors.Is(err, workroot.ErrUnsafe) || !errors.Is(err, syscall.ENOTDIR) {
+	if !errors.Is(err, workroot.ErrUnsafe) || runtime.GOOS == "windows" && !strings.Contains(err.Error(), "not a plain directory") || runtime.GOOS != "windows" && !errors.Is(err, syscall.ENOTDIR) {
 		t.Fatalf("startup did not enforce the workspace backend: %v", err)
 	}
 }

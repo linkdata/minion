@@ -56,7 +56,7 @@ func TestRunCancellationStopsDirectCommand(t *testing.T) {
 		if err == nil || cmd.ProcessState == nil {
 			t.Fatalf("canceled direct command did not exit with an error: %v", err)
 		}
-	case <-guard.C:
+	case <-time.After(10 * time.Second):
 		t.Fatal("canceled direct command did not exit promptly")
 	}
 }

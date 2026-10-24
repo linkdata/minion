@@ -146,8 +146,8 @@ func listModels(ctx context.Context, settings config.CodexConfig) (models []mode
 		return nil, err
 	}
 	stopReader := context.AfterFunc(ctx, func() { _ = stdout.Close() })
-	defer stopReader()
 	defer func() {
+		stopReader()
 		contextErr := ctx.Err()
 		cancel()
 		if waitErr := cmd.Wait(); !expectedDiscoveryStop(waitErr, directStopSent.Load()) {

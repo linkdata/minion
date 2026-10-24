@@ -249,15 +249,13 @@ func TestRepositoryRejectsUnrelatedComparison(t *testing.T) {
 
 func TestRepositoryOmitsLinksWithoutReportingDeletions(t *testing.T) {
 	fixture := newFixture(t)
-	if err := os.Symlink("../outside", filepath.Join(fixture.source, "link")); err != nil {
-		t.Fatal(err)
-	}
-	fixture.git(fixture.source, "add", "link")
+	linkBlob := fixture.gitInput(fixture.source, "../outside", "hash-object", "-w", "--stdin")
+	fixture.git(fixture.source, "update-index", "--add", "--cacheinfo", "120000,"+linkBlob+",link")
 	fixture.git(fixture.source, "update-index", "--add", "--cacheinfo", "160000,"+fixture.base+",sub")
 	fixture.git(fixture.source, "commit", "-m", "omitted symlink and gitlink")
 	fixture.git(fixture.source, "push", fixture.remote, "main")
 	checkout := fixture.clone()
-	snapshot, err := checkout.Snapshot(context.Background())
+	snapshot, err := checkout.Snapshot(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -271,7 +269,7 @@ func TestRepositoryOmitsLinksWithoutReportingDeletions(t *testing.T) {
 	}
 	assertModelRepositoryGit(t, source, "../outside", "show", "HEAD:link")
 	assertModelRepositoryGit(t, source, "160000 commit "+fixture.base+"\tsub\n", "ls-tree", "HEAD", "sub")
-	if err := repo.Verify(context.Background()); err != nil {
+	if err := repo.Verify(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"link", "sub"} {
@@ -283,7 +281,7 @@ func TestRepositoryOmitsLinksWithoutReportingDeletions(t *testing.T) {
 					invalid.Omitted = append(invalid.Omitted, other)
 				}
 			}
-			repo, err := MaterializeRepository(context.Background(), repositorySource(t, invalid.Files), invalid)
+			repo, err := MaterializeRepository(t.Context(), repositorySource(t, invalid.Files), invalid)
 			if repo != nil || err == nil || !strings.Contains(err.Error(), fmt.Sprintf("head omitted source path %q is not omitted", name)) {
 				t.Fatalf("undeclared %s returned repository=%v error=%v", name, repo, err)
 			}
@@ -586,20 +584,20 @@ func TestRepositoryVerifyRejectsMetadataMutations(t *testing.T) {
 				saved := filepath.Join(t.TempDir(), "saved.git")
 				if err = os.Rename(dir, saved); err == nil {
 					if scenario.name == "root symlink" {
-						err = os.Symlink(saved, dir)
+						symlinkOrSkip(t, saved, dir)
 					} else {
 						err = os.WriteFile(dir, []byte("replacement metadata"), 0600)
 					}
 				}
 			case "added symlink":
-				err = os.Symlink("config", filepath.Join(dir, "added"))
+				symlinkOrSkip(t, "config", filepath.Join(dir, "added"))
 			case "hard link":
 				err = os.Link(filepath.Join(dir, "config"), filepath.Join(t.TempDir(), "extra-link"))
 			}
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := repo.Verify(context.Background()); err == nil || !strings.Contains(err.Error(), scenario.want) {
+			if err := repo.Verify(t.Context()); err == nil || !strings.Contains(err.Error(), scenario.want) {
 				t.Fatalf("metadata mutation %q error=%v; want %q", scenario.name, err, scenario.want)
 			}
 		})

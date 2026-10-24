@@ -70,7 +70,11 @@ func TestRunnerCancellationDuringInstalledAuditValidatorPreservesCause(t *testin
 	}()
 	defer func() {
 		cancel()
-		<-done
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Error("canceled runner did not exit")
+		}
 	}()
 	guard := time.NewTimer(10 * time.Second)
 	defer guard.Stop()
@@ -90,7 +94,7 @@ func TestRunnerCancellationDuringInstalledAuditValidatorPreservesCause(t *testin
 		if !errors.Is(got.err, context.Canceled) || !errors.Is(got.err, monitor.ErrTerminalJob) || !strings.Contains(got.err.Error(), "audit validate-findings.cjs failed") || len(got.result.Calls) != 1 || got.result.Answer != "" {
 			t.Fatalf("validator cancellation lost cause or publishable boundary: calls=%d answer=%q error=%v", len(got.result.Calls), got.result.Answer, got.err)
 		}
-	case <-guard.C:
+	case <-time.After(10 * time.Second):
 		t.Fatal("cancelled validator did not stop")
 	}
 }

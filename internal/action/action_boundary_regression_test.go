@@ -31,8 +31,12 @@ func TestPrivateHostPathsCannotBeExposedByModelGrants(t *testing.T) {
 			if err := os.Mkdir(public, 0700); err != nil {
 				t.Fatal(err)
 			}
-			binary := filepath.Join(public, provider)
-			writeFixtureFile(t, public, provider, []byte("inert installed executable"))
+			executable := provider
+			if runtime.GOOS == "windows" {
+				executable += ".exe"
+			}
+			binary := filepath.Join(public, executable)
+			writeFixtureFile(t, public, executable, []byte("inert installed executable"))
 			if err := os.Chmod(binary, 0700); err != nil {
 				t.Fatal(err)
 			}
@@ -40,7 +44,6 @@ func TestPrivateHostPathsCannotBeExposedByModelGrants(t *testing.T) {
 			secret := filepath.Join(outside, "auth.json")
 			writeFixtureFile(t, outside, "auth.json", nil)
 			linked := filepath.Join(home, "auth.json")
-			symlinkOrSkip(t, secret, linked)
 			future := filepath.Join(outside, "new", "auth.json")
 			for _, test := range []struct {
 				name, protected, grant string
@@ -53,6 +56,9 @@ func TestPrivateHostPathsCannotBeExposedByModelGrants(t *testing.T) {
 				{"future auth exposure", future, outside, true},
 			} {
 				t.Run(test.name, func(t *testing.T) {
+					if test.name == "symlinked auth outside home" {
+						symlinkOrSkip(t, secret, linked)
+					}
 					writeFixtureFile(t, test.grant, "SKILL.md", []byte("public skill"))
 					skill := filepath.Join(test.grant, "SKILL.md")
 					runner := Runner{}

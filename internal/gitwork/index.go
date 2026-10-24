@@ -141,6 +141,22 @@ func (index *OfflineIndex) Changes(ctx context.Context) ([]workspace.Change, err
 	if _, err := index.run(ctx, 1024, nil, "read-tree", index.baseline); err != nil {
 		return nil, err
 	}
+	ignoreCase, err := index.run(ctx, 16, nil, "config", "--bool", "--default=false", "core.ignoreCase")
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(string(ignoreCase)) == "true" {
+		// Git keeps the old index spelling for case-only renames until it is removed.
+		stale, err := index.caseRenamedPaths(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if len(stale) != 0 {
+			if _, err := index.run(ctx, 1024, stale, "update-index", "--force-remove", "-z", "--stdin"); err != nil {
+				return nil, err
+			}
+		}
+	}
 	// Bound new output before Git hashes it; ignored files and metadata remain excluded.
 	untracked, err := index.run(ctx, maxChangedPathListBytes, nil, "ls-files", "-z", "--others", "--exclude-standard", "--", ".", excludeGit, excludeGitContents)
 	if err != nil {
@@ -205,6 +221,108 @@ func (index *OfflineIndex) Changes(ctx context.Context) ([]workspace.Change, err
 		return nil, err
 	}
 	return changes, nil
+}
+
+// caseRenamedPaths finds tracked names whose on-disk spelling changed under Git's case folding.
+func (index *OfflineIndex) caseRenamedPaths(ctx context.Context) ([]byte, error) {
+	type wantedNames struct {
+		exact, folded map[string]bool
+	}
+	wanted := map[string]wantedNames{}
+	for name := range index.tracked {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		parent := "."
+		for _, part := range strings.Split(name, "/") {
+			key := workspace.FoldPath(parent)
+			names := wanted[key]
+			if names.exact == nil {
+				names = wantedNames{exact: map[string]bool{}, folded: map[string]bool{}}
+			}
+			names.exact[part] = true
+			names.folded[workspace.FoldPath(part)] = true
+			wanted[key] = names
+			parent = path.Join(parent, part)
+		}
+	}
+	directories := map[string]map[string][]string{}
+	var stale []byte
+	for _, name := range slices.Sorted(maps.Keys(index.tracked)) {
+		actual := "."
+		found := true
+		for _, part := range strings.Split(name, "/") {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			names, cached := directories[actual]
+			if !cached {
+				filename := filepath.Join(index.source, filepath.FromSlash(actual))
+				f, err := workspace.OpenDirectory(filename)
+				if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
+					found = false
+					break
+				}
+				if err != nil {
+					return nil, fmt.Errorf("inspect fix directory %q: %w", actual, err)
+				}
+				names = map[string][]string{}
+				need := wanted[workspace.FoldPath(actual)]
+				remaining := len(need.exact)
+				for {
+					if err := ctx.Err(); err != nil {
+						_ = f.Close()
+						return nil, err
+					}
+					entries, readErr := f.ReadDir(128)
+					for _, entry := range entries {
+						key := workspace.FoldPath(entry.Name())
+						if need.folded[key] && (need.exact[entry.Name()] || len(names[key]) < 2) {
+							names[key] = append(names[key], entry.Name())
+						}
+						if need.exact[entry.Name()] {
+							remaining--
+						}
+					}
+					if readErr != nil && !errors.Is(readErr, io.EOF) {
+						_ = f.Close()
+						return nil, fmt.Errorf("inspect fix directory %q: %w", actual, readErr)
+					}
+					if remaining == 0 || errors.Is(readErr, io.EOF) {
+						break
+					}
+				}
+				if err := f.Close(); err != nil {
+					return nil, fmt.Errorf("inspect fix directory %q: %w", actual, err)
+				}
+				directories[actual] = names
+			}
+			matches := names[workspace.FoldPath(part)]
+			if len(matches) == 0 {
+				found = false
+				break
+			}
+			spelling := ""
+			for _, match := range matches {
+				if match == part {
+					spelling = part
+					break
+				}
+			}
+			if spelling == "" {
+				if len(matches) != 1 {
+					return nil, fmt.Errorf("ambiguous case-folded fix path %q", name)
+				}
+				spelling = matches[0]
+			}
+			actual = path.Join(actual, spelling)
+		}
+		if found && actual != name {
+			stale = append(stale, name...)
+			stale = append(stale, 0)
+		}
+	}
+	return stale, nil
 }
 
 // Check control-file shapes before Git can open FIFOs while discovering output.
@@ -438,7 +556,7 @@ func (index *OfflineIndex) run(ctx context.Context, limit int, input []byte, arg
 	cmd.Stdout, cmd.Stderr, cmd.Stdin = &output, &diagnostic, bytes.NewReader(input)
 	err := executil.Run(cmd)
 	contextErr := ctx.Err()
-	if output.Exceeded && contextErr == nil {
+	if output.Exceeded && contextErr == nil && !errors.Is(err, exec.ErrWaitDelay) {
 		return nil, fmt.Errorf("offline git %s output exceeds action limit: %w", args[0], ErrCheckoutTooLarge)
 	}
 	if err != nil || contextErr != nil {
