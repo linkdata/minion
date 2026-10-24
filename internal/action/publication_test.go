@@ -364,6 +364,27 @@ func TestPublishedRefutationsRejectMarkedSentenceCopies(t *testing.T) {
 	}
 }
 
+func TestPublishedRefutationsRejectInlineMarkdownSentenceCopies(t *testing.T) {
+	const private = "The first private review sentence stays internal. The second private review sentence stays internal."
+	const copied = "The second private review sentence stays internal."
+	for _, marker := range []string{"**", "_", "`"} {
+		t.Run(marker, func(t *testing.T) {
+			job := withClaudeCritic(testJob(command.Comment))
+			result := privateReviewResult(job)
+			result.Refutations[0].Text = private
+			result.Answer = "Public reply: " + marker + copied + marker
+			projected, err := projectPublication(job, result)
+			if err != nil || rejectPublishedRefutations(job, result, projected) == nil {
+				t.Fatalf("inline Markdown copied a private sentence: %v", err)
+			}
+			job.Source.Files[0].Data = []byte(copied + "\n")
+			if err := rejectPublishedRefutations(job, result, projected); err != nil {
+				t.Fatalf("existing public source quote was blocked: %v", err)
+			}
+		})
+	}
+}
+
 func TestPublishedRefutationsRejectQuotedAndIdeographicSentenceCopies(t *testing.T) {
 	for _, test := range []struct {
 		name, private, answer, sourceQuote string

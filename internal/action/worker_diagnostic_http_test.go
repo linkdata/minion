@@ -543,6 +543,7 @@ func TestHTTPResultCannotPublishPrivateRefutation(t *testing.T) {
 		{"nested indented quote leaders", "PRIVATE reviewer notes must stay private", "Public reply.\n  > >PRIVATE reviewer notes must stay private"},
 		{"collapsed whitespace", "The private refutation describes a missing access control check.\nThe same account cannot act for another user.", "Public reply. The private refutation describes a missing access control check. The same account cannot act for another user."},
 		{"one substantive sentence", "The private refutation describes a missing access control check.\nThe same account cannot act for another user.", "Public reply. The same account cannot act for another user."},
+		{"inline Markdown sentence", "The private refutation describes a missing access control check.\nThe same account cannot act for another user.", "Public reply: **The same account cannot act for another user.**"},
 		{"Markdown bullet leader", "The private refutation describes a missing access control check.\nThe same account cannot act for another user.", "Public reply.\n- The same account cannot act for another user."},
 		{"Markdown bullet after plain line", "The private refutation describes a missing access control check.\nThe same account cannot act for another user.", "Public reply\n- The same account cannot act for another user."},
 	} {

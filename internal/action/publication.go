@@ -128,7 +128,7 @@ func rejectPublishedRefutations(job Job, result Result, projected publication) e
 				}
 			}
 			for _, sentence := range strings.FieldsFunc(variant, publicationSentenceBreak) {
-				if text := foldPublicationSpace(sentence); utf8.RuneCountInString(text) >= minCopyRunes {
+				if text := foldPublicationSentence(sentence); utf8.RuneCountInString(text) >= minCopyRunes {
 					sentences[text] = true
 				}
 			}
@@ -146,7 +146,7 @@ func rejectPublishedRefutations(job Job, result Result, projected publication) e
 				}
 			}
 			for _, sentence := range strings.FieldsFunc(variant, publicationSentenceBreak) {
-				if text := foldPublicationSpace(sentence); sentences[text] && reject(text) {
+				if text := foldPublicationSentence(sentence); sentences[text] && reject(text) {
 					return true
 				}
 			}
@@ -164,7 +164,7 @@ func rejectPublishedRefutations(job Job, result Result, projected publication) e
 					continue
 				}
 				for _, sentence := range strings.FieldsFunc(line[markerEnd+1:], publicationSentenceBreak) {
-					if text := foldPublicationSpace(sentence); sentences[text] && reject(text) {
+					if text := foldPublicationSentence(sentence); sentences[text] && reject(text) {
 						return true
 					}
 				}
@@ -301,6 +301,10 @@ func rejectPublishedRefutations(job Job, result Result, projected publication) e
 
 func publicationSentenceBreak(r rune) bool {
 	return r == '.' || r == ';' || r == ':' || r == '!' || r == '?' || r == '"' || r == '。'
+}
+
+func foldPublicationSentence(text string) string {
+	return foldPublicationSpace(strings.Trim(strings.TrimSpace(text), "*_`"))
 }
 
 func foldPublicationSpace(text string) string {
