@@ -84,7 +84,7 @@ func TestFixIndexCaseOnlyRenameWithIgnoreCase(t *testing.T) {
 func TestFixIndexCaseOnlyRenameUsesCurrentIgnoreRules(t *testing.T) {
 	index, source := offlineIndexFixture(t, []workspace.File{
 		{Path: ".gitignore", Mode: workspace.Regular, Data: []byte("readme.md\n")},
-		{Path: "README.md", Mode: workspace.Regular, Data: []byte("fixture\n")},
+		{Path: "README.md", Mode: workspace.Executable, Data: []byte("fixture\n")},
 	})
 	if _, err := index.run(t.Context(), 128, nil, "config", "core.ignoreCase", "true"); err != nil {
 		t.Fatal(err)

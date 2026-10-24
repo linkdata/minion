@@ -31,3 +31,18 @@ func TestFixIndexCaseOnlyRenameOnWindows(t *testing.T) {
 		t.Fatalf("Windows case-only rename changes=%+v error=%v", changes, err)
 	}
 }
+
+func TestFixIndexPreservesExecutableCaseOnlyRenameOnWindows(t *testing.T) {
+	index, source := offlineIndexFixture(t, []workspace.File{{Path: "TOOL.sh", Mode: workspace.Executable, Data: []byte("#!/bin/sh\n")}})
+	intermediate := filepath.Join(source, "case-rename.tmp")
+	if err := os.Rename(filepath.Join(source, "TOOL.sh"), intermediate); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(intermediate, filepath.Join(source, "tool.sh")); err != nil {
+		t.Fatal(err)
+	}
+	changes, err := index.Changes(t.Context())
+	if err != nil || len(changes) != 2 || changes[0].Path != "TOOL.sh" || !changes[0].Delete || changes[1].Path != "tool.sh" || changes[1].Delete || changes[1].Mode != workspace.Executable || string(changes[1].Data) != "#!/bin/sh\n" {
+		t.Fatalf("Windows executable case-only rename changes=%+v error=%v", changes, err)
+	}
+}

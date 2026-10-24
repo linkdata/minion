@@ -37,6 +37,7 @@ const (
 type OfflineIndex struct {
 	dir, source, binary, baseline string
 	tracked                       map[string]int64
+	executable                    map[string]bool
 	controls                      map[string][sha256.Size]byte
 }
 
@@ -50,9 +51,12 @@ func NewOfflineIndex(ctx context.Context, dir, source string, files []workspace.
 	if err != nil {
 		return nil, fmt.Errorf("offline fix index requires git: %w", err)
 	}
-	index := &OfflineIndex{dir: dir, source: source, binary: binary, tracked: make(map[string]int64, len(files)), controls: make(map[string][sha256.Size]byte)}
+	index := &OfflineIndex{dir: dir, source: source, binary: binary, tracked: make(map[string]int64, len(files)), executable: make(map[string]bool), controls: make(map[string][sha256.Size]byte)}
 	for _, file := range files {
 		index.tracked[file.Path] = int64(len(file.Data))
+		if file.Mode == workspace.Executable {
+			index.executable[file.Path] = true
+		}
 		switch path.Base(file.Path) {
 		case ".gitignore", ".gitattributes":
 			index.controls[file.Path] = sha256.Sum256(file.Data)
@@ -145,6 +149,7 @@ func (index *OfflineIndex) Changes(ctx context.Context) ([]workspace.Change, err
 	if err != nil {
 		return nil, err
 	}
+	var renamedExecutable map[string]bool
 	if strings.TrimSpace(string(ignoreCase)) == "true" {
 		// Git keeps the old index spelling for case-only renames until it is removed.
 		stale, err := index.caseRenamedPaths(ctx)
@@ -154,6 +159,15 @@ func (index *OfflineIndex) Changes(ctx context.Context) ([]workspace.Change, err
 		if len(stale) != 0 {
 			if _, err := index.run(ctx, 1024, stale, "update-index", "--force-remove", "-z", "--stdin"); err != nil {
 				return nil, err
+			}
+			if runtime.GOOS == "windows" {
+				// Git cannot infer the executable bit from a newly spelled Windows file.
+				renamedExecutable = make(map[string]bool)
+				for _, old := range bytes.Split(stale, []byte{0}) {
+					if index.executable[string(old)] {
+						renamedExecutable[workspace.FoldPath(string(old))] = true
+					}
+				}
 			}
 		}
 	}
@@ -172,6 +186,7 @@ func (index *OfflineIndex) Changes(ctx context.Context) ([]workspace.Change, err
 	if len(paths) > workspace.MaxChanges {
 		return nil, fmt.Errorf("%w: fix result exceeds changed file limit", ErrTooManyFiles)
 	}
+	var executablePaths []byte
 	for _, record := range paths {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -188,10 +203,19 @@ func (index *OfflineIndex) Changes(ctx context.Context) ([]workspace.Change, err
 			return nil, fmt.Errorf("fix output %q is not regular or exceeds changed byte limit", name)
 		}
 		total += info.Size()
+		if renamedExecutable[workspace.FoldPath(name)] {
+			executablePaths = append(executablePaths, record...)
+			executablePaths = append(executablePaths, 0)
+		}
 	}
 	// shortcut: size prechecks can race and do not cap Git I/O; use VM or container storage limits if hard bounds become required.
 	if _, err := index.run(ctx, 1024, nil, "add", "--all", "--", ".", excludeGit, excludeGitContents); err != nil {
 		return nil, err
+	}
+	if len(executablePaths) != 0 {
+		if _, err := index.run(ctx, 1024, executablePaths, "update-index", "--chmod=+x", "-z", "--stdin"); err != nil {
+			return nil, fmt.Errorf("restore renamed executable source modes: %w", err)
+		}
 	}
 	raw, err := index.run(ctx, maxChangedPathListBytes, nil, "diff", "--cached", "--raw", "-z", "--no-abbrev", "--no-renames", "--no-ext-diff", "--no-textconv", index.baseline, "--")
 	if err != nil {

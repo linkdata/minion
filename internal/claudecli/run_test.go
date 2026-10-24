@@ -134,13 +134,14 @@ func readFile(t *testing.T, path string) string {
 }
 
 func TestUnixSocketWorkaround(t *testing.T) {
+	defaultSockets := runtime.GOOS == "linux"
 	for _, tc := range []struct {
 		name, fields string
 		want         bool
 	}{
-		{name: "omitted claude", want: true},
-		{name: "empty claude", fields: `,"claude":{}`, want: true},
-		{name: "null", fields: `,"claude":{"allow_all_unix_sockets":null}`, want: true},
+		{name: "omitted claude", want: defaultSockets},
+		{name: "empty claude", fields: `,"claude":{}`, want: defaultSockets},
+		{name: "null", fields: `,"claude":{"allow_all_unix_sockets":null}`, want: defaultSockets},
 		{name: "enabled", fields: `,"claude":{"allow_all_unix_sockets":true}`, want: true},
 		{name: "disabled", fields: `,"claude":{"allow_all_unix_sockets":false}`},
 	} {
@@ -336,7 +337,11 @@ printf '%s\n' '`+successfulResult+`'
 				t.Fatalf("--add-dir grants = %v, want %v", addDirs, wantAddDirs)
 			}
 			cwd := strings.TrimSpace(readFile(t, binary+".cwd"))
-			wantReads := append(SystemReadPaths(), workspace, cwd, output, reports, skillDir)
+			systemReads, err := effectiveSystemReadPaths()
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantReads := append(systemReads, workspace, cwd, output, reports, skillDir)
 			wantWrites := []string{cwd, output}
 			if writable {
 				wantWrites = append(wantWrites, workspace)

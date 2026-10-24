@@ -72,6 +72,14 @@ printf '%s\n' '{"type":"thread.started","thread_id":"test"}' '{"type":"item.comp
 			}
 			runtimeDir := strings.TrimSpace(string(tmp))
 			got := strings.Split(strings.TrimSuffix(string(args), "\n"), "\n")
+			systemRules := systemGrantRules(runtime.GOOS, nil)
+			if runtime.GOOS != "linux" {
+				paths, err := nativeSystemReadPaths()
+				if err != nil {
+					t.Fatal(err)
+				}
+				systemRules = systemGrantRules(runtime.GOOS, paths)
+			}
 			want := []string{
 				"exec", "--json", "--ignore-user-config", "--ignore-rules", "--strict-config", "--skip-git-repo-check",
 				"--disable", "apps", "--disable", "browser_use", "--disable", "browser_use_external",
@@ -87,7 +95,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"test"}' '{"type":"item.comp
 				"-c", `shell_environment_policy.set.GIT_CONFIG_KEY_0="safe.bareRepository"`,
 				"-c", `shell_environment_policy.filters={"PATH"="include","HOME"="include","TMPDIR"="include","TMP"="include","TEMP"="include","GOCACHE"="include","GIT_CONFIG_NOSYSTEM"="include","GIT_CONFIG_GLOBAL"="include","GIT_CONFIG_COUNT"="include","GIT_CONFIG_KEY_0"="include","GIT_CONFIG_VALUE_0"="include","GIT_ATTR_NOSYSTEM"="include","GIT_NO_REPLACE_OBJECTS"="include","GIT_NO_LAZY_FETCH"="include","GIT_OPTIONAL_LOCKS"="include","LANG"="include","LC_ALL"="include","LC_CTYPE"="include","TERM"="include"}`,
 				"-c", `default_permissions="minion"`,
-				"-c", fmt.Sprintf(`permissions.minion.filesystem={":root"="deny",":minimal"="read",":tmpdir"="write",%s=%q,%s="read",%s="read",%s="read",%s="read",%s="read",%s="read",%s="read",%s="read"}`, strconv.Quote(dir), tt.access, strconv.Quote(filepath.Join(dir, ".git")), strconv.Quote(filepath.Join(dir, ".agents")), strconv.Quote(filepath.Join(dir, ".codex")), strconv.Quote(filepath.Join(dir, ".claude")), strconv.Quote(filepath.Join(runtimeDir, ".git")), strconv.Quote(filepath.Join(runtimeDir, ".agents")), strconv.Quote(filepath.Join(runtimeDir, ".codex")), strconv.Quote(fakeCodex)),
+				"-c", fmt.Sprintf(`permissions.minion.filesystem={":root"="deny",%s,":tmpdir"="write",%s=%q,%s="read",%s="read",%s="read",%s="read",%s="read",%s="read",%s="read",%s="read"}`, strings.Join(systemRules, ","), strconv.Quote(dir), tt.access, strconv.Quote(filepath.Join(dir, ".git")), strconv.Quote(filepath.Join(dir, ".agents")), strconv.Quote(filepath.Join(dir, ".codex")), strconv.Quote(filepath.Join(dir, ".claude")), strconv.Quote(filepath.Join(runtimeDir, ".git")), strconv.Quote(filepath.Join(runtimeDir, ".agents")), strconv.Quote(filepath.Join(runtimeDir, ".codex")), strconv.Quote(fakeCodex)),
 				"-c", "permissions.minion.network.enabled=false",
 				"--", "-",
 			}

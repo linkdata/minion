@@ -280,6 +280,19 @@ func (c *Checkout) Import(ctx context.Context, expectedHead string, changes []wo
 	if err := workspace.Apply(c.path, changes); err != nil {
 		return err
 	}
+	// Git add can keep the old index spelling for case-only renames with core.ignoreCase.
+	var deleted strings.Builder
+	for _, change := range changes {
+		if change.Delete {
+			deleted.WriteString(change.Path)
+			deleted.WriteByte(0)
+		}
+	}
+	if deleted.Len() != 0 {
+		if err := runGitInputTo(ctx, c.path, strings.NewReader(deleted.String()), io.Discard, "update-index", "--force-remove", "-z", "--stdin"); err != nil {
+			return fmt.Errorf("stage imported deletions: %w", err)
+		}
+	}
 	if _, err := runGit(ctx, c.path, "add", "--all", "--", "."); err != nil {
 		return fmt.Errorf("stage imported changes: %w", err)
 	}
