@@ -137,6 +137,49 @@ func rejectPublishedRefutations(job Job, result Result, projected publication) e
 	if len(exact) == 0 {
 		return nil
 	}
+	type sentenceSuffix struct {
+		children map[byte]*sentenceSuffix
+		terminal bool
+	}
+	// Match sentence suffixes in one pass through each public sentence, even for large Fix files.
+	var suffixes sentenceSuffix
+	for text := range sentences {
+		node := &suffixes
+		for i := len(text) - 1; i >= 0; i-- {
+			if node.children == nil {
+				node.children = make(map[byte]*sentenceSuffix)
+			}
+			if node.children[text[i]] == nil {
+				node.children[text[i]] = new(sentenceSuffix)
+			}
+			node = node.children[text[i]]
+		}
+		node.terminal = true
+	}
+	sentenceCopy := func(text string, reject func(string) bool) bool {
+		text = foldPublicationSentence(text)
+		node := &suffixes
+		for i := len(text); i > 0; {
+			i--
+			node = node.children[text[i]]
+			if node == nil {
+				break
+			}
+			if !node.terminal {
+				continue
+			}
+			if i > 0 {
+				before, _ := utf8.DecodeLastRuneInString(text[:i])
+				if unicode.IsLetter(before) || unicode.IsNumber(before) || unicode.IsMark(before) || before == '_' {
+					continue
+				}
+			}
+			if reject(text[i:]) {
+				return true
+			}
+		}
+		return false
+	}
 	containsCopy := func(text string, reject func(string) bool) bool {
 		for _, variant := range publicationTextVariants(text) {
 			folded := foldPublicationSpace(variant)
@@ -146,27 +189,8 @@ func rejectPublishedRefutations(job Job, result Result, projected publication) e
 				}
 			}
 			for _, sentence := range strings.FieldsFunc(variant, publicationSentenceBreak) {
-				if text := foldPublicationSentence(sentence); sentences[text] && reject(text) {
+				if sentenceCopy(sentence, reject) {
 					return true
-				}
-			}
-			for line := range strings.SplitSeq(variant, "\n") {
-				line = strings.TrimLeft(line, " \t")
-				if len(line) < minCopyRunes+2 {
-					continue
-				}
-				markerEnd := strings.IndexAny(line, " \t")
-				if markerEnd < 1 || markerEnd > 6 {
-					continue
-				}
-				marker := line[:markerEnd]
-				if marker != "-" && marker != "*" && marker != "+" && marker != "//" && strings.Trim(marker, "#") != "" {
-					continue
-				}
-				for _, sentence := range strings.FieldsFunc(line[markerEnd+1:], publicationSentenceBreak) {
-					if text := foldPublicationSentence(sentence); sentences[text] && reject(text) {
-						return true
-					}
 				}
 			}
 		}

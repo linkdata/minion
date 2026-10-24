@@ -32,6 +32,7 @@ func TestExecuteRejectsHostileHTTPOutcomeBeforePublication(t *testing.T) {
 		{"invisible answer", "invisible answer", false, false},
 		{"changed acknowledged usage", "usage", false, true},
 		{"changed acknowledged refutation", "refutation", true, true},
+		{"prefixed private sentence", "prefixed refutation", true, true},
 		{"changed acknowledged decision", "decision", true, false},
 		{"incomplete critic receipt forged approval", "incomplete critic", true, true},
 		{"failed outcome after paid call", "failed outcome", false, true},
@@ -92,6 +93,10 @@ func TestExecuteRejectsHostileHTTPOutcomeBeforePublication(t *testing.T) {
 					last := &result.Calls[len(result.Calls)-1]
 					last.ReviewComplete, last.Approved, last.NoBlockers = false, false, false
 					result.CriticStopReason = ""
+				}
+				if scenario.change == "prefixed refutation" {
+					result.Refutations[0].Text = "The first private review sentence stays internal. The second private review sentence stays internal."
+					result.Answer = "Public reply The second private review sentence stays internal."
 				}
 				sequence := uint64(1)
 				binding := CallCheckpoint{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head}

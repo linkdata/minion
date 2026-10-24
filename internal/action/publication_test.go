@@ -365,6 +365,41 @@ func TestPublishedRefutationsRejectMarkedSentenceCopies(t *testing.T) {
 	}
 }
 
+func TestPublishedRefutationsRejectPrefixedSentenceCopies(t *testing.T) {
+	const private = "The first private review sentence stays internal. The second private review sentence stays internal."
+	const copied = "The second private review sentence stays internal."
+	for _, action := range []command.Action{command.Comment, command.Fix} {
+		t.Run(string(action), func(t *testing.T) {
+			job := withClaudeCritic(testJob(action))
+			result := privateReviewResult(job)
+			result.Refutations[0].Text = private
+			setPublic := func(text string) {
+				if action == command.Fix {
+					result.Answer = "Done"
+					result.Changes = []workspace.Change{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("// " + text + "\n")}}
+				} else {
+					result.Answer = text
+				}
+			}
+			setPublic("Public reply " + copied)
+			projected, err := projectPublication(job, result)
+			if err != nil || rejectPublishedRefutations(job, result, projected) == nil {
+				t.Fatalf("prefixed private sentence passed publication guard: %v", err)
+			}
+			job.Source.Files[0].Data = []byte(copied + "\n")
+			if err := rejectPublishedRefutations(job, result, projected); err != nil {
+				t.Fatalf("existing source quote was blocked: %v", err)
+			}
+			job.Source.Files[0].Data = []byte("unrelated source\n")
+			setPublic("Public reply Prefix" + copied)
+			projected, err = projectPublication(job, result)
+			if err != nil || rejectPublishedRefutations(job, result, projected) != nil {
+				t.Fatalf("private text within a larger word was treated as a copy: %v", err)
+			}
+		})
+	}
+}
+
 func TestPublishedRefutationsRejectInlineMarkdownSentenceCopies(t *testing.T) {
 	const private = "The first private review sentence stays internal. The second private review sentence stays internal."
 	const copied = "The second private review sentence stays internal."
