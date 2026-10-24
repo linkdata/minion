@@ -361,6 +361,9 @@ func checkModels(ctx context.Context, cfg *config.Config, logger *log.Logger) (e
 			if err = codexcli.CheckLogin(ctx, cfg.Codex); err == nil {
 				if err = codexcli.ValidateInstructionBoundary(ctx); err == nil {
 					cfg.Codex, err = codexcli.Validate(ctx, cfg.Codex)
+					if err == nil {
+						err = aicli.ValidateModelGitAccess(ctx, "Codex", codexcli.SystemReadPaths())
+					}
 				}
 			}
 			if err != nil {
@@ -372,6 +375,9 @@ func checkModels(ctx context.Context, cfg *config.Config, logger *log.Logger) (e
 		case "claude":
 			if cfg.Claude, err = claudecli.Validate(ctx, cfg.Claude); err != nil {
 				//lint:ignore ST1005 Claude is a proper noun.
+				return fmt.Errorf("Claude: %w", err) //nolint:staticcheck // -- Claude is a proper noun.
+			}
+			if err := aicli.ValidateModelGitAccess(ctx, "Claude", claudecli.SystemReadPaths()); err != nil {
 				return fmt.Errorf("Claude: %w", err) //nolint:staticcheck // -- Claude is a proper noun.
 			}
 			role.Model, role.Effort = cfg.Claude.Model, cfg.Claude.Effort

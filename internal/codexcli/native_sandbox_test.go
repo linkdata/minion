@@ -161,6 +161,20 @@ func TestNativeCodexSandboxProbeChild(t *testing.T) {
 	if data, err := os.ReadFile(allowed); err != nil || string(data) != "allowed" {
 		t.Fatalf("permitted source read failed: %q, %v", data, err)
 	}
+	git, err := aicli.AbsoluteExecutable("git")
+	if err != nil {
+		t.Fatalf("model Git lookup failed: %v", err)
+	}
+	if output, err := exec.CommandContext(t.Context(), git, "--version").CombinedOutput(); err != nil {
+		t.Fatalf("model Git cannot execute inside native sandbox: %v: %s", err, output)
+	}
+	output, err := exec.CommandContext(t.Context(), git, "--exec-path").Output()
+	if err != nil {
+		t.Fatalf("model Git cannot locate helpers inside native sandbox: %v", err)
+	}
+	if _, err := os.Stat(strings.TrimRight(string(output), "\r\n")); err != nil {
+		t.Fatalf("model Git helpers are unreadable inside native sandbox: %v", err)
+	}
 	if err := os.WriteFile(filepath.Join(filepath.Dir(allowed), "written.txt"), []byte("written"), 0o600); err != nil {
 		t.Fatalf("permitted source write failed: %v", err)
 	}
