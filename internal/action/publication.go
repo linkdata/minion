@@ -9,6 +9,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"golang.org/x/text/cases"
 	"golang.org/x/text/unicode/norm"
 
 	"github.com/linkdata/minion/internal/command"
@@ -253,16 +254,10 @@ func foldPublicationSpace(text string) string {
 		if space && result.Len() != 0 {
 			result.WriteByte(' ')
 		}
-		folded := r
-		for next := unicode.SimpleFold(r); next != r; next = unicode.SimpleFold(next) {
-			if next < folded {
-				folded = next
-			}
-		}
-		result.WriteRune(folded)
+		result.WriteRune(r)
 		space = false
 	}
-	return norm.NFC.String(result.String())
+	return norm.NFC.String(cases.Fold().String(result.String()))
 }
 
 func publicationTextVariants(text string) []string {

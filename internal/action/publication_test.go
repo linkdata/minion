@@ -295,6 +295,17 @@ func TestPublishedRefutationsRejectShortWholeReply(t *testing.T) {
 	}
 }
 
+func TestPublishedRefutationsFoldExpandedUnicodeCase(t *testing.T) {
+	job := withClaudeCritic(testJob(command.Comment))
+	result := privateReviewResult(job)
+	result.Refutations[0].Text = "The private Straße example should not be copied into a public reply."
+	result.Answer = "Public reply. THE PRIVATE STRASSE EXAMPLE SHOULD NOT BE COPIED INTO A PUBLIC REPLY."
+	projected, err := projectPublication(job, result)
+	if err != nil || rejectPublishedRefutations(job, result, projected) == nil {
+		t.Fatalf("expanded Unicode case fold missed a private sentence: %v", err)
+	}
+}
+
 func TestPublishedRefutationsRejectAuditQuotedTitle(t *testing.T) {
 	job := withClaudeCritic(testJob(command.SecurityAudit))
 	result := privateReviewResult(job)

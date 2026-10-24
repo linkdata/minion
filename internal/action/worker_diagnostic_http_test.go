@@ -539,6 +539,7 @@ func TestHTTPResultCannotPublishPrivateRefutation(t *testing.T) {
 		{"audit title quoted newline", "Private objection\nand evidence.", "Audit report\n"},
 		{"rendered quote leader", "> UNIQUE_PRIVATE_PHRASE_STAYS_HERE", "UNIQUE_PRIVATE_PHRASE_STAYS_HERE"},
 		{"Unicode simple fold", "PRIVATE Σ MARKER MUST STAY HERE", "PRIVATE ς MARKER MUST STAY HERE"},
+		{"Unicode expanded fold", "The private Straße example should stay in review.", "Public reply. THE PRIVATE STRASSE EXAMPLE SHOULD STAY IN REVIEW."},
 		{"canonical Unicode composition", "PRIVATE café OBJECTION MUST STAY HERE", "Public reply. PRIVATE cafe\u0301 OBJECTION MUST STAY HERE"},
 		{"HTML entity in Fix Markdown", "Private objection must stay out of this change", "Private&#32;objection must stay out of this change"},
 		{"case changed", "PRIVATE_MAIN_REFUTATION_TEXT", "Public reply.\nprivate_main_refutation_text"},
