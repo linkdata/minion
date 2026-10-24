@@ -28,6 +28,7 @@ func TestCappedPublicationProjectsEveryPublicBodyAndRetainedAudit(t *testing.T) 
 				job := withClaudeCritic(testJob(action))
 				if action == command.SecurityAudit {
 					installActionTestSkills(t, testAuditSkillURL)
+					fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
 				}
 				job.Identity.Repository = "o/r"
 				job.CriticMaxRounds = 2
