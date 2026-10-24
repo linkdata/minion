@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -25,8 +26,9 @@ import (
 // Run continues one action role's conversation with sandboxed shell tools.
 //
 // The CLI retains API network access. Model-generated commands have no allowed
-// network destinations; Unix sockets remain available when AllowAllUnixSockets
-// is nil or true. Host file access is limited to explicit read grants. A writable
+// network destinations; Unix sockets remain available on Linux when
+// AllowAllUnixSockets is nil, or on either supported OS when explicitly enabled.
+// Host file access is limited to explicit read grants. A writable
 // run may edit the source snapshot; outputDir grants a separate report directory write
 // access. ReadOnlyDirs and configured skills remain read-only. When OutputSchema
 // is set, the answer contains the CLI's structured JSON result.
@@ -41,6 +43,9 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 		runError = aicli.RedactError(runError, settings.APIKey)
 		result.Answer = aicli.RedactText(result.Answer, settings.APIKey)
 	}()
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		return result, errors.New("claude isolation requires Linux or macOS")
+	}
 	if strings.TrimSpace(prompt) == "" {
 		return result, errors.New("claude: prompt is empty")
 	}
@@ -194,12 +199,47 @@ func arguments(policy string) []string {
 }
 
 // SystemReadPaths are the fixed host paths visible to sandboxed commands.
-func SystemReadPaths() []string {
-	return []string{"/usr", "/bin", "/lib", "/lib64", "/etc/ld.so.cache", "/etc/ld.so.conf", "/etc/ld.so.conf.d", "/etc/localtime", "/etc/nsswitch.conf", "/etc/ssl/certs"}
+func SystemReadPaths() []string { return systemReadPaths(runtime.GOOS) }
+
+func systemReadPaths(goos string) []string {
+	switch goos {
+	case "linux":
+		return []string{"/usr", "/bin", "/lib", "/lib64", "/etc/ld.so.cache", "/etc/ld.so.conf", "/etc/ld.so.conf.d", "/etc/localtime", "/etc/nsswitch.conf", "/etc/ssl/certs"}
+	case "darwin":
+		return []string{"/System", "/usr", "/bin", "/sbin", "/opt/homebrew", "/Library/Developer/CommandLineTools", "/Library/Frameworks", "/Applications/Xcode.app/Contents/Developer", "/private/etc/ssl", "/private/etc/hosts", "/private/etc/resolv.conf", "/private/etc/localtime"}
+	default:
+		return nil
+	}
+}
+
+func effectiveSystemReadPaths() ([]string, error) {
+	paths := SystemReadPaths()
+	if len(paths) == 0 {
+		return nil, fmt.Errorf("Claude shell sandbox is unsupported on %s", runtime.GOOS)
+	}
+	if runtime.GOOS == "linux" {
+		return paths, nil
+	}
+	resolved := make([]string, 0, len(paths))
+	for i, path := range paths {
+		absolute, err := aicli.ResolvePath(path)
+		if errors.Is(err, os.ErrNotExist) && i != 0 {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("resolve Claude system grant %q: %w", path, err)
+		}
+		resolved = append(resolved, absolute)
+	}
+	return resolved, nil
 }
 
 func sandboxSettings(workspace, runtimeDir string, writable bool, outputDir string, settings config.ClaudeConfig, skillPaths []string, authDir string) (string, error) {
-	reads := append(SystemReadPaths(), workspace, runtimeDir)
+	systemReads, err := effectiveSystemReadPaths()
+	if err != nil {
+		return "", err
+	}
+	reads := append(systemReads, workspace, runtimeDir)
 	writes := []string{runtimeDir}
 	deniedWrites := []string{filepath.Join(runtimeDir, ".git")}
 	if writable {
@@ -233,7 +273,7 @@ func sandboxSettings(workspace, runtimeDir string, writable bool, outputDir stri
 			"filesystem":  map[string]any{"disabled": false, "denyRead": []string{"/"}, "allowRead": reads, "allowWrite": writes, "denyWrite": deniedWrites},
 			"network": map[string]any{
 				"allowedDomains": []string{}, "strictAllowlist": true, "allowLocalBinding": false,
-				"allowAllUnixSockets": settings.AllowAllUnixSockets == nil || *settings.AllowAllUnixSockets,
+				"allowAllUnixSockets": allowAllUnixSockets(runtime.GOOS, settings.AllowAllUnixSockets),
 			},
 		},
 	}
@@ -247,6 +287,13 @@ func sandboxSettings(workspace, runtimeDir string, writable bool, outputDir stri
 	}
 	data, err := json.Marshal(policy)
 	return string(data), err
+}
+
+func allowAllUnixSockets(goos string, override *bool) bool {
+	if override != nil {
+		return *override
+	}
+	return goos == "linux"
 }
 
 func credentialDenials() []map[string]string {
@@ -275,8 +322,8 @@ func childEnvironment(env []string, runtimeDir, cacheDir, authDir, configDir str
 		if authDir != "" && (key == "ANTHROPIC_API_KEY" || key == "CLAUDE_CODE_OAUTH_TOKEN") {
 			continue
 		}
-		// Native credential denial removes values from the shell environment,
-		// but the bubblewrap supervisor retains them in /proc/1/environ.
+		// Native credential denial removes values from shell commands, but the
+		// sandbox supervisor may retain them in its own environment.
 		switch key {
 		case "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN":
 			if value != "" {

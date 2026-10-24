@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -216,8 +217,8 @@ func TestPrepareFixClassifiesUnsupportedLayoutBeforeBranchOrModels(t *testing.T)
 }
 
 func TestPrepareRetainsCheckoutForRetryAfterCleanupFailure(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root bypasses directory permissions")
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("requires effective POSIX directory permissions and a non-root user")
 	}
 	base, _, _ := gitFixtureRemote(t)
 	delegatedGit, err := aicli.AbsoluteExecutable("git")
@@ -274,8 +275,8 @@ func TestPrepareRetainsCheckoutForRetryAfterCleanupFailure(t *testing.T) {
 }
 
 func TestExecuteLogsCheckoutCleanupFailureAfterSuccessfulPublication(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root bypasses directory permissions")
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("requires effective POSIX directory permissions and a non-root user")
 	}
 	gitFixtureRemote(t)
 	installActionTestSkills(t, testFixSkillURL)

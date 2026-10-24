@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -28,10 +29,102 @@ const (
 
 var runtimeMetadataNames = [...]string{".git", ".agents", ".codex"}
 
-// SystemReadPaths lists the Linux roots expanded by :minimal in Codex 0.160.0.
-// Admission checks use these paths; the native special path preserves OS aliases.
+// SystemReadPaths mirrors the host paths granted to model commands.
+// Linux lists the measured :minimal expansion; native hosts use explicit roots.
 func SystemReadPaths() []string {
-	return []string{"/bin", "/sbin", "/usr", "/etc", "/lib", "/lib64", "/nix/store", "/run/current-system/sw"}
+	return systemReadPaths(runtime.GOOS, os.Getenv)
+}
+
+func systemReadPaths(goos string, getenv func(string) string) []string {
+	switch goos {
+	case "linux":
+		return []string{"/bin", "/sbin", "/usr", "/etc", "/lib", "/lib64", "/nix/store", "/run/current-system/sw"}
+	case "darwin":
+		return []string{"/System", "/usr", "/bin", "/sbin", "/opt/homebrew", "/Library/Developer/CommandLineTools", "/Library/Frameworks", "/Applications/Xcode.app/Contents/Developer"}
+	case "windows":
+		root := getenv("SystemRoot")
+		if !filepath.IsAbs(root) {
+			return nil
+		}
+		paths := []string{root}
+		for _, key := range []string{"ProgramFiles", "ProgramFiles(x86)"} {
+			if path := getenv(key); filepath.IsAbs(path) {
+				paths = append(paths, path)
+			}
+		}
+		return paths
+	default:
+		return nil
+	}
+}
+
+func nativeSystemReadPaths() ([]string, error) {
+	paths := SystemReadPaths()
+	if len(paths) == 0 {
+		return nil, fmt.Errorf("Codex filesystem grants are unsupported on %s", runtime.GOOS)
+	}
+	var resolved []string
+	for i, path := range paths {
+		absolute, err := aicli.ResolvePath(path)
+		if errors.Is(err, os.ErrNotExist) && i != 0 {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("resolve Codex system grant %q: %w", path, err)
+		}
+		resolved = append(resolved, absolute)
+	}
+	return resolved, nil
+}
+
+func systemGrantRules(goos string, nativePaths []string) []string {
+	if goos == "linux" {
+		return []string{`":minimal"="read"`}
+	}
+	grants := make([]string, 0, len(nativePaths))
+	for _, path := range nativePaths {
+		grants = append(grants, fmt.Sprintf(`%s="read"`, strconv.Quote(path)))
+	}
+	return grants
+}
+
+func sandboxFilesystemRule(workspace, runtimeDir, realBinary, outputDir string, readOnlyDirs, skillPaths []string, writable bool) (string, error) {
+	workspaceAccess := "read"
+	if writable {
+		workspaceAccess = "write"
+	}
+	// The source snapshot is outside Codex's workspace, so keep its metadata and
+	// instruction directories read-only even when source edits are allowed.
+	// The sandbox re-executes the installed Codex binary. Grant that one file
+	// explicitly so a root-deny profile can start without exposing CODEX_HOME.
+	rules := []string{`":root"="deny"`}
+	if runtime.GOOS == "linux" {
+		rules = append(rules, systemGrantRules(runtime.GOOS, nil)...)
+	} else {
+		paths, err := nativeSystemReadPaths()
+		if err != nil {
+			return "", err
+		}
+		rules = append(rules, systemGrantRules(runtime.GOOS, paths)...)
+	}
+	rules = append(rules, `":tmpdir"="write"`, fmt.Sprintf(`%s=%q`, strconv.Quote(workspace), workspaceAccess))
+	for _, name := range []string{".git", ".agents", ".codex", ".claude"} {
+		rules = append(rules, fmt.Sprintf(`%s="read"`, strconv.Quote(filepath.Join(workspace, name))))
+	}
+	for _, name := range runtimeMetadataNames {
+		rules = append(rules, fmt.Sprintf(`%s="read"`, strconv.Quote(filepath.Join(runtimeDir, name))))
+	}
+	rules = append(rules, fmt.Sprintf(`%s="read"`, strconv.Quote(realBinary)))
+	if outputDir != "" {
+		rules = append(rules, fmt.Sprintf(`%s="write"`, strconv.Quote(outputDir)))
+	}
+	for _, path := range readOnlyDirs {
+		rules = append(rules, fmt.Sprintf(`%s="read"`, strconv.Quote(path)))
+	}
+	for _, skill := range skillPaths {
+		rules = append(rules, fmt.Sprintf(`%s="read"`, strconv.Quote(filepath.Dir(skill))))
+	}
+	return "permissions.minion.filesystem={" + strings.Join(rules, ",") + "}", nil
 }
 
 // Run continues this action role's Codex conversation for a source snapshot.
@@ -90,43 +183,21 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 		}
 		readOnlyDirs = append(readOnlyDirs, path)
 	}
+	if runtime.GOOS != "linux" {
+		if _, err := nativeSystemReadPaths(); err != nil {
+			return result, fmt.Errorf("codex exec: %w", err)
+		}
+	}
 
 	if err := s.prepare(workspace, realBinary, codexHome, outputDir, writable, settings); err != nil {
 		return result, err
 	}
 	runtimeDir, cacheDir := s.runtimeDir, s.cacheDir
 
-	workspaceAccess := "read"
-	if writable {
-		workspaceAccess = "write"
+	filesystemRule, err := sandboxFilesystemRule(workspace, runtimeDir, realBinary, outputDir, readOnlyDirs, s.skillPaths, writable)
+	if err != nil {
+		return result, fmt.Errorf("codex exec: %w", err)
 	}
-	// The source snapshot is outside Codex's workspace, so keep its metadata and
-	// instruction directories read-only even when source edits are allowed.
-	// The sandbox re-executes the installed Codex binary. Grant that one file
-	// explicitly so a root-deny profile can start without exposing CODEX_HOME.
-	filesystemRules := []string{
-		`":root"="deny"`, `":minimal"="read"`, `":tmpdir"="write"`,
-		fmt.Sprintf(`%s=%q`, strconv.Quote(workspace), workspaceAccess),
-	}
-	for _, name := range []string{".git", ".agents", ".codex", ".claude"} {
-		filesystemRules = append(filesystemRules, fmt.Sprintf(`%s="read"`, strconv.Quote(filepath.Join(workspace, name))))
-	}
-	// Runtime is also the persistent project root; models must not plant Git metadata, skills or config.
-	for _, name := range runtimeMetadataNames {
-		filesystemRules = append(filesystemRules, fmt.Sprintf(`%s="read"`, strconv.Quote(filepath.Join(runtimeDir, name))))
-	}
-	filesystemRules = append(filesystemRules, fmt.Sprintf(`%s="read"`, strconv.Quote(realBinary)))
-	if outputDir != "" {
-		filesystemRules = append(filesystemRules, fmt.Sprintf(`%s="write"`, strconv.Quote(outputDir)))
-	}
-	for _, path := range readOnlyDirs {
-		filesystemRules = append(filesystemRules, fmt.Sprintf(`%s="read"`, strconv.Quote(path)))
-	}
-
-	for _, skill := range s.skillPaths {
-		filesystemRules = append(filesystemRules, fmt.Sprintf(`%s="read"`, strconv.Quote(filepath.Dir(skill))))
-	}
-	filesystemRule := "permissions.minion.filesystem={" + strings.Join(filesystemRules, ",") + "}"
 
 	// Persist sessions to recover helper/interrupted usage while the action
 	// budget is live. Cancellation can leave rollout-only counters unread.
@@ -144,12 +215,7 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 		args = append(args, "--disable", feature)
 	}
 	args = append(args, instructionBoundaryConfig()...)
-	filters := []string{`"PATH"="include"`, `"HOME"="include"`, `"TMPDIR"="include"`, `"TMP"="include"`, `"TEMP"="include"`, `"GOCACHE"="include"`}
-	for _, entry := range aicli.ModelGitEnvironment() {
-		key, _, _ := strings.Cut(entry, "=")
-		filters = append(filters, strconv.Quote(key)+`="include"`)
-	}
-	filters = append(filters, `"LANG"="include"`, `"LC_ALL"="include"`, `"LC_CTYPE"="include"`, `"TERM"="include"`)
+	filters := shellEnvironmentFilters(runtime.GOOS)
 	args = append(
 		args,
 		"-c", "skills.include_instructions=false",
@@ -260,10 +326,28 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	return result, nil
 }
 
+func shellEnvironmentFilters(goos string) []string {
+	filters := []string{`"PATH"="include"`, `"HOME"="include"`, `"TMPDIR"="include"`, `"TMP"="include"`, `"TEMP"="include"`, `"GOCACHE"="include"`}
+	if goos == "windows" {
+		for _, key := range []string{"USERPROFILE", "APPDATA", "LOCALAPPDATA", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "HOMEDRIVE", "HOMEPATH"} {
+			filters = append(filters, strconv.Quote(key)+`="include"`)
+		}
+	}
+	for _, entry := range aicli.ModelGitEnvironment() {
+		key, _, _ := strings.Cut(entry, "=")
+		filters = append(filters, strconv.Quote(key)+`="include"`)
+	}
+	return append(filters, `"LANG"="include"`, `"LC_ALL"="include"`, `"LC_CTYPE"="include"`, `"TERM"="include"`)
+}
+
 // The runner holds GitHub and other service credentials; Codex only needs its
 // own authentication and ordinary process/network settings. Configured
 // authentication removes inherited credentials before the caller supplies it.
 func childEnvironment(env []string, runtimeDir, cacheDir, codexHome string, configuredAuth bool, writablePaths ...string) []string {
+	return childEnvironmentForOS(runtime.GOOS, env, runtimeDir, cacheDir, codexHome, configuredAuth, writablePaths...)
+}
+
+func childEnvironmentForOS(goos string, env []string, runtimeDir, cacheDir, codexHome string, configuredAuth bool, writablePaths ...string) []string {
 	allowed := map[string]bool{
 		"PATH": true, "HOME": true, "LANG": true, "LC_ALL": true, "LC_CTYPE": true, "TERM": true,
 		"CODEX_API_KEY": true, "CODEX_ACCESS_TOKEN": true,
@@ -271,7 +355,13 @@ func childEnvironment(env []string, runtimeDir, cacheDir, codexHome string, conf
 		"CODEX_CA_CERTIFICATE": true, "SSL_CERT_FILE": true, "SSL_CERT_DIR": true,
 		"HTTP_PROXY": true, "HTTPS_PROXY": true, "ALL_PROXY": true, "NO_PROXY": true,
 	}
+	if goos == "windows" {
+		for _, key := range []string{"USERPROFILE", "APPDATA", "LOCALAPPDATA", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "HOMEDRIVE", "HOMEPATH"} {
+			allowed[key] = true
+		}
+	}
 	clean := make([]string, 0, len(env))
+	seen := make(map[string]int)
 	writablePaths = append([]string{runtimeDir}, writablePaths...)
 	explicitHome := false
 	for _, entry := range env {
@@ -279,16 +369,26 @@ func childEnvironment(env []string, runtimeDir, cacheDir, codexHome string, conf
 		if !ok {
 			continue
 		}
-		if key == "CODEX_HOME" {
+		if strings.EqualFold(key, "CODEX_HOME") {
 			explicitHome = value != ""
 			continue
 		}
 		if configuredAuth && (strings.EqualFold(key, "CODEX_API_KEY") || strings.EqualFold(key, "CODEX_ACCESS_TOKEN")) {
 			continue
 		}
-		if allowed[strings.ToUpper(key)] {
-			if key == "PATH" {
+		normalized := strings.ToUpper(key)
+		if allowed[normalized] {
+			if normalized == "PATH" {
 				entry = "PATH=" + aicli.SafePath(value, writablePaths...)
+			} else if goos == "windows" {
+				entry = normalized + "=" + value
+			}
+			if goos == "windows" {
+				if index, found := seen[normalized]; found {
+					clean[index] = entry
+					continue
+				}
+				seen[normalized] = len(clean)
 			}
 			clean = append(clean, entry)
 		}

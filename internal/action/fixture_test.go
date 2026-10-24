@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -157,6 +158,16 @@ func gitFixtureRemote(t *testing.T, files ...workspace.File) (base, head, remote
 
 var fakeOnPath = testsupport.FakeOnPath
 
+func symlinkOrSkip(t *testing.T, target, link string) {
+	t.Helper()
+	if err := os.Symlink(target, link); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("Windows symlink fixture is unavailable: %v", err)
+		}
+		t.Fatal(err)
+	}
+}
+
 func modelGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	out, err := testsupport.ModelGit(t, dir, args...)
@@ -177,7 +188,7 @@ func assertModelRepository(t *testing.T, dir, head string) {
 	}{
 		{[]string{"rev-parse", "--is-shallow-repository"}, "false"},
 		{[]string{"rev-parse", "HEAD"}, head},
-		{[]string{"config", "--get", "core.hooksPath"}, "/dev/null"},
+		{[]string{"config", "--get", "core.hooksPath"}, os.DevNull},
 		{[]string{"config", "--get", "core.fsmonitor"}, "false"},
 		{[]string{"config", "--get", "protocol.allow"}, "never"},
 		{[]string{"config", "--get", "credential.helper"}, ""},
@@ -221,7 +232,7 @@ func attachRepository(t *testing.T, job *Job) {
 	}
 	git := func(args ...string) []byte {
 		t.Helper()
-		cmd := exec.Command("git", append([]string{"-C", root, "-c", "core.hooksPath=/dev/null"}, args...)...)
+		cmd := exec.Command("git", append([]string{"-C", root, "-c", "core.hooksPath=" + os.DevNull}, args...)...)
 		cmd.Env = append(testsupport.GitEnvironment(root), "GIT_AUTHOR_DATE=1767225600 +0000", "GIT_COMMITTER_DATE=1767225600 +0000", "GIT_AUTHOR_NAME=Fixture", "GIT_AUTHOR_EMAIL=fixture@example.invalid", "GIT_COMMITTER_NAME=Fixture", "GIT_COMMITTER_EMAIL=fixture@example.invalid")
 		var diagnostic bytes.Buffer
 		cmd.Stderr = &diagnostic
@@ -427,6 +438,9 @@ func TestServeFixFlowFixtureRejectsGraphQLMutation(t *testing.T) {
 
 func gitOnlyPath(t *testing.T) string {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("gitOnlyPath uses a POSIX executable symlink without .exe")
+	}
 	binary, err := aicli.AbsoluteExecutable("git")
 	if err != nil {
 		t.Fatal(err)

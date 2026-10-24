@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -16,9 +17,24 @@ import (
 func isolateHostPaths(t *testing.T, home string) {
 	t.Helper()
 	t.Setenv("HOME", home)
+	if runtime.GOOS == "windows" {
+		t.Setenv("USERPROFILE", home)
+		t.Setenv("HOMEDRIVE", "")
+		t.Setenv("HOMEPATH", "")
+	}
 	t.Setenv("PATH", t.TempDir())
 	for _, key := range []string{"XDG_CONFIG_HOME", "GH_CONFIG_DIR", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG"} {
 		t.Setenv(key, "")
+	}
+}
+
+func symlinkFixture(t *testing.T, target, link string) {
+	t.Helper()
+	if err := os.Symlink(target, link); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("Windows symlink fixture is unavailable: %v", err)
+		}
+		t.Fatal(err)
 	}
 }
 
@@ -46,13 +62,15 @@ func TestWorkRootPreflightRefusesModelGrants(t *testing.T) {
 				if kind == "resolved Claude binary" {
 					provider = "claude"
 				}
-				binary := filepath.Join(cfg.WorkRoot, "real-"+provider)
+				extension := ""
+				if runtime.GOOS == "windows" {
+					extension = ".exe"
+				}
+				binary := filepath.Join(cfg.WorkRoot, "real-"+provider+extension)
 				if err := os.WriteFile(binary, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
 					t.Fatal(err)
 				}
-				if err := os.Symlink(binary, filepath.Join(os.Getenv("PATH"), provider)); err != nil {
-					t.Fatal(err)
-				}
+				symlinkFixture(t, binary, filepath.Join(os.Getenv("PATH"), provider+extension))
 			case "required skill", "critic optional skill", "symlink root":
 				parent := ".agents"
 				if kind == "critic optional skill" {
@@ -78,9 +96,7 @@ func TestWorkRootPreflightRefusesModelGrants(t *testing.T) {
 				}
 				if kind == "symlink root" {
 					alias := filepath.Join(root, "alias")
-					if err := os.Symlink(cfg.WorkRoot, alias); err != nil {
-						t.Fatal(err)
-					}
+					symlinkFixture(t, cfg.WorkRoot, alias)
 					cfg.WorkRoot = alias
 				}
 			}
@@ -168,9 +184,7 @@ func TestWorkRootPreflightProtectsConfigurationAndCredentials(t *testing.T) {
 				if err := os.WriteFile(filepath.Join(public, "auth.json"), []byte("fixture only"), 0600); err != nil {
 					t.Fatal(err)
 				}
-				if err := os.Symlink(filepath.Join(public, "auth.json"), filepath.Join(native, "auth.json")); err != nil {
-					t.Fatal(err)
-				}
+				symlinkFixture(t, filepath.Join(public, "auth.json"), filepath.Join(native, "auth.json"))
 			case "gh home":
 				t.Setenv("GH_CONFIG_DIR", public)
 			case "default gh home":
@@ -178,16 +192,12 @@ func TestWorkRootPreflightProtectsConfigurationAndCredentials(t *testing.T) {
 				if err := os.MkdirAll(filepath.Join(root, "config"), 0700); err != nil {
 					t.Fatal(err)
 				}
-				if err := os.Symlink(public, filepath.Join(root, "config", "gh")); err != nil {
-					t.Fatal(err)
-				}
+				symlinkFixture(t, public, filepath.Join(root, "config", "gh"))
 			case "gh credential alias":
 				if err := os.WriteFile(filepath.Join(public, "hosts.yml"), []byte("fixture only"), 0600); err != nil {
 					t.Fatal(err)
 				}
-				if err := os.Symlink(filepath.Join(public, "hosts.yml"), filepath.Join(native, "hosts.yml")); err != nil {
-					t.Fatal(err)
-				}
+				symlinkFixture(t, filepath.Join(public, "hosts.yml"), filepath.Join(native, "hosts.yml"))
 			}
 			if err := os.WriteFile(configPath, []byte("fixture only"), 0600); err != nil {
 				t.Fatal(err)
@@ -322,9 +332,7 @@ func TestPrivatePathsRejectAliasesIntoSelectedInstalledSkill(t *testing.T) {
 				if kind == "ssh home" || kind == "usage" {
 					target = skill
 				}
-				if err := os.Symlink(target, privatePath); err != nil {
-					t.Fatal(err)
-				}
+				symlinkFixture(t, target, privatePath)
 				if err := checkIsolation(cfg, configPath); err != nil {
 					t.Fatalf("uninstalled skill changed admission: %v", err)
 				}
@@ -361,9 +369,7 @@ func TestIsolationAdmissionPreservesMissingPathCause(t *testing.T) {
 		t.Fatal(err)
 	}
 	configPath := filepath.Join(root, "config.json")
-	if err := os.Symlink(filepath.Join(root, "missing-config"), configPath); err != nil {
-		t.Fatal(err)
-	}
+	symlinkFixture(t, filepath.Join(root, "missing-config"), configPath)
 	err := checkIsolation(config.Config{Main: "codex", WorkRoot: work}, configPath)
 	if !errors.Is(err, workroot.ErrUnsafe) || !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("unresolved host admission lost safety classification or missing-path cause: %v", err)

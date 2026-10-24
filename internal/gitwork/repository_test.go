@@ -427,8 +427,8 @@ func TestRepositoryPinsModelConfigAndDisablesLogMailmap(t *testing.T) {
 	source, _ := repositoryFixture(t, snapshot)
 	assertModelRepositoryGit(t, source, snapshot.Head+"\n", "rev-parse", "refs/remotes/origin/HEAD")
 	for _, setting := range []struct{ key, want string }{
-		{"core.hooksPath", "/dev/null\n"}, {"core.fsmonitor", "false\n"}, {"core.fileMode", "true\n"},
-		{"core.excludesFile", "/dev/null\n"}, {"core.attributesFile", "/dev/null\n"},
+		{"core.hooksPath", os.DevNull + "\n"}, {"core.fsmonitor", "false\n"}, {"core.fileMode", gitFileMode() + "\n"},
+		{"core.excludesFile", os.DevNull + "\n"}, {"core.attributesFile", os.DevNull + "\n"},
 		{"core.logAllRefUpdates", "false\n"}, {"core.pager", "cat\n"}, {"log.mailmap", "false\n"},
 		{"protocol.allow", "never\n"}, {"credential.helper", "\n"}, {"gc.auto", "0\n"}, {"maintenance.auto", "false\n"},
 	} {

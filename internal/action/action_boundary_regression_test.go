@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -39,9 +40,7 @@ func TestPrivateHostPathsCannotBeExposedByModelGrants(t *testing.T) {
 			secret := filepath.Join(outside, "auth.json")
 			writeFixtureFile(t, outside, "auth.json", nil)
 			linked := filepath.Join(home, "auth.json")
-			if err := os.Symlink(secret, linked); err != nil {
-				t.Fatal(err)
-			}
+			symlinkOrSkip(t, secret, linked)
 			future := filepath.Join(outside, "new", "auth.json")
 			for _, test := range []struct {
 				name, protected, grant string
@@ -84,9 +83,7 @@ func TestWorkRootIsolationUsesPhysicalGrantParents(t *testing.T) {
 		}
 	}
 	alias := filepath.Join(root, "alias")
-	if err := os.Symlink(filepath.Join(physical, "nested"), alias); err != nil {
-		t.Fatal(err)
-	}
+	symlinkOrSkip(t, filepath.Join(physical, "nested"), alias)
 	writeFixtureFile(t, filepath.Join(physical, "nested"), "SKILL.md", []byte("public skill"))
 	runner := Runner{Codex: config.CodexConfig{Skills: []string{filepath.Join(alias, "SKILL.md")}}}
 	if err := runner.CheckWorkRootIsolation(filepath.Join(physical, "nested"), "codex"); err == nil || !strings.Contains(err.Error(), "overlaps") {
@@ -226,6 +223,9 @@ func TestPrivateReviewRejectsChangedSavedCheckpoint(t *testing.T) {
 					link = os.Link
 				}
 				if err := link(outside, path); err != nil {
+					if kind == "symlink" && runtime.GOOS == "windows" {
+						t.Skipf("Windows symlink fixture is unavailable: %v", err)
+					}
 					t.Fatal(err)
 				}
 			} else {
@@ -265,7 +265,7 @@ func TestPrivateReviewRejectsChangedSavedCheckpoint(t *testing.T) {
 			if got, readErr := os.ReadFile(path); readErr != nil || !bytes.Equal(got, data) {
 				t.Fatalf("refused checkpoint bytes changed: %q,%v", got, readErr)
 			}
-			if kind == "symlink" {
+			if kind == "symlink" && runtime.GOOS != "windows" {
 				if !errors.Is(err, syscall.ELOOP) {
 					t.Fatalf("checkpoint symlink lost no-follow cause: %v", err)
 				}

@@ -27,9 +27,6 @@ jobs:
       - name: Go vet
         run: go vet ./...
 
-      - name: Vet darwin build
-        run: GOOS=darwin go vet ./...
-
       - name: Check gofmt
         run: |
           unformatted="$(gofmt -l .)"
@@ -55,6 +52,63 @@ jobs:
 
       - name: Build
         run: go build -buildvcs=false -o "$RUNNER_TEMP/minion" ./cmd/minion
+
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Select supported Git on macOS
+        if: runner.os == 'macOS'
+        run: |
+          brew list --versions git || brew install git
+          echo "$(brew --prefix git)/bin" >> "$GITHUB_PATH"
+
+      - name: Show Git version
+        run: git --version
+
+      - name: Install Codex CLI on macOS
+        if: runner.os == 'macOS'
+        run: npm install --global @openai/codex@0.163.0
+
+      - name: Install standalone Codex CLI on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:CODEX_RELEASE = '0.163.0'
+          $env:CODEX_NON_INTERACTIVE = '1'
+          $env:CODEX_INSTALL_DIR = Join-Path $env:LOCALAPPDATA 'Programs\OpenAI\Codex\bin'
+          $installer = Join-Path $env:RUNNER_TEMP 'install-codex.ps1'
+          Invoke-WebRequest 'https://chatgpt.com/codex/install.ps1' -OutFile $installer
+          powershell -NoProfile -ExecutionPolicy Bypass -File $installer
+          if ($LASTEXITCODE -ne 0) { throw 'Codex installer failed' }
+          Add-Content -Path $env:GITHUB_PATH -Value $env:CODEX_INSTALL_DIR
+
+      - name: Check native Codex executable
+        run: codex --version
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        env:
+          MINION_NATIVE_SANDBOX_TEST: "1"
+        run: go test -count=1 ./...
+
+      - name: Build
+        run: go build -buildvcs=false ./cmd/minion
 
   coverage:
     needs: build

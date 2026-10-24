@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -27,8 +28,10 @@ func TestReviewSnapshotFixFreezesOnlyExportedCandidate(t *testing.T) {
 	index, source := offlineIndexFixture(t, job.Source.Files)
 	writeFixtureFile(t, source, "source.txt", []byte("reviewed"))
 	writeFixtureFile(t, source, "added", []byte("new executable"))
-	if err := os.Chmod(filepath.Join(source, "added"), 0700); err != nil {
-		t.Fatal(err)
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(filepath.Join(source, "added"), 0700); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := os.Remove(filepath.Join(source, "deleted")); err != nil {
 		t.Fatal(err)
@@ -48,7 +51,7 @@ func TestReviewSnapshotFixFreezesOnlyExportedCandidate(t *testing.T) {
 		t.Fatalf("frozen repository does not show exported candidate: %q", status)
 	}
 	info, err := os.Stat(filepath.Join(snapshot.source, "added"))
-	if err != nil || info.Mode().Perm() != 0755 {
+	if err != nil || runtime.GOOS != "windows" && info.Mode().Perm() != 0755 {
 		t.Fatalf("frozen executable=%v,%v", info, err)
 	}
 	if err := snapshot.verify(context.Background()); err != nil {
@@ -183,6 +186,9 @@ func TestReviewSnapshotRejectsOversizedReports(t *testing.T) {
 }
 
 func TestReviewSnapshotCleansFailedFixCandidateMaterialization(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not have the same path-length error as Unix")
+	}
 	for _, stage := range []string{"source", "addition"} {
 		t.Run(stage, func(t *testing.T) {
 			job := testJob(command.Fix)
@@ -330,6 +336,9 @@ func TestReviewSnapshotChecksExactFrozenFiles(t *testing.T) {
 	for _, reports := range []bool{false, true} {
 		for _, mutation := range []string{"special permissions", "new file", "directory"} {
 			t.Run(fmt.Sprintf("reports=%t/%s", reports, mutation), func(t *testing.T) {
+				if runtime.GOOS == "windows" && mutation == "special permissions" {
+					t.Skip("Windows does not represent setuid in file modes")
+				}
 				job := testJob(command.Fix)
 				index, source := offlineIndexFixture(t, job.Source.Files)
 				output, name := "", "source.txt"

@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strings"
 
 	"github.com/linkdata/minion/internal/workspace"
 )
@@ -26,6 +28,9 @@ func AbsoluteExecutable(name string) (string, error) {
 	}
 	if !filepath.IsAbs(binary) {
 		return "", fmt.Errorf("%s binary must have an absolute path", name)
+	}
+	if runtime.GOOS == "windows" && (strings.EqualFold(filepath.Ext(binary), ".cmd") || strings.EqualFold(filepath.Ext(binary), ".bat")) {
+		return "", fmt.Errorf("%s needs a native executable; batch launchers cannot be run directly", name)
 	}
 	return binary, nil
 }

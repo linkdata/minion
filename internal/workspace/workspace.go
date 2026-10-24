@@ -114,7 +114,7 @@ func FoldPath(name string) string {
 // validSourcePath accepts Git's case-sensitive slash paths, including literal backslashes.
 // Writable/import paths additionally reject HFS/NTFS aliases of Git metadata.
 func validSourcePath(name string) bool {
-	if !fs.ValidPath(name) || name == "." || len(name) >= MaxPathBytes || strings.ContainsRune(name, '\x00') {
+	if !fs.ValidPath(name) || name == "." || len(name) >= MaxPathBytes || strings.ContainsRune(name, '\x00') || !validPlatformPath(name) {
 		return false
 	}
 	for _, part := range strings.Split(name, "/") {
@@ -314,17 +314,17 @@ func CheckRoot(root string) error {
 	return dir.Close()
 }
 
-// CheckPrivateRoot checks directory type and permissions without following a final symlink.
+// CheckPrivateRoot checks directory type and access without following a final symlink.
 // Callers must provide trusted placement for root and its parents.
 func CheckPrivateRoot(root string) error {
 	info, err := os.Lstat(root)
 	if err != nil {
 		return err
 	}
-	if !info.IsDir() || info.Mode().Perm()&0077 != 0 {
+	if !info.IsDir() {
 		return fmt.Errorf("workspace root must be a private directory: %s (%s)", root, info.Mode())
 	}
-	return nil
+	return checkPrivateRoot(root, info)
 }
 
 // Materialize requires a root and parents not concurrently writable by untrusted processes.
@@ -466,7 +466,7 @@ func checkUnchanged(ctx context.Context, root string, base []File, repository bo
 			return fmt.Errorf("workspace changed: cannot verify %q: %w", rel, err)
 		}
 		delete(prior, rel)
-		if info.Mode() != fs.FileMode(old.Mode&0777) || !bytes.Equal(old.Data, data) {
+		if !sourceModeMatches(info, old.Mode) || !bytes.Equal(old.Data, data) {
 			return fmt.Errorf("workspace changed: changed %q", rel)
 		}
 		return nil
@@ -504,10 +504,7 @@ func ReadChanges(ctx context.Context, root string, selected []Change) ([]Change,
 		if err != nil {
 			return nil, fmt.Errorf("changed path %q: %w", selection.Path, err)
 		}
-		mode := Regular
-		if info.Mode().Perm()&0100 != 0 {
-			mode = Executable
-		}
+		mode := changedSourceMode(info, selection.Mode)
 		if selection.Mode != mode {
 			return nil, fmt.Errorf("selected change mode differs from file at %q", selection.Path)
 		}
@@ -697,7 +694,16 @@ func Apply(root string, changes []Change) error {
 			if !info.Mode().IsRegular() {
 				return fmt.Errorf("changed path %q is not regular", change.Path)
 			}
-			if !singleLink(info) {
+			opened, err := openPath(name, false)
+			if err != nil {
+				return err
+			}
+			current, statErr := opened.Stat()
+			valid := statErr == nil && os.SameFile(info, current) && singleLink(current, opened)
+			if err := errors.Join(statErr, opened.Close()); err != nil {
+				return err
+			}
+			if !valid {
 				return fmt.Errorf("changed path %q must have exactly one hard link", change.Path)
 			}
 		} else if !errors.Is(err, os.ErrNotExist) {
@@ -752,8 +758,12 @@ func readFile(name string, limit int64) (data []byte, info fs.FileInfo, resultEr
 	if opened.Size() > limit {
 		return nil, nil, errors.New("file exceeds byte limit")
 	}
-	if !singleLink(opened) {
+	if !singleLink(opened, f) {
 		return nil, nil, errors.New("file must have exactly one hard link")
+	}
+	beforeChange, err := changeTime(opened, f)
+	if err != nil {
+		return nil, nil, err
 	}
 	data = make([]byte, opened.Size()+1)
 	n, err := io.ReadFull(f, data)
@@ -765,17 +775,21 @@ func readFile(name string, limit int64) (data []byte, info fs.FileInfo, resultEr
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := checkReadStability(opened, after, len(data)); err != nil {
+	afterChange, err := changeTime(after, f)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := checkReadStability(opened, after, len(data), f, beforeChange == afterChange); err != nil {
 		return nil, nil, err
 	}
 	return data, opened, nil
 }
 
-func checkReadStability(opened, after fs.FileInfo, bytesRead int) error {
-	if !singleLink(after) {
+func checkReadStability(opened, after fs.FileInfo, bytesRead int, file *os.File, unchangedTime bool) error {
+	if !singleLink(after, file) {
 		return errors.New("file hard links changed while reading")
 	}
-	if int64(bytesRead) != opened.Size() || after.Size() != opened.Size() || after.Mode() != opened.Mode() || !after.ModTime().Equal(opened.ModTime()) || !sameChangeTime(opened, after) {
+	if int64(bytesRead) != opened.Size() || after.Size() != opened.Size() || after.Mode() != opened.Mode() || !after.ModTime().Equal(opened.ModTime()) || !unchangedTime {
 		return errors.New("file changed or exceeded limit while reading")
 	}
 	return nil

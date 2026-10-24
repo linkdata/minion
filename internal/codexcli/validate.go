@@ -38,6 +38,11 @@ type modelInfo struct {
 // changing the stored CLI login.
 func Validate(ctx context.Context, settings config.CodexConfig) (resolved config.CodexConfig, resultErr error) {
 	defer func() { resultErr = aicli.RedactError(resultErr, settings.APIKey) }()
+	if runtime.GOOS != "linux" {
+		if _, err := nativeSystemReadPaths(); err != nil {
+			return settings, err
+		}
+	}
 	models, err := listModels(ctx, settings)
 	if err != nil {
 		return settings, fmt.Errorf("cannot validate Codex settings: %w", err)

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -18,6 +19,9 @@ import (
 const dummyAPIKey = "minion-dummy-config-api-key"
 
 func TestAuthentication(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Claude CLI is not supported on native Windows")
+	}
 	parent := filepath.Join(t.TempDir(), "space ' $ `\n")
 	if err := os.Mkdir(parent, 0o700); err != nil {
 		t.Fatal(err)

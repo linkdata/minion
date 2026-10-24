@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -47,7 +48,7 @@ var (
 func resolveCredentialHelperGH() string {
 	path, err := aicli.AbsoluteExecutable("gh")
 	if err != nil {
-		return "/bin/false"
+		return ""
 	}
 	// Multicall launchers can select an app from the symlink name in argv[0].
 	return path
@@ -392,9 +393,11 @@ func runGitInputTo(ctx context.Context, dir string, stdin io.Reader, stdout io.W
 		"-c", "user.name=Minion",
 		"-c", "user.email=minion@localhost",
 		"-c", "credential.helper=",
-		"-c", credentialHelperConfig(resolveCredentialHelperGH()),
 		"-c", "push.gpgSign=false",
 		"-c", "submodule.recurse=false",
+	}
+	if helper := resolveCredentialHelperGH(); helper != "" {
+		gitArgs = append(gitArgs, "-c", credentialHelperConfig(helper))
 	}
 	cmd := gitCommand(ctx, binary, dir, cleanGitEnvironment(), append(gitArgs, args...)...)
 	cmd.Stdin = stdin
@@ -458,23 +461,30 @@ func disableAttributes(gitDir string) error {
 // network access separately; each call receives an independent argument slice.
 func hardeningArgs() []string {
 	return []string{
-		"-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
-		"-c", "core.fileMode=true",
+		"-c", "core.hooksPath=" + os.DevNull, "-c", "core.fsmonitor=false",
+		"-c", "core.fileMode=" + gitFileMode(),
 		"-c", "core.protectHFS=true", "-c", "core.protectNTFS=true",
-		"-c", "core.excludesFile=/dev/null", "-c", "core.attributesFile=/dev/null",
+		"-c", "core.excludesFile=" + os.DevNull, "-c", "core.attributesFile=" + os.DevNull,
 		"-c", "commit.gpgsign=false", "-c", "gc.auto=0", "-c", "maintenance.auto=false",
 	}
 }
 
+func gitFileMode() string {
+	if runtime.GOOS == "windows" {
+		return "false"
+	}
+	return "true"
+}
+
 func credentialHelperConfig(path string) string {
-	return "credential.helper=!" + aicli.ShellQuote(path) + " auth git-credential"
+	return "credential.helper=!" + aicli.ShellQuote(filepath.ToSlash(path)) + " auth git-credential"
 }
 
 func cleanGitEnvironment() []string {
 	var env []string
 	for _, entry := range os.Environ() {
 		key, _, ok := strings.Cut(entry, "=")
-		if !ok || strings.HasPrefix(key, "GIT_") || key == "GCM_INTERACTIVE" || key == "GH_PROMPT_DISABLED" || key == "LC_ALL" || key == "PATH" {
+		if !ok || strings.HasPrefix(strings.ToUpper(key), "GIT_") || strings.EqualFold(key, "GCM_INTERACTIVE") || strings.EqualFold(key, "GH_PROMPT_DISABLED") || strings.EqualFold(key, "LC_ALL") || strings.EqualFold(key, "PATH") {
 			continue
 		}
 		env = append(env, entry)
@@ -486,7 +496,7 @@ func cleanGitEnvironment() []string {
 // hardeningEnv isolates Git configuration and disables prompts for Minion-run Git.
 func hardeningEnv() []string {
 	return append(aicli.ModelGitEnvironment(),
-		"GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=/bin/false",
+		"GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS="+os.DevNull,
 		"GCM_INTERACTIVE=never", "GH_PROMPT_DISABLED=1", "LC_ALL=C",
 	)
 }

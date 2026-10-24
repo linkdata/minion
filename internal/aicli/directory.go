@@ -58,7 +58,7 @@ func Directory(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if !info.IsDir() || resolved == string(os.PathSeparator) {
+	if !info.IsDir() || resolved == filepath.VolumeName(resolved)+string(os.PathSeparator) {
 		return "", fmt.Errorf("expected a non-root directory: %s", resolved)
 	}
 	return resolved, nil

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -122,6 +123,9 @@ func TestRunRejectsUnsafeGrantBeforeStateOpen(t *testing.T) {
 	const source = "https://github.com/owner/repo/tree/pinned/skills/example"
 	for _, kind := range []string{"selected executable", "selected installed skill"} {
 		t.Run(kind, func(t *testing.T) {
+			if runtime.GOOS == "windows" && kind == "selected executable" {
+				t.Skip("POSIX executable symlink fixture is unavailable on native Windows")
+			}
 			home := t.TempDir()
 			isolateHostPaths(t, home)
 			statePath := filepath.Join(t.TempDir(), "state.json")
@@ -153,6 +157,9 @@ func TestRunRejectsUnsafeGrantBeforeStateOpen(t *testing.T) {
 				}
 			case "selected installed skill":
 				t.Setenv("HOME", grantRoot)
+				if runtime.GOOS == "windows" {
+					t.Setenv("USERPROFILE", grantRoot)
+				}
 				t.Setenv("CODEX_HOME", filepath.Join(home, "codex"))
 				t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "claude"))
 				t.Setenv("GH_CONFIG_DIR", filepath.Join(home, "gh"))
@@ -215,6 +222,9 @@ func TestRunRejectsUnsafeGrantBeforeStateOpen(t *testing.T) {
 }
 
 func TestRunChecksGitBeforeProvidersAndGitHub(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell Git wrapper fixture is unavailable on native Windows")
+	}
 	gitBinary, err := exec.LookPath("git")
 	if err != nil {
 		t.Fatal(err)

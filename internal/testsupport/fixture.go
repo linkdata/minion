@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/linkdata/minion/internal/aicli"
@@ -12,6 +13,9 @@ import (
 // FakeOnPath installs a complete script and returns its temporary bin directory.
 func FakeOnPath(t *testing.T, name, script string) string {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell fixture is unavailable on native Windows")
+	}
 	bin := t.TempDir()
 	if err := os.WriteFile(filepath.Join(bin, name), []byte(script), 0700); err != nil {
 		t.Fatal(err)

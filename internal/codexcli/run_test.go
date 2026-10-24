@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -525,6 +526,9 @@ func TestRunRejectsReadOnlyOutputOverlap(t *testing.T) {
 }
 
 func TestChildEnvironmentIsolatesCodexSessionButKeepsAuthentication(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix PATH fixture; Windows environment is tested separately")
+	}
 	env := childEnvironment([]string{
 		"CODEX_PERMISSION_PROFILE=unsafe-parent-profile", "CODEX_THREAD_ID=parent", "CODEX_SESSION_ID=parent",
 		"CODEX_APP_TOOLS_PIPE_PATH=parent-app", "CODEX_SANDBOX_NETWORK_DISABLED=1",
@@ -545,6 +549,73 @@ func TestChildEnvironmentIsolatesCodexSessionButKeepsAuthentication(t *testing.T
 	for _, kept := range []string{"CODEX_HOME=/trusted/codex", "CODEX_API_KEY=test-key", "CODEX_ACCESS_TOKEN=test-access-token", "PATH=/usr/bin", "HOME=/trusted/home", "HTTPS_PROXY=http://proxy", "SSL_CERT_FILE=/cert", "TMPDIR=/runtime", "GOCACHE=/cache", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=safe.bareRepository", "GIT_CONFIG_VALUE_0=explicit", "GIT_ATTR_NOSYSTEM=1", "GIT_NO_REPLACE_OBJECTS=1", "GIT_NO_LAZY_FETCH=1", "GIT_OPTIONAL_LOCKS=0"} {
 		if !strings.Contains(joined, kept) {
 			t.Fatalf("required environment setting missing: %s", kept)
+		}
+	}
+}
+
+func TestWindowsChildEnvironmentNormalizesNamesAndPath(t *testing.T) {
+	safe, writable := t.TempDir(), t.TempDir()
+	env := childEnvironmentForOS("windows", []string{
+		"Path=" + safe + string(os.PathListSeparator) + writable,
+		"pAtH=" + safe,
+		"CoDeX_HoMe=/wrong", "UserProfile=/operator", "AppData=/operator/appdata",
+		"LocalAppData=/operator/local", "SystemRoot=/windows", "GH_TOKEN=private",
+	}, writable, writable, "/selected", false, writable)
+	joined := strings.Join(env, "\n")
+	for _, required := range []string{"PATH=" + safe, "CODEX_HOME=/selected", "USERPROFILE=/operator", "APPDATA=/operator/appdata", "LOCALAPPDATA=/operator/local", "SYSTEMROOT=/windows"} {
+		if !strings.Contains(joined, required) {
+			t.Fatalf("missing Windows environment %q in %s", required, joined)
+		}
+	}
+	if strings.Count(joined, "PATH=") != 1 || strings.Contains(joined, "GH_TOKEN") || strings.Contains(joined, "/wrong") {
+		t.Fatalf("unsafe Windows environment: %s", joined)
+	}
+}
+
+func TestNativeSystemGrantRules(t *testing.T) {
+	if got := systemGrantRules("linux", nil); !slices.Equal(got, []string{`":minimal"="read"`}) {
+		t.Fatalf("Linux grants = %v", got)
+	}
+	mac := systemReadPaths("darwin", nil)
+	if !slices.Contains(mac, "/System") || !slices.Contains(mac, "/opt/homebrew") {
+		t.Fatalf("macOS grants = %v", mac)
+	}
+	systemRoot, programFiles := t.TempDir(), t.TempDir()
+	win := systemReadPaths("windows", func(key string) string {
+		switch key {
+		case "SystemRoot":
+			return systemRoot
+		case "ProgramFiles":
+			return programFiles
+		default:
+			return "relative"
+		}
+	})
+	if !slices.Equal(win, []string{systemRoot, programFiles}) || systemReadPaths("windows", func(string) string { return "relative" }) != nil {
+		t.Fatalf("Windows grants = %v", win)
+	}
+	for _, paths := range [][]string{mac, win} {
+		rules := systemGrantRules("darwin", paths)
+		if len(rules) != len(paths) || slices.Contains(rules, `":minimal"="read"`) {
+			t.Fatalf("native rules include opaque defaults: %v", rules)
+		}
+		for i, path := range paths {
+			if rules[i] != strconv.Quote(path)+`="read"` {
+				t.Fatalf("native grant %q = %q", path, rules[i])
+			}
+		}
+	}
+}
+
+func TestWindowsShellEnvironmentFilters(t *testing.T) {
+	linux := shellEnvironmentFilters("linux")
+	win := shellEnvironmentFilters("windows")
+	if slices.Contains(linux, `"USERPROFILE"="include"`) {
+		t.Fatalf("Linux received Windows shell variables: %v", linux)
+	}
+	for _, key := range []string{"PATH", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "SYSTEMROOT", "COMSPEC"} {
+		if !slices.Contains(win, strconv.Quote(key)+`="include"`) {
+			t.Fatalf("Windows shell variable %q missing from %v", key, win)
 		}
 	}
 }
@@ -817,6 +888,9 @@ func TestRunHonorsCancellation(t *testing.T) {
 }
 
 func TestRunRejectsExecutableFromSourceSnapshot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX executable fixture")
+	}
 	dir := canonicalTempDir(t)
 	path := filepath.Join(dir, "codex")
 	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
@@ -831,6 +905,9 @@ func TestRunRejectsExecutableFromSourceSnapshot(t *testing.T) {
 
 func installFakeCodex(t *testing.T, script string) string {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX fake Codex executable")
+	}
 	t.Setenv("CODEX_HOME", canonicalTempDir(t))
 	path, err := filepath.EvalSymlinks(filepath.Join(testsupport.FakeOnPath(t, "codex", script), "codex"))
 	if err != nil {

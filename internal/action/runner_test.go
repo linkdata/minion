@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -296,9 +297,7 @@ func TestRunnerCanonicalizesTrustedWorkRoot(t *testing.T) {
 	if err := os.Mkdir(actual, 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(actual, link); err != nil {
-		t.Fatal(err)
-	}
+	symlinkOrSkip(t, actual, link)
 	actual, err := filepath.EvalSymlinks(actual)
 	if err != nil {
 		t.Fatal(err)
@@ -452,6 +451,9 @@ func TestRunnerRejectsGitMetadataMutation(t *testing.T) {
 		role := test.role
 		for _, mutation := range test.mutations {
 			t.Run(string(test.action)+"/"+role+"/"+mutation, func(t *testing.T) {
+				if mutation == "permissions" && runtime.GOOS == "windows" {
+					t.Skip("os.Chmod cannot change Git metadata ACLs on native Windows")
+				}
 				job := withClaudeCritic(testJob(test.action))
 				calls := 0
 				var mainDir string
@@ -487,8 +489,8 @@ func TestRunnerRejectsGitMetadataMutation(t *testing.T) {
 								if err := os.WriteFile(dir, []byte("replaced metadata"), 0600); err != nil {
 									t.Fatal(err)
 								}
-							} else if err := os.Symlink(moved, dir); err != nil {
-								t.Fatal(err)
+							} else {
+								symlinkOrSkip(t, moved, dir)
 							}
 						case "hard link":
 							if err := os.Link(filepath.Join(dir, "HEAD"), filepath.Join(t.TempDir(), "linked-head")); err != nil {

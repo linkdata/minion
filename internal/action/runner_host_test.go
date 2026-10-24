@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -218,6 +219,9 @@ func TestRunnerOmittedSourceWriteIsTerminal(t *testing.T) {
 }
 
 func TestWorkRootIsolationRejectsResolvedExecutableTarget(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX executable symlink fixture has no native .exe launcher")
+	}
 	for _, provider := range []string{"codex", "claude"} {
 		t.Run(provider, func(t *testing.T) {
 			root := t.TempDir()

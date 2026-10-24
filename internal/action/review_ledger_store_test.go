@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -278,6 +279,9 @@ func TestPrivateReviewRecordsDecisionAfterVerdictCheckpoint(t *testing.T) {
 func TestPrivateReviewBoundaryBeforeStorageOrPublication(t *testing.T) {
 	for _, scenario := range []string{"foreign identity", "foreign source", "malformed history", "oversized history", "invalid calls", "invalid answer", "read-only source changes", "storage failure", "public root", "symlink root"} {
 		t.Run(scenario, func(t *testing.T) {
+			if scenario == "public root" && runtime.GOOS == "windows" {
+				t.Skip("os.Mkdir mode does not create a public ACL on native Windows")
+			}
 			job := withClaudeCritic(testJob(command.Comment))
 			result := privateReviewResult(job)
 			root := t.TempDir()
@@ -309,9 +313,7 @@ func TestPrivateReviewBoundaryBeforeStorageOrPublication(t *testing.T) {
 					t.Fatal(err)
 				}
 			case "symlink root":
-				if err := os.Symlink(t.TempDir(), filepath.Join(root, "reviews")); err != nil {
-					t.Fatal(err)
-				}
+				symlinkOrSkip(t, t.TempDir(), filepath.Join(root, "reviews"))
 			}
 			if err := e.publish(context.Background(), &preparedAction{job: job}, result); !errors.Is(err, monitor.ErrTerminalJob) {
 				t.Fatalf("unsafe publication was not stopped: %v", err)
@@ -342,8 +344,8 @@ func TestPrivateReviewBoundaryBeforeStorageOrPublication(t *testing.T) {
 func TestPerformCheckpointsPrivateReviewBeforeLaterCalls(t *testing.T) {
 	for _, outcome := range []string{"provider failure", "panic", "storage failure", "provider and storage failure", "initial storage failure"} {
 		t.Run(outcome, func(t *testing.T) {
-			if os.Geteuid() == 0 && (outcome == "storage failure" || outcome == "provider and storage failure") {
-				t.Skip("root bypasses read-only directory permissions")
+			if (runtime.GOOS == "windows" || os.Geteuid() == 0) && (outcome == "storage failure" || outcome == "provider and storage failure") {
+				t.Skip("requires effective POSIX directory permissions and a non-root user")
 			}
 			gitFixtureRemote(t)
 			root := t.TempDir()

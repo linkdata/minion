@@ -100,10 +100,10 @@ func TestHTTPFailureFallbackPreservesCoreWithoutAcknowledgingRawClaims(t *testin
 				t.Fatalf("bounded failure lost exact raw core or mutated original: worker=%v parent=%v raw=%+v", workerErr, got.err, got.result)
 			}
 			if acknowledged {
-				if finalErr != got.err || errors.Is(finalErr, monitor.ErrTerminalJob) {
+				if !errors.Is(finalErr, got.err) || !errors.Is(finalErr, monitor.ErrExecutionOutcomeUnknown) || errors.Is(finalErr, monitor.ErrTerminalJob) {
 					t.Fatalf("matching core gained a checkpoint mismatch: parent=%v finish=%v", got.err, finalErr)
 				}
-			} else if errors.Is(finalErr, monitor.ErrExecutionOutcomeUnknown) || !errors.Is(finalErr, monitor.ErrTerminalJob) || !strings.Contains(finalErr.Error(), "execution checkpoint contract violated") || f.sink.pending == nil || f.sink.returned != nil {
+			} else if !errors.Is(finalErr, monitor.ErrExecutionOutcomeUnknown) || !errors.Is(finalErr, monitor.ErrTerminalJob) || !strings.Contains(finalErr.Error(), "execution checkpoint contract violated") || f.sink.pending == nil || f.sink.returned != nil {
 				t.Fatalf("unacknowledged raw claim passed the publication checkpoint gate: %v", finalErr)
 			}
 			if finalErr == nil || got.result.Validate(f.job) == nil {

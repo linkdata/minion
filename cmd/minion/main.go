@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"syscall"
@@ -214,6 +215,12 @@ func checkIsolation(cfg config.Config, configPath string) (resultErr error) {
 	}
 	if err := workspace.CheckRoot(root); err != nil {
 		return err
+	}
+	if runtime.GOOS == "windows" {
+		// Windows ignores Mkdir's mode; child workspaces inherit this ACL.
+		if err := workspace.CheckPrivateRoot(root); err != nil {
+			return err
+		}
 	}
 	runner := action.Runner{}
 	for _, provider := range []string{cfg.Main, cfg.Adversarial} {

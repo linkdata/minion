@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"syscall"
 	"time"
 )
 
@@ -76,10 +75,7 @@ func Open(path string, initialCursor time.Time) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		if errors.Is(err, syscall.EWOULDBLOCK) {
-			err = ErrLocked
-		}
+	if err := lockFile(lock); err != nil {
 		return nil, errors.Join(err, lock.Close())
 	}
 	store := &Store{path: path, lock: lock}
@@ -170,7 +166,7 @@ func (s *Store) Close() error {
 	if s.lock == nil {
 		return nil
 	}
-	err := syscall.Flock(int(s.lock.Fd()), syscall.LOCK_UN)
+	err := unlockFile(s.lock)
 	closeErr := s.lock.Close()
 	s.lock = nil
 	if err != nil {

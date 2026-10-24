@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -80,8 +81,8 @@ func TestInitialRefutationsAreDiscardedAndEmptyHistoryIsOptional(t *testing.T) {
 }
 
 func TestReviewHistoryGrantFailureIsTerminalAfterPaidWork(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root bypasses directory permissions")
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("requires effective POSIX directory permissions and a non-root user")
 	}
 	root := t.TempDir()
 	t.Cleanup(func() {

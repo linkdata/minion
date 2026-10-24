@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -66,6 +67,20 @@ func NewOfflineIndex(ctx context.Context, dir, source string, files []workspace.
 	}
 	if _, err := index.run(ctx, 1024, nil, "add", "--all", "--force", "--", "."); err != nil {
 		return nil, err
+	}
+	if runtime.GOOS == "windows" {
+		var executablePaths strings.Builder
+		for _, file := range files {
+			if file.Mode == workspace.Executable {
+				executablePaths.WriteString(file.Path)
+				executablePaths.WriteByte(0)
+			}
+		}
+		if executablePaths.Len() != 0 {
+			if _, err := index.run(ctx, 1024, []byte(executablePaths.String()), "update-index", "--chmod=+x", "-z", "--stdin"); err != nil {
+				return nil, fmt.Errorf("restore executable source modes: %w", err)
+			}
+		}
 	}
 	tree, err := index.run(ctx, 128, nil, "write-tree")
 	if err != nil {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -39,9 +40,7 @@ func TestMaterializeSkillsKeepsPartialCleanupOwnership(t *testing.T) {
 					t.Fatal(err)
 				}
 				alias := filepath.Join(t.TempDir(), "skill-alias")
-				if err := os.Symlink(filepath.Dir(external), alias); err != nil {
-					t.Fatal(err)
-				}
+				symlinkOrSkip(t, filepath.Dir(external), alias)
 				external = filepath.Join(alias, "SKILL.md")
 				var err error
 				expectedExternal, err = filepath.EvalSymlinks(external)
@@ -64,7 +63,7 @@ func TestMaterializeSkillsKeepsPartialCleanupOwnership(t *testing.T) {
 			}
 			for _, path := range []string{owned, filepath.Dir(builtin), builtin} {
 				info, err := os.Stat(path)
-				if err != nil || info.Mode().Perm()&0077 != 0 {
+				if err != nil || runtime.GOOS != "windows" && info.Mode().Perm()&0077 != 0 {
 					t.Fatalf("nonprivate materialization %q: %v %v", path, info, err)
 				}
 			}
@@ -89,9 +88,7 @@ func TestMaterializeSkillsRefusesResolvedSourcePaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	alias := filepath.Join(t.TempDir(), "source-alias")
-	if err := os.Symlink(source, alias); err != nil {
-		t.Fatal(err)
-	}
+	symlinkOrSkip(t, source, alias)
 	for _, selected := range []string{inside, filepath.Join(alias, "SKILL.md")} {
 		paths, owned, err := MaterializeSkills(source, []string{selected})
 		if err == nil || !strings.Contains(err.Error(), "inside the untrusted source snapshot") || len(paths) != 0 || owned != "" {

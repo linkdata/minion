@@ -297,7 +297,7 @@ func TestReadStabilityRejectsChangedMetadata(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			after := before
 			test.change(&after)
-			err := checkReadStability(before, after, int(before.Size()))
+			err := checkReadStability(before, after, int(before.Size()), nil, before.stat.Ctim == after.stat.Ctim)
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("stability check=%v, want %q", err, test.want)
 			}

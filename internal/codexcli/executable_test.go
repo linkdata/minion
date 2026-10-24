@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -85,6 +86,9 @@ func TestMulticallStubRejectsWrongArgv0(t *testing.T) {
 }
 
 func TestRunInvokesAndGrantsResolvedExecutable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX executable fixture")
+	}
 	root := t.TempDir()
 	bin := filepath.Join(root, "bin")
 	if err := os.Mkdir(bin, 0700); err != nil {
@@ -134,6 +138,9 @@ printf '%s\n' '{"type":"thread.started","thread_id":"symlink-test"}' '{"type":"i
 }
 
 func TestCanonicalExecutablePreservesMulticallNameInRunAndPreflight(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix symlink executable fixture")
+	}
 	root := t.TempDir()
 	target, err := os.Executable()
 	if err != nil {

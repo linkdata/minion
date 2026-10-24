@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -93,6 +94,9 @@ const successfulResult = `{"type":"result","subtype":"success","is_error":false,
 
 func fakeExecutable(t *testing.T, name, script string) string {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("Claude CLI is not supported on native Windows")
+	}
 	if name == "claude" {
 		t.Setenv("HOME", t.TempDir())
 		t.Setenv("CLAUDE_CONFIG_DIR", "")
@@ -487,6 +491,9 @@ func TestRunStructuredOutput(t *testing.T) {
 }
 
 func TestRunRejectsUnsafePaths(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Claude CLI is not supported on native Windows")
+	}
 	workspace := t.TempDir()
 	outputParent := t.TempDir()
 	output := filepath.Join(outputParent, "reports")
@@ -534,6 +541,9 @@ func TestRunRejectsUnsafePaths(t *testing.T) {
 }
 
 func TestChildEnvironment(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix environment fixture; native Windows Claude is unsupported")
+	}
 	got, err := childEnvironment([]string{"HOME=/home/operator", "PATH=/bin::.:rel", "CLAUDE_CONFIG_DIR=/wrong-native-home", "ANTHROPIC_API_KEY=", "anthropic_api_key=dummy", "GH_TOKEN=dummy", "GITHUB_TOKEN=dummy", "GIT_CONFIG_GLOBAL=/private-git-config", "GIT_DIR=/private-git-dir", "NODE_OPTIONS=dummy", "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=0", "BASH_ENV=bad", "HTTPS_PROXY=http://proxy.example:8080", "https_proxy=http://lower.example:3128", "http_proxy=http://lower.example:3128", "all_proxy=socks5://lower.example:1080", "no_proxy=localhost", "Https_Proxy=http://ignored.example:3128", "invalid"}, "/run", "/cache", "", "/home/operator/.claude")
 	if err != nil {
 		t.Fatal(err)
@@ -581,6 +591,28 @@ func TestChildEnvironment(t *testing.T) {
 		if !found {
 			t.Fatalf("credential %s is not denied to Bash", key)
 		}
+	}
+}
+
+func TestRunRefusesNativeWindows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("native Windows only")
+	}
+	result, err := Run(t.Context(), t.TempDir(), "task", false, "", config.ClaudeConfig{})
+	if err == nil || !strings.Contains(err.Error(), "requires Linux or macOS") || result.Answer != "" {
+		t.Fatalf("unsupported native Claude was launched: %+v, %v", result, err)
+	}
+}
+
+func TestClaudeSandboxSystemPaths(t *testing.T) {
+	if got := systemReadPaths("windows"); got != nil {
+		t.Fatalf("native Windows Claude must remain unsupported: %v", got)
+	}
+	if got := systemReadPaths("darwin"); !slices.Contains(got, "/System") || !slices.Contains(got, "/opt/homebrew") || slices.Contains(got, "/lib64") {
+		t.Fatalf("macOS sandbox reads = %v", got)
+	}
+	if !allowAllUnixSockets("linux", nil) || allowAllUnixSockets("darwin", nil) {
+		t.Fatal("Unix socket defaults must stay Linux-specific")
 	}
 }
 

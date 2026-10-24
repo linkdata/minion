@@ -16,6 +16,9 @@ import (
 )
 
 func TestCheckModelsRequiresOnlySelectedProvider(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell provider fixture is unavailable on native Windows")
+	}
 	t.Setenv("ANTHROPIC_API_KEY", "")
 	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "")
 	t.Setenv("CODEX_API_KEY", "")
@@ -179,6 +182,9 @@ func TestGitHubTokenSelectionAndEmptyCLIResult(t *testing.T) {
 		{name: "empty CLI result", output: " \r\n", wantError: "gh auth token returned an empty token", callCLI: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			if runtime.GOOS == "windows" && test.callCLI {
+				t.Skip("POSIX shell gh fixture is unavailable on native Windows")
+			}
 			dir := t.TempDir()
 			t.Setenv("PATH", dir)
 			t.Setenv("GH_TOKEN", test.ghToken)

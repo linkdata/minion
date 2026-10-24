@@ -20,8 +20,8 @@ import (
 
 // Validate checks Claude's prerequisites and resolves model settings.
 //
-// It requires Linux, Claude Code 2.1.302 or later, authenticated CLI state,
-// bubblewrap, and socat. Model discovery uses the CLI's initialization protocol
+// It requires Linux or macOS, Claude Code 2.1.302 or later, authenticated CLI
+// state, and bubblewrap/socat on Linux. Model discovery uses the CLI's initialization protocol
 // without an inference turn. These checks do not execute a sandboxed command;
 // deployments must validate runtime isolation.
 //
@@ -30,8 +30,8 @@ import (
 func Validate(ctx context.Context, settings config.ClaudeConfig) (validated config.ClaudeConfig, resultErr error) {
 	defer func() { resultErr = aicli.RedactError(resultErr, settings.APIKey) }()
 	validated = settings
-	if runtime.GOOS != "linux" {
-		return validated, errors.New("claude isolation currently requires Linux")
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		return validated, errors.New("claude isolation requires Linux or macOS")
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -70,9 +70,11 @@ func Validate(ctx context.Context, settings config.ClaudeConfig) (validated conf
 	if !supportedVersion(string(version)) {
 		return validated, errors.New("claude isolation requires Claude Code 2.1.302 or later")
 	}
-	for _, name := range []string{"bwrap", "socat"} {
-		if _, err := aicli.ExecutablePath(name); err != nil {
-			return validated, fmt.Errorf("claude sandbox dependency %s: %w", name, err)
+	if runtime.GOOS == "linux" {
+		for _, name := range []string{"bwrap", "socat"} {
+			if _, err := aicli.ExecutablePath(name); err != nil {
+				return validated, fmt.Errorf("claude sandbox dependency %s: %w", name, err)
+			}
 		}
 	}
 	settings.ReadOnlyDirs = nil

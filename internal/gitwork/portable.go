@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -281,6 +282,25 @@ func (c *Checkout) Import(ctx context.Context, expectedHead string, changes []wo
 	}
 	if _, err := runGit(ctx, c.path, "add", "--all", "--", "."); err != nil {
 		return fmt.Errorf("stage imported changes: %w", err)
+	}
+	if runtime.GOOS == "windows" {
+		for _, mode := range []struct {
+			fileMode uint32
+			flag     string
+		}{{workspace.Executable, "+x"}, {workspace.Regular, "-x"}} {
+			var paths strings.Builder
+			for _, change := range changes {
+				if !change.Delete && change.Mode == mode.fileMode {
+					paths.WriteString(change.Path)
+					paths.WriteByte(0)
+				}
+			}
+			if paths.Len() != 0 {
+				if err := runGitInputTo(ctx, c.path, strings.NewReader(paths.String()), io.Discard, "update-index", "--chmod="+mode.flag, "-z", "--stdin"); err != nil {
+					return fmt.Errorf("restore imported file modes: %w", err)
+				}
+			}
+		}
 	}
 	raw, truncated, err := c.boundedGit(ctx, nil, maxChangedPathListBytes, true,
 		"diff", "--cached", "--raw", "-z", "--no-abbrev", "--no-renames", "--no-ext-diff", "--no-textconv", "HEAD", "--")

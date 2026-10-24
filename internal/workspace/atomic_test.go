@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -28,7 +29,7 @@ func TestWriteAtomicReplacesPrivateRecordAndCleansTemporaryFile(t *testing.T) {
 	if data, err := io.ReadAll(old); err != nil || string(data) != "old" {
 		t.Fatalf("replacement changed open prior record=%q,%v", data, err)
 	}
-	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0600 {
+	if info, err := os.Stat(path); err != nil || runtime.GOOS != "windows" && info.Mode().Perm() != 0600 || runtime.GOOS == "windows" && !info.Mode().IsRegular() {
 		t.Fatalf("record permissions=%v,%v", info, err)
 	}
 	if entries, err := os.ReadDir(root); err != nil || len(entries) != 1 {

@@ -51,10 +51,10 @@ func MaterializeRepository(ctx context.Context, source string, snapshot workspac
 		return nil, err
 	}
 	// Only fixed offline settings reach model commands; refs need neither reflogs nor a host identity.
-	const config = `[core]
+	config := strings.ReplaceAll(`[core]
 repositoryformatversion = 0
 bare = false
-filemode = true
+filemode = %s
 hooksPath = /dev/null
 fsmonitor = false
 excludesFile = /dev/null
@@ -71,7 +71,8 @@ helper =
 auto = 0
 [maintenance]
 auto = false
-`
+`, "/dev/null", os.DevNull)
+	config = fmt.Sprintf(config, gitFileMode())
 	if err := os.WriteFile(filepath.Join(dir, "config"), []byte(config), 0600); err != nil {
 		return nil, err
 	}

@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -37,8 +38,8 @@ func (w *cleanupRetryLog) Write(p []byte) (int, error) {
 }
 
 func TestRunnerSnapshotCleanupRetryKeepsValidatedResult(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root bypasses directory permissions")
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("requires effective POSIX directory permissions and a non-root user")
 	}
 	root := t.TempDir()
 	t.Cleanup(func() { _ = os.Chmod(root, 0700) })
@@ -63,8 +64,8 @@ func TestRunnerSnapshotCleanupRetryKeepsValidatedResult(t *testing.T) {
 }
 
 func TestRunnerAuditValidationCleanupRestoresRestrictedDirectory(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root bypasses directory permissions")
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("requires effective POSIX directory permissions and a non-root user")
 	}
 	installActionTestSkills(t, testAuditSkillURL)
 	marker := filepath.Join(t.TempDir(), "restricted")

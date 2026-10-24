@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -78,7 +79,7 @@ func TestMaterializeReadChangesAndApply(t *testing.T) {
 		t.Fatalf("binary=%v,%v", data, err)
 	}
 	info, err := os.Stat(filepath.Join(copyRoot, "binary"))
-	if err != nil || info.Mode().Perm() != 0755 {
+	if err != nil || !sourceModeMatches(info, Executable) {
 		t.Fatalf("executable mode=%v,%v", info, err)
 	}
 }
@@ -410,11 +411,17 @@ func TestApplyCleansRootAndKeepsRootDirectory(t *testing.T) {
 func TestMaterializeRefusesNonprivateRoot(t *testing.T) {
 	for _, kind := range []string{"public mode", "symlink"} {
 		t.Run(kind, func(t *testing.T) {
+			if runtime.GOOS == "windows" && kind == "public mode" {
+				t.Skip("Windows privacy is controlled by ACLs, not mode bits")
+			}
 			target := privateRoot(t)
 			root := target
 			if kind == "symlink" {
 				root = filepath.Join(t.TempDir(), "link")
 				if err := os.Symlink(target, root); err != nil {
+					if runtime.GOOS == "windows" {
+						t.Skipf("Windows symlink privilege unavailable: %v", err)
+					}
 					t.Fatal(err)
 				}
 			} else if err := os.Chmod(root, 0755); err != nil {
@@ -437,7 +444,7 @@ func TestApplyRootErrorDoesNotRequirePrivacy(t *testing.T) {
 		t.Fatal(err)
 	}
 	changes := []Change{{Path: "new", Mode: Regular, Data: []byte("imported")}}
-	if err := Apply(name, changes); !errors.Is(err, syscall.ENOTDIR) || strings.Contains(err.Error(), "private") {
+	if err := Apply(name, changes); err == nil || strings.Contains(err.Error(), "private") || runtime.GOOS != "windows" && !errors.Is(err, syscall.ENOTDIR) {
 		t.Fatalf("incorrect root requirement: %v", err)
 	}
 	if data, err := os.ReadFile(name); err != nil || string(data) != "unchanged" {
@@ -455,7 +462,7 @@ func TestApplyRootErrorDoesNotRequirePrivacy(t *testing.T) {
 	if data, err := os.ReadFile(filepath.Join(root, "new")); err != nil || string(data) != "imported" {
 		t.Fatalf("public directory import failed: %q, %v", data, err)
 	}
-	if info, err := os.Stat(root); err != nil || info.Mode().Perm() != 0755 {
+	if info, err := os.Stat(root); err != nil || runtime.GOOS != "windows" && info.Mode().Perm() != 0755 {
 		t.Fatalf("Apply changed root privacy: %v, %v", info, err)
 	}
 }
@@ -622,6 +629,9 @@ func TestRelativePathByteLimit(t *testing.T) {
 }
 
 func TestCollectionUsesOwnerExecuteBitForGitMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows uses the private Git index for executable mode")
+	}
 	for _, mode := range []os.FileMode{0644, 0645, 0755} {
 		t.Run(fmt.Sprintf("%o", mode), func(t *testing.T) {
 			root := privateRoot(t)

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -15,6 +16,9 @@ import (
 )
 
 func TestResolveCredentialHelperPreservesSymlinkName(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX symlinked shell launcher fixture is unavailable on native Windows")
+	}
 	gitPath, err := exec.LookPath("git")
 	if err != nil {
 		t.Fatal("git is unavailable")
@@ -57,12 +61,26 @@ func TestResolveCredentialHelperRejectsRelativePath(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", relative)
-	if got := resolveCredentialHelperGH(); got != "/bin/false" {
+	if got := resolveCredentialHelperGH(); got != "" {
 		t.Fatalf("relative credential helper was selected: %q", got)
 	}
 }
 
+func TestCleanGitEnvironmentStripsCaseVariantOverrides(t *testing.T) {
+	t.Setenv("git_config_global", "/hostile/config")
+	t.Setenv("gIt_askpass", "/hostile/askpass")
+	t.Setenv("Path", "/hostile/path")
+	for _, entry := range cleanGitEnvironment() {
+		if strings.Contains(entry, "/hostile/") {
+			t.Fatalf("untrusted case-variant environment survived: %q", entry)
+		}
+	}
+}
+
 func TestGitCredentialHelperIgnoresCheckoutRelativePath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell launchers and colon-separated PATH fixture are unavailable on native Windows")
+	}
 	realGit, err := exec.LookPath("git")
 	if err != nil {
 		t.Fatal("git is unavailable")

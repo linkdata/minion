@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -18,6 +19,9 @@ func TestHomePathUsesNativeVariableAndDefault(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("HOME", root)
+	if runtime.GOOS == "windows" {
+		t.Setenv("USERPROFILE", root)
+	}
 	for _, override := range []string{"", filepath.Join(root, "explicit")} {
 		t.Setenv("CLAUDE_CONFIG_DIR", override)
 		want := filepath.Join(realRoot, "explicit")

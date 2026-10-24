@@ -148,6 +148,25 @@ func TestExecutionCallPairingAndMissingAcknowledgements(t *testing.T) {
 	}
 }
 
+func TestExecutionFailureAfterAdmittedCallCannotRetry(t *testing.T) {
+	for _, admitted := range []bool{false, true} {
+		t.Run(map[bool]string{false: "before model", true: "after model"}[admitted], func(t *testing.T) {
+			f := newExecutionAdapterFixture(t, testJob(command.Comment))
+			var calls []CallUsage
+			if admitted {
+				call := CallUsage{Provider: "codex", Role: roleMain, Round: 1, Tokens: usage.Tokens{Input: 7}, Complete: false}
+				f.ack(call)
+				calls = []CallUsage{call}
+			}
+			failure := errors.New("native call failed")
+			err := f.sink.finish(f.result(calls, nil, ""), failure)
+			if !errors.Is(err, failure) || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) != admitted {
+				t.Fatalf("retry classification after admitted=%t: %v", admitted, err)
+			}
+		})
+	}
+}
+
 func TestExecutionCriticRequiresInitialPrefixAndSeparateDecision(t *testing.T) {
 	for _, scenario := range []string{"missing initial", "missing main prefix", "combined receipt and decision", "missing decision", "complete"} {
 		t.Run(scenario, func(t *testing.T) {
