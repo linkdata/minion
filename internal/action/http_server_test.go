@@ -272,6 +272,7 @@ func TestHTTPExecutorEncodedRequestBoundary(t *testing.T) {
 		{"/outcome", httpOutcomeBytes},
 	} {
 		t.Run(route.path, func(t *testing.T) {
+			t.Parallel()
 			var saves atomic.Int32
 			f := newHTTPServerTest(t, t.Context(), testJob(command.Comment), runnerExecutionCheckpoints{
 				before: func(CallCheckpoint) error { saves.Add(1); return nil },
@@ -321,6 +322,7 @@ func TestHTTPExecutorEncodedRequestBoundary(t *testing.T) {
 func TestHTTPExecutorPullAndCancelEncodedRequestBoundary(t *testing.T) {
 	for _, path := range []string{"/next", "/cancel"} {
 		t.Run(path, func(t *testing.T) {
+			t.Parallel()
 			f := newHTTPServerTest(t, t.Context(), testJob(command.Comment), runnerExecutionCheckpoints{}, nil)
 			var value any = httpPull{Version: ProtocolVersion, ExecutorID: f.job.Identity.ExecutorID}
 			if path == "/cancel" {

@@ -535,6 +535,7 @@ func TestUnixEndpointRejectsIncompleteBodiesWithoutBlockingClose(t *testing.T) {
 		{"active status wrong content type", "POST /status HTTP/1.1\r\nHost: minion\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\n\r\n1\r\n", "status", http.StatusBadRequest, true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			dir := unixTestDirectory(t)
 			directory, err := os.Stat(dir)
 			if err != nil {
