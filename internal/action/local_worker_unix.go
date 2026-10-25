@@ -11,26 +11,29 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
+	"time"
 
 	"github.com/linkdata/minion/internal/bounded"
+	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/executil"
 )
 
 // localWorker owns one direct child and its private HTTP endpoint.
 type localWorker struct {
-	executor  *HTTPExecutor
-	endpoint  *UnixEndpoint
-	cmd       *exec.Cmd
-	cancel    context.CancelFunc
-	exited    chan struct{}
-	childMu   sync.Mutex
-	stopSent  atomic.Bool
-	unclean   atomic.Bool
-	reuse     atomic.Int32
-	stderr    *bounded.Tail
-	waitErr   error
-	closeOnce sync.Once
-	closeErr  error
+	executor     *HTTPExecutor
+	endpoint     *UnixEndpoint
+	cmd          *exec.Cmd
+	cancel       context.CancelFunc
+	exited       chan struct{}
+	childMu      sync.Mutex
+	stopSent     atomic.Bool
+	unclean      atomic.Bool
+	reuse        atomic.Int32
+	stderr       *bounded.Tail
+	waitErr      error
+	closeOnce    sync.Once
+	closeErr     error
+	readyTimeout time.Duration
 }
 
 const (
@@ -44,9 +47,12 @@ const (
 // startLocalWorker owns the direct child's context and command. configure sets
 // environment and stdout; stderr is captured for a safe startup diagnostic.
 // Job cancellation is handled by Execute.
-func startLocalWorker(runtimeDir, executorID, path string, args []string, configure func(*exec.Cmd, string)) (*localWorker, error) {
+func startLocalWorker(runtimeDir, executorID, path string, args []string, readyTimeout time.Duration, configure func(*exec.Cmd, string)) (*localWorker, error) {
 	if path == "" {
 		return nil, errors.New("local worker command path is required")
+	}
+	if readyTimeout <= 0 {
+		return nil, errors.New("local worker readiness timeout must be positive")
 	}
 	executor, err := NewHTTPExecutor(executorID)
 	if err != nil {
@@ -66,7 +72,7 @@ func startLocalWorker(runtimeDir, executorID, path string, args []string, config
 	cmd.Stderr = stderr
 	cmd.Cancel = commandCancel
 	executil.Prepare(cmd)
-	w := &localWorker{executor: executor, endpoint: endpoint, cmd: cmd, cancel: cancel, exited: make(chan struct{}), stderr: stderr}
+	w := &localWorker{executor: executor, endpoint: endpoint, cmd: cmd, cancel: cancel, exited: make(chan struct{}), stderr: stderr, readyTimeout: readyTimeout}
 	w.reuse.Store(workerNeedsPull)
 	preparedCancel := cmd.Cancel
 	cmd.Cancel = func() error {
@@ -95,6 +101,33 @@ func startLocalWorker(runtimeDir, executorID, path string, args []string, config
 		}
 	}()
 	return w, nil
+}
+
+// AttachLocalWorker connects one selected direct child without changing the
+// default service mode. The caller owns the returned close function.
+func (e *Orchestrator) AttachLocalWorker(ctx context.Context, cfg config.Config, runtimeDir, path string, args []string, readyTimeout time.Duration, configure func(*exec.Cmd, string, WorkerSelection)) (WorkerSelection, func() error, error) {
+	if e.Executor != nil {
+		return WorkerSelection{}, nil, errors.New("orchestrator already has an executor")
+	}
+	if configure == nil {
+		return WorkerSelection{}, nil, errors.New("local worker startup configuration is required")
+	}
+	selected, err := e.WorkerSelection(cfg)
+	if err != nil {
+		return WorkerSelection{}, nil, err
+	}
+	w, err := startLocalWorker(runtimeDir, "local", path, args, readyTimeout, func(cmd *exec.Cmd, socket string) {
+		configure(cmd, socket, selected)
+	})
+	if err != nil {
+		return WorkerSelection{}, nil, err
+	}
+	if err := w.WaitCapacity(ctx); err != nil {
+		// WaitCapacity closes the child and endpoint on failure.
+		return WorkerSelection{}, nil, redactActionError(err, e.Runner.Codex.APIKey, e.Runner.Claude.APIKey)
+	}
+	e.Executor = w
+	return selected, w.Close, nil
 }
 
 func (w *localWorker) Execute(ctx context.Context, job Job, sink Checkpoints) (Result, error) {
@@ -138,6 +171,8 @@ func (w *localWorker) Execute(ctx context.Context, job Job, sink Checkpoints) (R
 // WaitCapacity releases capacity only after a pull is held at the original
 // endpoint while the direct child is live, initially and after each outcome.
 func (w *localWorker) WaitCapacity(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, w.readyTimeout)
+	defer cancel()
 	return w.awaitReusable(ctx)
 }
 

@@ -83,7 +83,7 @@ func TestSelectionPreflightDirectChild(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			worker, err := startLocalWorker(filepath.Join(base, "runtime"), "local", os.Args[0], []string{"-test.run=^TestSelectionPreflightDirectChildHelper$"}, func(cmd *exec.Cmd, socket string) {
+			worker, err := startLocalWorker(filepath.Join(base, "runtime"), "local", os.Args[0], []string{"-test.run=^TestSelectionPreflightDirectChildHelper$"}, 40*time.Second, func(cmd *exec.Cmd, socket string) {
 				cmd.Env = append(os.Environ(), "MINION_PREFLIGHT_CHILD=1", "MINION_PREFLIGHT_CASE="+tc.name,
 					"MINION_PREFLIGHT_SOCKET="+socket, "MINION_PREFLIGHT_BASE="+base)
 			})

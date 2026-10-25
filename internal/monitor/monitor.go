@@ -79,12 +79,13 @@ func (j Job) Marker() string {
 }
 
 type Monitor struct {
-	Config     config.Config
-	ConfigPath string
-	GitHub     GitHub
-	Handler    ActionHandler
-	Logger     *log.Logger
-	Now        func() time.Time
+	Config           config.Config
+	ConfigPath       string
+	GitHub           GitHub
+	Handler          ActionHandler
+	Logger           *log.Logger
+	Now              func() time.Time
+	SelectedCommands map[string]bool // Non-nil freezes discovery to the selected worker's commands.
 }
 
 func (m *Monitor) logf(format string, args ...any) {
@@ -484,6 +485,11 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				}
 			}
 			if err := waitCapacity(); err != nil {
+				if len(failures) != firstFailure {
+					if saveErr := m.deferNotification(store, entry.key, notification, entry.since, started); saveErr != nil {
+						return stop(err, saveErr)
+					}
+				}
 				return stop(err)
 			}
 		}
@@ -521,6 +527,9 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 func (m *Monitor) availableCommands(repo config.Repository) map[string]command.Action {
 	available := make(map[string]command.Action, len(repo.Actions))
 	for _, name := range repo.Actions {
+		if m.SelectedCommands != nil && !m.SelectedCommands[name] {
+			continue
+		}
 		mapping, ok := m.Config.Commands[name]
 		if !ok {
 			continue
@@ -698,7 +707,9 @@ func (m *Monitor) acceptWhitelistedInvitations(ctx context.Context) error {
 				failures = append(failures, fmt.Errorf("%s identity changed while registering invitation", fullName))
 				continue
 			}
-			m.Config.Repositories = append(m.Config.Repositories, repo)
+			if m.SelectedCommands == nil {
+				m.Config.Repositories = append(m.Config.Repositories, repo)
+			}
 			m.logf("added %s to monitored repositories in %s", repo.Name, m.ConfigPath)
 		}
 		if err := m.GitHub.AcceptRepositoryInvitation(actionCtx, invite.ID); err != nil {

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/state"
 )
@@ -109,5 +110,115 @@ func TestRunOnceWaitsAfterEachPersistedAction(t *testing.T) {
 				t.Fatalf("discovery or cursor advanced after capacity loss: current checks=%d reactions=%d cursor=%s repo cursor=%s", gh.currentChecks, len(gh.reactions), saved.Cursor, saved.RepositoryCursors["example-owner/example-repo"])
 			}
 		})
+	}
+}
+
+func TestRunOnceCapacityLossPersistsEarlierThreadFailure(t *testing.T) {
+	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	initial := now.Add(-time.Minute)
+	path := filepath.Join(t.TempDir(), "state.json")
+	store := openStateAt(t, path, initial)
+	bad := github.Item{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}}
+	good := github.Item{Key: "comment:2", NodeID: "node:2", Body: "@linkdataminion review", Author: github.User{Login: "writer"}}
+	gh := &fakeGitHub{
+		notifications: []github.Notification{testNotification(now)},
+		items:         []github.Item{bad, good},
+		permission:    github.Permission{Permission: "write"},
+		currentItem: func(item github.Item) (github.Item, error) {
+			if item.Key == bad.Key {
+				return github.Item{}, errors.New("provenance unavailable")
+			}
+			return item, nil
+		},
+	}
+	unavailable := errors.New("capacity unavailable")
+	handler := &capacityHandler{failAt: 2, err: unavailable}
+	clock := now
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Now: func() time.Time { return clock }}
+	if _, err := m.RunOnce(t.Context(), store); !errors.Is(err, unavailable) {
+		t.Fatalf("capacity loss = %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store = openStateAt(t, path, initial)
+	if len(store.Data.Processed) != 1 || len(store.Data.PendingNotifications) != 1 || !store.Data.Cursor.Equal(initial) {
+		t.Fatalf("capacity loss did not retain accepted action and retry: %+v", store.Data)
+	}
+	gh.notifications = nil
+	gh.currentItem = nil
+	handler.failAt = 0
+	clock = clock.Add(time.Minute)
+	if _, err := m.RunOnce(t.Context(), store); err != nil {
+		t.Fatalf("retry after notification disappeared: %v", err)
+	}
+	if len(store.Data.Processed) != 2 || len(store.Data.PendingNotifications) != 0 || len(handler.jobs) != 2 || handler.jobs[1].Source.Key != bad.Key {
+		t.Fatalf("lost failed action after capacity returned: state=%+v jobs=%+v", store.Data, handler.jobs)
+	}
+}
+
+func TestSelectedCommandsDoNotExpandWhenSkillAppears(t *testing.T) {
+	cfg := testConfig(t)
+	fixSkill := filepath.Join(os.Getenv("HOME"), ".agents", "skills", "fix", "SKILL.md")
+	if err := os.Remove(fixSkill); err != nil {
+		t.Fatal(err)
+	}
+	m := &Monitor{Config: cfg, SelectedCommands: map[string]bool{"review": true, "audit": true}}
+	if got := m.availableCommands(cfg.Repositories[0]); len(got) != 2 {
+		t.Fatalf("selected commands before install = %v", got)
+	}
+	if err := os.WriteFile(fixSkill, []byte("Use this test skill.\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := m.availableCommands(cfg.Repositories[0]); len(got) != 2 {
+		t.Fatalf("later skill expanded frozen command selection: %v", got)
+	}
+}
+
+func TestSelectedWorkerDefersInvitedRepositoryUntilRestart(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.InvitationOwners = []string{"example-owner"}
+	cfg.InvitationOwnerIDs = map[string]int64{"example-owner": 2}
+	path := filepath.Join(t.TempDir(), "config.json")
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	gh := &fakeGitHub{invitations: []github.Invitation{{
+		ID: 1, Repository: github.Repository{FullName: "example-owner/new-repo", Owner: github.User{Login: "example-owner"}}, Permissions: "write",
+	}}}
+	m := &Monitor{Config: cfg, ConfigPath: path, GitHub: gh, SelectedCommands: map[string]bool{"review": true}}
+	if err := m.acceptWhitelistedInvitations(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if len(m.Config.Repositories) != 1 || len(gh.accepted) != 1 {
+		t.Fatalf("new repository became active before restart: repos=%v accepted=%v", m.Config.Repositories, gh.accepted)
+	}
+	saved, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newRepo, ok := saved.Repository("example-owner/new-repo")
+	if !ok || len(newRepo.Actions) != len(cfg.Commands) {
+		t.Fatalf("invitation was not persisted for a new worker selection: %+v", saved.Repositories)
+	}
+	if got := m.availableCommands(newRepo); len(got) != 1 {
+		t.Fatalf("selected commands changed for persisted repository: %v", got)
+	}
+	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	notification := testNotification(now)
+	notification.Repository = github.Repository{FullName: newRepo.Name, ID: newRepo.ID, Owner: github.User{ID: newRepo.OwnerID}}
+	gh.invitations = nil
+	gh.notifications = []github.Notification{notification}
+	m.Handler = &capacityHandler{}
+	m.Now = func() time.Time { return now }
+	if _, err := m.RunOnce(t.Context(), openState(t, now.Add(-time.Minute))); err != nil {
+		t.Fatal(err)
+	}
+	if len(gh.notificationCalls) != 1 || gh.notificationCalls[0].repo != cfg.Repositories[0].Name || gh.threadCalls != 0 {
+		t.Fatalf("invited repository was scanned before restart: notifications=%v threads=%d", gh.notificationCalls, gh.threadCalls)
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -20,7 +21,9 @@ import (
 	"time"
 
 	"github.com/linkdata/minion/internal/command"
+	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/monitor"
+	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -31,7 +34,7 @@ func localWorkerTestStart(t *testing.T, mode string) *localWorker {
 	t.Helper()
 	report := filepath.Join(t.TempDir(), "child")
 	var output bytes.Buffer
-	w, err := startLocalWorker(unixTestDirectory(t), "local", os.Args[0], []string{"-test.run=^TestLocalWorkerHelper$"}, func(cmd *exec.Cmd, socket string) {
+	w, err := startLocalWorker(unixTestDirectory(t), "local", os.Args[0], []string{"-test.run=^TestLocalWorkerHelper$"}, 10*time.Second, func(cmd *exec.Cmd, socket string) {
 		cmd.Env = append(os.Environ(), "MINION_LOCAL_WORKER_HELPER="+mode, "MINION_LOCAL_WORKER_SOCKET="+socket, "MINION_LOCAL_WORKER_REPORT="+report)
 		cmd.Stdout = &output
 	})
@@ -124,6 +127,59 @@ func TestLocalWorkerRequiresInitialCapacityProof(t *testing.T) {
 	}
 }
 
+func TestAttachLocalWorkerRoutesOrchestratorThroughDirectChild(t *testing.T) {
+	gitFixtureRemote(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !serveIssueFixture(t, w, r) {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	commands := map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}}
+	e := &Orchestrator{WorkRoot: t.TempDir(), BotLogin: "bot", GitHub: testGitHub(server, "fixture"),
+		Main: "codex", CodexModel: "resolved", CodexEffort: "high", Commands: commands,
+		Runner: Runner{runModel: forbidModel(t)},
+	}
+	cfg := config.Config{Main: "codex", Commands: commands, Repositories: []config.Repository{{Name: "owner/repo", Actions: []string{"comment"}}}}
+	report := filepath.Join(t.TempDir(), "child")
+	selected, closeWorker, err := e.AttachLocalWorker(t.Context(), cfg, unixTestDirectory(t), os.Args[0], []string{"-test.run=^TestLocalWorkerHelper$"}, 10*time.Second, func(cmd *exec.Cmd, socket string, selected WorkerSelection) {
+		if len(selected.Commands) != 1 || selected.Commands["comment"].Action != "comment" || selected.Main.Model != "resolved" || selected.Main.Effort != "high" {
+			t.Fatalf("startup selection = %+v", selected)
+		}
+		cmd.Env = append(os.Environ(), "MINION_LOCAL_WORKER_HELPER=crash", "MINION_LOCAL_WORKER_SOCKET="+socket, "MINION_LOCAL_WORKER_REPORT="+report)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = closeWorker() })
+	if len(selected.Commands) != 1 || selected.Main.Model != "resolved" || e.Executor == nil {
+		t.Fatalf("worker was not attached with frozen selection: %+v, executor=%v", selected, e.Executor)
+	}
+	e.Executor.(*localWorker).executor.outcomeGrace = 20 * time.Millisecond
+	request := usageJob()
+	request.Command = command.Command{Name: "comment", Action: command.Comment}
+	request.Repository.Actions = []string{"comment"}
+	if err := e.Execute(t.Context(), request); err == nil {
+		t.Fatal("orchestrator did not dispatch through the crashing direct child")
+	}
+	worker := e.Executor.(*localWorker)
+	select {
+	case <-worker.exited:
+	case <-time.After(2 * time.Second):
+		t.Fatal("orchestrator did not assign work to direct child")
+	}
+	if worker.cmd.ProcessState == nil || worker.cmd.ProcessState.ExitCode() != 7 {
+		t.Fatalf("direct child did not receive assignment: %v", worker.cmd.ProcessState)
+	}
+	if err := e.WaitCapacity(t.Context()); err == nil {
+		t.Fatal("failed direct child still advertises capacity")
+	}
+	if e.Executor == nil {
+		t.Fatal("worker failure enabled in-process fallback")
+	}
+}
+
 func TestLocalWorkerAwaitHeldPull(t *testing.T) {
 	w := localWorkerTestStart(t, "run-http-idle")
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
@@ -140,7 +196,7 @@ func TestLocalWorkerAwaitHeldPull(t *testing.T) {
 	}
 }
 
-func TestLocalWorkerAwaitHeldPullRejectsCanceledRequest(t *testing.T) {
+func TestLocalWorkerWaitCapacityRejectsCanceledRequestWithinConfiguredTimeout(t *testing.T) {
 	w := localWorkerTestStart(t, "run-http-idle")
 	localWorkerTestPull(t, w)
 	canceled := make(chan struct{})
@@ -148,9 +204,8 @@ func TestLocalWorkerAwaitHeldPullRejectsCanceledRequest(t *testing.T) {
 	w.executor.mu.Lock()
 	w.executor.pullDone = canceled
 	w.executor.mu.Unlock()
-	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
-	defer cancel()
-	if err := w.awaitHeldPull(ctx); !errors.Is(err, context.DeadlineExceeded) {
+	w.readyTimeout = 10 * time.Millisecond
+	if err := w.WaitCapacity(t.Context()); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("canceled held request appeared ready: %v", err)
 	}
 	if w.cmd.ProcessState == nil {
@@ -1006,7 +1061,10 @@ func TestLocalWorkerListenerFailureReapsChild(t *testing.T) {
 
 func TestLocalWorkerStartFailureClosesEndpoint(t *testing.T) {
 	dir := unixTestDirectory(t)
-	w, err := startLocalWorker(dir, "local", filepath.Join(dir, "missing"), nil, nil)
+	if w, err := startLocalWorker(dir, "local", os.Args[0], nil, 0, nil); w != nil || err == nil || !strings.Contains(err.Error(), "readiness timeout") {
+		t.Fatalf("unbounded readiness wait accepted: worker=%v error=%v", w, err)
+	}
+	w, err := startLocalWorker(dir, "local", filepath.Join(dir, "missing"), nil, time.Second, nil)
 	if w != nil || err == nil || !strings.Contains(err.Error(), "start local worker") {
 		t.Fatalf("start failure: worker=%v error=%v", w, err)
 	}
