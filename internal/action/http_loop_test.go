@@ -86,6 +86,54 @@ func TestRunHTTPLoopCanceledHeldPullIsCleanShutdown(t *testing.T) {
 	}
 }
 
+type partialAssignmentBody struct {
+	ctx     context.Context
+	reading chan struct{}
+	reads   int
+}
+
+func (b *partialAssignmentBody) Read(p []byte) (int, error) {
+	if b.reads == 0 {
+		b.reads++
+		return copy(p, "{"), nil
+	}
+	if b.reads == 1 {
+		b.reads++
+		close(b.reading)
+	}
+	<-b.ctx.Done()
+	return 0, b.ctx.Err()
+}
+
+func (*partialAssignmentBody) Close() error { return nil }
+
+func TestRunHTTPLoopDoesNotHidePartialAssignmentOnCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	body := &partialAssignmentBody{ctx: ctx, reading: make(chan struct{})}
+	client := &http.Client{Transport: httpClientTestTransport(func(*http.Request) (*http.Response, error) {
+		header := make(http.Header)
+		header.Set("Content-Type", "application/json")
+		return &http.Response{StatusCode: http.StatusOK, Header: header, Body: body}, nil
+	})}
+	done := make(chan error, 1)
+	go func() { done <- RunHTTPLoop(ctx, client, "http://minion", "local", &Runner{runModel: forbidModel(t)}) }()
+	select {
+	case <-body.reading:
+	case <-time.After(5 * time.Second):
+		t.Fatal("worker did not read the partial assignment")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || !errors.Is(err, context.Canceled) {
+			t.Fatalf("partial assignment became clean idle shutdown: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("canceled partial assignment did not return")
+	}
+}
+
 func TestRunHTTPLoopStopsAfterMissingOutcomeACK(t *testing.T) {
 	installActionTestSkills(t, testReviewSkillURL)
 	job := testJob(command.Comment)

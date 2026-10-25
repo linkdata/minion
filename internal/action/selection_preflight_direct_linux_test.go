@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -181,7 +182,7 @@ func TestSelectionPreflightDirectChildHelper(t *testing.T) {
 			return aicli.Result{}, err
 		}
 		if os.Getenv("MINION_PREFLIGHT_CASE") == "known failure" && calls == 1 {
-			return aicli.Result{}, errors.New("fixture model failure")
+			return aicli.Result{}, &url.Error{Op: "Post", URL: "https://provider.invalid", Err: errors.New("fixture model failure")}
 		}
 		return aicli.Result{Answer: "Worker answer", UsageComplete: true}, nil
 	}}, selection)

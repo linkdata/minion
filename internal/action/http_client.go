@@ -24,6 +24,8 @@ type httpExecutionClient struct {
 	base                *url.URL
 	outcomeSent         atomic.Bool
 	outcomeAcknowledged bool
+	outcomeDegraded     bool
+	nextHeadersReceived bool
 }
 
 type httpRunStatus uint8
@@ -73,10 +75,6 @@ func RunHTTPLoop(ctx context.Context, client *http.Client, baseURL, executorID s
 		case httpRunIdleShutdown:
 			return nil
 		case httpRunAcknowledged:
-			var network *url.Error
-			if errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || errors.Is(err, monitor.ErrRequestTransport) || errors.As(err, &network) {
-				return err
-			}
 			continue
 		default:
 			if err == nil {
@@ -104,8 +102,10 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	configured := *client
 	configured.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	transport := &httpExecutionClient{client: &configured, base: base}
+	var checkpoints *httpClientCheckpoints
+	protocolFailed := false
 	defer func() {
-		if status != nil && transport.outcomeAcknowledged {
+		if status != nil && transport.outcomeAcknowledged && !transport.outcomeDegraded && !protocolFailed && checkpoints != nil && checkpoints.failure == nil {
 			*status = httpRunAcknowledged
 		}
 	}()
@@ -116,7 +116,7 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	var assignment httpAssignment
 	if err := transport.post(ctx, "next", pull, httpJobBytes, &assignment, httpBinding{}, 0); err != nil {
 		if status != nil && errors.Is(err, context.Canceled) &&
-			(ctx.Err() != nil || !errors.Is(err, monitor.ErrExecutionOutcomeUnknown)) {
+			(!errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || ctx.Err() != nil && !transport.nextHeadersReceived) {
 			*status = httpRunIdleShutdown
 		}
 		return err
@@ -139,7 +139,7 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	if assignment.Expires <= 0 {
 		return httpClientUnknown("next", errors.New("invalid assignment expiry"))
 	}
-	checkpoints := &httpClientCheckpoints{transport: transport, control: context.WithoutCancel(ctx), binding: httpJobBinding(job), started: started}
+	checkpoints = &httpClientCheckpoints{transport: transport, control: context.WithoutCancel(ctx), binding: httpJobBinding(job), started: started}
 	if !time.Now().Before(expires) {
 		err := errors.Join(monitor.ErrTerminalJob, context.DeadlineExceeded)
 		result := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head}
@@ -153,6 +153,7 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	watchCtx, stopWatch := context.WithCancelCause(ctx)
 	watchBody, err := httpEncode(checkpoints.binding, httpControlBytes)
 	if err != nil {
+		protocolFailed = true
 		stopWatch(errHTTPWatchStopped)
 		return fmt.Errorf("encode cancellation admission: %w", err)
 	}
@@ -179,6 +180,7 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 		}
 	}
 	if err != nil {
+		protocolFailed = true
 		stopWatch(errHTTPWatchStopped)
 		result := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head}
 		return errors.Join(err, checkpoints.outcome(result, err))
@@ -234,6 +236,10 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	outcomeErr := checkpoints.outcome(result, runErr)
 	stopWatch(errHTTPWatchStopped)
 	watchErr := <-watchDone
+	if watchErr != nil {
+		var network *url.Error
+		protocolFailed = errors.Is(watchErr, monitor.ErrExecutionOutcomeUnknown) || errors.Is(watchErr, monitor.ErrRequestTransport) || errors.As(watchErr, &network)
+	}
 	if outcomeErr == nil && context.Cause(watchCtx) == errHTTPWatchStopped && httpWatchUncertainty(watchErr) {
 		// Parent receipt is known. A watch-only protocol failure during upload
 		// cannot revoke it; errors already captured in runErr still propagate.
@@ -302,6 +308,9 @@ func (c *httpExecutionClient) open(ctx context.Context, kind string, data []byte
 			return nil, ctx.Err()
 		}
 		return nil, failure(err)
+	}
+	if kind == "next" {
+		c.nextHeadersReceived = true
 	}
 	if pullCancel != nil {
 		// The assignment wait is unbounded; only its received body uses control time.
@@ -474,6 +483,7 @@ func (c *httpClientCheckpoints) outcome(result Result, runErr error) error {
 		err = shapeErr
 	}
 	if err != nil {
+		c.transport.outcomeDegraded = true
 		// Encode the one fallback before sending anything. Already acknowledged
 		// receipts remain the parent's evidence; no After is inferred from Result.
 		fallback := Result{Version: c.binding.Version, Identity: c.binding.Identity, SourceRef: c.binding.SourceRef}
