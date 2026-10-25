@@ -38,6 +38,44 @@ func symlinkFixture(t *testing.T, target, link string) {
 	}
 }
 
+func TestGHConfigHomePrecedence(t *testing.T) {
+	root := t.TempDir()
+	for _, test := range []struct {
+		name, goos, gh, xdg, appdata, want string
+	}{
+		{"explicit", "windows", filepath.Join(root, "explicit"), filepath.Join(root, "xdg"), filepath.Join(root, "appdata"), filepath.Join(root, "explicit")},
+		{"xdg", "windows", "", filepath.Join(root, "xdg"), filepath.Join(root, "appdata"), filepath.Join(root, "xdg", "gh")},
+		{"windows appdata", "windows", "", "", filepath.Join(root, "appdata"), filepath.Join(root, "appdata", "GitHub CLI")},
+		{"windows fallback", "windows", "", "", "", filepath.Join(root, ".config", "gh")},
+		{"darwin fallback", "darwin", "", "", filepath.Join(root, "appdata"), filepath.Join(root, ".config", "gh")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("GH_CONFIG_DIR", test.gh)
+			t.Setenv("XDG_CONFIG_HOME", test.xdg)
+			t.Setenv("AppData", test.appdata)
+			if got := ghConfigHome(root, test.goos); got != test.want {
+				t.Fatalf("gh config home = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestWorkRootPreflightAllowsWindowsWithoutAppData(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows gh fallback without AppData")
+	}
+	home := t.TempDir()
+	isolateHostPaths(t, home)
+	t.Setenv("AppData", "")
+	work := filepath.Join(home, "work")
+	if err := os.Mkdir(work, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkIsolation(config.Config{Main: "codex", WorkRoot: work}, filepath.Join(home, "config.json")); err != nil {
+		t.Fatalf("gh HOME fallback was refused: %v", err)
+	}
+}
+
 func TestWorkRootPreflightAllowsOrdinaryDirectory(t *testing.T) {
 	isolateHostPaths(t, t.TempDir())
 	cfg := config.Config{Main: "codex", WorkRoot: t.TempDir(), StatePath: filepath.Join(t.TempDir(), "state.json")}
@@ -140,7 +178,7 @@ func TestWorkRootPreflightRequiresWorkspaceBackend(t *testing.T) {
 
 func TestWorkRootPreflightProtectsConfigurationAndCredentials(t *testing.T) {
 	const source = "https://github.com/owner/repo/tree/pinned/skills/example"
-	for _, kind := range []string{"clean", "config", "codex home", "claude home", "unused claude home", "credential alias", "gh home", "default gh home", "gh credential alias"} {
+	for _, kind := range []string{"clean", "config", "codex home", "claude home", "unused claude home", "credential alias", "gh home", "default gh home", "windows default gh home", "gh credential alias"} {
 		t.Run(kind, func(t *testing.T) {
 			root := t.TempDir()
 			isolateHostPaths(t, root)
@@ -193,6 +231,18 @@ func TestWorkRootPreflightProtectsConfigurationAndCredentials(t *testing.T) {
 					t.Fatal(err)
 				}
 				symlinkFixture(t, public, filepath.Join(root, "config", "gh"))
+			case "windows default gh home":
+				if runtime.GOOS != "windows" {
+					t.Skip("Windows AppData default")
+				}
+				t.Setenv("GH_CONFIG_DIR", "")
+				t.Setenv("XDG_CONFIG_HOME", "")
+				appdata := filepath.Join(root, "appdata")
+				if err := os.Mkdir(appdata, 0700); err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv("AppData", appdata)
+				symlinkFixture(t, public, filepath.Join(appdata, "GitHub CLI"))
 			case "gh credential alias":
 				if err := os.WriteFile(filepath.Join(public, "hosts.yml"), []byte("fixture only"), 0600); err != nil {
 					t.Fatal(err)
@@ -209,7 +259,9 @@ func TestWorkRootPreflightProtectsConfigurationAndCredentials(t *testing.T) {
 				return
 			}
 
-			if err := checkIsolation(cfg, configPath); !errors.Is(err, workroot.ErrUnsafe) || !strings.Contains(err.Error(), "private host path") || kind == "default gh home" && !strings.Contains(err.Error(), filepath.Join(root, "config", "gh")) {
+			if err := checkIsolation(cfg, configPath); !errors.Is(err, workroot.ErrUnsafe) || !strings.Contains(err.Error(), "private host path") ||
+				kind == "default gh home" && !strings.Contains(err.Error(), filepath.Join(root, "config", "gh")) ||
+				kind == "windows default gh home" && !strings.Contains(err.Error(), filepath.Join(root, "appdata", "GitHub CLI")) {
 				t.Fatalf("preflight accepted exposed %s: %v", kind, err)
 			}
 		})

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"syscall"
@@ -280,24 +281,40 @@ func checkIsolation(cfg config.Config, configPath string) (resultErr error) {
 		filepath.Join(userHome, ".config", "gh"),
 		filepath.Join(userHome, ".config", "gh", "hosts.yml"),
 	)
-	configHome, err := os.UserConfigDir()
-	if err != nil {
-		return err
+	if runtime.GOOS != "windows" || os.Getenv("AppData") != "" {
+		configHome, err := os.UserConfigDir()
+		if err != nil {
+			return err
+		}
+		private = append(private, filepath.Join(configHome, "git", "credentials"), filepath.Join(configHome, "git", "config"))
 	}
-	private = append(private, filepath.Join(configHome, "git", "credentials"), filepath.Join(configHome, "git", "config"))
+	xdgHome := os.Getenv("XDG_CONFIG_HOME")
+	if xdgHome != "" {
+		private = append(private, filepath.Join(xdgHome, "git", "credentials"), filepath.Join(xdgHome, "git", "config"))
+	}
 	for _, key := range []string{"GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG"} {
 		if path := os.Getenv(key); path != "" {
 			private = append(private, path)
 		}
 	}
-	ghHome := os.Getenv("GH_CONFIG_DIR")
-	if ghHome == "" {
-		ghHome = filepath.Join(configHome, "gh")
-	}
-	// Match gh's filepath.Join cleaning before checking aliases of hosts.yml.
-	ghHome = filepath.Clean(ghHome)
+	ghHome := ghConfigHome(userHome, runtime.GOOS)
 	private = append(private, ghHome, filepath.Join(ghHome, "hosts.yml"))
 	return runner.CheckPrivatePaths(private, cfg.Main, cfg.Adversarial)
+}
+
+func ghConfigHome(home, goos string) string {
+	if dir := os.Getenv("GH_CONFIG_DIR"); dir != "" {
+		return filepath.Clean(dir)
+	}
+	if dir := os.Getenv("XDG_CONFIG_HOME"); dir != "" {
+		return filepath.Join(dir, "gh")
+	}
+	if goos == "windows" {
+		if dir := os.Getenv("AppData"); dir != "" {
+			return filepath.Join(dir, "GitHub CLI")
+		}
+	}
+	return filepath.Join(home, ".config", "gh")
 }
 
 func logCommandSkills(cfg config.Config, logger *log.Logger) {

@@ -30,7 +30,11 @@ func TestDirectoryRequiresAnExistingNonRootDirectory(t *testing.T) {
 			t.Fatalf("accepted %q", path)
 		}
 	}
-	if _, err := Directory(volumeRoot); err == nil || err.Error() != "expected a non-root directory: "+volumeRoot {
+	canonicalRoot, err := filepath.EvalSymlinks(volumeRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Directory(volumeRoot); err == nil || err.Error() != "expected a non-root directory: "+canonicalRoot {
 		t.Fatalf("root error lost its path: %v", err)
 	}
 	alias := filepath.Join(root, "alias")
