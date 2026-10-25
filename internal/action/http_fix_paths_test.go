@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -59,6 +60,9 @@ func TestHostileHTTPFixPathsCannotPublish(t *testing.T) {
 				Commands: map[string]config.CommandMapping{"fix": {Action: string(command.Fix), Skills: []string{skills.BuiltinAntiPromptInjection}}},
 			}
 			e.Executor = executorFunc(func(ctx context.Context, job Job, checkpoints Checkpoints) (Result, error) {
+				if path == "link/outside" && !slices.Contains(job.Source.Omitted, "link") {
+					t.Fatalf("symlink fixture was not omitted from the portable source: %v", job.Source.Omitted)
+				}
 				job.Source.BaseFiles = nil // Empty issue comparison is omitted on the HTTP wire.
 				f := newHTTPServerTest(t, ctx, job, checkpoints, nil)
 				f.pull(t)

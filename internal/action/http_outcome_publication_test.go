@@ -58,6 +58,8 @@ func TestExecuteRejectsHostileHTTPOutcomeBeforePublication(t *testing.T) {
 					budgetQuotes = append(budgetQuotes, fmt.Sprintf("Private quote %04d was already in source.", i))
 				}
 				gitFixtureRemote(t, workspace.File{Path: "source.txt", Mode: workspace.Regular, Data: []byte(strings.Repeat("f", 1<<20) + "\n" + strings.Join(budgetQuotes, "\n"))})
+			} else if isAudit {
+				gitFixtureRemote(t, workspace.File{Path: "source.txt", Mode: workspace.Regular, Data: []byte("source\n")})
 			} else {
 				gitFixtureRemote(t)
 			}
@@ -94,7 +96,7 @@ func TestExecuteRejectsHostileHTTPOutcomeBeforePublication(t *testing.T) {
 			}
 			e.Executor = executorFunc(func(ctx context.Context, job Job, checkpoints Checkpoints) (Result, error) {
 				executed = true
-				if scenario.change == "budget refutation" {
+				if scenario.change == "budget refutation" || isAudit {
 					job.Source.BaseFiles = nil // Empty base files are omitted on the HTTP wire.
 				}
 				f := newHTTPServerTest(t, ctx, job, checkpoints, nil)
@@ -234,6 +236,18 @@ func TestExecuteRejectsHostileHTTPOutcomeBeforePublication(t *testing.T) {
 				validationErr := outcome.Result.Validate(job)
 				if (validationErr == nil) != scenario.validResult || scenario.change == "audit" && !strings.Contains(validationErr.Error(), "REPORT.md") || scenario.change == "audit coverage" && !strings.Contains(validationErr.Error(), "coverage-ledger.json") || scenario.change == "changes" && !strings.Contains(validationErr.Error(), "read-only action returned source changes") || scenario.change == "invisible answer" && !strings.Contains(validationErr.Error(), "action answer") {
 					t.Fatalf("hostile result semantic fixture changed: %v", validationErr)
+				}
+				wantPathError := ""
+				switch scenario.change {
+				case "audit path traversal", "audit path absolute":
+					wantPathError = "invalid action report artifact"
+				case "audit foreign repo", "audit target absolute":
+					wantPathError = "complete standard run"
+				case "audit companion traversal":
+					wantPathError = "audit companion file path is not portable"
+				}
+				if wantPathError != "" && !strings.Contains(validationErr.Error(), wantPathError) {
+					t.Fatalf("hostile result missed %s: %v", wantPathError, validationErr)
 				}
 				f.ack(t, "/outcome", outcome, http.StatusOK, sequence)
 				got := f.result(t)
