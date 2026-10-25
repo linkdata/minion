@@ -205,6 +205,64 @@ exit 99
 	}
 }
 
+func TestPreflightSelectionRejectsClaudeModelAlias(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake Claude CLI uses a POSIX shell")
+	}
+	installActionTestSkills(t, testReviewSkillURL)
+	writeActionTestSkills(t, os.Getenv("HOME"), ".claude", testReviewSkillURL)
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	for _, key := range []string{"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"} {
+		t.Setenv(key, "")
+	}
+	fakeOnPath(t, "claude", `#!/bin/sh
+if [ "$3" = auth ]; then
+  printf '%s\n' '{"loggedIn":true}'
+else
+  case " $* " in
+    *' --minion-unsupported-capability-probe '*) printf '%s\n' 'unknown option --minion-unsupported-capability-probe' >&2; exit 2 ;;
+    *' --resume '*)
+      next=false
+      for arg do
+        if $next; then id=$arg; break; fi
+        [ "$arg" != --resume ] || next=true
+      done
+      printf '%s\n' '{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":0,"total_cost_usd":0,"usage":{"input_tokens":0,"output_tokens":0}}'
+      printf 'No conversation found with session ID: %s\n' "$id" >&2
+      exit 1 ;;
+  esac
+  input=$(cat)
+  case "$input" in
+    *minion-initialize*) printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"minion-initialize","response":{"models":[{"value":"default","resolvedModel":"claude-pinned","supportedEffortLevels":["low"]}]}}}' ;;
+    *) exit 99 ;;
+  esac
+fi
+`)
+	selected := WorkerSelection{
+		Commands: map[string]config.CommandMapping{
+			"review": {Action: string(command.Review), Skills: []string{testReviewSkillURL}},
+		},
+		Main: RoleSettings{Provider: "claude", Model: "default", Effort: "low"},
+	}
+	runner, err := NewSelectedRunner(Runner{WorkRoot: t.TempDir()}, selected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = runner.PreflightSelection(t.Context())
+	requirePreflightMessage(t, err, preflightClaudeSettingsUnavailable)
+	if cause := errors.Unwrap(err); cause == nil || !strings.Contains(cause.Error(), "was not resolved at startup") {
+		t.Fatalf("unresolved Claude alias cause = %v", cause)
+	}
+	selected.Main.Model = "claude-pinned"
+	runner, err = NewSelectedRunner(Runner{WorkRoot: t.TempDir()}, selected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runner.PreflightSelection(t.Context()); err != nil {
+		t.Fatalf("resolved Claude model failed preflight: %v", err)
+	}
+}
+
 func TestValidPreflightMessageRejectsInjectedOutput(t *testing.T) {
 	for _, message := range []string{
 		"", "Codex login unavailable\nsecret", "selected command skill unavailable: secret",

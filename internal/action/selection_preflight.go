@@ -157,15 +157,23 @@ func (r *Runner) PreflightSelection(ctx context.Context) (resultErr error) {
 				return fmt.Errorf("codex instruction boundary: %w", err)
 			}
 			message = preflightCodexInvocationUnsupported
-			if _, err := codexcli.Validate(ctx, settings); err != nil {
+			validated, err := codexcli.Validate(ctx, settings)
+			if err != nil {
 				return fmt.Errorf("codex settings: %w", err)
+			}
+			if validated.Model != role.Model || validated.ReasoningEffort != role.Effort {
+				return errors.New("selected Codex model or effort was not resolved at startup")
 			}
 		case "claude":
 			settings := configured.Claude
 			settings.Model, settings.Effort = role.Model, role.Effort
 			message = preflightClaudeSettingsUnavailable
-			if _, err := claudecli.Validate(ctx, settings); err != nil {
+			validated, err := claudecli.Validate(ctx, settings)
+			if err != nil {
 				return fmt.Errorf("claude settings: %w", err)
+			}
+			if validated.Model != role.Model || validated.Effort != role.Effort {
+				return errors.New("selected Claude model or effort was not resolved at startup")
 			}
 		}
 	}
