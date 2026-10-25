@@ -150,7 +150,7 @@ func (f *httpServerTest) ack(t *testing.T, path string, value any, status int, s
 	t.Helper()
 	got := f.request(path, value)
 	if got.err != nil || got.status != status || got.ack.Kind != strings.TrimPrefix(path, "/") || got.ack.Sequence != sequence {
-		t.Fatalf("%s acknowledgement: %+v", path, got)
+		t.Fatalf("%s acknowledgement: %+v failure=%+v", path, got, got.ack.Failure)
 	}
 	return got.ack
 }
@@ -786,6 +786,9 @@ func TestHTTPExecutorRejectsStaleAndRegressingStatusWithoutChangingPaidSequence(
 	job.CriticMaxRounds = 2
 	f := newHTTPServerTest(t, ctx, job, runnerExecutionCheckpoints{}, nil)
 	f.pull(t)
+	f.tx.mu.Lock()
+	f.tx.started = f.tx.started.Add(-time.Second) // Keep synthetic nanosecond ages below measured elapsed time on Windows.
+	f.tx.mu.Unlock()
 	status := Status{Version: ProtocolVersion, Identity: f.job.Identity, SourceRef: f.job.Source.Head,
 		Sequence: 2, ProgressSequence: 4, ProgressAge: 2 * time.Nanosecond, LogSequence: 3, WorkerState: "busy", Phase: "prepare"}
 	f.ack(t, "/status", httpObservation{Status: status}, http.StatusOK, 2)
