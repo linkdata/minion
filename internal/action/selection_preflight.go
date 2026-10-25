@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
@@ -134,6 +135,12 @@ func workerCredentialValues(env []string) []string {
 			secrets = append(secrets, value)
 			if trimmed := strings.TrimSpace(value); trimmed != "" && trimmed != value {
 				secrets = append(secrets, trimmed)
+			}
+			if parsed, err := url.Parse(value); err == nil && parsed.User != nil {
+				secrets = append(secrets, parsed.User.String(), parsed.User.Username())
+				if password, ok := parsed.User.Password(); ok {
+					secrets = append(secrets, password)
+				}
 			}
 		}
 	}
