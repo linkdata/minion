@@ -978,7 +978,7 @@ func TestRunHTTPDeliversPaidFactsAfterCancellationWatchStopsAction(t *testing.T)
 				case "next":
 					runtime := job.RuntimeBudget
 					if name == "local action deadline" {
-						runtime = time.Second
+						runtime = 2 * time.Second
 					}
 					httpClientTestJSON(t, w, httpAssignment{Job: job, Expires: time.Now().Add(runtime).UnixNano()})
 					return

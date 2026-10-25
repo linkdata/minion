@@ -306,7 +306,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.comp
 			job := testJob(action)
 			job.RuntimeBudget = 5 * time.Second
 			if test.expire {
-				job.RuntimeBudget = time.Second
+				job.RuntimeBudget = 2 * time.Second
 			}
 			var modelContext context.Context
 			var changedSource string

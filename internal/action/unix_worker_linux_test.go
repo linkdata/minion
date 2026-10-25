@@ -80,16 +80,16 @@ func TestUnixExecutionDirectWorker(t *testing.T) {
 		}
 		socketClosed := closed || endpoint == nil
 		if !socketClosed {
-			t.Logf("retaining runtime directory after socket close failure: %s", runtimeDir)
+			t.Logf("socket close failed; fixture cleanup will remove %s", runtimeDir)
 			return
 		}
 		if err := os.Remove(runtimeDir); err != nil && !errors.Is(err, os.ErrNotExist) {
-			t.Errorf("retain nonempty runtime directory %s: %v", runtimeDir, err)
+			t.Errorf("remove runtime directory %s: %v", runtimeDir, err)
 			return
 		}
 		for _, path := range []string{report + ".ready", report + ".first", report + ".second", report + ".second-go", report + ".third-go", report + ".cancel-seen", report + ".third", report + ".release", report + ".failed", workRoot, grant, filepath.Join(skillDir, ".minion-install.json"), skillDir, filepath.Join(base, ".agents", "skills"), filepath.Join(base, ".agents")} {
 			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-				t.Errorf("retain nonempty owned path %s: %v", path, err)
+				t.Errorf("remove owned path %s: %v", path, err)
 				return
 			}
 		}
