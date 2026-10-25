@@ -74,19 +74,32 @@ func TestCheckModelsBoundsResolvedCatalogueModel(t *testing.T) {
 				}
 				model := strings.Repeat("m", size)
 				value := "default"
-				cfg := config.Config{Main: "claude"}
+				cfg := config.Config{Main: "claude", Adversarial: "claude"}
 				if selection == "alias" {
 					value, cfg.Claude.Model = "quick", "quick"
 				}
 				catalogue := fmt.Sprintf(`{"type":"control_response","response":{"subtype":"success","request_id":"minion-initialize","response":{"models":[{"value":%q,"resolvedModel":%q}]}}}`, value, model)
-				testsupport.FakeOnPath(t, "claude", `#!/bin/sh
+				fixtureDir := testsupport.FakeOnPath(t, "claude", `#!/bin/sh
 if [ "$3" = 'auth' ]; then
+  printf x >> "$0.authcalls"
   printf '%s\n' '{"loggedIn":true}'
 else
   if [ "$1" = --help ]; then
     printf '%s\n' 'Options:' '  --session-id <uuid>' '  -r, --resume [sessionId]' '  --add-dir <directories...>' '  --model <name>'
     exit 0
   fi
+  case " $* " in *' --minion-unsupported-capability-probe '*) printf '%s\n' 'unknown option --minion-unsupported-capability-probe' >&2; exit 2 ;; esac
+  case " $* " in
+    *' --resume '*)
+      next=false
+      for arg do
+        if $next; then id=$arg; break; fi
+        [ "$arg" != --resume ] || next=true
+      done
+      printf '%s\n' '{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":0,"total_cost_usd":0,"usage":{"input_tokens":0,"output_tokens":0}}'
+      printf 'No conversation found with session ID: %s\n' "$id" >&2
+      exit 1 ;;
+  esac
   input=$(/bin/cat)
   case "$input" in
     *minion-initialize*) printf '%s\n' '`+catalogue+`' ;;
@@ -102,6 +115,10 @@ fi
 				if size == 128 {
 					if err != nil {
 						t.Fatalf("exact-limit resolved model rejected: %v", err)
+					}
+					calls, err := os.ReadFile(filepath.Join(fixtureDir, "claude.authcalls"))
+					if err != nil || string(calls) != "x" {
+						t.Fatalf("shared provider validated %d times: %v", len(calls), err)
 					}
 				} else if err == nil || !strings.Contains(err.Error(), "claude settings: invalid action model or skills") {
 					t.Fatalf("over-limit resolved model reached jobs: %v", err)

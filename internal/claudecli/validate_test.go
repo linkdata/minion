@@ -1,6 +1,8 @@
 package claudecli
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -51,6 +53,10 @@ fi
 			if err != nil || cfg.Model != tc.wantModel || cfg.Effort != tc.wantEffort {
 				t.Fatalf("Validate = %+v, %v", cfg, err)
 			}
+			fresh := readFile(t, binary+".fresh-args")
+			if !strings.Contains(fresh, "--no-session-persistence\n") || !strings.Contains(fresh, "--session-id\n") || !strings.Contains(fresh, "--add-dir\n") || !strings.Contains(fresh, "--model\n"+tc.wantModel+"\n") {
+				t.Fatalf("fresh capability probe used wrong arguments: %q", fresh)
+			}
 		})
 	}
 }
@@ -58,18 +64,12 @@ fi
 const invocationHelp = "Options:\n  --session-id <uuid>\n  -r, --resume [sessionId]\n  --add-dir <directories...>\n  --model <name>\n  --effort <level>\n"
 
 func TestValidateRejectsMissingInvocationOptionBeforeModelCall(t *testing.T) {
-	for _, test := range []struct{ option, declaration string }{
-		{"--session-id", "  --session-id <uuid>\n"},
-		{"--resume", "  -r, --resume [sessionId]\n"},
-		{"--add-dir", "  --add-dir <directories...>\n"},
-		{"--model", "  --model <name>\n"},
-		{"--effort", "  --effort <level>\n"},
-	} {
-		t.Run(test.option, func(t *testing.T) {
-			binary := fakeValidationHelp(t, strings.Replace(invocationHelp, test.declaration, "", 1))
-			_, err := Validate(t.Context(), config.ClaudeConfig{Effort: "high"})
-			if err == nil || !strings.Contains(err.Error(), "invocation capability check") || !strings.Contains(err.Error(), test.option) {
-				t.Fatalf("accepted help without %s: %v", test.option, err)
+	for _, option := range []string{"--session-id", "--resume", "--add-dir", "--model"} {
+		t.Run(option, func(t *testing.T) {
+			binary := fakeValidationCLI(t, invocationHelp, option, false)
+			_, err := Validate(t.Context(), config.ClaudeConfig{})
+			if err == nil || !strings.Contains(err.Error(), option) {
+				t.Fatalf("accepted CLI without %s: %v", option, err)
 			}
 			if _, err := os.Stat(binary + ".model-called"); !os.IsNotExist(err) {
 				t.Fatalf("capability check started a model call: %v", err)
@@ -78,23 +78,66 @@ func TestValidateRejectsMissingInvocationOptionBeforeModelCall(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsMissingConfiguredEffortOption(t *testing.T) {
+	binary := fakeValidationCLI(t, strings.Replace(invocationHelp, "  --effort <level>\n", "", 1), "", false)
+	_, err := Validate(t.Context(), config.ClaudeConfig{Effort: "high"})
+	if err == nil || !strings.Contains(err.Error(), "--effort") {
+		t.Fatalf("accepted CLI without effort option: %v", err)
+	}
+	if _, err := os.Stat(binary + ".model-called"); !os.IsNotExist(err) {
+		t.Fatalf("capability check started a model call: %v", err)
+	}
+}
+
 func TestValidateDoesNotRequireUnusedEffortOption(t *testing.T) {
-	fakeValidationHelp(t, strings.Replace(invocationHelp, "  --effort <level>\n", "", 1))
+	fakeValidationCLI(t, strings.Replace(invocationHelp, "  --effort <level>\n", "", 1), "", false)
 	if _, err := Validate(t.Context(), config.ClaudeConfig{}); err != nil {
 		t.Fatalf("rejected CLI without unused effort option: %v", err)
 	}
 }
 
-func TestHelpOptionDeclaredRequiresDeclaration(t *testing.T) {
-	if helpOptionDeclared([]byte("  --other <value>  See --resume for details\n"), "--resume") || helpOptionDeclared([]byte("  --resumed <id>\n"), "--resume") {
-		t.Fatal("accepted a description or prefix as an option declaration")
-	}
-	if !helpOptionDeclared([]byte("  -r, --resume [sessionId]\n"), "--resume") {
-		t.Fatal("missed an option declaration after a short alias")
+func TestValidateRejectsCLIThatIgnoresUnknownOption(t *testing.T) {
+	fakeValidationCLI(t, invocationHelp, "", true)
+	if _, err := Validate(t.Context(), config.ClaudeConfig{}); err == nil || !strings.Contains(err.Error(), "did not reject an unknown option") {
+		t.Fatalf("accepted CLI that ignores unknown options: %v", err)
 	}
 }
 
-func fakeValidationHelp(t *testing.T, help string) string {
+func TestValidateHonorsCallerCancellation(t *testing.T) {
+	fakeValidationCLI(t, invocationHelp, "", false)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := Validate(ctx, config.ClaudeConfig{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("lost caller cancellation: %v", err)
+	}
+}
+
+func TestEmptySessionLookupRejectsModelActivity(t *testing.T) {
+	empty := `{"type":"result","is_error":true,"num_turns":0,"total_cost_usd":0,"usage":{"input_tokens":0,"output_tokens":0}}`
+	if !isEmptySessionLookup([]byte(empty)) {
+		t.Fatal("rejected an empty-session error result")
+	}
+	for _, output := range []string{
+		`{"type":"assistant"}` + "\n" + empty,
+		`{"type":"result","is_error":true,"num_turns":0,"usage":{"input_tokens":1}}`,
+		`{"type":"result","is_error":false,"num_turns":0}`,
+	} {
+		if isEmptySessionLookup([]byte(output)) {
+			t.Fatalf("accepted model activity or success: %q", output)
+		}
+	}
+}
+
+func TestHelpOptionDeclaredRequiresDeclaration(t *testing.T) {
+	if helpOptionDeclared([]byte("  --other <value>  See --effort for details\n"), "--effort") || helpOptionDeclared([]byte("  --effortful <id>\n"), "--effort") {
+		t.Fatal("accepted a description or prefix as an option declaration")
+	}
+	if !helpOptionDeclared([]byte("  --effort <level>\n"), "--effort") {
+		t.Fatal("missed an effort option declaration")
+	}
+}
+
+func fakeValidationCLI(t *testing.T, help, rejected string, ignoreUnknown bool) string {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("Claude CLI is not supported on native Windows")
@@ -104,6 +147,14 @@ func fakeValidationHelp(t *testing.T, help string) string {
 	for _, key := range []string{"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"} {
 		t.Setenv(key, "")
 	}
+	unknown := `case " $* " in *' --minion-unsupported-capability-probe '*) printf '%s\n' 'unknown option --minion-unsupported-capability-probe' >&2; exit 2 ;; esac`
+	if ignoreUnknown {
+		unknown = ""
+	}
+	reject := ""
+	if rejected != "" {
+		reject = `case " $* " in *' ` + rejected + ` '*) printf '%s\n' 'unsupported ` + rejected + `' >&2; exit 2 ;; esac`
+	}
 	dir := testsupport.FakeOnPath(t, "claude", `#!/bin/sh
 if [ "$3" = auth ]; then
   printf '%s\n' '{"loggedIn":true}'
@@ -111,6 +162,19 @@ elif [ "$1" = --help ]; then
   cat <<'MINION_HELP'
 `+help+`MINION_HELP
 else
+  `+unknown+`
+  `+reject+`
+  case " $* " in
+    *' --resume '*)
+      next=false
+      for arg do
+        if $next; then id=$arg; break; fi
+        [ "$arg" != --resume ] || next=true
+      done
+      printf '%s\n' '{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":0,"total_cost_usd":0,"usage":{"input_tokens":0,"output_tokens":0}}'
+      printf 'No conversation found with session ID: %s\n' "$id" >&2
+      exit 1 ;;
+  esac
   input=$(cat)
   case "$input" in
     *minion-initialize*) printf '%s\n' '`+modelCatalogue+`' ;;

@@ -93,6 +93,22 @@ func fakeExecutable(t *testing.T, name, script string) string {
   printf '%s\n' 'Options:' '  --session-id <uuid>' '  -r, --resume [sessionId]' '  --add-dir <directories...>' '  --model <name>' '  --effort <level>'
   exit 0
 fi
+case " $* " in *' --minion-unsupported-capability-probe '*) printf '%s\n' 'unknown option --minion-unsupported-capability-probe' >&2; exit 2 ;; esac
+case " $* " in
+  *' --input-format stream-json '*)
+    case " $* " in
+      *' --resume '*)
+        minion_next=false
+        for minion_arg do
+          if $minion_next; then minion_id=$minion_arg; break; fi
+          [ "$minion_arg" != --resume ] || minion_next=true
+        done
+        printf '%s\n' '{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":0,"total_cost_usd":0,"usage":{"input_tokens":0,"output_tokens":0}}'
+        printf 'No conversation found with session ID: %s\n' "$minion_id" >&2
+        exit 1 ;;
+      *' --session-id '*) printf '%s\n' "$@" > "$0.fresh-args"; printf '%s\n' '` + modelCatalogue + `'; exit 0 ;;
+    esac ;;
+esac
 minion_session_flag=false
 for minion_arg do
   if $minion_session_flag; then

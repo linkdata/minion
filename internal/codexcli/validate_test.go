@@ -20,6 +20,9 @@ import (
 )
 
 const catalogueScript = `#!/bin/sh
+if [ "$1" = app-server ]; then
+  case " $* " in *' --disable apps '*) ;; *) exit 0 ;; esac
+fi
 if [ "$1" = exec ]; then
   case " $* " in *' --help '*) ;; *) exit 9 ;; esac
   printf '%s\n' '--invocation--' "$@" >> @HELP_ARGS@
@@ -218,22 +221,13 @@ func TestValidateRejectsMissingOutputSchemaSupport(t *testing.T) {
 	}
 }
 
-func TestValidateRejectsMissingRunOptions(t *testing.T) {
-	for _, test := range []struct {
-		name, option string
-	}{
-		{"reasoning effort", "model_reasoning_effort="},
-		{"writable roots", "sandbox_workspace_write.writable_roots="},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			dir := t.TempDir()
-			page := `{"id":2,"result":{"data":[{"model":"fixture","isDefault":true,"defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high"}]}]}}`
-			script := strings.Replace(catalogueScriptFor(dir, page, ""), "if [ \"$1\" = exec ]; then", "if [ \"$1\" = exec ]; then\n  case \" $* \" in *' "+test.option+"'*) printf '%s\\n' 'unsupported "+test.option+"' >&2; exit 2 ;; esac\nfi\nif [ \"$1\" = exec ]; then", 1)
-			installFakeCodex(t, script)
-			if _, err := Validate(t.Context(), config.CodexConfig{}); err == nil || !strings.Contains(err.Error(), "Codex exec capability check") || !strings.Contains(err.Error(), test.option) {
-				t.Fatalf("accepted CLI without %s support: %v", test.name, err)
-			}
-		})
+func TestValidateRejectsMissingResolvedEffortConfig(t *testing.T) {
+	dir := t.TempDir()
+	page := `{"id":2,"result":{"data":[{"model":"fixture","isDefault":true,"defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high"}]}]}}`
+	script := strings.Replace(catalogueScriptFor(dir, page, ""), "if [ \"$1\" = app-server ]; then", "if [ \"$1\" = app-server ]; then\n  case \" $* \" in *' model_reasoning_effort='*) printf '%s\\n' 'unsupported model_reasoning_effort=' >&2; exit 2 ;; esac\nfi\nif [ \"$1\" = app-server ]; then", 1)
+	installFakeCodex(t, script)
+	if _, err := Validate(t.Context(), config.CodexConfig{}); err == nil || !strings.Contains(err.Error(), "Codex selected effort config capability check") || !strings.Contains(err.Error(), "model_reasoning_effort=") {
+		t.Fatalf("accepted CLI without the resolved effort config key: %v", err)
 	}
 }
 

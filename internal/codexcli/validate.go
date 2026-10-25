@@ -87,10 +87,8 @@ func Validate(ctx context.Context, settings config.CodexConfig) (resolved config
 	return settings, fmt.Errorf("codex.reasoning_effort %q is not supported for model %q; supported efforts: %s", effort, selected.Model, strings.Join(efforts, ", "))
 }
 
-// Check both exec parsers without supplying a prompt or starting an inference turn.
+// Check selected config and both exec parsers without starting an inference turn.
 func validateExecCapabilities(ctx context.Context, settings config.CodexConfig) (err error) {
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
 	binary, err := aicli.ExecutablePath("codex")
 	if err != nil {
 		return err
@@ -106,6 +104,19 @@ func validateExecCapabilities(ctx context.Context, settings config.CodexConfig) 
 	defer func() { err = errors.Join(err, os.RemoveAll(dir)) }()
 	schema := filepath.Join(dir, "output-schema.json")
 	env := childEnvironment(os.Environ(), dir, dir, home, true)
+	probe := func(args []string) ([]byte, error) {
+		probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		return aicli.Probe(probeCtx, binary, "codex", args, dir, env, "", settings.APIKey)
+	}
+	// exec --help parses flags but does not load -c settings. App-server
+	// startup checks the resolved effort key under strict config with no request.
+	if settings.ReasoningEffort != "" {
+		args := []string{"app-server", "--strict-config", "--listen", "stdio://", "-c", `model_provider="openai"`, "-c", "model_reasoning_effort=" + strconv.Quote(settings.ReasoningEffort)}
+		if _, probeErr := probe(args); probeErr != nil {
+			return fmt.Errorf("Codex selected effort config capability check: %w", probeErr) //nolint:staticcheck // -- Codex is a proper noun.
+		}
+	}
 	for _, command := range []struct {
 		name string
 		args []string
@@ -125,13 +136,13 @@ func validateExecCapabilities(ctx context.Context, settings config.CodexConfig) 
 				args = append(args, "-c", "model_reasoning_effort="+strconv.Quote(settings.ReasoningEffort))
 			}
 			args = append(args, "--output-schema", schema, "--help")
-			_, probeErr := aicli.Probe(ctx, binary, "codex", args, dir, env, "", settings.APIKey)
+			_, probeErr := probe(args)
 			if probeErr != nil {
 				return fmt.Errorf("Codex %s capability check (writable=%t): %w", command.name, writable, probeErr) //nolint:staticcheck // -- Codex is a proper noun.
 			}
 		}
 		invalid := append(command.args, "--minion-unsupported-capability-probe", "--help")
-		_, probeErr := aicli.Probe(ctx, binary, "codex", invalid, dir, env, "", settings.APIKey)
+		_, probeErr := probe(invalid)
 		var exitErr *exec.ExitError
 		if probeErr == nil || ctx.Err() != nil || errors.Is(probeErr, aicli.ErrOutputLimit) || !errors.As(probeErr, &exitErr) || exitErr.ExitCode() <= 0 {
 			return fmt.Errorf("Codex %s capability check did not reject an unknown option: %v", command.name, probeErr) //nolint:staticcheck // -- Codex is a proper noun.

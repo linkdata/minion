@@ -70,3 +70,12 @@ func TestProbeExactBoundAndCallerCancellation(t *testing.T) {
 		t.Fatalf("caller cancellation cause changed: %v", err)
 	}
 }
+
+func TestProbeRetainsBoundedStdoutOnCLIError(t *testing.T) {
+	binary := probeExecutable(t, "printf '%s\\n' '{\"type\":\"result\",\"is_error\":true}'\nexit 7\n")
+	output, err := Probe(t.Context(), binary, "", nil, t.TempDir(), os.Environ(), "", "")
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 7 || string(output) != "{\"type\":\"result\",\"is_error\":true}\n" {
+		t.Fatalf("output %q, error %v", output, err)
+	}
+}

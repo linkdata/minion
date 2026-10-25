@@ -12,6 +12,8 @@ import (
 )
 
 // Probe captures bounded output from an installed CLI without model inference.
+// It returns captured stdout even when the CLI exits with an error, so callers
+// can inspect structured failure events.
 // A nonempty argv0 preserves the executable's logical name for multicall binaries.
 // A nonempty secret is redacted before diagnostics are quoted.
 func Probe(ctx context.Context, binary, argv0 string, args []string, dir string, env []string, input, secret string) ([]byte, error) {
@@ -37,7 +39,7 @@ func Probe(ctx context.Context, binary, argv0 string, args []string, dir string,
 		if text := RedactTail(&diagnostics, secret); text != "" {
 			err = fmt.Errorf("%w: %q", err, text)
 		}
-		return nil, err
+		return output.Bytes(), err
 	}
 	return output.Bytes(), nil
 }
