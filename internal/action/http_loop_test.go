@@ -100,3 +100,35 @@ func TestRunHTTPLoopStopsAfterMissingOutcomeACK(t *testing.T) {
 		t.Fatalf("parent received outcome was changed by missing child ACK: result=%+v error=%v", got.result, got.err)
 	}
 }
+
+func TestRunHTTPLoopStopsAfterMalformedRequiredACK(t *testing.T) {
+	installActionTestSkills(t, testReviewSkillURL)
+	job := testJob(command.Comment)
+	parent := newHTTPServerTest(t, t.Context(), job, runnerExecutionCheckpoints{}, nil)
+	client := *parent.server.Client()
+	underlying := client.Transport
+	var pulls, calls atomic.Int32
+	client.Transport = httpClientTestTransport(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path == "/next" {
+			pulls.Add(1)
+		}
+		response, err := underlying.RoundTrip(r)
+		if err == nil && r.URL.Path == "/before" {
+			_ = response.Body.Close()
+			response.Body = io.NopCloser(strings.NewReader("{"))
+		}
+		return response, err
+	})
+	runner := &Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, _ modelRun) (aicli.Result, error) {
+		calls.Add(1)
+		return aicli.Result{Answer: "Worker answer", UsageComplete: true}, nil
+	}}
+	err := RunHTTPLoop(t.Context(), &client, parent.server.URL, job.Identity.ExecutorID, runner)
+	if !errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || pulls.Load() != 1 || calls.Load() != 0 {
+		t.Fatalf("malformed required ACK allowed another pull or model call: pulls=%d calls=%d error=%v", pulls.Load(), calls.Load(), err)
+	}
+	got := parent.result(t)
+	if got.err == nil || !got.result.matchesJob(job) {
+		t.Fatalf("parent lost acknowledged failure outcome: result=%+v error=%v", got.result, got.err)
+	}
+}

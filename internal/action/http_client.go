@@ -73,6 +73,10 @@ func RunHTTPLoop(ctx context.Context, client *http.Client, baseURL, executorID s
 		case httpRunIdleShutdown:
 			return nil
 		case httpRunAcknowledged:
+			var network *url.Error
+			if errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || errors.Is(err, monitor.ErrRequestTransport) || errors.As(err, &network) {
+				return err
+			}
 			continue
 		default:
 			if err == nil {
