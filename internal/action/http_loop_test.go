@@ -17,17 +17,22 @@ import (
 )
 
 func TestRunHTTPLoopStopsOnInvalidNext(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
 	var pulls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/next" {
 			t.Errorf("unexpected request: %s", r.URL.Path)
 		}
-		pulls.Add(1)
+		if pulls.Add(1) > 1 {
+			cancel()
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, "{")
 	}))
 	defer server.Close()
-	err := RunHTTPLoop(t.Context(), server.Client(), server.URL, "local", &Runner{runModel: forbidModel(t)})
+	err := RunHTTPLoop(ctx, server.Client(), server.URL, "local", &Runner{runModel: forbidModel(t)})
 	if !errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || pulls.Load() != 1 {
 		t.Fatalf("invalid next response retried or became shutdown: pulls=%d error=%v", pulls.Load(), err)
 	}
