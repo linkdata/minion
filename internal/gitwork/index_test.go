@@ -48,57 +48,69 @@ func writeIndexFixture(t *testing.T, source, name string, data []byte) {
 	writeFile(t, filepath.Join(source, name), string(data))
 }
 
-func TestFixIndexCaseOnlyRenameWithIgnoreCase(t *testing.T) {
-	for _, directory := range []bool{false, true} {
-		name := "README.md"
-		if directory {
-			name = "Docs/README.md"
-		}
-		t.Run(name, func(t *testing.T) {
-			index, source := offlineIndexFixture(t, []workspace.File{{Path: name, Mode: workspace.Regular, Data: []byte("fixture\n")}})
-			if _, err := index.run(t.Context(), 128, nil, "config", "core.ignoreCase", "true"); err != nil {
-				t.Fatal(err)
-			}
-			old, renamed := "README.md", "readme.md"
+func TestFixIndexCaseOnlyRename(t *testing.T) {
+	for _, ignoreCase := range []string{"false", "true"} {
+		for _, directory := range []bool{false, true} {
+			name := "README.md"
 			if directory {
-				old, renamed = "Docs", "docs"
+				name = "Docs/README.md"
 			}
-			intermediate := filepath.Join(source, "case-rename.tmp")
-			if err := os.Rename(filepath.Join(source, old), intermediate); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Rename(intermediate, filepath.Join(source, renamed)); err != nil {
-				t.Fatal(err)
-			}
-			changes, err := index.Changes(t.Context())
-			if err != nil || len(changes) != 2 {
-				t.Fatalf("case-only rename changes=%+v error=%v", changes, err)
-			}
-			if changes[0].Path != name || !changes[0].Delete || changes[1].Path != strings.Replace(name, old, renamed, 1) || changes[1].Delete || string(changes[1].Data) != "fixture\n" {
-				t.Fatalf("case-only rename was not staged as deletion and addition: %+v", changes)
-			}
-		})
+			t.Run(ignoreCase+"/"+name, func(t *testing.T) {
+				if ignoreCase == "false" && !caseSensitiveTempDir(t) {
+					t.Skip("core.ignoreCase=false requires a case-sensitive filesystem")
+				}
+				index, source := offlineIndexFixture(t, []workspace.File{{Path: name, Mode: workspace.Regular, Data: []byte("fixture\n")}})
+				if _, err := index.run(t.Context(), 128, nil, "config", "core.ignoreCase", ignoreCase); err != nil {
+					t.Fatal(err)
+				}
+				old, renamed := "README.md", "readme.md"
+				if directory {
+					old, renamed = "Docs", "docs"
+				}
+				intermediate := filepath.Join(source, "case-rename.tmp")
+				if err := os.Rename(filepath.Join(source, old), intermediate); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Rename(intermediate, filepath.Join(source, renamed)); err != nil {
+					t.Fatal(err)
+				}
+				changes, err := index.Changes(t.Context())
+				if err != nil || len(changes) != 2 {
+					t.Fatalf("case-only rename changes=%+v error=%v", changes, err)
+				}
+				if changes[0].Path != name || !changes[0].Delete || changes[1].Path != strings.Replace(name, old, renamed, 1) || changes[1].Delete || string(changes[1].Data) != "fixture\n" {
+					t.Fatalf("case-only rename was not staged as deletion and addition: %+v", changes)
+				}
+			})
+		}
 	}
 }
 
 func TestFixIndexCaseOnlyRenameUsesCurrentIgnoreRules(t *testing.T) {
-	index, source := offlineIndexFixture(t, []workspace.File{
-		{Path: ".gitignore", Mode: workspace.Regular, Data: []byte("readme.md\n")},
-		{Path: "README.md", Mode: workspace.Executable, Data: []byte("fixture\n")},
-	})
-	if _, err := index.run(t.Context(), 128, nil, "config", "core.ignoreCase", "true"); err != nil {
-		t.Fatal(err)
-	}
-	intermediate := filepath.Join(source, "case-rename.tmp")
-	if err := os.Rename(filepath.Join(source, "README.md"), intermediate); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Rename(intermediate, filepath.Join(source, "readme.md")); err != nil {
-		t.Fatal(err)
-	}
-	changes, err := index.Changes(t.Context())
-	if err != nil || len(changes) != 1 || changes[0].Path != "README.md" || !changes[0].Delete {
-		t.Fatalf("newly ignored spelling should stage only deletion: %+v, %v", changes, err)
+	for _, ignoreCase := range []string{"false", "true"} {
+		t.Run(ignoreCase, func(t *testing.T) {
+			if ignoreCase == "false" && !caseSensitiveTempDir(t) {
+				t.Skip("core.ignoreCase=false requires a case-sensitive filesystem")
+			}
+			index, source := offlineIndexFixture(t, []workspace.File{
+				{Path: ".gitignore", Mode: workspace.Regular, Data: []byte("readme.md\n")},
+				{Path: "README.md", Mode: workspace.Executable, Data: []byte("fixture\n")},
+			})
+			if _, err := index.run(t.Context(), 128, nil, "config", "core.ignoreCase", ignoreCase); err != nil {
+				t.Fatal(err)
+			}
+			intermediate := filepath.Join(source, "case-rename.tmp")
+			if err := os.Rename(filepath.Join(source, "README.md"), intermediate); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(intermediate, filepath.Join(source, "readme.md")); err != nil {
+				t.Fatal(err)
+			}
+			changes, err := index.Changes(t.Context())
+			if changes != nil || err == nil || !strings.Contains(err.Error(), "case-renamed fix path") {
+				t.Fatalf("newly ignored case rename was not refused: %+v, %v", changes, err)
+			}
+		})
 	}
 }
 
@@ -139,8 +151,8 @@ func TestFixIndexCaseSpellingScanSkipsIgnoredSiblings(t *testing.T) {
 		t.Fatal(err)
 	}
 	changes, err := index.Changes(t.Context())
-	if err != nil || len(changes) != 1 || changes[0].Path != "build/Docs/README.md" || !changes[0].Delete {
-		t.Fatalf("ignored siblings changed case-only deletion: %+v, %v", changes, err)
+	if changes != nil || err == nil || !strings.Contains(err.Error(), "case-renamed fix path") {
+		t.Fatalf("ignored siblings hid a case rename: %+v, %v", changes, err)
 	}
 }
 

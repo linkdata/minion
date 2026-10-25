@@ -150,9 +150,10 @@ func (index *OfflineIndex) Changes(ctx context.Context) ([]workspace.Change, err
 		return nil, err
 	}
 	var renamedExecutable map[string]bool
+	var stale []byte
 	if strings.TrimSpace(string(ignoreCase)) == "true" {
 		// Git keeps the old index spelling for case-only renames until it is removed.
-		stale, err := index.caseRenamedPaths(ctx)
+		stale, err = index.caseRenamedPaths(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -227,6 +228,30 @@ func (index *OfflineIndex) Changes(ctx context.Context) ([]workspace.Change, err
 	selected, objects, err := parseIndexChanges(raw)
 	if err != nil {
 		return nil, err
+	}
+	if len(stale) == 0 && strings.TrimSpace(string(ignoreCase)) != "true" {
+		for _, change := range selected {
+			if change.Delete {
+				stale, err = index.caseRenamedPaths(ctx)
+				if err != nil {
+					return nil, err
+				}
+				break
+			}
+		}
+	}
+	if len(stale) != 0 {
+		staged := make(map[string]bool, len(selected))
+		for _, change := range selected {
+			if !change.Delete {
+				staged[workspace.FoldPath(change.Path)] = true
+			}
+		}
+		for _, old := range bytes.Split(stale[:len(stale)-1], []byte{0}) {
+			if !staged[workspace.FoldPath(string(old))] {
+				return nil, fmt.Errorf("case-renamed fix path %q is not staged under its new spelling (possibly ignored)", old)
+			}
+		}
 	}
 	changes, err := workspace.ReadChanges(ctx, index.source, selected)
 	if err != nil {
