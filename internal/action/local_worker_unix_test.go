@@ -29,7 +29,7 @@ func localWorkerTestStart(t *testing.T, mode string) *localWorker {
 	var output bytes.Buffer
 	w, err := startLocalWorker(unixTestDirectory(t), "local", os.Args[0], []string{"-test.run=^TestLocalWorkerHelper$"}, func(cmd *exec.Cmd, socket string) {
 		cmd.Env = append(os.Environ(), "MINION_LOCAL_WORKER_HELPER="+mode, "MINION_LOCAL_WORKER_SOCKET="+socket, "MINION_LOCAL_WORKER_REPORT="+report)
-		cmd.Stdout, cmd.Stderr = &output, &output
+		cmd.Stdout = &output
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -205,33 +205,6 @@ func TestLocalWorkerAwaitHeldPullReportsBoundedPreflightDiagnostic(t *testing.T)
 	w.executor.mu.Unlock()
 	if pull || w.cmd.ProcessState == nil {
 		t.Fatalf("failed preflight held a pull or left its child live: pull=%t state=%v", pull, w.cmd.ProcessState)
-	}
-}
-
-type failingWorkerStderr struct{}
-
-func (failingWorkerStderr) Write([]byte) (int, error) {
-	return 0, errors.New("caller stderr failed")
-}
-
-func TestLocalWorkerPreflightDiagnosticSurvivesCallerStderrFailure(t *testing.T) {
-	report := filepath.Join(t.TempDir(), "child")
-	w, err := startLocalWorker(unixTestDirectory(t), "local", os.Args[0], []string{"-test.run=^TestLocalWorkerHelper$"}, func(cmd *exec.Cmd, socket string) {
-		cmd.Env = append(os.Environ(), "MINION_LOCAL_WORKER_HELPER=preflight-stderr-fail", "MINION_LOCAL_WORKER_SOCKET="+socket, "MINION_LOCAL_WORKER_REPORT="+report)
-		cmd.Stderr = failingWorkerStderr{}
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := w.Close(); err == nil {
-			t.Error("failed worker close lost its child error")
-		}
-	})
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-	defer cancel()
-	if err := w.awaitHeldPull(ctx); err == nil || !strings.Contains(err.Error(), "selected Codex CLI unavailable") {
-		t.Fatalf("caller stderr failure hid the captured preflight cause: %v", err)
 	}
 }
 
@@ -765,10 +738,6 @@ func TestLocalWorkerHelper(t *testing.T) {
 	}
 	if mode == "preflight-fail" {
 		fmt.Fprintln(os.Stderr, strings.Repeat("x", 16<<10)+"\nselected Codex CLI unavailable "+os.Getenv("CODEX_API_KEY")+"\nforged log line")
-		os.Exit(7)
-	}
-	if mode == "preflight-stderr-fail" {
-		fmt.Fprintln(os.Stderr, "selected Codex CLI unavailable")
 		os.Exit(7)
 	}
 	if mode == "stop-exit" || mode == "stop-success" {

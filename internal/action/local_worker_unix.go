@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -35,19 +34,9 @@ type localWorker struct {
 	closeErr  error
 }
 
-type lockedWriter struct {
-	mu     *sync.Mutex
-	writer io.Writer
-}
-
-func (w lockedWriter) Write(p []byte) (int, error) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.writer.Write(p)
-}
-
 // startLocalWorker owns the direct child's context and command. configure sets
-// environment and stdio; job cancellation is handled by Execute.
+// environment and stdout; stderr is captured for a safe startup diagnostic.
+// Job cancellation is handled by Execute.
 func startLocalWorker(runtimeDir, executorID, path string, args []string, configure func(*exec.Cmd, string)) (*localWorker, error) {
 	if path == "" {
 		return nil, errors.New("local worker command path is required")
@@ -66,17 +55,8 @@ func startLocalWorker(runtimeDir, executorID, path string, args []string, config
 	if configure != nil {
 		configure(cmd, endpoint.SocketPath())
 	}
-	// stdout and stderr may share one caller-owned writer.
-	outputMu := &sync.Mutex{}
-	if cmd.Stdout != nil {
-		cmd.Stdout = lockedWriter{outputMu, cmd.Stdout}
-	}
 	stderr := &bounded.Tail{}
-	if cmd.Stderr == nil {
-		cmd.Stderr = stderr
-	} else {
-		cmd.Stderr = io.MultiWriter(stderr, lockedWriter{outputMu, cmd.Stderr})
-	}
+	cmd.Stderr = stderr
 	env := cmd.Env
 	if env == nil {
 		env = os.Environ()
