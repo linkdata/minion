@@ -35,17 +35,29 @@ func TestNativeCodexSandboxEnforcement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(workspace) })
+	t.Cleanup(func() {
+		if err := os.RemoveAll(workspace); err != nil {
+			t.Errorf("remove sandbox workspace %q: %v", workspace, err)
+		}
+	})
 	private, err := os.MkdirTemp(home, "minion-sandbox-private-")
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(private) })
+	t.Cleanup(func() {
+		if err := os.RemoveAll(private); err != nil {
+			t.Errorf("remove sandbox private directory %q: %v", private, err)
+		}
+	})
 	probeHome, err := os.MkdirTemp(home, ".minion-codex-sandbox-")
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(probeHome) })
+	t.Cleanup(func() {
+		if err := os.RemoveAll(probeHome); err != nil {
+			t.Errorf("remove sandbox Codex home %q: %v", probeHome, err)
+		}
+	})
 	runtimeDir := t.TempDir()
 	executable, err := os.Executable()
 	if err != nil {
