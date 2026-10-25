@@ -90,7 +90,8 @@ func (w *localWorker) Execute(ctx context.Context, job Job, sink Checkpoints) (R
 // the direct child once before the endpoint closes its owned socket.
 func (w *localWorker) Close() error {
 	w.closeOnce.Do(func() {
-		// A child already reaped before Close began exited on its own.
+		coreErr := w.executor.Close()
+		// Direct cancellation starts after this check; preserve exits during callback drain.
 		select {
 		case <-w.exited:
 			if w.waitErr != nil {
@@ -98,7 +99,6 @@ func (w *localWorker) Close() error {
 			}
 		default:
 		}
-		coreErr := w.executor.Close()
 		w.cancel()
 		<-w.exited
 		w.closeErr = errors.Join(w.closeErr, coreErr, w.endpoint.Close())

@@ -34,7 +34,7 @@ func localWorkerTestStart(t *testing.T, mode string) *localWorker {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		if err := w.Close(); err != nil && mode != "hold" && mode != "known-hold" && mode != "known" && mode != "crash" && mode != "precrash" {
+		if err := w.Close(); err != nil && mode != "hold" && mode != "known-hold" && mode != "known" && mode != "crash" && mode != "precrash" && mode != "drain-kill" {
 			t.Errorf("close local worker: %v", err)
 		}
 		if t.Failed() {
@@ -278,6 +278,75 @@ func TestLocalWorkerDrainsAcceptedCallbackBeforeStop(t *testing.T) {
 	}
 }
 
+func TestLocalWorkerCloseReportsExitDuringCallbackDrain(t *testing.T) {
+	w := localWorkerTestStart(t, "drain-kill")
+	w.executor.outcomeGrace = 25 * time.Millisecond
+	entered, release := make(chan struct{}), make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+	done := make(chan httpServerTestResult, 1)
+	go func() {
+		result, err := w.Execute(t.Context(), testJob(command.Comment), runnerExecutionCheckpoints{before: func(CallCheckpoint) error {
+			close(entered)
+			<-release
+			return nil
+		}})
+		done <- httpServerTestResult{result, err}
+	}()
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("child did not enter accepted callback")
+	}
+	tx := w.executor.transaction()
+	if tx == nil {
+		t.Fatal("accepted callback lost its transaction")
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- w.Close() }()
+	select {
+	case <-tx.budget.Done():
+	case <-time.After(10 * time.Second):
+		t.Fatal("Close did not begin callback drain")
+	}
+	if err := w.cmd.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-w.exited:
+	case <-time.After(10 * time.Second):
+		t.Fatal("killed direct child was not reaped")
+	}
+	if _, err := os.Lstat(w.endpoint.SocketPath()); err != nil {
+		t.Fatalf("endpoint closed before entered callback drained: %v", err)
+	}
+	close(release)
+	select {
+	case err := <-closed:
+		if w.waitErr == nil || !errors.Is(err, w.waitErr) || w.cmd.ProcessState == nil {
+			t.Fatalf("spontaneous exit during drain was lost: close=%v wait=%v state=%v", err, w.waitErr, w.cmd.ProcessState)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Close did not finish after callback release")
+	}
+	select {
+	case got := <-done:
+		if !errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) {
+			t.Fatalf("missing outcome was not quarantined: result=%+v error=%v", got.result, got.err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Execute did not finish after child exit")
+	}
+	if _, err := os.Lstat(w.endpoint.SocketPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Close left owned endpoint: %v", err)
+	}
+}
+
 func TestLocalWorkerClosePreservesReplacedEndpoint(t *testing.T) {
 	w := localWorkerTestStart(t, "hold")
 	path := w.endpoint.SocketPath()
@@ -381,21 +450,21 @@ func TestLocalWorkerHelper(t *testing.T) {
 		select {}
 	}
 	job := assignment.Job
-	if mode == "drain" {
+	if mode == "drain" || mode == "drain-kill" {
 		call := CallUsage{Provider: job.Main.Provider, Role: roleMain, Round: 1, Model: job.Main.Model, Effort: job.Main.Effort}
 		unixTestAck(t, client, "/before", httpCall{Sequence: 1, Checkpoint: CallCheckpoint{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Call: call}}, 1)
 	}
 	result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "known"}
 	sequence := uint64(1)
 	var failure *httpFailure
-	if mode == "drain" || mode == "gap" {
+	if mode == "drain" || mode == "drain-kill" || mode == "gap" {
 		sequence, failure = 2, newHTTPFailure(context.Canceled)
 	}
 	unixTestAck(t, client, "/outcome", httpOutcome{Sequence: sequence, Result: result, Failure: failure}, sequence)
 	if mode == "known" {
 		os.Exit(7)
 	}
-	if mode != "drain" && mode != "known-hold" && mode != "gap" {
+	if mode != "drain" && mode != "drain-kill" && mode != "known-hold" && mode != "gap" {
 		t.Fatalf("unexpected helper mode %q", mode)
 	}
 	// The owner must stop the child only after the accepted outcome drains.
