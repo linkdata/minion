@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/linkdata/minion/internal/aicli"
@@ -19,10 +18,10 @@ import (
 
 // Validate checks Claude's prerequisites and resolves model settings.
 //
-// It requires Linux or macOS, the CLI options used by Run, authenticated CLI
-// state, and bubblewrap/socat on Linux. Model discovery uses the CLI's initialization
-// protocol without an inference turn. These checks do not execute a sandboxed command;
-// deployments must validate runtime isolation.
+// It requires Linux or macOS, authenticated CLI state, and bubblewrap/socat on
+// Linux. Model discovery passes Run's sandbox and tool options to the CLI's
+// initialization protocol without an inference turn. These checks do not execute
+// a sandboxed command; deployments must validate runtime isolation.
 //
 // APIKey overrides environment credentials and stored login. Without it,
 // environment API/OAuth tokens are rejected. Authenticated proxies are rejected.
@@ -66,18 +65,6 @@ func Validate(ctx context.Context, settings config.ClaudeConfig) (validated conf
 	policy, err := sandboxSettings(dir, dir, false, "", settings, nil, authDir)
 	if err != nil {
 		return validated, err
-	}
-	help, err := aicli.Probe(ctx, binary, "", []string{"--help"}, dir, env, "", settings.APIKey)
-	if err != nil {
-		return validated, fmt.Errorf("claude capabilities: %w", err)
-	}
-	for _, option := range append([]string{"--session-id", "--resume", "--add-dir", "--model", "--effort", "--json-schema", "--no-session-persistence", "--input-format"}, arguments(policy)...) {
-		if strings.HasPrefix(option, "-") {
-			option = strings.TrimSuffix(option, "=")
-			if !helpSupportsOption(help, option) {
-				return validated, fmt.Errorf("claude help does not list required option %s", option)
-			}
-		}
 	}
 	if runtime.GOOS == "linux" {
 		for _, name := range []string{"bwrap", "socat"} {
@@ -161,23 +148,4 @@ func initializationModels(data []byte) ([]modelInfo, error) {
 		}
 	}
 	return nil, errors.New("claude did not acknowledge initialization")
-}
-
-func helpSupportsOption(help []byte, option string) bool {
-	for _, line := range strings.Split(string(help), "\n") {
-		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, "-") {
-			continue
-		}
-		for _, field := range strings.Fields(line) {
-			if !strings.HasPrefix(field, "-") {
-				break
-			}
-			field, _, _ = strings.Cut(strings.TrimSuffix(field, ","), "=")
-			if field == option {
-				return true
-			}
-		}
-	}
-	return false
 }

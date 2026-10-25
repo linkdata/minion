@@ -13,27 +13,6 @@ const modelCatalogue = `{"type":"control_response","response":{"subtype":"succes
 const claudeHelp = `Claude Code 1.0.0
 Options:
   -p, --print
-  --verbose
-  --output-format
-  --permission-mode
-  --permission-prompts
-  --safe-mode
-  --setting-sources=<sources>
-  --disable-slash-commands
-  --strict-mcp-config
-  --mcp-config
-  --no-chrome
-  --tools
-  --allowedTools
-  --settings
-  --session-id
-  --resume
-  --add-dir
-  --model
-  --effort
-  --json-schema
-  --no-session-persistence
-  --input-format
 `
 
 func TestValidate(t *testing.T) {
@@ -102,23 +81,22 @@ fi
 	}
 }
 
-func TestValidateRequiresCapabilities(t *testing.T) {
+func TestValidateAcceptsSparseHelp(t *testing.T) {
 	fakeExecutable(t, "bwrap", "exit 99\n")
 	fakeExecutable(t, "socat", "exit 99\n")
-	for _, option := range []string{"--safe-mode", "--session-id", "--resume", "--json-schema"} {
-		t.Run(option, func(t *testing.T) {
-			help := strings.Replace(claudeHelp, "  "+option+"\n", "  "+option+"-other\n", 1)
-			fakeExecutable(t, "claude", `if [ "$1" = '--help' ]; then
+	fakeExecutable(t, "claude", `if [ "$1" = '--help' ]; then
   cat <<'HELP'
-`+help+`HELP
+`+claudeHelp+`HELP
+elif [ "$3" = 'auth' ]; then
+  printf '%s\n' '{"loggedIn":true}'
 else
-  exit 98
+  cat >/dev/null
+  printf '%s\n' '`+modelCatalogue+`'
 fi
 `)
-			if _, err := Validate(t.Context(), config.ClaudeConfig{}); err == nil || !strings.Contains(err.Error(), "required option "+option) {
-				t.Fatalf("Validate accepted missing %s: %v", option, err)
-			}
-		})
+	settings, err := Validate(t.Context(), config.ClaudeConfig{})
+	if err != nil || settings.Model != "claude-pinned" {
+		t.Fatalf("Validate with sparse help = %+v, %v", settings, err)
 	}
 }
 
