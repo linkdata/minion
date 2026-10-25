@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -37,6 +38,9 @@ func localWorkerTestStart(t *testing.T, mode string) *localWorker {
 	w, err := startLocalWorker(unixTestDirectory(t), "local", os.Args[0], []string{"-test.run=^TestLocalWorkerHelper$"}, 10*time.Second, func(cmd *exec.Cmd, socket string) {
 		cmd.Env = append(os.Environ(), "MINION_LOCAL_WORKER_HELPER="+mode, "MINION_LOCAL_WORKER_SOCKET="+socket, "MINION_LOCAL_WORKER_REPORT="+report)
 		cmd.Stdout = &output
+		if mode == "ignore-interrupt" {
+			cmd.WaitDelay = 100 * time.Millisecond
+		}
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -106,7 +110,46 @@ func TestLocalWorkerIdleRunHTTPClose(t *testing.T) {
 		t.Fatalf("idle RunHTTP worker did not stop cleanly: %v", err)
 	}
 	if w.cmd.ProcessState == nil || !w.cmd.ProcessState.Success() {
-		t.Fatalf("idle RunHTTP child did not consume shutdown response: %v", w.cmd.ProcessState)
+		t.Fatalf("idle RunHTTP child did not exit cleanly: %v", w.cmd.ProcessState)
+	}
+	if w.stopSent.Load() {
+		t.Fatal("idle RunHTTP child needed a direct stop signal")
+	}
+	if data, err := os.ReadFile(localWorkerTestReport(t, w) + ".idle-canceled"); err != nil || string(data) != "canceled" {
+		t.Fatalf("idle RunHTTP child did not consume the typed cancellation response: marker=%q error=%v", data, err)
+	}
+}
+
+func TestLocalWorkerCloseSignalsUnresponsiveIdleChild(t *testing.T) {
+	w := localWorkerTestStart(t, "ignore-idle-cancel")
+	w.stopGrace = 25 * time.Millisecond
+	localWorkerTestPull(t, w)
+	start := time.Now()
+	if err := w.Close(); err != nil {
+		t.Fatalf("unresponsive idle child did not stop cleanly: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("direct stop took %v after a %v grace period", elapsed, w.stopGrace)
+	}
+	if !w.stopSent.Load() || w.cmd.ProcessState == nil || !w.cmd.ProcessState.Success() {
+		t.Fatalf("unresponsive idle child was not reaped after direct stop: sent=%v state=%v", w.stopSent.Load(), w.cmd.ProcessState)
+	}
+}
+
+func TestLocalWorkerCloseKillsChildIgnoringInterrupt(t *testing.T) {
+	w := localWorkerTestStart(t, "ignore-interrupt")
+	w.stopGrace = 25 * time.Millisecond
+	localWorkerTestPull(t, w)
+	start := time.Now()
+	if err := w.Close(); err != nil {
+		t.Fatalf("unresponsive child was not reaped: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("forced stop took %v", elapsed)
+	}
+	status, ok := w.cmd.ProcessState.Sys().(syscall.WaitStatus)
+	if !w.stopSent.Load() || !ok || !status.Signaled() || status.Signal() != syscall.SIGKILL {
+		t.Fatalf("child did not reach bounded forced stop: sent=%v state=%v", w.stopSent.Load(), w.cmd.ProcessState)
 	}
 }
 
@@ -451,6 +494,7 @@ func TestLocalWorkerKnownOutcomeSurvivesChildExit(t *testing.T) {
 
 func TestLocalWorkerCloseReportsExitCodeAfterInterrupt(t *testing.T) {
 	w := localWorkerTestStart(t, "stop-exit")
+	w.stopGrace = 25 * time.Millisecond
 	var exitErr *exec.ExitError
 	if err := w.Close(); !errors.As(err, &exitErr) || exitErr.ExitCode() != 7 {
 		t.Fatalf("owner cancellation hid child exit code: %v", err)
@@ -462,6 +506,7 @@ func TestLocalWorkerCloseReportsExitCodeAfterInterrupt(t *testing.T) {
 
 func TestLocalWorkerCloseAcceptsGracefulInterrupt(t *testing.T) {
 	w := localWorkerTestStart(t, "stop-success")
+	w.stopGrace = 25 * time.Millisecond
 	if err := w.Close(); err != nil {
 		t.Fatalf("graceful owner cancellation reported as child failure: %v", err)
 	}
@@ -1091,7 +1136,7 @@ func TestLocalWorkerHelper(t *testing.T) {
 	defer client.CloseIdleConnections()
 	report := os.Getenv("MINION_LOCAL_WORKER_REPORT")
 	var interrupt chan os.Signal
-	if mode == "stop-exit" || mode == "stop-success" || mode == "run-http-idle" {
+	if mode == "stop-exit" || mode == "stop-success" || mode == "run-http-idle" || mode == "ignore-idle-cancel" || mode == "ignore-interrupt" {
 		interrupt = make(chan os.Signal, 1)
 		signal.Notify(interrupt, os.Interrupt)
 		defer signal.Stop(interrupt)
@@ -1121,6 +1166,29 @@ func TestLocalWorkerHelper(t *testing.T) {
 		err := RunHTTP(t.Context(), client, UnixExecutionBaseURL, "local", &Runner{})
 		if !errors.Is(err, context.Canceled) || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) {
 			t.Fatalf("idle pull did not receive intentional shutdown: %v", err)
+		}
+		if err := workspace.WriteAtomic(report+".idle-canceled", []byte("canceled")); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	if mode == "ignore-idle-cancel" || mode == "ignore-interrupt" {
+		pull, err := httpEncode(httpPull{Version: ProtocolVersion, ExecutorID: "local"}, httpControlBytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		conn, err := net.Dial("unix", os.Getenv("MINION_LOCAL_WORKER_SOCKET"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Close()
+		if _, err := fmt.Fprintf(conn, "POST /next HTTP/1.1\r\nHost: minion\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", len(pull), pull); err != nil {
+			t.Fatal(err)
+		}
+		// Never read the response; only the owner's direct stop can end this child.
+		<-interrupt
+		if mode == "ignore-interrupt" {
+			time.Sleep(time.Hour)
 		}
 		return
 	}
