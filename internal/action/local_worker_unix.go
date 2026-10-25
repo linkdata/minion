@@ -75,7 +75,7 @@ func (w *localWorker) Execute(ctx context.Context, job Job, sink Checkpoints) (R
 		// A received outcome remains the Job result; Close reports lifecycle errors separately.
 		if !state.outcome {
 			err = errors.Join(err, closeErr)
-			if closed {
+			if closed && state.admitted {
 				err = errors.Join(err, errors.New("local worker stopped before a final outcome"))
 			}
 			if w.waitErr != nil && closed && !errors.Is(closeErr, w.waitErr) {

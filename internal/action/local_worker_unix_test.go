@@ -73,6 +73,18 @@ func TestLocalWorkerKnownOutcomeSurvivesChildExit(t *testing.T) {
 	}
 }
 
+func TestLocalWorkerRejectedAfterCloseHasNoMissingOutcome(t *testing.T) {
+	w := localWorkerTestStart(t, "hold")
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	job := testJob(command.Comment)
+	result, err := w.Execute(t.Context(), job, runnerExecutionCheckpoints{})
+	if !result.matchesJob(job) || err == nil || !strings.Contains(err.Error(), "closed") || strings.Contains(err.Error(), "stopped before a final outcome") || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) {
+		t.Fatalf("rejected assignment claimed a missing outcome: result=%+v error=%v", result, err)
+	}
+}
+
 func TestLocalWorkerCrashAfterDeliveryQuarantines(t *testing.T) {
 	w := localWorkerTestStart(t, "crash")
 	w.executor.outcomeGrace = 25 * time.Millisecond
