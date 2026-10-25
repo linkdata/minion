@@ -67,6 +67,7 @@ func startLocalWorker(runtimeDir, executorID, path string, args []string, config
 	cmd.Cancel = commandCancel
 	executil.Prepare(cmd)
 	w := &localWorker{executor: executor, endpoint: endpoint, cmd: cmd, cancel: cancel, exited: make(chan struct{}), stderr: stderr}
+	w.reuse.Store(workerNeedsPull)
 	preparedCancel := cmd.Cancel
 	cmd.Cancel = func() error {
 		err := preparedCancel()
@@ -134,20 +135,35 @@ func (w *localWorker) Execute(ctx context.Context, job Job, sink Checkpoints) (R
 	return result, err
 }
 
-// awaitReusable releases capacity only after the completed attempt's next pull
-// is held at the original endpoint while the direct child is live.
+// WaitCapacity releases capacity only after a pull is held at the original
+// endpoint while the direct child is live, initially and after each outcome.
+func (w *localWorker) WaitCapacity(ctx context.Context) error {
+	return w.awaitReusable(ctx)
+}
+
 func (w *localWorker) awaitReusable(ctx context.Context) (reuseErr error) {
-	if !w.reuse.CompareAndSwap(workerNeedsPull, workerCheckingPull) {
+	if !w.reuse.CompareAndSwap(workerNeedsPull, workerCheckingPull) && !w.reuse.CompareAndSwap(workerReusable, workerCheckingPull) {
 		if w.unclean.Load() {
 			return errors.New("local worker attempt cleanup failed; capacity is unavailable")
 		}
 		select {
+		case <-w.endpoint.serveDone:
+			if w.endpoint.serveErr != nil {
+				return errors.Join(errors.New("local worker endpoint stopped before a pull"), w.endpoint.serveErr, w.Close())
+			}
+		default:
+		}
+		select {
 		case <-w.exited:
-			return errors.Join(errors.New("local worker exited before holding a pull"), w.waitErr)
+			err := errors.Join(errors.New("local worker exited before holding a pull"), w.waitErr)
+			if detail := w.startupDiagnostic(); detail != "" {
+				err = errors.Join(err, fmt.Errorf("worker startup diagnostic: %s", detail))
+			}
+			return errors.Join(err, w.Close())
 		default:
 		}
 		if w.reuse.Load() == workerRetired {
-			return errors.New("local worker closed before reuse proof")
+			return errors.Join(errors.New("local worker closed before reuse proof"), w.Close())
 		}
 		return errors.New("local worker has no completed attempt awaiting reuse")
 	}

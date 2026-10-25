@@ -1,6 +1,7 @@
 package action
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"slices"
@@ -16,6 +17,50 @@ type WorkerSelection struct {
 	Commands map[string]config.CommandMapping
 	Main     RoleSettings
 	Critic   *RoleSettings
+}
+
+// WorkerSelection derives a trusted worker boundary from enabled, installed commands.
+func (e *Orchestrator) WorkerSelection(cfg config.Config) (WorkerSelection, error) {
+	if cmp.Or(cfg.Main, "codex") != e.mainProvider() {
+		return WorkerSelection{}, errors.New("worker selection main provider differs from config")
+	}
+	if cfg.Adversarial != e.Adversarial {
+		return WorkerSelection{}, errors.New("worker selection critic provider differs from config")
+	}
+	selected := WorkerSelection{Commands: make(map[string]config.CommandMapping), Main: e.roleSettings(e.mainProvider(), nil)}
+	if e.Adversarial != "" {
+		critic := e.roleSettings(e.Adversarial, nil)
+		selected.Critic = &critic
+	}
+	seen := make(map[string]bool)
+	for _, repo := range cfg.Repositories {
+		for _, name := range repo.Actions {
+			if seen[name] {
+				continue
+			}
+			seen[name] = true
+			configured, ok := cfg.Commands[name]
+			used, present := e.Commands[name]
+			if !ok || !present || configured.Action != used.Action || !slices.Equal(configured.Skills, used.Skills) {
+				return WorkerSelection{}, fmt.Errorf("worker command %q differs from orchestrator command mapping", name)
+			}
+			installed, err := cfg.CommandInstalled(name)
+			if err != nil {
+				e.logf("disable %s: skill unavailable: %v", name, err)
+			}
+			if installed && err == nil {
+				selected.Commands[name] = used
+			}
+		}
+	}
+	if len(selected.Commands) == 0 {
+		return WorkerSelection{}, errors.New("worker selection has no installed enabled commands")
+	}
+	runner, err := NewSelectedRunner(Runner{}, selected)
+	if err != nil {
+		return WorkerSelection{}, err
+	}
+	return *runner.selection, nil
 }
 
 // NewSelectedRunner freezes one direct worker's assignment boundary for reuse.

@@ -76,6 +76,15 @@ func localWorkerTestPull(t *testing.T, w *localWorker) {
 	}
 }
 
+func localWorkerTestCapacity(t *testing.T, w *localWorker) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	if err := w.WaitCapacity(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func localWorkerTestReport(t *testing.T, w *localWorker) string {
 	t.Helper()
 	for i := len(w.cmd.Env) - 1; i >= 0; i-- {
@@ -95,6 +104,23 @@ func TestLocalWorkerIdleRunHTTPClose(t *testing.T) {
 	}
 	if w.cmd.ProcessState == nil || !w.cmd.ProcessState.Success() {
 		t.Fatalf("idle RunHTTP child did not consume shutdown response: %v", w.cmd.ProcessState)
+	}
+}
+
+func TestLocalWorkerRequiresInitialCapacityProof(t *testing.T) {
+	w := localWorkerTestStart(t, "run-http-idle")
+	localWorkerTestPull(t, w)
+	job := testJob(command.Comment)
+	if result, err := w.Execute(t.Context(), job, runnerExecutionCheckpoints{}); err == nil || !strings.Contains(err.Error(), "not ready") || !result.matchesJob(job) {
+		t.Fatalf("initial assignment bypassed capacity proof: result=%+v error=%v", result, err)
+	}
+	localWorkerTestCapacity(t, w)
+	if w.reuse.Load() != workerReusable {
+		t.Fatalf("live held pull did not release capacity: %d", w.reuse.Load())
+	}
+	localWorkerTestCapacity(t, w)
+	if w.reuse.Load() != workerReusable {
+		t.Fatalf("repeated capacity check lost live held pull: %d", w.reuse.Load())
 	}
 }
 
@@ -188,14 +214,14 @@ func TestLocalWorkerAwaitHeldPullTracksRealRequestCancellation(t *testing.T) {
 	}
 }
 
-func TestLocalWorkerAwaitHeldPullReportsChildExit(t *testing.T) {
+func TestLocalWorkerWaitCapacityRejectsDeadChild(t *testing.T) {
 	w := localWorkerTestStart(t, "precrash")
 	if err := w.cmd.Process.Signal(syscall.SIGUSR1); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
-	err := w.awaitHeldPull(ctx)
+	err := w.WaitCapacity(ctx)
 	var exit *exec.ExitError
 	if !errors.As(err, &exit) || exit.ExitCode() != 7 || !strings.Contains(err.Error(), "before holding a pull") {
 		t.Fatalf("pre-pull child exit lost its cause: %v", err)
@@ -206,9 +232,15 @@ func TestLocalWorkerAwaitHeldPullReportsChildExit(t *testing.T) {
 	if _, err := os.Lstat(w.endpoint.SocketPath()); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("pre-pull exit left the endpoint: %v", err)
 	}
+	if w.reuse.Load() != workerRetired {
+		t.Fatalf("dead child retained capacity: %d", w.reuse.Load())
+	}
+	if _, err := w.Execute(ctx, testJob(command.Comment), runnerExecutionCheckpoints{}); err == nil || !strings.Contains(err.Error(), "not ready") {
+		t.Fatalf("dead child accepted an assignment: %v", err)
+	}
 }
 
-func TestLocalWorkerAwaitHeldPullReportsBoundedPreflightDiagnostic(t *testing.T) {
+func TestLocalWorkerWaitCapacityReportsBoundedPreflightDiagnostic(t *testing.T) {
 	const secret = "native-preflight-secret"
 	const ghToken = "gh-credential"
 	const pgPassword = "shortpass"
@@ -220,7 +252,7 @@ func TestLocalWorkerAwaitHeldPullReportsBoundedPreflightDiagnostic(t *testing.T)
 	w := localWorkerTestStart(t, "preflight-fail")
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
-	err := w.awaitHeldPull(ctx)
+	err := w.WaitCapacity(ctx)
 	if err == nil || !strings.Contains(err.Error(), "Codex login unavailable") || strings.Contains(err.Error(), "forged log line") || strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), ghToken) || strings.Contains(err.Error(), pgPassword) || strings.Contains(err.Error(), proxy) || strings.Contains(err.Error(), preflightTestProxyUser) || strings.Contains(err.Error(), preflightTestProxyPassword) || strings.Contains(err.Error(), "p@ss") || len(err.Error()) > 9<<10 {
 		t.Fatalf("preflight diagnostic was lost, unbounded or active: %v", err)
 	}
@@ -232,14 +264,14 @@ func TestLocalWorkerAwaitHeldPullReportsBoundedPreflightDiagnostic(t *testing.T)
 	}
 }
 
-func TestLocalWorkerAwaitHeldPullReportsEndpointFailure(t *testing.T) {
+func TestLocalWorkerWaitCapacityReportsEndpointFailure(t *testing.T) {
 	w := localWorkerTestStart(t, "hold")
 	if err := w.endpoint.listener.Close(); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
-	if err := w.awaitHeldPull(ctx); err == nil || w.endpoint.serveErr == nil || !errors.Is(err, w.endpoint.serveErr) {
+	if err := w.WaitCapacity(ctx); err == nil || w.endpoint.serveErr == nil || !errors.Is(err, w.endpoint.serveErr) {
 		t.Fatalf("pre-pull endpoint failure lost its cause: wait=%v serve=%v", err, w.endpoint.serveErr)
 	}
 	if w.cmd.ProcessState == nil {
@@ -250,7 +282,37 @@ func TestLocalWorkerAwaitHeldPullReportsEndpointFailure(t *testing.T) {
 	}
 }
 
-func TestLocalWorkerAwaitHeldPullRejectsCancellationAndForgedReady(t *testing.T) {
+func TestLocalWorkerWaitCapacityRejectsReplacedEndpoint(t *testing.T) {
+	for _, proved := range []bool{false, true} {
+		t.Run(fmt.Sprint("previous proof: ", proved), func(t *testing.T) {
+			w := localWorkerTestStart(t, "known-hold")
+			localWorkerTestPull(t, w)
+			if proved {
+				localWorkerTestCapacity(t, w)
+			}
+			path := w.endpoint.SocketPath()
+			if err := os.Rename(path, path+".moved"); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte("replacement"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			if err := w.WaitCapacity(ctx); err == nil || !strings.Contains(err.Error(), "reuse endpoint") || !strings.Contains(err.Error(), "not a socket") {
+				t.Fatalf("replaced endpoint gained capacity: %v", err)
+			}
+			if data, err := os.ReadFile(path); err != nil || string(data) != "replacement" || w.cmd.ProcessState == nil || w.reuse.Load() != workerRetired {
+				t.Fatalf("replacement changed or child retained capacity: data=%q error=%v process=%v state=%d", data, err, w.cmd.ProcessState, w.reuse.Load())
+			}
+			if _, err := w.Execute(ctx, testJob(command.Comment), runnerExecutionCheckpoints{}); err == nil || !strings.Contains(err.Error(), "not ready") {
+				t.Fatalf("replaced endpoint accepted an assignment: %v", err)
+			}
+		})
+	}
+}
+
+func TestLocalWorkerWaitCapacityRejectsCancellationAndForgedReady(t *testing.T) {
 	for _, test := range []struct {
 		name  string
 		forge bool
@@ -282,7 +344,7 @@ func TestLocalWorkerAwaitHeldPullRejectsCancellationAndForgedReady(t *testing.T)
 				cancel()
 				want = context.Canceled
 			}
-			if err := w.awaitHeldPull(ctx); !errors.Is(err, want) {
+			if err := w.WaitCapacity(ctx); !errors.Is(err, want) {
 				t.Fatalf("unheld pull appeared ready or lost cancellation: %v", err)
 			}
 			if w.cmd.ProcessState == nil {
@@ -297,8 +359,12 @@ func TestLocalWorkerAwaitHeldPullRejectsCancellationAndForgedReady(t *testing.T)
 
 func TestLocalWorkerKnownOutcomeSurvivesChildExit(t *testing.T) {
 	w := localWorkerTestStart(t, "known")
+	owner := &Orchestrator{Executor: w}
+	if err := owner.WaitCapacity(t.Context()); err != nil {
+		t.Fatalf("initial worker capacity: %v", err)
+	}
 	job := testJob(command.Comment)
-	result, err := w.Execute(t.Context(), job, runnerExecutionCheckpoints{})
+	result, err := owner.Executor.Execute(t.Context(), job, runnerExecutionCheckpoints{})
 	if err != nil || result.Answer != "known" || !result.matchesJob(job) {
 		t.Fatalf("accepted outcome changed after worker exit: result=%+v error=%v", result, err)
 	}
@@ -310,7 +376,7 @@ func TestLocalWorkerKnownOutcomeSurvivesChildExit(t *testing.T) {
 	if w.waitErr == nil || w.cmd.ProcessState == nil {
 		t.Fatalf("nonzero direct child exit was not observed: wait=%v state=%v", w.waitErr, w.cmd.ProcessState)
 	}
-	if err := w.awaitReusable(t.Context()); err == nil || !strings.Contains(err.Error(), "exited before holding a pull") {
+	if err := owner.WaitCapacity(t.Context()); err == nil || !strings.Contains(err.Error(), "exited before holding a pull") {
 		t.Fatalf("crashed child gained a reuse witness: %v", err)
 	}
 	var exitErr *exec.ExitError
@@ -354,6 +420,8 @@ func TestLocalWorkerRejectedAfterCloseHasNoMissingOutcome(t *testing.T) {
 
 func TestLocalWorkerExternalCloseDoesNotReportExpectedInterrupt(t *testing.T) {
 	w := localWorkerTestStart(t, "hold")
+	// Model a previously proven pull that ended before assignment delivery.
+	w.reuse.Store(workerReusable)
 	job := testJob(command.Comment)
 	done := make(chan httpServerTestResult, 1)
 	go func() {
@@ -376,6 +444,7 @@ func TestLocalWorkerExternalCloseDoesNotReportExpectedInterrupt(t *testing.T) {
 
 func TestLocalWorkerCrashAfterDeliveryQuarantines(t *testing.T) {
 	w := localWorkerTestStart(t, "crash")
+	localWorkerTestCapacity(t, w)
 	w.executor.outcomeGrace = 25 * time.Millisecond
 	job := testJob(command.Comment)
 	result, err := w.Execute(t.Context(), job, runnerExecutionCheckpoints{})
@@ -395,6 +464,8 @@ func TestLocalWorkerCrashAfterDeliveryQuarantines(t *testing.T) {
 
 func TestLocalWorkerCrashBeforeDeliveryReportsExit(t *testing.T) {
 	w := localWorkerTestStart(t, "precrash")
+	// Model a previously proven pull that ended before assignment delivery.
+	w.reuse.Store(workerReusable)
 	job := testJob(command.Comment)
 	done := make(chan httpServerTestResult, 1)
 	go func() {
@@ -442,7 +513,7 @@ func TestExpectedLocalWorkerCancellationRequiresSentStop(t *testing.T) {
 func TestLocalWorkerBudgetQuarantineStopsLiveChild(t *testing.T) {
 	w := localWorkerTestStart(t, "stall")
 	w.executor.outcomeGrace = 25 * time.Millisecond
-	localWorkerTestPull(t, w)
+	localWorkerTestCapacity(t, w)
 	job := testJob(command.Comment)
 	job.RuntimeBudget = time.Second
 	result, err := w.Execute(t.Context(), job, runnerExecutionCheckpoints{})
@@ -462,6 +533,8 @@ func TestLocalWorkerBudgetQuarantineStopsLiveChild(t *testing.T) {
 
 func TestLocalWorkerBudgetBeforeDeliveryStopsLiveChild(t *testing.T) {
 	w := localWorkerTestStart(t, "hold")
+	// Model a previously proven pull that ended before assignment delivery.
+	w.reuse.Store(workerReusable)
 	job := testJob(command.Comment)
 	job.RuntimeBudget = 100 * time.Millisecond
 	result, err := w.Execute(t.Context(), job, runnerExecutionCheckpoints{})
@@ -481,6 +554,7 @@ func TestLocalWorkerBudgetBeforeDeliveryStopsLiveChild(t *testing.T) {
 
 func TestLocalWorkerAcceptedQuarantineStopsLiveChild(t *testing.T) {
 	w := localWorkerTestStart(t, "gap")
+	localWorkerTestCapacity(t, w)
 	job := testJob(command.Comment)
 	result, err := w.Execute(t.Context(), job, runnerExecutionCheckpoints{})
 	if t.Context().Err() != nil || !result.matchesJob(job) || result.Answer != "known" || !errors.Is(err, monitor.ErrExecutionOutcomeUnknown) {
@@ -501,6 +575,7 @@ func TestLocalWorkerDrainsAcceptedCallbackBeforeStop(t *testing.T) {
 	for _, stop := range []string{"shutdown", "cancellation"} {
 		t.Run(stop, func(t *testing.T) {
 			w := localWorkerTestStart(t, "drain")
+			localWorkerTestCapacity(t, w)
 			job := testJob(command.Comment)
 			entered, release := make(chan struct{}), make(chan struct{})
 			t.Cleanup(func() {
@@ -601,6 +676,7 @@ func TestLocalWorkerDrainsAcceptedCallbackBeforeStop(t *testing.T) {
 
 func TestLocalWorkerCloseReportsExitDuringCallbackDrain(t *testing.T) {
 	w := localWorkerTestStart(t, "drain-kill")
+	localWorkerTestCapacity(t, w)
 	w.executor.outcomeGrace = 25 * time.Millisecond
 	entered, release := make(chan struct{}), make(chan struct{})
 	t.Cleanup(func() {
@@ -688,6 +764,7 @@ func TestLocalWorkerClosePreservesReplacedEndpoint(t *testing.T) {
 
 func TestLocalWorkerKnownOutcomeKeepsEndpointCloseErrorSeparate(t *testing.T) {
 	w := localWorkerTestStart(t, "known-hold")
+	localWorkerTestCapacity(t, w)
 	job := testJob(command.Comment)
 	result, err := w.Execute(t.Context(), job, runnerExecutionCheckpoints{})
 	if err != nil || result.Answer != "known" || !result.matchesJob(job) {
@@ -713,7 +790,7 @@ func TestLocalWorkerReuseRequiresFreshPull(t *testing.T) {
 	report := localWorkerTestReport(t, w)
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
-	if err := w.awaitHeldPull(ctx); err != nil {
+	if err := w.WaitCapacity(ctx); err != nil {
 		t.Fatal(err)
 	}
 	first := testJob(command.Comment)
@@ -759,7 +836,7 @@ func TestLocalWorkerReuseRequiresFreshPull(t *testing.T) {
 		t.Fatalf("second assignment entered before reuse proof: result=%+v error=%v", rejected, err)
 	}
 	ready := make(chan error, 1)
-	go func() { ready <- w.awaitReusable(ctx) }()
+	go func() { ready <- w.WaitCapacity(ctx) }()
 	ticker := time.NewTicker(time.Millisecond)
 	defer ticker.Stop()
 	for w.reuse.Load() != workerCheckingPull {
@@ -804,6 +881,7 @@ func TestLocalWorkerReuseRequiresFreshPull(t *testing.T) {
 
 func TestLocalWorkerCloseDuringReuseProof(t *testing.T) {
 	w := localWorkerTestStart(t, "known-hold")
+	localWorkerTestCapacity(t, w)
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	job := testJob(command.Comment)
@@ -811,7 +889,7 @@ func TestLocalWorkerCloseDuringReuseProof(t *testing.T) {
 		t.Fatalf("first outcome: result=%+v error=%v", result, err)
 	}
 	ready := make(chan error, 1)
-	go func() { ready <- w.awaitReusable(ctx) }()
+	go func() { ready <- w.WaitCapacity(ctx) }()
 	for w.reuse.Load() != workerCheckingPull {
 		select {
 		case err := <-ready:
@@ -840,6 +918,7 @@ func TestLocalWorkerCloseDuringReuseProof(t *testing.T) {
 
 func TestLocalWorkerCleanupFailureRetiresWithoutRemovingEvidence(t *testing.T) {
 	w := localWorkerTestStart(t, "cleanup-failed")
+	localWorkerTestCapacity(t, w)
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	job := testJob(command.Comment)
@@ -853,7 +932,7 @@ func TestLocalWorkerCleanupFailureRetiresWithoutRemovingEvidence(t *testing.T) {
 	if w.reuse.Load() != workerRetired || w.cmd.ProcessState == nil {
 		t.Fatalf("failed cleanup left reusable or live child: state=%d process=%v", w.reuse.Load(), w.cmd.ProcessState)
 	}
-	if err := w.awaitReusable(t.Context()); err == nil || !strings.Contains(err.Error(), "cleanup failed") {
+	if err := w.WaitCapacity(t.Context()); err == nil || !strings.Contains(err.Error(), "cleanup failed") {
 		t.Fatalf("failed cleanup gained a reuse witness or lost its diagnostic: %v", err)
 	}
 	if _, err := w.Execute(t.Context(), job, runnerExecutionCheckpoints{}); err == nil || !strings.Contains(err.Error(), "not ready") {
@@ -863,6 +942,7 @@ func TestLocalWorkerCleanupFailureRetiresWithoutRemovingEvidence(t *testing.T) {
 
 func TestLocalWorkerReuseRejectsEndpointReplacement(t *testing.T) {
 	w := localWorkerTestStart(t, "known-hold")
+	localWorkerTestCapacity(t, w)
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	job := testJob(command.Comment)
@@ -877,7 +957,7 @@ func TestLocalWorkerReuseRejectsEndpointReplacement(t *testing.T) {
 	if err := os.WriteFile(path, []byte("replacement"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := w.awaitReusable(ctx); err == nil || !strings.Contains(err.Error(), "reuse endpoint") || !strings.Contains(err.Error(), "not a socket") {
+	if err := w.WaitCapacity(ctx); err == nil || !strings.Contains(err.Error(), "reuse endpoint") || !strings.Contains(err.Error(), "not a socket") {
 		t.Fatalf("replaced endpoint gained a reuse witness: %v", err)
 	}
 	if data, err := os.ReadFile(path); err != nil || string(data) != "replacement" || w.cmd.ProcessState == nil {
@@ -890,6 +970,7 @@ func TestLocalWorkerReuseRejectsEndpointReplacement(t *testing.T) {
 
 func TestLocalWorkerCanceledReuseWaitRetiresChild(t *testing.T) {
 	w := localWorkerTestStart(t, "known-hold")
+	localWorkerTestCapacity(t, w)
 	job := testJob(command.Comment)
 	result, err := w.Execute(t.Context(), job, runnerExecutionCheckpoints{})
 	if err != nil || result.Answer != "known" || !result.matchesJob(job) {
@@ -897,7 +978,7 @@ func TestLocalWorkerCanceledReuseWaitRetiresChild(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	if err := w.awaitReusable(ctx); !errors.Is(err, context.Canceled) {
+	if err := w.WaitCapacity(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled reuse wait lost its cause: %v", err)
 	}
 	if w.reuse.Load() != workerRetired || w.cmd.ProcessState == nil {

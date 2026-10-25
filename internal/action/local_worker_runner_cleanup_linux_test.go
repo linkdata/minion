@@ -27,7 +27,7 @@ func TestLocalWorkerRunnerCleansBeforeReuse(t *testing.T) {
 			w, workRoot, report := startRunnerCleanupWorker(t, mode)
 			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 			defer cancel()
-			if err := w.awaitHeldPull(ctx); err != nil {
+			if err := w.WaitCapacity(ctx); err != nil {
 				t.Fatal(err)
 			}
 			first := runnerCleanupJob("first")
@@ -36,7 +36,7 @@ func TestLocalWorkerRunnerCleansBeforeReuse(t *testing.T) {
 				t.Fatalf("first result=%+v error=%v", result, err)
 			}
 			assertRunnerCleanupRoot(t, workRoot)
-			if err := w.awaitReusable(ctx); err != nil {
+			if err := w.WaitCapacity(ctx); err != nil {
 				t.Fatalf("clean attempt could not reuse worker: %v", err)
 			}
 			second := runnerCleanupJob("second")
@@ -57,7 +57,7 @@ func TestLocalWorkerRunnerCleanupOnCancellation(t *testing.T) {
 	w, workRoot, report := startRunnerCleanupWorker(t, "cancel")
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
-	if err := w.awaitHeldPull(ctx); err != nil {
+	if err := w.WaitCapacity(ctx); err != nil {
 		t.Fatal(err)
 	}
 	actionCtx, stopAction := context.WithCancel(ctx)
@@ -88,7 +88,7 @@ func TestLocalWorkerRunnerCrashRetainsRecoveryEvidence(t *testing.T) {
 	w.executor.outcomeGrace = 25 * time.Millisecond
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
-	if err := w.awaitHeldPull(ctx); err != nil {
+	if err := w.WaitCapacity(ctx); err != nil {
 		t.Fatal(err)
 	}
 	job := runnerCleanupJob("crashed")

@@ -121,6 +121,17 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 	if err := ctx.Err(); err != nil {
 		return store.Data.NextPollAt, err
 	}
+	waitCapacity := func() error {
+		if handler, ok := m.Handler.(interface{ WaitCapacity(context.Context) error }); ok {
+			if err := handler.WaitCapacity(ctx); err != nil {
+				return fmt.Errorf("wait for action capacity: %w", err)
+			}
+		}
+		return ctx.Err()
+	}
+	if err := waitCapacity(); err != nil {
+		return store.Data.NextPollAt, err
+	}
 	now := time.Now
 	if m.Now != nil {
 		now = m.Now
@@ -461,16 +472,19 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				if jobFailure.Attempts < maxJobAttempts {
 					failures = append(failures, failureErr)
 				}
-				continue
+			} else {
+				store.Data.Processed[job.ID] = started
+				delete(store.Data.JobFailures, job.ID)
+				delete(store.Data.PendingFixes, job.ID)
+				if err := store.Save(); err != nil {
+					return stop(err)
+				}
+				if ctx.Err() != nil {
+					return stop()
+				}
 			}
-			store.Data.Processed[job.ID] = started
-			delete(store.Data.JobFailures, job.ID)
-			delete(store.Data.PendingFixes, job.ID)
-			if err := store.Save(); err != nil {
+			if err := waitCapacity(); err != nil {
 				return stop(err)
-			}
-			if ctx.Err() != nil {
-				return stop()
 			}
 		}
 		if len(failures) != firstFailure {
