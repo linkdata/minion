@@ -335,7 +335,7 @@ func listModels(ctx context.Context, settings config.CodexConfig) (models []mode
 }
 
 // The app-server is deliberately canceled after its last catalogue response.
-// Keep unexpected exits and pipe-drain failures even when cancellation is expected.
+// Keep unexpected exits and pipe-drain failures reported by Cmd.Wait even when cancellation is expected.
 func expectedDiscoveryStop(err error, directStopSent bool) bool {
 	if err == nil {
 		return true

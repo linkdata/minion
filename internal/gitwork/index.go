@@ -151,10 +151,11 @@ func (index *OfflineIndex) Changes(ctx context.Context) ([]workspace.Change, err
 	}
 	var renamedExecutable map[string]bool
 	var stale []byte
-	if strings.TrimSpace(string(ignoreCase)) == "true" || runtime.GOOS == "windows" {
+	scannedCasePaths := strings.TrimSpace(string(ignoreCase)) == "true" || runtime.GOOS == "windows"
+	if scannedCasePaths {
 		// Git keeps the old index spelling for case-only renames until it is removed.
 		// Windows also needs the old mode before Git stages a newly spelled file.
-		stale, err = index.caseRenamedPaths(ctx)
+		stale, err = index.caseRenamedPaths(ctx, workspace.MaxEntries)
 		if err != nil {
 			return nil, err
 		}
@@ -230,10 +231,10 @@ func (index *OfflineIndex) Changes(ctx context.Context) ([]workspace.Change, err
 	if err != nil {
 		return nil, err
 	}
-	if len(stale) == 0 && strings.TrimSpace(string(ignoreCase)) != "true" {
+	if len(stale) == 0 && !scannedCasePaths {
 		for _, change := range selected {
 			if change.Delete {
-				stale, err = index.caseRenamedPaths(ctx)
+				stale, err = index.caseRenamedPaths(ctx, workspace.MaxEntries)
 				if err != nil {
 					return nil, err
 				}
@@ -274,7 +275,7 @@ func (index *OfflineIndex) Changes(ctx context.Context) ([]workspace.Change, err
 }
 
 // caseRenamedPaths finds tracked names whose on-disk spelling changed under Git's case folding.
-func (index *OfflineIndex) caseRenamedPaths(ctx context.Context) ([]byte, error) {
+func (index *OfflineIndex) caseRenamedPaths(ctx context.Context, limit int) ([]byte, error) {
 	type wantedNames struct {
 		exact, folded map[string]bool
 	}
@@ -297,6 +298,7 @@ func (index *OfflineIndex) caseRenamedPaths(ctx context.Context) ([]byte, error)
 		}
 	}
 	directories := map[string]map[string][]string{}
+	scanned := 0
 	var stale []byte
 	for _, name := range slices.Sorted(maps.Keys(index.tracked)) {
 		actual := "."
@@ -325,6 +327,11 @@ func (index *OfflineIndex) caseRenamedPaths(ctx context.Context) ([]byte, error)
 						return nil, err
 					}
 					entries, readErr := f.ReadDir(128)
+					if len(entries) > limit-scanned {
+						_ = f.Close()
+						return nil, errors.New("fix case-spelling scan exceeds entry limit")
+					}
+					scanned += len(entries)
 					for _, entry := range entries {
 						key := workspace.FoldPath(entry.Name())
 						if need.folded[key] && (need.exact[entry.Name()] || len(names[key]) < 2) {

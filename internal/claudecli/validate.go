@@ -61,7 +61,6 @@ func Validate(ctx context.Context, settings config.ClaudeConfig) (validated conf
 	if err != nil {
 		return validated, err
 	}
-	settings.ReadOnlyDirs = nil
 	policy, err := sandboxSettings(dir, "", authDir)
 	if err != nil {
 		return validated, err

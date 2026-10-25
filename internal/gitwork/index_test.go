@@ -995,6 +995,32 @@ func TestFixIndexSkipsUntrackedContentsOfIgnoredTrackedDirectory(t *testing.T) {
 	}
 }
 
+func TestFixIndexBoundsCaseSpellingScanInsideIgnoredTrackedDirectory(t *testing.T) {
+	index, source := offlineIndexFixture(t, []workspace.File{
+		{Path: ".gitignore", Mode: workspace.Regular, Data: []byte("build/\n")},
+		{Path: "build/tracked/source", Mode: workspace.Regular, Data: []byte("before")},
+	})
+	if err := os.Remove(filepath.Join(source, "build", "tracked", "source")); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		writeIndexFixture(t, source, fmt.Sprintf("build/tracked/cache-%d", i), nil)
+	}
+	if err := index.checkControlFilesWithLimit(t.Context(), 2); err != nil {
+		t.Fatalf("ignored cache counted against control scan limit: %v", err)
+	}
+	if stale, err := index.caseRenamedPaths(t.Context(), 5); stale != nil || err == nil || !strings.Contains(err.Error(), "case-spelling scan exceeds entry limit") {
+		t.Fatalf("unbounded case-spelling scan: stale=%q error=%v", stale, err)
+	}
+	if stale, err := index.caseRenamedPaths(t.Context(), 6); err != nil || len(stale) != 0 {
+		t.Fatalf("exact case-spelling scan limit: stale=%q error=%v", stale, err)
+	}
+	changes, err := index.Changes(t.Context())
+	if err != nil || len(changes) != 1 || changes[0].Path != "build/tracked/source" || !changes[0].Delete {
+		t.Fatalf("tracked deletion with bounded ignored cache: changes=%+v error=%v", changes, err)
+	}
+}
+
 func TestFixIndexExportsNewIgnoreRulesAndExactChangeLimit(t *testing.T) {
 	index, source := offlineIndexFixture(t, nil)
 	writeIndexFixture(t, source, "sub/.gitignore", []byte("*.cache\n"))

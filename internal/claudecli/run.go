@@ -76,7 +76,6 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 			return result, fmt.Errorf("claude skill %q is inside a writable directory", skill)
 		}
 	}
-	readOnlyDirs := make([]string, 0, len(settings.ReadOnlyDirs))
 	for _, path := range settings.ReadOnlyDirs {
 		resolved, err := aicli.Directory(path)
 		if err != nil {
@@ -87,9 +86,7 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 			outputDir != "" && (workspacefs.Within(resolved, outputDir) || workspacefs.Within(outputDir, resolved)) {
 			return result, errors.New("claude read-only directory overlaps a writable grant")
 		}
-		readOnlyDirs = append(readOnlyDirs, resolved)
 	}
-	settings.ReadOnlyDirs = readOnlyDirs
 	policy, err := sandboxSettings(workspace, outputDir, authDir)
 	if err != nil {
 		return result, err
