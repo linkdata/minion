@@ -120,12 +120,10 @@ func TestUsageRecordLimit(t *testing.T) {
 }
 
 func TestUsageLifecycleTurnLimitDoesNotCertifyCappedHelper(t *testing.T) {
-	if testing.Short() {
-		t.Skip("scans the actual 100000-record identity boundary")
-	}
+	const recordLimit = 1000
 	var events strings.Builder
 	events.WriteString(usageRecord("child", "0", "response", 7, 0, 0) + "\n")
-	for i := range maxUsageRecords {
+	for i := range recordLimit {
 		events.WriteString(usageEvent("task_complete", fmt.Sprint(i)) + "\n")
 	}
 	path := writeUsageRollout(t, t.TempDir(), "child", "root", strings.TrimSuffix(events.String(), "\n"))
@@ -138,25 +136,23 @@ func TestUsageLifecycleTurnLimitDoesNotCertifyCappedHelper(t *testing.T) {
 		}
 		budget := int64(maxUsageScanBytes)
 		capture := &usageBoundary{valid: true, turns: map[string]bool{}}
-		got, complete, _, err := readRolloutUsageFrom(t.Context(), meta, "root", &budget, rolloutUsageMode{capture: capture})
+		got, complete, _, err := readRolloutUsageFrom(t.Context(), meta, "root", &budget, rolloutUsageMode{capture: capture, recordLimit: recordLimit})
 		if got != (usage.Tokens{Input: 7}) || complete == extra || errors.Is(err, errUnverifiedChildren) != extra || (err != nil && !extra) {
 			t.Fatalf("helper lifecycle cap: %+v complete=%t extra=%t err=%v", got, complete, extra, err)
 		}
-		if len(capture.turns) != maxUsageRecords || capture.valid == extra || capture.completed == extra || !capture.prefixKnown {
+		if len(capture.turns) != recordLimit || capture.valid == extra || capture.completed == extra || !capture.prefixKnown {
 			t.Fatalf("turn cap proof: turns=%d valid=%t completed=%t prefixKnown=%t extra=%t", len(capture.turns), capture.valid, capture.completed, capture.prefixKnown, extra)
 		}
 	}
 }
 
 func TestUsageTurnLimitCountsLifecycleAndResponseIdentitiesTogether(t *testing.T) {
-	if testing.Short() {
-		t.Skip("scans the actual 100000-record identity boundary")
-	}
+	const recordLimit = 1000
 	var events strings.Builder
-	for i := range maxUsageRecords / 2 {
+	for i := range recordLimit / 2 {
 		events.WriteString(usageEvent("task_complete", fmt.Sprintf("lifecycle-%d", i)) + "\n")
 	}
-	for i := range maxUsageRecords / 2 {
+	for i := range recordLimit / 2 {
 		id := fmt.Sprintf("response-%d", i)
 		events.WriteString(usageRecord("root", id, id, 1, 0, 0) + "\n" + usageEvent("task_complete", id) + "\n")
 	}
@@ -166,17 +162,15 @@ func TestUsageTurnLimitCountsLifecycleAndResponseIdentitiesTogether(t *testing.T
 			appendUsageEvents(t, path, usageRecord("root", "one-more", "one-more", 1, 0, 0), usageEvent("task_complete", "one-more"))
 		}
 		budget := int64(maxUsageScanBytes)
-		got, complete, _, err := readRolloutUsage(t.Context(), rolloutMeta{ID: "root", path: path}, "root", &budget)
-		if got != (usage.Tokens{Input: maxUsageRecords / 2}) || complete == extra || err != nil {
+		got, complete, _, err := readRolloutUsageFrom(t.Context(), rolloutMeta{ID: "root", path: path}, "root", &budget, rolloutUsageMode{recordLimit: recordLimit})
+		if got != (usage.Tokens{Input: recordLimit / 2}) || complete == extra || err != nil {
 			t.Fatalf("disjoint turn trackers exceeded their shared cap: %+v complete=%t extra=%t err=%v", got, complete, extra, err)
 		}
 	}
 }
 
 func TestUsageLateOldResponseLimitPreservesSubtractionCertainty(t *testing.T) {
-	if testing.Short() {
-		t.Skip("scans the actual 100000-record identity boundary")
-	}
+	const recordLimit = 1000
 	ctx := t.Context()
 	path := writeUsageRollout(t, t.TempDir(), "root", "", append(completedUsageTurn("root", "old", "baseline", 0), usageSnapshot(25, 0, 0, 0))...)
 	before := &usageBoundary{valid: true, turns: map[string]bool{}}
@@ -186,17 +180,17 @@ func TestUsageLateOldResponseLimitPreservesSubtractionCertainty(t *testing.T) {
 		t.Fatalf("invalid baseline fixture: complete=%t valid=%t err=%v", complete, before.valid, err)
 	}
 	var events strings.Builder
-	for i := range maxUsageRecords {
+	for i := range recordLimit {
 		events.WriteString(usageRecord("root", "old", fmt.Sprint(i), 1, 0, 0) + "\n")
 	}
-	events.WriteString(usageEvent("task_started", "new") + "\n" + usageSnapshot(30, maxUsageRecords+20, 0, 0) + "\n" + usageEvent("task_complete", "new"))
+	events.WriteString(usageEvent("task_started", "new") + "\n" + usageSnapshot(30, recordLimit+20, 0, 0) + "\n" + usageEvent("task_complete", "new"))
 	appendUsageEvents(t, path, events.String())
 	for _, extra := range []bool{false, true} {
 		if extra {
-			appendUsageEvents(t, path, usageRecord("root", "old", "one-more", 1, 0, 0), usageSnapshot(31, maxUsageRecords+21, 0, 0), usageEvent("task_complete", "new"))
+			appendUsageEvents(t, path, usageRecord("root", "old", "one-more", 1, 0, 0), usageSnapshot(31, recordLimit+21, 0, 0), usageEvent("task_complete", "new"))
 		}
 		budget := int64(maxUsageScanBytes)
-		got, complete, _, err := readRolloutUsageFrom(ctx, rolloutMeta{ID: "root", path: path}, "root", &budget, rolloutUsageMode{before: before})
+		got, complete, _, err := readRolloutUsageFrom(ctx, rolloutMeta{ID: "root", path: path}, "root", &budget, rolloutUsageMode{before: before, recordLimit: recordLimit})
 		want := usage.Tokens{Input: 20}
 		if extra {
 			want = usage.Tokens{}
@@ -208,22 +202,20 @@ func TestUsageLateOldResponseLimitPreservesSubtractionCertainty(t *testing.T) {
 }
 
 func TestUsageCappedBaselineCannotAttributeDroppedOldIdentity(t *testing.T) {
-	if testing.Short() {
-		t.Skip("scans the actual 100000-record identity boundary")
-	}
+	const recordLimit = 1000
 	ctx := t.Context()
 	var events strings.Builder
-	for i := range maxUsageRecords + 1 {
+	for i := range recordLimit + 1 {
 		id := fmt.Sprint(i)
 		events.WriteString(usageRecord("root", id, id, 1, 0, 0) + "\n" + usageEvent("task_complete", id) + "\n")
 	}
-	events.WriteString(usageSnapshot(25, maxUsageRecords+1, 0, 0))
+	events.WriteString(usageSnapshot(25, recordLimit+1, 0, 0))
 	path := writeUsageRollout(t, t.TempDir(), "root", "", events.String())
 	meta := rolloutMeta{ID: "root", path: path}
 	before := &usageBoundary{valid: true, turns: map[string]bool{}}
 	budget := int64(maxUsageScanBytes)
-	_, complete, _, err := readRolloutUsageFrom(ctx, meta, "root", &budget, rolloutUsageMode{capture: before})
-	if complete || before.valid || !before.prefixKnown || len(before.turns) != maxUsageRecords || len(before.responses) != maxUsageRecords || err != nil {
+	_, complete, _, err := readRolloutUsageFrom(ctx, meta, "root", &budget, rolloutUsageMode{capture: before, recordLimit: recordLimit})
+	if complete || before.valid || !before.prefixKnown || len(before.turns) != recordLimit || len(before.responses) != recordLimit || err != nil {
 		t.Fatalf("capped baseline fixture: complete=%t valid=%t prefixKnown=%t turns=%d responses=%d err=%v", complete, before.valid, before.prefixKnown, len(before.turns), len(before.responses), err)
 	}
 	budget = maxUsageScanBytes
@@ -231,7 +223,7 @@ func TestUsageCappedBaselineCannotAttributeDroppedOldIdentity(t *testing.T) {
 		t.Fatal("logical identity cap invalidated unchanged physical history")
 	}
 	// The dropped last ID is historical, even though the bounded maps lack it.
-	appendUsageEvents(t, path, usageRecord("root", fmt.Sprint(maxUsageRecords), fmt.Sprint(maxUsageRecords), 1, 0, 0), usageEvent("task_started", "new"), usageRecord("root", "new", "new", 20, 0, 0), usageSnapshot(30, maxUsageRecords+21, 0, 0), usageEvent("task_complete", "new"))
+	appendUsageEvents(t, path, usageRecord("root", fmt.Sprint(recordLimit), fmt.Sprint(recordLimit), 1, 0, 0), usageEvent("task_started", "new"), usageRecord("root", "new", "new", 20, 0, 0), usageSnapshot(30, recordLimit+21, 0, 0), usageEvent("task_complete", "new"))
 	budget = maxUsageScanBytes
 	got, complete, _, err := readRolloutUsageFrom(ctx, meta, "root", &budget, rolloutUsageMode{before: before})
 	if got != (usage.Tokens{}) || complete || err != nil {

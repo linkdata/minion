@@ -17,6 +17,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/linkdata/minion/internal/aicli"
@@ -133,25 +134,26 @@ func TestAlreadyAcknowledgedRequiresOwnTrailingMarker(t *testing.T) {
 
 func TestPrecheckDeadlineStopsJobBeforeModel(t *testing.T) {
 	installActionTestSkills(t, testReviewSkillURL)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/repos/o/r/issues/7/comments" {
-			t.Errorf("unexpected request: %s", r.URL)
+	synctest.Test(t, func(t *testing.T) {
+		server := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/repos/o/r/issues/7/comments" {
+				t.Errorf("unexpected request: %s", r.URL)
+			}
+			<-r.Context().Done()
+		}))
+		client := testGitHub(server, "test-token")
+		orchestrator := &Orchestrator{
+			GitHub:   client,
+			BotLogin: "linkdataminion",
+			Timeout:  20 * time.Millisecond,
+			Commands: map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{testReviewSkillURL}}},
+			Runner:   Runner{runModel: forbidModel(t)},
 		}
-		<-r.Context().Done()
-	}))
-	defer server.Close()
-	client := testGitHub(server, "test-token")
-	orchestrator := &Orchestrator{
-		GitHub:   client,
-		BotLogin: "linkdataminion",
-		Timeout:  20 * time.Millisecond,
-		Commands: map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{testReviewSkillURL}}},
-		Runner:   Runner{runModel: forbidModel(t)},
-	}
-	job := monitor.Job{Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"review"}}, SubjectType: "PullRequest", Number: 7, ID: strings.Repeat("a", 64), Command: command.Command{Name: "review", Action: command.Review}}
-	if err := orchestrator.Execute(t.Context(), job); !errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("precheck deadline was refundable: %v", err)
-	}
+		job := monitor.Job{Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"review"}}, SubjectType: "PullRequest", Number: 7, ID: strings.Repeat("a", 64), Command: command.Command{Name: "review", Action: command.Review}}
+		if err := orchestrator.Execute(t.Context(), job); !errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("precheck deadline was refundable: %v", err)
+		}
+	})
 }
 
 func TestVerifiedRepositoryRejectsReclaimedName(t *testing.T) {

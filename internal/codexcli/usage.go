@@ -392,6 +392,7 @@ type rolloutUsageMode struct {
 	allowUnchanged  bool
 	latest          *usage.Tokens
 	seenLatest      *bool
+	recordLimit     int // Test-only lower cap; zero keeps the production limit.
 }
 
 // A boundary excludes previous turns even when their final records arrive late.
@@ -444,8 +445,12 @@ func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, 
 	abortedTurns := map[string]bool{}
 	ownedTurns := map[string]bool{}
 	lifecycleCapped := false
+	recordLimit := maxUsageRecords
+	if mode.recordLimit > 0 {
+		recordLimit = min(recordLimit, mode.recordLimit)
+	}
 	admitIdentity := func(size int) bool {
-		if size < maxUsageRecords {
+		if size < recordLimit {
 			return true
 		}
 		complete = false
