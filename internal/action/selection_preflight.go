@@ -20,6 +20,7 @@ const (
 	preflightWorkRootUnavailable        = "worker work root unavailable"
 	preflightCanceled                   = "worker preflight canceled"
 	preflightWorkRootInvalid            = "worker work root invalid"
+	preflightEvidenceDirsUnsupported    = "worker evidence directories unsupported"
 	preflightCommandSkillUnavailable    = "selected command skill unavailable"
 	preflightCriticSkillUnavailable     = "selected critic skill unavailable"
 	preflightAuditSkillUnavailable      = "selected audit skill unavailable"
@@ -34,7 +35,8 @@ const (
 func validPreflightMessage(message string) bool {
 	switch message {
 	case preflightRunnerUnavailable, preflightSelectionUnavailable, preflightWorkRootUnavailable,
-		preflightCanceled, preflightWorkRootInvalid, preflightCommandSkillUnavailable,
+		preflightCanceled, preflightWorkRootInvalid, preflightEvidenceDirsUnsupported,
+		preflightCommandSkillUnavailable,
 		preflightCriticSkillUnavailable, preflightAuditSkillUnavailable,
 		preflightAuditToolchainUnavailable, preflightGitReadinessUnavailable,
 		preflightCodexLoginUnavailable, preflightCodexBoundaryUnavailable,
@@ -57,7 +59,7 @@ func (r *Runner) PreflightSelection(ctx context.Context) (resultErr error) {
 	message := preflightRunnerUnavailable
 	defer func() {
 		if resultErr != nil {
-			if errors.Is(resultErr, context.Canceled) || errors.Is(resultErr, context.DeadlineExceeded) {
+			if ctx.Err() != nil && (errors.Is(resultErr, context.Canceled) || errors.Is(resultErr, context.DeadlineExceeded)) {
 				message = preflightCanceled
 			}
 			resultErr = preflightError{message: message, cause: resultErr}
@@ -82,6 +84,10 @@ func (r *Runner) PreflightSelection(ctx context.Context) (resultErr error) {
 	workRoot, err := workspace.CanonicalPath(r.WorkRoot)
 	if err != nil {
 		return fmt.Errorf("worker work root: %w", err)
+	}
+	message = preflightEvidenceDirsUnsupported
+	if len(r.Codex.ReadOnlyDirs) != 0 || len(r.Claude.ReadOnlyDirs) != 0 {
+		return errUnsupportedEvidenceDirs
 	}
 	configured := *r
 	configured.Logger = nil

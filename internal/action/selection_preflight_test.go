@@ -54,6 +54,25 @@ func TestPreflightSelectionRequiresFrozenSelectionAndWorkRoot(t *testing.T) {
 	}
 }
 
+func TestPreflightSelectionRejectsUnsupportedEvidenceDirectoriesBeforePull(t *testing.T) {
+	runner := selectedPreflightRunner(t, map[string]config.CommandMapping{
+		"review": {Action: string(command.Review), Skills: []string{testReviewSkillURL}},
+	})
+	for _, provider := range []string{"codex", "claude"} {
+		if provider == "codex" {
+			runner.Codex.ReadOnlyDirs = []string{"/"}
+		} else {
+			runner.Codex.ReadOnlyDirs = nil
+			runner.Claude.ReadOnlyDirs = []string{"/"}
+		}
+		err := runner.PreflightSelection(t.Context())
+		requirePreflightMessage(t, err, preflightEvidenceDirsUnsupported)
+		if !errors.Is(err, errUnsupportedEvidenceDirs) {
+			t.Fatalf("%s evidence directory cause was lost: %v", provider, err)
+		}
+	}
+}
+
 func TestPreflightSelectionChecksEverySelectedRequiredSkill(t *testing.T) {
 	installActionTestSkills(t, testReviewSkillURL)
 	runner := selectedPreflightRunner(t, map[string]config.CommandMapping{
