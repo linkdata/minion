@@ -113,21 +113,25 @@ func validateExecCapabilities(ctx context.Context, settings config.CodexConfig) 
 		{name: "exec", args: []string{"exec"}},
 		{name: "exec resume", args: []string{"exec", "resume"}},
 	} {
-		args := append(command.args,
-			"--json", "--ignore-user-config", "--ignore-rules", "--strict-config", "--skip-git-repo-check",
-		)
-		args = append(args, sandboxArgs(dir, "", false)...)
-		args = append(args, disabledFeatureArgs()...)
-		args = append(args,
-			"-c", "skills.include_instructions=false", "-c", "approval_policy=never", "--model", settings.Model,
-			"--output-schema", schema, "--help",
-		)
-		_, probeErr := aicli.Probe(ctx, binary, "codex", args, dir, env, "", settings.APIKey)
-		if probeErr != nil {
-			return fmt.Errorf("Codex %s capability check: %w", command.name, probeErr) //nolint:staticcheck // -- Codex is a proper noun.
+		for _, writable := range []bool{false, true} {
+			args := append(append([]string(nil), command.args...),
+				"--json", "--ignore-user-config", "--ignore-rules", "--strict-config", "--skip-git-repo-check",
+			)
+			args = append(args, sandboxArgs(dir, "", writable)...)
+			args = append(args, disabledFeatureArgs()...)
+			args = append(args, execConfigArgs()...)
+			args = append(args, "--model", settings.Model)
+			if settings.ReasoningEffort != "" {
+				args = append(args, "-c", "model_reasoning_effort="+strconv.Quote(settings.ReasoningEffort))
+			}
+			args = append(args, "--output-schema", schema, "--help")
+			_, probeErr := aicli.Probe(ctx, binary, "codex", args, dir, env, "", settings.APIKey)
+			if probeErr != nil {
+				return fmt.Errorf("Codex %s capability check (writable=%t): %w", command.name, writable, probeErr) //nolint:staticcheck // -- Codex is a proper noun.
+			}
 		}
 		invalid := append(command.args, "--minion-unsupported-capability-probe", "--help")
-		_, probeErr = aicli.Probe(ctx, binary, "codex", invalid, dir, env, "", settings.APIKey)
+		_, probeErr := aicli.Probe(ctx, binary, "codex", invalid, dir, env, "", settings.APIKey)
 		var exitErr *exec.ExitError
 		if probeErr == nil || ctx.Err() != nil || errors.Is(probeErr, aicli.ErrOutputLimit) || !errors.As(probeErr, &exitErr) || exitErr.ExitCode() <= 0 {
 			return fmt.Errorf("Codex %s capability check did not reject an unknown option: %v", command.name, probeErr) //nolint:staticcheck // -- Codex is a proper noun.

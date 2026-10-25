@@ -2,10 +2,13 @@ package claudecli
 
 import (
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/linkdata/minion/internal/config"
+	"github.com/linkdata/minion/internal/testsupport"
 )
 
 const modelCatalogue = `{"type":"control_response","response":{"subtype":"success","request_id":"minion-initialize","response":{"models":[{"value":"unresolved"},{"value":"default","resolvedModel":"claude-pinned","supportedEffortLevels":["low","high"]},{"value":"quick","resolvedModel":"claude-small","supportedEffortLevels":["low","high"]}]}}}`
@@ -50,6 +53,72 @@ fi
 			}
 		})
 	}
+}
+
+const invocationHelp = "Options:\n  --session-id <uuid>\n  -r, --resume [sessionId]\n  --add-dir <directories...>\n  --model <name>\n  --effort <level>\n"
+
+func TestValidateRejectsMissingInvocationOptionBeforeModelCall(t *testing.T) {
+	for _, test := range []struct{ option, declaration string }{
+		{"--session-id", "  --session-id <uuid>\n"},
+		{"--resume", "  -r, --resume [sessionId]\n"},
+		{"--add-dir", "  --add-dir <directories...>\n"},
+		{"--model", "  --model <name>\n"},
+		{"--effort", "  --effort <level>\n"},
+	} {
+		t.Run(test.option, func(t *testing.T) {
+			binary := fakeValidationHelp(t, strings.Replace(invocationHelp, test.declaration, "", 1))
+			_, err := Validate(t.Context(), config.ClaudeConfig{Effort: "high"})
+			if err == nil || !strings.Contains(err.Error(), "invocation capability check") || !strings.Contains(err.Error(), test.option) {
+				t.Fatalf("accepted help without %s: %v", test.option, err)
+			}
+			if _, err := os.Stat(binary + ".model-called"); !os.IsNotExist(err) {
+				t.Fatalf("capability check started a model call: %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateDoesNotRequireUnusedEffortOption(t *testing.T) {
+	fakeValidationHelp(t, strings.Replace(invocationHelp, "  --effort <level>\n", "", 1))
+	if _, err := Validate(t.Context(), config.ClaudeConfig{}); err != nil {
+		t.Fatalf("rejected CLI without unused effort option: %v", err)
+	}
+}
+
+func TestHelpOptionDeclaredRequiresDeclaration(t *testing.T) {
+	if helpOptionDeclared([]byte("  --other <value>  See --resume for details\n"), "--resume") || helpOptionDeclared([]byte("  --resumed <id>\n"), "--resume") {
+		t.Fatal("accepted a description or prefix as an option declaration")
+	}
+	if !helpOptionDeclared([]byte("  -r, --resume [sessionId]\n"), "--resume") {
+		t.Fatal("missed an option declaration after a short alias")
+	}
+}
+
+func fakeValidationHelp(t *testing.T, help string) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("Claude CLI is not supported on native Windows")
+	}
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	for _, key := range []string{"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"} {
+		t.Setenv(key, "")
+	}
+	dir := testsupport.FakeOnPath(t, "claude", `#!/bin/sh
+if [ "$3" = auth ]; then
+  printf '%s\n' '{"loggedIn":true}'
+elif [ "$1" = --help ]; then
+  cat <<'MINION_HELP'
+`+help+`MINION_HELP
+else
+  input=$(cat)
+  case "$input" in
+    *minion-initialize*) printf '%s\n' '`+modelCatalogue+`' ;;
+    *) printf 'called' > "$0.model-called"; exit 99 ;;
+  esac
+fi
+`)
+	return filepath.Join(dir, "claude")
 }
 
 func TestValidateRequiresInitialization(t *testing.T) {

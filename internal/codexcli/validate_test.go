@@ -158,7 +158,7 @@ func TestValidateChecksExecAndResumeCapabilitiesWithoutCredentials(t *testing.T)
 		t.Fatal(err)
 	}
 	calls := strings.Split(strings.TrimPrefix(string(data), "--invocation--\n"), "--invocation--\n")
-	if len(calls) != 4 {
+	if len(calls) != 6 {
 		t.Fatalf("expected fresh/resume help and rejection probes, got %q", data)
 	}
 	flags := []string{"--json", "--ignore-user-config", "--ignore-rules", "--strict-config", "--skip-git-repo-check"}
@@ -169,26 +169,29 @@ func TestValidateChecksExecAndResumeCapabilitiesWithoutCredentials(t *testing.T)
 	} {
 		flags = append(flags, "--disable", feature)
 	}
-	flags = append(flags, "-c", "skills.include_instructions=false", "-c", "approval_policy=never", "--model", "fixture", "--output-schema")
 	for i, command := range [][]string{{"exec"}, {"exec", "resume"}} {
-		got := strings.Split(strings.TrimSpace(calls[2*i]), "\n")
-		if len(got) < 2 || !filepath.IsAbs(got[len(got)-2]) || filepath.Base(got[len(got)-2]) != "output-schema.json" {
-			t.Fatalf("probe %d omitted a temporary output schema: %q", i, got)
+		for j, writable := range []bool{false, true} {
+			got := strings.Split(strings.TrimSpace(calls[3*i+j]), "\n")
+			if len(got) < 2 || !filepath.IsAbs(got[len(got)-2]) || filepath.Base(got[len(got)-2]) != "output-schema.json" {
+				t.Fatalf("probe %d/%d omitted a temporary output schema: %q", i, j, got)
+			}
+			want := append(slices.Clone(command), flags[:5]...)
+			want = append(want, sandboxArgs(filepath.Dir(got[len(got)-2]), "", writable)...)
+			want = append(want, flags[5:]...)
+			want = append(want, execConfigArgs()...)
+			want = append(want, "--model", "fixture", "-c", `model_reasoning_effort="high"`, "--output-schema", got[len(got)-2], "--help")
+			if !slices.Equal(got, want) {
+				t.Fatalf("probe %d/%d args = %q; want %q", i, j, got, want)
+			}
 		}
-		want := append(append(slices.Clone(command), flags[:5]...), "-c", `sandbox_mode="read-only"`)
-		want = append(want, flags[5:]...)
-		want = append(want, got[len(got)-2], "--help")
-		if !slices.Equal(got, want) {
-			t.Fatalf("probe %d args = %q; want %q", i, got, want)
-		}
-		rejected := strings.Split(strings.TrimSpace(calls[2*i+1]), "\n")
+		rejected := strings.Split(strings.TrimSpace(calls[3*i+2]), "\n")
 		wantRejected := append(append([]string(nil), command...), "--minion-unsupported-capability-probe", "--help")
 		if !slices.Equal(rejected, wantRejected) {
 			t.Fatalf("negative probe %d args = %q; want %q", i, rejected, wantRejected)
 		}
 	}
 	env, err := os.ReadFile(filepath.Join(dir, "help-env"))
-	if err != nil || string(env) != strings.Repeat("absent,absent,absent,absent\n", 4) {
+	if err != nil || string(env) != strings.Repeat("absent,absent,absent,absent\n", 6) {
 		t.Fatalf("credentials reached capability probe: %q, %v", env, err)
 	}
 }
@@ -212,6 +215,25 @@ func TestValidateRejectsMissingOutputSchemaSupport(t *testing.T) {
 	installFakeCodex(t, script)
 	if _, err := Validate(t.Context(), config.CodexConfig{}); err == nil || !strings.Contains(err.Error(), "Codex exec capability check") || !strings.Contains(err.Error(), "--output-schema") {
 		t.Fatalf("accepted CLI without output schema support: %v", err)
+	}
+}
+
+func TestValidateRejectsMissingRunOptions(t *testing.T) {
+	for _, test := range []struct {
+		name, option string
+	}{
+		{"reasoning effort", "model_reasoning_effort="},
+		{"writable roots", "sandbox_workspace_write.writable_roots="},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			page := `{"id":2,"result":{"data":[{"model":"fixture","isDefault":true,"defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high"}]}]}}`
+			script := strings.Replace(catalogueScriptFor(dir, page, ""), "if [ \"$1\" = exec ]; then", "if [ \"$1\" = exec ]; then\n  case \" $* \" in *' "+test.option+"'*) printf '%s\\n' 'unsupported "+test.option+"' >&2; exit 2 ;; esac\nfi\nif [ \"$1\" = exec ]; then", 1)
+			installFakeCodex(t, script)
+			if _, err := Validate(t.Context(), config.CodexConfig{}); err == nil || !strings.Contains(err.Error(), "Codex exec capability check") || !strings.Contains(err.Error(), test.option) {
+				t.Fatalf("accepted CLI without %s support: %v", test.name, err)
+			}
+		})
 	}
 }
 

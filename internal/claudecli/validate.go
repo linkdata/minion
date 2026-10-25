@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/linkdata/minion/internal/aicli"
@@ -18,8 +19,9 @@ import (
 // Validate checks Claude's prerequisites and resolves model settings.
 //
 // It requires authenticated CLI state. Model discovery passes Run's sandbox
-// and tool options to the CLI's initialization protocol without an inference
-// turn. Claude owns sandbox startup and enforcement at runtime.
+// and tool options to the CLI's initialization protocol. Help advertises the
+// remaining fresh and resumed invocation options. Neither starts inference.
+// Claude owns sandbox enforcement.
 //
 // APIKey overrides environment credentials and stored login. Without it,
 // environment API/OAuth tokens are rejected. Authenticated proxies are rejected.
@@ -95,12 +97,44 @@ func Validate(ctx context.Context, settings config.ClaudeConfig) (validated conf
 			return validated, errors.New("claude model catalogue omitted the resolved model")
 		}
 		validated.Model = model.ResolvedModel
-		if validated.Effort == "" || slices.Contains(model.Efforts, validated.Effort) {
-			return validated, nil
+		if validated.Effort != "" && !slices.Contains(model.Efforts, validated.Effort) {
+			return validated, fmt.Errorf("claude effort %q is unsupported for model %q", validated.Effort, validated.Model)
 		}
-		return validated, fmt.Errorf("claude effort %q is unsupported for model %q", validated.Effort, validated.Model)
+		if err := validateInvocationCapabilities(ctx, binary, dir, env, validated); err != nil {
+			return validated, err
+		}
+		return validated, nil
 	}
 	return validated, fmt.Errorf("claude model %q is absent from the installed CLI catalogue", settings.Model)
+}
+
+// Initialization checks common Run flags; standalone help lists the rest.
+func validateInvocationCapabilities(ctx context.Context, binary, dir string, env []string, settings config.ClaudeConfig) error {
+	help, err := aicli.Probe(ctx, binary, "", []string{"--help"}, dir, env, "", settings.APIKey)
+	if err != nil {
+		return fmt.Errorf("claude invocation capability check: %w", err)
+	}
+	required := []string{"--session-id", "--resume", "--add-dir", "--model"}
+	if settings.Effort != "" {
+		required = append(required, "--effort")
+	}
+	for _, option := range required {
+		if !helpOptionDeclared(help, option) {
+			return fmt.Errorf("claude invocation capability check: %s is unavailable", option)
+		}
+	}
+	return nil
+}
+
+func helpOptionDeclared(help []byte, option string) bool {
+	for _, line := range bytes.Split(help, []byte{'\n'}) {
+		fields := strings.Fields(string(line))
+		if len(fields) > 0 && fields[0] == option ||
+			len(fields) > 1 && strings.HasSuffix(fields[0], ",") && fields[1] == option {
+			return true
+		}
+	}
+	return false
 }
 
 type modelInfo struct {

@@ -83,6 +83,10 @@ func TestCheckModelsBoundsResolvedCatalogueModel(t *testing.T) {
 if [ "$3" = 'auth' ]; then
   printf '%s\n' '{"loggedIn":true}'
 else
+  if [ "$1" = --help ]; then
+    printf '%s\n' 'Options:' '  --session-id <uuid>' '  -r, --resume [sessionId]' '  --add-dir <directories...>' '  --model <name>'
+    exit 0
+  fi
   input=$(/bin/cat)
   case "$input" in
     *minion-initialize*) printf '%s\n' '`+catalogue+`' ;;

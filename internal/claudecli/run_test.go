@@ -88,8 +88,12 @@ func fakeExecutable(t *testing.T, name, script string) string {
 		t.Setenv("HOME", t.TempDir())
 		t.Setenv("CLAUDE_CONFIG_DIR", "")
 		// Native invocations echo their explicit host-selected conversation ID.
-		// Discovery probes have no session selector and emit no such event.
-		script = `minion_session_flag=false
+		// Model discovery has no session selector and emits no such event.
+		script = `if [ "$1" = --help ]; then
+  printf '%s\n' 'Options:' '  --session-id <uuid>' '  -r, --resume [sessionId]' '  --add-dir <directories...>' '  --model <name>' '  --effort <level>'
+  exit 0
+fi
+minion_session_flag=false
 for minion_arg do
   if $minion_session_flag; then
     printf '{"type":"system","subtype":"init","session_id":"%s"}\n' "$minion_arg"
