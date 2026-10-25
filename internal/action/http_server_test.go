@@ -469,12 +469,37 @@ func TestHTTPExecutorBusyAndSingleAssignment(t *testing.T) {
 	if result, err := f.executor.Execute(t.Context(), f.job, runnerExecutionCheckpoints{}); err == nil || !result.matchesJob(f.job) {
 		t.Fatalf("busy executor admitted another action: %+v error=%v", result, err)
 	}
-	if got := f.request("/next", httpPull{Version: ProtocolVersion, ExecutorID: f.job.Identity.ExecutorID}); got.err != nil || got.status != http.StatusConflict {
+	if got := f.request("/next", httpPull{Version: ProtocolVersion, ExecutorID: f.job.Identity.ExecutorID}); got.err != nil || got.status != http.StatusConflict || got.ack.Failure == nil || errors.Is(got.ack.Failure.err(), context.Canceled) {
 		t.Fatalf("assignment was delivered twice: %+v", got)
 	}
 	f.ack(t, "/outcome", f.outcome(1, nil), http.StatusOK, 1)
 	if result := f.result(t); result.err != nil {
 		t.Fatal(result.err)
+	}
+}
+
+func TestHTTPExecutorClosedPullCancellationDiffersFromUnavailable(t *testing.T) {
+	executor, err := NewHTTPExecutor("local")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &httpServerTest{executor: executor, server: httptest.NewServer(executor)}
+	f.server.Client().Timeout = 5 * time.Second
+	defer f.server.Close()
+	pull := httpPull{Version: ProtocolVersion, ExecutorID: "local"}
+	executor.mu.Lock()
+	executor.unavailable = true
+	executor.mu.Unlock()
+	unavailable := f.request("/next", pull)
+	if unavailable.err != nil || unavailable.status != http.StatusConflict || unavailable.ack.Failure == nil || errors.Is(unavailable.ack.Failure.err(), context.Canceled) {
+		t.Fatalf("unavailable pull looked like shutdown: %+v", unavailable)
+	}
+	if err := executor.Close(); err != nil {
+		t.Fatal(err)
+	}
+	closed := f.request("/next", pull)
+	if closed.err != nil || closed.status != http.StatusConflict || closed.ack.Failure == nil || !errors.Is(closed.ack.Failure.err(), context.Canceled) {
+		t.Fatalf("closed pull did not signal shutdown: %+v", closed)
 	}
 }
 

@@ -18,15 +18,16 @@ import (
 
 // HTTPExecutor owns one supplied-data transaction. It does not prove worker readiness or cleanup.
 type HTTPExecutor struct {
-	mu          sync.Mutex
-	executorID  string
-	active      *httpTransaction
-	pull        bool
-	closed      bool
-	unavailable bool
-	changed     chan struct{}
-	status      Status
-	hasStatus   bool
+	mu           sync.Mutex
+	executorID   string
+	active       *httpTransaction
+	pull         bool
+	closed       bool
+	unavailable  bool
+	changed      chan struct{}
+	outcomeGrace time.Duration
+	status       Status
+	hasStatus    bool
 }
 
 type httpTransaction struct {
@@ -65,11 +66,16 @@ type httpTransaction struct {
 	quarantine         bool
 }
 
+type httpExecutionState struct {
+	admitted bool
+	outcome  bool
+}
+
 func NewHTTPExecutor(executorID string) (*HTTPExecutor, error) {
 	if !workspace.ValidIdentitySegment(executorID) {
 		return nil, errors.New("invalid HTTP executor identity")
 	}
-	return &HTTPExecutor{executorID: executorID, changed: make(chan struct{})}, nil
+	return &HTTPExecutor{executorID: executorID, changed: make(chan struct{}), outcomeGrace: httpControlTimeout}, nil
 }
 
 func (e *HTTPExecutor) notifyLocked() {
@@ -77,7 +83,11 @@ func (e *HTTPExecutor) notifyLocked() {
 	e.changed = make(chan struct{})
 }
 
-func (e *HTTPExecutor) Execute(ctx context.Context, job Job, sink Checkpoints) (result Result, runErr error) {
+func (e *HTTPExecutor) Execute(ctx context.Context, job Job, sink Checkpoints) (Result, error) {
+	return e.execute(ctx, job, sink, nil)
+}
+
+func (e *HTTPExecutor) execute(ctx context.Context, job Job, sink Checkpoints, state *httpExecutionState) (result Result, runErr error) {
 	started := time.Now()
 	result = Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head}
 	expires := started.Add(job.RuntimeBudget)
@@ -96,6 +106,9 @@ func (e *HTTPExecutor) Execute(ctx context.Context, job Job, sink Checkpoints) (
 		return result, errors.New("HTTP executor is closed, unavailable or busy")
 	}
 	e.active, e.status, e.hasStatus = tx, Status{}, false
+	if state != nil {
+		state.admitted = true
+	}
 	e.mu.Unlock()
 	defer func() {
 		tx.mu.Lock()
@@ -107,6 +120,9 @@ func (e *HTTPExecutor) Execute(ctx context.Context, job Job, sink Checkpoints) (
 		tx.mu.Lock()
 		if tx.outcome {
 			// A received outcome resolves watch ambiguity, even if its own receipt ACK was lost.
+			if state != nil {
+				state.outcome = true
+			}
 			result, runErr = tx.result, tx.runErr
 		} else if tx.delivered {
 			runErr = errors.Join(runErr, monitor.ErrExecutionOutcomeUnknown, tx.transportErr, tx.checkpointErr, actionCtx.Err())
@@ -164,7 +180,7 @@ func (e *HTTPExecutor) Execute(ctx context.Context, job Job, sink Checkpoints) (
 	if !delivered {
 		return result, httpExecutionContextError(actionCtx)
 	}
-	timer := time.NewTimer(httpControlTimeout)
+	timer := time.NewTimer(e.outcomeGrace)
 	defer timer.Stop()
 	select {
 	case <-tx.done:
@@ -237,8 +253,12 @@ func (e *HTTPExecutor) serveNext(w http.ResponseWriter, r *http.Request) {
 	}
 	e.mu.Lock()
 	if e.pull || e.closed || e.unavailable {
+		rejection := errors.New("HTTP executor has no pull slot")
+		if e.closed && !e.pull {
+			rejection = context.Canceled
+		}
 		e.mu.Unlock()
-		httpServerReject(w, "next", http.StatusConflict, httpBinding{}, 0, errors.New("HTTP executor has no pull slot"))
+		httpServerReject(w, "next", http.StatusConflict, httpBinding{}, 0, rejection)
 		return
 	}
 	e.pull = true
@@ -255,7 +275,12 @@ func (e *HTTPExecutor) serveNext(w http.ResponseWriter, r *http.Request) {
 	}()
 	for {
 		e.mu.Lock()
-		if e.closed || e.unavailable {
+		if e.closed {
+			e.mu.Unlock()
+			httpServerReject(w, "next", http.StatusConflict, httpBinding{}, 0, context.Canceled)
+			return
+		}
+		if e.unavailable {
 			e.mu.Unlock()
 			httpServerReject(w, "next", http.StatusConflict, httpBinding{}, 0, errors.New("HTTP executor is unavailable"))
 			return
