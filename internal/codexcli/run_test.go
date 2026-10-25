@@ -502,11 +502,9 @@ printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.comp
 
 func TestRunRejectsUnsafeCriticReadDirs(t *testing.T) {
 	root := canonicalTempDir(t)
-	workspace, reports := filepath.Join(root, "repo"), filepath.Join(root, "reports")
-	for _, dir := range []string{workspace, reports} {
-		if err := os.Mkdir(dir, 0o700); err != nil {
-			t.Fatal(err)
-		}
+	workspace := filepath.Join(root, "repo")
+	if err := os.Mkdir(workspace, 0o700); err != nil {
+		t.Fatal(err)
 	}
 	installFakeCodex(t, "#!/bin/sh\nexit 99\n")
 	for _, test := range []struct{ dir, failure string }{
