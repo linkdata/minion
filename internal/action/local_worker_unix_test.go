@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -792,6 +793,48 @@ func TestLocalWorkerReuseRequiresFreshPull(t *testing.T) {
 	}
 	if got := unixWorkerReport(t, ctx, report, ".second"); got != strconv.Itoa(w.cmd.Process.Pid) {
 		t.Fatalf("second assignment used another child: %q", got)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if w.reuse.Load() != workerRetired {
+		t.Fatalf("closed child remained reusable: %d", w.reuse.Load())
+	}
+}
+
+func TestLocalWorkerCloseDuringReuseProof(t *testing.T) {
+	w := localWorkerTestStart(t, "known-hold")
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	job := testJob(command.Comment)
+	if result, err := w.Execute(ctx, job, runnerExecutionCheckpoints{}); err != nil || result.Answer != "known" {
+		t.Fatalf("first outcome: result=%+v error=%v", result, err)
+	}
+	ready := make(chan error, 1)
+	go func() { ready <- w.awaitReusable(ctx) }()
+	for w.reuse.Load() != workerCheckingPull {
+		select {
+		case err := <-ready:
+			t.Fatalf("reuse proof returned before Close: %v", err)
+		case <-ctx.Done():
+			t.Fatalf("reuse proof did not start: %v", ctx.Err())
+		default:
+			runtime.Gosched()
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-ready:
+		if err == nil {
+			t.Fatal("closed worker passed reuse proof")
+		}
+	case <-ctx.Done():
+		t.Fatalf("reuse proof did not return after Close: %v", ctx.Err())
+	}
+	if w.reuse.Load() != workerRetired {
+		t.Fatalf("Close revived reusable capacity: %d", w.reuse.Load())
 	}
 }
 

@@ -98,6 +98,9 @@ func startLocalWorker(runtimeDir, executorID, path string, args []string, config
 
 func (w *localWorker) Execute(ctx context.Context, job Job, sink Checkpoints) (Result, error) {
 	if !w.reuse.CompareAndSwap(workerReusable, workerRunning) {
+		if w.reuse.Load() == workerRetired {
+			return Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head}, errors.New("local worker is closed or not ready for another assignment")
+		}
 		return Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head}, errors.New("local worker is busy or not ready for another assignment")
 	}
 	var state httpExecutionState
@@ -124,19 +127,27 @@ func (w *localWorker) Execute(ctx context.Context, job Job, sink Checkpoints) (R
 			}
 		}
 	} else if state.outcome {
-		w.reuse.Store(workerNeedsPull)
+		w.reuse.CompareAndSwap(workerRunning, workerNeedsPull)
 	} else {
-		w.reuse.Store(workerReusable)
+		w.reuse.CompareAndSwap(workerRunning, workerReusable)
 	}
 	return result, err
 }
 
 // awaitReusable releases capacity only after the completed attempt's next pull
-// is held by the same live child at the original endpoint.
+// is held at the original endpoint while the direct child is live.
 func (w *localWorker) awaitReusable(ctx context.Context) (reuseErr error) {
 	if !w.reuse.CompareAndSwap(workerNeedsPull, workerCheckingPull) {
 		if w.unclean.Load() {
 			return errors.New("local worker attempt cleanup failed; capacity is unavailable")
+		}
+		select {
+		case <-w.exited:
+			return errors.Join(errors.New("local worker exited before holding a pull"), w.waitErr)
+		default:
+		}
+		if w.reuse.Load() == workerRetired {
+			return errors.New("local worker closed before reuse proof")
 		}
 		return errors.New("local worker has no completed attempt awaiting reuse")
 	}
@@ -144,8 +155,8 @@ func (w *localWorker) awaitReusable(ctx context.Context) (reuseErr error) {
 		if reuseErr != nil {
 			w.reuse.Store(workerRetired)
 			reuseErr = errors.Join(reuseErr, w.Close())
-		} else {
-			w.reuse.Store(workerReusable)
+		} else if !w.reuse.CompareAndSwap(workerCheckingPull, workerReusable) {
+			reuseErr = errors.Join(errors.New("local worker closed during reuse proof"), w.Close())
 		}
 	}()
 	if err := w.endpoint.checkIdentity(); err != nil {
@@ -221,6 +232,7 @@ func (w *localWorker) awaitHeldPull(ctx context.Context) (waitErr error) {
 // Close drains accepted callbacks while HTTP serves, then stops and waits for
 // the direct child once before the endpoint closes its owned socket.
 func (w *localWorker) Close() error {
+	w.reuse.Store(workerRetired)
 	w.closeOnce.Do(func() {
 		coreErr := w.executor.Close()
 		// A published exit before cancellation is spontaneous, including one
