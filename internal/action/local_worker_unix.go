@@ -19,6 +19,7 @@ type localWorker struct {
 	cmd       *exec.Cmd
 	cancel    context.CancelFunc
 	exited    chan struct{}
+	childMu   sync.Mutex
 	waitErr   error
 	closeOnce sync.Once
 	closeErr  error
@@ -51,8 +52,11 @@ func startLocalWorker(runtimeDir, executorID string, command func(context.Contex
 	}
 	w := &localWorker{executor: executor, endpoint: endpoint, cmd: cmd, cancel: cancel, exited: make(chan struct{})}
 	go func() {
-		w.waitErr = cmd.Wait()
+		waitErr := cmd.Wait()
+		w.childMu.Lock()
+		w.waitErr = waitErr
 		close(w.exited)
+		w.childMu.Unlock()
 		_ = w.Close()
 	}()
 	go func() {
@@ -91,7 +95,9 @@ func (w *localWorker) Execute(ctx context.Context, job Job, sink Checkpoints) (R
 func (w *localWorker) Close() error {
 	w.closeOnce.Do(func() {
 		coreErr := w.executor.Close()
-		// Direct cancellation starts after this check; preserve exits during callback drain.
+		// Publish Wait and initiate cancellation under one lock, so a child exit
+		// observed during callback drain cannot be lost between these steps.
+		w.childMu.Lock()
 		select {
 		case <-w.exited:
 			if w.waitErr != nil {
@@ -100,6 +106,7 @@ func (w *localWorker) Close() error {
 		default:
 		}
 		w.cancel()
+		w.childMu.Unlock()
 		<-w.exited
 		w.closeErr = errors.Join(w.closeErr, coreErr, w.endpoint.Close())
 	})
