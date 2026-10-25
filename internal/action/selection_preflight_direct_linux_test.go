@@ -53,10 +53,10 @@ func TestSelectionPreflightDirectChild(t *testing.T) {
 			writeActionTestSkills(t, base, ".agents", testReviewSkillURL, testAuditSkillURL)
 			codexDir := fakeOnPath(t, "codex", preflightCodexCLI)
 			switch tc.name {
+			case "ready", "selected critic":
+				t.Setenv("PATH", codexDir+string(os.PathListSeparator)+gitOnlyPath(t))
 			case "selected CLI":
 				fakeOnPath(t, "codex", "#!/bin/sh\ncase \"$1 $2\" in 'login status') exit 0;; 'debug prompt-input') printf 'unsupported prompt-input\\n' >&2; exit 2;; esac\nexit 99\n")
-			case "selected critic":
-				t.Setenv("PATH", codexDir+string(os.PathListSeparator)+gitOnlyPath(t))
 			case "selected skill":
 				if err := os.Remove(filepath.Join(base, ".agents", "skills", "ponytail-review", "SKILL.md")); err != nil {
 					t.Fatal(err)
