@@ -10,7 +10,7 @@ import (
 
 func TestLiveClientReadOnly(t *testing.T) {
 	cfg := loadLiveTestConfig(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
 	defer cancel()
 	owner := liveClient(t, ctx, cfg.OwnerLogin)
 	bot := liveClient(t, ctx, cfg.BotLogin)

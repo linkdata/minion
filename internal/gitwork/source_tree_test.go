@@ -1,7 +1,6 @@
 package gitwork
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -82,7 +81,7 @@ func TestParseSourceEntriesCountsFilesAndMetadata(t *testing.T) {
 
 func TestSourceTreeRejectsInvalidRef(t *testing.T) {
 	var checkout Checkout
-	_, err := checkout.sourceTree(context.Background(), "--output=x")
+	_, err := checkout.sourceTree(t.Context(), "--output=x")
 	if !errors.Is(err, ErrUnsupportedSource) || !strings.Contains(err.Error(), "invalid source identity") {
 		t.Fatalf("invalid source identity error=%v", err)
 	}

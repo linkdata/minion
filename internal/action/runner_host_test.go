@@ -20,21 +20,21 @@ import (
 func TestRunnerRequiresExistingWorkRoot(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "missing")
 	runner := Runner{WorkRoot: missing, runModel: forbidModel(t)}
-	if result, err := runner.Run(context.Background(), testJob(command.Comment)); !errors.Is(err, os.ErrNotExist) || errors.Is(err, monitor.ErrTerminalJob) || len(result.Calls) != 0 {
+	if result, err := runner.Run(t.Context(), testJob(command.Comment)); !errors.Is(err, os.ErrNotExist) || errors.Is(err, monitor.ErrTerminalJob) || len(result.Calls) != 0 {
 		t.Fatalf("missing trusted root recreated or used: %+v,%v", result, err)
 	}
 	if _, err := os.Stat(missing); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("missing trusted root was created: %v", err)
 	}
 	runner = Runner{}
-	if _, err := runner.Run(context.Background(), testJob(command.Comment)); !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "work root is required") {
+	if _, err := runner.Run(t.Context(), testJob(command.Comment)); !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "work root is required") {
 		t.Fatalf("missing root=%v", err)
 	}
 }
 
 func TestRunnerRejectsCanceledContextBeforePreparation(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "must-not-be-created")
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	result, err := (&Runner{WorkRoot: root}).Run(ctx, testJob(command.Comment))
 	if !errors.Is(err, context.Canceled) || errors.Is(err, monitor.ErrTerminalJob) || len(result.Calls) != 0 {
@@ -46,7 +46,7 @@ func TestRunnerRejectsCanceledContextBeforePreparation(t *testing.T) {
 }
 
 func TestRunnerReturnsParentCancellationAfterFinalReview(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	job := withClaudeCritic(testJob(command.Comment))
 	root := t.TempDir()
@@ -117,7 +117,7 @@ func TestRunnerPreparationFailuresAreTerminalBeforeModels(t *testing.T) {
 					t.Fatal(caseErr)
 				}
 			}
-			if result, err := runner.Run(context.Background(), job); !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), test.want) || len(result.Calls) != 0 {
+			if result, err := runner.Run(t.Context(), job); !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), test.want) || len(result.Calls) != 0 {
 				t.Fatalf("preparation result=%+v error=%v", result, err)
 			}
 		})
@@ -136,7 +136,10 @@ func TestRunnerEnforcesSuppliedRuntimeBudget(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			action := test.action
-			parent, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			if action != command.SecurityAudit {
+				t.Parallel()
+			}
+			parent, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 			defer cancel()
 			job := testJob(action)
 			if action == command.SecurityAudit {
@@ -184,7 +187,7 @@ func TestRunnerFixCanReturnEmptyAnswerWithoutCritic(t *testing.T) {
 		writeFixtureFile(t, request.dir, "source.txt", []byte("fixed source"))
 		return aicli.Result{}, nil
 	}}
-	result, err := runner.Run(context.Background(), job)
+	result, err := runner.Run(t.Context(), job)
 	if err != nil || result.Answer != "" || len(result.Changes) != 1 || string(result.Changes[0].Data) != "fixed source" {
 		t.Fatalf("valid fix was lost because its summary was empty: %+v,%v", result, err)
 	}
@@ -202,7 +205,7 @@ func TestRunnerOmittedSourceWriteIsTerminal(t *testing.T) {
 		}
 		return aicli.Result{Answer: "Done."}, nil
 	}}
-	result, err := runner.Run(context.Background(), job)
+	result, err := runner.Run(t.Context(), job)
 	if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "omitted source path") || len(result.Calls) != 1 || len(result.Changes) != 0 {
 		t.Fatalf("omitted write must not rerun the model: %v", err)
 	}

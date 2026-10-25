@@ -228,7 +228,7 @@ func TestGitHubContextLimitAcrossActions(t *testing.T) {
 						},
 					},
 				}
-				err := orchestrator.Execute(context.Background(), job)
+				err := orchestrator.Execute(t.Context(), job)
 				if mode == "exact" {
 					if !errors.Is(err, modelErr) || modelCalls != 1 {
 						t.Fatalf("exact-limit execution = %v, model calls = %d; want model error and one call", err, modelCalls)
@@ -239,7 +239,7 @@ func TestGitHubContextLimitAcrossActions(t *testing.T) {
 					if err == nil || errors.Is(err, monitor.ErrTerminalJob) || errors.Is(err, monitor.ErrPostModelPublication) || modelCalls != 0 {
 						t.Fatalf("failed refusal publication = %v, model calls = %d; want retryable error and zero calls", err, modelCalls)
 					}
-					err = orchestrator.Execute(context.Background(), job)
+					err = orchestrator.Execute(t.Context(), job)
 				}
 				if err != nil || modelCalls != 0 {
 					t.Fatalf("oversized execution = %v, model calls = %d; want fixed refusal and zero calls", err, modelCalls)
@@ -255,7 +255,7 @@ func TestGitHubContextLimitAcrossActions(t *testing.T) {
 				if len(got) != 1 || got[0].Body != want {
 					t.Fatalf("refusal replies = %+v; want %q", got, want)
 				}
-				if err := orchestrator.Execute(context.Background(), job); err != nil || modelCalls != 0 {
+				if err := orchestrator.Execute(t.Context(), job); err != nil || modelCalls != 0 {
 					t.Fatalf("repeated rejected request = %v, model calls = %d", err, modelCalls)
 				}
 				mu.Lock()

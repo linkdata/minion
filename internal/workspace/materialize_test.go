@@ -2,7 +2,6 @@ package workspace
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -43,7 +42,7 @@ func TestMaterializeChangesCreatesOnlyFinalFiles(t *testing.T) {
 		{Path: "updated", Mode: Executable, Data: []byte{0, 255}},
 		{Path: "unchanged", Mode: Regular, Data: []byte("same")},
 	}
-	if err := CheckUnchanged(context.Background(), root, want); err != nil {
+	if err := CheckUnchanged(t.Context(), root, want); err != nil {
 		t.Fatalf("frozen candidate differs from final changes: %v", err)
 	}
 }
@@ -93,17 +92,17 @@ func TestMaterializeChangesPreservesSeparateTransferLimits(t *testing.T) {
 	if err := MaterializeChanges(root, base, changes); err != nil {
 		t.Fatal(err)
 	}
-	if err := CheckChangesUnchanged(context.Background(), root, base, changes); err != nil {
+	if err := CheckChangesUnchanged(t.Context(), root, base, changes); err != nil {
 		t.Fatalf("valid 65 MiB / 10,100-file candidate cannot be checked: %v", err)
 	}
 	byteOverflow := append(slices.Clone(base[:MaxBytes/len(data)]), File{Path: changes[0].Path, Mode: Regular, Data: data})
-	if err := CheckUnchanged(context.Background(), root, byteOverflow); err == nil || !strings.Contains(err.Error(), "source exceeds byte limit") {
+	if err := CheckUnchanged(t.Context(), root, byteOverflow); err == nil || !strings.Contains(err.Error(), "source exceeds byte limit") {
 		t.Fatalf("candidate canary widened source byte limit: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(root, changes[0].Path), []byte("tampered candidate"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := CheckChangesUnchanged(context.Background(), root, base, changes); err == nil || !strings.Contains(err.Error(), "workspace changed") {
+	if err := CheckChangesUnchanged(t.Context(), root, base, changes); err == nil || !strings.Contains(err.Error(), "workspace changed") {
 		t.Fatalf("large candidate mutation went undetected: %v", err)
 	}
 }
@@ -127,7 +126,7 @@ func TestCheckChangesUnchangedSkipsOnlyTopLevelGitDirectory(t *testing.T) {
 			if err := MaterializeChanges(root, base, changes); err != nil {
 				t.Fatal(err)
 			}
-			if err := CheckChangesUnchanged(context.Background(), root, base, changes); err != nil {
+			if err := CheckChangesUnchanged(t.Context(), root, base, changes); err != nil {
 				t.Fatalf("invalid candidate control: %v", err)
 			}
 			name := filepath.Join(root, test.path)
@@ -149,12 +148,12 @@ func TestCheckChangesUnchangedSkipsOnlyTopLevelGitDirectory(t *testing.T) {
 			case "symlink":
 				symlinkOrSkip(t, privateRoot(t), name)
 			}
-			err := CheckChangesUnchanged(context.Background(), root, base, changes)
+			err := CheckChangesUnchanged(t.Context(), root, base, changes)
 			want := fmt.Sprintf("unsafe workspace path %q", test.path)
 			if (err == nil) != test.allowed || (err != nil && !strings.Contains(err.Error(), want)) {
 				t.Fatalf("candidate metadata %q: %v, want allowed=%t", test.path, err, test.allowed)
 			}
-			if err := CheckUnchanged(context.Background(), root, final); err == nil || !strings.Contains(err.Error(), want) {
+			if err := CheckUnchanged(t.Context(), root, final); err == nil || !strings.Contains(err.Error(), want) {
 				t.Fatalf("strict unchanged check skipped metadata %q: %v", test.path, err)
 			}
 		})
@@ -228,14 +227,14 @@ func TestReadChangesCumulativeByteLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 	selected := []Change{{Path: "first", Mode: Regular}, {Path: "second", Mode: Regular}}
-	changes, err := ReadChanges(context.Background(), root, selected)
+	changes, err := ReadChanges(t.Context(), root, selected)
 	if err != nil || len(changes) != 2 || len(changes[0].Data)+len(changes[1].Data) != MaxChangeBytes {
 		t.Fatalf("exact cumulative byte limit: count=%d, err=%v", len(changes), err)
 	}
 	if err := os.WriteFile(second, data, 0600); err != nil {
 		t.Fatal(err)
 	}
-	changes, err = ReadChanges(context.Background(), root, selected)
+	changes, err = ReadChanges(t.Context(), root, selected)
 	if changes != nil || err == nil || !strings.Contains(err.Error(), `changed path "second"`) || !strings.Contains(err.Error(), "byte limit") {
 		t.Fatalf("cumulative changed-file overflow accepted: count=%d, err=%v", len(changes), err)
 	}

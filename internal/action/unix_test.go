@@ -333,7 +333,7 @@ func TestUnixEndpointServesActualHTTPTransaction(t *testing.T) {
 	if !ok || transport.Proxy != nil || client.Timeout != 0 || transport.ResponseHeaderTimeout != 0 || endpoint.server.WriteTimeout != 0 {
 		t.Fatal("Unix transport added proxy fallback or a whole-request/held-response deadline")
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	done := make(chan httpServerTestResult, 1)
 	go func() {
@@ -374,7 +374,7 @@ func TestUnixEndpointBoundsConnectionsWhileServingWatchAndControl(t *testing.T) 
 		t.Fatal(err)
 	}
 	defer client.CloseIdleConnections()
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	done := make(chan httpServerTestResult, 1)
 	go func() {
@@ -552,7 +552,7 @@ func TestUnixEndpointRejectsIncompleteBodiesWithoutBlockingClose(t *testing.T) {
 					t.Fatal(err)
 				}
 				defer client.CloseIdleConnections()
-				ctx, cancel := context.WithCancel(context.Background())
+				ctx, cancel := context.WithCancel(t.Context())
 				defer cancel()
 				done = make(chan httpServerTestResult, 1)
 				go func() {
@@ -638,7 +638,7 @@ func TestUnixEndpointUnexpectedListenerFailureWakesExecute(t *testing.T) {
 		t.Fatal(err)
 	}
 	unixTestCleanupEndpoint(t, endpoint)
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	done := make(chan httpServerTestResult, 1)
 	go func() {
@@ -683,7 +683,7 @@ func TestUnixEndpointCloseKeepsPaidSaveAndReceiptGraceAvailable(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer client.CloseIdleConnections()
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	done := make(chan httpServerTestResult, 1)
 	sink := runnerExecutionCheckpoints{before: f.sink.BeforeCall, review: f.sink.Review, after: func(fact CallCheckpoint) error {
@@ -725,7 +725,7 @@ func TestUnixEndpointCloseKeepsPaidSaveAndReceiptGraceAvailable(t *testing.T) {
 	select {
 	case err := <-closed:
 		t.Fatalf("endpoint Close abandoned the entered paid callback: %v", err)
-	default:
+	case <-time.After(100 * time.Millisecond):
 	}
 	probe, err := NewUnixExecutionClient(endpoint.SocketPath())
 	if err != nil {
@@ -820,8 +820,8 @@ func unixTestCleanupEndpoint(t *testing.T, endpoint *UnixEndpoint) {
 	})
 }
 
-func unixTestJSON(client *http.Client, path string, value, result any, limit int) (int, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+func unixTestJSON(t *testing.T, client *http.Client, path string, value, result any, limit int) (int, error) {
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	return unixTestJSONContext(ctx, client, path, value, result, limit)
 }
@@ -847,7 +847,7 @@ func unixTestJSONContext(ctx context.Context, client *http.Client, path string, 
 func unixTestAck(t *testing.T, client *http.Client, path string, value any, sequence uint64) {
 	t.Helper()
 	var ack httpAcknowledgement
-	status, err := unixTestJSON(client, path, value, &ack, httpControlBytes)
+	status, err := unixTestJSON(t, client, path, value, &ack, httpControlBytes)
 	if err != nil || status != http.StatusOK || ack.Kind != strings.TrimPrefix(path, "/") || ack.Sequence != sequence || ack.Failure != nil {
 		t.Fatalf("Unix %s acknowledgement: status=%d ack=%+v error=%v", path, status, ack, err)
 	}
@@ -856,7 +856,7 @@ func unixTestAck(t *testing.T, client *http.Client, path string, value any, sequ
 func unixTestPull(t *testing.T, client *http.Client, job Job) {
 	t.Helper()
 	var assignment httpAssignment
-	status, err := unixTestJSON(client, "/next", httpPull{Version: ProtocolVersion, ExecutorID: job.Identity.ExecutorID}, &assignment, httpJobBytes)
+	status, err := unixTestJSON(t, client, "/next", httpPull{Version: ProtocolVersion, ExecutorID: job.Identity.ExecutorID}, &assignment, httpJobBytes)
 	if err != nil || status != http.StatusOK || !reflect.DeepEqual(assignment.Job, job) || assignment.Expires <= time.Now().UnixNano() {
 		t.Fatalf("Unix assignment: status=%d job=%+v error=%v", status, assignment, err)
 	}

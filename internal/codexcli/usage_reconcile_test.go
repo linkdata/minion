@@ -30,7 +30,7 @@ func TestUsageSessionUnvisitedRolloutsRequireUnchangedOwnedBaseline(t *testing.T
 		{"unchanged unrelated", "unchanged", false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			ctx, home := context.Background(), t.TempDir()
+			ctx, home := t.Context(), t.TempDir()
 			root := writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "old-root", "r1", 100)...)
 			writeChild := func() string {
 				parent := "root"
@@ -97,7 +97,7 @@ func TestUsageSessionUnvisitedRolloutsRequireUnchangedOwnedBaseline(t *testing.T
 func TestUsageSessionObservationCannotCertifyUnchangedRoot(t *testing.T) {
 	for _, tool := range []string{"wait", "close_agent"} {
 		t.Run(tool, func(t *testing.T) {
-			ctx, home := context.Background(), t.TempDir()
+			ctx, home := t.Context(), t.TempDir()
 			writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "old-root", "r1", 100)...)
 			var session usageSession
 			session.begin(ctx, home, "root", time.Now())
@@ -112,7 +112,7 @@ func TestUsageSessionObservationCannotCertifyUnchangedRoot(t *testing.T) {
 }
 
 func TestUsageSessionMalformedHistoricalCountersDoNotPoisonResume(t *testing.T) {
-	ctx, home := context.Background(), t.TempDir()
+	ctx, home := t.Context(), t.TempDir()
 	root := writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "old-root", "r1", 100)...)
 	child := writeUsageRollout(t, home, "child", "root", completedUsageTurn("child", "old-child", "c1", -1)...)
 	before, err := os.ReadFile(child)
@@ -143,7 +143,7 @@ func TestUsageSessionMalformedHistoricalCountersDoNotPoisonResume(t *testing.T) 
 }
 
 func TestUsageSessionCounterGapKeepsNewRootDelta(t *testing.T) {
-	ctx, home := context.Background(), t.TempDir()
+	ctx, home := t.Context(), t.TempDir()
 	root := writeUsageRollout(t, home, "root", "", append(completedUsageTurn("root", "old", "r1", -1), usageSnapshot(22, 100, 0, 0))...)
 	var session usageSession
 	session.begin(ctx, home, "root", time.Now())
@@ -159,7 +159,7 @@ func TestUsageSessionCounterGapKeepsNewRootDelta(t *testing.T) {
 }
 
 func TestUsageSessionCounterGapSnapshotDetectsMissingNewResponse(t *testing.T) {
-	ctx, home := context.Background(), t.TempDir()
+	ctx, home := t.Context(), t.TempDir()
 	root := writeUsageRollout(t, home, "root", "", append(completedUsageTurn("root", "old", "r1", -1), usageSnapshot(22, 100, 0, 0))...)
 	var session usageSession
 	session.begin(ctx, home, "root", time.Now())
@@ -179,7 +179,7 @@ func TestUsageSessionCounterGapNeedsTrustworthySnapshotBaseline(t *testing.T) {
 		{"no old snapshot", completedUsageTurn("root", "old", "r1", -1)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx, home := context.Background(), t.TempDir()
+			ctx, home := t.Context(), t.TempDir()
 			root := writeUsageRollout(t, home, "root", "", tc.old...)
 			var session usageSession
 			session.begin(ctx, home, "root", time.Now())
@@ -196,7 +196,7 @@ func TestUsageSessionCounterGapNeedsTrustworthySnapshotBaseline(t *testing.T) {
 }
 
 func TestUsageSessionCounterGapAllowsWaitOnCompletedHelper(t *testing.T) {
-	ctx, home := context.Background(), t.TempDir()
+	ctx, home := t.Context(), t.TempDir()
 	root := writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "old-root", "r1", 100)...)
 	writeUsageRollout(t, home, "child", "root", completedUsageTurn("child", "old-child", "c1", -1)...)
 	var session usageSession
@@ -211,7 +211,7 @@ func TestUsageSessionCounterGapAllowsWaitOnCompletedHelper(t *testing.T) {
 }
 
 func TestUsageBoundaryCounterGapStillRequiresExactPrefix(t *testing.T) {
-	ctx, home := context.Background(), t.TempDir()
+	ctx, home := t.Context(), t.TempDir()
 	root := writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "old", "r1", -1)...)
 	var session usageSession
 	session.begin(ctx, home, "root", time.Now())
@@ -241,7 +241,7 @@ func TestUsageBoundaryCounterGapDoesNotExcuseMissingIdentity(t *testing.T) {
 		{"malformed payload", `"response_id":"response"`, `"response_id":42`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx, home := context.Background(), t.TempDir()
+			ctx, home := t.Context(), t.TempDir()
 			record := usageRecord("root", "turn", "response", -1, 0, 0)
 			changed := strings.Replace(record, tc.old, tc.replacement, 1)
 			if changed == record {
@@ -258,7 +258,7 @@ func TestUsageBoundaryCounterGapDoesNotExcuseMissingIdentity(t *testing.T) {
 }
 
 func TestUsageBoundaryIdentityRequiresAnUncappedPhysicalRead(t *testing.T) {
-	ctx, home := context.Background(), t.TempDir()
+	ctx, home := t.Context(), t.TempDir()
 	name := writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "turn", "response", -1)...)
 	data, err := os.ReadFile(name)
 	if err != nil {
@@ -284,7 +284,7 @@ func TestUsageBoundaryIdentityRequiresAnUncappedPhysicalRead(t *testing.T) {
 }
 
 func TestUsageSessionAmbiguousHistoricalIdentityCannotCertifyAnUnchangedHelper(t *testing.T) {
-	ctx, home := context.Background(), t.TempDir()
+	ctx, home := t.Context(), t.TempDir()
 	root := writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "old-root", "r1", 100)...)
 	child := writeUsageRollout(t, home, "child", "root", completedUsageTurn("child", "old-child", "c1", 40)...)
 	data, err := os.ReadFile(child)
@@ -316,7 +316,7 @@ func TestUsageSessionKnownHelperIdentityLossCannotDisappearFromReconcile(t *test
 	for _, timing := range []string{"before begin", "between begin and collect"} {
 		for _, change := range []string{"unchanged", "removed", "unreadable", "malformed header", "reparented header", "changed parent only", "changed session only", "changed history boundary", "added history boundary", "removed history boundary", "changed header ID", "equivalent parent header"} {
 			t.Run(timing+"/"+change, func(t *testing.T) {
-				ctx, home := context.Background(), t.TempDir()
+				ctx, home := t.Context(), t.TempDir()
 				root := writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "old-root", "r1", 100)...)
 				child := writeUsageRollout(t, home, "child", "root", completedUsageTurn("child", "old-child", "c1", 40)...)
 				if change == "added history boundary" {
@@ -401,7 +401,7 @@ func TestUsageSessionKnownHelperIdentityLossCannotDisappearFromReconcile(t *test
 }
 
 func TestUsageSessionHeaderAliasesDoNotGrowKnownOwnership(t *testing.T) {
-	ctx, home := context.Background(), t.TempDir()
+	ctx, home := t.Context(), t.TempDir()
 	root := writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "old-root", "r1", 100)...)
 	child := writeUsageRollout(t, home, "child", "root", completedUsageTurn("child", "old-child", "c1", 40)...)
 	original, err := os.ReadFile(child)
@@ -449,7 +449,7 @@ func TestUsageSessionCancellationDoesNotForgetKnownHelperIdentity(t *testing.T) 
 	for _, timing := range []string{"before begin", "before collect"} {
 		for _, change := range []string{"unchanged", "removed", "reparented header"} {
 			t.Run(timing+"/"+change, func(t *testing.T) {
-				ctx, home := context.Background(), t.TempDir()
+				ctx, home := t.Context(), t.TempDir()
 				root := writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "old-root", "r1", 100)...)
 				child := writeUsageRollout(t, home, "child", "root", completedUsageTurn("child", "old-child", "c1", 40)...)
 				var session usageSession

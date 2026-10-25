@@ -1,7 +1,6 @@
 package codexcli
 
 import (
-	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -31,7 +30,7 @@ if [ "$n" -eq 3 ]; then id=fresh; fi
 printf '{"type":"thread.started","thread_id":"%s"}\n' "$id"
 printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}' '{"type":"turn.completed"}'
 `)
-	ctx := context.Background()
+	ctx := t.Context()
 	dir, output, first, second := canonicalTempDir(t), canonicalTempDir(t), canonicalTempDir(t), canonicalTempDir(t)
 	settings := config.CodexConfig{Model: "model", ReasoningEffort: "high", OutputSchema: `{"type":"object"}`, Skills: []string{skills.BuiltinAntiPromptInjection}, ReadOnlyDirs: []string{first}}
 	var session Session
@@ -119,7 +118,7 @@ func TestSessionBindsImmutableSettingsBeforeNativeDispatch(t *testing.T) {
 					t.Error(err)
 				}
 			})
-			if _, err := session.Run(context.Background(), dir, "first", false, output, settings); err != nil {
+			if _, err := session.Run(t.Context(), dir, "first", false, output, settings); err != nil {
 				t.Fatal(err)
 			}
 			writable := false
@@ -151,7 +150,7 @@ func TestSessionBindsImmutableSettingsBeforeNativeDispatch(t *testing.T) {
 				}
 				t.Setenv("PATH", replacement+string(os.PathListSeparator)+os.Getenv("PATH"))
 			}
-			result, err := session.Run(context.Background(), dir, "second", writable, output, settings)
+			result, err := session.Run(t.Context(), dir, "second", writable, output, settings)
 			if err == nil || !strings.Contains(err.Error(), "host settings changed") || strings.Contains(err.Error(), "private-value") || result.Answer != "" {
 				t.Fatalf("immutable change accepted: %+v %v", result, err)
 			}
@@ -182,7 +181,7 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
 					t.Error(err)
 				}
 			})
-			first, err := session.Run(context.Background(), dir, "first", false, "", config.CodexConfig{})
+			first, err := session.Run(t.Context(), dir, "first", false, "", config.CodexConfig{})
 			if identity == "missing first" {
 				if err == nil || !strings.Contains(err.Error(), "did not identify a resumable thread") || first.Answer != "" || first.UsageComplete {
 					t.Fatalf("first call accepted without a thread: %+v %v", first, err)
@@ -190,7 +189,7 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
 			} else if err != nil {
 				t.Fatal(err)
 			}
-			result, err := session.Run(context.Background(), dir, "second", false, "", config.CodexConfig{})
+			result, err := session.Run(t.Context(), dir, "second", false, "", config.CodexConfig{})
 			wantError := map[string]string{"missing first": "did not identify a resumable thread", "missing resume": "resume did not identify its expected thread", "different resume": "resumed a different thread"}[identity]
 			if err == nil || !strings.Contains(err.Error(), wantError) || result.Answer != "" || identity != "missing first" && result.UsageComplete {
 				t.Fatalf("unbound resume accepted: %+v %v", result, err)
@@ -232,10 +231,10 @@ fi
 				}
 			})
 			source := t.TempDir()
-			if _, err := session.Run(context.Background(), source, "first", false, "", config.CodexConfig{}); err != nil {
+			if _, err := session.Run(t.Context(), source, "first", false, "", config.CodexConfig{}); err != nil {
 				t.Fatal(err)
 			}
-			result, err := session.Run(context.Background(), source, "resume", false, "", config.CodexConfig{})
+			result, err := session.Run(t.Context(), source, "resume", false, "", config.CodexConfig{})
 			if err == nil || !strings.Contains(err.Error(), tc.diagnostic) || strings.Contains(err.Error(), "did not identify its expected thread") || result.Answer != "" || result.UsageComplete {
 				t.Fatalf("resume diagnostics lost: %+v err=%v", result, err)
 			}
@@ -243,7 +242,7 @@ fi
 				t.Fatalf("native exit status lost: %v", err)
 			}
 			session.NewConversation()
-			result, err = session.Run(context.Background(), source, "fresh", false, "", config.CodexConfig{})
+			result, err = session.Run(t.Context(), source, "fresh", false, "", config.CodexConfig{})
 			if err != nil || result.Answer != "done" || session.threadID != "fresh" {
 				t.Fatalf("fresh conversation did not clear refusal: %+v err=%v thread=%q", result, err, session.threadID)
 			}
@@ -261,7 +260,7 @@ func TestSessionRuntimeControlFilesDoNotFollowPriorModelSymlinks(t *testing.T) {
 			t.Error(err)
 		}
 	})
-	if _, err := session.Run(context.Background(), dir, "first", false, "", settings); err != nil {
+	if _, err := session.Run(t.Context(), dir, "first", false, "", settings); err != nil {
 		t.Fatal(err)
 	}
 	outside := filepath.Join(t.TempDir(), "untouched")
@@ -277,7 +276,7 @@ func TestSessionRuntimeControlFilesDoNotFollowPriorModelSymlinks(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := session.Run(context.Background(), dir, "second", false, "", settings); err != nil {
+	if _, err := session.Run(t.Context(), dir, "second", false, "", settings); err != nil {
 		t.Fatal(err)
 	}
 	if data, err := os.ReadFile(outside); err != nil || string(data) != "original" {
@@ -307,7 +306,7 @@ func TestSessionFreshScratchResetFailureDoesNotDispatch(t *testing.T) {
 			t.Error(err)
 		}
 	})
-	if _, err := session.Run(context.Background(), dir, "first", false, "", config.CodexConfig{}); err != nil {
+	if _, err := session.Run(t.Context(), dir, "first", false, "", config.CodexConfig{}); err != nil {
 		t.Fatal(err)
 	}
 	parent := filepath.Dir(session.runtimeDir)
@@ -320,7 +319,7 @@ func TestSessionFreshScratchResetFailureDoesNotDispatch(t *testing.T) {
 		}
 	}()
 	session.NewConversation()
-	result, err := session.Run(context.Background(), dir, "fresh", false, "", config.CodexConfig{})
+	result, err := session.Run(t.Context(), dir, "fresh", false, "", config.CodexConfig{})
 	if !errors.Is(err, os.ErrPermission) || !strings.Contains(err.Error(), "reset conversation scratch") || result.Answer != "" {
 		t.Fatalf("fresh reset failed open: %+v %v", result, err)
 	}
@@ -343,7 +342,7 @@ func TestSessionRejectsRetargetedHomeWithoutNativeDispatch(t *testing.T) {
 		}
 	})
 	source := t.TempDir()
-	if _, err := session.Run(context.Background(), source, "first", false, "", config.CodexConfig{}); err != nil {
+	if _, err := session.Run(t.Context(), source, "first", false, "", config.CodexConfig{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Remove(alias); err != nil {
@@ -352,7 +351,7 @@ func TestSessionRejectsRetargetedHomeWithoutNativeDispatch(t *testing.T) {
 	if err := os.Symlink(t.TempDir(), alias); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := session.Run(context.Background(), source, "second", false, "", config.CodexConfig{}); err == nil || !strings.Contains(err.Error(), "host settings changed") {
+	if _, err := session.Run(t.Context(), source, "second", false, "", config.CodexConfig{}); err == nil || !strings.Contains(err.Error(), "host settings changed") {
 		t.Fatalf("retargeted home accepted: %v", err)
 	}
 	if data, err := os.ReadFile(binary + ".calls"); err != nil || string(data) != "called" {
@@ -383,10 +382,10 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
 		}
 	})
 	source := t.TempDir()
-	if _, err := session.Run(context.Background(), source, "first", false, "", config.CodexConfig{}); err != nil {
+	if _, err := session.Run(t.Context(), source, "first", false, "", config.CodexConfig{}); err != nil {
 		t.Fatal(err)
 	}
-	result, err := session.Run(context.Background(), source, "second", false, "", config.CodexConfig{})
+	result, err := session.Run(t.Context(), source, "second", false, "", config.CodexConfig{})
 	if err == nil || !strings.Contains(err.Error(), "resume did not identify its expected thread") || result.Answer != "" || result.UsageComplete || result.Tokens.Input != 20 || session.accounting.known["root"].path != root {
 		t.Fatalf("resume lost owned usage: %+v,%v,%+v", result, err, session.accounting.known)
 	}
@@ -415,7 +414,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.comp
 	}
 	run := func() {
 		t.Helper()
-		result, err := session.Run(context.Background(), source, "task", false, "", config.CodexConfig{})
+		result, err := session.Run(t.Context(), source, "task", false, "", config.CodexConfig{})
 		if err != nil || result.Answer != "done" {
 			t.Fatalf("runtime cleanup prevented native startup: %+v,%v", result, err)
 		}
@@ -476,7 +475,7 @@ func TestSessionEmptySkillsRemainEquivalent(t *testing.T) {
 	})
 	dir := t.TempDir()
 	for _, selected := range [][]string{nil, {}, nil} {
-		if _, err := session.Run(context.Background(), dir, "same empty skills", false, "", config.CodexConfig{Skills: selected}); err != nil {
+		if _, err := session.Run(t.Context(), dir, "same empty skills", false, "", config.CodexConfig{Skills: selected}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -493,7 +492,7 @@ func TestSessionRejectsPlantedBuildCache(t *testing.T) {
 				}
 			})
 			dir := t.TempDir()
-			if _, err := session.Run(context.Background(), dir, "first", false, "", config.CodexConfig{}); err != nil {
+			if _, err := session.Run(t.Context(), dir, "first", false, "", config.CodexConfig{}); err != nil {
 				t.Fatal(err)
 			}
 			if err := os.Remove(session.cacheDir); err != nil {
@@ -508,7 +507,7 @@ func TestSessionRejectsPlantedBuildCache(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if _, err := session.Run(context.Background(), dir, "second", false, "", config.CodexConfig{}); err == nil || !strings.Contains(err.Error(), "build cache is not a directory") {
+			if _, err := session.Run(t.Context(), dir, "second", false, "", config.CodexConfig{}); err == nil || !strings.Contains(err.Error(), "build cache is not a directory") {
 				t.Fatalf("planted cache accepted: %v", err)
 			}
 			if got, err := os.ReadFile(binary + ".calls"); err != nil || string(got) != "called" {

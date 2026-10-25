@@ -84,7 +84,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"terminal_r
 					}
 				}
 				runner.Logger = log.New(journal, "", 0)
-				result, err := runner.Run(context.Background(), job)
+				result, err := runner.Run(t.Context(), job)
 				if err != nil || result.Answer != "Done." || len(result.Calls) != 1 || result.Validate(job) != nil {
 					t.Fatalf("session cleanup discarded accepted result: %+v,%v", result, err)
 				}
@@ -122,7 +122,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"terminal_r
 }
 
 func TestRunnerTerminalFailureStaysTerminalWhenParentCancels(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	root := t.TempDir()
 	terminal := fmt.Errorf("%w: deterministic action refusal", monitor.ErrTerminalJob)
@@ -151,13 +151,13 @@ func TestFixPreparationChecksDurablePrerequisitesBeforeGitHub(t *testing.T) {
 	defer server.Close()
 	client := testGitHub(server, "fixture")
 	// Missing durable state must fail before any GitHub request.
-	_, err := (&Orchestrator{GitHub: client}).prepareFix(context.Background(), &preparedAction{request: request})
+	_, err := (&Orchestrator{GitHub: client}).prepareFix(t.Context(), &preparedAction{request: request})
 	if err == nil || !strings.Contains(err.Error(), "no durable state or valid ID") {
 		t.Fatalf("fix prerequisites: %v", err)
 	}
 	request.ID = "short"
 	orchestrator := Orchestrator{Store: openState(t, time.Now()), GitHub: client}
-	_, err = orchestrator.prepareFix(context.Background(), &preparedAction{request: request})
+	_, err = orchestrator.prepareFix(t.Context(), &preparedAction{request: request})
 	if err == nil || !strings.Contains(err.Error(), "no durable state or valid ID") {
 		t.Fatalf("short fix ID reached GitHub: %v", err)
 	}
@@ -194,7 +194,7 @@ func TestRunnerScratchCreationUsesPreparationFailureClass(t *testing.T) {
 			t.Error(err)
 		}
 	})
-	result, err := (&Runner{WorkRoot: root, runModel: forbidModel(t)}).Run(context.Background(), testJob(command.Comment))
+	result, err := (&Runner{WorkRoot: root, runModel: forbidModel(t)}).Run(t.Context(), testJob(command.Comment))
 	if !errors.Is(err, os.ErrPermission) || !errors.Is(err, workroot.ErrUnsafe) || errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "create source workspace") || len(result.Calls) != 0 {
 		t.Fatalf("scratch creation classification: %+v,%v", result, err)
 	}
@@ -234,7 +234,7 @@ func TestRunnerCleansPartiallyCreatedCriticSnapshot(t *testing.T) {
 		writeFixtureFile(t, request.dir, "source.txt", []byte("candidate"))
 		return aicli.Result{Answer: proposalJSON("Done.", "")}, nil
 	}}
-	result, err := runner.Run(context.Background(), job)
+	result, err := runner.Run(t.Context(), job)
 	if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "freeze critic input") || calls != 1 || len(result.Calls) != 1 {
 		t.Fatalf("partial freeze refusal: %+v,%v", result, err)
 	}
@@ -262,7 +262,7 @@ func TestRunnerUsesTheProbedNodeAfterPathChanges(t *testing.T) {
 		}
 		return aicli.Result{Answer: "Audit report\n"}, nil
 	}}
-	result, err := runner.Run(context.Background(), job)
+	result, err := runner.Run(t.Context(), job)
 	if err != nil || result.Answer != "" {
 		t.Fatalf("probed Node was not retained: %+v,%v", result, err)
 	}
@@ -332,7 +332,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.comp
 				}
 				return next(ctx, request)
 			}}
-			result, err := runner.Run(context.Background(), job)
+			result, err := runner.Run(t.Context(), job)
 			if !test.expire {
 				if err != nil || result.Answer != "Done." || len(result.Changes) != 1 || string(result.Changes[0].Data) != "fixed source" || journal.err != nil {
 					t.Fatalf("changed fix did not produce a publishable result before the deadline: %+v, %v; cleanup=%v", result, err, journal.err)

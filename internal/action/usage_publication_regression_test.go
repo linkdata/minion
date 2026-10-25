@@ -30,6 +30,7 @@ func TestExecutePublicationBookkeepingBoundaries(t *testing.T) {
 			root := t.TempDir()
 			usageDir := filepath.Join(root, "usage")
 			var posted atomic.Bool
+			stopServer := make(chan struct{})
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch {
 				case serveIssueFixture(t, w, r):
@@ -39,6 +40,7 @@ func TestExecutePublicationBookkeepingBoundaries(t *testing.T) {
 						// Also bound a broken implementation that renews the publication context.
 						select {
 						case <-r.Context().Done():
+						case <-stopServer:
 						case <-time.After(20 * time.Second):
 							http.Error(w, "publication did not stop", http.StatusGatewayTimeout)
 						}
@@ -59,7 +61,10 @@ func TestExecutePublicationBookkeepingBoundaries(t *testing.T) {
 					http.NotFound(w, r)
 				}
 			}))
-			defer server.Close()
+			defer func() {
+				close(stopServer)
+				server.Close()
+			}()
 			budget := 5 * time.Second
 			if scenario == "final usage save" {
 				budget = 30 * time.Second
@@ -83,7 +88,7 @@ func TestExecutePublicationBookkeepingBoundaries(t *testing.T) {
 			request := usageJob()
 			request.Command.Name, request.Command.Action = "audit", command.Comment
 			request.Repository.Actions = []string{"audit"}
-			err := e.Execute(context.Background(), request)
+			err := e.Execute(t.Context(), request)
 			if !posted.Load() {
 				t.Fatalf("test never reached publication: %v", err)
 			}

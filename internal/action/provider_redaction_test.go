@@ -70,7 +70,7 @@ done
 				} else {
 					runner.Claude.APIKey = tc.key
 				}
-				result, err := runner.runNative(context.Background(), modelRun{session: &session, provider: provider, dir: t.TempDir(), prompt: mainPrompt("inert fixture"), outputSchema: mainOutputSchema})
+				result, err := runner.runNative(t.Context(), modelRun{session: &session, provider: provider, dir: t.TempDir(), prompt: mainPrompt("inert fixture"), outputSchema: mainOutputSchema})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -128,7 +128,7 @@ func TestAuditReportRedactsNULSplitConfiguredKeyBeforeCriticAndPublication(t *te
 		}
 		return aicli.Result{Answer: approvedCritiqueJSON}, nil
 	}}
-	result, err := runner.Run(context.Background(), job)
+	result, err := runner.Run(t.Context(), job)
 	if err != nil || !criticSawReports || result.Answer != "" || result.Validate(job) != nil {
 		t.Fatalf("audit result: critic saw reports=%t answer=%q error=%v", criticSawReports, result.Answer, err)
 	}
@@ -202,7 +202,7 @@ func TestPartialAuditDropsMetadataWhenNormalizedTargetContainsKey(t *testing.T) 
 		writeFixtureFile(t, request.outputDir, "REPORT.md", []byte("Partial report\n"))
 		return aicli.Result{}, failure
 	}}
-	result, err := runner.Run(context.Background(), job)
+	result, err := runner.Run(t.Context(), job)
 	if !errors.Is(err, failure) || len(result.Artifacts) != 1 || result.Artifacts[0].Path != "REPORT.md" {
 		t.Fatalf("partial audit retained unsafe metadata: %+v, %v", result, err)
 	}
@@ -303,7 +303,7 @@ func TestIncompleteAuditReportRedactsConfiguredKey(t *testing.T) {
 		}
 		return aicli.Result{}, errors.New("fixture main failure")
 	}}
-	result, err := runner.Run(context.Background(), job)
+	result, err := runner.Run(t.Context(), job)
 	if err == nil {
 		t.Fatal("audit failure was not reported")
 	}
@@ -367,7 +367,7 @@ func TestRunnerRedactsReassembledSecretWithoutCritic(t *testing.T) {
 			} else {
 				runner.Claude.APIKey = "fixture-secret"
 			}
-			result, err := runner.Run(context.Background(), job)
+			result, err := runner.Run(t.Context(), job)
 			if err != nil || result.Answer != "public [redacted] text" {
 				t.Fatalf("NUL-split key was exposed: answer=%q error=%v", result.Answer, err)
 			}
@@ -419,7 +419,7 @@ func TestFixChangesRejectConfiguredKeysWithoutRejectingBinary(t *testing.T) {
 					writeFixtureFile(t, request.dir, test.path, []byte(test.data))
 					return aicli.Result{Answer: proposalJSON("Done", "")}, nil
 				}}
-				result, err := runner.Run(context.Background(), job)
+				result, err := runner.Run(t.Context(), job)
 				if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "configured provider key") || calls != 1 || result.Answer != "" || len(result.Changes) != 0 {
 					t.Fatalf("configured key reached fix result: calls=%d result=%+v error=%v", calls, result, err)
 				}

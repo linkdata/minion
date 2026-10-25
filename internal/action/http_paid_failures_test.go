@@ -67,7 +67,7 @@ func TestHTTPPaidDisconnectsKeepRawFactsSeparateFromSavedCheckpoints(t *testing.
 			var cut atomic.Bool
 			var deliveredAfter atomic.Int32
 			var deliveredReview atomic.Int32
-			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 			defer cancel()
 			transport := newHTTPServerTest(t, ctx, f.job, f.sink, func(next http.Handler) http.Handler {
 				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -202,7 +202,7 @@ func TestHTTPPaidDisconnectsKeepRawFactsSeparateFromSavedCheckpoints(t *testing.
 func TestHTTPMissingGitPreparationPreservesDiagnosticBeforeNativeWork(t *testing.T) {
 	f := newExecutionAdapterFixture(t, withClaudeCritic(testJob(command.Comment)))
 	store := f.startUsage()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	transport := newHTTPServerTest(t, ctx, f.job, f.sink, nil)
 	t.Setenv("PATH", t.TempDir())
@@ -250,7 +250,7 @@ func TestHTTPPaidOutputLimitPreservesUsageWithoutTrustingWorkerPolicy(t *testing
 	workerServer := httptest.NewServer(remote)
 	defer workerServer.Close()
 	defer remote.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 	defer cancel()
 	tokens := usage.Tokens{Input: 17, CachedInput: 3, Output: 5}
 	var native atomic.Int32

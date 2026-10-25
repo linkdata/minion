@@ -33,7 +33,7 @@ func offlineIndexFixture(t *testing.T, files []workspace.File) (*OfflineIndex, s
 	if err := workspace.Materialize(source, files); err != nil {
 		t.Fatal(err)
 	}
-	index, err := NewOfflineIndex(context.Background(), metadata, source, files)
+	index, err := NewOfflineIndex(t.Context(), metadata, source, files)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,11 +175,11 @@ func TestFixIndexPinsSHA1WhenGitDefaultsToSHA256(t *testing.T) {
 		t.Fatalf("control did not select SHA256: %q,%v", output, err)
 	}
 	index, source := offlineIndexFixture(t, []workspace.File{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("before")}})
-	if output, err := index.run(context.Background(), 128, nil, "rev-parse", "--show-object-format"); err != nil || strings.TrimSpace(string(output)) != "sha1" {
+	if output, err := index.run(t.Context(), 128, nil, "rev-parse", "--show-object-format"); err != nil || strings.TrimSpace(string(output)) != "sha1" {
 		t.Fatalf("offline index changed its object format: %q,%v", output, err)
 	}
 	writeIndexFixture(t, source, "source.txt", []byte("after"))
-	changes, err := index.Changes(context.Background())
+	changes, err := index.Changes(t.Context())
 	if err != nil || len(changes) != 1 || string(changes[0].Data) != "after" {
 		t.Fatalf("pinned index failed byte binding: %+v,%v", changes, err)
 	}
@@ -187,11 +187,11 @@ func TestFixIndexPinsSHA1WhenGitDefaultsToSHA256(t *testing.T) {
 
 func TestFixIndexBaselineIsTreeWithoutCommit(t *testing.T) {
 	index, _ := offlineIndexFixture(t, []workspace.File{{Path: "source", Mode: workspace.Regular, Data: []byte("baseline")}})
-	typeName, err := index.run(context.Background(), 128, nil, "cat-file", "-t", index.baseline)
+	typeName, err := index.run(t.Context(), 128, nil, "cat-file", "-t", index.baseline)
 	if err != nil || strings.TrimSpace(string(typeName)) != "tree" {
 		t.Fatalf("baseline type=%q error=%v", typeName, err)
 	}
-	objects, err := index.run(context.Background(), 1024, nil, "cat-file", "--batch-all-objects", "--batch-check=%(objecttype)")
+	objects, err := index.run(t.Context(), 1024, nil, "cat-file", "--batch-all-objects", "--batch-check=%(objecttype)")
 	if err != nil || strings.Contains(string(objects), "commit") {
 		t.Fatalf("offline objects=%q error=%v", objects, err)
 	}
@@ -205,7 +205,7 @@ func TestFixIndexRejectsBaselineMetadataAliasWithoutHidingLaunchErrors(t *testin
 			}
 			source, metadata := t.TempDir(), t.TempDir()
 			writeIndexFixture(t, source, name, []byte("source"))
-			_, err := NewOfflineIndex(context.Background(), metadata, source, nil)
+			_, err := NewOfflineIndex(t.Context(), metadata, source, nil)
 			var exit *exec.ExitError
 			if !errors.Is(err, ErrUnsupportedSource) || !errors.As(err, &exit) {
 				t.Fatalf("baseline alias error=%v", err)
@@ -214,7 +214,7 @@ func TestFixIndexRejectsBaselineMetadataAliasWithoutHidingLaunchErrors(t *testin
 	}
 	index, _ := offlineIndexFixture(t, nil)
 	index.dir = filepath.Join(t.TempDir(), "missing")
-	if _, err := index.run(context.Background(), 1024, nil, "add", "--all", "--", "."); !errors.Is(err, os.ErrNotExist) || errors.Is(err, ErrUnsupportedSource) {
+	if _, err := index.run(t.Context(), 1024, nil, "add", "--all", "--", "."); !errors.Is(err, os.ErrNotExist) || errors.Is(err, ErrUnsupportedSource) {
 		t.Fatalf("offline Git launch chdir error=%v", err)
 	}
 }
@@ -222,7 +222,7 @@ func TestFixIndexRejectsBaselineMetadataAliasWithoutHidingLaunchErrors(t *testin
 func TestFixIndexQuotesGitDiagnostic(t *testing.T) {
 	index, _ := offlineIndexFixture(t, nil)
 	index.binary = filepath.Join(fakeOnPath(t, "git-proxy", "#!/bin/sh\nprintf 'first line\\nforged journal entry\\n' >&2\nexit 1\n"), "git-proxy")
-	_, err := index.run(context.Background(), 1024, nil, "status")
+	_, err := index.run(t.Context(), 1024, nil, "status")
 	if err == nil || strings.Contains(err.Error(), "\n") || !strings.Contains(err.Error(), `"first line\nforged journal entry"`) {
 		t.Fatalf("unquoted offline Git diagnostic: %v", err)
 	}
@@ -239,7 +239,7 @@ func TestFixIndexBoundsControlFilesBeforeGitReadsThem(t *testing.T) {
 				const command = "git-control-probe"
 				// Git reads an exact-limit control, but not an oversized sparse file.
 				index.binary = filepath.Join(fakeOnPath(t, command, "#!/bin/sh\nprintf called > "+shellQuote(marker)+"\nexit 91\n"), command)
-				_, err := index.Changes(context.Background())
+				_, err := index.Changes(t.Context())
 				if size > workspace.MaxChangeBytes {
 					want := fmt.Sprintf("fix control file %q exceeds changed byte limit", control)
 					if size > workspace.MaxBytes {
@@ -273,7 +273,7 @@ func TestFixIndexBoundsAggregateControlBytesBeforeGit(t *testing.T) {
 	}
 	marker := filepath.Join(t.TempDir(), "called")
 	index.binary = filepath.Join(fakeOnPath(t, "git-control-probe", "#!/bin/sh\nprintf called > "+shellQuote(marker)+"\nexit 91\n"), "git-control-probe")
-	if _, err := index.Changes(context.Background()); err == nil || !strings.Contains(err.Error(), `fix control file ".gitattributes" exceeds changed byte limit`) {
+	if _, err := index.Changes(t.Context()); err == nil || !strings.Contains(err.Error(), `fix control file ".gitattributes" exceeds changed byte limit`) {
 		t.Fatalf("aggregate control bytes were accepted: %v", err)
 	}
 	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
@@ -288,7 +288,7 @@ func TestFixIndexChargesSameSizeTrackedControlRewrite(t *testing.T) {
 			index, source := offlineIndexFixture(t, []workspace.File{{Path: control, Mode: workspace.Regular, Data: baseline}})
 			marker := filepath.Join(t.TempDir(), "called")
 			index.binary = filepath.Join(fakeOnPath(t, "git-control-probe", "#!/bin/sh\nprintf called > "+shellQuote(marker)+"\nexit 91\n"), "git-control-probe")
-			_, err := index.Changes(context.Background())
+			_, err := index.Changes(t.Context())
 			var exit *exec.ExitError
 			if !errors.As(err, &exit) || exit.ExitCode() != 91 {
 				t.Fatalf("unchanged tracked control did not reach Git: %v", err)
@@ -302,7 +302,7 @@ func TestFixIndexChargesSameSizeTrackedControlRewrite(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(source, control), bytes.Repeat([]byte{'a'}, len(baseline)), 0600); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := index.Changes(context.Background()); err == nil || !strings.Contains(err.Error(), fmt.Sprintf("fix control file %q exceeds changed byte limit", control)) {
+			if _, err := index.Changes(t.Context()); err == nil || !strings.Contains(err.Error(), fmt.Sprintf("fix control file %q exceeds changed byte limit", control)) {
 				t.Fatalf("same-size control rewrite was accepted: %v", err)
 			}
 			if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
@@ -319,7 +319,7 @@ func TestFixIndexRefusesUnterminatedIgnoreOutput(t *testing.T) {
 	}
 	script := "#!/bin/sh\nfor arg do\nif [ \"$arg\" = check-ignore ]; then\nprintf ':(top)candidate'\nexit\nfi\ndone\nexec " + shellQuote(index.binary) + " \"$@\"\n"
 	index.binary = filepath.Join(fakeOnPath(t, "git-ignore", script), "git-ignore")
-	if _, err := index.Changes(context.Background()); err == nil || !strings.Contains(err.Error(), "invalid offline git ignore output") {
+	if _, err := index.Changes(t.Context()); err == nil || !strings.Contains(err.Error(), "invalid offline git ignore output") {
 		t.Fatalf("unterminated ignore output accepted: %v", err)
 	}
 }
@@ -327,12 +327,12 @@ func TestFixIndexRefusesUnterminatedIgnoreOutput(t *testing.T) {
 func TestFixIndexBoundsTrackedChangesWithoutRefusingUnchangedLargeSource(t *testing.T) {
 	data := make([]byte, workspace.MaxChangeBytes+1)
 	index, source := offlineIndexFixture(t, []workspace.File{{Path: "large", Mode: workspace.Regular, Data: data}})
-	if changes, err := index.Changes(context.Background()); err != nil || len(changes) != 0 {
+	if changes, err := index.Changes(t.Context()); err != nil || len(changes) != 0 {
 		t.Fatalf("unchanged source over result limit was refused: %+v,%v", changes, err)
 	}
 	data[len(data)-1] = 1
 	writeIndexFixture(t, source, "large", data)
-	if changes, err := index.Changes(context.Background()); err == nil || !strings.Contains(err.Error(), "byte limit") {
+	if changes, err := index.Changes(t.Context()); err == nil || !strings.Contains(err.Error(), "byte limit") {
 		t.Fatalf("oversized same-size tracked edit was exported: %+v,%v", changes, err)
 	}
 }
@@ -358,13 +358,13 @@ func TestFixIndexPreservesGitignoreAndTrackedIgnoredFiles(t *testing.T) {
 		}
 		t.Logf("ignored symlink fixture is unavailable on Windows: %v", err)
 	}
-	changes, err := index.Changes(context.Background())
+	changes, err := index.Changes(t.Context())
 	want := []workspace.Change{{Path: "tracked.log", Mode: workspace.Regular, Data: []byte("after")}}
 	if err != nil || !reflect.DeepEqual(changes, want) {
 		t.Fatalf("changes = %+v, %v", changes, err)
 	}
 	writeIndexFixture(t, source, "tracked.log", []byte("before"))
-	changes, err = index.Changes(context.Background())
+	changes, err = index.Changes(t.Context())
 	if err != nil || len(changes) != 0 {
 		t.Fatalf("ignored-only output changed result: %+v, %v", changes, err)
 	}
@@ -379,23 +379,23 @@ func TestFixIndexRebuildsEachCandidateFromBaseline(t *testing.T) {
 		if err := os.Remove(filepath.Join(source, "tracked.log")); err != nil {
 			t.Fatal(err)
 		}
-		changes, err := index.Changes(context.Background())
+		changes, err := index.Changes(t.Context())
 		if err != nil || len(changes) != 1 || !changes[0].Delete {
 			t.Fatalf("first candidate=%+v, %v", changes, err)
 		}
 		writeIndexFixture(t, source, "tracked.log", []byte("original"))
-		if changes, err := index.Changes(context.Background()); err != nil || len(changes) != 0 {
+		if changes, err := index.Changes(t.Context()); err != nil || len(changes) != 0 {
 			t.Fatalf("restored candidate retained staged deletion: %+v, %v", changes, err)
 		}
 	})
 	t.Run("new output ignored in later candidate", func(t *testing.T) {
 		index, source := offlineIndexFixture(t, []workspace.File{{Path: ".gitignore", Mode: workspace.Regular}})
 		writeIndexFixture(t, source, "runtime.log", []byte("generated output"))
-		if changes, err := index.Changes(context.Background()); err != nil || len(changes) != 1 || changes[0].Path != "runtime.log" {
+		if changes, err := index.Changes(t.Context()); err != nil || len(changes) != 1 || changes[0].Path != "runtime.log" {
 			t.Fatalf("first candidate=%+v, %v", changes, err)
 		}
 		writeIndexFixture(t, source, ".gitignore", []byte("*.log\n"))
-		changes, err := index.Changes(context.Background())
+		changes, err := index.Changes(t.Context())
 		if err != nil || len(changes) != 1 || changes[0].Path != ".gitignore" {
 			t.Fatalf("later ignore retained staged output: %+v, %v", changes, err)
 		}
@@ -418,7 +418,7 @@ func TestFixIndexDisablesAttributesAndOperatorConfiguration(t *testing.T) {
 		{Path: "source.txt", Mode: workspace.Regular, Data: []byte("unencoded text")},
 	})
 	writeIndexFixture(t, source, "source.txt", []byte("changed unencoded text"))
-	changes, err := index.Changes(context.Background())
+	changes, err := index.Changes(t.Context())
 	if err != nil || len(changes) != 1 || string(changes[0].Data) != "changed unencoded text" {
 		t.Fatalf("attributes changed result: %+v, %v", changes, err)
 	}
@@ -426,7 +426,7 @@ func TestFixIndexDisablesAttributesAndOperatorConfiguration(t *testing.T) {
 		t.Fatalf("repository filter ran: %v", err)
 	}
 	index.binary = filepath.Join(fakeOnPath(t, "git-environment", "#!/bin/sh\nexec env\n"), "git-environment")
-	environment, err := index.run(context.Background(), 8<<10, nil, "environment-probe")
+	environment, err := index.run(t.Context(), 8<<10, nil, "environment-probe")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -469,7 +469,7 @@ func TestFixIndexRejectsNonIgnoredUnsafeOutput(t *testing.T) {
 			case "nested repository":
 				writeIndexFixture(t, source, "nested/file", []byte("nested source"))
 				nested := filepath.Join(source, "nested")
-				if _, err := runGit(context.Background(), nested, "init", "--quiet", "--template=", "--object-format=sha1"); err != nil {
+				if _, err := runGit(t.Context(), nested, "init", "--quiet", "--template=", "--object-format=sha1"); err != nil {
 					t.Fatal(err)
 				}
 			case "aggregate oversized":
@@ -512,7 +512,7 @@ func TestFixIndexRejectsIgnoredUntrackedIgnoreRules(t *testing.T) {
 			index, source := offlineIndexFixture(t, files)
 			writeIndexFixture(t, source, "sub/.gitignore", []byte("!keep.gen\n"))
 			writeIndexFixture(t, source, "sub/keep.gen", []byte("included by local ignore rule"))
-			changes, err := index.Changes(context.Background())
+			changes, err := index.Changes(t.Context())
 			if !tracked {
 				if err == nil || !strings.Contains(err.Error(), `ignored untracked fix control file "sub/.gitignore"`) {
 					t.Fatalf("ignored untracked ignore rule exported changes: %+v,%v", changes, err)
@@ -531,13 +531,13 @@ func TestFixIndexRejectsSelfIgnoringToolCachesUntilRemoved(t *testing.T) {
 			writeIndexFixture(t, source, "source.txt", []byte("after"))
 			writeIndexFixture(t, source, cache+"/.gitignore", []byte("# Created by a test tool\n*\n"))
 			writeIndexFixture(t, source, cache+"/state", []byte("generated cache"))
-			if changes, err := index.Changes(context.Background()); err == nil || !strings.Contains(err.Error(), fmt.Sprintf("ignored untracked fix control file %q", cache+"/.gitignore")) {
+			if changes, err := index.Changes(t.Context()); err == nil || !strings.Contains(err.Error(), fmt.Sprintf("ignored untracked fix control file %q", cache+"/.gitignore")) {
 				t.Fatalf("self-ignoring cache was accepted: changes=%+v error=%v", changes, err)
 			}
 			if err := os.RemoveAll(filepath.Join(source, cache)); err != nil {
 				t.Fatal(err)
 			}
-			changes, err := index.Changes(context.Background())
+			changes, err := index.Changes(t.Context())
 			want := []workspace.Change{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("after")}}
 			if err != nil || !reflect.DeepEqual(changes, want) {
 				t.Fatalf("removing the tool cache lost the intended fix: changes=%+v error=%v", changes, err)
@@ -549,7 +549,7 @@ func TestFixIndexRejectsSelfIgnoringToolCachesUntilRemoved(t *testing.T) {
 		writeIndexFixture(t, source, ".pytest_cache/.gitignore", []byte("*\n"))
 		writeIndexFixture(t, source, ".pytest_cache/state", []byte("generated cache"))
 		writeIndexFixture(t, source, "fix.txt", []byte("reviewed"))
-		changes, err := index.Changes(context.Background())
+		changes, err := index.Changes(t.Context())
 		want := []workspace.Change{{Path: "fix.txt", Mode: workspace.Regular, Data: []byte("reviewed")}}
 		if err != nil || !reflect.DeepEqual(changes, want) {
 			t.Fatalf("supplied ignore rule did not exclude the cache directory: changes=%+v error=%v", changes, err)
@@ -569,7 +569,7 @@ func TestFixIndexBoundsActualControlScanBeforeStaging(t *testing.T) {
 		}
 	}
 	writeIndexFixture(t, source, "fix.txt", []byte("reviewed"))
-	changes, err := index.Changes(context.Background())
+	changes, err := index.Changes(t.Context())
 	want := []workspace.Change{{Path: "fix.txt", Mode: workspace.Regular, Data: []byte("reviewed")}}
 	if err != nil || !reflect.DeepEqual(changes, want) {
 		t.Fatalf("exact control-scan bound refused the intended fix: changes=%+v error=%v", changes, err)
@@ -581,7 +581,7 @@ func TestFixIndexBoundsActualControlScanBeforeStaging(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeIndexFixture(t, source, "overflow.cache", nil)
-	if changes, err := index.Changes(context.Background()); err == nil || !strings.Contains(err.Error(), "fix directory scan exceeds entry limit") {
+	if changes, err := index.Changes(t.Context()); err == nil || !strings.Contains(err.Error(), "fix directory scan exceeds entry limit") {
 		t.Fatalf("oversized control scan was accepted: changes=%+v error=%v", changes, err)
 	}
 	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
@@ -600,7 +600,7 @@ func TestFixIndexPreservesModeDeletionAndBinary(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeIndexFixture(t, source, "binary", []byte{0, 1, 2})
-	changes, err := index.Changes(context.Background())
+	changes, err := index.Changes(t.Context())
 	want := []workspace.Change{{Path: "binary", Mode: workspace.Regular, Data: []byte{0, 1, 2}}, {Path: "deleted", Delete: true}}
 	if runtime.GOOS != "windows" {
 		want = append(want, workspace.Change{Path: "mode", Mode: workspace.Executable, Data: []byte("same")})
@@ -628,7 +628,7 @@ func TestFixIndexBoundsBinaryAndDeletionDiffs(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if _, err := index.Changes(context.Background()); !errors.Is(err, ErrDiffTooLarge) {
+			if _, err := index.Changes(t.Context()); !errors.Is(err, ErrDiffTooLarge) {
 				t.Fatalf("%s lost its size classification: %v", kind, err)
 			}
 		})
@@ -637,7 +637,7 @@ func TestFixIndexBoundsBinaryAndDeletionDiffs(t *testing.T) {
 
 func TestFixIndexHonorsPreCanceledRequest(t *testing.T) {
 	index, _ := offlineIndexFixture(t, nil)
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	if _, err := index.Changes(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled index = %v", err)
@@ -659,7 +659,7 @@ done
 exec %s "$@"
 `, shellQuote(index.binary), shellQuote(filepath.Join(source, "source.txt")), shellQuote(index.binary))
 	index.binary = filepath.Join(fakeOnPath(t, "git-proxy", script), "git-proxy")
-	if _, err := index.Changes(context.Background()); err == nil || !strings.Contains(err.Error(), "changed after indexing") {
+	if _, err := index.Changes(t.Context()); err == nil || !strings.Contains(err.Error(), "changed after indexing") {
 		t.Fatalf("accepted unstaged bytes: %v", err)
 	}
 }
@@ -706,7 +706,7 @@ func TestFixIndexRejectsTrackedGrowthBeforeHashing(t *testing.T) {
 				writeIndexFixture(t, source, "first", data)
 				writeIndexFixture(t, source, "second", data)
 			}
-			if changes, err := index.Changes(context.Background()); err == nil || !strings.Contains(err.Error(), "tracked fix path") || !strings.Contains(err.Error(), "byte limit") {
+			if changes, err := index.Changes(t.Context()); err == nil || !strings.Contains(err.Error(), "tracked fix path") || !strings.Contains(err.Error(), "byte limit") {
 				t.Fatalf("tracked growth returned %+v, %v", changes, err)
 			}
 			_, err := index.run(t.Context(), 1024, nil, "cat-file", "-e", gitBlobID(data))
@@ -721,12 +721,12 @@ func TestFixIndexRejectsTrackedGrowthBeforeHashing(t *testing.T) {
 func TestFixIndexExcludesModelCreatedGitMetadata(t *testing.T) {
 	index, source := offlineIndexFixture(t, []workspace.File{{Path: "tracked/source", Mode: workspace.Regular, Data: []byte("before")}})
 	writeIndexFixture(t, source, ".GIT/config", []byte("untrusted metadata"))
-	if _, err := runGit(context.Background(), filepath.Join(source, "tracked"), "init", "--quiet", "--template="); err != nil {
+	if _, err := runGit(t.Context(), filepath.Join(source, "tracked"), "init", "--quiet", "--template="); err != nil {
 		t.Fatal(err)
 	}
 	writeIndexFixture(t, source, "tracked/.Git/minion-marker", []byte("untrusted nested metadata"))
 	writeIndexFixture(t, source, "tracked/source", []byte("after"))
-	changes, err := index.Changes(context.Background())
+	changes, err := index.Changes(t.Context())
 	want := []workspace.Change{{Path: "tracked/source", Mode: workspace.Regular, Data: []byte("after")}}
 	if err != nil || !reflect.DeepEqual(changes, want) {
 		t.Fatalf("model metadata affected selected contents: %+v, %v", changes, err)
@@ -741,7 +741,7 @@ func TestFixIndexCountsModeOnlyFileContentsAgainstResultLimit(t *testing.T) {
 	if err := os.Chmod(filepath.Join(source, "large.sh"), 0755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := index.Changes(context.Background()); err == nil || !strings.Contains(err.Error(), `changed path "large.sh"`) || !strings.Contains(err.Error(), "byte limit") {
+	if _, err := index.Changes(t.Context()); err == nil || !strings.Contains(err.Error(), `changed path "large.sh"`) || !strings.Contains(err.Error(), "byte limit") {
 		t.Fatalf("mode-only update did not obey full-content result limit: %v", err)
 	}
 }
@@ -758,7 +758,7 @@ func TestFixIndexPreservesFileDirectoryTransitions(t *testing.T) {
 				t.Fatal(err)
 			}
 			writeIndexFixture(t, source, after, []byte("after"))
-			changes, err := index.Changes(context.Background())
+			changes, err := index.Changes(t.Context())
 			if err != nil || len(changes) != 2 {
 				t.Fatalf("%s returned %+v, %v", kind, changes, err)
 			}
@@ -793,7 +793,7 @@ func TestFixIndexIgnoresUnusedRulesUnderIgnoredTrackedDirectory(t *testing.T) {
 			writeIndexFixture(t, source, tracked, []byte("after"))
 			writeIndexFixture(t, source, dir+"/.gitignore", []byte("!*\n!keep.tmp\n"))
 			writeIndexFixture(t, source, dir+"/keep.tmp", []byte("still excluded by ancestor"))
-			changes, err := index.Changes(context.Background())
+			changes, err := index.Changes(t.Context())
 			want := []workspace.Change{{Path: tracked, Mode: workspace.Regular, Data: []byte("after")}}
 			if err != nil || !reflect.DeepEqual(changes, want) {
 				t.Fatalf("unused ignored rules blocked tracked edit or included outputs: %+v,%v", changes, err)
@@ -803,7 +803,7 @@ func TestFixIndexIgnoresUnusedRulesUnderIgnoredTrackedDirectory(t *testing.T) {
 					t.Fatal(err)
 				}
 				symlinkOrSkip(t, tracked, filepath.Join(source, dir, ".gitignore"))
-				if _, err := index.Changes(context.Background()); err == nil || !strings.Contains(err.Error(), "must be regular") {
+				if _, err := index.Changes(t.Context()); err == nil || !strings.Contains(err.Error(), "must be regular") {
 					t.Fatalf("ignored tracked-directory control shape was not checked: %v", err)
 				}
 			})
@@ -818,7 +818,7 @@ func TestFixIndexPathListOverflowIsTooManyFiles(t *testing.T) {
 			writeIndexFixture(t, source, "source", []byte("after"))
 			script := fmt.Sprintf("#!/bin/sh\nfor arg do\nif [ \"$arg\" = %s ]; then\nhead -c %d /dev/zero\nexit\nfi\ndone\nexec %s \"$@\"\n", shellQuote(test.arg), maxChangedPathListBytes+1, shellQuote(index.binary))
 			index.binary = filepath.Join(fakeOnPath(t, "git-path-list", script), "git-path-list")
-			if _, err := index.Changes(context.Background()); !errors.Is(err, ErrTooManyFiles) || errors.Is(err, ErrCheckoutTooLarge) || errors.Is(err, ErrDiffTooLarge) || !strings.Contains(err.Error(), "offline git "+test.operation+" output exceeds action limit") {
+			if _, err := index.Changes(t.Context()); !errors.Is(err, ErrTooManyFiles) || errors.Is(err, ErrCheckoutTooLarge) || errors.Is(err, ErrDiffTooLarge) || !strings.Contains(err.Error(), "offline git "+test.operation+" output exceeds action limit") {
 				t.Fatalf("result path overflow lost operation or classification: %v", err)
 			}
 		})
@@ -842,7 +842,7 @@ func TestFixIndexPatchOverflowClassificationPreservesOtherErrors(t *testing.T) {
 			}
 			script := "#!/bin/sh\nfor arg do\nif [ \"$arg\" = --binary ]; then\nprintf x > " + shellQuote(marker) + "\n" + behavior + "\nexit\nfi\ndone\nexec " + shellQuote(index.binary) + " \"$@\"\n"
 			index.binary = filepath.Join(fakeOnPath(t, "git-patch", script), "git-patch")
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			done := make(chan struct{})
 			go func() {
@@ -895,7 +895,7 @@ func TestFixIndexPatchOverflowClassificationPreservesOtherErrors(t *testing.T) {
 	t.Run("generic output", func(t *testing.T) {
 		index, _ := offlineIndexFixture(t, nil)
 		index.binary = filepath.Join(fakeOnPath(t, "git-output", "#!/bin/sh\nprintf 'too much output'\n"), "git-output")
-		_, err := index.run(context.Background(), 1, nil, "diff", "--raw")
+		_, err := index.run(t.Context(), 1, nil, "diff", "--raw")
 		if !errors.Is(err, ErrCheckoutTooLarge) || errors.Is(err, ErrDiffTooLarge) || errors.Is(err, context.Canceled) || !strings.HasPrefix(err.Error(), "offline git diff output exceeds action limit:") {
 			t.Fatalf("generic overflow lost its operation or classification: %v", err)
 		}
@@ -911,7 +911,7 @@ func TestFixIndexClassifiesTrackedChangeCount(t *testing.T) {
 	for _, file := range files {
 		writeIndexFixture(t, source, file.Path, []byte("after"))
 	}
-	if changes, err := index.Changes(context.Background()); !errors.Is(err, ErrTooManyFiles) || changes != nil {
+	if changes, err := index.Changes(t.Context()); !errors.Is(err, ErrTooManyFiles) || changes != nil {
 		t.Fatalf("tracked change count lost native classification: %+v, %v", changes, err)
 	}
 }
@@ -930,7 +930,7 @@ func TestFixIndexReportsTrackedGrowthInPathOrder(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := index.Changes(context.Background()); err == nil || !strings.Contains(err.Error(), `tracked fix path "a-first" exceeds changed byte limit`) {
+	if _, err := index.Changes(t.Context()); err == nil || !strings.Contains(err.Error(), `tracked fix path "a-first" exceeds changed byte limit`) {
 		t.Fatalf("growth diagnostic did not select first path: %v", err)
 	}
 }
@@ -940,7 +940,7 @@ var fakeOnPath = testsupport.FakeOnPath
 func TestOfflineIndexRefusesOverlappingDirectories(t *testing.T) {
 	root := t.TempDir()
 	for _, pair := range [][2]string{{root, root}, {root, filepath.Join(root, "source")}, {filepath.Join(root, "index"), root}} {
-		if _, err := NewOfflineIndex(context.Background(), pair[0], pair[1], nil); err == nil || !strings.Contains(err.Error(), "directories overlap") {
+		if _, err := NewOfflineIndex(t.Context(), pair[0], pair[1], nil); err == nil || !strings.Contains(err.Error(), "directories overlap") {
 			t.Fatalf("metadata=%q source=%q error=%v", pair[0], pair[1], err)
 		}
 	}
@@ -958,7 +958,7 @@ func TestFixIndexBatchesIgnoreQueriesAcrossDirectories(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "queries")
 	script := "#!/bin/sh\nfor arg do\n if [ \"$arg\" = check-ignore ]; then printf 'query\\n' >> " + shellQuote(marker) + "; fi\ndone\nexec " + shellQuote(index.binary) + " \"$@\"\n"
 	index.binary = filepath.Join(fakeOnPath(t, "git-proxy", script), "git-proxy")
-	if err := index.checkControlFiles(context.Background()); err != nil {
+	if err := index.checkControlFiles(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(marker)
@@ -1028,7 +1028,7 @@ func TestFixIndexExportsNewIgnoreRulesAndExactChangeLimit(t *testing.T) {
 	for i := 1; i < workspace.MaxChanges; i++ {
 		writeIndexFixture(t, source, fmt.Sprintf("sub/%03d", i), []byte("source"))
 	}
-	changes, err := index.Changes(context.Background())
+	changes, err := index.Changes(t.Context())
 	if err != nil || len(changes) != workspace.MaxChanges {
 		t.Fatalf("exact change limit: count=%d error=%v", len(changes), err)
 	}

@@ -1,7 +1,6 @@
 package gitwork
 
 import (
-	"context"
 	"errors"
 	"os"
 	"os/exec"
@@ -75,8 +74,8 @@ func TestSnapshotRejectsUnrelatedPullRequestHistories(t *testing.T) {
 	fixture.git(fixture.source, "commit", "-m", "unrelated root")
 	head := fixture.git(fixture.source, "rev-parse", "HEAD")
 	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/pull/7/head")
-	checkout := fixture.keepCheckout(clonePullRequestFromURL(context.Background(), t.TempDir(), fixture.remote, 7, "main", head))
-	_, err := checkout.Snapshot(context.Background())
+	checkout := fixture.keepCheckout(clonePullRequestFromURL(t.Context(), t.TempDir(), fixture.remote, 7, "main", head))
+	_, err := checkout.Snapshot(t.Context())
 	if !errors.Is(err, ErrUnsupportedSource) || !strings.Contains(err.Error(), "no common ancestor") {
 		t.Fatalf("unrelated histories were retryable: %v", err)
 	}
@@ -95,14 +94,14 @@ func TestClonePullRequestSkipsUnusedBaseTipPreflight(t *testing.T) {
 	base := fixture.git(fixture.source, "rev-parse", "HEAD")
 	blob := fixture.git(fixture.source, "rev-parse", "HEAD:"+unused)
 	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/heads/main")
-	if checkout, err := cloneFromURL(context.Background(), t.TempDir(), fixture.remote, "main", true); !errors.Is(err, ErrCheckoutTooLarge) {
+	if checkout, err := cloneFromURL(t.Context(), t.TempDir(), fixture.remote, "main", true); !errors.Is(err, ErrCheckoutTooLarge) {
 		if checkout != nil {
 			_ = checkout.Close()
 		}
 		t.Fatalf("default clone error=%v want=%v", err, ErrCheckoutTooLarge)
 	}
-	checkout := fixture.keepCheckout(clonePullRequestFromURL(context.Background(), t.TempDir(), fixture.remote, 7, "main", head))
-	snapshot, err := checkout.Snapshot(context.Background())
+	checkout := fixture.keepCheckout(clonePullRequestFromURL(t.Context(), t.TempDir(), fixture.remote, 7, "main", head))
+	snapshot, err := checkout.Snapshot(t.Context())
 	if err != nil || snapshot.Head != head || snapshot.Base != base || snapshot.MergeBase != fixture.base || len(snapshot.Files) != 1 || string(snapshot.Files[0].Data) != "PR head\n" {
 		t.Fatalf("PR snapshot=%+v error=%v", snapshot, err)
 	}
@@ -136,13 +135,13 @@ func TestPullRequestRejectsDeletedMergeBaseMetadataAliasBeforeContent(t *testing
 	fixture.git(fixture.source, "commit", "-m", "remove unsupported path")
 	head := fixture.git(fixture.source, "rev-parse", "HEAD")
 	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/pull/7/head")
-	checkout := fixture.keepCheckout(clonePullRequestFromURL(context.Background(), t.TempDir(), fixture.remote, 7, "main", head))
+	checkout := fixture.keepCheckout(clonePullRequestFromURL(t.Context(), t.TempDir(), fixture.remote, 7, "main", head))
 	assertBlobPresent(fixture, checkout.path, blob)
 	if err := os.Rename(fixture.remote, fixture.remote+".offline"); err != nil {
 		t.Fatal(err)
 	}
 	log := recordSnapshotContentCalls(t)
-	if _, err := checkout.Snapshot(context.Background()); !errors.Is(err, ErrUnsupportedSource) {
+	if _, err := checkout.Snapshot(t.Context()); !errors.Is(err, ErrUnsupportedSource) {
 		t.Fatalf("merge-base alias accepted: %v", err)
 	}
 	if data, err := os.ReadFile(log); !errors.Is(err, os.ErrNotExist) {
@@ -163,7 +162,7 @@ func TestPullRequestInputGatesBeforeClone(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			root := t.TempDir()
-			if c, err := clonePullRequestFromURL(context.Background(), root, filepath.Join(t.TempDir(), "missing.git"), tt.number, tt.base, tt.head); err == nil || c != nil || !strings.Contains(err.Error(), tt.want) {
+			if c, err := clonePullRequestFromURL(t.Context(), root, filepath.Join(t.TempDir(), "missing.git"), tt.number, tt.base, tt.head); err == nil || c != nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("invalid input accepted: %v,%v", c, err)
 			}
 			entries, err := os.ReadDir(root)
@@ -178,7 +177,7 @@ func TestNewBranchRejectsInvalidNameBeforeGit(t *testing.T) {
 	f := newFixture(t)
 	before := f.git(f.checkout.path, "for-each-ref", "--format=%(refname) %(objectname)")
 	const name = "bad:ref"
-	if err := f.checkout.NewBranch(context.Background(), name); err == nil || !strings.Contains(err.Error(), "invalid branch \"bad:ref\"") {
+	if err := f.checkout.NewBranch(t.Context(), name); err == nil || !strings.Contains(err.Error(), "invalid branch \"bad:ref\"") {
 		t.Fatalf("invalid branch error=%v", err)
 	}
 	if after := f.git(f.checkout.path, "for-each-ref", "--format=%(refname) %(objectname)"); after != before {
@@ -199,7 +198,7 @@ func TestClonePullRequestRemovesCheckoutAfterHeadMoves(t *testing.T) {
 	writeFile(t, filepath.Join(f.source, "change.txt"), "new PR head\n")
 	head := f.commit("refs/pull/7/head", "PR head")
 	root := t.TempDir()
-	checkout, err := clonePullRequestFromURL(context.Background(), root, f.remote, 7, "main", f.base)
+	checkout, err := clonePullRequestFromURL(t.Context(), root, f.remote, 7, "main", f.base)
 	if checkout != nil || err == nil || !strings.Contains(err.Error(), "pull request head changed: expected "+f.base+", fetched "+head) {
 		t.Fatalf("moved head returned checkout=%v error=%v", checkout, err)
 	}

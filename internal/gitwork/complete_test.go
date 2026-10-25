@@ -1,7 +1,6 @@
 package gitwork
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -24,7 +23,7 @@ func TestCloneRejectsOversizedLocalTree(t *testing.T) {
 	writeSparse(t, name, workspace.MaxBytes+1)
 	fixture.commit("refs/heads/main", "oversized local blob")
 	root := t.TempDir()
-	checkout, err := cloneFromURL(context.Background(), root, fixture.remote, "main", true)
+	checkout, err := cloneFromURL(t.Context(), root, fixture.remote, "main", true)
 	if checkout != nil || !errors.Is(err, ErrCheckoutTooLarge) {
 		t.Fatalf("oversized source accepted: checkout=%v error=%v", checkout, err)
 	}
@@ -41,11 +40,11 @@ func TestSnapshotPreflightsMergeBaseMetadata(t *testing.T) {
 	blob := fixture.git(fixture.source, "rev-parse", "HEAD:old")
 	fixture.git(fixture.source, "rm", "old")
 	fixture.commit("refs/heads/main", "remove old blob")
-	checkout := fixture.keepCheckout(cloneFromURL(context.Background(), t.TempDir(), fixture.remote, "main", true))
+	checkout := fixture.keepCheckout(cloneFromURL(t.Context(), t.TempDir(), fixture.remote, "main", true))
 	assertBlobPresent(fixture, checkout.path, blob)
 	checkout.comparisonBase = base
 	log := recordSnapshotContentCalls(t)
-	if _, err := checkout.Snapshot(context.Background()); !errors.Is(err, ErrCheckoutTooLarge) {
+	if _, err := checkout.Snapshot(t.Context()); !errors.Is(err, ErrCheckoutTooLarge) {
 		t.Fatalf("merge-base limit: %v", err)
 	}
 	if data, err := os.ReadFile(log); !errors.Is(err, os.ErrNotExist) {
@@ -64,7 +63,7 @@ func TestSnapshotBoundsBundleBeforeReadingSource(t *testing.T) {
 			marker := filepath.Join(t.TempDir(), "source-read")
 			script := fmt.Sprintf("#!/bin/sh\nfor argument do\ncase \"$argument\" in bundle) bundle=yes;; --batch) touch %s;; esac\ndone\nif [ \"$bundle\" = yes ]; then head -c %d /dev/zero; exit; fi\nexec %s \"$@\"\n", shellQuote(marker), size, shellQuote(realGit))
 			fakeOnPath(t, "git", script)
-			snapshot, err := fixture.checkout.Snapshot(context.Background())
+			snapshot, err := fixture.checkout.Snapshot(t.Context())
 			if size == workspace.MaxBytes {
 				if err != nil || len(snapshot.Repository) != size || len(snapshot.Files) == 0 {
 					t.Fatalf("exact bundle limit: bytes=%d files=%d error=%v", len(snapshot.Repository), len(snapshot.Files), err)

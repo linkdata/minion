@@ -119,7 +119,7 @@ printf '%s\n' "$operation" >> ` + shellQuote(receipt) + `
 exec ` + shellQuote(realGit) + ` "$@"
 `
 	testsupport.FakeOnPath(t, "git", script)
-	if err := Check(context.Background(), relative); err != nil {
+	if err := Check(t.Context(), relative); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(receipt)
@@ -135,10 +135,6 @@ exec ` + shellQuote(realGit) + ` "$@"
 }
 
 func TestCheckGitFailuresRetainCauseAndCleanOwnedFiles(t *testing.T) {
-	realGit, err := aicli.AbsoluteExecutable("git")
-	if err != nil {
-		t.Fatal(err)
-	}
 	for _, test := range []struct {
 		name, match, action, want string
 		exit                      int
@@ -155,11 +151,15 @@ func TestCheckGitFailuresRetainCauseAndCleanOwnedFiles(t *testing.T) {
 		{name: "missing index change", match: " --raw ", action: "exit 0", want: "index did not preserve the synthetic change"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			realGit, err := aicli.AbsoluteExecutable("git")
+			if err != nil {
+				t.Fatal(err)
+			}
 			root := t.TempDir()
 			script := "#!/bin/sh\ncase \" $* \" in\n*" + shellQuote(test.match) + "*) " + test.action + " ;;\n" +
 				"*' --version '*) printf 'git version 2.45.1\\n'; exit 0 ;;\nesac\nexec " + shellQuote(realGit) + " \"$@\"\n"
 			testsupport.FakeOnPath(t, "git", script)
-			err := Check(context.Background(), root)
+			err = Check(t.Context(), root)
 			if err == nil || !strings.Contains(err.Error(), test.want) || strings.Contains(err.Error(), "\n") || errors.Is(err, ErrCheckoutTooLarge) != test.limit {
 				t.Fatalf("check lost failure classification: %v", err)
 			}
@@ -175,7 +175,7 @@ func TestCheckGitFailuresRetainCauseAndCleanOwnedFiles(t *testing.T) {
 	t.Run("missing git", func(t *testing.T) {
 		root := t.TempDir()
 		t.Setenv("PATH", t.TempDir())
-		if err := Check(context.Background(), root); !errors.Is(err, exec.ErrNotFound) {
+		if err := Check(t.Context(), root); !errors.Is(err, exec.ErrNotFound) {
 			t.Fatalf("missing git cause: %v", err)
 		}
 		assertGitCheckClean(t, root)
@@ -183,7 +183,7 @@ func TestCheckGitFailuresRetainCauseAndCleanOwnedFiles(t *testing.T) {
 	t.Run("bounded diagnostics", func(t *testing.T) {
 		root := t.TempDir()
 		testsupport.FakeOnPath(t, "git", fmt.Sprintf("#!/bin/sh\nhead -c %d /dev/zero | tr '\\000' x >&2\nexit 9\n", bounded.DiagnosticBytes+1024))
-		err := Check(context.Background(), root)
+		err := Check(t.Context(), root)
 		var exit *exec.ExitError
 		if !errors.As(err, &exit) || exit.ExitCode() != 9 || len(err.Error()) > bounded.DiagnosticBytes+200 {
 			t.Fatalf("unbounded or lost diagnostic: %v", err)
@@ -195,7 +195,7 @@ func TestCheckGitFailuresRetainCauseAndCleanOwnedFiles(t *testing.T) {
 func TestCheckGitHonorsCancellation(t *testing.T) {
 	t.Run("already canceled", func(t *testing.T) {
 		root := t.TempDir()
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := context.WithCancel(t.Context())
 		cancel()
 		if err := Check(ctx, root); !errors.Is(err, context.Canceled) {
 			t.Fatalf("canceled check: %v", err)
@@ -211,7 +211,7 @@ func TestCheckGitHonorsCancellation(t *testing.T) {
 			if deadline {
 				budget = time.Second
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), budget)
+			ctx, cancel := context.WithTimeout(t.Context(), budget)
 			defer cancel()
 			done := make(chan struct{})
 			if deadline {

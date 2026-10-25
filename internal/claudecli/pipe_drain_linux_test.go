@@ -5,6 +5,7 @@ package claudecli
 import (
 	"context"
 	"errors"
+	"os"
 	"os/exec"
 	"testing"
 	"time"
@@ -23,9 +24,7 @@ printf '%s\n' "$!" > "$0.pid.tmp"
 mv -- "$0.pid.tmp" "$0.pid"
 exit 0
 `)
-	testsupport.StopOnCleanup(t, binary+".pid.stop")
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-	defer cancel()
+	ctx, cancel := context.WithTimeout(t.Context(), 8*time.Second)
 	type outcome struct {
 		result aicli.Result
 		err    error
@@ -37,14 +36,23 @@ exit 0
 		result, err := Run(ctx, workspace, "task", false, "", config.ClaudeConfig{})
 		done <- outcome{result, err}
 	}()
+	defer func() {
+		cancel()
+		if err := os.WriteFile(binary+".pid.stop", nil, 0600); err != nil {
+			t.Errorf("stop fixture: %v", err)
+		}
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			t.Error("Run did not finish after pipe drain stop")
+		}
+	}()
 	child, err := testsupport.WaitForProcess(ctx, binary+".pid", done)
 	if err != nil {
-		cancel()
-		<-done
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		waitCtx, stopWait := context.WithTimeout(context.Background(), 3*time.Second)
+		waitCtx, stopWait := context.WithTimeout(context.WithoutCancel(t.Context()), 3*time.Second)
 		defer stopWait()
 		if err := child.Cleanup(waitCtx); err != nil {
 			t.Errorf("finite fixture child remained live after cleanup: %v", err)

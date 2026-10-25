@@ -260,7 +260,7 @@ func TestUnixExecutionDirectWorker(t *testing.T) {
 	select {
 	case err := <-closeDone:
 		t.Fatalf("endpoint closed before entered paid ACK drained: %v", err)
-	default:
+	case <-time.After(100 * time.Millisecond):
 	}
 	close(release)
 	gateReleased = true

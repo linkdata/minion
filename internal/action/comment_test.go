@@ -84,7 +84,7 @@ func TestCommentCommandReportsIssueAndPullRequest(t *testing.T) {
 			}
 			var err error
 			if subject == "Issue" {
-				err = orchestrator.Execute(context.Background(), job)
+				err = orchestrator.Execute(t.Context(), job)
 			} else {
 				err = attemptFixture(orchestrator).perform(testActionContext(t), job)
 			}

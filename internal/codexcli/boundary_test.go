@@ -1,7 +1,6 @@
 package codexcli
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -15,7 +14,7 @@ import (
 
 func TestInstructionProbePreservesOutputLimit(t *testing.T) {
 	installFakeCodex(t, "#!/bin/sh\nhead -c 4194305 /dev/zero\nexec sleep 30\n")
-	if err := ValidateInstructionBoundary(context.Background()); !errors.Is(err, aicli.ErrOutputLimit) {
+	if err := ValidateInstructionBoundary(t.Context()); !errors.Is(err, aicli.ErrOutputLimit) {
 		t.Fatalf("probe limit cause changed: %v", err)
 	}
 }
@@ -40,7 +39,7 @@ func TestInstructionProbeRejectsRelativeGitExecutable(t *testing.T) {
 	}
 	t.Setenv("GODEBUG", "execerrdot=0")
 	t.Setenv("PATH", "relbin"+string(os.PathListSeparator)+filepath.Dir(fakeCodex))
-	if err := ValidateInstructionBoundary(context.Background()); err == nil || !strings.Contains(err.Error(), "git binary must have an absolute path") {
+	if err := ValidateInstructionBoundary(t.Context()); err == nil || !strings.Contains(err.Error(), "git binary must have an absolute path") {
 		t.Fatalf("relative Git executable accepted: %v", err)
 	}
 	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
@@ -67,7 +66,7 @@ else
   printf '%s\n' '[{"role":"user","content":[{"text":"MINION_TRUSTED_PROMPT_78 MINION_UNTRUSTED_AGENTS_78 MINION_UNTRUSTED_SKILL_78"}]}]'
 fi
 `)
-	if err := ValidateInstructionBoundary(context.Background()); err != nil {
+	if err := ValidateInstructionBoundary(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	args, err := os.ReadFile(fakeCodex + ".args")
@@ -126,7 +125,7 @@ func TestValidateInstructionBoundaryRejectsUntrustedContent(t *testing.T) {
 				t.Fatal(err)
 			}
 			installFakeCodex(t, "#!/bin/sh\nif test -f \"$PWD/.minion-codex-root\"; then\ncat <<'EOF'\n"+string(output)+"\nEOF\nelse\nprintf '%s\\n' '[{\"role\":\"user\",\"content\":[{\"text\":\"MINION_TRUSTED_PROMPT_78 MINION_UNTRUSTED_AGENTS_78 MINION_UNTRUSTED_SKILL_78\"}]}]'\nfi\n")
-			if err := ValidateInstructionBoundary(context.Background()); err == nil || !strings.Contains(err.Error(), test.want) {
+			if err := ValidateInstructionBoundary(t.Context()); err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("ValidateInstructionBoundary() = %v, want %q", err, test.want)
 			}
 		})
@@ -140,7 +139,7 @@ func TestInstalledCodexInstructionBoundary(t *testing.T) {
 	if _, err := exec.LookPath("codex"); err != nil {
 		t.Skip("installed Codex CLI is unavailable")
 	}
-	if err := ValidateInstructionBoundary(context.Background()); err != nil {
+	if err := ValidateInstructionBoundary(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -152,7 +151,7 @@ func TestInstructionBoundaryRejectsVacuousOrInvalidControl(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			installFakeCodex(t, "#!/bin/sh\ncat <<'EVENTS'\n"+test.output+"\nEVENTS\n")
-			if err := ValidateInstructionBoundary(context.Background()); err == nil || !strings.Contains(err.Error(), test.want) {
+			if err := ValidateInstructionBoundary(t.Context()); err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("vacuous control accepted: %v", err)
 			}
 		})

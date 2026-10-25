@@ -2,7 +2,6 @@ package gitwork
 
 import (
 	"bytes"
-	"context"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -34,11 +33,11 @@ func repositorySource(t *testing.T, files []workspace.File) string {
 func repositoryFixture(t *testing.T, snapshot workspace.Snapshot) (string, *Repository) {
 	t.Helper()
 	source := repositorySource(t, snapshot.Files)
-	repo, err := MaterializeRepository(context.Background(), source, snapshot)
+	repo, err := MaterializeRepository(t.Context(), source, snapshot)
 	if err != nil || repo == nil {
 		t.Fatalf("materialize valid repository: repository=%v error=%v", repo, err)
 	}
-	if err := repo.Verify(context.Background()); err != nil {
+	if err := repo.Verify(t.Context()); err != nil {
 		t.Fatalf("new repository failed verification: %v", err)
 	}
 	return source, repo
@@ -71,12 +70,12 @@ func TestRepositoryCarriesCompleteHistoryOffline(t *testing.T) {
 	tagOnly := fixture.gitInput(fixture.source, "tag-only root\n", "commit-tree", tagTree)
 	fixture.git(fixture.source, "tag", "--annotate", "orphan-tag", "--message", "tag-only history", tagOnly)
 	fixture.git(fixture.source, "push", fixture.remote, "main", "other", "--tags")
-	checkout := fixture.keepCheckout(cloneFromURL(context.Background(), t.TempDir(), fixture.remote, "main", false))
+	checkout := fixture.keepCheckout(cloneFromURL(t.Context(), t.TempDir(), fixture.remote, "main", false))
 	// Preparation and all later inspection must work after the remote disappears.
 	if err := os.Rename(fixture.remote, fixture.remote+".offline"); err != nil {
 		t.Fatal(err)
 	}
-	snapshot, err := checkout.Snapshot(context.Background())
+	snapshot, err := checkout.Snapshot(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +106,7 @@ func TestRepositoryCarriesCompleteHistoryOffline(t *testing.T) {
 	t.Run("wrong merge base", func(t *testing.T) {
 		wrong := snapshot
 		wrong.Base, wrong.MergeBase = snapshot.Head, old
-		repo, err := MaterializeRepository(context.Background(), repositorySource(t, wrong.Files), wrong)
+		repo, err := MaterializeRepository(t.Context(), repositorySource(t, wrong.Files), wrong)
 		if repo != nil || err == nil || !strings.Contains(err.Error(), "merge-base differs") {
 			t.Fatalf("mismatched comparison returned repository=%v error=%v", repo, err)
 		}
@@ -116,7 +115,7 @@ func TestRepositoryCarriesCompleteHistoryOffline(t *testing.T) {
 
 func TestRepositoryRejectsInvalidOrMismatchedInput(t *testing.T) {
 	fixture := newFixture(t)
-	original, err := fixture.checkout.Snapshot(context.Background())
+	original, err := fixture.checkout.Snapshot(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,7 +176,7 @@ func TestRepositoryRejectsInvalidOrMismatchedInput(t *testing.T) {
 			case "extra file":
 				snapshot.Files = append(snapshot.Files, workspace.File{Path: "extra", Mode: workspace.Regular})
 			}
-			repo, err := MaterializeRepository(context.Background(), repositorySource(t, snapshot.Files), snapshot)
+			repo, err := MaterializeRepository(t.Context(), repositorySource(t, snapshot.Files), snapshot)
 			if repo != nil || err == nil || !strings.Contains(err.Error(), scenario.want) {
 				t.Fatalf("invalid repository=%v error=%v; want %q", repo, err, scenario.want)
 			}
@@ -191,18 +190,18 @@ func TestRepositoryRejectsInvalidOrMismatchedInput(t *testing.T) {
 
 func TestRepositoryRejectsIncompleteBundle(t *testing.T) {
 	fixture := newFixture(t)
-	snapshot, err := fixture.checkout.Snapshot(context.Background())
+	snapshot, err := fixture.checkout.Snapshot(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
 	repositoryFixture(t, snapshot)
 	// List one object explicitly: this pack omits its tree and blob without any promisor configuration.
-	pack, _, err := fixture.checkout.boundedGit(context.Background(), strings.NewReader(snapshot.Head+"\n"), workspace.MaxBytes, false, "pack-objects", "--stdout")
+	pack, _, err := fixture.checkout.boundedGit(t.Context(), strings.NewReader(snapshot.Head+"\n"), workspace.MaxBytes, false, "pack-objects", "--stdout")
 	if err != nil {
 		t.Fatal(err)
 	}
 	snapshot.Repository = append([]byte("# v2 git bundle\n"+snapshot.Head+" refs/heads/main\n\n"), pack...)
-	repo, err := MaterializeRepository(context.Background(), repositorySource(t, snapshot.Files), snapshot)
+	repo, err := MaterializeRepository(t.Context(), repositorySource(t, snapshot.Files), snapshot)
 	var exit *exec.ExitError
 	if repo != nil || err == nil || !strings.Contains(err.Error(), "incomplete repository") || !errors.As(err, &exit) {
 		t.Fatalf("incomplete bundle returned repository=%v error=%v", repo, err)
@@ -212,17 +211,17 @@ func TestRepositoryRejectsIncompleteBundle(t *testing.T) {
 func TestRepositoryRejectsIncrementalBundle(t *testing.T) {
 	fixture := newFixture(t)
 	fixture.git(fixture.source, "commit", "--allow-empty", "-m", "new commit")
-	bundle, _, err := (&Checkout{path: fixture.source}).boundedGit(context.Background(), nil, workspace.MaxBytes, false, "bundle", "create", "-", fixture.base+"..HEAD")
+	bundle, _, err := (&Checkout{path: fixture.source}).boundedGit(t.Context(), nil, workspace.MaxBytes, false, "bundle", "create", "-", fixture.base+"..HEAD")
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshot, err := fixture.checkout.Snapshot(context.Background())
+	snapshot, err := fixture.checkout.Snapshot(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
 	repositoryFixture(t, snapshot)
 	snapshot.Repository = bundle
-	repo, err := MaterializeRepository(context.Background(), repositorySource(t, snapshot.Files), snapshot)
+	repo, err := MaterializeRepository(t.Context(), repositorySource(t, snapshot.Files), snapshot)
 	var exit *exec.ExitError
 	if repo != nil || err == nil || !strings.Contains(err.Error(), "prerequisite") || !errors.As(err, &exit) {
 		t.Fatalf("incremental bundle returned repository=%v error=%v", repo, err)
@@ -234,13 +233,13 @@ func TestRepositoryRejectsUnrelatedComparison(t *testing.T) {
 	tree := fixture.git(fixture.checkout.path, "rev-parse", "HEAD^{tree}")
 	unrelated := fixture.gitInput(fixture.checkout.path, "unrelated root\n", "commit-tree", tree)
 	fixture.git(fixture.checkout.path, "update-ref", "refs/heads/unrelated", unrelated)
-	snapshot, err := fixture.checkout.Snapshot(context.Background())
+	snapshot, err := fixture.checkout.Snapshot(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
 	repositoryFixture(t, snapshot)
 	snapshot.Base, snapshot.MergeBase = unrelated, fixture.base
-	repo, err := MaterializeRepository(context.Background(), repositorySource(t, snapshot.Files), snapshot)
+	repo, err := MaterializeRepository(t.Context(), repositorySource(t, snapshot.Files), snapshot)
 	var exit *exec.ExitError
 	if repo != nil || !errors.As(err, &exit) || exit.ExitCode() != 1 || !strings.Contains(err.Error(), "merge-base") {
 		t.Fatalf("unrelated comparison returned repository=%v error=%v", repo, err)
@@ -296,12 +295,12 @@ func TestRepositoryAcceptsLegacyHistoricalDate(t *testing.T) {
 	legacy := fixture.gitInput(fixture.source, raw, "hash-object", "--literally", "-t", "commit", "-w", "--stdin")
 	head := fixture.gitInput(fixture.source, "current valid date\n", "commit-tree", tree, "-p", legacy)
 	fixture.git(fixture.source, "update-ref", "refs/heads/main", head)
-	if _, err := runGit(context.Background(), fixture.source, "fsck", "--full", "--no-dangling"); err == nil || !strings.Contains(err.Error(), "zeroPaddedDate") {
+	if _, err := runGit(t.Context(), fixture.source, "fsck", "--full", "--no-dangling"); err == nil || !strings.Contains(err.Error(), "zeroPaddedDate") {
 		t.Fatalf("legacy-date control did not trigger strict fsck: %v", err)
 	}
 	fixture.git(fixture.source, "push", fixture.remote, "main")
 	checkout := fixture.clone()
-	snapshot, err := checkout.Snapshot(context.Background())
+	snapshot, err := checkout.Snapshot(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -312,7 +311,7 @@ func TestRepositoryAcceptsLegacyHistoricalDate(t *testing.T) {
 
 func TestRepositoryPinsFilesRefFormat(t *testing.T) {
 	fixture := newFixture(t)
-	snapshot, err := fixture.checkout.Snapshot(context.Background())
+	snapshot, err := fixture.checkout.Snapshot(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -338,7 +337,7 @@ func TestRepositoryPinsFilesRefFormat(t *testing.T) {
 
 func TestRepositoryRejectsTooManyBundleRefsBeforeUpdate(t *testing.T) {
 	fixture := newFixture(t)
-	snapshot, err := fixture.checkout.Snapshot(context.Background())
+	snapshot, err := fixture.checkout.Snapshot(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -359,7 +358,7 @@ func TestRepositoryRejectsTooManyBundleRefsBeforeUpdate(t *testing.T) {
 	}
 	marker := filepath.Join(t.TempDir(), "update-ref-called")
 	fakeOnPath(t, "git", "#!/bin/sh\nfor arg do\n if [ \"$arg\" = update-ref ]; then printf called > "+shellQuote(marker)+"; exit 91; fi\ndone\nexec "+shellQuote(realGit)+" \"$@\"\n")
-	repo, err := MaterializeRepository(context.Background(), repositorySource(t, snapshot.Files), snapshot)
+	repo, err := MaterializeRepository(t.Context(), repositorySource(t, snapshot.Files), snapshot)
 	if repo != nil || !errors.Is(err, ErrCheckoutTooLarge) || !strings.Contains(err.Error(), "repository references") {
 		t.Fatalf("over-limit refs returned repository=%v error=%v", repo, err)
 	}
@@ -370,7 +369,7 @@ func TestRepositoryRejectsTooManyBundleRefsBeforeUpdate(t *testing.T) {
 
 func TestRepositoryPacksRefsWithoutReflogs(t *testing.T) {
 	fixture := newFixture(t)
-	snapshot, err := fixture.checkout.Snapshot(context.Background())
+	snapshot, err := fixture.checkout.Snapshot(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -409,7 +408,7 @@ func TestRepositoryPacksRefsWithoutReflogs(t *testing.T) {
 	if _, err := os.Lstat(filepath.Join(source, ".git", "logs")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("materialization wrote reflogs: %v", err)
 	}
-	if err := repo.Verify(context.Background()); err != nil {
+	if err := repo.Verify(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -419,7 +418,7 @@ func TestRepositoryPinsModelConfigAndDisablesLogMailmap(t *testing.T) {
 	writeFile(t, filepath.Join(fixture.source, ".mailmap"), "Forged <forged@example.invalid> Test <test@example.invalid>\n")
 	fixture.commit("refs/heads/main", "untrusted author mapping")
 	checkout := fixture.clone()
-	snapshot, err := checkout.Snapshot(context.Background())
+	snapshot, err := checkout.Snapshot(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -448,7 +447,7 @@ func TestRepositoryIgnoresHostGitDefaults(t *testing.T) {
 	writeFile(t, filepath.Join(fixture.source, ".gitattributes"), "README.md export-subst\n")
 	fixture.commit("refs/heads/main", "repository attribute control")
 	checkout := fixture.clone()
-	snapshot, err := checkout.Snapshot(context.Background())
+	snapshot, err := checkout.Snapshot(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -474,7 +473,7 @@ func TestRepositoryIgnoresHostGitDefaults(t *testing.T) {
 		{[]string{"-c", "core.excludesFile=" + ignore, "status", "--porcelain"}, ""},
 		{[]string{"-c", "core.attributesFile=" + attributes, "check-attr", "export-ignore", "--", "README.md"}, "README.md: export-ignore: set\n"},
 	} {
-		cmd := exec.CommandContext(context.Background(), binary, check.args...)
+		cmd := exec.CommandContext(t.Context(), binary, check.args...)
 		cmd.Dir, cmd.Env = source, env
 		out, err := cmd.CombinedOutput()
 		if err != nil || string(out) != check.want {
@@ -488,7 +487,7 @@ func TestRepositoryRefreshesOriginalIndexAndPreservesCandidateChanges(t *testing
 	writeFile(t, filepath.Join(fixture.source, "deleted"), "original\n")
 	fixture.commit("refs/heads/main", "candidate baseline")
 	checkout := fixture.clone()
-	snapshot, err := checkout.Snapshot(context.Background())
+	snapshot, err := checkout.Snapshot(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -499,11 +498,11 @@ func TestRepositoryRefreshesOriginalIndexAndPreservesCandidateChanges(t *testing
 				files = []workspace.File{{Path: "README.md", Mode: workspace.Regular, Data: []byte("candidate\n")}, {Path: "added", Mode: workspace.Regular, Data: []byte("new\n")}}
 			}
 			source := repositorySource(t, files)
-			repo, err := MaterializeRepository(context.Background(), source, snapshot)
+			repo, err := MaterializeRepository(t.Context(), source, snapshot)
 			if err != nil || repo == nil {
 				t.Fatalf("materialize candidate=%t: repository=%v error=%v", candidate, repo, err)
 			}
-			if err := repo.Verify(context.Background()); err != nil {
+			if err := repo.Verify(t.Context()); err != nil {
 				t.Fatal(err)
 			}
 			want := ""
@@ -511,7 +510,7 @@ func TestRepositoryRefreshesOriginalIndexAndPreservesCandidateChanges(t *testing
 				want = " M README.md\n D deleted\n?? added\n"
 			}
 			assertModelRepositoryGit(t, source, want, "status", "--porcelain")
-			if err := repo.Verify(context.Background()); err != nil {
+			if err := repo.Verify(t.Context()); err != nil {
 				t.Fatalf("writable repository status changed metadata: %v", err)
 			}
 			dir := filepath.Join(source, ".git")
@@ -554,7 +553,7 @@ func TestRepositoryRefreshesOriginalIndexAndPreservesCandidateChanges(t *testing
 
 func TestRepositoryVerifyRejectsMetadataMutations(t *testing.T) {
 	fixture := newFixture(t)
-	snapshot, err := fixture.checkout.Snapshot(context.Background())
+	snapshot, err := fixture.checkout.Snapshot(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -606,14 +605,14 @@ func TestRepositoryVerifyRejectsMetadataMutations(t *testing.T) {
 
 func TestRepositoryVerifyBoundsMetadata(t *testing.T) {
 	dir := t.TempDir()
-	digest, err := repositoryDigest(context.Background(), dir)
+	digest, err := repositoryDigest(t.Context(), dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	repo := &Repository{dir: dir, digest: digest}
 	name := filepath.Join(dir, "oversized")
 	writeSparse(t, name, workspace.MaxBytes+1)
-	if err := repo.Verify(context.Background()); err == nil || !strings.Contains(err.Error(), "file exceeds byte limit") {
+	if err := repo.Verify(t.Context()); err == nil || !strings.Contains(err.Error(), "file exceeds byte limit") {
 		t.Fatalf("oversized metadata error=%v", err)
 	}
 }
@@ -630,13 +629,13 @@ func TestRepositoryDigestEntryLimitCountsRoot(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := repositoryDigestWithLimit(context.Background(), dir, limit); err == nil || !strings.Contains(err.Error(), "repository metadata exceeds entry limit") {
+	if _, err := repositoryDigestWithLimit(t.Context(), dir, limit); err == nil || !strings.Contains(err.Error(), "repository metadata exceeds entry limit") {
 		t.Fatalf("wide metadata directory error=%v", err)
 	}
 	if err := os.Remove(filepath.Join(dir, "0")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := repositoryDigestWithLimit(context.Background(), dir, limit); err != nil {
+	if _, err := repositoryDigestWithLimit(t.Context(), dir, limit); err != nil {
 		t.Fatalf("exact metadata entry limit, including root: %v", err)
 	}
 }
@@ -659,7 +658,7 @@ func TestRepositoryDigestUsesReverseLexicalDepthFirstOrder(t *testing.T) {
 				fmt.Fprintf(hash, "%d\x00%s", len(name), name)
 			}
 		}
-		digest, err := repositoryDigest(context.Background(), dir)
+		digest, err := repositoryDigest(t.Context(), dir)
 		if err != nil || !bytes.Equal(digest[:], hash.Sum(nil)) {
 			t.Fatalf("metadata digest=%x error=%v; want %x", digest, err, hash.Sum(nil))
 		}
@@ -681,13 +680,13 @@ func TestRepositoryDigestBoundsTotalMetadata(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := repositoryDigest(context.Background(), dir); err == nil || !strings.Contains(err.Error(), "file exceeds byte limit") {
+	if _, err := repositoryDigest(t.Context(), dir); err == nil || !strings.Contains(err.Error(), "file exceeds byte limit") {
 		t.Fatalf("metadata total byte limit error=%v", err)
 	}
 	if err := os.Remove(filepath.Join(dir, "c")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := repositoryDigest(context.Background(), dir); err != nil {
+	if _, err := repositoryDigest(t.Context(), dir); err != nil {
 		t.Fatalf("exact metadata total byte limit: %v", err)
 	}
 }

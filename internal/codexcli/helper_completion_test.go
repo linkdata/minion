@@ -19,7 +19,7 @@ func TestKnownHelpersRequireLifecycleAccess(t *testing.T) {
 	for _, scenario := range []string{"missing root ID", "missing log", "canceled scan"} {
 		t.Run(scenario, func(t *testing.T) {
 			home, rootID := t.TempDir(), "root"
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			switch scenario {
 			case "missing root ID":
@@ -45,7 +45,7 @@ func TestKnownHelpersRequireLifecycleAccess(t *testing.T) {
 				path = writeUsageRollout(t, t.TempDir(), "child", "root", completedUsageTurn("child", "turn", "response", 5)...)
 				budget = 0
 			}
-			_, complete, _, err := readRolloutUsage(context.Background(), rolloutMeta{ID: "child", path: path}, "root", &budget)
+			_, complete, _, err := readRolloutUsage(t.Context(), rolloutMeta{ID: "child", path: path}, "root", &budget)
 			if complete || !errors.Is(err, errUnverifiedChildren) {
 				t.Fatalf("unreadable lifecycle accepted: complete=%t err=%v", complete, err)
 			}
@@ -68,7 +68,7 @@ func TestDuplicateHelperRolloutsCannotAttestCompletion(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(filepath.Dir(path), "duplicate.jsonl"), []byte(duplicate), 0600); err != nil {
 		t.Fatal(err)
 	}
-	tokens, complete, err := (&usageSession{}).collectUsage(context.Background(), home, "root", time.Now(), nil, []string{"child"}, nil)
+	tokens, complete, err := (&usageSession{}).collectUsage(t.Context(), home, "root", time.Now(), nil, []string{"child"}, nil)
 	if tokens != (usage.Tokens{Input: 10, Output: 1}) || complete || !errors.Is(err, errUnverifiedChildren) {
 		t.Fatalf("ambiguous helper accepted or double-counted: tokens=%+v complete=%t err=%v", tokens, complete, err)
 	}
@@ -98,7 +98,7 @@ func TestDuplicateRootRolloutsCannotInflateFreshUsage(t *testing.T) {
 		{"no stdout", nil, usage.Tokens{}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, complete, err := (&usageSession{}).collectUsage(context.Background(), home, "root", time.Now(), tc.fallback, nil, nil)
+			got, complete, err := (&usageSession{}).collectUsage(t.Context(), home, "root", time.Now(), tc.fallback, nil, nil)
 			if got != tc.want || complete || !errors.Is(err, errUnverifiedChildren) {
 				t.Fatalf("ambiguous root usage = %+v, complete=%t, err=%v; want %+v, incomplete and unverified", got, complete, err, tc.want)
 			}
@@ -107,7 +107,7 @@ func TestDuplicateRootRolloutsCannotInflateFreshUsage(t *testing.T) {
 }
 
 func TestResumedDuplicateRootCannotAttestCompletion(t *testing.T) {
-	ctx, home := context.Background(), t.TempDir()
+	ctx, home := t.Context(), t.TempDir()
 	root := writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "old", "r1", 100)...)
 	var session usageSession
 	session.begin(ctx, home, "root", time.Now())
@@ -153,7 +153,7 @@ EVENTS
 	if err := os.WriteFile(filepath.Join(filepath.Dir(root), "duplicate-root.jsonl"), data, 0600); err != nil {
 		t.Fatal(err)
 	}
-	result, err := Run(context.Background(), t.TempDir(), "task", false, "", config.CodexConfig{})
+	result, err := Run(t.Context(), t.TempDir(), "task", false, "", config.CodexConfig{})
 	if !errors.Is(err, errUnverifiedChildren) || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{}) {
 		t.Fatalf("ambiguous root published answer: result=%+v err=%v", result, err)
 	}
@@ -177,7 +177,7 @@ func TestRunRetainsHelperFailureAlongsideProviderFailure(t *testing.T) {
 			home := os.Getenv("CODEX_HOME")
 			writeUsageRollout(t, home, "root", "", usageEvent("task_started", "root-turn"), usageRecord("root", "root-turn", "root-response", 10, 0, 1), usageEvent("task_complete", "root-turn"))
 			writeUsageRollout(t, home, "child", "root", usageEvent("task_started", "child-turn"), usageRecord("child", "child-turn", "child-response", 20, 0, 2))
-			result, err := Run(context.Background(), t.TempDir(), "task", false, "", config.CodexConfig{})
+			result, err := Run(t.Context(), t.TempDir(), "task", false, "", config.CodexConfig{})
 			if !errors.Is(err, errUnverifiedChildren) || !strings.Contains(err.Error(), scenario.failure) || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 30, Output: 3}) {
 				t.Fatalf("provider/helper cause lost: result=%+v err=%v", result, err)
 			}

@@ -104,7 +104,7 @@ func TestPublishRetainsPrivateReviewBeforeGitHubWrites(t *testing.T) {
 			defer server.Close()
 			e := Orchestrator{WorkRoot: root, GitHub: testGitHub(server, "fixture"), Logger: log.New(&journal, "", 0)}
 			request := monitor.Job{ID: job.Identity.JobID, Number: 7, SubjectType: "Issue", Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2}, Source: github.Item{Author: github.User{Login: "writer"}}, Command: command.Command{Name: "comment", Action: command.Comment}}
-			publishErr := e.publish(context.Background(), &preparedAction{job: job, request: request}, result)
+			publishErr := e.publish(t.Context(), &preparedAction{job: job, request: request}, result)
 			if test.status == http.StatusCreated {
 				if publishErr != nil {
 					t.Fatal(publishErr)
@@ -312,7 +312,7 @@ func TestPrivateReviewBoundaryBeforeStorageOrPublication(t *testing.T) {
 			case "symlink root":
 				symlinkOrSkip(t, t.TempDir(), filepath.Join(root, "reviews"))
 			}
-			if err := e.publish(context.Background(), &preparedAction{job: job}, result); !errors.Is(err, monitor.ErrTerminalJob) {
+			if err := e.publish(t.Context(), &preparedAction{job: job}, result); !errors.Is(err, monitor.ErrTerminalJob) {
 				t.Fatalf("unsafe publication was not stopped: %v", err)
 			}
 			if scenario == "storage failure" {

@@ -48,7 +48,7 @@ func TestGitRejectsRelativeExecutableWhenErrDotDisabled(t *testing.T) {
 	if binary, err := exec.LookPath("git"); err != nil || filepath.IsAbs(binary) {
 		t.Fatalf("probe did not produce a relative executable: %q, %v", binary, err)
 	}
-	if _, err := runGit(context.Background(), checkout, "--version"); err == nil || !strings.Contains(err.Error(), "absolute path") {
+	if _, err := runGit(t.Context(), checkout, "--version"); err == nil || !strings.Contains(err.Error(), "absolute path") {
 		t.Fatalf("accepted relative Git executable: %v", err)
 	}
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
@@ -59,7 +59,7 @@ func TestGitRejectsRelativeExecutableWhenErrDotDisabled(t *testing.T) {
 func TestGitNeutralIdentityIgnoresAmbientEmail(t *testing.T) {
 	t.Setenv("EMAIL", "ambient@example.invalid")
 	dir := t.TempDir()
-	ctx := context.Background()
+	ctx := t.Context()
 	if email, err := runGit(ctx, dir, "config", "user.email"); err != nil || email != "minion@localhost" {
 		t.Fatalf("controlled user.email=%q error=%v", email, err)
 	}
@@ -71,7 +71,7 @@ func TestGitNeutralIdentityIgnoresAmbientEmail(t *testing.T) {
 
 func TestImportPreservesExecutableModeAndCommitIgnoresUnstagedFiles(t *testing.T) {
 	fixture := newFixture(t)
-	ctx := context.Background()
+	ctx := t.Context()
 	const branch = "minion/fix-reviewed-mode"
 	fixture.git(fixture.checkout.path, "config", "core.fileMode", "false")
 	if err := fixture.checkout.recordConfig(); err != nil {
@@ -98,7 +98,7 @@ func TestImportPreservesExecutableModeAndCommitIgnoresUnstagedFiles(t *testing.T
 
 func TestCommitAndPushPreservesUnicodeBranchSuffix(t *testing.T) {
 	fixture := newFixture(t)
-	ctx := context.Background()
+	ctx := t.Context()
 	const branch = "minion/fix-nbsp\u00a0"
 	if err := fixture.checkout.NewBranch(ctx, branch); err != nil {
 		t.Fatal(err)
@@ -123,13 +123,13 @@ func TestCloneIncludesTagsAndPublicationAcceptsAmbiguousShortName(t *testing.T) 
 	if got := fixture.git(checkout.path, "tag", "--list"); got != branch {
 		t.Fatalf("clone lost remote tag: %s", got)
 	}
-	if err := checkout.NewBranch(context.Background(), branch); err != nil {
+	if err := checkout.NewBranch(t.Context(), branch); err != nil {
 		t.Fatal(err)
 	}
-	if err := checkout.Import(context.Background(), fixture.base, []workspace.Change{{Path: "README.md", Mode: workspace.Regular, Data: []byte("reviewed\n")}}); err != nil {
+	if err := checkout.Import(t.Context(), fixture.base, []workspace.Change{{Path: "README.md", Mode: workspace.Regular, Data: []byte("reviewed\n")}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := checkout.commitAndPush(context.Background(), fixture.remote, branch, "bot", "reviewed", func(string) error { return nil }); err != nil {
+	if err := checkout.commitAndPush(t.Context(), fixture.remote, branch, "bot", "reviewed", func(string) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
 	if got := fixture.git("", "--git-dir="+fixture.remote, "show", "refs/heads/"+branch+":README.md"); got != "reviewed" {
@@ -175,7 +175,7 @@ func TestCommitAndPushRefusesInvalidArgumentsAndHead(t *testing.T) {
 	for _, kind := range []string{"branch", "blank message", "NUL message", "moved HEAD", "detached HEAD", "wrong branch", "nil recorder"} {
 		t.Run(kind, func(t *testing.T) {
 			f := newFixture(t)
-			ctx := context.Background()
+			ctx := t.Context()
 			const branch = "minion/fix-input-gates"
 			if err := f.checkout.NewBranch(ctx, branch); err != nil {
 				t.Fatal(err)
@@ -241,7 +241,7 @@ func TestCommitAndPushRefusesInvalidArgumentsAndHead(t *testing.T) {
 
 func TestCommitAndPushPreservesDivergentRemote(t *testing.T) {
 	f := newFixture(t)
-	ctx := context.Background()
+	ctx := t.Context()
 	const branch = "minion/fix-divergent"
 	writeFile(t, filepath.Join(f.source, "remote.txt"), "remote-only\n")
 	remoteHead := f.commit("refs/heads/"+branch, "divergent remote")
@@ -270,7 +270,7 @@ func TestCommitAndPushPreservesDivergentRemote(t *testing.T) {
 
 func TestCommitAndPushPreservesPreexistingAncestorRemote(t *testing.T) {
 	f := newFixture(t)
-	ctx := context.Background()
+	ctx := t.Context()
 	const branch = "minion/fix-preexisting"
 	f.git(f.source, "push", f.remote, f.base+":refs/heads/"+branch)
 	if err := f.checkout.NewBranch(ctx, branch); err != nil {
@@ -304,14 +304,14 @@ func TestStagedPathCountClassifiesPathListTruncation(t *testing.T) {
 	}
 	script := fmt.Sprintf("#!/bin/sh\nfor arg do\nif [ \"$arg\" = --name-only ]; then\nhead -c %d /dev/zero\nexit\nfi\ndone\nexec %s \"$@\"\n", maxChangedPathListBytes+1, shellQuote(realGit))
 	fakeOnPath(t, "git", script)
-	if count, err := f.checkout.stagedPathCount(context.Background()); count != 0 || !errors.Is(err, ErrTooManyFiles) || errors.Is(err, ErrCheckoutTooLarge) || errors.Is(err, context.Canceled) {
+	if count, err := f.checkout.stagedPathCount(t.Context()); count != 0 || !errors.Is(err, ErrTooManyFiles) || errors.Is(err, ErrCheckoutTooLarge) || errors.Is(err, context.Canceled) {
 		t.Fatalf("staged path truncation misclassified: %d, %v", count, err)
 	}
 }
 
 func TestCommitAndPushRequiresValidatedDestination(t *testing.T) {
 	fixture := newFixture(t)
-	ctx := context.Background()
+	ctx := t.Context()
 	const repo, branch = "owner/destination", "minion/fix-destination"
 	// Redirect only this controlled fixture's validated HTTPS URL to its local remote.
 	fixture.git(fixture.checkout.path, "config", "url."+fixture.remote+".insteadOf", "https://github.com/"+repo+".git")

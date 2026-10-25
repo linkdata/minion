@@ -50,7 +50,7 @@ func TestRunnerRejectsCriticFeedbackBlankAfterSanitization(t *testing.T) {
 						}
 						return aicli.Result{Answer: criticFeedbackJSON(blockers, feedback.text)}, nil
 					}
-					result, err := runner.Run(context.Background(), job)
+					result, err := runner.Run(t.Context(), job)
 					wantSequence := []string{"main/1/", "critic/1/full"}
 					if phase == reviewVerification {
 						wantSequence = append(wantSequence, "main/2/", "critic/2/verification")
@@ -128,7 +128,7 @@ func TestRunnerPreservesSanitizedCriticFeedbackIntoRevision(t *testing.T) {
 				}
 				return aicli.Result{Answer: approvedCritiqueJSON}, nil
 			}
-			result, err := runner.Run(context.Background(), job)
+			result, err := runner.Run(t.Context(), job)
 			wantSequence := []string{"main/1/", "critic/1/full", "main/2/", "critic/2/verification", "critic/2/full"}
 			if phase == reviewVerification {
 				wantSequence = []string{"main/1/", "critic/1/full", "main/2/", "critic/2/verification", "main/3/", "critic/3/verification", "critic/3/full"}

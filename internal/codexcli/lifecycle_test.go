@@ -1,7 +1,6 @@
 package codexcli
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -36,7 +35,7 @@ func TestRunOutputLimitPreservesRolloutUsage(t *testing.T) {
 		t.Run(scenario.name, func(t *testing.T) {
 			installFakeCodex(t, "#!/bin/sh\ncat <<'EVENTS'\n"+`{"type":"thread.started","thread_id":"root"}`+"\n"+scenario.events+"\nEVENTS\n")
 			writeUsageRollout(t, os.Getenv("CODEX_HOME"), "root", "", usageEvent("task_started", "root-turn"), usageRecord("root", "root-turn", "response", 100, 10, 7), usageEvent("task_complete", "root-turn"))
-			result, err := Run(context.Background(), t.TempDir(), "task", false, "", config.CodexConfig{})
+			result, err := Run(t.Context(), t.TempDir(), "task", false, "", config.CodexConfig{})
 			if !errors.Is(err, aicli.ErrOutputLimit) || strings.Count(err.Error(), aicli.ErrOutputLimit.Error()) != 1 || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 100, CachedInput: 10, Output: 7}) {
 				t.Fatalf("output limit accepted or known counters lost: result=%+v error=%v", result, err)
 			}
@@ -61,7 +60,7 @@ func TestRunRequiresCompletionForLatestTurn(t *testing.T) {
 		t.Run(scenario.name, func(t *testing.T) {
 			installFakeCodex(t, "#!/bin/sh\ncat <<'EVENTS'\n"+`{"type":"thread.started","thread_id":"root"}`+"\n"+scenario.events+"\nEVENTS\n")
 			writeUsageRollout(t, os.Getenv("CODEX_HOME"), "root", "", usageEvent("task_started", "root-turn"), usageRecord("root", "root-turn", "response", 100, 10, 7), usageEvent("task_complete", "root-turn"))
-			result, err := Run(context.Background(), t.TempDir(), "task", false, "", config.CodexConfig{})
+			result, err := Run(t.Context(), t.TempDir(), "task", false, "", config.CodexConfig{})
 			if result.Tokens != (usage.Tokens{Input: 100, CachedInput: 10, Output: 7}) {
 				t.Fatalf("lost known usage: %+v", result)
 			}
@@ -115,7 +114,7 @@ func TestRunChecksLatestOwnedChildTurn(t *testing.T) {
 			home := os.Getenv("CODEX_HOME")
 			writeUsageRollout(t, home, "root", "", usageEvent("task_started", "root-turn"), usageRecord("root", "root-turn", "root-response", 10, 0, 1), usageEvent("task_complete", "root-turn"))
 			writeUsageRollout(t, home, "child", "root", strings.Split(scenario.events, "\n")...)
-			result, err := Run(context.Background(), t.TempDir(), "task", false, "", config.CodexConfig{})
+			result, err := Run(t.Context(), t.TempDir(), "task", false, "", config.CodexConfig{})
 			if (err != nil) != scenario.fails || scenario.fails && (!strings.Contains(err.Error(), "helper agent work did not complete") || result.Answer != "") || !scenario.fails && result.Answer != "answer" || result.UsageComplete || result.Tokens != scenario.want {
 				t.Fatalf("latest child turn misclassified: result=%+v error=%v", result, err)
 			}
@@ -166,7 +165,7 @@ func TestRunRejectsKnownUnfinishedChildrenWithoutRejectingAccountingGaps(t *test
 					}
 				}
 			}
-			result, err := Run(context.Background(), t.TempDir(), "task", false, "", config.CodexConfig{})
+			result, err := Run(t.Context(), t.TempDir(), "task", false, "", config.CodexConfig{})
 			fails := scenario != "complete" && scenario != "missing counters"
 			if (err != nil) != fails || fails && (result.Answer != "" || result.UsageComplete || !strings.Contains(err.Error(), "helper agent work did not complete")) || !fails && result.Answer != "completed response" {
 				t.Fatalf("child lifecycle conflated with accounting: result=%+v error=%v", result, err)
@@ -198,7 +197,7 @@ func TestRunQuotesProviderDiagnosticsAndPreservesExitCause(t *testing.T) {
 				script += "printf 'private\\nforged journal line' >&2\n"
 			}
 			installFakeCodex(t, script)
-			result, err := Run(context.Background(), t.TempDir(), "task", false, "", config.CodexConfig{})
+			result, err := Run(t.Context(), t.TempDir(), "task", false, "", config.CodexConfig{})
 			if err == nil || strings.Contains(err.Error(), "\nforged journal line") || !strings.Contains(err.Error(), `private\nforged journal line`) || result.Answer != "" {
 				t.Fatalf("unsafe provider diagnostic: result=%+v error=%v", result, err)
 			}

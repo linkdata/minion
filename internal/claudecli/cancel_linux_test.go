@@ -21,8 +21,7 @@ mv -- "$0.pid.tmp" "$0.pid"
 exec sleep 30
 `)
 	workspace := t.TempDir()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx, cancel := context.WithCancel(t.Context())
 	type outcome struct {
 		result aicli.Result
 		err    error
@@ -33,17 +32,23 @@ exec sleep 30
 		result, err := Run(ctx, workspace, "task", false, "", config.ClaudeConfig{})
 		done <- outcome{result, err}
 	}()
+	defer func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			t.Error("Run did not finish after cancellation")
+		}
+	}()
 	// The real CLI process must start before cancellation.
-	waitCtx, stopWait := context.WithTimeout(context.Background(), 5*time.Second)
+	waitCtx, stopWait := context.WithTimeout(t.Context(), 5*time.Second)
 	defer stopWait()
 	child, err := testsupport.WaitForProcess(waitCtx, binary+".pid", done)
 	if err != nil {
-		cancel()
-		<-done
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		cleanupCtx, stopCleanup := context.WithTimeout(context.Background(), 3*time.Second)
+		cleanupCtx, stopCleanup := context.WithTimeout(context.WithoutCancel(t.Context()), 3*time.Second)
 		defer stopCleanup()
 		if err := child.Cleanup(cleanupCtx); err != nil {
 			t.Error(err)

@@ -165,7 +165,7 @@ func liveGHAuthEnv() []string {
 
 func TestLiveSmoke(t *testing.T) {
 	cfg := loadLiveTestConfig(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	for _, login := range []string{cfg.OwnerLogin, cfg.BotLogin} {
 		t.Run(login, func(t *testing.T) {

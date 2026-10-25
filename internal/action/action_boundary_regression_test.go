@@ -62,7 +62,7 @@ func TestExecuteCriticAdmissionUsesControlledWorkRoot(t *testing.T) {
 				request := usageJob()
 				request.Command = command.Command{Name: "comment", Action: command.Comment}
 				request.Repository.Actions = []string{"comment"}
-				err = e.Execute(context.Background(), request)
+				err = e.Execute(t.Context(), request)
 				if unsafe {
 					if errors.Is(err, workroot.ErrUnsafe) || !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "model evidence directories must be selected by Minion") || calls != 0 {
 						t.Fatalf("admission classification: calls=%d error=%v", calls, err)
@@ -100,7 +100,7 @@ func TestReviewEvidenceInitialCheckpointIsNotTerminalBeforeModels(t *testing.T) 
 		}
 		return &os.PathError{Op: "write", Path: "private-review", Err: syscall.ENOSPC}
 	}, runModel: forbidModel(t)}
-	result, err := runner.Run(context.Background(), job)
+	result, err := runner.Run(t.Context(), job)
 	if !errors.Is(err, syscall.ENOSPC) || errors.Is(err, monitor.ErrTerminalJob) || checkpoints != 1 || len(result.Calls) != 0 || len(result.Refutations) != 0 || result.Answer != "" || result.CriticStopReason != "" {
 		t.Fatalf("initial checkpoint policy: checkpoints=%d result=%+v error=%v", checkpoints, result, err)
 	}

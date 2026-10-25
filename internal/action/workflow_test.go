@@ -220,7 +220,7 @@ func TestPublishFixWithoutChangesPostsNormalReply(t *testing.T) {
 	request := usageJob()
 	request.Source = github.Item{UpdatedAt: time.Now()}
 	request.Command = command.Command{Name: "fix", Action: command.Fix}
-	if err := e.publishFix(context.Background(), &preparedAction{request: request, issueNodeID: "issue-node"}, Result{Answer: "Tests passed."}, publication{answer: "Tests passed."}); err != nil {
+	if err := e.publishFix(t.Context(), &preparedAction{request: request, issueNodeID: "issue-node"}, Result{Answer: "Tests passed."}, publication{answer: "Tests passed."}); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.HasPrefix(body, "AI returned a response without changing files.\n\n") || !strings.Contains(body, "Tests passed.") || !strings.Contains(body, request.Marker()) {
@@ -229,7 +229,7 @@ func TestPublishFixWithoutChangesPostsNormalReply(t *testing.T) {
 }
 
 func TestPortableJobRequiresExistingActionDeadline(t *testing.T) {
-	if _, err := (&Orchestrator{}).portableJob(context.Background(), nil, "", ""); err == nil || !strings.Contains(err.Error(), "requires a deadline") {
+	if _, err := (&Orchestrator{}).portableJob(t.Context(), nil, "", ""); err == nil || !strings.Contains(err.Error(), "requires a deadline") {
 		t.Fatalf("preparation created a fresh budget: %v", err)
 	}
 }
@@ -249,7 +249,7 @@ func TestPortableJobPreservesElapsedDeadlineCause(t *testing.T) {
 	request.Command.Action = command.Comment
 	orchestrator := attemptFixture(&Orchestrator{Commands: map[string]config.CommandMapping{"audit": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}}})
 	// Deadline expiration may precede propagation of the context's Err value.
-	ctx := expiredPreparationContext{Context: context.Background(), deadline: time.Now().Add(-time.Second)}
+	ctx := expiredPreparationContext{Context: t.Context(), deadline: time.Now().Add(-time.Second)}
 	_, err := orchestrator.portableJob(ctx, &preparedAction{checkout: checkout, request: request}, "title", "description")
 	if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, monitor.ErrTerminalJob) || strings.Contains(err.Error(), "invalid action runtime budget") {
 		t.Fatalf("elapsed preparation deadline lost its cause: %v", err)

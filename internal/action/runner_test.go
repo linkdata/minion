@@ -79,7 +79,7 @@ func TestRunnerUsesSuppliedSourceAndContext(t *testing.T) {
 				}
 				return aicli.Result{Answer: "No findings", Tokens: usage.Tokens{Input: 10, Output: 2}, UsageComplete: true}, nil
 			}
-			result, err := runner.Run(context.Background(), job)
+			result, err := runner.Run(t.Context(), job)
 			if err != nil || len(result.Refutations) != 0 || calls != 1 || result.Answer != "No findings" || len(result.Calls) != 1 || !result.Calls[0].Complete {
 				t.Fatalf("Run = %+v, %v; calls %d", result, err, calls)
 			}
@@ -116,7 +116,7 @@ func TestReviewContextPreservesDistinctRevisionIdentities(t *testing.T) {
 	if err := json.Unmarshal(data, &metadata); err != nil || metadata.Head != job.Source.Head || metadata.Base != job.Source.Base || metadata.MergeBase != job.Source.MergeBase || !slices.Equal(metadata.Omitted, job.Source.Omitted) || !slices.Equal(metadata.HeadOmitted, job.Source.HeadOmitted) {
 		t.Fatalf("revision identity projection: %s, %v", data, err)
 	}
-	prompt, err := actionPrompt(context.Background(), job, "/source", root, "", "")
+	prompt, err := actionPrompt(t.Context(), job, "/source", root, "", "")
 	want := fmt.Sprintf("head %s (merge base %s, base tip %s)", job.Source.Head, job.Source.MergeBase, job.Source.Base)
 	if err != nil || !strings.Contains(prompt, want) {
 		t.Fatalf("revision identity prompt: %q, %v; want %q", prompt, err, want)
@@ -151,7 +151,7 @@ func TestRunnerReturnsFileChangesAndPartialUsage(t *testing.T) {
 		}
 		return aicli.Result{Answer: "Changed two files", UsageComplete: true}, nil
 	}
-	result, err := runner.Run(context.Background(), job)
+	result, err := runner.Run(t.Context(), job)
 	mode := workspace.Executable
 	if runtime.GOOS == "windows" {
 		mode = workspace.Regular
@@ -164,7 +164,7 @@ func TestRunnerReturnsFileChangesAndPartialUsage(t *testing.T) {
 	runner.runModel = func(_ context.Context, _ modelRun) (aicli.Result, error) {
 		return aicli.Result{Tokens: usage.Tokens{Input: 12, Output: 3}}, failure
 	}
-	result, err = runner.Run(context.Background(), job)
+	result, err = runner.Run(t.Context(), job)
 	if !errors.Is(err, failure) || errors.Is(err, monitor.ErrTerminalJob) || len(result.Calls) != 1 || result.Calls[0].Tokens.Input != 12 || result.Calls[0].Complete || result.Answer != "" {
 		t.Fatalf("failure lost partial usage: %+v, %v", result, err)
 	}
@@ -177,7 +177,7 @@ func TestRunnerRedactsBothConfiguredKeysInReturnedError(t *testing.T) {
 	runner.runModel = func(context.Context, modelRun) (aicli.Result, error) {
 		return aicli.Result{}, fmt.Errorf("model call: %w", cause)
 	}
-	result, err := runner.Run(context.Background(), testJob(command.Comment))
+	result, err := runner.Run(t.Context(), testJob(command.Comment))
 	if !errors.Is(err, cause) || err.Error() != "model call: provider failed with [redacted] and [redacted]" || len(result.Calls) != 1 {
 		t.Fatalf("returned error lost redaction or cause: %+v, %v", result, err)
 	}
@@ -210,7 +210,7 @@ func TestRunnerUsesLocalHistoryWhenComparisonDiffIsIncomplete(t *testing.T) {
 			return aicli.Result{Answer: "Compared using local Git", UsageComplete: true}, nil
 		},
 	}
-	if _, err := runner.Run(context.Background(), job); err != nil {
+	if _, err := runner.Run(t.Context(), job); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -281,7 +281,7 @@ func TestRunnerKeepsCriticReadOnlyAndPrivateReasoning(t *testing.T) {
 		}
 		return aicli.Result{Answer: approvedCritiqueJSON, UsageComplete: true}, nil
 	}
-	result, err := runner.Run(context.Background(), job)
+	result, err := runner.Run(t.Context(), job)
 	if err != nil || calls != 2 || result.Answer != "public answer" || len(result.Refutations) != 0 || len(result.Calls) != 2 || result.Calls[1].Role != "critic" || len(result.Changes) != 3 {
 		t.Fatalf("result = %+v, %v", result, err)
 	}
@@ -293,7 +293,7 @@ func TestRunnerIgnoresWorkerGitMetadata(t *testing.T) {
 		writeFixtureFile(t, request.dir, "source.txt", []byte("changed"))
 		return aicli.Result{Answer: "Changed source", UsageComplete: true}, nil
 	}}
-	result, err := runner.Run(context.Background(), testJob(command.Fix))
+	result, err := runner.Run(t.Context(), testJob(command.Fix))
 	if err != nil || len(result.Changes) != 1 || result.Changes[0].Path != "source.txt" || string(result.Changes[0].Data) != "changed" {
 		t.Fatalf("metadata result=%+v,%v", result, err)
 	}
@@ -316,7 +316,7 @@ func TestRunnerCanonicalizesTrustedWorkRoot(t *testing.T) {
 		}
 		return aicli.Result{Answer: "Read source", UsageComplete: true}, nil
 	}}
-	if _, err := runner.Run(context.Background(), testJob(command.Comment)); err != nil {
+	if _, err := runner.Run(t.Context(), testJob(command.Comment)); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -419,7 +419,7 @@ func TestRunnerReturnsPartialAuditArtifactsOnFailure(t *testing.T) {
 				}
 				return aicli.Result{Tokens: usage.Tokens{Input: 9}}, failure
 			}}
-			result, err := runner.Run(context.Background(), job)
+			result, err := runner.Run(t.Context(), job)
 			wantArtifacts := 2
 			if field != "" {
 				wantArtifacts = 1
@@ -528,7 +528,7 @@ func TestRunnerRejectsGitMetadataMutation(t *testing.T) {
 						}
 					}
 				}
-				result, err := runner.Run(context.Background(), job)
+				result, err := runner.Run(t.Context(), job)
 				if !errors.Is(err, monitor.ErrTerminalJob) || result.Answer != "" || len(result.Changes) != 0 || !strings.Contains(err.Error(), wantError) || calls != wantCalls || len(result.Calls) != wantCalls || result.Calls[len(result.Calls)-1].Role != role {
 					t.Fatalf("metadata mutation accepted or wrong role failed: calls=%d want=%d result=%+v error=%v want=%q", calls, wantCalls, result, err, wantError)
 				}

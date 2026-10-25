@@ -49,7 +49,7 @@ func TestMaterializeReadChangesAndApply(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "new-empty"), nil, 0600); err != nil {
 		t.Fatal(err)
 	}
-	changes, err := ReadChanges(context.Background(), root, []Change{
+	changes, err := ReadChanges(t.Context(), root, []Change{
 		{Path: "binary", Mode: Executable}, {Path: "deleted", Delete: true},
 		{Path: "to-directory", Delete: true}, {Path: "to-directory/child", Mode: Regular},
 		{Path: "to-file", Mode: Regular}, {Path: "to-file/child", Delete: true}, {Path: "new-empty", Mode: Regular},
@@ -72,7 +72,7 @@ func TestMaterializeReadChangesAndApply(t *testing.T) {
 		{Path: "to-directory/child", Mode: Regular, Data: []byte("new")},
 		{Path: "to-file", Mode: Regular, Data: []byte("new file")}, {Path: "new-empty", Mode: Regular},
 	}
-	if err := CheckUnchanged(context.Background(), copyRoot, final); err != nil {
+	if err := CheckUnchanged(t.Context(), copyRoot, final); err != nil {
 		t.Fatalf("applied files differ from expected final source: %v", err)
 	}
 	data, err := os.ReadFile(filepath.Join(copyRoot, "binary"))
@@ -209,7 +209,7 @@ func TestSourcePreservesGitLegalCaseAndBackslashPaths(t *testing.T) {
 			t.Fatalf("source path %q=%q,%v", file.Path, data, err)
 		}
 	}
-	if err := CheckUnchanged(context.Background(), root, files); err != nil {
+	if err := CheckUnchanged(t.Context(), root, files); err != nil {
 		t.Fatalf("unchanged Git-legal source=%v", err)
 	}
 }
@@ -252,7 +252,7 @@ func TestCaseOnlyRenameAppliesDeletionBeforeCreation(t *testing.T) {
 			if err != nil || len(entries) != 1 || entries[0].Name() != "foo" {
 				t.Fatalf("renamed root entries=%v,%v", entries, err)
 			}
-			if err := CheckUnchanged(context.Background(), root, []File{{Path: "foo/a", Mode: Regular, Data: []byte("after")}}); err != nil {
+			if err := CheckUnchanged(t.Context(), root, []File{{Path: "foo/a", Mode: Regular, Data: []byte("after")}}); err != nil {
 				t.Fatalf("renamed source=%v", err)
 			}
 		})
@@ -359,7 +359,7 @@ func TestSnapshotBoundsAndIdentity(t *testing.T) {
 			t.Fatalf("context identity refusal lost: %v", err)
 		}
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	if err := CheckUnchanged(ctx, t.TempDir(), nil); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled context validation=%v", err)
@@ -486,7 +486,7 @@ func TestCheckUnchangedNamesFirstDeletedPath(t *testing.T) {
 	root := privateRoot(t)
 	base := []File{{Path: "z-last", Mode: Regular}, {Path: "a-first", Mode: Regular}}
 	for range 5 {
-		if err := CheckUnchanged(context.Background(), root, base); err == nil || err.Error() != `workspace changed: deleted "a-first"` {
+		if err := CheckUnchanged(t.Context(), root, base); err == nil || err.Error() != `workspace changed: deleted "a-first"` {
 			t.Fatalf("deletion diagnostic lacks stable path: %v", err)
 		}
 	}
@@ -497,7 +497,7 @@ func TestCollectionBoundsFileCountsAndBytes(t *testing.T) {
 	for i := range files {
 		files[i] = File{Path: fmt.Sprintf("source-%d", i), Mode: Regular}
 	}
-	if err := CheckUnchanged(context.Background(), filepath.Join(t.TempDir(), "absent"), files); err == nil || !strings.Contains(err.Error(), "source exceeds file limit") {
+	if err := CheckUnchanged(t.Context(), filepath.Join(t.TempDir(), "absent"), files); err == nil || !strings.Contains(err.Error(), "source exceeds file limit") {
 		t.Fatalf("oversized baseline validation=%v", err)
 	}
 	root := privateRoot(t)
@@ -513,7 +513,7 @@ func TestCollectionBoundsFileCountsAndBytes(t *testing.T) {
 		if err := os.Truncate(name, size); err != nil {
 			t.Fatal(err)
 		}
-		if err := CheckUnchanged(context.Background(), root, base); err == nil || !strings.Contains(err.Error(), "byte limit") || !strings.Contains(err.Error(), "workspace changed") {
+		if err := CheckUnchanged(t.Context(), root, base); err == nil || !strings.Contains(err.Error(), "byte limit") || !strings.Contains(err.Error(), "workspace changed") {
 			t.Fatalf("grown source size=%d read=%v", size, err)
 		}
 	}
@@ -529,7 +529,7 @@ func TestWalkBoundsEntries(t *testing.T) {
 	check := func(repository, overflow bool) {
 		t.Helper()
 		visited := 0
-		err := walk(context.Background(), root, repository, func(string, os.DirEntry) error {
+		err := walk(t.Context(), root, repository, func(string, os.DirEntry) error {
 			visited++
 			return nil
 		})
@@ -595,7 +595,7 @@ func TestCheckUnchangedDetectsSameSizeContentWithPreservedMtime(t *testing.T) {
 	if err := os.Chtimes(name, info.ModTime(), info.ModTime()); err != nil {
 		t.Fatal(err)
 	}
-	if err := CheckUnchanged(context.Background(), root, base); err == nil || !strings.Contains(err.Error(), "workspace changed") {
+	if err := CheckUnchanged(t.Context(), root, base); err == nil || !strings.Contains(err.Error(), "workspace changed") {
 		t.Fatalf("hidden content mutation validation=%v", err)
 	}
 }
@@ -661,13 +661,13 @@ func TestCollectionUsesOwnerExecuteBitForGitMode(t *testing.T) {
 			if mode&0100 != 0 {
 				wantMode = Executable
 			}
-			if err := CheckUnchanged(context.Background(), root, base); (err == nil) != (mode == 0644) || (err != nil && !strings.Contains(err.Error(), "workspace changed")) {
+			if err := CheckUnchanged(t.Context(), root, base); (err == nil) != (mode == 0644) || (err != nil && !strings.Contains(err.Error(), "workspace changed")) {
 				t.Fatalf("mode-only validation=%v, want mode=%o", err, wantMode)
 			}
 			if err := os.WriteFile(filepath.Join(root, "file"), []byte("after"), mode); err != nil {
 				t.Fatal(err)
 			}
-			changes, err := ReadChanges(context.Background(), root, []Change{{Path: "file", Mode: wantMode}})
+			changes, err := ReadChanges(t.Context(), root, []Change{{Path: "file", Mode: wantMode}})
 			if err != nil || len(changes) != 1 || changes[0].Mode != wantMode || string(changes[0].Data) != "after" {
 				t.Fatalf("edited file=%+v,%v, want mode=%o", changes, err, wantMode)
 			}

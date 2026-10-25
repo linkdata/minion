@@ -50,7 +50,7 @@ func TestExecuteScopesAttemptIdentity(t *testing.T) {
 			request.Command.Action = command.Comment
 			request.Repository.Actions = []string{"comment"}
 			for range 2 {
-				if err := orchestrator.Execute(context.Background(), request); err != nil {
+				if err := orchestrator.Execute(t.Context(), request); err != nil {
 					t.Fatal(err)
 				}
 			}

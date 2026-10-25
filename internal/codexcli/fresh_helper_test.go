@@ -45,7 +45,7 @@ func TestRunFreshAndBoundaryHelpers(t *testing.T) {
 			home := os.Getenv("CODEX_HOME")
 			writeUsageRollout(t, home, "root", "", usageEvent("task_started", "root-turn"), usageRecord("root", "root-turn", "root-response", 10, 0, 1), usageEvent("task_complete", "root-turn"))
 			writeUsageRolloutBoundary(t, home, "child", "root", scenario.boundary, scenario.events...)
-			result, err := Run(context.Background(), t.TempDir(), "synthetic helper lifecycle fixture", false, "", config.CodexConfig{})
+			result, err := Run(t.Context(), t.TempDir(), "synthetic helper lifecycle fixture", false, "", config.CodexConfig{})
 			want := usage.Tokens{Input: 10, Output: 1}
 			if scenario.childInput != 0 {
 				want = usage.Tokens{Input: 30, CachedInput: 5, Output: 3}
@@ -60,7 +60,7 @@ func TestRunFreshAndBoundaryHelpers(t *testing.T) {
 func TestRunCancelsMalformedOutputAndRetainsParseCause(t *testing.T) {
 	installFakeCodex(t, "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"root\"}' '{damaged'\nexec sleep 30\n")
 	writeUsageRollout(t, os.Getenv("CODEX_HOME"), "root", "", usageEvent("task_started", "root-turn"), usageRecord("root", "root-turn", "response", 10, 0, 1), usageEvent("task_complete", "root-turn"))
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	result, err := Run(ctx, t.TempDir(), "task", false, "", config.CodexConfig{})
 	if err == nil || !strings.Contains(err.Error(), "invalid JSONL event") || errors.Is(err, aicli.ErrOutputLimit) || ctx.Err() != nil || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 10, Output: 1}) {
@@ -75,7 +75,7 @@ func TestRunCancelsMalformedOutputAndRetainsParseCause(t *testing.T) {
 func TestRunCancelsJSONLOutputLimit(t *testing.T) {
 	installFakeCodex(t, "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"root\"}'\nprintf '%*s\\n' "+strconv.Itoa(aicli.MaxEventBytes+1)+" ''\nexec sleep 30\n")
 	writeUsageRollout(t, os.Getenv("CODEX_HOME"), "root", "", usageEvent("task_started", "root-turn"), usageRecord("root", "root-turn", "response", 10, 0, 1), usageEvent("task_complete", "root-turn"))
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	result, err := Run(ctx, t.TempDir(), "task", false, "", config.CodexConfig{})
 	if !errors.Is(err, aicli.ErrOutputLimit) || ctx.Err() != nil || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 10, Output: 1}) {

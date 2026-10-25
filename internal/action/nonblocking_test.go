@@ -46,7 +46,7 @@ func TestCriticEvidencePreservesBlockerVerdicts(t *testing.T) {
 				}
 				return aicli.Result{Answer: tt.answer, Tokens: usage.Tokens{Input: 11, Output: 2}}, tt.err
 			}}
-			result, err := runner.Run(context.Background(), job)
+			result, err := runner.Run(t.Context(), job)
 			validVerdict := tt.approved || tt.noBlockers || tt.hasBlockers
 			if (err == nil) != validVerdict || (tt.err != nil && !errors.Is(err, tt.err)) || len(result.Calls) != 2 || result.validate(job, false) != nil {
 				t.Fatalf("invalid critic outcome: result=%+v err=%v", result, err)
@@ -134,7 +134,7 @@ func TestRunnerNonblockingThresholdRequiresFreshFullReview(t *testing.T) {
 				blocking := (tt.fullBlockers && request.reviewPhase == reviewFull) || (tt.verificationBlockers && request.reviewPhase == reviewVerification)
 				return aicli.Result{Answer: fmt.Sprintf(`{"review_complete":true,"approved":false,"has_blockers":%t,"feedback":"Remaining finding"}`, blocking)}, nil
 			}}
-			result, err := runner.Run(context.Background(), job)
+			result, err := runner.Run(t.Context(), job)
 			if (err == nil) != (tt.wantReason != "") || len(phases) != tt.wantCalls {
 				t.Fatalf("policy result=%q error=%v phases=%v", result.Answer, err, phases)
 			}

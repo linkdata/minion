@@ -16,6 +16,7 @@ import (
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
+	"github.com/linkdata/minion/internal/gitwork"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/workspace"
 )
@@ -38,7 +39,7 @@ func TestReviewSnapshotFixFreezesOnlyExportedCandidate(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeFixtureFile(t, source, "runtime.log", make([]byte, workspace.MaxChangeBytes+1))
-	snapshot := mustFreeze(t, context.Background(), t.TempDir(), job, source, "", index)
+	snapshot := mustFreeze(t, t.Context(), t.TempDir(), job, source, "", index)
 	if snapshot.source == source || snapshot.outputDir != "" || len(snapshot.changes) != 3 {
 		t.Fatalf("unexpected critic snapshot: %+v", snapshot)
 	}
@@ -55,7 +56,7 @@ func TestReviewSnapshotFixFreezesOnlyExportedCandidate(t *testing.T) {
 	if err != nil || runtime.GOOS != "windows" && info.Mode().Perm() != 0755 {
 		t.Fatalf("frozen executable=%v,%v", info, err)
 	}
-	if err := snapshot.verify(context.Background()); err != nil {
+	if err := snapshot.verify(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	writeFixtureFile(t, source, "source.txt", []byte("changed after proposal"))
@@ -63,7 +64,7 @@ func TestReviewSnapshotFixFreezesOnlyExportedCandidate(t *testing.T) {
 	if err != nil || string(data) != "reviewed" {
 		t.Fatalf("background change reached critic copy=%q,%v", data, err)
 	}
-	if err := snapshot.verify(context.Background()); err != nil {
+	if err := snapshot.verify(t.Context()); err != nil {
 		t.Fatalf("live source edit invalidated the frozen candidate: %v", err)
 	}
 	for _, change := range snapshot.changes {
@@ -96,14 +97,14 @@ func TestReviewSnapshotFixFreezesFinalReplacementLayout(t *testing.T) {
 	for _, file := range want[1:] {
 		writeFixtureFile(t, source, file.Path, file.Data)
 	}
-	snapshot := mustFreeze(t, context.Background(), t.TempDir(), job, source, "", index)
+	snapshot := mustFreeze(t, t.Context(), t.TempDir(), job, source, "", index)
 	if len(snapshot.changes) != 6 {
 		t.Fatalf("replacement changes=%+v", snapshot.changes)
 	}
-	if err := workspace.CheckChangesUnchanged(context.Background(), snapshot.source, want, nil); err != nil {
+	if err := workspace.CheckChangesUnchanged(t.Context(), snapshot.source, want, nil); err != nil {
 		t.Fatalf("frozen critic tree differs from exported changes: %v", err)
 	}
-	if err := snapshot.verify(context.Background()); err != nil {
+	if err := snapshot.verify(t.Context()); err != nil {
 		t.Fatalf("unchanged candidate verification failed: %v", err)
 	}
 }
@@ -128,7 +129,7 @@ func TestReviewSnapshotFreezesRawAuditArtifactsAndAbsence(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	snapshot := mustFreeze(t, context.Background(), workRoot, job, source, output, nil)
+	snapshot := mustFreeze(t, t.Context(), workRoot, job, source, output, nil)
 	if snapshot.source != source || snapshot.ownedSource {
 		t.Fatal("copied an already read-only audit source")
 	}
@@ -139,7 +140,7 @@ func TestReviewSnapshotFreezesRawAuditArtifactsAndAbsence(t *testing.T) {
 	if _, err := os.Lstat(filepath.Join(snapshot.outputDir, "findings.json")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("absent artifact was created: %v", err)
 	}
-	if err := snapshot.verify(context.Background()); err != nil {
+	if err := snapshot.verify(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	writeFixtureFile(t, output, "REPORT.md", []byte("background report edit"))
@@ -147,7 +148,7 @@ func TestReviewSnapshotFreezesRawAuditArtifactsAndAbsence(t *testing.T) {
 	if err != nil || string(data) != "reviewed report" {
 		t.Fatalf("background work changed frozen report=%q,%v", data, err)
 	}
-	if err := snapshot.verify(context.Background()); err != nil {
+	if err := snapshot.verify(t.Context()); err != nil {
 		t.Fatalf("live report edit invalidated frozen publication bytes: %v", err)
 	}
 	for _, artifact := range snapshot.artifacts {
@@ -177,7 +178,7 @@ func TestReviewSnapshotRejectsOversizedReports(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeFixtureFile(t, output, "findings.json", make([]byte, maxAuditArtifactBytes+1))
-	snapshot, err := freezeReviewSnapshot(context.Background(), workRoot, job, source, output, nil, "")
+	snapshot, err := freezeReviewSnapshot(t.Context(), workRoot, job, source, output, nil, "")
 	if snapshot != nil {
 		t.Cleanup(func() {
 			if err := snapshot.close(); err != nil {
@@ -213,7 +214,7 @@ func TestReviewSnapshotCleansFailedFixCandidateMaterialization(t *testing.T) {
 			if stage == "addition" {
 				writeFixtureFile(t, source, name, []byte("added"))
 			}
-			control, err := freezeReviewSnapshot(context.Background(), t.TempDir(), job, source, "", index, "")
+			control, err := freezeReviewSnapshot(t.Context(), t.TempDir(), job, source, "", index, "")
 			if err != nil {
 				t.Fatalf("valid candidate failed under short root: %v", err)
 			}
@@ -227,7 +228,7 @@ func TestReviewSnapshotCleansFailedFixCandidateMaterialization(t *testing.T) {
 			if err := os.MkdirAll(workRoot, 0700); err != nil {
 				t.Fatal(err)
 			}
-			failed, err := freezeReviewSnapshot(context.Background(), workRoot, job, source, "", index, "")
+			failed, err := freezeReviewSnapshot(t.Context(), workRoot, job, source, "", index, "")
 			if failed == nil || !failed.ownedSource || !errors.Is(err, syscall.ENAMETOOLONG) {
 				t.Fatalf("expected %s filesystem failure: snapshot=%v error=%v", stage, failed, err)
 			}
@@ -276,7 +277,7 @@ func TestReviewSnapshotRejectsCriticCopyMutation(t *testing.T) {
 				}
 				return aicli.Result{Answer: approvedCritiqueJSON}, nil
 			}}
-			result, err := runner.Run(context.Background(), job)
+			result, err := runner.Run(t.Context(), job)
 			wantCalls := 2
 			if test.phase == reviewVerification {
 				wantCalls = 4
@@ -313,7 +314,7 @@ func TestReviewSnapshotRejectsCriticCopyMutation(t *testing.T) {
 func TestReviewSnapshotCancellationKeepsVerdictWithoutIntegrityFailure(t *testing.T) {
 	for _, interrupted := range []bool{false, true} {
 		t.Run(fmt.Sprintf("canceled=%t", interrupted), func(t *testing.T) {
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			job := withClaudeCritic(testJob(command.Fix))
 			runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
@@ -349,15 +350,19 @@ func TestReviewSnapshotChecksExactFrozenFiles(t *testing.T) {
 					t.Skip("Windows does not represent setuid in file modes")
 				}
 				job := testJob(command.Fix)
-				index, source := offlineIndexFixture(t, job.Source.Files)
+				var index *gitwork.OfflineIndex
+				var source string
 				output, name := "", "source.txt"
 				if reports {
 					job.Action = command.SecurityAudit
-					output, name, index = t.TempDir(), "REPORT.md", nil
+					source = t.TempDir()
+					output, name = t.TempDir(), "REPORT.md"
 					writeFixtureFile(t, output, name, []byte("reviewed report"))
+				} else {
+					index, source = offlineIndexFixture(t, job.Source.Files)
 				}
-				snapshot := mustFreeze(t, context.Background(), t.TempDir(), job, source, output, index)
-				if err := snapshot.verify(context.Background()); err != nil {
+				snapshot := mustFreeze(t, t.Context(), t.TempDir(), job, source, output, index)
+				if err := snapshot.verify(t.Context()); err != nil {
 					t.Fatalf("unchanged frozen copy rejected: %v", err)
 				}
 				root, want := snapshot.source, "frozen candidate source"
@@ -381,7 +386,7 @@ func TestReviewSnapshotChecksExactFrozenFiles(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
-				if err := snapshot.verify(context.Background()); err == nil || !strings.Contains(err.Error(), want) {
+				if err := snapshot.verify(t.Context()); err == nil || !strings.Contains(err.Error(), want) {
 					t.Fatalf("frozen %s mutation accepted: %v", mutation, err)
 				}
 				if reports {
@@ -390,7 +395,7 @@ func TestReviewSnapshotChecksExactFrozenFiles(t *testing.T) {
 						t.Fatalf("test changed the live reports instead of the frozen copy: %q,%v", data, err)
 					}
 				} else {
-					changes, err := index.Changes(context.Background())
+					changes, err := index.Changes(t.Context())
 					if err != nil || len(changes) != 0 {
 						t.Fatalf("test changed live source instead of frozen copy: %+v,%v", changes, err)
 					}

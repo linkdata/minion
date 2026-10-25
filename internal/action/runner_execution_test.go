@@ -44,7 +44,7 @@ func (c runnerExecutionCheckpoints) Review(value ReviewCheckpoint) error {
 func TestRunnerExecuteRequiresCheckpoints(t *testing.T) {
 	job := testJob(command.Comment)
 	runner := Runner{runModel: forbidModel(t)}
-	result, err := runner.Execute(context.Background(), job, nil)
+	result, err := runner.Execute(t.Context(), job, nil)
 	if !errors.Is(err, monitor.ErrTerminalJob) || !result.matchesJob(job) || len(result.Calls) != 0 || result.Answer != "" {
 		t.Fatalf("missing required checkpoints were accepted: result=%+v error=%v", result, err)
 	}
@@ -125,7 +125,7 @@ func TestRunnerExecuteCheckpointsInsideObserverAndSeparatesDecision(t *testing.T
 			return nil
 		},
 	}
-	result, err := runner.Execute(context.Background(), job, checkpoints)
+	result, err := runner.Execute(t.Context(), job, checkpoints)
 	wantEvents := []string{
 		"review/0/", "observe-before/main", "before/main", "native/main", "after/main", "observe-after/main", "review/1/",
 		"observe-before/critic", "before/critic", "native/critic", "after/critic", "observe-after/critic", "review/2/", "review/2/approved",
@@ -181,7 +181,7 @@ func TestRunnerExecuteCallCheckpointFailurePreservesReturnedFacts(t *testing.T) 
 					return nil
 				},
 			}
-			result, err := runner.Execute(context.Background(), job, checkpoints)
+			result, err := runner.Execute(t.Context(), job, checkpoints)
 			if !errors.Is(err, checkpointErr) || errors.Is(err, monitor.ErrTerminalJob) == test.before || nativeCalls != test.wantCalls || len(result.Calls) != test.wantCalls || !slices.Equal(result.Calls, captured) || result.Answer != "" || result.CriticStopReason != "" {
 				t.Fatalf("checkpoint failure continued or erased paid evidence: result=%+v captured=%+v calls=%d error=%v", result, captured, nativeCalls, err)
 			}
@@ -213,7 +213,7 @@ func TestRunnerExecuteStopsAfterPaidReviewCheckpointFailure(t *testing.T) {
 		}
 		return aicli.Result{Answer: proposalJSON("Candidate answer", ""), Tokens: tokens, UsageComplete: true}, nil
 	}}
-	result, err := runner.Execute(context.Background(), job, runnerExecutionCheckpoints{
+	result, err := runner.Execute(t.Context(), job, runnerExecutionCheckpoints{
 		after: func(value CallCheckpoint) error {
 			captured = append(captured, value.Call)
 			return nil
@@ -242,7 +242,7 @@ func TestRunnerExecuteStopsAfterPaidReviewCheckpointFailure(t *testing.T) {
 
 func TestRunnerExecuteAfterCallRunsAfterNativeCancellation(t *testing.T) {
 	job := testJob(command.Comment)
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	tokens := usage.Tokens{Input: 17, CachedInput: 2, Output: 3}
 	var captured []CallUsage
@@ -264,7 +264,7 @@ func TestRunnerExecuteAfterCallRunsAfterNativeCancellation(t *testing.T) {
 
 func TestRunnerExecuteObserverCancellationSkipsCallCheckpoints(t *testing.T) {
 	job := testJob(command.Comment)
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	observed := false
 	runner := Runner{WorkRoot: t.TempDir(), runModel: forbidModel(t), aroundModel: func(ctx context.Context, request modelRun, next modelCall) (aicli.Result, error) {

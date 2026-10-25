@@ -76,7 +76,7 @@ func TestExecuteRetainsPaidCriticReceiptAfterSuppliedMetadataIntegrityFailure(t 
 			}
 			request := usageJob()
 			request.Command, request.Repository.Actions = command.Command{Name: "comment", Action: command.Comment}, []string{"comment"}
-			err := e.Execute(context.Background(), request)
+			err := e.Execute(t.Context(), request)
 			if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "supplied repository changed") || !strings.Contains(err.Error(), "Git metadata changed") || calls != 2 || publications.Load() != 0 {
 				t.Fatalf("supplied metadata integrity failure continued or published: calls=%d publications=%d error=%v", calls, publications.Load(), err)
 			}

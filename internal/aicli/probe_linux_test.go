@@ -4,7 +4,6 @@ package aicli
 
 import (
 	"bytes"
-	"context"
 	"os/exec"
 	"testing"
 )
@@ -14,7 +13,7 @@ func TestProbePreservesLogicalArgv0(t *testing.T) {
 	if err != nil {
 		t.Skip("cat is unavailable")
 	}
-	output, err := Probe(context.Background(), cat, "logical-name", []string{"/proc/self/cmdline"}, t.TempDir(), nil, "", "")
+	output, err := Probe(t.Context(), cat, "logical-name", []string{"/proc/self/cmdline"}, t.TempDir(), nil, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

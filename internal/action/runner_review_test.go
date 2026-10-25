@@ -57,7 +57,7 @@ func TestRunnerSnapshotCleanupRetryKeepsValidatedResult(t *testing.T) {
 		}
 		return aicli.Result{Answer: approvedCritiqueJSON}, nil
 	}}
-	result, err := runner.Run(context.Background(), job)
+	result, err := runner.Run(t.Context(), job)
 	if err != nil || journal.err != nil || calls != 2 || result.Answer != "Done." || len(result.Diagnostics) != 0 || strings.Count(journal.String(), "cleanup retry scheduled") != 1 {
 		t.Fatalf("recovered snapshot cleanup: calls=%d result=%+v err=%v restore=%v log=%q", calls, result, err, journal.err, journal.String())
 	}
@@ -79,7 +79,7 @@ func TestRunnerAuditValidationCleanupRestoresRestrictedDirectory(t *testing.T) {
 		}
 		return aicli.Result{Answer: "Audit report\n"}, nil
 	}}
-	result, err := runner.Run(context.Background(), job)
+	result, err := runner.Run(t.Context(), job)
 	if err != nil || result.Answer != "" || len(result.Artifacts) != len(auditArtifacts) || len(result.Diagnostics) != 0 {
 		t.Fatalf("cleanup discarded validated audit: %+v,%v", result, err)
 	}
@@ -142,7 +142,7 @@ func TestRunnerReviewRevisionsFreezeCleanIndependentInputs(t *testing.T) {
 		}
 		return aicli.Result{Answer: approvedCritiqueJSON}, nil
 	}
-	result, err := runner.Run(context.Background(), job)
+	result, err := runner.Run(t.Context(), job)
 	if err != nil || result.Answer != "answer 2" || len(result.Changes) != 1 || string(result.Changes[0].Data) != "candidate 2" {
 		t.Fatalf("revised result=%+v,%v", result, err)
 	}
@@ -178,7 +178,7 @@ func TestRunnerReviewExportsFrozenSourceDespiteLiveChanges(t *testing.T) {
 				}
 				return aicli.Result{Answer: fmt.Sprintf(`{"approved":%t,"has_blockers":%t,"review_complete":true,"feedback":%q}`, accepted, !accepted, feedback)}, nil
 			}}
-			result, err := runner.Run(context.Background(), job)
+			result, err := runner.Run(t.Context(), job)
 			wantCalls, round := 2, 1
 			if !approved {
 				wantCalls, round = 5, 2
@@ -258,7 +258,7 @@ func TestRunnerAuditReviewFreezesAndExportsRawReports(t *testing.T) {
 				}
 				return aicli.Result{Answer: approvedCritiqueJSON}, nil
 			}
-			result, err := runner.Run(context.Background(), job)
+			result, err := runner.Run(t.Context(), job)
 			wantCritics := 1
 			if scenario == "empty architecture repaired" {
 				wantCritics = 3
@@ -301,7 +301,7 @@ func TestRunnerReviewRejectsInvalidFixBeforeCritic(t *testing.T) {
 				writeFixtureFile(t, request.dir, name, []byte("invalid change"))
 				return aicli.Result{Answer: proposalJSON("candidate", "")}, nil
 			}}
-			if _, err := runner.Run(context.Background(), job); !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), want) || calls != 1 {
+			if _, err := runner.Run(t.Context(), job); !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), want) || calls != 1 {
 				t.Fatalf("invalid layout calls=%d error=%v", calls, err)
 			}
 		})

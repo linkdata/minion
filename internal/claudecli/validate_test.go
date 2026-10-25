@@ -1,7 +1,6 @@
 package claudecli
 
 import (
-	"context"
 	"os"
 	"strings"
 	"testing"
@@ -36,7 +35,7 @@ fi
 			if err := os.Remove(binary + ".args"); err != nil && !os.IsNotExist(err) {
 				t.Fatal(err)
 			}
-			cfg, err := Validate(context.Background(), config.ClaudeConfig{Model: tc.model, Effort: tc.effort})
+			cfg, err := Validate(t.Context(), config.ClaudeConfig{Model: tc.model, Effort: tc.effort})
 			if args := readFile(t, binary+".args"); !strings.Contains(args, "--no-session-persistence\n") || !strings.Contains(args, "--input-format\nstream-json\n") || !strings.Contains(args, "--json-schema\n{\"type\":\"object\"}\n") {
 				t.Fatalf("model discovery retained a session or lost initialization framing: %q", args)
 			}
@@ -60,7 +59,7 @@ else
   exit 1
 fi
 `)
-	if _, err := Validate(context.Background(), config.ClaudeConfig{}); err == nil || !strings.Contains(err.Error(), "model discovery") {
+	if _, err := Validate(t.Context(), config.ClaudeConfig{}); err == nil || !strings.Contains(err.Error(), "model discovery") {
 		t.Fatalf("Validate = %v", err)
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -41,7 +42,7 @@ func TestWaitExitedParsesTheLastCommDelimiter(t *testing.T) {
 					t.Error(err)
 				}
 			}()
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			cancel()
 			err = (&Process{stat: pinned}).WaitExited(ctx)
 			switch {
@@ -86,20 +87,22 @@ func TestPinProcessRequiresAValidPIDFile(t *testing.T) {
 }
 
 func TestWaitForProcessRetriesUnpublishedPID(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "pid")
-	if err := os.WriteFile(path, nil, 0600); err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
-	child, err := WaitForProcess(ctx, path, make(chan struct{}))
-	if child != nil || !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "fixture child did not start") {
-		t.Fatalf("unpublished PID stopped polling before startup deadline: %v, %v", child, err)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "pid")
+		if err := os.WriteFile(path, nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+		defer cancel()
+		child, err := WaitForProcess(ctx, path, make(chan struct{}))
+		if child != nil || !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "fixture child did not start") {
+			t.Fatalf("unpublished PID stopped polling before startup deadline: %v, %v", child, err)
+		}
+	})
 }
 
 func TestCleanupDoesNotSignalStalePID(t *testing.T) {
-	runCtx, stop := context.WithTimeout(context.Background(), 3*time.Second)
+	runCtx, stop := context.WithTimeout(t.Context(), 3*time.Second)
 	cmd := exec.CommandContext(runCtx, "/bin/sh", "-c", "IFS= read -r value; printf '%s\\n' \"$value\"")
 	input, err := cmd.StdinPipe()
 	if err != nil {
@@ -126,7 +129,7 @@ func TestCleanupDoesNotSignalStalePID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	if err := child.Cleanup(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cleanup of unrelated process: %v", err)

@@ -1,7 +1,6 @@
 package codexcli
 
 import (
-	"context"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -27,7 +26,7 @@ func TestUsageSessionRejectsChangedBaselineResponseIdentity(t *testing.T) {
 		{"old response under new turn", "new", 100, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			ctx, home := context.Background(), t.TempDir()
+			ctx, home := t.Context(), t.TempDir()
 			root := writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "old", "r1", 100)...)
 			var session usageSession
 			session.begin(ctx, home, "root", time.Now())
@@ -43,7 +42,7 @@ func TestUsageSessionRejectsChangedBaselineResponseIdentity(t *testing.T) {
 func TestUsageSessionOverflowRetainsCurrentInvocationLowerBound(t *testing.T) {
 	for _, mode := range []string{"current helper sum", "late old responses", "old baseline plus late response"} {
 		t.Run(mode, func(t *testing.T) {
-			ctx, home := context.Background(), t.TempDir()
+			ctx, home := t.Context(), t.TempDir()
 			old := int64(0)
 			if mode == "old baseline plus late response" {
 				old = 1
@@ -94,7 +93,7 @@ func TestUsageRecordLimit(t *testing.T) {
 		}
 		budget := int64(maxUsageScanBytes)
 		capture := &usageBoundary{valid: true, turns: map[string]bool{}}
-		got, complete, _, err := readRolloutUsageFrom(context.Background(), rolloutMeta{ID: "root", path: path}, "root", &budget, rolloutUsageMode{capture: capture})
+		got, complete, _, err := readRolloutUsageFrom(t.Context(), rolloutMeta{ID: "root", path: path}, "root", &budget, rolloutUsageMode{capture: capture})
 		if got != (usage.Tokens{Input: maxUsageRecords}) || complete == extra || err != nil {
 			t.Fatalf("record cap: %+v complete=%t extra=%t err=%v", got, complete, extra, err)
 		}
@@ -105,7 +104,7 @@ func TestUsageRecordLimit(t *testing.T) {
 	// Logical retention limits must not stop a later trustworthy root floor.
 	appendUsageEvents(t, path, usageSnapshot(30, maxUsageRecords+17, 0, 0))
 	budget := int64(maxUsageScanBytes)
-	got, complete, _, err := readRolloutUsage(context.Background(), rolloutMeta{ID: "root", path: path}, "root", &budget)
+	got, complete, _, err := readRolloutUsage(t.Context(), rolloutMeta{ID: "root", path: path}, "root", &budget)
 	if got != (usage.Tokens{Input: maxUsageRecords + 17}) || complete || err != nil {
 		t.Fatalf("record cap lost later root lower bound: %+v complete=%t err=%v", got, complete, err)
 	}
@@ -114,7 +113,7 @@ func TestUsageRecordLimit(t *testing.T) {
 	child := writeUsageRollout(t, t.TempDir(), "child", "root", childEvents, usageRecord("child", "turn", "one-more", 1, 0, 0), usageEvent("task_complete", "turn"))
 	boundary := int64(9)
 	budget = maxUsageScanBytes
-	got, complete, _, err = readRolloutUsage(context.Background(), rolloutMeta{ID: "child", path: child, HistoryStart: &boundary}, "root", &budget)
+	got, complete, _, err = readRolloutUsage(t.Context(), rolloutMeta{ID: "child", path: child, HistoryStart: &boundary}, "root", &budget)
 	if got != (usage.Tokens{Input: maxUsageRecords}) || complete || err != nil {
 		t.Fatalf("counter-only cap revoked helper lifecycle proof: %+v complete=%t err=%v", got, complete, err)
 	}
@@ -139,7 +138,7 @@ func TestUsageLifecycleTurnLimitDoesNotCertifyCappedHelper(t *testing.T) {
 		}
 		budget := int64(maxUsageScanBytes)
 		capture := &usageBoundary{valid: true, turns: map[string]bool{}}
-		got, complete, _, err := readRolloutUsageFrom(context.Background(), meta, "root", &budget, rolloutUsageMode{capture: capture})
+		got, complete, _, err := readRolloutUsageFrom(t.Context(), meta, "root", &budget, rolloutUsageMode{capture: capture})
 		if got != (usage.Tokens{Input: 7}) || complete == extra || errors.Is(err, errUnverifiedChildren) != extra || (err != nil && !extra) {
 			t.Fatalf("helper lifecycle cap: %+v complete=%t extra=%t err=%v", got, complete, extra, err)
 		}
@@ -167,7 +166,7 @@ func TestUsageTurnLimitCountsLifecycleAndResponseIdentitiesTogether(t *testing.T
 			appendUsageEvents(t, path, usageRecord("root", "one-more", "one-more", 1, 0, 0), usageEvent("task_complete", "one-more"))
 		}
 		budget := int64(maxUsageScanBytes)
-		got, complete, _, err := readRolloutUsage(context.Background(), rolloutMeta{ID: "root", path: path}, "root", &budget)
+		got, complete, _, err := readRolloutUsage(t.Context(), rolloutMeta{ID: "root", path: path}, "root", &budget)
 		if got != (usage.Tokens{Input: maxUsageRecords / 2}) || complete == extra || err != nil {
 			t.Fatalf("disjoint turn trackers exceeded their shared cap: %+v complete=%t extra=%t err=%v", got, complete, extra, err)
 		}
@@ -178,7 +177,7 @@ func TestUsageLateOldResponseLimitPreservesSubtractionCertainty(t *testing.T) {
 	if testing.Short() {
 		t.Skip("scans the actual 100000-record identity boundary")
 	}
-	ctx := context.Background()
+	ctx := t.Context()
 	path := writeUsageRollout(t, t.TempDir(), "root", "", append(completedUsageTurn("root", "old", "baseline", 0), usageSnapshot(25, 0, 0, 0))...)
 	before := &usageBoundary{valid: true, turns: map[string]bool{}}
 	budget := int64(maxUsageScanBytes)
@@ -212,7 +211,7 @@ func TestUsageCappedBaselineCannotAttributeDroppedOldIdentity(t *testing.T) {
 	if testing.Short() {
 		t.Skip("scans the actual 100000-record identity boundary")
 	}
-	ctx := context.Background()
+	ctx := t.Context()
 	var events strings.Builder
 	for i := range maxUsageRecords + 1 {
 		id := fmt.Sprint(i)
@@ -253,7 +252,7 @@ func TestUnchangedUsageRolloutRespectsExactRemainingBudget(t *testing.T) {
 			if short {
 				budget--
 			}
-			if got := unchangedUsageRollout(context.Background(), path, &before, &budget); got == short {
+			if got := unchangedUsageRollout(t.Context(), path, &before, &budget); got == short {
 				t.Fatalf("byte proof=%t short=%t remaining=%d", got, short, budget)
 			}
 		})
@@ -286,7 +285,7 @@ func TestUsageDiscoveryExactWalkLimitAndNextEntry(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		files, ambiguous, complete := usageFiles(context.Background(), home, "root", time.Now(), known)
+		files, ambiguous, complete := usageFiles(t.Context(), home, "root", time.Now(), known)
 		if complete == extra || len(files) != 1 || ambiguous["root"] || files["root"].path != path {
 			t.Fatalf("walk limit: complete=%t extra=%t files=%+v ambiguous=%v", complete, extra, files, ambiguous)
 		}
@@ -301,7 +300,7 @@ func TestUsageErrorJoinDeduplicatesSharedSentinels(t *testing.T) {
 }
 
 func TestCollectUsageManyMissingHelpersReportOneCompletionCause(t *testing.T) {
-	ctx, home := context.Background(), t.TempDir()
+	ctx, home := t.Context(), t.TempDir()
 	root := writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "old", "r1", 10)...)
 	var session usageSession
 	session.begin(ctx, home, "root", time.Now())

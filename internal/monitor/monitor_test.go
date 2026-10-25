@@ -330,7 +330,7 @@ func TestRunOnceIgnoresCommandWithoutInstalledSkill(t *testing.T) {
 	}
 	handler := &fakeHandler{}
 	m := &Monitor{Config: cfg, GitHub: gh, Handler: handler, Now: func() time.Time { return now }}
-	if _, err := m.RunOnce(context.Background(), openState(t, now.Add(-time.Minute))); err != nil {
+	if _, err := m.RunOnce(t.Context(), openState(t, now.Add(-time.Minute))); err != nil {
 		t.Fatal(err)
 	}
 	if len(handler.jobs) != 0 || gh.currentChecks != 0 {
@@ -413,7 +413,7 @@ func TestRunOnceKeepsFailedRepositoryWindowAndRetriesPendingThreads(t *testing.T
 	handler := &fakeHandler{}
 	clock := now
 	m := &Monitor{Config: cfg, GitHub: gh, Handler: handler, Now: func() time.Time { return clock }}
-	if _, err := m.RunOnce(context.Background(), store); err == nil || !strings.Contains(err.Error(), "a/one") {
+	if _, err := m.RunOnce(t.Context(), store); err == nil || !strings.Contains(err.Error(), "a/one") {
 		t.Fatalf("failed repository poll was not reported: %v", err)
 	}
 	if len(handler.jobs) != 2 || len(store.Data.PendingNotifications) != 0 {
@@ -429,7 +429,7 @@ func TestRunOnceKeepsFailedRepositoryWindowAndRetriesPendingThreads(t *testing.T
 	gh.notificationErrors = nil
 	gh.notifications = append(gh.notifications, notification("a/one", 9, now.Add(30*time.Second)))
 	clock = now.Add(time.Minute)
-	if _, err := m.RunOnce(context.Background(), store); err != nil {
+	if _, err := m.RunOnce(t.Context(), store); err != nil {
 		t.Fatal(err)
 	}
 	if len(handler.jobs) != 3 || handler.jobs[2].Repository.Name != "a/one" || handler.jobs[2].Number != 9 {
@@ -450,7 +450,7 @@ func TestRunOnceSeedsNewRepositoryFromCurrentCursor(t *testing.T) {
 	clock := now
 	handler := &fakeHandler{}
 	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Now: func() time.Time { return clock }}
-	if _, err := m.RunOnce(context.Background(), store); err != nil {
+	if _, err := m.RunOnce(t.Context(), store); err != nil {
 		t.Fatal(err)
 	}
 	advanced := store.Data.Cursor
@@ -464,7 +464,7 @@ func TestRunOnceSeedsNewRepositoryFromCurrentCursor(t *testing.T) {
 		UpdatedAt:  now.Add(30 * time.Second),
 	}}
 	clock = now.Add(time.Minute)
-	if _, err := m.RunOnce(context.Background(), store); err != nil {
+	if _, err := m.RunOnce(t.Context(), store); err != nil {
 		t.Fatal(err)
 	}
 	if len(gh.notificationCalls) != 3 || gh.notificationCalls[2].repo != "b/two" || !gh.notificationCalls[2].since.Equal(advanced) {
@@ -492,7 +492,7 @@ func TestRunOnceChecksPermissionAndDeduplicates(t *testing.T) {
 	store := openState(t, first.Add(-time.Minute))
 	clock := first
 	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Logger: log.New(io.Discard, "", 0), Now: func() time.Time { return clock }}
-	if _, err := m.RunOnce(context.Background(), store); err != nil {
+	if _, err := m.RunOnce(t.Context(), store); err != nil {
 		t.Fatal(err)
 	}
 	if len(handler.jobs) != 1 || gh.checks != 1 || len(gh.reactions) != 1 {
@@ -502,7 +502,7 @@ func TestRunOnceChecksPermissionAndDeduplicates(t *testing.T) {
 		t.Fatalf("state not advanced after successful job: %+v", store.Data)
 	}
 	clock = clock.Add(time.Minute)
-	if _, err := m.RunOnce(context.Background(), store); err != nil {
+	if _, err := m.RunOnce(t.Context(), store); err != nil {
 		t.Fatal(err)
 	}
 	if len(handler.jobs) != 1 || gh.checks != 1 || len(gh.reactions) != 1 || gh.currentChecks != 1 {
@@ -524,7 +524,7 @@ func TestRunOnceRejectsInlineArgumentsAndDeduplicatesCommand(t *testing.T) {
 	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Now: func() time.Time { return now }}
 	for _, body := range []string{"@linkdataminion review history", "@linkdataminion REVIEW HISTORY", "@linkdataminion review now", "@linkdataminion review", "@linkdataminion REVIEW"} {
 		gh.items[0].Body = body
-		if _, err := m.RunOnce(context.Background(), store); err != nil {
+		if _, err := m.RunOnce(t.Context(), store); err != nil {
 			t.Fatal(err)
 		}
 		now = now.Add(time.Minute)
@@ -568,7 +568,7 @@ func TestRunOnceBoundsFailedExecutions(t *testing.T) {
 			clock := now
 			m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Now: func() time.Time { return clock }}
 			for attempt := 1; attempt <= maxJobAttempts; attempt++ {
-				_, err := m.RunOnce(context.Background(), store)
+				_, err := m.RunOnce(t.Context(), store)
 				if (err != nil) != (attempt < maxJobAttempts) {
 					t.Fatalf("attempt %d error = %v", attempt, err)
 				}
@@ -583,7 +583,7 @@ func TestRunOnceBoundsFailedExecutions(t *testing.T) {
 			if len(store.Data.Processed) != 1 || len(store.Data.JobFailures) != 0 || !store.Data.Cursor.After(now.Add(-time.Minute)) {
 				t.Fatalf("job did not finish after retry limit: %+v", store.Data)
 			}
-			if _, err := m.RunOnce(context.Background(), store); err != nil || len(handler.jobs) != maxJobAttempts || len(gh.comments) != 1 {
+			if _, err := m.RunOnce(t.Context(), store); err != nil || len(handler.jobs) != maxJobAttempts || len(gh.comments) != 1 {
 				t.Fatalf("processed job reran: err=%v jobs=%d replies=%d", err, len(handler.jobs), len(gh.comments))
 			}
 		})
@@ -614,7 +614,7 @@ func TestRunOnceDoesNotExhaustJobsDuringInfrastructureFailure(t *testing.T) {
 			clock := now
 			m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Now: func() time.Time { return clock }}
 			for attempt := 1; attempt <= maxJobAttempts+1; attempt++ {
-				if _, err := m.RunOnce(context.Background(), store); err == nil {
+				if _, err := m.RunOnce(t.Context(), store); err == nil {
 					t.Fatal("infrastructure failure was not surfaced")
 				}
 				clock = advanceToRetry(clock, store)
@@ -633,14 +633,14 @@ func TestRunOnceKeepsTerminalFailureWhenWorkRootFills(t *testing.T) {
 	handler := &fakeHandler{executeErr: errors.Join(ErrTerminalJob, workroot.ErrUnsafe)}
 	store := openState(t, now.Add(-time.Minute))
 	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Now: func() time.Time { return now }}
-	if _, err := m.RunOnce(context.Background(), store); err != nil {
+	if _, err := m.RunOnce(t.Context(), store); err != nil {
 		t.Fatal(err)
 	}
 	if len(handler.jobs) != 1 || len(gh.comments) != 1 || len(store.Data.Processed) != 1 {
 		t.Fatalf("terminal job reran or lacked a failure reply: jobs=%d replies=%d state=%+v", len(handler.jobs), len(gh.comments), store.Data)
 	}
 	m.Now = func() time.Time { return now.Add(time.Minute) }
-	if _, err := m.RunOnce(context.Background(), store); err != nil || len(handler.jobs) != 1 || len(gh.comments) != 1 {
+	if _, err := m.RunOnce(t.Context(), store); err != nil || len(handler.jobs) != 1 || len(gh.comments) != 1 {
 		t.Fatalf("terminal job retried after completion: err=%v jobs=%d replies=%d", err, len(handler.jobs), len(gh.comments))
 	}
 }
@@ -854,13 +854,16 @@ func TestRunOnceFixedPublicationRetriesWithoutModelMarker(t *testing.T) {
 	if len(gh.comments) != 1 || len(store.Data.Processed) != 1 || len(store.Data.JobFailures) != 0 {
 		t.Fatalf("fixed publication did not stop after bounded retries: %+v", store.Data)
 	}
+	if _, err := m.RunOnce(t.Context(), store); err != nil || len(handler.jobs) != maxJobAttempts {
+		t.Fatalf("finished job reran: err=%v jobs=%d", err, len(handler.jobs))
+	}
 }
 
 func TestRunOnceTerminalFailureRepliesWithFreshContext(t *testing.T) {
 	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
 	item := github.Item{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}, HTMLURL: "https://github.com/example-owner/example-repo/pull/7#issuecomment-1"}
 	gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}, items: []github.Item{item}, permission: github.Permission{Permission: "write"}}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	handler := &fakeHandler{onExecute: cancel, executeErr: errors.Join(ErrTerminalJob, context.DeadlineExceeded)}
 	store := openState(t, now.Add(-time.Minute))
@@ -880,7 +883,7 @@ func TestRunOnceTerminalFailureRepliesWithFreshContext(t *testing.T) {
 		t.Fatal(err)
 	}
 	m.Now = func() time.Time { return now.Add(time.Minute) }
-	if _, err := m.RunOnce(context.Background(), store); err != nil || gh.commentCalls != 1 || len(handler.jobs) != 1 || len(store.Data.Processed) != 1 {
+	if _, err := m.RunOnce(t.Context(), store); err != nil || gh.commentCalls != 1 || len(handler.jobs) != 1 || len(store.Data.Processed) != 1 {
 		t.Fatalf("failure reply duplicated after interrupted save: err=%v replies=%d jobs=%d state=%+v", err, gh.commentCalls, len(handler.jobs), store.Data)
 	}
 }
@@ -912,7 +915,7 @@ func TestRunOnceExecutorErrorCannotForgeLogLines(t *testing.T) {
 	store := openState(t, now.Add(-time.Minute))
 	var logs bytes.Buffer
 	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Logger: log.New(&logs, "", 0), Now: func() time.Time { return now }}
-	_, err := m.RunOnce(context.Background(), store)
+	_, err := m.RunOnce(t.Context(), store)
 	var retained *os.PathError
 	if !errors.Is(err, os.ErrPermission) || !errors.As(err, &retained) || retained.Path != path || len(handler.jobs) != 1 {
 		t.Fatalf("executor error changed retry or typed cause: jobs=%d err=%v", len(handler.jobs), err)
@@ -944,7 +947,7 @@ func TestRunOnceStopsAfterFailedReplyAttempts(t *testing.T) {
 	clock := now
 	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Now: func() time.Time { return clock }}
 	for attempt := 1; attempt <= maxFailureReplyAttempts; attempt++ {
-		_, err := m.RunOnce(context.Background(), store)
+		_, err := m.RunOnce(t.Context(), store)
 		if (err != nil) != (attempt < maxFailureReplyAttempts) {
 			t.Fatalf("reply attempt %d error = %v", attempt, err)
 		}
@@ -975,7 +978,7 @@ func TestRunOnceIgnoresQuotedOutsiderCommand(t *testing.T) {
 	handler := &fakeHandler{}
 	store := openState(t, now.Add(-time.Minute))
 	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Logger: log.New(io.Discard, "", 0), Now: func() time.Time { return now }}
-	if _, err := m.RunOnce(context.Background(), store); err != nil {
+	if _, err := m.RunOnce(t.Context(), store); err != nil {
 		t.Fatal(err)
 	}
 	if len(handler.jobs) != 0 || gh.checks != 0 || len(gh.reactions) != 0 {
@@ -998,7 +1001,7 @@ func TestRunOnceRetriesFailedReaction(t *testing.T) {
 	initial := store.Data.Cursor
 	clock := now
 	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Logger: log.New(io.Discard, "", 0), Now: func() time.Time { return clock }}
-	if _, err := m.RunOnce(context.Background(), store); err == nil {
+	if _, err := m.RunOnce(t.Context(), store); err == nil {
 		t.Fatal("expected reaction failure")
 	}
 	if !store.Data.Cursor.After(initial) || len(store.Data.PendingNotifications) != 1 || len(store.Data.Processed) != 0 || len(handler.jobs) != 0 {
@@ -1006,7 +1009,7 @@ func TestRunOnceRetriesFailedReaction(t *testing.T) {
 	}
 	gh.reactionErr = nil
 	clock = clock.Add(time.Minute)
-	if _, err := m.RunOnce(context.Background(), store); err != nil {
+	if _, err := m.RunOnce(t.Context(), store); err != nil {
 		t.Fatal(err)
 	}
 	if len(gh.reactions) != 2 || len(handler.jobs) != 1 || len(store.Data.PendingNotifications) != 0 {
@@ -1025,7 +1028,7 @@ func TestRunOncePersistsPermissionFailureWithoutPinningCursor(t *testing.T) {
 	store := openState(t, now.Add(-time.Minute))
 	initial := store.Data.Cursor
 	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Logger: log.New(io.Discard, "", 0), Now: func() time.Time { return now }}
-	if _, err := m.RunOnce(context.Background(), store); err == nil {
+	if _, err := m.RunOnce(t.Context(), store); err == nil {
 		t.Fatal("expected permission failure")
 	}
 	if !store.Data.Cursor.After(initial) || len(store.Data.PendingNotifications) != 1 || len(store.Data.Processed) != 0 || len(handler.jobs) != 0 {
@@ -1068,7 +1071,7 @@ func TestRunOnceRetriesFailedThreadAfterCursorAdvances(t *testing.T) {
 	store := openStateAt(t, path, initial)
 	clock := now
 	m := &Monitor{Config: cfg, GitHub: gh, Handler: &fakeHandler{}, Logger: log.New(&logs, "", 0), Now: func() time.Time { return clock }}
-	if _, err := m.RunOnce(context.Background(), store); err == nil || !strings.Contains(err.Error(), badItem.HTMLURL) {
+	if _, err := m.RunOnce(t.Context(), store); err == nil || !strings.Contains(err.Error(), badItem.HTMLURL) {
 		t.Fatalf("failure did not identify item URL: %v", err)
 	}
 	if !store.Data.Cursor.After(initial) || len(store.Data.PendingNotifications) != 1 || len(store.Data.Processed) != 1 {
@@ -1080,7 +1083,7 @@ func TestRunOnceRetriesFailedThreadAfterCursorAdvances(t *testing.T) {
 	store = openStateAt(t, path, initial)
 	gh.notifications = nil
 	clock = clock.Add(time.Minute)
-	if _, err := m.RunOnce(context.Background(), store); err == nil {
+	if _, err := m.RunOnce(t.Context(), store); err == nil {
 		t.Fatal("pending failure was not retried after restart")
 	}
 	if len(badSince) != 2 || !badSince[0].Equal(initial) || !badSince[1].Equal(initial) || len(store.Data.PendingNotifications) != 1 {
@@ -1088,11 +1091,11 @@ func TestRunOnceRetriesFailedThreadAfterCursorAdvances(t *testing.T) {
 	}
 	gh.currentItem = nil
 	clock = clock.Add(time.Minute)
-	if _, err := m.RunOnce(context.Background(), store); err != nil || len(badSince) != 2 {
+	if _, err := m.RunOnce(t.Context(), store); err != nil || len(badSince) != 2 {
 		t.Fatalf("pending thread retried before backoff elapsed: %v, %v", err, badSince)
 	}
 	clock = clock.Add(time.Minute)
-	if _, err := m.RunOnce(context.Background(), store); err != nil {
+	if _, err := m.RunOnce(t.Context(), store); err != nil {
 		t.Fatal(err)
 	}
 	if len(store.Data.PendingNotifications) != 0 || len(store.Data.Processed) != 2 || len(badSince) != 3 {
@@ -1115,12 +1118,12 @@ func TestRunOnceRetriesThreadFetchWithoutNewNotification(t *testing.T) {
 	store := openState(t, initial)
 	clock := now
 	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: &fakeHandler{}, Now: func() time.Time { return clock }}
-	if _, err := m.RunOnce(context.Background(), store); err == nil || !store.Data.Cursor.After(initial) {
+	if _, err := m.RunOnce(t.Context(), store); err == nil || !store.Data.Cursor.After(initial) {
 		t.Fatalf("failure did not advance global cursor: %v, %+v", err, store.Data)
 	}
 	gh.notifications = nil
 	clock = clock.Add(time.Minute)
-	if _, err := m.RunOnce(context.Background(), store); err != nil {
+	if _, err := m.RunOnce(t.Context(), store); err != nil {
 		t.Fatal(err)
 	}
 	if len(seen) != 2 || !seen[1].Equal(initial) || len(store.Data.PendingNotifications) != 0 {
@@ -1141,7 +1144,7 @@ func TestAllowedActorsCannotBypassWritePermission(t *testing.T) {
 	handler := &fakeHandler{}
 	store := openState(t, now.Add(-time.Minute))
 	m := &Monitor{Config: config, GitHub: gh, Handler: handler, Logger: log.New(io.Discard, "", 0), Now: func() time.Time { return now }}
-	if _, err := m.RunOnce(context.Background(), store); err != nil {
+	if _, err := m.RunOnce(t.Context(), store); err != nil {
 		t.Fatal(err)
 	}
 	if gh.checks != 1 || len(handler.jobs) != 0 || len(gh.reactions) != 0 {
@@ -1165,7 +1168,7 @@ func TestEditedCommentCannotUseOriginalAuthorAuthorization(t *testing.T) {
 	store := openState(t, first.Add(-time.Minute))
 	clock := first
 	m := &Monitor{Config: config, GitHub: gh, Handler: handler, Logger: log.New(io.Discard, "", 0), Now: func() time.Time { return clock }}
-	if _, err := m.RunOnce(context.Background(), store); err != nil {
+	if _, err := m.RunOnce(t.Context(), store); err != nil {
 		t.Fatal(err)
 	}
 	if len(handler.jobs) != 0 {
@@ -1185,7 +1188,7 @@ func TestEditedCommentCannotUseOriginalAuthorAuthorization(t *testing.T) {
 		}
 		return item, nil
 	}
-	if _, err := m.RunOnce(context.Background(), store); err != nil {
+	if _, err := m.RunOnce(t.Context(), store); err != nil {
 		t.Fatal(err)
 	}
 	if len(handler.jobs) != 1 || handler.jobs[0].Source.NodeID != "comment-node-2" || gh.checks != 1 || len(gh.reactions) != 1 {
@@ -1217,7 +1220,7 @@ func TestAcceptOnlyWhitelistedInvitations(t *testing.T) {
 	config.InvitationOwners = []string{"example-owner", "another-owner"}
 	config.InvitationOwnerIDs = map[string]int64{"example-owner": 2, "another-owner": 3}
 	m := &Monitor{Config: config, GitHub: gh}
-	if err := m.acceptWhitelistedInvitations(context.Background()); err != nil {
+	if err := m.acceptWhitelistedInvitations(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if len(gh.accepted) != 3 || gh.accepted[0] != 1 || gh.accepted[1] != 5 || gh.accepted[2] != 6 {
@@ -1240,7 +1243,7 @@ func TestInvitationListingErrorKeepsPartialWorkAndPollsAfterLongCheck(t *testing
 	}
 	store := openState(t, now.Add(-time.Minute))
 	m := &Monitor{Config: testConfig(t), GitHub: gh, Now: func() time.Time { return now }}
-	if _, err := m.RunOnce(context.Background(), store); err != nil {
+	if _, err := m.RunOnce(t.Context(), store); err != nil {
 		t.Fatal(err)
 	}
 	if len(gh.accepted) != 1 || gh.accepted[0] != 1 || len(gh.declined) != 1 || gh.declined[0] != 2 {
@@ -1270,7 +1273,7 @@ func TestInvitationListingBlockedDefersActions(t *testing.T) {
 				inviteErr: tc.err,
 			}
 			m := &Monitor{Config: testConfig(t), GitHub: gh}
-			if err := m.acceptWhitelistedInvitations(context.Background()); !errors.Is(err, tc.err) {
+			if err := m.acceptWhitelistedInvitations(t.Context()); !errors.Is(err, tc.err) {
 				t.Fatalf("invitation listing error = %v, want blocked error", err)
 			}
 			if len(gh.accepted) != 0 || len(gh.declined) != 0 {
@@ -1289,7 +1292,7 @@ func TestInvitationRateLimitStopsDeclines(t *testing.T) {
 		declineErr: &github.StatusError{StatusCode: http.StatusForbidden, Message: "secondary rate limit"},
 	}
 	m := &Monitor{Config: testConfig(t), GitHub: gh}
-	if err := m.acceptWhitelistedInvitations(context.Background()); err == nil {
+	if err := m.acceptWhitelistedInvitations(t.Context()); err == nil {
 		t.Fatal("expected rate-limit error")
 	}
 	if len(gh.declined) != 1 || gh.declined[0] != 1 {
@@ -1307,7 +1310,7 @@ func TestMonitoredRepositoryStillRequiresWriteInvitation(t *testing.T) {
 	config.InvitationOwners = []string{"example-owner", "another-owner"}
 	config.InvitationOwnerIDs = map[string]int64{"example-owner": 2, "another-owner": 3}
 	m := &Monitor{Config: config, GitHub: gh}
-	if err := m.acceptWhitelistedInvitations(context.Background()); err == nil {
+	if err := m.acceptWhitelistedInvitations(t.Context()); err == nil {
 		t.Fatal("read-only invitation to monitored repository should fail")
 	}
 	if len(gh.accepted) != 1 || gh.accepted[0] != 2 {
@@ -1331,7 +1334,7 @@ func TestInvitationOwnerDoesNotAuthorizeCommands(t *testing.T) {
 	handler := &fakeHandler{}
 	store := openState(t, now.Add(-time.Minute))
 	m := &Monitor{Config: config, GitHub: gh, Handler: handler, Now: func() time.Time { return now }}
-	if _, err := m.RunOnce(context.Background(), store); err != nil {
+	if _, err := m.RunOnce(t.Context(), store); err != nil {
 		t.Fatal(err)
 	}
 	if len(handler.jobs) != 0 || gh.checks != 0 {
@@ -1376,7 +1379,7 @@ func TestInvitationRegistersRepositoryBeforeAcceptanceAndMonitorsImmediately(t *
 			}
 			handler := &fakeHandler{}
 			m := &Monitor{Config: cfg, ConfigPath: path, GitHub: gh, Handler: handler, Now: func() time.Time { return now }}
-			if _, err := m.RunOnce(context.Background(), openState(t, now.Add(-time.Minute))); err != nil {
+			if _, err := m.RunOnce(t.Context(), openState(t, now.Add(-time.Minute))); err != nil {
 				t.Fatal(err)
 			}
 			if len(gh.accepted) != 1 || len(handler.jobs) != 1 || len(m.Config.Repositories) != 2 {
@@ -1393,7 +1396,7 @@ func TestInvitationRegistrationRetriesWithoutLosingOrDuplicatingRepository(t *te
 	path := filepath.Join(t.TempDir(), "config.json")
 	gh := &fakeGitHub{invitations: []github.Invitation{{ID: 1, Repository: github.Repository{FullName: "example-owner/second-repo", Owner: github.User{Login: "example-owner"}}, Permissions: "write"}}}
 	m := &Monitor{Config: cfg, ConfigPath: path, GitHub: gh}
-	if err := m.acceptWhitelistedInvitations(context.Background()); err == nil || len(gh.accepted) != 0 || len(m.Config.Repositories) != 1 {
+	if err := m.acceptWhitelistedInvitations(t.Context()); err == nil || len(gh.accepted) != 0 || len(m.Config.Repositories) != 1 {
 		t.Fatalf("accepted invitation despite config write failure: %v, %v", err, gh.accepted)
 	}
 	data, err := json.Marshal(cfg)
@@ -1404,7 +1407,7 @@ func TestInvitationRegistrationRetriesWithoutLosingOrDuplicatingRepository(t *te
 		t.Fatal(err)
 	}
 	gh.acceptErr = errors.New("HTTP 503")
-	if err := m.acceptWhitelistedInvitations(context.Background()); err == nil {
+	if err := m.acceptWhitelistedInvitations(t.Context()); err == nil {
 		t.Fatal("expected acceptance failure")
 	}
 	saved, err := config.Load(path)
@@ -1416,7 +1419,7 @@ func TestInvitationRegistrationRetriesWithoutLosingOrDuplicatingRepository(t *te
 	}
 	m.Config = saved
 	gh.acceptErr = nil
-	if err := m.acceptWhitelistedInvitations(context.Background()); err != nil {
+	if err := m.acceptWhitelistedInvitations(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if len(gh.accepted) != 2 || len(m.Config.Repositories) != 2 {
@@ -1442,7 +1445,7 @@ func TestInvitationWithCommandsDisabledRegistersNoActions(t *testing.T) {
 		ID: 1, Repository: github.Repository{FullName: "example-owner/second-repo", Owner: github.User{Login: "example-owner"}}, Permissions: "write",
 	}}}
 	m := &Monitor{Config: cfg, ConfigPath: path, GitHub: gh}
-	if err := m.acceptWhitelistedInvitations(context.Background()); err != nil {
+	if err := m.acceptWhitelistedInvitations(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	saved, err := config.Load(path)
@@ -1510,7 +1513,7 @@ func TestReclaimedRepositoryCannotTriggerCommandOrRetry(t *testing.T) {
 			}
 			handler := &fakeHandler{}
 			m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Now: func() time.Time { return now }}
-			if _, err := m.RunOnce(context.Background(), store); err != nil {
+			if _, err := m.RunOnce(t.Context(), store); err != nil {
 				t.Fatal(err)
 			}
 			if gh.threadCalls != 0 || gh.checks != 0 || len(gh.reactions) != 0 || len(handler.jobs) != 0 || len(store.Data.PendingNotifications) != 0 {
@@ -1542,7 +1545,7 @@ func TestReclaimedLoginCannotAuthorizeCommand(t *testing.T) {
 			tc.prepare(gh, &cfg)
 			handler := &fakeHandler{}
 			m := &Monitor{Config: cfg, GitHub: gh, Handler: handler, Now: func() time.Time { return now }}
-			if _, err := m.RunOnce(context.Background(), openState(t, now.Add(-time.Minute))); err != nil {
+			if _, err := m.RunOnce(t.Context(), openState(t, now.Add(-time.Minute))); err != nil {
 				t.Fatal(err)
 			}
 			if len(gh.reactions) != 0 || len(handler.jobs) != 0 {
@@ -1561,7 +1564,7 @@ func TestReclaimedInvitationOwnerCannotRegisterOrAccept(t *testing.T) {
 		{ID: 2, Repository: github.Repository{ID: 10, FullName: "example-owner/new-repo", Owner: github.User{ID: 99, Login: "example-owner"}}, Permissions: "write"},
 	}}
 	m := &Monitor{Config: cfg, GitHub: gh}
-	if err := m.acceptWhitelistedInvitations(context.Background()); err != nil {
+	if err := m.acceptWhitelistedInvitations(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if len(gh.accepted) != 0 || len(m.Config.Repositories) != 1 {
@@ -1585,7 +1588,7 @@ func TestRunOnceCountsInternalCancellation(t *testing.T) {
 			handler := &fakeHandler{executeErr: executeErr}
 			store := openState(t, now.Add(-time.Minute))
 			m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Now: func() time.Time { return now }}
-			_, err := m.RunOnce(context.Background(), store)
+			_, err := m.RunOnce(t.Context(), store)
 			if len(handler.jobs) != 1 {
 				t.Fatalf("jobs=%d", len(handler.jobs))
 			}

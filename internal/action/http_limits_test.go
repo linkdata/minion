@@ -4,7 +4,6 @@ package action
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -70,7 +69,7 @@ func TestHTTPWireRouteCapsUseActualJSONBytes(t *testing.T) {
 			}
 			transport := httpExecutionClient{client: server.Client(), base: base}
 			var got httpAssignment
-			err = transport.post(context.Background(), "next", []byte(`{}`), httpJobBytes, &got, httpBinding{}, 0)
+			err = transport.post(t.Context(), "next", []byte(`{}`), httpJobBytes, &got, httpBinding{}, 0)
 			server.Close()
 			if extra == 0 && (err != nil || !reflect.DeepEqual(got, assignment)) || extra == 1 && !errors.Is(err, errHTTPBodyLimit) {
 				t.Fatalf("assignment response boundary: extra=%d error=%v", extra, err)

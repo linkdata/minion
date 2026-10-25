@@ -107,7 +107,7 @@ func TestRunnerRejectsBlankNoChangeFix(t *testing.T) {
 			runner := Runner{WorkRoot: t.TempDir(), runModel: func(context.Context, modelRun) (aicli.Result, error) {
 				return aicli.Result{Answer: test.answer}, nil
 			}}
-			result, err := runner.Run(context.Background(), testJob(command.Fix))
+			result, err := runner.Run(t.Context(), testJob(command.Fix))
 			if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "action answer is blank") || result.Answer != "" || len(result.Changes) != 0 || len(result.Calls) != 1 {
 				t.Fatalf("blank no-change fix accepted: %+v, %v", result, err)
 			}
@@ -148,7 +148,7 @@ func TestRunnerAuditCollectionAndNormalizationFailuresAreTerminal(t *testing.T) 
 				}
 				return aicli.Result{Answer: "Audit complete."}, nil
 			}}
-			result, err := runner.Run(context.Background(), job)
+			result, err := runner.Run(t.Context(), job)
 			want := "invalid audit REPORT.md"
 			if stage == "normalization" {
 				want = "normalized audit metadata exceeds byte limit"
@@ -252,7 +252,7 @@ func TestRunnerRejectsHostReadGrantBeforeModels(t *testing.T) {
 			} else {
 				runner.Claude.ReadOnlyDirs = []string{missing}
 			}
-			result, err := runner.Run(context.Background(), job)
+			result, err := runner.Run(t.Context(), job)
 			if errors.Is(err, workroot.ErrUnsafe) || !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "model evidence directories must be selected by Minion") || calls != 0 || len(result.Calls) != 0 {
 				t.Fatalf("unsupported host grant result: native calls=%d recorded calls=%d error=%v", calls, len(result.Calls), err)
 			}
@@ -282,7 +282,7 @@ func TestRunnerStripsNULBeforeCriticAndResult(t *testing.T) {
 				}
 				return aicli.Result{Answer: approvedCritiqueJSON}, nil
 			}}
-			result, err := runner.Run(context.Background(), job)
+			result, err := runner.Run(t.Context(), job)
 			wantCritic := 0
 			if critic {
 				wantCritic = 1
@@ -311,7 +311,7 @@ func TestPreparationFailureDistinguishesCapacityFromInvalidInput(t *testing.T) {
 }
 
 func TestRunnerCancellationBeforeDispatchRecordsNoCall(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	job := testJob(command.Comment)
 	calls := 0
@@ -330,7 +330,7 @@ func TestRunnerJobValidationRejectsMetadataAliasBeforeModels(t *testing.T) {
 	job := testJob(command.Fix)
 	job.Source.Files = []workspace.File{{Path: "GIT~1/x", Mode: workspace.Regular}}
 	runner := Runner{WorkRoot: t.TempDir(), runModel: forbidModel(t)}
-	result, err := runner.Run(context.Background(), job)
+	result, err := runner.Run(t.Context(), job)
 	preflight := workspace.ValidateSnapshot(job.Source)
 	if !errors.Is(err, monitor.ErrTerminalJob) || len(result.Calls) != 0 ||
 		(preflight == nil && (!errors.Is(err, gitwork.ErrUnsupportedSource) || !strings.Contains(err.Error(), "unsafe fix source path"))) ||
@@ -359,7 +359,7 @@ func TestRunnerRemovesRestrictedModelDirectory(t *testing.T) {
 		}
 		return aicli.Result{Answer: "Done."}, nil
 	}}
-	result, err := runner.Run(context.Background(), testJob(command.Comment))
+	result, err := runner.Run(t.Context(), testJob(command.Comment))
 	if err != nil || result.Answer != "Done." {
 		t.Fatalf("restricted workspace result=%+v error=%v", result, err)
 	}
@@ -432,7 +432,7 @@ func TestRunnerReportsOwnedAndCriticCleanupFailures(t *testing.T) {
 				}
 				return aicli.Result{Answer: "Done."}, nil
 			}}
-			result, err := runner.Run(context.Background(), job)
+			result, err := runner.Run(t.Context(), job)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -489,7 +489,7 @@ esac
 				t.Setenv("PATH", bin)
 			}
 			root := t.TempDir()
-			result, err := (&Runner{WorkRoot: root, runModel: forbidModel(t)}).Run(context.Background(), testJob(command.Fix))
+			result, err := (&Runner{WorkRoot: root, runModel: forbidModel(t)}).Run(t.Context(), testJob(command.Fix))
 			if err == nil || errors.Is(err, monitor.ErrTerminalJob) != test.terminal || !strings.Contains(err.Error(), "prepare private index") || len(result.Calls) != 0 || result.Answer != "" {
 				t.Fatalf("private index classification: %+v,%v; want terminal=%t", result, err, test.terminal)
 			}

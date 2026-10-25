@@ -167,7 +167,7 @@ func TestFinalCriticFailureCannotPublishAtCap(t *testing.T) {
 				if failure == "empty redaction" {
 					runner.Codex.APIKey, runner.Claude.APIKey = "#", "redacted"
 				}
-				result, err := runner.Run(context.Background(), job)
+				result, err := runner.Run(t.Context(), job)
 				if err == nil || calls != position.calls || len(result.Calls) != calls || result.Answer != "" || result.CriticStopReason != "" || len(result.Changes) != 0 || len(result.Artifacts) != 0 {
 					t.Fatalf("final failure acquired publication: calls=%d result=%+v error=%v", calls, result, err)
 				}
@@ -234,7 +234,7 @@ func TestCappedFinalFullUsesFrozenFixAfterBlockingVerification(t *testing.T) {
 				}
 				return aicli.Result{Answer: approvedCritiqueJSON}, nil
 			}}
-			result, err := runner.Run(context.Background(), job)
+			result, err := runner.Run(t.Context(), job)
 			wantSequence := []string{"main/1/", "critic/1/full", "main/2/", "critic/2/verification", "critic/2/full"}
 			if !slices.Equal(sequence, wantSequence) || len(result.Calls) != 5 || !result.Calls[3].HasBlockers || !result.Calls[4].Approved || !result.Calls[4].ReviewComplete {
 				t.Fatalf("final verification/full evidence changed: calls=%v result=%+v error=%v", sequence, result, err)
@@ -313,7 +313,7 @@ func TestCappedAuditStillRequiresInstalledReportValidation(t *testing.T) {
 		}
 		return aicli.Result{Answer: proposalJSON("Audit candidate", "")}, nil
 	}}
-	result, err := runner.Run(context.Background(), job)
+	result, err := runner.Run(t.Context(), job)
 	if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "audit validate-findings.cjs failed") || calls != 2 || result.CriticStopReason != "round_cap" || result.Answer != "" || len(result.Changes) != 0 {
 		t.Fatalf("cap bypassed independent report validation: calls=%d result=%+v error=%v", calls, result, err)
 	}

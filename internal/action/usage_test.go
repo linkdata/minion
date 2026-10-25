@@ -28,7 +28,7 @@ func TestUsageDoesNotCountCanceledDispatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	job := testJob(command.Comment)
 	job.Identity.AttemptID = tracked.attemptID
@@ -148,7 +148,7 @@ func TestUsageAccumulatesCriticRevisions(t *testing.T) {
 	job := withClaudeCritic(testJob(command.Comment))
 	job.Identity.AttemptID = tracked.attemptID
 	job.Main.Provider, job.Critic.Provider = "claude", "codex"
-	result, err := tracked.Runner.Execute(context.Background(), job, newExecutionCheckpoints(tracked, job))
+	result, err := tracked.Runner.Execute(t.Context(), job, newExecutionCheckpoints(tracked, job))
 	if err != nil || result.Answer != "proposal" || result.CriticStopReason != "approved" {
 		t.Fatalf("answer=%q stop=%q err=%v", result.Answer, result.CriticStopReason, err)
 	}
@@ -222,7 +222,7 @@ func TestUsagePersistenceFailureStopsModelsOrPublication(t *testing.T) {
 			}
 			tracked.WorkRoot = t.TempDir()
 			tracked.Runner.WorkRoot = tracked.WorkRoot
-			result, err := tracked.Runner.Execute(context.Background(), job, newExecutionCheckpoints(tracked, job))
+			result, err := tracked.Runner.Execute(t.Context(), job, newExecutionCheckpoints(tracked, job))
 			answer := result.Answer
 			wantCalls := 1
 			if tt.before {
@@ -324,7 +324,7 @@ func TestExecuteRecordsNoModelAndSkipsAcknowledged(t *testing.T) {
 					runModel: forbidModel(t),
 				},
 			}
-			err := e.Execute(context.Background(), job)
+			err := e.Execute(t.Context(), job)
 			if failInitialSave {
 				if err == nil || errors.Is(err, monitor.ErrTerminalJob) || errors.Is(err, monitor.ErrPostModelPublication) || !strings.Contains(err.Error(), "save action usage") || len(comments) != 0 {
 					t.Fatalf("action ran without initial usage record: err=%v comments=%+v", err, comments)
@@ -334,7 +334,7 @@ func TestExecuteRecordsNoModelAndSkipsAcknowledged(t *testing.T) {
 			if err != nil || len(comments) != 1 {
 				t.Fatalf("execute error=%v comments=%+v", err, comments)
 			}
-			if err := e.Execute(context.Background(), job); err != nil || len(comments) != 1 {
+			if err := e.Execute(t.Context(), job); err != nil || len(comments) != 1 {
 				t.Fatalf("dedupe error=%v comments=%+v", err, comments)
 			}
 			records, err := usage.ReadAll(dir)
@@ -378,7 +378,7 @@ printf '%%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.com
 	job.Identity.AttemptID = tracked.attemptID
 	job.Main.Model, job.Main.Effort = "portable-model", "high"
 	job.Main.Skills = []string{testReviewSkillURL}
-	result, err := tracked.Runner.Execute(context.Background(), job, newExecutionCheckpoints(tracked, job))
+	result, err := tracked.Runner.Execute(t.Context(), job, newExecutionCheckpoints(tracked, job))
 	if err != nil {
 		t.Fatal(err)
 	}

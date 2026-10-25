@@ -274,7 +274,7 @@ func offlineIndexFixture(t *testing.T, files []workspace.File) (*gitwork.Offline
 	if err := workspace.Materialize(source, files); err != nil {
 		t.Fatal(err)
 	}
-	index, err := gitwork.NewOfflineIndex(context.Background(), metadata, source, files)
+	index, err := gitwork.NewOfflineIndex(t.Context(), metadata, source, files)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -313,7 +313,7 @@ func withClaudeCritic(job Job) Job {
 
 func cloneFixture(t *testing.T, root string) *gitwork.Checkout {
 	t.Helper()
-	checkout, err := gitwork.Clone(context.Background(), root, "o/r", "main", true)
+	checkout, err := gitwork.Clone(t.Context(), root, "o/r", "main", true)
 	if err != nil {
 		t.Fatal(err)
 	}

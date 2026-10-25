@@ -86,7 +86,7 @@ func TestMulticallStubRejectsWrongArgv0(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 	// --help makes a broken guard exit the test runner before it can run tests recursively.
 	cmd := exec.CommandContext(ctx, binary, "--help")
@@ -126,7 +126,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"symlink-test"}' '{"type":"i
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := Run(context.Background(), t.TempDir(), "Inert executable fixture", false, "", config.CodexConfig{})
+	result, err := Run(t.Context(), t.TempDir(), "Inert executable fixture", false, "", config.CodexConfig{})
 	if err != nil || result.Answer != "resolved executable" {
 		t.Fatalf("stub execution=%+v, %v", result, err)
 	}
@@ -161,18 +161,18 @@ func TestCanonicalExecutablePreservesMulticallNameInRunAndPreflight(t *testing.T
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("CODEX_HOME", t.TempDir())
-	if result, err := Run(context.Background(), t.TempDir(), "inert shim fixture", false, "", config.CodexConfig{}); err != nil || result.Answer != "shim answer" {
+	if result, err := Run(t.Context(), t.TempDir(), "inert shim fixture", false, "", config.CodexConfig{}); err != nil || result.Answer != "shim answer" {
 		t.Fatalf("multicall Run: %+v %v", result, err)
 	}
-	if settings, err := Validate(context.Background(), config.CodexConfig{}); err != nil || settings.Model != "fixture" {
+	if settings, err := Validate(t.Context(), config.CodexConfig{}); err != nil || settings.Model != "fixture" {
 		t.Fatalf("multicall model preflight: %+v %v", settings, err)
 	}
-	if err := ValidateInstructionBoundary(context.Background()); err != nil {
+	if err := ValidateInstructionBoundary(t.Context()); err != nil {
 		t.Fatalf("multicall instruction preflight: %v", err)
 	}
 	t.Setenv("CODEX_API_KEY", "")
 	t.Setenv("CODEX_ACCESS_TOKEN", "")
-	if err := CheckLogin(context.Background(), config.CodexConfig{}); err != nil {
+	if err := CheckLogin(t.Context(), config.CodexConfig{}); err != nil {
 		t.Fatalf("multicall login preflight: %v", err)
 	}
 }

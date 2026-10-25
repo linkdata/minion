@@ -1,7 +1,6 @@
 package gitwork
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -165,14 +164,14 @@ func TestRepositoryAndRefValidation(t *testing.T) {
 			t.Errorf("validateBranch(%q) should fail", branch)
 		}
 	}
-	if _, err := cloneFromURL(context.Background(), t.TempDir(), filepath.Join(t.TempDir(), "missing.git"), "bad..branch", true); err == nil || !strings.Contains(err.Error(), "invalid branch") {
+	if _, err := cloneFromURL(t.Context(), t.TempDir(), filepath.Join(t.TempDir(), "missing.git"), "bad..branch", true); err == nil || !strings.Contains(err.Error(), "invalid branch") {
 		t.Fatalf("cloneFromURL invalid default branch error = %v", err)
 	}
 }
 
 func TestGitErrorLabelsCommandAfterConfigOptions(t *testing.T) {
 	fixture := newFixture(t)
-	_, err := runGit(context.Background(), fixture.checkout.path,
+	_, err := runGit(t.Context(), fixture.checkout.path,
 		"-c", "user.name=example-bot", "-c", "user.email=example-bot@users.noreply.github.com",
 		"commit", "--not-a-real-option")
 	if err == nil || !strings.Contains(err.Error(), "git commit:") {
@@ -182,7 +181,7 @@ func TestGitErrorLabelsCommandAfterConfigOptions(t *testing.T) {
 
 func TestHeadRejectsMovedCheckout(t *testing.T) {
 	fixture := newFixture(t)
-	ctx := context.Background()
+	ctx := t.Context()
 	writeFile(t, filepath.Join(fixture.checkout.path, "unexpected.txt"), "unexpected\n")
 	fixture.git(fixture.checkout.path, "add", ".")
 	fixture.git(fixture.checkout.path, "commit", "-m", "moved")
@@ -193,7 +192,7 @@ func TestHeadRejectsMovedCheckout(t *testing.T) {
 
 func TestCheckoutPullRequestVerifiesHead(t *testing.T) {
 	fixture := newFixture(t)
-	ctx := context.Background()
+	ctx := t.Context()
 	writeFile(t, filepath.Join(fixture.source, "change.txt"), "PR change\n")
 	head := fixture.commit("refs/pull/7/head", "PR head")
 
@@ -243,7 +242,7 @@ func TestCheckoutPullRequestBoundsAliasedTreeEntries(t *testing.T) {
 			head := fixture.gitInput(fixture.source, "aliased PR head\n", "commit-tree", tree, "-p", fixture.base)
 			fixture.git(fixture.source, "push", fixture.remote, head+":refs/pull/7/head")
 			if test.reason != "" {
-				err := fixture.checkout.checkoutPullRequest(context.Background(), 7, "main", head)
+				err := fixture.checkout.checkoutPullRequest(t.Context(), 7, "main", head)
 				if !errors.Is(err, ErrCheckoutTooLarge) || errors.Is(err, ErrUnsupportedSource) || !strings.Contains(err.Error(), test.reason) {
 					t.Fatalf("expanded tree was not refused by %s bound: %v", test.reason, err)
 				}
@@ -260,7 +259,7 @@ func TestCheckoutPullRequestBoundsAliasedTreeEntries(t *testing.T) {
 			if _, err := os.Stat(filepath.Join(path, "payload")); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("PR worktree materialized: %v", err)
 			}
-			snapshot, err := checkout.Snapshot(context.Background())
+			snapshot, err := checkout.Snapshot(t.Context())
 			if err != nil || len(snapshot.Files) != wantFiles {
 				t.Fatalf("aliased tree snapshot files=%d error=%v", len(snapshot.Files), err)
 			}
@@ -282,8 +281,8 @@ func TestCheckoutPullRequestRejectsOversizedHeadMetadata(t *testing.T) {
 	head := fixture.git(fixture.source, "rev-parse", "HEAD")
 	blob := fixture.git(fixture.source, "rev-parse", "HEAD:new.dat")
 	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/pull/7/head")
-	checkout := fixture.keepCheckout(cloneFromURL(context.Background(), t.TempDir(), fixture.remote, "main", true))
-	if err := checkout.checkoutPullRequest(context.Background(), 7, "main", head); !errors.Is(err, ErrCheckoutTooLarge) {
+	checkout := fixture.keepCheckout(cloneFromURL(t.Context(), t.TempDir(), fixture.remote, "main", true))
+	if err := checkout.checkoutPullRequest(t.Context(), 7, "main", head); !errors.Is(err, ErrCheckoutTooLarge) {
 		t.Fatalf("oversized PR error = %v, want checkout limit", err)
 	}
 	assertBlobPresent(fixture, checkout.path, blob)
@@ -297,7 +296,7 @@ func TestCloneFailureRemovesOwnedDirectoryAndPreservesCause(t *testing.T) {
 	root := t.TempDir()
 	// A failed clone can leave data inside the directory it was given.
 	fakeOnPath(t, "git", "#!/bin/sh\nfor arg do destination=$arg; done\nprintf retained > \"$destination/partial\"\nprintf 'clone fixture failure' >&2\nexit 7\n")
-	checkout, err := cloneRepository(context.Background(), root, fixture.remote, "main")
+	checkout, err := cloneRepository(t.Context(), root, fixture.remote, "main")
 	var exit *exec.ExitError
 	if checkout != nil || !errors.As(err, &exit) || exit.ExitCode() != 7 || !strings.Contains(err.Error(), "clone fixture failure") {
 		t.Fatalf("failed clone lost its cause: checkout=%v error=%v", checkout, err)
@@ -317,7 +316,7 @@ func TestNewBranchPreservesOmittedGitlinkAndSymlink(t *testing.T) {
 	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/heads/main")
 
 	checkout := fixture.clone()
-	ctx := context.Background()
+	ctx := t.Context()
 	snapshot, err := checkout.Snapshot(ctx)
 	if err != nil || len(snapshot.Omitted) != 2 || snapshot.Omitted[0] != "omitted-link" || snapshot.Omitted[1] != "sub" {
 		t.Fatalf("omitted snapshot=%+v error=%v", snapshot, err)
@@ -342,7 +341,7 @@ func TestNewBranchPreservesOmittedGitlinkAndSymlink(t *testing.T) {
 
 func TestCommitAndPushPublishesRecordedBotCommit(t *testing.T) {
 	fixture := newFixture(t)
-	ctx := context.Background()
+	ctx := t.Context()
 	const branch = "minion/fix-123"
 	if err := fixture.checkout.NewBranch(ctx, branch); err != nil {
 		t.Fatal(err)
@@ -391,7 +390,7 @@ func TestCommitAndPushPublishesRecordedBotCommit(t *testing.T) {
 }
 
 func TestImportAndCommitBoundsChanges(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	for _, kind := range []string{"file count", "patch bytes"} {
 		t.Run(kind, func(t *testing.T) {
 			fixture := newFixture(t)
@@ -432,7 +431,7 @@ func TestImportAndCommitBoundsChanges(t *testing.T) {
 
 func TestCommitAndPushBoundsDirectlyStagedPathCount(t *testing.T) {
 	fixture := newFixture(t)
-	ctx := context.Background()
+	ctx := t.Context()
 	const branch = "minion/fix-staged-limit"
 	if err := fixture.checkout.NewBranch(ctx, branch); err != nil {
 		t.Fatal(err)
@@ -483,7 +482,7 @@ func TestSplitNULRecords(t *testing.T) {
 
 func TestChangedGitConfigStopsPublish(t *testing.T) {
 	fixture := newFixture(t)
-	ctx := context.Background()
+	ctx := t.Context()
 	if err := fixture.checkout.NewBranch(ctx, "minion/fix-config"); err != nil {
 		t.Fatal(err)
 	}
@@ -495,7 +494,7 @@ func TestChangedGitConfigStopsPublish(t *testing.T) {
 
 func TestCommitAndPushStopsWhenRecordFails(t *testing.T) {
 	fixture := newFixture(t)
-	ctx := context.Background()
+	ctx := t.Context()
 	const branch = "minion/fix-record"
 	if err := fixture.checkout.NewBranch(ctx, branch); err != nil {
 		t.Fatal(err)
@@ -552,12 +551,12 @@ func (f gitFixture) git(dir string, args ...string) string {
 
 func (f gitFixture) clone() *Checkout {
 	f.t.Helper()
-	return f.keepCheckout(cloneFromURL(context.Background(), f.t.TempDir(), f.remote, "main", true))
+	return f.keepCheckout(cloneFromURL(f.t.Context(), f.t.TempDir(), f.remote, "main", true))
 }
 
 func (f gitFixture) clonePullRequest(head string) *Checkout {
 	f.t.Helper()
-	return f.keepCheckout(clonePullRequestFromURL(context.Background(), f.t.TempDir(), f.remote, 7, "main", head))
+	return f.keepCheckout(clonePullRequestFromURL(f.t.Context(), f.t.TempDir(), f.remote, 7, "main", head))
 }
 
 func (f gitFixture) keepCheckout(checkout *Checkout, err error) *Checkout {

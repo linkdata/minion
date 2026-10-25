@@ -76,7 +76,7 @@ func TestCollectUsageIgnoresForeignThreadSnapshot(t *testing.T) {
 		usageEvent("task_started", "child-turn"),
 		`{"ordinal":25,"type":"event_msg","payload":{"type":"token_count","thread_id":"root","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0}}}}`,
 		usageEvent("task_complete", "child-turn"))
-	got, complete, err := (&usageSession{}).collectUsage(context.Background(), home, "root", time.Now(), nil, nil, nil)
+	got, complete, err := (&usageSession{}).collectUsage(t.Context(), home, "root", time.Now(), nil, nil, nil)
 	if got != (usage.Tokens{Input: 20}) || complete || err != nil {
 		t.Fatalf("foreign parent snapshot counted as child usage: tokens=%+v complete=%t err=%v", got, complete, err)
 	}
@@ -90,7 +90,7 @@ func TestCollectUsageIgnoresMalformedForeignThreadSnapshot(t *testing.T) {
 		usageSnapshot(24, 5, 0, 0),
 		`{"ordinal":25,"type":"event_msg","payload":{"type":"token_count","thread_id":"root","info":{"total_token_usage":{"output_tokens":1}}}}`,
 		usageEvent("task_complete", "child-turn"))
-	got, complete, err := (&usageSession{}).collectUsage(context.Background(), home, "root", time.Now(), nil, nil, nil)
+	got, complete, err := (&usageSession{}).collectUsage(t.Context(), home, "root", time.Now(), nil, nil, nil)
 	if got != (usage.Tokens{Input: 25}) || !complete || err != nil {
 		t.Fatalf("malformed foreign snapshot poisoned child usage: tokens=%+v complete=%t err=%v", got, complete, err)
 	}
@@ -120,7 +120,7 @@ func TestCollectUsageIncludesNestedHelpersWithoutInheritedOrDuplicateResponses(t
 		t.Fatal(err)
 	}
 	fallback := usage.Tokens{Input: 300, CachedInput: 150, Output: 30}
-	got, complete, err := (&usageSession{}).collectUsage(context.Background(), home, "root", started, &fallback, []string{"child"}, nil)
+	got, complete, err := (&usageSession{}).collectUsage(t.Context(), home, "root", started, &fallback, []string{"child"}, nil)
 	want := usage.Tokens{Input: 410, CachedInput: 175, Output: 41}
 	if got != want || !complete || err != nil {
 		t.Fatalf("collectUsage() = %+v, %v, error=%v; want %+v, complete", got, complete, err, want)
@@ -144,7 +144,7 @@ func TestRolloutUsageRejectsRecordsWithoutThreadOwnership(t *testing.T) {
 				usageEvent("task_complete", "turn"))
 			budget := int64(maxUsageScanBytes)
 			capture := &usageBoundary{valid: true, turns: map[string]bool{}}
-			got, complete, _, err := readRolloutUsageFrom(context.Background(), rolloutMeta{ID: scenario.id, path: path}, "root", &budget, rolloutUsageMode{capture: capture})
+			got, complete, _, err := readRolloutUsageFrom(t.Context(), rolloutMeta{ID: scenario.id, path: path}, "root", &budget, rolloutUsageMode{capture: capture})
 			if got != (usage.Tokens{Input: 10, Output: 1}) || complete != scenario.wantComplete || capture.valid != scenario.wantComplete || err != nil {
 				t.Fatalf("record ownership = %+v, complete=%t, baseline valid=%t, error=%v", got, complete, capture.valid, err)
 			}
@@ -171,7 +171,7 @@ func TestRolloutUsageUnknownOwnerAtChildHistoryBoundary(t *testing.T) {
 				usageEventAt(12, "task_complete", "child-turn"))
 			budget := int64(maxUsageScanBytes)
 			capture := &usageBoundary{valid: true, turns: map[string]bool{}}
-			got, complete, _, err := readRolloutUsageFrom(context.Background(), rolloutMeta{ID: "child", path: path, HistoryStart: &start}, "root", &budget, rolloutUsageMode{capture: capture})
+			got, complete, _, err := readRolloutUsageFrom(t.Context(), rolloutMeta{ID: "child", path: path, HistoryStart: &start}, "root", &budget, rolloutUsageMode{capture: capture})
 			if got != (usage.Tokens{Input: 10, Output: 1}) || complete != scenario.wantComplete || capture.valid != scenario.wantComplete || err != nil {
 				t.Fatalf("unknown-owner record at history boundary: %+v, complete=%t, baseline valid=%t, error=%v", got, complete, capture.valid, err)
 			}
@@ -189,7 +189,7 @@ func TestCollectUsageCountsEventsAtHistoryStart(t *testing.T) {
 		usageSnapshot(9, 107, 0, 0),
 		usageEventAt(9, "task_complete", "child-turn"))
 	budget := int64(maxUsageScanBytes)
-	got, complete, _, err := readRolloutUsage(context.Background(), rolloutMeta{ID: "child", path: path, HistoryStart: &start}, "root", &budget)
+	got, complete, _, err := readRolloutUsage(t.Context(), rolloutMeta{ID: "child", path: path, HistoryStart: &start}, "root", &budget)
 	if got != (usage.Tokens{Input: 7}) || !complete || err != nil {
 		t.Fatalf("history boundary = %+v, complete=%t, err=%v", got, complete, err)
 	}
@@ -206,7 +206,7 @@ func TestRepeatedHelperActivityRetainsLaterCountersAndCompletion(t *testing.T) {
 				child = append(child, usageEvent("task_complete", "child-turn"))
 			}
 			writeUsageRollout(t, home, "child", "root", child...)
-			tokens, complete, childError := (&usageSession{}).collectUsage(context.Background(), home, "root", time.Now(), nil, []string{"child"}, nil)
+			tokens, complete, childError := (&usageSession{}).collectUsage(t.Context(), home, "root", time.Now(), nil, []string{"child"}, nil)
 			if tokens != (usage.Tokens{Input: 1030, Output: 103}) || complete != done || (childError != nil) == done {
 				t.Fatalf("repeated activity lost counters/lifecycle: tokens=%+v complete=%t childError=%v", tokens, complete, childError)
 			}
@@ -232,7 +232,7 @@ func TestUsageAgentBoundsCountUniqueIDsAndRejectOverflow(t *testing.T) {
 		}
 		for _, fallback := range []*usage.Tokens{nil, {Input: 100, CachedInput: 10, Output: 7}} {
 			for range 3 {
-				tokens, complete, childError := (&usageSession{}).collectUsage(context.Background(), home, "root", time.Now(), fallback, nil, nil)
+				tokens, complete, childError := (&usageSession{}).collectUsage(t.Context(), home, "root", time.Now(), fallback, nil, nil)
 				if tokens != want || complete || !errors.Is(childError, aicli.ErrOutputLimit) || strings.Count(childError.Error(), errUsageAgentLimit.Error()) != 1 {
 					t.Fatalf("overflow discarded or randomized known counters: tokens=%+v want=%+v complete=%t error=%v", tokens, want, complete, childError)
 				}
@@ -247,7 +247,7 @@ func TestUsageAgentBoundsCountUniqueIDsAndRejectOverflow(t *testing.T) {
 		}
 		events = append(events, usageEvent("task_started", "root-turn"), usageRecord("root", "root-turn", "later-response", 1000, 0, 100), usageEvent("task_complete", "root-turn"))
 		writeUsageRollout(t, home, "root", "", events...)
-		tokens, complete, childError := (&usageSession{}).collectUsage(context.Background(), home, "root", time.Now(), nil, nil, nil)
+		tokens, complete, childError := (&usageSession{}).collectUsage(t.Context(), home, "root", time.Now(), nil, nil, nil)
 		if tokens != (usage.Tokens{Input: 1000, Output: 100}) || complete || !errors.Is(childError, aicli.ErrOutputLimit) {
 			t.Fatalf("overflow lost later counters or accepted work: tokens=%+v complete=%t error=%v", tokens, complete, childError)
 		}
@@ -260,7 +260,7 @@ func TestCollectUsageUsesLatestCumulativeSnapshotAndSubtractsInheritedBaseline(t
 		usageSnapshot(12, 100, 20, 10), usageSnapshot(13, 250, 80, 30), usageEvent("task_complete", "root-turn"))
 	writeUsageRollout(t, home, "child", "root", usageSnapshot(8, 100, 20, 10),
 		usageEvent("task_started", "child-turn"), usageSnapshot(12, 130, 30, 12), usageSnapshot(13, 160, 40, 20), usageEvent("task_complete", "child-turn"))
-	got, complete, err := (&usageSession{}).collectUsage(context.Background(), home, "root", time.Now(), nil, nil, nil)
+	got, complete, err := (&usageSession{}).collectUsage(t.Context(), home, "root", time.Now(), nil, nil, nil)
 	want := usage.Tokens{Input: 310, CachedInput: 100, Output: 40}
 	if got != want || !complete || err != nil {
 		t.Fatalf("collectUsage() = %+v, %v, error=%v; want %+v, complete", got, complete, err, want)
@@ -288,7 +288,7 @@ func TestCollectUsagePartialRunsPreserveKnownTokens(t *testing.T) {
 				events = append(events, usageEvent("task_complete", "root-turn"))
 			}
 			writeUsageRollout(t, home, "root", "", events...)
-			got, complete, err := (&usageSession{}).collectUsage(context.Background(), home, "root", time.Now(), nil, nil, nil)
+			got, complete, err := (&usageSession{}).collectUsage(t.Context(), home, "root", time.Now(), nil, nil, nil)
 			if got != (usage.Tokens{Input: 60, CachedInput: 40, Output: 3}) || complete || err != nil {
 				t.Fatalf("partial run = %+v, %v, error=%v", got, complete, err)
 			}
@@ -306,7 +306,7 @@ func TestCollectUsageTruncatedCompleteEventIsIncomplete(t *testing.T) {
 	if err := os.WriteFile(root, data[:len(data)-1], 0600); err != nil {
 		t.Fatal(err)
 	}
-	got, complete, err := (&usageSession{}).collectUsage(context.Background(), home, "root", time.Now(), nil, nil, nil)
+	got, complete, err := (&usageSession{}).collectUsage(t.Context(), home, "root", time.Now(), nil, nil, nil)
 	if got != (usage.Tokens{Input: 10, Output: 1}) || complete || err != nil {
 		t.Fatalf("truncated complete event usage=%+v complete=%t error=%v", got, complete, err)
 	}
@@ -316,7 +316,7 @@ func TestCollectUsageRequiresExplicitTokenFields(t *testing.T) {
 	home := t.TempDir()
 	record := strings.Replace(usageRecord("root", "turn", "response", 10, 0, 2), `"input_tokens":10,`, "", 1)
 	writeUsageRollout(t, home, "root", "", usageEvent("task_started", "turn"), record, usageEvent("task_complete", "turn"))
-	got, complete, err := (&usageSession{}).collectUsage(context.Background(), home, "root", time.Now(), nil, nil, nil)
+	got, complete, err := (&usageSession{}).collectUsage(t.Context(), home, "root", time.Now(), nil, nil, nil)
 	if got != (usage.Tokens{}) || complete || err != nil {
 		t.Fatalf("missing required field = %+v, %v, error=%v; want unknown", got, complete, err)
 	}
@@ -331,7 +331,7 @@ func TestCollectUsageDetectsMissingNestedHelper(t *testing.T) {
 			home := t.TempDir()
 			writeUsageRollout(t, home, "root", "", usageEvent("task_started", "root-turn"), usageRecord("root", "root-turn", "root-response", 10, 0, 1), usageEvent("task_complete", "root-turn"))
 			writeUsageRollout(t, home, "child", "root", usageEvent("task_started", "child-turn"), usageRecord("child", "child-turn", "child-response", 20, 0, 2), test.spawn, usageEvent("task_complete", "child-turn"))
-			got, complete, err := (&usageSession{}).collectUsage(context.Background(), home, "root", time.Now(), nil, []string{"child"}, nil)
+			got, complete, err := (&usageSession{}).collectUsage(t.Context(), home, "root", time.Now(), nil, []string{"child"}, nil)
 			if got != (usage.Tokens{Input: 30, Output: 3}) || complete || !errors.Is(err, errUnverifiedChildren) {
 				t.Fatalf("missing nested helper = %+v, %v, %v; want known tokens, unverified", got, complete, err)
 			}
@@ -342,7 +342,7 @@ func TestCollectUsageDetectsMissingNestedHelper(t *testing.T) {
 func TestCollectUsageDetectsMissingResponseRecords(t *testing.T) {
 	home := t.TempDir()
 	writeUsageRollout(t, home, "root", "", usageEvent("task_started", "turn"), usageRecord("root", "turn", "response", 10, 0, 1), usageSnapshot(18, 25, 10, 3), usageEvent("task_complete", "turn"))
-	got, complete, err := (&usageSession{}).collectUsage(context.Background(), home, "root", time.Now(), nil, nil, nil)
+	got, complete, err := (&usageSession{}).collectUsage(t.Context(), home, "root", time.Now(), nil, nil, nil)
 	if got != (usage.Tokens{Input: 25, CachedInput: 10, Output: 3}) || complete || err != nil {
 		t.Fatalf("mismatched cumulative counter = %+v, %v, error=%v; want snapshot, incomplete", got, complete, err)
 	}
@@ -367,13 +367,13 @@ func TestCollectUsageNeverAddsUnverifiedInheritedChildCounters(t *testing.T) {
 					t.Fatal(err)
 				}
 				budget, start := info.Size()+100, int64(9)
-				got, complete, _, err := readRolloutUsage(context.Background(), rolloutMeta{ID: "child", path: path, HistoryStart: &start}, "root", &budget)
+				got, complete, _, err := readRolloutUsage(t.Context(), rolloutMeta{ID: "child", path: path, HistoryStart: &start}, "root", &budget)
 				if got != want || complete || budget != 100 || !errors.Is(err, errUnverifiedChildren) {
 					t.Fatalf("damaged child: %+v complete=%t budget=%d err=%v want=%+v", got, complete, budget, err, want)
 				}
 				want.Input += 10
 				want.Output++
-				got, complete, err = (&usageSession{}).collectUsage(context.Background(), home, "root", time.Now(), nil, nil, nil)
+				got, complete, err = (&usageSession{}).collectUsage(t.Context(), home, "root", time.Now(), nil, nil, nil)
 				if got != want || complete || !errors.Is(err, errUnverifiedChildren) {
 					t.Fatalf("damaged tree: %+v complete=%t err=%v want=%+v", got, complete, err, want)
 				}
@@ -388,7 +388,7 @@ func TestCollectUsageBoundsScanningAndHonorsCancellation(t *testing.T) {
 	fallback := usage.Tokens{Input: 10, Output: 1}
 
 	t.Run("canceled", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := context.WithCancel(t.Context())
 		cancel()
 		got, complete, err := (&usageSession{}).collectUsage(ctx, home, "root", time.Now(), &fallback, nil, nil)
 		if got != fallback || complete || err != nil {
@@ -396,7 +396,7 @@ func TestCollectUsageBoundsScanningAndHonorsCancellation(t *testing.T) {
 		}
 	})
 	t.Run("canceled with expected child", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := context.WithCancel(t.Context())
 		cancel()
 		got, complete, err := (&usageSession{}).collectUsage(ctx, home, "root", time.Now(), &fallback, []string{"child"}, nil)
 		if got != fallback || complete || !errors.Is(err, errUnverifiedChildren) {
@@ -405,7 +405,7 @@ func TestCollectUsageBoundsScanningAndHonorsCancellation(t *testing.T) {
 	})
 	t.Run("bytes", func(t *testing.T) {
 		budget := int64(10)
-		_, complete, _, err := readRolloutUsage(context.Background(), rolloutMeta{ID: "root", path: root}, "root", &budget)
+		_, complete, _, err := readRolloutUsage(t.Context(), rolloutMeta{ID: "root", path: root}, "root", &budget)
 		if complete || budget != 0 || err != nil {
 			t.Fatalf("limited rollout scan = complete=%t budget=%d err=%v; want incomplete and exhausted", complete, budget, err)
 		}
@@ -419,7 +419,7 @@ func TestCollectUsageBoundsScanningAndHonorsCancellation(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		got, complete, err := (&usageSession{}).collectUsage(context.Background(), home, "root", time.Now(), &fallback, nil, nil)
+		got, complete, err := (&usageSession{}).collectUsage(t.Context(), home, "root", time.Now(), &fallback, nil, nil)
 		if got != fallback || complete || err != nil {
 			t.Fatalf("too many rollout files = %+v, %t, error=%v; want fallback, incomplete", got, complete, err)
 		}
@@ -439,14 +439,14 @@ func TestRolloutUsageSkipsOversizedLinesAndDebitsBytes(t *testing.T) {
 		t.Fatal(err)
 	}
 	budget := info.Size() + 1024
-	got, complete, children, err := readRolloutUsage(context.Background(), rolloutMeta{ID: "root", path: root}, "root", &budget)
+	got, complete, children, err := readRolloutUsage(t.Context(), rolloutMeta{ID: "root", path: root}, "root", &budget)
 	want := usage.Tokens{Input: 30, CachedInput: 15, Output: 3}
 	if got != want || complete || budget != 1024 || len(children) != 1 || children[0] != "late-child" || err != nil {
 		t.Fatalf("skipped line lost later usage/spawn or bytes: got=%+v complete=%t budget=%d children=%v err=%v", got, complete, budget, children, err)
 	}
 	writeUsageRollout(t, home, "late-child", "root", usageEvent("task_started", "child-turn"),
 		usageRecord("late-child", "child-turn", "child-response", 40, 2, 4), usageEvent("task_complete", "child-turn"))
-	got, complete, err = (&usageSession{}).collectUsage(context.Background(), home, "root", time.Now(), nil, nil, nil)
+	got, complete, err = (&usageSession{}).collectUsage(t.Context(), home, "root", time.Now(), nil, nil, nil)
 	var ok bool
 	want, ok = want.AddChecked(usage.Tokens{Input: 40, CachedInput: 2, Output: 4})
 	if !ok {
@@ -477,7 +477,7 @@ func TestRolloutScannerEventBoundaryAndPartialEOF(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			line := prefix + strings.Repeat("x", test.size-len(prefix)-len(suffix)) + suffix
 			complete := true
-			scanner := rolloutScanner(context.Background(), strings.NewReader(line+test.ending), &complete)
+			scanner := rolloutScanner(t.Context(), strings.NewReader(line+test.ending), &complete)
 			lines := 0
 			for scanner.Scan() {
 				lines++
@@ -497,7 +497,7 @@ func TestOversizedRolloutStillExhaustsOriginalBudget(t *testing.T) {
 		usageRecord("root", "turn", "before", 10, 0, 1), strings.Repeat("x", 2*aicli.MaxEventBytes+1),
 		usageRecord("root", "turn", "unreachable", 1000, 0, 100), usageEvent("task_complete", "turn"))
 	budget := int64(aicli.MaxEventBytes + (256 << 10))
-	got, complete, _, err := readRolloutUsage(context.Background(), rolloutMeta{ID: "root", path: path}, "root", &budget)
+	got, complete, _, err := readRolloutUsage(t.Context(), rolloutMeta{ID: "root", path: path}, "root", &budget)
 	if got != (usage.Tokens{Input: 10, Output: 1}) || complete || budget != 0 || err != nil {
 		t.Fatalf("oversized discard bypassed budget: got=%+v complete=%t budget=%d err=%v", got, complete, budget, err)
 	}
@@ -526,14 +526,14 @@ func TestRolloutSessionCapPrecedesLargerTreeBudget(t *testing.T) {
 		t.Fatal(err)
 	}
 	budget := treeBytes
-	got, complete, _, err := readRolloutUsage(context.Background(), rolloutMeta{ID: "root", path: path}, "root", &budget)
+	got, complete, _, err := readRolloutUsage(t.Context(), rolloutMeta{ID: "root", path: path}, "root", &budget)
 	if err != nil || got != (usage.Tokens{Input: 10, Output: 1}) || complete || budget != treeBytes-sessionBytes {
 		t.Fatalf("session cap bypassed: tokens=%+v complete=%t budget=%d err=%v", got, complete, budget, err)
 	}
 }
 
 func TestRolloutScannerCancellationWhileDiscarding(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	reader := &cancelingRolloutReader{Reader: strings.NewReader(strings.Repeat("x", 3*aicli.MaxEventBytes)), cancel: cancel, cancelAfter: aicli.MaxEventBytes + 2}
 	complete := true
@@ -572,7 +572,7 @@ func TestCollectUsageMergesRootLowerBoundsByComponent(t *testing.T) {
 			}
 			events = append(events, usageEvent("task_complete", "turn"))
 			writeUsageRollout(t, home, "root", "", events...)
-			got, complete, err := (&usageSession{}).collectUsage(context.Background(), home, "root", time.Now(), fallback, nil, nil)
+			got, complete, err := (&usageSession{}).collectUsage(t.Context(), home, "root", time.Now(), fallback, nil, nil)
 			if got != (usage.Tokens{Input: 100, CachedInput: 20, Output: 20}) || complete || err != nil {
 				t.Fatalf("component lower bounds lost: %+v complete=%t err=%v", got, complete, err)
 			}
@@ -588,7 +588,7 @@ func TestCollectUsageWithoutRootRetainsStdoutFallback(t *testing.T) {
 			name = "empty root ID"
 		}
 		t.Run(name, func(t *testing.T) {
-			got, complete, err := (&usageSession{}).collectUsage(context.Background(), t.TempDir(), rootID, time.Now(), &fallback, nil, nil)
+			got, complete, err := (&usageSession{}).collectUsage(t.Context(), t.TempDir(), rootID, time.Now(), &fallback, nil, nil)
 			if got != fallback || complete || err != nil {
 				t.Fatalf("missing root lost stdout fallback: tokens=%+v complete=%t error=%v", got, complete, err)
 			}
@@ -615,7 +615,7 @@ func TestCollectUsageRetainsValidCountersOnOverflow(t *testing.T) {
 			}
 			events = append(events, usageEvent("task_complete", "turn"))
 			writeUsageRollout(t, home, "root", "", events...)
-			got, complete, err := (&usageSession{}).collectUsage(context.Background(), home, "root", time.Now(), fallback, nil, nil)
+			got, complete, err := (&usageSession{}).collectUsage(t.Context(), home, "root", time.Now(), fallback, nil, nil)
 			if got != known || !got.Valid() || complete || err != nil {
 				t.Fatalf("overflow discarded valid counters: %+v complete=%t err=%v", got, complete, err)
 			}

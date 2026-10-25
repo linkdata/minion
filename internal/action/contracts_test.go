@@ -433,7 +433,7 @@ func TestFixJobRejectsUnsupportedLayoutBeforeExecution(t *testing.T) {
 			}
 			if runtime.GOOS == "windows" && test.name == "backslash" {
 				runner := Runner{WorkRoot: t.TempDir(), runModel: forbidModel(t)}
-				if _, err := runner.Run(context.Background(), job); !errors.Is(err, monitor.ErrTerminalJob) {
+				if _, err := runner.Run(t.Context(), job); !errors.Is(err, monitor.ErrTerminalJob) {
 					t.Fatalf("unsafe source reached execution: %v", err)
 				}
 				return
@@ -442,7 +442,7 @@ func TestFixJobRejectsUnsupportedLayoutBeforeExecution(t *testing.T) {
 				t.Fatalf("unsupported fix layout validation: %v", err)
 			}
 			runner := Runner{WorkRoot: t.TempDir(), runModel: forbidModel(t)}
-			if _, err := runner.Run(context.Background(), job); !errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, gitwork.ErrUnsupportedSource) || !strings.Contains(err.Error(), test.want) {
+			if _, err := runner.Run(t.Context(), job); !errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, gitwork.ErrUnsupportedSource) || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("unsupported fix source was not refused before execution: %v", err)
 			}
 			job.Action = command.Comment
