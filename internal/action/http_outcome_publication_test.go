@@ -41,9 +41,15 @@ func TestExecuteRejectsHostileHTTPOutcomeBeforePublication(t *testing.T) {
 		{"comment returns source changes", "changes", false, false},
 		{"audit returns empty report", "audit", false, false},
 		{"audit returns empty coverage", "audit coverage", false, false},
+		{"audit artifact traversal", "audit path traversal", false, false},
+		{"audit artifact absolute", "audit path absolute", false, false},
+		{"audit foreign repository", "audit foreign repo", false, false},
+		{"audit absolute target", "audit target absolute", false, false},
+		{"audit traversal companion", "audit companion traversal", false, false},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
-			if scenario.change == "audit" || scenario.change == "audit coverage" {
+			isAudit := strings.HasPrefix(scenario.change, "audit")
+			if isAudit {
 				installActionTestSkills(t, testAuditSkillURL)
 			}
 			var budgetQuotes []string
@@ -52,6 +58,8 @@ func TestExecuteRejectsHostileHTTPOutcomeBeforePublication(t *testing.T) {
 					budgetQuotes = append(budgetQuotes, fmt.Sprintf("Private quote %04d was already in source.", i))
 				}
 				gitFixtureRemote(t, workspace.File{Path: "source.txt", Mode: workspace.Regular, Data: []byte(strings.Repeat("f", 1<<20) + "\n" + strings.Join(budgetQuotes, "\n"))})
+			} else if isAudit {
+				gitFixtureRemote(t, workspace.File{Path: "source.txt", Mode: workspace.Regular, Data: []byte("source\n")})
 			} else {
 				gitFixtureRemote(t)
 			}
@@ -68,10 +76,16 @@ func TestExecuteRejectsHostileHTTPOutcomeBeforePublication(t *testing.T) {
 			}))
 			defer server.Close()
 			workRoot, usageDir := t.TempDir(), filepath.Join(t.TempDir(), "usage")
+			outside := filepath.Join(workRoot, "outside")
+			if isAudit {
+				if err := os.WriteFile(outside, []byte("untouched"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
 			var acknowledged Result
 			executed := false
 			name, action, skill := "comment", command.Comment, skills.BuiltinAntiPromptInjection
-			if scenario.change == "audit" || scenario.change == "audit coverage" {
+			if isAudit {
 				name, action, skill = "security-audit", command.SecurityAudit, testAuditSkillURL
 			}
 			e := &Orchestrator{WorkRoot: workRoot, Usage: &usage.Store{Dir: usageDir}, GitHub: testGitHub(server, "token"), BotLogin: "bot",
@@ -82,7 +96,7 @@ func TestExecuteRejectsHostileHTTPOutcomeBeforePublication(t *testing.T) {
 			}
 			e.Executor = executorFunc(func(ctx context.Context, job Job, checkpoints Checkpoints) (Result, error) {
 				executed = true
-				if scenario.change == "budget refutation" {
+				if scenario.change == "budget refutation" || isAudit {
 					job.Source.BaseFiles = nil // Empty base files are omitted on the HTTP wire.
 				}
 				f := newHTTPServerTest(t, ctx, job, checkpoints, nil)
@@ -191,6 +205,30 @@ func TestExecuteRejectsHostileHTTPOutcomeBeforePublication(t *testing.T) {
 							outcome.Result.Artifacts[i].Data = []byte("[]")
 						}
 					}
+				case "audit path traversal", "audit path absolute":
+					outcome.Result.Artifacts = auditArtifactsFixture(job, sourceIdentity(job), result.Answer)
+					path := "../../outside"
+					if scenario.change == "audit path absolute" {
+						path = outside
+					}
+					outcome.Result.Artifacts[0].Path = path
+				case "audit foreign repo", "audit target absolute", "audit companion traversal":
+					outcome.Result.Artifacts = auditArtifactsFixture(job, sourceIdentity(job), result.Answer)
+					before, after := "", ""
+					switch scenario.change {
+					case "audit foreign repo":
+						before, after = fmt.Sprintf(`"repo":%q`, job.Identity.Repository), `"repo":"foreign/repo"`
+					case "audit target absolute":
+						before, after = fmt.Sprintf(`"target":%q`, sourceIdentity(job)), fmt.Sprintf(`"target":%q`, outside)
+					case "audit companion traversal":
+						before, after = `"selected_companion_files":[]`, `"selected_companion_files":["../outside"]`
+					}
+					metadata := string(outcome.Result.Artifacts[0].Data)
+					changed := strings.Replace(metadata, before, after, 1)
+					if changed == metadata {
+						t.Fatalf("audit metadata lacks %s field", scenario.change)
+					}
+					outcome.Result.Artifacts[0].Data = []byte(changed)
 				}
 				if err := httpResultShape(outcome.Result); err != nil {
 					t.Fatalf("hostile result failed the wire shape before parent validation: %v", err)
@@ -198,6 +236,18 @@ func TestExecuteRejectsHostileHTTPOutcomeBeforePublication(t *testing.T) {
 				validationErr := outcome.Result.Validate(job)
 				if (validationErr == nil) != scenario.validResult || scenario.change == "audit" && !strings.Contains(validationErr.Error(), "REPORT.md") || scenario.change == "audit coverage" && !strings.Contains(validationErr.Error(), "coverage-ledger.json") || scenario.change == "changes" && !strings.Contains(validationErr.Error(), "read-only action returned source changes") || scenario.change == "invisible answer" && !strings.Contains(validationErr.Error(), "action answer") {
 					t.Fatalf("hostile result semantic fixture changed: %v", validationErr)
+				}
+				wantPathError := ""
+				switch scenario.change {
+				case "audit path traversal", "audit path absolute":
+					wantPathError = "invalid action report artifact"
+				case "audit foreign repo", "audit target absolute":
+					wantPathError = "complete standard run"
+				case "audit companion traversal":
+					wantPathError = "audit companion file path is not portable"
+				}
+				if wantPathError != "" && !strings.Contains(validationErr.Error(), wantPathError) {
+					t.Fatalf("hostile result missed %s: %v", wantPathError, validationErr)
 				}
 				f.ack(t, "/outcome", outcome, http.StatusOK, sequence)
 				got := f.result(t)
@@ -238,7 +288,7 @@ func TestExecuteRejectsHostileHTTPOutcomeBeforePublication(t *testing.T) {
 					t.Fatalf("hostile result replaced acknowledged review: %+v", saved)
 				}
 			}
-			if scenario.change == "audit" || scenario.change == "audit coverage" {
+			if isAudit {
 				if paths, err := filepath.Glob(filepath.Join(workRoot, "audits", "complete-*")); err != nil || len(paths) != 0 {
 					t.Fatalf("hostile report became a complete audit: paths=%v error=%v", paths, err)
 				}
@@ -251,12 +301,15 @@ func TestExecuteRejectsHostileHTTPOutcomeBeforePublication(t *testing.T) {
 					t.Fatalf("incomplete audit marker=%q error=%v", marker, err)
 				}
 				report, err := os.ReadFile(filepath.Join(paths[0], "REPORT.md"))
-				wantReport := ""
-				if scenario.change == "audit coverage" {
-					wantReport = "Forged publication"
+				wantReport := "Forged publication"
+				if scenario.change == "audit" {
+					wantReport = ""
 				}
 				if err != nil || string(report) != wantReport {
 					t.Fatalf("private report=%q error=%v want=%q", report, err, wantReport)
+				}
+				if data, err := os.ReadFile(outside); err != nil || string(data) != "untouched" {
+					t.Fatalf("outside file changed: %q error=%v", data, err)
 				}
 			}
 		})
