@@ -262,6 +262,7 @@ func (e *HTTPExecutor) serveNext(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	e.pull = true
+	e.notifyLocked()
 	e.mu.Unlock()
 	var delivery *httpTransaction
 	defer func() {
