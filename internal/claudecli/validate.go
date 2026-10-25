@@ -140,8 +140,9 @@ func validateInvocationCapabilities(probe func([]string, string) ([]byte, error)
 	if !cleanFreshInitialization(data) {
 		return errors.New("claude fresh invocation emitted model activity or malformed output")
 	}
-	invalid := append(slices.Clone(args), "--minion-unsupported-capability-probe")
-	if _, err := probe(invalid, initializeRequest); !cliRejected(err) {
+	const unknownOption = "--minion-unsupported-capability-probe"
+	invalid := append(slices.Clone(args), unknownOption)
+	if _, err := probe(invalid, initializeRequest); !cliRejected(err) || !strings.Contains(err.Error(), unknownOption) {
 		return fmt.Errorf("claude fresh invocation did not reject an unknown option: %v", err)
 	}
 	resumeID, err := conversationID()
@@ -154,10 +155,14 @@ func validateInvocationCapabilities(probe func([]string, string) ([]byte, error)
 	}
 	resume = append(resume, "--json-schema", `{"type":"object"}`, "--input-format", "stream-json")
 	data, err = probe(resume, initializeRequest)
-	if !cliRejected(err) || !strings.Contains(err.Error(), resumeID) || !isEmptySessionLookup(data) {
+	if !cliRejected(err) || !missingSessionDiagnostic(err, resumeID) || !isEmptySessionLookup(data) {
 		return fmt.Errorf("claude resume invocation did not reach empty-session lookup: %v", err)
 	}
 	return nil
+}
+
+func missingSessionDiagnostic(err error, id string) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "no conversation found with session id: "+id)
 }
 
 func cliRejected(err error) bool {

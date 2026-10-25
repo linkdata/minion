@@ -142,7 +142,7 @@ debug)
   printf '[{"role":"user","content":[{"text":"%s"}]}]\n' "$text"
   ;;
 exec)
-  case " $* " in *' --minion-unsupported-capability-probe '*) exit 2 ;; esac
+  case " $* " in *' --minion-unsupported-capability-probe '*) printf '%s\n' 'unexpected argument --minion-unsupported-capability-probe' >&2; exit 2 ;; esac
   if [ "$2" = resume ]; then
     printf '%s\n' 'Usage: codex exec resume [OPTIONS] [SESSION_ID] [PROMPT]'
   else
@@ -150,7 +150,7 @@ exec)
   fi
   ;;
 app-server)
-  case " $* " in *' minion_unsupported_capability_probe=true '*) exit 2 ;; esac
+  case " $* " in *' minion_unsupported_capability_probe=true '*) printf '%s\n' 'unknown config key: minion_unsupported_capability_probe' >&2; exit 2 ;; esac
   IFS= read -r request
   printf '%s\n' '{"id":1,"result":{}}'
   IFS= read -r request

@@ -116,8 +116,9 @@ func validateExecCapabilities(ctx context.Context, settings config.CodexConfig) 
 		if _, probeErr := probe(args); probeErr != nil {
 			return fmt.Errorf("Codex selected effort config capability check: %w", probeErr) //nolint:staticcheck // -- Codex is a proper noun.
 		}
-		invalid := append(append([]string(nil), args...), "-c", "minion_unsupported_capability_probe=true")
-		if _, probeErr := probe(invalid); !capabilityRejected(probeErr) {
+		const unknownKey = "minion_unsupported_capability_probe"
+		invalid := append(append([]string(nil), args...), "-c", unknownKey+"=true")
+		if _, probeErr := probe(invalid); !capabilityRejected(probeErr, unknownKey) {
 			return fmt.Errorf("Codex selected effort config capability check did not reject an unknown key: %v", probeErr) //nolint:staticcheck // -- Codex is a proper noun.
 		}
 	}
@@ -147,19 +148,20 @@ func validateExecCapabilities(ctx context.Context, settings config.CodexConfig) 
 			}
 			fullArgs = args
 		}
-		invalid := append(append([]string(nil), fullArgs[:len(fullArgs)-1]...), "--minion-unsupported-capability-probe", "--help")
+		const unknownOption = "--minion-unsupported-capability-probe"
+		invalid := append(append([]string(nil), fullArgs[:len(fullArgs)-1]...), unknownOption, "--help")
 		_, probeErr := probe(invalid)
-		if !capabilityRejected(probeErr) {
+		if !capabilityRejected(probeErr, unknownOption) {
 			return fmt.Errorf("Codex %s capability check did not reject an unknown option: %v", command.name, probeErr) //nolint:staticcheck // -- Codex is a proper noun.
 		}
 	}
 	return nil
 }
 
-func capabilityRejected(err error) bool {
+func capabilityRejected(err error, sentinel string) bool {
 	var exitErr *exec.ExitError
 	return err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) &&
-		!errors.Is(err, aicli.ErrOutputLimit) && errors.As(err, &exitErr) && exitErr.ExitCode() > 0
+		!errors.Is(err, aicli.ErrOutputLimit) && errors.As(err, &exitErr) && exitErr.ExitCode() > 0 && strings.Contains(err.Error(), sentinel)
 }
 
 func disabledFeatureArgs() []string {

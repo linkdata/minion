@@ -80,7 +80,7 @@ fi
 func TestValidateRejectsMissingInvocationOptionBeforeModelCall(t *testing.T) {
 	for _, option := range []string{"--session-id", "--resume", "--add-dir", "--model", "--effort"} {
 		t.Run(option, func(t *testing.T) {
-			binary := fakeValidationCLI(t, option, false)
+			binary := fakeValidationCLI(t, validationCLIBehavior{rejected: option})
 			settings := config.ClaudeConfig{}
 			if option == "--effort" {
 				settings.Effort = "high"
@@ -97,14 +97,28 @@ func TestValidateRejectsMissingInvocationOptionBeforeModelCall(t *testing.T) {
 }
 
 func TestValidateRejectsCLIThatIgnoresUnknownOption(t *testing.T) {
-	fakeValidationCLI(t, "", true)
+	fakeValidationCLI(t, validationCLIBehavior{ignoreUnknown: true})
 	if _, err := Validate(t.Context(), config.ClaudeConfig{}); err == nil || !strings.Contains(err.Error(), "did not reject an unknown option") {
 		t.Fatalf("accepted CLI that ignores unknown options: %v", err)
 	}
 }
 
+func TestValidateRejectsUnrelatedUnknownOptionFailure(t *testing.T) {
+	fakeValidationCLI(t, validationCLIBehavior{unrelatedUnknown: true})
+	if _, err := Validate(t.Context(), config.ClaudeConfig{}); err == nil || !strings.Contains(err.Error(), "did not reject an unknown option") {
+		t.Fatalf("accepted unrelated startup failure as parser rejection: %v", err)
+	}
+}
+
+func TestValidateRejectsUnsupportedResumeDespiteEmptyResult(t *testing.T) {
+	fakeValidationCLI(t, validationCLIBehavior{unsupportedResume: true})
+	if _, err := Validate(t.Context(), config.ClaudeConfig{}); err == nil || !strings.Contains(err.Error(), "did not reach empty-session lookup") {
+		t.Fatalf("accepted unsupported resume as missing-session lookup: %v", err)
+	}
+}
+
 func TestValidateHonorsCallerCancellation(t *testing.T) {
-	fakeValidationCLI(t, "", false)
+	fakeValidationCLI(t, validationCLIBehavior{})
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	if _, err := Validate(ctx, config.ClaudeConfig{}); !errors.Is(err, context.Canceled) {
@@ -150,7 +164,14 @@ func TestFreshInitializationRejectsPaidOrMalformedTrailingEvent(t *testing.T) {
 	}
 }
 
-func fakeValidationCLI(t *testing.T, rejected string, ignoreUnknown bool) string {
+type validationCLIBehavior struct {
+	rejected          string
+	ignoreUnknown     bool
+	unrelatedUnknown  bool
+	unsupportedResume bool
+}
+
+func fakeValidationCLI(t *testing.T, behavior validationCLIBehavior) string {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("Claude CLI is not supported on native Windows")
@@ -161,12 +182,18 @@ func fakeValidationCLI(t *testing.T, rejected string, ignoreUnknown bool) string
 		t.Setenv(key, "")
 	}
 	unknown := `case " $* " in *' --minion-unsupported-capability-probe '*) printf '%s\n' 'unknown option --minion-unsupported-capability-probe' >&2; exit 2 ;; esac`
-	if ignoreUnknown {
+	if behavior.unrelatedUnknown {
+		unknown = `case " $* " in *' --minion-unsupported-capability-probe '*) printf '%s\n' 'unrelated startup failure' >&2; exit 2 ;; esac`
+	} else if behavior.ignoreUnknown {
 		unknown = ""
 	}
 	reject := ""
-	if rejected != "" {
-		reject = `case " $* " in *' ` + rejected + ` '*) printf '%s\n' 'unsupported ` + rejected + `' >&2; exit 2 ;; esac`
+	if behavior.rejected != "" {
+		reject = `case " $* " in *' ` + behavior.rejected + ` '*) printf '%s\n' 'unsupported ` + behavior.rejected + `' >&2; exit 2 ;; esac`
+	}
+	resumeError := `printf 'No conversation found with session ID: %s\n' "$id" >&2`
+	if behavior.unsupportedResume {
+		resumeError = `printf 'unsupported --resume for session %s\n' "$id" >&2`
 	}
 	dir := testsupport.FakeOnPath(t, "claude", `#!/bin/sh
 if [ "$3" = auth ]; then
@@ -182,7 +209,7 @@ else
         [ "$arg" != --resume ] || next=true
       done
       printf '%s\n' '{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":0,"total_cost_usd":0,"usage":{"input_tokens":0,"output_tokens":0}}'
-      printf 'No conversation found with session ID: %s\n' "$id" >&2
+      `+resumeError+`
       exit 1 ;;
   esac
   input=$(cat)

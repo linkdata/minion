@@ -20,12 +20,12 @@ import (
 )
 
 const catalogueScript = `#!/bin/sh
-case " $* " in *' minion_unsupported_capability_probe=true '*) exit 2 ;; esac
+case " $* " in *' minion_unsupported_capability_probe=true '*) printf '%s\n' 'unknown config key: minion_unsupported_capability_probe' >&2; exit 2 ;; esac
 if [ "$1" = exec ]; then
   case " $* " in *' --help '*) ;; *) exit 9 ;; esac
   printf '%s\n' '--invocation--' "$@" >> @HELP_ARGS@
   printf '%s,%s,%s,%s\n' "${GH_TOKEN-absent}" "${GITHUB_TOKEN-absent}" "${CODEX_API_KEY-absent}" "${CODEX_ACCESS_TOKEN-absent}" >> @HELP_ENV@
-  case " $* " in *' --minion-unsupported-capability-probe '*) exit 2 ;; esac
+  case " $* " in *' --minion-unsupported-capability-probe '*) printf '%s\n' 'unexpected argument --minion-unsupported-capability-probe' >&2; exit 2 ;; esac
   if [ "$2" = resume ]; then
     printf '%s\n' 'Usage: codex exec resume [OPTIONS] [SESSION_ID] [PROMPT]'
   else
@@ -235,10 +235,20 @@ func TestValidateRejectsMissingResolvedEffortConfig(t *testing.T) {
 func TestValidateRejectsIgnoredUnknownConfigKey(t *testing.T) {
 	dir := t.TempDir()
 	page := `{"id":2,"result":{"data":[{"model":"fixture","isDefault":true,"defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high"}]}]}}`
-	script := strings.Replace(catalogueScriptFor(dir, page, ""), "case \" $* \" in *' minion_unsupported_capability_probe=true '*) exit 2 ;; esac", "", 1)
+	script := strings.Replace(catalogueScriptFor(dir, page, ""), "case \" $* \" in *' minion_unsupported_capability_probe=true '*) printf '%s\\n' 'unknown config key: minion_unsupported_capability_probe' >&2; exit 2 ;; esac", "", 1)
 	installFakeCodex(t, script)
 	if _, err := Validate(t.Context(), config.CodexConfig{}); err == nil || !strings.Contains(err.Error(), "did not reject an unknown key") {
 		t.Fatalf("accepted a CLI that ignores strict config keys: %v", err)
+	}
+}
+
+func TestValidateRejectsUnrelatedConfigFailure(t *testing.T) {
+	dir := t.TempDir()
+	page := `{"id":2,"result":{"data":[{"model":"fixture","isDefault":true,"defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high"}]}]}}`
+	script := strings.Replace(catalogueScriptFor(dir, page, ""), "unknown config key: minion_unsupported_capability_probe", "unrelated startup failure", 1)
+	installFakeCodex(t, script)
+	if _, err := Validate(t.Context(), config.CodexConfig{}); err == nil || !strings.Contains(err.Error(), "did not reject an unknown key") {
+		t.Fatalf("accepted unrelated startup failure as config rejection: %v", err)
 	}
 }
 
@@ -248,7 +258,9 @@ func TestCapabilityRejectedExcludesDeadline(t *testing.T) {
 	}
 	binary := installFakeCodex(t, "#!/bin/sh\nexit 2\n")
 	err := exec.Command(binary).Run()
-	if !capabilityRejected(err) || capabilityRejected(errors.Join(err, context.DeadlineExceeded)) {
+	if !capabilityRejected(errors.Join(err, errors.New("unsupported sentinel")), "sentinel") ||
+		capabilityRejected(errors.Join(err, context.DeadlineExceeded, errors.New("unsupported sentinel")), "sentinel") ||
+		capabilityRejected(err, "sentinel") {
 		t.Fatalf("wrong parser failure classification: %v", err)
 	}
 }
@@ -256,10 +268,20 @@ func TestCapabilityRejectedExcludesDeadline(t *testing.T) {
 func TestValidateRejectsHelpThatIgnoresUnknownOptions(t *testing.T) {
 	dir := t.TempDir()
 	page := `{"id":2,"result":{"data":[{"model":"fixture","isDefault":true,"defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high"}]}]}}`
-	script := strings.Replace(catalogueScriptFor(dir, page, ""), "case \" $* \" in *' --minion-unsupported-capability-probe '*) exit 2 ;; esac", "", 1)
+	script := strings.Replace(catalogueScriptFor(dir, page, ""), "case \" $* \" in *' --minion-unsupported-capability-probe '*) printf '%s\\n' 'unexpected argument --minion-unsupported-capability-probe' >&2; exit 2 ;; esac", "", 1)
 	installFakeCodex(t, script)
 	if _, err := Validate(t.Context(), config.CodexConfig{}); err == nil || !strings.Contains(err.Error(), "Codex exec capability check did not reject an unknown option") {
 		t.Fatalf("accepted help that ignored an unknown option: %v", err)
+	}
+}
+
+func TestValidateRejectsUnrelatedUnknownOptionFailure(t *testing.T) {
+	dir := t.TempDir()
+	page := `{"id":2,"result":{"data":[{"model":"fixture","isDefault":true,"defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high"}]}]}}`
+	script := strings.Replace(catalogueScriptFor(dir, page, ""), "unexpected argument --minion-unsupported-capability-probe", "unrelated startup failure", 1)
+	installFakeCodex(t, script)
+	if _, err := Validate(t.Context(), config.CodexConfig{}); err == nil || !strings.Contains(err.Error(), "did not reject an unknown option") {
+		t.Fatalf("accepted unrelated startup failure as option rejection: %v", err)
 	}
 }
 
