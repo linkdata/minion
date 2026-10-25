@@ -83,6 +83,18 @@ func TestCheckModelsBoundsResolvedCatalogueModel(t *testing.T) {
 if [ "$3" = 'auth' ]; then
   printf '%s\n' '{"loggedIn":true}'
 else
+  case " $* " in *' --minion-unsupported-capability-probe '*) printf '%s\n' 'unknown option --minion-unsupported-capability-probe' >&2; exit 2 ;; esac
+  case " $* " in
+    *' --resume '*)
+      next=false
+      for arg do
+        if $next; then id=$arg; break; fi
+        [ "$arg" != --resume ] || next=true
+      done
+      printf '%s\n' '{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":0,"total_cost_usd":0,"usage":{"input_tokens":0,"output_tokens":0}}'
+      printf 'No conversation found with session ID: %s\n' "$id" >&2
+      exit 1 ;;
+  esac
   input=$(/bin/cat)
   case "$input" in
     *minion-initialize*) printf '%s\n' '`+catalogue+`' ;;
@@ -130,7 +142,7 @@ debug)
   printf '[{"role":"user","content":[{"text":"%s"}]}]\n' "$text"
   ;;
 exec)
-  case " $* " in *' --minion-unsupported-capability-probe '*) exit 2 ;; esac
+  case " $* " in *' --minion-unsupported-capability-probe '*) printf '%s\n' 'unexpected argument --minion-unsupported-capability-probe' >&2; exit 2 ;; esac
   if [ "$2" = resume ]; then
     printf '%s\n' 'Usage: codex exec resume [OPTIONS] [SESSION_ID] [PROMPT]'
   else
@@ -138,6 +150,7 @@ exec)
   fi
   ;;
 app-server)
+  case " $* " in *' minion_unsupported_capability_probe=true '*) printf '%s\n' 'unknown config key: minion_unsupported_capability_probe' >&2; exit 2 ;; esac
   IFS= read -r request
   printf '%s\n' '{"id":1,"result":{}}'
   IFS= read -r request

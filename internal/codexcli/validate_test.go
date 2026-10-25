@@ -20,11 +20,12 @@ import (
 )
 
 const catalogueScript = `#!/bin/sh
+case " $* " in *' minion_unsupported_capability_probe=true '*) printf '%s\n' 'unknown config key: minion_unsupported_capability_probe' >&2; exit 2 ;; esac
 if [ "$1" = exec ]; then
   case " $* " in *' --help '*) ;; *) exit 9 ;; esac
   printf '%s\n' '--invocation--' "$@" >> @HELP_ARGS@
   printf '%s,%s,%s,%s\n' "${GH_TOKEN-absent}" "${GITHUB_TOKEN-absent}" "${CODEX_API_KEY-absent}" "${CODEX_ACCESS_TOKEN-absent}" >> @HELP_ENV@
-  case " $* " in *' --minion-unsupported-capability-probe '*) exit 2 ;; esac
+  case " $* " in *' --minion-unsupported-capability-probe '*) printf '%s\n' 'unexpected argument --minion-unsupported-capability-probe' >&2; exit 2 ;; esac
   if [ "$2" = resume ]; then
     printf '%s\n' 'Usage: codex exec resume [OPTIONS] [SESSION_ID] [PROMPT]'
   else
@@ -32,9 +33,9 @@ if [ "$1" = exec ]; then
   fi
   exit 0
 fi
+IFS= read -r request || exit 0
 printf '%s\n' "$@" > @ARGS@
 printf '%s,%s\n' "${GH_TOKEN-absent}" "${GITHUB_TOKEN-absent}" > @ENV@
-IFS= read -r request
 printf '%s\n' "$request" >> @REQUESTS@
 printf '%s\n' '{"id":1,"result":{}}'
 IFS= read -r request
@@ -158,7 +159,7 @@ func TestValidateChecksExecAndResumeCapabilitiesWithoutCredentials(t *testing.T)
 		t.Fatal(err)
 	}
 	calls := strings.Split(strings.TrimPrefix(string(data), "--invocation--\n"), "--invocation--\n")
-	if len(calls) != 4 {
+	if len(calls) != 6 {
 		t.Fatalf("expected fresh/resume help and rejection probes, got %q", data)
 	}
 	flags := []string{"--json", "--ignore-user-config", "--ignore-rules", "--strict-config", "--skip-git-repo-check"}
@@ -169,26 +170,32 @@ func TestValidateChecksExecAndResumeCapabilitiesWithoutCredentials(t *testing.T)
 	} {
 		flags = append(flags, "--disable", feature)
 	}
-	flags = append(flags, "-c", "skills.include_instructions=false", "-c", "approval_policy=never", "--model", "fixture", "--output-schema")
 	for i, command := range [][]string{{"exec"}, {"exec", "resume"}} {
-		got := strings.Split(strings.TrimSpace(calls[2*i]), "\n")
-		if len(got) < 2 || !filepath.IsAbs(got[len(got)-2]) || filepath.Base(got[len(got)-2]) != "output-schema.json" {
-			t.Fatalf("probe %d omitted a temporary output schema: %q", i, got)
+		var wantRejected []string
+		for j, writable := range []bool{false, true} {
+			got := strings.Split(strings.TrimSpace(calls[3*i+j]), "\n")
+			if len(got) < 2 || !filepath.IsAbs(got[len(got)-2]) || filepath.Base(got[len(got)-2]) != "output-schema.json" {
+				t.Fatalf("probe %d/%d omitted a temporary output schema: %q", i, j, got)
+			}
+			want := append(slices.Clone(command), flags[:5]...)
+			want = append(want, sandboxArgs(filepath.Dir(got[len(got)-2]), "", writable)...)
+			want = append(want, flags[5:]...)
+			want = append(want, execConfigArgs()...)
+			want = append(want, "--model", "fixture", "-c", `model_reasoning_effort="high"`, "--output-schema", got[len(got)-2], "--help")
+			if !slices.Equal(got, want) {
+				t.Fatalf("probe %d/%d args = %q; want %q", i, j, got, want)
+			}
+			if writable {
+				wantRejected = append(slices.Clone(want[:len(want)-1]), "--minion-unsupported-capability-probe", "--help")
+			}
 		}
-		want := append(append(slices.Clone(command), flags[:5]...), "-c", `sandbox_mode="read-only"`)
-		want = append(want, flags[5:]...)
-		want = append(want, got[len(got)-2], "--help")
-		if !slices.Equal(got, want) {
-			t.Fatalf("probe %d args = %q; want %q", i, got, want)
-		}
-		rejected := strings.Split(strings.TrimSpace(calls[2*i+1]), "\n")
-		wantRejected := append(append([]string(nil), command...), "--minion-unsupported-capability-probe", "--help")
+		rejected := strings.Split(strings.TrimSpace(calls[3*i+2]), "\n")
 		if !slices.Equal(rejected, wantRejected) {
 			t.Fatalf("negative probe %d args = %q; want %q", i, rejected, wantRejected)
 		}
 	}
 	env, err := os.ReadFile(filepath.Join(dir, "help-env"))
-	if err != nil || string(env) != strings.Repeat("absent,absent,absent,absent\n", 4) {
+	if err != nil || string(env) != strings.Repeat("absent,absent,absent,absent\n", 6) {
 		t.Fatalf("credentials reached capability probe: %q, %v", env, err)
 	}
 }
@@ -215,13 +222,97 @@ func TestValidateRejectsMissingOutputSchemaSupport(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsMissingResolvedEffortConfig(t *testing.T) {
+	dir := t.TempDir()
+	page := `{"id":2,"result":{"data":[{"model":"fixture","isDefault":true,"defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high"}]}]}}`
+	script := strings.Replace(catalogueScriptFor(dir, page, ""), "#!/bin/sh\n", "#!/bin/sh\ncase \" $* \" in *' model_reasoning_effort='*) printf '%s\\n' 'unsupported model_reasoning_effort=' >&2; exit 2 ;; esac\n", 1)
+	installFakeCodex(t, script)
+	if _, err := Validate(t.Context(), config.CodexConfig{}); err == nil || !strings.Contains(err.Error(), "Codex selected effort config capability check") || !strings.Contains(err.Error(), "model_reasoning_effort=") {
+		t.Fatalf("accepted CLI without the resolved effort config key: %v", err)
+	}
+}
+
+func TestValidateChecksResolvedModelEffortPair(t *testing.T) {
+	dir := t.TempDir()
+	page := `{"id":2,"result":{"data":[{"model":"fixture","isDefault":true,"defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high"}]}]}}`
+	script := strings.Replace(catalogueScriptFor(dir, page, ""), "#!/bin/sh\n", `#!/bin/sh
+if [ "$1" = app-server ]; then
+case " $* " in
+  *' model_reasoning_effort="high" '*)
+    case " $* " in *' model="fixture" '*) ;; *) printf '%s\n' 'invalid model/effort pair' >&2; exit 2 ;; esac ;;
+esac
+fi
+`, 1)
+	installFakeCodex(t, script)
+	if _, err := Validate(t.Context(), config.CodexConfig{}); err != nil {
+		t.Fatalf("resolved model/effort pair rejected: %v", err)
+	}
+}
+
+func TestValidateRejectsUnsupportedReadOnlySandboxConfig(t *testing.T) {
+	dir := t.TempDir()
+	page := `{"id":2,"result":{"data":[{"model":"fixture","isDefault":true,"defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high"}]}]}}`
+	script := strings.Replace(catalogueScriptFor(dir, page, ""), "#!/bin/sh\n", `#!/bin/sh
+if [ "$1" = app-server ]; then
+  case " $* " in *' sandbox_mode="read-only" '*) printf '%s\n' 'unsupported read-only sandbox' >&2; exit 2 ;; esac
+fi
+`, 1)
+	installFakeCodex(t, script)
+	if _, err := Validate(t.Context(), config.CodexConfig{}); err == nil || !strings.Contains(err.Error(), "writable=false") || !strings.Contains(err.Error(), "unsupported read-only sandbox") {
+		t.Fatalf("accepted unsupported read-only sandbox config: %v", err)
+	}
+}
+
+func TestValidateRejectsIgnoredUnknownConfigKey(t *testing.T) {
+	dir := t.TempDir()
+	page := `{"id":2,"result":{"data":[{"model":"fixture","isDefault":true,"defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high"}]}]}}`
+	script := strings.Replace(catalogueScriptFor(dir, page, ""), "case \" $* \" in *' minion_unsupported_capability_probe=true '*) printf '%s\\n' 'unknown config key: minion_unsupported_capability_probe' >&2; exit 2 ;; esac", "", 1)
+	installFakeCodex(t, script)
+	if _, err := Validate(t.Context(), config.CodexConfig{}); err == nil || !strings.Contains(err.Error(), "did not reject an unknown key") {
+		t.Fatalf("accepted a CLI that ignores strict config keys: %v", err)
+	}
+}
+
+func TestValidateRejectsUnrelatedConfigFailure(t *testing.T) {
+	dir := t.TempDir()
+	page := `{"id":2,"result":{"data":[{"model":"fixture","isDefault":true,"defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high"}]}]}}`
+	script := strings.Replace(catalogueScriptFor(dir, page, ""), "unknown config key: minion_unsupported_capability_probe", "unrelated startup failure", 1)
+	installFakeCodex(t, script)
+	if _, err := Validate(t.Context(), config.CodexConfig{}); err == nil || !strings.Contains(err.Error(), "did not reject an unknown key") {
+		t.Fatalf("accepted unrelated startup failure as config rejection: %v", err)
+	}
+}
+
+func TestCapabilityRejectedExcludesDeadline(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell fake is unavailable on native Windows")
+	}
+	binary := installFakeCodex(t, "#!/bin/sh\nexit 2\n")
+	err := exec.Command(binary).Run()
+	if !capabilityRejected(errors.Join(err, errors.New("unsupported sentinel")), "sentinel") ||
+		capabilityRejected(errors.Join(err, context.DeadlineExceeded, errors.New("unsupported sentinel")), "sentinel") ||
+		capabilityRejected(err, "sentinel") {
+		t.Fatalf("wrong parser failure classification: %v", err)
+	}
+}
+
 func TestValidateRejectsHelpThatIgnoresUnknownOptions(t *testing.T) {
 	dir := t.TempDir()
 	page := `{"id":2,"result":{"data":[{"model":"fixture","isDefault":true,"defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high"}]}]}}`
-	script := strings.Replace(catalogueScriptFor(dir, page, ""), "case \" $* \" in *' --minion-unsupported-capability-probe '*) exit 2 ;; esac", "", 1)
+	script := strings.Replace(catalogueScriptFor(dir, page, ""), "case \" $* \" in *' --minion-unsupported-capability-probe '*) printf '%s\\n' 'unexpected argument --minion-unsupported-capability-probe' >&2; exit 2 ;; esac", "", 1)
 	installFakeCodex(t, script)
 	if _, err := Validate(t.Context(), config.CodexConfig{}); err == nil || !strings.Contains(err.Error(), "Codex exec capability check did not reject an unknown option") {
 		t.Fatalf("accepted help that ignored an unknown option: %v", err)
+	}
+}
+
+func TestValidateRejectsUnrelatedUnknownOptionFailure(t *testing.T) {
+	dir := t.TempDir()
+	page := `{"id":2,"result":{"data":[{"model":"fixture","isDefault":true,"defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high"}]}]}}`
+	script := strings.Replace(catalogueScriptFor(dir, page, ""), "unexpected argument --minion-unsupported-capability-probe", "unrelated startup failure", 1)
+	installFakeCodex(t, script)
+	if _, err := Validate(t.Context(), config.CodexConfig{}); err == nil || !strings.Contains(err.Error(), "did not reject an unknown option") {
+		t.Fatalf("accepted unrelated startup failure as option rejection: %v", err)
 	}
 }
 

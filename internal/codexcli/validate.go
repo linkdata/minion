@@ -87,10 +87,8 @@ func Validate(ctx context.Context, settings config.CodexConfig) (resolved config
 	return settings, fmt.Errorf("codex.reasoning_effort %q is not supported for model %q; supported efforts: %s", effort, selected.Model, strings.Join(efforts, ", "))
 }
 
-// Check both exec parsers without supplying a prompt or starting an inference turn.
+// Check selected config and both exec parsers without starting an inference turn.
 func validateExecCapabilities(ctx context.Context, settings config.CodexConfig) (err error) {
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
 	binary, err := aicli.ExecutablePath("codex")
 	if err != nil {
 		return err
@@ -106,6 +104,27 @@ func validateExecCapabilities(ctx context.Context, settings config.CodexConfig) 
 	defer func() { err = errors.Join(err, os.RemoveAll(dir)) }()
 	schema := filepath.Join(dir, "output-schema.json")
 	env := childEnvironment(os.Environ(), dir, dir, home, true)
+	probe := func(args []string) ([]byte, error) {
+		probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		return aicli.Probe(probeCtx, binary, "codex", args, dir, env, "", settings.APIKey)
+	}
+	// exec --help parses flags but does not load -c settings. App-server
+	// startup checks that the resolved model/effort and both sandbox modes parse
+	// under strict config with no request. The catalogue checks model support.
+	if settings.ReasoningEffort != "" {
+		for _, writable := range []bool{false, true} {
+			args := append(appServerArgs(dir, writable), "-c", "model="+strconv.Quote(settings.Model), "-c", "model_reasoning_effort="+strconv.Quote(settings.ReasoningEffort))
+			if _, probeErr := probe(args); probeErr != nil {
+				return fmt.Errorf("Codex selected effort config capability check (writable=%t): %w", writable, probeErr) //nolint:staticcheck // -- Codex is a proper noun.
+			}
+			const unknownKey = "minion_unsupported_capability_probe"
+			invalid := append(append([]string(nil), args...), "-c", unknownKey+"=true")
+			if _, probeErr := probe(invalid); !capabilityRejected(probeErr, unknownKey) {
+				return fmt.Errorf("Codex selected effort config capability check (writable=%t) did not reject an unknown key: %v", writable, probeErr) //nolint:staticcheck // -- Codex is a proper noun.
+			}
+		}
+	}
 	for _, command := range []struct {
 		name string
 		args []string
@@ -113,27 +132,39 @@ func validateExecCapabilities(ctx context.Context, settings config.CodexConfig) 
 		{name: "exec", args: []string{"exec"}},
 		{name: "exec resume", args: []string{"exec", "resume"}},
 	} {
-		args := append(command.args,
-			"--json", "--ignore-user-config", "--ignore-rules", "--strict-config", "--skip-git-repo-check",
-		)
-		args = append(args, sandboxArgs(dir, "", false)...)
-		args = append(args, disabledFeatureArgs()...)
-		args = append(args,
-			"-c", "skills.include_instructions=false", "-c", "approval_policy=never", "--model", settings.Model,
-			"--output-schema", schema, "--help",
-		)
-		_, probeErr := aicli.Probe(ctx, binary, "codex", args, dir, env, "", settings.APIKey)
-		if probeErr != nil {
-			return fmt.Errorf("Codex %s capability check: %w", command.name, probeErr) //nolint:staticcheck // -- Codex is a proper noun.
+		var fullArgs []string
+		for _, writable := range []bool{false, true} {
+			args := append(append([]string(nil), command.args...),
+				"--json", "--ignore-user-config", "--ignore-rules", "--strict-config", "--skip-git-repo-check",
+			)
+			args = append(args, sandboxArgs(dir, "", writable)...)
+			args = append(args, disabledFeatureArgs()...)
+			args = append(args, execConfigArgs()...)
+			args = append(args, "--model", settings.Model)
+			if settings.ReasoningEffort != "" {
+				args = append(args, "-c", "model_reasoning_effort="+strconv.Quote(settings.ReasoningEffort))
+			}
+			args = append(args, "--output-schema", schema, "--help")
+			_, probeErr := probe(args)
+			if probeErr != nil {
+				return fmt.Errorf("Codex %s capability check (writable=%t): %w", command.name, writable, probeErr) //nolint:staticcheck // -- Codex is a proper noun.
+			}
+			fullArgs = args
 		}
-		invalid := append(command.args, "--minion-unsupported-capability-probe", "--help")
-		_, probeErr = aicli.Probe(ctx, binary, "codex", invalid, dir, env, "", settings.APIKey)
-		var exitErr *exec.ExitError
-		if probeErr == nil || ctx.Err() != nil || errors.Is(probeErr, aicli.ErrOutputLimit) || !errors.As(probeErr, &exitErr) || exitErr.ExitCode() <= 0 {
+		const unknownOption = "--minion-unsupported-capability-probe"
+		invalid := append(append([]string(nil), fullArgs[:len(fullArgs)-1]...), unknownOption, "--help")
+		_, probeErr := probe(invalid)
+		if !capabilityRejected(probeErr, unknownOption) {
 			return fmt.Errorf("Codex %s capability check did not reject an unknown option: %v", command.name, probeErr) //nolint:staticcheck // -- Codex is a proper noun.
 		}
 	}
 	return nil
+}
+
+func capabilityRejected(err error, sentinel string) bool {
+	var exitErr *exec.ExitError
+	return err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) &&
+		!errors.Is(err, aicli.ErrOutputLimit) && errors.As(err, &exitErr) && exitErr.ExitCode() > 0 && strings.Contains(err.Error(), sentinel)
 }
 
 func disabledFeatureArgs() []string {
@@ -146,6 +177,12 @@ func disabledFeatureArgs() []string {
 		args = append(args, "--disable", feature)
 	}
 	return args
+}
+
+func appServerArgs(dir string, writable bool) []string {
+	args := append([]string{"app-server", "--strict-config", "--listen", "stdio://", "-c", `model_provider="openai"`}, disabledFeatureArgs()...)
+	args = append(args, execConfigArgs()...)
+	return append(args, sandboxArgs(dir, "", writable)...)
 }
 
 func listModels(ctx context.Context, settings config.CodexConfig) (models []modelInfo, err error) {
@@ -169,9 +206,7 @@ func listModels(ctx context.Context, settings config.CodexConfig) (models []mode
 	// app-server has no --ignore-user-config flag. Select exec's built-in
 	// provider explicitly and avoid repository config by using a temporary cwd.
 	// Startup validates writable sandbox config without starting an inference turn.
-	args := append([]string{"app-server", "--strict-config", "--listen", "stdio://", "-c", `model_provider="openai"`}, disabledFeatureArgs()...)
-	args = append(args, execConfigArgs()...)
-	args = append(args, sandboxArgs(dir, "", true)...)
+	args := appServerArgs(dir, true)
 	if settings.APIKey != "" {
 		args = append(args, "-c", `cli_auth_credentials_store="ephemeral"`, "-c", `forced_login_method="api"`)
 	}

@@ -88,8 +88,24 @@ func fakeExecutable(t *testing.T, name, script string) string {
 		t.Setenv("HOME", t.TempDir())
 		t.Setenv("CLAUDE_CONFIG_DIR", "")
 		// Native invocations echo their explicit host-selected conversation ID.
-		// Discovery probes have no session selector and emit no such event.
-		script = `minion_session_flag=false
+		// Model discovery has no session selector and emits no such event.
+		script = `case " $* " in *' --minion-unsupported-capability-probe '*) printf '%s\n' 'unknown option --minion-unsupported-capability-probe' >&2; exit 2 ;; esac
+case " $* " in
+  *' --input-format stream-json '*)
+    case " $* " in
+      *' --resume '*)
+        minion_next=false
+        for minion_arg do
+          if $minion_next; then minion_id=$minion_arg; break; fi
+          [ "$minion_arg" != --resume ] || minion_next=true
+        done
+        printf '%s\n' '{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":0,"total_cost_usd":0,"usage":{"input_tokens":0,"output_tokens":0}}'
+        printf 'No conversation found with session ID: %s\n' "$minion_id" >&2
+        exit 1 ;;
+      *' --session-id '*) printf '%s\n' "$@" > "$0.fresh-args"; printf '%s\n' '` + modelCatalogue + `'; exit 0 ;;
+    esac ;;
+esac
+minion_session_flag=false
 for minion_arg do
   if $minion_session_flag; then
     printf '{"type":"system","subtype":"init","session_id":"%s"}\n' "$minion_arg"

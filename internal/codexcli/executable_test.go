@@ -31,6 +31,7 @@ func TestMain(m *testing.M) {
 	case "exec":
 		for _, arg := range os.Args[2:] {
 			if arg == "--minion-unsupported-capability-probe" {
+				fmt.Fprintln(os.Stderr, "unexpected argument --minion-unsupported-capability-probe")
 				os.Exit(2)
 			}
 			if arg == "--help" {
@@ -54,6 +55,12 @@ func TestMain(m *testing.M) {
 		}
 		_ = json.NewEncoder(os.Stdout).Encode([]any{map[string]any{"role": "user", "content": []any{map[string]string{"text": text}}}})
 	case "app-server":
+		for _, arg := range os.Args[2:] {
+			if arg == "minion_unsupported_capability_probe=true" {
+				fmt.Fprintln(os.Stderr, "unknown config key: minion_unsupported_capability_probe")
+				os.Exit(2)
+			}
+		}
 		decoder, encoder := json.NewDecoder(os.Stdin), json.NewEncoder(os.Stdout)
 		for {
 			var request struct {
