@@ -145,6 +145,9 @@ func TestNativeCodexSandboxEnforcement(t *testing.T) {
 		}
 		t.Fatalf("native Codex sandbox did not enforce Minion profile (%v): %s", err, output)
 	}
+	if data, err := os.ReadFile(filepath.Join(workspace, "written.txt")); err != nil || string(data) != "written" {
+		t.Fatalf("native Codex sandbox probe child did not complete: %q, %v", data, err)
+	}
 	if string(dataMustRead(t, privateFile)) != "private" {
 		t.Fatal("native sandbox changed private file")
 	}
@@ -181,9 +184,6 @@ func TestNativeCodexSandboxProbeChild(t *testing.T) {
 	if _, err := os.Stat(strings.TrimRight(string(output), "\r\n")); err != nil {
 		t.Fatalf("model Git helpers are unreadable inside native sandbox: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(filepath.Dir(allowed), "written.txt"), []byte("written"), 0o600); err != nil {
-		t.Fatalf("permitted source write failed: %v", err)
-	}
 	if data, err := os.ReadFile(gitFile); err != nil || string(data) != "metadata" {
 		t.Fatalf("Git metadata read failed: %q, %v", data, err)
 	}
@@ -216,6 +216,9 @@ func TestNativeCodexSandboxProbeChild(t *testing.T) {
 	if err == nil {
 		_ = conn.Close()
 		t.Fatal("sandboxed command reached a local network listener")
+	}
+	if err := os.WriteFile(filepath.Join(filepath.Dir(allowed), "written.txt"), []byte("written"), 0o600); err != nil {
+		t.Fatalf("permitted source write failed: %v", err)
 	}
 }
 
