@@ -36,7 +36,8 @@ var defaultActionTestCommands = map[string]command.Action{
 
 func testGitHub(server *httptest.Server, token string) *github.Client {
 	client := github.New(token)
-	client.BaseURL, client.HTTPClient = server.URL, server.Client()
+	client.HTTPClient = server.Client()
+	client.BaseURL = server.URL
 	return client
 }
 

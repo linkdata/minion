@@ -141,7 +141,6 @@ func TestPrecheckDeadlineStopsJobBeforeModel(t *testing.T) {
 			}
 			<-r.Context().Done()
 		}))
-		defer server.Close()
 		client := testGitHub(server, "test-token")
 		orchestrator := &Orchestrator{
 			GitHub:   client,
