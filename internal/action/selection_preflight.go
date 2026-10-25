@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/linkdata/minion/internal/claudecli"
@@ -24,7 +25,7 @@ func (r *Runner) PreflightSelection(ctx context.Context) (resultErr error) {
 		if resultErr == nil {
 			return
 		}
-		secrets := append([]string{r.Codex.APIKey, r.Claude.APIKey}, workerCredentialValues(os.Environ())...)
+		secrets := orderWorkerSecrets(append([]string{r.Codex.APIKey, r.Claude.APIKey}, workerCredentialValues(os.Environ())...))
 		resultErr = redactActionError(resultErr, secrets...)
 		if message := httpFailureDiagnostic(resultErr.Error()); message != resultErr.Error() {
 			resultErr = redactedActionError{cause: resultErr, message: message}
@@ -122,10 +123,24 @@ func workerCredentialValues(env []string) []string {
 		if !ok || value == "" {
 			continue
 		}
-		switch strings.ToUpper(name) {
-		case "CODEX_API_KEY", "CODEX_ACCESS_TOKEN", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN", "GH_TOKEN", "GITHUB_TOKEN":
+		upper := strings.ToUpper(name)
+		sensitive := strings.HasSuffix(upper, "_URL") ||
+			strings.Contains(upper, "TOKEN") || strings.Contains(upper, "KEY") ||
+			strings.Contains(upper, "SECRET") || strings.Contains(upper, "PASS") ||
+			strings.Contains(upper, "AUTH") || strings.Contains(upper, "CREDENTIAL") ||
+			strings.Contains(upper, "COOKIE") || strings.Contains(upper, "PROXY") ||
+			strings.Contains(upper, "DSN")
+		if len(value) >= 8 || sensitive {
 			secrets = append(secrets, value)
+			if trimmed := strings.TrimSpace(value); trimmed != "" && trimmed != value {
+				secrets = append(secrets, trimmed)
+			}
 		}
 	}
+	return secrets
+}
+
+func orderWorkerSecrets(secrets []string) []string {
+	sort.Slice(secrets, func(i, j int) bool { return len(secrets[i]) > len(secrets[j]) })
 	return secrets
 }

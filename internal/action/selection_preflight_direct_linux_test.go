@@ -169,14 +169,18 @@ func TestPreflightSelectionRedactsNativeCredentialFromCLIError(t *testing.T) {
 	installActionTestSkills(t, testReviewSkillURL)
 	t.Setenv("CODEX_HOME", t.TempDir())
 	const secret = "native-preflight-credential"
+	const databasePassword = "database-credential"
+	const proxy = "http://user:credential@proxy.example"
 	t.Setenv("CODEX_API_KEY", secret)
-	script := strings.Replace(preflightCodexCLI, "  app-server)\n", "  app-server)\n    printf '%s\\n' \"$CODEX_API_KEY\" >&2\n    exit 7\n", 1)
+	t.Setenv("PGPASSWORD", databasePassword)
+	t.Setenv("HTTPS_PROXY", proxy)
+	script := strings.Replace(preflightCodexCLI, "  app-server)\n", "  app-server)\n    printf '%s\\n' \"$CODEX_API_KEY $PGPASSWORD $HTTPS_PROXY\" >&2\n    exit 7\n", 1)
 	fakeOnPath(t, "codex", script)
 	runner := selectedPreflightRunner(t, map[string]config.CommandMapping{
 		"review": {Action: string(command.Review), Skills: []string{testReviewSkillURL}},
 	})
 	err := runner.PreflightSelection(t.Context())
-	if err == nil || strings.Contains(err.Error(), secret) || !strings.Contains(err.Error(), "[redacted]") {
+	if err == nil || strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), databasePassword) || strings.Contains(err.Error(), proxy) || !strings.Contains(err.Error(), "[redacted]") {
 		t.Fatalf("native credential escaped preflight error redaction: %v", err)
 	}
 }

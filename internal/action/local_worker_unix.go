@@ -63,7 +63,7 @@ func startLocalWorker(runtimeDir, executorID, path string, args []string, config
 	}
 	cmd.Cancel = commandCancel
 	executil.Prepare(cmd)
-	w := &localWorker{executor: executor, endpoint: endpoint, cmd: cmd, cancel: cancel, exited: make(chan struct{}), stderr: stderr, secrets: workerCredentialValues(env)}
+	w := &localWorker{executor: executor, endpoint: endpoint, cmd: cmd, cancel: cancel, exited: make(chan struct{}), stderr: stderr, secrets: orderWorkerSecrets(workerCredentialValues(env))}
 	preparedCancel := cmd.Cancel
 	cmd.Cancel = func() error {
 		err := preparedCancel()
@@ -135,8 +135,7 @@ func (w *localWorker) awaitHeldPull(ctx context.Context) (waitErr error) {
 						raw = ""
 					}
 				}
-				raw = strings.TrimSpace(raw)
-				detail := redactActionText(raw, w.secrets...)
+				detail := strings.TrimSpace(redactActionText(raw, w.secrets...))
 				if detail == "" {
 					detail = "worker startup output could not be safely displayed"
 				}
