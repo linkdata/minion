@@ -141,14 +141,17 @@ func TestRunHTTPLoopDoesNotHidePartialAssignmentOnCancel(t *testing.T) {
 
 func TestRunHTTPLoopStopsAfterMissingOutcomeACK(t *testing.T) {
 	installActionTestSkills(t, testReviewSkillURL)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
 	job := testJob(command.Comment)
 	parent := newHTTPServerTest(t, t.Context(), job, runnerExecutionCheckpoints{}, nil)
 	client := *parent.server.Client()
 	underlying := client.Transport
 	var pulls, calls atomic.Int32
 	client.Transport = httpClientTestTransport(func(r *http.Request) (*http.Response, error) {
-		if r.URL.Path == "/next" {
-			pulls.Add(1)
+		if r.URL.Path == "/next" && pulls.Add(1) > 1 {
+			cancel()
+			return nil, context.Canceled
 		}
 		response, err := underlying.RoundTrip(r)
 		if err == nil && r.URL.Path == "/outcome" {
@@ -161,7 +164,7 @@ func TestRunHTTPLoopStopsAfterMissingOutcomeACK(t *testing.T) {
 		calls.Add(1)
 		return aicli.Result{Answer: "Worker answer", UsageComplete: true}, nil
 	}}
-	err := RunHTTPLoop(t.Context(), &client, parent.server.URL, job.Identity.ExecutorID, runner)
+	err := RunHTTPLoop(ctx, &client, parent.server.URL, job.Identity.ExecutorID, runner)
 	if !errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || pulls.Load() != 1 || calls.Load() != 1 {
 		t.Fatalf("missing outcome ACK retried model work: pulls=%d calls=%d error=%v", pulls.Load(), calls.Load(), err)
 	}
@@ -173,6 +176,8 @@ func TestRunHTTPLoopStopsAfterMissingOutcomeACK(t *testing.T) {
 
 func TestRunHTTPLoopReportsWatchFailureAfterOutcomeACK(t *testing.T) {
 	installActionTestSkills(t, testReviewSkillURL)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
 	job := testJob(command.Comment)
 	parent := newHTTPServerTest(t, t.Context(), job, runnerExecutionCheckpoints{}, nil)
 	client := *parent.server.Client()
@@ -180,8 +185,9 @@ func TestRunHTTPLoopReportsWatchFailureAfterOutcomeACK(t *testing.T) {
 	triggerCtx, trigger := context.WithCancelCause(t.Context())
 	var pulls, watchReads atomic.Int32
 	client.Transport = httpClientTestTransport(func(r *http.Request) (*http.Response, error) {
-		if r.URL.Path == "/next" {
-			pulls.Add(1)
+		if r.URL.Path == "/next" && pulls.Add(1) > 1 {
+			cancel()
+			return nil, context.Canceled
 		}
 		response, err := underlying.RoundTrip(r)
 		if err != nil {
@@ -198,7 +204,7 @@ func TestRunHTTPLoopReportsWatchFailureAfterOutcomeACK(t *testing.T) {
 	runner := &Runner{WorkRoot: t.TempDir(), runModel: func(context.Context, modelRun) (aicli.Result, error) {
 		return aicli.Result{Answer: "Worker answer", UsageComplete: true}, nil
 	}}
-	err := RunHTTPLoop(t.Context(), &client, parent.server.URL, job.Identity.ExecutorID, runner)
+	err := RunHTTPLoop(ctx, &client, parent.server.URL, job.Identity.ExecutorID, runner)
 	if !errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || !strings.Contains(err.Error(), "HTTP cancel") || pulls.Load() != 1 || watchReads.Load() == 0 {
 		t.Fatalf("watch failure after outcome ACK was hidden: pulls=%d reads=%d error=%v", pulls.Load(), watchReads.Load(), err)
 	}
@@ -209,14 +215,17 @@ func TestRunHTTPLoopReportsWatchFailureAfterOutcomeACK(t *testing.T) {
 
 func TestRunHTTPLoopStopsAfterMalformedRequiredACK(t *testing.T) {
 	installActionTestSkills(t, testReviewSkillURL)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
 	job := testJob(command.Comment)
 	parent := newHTTPServerTest(t, t.Context(), job, runnerExecutionCheckpoints{}, nil)
 	client := *parent.server.Client()
 	underlying := client.Transport
 	var pulls, calls atomic.Int32
 	client.Transport = httpClientTestTransport(func(r *http.Request) (*http.Response, error) {
-		if r.URL.Path == "/next" {
-			pulls.Add(1)
+		if r.URL.Path == "/next" && pulls.Add(1) > 1 {
+			cancel()
+			return nil, context.Canceled
 		}
 		response, err := underlying.RoundTrip(r)
 		if err == nil && r.URL.Path == "/before" {
@@ -229,7 +238,7 @@ func TestRunHTTPLoopStopsAfterMalformedRequiredACK(t *testing.T) {
 		calls.Add(1)
 		return aicli.Result{Answer: "Worker answer", UsageComplete: true}, nil
 	}}
-	err := RunHTTPLoop(t.Context(), &client, parent.server.URL, job.Identity.ExecutorID, runner)
+	err := RunHTTPLoop(ctx, &client, parent.server.URL, job.Identity.ExecutorID, runner)
 	if !errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || pulls.Load() != 1 || calls.Load() != 0 {
 		t.Fatalf("malformed required ACK allowed another pull or model call: pulls=%d calls=%d error=%v", pulls.Load(), calls.Load(), err)
 	}
