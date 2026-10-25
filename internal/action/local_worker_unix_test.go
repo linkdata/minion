@@ -1,0 +1,305 @@
+//go:build linux
+
+package action
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/linkdata/minion/internal/command"
+	"github.com/linkdata/minion/internal/monitor"
+	"github.com/linkdata/minion/internal/workspace"
+)
+
+func localWorkerTestStart(t *testing.T, mode string) *localWorker {
+	t.Helper()
+	report := filepath.Join(t.TempDir(), "child")
+	var output bytes.Buffer
+	w, err := startLocalWorker(unixTestDirectory(t), "local", func(ctx context.Context, socket string) *exec.Cmd {
+		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestLocalWorkerHelper$")
+		cmd.Env = append(os.Environ(), "MINION_LOCAL_WORKER_HELPER="+mode, "MINION_LOCAL_WORKER_SOCKET="+socket, "MINION_LOCAL_WORKER_REPORT="+report)
+		cmd.Stdout, cmd.Stderr = &output, &output
+		return cmd
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := w.Close(); err != nil && mode != "hold" {
+			t.Errorf("close local worker: %v", err)
+		}
+		if t.Failed() {
+			t.Logf("local worker output: %s", output.String())
+		}
+	})
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	if got := unixWorkerReport(t, ctx, report, ".ready"); got != strconv.Itoa(w.cmd.Process.Pid) {
+		t.Fatalf("direct child PID = %q, want %d", got, w.cmd.Process.Pid)
+	}
+	return w
+}
+
+func TestLocalWorkerKnownOutcomeSurvivesChildExit(t *testing.T) {
+	w := localWorkerTestStart(t, "known")
+	job := testJob(command.Comment)
+	result, err := w.Execute(t.Context(), job, runnerExecutionCheckpoints{})
+	if err != nil || result.Answer != "known" || !result.matchesJob(job) {
+		t.Fatalf("accepted outcome changed after worker exit: result=%+v error=%v", result, err)
+	}
+	select {
+	case <-w.exited:
+	case <-time.After(10 * time.Second):
+		t.Fatal("direct child was not reaped")
+	}
+	if w.waitErr == nil || w.cmd.ProcessState == nil {
+		t.Fatalf("nonzero direct child exit was not observed: wait=%v state=%v", w.waitErr, w.cmd.ProcessState)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close after known outcome: %v", err)
+	}
+	if _, err := os.Lstat(w.endpoint.SocketPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("owned endpoint remains after child exit: %v", err)
+	}
+}
+
+func TestLocalWorkerCrashAfterDeliveryQuarantines(t *testing.T) {
+	w := localWorkerTestStart(t, "crash")
+	w.executor.outcomeGrace = 25 * time.Millisecond
+	job := testJob(command.Comment)
+	result, err := w.Execute(t.Context(), job, runnerExecutionCheckpoints{})
+	if !result.matchesJob(job) || !errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || !strings.Contains(err.Error(), "local worker exited") {
+		t.Fatalf("missing final outcome was not quarantined: result=%+v error=%v", result, err)
+	}
+	w.executor.mu.Lock()
+	quarantined := w.executor.unavailable
+	w.executor.mu.Unlock()
+	if !quarantined || w.cmd.ProcessState == nil {
+		t.Fatalf("crashed worker remains available or unjoined: quarantine=%v state=%v", quarantined, w.cmd.ProcessState)
+	}
+	if _, err := os.Lstat(w.endpoint.SocketPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("crash left owned endpoint: %v", err)
+	}
+}
+
+func TestLocalWorkerCrashBeforeDeliveryReportsExit(t *testing.T) {
+	w := localWorkerTestStart(t, "precrash")
+	job := testJob(command.Comment)
+	result, err := w.Execute(t.Context(), job, runnerExecutionCheckpoints{})
+	if !result.matchesJob(job) || err == nil || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || !strings.Contains(err.Error(), "local worker exited") {
+		t.Fatalf("pre-delivery exit lost its diagnostic or became uncertain: result=%+v error=%v", result, err)
+	}
+	if w.cmd.ProcessState == nil {
+		t.Fatal("pre-delivery child was not reaped")
+	}
+}
+
+func TestLocalWorkerDrainsAcceptedCallbackBeforeStop(t *testing.T) {
+	for _, stop := range []string{"shutdown", "cancellation"} {
+		t.Run(stop, func(t *testing.T) {
+			w := localWorkerTestStart(t, "drain")
+			job := testJob(command.Comment)
+			entered, release := make(chan struct{}), make(chan struct{})
+			t.Cleanup(func() {
+				select {
+				case <-release:
+				default:
+					close(release)
+				}
+			})
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			done := make(chan httpServerTestResult, 1)
+			go func() {
+				result, err := w.Execute(ctx, job, runnerExecutionCheckpoints{before: func(CallCheckpoint) error {
+					close(entered)
+					<-release
+					return nil
+				}})
+				done <- httpServerTestResult{result, err}
+			}()
+			select {
+			case <-entered:
+			case <-time.After(10 * time.Second):
+				t.Fatal("child never entered the accepted callback")
+			}
+			busy := job
+			busy.Identity.JobID = "other"
+			if result, err := w.Execute(t.Context(), busy, runnerExecutionCheckpoints{}); err == nil || !strings.Contains(err.Error(), "busy") || !result.matchesJob(busy) {
+				t.Fatalf("second assignment was not rejected: result=%+v error=%v", result, err)
+			}
+			busyCtx, cancelBusy := context.WithCancel(t.Context())
+			cancelBusy()
+			if _, err := w.Execute(busyCtx, busy, runnerExecutionCheckpoints{}); err == nil || !strings.Contains(err.Error(), "busy") {
+				t.Fatalf("canceled second assignment was not rejected as busy: %v", err)
+			}
+			w.executor.mu.Lock()
+			closedEarly := w.executor.closed
+			w.executor.mu.Unlock()
+			if closedEarly {
+				t.Fatal("canceled busy request stopped the active child")
+			}
+			closed := make(chan error, 1)
+			if stop == "shutdown" {
+				go func() { closed <- w.Close() }()
+			} else {
+				cancel()
+			}
+			tx := w.executor.transaction()
+			if tx == nil {
+				t.Fatal("accepted callback lost its transaction")
+			}
+			select {
+			case <-tx.budget.Done():
+			case <-time.After(10 * time.Second):
+				t.Fatal("stop did not reach the transaction")
+			}
+			select {
+			case err := <-closed:
+				t.Fatalf("close returned before callback drained: %v", err)
+			default:
+			}
+			select {
+			case <-w.exited:
+				t.Fatal("direct child was reaped before callback drain")
+			default:
+			}
+			if _, err := os.Lstat(w.endpoint.SocketPath()); err != nil {
+				t.Fatalf("endpoint closed before callback drain: %v", err)
+			}
+			close(release)
+			select {
+			case got := <-done:
+				if !errors.Is(got.err, context.Canceled) || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || got.result.Answer != "known" {
+					t.Fatalf("accepted canceled outcome lost: result=%+v error=%v", got.result, got.err)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("accepted callback did not finish")
+			}
+			if stop == "shutdown" {
+				select {
+				case err := <-closed:
+					if err != nil {
+						t.Fatal(err)
+					}
+				case <-time.After(10 * time.Second):
+					t.Fatal("shutdown did not reap child")
+				}
+			}
+			if w.cmd.ProcessState == nil {
+				t.Fatal("direct child was not reaped")
+			}
+			if _, err := os.Lstat(w.endpoint.SocketPath()); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("stop left owned endpoint: %v", err)
+			}
+		})
+	}
+}
+
+func TestLocalWorkerClosePreservesReplacedEndpoint(t *testing.T) {
+	w := localWorkerTestStart(t, "hold")
+	path := w.endpoint.SocketPath()
+	moved := path + ".moved"
+	if err := os.Rename(path, moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("replacement"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err == nil {
+		t.Fatalf("replacement was not reported: %v", err)
+	}
+	if data, err := os.ReadFile(path); err != nil || string(data) != "replacement" || w.cmd.ProcessState == nil {
+		t.Fatalf("replacement changed or child not reaped: data=%q error=%v state=%v", data, err, w.cmd.ProcessState)
+	}
+}
+
+func TestLocalWorkerListenerFailureReapsChild(t *testing.T) {
+	w := localWorkerTestStart(t, "hold")
+	if err := w.endpoint.listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-w.exited:
+	case <-time.After(10 * time.Second):
+		t.Fatal("listener failure did not stop direct child")
+	}
+	if err := w.Close(); err == nil {
+		t.Fatal("listener failure was not reported")
+	}
+	if _, err := os.Lstat(w.endpoint.SocketPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("listener failure left owned endpoint: %v", err)
+	}
+}
+
+func TestLocalWorkerStartFailureClosesEndpoint(t *testing.T) {
+	dir := unixTestDirectory(t)
+	w, err := startLocalWorker(dir, "local", func(ctx context.Context, _ string) *exec.Cmd {
+		return exec.CommandContext(ctx, filepath.Join(dir, "missing"))
+	})
+	if w != nil || err == nil || !strings.Contains(err.Error(), "start local worker") {
+		t.Fatalf("start failure: worker=%v error=%v", w, err)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, "execution.sock")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("start failure retained owned endpoint: %v", err)
+	}
+}
+
+func TestLocalWorkerHelper(t *testing.T) {
+	mode := os.Getenv("MINION_LOCAL_WORKER_HELPER")
+	if mode == "" {
+		return
+	}
+	client, err := NewUnixExecutionClient(os.Getenv("MINION_LOCAL_WORKER_SOCKET"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.CloseIdleConnections()
+	report := os.Getenv("MINION_LOCAL_WORKER_REPORT")
+	if err := workspace.WriteAtomic(report+".ready", []byte(strconv.Itoa(os.Getpid()))); err != nil {
+		t.Fatal(err)
+	}
+	if mode == "precrash" {
+		os.Exit(7)
+	}
+	if mode == "hold" {
+		select {}
+	}
+	var assignment httpAssignment
+	status, err := unixTestJSON(t, client, "/next", httpPull{Version: ProtocolVersion, ExecutorID: "local"}, &assignment, httpJobBytes)
+	if err != nil || status != http.StatusOK {
+		t.Fatalf("pull: status=%d error=%v", status, err)
+	}
+	if mode == "crash" {
+		os.Exit(7)
+	}
+	job := assignment.Job
+	if mode == "drain" {
+		call := CallUsage{Provider: job.Main.Provider, Role: roleMain, Round: 1, Model: job.Main.Model, Effort: job.Main.Effort}
+		unixTestAck(t, client, "/before", httpCall{Sequence: 1, Checkpoint: CallCheckpoint{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Call: call}}, 1)
+	}
+	result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "known"}
+	sequence := uint64(1)
+	var failure *httpFailure
+	if mode == "drain" {
+		sequence, failure = 2, newHTTPFailure(context.Canceled)
+	}
+	unixTestAck(t, client, "/outcome", httpOutcome{Sequence: sequence, Result: result, Failure: failure}, sequence)
+	if mode == "known" {
+		os.Exit(7)
+	}
+	if mode != "drain" {
+		t.Fatalf("unexpected helper mode %q", mode)
+	}
+	// The owner must stop the child only after the accepted outcome drains.
+	select {}
+}
