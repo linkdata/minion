@@ -305,6 +305,9 @@ printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.comp
 /bin/chmod 0500 `+shellQuote(root)+"\n")
 			job := testJob(action)
 			job.RuntimeBudget = 5 * time.Second
+			if test.expire {
+				job.RuntimeBudget = time.Second
+			}
 			var modelContext context.Context
 			var changedSource string
 			journal := &cleanupRetryLog{root: root, onRetry: func() error {
