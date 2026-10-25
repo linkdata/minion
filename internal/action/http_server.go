@@ -281,6 +281,7 @@ func (e *HTTPExecutor) serveNext(w http.ResponseWriter, r *http.Request) {
 			delivery.handlers.Done()
 		}
 	}()
+poll:
 	for {
 		e.mu.Lock()
 		if e.closed {
@@ -297,8 +298,27 @@ func (e *HTTPExecutor) serveNext(w http.ResponseWriter, r *http.Request) {
 		if tx != nil {
 			tx.mu.Lock()
 			if tx.delivered || tx.fenced {
+				completed := tx.outcome
 				tx.mu.Unlock()
 				e.mu.Unlock()
+				if completed {
+					for {
+						select {
+						case <-tx.finished:
+							continue poll
+						case <-r.Context().Done():
+							return
+						case <-changed:
+							e.mu.Lock()
+							closed := e.closed
+							changed = e.changed
+							e.mu.Unlock()
+							if closed {
+								continue poll
+							}
+						}
+					}
+				}
 				httpServerReject(w, "next", http.StatusConflict, httpBinding{}, 0, errors.New("HTTP assignment is already claimed"))
 				return
 			}
