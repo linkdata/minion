@@ -151,8 +151,9 @@ func (index *OfflineIndex) Changes(ctx context.Context) ([]workspace.Change, err
 	}
 	var renamedExecutable map[string]bool
 	var stale []byte
-	if strings.TrimSpace(string(ignoreCase)) == "true" {
+	if strings.TrimSpace(string(ignoreCase)) == "true" || runtime.GOOS == "windows" {
 		// Git keeps the old index spelling for case-only renames until it is removed.
+		// Windows also needs the old mode before Git stages a newly spelled file.
 		stale, err = index.caseRenamedPaths(ctx)
 		if err != nil {
 			return nil, err

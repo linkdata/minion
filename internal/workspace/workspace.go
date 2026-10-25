@@ -303,7 +303,7 @@ func CanonicalPath(root string) (string, error) {
 }
 
 // Within compares canonical absolute paths; callers resolve symlinks first.
-// On Windows, canonical component spelling preserves case-sensitive directory distinctions.
+// On Windows, existing canonical paths preserve case-sensitive directory distinctions.
 // On macOS, existing ancestor identity also catches case-insensitive aliases and missing suffixes.
 func Within(root, name string) bool {
 	if runtime.GOOS == "windows" {
@@ -316,7 +316,14 @@ func Within(root, name string) bool {
 		if rootPath == "" {
 			return namePath == "" || strings.HasPrefix(namePath, `\`)
 		}
-		return namePath == rootPath || strings.HasPrefix(namePath, rootPath+`\`)
+		if namePath == rootPath || strings.HasPrefix(namePath, rootPath+`\`) {
+			return true
+		}
+		if !equalFoldAncestor(rootPath, namePath) {
+			return false
+		}
+		_, err := os.Stat(root)
+		return err != nil // Existing canonical roots keep exact case; missing or unverifiable roots fail closed.
 	}
 	rel, err := filepath.Rel(root, name)
 	if err == nil && filepath.IsLocal(rel) {
@@ -327,17 +334,7 @@ func Within(root, name string) bool {
 	}
 	rootInfo, err := os.Stat(root)
 	if errors.Is(err, os.ErrNotExist) {
-		// shortcut: case folding may reject distinct future paths on a case-sensitive volume; revisit if needed.
-		for {
-			if strings.EqualFold(root, name) {
-				return true
-			}
-			parent := filepath.Dir(name)
-			if parent == name {
-				return false
-			}
-			name = parent
-		}
+		return equalFoldAncestor(root, name)
 	}
 	if err != nil {
 		return true // An unverified grant cannot be treated as separate.
@@ -348,6 +345,20 @@ func Within(root, name string) bool {
 			return true
 		}
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return true
+		}
+		parent := filepath.Dir(name)
+		if parent == name {
+			return false
+		}
+		name = parent
+	}
+}
+
+// shortcut: absent-root case folding may reject distinct future paths on a case-sensitive volume; revisit if needed.
+func equalFoldAncestor(root, name string) bool {
+	for {
+		if strings.EqualFold(root, name) {
 			return true
 		}
 		parent := filepath.Dir(name)

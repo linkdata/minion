@@ -87,21 +87,39 @@ func TestWindowsPathFromHandlePreservesVolumeGUID(t *testing.T) {
 }
 
 func TestWithinWindowsUsesCanonicalComponentCase(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "Tool")
+	if err := os.Mkdir(root, 0700); err != nil {
+		t.Fatal(err)
+	}
 	for _, test := range []struct {
 		root, name string
 		want       bool
 	}{
-		{`C:\case\Tool`, `C:\case\Tool\git.exe`, true},
-		{`C:\case\Tool`, `C:\case\tool\git.exe`, false},
-		{`C:\case\Tool`, `C:\case\Toolbox\git.exe`, false},
-		{`C:\`, `C:\case\Tool`, true},
+		{root, filepath.Join(root, "git.exe"), true},
+		{root, filepath.Join(parent, "tool", "git.exe"), false},
+		{root, filepath.Join(parent, "Toolbox", "git.exe"), false},
+		{filepath.VolumeName(root) + `\`, root, true},
 		{`\\Server\Share\Tool`, `\\server\share\Tool\git.exe`, true},
-		{`\\Server\Share\Tool`, `\\server\share\tool\git.exe`, false},
 		{`\\?\Volume{12345678-1234-1234-1234-123456789abc}\Tool`, `\\?\Volume{12345678-1234-1234-1234-123456789abc}\Tool\git.exe`, true},
 	} {
 		if got := Within(test.root, test.name); got != test.want {
 			t.Errorf("Within(%q, %q) = %t, want %t", test.root, test.name, got, test.want)
 		}
+	}
+}
+
+func TestWithinWindowsAbsentRootCaseAlias(t *testing.T) {
+	parent := t.TempDir()
+	grant := filepath.Join(parent, "FutureGrant")
+	if !Within(grant, filepath.Join(parent, "FUTUREGRANT", "auth.json")) {
+		t.Fatal("case alias escaped absent grant")
+	}
+	if Within(grant, filepath.Join(parent, "FUTUREGRANT-sibling", "auth.json")) {
+		t.Fatal("sibling counted as inside absent grant")
+	}
+	if Within(grant, filepath.Join(parent, "unrelated")) {
+		t.Fatal("unrelated path counted inside absent grant")
 	}
 }
 
