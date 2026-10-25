@@ -48,6 +48,7 @@ func TestRunHTTPReportsActualObservationsAndRawPaidReceipts(t *testing.T) {
 			job := testJob(command.Comment)
 			binding := httpJobBinding(job)
 			expires := time.Now().Add(job.RuntimeBudget)
+			expires = time.Unix(0, expires.UnixNano()) // Match the wire deadline's clock.
 			tokens := usage.Tokens{Input: 17, CachedInput: 3, Output: 5}
 			if test.invalidCounters {
 				tokens.Input = -1
@@ -961,7 +962,7 @@ func TestRunHTTPDeliversPaidFactsAfterCancellationWatchStopsAction(t *testing.T)
 				case "next":
 					runtime := job.RuntimeBudget
 					if name == "local action deadline" {
-						runtime = time.Second
+						runtime = 5 * time.Second
 					}
 					httpClientTestJSON(t, w, httpAssignment{Job: job, Expires: time.Now().Add(runtime).UnixNano()})
 					return
