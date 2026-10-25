@@ -110,8 +110,8 @@ func validateExecCapabilities(ctx context.Context, settings config.CodexConfig) 
 		return aicli.Probe(probeCtx, binary, "codex", args, dir, env, "", settings.APIKey)
 	}
 	// exec --help parses flags but does not load -c settings. App-server
-	// startup checks resolved model, effort and both sandbox modes under strict
-	// config with no request.
+	// startup checks that the resolved model/effort and both sandbox modes parse
+	// under strict config with no request. The catalogue checks model support.
 	if settings.ReasoningEffort != "" {
 		for _, writable := range []bool{false, true} {
 			args := append(appServerArgs(dir, writable), "-c", "model="+strconv.Quote(settings.Model), "-c", "model_reasoning_effort="+strconv.Quote(settings.ReasoningEffort))

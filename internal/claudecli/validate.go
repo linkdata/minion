@@ -203,7 +203,7 @@ func cleanFreshInitialization(data []byte) bool {
 			continue
 		}
 		var event capabilityEvent
-		if json.Unmarshal(line, &event) != nil || event.Type == "" || event.Type == "assistant" || event.Type == "result" ||
+		if json.Unmarshal(line, &event) != nil || event.Type != "control_response" && event.Type != "system" ||
 			event.usedModel() || event.hasAnswer() {
 			return false
 		}
@@ -218,7 +218,8 @@ func isEmptySessionLookup(data []byte) bool {
 			continue
 		}
 		var event capabilityEvent
-		if json.Unmarshal(line, &event) != nil || event.Type == "" || event.Type == "assistant" || event.usedModel() || event.hasAnswer() {
+		if json.Unmarshal(line, &event) != nil || event.Type != "control_response" && event.Type != "system" && event.Type != "result" ||
+			event.usedModel() || event.hasAnswer() {
 			return false
 		}
 		if event.Type == "result" {

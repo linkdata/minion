@@ -140,6 +140,8 @@ func TestEmptySessionLookupRejectsModelActivity(t *testing.T) {
 	}
 	for _, output := range []string{
 		`{"type":"assistant"}` + "\n" + empty,
+		`{"type":"user"}` + "\n" + empty,
+		`{"type":"stream_event"}` + "\n" + empty,
 		`{"type":"system","usage":{"input_tokens":1}}` + "\n" + empty,
 		`{"type":"system","modelUsage":{"main":{"inputTokens":0}}}` + "\n" + empty,
 		`{"type":"result","is_error":true,"result":"generated answer"}`,
@@ -169,6 +171,8 @@ func TestFreshInitializationRejectsPaidOrMalformedTrailingEvent(t *testing.T) {
 		`{"type":"result","subtype":"success","structured_output":{"answer":"generated answer"}}`,
 		`{"type":"system","usage":{"input_tokens":1}}`,
 		`{"type":"assistant"}`,
+		`{"type":"user"}`,
+		`{"type":"stream_event"}`,
 		`{`,
 		`null`,
 	} {
