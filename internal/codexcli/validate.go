@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -114,7 +113,7 @@ func validateExecCapabilities(ctx context.Context, settings config.CodexConfig) 
 		{name: "exec", args: []string{"exec"}},
 		{name: "exec resume", args: []string{"exec", "resume"}},
 	} {
-		args := append(slices.Clone(command.args),
+		args := append(command.args,
 			"--json", "--ignore-user-config", "--ignore-rules", "--strict-config", "--skip-git-repo-check",
 		)
 		args = append(args, sandboxArgs(dir, "", false)...)
@@ -127,7 +126,7 @@ func validateExecCapabilities(ctx context.Context, settings config.CodexConfig) 
 		if probeErr != nil {
 			return fmt.Errorf("Codex %s capability check: %w", command.name, probeErr) //nolint:staticcheck // -- Codex is a proper noun.
 		}
-		invalid := append(append([]string(nil), command.args...), "--minion-unsupported-capability-probe", "--help")
+		invalid := append(command.args, "--minion-unsupported-capability-probe", "--help")
 		_, probeErr = aicli.Probe(ctx, binary, "codex", invalid, dir, env, "", settings.APIKey)
 		var exitErr *exec.ExitError
 		if probeErr == nil || ctx.Err() != nil || errors.Is(probeErr, aicli.ErrOutputLimit) || !errors.As(probeErr, &exitErr) || exitErr.ExitCode() <= 0 {
