@@ -656,8 +656,8 @@ func TestPublishedRefutationsAuditTitleRejectsUnprovedCopyAfterScanBudget(t *tes
 	for i := range 982 {
 		quotes = append(quotes, fmt.Sprintf("Existing source quote %03d is already public.", i))
 	}
-	job.Source.Files[0].Data = []byte(strings.Join(quotes, "\n") + "\n" + strings.Repeat("f", 1<<20))
 	const private = "This private audit title must remain unpublished."
+	job.Source.Files[0].Data = []byte(strings.Join(quotes, "\n") + "\n" + strings.Repeat("f", 1<<20) + "\n" + private)
 	result := privateReviewResult(job)
 	result.Refutations = []Refutation{{Round: 2, Text: strings.Join(quotes, "\n")}, {Round: 3, Text: private}}
 	result.Calls[4].Approved, result.Calls[4].NoBlockers, result.Calls[4].HasBlockers = false, false, true
