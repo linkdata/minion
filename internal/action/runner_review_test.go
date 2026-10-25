@@ -8,7 +8,9 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -37,8 +39,8 @@ func (w *cleanupRetryLog) Write(p []byte) (int, error) {
 }
 
 func TestRunnerSnapshotCleanupRetryKeepsValidatedResult(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root bypasses directory permissions")
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("requires effective POSIX directory permissions and a non-root user")
 	}
 	root := t.TempDir()
 	t.Cleanup(func() { _ = os.Chmod(root, 0700) })
@@ -63,8 +65,8 @@ func TestRunnerSnapshotCleanupRetryKeepsValidatedResult(t *testing.T) {
 }
 
 func TestRunnerAuditValidationCleanupRestoresRestrictedDirectory(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root bypasses directory permissions")
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("requires effective POSIX directory permissions and a non-root user")
 	}
 	installActionTestSkills(t, testAuditSkillURL)
 	marker := filepath.Join(t.TempDir(), "restricted")
@@ -117,7 +119,8 @@ func TestRunnerReviewRevisionsFreezeCleanIndependentInputs(t *testing.T) {
 		if request.dir == source || request.writable || request.outputDir != "" {
 			t.Fatalf("critic received mutable main workspace: dir=%q writable=%t output=%q", request.dir, request.writable, request.outputDir)
 		}
-		if !strings.Contains(request.prompt, fmt.Sprintf(`inspect the frozen source at \"%s\"`, request.dir)) {
+		frozenPath := strconv.Quote(fmt.Sprintf("inspect the frozen source at %q", request.dir))
+		if !strings.Contains(request.prompt, frozenPath[1:len(frozenPath)-1]) {
 			t.Fatalf("critic prompt lacks frozen source path %q", request.dir)
 		}
 		data, err := workspace.ReadRegular(filepath.Join(request.dir, "source.txt"), workspace.MaxBytes)
@@ -286,8 +289,7 @@ func TestRunnerReviewRejectsInvalidFixBeforeCritic(t *testing.T) {
 			if scenario == "omitted path" {
 				job.Source.Omitted = []string{name}
 			} else {
-				job.Source.Files = []workspace.File{{Path: "Docs/stay", Mode: workspace.Regular}}
-				attachRepository(t, &job)
+				job.Source.Omitted = []string{"Docs/stay"}
 				name, want = "docs/new", "directory spelling collision"
 			}
 			calls := 0

@@ -6,47 +6,54 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 
-	"github.com/linkdata/minion/internal/processgroup"
 	"github.com/linkdata/minion/internal/testsupport"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
-func TestOfflineCheckIgnoreDoesNotAcceptSurvivingChild(t *testing.T) {
-	if err := processgroup.Check(); err != nil {
-		t.Skipf("delegated process ownership unavailable: %v", err)
-	}
+func TestFixIndexPreservesPipeDrainOverrunAboveOutputLimit(t *testing.T) {
 	index, _ := offlineIndexFixture(t, nil)
-	pidFile := filepath.Join(t.TempDir(), "child.pid")
-	testsupport.StopOnCleanup(t, pidFile+".stop")
-	script := "#!/bin/sh\n(while [ ! -f " + shellQuote(pidFile+".stop") + " ]; do sleep 1; done) </dev/null >/dev/null 2>&1 &\n" +
-		"printf '%s' \"$!\" > " + shellQuote(pidFile) + "\nexit 1\n"
-	index.binary = filepath.Join(fakeOnPath(t, "git-ignore-child", script), "git-ignore-child")
-	output, err := index.run(context.Background(), 1024, nil, "check-ignore", "--", "ignored")
-	if len(output) != 0 || !errors.Is(err, processgroup.ErrDescendants) {
-		t.Fatalf("check-ignore accepted surviving child: output=%q error=%v", output, err)
+	pidFile := filepath.Join(t.TempDir(), "holder.pid")
+	stopFile := pidFile + ".stop"
+	testsupport.StopOnCleanup(t, stopFile)
+	script := "#!/bin/sh\n(sleep 1; printf overflow-output; while [ ! -f " + shellQuote(stopFile) + " ]; do sleep .05; done) &\nprintf '%s' $! > " + shellQuote(pidFile) + "\nexit 0\n"
+	index.binary = filepath.Join(fakeOnPath(t, "git-proxy", script), "git-proxy")
+	_, err := index.run(t.Context(), 4, nil, "status")
+	process, pinErr := testsupport.PinProcess(pidFile)
+	if pinErr != nil {
+		t.Fatalf("pin finite pipe holder: %v", pinErr)
 	}
-	assertGitChildStopped(t, pidFile)
+	defer process.Close()
+	defer func() {
+		ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+		defer cancel()
+		if err := process.Cleanup(ctx); err != nil {
+			t.Errorf("clean finite pipe holder: %v", err)
+		}
+	}()
+	if !errors.Is(err, exec.ErrWaitDelay) || errors.Is(err, ErrCheckoutTooLarge) {
+		t.Fatalf("pipe-drain overrun classified as output size: %v", err)
+	}
 }
 
-func TestOfflineCheckIgnoreDoesNotAcceptProcessExhaustion(t *testing.T) {
-	if err := processgroup.Check(); err != nil {
-		t.Skipf("delegated process ownership unavailable: %v", err)
-	}
-	index, _ := offlineIndexFixture(t, nil)
-	index.binary = filepath.Join(fakeOnPath(t, "git-ignore-exhausted", "#!/bin/sh\n/bin/true\nexit 1\n"), "git-ignore-exhausted")
-	if err := processgroup.Configure(1, processgroup.DefaultMaxMemoryMiB<<20); err != nil {
+func TestFixIndexCaseSpellingScanRejectsAmbiguousAliases(t *testing.T) {
+	index, source := offlineIndexFixture(t, []workspace.File{{Path: "README.md", Mode: workspace.Regular, Data: []byte("fixture")}})
+	if _, err := index.run(t.Context(), 128, nil, "config", "core.ignoreCase", "true"); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = processgroup.Configure(processgroup.DefaultMaxTasks, processgroup.DefaultMaxMemoryMiB<<20) })
-	output, err := index.run(context.Background(), 1024, nil, "check-ignore", "--", "ignored")
-	if len(output) != 0 || !errors.Is(err, processgroup.ErrExhausted) {
-		t.Fatalf("check-ignore accepted process exhaustion: output=%q error=%v", output, err)
+	if err := os.Remove(filepath.Join(source, "README.md")); err != nil {
+		t.Fatal(err)
+	}
+	writeIndexFixture(t, source, "Readme.md", []byte("one"))
+	writeIndexFixture(t, source, "readme.md", []byte("two"))
+	if changes, err := index.Changes(t.Context()); changes != nil || err == nil || !strings.Contains(err.Error(), `ambiguous case-folded fix path "README.md"`) {
+		t.Fatalf("ambiguous aliases were selected: %+v, %v", changes, err)
 	}
 }
 

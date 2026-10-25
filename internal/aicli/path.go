@@ -46,7 +46,7 @@ func SafePath(value string, writable ...string) string {
 		}
 	}
 	if len(safe) == 0 {
-		return "/dev/null" // No command lookup is safer than a writable fallback.
+		return os.DevNull // No command lookup is safer than a writable fallback.
 	}
 	return strings.Join(safe, string(os.PathListSeparator))
 }

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -34,7 +35,7 @@ func TestStoreAtomicUpdates(t *testing.T) {
 		t.Fatal(err)
 	}
 	info, err := os.Stat(filepath.Join(dir, record.ID+".json"))
-	if err != nil || info.Mode().Perm() != 0600 {
+	if err != nil || !info.Mode().IsRegular() || runtime.GOOS != "windows" && info.Mode().Perm() != 0600 {
 		t.Fatalf("record permissions: info=%v err=%v", info, err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, ".record-interrupted"), []byte("partial"), 0600); err != nil {

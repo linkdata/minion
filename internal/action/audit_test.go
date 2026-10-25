@@ -488,9 +488,7 @@ func TestAuditArtifactReadModesPreserveFailurePolicies(t *testing.T) {
 					if err := os.Remove(name); err != nil {
 						t.Fatal(err)
 					}
-					if err := os.Symlink("REPORT.md", name); err != nil {
-						t.Fatal(err)
-					}
+					symlinkOrSkip(t, "REPORT.md", name)
 				case "oversized report":
 					writeFixtureFile(t, root, artifact, []byte(strings.Repeat("x", maxOutputBytes+1)))
 				case "invalid UTF-8 report":

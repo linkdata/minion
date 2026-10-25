@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -94,14 +95,13 @@ func TestClonePullRequestSkipsUnusedBaseTipPreflight(t *testing.T) {
 	base := fixture.git(fixture.source, "rev-parse", "HEAD")
 	blob := fixture.git(fixture.source, "rev-parse", "HEAD:"+unused)
 	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/heads/main")
-	url := "file://" + fixture.remote
-	if checkout, err := cloneFromURL(context.Background(), t.TempDir(), url, "main", true); !errors.Is(err, ErrCheckoutTooLarge) {
+	if checkout, err := cloneFromURL(context.Background(), t.TempDir(), fixture.remote, "main", true); !errors.Is(err, ErrCheckoutTooLarge) {
 		if checkout != nil {
 			_ = checkout.Close()
 		}
 		t.Fatalf("default clone error=%v want=%v", err, ErrCheckoutTooLarge)
 	}
-	checkout := fixture.keepCheckout(clonePullRequestFromURL(context.Background(), t.TempDir(), url, 7, "main", head))
+	checkout := fixture.keepCheckout(clonePullRequestFromURL(context.Background(), t.TempDir(), fixture.remote, 7, "main", head))
 	snapshot, err := checkout.Snapshot(context.Background())
 	if err != nil || snapshot.Head != head || snapshot.Base != base || snapshot.MergeBase != fixture.base || len(snapshot.Files) != 1 || string(snapshot.Files[0].Data) != "PR head\n" {
 		t.Fatalf("PR snapshot=%+v error=%v", snapshot, err)
@@ -118,6 +118,9 @@ func TestClonePullRequestSkipsUnusedBaseTipPreflight(t *testing.T) {
 }
 
 func TestPullRequestRejectsDeletedMergeBaseMetadataAliasBeforeContent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("git~1 may resolve to the fixture repository's .git directory")
+	}
 	const name = "git~1/hooks/x"
 	fixture := newFixture(t)
 	path := filepath.Join(fixture.source, filepath.FromSlash(name))
@@ -133,7 +136,7 @@ func TestPullRequestRejectsDeletedMergeBaseMetadataAliasBeforeContent(t *testing
 	fixture.git(fixture.source, "commit", "-m", "remove unsupported path")
 	head := fixture.git(fixture.source, "rev-parse", "HEAD")
 	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/pull/7/head")
-	checkout := fixture.keepCheckout(clonePullRequestFromURL(context.Background(), t.TempDir(), "file://"+fixture.remote, 7, "main", head))
+	checkout := fixture.keepCheckout(clonePullRequestFromURL(context.Background(), t.TempDir(), fixture.remote, 7, "main", head))
 	assertBlobPresent(fixture, checkout.path, blob)
 	if err := os.Rename(fixture.remote, fixture.remote+".offline"); err != nil {
 		t.Fatal(err)
@@ -160,7 +163,7 @@ func TestPullRequestInputGatesBeforeClone(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			root := t.TempDir()
-			if c, err := clonePullRequestFromURL(context.Background(), root, "file://"+filepath.Join(t.TempDir(), "missing.git"), tt.number, tt.base, tt.head); err == nil || c != nil || !strings.Contains(err.Error(), tt.want) {
+			if c, err := clonePullRequestFromURL(context.Background(), root, filepath.Join(t.TempDir(), "missing.git"), tt.number, tt.base, tt.head); err == nil || c != nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("invalid input accepted: %v,%v", c, err)
 			}
 			entries, err := os.ReadDir(root)

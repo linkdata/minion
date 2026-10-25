@@ -102,6 +102,22 @@ func (c *executionCheckpoints) BeforeCall(fact CallCheckpoint) error {
 			return c.fail(err)
 		}
 	}
+	if c.owner.Store != nil {
+		failure, exists := c.owner.Store.Data.JobFailures[c.job.Identity.JobID]
+		if !failure.ModelCallStarted {
+			failure.ModelCallStarted = true
+			c.owner.Store.Data.JobFailures[c.job.Identity.JobID] = failure
+			if err := c.owner.Store.Save(); err != nil {
+				if exists {
+					failure.ModelCallStarted = false
+					c.owner.Store.Data.JobFailures[c.job.Identity.JobID] = failure
+				} else {
+					delete(c.owner.Store.Data.JobFailures, c.job.Identity.JobID)
+				}
+				return c.fail(fmt.Errorf("save model call start: %w", err))
+			}
+		}
+	}
 	call := fact.Call
 	c.pending = &call
 	return nil
@@ -178,6 +194,11 @@ func (c *executionCheckpoints) finish(result Result, runErr error) error {
 		runErr = errors.Join(runErr, c.failure)
 	}
 	if !claimedSuccess {
+		// An admitted model call may have incurred a charge even without a receipt.
+		// The parent owns this checkpoint; worker failure flags do not set retry policy.
+		if !errors.Is(runErr, monitor.ErrTerminalJob) && (c.pending != nil || c.returned != nil || len(c.calls) != 0) {
+			runErr = errors.Join(runErr, monitor.ErrExecutionOutcomeUnknown)
+		}
 		// A failed AfterCall may return exactly its captured receipt after the acknowledged prefix.
 		calls := c.calls
 		if c.returned != nil {

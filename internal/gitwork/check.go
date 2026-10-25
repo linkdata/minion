@@ -15,7 +15,6 @@ import (
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/cleanup"
-	"github.com/linkdata/minion/internal/processgroup"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -24,7 +23,7 @@ const maxGitCheckBundleBytes = 1 << 20
 var gitVersionPattern = regexp.MustCompile(`^git version ([0-9]+)\.([0-9]+)\.([0-9]+)(?:\.windows\.[0-9]+)?(?: \([^()[:cntrl:]]+\))?$`)
 
 // Check proves Git 2.45.1 or newer supports the synthetic offline bundle/import/index operations.
-// The caller admits workRoot and process ownership before calling; no project data is used.
+// The caller admits workRoot before calling; no project data is used.
 func Check(ctx context.Context, workRoot string) (resultErr error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -119,9 +118,6 @@ func supportedGitVersion(output string) bool {
 }
 
 func finishGitCheck(root string, runErr error) error {
-	if errors.Is(runErr, processgroup.ErrScopeUnconfirmed) {
-		return fmt.Errorf("git readiness files retained at %q: %w", root, runErr)
-	}
 	if err := cleanup.RemoveAll(root); err != nil {
 		return errors.Join(runErr, fmt.Errorf("remove git readiness files %q: %w", root, err))
 	}

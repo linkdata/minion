@@ -394,7 +394,7 @@ printf '%%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.com
 		t.Fatal(err)
 	}
 	installed := filepath.Join(os.Getenv("HOME"), ".agents", "skills", "ponytail-review", "SKILL.md")
-	if !strings.Contains(string(args), ".minion-context-") || !strings.Contains(string(prompt), installed) || !strings.Contains(string(args), "--model\nportable-model\n") || !strings.Contains(string(args), `model_reasoning_effort="high"`) || strings.Contains(string(args), "stale-host-model") {
+	if !strings.Contains(string(prompt), ".minion-context-") || strings.Contains(string(args), ".minion-context-") || !strings.Contains(string(prompt), installed) || !strings.Contains(string(args), "--model\nportable-model\n") || !strings.Contains(string(args), `model_reasoning_effort="high"`) || strings.Contains(string(args), "stale-host-model") {
 		t.Fatalf("usage checkpoints lost worker context or skills: args=%s prompt=%s", args, prompt)
 	}
 	records, err := usage.ReadAll(store.Dir)

@@ -27,9 +27,7 @@ func readOnlyFixture(t *testing.T, pull, link bool) (gitFixture, *Checkout, stri
 		}
 	}
 	if link {
-		if err := os.Symlink("base-target", filepath.Join(fixture.source, "omitted-link")); err != nil {
-			t.Fatal(err)
-		}
+		symlinkOrSkip(t, "base-target", filepath.Join(fixture.source, "omitted-link"))
 	}
 	base := fixture.commit("refs/heads/main", "base files")
 	head := base
@@ -45,19 +43,16 @@ func readOnlyFixture(t *testing.T, pull, link bool) (gitFixture, *Checkout, stri
 			if err := os.Remove(filepath.Join(fixture.source, "omitted-link")); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.Symlink("head-target", filepath.Join(fixture.source, "omitted-link")); err != nil {
-				t.Fatal(err)
-			}
+			symlinkOrSkip(t, "head-target", filepath.Join(fixture.source, "omitted-link"))
 		}
 		head = fixture.commit("refs/pull/7/head", "PR changes")
 	}
 	var checkout *Checkout
 	var err error
-	url := "file://" + fixture.remote
 	if pull {
-		checkout, err = clonePullRequestFromURL(context.Background(), t.TempDir(), url, 7, "main", head)
+		checkout, err = clonePullRequestFromURL(context.Background(), t.TempDir(), fixture.remote, 7, "main", head)
 	} else {
-		checkout, err = cloneFromURL(context.Background(), t.TempDir(), url, "main", false)
+		checkout, err = cloneFromURL(context.Background(), t.TempDir(), fixture.remote, "main", false)
 	}
 	checkout = fixture.keepCheckout(checkout, err)
 	config, err := os.ReadFile(filepath.Join(checkout.path, ".git", "config"))

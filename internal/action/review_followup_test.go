@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -22,8 +23,8 @@ import (
 )
 
 func TestRunnerNativeCleanupKeepsAcceptedAnswer(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root bypasses directory permissions")
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("requires effective POSIX directory permissions and a non-root user")
 	}
 	for _, provider := range []string{"codex", "claude"} {
 		for _, recovers := range []bool{false, true} {
@@ -181,8 +182,8 @@ func TestAuditResultRejectsDuplicateAllowedArtifact(t *testing.T) {
 }
 
 func TestRunnerScratchCreationUsesPreparationFailureClass(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root bypasses directory permissions")
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("requires effective POSIX directory permissions and a non-root user")
 	}
 	root := t.TempDir()
 	if err := os.Chmod(root, 0500); err != nil {
@@ -275,8 +276,8 @@ func TestRunnerUsesTheProbedNodeAfterPathChanges(t *testing.T) {
 }
 
 func TestRunnerDeadlineDuringSessionCleanupClearsValidatedResult(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root bypasses directory permissions")
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("requires effective POSIX directory permissions and a non-root user")
 	}
 	for _, test := range []struct {
 		name   string

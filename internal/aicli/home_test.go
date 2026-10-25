@@ -4,25 +4,39 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
+
+func setNativeHome(t *testing.T, value string) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Setenv("HOMEDRIVE", "")
+		t.Setenv("HOMEPATH", "")
+		t.Setenv("USERPROFILE", value)
+		return "USERPROFILE"
+	}
+	t.Setenv("HOME", value)
+	return "HOME"
+}
 
 func TestHomePathKeepsNativeSelectionAndMissingDirectories(t *testing.T) {
 	root, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("HOME", root)
+	homeEnv := setNativeHome(t, root)
 	t.Setenv("MINION_TEST_AI_HOME", "")
 	if got, err := HomePath("MINION_TEST_AI_HOME", ".fixture"); err != nil || got != filepath.Join(root, ".fixture") {
 		t.Fatalf("default native home=%q, %v", got, err)
 	}
-	t.Setenv("HOME", "")
+	t.Setenv(homeEnv, "")
 	if got, err := HomePath("MINION_TEST_AI_HOME", ".fixture"); err == nil || got != "" {
 		t.Fatalf("guessed an unavailable native home=%q, %v", got, err)
 	}
-	if err := os.Unsetenv("HOME"); err != nil {
+	if err := os.Unsetenv(homeEnv); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := HomePath("MINION_TEST_AI_HOME", ".fixture"); err == nil || got != "" {
@@ -34,6 +48,10 @@ func TestHomePathKeepsNativeSelectionAndMissingDirectories(t *testing.T) {
 	}
 	alias := filepath.Join(root, "alias")
 	if err := os.Symlink(target, alias); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Logf("Windows symlink creation unavailable: %v", err)
+			return
+		}
 		t.Fatal(err)
 	}
 	t.Setenv("MINION_TEST_AI_HOME", alias+"/../not-created")
@@ -52,15 +70,18 @@ func TestHomePathErrorsIdentifySelectedPath(t *testing.T) {
 			root := t.TempDir()
 			path := filepath.Join(root, ".fixture")
 			if err := os.Symlink(filepath.Join(root, "missing"), path); err != nil {
+				if runtime.GOOS == "windows" {
+					t.Skipf("Windows symlink creation unavailable: %v", err)
+				}
 				t.Fatal(err)
 			}
-			t.Setenv("HOME", root)
+			setNativeHome(t, root)
 			t.Setenv("MINION_TEST_AI_HOME", "")
 			if explicit {
 				t.Setenv("MINION_TEST_AI_HOME", path)
 			}
 			got, err := HomePath("MINION_TEST_AI_HOME", ".fixture")
-			if got != "" || !errors.Is(err, os.ErrNotExist) || !strings.Contains(err.Error(), path) {
+			if got != "" || !errors.Is(err, os.ErrNotExist) || !strings.Contains(err.Error(), strconv.Quote(path)) {
 				t.Fatalf("selected path or cause lost: home=%q error=%v", got, err)
 			}
 		})
@@ -68,9 +89,9 @@ func TestHomePathErrorsIdentifySelectedPath(t *testing.T) {
 }
 
 func TestHomePathRejectsRelativeDefaultHome(t *testing.T) {
-	t.Setenv("HOME", "relative-home")
+	setNativeHome(t, "relative-home")
 	t.Setenv("MINION_TEST_AI_HOME", "")
-	if got, err := HomePath("MINION_TEST_AI_HOME", ".fixture"); err == nil || got != "" || !strings.Contains(err.Error(), "HOME must be absolute") {
+	if got, err := HomePath("MINION_TEST_AI_HOME", ".fixture"); err == nil || got != "" || !strings.Contains(err.Error(), "native home must be absolute") {
 		t.Fatalf("relative default accepted: %q,%v", got, err)
 	}
 	explicit, err := filepath.EvalSymlinks(t.TempDir())

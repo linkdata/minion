@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -16,7 +17,7 @@ import (
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/config"
-	"github.com/linkdata/minion/internal/processgroup"
+	"github.com/linkdata/minion/internal/executil"
 	"github.com/linkdata/minion/internal/usage"
 	workspacefs "github.com/linkdata/minion/internal/workspace"
 )
@@ -28,20 +29,50 @@ const (
 
 var runtimeMetadataNames = [...]string{".git", ".agents", ".codex"}
 
-// SystemReadPaths lists the Linux roots expanded by :minimal in Codex 0.160.0.
-// Admission checks use these paths; the native special path preserves OS aliases.
-func SystemReadPaths() []string {
-	return []string{"/bin", "/sbin", "/usr", "/etc", "/lib", "/lib64", "/nix/store", "/run/current-system/sw"}
+// sandboxArgs selects Codex's native sandbox. Its workspace is the private
+// runtime directory; source and report roots are writable only when requested.
+func sandboxArgs(workspace, outputDir string, writable bool) []string {
+	if !writable && outputDir == "" {
+		return []string{"-c", `sandbox_mode="read-only"`}
+	}
+	roots := make([]string, 0, 2)
+	if writable {
+		roots = append(roots, workspace)
+	}
+	if outputDir != "" {
+		roots = append(roots, outputDir)
+	}
+	encoded, _ := json.Marshal(roots) // Absolute, validated paths always marshal.
+	return []string{
+		"-c", `sandbox_mode="workspace-write"`,
+		"-c", "sandbox_workspace_write.exclude_slash_tmp=true",
+		"-c", "sandbox_workspace_write.exclude_tmpdir_env_var=true",
+		"-c", "sandbox_workspace_write.writable_roots=" + string(encoded),
+	}
+}
+
+func execConfigArgs() []string {
+	args := instructionBoundaryConfig()
+	args = append(args,
+		"-c", "skills.include_instructions=false",
+		"-c", "approval_policy=never",
+		"-c", `web_search="disabled"`,
+		"-c", "shell_environment_policy.ignore_default_excludes=false",
+		// Codex excludes *KEY* before filters; set restores only this fixed Git config key.
+		"-c", `shell_environment_policy.set.GIT_CONFIG_KEY_0="safe.bareRepository"`,
+		"-c", "shell_environment_policy.filters={"+strings.Join(shellEnvironmentFilters(runtime.GOOS), ",")+"}",
+	)
+	return args
 }
 
 // Run continues this action role's Codex conversation for a source snapshot.
 //
 // A writable run may edit the snapshot; outputDir optionally grants write
-// access to a separate report directory. ReadOnlyDirs in settings grants only
-// read access to separate application-selected evidence directories. OutputSchema constrains
+// access to a separate report directory. ReadOnlyDirs verifies separate
+// application-selected evidence directories. OutputSchema constrains
 // the final response to that JSON Schema when set. Codex starts in a separate
 // project root and reads the snapshot through its absolute path. Model-generated
-// commands have no network access.
+// commands use Codex's native sandbox and its default network restriction.
 //
 // A nonempty APIKey in settings overrides environment credentials and stored
 // login for this run. It is excluded from model-command environments and
@@ -67,6 +98,9 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	if err != nil {
 		return result, fmt.Errorf("codex exec: %w", err)
 	}
+	if err := rejectGlobalInstructions(codexHome); err != nil {
+		return result, fmt.Errorf("codex exec: %w", err)
+	}
 	if outputDir != "" {
 		outputDir, err = aicli.Directory(outputDir)
 		if err != nil {
@@ -76,7 +110,6 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 			return result, errors.New("codex exec: output directory must be separate from the source snapshot")
 		}
 	}
-	readOnlyDirs := make([]string, 0, len(settings.ReadOnlyDirs))
 	for _, path := range settings.ReadOnlyDirs {
 		path, err = aicli.Directory(path)
 		if err != nil {
@@ -88,45 +121,17 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 		if outputDir != "" && (workspacefs.Within(path, outputDir) || workspacefs.Within(outputDir, path)) {
 			return result, errors.New("codex exec: read-only directory overlaps the output directory")
 		}
-		readOnlyDirs = append(readOnlyDirs, path)
 	}
 
 	if err := s.prepare(workspace, realBinary, codexHome, outputDir, writable, settings); err != nil {
 		return result, err
 	}
 	runtimeDir, cacheDir := s.runtimeDir, s.cacheDir
-
-	workspaceAccess := "read"
-	if writable {
-		workspaceAccess = "write"
-	}
-	// The source snapshot is outside Codex's workspace, so keep its metadata and
-	// instruction directories read-only even when source edits are allowed.
-	// The sandbox re-executes the installed Codex binary. Grant that one file
-	// explicitly so a root-deny profile can start without exposing CODEX_HOME.
-	filesystemRules := []string{
-		`":root"="deny"`, `":minimal"="read"`, `":tmpdir"="write"`,
-		fmt.Sprintf(`%s=%q`, strconv.Quote(workspace), workspaceAccess),
-	}
-	for _, name := range []string{".git", ".agents", ".codex", ".claude"} {
-		filesystemRules = append(filesystemRules, fmt.Sprintf(`%s="read"`, strconv.Quote(filepath.Join(workspace, name))))
-	}
-	// Runtime is also the persistent project root; models must not plant Git metadata, skills or config.
-	for _, name := range runtimeMetadataNames {
-		filesystemRules = append(filesystemRules, fmt.Sprintf(`%s="read"`, strconv.Quote(filepath.Join(runtimeDir, name))))
-	}
-	filesystemRules = append(filesystemRules, fmt.Sprintf(`%s="read"`, strconv.Quote(realBinary)))
-	if outputDir != "" {
-		filesystemRules = append(filesystemRules, fmt.Sprintf(`%s="write"`, strconv.Quote(outputDir)))
-	}
-	for _, path := range readOnlyDirs {
-		filesystemRules = append(filesystemRules, fmt.Sprintf(`%s="read"`, strconv.Quote(path)))
-	}
-
 	for _, skill := range s.skillPaths {
-		filesystemRules = append(filesystemRules, fmt.Sprintf(`%s="read"`, strconv.Quote(filepath.Dir(skill))))
+		if workspacefs.Within(runtimeDir, skill) || outputDir != "" && workspacefs.Within(outputDir, skill) {
+			return result, fmt.Errorf("codex exec: skill %q is inside a writable directory", skill)
+		}
 	}
-	filesystemRule := "permissions.minion.filesystem={" + strings.Join(filesystemRules, ",") + "}"
 
 	// Persist sessions to recover helper/interrupted usage while the action
 	// budget is live. Cancellation can leave rollout-only counters unread.
@@ -135,34 +140,10 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 		args = append(args, "resume")
 	}
 	args = append(args, "--json", "--ignore-user-config", "--ignore-rules", "--strict-config", "--skip-git-repo-check")
+	args = append(args, sandboxArgs(workspace, outputDir, writable)...)
 	// Untrusted jobs must not inherit connected tools, plugins, rules, or a login-shell snapshot.
-	for _, feature := range []string{
-		"apps", "browser_use", "browser_use_external", "browser_use_full_cdp_access",
-		"computer_use", "image_generation", "plugins", "remote_plugin",
-		"shell_snapshot", "skill_mcp_dependency_install", "memories", "hooks", "skill_search",
-	} {
-		args = append(args, "--disable", feature)
-	}
-	args = append(args, instructionBoundaryConfig()...)
-	filters := []string{`"PATH"="include"`, `"HOME"="include"`, `"TMPDIR"="include"`, `"TMP"="include"`, `"TEMP"="include"`, `"GOCACHE"="include"`}
-	for _, entry := range aicli.ModelGitEnvironment() {
-		key, _, _ := strings.Cut(entry, "=")
-		filters = append(filters, strconv.Quote(key)+`="include"`)
-	}
-	filters = append(filters, `"LANG"="include"`, `"LC_ALL"="include"`, `"LC_CTYPE"="include"`, `"TERM"="include"`)
-	args = append(
-		args,
-		"-c", "skills.include_instructions=false",
-		"-c", "approval_policy=never",
-		"-c", `web_search="disabled"`,
-		"-c", "shell_environment_policy.ignore_default_excludes=false",
-		// Codex excludes *KEY* before filters; set restores only this fixed Git config key.
-		"-c", `shell_environment_policy.set.GIT_CONFIG_KEY_0="safe.bareRepository"`,
-		"-c", "shell_environment_policy.filters={"+strings.Join(filters, ",")+"}",
-		"-c", `default_permissions="minion"`,
-		"-c", filesystemRule,
-		"-c", "permissions.minion.network.enabled=false",
-	)
+	args = append(args, disabledFeatureArgs()...)
+	args = append(args, execConfigArgs()...)
 	if settings.Model != "" {
 		args = append(args, "--model", settings.Model)
 	}
@@ -202,7 +183,7 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 
 	started := time.Now()
 	s.accounting.begin(ctx, codexHome, s.threadID, started)
-	runErr := processgroup.Run(cmd)
+	runErr := executil.Run(cmd)
 	if cmd.Process == nil {
 		s.accounting.before = nil
 		return result, fmt.Errorf("codex exec: %w", runErr)
@@ -260,10 +241,28 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	return result, nil
 }
 
+func shellEnvironmentFilters(goos string) []string {
+	filters := []string{`"PATH"="include"`, `"HOME"="include"`, `"TMPDIR"="include"`, `"TMP"="include"`, `"TEMP"="include"`, `"GOCACHE"="include"`}
+	if goos == "windows" {
+		for _, key := range []string{"USERPROFILE", "APPDATA", "LOCALAPPDATA", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "HOMEDRIVE", "HOMEPATH"} {
+			filters = append(filters, strconv.Quote(key)+`="include"`)
+		}
+	}
+	for _, entry := range aicli.ModelGitEnvironment() {
+		key, _, _ := strings.Cut(entry, "=")
+		filters = append(filters, strconv.Quote(key)+`="include"`)
+	}
+	return append(filters, `"LANG"="include"`, `"LC_ALL"="include"`, `"LC_CTYPE"="include"`, `"TERM"="include"`)
+}
+
 // The runner holds GitHub and other service credentials; Codex only needs its
 // own authentication and ordinary process/network settings. Configured
 // authentication removes inherited credentials before the caller supplies it.
 func childEnvironment(env []string, runtimeDir, cacheDir, codexHome string, configuredAuth bool, writablePaths ...string) []string {
+	return childEnvironmentForOS(runtime.GOOS, env, runtimeDir, cacheDir, codexHome, configuredAuth, writablePaths...)
+}
+
+func childEnvironmentForOS(goos string, env []string, runtimeDir, cacheDir, codexHome string, configuredAuth bool, writablePaths ...string) []string {
 	allowed := map[string]bool{
 		"PATH": true, "HOME": true, "LANG": true, "LC_ALL": true, "LC_CTYPE": true, "TERM": true,
 		"CODEX_API_KEY": true, "CODEX_ACCESS_TOKEN": true,
@@ -271,7 +270,13 @@ func childEnvironment(env []string, runtimeDir, cacheDir, codexHome string, conf
 		"CODEX_CA_CERTIFICATE": true, "SSL_CERT_FILE": true, "SSL_CERT_DIR": true,
 		"HTTP_PROXY": true, "HTTPS_PROXY": true, "ALL_PROXY": true, "NO_PROXY": true,
 	}
+	if goos == "windows" {
+		for _, key := range []string{"USERPROFILE", "APPDATA", "LOCALAPPDATA", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "HOMEDRIVE", "HOMEPATH"} {
+			allowed[key] = true
+		}
+	}
 	clean := make([]string, 0, len(env))
+	seen := make(map[string]int)
 	writablePaths = append([]string{runtimeDir}, writablePaths...)
 	explicitHome := false
 	for _, entry := range env {
@@ -279,16 +284,26 @@ func childEnvironment(env []string, runtimeDir, cacheDir, codexHome string, conf
 		if !ok {
 			continue
 		}
-		if key == "CODEX_HOME" {
+		if strings.EqualFold(key, "CODEX_HOME") {
 			explicitHome = value != ""
 			continue
 		}
 		if configuredAuth && (strings.EqualFold(key, "CODEX_API_KEY") || strings.EqualFold(key, "CODEX_ACCESS_TOKEN")) {
 			continue
 		}
-		if allowed[strings.ToUpper(key)] {
-			if key == "PATH" {
+		normalized := strings.ToUpper(key)
+		if allowed[normalized] {
+			if normalized == "PATH" {
 				entry = "PATH=" + aicli.SafePath(value, writablePaths...)
+			} else if goos == "windows" {
+				entry = normalized + "=" + value
+			}
+			if goos == "windows" {
+				if index, found := seen[normalized]; found {
+					clean[index] = entry
+					continue
+				}
+				seen[normalized] = len(clean)
 			}
 			clean = append(clean, entry)
 		}

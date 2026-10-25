@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -41,6 +42,7 @@ func TestLoadModelProviders(t *testing.T) {
 		{name: "claude effort whitespace", fields: `,"claude":{"effort":"high\nlow"}`, wantError: "claude model and effort"},
 		{name: "claude runtime skills", fields: `,"claude":{"skills":["/tmp/SKILL.md"]}`, wantError: "unknown field"},
 		{name: "claude runtime directories", fields: `,"claude":{"read_only_dirs":["/tmp"]}`, wantError: "unknown field"},
+		{name: "claude Unix socket override", fields: `,"claude":{"allow_all_unix_sockets":true}`, wantError: "unknown field"},
 		{name: "codex runtime directories", fields: `,"codex":{"read_only_dirs":["/tmp"]}`, wantError: "unknown field"},
 		{name: "claude runtime schema", fields: `,"claude":{"output_schema":"{}"}`, wantError: "unknown field"},
 		{name: "codex runtime schema", fields: `,"codex":{"output_schema":"{}"}`, wantError: "unknown field"},
@@ -129,6 +131,11 @@ func TestCommandInstalledUsesMainProvider(t *testing.T) {
 		t.Run(tt.main+"/"+tt.installedRoot, func(t *testing.T) {
 			home := t.TempDir()
 			t.Setenv("HOME", home)
+			if runtime.GOOS == "windows" {
+				t.Setenv("USERPROFILE", home)
+				t.Setenv("HOMEDRIVE", "")
+				t.Setenv("HOMEPATH", "")
+			}
 			dir := filepath.Join(home, tt.installedRoot, "skills", "ponytail-review")
 			if err := os.MkdirAll(dir, 0o700); err != nil {
 				t.Fatal(err)

@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -18,6 +19,26 @@ const (
 	testURL = "https://github.com/example/skills/tree/main/skills/review"
 	testSHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 )
+
+func setTestHome(t *testing.T, home string) {
+	t.Helper()
+	t.Setenv("HOME", home)
+	if runtime.GOOS == "windows" {
+		t.Setenv("USERPROFILE", home)
+		t.Setenv("HOMEDRIVE", "")
+		t.Setenv("HOMEPATH", "")
+	}
+}
+
+func symlinkFixture(t *testing.T, target, link string) {
+	t.Helper()
+	if err := os.Symlink(target, link); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("Windows symlink fixture is unavailable: %v", err)
+		}
+		t.Fatal(err)
+	}
+}
 
 func TestName(t *testing.T) {
 	for _, tt := range []struct {
@@ -44,7 +65,7 @@ func TestName(t *testing.T) {
 }
 
 func TestBuiltinAvailableWithoutInstallation(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setTestHome(t, t.TempDir())
 	path, installed, err := InstalledPath(BuiltinAntiPromptInjection)
 	if err != nil || !installed || path != BuiltinAntiPromptInjection {
 		t.Fatalf("embedded skill = %q, %t, %v", path, installed, err)
@@ -71,7 +92,11 @@ func TestInstalledPathRequiresMatchingSafeInstallation(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			home := t.TempDir()
-			t.Setenv("HOME", home)
+			setTestHome(t, home)
+			canonicalHome, err := filepath.EvalSymlinks(home)
+			if err != nil {
+				t.Fatal(err)
+			}
 			if path, installed, err := tt.lookup(testURL); err != nil || installed || path != "" {
 				t.Fatalf("missing skill = %q, %t, %v", path, installed, err)
 			}
@@ -92,40 +117,42 @@ func TestInstalledPathRequiresMatchingSafeInstallation(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(dir, installMetadataName), metadata, 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if path, installed, err := tt.lookup(testURL); err != nil || !installed || path != filepath.Join(dir, "SKILL.md") {
+			if path, installed, err := tt.lookup(testURL); err != nil || !installed || path != filepath.Join(canonicalHome, tt.parent, "skills", "review", "SKILL.md") {
 				t.Fatalf("installed skill = %q, %t, %v", path, installed, err)
-			}
-			realDir := dir + "-installed"
-			if err := os.Rename(dir, realDir); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Symlink(realDir, dir); err != nil {
-				t.Fatal(err)
-			}
-			if path, installed, err := tt.lookup(testURL); err == nil || installed || path != "" || !strings.Contains(err.Error(), "must not be a symlink") {
-				t.Fatalf("symlinked skill directory = %q, %t, %v", path, installed, err)
-			}
-			if err := os.Remove(dir); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Rename(realDir, dir); err != nil {
-				t.Fatal(err)
 			}
 			if _, installed, err := tt.lookup("https://github.com/other/skills/tree/main/skills/review"); err == nil || installed {
 				t.Fatalf("mismatched source = %t, %v", installed, err)
 			}
-			if err := os.Symlink(t.TempDir(), filepath.Join(dir, "outside")); err != nil {
-				t.Fatal(err)
-			}
-			if _, installed, err := tt.lookup(testURL); err == nil || installed {
-				t.Fatalf("symlink in skill = %t, %v", installed, err)
-			}
+			t.Run("symlinked directory", func(t *testing.T) {
+				realDir := dir + "-installed"
+				if err := os.Rename(dir, realDir); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() {
+					if err := os.Remove(dir); err != nil && !os.IsNotExist(err) {
+						t.Error(err)
+					}
+					if err := os.Rename(realDir, dir); err != nil {
+						t.Error(err)
+					}
+				})
+				symlinkFixture(t, realDir, dir)
+				if path, installed, err := tt.lookup(testURL); err == nil || installed || path != "" || !strings.Contains(err.Error(), "must not be a symlink") {
+					t.Fatalf("symlinked skill directory = %q, %t, %v", path, installed, err)
+				}
+			})
+			t.Run("symlink in skill", func(t *testing.T) {
+				symlinkFixture(t, t.TempDir(), filepath.Join(dir, "outside"))
+				if _, installed, err := tt.lookup(testURL); err == nil || installed {
+					t.Fatalf("symlink in skill = %t, %v", installed, err)
+				}
+			})
 		})
 	}
 }
 
 func TestInstalledPathForBuiltinAndUnsupportedProvider(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setTestHome(t, t.TempDir())
 	for _, provider := range []string{"codex", "claude", "", "other"} {
 		path, installed, err := InstalledPathFor(BuiltinAntiPromptInjection, provider)
 		if provider == "codex" || provider == "claude" {
@@ -140,14 +167,16 @@ func TestInstalledPathForBuiltinAndUnsupportedProvider(t *testing.T) {
 
 func TestUserHomeResolvesSymlink(t *testing.T) {
 	realHome := t.TempDir()
-	linkedHome := filepath.Join(t.TempDir(), "home")
-	if err := os.Symlink(realHome, linkedHome); err != nil {
+	canonicalHome, err := filepath.EvalSymlinks(realHome)
+	if err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("HOME", linkedHome)
+	linkedHome := filepath.Join(t.TempDir(), "home")
+	symlinkFixture(t, realHome, linkedHome)
+	setTestHome(t, linkedHome)
 	home, err := userHome()
-	if err != nil || home != realHome {
-		t.Fatalf("userHome() = %q, %v; want %q", home, err, realHome)
+	if err != nil || home != canonicalHome {
+		t.Fatalf("userHome() = %q, %v; want %q", home, err, canonicalHome)
 	}
 }
 
@@ -218,7 +247,7 @@ func testInstaller(t *testing.T, home string, archive []byte) (*installer, *int,
 
 func TestInstallWholeSubtreesForBothAgents(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	old := filepath.Join(home, ".agents", "skills", "review")
 	if err := os.MkdirAll(old, 0o700); err != nil {
 		t.Fatal(err)
@@ -258,7 +287,7 @@ func TestInstallWholeSubtreesForBothAgents(t *testing.T) {
 			t.Fatalf("old content remains: %v", err)
 		}
 		info, err := os.Stat(filepath.Join(root, "audit", "scripts", "check.sh"))
-		if err != nil || info.Mode()&0o100 == 0 {
+		if err != nil || runtime.GOOS != "windows" && info.Mode()&0o100 == 0 {
 			t.Fatalf("supporting script mode = %v, %v", info, err)
 		}
 	}
@@ -410,9 +439,7 @@ func TestInstallIgnoresUnrelatedFilename(t *testing.T) {
 
 func TestInstallRejectsSymlinkedParentBeforeWriting(t *testing.T) {
 	home, outside := t.TempDir(), t.TempDir()
-	if err := os.Symlink(outside, filepath.Join(home, ".agents")); err != nil {
-		t.Fatal(err)
-	}
+	symlinkFixture(t, outside, filepath.Join(home, ".agents"))
 	i, _, _ := testInstaller(t, home, tarball(t, []archiveEntry{{name: "prefix/skills/review/SKILL.md", body: "new"}}))
 	if err := i.install(context.Background(), []string{testURL}); err == nil {
 		t.Fatal("symlinked skill parent accepted")

@@ -3,21 +3,30 @@ package workspace
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
 
 func TestWritablePathsRejectGitMetadataAliases(t *testing.T) {
-	aliases := []string{".git.", ".GiT ", ".git . .", "GIT~1", "git~1 .", ".git:stream", ".git::$INDEX_ALLOCATION", "git~1 . :stream"}
+	type aliasCase struct {
+		name               string
+		windowsSourceValid bool
+	}
+	aliases := []aliasCase{
+		{".git.", false}, {".GiT ", false}, {".git . .", false}, {"GIT~1", false},
+		{"git~1 .", false}, {".git:stream", false}, {".git::$INDEX_ALLOCATION", false}, {"git~1 . :stream", false},
+	}
 	// Git's HFS+ matcher ignores these exact code points at any position.
 	for _, ignored := range []rune{0x200c, 0x200d, 0x200e, 0x200f, 0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x206a, 0x206b, 0x206c, 0x206d, 0x206e, 0x206f, 0xfeff} {
-		aliases = append(aliases, ".g"+string(ignored)+"it")
+		aliases = append(aliases, aliasCase{".g" + string(ignored) + "it", true})
 	}
 	for _, alias := range aliases {
 		for _, prefix := range []string{"", "parent/"} {
-			name := prefix + alias + "/config"
-			if !validSourcePath(name) {
-				t.Fatalf("strict writable policy changed exact source spelling %q", name)
+			name := prefix + alias.name + "/config"
+			wantSourceValid := runtime.GOOS != "windows" || alias.windowsSourceValid
+			if got := validSourcePath(name); got != wantSourceValid {
+				t.Fatalf("source path %q validity=%t, want %t", name, got, wantSourceValid)
 			}
 			if ValidPath(name) {
 				t.Fatalf("accepted writable Git metadata alias %q", name)
@@ -31,15 +40,26 @@ func TestWritablePathsRejectGitMetadataAliases(t *testing.T) {
 	if err := ValidateFixPaths([]File{{Path: alias, Mode: Regular}}, nil); err == nil {
 		t.Fatal("accepted metadata-bearing writable source")
 	}
-	for _, name := range []string{"CON", "C:relative", ".gitignore", ".gitmodules", ".gitkeep", "git~2", "git~10", "git~1x", ".git. x", ".gitignore:stream", ".git\u200b", ".git\u2060", ".gİt", ".g\u200cit."} {
-		if !ValidPath(name) {
-			t.Fatalf("overbroad metadata rule rejected ordinary path %q", name)
+	for _, test := range []struct {
+		name         string
+		windowsValid bool
+	}{
+		{"CON", false}, {"C:relative", false}, {".gitignore", true}, {".gitmodules", true}, {".gitkeep", true},
+		{"git~2", true}, {"git~10", true}, {"git~1x", true}, {".git. x", true}, {".gitignore:stream", false},
+		{".git\u200b", true}, {".git\u2060", true}, {".gİt", true}, {".g\u200cit.", false},
+	} {
+		want := runtime.GOOS != "windows" || test.windowsValid
+		if got := ValidPath(test.name); got != want {
+			t.Fatalf("ordinary path %q validity=%t, want %t", test.name, got, want)
 		}
 	}
 }
 
 func TestApplyRejectsMetadataAliasesBeforeAnyMutation(t *testing.T) {
-	const name = ".git./config"
+	name := ".git./config"
+	if runtime.GOOS == "windows" {
+		name = ".g\u200cit/config"
+	}
 	root := privateRoot(t)
 	if err := Materialize(root, []File{{Path: "source", Mode: Regular, Data: []byte("before")}}); err != nil {
 		t.Fatal(err)
@@ -64,9 +84,20 @@ func TestCheckoutMetadataAliasesRespectGitSeparators(t *testing.T) {
 			t.Errorf("checkout alias accepted: %q", name)
 		}
 	}
-	for _, name := range []string{`dir\name`, `parent/dir\name`, `.gitignore\x`, `git~10\x`, ".g\u200cit\\x", "dir\\.g\u200cit/x"} {
-		if !validSourcePath(name) || !ValidCheckoutPath(name) {
-			t.Errorf("legal exact source spelling rejected: %q", name)
+	for _, test := range []struct {
+		name         string
+		windowsValid bool
+	}{
+		{`dir/name`, true}, {`parent/dir/name`, true}, {`.gitignore/x`, true}, {`git~10/x`, true},
+		{`dir\name`, false}, {`parent/dir\name`, false}, {`.gitignore\x`, false}, {`git~10\x`, false},
+		{".g\u200cit\\x", false}, {"dir\\.g\u200cit/x", false},
+	} {
+		want := runtime.GOOS != "windows" || test.windowsValid
+		if got := validSourcePath(test.name); got != want {
+			t.Errorf("source path %q validity=%t, want %t", test.name, got, want)
+		}
+		if got := ValidCheckoutPath(test.name); got != want {
+			t.Errorf("checkout path %q validity=%t, want %t", test.name, got, want)
 		}
 	}
 }

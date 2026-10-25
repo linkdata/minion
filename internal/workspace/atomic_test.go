@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -14,7 +15,12 @@ func TestWriteAtomicReplacesPrivateRecordAndCleansTemporaryFile(t *testing.T) {
 	if err := os.WriteFile(path, []byte("old"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	old, err := os.Open(path)
+	recordRoot, err := os.OpenRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = recordRoot.Close() }()
+	old, err := recordRoot.Open(filepath.Base(path))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -28,7 +34,7 @@ func TestWriteAtomicReplacesPrivateRecordAndCleansTemporaryFile(t *testing.T) {
 	if data, err := io.ReadAll(old); err != nil || string(data) != "old" {
 		t.Fatalf("replacement changed open prior record=%q,%v", data, err)
 	}
-	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0600 {
+	if info, err := os.Stat(path); err != nil || runtime.GOOS != "windows" && info.Mode().Perm() != 0600 || runtime.GOOS == "windows" && !info.Mode().IsRegular() {
 		t.Fatalf("record permissions=%v,%v", info, err)
 	}
 	if entries, err := os.ReadDir(root); err != nil || len(entries) != 1 {
@@ -39,7 +45,12 @@ func TestWriteAtomicReplacesPrivateRecordAndCleansTemporaryFile(t *testing.T) {
 func TestWriteAtomicReportsSyncFailureAfterReplacement(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "record.json")
-	if err := WriteAtomic(path, []byte("retained"), filepath.Join(root, "missing")); !errors.Is(err, os.ErrNotExist) {
+	err := WriteAtomic(path, []byte("retained"), filepath.Join(root, "missing"))
+	if runtime.GOOS == "windows" {
+		if err != nil {
+			t.Fatalf("unnecessary Windows directory open failed after replacement: %v", err)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("sync error lost: %v", err)
 	}
 	if data, err := os.ReadFile(path); err != nil || string(data) != "retained" {

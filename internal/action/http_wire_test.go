@@ -154,7 +154,7 @@ func TestHTTPJobBoundCoversEncodedJobAndAssignmentEnvelope(t *testing.T) {
 					path := fmt.Sprintf("file-%05d", i)
 					if shape == "long paths" {
 						prefix := fmt.Sprintf("dir-%05d/", i)
-						path = prefix + strings.Repeat(strings.Repeat("\x01<&>\\", 50)+"/", 16)
+						path = prefix + strings.Repeat(strings.Repeat("\u2028\u2029", 40)+"/", 16)
 						path += strings.Repeat("z", workspace.MaxPathBytes-1-len(path))
 					}
 					job.Source.Files = append(job.Source.Files, workspace.File{Path: "h/" + path[2:], Mode: workspace.Regular})
@@ -218,7 +218,7 @@ func TestHTTPJobBoundRefusesLargeDecodedShapesBeforeEncoding(t *testing.T) {
 			} else {
 				files := make([]workspace.File, workspace.MaxFiles)
 				paths := make([]string, workspace.MaxFiles)
-				prefix := strings.Repeat(strings.Repeat("\x01", 250)+"/", 5)
+				prefix := strings.Repeat(strings.Repeat("\u2028", 83)+"/", 5)
 				for i := range files {
 					paths[i] = prefix + fmt.Sprintf("file-%05d", i)
 					files[i] = workspace.File{Path: paths[i], Mode: workspace.Regular}

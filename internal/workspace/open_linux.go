@@ -10,15 +10,17 @@ import (
 	"syscall"
 )
 
-func singleLink(info os.FileInfo) bool {
+func singleLink(info os.FileInfo, _ *os.File) bool {
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	return ok && stat.Nlink == 1
 }
 
-func sameChangeTime(before, after os.FileInfo) bool {
-	first, firstOK := before.Sys().(*syscall.Stat_t)
-	last, lastOK := after.Sys().(*syscall.Stat_t)
-	return firstOK && lastOK && first.Ctim == last.Ctim
+func changeTime(info os.FileInfo, _ *os.File) ([2]int64, error) {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return [2]int64{}, errors.New("file change time unavailable")
+	}
+	return [2]int64{stat.Ctim.Sec, stat.Ctim.Nsec}, nil
 }
 
 // Pin each parent directory before opening its child; a worker may still rename paths.

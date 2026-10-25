@@ -16,6 +16,9 @@ import (
 )
 
 func TestCheckModelsRequiresOnlySelectedProvider(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell provider fixture is unavailable on native Windows")
+	}
 	t.Setenv("ANTHROPIC_API_KEY", "")
 	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "")
 	t.Setenv("CODEX_API_KEY", "")
@@ -25,9 +28,6 @@ func TestCheckModelsRequiresOnlySelectedProvider(t *testing.T) {
 	}
 	for _, provider := range []string{"codex", "claude"} {
 		t.Run(provider, func(t *testing.T) {
-			if provider == "claude" && runtime.GOOS != "linux" {
-				t.Skip("Claude sandbox support requires Linux")
-			}
 			dir := t.TempDir()
 			t.Setenv("PATH", dir)
 			for _, name := range []string{"codex", "claude"} {
@@ -63,8 +63,8 @@ func TestLogCommandSkillsReportsUnsupportedWorkflow(t *testing.T) {
 }
 
 func TestCheckModelsBoundsResolvedCatalogueModel(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("Claude sandbox support requires Linux")
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell provider fixture is unavailable on native Windows")
 	}
 	for _, selection := range []string{"default", "alias"} {
 		for _, size := range []int{128, 129} {
@@ -72,9 +72,6 @@ func TestCheckModelsBoundsResolvedCatalogueModel(t *testing.T) {
 				t.Setenv("HOME", t.TempDir())
 				for _, key := range []string{"CLAUDE_CONFIG_DIR", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy"} {
 					t.Setenv(key, "")
-				}
-				for _, name := range []string{"bwrap", "socat"} {
-					testsupport.FakeOnPath(t, name, "#!/bin/sh\nexit 99\n")
 				}
 				model := strings.Repeat("m", size)
 				value := "default"
@@ -84,9 +81,7 @@ func TestCheckModelsBoundsResolvedCatalogueModel(t *testing.T) {
 				}
 				catalogue := fmt.Sprintf(`{"type":"control_response","response":{"subtype":"success","request_id":"minion-initialize","response":{"models":[{"value":%q,"resolvedModel":%q}]}}}`, value, model)
 				testsupport.FakeOnPath(t, "claude", `#!/bin/sh
-if [ "$1" = '--version' ]; then
-  printf '%s\n' '2.1.302 (Claude Code)'
-elif [ "$3" = 'auth' ]; then
+if [ "$3" = 'auth' ]; then
   printf '%s\n' '{"loggedIn":true}'
 else
   input=$(/bin/cat)
@@ -131,6 +126,14 @@ debug)
     text="$text MINION_UNTRUSTED_AGENTS_78 MINION_UNTRUSTED_SKILL_78"
   fi
   printf '[{"role":"user","content":[{"text":"%s"}]}]\n' "$text"
+  ;;
+exec)
+  case " $* " in *' --minion-unsupported-capability-probe '*) exit 2 ;; esac
+  if [ "$2" = resume ]; then
+    printf '%s\n' 'Usage: codex exec resume [OPTIONS] [SESSION_ID] [PROMPT]'
+  else
+    printf '%s\n' 'Usage: codex exec [OPTIONS] [PROMPT]'
+  fi
   ;;
 app-server)
   IFS= read -r request
@@ -179,6 +182,9 @@ func TestGitHubTokenSelectionAndEmptyCLIResult(t *testing.T) {
 		{name: "empty CLI result", output: " \r\n", wantError: "gh auth token returned an empty token", callCLI: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			if runtime.GOOS == "windows" && test.callCLI {
+				t.Skip("POSIX shell gh fixture is unavailable on native Windows")
+			}
 			dir := t.TempDir()
 			t.Setenv("PATH", dir)
 			t.Setenv("GH_TOKEN", test.ghToken)

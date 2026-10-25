@@ -27,9 +27,6 @@ jobs:
       - name: Go vet
         run: go vet ./...
 
-      - name: Vet darwin build
-        run: GOOS=darwin go vet ./...
-
       - name: Check gofmt
         run: |
           unformatted="$(gofmt -l .)"
@@ -41,22 +38,9 @@ jobs:
 
       - name: Test
         run: |
-          runner_uid="$(id -u)"
-          runner_env=("HOME=$HOME" "PATH=$PATH" "MINION_RUN_UID=$runner_uid")
-          if [ "${GOTOOLCHAIN+x}" = x ]; then
-            runner_env+=("GOTOOLCHAIN=$GOTOOLCHAIN")
-          fi
-          sudo systemd-run --quiet --wait --pipe --collect --same-dir --uid="$runner_uid" \
-            -p Type=exec -p Delegate=yes -p DelegateSubgroup=minion-supervisor \
-            -p KillMode=mixed -p TasksMax=256 -p MemoryMax=4G -p MemorySwapMax=0 -- \
-            /usr/bin/env "${runner_env[@]}" bash -euc '
-              test "$(id -u)" = "$MINION_RUN_UID"
-              cgroup="$(sed -n "s/^0:://p" /proc/self/cgroup)"
-              printf "Minion test cgroup: %s\n" "$cgroup"
-              # Maximum-size wire fixtures exceed the race memory budget.
-              MINION_REQUIRE_PROCESSGROUP=1 go test -count=1 -run "^TestHTTPWireRouteCapsUseActualJSONBytes$" ./internal/action
-              MINION_REQUIRE_PROCESSGROUP=1 go test -race -coverprofile=coverage.out ./...
-            '
+          # Maximum-size wire fixtures exceed the race memory budget.
+          go test -count=1 -run '^TestHTTPWireRouteCapsUseActualJSONBytes$' ./internal/action
+          go test -race -coverprofile=coverage.out ./...
 
       - name: Coverage
         id: coverage
@@ -68,6 +52,41 @@ jobs:
 
       - name: Build
         run: go build -buildvcs=false -o "$RUNNER_TEMP/minion" ./cmd/minion
+
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, windows-11-arm]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Select supported Git on macOS
+        if: runner.os == 'macOS'
+        run: |
+          brew list --versions git || brew install git
+          echo "$(brew --prefix git)/bin" >> "$GITHUB_PATH"
+
+      - name: Show Git version
+        run: git --version
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test -count=1 -timeout=20m ./...
+
+      - name: Build
+        run: go build -buildvcs=false ./cmd/minion
 
   coverage:
     needs: build

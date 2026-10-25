@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -45,6 +46,114 @@ func offlineIndexFixture(t *testing.T, files []workspace.File) (*OfflineIndex, s
 func writeIndexFixture(t *testing.T, source, name string, data []byte) {
 	t.Helper()
 	writeFile(t, filepath.Join(source, name), string(data))
+}
+
+func TestFixIndexCaseOnlyRename(t *testing.T) {
+	for _, ignoreCase := range []string{"false", "true"} {
+		for _, directory := range []bool{false, true} {
+			name := "README.md"
+			if directory {
+				name = "Docs/README.md"
+			}
+			t.Run(ignoreCase+"/"+name, func(t *testing.T) {
+				if ignoreCase == "false" && !caseSensitiveTempDir(t) {
+					t.Skip("core.ignoreCase=false requires a case-sensitive filesystem")
+				}
+				index, source := offlineIndexFixture(t, []workspace.File{{Path: name, Mode: workspace.Regular, Data: []byte("fixture\n")}})
+				if _, err := index.run(t.Context(), 128, nil, "config", "core.ignoreCase", ignoreCase); err != nil {
+					t.Fatal(err)
+				}
+				old, renamed := "README.md", "readme.md"
+				if directory {
+					old, renamed = "Docs", "docs"
+				}
+				intermediate := filepath.Join(source, "case-rename.tmp")
+				if err := os.Rename(filepath.Join(source, old), intermediate); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Rename(intermediate, filepath.Join(source, renamed)); err != nil {
+					t.Fatal(err)
+				}
+				changes, err := index.Changes(t.Context())
+				if err != nil || len(changes) != 2 {
+					t.Fatalf("case-only rename changes=%+v error=%v", changes, err)
+				}
+				if changes[0].Path != name || !changes[0].Delete || changes[1].Path != strings.Replace(name, old, renamed, 1) || changes[1].Delete || string(changes[1].Data) != "fixture\n" {
+					t.Fatalf("case-only rename was not staged as deletion and addition: %+v", changes)
+				}
+			})
+		}
+	}
+}
+
+func TestFixIndexCaseOnlyRenameUsesCurrentIgnoreRules(t *testing.T) {
+	for _, ignoreCase := range []string{"false", "true"} {
+		t.Run(ignoreCase, func(t *testing.T) {
+			if ignoreCase == "false" && !caseSensitiveTempDir(t) {
+				t.Skip("core.ignoreCase=false requires a case-sensitive filesystem")
+			}
+			index, source := offlineIndexFixture(t, []workspace.File{
+				{Path: ".gitignore", Mode: workspace.Regular, Data: []byte("readme.md\n")},
+				{Path: "README.md", Mode: workspace.Executable, Data: []byte("fixture\n")},
+			})
+			if _, err := index.run(t.Context(), 128, nil, "config", "core.ignoreCase", ignoreCase); err != nil {
+				t.Fatal(err)
+			}
+			intermediate := filepath.Join(source, "case-rename.tmp")
+			if err := os.Rename(filepath.Join(source, "README.md"), intermediate); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(intermediate, filepath.Join(source, "readme.md")); err != nil {
+				t.Fatal(err)
+			}
+			changes, err := index.Changes(t.Context())
+			if changes != nil || err == nil || !strings.Contains(err.Error(), "case-renamed fix path") {
+				t.Fatalf("newly ignored case rename was not refused: %+v, %v", changes, err)
+			}
+		})
+	}
+}
+
+func TestFixIndexCaseOnlyRenameBoundsNewPath(t *testing.T) {
+	index, source := offlineIndexFixture(t, []workspace.File{{Path: "README.md", Mode: workspace.Regular, Data: []byte("fixture\n")}})
+	if _, err := index.run(t.Context(), 128, nil, "config", "core.ignoreCase", "true"); err != nil {
+		t.Fatal(err)
+	}
+	intermediate := filepath.Join(source, "case-rename.tmp")
+	if err := os.Rename(filepath.Join(source, "README.md"), intermediate); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(intermediate, filepath.Join(source, "readme.md")); err != nil {
+		t.Fatal(err)
+	}
+	writeSparse(t, filepath.Join(source, "readme.md"), int64(workspace.MaxChangeBytes)+1)
+	if changes, err := index.Changes(t.Context()); changes != nil || err == nil || !strings.Contains(err.Error(), "byte limit") {
+		t.Fatalf("oversized renamed path reached Git hashing: %+v, %v", changes, err)
+	}
+}
+
+func TestFixIndexCaseSpellingScanSkipsIgnoredSiblings(t *testing.T) {
+	index, source := offlineIndexFixture(t, []workspace.File{
+		{Path: ".gitignore", Mode: workspace.Regular, Data: []byte("build/\n")},
+		{Path: "build/Docs/README.md", Mode: workspace.Regular, Data: []byte("fixture\n")},
+	})
+	if _, err := index.run(t.Context(), 128, nil, "config", "core.ignoreCase", "true"); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 260; i++ {
+		writeIndexFixture(t, source, fmt.Sprintf("build/%03d.tmp", i), []byte("ignored"))
+	}
+	intermediate := filepath.Join(source, "build", "case-rename.tmp")
+	if err := os.Rename(filepath.Join(source, "build", "Docs"), intermediate); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(intermediate, filepath.Join(source, "build", "docs")); err != nil {
+		t.Fatal(err)
+	}
+	changes, err := index.Changes(t.Context())
+	if changes != nil || err == nil || !strings.Contains(err.Error(), "case-renamed fix path") {
+		t.Fatalf("ignored siblings hid a case rename: %+v, %v", changes, err)
+	}
 }
 
 func TestFixIndexPinsSHA1WhenGitDefaultsToSHA256(t *testing.T) {
@@ -91,6 +200,9 @@ func TestFixIndexBaselineIsTreeWithoutCommit(t *testing.T) {
 func TestFixIndexRejectsBaselineMetadataAliasWithoutHidingLaunchErrors(t *testing.T) {
 	for _, name := range []string{"GIT~1/file", ".git./file"} {
 		t.Run(name, func(t *testing.T) {
+			if runtime.GOOS == "windows" {
+				t.Skip("Windows normalizes metadata alias fixture paths")
+			}
 			source, metadata := t.TempDir(), t.TempDir()
 			writeIndexFixture(t, source, name, []byte("source"))
 			_, err := NewOfflineIndex(context.Background(), metadata, source, nil)
@@ -241,7 +353,10 @@ func TestFixIndexPreservesGitignoreAndTrackedIgnoredFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.Symlink("/outside/python", filepath.Join(source, ".venv", "bin", "python")); err != nil {
-		t.Fatal(err)
+		if runtime.GOOS != "windows" {
+			t.Fatal(err)
+		}
+		t.Logf("ignored symlink fixture is unavailable on Windows: %v", err)
 	}
 	changes, err := index.Changes(context.Background())
 	want := []workspace.Change{{Path: "tracked.log", Mode: workspace.Regular, Data: []byte("after")}}
@@ -342,14 +457,15 @@ func TestFixIndexRejectsNonIgnoredUnsafeOutput(t *testing.T) {
 		{"too many", "changed file limit"},
 	} {
 		t.Run(tt.kind, func(t *testing.T) {
+			if runtime.GOOS == "windows" && tt.kind == "unsafe path" {
+				t.Skip("backslash is a path separator on native Windows")
+			}
 			index, source := offlineIndexFixture(t, nil)
 			switch tt.kind {
 			case "unsafe path":
 				writeIndexFixture(t, source, "new\\output", []byte("data"))
 			case "symlink":
-				if err := os.Symlink("/outside/secret", filepath.Join(source, "link")); err != nil {
-					t.Fatal(err)
-				}
+				symlinkOrSkip(t, "/outside/secret", filepath.Join(source, "link"))
 			case "nested repository":
 				writeIndexFixture(t, source, "nested/file", []byte("nested source"))
 				nested := filepath.Join(source, "nested")
@@ -364,18 +480,23 @@ func TestFixIndexRejectsNonIgnoredUnsafeOutput(t *testing.T) {
 					writeIndexFixture(t, source, fmt.Sprintf("file-%d", i), nil)
 				}
 			}
-			marker := filepath.Join(t.TempDir(), "add-ran")
-			script := fmt.Sprintf("#!/bin/sh\nfor argument in \"$@\"; do\n if [ \"$argument\" = add ]; then touch %s; fi\ndone\nexec %s \"$@\"\n", shellQuote(marker), shellQuote(index.binary))
-			index.binary = filepath.Join(fakeOnPath(t, "git-proxy", script), "git-proxy")
-			changes, err := index.Changes(context.Background())
+			var marker string
+			if runtime.GOOS != "windows" {
+				marker = filepath.Join(t.TempDir(), "add-ran")
+				script := fmt.Sprintf("#!/bin/sh\nfor argument in \"$@\"; do\n if [ \"$argument\" = add ]; then touch %s; fi\ndone\nexec %s \"$@\"\n", shellQuote(marker), shellQuote(index.binary))
+				index.binary = filepath.Join(fakeOnPath(t, "git-proxy", script), "git-proxy")
+			}
+			changes, err := index.Changes(t.Context())
 			if err == nil || !strings.Contains(err.Error(), tt.cause) {
 				t.Fatalf("%s output: changes=%+v, err=%v; want %q", tt.kind, changes, err, tt.cause)
 			}
 			if tt.kind == "too many" && !errors.Is(err, ErrTooManyFiles) {
 				t.Fatalf("untracked change count lost native classification: %v", err)
 			}
-			if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("Git hashed rejected output before precheck: %v", err)
+			if marker != "" {
+				if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("Git hashed rejected output before precheck: %v", err)
+				}
 			}
 		})
 	}
@@ -438,6 +559,9 @@ func TestFixIndexRejectsSelfIgnoringToolCachesUntilRemoved(t *testing.T) {
 
 func TestFixIndexBoundsActualControlScanBeforeStaging(t *testing.T) {
 	index, source := offlineIndexFixture(t, []workspace.File{{Path: ".gitignore", Mode: workspace.Regular, Data: []byte("*.cache\n")}})
+	marker := filepath.Join(t.TempDir(), "add-ran")
+	script := "#!/bin/sh\nfor argument in \"$@\"; do\n if [ \"$argument\" = add ]; then touch " + shellQuote(marker) + "; fi\ndone\nexec " + shellQuote(index.binary) + " \"$@\"\n"
+	index.binary = filepath.Join(fakeOnPath(t, "git-proxy", script), "git-proxy")
 	// The tracked ignore file and intended change bring this to exactly 100000.
 	for i := 0; i < workspace.MaxEntries-2; i++ {
 		if err := os.WriteFile(filepath.Join(source, fmt.Sprintf("entry-%06d.cache", i)), nil, 0600); err != nil {
@@ -445,9 +569,6 @@ func TestFixIndexBoundsActualControlScanBeforeStaging(t *testing.T) {
 		}
 	}
 	writeIndexFixture(t, source, "fix.txt", []byte("reviewed"))
-	marker := filepath.Join(t.TempDir(), "add-ran")
-	script := "#!/bin/sh\nfor argument in \"$@\"; do\n if [ \"$argument\" = add ]; then touch " + shellQuote(marker) + "; fi\ndone\nexec " + shellQuote(index.binary) + " \"$@\"\n"
-	index.binary = filepath.Join(fakeOnPath(t, "git-proxy", script), "git-proxy")
 	changes, err := index.Changes(context.Background())
 	want := []workspace.Change{{Path: "fix.txt", Mode: workspace.Regular, Data: []byte("reviewed")}}
 	if err != nil || !reflect.DeepEqual(changes, want) {
@@ -470,15 +591,20 @@ func TestFixIndexBoundsActualControlScanBeforeStaging(t *testing.T) {
 
 func TestFixIndexPreservesModeDeletionAndBinary(t *testing.T) {
 	index, source := offlineIndexFixture(t, []workspace.File{{Path: "mode", Mode: workspace.Regular, Data: []byte("same")}, {Path: "deleted", Mode: workspace.Regular, Data: []byte("deleted")}})
-	if err := os.Chmod(filepath.Join(source, "mode"), 0755); err != nil {
-		t.Fatal(err)
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(filepath.Join(source, "mode"), 0755); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := os.Remove(filepath.Join(source, "deleted")); err != nil {
 		t.Fatal(err)
 	}
 	writeIndexFixture(t, source, "binary", []byte{0, 1, 2})
 	changes, err := index.Changes(context.Background())
-	want := []workspace.Change{{Path: "binary", Mode: workspace.Regular, Data: []byte{0, 1, 2}}, {Path: "deleted", Delete: true}, {Path: "mode", Mode: workspace.Executable, Data: []byte("same")}}
+	want := []workspace.Change{{Path: "binary", Mode: workspace.Regular, Data: []byte{0, 1, 2}}, {Path: "deleted", Delete: true}}
+	if runtime.GOOS != "windows" {
+		want = append(want, workspace.Change{Path: "mode", Mode: workspace.Executable, Data: []byte("same")})
+	}
 	if err != nil || !reflect.DeepEqual(changes, want) {
 		t.Fatalf("changes = %+v, %v", changes, err)
 	}
@@ -565,28 +691,28 @@ func TestParseIndexChangesRejectsMalformedRecords(t *testing.T) {
 }
 
 func TestFixIndexRejectsTrackedGrowthBeforeHashing(t *testing.T) {
-	for _, kind := range []string{"sparse huge file", "aggregate growth"} {
+	for _, kind := range []string{"single file growth", "aggregate growth"} {
 		t.Run(kind, func(t *testing.T) {
 			index, source := offlineIndexFixture(t, []workspace.File{
 				{Path: "first", Mode: workspace.Regular, Data: []byte("one")},
 				{Path: "second", Mode: workspace.Regular, Data: []byte("two")},
 			})
-			if kind == "sparse huge file" {
-				if err := os.Truncate(filepath.Join(source, "first"), 1<<40); err != nil {
-					t.Fatal(err)
-				}
+			var data []byte
+			if kind == "single file growth" {
+				data = make([]byte, workspace.MaxChangeBytes+1)
+				writeIndexFixture(t, source, "first", data)
 			} else {
-				writeIndexFixture(t, source, "first", make([]byte, workspace.MaxChangeBytes/2+1))
-				writeIndexFixture(t, source, "second", make([]byte, workspace.MaxChangeBytes/2+1))
+				data = make([]byte, workspace.MaxChangeBytes/2+1)
+				writeIndexFixture(t, source, "first", data)
+				writeIndexFixture(t, source, "second", data)
 			}
-			marker := filepath.Join(t.TempDir(), "add-ran")
-			script := fmt.Sprintf("#!/bin/sh\nfor argument in \"$@\"; do\n if [ \"$argument\" = add ]; then touch %s; fi\ndone\nexec %s \"$@\"\n", shellQuote(marker), shellQuote(index.binary))
-			index.binary = filepath.Join(fakeOnPath(t, "git-proxy", script), "git-proxy")
 			if changes, err := index.Changes(context.Background()); err == nil || !strings.Contains(err.Error(), "tracked fix path") || !strings.Contains(err.Error(), "byte limit") {
 				t.Fatalf("tracked growth returned %+v, %v", changes, err)
 			}
-			if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("Git hashed oversized tracked data before refusal: %v", err)
+			_, err := index.run(t.Context(), 1024, nil, "cat-file", "-e", gitBlobID(data))
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) || exit.ExitCode() != 1 {
+				t.Fatalf("Git hashed oversized tracked data before refusal, or object lookup failed: %v", err)
 			}
 		})
 	}
@@ -595,10 +721,10 @@ func TestFixIndexRejectsTrackedGrowthBeforeHashing(t *testing.T) {
 func TestFixIndexExcludesModelCreatedGitMetadata(t *testing.T) {
 	index, source := offlineIndexFixture(t, []workspace.File{{Path: "tracked/source", Mode: workspace.Regular, Data: []byte("before")}})
 	writeIndexFixture(t, source, ".GIT/config", []byte("untrusted metadata"))
-	writeIndexFixture(t, source, "tracked/.Git/config", []byte("untrusted nested metadata"))
 	if _, err := runGit(context.Background(), filepath.Join(source, "tracked"), "init", "--quiet", "--template="); err != nil {
 		t.Fatal(err)
 	}
+	writeIndexFixture(t, source, "tracked/.Git/minion-marker", []byte("untrusted nested metadata"))
 	writeIndexFixture(t, source, "tracked/source", []byte("after"))
 	changes, err := index.Changes(context.Background())
 	want := []workspace.Change{{Path: "tracked/source", Mode: workspace.Regular, Data: []byte("after")}}
@@ -608,6 +734,9 @@ func TestFixIndexExcludesModelCreatedGitMetadata(t *testing.T) {
 }
 
 func TestFixIndexCountsModeOnlyFileContentsAgainstResultLimit(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("native Windows Chmod does not set the executable bit for Git")
+	}
 	index, source := offlineIndexFixture(t, []workspace.File{{Path: "large.sh", Mode: workspace.Regular, Data: make([]byte, workspace.MaxChangeBytes+1)}})
 	if err := os.Chmod(filepath.Join(source, "large.sh"), 0755); err != nil {
 		t.Fatal(err)
@@ -669,15 +798,15 @@ func TestFixIndexIgnoresUnusedRulesUnderIgnoredTrackedDirectory(t *testing.T) {
 			if err != nil || !reflect.DeepEqual(changes, want) {
 				t.Fatalf("unused ignored rules blocked tracked edit or included outputs: %+v,%v", changes, err)
 			}
-			if err := os.Remove(filepath.Join(source, dir, ".gitignore")); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Symlink(tracked, filepath.Join(source, dir, ".gitignore")); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := index.Changes(context.Background()); err == nil || !strings.Contains(err.Error(), "must be regular") {
-				t.Fatalf("ignored tracked-directory control shape was not checked: %v", err)
-			}
+			t.Run("symlink control", func(t *testing.T) {
+				if err := os.Remove(filepath.Join(source, dir, ".gitignore")); err != nil {
+					t.Fatal(err)
+				}
+				symlinkOrSkip(t, tracked, filepath.Join(source, dir, ".gitignore"))
+				if _, err := index.Changes(context.Background()); err == nil || !strings.Contains(err.Error(), "must be regular") {
+					t.Fatalf("ignored tracked-directory control shape was not checked: %v", err)
+				}
+			})
 		})
 	}
 }
@@ -843,7 +972,10 @@ func TestFixIndexSkipsUntrackedContentsOfIgnoredTrackedDirectory(t *testing.T) {
 		{Path: ".gitignore", Mode: workspace.Regular, Data: []byte("build/\n")},
 		{Path: "build/tracked/source", Mode: workspace.Regular, Data: []byte("before")},
 	})
-	for i := 0; i < workspace.MaxEntries; i++ {
+	if _, err := index.run(t.Context(), 128, nil, "config", "core.ignoreCase", "true"); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
 		f, err := os.Create(filepath.Join(source, "build", fmt.Sprint(i)))
 		if err != nil {
 			t.Fatal(err)
@@ -852,11 +984,40 @@ func TestFixIndexSkipsUntrackedContentsOfIgnoredTrackedDirectory(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if err := index.checkControlFilesWithLimit(t.Context(), 2); err != nil {
+		t.Fatalf("ignored contents counted against control scan limit: %v", err)
+	}
 	writeIndexFixture(t, source, "build/tracked/source", []byte("after"))
-	changes, err := index.Changes(context.Background())
+	changes, err := index.Changes(t.Context())
 	want := []workspace.Change{{Path: "build/tracked/source", Mode: workspace.Regular, Data: []byte("after")}}
 	if err != nil || !reflect.DeepEqual(changes, want) {
 		t.Fatalf("ignored outputs changed tracked selection: %+v,%v", changes, err)
+	}
+}
+
+func TestFixIndexBoundsCaseSpellingScanInsideIgnoredTrackedDirectory(t *testing.T) {
+	index, source := offlineIndexFixture(t, []workspace.File{
+		{Path: ".gitignore", Mode: workspace.Regular, Data: []byte("build/\n")},
+		{Path: "build/tracked/source", Mode: workspace.Regular, Data: []byte("before")},
+	})
+	if err := os.Remove(filepath.Join(source, "build", "tracked", "source")); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		writeIndexFixture(t, source, fmt.Sprintf("build/tracked/cache-%d", i), nil)
+	}
+	if err := index.checkControlFilesWithLimit(t.Context(), 2); err != nil {
+		t.Fatalf("ignored cache counted against control scan limit: %v", err)
+	}
+	if stale, err := index.caseRenamedPaths(t.Context(), 5); stale != nil || err == nil || !strings.Contains(err.Error(), "case-spelling scan exceeds entry limit") {
+		t.Fatalf("unbounded case-spelling scan: stale=%q error=%v", stale, err)
+	}
+	if stale, err := index.caseRenamedPaths(t.Context(), 6); err != nil || len(stale) != 0 {
+		t.Fatalf("exact case-spelling scan limit: stale=%q error=%v", stale, err)
+	}
+	changes, err := index.Changes(t.Context())
+	if err != nil || len(changes) != 1 || changes[0].Path != "build/tracked/source" || !changes[0].Delete {
+		t.Fatalf("tracked deletion with bounded ignored cache: changes=%+v error=%v", changes, err)
 	}
 }
 

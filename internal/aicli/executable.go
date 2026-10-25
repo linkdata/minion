@@ -1,9 +1,12 @@
 package aicli
 
 import (
+	"errors"
 	"fmt"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strings"
 
 	"github.com/linkdata/minion/internal/workspace"
 )
@@ -15,17 +18,40 @@ func ExecutablePath(name string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.EvalSymlinks(binary)
+	resolved, err := workspace.CanonicalPath(binary)
+	if err != nil {
+		return "", err
+	}
+	if runtime.GOOS == "windows" && !strings.EqualFold(filepath.Ext(resolved), ".exe") {
+		return "", fmt.Errorf("%s needs a native .exe executable", name)
+	}
+	return resolved, nil
 }
 
 // AbsoluteExecutable resolves a PATH command without changing its launcher name.
 func AbsoluteExecutable(name string) (string, error) {
-	binary, err := exec.LookPath(name)
+	lookup := name
+	if runtime.GOOS == "windows" && filepath.Ext(name) == "" {
+		lookup += ".exe"
+	}
+	binary, err := exec.LookPath(lookup)
 	if err != nil {
+		if lookup != name && errors.Is(err, exec.ErrNotFound) {
+			return "", fmt.Errorf("%s needs a native .exe executable: %w", name, err)
+		}
 		return "", err
 	}
 	if !filepath.IsAbs(binary) {
 		return "", fmt.Errorf("%s binary must have an absolute path", name)
+	}
+	if runtime.GOOS == "windows" {
+		resolved, err := workspace.CanonicalPath(binary)
+		if err != nil {
+			return "", err
+		}
+		if !strings.EqualFold(filepath.Ext(binary), ".exe") || !strings.EqualFold(filepath.Ext(resolved), ".exe") {
+			return "", fmt.Errorf("%s needs a native .exe executable", name)
+		}
 	}
 	return binary, nil
 }

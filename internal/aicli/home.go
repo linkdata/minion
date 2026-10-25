@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 )
 
-// HomePath resolves a native override or HOME-relative default without creating it.
+// HomePath resolves a native override or OS user-home default without creating it.
 // A derived default does not imply that the override should be exported to the CLI.
 func HomePath(envVar, dirName string) (string, error) {
 	path := os.Getenv(envVar)
@@ -16,7 +16,7 @@ func HomePath(envVar, dirName string) (string, error) {
 			return "", fmt.Errorf("resolve %s home: %w", envVar, err)
 		}
 		if !filepath.IsAbs(home) {
-			return "", fmt.Errorf("resolve %s home: HOME must be absolute", envVar)
+			return "", fmt.Errorf("resolve %s home: native home must be absolute", envVar)
 		}
 		path = home + string(os.PathSeparator) + dirName
 	}

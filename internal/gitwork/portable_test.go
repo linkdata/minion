@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -49,7 +50,10 @@ func TestSnapshotPreservesPRDeletedBinaryAndModeContext(t *testing.T) {
 	}
 	writeFile(t, filepath.Join(fixture.source, "binary"), "\x00\xffhead")
 	writeFile(t, filepath.Join(fixture.source, "text.txt"), "head text\n")
-	if err := os.Chmod(filepath.Join(fixture.source, "binary"), 0755); err != nil {
+	if runtime.GOOS == "windows" {
+		fixture.git(fixture.source, "add", "binary")
+		fixture.git(fixture.source, "update-index", "--chmod=+x", "binary")
+	} else if err := os.Chmod(filepath.Join(fixture.source, "binary"), 0755); err != nil {
 		t.Fatal(err)
 	}
 	head := fixture.commit("refs/pull/7/head", "PR files")
@@ -132,7 +136,7 @@ func TestCloneRejectsShallowSource(t *testing.T) {
 	fixture := newFixture(t)
 	writeFile(t, filepath.Join(fixture.remote, "shallow"), fixture.base+"\n")
 	root := t.TempDir()
-	checkout, err := cloneFromURL(context.Background(), root, "file://"+fixture.remote, "main", true)
+	checkout, err := cloneFromURL(context.Background(), root, fixture.remote, "main", true)
 	if checkout != nil || err == nil || !strings.Contains(err.Error(), "source repository is shallow") {
 		t.Fatalf("shallow source returned checkout=%v error=%v", checkout, err)
 	}
@@ -282,10 +286,14 @@ func TestSnapshotReusesValidatedTreesByCommit(t *testing.T) {
 }
 
 func TestSnapshotPreservesOmittedPathSpellingsAcrossRevisions(t *testing.T) {
-	fixture := newFixture(t)
-	if err := os.Symlink("/outside", filepath.Join(fixture.source, "Docs")); err != nil {
-		t.Fatal(err)
+	if runtime.GOOS == "windows" {
+		t.Skip("case-only symlink rename fixture requires case-sensitive paths")
 	}
+	if !caseSensitiveTempDir(t) {
+		t.Skip("case-only symlink rename fixture requires a case-sensitive filesystem")
+	}
+	fixture := newFixture(t)
+	symlinkOrSkip(t, "/outside", filepath.Join(fixture.source, "Docs"))
 	fixture.commit("refs/heads/main", "base symlink")
 	checkout := fixture.clone()
 	if err := os.Rename(filepath.Join(fixture.source, "Docs"), filepath.Join(fixture.source, "docs")); err != nil {
@@ -364,6 +372,9 @@ func TestCloneIgnoresHostTemplateExclusions(t *testing.T) {
 func TestControlledGitRejectsPortableMetadataVariants(t *testing.T) {
 	for _, name := range []string{".g\u200cit/hooks/post-checkout", "git~1/hooks/post-checkout"} {
 		t.Run(name, func(t *testing.T) {
+			if runtime.GOOS == "windows" && strings.HasPrefix(name, "git~1/") {
+				t.Skip("git~1 may resolve to the fixture repository's .git directory")
+			}
 			root := t.TempDir()
 			ctx := context.Background()
 			if _, err := runGit(ctx, root, "init"); err != nil {
@@ -387,6 +398,12 @@ func TestControlledGitRejectsPortableMetadataVariants(t *testing.T) {
 }
 
 func TestSnapshotPreservesGitLegalSourceNames(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("case-distinct and backslash path fixture requires Unix filenames")
+	}
+	if !caseSensitiveTempDir(t) {
+		t.Skip("case-distinct paths require a case-sensitive filesystem")
+	}
 	fixture := newFixture(t)
 	names := []string{"include/xt_connmark.h", "include/xt_CONNMARK.h", "Docs/a.md", "docs/b.md", `back\slash`, ".g\u200cit\\x", "dir\\.g\u200cit/x"}
 	for _, name := range names {
@@ -416,11 +433,22 @@ func TestSnapshotPreservesGitLegalSourceNames(t *testing.T) {
 	}
 }
 
-func TestSourceTreeReadsLocalSymlink(t *testing.T) {
-	fixture := newFixture(t)
-	if err := os.Symlink("README.md", filepath.Join(fixture.checkout.path, "link")); err != nil {
+func caseSensitiveTempDir(t *testing.T) bool {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "case-probe"), nil, 0600); err != nil {
 		t.Fatal(err)
 	}
+	_, err := os.Stat(filepath.Join(root, "CASE-PROBE"))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	return errors.Is(err, os.ErrNotExist)
+}
+
+func TestSourceTreeReadsLocalSymlink(t *testing.T) {
+	fixture := newFixture(t)
+	symlinkOrSkip(t, "README.md", filepath.Join(fixture.checkout.path, "link"))
 	fixture.git(fixture.checkout.path, "add", "link")
 	fixture.git(fixture.checkout.path, "commit", "-m", "symlink metadata fixture")
 	head := fixture.git(fixture.checkout.path, "rev-parse", "HEAD")

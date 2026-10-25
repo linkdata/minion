@@ -11,12 +11,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"unicode"
 	"unicode/utf8"
 
 	"github.com/linkdata/minion/internal/aicli"
-	"github.com/linkdata/minion/internal/processgroup"
+	"github.com/linkdata/minion/internal/executil"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -252,7 +253,7 @@ func validateAuditFiles(ctx context.Context, files []workspace.File, validationD
 		cmd := auditNodeCommand(ctx, validationDir, tools.binary, tools.permissionFlag,
 			"--allow-fs-read="+filepath.Dir(skill), "--allow-fs-read="+validationDir,
 			script, filepath.Join(validationDir, validator.artifact))
-		if err := processgroup.Run(cmd); err != nil {
+		if err := executil.Run(cmd); err != nil {
 			if cause := ctx.Err(); cause != nil && !errors.Is(err, cause) {
 				err = errors.Join(cause, err)
 			}
@@ -960,14 +961,21 @@ func validateAuditMetadata(metadataBytes []byte, repo, target, head string) ([]s
 }
 
 func auditNodePermissionFlag(ctx context.Context, dir, binary string) (string, error) {
+	canary, err := os.CreateTemp(filepath.Dir(dir), "minion-node-deny-")
+	if err != nil {
+		return "", err
+	}
+	if err := canary.Close(); err != nil {
+		_ = os.Remove(canary.Name())
+		return "", err
+	}
+	defer os.Remove(canary.Name())
 	// Prefer the stable flag; Node 20 requires the experimental spelling.
 	for _, flag := range []string{"--permission", "--experimental-permission"} {
 		// #nosec G204 -- the flags and probe program are fixed strings, passed without a shell.
-		cmd := auditNodeCommand(ctx, dir, binary, flag, "-e", `if (!process.permission || process.permission.has('fs.read', '/etc/passwd')) process.exit(1)`)
-		if err := processgroup.Run(cmd); err == nil {
+		cmd := auditNodeCommand(ctx, dir, binary, flag, "-e", `if (!process.permission || process.permission.has('fs.read', process.argv[1])) process.exit(1)`, canary.Name())
+		if err := executil.Run(cmd); err == nil {
 			return flag, nil
-		} else if errors.Is(err, processgroup.ErrDescendants) || errors.Is(err, processgroup.ErrUnconfirmed) || errors.Is(err, processgroup.ErrExhausted) {
-			return "", err
 		}
 		if err := ctx.Err(); err != nil {
 			return "", err
@@ -979,6 +987,12 @@ func auditNodePermissionFlag(ctx context.Context, dir, binary string) (string, e
 func auditNodeCommand(ctx context.Context, dir, binary string, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, binary, args...)
 	cmd.Dir = dir
-	cmd.Env = []string{"HOME=" + dir, "PATH=/usr/bin:/bin"}
+	cmd.Env = []string{"HOME=" + dir, "PATH=" + aicli.SafePath(os.Getenv("PATH"), dir)}
+	if runtime.GOOS == "windows" {
+		cmd.Env = append(cmd.Env, "USERPROFILE="+dir, "APPDATA="+dir, "LOCALAPPDATA="+dir, "TEMP="+dir, "TMP="+dir)
+		if systemRoot := os.Getenv("SystemRoot"); systemRoot != "" {
+			cmd.Env = append(cmd.Env, "SystemRoot="+systemRoot)
+		}
+	}
 	return cmd
 }

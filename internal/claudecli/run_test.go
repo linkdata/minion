@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -21,7 +22,7 @@ import (
 	"github.com/linkdata/minion/internal/usage"
 )
 
-func TestReadOnlyAddDirsMatchCanonicalPolicyWithoutTreatingDirectoriesAsSkills(t *testing.T) {
+func TestOnlyWritableClaudeDirectoriesAreAdded(t *testing.T) {
 	root, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -32,67 +33,57 @@ func TestReadOnlyAddDirsMatchCanonicalPolicyWithoutTreatingDirectoriesAsSkills(t
 			t.Fatal(err)
 		}
 	}
-	if err := os.Symlink(realDir, alias); err != nil {
-		t.Fatal(err)
-	}
+	symlinkOrSkip(t, realDir, alias)
 	output, outputAlias := filepath.Join(root, "output"), filepath.Join(root, "output-alias")
 	if err := os.Mkdir(output, 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(output, outputAlias); err != nil {
-		t.Fatal(err)
-	}
+	symlinkOrSkip(t, output, outputAlias)
 	binary := fakeExecutable(t, "claude", `printf '%s\n' "$@" > "$0.args"
 cat >/dev/null
 printf '%s\n' '`+successfulResult+`'
 `)
 	source := t.TempDir()
-	nested := filepath.Join(source, "read-only")
-	if err := os.Mkdir(nested, 0700); err != nil {
-		t.Fatal(err)
-	}
-	nested, err = filepath.EvalSymlinks(nested)
-	if err != nil {
-		t.Fatal(err)
-	}
-	settings := config.ClaudeConfig{ReadOnlyDirs: []string{alias, namedSkill, nested}}
+	settings := config.ClaudeConfig{ReadOnlyDirs: []string{alias, namedSkill}}
 	if _, err := Run(context.Background(), source, "task", true, outputAlias, settings); err != nil {
 		t.Fatal(err)
 	}
 	args := strings.Split(strings.TrimSpace(readFile(t, binary+".args")), "\n")
 	var dirs []string
-	var policy struct {
-		Sandbox struct {
-			Filesystem struct{ AllowWrite, DenyWrite []string } `json:"filesystem"`
-		} `json:"sandbox"`
-	}
 	for i := 0; i+1 < len(args); i++ {
 		if args[i] == "--add-dir" {
 			dirs = append(dirs, args[i+1])
 		}
-		if args[i] == "--settings" {
-			if err := json.Unmarshal([]byte(args[i+1]), &policy); err != nil {
-				t.Fatal(err)
-			}
-		}
 	}
-	for _, dir := range []string{realDir, namedSkill, nested} {
-		if !slices.Contains(dirs, dir) || !slices.Contains(policy.Sandbox.Filesystem.DenyWrite, dir) {
-			t.Fatalf("canonical directory missing from grant or denial: dirs=%v deny=%v", dirs, policy.Sandbox.Filesystem.DenyWrite)
-		}
+	canonicalSource, err := filepath.EvalSymlinks(source)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !slices.Contains(dirs, output) || !slices.Contains(policy.Sandbox.Filesystem.AllowWrite, output) || slices.Contains(dirs, outputAlias) {
-		t.Fatalf("output alias was not canonicalized: dirs=%v policy=%+v", dirs, policy)
+	if !slices.Equal(dirs, []string{canonicalSource, output}) || !slices.Equal(settings.ReadOnlyDirs, []string{alias, namedSkill}) {
+		t.Fatalf("unexpected write roots or mutated caller settings: dirs=%v settings=%v", dirs, settings.ReadOnlyDirs)
 	}
-	if slices.Contains(dirs, root) || slices.Contains(dirs, alias) || !slices.Equal(settings.ReadOnlyDirs, []string{alias, namedSkill, nested}) {
-		t.Fatalf("grant widened or caller settings mutated: dirs=%v settings=%v", dirs, settings.ReadOnlyDirs)
+	if slices.Contains(dirs, realDir) || slices.Contains(dirs, namedSkill) || slices.Contains(dirs, outputAlias) {
+		t.Fatalf("read-only evidence or output alias was added: %v", dirs)
 	}
 }
 
 const successfulResult = `{"type":"result","subtype":"success","is_error":false,"result":"final answer","usage":{"input_tokens":3,"cache_creation_input_tokens":5,"cache_read_input_tokens":7,"output_tokens":11},"modelUsage":{"claude-main":{"inputTokens":3,"cacheCreationInputTokens":5,"cacheReadInputTokens":7,"outputTokens":11}}}`
 
+func symlinkOrSkip(t *testing.T, target, link string) {
+	t.Helper()
+	if err := os.Symlink(target, link); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("Windows symlink fixture is unavailable: %v", err)
+		}
+		t.Fatal(err)
+	}
+}
+
 func fakeExecutable(t *testing.T, name, script string) string {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("Claude CLI is not supported on native Windows")
+	}
 	if name == "claude" {
 		t.Setenv("HOME", t.TempDir())
 		t.Setenv("CLAUDE_CONFIG_DIR", "")
@@ -121,79 +112,6 @@ func readFile(t *testing.T, path string) string {
 		t.Fatal(err)
 	}
 	return string(data)
-}
-
-func TestUnixSocketWorkaround(t *testing.T) {
-	for _, tc := range []struct {
-		name, fields string
-		want         bool
-	}{
-		{name: "omitted claude", want: true},
-		{name: "empty claude", fields: `,"claude":{}`, want: true},
-		{name: "null", fields: `,"claude":{"allow_all_unix_sockets":null}`, want: true},
-		{name: "enabled", fields: `,"claude":{"allow_all_unix_sockets":true}`, want: true},
-		{name: "disabled", fields: `,"claude":{"allow_all_unix_sockets":false}`},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "config.json")
-			data := `{"bot_login":"bot","repositories":[{"name":"owner/repo","id":1,"owner_id":2,"actions":["review"]}]` + tc.fields + `}`
-			if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			cfg, err := config.Load(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			fakeExecutable(t, "bwrap", "exit 99\n")
-			fakeExecutable(t, "socat", "exit 99\n")
-			binary := fakeExecutable(t, "claude", `printf '%s\n' "$@" > "$0.args"
-if [ "$1" = '--version' ]; then
-  printf '%s\n' '2.1.302 (Claude Code)'
-elif [ "$3" = 'auth' ]; then
-  printf '%s\n' '{"loggedIn":true}'
-else
-  input=$(cat)
-  case "$input" in
-    *minion-initialize*) printf '%s\n' '`+modelCatalogue+`' ;;
-    *) printf '%s\n' '`+successfulResult+`' ;;
-  esac
-fi
-`)
-			settings, err := Validate(context.Background(), cfg.Claude)
-			if err != nil {
-				t.Fatal(err)
-			}
-			checkUnixSocketPolicy(t, binary, tc.want)
-			if _, err := Run(context.Background(), t.TempDir(), "task", false, "", settings); err != nil {
-				t.Fatal(err)
-			}
-			checkUnixSocketPolicy(t, binary, tc.want)
-		})
-	}
-}
-
-func checkUnixSocketPolicy(t *testing.T, binary string, want bool) {
-	t.Helper()
-	args := strings.Split(strings.TrimSpace(readFile(t, binary+".args")), "\n")
-	for i, arg := range args[:len(args)-1] {
-		if arg == "--settings" {
-			var settings struct {
-				Sandbox struct {
-					Network struct {
-						AllowAllUnixSockets *bool `json:"allowAllUnixSockets"`
-					} `json:"network"`
-				} `json:"sandbox"`
-			}
-			if err := json.Unmarshal([]byte(args[i+1]), &settings); err != nil {
-				t.Fatal(err)
-			}
-			if got := settings.Sandbox.Network.AllowAllUnixSockets; got == nil || *got != want {
-				t.Fatalf("allowAllUnixSockets = %v, want %t", got, want)
-			}
-			return
-		}
-	}
-	t.Fatal("missing sandbox settings")
 }
 
 func TestRun(t *testing.T) {
@@ -247,15 +165,11 @@ printf '%s\n' '`+successfulResult+`'
 				}
 			}
 			values := map[string]string{}
-			skillDir := ""
 			var addDirs []string
 			for i, arg := range args[:len(args)-1] {
 				values[arg] = args[i+1]
 				if arg == "--add-dir" {
 					addDirs = append(addDirs, args[i+1])
-					if args[i+1] != workspace && args[i+1] != reports && args[i+1] != output {
-						skillDir = args[i+1]
-					}
 				}
 			}
 			for key, want := range map[string]string{"--permission-mode": "dontAsk", "--tools": "Bash", "--allowedTools": "Bash", "--permission-prompts": "none", "--model": "claude-test", "--effort": "high", "--mcp-config": `{"mcpServers":{}}`} {
@@ -267,26 +181,12 @@ printf '%s\n' '`+successfulResult+`'
 				DisableClaudeAIConnectors bool  `json:"disableClaudeAiConnectors"`
 				AutoMemoryEnabled         *bool `json:"autoMemoryEnabled"`
 				Sandbox                   struct {
-					Enabled                      bool     `json:"enabled"`
-					FailIfUnavailable            bool     `json:"failIfUnavailable"`
-					AllowUnsandboxedCommands     bool     `json:"allowUnsandboxedCommands"`
-					EnableWeakerNestedSandbox    *bool    `json:"enableWeakerNestedSandbox"`
-					EnableWeakerNetworkIsolation *bool    `json:"enableWeakerNetworkIsolation"`
-					ExcludedCommands             []string `json:"excludedCommands"`
-					Credentials                  struct {
+					Enabled                  bool `json:"enabled"`
+					FailIfUnavailable        bool `json:"failIfUnavailable"`
+					AllowUnsandboxedCommands bool `json:"allowUnsandboxedCommands"`
+					Credentials              struct {
 						EnvVars []struct{ Name, Mode string } `json:"envVars"`
 					} `json:"credentials"`
-					Filesystem struct {
-						DenyRead   []string `json:"denyRead"`
-						DenyWrite  []string `json:"denyWrite"`
-						AllowRead  []string `json:"allowRead"`
-						AllowWrite []string `json:"allowWrite"`
-					} `json:"filesystem"`
-					Network struct {
-						AllowedDomains    []string `json:"allowedDomains"`
-						StrictAllowlist   bool     `json:"strictAllowlist"`
-						AllowLocalBinding *bool    `json:"allowLocalBinding"`
-					} `json:"network"`
 				} `json:"sandbox"`
 			}
 			if err := json.Unmarshal([]byte(values["--settings"]), &settings); err != nil {
@@ -296,11 +196,21 @@ printf '%s\n' '`+successfulResult+`'
 			if !settings.DisableClaudeAIConnectors || settings.AutoMemoryEnabled == nil || *settings.AutoMemoryEnabled {
 				t.Fatalf("Claude connected tools or memory enabled: %+v", settings)
 			}
-			if !policy.Enabled || !policy.FailIfUnavailable || policy.AllowUnsandboxedCommands || !policy.Network.StrictAllowlist || len(policy.Network.AllowedDomains) != 0 || len(policy.Filesystem.DenyRead) != 1 || policy.Filesystem.DenyRead[0] != "/" {
+			if !policy.Enabled || !policy.FailIfUnavailable || policy.AllowUnsandboxedCommands {
 				t.Fatalf("unsafe sandbox policy: %+v", policy)
 			}
-			if policy.EnableWeakerNestedSandbox == nil || *policy.EnableWeakerNestedSandbox || policy.EnableWeakerNetworkIsolation == nil || *policy.EnableWeakerNetworkIsolation || policy.Network.AllowLocalBinding == nil || *policy.Network.AllowLocalBinding || policy.ExcludedCommands == nil || len(policy.ExcludedCommands) != 0 {
-				t.Fatalf("sandbox weakened: %+v", policy)
+			var raw map[string]json.RawMessage
+			if err := json.Unmarshal([]byte(values["--settings"]), &raw); err != nil {
+				t.Fatal(err)
+			}
+			var nativeSandbox map[string]json.RawMessage
+			if err := json.Unmarshal(raw["sandbox"], &nativeSandbox); err != nil {
+				t.Fatal(err)
+			}
+			for _, name := range []string{"filesystem", "network"} {
+				if _, authored := nativeSandbox[name]; authored {
+					t.Fatalf("Minion authored Claude %s rules: %s", name, raw["sandbox"])
+				}
 			}
 			wantDenials := []string{"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CONFIG_DIR", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy"}
 			var denials []string
@@ -313,40 +223,14 @@ printf '%s\n' '`+successfulResult+`'
 			if !slices.Equal(denials, wantDenials) {
 				t.Fatalf("credential environment denials = %v, want %v", denials, wantDenials)
 			}
-			if slices.Contains(policy.Filesystem.AllowWrite, workspace) != writable || !slices.Contains(policy.Filesystem.DenyWrite, reports) {
-				t.Fatalf("wrong workspace/report permissions: %+v", policy.Filesystem)
+			wantAddDirs := []string{output}
+			if writable {
+				wantAddDirs = append([]string{workspace}, wantAddDirs...)
 			}
-			if filepath.Base(skillDir) != "anti-prompt-injection" || !slices.Contains(policy.Filesystem.DenyWrite, skillDir) {
-				t.Fatalf("skill --add-dir lacks denyWrite: skill=%q permissions=%+v", skillDir, policy.Filesystem)
-			}
-			wantAddDirs := []string{workspace, output, reports, skillDir}
-			slices.Sort(addDirs)
-			slices.Sort(wantAddDirs)
 			if !slices.Equal(addDirs, wantAddDirs) {
 				t.Fatalf("--add-dir grants = %v, want %v", addDirs, wantAddDirs)
 			}
 			cwd := strings.TrimSpace(readFile(t, binary+".cwd"))
-			wantReads := append(SystemReadPaths(), workspace, cwd, output, reports, skillDir)
-			wantWrites := []string{cwd, output}
-			if writable {
-				wantWrites = append(wantWrites, workspace)
-			}
-			slices.Sort(wantReads)
-			slices.Sort(wantWrites)
-			slices.Sort(policy.Filesystem.AllowRead)
-			slices.Sort(policy.Filesystem.AllowWrite)
-			if !slices.Equal(policy.Filesystem.AllowRead, wantReads) || !slices.Equal(policy.Filesystem.AllowWrite, wantWrites) {
-				t.Fatalf("sandbox grants: read=%v want=%v, write=%v want=%v", policy.Filesystem.AllowRead, wantReads, policy.Filesystem.AllowWrite, wantWrites)
-			}
-			if writable {
-				for _, name := range []string{".git", ".agents", ".codex", ".claude"} {
-					if !slices.Contains(policy.Filesystem.DenyWrite, filepath.Join(workspace, name)) {
-						t.Fatalf("fix workspace permits writing %s: %+v", name, policy.Filesystem)
-					}
-				}
-			} else if !slices.Contains(policy.Filesystem.DenyWrite, workspace) {
-				t.Fatal("read-only workspace protection missing")
-			}
 			prompt := readFile(t, binary+".prompt")
 			if !strings.Contains(prompt, "Source snapshot: ") || !strings.Contains(prompt, workspace) || !strings.Contains(prompt, "SKILL.md") || !strings.HasSuffix(prompt, "Handle task") {
 				t.Fatalf("prompt = %q", prompt)
@@ -487,7 +371,14 @@ func TestRunStructuredOutput(t *testing.T) {
 }
 
 func TestRunRejectsUnsafePaths(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Claude CLI is not supported on native Windows")
+	}
 	workspace := t.TempDir()
+	workspaceChild := filepath.Join(workspace, "evidence")
+	if err := os.Mkdir(workspaceChild, 0700); err != nil {
+		t.Fatal(err)
+	}
 	outputParent := t.TempDir()
 	output := filepath.Join(outputParent, "reports")
 	outputChild := filepath.Join(output, "sub")
@@ -514,6 +405,7 @@ func TestRunRejectsUnsafePaths(t *testing.T) {
 		{name: "read output ancestor", dir: workspace, output: output, settings: config.ClaudeConfig{ReadOnlyDirs: []string{outputParent}}, failure: "read-only directory overlaps"},
 		{name: "read inside output", dir: workspace, output: output, settings: config.ClaudeConfig{ReadOnlyDirs: []string{outputChild}}, failure: "read-only directory overlaps"},
 		{name: "read workspace ancestor", dir: workspace, settings: config.ClaudeConfig{ReadOnlyDirs: []string{filepath.Dir(workspace)}}, failure: "read-only directory overlaps"},
+		{name: "read inside writable workspace", dir: workspace, settings: config.ClaudeConfig{ReadOnlyDirs: []string{workspaceChild}}, failure: "read-only directory overlaps"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := Run(context.Background(), tc.dir, "task", true, tc.output, tc.settings); err == nil || !strings.Contains(err.Error(), tc.failure) {
@@ -533,7 +425,25 @@ func TestRunRejectsUnsafePaths(t *testing.T) {
 	}
 }
 
+func TestRunRejectsSkillInsideOutput(t *testing.T) {
+	source, output := t.TempDir(), t.TempDir()
+	skill := filepath.Join(output, "SKILL.md")
+	if err := os.WriteFile(skill, []byte("---\nname: test\n---\nTest skill.\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	binary := fakeExecutable(t, "claude", "touch \"$0.invoked\"\nexit 99\n")
+	if _, err := Run(context.Background(), source, "task", false, output, config.ClaudeConfig{Skills: []string{skill}}); err == nil || !strings.Contains(err.Error(), "inside a writable directory") {
+		t.Fatalf("accepted writable skill: %v", err)
+	}
+	if _, err := os.Stat(binary + ".invoked"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("invalid skill started Claude: %v", err)
+	}
+}
+
 func TestChildEnvironment(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix environment fixture; native Windows Claude is unsupported")
+	}
 	got, err := childEnvironment([]string{"HOME=/home/operator", "PATH=/bin::.:rel", "CLAUDE_CONFIG_DIR=/wrong-native-home", "ANTHROPIC_API_KEY=", "anthropic_api_key=dummy", "GH_TOKEN=dummy", "GITHUB_TOKEN=dummy", "GIT_CONFIG_GLOBAL=/private-git-config", "GIT_DIR=/private-git-dir", "NODE_OPTIONS=dummy", "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=0", "BASH_ENV=bad", "HTTPS_PROXY=http://proxy.example:8080", "https_proxy=http://lower.example:3128", "http_proxy=http://lower.example:3128", "all_proxy=socks5://lower.example:1080", "no_proxy=localhost", "Https_Proxy=http://ignored.example:3128", "invalid"}, "/run", "/cache", "", "/home/operator/.claude")
 	if err != nil {
 		t.Fatal(err)
@@ -613,20 +523,15 @@ func TestChildEnvironmentRejectsCredentials(t *testing.T) {
 func TestCredentialEnvironmentStopsCLI(t *testing.T) {
 	binary := fakeExecutable(t, "claude", "touch \"$0.called\"\nexit 99\n")
 	t.Setenv("ANTHROPIC_API_KEY", "dummy-secret")
-	for _, allow := range []bool{false, true} {
-		t.Run(fmt.Sprint(allow), func(t *testing.T) {
-			settings := config.ClaudeConfig{AllowAllUnixSockets: &allow}
-			if _, err := Validate(context.Background(), settings); err == nil || !strings.Contains(err.Error(), "ANTHROPIC_API_KEY") {
-				t.Fatalf("Validate accepted environment credentials: %v", err)
-			}
-			result, err := Run(context.Background(), t.TempDir(), "task", false, "", settings)
-			if err == nil || !strings.Contains(err.Error(), "ANTHROPIC_API_KEY") || !result.UsageComplete || result.Tokens != (usage.Tokens{}) || result.Answer != "" {
-				t.Fatalf("Run accepted environment credentials or lost complete zero usage: result=%+v err=%v", result, err)
-			}
-			if _, err := os.Stat(binary + ".called"); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("CLI launched with credentials: %v", err)
-			}
-		})
+	if _, err := Validate(context.Background(), config.ClaudeConfig{}); err == nil || !strings.Contains(err.Error(), "ANTHROPIC_API_KEY") {
+		t.Fatalf("Validate accepted environment credentials: %v", err)
+	}
+	result, err := Run(context.Background(), t.TempDir(), "task", false, "", config.ClaudeConfig{})
+	if err == nil || !strings.Contains(err.Error(), "ANTHROPIC_API_KEY") || !result.UsageComplete || result.Tokens != (usage.Tokens{}) || result.Answer != "" {
+		t.Fatalf("Run accepted environment credentials or lost complete zero usage: result=%+v err=%v", result, err)
+	}
+	if _, err := os.Stat(binary + ".called"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("CLI launched with credentials: %v", err)
 	}
 }
 
@@ -637,7 +542,7 @@ func TestRunUsageLimitKeepsSafeDiagnosticAndExitCause(t *testing.T) {
 		t.Run(fmt.Sprint(malformed), func(t *testing.T) {
 			output := "cat <<'RESULT'\n" + quota + "\n" + failed + "\nRESULT\nexit 7\n"
 			if malformed {
-				output = "printf '%s\\n' '" + assistantUsageEvent("partial", 3, 5, 7, 11) + "' '" + quota + "'\nprintf '{'\nsleep 30\n"
+				output = "printf '%s\\n' '" + assistantUsageEvent("partial", 3, 5, 7, 11) + "' '" + quota + "'\nprintf '{'\nexec sleep 30\n"
 			}
 			fakeExecutable(t, "claude", "cat >/dev/null\ncat <<'DIAG' >&2\nPRIVATE_STDERR\nforged journal line\nDIAG\n"+output)
 			result, err := Run(context.Background(), t.TempDir(), "task", false, "", config.ClaudeConfig{})

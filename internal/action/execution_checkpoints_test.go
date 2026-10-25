@@ -9,9 +9,11 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/monitor"
+	"github.com/linkdata/minion/internal/state"
 	"github.com/linkdata/minion/internal/usage"
 )
 
@@ -68,6 +70,58 @@ func (f *executionAdapterFixture) startUsage() *usage.Store {
 		f.t.Fatal(err)
 	}
 	return f.owner.Usage
+}
+
+func TestExecutionBeforeCallPersistsModelStartBeforeAcknowledgement(t *testing.T) {
+	f := newExecutionAdapterFixture(t, testJob(command.Comment))
+	path := filepath.Join(t.TempDir(), "state.json")
+	store, err := state.Open(path, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.owner.Store = store
+	store.Data.JobFailures[f.job.Identity.JobID] = state.JobFailure{Attempts: 1}
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	call := f.call(CallUsage{Provider: "codex", Role: roleMain, Round: 1})
+	if err := f.sink.BeforeCall(call); err != nil || f.sink.pending == nil || !store.Data.JobFailures[f.job.Identity.JobID].ModelCallStarted {
+		t.Fatalf("model start was not saved before ACK: pending=%+v failure=%+v error=%v", f.sink.pending, store.Data.JobFailures[f.job.Identity.JobID], err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := state.Open(path, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := reopened.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	if failure := reopened.Data.JobFailures[f.job.Identity.JobID]; failure.Attempts != 1 || !failure.ModelCallStarted {
+		t.Fatalf("reopen lost admitted model call: %+v", failure)
+	}
+}
+
+func TestExecutionBeforeCallStateSaveFailureRemainsPreCall(t *testing.T) {
+	f := newExecutionAdapterFixture(t, testJob(command.Comment))
+	store := openState(t, time.Now())
+	f.owner.Store = store
+	f.startUsage()
+	store.Data.JobFailures[f.job.Identity.JobID] = state.JobFailure{Attempts: 1}
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	store.Data.Cursor = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
+	err := f.sink.BeforeCall(f.call(CallUsage{Provider: "codex", Role: roleMain, Round: 1}))
+	if err == nil || errors.Is(err, monitor.ErrTerminalJob) || f.sink.pending != nil || store.Data.JobFailures[f.job.Identity.JobID] != (state.JobFailure{Attempts: 1}) {
+		t.Fatalf("failed marker save admitted or terminalized a model call: pending=%+v state=%+v error=%v", f.sink.pending, store.Data.JobFailures, err)
+	}
+	if final := f.sink.finish(f.result(nil, nil, ""), err); !errors.Is(final, err) || errors.Is(final, monitor.ErrExecutionOutcomeUnknown) {
+		t.Fatalf("failed marker save changed pre-call retry policy: %v", final)
+	}
 }
 
 func TestExecutionBeforeCallRejectsForeignOrUnpinnedFacts(t *testing.T) {
@@ -143,6 +197,25 @@ func TestExecutionCallPairingAndMissingAcknowledgements(t *testing.T) {
 				}
 			} else if !errors.Is(err, monitor.ErrTerminalJob) {
 				t.Fatalf("missing/mismatched callback did not stop execution: %v", err)
+			}
+		})
+	}
+}
+
+func TestExecutionFailureAfterAdmittedCallCannotRetry(t *testing.T) {
+	for _, admitted := range []bool{false, true} {
+		t.Run(map[bool]string{false: "before model", true: "after model"}[admitted], func(t *testing.T) {
+			f := newExecutionAdapterFixture(t, testJob(command.Comment))
+			var calls []CallUsage
+			if admitted {
+				call := CallUsage{Provider: "codex", Role: roleMain, Round: 1, Tokens: usage.Tokens{Input: 7}, Complete: false}
+				f.ack(call)
+				calls = []CallUsage{call}
+			}
+			failure := errors.New("native call failed")
+			err := f.sink.finish(f.result(calls, nil, ""), failure)
+			if !errors.Is(err, failure) || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) != admitted {
+				t.Fatalf("retry classification after admitted=%t: %v", admitted, err)
 			}
 		})
 	}

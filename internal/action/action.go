@@ -17,7 +17,6 @@ import (
 	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/gitwork"
 	"github.com/linkdata/minion/internal/monitor"
-	"github.com/linkdata/minion/internal/processgroup"
 	"github.com/linkdata/minion/internal/state"
 	"github.com/linkdata/minion/internal/usage"
 )
@@ -119,14 +118,6 @@ func (e *Orchestrator) Execute(ctx context.Context, job monitor.Job) (resultErr 
 		}()
 	}
 	resultErr = e.perform(ctx, job)
-	if errors.Is(resultErr, processgroup.ErrExhausted) {
-		message := processgroup.ErrExhausted.Error()
-		var event *processgroup.Exhaustion
-		if errors.As(resultErr, &event) {
-			message = event.Error()
-		}
-		e.logf("process limit job=%s attempt=%s: %s", job.ID, e.attemptID, message)
-	}
 	if errors.Is(resultErr, errGitHubContextTooLarge) {
 		// Give the fixed refusal its own deadline even when the action timed out.
 		replyCtx, replyCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
@@ -143,7 +134,7 @@ func (e *Orchestrator) Execute(ctx context.Context, job monitor.Job) (resultErr 
 	}
 	if resultErr != nil && (errors.Is(ctx.Err(), context.DeadlineExceeded) ||
 		errors.Is(resultErr, gitwork.ErrTooManyFiles) ||
-		errors.Is(resultErr, gitwork.ErrDiffTooLarge) || errors.Is(resultErr, gitwork.ErrCheckoutTooLarge) || errors.Is(resultErr, gitwork.ErrUnsupportedSource) || errors.Is(resultErr, aicli.ErrOutputLimit) || errors.Is(resultErr, processgroup.ErrExhausted)) {
+		errors.Is(resultErr, gitwork.ErrDiffTooLarge) || errors.Is(resultErr, gitwork.ErrCheckoutTooLarge) || errors.Is(resultErr, gitwork.ErrUnsupportedSource) || errors.Is(resultErr, aicli.ErrOutputLimit)) {
 		resultErr = fmt.Errorf("%w: %w", monitor.ErrTerminalJob, resultErr)
 	}
 	returned = true

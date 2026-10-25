@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -15,6 +16,9 @@ import (
 )
 
 func TestResolveCredentialHelperPreservesSymlinkName(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX symlinked shell launcher fixture is unavailable on native Windows")
+	}
 	gitPath, err := exec.LookPath("git")
 	if err != nil {
 		t.Fatal("git is unavailable")
@@ -44,25 +48,36 @@ func TestResolveCredentialHelperPreservesSymlinkName(t *testing.T) {
 }
 
 func TestResolveCredentialHelperRejectsRelativePath(t *testing.T) {
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
 	checkout := t.TempDir()
-	if err := os.WriteFile(filepath.Join(checkout, "gh"), []byte("#!/bin/sh\nexit 99\n"), 0700); err != nil {
+	name := "gh"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	if err := os.WriteFile(filepath.Join(checkout, name), []byte("#!/bin/sh\nexit 99\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	relative, err := filepath.Rel(cwd, checkout)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", relative)
-	if got := resolveCredentialHelperGH(); got != "/bin/false" {
+	t.Chdir(checkout)
+	t.Setenv("PATH", ".")
+	if got := resolveCredentialHelperGH(); got != "" {
 		t.Fatalf("relative credential helper was selected: %q", got)
 	}
 }
 
+func TestCleanGitEnvironmentStripsCaseVariantOverrides(t *testing.T) {
+	t.Setenv("git_config_global", "/hostile/config")
+	t.Setenv("gIt_askpass", "/hostile/askpass")
+	t.Setenv("Path", "/hostile/path")
+	for _, entry := range cleanGitEnvironment() {
+		if strings.Contains(entry, "/hostile/") {
+			t.Fatalf("untrusted case-variant environment survived: %q", entry)
+		}
+	}
+}
+
 func TestGitCredentialHelperIgnoresCheckoutRelativePath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell launchers and colon-separated PATH fixture are unavailable on native Windows")
+	}
 	realGit, err := exec.LookPath("git")
 	if err != nil {
 		t.Fatal("git is unavailable")
@@ -150,7 +165,7 @@ func TestRepositoryAndRefValidation(t *testing.T) {
 			t.Errorf("validateBranch(%q) should fail", branch)
 		}
 	}
-	if _, err := cloneFromURL(context.Background(), t.TempDir(), "file://"+filepath.Join(t.TempDir(), "missing.git"), "bad..branch", true); err == nil || !strings.Contains(err.Error(), "invalid branch") {
+	if _, err := cloneFromURL(context.Background(), t.TempDir(), filepath.Join(t.TempDir(), "missing.git"), "bad..branch", true); err == nil || !strings.Contains(err.Error(), "invalid branch") {
 		t.Fatalf("cloneFromURL invalid default branch error = %v", err)
 	}
 }
@@ -267,7 +282,7 @@ func TestCheckoutPullRequestRejectsOversizedHeadMetadata(t *testing.T) {
 	head := fixture.git(fixture.source, "rev-parse", "HEAD")
 	blob := fixture.git(fixture.source, "rev-parse", "HEAD:new.dat")
 	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/pull/7/head")
-	checkout := fixture.keepCheckout(cloneFromURL(context.Background(), t.TempDir(), "file://"+fixture.remote, "main", true))
+	checkout := fixture.keepCheckout(cloneFromURL(context.Background(), t.TempDir(), fixture.remote, "main", true))
 	if err := checkout.checkoutPullRequest(context.Background(), 7, "main", head); !errors.Is(err, ErrCheckoutTooLarge) {
 		t.Fatalf("oversized PR error = %v, want checkout limit", err)
 	}
@@ -295,9 +310,7 @@ func TestCloneFailureRemovesOwnedDirectoryAndPreservesCause(t *testing.T) {
 func TestNewBranchPreservesOmittedGitlinkAndSymlink(t *testing.T) {
 	fixture := newFixture(t)
 	fixture.git(fixture.source, "update-index", "--add", "--cacheinfo", "160000,"+fixture.base+",sub")
-	if err := os.Symlink("README.md", filepath.Join(fixture.source, "omitted-link")); err != nil {
-		t.Fatal(err)
-	}
+	symlinkOrSkip(t, "README.md", filepath.Join(fixture.source, "omitted-link"))
 	fixture.git(fixture.source, "add", "omitted-link")
 	fixture.git(fixture.source, "commit", "-m", "add gitlink and symlink")
 	linkBlob := fixture.git(fixture.source, "rev-parse", "HEAD:omitted-link")
@@ -595,6 +608,16 @@ func writeFile(t *testing.T, path, content string) {
 	}
 }
 
+func symlinkOrSkip(t *testing.T, target, link string) {
+	t.Helper()
+	if err := os.Symlink(target, link); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("Windows symlink fixture is unavailable: %v", err)
+		}
+		t.Fatal(err)
+	}
+}
+
 func writeSparse(t *testing.T, path string, size int64) {
 	t.Helper()
 	if err := os.WriteFile(path, nil, 0600); err != nil {
@@ -609,8 +632,8 @@ func writeSparse(t *testing.T, path string, size int64) {
 var shellQuote = aicli.ShellQuote
 
 func TestCheckoutCloseRetainsPathForRetry(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("requires ordinary directory permission enforcement")
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("requires effective POSIX directory permissions and a non-root user")
 	}
 	root := t.TempDir()
 	name := filepath.Join(root, "checkout")

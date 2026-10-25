@@ -12,11 +12,7 @@ import (
 const modelCatalogue = `{"type":"control_response","response":{"subtype":"success","request_id":"minion-initialize","response":{"models":[{"value":"unresolved"},{"value":"default","resolvedModel":"claude-pinned","supportedEffortLevels":["low","high"]},{"value":"quick","resolvedModel":"claude-small","supportedEffortLevels":["low","high"]}]}}}`
 
 func TestValidate(t *testing.T) {
-	fakeExecutable(t, "bwrap", "exit 99\n")
-	fakeExecutable(t, "socat", "exit 99\n")
-	binary := fakeExecutable(t, "claude", `if [ "$1" = '--version' ]; then
-  printf '%s\n' '2.1.302 (Claude Code)'
-elif [ "$3" = 'auth' ]; then
+	binary := fakeExecutable(t, "claude", `if [ "$3" = 'auth' ]; then
   printf '%s\n' '{"loggedIn":true}'
 else
   printf '%s\n' "$@" > "$0.args"
@@ -41,7 +37,7 @@ fi
 				t.Fatal(err)
 			}
 			cfg, err := Validate(context.Background(), config.ClaudeConfig{Model: tc.model, Effort: tc.effort})
-			if args := readFile(t, binary+".args"); !strings.Contains(args, "--no-session-persistence\n") || !strings.Contains(args, "--input-format\nstream-json\n") {
+			if args := readFile(t, binary+".args"); !strings.Contains(args, "--no-session-persistence\n") || !strings.Contains(args, "--input-format\nstream-json\n") || !strings.Contains(args, "--json-schema\n{\"type\":\"object\"}\n") {
 				t.Fatalf("model discovery retained a session or lost initialization framing: %q", args)
 			}
 			if tc.fails {
@@ -58,11 +54,7 @@ fi
 }
 
 func TestValidateRequiresInitialization(t *testing.T) {
-	fakeExecutable(t, "bwrap", "exit 99\n")
-	fakeExecutable(t, "socat", "exit 99\n")
-	fakeExecutable(t, "claude", `if [ "$1" = '--version' ]; then
-  printf '%s\n' '2.1.302 (Claude Code)'
-elif [ "$3" = 'auth' ]; then
+	fakeExecutable(t, "claude", `if [ "$3" = 'auth' ]; then
   printf '%s\n' '{"loggedIn":true}'
 else
   exit 1
@@ -70,28 +62,6 @@ fi
 `)
 	if _, err := Validate(context.Background(), config.ClaudeConfig{}); err == nil || !strings.Contains(err.Error(), "model discovery") {
 		t.Fatalf("Validate = %v", err)
-	}
-}
-
-func TestSupportedVersion(t *testing.T) {
-	for _, tc := range []struct {
-		version string
-		want    bool
-	}{
-		{"2.1.302 (Claude Code)", true},
-		{"2.1.303", true},
-		{"3.0.0", true},
-		{"2.1.301", false},
-		{"2.1.295", false},
-		{"2.0.999", false},
-		{"", false},
-		{"3.x.y", false},
-		{"3.0", false},
-		{"2.-1.295", false},
-	} {
-		if got := supportedVersion(tc.version); got != tc.want {
-			t.Errorf("supportedVersion(%q) = %v, want %v", tc.version, got, tc.want)
-		}
 	}
 }
 

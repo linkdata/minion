@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -151,7 +152,11 @@ func TestRunnerReturnsFileChangesAndPartialUsage(t *testing.T) {
 		return aicli.Result{Answer: "Changed two files", UsageComplete: true}, nil
 	}
 	result, err := runner.Run(context.Background(), job)
-	want := []workspace.Change{{Path: "binary", Mode: workspace.Executable, Data: []byte{0, 1, 2}}, {Path: "source.txt", Delete: true}}
+	mode := workspace.Executable
+	if runtime.GOOS == "windows" {
+		mode = workspace.Regular
+	}
+	want := []workspace.Change{{Path: "binary", Mode: mode, Data: []byte{0, 1, 2}}, {Path: "source.txt", Delete: true}}
 	if err != nil || !reflect.DeepEqual(result.Changes, want) {
 		t.Fatalf("changes = %+v, %v", result.Changes, err)
 	}
@@ -212,6 +217,10 @@ func TestRunnerUsesLocalHistoryWhenComparisonDiffIsIncomplete(t *testing.T) {
 
 func TestRunnerKeepsCriticReadOnlyAndPrivateReasoning(t *testing.T) {
 	forbidNetworkGit(t)
+	gitCommand := "git"
+	if runtime.GOOS == "windows" {
+		gitCommand = "git.exe"
+	}
 	job := testJob(command.Fix)
 	job.Source.Files = append(job.Source.Files, workspace.File{Path: "deleted.txt", Mode: workspace.Regular, Data: []byte("original deleted file")})
 	attachRepository(t, &job)
@@ -246,8 +255,8 @@ func TestRunnerKeepsCriticReadOnlyAndPrivateReasoning(t *testing.T) {
 		}
 		assertModelRepository(t, request.dir, job.Source.Head)
 		for _, want := range []string{
-			"Use git status and git diff against HEAD to compare the current source against the original input baseline, including added and deleted files, binary content, and executable modes.",
-			"For fix actions, compare current source with the original input at Git HEAD using git status and git diff, including additions, deletions, binary content and executable modes.",
+			fmt.Sprintf("Use %s status and %s diff against HEAD to compare the current source against the original input baseline, including added and deleted files, binary content, and executable modes.", gitCommand, gitCommand),
+			fmt.Sprintf("For fix actions, compare current source with the original input at Git HEAD using %s status and %s diff, including additions, deletions, binary content and executable modes.", gitCommand, gitCommand),
 		} {
 			if !strings.Contains(request.prompt, want) {
 				t.Fatalf("critic lacks local baseline instruction %q", want)
@@ -296,9 +305,7 @@ func TestRunnerCanonicalizesTrustedWorkRoot(t *testing.T) {
 	if err := os.Mkdir(actual, 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(actual, link); err != nil {
-		t.Fatal(err)
-	}
+	symlinkOrSkip(t, actual, link)
 	actual, err := filepath.EvalSymlinks(actual)
 	if err != nil {
 		t.Fatal(err)
@@ -317,6 +324,8 @@ func TestRunnerCanonicalizesTrustedWorkRoot(t *testing.T) {
 func TestPortableAuditMetadataUsesSourceIdentity(t *testing.T) {
 	job := testJob(command.SecurityAudit)
 	root := t.TempDir()
+	skill := filepath.Join(t.TempDir(), "installed", "security-audit", "SKILL.md")
+	companion := filepath.Join(filepath.Dir(skill), "WEB-PROTOCOL-AND-AUTH.md")
 	for _, name := range auditArtifacts {
 		data := []byte("content")
 		switch name {
@@ -327,7 +336,7 @@ func TestPortableAuditMetadataUsesSourceIdentity(t *testing.T) {
 		}
 		if name == "run-metadata.json" {
 			owners := strings.TrimSuffix(auditTestOwners, "}") + `,"/worker/local/extra-owner":"/worker/local/child"}`
-			data = []byte(fmt.Sprintf(`{"run_id":"test-run","repo":"owner/repo","target":"/worker/local/source","source_ref":%q,"profile":"standard","scope_paths":["."],"budget":null,"selected_companion_files":["/installed/security-audit/WEB-PROTOCOL-AND-AUTH.md"],"prior_run_paths":[],"shared_file_owners":%s,"execution_policy":"sandboxed-source-and-local-only","run_status":"complete","skill_source":"worker-claim","output_dir":"/worker/local/reports","extra":{"run_dir":"/worker/local/runtime"}}`, job.Source.Head, owners))
+			data = []byte(fmt.Sprintf(`{"run_id":"test-run","repo":"owner/repo","target":"/worker/local/source","source_ref":%q,"profile":"standard","scope_paths":["."],"budget":null,"selected_companion_files":[%q],"prior_run_paths":[],"shared_file_owners":%s,"execution_policy":"sandboxed-source-and-local-only","run_status":"complete","skill_source":"worker-claim","output_dir":"/worker/local/reports","extra":{"run_dir":"/worker/local/runtime"}}`, job.Source.Head, companion, owners))
 			if _, err := validateAuditMetadata(data, job.Identity.Repository, "/worker/local/source", job.Source.Head); err != nil {
 				t.Fatalf("invalid raw metadata control: %v", err)
 			}
@@ -341,7 +350,7 @@ func TestPortableAuditMetadataUsesSourceIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	raw := slices.Clone(files)
-	files, err = normalizeAuditArtifacts(files, job, "/installed/security-audit/SKILL.md")
+	files, err = normalizeAuditArtifacts(files, job, skill)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -355,15 +364,13 @@ func TestPortableAuditMetadataUsesSourceIdentity(t *testing.T) {
 		if file.Path == "run-metadata.json" && (strings.Contains(string(file.Data), "/worker/") || !strings.Contains(string(file.Data), sourceIdentity(job))) {
 			t.Fatalf("metadata is not portable: %s", file.Data)
 		}
-		if file.Path == "run-metadata.json" && (strings.Contains(string(file.Data), "/installed/") || !strings.Contains(string(file.Data), "WEB-PROTOCOL-AND-AUTH.md")) {
-			t.Fatalf("companion path is not portable: %s", file.Data)
-		}
 		if file.Path == "run-metadata.json" {
 			var metadata struct {
-				RunID  string            `json:"run_id"`
-				Owners map[string]string `json:"shared_file_owners"`
+				RunID                  string            `json:"run_id"`
+				Owners                 map[string]string `json:"shared_file_owners"`
+				SelectedCompanionFiles []string          `json:"selected_companion_files"`
 			}
-			if err := json.Unmarshal(file.Data, &metadata); err != nil || metadata.RunID != "test-run" || len(metadata.Owners) != len(auditArtifacts) || strings.Contains(string(file.Data), `"skill_source"`) || strings.Contains(string(file.Data), `"output_dir"`) || strings.Contains(string(file.Data), `"extra"`) || !strings.Contains(string(raw[i].Data), `"output_dir"`) {
+			if err := json.Unmarshal(file.Data, &metadata); err != nil || metadata.RunID != "test-run" || len(metadata.Owners) != len(auditArtifacts) || !slices.Equal(metadata.SelectedCompanionFiles, []string{"WEB-PROTOCOL-AND-AUTH.md"}) || strings.Contains(string(file.Data), `"skill_source"`) || strings.Contains(string(file.Data), `"output_dir"`) || strings.Contains(string(file.Data), `"extra"`) || !strings.Contains(string(raw[i].Data), `"output_dir"`) {
 				t.Fatalf("metadata projection changed supported evidence or retained extensions: %+v, %v", metadata, err)
 			}
 		}
@@ -452,6 +459,9 @@ func TestRunnerRejectsGitMetadataMutation(t *testing.T) {
 		role := test.role
 		for _, mutation := range test.mutations {
 			t.Run(string(test.action)+"/"+role+"/"+mutation, func(t *testing.T) {
+				if mutation == "permissions" && runtime.GOOS == "windows" {
+					t.Skip("os.Chmod cannot change Git metadata ACLs on native Windows")
+				}
 				job := withClaudeCritic(testJob(test.action))
 				calls := 0
 				var mainDir string
@@ -487,8 +497,8 @@ func TestRunnerRejectsGitMetadataMutation(t *testing.T) {
 								if err := os.WriteFile(dir, []byte("replaced metadata"), 0600); err != nil {
 									t.Fatal(err)
 								}
-							} else if err := os.Symlink(moved, dir); err != nil {
-								t.Fatal(err)
+							} else {
+								symlinkOrSkip(t, moved, dir)
 							}
 						case "hard link":
 							if err := os.Link(filepath.Join(dir, "HEAD"), filepath.Join(t.TempDir(), "linked-head")); err != nil {

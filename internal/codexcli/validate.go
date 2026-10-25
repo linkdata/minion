@@ -8,15 +8,18 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/config"
-	"github.com/linkdata/minion/internal/processgroup"
+	"github.com/linkdata/minion/internal/executil"
 )
 
 type modelInfo struct {
@@ -36,6 +39,13 @@ type modelInfo struct {
 // changing the stored CLI login.
 func Validate(ctx context.Context, settings config.CodexConfig) (resolved config.CodexConfig, resultErr error) {
 	defer func() { resultErr = aicli.RedactError(resultErr, settings.APIKey) }()
+	home, err := HomePath()
+	if err != nil {
+		return settings, err
+	}
+	if err := rejectGlobalInstructions(home); err != nil {
+		return settings, err
+	}
 	models, err := listModels(ctx, settings)
 	if err != nil {
 		return settings, fmt.Errorf("cannot validate Codex settings: %w", err)
@@ -68,10 +78,74 @@ func Validate(ctx context.Context, settings config.CodexConfig) (resolved config
 		if effort != "" && supported.ReasoningEffort == effort {
 			settings.Model = selected.Model
 			settings.ReasoningEffort = effort
+			if err := validateExecCapabilities(ctx, settings); err != nil {
+				return settings, fmt.Errorf("cannot validate Codex settings: %w", err)
+			}
 			return settings, nil
 		}
 	}
 	return settings, fmt.Errorf("codex.reasoning_effort %q is not supported for model %q; supported efforts: %s", effort, selected.Model, strings.Join(efforts, ", "))
+}
+
+// Check both exec parsers without supplying a prompt or starting an inference turn.
+func validateExecCapabilities(ctx context.Context, settings config.CodexConfig) (err error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	binary, err := aicli.ExecutablePath("codex")
+	if err != nil {
+		return err
+	}
+	home, err := HomePath()
+	if err != nil {
+		return err
+	}
+	dir, err := os.MkdirTemp("", "minion-codex-exec-check-")
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, os.RemoveAll(dir)) }()
+	schema := filepath.Join(dir, "output-schema.json")
+	env := childEnvironment(os.Environ(), dir, dir, home, true)
+	for _, command := range []struct {
+		name string
+		args []string
+	}{
+		{name: "exec", args: []string{"exec"}},
+		{name: "exec resume", args: []string{"exec", "resume"}},
+	} {
+		args := append(command.args,
+			"--json", "--ignore-user-config", "--ignore-rules", "--strict-config", "--skip-git-repo-check",
+		)
+		args = append(args, sandboxArgs(dir, "", false)...)
+		args = append(args, disabledFeatureArgs()...)
+		args = append(args,
+			"-c", "skills.include_instructions=false", "-c", "approval_policy=never", "--model", settings.Model,
+			"--output-schema", schema, "--help",
+		)
+		_, probeErr := aicli.Probe(ctx, binary, "codex", args, dir, env, "", settings.APIKey)
+		if probeErr != nil {
+			return fmt.Errorf("Codex %s capability check: %w", command.name, probeErr) //nolint:staticcheck // -- Codex is a proper noun.
+		}
+		invalid := append(command.args, "--minion-unsupported-capability-probe", "--help")
+		_, probeErr = aicli.Probe(ctx, binary, "codex", invalid, dir, env, "", settings.APIKey)
+		var exitErr *exec.ExitError
+		if probeErr == nil || ctx.Err() != nil || errors.Is(probeErr, aicli.ErrOutputLimit) || !errors.As(probeErr, &exitErr) || exitErr.ExitCode() <= 0 {
+			return fmt.Errorf("Codex %s capability check did not reject an unknown option: %v", command.name, probeErr) //nolint:staticcheck // -- Codex is a proper noun.
+		}
+	}
+	return nil
+}
+
+func disabledFeatureArgs() []string {
+	var args []string
+	for _, feature := range []string{
+		"apps", "browser_use", "browser_use_external", "browser_use_full_cdp_access",
+		"computer_use", "image_generation", "plugins", "remote_plugin",
+		"shell_snapshot", "skill_mcp_dependency_install", "memories", "hooks", "skill_search",
+	} {
+		args = append(args, "--disable", feature)
+	}
+	return args
 }
 
 func listModels(ctx context.Context, settings config.CodexConfig) (models []modelInfo, err error) {
@@ -90,13 +164,14 @@ func listModels(ctx context.Context, settings config.CodexConfig) (models []mode
 		return nil, err
 	}
 	defer func() {
-		if !errors.Is(err, processgroup.ErrScopeUnconfirmed) {
-			err = errors.Join(err, os.RemoveAll(dir))
-		}
+		err = errors.Join(err, os.RemoveAll(dir))
 	}()
 	// app-server has no --ignore-user-config flag. Select exec's built-in
 	// provider explicitly and avoid repository config by using a temporary cwd.
-	args := []string{"app-server", "--strict-config", "--listen", "stdio://", "-c", `model_provider="openai"`}
+	// Startup validates writable sandbox config without starting an inference turn.
+	args := append([]string{"app-server", "--strict-config", "--listen", "stdio://", "-c", `model_provider="openai"`}, disabledFeatureArgs()...)
+	args = append(args, execConfigArgs()...)
+	args = append(args, sandboxArgs(dir, "", true)...)
 	if settings.APIKey != "" {
 		args = append(args, "-c", `cli_auth_credentials_store="ephemeral"`, "-c", `forced_login_method="api"`)
 	}
@@ -127,14 +202,25 @@ func listModels(ctx context.Context, settings config.CodexConfig) (models []mode
 	if err != nil {
 		return nil, err
 	}
-	handle, err := processgroup.Start(cmd)
-	if handle == nil {
+	executil.Prepare(cmd)
+	var directStopSent atomic.Bool
+	cancelCommand := cmd.Cancel
+	cmd.Cancel = func() error {
+		err := cancelCommand()
+		if err == nil {
+			directStopSent.Store(true)
+		}
+		return err
+	}
+	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
+	stopReader := context.AfterFunc(ctx, func() { _ = stdout.Close() })
 	defer func() {
+		stopReader()
 		contextErr := ctx.Err()
 		cancel()
-		if waitErr := handle.Wait(); !expectedDiscoveryStop(waitErr) {
+		if waitErr := cmd.Wait(); !expectedDiscoveryStop(waitErr, directStopSent.Load()) {
 			err = errors.Join(err, waitErr)
 		}
 		if contextErr != nil && !errors.Is(err, contextErr) {
@@ -148,9 +234,6 @@ func listModels(ctx context.Context, settings config.CodexConfig) (models []mode
 			}
 		}
 	}()
-	if err != nil {
-		return nil, err
-	}
 	encoder := json.NewEncoder(stdin)
 	// Catalogue limits count the logical line after ScanLines removes CR/LF.
 	scanner := bufio.NewScanner(stdout)
@@ -244,17 +327,14 @@ func listModels(ctx context.Context, settings config.CodexConfig) (models []mode
 }
 
 // The app-server is deliberately canceled after its last catalogue response.
-// Keep ownership failures and unexpected exits even when cancellation is expected.
-func expectedDiscoveryStop(err error) bool {
+// Keep unexpected exits and pipe-drain failures reported by Cmd.Wait even when cancellation is expected.
+func expectedDiscoveryStop(err error, directStopSent bool) bool {
 	if err == nil {
 		return true
 	}
-	if errors.Is(err, processgroup.ErrDescendants) || errors.Is(err, processgroup.ErrUnconfirmed) || errors.Is(err, processgroup.ErrExhausted) {
-		return false
-	}
 	if joined, ok := err.(interface{ Unwrap() []error }); ok {
 		for _, cause := range joined.Unwrap() {
-			if !expectedDiscoveryStop(cause) {
+			if !expectedDiscoveryStop(cause, directStopSent) {
 				return false
 			}
 		}
@@ -267,6 +347,12 @@ func expectedDiscoveryStop(err error) bool {
 	if !errors.As(err, &exit) {
 		return false
 	}
+	if !directStopSent {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		return exit.ExitCode() == 1 // os.Process.Kill uses TerminateProcess with exit code 1.
+	}
 	status, ok := exit.Sys().(syscall.WaitStatus)
-	return ok && status.Signaled() && (status.Signal() == syscall.SIGTERM || status.Signal() == syscall.SIGKILL)
+	return ok && status.Signaled() && (status.Signal() == syscall.SIGINT || status.Signal() == syscall.SIGTERM || status.Signal() == syscall.SIGKILL)
 }

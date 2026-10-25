@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -18,6 +19,9 @@ func TestHomePathUsesNativeVariableAndDefault(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("HOME", root)
+	if runtime.GOOS == "windows" {
+		t.Setenv("USERPROFILE", root)
+	}
 	for _, override := range []string{"", filepath.Join(root, "explicit")} {
 		t.Setenv("CLAUDE_CONFIG_DIR", override)
 		want := filepath.Join(realRoot, "explicit")
@@ -77,12 +81,8 @@ func TestRunAndValidatePreserveNativeHomeSelection(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			for _, validate := range []bool{false, true} {
 				t.Run(map[bool]string{false: "run", true: "validate"}[validate], func(t *testing.T) {
-					fakeExecutable(t, "bwrap", "exit 99\n")
-					fakeExecutable(t, "socat", "exit 99\n")
 					binary := fakeExecutable(t, "claude", `printf '%s,%s\n' "${CLAUDE_CONFIG_DIR+x}" "${CLAUDE_CONFIG_DIR-}" >> "$0.homes"
-if [ "$1" = '--version' ]; then
-  printf '%s\n' '2.1.302 (Claude Code)'
-elif [ "$3" = 'auth' ]; then
+if [ "$3" = 'auth' ]; then
   printf '%s\n' '{"loggedIn":true}'
 else
   input=$(cat)

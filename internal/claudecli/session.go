@@ -94,10 +94,6 @@ func (s *Session) prepare(workspace, binary string, writable bool, outputDir str
 	} else {
 		s.workspace, s.binary, s.outputDir, s.writable, s.settings = workspace, binary, outputDir, writable, bound
 		s.settings.Skills = slices.Clone(bound.Skills)
-		if settings.AllowAllUnixSockets != nil {
-			allow := *settings.AllowAllUnixSockets
-			s.settings.AllowAllUnixSockets = &allow
-		}
 		s.initErr = s.initialize()
 		if s.initErr != nil {
 			return s.initErr

@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestMaterializeReadChangesAndApply(t *testing.T) {
@@ -78,7 +80,7 @@ func TestMaterializeReadChangesAndApply(t *testing.T) {
 		t.Fatalf("binary=%v,%v", data, err)
 	}
 	info, err := os.Stat(filepath.Join(copyRoot, "binary"))
-	if err != nil || info.Mode().Perm() != 0755 {
+	if err != nil || !sourceModeMatches(info, Executable) {
 		t.Fatalf("executable mode=%v,%v", info, err)
 	}
 }
@@ -179,6 +181,9 @@ func TestSnapshotHeadOmittedRequiresCurrentOmission(t *testing.T) {
 }
 
 func TestSourcePreservesGitLegalCaseAndBackslashPaths(t *testing.T) {
+	if runtime.GOOS == "windows" || !caseSensitiveTempDir(t) {
+		t.Skip("case-distinct and backslash path fixture requires a case-sensitive Unix filesystem")
+	}
 	files := []File{
 		{Path: "include/xt_connmark.h", Mode: Regular, Data: []byte("lowercase")},
 		{Path: "include/xt_CONNMARK.h", Mode: Regular, Data: []byte("uppercase")},
@@ -207,6 +212,19 @@ func TestSourcePreservesGitLegalCaseAndBackslashPaths(t *testing.T) {
 	if err := CheckUnchanged(context.Background(), root, files); err != nil {
 		t.Fatalf("unchanged Git-legal source=%v", err)
 	}
+}
+
+func caseSensitiveTempDir(t *testing.T) bool {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "case-probe"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := os.Stat(filepath.Join(root, "CASE-PROBE"))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	return errors.Is(err, os.ErrNotExist)
 }
 
 func TestCaseOnlyRenameAppliesDeletionBeforeCreation(t *testing.T) {
@@ -253,7 +271,17 @@ func TestCaseOnlyRenameAppliesDeletionBeforeCreation(t *testing.T) {
 	}
 }
 
-func TestWorkspaceRefusesLinksAndNonemptyMaterialization(t *testing.T) {
+func TestMaterializeRefusesNonemptyRoot(t *testing.T) {
+	root := privateRoot(t)
+	if err := os.WriteFile(filepath.Join(root, "source"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Materialize(root, nil); err == nil || !strings.Contains(err.Error(), "not empty") {
+		t.Fatalf("nonempty root validation=%v", err)
+	}
+}
+
+func TestWorkspaceRefusesLinks(t *testing.T) {
 	root, outside := privateRoot(t), t.TempDir()
 	sentinel := filepath.Join(outside, "file")
 	if err := os.WriteFile(sentinel, []byte("outside"), 0600); err != nil {
@@ -261,14 +289,14 @@ func TestWorkspaceRefusesLinksAndNonemptyMaterialization(t *testing.T) {
 	}
 	for name, target := range map[string]string{"parent": outside, "target": sentinel} {
 		if err := os.Symlink(target, filepath.Join(root, name)); err != nil {
+			if runtime.GOOS == "windows" {
+				t.Skipf("Windows symlink fixture is unavailable: %v", err)
+			}
 			t.Fatal(err)
 		}
 	}
-	if err := CheckUnchanged(context.Background(), root, nil); err == nil || !strings.Contains(err.Error(), "workspace changed") {
+	if err := CheckUnchanged(t.Context(), root, nil); err == nil || !strings.Contains(err.Error(), "workspace changed") {
 		t.Fatalf("generated symlink validation=%v", err)
-	}
-	if err := Materialize(root, nil); err == nil || !strings.Contains(err.Error(), "not empty") {
-		t.Fatalf("nonempty root validation=%v", err)
 	}
 	for _, tc := range []struct {
 		name, path, want string
@@ -407,26 +435,20 @@ func TestApplyCleansRootAndKeepsRootDirectory(t *testing.T) {
 	}
 }
 
-func TestMaterializeRefusesNonprivateRoot(t *testing.T) {
-	for _, kind := range []string{"public mode", "symlink"} {
-		t.Run(kind, func(t *testing.T) {
-			target := privateRoot(t)
-			root := target
-			if kind == "symlink" {
-				root = filepath.Join(t.TempDir(), "link")
-				if err := os.Symlink(target, root); err != nil {
-					t.Fatal(err)
-				}
-			} else if err := os.Chmod(root, 0755); err != nil {
-				t.Fatal(err)
-			}
-			if err := Materialize(root, []File{{Path: "source", Mode: Regular}}); err == nil || !strings.Contains(err.Error(), "private directory") {
-				t.Fatalf("root validation=%v", err)
-			}
-			if _, err := os.Stat(filepath.Join(target, "source")); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("refused materialization wrote source: %v", err)
-			}
-		})
+func TestMaterializeRefusesSymlinkRoot(t *testing.T) {
+	target := privateRoot(t)
+	root := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(target, root); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("Windows symlink privilege unavailable: %v", err)
+		}
+		t.Fatal(err)
+	}
+	if err := Materialize(root, []File{{Path: "source", Mode: Regular}}); err == nil {
+		t.Fatal("materialized through symlink root")
+	}
+	if _, err := os.Stat(filepath.Join(target, "source")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("refused materialization wrote source: %v", err)
 	}
 }
 
@@ -437,7 +459,7 @@ func TestApplyRootErrorDoesNotRequirePrivacy(t *testing.T) {
 		t.Fatal(err)
 	}
 	changes := []Change{{Path: "new", Mode: Regular, Data: []byte("imported")}}
-	if err := Apply(name, changes); !errors.Is(err, syscall.ENOTDIR) || strings.Contains(err.Error(), "private") {
+	if err := Apply(name, changes); err == nil || runtime.GOOS == "windows" && !strings.Contains(err.Error(), "not a plain directory") || runtime.GOOS != "windows" && !errors.Is(err, syscall.ENOTDIR) {
 		t.Fatalf("incorrect root requirement: %v", err)
 	}
 	if data, err := os.ReadFile(name); err != nil || string(data) != "unchanged" {
@@ -455,7 +477,7 @@ func TestApplyRootErrorDoesNotRequirePrivacy(t *testing.T) {
 	if data, err := os.ReadFile(filepath.Join(root, "new")); err != nil || string(data) != "imported" {
 		t.Fatalf("public directory import failed: %q, %v", data, err)
 	}
-	if info, err := os.Stat(root); err != nil || info.Mode().Perm() != 0755 {
+	if info, err := os.Stat(root); err != nil || runtime.GOOS != "windows" && info.Mode().Perm() != 0755 {
 		t.Fatalf("Apply changed root privacy: %v, %v", info, err)
 	}
 }
@@ -622,6 +644,9 @@ func TestRelativePathByteLimit(t *testing.T) {
 }
 
 func TestCollectionUsesOwnerExecuteBitForGitMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows uses the private Git index for executable mode")
+	}
 	for _, mode := range []os.FileMode{0644, 0645, 0755} {
 		t.Run(fmt.Sprintf("%o", mode), func(t *testing.T) {
 			root := privateRoot(t)
@@ -675,6 +700,10 @@ func TestCheckUnchangedRefusesUnsafeWorkerNames(t *testing.T) {
 			label += "-directory"
 		}
 		t.Run(label, func(t *testing.T) {
+			if (runtime.GOOS == "windows" && strings.Contains(test.name, "\\")) ||
+				((runtime.GOOS == "windows" || runtime.GOOS == "darwin") && !utf8.ValidString(test.name)) {
+				t.Skip("host cannot create this literal filename")
+			}
 			root := t.TempDir()
 			name := filepath.Join(root, test.name)
 			if test.directory {
@@ -688,7 +717,7 @@ func TestCheckUnchangedRefusesUnsafeWorkerNames(t *testing.T) {
 			if test.name == "new\\output" {
 				want = "workspace changed"
 			}
-			if err := CheckUnchanged(context.Background(), root, nil); err == nil || !strings.Contains(err.Error(), want) {
+			if err := CheckUnchanged(t.Context(), root, nil); err == nil || !strings.Contains(err.Error(), want) {
 				t.Fatalf("unsafe worker name %q validation=%v", test.name, err)
 			}
 		})

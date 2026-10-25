@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -21,7 +22,7 @@ import (
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/bounded"
-	"github.com/linkdata/minion/internal/processgroup"
+	"github.com/linkdata/minion/internal/executil"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -36,6 +37,7 @@ const (
 type OfflineIndex struct {
 	dir, source, binary, baseline string
 	tracked                       map[string]int64
+	executable                    map[string]bool
 	controls                      map[string][sha256.Size]byte
 }
 
@@ -49,9 +51,12 @@ func NewOfflineIndex(ctx context.Context, dir, source string, files []workspace.
 	if err != nil {
 		return nil, fmt.Errorf("offline fix index requires git: %w", err)
 	}
-	index := &OfflineIndex{dir: dir, source: source, binary: binary, tracked: make(map[string]int64, len(files)), controls: make(map[string][sha256.Size]byte)}
+	index := &OfflineIndex{dir: dir, source: source, binary: binary, tracked: make(map[string]int64, len(files)), executable: make(map[string]bool), controls: make(map[string][sha256.Size]byte)}
 	for _, file := range files {
 		index.tracked[file.Path] = int64(len(file.Data))
+		if file.Mode == workspace.Executable {
+			index.executable[file.Path] = true
+		}
 		switch path.Base(file.Path) {
 		case ".gitignore", ".gitattributes":
 			index.controls[file.Path] = sha256.Sum256(file.Data)
@@ -66,6 +71,20 @@ func NewOfflineIndex(ctx context.Context, dir, source string, files []workspace.
 	}
 	if _, err := index.run(ctx, 1024, nil, "add", "--all", "--force", "--", "."); err != nil {
 		return nil, err
+	}
+	if runtime.GOOS == "windows" {
+		var executablePaths strings.Builder
+		for _, file := range files {
+			if file.Mode == workspace.Executable {
+				executablePaths.WriteString(file.Path)
+				executablePaths.WriteByte(0)
+			}
+		}
+		if executablePaths.Len() != 0 {
+			if _, err := index.run(ctx, 1024, []byte(executablePaths.String()), "update-index", "--chmod=+x", "-z", "--stdin"); err != nil {
+				return nil, fmt.Errorf("restore executable source modes: %w", err)
+			}
+		}
 	}
 	tree, err := index.run(ctx, 128, nil, "write-tree")
 	if err != nil {
@@ -126,6 +145,35 @@ func (index *OfflineIndex) Changes(ctx context.Context) ([]workspace.Change, err
 	if _, err := index.run(ctx, 1024, nil, "read-tree", index.baseline); err != nil {
 		return nil, err
 	}
+	ignoreCase, err := index.run(ctx, 16, nil, "config", "--bool", "--default=false", "core.ignoreCase")
+	if err != nil {
+		return nil, err
+	}
+	var renamedExecutable map[string]bool
+	var stale []byte
+	scannedCasePaths := strings.TrimSpace(string(ignoreCase)) == "true" || runtime.GOOS == "windows"
+	if scannedCasePaths {
+		// Git keeps the old index spelling for case-only renames until it is removed.
+		// Windows also needs the old mode before Git stages a newly spelled file.
+		stale, err = index.caseRenamedPaths(ctx, workspace.MaxEntries)
+		if err != nil {
+			return nil, err
+		}
+		if len(stale) != 0 {
+			if _, err := index.run(ctx, 1024, stale, "update-index", "--force-remove", "-z", "--stdin"); err != nil {
+				return nil, err
+			}
+			if runtime.GOOS == "windows" {
+				// Git cannot infer the executable bit from a newly spelled Windows file.
+				renamedExecutable = make(map[string]bool)
+				for _, old := range bytes.Split(stale, []byte{0}) {
+					if index.executable[string(old)] {
+						renamedExecutable[workspace.FoldPath(string(old))] = true
+					}
+				}
+			}
+		}
+	}
 	// Bound new output before Git hashes it; ignored files and metadata remain excluded.
 	untracked, err := index.run(ctx, maxChangedPathListBytes, nil, "ls-files", "-z", "--others", "--exclude-standard", "--", ".", excludeGit, excludeGitContents)
 	if err != nil {
@@ -141,6 +189,7 @@ func (index *OfflineIndex) Changes(ctx context.Context) ([]workspace.Change, err
 	if len(paths) > workspace.MaxChanges {
 		return nil, fmt.Errorf("%w: fix result exceeds changed file limit", ErrTooManyFiles)
 	}
+	var executablePaths []byte
 	for _, record := range paths {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -157,10 +206,19 @@ func (index *OfflineIndex) Changes(ctx context.Context) ([]workspace.Change, err
 			return nil, fmt.Errorf("fix output %q is not regular or exceeds changed byte limit", name)
 		}
 		total += info.Size()
+		if renamedExecutable[workspace.FoldPath(name)] {
+			executablePaths = append(executablePaths, record...)
+			executablePaths = append(executablePaths, 0)
+		}
 	}
-	// shortcut: size prechecks can race and do not cap Git I/O; the dedicated work-root filesystem bounds storage.
+	// shortcut: size prechecks can race and do not cap Git I/O; use VM or container storage limits if hard bounds become required.
 	if _, err := index.run(ctx, 1024, nil, "add", "--all", "--", ".", excludeGit, excludeGitContents); err != nil {
 		return nil, err
+	}
+	if len(executablePaths) != 0 {
+		if _, err := index.run(ctx, 1024, executablePaths, "update-index", "--chmod=+x", "-z", "--stdin"); err != nil {
+			return nil, fmt.Errorf("restore renamed executable source modes: %w", err)
+		}
 	}
 	raw, err := index.run(ctx, maxChangedPathListBytes, nil, "diff", "--cached", "--raw", "-z", "--no-abbrev", "--no-renames", "--no-ext-diff", "--no-textconv", index.baseline, "--")
 	if err != nil {
@@ -172,6 +230,30 @@ func (index *OfflineIndex) Changes(ctx context.Context) ([]workspace.Change, err
 	selected, objects, err := parseIndexChanges(raw)
 	if err != nil {
 		return nil, err
+	}
+	if len(stale) == 0 && !scannedCasePaths {
+		for _, change := range selected {
+			if change.Delete {
+				stale, err = index.caseRenamedPaths(ctx, workspace.MaxEntries)
+				if err != nil {
+					return nil, err
+				}
+				break
+			}
+		}
+	}
+	if len(stale) != 0 {
+		staged := make(map[string]bool, len(selected))
+		for _, change := range selected {
+			if !change.Delete {
+				staged[workspace.FoldPath(change.Path)] = true
+			}
+		}
+		for _, old := range bytes.Split(stale[:len(stale)-1], []byte{0}) {
+			if !staged[workspace.FoldPath(string(old))] {
+				return nil, fmt.Errorf("case-renamed fix path %q is not staged under its new spelling (possibly ignored)", old)
+			}
+		}
 	}
 	changes, err := workspace.ReadChanges(ctx, index.source, selected)
 	if err != nil {
@@ -192,10 +274,122 @@ func (index *OfflineIndex) Changes(ctx context.Context) ([]workspace.Change, err
 	return changes, nil
 }
 
+// caseRenamedPaths finds tracked names whose on-disk spelling changed under Git's case folding.
+func (index *OfflineIndex) caseRenamedPaths(ctx context.Context, limit int) ([]byte, error) {
+	type wantedNames struct {
+		exact, folded map[string]bool
+	}
+	wanted := map[string]wantedNames{}
+	for name := range index.tracked {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		parent := "."
+		for _, part := range strings.Split(name, "/") {
+			key := workspace.FoldPath(parent)
+			names := wanted[key]
+			if names.exact == nil {
+				names = wantedNames{exact: map[string]bool{}, folded: map[string]bool{}}
+			}
+			names.exact[part] = true
+			names.folded[workspace.FoldPath(part)] = true
+			wanted[key] = names
+			parent = path.Join(parent, part)
+		}
+	}
+	directories := map[string]map[string][]string{}
+	scanned := 0
+	var stale []byte
+	for _, name := range slices.Sorted(maps.Keys(index.tracked)) {
+		actual := "."
+		found := true
+		for _, part := range strings.Split(name, "/") {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			names, cached := directories[actual]
+			if !cached {
+				filename := filepath.Join(index.source, filepath.FromSlash(actual))
+				f, err := workspace.OpenDirectory(filename)
+				if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
+					found = false
+					break
+				}
+				if err != nil {
+					return nil, fmt.Errorf("inspect fix directory %q: %w", actual, err)
+				}
+				names = map[string][]string{}
+				need := wanted[workspace.FoldPath(actual)]
+				remaining := len(need.exact)
+				for {
+					if err := ctx.Err(); err != nil {
+						_ = f.Close()
+						return nil, err
+					}
+					entries, readErr := f.ReadDir(128)
+					if len(entries) > limit-scanned {
+						_ = f.Close()
+						return nil, errors.New("fix case-spelling scan exceeds entry limit")
+					}
+					scanned += len(entries)
+					for _, entry := range entries {
+						key := workspace.FoldPath(entry.Name())
+						if need.folded[key] && (need.exact[entry.Name()] || len(names[key]) < 2) {
+							names[key] = append(names[key], entry.Name())
+						}
+						if need.exact[entry.Name()] {
+							remaining--
+						}
+					}
+					if readErr != nil && !errors.Is(readErr, io.EOF) {
+						_ = f.Close()
+						return nil, fmt.Errorf("inspect fix directory %q: %w", actual, readErr)
+					}
+					if remaining == 0 || errors.Is(readErr, io.EOF) {
+						break
+					}
+				}
+				if err := f.Close(); err != nil {
+					return nil, fmt.Errorf("inspect fix directory %q: %w", actual, err)
+				}
+				directories[actual] = names
+			}
+			matches := names[workspace.FoldPath(part)]
+			if len(matches) == 0 {
+				found = false
+				break
+			}
+			spelling := ""
+			for _, match := range matches {
+				if match == part {
+					spelling = part
+					break
+				}
+			}
+			if spelling == "" {
+				if len(matches) != 1 {
+					return nil, fmt.Errorf("ambiguous case-folded fix path %q", name)
+				}
+				spelling = matches[0]
+			}
+			actual = path.Join(actual, spelling)
+		}
+		if found && actual != name {
+			stale = append(stale, name...)
+			stale = append(stale, 0)
+		}
+	}
+	return stale, nil
+}
+
 // Check control-file shapes before Git can open FIFOs while discovering output.
 // Ignored directories are skipped unless they contain supplied tracked files.
 // shortcut: live writers can race these checks; isolate and quiesce executors in #96.
 func (index *OfflineIndex) checkControlFiles(ctx context.Context) error {
+	return index.checkControlFilesWithLimit(ctx, workspace.MaxEntries)
+}
+
+func (index *OfflineIndex) checkControlFilesWithLimit(ctx context.Context, limit int) error {
 	trackedDirs := map[string]bool{}
 	trackedChildren := map[string][]string{}
 	for name := range index.tracked {
@@ -333,7 +527,7 @@ func (index *OfflineIndex) checkControlFiles(ctx context.Context) error {
 					}
 					for _, entry := range batch {
 						entries++
-						if entries > workspace.MaxEntries {
+						if entries > limit {
 							return errors.New("fix directory scan exceeds entry limit")
 						}
 						if entry.Name() == ".git" && dir != "." && !trackedDirs[dir] {
@@ -421,12 +615,9 @@ func (index *OfflineIndex) run(ctx context.Context, limit int, input []byte, arg
 	cmd := gitCommand(runCtx, index.binary, dir, env, append(gitArgs, args...)...)
 	output, diagnostic := bounded.Buffer{Limit: limit, Cancel: cancel}, bounded.Buffer{Limit: bounded.DiagnosticBytes}
 	cmd.Stdout, cmd.Stderr, cmd.Stdin = &output, &diagnostic, bytes.NewReader(input)
-	err := processgroup.Run(cmd)
+	err := executil.Run(cmd)
 	contextErr := ctx.Err()
-	if errors.Is(err, processgroup.ErrDescendants) || errors.Is(err, processgroup.ErrUnconfirmed) || errors.Is(err, processgroup.ErrExhausted) {
-		return nil, gitFailure("offline git", args[0], diagnostic.String(), contextErr, err)
-	}
-	if output.Exceeded && contextErr == nil {
+	if output.Exceeded && contextErr == nil && !errors.Is(err, exec.ErrWaitDelay) {
 		return nil, fmt.Errorf("offline git %s output exceeds action limit: %w", args[0], ErrCheckoutTooLarge)
 	}
 	if err != nil || contextErr != nil {

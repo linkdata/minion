@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	"github.com/linkdata/minion/internal/bounded"
-	"github.com/linkdata/minion/internal/processgroup"
+	"github.com/linkdata/minion/internal/executil"
 )
 
 // Probe captures bounded output from an installed CLI without model inference.
@@ -26,7 +26,7 @@ func Probe(ctx context.Context, binary, argv0 string, args []string, dir string,
 	output := bounded.Buffer{Limit: MaxEventBytes, Cancel: cancel}
 	diagnostics := bounded.Tail{}
 	cmd.Stdout, cmd.Stderr = &output, &diagnostics
-	err := processgroup.Run(cmd)
+	err := executil.Run(cmd)
 	if contextErr := ctx.Err(); contextErr != nil && !errors.Is(err, contextErr) {
 		err = errors.Join(contextErr, err)
 	}

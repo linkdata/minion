@@ -24,7 +24,7 @@ func TestCloneRejectsOversizedLocalTree(t *testing.T) {
 	writeSparse(t, name, workspace.MaxBytes+1)
 	fixture.commit("refs/heads/main", "oversized local blob")
 	root := t.TempDir()
-	checkout, err := cloneFromURL(context.Background(), root, "file://"+fixture.remote, "main", true)
+	checkout, err := cloneFromURL(context.Background(), root, fixture.remote, "main", true)
 	if checkout != nil || !errors.Is(err, ErrCheckoutTooLarge) {
 		t.Fatalf("oversized source accepted: checkout=%v error=%v", checkout, err)
 	}
@@ -41,7 +41,7 @@ func TestSnapshotPreflightsMergeBaseMetadata(t *testing.T) {
 	blob := fixture.git(fixture.source, "rev-parse", "HEAD:old")
 	fixture.git(fixture.source, "rm", "old")
 	fixture.commit("refs/heads/main", "remove old blob")
-	checkout := fixture.keepCheckout(cloneFromURL(context.Background(), t.TempDir(), "file://"+fixture.remote, "main", true))
+	checkout := fixture.keepCheckout(cloneFromURL(context.Background(), t.TempDir(), fixture.remote, "main", true))
 	assertBlobPresent(fixture, checkout.path, blob)
 	checkout.comparisonBase = base
 	log := recordSnapshotContentCalls(t)

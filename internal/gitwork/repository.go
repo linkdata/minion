@@ -27,7 +27,7 @@ func MaterializeRepository(ctx context.Context, source string, snapshot workspac
 	if err := workspace.ValidateSnapshot(snapshot); err != nil {
 		return nil, err
 	}
-	if err := workspace.CheckPrivateRoot(source); err != nil {
+	if err := workspace.CheckRoot(source); err != nil {
 		return nil, err
 	}
 
@@ -51,10 +51,10 @@ func MaterializeRepository(ctx context.Context, source string, snapshot workspac
 		return nil, err
 	}
 	// Only fixed offline settings reach model commands; refs need neither reflogs nor a host identity.
-	const config = `[core]
+	config := strings.ReplaceAll(`[core]
 repositoryformatversion = 0
 bare = false
-filemode = true
+filemode = %s
 hooksPath = /dev/null
 fsmonitor = false
 excludesFile = /dev/null
@@ -71,7 +71,8 @@ helper =
 auto = 0
 [maintenance]
 auto = false
-`
+`, "/dev/null", os.DevNull)
+	config = fmt.Sprintf(config, gitFileMode())
 	if err := os.WriteFile(filepath.Join(dir, "config"), []byte(config), 0600); err != nil {
 		return nil, err
 	}
@@ -198,6 +199,10 @@ func (r *Repository) Verify(ctx context.Context) error {
 }
 
 func repositoryDigest(ctx context.Context, dir string) (sum [sha256.Size]byte, err error) {
+	return repositoryDigestWithLimit(ctx, dir, workspace.MaxEntries)
+}
+
+func repositoryDigestWithLimit(ctx context.Context, dir string, limit int) (sum [sha256.Size]byte, err error) {
 	hash := sha256.New()
 	type entry struct{ parent, name string }
 	pending, count, total := []entry{{name: dir}}, 1, 0
@@ -235,7 +240,7 @@ func repositoryDigest(ctx context.Context, dir string) (sum [sha256.Size]byte, e
 						return err
 					}
 					count += len(batch)
-					if count > workspace.MaxEntries {
+					if count > limit {
 						return errors.New("repository metadata exceeds entry limit")
 					}
 					for _, entry := range batch {

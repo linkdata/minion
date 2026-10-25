@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -15,6 +16,9 @@ import (
 func TestHomePathUsesNativeVariableAndDefault(t *testing.T) {
 	root := canonicalTempDir(t)
 	t.Setenv("HOME", root)
+	if runtime.GOOS == "windows" {
+		t.Setenv("USERPROFILE", root)
+	}
 	for _, override := range []string{"", filepath.Join(root, "explicit")} {
 		t.Setenv("CODEX_HOME", override)
 		want := override
@@ -24,6 +28,36 @@ func TestHomePathUsesNativeVariableAndDefault(t *testing.T) {
 		if got, err := HomePath(); err != nil || got != want {
 			t.Fatalf("native home=%q, %v; want %q", got, err, want)
 		}
+	}
+}
+
+func TestSelectedCodexHomeInstructionsStopValidationAndRun(t *testing.T) {
+	for _, name := range []string{"AGENTS.md", "AGENTS.override.md"} {
+		t.Run(name, func(t *testing.T) {
+			bin := t.TempDir()
+			nameOnPath := "codex"
+			if runtime.GOOS == "windows" {
+				nameOnPath += ".exe"
+			}
+			if err := os.WriteFile(filepath.Join(bin, nameOnPath), []byte("not a CLI"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("CODEX_HOME", canonicalTempDir(t))
+			home, err := HomePath()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(home, name), []byte("inert instructions\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Validate(t.Context(), config.CodexConfig{}); err == nil || !strings.Contains(err.Error(), name) {
+				t.Fatalf("Validate() = %v, want selected-home instruction refusal", err)
+			}
+			if _, err := Run(t.Context(), canonicalTempDir(t), "inert task", false, "", config.CodexConfig{}); err == nil || !strings.Contains(err.Error(), name) {
+				t.Fatalf("Run() = %v, want selected-home instruction refusal", err)
+			}
+		})
 	}
 }
 

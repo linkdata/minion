@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -15,6 +16,9 @@ import (
 func TestPullSnapshotPreservesSpecialComparisonPaths(t *testing.T) {
 	fixture := newFixture(t)
 	names := []string{"-dash", " leading", "trailing ", "tab\tname", "line\nname", `quote"name`, `literal\backslash`, "café"}
+	if runtime.GOOS == "windows" {
+		names = []string{"-dash", " leading", "café"}
+	}
 	for _, name := range names {
 		writeFile(t, filepath.Join(fixture.source, name), "merge-base contents\n")
 	}
@@ -43,7 +47,7 @@ func TestPullSnapshotPreservesSpecialComparisonPaths(t *testing.T) {
 			t.Fatalf("base path=%q contents=%q; want path=%q", file.Path, file.Data, want[i])
 		}
 	}
-	if !bytes.Contains(snapshot.Diff, []byte("café")) || bytes.Contains(snapshot.Diff, []byte(`caf\303\251`)) || !bytes.Contains(snapshot.Diff, []byte(`line\nname`)) {
+	if !bytes.Contains(snapshot.Diff, []byte("café")) || bytes.Contains(snapshot.Diff, []byte(`caf\303\251`)) || runtime.GOOS != "windows" && !bytes.Contains(snapshot.Diff, []byte(`line\nname`)) {
 		t.Fatalf("comparison text did not preserve UTF-8 and quote controls: %q", snapshot.Diff)
 	}
 }

@@ -20,7 +20,6 @@ import (
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/github"
-	"github.com/linkdata/minion/internal/processgroup"
 	"github.com/linkdata/minion/internal/state"
 	"github.com/linkdata/minion/internal/workroot"
 )
@@ -34,6 +33,7 @@ type GitHub interface {
 	DeclineRepositoryInvitation(context.Context, int64) error
 	ThreadItems(context.Context, string, string, int, time.Time) ([]github.Item, error)
 	CurrentItem(context.Context, github.Item) (github.Item, error)
+	HasVerifiedBotReply(context.Context, string, int, time.Time, string, string, bool) (bool, error)
 	Permission(context.Context, string, string) (github.Permission, error)
 	ReactEyes(context.Context, string) error
 	CreateIssueComment(context.Context, string, int, string) (github.Comment, error)
@@ -49,9 +49,9 @@ var ErrExecutionOutcomeUnknown = errors.New("execution outcome unknown")
 // ErrRequestTransport retains a request failure's infrastructure retry classification.
 var ErrRequestTransport = errors.New("request transport failure")
 
-// ErrPostModelPublication marks publication failure for completed or previously completed model work.
+// ErrPostModelPublication marks publication failure after model work or during a fixed recovery reply.
 //
-// Retrying it must consume a job attempt even when the write error is transient.
+// Without a model-call marker, retrying it consumes a job attempt even when the write error is transient.
 var ErrPostModelPublication = errors.New("post-model publication failure")
 
 const (
@@ -116,13 +116,10 @@ func InertLogText(s string) string {
 // It persists each completed command before advancing that repository's cursor.
 // Failed threads remain queued for retries without blocking other repositories.
 // Parent cancellation preserves earlier failures and unprocessed retry state/cursors.
-// Executions reporting parent cancellation refund their attempt unless publication has begun or the execution outcome is unknown.
+// Executions reporting parent cancellation refund their attempt unless a model call began, publication began, or the execution outcome is unknown.
 func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, error) {
 	if err := ctx.Err(); err != nil {
 		return store.Data.NextPollAt, err
-	}
-	if store.Data.UnconfirmedProcessJob != "" {
-		return store.Data.NextPollAt, fmt.Errorf("%w: %w: job %s requires operator recovery", processgroup.ErrUnconfirmed, processgroup.ErrScopeUnconfirmed, store.Data.UnconfirmedProcessJob)
 	}
 	now := time.Now
 	if m.Now != nil {
@@ -397,8 +394,11 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				continue
 			}
 			jobFailure := store.Data.JobFailures[job.ID]
+			if jobFailure.ModelCallStarted {
+				jobFailure.Attempts = maxJobAttempts
+			}
 			if jobFailure.Attempts >= maxJobAttempts {
-				if err := m.finishFailedJob(ctx, store, job, items, started, jobFailure); err != nil {
+				if err := m.finishFailedJob(ctx, store, job, started, jobFailure); err != nil {
 					failures = append(failures, err)
 				}
 				if ctx.Err() != nil {
@@ -422,20 +422,17 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				return stop(err)
 			}
 			m.logf("run %s from @%s in %s #%d", cmd.Action, item.Author.Login, repo.Name, number)
-			if err := m.Handler.Execute(ctx, job); err != nil {
+			err = m.Handler.Execute(ctx, job)
+			jobFailure.ModelCallStarted = store.Data.JobFailures[job.ID].ModelCallStarted
+			if err != nil {
 				failureErr := fmt.Errorf("%s from %s: %w", cmd.Action, itemLocation(item), err)
 				publicationFailure := errors.Is(err, ErrPostModelPublication)
 				outcomeUnknown := errors.Is(err, ErrExecutionOutcomeUnknown)
-				scopeUnconfirmed := errors.Is(err, processgroup.ErrScopeUnconfirmed)
-				unconfirmedProcesses := errors.Is(err, processgroup.ErrUnconfirmed) || scopeUnconfirmed
-				interrupted := !outcomeUnknown && !unconfirmedProcesses && !errors.Is(err, processgroup.ErrExhausted) && ctx.Err() != nil && errors.Is(err, context.Canceled) && !publicationFailure
+				interrupted := !jobFailure.ModelCallStarted && !outcomeUnknown && ctx.Err() != nil && errors.Is(err, context.Canceled) && !publicationFailure
 				switch {
-				case scopeUnconfirmed:
-					jobFailure.Attempts = maxJobAttempts
-					store.Data.UnconfirmedProcessJob = job.ID
 				case interrupted:
 					jobFailure.Attempts--
-				case outcomeUnknown, unconfirmedProcesses, errors.Is(err, ErrTerminalJob), errors.Is(err, processgroup.ErrDescendants), errors.Is(err, processgroup.ErrExhausted):
+				case jobFailure.ModelCallStarted, outcomeUnknown, errors.Is(err, ErrTerminalJob):
 					jobFailure.Attempts = maxJobAttempts
 				case !publicationFailure && (errors.Is(err, workroot.ErrUnsafe) || infrastructureFailure(err)):
 					jobFailure.Attempts--
@@ -452,17 +449,9 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 					m.logf("%s from %s interrupted: %v", cmd.Action, itemLocation(item), err)
 					return stop(failureErr)
 				}
-				if scopeUnconfirmed {
-					m.logf("%s from %s stopped: process scope release unconfirmed; operator recovery required: %v", cmd.Action, itemLocation(item), err)
-					return stop(failureErr)
-				}
-				if unconfirmedProcesses {
-					m.logf("%s from %s stopped: process safety proof failed; restart requires a fresh readiness check: %v", cmd.Action, itemLocation(item), err)
-					return stop(failureErr)
-				}
 				m.logf("%s from %s failed (attempt %d/%d): %v", cmd.Action, itemLocation(item), jobFailure.Attempts, maxJobAttempts, err)
 				if jobFailure.Attempts >= maxJobAttempts {
-					if replyErr := m.finishFailedJob(ctx, store, job, items, started, jobFailure); replyErr != nil {
+					if replyErr := m.finishFailedJob(ctx, store, job, started, jobFailure); replyErr != nil {
 						failures = append(failures, replyErr)
 					}
 				}
@@ -578,14 +567,14 @@ func infrastructureFailure(err error) bool {
 	return errors.Is(err, ErrRequestTransport) || errors.As(err, &network)
 }
 
-func (m *Monitor) finishFailedJob(ctx context.Context, store *state.Store, job Job, items []github.Item, at time.Time, failure state.JobFailure) error {
+func (m *Monitor) finishFailedJob(ctx context.Context, store *state.Store, job Job, at time.Time, failure state.JobFailure) error {
 	marker := job.Marker()
-	replied := false
-	for _, item := range items {
-		if strings.EqualFold(item.Author.Login, m.Config.BotLogin) && strings.HasSuffix(strings.TrimSpace(item.Body), "\n\n"+marker) {
-			replied = true
-			break
-		}
+	lookupCtx, cancelLookup := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancelLookup()
+	includeReviews := job.SubjectType == "PullRequest" && job.Command.Action == command.Review
+	replied, err := m.GitHub.HasVerifiedBotReply(lookupCtx, job.Repository.Name, job.Number, job.Source.UpdatedAt, m.Config.BotLogin, marker, includeReviews)
+	if err != nil {
+		return fmt.Errorf("check existing bot replies to %s: %w", itemLocation(job.Source), err)
 	}
 	if !replied {
 		replyCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)

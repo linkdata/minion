@@ -14,14 +14,12 @@ import (
 	"github.com/linkdata/minion/internal/usage"
 )
 
-func TestRunCancelsActiveChildProcess(t *testing.T) {
+func TestRunCancelsDirectCLIProcess(t *testing.T) {
 	binary := fakeExecutable(t, "claude", `printf '%s\n' '`+assistantUsageEvent("partial", 3, 5, 7, 2)+`'
-( i=0; while [ -f "$0" ] && [ "$i" -lt 30 ] && [ ! -f "$0.pid.stop" ]; do sleep 1; i=$((i+1)); done ) &
-printf '%s\n' "$!" > "$0.pid.tmp"
+printf '%s\n' "$$" > "$0.pid.tmp"
 mv -- "$0.pid.tmp" "$0.pid"
-wait
+exec sleep 30
 `)
-	testsupport.StopOnCleanup(t, binary+".pid.stop")
 	workspace := t.TempDir()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -35,8 +33,7 @@ wait
 		result, err := Run(ctx, workspace, "task", false, "", config.ClaudeConfig{})
 		done <- outcome{result, err}
 	}()
-	// The real subprocess must start before cancellation; a synthetic clock
-	// cannot establish whether its process group has actually been created.
+	// The real CLI process must start before cancellation.
 	waitCtx, stopWait := context.WithTimeout(context.Background(), 5*time.Second)
 	defer stopWait()
 	child, err := testsupport.WaitForProcess(waitCtx, binary+".pid", done)
@@ -61,8 +58,8 @@ wait
 	case <-waitCtx.Done():
 		t.Fatal("cancellation did not finish the run")
 	}
-	// Keep observing this child after cancellation, even if its PID is recycled.
+	// Keep observing the direct process after cancellation, even if its PID is recycled.
 	if err := child.WaitExited(waitCtx); err != nil {
-		t.Fatalf("child survived process-group cancellation: %v", err)
+		t.Fatalf("direct CLI process survived cancellation: %v", err)
 	}
 }

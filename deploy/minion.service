@@ -3,13 +3,8 @@ Description=linkdataminion GitHub mention monitor
 
 [Service]
 Type=simple
-# Let Minion cancel active model/Git process groups on shutdown.
+# Let Minion cancel direct commands before systemd's shutdown timeout.
 KillMode=mixed
-Delegate=yes
-DelegateSubgroup=minion-supervisor
-TasksMax=256
-MemoryMax=4G
-MemorySwapMax=0
 WorkingDirectory=/path/to/minion
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 ExecStart=/path/to/minion/bin/minion -config /path/to/minion/config.local.json -loop

@@ -12,6 +12,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"unicode"
@@ -111,10 +112,10 @@ func FoldPath(name string) string {
 	}, name)
 }
 
-// validSourcePath accepts Git's case-sensitive slash paths, including literal backslashes.
+// validSourcePath accepts Git's slash paths; only Unix can retain literal backslashes.
 // Writable/import paths additionally reject HFS/NTFS aliases of Git metadata.
 func validSourcePath(name string) bool {
-	if !fs.ValidPath(name) || name == "." || len(name) >= MaxPathBytes || strings.ContainsRune(name, '\x00') {
+	if !fs.ValidPath(name) || name == "." || len(name) >= MaxPathBytes || strings.ContainsRune(name, '\x00') || !validPlatformPath(name) {
 		return false
 	}
 	for _, part := range strings.Split(name, "/") {
@@ -280,14 +281,21 @@ func CanonicalPath(root string) (string, error) {
 		return "", errors.New("path is required")
 	}
 	if !filepath.IsAbs(root) {
+		if runtime.GOOS == "windows" && filepath.VolumeName(root) != "" {
+			return "", fmt.Errorf("resolve path: drive-relative path %q is unsupported", root)
+		}
 		cwd, err := os.Getwd()
 		if err != nil {
 			return "", fmt.Errorf("resolve path: %w", err)
 		}
-		// Preserve ".." until EvalSymlinks resolves each component in order.
-		root = cwd + string(os.PathSeparator) + root
+		// Preserve ".." until canonicalPath resolves each component in order.
+		if runtime.GOOS == "windows" && os.IsPathSeparator(root[0]) {
+			root = filepath.VolumeName(cwd) + root
+		} else {
+			root = cwd + string(os.PathSeparator) + root
+		}
 	}
-	root, err := filepath.EvalSymlinks(root)
+	root, err := canonicalPath(root)
 	if err != nil {
 		return "", fmt.Errorf("resolve path: %w", err)
 	}
@@ -295,9 +303,70 @@ func CanonicalPath(root string) (string, error) {
 }
 
 // Within compares canonical absolute paths; callers resolve symlinks first.
+// On Windows, existing canonical paths preserve case-sensitive directory distinctions.
+// On macOS, existing ancestor identity also catches case-insensitive aliases and missing suffixes.
 func Within(root, name string) bool {
+	if runtime.GOOS == "windows" {
+		rootVolume, nameVolume := filepath.VolumeName(root), filepath.VolumeName(name)
+		if rootVolume == "" || !strings.EqualFold(rootVolume, nameVolume) || !filepath.IsAbs(root) || !filepath.IsAbs(name) {
+			return false
+		}
+		rootPath := strings.TrimRight(filepath.FromSlash(root[len(rootVolume):]), `\`)
+		namePath := filepath.FromSlash(name[len(nameVolume):])
+		if rootPath == "" {
+			return namePath == "" || strings.HasPrefix(namePath, `\`)
+		}
+		if namePath == rootPath || strings.HasPrefix(namePath, rootPath+`\`) {
+			return true
+		}
+		if !equalFoldAncestor(rootPath, namePath) {
+			return false
+		}
+		_, err := os.Stat(root)
+		return err != nil // Existing canonical roots keep exact case; missing or unverifiable roots fail closed.
+	}
 	rel, err := filepath.Rel(root, name)
-	return err == nil && filepath.IsLocal(rel)
+	if err == nil && filepath.IsLocal(rel) {
+		return true
+	}
+	if runtime.GOOS != "darwin" {
+		return false
+	}
+	rootInfo, err := os.Stat(root)
+	if errors.Is(err, os.ErrNotExist) {
+		return equalFoldAncestor(root, name)
+	}
+	if err != nil {
+		return true // An unverified grant cannot be treated as separate.
+	}
+	for {
+		info, err := os.Stat(name)
+		if err == nil && os.SameFile(rootInfo, info) {
+			return true
+		}
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return true
+		}
+		parent := filepath.Dir(name)
+		if parent == name {
+			return false
+		}
+		name = parent
+	}
+}
+
+// shortcut: absent-root case folding may reject distinct future paths on a case-sensitive volume; revisit if needed.
+func equalFoldAncestor(root, name string) bool {
+	for {
+		if strings.EqualFold(root, name) {
+			return true
+		}
+		parent := filepath.Dir(name)
+		if parent == name {
+			return false
+		}
+		name = parent
+	}
 }
 
 // OpenDirectory anchors collection without following any symlink component.
@@ -312,19 +381,6 @@ func CheckRoot(root string) error {
 		return err
 	}
 	return dir.Close()
-}
-
-// CheckPrivateRoot checks directory type and permissions without following a final symlink.
-// Callers must provide trusted placement for root and its parents.
-func CheckPrivateRoot(root string) error {
-	info, err := os.Lstat(root)
-	if err != nil {
-		return err
-	}
-	if !info.IsDir() || info.Mode().Perm()&0077 != 0 {
-		return fmt.Errorf("workspace root must be a private directory: %s (%s)", root, info.Mode())
-	}
-	return nil
 }
 
 // Materialize requires a root and parents not concurrently writable by untrusted processes.
@@ -379,7 +435,7 @@ func changedFiles(base []File, changes []Change) ([]File, error) {
 }
 
 func materialize(root string, files []File) error {
-	if err := CheckPrivateRoot(root); err != nil {
+	if err := CheckRoot(root); err != nil {
 		return err
 	}
 	dir, err := os.Open(root)
@@ -466,7 +522,7 @@ func checkUnchanged(ctx context.Context, root string, base []File, repository bo
 			return fmt.Errorf("workspace changed: cannot verify %q: %w", rel, err)
 		}
 		delete(prior, rel)
-		if info.Mode() != fs.FileMode(old.Mode&0777) || !bytes.Equal(old.Data, data) {
+		if !sourceModeMatches(info, old.Mode) || !bytes.Equal(old.Data, data) {
 			return fmt.Errorf("workspace changed: changed %q", rel)
 		}
 		return nil
@@ -504,10 +560,7 @@ func ReadChanges(ctx context.Context, root string, selected []Change) ([]Change,
 		if err != nil {
 			return nil, fmt.Errorf("changed path %q: %w", selection.Path, err)
 		}
-		mode := Regular
-		if info.Mode().Perm()&0100 != 0 {
-			mode = Executable
-		}
+		mode := changedSourceMode(info, selection.Mode)
 		if selection.Mode != mode {
 			return nil, fmt.Errorf("selected change mode differs from file at %q", selection.Path)
 		}
@@ -697,7 +750,16 @@ func Apply(root string, changes []Change) error {
 			if !info.Mode().IsRegular() {
 				return fmt.Errorf("changed path %q is not regular", change.Path)
 			}
-			if !singleLink(info) {
+			opened, err := openPath(name, false)
+			if err != nil {
+				return err
+			}
+			current, statErr := opened.Stat()
+			valid := statErr == nil && os.SameFile(info, current) && singleLink(current, opened)
+			if err := errors.Join(statErr, opened.Close()); err != nil {
+				return err
+			}
+			if !valid {
 				return fmt.Errorf("changed path %q must have exactly one hard link", change.Path)
 			}
 		} else if !errors.Is(err, os.ErrNotExist) {
@@ -752,8 +814,12 @@ func readFile(name string, limit int64) (data []byte, info fs.FileInfo, resultEr
 	if opened.Size() > limit {
 		return nil, nil, errors.New("file exceeds byte limit")
 	}
-	if !singleLink(opened) {
+	if !singleLink(opened, f) {
 		return nil, nil, errors.New("file must have exactly one hard link")
+	}
+	beforeChange, err := changeTime(opened, f)
+	if err != nil {
+		return nil, nil, err
 	}
 	data = make([]byte, opened.Size()+1)
 	n, err := io.ReadFull(f, data)
@@ -765,17 +831,21 @@ func readFile(name string, limit int64) (data []byte, info fs.FileInfo, resultEr
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := checkReadStability(opened, after, len(data)); err != nil {
+	afterChange, err := changeTime(after, f)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := checkReadStability(opened, after, len(data), f, beforeChange == afterChange); err != nil {
 		return nil, nil, err
 	}
 	return data, opened, nil
 }
 
-func checkReadStability(opened, after fs.FileInfo, bytesRead int) error {
-	if !singleLink(after) {
+func checkReadStability(opened, after fs.FileInfo, bytesRead int, file *os.File, unchangedTime bool) error {
+	if !singleLink(after, file) {
 		return errors.New("file hard links changed while reading")
 	}
-	if int64(bytesRead) != opened.Size() || after.Size() != opened.Size() || after.Mode() != opened.Mode() || !after.ModTime().Equal(opened.ModTime()) || !sameChangeTime(opened, after) {
+	if int64(bytesRead) != opened.Size() || after.Size() != opened.Size() || after.Mode() != opened.Mode() || !after.ModTime().Equal(opened.ModTime()) || !unchangedTime {
 		return errors.New("file changed or exceeded limit while reading")
 	}
 	return nil

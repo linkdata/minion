@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"syscall"
 	"time"
 )
 
@@ -19,14 +18,13 @@ type Data struct {
 	Cursor time.Time `json:"cursor"`
 	// RepositoryCursors tracks each repository's durable notification cursor.
 	// Missing entries start at Cursor when that repository is first polled.
-	RepositoryCursors     map[string]time.Time           `json:"repository_cursors,omitempty"`
-	NextPollAt            time.Time                      `json:"next_poll_at,omitempty"`
-	NextInviteCheckAt     time.Time                      `json:"next_invite_check_at,omitempty"`
-	Processed             map[string]time.Time           `json:"processed"`
-	JobFailures           map[string]JobFailure          `json:"job_failures,omitempty"`
-	UnconfirmedProcessJob string                         `json:"unconfirmed_process_job,omitempty"`
-	PendingNotifications  map[string]PendingNotification `json:"pending_notifications,omitempty"`
-	PendingFixes          map[string]PendingFix          `json:"pending_fixes,omitempty"`
+	RepositoryCursors    map[string]time.Time           `json:"repository_cursors,omitempty"`
+	NextPollAt           time.Time                      `json:"next_poll_at,omitempty"`
+	NextInviteCheckAt    time.Time                      `json:"next_invite_check_at,omitempty"`
+	Processed            map[string]time.Time           `json:"processed"`
+	JobFailures          map[string]JobFailure          `json:"job_failures,omitempty"`
+	PendingNotifications map[string]PendingNotification `json:"pending_notifications,omitempty"`
+	PendingFixes         map[string]PendingFix          `json:"pending_fixes,omitempty"`
 }
 
 // PendingFix retains the commit and its publication caveat before a push.
@@ -56,8 +54,9 @@ type PendingNotification struct {
 }
 
 type JobFailure struct {
-	Attempts      int `json:"attempts"`
-	ReplyAttempts int `json:"reply_attempts,omitempty"`
+	Attempts         int  `json:"attempts"`
+	ReplyAttempts    int  `json:"reply_attempts,omitempty"`
+	ModelCallStarted bool `json:"model_call_started,omitempty"`
 }
 
 type Store struct {
@@ -77,10 +76,7 @@ func Open(path string, initialCursor time.Time) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		if errors.Is(err, syscall.EWOULDBLOCK) {
-			err = ErrLocked
-		}
+	if err := lockFile(lock); err != nil {
 		return nil, errors.Join(err, lock.Close())
 	}
 	store := &Store{path: path, lock: lock}
@@ -171,7 +167,7 @@ func (s *Store) Close() error {
 	if s.lock == nil {
 		return nil
 	}
-	err := syscall.Flock(int(s.lock.Fd()), syscall.LOCK_UN)
+	err := unlockFile(s.lock)
 	closeErr := s.lock.Close()
 	s.lock = nil
 	if err != nil {

@@ -8,32 +8,24 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"slices"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/config"
-	"github.com/linkdata/minion/internal/processgroup"
 )
 
 // Validate checks Claude's prerequisites and resolves model settings.
 //
-// It requires Linux, Claude Code 2.1.302 or later, authenticated CLI state,
-// bubblewrap, and socat. Model discovery uses the CLI's initialization protocol
-// without an inference turn. These checks do not execute a sandboxed command;
-// deployments must validate runtime isolation.
+// It requires authenticated CLI state. Model discovery passes Run's sandbox
+// and tool options to the CLI's initialization protocol without an inference
+// turn. Claude owns sandbox startup and enforcement at runtime.
 //
 // APIKey overrides environment credentials and stored login. Without it,
 // environment API/OAuth tokens are rejected. Authenticated proxies are rejected.
 func Validate(ctx context.Context, settings config.ClaudeConfig) (validated config.ClaudeConfig, resultErr error) {
 	defer func() { resultErr = aicli.RedactError(resultErr, settings.APIKey) }()
 	validated = settings
-	if runtime.GOOS != "linux" {
-		return validated, errors.New("claude isolation currently requires Linux")
-	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	dir, err := os.MkdirTemp("", "minion-claude-check-")
@@ -41,16 +33,12 @@ func Validate(ctx context.Context, settings config.ClaudeConfig) (validated conf
 		return validated, err
 	}
 	defer func() {
-		if !errors.Is(resultErr, processgroup.ErrScopeUnconfirmed) {
-			resultErr = errors.Join(resultErr, os.RemoveAll(dir))
-		}
+		resultErr = errors.Join(resultErr, os.RemoveAll(dir))
 	}()
 	authDir, err := authentication(filepath.Dir(dir), settings.APIKey)
 	if authDir != "" {
 		defer func() {
-			if !errors.Is(resultErr, processgroup.ErrScopeUnconfirmed) {
-				resultErr = errors.Join(resultErr, os.RemoveAll(authDir))
-			}
+			resultErr = errors.Join(resultErr, os.RemoveAll(authDir))
 		}()
 	}
 	if err != nil {
@@ -68,20 +56,7 @@ func Validate(ctx context.Context, settings config.ClaudeConfig) (validated conf
 	if err != nil {
 		return validated, err
 	}
-	version, err := aicli.Probe(ctx, binary, "", []string{"--version"}, dir, env, "", settings.APIKey)
-	if err != nil {
-		return validated, err
-	}
-	if !supportedVersion(string(version)) {
-		return validated, errors.New("claude isolation requires Claude Code 2.1.302 or later")
-	}
-	for _, name := range []string{"bwrap", "socat"} {
-		if _, err := aicli.ExecutablePath(name); err != nil {
-			return validated, fmt.Errorf("claude sandbox dependency %s: %w", name, err)
-		}
-	}
-	settings.ReadOnlyDirs = nil
-	policy, err := sandboxSettings(dir, dir, false, "", settings, nil, authDir)
+	policy, err := sandboxSettings(dir, "", authDir)
 	if err != nil {
 		return validated, err
 	}
@@ -99,7 +74,7 @@ func Validate(ctx context.Context, settings config.ClaudeConfig) (validated conf
 	if json.Unmarshal(auth, &status) != nil || !status.LoggedIn {
 		return validated, errors.New("claude is not authenticated; configure claude.api_key or run claude auth login")
 	}
-	args := append(arguments(policy), "--no-session-persistence", "--input-format", "stream-json")
+	args := append(arguments(policy), "--no-session-persistence", "--input-format", "stream-json", "--json-schema", `{"type":"object"}`)
 	data, err := aicli.Probe(ctx, binary, "", args, dir, env, "{\"type\":\"control_request\",\"request_id\":\"minion-initialize\",\"request\":{\"subtype\":\"initialize\"}}\n", settings.APIKey)
 	if err != nil {
 		return validated, fmt.Errorf("claude model discovery: %w", err)
@@ -160,24 +135,4 @@ func initializationModels(data []byte) ([]modelInfo, error) {
 		}
 	}
 	return nil, errors.New("claude did not acknowledge initialization")
-}
-
-func supportedVersion(version string) bool {
-	fields := strings.Fields(version)
-	if len(fields) == 0 {
-		return false
-	}
-	parts := strings.Split(fields[0], ".")
-	if len(parts) != 3 {
-		return false
-	}
-	numbers := make([]int, len(parts))
-	for i, part := range parts {
-		n, err := strconv.Atoi(part)
-		if err != nil || n < 0 {
-			return false
-		}
-		numbers[i] = n
-	}
-	return slices.Compare(numbers, []int{2, 1, 302}) >= 0
 }

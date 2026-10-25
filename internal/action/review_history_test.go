@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -80,8 +81,8 @@ func TestInitialRefutationsAreDiscardedAndEmptyHistoryIsOptional(t *testing.T) {
 }
 
 func TestReviewHistoryGrantFailureIsTerminalAfterPaidWork(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root bypasses directory permissions")
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("requires effective POSIX directory permissions and a non-root user")
 	}
 	root := t.TempDir()
 	t.Cleanup(func() {
@@ -146,7 +147,7 @@ func checkRefutations(t *testing.T, request modelRun, want []Refutation) string 
 				t.Fatalf("private grant instruction absent or repeated: %q", rule)
 			}
 		}
-		if info, err := os.Stat(dir); err != nil || !info.IsDir() || info.Mode().Perm()&0077 != 0 {
+		if info, err := os.Stat(dir); err != nil || !info.IsDir() || runtime.GOOS != "windows" && info.Mode().Perm()&0077 != 0 {
 			t.Fatalf("refutations directory privacy: %v,%v", info, err)
 		}
 		for _, other := range append([]string{request.dir, request.outputDir}, request.readOnlyDirs...) {

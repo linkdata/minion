@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -117,7 +118,11 @@ func TestHTTPWorkerDiagnosticsRemainPrivateThroughPublication(t *testing.T) {
 				strings.Contains(journal.String(), "FORGED JOURNAL ENTRY") || strings.ContainsRune(journal.String(), '\x1b') {
 				t.Fatalf("worker diagnostic escaped or answer bypassed inert publication: writes=%d posted=%q journal=%q", writes, posted, journal.String())
 			}
-			path := filepath.Join(owner.WorkRoot, "worker-diagnostics", job.Identity.AttemptID+".json")
+			canonicalRoot, err := workspace.CanonicalPath(owner.WorkRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(canonicalRoot, "worker-diagnostics", job.Identity.AttemptID+".json")
 			data, err := os.ReadFile(path)
 			if err != nil {
 				t.Fatal(err)
@@ -130,7 +135,7 @@ func TestHTTPWorkerDiagnosticsRemainPrivateThroughPublication(t *testing.T) {
 				len(record.WorkerReportedDiagnostics) != 1 || record.WorkerReportedDiagnostics[0] != outcome.Result.Diagnostics[0] || record.WorkerReportedFailure != nil {
 				t.Fatalf("validated diagnostic was not bound to private attempt record: %s, %+v", path, record)
 			}
-			if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0600 {
+			if info, err := os.Stat(path); err != nil || !info.Mode().IsRegular() || runtime.GOOS != "windows" && info.Mode().Perm() != 0600 {
 				t.Fatalf("private diagnostic record permissions: %v, %v", info, err)
 			}
 			if !strings.Contains(journal.String(), fmt.Sprintf("private_path=%q", path)) {
@@ -294,7 +299,11 @@ func TestHTTPFailureAtWireTextLimitRemainsPrivate(t *testing.T) {
 	if err := owner.retainWorkerDiagnostics(job, got.result, got.err); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(owner.WorkRoot, "worker-diagnostics", job.Identity.AttemptID+".json")
+	canonicalRoot, err := workspace.CanonicalPath(owner.WorkRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(canonicalRoot, "worker-diagnostics", job.Identity.AttemptID+".json")
 	if strings.Count(journal.String(), "\n") != 1 || strings.ContainsRune(journal.String(), '\x01') ||
 		!strings.Contains(journal.String(), fmt.Sprintf("private_path=%q", path)) {
 		t.Fatalf("maximum worker failure escaped parent journal or lost private path: %q", journal.String())
@@ -324,7 +333,6 @@ func TestHTTPWorkerFailureThroughOrchestratorAndMonitor(t *testing.T) {
 	defer server.Close()
 	message := strings.Repeat("\x01", httpFailureMessageLimit-len("\nFORGED\x1b[2J")) + "\nFORGED\x1b[2J"
 	failure := &httpFailure{Message: message, Terminal: true, Canceled: true, Deadline: true, Unsafe: true,
-		Descendants: true, Unconfirmed: true, ScopeUnconfirmed: true, Exhausted: true,
 		OutcomeUnknown: true, RequestTransport: true, MissingExecutable: true, NoSpace: true,
 		QuotaExceeded: true, OutputLimit: true}
 	var journal bytes.Buffer
@@ -367,7 +375,7 @@ func TestHTTPWorkerFailureThroughOrchestratorAndMonitor(t *testing.T) {
 		GitHub: gh, Handler: owner, Logger: parentLogger, Now: func() time.Time { return clock }}
 	for attempt := 1; attempt <= 3; attempt++ {
 		_, err := m.RunOnce(t.Context(), store)
-		if (err == nil) != (attempt == 3) || len(jobs) != attempt || store.Data.UnconfirmedProcessJob != "" {
+		if (err == nil) != (attempt == 3) || len(jobs) != attempt {
 			t.Fatalf("worker claims changed retry policy at attempt %d: jobs=%d state=%+v error=%v", attempt, len(jobs), store.Data, err)
 		}
 		if attempt < 3 && len(gh.replies) != 0 {

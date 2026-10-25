@@ -7,7 +7,7 @@ import (
 )
 
 // HomePath selects the stored native configuration directory, allowing a missing
-// directory. An unavailable HOME without CLAUDE_CONFIG_DIR is refused.
+// directory. Without CLAUDE_CONFIG_DIR, an unavailable OS user home is refused.
 func HomePath() (string, error) {
 	return aicli.HomePath("CLAUDE_CONFIG_DIR", ".claude")
 }

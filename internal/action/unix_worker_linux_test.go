@@ -20,19 +20,12 @@ import (
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/monitor"
-	"github.com/linkdata/minion/internal/processgroup"
 	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/usage"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
-func TestUnixExecutionOwnedWorker(t *testing.T) {
-	if err := processgroup.Check(); err != nil {
-		if os.Getenv("MINION_REQUIRE_PROCESSGROUP") == "1" {
-			t.Fatalf("required delegated process ownership unavailable: %v", err)
-		}
-		t.Skipf("delegated process ownership unavailable: %v", err)
-	}
+func TestUnixExecutionDirectWorker(t *testing.T) {
 	tempRoot, err := workspace.CanonicalPath(os.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -52,10 +45,10 @@ func TestUnixExecutionOwnedWorker(t *testing.T) {
 	workRoot := filepath.Join(base, "work")
 	var endpoint *UnixEndpoint
 	var core *HTTPExecutor
-	var worker *processgroup.WorkerHandle
+	var cmd *exec.Cmd
 	var cancel context.CancelFunc
 	var output bytes.Buffer
-	closed, released := false, false
+	closed, waited := false, false
 	defer func() {
 		if core != nil {
 			_ = core.Close()
@@ -63,35 +56,33 @@ func TestUnixExecutionOwnedWorker(t *testing.T) {
 		if cancel != nil {
 			cancel()
 		}
-		if worker != nil && !released {
-			var waitErr error
-			released, waitErr = worker.Wait()
-			if waitErr != nil {
-				t.Errorf("cleanup owned worker: released=%t error=%v", released, waitErr)
+		if cmd != nil && !waited {
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
 			}
+			_ = cmd.Wait()
+			waited = true
 		}
 		if endpoint != nil && !closed {
-			if worker != nil && !released {
-				_ = endpoint.server.Close() // Keep the socket path for operator recovery.
-			} else if err := endpoint.Close(); err != nil {
-				t.Errorf("retain unproved Unix socket in %s: %v", runtimeDir, err)
+			if err := endpoint.Close(); err != nil {
+				t.Errorf("close Unix socket in %s: %v", runtimeDir, err)
 			} else {
 				closed = true
 			}
 		}
-		if released && t.Failed() {
-			t.Logf("owned worker output: %s", output.String())
+		if waited && t.Failed() {
+			t.Logf("direct worker output: %s", output.String())
 		}
 		socketClosed := closed || endpoint == nil
-		if !socketClosed || worker != nil && !released {
-			t.Logf("retaining runtime directory without proved socket closure and worker release: %s", runtimeDir)
+		if !socketClosed {
+			t.Logf("retaining runtime directory after socket close failure: %s", runtimeDir)
 			return
 		}
 		if err := os.Remove(runtimeDir); err != nil && !errors.Is(err, os.ErrNotExist) {
 			t.Errorf("retain nonempty runtime directory %s: %v", runtimeDir, err)
 			return
 		}
-		for _, path := range []string{report + ".recorded", report + ".ready", report + ".first", report + ".second", report + ".second-go", report + ".third-go", report + ".cancel-seen", report + ".third", report + ".release", report + ".failed", workRoot, grant, filepath.Join(skillDir, ".minion-install.json"), skillDir, filepath.Join(base, ".agents", "skills"), filepath.Join(base, ".agents")} {
+		for _, path := range []string{report + ".ready", report + ".first", report + ".second", report + ".second-go", report + ".third-go", report + ".cancel-seen", report + ".third", report + ".release", report + ".failed", workRoot, grant, filepath.Join(skillDir, ".minion-install.json"), skillDir, filepath.Join(base, ".agents", "skills"), filepath.Join(base, ".agents")} {
 			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 				t.Errorf("retain nonempty owned path %s: %v", path, err)
 				return
@@ -109,24 +100,6 @@ func TestUnixExecutionOwnedWorker(t *testing.T) {
 	if err := os.Mkdir(workRoot, 0700); err != nil {
 		t.Fatal(err)
 	}
-	// Resolve the real installed role grant while it still contains regular files
-	// only; the future socket is already protected by the path boundary check.
-	roles := withClaudeCritic(testJob(command.Comment))
-	selectedJob := roles
-	selectedJob.Main.Skills = []string{testReviewSkillURL}
-	selected := Runner{}
-	if err := selected.ConfigureRole(selectedJob.Main); err != nil {
-		t.Fatalf("resolve pinned installed skill before worker start: %v", err)
-	}
-	if !slices.Contains(selected.Codex.Skills, grant) {
-		t.Fatalf("selected role did not pin installed parent grant: %v", selected.Codex.Skills)
-	}
-	if err := selected.ConfigureRole(*selectedJob.Critic); err != nil {
-		t.Fatal(err)
-	}
-	if err := selected.CheckPrivatePaths([]string{runtimeDir, filepath.Join(runtimeDir, "execution.sock")}, selectedJob.Main.Provider, selectedJob.Critic.Provider); err == nil || !strings.Contains(err.Error(), "visible through model filesystem grant") {
-		t.Fatalf("selected parent grant did not refuse readiness: %v", err)
-	}
 	core, err = NewHTTPExecutor("local")
 	if err != nil {
 		t.Fatal(err)
@@ -135,32 +108,15 @@ func TestUnixExecutionOwnedWorker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := selected.ConfigureRole(roles.Main); err != nil {
-		t.Fatal(err)
-	}
-	if err := selected.CheckPrivatePaths([]string{runtimeDir, endpoint.SocketPath()}, roles.Main.Provider, roles.Critic.Provider); err != nil {
-		t.Fatalf("private socket refused with safe selected roles: %v", err)
-	}
-
-	ctx, stop := context.WithTimeout(context.Background(), 90*time.Second)
+	ctx, stop := context.WithTimeout(t.Context(), 90*time.Second)
 	cancel = stop
-	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestUnixExecutionWorkerHelper$")
+	cmd = exec.CommandContext(ctx, os.Args[0], "-test.run=^TestUnixExecutionWorkerHelper$")
+	cmd.WaitDelay = 2 * time.Second
 	cmd.Env = append(os.Environ(), "MINION_UNIX_WORKER_HELPER=1", "MINION_UNIX_WORKER_SOCKET="+endpoint.SocketPath(),
 		"MINION_UNIX_WORKER_REPORT="+report, "MINION_UNIX_WORKER_WORKROOT="+workRoot)
 	cmd.Stdout, cmd.Stderr = &output, &output
-	var recorded string
-	worker, startErr := processgroup.StartWorker(cmd, func(scope string) error {
-		if cmd.Process != nil {
-			return errors.New("worker started before ownership was recorded")
-		}
-		recorded = scope
-		return workspace.WriteAtomic(report+".recorded", []byte(scope))
-	})
-	if startErr != nil || worker == nil || recorded == "" {
-		t.Fatalf("start owned Unix worker: handle=%v scope=%q error=%v", worker, recorded, startErr)
-	}
-	if data, err := os.ReadFile(report + ".recorded"); err != nil || string(data) != recorded {
-		t.Fatalf("worker ownership record was not durable: data=%q scope=%q error=%v", data, recorded, err)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start Unix worker: %v", err)
 	}
 	if pid := unixWorkerReport(t, ctx, report, ".ready"); pid != strconv.Itoa(cmd.Process.Pid) {
 		t.Fatalf("ready worker PID = %q; want %d", pid, cmd.Process.Pid)
@@ -310,7 +266,7 @@ func TestUnixExecutionOwnedWorker(t *testing.T) {
 	gateReleased = true
 	got := awaitResult(thirdDone, "canceled paid assignment")
 	wantMain := CallUsage{Provider: "codex", Role: roleMain, Round: 1, Tokens: tokens, Complete: true}
-	if !errors.Is(got.err, context.Canceled) || errors.Is(got.err, context.DeadlineExceeded) || errors.Is(got.err, monitor.ErrTerminalJob) || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || errors.Is(got.err, processgroup.ErrUnconfirmed) || !got.result.matchesJob(third.job) || !slices.Equal(got.result.Calls, []CallUsage{wantMain}) || got.result.Answer != "" || got.result.CriticStopReason != "" || len(got.result.Refutations) != 0 {
+	if !errors.Is(got.err, context.Canceled) || errors.Is(got.err, context.DeadlineExceeded) || errors.Is(got.err, monitor.ErrTerminalJob) || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || !got.result.matchesJob(third.job) || !slices.Equal(got.result.Calls, []CallUsage{wantMain}) || got.result.Answer != "" || got.result.CriticStopReason != "" || len(got.result.Refutations) != 0 {
 		t.Fatalf("canceled paid assignment lost its known raw main receipt: result=%+v error=%v", got.result, got.err)
 	}
 	finalErr := third.sink.finish(got.result, got.err)
@@ -346,12 +302,13 @@ func TestUnixExecutionOwnedWorker(t *testing.T) {
 	if err := os.WriteFile(report+".release", []byte("release"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	released, waitErr := worker.Wait()
-	if !released || waitErr != nil || cmd.ProcessState == nil || !cmd.ProcessState.Success() {
-		t.Fatalf("worker scope or nested commands survived: released=%t error=%v state=%v output=%s", released, waitErr, cmd.ProcessState, output.String())
+	waitErr := cmd.Wait()
+	waited = true
+	if waitErr != nil || cmd.ProcessState == nil || !cmd.ProcessState.Success() {
+		t.Fatalf("direct worker did not finish: error=%v state=%v output=%s", waitErr, cmd.ProcessState, output.String())
 	}
 	if err := endpoint.Close(); err != nil {
-		t.Fatalf("close endpoint after whole-worker release: %v", err)
+		t.Fatalf("close endpoint after direct worker exit: %v", err)
 	}
 	closed = true
 	if _, err := os.Lstat(endpoint.SocketPath()); !errors.Is(err, os.ErrNotExist) {
@@ -372,18 +329,6 @@ func TestUnixExecutionWorkerHelper(t *testing.T) {
 			_ = os.WriteFile(report+".failed", []byte("worker helper failed"), 0600)
 		}
 	}()
-	if data, err := os.ReadFile(report + ".recorded"); err != nil || len(data) == 0 {
-		t.Fatalf("helper acted before parent ownership record: data=%q error=%v", data, err)
-	}
-	if err := processgroup.Configure(64, 512<<20); err != nil {
-		t.Fatal(err)
-	}
-	if err := processgroup.Check(); err != nil {
-		t.Fatalf("nested worker placement unavailable: %v", err)
-	}
-	if err := processgroup.Run(exec.Command(os.Args[0], "-test.run=^$")); err != nil {
-		t.Fatalf("ordinary nested command was not released: %v", err)
-	}
 	if err := workspace.WriteAtomic(report+".ready", []byte(strconv.Itoa(os.Getpid()))); err != nil {
 		t.Fatal(err)
 	}
@@ -408,7 +353,7 @@ func TestUnixExecutionWorkerHelper(t *testing.T) {
 		}
 		return aicli.Result{Answer: answer, Tokens: usage.Tokens{Input: 9, CachedInput: 2, Output: 4}, UsageComplete: true}, nil
 	}}
-	ctx, cancel := context.WithTimeout(context.Background(), 75*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 75*time.Second)
 	defer cancel()
 	for index := 0; index < 2; index++ {
 		if index == 1 {
@@ -426,7 +371,7 @@ func TestUnixExecutionWorkerHelper(t *testing.T) {
 		}
 	}
 	unixWorkerReport(t, ctx, report, ".third-go")
-	if err := RunHTTP(ctx, client, UnixExecutionBaseURL, "local", runner); !errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, monitor.ErrTerminalJob) || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || errors.Is(err, processgroup.ErrUnconfirmed) {
+	if err := RunHTTP(ctx, client, UnixExecutionBaseURL, "local", runner); !errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, monitor.ErrTerminalJob) || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) {
 		t.Fatalf("paid canceled worker assignment: %v", err)
 	}
 	select {

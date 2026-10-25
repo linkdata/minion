@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/linkdata/minion/internal/workspace"
 )
 
 type source struct {
@@ -134,7 +136,7 @@ func userHome() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.EvalSymlinks(home)
+	return workspace.CanonicalPath(home)
 }
 
 func validSHA(sha string) bool {
