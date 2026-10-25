@@ -468,7 +468,7 @@ func TestLocalWorkerRejectedAfterCloseHasNoMissingOutcome(t *testing.T) {
 	}
 	job := testJob(command.Comment)
 	result, err := w.Execute(t.Context(), job, runnerExecutionCheckpoints{})
-	if !result.matchesJob(job) || err == nil || !strings.Contains(err.Error(), "closed") || strings.Contains(err.Error(), "stopped before a final outcome") || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) {
+	if !result.matchesJob(job) || !errors.Is(err, monitor.ErrRequestTransport) || !strings.Contains(err.Error(), "closed") || strings.Contains(err.Error(), "stopped before a final outcome") || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) {
 		t.Fatalf("rejected assignment claimed a missing outcome: result=%+v error=%v", result, err)
 	}
 }
@@ -534,7 +534,7 @@ func TestLocalWorkerCrashBeforeDeliveryReportsExit(t *testing.T) {
 	select {
 	case got := <-done:
 		var exit *exec.ExitError
-		if !got.result.matchesJob(job) || !errors.As(got.err, &exit) || exit.ExitCode() != 7 || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || !strings.Contains(got.err.Error(), "local worker exited") {
+		if !got.result.matchesJob(job) || !errors.As(got.err, &exit) || exit.ExitCode() != 7 || !errors.Is(got.err, monitor.ErrRequestTransport) || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || !strings.Contains(got.err.Error(), "local worker exited") {
 			t.Fatalf("pre-delivery exit lost its diagnostic or became uncertain: result=%+v error=%v", got.result, got.err)
 		}
 	case <-time.After(10 * time.Second):

@@ -16,6 +16,7 @@ import (
 	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/executil"
+	"github.com/linkdata/minion/internal/monitor"
 )
 
 // localWorker owns one direct child and its private HTTP endpoint.
@@ -133,9 +134,9 @@ func (e *Orchestrator) AttachLocalWorker(ctx context.Context, cfg config.Config,
 func (w *localWorker) Execute(ctx context.Context, job Job, sink Checkpoints) (Result, error) {
 	if !w.reuse.CompareAndSwap(workerReusable, workerRunning) {
 		if w.reuse.Load() == workerRetired {
-			return Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head}, errors.New("local worker is closed or not ready for another assignment")
+			return Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head}, fmt.Errorf("%w: local worker is closed or not ready for another assignment", monitor.ErrRequestTransport)
 		}
-		return Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head}, errors.New("local worker is busy or not ready for another assignment")
+		return Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head}, fmt.Errorf("%w: local worker is busy or not ready for another assignment", monitor.ErrRequestTransport)
 	}
 	var state httpExecutionState
 	result, err := w.executor.execute(ctx, job, sink, &state)
@@ -156,6 +157,9 @@ func (w *localWorker) Execute(ctx context.Context, job Job, sink Checkpoints) (R
 		// A received outcome remains the Job result; Close reports lifecycle errors separately.
 		if !state.outcome {
 			err = errors.Join(err, closeErr)
+			if (closed || unavailable) && ctx.Err() == nil && !errors.Is(err, monitor.ErrExecutionOutcomeUnknown) && !errors.Is(err, monitor.ErrTerminalJob) {
+				err = errors.Join(err, monitor.ErrRequestTransport)
+			}
 			if closed && state.admitted {
 				err = errors.Join(err, errors.New("local worker stopped before a final outcome"))
 			}
