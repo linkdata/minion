@@ -109,7 +109,7 @@ func (w *localWorker) awaitHeldPull(ctx context.Context) (waitErr error) {
 	}()
 	for {
 		w.executor.mu.Lock()
-		pull, closed, unavailable, changed := w.executor.pull, w.executor.closed, w.executor.unavailable, w.executor.changed
+		pull, pullDone, closed, unavailable, changed := w.executor.pull, w.executor.pullDone, w.executor.closed, w.executor.unavailable, w.executor.changed
 		w.executor.mu.Unlock()
 		select {
 		case <-w.exited:
@@ -128,7 +128,12 @@ func (w *localWorker) awaitHeldPull(ctx context.Context) (waitErr error) {
 			return errors.New("local worker executor stopped before holding a pull")
 		}
 		if pull {
-			return nil
+			select {
+			case <-pullDone:
+				// Wait for the canceled handler to release its pull slot.
+			default:
+				return nil
+			}
 		}
 		select {
 		case <-w.exited:

@@ -22,6 +22,7 @@ type HTTPExecutor struct {
 	executorID   string
 	active       *httpTransaction
 	pull         bool
+	pullDone     <-chan struct{}
 	closed       bool
 	unavailable  bool
 	changed      chan struct{}
@@ -261,13 +262,19 @@ func (e *HTTPExecutor) serveNext(w http.ResponseWriter, r *http.Request) {
 		httpServerReject(w, "next", http.StatusConflict, httpBinding{}, 0, rejection)
 		return
 	}
+	if r.Context().Err() != nil {
+		e.mu.Unlock()
+		return
+	}
 	e.pull = true
+	e.pullDone = r.Context().Done()
 	e.notifyLocked()
 	e.mu.Unlock()
 	var delivery *httpTransaction
 	defer func() {
 		e.mu.Lock()
 		e.pull = false
+		e.pullDone = nil
 		e.notifyLocked()
 		e.mu.Unlock()
 		if delivery != nil {

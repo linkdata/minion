@@ -95,6 +95,24 @@ func TestLocalWorkerAwaitHeldPull(t *testing.T) {
 	}
 }
 
+func TestLocalWorkerAwaitHeldPullRejectsCanceledRequest(t *testing.T) {
+	w := localWorkerTestStart(t, "run-http-idle")
+	localWorkerTestPull(t, w)
+	canceled := make(chan struct{})
+	close(canceled)
+	w.executor.mu.Lock()
+	w.executor.pullDone = canceled
+	w.executor.mu.Unlock()
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	if err := w.awaitHeldPull(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("canceled held request appeared ready: %v", err)
+	}
+	if w.cmd.ProcessState == nil {
+		t.Fatal("canceled pull left the child live")
+	}
+}
+
 func TestLocalWorkerAwaitHeldPullReportsChildExit(t *testing.T) {
 	w := localWorkerTestStart(t, "precrash")
 	if err := w.cmd.Process.Signal(syscall.SIGUSR1); err != nil {
