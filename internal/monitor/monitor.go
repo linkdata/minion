@@ -485,10 +485,8 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				}
 			}
 			if err := waitCapacity(); err != nil {
-				if len(failures) != firstFailure {
-					if saveErr := m.deferNotification(store, entry.key, notification, entry.since, started); saveErr != nil {
-						return stop(err, saveErr)
-					}
+				if saveErr := m.deferNotification(store, entry.key, notification, entry.since, started); saveErr != nil {
+					return stop(err, saveErr)
 				}
 				return stop(err)
 			}

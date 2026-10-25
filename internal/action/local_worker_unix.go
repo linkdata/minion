@@ -194,11 +194,7 @@ func (w *localWorker) awaitReusable(ctx context.Context) (reuseErr error) {
 		}
 		select {
 		case <-w.exited:
-			err := errors.Join(errors.New("local worker exited before holding a pull"), w.waitErr)
-			if detail := w.startupDiagnostic(); detail != "" {
-				err = errors.Join(err, fmt.Errorf("worker startup diagnostic: %s", detail))
-			}
-			return errors.Join(err, w.Close())
+			return errors.Join(w.exitBeforePull(), w.Close())
 		default:
 		}
 		if w.reuse.Load() == workerRetired {
@@ -214,16 +210,37 @@ func (w *localWorker) awaitReusable(ctx context.Context) (reuseErr error) {
 			reuseErr = errors.Join(errors.New("local worker closed during reuse proof"), w.Close())
 		}
 	}()
-	if err := w.endpoint.checkIdentity(); err != nil {
-		return fmt.Errorf("local worker reuse endpoint: %w", err)
+	if err := w.checkCapacityEndpoint(); err != nil {
+		return err
 	}
 	if err := w.awaitHeldPull(ctx); err != nil {
-		return fmt.Errorf("local worker reuse pull: %w", err)
+		return fmt.Errorf("local worker capacity pull: %w", err)
 	}
-	if err := w.endpoint.checkIdentity(); err != nil {
-		return fmt.Errorf("local worker reuse endpoint: %w", err)
+	if err := w.checkCapacityEndpoint(); err != nil {
+		return err
 	}
 	return nil
+}
+
+func (w *localWorker) checkCapacityEndpoint() error {
+	err := w.endpoint.checkIdentity()
+	if err == nil {
+		return nil
+	}
+	select {
+	case <-w.exited:
+		err = errors.Join(err, w.exitBeforePull())
+	default:
+	}
+	return fmt.Errorf("local worker capacity endpoint: %w", err)
+}
+
+func (w *localWorker) exitBeforePull() error {
+	err := errors.Join(errors.New("local worker exited before holding a pull"), w.waitErr)
+	if detail := w.startupDiagnostic(); detail != "" {
+		err = errors.Join(err, fmt.Errorf("worker startup diagnostic: %s", detail))
+	}
+	return err
 }
 
 func (w *localWorker) startupDiagnostic() string {
@@ -249,11 +266,7 @@ func (w *localWorker) awaitHeldPull(ctx context.Context) (waitErr error) {
 		w.executor.mu.Unlock()
 		select {
 		case <-w.exited:
-			err := errors.Join(errors.New("local worker exited before holding a pull"), w.waitErr)
-			if detail := w.startupDiagnostic(); detail != "" {
-				err = errors.Join(err, fmt.Errorf("worker startup diagnostic: %s", detail))
-			}
-			return err
+			return w.exitBeforePull()
 		default:
 		}
 		select {

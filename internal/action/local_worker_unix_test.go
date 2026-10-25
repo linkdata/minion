@@ -317,6 +317,12 @@ func TestLocalWorkerWaitCapacityReportsBoundedPreflightDiagnostic(t *testing.T) 
 	if pull || w.cmd.ProcessState == nil {
 		t.Fatalf("failed preflight held a pull or left its child live: pull=%t state=%v", pull, w.cmd.ProcessState)
 	}
+	// Recreate a readiness check that claimed the state just before Close removed the socket.
+	w.reuse.Store(workerNeedsPull)
+	err = w.WaitCapacity(ctx)
+	if err == nil || !strings.Contains(err.Error(), "capacity endpoint") || !strings.Contains(err.Error(), "Codex login unavailable") || strings.Contains(err.Error(), secret) {
+		t.Fatalf("socket removal hid the child diagnostic: %v", err)
+	}
 }
 
 func TestLocalWorkerWaitCapacityReportsEndpointFailure(t *testing.T) {
@@ -354,7 +360,7 @@ func TestLocalWorkerWaitCapacityRejectsReplacedEndpoint(t *testing.T) {
 			}
 			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 			defer cancel()
-			if err := w.WaitCapacity(ctx); err == nil || !strings.Contains(err.Error(), "reuse endpoint") || !strings.Contains(err.Error(), "not a socket") {
+			if err := w.WaitCapacity(ctx); err == nil || !strings.Contains(err.Error(), "capacity endpoint") || !strings.Contains(err.Error(), "not a socket") {
 				t.Fatalf("replaced endpoint gained capacity: %v", err)
 			}
 			if data, err := os.ReadFile(path); err != nil || string(data) != "replacement" || w.cmd.ProcessState == nil || w.reuse.Load() != workerRetired {
@@ -1012,7 +1018,7 @@ func TestLocalWorkerReuseRejectsEndpointReplacement(t *testing.T) {
 	if err := os.WriteFile(path, []byte("replacement"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := w.WaitCapacity(ctx); err == nil || !strings.Contains(err.Error(), "reuse endpoint") || !strings.Contains(err.Error(), "not a socket") {
+	if err := w.WaitCapacity(ctx); err == nil || !strings.Contains(err.Error(), "capacity endpoint") || !strings.Contains(err.Error(), "not a socket") {
 		t.Fatalf("replaced endpoint gained a reuse witness: %v", err)
 	}
 	if data, err := os.ReadFile(path); err != nil || string(data) != "replacement" || w.cmd.ProcessState == nil {

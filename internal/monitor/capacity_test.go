@@ -74,6 +74,7 @@ func TestRunOnceWaitsAfterEachPersistedAction(t *testing.T) {
 		{"capacity lost after first action", 2, []string{"wait", "execute:comment:1", "wait"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			clock := now
 			initial := now.Add(-time.Minute)
 			path := filepath.Join(t.TempDir(), "state.json")
 			store := openStateAt(t, path, initial)
@@ -87,7 +88,7 @@ func TestRunOnceWaitsAfterEachPersistedAction(t *testing.T) {
 			}
 			unavailable := errors.New("capacity unavailable")
 			handler := &capacityHandler{failAt: test.failAt, err: unavailable}
-			m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Now: func() time.Time { return now }}
+			m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Now: func() time.Time { return clock }}
 			_, err := m.RunOnce(t.Context(), store)
 			if test.failAt == 0 && err != nil || test.failAt != 0 && !errors.Is(err, unavailable) {
 				t.Fatalf("RunOnce error = %v", err)
@@ -106,8 +107,19 @@ func TestRunOnceWaitsAfterEachPersistedAction(t *testing.T) {
 			if len(saved.Processed) != len(handler.jobs) {
 				t.Fatalf("persisted jobs = %d, executed = %d", len(saved.Processed), len(handler.jobs))
 			}
-			if test.failAt != 0 && (gh.currentChecks != 1 || len(gh.reactions) != 1 || !saved.Cursor.Equal(initial) || !saved.RepositoryCursors["example-owner/example-repo"].Equal(initial)) {
+			if test.failAt != 0 && (gh.currentChecks != 1 || len(gh.reactions) != 1 || len(saved.PendingNotifications) != 1 || !saved.Cursor.Equal(initial) || !saved.RepositoryCursors["example-owner/example-repo"].Equal(initial)) {
 				t.Fatalf("discovery or cursor advanced after capacity loss: current checks=%d reactions=%d cursor=%s repo cursor=%s", gh.currentChecks, len(gh.reactions), saved.Cursor, saved.RepositoryCursors["example-owner/example-repo"])
+			}
+			if test.failAt != 0 {
+				gh.notifications = nil
+				handler.failAt = 0
+				clock = clock.Add(time.Minute)
+				if _, err := m.RunOnce(t.Context(), store); err != nil {
+					t.Fatalf("retry after notification disappeared: %v", err)
+				}
+				if len(handler.jobs) != 2 || handler.jobs[1].Source.Key != "comment:2" || len(store.Data.Processed) != 2 || len(store.Data.PendingNotifications) != 0 {
+					t.Fatalf("second action was lost or first was repeated: jobs=%v processed=%v pending=%v", handler.jobs, store.Data.Processed, store.Data.PendingNotifications)
+				}
 			}
 		})
 	}
