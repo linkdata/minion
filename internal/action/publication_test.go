@@ -667,7 +667,7 @@ func TestPublishedRefutationsAuditTitleRejectsUnprovedCopyAfterScanBudget(t *tes
 		CallUsage{Provider: job.Critic.Provider, Role: roleCritic, Round: 3, ReviewPhase: reviewFull, ReviewComplete: true, Approved: true, NoBlockers: true},
 	)
 	type finding struct{ Verdict, Fingerprint, Title string }
-	findings := make([]finding, 0, len(quotes)+2)
+	findings := make([]finding, 0, len(quotes)+1)
 	for i, quote := range quotes {
 		findings = append(findings, finding{Verdict: "confirmed", Fingerprint: fmt.Sprint(i), Title: quote})
 	}
@@ -695,7 +695,7 @@ func TestPublishedRefutationsAuditTitleRejectsUnprovedCopyAfterScanBudget(t *tes
 	if err := rejectPublishedRefutations(job, result, publication{answer: "Audit summary"}); err == nil {
 		t.Fatal("partial private audit title passed without source proof after scan budget")
 	}
-	findings = append(findings[:len(quotes)], finding{Verdict: "confirmed", Fingerprint: "private", Title: private})
+	findings[len(quotes)] = finding{Verdict: "confirmed", Fingerprint: "private", Title: private}
 	data, err = json.Marshal(findings)
 	if err != nil {
 		t.Fatal(err)
