@@ -357,7 +357,7 @@ func expectedDiscoveryStop(err error, directStopSent bool) bool {
 		return false
 	}
 	if runtime.GOOS == "windows" {
-		return true
+		return exit.ExitCode() == 1 // os.Process.Kill uses TerminateProcess with exit code 1.
 	}
 	status, ok := exit.Sys().(syscall.WaitStatus)
 	return ok && status.Signaled() && (status.Signal() == syscall.SIGINT || status.Signal() == syscall.SIGTERM || status.Signal() == syscall.SIGKILL)
