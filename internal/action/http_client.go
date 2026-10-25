@@ -20,10 +20,19 @@ import (
 var errHTTPWatchStopped = errors.New("HTTP cancellation watch stopped after worker return")
 
 type httpExecutionClient struct {
-	client      *http.Client
-	base        *url.URL
-	outcomeSent atomic.Bool
+	client              *http.Client
+	base                *url.URL
+	outcomeSent         atomic.Bool
+	outcomeAcknowledged bool
 }
+
+type httpRunStatus uint8
+
+const (
+	httpRunFailed httpRunStatus = iota
+	httpRunIdleShutdown
+	httpRunAcknowledged
+)
 
 type httpPullBody struct {
 	io.ReadCloser
@@ -52,6 +61,29 @@ type httpClientCheckpoints struct {
 
 // RunHTTP pulls and executes one assignment. Returning does not prove process release.
 func RunHTTP(ctx context.Context, client *http.Client, baseURL, executorID string, runner *Runner) error {
+	return runHTTP(ctx, client, baseURL, executorID, runner, nil)
+}
+
+// RunHTTPLoop executes distinct assignments until the parent closes an idle pull.
+func RunHTTPLoop(ctx context.Context, client *http.Client, baseURL, executorID string, runner *Runner) error {
+	for {
+		var status httpRunStatus
+		err := runHTTP(ctx, client, baseURL, executorID, runner, &status)
+		switch status {
+		case httpRunIdleShutdown:
+			return nil
+		case httpRunAcknowledged:
+			continue
+		default:
+			if err == nil {
+				return errors.New("HTTP worker ended without an acknowledged outcome")
+			}
+			return err
+		}
+	}
+}
+
+func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID string, runner *Runner, status *httpRunStatus) error {
 	if client == nil || runner == nil || !workspace.ValidIdentitySegment(executorID) {
 		return errors.New("HTTP worker requires a client, runner and valid executor identity")
 	}
@@ -65,12 +97,20 @@ func RunHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	configured := *client
 	configured.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	transport := &httpExecutionClient{client: &configured, base: base}
+	defer func() {
+		if status != nil && transport.outcomeAcknowledged {
+			*status = httpRunAcknowledged
+		}
+	}()
 	pull, err := httpEncode(httpPull{Version: ProtocolVersion, ExecutorID: executorID}, httpControlBytes)
 	if err != nil {
 		return err
 	}
 	var assignment httpAssignment
 	if err := transport.post(ctx, "next", pull, httpJobBytes, &assignment, httpBinding{}, 0); err != nil {
+		if status != nil && ctx.Err() == nil && errors.Is(err, context.Canceled) && !errors.Is(err, monitor.ErrExecutionOutcomeUnknown) {
+			*status = httpRunIdleShutdown
+		}
 		return err
 	}
 	started := time.Now()
@@ -337,6 +377,9 @@ func (c *httpClientCheckpoints) acknowledge(kind string, data []byte, sequence u
 	}
 	if ack.httpBinding != c.binding || ack.Sequence != sequence || ack.Kind != kind || ack.Failure != nil {
 		return httpClientUnknown(kind, errors.New("missing or mismatched successful acknowledgement"))
+	}
+	if kind == "outcome" {
+		c.transport.outcomeAcknowledged = true
 	}
 	return nil
 }

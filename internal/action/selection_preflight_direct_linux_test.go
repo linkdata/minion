@@ -8,14 +8,18 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
+	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -24,6 +28,7 @@ func TestSelectionPreflightDirectChild(t *testing.T) {
 		name, want string
 	}{
 		{name: "ready"},
+		{name: "known failure"},
 		{name: "selected CLI", want: "Codex instruction boundary unavailable"},
 		{name: "selected critic", want: "Claude settings check failed"},
 		{name: "selected skill", want: "selected command skill unavailable"},
@@ -53,7 +58,7 @@ func TestSelectionPreflightDirectChild(t *testing.T) {
 			writeActionTestSkills(t, base, ".agents", testReviewSkillURL, testAuditSkillURL)
 			codexDir := fakeOnPath(t, "codex", preflightCodexCLI)
 			switch tc.name {
-			case "ready", "selected critic":
+			case "ready", "known failure", "selected critic":
 				t.Setenv("PATH", codexDir+string(os.PathListSeparator)+gitOnlyPath(t))
 			case "selected CLI":
 				fakeOnPath(t, "codex", "#!/bin/sh\ncase \"$1 $2\" in 'login status') exit 0;; 'debug prompt-input') printf 'unsupported prompt-input\\n' >&2; exit 2;; esac\nexit 99\n")
@@ -107,18 +112,46 @@ func TestSelectionPreflightDirectChild(t *testing.T) {
 			job := testJob(command.Comment)
 			job.Main.Model, job.Main.Effort, job.Main.Skills = "main-1", "high", []string{testReviewSkillURL}
 			result, err := worker.Execute(ctx, job, runnerExecutionCheckpoints{})
-			if err != nil || result.Answer != "Worker answer" || len(result.Calls) != 1 || result.Validate(job) != nil {
+			if tc.name == "known failure" {
+				if err == nil || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || !result.matchesJob(job) || result.Answer != "" || len(result.Calls) != 1 {
+					t.Fatalf("known failed action lost its outcome: result=%+v error=%v", result, err)
+				}
+			} else if err != nil || result.Answer != "Worker answer" || len(result.Calls) != 1 || result.Validate(job) != nil {
 				t.Fatalf("preflighted child did not execute once: result=%+v error=%v", result, err)
+			}
+			if err := worker.awaitReusable(ctx); err != nil {
+				t.Fatalf("preflighted child did not hold another pull: %v", err)
+			}
+			job.Identity.JobID, job.Identity.AttemptID = "second-job", "second-attempt"
+			result, err = worker.Execute(ctx, job, runnerExecutionCheckpoints{})
+			if err != nil || result.Answer != "Worker answer" || len(result.Calls) != 1 || result.Validate(job) != nil {
+				t.Fatalf("preflighted child did not execute second action: result=%+v error=%v", result, err)
+			}
+			if err := worker.awaitReusable(ctx); err != nil {
+				t.Fatalf("preflighted child did not hold idle pull: %v", err)
+			}
+			if tc.name == "known failure" {
+				if err := worker.Close(); err != nil {
+					t.Fatalf("owner shutdown failed: %v", err)
+				}
+			} else if err := worker.executor.Close(); err != nil {
+				t.Fatalf("held-pull shutdown failed: %v", err)
 			}
 			select {
 			case <-worker.exited:
 			case <-ctx.Done():
-				t.Fatalf("child did not exit after one assignment: %v", ctx.Err())
+				t.Fatalf("child did not exit after held-pull shutdown: %v", ctx.Err())
 			}
-			if worker.waitErr != nil {
-				t.Fatalf("child exited after assignment: %v", worker.waitErr)
+			if tc.name == "ready" && worker.waitErr != nil {
+				t.Fatalf("child did not consume idle shutdown: %v", worker.waitErr)
 			}
-			if data, err := os.ReadFile(filepath.Join(base, "model")); err != nil || string(data) != "1" {
+			if worker.cmd.ProcessState == nil || !worker.cmd.ProcessState.Success() {
+				t.Fatalf("direct child did not exit successfully: %v", worker.cmd.ProcessState)
+			}
+			if err := worker.Close(); err != nil {
+				t.Fatalf("close exited worker: %v", err)
+			}
+			if data, err := os.ReadFile(filepath.Join(base, "model")); err != nil || string(data) != "2" {
 				t.Fatalf("model call marker = %q, %v", data, err)
 			}
 		})
@@ -129,6 +162,8 @@ func TestSelectionPreflightDirectChildHelper(t *testing.T) {
 	if os.Getenv("MINION_PREFLIGHT_CHILD") != "1" {
 		return
 	}
+	ctx, stop := signal.NotifyContext(t.Context(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	base := os.Getenv("MINION_PREFLIGHT_BASE")
 	selection := WorkerSelection{Commands: map[string]config.CommandMapping{
 		"comment": {Action: "comment", Skills: []string{testReviewSkillURL}},
@@ -139,16 +174,21 @@ func TestSelectionPreflightDirectChildHelper(t *testing.T) {
 	if os.Getenv("MINION_PREFLIGHT_CASE") == "selected critic" {
 		selection.Critic = &RoleSettings{Provider: "claude", Model: "critic-1", Effort: "medium"}
 	}
+	calls := 0
 	runner, err := NewSelectedRunner(Runner{WorkRoot: filepath.Join(base, "work"), runModel: func(context.Context, modelRun) (aicli.Result, error) {
-		if err := workspace.WriteAtomic(filepath.Join(base, "model"), []byte("1")); err != nil {
+		calls++
+		if err := workspace.WriteAtomic(filepath.Join(base, "model"), []byte(strconv.Itoa(calls))); err != nil {
 			return aicli.Result{}, err
+		}
+		if os.Getenv("MINION_PREFLIGHT_CASE") == "known failure" && calls == 1 {
+			return aicli.Result{}, errors.New("fixture model failure")
 		}
 		return aicli.Result{Answer: "Worker answer", UsageComplete: true}, nil
 	}}, selection)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := runner.PreflightSelection(t.Context()); err != nil {
+	if err := runner.PreflightSelection(ctx); err != nil {
 		fmt.Fprintln(os.Stderr, "minion preflight:", err)
 		t.Fatalf("preflight: %v", err)
 	}
@@ -160,7 +200,7 @@ func TestSelectionPreflightDirectChildHelper(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer client.CloseIdleConnections()
-	if err := RunHTTP(t.Context(), client, UnixExecutionBaseURL, "local", runner); err != nil {
+	if err := RunHTTPLoop(ctx, client, UnixExecutionBaseURL, "local", runner); err != nil && !(ctx.Err() != nil && errors.Is(err, context.Canceled)) {
 		t.Fatal(err)
 	}
 }
