@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -201,6 +202,9 @@ func TestImportAttestsUnsortedBinaryEmptyModeAndDeletionChanges(t *testing.T) {
 }
 
 func TestSourceAliasesAreUnsupportedForDefaultAndPullRequestCheckout(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("git~1 may resolve to the fixture repository's .git directory")
+	}
 	const path = "git~1/hooks/test"
 	fixture := newFixture(t)
 	alias := filepath.Join(fixture.source, filepath.FromSlash(path))

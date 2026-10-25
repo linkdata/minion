@@ -188,6 +188,9 @@ func TestFixIndexBaselineIsTreeWithoutCommit(t *testing.T) {
 func TestFixIndexRejectsBaselineMetadataAliasWithoutHidingLaunchErrors(t *testing.T) {
 	for _, name := range []string{"GIT~1/file", ".git./file"} {
 		t.Run(name, func(t *testing.T) {
+			if runtime.GOOS == "windows" {
+				t.Skip("Windows normalizes metadata alias fixture paths")
+			}
 			source, metadata := t.TempDir(), t.TempDir()
 			writeIndexFixture(t, source, name, []byte("source"))
 			_, err := NewOfflineIndex(context.Background(), metadata, source, nil)
@@ -706,10 +709,10 @@ func TestFixIndexRejectsTrackedGrowthBeforeHashing(t *testing.T) {
 func TestFixIndexExcludesModelCreatedGitMetadata(t *testing.T) {
 	index, source := offlineIndexFixture(t, []workspace.File{{Path: "tracked/source", Mode: workspace.Regular, Data: []byte("before")}})
 	writeIndexFixture(t, source, ".GIT/config", []byte("untrusted metadata"))
-	writeIndexFixture(t, source, "tracked/.Git/config", []byte("untrusted nested metadata"))
 	if _, err := runGit(context.Background(), filepath.Join(source, "tracked"), "init", "--quiet", "--template="); err != nil {
 		t.Fatal(err)
 	}
+	writeIndexFixture(t, source, "tracked/.Git/minion-marker", []byte("untrusted nested metadata"))
 	writeIndexFixture(t, source, "tracked/source", []byte("after"))
 	changes, err := index.Changes(context.Background())
 	want := []workspace.Change{{Path: "tracked/source", Mode: workspace.Regular, Data: []byte("after")}}

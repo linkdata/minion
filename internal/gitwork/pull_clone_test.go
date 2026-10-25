@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -117,6 +118,9 @@ func TestClonePullRequestSkipsUnusedBaseTipPreflight(t *testing.T) {
 }
 
 func TestPullRequestRejectsDeletedMergeBaseMetadataAliasBeforeContent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("git~1 may resolve to the fixture repository's .git directory")
+	}
 	const name = "git~1/hooks/x"
 	fixture := newFixture(t)
 	path := filepath.Join(fixture.source, filepath.FromSlash(name))
