@@ -34,7 +34,7 @@ func localWorkerTestStart(t *testing.T, mode string) *localWorker {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		if err := w.Close(); err != nil && mode != "hold" && mode != "known-hold" {
+		if err := w.Close(); err != nil && mode != "hold" && mode != "known-hold" && mode != "known" && mode != "crash" && mode != "precrash" {
 			t.Errorf("close local worker: %v", err)
 		}
 		if t.Failed() {
@@ -64,8 +64,9 @@ func TestLocalWorkerKnownOutcomeSurvivesChildExit(t *testing.T) {
 	if w.waitErr == nil || w.cmd.ProcessState == nil {
 		t.Fatalf("nonzero direct child exit was not observed: wait=%v state=%v", w.waitErr, w.cmd.ProcessState)
 	}
-	if err := w.Close(); err != nil {
-		t.Fatalf("close after known outcome: %v", err)
+	var exitErr *exec.ExitError
+	if err := w.Close(); !errors.As(err, &exitErr) || exitErr.ExitCode() != 7 || !strings.Contains(err.Error(), "local worker exited") {
+		t.Fatalf("spontaneous exit was not reported separately: %v", err)
 	}
 	if _, err := os.Lstat(w.endpoint.SocketPath()); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("owned endpoint remains after child exit: %v", err)
@@ -135,6 +136,25 @@ func TestLocalWorkerBudgetQuarantineStopsLiveChild(t *testing.T) {
 	}
 	if _, err := os.Lstat(w.endpoint.SocketPath()); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("budget quarantine left owned endpoint: %v", err)
+	}
+}
+
+func TestLocalWorkerBudgetBeforeDeliveryStopsLiveChild(t *testing.T) {
+	w := localWorkerTestStart(t, "hold")
+	job := testJob(command.Comment)
+	job.RuntimeBudget = 100 * time.Millisecond
+	result, err := w.Execute(t.Context(), job, runnerExecutionCheckpoints{})
+	if t.Context().Err() != nil || !result.matchesJob(job) || !errors.Is(err, context.DeadlineExceeded) || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) {
+		t.Fatalf("undelivered budget expiry became uncertain or lost: result=%+v error=%v caller=%v", result, err, t.Context().Err())
+	}
+	w.executor.mu.Lock()
+	closed := w.executor.closed
+	w.executor.mu.Unlock()
+	if !closed || w.cmd.ProcessState == nil {
+		t.Fatalf("undelivered budget expiry left child live: closed=%v state=%v", closed, w.cmd.ProcessState)
+	}
+	if _, err := os.Lstat(w.endpoint.SocketPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("undelivered budget expiry left owned endpoint: %v", err)
 	}
 }
 

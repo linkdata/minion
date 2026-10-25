@@ -70,7 +70,7 @@ func (w *localWorker) Execute(ctx context.Context, job Job, sink Checkpoints) (R
 	w.executor.mu.Lock()
 	closed, unavailable := w.executor.closed, w.executor.unavailable
 	w.executor.mu.Unlock()
-	if closed || unavailable || state.admitted && ctx.Err() != nil {
+	if closed || unavailable || state.admitted && (ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded)) {
 		closeErr := w.Close()
 		// A received outcome remains the Job result; Close reports lifecycle errors separately.
 		if !state.outcome {
@@ -78,7 +78,7 @@ func (w *localWorker) Execute(ctx context.Context, job Job, sink Checkpoints) (R
 			if closed {
 				err = errors.Join(err, errors.New("local worker stopped before a final outcome"))
 			}
-			if w.waitErr != nil && closed {
+			if w.waitErr != nil && closed && !errors.Is(closeErr, w.waitErr) {
 				err = errors.Join(err, fmt.Errorf("local worker exited: %w", w.waitErr))
 			}
 		}
@@ -90,10 +90,18 @@ func (w *localWorker) Execute(ctx context.Context, job Job, sink Checkpoints) (R
 // the direct child once before the endpoint closes its owned socket.
 func (w *localWorker) Close() error {
 	w.closeOnce.Do(func() {
+		// A child already reaped before Close began exited on its own.
+		select {
+		case <-w.exited:
+			if w.waitErr != nil {
+				w.closeErr = fmt.Errorf("local worker exited: %w", w.waitErr)
+			}
+		default:
+		}
 		coreErr := w.executor.Close()
 		w.cancel()
 		<-w.exited
-		w.closeErr = errors.Join(coreErr, w.endpoint.Close())
+		w.closeErr = errors.Join(w.closeErr, coreErr, w.endpoint.Close())
 	})
 	return w.closeErr
 }
