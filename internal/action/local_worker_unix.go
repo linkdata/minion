@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -15,7 +14,6 @@ import (
 
 	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/executil"
-	"github.com/linkdata/minion/internal/monitor"
 )
 
 // localWorker owns one direct child and its private HTTP endpoint.
@@ -28,7 +26,6 @@ type localWorker struct {
 	childMu   sync.Mutex
 	stopSent  atomic.Bool
 	stderr    *bounded.Tail
-	secrets   []string
 	waitErr   error
 	closeOnce sync.Once
 	closeErr  error
@@ -57,13 +54,9 @@ func startLocalWorker(runtimeDir, executorID, path string, args []string, config
 	}
 	stderr := &bounded.Tail{}
 	cmd.Stderr = stderr
-	env := cmd.Env
-	if env == nil {
-		env = os.Environ()
-	}
 	cmd.Cancel = commandCancel
 	executil.Prepare(cmd)
-	w := &localWorker{executor: executor, endpoint: endpoint, cmd: cmd, cancel: cancel, exited: make(chan struct{}), stderr: stderr, secrets: orderWorkerSecrets(workerCredentialValues(env))}
+	w := &localWorker{executor: executor, endpoint: endpoint, cmd: cmd, cancel: cancel, exited: make(chan struct{}), stderr: stderr}
 	preparedCancel := cmd.Cancel
 	cmd.Cancel = func() error {
 		err := preparedCancel()
@@ -113,22 +106,12 @@ func (w *localWorker) Execute(ctx context.Context, job Job, sink Checkpoints) (R
 }
 
 func (w *localWorker) startupDiagnostic() string {
-	raw := w.stderr.String()
-	if raw == "" {
-		return ""
-	}
-	if w.stderr.Truncated {
-		if end := strings.IndexByte(raw, '\n'); end >= 0 {
-			raw = raw[end+1:]
-		} else {
-			raw = ""
+	for _, line := range strings.Split(w.stderr.String(), "\n") {
+		if message, ok := strings.CutPrefix(line, "minion preflight: "); ok && validPreflightMessage(message) {
+			return message
 		}
 	}
-	detail := strings.TrimSpace(redactActionText(raw, w.secrets...))
-	if detail == "" {
-		detail = "worker startup output could not be safely displayed"
-	}
-	return monitor.InertLogText(detail)
+	return ""
 }
 
 // awaitHeldPull proves only that this endpoint accepted a pull while its

@@ -42,7 +42,7 @@ func localWorkerTestStart(t *testing.T, mode string) *localWorker {
 			t.Errorf("close local worker: %v", err)
 		}
 		if t.Failed() {
-			t.Logf("local worker output: %s", monitor.InertLogText(redactActionText(output.String(), w.secrets...)))
+			t.Logf("local worker output: %s", monitor.InertLogText(output.String()))
 			if detail := w.startupDiagnostic(); detail != "" {
 				t.Logf("local worker stderr: %s", detail)
 			}
@@ -209,7 +209,7 @@ func TestLocalWorkerAwaitHeldPullReportsBoundedPreflightDiagnostic(t *testing.T)
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	err := w.awaitHeldPull(ctx)
-	if err == nil || !strings.Contains(err.Error(), "selected Codex CLI unavailable") || !strings.Contains(err.Error(), `\nforged log line`) || strings.Contains(err.Error(), "\nforged log line") || strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), ghToken) || strings.Contains(err.Error(), pgPassword) || strings.Contains(err.Error(), proxy) || strings.Contains(err.Error(), preflightTestProxyUser) || strings.Contains(err.Error(), preflightTestProxyPassword) || strings.Contains(err.Error(), "p@ss") || len(err.Error()) > 9<<10 {
+	if err == nil || !strings.Contains(err.Error(), "Codex login unavailable") || strings.Contains(err.Error(), "forged log line") || strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), ghToken) || strings.Contains(err.Error(), pgPassword) || strings.Contains(err.Error(), proxy) || strings.Contains(err.Error(), preflightTestProxyUser) || strings.Contains(err.Error(), preflightTestProxyPassword) || strings.Contains(err.Error(), "p@ss") || len(err.Error()) > 9<<10 {
 		t.Fatalf("preflight diagnostic was lost, unbounded or active: %v", err)
 	}
 	w.executor.mu.Lock()
@@ -750,6 +750,7 @@ func TestLocalWorkerHelper(t *testing.T) {
 	}
 	if mode == "preflight-fail" {
 		fmt.Fprintln(os.Stderr, strings.Repeat("x", 16<<10)+"\nselected Codex CLI unavailable "+os.Getenv("CODEX_API_KEY")+strings.TrimSpace(os.Getenv("GH_TOKEN"))+" "+os.Getenv("PGPASSWORD")+" "+os.Getenv("HTTPS_PROXY")+" "+preflightTestProxyUser+" "+preflightTestProxyPassword+" p@ss\nforged log line")
+		fmt.Fprintln(os.Stderr, "minion preflight: Codex login unavailable")
 		os.Exit(7)
 	}
 	if mode == "stop-exit" || mode == "stop-success" {

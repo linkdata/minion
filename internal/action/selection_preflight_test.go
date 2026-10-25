@@ -1,16 +1,24 @@
 package action
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
-	"unicode/utf8"
 
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
 )
+
+func requirePreflightMessage(t *testing.T, err error, want string) {
+	t.Helper()
+	if err == nil || err.Error() != want || !validPreflightMessage(err.Error()) {
+		t.Fatalf("preflight error = %v, want exact safe message %q", err, want)
+	}
+}
 
 func selectedPreflightRunner(t *testing.T, commands map[string]config.CommandMapping) *Runner {
 	t.Helper()
@@ -26,18 +34,23 @@ func selectedPreflightRunner(t *testing.T, commands map[string]config.CommandMap
 
 func TestPreflightSelectionRequiresFrozenSelectionAndWorkRoot(t *testing.T) {
 	var missing *Runner
-	if err := missing.PreflightSelection(t.Context()); err == nil || !strings.Contains(err.Error(), "runner is missing") {
-		t.Fatalf("nil runner preflight = %v", err)
-	}
-	if err := (&Runner{WorkRoot: t.TempDir()}).PreflightSelection(t.Context()); err == nil || !strings.Contains(err.Error(), "no frozen selection") {
-		t.Fatalf("unselected runner preflight = %v", err)
-	}
+	requirePreflightMessage(t, missing.PreflightSelection(t.Context()), preflightRunnerUnavailable)
+	requirePreflightMessage(t, (&Runner{WorkRoot: t.TempDir()}).PreflightSelection(t.Context()), preflightSelectionUnavailable)
 	runner := selectedPreflightRunner(t, map[string]config.CommandMapping{
 		"review": {Action: string(command.Review), Skills: []string{testReviewSkillURL}},
 	})
 	runner.WorkRoot = ""
-	if err := runner.PreflightSelection(t.Context()); err == nil || !strings.Contains(err.Error(), "work root is required") {
-		t.Fatalf("empty work root preflight = %v", err)
+	requirePreflightMessage(t, runner.PreflightSelection(t.Context()), preflightWorkRootUnavailable)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	err := runner.PreflightSelection(ctx)
+	// The missing work root takes precedence over cancellation.
+	requirePreflightMessage(t, err, preflightWorkRootUnavailable)
+	runner.WorkRoot = t.TempDir()
+	err = runner.PreflightSelection(ctx)
+	requirePreflightMessage(t, err, preflightCanceled)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled preflight lost cause: %v", err)
 	}
 }
 
@@ -48,8 +61,9 @@ func TestPreflightSelectionChecksEverySelectedRequiredSkill(t *testing.T) {
 		"fix":    {Action: string(command.Fix), Skills: []string{testFixSkillURL}},
 	})
 	err := runner.PreflightSelection(t.Context())
-	if err == nil || !strings.Contains(err.Error(), "fix") || !strings.Contains(err.Error(), "not installed") {
-		t.Fatalf("missing selected skill preflight = %v", err)
+	requirePreflightMessage(t, err, preflightCommandSkillUnavailable)
+	if cause := errors.Unwrap(err); cause == nil || !strings.Contains(cause.Error(), "not installed") {
+		t.Fatalf("missing selected skill cause = %v", cause)
 	}
 	if len(runner.Codex.Skills) != 0 || runner.selection.Commands["fix"].Skills[0] != testFixSkillURL {
 		t.Fatal("preflight changed runner or frozen selection")
@@ -67,8 +81,9 @@ func TestPreflightSelectionChecksOnlySelectedAuditTools(t *testing.T) {
 		"audit":  {Action: string(command.SecurityAudit), Skills: []string{testAuditSkillURL}},
 	})
 	err := runner.PreflightSelection(t.Context())
-	if err == nil || !strings.Contains(err.Error(), "audit prerequisites") || !strings.Contains(err.Error(), "validate-findings.cjs") {
-		t.Fatalf("selected audit toolchain preflight = %v", err)
+	requirePreflightMessage(t, err, preflightAuditToolchainUnavailable)
+	if cause := errors.Unwrap(err); cause == nil || !strings.Contains(cause.Error(), "validate-findings.cjs") {
+		t.Fatalf("selected audit toolchain cause = %v", cause)
 	}
 	assertEmptyDir(t, runner.WorkRoot)
 
@@ -77,9 +92,7 @@ func TestPreflightSelectionChecksOnlySelectedAuditTools(t *testing.T) {
 	})
 	t.Setenv("PATH", t.TempDir())
 	err = reviewOnly.PreflightSelection(t.Context())
-	if err == nil || !strings.Contains(err.Error(), "git readiness") || strings.Contains(err.Error(), "audit prerequisites") {
-		t.Fatalf("review-only preflight reached unselected audit: %v", err)
-	}
+	requirePreflightMessage(t, err, preflightGitReadinessUnavailable)
 }
 
 func TestPreflightSelectionRequiresAuditInCommandMapping(t *testing.T) {
@@ -93,20 +106,19 @@ func TestPreflightSelectionRequiresAuditInCommandMapping(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := runner.PreflightSelection(t.Context()); err == nil || !strings.Contains(err.Error(), "no selected security-audit skill") {
-		t.Fatalf("audit borrowed optional skill: %v", err)
-	}
+	requirePreflightMessage(t, runner.PreflightSelection(t.Context()), preflightAuditSkillUnavailable)
 }
 
-func TestPreflightSelectionRedactsAndBoundsErrors(t *testing.T) {
+func TestPreflightSelectionNeverDisplaysRawCauses(t *testing.T) {
 	const key = "preflight-secret-key"
 	runner := selectedPreflightRunner(t, map[string]config.CommandMapping{
 		"review": {Action: string(command.Review), Skills: []string{"https://github.com/o/r/tree/main/skills/" + key}},
 	})
 	runner.Codex.APIKey = key
 	err := runner.PreflightSelection(t.Context())
-	if err == nil || strings.Contains(err.Error(), key) || !strings.Contains(err.Error(), "[redacted]") {
-		t.Fatalf("unredacted skill error: %v", err)
+	requirePreflightMessage(t, err, preflightCommandSkillUnavailable)
+	if cause := errors.Unwrap(err); cause == nil || !strings.Contains(cause.Error(), key) {
+		t.Fatalf("preflight lost raw skill cause: %v", cause)
 	}
 	if runtime.GOOS == "windows" {
 		t.Skip("oversized path errors differ on Windows")
@@ -117,16 +129,51 @@ func TestPreflightSelectionRedactsAndBoundsErrors(t *testing.T) {
 	runner.Codex.APIKey = key
 	runner.WorkRoot = filepath.Join(t.TempDir(), strings.Repeat("a", 100)+key+strings.Repeat("b", 12000))
 	err = runner.PreflightSelection(t.Context())
-	if err == nil {
-		t.Fatal("invalid work root passed preflight")
+	requirePreflightMessage(t, err, preflightWorkRootInvalid)
+	if cause := errors.Unwrap(err); cause == nil || !strings.Contains(cause.Error(), key) {
+		t.Fatalf("preflight lost raw work-root cause: %v", cause)
 	}
-	if strings.Contains(err.Error(), key) || len(err.Error()) > httpFailureMessageLimit || !utf8.ValidString(err.Error()) {
-		t.Fatalf("unsafe preflight error: bytes=%d error=%v", len(err.Error()), err)
+}
+
+func TestPreflightSelectionHidesNativeCredentialEcho(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake Codex CLI uses a POSIX shell")
 	}
-	if !strings.Contains(err.Error(), "[redacted]") || !strings.HasSuffix(err.Error(), " [truncated]") {
-		t.Fatalf("preflight error was not redacted and bounded: %q", err)
+	installActionTestSkills(t, testReviewSkillURL)
+	t.Setenv("CODEX_HOME", t.TempDir())
+	const token = "native-preflight-token"
+	t.Setenv("CODEX_API_KEY", token)
+	fakeOnPath(t, "codex", `#!/bin/sh
+case "$1 $2" in
+  'debug prompt-input')
+    case " $* " in
+      *' skills.include_instructions=true '*) printf '%s\n' '[{"role":"user","content":[{"text":"MINION_TRUSTED_PROMPT_78 MINION_UNTRUSTED_AGENTS_78 MINION_UNTRUSTED_SKILL_78"}]}]' ;;
+      *) printf '%s\n' '[{"role":"user","content":[{"text":"MINION_TRUSTED_PROMPT_78"}]}]' ;;
+    esac
+    exit 0 ;;
+esac
+case "$1" in
+  app-server) printf '%s\n' "$CODEX_API_KEY" >&2; exit 7 ;;
+esac
+exit 99
+`)
+	runner := selectedPreflightRunner(t, map[string]config.CommandMapping{
+		"review": {Action: string(command.Review), Skills: []string{testReviewSkillURL}},
+	})
+	err := runner.PreflightSelection(t.Context())
+	requirePreflightMessage(t, err, preflightCodexInvocationUnsupported)
+	if cause := errors.Unwrap(err); cause == nil || !strings.Contains(cause.Error(), token) {
+		t.Fatalf("fake CLI did not echo the native credential into the raw cause: %v", cause)
 	}
-	if !strings.Contains(err.Error(), "worker work root") {
-		t.Fatalf("preflight lost work root context: %v", err)
+}
+
+func TestValidPreflightMessageRejectsInjectedOutput(t *testing.T) {
+	for _, message := range []string{
+		"", "Codex login unavailable\nsecret", "selected command skill unavailable: secret",
+		"worker runner unavailable ", "preflight: worker runner unavailable",
+	} {
+		if validPreflightMessage(message) {
+			t.Fatalf("accepted nonconstant preflight message %q", message)
+		}
 	}
 }

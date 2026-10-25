@@ -24,11 +24,11 @@ func TestSelectionPreflightDirectChild(t *testing.T) {
 		name, want string
 	}{
 		{name: "ready"},
-		{name: "selected CLI", want: "codex instruction boundary"},
-		{name: "selected critic", want: "claude settings"},
-		{name: "selected skill", want: "codex skill"},
-		{name: "Git", want: "Git 2.45.1 or later"},
-		{name: "audit tooling", want: "audit validator"},
+		{name: "selected CLI", want: "Codex instruction boundary unavailable"},
+		{name: "selected critic", want: "Claude settings check failed"},
+		{name: "selected skill", want: "selected command skill unavailable"},
+		{name: "Git", want: "Git readiness unavailable"},
+		{name: "audit tooling", want: "audit toolchain unavailable"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			base, err := os.MkdirTemp(os.TempDir(), "minion-preflight-")
@@ -149,7 +149,7 @@ func TestSelectionPreflightDirectChildHelper(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := runner.PreflightSelection(t.Context()); err != nil {
-		fmt.Fprintln(os.Stderr, "preflight:", err)
+		fmt.Fprintln(os.Stderr, "minion preflight:", err)
 		t.Fatalf("preflight: %v", err)
 	}
 	if err := workspace.WriteAtomic(filepath.Join(base, "pull"), []byte("ready")); err != nil {
@@ -180,7 +180,7 @@ func TestPreflightSelectionRedactsNativeCredentialFromCLIError(t *testing.T) {
 		"review": {Action: string(command.Review), Skills: []string{testReviewSkillURL}},
 	})
 	err := runner.PreflightSelection(t.Context())
-	if err == nil || strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), databasePassword) || strings.Contains(err.Error(), proxy) || !strings.Contains(err.Error(), "[redacted]") {
+	if err == nil || strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), databasePassword) || strings.Contains(err.Error(), proxy) || err.Error() != "Codex model or invocation unsupported" {
 		t.Fatalf("native credential escaped preflight error redaction: %v", err)
 	}
 }
