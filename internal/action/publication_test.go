@@ -653,7 +653,7 @@ func TestPublishedRefutationsAuditTitleRejectsUnprovedCopyAfterScanBudget(t *tes
 	job := withClaudeCritic(testJob(command.SecurityAudit))
 	job.CriticMaxRounds = 3
 	var quotes []string
-	for i := range 990 {
+	for i := range 982 {
 		quotes = append(quotes, fmt.Sprintf("Existing source quote %03d is already public.", i))
 	}
 	job.Source.Files[0].Data = []byte(strings.Join(quotes, "\n") + "\n" + strings.Repeat("f", 1<<20))
@@ -671,7 +671,6 @@ func TestPublishedRefutationsAuditTitleRejectsUnprovedCopyAfterScanBudget(t *tes
 	for i, quote := range quotes {
 		findings = append(findings, finding{Verdict: "confirmed", Fingerprint: fmt.Sprint(i), Title: quote})
 	}
-	findings = append(findings, finding{Verdict: "confirmed", Fingerprint: "partial", Title: "Background: " + private})
 	data, err := json.Marshal(findings)
 	if err != nil {
 		t.Fatal(err)
@@ -684,10 +683,19 @@ func TestPublishedRefutationsAuditTitleRejectsUnprovedCopyAfterScanBudget(t *tes
 	if err := result.validate(job, false); err != nil {
 		t.Fatalf("partial result and refutations are not structurally valid: %v", err)
 	}
+	if err := rejectPublishedRefutations(job, result, publication{answer: "Audit summary"}); err != nil {
+		t.Fatalf("public audit titles exhausted the source scan budget: %v", err)
+	}
+	findings = append(findings, finding{Verdict: "confirmed", Fingerprint: "partial", Title: "Background: " + private})
+	data, err = json.Marshal(findings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result.Artifacts[0].Data = data
 	if err := rejectPublishedRefutations(job, result, publication{answer: "Audit summary"}); err == nil {
 		t.Fatal("partial private audit title passed without source proof after scan budget")
 	}
-	findings = append(findings, finding{Verdict: "confirmed", Fingerprint: "private", Title: private})
+	findings = append(findings[:len(quotes)], finding{Verdict: "confirmed", Fingerprint: "private", Title: private})
 	data, err = json.Marshal(findings)
 	if err != nil {
 		t.Fatal(err)
