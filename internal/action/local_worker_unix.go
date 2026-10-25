@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -28,6 +29,7 @@ type localWorker struct {
 	childMu   sync.Mutex
 	stopSent  atomic.Bool
 	stderr    *bounded.Tail
+	secrets   []string
 	waitErr   error
 	closeOnce sync.Once
 	closeErr  error
@@ -73,11 +75,15 @@ func startLocalWorker(runtimeDir, executorID, path string, args []string, config
 	if cmd.Stderr == nil {
 		cmd.Stderr = stderr
 	} else {
-		cmd.Stderr = io.MultiWriter(lockedWriter{outputMu, cmd.Stderr}, stderr)
+		cmd.Stderr = io.MultiWriter(stderr, lockedWriter{outputMu, cmd.Stderr})
+	}
+	env := cmd.Env
+	if env == nil {
+		env = os.Environ()
 	}
 	cmd.Cancel = commandCancel
 	executil.Prepare(cmd)
-	w := &localWorker{executor: executor, endpoint: endpoint, cmd: cmd, cancel: cancel, exited: make(chan struct{}), stderr: stderr}
+	w := &localWorker{executor: executor, endpoint: endpoint, cmd: cmd, cancel: cancel, exited: make(chan struct{}), stderr: stderr, secrets: workerCredentialValues(env)}
 	preparedCancel := cmd.Cancel
 	cmd.Cancel = func() error {
 		err := preparedCancel()
@@ -141,7 +147,19 @@ func (w *localWorker) awaitHeldPull(ctx context.Context) (waitErr error) {
 		select {
 		case <-w.exited:
 			err := errors.Join(errors.New("local worker exited before holding a pull"), w.waitErr)
-			if detail := strings.TrimSpace(w.stderr.String()); detail != "" {
+			if raw := w.stderr.String(); raw != "" {
+				if w.stderr.Truncated {
+					if end := strings.IndexByte(raw, '\n'); end >= 0 {
+						raw = raw[end+1:]
+					} else {
+						raw = ""
+					}
+				}
+				raw = strings.TrimSpace(raw)
+				detail := redactActionText(raw, w.secrets...)
+				if detail == "" {
+					detail = "worker startup output could not be safely displayed"
+				}
 				err = errors.Join(err, fmt.Errorf("worker startup diagnostic: %s", monitor.InertLogText(detail)))
 			}
 			return err

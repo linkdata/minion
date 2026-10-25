@@ -165,6 +165,22 @@ func TestSelectionPreflightDirectChildHelper(t *testing.T) {
 	}
 }
 
+func TestPreflightSelectionRedactsNativeCredentialFromCLIError(t *testing.T) {
+	installActionTestSkills(t, testReviewSkillURL)
+	t.Setenv("CODEX_HOME", t.TempDir())
+	const secret = "native-preflight-credential"
+	t.Setenv("CODEX_API_KEY", secret)
+	script := strings.Replace(preflightCodexCLI, "  app-server)\n", "  app-server)\n    printf '%s\\n' \"$CODEX_API_KEY\" >&2\n    exit 7\n", 1)
+	fakeOnPath(t, "codex", script)
+	runner := selectedPreflightRunner(t, map[string]config.CommandMapping{
+		"review": {Action: string(command.Review), Skills: []string{testReviewSkillURL}},
+	})
+	err := runner.PreflightSelection(t.Context())
+	if err == nil || strings.Contains(err.Error(), secret) || !strings.Contains(err.Error(), "[redacted]") {
+		t.Fatalf("native credential escaped preflight error redaction: %v", err)
+	}
+}
+
 const preflightCodexCLI = `#!/bin/sh
 case "$1 $2" in
   'login status') exit 0 ;;

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/linkdata/minion/internal/claudecli"
 	"github.com/linkdata/minion/internal/codexcli"
@@ -23,7 +24,8 @@ func (r *Runner) PreflightSelection(ctx context.Context) (resultErr error) {
 		if resultErr == nil {
 			return
 		}
-		resultErr = redactActionError(resultErr, r.Codex.APIKey, r.Claude.APIKey)
+		secrets := append([]string{r.Codex.APIKey, r.Claude.APIKey}, workerCredentialValues(os.Environ())...)
+		resultErr = redactActionError(resultErr, secrets...)
 		if message := httpFailureDiagnostic(resultErr.Error()); message != resultErr.Error() {
 			resultErr = redactedActionError{cause: resultErr, message: message}
 		}
@@ -43,7 +45,7 @@ func (r *Runner) PreflightSelection(ctx context.Context) (resultErr error) {
 	}
 	configured := *r
 	configured.Logger = nil
-	var auditSkills []string
+	var auditSkill string
 	for name, mapping := range r.selection.Commands {
 		role := r.selection.Main
 		role.Skills = mapping.Skills
@@ -63,7 +65,7 @@ func (r *Runner) PreflightSelection(ctx context.Context) (resultErr error) {
 			if !auditSelected || skill == "" {
 				return fmt.Errorf("worker command %q has no selected security-audit skill", name)
 			}
-			auditSkills = append(auditSkills, skill)
+			auditSkill = skill
 		}
 	}
 	if r.selection.Critic != nil {
@@ -71,16 +73,14 @@ func (r *Runner) PreflightSelection(ctx context.Context) (resultErr error) {
 			return fmt.Errorf("worker critic: %w", err)
 		}
 	}
-	if len(auditSkills) != 0 {
+	if auditSkill != "" {
 		dir, err := os.MkdirTemp(workRoot, ".minion-audit-preflight-")
 		if err != nil {
 			return fmt.Errorf("audit prerequisites: %w", err)
 		}
 		defer func() { resultErr = errors.Join(resultErr, os.RemoveAll(dir)) }()
-		for _, skill := range auditSkills {
-			if _, err := checkAuditTools(ctx, dir, skill); err != nil {
-				return fmt.Errorf("audit prerequisites: %w", err)
-			}
+		if _, err := checkAuditTools(ctx, dir, auditSkill); err != nil {
+			return fmt.Errorf("audit prerequisites: %w", err)
 		}
 	}
 	if err := gitwork.Check(ctx, workRoot); err != nil {
@@ -113,4 +113,19 @@ func (r *Runner) PreflightSelection(ctx context.Context) (resultErr error) {
 		}
 	}
 	return nil
+}
+
+func workerCredentialValues(env []string) []string {
+	var secrets []string
+	for _, entry := range env {
+		name, value, ok := strings.Cut(entry, "=")
+		if !ok || value == "" {
+			continue
+		}
+		switch strings.ToUpper(name) {
+		case "CODEX_API_KEY", "CODEX_ACCESS_TOKEN", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN", "GH_TOKEN", "GITHUB_TOKEN":
+			secrets = append(secrets, value)
+		}
+	}
+	return secrets
 }
