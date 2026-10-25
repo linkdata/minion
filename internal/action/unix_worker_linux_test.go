@@ -38,6 +38,11 @@ func TestUnixExecutionDirectWorker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(base); err != nil {
+			t.Errorf("remove Unix worker fixture %s: %v", base, err)
+		}
+	})
 	skillDir := filepath.Join(base, ".agents", "skills", name)
 	runtimeDir := filepath.Join(skillDir, "socket")
 	grant := filepath.Join(skillDir, "SKILL.md")

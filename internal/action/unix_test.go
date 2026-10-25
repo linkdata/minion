@@ -232,7 +232,11 @@ func TestUnixEndpointClosePreservesReplacement(t *testing.T) {
 				if err := os.Rename(dir, moved); err != nil {
 					t.Fatal(err)
 				}
-				t.Cleanup(func() { _ = os.RemoveAll(moved) })
+				t.Cleanup(func() {
+					if err := os.RemoveAll(moved); err != nil {
+						t.Errorf("remove moved Unix fixture %s: %v", moved, err)
+					}
+				})
 				if err := os.Mkdir(dir, 0700); err != nil {
 					t.Fatal(err)
 				}
@@ -786,7 +790,11 @@ func unixTestDirectory(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	t.Cleanup(func() {
+		if err := os.RemoveAll(dir); err != nil {
+			t.Errorf("remove Unix test directory %s: %v", dir, err)
+		}
+	})
 	return dir
 }
 
