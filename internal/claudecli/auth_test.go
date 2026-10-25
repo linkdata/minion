@@ -67,16 +67,9 @@ func TestAuthenticationCanonicalParent(t *testing.T) {
 func TestAPIKeyConfiguration(t *testing.T) {
 	for _, validate := range []bool{false, true} {
 		t.Run(map[bool]string{false: "run", true: "validate"}[validate], func(t *testing.T) {
-			fakeExecutable(t, "bwrap", "exit 99\n")
-			fakeExecutable(t, "socat", "exit 99\n")
 			binary := fakeExecutable(t, "claude", `test -z "$ANTHROPIC_API_KEY$CLAUDE_CODE_OAUTH_TOKEN$ANTHROPIC_AUTH_TOKEN" || exit 2
 test "$(cat "$CLAUDE_CONFIG_DIR/api-key")" = '`+dummyAPIKey+`' || exit 3
 printf '%s\n' "$CLAUDE_CONFIG_DIR" >> "$0.authdirs"
-if [ "$1" = '--help' ]; then
-  cat <<'HELP'
-`+claudeHelp+`HELP
-  exit
-fi
 printf '%s\n' "$@" >> "$0.args"
 for arg in "$@"; do
   if [ "$arg" = auth ]; then

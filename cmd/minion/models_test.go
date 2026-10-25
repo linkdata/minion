@@ -28,22 +28,12 @@ func TestCheckModelsRequiresOnlySelectedProvider(t *testing.T) {
 	}
 	for _, provider := range []string{"codex", "claude"} {
 		t.Run(provider, func(t *testing.T) {
-			if provider == "claude" && runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
-				t.Skip("Claude sandbox support requires Linux or macOS")
-			}
 			dir := t.TempDir()
 			t.Setenv("PATH", dir)
 			for _, name := range []string{"codex", "claude"} {
 				body := "#!/bin/sh\nprintf 'called' > \"$0.called\"\nprintf 'fixture preflight failure' >&2\nexit 1\n"
 				if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o700); err != nil {
 					t.Fatal(err)
-				}
-			}
-			if provider == "claude" && runtime.GOOS == "linux" {
-				for _, name := range []string{"bwrap", "socat"} {
-					if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
-						t.Fatal(err)
-					}
 				}
 			}
 			cfg := config.Config{Main: provider}
@@ -73,8 +63,8 @@ func TestLogCommandSkillsReportsUnsupportedWorkflow(t *testing.T) {
 }
 
 func TestCheckModelsBoundsResolvedCatalogueModel(t *testing.T) {
-	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
-		t.Skip("Claude sandbox support requires Linux or macOS")
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell provider fixture is unavailable on native Windows")
 	}
 	for _, selection := range []string{"default", "alias"} {
 		for _, size := range []int{128, 129} {
@@ -82,9 +72,6 @@ func TestCheckModelsBoundsResolvedCatalogueModel(t *testing.T) {
 				t.Setenv("HOME", t.TempDir())
 				for _, key := range []string{"CLAUDE_CONFIG_DIR", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy"} {
 					t.Setenv(key, "")
-				}
-				for _, name := range []string{"bwrap", "socat"} {
-					testsupport.FakeOnPath(t, name, "#!/bin/sh\nexit 99\n")
 				}
 				model := strings.Repeat("m", size)
 				value := "default"
@@ -94,9 +81,7 @@ func TestCheckModelsBoundsResolvedCatalogueModel(t *testing.T) {
 				}
 				catalogue := fmt.Sprintf(`{"type":"control_response","response":{"subtype":"success","request_id":"minion-initialize","response":{"models":[{"value":%q,"resolvedModel":%q}]}}}`, value, model)
 				testsupport.FakeOnPath(t, "claude", `#!/bin/sh
-if [ "$1" = '--help' ]; then
-  printf '%s\n' '--session-id --resume --add-dir --model --effort --json-schema --no-session-persistence --input-format -p --verbose --output-format --permission-mode --permission-prompts --safe-mode --setting-sources --disable-slash-commands --strict-mcp-config --mcp-config --no-chrome --tools --allowedTools --settings'
-elif [ "$3" = 'auth' ]; then
+if [ "$3" = 'auth' ]; then
   printf '%s\n' '{"loggedIn":true}'
 else
   input=$(/bin/cat)

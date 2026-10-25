@@ -12,7 +12,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
@@ -42,9 +41,6 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 		runError = aicli.RedactError(runError, settings.APIKey)
 		result.Answer = aicli.RedactText(result.Answer, settings.APIKey)
 	}()
-	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
-		return result, errors.New("claude isolation requires Linux or macOS")
-	}
 	if strings.TrimSpace(prompt) == "" {
 		return result, errors.New("claude: prompt is empty")
 	}

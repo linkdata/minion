@@ -10,20 +10,9 @@ import (
 )
 
 const modelCatalogue = `{"type":"control_response","response":{"subtype":"success","request_id":"minion-initialize","response":{"models":[{"value":"unresolved"},{"value":"default","resolvedModel":"claude-pinned","supportedEffortLevels":["low","high"]},{"value":"quick","resolvedModel":"claude-small","supportedEffortLevels":["low","high"]}]}}}`
-const claudeHelp = `Claude Code 1.0.0
-Options:
-  -p, --print
-`
 
 func TestValidate(t *testing.T) {
-	fakeExecutable(t, "bwrap", "exit 99\n")
-	fakeExecutable(t, "socat", "exit 99\n")
-	binary := fakeExecutable(t, "claude", `if [ "$1" = '--help' ]; then
-  cat <<'HELP'
-`+claudeHelp+`HELP
-elif [ "$1" = '--version' ]; then
-  exit 97
-elif [ "$3" = 'auth' ]; then
+	binary := fakeExecutable(t, "claude", `if [ "$3" = 'auth' ]; then
   printf '%s\n' '{"loggedIn":true}'
 else
   printf '%s\n' "$@" > "$0.args"
@@ -65,12 +54,7 @@ fi
 }
 
 func TestValidateRequiresInitialization(t *testing.T) {
-	fakeExecutable(t, "bwrap", "exit 99\n")
-	fakeExecutable(t, "socat", "exit 99\n")
-	fakeExecutable(t, "claude", `if [ "$1" = '--help' ]; then
-  cat <<'HELP'
-`+claudeHelp+`HELP
-elif [ "$3" = 'auth' ]; then
+	fakeExecutable(t, "claude", `if [ "$3" = 'auth' ]; then
   printf '%s\n' '{"loggedIn":true}'
 else
   exit 1
@@ -78,25 +62,6 @@ fi
 `)
 	if _, err := Validate(context.Background(), config.ClaudeConfig{}); err == nil || !strings.Contains(err.Error(), "model discovery") {
 		t.Fatalf("Validate = %v", err)
-	}
-}
-
-func TestValidateAcceptsSparseHelp(t *testing.T) {
-	fakeExecutable(t, "bwrap", "exit 99\n")
-	fakeExecutable(t, "socat", "exit 99\n")
-	fakeExecutable(t, "claude", `if [ "$1" = '--help' ]; then
-  cat <<'HELP'
-`+claudeHelp+`HELP
-elif [ "$3" = 'auth' ]; then
-  printf '%s\n' '{"loggedIn":true}'
-else
-  cat >/dev/null
-  printf '%s\n' '`+modelCatalogue+`'
-fi
-`)
-	settings, err := Validate(t.Context(), config.ClaudeConfig{})
-	if err != nil || settings.Model != "claude-pinned" {
-		t.Fatalf("Validate with sparse help = %+v, %v", settings, err)
 	}
 }
 

@@ -494,16 +494,6 @@ func TestChildEnvironment(t *testing.T) {
 	}
 }
 
-func TestRunRefusesNativeWindows(t *testing.T) {
-	if runtime.GOOS != "windows" {
-		t.Skip("native Windows only")
-	}
-	result, err := Run(t.Context(), t.TempDir(), "task", false, "", config.ClaudeConfig{})
-	if err == nil || !strings.Contains(err.Error(), "requires Linux or macOS") || result.Answer != "" {
-		t.Fatalf("unsupported native Claude was launched: %+v, %v", result, err)
-	}
-}
-
 func TestChildEnvironmentRejectsCredentials(t *testing.T) {
 	for _, tc := range []struct {
 		name, value string

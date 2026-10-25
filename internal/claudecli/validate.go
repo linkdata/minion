@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"time"
 
@@ -18,19 +17,15 @@ import (
 
 // Validate checks Claude's prerequisites and resolves model settings.
 //
-// It requires Linux or macOS, authenticated CLI state, and bubblewrap/socat on
-// Linux. Model discovery passes Run's sandbox and tool options to the CLI's
-// initialization protocol without an inference turn. These checks do not execute
-// a sandboxed command; deployments must validate runtime isolation.
+// It requires authenticated CLI state. Model discovery passes Run's sandbox
+// and tool options to the CLI's initialization protocol without an inference
+// turn. Claude owns sandbox startup and enforcement at runtime.
 //
 // APIKey overrides environment credentials and stored login. Without it,
 // environment API/OAuth tokens are rejected. Authenticated proxies are rejected.
 func Validate(ctx context.Context, settings config.ClaudeConfig) (validated config.ClaudeConfig, resultErr error) {
 	defer func() { resultErr = aicli.RedactError(resultErr, settings.APIKey) }()
 	validated = settings
-	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
-		return validated, errors.New("claude isolation requires Linux or macOS")
-	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	dir, err := os.MkdirTemp("", "minion-claude-check-")
@@ -64,13 +59,6 @@ func Validate(ctx context.Context, settings config.ClaudeConfig) (validated conf
 	policy, err := sandboxSettings(dir, "", authDir)
 	if err != nil {
 		return validated, err
-	}
-	if runtime.GOOS == "linux" {
-		for _, name := range []string{"bwrap", "socat"} {
-			if _, err := aicli.ExecutablePath(name); err != nil {
-				return validated, fmt.Errorf("claude sandbox dependency %s: %w", name, err)
-			}
-		}
 	}
 	authArgs := []string{"--safe-mode", "--setting-sources="}
 	if authDir != "" {
