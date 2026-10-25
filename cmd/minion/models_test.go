@@ -39,6 +39,13 @@ func TestCheckModelsRequiresOnlySelectedProvider(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			if provider == "claude" && runtime.GOOS == "linux" {
+				for _, name := range []string{"bwrap", "socat"} {
+					if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
 			cfg := config.Config{Main: provider}
 			var output bytes.Buffer
 			if err := checkModels(context.Background(), &cfg, log.New(&output, "", 0)); err == nil {

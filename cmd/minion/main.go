@@ -9,8 +9,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"runtime"
-	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -85,7 +83,7 @@ func runWithGitCheck(checkGit func(context.Context, string) error) int {
 	}
 	logCommandSkills(cfg, logger)
 	checkWorkRoot := func() error {
-		return checkIsolation(cfg, loadedPath)
+		return checkWorkRootPath(cfg.WorkRoot)
 	}
 	if err := checkWorkRoot(); err != nil {
 		logger.Printf("work root: %v", err)
@@ -193,128 +191,27 @@ func newOrchestrator(cfg config.Config, client *github.Client, store *state.Stor
 		CodexEffort:           cfg.Codex.ReasoningEffort,
 		ClaudeModel:           cfg.Claude.Model,
 		ClaudeEffort:          cfg.Claude.Effort,
-		// Jobs override model, effort and skills; the runner keeps host credentials and sandbox grants.
+		// Jobs override model, effort and skills; the runner keeps host credentials.
 		Runner: action.Runner{
 			Codex:  config.CodexConfig{APIKey: cfg.Codex.APIKey},
-			Claude: config.ClaudeConfig{APIKey: cfg.Claude.APIKey, AllowAllUnixSockets: cfg.Claude.AllowAllUnixSockets},
+			Claude: config.ClaudeConfig{APIKey: cfg.Claude.APIKey},
 			Logger: logger,
 		},
 	}
 }
 
-func checkIsolation(cfg config.Config, configPath string) (resultErr error) {
+func checkWorkRootPath(path string) (resultErr error) {
 	// Host admission retries unsafe placement; later job preparation has its own failure policy.
 	defer func() {
 		if resultErr != nil {
 			resultErr = fmt.Errorf("%w: %w", workroot.ErrUnsafe, resultErr)
 		}
 	}()
-	root, err := workspace.CanonicalPath(cfg.WorkRoot)
+	root, err := workspace.CanonicalPath(path)
 	if err != nil {
 		return err
 	}
-	if err := workspace.CheckRoot(root); err != nil {
-		return err
-	}
-	runner := action.Runner{}
-	for _, provider := range []string{cfg.Main, cfg.Adversarial} {
-		if provider == "" {
-			continue
-		}
-		sources := slices.Clone(cfg.AlwaysOnSkills)
-		if provider == cfg.Main {
-			for _, mapping := range cfg.Commands {
-				if mapping.SupportsProvider(provider) {
-					sources = append(sources, mapping.Skills...)
-				}
-			}
-		}
-		// Missing required skills disable their command; admission needs only existing grants.
-		if err := runner.ConfigureRole(action.RoleSettings{Provider: provider, AlwaysOnSkills: sources}); err != nil {
-			return err
-		}
-	}
-	if err := runner.CheckWorkRootIsolation(root, cfg.Main, cfg.Adversarial); err != nil {
-		return err
-	}
-	private := []string{configPath}
-	if cfg.StatePath != "" {
-		private = append(private,
-			cfg.StatePath,
-			cfg.StatePath+".lock",
-			filepath.Join(filepath.Dir(cfg.StatePath), "usage"),
-		)
-	}
-	// Shared system reads can expose stored credentials even for an unused provider.
-	codexHome, err := codexcli.HomePath()
-	if err != nil {
-		return err
-	}
-	private = append(private, codexHome, filepath.Join(codexHome, "auth.json"), filepath.Join(codexHome, "config.toml"))
-	claudeHome, err := claudecli.HomePath()
-	if err != nil {
-		return err
-	}
-	private = append(private, claudeHome, filepath.Join(claudeHome, ".credentials.json"), filepath.Join(claudeHome, ".claude.json"), filepath.Join(claudeHome, "settings.json"))
-	userHome, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("resolve user home: %w", err)
-	}
-	if !filepath.IsAbs(userHome) {
-		return errors.New("resolve user home: HOME must be absolute")
-	}
-	private = append(private,
-		filepath.Join(userHome, ".codex"),
-		filepath.Join(userHome, ".codex", "auth.json"),
-		filepath.Join(userHome, ".codex", "config.toml"),
-		filepath.Join(userHome, ".claude"),
-		filepath.Join(userHome, ".claude", ".credentials.json"),
-		filepath.Join(userHome, ".claude", ".claude.json"),
-		filepath.Join(userHome, ".claude", "settings.json"),
-		filepath.Join(userHome, ".claude.json"),
-		filepath.Join(userHome, ".git-credentials"),
-		filepath.Join(userHome, ".gitconfig"),
-		filepath.Join(userHome, ".netrc"),
-		filepath.Join(userHome, ".ssh"),
-		filepath.Join(userHome, ".config", "git", "credentials"),
-		filepath.Join(userHome, ".config", "git", "config"),
-		filepath.Join(userHome, ".config", "gh"),
-		filepath.Join(userHome, ".config", "gh", "hosts.yml"),
-	)
-	if runtime.GOOS != "windows" || os.Getenv("AppData") != "" {
-		configHome, err := os.UserConfigDir()
-		if err != nil {
-			return err
-		}
-		private = append(private, filepath.Join(configHome, "git", "credentials"), filepath.Join(configHome, "git", "config"))
-	}
-	xdgHome := os.Getenv("XDG_CONFIG_HOME")
-	if xdgHome != "" {
-		private = append(private, filepath.Join(xdgHome, "git", "credentials"), filepath.Join(xdgHome, "git", "config"))
-	}
-	for _, key := range []string{"GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG"} {
-		if path := os.Getenv(key); path != "" {
-			private = append(private, path)
-		}
-	}
-	ghHome := ghConfigHome(userHome, runtime.GOOS)
-	private = append(private, ghHome, filepath.Join(ghHome, "hosts.yml"))
-	return runner.CheckPrivatePaths(private, cfg.Main, cfg.Adversarial)
-}
-
-func ghConfigHome(home, goos string) string {
-	if dir := os.Getenv("GH_CONFIG_DIR"); dir != "" {
-		return filepath.Clean(dir)
-	}
-	if dir := os.Getenv("XDG_CONFIG_HOME"); dir != "" {
-		return filepath.Join(dir, "gh")
-	}
-	if goos == "windows" {
-		if dir := os.Getenv("AppData"); dir != "" {
-			return filepath.Join(dir, "GitHub CLI")
-		}
-	}
-	return filepath.Join(home, ".config", "gh")
+	return workspace.CheckRoot(root)
 }
 
 func logCommandSkills(cfg config.Config, logger *log.Logger) {
@@ -378,9 +275,6 @@ func checkModels(ctx context.Context, cfg *config.Config, logger *log.Logger) (e
 			if err = codexcli.CheckLogin(ctx, cfg.Codex); err == nil {
 				if err = codexcli.ValidateInstructionBoundary(ctx); err == nil {
 					cfg.Codex, err = codexcli.Validate(ctx, cfg.Codex)
-					if err == nil {
-						err = aicli.ValidateModelGitAccess(ctx, "Codex", codexcli.SystemReadPaths())
-					}
 				}
 			}
 			if err != nil {
@@ -392,9 +286,6 @@ func checkModels(ctx context.Context, cfg *config.Config, logger *log.Logger) (e
 		case "claude":
 			if cfg.Claude, err = claudecli.Validate(ctx, cfg.Claude); err != nil {
 				//lint:ignore ST1005 Claude is a proper noun.
-				return fmt.Errorf("Claude: %w", err) //nolint:staticcheck // -- Claude is a proper noun.
-			}
-			if err := aicli.ValidateModelGitAccess(ctx, "Claude", claudecli.SystemReadPaths()); err != nil {
 				return fmt.Errorf("Claude: %w", err) //nolint:staticcheck // -- Claude is a proper noun.
 			}
 			role.Model, role.Effort = cfg.Claude.Model, cfg.Claude.Effort

@@ -25,13 +25,12 @@ import (
 
 // Run continues one action role's conversation with sandboxed shell tools.
 //
-// The CLI retains API network access. Model-generated commands have no allowed
-// network destinations; Unix sockets remain available on Linux when
-// AllowAllUnixSockets is nil, or on either supported OS when explicitly enabled.
-// Host file access is limited to explicit read grants. A writable
-// run may edit the source snapshot; outputDir grants a separate report directory write
-// access. ReadOnlyDirs and configured skills remain read-only. When OutputSchema
-// is set, the answer contains the CLI's structured JSON result.
+// The CLI retains API network access. Model-generated commands use Claude's
+// native sandbox with its default filesystem and network restrictions. A
+// writable run may edit the source snapshot; outputDir grants a separate report
+// directory write. ReadOnlyDirs and configured skills are readable without
+// granting them write access. When OutputSchema is set, the answer contains
+// the CLI's structured JSON result.
 //
 // APIKey overrides environment credentials and stored CLI login through a
 // temporary, tool-inaccessible key helper. Without APIKey, use Claude's stored
@@ -72,19 +71,26 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	}
 	runtimeDir, authDir, cacheDir := s.runtimeDir, s.authDir, s.cacheDir
 	skillPaths, configDir := s.skillPaths, s.configDir
+	for _, skill := range skillPaths {
+		if workspacefs.Within(runtimeDir, skill) || outputDir != "" && workspacefs.Within(outputDir, skill) {
+			return result, fmt.Errorf("claude skill %q is inside a writable directory", skill)
+		}
+	}
 	readOnlyDirs := make([]string, 0, len(settings.ReadOnlyDirs))
 	for _, path := range settings.ReadOnlyDirs {
 		resolved, err := aicli.Directory(path)
 		if err != nil {
 			return result, fmt.Errorf("claude read-only directory: %w", err)
 		}
-		if workspacefs.Within(resolved, workspace) || workspacefs.Within(resolved, runtimeDir) || outputDir != "" && (workspacefs.Within(resolved, outputDir) || workspacefs.Within(outputDir, resolved)) {
+		if workspacefs.Within(resolved, workspace) || workspacefs.Within(workspace, resolved) ||
+			workspacefs.Within(resolved, runtimeDir) || workspacefs.Within(runtimeDir, resolved) ||
+			outputDir != "" && (workspacefs.Within(resolved, outputDir) || workspacefs.Within(outputDir, resolved)) {
 			return result, errors.New("claude read-only directory overlaps a writable grant")
 		}
 		readOnlyDirs = append(readOnlyDirs, resolved)
 	}
 	settings.ReadOnlyDirs = readOnlyDirs
-	policy, err := sandboxSettings(workspace, runtimeDir, writable, outputDir, settings, skillPaths, authDir)
+	policy, err := sandboxSettings(workspace, outputDir, authDir)
 	if err != nil {
 		return result, err
 	}
@@ -99,14 +105,10 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	} else {
 		args = append(args, "--session-id", s.id)
 	}
-	// Additional working directories also grant writes in Claude's sandbox;
-	// sandboxSettings denies them explicitly for read-only inputs.
-	args = append(args, "--add-dir", workspace)
-	for _, path := range settings.ReadOnlyDirs {
-		args = append(args, "--add-dir", path)
-	}
-	for _, skill := range skillPaths {
-		args = append(args, "--add-dir", filepath.Dir(skill))
+	// Claude's native sandbox makes --add-dir writable, so only the requested
+	// source and report outputs receive that grant.
+	if writable {
+		args = append(args, "--add-dir", workspace)
 	}
 	if outputDir != "" {
 		args = append(args, "--add-dir", outputDir)
@@ -198,99 +200,30 @@ func arguments(policy string) []string {
 	}
 }
 
-// SystemReadPaths are the fixed host paths visible to sandboxed commands.
-func SystemReadPaths() []string { return systemReadPaths(runtime.GOOS) }
-
-func systemReadPaths(goos string) []string {
-	switch goos {
-	case "linux":
-		return []string{"/usr", "/bin", "/lib", "/lib64", "/etc/ld.so.cache", "/etc/ld.so.conf", "/etc/ld.so.conf.d", "/etc/localtime", "/etc/nsswitch.conf", "/etc/ssl/certs"}
-	case "darwin":
-		return []string{"/System/Library", "/System/Cryptexes/OS/System/Library/dyld", "/usr", "/bin", "/sbin", "/opt/homebrew", "/Library/Developer/CommandLineTools", "/Library/Frameworks", "/Applications/Xcode.app/Contents/Developer", "/private/etc/ssl", "/private/etc/hosts", "/private/etc/resolv.conf", "/private/etc/localtime"}
-	default:
-		return nil
+func sandboxSettings(workspace, outputDir, authDir string) (string, error) {
+	if authDir != "" && (workspacefs.Within(workspace, authDir) || workspacefs.Within(authDir, workspace) ||
+		outputDir != "" && (workspacefs.Within(outputDir, authDir) || workspacefs.Within(authDir, outputDir))) {
+		return "", errors.New("claude API key directory overlaps a writable directory")
 	}
-}
-
-func effectiveSystemReadPaths() ([]string, error) {
-	paths := SystemReadPaths()
-	if len(paths) == 0 {
-		return nil, fmt.Errorf("Claude shell sandbox is unsupported on %s", runtime.GOOS)
-	}
-	if runtime.GOOS == "linux" {
-		return paths, nil
-	}
-	resolved, err := aicli.ResolveSystemReadPaths(paths)
-	if err != nil {
-		return nil, fmt.Errorf("resolve Claude system grants: %w", err)
-	}
-	return resolved, nil
-}
-
-func sandboxSettings(workspace, runtimeDir string, writable bool, outputDir string, settings config.ClaudeConfig, skillPaths []string, authDir string) (string, error) {
-	systemReads, err := effectiveSystemReadPaths()
-	if err != nil {
-		return "", err
-	}
-	reads := append(systemReads, workspace, runtimeDir)
-	if runtime.GOOS == "darwin" {
-		// Apple's /usr/bin/git shim reads this link to select the developer tools.
-		reads = append(reads, "/private/var/db/xcode_select_link")
-	}
-	writes := []string{runtimeDir}
-	deniedWrites := []string{filepath.Join(runtimeDir, ".git")}
-	if writable {
-		writes = append(writes, workspace)
-		for _, name := range []string{".git", ".agents", ".codex", ".claude"} {
-			deniedWrites = append(deniedWrites, filepath.Join(workspace, name))
-		}
-	} else {
-		deniedWrites = append(deniedWrites, workspace)
-	}
-	if outputDir != "" {
-		reads = append(reads, outputDir)
-		writes = append(writes, outputDir)
-	}
-	for _, path := range settings.ReadOnlyDirs {
-		reads = append(reads, path)
-		deniedWrites = append(deniedWrites, path)
-	}
-	for _, skill := range skillPaths {
-		reads = append(reads, filepath.Dir(skill))
-		deniedWrites = append(deniedWrites, filepath.Dir(skill))
+	credentials := map[string]any{"envVars": credentialDenials()}
+	if authDir != "" {
+		credentials["files"] = []map[string]string{{"path": filepath.Join(authDir, "api-key"), "mode": "deny"}}
 	}
 	policy := map[string]any{
 		"disableClaudeAiConnectors": true,
 		"autoMemoryEnabled":         false,
 		"sandbox": map[string]any{
-			"enabled": true, "failIfUnavailable": true, "autoAllowBashIfSandboxed": true,
-			"allowUnsandboxedCommands": false, "excludedCommands": []string{},
-			"enableWeakerNestedSandbox": false, "enableWeakerNetworkIsolation": false,
-			"credentials": map[string]any{"envVars": credentialDenials()},
-			"filesystem":  map[string]any{"disabled": false, "denyRead": []string{"/"}, "allowRead": reads, "allowWrite": writes, "denyWrite": deniedWrites},
-			"network": map[string]any{
-				"allowedDomains": []string{}, "strictAllowlist": true, "allowLocalBinding": false,
-				"allowAllUnixSockets": allowAllUnixSockets(runtime.GOOS, settings.AllowAllUnixSockets),
-			},
+			"enabled":                  true,
+			"failIfUnavailable":        true,
+			"allowUnsandboxedCommands": false,
+			"credentials":              credentials,
 		},
 	}
 	if authDir != "" {
-		for _, grant := range reads {
-			if workspacefs.Within(grant, authDir) || workspacefs.Within(authDir, grant) {
-				return "", errors.New("claude API key directory overlaps a sandbox grant")
-			}
-		}
 		policy["apiKeyHelper"] = apiKeyHelper(authDir)
 	}
 	data, err := json.Marshal(policy)
 	return string(data), err
-}
-
-func allowAllUnixSockets(goos string, override *bool) bool {
-	if override != nil {
-		return *override
-	}
-	return goos == "linux"
 }
 
 func credentialDenials() []map[string]string {

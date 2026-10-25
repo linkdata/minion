@@ -11,46 +11,13 @@ import (
 	"time"
 
 	"github.com/linkdata/minion/internal/aicli"
-	"github.com/linkdata/minion/internal/codexcli"
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/skills"
-	"github.com/linkdata/minion/internal/workroot"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
-func TestRunnerWorkRootIsolation(t *testing.T) {
-	for _, kind := range []string{"main skill", "critic skill", "system read"} {
-		t.Run(kind, func(t *testing.T) {
-			root := t.TempDir()
-			work := filepath.Join(root, "work")
-			if err := os.Mkdir(work, 0700); err != nil {
-				t.Fatal(err)
-			}
-			runner := Runner{}
-			job := withClaudeCritic(testJob(command.Comment))
-			switch kind {
-			case "main skill", "critic skill":
-				skill := filepath.Join(work, "skill", "SKILL.md")
-				writeFixtureFile(t, work, "skill/SKILL.md", []byte("trusted skill"))
-				if kind == "main skill" {
-					runner.Codex.Skills = []string{skill}
-				} else {
-					runner.Claude.Skills = []string{skill}
-				}
-			case "system read":
-				t.Setenv("PATH", t.TempDir())
-				reads := codexcli.SystemReadPaths()
-				if len(reads) == 0 {
-					t.Fatal("Codex has no system read paths")
-				}
-				work = reads[0]
-			}
-			if err := runner.CheckWorkRootIsolation(work, job.Main.Provider, job.Critic.Provider); err == nil || !strings.Contains(err.Error(), "work root overlaps") {
-				t.Fatalf("isolation=%v", err)
-			}
-		})
-	}
+func TestRunnerRequiresExistingWorkRoot(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "missing")
 	runner := Runner{WorkRoot: missing, runModel: forbidModel(t)}
 	if result, err := runner.Run(context.Background(), testJob(command.Comment)); !errors.Is(err, os.ErrNotExist) || errors.Is(err, monitor.ErrTerminalJob) || len(result.Calls) != 0 {
@@ -62,31 +29,6 @@ func TestRunnerWorkRootIsolation(t *testing.T) {
 	runner = Runner{}
 	if _, err := runner.Run(context.Background(), testJob(command.Comment)); !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "work root is required") {
 		t.Fatalf("missing root=%v", err)
-	}
-}
-
-func TestMacCodexMinimalRootsRejectWorkAndPrivatePaths(t *testing.T) {
-	if runtime.GOOS != "darwin" {
-		t.Skip("macOS Codex minimal roots")
-	}
-	runner := Runner{}
-	for _, path := range []string{"/tmp", "/var/tmp", "/Library/Preferences", "/Applications", "/Library/Apple", "/Library/Filesystems/NetFSPlugins"} {
-		if err := runner.CheckPrivatePaths([]string{filepath.Join(path, "future-secret")}, "codex"); err == nil || !strings.Contains(err.Error(), "is visible through model filesystem grant") {
-			t.Fatalf("private path under macOS minimal root %q accepted: %v", path, err)
-		}
-		if _, err := os.Stat(path); err == nil {
-			if err := runner.CheckWorkRootIsolation(path, "codex"); err == nil || !strings.Contains(err.Error(), "work root overlaps") {
-				t.Fatalf("macOS minimal root %q accepted as work root: %v", path, err)
-			}
-		} else if !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("macOS minimal root %q: %v", path, err)
-		}
-	}
-}
-
-func TestWorkRootIsolationRejectsUnknownProvider(t *testing.T) {
-	if err := (&Runner{}).CheckWorkRootIsolation(t.TempDir(), "unknown"); err == nil || !strings.Contains(err.Error(), "unsupported AI provider") {
-		t.Fatalf("unknown provider mixed filesystem grants: %v", err)
 	}
 }
 
@@ -266,54 +208,5 @@ func TestRunnerOmittedSourceWriteIsTerminal(t *testing.T) {
 	}
 	if err := result.validate(job, false); err != nil {
 		t.Fatalf("incomplete result must retain valid diagnostics: %v", err)
-	}
-}
-
-func TestWorkRootIsolationRejectsResolvedExecutableTarget(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX executable symlink fixture has no native .exe launcher")
-	}
-	for _, provider := range []string{"codex", "claude"} {
-		t.Run(provider, func(t *testing.T) {
-			root := t.TempDir()
-			work, bin := filepath.Join(root, "work"), filepath.Join(root, "bin")
-			for _, directory := range []string{work, bin} {
-				if err := os.Mkdir(directory, 0700); err != nil {
-					t.Fatal(err)
-				}
-			}
-			target := filepath.Join(work, "actual-"+provider)
-			if err := os.WriteFile(target, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Symlink(target, filepath.Join(bin, provider)); err != nil {
-				t.Fatal(err)
-			}
-			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-			want, err := filepath.EvalSymlinks(target)
-			if err != nil {
-				t.Fatal(err)
-			}
-			runner := Runner{}
-			if err := runner.CheckWorkRootIsolation(work, provider); err == nil || !strings.Contains(err.Error(), "work root overlaps") || !strings.Contains(err.Error(), want) {
-				t.Fatalf("outside symlink hid executable inside work root: %v", err)
-			}
-			other := "claude"
-			if provider == "claude" {
-				other = "codex"
-			}
-			if err := runner.CheckWorkRootIsolation(work, other); err != nil {
-				t.Fatalf("unused %s executable affected %s admission: %v", provider, other, err)
-			}
-			job := testJob(command.Comment)
-			job.Main.Provider = other
-			job.Critic = &RoleSettings{Provider: provider}
-			job.CriticMaxRounds = 1
-			runner.WorkRoot, runner.runModel = work, forbidModel(t)
-			result, err := runner.Run(context.Background(), job)
-			if !errors.Is(err, workroot.ErrUnsafe) || !strings.Contains(err.Error(), "work root overlaps") || !strings.Contains(err.Error(), want) || len(result.Calls) != 0 {
-				t.Fatalf("critic executable escaped Run admission: calls=%d error=%v", len(result.Calls), err)
-			}
-		})
 	}
 }

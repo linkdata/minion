@@ -79,32 +79,10 @@ jobs:
       - name: Show Git version
         run: git --version
 
-      - name: Install Codex CLI on macOS
-        if: runner.os == 'macOS'
-        run: npm install --global @openai/codex
-
-      - name: Install standalone Codex CLI on Windows
-        if: matrix.os == 'windows-11-arm'
-        shell: pwsh
-        run: |
-          $env:CODEX_NON_INTERACTIVE = '1'
-          $env:CODEX_INSTALL_DIR = Join-Path $env:LOCALAPPDATA 'Programs\OpenAI\Codex\bin'
-          $installer = Join-Path $env:RUNNER_TEMP 'install-codex.ps1'
-          Invoke-WebRequest 'https://chatgpt.com/codex/install.ps1' -OutFile $installer
-          powershell -NoProfile -ExecutionPolicy Bypass -File $installer
-          if ($LASTEXITCODE -ne 0) { throw 'Codex installer failed' }
-          Add-Content -Path $env:GITHUB_PATH -Value $env:CODEX_INSTALL_DIR
-
-      - name: Check native Codex executable
-        if: matrix.os != 'windows-latest'
-        run: codex --version
-
       - name: Vet
         run: go vet ./...
 
       - name: Test
-        env:
-          MINION_NATIVE_SANDBOX_TEST: ${{ matrix.os == 'windows-latest' && '0' || '1' }}
         run: go test -count=1 -timeout=20m ./...
 
       - name: Build

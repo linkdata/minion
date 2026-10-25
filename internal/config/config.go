@@ -93,7 +93,7 @@ type CodexConfig struct {
 	APIKey string `json:"api_key,omitempty"`
 	// Skills contains installed paths selected by the application, not config JSON.
 	Skills []string `json:"-"`
-	// ReadOnlyDirs grants read access to additional application-selected directories.
+	// ReadOnlyDirs identifies application-selected evidence kept outside writable roots.
 	ReadOnlyDirs []string `json:"-"`
 	// OutputSchema constrains the final response using application-selected JSON Schema.
 	OutputSchema string `json:"-"`
@@ -105,13 +105,9 @@ type ClaudeConfig struct {
 	Effort string `json:"effort,omitempty"`
 	// APIKey overrides environment credentials and stored login when nonempty.
 	APIKey string `json:"api_key,omitempty"`
-	// AllowAllUnixSockets disables Unix-socket filtering to work around Claude's
-	// sandbox startup failure on affected Linux hosts. Nil selects true on Linux
-	// and false on macOS.
-	AllowAllUnixSockets *bool `json:"allow_all_unix_sockets,omitempty"`
 	// Skills contains installed paths selected by the application, not config JSON.
 	Skills []string `json:"-"`
-	// ReadOnlyDirs grants read access to additional application-selected directories.
+	// ReadOnlyDirs identifies application-selected evidence kept outside writable roots.
 	ReadOnlyDirs []string `json:"-"`
 	// OutputSchema constrains the final response using application-selected JSON Schema.
 	OutputSchema string `json:"-"`

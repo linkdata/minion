@@ -23,83 +23,6 @@ import (
 	"github.com/linkdata/minion/internal/workroot"
 )
 
-func TestPrivateHostPathsCannotBeExposedByModelGrants(t *testing.T) {
-	for _, provider := range []string{"codex", "claude"} {
-		t.Run(provider, func(t *testing.T) {
-			home, outside := t.TempDir(), t.TempDir()
-			public := filepath.Join(home, "public")
-			if err := os.Mkdir(public, 0700); err != nil {
-				t.Fatal(err)
-			}
-			executable := provider
-			if runtime.GOOS == "windows" {
-				executable += ".exe"
-			}
-			binary := filepath.Join(public, executable)
-			writeFixtureFile(t, public, executable, []byte("inert installed executable"))
-			if err := os.Chmod(binary, 0700); err != nil {
-				t.Fatal(err)
-			}
-			t.Setenv("PATH", public)
-			secret := filepath.Join(outside, "auth.json")
-			writeFixtureFile(t, outside, "auth.json", nil)
-			linked := filepath.Join(home, "auth.json")
-			future := filepath.Join(outside, "new", "auth.json")
-			for _, test := range []struct {
-				name, protected, grant string
-				refuse                 bool
-			}{
-				{"public descendants", home, public, false},
-				{"home exposure", home, home, true},
-				{"config exposure", secret, outside, true},
-				{"symlinked auth outside home", linked, outside, true},
-				{"future auth exposure", future, outside, true},
-			} {
-				t.Run(test.name, func(t *testing.T) {
-					if test.name == "symlinked auth outside home" {
-						symlinkOrSkip(t, secret, linked)
-					}
-					writeFixtureFile(t, test.grant, "SKILL.md", []byte("public skill"))
-					skill := filepath.Join(test.grant, "SKILL.md")
-					runner := Runner{}
-					if provider == "codex" {
-						runner.Codex.Skills = []string{skill}
-					} else {
-						runner.Claude.Skills = []string{skill}
-					}
-					if err := runner.CheckPrivatePaths([]string{test.protected}, provider); (err != nil) != test.refuse || (test.refuse && !strings.Contains(err.Error(), "is visible through model filesystem grant")) {
-						t.Fatalf("private-path admission error=%v want refusal=%t", err, test.refuse)
-					}
-				})
-			}
-			if _, err := os.Lstat(filepath.Dir(future)); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("private admission created credentials: %v", err)
-			}
-		})
-	}
-}
-
-func TestWorkRootIsolationUsesPhysicalGrantParents(t *testing.T) {
-	t.Setenv("PATH", t.TempDir())
-	root := t.TempDir()
-	physical := filepath.Join(root, "physical")
-	for _, dir := range []string{filepath.Join(physical, "nested"), filepath.Join(root, "nested")} {
-		if err := os.MkdirAll(dir, 0700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	alias := filepath.Join(root, "alias")
-	symlinkOrSkip(t, filepath.Join(physical, "nested"), alias)
-	writeFixtureFile(t, filepath.Join(physical, "nested"), "SKILL.md", []byte("public skill"))
-	runner := Runner{Codex: config.CodexConfig{Skills: []string{filepath.Join(alias, "SKILL.md")}}}
-	if err := runner.CheckWorkRootIsolation(filepath.Join(physical, "nested"), "codex"); err == nil || !strings.Contains(err.Error(), "overlaps") {
-		t.Fatalf("physical skill grant overlap accepted: %v", err)
-	}
-	if err := runner.CheckWorkRootIsolation(filepath.Join(root, "nested"), "codex"); err != nil {
-		t.Fatalf("logical decoy substituted for physical skill grant: %v", err)
-	}
-}
-
 func TestExecuteCriticAdmissionUsesControlledWorkRoot(t *testing.T) {
 	for _, critic := range []bool{false, true} {
 		for _, unsafe := range []bool{false, true} {
@@ -141,7 +64,7 @@ func TestExecuteCriticAdmissionUsesControlledWorkRoot(t *testing.T) {
 				request.Repository.Actions = []string{"comment"}
 				err = e.Execute(context.Background(), request)
 				if unsafe {
-					if errors.Is(err, workroot.ErrUnsafe) || !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "host-level model read grants are unsupported") || calls != 0 {
+					if errors.Is(err, workroot.ErrUnsafe) || !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "model evidence directories must be selected by Minion") || calls != 0 {
 						t.Fatalf("admission classification: calls=%d error=%v", calls, err)
 					}
 					if _, err := os.Stat(filepath.Join(root, "reviews")); !errors.Is(err, os.ErrNotExist) {

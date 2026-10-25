@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -45,11 +46,6 @@ func Validate(ctx context.Context, settings config.CodexConfig) (resolved config
 	}
 	if err := rejectGlobalInstructions(home); err != nil {
 		return settings, err
-	}
-	if runtime.GOOS != "linux" {
-		if _, err := nativeSystemReadPaths(); err != nil {
-			return settings, err
-		}
 	}
 	models, err := listModels(ctx, settings)
 	if err != nil {
@@ -118,20 +114,29 @@ func validateExecCapabilities(ctx context.Context, settings config.CodexConfig) 
 		{name: "exec", args: []string{"exec"}},
 		{name: "exec resume", args: []string{"exec", "resume"}},
 	} {
-		args := append(command.args,
-			"--json", "--ignore-user-config", "--ignore-rules", "--strict-config", "--skip-git-repo-check",
-		)
-		args = append(args, disabledFeatureArgs()...)
-		args = append(args,
-			"-c", "skills.include_instructions=false", "-c", "approval_policy=never", "--model", settings.Model,
-			"--output-schema", schema, "--help",
-		)
-		_, probeErr := aicli.Probe(ctx, binary, "codex", args, dir, env, "", settings.APIKey)
-		if probeErr != nil {
-			return fmt.Errorf("Codex %s capability check: %w", command.name, probeErr) //nolint:staticcheck // -- Codex is a proper noun.
+		for _, mode := range []struct {
+			name string
+			args []string
+		}{
+			{name: "read-only", args: sandboxArgs(dir, "", false)},
+			{name: "workspace-write", args: sandboxArgs(dir, "", true)},
+		} {
+			args := append(slices.Clone(command.args),
+				"--json", "--ignore-user-config", "--ignore-rules", "--strict-config", "--skip-git-repo-check",
+			)
+			args = append(args, mode.args...)
+			args = append(args, disabledFeatureArgs()...)
+			args = append(args,
+				"-c", "skills.include_instructions=false", "-c", "approval_policy=never", "--model", settings.Model,
+				"--output-schema", schema, "--help",
+			)
+			_, probeErr := aicli.Probe(ctx, binary, "codex", args, dir, env, "", settings.APIKey)
+			if probeErr != nil {
+				return fmt.Errorf("Codex %s %s capability check: %w", command.name, mode.name, probeErr) //nolint:staticcheck // -- Codex is a proper noun.
+			}
 		}
 		invalid := append(append([]string(nil), command.args...), "--minion-unsupported-capability-probe", "--help")
-		_, probeErr = aicli.Probe(ctx, binary, "codex", invalid, dir, env, "", settings.APIKey)
+		_, probeErr := aicli.Probe(ctx, binary, "codex", invalid, dir, env, "", settings.APIKey)
 		var exitErr *exec.ExitError
 		if probeErr == nil || ctx.Err() != nil || errors.Is(probeErr, aicli.ErrOutputLimit) || !errors.As(probeErr, &exitErr) || exitErr.ExitCode() <= 0 {
 			return fmt.Errorf("Codex %s capability check did not reject an unknown option: %v", command.name, probeErr) //nolint:staticcheck // -- Codex is a proper noun.
@@ -170,14 +175,11 @@ func listModels(ctx context.Context, settings config.CodexConfig) (models []mode
 	defer func() {
 		err = errors.Join(err, os.RemoveAll(dir))
 	}()
-	filesystemRule, err := sandboxFilesystemRule(dir, dir, binary, "", nil, nil, false)
-	if err != nil {
-		return nil, err
-	}
 	// app-server has no --ignore-user-config flag. Select exec's built-in
 	// provider explicitly and avoid repository config by using a temporary cwd.
 	args := append([]string{"app-server", "--strict-config", "--listen", "stdio://", "-c", `model_provider="openai"`}, disabledFeatureArgs()...)
-	args = append(args, execConfigArgs(filesystemRule)...)
+	args = append(args, execConfigArgs()...)
+	args = append(args, "-c", `sandbox_mode="read-only"`)
 	if settings.APIKey != "" {
 		args = append(args, "-c", `cli_auth_credentials_store="ephemeral"`, "-c", `forced_login_method="api"`)
 	}

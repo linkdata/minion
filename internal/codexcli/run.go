@@ -29,112 +29,29 @@ const (
 
 var runtimeMetadataNames = [...]string{".git", ".agents", ".codex"}
 
-// SystemReadPaths mirrors the host paths granted to model commands.
-// Linux and macOS include the measured :minimal expansion for host admission.
-func SystemReadPaths() []string {
-	return systemReadPaths(runtime.GOOS, os.Getenv)
-}
-
-func systemReadPaths(goos string, getenv func(string) string) []string {
-	paths := explicitSystemReadPaths(goos, getenv)
-	if goos == "darwin" {
-		return append(paths, "/Library/Apple", "/Library/Filesystems/NetFSPlugins", "/Library/Preferences",
-			"/private/etc", "/etc", "/private/var/db", "/var/db", "/private/tmp", "/private/var/tmp",
-			"/System/iOSSupport/System/Library/Frameworks", "/System/iOSSupport/System/Library/PrivateFrameworks",
-			"/System/iOSSupport/System/Library/SubFrameworks", "/Applications")
+// sandboxArgs selects Codex's native sandbox. Its workspace is the private
+// runtime directory; source and report roots are writable only when requested.
+func sandboxArgs(workspace, outputDir string, writable bool) []string {
+	if !writable && outputDir == "" {
+		return []string{"-c", `sandbox_mode="read-only"`}
 	}
-	return paths
-}
-
-func explicitSystemReadPaths(goos string, getenv func(string) string) []string {
-	switch goos {
-	case "linux":
-		return []string{"/bin", "/sbin", "/usr", "/etc", "/lib", "/lib64", "/nix/store", "/run/current-system/sw"}
-	case "darwin":
-		return []string{"/System/Library", "/System/Cryptexes/OS/System/Library/dyld", "/usr", "/bin", "/sbin", "/opt/homebrew", "/Library/Developer/CommandLineTools", "/Library/Frameworks", "/Applications/Xcode.app/Contents/Developer"}
-	case "windows":
-		root := getenv("SystemRoot")
-		if !filepath.IsAbs(root) {
-			return nil
-		}
-		paths := []string{root}
-		for _, key := range []string{"ProgramFiles", "ProgramFiles(x86)"} {
-			if path := getenv(key); filepath.IsAbs(path) {
-				paths = append(paths, path)
-			}
-		}
-		return paths
-	default:
-		return nil
-	}
-}
-
-func nativeSystemReadPaths() ([]string, error) {
-	paths := explicitSystemReadPaths(runtime.GOOS, os.Getenv)
-	if len(paths) == 0 {
-		return nil, fmt.Errorf("Codex filesystem grants are unsupported on %s", runtime.GOOS)
-	}
-	resolved, err := aicli.ResolveSystemReadPaths(paths)
-	if err != nil {
-		return nil, fmt.Errorf("resolve Codex system grants: %w", err)
-	}
-	return resolved, nil
-}
-
-func systemGrantRules(goos string, nativePaths []string) []string {
-	grants := make([]string, 0, len(nativePaths)+1)
-	if goos == "linux" || goos == "darwin" {
-		grants = append(grants, `":minimal"="read"`)
-		if goos == "linux" {
-			return grants
-		}
-	}
-	for _, path := range nativePaths {
-		grants = append(grants, fmt.Sprintf(`%s="read"`, strconv.Quote(path)))
-	}
-	return grants
-}
-
-func sandboxFilesystemRule(workspace, runtimeDir, realBinary, outputDir string, readOnlyDirs, skillPaths []string, writable bool) (string, error) {
-	workspaceAccess := "read"
+	roots := make([]string, 0, 2)
 	if writable {
-		workspaceAccess = "write"
+		roots = append(roots, workspace)
 	}
-	// The source snapshot is outside Codex's workspace, so keep its metadata and
-	// instruction directories read-only even when source edits are allowed.
-	// The sandbox re-executes the installed Codex binary. Grant that one file
-	// explicitly so a root-deny profile can start without exposing CODEX_HOME.
-	rules := []string{`":root"="deny"`}
-	if runtime.GOOS == "linux" {
-		rules = append(rules, systemGrantRules(runtime.GOOS, nil)...)
-	} else {
-		paths, err := nativeSystemReadPaths()
-		if err != nil {
-			return "", err
-		}
-		rules = append(rules, systemGrantRules(runtime.GOOS, paths)...)
-	}
-	rules = append(rules, `":tmpdir"="write"`, fmt.Sprintf(`%s=%q`, strconv.Quote(workspace), workspaceAccess))
-	for _, name := range []string{".git", ".agents", ".codex", ".claude"} {
-		rules = append(rules, fmt.Sprintf(`%s="read"`, strconv.Quote(filepath.Join(workspace, name))))
-	}
-	for _, name := range runtimeMetadataNames {
-		rules = append(rules, fmt.Sprintf(`%s="read"`, strconv.Quote(filepath.Join(runtimeDir, name))))
-	}
-	rules = append(rules, fmt.Sprintf(`%s="read"`, strconv.Quote(realBinary)))
 	if outputDir != "" {
-		rules = append(rules, fmt.Sprintf(`%s="write"`, strconv.Quote(outputDir)))
+		roots = append(roots, outputDir)
 	}
-	for _, path := range readOnlyDirs {
-		rules = append(rules, fmt.Sprintf(`%s="read"`, strconv.Quote(path)))
+	encoded, _ := json.Marshal(roots) // Absolute, validated paths always marshal.
+	return []string{
+		"-c", `sandbox_mode="workspace-write"`,
+		"-c", "sandbox_workspace_write.exclude_slash_tmp=true",
+		"-c", "sandbox_workspace_write.exclude_tmpdir_env_var=true",
+		"-c", "sandbox_workspace_write.writable_roots=" + string(encoded),
 	}
-	for _, skill := range skillPaths {
-		rules = append(rules, fmt.Sprintf(`%s="read"`, strconv.Quote(filepath.Dir(skill))))
-	}
-	return "permissions.minion.filesystem={" + strings.Join(rules, ",") + "}", nil
 }
 
-func execConfigArgs(filesystemRule string) []string {
+func execConfigArgs() []string {
 	args := instructionBoundaryConfig()
 	args = append(args,
 		"-c", "skills.include_instructions=false",
@@ -144,25 +61,18 @@ func execConfigArgs(filesystemRule string) []string {
 		// Codex excludes *KEY* before filters; set restores only this fixed Git config key.
 		"-c", `shell_environment_policy.set.GIT_CONFIG_KEY_0="safe.bareRepository"`,
 		"-c", "shell_environment_policy.filters={"+strings.Join(shellEnvironmentFilters(runtime.GOOS), ",")+"}",
-		"-c", `default_permissions="minion"`,
-		"-c", filesystemRule,
-		"-c", "permissions.minion.network.enabled=false",
 	)
-	if runtime.GOOS == "windows" {
-		// The legacy Windows backends cannot enforce restricted host reads.
-		args = append(args, "-c", `windows.sandbox="mxc"`)
-	}
 	return args
 }
 
 // Run continues this action role's Codex conversation for a source snapshot.
 //
 // A writable run may edit the snapshot; outputDir optionally grants write
-// access to a separate report directory. ReadOnlyDirs in settings grants only
-// read access to separate application-selected evidence directories. OutputSchema constrains
+// access to a separate report directory. ReadOnlyDirs verifies separate
+// application-selected evidence directories. OutputSchema constrains
 // the final response to that JSON Schema when set. Codex starts in a separate
 // project root and reads the snapshot through its absolute path. Model-generated
-// commands have no network access.
+// commands use Codex's native sandbox and its default network restriction.
 //
 // A nonempty APIKey in settings overrides environment credentials and stored
 // login for this run. It is excluded from model-command environments and
@@ -200,7 +110,6 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 			return result, errors.New("codex exec: output directory must be separate from the source snapshot")
 		}
 	}
-	readOnlyDirs := make([]string, 0, len(settings.ReadOnlyDirs))
 	for _, path := range settings.ReadOnlyDirs {
 		path, err = aicli.Directory(path)
 		if err != nil {
@@ -212,22 +121,16 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 		if outputDir != "" && (workspacefs.Within(path, outputDir) || workspacefs.Within(outputDir, path)) {
 			return result, errors.New("codex exec: read-only directory overlaps the output directory")
 		}
-		readOnlyDirs = append(readOnlyDirs, path)
-	}
-	if runtime.GOOS != "linux" {
-		if _, err := nativeSystemReadPaths(); err != nil {
-			return result, fmt.Errorf("codex exec: %w", err)
-		}
 	}
 
 	if err := s.prepare(workspace, realBinary, codexHome, outputDir, writable, settings); err != nil {
 		return result, err
 	}
 	runtimeDir, cacheDir := s.runtimeDir, s.cacheDir
-
-	filesystemRule, err := sandboxFilesystemRule(workspace, runtimeDir, realBinary, outputDir, readOnlyDirs, s.skillPaths, writable)
-	if err != nil {
-		return result, fmt.Errorf("codex exec: %w", err)
+	for _, skill := range s.skillPaths {
+		if workspacefs.Within(runtimeDir, skill) || outputDir != "" && workspacefs.Within(outputDir, skill) {
+			return result, fmt.Errorf("codex exec: skill %q is inside a writable directory", skill)
+		}
 	}
 
 	// Persist sessions to recover helper/interrupted usage while the action
@@ -237,9 +140,10 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 		args = append(args, "resume")
 	}
 	args = append(args, "--json", "--ignore-user-config", "--ignore-rules", "--strict-config", "--skip-git-repo-check")
+	args = append(args, sandboxArgs(workspace, outputDir, writable)...)
 	// Untrusted jobs must not inherit connected tools, plugins, rules, or a login-shell snapshot.
 	args = append(args, disabledFeatureArgs()...)
-	args = append(args, execConfigArgs(filesystemRule)...)
+	args = append(args, execConfigArgs()...)
 	if settings.Model != "" {
 		args = append(args, "--model", settings.Model)
 	}

@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -119,109 +118,27 @@ func TestCronPassSkipsPreflightWhenStateLocked(t *testing.T) {
 	}
 }
 
-func TestRunRejectsUnsafeGrantBeforeStateOpen(t *testing.T) {
-	const source = "https://github.com/owner/repo/tree/pinned/skills/example"
-	for _, kind := range []string{"selected executable", "selected installed skill"} {
-		t.Run(kind, func(t *testing.T) {
-			if runtime.GOOS == "windows" && kind == "selected executable" {
-				t.Skip("POSIX executable symlink fixture is unavailable on native Windows")
-			}
-			home := t.TempDir()
-			isolateHostPaths(t, home)
-			statePath := filepath.Join(t.TempDir(), "state.json")
-			workRoot := t.TempDir()
-			grantRoot, err := os.MkdirTemp(workRoot, "minion-admission-")
-			if err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(func() {
-				if err := os.RemoveAll(grantRoot); err != nil {
-					t.Error(err)
-				}
-			})
-			cfg := config.Config{
-				Main: "codex", BotLogin: "fixture", StatePath: statePath, WorkRoot: workRoot,
-				Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{},
-				Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2}},
-			}
-			var grantPath string
-			switch kind {
-			case "selected executable":
-				bin := filepath.Join(grantRoot, "codex")
-				grantPath = bin
-				if err := os.WriteFile(bin, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.Symlink(bin, filepath.Join(os.Getenv("PATH"), "codex")); err != nil {
-					t.Fatal(err)
-				}
-			case "selected installed skill":
-				t.Setenv("HOME", grantRoot)
-				if runtime.GOOS == "windows" {
-					t.Setenv("USERPROFILE", grantRoot)
-				}
-				t.Setenv("CODEX_HOME", filepath.Join(home, "codex"))
-				t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "claude"))
-				t.Setenv("GH_CONFIG_DIR", filepath.Join(home, "gh"))
-				t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
-				skill := filepath.Join(grantRoot, ".agents", "skills", "example")
-				grantPath = skill
-				if err := os.MkdirAll(skill, 0700); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(filepath.Join(skill, "SKILL.md"), []byte("Fixture skill.\n"), 0600); err != nil {
-					t.Fatal(err)
-				}
-				metadata := fmt.Sprintf(`{"url":%q,"commit":%q}`, source, strings.Repeat("a", 40))
-				if err := os.WriteFile(filepath.Join(skill, ".minion-install.json"), []byte(metadata), 0600); err != nil {
-					t.Fatal(err)
-				}
-				cfg.Commands = map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{source}}}
-				cfg.Repositories[0].Actions = []string{"review"}
-			}
-			grantPath, err = filepath.EvalSymlinks(grantPath)
-			if err != nil {
-				t.Fatal(err)
-			}
-			configPath := filepath.Join(t.TempDir(), "config.json")
-			data, err := json.Marshal(cfg)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(configPath, data, 0600); err != nil {
-				t.Fatal(err)
-			}
-			oldFlags, oldArgs := flag.CommandLine, os.Args
-			t.Cleanup(func() { flag.CommandLine, os.Args = oldFlags, oldArgs })
-			flag.CommandLine = flag.NewFlagSet("minion", flag.ContinueOnError)
-			os.Args = []string{"minion", "-config", configPath}
-			logPath := filepath.Join(t.TempDir(), "stderr.log")
-			logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY, 0600)
-			if err != nil {
-				t.Fatal(err)
-			}
-			code := func() int {
-				oldStderr := os.Stderr
-				os.Stderr = logFile
-				defer func() { os.Stderr = oldStderr }()
-				return run()
-			}()
-			if err := logFile.Close(); err != nil {
-				t.Fatal(err)
-			}
-			logText, err := os.ReadFile(logPath)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if code != 1 || !strings.Contains(string(logText), "work root overlaps model filesystem grant") || !strings.Contains(string(logText), fmt.Sprintf("%q", grantPath)) {
-				t.Fatalf("unsafe %s: exit=%d log=%q; want selected grant refusal", kind, code, logText)
-			}
-			for _, path := range []string{statePath, statePath + ".lock"} {
-				if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
-					t.Fatalf("unsafe %s opened state at %s: %v", kind, path, err)
-				}
-			}
-		})
+func TestRunRejectsUnsafeWorkRootBeforeStateOpen(t *testing.T) {
+	isolateHostPaths(t, t.TempDir())
+	root := t.TempDir()
+	workRoot := filepath.Join(root, "not-a-directory")
+	if err := os.WriteFile(workRoot, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	cfg := config.Config{
+		Main: "codex", BotLogin: "fixture", StatePath: statePath, WorkRoot: workRoot,
+		Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{},
+		Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2}},
+	}
+	code, output := runStartupFixture(t, cfg)
+	if code != 1 || !strings.Contains(output, "work root:") {
+		t.Fatalf("unsafe work root: exit=%d log=%q", code, output)
+	}
+	for _, path := range []string{statePath, statePath + ".lock"} {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("unsafe work root opened state at %s: %v", path, err)
+		}
 	}
 }
 

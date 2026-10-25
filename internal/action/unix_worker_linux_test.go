@@ -100,24 +100,6 @@ func TestUnixExecutionDirectWorker(t *testing.T) {
 	if err := os.Mkdir(workRoot, 0700); err != nil {
 		t.Fatal(err)
 	}
-	// Resolve the real installed role grant while it still contains regular files
-	// only; the future socket is already protected by the path boundary check.
-	roles := withClaudeCritic(testJob(command.Comment))
-	selectedJob := roles
-	selectedJob.Main.Skills = []string{testReviewSkillURL}
-	selected := Runner{}
-	if err := selected.ConfigureRole(selectedJob.Main); err != nil {
-		t.Fatalf("resolve pinned installed skill before worker start: %v", err)
-	}
-	if !slices.Contains(selected.Codex.Skills, grant) {
-		t.Fatalf("selected role did not pin installed parent grant: %v", selected.Codex.Skills)
-	}
-	if err := selected.ConfigureRole(*selectedJob.Critic); err != nil {
-		t.Fatal(err)
-	}
-	if err := selected.CheckPrivatePaths([]string{runtimeDir, filepath.Join(runtimeDir, "execution.sock")}, selectedJob.Main.Provider, selectedJob.Critic.Provider); err == nil || !strings.Contains(err.Error(), "visible through model filesystem grant") {
-		t.Fatalf("selected parent grant did not refuse readiness: %v", err)
-	}
 	core, err = NewHTTPExecutor("local")
 	if err != nil {
 		t.Fatal(err)
@@ -126,13 +108,6 @@ func TestUnixExecutionDirectWorker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := selected.ConfigureRole(roles.Main); err != nil {
-		t.Fatal(err)
-	}
-	if err := selected.CheckPrivatePaths([]string{runtimeDir, endpoint.SocketPath()}, roles.Main.Provider, roles.Critic.Provider); err != nil {
-		t.Fatalf("private socket refused with safe selected roles: %v", err)
-	}
-
 	ctx, stop := context.WithTimeout(t.Context(), 90*time.Second)
 	cancel = stop
 	cmd = exec.CommandContext(ctx, os.Args[0], "-test.run=^TestUnixExecutionWorkerHelper$")

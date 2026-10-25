@@ -100,7 +100,7 @@ func TestValidateModelAndEffortAgainstInstalledCatalogue(t *testing.T) {
 				t.Fatalf("Validate() = %+v, %v", settings, err)
 			}
 			args, err := os.ReadFile(filepath.Join(dir, "args"))
-			if err != nil || !strings.HasPrefix(string(args), "app-server\n") || !strings.Contains(string(args), `model_provider="openai"`) || !strings.Contains(string(args), `default_permissions="minion"`) || !strings.Contains(string(args), "--disable\napps\n") {
+			if err != nil || !strings.HasPrefix(string(args), "app-server\n") || !strings.Contains(string(args), `model_provider="openai"`) || !strings.Contains(string(args), `sandbox_mode="read-only"`) || !strings.Contains(string(args), "--disable\napps\n") {
 				t.Fatalf("wrong discovery command: %s, %v", args, err)
 			}
 			env, err := os.ReadFile(filepath.Join(dir, "env"))
@@ -144,8 +144,8 @@ func TestValidateChecksExecAndResumeCapabilitiesWithoutCredentials(t *testing.T)
 		t.Fatal(err)
 	}
 	calls := strings.Split(strings.TrimPrefix(string(data), "--invocation--\n"), "--invocation--\n")
-	if len(calls) != 4 {
-		t.Fatalf("expected fresh/resume help and rejection probes, got %q", data)
+	if len(calls) != 6 {
+		t.Fatalf("expected fresh/resume native-mode help and rejection probes, got %q", data)
 	}
 	flags := []string{"--json", "--ignore-user-config", "--ignore-rules", "--strict-config", "--skip-git-repo-check"}
 	for _, feature := range []string{
@@ -157,22 +157,40 @@ func TestValidateChecksExecAndResumeCapabilitiesWithoutCredentials(t *testing.T)
 	}
 	flags = append(flags, "-c", "skills.include_instructions=false", "-c", "approval_policy=never", "--model", "fixture", "--output-schema")
 	for i, command := range [][]string{{"exec"}, {"exec", "resume"}} {
-		got := strings.Split(strings.TrimSpace(calls[2*i]), "\n")
-		if len(got) != len(command)+len(flags)+2 || !filepath.IsAbs(got[len(got)-2]) || filepath.Base(got[len(got)-2]) != "output-schema.json" {
-			t.Fatalf("probe %d omitted a temporary output schema: %q", i, got)
+		for j, mode := range []string{"read-only", "workspace-write"} {
+			got := strings.Split(strings.TrimSpace(calls[3*i+j]), "\n")
+			if !filepath.IsAbs(got[len(got)-2]) || filepath.Base(got[len(got)-2]) != "output-schema.json" {
+				t.Fatalf("probe %d/%s omitted a temporary output schema: %q", i, mode, got)
+			}
+			sandbox := []string{"-c", `sandbox_mode="` + mode + `"`}
+			if mode == "workspace-write" {
+				if len(got) < len(command)+len(flags)+10 {
+					t.Fatalf("probe %d/%s omitted writable roots: %q", i, mode, got)
+				}
+				roots := got[len(command)+5+7]
+				sandbox = append(sandbox,
+					"-c", "sandbox_workspace_write.exclude_slash_tmp=true",
+					"-c", "sandbox_workspace_write.exclude_tmpdir_env_var=true",
+					"-c", roots,
+				)
+				if !strings.HasPrefix(roots, `sandbox_workspace_write.writable_roots=[`) {
+					t.Fatalf("probe %d/%s omitted writable roots: %q", i, mode, got)
+				}
+			}
+			want := append(append(append(slices.Clone(command), flags[:5]...), sandbox...), flags[5:]...)
+			want = append(want, got[len(got)-2], "--help")
+			if !slices.Equal(got, want) {
+				t.Fatalf("probe %d/%s args = %q; want %q", i, mode, got, want)
+			}
 		}
-		want := append(append(command, flags...), got[len(got)-2], "--help")
-		if !slices.Equal(got, want) {
-			t.Fatalf("probe %d args = %q; want %q", i, got, want)
-		}
-		rejected := strings.Split(strings.TrimSpace(calls[2*i+1]), "\n")
+		rejected := strings.Split(strings.TrimSpace(calls[3*i+2]), "\n")
 		wantRejected := append(append([]string(nil), command...), "--minion-unsupported-capability-probe", "--help")
 		if !slices.Equal(rejected, wantRejected) {
 			t.Fatalf("negative probe %d args = %q; want %q", i, rejected, wantRejected)
 		}
 	}
 	env, err := os.ReadFile(filepath.Join(dir, "help-env"))
-	if err != nil || string(env) != strings.Repeat("absent,absent,absent,absent\n", 4) {
+	if err != nil || string(env) != strings.Repeat("absent,absent,absent,absent\n", 6) {
 		t.Fatalf("credentials reached capability probe: %q, %v", env, err)
 	}
 }
@@ -183,7 +201,7 @@ func TestValidateRejectsUnsupportedExecResumeFlag(t *testing.T) {
 	script := catalogueScriptFor(dir, page, "")
 	script = strings.Replace(script, "if [ \"$1\" = exec ]; then", "if [ \"$1\" = exec ] && [ \"$2\" = resume ]; then\n  case \" $* \" in *' --ignore-rules '*) printf '%s\\n' \"unexpected argument '--ignore-rules'\" >&2; exit 2 ;; esac\nfi\nif [ \"$1\" = exec ]; then", 1)
 	installFakeCodex(t, script)
-	if _, err := Validate(t.Context(), config.CodexConfig{}); err == nil || !strings.Contains(err.Error(), "Codex exec resume capability check") || !strings.Contains(err.Error(), "--ignore-rules") {
+	if _, err := Validate(t.Context(), config.CodexConfig{}); err == nil || !strings.Contains(err.Error(), "Codex exec resume read-only capability check") || !strings.Contains(err.Error(), "--ignore-rules") {
 		t.Fatalf("accepted unsupported resume flag: %v", err)
 	}
 }
@@ -194,7 +212,7 @@ func TestValidateRejectsMissingOutputSchemaSupport(t *testing.T) {
 	script := catalogueScriptFor(dir, page, "")
 	script = strings.Replace(script, "if [ \"$1\" = exec ]; then", "if [ \"$1\" = exec ]; then\n  case \" $* \" in *' --output-schema '*) printf '%s\\n' \"unexpected argument '--output-schema'\" >&2; exit 2 ;; esac\nfi\nif [ \"$1\" = exec ]; then", 1)
 	installFakeCodex(t, script)
-	if _, err := Validate(t.Context(), config.CodexConfig{}); err == nil || !strings.Contains(err.Error(), "Codex exec capability check") || !strings.Contains(err.Error(), "--output-schema") {
+	if _, err := Validate(t.Context(), config.CodexConfig{}); err == nil || !strings.Contains(err.Error(), "Codex exec read-only capability check") || !strings.Contains(err.Error(), "--output-schema") {
 		t.Fatalf("accepted CLI without output schema support: %v", err)
 	}
 }

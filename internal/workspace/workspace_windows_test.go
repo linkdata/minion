@@ -175,6 +175,39 @@ func TestWindowsOpenPathRejectsLink(t *testing.T) {
 	}
 }
 
+func TestWindowsOpenPathRejectsJunction(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "target")
+	if err := os.Mkdir(target, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(target, "source"), []byte("content"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	junction := filepath.Join(root, "junction")
+	if output, err := exec.Command("cmd.exe", "/c", "mklink", "/J", junction, target).CombinedOutput(); err != nil {
+		t.Fatalf("create junction: %v: %s", err, output)
+	}
+	for _, test := range []struct {
+		name      string
+		path      string
+		directory bool
+	}{
+		{"final component", junction, true},
+		{"parent component", filepath.Join(junction, "source"), false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			file, err := openPath(test.path, test.directory)
+			if file != nil {
+				_ = file.Close()
+			}
+			if err == nil {
+				t.Fatalf("opened %q through a junction", test.path)
+			}
+		})
+	}
+}
+
 func TestWindowsOpenDirectoryThroughFileReturnsENOTDIR(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "file")
 	if err := os.WriteFile(file, nil, 0600); err != nil {

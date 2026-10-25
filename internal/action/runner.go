@@ -18,9 +18,7 @@ import (
 	"time"
 
 	"github.com/linkdata/minion/internal/aicli"
-	"github.com/linkdata/minion/internal/claudecli"
 	"github.com/linkdata/minion/internal/cleanup"
-	"github.com/linkdata/minion/internal/codexcli"
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/gitwork"
@@ -29,7 +27,7 @@ import (
 	"github.com/linkdata/minion/internal/workspace"
 )
 
-var errUnsupportedModelReadGrants = errors.New("host-level model read grants are unsupported")
+var errUnsupportedEvidenceDirs = errors.New("model evidence directories must be selected by Minion")
 
 // Runner computes an action using supplied files and installed tools only.
 // Authentication belongs to this host configuration, never to Job or Result.
@@ -120,18 +118,8 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 	if err != nil {
 		return result, err
 	}
-	providers := []string{job.Main.Provider}
-	if job.Critic != nil {
-		providers = append(providers, job.Critic.Provider)
-	}
-	if err := configured.CheckWorkRootIsolation(workRoot, providers...); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return result, err
-		}
-		if errors.Is(err, errUnsupportedModelReadGrants) {
-			return result, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
-		}
-		return result, fmt.Errorf("%w: %w", workroot.ErrUnsafe, err)
+	if len(configured.Codex.ReadOnlyDirs) != 0 || len(configured.Claude.ReadOnlyDirs) != 0 {
+		return result, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, errUnsupportedEvidenceDirs)
 	}
 	if job.Critic != nil {
 		if err := checkpointReview(nil); err != nil {
@@ -472,90 +460,6 @@ func preparationFailure(stage string, err error) error {
 		return fmt.Errorf("%s: %w", stage, err)
 	}
 	return fmt.Errorf("%w: %s: %w", monitor.ErrTerminalJob, stage, err)
-}
-
-// CheckWorkRootIsolation refuses overlap with the selected providers' filesystem grants.
-// It checks existing paths without creating directories or invoking models.
-func (r *Runner) CheckWorkRootIsolation(root string, providers ...string) error {
-	root, err := workspace.CanonicalPath(root)
-	if err != nil {
-		return err
-	}
-	grants, err := r.modelReadPaths(providers...)
-	if err != nil {
-		return err
-	}
-	for _, grant := range grants {
-		if workspace.Within(grant, root) || workspace.Within(root, grant) {
-			return fmt.Errorf("work root overlaps model filesystem grant %q", grant)
-		}
-	}
-	return nil
-}
-
-// CheckPrivatePaths refuses grants that expose protected host paths, including future credential files.
-// A selected public skill or binary below a private home does not expose the whole home.
-func (r *Runner) CheckPrivatePaths(paths []string, providers ...string) error {
-	grants, err := r.modelReadPaths(providers...)
-	if err != nil {
-		return err
-	}
-	for _, name := range paths {
-		resolved, err := aicli.ResolvePath(name)
-		if err != nil {
-			return err
-		}
-		for _, grant := range grants {
-			if workspace.Within(grant, resolved) {
-				return fmt.Errorf("private host path %q is visible through model filesystem grant %q", name, grant)
-			}
-		}
-	}
-	return nil
-}
-
-func (r *Runner) modelReadPaths(providers ...string) ([]string, error) {
-	if len(r.Codex.ReadOnlyDirs) != 0 || len(r.Claude.ReadOnlyDirs) != 0 {
-		return nil, errUnsupportedModelReadGrants
-	}
-	var grants []string
-	for _, provider := range providers {
-		if provider == "" {
-			continue
-		}
-		var systemReads, selected []string
-		switch provider {
-		case "codex":
-			systemReads = codexcli.SystemReadPaths()
-			selected = r.Codex.Skills
-		case "claude":
-			systemReads = claudecli.SystemReadPaths()
-			selected = r.Claude.Skills
-		default:
-			return nil, fmt.Errorf("unsupported AI provider %q", provider)
-		}
-		binary, err := aicli.ExecutablePath(provider)
-		if err == nil {
-			grants = append(grants, binary)
-		} else if !errors.Is(err, exec.ErrNotFound) && !errors.Is(err, os.ErrNotExist) {
-			return nil, err
-		}
-		// A fixed grant can become readable after startup when its directory is created.
-		grants = append(grants, systemReads...)
-		for _, skill := range selected {
-			if filepath.IsAbs(skill) {
-				grants = append(grants, filepath.Dir(skill))
-			}
-		}
-	}
-	for i, grant := range grants {
-		resolved, err := aicli.ResolvePath(grant)
-		if err != nil {
-			return nil, err
-		}
-		grants[i] = resolved
-	}
-	return grants, nil
 }
 
 func materializeContext(root string, snapshot workspace.Snapshot) error {

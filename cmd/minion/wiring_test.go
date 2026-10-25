@@ -18,10 +18,9 @@ import (
 	"github.com/linkdata/minion/internal/state"
 )
 
-func TestServiceWiringPreservesAdmissionAndHostPolicy(t *testing.T) {
+func TestServiceWiringPreservesAdmissionAndCredentials(t *testing.T) {
 	strict := 0
 	consecutive := 7
-	sockets := true
 	cfg := config.Config{
 		WorkRoot: "/private/work", StatePath: "/private/state.json", BotLogin: "bot",
 		Main: "claude", Adversarial: "codex",
@@ -30,7 +29,7 @@ func TestServiceWiringPreservesAdmissionAndHostPolicy(t *testing.T) {
 		AlwaysOnSkills: []string{skills.BuiltinAntiPromptInjection},
 		Commands:       map[string]config.CommandMapping{"inspect": {Action: "review"}},
 		Codex:          config.CodexConfig{APIKey: "codex-test-key", Model: "codex-pinned", ReasoningEffort: "high", Skills: []string{"stale-host-skill"}},
-		Claude:         config.ClaudeConfig{APIKey: "claude-test-key", Model: "claude-pinned", Effort: "medium", AllowAllUnixSockets: &sockets, Skills: []string{"stale-host-skill"}},
+		Claude:         config.ClaudeConfig{APIKey: "claude-test-key", Model: "claude-pinned", Effort: "medium", Skills: []string{"stale-host-skill"}},
 	}
 	admissionErr := errors.New("admission sentinel")
 	client, store, logger := &github.Client{}, &state.Store{}, log.New(io.Discard, "", 0)
@@ -58,9 +57,8 @@ func TestServiceWiringPreservesAdmissionAndHostPolicy(t *testing.T) {
 	}
 	if orchestrator.Runner.Codex.APIKey != cfg.Codex.APIKey ||
 		orchestrator.Runner.Claude.APIKey != cfg.Claude.APIKey ||
-		orchestrator.Runner.Claude.AllowAllUnixSockets != cfg.Claude.AllowAllUnixSockets ||
 		len(orchestrator.Runner.Codex.Skills) != 0 ||
 		len(orchestrator.Runner.Claude.Skills) != 0 {
-		t.Fatal("runner lost provider authentication/socket policy or retained unselected skills")
+		t.Fatal("runner lost provider authentication or retained unselected skills")
 	}
 }

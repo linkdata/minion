@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -139,15 +138,8 @@ printf '%s\n' '{"type":"thread.started","thread_id":"symlink-test"}' '{"type":"i
 	if err != nil {
 		t.Fatal(err)
 	}
-	var filesystem string
-	for _, arg := range strings.Split(string(args), "\n") {
-		if strings.HasPrefix(arg, "permissions.minion.filesystem=") {
-			filesystem = arg
-			break
-		}
-	}
-	if !strings.Contains(filesystem, strconv.Quote(want)+`="read"`) || strings.Contains(filesystem, strconv.Quote(alias)+`="read"`) {
-		t.Fatalf("sandbox grants do not match invoked resolved file: %s", filesystem)
+	if !strings.Contains(string(args), `sandbox_mode="read-only"`) || strings.Contains(string(args), "permissions.minion") {
+		t.Fatalf("resolved executable did not use native read-only sandbox: %s", args)
 	}
 }
 

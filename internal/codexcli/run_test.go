@@ -22,10 +22,22 @@ import (
 	"github.com/linkdata/minion/internal/usage"
 )
 
-func TestExecConfigSelectsWindowsSandbox(t *testing.T) {
-	got := slices.Contains(execConfigArgs(`permissions.minion.filesystem={}`), `windows.sandbox="mxc"`)
-	if got != (runtime.GOOS == "windows") {
-		t.Fatalf("Windows MXC selection on %s = %t", runtime.GOOS, got)
+func TestSandboxArgsSelectsNativeMode(t *testing.T) {
+	for _, test := range []struct {
+		name, output string
+		writable     bool
+		want         []string
+	}{
+		{"review", "", false, []string{"-c", `sandbox_mode="read-only"`}},
+		{"fix", "", true, []string{"-c", `sandbox_mode="workspace-write"`, "-c", "sandbox_workspace_write.exclude_slash_tmp=true", "-c", "sandbox_workspace_write.exclude_tmpdir_env_var=true", "-c", `sandbox_workspace_write.writable_roots=["/source"]`}},
+		{"report", "/report", false, []string{"-c", `sandbox_mode="workspace-write"`, "-c", "sandbox_workspace_write.exclude_slash_tmp=true", "-c", "sandbox_workspace_write.exclude_tmpdir_env_var=true", "-c", `sandbox_workspace_write.writable_roots=["/report"]`}},
+		{"fix and report", "/report", true, []string{"-c", `sandbox_mode="workspace-write"`, "-c", "sandbox_workspace_write.exclude_slash_tmp=true", "-c", "sandbox_workspace_write.exclude_tmpdir_env_var=true", "-c", `sandbox_workspace_write.writable_roots=["/source","/report"]`}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := sandboxArgs("/source", test.output, test.writable); !slices.Equal(got, test.want) {
+				t.Fatalf("sandbox args = %v, want %v", got, test.want)
+			}
+		})
 	}
 }
 
@@ -36,10 +48,9 @@ func TestRunInvokesCodexAndReturnsFinalMessage(t *testing.T) {
 	for _, tt := range []struct {
 		name     string
 		writable bool
-		access   string
 	}{
-		{name: "review", access: "read"},
-		{name: "fix", writable: true, access: "write"},
+		{name: "review"},
+		{name: "fix", writable: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := canonicalTempDir(t)
@@ -79,16 +90,15 @@ printf '%s\n' '{"type":"thread.started","thread_id":"test"}' '{"type":"item.comp
 			}
 			runtimeDir := strings.TrimSpace(string(tmp))
 			got := strings.Split(strings.TrimSuffix(string(args), "\n"), "\n")
-			systemRules := systemGrantRules(runtime.GOOS, nil)
-			if runtime.GOOS != "linux" {
-				paths, err := nativeSystemReadPaths()
-				if err != nil {
-					t.Fatal(err)
-				}
-				systemRules = systemGrantRules(runtime.GOOS, paths)
-			}
 			want := []string{
 				"exec", "--json", "--ignore-user-config", "--ignore-rules", "--strict-config", "--skip-git-repo-check",
+			}
+			if tt.writable {
+				want = append(want, "-c", `sandbox_mode="workspace-write"`, "-c", "sandbox_workspace_write.exclude_slash_tmp=true", "-c", "sandbox_workspace_write.exclude_tmpdir_env_var=true", "-c", `sandbox_workspace_write.writable_roots=[`+strconv.Quote(dir)+`]`)
+			} else {
+				want = append(want, "-c", `sandbox_mode="read-only"`)
+			}
+			want = append(want,
 				"--disable", "apps", "--disable", "browser_use", "--disable", "browser_use_external",
 				"--disable", "browser_use_full_cdp_access", "--disable", "computer_use",
 				"--disable", "image_generation", "--disable", "plugins", "--disable", "remote_plugin",
@@ -101,14 +111,8 @@ printf '%s\n' '{"type":"thread.started","thread_id":"test"}' '{"type":"item.comp
 				"-c", "shell_environment_policy.ignore_default_excludes=false",
 				"-c", `shell_environment_policy.set.GIT_CONFIG_KEY_0="safe.bareRepository"`,
 				"-c", `shell_environment_policy.filters={"PATH"="include","HOME"="include","TMPDIR"="include","TMP"="include","TEMP"="include","GOCACHE"="include","GIT_CONFIG_NOSYSTEM"="include","GIT_CONFIG_GLOBAL"="include","GIT_CONFIG_COUNT"="include","GIT_CONFIG_KEY_0"="include","GIT_CONFIG_VALUE_0"="include","GIT_ATTR_NOSYSTEM"="include","GIT_NO_REPLACE_OBJECTS"="include","GIT_NO_LAZY_FETCH"="include","GIT_OPTIONAL_LOCKS"="include","LANG"="include","LC_ALL"="include","LC_CTYPE"="include","TERM"="include"}`,
-				"-c", `default_permissions="minion"`,
-				"-c", fmt.Sprintf(`permissions.minion.filesystem={":root"="deny",%s,":tmpdir"="write",%s=%q,%s="read",%s="read",%s="read",%s="read",%s="read",%s="read",%s="read",%s="read"}`, strings.Join(systemRules, ","), strconv.Quote(dir), tt.access, strconv.Quote(filepath.Join(dir, ".git")), strconv.Quote(filepath.Join(dir, ".agents")), strconv.Quote(filepath.Join(dir, ".codex")), strconv.Quote(filepath.Join(dir, ".claude")), strconv.Quote(filepath.Join(runtimeDir, ".git")), strconv.Quote(filepath.Join(runtimeDir, ".agents")), strconv.Quote(filepath.Join(runtimeDir, ".codex")), strconv.Quote(fakeCodex)),
-				"-c", "permissions.minion.network.enabled=false",
 				"--", "-",
-			}
-			if runtime.GOOS == "windows" {
-				want = slices.Insert(want, len(want)-2, "-c", `windows.sandbox="mxc"`)
-			}
+			)
 			if strings.Join(got, "\n") != strings.Join(want, "\n") {
 				t.Fatalf("arguments = %q, want %q", got, want)
 			}
@@ -304,7 +308,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.comp
 	}
 	for _, want := range []string{
 		"--model\ngpt-6-sol\n", "-c\nmodel_reasoning_effort=\"ultra\"\n",
-		strconv.Quote(filepath.Dir(skillPath)) + `="read"`,
+		`sandbox_mode="read-only"`,
 	} {
 		if !strings.Contains(string(args), want) {
 			t.Fatalf("configured Codex argument %q missing from %s", want, args)
@@ -398,8 +402,8 @@ printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.comp
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(args), strconv.Quote(filepath.Dir(skillPath))+`="read"`) {
-		t.Fatalf("embedded skill read permission missing: %s", args)
+	if !strings.Contains(string(args), `sandbox_mode="read-only"`) || strings.Contains(string(args), "permissions.minion") {
+		t.Fatalf("embedded skill run did not use the native read-only sandbox: %s", args)
 	}
 	prompt, err := os.ReadFile(fakeCodex + ".prompt")
 	if err != nil {
@@ -437,10 +441,13 @@ printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.comp
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{strconv.Quote(workspace) + `="read"`, strconv.Quote(output) + `="write"`, "permissions.minion.network.enabled=false"} {
+	for _, want := range []string{`sandbox_mode="workspace-write"`, `sandbox_workspace_write.writable_roots=[` + strconv.Quote(output) + `]`} {
 		if !strings.Contains(string(args), want) {
-			t.Fatalf("audit permission %q missing from %s", want, args)
+			t.Fatalf("audit sandbox setting %q missing from %s", want, args)
 		}
+	}
+	if strings.Contains(string(args), `sandbox_workspace_write.writable_roots=[`+strconv.Quote(workspace)) {
+		t.Fatalf("audit source is writable: %s", args)
 	}
 	if strings.Contains(string(args), "--ephemeral") {
 		t.Fatal("audit helpers cannot fork an ephemeral parent session")
@@ -483,10 +490,8 @@ printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.comp
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, dir := range []string{workspace, reports} {
-		if !strings.Contains(string(args), strconv.Quote(dir)+`="read"`) || strings.Contains(string(args), strconv.Quote(dir)+`="write"`) {
-			t.Fatalf("critic lacks read-only access to %s: %s", dir, args)
-		}
+	if !strings.Contains(string(args), `sandbox_mode="read-only"`) || strings.Contains(string(args), "sandbox_workspace_write.writable_roots") {
+		t.Fatalf("critic did not use Codex's native read-only sandbox: %s", args)
 	}
 	for _, test := range []struct{ dir, failure string }{
 		{root, "separate from the source snapshot"},
@@ -514,6 +519,21 @@ func TestRunRejectsSkillInsideSource(t *testing.T) {
 		if _, err := Run(context.Background(), source, "task", false, "", config.CodexConfig{Skills: []string{path}}); err == nil || !strings.Contains(err.Error(), "skill is inside the untrusted source snapshot") {
 			t.Fatalf("accepted source skill %q: %v", path, err)
 		}
+	}
+	if _, err := os.Stat(binary + ".invoked"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("invalid skill started Codex: %v", err)
+	}
+}
+
+func TestRunRejectsSkillInsideOutput(t *testing.T) {
+	source, output := t.TempDir(), t.TempDir()
+	skill := filepath.Join(output, "SKILL.md")
+	if err := os.WriteFile(skill, []byte("---\nname: test\n---\nTest skill.\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	binary := installFakeCodex(t, "#!/bin/sh\ntouch \"$0.invoked\"\nexit 99\n")
+	if _, err := Run(context.Background(), source, "task", false, output, config.CodexConfig{Skills: []string{skill}}); err == nil || !strings.Contains(err.Error(), "inside a writable directory") {
+		t.Fatalf("accepted writable skill: %v", err)
 	}
 	if _, err := os.Stat(binary + ".invoked"); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("invalid skill started Codex: %v", err)
@@ -587,65 +607,6 @@ func TestWindowsChildEnvironmentNormalizesNamesAndPath(t *testing.T) {
 	}
 	if strings.Count(joined, "PATH=") != 1 || strings.Contains(joined, "GH_TOKEN") || strings.Contains(joined, "/wrong") {
 		t.Fatalf("unsafe Windows environment: %s", joined)
-	}
-}
-
-func TestNativeSystemGrantRules(t *testing.T) {
-	if got := systemGrantRules("linux", nil); !slices.Equal(got, []string{`":minimal"="read"`}) {
-		t.Fatalf("Linux grants = %v", got)
-	}
-	mac := systemReadPaths("darwin", nil)
-	macExplicit := explicitSystemReadPaths("darwin", nil)
-	wantMinimal := []string{
-		"/Library/Apple", "/Library/Filesystems/NetFSPlugins", "/Library/Preferences",
-		"/private/etc", "/etc", "/private/var/db", "/var/db", "/private/tmp", "/private/var/tmp",
-		"/System/iOSSupport/System/Library/Frameworks", "/System/iOSSupport/System/Library/PrivateFrameworks",
-		"/System/iOSSupport/System/Library/SubFrameworks", "/Applications",
-	}
-	if !slices.Equal(mac, append(slices.Clone(macExplicit), wantMinimal...)) {
-		t.Fatalf("macOS admission roots = %v, want explicit + %v", mac, wantMinimal)
-	}
-	if !slices.Contains(mac, "/System/Library") || !slices.Contains(mac, "/System/Cryptexes/OS/System/Library/dyld") || !slices.Contains(mac, "/opt/homebrew") {
-		t.Fatalf("macOS grants = %v", mac)
-	}
-	const data = "/System/Volumes/Data"
-	for _, path := range mac {
-		path = strings.TrimRight(path, "/")
-		if path == data || strings.HasPrefix(data, path+"/") || strings.HasPrefix(path, data+"/") {
-			t.Fatalf("macOS grant exposes Data volume user files: %q", path)
-		}
-	}
-	systemRoot, programFiles := t.TempDir(), t.TempDir()
-	win := systemReadPaths("windows", func(key string) string {
-		switch key {
-		case "SystemRoot":
-			return systemRoot
-		case "ProgramFiles":
-			return programFiles
-		default:
-			return "relative"
-		}
-	})
-	if !slices.Equal(win, []string{systemRoot, programFiles}) || systemReadPaths("windows", func(string) string { return "relative" }) != nil {
-		t.Fatalf("Windows grants = %v", win)
-	}
-	for _, test := range []struct {
-		goos  string
-		paths []string
-		start []string
-	}{
-		{"darwin", macExplicit, []string{`":minimal"="read"`}},
-		{"windows", win, nil},
-	} {
-		rules := systemGrantRules(test.goos, test.paths)
-		if len(rules) != len(test.paths)+len(test.start) || !slices.Equal(rules[:len(test.start)], test.start) {
-			t.Fatalf("%s native grant prefix = %v", test.goos, rules)
-		}
-		for i, path := range test.paths {
-			if rules[i+len(test.start)] != strconv.Quote(path)+`="read"` {
-				t.Fatalf("%s native grant %q = %q", test.goos, path, rules[i+len(test.start)])
-			}
-		}
 	}
 }
 

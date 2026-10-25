@@ -104,22 +104,20 @@ if $resume; then printf '%s\n' '`+doubled+`'; else printf '%s\n' '`+successfulRe
 		var policy struct {
 			AutoMemory *bool `json:"autoMemoryEnabled"`
 			Sandbox    struct {
-				Filesystem struct{ AllowRead, AllowWrite, DenyWrite []string } `json:"filesystem"`
+				Credentials struct {
+					Files []struct{ Path, Mode string } `json:"files"`
+				} `json:"credentials"`
 			} `json:"sandbox"`
 		}
 		if err := json.Unmarshal([]byte(option(args, "--settings")), &policy); err != nil {
 			t.Fatal(err)
 		}
-		if policy.AutoMemory == nil || *policy.AutoMemory || slices.Contains(policy.Sandbox.Filesystem.AllowRead, session.authDir) || slices.Contains(policy.Sandbox.Filesystem.AllowWrite, session.authDir) {
-			t.Fatal("native memory or private authentication exposed")
-		}
-		if !slices.Contains(policy.Sandbox.Filesystem.DenyWrite, filepath.Join(session.runtimeDir, ".git")) {
-			t.Fatal("runtime Git metadata is writable")
+		if policy.AutoMemory == nil || *policy.AutoMemory || len(policy.Sandbox.Credentials.Files) != 1 || policy.Sandbox.Credentials.Files[0].Path != filepath.Join(session.authDir, "api-key") || policy.Sandbox.Credentials.Files[0].Mode != "deny" {
+			t.Fatal("native memory or private authentication protection changed")
 		}
 		for _, grant := range []string{oldGrant, newGrant} {
-			want := i == 0 && grant == oldGrant || i == 1 && grant == newGrant
-			if slices.Contains(args, grant) != want || slices.Contains(policy.Sandbox.Filesystem.AllowRead, grant) != want {
-				t.Fatalf("call%d retained stale/wrong grant %s", i+1, grant)
+			if slices.Contains(args, grant) {
+				t.Fatalf("call%d passed read-only evidence as a writable grant %s", i+1, grant)
 			}
 		}
 	}
@@ -161,16 +159,12 @@ func TestSessionRejectsChangedIdentityAndSettingsBeforeNativeCall(t *testing.T) 
 		{"skill", func(_ *testing.T, _ *string, _ *bool, _ *string, cfg *config.ClaudeConfig) {
 			cfg.Skills[0] = "builtin://other"
 		}},
-		{"socket policy", func(_ *testing.T, _ *string, _ *bool, _ *string, cfg *config.ClaudeConfig) {
-			*cfg.AllowAllUnixSockets = false
-		}},
 		{"schema", func(_ *testing.T, _ *string, _ *bool, _ *string, cfg *config.ClaudeConfig) { cfg.OutputSchema = `{}` }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			binary := fakeExecutable(t, "claude", "cat >/dev/null\nprintf called >>\"$0.calls\"\nprintf '%s\\n' '"+successfulResult+"'\n")
 			dir, output, writable := t.TempDir(), "", false
-			allow := true
-			settings := config.ClaudeConfig{APIKey: "private-fixture-key", Skills: []string{skills.BuiltinAntiPromptInjection}, AllowAllUnixSockets: &allow}
+			settings := config.ClaudeConfig{APIKey: "private-fixture-key", Skills: []string{skills.BuiltinAntiPromptInjection}}
 			var session Session
 			t.Cleanup(func() {
 				if err := session.Close(); err != nil {
