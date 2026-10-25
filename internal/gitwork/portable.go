@@ -297,13 +297,17 @@ func (c *Checkout) Import(ctx context.Context, expectedHead string, changes []wo
 		return fmt.Errorf("stage imported changes: %w", err)
 	}
 	if runtime.GOOS == "windows" {
+		indexedPaths, err := c.indexedImportedPaths(ctx, changes)
+		if err != nil {
+			return err
+		}
 		for _, mode := range []struct {
 			fileMode uint32
 			flag     string
 		}{{workspace.Executable, "+x"}, {workspace.Regular, "-x"}} {
 			var paths strings.Builder
 			for _, change := range changes {
-				if !change.Delete && change.Mode == mode.fileMode {
+				if !change.Delete && change.Mode == mode.fileMode && indexedPaths[change.Path] {
 					paths.WriteString(change.Path)
 					paths.WriteByte(0)
 				}
@@ -345,6 +349,36 @@ func (c *Checkout) Import(ctx context.Context, expectedHead string, changes []wo
 		}
 	}
 	return nil
+}
+
+func (c *Checkout) indexedImportedPaths(ctx context.Context, changes []workspace.Change) (map[string]bool, error) {
+	indexed := make(map[string]bool, len(changes))
+	for _, change := range changes {
+		if !change.Delete {
+			indexed[change.Path] = false
+		}
+	}
+	if len(indexed) == 0 {
+		return indexed, nil
+	}
+	raw, truncated, err := c.boundedGit(ctx, nil, maxPathListBytes, true, "ls-files", "--cached", "-z")
+	if err != nil {
+		return nil, err
+	}
+	if truncated {
+		return nil, ErrTooManyFiles
+	}
+	paths, err := splitNUL(raw)
+	if err != nil {
+		return nil, fmt.Errorf("invalid Git index paths: %w", err)
+	}
+	for _, path := range paths {
+		name := string(path)
+		if _, wanted := indexed[name]; wanted {
+			indexed[name] = true
+		}
+	}
+	return indexed, nil
 }
 
 func (c *Checkout) boundedGit(ctx context.Context, stdin io.Reader, limit int, truncate bool, args ...string) ([]byte, bool, error) {

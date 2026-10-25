@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -118,7 +119,8 @@ func TestRunnerReviewRevisionsFreezeCleanIndependentInputs(t *testing.T) {
 		if request.dir == source || request.writable || request.outputDir != "" {
 			t.Fatalf("critic received mutable main workspace: dir=%q writable=%t output=%q", request.dir, request.writable, request.outputDir)
 		}
-		if !strings.Contains(request.prompt, fmt.Sprintf(`inspect the frozen source at \"%s\"`, request.dir)) {
+		frozenPath := strconv.Quote(fmt.Sprintf("inspect the frozen source at %q", request.dir))
+		if !strings.Contains(request.prompt, frozenPath[1:len(frozenPath)-1]) {
 			t.Fatalf("critic prompt lacks frozen source path %q", request.dir)
 		}
 		data, err := workspace.ReadRegular(filepath.Join(request.dir, "source.txt"), workspace.MaxBytes)

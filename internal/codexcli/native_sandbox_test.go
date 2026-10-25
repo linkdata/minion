@@ -116,16 +116,21 @@ func TestNativeCodexSandboxEnforcement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(rule, `":minimal"`) {
-		t.Fatal("native sandbox probe received opaque minimal host grants")
+	if !strings.HasPrefix(rule, `permissions.minion.filesystem={":root"="deny",`) {
+		t.Fatal("native sandbox probe lost its root denial")
+	}
+	if hasMinimal := strings.Contains(rule, `":minimal"="read"`); hasMinimal != (runtime.GOOS == "darwin") {
+		t.Fatalf("native sandbox minimal grant on %s = %t", runtime.GOOS, hasMinimal)
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, cli,
-		"sandbox", "-c", `default_permissions="minion"`, "-c", rule,
-		"-c", "permissions.minion.network.enabled=false", "--",
-		executable, "-test.run=^TestNativeCodexSandboxProbeChild$",
-	)
+	args := []string{"sandbox", "-c", `default_permissions="minion"`, "-c", rule,
+		"-c", "permissions.minion.network.enabled=false"}
+	if runtime.GOOS == "windows" {
+		args = append(args, "-c", `windows.sandbox="mxc"`)
+	}
+	args = append(args, "--", executable, "-test.run=^TestNativeCodexSandboxProbeChild$")
+	cmd := exec.CommandContext(ctx, cli, args...)
 	cmd.Dir = runtimeDir
 	cmd.Env = append(os.Environ(),
 		"CODEX_HOME="+probeHome,

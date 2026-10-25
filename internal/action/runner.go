@@ -540,13 +540,8 @@ func (r *Runner) modelReadPaths(providers ...string) ([]string, error) {
 		} else if !errors.Is(err, exec.ErrNotFound) && !errors.Is(err, os.ErrNotExist) {
 			return nil, err
 		}
-		for _, path := range systemReads {
-			if _, err := os.Stat(path); err == nil {
-				grants = append(grants, path)
-			} else if !errors.Is(err, os.ErrNotExist) {
-				return nil, err
-			}
-		}
+		// A fixed grant can become readable after startup when its directory is created.
+		grants = append(grants, systemReads...)
 		for _, skill := range selected {
 			if filepath.IsAbs(skill) {
 				grants = append(grants, filepath.Dir(skill))
@@ -554,7 +549,7 @@ func (r *Runner) modelReadPaths(providers ...string) ([]string, error) {
 		}
 	}
 	for i, grant := range grants {
-		resolved, err := workspace.CanonicalPath(grant)
+		resolved, err := aicli.ResolvePath(grant)
 		if err != nil {
 			return nil, err
 		}

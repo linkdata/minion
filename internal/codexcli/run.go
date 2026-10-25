@@ -30,12 +30,23 @@ const (
 var runtimeMetadataNames = [...]string{".git", ".agents", ".codex"}
 
 // SystemReadPaths mirrors the host paths granted to model commands.
-// Linux lists the measured :minimal expansion; native hosts use explicit roots.
+// Linux and macOS include the measured :minimal expansion for host admission.
 func SystemReadPaths() []string {
 	return systemReadPaths(runtime.GOOS, os.Getenv)
 }
 
 func systemReadPaths(goos string, getenv func(string) string) []string {
+	paths := explicitSystemReadPaths(goos, getenv)
+	if goos == "darwin" {
+		return append(paths, "/Library/Apple", "/Library/Filesystems/NetFSPlugins", "/Library/Preferences",
+			"/private/etc", "/etc", "/private/var/db", "/var/db", "/private/tmp", "/private/var/tmp",
+			"/System/iOSSupport/System/Library/Frameworks", "/System/iOSSupport/System/Library/PrivateFrameworks",
+			"/System/iOSSupport/System/Library/SubFrameworks", "/Applications")
+	}
+	return paths
+}
+
+func explicitSystemReadPaths(goos string, getenv func(string) string) []string {
 	switch goos {
 	case "linux":
 		return []string{"/bin", "/sbin", "/usr", "/etc", "/lib", "/lib64", "/nix/store", "/run/current-system/sw"}
@@ -59,7 +70,7 @@ func systemReadPaths(goos string, getenv func(string) string) []string {
 }
 
 func nativeSystemReadPaths() ([]string, error) {
-	paths := SystemReadPaths()
+	paths := explicitSystemReadPaths(runtime.GOOS, os.Getenv)
 	if len(paths) == 0 {
 		return nil, fmt.Errorf("Codex filesystem grants are unsupported on %s", runtime.GOOS)
 	}
@@ -71,10 +82,13 @@ func nativeSystemReadPaths() ([]string, error) {
 }
 
 func systemGrantRules(goos string, nativePaths []string) []string {
-	if goos == "linux" {
-		return []string{`":minimal"="read"`}
+	grants := make([]string, 0, len(nativePaths)+1)
+	if goos == "linux" || goos == "darwin" {
+		grants = append(grants, `":minimal"="read"`)
+		if goos == "linux" {
+			return grants
+		}
 	}
-	grants := make([]string, 0, len(nativePaths))
 	for _, path := range nativePaths {
 		grants = append(grants, fmt.Sprintf(`%s="read"`, strconv.Quote(path)))
 	}
@@ -122,7 +136,7 @@ func sandboxFilesystemRule(workspace, runtimeDir, realBinary, outputDir string, 
 
 func execConfigArgs(filesystemRule string) []string {
 	args := instructionBoundaryConfig()
-	return append(args,
+	args = append(args,
 		"-c", "skills.include_instructions=false",
 		"-c", "approval_policy=never",
 		"-c", `web_search="disabled"`,
@@ -134,6 +148,11 @@ func execConfigArgs(filesystemRule string) []string {
 		"-c", filesystemRule,
 		"-c", "permissions.minion.network.enabled=false",
 	)
+	if runtime.GOOS == "windows" {
+		// The legacy Windows backends cannot enforce restricted host reads.
+		args = append(args, "-c", `windows.sandbox="mxc"`)
+	}
+	return args
 }
 
 // Run continues this action role's Codex conversation for a source snapshot.
@@ -167,6 +186,9 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	}
 	codexHome, err := HomePath()
 	if err != nil {
+		return result, fmt.Errorf("codex exec: %w", err)
+	}
+	if err := rejectGlobalInstructions(codexHome); err != nil {
 		return result, fmt.Errorf("codex exec: %w", err)
 	}
 	if outputDir != "" {

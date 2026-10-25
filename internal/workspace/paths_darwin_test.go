@@ -48,7 +48,14 @@ func TestWithinCaseInsensitiveFilesystemAlias(t *testing.T) {
 
 func TestWithinAbsentDarwinGrant(t *testing.T) {
 	parent := t.TempDir()
-	if Within(filepath.Join(parent, "absent-grant"), filepath.Join(parent, "unrelated")) {
+	grant := filepath.Join(parent, "absent-grant")
+	if !Within(grant, filepath.Join(parent, "ABSENT-GRANT", "future", "auth.json")) {
+		t.Fatal("case alias escaped absent grant")
+	}
+	if Within(grant, filepath.Join(parent, "absent-grant-sibling")) {
+		t.Fatal("sibling counted as inside absent grant")
+	}
+	if Within(grant, filepath.Join(parent, "unrelated")) {
 		t.Fatal("unrelated path counted inside an absent grant")
 	}
 }

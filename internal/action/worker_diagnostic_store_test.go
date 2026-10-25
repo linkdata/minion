@@ -19,6 +19,7 @@ import (
 
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/monitor"
+	"github.com/linkdata/minion/internal/workspace"
 )
 
 func TestWorkerDiagnosticsStayInPrivateAttemptRecord(t *testing.T) {
@@ -32,8 +33,13 @@ func TestWorkerDiagnosticsStayInPrivateAttemptRecord(t *testing.T) {
 	if err := owner.retainWorkerDiagnostics(job, result, failure); err != nil {
 		t.Fatalf("private attempt record missing: path=%q error=%v", path, err)
 	}
+	canonicalRoot, err := workspace.CanonicalPath(owner.WorkRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loggedPath := filepath.Join(canonicalRoot, "worker-diagnostics", job.Identity.AttemptID+".json")
 	if strings.Contains(journal.String(), "SECRET") || strings.Contains(journal.String(), "FORGED") ||
-		!strings.Contains(journal.String(), "count=1") || !strings.Contains(journal.String(), path) {
+		!strings.Contains(journal.String(), "count=1") || !strings.Contains(journal.String(), fmt.Sprintf("private_path=%q", loggedPath)) {
 		t.Fatalf("worker text reached journal or record location is hidden: %q", journal.String())
 	}
 	data, err := os.ReadFile(path)

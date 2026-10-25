@@ -18,6 +18,7 @@ import (
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/skills"
+	"github.com/linkdata/minion/internal/workspace"
 )
 
 func TestConfigureRoleReportsRequiredAndOptionalResolutionErrors(t *testing.T) {
@@ -77,6 +78,12 @@ func TestRunnerSeparatesMainAndCriticSkills(t *testing.T) {
 			t.Setenv("HOME", home)
 			if runtime.GOOS == "windows" {
 				t.Setenv("USERPROFILE", home)
+				t.Setenv("HOMEDRIVE", "")
+				t.Setenv("HOMEPATH", "")
+			}
+			canonicalHome, err := workspace.CanonicalPath(home)
+			if err != nil {
+				t.Fatal(err)
 			}
 			mainRoot, criticRoot, critic := ".agents", ".claude", "claude"
 			if main == "claude" {
@@ -104,11 +111,11 @@ func TestRunnerSeparatesMainAndCriticSkills(t *testing.T) {
 				mainSkills, criticSkills = configured.Claude.Skills, configured.Codex.Skills
 			}
 			wantMain := []string{
-				filepath.Join(home, mainRoot, "skills", "ponytail-review", "SKILL.md"),
-				filepath.Join(home, mainRoot, "skills", "optional", "SKILL.md"),
+				filepath.Join(canonicalHome, mainRoot, "skills", "ponytail-review", "SKILL.md"),
+				filepath.Join(canonicalHome, mainRoot, "skills", "optional", "SKILL.md"),
 				skills.BuiltinAntiPromptInjection,
 			}
-			wantCritic := []string{filepath.Join(home, criticRoot, "skills", "optional", "SKILL.md"), skills.BuiltinAntiPromptInjection}
+			wantCritic := []string{filepath.Join(canonicalHome, criticRoot, "skills", "optional", "SKILL.md"), skills.BuiltinAntiPromptInjection}
 			if !slices.Equal(mainSkills, wantMain) || !slices.Equal(criticSkills, wantCritic) {
 				t.Fatalf("skills mixed roles: main=%v critic=%v", mainSkills, criticSkills)
 			}

@@ -327,7 +327,17 @@ func Within(root, name string) bool {
 	}
 	rootInfo, err := os.Stat(root)
 	if errors.Is(err, os.ErrNotExist) {
-		return false // shortcut: absent roots have no identity; revisit if security grants may be absent.
+		// shortcut: case folding may reject distinct future paths on a case-sensitive volume; revisit if needed.
+		for {
+			if strings.EqualFold(root, name) {
+				return true
+			}
+			parent := filepath.Dir(name)
+			if parent == name {
+				return false
+			}
+			name = parent
+		}
 	}
 	if err != nil {
 		return true // An unverified grant cannot be treated as separate.

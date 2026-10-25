@@ -11,10 +11,12 @@ import (
 	"time"
 
 	"github.com/linkdata/minion/internal/aicli"
+	"github.com/linkdata/minion/internal/codexcli"
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/workroot"
+	"github.com/linkdata/minion/internal/workspace"
 )
 
 func TestRunnerWorkRootIsolation(t *testing.T) {
@@ -38,7 +40,11 @@ func TestRunnerWorkRootIsolation(t *testing.T) {
 				}
 			case "system read":
 				t.Setenv("PATH", t.TempDir())
-				work = "/usr"
+				reads := codexcli.SystemReadPaths()
+				if len(reads) == 0 {
+					t.Fatal("Codex has no system read paths")
+				}
+				work = reads[0]
 			}
 			if err := runner.CheckWorkRootIsolation(work, job.Main.Provider, job.Critic.Provider); err == nil || !strings.Contains(err.Error(), "work root overlaps") {
 				t.Fatalf("isolation=%v", err)
@@ -56,6 +62,25 @@ func TestRunnerWorkRootIsolation(t *testing.T) {
 	runner = Runner{}
 	if _, err := runner.Run(context.Background(), testJob(command.Comment)); !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "work root is required") {
 		t.Fatalf("missing root=%v", err)
+	}
+}
+
+func TestMacCodexMinimalRootsRejectWorkAndPrivatePaths(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("macOS Codex minimal roots")
+	}
+	runner := Runner{}
+	for _, path := range []string{"/tmp", "/var/tmp", "/Library/Preferences", "/Applications", "/Library/Apple", "/Library/Filesystems/NetFSPlugins"} {
+		if err := runner.CheckPrivatePaths([]string{filepath.Join(path, "future-secret")}, "codex"); err == nil || !strings.Contains(err.Error(), "is visible through model filesystem grant") {
+			t.Fatalf("private path under macOS minimal root %q accepted: %v", path, err)
+		}
+		if _, err := os.Stat(path); err == nil {
+			if err := runner.CheckWorkRootIsolation(path, "codex"); err == nil || !strings.Contains(err.Error(), "work root overlaps") {
+				t.Fatalf("macOS minimal root %q accepted as work root: %v", path, err)
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("macOS minimal root %q: %v", path, err)
+		}
 	}
 }
 
@@ -109,21 +134,47 @@ func TestRunnerReturnsParentCancellationAfterFinalReview(t *testing.T) {
 
 func TestRunnerPreparationFailuresAreTerminalBeforeModels(t *testing.T) {
 	longPath := strings.TrimSuffix(strings.Repeat(strings.Repeat("a", 255)+"/", 16), "/")
+	sourceFailure := func(job *Job) { job.Source.Files[0].Path = longPath }
+	contextFailure := func(job *Job) { job.Source.BaseFiles[0].Path = longPath }
+	if runtime.GOOS == "windows" {
+		sourceFailure = func(job *Job) {
+			job.Source.Files = append(job.Source.Files, workspace.File{Path: "SOURCE.txt", Mode: workspace.Regular})
+		}
+		contextFailure = func(job *Job) {
+			job.Source.BaseFiles = append(job.Source.BaseFiles, workspace.File{Path: "DELETED.txt", Mode: workspace.Regular})
+		}
+	}
 	for _, test := range []struct {
 		name   string
 		action command.Action
 		mutate func(*Job)
 		want   string
 	}{
-		{"source materialization", command.Comment, func(job *Job) { job.Source.Files[0].Path = longPath }, "materialize source"},
+		{"source materialization", command.Comment, sourceFailure, "materialize source"},
 		{"repository materialization", command.Comment, func(job *Job) { job.Source.Files[0].Data = []byte("forged\n") }, "materialize repository"},
-		{"context materialization", command.Review, func(job *Job) { job.Source.BaseFiles[0].Path = longPath }, "materialize context"},
+		{"context materialization", command.Review, contextFailure, "materialize context"},
 		{"missing audit task skill", command.SecurityAudit, func(job *Job) { job.Main.Skills = []string{skills.BuiltinAntiPromptInjection} }, "action prompt: security audit requires"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			job := testJob(test.action)
 			test.mutate(&job)
 			runner := Runner{WorkRoot: t.TempDir(), runModel: forbidModel(t)}
+			if runtime.GOOS == "windows" && (test.name == "source materialization" || test.name == "context materialization") {
+				probe := filepath.Join(runner.WorkRoot, "case-probe")
+				if err := os.WriteFile(probe, nil, 0600); err != nil {
+					t.Fatal(err)
+				}
+				_, caseErr := os.Stat(filepath.Join(runner.WorkRoot, "CASE-PROBE"))
+				if err := os.Remove(probe); err != nil {
+					t.Fatal(err)
+				}
+				if errors.Is(caseErr, os.ErrNotExist) {
+					t.Skip("case alias fixture requires a case-insensitive work root")
+				}
+				if caseErr != nil {
+					t.Fatal(caseErr)
+				}
+			}
 			if result, err := runner.Run(context.Background(), job); !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), test.want) || len(result.Calls) != 0 {
 				t.Fatalf("preparation result=%+v error=%v", result, err)
 			}

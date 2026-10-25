@@ -654,7 +654,7 @@ func TestRepositoryDigestUsesReverseLexicalDepthFirstOrder(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			fmt.Fprintf(hash, "%s\x00%d\x00", name, info.Mode())
+			fmt.Fprintf(hash, "%s\x00%d\x00", filepath.FromSlash(name), info.Mode())
 			if info.Mode().IsRegular() {
 				fmt.Fprintf(hash, "%d\x00%s", len(name), name)
 			}

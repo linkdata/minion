@@ -27,13 +27,15 @@ import (
 
 func TestPartialAuditMetadataPathListsStayPortable(t *testing.T) {
 	job := testJob(command.SecurityAudit)
+	skill := filepath.Join(t.TempDir(), "installed", "SKILL.md")
+	installed := filepath.Dir(skill)
 	for _, field := range []string{"scope_paths", "prior_run_paths"} {
 		for _, path := range []string{".", "relative/report.md", "/worker/source", "../outside", `bad\path`} {
 			data, err := json.Marshal(map[string]any{field: []string{path}})
 			if err != nil {
 				t.Fatal(err)
 			}
-			files, err := normalizeAuditArtifacts([]workspace.File{{Path: "run-metadata.json", Mode: workspace.Regular, Data: data}}, job, "/installed/SKILL.md")
+			files, err := normalizeAuditArtifacts([]workspace.File{{Path: "run-metadata.json", Mode: workspace.Regular, Data: data}}, job, skill)
 			portable := path == "." || path == "relative/report.md"
 			if (err == nil) != portable {
 				t.Fatalf("partial %s path %q: %v", field, path, err)
@@ -49,10 +51,10 @@ func TestPartialAuditMetadataPathListsStayPortable(t *testing.T) {
 	for _, test := range []struct {
 		name, path, want, wantErr string
 	}{
-		{"inside installed skill", "/installed/companion.md", "companion.md", ""},
+		{"inside installed skill", filepath.Join(installed, "companion.md"), "companion.md", ""},
 		{"portable relative", "extras/companion.md", "extras/companion.md", ""},
-		{"outside installed skill", "/etc/passwd", "", "outside the installed skill"},
-		{"absolute escape", "/installed/../outside", "", "outside the installed skill"},
+		{"outside installed skill", filepath.Join(filepath.Dir(installed), "outside.md"), "", "outside the installed skill"},
+		{"absolute escape", installed + string(os.PathSeparator) + ".." + string(os.PathSeparator) + "outside", "", "outside the installed skill"},
 		{"relative escape", "../outside", "", "path is invalid"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -60,7 +62,7 @@ func TestPartialAuditMetadataPathListsStayPortable(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			files, err := normalizeAuditArtifacts([]workspace.File{{Path: "run-metadata.json", Mode: workspace.Regular, Data: data}}, job, "/installed/SKILL.md")
+			files, err := normalizeAuditArtifacts([]workspace.File{{Path: "run-metadata.json", Mode: workspace.Regular, Data: data}}, job, skill)
 			if test.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
 					t.Fatalf("companion %q error = %v; want %q", test.path, err, test.wantErr)
@@ -329,7 +331,10 @@ func TestRunnerJobValidationRejectsMetadataAliasBeforeModels(t *testing.T) {
 	job.Source.Files = []workspace.File{{Path: "GIT~1/x", Mode: workspace.Regular}}
 	runner := Runner{WorkRoot: t.TempDir(), runModel: forbidModel(t)}
 	result, err := runner.Run(context.Background(), job)
-	if !errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, gitwork.ErrUnsupportedSource) || !strings.Contains(err.Error(), "unsafe fix source path") || len(result.Calls) != 0 {
+	preflight := workspace.ValidateSnapshot(job.Source)
+	if !errors.Is(err, monitor.ErrTerminalJob) || len(result.Calls) != 0 ||
+		(preflight == nil && (!errors.Is(err, gitwork.ErrUnsupportedSource) || !strings.Contains(err.Error(), "unsafe fix source path"))) ||
+		(preflight != nil && !strings.Contains(err.Error(), preflight.Error())) {
 		t.Fatalf("unsupported source was retryable: %v", err)
 	}
 }

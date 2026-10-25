@@ -22,6 +22,13 @@ import (
 	"github.com/linkdata/minion/internal/usage"
 )
 
+func TestExecConfigSelectsWindowsSandbox(t *testing.T) {
+	got := slices.Contains(execConfigArgs(`permissions.minion.filesystem={}`), `windows.sandbox="mxc"`)
+	if got != (runtime.GOOS == "windows") {
+		t.Fatalf("Windows MXC selection on %s = %t", runtime.GOOS, got)
+	}
+}
+
 func TestRunInvokesCodexAndReturnsFinalMessage(t *testing.T) {
 	if !slices.Contains(aicli.ModelGitEnvironment(), "GIT_CONFIG_KEY_0=safe.bareRepository") {
 		t.Fatal("Codex shell Git key diverged from the shared model Git environment")
@@ -98,6 +105,9 @@ printf '%s\n' '{"type":"thread.started","thread_id":"test"}' '{"type":"item.comp
 				"-c", fmt.Sprintf(`permissions.minion.filesystem={":root"="deny",%s,":tmpdir"="write",%s=%q,%s="read",%s="read",%s="read",%s="read",%s="read",%s="read",%s="read",%s="read"}`, strings.Join(systemRules, ","), strconv.Quote(dir), tt.access, strconv.Quote(filepath.Join(dir, ".git")), strconv.Quote(filepath.Join(dir, ".agents")), strconv.Quote(filepath.Join(dir, ".codex")), strconv.Quote(filepath.Join(dir, ".claude")), strconv.Quote(filepath.Join(runtimeDir, ".git")), strconv.Quote(filepath.Join(runtimeDir, ".agents")), strconv.Quote(filepath.Join(runtimeDir, ".codex")), strconv.Quote(fakeCodex)),
 				"-c", "permissions.minion.network.enabled=false",
 				"--", "-",
+			}
+			if runtime.GOOS == "windows" {
+				want = slices.Insert(want, len(want)-2, "-c", `windows.sandbox="mxc"`)
 			}
 			if strings.Join(got, "\n") != strings.Join(want, "\n") {
 				t.Fatalf("arguments = %q, want %q", got, want)
@@ -585,6 +595,16 @@ func TestNativeSystemGrantRules(t *testing.T) {
 		t.Fatalf("Linux grants = %v", got)
 	}
 	mac := systemReadPaths("darwin", nil)
+	macExplicit := explicitSystemReadPaths("darwin", nil)
+	wantMinimal := []string{
+		"/Library/Apple", "/Library/Filesystems/NetFSPlugins", "/Library/Preferences",
+		"/private/etc", "/etc", "/private/var/db", "/var/db", "/private/tmp", "/private/var/tmp",
+		"/System/iOSSupport/System/Library/Frameworks", "/System/iOSSupport/System/Library/PrivateFrameworks",
+		"/System/iOSSupport/System/Library/SubFrameworks", "/Applications",
+	}
+	if !slices.Equal(mac, append(slices.Clone(macExplicit), wantMinimal...)) {
+		t.Fatalf("macOS admission roots = %v, want explicit + %v", mac, wantMinimal)
+	}
 	if !slices.Contains(mac, "/System/Library") || !slices.Contains(mac, "/System/Cryptexes/OS/System/Library/dyld") || !slices.Contains(mac, "/opt/homebrew") {
 		t.Fatalf("macOS grants = %v", mac)
 	}
@@ -609,14 +629,21 @@ func TestNativeSystemGrantRules(t *testing.T) {
 	if !slices.Equal(win, []string{systemRoot, programFiles}) || systemReadPaths("windows", func(string) string { return "relative" }) != nil {
 		t.Fatalf("Windows grants = %v", win)
 	}
-	for _, paths := range [][]string{mac, win} {
-		rules := systemGrantRules("darwin", paths)
-		if len(rules) != len(paths) || slices.Contains(rules, `":minimal"="read"`) {
-			t.Fatalf("native rules include opaque defaults: %v", rules)
+	for _, test := range []struct {
+		goos  string
+		paths []string
+		start []string
+	}{
+		{"darwin", macExplicit, []string{`":minimal"="read"`}},
+		{"windows", win, nil},
+	} {
+		rules := systemGrantRules(test.goos, test.paths)
+		if len(rules) != len(test.paths)+len(test.start) || !slices.Equal(rules[:len(test.start)], test.start) {
+			t.Fatalf("%s native grant prefix = %v", test.goos, rules)
 		}
-		for i, path := range paths {
-			if rules[i] != strconv.Quote(path)+`="read"` {
-				t.Fatalf("native grant %q = %q", path, rules[i])
+		for i, path := range test.paths {
+			if rules[i+len(test.start)] != strconv.Quote(path)+`="read"` {
+				t.Fatalf("%s native grant %q = %q", test.goos, path, rules[i+len(test.start)])
 			}
 		}
 	}

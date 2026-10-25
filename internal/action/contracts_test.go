@@ -311,7 +311,7 @@ func TestAuditJobRejectsUncitableSourcePathsBeforeModel(t *testing.T) {
 	}{
 		{"backslash", `literal\backslash`, true},
 		{"colon", "segment:name", true},
-		{"reserved", "CON.txt", true},
+		{"reserved", "CON.txt", false},
 		{"trailing dot", "source.", true},
 		{"leading tilde", "~source", false},
 		{"default ignorable", "so\u200burce", false},

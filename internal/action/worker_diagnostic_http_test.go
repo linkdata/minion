@@ -118,7 +118,11 @@ func TestHTTPWorkerDiagnosticsRemainPrivateThroughPublication(t *testing.T) {
 				strings.Contains(journal.String(), "FORGED JOURNAL ENTRY") || strings.ContainsRune(journal.String(), '\x1b') {
 				t.Fatalf("worker diagnostic escaped or answer bypassed inert publication: writes=%d posted=%q journal=%q", writes, posted, journal.String())
 			}
-			path := filepath.Join(owner.WorkRoot, "worker-diagnostics", job.Identity.AttemptID+".json")
+			canonicalRoot, err := workspace.CanonicalPath(owner.WorkRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(canonicalRoot, "worker-diagnostics", job.Identity.AttemptID+".json")
 			data, err := os.ReadFile(path)
 			if err != nil {
 				t.Fatal(err)
@@ -295,7 +299,11 @@ func TestHTTPFailureAtWireTextLimitRemainsPrivate(t *testing.T) {
 	if err := owner.retainWorkerDiagnostics(job, got.result, got.err); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(owner.WorkRoot, "worker-diagnostics", job.Identity.AttemptID+".json")
+	canonicalRoot, err := workspace.CanonicalPath(owner.WorkRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(canonicalRoot, "worker-diagnostics", job.Identity.AttemptID+".json")
 	if strings.Count(journal.String(), "\n") != 1 || strings.ContainsRune(journal.String(), '\x01') ||
 		!strings.Contains(journal.String(), fmt.Sprintf("private_path=%q", path)) {
 		t.Fatalf("maximum worker failure escaped parent journal or lost private path: %q", journal.String())

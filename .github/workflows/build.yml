@@ -57,7 +57,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest]
+        os: [macos-latest, windows-latest, windows-11-arm]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -84,7 +84,7 @@ jobs:
         run: npm install --global @openai/codex
 
       - name: Install standalone Codex CLI on Windows
-        if: runner.os == 'Windows'
+        if: matrix.os == 'windows-11-arm'
         shell: pwsh
         run: |
           $env:CODEX_NON_INTERACTIVE = '1'
@@ -96,6 +96,7 @@ jobs:
           Add-Content -Path $env:GITHUB_PATH -Value $env:CODEX_INSTALL_DIR
 
       - name: Check native Codex executable
+        if: matrix.os != 'windows-latest'
         run: codex --version
 
       - name: Vet
@@ -103,7 +104,7 @@ jobs:
 
       - name: Test
         env:
-          MINION_NATIVE_SANDBOX_TEST: "1"
+          MINION_NATIVE_SANDBOX_TEST: ${{ matrix.os == 'windows-latest' && '0' || '1' }}
         run: go test -count=1 -timeout=20m ./...
 
       - name: Build
