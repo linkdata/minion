@@ -484,6 +484,7 @@ func TestHTTPExecutorClosedPullCancellationDiffersFromUnavailable(t *testing.T) 
 		t.Fatal(err)
 	}
 	f := &httpServerTest{executor: executor, server: httptest.NewServer(executor)}
+	f.server.Client().Timeout = 5 * time.Second
 	defer f.server.Close()
 	pull := httpPull{Version: ProtocolVersion, ExecutorID: "local"}
 	executor.mu.Lock()
