@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -150,6 +151,8 @@ func TestUnixExecutionDirectWorker(t *testing.T) {
 	}
 	for index, digit := range []string{"a", "b"} {
 		job := withClaudeCritic(testJob(command.Comment))
+		job.Main.Model, job.Main.Effort = fmt.Sprintf("main-%d", index+1), []string{"high", "low"}[index]
+		job.Critic.Model, job.Critic.Effort = fmt.Sprintf("critic-%d", index+1), "medium"
 		job.Identity.JobID = strings.Repeat(strconv.Itoa(index+1), 64)
 		fixture := newExecutionAdapterFixture(t, job)
 		fixture.owner.attemptID = strings.Repeat(digit, 32)
@@ -179,8 +182,8 @@ func TestUnixExecutionDirectWorker(t *testing.T) {
 		got := awaitResult(done, fmt.Sprintf("assignment %d", index+1))
 		finalErr := fixture.sink.finish(got.result, got.err)
 		wantCalls := []CallUsage{
-			{Provider: "codex", Role: roleMain, Round: 1, Tokens: tokens, Complete: true},
-			{Provider: "claude", Role: roleCritic, Round: 1, ReviewPhase: reviewFull, Tokens: tokens, Approved: true, NoBlockers: true, ReviewComplete: true, Complete: true},
+			{Provider: "codex", Role: roleMain, Round: 1, Model: job.Main.Model, Effort: job.Main.Effort, Tokens: tokens, Complete: true},
+			{Provider: "claude", Role: roleCritic, Round: 1, ReviewPhase: reviewFull, Model: job.Critic.Model, Effort: job.Critic.Effort, Tokens: tokens, Approved: true, NoBlockers: true, ReviewComplete: true, Complete: true},
 		}
 		if finalErr = finishUsage(finalErr); finalErr != nil || got.result.Validate(fixture.job) != nil || got.result.Answer != "Worker answer" || got.result.CriticStopReason != "approved" || !slices.Equal(got.result.Calls, wantCalls) || !slices.Equal(got.result.Calls, fixture.sink.calls) {
 			t.Fatalf("assignment %d lost durable receipts: result=%+v raw=%v final=%v", index+1, got.result, got.err, finalErr)
@@ -208,6 +211,7 @@ func TestUnixExecutionDirectWorker(t *testing.T) {
 		}
 	}
 	thirdJob := withClaudeCritic(testJob(command.Comment))
+	thirdJob.Main.Model, thirdJob.Main.Effort = "main-3", "high"
 	thirdJob.Identity.JobID = strings.Repeat("3", 64)
 	third := newExecutionAdapterFixture(t, thirdJob)
 	third.owner.attemptID = strings.Repeat("c", 32)
@@ -252,6 +256,21 @@ func TestUnixExecutionDirectWorker(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatalf("paid main receipt was not saved: %v", ctx.Err())
 	}
+	busyJob := third.job
+	busyJob.Identity.JobID, busyJob.Identity.AttemptID = strings.Repeat("4", 64), strings.Repeat("d", 32)
+	if result, err := core.Execute(ctx, busyJob, runnerExecutionCheckpoints{}); err == nil || !strings.Contains(err.Error(), "busy") || !result.matchesJob(busyJob) {
+		t.Fatalf("active Unix worker admitted a second Job: result=%+v error=%v", result, err)
+	}
+	probe, err := NewUnixExecutionClient(endpoint.SocketPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer probe.CloseIdleConnections()
+	var rejection httpAcknowledgement
+	status, err := unixTestJSON(t, probe, "/next", httpPull{Version: ProtocolVersion, ExecutorID: "local"}, &rejection, httpControlBytes)
+	if err != nil || status != http.StatusConflict || rejection.Kind != "next" || rejection.Failure == nil {
+		t.Fatalf("active Unix assignment was delivered twice: status=%d ack=%+v error=%v", status, rejection, err)
+	}
 	closeStarted := make(chan struct{})
 	closeDone := make(chan error, 1)
 	go func() {
@@ -270,7 +289,7 @@ func TestUnixExecutionDirectWorker(t *testing.T) {
 	close(release)
 	gateReleased = true
 	got := awaitResult(thirdDone, "canceled paid assignment")
-	wantMain := CallUsage{Provider: "codex", Role: roleMain, Round: 1, Tokens: tokens, Complete: true}
+	wantMain := CallUsage{Provider: "codex", Role: roleMain, Round: 1, Model: third.job.Main.Model, Effort: third.job.Main.Effort, Tokens: tokens, Complete: true}
 	if !errors.Is(got.err, context.Canceled) || errors.Is(got.err, context.DeadlineExceeded) || errors.Is(got.err, monitor.ErrTerminalJob) || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || !got.result.matchesJob(third.job) || !slices.Equal(got.result.Calls, []CallUsage{wantMain}) || got.result.Answer != "" || got.result.CriticStopReason != "" || len(got.result.Refutations) != 0 {
 		t.Fatalf("canceled paid assignment lost its known raw main receipt: result=%+v error=%v", got.result, got.err)
 	}
@@ -343,7 +362,21 @@ func TestUnixExecutionWorkerHelper(t *testing.T) {
 	}
 	nativeCalls := 0
 	cancelWitness := make(chan error, 1)
+	wantRuns := []modelRun{
+		{provider: "codex", role: roleMain, model: "main-1", effort: "high"},
+		{provider: "claude", role: roleCritic, model: "critic-1", effort: "medium"},
+		{provider: "codex", role: roleMain, model: "main-2", effort: "low"},
+		{provider: "claude", role: roleCritic, model: "critic-2", effort: "medium"},
+		{provider: "codex", role: roleMain, model: "main-3", effort: "high"},
+	}
 	runner := &Runner{WorkRoot: os.Getenv("MINION_UNIX_WORKER_WORKROOT"), runModel: func(callCtx context.Context, request modelRun) (aicli.Result, error) {
+		if nativeCalls >= len(wantRuns) {
+			return aicli.Result{}, fmt.Errorf("unexpected model call: %+v", request)
+		}
+		want := wantRuns[nativeCalls]
+		if request.provider != want.provider || request.role != want.role || request.model != want.model || request.effort != want.effort {
+			return aicli.Result{}, fmt.Errorf("model settings for call %d: got=%+v want=%+v", nativeCalls+1, request, want)
+		}
 		nativeCalls++
 		if nativeCalls == 5 {
 			context.AfterFunc(callCtx, func() {
