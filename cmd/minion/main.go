@@ -267,11 +267,7 @@ func githubToken(ctx context.Context) (string, error) {
 }
 
 func checkModels(ctx context.Context, cfg *config.Config, logger *log.Logger) (err error) {
-	providers := []string{cfg.Main}
-	if cfg.Adversarial != cfg.Main {
-		providers = append(providers, cfg.Adversarial)
-	}
-	for _, provider := range providers {
+	for _, provider := range []string{cfg.Main, cfg.Adversarial} {
 		role := action.RoleSettings{Provider: provider}
 		var label, effortName string
 		switch provider {

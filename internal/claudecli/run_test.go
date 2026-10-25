@@ -89,11 +89,7 @@ func fakeExecutable(t *testing.T, name, script string) string {
 		t.Setenv("CLAUDE_CONFIG_DIR", "")
 		// Native invocations echo their explicit host-selected conversation ID.
 		// Model discovery has no session selector and emits no such event.
-		script = `if [ "$1" = --help ]; then
-  printf '%s\n' 'Options:' '  --session-id <uuid>' '  -r, --resume [sessionId]' '  --add-dir <directories...>' '  --model <name>' '  --effort <level>'
-  exit 0
-fi
-case " $* " in *' --minion-unsupported-capability-probe '*) printf '%s\n' 'unknown option --minion-unsupported-capability-probe' >&2; exit 2 ;; esac
+		script = `case " $* " in *' --minion-unsupported-capability-probe '*) printf '%s\n' 'unknown option --minion-unsupported-capability-probe' >&2; exit 2 ;; esac
 case " $* " in
   *' --input-format stream-json '*)
     case " $* " in

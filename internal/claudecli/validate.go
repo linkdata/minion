@@ -23,8 +23,8 @@ const initializeRequest = "{\"type\":\"control_request\",\"request_id\":\"minion
 //
 // It requires authenticated CLI state. Model discovery passes Run's sandbox
 // and tool options to the CLI's initialization protocol. Fresh initialization
-// and missing-session lookup check Run's invocation shapes without inference;
-// help checks the optional effort flag. Claude owns sandbox enforcement.
+// and missing-session lookup check Run's invocation shapes without inference.
+// Claude owns sandbox enforcement.
 //
 // APIKey overrides environment credentials and stored login. Without it,
 // environment API/OAuth tokens are rejected. Authenticated proxies are rejected.
@@ -118,15 +118,6 @@ func Validate(ctx context.Context, settings config.ClaudeConfig) (validated conf
 // An initialize-only fresh call does not create a resumable conversation, so
 // resume can prove argument parsing and lookup, not session continuation.
 func validateInvocationCapabilities(probe func([]string, string) ([]byte, error), dir, policy string, settings config.ClaudeConfig) error {
-	if settings.Effort != "" {
-		help, err := probe([]string{"--help"}, "")
-		if err != nil {
-			return fmt.Errorf("claude effort capability check: %w", err)
-		}
-		if !helpOptionDeclared(help, "--effort") {
-			return errors.New("claude effort capability check: --effort is unavailable")
-		}
-	}
 	freshID, err := conversationID()
 	if err != nil {
 		return err
@@ -143,11 +134,11 @@ func validateInvocationCapabilities(probe func([]string, string) ([]byte, error)
 	if _, err := initializationModels(data); err != nil {
 		return fmt.Errorf("claude fresh invocation did not acknowledge initialization: %w", err)
 	}
-	if hasAssistantEvent(data) {
-		return errors.New("claude fresh invocation emitted a model turn")
+	if !cleanFreshInitialization(data) {
+		return errors.New("claude fresh invocation emitted model activity or malformed output")
 	}
 	invalid := append(slices.Clone(args), "--minion-unsupported-capability-probe")
-	if _, err := probe(invalid, initializeRequest); !cliRejected(err) || !strings.Contains(err.Error(), "--minion-unsupported-capability-probe") {
+	if _, err := probe(invalid, initializeRequest); !cliRejected(err) {
 		return fmt.Errorf("claude fresh invocation did not reject an unknown option: %v", err)
 	}
 	resumeID, err := conversationID()
@@ -166,36 +157,42 @@ func validateInvocationCapabilities(probe func([]string, string) ([]byte, error)
 	return nil
 }
 
-func helpOptionDeclared(help []byte, option string) bool {
-	for _, line := range bytes.Split(help, []byte{'\n'}) {
-		fields := strings.Fields(string(line))
-		if len(fields) > 0 && fields[0] == option ||
-			len(fields) > 1 && strings.HasSuffix(fields[0], ",") && fields[1] == option {
-			return true
-		}
-	}
-	return false
-}
-
 func cliRejected(err error) bool {
 	var exitErr *exec.ExitError
 	return err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) &&
 		!errors.Is(err, aicli.ErrOutputLimit) && errors.As(err, &exitErr) && exitErr.ExitCode() > 0
 }
 
-func hasAssistantEvent(data []byte) bool {
+type capabilityEvent struct {
+	Type         string  `json:"type"`
+	IsError      bool    `json:"is_error"`
+	NumTurns     int     `json:"num_turns"`
+	TotalCostUSD float64 `json:"total_cost_usd"`
+	Usage        struct {
+		InputTokens              int64 `json:"input_tokens"`
+		OutputTokens             int64 `json:"output_tokens"`
+		CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
+		CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
+	} `json:"usage"`
+}
+
+func (e capabilityEvent) usedModel() bool {
+	return e.NumTurns != 0 || e.TotalCostUSD != 0 || e.Usage.InputTokens != 0 || e.Usage.OutputTokens != 0 ||
+		e.Usage.CacheCreationInputTokens != 0 || e.Usage.CacheReadInputTokens != 0
+}
+
+func cleanFreshInitialization(data []byte) bool {
 	for _, line := range bytes.Split(data, []byte{'\n'}) {
 		if len(bytes.TrimSpace(line)) == 0 {
 			continue
 		}
-		var event struct {
-			Type string `json:"type"`
-		}
-		if json.Unmarshal(line, &event) == nil && event.Type == "assistant" {
-			return true
+		var event capabilityEvent
+		if json.Unmarshal(line, &event) != nil || event.Type == "" || event.Type == "assistant" || event.usedModel() ||
+			event.Type == "result" && event.IsError {
+			return false
 		}
 	}
-	return false
+	return true
 }
 
 func isEmptySessionLookup(data []byte) bool {
@@ -204,24 +201,12 @@ func isEmptySessionLookup(data []byte) bool {
 		if len(bytes.TrimSpace(line)) == 0 {
 			continue
 		}
-		var event struct {
-			Type         string  `json:"type"`
-			IsError      bool    `json:"is_error"`
-			NumTurns     int     `json:"num_turns"`
-			TotalCostUSD float64 `json:"total_cost_usd"`
-			Usage        struct {
-				InputTokens              int64 `json:"input_tokens"`
-				OutputTokens             int64 `json:"output_tokens"`
-				CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
-				CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
-			} `json:"usage"`
-		}
-		if json.Unmarshal(line, &event) != nil || event.Type == "assistant" {
+		var event capabilityEvent
+		if json.Unmarshal(line, &event) != nil || event.Type == "" || event.Type == "assistant" {
 			return false
 		}
 		if event.Type == "result" {
-			if found || !event.IsError || event.NumTurns != 0 || event.TotalCostUSD != 0 ||
-				event.Usage.InputTokens != 0 || event.Usage.OutputTokens != 0 || event.Usage.CacheCreationInputTokens != 0 || event.Usage.CacheReadInputTokens != 0 {
+			if found || !event.IsError || event.usedModel() {
 				return false
 			}
 			found = true

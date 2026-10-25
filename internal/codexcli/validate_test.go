@@ -20,9 +20,6 @@ import (
 )
 
 const catalogueScript = `#!/bin/sh
-if [ "$1" = app-server ]; then
-  case " $* " in *' --disable apps '*) ;; *) exit 0 ;; esac
-fi
 if [ "$1" = exec ]; then
   case " $* " in *' --help '*) ;; *) exit 9 ;; esac
   printf '%s\n' '--invocation--' "$@" >> @HELP_ARGS@
@@ -35,9 +32,9 @@ if [ "$1" = exec ]; then
   fi
   exit 0
 fi
+IFS= read -r request || exit 0
 printf '%s\n' "$@" > @ARGS@
 printf '%s,%s\n' "${GH_TOKEN-absent}" "${GITHUB_TOKEN-absent}" > @ENV@
-IFS= read -r request
 printf '%s\n' "$request" >> @REQUESTS@
 printf '%s\n' '{"id":1,"result":{}}'
 IFS= read -r request
@@ -224,7 +221,7 @@ func TestValidateRejectsMissingOutputSchemaSupport(t *testing.T) {
 func TestValidateRejectsMissingResolvedEffortConfig(t *testing.T) {
 	dir := t.TempDir()
 	page := `{"id":2,"result":{"data":[{"model":"fixture","isDefault":true,"defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high"}]}]}}`
-	script := strings.Replace(catalogueScriptFor(dir, page, ""), "if [ \"$1\" = app-server ]; then", "if [ \"$1\" = app-server ]; then\n  case \" $* \" in *' model_reasoning_effort='*) printf '%s\\n' 'unsupported model_reasoning_effort=' >&2; exit 2 ;; esac\nfi\nif [ \"$1\" = app-server ]; then", 1)
+	script := strings.Replace(catalogueScriptFor(dir, page, ""), "#!/bin/sh\n", "#!/bin/sh\ncase \" $* \" in *' model_reasoning_effort='*) printf '%s\\n' 'unsupported model_reasoning_effort=' >&2; exit 2 ;; esac\n", 1)
 	installFakeCodex(t, script)
 	if _, err := Validate(t.Context(), config.CodexConfig{}); err == nil || !strings.Contains(err.Error(), "Codex selected effort config capability check") || !strings.Contains(err.Error(), "model_reasoning_effort=") {
 		t.Fatalf("accepted CLI without the resolved effort config key: %v", err)

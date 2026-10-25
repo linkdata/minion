@@ -112,7 +112,7 @@ func validateExecCapabilities(ctx context.Context, settings config.CodexConfig) 
 	// exec --help parses flags but does not load -c settings. App-server
 	// startup checks the resolved effort key under strict config with no request.
 	if settings.ReasoningEffort != "" {
-		args := []string{"app-server", "--strict-config", "--listen", "stdio://", "-c", `model_provider="openai"`, "-c", "model_reasoning_effort=" + strconv.Quote(settings.ReasoningEffort)}
+		args := append(appServerArgs(dir), "-c", "model_reasoning_effort="+strconv.Quote(settings.ReasoningEffort))
 		if _, probeErr := probe(args); probeErr != nil {
 			return fmt.Errorf("Codex selected effort config capability check: %w", probeErr) //nolint:staticcheck // -- Codex is a proper noun.
 		}
@@ -163,6 +163,12 @@ func disabledFeatureArgs() []string {
 	return args
 }
 
+func appServerArgs(dir string) []string {
+	args := append([]string{"app-server", "--strict-config", "--listen", "stdio://", "-c", `model_provider="openai"`}, disabledFeatureArgs()...)
+	args = append(args, execConfigArgs()...)
+	return append(args, sandboxArgs(dir, "", true)...)
+}
+
 func listModels(ctx context.Context, settings config.CodexConfig) (models []modelInfo, err error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -184,9 +190,7 @@ func listModels(ctx context.Context, settings config.CodexConfig) (models []mode
 	// app-server has no --ignore-user-config flag. Select exec's built-in
 	// provider explicitly and avoid repository config by using a temporary cwd.
 	// Startup validates writable sandbox config without starting an inference turn.
-	args := append([]string{"app-server", "--strict-config", "--listen", "stdio://", "-c", `model_provider="openai"`}, disabledFeatureArgs()...)
-	args = append(args, execConfigArgs()...)
-	args = append(args, sandboxArgs(dir, "", true)...)
+	args := appServerArgs(dir)
 	if settings.APIKey != "" {
 		args = append(args, "-c", `cli_auth_credentials_store="ephemeral"`, "-c", `forced_login_method="api"`)
 	}

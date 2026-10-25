@@ -61,12 +61,10 @@ fi
 	}
 }
 
-const invocationHelp = "Options:\n  --session-id <uuid>\n  -r, --resume [sessionId]\n  --add-dir <directories...>\n  --model <name>\n  --effort <level>\n"
-
 func TestValidateRejectsMissingInvocationOptionBeforeModelCall(t *testing.T) {
 	for _, option := range []string{"--session-id", "--resume", "--add-dir", "--model"} {
 		t.Run(option, func(t *testing.T) {
-			binary := fakeValidationCLI(t, invocationHelp, option, false)
+			binary := fakeValidationCLI(t, option, false)
 			_, err := Validate(t.Context(), config.ClaudeConfig{})
 			if err == nil || !strings.Contains(err.Error(), option) {
 				t.Fatalf("accepted CLI without %s: %v", option, err)
@@ -78,33 +76,15 @@ func TestValidateRejectsMissingInvocationOptionBeforeModelCall(t *testing.T) {
 	}
 }
 
-func TestValidateRejectsMissingConfiguredEffortOption(t *testing.T) {
-	binary := fakeValidationCLI(t, strings.Replace(invocationHelp, "  --effort <level>\n", "", 1), "", false)
-	_, err := Validate(t.Context(), config.ClaudeConfig{Effort: "high"})
-	if err == nil || !strings.Contains(err.Error(), "--effort") {
-		t.Fatalf("accepted CLI without effort option: %v", err)
-	}
-	if _, err := os.Stat(binary + ".model-called"); !os.IsNotExist(err) {
-		t.Fatalf("capability check started a model call: %v", err)
-	}
-}
-
-func TestValidateDoesNotRequireUnusedEffortOption(t *testing.T) {
-	fakeValidationCLI(t, strings.Replace(invocationHelp, "  --effort <level>\n", "", 1), "", false)
-	if _, err := Validate(t.Context(), config.ClaudeConfig{}); err != nil {
-		t.Fatalf("rejected CLI without unused effort option: %v", err)
-	}
-}
-
 func TestValidateRejectsCLIThatIgnoresUnknownOption(t *testing.T) {
-	fakeValidationCLI(t, invocationHelp, "", true)
+	fakeValidationCLI(t, "", true)
 	if _, err := Validate(t.Context(), config.ClaudeConfig{}); err == nil || !strings.Contains(err.Error(), "did not reject an unknown option") {
 		t.Fatalf("accepted CLI that ignores unknown options: %v", err)
 	}
 }
 
 func TestValidateHonorsCallerCancellation(t *testing.T) {
-	fakeValidationCLI(t, invocationHelp, "", false)
+	fakeValidationCLI(t, "", false)
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	if _, err := Validate(ctx, config.ClaudeConfig{}); !errors.Is(err, context.Canceled) {
@@ -128,16 +108,26 @@ func TestEmptySessionLookupRejectsModelActivity(t *testing.T) {
 	}
 }
 
-func TestHelpOptionDeclaredRequiresDeclaration(t *testing.T) {
-	if helpOptionDeclared([]byte("  --other <value>  See --effort for details\n"), "--effort") || helpOptionDeclared([]byte("  --effortful <id>\n"), "--effort") {
-		t.Fatal("accepted a description or prefix as an option declaration")
+func TestFreshInitializationRejectsPaidOrMalformedTrailingEvent(t *testing.T) {
+	if !cleanFreshInitialization([]byte(modelCatalogue)) {
+		t.Fatal("rejected a control-only initialization")
 	}
-	if !helpOptionDeclared([]byte("  --effort <level>\n"), "--effort") {
-		t.Fatal("missed an effort option declaration")
+	for _, extra := range []string{
+		`{"type":"result","num_turns":1}`,
+		`{"type":"result","usage":{"input_tokens":1}}`,
+		`{"type":"result","total_cost_usd":0.01}`,
+		`{"type":"system","usage":{"input_tokens":1}}`,
+		`{"type":"assistant"}`,
+		`{`,
+		`null`,
+	} {
+		if cleanFreshInitialization([]byte(modelCatalogue + "\n" + extra)) {
+			t.Fatalf("accepted trailing model activity or malformed event: %s", extra)
+		}
 	}
 }
 
-func fakeValidationCLI(t *testing.T, help, rejected string, ignoreUnknown bool) string {
+func fakeValidationCLI(t *testing.T, rejected string, ignoreUnknown bool) string {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("Claude CLI is not supported on native Windows")
@@ -158,9 +148,6 @@ func fakeValidationCLI(t *testing.T, help, rejected string, ignoreUnknown bool) 
 	dir := testsupport.FakeOnPath(t, "claude", `#!/bin/sh
 if [ "$3" = auth ]; then
   printf '%s\n' '{"loggedIn":true}'
-elif [ "$1" = --help ]; then
-  cat <<'MINION_HELP'
-`+help+`MINION_HELP
 else
   `+unknown+`
   `+reject+`
