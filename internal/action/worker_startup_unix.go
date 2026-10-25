@@ -1,0 +1,34 @@
+//go:build !windows
+
+package action
+
+import (
+	"context"
+	"fmt"
+	"io"
+)
+
+// RunSelectedLocalWorker reads one startup message, preflights, then pulls Jobs.
+func RunSelectedLocalWorker(ctx context.Context, input io.Reader) error {
+	return runSelectedLocalWorker(ctx, input, nil)
+}
+
+func runSelectedLocalWorker(ctx context.Context, input io.Reader, call modelCall) error {
+	startup, err := decodeWorkerStartup(input)
+	if err != nil {
+		return err
+	}
+	runner, err := startup.runner(call)
+	if err != nil {
+		return err
+	}
+	if err := runner.PreflightSelection(ctx); err != nil {
+		return err // The CLI prints the fixed preflightError after "minion preflight: ".
+	}
+	client, err := NewUnixExecutionClient(startup.SocketPath)
+	if err != nil {
+		return fmt.Errorf("worker endpoint: %w", err)
+	}
+	defer client.CloseIdleConnections()
+	return RunHTTPLoop(ctx, client, UnixExecutionBaseURL, "local", runner)
+}

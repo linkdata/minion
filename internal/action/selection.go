@@ -14,9 +14,9 @@ import (
 // WorkerSelection comes from trusted startup configuration, never from a Job.
 // Main.Skills is supplied by the selected command mapping.
 type WorkerSelection struct {
-	Commands map[string]config.CommandMapping
-	Main     RoleSettings
-	Critic   *RoleSettings
+	Commands map[string]config.CommandMapping `json:"commands"`
+	Main     RoleSettings                     `json:"main"`
+	Critic   *RoleSettings                    `json:"critic,omitempty"`
 }
 
 // WorkerSelection derives a trusted worker boundary from enabled, installed commands.
