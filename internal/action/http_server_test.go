@@ -553,7 +553,15 @@ func TestHTTPExecutorCanceledPullDoesNotClaimReadyAssignment(t *testing.T) {
 			next.ServeHTTP(w, r)
 		})
 	})
+	f.executor.mu.Lock()
+	changed := f.executor.changed
+	f.executor.mu.Unlock()
 	response := f.request("/next", httpPull{Version: ProtocolVersion, ExecutorID: f.job.Identity.ExecutorID})
+	select {
+	case <-changed:
+		t.Fatal("canceled pull was announced as held")
+	default:
+	}
 	f.tx.mu.Lock()
 	claimed, retained := f.tx.delivered, len(f.tx.body) != 0
 	f.tx.mu.Unlock()

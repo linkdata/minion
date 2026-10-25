@@ -99,6 +99,51 @@ func (w *localWorker) Execute(ctx context.Context, job Job, sink Checkpoints) (R
 	return result, err
 }
 
+// awaitHeldPull proves only that this endpoint accepted a pull while its
+// direct child was live; selected-tool preflight and capacity are separate.
+func (w *localWorker) awaitHeldPull(ctx context.Context) (waitErr error) {
+	defer func() {
+		if waitErr != nil {
+			waitErr = errors.Join(waitErr, w.Close())
+		}
+	}()
+	for {
+		w.executor.mu.Lock()
+		pull, pullDone, closed, unavailable, changed := w.executor.pull, w.executor.pullDone, w.executor.closed, w.executor.unavailable, w.executor.changed
+		w.executor.mu.Unlock()
+		select {
+		case <-w.exited:
+			return errors.Join(errors.New("local worker exited before holding a pull"), w.waitErr)
+		default:
+		}
+		select {
+		case <-w.endpoint.serveDone:
+			return errors.Join(errors.New("local worker endpoint stopped before a pull"), w.endpoint.serveErr)
+		default:
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if closed || unavailable {
+			return errors.New("local worker executor stopped before holding a pull")
+		}
+		if pull {
+			select {
+			case <-pullDone:
+				// Wait for the canceled handler to release its pull slot.
+			default:
+				return nil
+			}
+		}
+		select {
+		case <-w.exited:
+		case <-w.endpoint.serveDone:
+		case <-changed:
+		case <-ctx.Done():
+		}
+	}
+}
+
 // Close drains accepted callbacks while HTTP serves, then stops and waits for
 // the direct child once before the endpoint closes its owned socket.
 func (w *localWorker) Close() error {
