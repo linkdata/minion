@@ -35,7 +35,10 @@ exec sleep 30
 	}()
 	defer func() {
 		cancel()
-		for range done {
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			t.Error("Run did not finish after cancellation")
 		}
 	}()
 	// The real CLI process must start before cancellation.

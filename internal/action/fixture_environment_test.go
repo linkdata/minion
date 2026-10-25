@@ -21,7 +21,7 @@ func TestGitFixtureRemoteIgnoresInheritedRepositorySelectors(t *testing.T) {
 	}
 	t.Setenv("GIT_DIR", gitDir)
 	t.Setenv("GIT_INDEX_FILE", index)
-	base, head, remote := gitFixtureRemoteRaw(t, workspace.File{Path: "fixture.txt", Mode: workspace.Regular, Data: []byte("literal fixture contents\n")})
+	base, head, remote := gitFixtureRemote(t, workspace.File{Path: "fixture.txt", Mode: workspace.Regular, Data: []byte("literal fixture contents\n")})
 	if !workspace.ValidSHA(base) || !workspace.ValidSHA(head) || base == head {
 		t.Fatalf("fixture failed to create distinct commits: base=%q head=%q", base, head)
 	}
@@ -43,7 +43,7 @@ func TestGitFixtureRemoteIgnoresInheritedRepositorySelectors(t *testing.T) {
 }
 
 func TestGitFixtureRemotePreservesOfflineProtocolDenial(t *testing.T) {
-	_, _, remote := gitFixtureRemoteRaw(t)
+	_, _, remote := gitFixtureRemote(t)
 	if out := modelGit(t, t.TempDir(), "ls-remote", remote); !strings.Contains(out, "\trefs/heads/main\n") {
 		t.Fatalf("trusted local fixture remote is unavailable: %q", out)
 	}

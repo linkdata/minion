@@ -5,6 +5,7 @@ package claudecli
 import (
 	"context"
 	"errors"
+	"os"
 	"os/exec"
 	"testing"
 	"time"
@@ -39,7 +40,13 @@ exit 0
 	}()
 	defer func() {
 		cancel()
-		for range done {
+		if err := os.WriteFile(binary+".pid.stop", nil, 0600); err != nil {
+			t.Errorf("stop fixture: %v", err)
+		}
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			t.Error("Run did not finish after pipe drain stop")
 		}
 	}()
 	child, err := testsupport.WaitForProcess(ctx, binary+".pid", done)
