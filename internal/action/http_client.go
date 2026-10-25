@@ -25,7 +25,6 @@ type httpExecutionClient struct {
 	outcomeSent         atomic.Bool
 	outcomeAcknowledged bool
 	outcomeDegraded     bool
-	nextHeadersReceived bool
 }
 
 type httpRunStatus uint8
@@ -115,8 +114,7 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	}
 	var assignment httpAssignment
 	if err := transport.post(ctx, "next", pull, httpJobBytes, &assignment, httpBinding{}, 0); err != nil {
-		if status != nil && errors.Is(err, context.Canceled) &&
-			(!errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || ctx.Err() != nil && !transport.nextHeadersReceived) {
+		if status != nil && errors.Is(err, context.Canceled) && !errors.Is(err, monitor.ErrExecutionOutcomeUnknown) {
 			*status = httpRunIdleShutdown
 		}
 		return err
@@ -240,7 +238,7 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 		var network *url.Error
 		protocolFailed = errors.Is(watchErr, monitor.ErrExecutionOutcomeUnknown) || errors.Is(watchErr, monitor.ErrRequestTransport) || errors.As(watchErr, &network)
 	}
-	if outcomeErr == nil && context.Cause(watchCtx) == errHTTPWatchStopped && httpWatchUncertainty(watchErr) {
+	if status == nil && outcomeErr == nil && context.Cause(watchCtx) == errHTTPWatchStopped && httpWatchUncertainty(watchErr) {
 		// Parent receipt is known. A watch-only protocol failure during upload
 		// cannot revoke it; errors already captured in runErr still propagate.
 		runner.logf("HTTP cancellation watch: %q", httpFailureDiagnostic(watchErr.Error()))
@@ -308,9 +306,6 @@ func (c *httpExecutionClient) open(ctx context.Context, kind string, data []byte
 			return nil, ctx.Err()
 		}
 		return nil, failure(err)
-	}
-	if kind == "next" {
-		c.nextHeadersReceived = true
 	}
 	if pullCancel != nil {
 		// The assignment wait is unbounded; only its received body uses control time.

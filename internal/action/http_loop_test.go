@@ -50,7 +50,7 @@ func TestRunHTTPLoopCanceledBeforePullIsCleanShutdown(t *testing.T) {
 	}
 }
 
-func TestRunHTTPLoopCanceledHeldPullIsCleanShutdown(t *testing.T) {
+func TestRunHTTPLoopCanceledHeldPullWithoutACKIsUncertain(t *testing.T) {
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -78,8 +78,8 @@ func TestRunHTTPLoopCanceledHeldPullIsCleanShutdown(t *testing.T) {
 	cancel()
 	select {
 	case err := <-done:
-		if err != nil {
-			t.Fatalf("canceled idle pull became a worker failure: %v", err)
+		if !errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || !errors.Is(err, context.Canceled) {
+			t.Fatalf("canceled pull without a parent reply was treated as idle: %v", err)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("canceled idle pull did not return")
@@ -163,6 +163,42 @@ func TestRunHTTPLoopStopsAfterMissingOutcomeACK(t *testing.T) {
 	got := parent.result(t)
 	if got.err != nil || got.result.Answer != "Worker answer" {
 		t.Fatalf("parent received outcome was changed by missing child ACK: result=%+v error=%v", got.result, got.err)
+	}
+}
+
+func TestRunHTTPLoopReportsWatchFailureAfterOutcomeACK(t *testing.T) {
+	installActionTestSkills(t, testReviewSkillURL)
+	job := testJob(command.Comment)
+	parent := newHTTPServerTest(t, t.Context(), job, runnerExecutionCheckpoints{}, nil)
+	client := *parent.server.Client()
+	underlying := client.Transport
+	triggerCtx, trigger := context.WithCancelCause(t.Context())
+	var pulls, watchReads atomic.Int32
+	client.Transport = httpClientTestTransport(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path == "/next" {
+			pulls.Add(1)
+		}
+		response, err := underlying.RoundTrip(r)
+		if err != nil {
+			return response, err
+		}
+		switch r.URL.Path {
+		case "/cancel":
+			response.Body = httpClientGatedWatchBody{ReadCloser: response.Body, reader: strings.NewReader("{"), trigger: triggerCtx.Done(), reads: &watchReads}
+		case "/outcome":
+			response.Body = httpClientCancelOnCloseBody{ReadCloser: response.Body, cancel: trigger, cause: context.Canceled}
+		}
+		return response, nil
+	})
+	runner := &Runner{WorkRoot: t.TempDir(), runModel: func(context.Context, modelRun) (aicli.Result, error) {
+		return aicli.Result{Answer: "Worker answer", UsageComplete: true}, nil
+	}}
+	err := RunHTTPLoop(t.Context(), &client, parent.server.URL, job.Identity.ExecutorID, runner)
+	if !errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || !strings.Contains(err.Error(), "HTTP cancel") || pulls.Load() != 1 || watchReads.Load() == 0 {
+		t.Fatalf("watch failure after outcome ACK was hidden: pulls=%d reads=%d error=%v", pulls.Load(), watchReads.Load(), err)
+	}
+	if got := parent.result(t); got.err != nil || got.result.Answer != "Worker answer" {
+		t.Fatalf("watch failure altered acknowledged result: %+v", got)
 	}
 }
 
