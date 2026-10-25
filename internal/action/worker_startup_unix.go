@@ -23,7 +23,7 @@ func runSelectedLocalWorker(ctx context.Context, input io.Reader, call modelCall
 		return err
 	}
 	if err := runner.PreflightSelection(ctx); err != nil {
-		return err // The CLI prints the fixed preflightError after "minion preflight: ".
+		return err
 	}
 	client, err := NewUnixExecutionClient(startup.SocketPath)
 	if err != nil {

@@ -23,8 +23,8 @@ type WorkerStartup struct {
 
 func (s WorkerStartup) validate() error {
 	if s.WorkRoot == "" || s.SocketPath == "" || !filepath.IsAbs(s.WorkRoot) || !filepath.IsAbs(s.SocketPath) ||
-		filepath.Clean(s.WorkRoot) != s.WorkRoot || filepath.Clean(s.SocketPath) != s.SocketPath {
-		return errors.New("worker startup requires clean absolute work root and socket paths")
+		filepath.Clean(s.SocketPath) != s.SocketPath {
+		return errors.New("worker startup requires an absolute work root and clean absolute socket path")
 	}
 	if _, err := s.runner(nil); err != nil {
 		return fmt.Errorf("worker startup selection: %w", err)

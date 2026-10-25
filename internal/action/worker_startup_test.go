@@ -3,6 +3,7 @@ package action
 import (
 	"bytes"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -48,6 +49,19 @@ func TestWorkerStartupRoundTripAndProviderKeys(t *testing.T) {
 	}
 	if runner.Codex.APIKey != startup.CodexAPIKey || runner.Claude.APIKey != startup.ClaudeAPIKey || runner.selection == nil || runner.WorkRoot != startup.WorkRoot {
 		t.Fatal("selected runner lost configured provider credentials, selection, or work root")
+	}
+}
+
+func TestWorkerStartupAcceptsAbsoluteWorkRootWithTrailingSeparator(t *testing.T) {
+	startup := testWorkerStartup(t)
+	startup.WorkRoot += string(os.PathSeparator)
+	encoded, err := EncodeWorkerStartup(startup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := decodeWorkerStartup(bytes.NewReader(encoded))
+	if err != nil || decoded.WorkRoot != startup.WorkRoot {
+		t.Fatalf("valid work-root spelling was rejected or changed: root=%q error=%v", decoded.WorkRoot, err)
 	}
 }
 
