@@ -62,6 +62,15 @@ type Orchestrator struct {
 	Commands              map[string]config.CommandMapping
 }
 
+// WaitCapacity gates discovery when the selected executor owns readiness.
+func (e *Orchestrator) WaitCapacity(ctx context.Context) error {
+	ready, ok := e.Executor.(interface{ WaitCapacity(context.Context) error })
+	if !ok {
+		return nil
+	}
+	return redactActionError(ready.WaitCapacity(ctx), e.Runner.Codex.APIKey, e.Runner.Claude.APIKey)
+}
+
 func (e *Orchestrator) Execute(ctx context.Context, job monitor.Job) (resultErr error) {
 	defer func() {
 		resultErr = redactActionError(resultErr, e.Runner.Codex.APIKey, e.Runner.Claude.APIKey)

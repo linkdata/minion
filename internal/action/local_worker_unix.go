@@ -11,26 +11,30 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
+	"time"
 
 	"github.com/linkdata/minion/internal/bounded"
+	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/executil"
+	"github.com/linkdata/minion/internal/monitor"
 )
 
 // localWorker owns one direct child and its private HTTP endpoint.
 type localWorker struct {
-	executor  *HTTPExecutor
-	endpoint  *UnixEndpoint
-	cmd       *exec.Cmd
-	cancel    context.CancelFunc
-	exited    chan struct{}
-	childMu   sync.Mutex
-	stopSent  atomic.Bool
-	unclean   atomic.Bool
-	reuse     atomic.Int32
-	stderr    *bounded.Tail
-	waitErr   error
-	closeOnce sync.Once
-	closeErr  error
+	executor     *HTTPExecutor
+	endpoint     *UnixEndpoint
+	cmd          *exec.Cmd
+	cancel       context.CancelFunc
+	exited       chan struct{}
+	childMu      sync.Mutex
+	stopSent     atomic.Bool
+	unclean      atomic.Bool
+	reuse        atomic.Int32
+	stderr       *bounded.Tail
+	waitErr      error
+	closeOnce    sync.Once
+	closeErr     error
+	readyTimeout time.Duration
 }
 
 const (
@@ -44,9 +48,12 @@ const (
 // startLocalWorker owns the direct child's context and command. configure sets
 // environment and stdout; stderr is captured for a safe startup diagnostic.
 // Job cancellation is handled by Execute.
-func startLocalWorker(runtimeDir, executorID, path string, args []string, configure func(*exec.Cmd, string)) (*localWorker, error) {
+func startLocalWorker(runtimeDir, executorID, path string, args []string, readyTimeout time.Duration, configure func(*exec.Cmd, string)) (*localWorker, error) {
 	if path == "" {
 		return nil, errors.New("local worker command path is required")
+	}
+	if readyTimeout <= 0 {
+		return nil, errors.New("local worker readiness timeout must be positive")
 	}
 	executor, err := NewHTTPExecutor(executorID)
 	if err != nil {
@@ -66,7 +73,8 @@ func startLocalWorker(runtimeDir, executorID, path string, args []string, config
 	cmd.Stderr = stderr
 	cmd.Cancel = commandCancel
 	executil.Prepare(cmd)
-	w := &localWorker{executor: executor, endpoint: endpoint, cmd: cmd, cancel: cancel, exited: make(chan struct{}), stderr: stderr}
+	w := &localWorker{executor: executor, endpoint: endpoint, cmd: cmd, cancel: cancel, exited: make(chan struct{}), stderr: stderr, readyTimeout: readyTimeout}
+	w.reuse.Store(workerNeedsPull)
 	preparedCancel := cmd.Cancel
 	cmd.Cancel = func() error {
 		err := preparedCancel()
@@ -96,12 +104,39 @@ func startLocalWorker(runtimeDir, executorID, path string, args []string, config
 	return w, nil
 }
 
+// AttachLocalWorker connects one selected direct child without changing the
+// default service mode. The caller owns the returned close function.
+func (e *Orchestrator) AttachLocalWorker(ctx context.Context, cfg config.Config, runtimeDir, path string, args []string, readyTimeout time.Duration, configure func(*exec.Cmd, string, WorkerSelection)) (WorkerSelection, func() error, error) {
+	if e.Executor != nil {
+		return WorkerSelection{}, nil, errors.New("orchestrator already has an executor")
+	}
+	if configure == nil {
+		return WorkerSelection{}, nil, errors.New("local worker startup configuration is required")
+	}
+	selected, err := e.WorkerSelection(cfg)
+	if err != nil {
+		return WorkerSelection{}, nil, err
+	}
+	w, err := startLocalWorker(runtimeDir, "local", path, args, readyTimeout, func(cmd *exec.Cmd, socket string) {
+		configure(cmd, socket, selected)
+	})
+	if err != nil {
+		return WorkerSelection{}, nil, err
+	}
+	if err := w.WaitCapacity(ctx); err != nil {
+		// WaitCapacity closes the child and endpoint on failure.
+		return WorkerSelection{}, nil, redactActionError(err, e.Runner.Codex.APIKey, e.Runner.Claude.APIKey)
+	}
+	e.Executor = w
+	return selected, w.Close, nil
+}
+
 func (w *localWorker) Execute(ctx context.Context, job Job, sink Checkpoints) (Result, error) {
 	if !w.reuse.CompareAndSwap(workerReusable, workerRunning) {
 		if w.reuse.Load() == workerRetired {
-			return Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head}, errors.New("local worker is closed or not ready for another assignment")
+			return Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head}, fmt.Errorf("%w: local worker is closed or not ready for another assignment", monitor.ErrRequestTransport)
 		}
-		return Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head}, errors.New("local worker is busy or not ready for another assignment")
+		return Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head}, fmt.Errorf("%w: local worker is busy or not ready for another assignment", monitor.ErrRequestTransport)
 	}
 	var state httpExecutionState
 	result, err := w.executor.execute(ctx, job, sink, &state)
@@ -122,6 +157,9 @@ func (w *localWorker) Execute(ctx context.Context, job Job, sink Checkpoints) (R
 		// A received outcome remains the Job result; Close reports lifecycle errors separately.
 		if !state.outcome {
 			err = errors.Join(err, closeErr)
+			if (closed || unavailable) && ctx.Err() == nil && !errors.Is(err, monitor.ErrExecutionOutcomeUnknown) && !errors.Is(err, monitor.ErrTerminalJob) {
+				err = errors.Join(err, monitor.ErrRequestTransport)
+			}
 			if closed && state.admitted {
 				err = errors.Join(err, errors.New("local worker stopped before a final outcome"))
 			}
@@ -134,20 +172,33 @@ func (w *localWorker) Execute(ctx context.Context, job Job, sink Checkpoints) (R
 	return result, err
 }
 
-// awaitReusable releases capacity only after the completed attempt's next pull
-// is held at the original endpoint while the direct child is live.
+// WaitCapacity releases capacity only after a pull is held at the original
+// endpoint while the direct child is live, initially and after each outcome.
+func (w *localWorker) WaitCapacity(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, w.readyTimeout)
+	defer cancel()
+	return w.awaitReusable(ctx)
+}
+
 func (w *localWorker) awaitReusable(ctx context.Context) (reuseErr error) {
-	if !w.reuse.CompareAndSwap(workerNeedsPull, workerCheckingPull) {
+	if !w.reuse.CompareAndSwap(workerNeedsPull, workerCheckingPull) && !w.reuse.CompareAndSwap(workerReusable, workerCheckingPull) {
 		if w.unclean.Load() {
 			return errors.New("local worker attempt cleanup failed; capacity is unavailable")
 		}
 		select {
+		case <-w.endpoint.serveDone:
+			if w.endpoint.serveErr != nil {
+				return errors.Join(errors.New("local worker endpoint stopped before a pull"), w.endpoint.serveErr, w.Close())
+			}
+		default:
+		}
+		select {
 		case <-w.exited:
-			return errors.Join(errors.New("local worker exited before holding a pull"), w.waitErr)
+			return errors.Join(w.exitBeforePull(), w.Close())
 		default:
 		}
 		if w.reuse.Load() == workerRetired {
-			return errors.New("local worker closed before reuse proof")
+			return errors.Join(errors.New("local worker closed before reuse proof"), w.Close())
 		}
 		return errors.New("local worker has no completed attempt awaiting reuse")
 	}
@@ -159,16 +210,37 @@ func (w *localWorker) awaitReusable(ctx context.Context) (reuseErr error) {
 			reuseErr = errors.Join(errors.New("local worker closed during reuse proof"), w.Close())
 		}
 	}()
-	if err := w.endpoint.checkIdentity(); err != nil {
-		return fmt.Errorf("local worker reuse endpoint: %w", err)
+	if err := w.checkCapacityEndpoint(); err != nil {
+		return err
 	}
 	if err := w.awaitHeldPull(ctx); err != nil {
-		return fmt.Errorf("local worker reuse pull: %w", err)
+		return fmt.Errorf("local worker capacity pull: %w", err)
 	}
-	if err := w.endpoint.checkIdentity(); err != nil {
-		return fmt.Errorf("local worker reuse endpoint: %w", err)
+	if err := w.checkCapacityEndpoint(); err != nil {
+		return err
 	}
 	return nil
+}
+
+func (w *localWorker) checkCapacityEndpoint() error {
+	err := w.endpoint.checkIdentity()
+	if err == nil {
+		return nil
+	}
+	select {
+	case <-w.exited:
+		err = errors.Join(err, w.exitBeforePull())
+	default:
+	}
+	return fmt.Errorf("local worker capacity endpoint: %w", err)
+}
+
+func (w *localWorker) exitBeforePull() error {
+	err := errors.Join(errors.New("local worker exited before holding a pull"), w.waitErr)
+	if detail := w.startupDiagnostic(); detail != "" {
+		err = errors.Join(err, fmt.Errorf("worker startup diagnostic: %s", detail))
+	}
+	return err
 }
 
 func (w *localWorker) startupDiagnostic() string {
@@ -194,11 +266,7 @@ func (w *localWorker) awaitHeldPull(ctx context.Context) (waitErr error) {
 		w.executor.mu.Unlock()
 		select {
 		case <-w.exited:
-			err := errors.Join(errors.New("local worker exited before holding a pull"), w.waitErr)
-			if detail := w.startupDiagnostic(); detail != "" {
-				err = errors.Join(err, fmt.Errorf("worker startup diagnostic: %s", detail))
-			}
-			return err
+			return w.exitBeforePull()
 		default:
 		}
 		select {

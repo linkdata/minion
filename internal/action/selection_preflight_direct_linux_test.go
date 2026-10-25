@@ -83,7 +83,7 @@ func TestSelectionPreflightDirectChild(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			worker, err := startLocalWorker(filepath.Join(base, "runtime"), "local", os.Args[0], []string{"-test.run=^TestSelectionPreflightDirectChildHelper$"}, func(cmd *exec.Cmd, socket string) {
+			worker, err := startLocalWorker(filepath.Join(base, "runtime"), "local", os.Args[0], []string{"-test.run=^TestSelectionPreflightDirectChildHelper$"}, 40*time.Second, func(cmd *exec.Cmd, socket string) {
 				cmd.Env = append(os.Environ(), "MINION_PREFLIGHT_CHILD=1", "MINION_PREFLIGHT_CASE="+tc.name,
 					"MINION_PREFLIGHT_SOCKET="+socket, "MINION_PREFLIGHT_BASE="+base)
 			})
@@ -97,7 +97,7 @@ func TestSelectionPreflightDirectChild(t *testing.T) {
 			})
 			ctx, cancel := context.WithTimeout(t.Context(), 40*time.Second)
 			defer cancel()
-			err = worker.awaitHeldPull(ctx)
+			err = worker.WaitCapacity(ctx)
 			if tc.want != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), "worker startup diagnostic") || ctx.Err() != nil || len(err.Error()) > 9<<10 {
 					t.Fatalf("failed preflight diagnostic or held pull: error=%v", err)
@@ -147,7 +147,7 @@ func TestSelectionPreflightDirectChild(t *testing.T) {
 			} else if err != nil || result.Answer != "Worker answer" || len(result.Calls) != 1 || result.Validate(job) != nil {
 				t.Fatalf("preflighted child did not execute once: result=%+v error=%v", result, err)
 			}
-			if err := worker.awaitReusable(ctx); err != nil {
+			if err := worker.WaitCapacity(ctx); err != nil {
 				t.Fatalf("preflighted child did not hold another pull: %v", err)
 			}
 			job.Identity.JobID, job.Identity.AttemptID = "second-job", "second-attempt"
@@ -155,7 +155,7 @@ func TestSelectionPreflightDirectChild(t *testing.T) {
 			if err != nil || result.Answer != "Worker answer" || len(result.Calls) != 1 || result.Validate(job) != nil {
 				t.Fatalf("preflighted child did not execute second action: result=%+v error=%v", result, err)
 			}
-			if err := worker.awaitReusable(ctx); err != nil {
+			if err := worker.WaitCapacity(ctx); err != nil {
 				t.Fatalf("preflighted child did not hold idle pull: %v", err)
 			}
 			if err := worker.executor.Close(); err != nil {
