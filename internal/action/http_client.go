@@ -20,10 +20,20 @@ import (
 var errHTTPWatchStopped = errors.New("HTTP cancellation watch stopped after worker return")
 
 type httpExecutionClient struct {
-	client      *http.Client
-	base        *url.URL
-	outcomeSent atomic.Bool
+	client              *http.Client
+	base                *url.URL
+	outcomeSent         atomic.Bool
+	outcomeAcknowledged bool
+	outcomeDegraded     bool
 }
+
+type httpRunStatus uint8
+
+const (
+	httpRunFailed httpRunStatus = iota
+	httpRunIdleShutdown
+	httpRunAcknowledged
+)
 
 type httpPullBody struct {
 	io.ReadCloser
@@ -52,6 +62,29 @@ type httpClientCheckpoints struct {
 
 // RunHTTP pulls and executes one assignment. Returning does not prove process release.
 func RunHTTP(ctx context.Context, client *http.Client, baseURL, executorID string, runner *Runner) error {
+	return runHTTP(ctx, client, baseURL, executorID, runner, nil)
+}
+
+// RunHTTPLoop executes distinct assignments until the parent closes an idle pull.
+func RunHTTPLoop(ctx context.Context, client *http.Client, baseURL, executorID string, runner *Runner) error {
+	for {
+		var status httpRunStatus
+		err := runHTTP(ctx, client, baseURL, executorID, runner, &status)
+		switch status {
+		case httpRunIdleShutdown:
+			return nil
+		case httpRunAcknowledged:
+			continue
+		default:
+			if err == nil {
+				return errors.New("HTTP worker ended without an acknowledged outcome")
+			}
+			return err
+		}
+	}
+}
+
+func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID string, runner *Runner, status *httpRunStatus) error {
 	if client == nil || runner == nil || !workspace.ValidIdentitySegment(executorID) {
 		return errors.New("HTTP worker requires a client, runner and valid executor identity")
 	}
@@ -60,17 +93,30 @@ func RunHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 		return errors.New("invalid HTTP execution base URL")
 	}
 	if err := ctx.Err(); err != nil {
+		if status != nil && errors.Is(err, context.Canceled) {
+			*status = httpRunIdleShutdown
+		}
 		return err
 	}
 	configured := *client
 	configured.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	transport := &httpExecutionClient{client: &configured, base: base}
+	var checkpoints *httpClientCheckpoints
+	protocolFailed := false
+	defer func() {
+		if status != nil && transport.outcomeAcknowledged && !transport.outcomeDegraded && !protocolFailed && checkpoints != nil && checkpoints.failure == nil {
+			*status = httpRunAcknowledged
+		}
+	}()
 	pull, err := httpEncode(httpPull{Version: ProtocolVersion, ExecutorID: executorID}, httpControlBytes)
 	if err != nil {
 		return err
 	}
 	var assignment httpAssignment
 	if err := transport.post(ctx, "next", pull, httpJobBytes, &assignment, httpBinding{}, 0); err != nil {
+		if status != nil && errors.Is(err, context.Canceled) && !errors.Is(err, monitor.ErrExecutionOutcomeUnknown) {
+			*status = httpRunIdleShutdown
+		}
 		return err
 	}
 	started := time.Now()
@@ -91,7 +137,7 @@ func RunHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	if assignment.Expires <= 0 {
 		return httpClientUnknown("next", errors.New("invalid assignment expiry"))
 	}
-	checkpoints := &httpClientCheckpoints{transport: transport, control: context.WithoutCancel(ctx), binding: httpJobBinding(job), started: started}
+	checkpoints = &httpClientCheckpoints{transport: transport, control: context.WithoutCancel(ctx), binding: httpJobBinding(job), started: started}
 	if !time.Now().Before(expires) {
 		err := errors.Join(monitor.ErrTerminalJob, context.DeadlineExceeded)
 		result := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head}
@@ -105,6 +151,7 @@ func RunHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	watchCtx, stopWatch := context.WithCancelCause(ctx)
 	watchBody, err := httpEncode(checkpoints.binding, httpControlBytes)
 	if err != nil {
+		protocolFailed = true
 		stopWatch(errHTTPWatchStopped)
 		return fmt.Errorf("encode cancellation admission: %w", err)
 	}
@@ -131,6 +178,7 @@ func RunHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 		}
 	}
 	if err != nil {
+		protocolFailed = true
 		stopWatch(errHTTPWatchStopped)
 		result := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head}
 		return errors.Join(err, checkpoints.outcome(result, err))
@@ -186,7 +234,11 @@ func RunHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	outcomeErr := checkpoints.outcome(result, runErr)
 	stopWatch(errHTTPWatchStopped)
 	watchErr := <-watchDone
-	if outcomeErr == nil && context.Cause(watchCtx) == errHTTPWatchStopped && httpWatchUncertainty(watchErr) {
+	if watchErr != nil {
+		var network *url.Error
+		protocolFailed = errors.Is(watchErr, monitor.ErrExecutionOutcomeUnknown) || errors.Is(watchErr, monitor.ErrRequestTransport) || errors.As(watchErr, &network)
+	}
+	if status == nil && outcomeErr == nil && context.Cause(watchCtx) == errHTTPWatchStopped && httpWatchUncertainty(watchErr) {
 		// Parent receipt is known. A watch-only protocol failure during upload
 		// cannot revoke it; errors already captured in runErr still propagate.
 		runner.logf("HTTP cancellation watch: %q", httpFailureDiagnostic(watchErr.Error()))
@@ -338,6 +390,9 @@ func (c *httpClientCheckpoints) acknowledge(kind string, data []byte, sequence u
 	if ack.httpBinding != c.binding || ack.Sequence != sequence || ack.Kind != kind || ack.Failure != nil {
 		return httpClientUnknown(kind, errors.New("missing or mismatched successful acknowledgement"))
 	}
+	if kind == "outcome" {
+		c.transport.outcomeAcknowledged = true
+	}
 	return nil
 }
 
@@ -423,6 +478,7 @@ func (c *httpClientCheckpoints) outcome(result Result, runErr error) error {
 		err = shapeErr
 	}
 	if err != nil {
+		c.transport.outcomeDegraded = true
 		// Encode the one fallback before sending anything. Already acknowledged
 		// receipts remain the parent's evidence; no After is inferred from Result.
 		fallback := Result{Version: c.binding.Version, Identity: c.binding.Identity, SourceRef: c.binding.SourceRef}

@@ -272,12 +272,13 @@ func (e *HTTPExecutor) serveNext(w http.ResponseWriter, r *http.Request) {
 	e.mu.Unlock()
 	var delivery *httpTransaction
 	defer func() {
-		e.mu.Lock()
-		e.pull = false
-		e.pullDone = nil
-		e.notifyLocked()
-		e.mu.Unlock()
-		if delivery != nil {
+		if delivery == nil {
+			e.mu.Lock()
+			e.pull = false
+			e.pullDone = nil
+			e.notifyLocked()
+			e.mu.Unlock()
+		} else {
 			delivery.handlers.Done()
 		}
 	}()
@@ -329,6 +330,10 @@ poll:
 				body := tx.body
 				tx.body = nil
 				tx.mu.Unlock()
+				// The assignment ACK can start another pull before this handler returns.
+				e.pull = false
+				e.pullDone = nil
+				e.notifyLocked()
 				e.mu.Unlock()
 				if err := httpServerWriteBytes(w, http.StatusOK, body); err != nil {
 					tx.stopRequiredDelivery(err)

@@ -6,16 +6,23 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
+	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -24,6 +31,9 @@ func TestSelectionPreflightDirectChild(t *testing.T) {
 		name, want string
 	}{
 		{name: "ready"},
+		{name: "known failure"},
+		{name: "missing outcome ACK"},
+		{name: "malformed required ACK"},
 		{name: "selected CLI", want: "Codex instruction boundary unavailable"},
 		{name: "selected critic", want: "Claude settings check failed"},
 		{name: "selected skill", want: "selected command skill unavailable"},
@@ -31,6 +41,7 @@ func TestSelectionPreflightDirectChild(t *testing.T) {
 		{name: "audit tooling", want: "audit toolchain unavailable"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			ackFailure := tc.name == "missing outcome ACK" || tc.name == "malformed required ACK"
 			base, err := os.MkdirTemp(os.TempDir(), "minion-preflight-")
 			if err != nil {
 				t.Fatal(err)
@@ -53,7 +64,7 @@ func TestSelectionPreflightDirectChild(t *testing.T) {
 			writeActionTestSkills(t, base, ".agents", testReviewSkillURL, testAuditSkillURL)
 			codexDir := fakeOnPath(t, "codex", preflightCodexCLI)
 			switch tc.name {
-			case "ready", "selected critic":
+			case "ready", "known failure", "missing outcome ACK", "malformed required ACK", "selected critic":
 				t.Setenv("PATH", codexDir+string(os.PathListSeparator)+gitOnlyPath(t))
 			case "selected CLI":
 				fakeOnPath(t, "codex", "#!/bin/sh\ncase \"$1 $2\" in 'login status') exit 0;; 'debug prompt-input') printf 'unsupported prompt-input\\n' >&2; exit 2;; esac\nexit 99\n")
@@ -80,7 +91,7 @@ func TestSelectionPreflightDirectChild(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() {
-				if err := worker.Close(); err != nil && tc.want == "" && !t.Failed() {
+				if err := worker.Close(); err != nil && tc.want == "" && !ackFailure && !t.Failed() {
 					t.Errorf("close direct child: %v", err)
 				}
 			})
@@ -107,18 +118,64 @@ func TestSelectionPreflightDirectChild(t *testing.T) {
 			job := testJob(command.Comment)
 			job.Main.Model, job.Main.Effort, job.Main.Skills = "main-1", "high", []string{testReviewSkillURL}
 			result, err := worker.Execute(ctx, job, runnerExecutionCheckpoints{})
-			if err != nil || result.Answer != "Worker answer" || len(result.Calls) != 1 || result.Validate(job) != nil {
+			if ackFailure {
+				if !result.matchesJob(job) || tc.name == "missing outcome ACK" && (err != nil || result.Answer != "Worker answer" || len(result.Calls) != 1) || tc.name == "malformed required ACK" && (err == nil || len(result.Calls) != 0) {
+					t.Fatalf("failed ACK changed parent outcome: result=%+v error=%v", result, err)
+				}
+				select {
+				case <-worker.exited:
+				case <-time.After(5 * time.Second):
+					t.Fatal("child did not exit after failed ACK")
+				}
+				var exit *exec.ExitError
+				if !errors.As(worker.waitErr, &exit) || exit.ExitCode() != 1 {
+					t.Fatalf("failed ACK did not stop child with test failure: %v", worker.waitErr)
+				}
+				if _, err := os.Stat(filepath.Join(base, "second-pull")); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("child pulled again after failed ACK: %v", err)
+				}
+				model, modelErr := os.ReadFile(filepath.Join(base, "model"))
+				if tc.name == "missing outcome ACK" && (modelErr != nil || string(model) != "1") || tc.name == "malformed required ACK" && !errors.Is(modelErr, os.ErrNotExist) {
+					t.Fatalf("failed ACK changed model calls: marker=%q error=%v", model, modelErr)
+				}
+				return
+			}
+			if tc.name == "known failure" {
+				if err == nil || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || !result.matchesJob(job) || result.Answer != "" || len(result.Calls) != 1 {
+					t.Fatalf("known failed action lost its outcome: result=%+v error=%v", result, err)
+				}
+			} else if err != nil || result.Answer != "Worker answer" || len(result.Calls) != 1 || result.Validate(job) != nil {
 				t.Fatalf("preflighted child did not execute once: result=%+v error=%v", result, err)
+			}
+			if err := worker.awaitReusable(ctx); err != nil {
+				t.Fatalf("preflighted child did not hold another pull: %v", err)
+			}
+			job.Identity.JobID, job.Identity.AttemptID = "second-job", "second-attempt"
+			result, err = worker.Execute(ctx, job, runnerExecutionCheckpoints{})
+			if err != nil || result.Answer != "Worker answer" || len(result.Calls) != 1 || result.Validate(job) != nil {
+				t.Fatalf("preflighted child did not execute second action: result=%+v error=%v", result, err)
+			}
+			if err := worker.awaitReusable(ctx); err != nil {
+				t.Fatalf("preflighted child did not hold idle pull: %v", err)
+			}
+			if err := worker.executor.Close(); err != nil {
+				t.Fatalf("held-pull shutdown failed: %v", err)
 			}
 			select {
 			case <-worker.exited:
 			case <-ctx.Done():
-				t.Fatalf("child did not exit after one assignment: %v", ctx.Err())
+				t.Fatalf("child did not exit after held-pull shutdown: %v", ctx.Err())
 			}
-			if worker.waitErr != nil {
-				t.Fatalf("child exited after assignment: %v", worker.waitErr)
+			if tc.name == "ready" && worker.waitErr != nil {
+				t.Fatalf("child did not consume idle shutdown: %v", worker.waitErr)
 			}
-			if data, err := os.ReadFile(filepath.Join(base, "model")); err != nil || string(data) != "1" {
+			if worker.cmd.ProcessState == nil || !worker.cmd.ProcessState.Success() {
+				t.Fatalf("direct child did not exit successfully: %v", worker.cmd.ProcessState)
+			}
+			if err := worker.Close(); err != nil {
+				t.Fatalf("close exited worker: %v", err)
+			}
+			if data, err := os.ReadFile(filepath.Join(base, "model")); err != nil || string(data) != "2" {
 				t.Fatalf("model call marker = %q, %v", data, err)
 			}
 		})
@@ -129,6 +186,8 @@ func TestSelectionPreflightDirectChildHelper(t *testing.T) {
 	if os.Getenv("MINION_PREFLIGHT_CHILD") != "1" {
 		return
 	}
+	ctx, stop := signal.NotifyContext(t.Context(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	base := os.Getenv("MINION_PREFLIGHT_BASE")
 	selection := WorkerSelection{Commands: map[string]config.CommandMapping{
 		"comment": {Action: "comment", Skills: []string{testReviewSkillURL}},
@@ -139,16 +198,21 @@ func TestSelectionPreflightDirectChildHelper(t *testing.T) {
 	if os.Getenv("MINION_PREFLIGHT_CASE") == "selected critic" {
 		selection.Critic = &RoleSettings{Provider: "claude", Model: "critic-1", Effort: "medium"}
 	}
+	calls := 0
 	runner, err := NewSelectedRunner(Runner{WorkRoot: filepath.Join(base, "work"), runModel: func(context.Context, modelRun) (aicli.Result, error) {
-		if err := workspace.WriteAtomic(filepath.Join(base, "model"), []byte("1")); err != nil {
+		calls++
+		if err := workspace.WriteAtomic(filepath.Join(base, "model"), []byte(strconv.Itoa(calls))); err != nil {
 			return aicli.Result{}, err
+		}
+		if os.Getenv("MINION_PREFLIGHT_CASE") == "known failure" && calls == 1 {
+			return aicli.Result{}, &url.Error{Op: "Post", URL: "https://provider.invalid", Err: errors.New("fixture model failure")}
 		}
 		return aicli.Result{Answer: "Worker answer", UsageComplete: true}, nil
 	}}, selection)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := runner.PreflightSelection(t.Context()); err != nil {
+	if err := runner.PreflightSelection(ctx); err != nil {
 		fmt.Fprintln(os.Stderr, "minion preflight:", err)
 		t.Fatalf("preflight: %v", err)
 	}
@@ -160,8 +224,44 @@ func TestSelectionPreflightDirectChildHelper(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer client.CloseIdleConnections()
-	if err := RunHTTP(t.Context(), client, UnixExecutionBaseURL, "local", runner); err != nil {
+	caseName := os.Getenv("MINION_PREFLIGHT_CASE")
+	if caseName == "missing outcome ACK" || caseName == "malformed required ACK" {
+		transport := client.Transport
+		pulls := 0
+		client.Transport = httpClientTestTransport(func(request *http.Request) (*http.Response, error) {
+			if request.URL.Path == "/next" {
+				pulls++
+				if pulls == 2 {
+					if err := workspace.WriteAtomic(filepath.Join(base, "second-pull"), []byte("pulled")); err != nil {
+						return nil, err
+					}
+				}
+			}
+			response, err := transport.RoundTrip(request)
+			if err != nil {
+				return response, err
+			}
+			if caseName == "missing outcome ACK" && request.URL.Path == "/outcome" || caseName == "malformed required ACK" && request.URL.Path == "/before" {
+				_ = response.Body.Close()
+				body := ""
+				if caseName == "malformed required ACK" {
+					body = "{"
+				}
+				response.Body = io.NopCloser(strings.NewReader(body))
+			}
+			return response, nil
+		})
+	}
+	if err := RunHTTPLoop(ctx, client, UnixExecutionBaseURL, "local", runner); err != nil {
+		if caseName == "missing outcome ACK" || caseName == "malformed required ACK" {
+			if !errors.Is(err, monitor.ErrExecutionOutcomeUnknown) {
+				t.Fatalf("failed ACK did not report unknown outcome: %v", err)
+			}
+		}
 		t.Fatal(err)
+	}
+	if caseName == "missing outcome ACK" || caseName == "malformed required ACK" {
+		t.Fatal("failed ACK was treated as clean shutdown")
 	}
 }
 
