@@ -83,9 +83,6 @@ func (w *localWorker) Execute(ctx context.Context, job Job, sink Checkpoints) (R
 			if closed && state.admitted {
 				err = errors.Join(err, errors.New("local worker stopped before a final outcome"))
 			}
-			if w.waitErr != nil && closed && !errors.Is(closeErr, w.waitErr) {
-				err = errors.Join(err, fmt.Errorf("local worker exited: %w", w.waitErr))
-			}
 		}
 	}
 	return result, err

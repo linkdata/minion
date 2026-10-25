@@ -50,6 +50,36 @@ func localWorkerTestStart(t *testing.T, mode string) *localWorker {
 	return w
 }
 
+func localWorkerTestPull(t *testing.T, w *localWorker) {
+	t.Helper()
+	deadline := time.NewTimer(10 * time.Second)
+	defer deadline.Stop()
+	for {
+		w.executor.mu.Lock()
+		held := w.executor.pull
+		w.executor.mu.Unlock()
+		if held {
+			return
+		}
+		select {
+		case <-deadline.C:
+			t.Fatal("child never held a pull")
+		case <-time.After(time.Millisecond):
+		}
+	}
+}
+
+func TestLocalWorkerIdleRunHTTPClose(t *testing.T) {
+	w := localWorkerTestStart(t, "run-http-idle")
+	localWorkerTestPull(t, w)
+	if err := w.Close(); err != nil {
+		t.Fatalf("idle RunHTTP worker did not stop cleanly: %v", err)
+	}
+	if w.cmd.ProcessState == nil || !w.cmd.ProcessState.Success() {
+		t.Fatalf("idle RunHTTP child did not consume shutdown response: %v", w.cmd.ProcessState)
+	}
+}
+
 func TestLocalWorkerKnownOutcomeSurvivesChildExit(t *testing.T) {
 	w := localWorkerTestStart(t, "known")
 	job := testJob(command.Comment)
@@ -104,6 +134,28 @@ func TestLocalWorkerRejectedAfterCloseHasNoMissingOutcome(t *testing.T) {
 	}
 }
 
+func TestLocalWorkerExternalCloseDoesNotReportExpectedInterrupt(t *testing.T) {
+	w := localWorkerTestStart(t, "hold")
+	job := testJob(command.Comment)
+	done := make(chan httpServerTestResult, 1)
+	go func() {
+		result, err := w.Execute(t.Context(), job, runnerExecutionCheckpoints{})
+		done <- httpServerTestResult{result, err}
+	}()
+	unixTestReady(t, w.executor)
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-done:
+		if !got.result.matchesJob(job) || !errors.Is(got.err, context.Canceled) || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || strings.Contains(got.err.Error(), "local worker exited") {
+			t.Fatalf("expected child interrupt became an exit failure: result=%+v error=%v", got.result, got.err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("externally closed action did not finish")
+	}
+}
+
 func TestLocalWorkerCrashAfterDeliveryQuarantines(t *testing.T) {
 	w := localWorkerTestStart(t, "crash")
 	w.executor.outcomeGrace = 25 * time.Millisecond
@@ -138,21 +190,7 @@ func TestLocalWorkerCrashBeforeDeliveryReportsExit(t *testing.T) {
 func TestLocalWorkerBudgetQuarantineStopsLiveChild(t *testing.T) {
 	w := localWorkerTestStart(t, "stall")
 	w.executor.outcomeGrace = 25 * time.Millisecond
-	deadline := time.NewTimer(10 * time.Second)
-	defer deadline.Stop()
-	for {
-		w.executor.mu.Lock()
-		held := w.executor.pull
-		w.executor.mu.Unlock()
-		if held {
-			break
-		}
-		select {
-		case <-deadline.C:
-			t.Fatal("child never held a pull")
-		case <-time.After(time.Millisecond):
-		}
-	}
+	localWorkerTestPull(t, w)
 	job := testJob(command.Comment)
 	job.RuntimeBudget = time.Second
 	result, err := w.Execute(t.Context(), job, runnerExecutionCheckpoints{})
@@ -461,7 +499,7 @@ func TestLocalWorkerHelper(t *testing.T) {
 	defer client.CloseIdleConnections()
 	report := os.Getenv("MINION_LOCAL_WORKER_REPORT")
 	var interrupt chan os.Signal
-	if mode == "stop-exit" || mode == "stop-success" {
+	if mode == "stop-exit" || mode == "stop-success" || mode == "run-http-idle" {
 		interrupt = make(chan os.Signal, 1)
 		signal.Notify(interrupt, os.Interrupt)
 		defer signal.Stop(interrupt)
@@ -473,6 +511,13 @@ func TestLocalWorkerHelper(t *testing.T) {
 		<-interrupt
 		if mode == "stop-exit" {
 			os.Exit(7)
+		}
+		return
+	}
+	if mode == "run-http-idle" {
+		err := RunHTTP(t.Context(), client, UnixExecutionBaseURL, "local", &Runner{})
+		if !errors.Is(err, context.Canceled) || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) {
+			t.Fatalf("idle pull did not receive intentional shutdown: %v", err)
 		}
 		return
 	}

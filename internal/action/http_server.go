@@ -253,8 +253,12 @@ func (e *HTTPExecutor) serveNext(w http.ResponseWriter, r *http.Request) {
 	}
 	e.mu.Lock()
 	if e.pull || e.closed || e.unavailable {
+		rejection := errors.New("HTTP executor has no pull slot")
+		if e.closed && !e.pull {
+			rejection = context.Canceled
+		}
 		e.mu.Unlock()
-		httpServerReject(w, "next", http.StatusConflict, httpBinding{}, 0, errors.New("HTTP executor has no pull slot"))
+		httpServerReject(w, "next", http.StatusConflict, httpBinding{}, 0, rejection)
 		return
 	}
 	e.pull = true
@@ -271,7 +275,12 @@ func (e *HTTPExecutor) serveNext(w http.ResponseWriter, r *http.Request) {
 	}()
 	for {
 		e.mu.Lock()
-		if e.closed || e.unavailable {
+		if e.closed {
+			e.mu.Unlock()
+			httpServerReject(w, "next", http.StatusConflict, httpBinding{}, 0, context.Canceled)
+			return
+		}
+		if e.unavailable {
 			e.mu.Unlock()
 			httpServerReject(w, "next", http.StatusConflict, httpBinding{}, 0, errors.New("HTTP executor is unavailable"))
 			return
