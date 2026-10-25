@@ -20,6 +20,7 @@ import (
 )
 
 const catalogueScript = `#!/bin/sh
+case " $* " in *' minion_unsupported_capability_probe=true '*) exit 2 ;; esac
 if [ "$1" = exec ]; then
   case " $* " in *' --help '*) ;; *) exit 9 ;; esac
   printf '%s\n' '--invocation--' "$@" >> @HELP_ARGS@
@@ -170,6 +171,7 @@ func TestValidateChecksExecAndResumeCapabilitiesWithoutCredentials(t *testing.T)
 		flags = append(flags, "--disable", feature)
 	}
 	for i, command := range [][]string{{"exec"}, {"exec", "resume"}} {
+		var wantRejected []string
 		for j, writable := range []bool{false, true} {
 			got := strings.Split(strings.TrimSpace(calls[3*i+j]), "\n")
 			if len(got) < 2 || !filepath.IsAbs(got[len(got)-2]) || filepath.Base(got[len(got)-2]) != "output-schema.json" {
@@ -183,9 +185,11 @@ func TestValidateChecksExecAndResumeCapabilitiesWithoutCredentials(t *testing.T)
 			if !slices.Equal(got, want) {
 				t.Fatalf("probe %d/%d args = %q; want %q", i, j, got, want)
 			}
+			if writable {
+				wantRejected = append(slices.Clone(want[:len(want)-1]), "--minion-unsupported-capability-probe", "--help")
+			}
 		}
 		rejected := strings.Split(strings.TrimSpace(calls[3*i+2]), "\n")
-		wantRejected := append(append([]string(nil), command...), "--minion-unsupported-capability-probe", "--help")
 		if !slices.Equal(rejected, wantRejected) {
 			t.Fatalf("negative probe %d args = %q; want %q", i, rejected, wantRejected)
 		}
@@ -225,6 +229,27 @@ func TestValidateRejectsMissingResolvedEffortConfig(t *testing.T) {
 	installFakeCodex(t, script)
 	if _, err := Validate(t.Context(), config.CodexConfig{}); err == nil || !strings.Contains(err.Error(), "Codex selected effort config capability check") || !strings.Contains(err.Error(), "model_reasoning_effort=") {
 		t.Fatalf("accepted CLI without the resolved effort config key: %v", err)
+	}
+}
+
+func TestValidateRejectsIgnoredUnknownConfigKey(t *testing.T) {
+	dir := t.TempDir()
+	page := `{"id":2,"result":{"data":[{"model":"fixture","isDefault":true,"defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high"}]}]}}`
+	script := strings.Replace(catalogueScriptFor(dir, page, ""), "case \" $* \" in *' minion_unsupported_capability_probe=true '*) exit 2 ;; esac", "", 1)
+	installFakeCodex(t, script)
+	if _, err := Validate(t.Context(), config.CodexConfig{}); err == nil || !strings.Contains(err.Error(), "did not reject an unknown key") {
+		t.Fatalf("accepted a CLI that ignores strict config keys: %v", err)
+	}
+}
+
+func TestCapabilityRejectedExcludesDeadline(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell fake is unavailable on native Windows")
+	}
+	binary := installFakeCodex(t, "#!/bin/sh\nexit 2\n")
+	err := exec.Command(binary).Run()
+	if !capabilityRejected(err) || capabilityRejected(errors.Join(err, context.DeadlineExceeded)) {
+		t.Fatalf("wrong parser failure classification: %v", err)
 	}
 }
 

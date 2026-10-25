@@ -54,6 +54,11 @@ func TestMain(m *testing.M) {
 		}
 		_ = json.NewEncoder(os.Stdout).Encode([]any{map[string]any{"role": "user", "content": []any{map[string]string{"text": text}}}})
 	case "app-server":
+		for _, arg := range os.Args[2:] {
+			if arg == "minion_unsupported_capability_probe=true" {
+				os.Exit(2)
+			}
+		}
 		decoder, encoder := json.NewDecoder(os.Stdin), json.NewEncoder(os.Stdout)
 		for {
 			var request struct {

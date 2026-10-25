@@ -116,6 +116,10 @@ func validateExecCapabilities(ctx context.Context, settings config.CodexConfig) 
 		if _, probeErr := probe(args); probeErr != nil {
 			return fmt.Errorf("Codex selected effort config capability check: %w", probeErr) //nolint:staticcheck // -- Codex is a proper noun.
 		}
+		invalid := append(append([]string(nil), args...), "-c", "minion_unsupported_capability_probe=true")
+		if _, probeErr := probe(invalid); !capabilityRejected(probeErr) {
+			return fmt.Errorf("Codex selected effort config capability check did not reject an unknown key: %v", probeErr) //nolint:staticcheck // -- Codex is a proper noun.
+		}
 	}
 	for _, command := range []struct {
 		name string
@@ -124,6 +128,7 @@ func validateExecCapabilities(ctx context.Context, settings config.CodexConfig) 
 		{name: "exec", args: []string{"exec"}},
 		{name: "exec resume", args: []string{"exec", "resume"}},
 	} {
+		var fullArgs []string
 		for _, writable := range []bool{false, true} {
 			args := append(append([]string(nil), command.args...),
 				"--json", "--ignore-user-config", "--ignore-rules", "--strict-config", "--skip-git-repo-check",
@@ -140,15 +145,21 @@ func validateExecCapabilities(ctx context.Context, settings config.CodexConfig) 
 			if probeErr != nil {
 				return fmt.Errorf("Codex %s capability check (writable=%t): %w", command.name, writable, probeErr) //nolint:staticcheck // -- Codex is a proper noun.
 			}
+			fullArgs = args
 		}
-		invalid := append(command.args, "--minion-unsupported-capability-probe", "--help")
+		invalid := append(append([]string(nil), fullArgs[:len(fullArgs)-1]...), "--minion-unsupported-capability-probe", "--help")
 		_, probeErr := probe(invalid)
-		var exitErr *exec.ExitError
-		if probeErr == nil || ctx.Err() != nil || errors.Is(probeErr, aicli.ErrOutputLimit) || !errors.As(probeErr, &exitErr) || exitErr.ExitCode() <= 0 {
+		if !capabilityRejected(probeErr) {
 			return fmt.Errorf("Codex %s capability check did not reject an unknown option: %v", command.name, probeErr) //nolint:staticcheck // -- Codex is a proper noun.
 		}
 	}
 	return nil
+}
+
+func capabilityRejected(err error) bool {
+	var exitErr *exec.ExitError
+	return err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) &&
+		!errors.Is(err, aicli.ErrOutputLimit) && errors.As(err, &exitErr) && exitErr.ExitCode() > 0
 }
 
 func disabledFeatureArgs() []string {

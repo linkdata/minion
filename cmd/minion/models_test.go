@@ -150,6 +150,7 @@ exec)
   fi
   ;;
 app-server)
+  case " $* " in *' minion_unsupported_capability_probe=true '*) exit 2 ;; esac
   IFS= read -r request
   printf '%s\n' '{"id":1,"result":{}}'
   IFS= read -r request

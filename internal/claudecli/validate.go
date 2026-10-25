@@ -91,6 +91,9 @@ func Validate(ctx context.Context, settings config.ClaudeConfig) (validated conf
 	if err != nil {
 		return validated, err
 	}
+	if !cleanFreshInitialization(data) {
+		return validated, errors.New("claude model discovery emitted model activity or malformed output")
+	}
 	for _, model := range models {
 		if settings.Model == "" {
 			if model.Value != "default" {
@@ -164,10 +167,11 @@ func cliRejected(err error) bool {
 }
 
 type capabilityEvent struct {
-	Type         string  `json:"type"`
-	IsError      bool    `json:"is_error"`
-	NumTurns     int     `json:"num_turns"`
-	TotalCostUSD float64 `json:"total_cost_usd"`
+	Type         string                     `json:"type"`
+	IsError      bool                       `json:"is_error"`
+	NumTurns     int                        `json:"num_turns"`
+	TotalCostUSD float64                    `json:"total_cost_usd"`
+	ModelUsage   map[string]json.RawMessage `json:"modelUsage"`
 	Usage        struct {
 		InputTokens              int64 `json:"input_tokens"`
 		OutputTokens             int64 `json:"output_tokens"`
@@ -177,7 +181,7 @@ type capabilityEvent struct {
 }
 
 func (e capabilityEvent) usedModel() bool {
-	return e.NumTurns != 0 || e.TotalCostUSD != 0 || e.Usage.InputTokens != 0 || e.Usage.OutputTokens != 0 ||
+	return e.NumTurns != 0 || e.TotalCostUSD != 0 || len(e.ModelUsage) != 0 || e.Usage.InputTokens != 0 || e.Usage.OutputTokens != 0 ||
 		e.Usage.CacheCreationInputTokens != 0 || e.Usage.CacheReadInputTokens != 0
 }
 

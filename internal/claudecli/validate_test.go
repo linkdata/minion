@@ -54,18 +54,38 @@ fi
 				t.Fatalf("Validate = %+v, %v", cfg, err)
 			}
 			fresh := readFile(t, binary+".fresh-args")
-			if !strings.Contains(fresh, "--no-session-persistence\n") || !strings.Contains(fresh, "--session-id\n") || !strings.Contains(fresh, "--add-dir\n") || !strings.Contains(fresh, "--model\n"+tc.wantModel+"\n") {
+			if !strings.Contains(fresh, "--no-session-persistence\n") || !strings.Contains(fresh, "--session-id\n") || !strings.Contains(fresh, "--add-dir\n") || !strings.Contains(fresh, "--model\n"+tc.wantModel+"\n") || !strings.Contains(fresh, "--json-schema\n{\"type\":\"object\"}\n") {
 				t.Fatalf("fresh capability probe used wrong arguments: %q", fresh)
+			}
+			if tc.effort != "" && !strings.Contains(fresh, "--effort\n"+tc.effort+"\n") {
+				t.Fatalf("fresh capability probe omitted selected effort: %q", fresh)
 			}
 		})
 	}
 }
 
+func TestValidateRejectsPaidDiscoveryOutput(t *testing.T) {
+	fakeExecutable(t, "claude", `if [ "$3" = auth ]; then
+  printf '%s\n' '{"loggedIn":true}'
+else
+  cat >/dev/null
+  printf '%s\n' '`+modelCatalogue+`' '{"type":"result","modelUsage":{"main":{"inputTokens":1}}}'
+fi
+`)
+	if _, err := Validate(t.Context(), config.ClaudeConfig{}); err == nil || !strings.Contains(err.Error(), "model discovery emitted model activity") {
+		t.Fatalf("accepted paid event after catalogue: %v", err)
+	}
+}
+
 func TestValidateRejectsMissingInvocationOptionBeforeModelCall(t *testing.T) {
-	for _, option := range []string{"--session-id", "--resume", "--add-dir", "--model"} {
+	for _, option := range []string{"--session-id", "--resume", "--add-dir", "--model", "--effort"} {
 		t.Run(option, func(t *testing.T) {
 			binary := fakeValidationCLI(t, option, false)
-			_, err := Validate(t.Context(), config.ClaudeConfig{})
+			settings := config.ClaudeConfig{}
+			if option == "--effort" {
+				settings.Effort = "high"
+			}
+			_, err := Validate(t.Context(), settings)
 			if err == nil || !strings.Contains(err.Error(), option) {
 				t.Fatalf("accepted CLI without %s: %v", option, err)
 			}
@@ -100,6 +120,7 @@ func TestEmptySessionLookupRejectsModelActivity(t *testing.T) {
 	for _, output := range []string{
 		`{"type":"assistant"}` + "\n" + empty,
 		`{"type":"result","is_error":true,"num_turns":0,"usage":{"input_tokens":1}}`,
+		`{"type":"result","is_error":true,"num_turns":0,"modelUsage":{"main":{"inputTokens":1}}}`,
 		`{"type":"result","is_error":false,"num_turns":0}`,
 	} {
 		if isEmptySessionLookup([]byte(output)) {
@@ -116,6 +137,8 @@ func TestFreshInitializationRejectsPaidOrMalformedTrailingEvent(t *testing.T) {
 		`{"type":"result","num_turns":1}`,
 		`{"type":"result","usage":{"input_tokens":1}}`,
 		`{"type":"result","total_cost_usd":0.01}`,
+		`{"type":"result","modelUsage":{"main":{"inputTokens":3}}}`,
+		`{"type":"result","modelUsage":{"main":{"inputTokens":0}}}`,
 		`{"type":"system","usage":{"input_tokens":1}}`,
 		`{"type":"assistant"}`,
 		`{`,
