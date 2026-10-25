@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os/exec"
 	"sync"
+	"syscall"
 
 	"github.com/linkdata/minion/internal/executil"
 )
@@ -95,20 +96,36 @@ func (w *localWorker) Execute(ctx context.Context, job Job, sink Checkpoints) (R
 func (w *localWorker) Close() error {
 	w.closeOnce.Do(func() {
 		coreErr := w.executor.Close()
-		// Publish Wait and initiate cancellation under one lock, so a child exit
-		// observed during callback drain cannot be lost between these steps.
+		// A published exit before cancellation is spontaneous, including one
+		// observed while accepted callbacks drain.
 		w.childMu.Lock()
+		exitedBeforeCancel := false
 		select {
 		case <-w.exited:
-			if w.waitErr != nil {
-				w.closeErr = fmt.Errorf("local worker exited: %w", w.waitErr)
-			}
+			exitedBeforeCancel = true
 		default:
 		}
 		w.cancel()
 		w.childMu.Unlock()
 		<-w.exited
+		// Cmd.Wait may have returned before cancellation but published afterward.
+		// Keep every nonzero exit code and other unexpected Wait error.
+		if w.waitErr != nil && (exitedBeforeCancel || !expectedLocalWorkerCancellation(w.waitErr)) {
+			w.closeErr = fmt.Errorf("local worker exited: %w", w.waitErr)
+		}
 		w.closeErr = errors.Join(w.closeErr, coreErr, w.endpoint.Close())
 	})
 	return w.closeErr
+}
+
+func expectedLocalWorkerCancellation(err error) bool {
+	if errors.Is(err, context.Canceled) {
+		return true // Cmd.Wait can report context cancellation after a successful exit.
+	}
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) {
+		return false
+	}
+	status, ok := exit.Sys().(syscall.WaitStatus)
+	return ok && status.Signaled() && (status.Signal() == syscall.SIGINT || status.Signal() == syscall.SIGKILL)
 }

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -34,7 +35,7 @@ func localWorkerTestStart(t *testing.T, mode string) *localWorker {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		if err := w.Close(); err != nil && mode != "hold" && mode != "known-hold" && mode != "known" && mode != "crash" && mode != "precrash" && mode != "drain-kill" {
+		if err := w.Close(); err != nil && mode != "hold" && mode != "known-hold" && mode != "known" && mode != "crash" && mode != "precrash" && mode != "drain-kill" && mode != "stop-exit" {
 			t.Errorf("close local worker: %v", err)
 		}
 		if t.Failed() {
@@ -70,6 +71,24 @@ func TestLocalWorkerKnownOutcomeSurvivesChildExit(t *testing.T) {
 	}
 	if _, err := os.Lstat(w.endpoint.SocketPath()); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("owned endpoint remains after child exit: %v", err)
+	}
+}
+
+func TestLocalWorkerCloseReportsExitCodeAfterInterrupt(t *testing.T) {
+	w := localWorkerTestStart(t, "stop-exit")
+	var exitErr *exec.ExitError
+	if err := w.Close(); !errors.As(err, &exitErr) || exitErr.ExitCode() != 7 {
+		t.Fatalf("owner cancellation hid child exit code: %v", err)
+	}
+	if w.cmd.ProcessState == nil {
+		t.Fatal("direct child was not reaped")
+	}
+}
+
+func TestLocalWorkerCloseAcceptsGracefulInterrupt(t *testing.T) {
+	w := localWorkerTestStart(t, "stop-success")
+	if err := w.Close(); err != nil {
+		t.Fatalf("graceful owner cancellation reported as child failure: %v", err)
 	}
 }
 
@@ -135,7 +154,7 @@ func TestLocalWorkerBudgetQuarantineStopsLiveChild(t *testing.T) {
 		}
 	}
 	job := testJob(command.Comment)
-	job.RuntimeBudget = 100 * time.Millisecond
+	job.RuntimeBudget = time.Second
 	result, err := w.Execute(t.Context(), job, runnerExecutionCheckpoints{})
 	if t.Context().Err() != nil || !result.matchesJob(job) || !errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("live caller lost uncertain budget outcome: result=%+v error=%v caller=%v", result, err, t.Context().Err())
@@ -441,8 +460,21 @@ func TestLocalWorkerHelper(t *testing.T) {
 	}
 	defer client.CloseIdleConnections()
 	report := os.Getenv("MINION_LOCAL_WORKER_REPORT")
+	var interrupt chan os.Signal
+	if mode == "stop-exit" || mode == "stop-success" {
+		interrupt = make(chan os.Signal, 1)
+		signal.Notify(interrupt, os.Interrupt)
+		defer signal.Stop(interrupt)
+	}
 	if err := workspace.WriteAtomic(report+".ready", []byte(strconv.Itoa(os.Getpid()))); err != nil {
 		t.Fatal(err)
+	}
+	if mode == "stop-exit" || mode == "stop-success" {
+		<-interrupt
+		if mode == "stop-exit" {
+			os.Exit(7)
+		}
+		return
 	}
 	if mode == "precrash" {
 		os.Exit(7)
