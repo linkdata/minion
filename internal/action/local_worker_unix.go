@@ -7,10 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
 
+	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/executil"
 )
 
@@ -23,13 +25,15 @@ type localWorker struct {
 	exited    chan struct{}
 	childMu   sync.Mutex
 	stopSent  atomic.Bool
+	stderr    *bounded.Tail
 	waitErr   error
 	closeOnce sync.Once
 	closeErr  error
 }
 
 // startLocalWorker owns the direct child's context and command. configure sets
-// environment and stdio; job cancellation is handled by Execute.
+// environment and stdout; stderr is captured for a safe startup diagnostic.
+// Job cancellation is handled by Execute.
 func startLocalWorker(runtimeDir, executorID, path string, args []string, configure func(*exec.Cmd, string)) (*localWorker, error) {
 	if path == "" {
 		return nil, errors.New("local worker command path is required")
@@ -48,9 +52,11 @@ func startLocalWorker(runtimeDir, executorID, path string, args []string, config
 	if configure != nil {
 		configure(cmd, endpoint.SocketPath())
 	}
+	stderr := &bounded.Tail{}
+	cmd.Stderr = stderr
 	cmd.Cancel = commandCancel
 	executil.Prepare(cmd)
-	w := &localWorker{executor: executor, endpoint: endpoint, cmd: cmd, cancel: cancel, exited: make(chan struct{})}
+	w := &localWorker{executor: executor, endpoint: endpoint, cmd: cmd, cancel: cancel, exited: make(chan struct{}), stderr: stderr}
 	preparedCancel := cmd.Cancel
 	cmd.Cancel = func() error {
 		err := preparedCancel()
@@ -99,6 +105,15 @@ func (w *localWorker) Execute(ctx context.Context, job Job, sink Checkpoints) (R
 	return result, err
 }
 
+func (w *localWorker) startupDiagnostic() string {
+	for _, line := range strings.Split(w.stderr.String(), "\n") {
+		if message, ok := strings.CutPrefix(line, "minion preflight: "); ok && validPreflightMessage(message) {
+			return message
+		}
+	}
+	return ""
+}
+
 // awaitHeldPull proves only that this endpoint accepted a pull while its
 // direct child was live; selected-tool preflight and capacity are separate.
 func (w *localWorker) awaitHeldPull(ctx context.Context) (waitErr error) {
@@ -113,7 +128,11 @@ func (w *localWorker) awaitHeldPull(ctx context.Context) (waitErr error) {
 		w.executor.mu.Unlock()
 		select {
 		case <-w.exited:
-			return errors.Join(errors.New("local worker exited before holding a pull"), w.waitErr)
+			err := errors.Join(errors.New("local worker exited before holding a pull"), w.waitErr)
+			if detail := w.startupDiagnostic(); detail != "" {
+				err = errors.Join(err, fmt.Errorf("worker startup diagnostic: %s", detail))
+			}
+			return err
 		default:
 		}
 		select {

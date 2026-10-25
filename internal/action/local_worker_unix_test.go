@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
@@ -22,23 +23,29 @@ import (
 	"github.com/linkdata/minion/internal/workspace"
 )
 
+const preflightTestProxyUser = "u%40ser"
+const preflightTestProxyPassword = "p%40ss"
+
 func localWorkerTestStart(t *testing.T, mode string) *localWorker {
 	t.Helper()
 	report := filepath.Join(t.TempDir(), "child")
 	var output bytes.Buffer
 	w, err := startLocalWorker(unixTestDirectory(t), "local", os.Args[0], []string{"-test.run=^TestLocalWorkerHelper$"}, func(cmd *exec.Cmd, socket string) {
 		cmd.Env = append(os.Environ(), "MINION_LOCAL_WORKER_HELPER="+mode, "MINION_LOCAL_WORKER_SOCKET="+socket, "MINION_LOCAL_WORKER_REPORT="+report)
-		cmd.Stdout, cmd.Stderr = &output, &output
+		cmd.Stdout = &output
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		if err := w.Close(); err != nil && mode != "hold" && mode != "known-hold" && mode != "known" && mode != "crash" && mode != "precrash" && mode != "drain-kill" && mode != "stop-exit" {
+		if err := w.Close(); err != nil && mode != "hold" && mode != "known-hold" && mode != "known" && mode != "crash" && mode != "precrash" && mode != "preflight-fail" && mode != "drain-kill" && mode != "stop-exit" {
 			t.Errorf("close local worker: %v", err)
 		}
 		if t.Failed() {
-			t.Logf("local worker output: %s", output.String())
+			t.Logf("local worker output: %s", monitor.InertLogText(output.String()))
+			if detail := w.startupDiagnostic(); detail != "" {
+				t.Logf("local worker stderr: %s", detail)
+			}
 		}
 	})
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
@@ -186,6 +193,30 @@ func TestLocalWorkerAwaitHeldPullReportsChildExit(t *testing.T) {
 	}
 	if _, err := os.Lstat(w.endpoint.SocketPath()); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("pre-pull exit left the endpoint: %v", err)
+	}
+}
+
+func TestLocalWorkerAwaitHeldPullReportsBoundedPreflightDiagnostic(t *testing.T) {
+	const secret = "native-preflight-secret"
+	const ghToken = "gh-credential"
+	const pgPassword = "shortpass"
+	const proxy = "http://" + preflightTestProxyUser + ":" + preflightTestProxyPassword + "@proxy.example"
+	t.Setenv("CODEX_API_KEY", secret)
+	t.Setenv("GH_TOKEN", " "+ghToken+" ")
+	t.Setenv("PGPASSWORD", pgPassword)
+	t.Setenv("HTTPS_PROXY", proxy)
+	w := localWorkerTestStart(t, "preflight-fail")
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	err := w.awaitHeldPull(ctx)
+	if err == nil || !strings.Contains(err.Error(), "Codex login unavailable") || strings.Contains(err.Error(), "forged log line") || strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), ghToken) || strings.Contains(err.Error(), pgPassword) || strings.Contains(err.Error(), proxy) || strings.Contains(err.Error(), preflightTestProxyUser) || strings.Contains(err.Error(), preflightTestProxyPassword) || strings.Contains(err.Error(), "p@ss") || len(err.Error()) > 9<<10 {
+		t.Fatalf("preflight diagnostic was lost, unbounded or active: %v", err)
+	}
+	w.executor.mu.Lock()
+	pull := w.executor.pull
+	w.executor.mu.Unlock()
+	if pull || w.cmd.ProcessState == nil {
+		t.Fatalf("failed preflight held a pull or left its child live: pull=%t state=%v", pull, w.cmd.ProcessState)
 	}
 }
 
@@ -716,6 +747,11 @@ func TestLocalWorkerHelper(t *testing.T) {
 	}
 	if err := workspace.WriteAtomic(report+".ready", []byte(strconv.Itoa(os.Getpid()))); err != nil {
 		t.Fatal(err)
+	}
+	if mode == "preflight-fail" {
+		fmt.Fprintln(os.Stderr, strings.Repeat("x", 16<<10)+"\nselected Codex CLI unavailable "+os.Getenv("CODEX_API_KEY")+strings.TrimSpace(os.Getenv("GH_TOKEN"))+" "+os.Getenv("PGPASSWORD")+" "+os.Getenv("HTTPS_PROXY")+" "+preflightTestProxyUser+" "+preflightTestProxyPassword+" p@ss\nforged log line")
+		fmt.Fprintln(os.Stderr, "minion preflight: Codex login unavailable")
+		os.Exit(7)
 	}
 	if mode == "stop-exit" || mode == "stop-success" {
 		<-interrupt

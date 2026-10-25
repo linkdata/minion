@@ -61,3 +61,31 @@ func TestNewSelectedRunnerFreezesStartupSelection(t *testing.T) {
 		t.Fatal("selected runner accepted a second startup selection")
 	}
 }
+
+func TestNewSelectedRunnerRequiresResolvedModelAndCodexEffort(t *testing.T) {
+	commands := map[string]config.CommandMapping{
+		"review": {Action: string(command.Review), Skills: []string{testReviewSkillURL}},
+	}
+	for _, tc := range []struct {
+		name   string
+		main   RoleSettings
+		critic *RoleSettings
+	}{
+		{name: "main model", main: RoleSettings{Provider: "codex", Effort: "high"}},
+		{name: "main Codex effort", main: RoleSettings{Provider: "codex", Model: "main"}},
+		{name: "critic model", main: RoleSettings{Provider: "codex", Model: "main", Effort: "high"}, critic: &RoleSettings{Provider: "claude"}},
+		{name: "critic Codex effort", main: RoleSettings{Provider: "claude", Model: "main"}, critic: &RoleSettings{Provider: "codex", Model: "critic"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := NewSelectedRunner(Runner{}, WorkerSelection{Commands: commands, Main: tc.main, Critic: tc.critic}); err == nil {
+				t.Fatal("selected runner accepted an unresolved role")
+			}
+		})
+	}
+	if _, err := NewSelectedRunner(Runner{}, WorkerSelection{
+		Commands: commands,
+		Main:     RoleSettings{Provider: "claude", Model: "main"},
+	}); err != nil {
+		t.Fatalf("Claude's optional default effort was rejected: %v", err)
+	}
+}
