@@ -22,7 +22,6 @@ const (
 	preflightWorkRootInvalid            = "worker work root invalid"
 	preflightEvidenceDirsUnsupported    = "worker evidence directories unsupported"
 	preflightCommandSkillUnavailable    = "selected command skill unavailable"
-	preflightCriticSkillUnavailable     = "selected critic skill unavailable"
 	preflightAuditSkillUnavailable      = "selected audit skill unavailable"
 	preflightAuditToolchainUnavailable  = "audit toolchain unavailable"
 	preflightGitReadinessUnavailable    = "Git readiness unavailable"
@@ -36,8 +35,7 @@ func validPreflightMessage(message string) bool {
 	switch message {
 	case preflightRunnerUnavailable, preflightSelectionUnavailable, preflightWorkRootUnavailable,
 		preflightCanceled, preflightWorkRootInvalid, preflightEvidenceDirsUnsupported,
-		preflightCommandSkillUnavailable,
-		preflightCriticSkillUnavailable, preflightAuditSkillUnavailable,
+		preflightCommandSkillUnavailable, preflightAuditSkillUnavailable,
 		preflightAuditToolchainUnavailable, preflightGitReadinessUnavailable,
 		preflightCodexLoginUnavailable, preflightCodexBoundaryUnavailable,
 		preflightCodexInvocationUnsupported, preflightClaudeSettingsUnavailable:
@@ -85,6 +83,9 @@ func (r *Runner) PreflightSelection(ctx context.Context) (resultErr error) {
 	if err != nil {
 		return fmt.Errorf("worker work root: %w", err)
 	}
+	if err := workspace.CheckRoot(workRoot); err != nil {
+		return fmt.Errorf("worker work root: %w", err)
+	}
 	message = preflightEvidenceDirsUnsupported
 	if len(r.Codex.ReadOnlyDirs) != 0 || len(r.Claude.ReadOnlyDirs) != 0 {
 		return errUnsupportedEvidenceDirs
@@ -114,12 +115,6 @@ func (r *Runner) PreflightSelection(ctx context.Context) (resultErr error) {
 				return fmt.Errorf("worker command %q has no selected security-audit skill", name)
 			}
 			auditSkill = skill
-		}
-	}
-	if r.selection.Critic != nil {
-		message = preflightCriticSkillUnavailable
-		if err := configured.ConfigureRole(*r.selection.Critic); err != nil {
-			return fmt.Errorf("worker critic: %w", err)
 		}
 	}
 	if auditSkill != "" {

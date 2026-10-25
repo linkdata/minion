@@ -73,6 +73,25 @@ func TestPreflightSelectionRejectsUnsupportedEvidenceDirectoriesBeforePull(t *te
 	}
 }
 
+func TestPreflightSelectionRejectsInvalidWorkRootBeforeToolChecks(t *testing.T) {
+	runner := selectedPreflightRunner(t, map[string]config.CommandMapping{
+		"review": {Action: string(command.Review), Skills: []string{testReviewSkillURL}},
+	})
+	file, err := os.CreateTemp(t.TempDir(), "work-root-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	runner.WorkRoot = file.Name()
+	requirePreflightMessage(t, runner.PreflightSelection(t.Context()), preflightWorkRootInvalid)
+	if runtime.GOOS != "windows" {
+		runner.WorkRoot = "/"
+		requirePreflightMessage(t, runner.PreflightSelection(t.Context()), preflightWorkRootInvalid)
+	}
+}
+
 func TestPreflightSelectionChecksEverySelectedRequiredSkill(t *testing.T) {
 	installActionTestSkills(t, testReviewSkillURL)
 	runner := selectedPreflightRunner(t, map[string]config.CommandMapping{
