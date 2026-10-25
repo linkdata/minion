@@ -217,6 +217,10 @@ func TestRunnerUsesLocalHistoryWhenComparisonDiffIsIncomplete(t *testing.T) {
 
 func TestRunnerKeepsCriticReadOnlyAndPrivateReasoning(t *testing.T) {
 	forbidNetworkGit(t)
+	gitCommand := "git"
+	if runtime.GOOS == "windows" {
+		gitCommand = "git.exe"
+	}
 	job := testJob(command.Fix)
 	job.Source.Files = append(job.Source.Files, workspace.File{Path: "deleted.txt", Mode: workspace.Regular, Data: []byte("original deleted file")})
 	attachRepository(t, &job)
@@ -251,8 +255,8 @@ func TestRunnerKeepsCriticReadOnlyAndPrivateReasoning(t *testing.T) {
 		}
 		assertModelRepository(t, request.dir, job.Source.Head)
 		for _, want := range []string{
-			"Use git status and git diff against HEAD to compare the current source against the original input baseline, including added and deleted files, binary content, and executable modes.",
-			"For fix actions, compare current source with the original input at Git HEAD using git status and git diff, including additions, deletions, binary content and executable modes.",
+			fmt.Sprintf("Use %s status and %s diff against HEAD to compare the current source against the original input baseline, including added and deleted files, binary content, and executable modes.", gitCommand, gitCommand),
+			fmt.Sprintf("For fix actions, compare current source with the original input at Git HEAD using %s status and %s diff, including additions, deletions, binary content and executable modes.", gitCommand, gitCommand),
 		} {
 			if !strings.Contains(request.prompt, want) {
 				t.Fatalf("critic lacks local baseline instruction %q", want)

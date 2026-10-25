@@ -343,6 +343,9 @@ printf '%s\n' '`+successfulResult+`'
 				t.Fatal(err)
 			}
 			wantReads := append(systemReads, workspace, cwd, output, reports, skillDir)
+			if runtime.GOOS == "darwin" {
+				wantReads = append(wantReads, "/private/var/db/xcode_select_link")
+			}
 			wantWrites := []string{cwd, output}
 			if writable {
 				wantWrites = append(wantWrites, workspace)

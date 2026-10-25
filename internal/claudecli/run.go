@@ -233,6 +233,10 @@ func sandboxSettings(workspace, runtimeDir string, writable bool, outputDir stri
 		return "", err
 	}
 	reads := append(systemReads, workspace, runtimeDir)
+	if runtime.GOOS == "darwin" {
+		// Apple's /usr/bin/git shim reads this link to select the developer tools.
+		reads = append(reads, "/private/var/db/xcode_select_link")
+	}
 	writes := []string{runtimeDir}
 	deniedWrites := []string{filepath.Join(runtimeDir, ".git")}
 	if writable {
