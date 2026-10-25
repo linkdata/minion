@@ -48,19 +48,16 @@ func TestResolveCredentialHelperPreservesSymlinkName(t *testing.T) {
 }
 
 func TestResolveCredentialHelperRejectsRelativePath(t *testing.T) {
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
 	checkout := t.TempDir()
-	if err := os.WriteFile(filepath.Join(checkout, "gh"), []byte("#!/bin/sh\nexit 99\n"), 0700); err != nil {
+	name := "gh"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	if err := os.WriteFile(filepath.Join(checkout, name), []byte("#!/bin/sh\nexit 99\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	relative, err := filepath.Rel(cwd, checkout)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", relative)
+	t.Chdir(checkout)
+	t.Setenv("PATH", ".")
 	if got := resolveCredentialHelperGH(); got != "" {
 		t.Fatalf("relative credential helper was selected: %q", got)
 	}

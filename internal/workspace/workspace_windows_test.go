@@ -3,11 +3,107 @@ package workspace
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
 )
+
+func TestCanonicalPathResolvesNestedJunctionsWindows(t *testing.T) {
+	root := t.TempDir()
+	release := filepath.Join(root, "releases", "v1")
+	bin := filepath.Join(release, "bin")
+	for _, dir := range []string{bin, filepath.Join(release, "sibling")} {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	file := filepath.Join(bin, "codex.exe")
+	if err := os.WriteFile(file, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	current, visible := filepath.Join(root, "current"), filepath.Join(root, "visible")
+	for _, link := range []struct{ path, target string }{
+		{current, release},
+		{visible, filepath.Join(current, "bin")},
+	} {
+		if output, err := exec.Command("cmd.exe", "/c", "mklink", "/J", link.path, link.target).CombinedOutput(); err != nil {
+			t.Fatalf("create junction %q -> %q: %v: %s", link.path, link.target, err, output)
+		}
+	}
+	for _, test := range []struct{ path, want string }{
+		{filepath.Join(visible, "codex.exe"), file},
+		{visible + `\..\sibling`, filepath.Join(release, "sibling")},
+	} {
+		want, err := filepath.EvalSymlinks(test.want)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, err := CanonicalPath(test.path); err != nil || got != want {
+			t.Fatalf("CanonicalPath(%q)=%q, %v; want %q", test.path, got, err, want)
+		}
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(cwd) })
+	if err := os.Chdir(visible); err != nil {
+		t.Fatal(err)
+	}
+	want, err := filepath.EvalSymlinks(filepath.Join(release, "sibling"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := CanonicalPath(`..\sibling`); err != nil || got != want {
+		t.Fatalf("relative parent through junction=%q, %v; want %q", got, err, want)
+	}
+	rootRelative := strings.TrimPrefix(visible+`\..\sibling`, filepath.VolumeName(visible))
+	if got, err := CanonicalPath(rootRelative); err != nil || got != want {
+		t.Fatalf("drive-root parent through junction=%q, %v; want %q", got, err, want)
+	}
+	if _, err := CanonicalPath(filepath.VolumeName(visible) + `sibling`); err == nil || !strings.Contains(err.Error(), "drive-relative") {
+		t.Fatalf("drive-relative path accepted: %v", err)
+	}
+	if _, err := CanonicalPath(visible + `\..\missing`); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing target after junction accepted: %v", err)
+	}
+	if _, err := CanonicalPath(filepath.Join(visible, "codex.exe") + `\..`); err == nil {
+		t.Fatal("file parent component accepted")
+	}
+}
+
+func TestWindowsPathFromHandlePreservesVolumeGUID(t *testing.T) {
+	for _, test := range []struct{ path, want string }{
+		{`\\?\C:\tools\git.exe`, `C:\tools\git.exe`},
+		{`\\?\UNC\server\share\git.exe`, `\\server\share\git.exe`},
+		{`\\?\Volume{12345678-1234-1234-1234-123456789abc}\git.exe`, `\\?\Volume{12345678-1234-1234-1234-123456789abc}\git.exe`},
+	} {
+		if got := windowsPathFromHandle(test.path); got != test.want || !filepath.IsAbs(got) {
+			t.Errorf("windowsPathFromHandle(%q) = %q, want absolute %q", test.path, got, test.want)
+		}
+	}
+}
+
+func TestWithinWindowsUsesCanonicalComponentCase(t *testing.T) {
+	for _, test := range []struct {
+		root, name string
+		want       bool
+	}{
+		{`C:\case\Tool`, `C:\case\Tool\git.exe`, true},
+		{`C:\case\Tool`, `C:\case\tool\git.exe`, false},
+		{`C:\case\Tool`, `C:\case\Toolbox\git.exe`, false},
+		{`C:\`, `C:\case\Tool`, true},
+		{`\\Server\Share\Tool`, `\\server\share\Tool\git.exe`, true},
+		{`\\Server\Share\Tool`, `\\server\share\tool\git.exe`, false},
+		{`\\?\Volume{12345678-1234-1234-1234-123456789abc}\Tool`, `\\?\Volume{12345678-1234-1234-1234-123456789abc}\Tool\git.exe`, true},
+	} {
+		if got := Within(test.root, test.name); got != test.want {
+			t.Errorf("Within(%q, %q) = %t, want %t", test.root, test.name, got, test.want)
+		}
+	}
+}
 
 func TestWindowsSourcePaths(t *testing.T) {
 	for _, test := range []struct {

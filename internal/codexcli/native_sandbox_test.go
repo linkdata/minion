@@ -51,6 +51,12 @@ func TestNativeCodexSandboxEnforcement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if runtime.GOOS == "darwin" {
+		executable, err = filepath.EvalSymlinks(executable)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 	allowedFile := filepath.Join(workspace, "allowed.txt")
 	gitDir := filepath.Join(workspace, ".git")
 	if err := os.Mkdir(gitDir, 0o700); err != nil {

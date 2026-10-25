@@ -256,6 +256,7 @@ func testConfig(t *testing.T) config.Config {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	urls := map[string]string{
 		"review":         "https://github.com/example/skills/tree/main/skills/review",
 		"fix":            "https://github.com/example/skills/tree/main/skills/fix",

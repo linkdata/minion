@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -74,6 +75,9 @@ func TestRunnerSeparatesMainAndCriticSkills(t *testing.T) {
 		t.Run(main, func(t *testing.T) {
 			home := t.TempDir()
 			t.Setenv("HOME", home)
+			if runtime.GOOS == "windows" {
+				t.Setenv("USERPROFILE", home)
+			}
 			mainRoot, criticRoot, critic := ".agents", ".claude", "claude"
 			if main == "claude" {
 				mainRoot, criticRoot, critic = ".claude", ".agents", "codex"

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"syscall"
@@ -67,6 +68,9 @@ func TestSupportedGitVersion(t *testing.T) {
 }
 
 func TestCheckGitUsesSyntheticPrivateOfflinePaths(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell fixture is unavailable on native Windows; TestCheckGitNativeWindows covers readiness")
+	}
 	realGit, err := aicli.AbsoluteExecutable("git")
 	if err != nil {
 		t.Fatal(err)

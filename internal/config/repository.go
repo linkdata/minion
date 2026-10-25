@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/linkdata/minion/internal/workspace"
 )
 
 // AddRepository preserves existing settings and atomically appends a repository.
@@ -18,7 +20,7 @@ func AddRepository(path string, repo Repository) (added Repository, err error) {
 	if err != nil {
 		return Repository{}, err
 	}
-	target, err := filepath.EvalSymlinks(abs)
+	target, err := workspace.CanonicalPath(abs)
 	if err != nil {
 		return Repository{}, err
 	}

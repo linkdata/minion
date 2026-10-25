@@ -559,6 +559,10 @@ func TestChildEnvironmentIsolatesCodexSessionButKeepsAuthentication(t *testing.T
 
 func TestWindowsChildEnvironmentNormalizesNamesAndPath(t *testing.T) {
 	safe, writable := t.TempDir(), t.TempDir()
+	canonicalSafe, err := filepath.EvalSymlinks(safe)
+	if err != nil {
+		t.Fatal(err)
+	}
 	env := childEnvironmentForOS("windows", []string{
 		"Path=" + safe + string(os.PathListSeparator) + writable,
 		"pAtH=" + safe,
@@ -566,7 +570,7 @@ func TestWindowsChildEnvironmentNormalizesNamesAndPath(t *testing.T) {
 		"LocalAppData=/operator/local", "SystemRoot=/windows", "GH_TOKEN=private",
 	}, writable, writable, "/selected", false, writable)
 	joined := strings.Join(env, "\n")
-	for _, required := range []string{"PATH=" + safe, "CODEX_HOME=/selected", "USERPROFILE=/operator", "APPDATA=/operator/appdata", "LOCALAPPDATA=/operator/local", "SYSTEMROOT=/windows"} {
+	for _, required := range []string{"PATH=" + canonicalSafe, "CODEX_HOME=/selected", "USERPROFILE=/operator", "APPDATA=/operator/appdata", "LOCALAPPDATA=/operator/local", "SYSTEMROOT=/windows"} {
 		if !strings.Contains(joined, required) {
 			t.Fatalf("missing Windows environment %q in %s", required, joined)
 		}

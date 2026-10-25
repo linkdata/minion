@@ -353,6 +353,10 @@ func (index *OfflineIndex) caseRenamedPaths(ctx context.Context) ([]byte, error)
 // Ignored directories are skipped unless they contain supplied tracked files.
 // shortcut: live writers can race these checks; isolate and quiesce executors in #96.
 func (index *OfflineIndex) checkControlFiles(ctx context.Context) error {
+	return index.checkControlFilesWithLimit(ctx, workspace.MaxEntries)
+}
+
+func (index *OfflineIndex) checkControlFilesWithLimit(ctx context.Context, limit int) error {
 	trackedDirs := map[string]bool{}
 	trackedChildren := map[string][]string{}
 	for name := range index.tracked {
@@ -490,7 +494,7 @@ func (index *OfflineIndex) checkControlFiles(ctx context.Context) error {
 					}
 					for _, entry := range batch {
 						entries++
-						if entries > workspace.MaxEntries {
+						if entries > limit {
 							return errors.New("fix directory scan exceeds entry limit")
 						}
 						if entry.Name() == ".git" && dir != "." && !trackedDirs[dir] {

@@ -177,8 +177,15 @@ func TestExecuteLimitCausesAndInvalidIncompleteResultsAreTerminal(t *testing.T) 
 }
 
 func TestPrepareFixClassifiesUnsupportedLayoutBeforeBranchOrModels(t *testing.T) {
-	files := []workspace.File{{Path: "README", Mode: workspace.Regular}, {Path: "readme", Mode: workspace.Regular}}
-	gitFixtureRemote(t, files...)
+	_, _, remote := gitFixtureRemote(t, workspace.File{Path: "README", Mode: workspace.Regular})
+	source := filepath.Join(filepath.Dir(remote), "source")
+	blob := strings.TrimSpace(modelGit(t, source, "rev-parse", "HEAD:README"))
+	modelGit(t, source, "-c", "core.ignoreCase=false", "update-index", "--add", "--cacheinfo", "100644,"+blob+",readme")
+	modelGit(t, source, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "case collision")
+	if names := modelGit(t, source, "ls-tree", "--name-only", "HEAD"); string(names) != "README\nreadme\n" {
+		t.Fatalf("unsupported source fixture lost its case collision: %q", names)
+	}
+	modelGit(t, source, "push", remote, "HEAD:refs/heads/main")
 	git, err := exec.LookPath("git")
 	if err != nil {
 		t.Fatal(err)

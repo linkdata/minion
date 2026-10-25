@@ -281,14 +281,21 @@ func CanonicalPath(root string) (string, error) {
 		return "", errors.New("path is required")
 	}
 	if !filepath.IsAbs(root) {
+		if runtime.GOOS == "windows" && filepath.VolumeName(root) != "" {
+			return "", fmt.Errorf("resolve path: drive-relative path %q is unsupported", root)
+		}
 		cwd, err := os.Getwd()
 		if err != nil {
 			return "", fmt.Errorf("resolve path: %w", err)
 		}
-		// Preserve ".." until EvalSymlinks resolves each component in order.
-		root = cwd + string(os.PathSeparator) + root
+		// Preserve ".." until canonicalPath resolves each component in order.
+		if runtime.GOOS == "windows" && os.IsPathSeparator(root[0]) {
+			root = filepath.VolumeName(cwd) + root
+		} else {
+			root = cwd + string(os.PathSeparator) + root
+		}
 	}
-	root, err := filepath.EvalSymlinks(root)
+	root, err := canonicalPath(root)
 	if err != nil {
 		return "", fmt.Errorf("resolve path: %w", err)
 	}
@@ -296,8 +303,21 @@ func CanonicalPath(root string) (string, error) {
 }
 
 // Within compares canonical absolute paths; callers resolve symlinks first.
+// On Windows, canonical component spelling preserves case-sensitive directory distinctions.
 // On macOS, existing ancestor identity also catches case-insensitive aliases and missing suffixes.
 func Within(root, name string) bool {
+	if runtime.GOOS == "windows" {
+		rootVolume, nameVolume := filepath.VolumeName(root), filepath.VolumeName(name)
+		if rootVolume == "" || !strings.EqualFold(rootVolume, nameVolume) || !filepath.IsAbs(root) || !filepath.IsAbs(name) {
+			return false
+		}
+		rootPath := strings.TrimRight(filepath.FromSlash(root[len(rootVolume):]), `\`)
+		namePath := filepath.FromSlash(name[len(nameVolume):])
+		if rootPath == "" {
+			return namePath == "" || strings.HasPrefix(namePath, `\`)
+		}
+		return namePath == rootPath || strings.HasPrefix(namePath, rootPath+`\`)
+	}
 	rel, err := filepath.Rel(root, name)
 	if err == nil && filepath.IsLocal(rel) {
 		return true

@@ -199,6 +199,10 @@ func (r *Repository) Verify(ctx context.Context) error {
 }
 
 func repositoryDigest(ctx context.Context, dir string) (sum [sha256.Size]byte, err error) {
+	return repositoryDigestWithLimit(ctx, dir, workspace.MaxEntries)
+}
+
+func repositoryDigestWithLimit(ctx context.Context, dir string, limit int) (sum [sha256.Size]byte, err error) {
 	hash := sha256.New()
 	type entry struct{ parent, name string }
 	pending, count, total := []entry{{name: dir}}, 1, 0
@@ -236,7 +240,7 @@ func repositoryDigest(ctx context.Context, dir string) (sum [sha256.Size]byte, e
 						return err
 					}
 					count += len(batch)
-					if count > workspace.MaxEntries {
+					if count > limit {
 						return errors.New("repository metadata exceeds entry limit")
 					}
 					for _, entry := range batch {

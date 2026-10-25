@@ -547,6 +547,9 @@ func TestFixIndexRejectsSelfIgnoringToolCachesUntilRemoved(t *testing.T) {
 
 func TestFixIndexBoundsActualControlScanBeforeStaging(t *testing.T) {
 	index, source := offlineIndexFixture(t, []workspace.File{{Path: ".gitignore", Mode: workspace.Regular, Data: []byte("*.cache\n")}})
+	marker := filepath.Join(t.TempDir(), "add-ran")
+	script := "#!/bin/sh\nfor argument in \"$@\"; do\n if [ \"$argument\" = add ]; then touch " + shellQuote(marker) + "; fi\ndone\nexec " + shellQuote(index.binary) + " \"$@\"\n"
+	index.binary = filepath.Join(fakeOnPath(t, "git-proxy", script), "git-proxy")
 	// The tracked ignore file and intended change bring this to exactly 100000.
 	for i := 0; i < workspace.MaxEntries-2; i++ {
 		if err := os.WriteFile(filepath.Join(source, fmt.Sprintf("entry-%06d.cache", i)), nil, 0600); err != nil {
@@ -554,9 +557,6 @@ func TestFixIndexBoundsActualControlScanBeforeStaging(t *testing.T) {
 		}
 	}
 	writeIndexFixture(t, source, "fix.txt", []byte("reviewed"))
-	marker := filepath.Join(t.TempDir(), "add-ran")
-	script := "#!/bin/sh\nfor argument in \"$@\"; do\n if [ \"$argument\" = add ]; then touch " + shellQuote(marker) + "; fi\ndone\nexec " + shellQuote(index.binary) + " \"$@\"\n"
-	index.binary = filepath.Join(fakeOnPath(t, "git-proxy", script), "git-proxy")
 	changes, err := index.Changes(context.Background())
 	want := []workspace.Change{{Path: "fix.txt", Mode: workspace.Regular, Data: []byte("reviewed")}}
 	if err != nil || !reflect.DeepEqual(changes, want) {
@@ -679,28 +679,28 @@ func TestParseIndexChangesRejectsMalformedRecords(t *testing.T) {
 }
 
 func TestFixIndexRejectsTrackedGrowthBeforeHashing(t *testing.T) {
-	for _, kind := range []string{"sparse huge file", "aggregate growth"} {
+	for _, kind := range []string{"single file growth", "aggregate growth"} {
 		t.Run(kind, func(t *testing.T) {
 			index, source := offlineIndexFixture(t, []workspace.File{
 				{Path: "first", Mode: workspace.Regular, Data: []byte("one")},
 				{Path: "second", Mode: workspace.Regular, Data: []byte("two")},
 			})
-			if kind == "sparse huge file" {
-				if err := os.Truncate(filepath.Join(source, "first"), 1<<40); err != nil {
-					t.Fatal(err)
-				}
+			var data []byte
+			if kind == "single file growth" {
+				data = make([]byte, workspace.MaxChangeBytes+1)
+				writeIndexFixture(t, source, "first", data)
 			} else {
-				writeIndexFixture(t, source, "first", make([]byte, workspace.MaxChangeBytes/2+1))
-				writeIndexFixture(t, source, "second", make([]byte, workspace.MaxChangeBytes/2+1))
+				data = make([]byte, workspace.MaxChangeBytes/2+1)
+				writeIndexFixture(t, source, "first", data)
+				writeIndexFixture(t, source, "second", data)
 			}
-			marker := filepath.Join(t.TempDir(), "add-ran")
-			script := fmt.Sprintf("#!/bin/sh\nfor argument in \"$@\"; do\n if [ \"$argument\" = add ]; then touch %s; fi\ndone\nexec %s \"$@\"\n", shellQuote(marker), shellQuote(index.binary))
-			index.binary = filepath.Join(fakeOnPath(t, "git-proxy", script), "git-proxy")
 			if changes, err := index.Changes(context.Background()); err == nil || !strings.Contains(err.Error(), "tracked fix path") || !strings.Contains(err.Error(), "byte limit") {
 				t.Fatalf("tracked growth returned %+v, %v", changes, err)
 			}
-			if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("Git hashed oversized tracked data before refusal: %v", err)
+			_, err := index.run(t.Context(), 1024, nil, "cat-file", "-e", gitBlobID(data))
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) || exit.ExitCode() != 1 {
+				t.Fatalf("Git hashed oversized tracked data before refusal, or object lookup failed: %v", err)
 			}
 		})
 	}
@@ -963,7 +963,7 @@ func TestFixIndexSkipsUntrackedContentsOfIgnoredTrackedDirectory(t *testing.T) {
 	if _, err := index.run(t.Context(), 128, nil, "config", "core.ignoreCase", "true"); err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < workspace.MaxEntries; i++ {
+	for i := 0; i < 3; i++ {
 		f, err := os.Create(filepath.Join(source, "build", fmt.Sprint(i)))
 		if err != nil {
 			t.Fatal(err)
@@ -971,6 +971,9 @@ func TestFixIndexSkipsUntrackedContentsOfIgnoredTrackedDirectory(t *testing.T) {
 		if err := f.Close(); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if err := index.checkControlFilesWithLimit(t.Context(), 2); err != nil {
+		t.Fatalf("ignored contents counted against control scan limit: %v", err)
 	}
 	writeIndexFixture(t, source, "build/tracked/source", []byte("after"))
 	changes, err := index.Changes(t.Context())

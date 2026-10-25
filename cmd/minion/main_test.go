@@ -179,6 +179,10 @@ func TestRunRejectsUnsafeGrantBeforeStateOpen(t *testing.T) {
 				cfg.Commands = map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{source}}}
 				cfg.Repositories[0].Actions = []string{"review"}
 			}
+			grantPath, err = filepath.EvalSymlinks(grantPath)
+			if err != nil {
+				t.Fatal(err)
+			}
 			configPath := filepath.Join(t.TempDir(), "config.json")
 			data, err := json.Marshal(cfg)
 			if err != nil {
@@ -209,7 +213,7 @@ func TestRunRejectsUnsafeGrantBeforeStateOpen(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if code != 1 || !strings.Contains(string(logText), "work root overlaps model filesystem grant") || !strings.Contains(string(logText), grantPath) {
+			if code != 1 || !strings.Contains(string(logText), "work root overlaps model filesystem grant") || !strings.Contains(string(logText), fmt.Sprintf("%q", grantPath)) {
 				t.Fatalf("unsafe %s: exit=%d log=%q; want selected grant refusal", kind, code, logText)
 			}
 			for _, path := range []string{statePath, statePath + ".lock"} {

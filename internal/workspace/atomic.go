@@ -29,7 +29,13 @@ func WriteAtomic(path string, data []byte, extraDirs ...string) (resultErr error
 	if err := errors.Join(writeErr, file.Close()); err != nil {
 		return err
 	}
-	if err := os.Rename(temporary, path); err != nil {
+	root, err := os.OpenRoot(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	// Root.Rename requests POSIX replacement semantics on Windows for open prior records.
+	err = root.Rename(filepath.Base(temporary), filepath.Base(path))
+	if err := errors.Join(err, root.Close()); err != nil {
 		return err
 	}
 	temporary = ""

@@ -94,21 +94,24 @@ func TestResolvePathKeepsFilesystemSemanticsWithoutCreating(t *testing.T) {
 		t.Fatal(err)
 	}
 	relative, err := filepath.Rel(cwd, alias)
-	if err != nil {
+	if err != nil && filepath.VolumeName(cwd) == filepath.VolumeName(alias) {
 		t.Fatal(err)
 	}
-	for _, test := range []struct {
+	tests := []struct {
 		name, path, want string
 	}{
 		{"existing parent", alias + "/..", actual},
 		{"missing suffix", alias + "/../new/home", filepath.Join(actual, "new", "home")},
-		{"relative missing suffix", relative + "/../new/home", filepath.Join(actual, "new", "home")},
 		{"missing suffix dot", root + "/missing/./x", filepath.Join(root, "missing", "x")},
 		{"missing suffix trailing dot", root + "/missing/.", filepath.Join(root, "missing")},
 		{"missing suffix trailing separator", root + "/missing/", filepath.Join(root, "missing")},
 		{"dangling link", dangling + "/home", ""},
 		{"unknown parent", root + "/absent/../target", ""},
-	} {
+	}
+	if err == nil {
+		tests = append(tests, struct{ name, path, want string }{"relative missing suffix", relative + "/../new/home", filepath.Join(actual, "new", "home")})
+	}
+	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			got, err := ResolvePath(test.path)
 			if (err == nil) != (test.want != "") || got != test.want {

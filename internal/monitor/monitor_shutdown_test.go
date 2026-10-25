@@ -47,13 +47,16 @@ func TestRunOnceLabelsListErrorWhenIntervalSaveFails(t *testing.T) {
 	}
 	listErr := errors.New("list failed")
 	gh := &intervalErrorGitHub{fakeGitHub: &fakeGitHub{}, err: listErr, beforeReturn: func() {
-		if err := os.Rename(filepath.Dir(statePath), filepath.Join(t.TempDir(), "retained-state")); err != nil {
+		if err := os.Remove(statePath); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(statePath, 0700); err != nil {
 			t.Fatal(err)
 		}
 	}}
 	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: &fakeHandler{}, Now: func() time.Time { return now }}
 	_, err := m.RunOnce(context.Background(), store)
-	if !errors.Is(err, listErr) || !errors.Is(err, os.ErrNotExist) || !strings.Contains(err.Error(), "list example-owner/example-repo notifications: list failed") {
+	if !errors.Is(err, listErr) || !strings.Contains(err.Error(), "list example-owner/example-repo notifications: list failed") || !strings.Contains(err.Error(), statePath) {
 		t.Fatalf("list and save errors lost context: %v", err)
 	}
 }

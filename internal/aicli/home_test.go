@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -80,7 +81,7 @@ func TestHomePathErrorsIdentifySelectedPath(t *testing.T) {
 				t.Setenv("MINION_TEST_AI_HOME", path)
 			}
 			got, err := HomePath("MINION_TEST_AI_HOME", ".fixture")
-			if got != "" || !errors.Is(err, os.ErrNotExist) || !strings.Contains(err.Error(), path) {
+			if got != "" || !errors.Is(err, os.ErrNotExist) || !strings.Contains(err.Error(), strconv.Quote(path)) {
 				t.Fatalf("selected path or cause lost: home=%q error=%v", got, err)
 			}
 		})

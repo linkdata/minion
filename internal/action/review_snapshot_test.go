@@ -3,6 +3,7 @@ package action
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -117,7 +118,11 @@ func TestReviewSnapshotFreezesRawAuditArtifactsAndAbsence(t *testing.T) {
 		t.Fatal(err)
 	}
 	output, workRoot := t.TempDir(), t.TempDir()
-	rawMetadata := `{"target":"` + source + `","raw":"not normalized"}`
+	metadata, err := json.Marshal(map[string]string{"target": source, "raw": "not normalized"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawMetadata := string(metadata)
 	for name, data := range map[string]string{"REPORT.md": "reviewed report", "run-metadata.json": rawMetadata, "FINDINGS-DETAIL.md": ""} {
 		if err := os.WriteFile(filepath.Join(output, name), []byte(data), 0600); err != nil {
 			t.Fatal(err)
@@ -192,7 +197,11 @@ func TestReviewSnapshotCleansFailedFixCandidateMaterialization(t *testing.T) {
 	for _, stage := range []string{"source", "addition"} {
 		t.Run(stage, func(t *testing.T) {
 			job := testJob(command.Fix)
-			name := strings.TrimSuffix(strings.Repeat(strings.Repeat("a", 250)+"/", 14), "/")
+			segments := 14
+			if runtime.GOOS == "darwin" {
+				segments = 2
+			}
+			name := strings.TrimSuffix(strings.Repeat(strings.Repeat("a", 250)+"/", segments), "/")
 			if stage == "source" {
 				job.Source.Files = append(job.Source.Files, workspace.File{Path: name, Mode: workspace.Regular, Data: []byte("source")})
 				attachRepository(t, &job)

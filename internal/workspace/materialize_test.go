@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -178,7 +179,11 @@ func TestMaterializeChangesValidatesBeforeWriting(t *testing.T) {
 	}
 	const name = "literal\\backslash"
 	root := privateRoot(t)
-	if err := MaterializeChanges(root, []File{{Path: name, Mode: Regular}}, nil); err == nil || !strings.Contains(err.Error(), "unsafe fix source path") {
+	want := "unsafe fix source path"
+	if runtime.GOOS == "windows" {
+		want = "invalid source file"
+	}
+	if err := MaterializeChanges(root, []File{{Path: name, Mode: Regular}}, nil); err == nil || !strings.Contains(err.Error(), want) {
 		t.Fatalf("unsafe candidate baseline %q accepted: %v", name, err)
 	}
 	entries, err := os.ReadDir(root)

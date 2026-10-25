@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -129,6 +130,11 @@ func TestCommandInstalledUsesMainProvider(t *testing.T) {
 		t.Run(tt.main+"/"+tt.installedRoot, func(t *testing.T) {
 			home := t.TempDir()
 			t.Setenv("HOME", home)
+			if runtime.GOOS == "windows" {
+				t.Setenv("USERPROFILE", home)
+				t.Setenv("HOMEDRIVE", "")
+				t.Setenv("HOMEPATH", "")
+			}
 			dir := filepath.Join(home, tt.installedRoot, "skills", "ponytail-review")
 			if err := os.MkdirAll(dir, 0o700); err != nil {
 				t.Fatal(err)

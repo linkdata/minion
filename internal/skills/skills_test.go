@@ -93,6 +93,10 @@ func TestInstalledPathRequiresMatchingSafeInstallation(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			home := t.TempDir()
 			setTestHome(t, home)
+			canonicalHome, err := filepath.EvalSymlinks(home)
+			if err != nil {
+				t.Fatal(err)
+			}
 			if path, installed, err := tt.lookup(testURL); err != nil || installed || path != "" {
 				t.Fatalf("missing skill = %q, %t, %v", path, installed, err)
 			}
@@ -113,7 +117,7 @@ func TestInstalledPathRequiresMatchingSafeInstallation(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(dir, installMetadataName), metadata, 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if path, installed, err := tt.lookup(testURL); err != nil || !installed || path != filepath.Join(dir, "SKILL.md") {
+			if path, installed, err := tt.lookup(testURL); err != nil || !installed || path != filepath.Join(canonicalHome, tt.parent, "skills", "review", "SKILL.md") {
 				t.Fatalf("installed skill = %q, %t, %v", path, installed, err)
 			}
 			if _, installed, err := tt.lookup("https://github.com/other/skills/tree/main/skills/review"); err == nil || installed {
@@ -163,12 +167,16 @@ func TestInstalledPathForBuiltinAndUnsupportedProvider(t *testing.T) {
 
 func TestUserHomeResolvesSymlink(t *testing.T) {
 	realHome := t.TempDir()
+	canonicalHome, err := filepath.EvalSymlinks(realHome)
+	if err != nil {
+		t.Fatal(err)
+	}
 	linkedHome := filepath.Join(t.TempDir(), "home")
 	symlinkFixture(t, realHome, linkedHome)
 	setTestHome(t, linkedHome)
 	home, err := userHome()
-	if err != nil || home != realHome {
-		t.Fatalf("userHome() = %q, %v; want %q", home, err, realHome)
+	if err != nil || home != canonicalHome {
+		t.Fatalf("userHome() = %q, %v; want %q", home, err, canonicalHome)
 	}
 }
 

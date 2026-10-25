@@ -19,7 +19,7 @@ func ValidateModelGitAccess(ctx context.Context, provider string, systemReads []
 	if err != nil {
 		return fmt.Errorf("resolve Git for %s model commands: %w", provider, err)
 	}
-	target, err := filepath.EvalSymlinks(binary)
+	target, err := workspace.CanonicalPath(binary)
 	if err != nil {
 		return fmt.Errorf("resolve Git target for %s model commands: %w", provider, err)
 	}
@@ -52,7 +52,7 @@ func ValidateModelGitAccess(ctx context.Context, provider string, systemReads []
 		return fmt.Errorf("resolve Git helper path: %w", err)
 	}
 	// Model PATH resolves directory aliases, but leaves the executable name intact.
-	lookupDir, err := filepath.EvalSymlinks(filepath.Dir(binary))
+	lookupDir, err := workspace.CanonicalPath(filepath.Dir(binary))
 	if err != nil {
 		return fmt.Errorf("resolve Git lookup directory for %s model commands: %w", provider, err)
 	}

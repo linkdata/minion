@@ -461,6 +461,11 @@ func installActionTestSkills(t *testing.T, sources ...string) {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	if runtime.GOOS == "windows" {
+		t.Setenv("USERPROFILE", home)
+		t.Setenv("HOMEDRIVE", "")
+		t.Setenv("HOMEPATH", "")
+	}
 	writeActionTestSkills(t, home, ".agents", sources...)
 }
 

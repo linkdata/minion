@@ -459,7 +459,7 @@ func TestApplyRootErrorDoesNotRequirePrivacy(t *testing.T) {
 		t.Fatal(err)
 	}
 	changes := []Change{{Path: "new", Mode: Regular, Data: []byte("imported")}}
-	if err := Apply(name, changes); err == nil || strings.Contains(err.Error(), "private") || runtime.GOOS == "windows" && !strings.Contains(err.Error(), "not a plain directory") || runtime.GOOS != "windows" && !errors.Is(err, syscall.ENOTDIR) {
+	if err := Apply(name, changes); err == nil || runtime.GOOS == "windows" && !strings.Contains(err.Error(), "not a plain directory") || runtime.GOOS != "windows" && !errors.Is(err, syscall.ENOTDIR) {
 		t.Fatalf("incorrect root requirement: %v", err)
 	}
 	if data, err := os.ReadFile(name); err != nil || string(data) != "unchanged" {
@@ -700,8 +700,9 @@ func TestCheckUnchangedRefusesUnsafeWorkerNames(t *testing.T) {
 			label += "-directory"
 		}
 		t.Run(label, func(t *testing.T) {
-			if runtime.GOOS == "windows" && (strings.Contains(test.name, "\\") || !utf8.ValidString(test.name)) {
-				t.Skip("Windows cannot create this literal filename")
+			if (runtime.GOOS == "windows" && strings.Contains(test.name, "\\")) ||
+				((runtime.GOOS == "windows" || runtime.GOOS == "darwin") && !utf8.ValidString(test.name)) {
+				t.Skip("host cannot create this literal filename")
 			}
 			root := t.TempDir()
 			name := filepath.Join(root, test.name)

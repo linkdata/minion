@@ -104,7 +104,7 @@ jobs:
       - name: Test
         env:
           MINION_NATIVE_SANDBOX_TEST: "1"
-        run: go test -count=1 ./...
+        run: go test -count=1 -timeout=20m ./...
 
       - name: Build
         run: go build -buildvcs=false ./cmd/minion

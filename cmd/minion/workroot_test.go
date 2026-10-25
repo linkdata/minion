@@ -260,8 +260,8 @@ func TestWorkRootPreflightProtectsConfigurationAndCredentials(t *testing.T) {
 			}
 
 			if err := checkIsolation(cfg, configPath); !errors.Is(err, workroot.ErrUnsafe) || !strings.Contains(err.Error(), "private host path") ||
-				kind == "default gh home" && !strings.Contains(err.Error(), filepath.Join(root, "config", "gh")) ||
-				kind == "windows default gh home" && !strings.Contains(err.Error(), filepath.Join(root, "appdata", "GitHub CLI")) {
+				kind == "default gh home" && !strings.Contains(err.Error(), fmt.Sprintf("%q", filepath.Join(root, "config", "gh"))) ||
+				kind == "windows default gh home" && !strings.Contains(err.Error(), fmt.Sprintf("%q", filepath.Join(root, "appdata", "GitHub CLI"))) {
 				t.Fatalf("preflight accepted exposed %s: %v", kind, err)
 			}
 		})

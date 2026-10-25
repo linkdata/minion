@@ -18,7 +18,14 @@ func ExecutablePath(name string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.EvalSymlinks(binary)
+	resolved, err := workspace.CanonicalPath(binary)
+	if err != nil {
+		return "", err
+	}
+	if runtime.GOOS == "windows" && !strings.EqualFold(filepath.Ext(resolved), ".exe") {
+		return "", fmt.Errorf("%s needs a native .exe executable", name)
+	}
+	return resolved, nil
 }
 
 // AbsoluteExecutable resolves a PATH command without changing its launcher name.
@@ -38,7 +45,7 @@ func AbsoluteExecutable(name string) (string, error) {
 		return "", fmt.Errorf("%s binary must have an absolute path", name)
 	}
 	if runtime.GOOS == "windows" {
-		resolved, err := filepath.EvalSymlinks(binary)
+		resolved, err := workspace.CanonicalPath(binary)
 		if err != nil {
 			return "", err
 		}

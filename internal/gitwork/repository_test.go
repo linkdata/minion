@@ -620,7 +620,8 @@ func TestRepositoryVerifyBoundsMetadata(t *testing.T) {
 
 func TestRepositoryDigestEntryLimitCountsRoot(t *testing.T) {
 	dir := t.TempDir()
-	for i := 0; i < workspace.MaxEntries; i++ {
+	const limit = 4
+	for i := 0; i < limit; i++ {
 		f, err := os.Create(filepath.Join(dir, fmt.Sprint(i)))
 		if err != nil {
 			t.Fatal(err)
@@ -629,13 +630,13 @@ func TestRepositoryDigestEntryLimitCountsRoot(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := repositoryDigest(context.Background(), dir); err == nil || !strings.Contains(err.Error(), "repository metadata exceeds entry limit") {
+	if _, err := repositoryDigestWithLimit(context.Background(), dir, limit); err == nil || !strings.Contains(err.Error(), "repository metadata exceeds entry limit") {
 		t.Fatalf("wide metadata directory error=%v", err)
 	}
 	if err := os.Remove(filepath.Join(dir, "0")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := repositoryDigest(context.Background(), dir); err != nil {
+	if _, err := repositoryDigestWithLimit(context.Background(), dir, limit); err != nil {
 		t.Fatalf("exact metadata entry limit, including root: %v", err)
 	}
 }
