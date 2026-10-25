@@ -29,9 +29,15 @@ func NewSelectedRunner(runner Runner, selected WorkerSelection) (*Runner, error)
 	if err := selected.Main.Validate(); err != nil {
 		return nil, fmt.Errorf("worker main selection: %w", err)
 	}
+	if selected.Main.Model == "" || selected.Main.Provider == "codex" && selected.Main.Effort == "" {
+		return nil, errors.New("worker main selection requires a resolved model and Codex effort")
+	}
 	if selected.Critic != nil {
 		if err := selected.Critic.Validate(); err != nil {
 			return nil, fmt.Errorf("worker critic selection: %w", err)
+		}
+		if selected.Critic.Model == "" || selected.Critic.Provider == "codex" && selected.Critic.Effort == "" {
+			return nil, errors.New("worker critic selection requires a resolved model and Codex effort")
 		}
 		if len(selected.Critic.Skills) != 0 || selected.Critic.Provider == selected.Main.Provider {
 			return nil, errors.New("worker critic selection must use the other provider and only always-on skills")

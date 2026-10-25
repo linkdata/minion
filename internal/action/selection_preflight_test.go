@@ -24,7 +24,7 @@ func selectedPreflightRunner(t *testing.T, commands map[string]config.CommandMap
 	t.Helper()
 	runner, err := NewSelectedRunner(Runner{WorkRoot: t.TempDir()}, WorkerSelection{
 		Commands: commands,
-		Main:     RoleSettings{Provider: "codex"},
+		Main:     RoleSettings{Provider: "codex", Model: "main-1", Effort: "high"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -139,7 +139,7 @@ func TestPreflightSelectionRequiresAuditInCommandMapping(t *testing.T) {
 		Commands: map[string]config.CommandMapping{
 			"audit": {Action: string(command.SecurityAudit), Skills: []string{testReviewSkillURL}},
 		},
-		Main: RoleSettings{Provider: "codex", AlwaysOnSkills: []string{testAuditSkillURL}},
+		Main: RoleSettings{Provider: "codex", Model: "main-1", Effort: "high", AlwaysOnSkills: []string{testAuditSkillURL}},
 	})
 	if err != nil {
 		t.Fatal(err)
