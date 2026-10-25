@@ -142,6 +142,8 @@ func TestEmptySessionLookupRejectsModelActivity(t *testing.T) {
 		`{"type":"assistant"}` + "\n" + empty,
 		`{"type":"system","usage":{"input_tokens":1}}` + "\n" + empty,
 		`{"type":"system","modelUsage":{"main":{"inputTokens":0}}}` + "\n" + empty,
+		`{"type":"result","is_error":true,"result":"generated answer"}`,
+		`{"type":"result","is_error":true,"structured_output":{"answer":"generated answer"}}`,
 		`{"type":"result","is_error":true,"num_turns":0,"usage":{"input_tokens":1}}`,
 		`{"type":"result","is_error":true,"num_turns":0,"modelUsage":{"main":{"inputTokens":1}}}`,
 		`{"type":"result","is_error":false,"num_turns":0}`,
@@ -157,6 +159,7 @@ func TestFreshInitializationRejectsPaidOrMalformedTrailingEvent(t *testing.T) {
 		t.Fatal("rejected a control-only initialization")
 	}
 	for _, extra := range []string{
+		`{"type":"result","subtype":"success"}`,
 		`{"type":"result","num_turns":1}`,
 		`{"type":"result","usage":{"input_tokens":1}}`,
 		`{"type":"result","total_cost_usd":0.01}`,

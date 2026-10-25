@@ -232,6 +232,37 @@ func TestValidateRejectsMissingResolvedEffortConfig(t *testing.T) {
 	}
 }
 
+func TestValidateChecksResolvedModelEffortPair(t *testing.T) {
+	dir := t.TempDir()
+	page := `{"id":2,"result":{"data":[{"model":"fixture","isDefault":true,"defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high"}]}]}}`
+	script := strings.Replace(catalogueScriptFor(dir, page, ""), "#!/bin/sh\n", `#!/bin/sh
+if [ "$1" = app-server ]; then
+case " $* " in
+  *' model_reasoning_effort="high" '*)
+    case " $* " in *' model="fixture" '*) ;; *) printf '%s\n' 'invalid model/effort pair' >&2; exit 2 ;; esac ;;
+esac
+fi
+`, 1)
+	installFakeCodex(t, script)
+	if _, err := Validate(t.Context(), config.CodexConfig{}); err != nil {
+		t.Fatalf("resolved model/effort pair rejected: %v", err)
+	}
+}
+
+func TestValidateRejectsUnsupportedReadOnlySandboxConfig(t *testing.T) {
+	dir := t.TempDir()
+	page := `{"id":2,"result":{"data":[{"model":"fixture","isDefault":true,"defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high"}]}]}}`
+	script := strings.Replace(catalogueScriptFor(dir, page, ""), "#!/bin/sh\n", `#!/bin/sh
+if [ "$1" = app-server ]; then
+  case " $* " in *' sandbox_mode="read-only" '*) printf '%s\n' 'unsupported read-only sandbox' >&2; exit 2 ;; esac
+fi
+`, 1)
+	installFakeCodex(t, script)
+	if _, err := Validate(t.Context(), config.CodexConfig{}); err == nil || !strings.Contains(err.Error(), "writable=false") || !strings.Contains(err.Error(), "unsupported read-only sandbox") {
+		t.Fatalf("accepted unsupported read-only sandbox config: %v", err)
+	}
+}
+
 func TestValidateRejectsIgnoredUnknownConfigKey(t *testing.T) {
 	dir := t.TempDir()
 	page := `{"id":2,"result":{"data":[{"model":"fixture","isDefault":true,"defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high"}]}]}}`

@@ -193,15 +193,18 @@ func (e capabilityEvent) usedModel() bool {
 		e.Usage.CacheCreationInputTokens != 0 || e.Usage.CacheReadInputTokens != 0
 }
 
+func (e capabilityEvent) hasAnswer() bool {
+	return e.Result != "" || len(e.Structured) != 0 && !bytes.Equal(bytes.TrimSpace(e.Structured), []byte("null"))
+}
+
 func cleanFreshInitialization(data []byte) bool {
 	for _, line := range bytes.Split(data, []byte{'\n'}) {
 		if len(bytes.TrimSpace(line)) == 0 {
 			continue
 		}
 		var event capabilityEvent
-		if json.Unmarshal(line, &event) != nil || event.Type == "" || event.Type == "assistant" || event.usedModel() ||
-			event.Result != "" || len(event.Structured) != 0 && !bytes.Equal(bytes.TrimSpace(event.Structured), []byte("null")) ||
-			event.Type == "result" && event.IsError {
+		if json.Unmarshal(line, &event) != nil || event.Type == "" || event.Type == "assistant" || event.Type == "result" ||
+			event.usedModel() || event.hasAnswer() {
 			return false
 		}
 	}
@@ -215,7 +218,7 @@ func isEmptySessionLookup(data []byte) bool {
 			continue
 		}
 		var event capabilityEvent
-		if json.Unmarshal(line, &event) != nil || event.Type == "" || event.Type == "assistant" || event.usedModel() {
+		if json.Unmarshal(line, &event) != nil || event.Type == "" || event.Type == "assistant" || event.usedModel() || event.hasAnswer() {
 			return false
 		}
 		if event.Type == "result" {

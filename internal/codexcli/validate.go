@@ -110,16 +110,19 @@ func validateExecCapabilities(ctx context.Context, settings config.CodexConfig) 
 		return aicli.Probe(probeCtx, binary, "codex", args, dir, env, "", settings.APIKey)
 	}
 	// exec --help parses flags but does not load -c settings. App-server
-	// startup checks the resolved effort key under strict config with no request.
+	// startup checks resolved model, effort and both sandbox modes under strict
+	// config with no request.
 	if settings.ReasoningEffort != "" {
-		args := append(appServerArgs(dir), "-c", "model_reasoning_effort="+strconv.Quote(settings.ReasoningEffort))
-		if _, probeErr := probe(args); probeErr != nil {
-			return fmt.Errorf("Codex selected effort config capability check: %w", probeErr) //nolint:staticcheck // -- Codex is a proper noun.
-		}
-		const unknownKey = "minion_unsupported_capability_probe"
-		invalid := append(append([]string(nil), args...), "-c", unknownKey+"=true")
-		if _, probeErr := probe(invalid); !capabilityRejected(probeErr, unknownKey) {
-			return fmt.Errorf("Codex selected effort config capability check did not reject an unknown key: %v", probeErr) //nolint:staticcheck // -- Codex is a proper noun.
+		for _, writable := range []bool{false, true} {
+			args := append(appServerArgs(dir, writable), "-c", "model="+strconv.Quote(settings.Model), "-c", "model_reasoning_effort="+strconv.Quote(settings.ReasoningEffort))
+			if _, probeErr := probe(args); probeErr != nil {
+				return fmt.Errorf("Codex selected effort config capability check (writable=%t): %w", writable, probeErr) //nolint:staticcheck // -- Codex is a proper noun.
+			}
+			const unknownKey = "minion_unsupported_capability_probe"
+			invalid := append(append([]string(nil), args...), "-c", unknownKey+"=true")
+			if _, probeErr := probe(invalid); !capabilityRejected(probeErr, unknownKey) {
+				return fmt.Errorf("Codex selected effort config capability check (writable=%t) did not reject an unknown key: %v", writable, probeErr) //nolint:staticcheck // -- Codex is a proper noun.
+			}
 		}
 	}
 	for _, command := range []struct {
@@ -176,10 +179,10 @@ func disabledFeatureArgs() []string {
 	return args
 }
 
-func appServerArgs(dir string) []string {
+func appServerArgs(dir string, writable bool) []string {
 	args := append([]string{"app-server", "--strict-config", "--listen", "stdio://", "-c", `model_provider="openai"`}, disabledFeatureArgs()...)
 	args = append(args, execConfigArgs()...)
-	return append(args, sandboxArgs(dir, "", true)...)
+	return append(args, sandboxArgs(dir, "", writable)...)
 }
 
 func listModels(ctx context.Context, settings config.CodexConfig) (models []modelInfo, err error) {
@@ -203,7 +206,7 @@ func listModels(ctx context.Context, settings config.CodexConfig) (models []mode
 	// app-server has no --ignore-user-config flag. Select exec's built-in
 	// provider explicitly and avoid repository config by using a temporary cwd.
 	// Startup validates writable sandbox config without starting an inference turn.
-	args := appServerArgs(dir)
+	args := appServerArgs(dir, true)
 	if settings.APIKey != "" {
 		args = append(args, "-c", `cli_auth_credentials_store="ephemeral"`, "-c", `forced_login_method="api"`)
 	}
