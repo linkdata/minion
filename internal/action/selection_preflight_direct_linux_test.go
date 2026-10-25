@@ -200,7 +200,7 @@ func TestSelectionPreflightDirectChildHelper(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer client.CloseIdleConnections()
-	if err := RunHTTPLoop(ctx, client, UnixExecutionBaseURL, "local", runner); err != nil && !(ctx.Err() != nil && errors.Is(err, context.Canceled)) {
+	if err := RunHTTPLoop(ctx, client, UnixExecutionBaseURL, "local", runner); err != nil {
 		t.Fatal(err)
 	}
 }

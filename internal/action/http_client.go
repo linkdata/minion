@@ -108,7 +108,8 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	}
 	var assignment httpAssignment
 	if err := transport.post(ctx, "next", pull, httpJobBytes, &assignment, httpBinding{}, 0); err != nil {
-		if status != nil && ctx.Err() == nil && errors.Is(err, context.Canceled) && !errors.Is(err, monitor.ErrExecutionOutcomeUnknown) {
+		if status != nil && errors.Is(err, context.Canceled) &&
+			(ctx.Err() != nil || !errors.Is(err, monitor.ErrExecutionOutcomeUnknown)) {
 			*status = httpRunIdleShutdown
 		}
 		return err

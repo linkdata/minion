@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
@@ -29,6 +30,42 @@ func TestRunHTTPLoopStopsOnInvalidNext(t *testing.T) {
 	err := RunHTTPLoop(t.Context(), server.Client(), server.URL, "local", &Runner{runModel: forbidModel(t)})
 	if !errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || pulls.Load() != 1 {
 		t.Fatalf("invalid next response retried or became shutdown: pulls=%d error=%v", pulls.Load(), err)
+	}
+}
+
+func TestRunHTTPLoopCanceledHeldPullIsCleanShutdown(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/next" {
+			t.Errorf("unexpected request: %s", r.URL.Path)
+		}
+		close(entered)
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	defer func() { close(release); server.Close() }()
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- RunHTTPLoop(ctx, server.Client(), server.URL, "local", &Runner{runModel: forbidModel(t)})
+	}()
+	select {
+	case <-entered:
+	case <-ctx.Done():
+		t.Fatalf("worker did not hold a pull: %v", ctx.Err())
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("canceled idle pull became a worker failure: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("canceled idle pull did not return")
 	}
 }
 
