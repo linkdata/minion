@@ -113,6 +113,62 @@ func TestLocalWorkerAwaitHeldPullRejectsCanceledRequest(t *testing.T) {
 	}
 }
 
+func TestLocalWorkerAwaitHeldPullTracksRealRequestCancellation(t *testing.T) {
+	w := localWorkerTestStart(t, "hold")
+	client, err := NewUnixExecutionClient(w.endpoint.SocketPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.CloseIdleConnections()
+	requestCtx, cancelRequest := context.WithCancel(t.Context())
+	defer cancelRequest()
+	body, err := httpEncode(httpPull{Version: ProtocolVersion, ExecutorID: "local"}, httpControlBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := http.NewRequestWithContext(requestCtx, http.MethodPost, UnixExecutionBaseURL+"/next", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	requestDone := make(chan error, 1)
+	go func() {
+		response, err := client.Do(request)
+		if response != nil {
+			_ = response.Body.Close()
+		}
+		requestDone <- err
+	}()
+	localWorkerTestPull(t, w)
+	w.executor.mu.Lock()
+	pullDone := w.executor.pullDone
+	w.executor.mu.Unlock()
+	if pullDone == nil {
+		t.Fatal("held pull has no request cancellation channel")
+	}
+	cancelRequest()
+	deadline, stop := context.WithTimeout(t.Context(), 10*time.Second)
+	defer stop()
+	select {
+	case <-pullDone:
+	case <-deadline.Done():
+		t.Fatal("held pull did not track request cancellation")
+	}
+	select {
+	case <-requestDone:
+	case <-deadline.Done():
+		t.Fatal("canceled pull client did not finish")
+	}
+	readyCtx, stopReady := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer stopReady()
+	if err := w.awaitHeldPull(readyCtx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("canceled real pull appeared ready: %v", err)
+	}
+	if w.cmd.ProcessState == nil {
+		t.Fatal("canceled readiness check left the direct child live")
+	}
+}
+
 func TestLocalWorkerAwaitHeldPullReportsChildExit(t *testing.T) {
 	w := localWorkerTestStart(t, "precrash")
 	if err := w.cmd.Process.Signal(syscall.SIGUSR1); err != nil {
