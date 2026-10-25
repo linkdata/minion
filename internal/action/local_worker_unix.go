@@ -25,11 +25,21 @@ type localWorker struct {
 	exited    chan struct{}
 	childMu   sync.Mutex
 	stopSent  atomic.Bool
+	unclean   atomic.Bool
+	reuse     atomic.Int32
 	stderr    *bounded.Tail
 	waitErr   error
 	closeOnce sync.Once
 	closeErr  error
 }
+
+const (
+	workerReusable int32 = iota
+	workerRunning
+	workerNeedsPull
+	workerCheckingPull
+	workerRetired
+)
 
 // startLocalWorker owns the direct child's context and command. configure sets
 // environment and stdout; stderr is captured for a safe startup diagnostic.
@@ -87,12 +97,24 @@ func startLocalWorker(runtimeDir, executorID, path string, args []string, config
 }
 
 func (w *localWorker) Execute(ctx context.Context, job Job, sink Checkpoints) (Result, error) {
+	if !w.reuse.CompareAndSwap(workerReusable, workerRunning) {
+		return Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head}, errors.New("local worker is busy or not ready for another assignment")
+	}
 	var state httpExecutionState
 	result, err := w.executor.execute(ctx, job, sink, &state)
 	w.executor.mu.Lock()
 	closed, unavailable := w.executor.closed, w.executor.unavailable
 	w.executor.mu.Unlock()
-	if closed || unavailable || state.admitted && (ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded)) {
+	cleanupFailed := false
+	// RunHTTP sends the outcome after Runner cleanup; a reported failure retires this worker.
+	for _, diagnostic := range result.Diagnostics {
+		cleanupFailed = cleanupFailed || diagnostic.Code == "cleanup_failed"
+	}
+	if cleanupFailed {
+		w.unclean.Store(true)
+	}
+	if closed || unavailable || cleanupFailed || state.admitted && (ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded)) {
+		w.reuse.Store(workerRetired)
 		closeErr := w.Close()
 		// A received outcome remains the Job result; Close reports lifecycle errors separately.
 		if !state.outcome {
@@ -101,8 +123,41 @@ func (w *localWorker) Execute(ctx context.Context, job Job, sink Checkpoints) (R
 				err = errors.Join(err, errors.New("local worker stopped before a final outcome"))
 			}
 		}
+	} else if state.outcome {
+		w.reuse.Store(workerNeedsPull)
+	} else {
+		w.reuse.Store(workerReusable)
 	}
 	return result, err
+}
+
+// awaitReusable releases capacity only after the completed attempt's next pull
+// is held by the same live child at the original endpoint.
+func (w *localWorker) awaitReusable(ctx context.Context) (reuseErr error) {
+	if !w.reuse.CompareAndSwap(workerNeedsPull, workerCheckingPull) {
+		if w.unclean.Load() {
+			return errors.New("local worker attempt cleanup failed; capacity is unavailable")
+		}
+		return errors.New("local worker has no completed attempt awaiting reuse")
+	}
+	defer func() {
+		if reuseErr != nil {
+			w.reuse.Store(workerRetired)
+			reuseErr = errors.Join(reuseErr, w.Close())
+		} else {
+			w.reuse.Store(workerReusable)
+		}
+	}()
+	if err := w.endpoint.checkIdentity(); err != nil {
+		return fmt.Errorf("local worker reuse endpoint: %w", err)
+	}
+	if err := w.awaitHeldPull(ctx); err != nil {
+		return fmt.Errorf("local worker reuse pull: %w", err)
+	}
+	if err := w.endpoint.checkIdentity(); err != nil {
+		return fmt.Errorf("local worker reuse endpoint: %w", err)
+	}
+	return nil
 }
 
 func (w *localWorker) startupDiagnostic() string {

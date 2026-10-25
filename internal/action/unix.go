@@ -133,6 +133,16 @@ func (e *UnixEndpoint) Close() error {
 }
 
 func (e *UnixEndpoint) removeSocket() error {
+	if err := e.checkIdentity(); err != nil {
+		return err
+	}
+	if err := os.Remove(e.socketPath); err != nil {
+		return fmt.Errorf("remove execution socket %q: %w", e.socketPath, err)
+	}
+	return nil
+}
+
+func (e *UnixEndpoint) checkIdentity() error {
 	directory, err := unixRuntimeDirectory(filepath.Dir(e.socketPath))
 	if err != nil {
 		return fmt.Errorf("execution socket %q retained: %w", e.socketPath, err)
@@ -146,9 +156,6 @@ func (e *UnixEndpoint) removeSocket() error {
 	}
 	if !os.SameFile(e.socket, socket) {
 		return fmt.Errorf("execution socket %q retained: socket identity changed", e.socketPath)
-	}
-	if err := os.Remove(e.socketPath); err != nil {
-		return fmt.Errorf("remove execution socket %q: %w", e.socketPath, err)
 	}
 	return nil
 }

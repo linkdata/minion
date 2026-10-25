@@ -75,6 +75,17 @@ func localWorkerTestPull(t *testing.T, w *localWorker) {
 	}
 }
 
+func localWorkerTestReport(t *testing.T, w *localWorker) string {
+	t.Helper()
+	for i := len(w.cmd.Env) - 1; i >= 0; i-- {
+		if report, ok := strings.CutPrefix(w.cmd.Env[i], "MINION_LOCAL_WORKER_REPORT="); ok {
+			return report
+		}
+	}
+	t.Fatal("local worker report path is missing")
+	return ""
+}
+
 func TestLocalWorkerIdleRunHTTPClose(t *testing.T) {
 	w := localWorkerTestStart(t, "run-http-idle")
 	localWorkerTestPull(t, w)
@@ -297,6 +308,9 @@ func TestLocalWorkerKnownOutcomeSurvivesChildExit(t *testing.T) {
 	}
 	if w.waitErr == nil || w.cmd.ProcessState == nil {
 		t.Fatalf("nonzero direct child exit was not observed: wait=%v state=%v", w.waitErr, w.cmd.ProcessState)
+	}
+	if err := w.awaitReusable(t.Context()); err == nil || !strings.Contains(err.Error(), "exited before holding a pull") {
+		t.Fatalf("crashed child gained a reuse witness: %v", err)
 	}
 	var exitErr *exec.ExitError
 	if err := w.Close(); !errors.As(err, &exitErr) || exitErr.ExitCode() != 7 || !strings.Contains(err.Error(), "local worker exited") {
@@ -693,6 +707,161 @@ func TestLocalWorkerKnownOutcomeKeepsEndpointCloseErrorSeparate(t *testing.T) {
 	}
 }
 
+func TestLocalWorkerReuseRequiresFreshPull(t *testing.T) {
+	w := localWorkerTestStart(t, "reuse")
+	report := localWorkerTestReport(t, w)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	if err := w.awaitHeldPull(ctx); err != nil {
+		t.Fatal(err)
+	}
+	first := testJob(command.Comment)
+	if err := workspace.WriteAtomic(report+".unrelated", []byte("keep")); err != nil {
+		t.Fatal(err)
+	}
+	firstDone := make(chan httpServerTestResult, 1)
+	go func() {
+		result, err := w.Execute(ctx, first, runnerExecutionCheckpoints{})
+		firstDone <- httpServerTestResult{result, err}
+	}()
+	unixWorkerReport(t, ctx, report, ".cleanup-start")
+	if rejected, err := w.Execute(ctx, first, runnerExecutionCheckpoints{}); err == nil || !strings.Contains(err.Error(), "busy") || !rejected.matchesJob(first) {
+		t.Fatalf("assignment entered during cleanup: result=%+v error=%v", rejected, err)
+	}
+	if err := workspace.WriteAtomic(report+".cleanup-go", []byte("go")); err != nil {
+		t.Fatal(err)
+	}
+	var result Result
+	var err error
+	select {
+	case got := <-firstDone:
+		result, err = got.result, got.err
+	case <-ctx.Done():
+		t.Fatalf("first assignment did not finish cleanup: %v", ctx.Err())
+	}
+	if err != nil || result.Answer != "known" || !result.matchesJob(first) {
+		t.Fatalf("first outcome: result=%+v error=%v", result, err)
+	}
+	if _, err := os.Stat(report + ".attempt"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("attempt workspace survived accepted outcome: %v", err)
+	}
+	if data, err := os.ReadFile(report + ".unrelated"); err != nil || string(data) != "keep" {
+		t.Fatalf("unrelated path changed during cleanup: data=%q error=%v", data, err)
+	}
+	if got := unixWorkerReport(t, ctx, report, ".first"); got != strconv.Itoa(w.cmd.Process.Pid) {
+		t.Fatalf("first assignment used another child: %q", got)
+	}
+	second := first
+	second.Identity.JobID = "second-job"
+	second.Identity.AttemptID = "second-attempt"
+	if rejected, err := w.Execute(ctx, second, runnerExecutionCheckpoints{}); err == nil || !strings.Contains(err.Error(), "not ready") || !rejected.matchesJob(second) {
+		t.Fatalf("second assignment entered before reuse proof: result=%+v error=%v", rejected, err)
+	}
+	ready := make(chan error, 1)
+	go func() { ready <- w.awaitReusable(ctx) }()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for w.reuse.Load() != workerCheckingPull {
+		select {
+		case err := <-ready:
+			t.Fatalf("reuse witness returned before a fresh pull: %v", err)
+		case <-ctx.Done():
+			t.Fatalf("reuse witness did not start: %v", ctx.Err())
+		case <-ticker.C:
+		}
+	}
+	select {
+	case err := <-ready:
+		t.Fatalf("reuse witness returned without the next pull: %v", err)
+	default:
+	}
+	if err := workspace.WriteAtomic(report+".resume", []byte("go")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-ready:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-ctx.Done():
+		t.Fatalf("fresh pull did not release capacity: %v", ctx.Err())
+	}
+	result, err = w.Execute(ctx, second, runnerExecutionCheckpoints{})
+	if err != nil || result.Answer != "known" || !result.matchesJob(second) {
+		t.Fatalf("second outcome: result=%+v error=%v", result, err)
+	}
+	if got := unixWorkerReport(t, ctx, report, ".second"); got != strconv.Itoa(w.cmd.Process.Pid) {
+		t.Fatalf("second assignment used another child: %q", got)
+	}
+}
+
+func TestLocalWorkerCleanupFailureRetiresWithoutRemovingEvidence(t *testing.T) {
+	w := localWorkerTestStart(t, "cleanup-failed")
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	job := testJob(command.Comment)
+	result, err := w.Execute(ctx, job, runnerExecutionCheckpoints{})
+	if err != nil || result.Answer != "known" || !result.matchesJob(job) || len(result.Diagnostics) != 1 || result.Diagnostics[0].Code != "cleanup_failed" {
+		t.Fatalf("cleanup failure changed the accepted outcome: result=%+v error=%v", result, err)
+	}
+	if data, err := os.ReadFile(localWorkerTestReport(t, w) + ".leftover"); err != nil || string(data) != "retain" {
+		t.Fatalf("failed cleanup evidence was removed: data=%q error=%v", data, err)
+	}
+	if w.reuse.Load() != workerRetired || w.cmd.ProcessState == nil {
+		t.Fatalf("failed cleanup left reusable or live child: state=%d process=%v", w.reuse.Load(), w.cmd.ProcessState)
+	}
+	if err := w.awaitReusable(t.Context()); err == nil || !strings.Contains(err.Error(), "cleanup failed") {
+		t.Fatalf("failed cleanup gained a reuse witness or lost its diagnostic: %v", err)
+	}
+	if _, err := w.Execute(t.Context(), job, runnerExecutionCheckpoints{}); err == nil || !strings.Contains(err.Error(), "not ready") {
+		t.Fatalf("failed cleanup accepted another assignment: %v", err)
+	}
+}
+
+func TestLocalWorkerReuseRejectsEndpointReplacement(t *testing.T) {
+	w := localWorkerTestStart(t, "known-hold")
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	job := testJob(command.Comment)
+	result, err := w.Execute(ctx, job, runnerExecutionCheckpoints{})
+	if err != nil || result.Answer != "known" || !result.matchesJob(job) {
+		t.Fatalf("accepted outcome changed: result=%+v error=%v", result, err)
+	}
+	path := w.endpoint.SocketPath()
+	if err := os.Rename(path, path+".moved"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("replacement"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.awaitReusable(ctx); err == nil || !strings.Contains(err.Error(), "reuse endpoint") || !strings.Contains(err.Error(), "not a socket") {
+		t.Fatalf("replaced endpoint gained a reuse witness: %v", err)
+	}
+	if data, err := os.ReadFile(path); err != nil || string(data) != "replacement" || w.cmd.ProcessState == nil {
+		t.Fatalf("replacement changed or child not reaped: data=%q error=%v process=%v", data, err, w.cmd.ProcessState)
+	}
+	if _, err := w.Execute(t.Context(), job, runnerExecutionCheckpoints{}); err == nil || !strings.Contains(err.Error(), "not ready") {
+		t.Fatalf("replaced endpoint accepted another assignment: %v", err)
+	}
+}
+
+func TestLocalWorkerCanceledReuseWaitRetiresChild(t *testing.T) {
+	w := localWorkerTestStart(t, "known-hold")
+	job := testJob(command.Comment)
+	result, err := w.Execute(t.Context(), job, runnerExecutionCheckpoints{})
+	if err != nil || result.Answer != "known" || !result.matchesJob(job) {
+		t.Fatalf("accepted outcome changed: result=%+v error=%v", result, err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if err := w.awaitReusable(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled reuse wait lost its cause: %v", err)
+	}
+	if w.reuse.Load() != workerRetired || w.cmd.ProcessState == nil {
+		t.Fatalf("canceled reuse left capacity or child live: state=%d process=%v", w.reuse.Load(), w.cmd.ProcessState)
+	}
+}
+
 func TestLocalWorkerListenerFailureReapsChild(t *testing.T) {
 	w := localWorkerTestStart(t, "hold")
 	if err := w.endpoint.listener.Close(); err != nil {
@@ -774,6 +943,41 @@ func TestLocalWorkerHelper(t *testing.T) {
 	if mode == "hold" {
 		select {}
 	}
+	if mode == "reuse" {
+		for index, marker := range []string{".first", ".second"} {
+			if index == 1 {
+				ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+				unixWorkerReport(t, ctx, report, ".resume")
+				cancel()
+			}
+			var assignment httpAssignment
+			status, err := unixTestJSON(t, client, "/next", httpPull{Version: ProtocolVersion, ExecutorID: "local"}, &assignment, httpJobBytes)
+			if err != nil || status != http.StatusOK {
+				t.Fatalf("pull %d: status=%d error=%v", index+1, status, err)
+			}
+			job := assignment.Job
+			if index == 0 {
+				if err := workspace.WriteAtomic(report+".attempt", []byte("temporary")); err != nil {
+					t.Fatal(err)
+				}
+				if err := workspace.WriteAtomic(report+".cleanup-start", []byte("started")); err != nil {
+					t.Fatal(err)
+				}
+				ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+				unixWorkerReport(t, ctx, report, ".cleanup-go")
+				cancel()
+				if err := os.Remove(report + ".attempt"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "known"}
+			unixTestAck(t, client, "/outcome", httpOutcome{Sequence: 1, Result: result}, 1)
+			if err := workspace.WriteAtomic(report+marker, []byte(strconv.Itoa(os.Getpid()))); err != nil {
+				t.Fatal(err)
+			}
+		}
+		select {}
+	}
 	var assignment httpAssignment
 	status, err := unixTestJSON(t, client, "/next", httpPull{Version: ProtocolVersion, ExecutorID: "local"}, &assignment, httpJobBytes)
 	if err != nil || status != http.StatusOK {
@@ -791,6 +995,12 @@ func TestLocalWorkerHelper(t *testing.T) {
 		unixTestAck(t, client, "/before", httpCall{Sequence: 1, Checkpoint: CallCheckpoint{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Call: call}}, 1)
 	}
 	result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "known"}
+	if mode == "cleanup-failed" {
+		if err := workspace.WriteAtomic(report+".leftover", []byte("retain")); err != nil {
+			t.Fatal(err)
+		}
+		result.Diagnostics = []Diagnostic{{Code: "cleanup_failed", Message: "Execution workspace cleanup failed; operator attention is required."}}
+	}
 	sequence := uint64(1)
 	var failure *httpFailure
 	if mode == "drain" || mode == "drain-kill" || mode == "gap" {
@@ -800,7 +1010,7 @@ func TestLocalWorkerHelper(t *testing.T) {
 	if mode == "known" {
 		os.Exit(7)
 	}
-	if mode != "drain" && mode != "drain-kill" && mode != "known-hold" && mode != "gap" {
+	if mode != "drain" && mode != "drain-kill" && mode != "known-hold" && mode != "gap" && mode != "cleanup-failed" {
 		t.Fatalf("unexpected helper mode %q", mode)
 	}
 	// The owner must stop the child only after the accepted outcome drains.
