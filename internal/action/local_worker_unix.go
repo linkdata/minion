@@ -112,6 +112,25 @@ func (w *localWorker) Execute(ctx context.Context, job Job, sink Checkpoints) (R
 	return result, err
 }
 
+func (w *localWorker) startupDiagnostic() string {
+	raw := w.stderr.String()
+	if raw == "" {
+		return ""
+	}
+	if w.stderr.Truncated {
+		if end := strings.IndexByte(raw, '\n'); end >= 0 {
+			raw = raw[end+1:]
+		} else {
+			raw = ""
+		}
+	}
+	detail := strings.TrimSpace(redactActionText(raw, w.secrets...))
+	if detail == "" {
+		detail = "worker startup output could not be safely displayed"
+	}
+	return monitor.InertLogText(detail)
+}
+
 // awaitHeldPull proves only that this endpoint accepted a pull while its
 // direct child was live; selected-tool preflight and capacity are separate.
 func (w *localWorker) awaitHeldPull(ctx context.Context) (waitErr error) {
@@ -127,19 +146,8 @@ func (w *localWorker) awaitHeldPull(ctx context.Context) (waitErr error) {
 		select {
 		case <-w.exited:
 			err := errors.Join(errors.New("local worker exited before holding a pull"), w.waitErr)
-			if raw := w.stderr.String(); raw != "" {
-				if w.stderr.Truncated {
-					if end := strings.IndexByte(raw, '\n'); end >= 0 {
-						raw = raw[end+1:]
-					} else {
-						raw = ""
-					}
-				}
-				detail := strings.TrimSpace(redactActionText(raw, w.secrets...))
-				if detail == "" {
-					detail = "worker startup output could not be safely displayed"
-				}
-				err = errors.Join(err, fmt.Errorf("worker startup diagnostic: %s", monitor.InertLogText(detail)))
+			if detail := w.startupDiagnostic(); detail != "" {
+				err = errors.Join(err, fmt.Errorf("worker startup diagnostic: %s", detail))
 			}
 			return err
 		default:

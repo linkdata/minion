@@ -137,7 +137,11 @@ func workerCredentialValues(env []string) []string {
 				secrets = append(secrets, trimmed)
 			}
 			if parsed, err := url.Parse(value); err == nil && parsed.User != nil {
-				secrets = append(secrets, parsed.User.String(), parsed.User.Username())
+				userinfo := parsed.User.String()
+				secrets = append(secrets, userinfo, parsed.User.Username())
+				if encodedUser, encodedPassword, ok := strings.Cut(userinfo, ":"); ok {
+					secrets = append(secrets, encodedUser, encodedPassword)
+				}
 				if password, ok := parsed.User.Password(); ok {
 					secrets = append(secrets, password)
 				}
