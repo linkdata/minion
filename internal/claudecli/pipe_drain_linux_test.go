@@ -24,9 +24,7 @@ printf '%s\n' "$!" > "$0.pid.tmp"
 mv -- "$0.pid.tmp" "$0.pid"
 exit 0
 `)
-	testsupport.StopOnCleanup(t, binary+".pid.stop")
 	ctx, cancel := context.WithTimeout(t.Context(), 8*time.Second)
-	defer cancel()
 	type outcome struct {
 		result aicli.Result
 		err    error

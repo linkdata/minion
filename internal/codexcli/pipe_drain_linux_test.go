@@ -25,10 +25,8 @@ printf '%s\n' "$!" > "$0.pid.tmp"
 mv -- "$0.pid.tmp" "$0.pid"
 exit 0
 `)
-	testsupport.StopOnCleanup(t, binary+".pid.stop")
 	writeUsageRollout(t, os.Getenv("CODEX_HOME"), "root", "", usageEvent("task_started", "root-turn"), usageRecord("root", "root-turn", "response", 15, 7, 11), usageEvent("task_complete", "root-turn"))
 	ctx, cancel := context.WithTimeout(t.Context(), 8*time.Second)
-	defer cancel()
 	type outcome struct {
 		result aicli.Result
 		err    error

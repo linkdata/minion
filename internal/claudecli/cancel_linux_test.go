@@ -22,7 +22,6 @@ exec sleep 30
 `)
 	workspace := t.TempDir()
 	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
 	type outcome struct {
 		result aicli.Result
 		err    error
