@@ -143,7 +143,7 @@ app-server)
   IFS= read -r request
   IFS= read -r request
   printf '%s\n' '`+catalogue+`'
-  /bin/cat >/dev/null
+  exec /bin/cat >/dev/null
   ;;
 *) exit 90 ;;
 esac

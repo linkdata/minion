@@ -136,6 +136,9 @@ func TestRunnerEnforcesSuppliedRuntimeBudget(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			action := test.action
+			if action != command.SecurityAudit {
+				t.Parallel()
+			}
 			parent, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 			defer cancel()
 			job := testJob(action)

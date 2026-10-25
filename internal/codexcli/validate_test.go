@@ -47,7 +47,7 @@ if [ -n @PAGE2@ ]; then
   printf '%s\n' "$request" >> @REQUESTS@
   printf '%s\n' @PAGE2@
 fi
-cat >/dev/null
+exec cat >/dev/null
 `
 
 func catalogueScriptFor(dir, page1, page2 string) string {
