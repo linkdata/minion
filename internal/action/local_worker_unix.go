@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os/exec"
 	"sync"
+	"sync/atomic"
 	"syscall"
 
 	"github.com/linkdata/minion/internal/executil"
@@ -21,16 +22,17 @@ type localWorker struct {
 	cancel    context.CancelFunc
 	exited    chan struct{}
 	childMu   sync.Mutex
+	stopSent  atomic.Bool
 	waitErr   error
 	closeOnce sync.Once
 	closeErr  error
 }
 
-// startLocalWorker starts a child bound to its own lifetime context. The
-// command must use that context; job cancellation is handled by Execute.
-func startLocalWorker(runtimeDir, executorID string, command func(context.Context, string) *exec.Cmd) (*localWorker, error) {
-	if command == nil {
-		return nil, errors.New("local worker command is required")
+// startLocalWorker owns the direct child's context and command. configure sets
+// environment and stdio; job cancellation is handled by Execute.
+func startLocalWorker(runtimeDir, executorID, path string, args []string, configure func(*exec.Cmd, string)) (*localWorker, error) {
+	if path == "" {
+		return nil, errors.New("local worker command path is required")
 	}
 	executor, err := NewHTTPExecutor(executorID)
 	if err != nil {
@@ -41,17 +43,26 @@ func startLocalWorker(runtimeDir, executorID string, command func(context.Contex
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	cmd := command(ctx, endpoint.SocketPath())
-	if cmd == nil || cmd.Cancel == nil {
-		cancel()
-		return nil, errors.Join(errors.New("local worker command must use its lifetime context"), endpoint.Close())
+	cmd := exec.CommandContext(ctx, path, args...)
+	commandCancel := cmd.Cancel
+	if configure != nil {
+		configure(cmd, endpoint.SocketPath())
 	}
+	cmd.Cancel = commandCancel
 	executil.Prepare(cmd)
+	w := &localWorker{executor: executor, endpoint: endpoint, cmd: cmd, cancel: cancel, exited: make(chan struct{})}
+	preparedCancel := cmd.Cancel
+	cmd.Cancel = func() error {
+		err := preparedCancel()
+		if err == nil {
+			w.stopSent.Store(true)
+		}
+		return err
+	}
 	if err := cmd.Start(); err != nil {
 		cancel()
 		return nil, errors.Join(fmt.Errorf("start local worker: %w", err), endpoint.Close())
 	}
-	w := &localWorker{executor: executor, endpoint: endpoint, cmd: cmd, cancel: cancel, exited: make(chan struct{})}
 	go func() {
 		waitErr := cmd.Wait()
 		w.childMu.Lock()
@@ -107,7 +118,7 @@ func (w *localWorker) Close() error {
 		<-w.exited
 		// Cmd.Wait may have returned before cancellation but published afterward.
 		// Keep every nonzero exit code and other unexpected Wait error.
-		if w.waitErr != nil && (exitedBeforeCancel || !expectedLocalWorkerCancellation(w.waitErr)) {
+		if w.waitErr != nil && (exitedBeforeCancel || !expectedLocalWorkerCancellation(w.waitErr, w.stopSent.Load())) {
 			w.closeErr = fmt.Errorf("local worker exited: %w", w.waitErr)
 		}
 		w.closeErr = errors.Join(w.closeErr, coreErr, w.endpoint.Close())
@@ -115,7 +126,10 @@ func (w *localWorker) Close() error {
 	return w.closeErr
 }
 
-func expectedLocalWorkerCancellation(err error) bool {
+func expectedLocalWorkerCancellation(err error, directStopSent bool) bool {
+	if !directStopSent {
+		return false
+	}
 	if errors.Is(err, context.Canceled) {
 		return true // Cmd.Wait can report context cancellation after a successful exit.
 	}

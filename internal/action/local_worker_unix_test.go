@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -25,11 +26,9 @@ func localWorkerTestStart(t *testing.T, mode string) *localWorker {
 	t.Helper()
 	report := filepath.Join(t.TempDir(), "child")
 	var output bytes.Buffer
-	w, err := startLocalWorker(unixTestDirectory(t), "local", func(ctx context.Context, socket string) *exec.Cmd {
-		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestLocalWorkerHelper$")
+	w, err := startLocalWorker(unixTestDirectory(t), "local", os.Args[0], []string{"-test.run=^TestLocalWorkerHelper$"}, func(cmd *exec.Cmd, socket string) {
 		cmd.Env = append(os.Environ(), "MINION_LOCAL_WORKER_HELPER="+mode, "MINION_LOCAL_WORKER_SOCKET="+socket, "MINION_LOCAL_WORKER_REPORT="+report)
 		cmd.Stdout, cmd.Stderr = &output, &output
-		return cmd
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -178,12 +177,46 @@ func TestLocalWorkerCrashAfterDeliveryQuarantines(t *testing.T) {
 func TestLocalWorkerCrashBeforeDeliveryReportsExit(t *testing.T) {
 	w := localWorkerTestStart(t, "precrash")
 	job := testJob(command.Comment)
-	result, err := w.Execute(t.Context(), job, runnerExecutionCheckpoints{})
-	if !result.matchesJob(job) || err == nil || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || !strings.Contains(err.Error(), "local worker exited") {
-		t.Fatalf("pre-delivery exit lost its diagnostic or became uncertain: result=%+v error=%v", result, err)
+	done := make(chan httpServerTestResult, 1)
+	go func() {
+		result, err := w.Execute(t.Context(), job, runnerExecutionCheckpoints{})
+		done <- httpServerTestResult{result, err}
+	}()
+	unixTestReady(t, w.executor)
+	if err := w.cmd.Process.Signal(syscall.SIGUSR1); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-done:
+		var exit *exec.ExitError
+		if !got.result.matchesJob(job) || !errors.As(got.err, &exit) || exit.ExitCode() != 7 || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || !strings.Contains(got.err.Error(), "local worker exited") {
+			t.Fatalf("pre-delivery exit lost its diagnostic or became uncertain: result=%+v error=%v", got.result, got.err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("pre-delivery child exit did not finish action")
 	}
 	if w.cmd.ProcessState == nil {
 		t.Fatal("pre-delivery child was not reaped")
+	}
+}
+
+func TestExpectedLocalWorkerCancellationRequiresSentStop(t *testing.T) {
+	if os.Getenv("MINION_LOCAL_WORKER_SELF_SIGINT") == "1" {
+		if err := syscall.Kill(os.Getpid(), syscall.SIGINT); err != nil {
+			t.Fatal(err)
+		}
+		t.Fatal("SIGINT did not terminate helper")
+	}
+	cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestExpectedLocalWorkerCancellationRequiresSentStop$")
+	cmd.Env = append(os.Environ(), "MINION_LOCAL_WORKER_SELF_SIGINT=1")
+	err := cmd.Run()
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) {
+		t.Fatalf("helper did not exit on SIGINT: %v", err)
+	}
+	status, ok := exit.Sys().(syscall.WaitStatus)
+	if !ok || !status.Signaled() || status.Signal() != syscall.SIGINT || expectedLocalWorkerCancellation(err, false) || !expectedLocalWorkerCancellation(err, true) || expectedLocalWorkerCancellation(context.Canceled, false) {
+		t.Fatalf("external SIGINT without owner stop was suppressed: %v", err)
 	}
 }
 
@@ -476,9 +509,7 @@ func TestLocalWorkerListenerFailureReapsChild(t *testing.T) {
 
 func TestLocalWorkerStartFailureClosesEndpoint(t *testing.T) {
 	dir := unixTestDirectory(t)
-	w, err := startLocalWorker(dir, "local", func(ctx context.Context, _ string) *exec.Cmd {
-		return exec.CommandContext(ctx, filepath.Join(dir, "missing"))
-	})
+	w, err := startLocalWorker(dir, "local", filepath.Join(dir, "missing"), nil, nil)
 	if w != nil || err == nil || !strings.Contains(err.Error(), "start local worker") {
 		t.Fatalf("start failure: worker=%v error=%v", w, err)
 	}
@@ -504,6 +535,12 @@ func TestLocalWorkerHelper(t *testing.T) {
 		signal.Notify(interrupt, os.Interrupt)
 		defer signal.Stop(interrupt)
 	}
+	var crash chan os.Signal
+	if mode == "precrash" {
+		crash = make(chan os.Signal, 1)
+		signal.Notify(crash, syscall.SIGUSR1)
+		defer signal.Stop(crash)
+	}
 	if err := workspace.WriteAtomic(report+".ready", []byte(strconv.Itoa(os.Getpid()))); err != nil {
 		t.Fatal(err)
 	}
@@ -522,6 +559,7 @@ func TestLocalWorkerHelper(t *testing.T) {
 		return
 	}
 	if mode == "precrash" {
+		<-crash
 		os.Exit(7)
 	}
 	if mode == "hold" {
