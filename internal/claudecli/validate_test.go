@@ -110,6 +110,13 @@ func TestValidateRejectsUnrelatedUnknownOptionFailure(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsUnknownOptionAfterModelOutput(t *testing.T) {
+	fakeValidationCLI(t, validationCLIBehavior{modelOutputOnUnknown: true})
+	if _, err := Validate(t.Context(), config.ClaudeConfig{}); err == nil || !strings.Contains(err.Error(), "did not reject an unknown option") {
+		t.Fatalf("accepted model output during parser rejection: %v", err)
+	}
+}
+
 func TestValidateRejectsUnsupportedResumeDespiteEmptyResult(t *testing.T) {
 	fakeValidationCLI(t, validationCLIBehavior{unsupportedResume: true})
 	if _, err := Validate(t.Context(), config.ClaudeConfig{}); err == nil || !strings.Contains(err.Error(), "did not reach empty-session lookup") {
@@ -133,6 +140,8 @@ func TestEmptySessionLookupRejectsModelActivity(t *testing.T) {
 	}
 	for _, output := range []string{
 		`{"type":"assistant"}` + "\n" + empty,
+		`{"type":"system","usage":{"input_tokens":1}}` + "\n" + empty,
+		`{"type":"system","modelUsage":{"main":{"inputTokens":0}}}` + "\n" + empty,
 		`{"type":"result","is_error":true,"num_turns":0,"usage":{"input_tokens":1}}`,
 		`{"type":"result","is_error":true,"num_turns":0,"modelUsage":{"main":{"inputTokens":1}}}`,
 		`{"type":"result","is_error":false,"num_turns":0}`,
@@ -153,6 +162,8 @@ func TestFreshInitializationRejectsPaidOrMalformedTrailingEvent(t *testing.T) {
 		`{"type":"result","total_cost_usd":0.01}`,
 		`{"type":"result","modelUsage":{"main":{"inputTokens":3}}}`,
 		`{"type":"result","modelUsage":{"main":{"inputTokens":0}}}`,
+		`{"type":"result","subtype":"success","result":"generated answer"}`,
+		`{"type":"result","subtype":"success","structured_output":{"answer":"generated answer"}}`,
 		`{"type":"system","usage":{"input_tokens":1}}`,
 		`{"type":"assistant"}`,
 		`{`,
@@ -165,10 +176,11 @@ func TestFreshInitializationRejectsPaidOrMalformedTrailingEvent(t *testing.T) {
 }
 
 type validationCLIBehavior struct {
-	rejected          string
-	ignoreUnknown     bool
-	unrelatedUnknown  bool
-	unsupportedResume bool
+	rejected             string
+	ignoreUnknown        bool
+	unrelatedUnknown     bool
+	modelOutputOnUnknown bool
+	unsupportedResume    bool
 }
 
 func fakeValidationCLI(t *testing.T, behavior validationCLIBehavior) string {
@@ -184,6 +196,8 @@ func fakeValidationCLI(t *testing.T, behavior validationCLIBehavior) string {
 	unknown := `case " $* " in *' --minion-unsupported-capability-probe '*) printf '%s\n' 'unknown option --minion-unsupported-capability-probe' >&2; exit 2 ;; esac`
 	if behavior.unrelatedUnknown {
 		unknown = `case " $* " in *' --minion-unsupported-capability-probe '*) printf '%s\n' 'unrelated startup failure' >&2; exit 2 ;; esac`
+	} else if behavior.modelOutputOnUnknown {
+		unknown = `case " $* " in *' --minion-unsupported-capability-probe '*) printf '%s\n' '{"type":"assistant"}'; printf '%s\n' 'unknown option --minion-unsupported-capability-probe' >&2; exit 2 ;; esac`
 	} else if behavior.ignoreUnknown {
 		unknown = ""
 	}

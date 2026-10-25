@@ -142,7 +142,8 @@ func validateInvocationCapabilities(probe func([]string, string) ([]byte, error)
 	}
 	const unknownOption = "--minion-unsupported-capability-probe"
 	invalid := append(slices.Clone(args), unknownOption)
-	if _, err := probe(invalid, initializeRequest); !cliRejected(err) || !strings.Contains(err.Error(), unknownOption) {
+	invalidData, err := probe(invalid, initializeRequest)
+	if !cliRejected(err) || !strings.Contains(err.Error(), unknownOption) || !cleanFreshInitialization(invalidData) {
 		return fmt.Errorf("claude fresh invocation did not reject an unknown option: %v", err)
 	}
 	resumeID, err := conversationID()
@@ -177,6 +178,8 @@ type capabilityEvent struct {
 	NumTurns     int                        `json:"num_turns"`
 	TotalCostUSD float64                    `json:"total_cost_usd"`
 	ModelUsage   map[string]json.RawMessage `json:"modelUsage"`
+	Result       string                     `json:"result"`
+	Structured   json.RawMessage            `json:"structured_output"`
 	Usage        struct {
 		InputTokens              int64 `json:"input_tokens"`
 		OutputTokens             int64 `json:"output_tokens"`
@@ -197,6 +200,7 @@ func cleanFreshInitialization(data []byte) bool {
 		}
 		var event capabilityEvent
 		if json.Unmarshal(line, &event) != nil || event.Type == "" || event.Type == "assistant" || event.usedModel() ||
+			event.Result != "" || len(event.Structured) != 0 && !bytes.Equal(bytes.TrimSpace(event.Structured), []byte("null")) ||
 			event.Type == "result" && event.IsError {
 			return false
 		}
@@ -211,11 +215,11 @@ func isEmptySessionLookup(data []byte) bool {
 			continue
 		}
 		var event capabilityEvent
-		if json.Unmarshal(line, &event) != nil || event.Type == "" || event.Type == "assistant" {
+		if json.Unmarshal(line, &event) != nil || event.Type == "" || event.Type == "assistant" || event.usedModel() {
 			return false
 		}
 		if event.Type == "result" {
-			if found || !event.IsError || event.usedModel() {
+			if found || !event.IsError {
 				return false
 			}
 			found = true
