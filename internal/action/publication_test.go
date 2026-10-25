@@ -653,11 +653,11 @@ func TestPublishedRefutationsAuditTitleRejectsUnprovedCopyAfterScanBudget(t *tes
 	job := withClaudeCritic(testJob(command.SecurityAudit))
 	job.CriticMaxRounds = 3
 	var quotes []string
-	for i := range 990 {
+	for i := range 982 {
 		quotes = append(quotes, fmt.Sprintf("Existing source quote %03d is already public.", i))
 	}
-	job.Source.Files[0].Data = []byte(strings.Repeat("f", 1<<20) + "\n" + strings.Join(quotes, "\n"))
 	const private = "This private audit title must remain unpublished."
+	job.Source.Files[0].Data = []byte(strings.Join(quotes, "\n") + "\n" + strings.Repeat("f", 1<<20) + "\n" + private)
 	result := privateReviewResult(job)
 	result.Refutations = []Refutation{{Round: 2, Text: strings.Join(quotes, "\n")}, {Round: 3, Text: private}}
 	result.Calls[4].Approved, result.Calls[4].NoBlockers, result.Calls[4].HasBlockers = false, false, true
@@ -667,11 +667,10 @@ func TestPublishedRefutationsAuditTitleRejectsUnprovedCopyAfterScanBudget(t *tes
 		CallUsage{Provider: job.Critic.Provider, Role: roleCritic, Round: 3, ReviewPhase: reviewFull, ReviewComplete: true, Approved: true, NoBlockers: true},
 	)
 	type finding struct{ Verdict, Fingerprint, Title string }
-	findings := make([]finding, 0, len(quotes)+2)
+	findings := make([]finding, 0, len(quotes)+1)
 	for i, quote := range quotes {
 		findings = append(findings, finding{Verdict: "confirmed", Fingerprint: fmt.Sprint(i), Title: quote})
 	}
-	findings = append(findings, finding{Verdict: "confirmed", Fingerprint: "partial", Title: "Background: " + private})
 	data, err := json.Marshal(findings)
 	if err != nil {
 		t.Fatal(err)
@@ -684,10 +683,19 @@ func TestPublishedRefutationsAuditTitleRejectsUnprovedCopyAfterScanBudget(t *tes
 	if err := result.validate(job, false); err != nil {
 		t.Fatalf("partial result and refutations are not structurally valid: %v", err)
 	}
+	if err := rejectPublishedRefutations(job, result, publication{answer: "Audit summary"}); err != nil {
+		t.Fatalf("public audit titles exhausted the source scan budget: %v", err)
+	}
+	findings = append(findings, finding{Verdict: "confirmed", Fingerprint: "partial", Title: "Background: " + private})
+	data, err = json.Marshal(findings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result.Artifacts[0].Data = data
 	if err := rejectPublishedRefutations(job, result, publication{answer: "Audit summary"}); err == nil {
 		t.Fatal("partial private audit title passed without source proof after scan budget")
 	}
-	findings = append(findings, finding{Verdict: "confirmed", Fingerprint: "private", Title: private})
+	findings[len(quotes)] = finding{Verdict: "confirmed", Fingerprint: "private", Title: private}
 	data, err = json.Marshal(findings)
 	if err != nil {
 		t.Fatal(err)
