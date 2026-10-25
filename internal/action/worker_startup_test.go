@@ -126,6 +126,10 @@ func TestEncodeWorkerStartupRejectsInvalidInput(t *testing.T) {
 		{"unselected", func(s *WorkerStartup) { s.Selection = WorkerSelection{} }},
 		{"unused provider key", func(s *WorkerStartup) { s.Selection.Critic = nil }},
 		{"oversized", func(s *WorkerStartup) { s.CodexAPIKey = strings.Repeat("x", workerStartupBytes) }},
+		{"aggregate provider keys", func(s *WorkerStartup) {
+			key := strings.Repeat("x", workerStartupBytes/2)
+			s.CodexAPIKey, s.ClaudeAPIKey = key, key
+		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			invalid := startup

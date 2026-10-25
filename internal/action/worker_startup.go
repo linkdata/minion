@@ -49,6 +49,46 @@ func (s WorkerStartup) runner(call modelCall) (*Runner, error) {
 
 // EncodeWorkerStartup prepares bounded input for the direct child's stdin.
 func EncodeWorkerStartup(startup WorkerStartup) ([]byte, error) {
+	remaining := workerStartupBytes
+	add := func(value string) bool {
+		if len(value) > remaining {
+			return false
+		}
+		remaining -= len(value)
+		return true
+	}
+	addRole := func(role RoleSettings) bool {
+		if !add(role.Provider) || !add(role.Model) || !add(role.Effort) {
+			return false
+		}
+		for _, skill := range role.Skills {
+			if !add(skill) {
+				return false
+			}
+		}
+		for _, skill := range role.AlwaysOnSkills {
+			if !add(skill) {
+				return false
+			}
+		}
+		return true
+	}
+	if !add(startup.WorkRoot) || !add(startup.SocketPath) || !add(startup.CodexAPIKey) || !add(startup.ClaudeAPIKey) || !addRole(startup.Selection.Main) {
+		return nil, errHTTPBodyLimit
+	}
+	if startup.Selection.Critic != nil && !addRole(*startup.Selection.Critic) {
+		return nil, errHTTPBodyLimit
+	}
+	for name, mapping := range startup.Selection.Commands {
+		if !add(name) || !add(mapping.Action) {
+			return nil, errHTTPBodyLimit
+		}
+		for _, skill := range mapping.Skills {
+			if !add(skill) {
+				return nil, errHTTPBodyLimit
+			}
+		}
+	}
 	if err := startup.validate(); err != nil {
 		return nil, err
 	}
