@@ -1145,7 +1145,7 @@ func TestHTTPClientSendsOneBoundFailureForUnrepresentableOutcome(t *testing.T) {
 				originalCalls, originalRefs := slices.Clone(result.Calls), slices.Clone(result.Refutations)
 				originalIdentity, originalReason := result.Identity, result.CriticStopReason
 				err = checkpoints.outcome(result, errors.Join(monitor.ErrTerminalJob, syscall.ENOSPC))
-				if !errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || requests.Load() != 1 || len(outcomes) != 1 || len(result.Answer) != maxOutputBytes+1 || result.Identity != originalIdentity || result.CriticStopReason != originalReason || !slices.Equal(result.Calls, originalCalls) || !slices.Equal(result.Refutations, originalRefs) {
+				if !errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || !checkpoints.transport.outcomeDegraded || checkpoints.transport.outcomeAcknowledged == loseACK || requests.Load() != 1 || len(outcomes) != 1 || len(result.Answer) != maxOutputBytes+1 || result.Identity != originalIdentity || result.CriticStopReason != originalReason || !slices.Equal(result.Calls, originalCalls) || !slices.Equal(result.Refutations, originalRefs) {
 					t.Fatalf("fallback hid unknown outcome, retried, or mutated raw result: error=%v requests=%d", err, requests.Load())
 				}
 				got := <-outcomes
