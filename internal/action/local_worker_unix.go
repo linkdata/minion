@@ -68,10 +68,11 @@ func (w *localWorker) Execute(ctx context.Context, job Job, sink Checkpoints) (R
 	var state httpExecutionState
 	result, err := w.executor.execute(ctx, job, sink, &state)
 	w.executor.mu.Lock()
-	closed := w.executor.closed
+	closed, unavailable := w.executor.closed, w.executor.unavailable
 	w.executor.mu.Unlock()
-	if closed || state.admitted && ctx.Err() != nil {
+	if closed || unavailable || state.admitted && ctx.Err() != nil {
 		closeErr := w.Close()
+		// A received outcome remains the Job result; Close reports lifecycle errors separately.
 		if !state.outcome {
 			err = errors.Join(err, closeErr)
 			if closed {

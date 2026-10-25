@@ -34,7 +34,7 @@ func localWorkerTestStart(t *testing.T, mode string) *localWorker {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		if err := w.Close(); err != nil && mode != "hold" {
+		if err := w.Close(); err != nil && mode != "hold" && mode != "known-hold" {
 			t.Errorf("close local worker: %v", err)
 		}
 		if t.Failed() {
@@ -100,6 +100,59 @@ func TestLocalWorkerCrashBeforeDeliveryReportsExit(t *testing.T) {
 	}
 	if w.cmd.ProcessState == nil {
 		t.Fatal("pre-delivery child was not reaped")
+	}
+}
+
+func TestLocalWorkerBudgetQuarantineStopsLiveChild(t *testing.T) {
+	w := localWorkerTestStart(t, "stall")
+	w.executor.outcomeGrace = 25 * time.Millisecond
+	deadline := time.NewTimer(10 * time.Second)
+	defer deadline.Stop()
+	for {
+		w.executor.mu.Lock()
+		held := w.executor.pull
+		w.executor.mu.Unlock()
+		if held {
+			break
+		}
+		select {
+		case <-deadline.C:
+			t.Fatal("child never held a pull")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	job := testJob(command.Comment)
+	job.RuntimeBudget = 100 * time.Millisecond
+	result, err := w.Execute(t.Context(), job, runnerExecutionCheckpoints{})
+	if t.Context().Err() != nil || !result.matchesJob(job) || !errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("live caller lost uncertain budget outcome: result=%+v error=%v caller=%v", result, err, t.Context().Err())
+	}
+	w.executor.mu.Lock()
+	closed, unavailable := w.executor.closed, w.executor.unavailable
+	w.executor.mu.Unlock()
+	if !closed || !unavailable || w.cmd.ProcessState == nil {
+		t.Fatalf("budget quarantine left child available: closed=%v unavailable=%v state=%v", closed, unavailable, w.cmd.ProcessState)
+	}
+	if _, err := os.Lstat(w.endpoint.SocketPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("budget quarantine left owned endpoint: %v", err)
+	}
+}
+
+func TestLocalWorkerAcceptedQuarantineStopsLiveChild(t *testing.T) {
+	w := localWorkerTestStart(t, "gap")
+	job := testJob(command.Comment)
+	result, err := w.Execute(t.Context(), job, runnerExecutionCheckpoints{})
+	if t.Context().Err() != nil || !result.matchesJob(job) || result.Answer != "known" || !errors.Is(err, monitor.ErrExecutionOutcomeUnknown) {
+		t.Fatalf("accepted uncertain outcome changed: result=%+v error=%v caller=%v", result, err, t.Context().Err())
+	}
+	w.executor.mu.Lock()
+	closed, unavailable := w.executor.closed, w.executor.unavailable
+	w.executor.mu.Unlock()
+	if !closed || !unavailable || w.cmd.ProcessState == nil {
+		t.Fatalf("accepted quarantine left child available: closed=%v unavailable=%v state=%v", closed, unavailable, w.cmd.ProcessState)
+	}
+	if _, err := os.Lstat(w.endpoint.SocketPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("accepted quarantine left owned endpoint: %v", err)
 	}
 }
 
@@ -223,6 +276,28 @@ func TestLocalWorkerClosePreservesReplacedEndpoint(t *testing.T) {
 	}
 }
 
+func TestLocalWorkerKnownOutcomeKeepsEndpointCloseErrorSeparate(t *testing.T) {
+	w := localWorkerTestStart(t, "known-hold")
+	job := testJob(command.Comment)
+	result, err := w.Execute(t.Context(), job, runnerExecutionCheckpoints{})
+	if err != nil || result.Answer != "known" || !result.matchesJob(job) {
+		t.Fatalf("accepted outcome changed: result=%+v error=%v", result, err)
+	}
+	path := w.endpoint.SocketPath()
+	if err := os.Rename(path, path+".moved"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("replacement"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err == nil {
+		t.Fatal("endpoint replacement was not reported by Close")
+	}
+	if data, err := os.ReadFile(path); err != nil || string(data) != "replacement" || w.cmd.ProcessState == nil {
+		t.Fatalf("replacement changed or child not reaped: data=%q error=%v state=%v", data, err, w.cmd.ProcessState)
+	}
+}
+
 func TestLocalWorkerListenerFailureReapsChild(t *testing.T) {
 	w := localWorkerTestStart(t, "hold")
 	if err := w.endpoint.listener.Close(); err != nil {
@@ -282,6 +357,9 @@ func TestLocalWorkerHelper(t *testing.T) {
 	if mode == "crash" {
 		os.Exit(7)
 	}
+	if mode == "stall" {
+		select {}
+	}
 	job := assignment.Job
 	if mode == "drain" {
 		call := CallUsage{Provider: job.Main.Provider, Role: roleMain, Round: 1, Model: job.Main.Model, Effort: job.Main.Effort}
@@ -290,14 +368,14 @@ func TestLocalWorkerHelper(t *testing.T) {
 	result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "known"}
 	sequence := uint64(1)
 	var failure *httpFailure
-	if mode == "drain" {
+	if mode == "drain" || mode == "gap" {
 		sequence, failure = 2, newHTTPFailure(context.Canceled)
 	}
 	unixTestAck(t, client, "/outcome", httpOutcome{Sequence: sequence, Result: result, Failure: failure}, sequence)
 	if mode == "known" {
 		os.Exit(7)
 	}
-	if mode != "drain" {
+	if mode != "drain" && mode != "known-hold" && mode != "gap" {
 		t.Fatalf("unexpected helper mode %q", mode)
 	}
 	// The owner must stop the child only after the accepted outcome drains.
