@@ -34,6 +34,7 @@ var errUnsupportedEvidenceDirs = errors.New("model evidence directories must be 
 type Runner struct {
 	Codex       config.CodexConfig
 	Claude      config.ClaudeConfig
+	selection   *WorkerSelection
 	runModel    modelCall
 	aroundModel func(context.Context, modelRun, modelCall) (aicli.Result, error)
 	Logger      *log.Logger
@@ -69,6 +70,11 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 	}()
 	if err := job.Validate(); err != nil {
 		return result, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
+	}
+	if r.selection != nil {
+		if err := r.selection.matches(job); err != nil {
+			return result, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		return result, err

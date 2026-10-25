@@ -20,6 +20,7 @@ import (
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
+	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/usage"
@@ -94,6 +95,12 @@ func TestUnixExecutionDirectWorker(t *testing.T) {
 				return
 			}
 		}
+		for mismatch := range unixWorkerSelectionMismatches(withClaudeCritic(testJob(command.Comment))) {
+			if err := os.Remove(report + fmt.Sprintf(".mismatch-%d", mismatch)); err != nil && !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("remove mismatch marker %d: %v", mismatch, err)
+				return
+			}
+		}
 		if err := os.Remove(base); err != nil {
 			t.Errorf("remove empty runtime parent: %v", err)
 		}
@@ -151,8 +158,8 @@ func TestUnixExecutionDirectWorker(t *testing.T) {
 	}
 	for index, digit := range []string{"a", "b"} {
 		job := withClaudeCritic(testJob(command.Comment))
-		job.Main.Model, job.Main.Effort = fmt.Sprintf("main-%d", index+1), []string{"high", "low"}[index]
-		job.Critic.Model, job.Critic.Effort = fmt.Sprintf("critic-%d", index+1), "medium"
+		job.Main.Model, job.Main.Effort = "main-1", "high"
+		job.Critic.Model, job.Critic.Effort = "critic-1", "medium"
 		job.Identity.JobID = strings.Repeat(strconv.Itoa(index+1), 64)
 		fixture := newExecutionAdapterFixture(t, job)
 		fixture.owner.attemptID = strings.Repeat(digit, 32)
@@ -168,11 +175,6 @@ func TestUnixExecutionDirectWorker(t *testing.T) {
 		finishUsage, err := fixture.owner.trackUsage(tracked)
 		if err != nil {
 			t.Fatal(err)
-		}
-		if index == 1 {
-			if err := os.WriteFile(report+".second-go", []byte("go"), 0600); err != nil {
-				t.Fatal(err)
-			}
 		}
 		done := make(chan httpServerTestResult, 1)
 		go func() {
@@ -199,6 +201,26 @@ func TestUnixExecutionDirectWorker(t *testing.T) {
 		if got := unixWorkerReport(t, ctx, report, marker); got != fmt.Sprintf("%d:%d", cmd.Process.Pid, (index+1)*2) {
 			t.Fatalf("assignment %d ran in another worker or lost native calls: %q", index+1, got)
 		}
+		if index == 0 {
+			if err := os.WriteFile(report+".second-go", []byte("go"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			for mismatch, rejected := range unixWorkerSelectionMismatches(job) {
+				rejected.Identity.JobID = fmt.Sprintf("mismatch-%d", mismatch)
+				rejected.Identity.AttemptID = fmt.Sprintf("mismatch-%d", mismatch)
+				if err := rejected.Validate(); err != nil {
+					t.Fatalf("invalid mismatch fixture %d: %v", mismatch, err)
+				}
+				result, err := core.Execute(ctx, rejected, runnerExecutionCheckpoints{})
+				var workerFailure *workerFailureError
+				if !errors.As(err, &workerFailure) || !workerFailure.failure.Terminal || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || !result.matchesJob(rejected) || len(result.Calls) != 0 {
+					t.Fatalf("mismatch %d was not a known no-call failure: result=%+v error=%v", mismatch, result, err)
+				}
+				if got := unixWorkerReport(t, ctx, report, fmt.Sprintf(".mismatch-%d", mismatch)); got != fmt.Sprintf("%d:2", cmd.Process.Pid) {
+					t.Fatalf("mismatch %d changed child or model call count: %q", mismatch, got)
+				}
+			}
+		}
 	}
 	records, err := usage.ReadAll(store.Dir)
 	if err != nil || len(records) != 2 {
@@ -211,7 +233,8 @@ func TestUnixExecutionDirectWorker(t *testing.T) {
 		}
 	}
 	thirdJob := withClaudeCritic(testJob(command.Comment))
-	thirdJob.Main.Model, thirdJob.Main.Effort = "main-3", "high"
+	thirdJob.Main.Model, thirdJob.Main.Effort = "main-1", "high"
+	thirdJob.Critic.Model, thirdJob.Critic.Effort = "critic-1", "medium"
 	thirdJob.Identity.JobID = strings.Repeat("3", 64)
 	third := newExecutionAdapterFixture(t, thirdJob)
 	third.owner.attemptID = strings.Repeat("c", 32)
@@ -343,6 +366,37 @@ func TestUnixExecutionDirectWorker(t *testing.T) {
 	}
 }
 
+func unixWorkerTestSelection() WorkerSelection {
+	return WorkerSelection{
+		Commands: map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}},
+		Main:     RoleSettings{Provider: "codex", Model: "main-1", Effort: "high"},
+		Critic:   &RoleSettings{Provider: "claude", Model: "critic-1", Effort: "medium"},
+	}
+}
+
+func unixWorkerSelectionMismatches(base Job) []Job {
+	change := func(edit func(*Job)) Job {
+		job := base
+		critic := *base.Critic
+		job.Critic = &critic
+		edit(&job)
+		return job
+	}
+	return []Job{
+		change(func(job *Job) { job.Command = "other" }),
+		change(func(job *Job) { job.Action = command.Fix }),
+		change(func(job *Job) { job.Main.Model = "other" }),
+		change(func(job *Job) { job.Main.Effort = "low" }),
+		change(func(job *Job) { job.Main.Skills = []string{testReviewSkillURL} }),
+		change(func(job *Job) { job.Main.AlwaysOnSkills = []string{skills.BuiltinAntiPromptInjection} }),
+		change(func(job *Job) { job.Main.Provider, job.Critic.Provider = "claude", "codex" }),
+		change(func(job *Job) { job.Critic.Model = "other" }),
+		change(func(job *Job) { job.Critic.Effort = "low" }),
+		change(func(job *Job) { job.Critic.AlwaysOnSkills = []string{skills.BuiltinAntiPromptInjection} }),
+		change(func(job *Job) { job.Critic = nil; job.CriticMaxRounds = 0 }),
+	}
+}
+
 func TestUnixExecutionWorkerHelper(t *testing.T) {
 	if os.Getenv("MINION_UNIX_WORKER_HELPER") != "1" {
 		return
@@ -365,19 +419,19 @@ func TestUnixExecutionWorkerHelper(t *testing.T) {
 	wantRuns := []modelRun{
 		{provider: "codex", role: roleMain, model: "main-1", effort: "high"},
 		{provider: "claude", role: roleCritic, model: "critic-1", effort: "medium"},
-		{provider: "codex", role: roleMain, model: "main-2", effort: "low"},
-		{provider: "claude", role: roleCritic, model: "critic-2", effort: "medium"},
-		{provider: "codex", role: roleMain, model: "main-3", effort: "high"},
+		{provider: "codex", role: roleMain, model: "main-1", effort: "high"},
+		{provider: "claude", role: roleCritic, model: "critic-1", effort: "medium"},
+		{provider: "codex", role: roleMain, model: "main-1", effort: "high"},
 	}
-	runner := &Runner{WorkRoot: os.Getenv("MINION_UNIX_WORKER_WORKROOT"), runModel: func(callCtx context.Context, request modelRun) (aicli.Result, error) {
-		if nativeCalls >= len(wantRuns) {
+	runner, err := NewSelectedRunner(Runner{WorkRoot: os.Getenv("MINION_UNIX_WORKER_WORKROOT"), runModel: func(callCtx context.Context, request modelRun) (aicli.Result, error) {
+		nativeCalls++
+		if nativeCalls > len(wantRuns) {
 			return aicli.Result{}, fmt.Errorf("unexpected model call: %+v", request)
 		}
-		want := wantRuns[nativeCalls]
+		want := wantRuns[nativeCalls-1]
 		if request.provider != want.provider || request.role != want.role || request.model != want.model || request.effort != want.effort {
-			return aicli.Result{}, fmt.Errorf("model settings for call %d: got=%+v want=%+v", nativeCalls+1, request, want)
+			return aicli.Result{}, fmt.Errorf("model settings for call %d: got=%+v want=%+v", nativeCalls, request, want)
 		}
-		nativeCalls++
 		if nativeCalls == 5 {
 			context.AfterFunc(callCtx, func() {
 				cancelWitness <- workspace.WriteAtomic(report+".cancel-seen", []byte(callCtx.Err().Error()))
@@ -390,13 +444,13 @@ func TestUnixExecutionWorkerHelper(t *testing.T) {
 			return aicli.Result{}, fmt.Errorf("unexpected model role %q", request.role)
 		}
 		return aicli.Result{Answer: answer, Tokens: usage.Tokens{Input: 9, CachedInput: 2, Output: 4}, UsageComplete: true}, nil
-	}}
+	}}, unixWorkerTestSelection())
+	if err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithTimeout(t.Context(), 75*time.Second)
 	defer cancel()
 	for index := 0; index < 2; index++ {
-		if index == 1 {
-			unixWorkerReport(t, ctx, report, ".second-go")
-		}
 		if err := RunHTTP(ctx, client, UnixExecutionBaseURL, "local", runner); err != nil {
 			t.Fatalf("worker assignment %d: %v", index+1, err)
 		}
@@ -406,6 +460,17 @@ func TestUnixExecutionWorkerHelper(t *testing.T) {
 		}
 		if err := workspace.WriteAtomic(report+marker, []byte(fmt.Sprintf("%d:%d", os.Getpid(), nativeCalls))); err != nil {
 			t.Fatal(err)
+		}
+		if index == 0 {
+			unixWorkerReport(t, ctx, report, ".second-go")
+			for mismatch := range unixWorkerSelectionMismatches(withClaudeCritic(testJob(command.Comment))) {
+				if err := RunHTTP(ctx, client, UnixExecutionBaseURL, "local", runner); !errors.Is(err, monitor.ErrTerminalJob) || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) {
+					t.Fatalf("mismatch %d lost known failure: %v", mismatch, err)
+				}
+				if err := workspace.WriteAtomic(report+fmt.Sprintf(".mismatch-%d", mismatch), []byte(fmt.Sprintf("%d:%d", os.Getpid(), nativeCalls))); err != nil {
+					t.Fatal(err)
+				}
+			}
 		}
 	}
 	unixWorkerReport(t, ctx, report, ".third-go")
