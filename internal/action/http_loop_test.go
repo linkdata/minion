@@ -33,6 +33,23 @@ func TestRunHTTPLoopStopsOnInvalidNext(t *testing.T) {
 	}
 }
 
+func TestRunHTTPLoopCanceledBeforePullIsCleanShutdown(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	var sent atomic.Bool
+	client := &http.Client{Transport: httpClientTestTransport(func(*http.Request) (*http.Response, error) {
+		sent.Store(true)
+		return nil, errors.New("unexpected pull")
+	})}
+	runner := &Runner{runModel: forbidModel(t)}
+	if err := RunHTTPLoop(ctx, client, "http://minion", "local", runner); err != nil || sent.Load() {
+		t.Fatalf("canceled pre-pull worker failed or sent a request: error=%v sent=%t", err, sent.Load())
+	}
+	if err := RunHTTP(ctx, client, "http://minion", "local", runner); !errors.Is(err, context.Canceled) || sent.Load() {
+		t.Fatalf("one-attempt API changed cancellation: error=%v sent=%t", err, sent.Load())
+	}
+}
+
 func TestRunHTTPLoopCanceledHeldPullIsCleanShutdown(t *testing.T) {
 	entered := make(chan struct{})
 	release := make(chan struct{})

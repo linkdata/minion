@@ -96,6 +96,9 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 		return errors.New("invalid HTTP execution base URL")
 	}
 	if err := ctx.Err(); err != nil {
+		if status != nil && errors.Is(err, context.Canceled) {
+			*status = httpRunIdleShutdown
+		}
 		return err
 	}
 	configured := *client
