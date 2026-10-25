@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
@@ -34,7 +35,7 @@ func localWorkerTestStart(t *testing.T, mode string) *localWorker {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		if err := w.Close(); err != nil && mode != "hold" && mode != "known-hold" && mode != "known" && mode != "crash" && mode != "precrash" && mode != "drain-kill" && mode != "stop-exit" {
+		if err := w.Close(); err != nil && mode != "hold" && mode != "known-hold" && mode != "known" && mode != "crash" && mode != "precrash" && mode != "preflight-fail" && mode != "drain-kill" && mode != "stop-exit" {
 			t.Errorf("close local worker: %v", err)
 		}
 		if t.Failed() {
@@ -186,6 +187,22 @@ func TestLocalWorkerAwaitHeldPullReportsChildExit(t *testing.T) {
 	}
 	if _, err := os.Lstat(w.endpoint.SocketPath()); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("pre-pull exit left the endpoint: %v", err)
+	}
+}
+
+func TestLocalWorkerAwaitHeldPullReportsBoundedPreflightDiagnostic(t *testing.T) {
+	w := localWorkerTestStart(t, "preflight-fail")
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	err := w.awaitHeldPull(ctx)
+	if err == nil || !strings.Contains(err.Error(), "selected Codex CLI unavailable") || !strings.Contains(err.Error(), `\nforged log line`) || strings.Contains(err.Error(), "\nforged log line") || len(err.Error()) > 9<<10 {
+		t.Fatalf("preflight diagnostic was lost, unbounded or active: %v", err)
+	}
+	w.executor.mu.Lock()
+	pull := w.executor.pull
+	w.executor.mu.Unlock()
+	if pull || w.cmd.ProcessState == nil {
+		t.Fatalf("failed preflight held a pull or left its child live: pull=%t state=%v", pull, w.cmd.ProcessState)
 	}
 }
 
@@ -716,6 +733,10 @@ func TestLocalWorkerHelper(t *testing.T) {
 	}
 	if err := workspace.WriteAtomic(report+".ready", []byte(strconv.Itoa(os.Getpid()))); err != nil {
 		t.Fatal(err)
+	}
+	if mode == "preflight-fail" {
+		fmt.Fprintln(os.Stderr, strings.Repeat("x", 16<<10)+"selected Codex CLI unavailable\nforged log line")
+		os.Exit(7)
 	}
 	if mode == "stop-exit" || mode == "stop-success" {
 		<-interrupt

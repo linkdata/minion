@@ -6,12 +6,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os/exec"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
 
+	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/executil"
+	"github.com/linkdata/minion/internal/monitor"
 )
 
 // localWorker owns one direct child and its private HTTP endpoint.
@@ -23,9 +27,21 @@ type localWorker struct {
 	exited    chan struct{}
 	childMu   sync.Mutex
 	stopSent  atomic.Bool
+	stderr    *bounded.Tail
 	waitErr   error
 	closeOnce sync.Once
 	closeErr  error
+}
+
+type lockedWriter struct {
+	mu     *sync.Mutex
+	writer io.Writer
+}
+
+func (w lockedWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.writer.Write(p)
 }
 
 // startLocalWorker owns the direct child's context and command. configure sets
@@ -48,9 +64,20 @@ func startLocalWorker(runtimeDir, executorID, path string, args []string, config
 	if configure != nil {
 		configure(cmd, endpoint.SocketPath())
 	}
+	// stdout and stderr may share one caller-owned writer.
+	outputMu := &sync.Mutex{}
+	if cmd.Stdout != nil {
+		cmd.Stdout = lockedWriter{outputMu, cmd.Stdout}
+	}
+	stderr := &bounded.Tail{}
+	if cmd.Stderr == nil {
+		cmd.Stderr = stderr
+	} else {
+		cmd.Stderr = io.MultiWriter(lockedWriter{outputMu, cmd.Stderr}, stderr)
+	}
 	cmd.Cancel = commandCancel
 	executil.Prepare(cmd)
-	w := &localWorker{executor: executor, endpoint: endpoint, cmd: cmd, cancel: cancel, exited: make(chan struct{})}
+	w := &localWorker{executor: executor, endpoint: endpoint, cmd: cmd, cancel: cancel, exited: make(chan struct{}), stderr: stderr}
 	preparedCancel := cmd.Cancel
 	cmd.Cancel = func() error {
 		err := preparedCancel()
@@ -113,7 +140,11 @@ func (w *localWorker) awaitHeldPull(ctx context.Context) (waitErr error) {
 		w.executor.mu.Unlock()
 		select {
 		case <-w.exited:
-			return errors.Join(errors.New("local worker exited before holding a pull"), w.waitErr)
+			err := errors.Join(errors.New("local worker exited before holding a pull"), w.waitErr)
+			if detail := strings.TrimSpace(w.stderr.String()); detail != "" {
+				err = errors.Join(err, fmt.Errorf("worker startup diagnostic: %s", monitor.InertLogText(detail)))
+			}
+			return err
 		default:
 		}
 		select {
