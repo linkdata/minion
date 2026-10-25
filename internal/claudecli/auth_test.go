@@ -6,17 +6,20 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/config"
-	workspacepath "github.com/linkdata/minion/internal/workspace"
 )
 
 const dummyAPIKey = "minion-dummy-config-api-key"
 
 func TestAuthentication(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Claude CLI is not supported on native Windows")
+	}
 	parent := filepath.Join(t.TempDir(), "space ' $ `\n")
 	if err := os.Mkdir(parent, 0o700); err != nil {
 		t.Fatal(err)
@@ -46,9 +49,7 @@ func TestAuthentication(t *testing.T) {
 func TestAuthenticationCanonicalParent(t *testing.T) {
 	parent := t.TempDir()
 	link := filepath.Join(t.TempDir(), "auth-parent")
-	if err := os.Symlink(parent, link); err != nil {
-		t.Fatal(err)
-	}
+	symlinkOrSkip(t, parent, link)
 	dir, err := authentication(link, dummyAPIKey)
 	if err != nil {
 		t.Fatal(err)
@@ -65,15 +66,9 @@ func TestAuthenticationCanonicalParent(t *testing.T) {
 func TestAPIKeyConfiguration(t *testing.T) {
 	for _, validate := range []bool{false, true} {
 		t.Run(map[bool]string{false: "run", true: "validate"}[validate], func(t *testing.T) {
-			fakeExecutable(t, "bwrap", "exit 99\n")
-			fakeExecutable(t, "socat", "exit 99\n")
 			binary := fakeExecutable(t, "claude", `test -z "$ANTHROPIC_API_KEY$CLAUDE_CODE_OAUTH_TOKEN$ANTHROPIC_AUTH_TOKEN" || exit 2
 test "$(cat "$CLAUDE_CONFIG_DIR/api-key")" = '`+dummyAPIKey+`' || exit 3
 printf '%s\n' "$CLAUDE_CONFIG_DIR" >> "$0.authdirs"
-if [ "$1" = '--version' ]; then
-  printf '%s\n' '2.1.302 (Claude Code)'
-  exit
-fi
 printf '%s\n' "$@" >> "$0.args"
 for arg in "$@"; do
   if [ "$arg" = auth ]; then
@@ -119,10 +114,9 @@ esac
 				var policy struct {
 					Helper  string `json:"apiKeyHelper"`
 					Sandbox struct {
-						Filesystem struct {
-							Read  []string `json:"allowRead"`
-							Write []string `json:"allowWrite"`
-						} `json:"filesystem"`
+						Credentials struct {
+							Files []struct{ Path, Mode string } `json:"files"`
+						} `json:"credentials"`
 					} `json:"sandbox"`
 				}
 				if err := json.Unmarshal([]byte(lines[i+1]), &policy); err != nil {
@@ -131,10 +125,8 @@ esac
 				if policy.Helper != apiKeyHelper(dirs[0]) {
 					t.Fatal("missing explicit configured-key helper")
 				}
-				for _, grant := range append(policy.Sandbox.Filesystem.Read, policy.Sandbox.Filesystem.Write...) {
-					if workspacepath.Within(grant, dirs[0]) {
-						t.Fatal("credential helper is exposed to sandbox tools")
-					}
+				if len(policy.Sandbox.Credentials.Files) != 1 || policy.Sandbox.Credentials.Files[0].Path != filepath.Join(dirs[0], "api-key") || policy.Sandbox.Credentials.Files[0].Mode != "deny" {
+					t.Fatalf("credential file is not denied to sandbox tools: %+v", policy.Sandbox.Credentials.Files)
 				}
 				policies++
 			}
@@ -206,21 +198,12 @@ func TestAPIKeyAnswerRedaction(t *testing.T) {
 
 func TestAPIKeyGrantOverlap(t *testing.T) {
 	root := t.TempDir()
-	workspace := filepath.Join(root, "checkout")
-	if err := os.Mkdir(workspace, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	skill := filepath.Join(root, "SKILL.md")
-	if err := os.WriteFile(skill, []byte("dummy skill"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	fakeExecutableUnchecked(t, "claude", "exit 99\n")
-	_, err := Run(t.Context(), workspace, "task", false, "", config.ClaudeConfig{APIKey: dummyAPIKey, Skills: []string{skill}})
-	if err == nil || !strings.Contains(err.Error(), "API key directory overlaps") {
-		t.Fatal("accepted skill read grant containing credential directory")
-	}
-	entries, err := os.ReadDir(root)
-	if err != nil || len(entries) != 2 {
-		t.Fatalf("failed validation retained temporary files: %v, %v", entries, err)
+	for _, test := range []struct{ workspace, output string }{
+		{workspace: root},
+		{workspace: filepath.Join(root, "source"), output: root},
+	} {
+		if _, err := sandboxSettings(test.workspace, test.output, filepath.Join(root, "auth")); err == nil || !strings.Contains(err.Error(), "API key directory overlaps") {
+			t.Fatalf("accepted writable root containing credential directory: %+v: %v", test, err)
+		}
 	}
 }

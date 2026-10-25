@@ -19,7 +19,6 @@ import (
 )
 
 func TestHostileHTTPAuditRunsPublishingHostValidator(t *testing.T) {
-	requireActionProcessGroup(t)
 	installActionTestSkills(t, testAuditSkillURL)
 	skillDir := filepath.Join(os.Getenv("HOME"), ".agents", "skills", "security-audit")
 	validator := `const findings = JSON.parse(require("node:fs").readFileSync(process.argv[2], "utf8"));

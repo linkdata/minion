@@ -17,7 +17,6 @@ import (
 )
 
 func TestRunnerChecksAuditPrerequisitesBeforeModel(t *testing.T) {
-	requireActionProcessGroup(t)
 	for _, scenario := range []struct{ name, script, node, want string }{
 		{"missing findings validator", "validate-findings.cjs", "valid", "audit validator"},
 		{"nonregular validator", "directory", "valid", "not a regular file"},
@@ -121,9 +120,6 @@ func TestAuditMissingInputsFailBeforeValidatorExecution(t *testing.T) {
 					supplied = append(supplied, file)
 				}
 				allowed := empty && auditArtifactMayBeEmpty(name)
-				if allowed {
-					requireActionProcessGroup(t)
-				}
 				marker := filepath.Join(t.TempDir(), "node-called")
 				nodeDir := fakeOnPath(t, "node", "#!/bin/sh\nprintf called > "+shellQuote(marker)+"\nexit 0\n")
 				err := validateAuditFiles(t.Context(), supplied, t.TempDir(), "/installed/SKILL.md", auditTools{binary: filepath.Join(nodeDir, "node"), permissionFlag: "--permission"}, job.Identity.Repository, "/source", job.Source.Head)
@@ -166,7 +162,6 @@ func TestAuditMissingInputsFailBeforeValidatorExecution(t *testing.T) {
 }
 
 func TestAuditValidatorDiagnosticsStayOutOfErrors(t *testing.T) {
-	requireActionProcessGroup(t)
 	job := testJob(command.SecurityAudit)
 	const diagnostic = "PRIVATE_VALIDATOR_FINDING\nforged journal line \"quoted\"\n"
 	script := "#!/bin/sh\nprintf '%s' " + shellQuote(diagnostic) + " >&2\nexit 23\n"

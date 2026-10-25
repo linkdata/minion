@@ -128,7 +128,6 @@ func TestEveryActionPromptDeclaresRenderedPublicationBudget(t *testing.T) {
 }
 
 func TestNoCriticRunnerKeepsChangedFixWithUnpublishedOversizedSummary(t *testing.T) {
-	requireActionProcessGroup(t)
 	// The provider seam replaces the model CLI; repository preparation still runs Git.
 	for _, summary := range []struct{ name, text string }{
 		{"raw byte overflow", strings.Repeat("x", maxOutputBytes+1)},
@@ -167,7 +166,6 @@ func TestNoCriticRunnerKeepsChangedFixWithUnpublishedOversizedSummary(t *testing
 }
 
 func TestCriticAuditUsesValidatedReportDespiteOversizedProposal(t *testing.T) {
-	requireActionProcessGroup(t)
 	job := withClaudeCritic(auditRunnerJob(t))
 	job.CriticMaxRounds = 1
 	const report = "Validated audit report\n"
@@ -199,7 +197,6 @@ func TestCriticAuditUsesValidatedReportDespiteOversizedProposal(t *testing.T) {
 }
 
 func TestCriticRunnerKeepsChangedFixWithUnpublishedOversizedSummary(t *testing.T) {
-	requireActionProcessGroup(t)
 	for _, changed := range []bool{false, true} {
 		t.Run(fmt.Sprintf("changed=%t", changed), func(t *testing.T) {
 			job := withClaudeCritic(testJob(command.Fix))
@@ -238,7 +235,6 @@ func TestCriticRunnerKeepsChangedFixWithUnpublishedOversizedSummary(t *testing.T
 }
 
 func TestCriticRunnerRejectsInvisibleNoChangeFixBeforeCritic(t *testing.T) {
-	requireActionProcessGroup(t)
 	for _, changed := range []bool{false, true} {
 		t.Run(fmt.Sprintf("changed=%t", changed), func(t *testing.T) {
 			job := withClaudeCritic(testJob(command.Fix))

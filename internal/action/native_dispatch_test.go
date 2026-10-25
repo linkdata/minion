@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
-	"slices"
 	"strings"
 	"testing"
 
@@ -16,7 +14,6 @@ import (
 )
 
 func TestRunnerNativeDispatchContinuesRolesAndRefreshesFullCritic(t *testing.T) {
-	requireActionProcessGroup(t)
 	for _, action := range []command.Action{command.Comment, command.Fix} {
 		for _, mainProvider := range []string{"codex", "claude"} {
 			t.Run(string(action)+"/"+mainProvider+"-main", func(t *testing.T) {
@@ -28,6 +25,10 @@ func TestRunnerNativeDispatchContinuesRolesAndRefreshesFullCritic(t *testing.T) 
 				}
 				receipts := t.TempDir()
 				root := t.TempDir()
+				root, err := filepath.EvalSymlinks(root)
+				if err != nil {
+					t.Fatal(err)
+				}
 				job := withClaudeCritic(testJob(action))
 				if mainProvider == "claude" {
 					job.Main.Provider, job.Critic.Provider = "claude", "codex"
@@ -80,7 +81,6 @@ for arg do
   --json-schema) printf '%%s' "$arg" > "$base.$n.schema" ;;
   --output-schema) cat "$arg" > "$base.$n.schema" ;;
  esac
- case "$arg" in /*/.minion-context-*) cat "$arg/source.json" > "$base.$n.source" ;; esac
  if $positional && [ "$arg" != - ]; then id="$arg"; fi
  if [ "$arg" = -- ]; then positional=true; fi
  previous="$arg"
@@ -170,47 +170,51 @@ fi
 						if strings.Contains(args, "stale-host-") || !strings.Contains(args, "--model\n"+role.Model+"\n") {
 							t.Fatalf("%s call%d lost native role model: %s", provider, call, args)
 						}
+						prompt := read(provider, call, "prompt")
+						if !strings.Contains(prompt, ".minion-context-") || !strings.Contains(prompt, job.Source.Head) || strings.Contains(args, ".minion-context-") {
+							t.Fatalf("%s call%d lost prompt context or passed it as a writable root: args=%s prompt=%s", provider, call, args, prompt)
+						}
 						if provider == "codex" {
 							if !strings.Contains(args, fmt.Sprintf("model_reasoning_effort=%q\n", role.Effort)) {
 								t.Fatalf("Codex call%d lost native role effort: %s", call, args)
 							}
-							if !regexp.MustCompile(`"[^"\n]*/\.minion-context-[^"\n]+"="read"`).MatchString(args) {
-								t.Fatalf("Codex call%d lacks a read-only context grant: %s", call, args)
+							mode := `sandbox_mode="read-only"`
+							if action == command.Fix && provider == job.Main.Provider {
+								mode = `sandbox_mode="workspace-write"`
+							}
+							if !strings.Contains(args, mode) || strings.Contains(args, "permissions.minion") {
+								t.Fatalf("Codex call%d lost native sandbox mode: %s", call, args)
 							}
 						} else {
-							arguments, values, contextDir := strings.Split(args, "\n"), map[string]string{}, ""
+							arguments, values := strings.Split(args, "\n"), map[string]string{}
 							for n, arg := range arguments[:len(arguments)-1] {
 								values[arg] = arguments[n+1]
-								if arg == "--add-dir" && strings.HasPrefix(filepath.Base(arguments[n+1]), ".minion-context-") {
-									contextDir = arguments[n+1]
-								}
 							}
-							if contextDir == "" || values["--json-schema"] != schema || values["--effort"] != role.Effort {
-								t.Fatalf("Claude call%d lost native context/schema/effort: %s", call, args)
+							if values["--json-schema"] != schema || values["--effort"] != role.Effort || values["--permission-mode"] != "dontAsk" || !strings.Contains(args, "--safe-mode\n") {
+								t.Fatalf("Claude call%d lost native sandbox/schema/effort: %s", call, args)
 							}
 							var policy struct {
 								Sandbox struct {
-									Filesystem struct {
-										AllowRead []string `json:"allowRead"`
-										DenyWrite []string `json:"denyWrite"`
-									} `json:"filesystem"`
+									Enabled           bool `json:"enabled"`
+									FailIfUnavailable bool `json:"failIfUnavailable"`
 								} `json:"sandbox"`
 							}
 							if err := json.Unmarshal([]byte(values["--settings"]), &policy); err != nil {
 								t.Fatal(err)
 							}
-							if !slices.Contains(policy.Sandbox.Filesystem.AllowRead, contextDir) || !slices.Contains(policy.Sandbox.Filesystem.DenyWrite, contextDir) {
-								t.Fatalf("Claude call%d context grant is not read-only: %+v", call, policy)
+							grant := values["--add-dir"]
+							writableMain := action == command.Fix && provider == job.Main.Provider
+							if !policy.Sandbox.Enabled || !policy.Sandbox.FailIfUnavailable || (grant != "") != writableMain || grant != "" && (filepath.Dir(grant) != root || !strings.Contains(prompt, fmt.Sprintf("%q", grant))) {
+								t.Fatalf("Claude call%d lost native sandbox mode: args=%s policy=%+v", call, args, policy)
 							}
-							prompt := read(provider, call, "prompt")
 							skill := filepath.Join(os.Getenv("HOME"), ".claude", "skills", "ponytail-review", "SKILL.md")
-							if !strings.Contains(read(provider, call, "source"), job.Source.Head) || !strings.Contains(prompt, contextDir) || !strings.Contains(prompt, skill) {
-								t.Fatalf("Claude call%d lost source identity or skill/context prompt: %s", call, prompt)
+							if !strings.Contains(prompt, skill) {
+								t.Fatalf("Claude call%d lost skill prompt: %s", call, prompt)
 							}
 						}
 						wantHistory := provider == job.Critic.Provider && call%2 == 0 || provider == job.Main.Provider && call >= 3
-						if strings.Contains(read(provider, call, "args"), ".minion-review-history-") != wantHistory || strings.Contains(read(provider, call, "prompt"), "Application-owned refutations") != wantHistory {
-							t.Fatalf("%s call%d received the wrong refutation grant/context", provider, call)
+						if strings.Contains(args, ".minion-review-history-") || strings.Contains(prompt, ".minion-review-history-") != wantHistory || strings.Contains(prompt, "Application-owned refutations") != wantHistory {
+							t.Fatalf("%s call%d received the wrong refutation context", provider, call)
 						}
 					}
 					if _, err := os.Lstat(read(provider, 1, "cwd")); !os.IsNotExist(err) {

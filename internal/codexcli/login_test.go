@@ -98,7 +98,7 @@ func TestCheckLoginKeepsImplicitNativeHome(t *testing.T) {
 }
 
 func TestCheckLoginRequiresKnownNativeHome(t *testing.T) {
-	binary := installFakeCodexUnchecked(t, "#!/bin/sh\ntouch \"$0.called\"\n")
+	binary := installFakeCodex(t, "#!/bin/sh\ntouch \"$0.called\"\n")
 	t.Setenv("HOME", "")
 	t.Setenv("CODEX_HOME", "")
 	t.Setenv("CODEX_API_KEY", "")

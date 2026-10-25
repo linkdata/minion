@@ -16,7 +16,6 @@ import (
 	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/gitwork"
 	"github.com/linkdata/minion/internal/monitor"
-	"github.com/linkdata/minion/internal/processgroup"
 	"github.com/linkdata/minion/internal/state"
 	"github.com/linkdata/minion/internal/workspace"
 )
@@ -45,10 +44,6 @@ func (e *Orchestrator) perform(ctx context.Context, request monitor.Job) (result
 		return err
 	}
 	defer func() {
-		if errors.Is(resultErr, processgroup.ErrScopeUnconfirmed) {
-			e.logf("preserve prepared checkout after unconfirmed scope release job=%s", request.ID)
-			return
-		}
 		if err := prepared.checkout.Close(); err != nil {
 			e.logf("close prepared action: %v", err)
 		}
@@ -85,11 +80,7 @@ func (e *Orchestrator) prepare(ctx context.Context, request monitor.Job) (prepar
 	p := &preparedAction{request: request}
 	defer func() {
 		if resultErr != nil {
-			if errors.Is(resultErr, processgroup.ErrScopeUnconfirmed) {
-				e.logf("preserve prepared checkout after unconfirmed scope release job=%s", request.ID)
-			} else {
-				resultErr = errors.Join(resultErr, p.checkout.Close())
-			}
+			resultErr = errors.Join(resultErr, p.checkout.Close())
 		}
 	}()
 	if request.Command.Action == command.Fix {

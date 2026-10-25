@@ -271,10 +271,8 @@ func (o *jsonlOutput) finishLine(line []byte) {
 		}
 		if len(content) != 0 && content[0] == '[' {
 			var blocks []struct {
-				Type    string          `json:"type"`
-				IsError bool            `json:"is_error"`
-				Content json.RawMessage `json:"content"`
-				Text    string          `json:"text"`
+				Type string `json:"type"`
+				Text string `json:"text"`
 			}
 			if err := json.Unmarshal(content, &blocks); err != nil {
 				o.fail(fmt.Errorf("invalid Claude tool response: %w", err))
@@ -283,12 +281,6 @@ func (o *jsonlOutput) finishLine(line []byte) {
 			for _, content := range blocks {
 				if e.IsSynthetic && !e.Ambient && content.Type == "text" {
 					o.recordTaskNotice(content.Text)
-				}
-				if content.Type == "tool_result" && content.IsError {
-					if toolSandboxFailure(content.Content) {
-						o.fail(errors.New("sandbox could not start"))
-						return
-					}
 				}
 			}
 		}
@@ -534,36 +526,6 @@ func (o *jsonlOutput) assistantLowerBound() (usage.Tokens, bool) {
 }
 
 func covers(a, b usage.Tokens) bool { return a.Max(b) == a }
-
-func toolSandboxFailure(content json.RawMessage) bool {
-	var text string
-	if json.Unmarshal(content, &text) == nil {
-		return sandboxFailure(text)
-	}
-	var blocks []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
-	}
-	if json.Unmarshal(content, &blocks) == nil {
-		for _, block := range blocks {
-			if block.Type == "text" && sandboxFailure(block.Text) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func sandboxFailure(text string) bool {
-	// Bare bwrap/apply-seccomp output can come from repository commands.
-	const prefix = "Sandbox is required but failed to initialize:"
-	if strings.HasPrefix(text, prefix) {
-		return true
-	}
-	header, rest, ok := strings.Cut(text, "\n")
-	code, valid := strings.CutPrefix(header, "Exit code ")
-	return ok && valid && code != "" && strings.Trim(code, "0123456789") == "" && strings.HasPrefix(rest, prefix)
-}
 
 func isWaitCeilingStop(line []byte) bool {
 	// Managed CLI settings can override its launch environment. Match this

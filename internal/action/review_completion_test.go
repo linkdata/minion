@@ -21,7 +21,6 @@ import (
 const incompleteCritiqueJSON = `{"approved":false,"has_blockers":true,"review_complete":false,"feedback":"Assigned review remains unfinished."}`
 
 func TestRunnerStopsOnIncompleteCriticReview(t *testing.T) {
-	requireActionProcessGroup(t)
 	for _, position := range []struct {
 		name, phase string
 		round       int
@@ -116,7 +115,6 @@ func TestRunnerStopsOnIncompleteCriticReview(t *testing.T) {
 }
 
 func TestRunnerCompletedReviewDoesNotRequireUsageCompletion(t *testing.T) {
-	requireActionProcessGroup(t)
 	job := withClaudeCritic(testJob(command.Comment))
 	calls := 0
 	tokens := usage.Tokens{Input: 11, Output: 2}
@@ -141,7 +139,6 @@ func TestRunnerCompletedReviewDoesNotRequireUsageCompletion(t *testing.T) {
 }
 
 func TestRunnerProviderErrorDoesNotAttestReviewCompletion(t *testing.T) {
-	requireActionProcessGroup(t)
 	failure := errors.New("native provider stopped")
 	for _, verdict := range []struct{ name, answer string }{
 		{name: "completed shape", answer: approvedCritiqueJSON},

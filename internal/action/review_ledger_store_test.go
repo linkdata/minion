@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -38,7 +39,7 @@ func loadPrivateReview(root string) (retainedReview, error) {
 	}
 	for path, want := range map[string]os.FileMode{paths[0]: 0600, filepath.Dir(paths[0]): 0700} {
 		info, err := os.Stat(path)
-		if err != nil || info.Mode().Perm() != want {
+		if err != nil || runtime.GOOS != "windows" && info.Mode().Perm() != want {
 			return retainedReview{}, fmt.Errorf("private mode %s: %v error=%v", path, info, err)
 		}
 	}
@@ -276,7 +277,7 @@ func TestPrivateReviewRecordsDecisionAfterVerdictCheckpoint(t *testing.T) {
 }
 
 func TestPrivateReviewBoundaryBeforeStorageOrPublication(t *testing.T) {
-	for _, scenario := range []string{"foreign identity", "foreign source", "malformed history", "oversized history", "invalid calls", "invalid answer", "read-only source changes", "storage failure", "public root", "symlink root"} {
+	for _, scenario := range []string{"foreign identity", "foreign source", "malformed history", "oversized history", "invalid calls", "invalid answer", "read-only source changes", "storage failure", "non-directory history", "symlink root"} {
 		t.Run(scenario, func(t *testing.T) {
 			job := withClaudeCritic(testJob(command.Comment))
 			result := privateReviewResult(job)
@@ -304,14 +305,12 @@ func TestPrivateReviewBoundaryBeforeStorageOrPublication(t *testing.T) {
 				if err := os.WriteFile(root, []byte("blocked"), 0600); err != nil {
 					t.Fatal(err)
 				}
-			case "public root":
-				if err := os.MkdirAll(filepath.Join(root, "reviews"), 0755); err != nil {
+			case "non-directory history":
+				if err := os.WriteFile(filepath.Join(root, "reviews"), []byte("blocked"), 0600); err != nil {
 					t.Fatal(err)
 				}
 			case "symlink root":
-				if err := os.Symlink(t.TempDir(), filepath.Join(root, "reviews")); err != nil {
-					t.Fatal(err)
-				}
+				symlinkOrSkip(t, t.TempDir(), filepath.Join(root, "reviews"))
 			}
 			if err := e.publish(t.Context(), &preparedAction{job: job}, result); !errors.Is(err, monitor.ErrTerminalJob) {
 				t.Fatalf("unsafe publication was not stopped: %v", err)
@@ -342,8 +341,8 @@ func TestPrivateReviewBoundaryBeforeStorageOrPublication(t *testing.T) {
 func TestPerformCheckpointsPrivateReviewBeforeLaterCalls(t *testing.T) {
 	for _, outcome := range []string{"provider failure", "panic", "storage failure", "provider and storage failure", "initial storage failure"} {
 		t.Run(outcome, func(t *testing.T) {
-			if os.Geteuid() == 0 && (outcome == "storage failure" || outcome == "provider and storage failure") {
-				t.Skip("root bypasses read-only directory permissions")
+			if (runtime.GOOS == "windows" || os.Geteuid() == 0) && (outcome == "storage failure" || outcome == "provider and storage failure") {
+				t.Skip("requires effective POSIX directory permissions and a non-root user")
 			}
 			gitFixtureRemote(t)
 			root := t.TempDir()

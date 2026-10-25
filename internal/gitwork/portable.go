@@ -7,12 +7,12 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/linkdata/minion/internal/bounded"
-	"github.com/linkdata/minion/internal/processgroup"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -199,8 +199,7 @@ func (c *Checkout) Snapshot(ctx context.Context) (s workspace.Snapshot, err erro
 	if s.Base = c.comparisonBase; s.Base != "" {
 		if s.MergeBase, err = runGit(ctx, c.path, "merge-base", s.Base, s.Head); err != nil {
 			var exit *exec.ExitError
-			if ctx.Err() == nil && !errors.Is(err, processgroup.ErrDescendants) && !errors.Is(err, processgroup.ErrUnconfirmed) &&
-				!errors.Is(err, processgroup.ErrExhausted) && errors.As(err, &exit) && exit.ExitCode() == 1 {
+			if ctx.Err() == nil && errors.As(err, &exit) && exit.ExitCode() == 1 {
 				return s, fmt.Errorf("%w: pull request histories have no common ancestor: %w", ErrUnsupportedSource, err)
 			}
 			return s, err
@@ -281,8 +280,44 @@ func (c *Checkout) Import(ctx context.Context, expectedHead string, changes []wo
 	if err := workspace.Apply(c.path, changes); err != nil {
 		return err
 	}
+	// Git add can keep the old index spelling for case-only renames with core.ignoreCase.
+	var deleted strings.Builder
+	for _, change := range changes {
+		if change.Delete {
+			deleted.WriteString(change.Path)
+			deleted.WriteByte(0)
+		}
+	}
+	if deleted.Len() != 0 {
+		if err := runGitInputTo(ctx, c.path, strings.NewReader(deleted.String()), io.Discard, "update-index", "--force-remove", "-z", "--stdin"); err != nil {
+			return fmt.Errorf("stage imported deletions: %w", err)
+		}
+	}
 	if _, err := runGit(ctx, c.path, "add", "--all", "--", "."); err != nil {
 		return fmt.Errorf("stage imported changes: %w", err)
+	}
+	if runtime.GOOS == "windows" {
+		indexedPaths, err := c.indexedImportedPaths(ctx, changes)
+		if err != nil {
+			return err
+		}
+		for _, mode := range []struct {
+			fileMode uint32
+			flag     string
+		}{{workspace.Executable, "+x"}, {workspace.Regular, "-x"}} {
+			var paths strings.Builder
+			for _, change := range changes {
+				if !change.Delete && change.Mode == mode.fileMode && indexedPaths[change.Path] {
+					paths.WriteString(change.Path)
+					paths.WriteByte(0)
+				}
+			}
+			if paths.Len() != 0 {
+				if err := runGitInputTo(ctx, c.path, strings.NewReader(paths.String()), io.Discard, "update-index", "--chmod="+mode.flag, "-z", "--stdin"); err != nil {
+					return fmt.Errorf("restore imported file modes: %w", err)
+				}
+			}
+		}
 	}
 	raw, truncated, err := c.boundedGit(ctx, nil, maxChangedPathListBytes, true,
 		"diff", "--cached", "--raw", "-z", "--no-abbrev", "--no-renames", "--no-ext-diff", "--no-textconv", "HEAD", "--")
@@ -316,6 +351,36 @@ func (c *Checkout) Import(ctx context.Context, expectedHead string, changes []wo
 	return nil
 }
 
+func (c *Checkout) indexedImportedPaths(ctx context.Context, changes []workspace.Change) (map[string]bool, error) {
+	indexed := make(map[string]bool, len(changes))
+	for _, change := range changes {
+		if !change.Delete {
+			indexed[change.Path] = false
+		}
+	}
+	if len(indexed) == 0 {
+		return indexed, nil
+	}
+	raw, truncated, err := c.boundedGit(ctx, nil, maxPathListBytes, true, "ls-files", "--cached", "-z")
+	if err != nil {
+		return nil, err
+	}
+	if truncated {
+		return nil, ErrTooManyFiles
+	}
+	paths, err := splitNUL(raw)
+	if err != nil {
+		return nil, fmt.Errorf("invalid Git index paths: %w", err)
+	}
+	for _, path := range paths {
+		name := string(path)
+		if _, wanted := indexed[name]; wanted {
+			indexed[name] = true
+		}
+	}
+	return indexed, nil
+}
+
 func (c *Checkout) boundedGit(ctx context.Context, stdin io.Reader, limit int, truncate bool, args ...string) ([]byte, bool, error) {
 	readCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -327,7 +392,7 @@ func (c *Checkout) boundedGit(ctx context.Context, stdin io.Reader, limit int, t
 		}
 		return nil, false, err
 	}
-	if errors.Is(err, processgroup.ErrDescendants) || errors.Is(err, processgroup.ErrUnconfirmed) || errors.Is(err, processgroup.ErrExhausted) {
+	if errors.Is(err, exec.ErrWaitDelay) {
 		return nil, false, err
 	}
 	if output.Exceeded {

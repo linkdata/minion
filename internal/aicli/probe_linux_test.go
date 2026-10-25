@@ -9,7 +9,6 @@ import (
 )
 
 func TestProbePreservesLogicalArgv0(t *testing.T) {
-	requireProbeProcessGroup(t)
 	cat, err := exec.LookPath("cat")
 	if err != nil {
 		t.Skip("cat is unavailable")

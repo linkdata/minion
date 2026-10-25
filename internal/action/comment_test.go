@@ -18,7 +18,6 @@ import (
 )
 
 func TestCommentCommandReportsIssueAndPullRequest(t *testing.T) {
-	requireActionProcessGroup(t)
 	for _, subject := range []string{"Issue", "PullRequest"} {
 		t.Run(subject, func(t *testing.T) {
 			installActionTestSkills(t, testReviewSkillURL)

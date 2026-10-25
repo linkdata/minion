@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -22,7 +21,6 @@ import (
 	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/gitwork"
 	"github.com/linkdata/minion/internal/monitor"
-	"github.com/linkdata/minion/internal/processgroup"
 	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/state"
 	"github.com/linkdata/minion/internal/usage"
@@ -85,10 +83,7 @@ func runWithGitCheck(checkGit func(context.Context, string) error) int {
 	}
 	logCommandSkills(cfg, logger)
 	checkWorkRoot := func() error {
-		if err := workroot.Check(cfg.WorkRoot, cfg.StatePath, cfg.WorkRootMaxBytes); err != nil {
-			return err
-		}
-		return checkIsolation(cfg, loadedPath)
+		return checkWorkRootPath(cfg.WorkRoot)
 	}
 	if err := checkWorkRoot(); err != nil {
 		logger.Printf("work root: %v", err)
@@ -113,42 +108,16 @@ func runWithGitCheck(checkGit func(context.Context, string) error) int {
 			logger.Printf("close state: %v", err)
 		}
 	}()
-	if store.Data.UnconfirmedProcessJob != "" {
-		logger.Printf("process scope release for %s is unconfirmed; operator recovery required", store.Data.UnconfirmedProcessJob)
-		return 1
-	}
-	latchProcessError := func(stage string, runErr error) {
-		if errors.Is(runErr, processgroup.ErrScopeUnconfirmed) {
-			store.Data.UnconfirmedProcessJob = stage
-			if saveErr := store.Save(); saveErr != nil {
-				logger.Printf("save unconfirmed process scope release: %v", saveErr)
-			}
-		}
-	}
-	if err := processgroup.Configure(cfg.CommandMaxTasks, int64(cfg.CommandMaxMemoryMiB)<<20); err != nil {
-		logger.Printf("process limits: %v", err)
-		return 1
-	}
-	if err := processgroup.Check(); err != nil {
-		if errors.Is(err, processgroup.ErrScopeUnconfirmed) {
-			latchProcessError("process probe", err)
-		}
-		logger.Printf("process ownership: %v", err)
-		return 1
-	}
 	if err := checkGit(ctx, cfg.WorkRoot); err != nil {
-		latchProcessError("Git preflight", err)
 		logger.Printf("Git preflight: %v", err)
 		return 1
 	}
 	if err := checkModels(ctx, &cfg, logger); err != nil {
-		latchProcessError("AI preflight", err)
 		logger.Printf("AI preflight: %v", err)
 		return 1
 	}
 	token, err := githubToken(ctx)
 	if err != nil {
-		latchProcessError("GitHub authentication", err)
 		logger.Printf("GitHub authentication: %v", err)
 		return 1
 	}
@@ -181,7 +150,7 @@ func runWithGitCheck(checkGit func(context.Context, string) error) int {
 			} else {
 				logger.Printf("poll: %s", monitor.InertLogText(err.Error()))
 			}
-			if !*loop || errors.Is(err, processgroup.ErrUnconfirmed) || errors.Is(err, processgroup.ErrScopeUnconfirmed) {
+			if !*loop {
 				return 1
 			}
 		}
@@ -222,112 +191,27 @@ func newOrchestrator(cfg config.Config, client *github.Client, store *state.Stor
 		CodexEffort:           cfg.Codex.ReasoningEffort,
 		ClaudeModel:           cfg.Claude.Model,
 		ClaudeEffort:          cfg.Claude.Effort,
-		// Jobs override model, effort and skills; the runner keeps host credentials and sandbox grants.
+		// Jobs override model, effort and skills; the runner keeps host credentials.
 		Runner: action.Runner{
 			Codex:  config.CodexConfig{APIKey: cfg.Codex.APIKey},
-			Claude: config.ClaudeConfig{APIKey: cfg.Claude.APIKey, AllowAllUnixSockets: cfg.Claude.AllowAllUnixSockets},
+			Claude: config.ClaudeConfig{APIKey: cfg.Claude.APIKey},
 			Logger: logger,
 		},
 	}
 }
 
-func checkIsolation(cfg config.Config, configPath string) (resultErr error) {
+func checkWorkRootPath(path string) (resultErr error) {
 	// Host admission retries unsafe placement; later job preparation has its own failure policy.
 	defer func() {
 		if resultErr != nil {
 			resultErr = fmt.Errorf("%w: %w", workroot.ErrUnsafe, resultErr)
 		}
 	}()
-	root, err := workspace.CanonicalPath(cfg.WorkRoot)
+	root, err := workspace.CanonicalPath(path)
 	if err != nil {
 		return err
 	}
-	if err := workspace.CheckRoot(root); err != nil {
-		return err
-	}
-	runner := action.Runner{}
-	for _, provider := range []string{cfg.Main, cfg.Adversarial} {
-		if provider == "" {
-			continue
-		}
-		sources := slices.Clone(cfg.AlwaysOnSkills)
-		if provider == cfg.Main {
-			for _, mapping := range cfg.Commands {
-				if mapping.SupportsProvider(provider) {
-					sources = append(sources, mapping.Skills...)
-				}
-			}
-		}
-		// Missing required skills disable their command; admission needs only existing grants.
-		if err := runner.ConfigureRole(action.RoleSettings{Provider: provider, AlwaysOnSkills: sources}); err != nil {
-			return err
-		}
-	}
-	if err := runner.CheckWorkRootIsolation(root, cfg.Main, cfg.Adversarial); err != nil {
-		return err
-	}
-	private := []string{configPath}
-	if cfg.StatePath != "" {
-		private = append(private,
-			cfg.StatePath,
-			cfg.StatePath+".lock",
-			filepath.Join(filepath.Dir(cfg.StatePath), "usage"),
-		)
-	}
-	// Shared system reads can expose stored credentials even for an unused provider.
-	codexHome, err := codexcli.HomePath()
-	if err != nil {
-		return err
-	}
-	private = append(private, codexHome, filepath.Join(codexHome, "auth.json"), filepath.Join(codexHome, "config.toml"))
-	claudeHome, err := claudecli.HomePath()
-	if err != nil {
-		return err
-	}
-	private = append(private, claudeHome, filepath.Join(claudeHome, ".credentials.json"), filepath.Join(claudeHome, ".claude.json"), filepath.Join(claudeHome, "settings.json"))
-	userHome, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("resolve user home: %w", err)
-	}
-	if !filepath.IsAbs(userHome) {
-		return errors.New("resolve user home: HOME must be absolute")
-	}
-	private = append(private,
-		filepath.Join(userHome, ".codex"),
-		filepath.Join(userHome, ".codex", "auth.json"),
-		filepath.Join(userHome, ".codex", "config.toml"),
-		filepath.Join(userHome, ".claude"),
-		filepath.Join(userHome, ".claude", ".credentials.json"),
-		filepath.Join(userHome, ".claude", ".claude.json"),
-		filepath.Join(userHome, ".claude", "settings.json"),
-		filepath.Join(userHome, ".claude.json"),
-		filepath.Join(userHome, ".git-credentials"),
-		filepath.Join(userHome, ".gitconfig"),
-		filepath.Join(userHome, ".netrc"),
-		filepath.Join(userHome, ".ssh"),
-		filepath.Join(userHome, ".config", "git", "credentials"),
-		filepath.Join(userHome, ".config", "git", "config"),
-		filepath.Join(userHome, ".config", "gh"),
-		filepath.Join(userHome, ".config", "gh", "hosts.yml"),
-	)
-	configHome, err := os.UserConfigDir()
-	if err != nil {
-		return err
-	}
-	private = append(private, filepath.Join(configHome, "git", "credentials"), filepath.Join(configHome, "git", "config"))
-	for _, key := range []string{"GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG"} {
-		if path := os.Getenv(key); path != "" {
-			private = append(private, path)
-		}
-	}
-	ghHome := os.Getenv("GH_CONFIG_DIR")
-	if ghHome == "" {
-		ghHome = filepath.Join(configHome, "gh")
-	}
-	// Match gh's filepath.Join cleaning before checking aliases of hosts.yml.
-	ghHome = filepath.Clean(ghHome)
-	private = append(private, ghHome, filepath.Join(ghHome, "hosts.yml"))
-	return runner.CheckPrivatePaths(private, cfg.Main, cfg.Adversarial)
+	return workspace.CheckRoot(root)
 }
 
 func logCommandSkills(cfg config.Config, logger *log.Logger) {
@@ -416,7 +300,7 @@ func checkModels(ctx context.Context, cfg *config.Config, logger *log.Logger) (e
 		}
 		logger.Printf("%s settings: model=%s %s=%s", label, role.Model, effortName, role.Effort)
 	}
-	logger.Printf("AI roles: main=%s adversarial=%s job_timeout_minutes=%d command_max_tasks=%d command_max_memory_mib=%d", cfg.Main, cfg.Adversarial, cfg.JobTimeoutMinutes, cfg.CommandMaxTasks, cfg.CommandMaxMemoryMiB)
+	logger.Printf("AI roles: main=%s adversarial=%s job_timeout_minutes=%d", cfg.Main, cfg.Adversarial, cfg.JobTimeoutMinutes)
 	if cfg.Adversarial != "" {
 		maxRounds, nonblockingAfterRound, consecutiveNoBlockerRounds := cfg.CriticStopping.Resolve()
 		logger.Printf("critic policy: max_rounds=%d nonblocking_after_round=%d consecutive_no_blocker_rounds=%d", maxRounds, nonblockingAfterRound, consecutiveNoBlockerRounds)

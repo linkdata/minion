@@ -5,11 +5,22 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"unicode"
 	"unicode/utf8"
 )
+
+func symlinkOrSkip(t *testing.T, target, link string) {
+	t.Helper()
+	if err := os.Symlink(target, link); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("Windows symlink fixture is unavailable: %v", err)
+		}
+		t.Fatal(err)
+	}
+}
 
 func TestCanonicalPathCanonicalizesExistingDirectory(t *testing.T) {
 	parent, linkParent := t.TempDir(), t.TempDir()
@@ -18,9 +29,7 @@ func TestCanonicalPathCanonicalizesExistingDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	link := filepath.Join(linkParent, "linked")
-	if err := os.Symlink(parent, link); err != nil {
-		t.Fatal(err)
-	}
+	symlinkOrSkip(t, parent, link)
 	if err := os.Mkdir(filepath.Join(parent, "new"), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -56,9 +65,7 @@ func TestCanonicalPathResolvesRelativeParentsThroughPWD(t *testing.T) {
 		t.Fatal(err)
 	}
 	alias := filepath.Join(root, "alias")
-	if err := os.Symlink(nested, alias); err != nil {
-		t.Fatal(err)
-	}
+	symlinkOrSkip(t, nested, alias)
 	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)

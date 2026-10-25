@@ -26,7 +26,6 @@ func TestCappedPublicationProjectsEveryPublicBodyAndRetainedAudit(t *testing.T) 
 			t.Run(string(action)+"/"+verdict, func(t *testing.T) {
 				job := withClaudeCritic(testJob(action))
 				if action == command.SecurityAudit {
-					requireActionProcessGroup(t)
 					installActionTestSkills(t, testAuditSkillURL)
 					fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
 				}

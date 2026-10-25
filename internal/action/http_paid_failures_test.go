@@ -58,7 +58,6 @@ func (w httpLosePaidACK) Write([]byte) (int, error) {
 }
 
 func TestHTTPPaidDisconnectsKeepRawFactsSeparateFromSavedCheckpoints(t *testing.T) {
-	requireActionProcessGroup(t)
 	for _, stage := range []string{"After request", "After ACK", "critic prefix ACK", "approved decision ACK", "capped decision ACK"} {
 		t.Run(stage, func(t *testing.T) {
 			job := withClaudeCritic(testJob(command.Comment))
@@ -231,7 +230,6 @@ func TestHTTPMissingGitPreparationPreservesDiagnosticBeforeNativeWork(t *testing
 }
 
 func TestHTTPPaidOutputLimitPreservesUsageWithoutTrustingWorkerPolicy(t *testing.T) {
-	requireActionProcessGroup(t)
 	gitFixtureRemote(t)
 	var writes atomic.Int32
 	githubServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -275,7 +273,7 @@ func TestHTTPPaidOutputLimitPreservesUsageWithoutTrustingWorkerPolicy(t *testing
 	case <-time.After(5 * time.Second):
 		t.Fatalf("worker did not receive paid output-limit outcome receipt: parent=%v native=%d writes=%d", parentErr, native.Load(), writes.Load())
 	}
-	if !errors.Is(workerErr, aicli.ErrOutputLimit) || errors.Is(workerErr, monitor.ErrTerminalJob) || parentErr == nil || strings.Contains(parentErr.Error(), "paid native event limit") || errors.Is(parentErr, aicli.ErrOutputLimit) || errors.Is(parentErr, monitor.ErrTerminalJob) || errors.Is(parentErr, monitor.ErrExecutionOutcomeUnknown) || native.Load() != 1 || writes.Load() != 0 {
+	if !errors.Is(workerErr, aicli.ErrOutputLimit) || errors.Is(workerErr, monitor.ErrTerminalJob) || parentErr == nil || strings.Contains(parentErr.Error(), "paid native event limit") || errors.Is(parentErr, aicli.ErrOutputLimit) || errors.Is(parentErr, monitor.ErrTerminalJob) || !errors.Is(parentErr, monitor.ErrExecutionOutcomeUnknown) || native.Load() != 1 || writes.Load() != 0 {
 		t.Fatalf("paid worker limit changed parent policy or reached publication: native=%d writes=%d worker=%v parent=%v", native.Load(), writes.Load(), workerErr, parentErr)
 	}
 	records, err := usage.ReadAll(store.Dir)

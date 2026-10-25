@@ -20,7 +20,7 @@ func TestInstructionProbePreservesOutputLimit(t *testing.T) {
 }
 
 func TestInstructionProbeRejectsRelativeGitExecutable(t *testing.T) {
-	fakeCodex := installFakeCodexUnchecked(t, "#!/bin/sh\nexit 0\n")
+	fakeCodex := installFakeCodex(t, "#!/bin/sh\nexit 0\n")
 	root := t.TempDir()
 	old, err := os.Getwd()
 	if err != nil {

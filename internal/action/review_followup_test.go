@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -22,10 +23,9 @@ import (
 )
 
 func TestRunnerNativeCleanupKeepsAcceptedAnswer(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root bypasses directory permissions")
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("requires effective POSIX directory permissions and a non-root user")
 	}
-	requireActionProcessGroup(t)
 	for _, provider := range []string{"codex", "claude"} {
 		for _, recovers := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/recover=%t", provider, recovers), func(t *testing.T) {
@@ -122,7 +122,6 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"terminal_r
 }
 
 func TestRunnerTerminalFailureStaysTerminalWhenParentCancels(t *testing.T) {
-	requireActionProcessGroup(t)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	root := t.TempDir()
@@ -183,8 +182,8 @@ func TestAuditResultRejectsDuplicateAllowedArtifact(t *testing.T) {
 }
 
 func TestRunnerScratchCreationUsesPreparationFailureClass(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root bypasses directory permissions")
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("requires effective POSIX directory permissions and a non-root user")
 	}
 	root := t.TempDir()
 	if err := os.Chmod(root, 0500); err != nil {
@@ -217,7 +216,6 @@ func TestRevisionInstructionsEvaluateProposedChanges(t *testing.T) {
 }
 
 func TestRunnerCleansPartiallyCreatedCriticSnapshot(t *testing.T) {
-	requireActionProcessGroup(t)
 	job := withClaudeCritic(testJob(command.Fix))
 	root := t.TempDir()
 	marker := filepath.Join(t.TempDir(), "partial-snapshot")
@@ -253,7 +251,6 @@ func TestRunnerCleansPartiallyCreatedCriticSnapshot(t *testing.T) {
 }
 
 func TestRunnerUsesTheProbedNodeAfterPathChanges(t *testing.T) {
-	requireActionProcessGroup(t)
 	installActionTestSkills(t, testAuditSkillURL)
 	first, second := filepath.Join(t.TempDir(), "first-node"), filepath.Join(t.TempDir(), "second-node")
 	fakeOnPath(t, "node", "#!/bin/sh\nprintf '%s\\n' \"$*\" >> "+shellQuote(first)+"\n")
@@ -279,10 +276,9 @@ func TestRunnerUsesTheProbedNodeAfterPathChanges(t *testing.T) {
 }
 
 func TestRunnerDeadlineDuringSessionCleanupClearsValidatedResult(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root bypasses directory permissions")
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("requires effective POSIX directory permissions and a non-root user")
 	}
-	requireActionProcessGroup(t)
 	for _, test := range []struct {
 		name   string
 		action command.Action

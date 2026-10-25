@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -145,9 +146,7 @@ func TestCheckChangesUnchangedSkipsOnlyTopLevelGitDirectory(t *testing.T) {
 					t.Fatal(err)
 				}
 			case "symlink":
-				if err := os.Symlink(privateRoot(t), name); err != nil {
-					t.Fatal(err)
-				}
+				symlinkOrSkip(t, privateRoot(t), name)
 			}
 			err := CheckChangesUnchanged(t.Context(), root, base, changes)
 			want := fmt.Sprintf("unsafe workspace path %q", test.path)
@@ -179,7 +178,11 @@ func TestMaterializeChangesValidatesBeforeWriting(t *testing.T) {
 	}
 	const name = "literal\\backslash"
 	root := privateRoot(t)
-	if err := MaterializeChanges(root, []File{{Path: name, Mode: Regular}}, nil); err == nil || !strings.Contains(err.Error(), "unsafe fix source path") {
+	want := "unsafe fix source path"
+	if runtime.GOOS == "windows" {
+		want = "invalid source file"
+	}
+	if err := MaterializeChanges(root, []File{{Path: name, Mode: Regular}}, nil); err == nil || !strings.Contains(err.Error(), want) {
 		t.Fatalf("unsafe candidate baseline %q accepted: %v", name, err)
 	}
 	entries, err := os.ReadDir(root)

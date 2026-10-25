@@ -98,7 +98,6 @@ func TestAuditSeedsCheckedUsesReviewedFiles(t *testing.T) {
 }
 
 func TestHostileHTTPAuditWorkBudgetCannotPublish(t *testing.T) {
-	requireActionProcessGroup(t)
 	installActionTestSkills(t, testAuditSkillURL)
 	gitFixtureRemote(t, workspace.File{Path: "source.txt", Mode: workspace.Regular, Data: []byte("source\n")})
 	var writes atomic.Int32

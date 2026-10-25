@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -68,10 +69,17 @@ func TestPortableClaudeCommentRoundTripRejectsWrongVersion(t *testing.T) {
 	ctx := testActionContext(t)
 	e = attemptFixture(e)
 	installedHome := os.Getenv("HOME")
-	t.Setenv("HOME", t.TempDir())
+	missingHome := t.TempDir()
+	t.Setenv("HOME", missingHome)
+	if runtime.GOOS == "windows" {
+		t.Setenv("USERPROFILE", missingHome)
+	}
 	// Preparation must not resolve skills from the executor HOME.
 	prepared, err := e.prepare(ctx, request)
 	t.Setenv("HOME", installedHome)
+	if runtime.GOOS == "windows" {
+		t.Setenv("USERPROFILE", installedHome)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}

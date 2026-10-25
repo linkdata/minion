@@ -27,7 +27,6 @@ func (f executorFunc) Execute(ctx context.Context, job Job, checkpoints Checkpoi
 }
 
 func TestFailedExecutorRetainsOnlyCheckpointCapturedReviewEvidence(t *testing.T) {
-	requireActionProcessGroup(t)
 	for _, mode := range []string{"omitted", "unacknowledged suffix", "changed refutation", "unacknowledged decision", "failed After", "acknowledged decision"} {
 		t.Run(mode, func(t *testing.T) {
 			gitFixtureRemote(t)
@@ -129,7 +128,6 @@ func TestFailedExecutorRetainsOnlyCheckpointCapturedReviewEvidence(t *testing.T)
 }
 
 func TestOrchestratorRequiresExecutorAcknowledgementsBeforePublication(t *testing.T) {
-	requireActionProcessGroup(t)
 	for _, mode := range []string{"complete", "omitted", "ignored refusal"} {
 		t.Run(mode, func(t *testing.T) {
 			gitFixtureRemote(t)

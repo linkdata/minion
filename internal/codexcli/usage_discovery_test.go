@@ -93,9 +93,7 @@ func TestUsageDiscoverySkipsSymlinksAndNonRegularEntries(t *testing.T) {
 		filepath.Join(filepath.Dir(root), "linked.jsonl"): child,
 		filepath.Join(sessions, "linked-directory"):       filepath.Dir(child),
 	} {
-		if err := os.Symlink(target, link); err != nil {
-			t.Fatal(err)
-		}
+		symlinkOrSkip(t, target, link)
 	}
 	if err := os.Mkdir(filepath.Join(filepath.Dir(root), "directory.jsonl"), 0700); err != nil {
 		t.Fatal(err)

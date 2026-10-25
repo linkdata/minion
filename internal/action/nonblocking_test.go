@@ -19,7 +19,6 @@ import (
 )
 
 func TestCriticEvidencePreservesBlockerVerdicts(t *testing.T) {
-	requireActionProcessGroup(t)
 	failed := errors.New("provider failed")
 	for _, tt := range []struct {
 		name, answer                      string
@@ -97,7 +96,6 @@ func TestJournalPolicyIsNotPublication(t *testing.T) {
 }
 
 func TestRunnerNonblockingThresholdRequiresFreshFullReview(t *testing.T) {
-	requireActionProcessGroup(t)
 	for _, tt := range []struct {
 		name                 string
 		threshold, rounds    int

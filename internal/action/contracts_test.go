@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -124,7 +126,9 @@ func TestResultValidateRejectsDuplicateAuditMetadataKeys(t *testing.T) {
 
 func TestAuditCompanionsStayInsideInstalledSkillAndPortableResult(t *testing.T) {
 	job := testJob(command.SecurityAudit)
-	for _, companion := range []string{"DOMAIN.md", "/installed/security-audit/DOMAIN.md", "../outside.md", "/etc/passwd", "bad\\path"} {
+	skill := filepath.Join(t.TempDir(), "installed", "security-audit", "SKILL.md")
+	installedCompanion := filepath.Join(filepath.Dir(skill), "DOMAIN.md")
+	for _, companion := range []string{"DOMAIN.md", installedCompanion, "../outside.md", filepath.Join(t.TempDir(), "outside.md"), "bad\\path"} {
 		t.Run(companion, func(t *testing.T) {
 			result := completeAuditResult(job)
 			if err := result.Validate(job); err != nil {
@@ -146,8 +150,8 @@ func TestAuditCompanionsStayInsideInstalledSkillAndPortableResult(t *testing.T) 
 			if (err == nil) != portable || (err != nil && !strings.Contains(err.Error(), "companion file path is not portable")) {
 				t.Fatalf("import companion %q: %v", companion, err)
 			}
-			normalized, err := normalizeAuditArtifacts(result.Artifacts, job, "/installed/security-audit/SKILL.md")
-			inside := portable || companion == "/installed/security-audit/DOMAIN.md"
+			normalized, err := normalizeAuditArtifacts(result.Artifacts, job, skill)
+			inside := portable || companion == installedCompanion
 			if (err == nil) != inside {
 				t.Fatalf("normalize companion %q: %v", companion, err)
 			}
@@ -301,21 +305,25 @@ func TestJobValidate(t *testing.T) {
 }
 
 func TestAuditJobRejectsUncitableSourcePathsBeforeModel(t *testing.T) {
-	for _, test := range []struct{ name, path string }{
-		{"backslash", `literal\backslash`},
-		{"colon", "segment:name"},
-		{"reserved", "CON.txt"},
-		{"trailing dot", "source."},
-		{"leading tilde", "~source"},
-		{"default ignorable", "so\u200burce"},
+	for _, test := range []struct {
+		name, path     string
+		windowsInvalid bool
+	}{
+		{"backslash", `literal\backslash`, true},
+		{"colon", "segment:name", true},
+		{"reserved", "CON.txt", false},
+		{"trailing dot", "source.", true},
+		{"leading tilde", "~source", false},
+		{"default ignorable", "so\u200burce", false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			job := testJob(command.SecurityAudit)
 			job.Source.Files[0].Path = test.path
-			if err := workspace.ValidateSnapshot(job.Source); err != nil {
-				t.Fatalf("fixture source path is not admitted by the portable snapshot: %v", err)
+			sourceErr := workspace.ValidateSnapshot(job.Source)
+			if (sourceErr != nil) != (runtime.GOOS == "windows" && test.windowsInvalid) {
+				t.Fatalf("unexpected source path admission: %v", sourceErr)
 			}
-			if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "audit source path cannot be cited") || strings.Contains(err.Error(), test.path) {
+			if err := job.Validate(); err == nil || (sourceErr == nil && (!strings.Contains(err.Error(), "audit source path cannot be cited") || strings.Contains(err.Error(), test.path))) {
 				t.Fatalf("audit path was accepted or echoed: %v", err)
 			}
 			called := false
@@ -334,13 +342,21 @@ func TestAuditJobRejectsUncitableSourcePathsBeforeModel(t *testing.T) {
 		t.Fatalf("ordinary audit source rejected: %v", err)
 	}
 	job = testJob(command.Comment)
-	job.Source.Files[0].Path = `literal\backslash`
+	readOnlyPath := `literal\backslash`
+	if runtime.GOOS == "windows" {
+		readOnlyPath = "~source"
+	}
+	job.Source.Files[0].Path = readOnlyPath
 	if err := job.Validate(); err != nil {
 		t.Fatalf("other action source acceptance changed: %v", err)
 	}
 	job = testJob(command.SecurityAudit)
-	job.Source.Omitted = []string{`link\source`}
-	job.Source.HeadOmitted = []string{`link\source`}
+	omittedPath := `link\source`
+	if runtime.GOOS == "windows" {
+		omittedPath = "~link"
+	}
+	job.Source.Omitted = []string{omittedPath}
+	job.Source.HeadOmitted = []string{omittedPath}
 	if err := workspace.ValidateSnapshot(job.Source); err != nil {
 		t.Fatalf("fixture omitted head path is not admitted by the portable snapshot: %v", err)
 	}
@@ -350,7 +366,11 @@ func TestAuditJobRejectsUncitableSourcePathsBeforeModel(t *testing.T) {
 	job = testJob(command.SecurityAudit)
 	job.Identity.SubjectType = "PullRequest"
 	job.Source.Base, job.Source.MergeBase = portableHead, portableHead
-	job.Source.BaseFiles = []workspace.File{{Path: `base\source`, Mode: workspace.Regular, Data: []byte("base\n")}}
+	basePath := `base\source`
+	if runtime.GOOS == "windows" {
+		basePath = "~base"
+	}
+	job.Source.BaseFiles = []workspace.File{{Path: basePath, Mode: workspace.Regular, Data: []byte("base\n")}}
 	if err := job.Validate(); err != nil {
 		t.Fatalf("uncitable base-only source blocked current audit: %v", err)
 	}
@@ -408,8 +428,15 @@ func TestFixJobRejectsUnsupportedLayoutBeforeExecution(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			job := testJob(command.Fix)
 			job.Source.Files, job.Source.Omitted = test.files, test.omitted
-			if err := workspace.ValidateSnapshot(job.Source); err != nil {
-				t.Fatalf("invalid exact source fixture: %v", err)
+			if err := workspace.ValidateSnapshot(job.Source); (err != nil) != (runtime.GOOS == "windows" && test.name == "backslash") {
+				t.Fatalf("unexpected source fixture admission: %v", err)
+			}
+			if runtime.GOOS == "windows" && test.name == "backslash" {
+				runner := Runner{WorkRoot: t.TempDir(), runModel: forbidModel(t)}
+				if _, err := runner.Run(t.Context(), job); !errors.Is(err, monitor.ErrTerminalJob) {
+					t.Fatalf("unsafe source reached execution: %v", err)
+				}
+				return
 			}
 			if err := job.Validate(); !errors.Is(err, gitwork.ErrUnsupportedSource) || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("unsupported fix layout validation: %v", err)
@@ -797,7 +824,7 @@ func TestJobJSONRoundTrip(t *testing.T) {
 	job.CriticMaxRounds = config.DefaultCriticMaxRounds
 	job.CriticNonblockingRounds, job.CriticConsecutiveNoBlockerRounds = 4, 2
 	job.Source.Omitted = []string{"omitted-link"}
-	job.Source.ChangedPaths = []string{`back\slash`, "case", "CASE"}
+	job.Source.ChangedPaths = []string{"src/changed", "case", "CASE"}
 	data, err := json.Marshal(job)
 	if err != nil {
 		t.Fatal(err)

@@ -14,7 +14,6 @@ import (
 )
 
 func TestRunnerKeepsRoleSessionsWithinEachAction(t *testing.T) {
-	requireActionProcessGroup(t)
 	job := withClaudeCritic(testJob(command.Comment))
 	job.CriticMaxRounds = 3
 	var actions [][]modelRun
@@ -56,7 +55,6 @@ func TestRunnerKeepsRoleSessionsWithinEachAction(t *testing.T) {
 }
 
 func TestRunnerKeepsSourceCriticContextAndRefutationPaths(t *testing.T) {
-	requireActionProcessGroup(t)
 	job := withClaudeCritic(testJob(command.Fix))
 	job.CriticMaxRounds = 3
 	var mainDir, criticDir, contextDir, historyDir string

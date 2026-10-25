@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -97,6 +98,33 @@ func TestImportRequiresExactlyReviewedPaths(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestIndexedImportedPathsKeepGitArgumentsBounded(t *testing.T) {
+	fixture := newFixture(t)
+	changes := make([]workspace.Change, workspace.MaxChanges)
+	changes[0] = workspace.Change{Path: "README.md", Mode: workspace.Regular}
+	size := len(changes[0].Path)
+	for i := 1; i < len(changes); i++ {
+		name := fmt.Sprintf("%03d/%s/%s", i, strings.Repeat("a", 200), strings.Repeat("b", 200))
+		changes[i] = workspace.Change{Path: name, Mode: workspace.Regular}
+		size += len(name)
+	}
+	if size <= 32767 {
+		t.Fatalf("fixture paths total %d bytes; need more than Windows argv limit", size)
+	}
+	if err := workspace.ValidateChanges(changes); err != nil {
+		t.Fatal(err)
+	}
+	indexed, err := fixture.checkout.indexedImportedPaths(t.Context(), changes)
+	if err != nil || len(indexed) != len(changes) || !indexed["README.md"] {
+		t.Fatalf("indexed README=%t path count=%d error=%v", indexed["README.md"], len(indexed), err)
+	}
+	for _, change := range changes[1:] {
+		if indexed[change.Path] {
+			t.Fatalf("unstaged path %q found in index", change.Path)
+		}
 	}
 }
 
@@ -201,6 +229,9 @@ func TestImportAttestsUnsortedBinaryEmptyModeAndDeletionChanges(t *testing.T) {
 }
 
 func TestSourceAliasesAreUnsupportedForDefaultAndPullRequestCheckout(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("git~1 may resolve to the fixture repository's .git directory")
+	}
 	const path = "git~1/hooks/test"
 	fixture := newFixture(t)
 	alias := filepath.Join(fixture.source, filepath.FromSlash(path))
@@ -231,7 +262,6 @@ func TestSourceAliasesAreUnsupportedForDefaultAndPullRequestCheckout(t *testing.
 }
 
 func TestGitFailureClassificationIsSpecificAndPreservesCancellation(t *testing.T) {
-	requireGitProcessGroup(t)
 	root := t.TempDir()
 	shim := "#!/bin/sh\nprintf '%s\\n' \"$MINION_TEST_GIT_DIAGNOSTIC\" >&2\nexit 1\n"
 	fakeOnPath(t, "git", shim)

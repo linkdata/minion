@@ -9,18 +9,19 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/linkdata/minion/internal/config"
+	"github.com/linkdata/minion/internal/testtemp"
 )
 
 // The test binary is a multicall Codex stub when production sets argv[0] to codex.
 func TestMain(m *testing.M) {
 	if len(os.Args) < 2 || strings.HasPrefix(os.Args[1], "-test.") {
-		os.Exit(m.Run())
+		testtemp.Main(m)
 	}
 	if os.Args[0] != "codex" {
 		fmt.Fprintln(os.Stderr, "codex stub invoked as", os.Args[0])
@@ -28,6 +29,19 @@ func TestMain(m *testing.M) {
 	}
 	switch os.Args[1] {
 	case "exec":
+		for _, arg := range os.Args[2:] {
+			if arg == "--minion-unsupported-capability-probe" {
+				os.Exit(2)
+			}
+			if arg == "--help" {
+				if os.Args[2] == "resume" {
+					fmt.Println("Usage: codex exec resume [OPTIONS] [SESSION_ID] [PROMPT]")
+				} else {
+					fmt.Println("Usage: codex exec [OPTIONS] [PROMPT]")
+				}
+				return
+			}
+		}
 		fmt.Println(`{"type":"thread.started","thread_id":"root"}`)
 		fmt.Println(`{"type":"item.completed","item":{"type":"agent_message","text":"shim answer"}}`)
 		fmt.Println(`{"type":"turn.completed"}`)
@@ -85,7 +99,9 @@ func TestMulticallStubRejectsWrongArgv0(t *testing.T) {
 }
 
 func TestRunInvokesAndGrantsResolvedExecutable(t *testing.T) {
-	requireCodexProcessGroup(t)
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX executable fixture")
+	}
 	root := t.TempDir()
 	bin := filepath.Join(root, "bin")
 	if err := os.Mkdir(bin, 0700); err != nil {
@@ -122,20 +138,15 @@ printf '%s\n' '{"type":"thread.started","thread_id":"symlink-test"}' '{"type":"i
 	if err != nil {
 		t.Fatal(err)
 	}
-	var filesystem string
-	for _, arg := range strings.Split(string(args), "\n") {
-		if strings.HasPrefix(arg, "permissions.minion.filesystem=") {
-			filesystem = arg
-			break
-		}
-	}
-	if !strings.Contains(filesystem, strconv.Quote(want)+`="read"`) || strings.Contains(filesystem, strconv.Quote(alias)+`="read"`) {
-		t.Fatalf("sandbox grants do not match invoked resolved file: %s", filesystem)
+	if !strings.Contains(string(args), `sandbox_mode="read-only"`) || strings.Contains(string(args), "permissions.minion") {
+		t.Fatalf("resolved executable did not use native read-only sandbox: %s", args)
 	}
 }
 
 func TestCanonicalExecutablePreservesMulticallNameInRunAndPreflight(t *testing.T) {
-	requireCodexProcessGroup(t)
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix symlink executable fixture")
+	}
 	root := t.TempDir()
 	target, err := os.Executable()
 	if err != nil {

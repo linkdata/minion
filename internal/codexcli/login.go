@@ -9,7 +9,6 @@ import (
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/config"
-	"github.com/linkdata/minion/internal/processgroup"
 )
 
 // CheckLogin inspects stored authentication without an inference turn.
@@ -34,9 +33,7 @@ func CheckLogin(ctx context.Context, settings config.CodexConfig) (resultErr err
 		return err
 	}
 	defer func() {
-		if !errors.Is(resultErr, processgroup.ErrScopeUnconfirmed) {
-			resultErr = errors.Join(resultErr, os.RemoveAll(dir))
-		}
+		resultErr = errors.Join(resultErr, os.RemoveAll(dir))
 	}()
 	env := childEnvironment(os.Environ(), dir, dir, home, false)
 	if _, err := aicli.Probe(ctx, binary, "codex", []string{"login", "status"}, dir, env, "", ""); err != nil {

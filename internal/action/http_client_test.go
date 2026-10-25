@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"testing/iotest"
 	"testing/synctest"
@@ -21,13 +22,11 @@ import (
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/monitor"
-	"github.com/linkdata/minion/internal/processgroup"
 	"github.com/linkdata/minion/internal/usage"
 	"github.com/linkdata/minion/internal/workroot"
 )
 
 func TestRunHTTPReportsActualObservationsAndRawPaidReceipts(t *testing.T) {
-	requireActionProcessGroup(t)
 	for _, test := range []struct {
 		name            string
 		invalidCounters bool
@@ -50,6 +49,7 @@ func TestRunHTTPReportsActualObservationsAndRawPaidReceipts(t *testing.T) {
 			job := testJob(command.Comment)
 			binding := httpJobBinding(job)
 			expires := time.Now().Add(job.RuntimeBudget)
+			expires = time.Unix(0, expires.UnixNano()) // Match the wire deadline's clock.
 			tokens := usage.Tokens{Input: 17, CachedInput: 3, Output: 5}
 			if test.invalidCounters {
 				tokens.Input = -1
@@ -475,7 +475,7 @@ func TestRunHTTPRequiresWatchAdmissionBeforeRunner(t *testing.T) {
 					if name != "invalid headers" {
 						failure := workroot.ErrUnsafe
 						if name == "parent unknown failure" {
-							failure = errors.Join(monitor.ErrExecutionOutcomeUnknown, processgroup.ErrUnconfirmed, processgroup.ErrScopeUnconfirmed)
+							failure = errors.Join(monitor.ErrExecutionOutcomeUnknown, syscall.ENOSPC, syscall.EDQUOT)
 						}
 						w.Header().Set("Content-Type", "application/json")
 						w.WriteHeader(http.StatusConflict)
@@ -505,7 +505,7 @@ func TestRunHTTPRequiresWatchAdmissionBeforeRunner(t *testing.T) {
 			if outcome.Sequence != 1 || !outcome.Result.matchesJob(job) || outcome.Failure == nil || outcome.Failure.OutcomeUnknown != unknown || len(outcome.Result.Calls) != 0 || outcome.Result.Answer != "" {
 				t.Fatalf("watch startup failure fabricated execution: %+v", outcome)
 			}
-			if unknown && (!errors.Is(err, processgroup.ErrUnconfirmed) || !errors.Is(err, processgroup.ErrScopeUnconfirmed) || !outcome.Failure.Unconfirmed || !outcome.Failure.ScopeUnconfirmed) {
+			if unknown && (!errors.Is(err, syscall.ENOSPC) || !errors.Is(err, syscall.EDQUOT) || !outcome.Failure.NoSpace || !outcome.Failure.QuotaExceeded) {
 				t.Fatalf("known no-work transport mode erased supplied parent failure flags: error=%v outcome=%+v", err, outcome)
 			}
 		})
@@ -606,9 +606,6 @@ func TestRunHTTPKnownNoWorkOutcomeReleasesParentCapacity(t *testing.T) {
 func TestRunHTTPStalledStatusCannotConsumeOutcomeGrace(t *testing.T) {
 	for _, phase := range []string{"prepare", "upload"} {
 		t.Run(phase, func(t *testing.T) {
-			if phase == "upload" {
-				requireActionProcessGroup(t)
-			}
 			run := func(t *testing.T) {
 				job := testJob(command.Comment)
 				job.RuntimeBudget = 2 * time.Second
@@ -692,7 +689,6 @@ func TestRunHTTPStalledStatusCannotConsumeOutcomeGrace(t *testing.T) {
 }
 
 func TestRunHTTPOutcomeACKPreservesKnownReceiptAfterWatchFailure(t *testing.T) {
-	requireActionProcessGroup(t)
 	for _, test := range []struct {
 		name                string
 		early               bool
@@ -703,7 +699,7 @@ func TestRunHTTPOutcomeACKPreservesKnownReceiptAfterWatchFailure(t *testing.T) {
 		duringUpload        bool
 		callerBeforeOutcome bool
 		expiredAfterWatch   bool
-		processFailure      bool
+		nativeFailure       bool
 	}{
 		{name: "malformed watch after ACK"},
 		{name: "truncated watch after ACK", truncated: true},
@@ -716,7 +712,7 @@ func TestRunHTTPOutcomeACKPreservesKnownReceiptAfterWatchFailure(t *testing.T) {
 		{name: "watch first then caller cause before outcome", duringUpload: true, callerBeforeOutcome: true},
 		{name: "watch first then caller cause after ACK", duringUpload: true, externalCause: true},
 		{name: "accepted expiry after upload watch", duringUpload: true, expiredAfterWatch: true},
-		{name: "process failure during upload watch", duringUpload: true, processFailure: true},
+		{name: "native failure during upload watch", duringUpload: true, nativeFailure: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			job := testJob(command.Comment)
@@ -730,7 +726,7 @@ func TestRunHTTPOutcomeACKPreservesKnownReceiptAfterWatchFailure(t *testing.T) {
 			outcomeEntered, watchClosed := make(chan struct{}), make(chan struct{})
 			uploadEntered := make(chan struct{})
 			ctx, cancel := context.WithCancelCause(t.Context())
-			externalCause := errors.Join(processgroup.ErrScopeUnconfirmed, monitor.ErrExecutionOutcomeUnknown)
+			externalCause := errors.Join(syscall.ENOSPC, monitor.ErrExecutionOutcomeUnknown)
 			var native, outcomes, faultReads, observations atomic.Int32
 			client := *parent.server.Client()
 			client.Timeout = 0
@@ -771,7 +767,7 @@ func TestRunHTTPOutcomeACKPreservesKnownReceiptAfterWatchFailure(t *testing.T) {
 					var reader io.Reader = strings.NewReader("{")
 					if test.truncated {
 						reader = iotest.ErrReader(io.ErrUnexpectedEOF)
-					} else if test.processFailure {
+					} else if test.nativeFailure {
 						reader = iotest.ErrReader(externalCause)
 					} else if test.externalCause && !test.duringUpload {
 						reader = iotest.ErrReader(context.Canceled)
@@ -826,17 +822,17 @@ func TestRunHTTPOutcomeACKPreservesKnownReceiptAfterWatchFailure(t *testing.T) {
 			}
 			got := parent.result(t)
 			callerFailure := test.externalCause || test.callerBeforeOutcome
-			workerUnknown := test.early || test.malformedACK || callerFailure || test.processFailure
+			workerUnknown := test.early || test.malformedACK || callerFailure || test.nativeFailure
 			workerFailed := workerUnknown || test.expiredAfterWatch
-			parentFailed := test.early || test.callerBeforeOutcome || test.processFailure || test.expiredAfterWatch
+			parentFailed := test.early || test.callerBeforeOutcome || test.nativeFailure || test.expiredAfterWatch
 			if errors.Is(workerErr, monitor.ErrExecutionOutcomeUnknown) != workerUnknown || (workerErr != nil) != workerFailed || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || (got.err != nil) != parentFailed || native.Load() != 1 || outcomes.Load() != 1 || faultReads.Load() == 0 || len(got.result.Calls) != 1 || test.duringUpload && observations.Load() != 2 {
 				t.Fatalf("watch drain changed known receipt or erased earlier failure: worker=%v parent=%v result=%+v native=%d outcomes=%d reads=%d", workerErr, got.err, got.result, native.Load(), outcomes.Load(), faultReads.Load())
 			}
 			if callerFailure && (!errors.Is(workerErr, externalCause) || context.Cause(ctx) != externalCause) {
 				t.Fatalf("known receipt erased original caller cause: worker=%v caller=%v", workerErr, context.Cause(ctx))
 			}
-			if errors.Is(workerErr, processgroup.ErrScopeUnconfirmed) != (callerFailure || test.processFailure) || errors.Is(got.err, processgroup.ErrScopeUnconfirmed) || test.processFailure && !errors.Is(workerErr, externalCause) {
-				t.Fatalf("worker process claim escaped into parent policy: worker=%v parent=%v", workerErr, got.err)
+			if errors.Is(workerErr, syscall.ENOSPC) != (callerFailure || test.nativeFailure) || errors.Is(got.err, syscall.ENOSPC) || test.nativeFailure && !errors.Is(workerErr, externalCause) {
+				t.Fatalf("worker native failure escaped into parent policy: worker=%v parent=%v", workerErr, got.err)
 			}
 			if test.expiredAfterWatch && (!errors.Is(workerErr, monitor.ErrTerminalJob) || !errors.Is(workerErr, context.DeadlineExceeded) || !errors.Is(got.err, monitor.ErrTerminalJob) || !errors.Is(got.err, context.DeadlineExceeded)) {
 				t.Fatalf("watch child cancellation masked accepted expiry: worker=%v parent=%v", workerErr, got.err)
@@ -962,7 +958,6 @@ func TestHTTPClientWatchDistinguishesLocalStopFromParsedReplies(t *testing.T) {
 }
 
 func TestRunHTTPDeliversPaidFactsAfterCancellationWatchStopsAction(t *testing.T) {
-	requireActionProcessGroup(t)
 	for _, name := range []string{"deadline", "canceled", "completed", "malformed", "pipe before outcome", "local parent cancellation", "local action deadline"} {
 		t.Run(name, func(t *testing.T) {
 			job := testJob(command.Comment)
@@ -983,7 +978,7 @@ func TestRunHTTPDeliversPaidFactsAfterCancellationWatchStopsAction(t *testing.T)
 				case "next":
 					runtime := job.RuntimeBudget
 					if name == "local action deadline" {
-						runtime = time.Second
+						runtime = 5 * time.Second
 					}
 					httpClientTestJSON(t, w, httpAssignment{Job: job, Expires: time.Now().Add(runtime).UnixNano()})
 					return
@@ -1149,7 +1144,7 @@ func TestHTTPClientSendsOneBoundFailureForUnrepresentableOutcome(t *testing.T) {
 				}
 				originalCalls, originalRefs := slices.Clone(result.Calls), slices.Clone(result.Refutations)
 				originalIdentity, originalReason := result.Identity, result.CriticStopReason
-				err = checkpoints.outcome(result, errors.Join(monitor.ErrTerminalJob, processgroup.ErrScopeUnconfirmed))
+				err = checkpoints.outcome(result, errors.Join(monitor.ErrTerminalJob, syscall.ENOSPC))
 				if !errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || requests.Load() != 1 || len(outcomes) != 1 || len(result.Answer) != maxOutputBytes+1 || result.Identity != originalIdentity || result.CriticStopReason != originalReason || !slices.Equal(result.Calls, originalCalls) || !slices.Equal(result.Refutations, originalRefs) {
 					t.Fatalf("fallback hid unknown outcome, retried, or mutated raw result: error=%v requests=%d", err, requests.Load())
 				}
@@ -1166,7 +1161,7 @@ func TestHTTPClientSendsOneBoundFailureForUnrepresentableOutcome(t *testing.T) {
 				if test.wantReason {
 					wantReason = originalReason
 				}
-				if !got.Result.matchesJob(job) || got.Result.Answer != "" || len(got.Result.Changes)+len(got.Result.Artifacts)+len(got.Result.Diagnostics) != 0 || !slices.Equal(got.Result.Calls, wantCalls) || !slices.Equal(got.Result.Refutations, wantRefs) || got.Result.CriticStopReason != wantReason || got.Failure == nil || !got.Failure.Terminal || !got.Failure.ScopeUnconfirmed || !got.Failure.OutcomeUnknown {
+				if !got.Result.matchesJob(job) || got.Result.Answer != "" || len(got.Result.Changes)+len(got.Result.Artifacts)+len(got.Result.Diagnostics) != 0 || !slices.Equal(got.Result.Calls, wantCalls) || !slices.Equal(got.Result.Refutations, wantRefs) || got.Result.CriticStopReason != wantReason || got.Failure == nil || !got.Failure.Terminal || !got.Failure.NoSpace || !got.Failure.OutcomeUnknown {
 					t.Fatalf("bounded fallback lost actual flags or invented success/receipts: %+v", got)
 				}
 			})

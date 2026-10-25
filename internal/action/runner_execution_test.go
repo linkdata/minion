@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os/exec"
 	"slices"
 	"testing"
 
@@ -49,8 +50,20 @@ func TestRunnerExecuteRequiresCheckpoints(t *testing.T) {
 	}
 }
 
+func TestRunnerWaitDelayKeepsReceiptWithoutAutomaticRetry(t *testing.T) {
+	f := newExecutionAdapterFixture(t, testJob(command.Comment))
+	tokens := usage.Tokens{Input: 13, Output: 4}
+	runner := Runner{WorkRoot: t.TempDir(), runModel: func(context.Context, modelRun) (aicli.Result, error) {
+		return aicli.Result{Tokens: tokens}, exec.ErrWaitDelay
+	}}
+	result, err := runner.Execute(t.Context(), f.job, f.sink)
+	finalErr := f.sink.finish(result, err)
+	if !errors.Is(err, exec.ErrWaitDelay) || !errors.Is(finalErr, monitor.ErrExecutionOutcomeUnknown) || len(result.Calls) != 1 || result.Calls[0].Tokens != tokens || result.Answer != "" {
+		t.Fatalf("failed paid call was lost or retryable: result=%+v raw=%v final=%v", result, err, finalErr)
+	}
+}
+
 func TestRunnerExecuteCheckpointsInsideObserverAndSeparatesDecision(t *testing.T) {
-	requireActionProcessGroup(t)
 	job := withClaudeCritic(testJob(command.Comment))
 	tokens := usage.Tokens{Input: 11, CachedInput: 3, Output: 2}
 	var events []string
@@ -123,7 +136,6 @@ func TestRunnerExecuteCheckpointsInsideObserverAndSeparatesDecision(t *testing.T
 }
 
 func TestRunnerExecuteCallCheckpointFailurePreservesReturnedFacts(t *testing.T) {
-	requireActionProcessGroup(t)
 	checkpointErr, nativeErr := errors.New("checkpoint failed"), errors.New("native failed")
 	for _, test := range []struct {
 		name, role string
@@ -188,7 +200,6 @@ func TestRunnerExecuteCallCheckpointFailurePreservesReturnedFacts(t *testing.T) 
 }
 
 func TestRunnerExecuteStopsAfterPaidReviewCheckpointFailure(t *testing.T) {
-	requireActionProcessGroup(t)
 	job := withClaudeCritic(testJob(command.Comment))
 	reviewErr := errors.New("paid review checkpoint failed")
 	tokens := usage.Tokens{Input: 23, CachedInput: 7, Output: 4}
@@ -230,7 +241,6 @@ func TestRunnerExecuteStopsAfterPaidReviewCheckpointFailure(t *testing.T) {
 }
 
 func TestRunnerExecuteAfterCallRunsAfterNativeCancellation(t *testing.T) {
-	requireActionProcessGroup(t)
 	job := testJob(command.Comment)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -253,7 +263,6 @@ func TestRunnerExecuteAfterCallRunsAfterNativeCancellation(t *testing.T) {
 }
 
 func TestRunnerExecuteObserverCancellationSkipsCallCheckpoints(t *testing.T) {
-	requireActionProcessGroup(t)
 	job := testJob(command.Comment)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()

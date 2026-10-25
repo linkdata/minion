@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -31,7 +32,6 @@ func repositorySource(t *testing.T, files []workspace.File) string {
 
 func repositoryFixture(t *testing.T, snapshot workspace.Snapshot) (string, *Repository) {
 	t.Helper()
-	requireGitProcessGroup(t)
 	source := repositorySource(t, snapshot.Files)
 	repo, err := MaterializeRepository(t.Context(), source, snapshot)
 	if err != nil || repo == nil {
@@ -70,7 +70,7 @@ func TestRepositoryCarriesCompleteHistoryOffline(t *testing.T) {
 	tagOnly := fixture.gitInput(fixture.source, "tag-only root\n", "commit-tree", tagTree)
 	fixture.git(fixture.source, "tag", "--annotate", "orphan-tag", "--message", "tag-only history", tagOnly)
 	fixture.git(fixture.source, "push", fixture.remote, "main", "other", "--tags")
-	checkout := fixture.keepCheckout(cloneFromURL(t.Context(), t.TempDir(), "file://"+fixture.remote, "main", false))
+	checkout := fixture.keepCheckout(cloneFromURL(t.Context(), t.TempDir(), fixture.remote, "main", false))
 	// Preparation and all later inspection must work after the remote disappears.
 	if err := os.Rename(fixture.remote, fixture.remote+".offline"); err != nil {
 		t.Fatal(err)
@@ -248,10 +248,8 @@ func TestRepositoryRejectsUnrelatedComparison(t *testing.T) {
 
 func TestRepositoryOmitsLinksWithoutReportingDeletions(t *testing.T) {
 	fixture := newFixture(t)
-	if err := os.Symlink("../outside", filepath.Join(fixture.source, "link")); err != nil {
-		t.Fatal(err)
-	}
-	fixture.git(fixture.source, "add", "link")
+	linkBlob := fixture.gitInput(fixture.source, "../outside", "hash-object", "-w", "--stdin")
+	fixture.git(fixture.source, "update-index", "--add", "--cacheinfo", "120000,"+linkBlob+",link")
 	fixture.git(fixture.source, "update-index", "--add", "--cacheinfo", "160000,"+fixture.base+",sub")
 	fixture.git(fixture.source, "commit", "-m", "omitted symlink and gitlink")
 	fixture.git(fixture.source, "push", fixture.remote, "main")
@@ -427,8 +425,8 @@ func TestRepositoryPinsModelConfigAndDisablesLogMailmap(t *testing.T) {
 	source, _ := repositoryFixture(t, snapshot)
 	assertModelRepositoryGit(t, source, snapshot.Head+"\n", "rev-parse", "refs/remotes/origin/HEAD")
 	for _, setting := range []struct{ key, want string }{
-		{"core.hooksPath", "/dev/null\n"}, {"core.fsmonitor", "false\n"}, {"core.fileMode", "true\n"},
-		{"core.excludesFile", "/dev/null\n"}, {"core.attributesFile", "/dev/null\n"},
+		{"core.hooksPath", os.DevNull + "\n"}, {"core.fsmonitor", "false\n"}, {"core.fileMode", gitFileMode() + "\n"},
+		{"core.excludesFile", os.DevNull + "\n"}, {"core.attributesFile", os.DevNull + "\n"},
 		{"core.logAllRefUpdates", "false\n"}, {"core.pager", "cat\n"}, {"log.mailmap", "false\n"},
 		{"protocol.allow", "never\n"}, {"credential.helper", "\n"}, {"gc.auto", "0\n"}, {"maintenance.auto", "false\n"},
 	} {
@@ -585,13 +583,13 @@ func TestRepositoryVerifyRejectsMetadataMutations(t *testing.T) {
 				saved := filepath.Join(t.TempDir(), "saved.git")
 				if err = os.Rename(dir, saved); err == nil {
 					if scenario.name == "root symlink" {
-						err = os.Symlink(saved, dir)
+						symlinkOrSkip(t, saved, dir)
 					} else {
 						err = os.WriteFile(dir, []byte("replacement metadata"), 0600)
 					}
 				}
 			case "added symlink":
-				err = os.Symlink("config", filepath.Join(dir, "added"))
+				symlinkOrSkip(t, "config", filepath.Join(dir, "added"))
 			case "hard link":
 				err = os.Link(filepath.Join(dir, "config"), filepath.Join(t.TempDir(), "extra-link"))
 			}
@@ -621,7 +619,8 @@ func TestRepositoryVerifyBoundsMetadata(t *testing.T) {
 
 func TestRepositoryDigestEntryLimitCountsRoot(t *testing.T) {
 	dir := t.TempDir()
-	for i := 0; i < workspace.MaxEntries; i++ {
+	const limit = 4
+	for i := 0; i < limit; i++ {
 		f, err := os.Create(filepath.Join(dir, fmt.Sprint(i)))
 		if err != nil {
 			t.Fatal(err)
@@ -630,13 +629,13 @@ func TestRepositoryDigestEntryLimitCountsRoot(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := repositoryDigest(t.Context(), dir); err == nil || !strings.Contains(err.Error(), "repository metadata exceeds entry limit") {
+	if _, err := repositoryDigestWithLimit(t.Context(), dir, limit); err == nil || !strings.Contains(err.Error(), "repository metadata exceeds entry limit") {
 		t.Fatalf("wide metadata directory error=%v", err)
 	}
 	if err := os.Remove(filepath.Join(dir, "0")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := repositoryDigest(t.Context(), dir); err != nil {
+	if _, err := repositoryDigestWithLimit(t.Context(), dir, limit); err != nil {
 		t.Fatalf("exact metadata entry limit, including root: %v", err)
 	}
 }
@@ -654,7 +653,7 @@ func TestRepositoryDigestUsesReverseLexicalDepthFirstOrder(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			fmt.Fprintf(hash, "%s\x00%d\x00", name, info.Mode())
+			fmt.Fprintf(hash, "%s\x00%d\x00", filepath.FromSlash(name), info.Mode())
 			if info.Mode().IsRegular() {
 				fmt.Fprintf(hash, "%d\x00%s", len(name), name)
 			}
@@ -692,29 +691,21 @@ func TestRepositoryDigestBoundsTotalMetadata(t *testing.T) {
 	}
 }
 
-func TestMaterializeRepositoryRequiresPrivateRoot(t *testing.T) {
+func TestMaterializeRepositoryRejectsSymlinkRoot(t *testing.T) {
 	snapshot := workspace.Snapshot{Head: strings.Repeat("a", 40), Repository: []byte("bundle")}
-	for _, kind := range []string{"public directory", "symlink"} {
-		t.Run(kind, func(t *testing.T) {
-			root := t.TempDir()
-			source := root
-			if kind == "public directory" {
-				if err := os.Chmod(source, 0755); err != nil {
-					t.Fatal(err)
-				}
-			} else {
-				source = filepath.Join(t.TempDir(), "source")
-				if err := os.Symlink(root, source); err != nil {
-					t.Fatal(err)
-				}
-			}
-			repository, err := MaterializeRepository(t.Context(), source, snapshot)
-			if repository != nil || err == nil || !strings.Contains(err.Error(), "workspace root must be a private directory") {
-				t.Fatalf("private-root check returned repository=%v error=%v", repository, err)
-			}
-			if _, err := os.Lstat(filepath.Join(root, ".git")); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("rejected root received Git metadata: %v", err)
-			}
-		})
+	root := t.TempDir()
+	source := filepath.Join(t.TempDir(), "source")
+	if err := os.Symlink(root, source); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("Windows symlink privilege unavailable: %v", err)
+		}
+		t.Fatal(err)
+	}
+	repository, err := MaterializeRepository(t.Context(), source, snapshot)
+	if repository != nil || err == nil {
+		t.Fatalf("symlink root returned repository=%v error=%v", repository, err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, ".git")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("rejected root received Git metadata: %v", err)
 	}
 }

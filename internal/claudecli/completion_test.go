@@ -177,7 +177,7 @@ func TestRunFatalGraceStopsWatchdogAndKeepsObservedUsage(t *testing.T) {
 				if resultFollows {
 					script += "cat <<'RESULT'\n" + successfulResult + "\nRESULT\n"
 				}
-				script += "sleep 30\n"
+				script += "exec sleep 30\n"
 				fakeExecutable(t, "claude", script)
 				ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 				defer cancel()

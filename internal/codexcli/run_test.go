@@ -7,21 +7,39 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/config"
-	"github.com/linkdata/minion/internal/processgroup"
 	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/testsupport"
 	"github.com/linkdata/minion/internal/usage"
 )
+
+func TestSandboxArgsSelectsNativeMode(t *testing.T) {
+	for _, test := range []struct {
+		name, output string
+		writable     bool
+		want         []string
+	}{
+		{"review", "", false, []string{"-c", `sandbox_mode="read-only"`}},
+		{"fix", "", true, []string{"-c", `sandbox_mode="workspace-write"`, "-c", "sandbox_workspace_write.exclude_slash_tmp=true", "-c", "sandbox_workspace_write.exclude_tmpdir_env_var=true", "-c", `sandbox_workspace_write.writable_roots=["/source"]`}},
+		{"report", "/report", false, []string{"-c", `sandbox_mode="workspace-write"`, "-c", "sandbox_workspace_write.exclude_slash_tmp=true", "-c", "sandbox_workspace_write.exclude_tmpdir_env_var=true", "-c", `sandbox_workspace_write.writable_roots=["/report"]`}},
+		{"fix and report", "/report", true, []string{"-c", `sandbox_mode="workspace-write"`, "-c", "sandbox_workspace_write.exclude_slash_tmp=true", "-c", "sandbox_workspace_write.exclude_tmpdir_env_var=true", "-c", `sandbox_workspace_write.writable_roots=["/source","/report"]`}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := sandboxArgs("/source", test.output, test.writable); !slices.Equal(got, test.want) {
+				t.Fatalf("sandbox args = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
 
 func TestRunInvokesCodexAndReturnsFinalMessage(t *testing.T) {
 	if !slices.Contains(aicli.ModelGitEnvironment(), "GIT_CONFIG_KEY_0=safe.bareRepository") {
@@ -30,10 +48,9 @@ func TestRunInvokesCodexAndReturnsFinalMessage(t *testing.T) {
 	for _, tt := range []struct {
 		name     string
 		writable bool
-		access   string
 	}{
-		{name: "review", access: "read"},
-		{name: "fix", writable: true, access: "write"},
+		{name: "review"},
+		{name: "fix", writable: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := canonicalTempDir(t)
@@ -75,6 +92,13 @@ printf '%s\n' '{"type":"thread.started","thread_id":"test"}' '{"type":"item.comp
 			got := strings.Split(strings.TrimSuffix(string(args), "\n"), "\n")
 			want := []string{
 				"exec", "--json", "--ignore-user-config", "--ignore-rules", "--strict-config", "--skip-git-repo-check",
+			}
+			if tt.writable {
+				want = append(want, "-c", `sandbox_mode="workspace-write"`, "-c", "sandbox_workspace_write.exclude_slash_tmp=true", "-c", "sandbox_workspace_write.exclude_tmpdir_env_var=true", "-c", `sandbox_workspace_write.writable_roots=[`+strconv.Quote(dir)+`]`)
+			} else {
+				want = append(want, "-c", `sandbox_mode="read-only"`)
+			}
+			want = append(want,
 				"--disable", "apps", "--disable", "browser_use", "--disable", "browser_use_external",
 				"--disable", "browser_use_full_cdp_access", "--disable", "computer_use",
 				"--disable", "image_generation", "--disable", "plugins", "--disable", "remote_plugin",
@@ -87,11 +111,8 @@ printf '%s\n' '{"type":"thread.started","thread_id":"test"}' '{"type":"item.comp
 				"-c", "shell_environment_policy.ignore_default_excludes=false",
 				"-c", `shell_environment_policy.set.GIT_CONFIG_KEY_0="safe.bareRepository"`,
 				"-c", `shell_environment_policy.filters={"PATH"="include","HOME"="include","TMPDIR"="include","TMP"="include","TEMP"="include","GOCACHE"="include","GIT_CONFIG_NOSYSTEM"="include","GIT_CONFIG_GLOBAL"="include","GIT_CONFIG_COUNT"="include","GIT_CONFIG_KEY_0"="include","GIT_CONFIG_VALUE_0"="include","GIT_ATTR_NOSYSTEM"="include","GIT_NO_REPLACE_OBJECTS"="include","GIT_NO_LAZY_FETCH"="include","GIT_OPTIONAL_LOCKS"="include","LANG"="include","LC_ALL"="include","LC_CTYPE"="include","TERM"="include"}`,
-				"-c", `default_permissions="minion"`,
-				"-c", fmt.Sprintf(`permissions.minion.filesystem={":root"="deny",":minimal"="read",":tmpdir"="write",%s=%q,%s="read",%s="read",%s="read",%s="read",%s="read",%s="read",%s="read",%s="read"}`, strconv.Quote(dir), tt.access, strconv.Quote(filepath.Join(dir, ".git")), strconv.Quote(filepath.Join(dir, ".agents")), strconv.Quote(filepath.Join(dir, ".codex")), strconv.Quote(filepath.Join(dir, ".claude")), strconv.Quote(filepath.Join(runtimeDir, ".git")), strconv.Quote(filepath.Join(runtimeDir, ".agents")), strconv.Quote(filepath.Join(runtimeDir, ".codex")), strconv.Quote(fakeCodex)),
-				"-c", "permissions.minion.network.enabled=false",
 				"--", "-",
-			}
+			)
 			if strings.Join(got, "\n") != strings.Join(want, "\n") {
 				t.Fatalf("arguments = %q, want %q", got, want)
 			}
@@ -287,7 +308,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.comp
 	}
 	for _, want := range []string{
 		"--model\ngpt-6-sol\n", "-c\nmodel_reasoning_effort=\"ultra\"\n",
-		strconv.Quote(filepath.Dir(skillPath)) + `="read"`,
+		`sandbox_mode="read-only"`,
 	} {
 		if !strings.Contains(string(args), want) {
 			t.Fatalf("configured Codex argument %q missing from %s", want, args)
@@ -381,8 +402,8 @@ printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.comp
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(args), strconv.Quote(filepath.Dir(skillPath))+`="read"`) {
-		t.Fatalf("embedded skill read permission missing: %s", args)
+	if !strings.Contains(string(args), `sandbox_mode="read-only"`) || strings.Contains(string(args), "permissions.minion") {
+		t.Fatalf("embedded skill run did not use the native read-only sandbox: %s", args)
 	}
 	prompt, err := os.ReadFile(fakeCodex + ".prompt")
 	if err != nil {
@@ -420,10 +441,13 @@ printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.comp
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{strconv.Quote(workspace) + `="read"`, strconv.Quote(output) + `="write"`, "permissions.minion.network.enabled=false"} {
+	for _, want := range []string{`sandbox_mode="workspace-write"`, `sandbox_workspace_write.writable_roots=[` + strconv.Quote(output) + `]`} {
 		if !strings.Contains(string(args), want) {
-			t.Fatalf("audit permission %q missing from %s", want, args)
+			t.Fatalf("audit sandbox setting %q missing from %s", want, args)
 		}
+	}
+	if strings.Contains(string(args), `sandbox_workspace_write.writable_roots=[`+strconv.Quote(workspace)) {
+		t.Fatalf("audit source is writable: %s", args)
 	}
 	if strings.Contains(string(args), "--ephemeral") {
 		t.Fatal("audit helpers cannot fork an ephemeral parent session")
@@ -435,7 +459,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.comp
 
 func TestRunRejectsUnsafeAuditReportDirectories(t *testing.T) {
 	workspace := canonicalTempDir(t)
-	installFakeCodexUnchecked(t, "#!/bin/sh\nexit 99\n")
+	installFakeCodex(t, "#!/bin/sh\nexit 99\n")
 	inside := filepath.Join(workspace, "reports")
 	if err := os.Mkdir(inside, 0o700); err != nil {
 		t.Fatal(err)
@@ -471,10 +495,8 @@ printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.comp
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, dir := range []string{workspace, reports} {
-		if !strings.Contains(string(args), strconv.Quote(dir)+`="read"`) || strings.Contains(string(args), strconv.Quote(dir)+`="write"`) {
-			t.Fatalf("critic lacks read-only access to %s: %s", dir, args)
-		}
+	if !strings.Contains(string(args), `sandbox_mode="read-only"`) || strings.Contains(string(args), "sandbox_workspace_write.writable_roots") {
+		t.Fatalf("critic did not use Codex's native read-only sandbox: %s", args)
 	}
 }
 
@@ -486,7 +508,7 @@ func TestRunRejectsUnsafeCriticReadDirs(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	installFakeCodexUnchecked(t, "#!/bin/sh\nexit 99\n")
+	installFakeCodex(t, "#!/bin/sh\nexit 99\n")
 	for _, test := range []struct{ dir, failure string }{
 		{root, "separate from the source snapshot"},
 		{workspace, "separate from the source snapshot"},
@@ -507,14 +529,27 @@ func TestRunRejectsSkillInsideSource(t *testing.T) {
 		t.Fatal(err)
 	}
 	alias := filepath.Join(t.TempDir(), "SKILL.md")
-	if err := os.Symlink(skill, alias); err != nil {
-		t.Fatal(err)
-	}
-	binary := installFakeCodexUnchecked(t, "#!/bin/sh\ntouch \"$0.invoked\"\nexit 99\n")
+	symlinkOrSkip(t, skill, alias)
+	binary := installFakeCodex(t, "#!/bin/sh\ntouch \"$0.invoked\"\nexit 99\n")
 	for _, path := range []string{skill, alias} {
 		if _, err := Run(t.Context(), source, "task", false, "", config.CodexConfig{Skills: []string{path}}); err == nil || !strings.Contains(err.Error(), "skill is inside the untrusted source snapshot") {
 			t.Fatalf("accepted source skill %q: %v", path, err)
 		}
+	}
+	if _, err := os.Stat(binary + ".invoked"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("invalid skill started Codex: %v", err)
+	}
+}
+
+func TestRunRejectsSkillInsideOutput(t *testing.T) {
+	source, output := t.TempDir(), t.TempDir()
+	skill := filepath.Join(output, "SKILL.md")
+	if err := os.WriteFile(skill, []byte("---\nname: test\n---\nTest skill.\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	binary := installFakeCodex(t, "#!/bin/sh\ntouch \"$0.invoked\"\nexit 99\n")
+	if _, err := Run(t.Context(), source, "task", false, output, config.CodexConfig{Skills: []string{skill}}); err == nil || !strings.Contains(err.Error(), "inside a writable directory") {
+		t.Fatalf("accepted writable skill: %v", err)
 	}
 	if _, err := os.Stat(binary + ".invoked"); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("invalid skill started Codex: %v", err)
@@ -528,10 +563,8 @@ func TestRunRejectsReadOnlyOutputOverlap(t *testing.T) {
 		t.Fatal(err)
 	}
 	alias := filepath.Join(t.TempDir(), "output")
-	if err := os.Symlink(output, alias); err != nil {
-		t.Fatal(err)
-	}
-	binary := installFakeCodexUnchecked(t, "#!/bin/sh\ntouch \"$0.invoked\"\nexit 99\n")
+	symlinkOrSkip(t, output, alias)
+	binary := installFakeCodex(t, "#!/bin/sh\ntouch \"$0.invoked\"\nexit 99\n")
 	for _, path := range []string{output, child, filepath.Dir(output), alias} {
 		if _, err := Run(t.Context(), source, "task", false, output, config.CodexConfig{ReadOnlyDirs: []string{path}}); err == nil || !strings.Contains(err.Error(), "read-only directory overlaps the output directory") {
 			t.Fatalf("accepted read-only/output overlap %q: %v", path, err)
@@ -543,6 +576,9 @@ func TestRunRejectsReadOnlyOutputOverlap(t *testing.T) {
 }
 
 func TestChildEnvironmentIsolatesCodexSessionButKeepsAuthentication(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix PATH fixture; Windows environment is tested separately")
+	}
 	env := childEnvironment([]string{
 		"CODEX_PERMISSION_PROFILE=unsafe-parent-profile", "CODEX_THREAD_ID=parent", "CODEX_SESSION_ID=parent",
 		"CODEX_APP_TOOLS_PIPE_PATH=parent-app", "CODEX_SANDBOX_NETWORK_DISABLED=1",
@@ -563,6 +599,42 @@ func TestChildEnvironmentIsolatesCodexSessionButKeepsAuthentication(t *testing.T
 	for _, kept := range []string{"CODEX_HOME=/trusted/codex", "CODEX_API_KEY=test-key", "CODEX_ACCESS_TOKEN=test-access-token", "PATH=/usr/bin", "HOME=/trusted/home", "HTTPS_PROXY=http://proxy", "SSL_CERT_FILE=/cert", "TMPDIR=/runtime", "GOCACHE=/cache", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=safe.bareRepository", "GIT_CONFIG_VALUE_0=explicit", "GIT_ATTR_NOSYSTEM=1", "GIT_NO_REPLACE_OBJECTS=1", "GIT_NO_LAZY_FETCH=1", "GIT_OPTIONAL_LOCKS=0"} {
 		if !strings.Contains(joined, kept) {
 			t.Fatalf("required environment setting missing: %s", kept)
+		}
+	}
+}
+
+func TestWindowsChildEnvironmentNormalizesNamesAndPath(t *testing.T) {
+	safe, writable := t.TempDir(), t.TempDir()
+	canonicalSafe, err := filepath.EvalSymlinks(safe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := childEnvironmentForOS("windows", []string{
+		"Path=" + safe + string(os.PathListSeparator) + writable,
+		"pAtH=" + safe,
+		"CoDeX_HoMe=/wrong", "UserProfile=/operator", "AppData=/operator/appdata",
+		"LocalAppData=/operator/local", "SystemRoot=/windows", "GH_TOKEN=private",
+	}, writable, writable, "/selected", false, writable)
+	joined := strings.Join(env, "\n")
+	for _, required := range []string{"PATH=" + canonicalSafe, "CODEX_HOME=/selected", "USERPROFILE=/operator", "APPDATA=/operator/appdata", "LOCALAPPDATA=/operator/local", "SYSTEMROOT=/windows"} {
+		if !strings.Contains(joined, required) {
+			t.Fatalf("missing Windows environment %q in %s", required, joined)
+		}
+	}
+	if strings.Count(joined, "PATH=") != 1 || strings.Contains(joined, "GH_TOKEN") || strings.Contains(joined, "/wrong") {
+		t.Fatalf("unsafe Windows environment: %s", joined)
+	}
+}
+
+func TestWindowsShellEnvironmentFilters(t *testing.T) {
+	linux := shellEnvironmentFilters("linux")
+	win := shellEnvironmentFilters("windows")
+	if slices.Contains(linux, `"USERPROFILE"="include"`) {
+		t.Fatalf("Linux received Windows shell variables: %v", linux)
+	}
+	for _, key := range []string{"PATH", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "SYSTEMROOT", "COMSPEC"} {
+		if !slices.Contains(win, strconv.Quote(key)+`="include"`) {
+			t.Fatalf("Windows shell variable %q missing from %v", key, win)
 		}
 	}
 }
@@ -835,6 +907,9 @@ func TestRunHonorsCancellation(t *testing.T) {
 }
 
 func TestRunRejectsExecutableFromSourceSnapshot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX executable fixture")
+	}
 	dir := canonicalTempDir(t)
 	path := filepath.Join(dir, "codex")
 	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
@@ -847,32 +922,27 @@ func TestRunRejectsExecutableFromSourceSnapshot(t *testing.T) {
 	}
 }
 
-var codexProcessGroupCheck = sync.OnceValue(processgroup.Check)
-
-func requireCodexProcessGroup(t *testing.T) {
-	t.Helper()
-	if err := codexProcessGroupCheck(); err != nil {
-		if os.Getenv("MINION_REQUIRE_PROCESSGROUP") == "1" {
-			t.Fatal(err)
-		}
-		t.Skipf("native Codex tests require delegated process ownership: %v", err)
-	}
-}
-
 func installFakeCodex(t *testing.T, script string) string {
 	t.Helper()
-	requireCodexProcessGroup(t)
-	return installFakeCodexUnchecked(t, script)
-}
-
-func installFakeCodexUnchecked(t *testing.T, script string) string {
-	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX fake Codex executable")
+	}
 	t.Setenv("CODEX_HOME", canonicalTempDir(t))
 	path, err := filepath.EvalSymlinks(filepath.Join(testsupport.FakeOnPath(t, "codex", script), "codex"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	return path
+}
+
+func symlinkOrSkip(t *testing.T, target, link string) {
+	t.Helper()
+	if err := os.Symlink(target, link); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("Windows symlink fixture is unavailable: %v", err)
+		}
+		t.Fatal(err)
+	}
 }
 
 func canonicalTempDir(t *testing.T) string {

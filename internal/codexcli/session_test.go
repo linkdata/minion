@@ -62,7 +62,7 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
 	}
 	for call := 1; call <= 3; call++ {
 		args := read(".args." + strconv.Itoa(call))
-		for _, required := range []string{"--ignore-user-config\n", "--ignore-rules\n", "--strict-config\n", "--skip-git-repo-check\n", "approval_policy=never\n", "permissions.minion.network.enabled=false\n", `":root"="deny"`, `":tmpdir"="write"`, strconv.Quote(dir) + `="write"`, strconv.Quote(output) + `="write"`, strconv.Quote(filepath.Join(session.runtimeDir, ".git")) + `="read"`, strconv.Quote(filepath.Join(session.runtimeDir, ".agents")) + `="read"`, strconv.Quote(filepath.Join(session.runtimeDir, ".codex")) + `="read"`, "--disable\nmemories\n", "--disable\nhooks\n", "--disable\nskill_search\n", "--model\nmodel\n", `model_reasoning_effort="high"`, "--output-schema\n" + filepath.Join(session.runtimeDir, "output-schema.json") + "\n"} {
+		for _, required := range []string{"--ignore-user-config\n", "--ignore-rules\n", "--strict-config\n", "--skip-git-repo-check\n", "approval_policy=never\n", `sandbox_mode="workspace-write"`, "sandbox_workspace_write.exclude_slash_tmp=true", "sandbox_workspace_write.exclude_tmpdir_env_var=true", `sandbox_workspace_write.writable_roots=[` + strconv.Quote(dir) + `,` + strconv.Quote(output) + `]`, "--disable\nmemories\n", "--disable\nhooks\n", "--disable\nskill_search\n", "--model\nmodel\n", `model_reasoning_effort="high"`, "--output-schema\n" + filepath.Join(session.runtimeDir, "output-schema.json") + "\n"} {
 			if !strings.Contains(args, required) {
 				t.Fatalf("call%d missing policy %q in %s", call, required, args)
 			}
@@ -74,12 +74,9 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
 		} else if !strings.HasPrefix(args, "exec\n--json\n") || !strings.HasSuffix(args, "--\n-\n") {
 			t.Fatalf("call%d unexpectedly continued a conversation: %s", call, args)
 		}
-		for _, grant := range []struct {
-			path string
-			want bool
-		}{{first, call == 1}, {second, call == 2}} {
-			if strings.Contains(args, strconv.Quote(grant.path)+`="read"`) != grant.want {
-				t.Fatalf("call%d retained or omitted phase grant %s: %s", call, grant.path, args)
+		for _, path := range []string{first, second} {
+			if strings.Contains(args, strconv.Quote(path)) {
+				t.Fatalf("call%d passed read-only evidence as a writable root: %s", call, args)
 			}
 		}
 		if read(".cwd."+strconv.Itoa(call)) != session.runtimeDir+"\n" || read(".paths."+strconv.Itoa(call)) != session.runtimeDir+"\n"+filepath.Join(session.runtimeDir, "go-build")+"\n" {

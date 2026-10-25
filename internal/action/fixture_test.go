@@ -12,9 +12,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -24,24 +24,11 @@ import (
 	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/gitwork"
 	"github.com/linkdata/minion/internal/monitor"
-	"github.com/linkdata/minion/internal/processgroup"
 	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/state"
 	"github.com/linkdata/minion/internal/testsupport"
 	"github.com/linkdata/minion/internal/workspace"
 )
-
-var actionProcessGroupCheck = sync.OnceValue(processgroup.Check)
-
-func requireActionProcessGroup(t *testing.T) {
-	t.Helper()
-	if err := actionProcessGroupCheck(); err != nil {
-		if os.Getenv("MINION_REQUIRE_PROCESSGROUP") == "1" {
-			t.Fatal(err)
-		}
-		t.Skipf("native action execution requires a delegated service: %v", err)
-	}
-}
 
 var defaultActionTestCommands = map[string]command.Action{
 	"review": command.Review, "fix": command.Fix, "audit": command.Comment, "security-audit": command.SecurityAudit,
@@ -123,7 +110,6 @@ func assertEmptyDir(t *testing.T, root string) {
 
 func gitFixtureRemote(t *testing.T, files ...workspace.File) (base, head, remote string) {
 	t.Helper()
-	requireActionProcessGroup(t)
 	return gitFixtureRemoteRaw(t, files...)
 }
 
@@ -177,6 +163,16 @@ func gitFixtureRemoteRaw(t *testing.T, files ...workspace.File) (base, head, rem
 
 var fakeOnPath = testsupport.FakeOnPath
 
+func symlinkOrSkip(t *testing.T, target, link string) {
+	t.Helper()
+	if err := os.Symlink(target, link); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("Windows symlink fixture is unavailable: %v", err)
+		}
+		t.Fatal(err)
+	}
+}
+
 func modelGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	out, err := testsupport.ModelGit(t, dir, args...)
@@ -197,7 +193,7 @@ func assertModelRepository(t *testing.T, dir, head string) {
 	}{
 		{[]string{"rev-parse", "--is-shallow-repository"}, "false"},
 		{[]string{"rev-parse", "HEAD"}, head},
-		{[]string{"config", "--get", "core.hooksPath"}, "/dev/null"},
+		{[]string{"config", "--get", "core.hooksPath"}, os.DevNull},
 		{[]string{"config", "--get", "core.fsmonitor"}, "false"},
 		{[]string{"config", "--get", "protocol.allow"}, "never"},
 		{[]string{"config", "--get", "credential.helper"}, ""},
@@ -241,7 +237,7 @@ func attachRepository(t *testing.T, job *Job) {
 	}
 	git := func(args ...string) []byte {
 		t.Helper()
-		cmd := exec.Command("git", append([]string{"-C", root, "-c", "core.hooksPath=/dev/null"}, args...)...)
+		cmd := exec.Command("git", append([]string{"-C", root, "-c", "core.hooksPath=" + os.DevNull}, args...)...)
 		cmd.Env = append(testsupport.GitEnvironment(root), "GIT_AUTHOR_DATE=1767225600 +0000", "GIT_COMMITTER_DATE=1767225600 +0000", "GIT_AUTHOR_NAME=Fixture", "GIT_AUTHOR_EMAIL=fixture@example.invalid", "GIT_COMMITTER_NAME=Fixture", "GIT_COMMITTER_EMAIL=fixture@example.invalid")
 		var diagnostic bytes.Buffer
 		cmd.Stderr = &diagnostic
@@ -271,7 +267,6 @@ const privateForkRepositoryJSON = `{"id":2,"full_name":"linkdataminion/r","fork"
 
 func offlineIndexFixture(t *testing.T, files []workspace.File) (*gitwork.OfflineIndex, string) {
 	t.Helper()
-	requireActionProcessGroup(t)
 	root := t.TempDir()
 	source, err := os.MkdirTemp(root, "source-")
 	if err != nil {
@@ -323,7 +318,6 @@ func withClaudeCritic(job Job) Job {
 
 func cloneFixture(t *testing.T, root string) *gitwork.Checkout {
 	t.Helper()
-	requireActionProcessGroup(t)
 	checkout, err := gitwork.Clone(t.Context(), root, "o/r", "main", true)
 	if err != nil {
 		t.Fatal(err)
@@ -449,6 +443,9 @@ func TestServeFixFlowFixtureRejectsGraphQLMutation(t *testing.T) {
 
 func gitOnlyPath(t *testing.T) string {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("gitOnlyPath uses a POSIX executable symlink without .exe")
+	}
 	binary, err := aicli.AbsoluteExecutable("git")
 	if err != nil {
 		t.Fatal(err)
@@ -469,6 +466,11 @@ func installActionTestSkills(t *testing.T, sources ...string) {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	if runtime.GOOS == "windows" {
+		t.Setenv("USERPROFILE", home)
+		t.Setenv("HOMEDRIVE", "")
+		t.Setenv("HOMEPATH", "")
+	}
 	writeActionTestSkills(t, home, ".agents", sources...)
 }
 

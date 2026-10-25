@@ -1,7 +1,6 @@
 package claudecli
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -233,47 +232,6 @@ func TestOutputNativeTurnResults(t *testing.T) {
 				}
 			} else if o.err != nil || cancelled || !o.completed || !o.result.UsageComplete || o.result.Answer != tc.answer {
 				t.Fatalf("valid result stream rejected: result=%+v error=%v cancelled=%v", o.result, o.err, cancelled)
-			}
-		})
-	}
-}
-
-func TestSandboxStartupFailureAborts(t *testing.T) {
-	for _, tc := range []struct {
-		name    string
-		message any
-		fails   bool
-	}{
-		{"repository seccomp failure", "Exit code 1\napply-seccomp: write /proc/self/setgroups: Permission denied", false},
-		{"repository bubblewrap failure", "Exit code 1\nbwrap: No permissions to create a new namespace", false},
-		{"repository startup-like output", "Exit code 1\nbwrap: this line was printed by a repository test", false},
-		{"later repository bubblewrap output", "Exit code 1\nTest failed\nbwrap: namespace unavailable", false},
-		{"initialization", "Sandbox is required but failed to initialize: Failed to create bridge sockets after 5 attempts.", true},
-		{"later initialization", "Exit code 1\nSandbox is required but failed to initialize: unavailable", true},
-		{"repository output after first line", "Exit code 1\nTest failed\nSandbox is required but failed to initialize: printed by repository", false},
-		{"invalid exit header", "Exit code unknown\nSandbox is required but failed to initialize: printed by repository", false},
-		{"quoted initialization", "quoted Sandbox is required but failed to initialize: unavailable", false},
-		{"test failure", "Exit code 1\nFAIL expected 2, got 1", false},
-		{"repository output blocks", []map[string]string{{"type": "text", "text": "Exit code 1"}, {"type": "text", "text": "apply-seccomp: namespace unavailable"}}, false},
-		{"test failure blocks", []map[string]string{{"type": "text", "text": "Exit code 1\nFAIL expected 2, got 1"}}, false},
-		{"nontext block", []map[string]string{{"type": "other", "text": "apply-seccomp: not a text block"}}, false},
-		{"empty content", nil, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			cancelled := false
-			o := jsonlOutput{cancel: func() { cancelled = true }}
-			data, err := json.Marshal(map[string]any{"type": "user", "message": map[string]any{"content": []map[string]any{{"type": "tool_result", "is_error": true, "content": tc.message}}}})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err := o.Write(append(data, '\n')); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := o.Write([]byte(successfulResult + "\n")); err != nil {
-				t.Fatal(err)
-			}
-			if cancelled != tc.fails || (o.err != nil) != tc.fails || tc.fails && o.result.Answer != "" || !tc.fails && (!o.completed || o.result.Answer != "final answer") {
-				t.Fatalf("sandbox failure accepted: %+v", o)
 			}
 		})
 	}

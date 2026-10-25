@@ -49,7 +49,7 @@ func MaterializeSkills(source string, selected []string) (paths []string, embedd
 		if !filepath.IsAbs(skill) || filepath.Base(skill) != "SKILL.md" {
 			return nil, embeddedDir, fmt.Errorf("skill %q must be an absolute SKILL.md path", skill)
 		}
-		resolved, err := filepath.EvalSymlinks(skill)
+		resolved, err := workspace.CanonicalPath(skill)
 		if err != nil {
 			return nil, embeddedDir, err
 		}

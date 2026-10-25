@@ -8,7 +8,9 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -37,10 +39,9 @@ func (w *cleanupRetryLog) Write(p []byte) (int, error) {
 }
 
 func TestRunnerSnapshotCleanupRetryKeepsValidatedResult(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root bypasses directory permissions")
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("requires effective POSIX directory permissions and a non-root user")
 	}
-	requireActionProcessGroup(t)
 	root := t.TempDir()
 	t.Cleanup(func() { _ = os.Chmod(root, 0700) })
 	journal := &cleanupRetryLog{root: root}
@@ -64,10 +65,9 @@ func TestRunnerSnapshotCleanupRetryKeepsValidatedResult(t *testing.T) {
 }
 
 func TestRunnerAuditValidationCleanupRestoresRestrictedDirectory(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root bypasses directory permissions")
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("requires effective POSIX directory permissions and a non-root user")
 	}
-	requireActionProcessGroup(t)
 	installActionTestSkills(t, testAuditSkillURL)
 	marker := filepath.Join(t.TempDir(), "restricted")
 	fakeOnPath(t, "node", "#!/bin/sh\nset -eu\ncase \"$*\" in *validate-coverage-ledger.cjs*) /bin/chmod 000 .; printf changed > "+shellQuote(marker)+";; esac\nexit 0\n")
@@ -90,7 +90,6 @@ func TestRunnerAuditValidationCleanupRestoresRestrictedDirectory(t *testing.T) {
 }
 
 func TestRunnerReviewRevisionsFreezeCleanIndependentInputs(t *testing.T) {
-	requireActionProcessGroup(t)
 	job := withClaudeCritic(testJob(command.Fix))
 	job.CriticMaxRounds = 2
 	root := t.TempDir()
@@ -120,7 +119,8 @@ func TestRunnerReviewRevisionsFreezeCleanIndependentInputs(t *testing.T) {
 		if request.dir == source || request.writable || request.outputDir != "" {
 			t.Fatalf("critic received mutable main workspace: dir=%q writable=%t output=%q", request.dir, request.writable, request.outputDir)
 		}
-		if !strings.Contains(request.prompt, fmt.Sprintf(`inspect the frozen source at \"%s\"`, request.dir)) {
+		frozenPath := strconv.Quote(fmt.Sprintf("inspect the frozen source at %q", request.dir))
+		if !strings.Contains(request.prompt, frozenPath[1:len(frozenPath)-1]) {
 			t.Fatalf("critic prompt lacks frozen source path %q", request.dir)
 		}
 		data, err := workspace.ReadRegular(filepath.Join(request.dir, "source.txt"), workspace.MaxBytes)
@@ -154,7 +154,6 @@ func TestRunnerReviewRevisionsFreezeCleanIndependentInputs(t *testing.T) {
 }
 
 func TestRunnerReviewExportsFrozenSourceDespiteLiveChanges(t *testing.T) {
-	requireActionProcessGroup(t)
 	for _, approved := range []bool{false, true} {
 		t.Run(fmt.Sprintf("approved=%t", approved), func(t *testing.T) {
 			job := withClaudeCritic(testJob(command.Fix))
@@ -192,7 +191,6 @@ func TestRunnerReviewExportsFrozenSourceDespiteLiveChanges(t *testing.T) {
 }
 
 func TestRunnerAuditReviewFreezesAndExportsRawReports(t *testing.T) {
-	requireActionProcessGroup(t)
 	for _, scenario := range []string{"approved", "mutated during critic", "mutated during validation", "empty architecture repaired"} {
 		t.Run(scenario, func(t *testing.T) {
 			job := withClaudeCritic(auditRunnerJob(t))
@@ -284,7 +282,6 @@ func TestRunnerAuditReviewFreezesAndExportsRawReports(t *testing.T) {
 }
 
 func TestRunnerReviewRejectsInvalidFixBeforeCritic(t *testing.T) {
-	requireActionProcessGroup(t)
 	for _, scenario := range []string{"omitted path", "directory spelling collision"} {
 		t.Run(scenario, func(t *testing.T) {
 			job := withClaudeCritic(testJob(command.Fix))
@@ -292,8 +289,7 @@ func TestRunnerReviewRejectsInvalidFixBeforeCritic(t *testing.T) {
 			if scenario == "omitted path" {
 				job.Source.Omitted = []string{name}
 			} else {
-				job.Source.Files = []workspace.File{{Path: "Docs/stay", Mode: workspace.Regular}}
-				attachRepository(t, &job)
+				job.Source.Omitted = []string{"Docs/stay"}
 				name, want = "docs/new", "directory spelling collision"
 			}
 			calls := 0

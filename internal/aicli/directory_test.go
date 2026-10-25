@@ -4,27 +4,41 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
+func symlinkOrSkip(t *testing.T, target, link string) {
+	t.Helper()
+	if err := os.Symlink(target, link); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("Windows symlink fixture is unavailable: %v", err)
+		}
+		t.Fatal(err)
+	}
+}
+
 func TestDirectoryRequiresAnExistingNonRootDirectory(t *testing.T) {
 	root := t.TempDir()
+	volumeRoot := filepath.VolumeName(root) + string(os.PathSeparator)
 	file := filepath.Join(root, "file")
 	if err := os.WriteFile(file, nil, 0600); err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range []string{"", " ", string(os.PathSeparator), file, filepath.Join(root, "missing")} {
+	for _, path := range []string{"", " ", volumeRoot, file, filepath.Join(root, "missing")} {
 		if _, err := Directory(path); err == nil {
 			t.Fatalf("accepted %q", path)
 		}
 	}
-	if _, err := Directory(string(os.PathSeparator)); err == nil || err.Error() != "expected a non-root directory: "+string(os.PathSeparator) {
+	canonicalRoot, err := filepath.EvalSymlinks(volumeRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Directory(volumeRoot); err == nil || err.Error() != "expected a non-root directory: "+canonicalRoot {
 		t.Fatalf("root error lost its path: %v", err)
 	}
 	alias := filepath.Join(root, "alias")
-	if err := os.Symlink(root, alias); err != nil {
-		t.Fatal(err)
-	}
+	symlinkOrSkip(t, root, alias)
 	want, err := filepath.EvalSymlinks(root)
 	if err != nil {
 		t.Fatal(err)
@@ -51,9 +65,7 @@ func TestDirectoryResolvesSymlinksBeforeParentComponents(t *testing.T) {
 		}
 	}
 	alias := filepath.Join(root, "alias")
-	if err := os.Symlink(filepath.Join(actual, "nested"), alias); err != nil {
-		t.Fatal(err)
-	}
+	symlinkOrSkip(t, filepath.Join(actual, "nested"), alias)
 	// Join would clean away the parent component before symlink resolution.
 	if got, err := Directory(alias + "/../directory"); err != nil || got != filepath.Join(actual, "directory") {
 		t.Fatalf("directory resolved=%q error=%v", got, err)
@@ -74,33 +86,32 @@ func TestResolvePathKeepsFilesystemSemanticsWithoutCreating(t *testing.T) {
 		t.Fatal(err)
 	}
 	alias := filepath.Join(root, "alias")
-	if err := os.Symlink(filepath.Join(actual, "nested"), alias); err != nil {
-		t.Fatal(err)
-	}
+	symlinkOrSkip(t, filepath.Join(actual, "nested"), alias)
 	dangling := filepath.Join(root, "dangling")
-	if err := os.Symlink(filepath.Join(root, "absent"), dangling); err != nil {
-		t.Fatal(err)
-	}
+	symlinkOrSkip(t, filepath.Join(root, "absent"), dangling)
 	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
 	}
 	relative, err := filepath.Rel(cwd, alias)
-	if err != nil {
+	if err != nil && filepath.VolumeName(cwd) == filepath.VolumeName(alias) {
 		t.Fatal(err)
 	}
-	for _, test := range []struct {
+	tests := []struct {
 		name, path, want string
 	}{
 		{"existing parent", alias + "/..", actual},
 		{"missing suffix", alias + "/../new/home", filepath.Join(actual, "new", "home")},
-		{"relative missing suffix", relative + "/../new/home", filepath.Join(actual, "new", "home")},
 		{"missing suffix dot", root + "/missing/./x", filepath.Join(root, "missing", "x")},
 		{"missing suffix trailing dot", root + "/missing/.", filepath.Join(root, "missing")},
 		{"missing suffix trailing separator", root + "/missing/", filepath.Join(root, "missing")},
 		{"dangling link", dangling + "/home", ""},
 		{"unknown parent", root + "/absent/../target", ""},
-	} {
+	}
+	if err == nil {
+		tests = append(tests, struct{ name, path, want string }{"relative missing suffix", relative + "/../new/home", filepath.Join(actual, "new", "home")})
+	}
+	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			got, err := ResolvePath(test.path)
 			if (err == nil) != (test.want != "") || got != test.want {

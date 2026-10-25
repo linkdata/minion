@@ -131,7 +131,7 @@ func (r Record) validate() error {
 
 type Store struct{ Dir string }
 
-// Save atomically replaces one attempt and syncs its directory and parent.
+// Save atomically replaces one attempt and syncs its directory and parent on Unix.
 //
 // The caller serializes updates to an ID. An error after replacement can leave
 // the new attempt in place.
@@ -160,6 +160,11 @@ func ReadAll(dir string) ([]Record, error) {
 	if err != nil {
 		return nil, err
 	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
 	records := make([]Record, 0, len(entries))
 	for _, entry := range entries {
 		if !strings.HasSuffix(entry.Name(), ".json") {
@@ -168,7 +173,8 @@ func ReadAll(dir string) ([]Record, error) {
 		if !entry.Type().IsRegular() || !validID.MatchString(strings.TrimSuffix(entry.Name(), ".json")) {
 			return nil, fmt.Errorf("invalid usage file %q", entry.Name())
 		}
-		f, err := os.Open(filepath.Join(dir, entry.Name()))
+		// Root.Open shares delete access on Windows, allowing Save to replace open records.
+		f, err := root.Open(entry.Name())
 		if err != nil {
 			return nil, err
 		}

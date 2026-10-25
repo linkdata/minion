@@ -1,4 +1,4 @@
-//go:build !linux
+//go:build !linux && !darwin && !windows
 
 package workspace
 
@@ -9,14 +9,14 @@ import (
 	"testing"
 )
 
-func TestApplyRequiresLinuxBeforeChangingFiles(t *testing.T) {
+func TestApplyRejectsUnsupportedPlatformBeforeChangingFiles(t *testing.T) {
 	change := Change{Path: "existing", Mode: Regular, Data: []byte("after")}
 	root := t.TempDir()
 	filename := filepath.Join(root, "existing")
 	if err := os.WriteFile(filename, []byte("before"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := Apply(root, []Change{change}); err == nil || !strings.Contains(err.Error(), "requires Linux") {
+	if err := Apply(root, []Change{change}); err == nil || !strings.Contains(err.Error(), "unsupported on this platform") {
 		t.Fatalf("unsupported import did not report its platform requirement: %v", err)
 	}
 	if data, err := os.ReadFile(filename); err != nil || string(data) != "before" {

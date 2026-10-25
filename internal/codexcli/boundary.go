@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/linkdata/minion/internal/aicli"
-	"github.com/linkdata/minion/internal/processgroup"
+	"github.com/linkdata/minion/internal/executil"
 )
 
 const (
@@ -46,9 +46,7 @@ func ValidateInstructionBoundary(ctx context.Context) (resultErr error) {
 		return err
 	}
 	defer func() {
-		if !errors.Is(resultErr, processgroup.ErrScopeUnconfirmed) {
-			resultErr = errors.Join(resultErr, os.RemoveAll(root))
-		}
+		resultErr = errors.Join(resultErr, os.RemoveAll(root))
 	}()
 	repo := filepath.Join(root, "repo")
 	runtimeDir := filepath.Join(repo, "var", "work", "runtime")
@@ -76,7 +74,7 @@ func ValidateInstructionBoundary(ctx context.Context) (resultErr error) {
 	// #nosec G204 -- Git receives one generated path as an argument, without a shell.
 	git := exec.CommandContext(ctx, gitBinary, "init", "-q", repo)
 	git.Env = append([]string{"PATH=" + os.Getenv("PATH"), "HOME=" + probeHome}, aicli.ModelGitEnvironment()...)
-	if err := processgroup.Run(git); err != nil {
+	if err := executil.Run(git); err != nil {
 		return fmt.Errorf("create Codex instruction probe repository: %w", err)
 	}
 	// A visible control proves this CLI exposes both instruction sources to

@@ -14,13 +14,13 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 	"unicode/utf8"
 
 	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/github"
-	"github.com/linkdata/minion/internal/processgroup"
 	"github.com/linkdata/minion/internal/state"
 	"github.com/linkdata/minion/internal/workroot"
 )
@@ -50,6 +50,7 @@ type fakeGitHub struct {
 	reactions          []string
 	checks             int
 	repoChecks         int
+	beforeRepository   func()
 	currentChecks      int
 	currentItem        func(github.Item) (github.Item, error)
 	commentErr         error
@@ -57,6 +58,9 @@ type fakeGitHub struct {
 	comments           []github.Comment
 	threadItems        func(string, int, time.Time) ([]github.Item, error)
 	threadCalls        int
+	reviewReplies      []github.Item
+	verifiedCalls      []bool
+	beforeVerify       func(context.Context, bool) error
 	rawIDs             bool
 	liveRepo           *github.Repository
 }
@@ -103,6 +107,9 @@ func fixtureRepository(repo github.Repository) github.Repository {
 
 func (f *fakeGitHub) Repository(ctx context.Context, name string) (github.Repository, error) {
 	f.repoChecks++
+	if f.beforeRepository != nil {
+		f.beforeRepository()
+	}
 	if err := ctx.Err(); err != nil {
 		return github.Repository{}, err
 	}
@@ -169,6 +176,35 @@ func (f *fakeGitHub) CurrentItem(_ context.Context, item github.Item) (github.It
 	return item, nil
 }
 
+func (f *fakeGitHub) HasVerifiedBotReply(ctx context.Context, _ string, _ int, since time.Time, botLogin, marker string, includeReviews bool) (bool, error) {
+	f.verifiedCalls = append(f.verifiedCalls, includeReviews)
+	if f.beforeVerify != nil {
+		if err := f.beforeVerify(ctx, includeReviews); err != nil {
+			return false, err
+		}
+	}
+	items := f.items
+	if includeReviews {
+		items = append(append([]github.Item(nil), items...), f.reviewReplies...)
+	}
+	for _, item := range items {
+		if !since.IsZero() && !item.UpdatedAt.IsZero() && item.UpdatedAt.Before(since.Add(-time.Second)) {
+			continue
+		}
+		if !strings.EqualFold(item.Author.Login, botLogin) || !strings.HasSuffix(strings.TrimSpace(item.Body), "\n\n"+marker) {
+			continue
+		}
+		current, err := f.CurrentItem(ctx, item)
+		if err != nil {
+			return false, err
+		}
+		if !current.Edited && strings.EqualFold(current.Author.Login, botLogin) && strings.HasSuffix(strings.TrimSpace(current.Body), "\n\n"+marker) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (f *fakeGitHub) Permission(_ context.Context, _, login string) (github.Permission, error) {
 	f.checks++
 	permission := f.permission
@@ -220,6 +256,7 @@ func testConfig(t *testing.T) config.Config {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	urls := map[string]string{
 		"review":         "https://github.com/example/skills/tree/main/skills/review",
 		"fix":            "https://github.com/example/skills/tree/main/skills/fix",
@@ -553,45 +590,6 @@ func TestRunOnceBoundsFailedExecutions(t *testing.T) {
 	}
 }
 
-func TestRunOnceStopsUntilUnconfirmedScopeReleaseIsResolved(t *testing.T) {
-	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
-	item := github.Item{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}}
-	gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}, items: []github.Item{item}, permission: github.Permission{Permission: "write"}}
-	handler := &fakeHandler{executeErr: errors.Join(processgroup.ErrUnconfirmed, processgroup.ErrScopeUnconfirmed)}
-	store := openState(t, now.Add(-time.Minute))
-	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Now: func() time.Time { return now }}
-	if _, err := m.RunOnce(t.Context(), store); !errors.Is(err, processgroup.ErrUnconfirmed) {
-		t.Fatalf("unconfirmed cleanup error = %v", err)
-	}
-	if len(handler.jobs) != 1 || store.Data.UnconfirmedProcessJob != handler.jobs[0].ID ||
-		store.Data.JobFailures[handler.jobs[0].ID].Attempts != maxJobAttempts || len(gh.comments) != 0 || len(store.Data.Processed) != 0 {
-		t.Fatalf("unconfirmed cleanup was not held for recovery: jobs=%d replies=%d state=%+v", len(handler.jobs), len(gh.comments), store.Data)
-	}
-	requests := len(gh.notificationCalls)
-	handler.executeErr = nil
-	if _, err := m.RunOnce(t.Context(), store); !errors.Is(err, processgroup.ErrScopeUnconfirmed) || len(handler.jobs) != 1 || len(gh.notificationCalls) != requests || len(gh.comments) != 0 {
-		t.Fatalf("later pass resumed before recovery: err=%v jobs=%d polls=%d replies=%d", err, len(handler.jobs), len(gh.notificationCalls), len(gh.comments))
-	}
-}
-
-func TestRunOnceStopsWithoutLatchAfterReleasedScopeObservationFailure(t *testing.T) {
-	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
-	items := []github.Item{
-		{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}},
-		{Key: "comment:2", NodeID: "node:2", Body: "@linkdataminion review", Author: github.User{Login: "writer"}},
-	}
-	gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}, items: items, permission: github.Permission{Permission: "write"}}
-	handler := &fakeHandler{executeErr: processgroup.ErrUnconfirmed}
-	store := openState(t, now.Add(-time.Minute))
-	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Now: func() time.Time { return now }}
-	if _, err := m.RunOnce(t.Context(), store); !errors.Is(err, processgroup.ErrUnconfirmed) {
-		t.Fatalf("released-scope observation failure: %v", err)
-	}
-	if len(handler.jobs) != 1 || len(gh.reactions) != 1 || store.Data.UnconfirmedProcessJob != "" || len(gh.comments) != 0 || len(store.Data.Processed) != 0 || store.Data.JobFailures[handler.jobs[0].ID].Attempts != maxJobAttempts {
-		t.Fatalf("released-scope failure continued or latched: jobs=%d reactions=%d replies=%d state=%+v", len(handler.jobs), len(gh.reactions), len(gh.comments), store.Data)
-	}
-}
-
 func TestRunOnceDoesNotExhaustJobsDuringInfrastructureFailure(t *testing.T) {
 	for _, test := range []struct {
 		name string
@@ -647,25 +645,196 @@ func TestRunOnceKeepsTerminalFailureWhenWorkRootFills(t *testing.T) {
 	}
 }
 
-func TestRunOnceCountsPublicationFailureWhenWorkRootFills(t *testing.T) {
+func TestRunOnceTerminalizesPublicationFailureWhenWorkRootFills(t *testing.T) {
 	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
 	item := github.Item{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}, HTMLURL: "https://github.com/example-owner/example-repo/pull/7#issuecomment-1"}
 	gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}, items: []github.Item{item}, permission: github.Permission{Permission: "write"}}
 	handler := &fakeHandler{executeErr: errors.Join(ErrPostModelPublication, workroot.ErrUnsafe, &github.StatusError{StatusCode: http.StatusBadGateway})}
 	store := openState(t, now.Add(-time.Minute))
+	handler.onExecute = func() { saveModelCallStart(t, store, jobID(item.Key, "review")) }
 	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Now: func() time.Time { return now }}
-	if _, err := m.RunOnce(t.Context(), store); err == nil || len(handler.jobs) != 1 {
+	if _, err := m.RunOnce(t.Context(), store); err != nil || len(handler.jobs) != 1 {
 		t.Fatalf("publication failure = %v, jobs = %d", err, len(handler.jobs))
 	}
-	if failure := store.Data.JobFailures[handler.jobs[0].ID]; failure.Attempts != 1 {
-		t.Fatalf("publication failure was refunded when work root filled: %+v", failure)
+	if len(gh.comments) != 1 || len(store.Data.Processed) != 1 || len(store.Data.JobFailures) != 0 {
+		t.Fatalf("publication failure repeated paid work when work root filled: %+v", store.Data)
 	}
 }
 
-func TestRunOnceBoundsPublicationFailuresAfterModel(t *testing.T) {
+func TestRunOncePublicationFailureRetriesOnlyFailureReply(t *testing.T) {
 	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
 	item := github.Item{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}, HTMLURL: "https://github.com/example-owner/example-repo/pull/7#issuecomment-1"}
+	replyErr := errors.New("failure reply unavailable")
+	gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}, items: []github.Item{item}, permission: github.Permission{Permission: "write"}, commentErr: replyErr}
+	handler := &fakeHandler{executeErr: errors.Join(ErrPostModelPublication, &github.StatusError{StatusCode: http.StatusBadGateway})}
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	store := openStateAt(t, statePath, now.Add(-time.Minute))
+	handler.onExecute = func() { saveModelCallStart(t, store, jobID(item.Key, "review")) }
+	clock := now
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Now: func() time.Time { return clock }}
+	if _, err := m.RunOnce(t.Context(), store); !errors.Is(err, replyErr) || len(handler.jobs) != 1 || gh.commentCalls != 1 {
+		t.Fatalf("publication failure retry included model work: err=%v jobs=%d replies=%d", err, len(handler.jobs), gh.commentCalls)
+	}
+	id := handler.jobs[0].ID
+	if failure := store.Data.JobFailures[id]; failure.Attempts != maxJobAttempts || failure.ReplyAttempts != 1 || !failure.ModelCallStarted {
+		t.Fatalf("publication failure did not retain only its failure reply: %+v", failure)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened := openStateAt(t, statePath, now.Add(-time.Minute))
+	handler.onExecute = func() { t.Fatal("publication retry repeated model work") }
+	gh.commentErr = nil
+	clock = advanceToRetry(clock, reopened)
+	if _, err := m.RunOnce(t.Context(), reopened); err != nil || len(handler.jobs) != 1 || gh.commentCalls != 2 || len(gh.comments) != 1 || len(reopened.Data.Processed) != 1 {
+		t.Fatalf("publication failure reply did not finish after restart: err=%v jobs=%d replies=%d state=%+v", err, len(handler.jobs), gh.commentCalls, reopened.Data)
+	}
+}
+
+func TestFailureReplyGetsFreshPostBudgetAfterLookup(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+		gh := &fakeGitHub{
+			beforeVerify: func(context.Context, bool) error {
+				time.Sleep(9 * time.Second)
+				return nil
+			},
+			beforeRepository: func() { time.Sleep(2 * time.Second) },
+		}
+		store := openState(t, now)
+		job := Job{
+			Repository:  config.Repository{Name: "example-owner/example-repo", ID: 1, OwnerID: 2},
+			SubjectType: "Issue",
+			Number:      7,
+			ID:          "failure-reply-budget",
+		}
+		m := &Monitor{Config: config.Config{BotLogin: "linkdataminion"}, GitHub: gh}
+		if err := m.finishFailedJob(t.Context(), store, job, now, state.JobFailure{}); err != nil {
+			t.Fatal(err)
+		}
+		if gh.commentCalls != 1 || len(store.Data.Processed) != 1 {
+			t.Fatalf("slow reply lookup consumed posting budget: comments=%d state=%+v", gh.commentCalls, store.Data)
+		}
+	})
+}
+
+func TestRunOncePullRequestCommentAndFixFailureReplySkipsReviewLookup(t *testing.T) {
+	for _, name := range []string{"audit", "fix"} {
+		t.Run(name, func(t *testing.T) {
+			now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+			item := github.Item{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion " + name, Author: github.User{Login: "writer"}, UpdatedAt: now}
+			gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}, items: []github.Item{item}, permission: github.Permission{Permission: "write"}}
+			gh.threadItems = func(string, int, time.Time) ([]github.Item, error) {
+				if gh.threadCalls > 1 {
+					return nil, errors.New("unrelated review GraphQL lookup failed")
+				}
+				return gh.items, nil
+			}
+			gh.beforeVerify = func(_ context.Context, includeReviews bool) error {
+				if includeReviews {
+					return errors.New("unrelated review GraphQL lookup failed")
+				}
+				return nil
+			}
+			handler := &fakeHandler{executeErr: ErrTerminalJob}
+			store := openState(t, now.Add(-time.Minute))
+			m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Now: func() time.Time { return now }}
+			if _, err := m.RunOnce(t.Context(), store); err != nil {
+				t.Fatal(err)
+			}
+			if len(handler.jobs) != 1 || gh.threadCalls != 1 || len(gh.verifiedCalls) != 1 || gh.verifiedCalls[0] || len(gh.comments) != 1 || len(store.Data.Processed) != 1 {
+				t.Fatalf("failure reply depended on review lookup: jobs=%d thread calls=%d verified calls=%v comments=%d state=%+v", len(handler.jobs), gh.threadCalls, gh.verifiedCalls, len(gh.comments), store.Data)
+			}
+		})
+	}
+}
+
+func TestRunOnceFailureReplyChecksCurrentBotProvenance(t *testing.T) {
+	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	request := github.Item{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}, UpdatedAt: now}
+	marker := (Job{ID: jobID(request.Key, "review")}).Marker()
+	stale := github.Item{Key: "comment:2", NodeID: "node:2", Body: "Earlier reply.\n\n" + marker, Author: github.User{Login: "linkdataminion"}, UpdatedAt: now}
+	gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}, items: []github.Item{request, stale}, permission: github.Permission{Permission: "write"}}
+	gh.currentItem = func(item github.Item) (github.Item, error) {
+		if item.Key == stale.Key {
+			item.Edited = true
+		}
+		return item, nil
+	}
+	store := openState(t, now.Add(-time.Minute))
+	handler := &fakeHandler{executeErr: ErrTerminalJob}
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Now: func() time.Time { return now }}
+	if _, err := m.RunOnce(t.Context(), store); err != nil {
+		t.Fatal(err)
+	}
+	if len(handler.jobs) != 1 || len(gh.comments) != 1 || len(store.Data.Processed) != 1 {
+		t.Fatalf("edited bot reply suppressed a current failure reply: jobs=%d comments=%d state=%+v", len(handler.jobs), len(gh.comments), store.Data)
+	}
+}
+
+func TestRunOnceLostPublicationResponseFindsSuccessfulReply(t *testing.T) {
+	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	item := github.Item{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}, UpdatedAt: now.Add(-30 * time.Second)}
 	gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}, items: []github.Item{item}, permission: github.Permission{Permission: "write"}}
+	store := openState(t, now.Add(-time.Minute))
+	id := jobID(item.Key, "review")
+	handler := &fakeHandler{executeErr: ErrPostModelPublication, onExecute: func() {
+		saveModelCallStart(t, store, id)
+		gh.reviewReplies = append(gh.reviewReplies, github.Item{Key: "review:2", NodeID: "node:2", Body: "Review complete.\n\n" + (Job{ID: id}).Marker(), Author: github.User{Login: "linkdataminion"}, UpdatedAt: now})
+	}}
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Now: func() time.Time { return now }}
+	if _, err := m.RunOnce(t.Context(), store); err != nil {
+		t.Fatal(err)
+	}
+	if len(handler.jobs) != 1 || gh.threadCalls != 1 || gh.currentChecks != 2 || gh.commentCalls != 0 || len(gh.verifiedCalls) != 1 || !gh.verifiedCalls[0] || len(store.Data.Processed) != 1 || len(store.Data.JobFailures) != 0 {
+		t.Fatalf("lost review response posted a contradictory failure or repeated work: jobs=%d thread calls=%d current checks=%d verified calls=%v failure replies=%d state=%+v", len(handler.jobs), gh.threadCalls, gh.currentChecks, gh.verifiedCalls, gh.commentCalls, store.Data)
+	}
+}
+
+func TestRunOnceLostPublicationResponseRetriesFailedLookup(t *testing.T) {
+	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	item := github.Item{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}, UpdatedAt: now.Add(-30 * time.Second)}
+	gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}, items: []github.Item{item}, permission: github.Permission{Permission: "write"}}
+	lookupErr := errors.New("reply lookup unavailable")
+	gh.beforeVerify = func(context.Context, bool) error {
+		if len(gh.verifiedCalls) == 1 {
+			return lookupErr
+		}
+		return nil
+	}
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	store := openStateAt(t, statePath, now.Add(-time.Minute))
+	id := jobID(item.Key, "review")
+	handler := &fakeHandler{executeErr: ErrPostModelPublication, onExecute: func() {
+		saveModelCallStart(t, store, id)
+		gh.reviewReplies = append(gh.reviewReplies, github.Item{Key: "review:2", NodeID: "node:2", Body: "Review complete.\n\n" + (Job{ID: id}).Marker(), Author: github.User{Login: "linkdataminion"}, UpdatedAt: now})
+	}}
+	clock := now
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Now: func() time.Time { return clock }}
+	if _, err := m.RunOnce(t.Context(), store); !errors.Is(err, lookupErr) || gh.commentCalls != 0 || len(store.Data.Processed) != 0 {
+		t.Fatalf("failed lookup posted a failure or consumed job: err=%v comments=%d state=%+v", err, gh.commentCalls, store.Data)
+	}
+	if failure := store.Data.JobFailures[id]; failure.Attempts != maxJobAttempts || failure.ReplyAttempts != 0 || !failure.ModelCallStarted {
+		t.Fatalf("failed lookup did not retain terminal retry state: %+v", failure)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened := openStateAt(t, statePath, now.Add(-time.Minute))
+	handler.onExecute = func() { t.Fatal("reply lookup retry repeated paid model work") }
+	clock = advanceToRetry(clock, reopened)
+	if _, err := m.RunOnce(t.Context(), reopened); err != nil || len(handler.jobs) != 1 || gh.commentCalls != 0 || len(gh.verifiedCalls) != 2 || !gh.verifiedCalls[1] || len(reopened.Data.Processed) != 1 || len(reopened.Data.JobFailures) != 0 {
+		t.Fatalf("recovered lookup repeated work or posted failure: err=%v jobs=%d replies=%d state=%+v", err, len(handler.jobs), gh.commentCalls, reopened.Data)
+	}
+}
+
+func TestRunOnceFixedPublicationRetriesWithoutModelMarker(t *testing.T) {
+	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	item := github.Item{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion fix", Author: github.User{Login: "writer"}}
+	notification := testNotification(now)
+	notification.Subject.Type = "Issue"
+	notification.Subject.URL = "https://api.github.com/repos/example-owner/example-repo/issues/7"
+	gh := &fakeGitHub{notifications: []github.Notification{notification}, items: []github.Item{item}, permission: github.Permission{Permission: "write"}}
 	handler := &fakeHandler{executeErr: errors.Join(ErrPostModelPublication, &github.StatusError{StatusCode: http.StatusBadGateway})}
 	store := openState(t, now.Add(-time.Minute))
 	clock := now
@@ -673,15 +842,17 @@ func TestRunOnceBoundsPublicationFailuresAfterModel(t *testing.T) {
 	for attempt := 1; attempt <= maxJobAttempts; attempt++ {
 		_, err := m.RunOnce(t.Context(), store)
 		if (err != nil) != (attempt < maxJobAttempts) || len(handler.jobs) != attempt {
-			t.Fatalf("attempt %d: err=%v jobs=%d", attempt, err, len(handler.jobs))
+			t.Fatalf("fixed publication attempt %d: err=%v jobs=%d", attempt, err, len(handler.jobs))
 		}
-		if attempt < maxJobAttempts && store.Data.JobFailures[handler.jobs[0].ID].Attempts != attempt {
-			t.Fatalf("publication failure refunded attempt %d: %+v", attempt, store.Data.JobFailures)
+		if attempt < maxJobAttempts {
+			if failure := store.Data.JobFailures[handler.jobs[0].ID]; failure.Attempts != attempt || failure.ModelCallStarted {
+				t.Fatalf("fixed publication changed retry state: %+v", failure)
+			}
 		}
 		clock = advanceToRetry(clock, store)
 	}
-	if len(gh.comments) != 1 || len(store.Data.Processed) != 1 {
-		t.Fatalf("publication failure did not finish: comments=%d state=%+v", len(gh.comments), store.Data)
+	if len(gh.comments) != 1 || len(store.Data.Processed) != 1 || len(store.Data.JobFailures) != 0 {
+		t.Fatalf("fixed publication did not stop after bounded retries: %+v", store.Data)
 	}
 	if _, err := m.RunOnce(t.Context(), store); err != nil || len(handler.jobs) != maxJobAttempts {
 		t.Fatalf("finished job reran: err=%v jobs=%d", err, len(handler.jobs))
@@ -714,28 +885,6 @@ func TestRunOnceTerminalFailureRepliesWithFreshContext(t *testing.T) {
 	m.Now = func() time.Time { return now.Add(time.Minute) }
 	if _, err := m.RunOnce(t.Context(), store); err != nil || gh.commentCalls != 1 || len(handler.jobs) != 1 || len(store.Data.Processed) != 1 {
 		t.Fatalf("failure reply duplicated after interrupted save: err=%v replies=%d jobs=%d state=%+v", err, gh.commentCalls, len(handler.jobs), store.Data)
-	}
-}
-
-func TestRunOnceExhaustedCancellationIsTerminal(t *testing.T) {
-	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
-	item := github.Item{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion review", Author: github.User{Login: "writer"}}
-	gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}, items: []github.Item{item}, permission: github.Permission{Permission: "write"}}
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-	handler := &fakeHandler{onExecute: cancel, executeErr: errors.Join(processgroup.ErrExhausted, context.Canceled)}
-	store := openState(t, now.Add(-time.Minute))
-	var logs bytes.Buffer
-	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Logger: log.New(&logs, "", 0), Now: func() time.Time { return now }}
-	if _, err := m.RunOnce(ctx, store); !errors.Is(err, processgroup.ErrExhausted) || !errors.Is(err, context.Canceled) {
-		t.Fatalf("resource exhaustion lost its cause or parent cancellation: %v", err)
-	}
-	if len(handler.jobs) != 1 || len(gh.comments) != 1 || len(store.Data.Processed) != 1 || len(store.Data.JobFailures) != 0 || !strings.Contains(logs.String(), "failed (attempt 3/3)") || strings.Contains(logs.String(), " interrupted: ") {
-		t.Fatalf("resource exhaustion was retried or mislabeled: jobs=%d comments=%d logs=%q state=%+v", len(handler.jobs), len(gh.comments), logs.String(), store.Data)
-	}
-	m.Now = func() time.Time { return now.Add(time.Minute) }
-	if _, err := m.RunOnce(t.Context(), store); err != nil || len(handler.jobs) != 1 {
-		t.Fatalf("completed resource-exhausted job reran: err=%v jobs=%d", err, len(handler.jobs))
 	}
 }
 

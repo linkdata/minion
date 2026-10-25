@@ -22,7 +22,6 @@ func criticFeedbackJSON(hasBlockers bool, feedback string) string {
 }
 
 func TestRunnerRejectsCriticFeedbackBlankAfterSanitization(t *testing.T) {
-	requireActionProcessGroup(t)
 	for _, phase := range []string{reviewFull, reviewVerification} {
 		for _, feedback := range []struct {
 			name, text, codexKey, claudeKey string
@@ -95,7 +94,6 @@ func TestRunnerRejectsCriticFeedbackBlankAfterSanitization(t *testing.T) {
 }
 
 func TestRunnerPreservesSanitizedCriticFeedbackIntoRevision(t *testing.T) {
-	requireActionProcessGroup(t)
 	const codexKey, claudeKey = "main-key", "critic-key"
 	const feedback = "Repair the de\x00fect using main-\x00key and critic-\x00key."
 	const sanitized = "Repair the defect using [redacted] and [redacted]."

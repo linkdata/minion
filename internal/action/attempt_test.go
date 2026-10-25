@@ -19,7 +19,6 @@ import (
 )
 
 func TestExecuteScopesAttemptIdentity(t *testing.T) {
-	requireActionProcessGroup(t)
 	for _, withUsage := range []bool{false, true} {
 		t.Run(fmt.Sprintf("usage=%t", withUsage), func(t *testing.T) {
 			gitFixtureRemote(t)

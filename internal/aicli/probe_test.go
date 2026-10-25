@@ -1,3 +1,5 @@
+//go:build !windows
+
 package aicli
 
 import (
@@ -8,24 +10,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
-
-	"github.com/linkdata/minion/internal/processgroup"
 )
-
-var probeProcessGroupCheck = sync.OnceValue(processgroup.Check)
-
-func requireProbeProcessGroup(t *testing.T) {
-	t.Helper()
-	if err := probeProcessGroupCheck(); err != nil {
-		if os.Getenv("MINION_REQUIRE_PROCESSGROUP") == "1" {
-			t.Fatal(err)
-		}
-		t.Skipf("CLI probe requires a delegated service: %v", err)
-	}
-}
 
 func probeExecutable(t *testing.T, script string) string {
 	t.Helper()
@@ -37,12 +24,11 @@ func probeExecutable(t *testing.T, script string) string {
 }
 
 func TestProbeRetainsOutputLimitAndQuotesDiagnostics(t *testing.T) {
-	requireProbeProcessGroup(t)
 	for _, tc := range []struct {
 		name, script, diagnostic string
 		limited                  bool
 	}{
-		{"output cap", fmt.Sprintf("head -c %d /dev/zero\nsleep 30\n", MaxEventBytes+1), "", true},
+		{"output cap", fmt.Sprintf("head -c %d /dev/zero\nexec sleep 30\n", MaxEventBytes+1), "", true},
 		{"diagnostic", "printf 'first\\nforged journal line' >&2\nexit 7\n", `first\nforged journal line`, false},
 		{"quiet failure", "exit 7\n", "", false},
 	} {
@@ -73,7 +59,6 @@ func TestProbeRetainsOutputLimitAndQuotesDiagnostics(t *testing.T) {
 }
 
 func TestProbeExactBoundAndCallerCancellation(t *testing.T) {
-	requireProbeProcessGroup(t)
 	binary := probeExecutable(t, fmt.Sprintf("head -c %d /dev/zero\n", MaxEventBytes))
 	output, err := Probe(t.Context(), binary, "", nil, t.TempDir(), os.Environ(), "", "")
 	if err != nil || len(output) != MaxEventBytes {

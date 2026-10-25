@@ -11,12 +11,14 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
 
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/monitor"
+	"github.com/linkdata/minion/internal/workspace"
 )
 
 func TestWorkerDiagnosticsStayInPrivateAttemptRecord(t *testing.T) {
@@ -30,8 +32,13 @@ func TestWorkerDiagnosticsStayInPrivateAttemptRecord(t *testing.T) {
 	if err := owner.retainWorkerDiagnostics(job, result, failure); err != nil {
 		t.Fatalf("private attempt record missing: path=%q error=%v", path, err)
 	}
+	canonicalRoot, err := workspace.CanonicalPath(owner.WorkRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loggedPath := filepath.Join(canonicalRoot, "worker-diagnostics", job.Identity.AttemptID+".json")
 	if strings.Contains(journal.String(), "SECRET") || strings.Contains(journal.String(), "FORGED") ||
-		!strings.Contains(journal.String(), "count=1") || !strings.Contains(journal.String(), path) {
+		!strings.Contains(journal.String(), "count=1") || !strings.Contains(journal.String(), fmt.Sprintf("private_path=%q", loggedPath)) {
 		t.Fatalf("worker text reached journal or record location is hidden: %q", journal.String())
 	}
 	data, err := os.ReadFile(path)
@@ -47,10 +54,10 @@ func TestWorkerDiagnosticsStayInPrivateAttemptRecord(t *testing.T) {
 		len(record.WorkerReportedDiagnostics) != 1 || record.WorkerReportedDiagnostics[0] != result.Diagnostics[0] {
 		t.Fatalf("private worker evidence changed: record=%+v", record)
 	}
-	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0600 {
+	if info, err := os.Stat(path); err != nil || !info.Mode().IsRegular() || runtime.GOOS != "windows" && info.Mode().Perm() != 0600 {
 		t.Fatalf("private record permissions: %v, %v", info, err)
 	}
-	if info, err := os.Stat(filepath.Dir(path)); err != nil || info.Mode().Perm() != 0700 {
+	if info, err := os.Stat(filepath.Dir(path)); err != nil || !info.IsDir() || runtime.GOOS != "windows" && info.Mode().Perm() != 0700 {
 		t.Fatalf("private directory permissions: %v, %v", info, err)
 	}
 	if err := owner.retainWorkerDiagnostics(job, result, failure); err != nil {
@@ -71,10 +78,8 @@ func TestPrivateWorkerDiagnosticSaveFailureBlocksPublication(t *testing.T) {
 		t.Fatalf("baseline result would not be publishable: %v", err)
 	}
 	root := t.TempDir()
-	if err := os.Mkdir(filepath.Join(root, "worker-diagnostics"), 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(filepath.Join(root, "worker-diagnostics"), 0755); err != nil {
+	blocked := filepath.Join(root, "worker-diagnostics")
+	if err := os.WriteFile(blocked, []byte("existing file"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	var writes atomic.Int32
@@ -100,7 +105,7 @@ func TestPrivateWorkerDiagnosticSaveFailureBlocksPublication(t *testing.T) {
 	if !errors.Is(err, monitor.ErrTerminalJob) || strings.Contains(err.Error(), "SECRET") || strings.Contains(journal.String(), "SECRET") || writes.Load() != 0 {
 		t.Fatalf("private save failure did not stop publication safely: error=%v journal=%q", err, journal.String())
 	}
-	if entries, err := os.ReadDir(filepath.Join(root, "worker-diagnostics")); err != nil || len(entries) != 0 {
-		t.Fatalf("private save failure left a published record: %v, %v", entries, err)
+	if data, err := os.ReadFile(blocked); err != nil || string(data) != "existing file" {
+		t.Fatalf("private save failure changed existing file: %q, %v", data, err)
 	}
 }

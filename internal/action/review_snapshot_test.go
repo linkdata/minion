@@ -3,11 +3,13 @@ package action
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -28,8 +30,10 @@ func TestReviewSnapshotFixFreezesOnlyExportedCandidate(t *testing.T) {
 	index, source := offlineIndexFixture(t, job.Source.Files)
 	writeFixtureFile(t, source, "source.txt", []byte("reviewed"))
 	writeFixtureFile(t, source, "added", []byte("new executable"))
-	if err := os.Chmod(filepath.Join(source, "added"), 0700); err != nil {
-		t.Fatal(err)
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(filepath.Join(source, "added"), 0700); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := os.Remove(filepath.Join(source, "deleted")); err != nil {
 		t.Fatal(err)
@@ -49,7 +53,7 @@ func TestReviewSnapshotFixFreezesOnlyExportedCandidate(t *testing.T) {
 		t.Fatalf("frozen repository does not show exported candidate: %q", status)
 	}
 	info, err := os.Stat(filepath.Join(snapshot.source, "added"))
-	if err != nil || info.Mode().Perm() != 0755 {
+	if err != nil || runtime.GOOS != "windows" && info.Mode().Perm() != 0755 {
 		t.Fatalf("frozen executable=%v,%v", info, err)
 	}
 	if err := snapshot.verify(t.Context()); err != nil {
@@ -115,7 +119,11 @@ func TestReviewSnapshotFreezesRawAuditArtifactsAndAbsence(t *testing.T) {
 		t.Fatal(err)
 	}
 	output, workRoot := t.TempDir(), t.TempDir()
-	rawMetadata := `{"target":"` + source + `","raw":"not normalized"}`
+	metadata, err := json.Marshal(map[string]string{"target": source, "raw": "not normalized"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawMetadata := string(metadata)
 	for name, data := range map[string]string{"REPORT.md": "reviewed report", "run-metadata.json": rawMetadata, "FINDINGS-DETAIL.md": ""} {
 		if err := os.WriteFile(filepath.Join(output, name), []byte(data), 0600); err != nil {
 			t.Fatal(err)
@@ -184,10 +192,17 @@ func TestReviewSnapshotRejectsOversizedReports(t *testing.T) {
 }
 
 func TestReviewSnapshotCleansFailedFixCandidateMaterialization(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not have the same path-length error as Unix")
+	}
 	for _, stage := range []string{"source", "addition"} {
 		t.Run(stage, func(t *testing.T) {
 			job := testJob(command.Fix)
-			name := strings.TrimSuffix(strings.Repeat(strings.Repeat("a", 250)+"/", 14), "/")
+			segments := 14
+			if runtime.GOOS == "darwin" {
+				segments = 2
+			}
+			name := strings.TrimSuffix(strings.Repeat(strings.Repeat("a", 250)+"/", segments), "/")
 			if stage == "source" {
 				job.Source.Files = append(job.Source.Files, workspace.File{Path: name, Mode: workspace.Regular, Data: []byte("source")})
 				attachRepository(t, &job)
@@ -229,7 +244,6 @@ func TestReviewSnapshotCleansFailedFixCandidateMaterialization(t *testing.T) {
 }
 
 func TestReviewSnapshotRejectsCriticCopyMutation(t *testing.T) {
-	requireActionProcessGroup(t)
 	for _, test := range []struct {
 		name, phase string
 		approveFull bool
@@ -298,7 +312,6 @@ func TestReviewSnapshotRejectsCriticCopyMutation(t *testing.T) {
 }
 
 func TestReviewSnapshotCancellationKeepsVerdictWithoutIntegrityFailure(t *testing.T) {
-	requireActionProcessGroup(t)
 	for _, interrupted := range []bool{false, true} {
 		t.Run(fmt.Sprintf("canceled=%t", interrupted), func(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())
@@ -333,6 +346,9 @@ func TestReviewSnapshotChecksExactFrozenFiles(t *testing.T) {
 	for _, reports := range []bool{false, true} {
 		for _, mutation := range []string{"special permissions", "new file", "directory"} {
 			t.Run(fmt.Sprintf("reports=%t/%s", reports, mutation), func(t *testing.T) {
+				if runtime.GOOS == "windows" && mutation == "special permissions" {
+					t.Skip("Windows does not represent setuid in file modes")
+				}
 				job := testJob(command.Fix)
 				var index *gitwork.OfflineIndex
 				var source string

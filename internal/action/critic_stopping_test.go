@@ -14,7 +14,6 @@ import (
 )
 
 func TestRunnerCriticStoppingReplaysFullReviewStreak(t *testing.T) {
-	requireActionProcessGroup(t)
 	verdicts := map[string]string{
 		"approved": approvedCritiqueJSON,
 		"nits":     `{"review_complete":true,"approved":false,"has_blockers":false,"feedback":"Nonblocking nit."}`,

@@ -15,7 +15,6 @@ import (
 )
 
 func TestUsageAggregateBounds(t *testing.T) {
-	requireActionProcessGroup(t)
 	for _, scenario := range []struct {
 		name          string
 		first, second int64

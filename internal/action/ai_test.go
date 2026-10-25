@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -24,12 +25,16 @@ import (
 )
 
 func TestReviewPromptsRequireCompleteInvestigationInEveryPhase(t *testing.T) {
+	gitCommand := "git"
+	if runtime.GOOS == "windows" {
+		gitCommand = "git.exe"
+	}
 	prompts := map[string]string{}
 	for _, phase := range []string{reviewFull, reviewVerification} {
 		prompts[phase] = criticPrompt(phase, "Review this change.", "Candidate.", "", "", "")
 		for _, want := range []string{
 			"complete local Git history with read-only metadata",
-			"For fix actions, compare current source with the original input at Git HEAD using git status and git diff, including additions, deletions, binary content and executable modes.",
+			fmt.Sprintf("For fix actions, compare current source with the original input at Git HEAD using %s status and %s diff, including additions, deletions, binary content and executable modes.", gitCommand, gitCommand),
 		} {
 			if !strings.Contains(prompts[phase], want) {
 				t.Errorf("%s critic lacks local Git instruction %q", phase, want)
@@ -58,6 +63,9 @@ func TestReviewPromptsRequireCompleteInvestigationInEveryPhase(t *testing.T) {
 			t.Fatal(err)
 		}
 		prompts[string(action)] = prompt
+	}
+	if want := fmt.Sprintf("Use %s status and %s diff against HEAD", gitCommand, gitCommand); !strings.Contains(prompts[string(command.Fix)], want) {
+		t.Errorf("fix prompt lacks local Git instruction %q", want)
 	}
 	for name, prompt := range prompts {
 		for _, rule := range []string{
@@ -807,7 +815,6 @@ func TestParseCritique(t *testing.T) {
 }
 
 func TestCommentPublishesCompletedCriticResultWithActualOutcome(t *testing.T) {
-	requireActionProcessGroup(t)
 	zero := 0
 	for _, tt := range []struct {
 		name, verdict string

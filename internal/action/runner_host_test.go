@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -13,37 +14,10 @@ import (
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/skills"
-	"github.com/linkdata/minion/internal/workroot"
+	"github.com/linkdata/minion/internal/workspace"
 )
 
-func TestRunnerWorkRootIsolation(t *testing.T) {
-	for _, kind := range []string{"main skill", "critic skill", "system read"} {
-		t.Run(kind, func(t *testing.T) {
-			root := t.TempDir()
-			work := filepath.Join(root, "work")
-			if err := os.Mkdir(work, 0700); err != nil {
-				t.Fatal(err)
-			}
-			runner := Runner{}
-			job := withClaudeCritic(testJob(command.Comment))
-			switch kind {
-			case "main skill", "critic skill":
-				skill := filepath.Join(work, "skill", "SKILL.md")
-				writeFixtureFile(t, work, "skill/SKILL.md", []byte("trusted skill"))
-				if kind == "main skill" {
-					runner.Codex.Skills = []string{skill}
-				} else {
-					runner.Claude.Skills = []string{skill}
-				}
-			case "system read":
-				t.Setenv("PATH", t.TempDir())
-				work = "/usr"
-			}
-			if err := runner.CheckWorkRootIsolation(work, job.Main.Provider, job.Critic.Provider); err == nil || !strings.Contains(err.Error(), "work root overlaps") {
-				t.Fatalf("isolation=%v", err)
-			}
-		})
-	}
+func TestRunnerRequiresExistingWorkRoot(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "missing")
 	runner := Runner{WorkRoot: missing, runModel: forbidModel(t)}
 	if result, err := runner.Run(t.Context(), testJob(command.Comment)); !errors.Is(err, os.ErrNotExist) || errors.Is(err, monitor.ErrTerminalJob) || len(result.Calls) != 0 {
@@ -55,12 +29,6 @@ func TestRunnerWorkRootIsolation(t *testing.T) {
 	runner = Runner{}
 	if _, err := runner.Run(t.Context(), testJob(command.Comment)); !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "work root is required") {
 		t.Fatalf("missing root=%v", err)
-	}
-}
-
-func TestWorkRootIsolationRejectsUnknownProvider(t *testing.T) {
-	if err := (&Runner{}).CheckWorkRootIsolation(t.TempDir(), "unknown"); err == nil || !strings.Contains(err.Error(), "unsupported AI provider") {
-		t.Fatalf("unknown provider mixed filesystem grants: %v", err)
 	}
 }
 
@@ -78,7 +46,6 @@ func TestRunnerRejectsCanceledContextBeforePreparation(t *testing.T) {
 }
 
 func TestRunnerReturnsParentCancellationAfterFinalReview(t *testing.T) {
-	requireActionProcessGroup(t)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	job := withClaudeCritic(testJob(command.Comment))
@@ -109,24 +76,47 @@ func TestRunnerReturnsParentCancellationAfterFinalReview(t *testing.T) {
 
 func TestRunnerPreparationFailuresAreTerminalBeforeModels(t *testing.T) {
 	longPath := strings.TrimSuffix(strings.Repeat(strings.Repeat("a", 255)+"/", 16), "/")
+	sourceFailure := func(job *Job) { job.Source.Files[0].Path = longPath }
+	contextFailure := func(job *Job) { job.Source.BaseFiles[0].Path = longPath }
+	if runtime.GOOS == "windows" {
+		sourceFailure = func(job *Job) {
+			job.Source.Files = append(job.Source.Files, workspace.File{Path: "SOURCE.txt", Mode: workspace.Regular})
+		}
+		contextFailure = func(job *Job) {
+			job.Source.BaseFiles = append(job.Source.BaseFiles, workspace.File{Path: "DELETED.txt", Mode: workspace.Regular})
+		}
+	}
 	for _, test := range []struct {
 		name   string
 		action command.Action
 		mutate func(*Job)
 		want   string
 	}{
-		{"source materialization", command.Comment, func(job *Job) { job.Source.Files[0].Path = longPath }, "materialize source"},
+		{"source materialization", command.Comment, sourceFailure, "materialize source"},
 		{"repository materialization", command.Comment, func(job *Job) { job.Source.Files[0].Data = []byte("forged\n") }, "materialize repository"},
-		{"context materialization", command.Review, func(job *Job) { job.Source.BaseFiles[0].Path = longPath }, "materialize context"},
+		{"context materialization", command.Review, contextFailure, "materialize context"},
 		{"missing audit task skill", command.SecurityAudit, func(job *Job) { job.Main.Skills = []string{skills.BuiltinAntiPromptInjection} }, "action prompt: security audit requires"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if test.name != "source materialization" {
-				requireActionProcessGroup(t)
-			}
 			job := testJob(test.action)
 			test.mutate(&job)
 			runner := Runner{WorkRoot: t.TempDir(), runModel: forbidModel(t)}
+			if runtime.GOOS == "windows" && (test.name == "source materialization" || test.name == "context materialization") {
+				probe := filepath.Join(runner.WorkRoot, "case-probe")
+				if err := os.WriteFile(probe, nil, 0600); err != nil {
+					t.Fatal(err)
+				}
+				_, caseErr := os.Stat(filepath.Join(runner.WorkRoot, "CASE-PROBE"))
+				if err := os.Remove(probe); err != nil {
+					t.Fatal(err)
+				}
+				if errors.Is(caseErr, os.ErrNotExist) {
+					t.Skip("case alias fixture requires a case-insensitive work root")
+				}
+				if caseErr != nil {
+					t.Fatal(caseErr)
+				}
+			}
 			if result, err := runner.Run(t.Context(), job); !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), test.want) || len(result.Calls) != 0 {
 				t.Fatalf("preparation result=%+v error=%v", result, err)
 			}
@@ -135,7 +125,6 @@ func TestRunnerPreparationFailuresAreTerminalBeforeModels(t *testing.T) {
 }
 
 func TestRunnerEnforcesSuppliedRuntimeBudget(t *testing.T) {
-	requireActionProcessGroup(t)
 	for _, test := range []struct {
 		name        string
 		action      command.Action
@@ -190,7 +179,6 @@ func TestRunnerEnforcesSuppliedRuntimeBudget(t *testing.T) {
 }
 
 func TestRunnerFixCanReturnEmptyAnswerWithoutCritic(t *testing.T) {
-	requireActionProcessGroup(t)
 	job := testJob(command.Fix)
 	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 		writeFixtureFile(t, request.dir, "source.txt", []byte("fixed source"))
@@ -203,7 +191,6 @@ func TestRunnerFixCanReturnEmptyAnswerWithoutCritic(t *testing.T) {
 }
 
 func TestRunnerOmittedSourceWriteIsTerminal(t *testing.T) {
-	requireActionProcessGroup(t)
 	job := testJob(command.Fix)
 	job.Source.Omitted = []string{"hidden"}
 	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
@@ -221,51 +208,5 @@ func TestRunnerOmittedSourceWriteIsTerminal(t *testing.T) {
 	}
 	if err := result.validate(job, false); err != nil {
 		t.Fatalf("incomplete result must retain valid diagnostics: %v", err)
-	}
-}
-
-func TestWorkRootIsolationRejectsResolvedExecutableTarget(t *testing.T) {
-	for _, provider := range []string{"codex", "claude"} {
-		t.Run(provider, func(t *testing.T) {
-			root := t.TempDir()
-			work, bin := filepath.Join(root, "work"), filepath.Join(root, "bin")
-			for _, directory := range []string{work, bin} {
-				if err := os.Mkdir(directory, 0700); err != nil {
-					t.Fatal(err)
-				}
-			}
-			target := filepath.Join(work, "actual-"+provider)
-			if err := os.WriteFile(target, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Symlink(target, filepath.Join(bin, provider)); err != nil {
-				t.Fatal(err)
-			}
-			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-			want, err := filepath.EvalSymlinks(target)
-			if err != nil {
-				t.Fatal(err)
-			}
-			runner := Runner{}
-			if err := runner.CheckWorkRootIsolation(work, provider); err == nil || !strings.Contains(err.Error(), "work root overlaps") || !strings.Contains(err.Error(), want) {
-				t.Fatalf("outside symlink hid executable inside work root: %v", err)
-			}
-			other := "claude"
-			if provider == "claude" {
-				other = "codex"
-			}
-			if err := runner.CheckWorkRootIsolation(work, other); err != nil {
-				t.Fatalf("unused %s executable affected %s admission: %v", provider, other, err)
-			}
-			job := testJob(command.Comment)
-			job.Main.Provider = other
-			job.Critic = &RoleSettings{Provider: provider}
-			job.CriticMaxRounds = 1
-			runner.WorkRoot, runner.runModel = work, forbidModel(t)
-			result, err := runner.Run(t.Context(), job)
-			if !errors.Is(err, workroot.ErrUnsafe) || !strings.Contains(err.Error(), "work root overlaps") || !strings.Contains(err.Error(), want) || len(result.Calls) != 0 {
-				t.Fatalf("critic executable escaped Run admission: calls=%d error=%v", len(result.Calls), err)
-			}
-		})
 	}
 }

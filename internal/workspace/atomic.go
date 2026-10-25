@@ -4,9 +4,10 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 )
 
-// WriteAtomic replaces a private record, then syncs its directory and extra ancestors.
+// WriteAtomic replaces a private record, then syncs its directory and extra ancestors except on Windows.
 // The caller validates paths and serializes updates; sync failure can follow replacement.
 func WriteAtomic(path string, data []byte, extraDirs ...string) (resultErr error) {
 	file, err := os.CreateTemp(filepath.Dir(path), ".record-*")
@@ -28,10 +29,20 @@ func WriteAtomic(path string, data []byte, extraDirs ...string) (resultErr error
 	if err := errors.Join(writeErr, file.Close()); err != nil {
 		return err
 	}
-	if err := os.Rename(temporary, path); err != nil {
+	root, err := os.OpenRoot(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	// Root.Rename requests POSIX replacement semantics on Windows for open prior records.
+	err = root.Rename(filepath.Base(temporary), filepath.Base(path))
+	if err := errors.Join(err, root.Close()); err != nil {
 		return err
 	}
 	temporary = ""
+	// shortcut: Windows directory Sync lacks write access; revisit if crash durability is required.
+	if runtime.GOOS == "windows" {
+		return nil
+	}
 	for _, directory := range append([]string{filepath.Dir(path)}, extraDirs...) {
 		file, err := os.Open(directory)
 		if err != nil {

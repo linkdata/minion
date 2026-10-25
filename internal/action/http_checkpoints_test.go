@@ -22,7 +22,6 @@ import (
 )
 
 func TestHTTPCheckpointsKeepActualStoreRefusalsAndDurablePrefix(t *testing.T) {
-	requireActionProcessGroup(t)
 	for _, stage := range []string{"before", "after", "approved decision", "capped decision", "optional usage"} {
 		t.Run(stage, func(t *testing.T) {
 			job := withClaudeCritic(testJob(command.Comment))

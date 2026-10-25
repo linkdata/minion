@@ -12,7 +12,6 @@ import (
 )
 
 func TestRunnerMissingProviderIsNotTerminalAndRecordsZeroUsage(t *testing.T) {
-	requireActionProcessGroup(t)
 	for _, provider := range []string{"codex", "claude"} {
 		t.Run(provider, func(t *testing.T) {
 			t.Setenv("PATH", gitOnlyPath(t))

@@ -23,7 +23,6 @@ import (
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/monitor"
-	"github.com/linkdata/minion/internal/processgroup"
 	"github.com/linkdata/minion/internal/usage"
 	"github.com/linkdata/minion/internal/workroot"
 	"github.com/linkdata/minion/internal/workspace"
@@ -162,7 +161,7 @@ func (f *httpServerTest) ack(t *testing.T, path string, value any, status int, s
 	t.Helper()
 	got := f.request(path, value)
 	if got.err != nil || got.status != status || got.ack.Kind != strings.TrimPrefix(path, "/") || got.ack.Sequence != sequence {
-		t.Fatalf("%s acknowledgement: %+v", path, got)
+		t.Fatalf("%s acknowledgement: %+v failure=%+v", path, got, got.ack.Failure)
 	}
 	return got.ack
 }
@@ -597,8 +596,7 @@ func TestHTTPExecutorFailedOutcomeAcrossMissingCallbackPreservesOnlyRawFacts(t *
 func TestHTTPExecutorTreatsWorkerFailurePolicyAsUntrusted(t *testing.T) {
 	workerFailure := func() *httpFailure {
 		return &httpFailure{Message: "failed\nFORGED JOURNAL ENTRY\x1b[2J", Terminal: true,
-			Canceled: true, Deadline: true, Unsafe: true, Descendants: true, Unconfirmed: true,
-			ScopeUnconfirmed: true, Exhausted: true, OutcomeUnknown: true, RequestTransport: true,
+			Canceled: true, Deadline: true, Unsafe: true, OutcomeUnknown: true, RequestTransport: true,
 			MissingExecutable: true, NoSpace: true, QuotaExceeded: true, OutputLimit: true}
 	}
 	assertWorkerFailure := func(t *testing.T, err error) {
@@ -607,8 +605,7 @@ func TestHTTPExecutorTreatsWorkerFailurePolicyAsUntrusted(t *testing.T) {
 			t.Fatal("worker failure became success")
 		}
 		for _, cause := range []error{monitor.ErrTerminalJob, context.Canceled, context.DeadlineExceeded,
-			workroot.ErrUnsafe, processgroup.ErrDescendants, processgroup.ErrUnconfirmed,
-			processgroup.ErrScopeUnconfirmed, processgroup.ErrExhausted, monitor.ErrExecutionOutcomeUnknown,
+			workroot.ErrUnsafe, monitor.ErrExecutionOutcomeUnknown,
 			monitor.ErrRequestTransport, exec.ErrNotFound, syscall.ENOSPC, syscall.EDQUOT,
 			aicli.ErrOutputLimit} {
 			if errors.Is(err, cause) {
@@ -659,26 +656,6 @@ func TestHTTPExecutorTreatsWorkerFailurePolicyAsUntrusted(t *testing.T) {
 			}
 		})
 	}
-
-	t.Run("unreleased worker scope", func(t *testing.T) {
-		f := newHTTPServerTest(t, t.Context(), testJob(command.Comment), runnerExecutionCheckpoints{}, nil)
-		f.pull(t)
-		outcome := f.outcome(1, nil)
-		outcome.Failure = workerFailure()
-		outcome.Failure.Exhaustion = &processgroup.Exhaustion{
-			MaxTasks: 128, MaxMemoryBytes: 3 << 30, PIDEventsMax: 1,
-			Stop: "forced", Scope: "/worker\nFORGED SCOPE\x1b[2J", Released: false,
-		}
-		f.ack(t, "/outcome", outcome, http.StatusOK, 1)
-		got := f.result(t)
-		assertWorkerFailure(t, got.err)
-		var scope *processgroup.Exhaustion
-		var journal bytes.Buffer
-		log.New(&journal, "", 0).Printf("worker failure: %v", got.err)
-		if errors.As(got.err, &scope) || strings.Contains(journal.String(), "FORGED SCOPE") {
-			t.Fatalf("worker scope path became parent process evidence or log content: error=%v log=%q", got.err, journal.String())
-		}
-	})
 
 	t.Run("parent checkpoint", func(t *testing.T) {
 		parentErr := fmt.Errorf("parent save: %w", workroot.ErrUnsafe)
@@ -820,6 +797,9 @@ func TestHTTPExecutorRejectsStaleAndRegressingStatusWithoutChangingPaidSequence(
 	job.CriticMaxRounds = 2
 	f := newHTTPServerTest(t, ctx, job, runnerExecutionCheckpoints{}, nil)
 	f.pull(t)
+	f.tx.mu.Lock()
+	f.tx.started = f.tx.started.Add(-time.Second) // Keep synthetic nanosecond ages below measured elapsed time on Windows.
+	f.tx.mu.Unlock()
 	status := Status{Version: ProtocolVersion, Identity: f.job.Identity, SourceRef: f.job.Source.Head,
 		Sequence: 2, ProgressSequence: 4, ProgressAge: 2 * time.Nanosecond, LogSequence: 3, WorkerState: "busy", Phase: "prepare"}
 	f.ack(t, "/status", httpObservation{Status: status}, http.StatusOK, 2)

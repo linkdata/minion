@@ -124,7 +124,6 @@ func TestCappedDecisionRequiresOriginalFinalCompleteEvidence(t *testing.T) {
 }
 
 func TestFinalCriticFailureCannotPublishAtCap(t *testing.T) {
-	requireActionProcessGroup(t)
 	providerErr := errors.New("provider interrupted at cap")
 	for _, position := range []struct {
 		name, phase  string
@@ -200,7 +199,6 @@ func TestFinalCriticFailureCannotPublishAtCap(t *testing.T) {
 }
 
 func TestCappedFinalFullUsesFrozenFixAfterBlockingVerification(t *testing.T) {
-	requireActionProcessGroup(t)
 	for _, tamperFrozen := range []bool{false, true} {
 		t.Run(fmt.Sprintf("tamper frozen=%t", tamperFrozen), func(t *testing.T) {
 			job := withClaudeCritic(testJob(command.Fix))
@@ -301,7 +299,6 @@ func TestPrivateReviewRecordsActualCapAfterVerdictCheckpoint(t *testing.T) {
 }
 
 func TestCappedAuditStillRequiresInstalledReportValidation(t *testing.T) {
-	requireActionProcessGroup(t)
 	job := withClaudeCritic(auditRunnerJob(t))
 	job.CriticMaxRounds = 1
 	fakeOnPath(t, "node", "#!/bin/sh\ncase \"$*\" in *validate-findings.cjs*) exit 9;; esac\nexit 0\n")

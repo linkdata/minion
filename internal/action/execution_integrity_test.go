@@ -24,7 +24,6 @@ import (
 )
 
 func TestExecuteRetainsPaidCriticReceiptAfterSuppliedMetadataIntegrityFailure(t *testing.T) {
-	requireActionProcessGroup(t)
 	for _, approved := range []bool{false, true} {
 		name := "rejected"
 		if approved {

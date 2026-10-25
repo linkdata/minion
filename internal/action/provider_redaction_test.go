@@ -18,7 +18,6 @@ import (
 )
 
 func TestNativeProposalRedactsEncodedConfiguredKey(t *testing.T) {
-	requireActionProcessGroup(t)
 	for _, provider := range []string{"codex", "claude"} {
 		for _, tc := range []struct{ name, key string }{
 			{"quote", `fixture"secret`},
@@ -85,7 +84,6 @@ done
 }
 
 func TestAuditReportRedactsNULSplitConfiguredKeyBeforeCriticAndPublication(t *testing.T) {
-	requireActionProcessGroup(t)
 	job := withClaudeCritic(auditRunnerJob(t))
 	job.CriticMaxRounds = 1
 	const key = "fixture-audit-secret"
@@ -151,7 +149,6 @@ func TestAuditReportRedactsNULSplitConfiguredKeyBeforeCriticAndPublication(t *te
 }
 
 func TestAuditEncodedConfiguredKeyStopsBeforeCritic(t *testing.T) {
-	requireActionProcessGroup(t)
 	const key = "fixture-audit-secret"
 	const encoded = "fixture-audit-&#x73;ecret"
 	for _, test := range []struct {
@@ -197,7 +194,6 @@ func TestAuditEncodedConfiguredKeyStopsBeforeCritic(t *testing.T) {
 }
 
 func TestPartialAuditDropsMetadataWhenNormalizedTargetContainsKey(t *testing.T) {
-	requireActionProcessGroup(t)
 	job := auditRunnerJob(t)
 	key := job.Identity.Repository
 	failure := errors.New("provider stopped")
@@ -299,7 +295,6 @@ func TestAuditJSONRedactsMarkerLikeConfiguredKeys(t *testing.T) {
 }
 
 func TestIncompleteAuditReportRedactsConfiguredKey(t *testing.T) {
-	requireActionProcessGroup(t)
 	job := auditRunnerJob(t)
 	const key = "fixture-audit-secret"
 	runner := Runner{WorkRoot: t.TempDir(), Codex: config.CodexConfig{APIKey: key}, runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
@@ -360,7 +355,6 @@ func TestInvalidAuditJSONIsOmittedFromPartialArtifacts(t *testing.T) {
 }
 
 func TestRunnerRedactsReassembledSecretWithoutCritic(t *testing.T) {
-	requireActionProcessGroup(t)
 	for _, provider := range []string{"codex", "claude"} {
 		t.Run(provider, func(t *testing.T) {
 			job := testJob(command.Comment)
@@ -412,7 +406,6 @@ func TestFixChangesRejectConfiguredKeysWithoutRejectingBinary(t *testing.T) {
 	} {
 		for _, critic := range []bool{false, true} {
 			t.Run(test.name+"/critic="+strconv.FormatBool(critic), func(t *testing.T) {
-				requireActionProcessGroup(t)
 				job := testJob(command.Fix)
 				if critic {
 					job = withClaudeCritic(job)

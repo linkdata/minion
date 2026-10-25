@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -20,7 +21,6 @@ import (
 )
 
 func TestInitialRefutationsAreDiscardedAndEmptyHistoryIsOptional(t *testing.T) {
-	requireActionProcessGroup(t)
 	job := withClaudeCritic(testJob(command.Comment))
 	job.CriticMaxRounds, job.CriticNonblockingRounds = 2, 0
 	calls := 0
@@ -81,10 +81,9 @@ func TestInitialRefutationsAreDiscardedAndEmptyHistoryIsOptional(t *testing.T) {
 }
 
 func TestReviewHistoryGrantFailureIsTerminalAfterPaidWork(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root bypasses directory permissions")
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("requires effective POSIX directory permissions and a non-root user")
 	}
-	requireActionProcessGroup(t)
 	root := t.TempDir()
 	t.Cleanup(func() {
 		if err := os.Chmod(root, 0700); err != nil {
@@ -148,7 +147,7 @@ func checkRefutations(t *testing.T, request modelRun, want []Refutation) string 
 				t.Fatalf("private grant instruction absent or repeated: %q", rule)
 			}
 		}
-		if info, err := os.Stat(dir); err != nil || !info.IsDir() || info.Mode().Perm()&0077 != 0 {
+		if info, err := os.Stat(dir); err != nil || !info.IsDir() || runtime.GOOS != "windows" && info.Mode().Perm()&0077 != 0 {
 			t.Fatalf("refutations directory privacy: %v,%v", info, err)
 		}
 		for _, other := range append([]string{request.dir, request.outputDir}, request.readOnlyDirs...) {
@@ -174,7 +173,6 @@ func checkRefutations(t *testing.T, request modelRun, want []Refutation) string 
 }
 
 func TestRefutationsSurviveOmissionWithoutRememberingImplementedChanges(t *testing.T) {
-	requireActionProcessGroup(t)
 	const refutation = "PRIVATE_REFUTATION_A: source.txt is application data; this undeployed project requires no migration."
 	const findingA = "PRIVATE_FINDING_A: add a migration."
 	const findingB = "PRIVATE_BLOCKER_B: source.txt must contain fixed B."
@@ -260,7 +258,6 @@ func TestRefutationsSurviveOmissionWithoutRememberingImplementedChanges(t *testi
 }
 
 func TestRefutationsRetainSuccessfulMainPrefixAfterStop(t *testing.T) {
-	requireActionProcessGroup(t)
 	for _, failure := range []string{"main provider", "critic provider", "main malformed", "critic malformed", "round cap"} {
 		t.Run(failure, func(t *testing.T) {
 			job := withClaudeCritic(testJob(command.Comment))
@@ -343,7 +340,6 @@ func TestRefutationsRetainSuccessfulMainPrefixAfterStop(t *testing.T) {
 }
 
 func TestRefutationsRemainPrivateFromAuditArtifacts(t *testing.T) {
-	requireActionProcessGroup(t)
 	installActionTestSkills(t, testAuditSkillURL)
 	fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
 	job := withClaudeCritic(testJob(command.SecurityAudit))
@@ -389,7 +385,6 @@ func TestRefutationsRemainPrivateFromAuditArtifacts(t *testing.T) {
 }
 
 func TestRefutationCheckpointFailureStopsBeforeNextCall(t *testing.T) {
-	requireActionProcessGroup(t)
 	job := withClaudeCritic(testJob(command.Comment))
 	job.CriticMaxRounds, job.CriticNonblockingRounds = 2, 0
 	checkpointErr := errors.New("private refutation checkpoint unavailable")
@@ -427,7 +422,6 @@ func TestRefutationCheckpointFailureStopsBeforeNextCall(t *testing.T) {
 }
 
 func TestRunnerCheckpointsCriticDecisionAfterVerifiedVerdict(t *testing.T) {
-	requireActionProcessGroup(t)
 	checkpointErr := errors.New("critic decision checkpoint unavailable")
 	for _, failDecision := range []bool{false, true} {
 		t.Run(fmt.Sprintf("checkpoint failure=%t", failDecision), func(t *testing.T) {
