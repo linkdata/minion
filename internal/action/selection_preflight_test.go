@@ -200,8 +200,8 @@ exit 99
 	})
 	err := runner.PreflightSelection(t.Context())
 	requirePreflightMessage(t, err, preflightCodexInvocationUnsupported)
-	if cause := errors.Unwrap(err); cause == nil || !strings.Contains(cause.Error(), token) {
-		t.Fatalf("fake CLI did not echo the native credential into the raw cause: %v", cause)
+	if cause := errors.Unwrap(err); cause == nil || strings.Contains(cause.Error(), token) || !strings.Contains(cause.Error(), "[redacted]") {
+		t.Fatalf("native credential was not redacted in the preflight cause: %v", cause)
 	}
 }
 

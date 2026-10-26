@@ -26,6 +26,34 @@ import (
 	"github.com/linkdata/minion/internal/workroot"
 )
 
+func TestRunHTTPRejectsBaseRunnerCredentialsBeforePull(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(server.Close)
+	for _, test := range []struct {
+		name   string
+		runner Runner
+	}{
+		{"configured Codex key", Runner{Codex: config.CodexConfig{APIKey: "secret"}}},
+		{"native Codex key", Runner{Codex: config.CodexConfig{NativeAPIKey: "secret"}}},
+		{"native Codex token", Runner{Codex: config.CodexConfig{NativeAccessToken: "secret"}}},
+		{"Claude key", Runner{Claude: config.ClaudeConfig{APIKey: "secret"}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := RunHTTP(t.Context(), server.Client(), server.URL, "local", &test.runner)
+			if err == nil || !strings.Contains(err.Error(), "must not retain provider credentials") {
+				t.Fatalf("RunHTTP error = %v, want credential rejection", err)
+			}
+			if got := requests.Load(); got != 0 {
+				t.Fatalf("network requests = %d, want zero", got)
+			}
+		})
+	}
+}
+
 func TestRunHTTPReportsActualObservationsAndRawPaidReceipts(t *testing.T) {
 	for _, test := range []struct {
 		name            string
