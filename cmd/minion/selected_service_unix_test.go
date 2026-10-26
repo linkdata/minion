@@ -111,7 +111,11 @@ func TestAttachSelectedLocalWorkerSelectedCredentials(t *testing.T) {
 		want   action.WorkerCredentials
 	}{
 		{"configured Codex", func(*config.Config) {}, action.WorkerCredentials{CodexAPIKey: "selected-config-key"}},
-		{"native Codex", func(cfg *config.Config) { cfg.Codex.APIKey = "" }, action.WorkerCredentials{CodexNativeAPIKey: "selected-environment-key", CodexAccessToken: "selected-environment-token"}},
+		{"native Codex", func(cfg *config.Config) {
+			cfg.Codex.APIKey = ""
+			cfg.Codex.NativeAPIKey = "selected-environment-key"
+			cfg.Codex.NativeAccessToken = "selected-environment-token"
+		}, action.WorkerCredentials{CodexNativeAPIKey: "selected-environment-key", CodexAccessToken: "selected-environment-token"}},
 		{"Claude only", func(cfg *config.Config) {
 			cfg.Main = "claude"
 			cfg.Claude.Model, cfg.Claude.Effort = "claude-main", "medium"
@@ -120,6 +124,8 @@ func TestAttachSelectedLocalWorkerSelectedCredentials(t *testing.T) {
 			cfg.Main, cfg.Adversarial = "claude", "codex"
 			cfg.Claude.Model, cfg.Claude.Effort = "claude-main", "medium"
 			cfg.Codex.APIKey = ""
+			cfg.Codex.NativeAPIKey = "selected-environment-key"
+			cfg.Codex.NativeAccessToken = "selected-environment-token"
 		}, action.WorkerCredentials{CodexNativeAPIKey: "selected-environment-key", CodexAccessToken: "selected-environment-token", ClaudeAPIKey: "unselected-config-key"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
