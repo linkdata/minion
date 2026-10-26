@@ -35,12 +35,13 @@ func localWorkerTestStart(t *testing.T, mode string) *localWorker {
 	t.Helper()
 	report := filepath.Join(t.TempDir(), "child")
 	var output bytes.Buffer
-	w, err := startLocalWorker(unixTestDirectory(t), "local", os.Args[0], []string{"-test.run=^TestLocalWorkerHelper$"}, 10*time.Second, func(cmd *exec.Cmd, socket string) {
+	w, err := startLocalWorker(unixTestDirectory(t), "local", os.Args[0], []string{"-test.run=^TestLocalWorkerHelper$"}, 10*time.Second, func(cmd *exec.Cmd, socket string) error {
 		cmd.Env = append(os.Environ(), "MINION_LOCAL_WORKER_HELPER="+mode, "MINION_LOCAL_WORKER_SOCKET="+socket, "MINION_LOCAL_WORKER_REPORT="+report)
 		cmd.Stdout = &output
 		if mode == "ignore-interrupt" {
 			cmd.WaitDelay = 100 * time.Millisecond
 		}
+		return nil
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -186,11 +187,12 @@ func TestAttachLocalWorkerRoutesOrchestratorThroughDirectChild(t *testing.T) {
 	}
 	cfg := config.Config{Main: "codex", Commands: commands, Repositories: []config.Repository{{Name: "owner/repo", Actions: []string{"comment"}}}}
 	report := filepath.Join(t.TempDir(), "child")
-	selected, closeWorker, err := e.AttachLocalWorker(t.Context(), cfg, unixTestDirectory(t), os.Args[0], []string{"-test.run=^TestLocalWorkerHelper$"}, 10*time.Second, func(cmd *exec.Cmd, socket string, selected WorkerSelection) {
+	selected, exited, closeWorker, err := e.AttachLocalWorker(t.Context(), cfg, unixTestDirectory(t), os.Args[0], []string{"-test.run=^TestLocalWorkerHelper$"}, 10*time.Second, func(cmd *exec.Cmd, socket string, selected WorkerSelection) error {
 		if len(selected.Commands) != 1 || selected.Commands["comment"].Action != "comment" || selected.Main.Model != "resolved" || selected.Main.Effort != "high" {
 			t.Fatalf("startup selection = %+v", selected)
 		}
 		cmd.Env = append(os.Environ(), "MINION_LOCAL_WORKER_HELPER=crash", "MINION_LOCAL_WORKER_SOCKET="+socket, "MINION_LOCAL_WORKER_REPORT="+report)
+		return nil
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -208,15 +210,15 @@ func TestAttachLocalWorkerRoutesOrchestratorThroughDirectChild(t *testing.T) {
 	}
 	worker := e.Executor.(*localWorker)
 	select {
-	case <-worker.exited:
+	case <-exited:
 	case <-time.After(2 * time.Second):
 		t.Fatal("orchestrator did not assign work to direct child")
 	}
 	if worker.cmd.ProcessState == nil || worker.cmd.ProcessState.ExitCode() != 7 {
 		t.Fatalf("direct child did not receive assignment: %v", worker.cmd.ProcessState)
 	}
-	if err := e.WaitCapacity(t.Context()); err == nil {
-		t.Fatal("failed direct child still advertises capacity")
+	if err := e.WaitCapacity(t.Context()); !errors.Is(err, ErrLocalWorkerUnavailable) {
+		t.Fatalf("failed direct child did not report permanent capacity loss: %v", err)
 	}
 	if e.Executor == nil {
 		t.Fatal("worker failure enabled in-process fallback")
@@ -1115,7 +1117,15 @@ func TestLocalWorkerStartFailureClosesEndpoint(t *testing.T) {
 	if w, err := startLocalWorker(dir, "local", os.Args[0], nil, 0, nil); w != nil || err == nil || !strings.Contains(err.Error(), "readiness timeout") {
 		t.Fatalf("unbounded readiness wait accepted: worker=%v error=%v", w, err)
 	}
-	w, err := startLocalWorker(dir, "local", filepath.Join(dir, "missing"), nil, time.Second, nil)
+	configureErr := errors.New("startup configuration failed")
+	w, err := startLocalWorker(dir, "local", filepath.Join(dir, "missing"), nil, time.Second, func(*exec.Cmd, string) error { return configureErr })
+	if w != nil || !errors.Is(err, configureErr) || !strings.Contains(err.Error(), "configure local worker") {
+		t.Fatalf("configure failure did not precede child start: worker=%v error=%v", w, err)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, "execution.sock")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("configure failure retained owned endpoint: %v", err)
+	}
+	w, err = startLocalWorker(dir, "local", filepath.Join(dir, "missing"), nil, time.Second, nil)
 	if w != nil || err == nil || !strings.Contains(err.Error(), "start local worker") {
 		t.Fatalf("start failure: worker=%v error=%v", w, err)
 	}

@@ -142,6 +142,10 @@ func runWithGitCheck(checkGit func(context.Context, string) error) int {
 
 	orchestrator := newOrchestrator(cfg, client, store, logger, checkWorkRoot)
 	watcher := &monitor.Monitor{Config: cfg, ConfigPath: loadedPath, GitHub: client, Handler: orchestrator, Logger: logger}
+	return runMonitorLoop(ctx, watcher, store, *loop, nil, logger)
+}
+
+func runMonitorLoop(ctx context.Context, watcher *monitor.Monitor, store *state.Store, loop bool, workerExited <-chan struct{}, logger *log.Logger) int {
 	for {
 		next, err := watcher.RunOnce(ctx, store)
 		if err != nil {
@@ -150,11 +154,21 @@ func runWithGitCheck(checkGit func(context.Context, string) error) int {
 			} else {
 				logger.Printf("poll: %s", monitor.InertLogText(err.Error()))
 			}
-			if !*loop {
+			if !loop || workerExited != nil && ctx.Err() == nil && errors.Is(err, action.ErrLocalWorkerUnavailable) {
 				return 1
 			}
 		}
-		if !*loop {
+		if workerExited != nil {
+			select {
+			case <-workerExited:
+				if ctx.Err() == nil {
+					logger.Print("selected local worker exited")
+					return 1
+				}
+			default:
+			}
+		}
+		if !loop {
 			return 0
 		}
 		wait := time.Until(next)
@@ -166,6 +180,13 @@ func runWithGitCheck(checkGit func(context.Context, string) error) int {
 		case <-ctx.Done():
 			timer.Stop()
 			return 0
+		case <-workerExited:
+			timer.Stop()
+			if ctx.Err() != nil {
+				return 0
+			}
+			logger.Print("selected local worker exited")
+			return 1
 		case <-timer.C:
 		}
 	}

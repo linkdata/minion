@@ -121,9 +121,10 @@ func startRunnerCleanupWorker(t *testing.T, mode string) (*localWorker, string, 
 		t.Fatal(err)
 	}
 	var output bytes.Buffer
-	w, err := startLocalWorker(unixTestDirectory(t), "local", os.Args[0], []string{"-test.run=^TestLocalWorkerRunnerCleanupHelper$"}, 10*time.Second, func(cmd *exec.Cmd, socket string) {
+	w, err := startLocalWorker(unixTestDirectory(t), "local", os.Args[0], []string{"-test.run=^TestLocalWorkerRunnerCleanupHelper$"}, 10*time.Second, func(cmd *exec.Cmd, socket string) error {
 		cmd.Env = append(os.Environ(), "MINION_RUNNER_CLEANUP_HELPER="+mode, "MINION_RUNNER_CLEANUP_SOCKET="+socket, "MINION_RUNNER_CLEANUP_WORKROOT="+workRoot, "MINION_RUNNER_CLEANUP_REPORT="+report)
 		cmd.Stdout = &output
+		return nil
 	})
 	if err != nil {
 		t.Fatal(err)

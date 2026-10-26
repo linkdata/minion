@@ -1,0 +1,68 @@
+//go:build !windows
+
+package main
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"log"
+	"os/exec"
+	"time"
+
+	"github.com/linkdata/minion/internal/action"
+	"github.com/linkdata/minion/internal/monitor"
+	"github.com/linkdata/minion/internal/state"
+)
+
+// attachSelectedLocalWorker prepares one selected child before the monitor can
+// discover work. Public service mode selection remains with the CLI switch.
+func attachSelectedLocalWorker(ctx context.Context, owner *action.Orchestrator, watcher *monitor.Monitor, runtimeDir, path string, args []string, readyTimeout time.Duration) (<-chan struct{}, func() error, error) {
+	if owner == nil || watcher == nil {
+		return nil, nil, errors.New("selected local service requires an owner and monitor")
+	}
+	selected, done, closeWorker, err := owner.AttachLocalWorker(ctx, watcher.Config, runtimeDir, path, args, readyTimeout, func(cmd *exec.Cmd, socket string, selected action.WorkerSelection) error {
+		startup := action.WorkerStartup{Selection: selected, WorkRoot: owner.WorkRoot, SocketPath: socket}
+		uses := func(provider string) bool {
+			return selected.Main.Provider == provider || selected.Critic != nil && selected.Critic.Provider == provider
+		}
+		if uses("codex") {
+			startup.CodexAPIKey = owner.Runner.Codex.APIKey
+		}
+		if uses("claude") {
+			startup.ClaudeAPIKey = owner.Runner.Claude.APIKey
+		}
+		input, err := action.EncodeWorkerStartup(startup)
+		if err != nil {
+			return fmt.Errorf("encode selected worker startup: %w", err)
+		}
+		cmd.Stdin = bytes.NewReader(input)
+		cmd.Env = selectedWorkerEnv(startup)
+		return nil
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	watcher.Handler = owner
+	watcher.SelectedCommands = make(map[string]bool, len(selected.Commands))
+	for name := range selected.Commands {
+		watcher.SelectedCommands[name] = true
+	}
+	return done, closeWorker, nil
+}
+
+// runSelectedLocalService owns the selected child across the monitor loop.
+func runSelectedLocalService(ctx context.Context, watcher *monitor.Monitor, store *state.Store, loop bool, done <-chan struct{}, logger *log.Logger, closeWorker func() error) (code int) {
+	if done == nil || closeWorker == nil {
+		logger.Print("selected local worker is missing")
+		return 1
+	}
+	defer func() {
+		if err := closeWorker(); err != nil {
+			logger.Printf("close selected local worker: %s", monitor.InertLogText(err.Error()))
+			code = 1
+		}
+	}()
+	return runMonitorLoop(ctx, watcher, store, loop, done, logger)
+}
