@@ -244,6 +244,9 @@ func (s *Session) admitRollouts(ctx context.Context, rootID string, started time
 		return
 	}
 	_, rootOwned := s.ownedRollouts[root.path]
+	if !rootOwned && !paths[root.path] {
+		return
+	}
 	if s.excludedRollouts[root.path] && !rootOwned {
 		return
 	}
@@ -286,6 +289,9 @@ func (s *Session) admitRollouts(ctx context.Context, rootID string, started time
 			return
 		}
 		owned, alreadyOwned := s.ownedRollouts[meta.path]
+		if !alreadyOwned && !paths[meta.path] {
+			continue
+		}
 		if s.excludedRollouts[meta.path] && !alreadyOwned {
 			continue
 		}

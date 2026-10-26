@@ -522,6 +522,33 @@ printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.comp
 	}
 }
 
+func TestSessionDoesNotClaimRolloutOutsideCleanupInventory(t *testing.T) {
+	installFakeCodex(t, `#!/bin/sh
+cat >/dev/null
+printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}' '{"type":"turn.completed"}'
+`)
+	home := os.Getenv("CODEX_HOME")
+	manual := filepath.Join(home, "sessions", "manual", "rollout-root.jsonl")
+	if err := os.MkdirAll(filepath.Dir(manual), 0700); err != nil {
+		t.Fatal(err)
+	}
+	original := rolloutTemplate(t, "root", "", 10)
+	if err := os.WriteFile(manual, original, 0600); err != nil {
+		t.Fatal(err)
+	}
+	var session Session
+	if _, err := session.Run(t.Context(), t.TempDir(), "task", false, "", config.CodexConfig{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(manual)
+	if err != nil || !bytes.Equal(data, original) {
+		t.Fatalf("preexisting rollout outside cleanup inventory was removed or changed: %q, %v", data, err)
+	}
+}
+
 func TestSessionPreservesRolloutsWhenHelperCompletionIsUnverified(t *testing.T) {
 	binary := installFakeCodex(t, `#!/bin/sh
 set -eu
