@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -137,6 +138,9 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	if err := assignment.Credentials.validateJob(job); err != nil {
 		return httpClientUnknown("next", err)
 	}
+	if assignment.StopGrace <= 0 || assignment.StopGrace > config.MaxActionRuntime {
+		return httpClientUnknown("next", errors.New("invalid assignment stop grace"))
+	}
 	jobRunner := *runner
 	jobRunner.Codex.APIKey = assignment.Credentials.CodexAPIKey
 	jobRunner.Codex.NativeAPIKey = assignment.Credentials.CodexNativeAPIKey
@@ -160,7 +164,17 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	if deadline, ok := ctx.Deadline(); ok && deadline.Before(expires) {
 		expires = deadline
 	}
-	checkpoints = &httpClientCheckpoints{transport: transport, control: context.WithoutCancel(ctx), binding: httpJobBinding(job), started: started}
+	controlCtx, cancelControl := context.WithDeadline(context.WithoutCancel(ctx), expires.Add(assignment.StopGrace))
+	defer cancelControl()
+	shortenControl := func(remaining time.Duration) {
+		if remaining <= 0 {
+			cancelControl()
+			return
+		}
+		timer := time.AfterFunc(remaining, cancelControl)
+		context.AfterFunc(controlCtx, func() { timer.Stop() })
+	}
+	checkpoints = &httpClientCheckpoints{transport: transport, control: controlCtx, binding: httpJobBinding(job), started: started}
 	if !time.Now().Before(expires) {
 		err := errors.Join(monitor.ErrTerminalJob, context.DeadlineExceeded)
 		result := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head}
@@ -171,6 +185,9 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	defer stopDeadline()
 	actionCtx, cancelAction := context.WithCancelCause(deadlineCtx)
 	defer cancelAction(context.Canceled)
+	startStop := sync.OnceFunc(func() { shortenControl(assignment.StopGrace) })
+	stopOnAction := context.AfterFunc(actionCtx, startStop)
+	defer stopOnAction()
 	checkpoints.action = actionCtx
 	watchCtx, stopWatch := context.WithCancelCause(ctx)
 	watchBody, err := httpEncode(checkpoints.binding, httpControlBytes)
@@ -204,13 +221,14 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	if err != nil {
 		protocolFailed = true
 		stopWatch(errHTTPWatchStopped)
+		startStop()
 		result := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head}
 		clearCredentials()
 		return errors.Join(err, checkpoints.outcome(result, err))
 	}
 	watchDone := make(chan error, 1)
 	go func() {
-		err := transport.watch(watchCtx, watchResponse, checkpoints.binding)
+		err := transport.watch(watchCtx, watchResponse, checkpoints.binding, shortenControl)
 		// Only cancellation of the held request is an intentional stop. Do not
 		// erase a parsed parent reply or protocol failure if stopping races it.
 		if watchCtx.Err() != nil && err == watchCtx.Err() {
@@ -229,17 +247,19 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 		watchDone <- err
 	}()
 	result := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head}
-	if err := checkpoints.status("prepare", 1); err != nil {
+	if err := checkpoints.status(actionCtx, "prepare", 1); err != nil {
 		runner.logf("HTTP prepare observation: %v", err)
 	}
 	var runErr error
-	// Preparation and status transfer consume the same accepted runtime.
+	// Preparation consumes the accepted runtime.
 	job.RuntimeBudget = time.Until(expires)
 	if job.RuntimeBudget <= 0 {
 		runErr = errors.Join(monitor.ErrTerminalJob, context.DeadlineExceeded)
 	} else {
 		result, runErr = jobRunner.Execute(actionCtx, job, checkpoints)
 	}
+	stopStarted := time.Now()
+	startStop()
 	clearCredentials()
 	for _, diagnostic := range result.Diagnostics {
 		if diagnostic.Code == "cleanup_failed" {
@@ -247,10 +267,13 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 			break
 		}
 	}
-	if runErr == nil {
-		if err := checkpoints.status("upload", 2); err != nil {
+	if runErr == nil && actionCtx.Err() == nil {
+		// Leave at least half the fixed stop grace for the required Result.
+		statusCtx, cancelStatus := context.WithDeadline(actionCtx, stopStarted.Add(assignment.StopGrace/2))
+		if err := checkpoints.status(statusCtx, "upload", 2); err != nil {
 			runner.logf("HTTP upload observation: %v", err)
 		}
+		cancelStatus()
 	}
 	cause := context.Cause(actionCtx)
 	if runErr == nil && httpWatchUncertainty(cause) {
@@ -380,9 +403,9 @@ func (c *httpExecutionClient) open(ctx context.Context, kind string, data []byte
 	return response, nil
 }
 
-func (c *httpExecutionClient) watch(ctx context.Context, response *http.Response, binding httpBinding) error {
+func (c *httpExecutionClient) watch(ctx context.Context, response *http.Response, binding httpBinding, shortenControl func(time.Duration)) error {
 	defer response.Body.Close()
-	var cancellation httpCancellation
+	cancellation := httpCancellation{StopRemaining: -1}
 	if err := httpDecode(response.Body, httpControlBytes, &cancellation); err != nil {
 		intentionalPipe := context.Cause(ctx) == errHTTPWatchStopped && errors.Is(err, io.ErrClosedPipe)
 		if ctx.Err() != nil && (errors.Is(err, ctx.Err()) || errors.Is(err, context.Cause(ctx)) || intentionalPipe) {
@@ -394,9 +417,14 @@ func (c *httpExecutionClient) watch(ctx context.Context, response *http.Response
 		return httpClientUnknown("cancel", errors.New("cancellation binding differs from assignment"))
 	}
 	switch cancellation.Reason {
-	case "canceled":
-		return fmt.Errorf("parent action canceled: %w", context.Canceled)
-	case "deadline":
+	case "canceled", "deadline":
+		if cancellation.StopRemaining < 0 || cancellation.StopRemaining > config.MaxActionRuntime {
+			return httpClientUnknown("cancel", errors.New("invalid cancellation stop remaining"))
+		}
+		shortenControl(cancellation.StopRemaining)
+		if cancellation.Reason == "canceled" {
+			return fmt.Errorf("parent action canceled: %w", context.Canceled)
+		}
 		return errors.Join(monitor.ErrTerminalJob, context.DeadlineExceeded)
 	case "completed":
 		if c.outcomeSent.Load() {
@@ -408,13 +436,16 @@ func (c *httpExecutionClient) watch(ctx context.Context, response *http.Response
 	}
 }
 
-func (c *httpClientCheckpoints) acknowledge(kind string, data []byte, sequence uint64) error {
-	parent := c.control
-	if kind == "status" {
-		parent = c.action
-	}
+func (c *httpClientCheckpoints) acknowledge(parent context.Context, kind string, data []byte, sequence uint64) error {
 	ctx, cancel := context.WithTimeout(parent, httpControlTimeout)
 	defer cancel()
+	if kind == "status" {
+		stop := context.AfterFunc(c.control, cancel)
+		defer stop()
+	}
+	if err := ctx.Err(); err != nil {
+		return httpClientUnknown(kind, err)
+	}
 	if kind != "status" {
 		c.sequence = sequence
 	}
@@ -449,7 +480,7 @@ func (c *httpClientCheckpoints) checkpoint(kind string, value CallCheckpoint) er
 	sequence := c.sequence + 1
 	data, err := httpEncode(httpCall{Sequence: sequence, Checkpoint: value}, httpControlBytes)
 	if err == nil {
-		err = c.acknowledge(kind, data, sequence)
+		err = c.acknowledge(c.control, kind, data, sequence)
 	} else {
 		err = httpClientUnknown(kind, err)
 	}
@@ -480,7 +511,7 @@ func (c *httpClientCheckpoints) Review(value ReviewCheckpoint) error {
 	sequence := c.sequence + 1
 	data, err := httpEncode(httpReview{Sequence: sequence, Checkpoint: value}, httpReviewBytes)
 	if err == nil {
-		err = c.acknowledge("review", data, sequence)
+		err = c.acknowledge(c.control, "review", data, sequence)
 	} else {
 		err = httpClientUnknown("review", err)
 	}
@@ -488,16 +519,19 @@ func (c *httpClientCheckpoints) Review(value ReviewCheckpoint) error {
 	return err
 }
 
-func (c *httpClientCheckpoints) status(phase string, observation uint64) error {
+func (c *httpClientCheckpoints) status(parent context.Context, phase string, observation uint64) error {
 	status := Status{Version: c.binding.Version, Identity: c.binding.Identity, SourceRef: c.binding.SourceRef, Sequence: observation, ProgressAge: time.Since(c.started), WorkerState: "busy", Phase: phase}
 	data, err := httpEncode(httpObservation{Status: status}, httpControlBytes)
 	if err != nil {
 		return httpClientUnknown("status", err)
 	}
-	return c.acknowledge("status", data, observation)
+	return c.acknowledge(parent, "status", data, observation)
 }
 
 func (c *httpClientCheckpoints) outcome(result Result, runErr error) error {
+	if err := c.control.Err(); err != nil {
+		return httpClientUnknown("outcome", err)
+	}
 	sequence := c.sequence + 1
 	outcome := httpOutcome{Sequence: sequence, Result: result, Failure: newHTTPFailure(runErr)}
 	shapeErr := httpResultShape(result)
@@ -541,5 +575,5 @@ func (c *httpClientCheckpoints) outcome(result Result, runErr error) error {
 	if outcome.Failure != nil && outcome.Failure.OutcomeUnknown && !errors.Is(runErr, monitor.ErrExecutionOutcomeUnknown) {
 		omitted = errors.Join(omitted, monitor.ErrExecutionOutcomeUnknown)
 	}
-	return errors.Join(omitted, c.acknowledge("outcome", data, sequence))
+	return errors.Join(omitted, c.acknowledge(c.control, "outcome", data, sequence))
 }

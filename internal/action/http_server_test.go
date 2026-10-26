@@ -22,6 +22,7 @@ import (
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
+	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/usage"
 	"github.com/linkdata/minion/internal/workroot"
@@ -70,6 +71,10 @@ func newHTTPServerTestInMemory(t *testing.T, ctx context.Context, job Job, sink 
 }
 
 func newHTTPServerTestWithServer(t *testing.T, ctx context.Context, job Job, sink Checkpoints, wrap func(http.Handler) http.Handler, newServer func(http.Handler) *httptest.Server, credentials ...WorkerCredentials) *httpServerTest {
+	return newHTTPServerTestWithStopServer(t, ctx, job, sink, wrap, newServer, 0, credentials...)
+}
+
+func newHTTPServerTestWithStopServer(t *testing.T, ctx context.Context, job Job, sink Checkpoints, wrap func(http.Handler) http.Handler, newServer func(http.Handler) *httptest.Server, stopBudget time.Duration, credentials ...WorkerCredentials) *httpServerTest {
 	t.Helper()
 	executor, err := NewHTTPExecutor(job.Identity.ExecutorID)
 	if err != nil {
@@ -105,7 +110,13 @@ func newHTTPServerTestWithServer(t *testing.T, ctx context.Context, job Job, sin
 		f.server.Close()
 	})
 	go func() {
-		result, err := executor.Execute(ctx, job, sink)
+		var result Result
+		var err error
+		if stopBudget == 0 {
+			result, err = executor.Execute(ctx, job, sink)
+		} else {
+			result, err = executor.ExecuteWithStop(ctx, stopBudget, job, sink)
+		}
 		f.done <- httpServerTestResult{result, err}
 	}()
 	timer := time.NewTimer(5 * time.Second)
@@ -250,6 +261,59 @@ func TestHTTPExecutorRejectsExpiryDuringAssignmentEncoding(t *testing.T) {
 	if err := httpDecode(response.Body, httpControlBytes, &ack); err != nil || response.Code != http.StatusConflict || ack.Kind != "next" || ack.Failure == nil || !ack.Failure.Deadline || tx.delivered {
 		t.Fatalf("expired assignment was claimed or rejected without a typed deadline: code=%d ack=%+v delivered=%t err=%v", response.Code, ack, tx.delivered, err)
 	}
+}
+
+func TestHTTPExecutorCancellationWhileEncodingAssignment(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		const stopBudget = time.Millisecond
+		f := newHTTPServerTestWithStopServer(t, ctx, testJob(command.Comment), runnerExecutionCheckpoints{}, nil,
+			func(h http.Handler) *httptest.Server { return httptest.NewTestServer(t, h) }, stopBudget)
+		pull, err := httpEncode(httpPull{Version: ProtocolVersion, ExecutorID: f.job.Identity.ExecutorID}, httpControlBytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/next", bytes.NewReader(pull))
+		request.Header.Set("Content-Type", "application/json")
+		response := &httpRepullRecorder{httptest.NewRecorder()}
+		entered, release, finished := make(chan struct{}), make(chan struct{}), make(chan struct{})
+		var once sync.Once
+		unblock := func() { once.Do(func() { close(release) }) }
+		defer unblock()
+		go func() {
+			f.executor.serveNextEncoded(response, request, func(assignment httpAssignment) ([]byte, error) {
+				close(entered)
+				<-release
+				return httpEncode(assignment, httpJobBytes)
+			})
+			close(finished)
+		}()
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("assignment encoding did not start")
+		}
+		canceledAt := time.Now()
+		cancel()
+		select {
+		case <-f.tx.stop:
+		case <-time.After(2 * stopBudget):
+			t.Fatal("assignment encoding held the stop path")
+		}
+		if elapsed := time.Since(canceledAt); elapsed > 2*stopBudget {
+			t.Fatalf("stop was delayed by assignment encoding: %s", elapsed)
+		}
+		if got := f.result(t); !errors.Is(got.err, context.Canceled) || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) {
+			t.Fatalf("unclaimed assignment changed cancellation: %+v error=%v", got.result, got.err)
+		}
+		unblock()
+		<-finished
+		var ack httpAcknowledgement
+		if err := httpDecode(response.Body, httpControlBytes, &ack); err != nil || response.Code != http.StatusConflict || ack.Failure == nil || !ack.Failure.Canceled || f.tx.delivered {
+			t.Fatalf("canceled encoding claimed assignment: status=%d ack=%+v delivered=%t error=%v", response.Code, ack, f.tx.delivered, err)
+		}
+	})
 }
 
 func TestHTTPExecutorBindingSequenceAndRawCheckpointFacts(t *testing.T) {
@@ -439,6 +503,19 @@ type httpStatusHeldBody struct {
 	once    sync.Once
 }
 
+type httpSecondReadBody struct {
+	io.ReadCloser
+	reads   atomic.Int32
+	entered chan struct{}
+}
+
+func (b *httpSecondReadBody) Read(p []byte) (int, error) {
+	if b.reads.Add(1) == 2 {
+		close(b.entered)
+	}
+	return b.ReadCloser.Read(p)
+}
+
 func (b *httpStatusHeldBody) Read(p []byte) (int, error) {
 	b.once.Do(func() { close(b.entered); <-b.release })
 	return b.ReadCloser.Read(p)
@@ -527,7 +604,7 @@ func TestHTTPExecutorBusyAndSingleAssignment(t *testing.T) {
 	defer cancel()
 	deadline, _ := ctx.Deadline()
 	f := newHTTPServerTest(t, ctx, testJob(command.Comment), runnerExecutionCheckpoints{}, nil)
-	f.ack(t, "/next", httpPull{Version: ProtocolVersion + 1, ExecutorID: f.job.Identity.ExecutorID}, http.StatusConflict, 0)
+	f.ack(t, "/next", httpPull{Version: ProtocolVersion - 1, ExecutorID: f.job.Identity.ExecutorID}, http.StatusConflict, 0)
 	f.ack(t, "/next", httpPull{Version: ProtocolVersion, ExecutorID: "foreign"}, http.StatusConflict, 0)
 	beforePull := time.Now()
 	if assignment := f.pull(t); assignment.Job.RuntimeBudget > deadline.Sub(beforePull) {
@@ -857,6 +934,80 @@ func TestHTTPExecutorStoreRefusalRemainsFinalIfWorkerContinues(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestHTTPExecutorStoreRefusalWakesWatchAfterACK(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const stopBudget = 10 * time.Millisecond
+		storeErr := errors.New("parent checkpoint save refused")
+		entered, release := make(chan struct{}), make(chan struct{})
+		var releaseOnce sync.Once
+		unblock := func() { releaseOnce.Do(func() { close(release) }) }
+		defer unblock()
+		f := newHTTPServerTestWithStopServer(t, t.Context(), testJob(command.Comment), runnerExecutionCheckpoints{
+			before: func(CallCheckpoint) error { return storeErr },
+		}, func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/before" {
+					w = httpServerHeldWrite{ResponseWriter: w, entered: entered, release: release}
+				}
+				next.ServeHTTP(w, r)
+			})
+		}, func(h http.Handler) *httptest.Server { return httptest.NewTestServer(t, h) }, stopBudget)
+		f.pull(t)
+		body, err := json.Marshal(f.tx.binding)
+		if err != nil {
+			t.Fatal(err)
+		}
+		watch, err := f.server.Client().Post(f.server.URL+"/cancel", "application/json", bytes.NewReader(body))
+		if err != nil || watch.StatusCode != http.StatusOK {
+			t.Fatalf("watch admission: response=%v error=%v", watch, err)
+		}
+		defer watch.Body.Close()
+		watchDone := make(chan struct {
+			cancellation httpCancellation
+			err          error
+		}, 1)
+		go func() {
+			var cancellation httpCancellation
+			err := httpDecode(watch.Body, httpControlBytes, &cancellation)
+			watchDone <- struct {
+				cancellation httpCancellation
+				err          error
+			}{cancellation, err}
+		}()
+		ackDone := make(chan httpServerTestExchange, 1)
+		go func() { ackDone <- f.request("/before", f.call(1)) }()
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("failed checkpoint ACK did not enter its write")
+		}
+		<-f.tx.stop
+		stopUntil := f.tx.controlDeadline()
+		time.Sleep(2 * time.Millisecond)
+		select {
+		case got := <-watchDone:
+			t.Fatalf("watch preempted failed checkpoint ACK: %+v", got)
+		default:
+		}
+		unblock()
+		ack := <-ackDone
+		if ack.err != nil || ack.status != http.StatusInternalServerError || ack.ack.Failure == nil || ack.ack.Failure.Message != storeErr.Error() {
+			t.Fatalf("failed checkpoint ACK lost store refusal: %+v", ack)
+		}
+		gotWatch := <-watchDone
+		if gotWatch.err != nil || gotWatch.cancellation.Reason != "canceled" || gotWatch.cancellation.StopRemaining <= 0 || gotWatch.cancellation.StopRemaining >= stopBudget {
+			t.Fatalf("watch missed bounded stop after failed ACK: %+v", gotWatch)
+		}
+		if later := f.tx.controlDeadline(); !later.Equal(stopUntil) {
+			t.Fatalf("watch renewed stop deadline: first=%s later=%s", stopUntil, later)
+		}
+		got := f.result(t)
+		if time.Now().After(stopUntil.Add(2*time.Millisecond)) || !errors.Is(got.err, storeErr) || !errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) {
+			t.Fatalf("failed save outlived fixed stop: result=%+v error=%v deadline=%s", got.result, got.err, stopUntil)
+		}
+	})
 }
 
 func TestHTTPExecutorStatusIsIndependentAndAllowsObservationGaps(t *testing.T) {
@@ -1601,7 +1752,7 @@ func TestHTTPExecutorCloseKeepsWatchAndPaidReceiptGraceAvailable(t *testing.T) {
 				closed := make(chan error, 1)
 				go func() { closed <- f.executor.Close() }()
 				var cancellation httpCancellation
-				if err := httpDecode(response.Body, httpControlBytes, &cancellation); err != nil || cancellation.httpBinding != f.tx.binding || cancellation.Reason != "canceled" {
+				if err := httpDecode(response.Body, httpControlBytes, &cancellation); err != nil || cancellation.httpBinding != f.tx.binding || cancellation.Reason != "canceled" || cancellation.StopRemaining <= 0 || cancellation.StopRemaining > f.tx.stopGrace {
 					t.Fatalf("Close did not deliver bound known cancellation: %+v error=%v", cancellation, err)
 				}
 				synctest.Wait()
@@ -1639,6 +1790,37 @@ type httpServerHeldWrite struct {
 	http.ResponseWriter
 	entered chan struct{}
 	release chan struct{}
+}
+
+type httpDeadlineHeldWrite struct {
+	http.ResponseWriter
+	entered   chan struct{}
+	deadlines chan time.Time
+}
+
+func (w *httpDeadlineHeldWrite) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+func (w *httpDeadlineHeldWrite) SetWriteDeadline(deadline time.Time) error {
+	w.deadlines <- deadline
+	return nil
+}
+
+func (w *httpDeadlineHeldWrite) Write([]byte) (int, error) {
+	close(w.entered)
+	deadline := <-w.deadlines
+	for {
+		if deadline.IsZero() {
+			deadline = <-w.deadlines
+			continue
+		}
+		timer := time.NewTimer(time.Until(deadline))
+		select {
+		case deadline = <-w.deadlines:
+			timer.Stop()
+		case <-timer.C:
+			return 0, context.DeadlineExceeded
+		}
+	}
 }
 
 func (w httpServerHeldWrite) Unwrap() http.ResponseWriter { return w.ResponseWriter }
@@ -1694,6 +1876,162 @@ func TestHTTPExecutorSealedOutcomeDoesNotAcquireDeadlineDuringACKDrain(t *testin
 	})
 }
 
+func TestHTTPExecutorCloseBoundsSealedOutcomeACK(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const stopBudget = 10 * time.Millisecond
+		entered := make(chan struct{})
+		f := newHTTPServerTestWithStopServer(t, t.Context(), testJob(command.Comment), runnerExecutionCheckpoints{},
+			func(next http.Handler) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path == "/outcome" {
+						w = &httpDeadlineHeldWrite{ResponseWriter: w, entered: entered, deadlines: make(chan time.Time, 4)}
+					}
+					next.ServeHTTP(w, r)
+				})
+			}, func(h http.Handler) *httptest.Server { return httptest.NewTestServer(t, h) }, stopBudget)
+		f.pull(t)
+		outcome := f.outcome(1, nil)
+		outcome.Result.Answer = "Sealed before explicit Close"
+		acknowledged := make(chan httpServerTestExchange, 1)
+		go func() { acknowledged <- f.request("/outcome", outcome) }()
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("outcome did not seal before ACK write")
+		}
+		f.tx.mu.Lock()
+		sealed := f.tx.outcome
+		f.tx.mu.Unlock()
+		if !sealed {
+			t.Fatal("fixture entered an outcome rejection before sealing")
+		}
+		closed := make(chan error, 1)
+		stoppedAt := time.Now()
+		go func() { closed <- f.executor.Close() }()
+		<-f.tx.stop
+		got := f.result(t)
+		if elapsed := time.Since(stoppedAt); elapsed > 2*stopBudget {
+			t.Fatalf("sealed ACK outlived explicit Close bound: %s", elapsed)
+		}
+		if err := <-closed; err != nil {
+			t.Fatal(err)
+		}
+		if got.err != nil || !reflect.DeepEqual(got.result, outcome.Result) {
+			t.Fatalf("lost ACK erased sealed outcome: %+v error=%v", got.result, got.err)
+		}
+		if ack := <-acknowledged; ack.err == nil && ack.status == http.StatusOK && ack.ack.Failure == nil {
+			t.Fatalf("blocked ACK was reported delivered: %+v", ack)
+		}
+		f.executor.mu.Lock()
+		unavailable := f.executor.unavailable
+		f.executor.mu.Unlock()
+		if !unavailable {
+			t.Fatal("lost ACK did not quarantine worker capacity")
+		}
+	})
+}
+
+func TestHTTPExecutorCallerCancellationBoundsSealedOutcomeACK(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		const stopBudget = 10 * time.Millisecond
+		entered := make(chan struct{})
+		f := newHTTPServerTestWithStopServer(t, ctx, testJob(command.Comment), runnerExecutionCheckpoints{},
+			func(next http.Handler) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path == "/outcome" {
+						w = &httpDeadlineHeldWrite{ResponseWriter: w, entered: entered, deadlines: make(chan time.Time, 4)}
+					}
+					next.ServeHTTP(w, r)
+				})
+			}, func(h http.Handler) *httptest.Server { return httptest.NewTestServer(t, h) }, stopBudget)
+		f.pull(t)
+		outcome := f.outcome(1, nil)
+		outcome.Result.Answer = "Sealed before caller cancellation"
+		acknowledged := make(chan httpServerTestExchange, 1)
+		go func() { acknowledged <- f.request("/outcome", outcome) }()
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("outcome did not seal before ACK write")
+		}
+		f.tx.mu.Lock()
+		sealed := f.tx.outcome
+		f.tx.mu.Unlock()
+		if !sealed {
+			t.Fatal("fixture entered an outcome rejection before sealing")
+		}
+		canceledAt := time.Now()
+		cancel()
+		<-f.tx.stop
+		got := f.result(t)
+		if elapsed := time.Since(canceledAt); elapsed > 2*stopBudget {
+			t.Fatalf("sealed ACK outlived caller cancellation bound: %s", elapsed)
+		}
+		if got.err != nil || !reflect.DeepEqual(got.result, outcome.Result) {
+			t.Fatalf("lost ACK erased sealed outcome: %+v error=%v", got.result, got.err)
+		}
+		if ack := <-acknowledged; ack.err == nil && ack.status == http.StatusOK && ack.ack.Failure == nil {
+			t.Fatalf("blocked ACK was reported delivered: %+v", ack)
+		}
+		f.executor.mu.Lock()
+		unavailable, closed := f.executor.unavailable, f.executor.closed
+		f.executor.mu.Unlock()
+		if !unavailable || closed {
+			t.Fatalf("lost ACK capacity = unavailable:%t closed:%t", unavailable, closed)
+		}
+	})
+}
+
+func TestHTTPExecutorCloseBoundsCompletedWatchReason(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const stopBudget = 10 * time.Millisecond
+		entered := make(chan struct{})
+		f := newHTTPServerTestWithStopServer(t, t.Context(), testJob(command.Comment), runnerExecutionCheckpoints{},
+			func(next http.Handler) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path == "/cancel" {
+						w = &httpDeadlineHeldWrite{ResponseWriter: w, entered: entered, deadlines: make(chan time.Time, 4)}
+					}
+					next.ServeHTTP(w, r)
+				})
+			}, func(h http.Handler) *httptest.Server { return httptest.NewTestServer(t, h) }, stopBudget)
+		f.pull(t)
+		body, err := json.Marshal(f.tx.binding)
+		if err != nil {
+			t.Fatal(err)
+		}
+		watch, err := f.server.Client().Post(f.server.URL+"/cancel", "application/json", bytes.NewReader(body))
+		if err != nil || watch.StatusCode != http.StatusOK {
+			t.Fatalf("watch admission: response=%v error=%v", watch, err)
+		}
+		defer watch.Body.Close()
+		outcome := f.outcome(1, nil)
+		outcome.Result.Answer = "Sealed before completed watch reply"
+		f.ack(t, "/outcome", outcome, http.StatusOK, 1)
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("completed watch reason did not enter its write")
+		}
+		closed := make(chan error, 1)
+		stoppedAt := time.Now()
+		go func() { closed <- f.executor.Close() }()
+		<-f.tx.stop
+		got := f.result(t)
+		if elapsed := time.Since(stoppedAt); elapsed > 2*stopBudget {
+			t.Fatalf("completed watch reason outlived Close bound: %s", elapsed)
+		}
+		if err := <-closed; err != nil {
+			t.Fatal(err)
+		}
+		if got.err != nil || !reflect.DeepEqual(got.result, outcome.Result) {
+			t.Fatalf("failed completed watch reason erased known outcome: %+v error=%v", got.result, got.err)
+		}
+	})
+}
+
 func TestHTTPExecutorMissingOutcomeClosesRealGraceAndQuarantines(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		ctx, cancel := context.WithCancel(t.Context())
@@ -1724,6 +2062,227 @@ func TestHTTPExecutorMissingOutcomeClosesRealGraceAndQuarantines(t *testing.T) {
 		}
 		if got, ok := f.executor.Status(); !ok || got != ready {
 			t.Fatalf("forged ready observation was not retained as an untrusted label: status=%+v present=%t", got, ok)
+		}
+	})
+}
+
+func TestHTTPExecutorShortStopBudgetDoesNotRenewForSerialControls(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		const stopBudget = 10 * time.Millisecond
+		paid := make(chan CallUsage, 1)
+		f := newHTTPServerTestWithStopServer(t, ctx, testJob(command.Comment), runnerExecutionCheckpoints{
+			after: func(value CallCheckpoint) error { paid <- value.Call; return nil },
+		}, nil,
+			func(h http.Handler) *httptest.Server { return httptest.NewTestServer(t, h) }, stopBudget)
+		if assignment := f.pull(t); assignment.StopGrace != stopBudget {
+			t.Fatalf("assignment stop budget = %s, want %s", assignment.StopGrace, stopBudget)
+		}
+		f.ack(t, "/before", f.call(1), http.StatusOK, 1)
+		stoppedAt := time.Now()
+		cancel()
+		<-f.tx.stop
+		for sequence := uint64(1); sequence <= 2; sequence++ {
+			if sequence == 2 {
+				time.Sleep(stopBudget - 2*time.Millisecond)
+				receipt := f.call(2)
+				receipt.Checkpoint.Call.Tokens = usage.Tokens{Input: 17}
+				receipt.Checkpoint.Call.Complete = true
+				f.ack(t, "/after", receipt, http.StatusOK, 2)
+				if got := <-paid; got != receipt.Checkpoint.Call {
+					t.Fatalf("late paid receipt changed before stop expiry: got=%+v want=%+v", got, receipt.Checkpoint.Call)
+				}
+			}
+			status := Status{Version: ProtocolVersion, Identity: f.job.Identity, SourceRef: f.job.Source.Head,
+				Sequence: sequence, WorkerState: "ready", Phase: "cleanup"}
+			want := http.StatusOK
+			if sequence > 1 {
+				want = http.StatusConflict // A repeated ready label is invalid, but still consumes a control reply.
+			}
+			f.ack(t, "/status", httpObservation{Status: status}, want, sequence)
+		}
+		got := f.result(t)
+		if elapsed := time.Since(stoppedAt); elapsed < stopBudget || elapsed > stopBudget+2*time.Millisecond {
+			t.Fatalf("serial controls changed stop budget: elapsed=%s budget=%s", elapsed, stopBudget)
+		}
+		if !errors.Is(got.err, context.Canceled) || !errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) {
+			t.Fatalf("missing final outcome changed cancellation: result=%+v error=%v", got.result, got.err)
+		}
+		if late := f.request("/outcome", f.outcome(1, nil)); late.err != nil || late.status != http.StatusConflict {
+			t.Fatalf("late result entered after fixed stop deadline: %+v", late)
+		}
+		if _, err := f.executor.Execute(t.Context(), f.job, runnerExecutionCheckpoints{}); err == nil {
+			t.Fatal("missing outcome released worker capacity")
+		}
+	})
+}
+
+func TestHTTPExecutorRejectsInvalidStopBudgetBeforeAdmission(t *testing.T) {
+	job := testJob(command.Comment)
+	for _, stopBudget := range []time.Duration{0, -time.Nanosecond, config.MaxActionRuntime + time.Nanosecond} {
+		executor, err := NewHTTPExecutor(job.Identity.ExecutorID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		result, err := executor.ExecuteWithStop(t.Context(), stopBudget, job, runnerExecutionCheckpoints{})
+		if !errors.Is(err, monitor.ErrTerminalJob) || !result.matchesJob(job) || executor.transaction() != nil {
+			t.Fatalf("stop budget %s admitted work: result=%+v error=%v", stopBudget, result, err)
+		}
+	}
+}
+
+func TestHTTPExecutorStopContractsEnteredMutationBodyRead(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		entered := make(chan struct{})
+		const stopBudget = 10 * time.Millisecond
+		f := newHTTPServerTestWithStopServer(t, ctx, testJob(command.Comment), runnerExecutionCheckpoints{},
+			func(next http.Handler) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path == "/after" {
+						r.Body = &httpSecondReadBody{ReadCloser: r.Body, entered: entered}
+					}
+					next.ServeHTTP(w, r)
+				})
+			}, func(h http.Handler) *httptest.Server { return httptest.NewTestServer(t, h) }, stopBudget)
+		f.pull(t)
+		reader, writer := io.Pipe()
+		defer writer.Close()
+		request, err := http.NewRequestWithContext(t.Context(), http.MethodPost, f.server.URL+"/after", reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Header.Set("Content-Type", "application/json")
+		responseDone := make(chan error, 1)
+		go func() {
+			response, err := f.server.Client().Do(request)
+			if response != nil {
+				_ = response.Body.Close()
+			}
+			responseDone <- err
+		}()
+		if _, err := writer.Write([]byte(`{"sequence":`)); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("mutation did not enter its partial body read")
+		}
+		stoppedAt := time.Now()
+		cancel()
+		<-f.tx.stop
+		got := f.result(t)
+		if elapsed := time.Since(stoppedAt); elapsed > 2*stopBudget {
+			t.Fatalf("entered network read outlived stop budget: %s", elapsed)
+		}
+		if !errors.Is(got.err, context.Canceled) || !errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) {
+			t.Fatalf("partial mutation changed final outcome: %+v error=%v", got.result, got.err)
+		}
+		_ = writer.Close()
+		select {
+		case <-responseDone:
+		case <-time.After(5 * time.Second):
+			t.Fatal("client did not finish after stop")
+		}
+	})
+}
+
+func TestHTTPExecutorCloseUsesSameShortStopBudget(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const stopBudget = 10 * time.Millisecond
+		f := newHTTPServerTestWithStopServer(t, t.Context(), testJob(command.Comment), runnerExecutionCheckpoints{}, nil,
+			func(h http.Handler) *httptest.Server { return httptest.NewTestServer(t, h) }, stopBudget)
+		f.pull(t)
+		closed := make(chan error, 1)
+		stoppedAt := time.Now()
+		go func() { closed <- f.executor.Close() }()
+		<-f.tx.stop
+		got := f.result(t)
+		if err := <-closed; err != nil {
+			t.Fatalf("Close failed: %v", err)
+		}
+		if elapsed := time.Since(stoppedAt); elapsed < stopBudget || elapsed > 2*stopBudget {
+			t.Fatalf("Close changed stop budget: elapsed=%s budget=%s", elapsed, stopBudget)
+		}
+		if !errors.Is(got.err, context.Canceled) || !errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) {
+			t.Fatalf("shutdown lost unknown outcome: %+v error=%v", got.result, got.err)
+		}
+	})
+}
+
+func TestHTTPExecutorCloseReusesCancellationStopDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		const stopBudget = 10 * time.Millisecond
+		f := newHTTPServerTestWithStopServer(t, ctx, testJob(command.Comment), runnerExecutionCheckpoints{}, nil,
+			func(h http.Handler) *httptest.Server { return httptest.NewTestServer(t, h) }, stopBudget)
+		f.pull(t)
+		canceledAt := time.Now()
+		cancel()
+		<-f.tx.stop
+		stopUntil := f.tx.controlDeadline()
+		time.Sleep(stopBudget - 2*time.Millisecond)
+		closed := make(chan error, 1)
+		go func() { closed <- f.executor.Close() }()
+		if err := <-closed; err != nil {
+			t.Fatal(err)
+		}
+		got := f.result(t)
+		if deadline := f.tx.controlDeadline(); !deadline.Equal(stopUntil) {
+			t.Fatalf("Close renewed stop deadline: first=%s later=%s", stopUntil, deadline)
+		}
+		if elapsed := time.Since(canceledAt); elapsed > stopBudget+2*time.Millisecond {
+			t.Fatalf("Close renewed cancellation budget: %s", elapsed)
+		}
+		if !errors.Is(got.err, context.Canceled) || !errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) {
+			t.Fatalf("missing final outcome changed cancellation: %+v error=%v", got.result, got.err)
+		}
+	})
+}
+
+func TestHTTPExecutorCloseCancelsLateStopTimer(t *testing.T) {
+	e, err := NewHTTPExecutor("local")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Execute has already captured a nil stopCancel, but its transaction is still active.
+	tx := &httpTransaction{stopBudget: func() {}, stopGrace: time.Hour, stop: make(chan struct{}), finished: make(chan struct{})}
+	e.active = tx
+	closed := make(chan error, 1)
+	go func() { closed <- e.Close() }()
+	<-tx.stop
+	close(tx.finished)
+	if err := <-closed; err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.stopContext.Err(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Close retained a late stop timer: %v", err)
+	}
+}
+
+func TestHTTPServerStopKeepsEarlierRequestDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		tx := &httpTransaction{stop: make(chan struct{})}
+		original := time.Now().Add(10 * time.Millisecond)
+		updated := make(chan time.Time, 1)
+		finish := httpServerDeadlineWatch([]*httpTransaction{tx}, original, func(deadline time.Time) error {
+			updated <- deadline
+			return nil
+		})
+		time.Sleep(9 * time.Millisecond)
+		tx.mu.Lock()
+		tx.stopUntil = time.Now().Add(30 * time.Millisecond)
+		close(tx.stop)
+		tx.mu.Unlock()
+		if deadline := <-updated; !deadline.Equal(original) {
+			t.Fatalf("stop extended request deadline: original=%s new=%s", original, deadline)
+		}
+		if err := finish(); err != nil {
+			t.Fatal(err)
 		}
 	})
 }

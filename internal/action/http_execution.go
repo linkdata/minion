@@ -71,6 +71,7 @@ type httpAssignment struct {
 	Job         Job               `json:"job"`
 	Credentials WorkerCredentials `json:"credentials"`
 	HeldFor     time.Duration     `json:"held_for_ns"`
+	StopGrace   time.Duration     `json:"stop_grace_ns"`
 }
 
 type httpCall struct {
@@ -102,5 +103,6 @@ type httpAcknowledgement struct {
 
 type httpCancellation struct {
 	httpBinding
-	Reason string `json:"reason"`
+	Reason        string        `json:"reason"`
+	StopRemaining time.Duration `json:"stop_remaining_ns"`
 }

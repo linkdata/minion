@@ -101,7 +101,7 @@ func TestRunHTTPReportsActualObservationsAndRawPaidReceipts(t *testing.T) {
 						t.Errorf("invalid or repeated pull: %+v error=%v", pull, err)
 					}
 					events <- "next"
-					httpClientTestJSON(t, w, httpAssignment{Job: job})
+					httpClientTestJSON(t, w, httpAssignment{Job: job, StopGrace: httpControlTimeout})
 					return
 				case "cancel":
 					var value httpBinding
@@ -261,6 +261,67 @@ func TestRunHTTPReportsActualObservationsAndRawPaidReceipts(t *testing.T) {
 	}
 }
 
+func TestRunHTTPShortStopGraceReservesFinalOutcome(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		job := testJob(command.Comment)
+		binding := httpJobBinding(job)
+		var statuses atomic.Int32
+		outcomes := make(chan httpOutcome, 1)
+		server := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/next":
+				httpClientTestJSON(t, w, httpAssignment{Job: job, StopGrace: 10 * time.Millisecond})
+			case "/cancel":
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				w.(http.Flusher).Flush()
+				<-r.Context().Done()
+			case "/status":
+				var status httpObservation
+				if err := httpDecode(r.Body, httpControlBytes, &status); err != nil {
+					t.Error(err)
+				}
+				if statuses.Add(1) > 1 {
+					<-r.Context().Done()
+					return
+				}
+				httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: binding, Kind: "status", Sequence: status.Status.Sequence})
+			case "/before", "/after":
+				var call httpCall
+				if err := httpDecode(r.Body, httpControlBytes, &call); err != nil {
+					t.Error(err)
+				}
+				httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: binding, Kind: strings.TrimPrefix(r.URL.Path, "/"), Sequence: call.Sequence})
+			case "/outcome":
+				var outcome httpOutcome
+				if err := httpDecode(r.Body, httpOutcomeBytes, &outcome); err != nil {
+					t.Error(err)
+				}
+				outcomes <- outcome
+				httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: binding, Kind: "outcome", Sequence: outcome.Sequence})
+			default:
+				t.Errorf("unexpected route %s", r.URL.Path)
+			}
+		}))
+		defer server.CloseClientConnections()
+		client := *server.Client()
+		client.Timeout = 0
+		runner := &Runner{WorkRoot: t.TempDir(), runModel: func(context.Context, modelRun) (aicli.Result, error) {
+			return aicli.Result{Answer: "Complete", Tokens: usage.Tokens{Input: 1}, UsageComplete: true}, nil
+		}}
+		if err := RunHTTP(t.Context(), &client, server.URL, job.Identity.ExecutorID, runner); err != nil {
+			t.Fatal(err)
+		}
+		if statuses.Load() != 2 || len(outcomes) != 1 {
+			t.Fatalf("optional status displaced final result: statuses=%d outcomes=%d", statuses.Load(), len(outcomes))
+		}
+		outcome := <-outcomes
+		if outcome.Failure != nil || outcome.Result.Answer != "Complete" || len(outcome.Result.Calls) != 1 {
+			t.Fatalf("successful result lost: %+v", outcome)
+		}
+	})
+}
+
 func TestHTTPClientRequiresExactAcknowledgementAndNeverRetries(t *testing.T) {
 	for _, name := range []string{"known failure", "HTTP 202", "HTTP 206", "empty", "malformed", "trailing", "unknown field", "foreign binding", "wrong kind", "wrong sequence", "success with failure", "content type", "encoding", "multiple encodings", "oversized"} {
 		t.Run(name, func(t *testing.T) {
@@ -337,10 +398,10 @@ func TestHTTPClientRequiresExactAcknowledgementAndNeverRetries(t *testing.T) {
 }
 
 func TestRunHTTPRejectsAssignmentBeforeWatchOrRunner(t *testing.T) {
-	for _, name := range []string{"version", "executor", "unselected credential", "mixed credential", "HTTP 202", "HTTP 206", "expired", "expired outcome ACK lost", "missing budget", "negative pull wait", "inflated pull wait", "trailing JSON"} {
+	for _, name := range []string{"version", "executor", "unselected credential", "mixed credential", "HTTP 202", "HTTP 206", "expired", "expired outcome ACK lost", "missing budget", "missing stop grace", "negative stop grace", "excessive stop grace", "negative pull wait", "inflated pull wait", "trailing JSON"} {
 		t.Run(name, func(t *testing.T) {
 			job := testJob(command.Comment)
-			assignment := httpAssignment{Job: job}
+			assignment := httpAssignment{Job: job, StopGrace: httpControlTimeout}
 			switch name {
 			case "version":
 				assignment.Job.Version++
@@ -355,6 +416,12 @@ func TestRunHTTPRejectsAssignmentBeforeWatchOrRunner(t *testing.T) {
 				assignment.Job.RuntimeBudget = time.Nanosecond
 			case "missing budget":
 				assignment.Job.RuntimeBudget = 0
+			case "missing stop grace":
+				assignment.StopGrace = 0
+			case "negative stop grace":
+				assignment.StopGrace = -time.Second
+			case "excessive stop grace":
+				assignment.StopGrace = config.MaxActionRuntime + time.Second
 			case "negative pull wait":
 				assignment.HeldFor = -time.Second
 			case "inflated pull wait":
@@ -437,7 +504,7 @@ func TestRunHTTPPullWaitDoesNotRenewOrConsumeRuntime(t *testing.T) {
 						time.Sleep(test.idle)
 						held := time.Since(arrived)
 						time.Sleep(test.transfer)
-						httpClientTestJSON(t, w, httpAssignment{Job: job, HeldFor: held})
+						httpClientTestJSON(t, w, httpAssignment{Job: job, HeldFor: held, StopGrace: httpControlTimeout})
 					case "/cancel":
 						watch.Add(1)
 						w.Header().Set("Content-Type", "application/json")
@@ -599,7 +666,7 @@ func TestRunHTTPRequiresWatchAdmissionBeforeRunner(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
 				case "/next":
-					httpClientTestJSON(t, w, httpAssignment{Job: job})
+					httpClientTestJSON(t, w, httpAssignment{Job: job, StopGrace: httpControlTimeout})
 				case "/cancel":
 					if name != "invalid headers" {
 						failure := workroot.ErrUnsafe
@@ -652,7 +719,7 @@ func TestRunHTTPBoundsStalledWatchHeadersByAcceptedExpiry(t *testing.T) {
 			case "/next":
 				short := job
 				short.RuntimeBudget = time.Second
-				httpClientTestJSON(t, w, httpAssignment{Job: short})
+				httpClientTestJSON(t, w, httpAssignment{Job: short, StopGrace: httpControlTimeout})
 			case "/cancel":
 				var value httpBinding
 				if err := httpDecode(r.Body, httpControlBytes, &value); err != nil || value != binding {
@@ -1049,11 +1116,15 @@ func (w httpClientFailedWatchHeaders) WriteHeader(status int) {
 func TestHTTPClientWatchDistinguishesLocalStopFromParsedReplies(t *testing.T) {
 	binding := httpJobBinding(testJob(command.Comment))
 	for _, test := range []struct {
-		name    string
-		reason  string
-		readErr error
-		want    error
-		unknown bool
+		name          string
+		reason        string
+		remaining     time.Duration
+		zeroRemaining bool
+		missingField  bool
+		nullField     bool
+		readErr       error
+		want          error
+		unknown       bool
 	}{
 		{name: "local explicit cause", readErr: errHTTPWatchStopped, want: context.Canceled},
 		{name: "local context sentinel", readErr: context.Canceled, want: context.Canceled},
@@ -1061,6 +1132,11 @@ func TestHTTPClientWatchDistinguishesLocalStopFromParsedReplies(t *testing.T) {
 		{name: "malformed body", unknown: true},
 		{name: "parent deadline", reason: "deadline", want: context.DeadlineExceeded},
 		{name: "parent cancellation", reason: "canceled", want: context.Canceled},
+		{name: "expired stop remaining", reason: "canceled", zeroRemaining: true, want: context.Canceled},
+		{name: "missing stop remaining", reason: "canceled", missingField: true, unknown: true},
+		{name: "null stop remaining", reason: "deadline", nullField: true, unknown: true},
+		{name: "negative stop remaining", reason: "canceled", remaining: -time.Second, unknown: true},
+		{name: "excessive stop remaining", reason: "deadline", remaining: config.MaxActionRuntime + time.Nanosecond, unknown: true},
 		{name: "premature completed", reason: "completed", unknown: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -1070,16 +1146,45 @@ func TestHTTPClientWatchDistinguishesLocalStopFromParsedReplies(t *testing.T) {
 			if test.readErr != nil {
 				reader = iotest.ErrReader(test.readErr)
 			} else if test.reason != "" {
-				body, err := httpEncode(httpCancellation{httpBinding: binding, Reason: test.reason}, httpControlBytes)
+				remaining := test.remaining
+				if remaining == 0 && !test.zeroRemaining {
+					remaining = httpControlTimeout
+				}
+				body, err := httpEncode(httpCancellation{httpBinding: binding, Reason: test.reason, StopRemaining: remaining}, httpControlBytes)
 				if err != nil {
 					t.Fatal(err)
+				}
+				if test.missingField || test.nullField {
+					var fields map[string]json.RawMessage
+					if err := json.Unmarshal(body, &fields); err != nil {
+						t.Fatal(err)
+					}
+					if test.missingField {
+						delete(fields, "stop_remaining_ns")
+					} else {
+						fields["stop_remaining_ns"] = json.RawMessage("null")
+					}
+					if body, err = json.Marshal(fields); err != nil {
+						t.Fatal(err)
+					}
 				}
 				reader = strings.NewReader(string(body))
 			}
 			transport := &httpExecutionClient{}
-			err := transport.watch(ctx, &http.Response{Body: io.NopCloser(reader)}, binding)
+			shortened := false
+			var shortenedTo time.Duration
+			err := transport.watch(ctx, &http.Response{Body: io.NopCloser(reader)}, binding, func(remaining time.Duration) {
+				shortened = true
+				shortenedTo = remaining
+			})
 			if errors.Is(err, monitor.ErrExecutionOutcomeUnknown) != test.unknown || test.want != nil && !errors.Is(err, test.want) {
 				t.Fatalf("intentional stop erased a real reply or became unknown: %v", err)
+			}
+			if test.unknown && shortened {
+				t.Fatal("invalid cancellation changed the control deadline")
+			}
+			if test.zeroRemaining && (!shortened || shortenedTo != 0) {
+				t.Fatalf("expired cancellation did not close the control deadline: shortened=%t remaining=%s", shortened, shortenedTo)
 			}
 			if test.readErr != nil && err != context.Canceled || test.reason == "canceled" && err == context.Canceled {
 				t.Fatalf("local request stop and parsed parent cancellation became indistinguishable: %v", err)
@@ -1113,7 +1218,7 @@ func TestRunHTTPDeliversPaidFactsAfterCancellationWatchStopsAction(t *testing.T)
 					}
 					short := job
 					short.RuntimeBudget = runtime
-					httpClientTestJSON(t, w, httpAssignment{Job: short})
+					httpClientTestJSON(t, w, httpAssignment{Job: short, StopGrace: httpControlTimeout})
 					return
 				case "cancel":
 					w.Header().Set("Content-Type", "application/json")
@@ -1142,7 +1247,7 @@ func TestRunHTTPDeliversPaidFactsAfterCancellationWatchStopsAction(t *testing.T)
 						_, _ = fmt.Fprint(w, "{")
 						return
 					}
-					httpClientTestJSON(t, w, httpCancellation{httpBinding: binding, Reason: name})
+					httpClientTestJSON(t, w, httpCancellation{httpBinding: binding, Reason: name, StopRemaining: httpControlTimeout})
 					return
 				case "status":
 					var value httpObservation
@@ -1319,6 +1424,103 @@ func TestRunHTTPRejectsRedirectsWithoutMutatingClient(t *testing.T) {
 	}
 	if err := client.CheckRedirect(nil, nil); err != nil || originalPolicy.Load() != 1 {
 		t.Fatal("caller redirect policy was replaced")
+	}
+}
+
+func TestRunHTTPStopGraceBoundsSerialAfterAndOutcome(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		parentStop  bool
+		wantElapsed time.Duration
+		wantOutcome int32
+	}{
+		{name: "caller cancellation", wantElapsed: time.Second, wantOutcome: 1},
+		{name: "parent short stop", parentStop: true, wantElapsed: 250 * time.Millisecond},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				job := testJob(command.Comment)
+				binding := httpJobBinding(job)
+				started := make(chan struct{})
+				releaseOutcome := make(chan struct{})
+				defer close(releaseOutcome)
+				var native, after, outcomes atomic.Int32
+				server := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					switch r.URL.Path {
+					case "/next":
+						httpClientTestJSON(t, w, httpAssignment{Job: job, StopGrace: time.Second})
+					case "/cancel":
+						w.Header().Set("Content-Type", "application/json")
+						w.WriteHeader(http.StatusOK)
+						w.(http.Flusher).Flush()
+						if test.parentStop {
+							<-started
+							httpClientTestJSON(t, w, httpCancellation{httpBinding: binding, Reason: "canceled", StopRemaining: test.wantElapsed})
+						} else {
+							<-r.Context().Done()
+						}
+					case "/status":
+						var observation httpObservation
+						if err := httpDecode(r.Body, httpControlBytes, &observation); err != nil {
+							t.Error(err)
+						}
+						httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: binding, Kind: "status", Sequence: observation.Status.Sequence})
+					case "/before", "/after":
+						var call httpCall
+						if err := httpDecode(r.Body, httpControlBytes, &call); err != nil {
+							t.Error(err)
+						}
+						kind := strings.TrimPrefix(r.URL.Path, "/")
+						if kind == "after" {
+							after.Add(1)
+							timer := time.NewTimer(600 * time.Millisecond)
+							defer timer.Stop()
+							select {
+							case <-timer.C:
+							case <-r.Context().Done():
+								return
+							}
+						}
+						httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: binding, Kind: kind, Sequence: call.Sequence})
+					case "/outcome":
+						outcomes.Add(1)
+						select {
+						case <-r.Context().Done():
+						case <-releaseOutcome:
+						}
+					default:
+						t.Errorf("unexpected worker request: %s", r.URL.Path)
+					}
+				}))
+				defer server.CloseClientConnections()
+				client := *server.Client()
+				client.Timeout = 0
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				runner := &Runner{WorkRoot: t.TempDir(), runModel: func(ctx context.Context, _ modelRun) (aicli.Result, error) {
+					if native.Add(1) != 1 {
+						return aicli.Result{}, errors.New("model work restarted after stop")
+					}
+					close(started)
+					<-ctx.Done()
+					return aicli.Result{Tokens: usage.Tokens{Input: 7}}, ctx.Err()
+				}}
+				done := make(chan error, 1)
+				go func() { done <- RunHTTP(ctx, &client, server.URL, job.Identity.ExecutorID, runner) }()
+				<-started
+				stoppedAt := time.Now()
+				if !test.parentStop {
+					cancel()
+				}
+				err := <-done
+				if !errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || !errors.Is(err, context.Canceled) || native.Load() != 1 || after.Load() != 1 || outcomes.Load() != test.wantOutcome {
+					t.Fatalf("stop lost paid checkpoint or repeated work/upload: error=%v native=%d after=%d outcome=%d", err, native.Load(), after.Load(), outcomes.Load())
+				}
+				if elapsed := time.Since(stoppedAt); elapsed < test.wantElapsed || elapsed > test.wantElapsed+100*time.Millisecond {
+					t.Fatalf("control request outlived the fixed stop grace: %s", elapsed)
+				}
+			})
+		})
 	}
 }
 
