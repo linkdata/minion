@@ -863,7 +863,10 @@ func TestRunHTTPStalledStatusCannotConsumeOutcomeGrace(t *testing.T) {
 				if phase == "upload" {
 					wantCalls = 1
 				}
-				if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, monitor.ErrTerminalJob) || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || !errors.Is(got.err, context.DeadlineExceeded) || !errors.Is(got.err, monitor.ErrTerminalJob) || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || native.Load() != int32(wantCalls) || len(got.result.Calls) != wantCalls || len(paid) != wantCalls || len(stopped) != 1 {
+				var reported *workerFailureError
+				// The worker can expire before the parent because pull transit consumes
+				// part of its budget. Its deadline report stays private worker evidence.
+				if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, monitor.ErrTerminalJob) || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || !errors.As(got.err, &reported) || !reported.failure.Deadline || !reported.failure.Terminal || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || native.Load() != int32(wantCalls) || len(got.result.Calls) != wantCalls || len(paid) != wantCalls || len(stopped) != 1 {
 					t.Fatalf("stalled observation lost known outcome or paid facts: worker=%v parent=%v result=%+v native=%d paid=%d stopped=%d", err, got.err, got.result, native.Load(), len(paid), len(stopped))
 				}
 				if cause := <-stopped; !errors.Is(cause, context.DeadlineExceeded) {
