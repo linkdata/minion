@@ -45,7 +45,6 @@ type httpTransaction struct {
 	budget     context.Context
 	cancel     context.CancelFunc
 	stopBudget context.CancelFunc
-	body       []byte
 
 	ready              bool
 	delivered          bool
@@ -156,15 +155,11 @@ func (e *HTTPExecutor) execute(ctx context.Context, job Job, sink Checkpoints, s
 	if httpJobBound(job) > httpJobBytes {
 		return result, fmt.Errorf("%w: conservative Job encoding bound: %w", monitor.ErrTerminalJob, errHTTPBodyLimit)
 	}
-	body, err := httpEncode(httpAssignment{Job: job, Expires: expires.UnixNano()}, httpJobBytes)
-	if err != nil {
-		return result, fmt.Errorf("%w: encode HTTP assignment: %w", monitor.ErrTerminalJob, err)
-	}
 	if err := httpExecutionContextError(actionCtx); err != nil {
 		return result, err
 	}
 	tx.mu.Lock()
-	tx.body, tx.ready = body, true
+	tx.ready = true
 	tx.mu.Unlock()
 	e.mu.Lock()
 	e.notifyLocked()
@@ -176,10 +171,10 @@ func (e *HTTPExecutor) execute(ctx context.Context, job Job, sink Checkpoints, s
 	case <-tx.stop:
 	}
 	tx.mu.Lock()
-	delivered := tx.delivered
+	delivered, transportErr := tx.delivered, tx.transportErr
 	tx.mu.Unlock()
 	if !delivered {
-		return result, httpExecutionContextError(actionCtx)
+		return result, errors.Join(httpExecutionContextError(actionCtx), transportErr)
 	}
 	timer := time.NewTimer(e.outcomeGrace)
 	defer timer.Stop()
@@ -248,6 +243,7 @@ func (e *HTTPExecutor) serveNext(w http.ResponseWriter, r *http.Request) {
 		httpServerReject(w, "next", httpInputStatus(err), httpBinding{}, 0, err)
 		return
 	}
+	pullAt := time.Now()
 	if pull.Version != ProtocolVersion || pull.ExecutorID != e.executorID {
 		httpServerReject(w, "next", http.StatusConflict, httpBinding{}, 0, errors.New("HTTP pull version or executor differs"))
 		return
@@ -324,11 +320,32 @@ poll:
 				return
 			}
 			if tx.ready && httpExecutionContextError(tx.ctx) == nil && r.Context().Err() == nil {
+				deadline, _ := tx.budget.Deadline()
+				dispatchAt := time.Now()
+				job := tx.job
+				job.RuntimeBudget = max(deadline.Sub(dispatchAt), time.Nanosecond)
+				body, err := httpEncode(httpAssignment{Job: job, HeldFor: dispatchAt.Sub(pullAt)}, httpJobBytes)
+				if err != nil {
+					tx.mu.Unlock()
+					e.mu.Unlock()
+					tx.stopExecution(fmt.Errorf("%w: encode HTTP assignment: %w", monitor.ErrTerminalJob, err), true)
+					httpServerReject(w, "next", http.StatusInternalServerError, httpBinding{}, 0, err)
+					return
+				}
+				if r.Context().Err() != nil {
+					tx.mu.Unlock()
+					e.mu.Unlock()
+					return
+				}
+				if err := httpExecutionContextError(tx.ctx); err != nil {
+					tx.mu.Unlock()
+					e.mu.Unlock()
+					httpServerReject(w, "next", http.StatusConflict, httpBinding{}, 0, err)
+					return
+				}
 				tx.delivered = true
 				tx.handlers.Add(1)
 				delivery = tx
-				body := tx.body
-				tx.body = nil
 				tx.mu.Unlock()
 				// The assignment ACK can start another pull before this handler returns.
 				e.pull = false

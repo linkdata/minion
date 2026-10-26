@@ -73,7 +73,7 @@ func TestExecutePublicationBookkeepingBoundaries(t *testing.T) {
 			work := t.TempDir()
 			var journal bytes.Buffer
 			e := Orchestrator{GitHub: testGitHub(server, "token"), BotLogin: "bot", WorkRoot: work,
-				Timeout: budget, Logger: log.New(&journal, "", 0), Commands: map[string]config.CommandMapping{"audit": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}},
+				MaxRuntime: budget, Logger: log.New(&journal, "", 0), Commands: map[string]config.CommandMapping{"audit": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}},
 				Runner: Runner{runModel: func(modelContext context.Context, _ modelRun) (aicli.Result, error) {
 					got, ok := modelContext.Deadline()
 					if !ok || got.Before(started) || got.Sub(started) > budget+500*time.Millisecond {

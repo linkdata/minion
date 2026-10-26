@@ -25,10 +25,14 @@ var (
 const (
 	// DefaultMaxGitHubContextBytes is the default GitHub text budget for an AI action.
 	DefaultMaxGitHubContextBytes = 32 << 10
-	// DefaultJobTimeout is the runtime budget for each execution attempt.
-	DefaultJobTimeout = 4 * time.Hour
-	// MaxJobTimeout is the largest configurable per-attempt runtime budget.
-	MaxJobTimeout = 24 * time.Hour
+	// DefaultInactivityTimeout is the default gap allowed without executor progress.
+	DefaultInactivityTimeout = 10 * time.Minute
+	// MaxInactivityTimeout is the largest configurable inactivity timeout.
+	MaxInactivityTimeout = 4 * time.Hour
+	// DefaultMaxRuntime is the default hard action runtime.
+	DefaultMaxRuntime = 4 * time.Hour
+	// MaxActionRuntime is the largest configurable hard action runtime.
+	MaxActionRuntime = 24 * time.Hour
 	// DefaultCriticMaxRounds is the default proposal/revision round limit.
 	DefaultCriticMaxRounds = 5
 	// MaxCriticMaxRounds is the largest configurable proposal/revision round limit.
@@ -163,9 +167,10 @@ type Config struct {
 	// Nil Commands selects defaults; an empty map disables all commands.
 	Commands map[string]CommandMapping `json:"commands"`
 	// Nil AlwaysOnSkills selects anti-prompt-injection and caveman; an empty list disables always-on skills.
-	AlwaysOnSkills      []string `json:"always_on_skills"`
-	PollIntervalSeconds int      `json:"poll_interval_seconds,omitempty"`
-	JobTimeoutMinutes   int      `json:"job_timeout_minutes,omitempty"`
+	AlwaysOnSkills           []string `json:"always_on_skills"`
+	PollIntervalSeconds      int      `json:"poll_interval_seconds,omitempty"`
+	InactivityTimeoutMinutes int      `json:"inactivity_timeout_minutes,omitempty"`
+	MaxRuntimeMinutes        int      `json:"max_runtime_minutes,omitempty"`
 	// MaxGitHubContextBytes limits the combined UTF-8 bytes of trimmed GitHub text in one action.
 	//
 	// Zero selects [DefaultMaxGitHubContextBytes].
@@ -345,11 +350,17 @@ func (c *Config) Validate(configDir string) error {
 	if c.PollIntervalSeconds < 60 {
 		return fmt.Errorf("poll_interval_seconds must be at least 60")
 	}
-	if c.JobTimeoutMinutes == 0 {
-		c.JobTimeoutMinutes = int(DefaultJobTimeout / time.Minute)
+	if c.InactivityTimeoutMinutes == 0 {
+		c.InactivityTimeoutMinutes = int(DefaultInactivityTimeout / time.Minute)
 	}
-	if c.JobTimeoutMinutes < 1 || c.JobTimeoutMinutes > int(MaxJobTimeout/time.Minute) {
-		return fmt.Errorf("job_timeout_minutes must be between 1 and %d", int(MaxJobTimeout/time.Minute))
+	if c.InactivityTimeoutMinutes < 1 || c.InactivityTimeoutMinutes > int(MaxInactivityTimeout/time.Minute) {
+		return fmt.Errorf("inactivity_timeout_minutes must be between 1 and %d", int(MaxInactivityTimeout/time.Minute))
+	}
+	if c.MaxRuntimeMinutes == 0 {
+		c.MaxRuntimeMinutes = int(DefaultMaxRuntime / time.Minute)
+	}
+	if c.MaxRuntimeMinutes < 1 || c.MaxRuntimeMinutes > int(MaxActionRuntime/time.Minute) {
+		return fmt.Errorf("max_runtime_minutes must be between 1 and %d", int(MaxActionRuntime/time.Minute))
 	}
 	if c.MaxGitHubContextBytes == 0 {
 		c.MaxGitHubContextBytes = DefaultMaxGitHubContextBytes

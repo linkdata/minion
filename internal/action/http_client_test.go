@@ -48,8 +48,6 @@ func TestRunHTTPReportsActualObservationsAndRawPaidReceipts(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			job := testJob(command.Comment)
 			binding := httpJobBinding(job)
-			expires := time.Now().Add(job.RuntimeBudget)
-			expires = time.Unix(0, expires.UnixNano()) // Match the wire deadline's clock.
 			tokens := usage.Tokens{Input: 17, CachedInput: 3, Output: 5}
 			if test.invalidCounters {
 				tokens.Input = -1
@@ -75,7 +73,7 @@ func TestRunHTTPReportsActualObservationsAndRawPaidReceipts(t *testing.T) {
 						t.Errorf("invalid or repeated pull: %+v error=%v", pull, err)
 					}
 					events <- "next"
-					httpClientTestJSON(t, w, httpAssignment{Job: job, Expires: expires.UnixNano()})
+					httpClientTestJSON(t, w, httpAssignment{Job: job})
 					return
 				case "cancel":
 					var value httpBinding
@@ -177,7 +175,7 @@ func TestRunHTTPReportsActualObservationsAndRawPaidReceipts(t *testing.T) {
 					t.Error("worker repeated native execution or ran before watch admission")
 					return aicli.Result{}, errors.New("unexpected native admission")
 				}
-				if deadline, ok := ctx.Deadline(); !ok || deadline.After(expires) {
+				if deadline, ok := ctx.Deadline(); !ok || time.Until(deadline) > job.RuntimeBudget {
 					t.Errorf("worker renewed the accepted budget: %v %t", deadline, ok)
 					return aicli.Result{}, errors.New("renewed native runtime")
 				}
@@ -311,19 +309,23 @@ func TestHTTPClientRequiresExactAcknowledgementAndNeverRetries(t *testing.T) {
 }
 
 func TestRunHTTPRejectsAssignmentBeforeWatchOrRunner(t *testing.T) {
-	for _, name := range []string{"version", "executor", "HTTP 202", "HTTP 206", "expired", "expired outcome ACK lost", "missing expiry", "trailing JSON"} {
+	for _, name := range []string{"version", "executor", "HTTP 202", "HTTP 206", "expired", "expired outcome ACK lost", "missing budget", "negative pull wait", "inflated pull wait", "trailing JSON"} {
 		t.Run(name, func(t *testing.T) {
 			job := testJob(command.Comment)
-			assignment := httpAssignment{Job: job, Expires: time.Now().Add(job.RuntimeBudget).UnixNano()}
+			assignment := httpAssignment{Job: job}
 			switch name {
 			case "version":
 				assignment.Job.Version++
 			case "executor":
 				assignment.Job.Identity.ExecutorID = "foreign"
 			case "expired", "expired outcome ACK lost":
-				assignment.Expires = time.Now().Add(-time.Minute).UnixNano()
-			case "missing expiry":
-				assignment.Expires = 0
+				assignment.Job.RuntimeBudget = time.Nanosecond
+			case "missing budget":
+				assignment.Job.RuntimeBudget = 0
+			case "negative pull wait":
+				assignment.HeldFor = -time.Second
+			case "inflated pull wait":
+				assignment.HeldFor = config.MaxActionRuntime + time.Second
 			}
 			var requests atomic.Int32
 			outcomes := make(chan httpOutcome, 1)
@@ -369,6 +371,95 @@ func TestRunHTTPRejectsAssignmentBeforeWatchOrRunner(t *testing.T) {
 			} else if !errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || requests.Load() != 1 || len(outcomes) != 0 {
 				t.Fatalf("invalid assignment ran or became repeatable: error=%v requests=%d", err, requests.Load())
 			}
+		})
+	}
+}
+
+func TestRunHTTPPullWaitDoesNotRenewOrConsumeRuntime(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		idle      time.Duration
+		transfer  time.Duration
+		wantWatch bool
+	}{
+		{name: "idle long poll", idle: 40 * time.Second, wantWatch: true},
+		{name: "delayed response", transfer: 3 * time.Second},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				job := testJob(command.Comment)
+				job.RuntimeBudget = 2 * time.Second
+				var watch, native atomic.Int32
+				sealed := make(chan struct{})
+				outcomes := make(chan httpOutcome, 1)
+				server := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					switch r.URL.Path {
+					case "/next":
+						arrived := time.Now()
+						time.Sleep(test.idle)
+						held := time.Since(arrived)
+						time.Sleep(test.transfer)
+						httpClientTestJSON(t, w, httpAssignment{Job: job, HeldFor: held})
+					case "/cancel":
+						watch.Add(1)
+						w.Header().Set("Content-Type", "application/json")
+						w.WriteHeader(http.StatusOK)
+						w.(http.Flusher).Flush()
+						select {
+						case <-sealed:
+							_ = json.NewEncoder(w).Encode(httpCancellation{httpBinding: httpJobBinding(job), Reason: "completed"})
+						case <-r.Context().Done():
+						}
+					case "/status":
+						var observation httpObservation
+						if err := httpDecode(r.Body, httpControlBytes, &observation); err != nil {
+							t.Error(err)
+						}
+						httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: httpJobBinding(job), Kind: "status", Sequence: observation.Status.Sequence})
+					case "/before", "/after":
+						var call httpCall
+						if err := httpDecode(r.Body, httpControlBytes, &call); err != nil {
+							t.Error(err)
+						}
+						httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: httpJobBinding(job), Kind: strings.TrimPrefix(r.URL.Path, "/"), Sequence: call.Sequence})
+					case "/outcome":
+						var outcome httpOutcome
+						if err := httpDecode(r.Body, httpOutcomeBytes, &outcome); err != nil {
+							t.Error(err)
+						}
+						outcomes <- outcome
+						close(sealed)
+						httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: httpJobBinding(job), Kind: "outcome", Sequence: outcome.Sequence})
+					default:
+						t.Errorf("expired or refused assignment advanced to %s", r.URL.Path)
+						http.NotFound(w, r)
+					}
+				}))
+				defer server.Close()
+				client := *server.Client()
+				client.Timeout = 0
+				err := RunHTTP(t.Context(), &client, server.URL, job.Identity.ExecutorID, &Runner{WorkRoot: t.TempDir(), runModel: func(ctx context.Context, _ modelRun) (aicli.Result, error) {
+					native.Add(1)
+					deadline, ok := ctx.Deadline()
+					if !test.wantWatch || !ok || time.Until(deadline) <= time.Second || time.Until(deadline) > job.RuntimeBudget {
+						return aicli.Result{}, errors.New("idle pull consumed or renewed model runtime")
+					}
+					return aicli.Result{Answer: "Complete answer", Tokens: usage.Tokens{Input: 1}, UsageComplete: true}, nil
+				}})
+				if (err == nil) != test.wantWatch || (native.Load() != 0) != test.wantWatch || (watch.Load() != 0) != test.wantWatch || len(outcomes) != 1 {
+					t.Fatalf("wrong pull budget treatment: error=%v watch=%d native=%d outcomes=%d", err, watch.Load(), native.Load(), len(outcomes))
+				}
+				outcome := <-outcomes
+				if test.wantWatch {
+					if outcome.Failure != nil || outcome.Result.Answer != "Complete answer" || len(outcome.Result.Calls) != 1 {
+						t.Fatalf("idle long pull changed a successful action: error=%v outcome=%+v", err, outcome)
+					}
+				} else {
+					if !errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, context.DeadlineExceeded) || outcome.Failure == nil || !outcome.Failure.Terminal || !outcome.Failure.Deadline || len(outcome.Result.Calls) != 0 {
+						t.Fatalf("late response renewed action or lost no-work receipt: error=%v outcome=%+v", err, outcome)
+					}
+				}
+			})
 		})
 	}
 }
@@ -470,7 +561,7 @@ func TestRunHTTPRequiresWatchAdmissionBeforeRunner(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
 				case "/next":
-					httpClientTestJSON(t, w, httpAssignment{Job: job, Expires: time.Now().Add(job.RuntimeBudget).UnixNano()})
+					httpClientTestJSON(t, w, httpAssignment{Job: job})
 				case "/cancel":
 					if name != "invalid headers" {
 						failure := workroot.ErrUnsafe
@@ -521,7 +612,9 @@ func TestRunHTTPBoundsStalledWatchHeadersByAcceptedExpiry(t *testing.T) {
 		server := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch r.URL.Path {
 			case "/next":
-				httpClientTestJSON(t, w, httpAssignment{Job: job, Expires: time.Now().Add(time.Second).UnixNano()})
+				short := job
+				short.RuntimeBudget = time.Second
+				httpClientTestJSON(t, w, httpAssignment{Job: short})
 			case "/cancel":
 				var value httpBinding
 				if err := httpDecode(r.Body, httpControlBytes, &value); err != nil || value != binding {
@@ -980,7 +1073,9 @@ func TestRunHTTPDeliversPaidFactsAfterCancellationWatchStopsAction(t *testing.T)
 					if name == "local action deadline" {
 						runtime = 2 * time.Second
 					}
-					httpClientTestJSON(t, w, httpAssignment{Job: job, Expires: time.Now().Add(runtime).UnixNano()})
+					short := job
+					short.RuntimeBudget = runtime
+					httpClientTestJSON(t, w, httpAssignment{Job: short})
 					return
 				case "cancel":
 					w.Header().Set("Content-Type", "application/json")

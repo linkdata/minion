@@ -95,7 +95,7 @@ func TestStatusRejectsForeignAndMalformedObservations(t *testing.T) {
 		}
 	}
 	status.Phase, status.Round, status.WorkerState = "cleanup", 0, "unclean"
-	status.ProgressAge = config.MaxJobTimeout + time.Second // Cleanup may outlive the action budget.
+	status.ProgressAge = config.MaxActionRuntime + time.Second // Cleanup may outlive the action budget.
 	if err := status.Validate(job); err != nil {
 		t.Fatalf("unclean cleanup status: %v", err)
 	}

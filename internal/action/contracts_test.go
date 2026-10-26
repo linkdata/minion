@@ -254,7 +254,7 @@ func TestJobValidate(t *testing.T) {
 			j.Critic = &RoleSettings{Provider: "claude", Skills: []string{skills.BuiltinAntiPromptInjection}}
 		}, "only always-on skills"},
 		{"same provider", func(j *Job) { j.Critic = &RoleSettings{Provider: j.Main.Provider} }, "require different providers"},
-		{"runtime maximum", func(j *Job) { j.RuntimeBudget = config.MaxJobTimeout + time.Nanosecond }, "invalid action runtime budget"},
+		{"runtime maximum", func(j *Job) { j.RuntimeBudget = config.MaxActionRuntime + time.Nanosecond }, "invalid action runtime budget"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			job := testJob(command.Comment)
@@ -291,7 +291,7 @@ func TestJobValidate(t *testing.T) {
 		}},
 		{"maximum settings", func(j *Job) {
 			j.Main.Model, j.Main.Effort = strings.Repeat("m", config.MaxModelSettingBytes), strings.Repeat("e", config.MaxModelSettingBytes)
-			j.RuntimeBudget = config.MaxJobTimeout
+			j.RuntimeBudget = config.MaxActionRuntime
 		}},
 	} {
 		t.Run("valid/"+test.name, func(t *testing.T) {

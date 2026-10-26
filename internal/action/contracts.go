@@ -18,7 +18,7 @@ import (
 )
 
 // ProtocolVersion identifies the versioned Job, Result, and Status contracts.
-const ProtocolVersion = 8
+const ProtocolVersion = 9
 
 const (
 	maxDiagnostics            = 100
@@ -174,7 +174,7 @@ func (j Job) Validate() error {
 	if !workspace.ValidIdentitySegment(j.Command) {
 		return errors.New("invalid action command")
 	}
-	if j.RuntimeBudget <= 0 || j.RuntimeBudget > config.MaxJobTimeout {
+	if j.RuntimeBudget <= 0 || j.RuntimeBudget > config.MaxActionRuntime {
 		return errors.New("invalid action runtime budget")
 	}
 	if (j.Identity.SubjectType == "PullRequest") != (j.Source.Base != "") {

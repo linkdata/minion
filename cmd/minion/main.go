@@ -233,7 +233,7 @@ func newOrchestrator(cfg config.Config, client *github.Client, store *state.Stor
 		Store:                 store,
 		Usage:                 &usage.Store{Dir: filepath.Join(filepath.Dir(cfg.StatePath), "usage")},
 		CheckWorkRoot:         checkWorkRoot,
-		Timeout:               time.Duration(cfg.JobTimeoutMinutes) * time.Minute,
+		MaxRuntime:            time.Duration(cfg.MaxRuntimeMinutes) * time.Minute,
 		MaxGitHubContextBytes: cfg.MaxGitHubContextBytes,
 		Commands:              cfg.Commands,
 		Main:                  cfg.Main,
@@ -353,7 +353,7 @@ func checkModels(ctx context.Context, cfg *config.Config, logger *log.Logger) (e
 		}
 		logger.Printf("%s settings: model=%s %s=%s", label, role.Model, effortName, role.Effort)
 	}
-	logger.Printf("AI roles: main=%s adversarial=%s job_timeout_minutes=%d", cfg.Main, cfg.Adversarial, cfg.JobTimeoutMinutes)
+	logger.Printf("AI roles: main=%s adversarial=%s inactivity_timeout_minutes=%d max_runtime_minutes=%d", cfg.Main, cfg.Adversarial, cfg.InactivityTimeoutMinutes, cfg.MaxRuntimeMinutes)
 	if cfg.Adversarial != "" {
 		maxRounds, nonblockingAfterRound, consecutiveNoBlockerRounds := cfg.CriticStopping.Resolve()
 		logger.Printf("critic policy: max_rounds=%d nonblocking_after_round=%d consecutive_no_blocker_rounds=%d", maxRounds, nonblockingAfterRound, consecutiveNoBlockerRounds)

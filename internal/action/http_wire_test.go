@@ -132,7 +132,7 @@ func TestHTTPJobBoundCoversEncodedJobAndAssignmentEnvelope(t *testing.T) {
 				job.Identity.Repository, job.Identity.Requester = strings.Repeat("o", 100)+"/"+strings.Repeat("r", 100), strings.Repeat("b", 100)+"[bot]"
 				job.Identity.RepositoryID, job.Identity.OwnerID, job.Identity.RequesterID = math.MaxInt64, math.MaxInt64, math.MaxInt64
 				job.Identity.Number = int(^uint(0) >> 1)
-				job.Command, job.RuntimeBudget = strings.Repeat("c", 100), config.MaxJobTimeout
+				job.Command, job.RuntimeBudget = strings.Repeat("c", 100), config.MaxActionRuntime
 				for _, role := range []*RoleSettings{&job.Main, job.Critic} {
 					role.Model, role.Effort = strings.Repeat("\x01", config.MaxModelSettingBytes), strings.Repeat("&", config.MaxModelSettingBytes)
 					role.AlwaysOnSkills = make([]string, config.MaxSkillsPerRole-len(role.Skills))
@@ -177,9 +177,9 @@ func TestHTTPJobBoundCoversEncodedJobAndAssignmentEnvelope(t *testing.T) {
 			bound := httpJobBound(job)
 			envelope := struct {
 				Job     Job    `json:"job"`
-				Expires int64  `json:"expires_unix_ns"`
+				HeldFor int64  `json:"held_for_ns"`
 				Control string `json:"control"`
-			}{Job: job, Expires: math.MaxInt64, Control: strings.Repeat("x", httpControlBytes-1024)}
+			}{Job: job, HeldFor: math.MaxInt64, Control: strings.Repeat("x", httpControlBytes-1024)}
 			encoded, err := httpEncode(envelope, httpJobBytes)
 			if err != nil || bound < int64(len(encoded)) || bound > httpJobBytes {
 				t.Fatalf("Job size bound failed: bound=%d encoded=%d error=%v", bound, len(encoded), err)

@@ -143,17 +143,46 @@ func TestPrecheckDeadlineStopsJobBeforeModel(t *testing.T) {
 		}))
 		client := testGitHub(server, "test-token")
 		orchestrator := &Orchestrator{
-			GitHub:   client,
-			BotLogin: "linkdataminion",
-			Timeout:  20 * time.Millisecond,
-			Commands: map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{testReviewSkillURL}}},
-			Runner:   Runner{runModel: forbidModel(t)},
+			GitHub:     client,
+			BotLogin:   "linkdataminion",
+			MaxRuntime: 20 * time.Millisecond,
+			Commands:   map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{testReviewSkillURL}}},
+			Runner:     Runner{runModel: forbidModel(t)},
 		}
 		job := monitor.Job{Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"review"}}, SubjectType: "PullRequest", Number: 7, ID: strings.Repeat("a", 64), Command: command.Command{Name: "review", Action: command.Review}}
 		if err := orchestrator.Execute(t.Context(), job); !errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("precheck deadline was refundable: %v", err)
 		}
 	})
+}
+
+func TestRuntimeDeadlineUsesAcceptedTime(t *testing.T) {
+	acceptedAt := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	if got, want := runtimeDeadline(acceptedAt, 37*time.Minute), acceptedAt.Add(37*time.Minute); !got.Equal(want) {
+		t.Fatalf("supplied runtime deadline = %s, want %s", got, want)
+	}
+	if got, want := runtimeDeadline(acceptedAt, 0), acceptedAt.Add(config.DefaultMaxRuntime); !got.Equal(want) {
+		t.Fatalf("default runtime deadline = %s, want %s", got, want)
+	}
+}
+
+func TestExpiredAcceptedDeadlineStopsBeforeModel(t *testing.T) {
+	installActionTestSkills(t, testReviewSkillURL)
+	server := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("expired accepted action reached GitHub: %s", r.URL)
+		http.Error(w, "expired", http.StatusGatewayTimeout)
+	}))
+	orchestrator := &Orchestrator{
+		GitHub: testGitHub(server, "test-token"), MaxRuntime: time.Minute,
+		Commands: map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{testReviewSkillURL}}},
+		Runner:   Runner{runModel: forbidModel(t)},
+	}
+	job := monitor.Job{Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"review"}},
+		SubjectType: "PullRequest", Number: 7, ID: strings.Repeat("a", 64), Command: command.Command{Name: "review", Action: command.Review},
+		AcceptedAt: time.Now().Add(-2 * time.Minute)}
+	if err := orchestrator.Execute(t.Context(), job); !errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expired accepted action was not terminal: %v", err)
+	}
 }
 
 func TestVerifiedRepositoryRejectsReclaimedName(t *testing.T) {

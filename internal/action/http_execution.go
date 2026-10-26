@@ -20,8 +20,8 @@ type httpPull struct {
 }
 
 type httpAssignment struct {
-	Job     Job   `json:"job"`
-	Expires int64 `json:"expires_unix_ns"`
+	Job     Job           `json:"job"`
+	HeldFor time.Duration `json:"held_for_ns"`
 }
 
 type httpCall struct {
