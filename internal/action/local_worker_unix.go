@@ -35,6 +35,7 @@ type localWorker struct {
 	closeOnce    sync.Once
 	closeErr     error
 	readyTimeout time.Duration
+	stopGrace    time.Duration
 }
 
 const (
@@ -73,7 +74,7 @@ func startLocalWorker(runtimeDir, executorID, path string, args []string, readyT
 	cmd.Stderr = stderr
 	cmd.Cancel = commandCancel
 	executil.Prepare(cmd)
-	w := &localWorker{executor: executor, endpoint: endpoint, cmd: cmd, cancel: cancel, exited: make(chan struct{}), stderr: stderr, readyTimeout: readyTimeout}
+	w := &localWorker{executor: executor, endpoint: endpoint, cmd: cmd, cancel: cancel, exited: make(chan struct{}), stderr: stderr, readyTimeout: readyTimeout, stopGrace: 2 * time.Second}
 	w.reuse.Store(workerNeedsPull)
 	preparedCancel := cmd.Cancel
 	cmd.Cancel = func() error {
@@ -297,24 +298,34 @@ func (w *localWorker) awaitHeldPull(ctx context.Context) (waitErr error) {
 	}
 }
 
-// Close drains accepted callbacks while HTTP serves, then stops and waits for
-// the direct child once before the endpoint closes its owned socket.
+// Close drains accepted callbacks while HTTP serves, allows the direct child
+// to consume the canceled pull, then stops it if needed before closing the socket.
 func (w *localWorker) Close() error {
 	w.reuse.Store(workerRetired)
 	w.closeOnce.Do(func() {
 		coreErr := w.executor.Close()
+		grace := time.NewTimer(w.stopGrace)
+		select {
+		case <-w.exited:
+		case <-grace.C:
+		}
+		grace.Stop()
 		// A published exit before cancellation is spontaneous, including one
-		// observed while accepted callbacks drain.
+		// observed while accepted callbacks drain. Recheck under childMu so
+		// the waiter cannot publish an exit between this check and the stop.
 		w.childMu.Lock()
 		exitedBeforeCancel := false
 		select {
 		case <-w.exited:
 			exitedBeforeCancel = true
 		default:
+			w.cancel()
 		}
-		w.cancel()
 		w.childMu.Unlock()
 		<-w.exited
+		if exitedBeforeCancel {
+			w.cancel() // Release the command context after a graceful exit.
+		}
 		// Cmd.Wait may have returned before cancellation but published afterward.
 		// Keep every nonzero exit code and other unexpected Wait error.
 		if w.waitErr != nil && (exitedBeforeCancel || !expectedLocalWorkerCancellation(w.waitErr, w.stopSent.Load())) {
