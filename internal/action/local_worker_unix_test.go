@@ -652,7 +652,7 @@ func TestLocalWorkerBudgetQuarantineStopsLiveChild(t *testing.T) {
 
 func TestLocalWorkerCancellationDoesNotRenewStopDeadline(t *testing.T) {
 	w := localWorkerTestStart(t, "stall")
-	w.executor.outcomeGrace = 40 * time.Millisecond
+	w.executor.outcomeGrace = 600 * time.Millisecond
 	localWorkerTestCapacity(t, w)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -666,13 +666,34 @@ func TestLocalWorkerCancellationDoesNotRenewStopDeadline(t *testing.T) {
 	defer stopWait()
 	unixWorkerReport(t, wait, localWorkerTestReport(t, w), ".entered")
 	cancel()
+	w.executor.mu.Lock()
+	tx := w.executor.active
+	w.executor.mu.Unlock()
+	if tx == nil {
+		t.Fatal("canceled assignment lost its active transaction")
+	}
+	select {
+	case <-tx.stop:
+	case <-time.After(time.Second):
+		t.Fatal("canceled assignment did not start the shared stop deadline")
+	}
+	stopUntil := tx.controlDeadline()
+	if stopUntil.IsZero() {
+		t.Fatal("shared stop deadline was not recorded")
+	}
+	// Allow scheduling slack, but fail if Close starts a second full grace.
+	limit := time.NewTimer(max(time.Until(stopUntil.Add(300*time.Millisecond)), 0))
+	defer limit.Stop()
 	select {
 	case got := <-done:
 		if !got.result.matchesJob(job) || !errors.Is(got.err, context.Canceled) || !errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) {
 			t.Fatalf("canceled assignment changed result: result=%+v error=%v", got.result, got.err)
 		}
-	case <-time.After(time.Second):
+	case <-limit.C:
 		t.Fatal("direct child started another grace period after the HTTP stop deadline")
+	}
+	if !w.stopUntil.Equal(stopUntil) {
+		t.Fatalf("worker stop deadline was renewed: worker=%v transaction=%v", w.stopUntil, stopUntil)
 	}
 	if w.reuse.Load() != workerRetired || w.cmd.ProcessState == nil {
 		t.Fatalf("stopped worker kept capacity or direct child: reuse=%d process=%v", w.reuse.Load(), w.cmd.ProcessState)
