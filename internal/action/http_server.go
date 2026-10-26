@@ -265,12 +265,6 @@ func (e *HTTPExecutor) Close() error {
 		tx.stopBudget()
 		tx.forceStop()
 		<-tx.finished
-		tx.mu.Lock()
-		stopCancel := tx.stopCancel
-		tx.mu.Unlock()
-		if stopCancel != nil {
-			stopCancel()
-		}
 	}
 	return nil
 }
@@ -584,7 +578,7 @@ func (tx *httpTransaction) startStopLocked(explicitClose bool) {
 	if tx.stopContext != nil || tx.fenced && !explicitClose {
 		return
 	}
-	tx.stopContext, tx.stopCancel = context.WithTimeout(context.WithoutCancel(tx.budget), tx.stopGrace)
+	tx.stopContext, tx.stopCancel = context.WithTimeout(context.Background(), tx.stopGrace)
 	tx.stopUntil, _ = tx.stopContext.Deadline()
 	tx.stopping = true
 	close(tx.stop)
@@ -829,7 +823,7 @@ func httpServerRead(w http.ResponseWriter, r *http.Request, limit int, value any
 	if err := controller.SetReadDeadline(deadline); err != nil {
 		return err
 	}
-	finishWatch := httpServerDeadlineWatch(transaction, controller.SetReadDeadline)
+	finishWatch := httpServerDeadlineWatch(transaction, deadline, controller.SetReadDeadline)
 	defer func() { readErr = errors.Join(readErr, finishWatch(), controller.SetReadDeadline(time.Time{})) }()
 	return httpDecode(r.Body, limit, value)
 }
@@ -866,7 +860,7 @@ func httpControlDeadline(transaction []*httpTransaction) time.Time {
 	return deadline
 }
 
-func httpServerDeadlineWatch(transaction []*httpTransaction, set func(time.Time) error) func() error {
+func httpServerDeadlineWatch(transaction []*httpTransaction, deadline time.Time, set func(time.Time) error) func() error {
 	if len(transaction) == 0 {
 		return func() error { return nil }
 	}
@@ -875,7 +869,10 @@ func httpServerDeadlineWatch(transaction []*httpTransaction, set func(time.Time)
 	go func() {
 		select {
 		case <-transaction[0].stop:
-			watched <- set(transaction[0].controlDeadline())
+			if stopUntil := transaction[0].controlDeadline(); !stopUntil.IsZero() && stopUntil.Before(deadline) {
+				deadline = stopUntil
+			}
+			watched <- set(deadline)
 		case <-done:
 			watched <- nil
 		}
@@ -889,10 +886,11 @@ func httpServerDeadlineWatch(transaction []*httpTransaction, set func(time.Time)
 // Flushed headers prove watch admission before the worker starts Runner; the reason body comes later.
 func httpServerWatchHeaders(w http.ResponseWriter, tx *httpTransaction) (writeErr error) {
 	controller := http.NewResponseController(w)
-	if err := controller.SetWriteDeadline(httpControlDeadline([]*httpTransaction{tx})); err != nil {
+	deadline := httpControlDeadline([]*httpTransaction{tx})
+	if err := controller.SetWriteDeadline(deadline); err != nil {
 		return err
 	}
-	finishWatch := httpServerDeadlineWatch([]*httpTransaction{tx}, controller.SetWriteDeadline)
+	finishWatch := httpServerDeadlineWatch([]*httpTransaction{tx}, deadline, controller.SetWriteDeadline)
 	defer func() { writeErr = errors.Join(writeErr, finishWatch(), controller.SetWriteDeadline(time.Time{})) }()
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -905,10 +903,11 @@ func httpServerWatchReason(w http.ResponseWriter, cancellation httpCancellation,
 		return err
 	}
 	controller := http.NewResponseController(w)
-	if err := controller.SetWriteDeadline(httpControlDeadline([]*httpTransaction{tx})); err != nil {
+	deadline := httpControlDeadline([]*httpTransaction{tx})
+	if err := controller.SetWriteDeadline(deadline); err != nil {
 		return err
 	}
-	finishWatch := httpServerDeadlineWatch([]*httpTransaction{tx}, controller.SetWriteDeadline)
+	finishWatch := httpServerDeadlineWatch([]*httpTransaction{tx}, deadline, controller.SetWriteDeadline)
 	defer func() { writeErr = errors.Join(writeErr, finishWatch()) }()
 	n, err := w.Write(body)
 	if err != nil {
@@ -923,10 +922,11 @@ func httpServerWatchReason(w http.ResponseWriter, cancellation httpCancellation,
 
 func httpServerWriteBytes(w http.ResponseWriter, status int, body []byte, transaction ...*httpTransaction) (writeErr error) {
 	controller := http.NewResponseController(w)
-	if err := controller.SetWriteDeadline(httpControlDeadline(transaction)); err != nil {
+	deadline := httpControlDeadline(transaction)
+	if err := controller.SetWriteDeadline(deadline); err != nil {
 		return err
 	}
-	finishWatch := httpServerDeadlineWatch(transaction, controller.SetWriteDeadline)
+	finishWatch := httpServerDeadlineWatch(transaction, deadline, controller.SetWriteDeadline)
 	defer func() { writeErr = errors.Join(writeErr, finishWatch(), controller.SetWriteDeadline(time.Time{})) }()
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Content-Length", strconv.Itoa(len(body)))

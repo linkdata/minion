@@ -63,15 +63,14 @@ func TestRunHTTPReportsActualObservationsAndRawPaidReceipts(t *testing.T) {
 		malformedStatus bool
 		afterFailure    bool
 		watchPipe       bool
-		measureAge      bool
 	}{
-		{name: "complete", measureAge: true},
+		{name: "complete"},
 		{name: "invalid signed counters", invalidCounters: true},
 		{name: "intentional held watch stop", holdWatch: true},
 		{name: "intentional held watch pipe close", holdWatch: true, watchPipe: true},
 		{name: "lost prepare observation ACK", lostStatus: "prepare"},
-		{name: "malformed upload observation ACK", lostStatus: "upload", malformedStatus: true},
-		{name: "paid checkpoint refusal skips upload", afterFailure: true},
+		{name: "malformed prepare observation ACK", lostStatus: "prepare", malformedStatus: true},
+		{name: "paid checkpoint refusal", afterFailure: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			job := testJob(command.Comment)
@@ -85,7 +84,6 @@ func TestRunHTTPReportsActualObservationsAndRawPaidReceipts(t *testing.T) {
 			var watchAdmitted atomic.Bool
 			sealed := make(chan struct{})
 			events := make(chan string, 8)
-			statusAges := make(chan time.Duration, 2)
 			after := make(chan CallUsage, 1)
 			outcome := make(chan httpOutcome, 1)
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -127,14 +125,7 @@ func TestRunHTTPReportsActualObservationsAndRawPaidReceipts(t *testing.T) {
 					if err := httpDecode(r.Body, httpControlBytes, &value); err != nil || value.Status.Validate(job) != nil || value.Status.WorkerState != "busy" {
 						t.Errorf("invalid observation: %+v error=%v", value, err)
 					}
-					if test.measureAge {
-						statusAges <- value.Status.ProgressAge
-					}
-					want := uint64(1)
-					if value.Status.Phase == "upload" {
-						want = 2
-					}
-					if value.Status.Sequence != want {
+					if value.Status.Phase != "prepare" || value.Status.Sequence != 1 {
 						t.Errorf("status sequence reused transport sequence: %+v", value)
 					}
 					requestSequence = value.Status.Sequence
@@ -207,9 +198,6 @@ func TestRunHTTPReportsActualObservationsAndRawPaidReceipts(t *testing.T) {
 					t.Errorf("worker renewed the accepted budget: %v %t", deadline, ok)
 					return aicli.Result{}, errors.New("renewed native runtime")
 				}
-				if test.measureAge {
-					time.Sleep(20 * time.Millisecond)
-				}
 				return aicli.Result{Answer: "Complete answer", Tokens: tokens, UsageComplete: true}, nil
 			}}
 			err := RunHTTP(t.Context(), &client, server.URL, job.Identity.ExecutorID, runner)
@@ -220,21 +208,9 @@ func TestRunHTTPReportsActualObservationsAndRawPaidReceipts(t *testing.T) {
 			} else if err != nil {
 				t.Fatal(err)
 			}
-			wantEvents := []string{"next", "status/prepare", "before", "after", "status/upload", "outcome"}
-			if test.invalidCounters || test.afterFailure {
-				wantEvents = []string{"next", "status/prepare", "before", "after", "outcome"}
-			}
+			wantEvents := []string{"next", "status/prepare", "before", "after", "outcome"}
 			if test.watchPipe && pipeReads.Load() != 1 {
 				t.Fatalf("held watch did not return the injected teardown pipe error: %d", pipeReads.Load())
-			}
-			if test.measureAge {
-				if len(statusAges) != 2 {
-					t.Fatalf("missing age observations: %d", len(statusAges))
-				}
-				prepareAge, uploadAge := <-statusAges, <-statusAges
-				if uploadAge < 20*time.Millisecond || uploadAge <= prepareAge {
-					t.Fatalf("upload age did not include model time: prepare=%s upload=%s", prepareAge, uploadAge)
-				}
 			}
 			if len(events) != len(wantEvents) || len(after) != 1 || len(outcome) != 1 || next.Load() != 1 || native.Load() != 1 {
 				t.Fatalf("missing transaction observations: events=%d after=%d outcome=%d pulls=%d native=%d", len(events), len(after), len(outcome), next.Load(), native.Load())
@@ -259,6 +235,67 @@ func TestRunHTTPReportsActualObservationsAndRawPaidReceipts(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRunHTTPShortStopGraceReservesFinalOutcome(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		job := testJob(command.Comment)
+		binding := httpJobBinding(job)
+		var statuses atomic.Int32
+		outcomes := make(chan httpOutcome, 1)
+		server := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/next":
+				httpClientTestJSON(t, w, httpAssignment{Job: job, StopGrace: 10 * time.Millisecond})
+			case "/cancel":
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				w.(http.Flusher).Flush()
+				<-r.Context().Done()
+			case "/status":
+				var status httpObservation
+				if err := httpDecode(r.Body, httpControlBytes, &status); err != nil {
+					t.Error(err)
+				}
+				if statuses.Add(1) > 1 {
+					<-r.Context().Done()
+					return
+				}
+				httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: binding, Kind: "status", Sequence: status.Status.Sequence})
+			case "/before", "/after":
+				var call httpCall
+				if err := httpDecode(r.Body, httpControlBytes, &call); err != nil {
+					t.Error(err)
+				}
+				httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: binding, Kind: strings.TrimPrefix(r.URL.Path, "/"), Sequence: call.Sequence})
+			case "/outcome":
+				var outcome httpOutcome
+				if err := httpDecode(r.Body, httpOutcomeBytes, &outcome); err != nil {
+					t.Error(err)
+				}
+				outcomes <- outcome
+				httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: binding, Kind: "outcome", Sequence: outcome.Sequence})
+			default:
+				t.Errorf("unexpected route %s", r.URL.Path)
+			}
+		}))
+		defer server.CloseClientConnections()
+		client := *server.Client()
+		client.Timeout = 0
+		runner := &Runner{WorkRoot: t.TempDir(), runModel: func(context.Context, modelRun) (aicli.Result, error) {
+			return aicli.Result{Answer: "Complete", Tokens: usage.Tokens{Input: 1}, UsageComplete: true}, nil
+		}}
+		if err := RunHTTP(t.Context(), &client, server.URL, job.Identity.ExecutorID, runner); err != nil {
+			t.Fatal(err)
+		}
+		if statuses.Load() != 1 || len(outcomes) != 1 {
+			t.Fatalf("optional status displaced final result: statuses=%d outcomes=%d", statuses.Load(), len(outcomes))
+		}
+		outcome := <-outcomes
+		if outcome.Failure != nil || outcome.Result.Answer != "Complete" || len(outcome.Result.Calls) != 1 {
+			t.Fatalf("successful result lost: %+v", outcome)
+		}
+	})
 }
 
 func TestHTTPClientRequiresExactAcknowledgementAndNeverRetries(t *testing.T) {

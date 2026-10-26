@@ -267,11 +267,6 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 			break
 		}
 	}
-	if runErr == nil {
-		if err := checkpoints.status("upload", 2); err != nil {
-			runner.logf("HTTP upload observation: %v", err)
-		}
-	}
 	cause := context.Cause(actionCtx)
 	if runErr == nil && httpWatchUncertainty(cause) {
 		// A completed result can resolve independent watch uncertainty through its receipt.
@@ -414,17 +409,14 @@ func (c *httpExecutionClient) watch(ctx context.Context, response *http.Response
 		return httpClientUnknown("cancel", errors.New("cancellation binding differs from assignment"))
 	}
 	switch cancellation.Reason {
-	case "canceled":
+	case "canceled", "deadline":
 		if cancellation.StopRemaining < 0 || cancellation.StopRemaining > config.MaxActionRuntime {
 			return httpClientUnknown("cancel", errors.New("invalid cancellation stop remaining"))
 		}
 		shortenControl(cancellation.StopRemaining)
-		return fmt.Errorf("parent action canceled: %w", context.Canceled)
-	case "deadline":
-		if cancellation.StopRemaining < 0 || cancellation.StopRemaining > config.MaxActionRuntime {
-			return httpClientUnknown("cancel", errors.New("invalid cancellation stop remaining"))
+		if cancellation.Reason == "canceled" {
+			return fmt.Errorf("parent action canceled: %w", context.Canceled)
 		}
-		shortenControl(cancellation.StopRemaining)
 		return errors.Join(monitor.ErrTerminalJob, context.DeadlineExceeded)
 	case "completed":
 		if c.outcomeSent.Load() {

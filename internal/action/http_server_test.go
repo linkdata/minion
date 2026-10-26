@@ -2158,3 +2158,26 @@ func TestHTTPExecutorCloseReusesCancellationStopDeadline(t *testing.T) {
 		}
 	})
 }
+
+func TestHTTPServerStopKeepsEarlierRequestDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		tx := &httpTransaction{stop: make(chan struct{})}
+		original := time.Now().Add(10 * time.Millisecond)
+		updated := make(chan time.Time, 1)
+		finish := httpServerDeadlineWatch([]*httpTransaction{tx}, original, func(deadline time.Time) error {
+			updated <- deadline
+			return nil
+		})
+		time.Sleep(9 * time.Millisecond)
+		tx.mu.Lock()
+		tx.stopUntil = time.Now().Add(30 * time.Millisecond)
+		close(tx.stop)
+		tx.mu.Unlock()
+		if deadline := <-updated; !deadline.Equal(original) {
+			t.Fatalf("stop extended request deadline: original=%s new=%s", original, deadline)
+		}
+		if err := finish(); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
