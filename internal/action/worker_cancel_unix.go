@@ -5,9 +5,14 @@ package action
 import (
 	"context"
 	"errors"
+	"os"
 	"os/exec"
 	"syscall"
 )
+
+func localWorkerProcessDone(err error) bool {
+	return errors.Is(err, os.ErrProcessDone)
+}
 
 func expectedLocalWorkerCancellation(err error, directStopSent bool) bool {
 	if !directStopSent {

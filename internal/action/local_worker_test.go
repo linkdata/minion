@@ -532,6 +532,30 @@ func TestLocalWorkerCloseStopsHTTPSBeforeDelayedChildWait(t *testing.T) {
 	}
 }
 
+func TestLocalWorkerIgnoresReapedProcessBeforeExitPublication(t *testing.T) {
+	cmd := exec.Command(os.Args[0], "-test.run=^TestLocalWorkerHTTPSHelper$")
+	cmd.Env = append(os.Environ(), "MINION_HTTPS_WORKER_TEST=", "GORACE=atexit_sleep_ms=0")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	state, err := cmd.Process.Wait()
+	if err != nil || !state.Success() {
+		t.Fatalf("direct child did not exit cleanly: state=%v error=%v", state, err)
+	}
+	// Process.Wait has reaped the child, but Cmd.Wait can still be copying stderr.
+	if err := cmd.Process.Kill(); err == nil || !localWorkerProcessDone(err) {
+		t.Fatalf("reaped child was not recognized: %v", err)
+	}
+	w := &localWorker{cmd: cmd, exited: make(chan struct{}), cancel: func() {}}
+	w.stopDirectChild()
+	if w.stopErr != nil || w.stopSent.Load() {
+		t.Fatalf("reaped child became a stop failure: error=%v signal=%v", w.stopErr, w.stopSent.Load())
+	}
+	if localWorkerProcessDone(errors.New("other kill failure")) {
+		t.Fatal("unrelated kill failure was hidden")
+	}
+}
+
 func TestLocalWorkerClosePreservesExitDuringCallbackDrain(t *testing.T) {
 	w := startHTTPSWorkerTest(t, "drain")
 	w.executor.outcomeGrace = 100 * time.Millisecond

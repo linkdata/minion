@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -333,22 +332,24 @@ func (w *localWorker) beginStop(until time.Time) {
 	w.reuse.Store(workerRetired)
 	w.stopOnce.Do(func() {
 		w.stopUntil = until
-		w.stopTimer = time.AfterFunc(max(time.Until(until), 0), func() {
-			w.childMu.Lock()
-			defer w.childMu.Unlock()
-			select {
-			case <-w.exited:
-				return
-			default:
-			}
-			if err := w.cmd.Process.Kill(); err == nil {
-				w.stopSent.Store(true)
-			} else if !errors.Is(err, os.ErrProcessDone) {
-				w.stopErr = fmt.Errorf("stop direct local worker: %w", err)
-				w.cancel()
-			}
-		})
+		w.stopTimer = time.AfterFunc(max(time.Until(until), 0), w.stopDirectChild)
 	})
+}
+
+func (w *localWorker) stopDirectChild() {
+	w.childMu.Lock()
+	defer w.childMu.Unlock()
+	select {
+	case <-w.exited:
+		return
+	default:
+	}
+	if err := w.cmd.Process.Kill(); err == nil {
+		w.stopSent.Store(true)
+	} else if !localWorkerProcessDone(err) {
+		w.stopErr = fmt.Errorf("stop direct local worker: %w", err)
+		w.cancel()
+	}
 }
 
 // Close drains accepted callbacks while HTTP serves, starts HTTPS shutdown
