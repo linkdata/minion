@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -491,6 +492,72 @@ printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.comp
 				}
 			}
 		})
+	}
+}
+
+func TestSessionFallbackPreservesKnownDuplicateIdentity(t *testing.T) {
+	home := t.TempDir()
+	first := writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "turn", "response", 10)...)
+	second := filepath.Join(filepath.Dir(first), "rollout-copy.jsonl")
+	data, err := os.ReadFile(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(second, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	files, ambiguous, complete := usageFiles(t.Context(), home, "root", started, nil)
+	if complete || !ambiguous["root"] || !files["root"].duplicate {
+		t.Fatalf("duplicate evidence was not captured: files=%v ambiguous=%v complete=%t", files, ambiguous, complete)
+	}
+	known := ownedUsageFiles(files, "root")
+	if err := os.Remove(known["root"].path); err != nil {
+		t.Fatal(err)
+	}
+	remaining := first
+	if remaining == known["root"].path {
+		remaining = second
+	}
+	session := Session{home: home, accounting: usageSession{known: known}}
+	paths := map[string]bool{remaining: true}
+	session.admitRollouts(t.Context(), "root", started, paths)
+	session.reportUnownedNewRollouts(t.Context(), paths, "root", nil, nil, "")
+	if len(session.ownedRollouts) != 0 {
+		t.Fatalf("known duplicate was admitted for deletion: %v", session.ownedRollouts)
+	}
+	if err := session.Close(); err == nil || !strings.Contains(err.Error(), remaining) {
+		t.Fatalf("known duplicate lacked recovery path: %v", err)
+	}
+	if _, err := os.Lstat(remaining); err != nil {
+		t.Fatalf("known duplicate was removed: %v", err)
+	}
+}
+
+func TestSessionFallbackHeaderFileCapPreservesRollouts(t *testing.T) {
+	home := t.TempDir()
+	root := writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "turn", "response", 10)...)
+	dir := filepath.Dir(root)
+	paths := map[string]bool{root: true}
+	for i := range maxUsageFiles {
+		id := fmt.Sprintf("foreign-%04d", i)
+		path := filepath.Join(dir, "rollout-"+id+".jsonl")
+		data := []byte(fmt.Sprintf("{\"type\":\"session_meta\",\"payload\":{\"id\":%q,\"session_id\":%q,\"source\":\"exec\"}}\n", id, id))
+		if err := os.WriteFile(path, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+		paths[path] = true
+	}
+	session := Session{home: home}
+	session.admitRollouts(t.Context(), "root", time.Now(), paths)
+	if len(session.ownedRollouts) != 0 {
+		t.Fatalf("incomplete fallback admitted rollouts: %v", session.ownedRollouts)
+	}
+	if err := session.Close(); err == nil || !strings.Contains(err.Error(), filepath.Join(home, "sessions")) {
+		t.Fatalf("fallback cap lacked recovery root: %v", err)
+	}
+	if _, err := os.Lstat(root); err != nil {
+		t.Fatalf("root rollout was removed after fallback cap: %v", err)
 	}
 }
 

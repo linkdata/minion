@@ -122,9 +122,14 @@ func (s *Session) rolloutScanError(err error) {
 }
 
 // Usage discovery can be incomplete because an unrelated recent header is malformed.
-func cleanupHeaderFiles(ctx context.Context, paths map[string]bool, started time.Time, owned map[string]ownedRollout) (map[string]rolloutMeta, map[string]bool, error) {
+func cleanupHeaderFiles(ctx context.Context, paths map[string]bool, started time.Time, owned map[string]ownedRollout, known map[string]rolloutMeta) (map[string]rolloutMeta, map[string]bool, error) {
 	files, ambiguous := map[string]rolloutMeta{}, map[string]bool{}
-	budget := int64(maxUsageScanBytes)
+	candidates := 0
+	for id, meta := range known {
+		if meta.duplicate {
+			ambiguous[id] = true
+		}
+	}
 	allPaths := maps.Clone(paths)
 	for path := range owned {
 		allPaths[path] = true
@@ -140,9 +145,9 @@ func cleanupHeaderFiles(ctx context.Context, paths map[string]bool, started time
 		if _, known := owned[path]; !known && info.ModTime().Before(started.Add(-time.Minute)) {
 			continue
 		}
-		budget -= min(info.Size(), maxUsageHeaderBytes)
-		if budget < 0 {
-			return nil, nil, errors.New("rollout header scan exceeded byte limit")
+		candidates++
+		if candidates > maxUsageFiles {
+			return nil, nil, fmt.Errorf("rollout header scan exceeded %d files", maxUsageFiles)
 		}
 		meta, err := readRolloutHeader(path)
 		if err != nil {
@@ -187,7 +192,7 @@ func (s *Session) admitRollouts(ctx context.Context, rootID string, started time
 	}
 	if !complete {
 		var err error
-		files, ambiguous, err = cleanupHeaderFiles(ctx, paths, started, s.ownedRollouts)
+		files, ambiguous, err = cleanupHeaderFiles(ctx, paths, started, s.ownedRollouts, s.accounting.known)
 		if err != nil {
 			s.rolloutScanError(err)
 			return
@@ -208,6 +213,10 @@ func (s *Session) admitRollouts(ctx context.Context, rootID string, started time
 	for changed := true; changed; {
 		changed = false
 		for id, meta := range files {
+			if err := ctx.Err(); err != nil {
+				s.rolloutScanError(err)
+				return
+			}
 			if id == rootID || ambiguous[id] || meta.duplicate || meta.SessionID != "" && meta.SessionID != rootID {
 				continue
 			}
@@ -279,10 +288,7 @@ func (s *Session) reportUnownedNewRollouts(ctx context.Context, paths map[string
 		}
 		return
 	}
-	linked := map[string]bool{}
-	if rootID != "" {
-		linked[rootID] = true
-	}
+	linked := map[string]bool{rootID: true}
 	if conflictingID != "" {
 		linked[conflictingID] = true
 	}
@@ -295,8 +301,12 @@ func (s *Session) reportUnownedNewRollouts(ctx context.Context, paths map[string
 	for changed := true; changed; {
 		changed = false
 		for _, owned := range s.ownedRollouts {
+			if err := ctx.Err(); err != nil {
+				s.rolloutScanError(err)
+				return
+			}
 			meta := owned.meta
-			if !linked[meta.ID] && (meta.ID == rootID || rootID != "" && meta.SessionID == rootID || meta.ParentID != "" && linked[meta.ParentID]) {
+			if !linked[meta.ID] && (meta.ID == rootID || meta.SessionID == rootID || meta.ParentID != "" && linked[meta.ParentID]) {
 				linked[meta.ID], changed = true, true
 			}
 		}
@@ -327,7 +337,11 @@ func (s *Session) reportUnownedNewRollouts(ctx context.Context, paths map[string
 	for changed := true; changed; {
 		changed = false
 		for path, meta := range metas {
-			if linked[meta.ID] || rootID != "" && meta.SessionID == rootID || meta.ParentID != "" && linked[meta.ParentID] {
+			if err := ctx.Err(); err != nil {
+				s.rolloutScanError(err)
+				return
+			}
+			if linked[meta.ID] || meta.SessionID == rootID || meta.ParentID != "" && linked[meta.ParentID] {
 				if !linked[meta.ID] {
 					linked[meta.ID], changed = true, true
 				}
@@ -337,6 +351,10 @@ func (s *Session) reportUnownedNewRollouts(ctx context.Context, paths map[string
 		}
 	}
 	for _, path := range unknown {
+		if err := ctx.Err(); err != nil {
+			s.rolloutScanError(err)
+			return
+		}
 		name := strings.TrimSuffix(filepath.Base(path), ".jsonl")
 		for id := range linked {
 			if strings.HasSuffix(name, "-"+id) {
