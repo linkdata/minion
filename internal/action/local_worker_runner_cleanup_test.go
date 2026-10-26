@@ -1,10 +1,9 @@
-//go:build linux
-
 package action
 
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -36,16 +35,19 @@ func TestLocalWorkerRunnerCleansBeforeReuse(t *testing.T) {
 				t.Fatalf("first result=%+v error=%v", result, err)
 			}
 			assertRunnerCleanupRoot(t, workRoot)
+			second := runnerCleanupJob("second")
+			if rejected, err := w.Execute(ctx, second, runnerExecutionCheckpoints{}); err == nil || !strings.Contains(err.Error(), "not ready") || !rejected.matchesJob(second) {
+				t.Fatalf("second assignment bypassed fresh pull proof: result=%+v error=%v", rejected, err)
+			}
 			if err := w.WaitCapacity(ctx); err != nil {
 				t.Fatalf("clean attempt could not reuse worker: %v", err)
 			}
-			second := runnerCleanupJob("second")
 			result, err = w.Execute(ctx, second, runnerExecutionCheckpoints{})
 			if err != nil || !result.matchesJob(second) || result.Answer != proposalJSON("worker answer", "") {
 				t.Fatalf("second result=%+v error=%v", result, err)
 			}
 			assertRunnerCleanupRoot(t, workRoot)
-			if got := unixWorkerReport(t, ctx, report, ".done"); got != strconv.Itoa(w.cmd.Process.Pid) {
+			if got := localWorkerReport(t, ctx, report, ".done"); got != strconv.Itoa(w.cmd.Process.Pid) {
 				t.Fatalf("reused worker PID=%q, want %d", got, w.cmd.Process.Pid)
 			}
 		})
@@ -66,7 +68,7 @@ func TestLocalWorkerRunnerCleanupOnCancellation(t *testing.T) {
 		result, err := w.Execute(actionCtx, runnerCleanupJob("canceled"), runnerExecutionCheckpoints{})
 		done <- httpServerTestResult{result, err}
 	}()
-	unixWorkerReport(t, ctx, report, ".entered")
+	localWorkerReport(t, ctx, report, ".entered")
 	stopAction()
 	select {
 	case got := <-done:
@@ -96,7 +98,7 @@ func TestLocalWorkerRunnerCrashRetainsRecoveryEvidence(t *testing.T) {
 	if err == nil || !errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || !result.matchesJob(job) {
 		t.Fatalf("crash result=%+v error=%v", result, err)
 	}
-	unixWorkerReport(t, ctx, report, ".entered")
+	localWorkerReport(t, ctx, report, ".entered")
 	entries, err := os.ReadDir(workRoot)
 	if err != nil {
 		t.Fatal(err)
@@ -121,8 +123,13 @@ func startRunnerCleanupWorker(t *testing.T, mode string) (*localWorker, string, 
 		t.Fatal(err)
 	}
 	var output bytes.Buffer
-	w, err := startLocalWorker(unixTestDirectory(t), "local", os.Args[0], []string{"-test.run=^TestLocalWorkerRunnerCleanupHelper$"}, 10*time.Second, WorkerCredentials{}, func(cmd *exec.Cmd, socket string) error {
-		cmd.Env = append(os.Environ(), "MINION_RUNNER_CLEANUP_HELPER="+mode, "MINION_RUNNER_CLEANUP_SOCKET="+socket, "MINION_RUNNER_CLEANUP_WORKROOT="+workRoot, "MINION_RUNNER_CLEANUP_REPORT="+report)
+	w, err := startLocalWorker("local", os.Args[0], []string{"-test.run=^TestLocalWorkerRunnerCleanupHelper$"}, 10*time.Second, WorkerCredentials{}, func(cmd *exec.Cmd, access LocalEndpointAccess) error {
+		data, err := json.Marshal(access)
+		if err != nil {
+			return err
+		}
+		cmd.Stdin = bytes.NewReader(data)
+		cmd.Env = append(os.Environ(), "MINION_RUNNER_CLEANUP_HELPER="+mode, "MINION_RUNNER_CLEANUP_WORKROOT="+workRoot, "MINION_RUNNER_CLEANUP_REPORT="+report)
 		cmd.Stdout = &output
 		return nil
 	})
@@ -169,7 +176,11 @@ func TestLocalWorkerRunnerCleanupHelper(t *testing.T) {
 			_ = workspace.WriteAtomic(report+".failed", []byte("helper failed"))
 		}
 	}()
-	client, err := NewUnixExecutionClient(os.Getenv("MINION_RUNNER_CLEANUP_SOCKET"))
+	var access LocalEndpointAccess
+	if err := json.NewDecoder(os.Stdin).Decode(&access); err != nil {
+		t.Fatal(err)
+	}
+	client, err := NewLocalExecutionClient(access)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,7 +210,7 @@ func TestLocalWorkerRunnerCleanupHelper(t *testing.T) {
 		count = 1
 	}
 	for i := range count {
-		err := RunHTTP(ctx, client, UnixExecutionBaseURL, "local", runner)
+		err := RunHTTP(ctx, client, access.BaseURL, "local", runner)
 		if mode == "model-failure" && i == 0 {
 			if err == nil || !strings.Contains(err.Error(), "fixture model failure") {
 				t.Fatalf("first run error=%v", err)
@@ -216,11 +227,32 @@ func TestLocalWorkerRunnerCleanupHelper(t *testing.T) {
 		if err := workspace.WriteAtomic(report+".done", []byte(strconv.Itoa(os.Getpid()))); err != nil {
 			t.Fatal(err)
 		}
-		if err := RunHTTP(ctx, client, UnixExecutionBaseURL, "local", runner); !errors.Is(err, context.Canceled) {
+		if err := RunHTTP(ctx, client, access.BaseURL, "local", runner); !errors.Is(err, context.Canceled) {
 			t.Fatalf("idle worker stop error=%v", err)
 		}
 	}
 	if mode == "cancel" && calls != 1 {
 		t.Fatalf("canceled model calls=%d", calls)
+	}
+}
+
+func localWorkerReport(t *testing.T, ctx context.Context, report, suffix string) string {
+	t.Helper()
+	path := report + suffix
+	ticker := time.NewTicker(2 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		data, err := os.ReadFile(path)
+		if err == nil {
+			return string(data)
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("read worker marker %s: %v", path, err)
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("wait worker marker %s: %v", path, ctx.Err())
+		case <-ticker.C:
+		}
 	}
 }

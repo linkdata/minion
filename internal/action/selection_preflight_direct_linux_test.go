@@ -3,7 +3,9 @@
 package action
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -51,7 +53,7 @@ func TestSelectionPreflightDirectChild(t *testing.T) {
 					t.Errorf("remove direct-child fixture: %v", err)
 				}
 			})
-			for _, dir := range []string{"runtime", "work", "codex-home"} {
+			for _, dir := range []string{"work", "codex-home"} {
 				if err := os.Mkdir(filepath.Join(base, dir), 0700); err != nil {
 					t.Fatal(err)
 				}
@@ -83,9 +85,14 @@ func TestSelectionPreflightDirectChild(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			worker, err := startLocalWorker(filepath.Join(base, "runtime"), "local", os.Args[0], []string{"-test.run=^TestSelectionPreflightDirectChildHelper$"}, 40*time.Second, WorkerCredentials{}, func(cmd *exec.Cmd, socket string) error {
+			worker, err := startLocalWorker("local", os.Args[0], []string{"-test.run=^TestSelectionPreflightDirectChildHelper$"}, 40*time.Second, WorkerCredentials{}, func(cmd *exec.Cmd, access LocalEndpointAccess) error {
+				input, err := json.Marshal(access)
+				if err != nil {
+					return err
+				}
+				cmd.Stdin = bytes.NewReader(input)
 				cmd.Env = append(os.Environ(), "MINION_PREFLIGHT_CHILD=1", "MINION_PREFLIGHT_CASE="+tc.name,
-					"MINION_PREFLIGHT_SOCKET="+socket, "MINION_PREFLIGHT_BASE="+base)
+					"MINION_PREFLIGHT_BASE="+base)
 				return nil
 			})
 			if err != nil {
@@ -220,7 +227,11 @@ func TestSelectionPreflightDirectChildHelper(t *testing.T) {
 	if err := workspace.WriteAtomic(filepath.Join(base, "pull"), []byte("ready")); err != nil {
 		t.Fatal(err)
 	}
-	client, err := NewUnixExecutionClient(os.Getenv("MINION_PREFLIGHT_SOCKET"))
+	var access LocalEndpointAccess
+	if err := json.NewDecoder(os.Stdin).Decode(&access); err != nil {
+		t.Fatal(err)
+	}
+	client, err := NewLocalExecutionClient(access)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -253,7 +264,7 @@ func TestSelectionPreflightDirectChildHelper(t *testing.T) {
 			return response, nil
 		})
 	}
-	if err := RunHTTPLoop(ctx, client, UnixExecutionBaseURL, "local", runner); err != nil {
+	if err := RunHTTPLoop(ctx, client, access.BaseURL, "local", runner); err != nil {
 		if caseName == "missing outcome ACK" || caseName == "malformed required ACK" {
 			if !errors.Is(err, monitor.ErrExecutionOutcomeUnknown) {
 				t.Fatalf("failed ACK did not report unknown outcome: %v", err)

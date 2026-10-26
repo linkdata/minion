@@ -1,5 +1,3 @@
-//go:build !windows
-
 package main
 
 import (
@@ -18,13 +16,13 @@ import (
 
 // attachSelectedLocalWorker prepares one selected child before the monitor can
 // discover work. Public service mode selection remains with the CLI switch.
-func attachSelectedLocalWorker(ctx context.Context, owner *action.Orchestrator, watcher *monitor.Monitor, runtimeDir, path string, args []string, readyTimeout time.Duration) (<-chan struct{}, func() error, error) {
+func attachSelectedLocalWorker(ctx context.Context, owner *action.Orchestrator, watcher *monitor.Monitor, path string, args []string, readyTimeout time.Duration) (<-chan struct{}, func() error, error) {
 	if owner == nil || watcher == nil {
 		return nil, nil, errors.New("selected local service requires an owner and monitor")
 	}
-	selected, done, closeWorker, err := owner.AttachLocalWorker(ctx, watcher.Config, runtimeDir, path, args, readyTimeout, func(cmd *exec.Cmd, socket string, selected action.WorkerSelection, credentials action.WorkerCredentials) error {
+	selected, done, closeWorker, err := owner.AttachLocalWorker(ctx, watcher.Config, path, args, readyTimeout, func(cmd *exec.Cmd, endpoint action.LocalEndpointAccess, selected action.WorkerSelection, credentials action.WorkerCredentials) error {
 		startup := action.WorkerStartup{
-			Selection: selected, WorkRoot: owner.WorkRoot, SocketPath: socket,
+			Selection: selected, WorkRoot: owner.WorkRoot, Endpoint: endpoint,
 			CodexAPIKey: credentials.CodexAPIKey, CodexNativeAPIKey: credentials.CodexNativeAPIKey,
 			CodexAccessToken: credentials.CodexAccessToken, ClaudeAPIKey: credentials.ClaudeAPIKey,
 		}

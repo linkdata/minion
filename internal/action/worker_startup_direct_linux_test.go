@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -21,6 +22,7 @@ import (
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
+	"github.com/linkdata/minion/internal/usage"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -88,8 +90,8 @@ func TestSelectedWorkerStartupDirectChild(t *testing.T) {
 			if tc.nativeAuth {
 				startup.CodexNativeAPIKey, startup.CodexAccessToken = "native-startup-key", "native-startup-token"
 			}
-			worker, err := startLocalWorker(unixTestDirectory(t), "local", os.Args[0], []string{"-test.run=^TestSelectedWorkerStartupDirectChildHelper$"}, 20*time.Second, WorkerCredentials{}, func(cmd *exec.Cmd, socket string) error {
-				startup.SocketPath = socket
+			worker, err := startLocalWorker("local", os.Args[0], []string{"-test.run=^TestSelectedWorkerStartupDirectChildHelper$"}, 20*time.Second, WorkerCredentials{}, func(cmd *exec.Cmd, access LocalEndpointAccess) error {
+				startup.Endpoint = access
 				var input []byte
 				var inputErr error
 				switch {
@@ -185,6 +187,100 @@ func TestSelectedWorkerStartupDirectChildHelper(t *testing.T) {
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "minion preflight:", err)
+		t.Fatal(err)
+	}
+}
+
+func TestDirectHTTPSChildRetainsMainAndCriticReceipts(t *testing.T) {
+	base := t.TempDir()
+	work := filepath.Join(base, "work")
+	if err := os.Mkdir(work, 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", base)
+	writeActionTestSkills(t, base, ".agents", testReviewSkillURL)
+	job := withClaudeCritic(testJob(command.Comment))
+	job.Main.Model, job.Main.Effort, job.Main.Skills = "main-1", "high", []string{testReviewSkillURL}
+	job.Critic.Model, job.Critic.Effort, job.CriticMaxRounds = "critic-1", "medium", 1
+	fixture := newExecutionAdapterFixture(t, job)
+	store := fixture.startUsage()
+	worker, err := startLocalWorker("local", os.Args[0], []string{"-test.run=^TestDirectHTTPSChildRetainsMainAndCriticReceiptsHelper$"}, 20*time.Second, WorkerCredentials{}, func(cmd *exec.Cmd, access LocalEndpointAccess) error {
+		input, err := json.Marshal(access)
+		if err != nil {
+			return err
+		}
+		cmd.Stdin = bytes.NewReader(input)
+		cmd.Env = append(os.Environ(), "MINION_CRITIC_CHILD=1", "MINION_CRITIC_WORK="+work)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = worker.Close() })
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+	if err := worker.WaitCapacity(ctx); err != nil {
+		t.Fatal(err)
+	}
+	result, err := worker.Execute(ctx, fixture.job, fixture.sink)
+	finishErr := fixture.sink.finish(result, err)
+	if err != nil || finishErr != nil || result.Answer != "Worker answer" || result.CriticStopReason != "approved" || result.Validate(fixture.job) != nil {
+		t.Fatalf("direct child outcome: result=%+v error=%v checkpoint=%v", result, err, finishErr)
+	}
+	if len(result.Calls) != 2 || result.Calls[0].Role != roleMain || result.Calls[1].Role != roleCritic ||
+		result.Calls[0].Tokens != (usage.Tokens{Input: 7, Output: 2}) || result.Calls[1].Tokens != (usage.Tokens{Input: 11, Output: 3}) ||
+		!result.Calls[0].Complete || !result.Calls[1].Complete || result.Calls[1].ReviewPhase != reviewFull ||
+		!result.Calls[1].Approved || !result.Calls[1].ReviewComplete {
+		t.Fatalf("direct child did not complete both model calls: %+v", result.Calls)
+	}
+	if err := worker.WaitCapacity(ctx); err != nil {
+		t.Fatalf("direct child did not repull after review: %v", err)
+	}
+	if err := worker.Close(); err != nil || worker.cmd.ProcessState == nil || !worker.cmd.ProcessState.Success() {
+		t.Fatalf("direct child did not exit cleanly: error=%v state=%v", err, worker.cmd.ProcessState)
+	}
+	saved := readPrivateReview(t, fixture.owner.WorkRoot)
+	if !slices.Equal(saved.Calls, result.Calls) || saved.CriticStopReason != "approved" {
+		t.Fatalf("durable private review lost child receipts: %+v", saved)
+	}
+	records, err := usage.ReadAll(store.Dir)
+	if err != nil || len(records) != 1 || records[0].CodexCalls != 1 || records[0].ClaudeCalls != 1 ||
+		records[0].Tokens != (usage.Tokens{Input: 18, Output: 5}) || !records[0].UsageComplete {
+		t.Fatalf("durable paid usage lost child calls: records=%+v error=%v", records, err)
+	}
+}
+
+func TestDirectHTTPSChildRetainsMainAndCriticReceiptsHelper(t *testing.T) {
+	if os.Getenv("MINION_CRITIC_CHILD") != "1" {
+		return
+	}
+	var access LocalEndpointAccess
+	if err := json.NewDecoder(os.Stdin).Decode(&access); err != nil {
+		t.Fatal(err)
+	}
+	client, err := NewLocalExecutionClient(access)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.CloseIdleConnections()
+	runner := Runner{WorkRoot: os.Getenv("MINION_CRITIC_WORK"), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+		if request.round != 1 {
+			t.Fatalf("unexpected review round: %d", request.round)
+		}
+		switch request.role {
+		case roleMain:
+			return aicli.Result{Answer: proposalJSON("Worker answer", ""), Tokens: usage.Tokens{Input: 7, Output: 2}, UsageComplete: true}, nil
+		case roleCritic:
+			if request.reviewPhase != reviewFull {
+				t.Fatalf("unexpected review phase: %s", request.reviewPhase)
+			}
+			return aicli.Result{Answer: approvedCritiqueJSON, Tokens: usage.Tokens{Input: 11, Output: 3}, UsageComplete: true}, nil
+		default:
+			t.Fatalf("unexpected model role: %s", request.role)
+			return aicli.Result{}, nil
+		}
+	}}
+	if err := RunHTTPLoop(t.Context(), client, access.BaseURL, "local", &runner); err != nil {
 		t.Fatal(err)
 	}
 }

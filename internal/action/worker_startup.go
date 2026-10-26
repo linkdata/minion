@@ -14,19 +14,21 @@ const workerStartupBytes = 8 << 20
 // WorkerStartup is trusted parent input to one selected local worker.
 // GitHub credentials stay with the parent.
 type WorkerStartup struct {
-	Selection         WorkerSelection `json:"selection"`
-	WorkRoot          string          `json:"work_root"`
-	SocketPath        string          `json:"socket_path"`
-	CodexAPIKey       string          `json:"codex_api_key,omitempty"`
-	CodexNativeAPIKey string          `json:"codex_native_api_key,omitempty"`
-	CodexAccessToken  string          `json:"codex_access_token,omitempty"`
-	ClaudeAPIKey      string          `json:"claude_api_key,omitempty"`
+	Selection         WorkerSelection     `json:"selection"`
+	WorkRoot          string              `json:"work_root"`
+	Endpoint          LocalEndpointAccess `json:"endpoint"`
+	CodexAPIKey       string              `json:"codex_api_key,omitempty"`
+	CodexNativeAPIKey string              `json:"codex_native_api_key,omitempty"`
+	CodexAccessToken  string              `json:"codex_access_token,omitempty"`
+	ClaudeAPIKey      string              `json:"claude_api_key,omitempty"`
 }
 
 func (s WorkerStartup) validate() error {
-	if s.WorkRoot == "" || s.SocketPath == "" || !filepath.IsAbs(s.WorkRoot) || !filepath.IsAbs(s.SocketPath) ||
-		filepath.Clean(s.SocketPath) != s.SocketPath {
-		return errors.New("worker startup requires an absolute work root and clean absolute socket path")
+	if s.WorkRoot == "" || !filepath.IsAbs(s.WorkRoot) {
+		return errors.New("worker startup requires an absolute work root")
+	}
+	if err := s.Endpoint.validate(); err != nil {
+		return fmt.Errorf("worker startup endpoint: %w", err)
 	}
 	if _, err := s.runner(nil); err != nil {
 		return fmt.Errorf("worker startup selection: %w", err)
@@ -79,7 +81,7 @@ func EncodeWorkerStartup(startup WorkerStartup) ([]byte, error) {
 		}
 		return true
 	}
-	if !add(startup.WorkRoot) || !add(startup.SocketPath) || !add(startup.CodexAPIKey) || !add(startup.CodexNativeAPIKey) || !add(startup.CodexAccessToken) || !add(startup.ClaudeAPIKey) || !addRole(startup.Selection.Main) {
+	if !add(startup.WorkRoot) || !add(startup.Endpoint.BaseURL) || !add(string(startup.Endpoint.Certificate)) || !add(startup.Endpoint.Token) || !add(startup.CodexAPIKey) || !add(startup.CodexNativeAPIKey) || !add(startup.CodexAccessToken) || !add(startup.ClaudeAPIKey) || !addRole(startup.Selection.Main) {
 		return nil, errHTTPBodyLimit
 	}
 	if startup.Selection.Critic != nil && !addRole(*startup.Selection.Critic) {

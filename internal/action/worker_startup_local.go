@@ -1,5 +1,3 @@
-//go:build !windows
-
 package action
 
 import (
@@ -25,14 +23,15 @@ func runSelectedLocalWorker(ctx context.Context, input io.Reader, call modelCall
 	if err := runner.PreflightSelection(ctx); err != nil {
 		return err
 	}
-	// The startup copy authenticates preflight only; each assignment carries fresh credentials.
+	// Startup provider credentials are only needed for preflight; assignments carry fresh credentials.
 	startup.clearCredentials(runner)
-	client, err := NewUnixExecutionClient(startup.SocketPath)
+	client, err := NewLocalExecutionClient(startup.Endpoint)
 	if err != nil {
 		return fmt.Errorf("worker endpoint: %w", err)
 	}
+	startup.Endpoint.Token = ""
 	defer client.CloseIdleConnections()
-	return RunHTTPLoop(ctx, client, UnixExecutionBaseURL, "local", runner)
+	return RunHTTPLoop(ctx, client, startup.Endpoint.BaseURL, "local", runner)
 }
 
 func (s *WorkerStartup) clearCredentials(runner *Runner) {

@@ -1,5 +1,3 @@
-//go:build linux
-
 package main
 
 import (
@@ -43,10 +41,6 @@ func TestAttachSelectedLocalWorkerFreezesStartupAndOwnsClose(t *testing.T) {
 	for _, mode := range []string{"ready", "reject-before-pull"} {
 		t.Run(mode, func(t *testing.T) {
 			cfg := selectedServiceTestConfig(t)
-			runtimeDir := filepath.Join(t.TempDir(), "runtime")
-			if err := os.Mkdir(runtimeDir, 0700); err != nil {
-				t.Fatal(err)
-			}
 			report := filepath.Join(t.TempDir(), "startup.json")
 			t.Setenv("MINION_SELECTED_SERVICE_HELPER", mode)
 			t.Setenv("MINION_SELECTED_SERVICE_REPORT", report)
@@ -64,7 +58,7 @@ func TestAttachSelectedLocalWorkerFreezesStartupAndOwnsClose(t *testing.T) {
 			logger := log.New(&logs, "", 0)
 			owner := newOrchestrator(cfg, nil, nil, logger, nil)
 			watcher := &monitor.Monitor{Config: cfg, Logger: logger}
-			done, closeWorker, err := attachSelectedLocalWorker(t.Context(), owner, watcher, runtimeDir, os.Args[0], []string{"-test.run=^TestSelectedLocalServiceChild$"}, 5*time.Second)
+			done, closeWorker, err := attachSelectedLocalWorker(t.Context(), owner, watcher, os.Args[0], []string{"-test.run=^TestSelectedLocalServiceChild$"}, 5*time.Second)
 			if mode == "reject-before-pull" {
 				if err == nil || done != nil || closeWorker != nil || owner.Executor != nil || watcher.Handler != nil || watcher.SelectedCommands != nil {
 					t.Fatalf("failed preflight exposed a worker or discovery: done=%v close=%v owner=%v handler=%v commands=%v error=%v", done != nil, closeWorker != nil, owner.Executor, watcher.Handler, watcher.SelectedCommands, err)
@@ -89,16 +83,13 @@ func TestAttachSelectedLocalWorkerFreezesStartupAndOwnsClose(t *testing.T) {
 			if err := json.Unmarshal(data, &startup); err != nil {
 				t.Fatal(err)
 			}
-			if startup.WorkRoot != cfg.WorkRoot || startup.SocketPath != filepath.Join(runtimeDir, "execution.sock") || len(startup.Selection.Commands) != 1 || startup.Selection.Commands["comment"].Action != "comment" || startup.CodexAPIKey != cfg.Codex.APIKey || startup.CodexNativeAPIKey != "" || startup.CodexAccessToken != "" || startup.ClaudeAPIKey != "" {
-				t.Fatalf("child startup differed from parent selection: work_root=%q socket_path=%q command_count=%d comment_action=%q", startup.WorkRoot, startup.SocketPath, len(startup.Selection.Commands), startup.Selection.Commands["comment"].Action)
+			if startup.WorkRoot != cfg.WorkRoot || !strings.HasPrefix(startup.Endpoint.BaseURL, "https://127.0.0.1:") || len(startup.Endpoint.Certificate) == 0 || startup.Endpoint.Token == "" || len(startup.Selection.Commands) != 1 || startup.Selection.Commands["comment"].Action != "comment" || startup.CodexAPIKey != cfg.Codex.APIKey || startup.CodexNativeAPIKey != "" || startup.CodexAccessToken != "" || startup.ClaudeAPIKey != "" {
+				t.Fatalf("child startup differed from parent selection: work_root=%q endpoint=%q command_count=%d comment_action=%q", startup.WorkRoot, startup.Endpoint.BaseURL, len(startup.Selection.Commands), startup.Selection.Commands["comment"].Action)
 			}
 			now := time.Now().UTC()
 			store := &state.Store{Data: state.Data{NextInviteCheckAt: now.Add(time.Hour), NextPollAt: now.Add(time.Hour)}}
 			if code := runSelectedLocalService(t.Context(), watcher, store, false, done, logger, closeWorker); code != 0 {
 				t.Fatalf("clean selected child shutdown returned %d: %s", code, logs.String())
-			}
-			if _, err := os.Lstat(startup.SocketPath); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("selected service retained its socket: %v", err)
 			}
 		})
 	}
@@ -136,13 +127,9 @@ func TestAttachSelectedLocalWorkerSelectedCredentials(t *testing.T) {
 			t.Setenv("MINION_SELECTED_SERVICE_HELPER", "ready")
 			report := filepath.Join(t.TempDir(), "startup.json")
 			t.Setenv("MINION_SELECTED_SERVICE_REPORT", report)
-			runtimeDir := filepath.Join(t.TempDir(), "runtime")
-			if err := os.Mkdir(runtimeDir, 0700); err != nil {
-				t.Fatal(err)
-			}
 			owner := newOrchestrator(cfg, nil, nil, log.New(io.Discard, "", 0), nil)
 			watcher := &monitor.Monitor{Config: cfg}
-			_, closeWorker, err := attachSelectedLocalWorker(t.Context(), owner, watcher, runtimeDir, os.Args[0], []string{"-test.run=^TestSelectedLocalServiceChild$"}, 5*time.Second)
+			_, closeWorker, err := attachSelectedLocalWorker(t.Context(), owner, watcher, os.Args[0], []string{"-test.run=^TestSelectedLocalServiceChild$"}, 5*time.Second)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -256,13 +243,13 @@ func TestSelectedLocalServiceChild(t *testing.T) {
 		fmt.Fprintln(os.Stderr, "minion preflight: fixture rejected before pull")
 		os.Exit(7)
 	}
-	client, err := action.NewUnixExecutionClient(startup.SocketPath)
+	client, err := action.NewLocalExecutionClient(startup.Endpoint)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer client.CloseIdleConnections()
 	pull := fmt.Sprintf(`{"version":%d,"executor_id":"local"}`, action.ProtocolVersion)
-	request, err := http.NewRequestWithContext(t.Context(), http.MethodPost, action.UnixExecutionBaseURL+"/next", strings.NewReader(pull))
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodPost, startup.Endpoint.BaseURL+"/next", strings.NewReader(pull))
 	if err != nil {
 		t.Fatal(err)
 	}
