@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/workspace"
 )
@@ -48,6 +49,11 @@ type httpTransaction struct {
 	budget      context.Context
 	cancel      context.CancelFunc
 	stopBudget  context.CancelFunc
+	stopGrace   time.Duration
+	stopOnce    sync.Once
+	stopContext context.Context
+	stopCancel  context.CancelFunc
+	stopUntil   time.Time
 
 	ready              bool
 	delivered          bool
@@ -104,20 +110,34 @@ func (e *HTTPExecutor) notifyLocked() {
 }
 
 func (e *HTTPExecutor) Execute(ctx context.Context, job Job, sink Checkpoints) (Result, error) {
-	return e.execute(ctx, job, sink, nil)
+	return e.execute(ctx, 0, job, sink, nil)
 }
 
-func (e *HTTPExecutor) execute(ctx context.Context, job Job, sink Checkpoints, state *httpExecutionState) (result Result, runErr error) {
+// ExecuteWithStop supplies one post-stop budget for this transaction.
+func (e *HTTPExecutor) ExecuteWithStop(ctx context.Context, stopBudget time.Duration, job Job, sink Checkpoints) (Result, error) {
+	if stopBudget <= 0 || stopBudget > config.MaxActionRuntime {
+		return Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head}, fmt.Errorf("%w: invalid HTTP stop budget", monitor.ErrTerminalJob)
+	}
+	return e.execute(ctx, stopBudget, job, sink, nil)
+}
+
+func (e *HTTPExecutor) execute(ctx context.Context, stopBudget time.Duration, job Job, sink Checkpoints, state *httpExecutionState) (result Result, runErr error) {
 	started := time.Now()
 	result = Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head}
+	if stopBudget == 0 {
+		stopBudget = e.outcomeGrace
+	}
+	if stopBudget <= 0 || stopBudget > config.MaxActionRuntime {
+		return result, fmt.Errorf("%w: invalid HTTP stop budget", monitor.ErrTerminalJob)
+	}
 	expires := started.Add(job.RuntimeBudget)
 	if deadline, ok := ctx.Deadline(); ok && deadline.Before(expires) {
 		expires = deadline
 	}
-	budgetCtx, stopBudget := context.WithDeadline(ctx, expires)
-	defer stopBudget()
+	budgetCtx, cancelBudget := context.WithDeadline(ctx, expires)
+	defer cancelBudget()
 	actionCtx, cancel := context.WithCancel(budgetCtx)
-	tx := &httpTransaction{job: job, started: started, binding: httpJobBinding(job), sink: sink, ctx: actionCtx, budget: budgetCtx, cancel: cancel, stopBudget: stopBudget,
+	tx := &httpTransaction{job: job, started: started, binding: httpJobBinding(job), sink: sink, ctx: actionCtx, budget: budgetCtx, cancel: cancel, stopBudget: cancelBudget, stopGrace: stopBudget,
 		stop: make(chan struct{}), done: make(chan struct{}), finished: make(chan struct{})}
 	e.mu.Lock()
 	if e.closed || e.unavailable || e.active != nil {
@@ -134,7 +154,11 @@ func (e *HTTPExecutor) execute(ctx context.Context, job Job, sink Checkpoints, s
 	defer func() {
 		tx.mu.Lock()
 		tx.fenced = true
+		stopCancel := tx.stopCancel
 		tx.mu.Unlock()
+		if stopCancel != nil {
+			stopCancel()
+		}
 		cancel()
 		// Saves have no context. An entered fsync must drain even after control grace expires.
 		tx.handlers.Wait()
@@ -194,17 +218,19 @@ func (e *HTTPExecutor) execute(ctx context.Context, job Job, sink Checkpoints, s
 	case <-actionCtx.Done():
 	case <-tx.stop:
 	}
+	tx.stopExecution(nil, false)
 	tx.mu.Lock()
-	delivered, transportErr := tx.delivered, tx.transportErr
+	delivered, transportErr, stopContext, outcome := tx.delivered, tx.transportErr, tx.stopContext, tx.outcome
 	tx.mu.Unlock()
+	if outcome {
+		return result, nil
+	}
 	if !delivered {
 		return result, errors.Join(httpExecutionContextError(actionCtx), transportErr)
 	}
-	timer := time.NewTimer(e.outcomeGrace)
-	defer timer.Stop()
 	select {
 	case <-tx.done:
-	case <-timer.C:
+	case <-stopContext.Done():
 	}
 	return result, httpExecutionContextError(actionCtx)
 }
@@ -230,6 +256,7 @@ func (e *HTTPExecutor) Close() error {
 	e.mu.Unlock()
 	if tx != nil {
 		tx.stopBudget()
+		tx.stopExecution(nil, false)
 		<-tx.finished
 	}
 	return nil
@@ -348,7 +375,7 @@ poll:
 				dispatchAt := time.Now()
 				job := tx.job
 				job.RuntimeBudget = max(deadline.Sub(dispatchAt), time.Nanosecond)
-				body, err := httpEncode(httpAssignment{Job: job, Credentials: tx.credentials, HeldFor: dispatchAt.Sub(pullAt)}, httpJobBytes)
+				body, err := httpEncode(httpAssignment{Job: job, Credentials: tx.credentials, HeldFor: dispatchAt.Sub(pullAt), StopGrace: tx.stopGrace}, httpJobBytes)
 				if err != nil {
 					tx.mu.Unlock()
 					e.mu.Unlock()
@@ -376,7 +403,7 @@ poll:
 				e.pullDone = nil
 				e.notifyLocked()
 				e.mu.Unlock()
-				if err := httpServerWriteBytes(w, http.StatusOK, body); err != nil {
+				if err := httpServerWriteBytes(w, http.StatusOK, body, tx); err != nil {
 					tx.stopRequiredDelivery(err)
 				}
 				return
@@ -402,13 +429,16 @@ func (tx *httpTransaction) enter(binding httpBinding, sequence uint64, kind stri
 	tx.mu.Lock()
 	defer tx.mu.Unlock()
 	gap := sequence > tx.sequence+1
-	if !tx.delivered || binding != tx.binding || sequence == 0 || sequence <= tx.sequence || (gap && !failedOutcome) {
+	if tx.fenced || !tx.delivered || binding != tx.binding || sequence == 0 || sequence <= tx.sequence || (gap && !failedOutcome) {
 		return false, errors.New("HTTP checkpoint binding, sequence or admission differs")
 	}
 	// A bound request consumes its sequence even when model admission is refused.
 	tx.sequence = sequence
 	if kind != "outcome" && tx.checkpointErr != nil {
 		return false, tx.checkpointErr
+	}
+	if !tx.stopUntil.IsZero() && !time.Now().Before(tx.stopUntil) {
+		return false, context.DeadlineExceeded
 	}
 	if kind == "before" {
 		err := httpExecutionContextError(tx.ctx)
@@ -435,7 +465,7 @@ func (e *HTTPExecutor) serveStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tx.mu.Lock()
-	if tx.fenced || !tx.delivered {
+	if tx.fenced || !tx.delivered || (!tx.stopUntil.IsZero() && !time.Now().Before(tx.stopUntil)) {
 		tx.mu.Unlock()
 		tx.observation.Unlock()
 		httpServerReject(w, "status", http.StatusConflict, httpBinding{}, 0, errors.New("HTTP execution has closed observation admission"))
@@ -443,7 +473,7 @@ func (e *HTTPExecutor) serveStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	tx.mu.Unlock()
 	var observation httpObservation
-	err := httpServerRead(w, r, httpControlBytes, &observation)
+	err := httpServerRead(w, r, httpControlBytes, &observation, tx)
 	status := observation.Status
 	binding := httpBinding{status.Version, status.Identity, status.SourceRef}
 	code := httpInputStatus(err)
@@ -458,7 +488,7 @@ func (e *HTTPExecutor) serveStatus(w http.ResponseWriter, r *http.Request) {
 		if err == nil {
 			e.mu.Lock()
 			tx.mu.Lock()
-			if tx.fenced || !tx.delivered {
+			if tx.fenced || !tx.delivered || (!tx.stopUntil.IsZero() && !time.Now().Before(tx.stopUntil)) {
 				err = errors.New("HTTP execution has closed observation admission")
 			} else if status.Phase == "upload" && !tx.uploadReady {
 				err = errors.New("HTTP Status upload exceeds accepted callback facts")
@@ -485,23 +515,39 @@ func (e *HTTPExecutor) serveStatus(w http.ResponseWriter, r *http.Request) {
 	tx.observation.Unlock()
 	// Observation delivery never admits paid work or changes its sequence or outcome.
 	if err != nil {
-		httpServerReject(w, "status", code, binding, status.Sequence, err)
+		httpServerReject(w, "status", code, binding, status.Sequence, err, tx)
 		return
 	}
-	_ = httpServerWrite(w, code, httpAcknowledgement{httpBinding: binding, Kind: "status", Sequence: status.Sequence})
+	_ = httpServerWrite(w, code, httpAcknowledgement{httpBinding: binding, Kind: "status", Sequence: status.Sequence}, tx)
 }
 
-// stopExecution begins control grace; a known store refusal need not cancel the worker before its error returns.
+func (tx *httpTransaction) controlDeadline() time.Time {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	return tx.stopUntil
+}
+
+// stopExecution begins the single control drain; a known store refusal need not cancel the worker before its error returns.
 func (tx *httpTransaction) stopExecution(err error, cancel bool) {
 	tx.mu.Lock()
 	if err != nil && tx.transportErr == nil {
 		tx.transportErr = err
 	}
-	if !tx.stopping {
+	tx.mu.Unlock()
+	tx.stopOnce.Do(func() {
+		stopContext, stopCancel := context.WithTimeout(context.WithoutCancel(tx.budget), tx.stopGrace)
+		deadline, _ := stopContext.Deadline()
+		tx.mu.Lock()
+		if tx.fenced {
+			tx.mu.Unlock()
+			stopCancel()
+			return
+		}
+		tx.stopContext, tx.stopCancel, tx.stopUntil = stopContext, stopCancel, deadline
 		tx.stopping = true
 		close(tx.stop)
-	}
-	tx.mu.Unlock()
+		tx.mu.Unlock()
+	})
 	if cancel {
 		tx.cancel()
 	}
@@ -551,7 +597,7 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 	switch kind {
 	case "before", "after":
 		var call httpCall
-		err = httpServerRead(w, r, httpControlBytes, &call)
+		err = httpServerRead(w, r, httpControlBytes, &call, tx)
 		binding, sequence = httpBinding{call.Checkpoint.Version, call.Checkpoint.Identity, call.Checkpoint.SourceRef}, call.Sequence
 		if err == nil {
 			err = httpCallShape(call.Checkpoint.Call)
@@ -574,7 +620,7 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 		}
 	case "review":
 		var review httpReview
-		err = httpServerRead(w, r, httpReviewBytes, &review)
+		err = httpServerRead(w, r, httpReviewBytes, &review, tx)
 		binding, sequence = httpBinding{review.Checkpoint.Version, review.Checkpoint.Identity, review.Checkpoint.SourceRef}, review.Sequence
 		if err == nil {
 			err = httpReviewShape(review.Checkpoint)
@@ -585,7 +631,7 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 		apply = func() error { return tx.sink.Review(review.Checkpoint) }
 	case "outcome":
 		var outcome httpOutcome
-		err = httpServerRead(w, r, httpOutcomeBytes, &outcome)
+		err = httpServerRead(w, r, httpOutcomeBytes, &outcome, tx)
 		binding, sequence = httpBinding{outcome.Result.Version, outcome.Result.Identity, outcome.Result.SourceRef}, outcome.Sequence
 		if err == nil {
 			err = httpResultShape(outcome.Result)
@@ -622,14 +668,14 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		tx.mutation.Unlock()
 		locked = false
-		httpServerReject(w, kind, httpInputStatus(err), httpBinding{}, sequence, err)
+		httpServerReject(w, kind, httpInputStatus(err), httpBinding{}, sequence, err, tx)
 		return
 	}
 	sequenceGap, err = tx.enter(binding, sequence, kind, failedOutcome)
 	if err != nil {
 		tx.mutation.Unlock()
 		locked = false
-		httpServerReject(w, kind, http.StatusConflict, binding, sequence, err)
+		httpServerReject(w, kind, http.StatusConflict, binding, sequence, err, tx)
 		return
 	}
 	callbackErr := apply()
@@ -654,7 +700,7 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 		status = http.StatusInternalServerError
 	}
 	ack := httpAcknowledgement{httpBinding: binding, Sequence: sequence, Kind: kind, Failure: newHTTPFailure(callbackErr)}
-	if err := httpServerWrite(w, status, ack); err != nil {
+	if err := httpServerWrite(w, status, ack, tx); err != nil {
 		if kind == "outcome" {
 			tx.mu.Lock()
 			tx.quarantine = true
@@ -690,7 +736,7 @@ func (e *HTTPExecutor) serveCancel(w http.ResponseWriter, r *http.Request) {
 	tx.handlers.Add(1)
 	tx.mu.Unlock()
 	defer tx.handlers.Done()
-	if err := httpServerWatchHeaders(w); err != nil {
+	if err := httpServerWatchHeaders(w, tx); err != nil {
 		tx.stopExecution(err, true)
 		return
 	}
@@ -714,7 +760,15 @@ func (e *HTTPExecutor) serveCancel(w http.ResponseWriter, r *http.Request) {
 		reason = "deadline"
 	}
 	tx.mu.Unlock()
-	if err := httpServerWatchReason(w, httpCancellation{httpBinding: binding, Reason: reason}); err != nil {
+	if reason != "completed" {
+		tx.stopExecution(nil, false)
+	}
+	stopUntil := tx.controlDeadline()
+	remaining := time.Duration(0)
+	if !stopUntil.IsZero() {
+		remaining = max(time.Until(stopUntil), 0)
+	}
+	if err := httpServerWatchReason(w, httpCancellation{httpBinding: binding, Reason: reason, StopRemaining: remaining}, tx); err != nil {
 		tx.mu.Lock()
 		sealed := tx.outcome
 		tx.mu.Unlock()
@@ -724,7 +778,7 @@ func (e *HTTPExecutor) serveCancel(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func httpServerRead(w http.ResponseWriter, r *http.Request, limit int, value any) (readErr error) {
+func httpServerRead(w http.ResponseWriter, r *http.Request, limit int, value any, transaction ...*httpTransaction) (readErr error) {
 	media, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || media != "application/json" {
 		return errors.New("HTTP execution requires JSON content type")
@@ -734,10 +788,12 @@ func httpServerRead(w http.ResponseWriter, r *http.Request, limit int, value any
 		return errors.New("HTTP execution does not accept content encoding")
 	}
 	controller := http.NewResponseController(w)
-	if err := controller.SetReadDeadline(time.Now().Add(httpControlTimeout)); err != nil {
+	deadline := httpControlDeadline(transaction)
+	if err := controller.SetReadDeadline(deadline); err != nil {
 		return err
 	}
-	defer func() { readErr = errors.Join(readErr, controller.SetReadDeadline(time.Time{})) }()
+	finishWatch := httpServerDeadlineWatch(transaction, controller.SetReadDeadline)
+	defer func() { readErr = errors.Join(readErr, finishWatch(), controller.SetReadDeadline(time.Time{})) }()
 	return httpDecode(r.Body, limit, value)
 }
 
@@ -748,40 +804,71 @@ func httpInputStatus(err error) int {
 	return http.StatusBadRequest
 }
 
-func httpServerReject(w http.ResponseWriter, kind string, status int, binding httpBinding, sequence uint64, err error) {
+func httpServerReject(w http.ResponseWriter, kind string, status int, binding httpBinding, sequence uint64, err error, transaction ...*httpTransaction) {
 	// Do not let net/http drain an unfinished rejected body before or after the ACK.
 	w.Header().Set("Connection", "close")
 	err = errors.Join(err, http.NewResponseController(w).SetReadDeadline(time.Now()))
-	_ = httpServerWrite(w, status, httpAcknowledgement{httpBinding: binding, Kind: kind, Sequence: sequence, Failure: newHTTPFailure(err)})
+	_ = httpServerWrite(w, status, httpAcknowledgement{httpBinding: binding, Kind: kind, Sequence: sequence, Failure: newHTTPFailure(err)}, transaction...)
 }
 
-func httpServerWrite(w http.ResponseWriter, status int, value any) error {
+func httpServerWrite(w http.ResponseWriter, status int, value any, transaction ...*httpTransaction) error {
 	body, err := httpEncode(value, httpControlBytes)
 	if err != nil {
 		return err
 	}
-	return httpServerWriteBytes(w, status, body)
+	return httpServerWriteBytes(w, status, body, transaction...)
+}
+
+func httpControlDeadline(transaction []*httpTransaction) time.Time {
+	deadline := time.Now().Add(httpControlTimeout)
+	if len(transaction) != 0 {
+		if stopUntil := transaction[0].controlDeadline(); !stopUntil.IsZero() && stopUntil.Before(deadline) {
+			return stopUntil
+		}
+	}
+	return deadline
+}
+
+func httpServerDeadlineWatch(transaction []*httpTransaction, set func(time.Time) error) func() error {
+	if len(transaction) == 0 {
+		return func() error { return nil }
+	}
+	done := make(chan struct{})
+	watched := make(chan error, 1)
+	go func() {
+		select {
+		case <-transaction[0].stop:
+			watched <- set(transaction[0].controlDeadline())
+		case <-done:
+			watched <- nil
+		}
+	}()
+	return func() error {
+		close(done)
+		return <-watched
+	}
 }
 
 // Flushed headers prove watch admission before the worker starts Runner; the reason body comes later.
-func httpServerWatchHeaders(w http.ResponseWriter) (writeErr error) {
+func httpServerWatchHeaders(w http.ResponseWriter, tx *httpTransaction) (writeErr error) {
 	controller := http.NewResponseController(w)
-	if err := controller.SetWriteDeadline(time.Now().Add(httpControlTimeout)); err != nil {
+	if err := controller.SetWriteDeadline(httpControlDeadline([]*httpTransaction{tx})); err != nil {
 		return err
 	}
-	defer func() { writeErr = errors.Join(writeErr, controller.SetWriteDeadline(time.Time{})) }()
+	finishWatch := httpServerDeadlineWatch([]*httpTransaction{tx}, controller.SetWriteDeadline)
+	defer func() { writeErr = errors.Join(writeErr, finishWatch(), controller.SetWriteDeadline(time.Time{})) }()
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	return controller.Flush()
 }
 
-func httpServerWatchReason(w http.ResponseWriter, cancellation httpCancellation) error {
+func httpServerWatchReason(w http.ResponseWriter, cancellation httpCancellation, tx *httpTransaction) error {
 	body, err := httpEncode(cancellation, httpControlBytes)
 	if err != nil {
 		return err
 	}
 	controller := http.NewResponseController(w)
-	if err := controller.SetWriteDeadline(time.Now().Add(httpControlTimeout)); err != nil {
+	if err := controller.SetWriteDeadline(httpControlDeadline([]*httpTransaction{tx})); err != nil {
 		return err
 	}
 	n, err := w.Write(body)
@@ -795,12 +882,13 @@ func httpServerWatchReason(w http.ResponseWriter, cancellation httpCancellation)
 	return controller.Flush()
 }
 
-func httpServerWriteBytes(w http.ResponseWriter, status int, body []byte) (writeErr error) {
+func httpServerWriteBytes(w http.ResponseWriter, status int, body []byte, transaction ...*httpTransaction) (writeErr error) {
 	controller := http.NewResponseController(w)
-	if err := controller.SetWriteDeadline(time.Now().Add(httpControlTimeout)); err != nil {
+	if err := controller.SetWriteDeadline(httpControlDeadline(transaction)); err != nil {
 		return err
 	}
-	defer func() { writeErr = errors.Join(writeErr, controller.SetWriteDeadline(time.Time{})) }()
+	finishWatch := httpServerDeadlineWatch(transaction, controller.SetWriteDeadline)
+	defer func() { writeErr = errors.Join(writeErr, finishWatch(), controller.SetWriteDeadline(time.Time{})) }()
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 	w.WriteHeader(status)

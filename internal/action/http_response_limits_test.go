@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/monitor"
@@ -37,7 +38,7 @@ func TestHTTPControlResponseEncodedBoundary(t *testing.T) {
 					}
 					var value any = ack
 					if kind == "cancel" && !negative {
-						value = httpCancellation{httpBinding: binding, Reason: "canceled"}
+						value = httpCancellation{httpBinding: binding, Reason: "canceled", StopRemaining: httpControlTimeout}
 					}
 					body, err := json.Marshal(value)
 					if err != nil {
@@ -64,7 +65,7 @@ func TestHTTPControlResponseEncodedBoundary(t *testing.T) {
 						var response *http.Response
 						response, err = transport.open(t.Context(), kind, []byte(`{}`), binding, 0)
 						if err == nil {
-							err = transport.watch(t.Context(), response, binding)
+							err = transport.watch(t.Context(), response, binding, func(time.Duration) {})
 						}
 					} else {
 						client := httpClientCheckpoints{transport: transport, control: t.Context(), action: t.Context(), binding: binding}

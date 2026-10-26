@@ -160,7 +160,7 @@ func (w *localWorker) Execute(ctx context.Context, job Job, sink Checkpoints) (R
 		return Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head}, fmt.Errorf("%w: local worker is busy or not ready for another assignment", monitor.ErrRequestTransport)
 	}
 	var state httpExecutionState
-	result, err := w.executor.execute(ctx, job, sink, &state)
+	result, err := w.executor.execute(ctx, 0, job, sink, &state)
 	w.executor.mu.Lock()
 	closed, unavailable := w.executor.closed, w.executor.unavailable
 	w.executor.mu.Unlock()

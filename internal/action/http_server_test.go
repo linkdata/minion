@@ -70,6 +70,10 @@ func newHTTPServerTestInMemory(t *testing.T, ctx context.Context, job Job, sink 
 }
 
 func newHTTPServerTestWithServer(t *testing.T, ctx context.Context, job Job, sink Checkpoints, wrap func(http.Handler) http.Handler, newServer func(http.Handler) *httptest.Server, credentials ...WorkerCredentials) *httpServerTest {
+	return newHTTPServerTestWithStopServer(t, ctx, job, sink, wrap, newServer, 0, credentials...)
+}
+
+func newHTTPServerTestWithStopServer(t *testing.T, ctx context.Context, job Job, sink Checkpoints, wrap func(http.Handler) http.Handler, newServer func(http.Handler) *httptest.Server, stopBudget time.Duration, credentials ...WorkerCredentials) *httpServerTest {
 	t.Helper()
 	executor, err := NewHTTPExecutor(job.Identity.ExecutorID)
 	if err != nil {
@@ -105,7 +109,13 @@ func newHTTPServerTestWithServer(t *testing.T, ctx context.Context, job Job, sin
 		f.server.Close()
 	})
 	go func() {
-		result, err := executor.Execute(ctx, job, sink)
+		var result Result
+		var err error
+		if stopBudget == 0 {
+			result, err = executor.Execute(ctx, job, sink)
+		} else {
+			result, err = executor.ExecuteWithStop(ctx, stopBudget, job, sink)
+		}
 		f.done <- httpServerTestResult{result, err}
 	}()
 	timer := time.NewTimer(5 * time.Second)
@@ -437,6 +447,19 @@ type httpStatusHeldBody struct {
 	entered chan struct{}
 	release chan struct{}
 	once    sync.Once
+}
+
+type httpSecondReadBody struct {
+	io.ReadCloser
+	reads   atomic.Int32
+	entered chan struct{}
+}
+
+func (b *httpSecondReadBody) Read(p []byte) (int, error) {
+	if b.reads.Add(1) == 2 {
+		close(b.entered)
+	}
+	return b.ReadCloser.Read(p)
 }
 
 func (b *httpStatusHeldBody) Read(p []byte) (int, error) {
@@ -1724,6 +1747,126 @@ func TestHTTPExecutorMissingOutcomeClosesRealGraceAndQuarantines(t *testing.T) {
 		}
 		if got, ok := f.executor.Status(); !ok || got != ready {
 			t.Fatalf("forged ready observation was not retained as an untrusted label: status=%+v present=%t", got, ok)
+		}
+	})
+}
+
+func TestHTTPExecutorShortStopBudgetDoesNotRenewForSerialControls(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		const stopBudget = 10 * time.Millisecond
+		f := newHTTPServerTestWithStopServer(t, ctx, testJob(command.Comment), runnerExecutionCheckpoints{}, nil,
+			func(h http.Handler) *httptest.Server { return httptest.NewTestServer(t, h) }, stopBudget)
+		if assignment := f.pull(t); assignment.StopGrace != stopBudget {
+			t.Fatalf("assignment stop budget = %s, want %s", assignment.StopGrace, stopBudget)
+		}
+		cancel()
+		<-f.tx.stop
+		stoppedAt := time.Now()
+		for sequence := uint64(1); sequence <= 2; sequence++ {
+			status := Status{Version: ProtocolVersion, Identity: f.job.Identity, SourceRef: f.job.Source.Head,
+				Sequence: sequence, WorkerState: "ready", Phase: "cleanup"}
+			want := http.StatusOK
+			if sequence > 1 {
+				want = http.StatusConflict // A repeated ready label is invalid, but still consumes a control reply.
+			}
+			f.ack(t, "/status", httpObservation{Status: status}, want, sequence)
+			time.Sleep(3 * time.Millisecond)
+		}
+		got := f.result(t)
+		if elapsed := time.Since(stoppedAt); elapsed < stopBudget || elapsed > 2*stopBudget {
+			t.Fatalf("serial controls changed stop budget: elapsed=%s budget=%s", elapsed, stopBudget)
+		}
+		if !errors.Is(got.err, context.Canceled) || !errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) {
+			t.Fatalf("missing final outcome changed cancellation: result=%+v error=%v", got.result, got.err)
+		}
+		if late := f.request("/outcome", f.outcome(1, nil)); late.err != nil || late.status != http.StatusConflict {
+			t.Fatalf("late result entered after fixed stop deadline: %+v", late)
+		}
+		if _, err := f.executor.Execute(t.Context(), f.job, runnerExecutionCheckpoints{}); err == nil {
+			t.Fatal("missing outcome released worker capacity")
+		}
+	})
+}
+
+func TestHTTPExecutorStopContractsEnteredMutationBodyRead(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		entered := make(chan struct{})
+		const stopBudget = 10 * time.Millisecond
+		f := newHTTPServerTestWithStopServer(t, ctx, testJob(command.Comment), runnerExecutionCheckpoints{},
+			func(next http.Handler) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path == "/after" {
+						r.Body = &httpSecondReadBody{ReadCloser: r.Body, entered: entered}
+					}
+					next.ServeHTTP(w, r)
+				})
+			}, func(h http.Handler) *httptest.Server { return httptest.NewTestServer(t, h) }, stopBudget)
+		f.pull(t)
+		reader, writer := io.Pipe()
+		defer writer.Close()
+		request, err := http.NewRequestWithContext(t.Context(), http.MethodPost, f.server.URL+"/after", reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Header.Set("Content-Type", "application/json")
+		responseDone := make(chan error, 1)
+		go func() {
+			response, err := f.server.Client().Do(request)
+			if response != nil {
+				_ = response.Body.Close()
+			}
+			responseDone <- err
+		}()
+		if _, err := writer.Write([]byte(`{"sequence":`)); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("mutation did not enter its partial body read")
+		}
+		cancel()
+		<-f.tx.stop
+		stoppedAt := time.Now()
+		got := f.result(t)
+		if elapsed := time.Since(stoppedAt); elapsed > 2*stopBudget {
+			t.Fatalf("entered network read outlived stop budget: %s", elapsed)
+		}
+		if !errors.Is(got.err, context.Canceled) || !errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) {
+			t.Fatalf("partial mutation changed final outcome: %+v error=%v", got.result, got.err)
+		}
+		_ = writer.Close()
+		select {
+		case <-responseDone:
+		case <-time.After(5 * time.Second):
+			t.Fatal("client did not finish after stop")
+		}
+	})
+}
+
+func TestHTTPExecutorCloseUsesSameShortStopBudget(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const stopBudget = 10 * time.Millisecond
+		f := newHTTPServerTestWithStopServer(t, t.Context(), testJob(command.Comment), runnerExecutionCheckpoints{}, nil,
+			func(h http.Handler) *httptest.Server { return httptest.NewTestServer(t, h) }, stopBudget)
+		f.pull(t)
+		closed := make(chan error, 1)
+		go func() { closed <- f.executor.Close() }()
+		<-f.tx.stop
+		stoppedAt := time.Now()
+		got := f.result(t)
+		if err := <-closed; err != nil {
+			t.Fatalf("Close failed: %v", err)
+		}
+		if elapsed := time.Since(stoppedAt); elapsed < stopBudget || elapsed > 2*stopBudget {
+			t.Fatalf("Close changed stop budget: elapsed=%s budget=%s", elapsed, stopBudget)
+		}
+		if !errors.Is(got.err, context.Canceled) || !errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) {
+			t.Fatalf("shutdown lost unknown outcome: %+v error=%v", got.result, got.err)
 		}
 	})
 }
