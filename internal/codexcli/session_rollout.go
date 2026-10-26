@@ -241,10 +241,8 @@ func (s *Session) admitRollouts(ctx context.Context, rootID string, started time
 			s.rolloutScanError(err)
 			return
 		}
-		if _, alreadyOwned := s.ownedRollouts[meta.path]; alreadyOwned {
-			continue
-		}
-		if s.excludedRollouts[meta.path] {
+		owned, alreadyOwned := s.ownedRollouts[meta.path]
+		if s.excludedRollouts[meta.path] && !alreadyOwned {
 			continue
 		}
 		info, err := rolloutFileInfo(s.home, meta.path)
@@ -258,6 +256,13 @@ func (s *Session) admitRollouts(ctx context.Context, rootID string, started time
 		if err := ctx.Err(); err != nil {
 			s.rolloutScanError(err)
 			return
+		}
+		if alreadyOwned {
+			if os.SameFile(info, owned.info) && sameRolloutMeta(header, owned.meta) {
+				owned.info = info
+				s.ownedRollouts[meta.path] = owned
+			}
+			continue
 		}
 		s.ownedRollouts[meta.path] = ownedRollout{meta: meta, info: info}
 	}
@@ -377,8 +382,8 @@ func (s *Session) cleanupRollouts() error {
 			delete(s.ownedRollouts, path)
 			continue
 		}
-		if err != nil || !os.SameFile(info, owned.info) {
-			result = errors.Join(result, fmt.Errorf("codex exec: rollout cleanup requires operator recovery at %q: identity changed", path), err)
+		if err != nil || !os.SameFile(info, owned.info) || info.Size() != owned.info.Size() || !info.ModTime().Equal(owned.info.ModTime()) {
+			result = errors.Join(result, fmt.Errorf("codex exec: rollout cleanup requires operator recovery at %q: identity or contents changed", path), err)
 			continue
 		}
 		header, err := readRolloutHeader(path)

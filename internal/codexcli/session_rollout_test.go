@@ -53,8 +53,8 @@ printf '{"type":"thread.started","thread_id":"%s"}\n' "$id"
 printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}' '{"type":"turn.completed"}'
 `)
 	home := os.Getenv("CODEX_HOME")
-	foreign := writeUsageRollout(t, home, "foreign", "", completedUsageTurn("foreign", "foreign-turn", "foreign-response", 99)...)
-	day, err := filepath.Rel(filepath.Join(home, "sessions"), filepath.Dir(foreign))
+	preexistingLinked := writeUsageRollout(t, home, "linked", "", completedUsageTurn("linked", "linked-turn", "linked-response", 99)...)
+	day, err := filepath.Rel(filepath.Join(home, "sessions"), filepath.Dir(preexistingLinked))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +77,7 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
 		t.Fatal(err)
 	}
 	preserved := map[string][]byte{}
-	for _, path := range []string{foreign, preexisting, auth} {
+	for _, path := range []string{preexistingLinked, preexisting, auth} {
 		preserved[path], err = os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)
@@ -85,7 +85,7 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
 	}
 	var session Session
 	source := t.TempDir()
-	wantInput := []int64{159, 5, 40}
+	wantInput := []int64{159, 5, 40} // First call: 10 root + 20 child + 30 solo + 99 preexisting linked.
 	for call := 1; call <= 3; call++ {
 		if call == 3 {
 			session.NewConversation()
@@ -342,6 +342,10 @@ func TestSessionClosePreservesReplacedAndSymlinkRollouts(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			originalInfo, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
 			if replacement != "changed header" {
 				if err := os.Remove(path); err != nil {
 					t.Fatal(err)
@@ -368,6 +372,9 @@ func TestSessionClosePreservesReplacedAndSymlinkRollouts(t *testing.T) {
 				if err := os.WriteFile(path, original, 0600); err != nil {
 					t.Fatal(err)
 				}
+				if err := os.Chtimes(path, originalInfo.ModTime(), originalInfo.ModTime()); err != nil {
+					t.Fatal(err)
+				}
 			} else {
 				if err := os.Remove(path); err != nil {
 					t.Fatal(err)
@@ -384,6 +391,48 @@ func TestSessionClosePreservesReplacedAndSymlinkRollouts(t *testing.T) {
 			}
 			if data, err := os.ReadFile(backup); err != nil || string(data) != string(original) {
 				t.Fatalf("other hardlink changed: %q, %v", data, err)
+			}
+		})
+	}
+}
+
+func TestSessionClosePreservesChangedOwnedRollout(t *testing.T) {
+	for _, change := range []string{"append", "modtime"} {
+		t.Run(change, func(t *testing.T) {
+			session, path := runOwnedRollout(t)
+			original, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := original
+			switch change {
+			case "append":
+				added := []byte("external continuation\n")
+				f, openErr := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
+				if openErr != nil {
+					t.Fatal(openErr)
+				}
+				_, writeErr := f.Write(added)
+				closeErr := f.Close()
+				if writeErr != nil || closeErr != nil {
+					t.Fatalf("append rollout: write=%v close=%v", writeErr, closeErr)
+				}
+				want = append(bytes.Clone(original), added...)
+			case "modtime":
+				info, statErr := os.Stat(path)
+				if statErr != nil {
+					t.Fatal(statErr)
+				}
+				if err := os.Chtimes(path, info.ModTime(), info.ModTime().Add(10*time.Second)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := session.Close(); err == nil || !strings.Contains(err.Error(), path) {
+				t.Fatalf("changed rollout was not preserved for recovery: %v", err)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil || !bytes.Equal(data, want) {
+				t.Fatalf("changed rollout was altered: %q, %v", data, err)
 			}
 		})
 	}
