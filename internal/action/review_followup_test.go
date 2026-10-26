@@ -125,8 +125,8 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"terminal_r
 						t.Fatalf("native cleanup failure was not exercised: %v", entries)
 					}
 					logText := journal.String()
-					if !strings.Contains(logText, "model session cleanup failed job="+job.Identity.JobID+" attempt="+job.Identity.AttemptID) || !strings.Contains(logText, retained) || !strings.Contains(logText, "[redacted]") || strings.Contains(logText, crossProviderSecret) {
-						t.Fatal("persistent cleanup lost retained path or leaked credential")
+					if !strings.Contains(logText, "model session cleanup failed job="+job.Identity.JobID+" attempt="+job.Identity.AttemptID) || strings.Contains(logText, retained) || strings.Contains(logText, crossProviderSecret) {
+						t.Fatal("persistent cleanup log missed the failure or exposed private detail")
 					}
 					if !strings.Contains(result.Diagnostics[1].Message, retained) || !strings.Contains(result.Diagnostics[1].Message, "[redacted]") || strings.Contains(result.Diagnostics[1].Message, crossProviderSecret) {
 						t.Fatal("private cleanup diagnostic lost retained path or leaked credential")

@@ -20,6 +20,9 @@ type ownedRollout struct {
 
 // Inventory paths in the usage discovery window, including nonregular entries.
 func rolloutPaths(ctx context.Context, home string, started time.Time) (map[string]bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	root := filepath.Join(home, "sessions")
 	info, err := os.Lstat(root)
 	if errors.Is(err, os.ErrNotExist) {
@@ -84,8 +87,12 @@ func sameRolloutMeta(a, b rolloutMeta) bool {
 	return a.HistoryStart == nil && b.HistoryStart == nil || a.HistoryStart != nil && b.HistoryStart != nil && *a.HistoryStart == *b.HistoryStart
 }
 
+func (s *Session) rolloutScanError(err error) {
+	s.rolloutDiscoveryErr = errors.Join(s.rolloutDiscoveryErr, fmt.Errorf("codex exec: inspect rollouts under %q: %w", filepath.Join(s.home, "sessions"), err))
+}
+
 // Usage discovery can be incomplete because an unrelated recent header is malformed.
-func cleanupHeaderFiles(paths map[string]bool, started time.Time, owned map[string]ownedRollout) (map[string]rolloutMeta, map[string]bool, error) {
+func cleanupHeaderFiles(ctx context.Context, paths map[string]bool, started time.Time, owned map[string]ownedRollout) (map[string]rolloutMeta, map[string]bool, error) {
 	files, ambiguous := map[string]rolloutMeta{}, map[string]bool{}
 	budget := int64(maxUsageScanBytes)
 	allPaths := maps.Clone(paths)
@@ -93,6 +100,9 @@ func cleanupHeaderFiles(paths map[string]bool, started time.Time, owned map[stri
 		allPaths[path] = true
 	}
 	for _, path := range slices.Sorted(maps.Keys(allPaths)) {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
 		info, err := os.Lstat(path)
 		if err != nil || !info.Mode().IsRegular() {
 			continue
@@ -114,11 +124,18 @@ func cleanupHeaderFiles(paths map[string]bool, started time.Time, owned map[stri
 			files[meta.ID] = meta
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
 	return files, ambiguous, nil
 }
 
-func (s *Session) admitRollouts(rootID string, started time.Time, paths map[string]bool) {
+func (s *Session) admitRollouts(ctx context.Context, rootID string, started time.Time, paths map[string]bool) {
 	if rootID == "" {
+		return
+	}
+	if err := ctx.Err(); err != nil {
+		s.rolloutScanError(err)
 		return
 	}
 	rootInfo, err := os.Lstat(filepath.Join(s.home, "sessions"))
@@ -133,12 +150,16 @@ func (s *Session) admitRollouts(rootID string, started time.Time, paths map[stri
 		s.rolloutDiscoveryErr = errors.Join(s.rolloutDiscoveryErr, fmt.Errorf("codex exec: rollout sessions is not a directory at %q", filepath.Join(s.home, "sessions")))
 		return
 	}
-	files, ambiguous, complete := usageFiles(context.Background(), s.home, rootID, started, s.accounting.known)
+	files, ambiguous, complete := usageFiles(ctx, s.home, rootID, started, s.accounting.known)
+	if err := ctx.Err(); err != nil {
+		s.rolloutScanError(err)
+		return
+	}
 	if !complete {
 		var err error
-		files, ambiguous, err = cleanupHeaderFiles(paths, started, s.ownedRollouts)
+		files, ambiguous, err = cleanupHeaderFiles(ctx, paths, started, s.ownedRollouts)
 		if err != nil {
-			s.rolloutDiscoveryErr = errors.Join(s.rolloutDiscoveryErr, fmt.Errorf("codex exec: inspect rollouts under %q: %w", filepath.Join(s.home, "sessions"), err))
+			s.rolloutScanError(err)
 			return
 		}
 	}
@@ -169,12 +190,17 @@ func (s *Session) admitRollouts(rootID string, started time.Time, paths map[stri
 			}
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		s.rolloutScanError(err)
+		return
+	}
 	if s.ownedRollouts == nil {
 		s.ownedRollouts = map[string]ownedRollout{}
 	}
-	for id, meta := range selected {
-		if ambiguous[id] {
-			continue
+	for _, meta := range selected {
+		if err := ctx.Err(); err != nil {
+			s.rolloutScanError(err)
+			return
 		}
 		if _, alreadyOwned := s.ownedRollouts[meta.path]; alreadyOwned {
 			continue
@@ -190,11 +216,19 @@ func (s *Session) admitRollouts(rootID string, started time.Time, paths map[stri
 		if err != nil || !sameRolloutMeta(meta, header) {
 			continue
 		}
+		if err := ctx.Err(); err != nil {
+			s.rolloutScanError(err)
+			return
+		}
 		s.ownedRollouts[meta.path] = ownedRollout{meta: meta, info: info}
 	}
 }
 
-func (s *Session) reportUnownedNewRollouts(paths map[string]bool, rootID string, children []string, spawns map[string]bool) {
+func (s *Session) reportUnownedNewRollouts(ctx context.Context, paths map[string]bool, rootID string, children []string, spawns map[string]bool) {
+	if err := ctx.Err(); err != nil {
+		s.rolloutScanError(err)
+		return
+	}
 	newPaths := []string{}
 	for _, path := range slices.Sorted(maps.Keys(paths)) {
 		if s.excludedRollouts[path] {
@@ -237,6 +271,10 @@ func (s *Session) reportUnownedNewRollouts(paths map[string]bool, rootID string,
 	metas := map[string]rolloutMeta{}
 	unknown := []string{}
 	for _, path := range newPaths {
+		if err := ctx.Err(); err != nil {
+			s.rolloutScanError(err)
+			return
+		}
 		info, err := os.Lstat(path)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
@@ -248,6 +286,10 @@ func (s *Session) reportUnownedNewRollouts(paths map[string]bool, rootID string,
 			}
 		}
 		unknown = append(unknown, path)
+	}
+	if err := ctx.Err(); err != nil {
+		s.rolloutScanError(err)
+		return
 	}
 	for changed := true; changed; {
 		changed = false

@@ -182,6 +182,7 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	cmd.Stdout = &output
 	cmd.Stderr = &stderr
 	started := time.Now()
+	// Cleanup needs a complete pre-call baseline; stop before paid work if it cannot be read.
 	paths, err := rolloutPaths(ctx, codexHome, started)
 	if err != nil {
 		return result, fmt.Errorf("codex exec: inventory existing rollouts: %w", err)
@@ -216,14 +217,14 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	var childError error
 	result.Tokens, result.UsageComplete, childError = s.accounting.collectUsage(ctx, codexHome, cmp.Or(output.threadID, output.expectedID), started, output.tokens, output.children, output.observationOnly, output.spawns)
 	rootID := cmp.Or(output.expectedID, output.threadID)
-	newPaths, scanErr := rolloutPaths(context.Background(), codexHome, started)
+	newPaths, scanErr := rolloutPaths(ctx, codexHome, started)
 	if scanErr != nil {
 		s.rolloutDiscoveryErr = errors.Join(s.rolloutDiscoveryErr, fmt.Errorf("codex exec: inspect new rollouts under %q: %w", filepath.Join(codexHome, "sessions"), scanErr))
 	} else {
 		if rootID != "" {
-			s.admitRollouts(rootID, started, newPaths)
+			s.admitRollouts(ctx, rootID, started, newPaths)
 		}
-		s.reportUnownedNewRollouts(newPaths, rootID, output.children, output.spawns)
+		s.reportUnownedNewRollouts(ctx, newPaths, rootID, output.children, output.spawns)
 	}
 	defer func() {
 		if childError != nil {

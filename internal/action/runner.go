@@ -355,7 +355,7 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 			if err := sessions.close(); err != nil {
 				cleanupFailed = true
 				cleanupDetail = redactActionText(httpFailureDiagnostic(redactActionError(err, configured.secretValues()...).Error()), configured.secretValues()...)
-				configured.logf("model session cleanup failed job=%s attempt=%s: %q", job.Identity.JobID, job.Identity.AttemptID, cleanupDetail)
+				configured.logf("model session cleanup failed job=%s attempt=%s", job.Identity.JobID, job.Identity.AttemptID)
 			}
 		}
 	}()

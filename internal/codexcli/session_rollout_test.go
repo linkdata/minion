@@ -1,6 +1,7 @@
 package codexcli
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -141,6 +142,66 @@ exit 9
 				t.Fatalf("partial rollout cleanup: identified=%t, err=%v", identified, err)
 			}
 		})
+	}
+}
+
+func TestSessionCanceledRunPreservesUnverifiedRollout(t *testing.T) {
+	binary := installFakeCodex(t, `#!/bin/sh
+set -eu
+cat >/dev/null
+dir="$CODEX_HOME/sessions/$(cat "$0.day")"
+mkdir -p "$dir"
+cp "$0.root" "$dir/rollout-root.jsonl"
+printf '%s\n' '{"type":"thread.started","thread_id":"root"}'
+: > "$0.ready"
+exec sleep 30
+`)
+	day := time.Now().Format("2006/01/02")
+	putRolloutTemplate(t, binary, "day", []byte(day))
+	putRolloutTemplate(t, binary, "root", rolloutTemplate(t, "root", "", 10))
+	path := filepath.Join(os.Getenv("CODEX_HOME"), "sessions", filepath.FromSlash(day), "rollout-root.jsonl")
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	var session Session
+	source := t.TempDir()
+	done := make(chan error, 1)
+	go func() {
+		_, err := session.Run(ctx, source, "cancel", false, "", config.CodexConfig{})
+		done <- err
+	}()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	for {
+		if _, err := os.Stat(binary + ".ready"); err == nil {
+			break
+		} else if !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("Codex exited before cancellation: %v", err)
+		case <-ticker.C:
+		case <-deadline.C:
+			t.Fatal("Codex did not create the rollout")
+		}
+	}
+	deadline.Stop()
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("canceled Run: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("canceled Run did not return")
+	}
+	if err := session.Close(); !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), filepath.Join(os.Getenv("CODEX_HOME"), "sessions")) {
+		t.Fatalf("canceled cleanup lacked recovery path: %v", err)
+	}
+	if _, err := os.Lstat(path); err != nil {
+		t.Fatalf("unverified rollout was removed: %v", err)
 	}
 }
 
