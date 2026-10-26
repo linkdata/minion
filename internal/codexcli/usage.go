@@ -65,7 +65,7 @@ type rolloutEvent struct {
 	Payload json.RawMessage `json:"payload"`
 }
 
-func collectUsageFiles(ctx context.Context, rootID string, fallback *usage.Tokens, expectedChildren []string, files map[string]rolloutMeta, ambiguous map[string]bool, complete bool) (usage.Tokens, bool, error) {
+func collectUsageFiles(ctx context.Context, rootID string, fallback *usage.Tokens, expectedChildren []string, files map[string]rolloutMeta, ambiguous map[string]bool, complete bool, spawned map[string]bool) (usage.Tokens, bool, error) {
 	var total usage.Tokens
 	if rootID == "" || ctx.Err() != nil || ambiguous[rootID] {
 		if fallback != nil {
@@ -123,7 +123,7 @@ func collectUsageFiles(ctx context.Context, rootID string, fallback *usage.Token
 			}
 			continue
 		}
-		tokens, ok, children, workError := readRolloutUsage(ctx, meta, rootID, &budget)
+		tokens, ok, children, workError := readRolloutUsageFrom(ctx, meta, rootID, &budget, rolloutUsageMode{spawned: spawned})
 		childError = joinUsageErrors(childError, workError)
 		for _, child := range children {
 			_, selectedChild := selected[child]

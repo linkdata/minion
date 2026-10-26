@@ -46,7 +46,7 @@ dir="$CODEX_HOME/sessions/$(cat "$0.day")"
 mkdir -p "$dir"
 case "$n" in
   1) cp "$0.root" "$dir/rollout-root.jsonl"; cp "$0.child" "$dir/rollout-child.jsonl"; cp "$0.solo" "$dir/rollout-solo.jsonl"; id=root ;;
-  2) cat "$0.resume" >> "$dir/rollout-root.jsonl"; id=root ;;
+  2) cat "$0.resume" >> "$dir/rollout-root.jsonl"; cp "$0.newchild" "$dir/rollout-newchild.jsonl"; id=root ;;
   3) cp "$0.fresh" "$dir/rollout-fresh.jsonl"; id=fresh ;;
 esac
 printf '{"type":"thread.started","thread_id":"%s"}\n' "$id"
@@ -64,9 +64,10 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
 	putRolloutTemplate(t, binary, "day", []byte(filepath.ToSlash(day)))
 	putRolloutTemplate(t, binary, "root", rolloutTemplate(t, "root", "", 10))
 	putRolloutTemplate(t, binary, "child", rolloutTemplate(t, "child", "root", 20))
+	putRolloutTemplate(t, binary, "newchild", rolloutTemplate(t, "newchild", "root", 6))
 	putRolloutTemplate(t, binary, "solo", []byte(`{"type":"session_meta","payload":{"id":"solo","session_id":"root","source":"exec"}}`+"\n"+strings.Join(completedUsageTurn("solo", "solo-turn", "solo-response", 30), "\n")+"\n"))
 	putRolloutTemplate(t, binary, "fresh", rolloutTemplate(t, "fresh", "", 40))
-	putRolloutTemplate(t, binary, "resume", []byte(strings.Join(completedUsageTurn("root", "resume-turn", "resume-response", 5), "\n")+"\n"))
+	putRolloutTemplate(t, binary, "resume", []byte(strings.Join([]string{usageEvent("task_started", "resume-turn"), nativeActivityEvent(25, "root", "resume-turn", "started", "newchild"), usageRecord("root", "resume-turn", "resume-response", 5, 0, 0), nativeActivityEvent(35, "root", "resume-turn", "completed", "newchild"), usageEvent("task_complete", "resume-turn")}, "\n")+"\n"))
 	preexisting := filepath.Join(home, "sessions", filepath.FromSlash(day), "older-root.jsonl")
 	if err := os.WriteFile(preexisting, rolloutTemplate(t, "root", "", 100), 0600); err != nil {
 		t.Fatal(err)
@@ -88,7 +89,7 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
 	}
 	var session Session
 	source := t.TempDir()
-	wantInput := []int64{159, 5, 40} // First call: 10 root + 20 child + 30 solo + 99 preexisting linked.
+	wantInput := []int64{159, 11, 40} // First: 10 root + 20 child + 30 solo + 99 preexisting linked. Resume: 5 root + 6 new child.
 	for call := 1; call <= 3; call++ {
 		if call == 3 {
 			session.NewConversation()
@@ -99,7 +100,7 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
 		}
 	}
 	paths := []string{}
-	for _, id := range []string{"root", "child", "solo", "fresh"} {
+	for _, id := range []string{"root", "child", "solo", "newchild", "fresh"} {
 		path := filepath.Join(home, "sessions", filepath.FromSlash(day), "rollout-"+id+".jsonl")
 		paths = append(paths, path)
 		if _, err := os.Stat(path); err != nil {
@@ -519,6 +520,80 @@ printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.comp
 	}
 	if _, err := os.Lstat(filepath.Join(root, "rollout-root.jsonl")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("verified root remains: %v", err)
+	}
+}
+
+func TestSessionCleansNativeAndNestedHelpersWithoutStdoutSpawn(t *testing.T) {
+	binary := installFakeCodex(t, `#!/bin/sh
+set -eu
+cat >/dev/null
+dir="$CODEX_HOME/sessions/$(cat "$0.day")"
+mkdir -p "$dir"
+for id in root child grandchild; do cp "$0.$id" "$dir/rollout-$id.jsonl"; done
+printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}' '{"type":"turn.completed"}'
+`)
+	day := time.Now().Format("2006/01/02")
+	putRolloutTemplate(t, binary, "day", []byte(day))
+	for _, fixture := range []struct {
+		id, parent string
+		events     []string
+	}{
+		{"root", "", []string{usageEvent("task_started", "root-turn"), nativeActivityEvent(25, "root", "root-turn", "started", "child"), usageRecord("root", "root-turn", "root-response", 10, 0, 0), nativeActivityEvent(35, "root", "root-turn", "completed", "child"), usageEvent("task_complete", "root-turn")}},
+		{"child", "root", []string{usageEvent("task_started", "child-turn"), nativeActivityEvent(45, "child", "child-turn", "started", "grandchild"), usageRecord("child", "child-turn", "child-response", 20, 0, 0), nativeActivityEvent(55, "child", "child-turn", "completed", "grandchild"), usageEvent("task_complete", "child-turn")}},
+		{"grandchild", "child", completedUsageTurn("grandchild", "grandchild-turn", "grandchild-response", 5)},
+	} {
+		path := writeUsageRollout(t, t.TempDir(), fixture.id, fixture.parent, fixture.events...)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		putRolloutTemplate(t, binary, fixture.id, data)
+	}
+	var session Session
+	result, err := session.Run(t.Context(), t.TempDir(), "task", false, "", config.CodexConfig{})
+	if err != nil || !result.UsageComplete || result.Tokens.Input != 35 {
+		t.Fatalf("native helper run: result=%+v err=%v", result, err)
+	}
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"root", "child", "grandchild"} {
+		path := filepath.Join(os.Getenv("CODEX_HOME"), "sessions", filepath.FromSlash(day), "rollout-"+id+".jsonl")
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("verified %s rollout remains: %v", id, err)
+		}
+	}
+}
+
+func TestSessionReportsMalformedNativeHelperWithoutStdoutSpawn(t *testing.T) {
+	binary := installFakeCodex(t, `#!/bin/sh
+set -eu
+cat >/dev/null
+dir="$CODEX_HOME/sessions/$(cat "$0.day")"
+mkdir -p "$dir"
+cp "$0.root" "$dir/rollout-root.jsonl"
+printf 'invalid header\n' > "$dir/rollout-child.jsonl"
+printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}' '{"type":"turn.completed"}'
+`)
+	day := time.Now().Format("2006/01/02")
+	putRolloutTemplate(t, binary, "day", []byte(day))
+	root := []string{usageEvent("task_started", "root-turn"), nativeActivityEvent(25, "root", "root-turn", "started", "child"), usageRecord("root", "root-turn", "response", 10, 0, 0), usageEvent("task_complete", "root-turn")}
+	path := writeUsageRollout(t, t.TempDir(), "root", "", root...)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	putRolloutTemplate(t, binary, "root", data)
+	var session Session
+	if _, err := session.Run(t.Context(), t.TempDir(), "task", false, "", config.CodexConfig{}); !errors.Is(err, errUnverifiedChildren) {
+		t.Fatalf("malformed native helper was accepted: %v", err)
+	}
+	child := filepath.Join(os.Getenv("CODEX_HOME"), "sessions", filepath.FromSlash(day), "rollout-child.jsonl")
+	if err := session.Close(); err == nil || !strings.Contains(err.Error(), child) {
+		t.Fatalf("malformed native helper lacks recovery path: %v", err)
+	}
+	if _, err := os.Lstat(child); err != nil {
+		t.Fatalf("malformed native helper was removed: %v", err)
 	}
 }
 
