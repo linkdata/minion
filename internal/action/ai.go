@@ -171,7 +171,7 @@ func (r *Runner) runAI(ctx context.Context, job Job, dir, prompt, outputDir stri
 		request.prompt, request.outputSchema = mainPrompt(prompt), mainOutputSchema
 	}
 	var priorAnswer, priorFeedback string
-	secrets := []string{r.Codex.APIKey, r.Claude.APIKey}
+	secrets := r.secretValues()
 	for round := 1; round <= rounds; round++ {
 		request.round = round
 		policy.observe(CallUsage{Role: roleMain, Round: round})

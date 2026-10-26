@@ -24,15 +24,33 @@ import (
 	"github.com/linkdata/minion/internal/workspace"
 )
 
+func TestWorkerStartupClearsPreflightCredentials(t *testing.T) {
+	startup := testWorkerStartup(t)
+	startup.CodexAPIKey = ""
+	startup.CodexNativeAPIKey = "private-native-key"
+	startup.CodexAccessToken = "private-native-token"
+	runner, err := startup.runner(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	startup.clearCredentials(runner)
+	if startup.CodexAPIKey != "" || startup.CodexNativeAPIKey != "" || startup.CodexAccessToken != "" || startup.ClaudeAPIKey != "" ||
+		runner.Codex.APIKey != "" || runner.Codex.NativeAPIKey != "" || runner.Codex.NativeAccessToken != "" || runner.Claude.APIKey != "" || runner.selection == nil {
+		t.Fatal("preflight credentials remained in reusable startup or runner")
+	}
+}
+
 func TestSelectedWorkerStartupDirectChild(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
 		invalidInput bool
 		unselected   bool
 		badPreflight bool
+		nativeAuth   bool
 		wantError    string
 	}{
 		{name: "selected startup"},
+		{name: "native credentials during preflight", nativeAuth: true},
 		{name: "malformed input", invalidInput: true, wantError: "decode worker startup"},
 		{name: "unselected input", unselected: true, wantError: "worker startup selection"},
 		{name: "failed preflight", badPreflight: true, wantError: "Codex instruction boundary unavailable"},
@@ -53,6 +71,8 @@ func TestSelectedWorkerStartupDirectChild(t *testing.T) {
 			codexScript := preflightCodexCLI
 			if tc.badPreflight {
 				codexScript = "#!/bin/sh\ncase \"$1 $2\" in 'login status') exit 0;; 'debug prompt-input') exit 2;; esac\nexit 99\n"
+			} else if tc.nativeAuth {
+				codexScript = strings.Replace(preflightCodexCLI, "    IFS= read -r request || exit 0\n", "    IFS= read -r request || exit 0\n    [ \"$CODEX_API_KEY\" = native-startup-key ] && [ \"$CODEX_ACCESS_TOKEN\" = native-startup-token ] || exit 19\n", 1)
 			}
 			codexDir := fakeOnPath(t, "codex", codexScript)
 			t.Setenv("PATH", codexDir+string(os.PathListSeparator)+gitOnlyPath(t))
@@ -62,7 +82,10 @@ func TestSelectedWorkerStartupDirectChild(t *testing.T) {
 				}, Main: RoleSettings{Provider: "codex", Model: "main-1", Effort: "high"}},
 				WorkRoot: filepath.Join(base, "work"),
 			}
-			worker, err := startLocalWorker(unixTestDirectory(t), "local", os.Args[0], []string{"-test.run=^TestSelectedWorkerStartupDirectChildHelper$"}, 20*time.Second, func(cmd *exec.Cmd, socket string) error {
+			if tc.nativeAuth {
+				startup.CodexNativeAPIKey, startup.CodexAccessToken = "native-startup-key", "native-startup-token"
+			}
+			worker, err := startLocalWorker(unixTestDirectory(t), "local", os.Args[0], []string{"-test.run=^TestSelectedWorkerStartupDirectChildHelper$"}, 20*time.Second, WorkerCredentials{}, func(cmd *exec.Cmd, socket string) error {
 				startup.SocketPath = socket
 				var input []byte
 				var inputErr error

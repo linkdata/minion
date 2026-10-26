@@ -225,6 +225,15 @@ func runMonitorLoop(ctx context.Context, watcher *monitor.Monitor, store *state.
 }
 
 func newOrchestrator(cfg config.Config, client *github.Client, store *state.Store, logger *log.Logger, checkWorkRoot func() error) *action.Orchestrator {
+	codexAuth := config.CodexConfig{APIKey: cfg.Codex.APIKey}
+	if codexAuth.APIKey == "" {
+		codexAuth.NativeAPIKey = cfg.Codex.NativeAPIKey
+		codexAuth.NativeAccessToken = cfg.Codex.NativeAccessToken
+		if codexAuth.NativeAPIKey == "" && codexAuth.NativeAccessToken == "" {
+			codexAuth.NativeAPIKey = os.Getenv("CODEX_API_KEY")
+			codexAuth.NativeAccessToken = os.Getenv("CODEX_ACCESS_TOKEN")
+		}
+	}
 	return &action.Orchestrator{
 		WorkRoot:              cfg.WorkRoot,
 		Logger:                logger,
@@ -246,7 +255,7 @@ func newOrchestrator(cfg config.Config, client *github.Client, store *state.Stor
 		ClaudeEffort:          cfg.Claude.Effort,
 		// Jobs override model, effort and skills; the runner keeps host credentials.
 		Runner: action.Runner{
-			Codex:  config.CodexConfig{APIKey: cfg.Codex.APIKey},
+			Codex:  codexAuth,
 			Claude: config.ClaudeConfig{APIKey: cfg.Claude.APIKey},
 			Logger: logger,
 		},

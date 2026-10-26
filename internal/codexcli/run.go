@@ -78,9 +78,10 @@ func execConfigArgs() []string {
 // login for this run. It is excluded from model-command environments and
 // redacted from the returned answer and error text.
 func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, outputDir string, settings config.CodexConfig) (result aicli.Result, runError error) {
+	settings = captureAmbientNativeCredentials(settings)
 	defer func() {
-		result.Answer = aicli.RedactText(result.Answer, settings.APIKey)
-		runError = aicli.RedactError(runError, settings.APIKey)
+		result.Answer = redactCodexText(result.Answer, settings)
+		runError = redactCodexError(runError, settings)
 	}()
 	result.UsageComplete = true
 	if strings.TrimSpace(prompt) == "" {
@@ -171,7 +172,7 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	cmd := exec.CommandContext(runCtx, realBinary, args...)
 	cmd.Args[0] = "codex"
 	cmd.Dir = runtimeDir
-	cmd.Env = childEnvironment(os.Environ(), runtimeDir, cacheDir, codexHome, settings.APIKey != "", workspace, outputDir)
+	cmd.Env = nativeCredentialEnvironment(os.Environ(), runtimeDir, cacheDir, codexHome, settings, workspace, outputDir)
 	if settings.APIKey != "" {
 		cmd.Env = append(cmd.Env, "CODEX_API_KEY="+settings.APIKey)
 	}
@@ -224,7 +225,7 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 		return result, fmt.Errorf("codex exec output: %w", errors.Join(output.parseErr, runErr))
 	}
 	if runErr != nil || output.failed || !output.completed {
-		detail := cmp.Or(aicli.RedactText(output.failureReason, settings.APIKey), aicli.RedactTail(&stderr, settings.APIKey))
+		detail := cmp.Or(redactCodexText(output.failureReason, settings), redactCodexTail(&stderr, settings))
 		if runErr != nil || output.failed {
 			reason := bounded.Text(cmp.Or(detail, "no further diagnostics"))
 			if runErr != nil {

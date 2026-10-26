@@ -59,6 +59,7 @@ func TestCheckLoginSelectedCredentialsDoNotInspectStoredLogin(t *testing.T) {
 	for _, test := range []struct{ key, value string }{
 		{"configured", "dummy-key"}, {"CODEX_API_KEY", "dummy-environment-key"},
 		{"CODEX_ACCESS_TOKEN", "dummy-environment-token"}, {"CODEX_API_KEY", " "},
+		{"native API key", "dummy-native-key"}, {"native access token", "dummy-native-token"},
 	} {
 		t.Run(test.key+"/"+test.value, func(t *testing.T) {
 			t.Setenv("PATH", t.TempDir())
@@ -67,6 +68,10 @@ func TestCheckLoginSelectedCredentialsDoNotInspectStoredLogin(t *testing.T) {
 			settings := config.CodexConfig{}
 			if test.key == "configured" {
 				settings.APIKey = test.value
+			} else if test.key == "native API key" {
+				settings.NativeAPIKey = test.value
+			} else if test.key == "native access token" {
+				settings.NativeAccessToken = test.value
 			} else {
 				t.Setenv(test.key, test.value)
 			}

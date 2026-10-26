@@ -532,3 +532,11 @@ func TestSessionCloseFailureRetainsOwnedPathAndRedactsKey(t *testing.T) {
 		t.Fatalf("cleanup retry retained resource: %v", err)
 	}
 }
+
+func TestSessionCloseFailureRedactsNativeAccessToken(t *testing.T) {
+	const token = "native-access-secret"
+	session := Session{runtimeDir: "invalid-" + token + "\x00", settings: config.CodexConfig{NativeAccessToken: token}}
+	if err := session.Close(); err == nil || strings.Contains(err.Error(), token) || session.runtimeDir == "" {
+		t.Fatalf("cleanup lost path or native token: %v", err)
+	}
+}

@@ -38,7 +38,8 @@ type modelInfo struct {
 // A nonempty APIKey in settings selects API authentication for discovery without
 // changing the stored CLI login.
 func Validate(ctx context.Context, settings config.CodexConfig) (resolved config.CodexConfig, resultErr error) {
-	defer func() { resultErr = aicli.RedactError(resultErr, settings.APIKey) }()
+	settings = captureAmbientNativeCredentials(settings)
+	defer func() { resultErr = redactCodexError(resultErr, settings) }()
 	home, err := HomePath()
 	if err != nil {
 		return settings, err
@@ -220,7 +221,7 @@ func listModels(ctx context.Context, settings config.CodexConfig) (models []mode
 	cmd := exec.CommandContext(ctx, binary, args...)
 	cmd.Args[0] = "codex"
 	cmd.Dir = dir
-	cmd.Env = childEnvironment(os.Environ(), dir, dir, home, settings.APIKey != "")
+	cmd.Env = nativeCredentialEnvironment(os.Environ(), dir, dir, home, settings)
 	diagnostics := bounded.Tail{}
 	cmd.Stderr = &diagnostics
 	stdin, err := cmd.StdinPipe()
@@ -264,7 +265,7 @@ func listModels(ctx context.Context, settings config.CodexConfig) (models []mode
 		if err != nil {
 			if contextErr != nil {
 				err = fmt.Errorf("Codex model discovery: %w", err) //nolint:staticcheck // -- Codex is a proper noun.
-			} else if detail := aicli.RedactTail(&diagnostics, settings.APIKey); detail != "" {
+			} else if detail := redactCodexTail(&diagnostics, settings); detail != "" {
 				err = fmt.Errorf("%w: %q", err, detail)
 			}
 		}
@@ -298,7 +299,7 @@ func listModels(ctx context.Context, settings config.CodexConfig) (models []mode
 				return fmt.Errorf("unexpected Codex response ID %d during %s", *response.ID, method)
 			}
 			if response.Error != nil {
-				return fmt.Errorf("Codex %s: %q", method, bounded.Text(aicli.RedactText(response.Error.Message, settings.APIKey))) //nolint:staticcheck // -- Codex is a proper noun.
+				return fmt.Errorf("Codex %s: %q", method, bounded.Text(redactCodexText(response.Error.Message, settings))) //nolint:staticcheck // -- Codex is a proper noun.
 			}
 			if len(response.Result) == 0 || string(response.Result) == "null" {
 				return fmt.Errorf("Codex %s returned no result", method) //nolint:staticcheck // -- Codex is a proper noun.

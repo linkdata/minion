@@ -25,10 +25,17 @@ func runSelectedLocalWorker(ctx context.Context, input io.Reader, call modelCall
 	if err := runner.PreflightSelection(ctx); err != nil {
 		return err
 	}
+	// The startup copy authenticates preflight only; each assignment carries fresh credentials.
+	startup.clearCredentials(runner)
 	client, err := NewUnixExecutionClient(startup.SocketPath)
 	if err != nil {
 		return fmt.Errorf("worker endpoint: %w", err)
 	}
 	defer client.CloseIdleConnections()
 	return RunHTTPLoop(ctx, client, UnixExecutionBaseURL, "local", runner)
+}
+
+func (s *WorkerStartup) clearCredentials(runner *Runner) {
+	s.CodexAPIKey, s.CodexNativeAPIKey, s.CodexAccessToken, s.ClaudeAPIKey = "", "", "", ""
+	runner.Codex.APIKey, runner.Codex.NativeAPIKey, runner.Codex.NativeAccessToken, runner.Claude.APIKey = "", "", "", ""
 }

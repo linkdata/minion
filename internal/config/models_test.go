@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -114,6 +115,14 @@ func TestLoadProviderAPIKeys(t *testing.T) {
 				t.Fatalf("invalid key accepted or exposed: %v", err)
 			}
 		}
+	}
+}
+
+func TestCodexNativeCredentialsStayOutOfConfigJSON(t *testing.T) {
+	settings := CodexConfig{NativeAPIKey: "native-api-secret", NativeAccessToken: "native-access-secret"}
+	encoded, err := json.Marshal(settings)
+	if err != nil || strings.Contains(string(encoded), "secret") {
+		t.Fatalf("native Codex credential serialized: %q, %v", encoded, err)
 	}
 }
 

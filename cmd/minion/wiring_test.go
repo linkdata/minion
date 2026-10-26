@@ -61,3 +61,20 @@ func TestServiceWiringPreservesAdmissionAndCredentials(t *testing.T) {
 		t.Fatal("runner lost provider authentication or retained unselected skills")
 	}
 }
+
+func TestServiceWiringSnapshotsNativeCodexCredentials(t *testing.T) {
+	t.Setenv("CODEX_API_KEY", "native-key")
+	t.Setenv("CODEX_ACCESS_TOKEN", "native-token")
+	got := newOrchestrator(config.Config{}, nil, nil, nil, nil).Runner.Codex
+	if got.NativeAPIKey != "native-key" || got.NativeAccessToken != "native-token" || got.APIKey != "" {
+		t.Fatalf("native Codex credentials were not captured separately: %+v", got)
+	}
+	got = newOrchestrator(config.Config{Codex: config.CodexConfig{NativeAPIKey: "validated-key"}}, nil, nil, nil, nil).Runner.Codex
+	if got.NativeAPIKey != "validated-key" || got.NativeAccessToken != "" {
+		t.Fatalf("validated Codex credentials changed before dispatch: %+v", got)
+	}
+	got = newOrchestrator(config.Config{Codex: config.CodexConfig{APIKey: "configured-key"}}, nil, nil, nil, nil).Runner.Codex
+	if got.APIKey != "configured-key" || got.NativeAPIKey != "" || got.NativeAccessToken != "" {
+		t.Fatalf("configured Codex key did not exclude native credentials: %+v", got)
+	}
+}

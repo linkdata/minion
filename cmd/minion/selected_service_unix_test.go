@@ -89,7 +89,7 @@ func TestAttachSelectedLocalWorkerFreezesStartupAndOwnsClose(t *testing.T) {
 			if err := json.Unmarshal(data, &startup); err != nil {
 				t.Fatal(err)
 			}
-			if startup.WorkRoot != cfg.WorkRoot || startup.SocketPath != filepath.Join(runtimeDir, "execution.sock") || len(startup.Selection.Commands) != 1 || startup.Selection.Commands["comment"].Action != "comment" || startup.CodexAPIKey != cfg.Codex.APIKey || startup.ClaudeAPIKey != "" {
+			if startup.WorkRoot != cfg.WorkRoot || startup.SocketPath != filepath.Join(runtimeDir, "execution.sock") || len(startup.Selection.Commands) != 1 || startup.Selection.Commands["comment"].Action != "comment" || startup.CodexAPIKey != cfg.Codex.APIKey || startup.CodexNativeAPIKey != "" || startup.CodexAccessToken != "" || startup.ClaudeAPIKey != "" {
 				t.Fatalf("child startup differed from parent selection: %+v", startup)
 			}
 			now := time.Now().UTC()
@@ -99,6 +99,58 @@ func TestAttachSelectedLocalWorkerFreezesStartupAndOwnsClose(t *testing.T) {
 			}
 			if _, err := os.Lstat(startup.SocketPath); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("selected service retained its socket: %v", err)
+			}
+		})
+	}
+}
+
+func TestAttachSelectedLocalWorkerSelectedCredentials(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		adjust func(*config.Config)
+		want   action.WorkerCredentials
+	}{
+		{"configured Codex", func(*config.Config) {}, action.WorkerCredentials{CodexAPIKey: "selected-config-key"}},
+		{"native Codex", func(cfg *config.Config) { cfg.Codex.APIKey = "" }, action.WorkerCredentials{CodexNativeAPIKey: "selected-environment-key", CodexAccessToken: "selected-environment-token"}},
+		{"Claude only", func(cfg *config.Config) {
+			cfg.Main = "claude"
+			cfg.Claude.Model, cfg.Claude.Effort = "claude-main", "medium"
+		}, action.WorkerCredentials{ClaudeAPIKey: "unselected-config-key"}},
+		{"Codex critic", func(cfg *config.Config) {
+			cfg.Main, cfg.Adversarial = "claude", "codex"
+			cfg.Claude.Model, cfg.Claude.Effort = "claude-main", "medium"
+			cfg.Codex.APIKey = ""
+		}, action.WorkerCredentials{CodexNativeAPIKey: "selected-environment-key", CodexAccessToken: "selected-environment-token", ClaudeAPIKey: "unselected-config-key"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := selectedServiceTestConfig(t)
+			tc.adjust(&cfg)
+			t.Setenv("CODEX_API_KEY", "selected-environment-key")
+			t.Setenv("CODEX_ACCESS_TOKEN", "selected-environment-token")
+			t.Setenv("MINION_SELECTED_SERVICE_HELPER", "ready")
+			report := filepath.Join(t.TempDir(), "startup.json")
+			t.Setenv("MINION_SELECTED_SERVICE_REPORT", report)
+			runtimeDir := filepath.Join(t.TempDir(), "runtime")
+			if err := os.Mkdir(runtimeDir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			owner := newOrchestrator(cfg, nil, nil, log.New(io.Discard, "", 0), nil)
+			watcher := &monitor.Monitor{Config: cfg}
+			_, closeWorker, err := attachSelectedLocalWorker(t.Context(), owner, watcher, runtimeDir, os.Args[0], []string{"-test.run=^TestSelectedLocalServiceChild$"}, 5*time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = closeWorker() })
+			data, err := os.ReadFile(report)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var startup action.WorkerStartup
+			if err := json.Unmarshal(data, &startup); err != nil {
+				t.Fatal(err)
+			}
+			if startup.CodexAPIKey != tc.want.CodexAPIKey || startup.CodexNativeAPIKey != tc.want.CodexNativeAPIKey || startup.CodexAccessToken != tc.want.CodexAccessToken || startup.ClaudeAPIKey != tc.want.ClaudeAPIKey {
+				t.Fatal("child startup did not contain exactly the selected credentials")
 			}
 		})
 	}

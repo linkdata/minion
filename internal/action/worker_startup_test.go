@@ -52,6 +52,25 @@ func TestWorkerStartupRoundTripAndProviderKeys(t *testing.T) {
 	}
 }
 
+func TestWorkerStartupNativeCodexCredentials(t *testing.T) {
+	startup := testWorkerStartup(t)
+	startup.CodexAPIKey = ""
+	startup.CodexNativeAPIKey = "private-native-key"
+	startup.CodexAccessToken = "private-native-token"
+	encoded, err := EncodeWorkerStartup(startup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := decodeWorkerStartup(bytes.NewReader(encoded))
+	if err != nil || !reflect.DeepEqual(decoded, startup) {
+		t.Fatal("native Codex credentials changed during startup roundtrip")
+	}
+	runner, err := decoded.runner(nil)
+	if err != nil || runner.Codex.APIKey != "" || runner.Codex.NativeAPIKey != startup.CodexNativeAPIKey || runner.Codex.NativeAccessToken != startup.CodexAccessToken {
+		t.Fatal("startup runner lost selected native Codex credentials")
+	}
+}
+
 func TestWorkerStartupAcceptsAbsoluteWorkRootWithTrailingSeparator(t *testing.T) {
 	startup := testWorkerStartup(t)
 	startup.WorkRoot += string(os.PathSeparator)
@@ -89,6 +108,19 @@ func TestDecodeWorkerStartupRejectsInvalidInput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	conflictingCodex := startup
+	conflictingCodex.CodexNativeAPIKey = "private-native-key"
+	conflictingCodexBytes, err := json.Marshal(conflictingCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalidNative := startup
+	invalidNative.CodexAPIKey = ""
+	invalidNative.CodexNativeAPIKey = "private key"
+	invalidNativeBytes, err := json.Marshal(invalidNative)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, test := range []struct {
 		name string
 		data []byte
@@ -103,6 +135,8 @@ func TestDecodeWorkerStartupRejectsInvalidInput(t *testing.T) {
 		{"unselected", unselectedBytes},
 		{"incomplete", incompleteBytes},
 		{"unused provider key", unusedKeyBytes},
+		{"conflicting Codex auth", conflictingCodexBytes},
+		{"invalid native Codex auth", invalidNativeBytes},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if _, err := decodeWorkerStartup(bytes.NewReader(test.data)); err == nil || strings.Contains(err.Error(), startup.CodexAPIKey) || strings.Contains(err.Error(), startup.ClaudeAPIKey) {
@@ -125,6 +159,13 @@ func TestEncodeWorkerStartupRejectsInvalidInput(t *testing.T) {
 		{"missing endpoint", func(s *WorkerStartup) { s.SocketPath = "" }},
 		{"unselected", func(s *WorkerStartup) { s.Selection = WorkerSelection{} }},
 		{"unused provider key", func(s *WorkerStartup) { s.Selection.Critic = nil }},
+		{"unused native Codex key", func(s *WorkerStartup) {
+			s.Selection.Main.Provider, s.Selection.Critic = "claude", nil
+			s.CodexAPIKey = ""
+			s.CodexNativeAPIKey = "private-native-key"
+		}},
+		{"conflicting Codex auth", func(s *WorkerStartup) { s.CodexNativeAPIKey = "private-native-key" }},
+		{"invalid native Codex auth", func(s *WorkerStartup) { s.CodexAPIKey, s.CodexNativeAPIKey = "", "private key" }},
 		{"oversized", func(s *WorkerStartup) { s.CodexAPIKey = strings.Repeat("x", workerStartupBytes) }},
 		{"aggregate provider keys", func(s *WorkerStartup) {
 			key := strings.Repeat("x", workerStartupBytes/2)

@@ -59,8 +59,8 @@ func (c *httpDeadlineAfterCheck) Err() error {
 	return nil
 }
 
-func newHTTPServerTest(t *testing.T, ctx context.Context, job Job, sink Checkpoints, wrap func(http.Handler) http.Handler) *httpServerTest {
-	return newHTTPServerTestWithServer(t, ctx, job, sink, wrap, httptest.NewServer)
+func newHTTPServerTest(t *testing.T, ctx context.Context, job Job, sink Checkpoints, wrap func(http.Handler) http.Handler, credentials ...WorkerCredentials) *httpServerTest {
+	return newHTTPServerTestWithServer(t, ctx, job, sink, wrap, httptest.NewServer, credentials...)
 }
 
 func newHTTPServerTestInMemory(t *testing.T, ctx context.Context, job Job, sink Checkpoints) *httpServerTest {
@@ -69,11 +69,16 @@ func newHTTPServerTestInMemory(t *testing.T, ctx context.Context, job Job, sink 
 	})
 }
 
-func newHTTPServerTestWithServer(t *testing.T, ctx context.Context, job Job, sink Checkpoints, wrap func(http.Handler) http.Handler, newServer func(http.Handler) *httptest.Server) *httpServerTest {
+func newHTTPServerTestWithServer(t *testing.T, ctx context.Context, job Job, sink Checkpoints, wrap func(http.Handler) http.Handler, newServer func(http.Handler) *httptest.Server, credentials ...WorkerCredentials) *httpServerTest {
 	t.Helper()
 	executor, err := NewHTTPExecutor(job.Identity.ExecutorID)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if len(credentials) > 0 {
+		if err := executor.SetWorkerCredentials(credentials[0]); err != nil {
+			t.Fatal(err)
+		}
 	}
 	var handler http.Handler = executor
 	if wrap != nil {

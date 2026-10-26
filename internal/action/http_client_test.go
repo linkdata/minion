@@ -309,7 +309,7 @@ func TestHTTPClientRequiresExactAcknowledgementAndNeverRetries(t *testing.T) {
 }
 
 func TestRunHTTPRejectsAssignmentBeforeWatchOrRunner(t *testing.T) {
-	for _, name := range []string{"version", "executor", "HTTP 202", "HTTP 206", "expired", "expired outcome ACK lost", "missing budget", "negative pull wait", "inflated pull wait", "trailing JSON"} {
+	for _, name := range []string{"version", "executor", "unselected credential", "mixed credential", "HTTP 202", "HTTP 206", "expired", "expired outcome ACK lost", "missing budget", "negative pull wait", "inflated pull wait", "trailing JSON"} {
 		t.Run(name, func(t *testing.T) {
 			job := testJob(command.Comment)
 			assignment := httpAssignment{Job: job}
@@ -318,6 +318,11 @@ func TestRunHTTPRejectsAssignmentBeforeWatchOrRunner(t *testing.T) {
 				assignment.Job.Version++
 			case "executor":
 				assignment.Job.Identity.ExecutorID = "foreign"
+			case "unselected credential":
+				assignment.Credentials.ClaudeAPIKey = "private-claude-key"
+			case "mixed credential":
+				assignment.Credentials.CodexAPIKey = "configured-key"
+				assignment.Credentials.CodexNativeAPIKey = "native-key"
 			case "expired", "expired outcome ACK lost":
 				assignment.Job.RuntimeBudget = time.Nanosecond
 			case "missing budget":

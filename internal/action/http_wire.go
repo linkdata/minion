@@ -154,3 +154,16 @@ func httpJobBound(job Job) int64 {
 	}
 	return size
 }
+
+// httpAssignmentBound adds worst-case JSON escaping for per-job credentials.
+// httpJobBound already reserves space for assignment field names and scalars.
+func httpAssignmentBound(job Job, credentials WorkerCredentials) int64 {
+	size := httpJobBound(job)
+	for _, value := range []string{credentials.CodexAPIKey, credentials.CodexNativeAPIKey, credentials.CodexAccessToken, credentials.ClaudeAPIKey} {
+		if int64(len(value)) > (math.MaxInt64-size)/6 {
+			return math.MaxInt64
+		}
+		size += 6 * int64(len(value))
+	}
+	return size
+}

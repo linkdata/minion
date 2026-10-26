@@ -95,6 +95,9 @@ type CodexConfig struct {
 	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 	// APIKey overrides environment credentials and stored login when nonempty.
 	APIKey string `json:"api_key,omitempty"`
+	// NativeAPIKey and NativeAccessToken carry environment authentication without config serialization.
+	NativeAPIKey      string `json:"-"`
+	NativeAccessToken string `json:"-"`
 	// Skills contains installed paths selected by the application, not config JSON.
 	Skills []string `json:"-"`
 	// ReadOnlyDirs identifies application-selected evidence kept outside writable roots.

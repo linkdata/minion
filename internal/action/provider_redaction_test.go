@@ -17,14 +17,23 @@ import (
 	"github.com/linkdata/minion/internal/monitor"
 )
 
-func TestNativeProposalRedactsEncodedConfiguredKey(t *testing.T) {
-	for _, provider := range []string{"codex", "claude"} {
+func TestNativeProposalRedactsEncodedProviderCredential(t *testing.T) {
+	for _, auth := range []struct {
+		name, provider string
+		set            func(*Runner, string)
+	}{
+		{"codex configured", "codex", func(r *Runner, key string) { r.Codex.APIKey = key }},
+		{"codex native API key", "codex", func(r *Runner, key string) { r.Codex.NativeAPIKey = key }},
+		{"codex native access token", "codex", func(r *Runner, key string) { r.Codex.NativeAccessToken = key }},
+		{"claude configured", "claude", func(r *Runner, key string) { r.Claude.APIKey = key }},
+	} {
 		for _, tc := range []struct{ name, key string }{
 			{"quote", `fixture"secret`},
 			{"backslash", `fixture\secret`},
 			{"JSON HTML escape", "fixture<secret"},
 		} {
-			t.Run(provider+"/"+tc.name, func(t *testing.T) {
+			t.Run(auth.name+"/"+tc.name, func(t *testing.T) {
+				provider := auth.provider
 				t.Setenv("HOME", t.TempDir())
 				t.Setenv("CODEX_HOME", t.TempDir())
 				t.Setenv("CLAUDE_CONFIG_DIR", "")
@@ -65,11 +74,7 @@ done
 					}
 				})
 				runner := Runner{}
-				if provider == "codex" {
-					runner.Codex.APIKey = tc.key
-				} else {
-					runner.Claude.APIKey = tc.key
-				}
+				auth.set(&runner, tc.key)
 				result, err := runner.runNative(t.Context(), modelRun{session: &session, provider: provider, dir: t.TempDir(), prompt: mainPrompt("inert fixture"), outputSchema: mainOutputSchema})
 				if err != nil {
 					t.Fatal(err)
@@ -80,6 +85,16 @@ done
 				}
 			})
 		}
+	}
+}
+
+func TestActionRedactsOverlappingNativeCredentials(t *testing.T) {
+	runner := Runner{Codex: config.CodexConfig{NativeAPIKey: "shared-secret", NativeAccessToken: "prefix-shared-secret-suffix"}}
+	if got := redactActionText("prefix-shared-secret-suffix", runner.secretValues()...); got != "[redacted]" {
+		t.Fatalf("overlapping native credential left a fragment: %q", got)
+	}
+	if err := redactActionError(errors.New("prefix-shared-secret-suffix"), runner.secretValues()...); err == nil || err.Error() != "[redacted]" {
+		t.Fatalf("overlapping native credential escaped error: %v", err)
 	}
 }
 

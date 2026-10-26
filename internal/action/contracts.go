@@ -18,7 +18,7 @@ import (
 )
 
 // ProtocolVersion identifies the versioned Job, Result, and Status contracts.
-const ProtocolVersion = 9
+const ProtocolVersion = 10
 
 const (
 	maxDiagnostics            = 100
