@@ -15,7 +15,7 @@ import (
 
 // Session owns one action role's stable scratch paths and native conversation.
 // Its zero value is ready to use. Calls must be serialized, followed by Close.
-// Native transcripts retain the CLI's normal private persistence policy.
+// Close removes verified rollouts created by this session from the native home.
 type Session struct {
 	bound, used, reset, skillsReady   bool
 	workspace, binary, home, output   string
@@ -26,6 +26,9 @@ type Session struct {
 	skillPaths                        []string
 	threadID                          string
 	accounting                        usageSession
+	excludedRollouts                  map[string]bool
+	ownedRollouts                     map[string]ownedRollout
+	rolloutDiscoveryErr               error
 }
 
 // NewConversation makes the next invocation fresh, at the same stable paths.
@@ -36,9 +39,9 @@ func (s *Session) NewConversation() {
 	s.reset = s.runtimeDir != ""
 }
 
-// Close removes owned scratch and embedded skills, but never native transcripts.
+// Close removes owned scratch, embedded skills and verified native rollouts.
 func (s *Session) Close() error {
-	var err error
+	err := s.cleanupRollouts()
 	for _, owned := range []struct {
 		path  *string
 		label string

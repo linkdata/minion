@@ -1,0 +1,303 @@
+package codexcli
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io/fs"
+	"maps"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"time"
+)
+
+type ownedRollout struct {
+	meta rolloutMeta
+	info os.FileInfo
+}
+
+// Inventory paths in the usage discovery window, including nonregular entries.
+func rolloutPaths(ctx context.Context, home string, started time.Time) (map[string]bool, error) {
+	root := filepath.Join(home, "sessions")
+	info, err := os.Lstat(root)
+	if errors.Is(err, os.ErrNotExist) {
+		return map[string]bool{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !info.IsDir() {
+		return nil, errors.New("sessions path is not a directory")
+	}
+	paths := map[string]bool{}
+	entries := 0
+	err = walkUsageFiles(ctx, root, started, func(path string, entry fs.DirEntry) error {
+		entries++
+		if entries > maxUsageWalkEntries {
+			return fs.SkipAll
+		}
+		if strings.HasSuffix(entry.Name(), ".jsonl") {
+			paths[path] = true
+		}
+		return nil
+	})
+	if errors.Is(err, fs.SkipAll) {
+		err = fmt.Errorf("rollout path inventory exceeded %d entries", maxUsageWalkEntries)
+	}
+	return paths, err
+}
+
+func rolloutFileInfo(home, path string) (os.FileInfo, error) {
+	root := filepath.Join(home, "sessions")
+	rel, err := filepath.Rel(root, path)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || !strings.HasSuffix(path, ".jsonl") {
+		return nil, errors.New("rollout path is outside sessions")
+	}
+	for dir := filepath.Dir(path); ; dir = filepath.Dir(dir) {
+		info, err := os.Lstat(dir)
+		if err != nil {
+			return nil, err
+		}
+		if !info.IsDir() {
+			return nil, errors.New("rollout parent is not a directory")
+		}
+		if dir == root {
+			break
+		}
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, errors.New("rollout is not a regular file")
+	}
+	return info, nil
+}
+
+func sameRolloutMeta(a, b rolloutMeta) bool {
+	if a.ID != b.ID || a.SessionID != b.SessionID || a.ParentID != b.ParentID {
+		return false
+	}
+	return a.HistoryStart == nil && b.HistoryStart == nil || a.HistoryStart != nil && b.HistoryStart != nil && *a.HistoryStart == *b.HistoryStart
+}
+
+// Usage discovery can be incomplete because an unrelated recent header is malformed.
+func cleanupHeaderFiles(paths map[string]bool, started time.Time, owned map[string]ownedRollout) (map[string]rolloutMeta, map[string]bool, error) {
+	files, ambiguous := map[string]rolloutMeta{}, map[string]bool{}
+	budget := int64(maxUsageScanBytes)
+	allPaths := maps.Clone(paths)
+	for path := range owned {
+		allPaths[path] = true
+	}
+	for _, path := range slices.Sorted(maps.Keys(allPaths)) {
+		info, err := os.Lstat(path)
+		if err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		if _, known := owned[path]; !known && info.ModTime().Before(started.Add(-time.Minute)) {
+			continue
+		}
+		budget -= min(info.Size(), maxUsageHeaderBytes)
+		if budget < 0 {
+			return nil, nil, errors.New("rollout header scan exceeded byte limit")
+		}
+		meta, err := readRolloutHeader(path)
+		if err != nil {
+			continue
+		}
+		if _, exists := files[meta.ID]; exists {
+			ambiguous[meta.ID] = true
+		} else {
+			files[meta.ID] = meta
+		}
+	}
+	return files, ambiguous, nil
+}
+
+func (s *Session) admitRollouts(rootID string, started time.Time, paths map[string]bool) {
+	if rootID == "" {
+		return
+	}
+	rootInfo, err := os.Lstat(filepath.Join(s.home, "sessions"))
+	if errors.Is(err, os.ErrNotExist) {
+		return
+	}
+	if err != nil {
+		s.rolloutDiscoveryErr = errors.Join(s.rolloutDiscoveryErr, fmt.Errorf("codex exec: inspect rollout sessions under %q: %w", s.home, err))
+		return
+	}
+	if !rootInfo.IsDir() {
+		s.rolloutDiscoveryErr = errors.Join(s.rolloutDiscoveryErr, fmt.Errorf("codex exec: rollout sessions is not a directory at %q", filepath.Join(s.home, "sessions")))
+		return
+	}
+	files, ambiguous, complete := usageFiles(context.Background(), s.home, rootID, started, s.accounting.known)
+	if !complete {
+		var err error
+		files, ambiguous, err = cleanupHeaderFiles(paths, started, s.ownedRollouts)
+		if err != nil {
+			s.rolloutDiscoveryErr = errors.Join(s.rolloutDiscoveryErr, fmt.Errorf("codex exec: inspect rollouts under %q: %w", filepath.Join(s.home, "sessions"), err))
+			return
+		}
+	}
+	root, exists := files[rootID]
+	if !exists {
+		return
+	}
+	_, rootOwned := s.ownedRollouts[root.path]
+	if s.excludedRollouts[root.path] && !rootOwned {
+		return
+	}
+	if ambiguous[rootID] || root.duplicate || root.ParentID != "" || root.SessionID != "" && root.SessionID != rootID {
+		return
+	}
+	selected := map[string]rolloutMeta{rootID: root}
+	for changed := true; changed; {
+		changed = false
+		for id, meta := range files {
+			if id == rootID || ambiguous[id] || meta.duplicate || meta.SessionID != "" && meta.SessionID != rootID {
+				continue
+			}
+			if _, known := selected[id]; known {
+				continue
+			}
+			_, parent := selected[meta.ParentID]
+			if meta.ParentID == "" && meta.SessionID == rootID || meta.ParentID != "" && parent {
+				selected[id], changed = meta, true
+			}
+		}
+	}
+	if s.ownedRollouts == nil {
+		s.ownedRollouts = map[string]ownedRollout{}
+	}
+	for id, meta := range selected {
+		if ambiguous[id] {
+			continue
+		}
+		if _, alreadyOwned := s.ownedRollouts[meta.path]; alreadyOwned {
+			continue
+		}
+		if s.excludedRollouts[meta.path] {
+			continue
+		}
+		info, err := rolloutFileInfo(s.home, meta.path)
+		if err != nil {
+			continue
+		}
+		header, err := readRolloutHeader(meta.path)
+		if err != nil || !sameRolloutMeta(meta, header) {
+			continue
+		}
+		s.ownedRollouts[meta.path] = ownedRollout{meta: meta, info: info}
+	}
+}
+
+func (s *Session) reportUnownedNewRollouts(paths map[string]bool, rootID string, children []string, spawns map[string]bool) {
+	newPaths := []string{}
+	for _, path := range slices.Sorted(maps.Keys(paths)) {
+		if s.excludedRollouts[path] {
+			continue
+		}
+		if _, owned := s.ownedRollouts[path]; !owned {
+			newPaths = append(newPaths, path)
+		}
+	}
+	if len(newPaths) > maxUsageFiles {
+		s.rolloutDiscoveryErr = errors.Join(s.rolloutDiscoveryErr, fmt.Errorf("codex exec: inspect new rollouts under %q: file limit exceeded", filepath.Join(s.home, "sessions")))
+		return
+	}
+	if rootID == "" && len(children) == 0 && len(spawns) == 0 {
+		// A failed call without an identity cannot distinguish its rollouts from concurrent ones.
+		for _, path := range newPaths {
+			s.rolloutDiscoveryErr = errors.Join(s.rolloutDiscoveryErr, fmt.Errorf("codex exec: rollout cleanup requires operator recovery at %q: thread identity missing", path))
+		}
+		return
+	}
+	linked := map[string]bool{}
+	if rootID != "" {
+		linked[rootID] = true
+	}
+	for _, id := range children {
+		linked[id] = true
+	}
+	for id := range spawns {
+		linked[id] = true
+	}
+	for changed := true; changed; {
+		changed = false
+		for _, owned := range s.ownedRollouts {
+			meta := owned.meta
+			if !linked[meta.ID] && (meta.ID == rootID || rootID != "" && meta.SessionID == rootID || meta.ParentID != "" && linked[meta.ParentID]) {
+				linked[meta.ID], changed = true, true
+			}
+		}
+	}
+	metas := map[string]rolloutMeta{}
+	unknown := []string{}
+	for _, path := range newPaths {
+		info, err := os.Lstat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err == nil && info.Mode().IsRegular() {
+			if meta, readErr := readRolloutHeader(path); readErr == nil {
+				metas[path] = meta
+				continue
+			}
+		}
+		unknown = append(unknown, path)
+	}
+	for changed := true; changed; {
+		changed = false
+		for path, meta := range metas {
+			if linked[meta.ID] || rootID != "" && meta.SessionID == rootID || meta.ParentID != "" && linked[meta.ParentID] {
+				if !linked[meta.ID] {
+					linked[meta.ID], changed = true, true
+				}
+				s.rolloutDiscoveryErr = errors.Join(s.rolloutDiscoveryErr, fmt.Errorf("codex exec: rollout cleanup requires operator recovery at %q: ownership unverified", path))
+				delete(metas, path)
+			}
+		}
+	}
+	for _, path := range unknown {
+		name := strings.TrimSuffix(filepath.Base(path), ".jsonl")
+		for id := range linked {
+			if strings.HasSuffix(name, "-"+id) {
+				s.rolloutDiscoveryErr = errors.Join(s.rolloutDiscoveryErr, fmt.Errorf("codex exec: rollout cleanup requires operator recovery at %q: ownership unverified", path))
+				break
+			}
+		}
+	}
+}
+
+func (s *Session) cleanupRollouts() error {
+	if len(s.ownedRollouts) == 0 {
+		return s.rolloutDiscoveryErr
+	}
+	var result error = s.rolloutDiscoveryErr
+	for _, path := range slices.Sorted(maps.Keys(s.ownedRollouts)) {
+		owned := s.ownedRollouts[path]
+		info, err := rolloutFileInfo(s.home, path)
+		if errors.Is(err, os.ErrNotExist) {
+			delete(s.ownedRollouts, path)
+			continue
+		}
+		if err != nil || !os.SameFile(info, owned.info) {
+			result = errors.Join(result, fmt.Errorf("codex exec: rollout cleanup requires operator recovery at %q: identity changed", path), err)
+			continue
+		}
+		header, err := readRolloutHeader(path)
+		if err != nil || !sameRolloutMeta(header, owned.meta) {
+			result = errors.Join(result, fmt.Errorf("codex exec: rollout cleanup requires operator recovery at %q: header changed", path), err)
+			continue
+		}
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			result = errors.Join(result, fmt.Errorf("codex exec: remove rollout %q: %w", path, err))
+			continue
+		}
+		delete(s.ownedRollouts, path)
+	}
+	return result
+}
