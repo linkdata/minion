@@ -575,10 +575,14 @@ func TestLocalWorkerCloseKeepsHTTPSForRepullBetweenJobs(t *testing.T) {
 			t.Fatal("worker close did not stop assignments")
 		}
 	}
+	observe := time.NewTimer(50 * time.Millisecond)
+	defer observe.Stop()
 	select {
 	case <-w.endpoint.serveDone:
 		t.Fatal("HTTPS stopped before the worker could repull")
-	default:
+	case <-observe.C:
+	case <-ctx.Done():
+		t.Fatal("worker close did not leave time to repull")
 	}
 	release()
 	select {
