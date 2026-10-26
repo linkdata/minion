@@ -24,7 +24,7 @@ import (
 func TestWorkerDiagnosticsStayInPrivateAttemptRecord(t *testing.T) {
 	job := testJob(command.Comment)
 	result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head,
-		Diagnostics: []Diagnostic{{Code: "SECRET_CODE_123", Message: "SECRET cleanup\nFORGED ENTRY"}}}
+		Diagnostics: []Diagnostic{{Code: "cleanup_failed", Message: "Execution workspace cleanup failed; operator attention is required."}, {Code: "cleanup_recovery", Message: "SECRET cleanup\nFORGED ENTRY"}}}
 	var journal bytes.Buffer
 	owner := Orchestrator{WorkRoot: t.TempDir(), Logger: log.New(&journal, "", 0)}
 	failure := (&httpFailure{Message: "SECRET failure\nFORGED ENTRY", Unsafe: true}).workerErr()
@@ -38,7 +38,7 @@ func TestWorkerDiagnosticsStayInPrivateAttemptRecord(t *testing.T) {
 	}
 	loggedPath := filepath.Join(canonicalRoot, "worker-diagnostics", job.Identity.AttemptID+".json")
 	if strings.Contains(journal.String(), "SECRET") || strings.Contains(journal.String(), "FORGED") ||
-		!strings.Contains(journal.String(), "count=1") || !strings.Contains(journal.String(), fmt.Sprintf("private_path=%q", loggedPath)) {
+		!strings.Contains(journal.String(), "count=2") || !strings.Contains(journal.String(), fmt.Sprintf("private_path=%q", loggedPath)) {
 		t.Fatalf("worker text reached journal or record location is hidden: %q", journal.String())
 	}
 	data, err := os.ReadFile(path)
@@ -51,7 +51,7 @@ func TestWorkerDiagnosticsStayInPrivateAttemptRecord(t *testing.T) {
 	}
 	if record.Identity != job.Identity || record.SourceRef != job.Source.Head ||
 		!reflect.DeepEqual(record.WorkerReportedFailure, &httpFailure{Message: "SECRET failure\nFORGED ENTRY", Unsafe: true}) ||
-		len(record.WorkerReportedDiagnostics) != 1 || record.WorkerReportedDiagnostics[0] != result.Diagnostics[0] {
+		!reflect.DeepEqual(record.WorkerReportedDiagnostics, result.Diagnostics) {
 		t.Fatalf("private worker evidence changed: record=%+v", record)
 	}
 	if info, err := os.Stat(path); err != nil || !info.Mode().IsRegular() || runtime.GOOS != "windows" && info.Mode().Perm() != 0600 {
@@ -63,7 +63,7 @@ func TestWorkerDiagnosticsStayInPrivateAttemptRecord(t *testing.T) {
 	if err := owner.retainWorkerDiagnostics(job, result, failure); err != nil {
 		t.Fatalf("same attempt changed its private record: %v", err)
 	}
-	result.Diagnostics[0].Message = "different report"
+	result.Diagnostics[1].Message = "different report"
 	if err := owner.retainWorkerDiagnostics(job, result, failure); !errors.Is(err, monitor.ErrTerminalJob) {
 		t.Fatalf("conflicting worker record was accepted: %v", err)
 	}

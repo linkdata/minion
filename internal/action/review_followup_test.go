@@ -29,6 +29,10 @@ func TestRunnerNativeCleanupKeepsAcceptedAnswer(t *testing.T) {
 	for _, provider := range []string{"codex", "claude"} {
 		for _, recovers := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/recover=%t", provider, recovers), func(t *testing.T) {
+				crossProviderSecret := "remove temporary directory"
+				if provider == "claude" {
+					crossProviderSecret = "claude cleanup"
+				}
 				installActionTestSkills(t)
 				t.Setenv("CODEX_HOME", t.TempDir())
 				for _, key := range []string{"CLAUDE_CONFIG_DIR", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"} {
@@ -54,6 +58,11 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"terminal_r
 				job := testJob(command.Comment)
 				job.Main.Provider = provider
 				runner := Runner{WorkRoot: root, Claude: config.ClaudeConfig{APIKey: "inert-test-key"}}
+				if provider == "codex" {
+					runner.Claude.APIKey = crossProviderSecret
+				} else {
+					runner.Codex.NativeAPIKey = crossProviderSecret
+				}
 				journal := &cleanupRetryLog{root: root}
 				removed := 0
 				if !recovers {
@@ -89,31 +98,38 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"terminal_r
 					t.Fatalf("session cleanup discarded accepted result: %+v,%v", result, err)
 				}
 				if journal.err != nil || strings.Count(journal.String(), "model session cleanup retry scheduled") != 1 {
-					t.Fatalf("session cleanup retry was not exercised: %v, %q", journal.err, journal.String())
+					t.Fatal("session cleanup retry was not exercised")
 				}
 				if recovers {
-					if len(result.Diagnostics) != 0 {
+					if len(result.Diagnostics) != 0 || strings.Contains(journal.String(), "model session cleanup failed") {
 						t.Fatalf("cleanup retry did not recover: %+v,%v", result, journal.err)
 					}
 					if entries, err := os.ReadDir(root); err != nil || len(entries) != 0 {
 						t.Fatalf("recovered cleanup left paths: %v,%v", entries, err)
 					}
 				} else {
-					if len(result.Diagnostics) != 1 || result.Diagnostics[0].Code != "cleanup_failed" {
-						t.Fatalf("persistent cleanup was not reported: %+v", result.Diagnostics)
+					if len(result.Diagnostics) != 2 || result.Diagnostics[0] != (Diagnostic{Code: "cleanup_failed", Message: "Execution workspace cleanup failed; operator attention is required."}) || result.Diagnostics[1].Code != "cleanup_recovery" {
+						t.Fatal("persistent cleanup was not reported generically")
 					}
 					entries, err := os.ReadDir(root)
 					if err != nil {
 						t.Fatal(err)
 					}
-					found := false
+					retained := ""
 					for _, entry := range entries {
 						if strings.HasPrefix(entry.Name(), ".minion-"+provider+"-") {
-							found = true
+							retained = filepath.Join(root, entry.Name())
 						}
 					}
-					if !found {
+					if retained == "" {
 						t.Fatalf("native cleanup failure was not exercised: %v", entries)
+					}
+					logText := journal.String()
+					if !strings.Contains(logText, "model session cleanup failed job="+job.Identity.JobID+" attempt="+job.Identity.AttemptID) || strings.Contains(logText, retained) || strings.Contains(logText, crossProviderSecret) {
+						t.Fatal("persistent cleanup log missed the failure or exposed private detail")
+					}
+					if !strings.Contains(result.Diagnostics[1].Message, retained) || !strings.Contains(result.Diagnostics[1].Message, "[redacted]") || strings.Contains(result.Diagnostics[1].Message, crossProviderSecret) {
+						t.Fatal("private cleanup diagnostic lost retained path or leaked credential")
 					}
 				}
 			})

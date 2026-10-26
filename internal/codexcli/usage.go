@@ -65,7 +65,7 @@ type rolloutEvent struct {
 	Payload json.RawMessage `json:"payload"`
 }
 
-func collectUsageFiles(ctx context.Context, rootID string, fallback *usage.Tokens, expectedChildren []string, files map[string]rolloutMeta, ambiguous map[string]bool, complete bool) (usage.Tokens, bool, error) {
+func collectUsageFiles(ctx context.Context, rootID string, fallback *usage.Tokens, expectedChildren []string, files map[string]rolloutMeta, ambiguous map[string]bool, complete bool, spawned map[string]bool) (usage.Tokens, bool, error) {
 	var total usage.Tokens
 	if rootID == "" || ctx.Err() != nil || ambiguous[rootID] {
 		if fallback != nil {
@@ -123,7 +123,7 @@ func collectUsageFiles(ctx context.Context, rootID string, fallback *usage.Token
 			}
 			continue
 		}
-		tokens, ok, children, workError := readRolloutUsage(ctx, meta, rootID, &budget)
+		tokens, ok, children, workError := readRolloutUsageFrom(ctx, meta, rootID, &budget, rolloutUsageMode{spawned: spawned})
 		childError = joinUsageErrors(childError, workError)
 		for _, child := range children {
 			_, selectedChild := selected[child]
@@ -168,37 +168,13 @@ func usageFiles(ctx context.Context, home, rootID string, started time.Time, kno
 			complete = false
 			return
 		}
-		f, err := os.Open(path)
+		meta, err := readRolloutHeader(path)
 		if err != nil {
 			complete = false
+		}
+		if meta.ID == "" {
 			return
 		}
-		scanner := bufio.NewScanner(io.LimitReader(f, maxUsageHeaderBytes+1))
-		scanner.Buffer(make([]byte, 4096), maxUsageHeaderBytes+2)
-		var event rolloutEvent
-		var meta rolloutMeta
-		ok := scanner.Scan() && len(scanner.Bytes()) <= maxUsageHeaderBytes && json.Unmarshal(scanner.Bytes(), &event) == nil && event.Type == "session_meta" && json.Unmarshal(event.Payload, &meta) == nil && meta.ID != "" && scanner.Err() == nil
-		if err := f.Close(); err != nil {
-			complete = false
-		}
-		if !ok {
-			complete = false
-			return
-		}
-		if meta.ParentID == "" {
-			var source struct {
-				Subagent struct {
-					Spawn struct {
-						ParentID string `json:"parent_thread_id"`
-					} `json:"thread_spawn"`
-				} `json:"subagent"`
-			}
-			if json.Unmarshal(meta.Source, &source) == nil {
-				meta.ParentID = source.Subagent.Spawn.ParentID
-			}
-		}
-		meta.Source = nil
-		meta.path = path
 		if expectedID != "" {
 			before := known[expectedID]
 			meta.duplicate = before.duplicate
@@ -263,6 +239,40 @@ func usageFiles(ctx context.Context, home, rootID string, started time.Time, kno
 		}
 	}
 	return files, ambiguous, complete && ctx.Err() == nil
+}
+
+func readRolloutHeader(path string) (meta rolloutMeta, err error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return meta, err
+	}
+	return readRolloutHeaderFrom(f, path)
+}
+
+func readRolloutHeaderFrom(f io.ReadCloser, path string) (meta rolloutMeta, err error) {
+	scanner := bufio.NewScanner(io.LimitReader(f, maxUsageHeaderBytes+1))
+	scanner.Buffer(make([]byte, 4096), maxUsageHeaderBytes+2)
+	var event rolloutEvent
+	ok := scanner.Scan() && len(scanner.Bytes()) <= maxUsageHeaderBytes && json.Unmarshal(scanner.Bytes(), &event) == nil && event.Type == "session_meta" && json.Unmarshal(event.Payload, &meta) == nil && meta.ID != "" && scanner.Err() == nil
+	closeErr := f.Close()
+	if !ok {
+		return rolloutMeta{}, errors.Join(errors.New("invalid rollout header"), closeErr)
+	}
+	if meta.ParentID == "" {
+		var source struct {
+			Subagent struct {
+				Spawn struct {
+					ParentID string `json:"parent_thread_id"`
+				} `json:"thread_spawn"`
+			} `json:"subagent"`
+		}
+		if json.Unmarshal(meta.Source, &source) == nil {
+			meta.ParentID = source.Subagent.Spawn.ParentID
+		}
+	}
+	meta.Source = nil
+	meta.path = path
+	return meta, closeErr
 }
 
 // ReadDir with a positive count keeps a single large directory from being

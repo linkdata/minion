@@ -72,6 +72,7 @@ type usageSession struct {
 	known            map[string]rolloutMeta
 	before           map[string]*usageBoundary
 	baselineComplete bool
+	provedSpawns     map[string]bool
 }
 
 func ownedUsageFiles(files map[string]rolloutMeta, rootID string) map[string]rolloutMeta {
@@ -99,6 +100,7 @@ func ownedUsageFiles(files map[string]rolloutMeta, rootID string) map[string]rol
 // lifetime baseline or rejecting a call before its provider runs.
 func (s *usageSession) begin(ctx context.Context, home, rootID string, started time.Time) {
 	s.before = nil
+	s.provedSpawns = nil
 	budget := int64(maxUsageScanBytes)
 	s.baselineComplete = true
 	if rootID == "" {
@@ -133,10 +135,16 @@ func (s *usageSession) begin(ctx context.Context, home, rootID string, started t
 
 func (s *usageSession) collectUsage(ctx context.Context, home, rootID string, started time.Time, fallback *usage.Tokens, expectedChildren []string, observationOnly map[string]bool, currentSpawns ...map[string]bool) (usage.Tokens, bool, error) {
 	defer func() { s.before = nil }()
+	s.provedSpawns = nil
 	if s.before == nil {
 		files, ambiguous, complete := usageFiles(ctx, home, rootID, started, nil)
-		tokens, complete, err := collectUsageFiles(ctx, rootID, fallback, expectedChildren, files, ambiguous, complete)
+		spawned := map[string]bool{}
+		if len(currentSpawns) != 0 {
+			maps.Copy(spawned, currentSpawns[0])
+		}
+		tokens, complete, err := collectUsageFiles(ctx, rootID, fallback, expectedChildren, files, ambiguous, complete, spawned)
 		s.known = ownedUsageFiles(files, rootID)
+		s.provedSpawns = spawned
 		return tokens, complete, err
 	}
 	budget := int64(maxUsageScanBytes) // Collection has its own bound after the baseline pass.
@@ -220,5 +228,6 @@ func (s *usageSession) collectUsage(ctx context.Context, home, rootID string, st
 	}
 	// Keep bounded lifetime ownership, including unresolved known identities, for the next invocation.
 	s.known = owned
+	s.provedSpawns = spawned
 	return total, complete && ctx.Err() == nil, childError
 }

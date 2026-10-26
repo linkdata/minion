@@ -145,6 +145,7 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 	}
 	owned := []string{source}
 	cleanupFailed := false
+	var cleanupDetail string
 	// Remove owned paths after sessions, report collection, and review snapshots close.
 	defer func() {
 		failed := cleanupFailed
@@ -155,6 +156,9 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 		}
 		if failed {
 			result.Diagnostics = append(result.Diagnostics, Diagnostic{Code: "cleanup_failed", Message: "Execution workspace cleanup failed; operator attention is required."})
+			if cleanupDetail != "" {
+				result.Diagnostics = append(result.Diagnostics, Diagnostic{Code: "cleanup_recovery", Message: cleanupDetail})
+			}
 		}
 	}()
 	contextDir, err := os.MkdirTemp(workRoot, ".minion-context-")
@@ -348,7 +352,11 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 	defer func() {
 		if err := sessions.close(); err != nil {
 			configured.logf("model session cleanup retry scheduled job=%s attempt=%s", job.Identity.JobID, job.Identity.AttemptID)
-			cleanupFailed = sessions.close() != nil
+			if err := sessions.close(); err != nil {
+				cleanupFailed = true
+				cleanupDetail = redactActionText(httpFailureDiagnostic(redactActionError(err, configured.secretValues()...).Error()), configured.secretValues()...)
+				configured.logf("model session cleanup failed job=%s attempt=%s", job.Identity.JobID, job.Identity.AttemptID)
+			}
 		}
 	}()
 	var answer string

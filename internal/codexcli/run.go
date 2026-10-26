@@ -181,8 +181,22 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	stderr := bounded.Tail{}
 	cmd.Stdout = &output
 	cmd.Stderr = &stderr
-
 	started := time.Now()
+	// Cleanup needs a complete pre-call baseline; stop before paid work if it cannot be read.
+	paths, err := rolloutPaths(ctx, codexHome, started)
+	if err != nil {
+		return result, fmt.Errorf("codex exec: inventory existing rollouts: %w", err)
+	}
+	if s.excludedRollouts == nil {
+		s.excludedRollouts = map[string]bool{}
+	}
+	for path := range paths {
+		s.excludedRollouts[path] = true
+	}
+	if err := s.disqualifyChangedRollouts(ctx); err != nil {
+		return result, fmt.Errorf("codex exec: verify prior rollouts: %w", err)
+	}
+
 	s.accounting.begin(ctx, codexHome, s.threadID, started)
 	runErr := executil.Run(cmd)
 	if cmd.Process == nil {
@@ -205,6 +219,19 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	}
 	var childError error
 	result.Tokens, result.UsageComplete, childError = s.accounting.collectUsage(ctx, codexHome, cmp.Or(output.threadID, output.expectedID), started, output.tokens, output.children, output.observationOnly, output.spawns)
+	rootID := cmp.Or(output.expectedID, output.threadID)
+	newPaths, scanErr := rolloutPaths(ctx, codexHome, started)
+	if scanErr != nil {
+		s.rolloutDiscoveryErr = errors.Join(s.rolloutDiscoveryErr, fmt.Errorf("codex exec: inspect new rollouts under %q: %w", filepath.Join(codexHome, "sessions"), scanErr))
+	} else {
+		if rootID != "" {
+			s.admitRollouts(ctx, rootID, started, newPaths, s.accounting.provedSpawns)
+		}
+		s.reportUnownedNewRollouts(ctx, newPaths, rootID, output.children, s.accounting.provedSpawns, output.conflictingID)
+	}
+	if errors.Is(runErr, exec.ErrWaitDelay) || childError != nil {
+		s.preserveOwnedRollouts("writer completion unverified")
+	}
 	defer func() {
 		if childError != nil {
 			result.Answer, result.UsageComplete = "", false
@@ -350,6 +377,7 @@ type jsonlOutput struct {
 	cancel          context.CancelFunc
 	threadID        string
 	expectedID      string
+	conflictingID   string
 	tokens          *usage.Tokens
 	children        []string
 	observationOnly map[string]bool
@@ -425,12 +453,14 @@ func (o *jsonlOutput) accept(event codexEvent) {
 	switch event.Type {
 	case "thread.started":
 		if o.expectedID != "" && event.ThreadID != "" && event.ThreadID != o.expectedID {
+			o.conflictingID = event.ThreadID
 			o.stop(errors.New("Codex resumed a different thread")) //nolint:staticcheck // -- Codex is a proper noun.
 			return
 		}
 		if o.threadID == "" {
 			o.threadID = event.ThreadID
 		} else if event.ThreadID != "" && event.ThreadID != o.threadID {
+			o.conflictingID = event.ThreadID
 			o.stop(errors.New("Codex thread identity changed within one call")) //nolint:staticcheck // -- Codex is a proper noun.
 		}
 	case "turn.started":
