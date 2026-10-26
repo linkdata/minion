@@ -2,8 +2,10 @@ package action
 
 import (
 	"bytes"
+	"context"
 	"crypto/x509"
 	"encoding/base64"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -11,6 +13,10 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/linkdata/minion/internal/command"
+	"github.com/linkdata/minion/internal/monitor"
+	"github.com/linkdata/minion/internal/usage"
 )
 
 func testLocalEndpoint(t *testing.T) (*HTTPExecutor, *LocalEndpoint) {
@@ -43,6 +49,11 @@ func TestLocalEndpointPinsOriginCertificateAndAuthorizesBeforeBody(t *testing.T)
 	u, err := url.Parse(access.BaseURL)
 	if err != nil || u.Scheme != "https" || u.Hostname() != "127.0.0.1" {
 		t.Fatalf("endpoint is not IPv4 loopback HTTPS: %q, %v", access.BaseURL, err)
+	}
+	invalidOrigin := access
+	invalidOrigin.BaseURL += "?"
+	if _, err := NewLocalExecutionClient(invalidOrigin); err == nil {
+		t.Fatal("empty query marker passed endpoint validation")
 	}
 	certificate, err := x509.ParseCertificate(access.Certificate)
 	if err != nil || certificate.NotAfter.Before(time.Now().Add(5*365*24*time.Hour)) {
@@ -154,5 +165,142 @@ func TestLocalEndpointCloseWakesHeldPull(t *testing.T) {
 	}
 	if err := endpoint.Close(); err != nil {
 		t.Fatalf("second close: %v", err)
+	}
+}
+
+func TestLocalEndpointDrainsPaidCallbackBeforeShutdown(t *testing.T) {
+	core, endpoint := testLocalEndpoint(t)
+	access := endpoint.Access()
+	client, err := NewLocalExecutionClient(access)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.CloseIdleConnections()
+	job := testJob(command.Comment)
+	entered, release := make(chan struct{}), make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	type outcome struct {
+		result Result
+		err    error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		result, err := core.Execute(ctx, job, runnerExecutionCheckpoints{after: func(CallCheckpoint) error {
+			close(entered)
+			<-release
+			return nil
+		}})
+		done <- outcome{result, err}
+	}()
+	var assignment httpAssignment
+	localTestJSON(t, client, access.BaseURL, "/next", httpPull{Version: ProtocolVersion, ExecutorID: job.Identity.ExecutorID}, &assignment, httpJobBytes)
+	if !sameAssignmentJob(job, assignment.Job) {
+		t.Fatal("HTTPS pull changed the accepted Job")
+	}
+	core.mu.Lock()
+	tx := core.active
+	core.mu.Unlock()
+	if tx == nil {
+		t.Fatal("HTTPS pull did not admit a transaction")
+	}
+	call := CallUsage{Provider: job.Main.Provider, Role: roleMain, Round: 1, Tokens: usage.Tokens{Input: 7, Output: 2}, Complete: true}
+	fact := CallCheckpoint{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Call: callMetadata(call)}
+	localTestAck(t, client, access.BaseURL, "/before", httpCall{Sequence: 1, Checkpoint: fact}, 1)
+	fact.Call = call
+	after := make(chan error, 1)
+	go func() {
+		var ack httpAcknowledgement
+		status, err := localJSON(ctx, client, access.BaseURL, "/after", httpCall{Sequence: 2, Checkpoint: fact}, &ack, httpControlBytes)
+		if err == nil && (status != http.StatusOK || ack.Sequence != 2 || ack.Failure != nil) {
+			err = errors.New("paid callback was not acknowledged")
+		}
+		after <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("paid callback was not entered")
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- endpoint.Close() }()
+	select {
+	case <-tx.budget.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("endpoint Close did not cancel the accepted transaction")
+	}
+	select {
+	case err := <-closed:
+		t.Fatalf("endpoint closed during the paid callback: %v", err)
+	default:
+	}
+	close(release)
+	select {
+	case err := <-after:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("paid callback acknowledgement did not drain")
+	}
+	want := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "known paid result", Calls: []CallUsage{call}}
+	localTestAck(t, client, access.BaseURL, "/outcome", httpOutcome{Sequence: 3, Result: want, Failure: newHTTPFailure(context.Canceled)}, 3)
+	select {
+	case got := <-done:
+		if !errors.Is(got.err, context.Canceled) || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || got.result.Answer != want.Answer || len(got.result.Calls) != 1 {
+			t.Fatalf("shutdown lost the known paid result: result=%+v error=%v", got.result, got.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("accepted result did not finish")
+	}
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("endpoint did not join after the paid result")
+	}
+}
+
+func localJSON(ctx context.Context, client *http.Client, baseURL, path string, value, result any, limit int) (int, error) {
+	data, err := httpEncode(value, limit)
+	if err != nil {
+		return 0, err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+path, bytes.NewReader(data))
+	if err != nil {
+		return 0, err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := client.Do(request)
+	if err != nil {
+		return 0, err
+	}
+	defer response.Body.Close()
+	return response.StatusCode, httpDecode(response.Body, limit, result)
+}
+
+func localTestJSON(t *testing.T, client *http.Client, baseURL, path string, value, result any, limit int) {
+	t.Helper()
+	status, err := localJSON(t.Context(), client, baseURL, path, value, result, limit)
+	if err != nil || status != http.StatusOK {
+		t.Fatalf("local HTTPS %s: status=%d error=%v", path, status, err)
+	}
+}
+
+func localTestAck(t *testing.T, client *http.Client, baseURL, path string, value any, sequence uint64) {
+	t.Helper()
+	var ack httpAcknowledgement
+	localTestJSON(t, client, baseURL, path, value, &ack, httpControlBytes)
+	if ack.Sequence != sequence || ack.Failure != nil {
+		t.Fatalf("local HTTPS %s acknowledgement: %+v", path, ack)
 	}
 }

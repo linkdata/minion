@@ -19,8 +19,6 @@ import (
 	"time"
 )
 
-const localExecutionConnectionLimit = 16
-
 // LocalEndpointAccess is trusted startup input for one direct worker.
 type LocalEndpointAccess struct {
 	BaseURL     string `json:"base_url"`
@@ -30,7 +28,7 @@ type LocalEndpointAccess struct {
 
 func (a LocalEndpointAccess) validate() error {
 	u, err := url.Parse(a.BaseURL)
-	if err != nil || u == nil || u.Scheme != "https" || u.User != nil || u.Path != "" || u.RawPath != "" || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" {
+	if err != nil || u == nil || u.Scheme != "https" || u.User != nil || u.Path != "" || u.RawPath != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.Opaque != "" {
 		return errors.New("local worker endpoint must be a loopback HTTPS origin")
 	}
 	host, port, err := net.SplitHostPort(u.Host)
@@ -57,7 +55,7 @@ func (a LocalEndpointAccess) validate() error {
 // LocalEndpoint serves the existing bounded HTTP protocol on one private TLS origin.
 type LocalEndpoint struct {
 	executor  *HTTPExecutor
-	listener  *localLimitedListener
+	listener  net.Listener
 	server    *http.Server
 	access    LocalEndpointAccess
 	serveDone chan struct{}
@@ -104,8 +102,6 @@ func ListenLocalExecution(executor *HTTPExecutor) (*LocalEndpoint, error) {
 	if err := access.validate(); err != nil {
 		return nil, errors.Join(err, listener.Close())
 	}
-	protocols := &http.Protocols{}
-	protocols.SetHTTP1(true) // One request at a time per bounded connection.
 	server := &http.Server{
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			values := r.Header.Values("Authorization")
@@ -120,14 +116,13 @@ func ListenLocalExecution(executor *HTTPExecutor) (*LocalEndpoint, error) {
 		}),
 		ReadHeaderTimeout: httpControlTimeout,
 		MaxHeaderBytes:    httpControlBytes,
-		Protocols:         protocols,
 		TLSConfig: &tls.Config{
 			MinVersion:   tls.VersionTLS13,
 			Certificates: []tls.Certificate{{Certificate: [][]byte{certificate}, PrivateKey: privateKey}},
 		},
 	}
 	e := &LocalEndpoint{
-		executor: executor, listener: &localLimitedListener{Listener: listener, slots: make(chan struct{}, localExecutionConnectionLimit)},
+		executor: executor, listener: listener,
 		server: server, access: access, serveDone: make(chan struct{}),
 	}
 	go func() {
@@ -169,38 +164,6 @@ func (e *LocalEndpoint) Close() error {
 		e.closeErr = errors.Join(coreErr, serverErr, e.serveErr)
 	})
 	return e.closeErr
-}
-
-type localLimitedListener struct {
-	net.Listener
-	slots chan struct{}
-}
-
-func (l *localLimitedListener) Accept() (net.Conn, error) {
-	for {
-		connection, err := l.Listener.Accept()
-		if err != nil {
-			return nil, err
-		}
-		select {
-		case l.slots <- struct{}{}:
-			return &localLimitedConn{Conn: connection, slots: l.slots}, nil
-		default:
-			_ = connection.Close()
-		}
-	}
-}
-
-type localLimitedConn struct {
-	net.Conn
-	slots chan struct{}
-	once  sync.Once
-}
-
-func (c *localLimitedConn) Close() error {
-	err := c.Conn.Close()
-	c.once.Do(func() { <-c.slots })
-	return err
 }
 
 type localAuthenticatedTransport struct {
