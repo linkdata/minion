@@ -5,11 +5,13 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -20,10 +22,14 @@ import (
 )
 
 // The test executable doubles as the public execute-mode child and a native
-// Codex probe. This keeps the Windows acceptance path free of shell wrappers.
+// Codex or Git fixture. This keeps the Windows acceptance path free of shell wrappers.
 func TestMain(m *testing.M) {
-	if strings.TrimSuffix(strings.ToLower(filepath.Base(os.Args[0])), ".exe") == "codex" {
+	switch strings.TrimSuffix(strings.ToLower(filepath.Base(os.Args[0])), ".exe") {
+	case "codex":
 		windowsModeCodexProbe()
+		return
+	case "git":
+		windowsModeGitProxy()
 		return
 	}
 	if os.Getenv("MINION_WINDOWS_EXECUTE_CHILD") == "1" && len(os.Args) == 2 && os.Args[1] == "-mode=execute" {
@@ -31,6 +37,25 @@ func TestMain(m *testing.M) {
 		os.Exit(run())
 	}
 	os.Exit(m.Run())
+}
+
+func windowsModeGitProxy() {
+	realGit, rewrite := os.Getenv("MINION_WINDOWS_GIT_PROXY"), os.Getenv("MINION_WINDOWS_GIT_CONFIG")
+	if realGit == "" || rewrite == "" {
+		os.Exit(99)
+	}
+	args := append([]string{"-c", "protocol.https.allow=never", "-c", "protocol.http.allow=never", "-c", "protocol.ssh.allow=never", "-c", "protocol.git.allow=never", "-c", "include.path=" + filepath.ToSlash(rewrite)}, os.Args[1:]...)
+	cmd := exec.Command(realGit, args...)
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	if err := cmd.Run(); err != nil {
+		var exit *exec.ExitError
+		if errors.As(err, &exit) {
+			os.Exit(exit.ExitCode())
+		}
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	os.Exit(0)
 }
 
 func windowsModeCodexProbe() {
@@ -80,12 +105,81 @@ func windowsModeCodexProbe() {
 				os.Exit(2)
 			}
 			if argument == "--help" {
-				fmt.Println("Usage: codex exec [OPTIONS] [PROMPT]")
+				if len(os.Args) > 2 && os.Args[2] == "resume" {
+					fmt.Println("Usage: codex exec resume [OPTIONS] [SESSION_ID] [PROMPT]")
+				} else {
+					fmt.Println("Usage: codex exec [OPTIONS] [PROMPT]")
+				}
 				return
 			}
 		}
+		binary, err := os.Executable()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(99)
+		}
+		calls, err := os.OpenFile(filepath.Join(filepath.Dir(binary), "model-calls"), os.O_WRONLY|os.O_APPEND, 0)
+		if err != nil { // An unarmed fixture must not stand in for a model call.
+			os.Exit(99)
+		}
+		if _, err := io.Copy(io.Discard, os.Stdin); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(99)
+		}
+		if _, err := io.WriteString(calls, "model\n"); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(99)
+		}
+		if err := calls.Close(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(99)
+		}
+		fmt.Println(`{"type":"thread.started","thread_id":"root"}`)
+		fmt.Println(`{"type":"item.completed","item":{"type":"agent_message","text":"No findings."}}`)
+		fmt.Println(`{"type":"turn.completed","usage":{"input_tokens":3,"cached_input_tokens":0,"output_tokens":2}}`)
+		return
 	}
 	os.Exit(99) // This fixture never starts a paid model call.
+}
+
+func windowsModeCopyExecutable(t *testing.T, dir, name string) {
+	t.Helper()
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, name+".exe"), data, 0700); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func offlineModeWorkerPath(t *testing.T, binary string) string {
+	t.Helper()
+	t.Setenv("MINION_WINDOWS_EXECUTE_CHILD", "1")
+	return binary
+}
+
+func offlineModeGitProxy(t *testing.T, realGit, rewrite string) {
+	t.Helper()
+	bin := t.TempDir()
+	windowsModeCopyExecutable(t, bin, "git")
+	t.Setenv("MINION_WINDOWS_GIT_PROXY", realGit)
+	t.Setenv("MINION_WINDOWS_GIT_CONFIG", rewrite)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func offlineModeCodex(t *testing.T, modelCalls string) {
+	t.Helper()
+	bin := filepath.Dir(modelCalls)
+	windowsModeCopyExecutable(t, bin, "codex")
+	if err := os.WriteFile(modelCalls, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
 func TestWindowsPublicExecuteModeUsesSelectedHTTPSWorker(t *testing.T) {
@@ -94,13 +188,7 @@ func TestWindowsPublicExecuteModeUsesSelectedHTTPSWorker(t *testing.T) {
 		t.Fatal(err)
 	}
 	bin := t.TempDir()
-	data, err := os.ReadFile(binary)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(bin, "codex.exe"), data, 0700); err != nil {
-		t.Fatal(err)
-	}
+	windowsModeCopyExecutable(t, bin, "codex")
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	home := t.TempDir()
 	t.Setenv("HOME", home)
