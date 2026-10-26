@@ -22,6 +22,7 @@ import (
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
+	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/usage"
 	"github.com/linkdata/minion/internal/workroot"
@@ -1624,7 +1625,7 @@ func TestHTTPExecutorCloseKeepsWatchAndPaidReceiptGraceAvailable(t *testing.T) {
 				closed := make(chan error, 1)
 				go func() { closed <- f.executor.Close() }()
 				var cancellation httpCancellation
-				if err := httpDecode(response.Body, httpControlBytes, &cancellation); err != nil || cancellation.httpBinding != f.tx.binding || cancellation.Reason != "canceled" {
+				if err := httpDecode(response.Body, httpControlBytes, &cancellation); err != nil || cancellation.httpBinding != f.tx.binding || cancellation.Reason != "canceled" || cancellation.StopRemaining <= 0 || cancellation.StopRemaining > f.tx.stopGrace {
 					t.Fatalf("Close did not deliver bound known cancellation: %+v error=%v", cancellation, err)
 				}
 				synctest.Wait()
@@ -1778,9 +1779,9 @@ func TestHTTPExecutorCloseBoundsSealedOutcomeACK(t *testing.T) {
 			t.Fatal("fixture entered an outcome rejection before sealing")
 		}
 		closed := make(chan error, 1)
+		stoppedAt := time.Now()
 		go func() { closed <- f.executor.Close() }()
 		<-f.tx.stop
-		stoppedAt := time.Now()
 		got := f.result(t)
 		if elapsed := time.Since(stoppedAt); elapsed > 2*stopBudget {
 			t.Fatalf("sealed ACK outlived explicit Close bound: %s", elapsed)
@@ -1794,8 +1795,64 @@ func TestHTTPExecutorCloseBoundsSealedOutcomeACK(t *testing.T) {
 		if ack := <-acknowledged; ack.err == nil && ack.status == http.StatusOK && ack.ack.Failure == nil {
 			t.Fatalf("blocked ACK was reported delivered: %+v", ack)
 		}
-		if _, err := f.executor.Execute(t.Context(), f.job, runnerExecutionCheckpoints{}); err == nil {
-			t.Fatal("lost ACK released worker capacity")
+		f.executor.mu.Lock()
+		unavailable := f.executor.unavailable
+		f.executor.mu.Unlock()
+		if !unavailable {
+			t.Fatal("lost ACK did not quarantine worker capacity")
+		}
+	})
+}
+
+func TestHTTPExecutorCallerCancellationBoundsSealedOutcomeACK(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		const stopBudget = 10 * time.Millisecond
+		entered := make(chan struct{})
+		f := newHTTPServerTestWithStopServer(t, ctx, testJob(command.Comment), runnerExecutionCheckpoints{},
+			func(next http.Handler) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path == "/outcome" {
+						w = &httpDeadlineHeldWrite{ResponseWriter: w, entered: entered, deadlines: make(chan time.Time, 4)}
+					}
+					next.ServeHTTP(w, r)
+				})
+			}, func(h http.Handler) *httptest.Server { return httptest.NewTestServer(t, h) }, stopBudget)
+		f.pull(t)
+		outcome := f.outcome(1, nil)
+		outcome.Result.Answer = "Sealed before caller cancellation"
+		acknowledged := make(chan httpServerTestExchange, 1)
+		go func() { acknowledged <- f.request("/outcome", outcome) }()
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("outcome did not seal before ACK write")
+		}
+		f.tx.mu.Lock()
+		sealed := f.tx.outcome
+		f.tx.mu.Unlock()
+		if !sealed {
+			t.Fatal("fixture entered an outcome rejection before sealing")
+		}
+		canceledAt := time.Now()
+		cancel()
+		<-f.tx.stop
+		got := f.result(t)
+		if elapsed := time.Since(canceledAt); elapsed > 2*stopBudget {
+			t.Fatalf("sealed ACK outlived caller cancellation bound: %s", elapsed)
+		}
+		if got.err != nil || !reflect.DeepEqual(got.result, outcome.Result) {
+			t.Fatalf("lost ACK erased sealed outcome: %+v error=%v", got.result, got.err)
+		}
+		if ack := <-acknowledged; ack.err == nil && ack.status == http.StatusOK && ack.ack.Failure == nil {
+			t.Fatalf("blocked ACK was reported delivered: %+v", ack)
+		}
+		f.executor.mu.Lock()
+		unavailable, closed := f.executor.unavailable, f.executor.closed
+		f.executor.mu.Unlock()
+		if !unavailable || closed {
+			t.Fatalf("lost ACK capacity = unavailable:%t closed:%t", unavailable, closed)
 		}
 	})
 }
@@ -1832,9 +1889,9 @@ func TestHTTPExecutorCloseBoundsCompletedWatchReason(t *testing.T) {
 			t.Fatal("completed watch reason did not enter its write")
 		}
 		closed := make(chan error, 1)
+		stoppedAt := time.Now()
 		go func() { closed <- f.executor.Close() }()
 		<-f.tx.stop
-		stoppedAt := time.Now()
 		got := f.result(t)
 		if elapsed := time.Since(stoppedAt); elapsed > 2*stopBudget {
 			t.Fatalf("completed watch reason outlived Close bound: %s", elapsed)
@@ -1892,10 +1949,13 @@ func TestHTTPExecutorShortStopBudgetDoesNotRenewForSerialControls(t *testing.T) 
 		if assignment := f.pull(t); assignment.StopGrace != stopBudget {
 			t.Fatalf("assignment stop budget = %s, want %s", assignment.StopGrace, stopBudget)
 		}
+		stoppedAt := time.Now()
 		cancel()
 		<-f.tx.stop
-		stoppedAt := time.Now()
 		for sequence := uint64(1); sequence <= 2; sequence++ {
+			if sequence == 2 {
+				time.Sleep(stopBudget - 2*time.Millisecond)
+			}
 			status := Status{Version: ProtocolVersion, Identity: f.job.Identity, SourceRef: f.job.Source.Head,
 				Sequence: sequence, WorkerState: "ready", Phase: "cleanup"}
 			want := http.StatusOK
@@ -1903,10 +1963,9 @@ func TestHTTPExecutorShortStopBudgetDoesNotRenewForSerialControls(t *testing.T) 
 				want = http.StatusConflict // A repeated ready label is invalid, but still consumes a control reply.
 			}
 			f.ack(t, "/status", httpObservation{Status: status}, want, sequence)
-			time.Sleep(3 * time.Millisecond)
 		}
 		got := f.result(t)
-		if elapsed := time.Since(stoppedAt); elapsed < stopBudget || elapsed > 2*stopBudget {
+		if elapsed := time.Since(stoppedAt); elapsed < stopBudget || elapsed > stopBudget+2*time.Millisecond {
 			t.Fatalf("serial controls changed stop budget: elapsed=%s budget=%s", elapsed, stopBudget)
 		}
 		if !errors.Is(got.err, context.Canceled) || !errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) {
@@ -1919,6 +1978,20 @@ func TestHTTPExecutorShortStopBudgetDoesNotRenewForSerialControls(t *testing.T) 
 			t.Fatal("missing outcome released worker capacity")
 		}
 	})
+}
+
+func TestHTTPExecutorRejectsInvalidStopBudgetBeforeAdmission(t *testing.T) {
+	job := testJob(command.Comment)
+	for _, stopBudget := range []time.Duration{0, -time.Nanosecond, config.MaxActionRuntime + time.Nanosecond} {
+		executor, err := NewHTTPExecutor(job.Identity.ExecutorID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		result, err := executor.ExecuteWithStop(t.Context(), stopBudget, job, runnerExecutionCheckpoints{})
+		if !errors.Is(err, monitor.ErrTerminalJob) || !result.matchesJob(job) || executor.transaction() != nil {
+			t.Fatalf("stop budget %s admitted work: result=%+v error=%v", stopBudget, result, err)
+		}
+	}
 }
 
 func TestHTTPExecutorStopContractsEnteredMutationBodyRead(t *testing.T) {
@@ -1960,9 +2033,9 @@ func TestHTTPExecutorStopContractsEnteredMutationBodyRead(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			t.Fatal("mutation did not enter its partial body read")
 		}
+		stoppedAt := time.Now()
 		cancel()
 		<-f.tx.stop
-		stoppedAt := time.Now()
 		got := f.result(t)
 		if elapsed := time.Since(stoppedAt); elapsed > 2*stopBudget {
 			t.Fatalf("entered network read outlived stop budget: %s", elapsed)
@@ -1986,9 +2059,9 @@ func TestHTTPExecutorCloseUsesSameShortStopBudget(t *testing.T) {
 			func(h http.Handler) *httptest.Server { return httptest.NewTestServer(t, h) }, stopBudget)
 		f.pull(t)
 		closed := make(chan error, 1)
+		stoppedAt := time.Now()
 		go func() { closed <- f.executor.Close() }()
 		<-f.tx.stop
-		stoppedAt := time.Now()
 		got := f.result(t)
 		if err := <-closed; err != nil {
 			t.Fatalf("Close failed: %v", err)
@@ -1998,6 +2071,37 @@ func TestHTTPExecutorCloseUsesSameShortStopBudget(t *testing.T) {
 		}
 		if !errors.Is(got.err, context.Canceled) || !errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) {
 			t.Fatalf("shutdown lost unknown outcome: %+v error=%v", got.result, got.err)
+		}
+	})
+}
+
+func TestHTTPExecutorCloseReusesCancellationStopDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		const stopBudget = 10 * time.Millisecond
+		f := newHTTPServerTestWithStopServer(t, ctx, testJob(command.Comment), runnerExecutionCheckpoints{}, nil,
+			func(h http.Handler) *httptest.Server { return httptest.NewTestServer(t, h) }, stopBudget)
+		f.pull(t)
+		canceledAt := time.Now()
+		cancel()
+		<-f.tx.stop
+		stopUntil := f.tx.controlDeadline()
+		time.Sleep(stopBudget - 2*time.Millisecond)
+		closed := make(chan error, 1)
+		go func() { closed <- f.executor.Close() }()
+		if err := <-closed; err != nil {
+			t.Fatal(err)
+		}
+		got := f.result(t)
+		if deadline := f.tx.controlDeadline(); !deadline.Equal(stopUntil) {
+			t.Fatalf("Close renewed stop deadline: first=%s later=%s", stopUntil, deadline)
+		}
+		if elapsed := time.Since(canceledAt); elapsed > stopBudget+2*time.Millisecond {
+			t.Fatalf("Close renewed cancellation budget: %s", elapsed)
+		}
+		if !errors.Is(got.err, context.Canceled) || !errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) {
+			t.Fatalf("missing final outcome changed cancellation: %+v error=%v", got.result, got.err)
 		}
 	})
 }

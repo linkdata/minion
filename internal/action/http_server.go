@@ -150,6 +150,11 @@ func (e *HTTPExecutor) execute(ctx context.Context, stopBudget time.Duration, jo
 		state.admitted = true
 	}
 	e.mu.Unlock()
+	stopWatchDone := make(chan struct{})
+	stopWatch := context.AfterFunc(budgetCtx, func() {
+		tx.forceStop()
+		close(stopWatchDone)
+	})
 	defer func() {
 		tx.mu.Lock()
 		tx.fenced = true
@@ -157,6 +162,9 @@ func (e *HTTPExecutor) execute(ctx context.Context, stopBudget time.Duration, jo
 		cancel()
 		// Saves have no context. An entered fsync must drain even after control grace expires.
 		tx.handlers.Wait()
+		if !stopWatch() {
+			<-stopWatchDone
+		}
 		tx.mu.Lock()
 		stopCancel := tx.stopCancel
 		if tx.outcome {
@@ -255,7 +263,7 @@ func (e *HTTPExecutor) Close() error {
 	e.mu.Unlock()
 	if tx != nil {
 		tx.stopBudget()
-		tx.stopForClose()
+		tx.forceStop()
 		<-tx.finished
 		tx.mu.Lock()
 		stopCancel := tx.stopCancel
@@ -545,7 +553,7 @@ func (tx *httpTransaction) stopExecution(err error, cancel bool) {
 	}
 }
 
-func (tx *httpTransaction) stopForClose() {
+func (tx *httpTransaction) forceStop() {
 	tx.mu.Lock()
 	tx.startStopLocked(true)
 	tx.mu.Unlock()
