@@ -19,6 +19,40 @@ import (
 	"time"
 )
 
+const localExecutionConnectionLimit = 16
+
+type boundedLocalListener struct {
+	net.Listener
+	slots chan struct{}
+}
+
+func (l *boundedLocalListener) Accept() (net.Conn, error) {
+	for {
+		connection, err := l.Listener.Accept()
+		if err != nil {
+			return nil, err
+		}
+		select {
+		case l.slots <- struct{}{}:
+			return &boundedLocalConn{Conn: connection, slots: l.slots}, nil
+		default:
+			_ = connection.Close()
+		}
+	}
+}
+
+type boundedLocalConn struct {
+	net.Conn
+	slots     chan struct{}
+	closeOnce sync.Once
+}
+
+func (c *boundedLocalConn) Close() error {
+	err := c.Conn.Close()
+	c.closeOnce.Do(func() { <-c.slots })
+	return err
+}
+
 // LocalEndpointAccess is trusted startup input for one direct worker.
 type LocalEndpointAccess struct {
 	BaseURL     string `json:"base_url"`
@@ -55,7 +89,7 @@ func (a LocalEndpointAccess) validate() error {
 // LocalEndpoint serves the existing bounded HTTP protocol on one private TLS origin.
 type LocalEndpoint struct {
 	executor  *HTTPExecutor
-	listener  net.Listener
+	listener  *boundedLocalListener
 	server    *http.Server
 	access    LocalEndpointAccess
 	serveDone chan struct{}
@@ -123,7 +157,7 @@ func ListenLocalExecution(executor *HTTPExecutor) (*LocalEndpoint, error) {
 		},
 	}
 	e := &LocalEndpoint{
-		executor: executor, listener: listener,
+		executor: executor, listener: &boundedLocalListener{Listener: listener, slots: make(chan struct{}, localExecutionConnectionLimit)},
 		server: server, access: access, serveDone: make(chan struct{}),
 	}
 	go func() {

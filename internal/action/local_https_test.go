@@ -121,6 +121,74 @@ func TestLocalEndpointPinsOriginCertificateAndAuthorizesBeforeBody(t *testing.T)
 	}
 }
 
+func TestLocalEndpointBoundsPreAuthenticationConnections(t *testing.T) {
+	_, endpoint := testLocalEndpoint(t)
+	access := endpoint.Access()
+	u, err := url.Parse(access.BaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stalled []net.Conn
+	t.Cleanup(func() {
+		for _, connection := range stalled {
+			if connection != nil {
+				_ = connection.Close()
+			}
+		}
+	})
+	waitSlots := func(want int) {
+		t.Helper()
+		deadline := time.NewTimer(5 * time.Second)
+		defer deadline.Stop()
+		tick := time.NewTicker(time.Millisecond)
+		defer tick.Stop()
+		for len(endpoint.listener.slots) != want {
+			select {
+			case <-tick.C:
+			case <-deadline.C:
+				t.Fatalf("accepted local connections = %d, want %d", len(endpoint.listener.slots), want)
+			}
+		}
+	}
+	for range localExecutionConnectionLimit {
+		connection, err := net.DialTimeout("tcp4", u.Host, 5*time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stalled = append(stalled, connection) // No TLS handshake; these occupy pre-authentication slots.
+	}
+	waitSlots(localExecutionConnectionLimit)
+	overflow, err := net.DialTimeout("tcp4", u.Host, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer overflow.Close()
+	if err := overflow.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	var data [1]byte
+	if n, err := overflow.Read(data[:]); n != 0 || err == nil {
+		t.Fatalf("overflow connection stayed open: bytes=%q error=%v", data[:n], err)
+	} else if timeout, ok := err.(net.Error); ok && timeout.Timeout() {
+		t.Fatalf("overflow connection was not promptly closed: %v", err)
+	}
+	waitSlots(localExecutionConnectionLimit)
+	if err := stalled[0].Close(); err != nil {
+		t.Fatal(err)
+	}
+	stalled[0] = nil
+	waitSlots(localExecutionConnectionLimit - 1)
+	client, err := NewLocalExecutionClient(access)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.CloseIdleConnections()
+	status, err := testLocalPost(t, client, access.BaseURL, []byte("{"))
+	if err != nil || status != http.StatusBadRequest {
+		t.Fatalf("released slot did not admit the selected client: status=%d error=%v", status, err)
+	}
+}
+
 func TestLocalEndpointUnauthorizedUnfinishedBodyDoesNotHoldShutdown(t *testing.T) {
 	_, endpoint := testLocalEndpoint(t)
 	access := endpoint.Access()
