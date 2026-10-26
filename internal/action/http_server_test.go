@@ -2244,6 +2244,26 @@ func TestHTTPExecutorCloseReusesCancellationStopDeadline(t *testing.T) {
 	})
 }
 
+func TestHTTPExecutorCloseCancelsLateStopTimer(t *testing.T) {
+	e, err := NewHTTPExecutor("local")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Execute has already captured a nil stopCancel, but its transaction is still active.
+	tx := &httpTransaction{stopBudget: func() {}, stopGrace: time.Hour, stop: make(chan struct{}), finished: make(chan struct{})}
+	e.active = tx
+	closed := make(chan error, 1)
+	go func() { closed <- e.Close() }()
+	<-tx.stop
+	close(tx.finished)
+	if err := <-closed; err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.stopContext.Err(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Close retained a late stop timer: %v", err)
+	}
+}
+
 func TestHTTPServerStopKeepsEarlierRequestDeadline(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		tx := &httpTransaction{stop: make(chan struct{})}

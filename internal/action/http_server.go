@@ -266,6 +266,12 @@ func (e *HTTPExecutor) Close() error {
 		tx.stopBudget()
 		tx.forceStop()
 		<-tx.finished
+		tx.mu.Lock()
+		stopCancel := tx.stopCancel
+		tx.mu.Unlock()
+		if stopCancel != nil {
+			stopCancel()
+		}
 	}
 	return nil
 }
