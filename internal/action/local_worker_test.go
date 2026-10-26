@@ -559,7 +559,7 @@ func TestLocalWorkerIgnoresReapedProcessBeforeExitPublication(t *testing.T) {
 
 func TestLocalWorkerClosePreservesExitDuringCallbackDrain(t *testing.T) {
 	w := startHTTPSWorkerTest(t, "drain")
-	w.executor.outcomeGrace = 100 * time.Millisecond
+	w.executor.outcomeGrace = 6 * time.Second // The manual crash must precede automatic stop, even on a loaded host.
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	if err := w.WaitCapacity(ctx); err != nil {
@@ -598,6 +598,11 @@ func TestLocalWorkerClosePreservesExitDuringCallbackDrain(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("Close did not begin callback drain")
 	}
+	select {
+	case <-tx.stop:
+	case <-ctx.Done():
+		t.Fatal("Close did not start the stop deadline")
+	}
 	if err := w.cmd.Process.Kill(); err != nil {
 		t.Fatal(err)
 	}
@@ -606,6 +611,13 @@ func TestLocalWorkerClosePreservesExitDuringCallbackDrain(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("exiting child was not reaped")
 	}
+	tx.mu.Lock()
+	stopCancel := tx.stopCancel
+	tx.mu.Unlock()
+	if stopCancel == nil {
+		t.Fatal("stop deadline was not available")
+	}
+	stopCancel() // Avoid waiting for the long automatic grace after proving the manual crash.
 	select {
 	case err := <-closed:
 		t.Fatalf("Close returned before callback drained: %v", err)

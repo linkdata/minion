@@ -26,5 +26,5 @@ func expectedLocalWorkerCancellation(err error, directStopSent bool) bool {
 		return false
 	}
 	status, ok := exit.Sys().(syscall.WaitStatus)
-	return ok && status.Signaled() && (status.Signal() == syscall.SIGINT || status.Signal() == syscall.SIGKILL)
+	return ok && status.Signaled() && status.Signal() == syscall.SIGKILL
 }
