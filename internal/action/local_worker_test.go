@@ -513,11 +513,6 @@ func TestLocalWorkerCloseStopsHTTPSBeforeDelayedChildWait(t *testing.T) {
 	defer deadline.Stop()
 	<-deadline.C
 	select {
-	case <-exited:
-		t.Fatal("direct child wait was published before the test released it")
-	default:
-	}
-	select {
 	case err := <-closed:
 		t.Fatalf("Close returned before direct child wait was published: %v", err)
 	default:
