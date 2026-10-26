@@ -163,7 +163,9 @@ func TestExecuteModeOfflinePublicationAndRestart(t *testing.T) {
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}
-	runtimeParent, err := os.MkdirTemp("", "m239-")
+	// Unix socket paths have a small OS limit. Keep this fixture's runtime
+	// parent short even when macOS gives tests a long per-user TMPDIR.
+	runtimeParent, err := os.MkdirTemp("/tmp", "m239-")
 	if err != nil {
 		t.Fatal(err)
 	}

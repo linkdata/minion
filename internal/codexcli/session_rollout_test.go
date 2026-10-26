@@ -824,7 +824,7 @@ func TestSessionFallbackPreservesKnownDuplicateIdentity(t *testing.T) {
 	if len(session.ownedRollouts) != 0 {
 		t.Fatalf("known duplicate was admitted for deletion: %v", session.ownedRollouts)
 	}
-	if err := session.Close(); err == nil || !strings.Contains(err.Error(), remaining) {
+	if err := session.Close(); err == nil || !strings.Contains(err.Error(), fmt.Sprintf("%q", remaining)) {
 		t.Fatalf("known duplicate lacked recovery path: %v", err)
 	}
 	if _, err := os.Lstat(remaining); err != nil {
@@ -851,7 +851,7 @@ func TestSessionFallbackHeaderFileCapPreservesRollouts(t *testing.T) {
 	if len(session.ownedRollouts) != 0 {
 		t.Fatalf("incomplete fallback admitted rollouts: %v", session.ownedRollouts)
 	}
-	if err := session.Close(); err == nil || !strings.Contains(err.Error(), filepath.Join(home, "sessions")) {
+	if err := session.Close(); err == nil || !strings.Contains(err.Error(), fmt.Sprintf("%q", filepath.Join(home, "sessions"))) {
 		t.Fatalf("fallback cap lacked recovery root: %v", err)
 	}
 	if _, err := os.Lstat(root); err != nil {
