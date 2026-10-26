@@ -17,7 +17,7 @@ func TestCheckLoginUsesPrivateCwdAndNativeEnvironment(t *testing.T) {
 	binary := installFakeCodex(t, `#!/bin/sh
 printf '%s\n' "$@" > "$0.args"
 pwd > "$0.cwd"
-printf '%s,%s,%s,%s\n' "${GH_TOKEN-absent}" "${GITHUB_TOKEN-absent}" "$TMPDIR" "$CODEX_HOME" > "$0.env"
+printf '%s,%s,%s,%s,%s,%s\n' "${GH_TOKEN-absent}" "${GITHUB_TOKEN-absent}" "${CODEX_API_KEY-absent}" "${CODEX_ACCESS_TOKEN-absent}" "$TMPDIR" "$CODEX_HOME" > "$0.env"
 `)
 	t.Setenv("GH_TOKEN", "dummy-github-token")
 	t.Setenv("GITHUB_TOKEN", "dummy-github-token")
@@ -47,8 +47,11 @@ printf '%s,%s,%s,%s\n' "${GH_TOKEN-absent}" "${GITHUB_TOKEN-absent}" "$TMPDIR" "
 		t.Fatalf("login inherited working directory: %q", private)
 	}
 	data, err = os.ReadFile(binary + ".env")
-	if err != nil || string(data) != "absent,absent,"+private+","+home+"\n" {
-		t.Fatalf("login inherited service credentials or lost native paths: %q, %v", data, err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "absent,absent,absent,absent,"+private+","+home+"\n" {
+		t.Fatal("login inherited service credentials or lost native paths")
 	}
 	if _, err := os.Stat(private); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("login retained its private working directory: %v", err)

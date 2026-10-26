@@ -23,8 +23,7 @@ func captureAmbientNativeCredentials(settings config.CodexConfig) config.CodexCo
 
 // nativeCredentialEnvironment passes selected native auth only to the CLI process.
 func nativeCredentialEnvironment(env []string, runtimeDir, cacheDir, home string, settings config.CodexConfig, writablePaths ...string) []string {
-	explicit := settings.NativeAPIKey != "" || settings.NativeAccessToken != ""
-	clean := childEnvironment(env, runtimeDir, cacheDir, home, settings.APIKey != "" || explicit, writablePaths...)
+	clean := childEnvironment(env, runtimeDir, cacheDir, home, true, writablePaths...)
 	if settings.APIKey == "" {
 		if settings.NativeAPIKey != "" {
 			clean = append(clean, "CODEX_API_KEY="+settings.NativeAPIKey)

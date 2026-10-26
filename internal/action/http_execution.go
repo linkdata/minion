@@ -35,6 +35,7 @@ type WorkerCredentials struct {
 const maxWorkerCredentialBytes = 8 << 10
 
 func (credentials WorkerCredentials) validate() error {
+	// Bound each field before summing so the aggregate cannot overflow int.
 	if len(credentials.CodexAPIKey) > maxWorkerCredentialBytes || len(credentials.CodexNativeAPIKey) > maxWorkerCredentialBytes ||
 		len(credentials.CodexAccessToken) > maxWorkerCredentialBytes ||
 		len(credentials.ClaudeAPIKey) > maxWorkerCredentialBytes ||
