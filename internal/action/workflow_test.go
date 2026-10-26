@@ -191,7 +191,7 @@ func TestFailedAuditRetainsLabelledPartialArtifactsWithoutPublication(t *testing
 			t.Fatalf("worker directory retained: %s,%v", dir, err)
 		}
 	}
-	if !strings.Contains(journal.String(), "job="+request.ID) || !regexp.MustCompile(`attempt=[0-9a-f]{32} executor=local count=1 worker_reported_failure=false private_path=`).MatchString(journal.String()) {
+	if !strings.Contains(journal.String(), "job="+request.ID) || !regexp.MustCompile(`attempt=[0-9a-f]{32} executor=local count=1 worker_reported_failure=false cleanup_unverified=false private_path=`).MatchString(journal.String()) {
 		t.Fatalf("missing identified failure diagnostic: %s", &journal)
 	}
 	if strings.Contains(journal.String(), report) || strings.Contains(journal.String(), failure.Error()) || strings.Contains(journal.String(), "collected artifacts are incomplete") {
