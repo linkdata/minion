@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -41,14 +42,22 @@ func testLocalEndpoint(t *testing.T) (*HTTPExecutor, *LocalEndpoint) {
 	return core, endpoint
 }
 
-func testLocalPost(t *testing.T, client *http.Client, address string, body []byte) (*http.Response, error) {
+func testLocalPost(t *testing.T, client *http.Client, address string, body []byte) (int, error) {
 	t.Helper()
-	request, err := http.NewRequestWithContext(t.Context(), http.MethodPost, address+"/next", bytes.NewReader(body))
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, address+"/next", bytes.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
 	request.Header.Set("Content-Type", "application/json")
-	return client.Do(request)
+	response, err := client.Do(request)
+	if err != nil {
+		return 0, err
+	}
+	defer response.Body.Close()
+	_, err = io.Copy(io.Discard, response.Body)
+	return response.StatusCode, err
 }
 
 func TestLocalEndpointPinsOriginCertificateAndAuthorizesBeforeBody(t *testing.T) {
@@ -73,11 +82,10 @@ func TestLocalEndpointPinsOriginCertificateAndAuthorizesBeforeBody(t *testing.T)
 	}
 	defer client.CloseIdleConnections()
 	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:1")
-	response, err := testLocalPost(t, client, access.BaseURL, []byte("{"))
-	if err != nil || response.StatusCode != http.StatusBadRequest {
-		t.Fatalf("pinned direct request: status=%v error=%v", response, err)
+	status, err := testLocalPost(t, client, access.BaseURL, []byte("{"))
+	if err != nil || status != http.StatusBadRequest {
+		t.Fatalf("pinned direct request: status=%d error=%v", status, err)
 	}
-	response.Body.Close()
 
 	wrongToken := access
 	wrongToken.Token = base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0}, 32))
@@ -86,14 +94,13 @@ func TestLocalEndpointPinsOriginCertificateAndAuthorizesBeforeBody(t *testing.T)
 		t.Fatal(err)
 	}
 	defer unauthorized.CloseIdleConnections()
-	response, err = testLocalPost(t, unauthorized, access.BaseURL, []byte("{"))
-	if err != nil || response.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("wrong token reached protocol decoder: status=%v error=%v", response, err)
+	status, err = testLocalPost(t, unauthorized, access.BaseURL, []byte("{"))
+	if err != nil || status != http.StatusUnauthorized {
+		t.Fatalf("wrong token reached protocol decoder: status=%d error=%v", status, err)
 	}
-	response.Body.Close()
 
-	if response, err := testLocalPost(t, client, "https://example.invalid", []byte("{}")); err == nil || response != nil || !strings.Contains(err.Error(), "refused another origin") {
-		t.Fatalf("client sent a credential to another origin: response=%v error=%v", response, err)
+	if status, err := testLocalPost(t, client, "https://example.invalid", []byte("{}")); err == nil || status != 0 || !strings.Contains(err.Error(), "refused another origin") {
+		t.Fatalf("client sent a credential to another origin: status=%d error=%v", status, err)
 	}
 
 	var spoofedRequests atomic.Int32
@@ -109,8 +116,8 @@ func TestLocalEndpointPinsOriginCertificateAndAuthorizesBeforeBody(t *testing.T)
 		t.Fatal(err)
 	}
 	defer spoofClient.CloseIdleConnections()
-	if response, err := testLocalPost(t, spoofClient, spoof.URL, []byte("{}")); err == nil || response != nil || spoofedRequests.Load() != 0 {
-		t.Fatalf("replacement listener received authenticated HTTP: response=%v error=%v requests=%d", response, err, spoofedRequests.Load())
+	if status, err := testLocalPost(t, spoofClient, spoof.URL, []byte("{}")); err == nil || status != 0 || spoofedRequests.Load() != 0 {
+		t.Fatalf("replacement listener received authenticated HTTP: status=%d error=%v requests=%d", status, err, spoofedRequests.Load())
 	}
 }
 
@@ -346,7 +353,9 @@ func localJSON(ctx context.Context, client *http.Client, baseURL, path string, v
 
 func localTestJSON(t *testing.T, client *http.Client, baseURL, path string, value, result any, limit int) {
 	t.Helper()
-	status, err := localJSON(t.Context(), client, baseURL, path, value, result, limit)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	status, err := localJSON(ctx, client, baseURL, path, value, result, limit)
 	if err != nil || status != http.StatusOK {
 		t.Fatalf("local HTTPS %s: status=%d error=%v", path, status, err)
 	}
@@ -356,7 +365,7 @@ func localTestAck(t *testing.T, client *http.Client, baseURL, path string, value
 	t.Helper()
 	var ack httpAcknowledgement
 	localTestJSON(t, client, baseURL, path, value, &ack, httpControlBytes)
-	if ack.Sequence != sequence || ack.Failure != nil {
+	if ack.Kind != strings.TrimPrefix(path, "/") || ack.Sequence != sequence || ack.Failure != nil {
 		t.Fatalf("local HTTPS %s acknowledgement: %+v", path, ack)
 	}
 }
