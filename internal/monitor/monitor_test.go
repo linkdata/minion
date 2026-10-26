@@ -1220,7 +1220,7 @@ func TestAcceptOnlyWhitelistedInvitations(t *testing.T) {
 	config.InvitationOwners = []string{"example-owner", "another-owner"}
 	config.InvitationOwnerIDs = map[string]int64{"example-owner": 2, "another-owner": 3}
 	m := &Monitor{Config: config, GitHub: gh}
-	if err := m.acceptWhitelistedInvitations(t.Context()); err != nil {
+	if _, err := m.acceptWhitelistedInvitations(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if len(gh.accepted) != 3 || gh.accepted[0] != 1 || gh.accepted[1] != 5 || gh.accepted[2] != 6 {
@@ -1273,7 +1273,7 @@ func TestInvitationListingBlockedDefersActions(t *testing.T) {
 				inviteErr: tc.err,
 			}
 			m := &Monitor{Config: testConfig(t), GitHub: gh}
-			if err := m.acceptWhitelistedInvitations(t.Context()); !errors.Is(err, tc.err) {
+			if _, err := m.acceptWhitelistedInvitations(t.Context()); !errors.Is(err, tc.err) {
 				t.Fatalf("invitation listing error = %v, want blocked error", err)
 			}
 			if len(gh.accepted) != 0 || len(gh.declined) != 0 {
@@ -1292,7 +1292,7 @@ func TestInvitationRateLimitStopsDeclines(t *testing.T) {
 		declineErr: &github.StatusError{StatusCode: http.StatusForbidden, Message: "secondary rate limit"},
 	}
 	m := &Monitor{Config: testConfig(t), GitHub: gh}
-	if err := m.acceptWhitelistedInvitations(t.Context()); err == nil {
+	if _, err := m.acceptWhitelistedInvitations(t.Context()); err == nil {
 		t.Fatal("expected rate-limit error")
 	}
 	if len(gh.declined) != 1 || gh.declined[0] != 1 {
@@ -1310,7 +1310,7 @@ func TestMonitoredRepositoryStillRequiresWriteInvitation(t *testing.T) {
 	config.InvitationOwners = []string{"example-owner", "another-owner"}
 	config.InvitationOwnerIDs = map[string]int64{"example-owner": 2, "another-owner": 3}
 	m := &Monitor{Config: config, GitHub: gh}
-	if err := m.acceptWhitelistedInvitations(t.Context()); err == nil {
+	if _, err := m.acceptWhitelistedInvitations(t.Context()); err == nil {
 		t.Fatal("read-only invitation to monitored repository should fail")
 	}
 	if len(gh.accepted) != 1 || gh.accepted[0] != 2 {
@@ -1396,7 +1396,7 @@ func TestInvitationRegistrationRetriesWithoutLosingOrDuplicatingRepository(t *te
 	path := filepath.Join(t.TempDir(), "config.json")
 	gh := &fakeGitHub{invitations: []github.Invitation{{ID: 1, Repository: github.Repository{FullName: "example-owner/second-repo", Owner: github.User{Login: "example-owner"}}, Permissions: "write"}}}
 	m := &Monitor{Config: cfg, ConfigPath: path, GitHub: gh}
-	if err := m.acceptWhitelistedInvitations(t.Context()); err == nil || len(gh.accepted) != 0 || len(m.Config.Repositories) != 1 {
+	if _, err := m.acceptWhitelistedInvitations(t.Context()); err == nil || len(gh.accepted) != 0 || len(m.Config.Repositories) != 1 {
 		t.Fatalf("accepted invitation despite config write failure: %v, %v", err, gh.accepted)
 	}
 	data, err := json.Marshal(cfg)
@@ -1407,7 +1407,7 @@ func TestInvitationRegistrationRetriesWithoutLosingOrDuplicatingRepository(t *te
 		t.Fatal(err)
 	}
 	gh.acceptErr = errors.New("HTTP 503")
-	if err := m.acceptWhitelistedInvitations(t.Context()); err == nil {
+	if _, err := m.acceptWhitelistedInvitations(t.Context()); err == nil {
 		t.Fatal("expected acceptance failure")
 	}
 	saved, err := config.Load(path)
@@ -1419,7 +1419,7 @@ func TestInvitationRegistrationRetriesWithoutLosingOrDuplicatingRepository(t *te
 	}
 	m.Config = saved
 	gh.acceptErr = nil
-	if err := m.acceptWhitelistedInvitations(t.Context()); err != nil {
+	if _, err := m.acceptWhitelistedInvitations(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if len(gh.accepted) != 2 || len(m.Config.Repositories) != 2 {
@@ -1445,7 +1445,7 @@ func TestInvitationWithCommandsDisabledRegistersNoActions(t *testing.T) {
 		ID: 1, Repository: github.Repository{FullName: "example-owner/second-repo", Owner: github.User{Login: "example-owner"}}, Permissions: "write",
 	}}}
 	m := &Monitor{Config: cfg, ConfigPath: path, GitHub: gh}
-	if err := m.acceptWhitelistedInvitations(t.Context()); err != nil {
+	if _, err := m.acceptWhitelistedInvitations(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	saved, err := config.Load(path)
@@ -1564,7 +1564,7 @@ func TestReclaimedInvitationOwnerCannotRegisterOrAccept(t *testing.T) {
 		{ID: 2, Repository: github.Repository{ID: 10, FullName: "example-owner/new-repo", Owner: github.User{ID: 99, Login: "example-owner"}}, Permissions: "write"},
 	}}
 	m := &Monitor{Config: cfg, GitHub: gh}
-	if err := m.acceptWhitelistedInvitations(t.Context()); err != nil {
+	if _, err := m.acceptWhitelistedInvitations(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if len(gh.accepted) != 0 || len(m.Config.Repositories) != 1 {

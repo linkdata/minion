@@ -203,11 +203,12 @@ func TestSelectedWorkerDefersInvitedRepositoryUntilRestart(t *testing.T) {
 		ID: 1, Repository: github.Repository{FullName: "example-owner/new-repo", Owner: github.User{Login: "example-owner"}}, Permissions: "write",
 	}}}
 	m := &Monitor{Config: cfg, ConfigPath: path, GitHub: gh, SelectedCommands: map[string]bool{"review": true}}
-	if err := m.acceptWhitelistedInvitations(t.Context()); err != nil {
+	deferred, err := m.acceptWhitelistedInvitations(t.Context())
+	if err != nil {
 		t.Fatal(err)
 	}
-	if len(m.Config.Repositories) != 1 || len(gh.accepted) != 1 {
-		t.Fatalf("new repository became active before restart: repos=%v accepted=%v", m.Config.Repositories, gh.accepted)
+	if len(m.Config.Repositories) != 1 || len(gh.accepted) != 1 || !slices.Equal(deferred, []string{"example-owner/new-repo"}) {
+		t.Fatalf("new repository became active before restart: repos=%v accepted=%v deferred=%v", m.Config.Repositories, gh.accepted, deferred)
 	}
 	saved, err := config.Load(path)
 	if err != nil {
@@ -232,5 +233,74 @@ func TestSelectedWorkerDefersInvitedRepositoryUntilRestart(t *testing.T) {
 	}
 	if len(gh.notificationCalls) != 1 || gh.notificationCalls[0].repo != cfg.Repositories[0].Name || gh.threadCalls != 0 {
 		t.Fatalf("invited repository was scanned before restart: notifications=%v threads=%d", gh.notificationCalls, gh.threadCalls)
+	}
+}
+
+func TestSelectedWorkerInvitationKeepsCursorUntilRestart(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.InvitationOwners = []string{"example-owner"}
+	cfg.InvitationOwnerIDs = map[string]int64{"example-owner": 2}
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	const newRepo = "example-owner/new-repo"
+	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	initial := now.Add(-time.Minute)
+	requestAt := now.Add(-10 * time.Second)
+	notification := testNotification(requestAt)
+	notification.Repository.FullName = newRepo
+	notification.Subject.URL = "https://api.github.com/repos/" + newRepo + "/pulls/7"
+	gh := &fakeGitHub{
+		invitations: []github.Invitation{{ID: 1, Repository: github.Repository{FullName: newRepo,
+			Owner: github.User{Login: "example-owner"}}, Permissions: "write"}},
+		notifications: []github.Notification{notification},
+		items: []github.Item{{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion review",
+			Author: github.User{Login: "writer"}, UpdatedAt: requestAt}},
+		permission: github.Permission{Permission: "write"},
+	}
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	store := openStateAt(t, statePath, initial)
+	handler := &capacityHandler{}
+	m := &Monitor{Config: cfg, ConfigPath: configPath, GitHub: gh, Handler: handler,
+		SelectedCommands: map[string]bool{"review": true}, Now: func() time.Time { return now }}
+	if _, err := m.RunOnce(t.Context(), store); err != nil {
+		t.Fatal(err)
+	}
+	if len(m.Config.Repositories) != 1 || len(handler.jobs) != 0 || len(gh.accepted) != 1 ||
+		!store.Data.RepositoryCursors[newRepo].Equal(initial) || !store.Data.Cursor.After(requestAt) {
+		t.Fatalf("deferred invitation cursor lost: repositories=%v jobs=%v accepted=%v cursors=%v account=%v",
+			m.Config.Repositories, handler.jobs, gh.accepted, store.Data.RepositoryCursors, store.Data.Cursor)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store = openStateAt(t, statePath, initial)
+	reloaded, err := config.Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gh.invitations = nil
+	gh.notificationCalls = nil
+	m = &Monitor{Config: reloaded, ConfigPath: configPath, GitHub: gh, Handler: handler,
+		SelectedCommands: map[string]bool{"review": true}, Now: func() time.Time { return now.Add(time.Minute) }}
+	if _, err := m.RunOnce(t.Context(), store); err != nil {
+		t.Fatal(err)
+	}
+	var sawNewRepo bool
+	for _, call := range gh.notificationCalls {
+		if call.repo == newRepo {
+			sawNewRepo = true
+			if call.since.After(requestAt) {
+				t.Fatalf("restart skipped new repository notification: since=%s request=%s", call.since, requestAt)
+			}
+		}
+	}
+	if !sawNewRepo || len(handler.jobs) != 1 || handler.jobs[0].Repository.Name != newRepo {
+		t.Fatalf("restart did not discover deferred command: calls=%v jobs=%v", gh.notificationCalls, handler.jobs)
 	}
 }

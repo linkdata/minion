@@ -163,23 +163,37 @@ func TestExecuteModeOfflinePublicationAndRestart(t *testing.T) {
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}
+	runtimeParent, err := os.MkdirTemp("", "m239-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Remove(runtimeParent); err != nil {
+			t.Error(err)
+		}
+	})
+	t.Setenv("TMPDIR", runtimeParent)
+	binary, err := filepath.Abs(os.Args[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker := filepath.Join(base, "test-worker")
+	script := "#!/bin/sh\n[ \"$#\" -eq 1 ] && [ \"$1\" = '-mode=execute' ] || exit 98\nexec " + aicli.ShellQuote(binary) + " '-test.run=^TestExecuteModeOfflineChild$'\n"
+	if err := os.WriteFile(worker, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
 	runPoll := func(at time.Time) {
 		t.Helper()
 		var logs bytes.Buffer
 		logger := log.New(&logs, "", 0)
 		owner := newOrchestrator(cfg, client, store, logger, nil)
 		watcher := &monitor.Monitor{Config: cfg, GitHub: client, Handler: owner, Now: func() time.Time { return at }}
-		runtimeDir := filepath.Join(t.TempDir(), "runtime")
-		if err := os.Mkdir(runtimeDir, 0700); err != nil {
-			t.Fatal(err)
-		}
-		done, closeWorker, err := attachSelectedLocalWorker(t.Context(), owner, watcher, runtimeDir, os.Args[0],
-			[]string{"-test.run=^TestExecuteModeOfflineChild$"}, 10*time.Second)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if code := runSelectedLocalService(t.Context(), watcher, store, false, done, logger, closeWorker); code != 0 {
+		if code := runOrchestrateMode(t.Context(), owner, watcher, store, false, logger, worker, 10*time.Second); code != 0 {
 			t.Fatalf("orchestrate poll returned %d: %s", code, logs.String())
+		}
+		entries, err := os.ReadDir(runtimeParent)
+		if err != nil || len(entries) != 0 {
+			t.Fatalf("owned runtime directory was not cleaned: entries=%v error=%v", entries, err)
 		}
 	}
 	runPoll(now)
