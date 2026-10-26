@@ -47,6 +47,18 @@ type httpServerTest struct {
 	done     chan httpServerTestResult
 }
 
+type httpDeadlineAfterCheck struct {
+	context.Context
+	checks atomic.Int32
+}
+
+func (c *httpDeadlineAfterCheck) Err() error {
+	if c.checks.Add(1) > 1 {
+		return context.DeadlineExceeded
+	}
+	return nil
+}
+
 func newHTTPServerTest(t *testing.T, ctx context.Context, job Job, sink Checkpoints, wrap func(http.Handler) http.Handler) *httpServerTest {
 	return newHTTPServerTestWithServer(t, ctx, job, sink, wrap, httptest.NewServer)
 }
@@ -132,10 +144,18 @@ func (f *httpServerTest) pull(t *testing.T) httpAssignment {
 	if err := httpDecode(response.Body, httpJobBytes, &assignment); err != nil || response.StatusCode != http.StatusOK {
 		t.Fatalf("assignment: status=%d error=%v", response.StatusCode, err)
 	}
-	if !reflect.DeepEqual(assignment.Job, f.job) || assignment.Expires <= time.Now().UnixNano() {
+	if !sameAssignmentJob(f.job, assignment.Job) || assignment.HeldFor < 0 {
 		t.Fatalf("assignment changed supplied Job or lost its remaining budget: %+v", assignment)
 	}
 	return assignment
+}
+
+func sameAssignmentJob(want, got Job) bool {
+	if got.RuntimeBudget <= 0 || got.RuntimeBudget > want.RuntimeBudget {
+		return false
+	}
+	got.RuntimeBudget = want.RuntimeBudget
+	return reflect.DeepEqual(got, want)
 }
 
 func (f *httpServerTest) request(path string, value any) httpServerTestExchange {
@@ -184,6 +204,47 @@ func (f *httpServerTest) call(sequence uint64) httpCall {
 
 func (f *httpServerTest) outcome(sequence uint64, runErr error) httpOutcome {
 	return httpOutcome{Sequence: sequence, Result: Result{Version: ProtocolVersion, Identity: f.job.Identity, SourceRef: f.job.Source.Head}, Failure: newHTTPFailure(runErr)}
+}
+
+func TestHTTPExecutorDispatchUsesRemainingRuntime(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		job := testJob(command.Comment)
+		job.RuntimeBudget = 3 * time.Second
+		f := newHTTPServerTestInMemory(t, t.Context(), job, runnerExecutionCheckpoints{})
+		time.Sleep(2 * time.Second)
+		assignment := f.pull(t)
+		if assignment.Job.RuntimeBudget <= 0 || assignment.Job.RuntimeBudget > time.Second || assignment.HeldFor < 0 {
+			t.Fatalf("dispatch renewed or lost action runtime: budget=%s held=%s", assignment.Job.RuntimeBudget, assignment.HeldFor)
+		}
+		f.ack(t, "/outcome", f.outcome(1, nil), http.StatusOK, 1)
+		if result := f.result(t); result.err != nil {
+			t.Fatalf("known outcome lost after reduced dispatch budget: %v", result.err)
+		}
+	})
+}
+
+func TestHTTPExecutorRejectsExpiryDuringAssignmentEncoding(t *testing.T) {
+	job := testJob(command.Comment)
+	executor, err := NewHTTPExecutor(job.Identity.ExecutorID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	budget, stop := context.WithTimeout(t.Context(), time.Minute)
+	defer stop()
+	tx := &httpTransaction{job: job, ctx: &httpDeadlineAfterCheck{Context: budget}, budget: budget, ready: true}
+	executor.active = tx
+	pull, err := httpEncode(httpPull{Version: ProtocolVersion, ExecutorID: job.Identity.ExecutorID}, httpControlBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/next", bytes.NewReader(pull))
+	request.Header.Set("Content-Type", "application/json")
+	response := &httpRepullRecorder{httptest.NewRecorder()}
+	executor.serveNext(response, request)
+	var ack httpAcknowledgement
+	if err := httpDecode(response.Body, httpControlBytes, &ack); err != nil || response.Code != http.StatusConflict || ack.Kind != "next" || ack.Failure == nil || !ack.Failure.Deadline || tx.delivered {
+		t.Fatalf("expired assignment was claimed or rejected without a typed deadline: code=%d ack=%+v delivered=%t err=%v", response.Code, ack, tx.delivered, err)
+	}
 }
 
 func TestHTTPExecutorBindingSequenceAndRawCheckpointFacts(t *testing.T) {
@@ -348,7 +409,7 @@ func TestHTTPExecutorPullAndCancelEncodedRequestBoundary(t *testing.T) {
 			}
 			if path == "/next" {
 				var assignment httpAssignment
-				if err := httpDecode(response.Body, httpJobBytes, &assignment); err != nil || !reflect.DeepEqual(assignment.Job, f.job) {
+				if err := httpDecode(response.Body, httpJobBytes, &assignment); err != nil || !sameAssignmentJob(f.job, assignment.Job) {
 					t.Fatalf("exact pull did not preserve supplied assignment: error=%v", err)
 				}
 			}
@@ -463,8 +524,9 @@ func TestHTTPExecutorBusyAndSingleAssignment(t *testing.T) {
 	f := newHTTPServerTest(t, ctx, testJob(command.Comment), runnerExecutionCheckpoints{}, nil)
 	f.ack(t, "/next", httpPull{Version: ProtocolVersion + 1, ExecutorID: f.job.Identity.ExecutorID}, http.StatusConflict, 0)
 	f.ack(t, "/next", httpPull{Version: ProtocolVersion, ExecutorID: "foreign"}, http.StatusConflict, 0)
-	if assignment := f.pull(t); assignment.Expires > deadline.UnixNano() {
-		t.Fatalf("assignment exceeded parent deadline: %v > %v", time.Unix(0, assignment.Expires), deadline)
+	beforePull := time.Now()
+	if assignment := f.pull(t); assignment.Job.RuntimeBudget > deadline.Sub(beforePull) {
+		t.Fatalf("assignment exceeded parent deadline: %s", assignment.Job.RuntimeBudget)
 	}
 	if result, err := f.executor.Execute(t.Context(), f.job, runnerExecutionCheckpoints{}); err == nil || !result.matchesJob(f.job) {
 		t.Fatalf("busy executor admitted another action: %+v error=%v", result, err)
@@ -563,7 +625,7 @@ func TestHTTPExecutorCanceledPullDoesNotClaimReadyAssignment(t *testing.T) {
 	default:
 	}
 	f.tx.mu.Lock()
-	claimed, retained := f.tx.delivered, len(f.tx.body) != 0
+	claimed, retained := f.tx.delivered, f.tx.ready
 	f.tx.mu.Unlock()
 	if claimed || !retained || response.status != http.StatusOK || !errors.Is(response.err, io.EOF) {
 		t.Fatalf("canceled pull claimed or wrote the assignment: claimed=%v retained=%v response=%+v", claimed, retained, response)

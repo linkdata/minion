@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/workspace"
 )
@@ -113,6 +114,7 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 		return err
 	}
 	var assignment httpAssignment
+	pullStarted := time.Now()
 	if err := transport.post(ctx, "next", pull, httpJobBytes, &assignment, httpBinding{}, 0); err != nil {
 		if status != nil && errors.Is(err, context.Canceled) && !errors.Is(err, monitor.ErrExecutionOutcomeUnknown) {
 			*status = httpRunIdleShutdown
@@ -127,15 +129,15 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	if job.Identity.ExecutorID != executorID {
 		return httpClientUnknown("next", errors.New("assignment executor differs from pull"))
 	}
-	expires := time.Unix(0, assignment.Expires)
-	if supplied := time.Now().Add(job.RuntimeBudget); supplied.Before(expires) {
-		expires = supplied
+	// Subtract transit and decoding time, but not the parent's idle long-poll.
+	elapsed := started.Sub(pullStarted)
+	if assignment.HeldFor < 0 || assignment.HeldFor > elapsed && assignment.HeldFor-elapsed > config.MaxActionRuntime {
+		return httpClientUnknown("next", errors.New("invalid assignment pull wait"))
 	}
+	transit := elapsed - min(elapsed, assignment.HeldFor)
+	expires := started.Add(job.RuntimeBudget - transit)
 	if deadline, ok := ctx.Deadline(); ok && deadline.Before(expires) {
 		expires = deadline
-	}
-	if assignment.Expires <= 0 {
-		return httpClientUnknown("next", errors.New("invalid assignment expiry"))
 	}
 	checkpoints = &httpClientCheckpoints{transport: transport, control: context.WithoutCancel(ctx), binding: httpJobBinding(job), started: started}
 	if !time.Now().Before(expires) {

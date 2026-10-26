@@ -14,7 +14,6 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/linkdata/minion/internal/command"
 )
@@ -50,7 +49,7 @@ func TestHTTPWireRouteCapsUseActualJSONBytes(t *testing.T) {
 	}
 	t.Run("assignment response", func(t *testing.T) {
 		job := testJob(command.Comment)
-		assignment := httpAssignment{Job: job, Expires: time.Now().Add(time.Hour).UnixNano()}
+		assignment := httpAssignment{Job: job}
 		body, err := json.Marshal(assignment)
 		if err != nil {
 			t.Fatal(err)

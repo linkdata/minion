@@ -96,6 +96,11 @@ func TestRunOnceWaitsAfterEachPersistedAction(t *testing.T) {
 			if !slices.Equal(handler.events, test.want) {
 				t.Fatalf("events = %v, want %v", handler.events, test.want)
 			}
+			for _, job := range handler.jobs {
+				if job.AcceptedAt.IsZero() {
+					t.Fatalf("accepted job lacks a runtime start: %+v", job)
+				}
+			}
 			data, err := os.ReadFile(path)
 			if err != nil {
 				t.Fatal(err)

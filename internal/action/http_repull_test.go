@@ -5,7 +5,6 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
-	"reflect"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
@@ -157,18 +156,15 @@ func TestHTTPExecutorNextPullWaitsForCompletedTransactionDrain(t *testing.T) {
 		}
 
 		job := testJob(command.Comment)
-		assignment := httpAssignment{Job: job, Expires: time.Now().Add(time.Minute).UnixNano()}
-		body, err := httpEncode(assignment, httpJobBytes)
-		if err != nil {
-			t.Fatal(err)
-		}
+		budget, cancelBudget := context.WithTimeout(t.Context(), time.Minute)
+		defer cancelBudget()
 		executor.mu.Lock()
 		executor.active = nil
 		executor.notifyLocked()
 		executor.mu.Unlock()
 		synctest.Wait()
 		executor.mu.Lock()
-		executor.active = &httpTransaction{ctx: t.Context(), ready: true, body: body}
+		executor.active = &httpTransaction{job: job, ctx: budget, budget: budget, ready: true}
 		executor.notifyLocked()
 		executor.mu.Unlock()
 		synctest.Wait()
@@ -188,7 +184,8 @@ func TestHTTPExecutorNextPullWaitsForCompletedTransactionDrain(t *testing.T) {
 		response := writer.Result()
 		defer response.Body.Close()
 		var received httpAssignment
-		if err := httpDecode(response.Body, httpJobBytes, &received); err != nil || response.StatusCode != http.StatusOK || !reflect.DeepEqual(received, assignment) {
+		if err := httpDecode(response.Body, httpJobBytes, &received); err != nil || response.StatusCode != http.StatusOK ||
+			received.Job.Identity != job.Identity || received.Job.RuntimeBudget <= 0 || received.Job.RuntimeBudget > time.Minute || received.HeldFor < 0 {
 			t.Fatalf("next assignment: status=%d value=%+v error=%v", response.StatusCode, received, err)
 		}
 	})

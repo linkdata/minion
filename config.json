@@ -36,7 +36,8 @@
     "https://github.com/JuliusBrussee/caveman/tree/main/skills/caveman"
   ],
   "poll_interval_seconds": 60,
-  "job_timeout_minutes": 240,
+  "inactivity_timeout_minutes": 10,
+  "max_runtime_minutes": 240,
   "max_github_context_bytes": 32768,
   "state_path": "var/state.json",
   "work_root": "var/work",

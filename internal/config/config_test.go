@@ -21,7 +21,8 @@ func TestCheckedInConfigIsSample(t *testing.T) {
 		cfg.Codex.Model != "" || cfg.Codex.ReasoningEffort != "" ||
 		cfg.Claude.Model != "" || cfg.Claude.Effort != "" ||
 		cfg.Main != "codex" || cfg.Adversarial != "" || cfg.CriticStopping.MaxRounds != 5 ||
-		cfg.CriticStopping.NonblockingAfterRound != nil || cfg.CriticStopping.ConsecutiveNoBlockerRounds != nil || cfg.JobTimeoutMinutes != 240 ||
+		cfg.CriticStopping.NonblockingAfterRound != nil || cfg.CriticStopping.ConsecutiveNoBlockerRounds != nil ||
+		cfg.InactivityTimeoutMinutes != 10 || cfg.MaxRuntimeMinutes != 240 ||
 		len(cfg.Commands) != 4 || len(cfg.AlwaysOnSkills) != 2 ||
 		cfg.MaxGitHubContextBytes != DefaultMaxGitHubContextBytes ||
 		cfg.AlwaysOnSkills[0] != defaultAntiInjectionSkill || cfg.AlwaysOnSkills[1] != defaultCavemanSkill {
@@ -447,34 +448,78 @@ func TestLoadRejectsLegacyCodexSkills(t *testing.T) {
 	}
 }
 
-func TestValidateJobTimeoutMinutes(t *testing.T) {
+func TestValidateActionTimeoutMinutes(t *testing.T) {
+	base := func() Config {
+		return Config{BotLogin: "bot", Repositories: []Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"review"}}}}
+	}
+	defaults := base()
+	if err := defaults.Validate(t.TempDir()); err != nil || defaults.InactivityTimeoutMinutes != 10 || defaults.MaxRuntimeMinutes != 240 {
+		t.Fatalf("timeout defaults: inactivity=%d max=%d error=%v", defaults.InactivityTimeoutMinutes, defaults.MaxRuntimeMinutes, err)
+	}
 	for _, tt := range []struct {
-		name      string
-		minutes   int
-		want      int
-		wantError bool
+		name                string
+		inactivity, runtime int
+		wantInactivity      int
+		wantRuntime         int
 	}{
-		{name: "default", want: 240},
-		{name: "minimum", minutes: 1, want: 1},
-		{name: "custom", minutes: 360, want: 360},
-		{name: "maximum", minutes: 1440, want: 1440},
-		{name: "negative", minutes: -1, wantError: true},
-		{name: "above maximum", minutes: 1441, wantError: true},
-		{name: "large", minutes: 1 << 30, wantError: true},
+		{name: "default inactivity", runtime: 7, wantInactivity: 10, wantRuntime: 7},
+		{name: "default max runtime", inactivity: 3, wantInactivity: 3, wantRuntime: 240},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg := Config{BotLogin: "bot", JobTimeoutMinutes: tt.minutes, Repositories: []Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"review"}}}}
-			err := cfg.Validate(t.TempDir())
-			if tt.wantError {
-				if err == nil || !strings.Contains(err.Error(), "job_timeout_minutes") {
-					t.Fatalf("Validate() error=%v, want runtime validation error", err)
-				}
-				return
-			}
-			if err != nil || cfg.JobTimeoutMinutes != tt.want {
-				t.Fatalf("Validate() timeout=%d, error=%v; want %d", cfg.JobTimeoutMinutes, err, tt.want)
+			cfg := base()
+			cfg.InactivityTimeoutMinutes, cfg.MaxRuntimeMinutes = tt.inactivity, tt.runtime
+			if err := cfg.Validate(t.TempDir()); err != nil || cfg.InactivityTimeoutMinutes != tt.wantInactivity || cfg.MaxRuntimeMinutes != tt.wantRuntime {
+				t.Fatalf("Validate() inactivity=%d max=%d error=%v; want %d/%d", cfg.InactivityTimeoutMinutes, cfg.MaxRuntimeMinutes, err, tt.wantInactivity, tt.wantRuntime)
 			}
 		})
+	}
+	independent := base()
+	independent.InactivityTimeoutMinutes, independent.MaxRuntimeMinutes = 240, 1
+	if err := independent.Validate(t.TempDir()); err != nil {
+		t.Fatalf("inactivity may exceed max runtime: %v", err)
+	}
+	for _, setting := range []struct {
+		name string
+		max  int
+		set  func(*Config, int)
+		get  func(Config) int
+	}{
+		{"inactivity_timeout_minutes", 240,
+			func(c *Config, n int) { c.InactivityTimeoutMinutes = n },
+			func(c Config) int { return c.InactivityTimeoutMinutes }},
+		{"max_runtime_minutes", 1440,
+			func(c *Config, n int) { c.MaxRuntimeMinutes = n },
+			func(c Config) int { return c.MaxRuntimeMinutes }},
+	} {
+		for _, tt := range []struct {
+			name      string
+			minutes   int
+			wantError bool
+		}{
+			{name: "minimum", minutes: 1},
+			{name: "maximum", minutes: setting.max},
+			{name: "negative", minutes: -1, wantError: true},
+			{name: "above maximum", minutes: setting.max + 1, wantError: true},
+			{name: "large", minutes: 1 << 30, wantError: true},
+		} {
+			t.Run(setting.name+"/"+tt.name, func(t *testing.T) {
+				cfg := base()
+				setting.set(&cfg, tt.minutes)
+				err := cfg.Validate(t.TempDir())
+				if tt.wantError {
+					if err == nil || !strings.Contains(err.Error(), setting.name) {
+						t.Fatalf("Validate() error=%v, want %s validation error", err, setting.name)
+					}
+					return
+				}
+				if err != nil || setting.get(cfg) != tt.minutes {
+					t.Fatalf("Validate() %s=%d, error=%v; want %d", setting.name, setting.get(cfg), err, tt.minutes)
+				}
+			})
+		}
+	}
+	if _, err := decode(strings.NewReader(`{"job_timeout_minutes":30}`)); err == nil || !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("accepted retired timeout key: %v", err)
 	}
 }
 

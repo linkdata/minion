@@ -55,14 +55,18 @@ func TestCommentCommandReportsIssueAndPullRequest(t *testing.T) {
 				Source:  github.Item{Author: github.User{ID: 7, Login: "writer"}, Body: "@linkdataminion audit\n\n" + notes},
 				Command: command.Command{Name: "audit", Action: command.Comment},
 			}
+			if subject == "Issue" {
+				job.AcceptedAt = time.Now().Add(-time.Minute)
+			}
 			orchestrator := &Orchestrator{WorkRoot: t.TempDir(), GitHub: client, BotLogin: "linkdataminion", Commands: map[string]config.CommandMapping{"audit": {Action: "comment", Skills: []string{testReviewSkillURL}}},
 				Runner: Runner{
 					runModel: func(ctx context.Context, modelRequest modelRun) (aicli.Result, error) {
 						if subject == "Issue" {
 							deadline, ok := ctx.Deadline()
 							remaining := time.Until(deadline)
-							if !ok || remaining < config.DefaultJobTimeout-time.Minute || remaining > config.DefaultJobTimeout {
-								t.Fatalf("zero timeout selected wrong model budget: %v present=%t", remaining, ok)
+							budget := config.DefaultMaxRuntime - time.Minute
+							if !ok || remaining < budget-time.Minute || remaining > budget {
+								t.Fatalf("accepted time renewed the model budget: %v present=%t", remaining, ok)
 							}
 						}
 						prompt, writable, outputDir := modelRequest.prompt, modelRequest.writable, modelRequest.outputDir

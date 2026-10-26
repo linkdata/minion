@@ -56,8 +56,8 @@ type Orchestrator struct {
 	//
 	// A nil function disables these checks.
 	CheckWorkRoot func() error
-	// Timeout selects config.DefaultJobTimeout when zero.
-	Timeout time.Duration
+	// MaxRuntime selects config.DefaultMaxRuntime when zero.
+	MaxRuntime time.Duration
 	// MaxGitHubContextBytes limits combined GitHub text.
 	//
 	// Nonpositive values use [config.DefaultMaxGitHubContextBytes].
@@ -78,6 +78,18 @@ func (e *Orchestrator) Execute(ctx context.Context, job monitor.Job) (resultErr 
 	defer func() {
 		resultErr = redactActionError(resultErr, e.Runner.Codex.APIKey, e.Runner.Claude.APIKey)
 	}()
+	acceptedAt := job.AcceptedAt
+	if acceptedAt.IsZero() {
+		acceptedAt = time.Now()
+	}
+	ctx, cancel := context.WithDeadline(ctx, runtimeDeadline(acceptedAt, e.MaxRuntime))
+	defer cancel()
+	if err := ctx.Err(); err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
+		}
+		return err
+	}
 	if e.CheckWorkRoot != nil {
 		if err := e.CheckWorkRoot(); err != nil {
 			return err
@@ -96,9 +108,6 @@ func (e *Orchestrator) Execute(ctx context.Context, job monitor.Job) (resultErr 
 	if err := e.validateCommand(job); err != nil {
 		return err
 	}
-	timeout := cmp.Or(e.Timeout, config.DefaultJobTimeout)
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
 	done, err := e.alreadyAcknowledged(ctx, job)
 	if err != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
@@ -151,6 +160,10 @@ func (e *Orchestrator) Execute(ctx context.Context, job monitor.Job) (resultErr 
 	}
 	returned = true
 	return resultErr
+}
+
+func runtimeDeadline(acceptedAt time.Time, maxRuntime time.Duration) time.Time {
+	return acceptedAt.Add(cmp.Or(maxRuntime, config.DefaultMaxRuntime))
 }
 
 func (e *Orchestrator) validateCommand(job monitor.Job) error {

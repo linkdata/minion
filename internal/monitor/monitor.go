@@ -72,6 +72,7 @@ type Job struct {
 	Source      github.Item
 	Command     command.Command
 	ID          string
+	AcceptedAt  time.Time
 }
 
 func (j Job) Marker() string {
@@ -439,6 +440,8 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			}
 			// Count an interrupted execution before starting it, so a crash cannot
 			// restart an expensive job forever without consuming an attempt.
+			// shortcut: retries can renew this time until #153 persists the original acceptance.
+			job.AcceptedAt = time.Now()
 			jobFailure.Attempts++
 			store.Data.JobFailures[job.ID] = jobFailure
 			if err := store.Save(); err != nil {

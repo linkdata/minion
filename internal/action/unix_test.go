@@ -866,7 +866,7 @@ func unixTestPull(t *testing.T, client *http.Client, job Job) {
 	t.Helper()
 	var assignment httpAssignment
 	status, err := unixTestJSON(t, client, "/next", httpPull{Version: ProtocolVersion, ExecutorID: job.Identity.ExecutorID}, &assignment, httpJobBytes)
-	if err != nil || status != http.StatusOK || !reflect.DeepEqual(assignment.Job, job) || assignment.Expires <= time.Now().UnixNano() {
+	if err != nil || status != http.StatusOK || !sameAssignmentJob(job, assignment.Job) || assignment.HeldFor < 0 {
 		t.Fatalf("Unix assignment: status=%d job=%+v error=%v", status, assignment, err)
 	}
 }
