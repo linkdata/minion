@@ -28,6 +28,8 @@ var errGitHubContextTooLarge = errors.New("GitHub context exceeds configured byt
 // ErrLocalWorkerUnavailable means the selected direct worker cannot accept another Job.
 var ErrLocalWorkerUnavailable = errors.New("selected local worker unavailable")
 
+var errLocalWorkerCleanupUnverified = errors.New("direct local worker attempt cleanup unverified")
+
 var modelLineBreaks = strings.NewReplacer(
 	"\r\n", "\n", "\r", "\n", "\v", "\n", "\f", "\n",
 	"\x1c", "\n", "\x1d", "\n", "\x1e", "\n",

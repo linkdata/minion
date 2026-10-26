@@ -77,9 +77,10 @@ type httpTransaction struct {
 }
 
 type httpExecutionState struct {
-	admitted bool
-	outcome  bool
-	onStop   func(time.Time)
+	admitted  bool
+	delivered bool
+	outcome   bool
+	onStop    func(time.Time)
 }
 
 func NewHTTPExecutor(executorID string) (*HTTPExecutor, error) {
@@ -173,6 +174,9 @@ func (e *HTTPExecutor) execute(ctx context.Context, stopBudget time.Duration, jo
 		}
 		tx.mu.Lock()
 		stopCancel := tx.stopCancel
+		if state != nil {
+			state.delivered = tx.delivered
+		}
 		if tx.outcome {
 			// A received outcome resolves watch ambiguity, even if its own receipt ACK was lost.
 			if state != nil {

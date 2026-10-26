@@ -567,7 +567,7 @@ func TestLocalWorkerCrashAfterDeliveryQuarantines(t *testing.T) {
 	w.executor.outcomeGrace = 25 * time.Millisecond
 	job := testJob(command.Comment)
 	result, err := w.Execute(t.Context(), job, runnerExecutionCheckpoints{})
-	if !result.matchesJob(job) || !errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || !strings.Contains(err.Error(), "local worker exited") {
+	if !result.matchesJob(job) || !errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || !errors.Is(err, errLocalWorkerCleanupUnverified) || !strings.Contains(err.Error(), "local worker exited") {
 		t.Fatalf("missing final outcome was not quarantined: result=%+v error=%v", result, err)
 	}
 	w.executor.mu.Lock()
@@ -598,7 +598,7 @@ func TestLocalWorkerCrashBeforeDeliveryReportsExit(t *testing.T) {
 	select {
 	case got := <-done:
 		var exit *exec.ExitError
-		if !got.result.matchesJob(job) || !errors.As(got.err, &exit) || exit.ExitCode() != 7 || !errors.Is(got.err, monitor.ErrRequestTransport) || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || !strings.Contains(got.err.Error(), "local worker exited") {
+		if !got.result.matchesJob(job) || !errors.As(got.err, &exit) || exit.ExitCode() != 7 || !errors.Is(got.err, monitor.ErrRequestTransport) || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || errors.Is(got.err, errLocalWorkerCleanupUnverified) || !strings.Contains(got.err.Error(), "local worker exited") {
 			t.Fatalf("pre-delivery exit lost its diagnostic or became uncertain: result=%+v error=%v", got.result, got.err)
 		}
 	case <-time.After(10 * time.Second):

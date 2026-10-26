@@ -165,6 +165,9 @@ func (w *localWorker) Execute(ctx context.Context, job Job, sink Checkpoints) (R
 	}
 	state := httpExecutionState{onStop: w.beginStop}
 	result, err := w.executor.execute(ctx, 0, job, sink, &state)
+	if state.delivered && !state.outcome {
+		err = errors.Join(err, errLocalWorkerCleanupUnverified)
+	}
 	w.executor.mu.Lock()
 	closed, unavailable := w.executor.closed, w.executor.unavailable
 	w.executor.mu.Unlock()

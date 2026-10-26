@@ -5,6 +5,7 @@ package action
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -92,21 +93,42 @@ func TestLocalWorkerRunnerCrashRetainsRecoveryEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	job := runnerCleanupJob("crashed")
-	result, err := w.Execute(ctx, job, runnerExecutionCheckpoints{})
-	if err == nil || !errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || !result.matchesJob(job) {
-		t.Fatalf("crash result=%+v error=%v", result, err)
+	result, runErr := w.Execute(ctx, job, runnerExecutionCheckpoints{})
+	if runErr == nil || !errors.Is(runErr, monitor.ErrExecutionOutcomeUnknown) || !errors.Is(runErr, errLocalWorkerCleanupUnverified) || !result.matchesJob(job) {
+		t.Fatalf("crash result=%+v error=%v", result, runErr)
 	}
 	unixWorkerReport(t, ctx, report, ".entered")
 	entries, err := os.ReadDir(workRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
-	found := false
+	orphan := ""
 	for _, entry := range entries {
-		found = found || strings.HasPrefix(entry.Name(), "minion-")
+		if strings.HasPrefix(entry.Name(), "minion-") {
+			orphan = entry.Name()
+		}
 	}
-	if !found {
+	if orphan == "" {
 		t.Fatalf("crash erased attempted workspace: entries=%v", entries)
+	}
+	owner := Orchestrator{WorkRoot: workRoot}
+	if err := owner.retainWorkerDiagnostics(job, result, runErr); err != nil {
+		t.Fatalf("record unverified cleanup scope: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(workRoot, "worker-diagnostics", job.Identity.AttemptID+".json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var record retainedWorkerDiagnostics
+	if err := json.Unmarshal(data, &record); err != nil {
+		t.Fatal(err)
+	}
+	canonicalRoot, err := workspace.CanonicalPath(workRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.CleanupUnverifiedWorkRoot != canonicalRoot || record.WorkerReportedFailure != nil || len(record.WorkerReportedDiagnostics) != 0 || strings.Contains(string(data), orphan) {
+		t.Fatalf("crash recovery record claimed unobserved worker facts: %+v", record)
 	}
 	if w.reuse.Load() != workerRetired || w.cmd.ProcessState == nil {
 		t.Fatalf("crashed worker retained capacity or process: state=%d process=%v", w.reuse.Load(), w.cmd.ProcessState)
