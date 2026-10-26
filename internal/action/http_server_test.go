@@ -263,6 +263,59 @@ func TestHTTPExecutorRejectsExpiryDuringAssignmentEncoding(t *testing.T) {
 	}
 }
 
+func TestHTTPExecutorCancellationWhileEncodingAssignment(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		const stopBudget = time.Millisecond
+		f := newHTTPServerTestWithStopServer(t, ctx, testJob(command.Comment), runnerExecutionCheckpoints{}, nil,
+			func(h http.Handler) *httptest.Server { return httptest.NewTestServer(t, h) }, stopBudget)
+		pull, err := httpEncode(httpPull{Version: ProtocolVersion, ExecutorID: f.job.Identity.ExecutorID}, httpControlBytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/next", bytes.NewReader(pull))
+		request.Header.Set("Content-Type", "application/json")
+		response := &httpRepullRecorder{httptest.NewRecorder()}
+		entered, release, finished := make(chan struct{}), make(chan struct{}), make(chan struct{})
+		var once sync.Once
+		unblock := func() { once.Do(func() { close(release) }) }
+		defer unblock()
+		go func() {
+			f.executor.serveNextEncoded(response, request, func(assignment httpAssignment) ([]byte, error) {
+				close(entered)
+				<-release
+				return httpEncode(assignment, httpJobBytes)
+			})
+			close(finished)
+		}()
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("assignment encoding did not start")
+		}
+		canceledAt := time.Now()
+		cancel()
+		select {
+		case <-f.tx.stop:
+		case <-time.After(2 * stopBudget):
+			t.Fatal("assignment encoding held the stop path")
+		}
+		if elapsed := time.Since(canceledAt); elapsed > 2*stopBudget {
+			t.Fatalf("stop was delayed by assignment encoding: %s", elapsed)
+		}
+		if got := f.result(t); !errors.Is(got.err, context.Canceled) || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) {
+			t.Fatalf("unclaimed assignment changed cancellation: %+v error=%v", got.result, got.err)
+		}
+		unblock()
+		<-finished
+		var ack httpAcknowledgement
+		if err := httpDecode(response.Body, httpControlBytes, &ack); err != nil || response.Code != http.StatusConflict || ack.Failure == nil || !ack.Failure.Canceled || f.tx.delivered {
+			t.Fatalf("canceled encoding claimed assignment: status=%d ack=%+v delivered=%t error=%v", response.Code, ack, f.tx.delivered, err)
+		}
+	})
+}
+
 func TestHTTPExecutorBindingSequenceAndRawCheckpointFacts(t *testing.T) {
 	var before, after, review atomic.Int32
 	paid := make(chan CallUsage, 1)

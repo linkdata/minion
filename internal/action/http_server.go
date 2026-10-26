@@ -302,6 +302,12 @@ func (e *HTTPExecutor) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (e *HTTPExecutor) serveNext(w http.ResponseWriter, r *http.Request) {
+	e.serveNextEncoded(w, r, func(assignment httpAssignment) ([]byte, error) {
+		return httpEncode(assignment, httpJobBytes)
+	})
+}
+
+func (e *HTTPExecutor) serveNextEncoded(w http.ResponseWriter, r *http.Request, encode func(httpAssignment) ([]byte, error)) {
 	var pull httpPull
 	if err := httpServerRead(w, r, httpControlBytes, &pull); err != nil {
 		httpServerReject(w, "next", httpInputStatus(err), httpBinding{}, 0, err)
@@ -388,23 +394,38 @@ poll:
 				dispatchAt := time.Now()
 				job := tx.job
 				job.RuntimeBudget = max(deadline.Sub(dispatchAt), time.Nanosecond)
-				body, err := httpEncode(httpAssignment{Job: job, Credentials: tx.credentials, HeldFor: dispatchAt.Sub(pullAt), StopGrace: tx.stopGrace}, httpJobBytes)
-				if err != nil {
-					tx.mu.Unlock()
-					e.mu.Unlock()
-					tx.stopExecution(fmt.Errorf("%w: encode HTTP assignment: %w", monitor.ErrTerminalJob, err), true)
-					httpServerReject(w, "next", http.StatusInternalServerError, httpBinding{}, 0, err)
-					return
-				}
+				assignment := httpAssignment{Job: job, Credentials: tx.credentials, HeldFor: dispatchAt.Sub(pullAt), StopGrace: tx.stopGrace}
+				tx.mu.Unlock()
+				e.mu.Unlock()
+				body, err := encode(assignment)
+				e.mu.Lock()
+				tx.mu.Lock()
 				if r.Context().Err() != nil {
 					tx.mu.Unlock()
 					e.mu.Unlock()
 					return
 				}
-				if err := httpExecutionContextError(tx.ctx); err != nil {
+				if ctxErr := httpExecutionContextError(tx.ctx); ctxErr != nil {
 					tx.mu.Unlock()
 					e.mu.Unlock()
-					httpServerReject(w, "next", http.StatusConflict, httpBinding{}, 0, err)
+					httpServerReject(w, "next", http.StatusConflict, httpBinding{}, 0, ctxErr)
+					return
+				}
+				if e.active != tx || e.closed || e.unavailable || tx.fenced || tx.delivered {
+					rejection := errors.New("HTTP assignment changed during encoding")
+					if e.closed {
+						rejection = context.Canceled
+					}
+					tx.mu.Unlock()
+					e.mu.Unlock()
+					httpServerReject(w, "next", http.StatusConflict, httpBinding{}, 0, rejection)
+					return
+				}
+				if err != nil {
+					tx.mu.Unlock()
+					e.mu.Unlock()
+					tx.stopExecution(fmt.Errorf("%w: encode HTTP assignment: %w", monitor.ErrTerminalJob, err), true)
+					httpServerReject(w, "next", http.StatusInternalServerError, httpBinding{}, 0, err)
 					return
 				}
 				tx.delivered = true
