@@ -414,7 +414,10 @@ func TestLocalWorkerHTTPSHelper(t *testing.T) {
 		os.Exit(7)
 	}
 	if mode == "hold" {
-		select {}
+		// Keep a timer live so the test process cannot report a false runtime
+		// deadlock before the parent checks canceled-pull readiness.
+		time.Sleep(30 * time.Second)
+		t.Fatal("held worker was not stopped")
 	}
 	if mode == "idle" || mode == "ignore-idle-cancel" {
 		if err := RunHTTPLoop(t.Context(), client, access.BaseURL, "local", &Runner{}); err != nil {

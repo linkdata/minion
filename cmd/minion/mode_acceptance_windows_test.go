@@ -39,13 +39,26 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
+type windowsModeGitProxyConfig struct {
+	RealGit string `json:"real_git"`
+	Rewrite string `json:"rewrite"`
+}
+
 func windowsModeGitProxy() {
-	realGit, rewrite := os.Getenv("MINION_WINDOWS_GIT_PROXY"), os.Getenv("MINION_WINDOWS_GIT_CONFIG")
-	if realGit == "" || rewrite == "" {
+	binary, err := os.Executable()
+	if err != nil {
 		os.Exit(99)
 	}
-	args := append([]string{"-c", "protocol.https.allow=never", "-c", "protocol.http.allow=never", "-c", "protocol.ssh.allow=never", "-c", "protocol.git.allow=never", "-c", "include.path=" + filepath.ToSlash(rewrite)}, os.Args[1:]...)
-	cmd := exec.Command(realGit, args...)
+	data, err := os.ReadFile(filepath.Join(filepath.Dir(binary), "git-proxy.json"))
+	if err != nil {
+		os.Exit(99)
+	}
+	var proxy windowsModeGitProxyConfig
+	if json.Unmarshal(data, &proxy) != nil || proxy.RealGit == "" || proxy.Rewrite == "" {
+		os.Exit(99)
+	}
+	args := append([]string{"-c", "protocol.https.allow=never", "-c", "protocol.http.allow=never", "-c", "protocol.ssh.allow=never", "-c", "protocol.git.allow=never", "-c", "include.path=" + filepath.ToSlash(proxy.Rewrite)}, os.Args[1:]...)
+	cmd := exec.Command(proxy.RealGit, args...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	if err := cmd.Run(); err != nil {
 		var exit *exec.ExitError
@@ -71,6 +84,7 @@ func windowsModeCodexProbe() {
 			text += " MINION_UNTRUSTED_AGENTS_78 MINION_UNTRUSTED_SKILL_78"
 		}
 		_ = json.NewEncoder(os.Stdout).Encode([]any{map[string]any{"role": "user", "content": []any{map[string]string{"text": text}}}})
+		return
 	case "app-server":
 		if strings.Contains(strings.Join(os.Args, " "), "minion_unsupported_capability_probe=true") {
 			fmt.Fprintln(os.Stderr, "unknown config key: minion_unsupported_capability_probe")
@@ -167,8 +181,14 @@ func offlineModeGitProxy(t *testing.T, realGit, rewrite string) {
 	t.Helper()
 	bin := t.TempDir()
 	windowsModeCopyExecutable(t, bin, "git")
-	t.Setenv("MINION_WINDOWS_GIT_PROXY", realGit)
-	t.Setenv("MINION_WINDOWS_GIT_CONFIG", rewrite)
+	// Git readiness strips fixture environment variables before calling git.exe.
+	data, err := json.Marshal(windowsModeGitProxyConfig{RealGit: realGit, Rewrite: rewrite})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bin, "git-proxy.json"), data, 0600); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
