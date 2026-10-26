@@ -123,9 +123,16 @@ func (e *UnixEndpoint) SocketPath() string { return e.socketPath }
 // When a worker can write the runtime path, first call HTTPExecutor.Close while
 // HTTP serves, wait for the direct worker process to exit, then call Close.
 func (e *UnixEndpoint) Close() error {
+	return e.closeContext(context.Background())
+}
+
+func (e *UnixEndpoint) closeContext(ctx context.Context) error {
 	e.closeOnce.Do(func() {
 		coreErr := e.executor.Close()
-		shutdownErr := e.server.Shutdown(context.Background())
+		shutdownErr := e.server.Shutdown(ctx)
+		if shutdownErr != nil {
+			shutdownErr = errors.Join(shutdownErr, e.server.Close())
+		}
 		<-e.serveDone
 		e.closeErr = errors.Join(coreErr, shutdownErr, e.serveErr, e.removeSocket())
 	})

@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -32,6 +33,9 @@ type localWorker struct {
 	reuse        atomic.Int32
 	stderr       *bounded.Tail
 	waitErr      error
+	killErr      error
+	stopUntil    time.Time
+	stopTimer    *time.Timer
 	closeOnce    sync.Once
 	closeErr     error
 	readyTimeout time.Duration
@@ -159,7 +163,7 @@ func (w *localWorker) Execute(ctx context.Context, job Job, sink Checkpoints) (R
 		}
 		return Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head}, fmt.Errorf("%w: local worker is busy or not ready for another assignment", monitor.ErrRequestTransport)
 	}
-	var state httpExecutionState
+	state := httpExecutionState{onStop: w.beginStop}
 	result, err := w.executor.execute(ctx, 0, job, sink, &state)
 	w.executor.mu.Lock()
 	closed, unavailable := w.executor.closed, w.executor.unavailable
@@ -172,7 +176,7 @@ func (w *localWorker) Execute(ctx context.Context, job Job, sink Checkpoints) (R
 	if cleanupFailed {
 		w.unclean.Store(true)
 	}
-	if closed || unavailable || cleanupFailed || state.admitted && (ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded)) {
+	if closed || unavailable || cleanupFailed || w.reuse.Load() == workerRetired || state.admitted && (ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded)) {
 		w.reuse.Store(workerRetired)
 		closeErr := w.Close()
 		// A received outcome remains the Job result; Close reports lifecycle errors separately.
@@ -322,13 +326,45 @@ func (w *localWorker) awaitHeldPull(ctx context.Context) (waitErr error) {
 	}
 }
 
-// Close drains accepted callbacks while HTTP serves, allows the direct child
-// to consume the canceled pull, then stops it if needed before closing the socket.
+// beginStop retires capacity and bounds the direct child to the HTTP stop deadline.
+func (w *localWorker) beginStop(until time.Time) {
+	w.reuse.Store(workerRetired)
+	w.stopUntil = until
+	w.stopTimer = time.AfterFunc(max(time.Until(until), 0), func() {
+		w.childMu.Lock()
+		defer w.childMu.Unlock()
+		select {
+		case <-w.exited:
+			return
+		default:
+		}
+		if err := w.cmd.Process.Kill(); err == nil {
+			w.stopSent.Store(true)
+		} else if !errors.Is(err, os.ErrProcessDone) && !errors.Is(err, syscall.ESRCH) {
+			w.killErr = fmt.Errorf("stop local worker at deadline: %w", err)
+		}
+	})
+}
+
+// Close drains accepted callbacks while HTTP serves, then joins the direct
+// child and endpoint without starting another stop grace period.
 func (w *localWorker) Close() error {
 	w.reuse.Store(workerRetired)
 	w.closeOnce.Do(func() {
+		started := time.Now()
 		coreErr := w.executor.Close()
-		grace := time.NewTimer(w.stopGrace)
+		// Close joins the transaction, including its single stop notification.
+		until := w.stopUntil
+		if until.IsZero() {
+			w.beginStop(started.Add(w.stopGrace))
+			until = w.stopUntil
+		}
+		// Give an idle child a chance to consume the closed pull before SIGINT.
+		signalUntil := started.Add(w.stopGrace - w.stopGrace/4)
+		if until.Before(signalUntil) {
+			signalUntil = until
+		}
+		grace := time.NewTimer(max(time.Until(signalUntil), 0))
 		select {
 		case <-w.exited:
 		case <-grace.C:
@@ -347,15 +383,21 @@ func (w *localWorker) Close() error {
 		}
 		w.childMu.Unlock()
 		<-w.exited
+		w.stopTimer.Stop()
 		if exitedBeforeCancel {
 			w.cancel() // Release the command context after a graceful exit.
 		}
 		// Cmd.Wait may have returned before cancellation but published afterward.
 		// Keep every nonzero exit code and other unexpected Wait error.
-		if w.waitErr != nil && (exitedBeforeCancel || !expectedLocalWorkerCancellation(w.waitErr, w.stopSent.Load())) {
+		if w.waitErr != nil && !expectedLocalWorkerCancellation(w.waitErr, w.stopSent.Load()) {
 			w.closeErr = fmt.Errorf("local worker exited: %w", w.waitErr)
 		}
-		w.closeErr = errors.Join(w.closeErr, coreErr, w.endpoint.Close())
+		w.childMu.Lock()
+		w.closeErr = errors.Join(w.closeErr, w.killErr)
+		w.childMu.Unlock()
+		stopContext, cancelStop := context.WithDeadline(context.Background(), until)
+		w.closeErr = errors.Join(w.closeErr, coreErr, w.endpoint.closeContext(stopContext))
+		cancelStop()
 	})
 	return w.closeErr
 }

@@ -320,6 +320,53 @@ func TestUnixEndpointConcurrentCloseRetainsBorrowedDirectory(t *testing.T) {
 	}
 }
 
+func TestUnixEndpointCloseContextBoundsShutdown(t *testing.T) {
+	endpoint, err := ListenUnixExecution(unixTestDirectory(t), unixTestCore(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	unixTestCleanupEndpoint(t, endpoint)
+	entered := make(chan struct{})
+	endpoint.server.Handler = http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		close(entered)
+		<-r.Context().Done()
+	})
+	client, err := NewUnixExecutionClient(endpoint.SocketPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.CloseIdleConnections()
+	requestDone := make(chan error, 1)
+	go func() {
+		response, err := client.Post(UnixExecutionBaseURL+"/next", "application/json", strings.NewReader("{}"))
+		if response != nil {
+			_ = response.Body.Close()
+		}
+		requestDone <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("endpoint did not enter the held request")
+	}
+	stop, cancel := context.WithTimeout(t.Context(), 25*time.Millisecond)
+	defer cancel()
+	if err := endpoint.closeContext(stop); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("held endpoint shutdown did not report the stop deadline: %v", err)
+	}
+	select {
+	case err := <-requestDone:
+		if err == nil {
+			t.Fatal("held request survived forced endpoint close")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("held request survived the stop deadline")
+	}
+	if _, err := os.Lstat(endpoint.SocketPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("bounded close retained owned socket: %v", err)
+	}
+}
+
 func TestUnixEndpointServesActualHTTPTransaction(t *testing.T) {
 	job := testJob(command.Comment)
 	core := unixTestCore(t)

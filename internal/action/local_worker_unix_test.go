@@ -36,7 +36,8 @@ func localWorkerTestStart(t *testing.T, mode string) *localWorker {
 	report := filepath.Join(t.TempDir(), "child")
 	var output bytes.Buffer
 	w, err := startLocalWorker(unixTestDirectory(t), "local", os.Args[0], []string{"-test.run=^TestLocalWorkerHelper$"}, 10*time.Second, WorkerCredentials{}, func(cmd *exec.Cmd, socket string) error {
-		cmd.Env = append(os.Environ(), "MINION_LOCAL_WORKER_HELPER="+mode, "MINION_LOCAL_WORKER_SOCKET="+socket, "MINION_LOCAL_WORKER_REPORT="+report)
+		// The parent joins this helper; skip the race runtime's post-exit sleep.
+		cmd.Env = append(os.Environ(), "MINION_LOCAL_WORKER_HELPER="+mode, "MINION_LOCAL_WORKER_SOCKET="+socket, "MINION_LOCAL_WORKER_REPORT="+report, "GORACE=atexit_sleep_ms=0")
 		cmd.Stdout = &output
 		if mode == "ignore-interrupt" {
 			cmd.WaitDelay = 100 * time.Millisecond
@@ -121,7 +122,7 @@ func TestLocalWorkerIdleRunHTTPClose(t *testing.T) {
 	}
 }
 
-func TestLocalWorkerCloseSignalsUnresponsiveIdleChild(t *testing.T) {
+func TestLocalWorkerCloseStopsUnresponsiveIdleChild(t *testing.T) {
 	w := localWorkerTestStart(t, "ignore-idle-cancel")
 	w.stopGrace = 25 * time.Millisecond
 	localWorkerTestPull(t, w)
@@ -132,7 +133,7 @@ func TestLocalWorkerCloseSignalsUnresponsiveIdleChild(t *testing.T) {
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
 		t.Fatalf("direct stop took %v after a %v grace period", elapsed, w.stopGrace)
 	}
-	if !w.stopSent.Load() || w.cmd.ProcessState == nil || !w.cmd.ProcessState.Success() {
+	if !w.stopSent.Load() || w.cmd.ProcessState == nil {
 		t.Fatalf("unresponsive idle child was not reaped after direct stop: sent=%v state=%v", w.stopSent.Load(), w.cmd.ProcessState)
 	}
 }
@@ -503,7 +504,7 @@ func TestLocalWorkerKnownOutcomeSurvivesChildExit(t *testing.T) {
 
 func TestLocalWorkerCloseReportsExitCodeAfterInterrupt(t *testing.T) {
 	w := localWorkerTestStart(t, "stop-exit")
-	w.stopGrace = 25 * time.Millisecond
+	w.stopGrace = 400 * time.Millisecond
 	var exitErr *exec.ExitError
 	if err := w.Close(); !errors.As(err, &exitErr) || exitErr.ExitCode() != 7 {
 		t.Fatalf("owner cancellation hid child exit code: %v", err)
@@ -515,9 +516,12 @@ func TestLocalWorkerCloseReportsExitCodeAfterInterrupt(t *testing.T) {
 
 func TestLocalWorkerCloseAcceptsGracefulInterrupt(t *testing.T) {
 	w := localWorkerTestStart(t, "stop-success")
-	w.stopGrace = 25 * time.Millisecond
+	w.stopGrace = 400 * time.Millisecond
 	if err := w.Close(); err != nil {
 		t.Fatalf("graceful owner cancellation reported as child failure: %v", err)
+	}
+	if w.cmd.ProcessState == nil || !w.cmd.ProcessState.Success() {
+		t.Fatalf("owner interrupt did not let the direct child exit gracefully: %v", w.cmd.ProcessState)
 	}
 }
 
@@ -643,6 +647,38 @@ func TestLocalWorkerBudgetQuarantineStopsLiveChild(t *testing.T) {
 	}
 	if _, err := os.Lstat(w.endpoint.SocketPath()); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("budget quarantine left owned endpoint: %v", err)
+	}
+}
+
+func TestLocalWorkerCancellationDoesNotRenewStopDeadline(t *testing.T) {
+	w := localWorkerTestStart(t, "stall")
+	w.executor.outcomeGrace = 40 * time.Millisecond
+	localWorkerTestCapacity(t, w)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	job := testJob(command.Comment)
+	done := make(chan httpServerTestResult, 1)
+	go func() {
+		result, err := w.Execute(ctx, job, runnerExecutionCheckpoints{})
+		done <- httpServerTestResult{result, err}
+	}()
+	wait, stopWait := context.WithTimeout(t.Context(), 10*time.Second)
+	defer stopWait()
+	unixWorkerReport(t, wait, localWorkerTestReport(t, w), ".entered")
+	cancel()
+	select {
+	case got := <-done:
+		if !got.result.matchesJob(job) || !errors.Is(got.err, context.Canceled) || !errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) {
+			t.Fatalf("canceled assignment changed result: result=%+v error=%v", got.result, got.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("direct child started another grace period after the HTTP stop deadline")
+	}
+	if w.reuse.Load() != workerRetired || w.cmd.ProcessState == nil {
+		t.Fatalf("stopped worker kept capacity or direct child: reuse=%d process=%v", w.reuse.Load(), w.cmd.ProcessState)
+	}
+	if _, err := os.Lstat(w.endpoint.SocketPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stopped worker retained endpoint: %v", err)
 	}
 }
 
@@ -789,10 +825,74 @@ func TestLocalWorkerDrainsAcceptedCallbackBeforeStop(t *testing.T) {
 	}
 }
 
+func TestLocalWorkerShortStopRetiresWhileCallbackDrains(t *testing.T) {
+	w := localWorkerTestStart(t, "drain")
+	w.executor.outcomeGrace = 40 * time.Millisecond
+	localWorkerTestCapacity(t, w)
+	entered, release := make(chan struct{}), make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+	job := testJob(command.Comment)
+	done := make(chan httpServerTestResult, 1)
+	go func() {
+		result, err := w.Execute(t.Context(), job, runnerExecutionCheckpoints{before: func(CallCheckpoint) error {
+			close(entered)
+			<-release
+			return nil
+		}})
+		done <- httpServerTestResult{result, err}
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("direct child did not enter the paid callback")
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- w.Close() }()
+	select {
+	case <-w.exited:
+	case <-time.After(time.Second):
+		t.Fatal("direct child outlived the single short stop deadline")
+	}
+	if w.reuse.Load() != workerRetired || w.cmd.ProcessState == nil {
+		t.Fatalf("blocked callback released capacity or left direct child: reuse=%d process=%v", w.reuse.Load(), w.cmd.ProcessState)
+	}
+	select {
+	case err := <-closed:
+		t.Fatalf("Close abandoned the entered callback: %v", err)
+	default:
+	}
+	if _, err := os.Lstat(w.endpoint.SocketPath()); err != nil {
+		t.Fatalf("Close removed the endpoint before callback drain: %v", err)
+	}
+	close(release)
+	select {
+	case got := <-done:
+		if !got.result.matchesJob(job) || !errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) {
+			t.Fatalf("lost child changed the uncertain result: result=%+v error=%v", got.result, got.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("accepted callback did not finish")
+	}
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not finish after callback drain")
+	}
+	if _, err := os.Lstat(w.endpoint.SocketPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stopped worker retained endpoint: %v", err)
+	}
+}
+
 func TestLocalWorkerCloseReportsExitDuringCallbackDrain(t *testing.T) {
 	w := localWorkerTestStart(t, "drain-kill")
 	localWorkerTestCapacity(t, w)
-	w.executor.outcomeGrace = 25 * time.Millisecond
+	w.executor.outcomeGrace = 500 * time.Millisecond
 	entered, release := make(chan struct{}), make(chan struct{})
 	t.Cleanup(func() {
 		select {
@@ -1038,7 +1138,7 @@ func TestLocalWorkerCleanupFailureRetiresWithoutRemovingEvidence(t *testing.T) {
 	defer cancel()
 	job := testJob(command.Comment)
 	result, err := w.Execute(ctx, job, runnerExecutionCheckpoints{})
-	if err != nil || result.Answer != "known" || !result.matchesJob(job) || len(result.Diagnostics) != 1 || result.Diagnostics[0].Code != "cleanup_failed" {
+	if err != nil || result.Answer != "known" || !result.matchesJob(job) || len(result.Diagnostics) != 2 || result.Diagnostics[0].Code != "cleanup_failed" || result.Diagnostics[1].Code != "cleanup_recovery" || !strings.Contains(result.Diagnostics[1].Message, ".leftover") {
 		t.Fatalf("cleanup failure changed the accepted outcome: result=%+v error=%v", result, err)
 	}
 	if data, err := os.ReadFile(localWorkerTestReport(t, w) + ".leftover"); err != nil || string(data) != "retain" {
@@ -1260,6 +1360,9 @@ func TestLocalWorkerHelper(t *testing.T) {
 		os.Exit(7)
 	}
 	if mode == "stall" {
+		if err := workspace.WriteAtomic(report+".entered", []byte("entered")); err != nil {
+			t.Fatal(err)
+		}
 		select {}
 	}
 	job := assignment.Job
@@ -1272,7 +1375,10 @@ func TestLocalWorkerHelper(t *testing.T) {
 		if err := workspace.WriteAtomic(report+".leftover", []byte("retain")); err != nil {
 			t.Fatal(err)
 		}
-		result.Diagnostics = []Diagnostic{{Code: "cleanup_failed", Message: "Execution workspace cleanup failed; operator attention is required."}}
+		result.Diagnostics = []Diagnostic{
+			{Code: "cleanup_failed", Message: "Execution workspace cleanup failed; operator attention is required."},
+			{Code: "cleanup_recovery", Message: "Retained test evidence: " + report + ".leftover"},
+		}
 	}
 	sequence := uint64(1)
 	var failure *httpFailure
