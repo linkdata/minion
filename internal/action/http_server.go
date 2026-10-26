@@ -50,7 +50,6 @@ type httpTransaction struct {
 	cancel      context.CancelFunc
 	stopBudget  context.CancelFunc
 	stopGrace   time.Duration
-	stopOnce    sync.Once
 	stopContext context.Context
 	stopCancel  context.CancelFunc
 	stopUntil   time.Time
@@ -154,15 +153,12 @@ func (e *HTTPExecutor) execute(ctx context.Context, stopBudget time.Duration, jo
 	defer func() {
 		tx.mu.Lock()
 		tx.fenced = true
-		stopCancel := tx.stopCancel
 		tx.mu.Unlock()
-		if stopCancel != nil {
-			stopCancel()
-		}
 		cancel()
 		// Saves have no context. An entered fsync must drain even after control grace expires.
 		tx.handlers.Wait()
 		tx.mu.Lock()
+		stopCancel := tx.stopCancel
 		if tx.outcome {
 			// A received outcome resolves watch ambiguity, even if its own receipt ACK was lost.
 			if state != nil {
@@ -178,6 +174,9 @@ func (e *HTTPExecutor) execute(ctx context.Context, stopBudget time.Duration, jo
 		}
 		quarantine := tx.quarantine
 		tx.mu.Unlock()
+		if stopCancel != nil {
+			stopCancel()
+		}
 		e.mu.Lock()
 		e.active = nil
 		e.unavailable = e.unavailable || quarantine
@@ -256,8 +255,14 @@ func (e *HTTPExecutor) Close() error {
 	e.mu.Unlock()
 	if tx != nil {
 		tx.stopBudget()
-		tx.stopExecution(nil, false)
+		tx.stopForClose()
 		<-tx.finished
+		tx.mu.Lock()
+		stopCancel := tx.stopCancel
+		tx.mu.Unlock()
+		if stopCancel != nil {
+			stopCancel()
+		}
 	}
 	return nil
 }
@@ -533,24 +538,27 @@ func (tx *httpTransaction) stopExecution(err error, cancel bool) {
 	if err != nil && tx.transportErr == nil {
 		tx.transportErr = err
 	}
+	tx.startStopLocked(false)
 	tx.mu.Unlock()
-	tx.stopOnce.Do(func() {
-		stopContext, stopCancel := context.WithTimeout(context.WithoutCancel(tx.budget), tx.stopGrace)
-		deadline, _ := stopContext.Deadline()
-		tx.mu.Lock()
-		if tx.fenced {
-			tx.mu.Unlock()
-			stopCancel()
-			return
-		}
-		tx.stopContext, tx.stopCancel, tx.stopUntil = stopContext, stopCancel, deadline
-		tx.stopping = true
-		close(tx.stop)
-		tx.mu.Unlock()
-	})
 	if cancel {
 		tx.cancel()
 	}
+}
+
+func (tx *httpTransaction) stopForClose() {
+	tx.mu.Lock()
+	tx.startStopLocked(true)
+	tx.mu.Unlock()
+}
+
+func (tx *httpTransaction) startStopLocked(explicitClose bool) {
+	if tx.stopContext != nil || tx.fenced && !explicitClose {
+		return
+	}
+	tx.stopContext, tx.stopCancel = context.WithTimeout(context.WithoutCancel(tx.budget), tx.stopGrace)
+	tx.stopUntil, _ = tx.stopContext.Deadline()
+	tx.stopping = true
+	close(tx.stop)
 }
 
 func (tx *httpTransaction) stopRequiredDelivery(err error) {
@@ -862,7 +870,7 @@ func httpServerWatchHeaders(w http.ResponseWriter, tx *httpTransaction) (writeEr
 	return controller.Flush()
 }
 
-func httpServerWatchReason(w http.ResponseWriter, cancellation httpCancellation, tx *httpTransaction) error {
+func httpServerWatchReason(w http.ResponseWriter, cancellation httpCancellation, tx *httpTransaction) (writeErr error) {
 	body, err := httpEncode(cancellation, httpControlBytes)
 	if err != nil {
 		return err
@@ -871,6 +879,8 @@ func httpServerWatchReason(w http.ResponseWriter, cancellation httpCancellation,
 	if err := controller.SetWriteDeadline(httpControlDeadline([]*httpTransaction{tx})); err != nil {
 		return err
 	}
+	finishWatch := httpServerDeadlineWatch([]*httpTransaction{tx}, controller.SetWriteDeadline)
+	defer func() { writeErr = errors.Join(writeErr, finishWatch()) }()
 	n, err := w.Write(body)
 	if err != nil {
 		return err

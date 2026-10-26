@@ -1664,6 +1664,37 @@ type httpServerHeldWrite struct {
 	release chan struct{}
 }
 
+type httpDeadlineHeldWrite struct {
+	http.ResponseWriter
+	entered   chan struct{}
+	deadlines chan time.Time
+}
+
+func (w *httpDeadlineHeldWrite) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+func (w *httpDeadlineHeldWrite) SetWriteDeadline(deadline time.Time) error {
+	w.deadlines <- deadline
+	return nil
+}
+
+func (w *httpDeadlineHeldWrite) Write([]byte) (int, error) {
+	close(w.entered)
+	deadline := <-w.deadlines
+	for {
+		if deadline.IsZero() {
+			deadline = <-w.deadlines
+			continue
+		}
+		timer := time.NewTimer(time.Until(deadline))
+		select {
+		case deadline = <-w.deadlines:
+			timer.Stop()
+		case <-timer.C:
+			return 0, context.DeadlineExceeded
+		}
+	}
+}
+
 func (w httpServerHeldWrite) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 func (w httpServerHeldWrite) Write(body []byte) (int, error) {
 	close(w.entered)
@@ -1713,6 +1744,106 @@ func TestHTTPExecutorSealedOutcomeDoesNotAcquireDeadlineDuringACKDrain(t *testin
 		}
 		if got := f.result(t); got.err != nil || !reflect.DeepEqual(got.result, outcome.Result) {
 			t.Fatalf("ACK drain invented a deadline after the outcome was already sealed: %+v error=%v", got.result, got.err)
+		}
+	})
+}
+
+func TestHTTPExecutorCloseBoundsSealedOutcomeACK(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const stopBudget = 10 * time.Millisecond
+		entered := make(chan struct{})
+		f := newHTTPServerTestWithStopServer(t, t.Context(), testJob(command.Comment), runnerExecutionCheckpoints{},
+			func(next http.Handler) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path == "/outcome" {
+						w = &httpDeadlineHeldWrite{ResponseWriter: w, entered: entered, deadlines: make(chan time.Time, 4)}
+					}
+					next.ServeHTTP(w, r)
+				})
+			}, func(h http.Handler) *httptest.Server { return httptest.NewTestServer(t, h) }, stopBudget)
+		f.pull(t)
+		outcome := f.outcome(1, nil)
+		outcome.Result.Answer = "Sealed before explicit Close"
+		acknowledged := make(chan httpServerTestExchange, 1)
+		go func() { acknowledged <- f.request("/outcome", outcome) }()
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("outcome did not seal before ACK write")
+		}
+		f.tx.mu.Lock()
+		sealed := f.tx.outcome
+		f.tx.mu.Unlock()
+		if !sealed {
+			t.Fatal("fixture entered an outcome rejection before sealing")
+		}
+		closed := make(chan error, 1)
+		go func() { closed <- f.executor.Close() }()
+		<-f.tx.stop
+		stoppedAt := time.Now()
+		got := f.result(t)
+		if elapsed := time.Since(stoppedAt); elapsed > 2*stopBudget {
+			t.Fatalf("sealed ACK outlived explicit Close bound: %s", elapsed)
+		}
+		if err := <-closed; err != nil {
+			t.Fatal(err)
+		}
+		if got.err != nil || !reflect.DeepEqual(got.result, outcome.Result) {
+			t.Fatalf("lost ACK erased sealed outcome: %+v error=%v", got.result, got.err)
+		}
+		if ack := <-acknowledged; ack.err == nil && ack.status == http.StatusOK && ack.ack.Failure == nil {
+			t.Fatalf("blocked ACK was reported delivered: %+v", ack)
+		}
+		if _, err := f.executor.Execute(t.Context(), f.job, runnerExecutionCheckpoints{}); err == nil {
+			t.Fatal("lost ACK released worker capacity")
+		}
+	})
+}
+
+func TestHTTPExecutorCloseBoundsCompletedWatchReason(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const stopBudget = 10 * time.Millisecond
+		entered := make(chan struct{})
+		f := newHTTPServerTestWithStopServer(t, t.Context(), testJob(command.Comment), runnerExecutionCheckpoints{},
+			func(next http.Handler) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path == "/cancel" {
+						w = &httpDeadlineHeldWrite{ResponseWriter: w, entered: entered, deadlines: make(chan time.Time, 4)}
+					}
+					next.ServeHTTP(w, r)
+				})
+			}, func(h http.Handler) *httptest.Server { return httptest.NewTestServer(t, h) }, stopBudget)
+		f.pull(t)
+		body, err := json.Marshal(f.tx.binding)
+		if err != nil {
+			t.Fatal(err)
+		}
+		watch, err := f.server.Client().Post(f.server.URL+"/cancel", "application/json", bytes.NewReader(body))
+		if err != nil || watch.StatusCode != http.StatusOK {
+			t.Fatalf("watch admission: response=%v error=%v", watch, err)
+		}
+		defer watch.Body.Close()
+		outcome := f.outcome(1, nil)
+		outcome.Result.Answer = "Sealed before completed watch reply"
+		f.ack(t, "/outcome", outcome, http.StatusOK, 1)
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("completed watch reason did not enter its write")
+		}
+		closed := make(chan error, 1)
+		go func() { closed <- f.executor.Close() }()
+		<-f.tx.stop
+		stoppedAt := time.Now()
+		got := f.result(t)
+		if elapsed := time.Since(stoppedAt); elapsed > 2*stopBudget {
+			t.Fatalf("completed watch reason outlived Close bound: %s", elapsed)
+		}
+		if err := <-closed; err != nil {
+			t.Fatal(err)
+		}
+		if got.err != nil || !reflect.DeepEqual(got.result, outcome.Result) {
+			t.Fatalf("failed completed watch reason erased known outcome: %+v error=%v", got.result, got.err)
 		}
 	})
 }

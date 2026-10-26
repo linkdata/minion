@@ -1055,11 +1055,13 @@ func (w httpClientFailedWatchHeaders) WriteHeader(status int) {
 func TestHTTPClientWatchDistinguishesLocalStopFromParsedReplies(t *testing.T) {
 	binding := httpJobBinding(testJob(command.Comment))
 	for _, test := range []struct {
-		name    string
-		reason  string
-		readErr error
-		want    error
-		unknown bool
+		name          string
+		reason        string
+		remaining     time.Duration
+		zeroRemaining bool
+		readErr       error
+		want          error
+		unknown       bool
 	}{
 		{name: "local explicit cause", readErr: errHTTPWatchStopped, want: context.Canceled},
 		{name: "local context sentinel", readErr: context.Canceled, want: context.Canceled},
@@ -1067,6 +1069,9 @@ func TestHTTPClientWatchDistinguishesLocalStopFromParsedReplies(t *testing.T) {
 		{name: "malformed body", unknown: true},
 		{name: "parent deadline", reason: "deadline", want: context.DeadlineExceeded},
 		{name: "parent cancellation", reason: "canceled", want: context.Canceled},
+		{name: "expired stop remaining", reason: "canceled", zeroRemaining: true, want: context.Canceled},
+		{name: "negative stop remaining", reason: "canceled", remaining: -time.Second, unknown: true},
+		{name: "excessive stop remaining", reason: "deadline", remaining: config.MaxActionRuntime + time.Nanosecond, unknown: true},
 		{name: "premature completed", reason: "completed", unknown: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -1076,16 +1081,27 @@ func TestHTTPClientWatchDistinguishesLocalStopFromParsedReplies(t *testing.T) {
 			if test.readErr != nil {
 				reader = iotest.ErrReader(test.readErr)
 			} else if test.reason != "" {
-				body, err := httpEncode(httpCancellation{httpBinding: binding, Reason: test.reason, StopRemaining: httpControlTimeout}, httpControlBytes)
+				remaining := test.remaining
+				if remaining == 0 && !test.zeroRemaining {
+					remaining = httpControlTimeout
+				}
+				body, err := httpEncode(httpCancellation{httpBinding: binding, Reason: test.reason, StopRemaining: remaining}, httpControlBytes)
 				if err != nil {
 					t.Fatal(err)
 				}
 				reader = strings.NewReader(string(body))
 			}
 			transport := &httpExecutionClient{}
-			err := transport.watch(ctx, &http.Response{Body: io.NopCloser(reader)}, binding, func(time.Duration) {})
+			shortened := false
+			err := transport.watch(ctx, &http.Response{Body: io.NopCloser(reader)}, binding, func(time.Duration) { shortened = true })
 			if errors.Is(err, monitor.ErrExecutionOutcomeUnknown) != test.unknown || test.want != nil && !errors.Is(err, test.want) {
 				t.Fatalf("intentional stop erased a real reply or became unknown: %v", err)
+			}
+			if test.unknown && shortened {
+				t.Fatal("invalid cancellation changed the control deadline")
+			}
+			if test.zeroRemaining && !shortened {
+				t.Fatal("expired cancellation did not close the control deadline")
 			}
 			if test.readErr != nil && err != context.Canceled || test.reason == "canceled" && err == context.Canceled {
 				t.Fatalf("local request stop and parsed parent cancellation became indistinguishable: %v", err)
