@@ -162,8 +162,9 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 				result.Diagnostics = append(result.Diagnostics, Diagnostic{Code: "cleanup_recovery", Message: cleanupDetail})
 			}
 			if len(retained) != 0 {
+				// Minion creates these basenames; preserve them exactly for recovery.
 				message := "Owned workspace recovery paths under the configured work root: " + strings.Join(retained, ", ")
-				result.Diagnostics = append(result.Diagnostics, Diagnostic{Code: "cleanup_recovery", Message: httpFailureDiagnostic(redactActionText(message, configured.secretValues()...))})
+				result.Diagnostics = append(result.Diagnostics, Diagnostic{Code: "cleanup_recovery", Message: httpFailureDiagnostic(message)})
 			}
 		}
 	}()

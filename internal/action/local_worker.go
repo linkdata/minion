@@ -332,7 +332,7 @@ func (w *localWorker) beginStop(until time.Time) {
 	w.reuse.Store(workerRetired)
 	w.stopOnce.Do(func() {
 		w.stopUntil = until
-		w.stopTimer = time.AfterFunc(max(time.Until(until), 0), w.stopDirectChild)
+		w.stopTimer = time.AfterFunc(time.Until(until), w.stopDirectChild)
 	})
 }
 

@@ -223,7 +223,7 @@ func TestLocalWorkerStopKeepsHTTPDeadline(t *testing.T) {
 			if !w.stopUntil.Equal(until) {
 				t.Fatalf("later stop renewed deadline: first=%v later=%v", until, w.stopUntil)
 			}
-			childLimit := time.NewTimer(max(time.Until(until.Add(time.Second)), 0))
+			childLimit := time.NewTimer(time.Until(until.Add(time.Second)))
 			defer childLimit.Stop()
 			select {
 			case <-w.exited:
@@ -434,7 +434,7 @@ func TestLocalWorkerShortStopRetiresWhileCallbackDrains(t *testing.T) {
 	if until.IsZero() || !w.stopUntil.Equal(until) || w.reuse.Load() != workerRetired {
 		t.Fatalf("blocked callback kept capacity or renewed deadline: HTTP=%v worker=%v reuse=%d", until, w.stopUntil, w.reuse.Load())
 	}
-	childLimit := time.NewTimer(max(time.Until(until.Add(time.Second)), 0))
+	childLimit := time.NewTimer(time.Until(until.Add(time.Second)))
 	defer childLimit.Stop()
 	select {
 	case <-w.exited:
@@ -477,6 +477,8 @@ func TestLocalWorkerCloseStopsHTTPSBeforeDelayedChildWait(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = endpoint.Close() })
+	holdAuthenticatedUnfinishedLocalRequest(t, endpoint)
 	until := time.Now().Add(150 * time.Millisecond)
 	exited := make(chan struct{})
 	stopTimer := time.NewTimer(time.Hour)
@@ -497,7 +499,6 @@ func TestLocalWorkerCloseStopsHTTPSBeforeDelayedChildWait(t *testing.T) {
 	t.Cleanup(func() {
 		release()
 		stopTimer.Stop()
-		_ = endpoint.Close()
 	})
 	closed := make(chan error, 1)
 	go func() { closed <- w.Close() }()
@@ -508,7 +509,7 @@ func TestLocalWorkerCloseStopsHTTPSBeforeDelayedChildWait(t *testing.T) {
 	case <-limit.C:
 		t.Fatal("HTTPS listener stayed open while direct child wait was delayed")
 	}
-	deadline := time.NewTimer(max(time.Until(until), 0))
+	deadline := time.NewTimer(time.Until(until))
 	defer deadline.Stop()
 	<-deadline.C
 	select {
@@ -524,8 +525,8 @@ func TestLocalWorkerCloseStopsHTTPSBeforeDelayedChildWait(t *testing.T) {
 	release()
 	select {
 	case err := <-closed:
-		if err != nil {
-			t.Fatal(err)
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("held HTTPS request did not consume first stop deadline: %v", err)
 		}
 	case <-limit.C:
 		t.Fatal("Close did not join the delayed direct child wait")

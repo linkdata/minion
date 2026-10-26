@@ -432,6 +432,9 @@ func TestRunnerReportsOwnedAndCriticCleanupFailures(t *testing.T) {
 				}
 				return aicli.Result{Answer: "Done."}, nil
 			}}
+			if !critic {
+				runner.Claude.APIKey = "m" // Unused short key must not alter generated recovery basenames.
+			}
 			result, err := runner.Run(t.Context(), job)
 			if err != nil || result.Answer != "Done." {
 				t.Fatalf("cleanup changed accepted result: answer=%q error=%v", result.Answer, err)

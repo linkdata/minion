@@ -247,6 +247,25 @@ func TestLocalEndpointCloseUsesRemainingDeadline(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = endpoint.Close() })
+	holdAuthenticatedUnfinishedLocalRequest(t, endpoint)
+	until := time.Now().Add(150 * time.Millisecond)
+	started := time.Now()
+	err = endpoint.closeUntil(until)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("active HTTPS request did not consume remaining stop time: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("HTTPS shutdown started a new grace period: %v", elapsed)
+	}
+	select {
+	case <-endpoint.serveDone:
+	default:
+		t.Fatal("HTTPS serving was not joined after deadline")
+	}
+}
+
+func holdAuthenticatedUnfinishedLocalRequest(t *testing.T, endpoint *LocalEndpoint) {
+	t.Helper()
 	access := endpoint.Access()
 	u, err := url.Parse(access.BaseURL)
 	if err != nil {
@@ -264,7 +283,7 @@ func TestLocalEndpointCloseUsesRemainingDeadline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer connection.Close()
+	t.Cleanup(func() { _ = connection.Close() })
 	if err := connection.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
 		t.Fatal(err)
 	}
@@ -278,20 +297,6 @@ func TestLocalEndpointCloseUsesRemainingDeadline(t *testing.T) {
 	response.Body.Close()
 	if response.StatusCode != http.StatusContinue {
 		t.Fatalf("unfinished authenticated body did not enter handler: status=%d", response.StatusCode)
-	}
-	until := time.Now().Add(150 * time.Millisecond)
-	started := time.Now()
-	err = endpoint.closeUntil(until)
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("active HTTPS request did not consume remaining stop time: %v", err)
-	}
-	if elapsed := time.Since(started); elapsed > 2*time.Second {
-		t.Fatalf("HTTPS shutdown started a new grace period: %v", elapsed)
-	}
-	select {
-	case <-endpoint.serveDone:
-	default:
-		t.Fatal("HTTPS serving was not joined after deadline")
 	}
 }
 
