@@ -351,14 +351,15 @@ func (w *localWorker) beginStop(until time.Time) {
 	})
 }
 
-// Close drains accepted callbacks while HTTP serves, joins the direct child,
-// then closes HTTPS within the same stop deadline.
+// Close drains accepted callbacks while HTTP serves, starts HTTPS shutdown
+// with the first stop deadline, then joins the direct child.
 func (w *localWorker) Close() error {
 	w.reuse.Store(workerRetired)
 	w.closeOnce.Do(func() {
 		started := time.Now()
 		coreErr := w.executor.Close()
 		w.beginStop(started.Add(w.stopGrace)) // Idle fallback; an active transaction keeps its first deadline.
+		endpointErr := w.endpoint.closeUntil(w.stopUntil)
 		<-w.exited
 		w.stopTimer.Stop()
 		w.childMu.Lock()
@@ -369,7 +370,7 @@ func (w *localWorker) Close() error {
 		if waitErr != nil && !expectedLocalWorkerCancellation(waitErr, stopSent) {
 			w.closeErr = fmt.Errorf("local worker exited: %w", waitErr)
 		}
-		w.closeErr = errors.Join(w.closeErr, stopErr, coreErr, w.endpoint.closeUntil(w.stopUntil))
+		w.closeErr = errors.Join(w.closeErr, stopErr, coreErr, endpointErr)
 	})
 	return w.closeErr
 }

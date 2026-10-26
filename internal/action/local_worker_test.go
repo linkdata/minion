@@ -468,6 +468,70 @@ func TestLocalWorkerShortStopRetiresWhileCallbackDrains(t *testing.T) {
 	}
 }
 
+func TestLocalWorkerCloseStopsHTTPSBeforeDelayedChildWait(t *testing.T) {
+	executor, err := NewHTTPExecutor("local")
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoint, err := ListenLocalExecution(executor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	until := time.Now().Add(150 * time.Millisecond)
+	exited := make(chan struct{})
+	stopTimer := time.NewTimer(time.Hour)
+	w := &localWorker{
+		executor: executor, endpoint: endpoint, exited: exited,
+		cancel: func() {}, stopGrace: 2 * time.Second,
+		stopUntil: until, stopTimer: stopTimer,
+	}
+	// Model a transaction that already began stopping while Cmd.Wait is delayed.
+	w.stopOnce.Do(func() {})
+	release := func() {
+		select {
+		case <-exited:
+		default:
+			close(exited)
+		}
+	}
+	t.Cleanup(func() {
+		release()
+		stopTimer.Stop()
+		_ = endpoint.Close()
+	})
+	closed := make(chan error, 1)
+	go func() { closed <- w.Close() }()
+	limit := time.NewTimer(2 * time.Second)
+	defer limit.Stop()
+	select {
+	case <-endpoint.serveDone:
+	case <-limit.C:
+		t.Fatal("HTTPS listener stayed open while direct child wait was delayed")
+	}
+	deadline := time.NewTimer(max(time.Until(until), 0))
+	defer deadline.Stop()
+	<-deadline.C
+	select {
+	case <-exited:
+		t.Fatal("direct child wait was published before the test released it")
+	default:
+	}
+	select {
+	case err := <-closed:
+		t.Fatalf("Close returned before direct child wait was published: %v", err)
+	default:
+	}
+	release()
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-limit.C:
+		t.Fatal("Close did not join the delayed direct child wait")
+	}
+}
+
 func TestLocalWorkerClosePreservesExitDuringCallbackDrain(t *testing.T) {
 	w := startHTTPSWorkerTest(t, "drain")
 	w.executor.outcomeGrace = 100 * time.Millisecond
