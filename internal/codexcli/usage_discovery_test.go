@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -217,6 +218,54 @@ func TestUsageDatePruningPreservesMidnightMarginAndUnknownLayouts(t *testing.T) 
 				}
 			}
 		})
+	}
+}
+
+func TestRolloutPathInventorySkipsOldAndUnrelatedDirectories(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, "sessions")
+	started := time.Date(2027, time.January, 1, 12, 0, 0, 0, time.UTC)
+	current := filepath.Join(root, "2027", "01", "01", "current.jsonl")
+	manual := filepath.Join(root, "manual", "manual.jsonl")
+	for _, path := range []string{current, manual, filepath.Join(root, "2024", "old.jsonl"), filepath.Join(root, "2026", "01", "old.jsonl")} {
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	paths, err := rolloutPaths(t.Context(), home, started)
+	if err != nil || len(paths) != 1 || !paths[current] {
+		t.Fatalf("rollout inventory followed stale or unrelated directories: paths=%v err=%v", paths, err)
+	}
+	seenManual := false
+	if err := walkUsageFiles(t.Context(), root, started, func(path string, entry fs.DirEntry) error {
+		seenManual = seenManual || path == manual
+		return nil
+	}); err != nil || !seenManual {
+		t.Fatalf("usage discovery lost unknown layouts: seen=%t err=%v", seenManual, err)
+	}
+}
+
+type failingCloseReader struct {
+	io.Reader
+	err error
+}
+
+func (r failingCloseReader) Close() error { return r.err }
+
+func TestRolloutHeaderKeepsParsedMetaOnCloseError(t *testing.T) {
+	closeErr := errors.New("close failed")
+	path := filepath.Join(t.TempDir(), "child.jsonl")
+	header := `{"type":"session_meta","payload":{"id":"child","session_id":"root","source":{"subagent":{"thread_spawn":{"parent_thread_id":"root"}}}}}` + "\n"
+	meta, err := readRolloutHeaderFrom(failingCloseReader{strings.NewReader(header), closeErr}, path)
+	if !errors.Is(err, closeErr) || meta.ID != "child" || meta.SessionID != "root" || meta.ParentID != "root" || meta.path != path {
+		t.Fatalf("valid header lost after close failure: meta=%+v err=%v", meta, err)
+	}
+	meta, err = readRolloutHeaderFrom(failingCloseReader{strings.NewReader(`{"type":"other"}`), closeErr}, path)
+	if !errors.Is(err, closeErr) || meta.ID != "" {
+		t.Fatalf("invalid header admitted after close failure: meta=%+v err=%v", meta, err)
 	}
 }
 

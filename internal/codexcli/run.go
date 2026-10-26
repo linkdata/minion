@@ -193,6 +193,9 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	for path := range paths {
 		s.excludedRollouts[path] = true
 	}
+	if err := s.disqualifyChangedRollouts(ctx); err != nil {
+		return result, fmt.Errorf("codex exec: verify prior rollouts: %w", err)
+	}
 
 	s.accounting.begin(ctx, codexHome, s.threadID, started)
 	runErr := executil.Run(cmd)
@@ -222,9 +225,12 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 		s.rolloutDiscoveryErr = errors.Join(s.rolloutDiscoveryErr, fmt.Errorf("codex exec: inspect new rollouts under %q: %w", filepath.Join(codexHome, "sessions"), scanErr))
 	} else {
 		if rootID != "" {
-			s.admitRollouts(ctx, rootID, started, newPaths)
+			s.admitRollouts(ctx, rootID, started, newPaths, output.spawns)
 		}
 		s.reportUnownedNewRollouts(ctx, newPaths, rootID, output.children, output.spawns, output.conflictingID)
+	}
+	if errors.Is(runErr, exec.ErrWaitDelay) || childError != nil {
+		s.preserveOwnedRollouts("writer completion unverified")
 	}
 	defer func() {
 		if childError != nil {

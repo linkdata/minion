@@ -49,6 +49,9 @@ func rolloutPaths(ctx context.Context, home string, started time.Time) (map[stri
 		if strings.HasSuffix(entry.Name(), ".jsonl") {
 			paths[path] = true
 		}
+		if entry.IsDir() && !recentSessionDateComponent(root, path, started) {
+			return fs.SkipDir
+		}
 		return nil
 	})
 	if errors.Is(err, fs.SkipAll) {
@@ -121,6 +124,44 @@ func (s *Session) rolloutScanError(err error) {
 	s.rolloutDiscoveryErr = errors.Join(s.rolloutDiscoveryErr, fmt.Errorf("codex exec: inspect rollouts under %q: %w", filepath.Join(s.home, "sessions"), err))
 }
 
+func (s *Session) preserveOwnedRollout(path, reason string) {
+	delete(s.ownedRollouts, path)
+	s.excludedRollouts[path] = true
+	s.rolloutDiscoveryErr = errors.Join(s.rolloutDiscoveryErr, fmt.Errorf("codex exec: rollout cleanup requires operator recovery at %q: %s", path, reason))
+}
+
+func (s *Session) preserveOwnedRollouts(reason string) {
+	for _, path := range slices.Sorted(maps.Keys(s.ownedRollouts)) {
+		s.preserveOwnedRollout(path, reason)
+	}
+}
+
+// A changed owned file cannot be attributed to the next invocation's writes.
+func (s *Session) disqualifyChangedRollouts(ctx context.Context) error {
+	changed := false
+	for _, path := range slices.Sorted(maps.Keys(s.ownedRollouts)) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		owned := s.ownedRollouts[path]
+		info, err := rolloutFileInfo(s.home, path)
+		if errors.Is(err, errRolloutLeafMissing) {
+			continue
+		}
+		if err == nil && os.SameFile(info, owned.info) && info.Size() == owned.info.Size() && info.ModTime().Equal(owned.info.ModTime()) {
+			if header, headerErr := readRolloutHeader(path); headerErr == nil && sameRolloutMeta(header, owned.meta) {
+				continue
+			}
+		}
+		s.preserveOwnedRollout(path, "changed before invocation")
+		changed = true
+	}
+	if changed {
+		return errors.New("prior rollout changed")
+	}
+	return nil
+}
+
 // Usage discovery can be incomplete because an unrelated recent header is malformed.
 func cleanupHeaderFiles(ctx context.Context, paths map[string]bool, started time.Time, owned map[string]ownedRollout, known map[string]rolloutMeta) (map[string]rolloutMeta, map[string]bool, error) {
 	files, ambiguous := map[string]rolloutMeta{}, map[string]bool{}
@@ -165,7 +206,7 @@ func cleanupHeaderFiles(ctx context.Context, paths map[string]bool, started time
 	return files, ambiguous, nil
 }
 
-func (s *Session) admitRollouts(ctx context.Context, rootID string, started time.Time, paths map[string]bool) {
+func (s *Session) admitRollouts(ctx context.Context, rootID string, started time.Time, paths map[string]bool, spawns map[string]bool) {
 	if rootID == "" {
 		return
 	}
@@ -218,6 +259,9 @@ func (s *Session) admitRollouts(ctx context.Context, rootID string, started time
 				return
 			}
 			if id == rootID || ambiguous[id] || meta.duplicate || meta.SessionID != "" && meta.SessionID != rootID {
+				continue
+			}
+			if _, alreadyOwned := s.ownedRollouts[meta.path]; !alreadyOwned && !spawns[id] {
 				continue
 			}
 			if _, known := selected[id]; known {

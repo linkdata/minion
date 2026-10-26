@@ -50,6 +50,9 @@ case "$n" in
   3) cp "$0.fresh" "$dir/rollout-fresh.jsonl"; id=fresh ;;
 esac
 printf '{"type":"thread.started","thread_id":"%s"}\n' "$id"
+if [ "$n" = 1 ]; then
+  printf '%s\n' '{"type":"item.completed","item":{"type":"collab_tool_call","tool":"spawn_agent","receiver_thread_ids":["child","solo"]}}'
+fi
 printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}' '{"type":"turn.completed"}'
 `)
 	home := os.Getenv("CODEX_HOME")
@@ -438,6 +441,123 @@ func TestSessionClosePreservesChangedOwnedRollout(t *testing.T) {
 	}
 }
 
+func TestSessionPreservesRolloutChangedBetweenCalls(t *testing.T) {
+	binary := installFakeCodex(t, `#!/bin/sh
+set -eu
+cat >/dev/null
+n=0
+if [ -f "$0.calls" ]; then n=$(cat "$0.calls"); fi
+printf '%s' "$((n + 1))" > "$0.calls"
+dir="$CODEX_HOME/sessions/$(cat "$0.day")"
+mkdir -p "$dir"
+path="$dir/rollout-root.jsonl"
+if [ -f "$path" ]; then cat "$0.resume" >> "$path"; else cp "$0.root" "$path"; fi
+printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}' '{"type":"turn.completed"}'
+`)
+	day := time.Now().Format("2006/01/02")
+	putRolloutTemplate(t, binary, "day", []byte(day))
+	putRolloutTemplate(t, binary, "root", rolloutTemplate(t, "root", "", 10))
+	putRolloutTemplate(t, binary, "resume", []byte(strings.Join(completedUsageTurn("root", "own-resume", "own-response", 5), "\n")+"\n"))
+	var session Session
+	source := t.TempDir()
+	if _, err := session.Run(t.Context(), source, "first", false, "", config.CodexConfig{}); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(os.Getenv("CODEX_HOME"), "sessions", filepath.FromSlash(day), "rollout-root.jsonl")
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, writeErr := f.WriteString(strings.Join(completedUsageTurn("root", "external", "external-response", 7), "\n") + "\n")
+	if err := errors.Join(writeErr, f.Close()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := session.Run(t.Context(), source, "second", false, "", config.CodexConfig{}); err == nil || strings.Contains(err.Error(), path) {
+		t.Fatalf("changed prior rollout did not stop before paid dispatch or exposed path: %v", err)
+	}
+	if calls, err := os.ReadFile(binary + ".calls"); err != nil || string(calls) != "1" {
+		t.Fatalf("second Codex invocation was dispatched: calls=%q, err=%v", calls, err)
+	}
+	want, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := session.Close(); err == nil || !strings.Contains(err.Error(), path) {
+		t.Fatalf("external continuation was not reported: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(data, want) {
+		t.Fatalf("external continuation was removed or altered: %q, %v", data, err)
+	}
+}
+
+func TestSessionDoesNotClaimConcurrentSameThreadHelper(t *testing.T) {
+	binary := installFakeCodex(t, `#!/bin/sh
+set -eu
+cat >/dev/null
+dir="$CODEX_HOME/sessions/$(cat "$0.day")"
+mkdir -p "$dir"
+cp "$0.root" "$dir/rollout-root.jsonl"
+cp "$0.child" "$dir/rollout-child.jsonl"
+printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}' '{"type":"turn.completed"}'
+`)
+	day := time.Now().Format("2006/01/02")
+	putRolloutTemplate(t, binary, "day", []byte(day))
+	putRolloutTemplate(t, binary, "root", rolloutTemplate(t, "root", "", 10))
+	putRolloutTemplate(t, binary, "child", rolloutTemplate(t, "child", "root", 20))
+	var session Session
+	if _, err := session.Run(t.Context(), t.TempDir(), "task", false, "", config.CodexConfig{}); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(os.Getenv("CODEX_HOME"), "sessions", filepath.FromSlash(day))
+	child := filepath.Join(root, "rollout-child.jsonl")
+	if err := session.Close(); err == nil || !strings.Contains(err.Error(), child) {
+		t.Fatalf("unproved same-thread helper lacks recovery path: %v", err)
+	}
+	if _, err := os.Lstat(child); err != nil {
+		t.Fatalf("unproved same-thread helper was removed: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "rollout-root.jsonl")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("verified root remains: %v", err)
+	}
+}
+
+func TestSessionPreservesRolloutsWhenHelperCompletionIsUnverified(t *testing.T) {
+	binary := installFakeCodex(t, `#!/bin/sh
+set -eu
+cat >/dev/null
+dir="$CODEX_HOME/sessions/$(cat "$0.day")"
+mkdir -p "$dir"
+cp "$0.root" "$dir/rollout-root.jsonl"
+cp "$0.child" "$dir/rollout-child.jsonl"
+printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.completed","item":{"type":"collab_tool_call","tool":"spawn_agent","receiver_thread_ids":["child"]}}' '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}' '{"type":"turn.completed"}'
+`)
+	day := time.Now().Format("2006/01/02")
+	putRolloutTemplate(t, binary, "day", []byte(day))
+	putRolloutTemplate(t, binary, "root", rolloutTemplate(t, "root", "", 10))
+	child := writeUsageRollout(t, t.TempDir(), "child", "root", usageEvent("task_started", "child-turn"), usageRecord("child", "child-turn", "child-response", 20, 0, 1))
+	childData, err := os.ReadFile(child)
+	if err != nil {
+		t.Fatal(err)
+	}
+	putRolloutTemplate(t, binary, "child", childData)
+	var session Session
+	if _, err := session.Run(t.Context(), t.TempDir(), "task", false, "", config.CodexConfig{}); !errors.Is(err, errUnverifiedChildren) {
+		t.Fatalf("unfinished helper accepted: %v", err)
+	}
+	root := filepath.Join(os.Getenv("CODEX_HOME"), "sessions", filepath.FromSlash(day))
+	closeErr := session.Close()
+	for _, id := range []string{"root", "child"} {
+		path := filepath.Join(root, "rollout-"+id+".jsonl")
+		if closeErr == nil || !strings.Contains(closeErr.Error(), path) {
+			t.Fatalf("unverified %s rollout lacks recovery path: %v", id, closeErr)
+		}
+		if _, err := os.Lstat(path); err != nil {
+			t.Fatalf("unverified %s rollout was removed: %v", id, err)
+		}
+	}
+}
+
 func TestSessionCloseRetriesFailedRolloutRemoval(t *testing.T) {
 	session, path := runOwnedRollout(t)
 	dir := filepath.Dir(path)
@@ -468,8 +588,39 @@ func TestSessionCloseAcceptsAlreadyMissingRollout(t *testing.T) {
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
+	if err := session.disqualifyChangedRollouts(t.Context()); err != nil || session.rolloutDiscoveryErr != nil {
+		t.Fatalf("missing rollout caused recovery failure: err=%v recovery=%v", err, session.rolloutDiscoveryErr)
+	}
 	if err := session.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestSessionPreservesRecreatedRolloutBetweenCalls(t *testing.T) {
+	session, path := runOwnedRollout(t)
+	original, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backup := filepath.Join(t.TempDir(), "old-inode")
+	if err := os.Link(path, backup); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.disqualifyChangedRollouts(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, original, 0600); err != nil {
+		t.Fatal(err)
+	}
+	session.admitRollouts(t.Context(), "root", time.Now(), map[string]bool{path: true}, nil)
+	if err := session.Close(); err == nil || !strings.Contains(err.Error(), path) {
+		t.Fatalf("recreated rollout lacked recovery path: %v", err)
+	}
+	if data, err := os.ReadFile(path); err != nil || !bytes.Equal(data, original) {
+		t.Fatalf("recreated rollout was removed or changed: %q, %v", data, err)
 	}
 }
 
@@ -526,12 +677,8 @@ printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.comp
 			if err == nil || !strings.Contains(err.Error(), filepath.Join(os.Getenv("CODEX_HOME"), "sessions")) {
 				t.Fatalf("ambiguous rollout cleanup was not reported: %v", err)
 			}
-			names := []string{"rollout-duplicate.jsonl"}
-			if duplicate == "root" {
-				names = append(names, "rollout-root.jsonl")
-			} else if _, err := os.Lstat(filepath.Join(os.Getenv("CODEX_HOME"), "sessions", filepath.FromSlash(day), "rollout-root.jsonl")); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("unambiguous root was not cleaned: %v", err)
-			}
+			// Unverified child completion also retains the root transcript.
+			names := []string{"rollout-duplicate.jsonl", "rollout-root.jsonl"}
 			if duplicate == "child" {
 				names = append(names, "rollout-child.jsonl")
 			}
@@ -570,7 +717,7 @@ func TestSessionFallbackPreservesKnownDuplicateIdentity(t *testing.T) {
 	}
 	session := Session{home: home, accounting: usageSession{known: known}}
 	paths := map[string]bool{remaining: true}
-	session.admitRollouts(t.Context(), "root", started, paths)
+	session.admitRollouts(t.Context(), "root", started, paths, nil)
 	session.reportUnownedNewRollouts(t.Context(), paths, "root", nil, nil, "")
 	if len(session.ownedRollouts) != 0 {
 		t.Fatalf("known duplicate was admitted for deletion: %v", session.ownedRollouts)
@@ -598,7 +745,7 @@ func TestSessionFallbackHeaderFileCapPreservesRollouts(t *testing.T) {
 		paths[path] = true
 	}
 	session := Session{home: home}
-	session.admitRollouts(t.Context(), "root", time.Now(), paths)
+	session.admitRollouts(t.Context(), "root", time.Now(), paths, nil)
 	if len(session.ownedRollouts) != 0 {
 		t.Fatalf("incomplete fallback admitted rollouts: %v", session.ownedRollouts)
 	}

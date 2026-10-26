@@ -171,6 +171,8 @@ func usageFiles(ctx context.Context, home, rootID string, started time.Time, kno
 		meta, err := readRolloutHeader(path)
 		if err != nil {
 			complete = false
+		}
+		if meta.ID == "" {
 			return
 		}
 		if expectedID != "" {
@@ -244,15 +246,17 @@ func readRolloutHeader(path string) (meta rolloutMeta, err error) {
 	if err != nil {
 		return meta, err
 	}
+	return readRolloutHeaderFrom(f, path)
+}
+
+func readRolloutHeaderFrom(f io.ReadCloser, path string) (meta rolloutMeta, err error) {
 	scanner := bufio.NewScanner(io.LimitReader(f, maxUsageHeaderBytes+1))
 	scanner.Buffer(make([]byte, 4096), maxUsageHeaderBytes+2)
 	var event rolloutEvent
 	ok := scanner.Scan() && len(scanner.Bytes()) <= maxUsageHeaderBytes && json.Unmarshal(scanner.Bytes(), &event) == nil && event.Type == "session_meta" && json.Unmarshal(event.Payload, &meta) == nil && meta.ID != "" && scanner.Err() == nil
-	if closeErr := f.Close(); closeErr != nil {
-		return meta, closeErr
-	}
+	closeErr := f.Close()
 	if !ok {
-		return meta, errors.New("invalid rollout header")
+		return rolloutMeta{}, errors.Join(errors.New("invalid rollout header"), closeErr)
 	}
 	if meta.ParentID == "" {
 		var source struct {
@@ -268,7 +272,7 @@ func readRolloutHeader(path string) (meta rolloutMeta, err error) {
 	}
 	meta.Source = nil
 	meta.path = path
-	return meta, nil
+	return meta, closeErr
 }
 
 // ReadDir with a positive count keeps a single large directory from being
