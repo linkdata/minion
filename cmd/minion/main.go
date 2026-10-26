@@ -229,10 +229,6 @@ func newOrchestrator(cfg config.Config, client *github.Client, store *state.Stor
 	if codexAuth.APIKey == "" {
 		codexAuth.NativeAPIKey = cfg.Codex.NativeAPIKey
 		codexAuth.NativeAccessToken = cfg.Codex.NativeAccessToken
-		if codexAuth.NativeAPIKey == "" && codexAuth.NativeAccessToken == "" {
-			codexAuth.NativeAPIKey = os.Getenv("CODEX_API_KEY")
-			codexAuth.NativeAccessToken = os.Getenv("CODEX_ACCESS_TOKEN")
-		}
 	}
 	return &action.Orchestrator{
 		WorkRoot:              cfg.WorkRoot,
