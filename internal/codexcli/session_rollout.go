@@ -41,6 +41,9 @@ func rolloutPaths(ctx context.Context, home string, started time.Time) (map[stri
 		if entries > maxUsageWalkEntries {
 			return fs.SkipAll
 		}
+		if entry.Type()&os.ModeSymlink != 0 && recentSessionDateComponent(root, path, started) {
+			return fmt.Errorf("rollout date directory is a symlink at %q", path)
+		}
 		if strings.HasSuffix(entry.Name(), ".jsonl") {
 			paths[path] = true
 		}
@@ -50,6 +53,28 @@ func rolloutPaths(ctx context.Context, home string, started time.Time) (map[stri
 		err = fmt.Errorf("rollout path inventory exceeded %d entries", maxUsageWalkEntries)
 	}
 	return paths, err
+}
+
+func recentSessionDateComponent(root, path string, started time.Time) bool {
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
+	}
+	date := filepath.ToSlash(rel)
+	oldest := started.UTC().AddDate(0, 0, -1).Format("2006/01/02")
+	var layout, cutoff string
+	switch strings.Count(date, "/") {
+	case 0:
+		layout, cutoff = "2006", oldest[:4]
+	case 1:
+		layout, cutoff = "2006/01", oldest[:7]
+	case 2:
+		layout, cutoff = "2006/01/02", oldest
+	default:
+		return false
+	}
+	_, err = time.Parse(layout, date)
+	return err == nil && date >= cutoff
 }
 
 func rolloutFileInfo(home, path string) (os.FileInfo, error) {

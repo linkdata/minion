@@ -1,6 +1,7 @@
 package codexcli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/linkdata/minion/internal/config"
+	"github.com/linkdata/minion/internal/usage"
 )
 
 func rolloutTemplate(t *testing.T, id, parent string, tokens int64) []byte {
@@ -73,14 +75,22 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
 	if err := os.WriteFile(auth, []byte("private login"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	preserved := map[string][]byte{}
+	for _, path := range []string{foreign, preexisting, auth} {
+		preserved[path], err = os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 	var session Session
 	source := t.TempDir()
+	wantInput := []int64{159, 5, 40}
 	for call := 1; call <= 3; call++ {
 		if call == 3 {
 			session.NewConversation()
 		}
 		result, err := session.Run(t.Context(), source, "task", false, "", config.CodexConfig{})
-		if err != nil || result.Answer != "done" {
+		if err != nil || result.Answer != "done" || !result.UsageComplete || result.Tokens != (usage.Tokens{Input: wantInput[call-1]}) {
 			t.Fatalf("call %d: %+v, %v", call, result, err)
 		}
 	}
@@ -100,9 +110,9 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
 			t.Fatalf("owned rollout remains at %s: %v", path, err)
 		}
 	}
-	for path, want := range map[string]string{foreign: "", preexisting: "", auth: "private login"} {
+	for path, want := range preserved {
 		data, err := os.ReadFile(path)
-		if err != nil || want != "" && string(data) != want {
+		if err != nil || !bytes.Equal(data, want) {
 			t.Fatalf("unrelated data changed at %s: %q, %v", path, data, err)
 		}
 	}
@@ -487,6 +497,81 @@ printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.comp
 				t.Fatalf("new nonregular rollout path was removed: %v", err)
 			}
 		})
+	}
+}
+
+func TestSessionRejectsRecentSymlinkedRolloutDates(t *testing.T) {
+	parts := strings.Split(time.Now().UTC().Format("2006/01/02"), "/")
+	for depth := 1; depth <= 3; depth++ {
+		t.Run(strings.Join(parts[:depth], "/"), func(t *testing.T) {
+			binary := installFakeCodex(t, "#!/bin/sh\nprintf called >\"$0.called\"\n")
+			link := filepath.Join(append([]string{os.Getenv("CODEX_HOME"), "sessions"}, parts[:depth]...)...)
+			if err := os.MkdirAll(filepath.Dir(link), 0700); err != nil {
+				t.Fatal(err)
+			}
+			symlinkOrSkip(t, t.TempDir(), link)
+			var session Session
+			_, err := session.Run(t.Context(), t.TempDir(), "task", false, "", config.CodexConfig{})
+			if err == nil || !strings.Contains(err.Error(), link) {
+				t.Fatalf("preexisting symlink did not stop dispatch: %v", err)
+			}
+			if _, err := os.Stat(binary + ".called"); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("Codex ran after unsafe inventory: %v", err)
+			}
+			if err := session.Close(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	t.Run("old and unrelated", func(t *testing.T) {
+		installFakeCodex(t, `#!/bin/sh
+cat >/dev/null
+printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}' '{"type":"turn.completed"}'
+`)
+		home := os.Getenv("CODEX_HOME")
+		old := filepath.Join(home, "sessions", filepath.FromSlash(time.Now().UTC().AddDate(0, 0, -3).Format("2006/01/02")))
+		if err := os.MkdirAll(filepath.Dir(old), 0700); err != nil {
+			t.Fatal(err)
+		}
+		symlinkOrSkip(t, t.TempDir(), old)
+		symlinkOrSkip(t, t.TempDir(), filepath.Join(home, "sessions", "manual"))
+		var session Session
+		if _, err := session.Run(t.Context(), t.TempDir(), "task", false, "", config.CodexConfig{}); err != nil {
+			t.Fatalf("unrelated symlinks blocked dispatch: %v", err)
+		}
+		if err := session.Close(); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func TestSessionReportsSymlinkedRolloutDateCreatedDuringCall(t *testing.T) {
+	binary := installFakeCodex(t, `#!/bin/sh
+set -eu
+cat >/dev/null
+dir="$CODEX_HOME/sessions/$(cat "$0.day")"
+mkdir -p "$(dirname "$dir")"
+ln -s "$(cat "$0.target")" "$dir"
+cp "$0.root" "$dir/rollout-root.jsonl"
+printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}' '{"type":"turn.completed"}'
+`)
+	day := time.Now().UTC().Format("2006/01/02")
+	putRolloutTemplate(t, binary, "day", []byte(day))
+	target := t.TempDir()
+	putRolloutTemplate(t, binary, "target", []byte(target))
+	rollout := rolloutTemplate(t, "root", "", 10)
+	putRolloutTemplate(t, binary, "root", rollout)
+	var session Session
+	if _, err := session.Run(t.Context(), t.TempDir(), "task", false, "", config.CodexConfig{}); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(os.Getenv("CODEX_HOME"), "sessions", filepath.FromSlash(day))
+	if err := session.Close(); err == nil || !strings.Contains(err.Error(), link) {
+		t.Fatalf("symlinked rollout date lacked recovery path: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(target, "rollout-root.jsonl"))
+	if err != nil || !bytes.Equal(data, rollout) {
+		t.Fatalf("rollout behind symlink changed: %q, %v", data, err)
 	}
 }
 
