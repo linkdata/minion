@@ -73,6 +73,9 @@ func TestSelectedWorkerStartupDirectChild(t *testing.T) {
 				codexScript = "#!/bin/sh\ncase \"$1 $2\" in 'login status') exit 0;; 'debug prompt-input') exit 2;; esac\nexit 99\n"
 			} else if tc.nativeAuth {
 				codexScript = strings.Replace(preflightCodexCLI, "    IFS= read -r request || exit 0\n", "    IFS= read -r request || exit 0\n    [ \"$CODEX_API_KEY\" = native-startup-key ] && [ \"$CODEX_ACCESS_TOKEN\" = native-startup-token ] || exit 19\n", 1)
+				if codexScript == preflightCodexCLI {
+					t.Fatal("native credential fixture marker missing")
+				}
 			}
 			codexDir := fakeOnPath(t, "codex", codexScript)
 			t.Setenv("PATH", codexDir+string(os.PathListSeparator)+gitOnlyPath(t))

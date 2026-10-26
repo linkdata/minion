@@ -393,6 +393,11 @@ func TestRunHTTPRejectsAssignmentBeforeWatchOrRunner(t *testing.T) {
 			}))
 			defer server.Close()
 			err := RunHTTP(t.Context(), server.Client(), server.URL, job.Identity.ExecutorID, &Runner{runModel: forbidModel(t)})
+			for _, value := range []string{assignment.Credentials.CodexAPIKey, assignment.Credentials.CodexNativeAPIKey, assignment.Credentials.CodexAccessToken, assignment.Credentials.ClaudeAPIKey} {
+				if value != "" && err != nil && strings.Contains(err.Error(), value) {
+					t.Fatal("invalid assignment error exposed a credential")
+				}
+			}
 			if name == "expired" || name == "expired outcome ACK lost" {
 				if !errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, context.DeadlineExceeded) || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) != (name == "expired outcome ACK lost") || requests.Load() != 2 || len(outcomes) != 1 {
 					t.Fatalf("expired known assignment lost its bound no-work outcome: error=%v requests=%d outcomes=%d", err, requests.Load(), len(outcomes))
@@ -402,7 +407,7 @@ func TestRunHTTPRejectsAssignmentBeforeWatchOrRunner(t *testing.T) {
 					t.Fatalf("expired assignment fabricated work or unknown execution: %+v", outcome)
 				}
 			} else if !errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || requests.Load() != 1 || len(outcomes) != 0 {
-				t.Fatalf("invalid assignment ran or became repeatable: error=%v requests=%d", err, requests.Load())
+				t.Fatalf("invalid assignment ran or became repeatable: unknown=%t requests=%d", errors.Is(err, monitor.ErrExecutionOutcomeUnknown), requests.Load())
 			}
 		})
 	}

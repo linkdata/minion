@@ -90,7 +90,7 @@ func TestAttachSelectedLocalWorkerFreezesStartupAndOwnsClose(t *testing.T) {
 				t.Fatal(err)
 			}
 			if startup.WorkRoot != cfg.WorkRoot || startup.SocketPath != filepath.Join(runtimeDir, "execution.sock") || len(startup.Selection.Commands) != 1 || startup.Selection.Commands["comment"].Action != "comment" || startup.CodexAPIKey != cfg.Codex.APIKey || startup.CodexNativeAPIKey != "" || startup.CodexAccessToken != "" || startup.ClaudeAPIKey != "" {
-				t.Fatalf("child startup differed from parent selection: %+v", startup)
+				t.Fatalf("child startup differed from parent selection: work_root=%q socket_path=%q command_count=%d comment_action=%q", startup.WorkRoot, startup.SocketPath, len(startup.Selection.Commands), startup.Selection.Commands["comment"].Action)
 			}
 			now := time.Now().UTC()
 			store := &state.Store{Data: state.Data{NextInviteCheckAt: now.Add(time.Hour), NextPollAt: now.Add(time.Hour)}}

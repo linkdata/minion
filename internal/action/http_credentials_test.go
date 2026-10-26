@@ -30,15 +30,21 @@ func TestWorkerCredentialsValidateAndAssign(t *testing.T) {
 		{"native Codex key", WorkerCredentials{CodexNativeAPIKey: secret}, true},
 		{"native Codex token", WorkerCredentials{CodexAccessToken: secret}, true},
 		{"unselected Claude key", WorkerCredentials{ClaudeAPIKey: secret}, false},
-		{"mixed Codex auth", WorkerCredentials{CodexAPIKey: secret, CodexNativeAPIKey: "native"}, false},
+		{"mixed Codex auth", WorkerCredentials{CodexAPIKey: secret, CodexNativeAPIKey: "native-secret"}, false},
 		{"invalid UTF-8", WorkerCredentials{CodexAPIKey: string([]byte{0xff})}, false},
 		{"newline", WorkerCredentials{CodexAPIKey: secret + "\n"}, false},
 		{"oversized", WorkerCredentials{CodexAPIKey: strings.Repeat("x", maxWorkerCredentialBytes+1)}, false},
+		{"aggregate oversized", WorkerCredentials{CodexNativeAPIKey: strings.Repeat("x", 4096), CodexAccessToken: strings.Repeat("y", 4097)}, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			err := test.credentials.validateJob(job)
-			if (err == nil) != test.valid || err != nil && strings.Contains(err.Error(), secret) {
-				t.Fatalf("credential validity=%t error=%v", test.valid, err)
+			for _, value := range []string{test.credentials.CodexAPIKey, test.credentials.CodexNativeAPIKey, test.credentials.CodexAccessToken, test.credentials.ClaudeAPIKey} {
+				if value != "" && err != nil && strings.Contains(err.Error(), value) {
+					t.Fatal("credential validation error exposed a credential")
+				}
+			}
+			if (err == nil) != test.valid {
+				t.Fatalf("credential validity=%t got_error=%t", test.valid, err != nil)
 			}
 		})
 	}
@@ -74,7 +80,7 @@ func TestWorkerCredentialsValidateAndAssign(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := wrong.Execute(t.Context(), job, runnerExecutionCheckpoints{}); !errors.Is(err, monitor.ErrTerminalJob) || strings.Contains(err.Error(), secret) {
-		t.Fatalf("unselected credential was dispatched or exposed: %v", err)
+		t.Fatal("unselected credential was dispatched or exposed")
 	}
 }
 
@@ -139,7 +145,7 @@ func TestRunHTTPKeepsCredentialsPerJobAndCleansBeforeOutcome(t *testing.T) {
 		}
 		got := f.result(t)
 		if got.err != nil || got.result.Answer != "Report [redacted]" || runner.Codex.APIKey != "" || runner.Codex.NativeAPIKey != "" || runner.Codex.NativeAccessToken != "" || runner.Claude.APIKey != "" {
-			t.Fatalf("job %d retained or exposed provider credentials: result=%q error=%v", i+1, got.result.Answer, got.err)
+			t.Fatalf("job %d retained or exposed provider credentials", i+1)
 		}
 	}
 	if modelCalls != len(secrets) {

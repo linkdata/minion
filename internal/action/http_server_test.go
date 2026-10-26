@@ -150,7 +150,7 @@ func (f *httpServerTest) pull(t *testing.T) httpAssignment {
 		t.Fatalf("assignment: status=%d error=%v", response.StatusCode, err)
 	}
 	if !sameAssignmentJob(f.job, assignment.Job) || assignment.HeldFor < 0 {
-		t.Fatalf("assignment changed supplied Job or lost its remaining budget: %+v", assignment)
+		t.Fatalf("assignment changed supplied Job or lost its remaining budget: job_matches=%t budget=%s held=%s", sameAssignmentJob(f.job, assignment.Job), assignment.Job.RuntimeBudget, assignment.HeldFor)
 	}
 	return assignment
 }

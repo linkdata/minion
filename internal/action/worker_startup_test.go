@@ -41,7 +41,7 @@ func TestWorkerStartupRoundTripAndProviderKeys(t *testing.T) {
 	}
 	decoded, err := decodeWorkerStartup(bytes.NewReader(encoded))
 	if err != nil || !reflect.DeepEqual(decoded, startup) {
-		t.Fatalf("worker startup roundtrip: decoded=%+v error=%v", decoded, err)
+		t.Fatalf("worker startup roundtrip: selection=%+v work_root=%q socket_path=%q error=%v", decoded.Selection, decoded.WorkRoot, decoded.SocketPath, err)
 	}
 	runner, err := decoded.runner(nil)
 	if err != nil {
@@ -110,6 +110,7 @@ func TestDecodeWorkerStartupRejectsInvalidInput(t *testing.T) {
 	}
 	conflictingCodex := startup
 	conflictingCodex.CodexNativeAPIKey = "private-native-key"
+	conflictingCodex.CodexAccessToken = "private-native-token"
 	conflictingCodexBytes, err := json.Marshal(conflictingCodex)
 	if err != nil {
 		t.Fatal(err)
@@ -117,6 +118,7 @@ func TestDecodeWorkerStartupRejectsInvalidInput(t *testing.T) {
 	invalidNative := startup
 	invalidNative.CodexAPIKey = ""
 	invalidNative.CodexNativeAPIKey = "private key"
+	invalidNative.CodexAccessToken = "private-native-token"
 	invalidNativeBytes, err := json.Marshal(invalidNative)
 	if err != nil {
 		t.Fatal(err)
@@ -139,8 +141,14 @@ func TestDecodeWorkerStartupRejectsInvalidInput(t *testing.T) {
 		{"invalid native Codex auth", invalidNativeBytes},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if _, err := decodeWorkerStartup(bytes.NewReader(test.data)); err == nil || strings.Contains(err.Error(), startup.CodexAPIKey) || strings.Contains(err.Error(), startup.ClaudeAPIKey) {
-				t.Fatalf("invalid startup accepted or leaked a provider key: %v", err)
+			_, err := decodeWorkerStartup(bytes.NewReader(test.data))
+			if err == nil {
+				t.Fatal("invalid startup accepted")
+			}
+			for _, secret := range []string{startup.CodexAPIKey, startup.ClaudeAPIKey, conflictingCodex.CodexNativeAPIKey, invalidNative.CodexNativeAPIKey, invalidNative.CodexAccessToken} {
+				if strings.Contains(err.Error(), secret) {
+					t.Fatal("invalid startup error leaked a credential")
+				}
 			}
 		})
 	}
