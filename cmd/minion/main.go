@@ -70,10 +70,6 @@ func runWithGitCheck(checkGit func(context.Context, string) error) int {
 		logger.Printf("unsupported mode %q; use in-process, orchestrate, or execute", *mode)
 		return 2
 	}
-	if *mode == "orchestrate" && !localModeAvailable {
-		logger.Print("-mode=orchestrate is unavailable on Windows until native transport is implemented")
-		return 2
-	}
 	loadedPath, err := filepath.Abs(*configPath)
 	if err != nil {
 		logger.Printf("config: %v", err)

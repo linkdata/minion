@@ -1,5 +1,3 @@
-//go:build !windows
-
 package action
 
 import (
@@ -10,7 +8,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/linkdata/minion/internal/bounded"
@@ -22,7 +19,7 @@ import (
 // localWorker owns one direct child and its private HTTP endpoint.
 type localWorker struct {
 	executor     *HTTPExecutor
-	endpoint     *UnixEndpoint
+	endpoint     *LocalEndpoint
 	cmd          *exec.Cmd
 	cancel       context.CancelFunc
 	exited       chan struct{}
@@ -49,7 +46,7 @@ const (
 // startLocalWorker owns the direct child's context and command. configure
 // prepares the child command; stderr is captured for a safe startup diagnostic.
 // Job cancellation is handled by Execute.
-func startLocalWorker(runtimeDir, executorID, path string, args []string, readyTimeout time.Duration, credentials WorkerCredentials, configure func(*exec.Cmd, string) error) (*localWorker, error) {
+func startLocalWorker(executorID, path string, args []string, readyTimeout time.Duration, credentials WorkerCredentials, configure func(*exec.Cmd, LocalEndpointAccess) error) (*localWorker, error) {
 	if path == "" {
 		return nil, errors.New("local worker command path is required")
 	}
@@ -63,7 +60,7 @@ func startLocalWorker(runtimeDir, executorID, path string, args []string, readyT
 	if err := executor.SetWorkerCredentials(credentials); err != nil {
 		return nil, err
 	}
-	endpoint, err := ListenUnixExecution(runtimeDir, executor)
+	endpoint, err := ListenLocalExecution(executor)
 	if err != nil {
 		return nil, err
 	}
@@ -71,7 +68,7 @@ func startLocalWorker(runtimeDir, executorID, path string, args []string, readyT
 	cmd := exec.CommandContext(ctx, path, args...)
 	commandCancel := cmd.Cancel
 	if configure != nil {
-		if err := configure(cmd, endpoint.SocketPath()); err != nil {
+		if err := configure(cmd, endpoint.Access()); err != nil {
 			cancel()
 			return nil, errors.Join(fmt.Errorf("configure local worker: %w", err), endpoint.Close())
 		}
@@ -113,7 +110,7 @@ func startLocalWorker(runtimeDir, executorID, path string, args []string, readyT
 
 // AttachLocalWorker connects one selected direct child without changing the
 // default service mode. The caller watches its exit and owns the close function.
-func (e *Orchestrator) AttachLocalWorker(ctx context.Context, cfg config.Config, runtimeDir, path string, args []string, readyTimeout time.Duration, configure func(*exec.Cmd, string, WorkerSelection, WorkerCredentials) error) (WorkerSelection, <-chan struct{}, func() error, error) {
+func (e *Orchestrator) AttachLocalWorker(ctx context.Context, cfg config.Config, path string, args []string, readyTimeout time.Duration, configure func(*exec.Cmd, LocalEndpointAccess, WorkerSelection, WorkerCredentials) error) (WorkerSelection, <-chan struct{}, func() error, error) {
 	if e.Executor != nil {
 		return WorkerSelection{}, nil, nil, errors.New("orchestrator already has an executor")
 	}
@@ -138,8 +135,8 @@ func (e *Orchestrator) AttachLocalWorker(ctx context.Context, cfg config.Config,
 	if uses("claude") {
 		credentials.ClaudeAPIKey = e.Runner.Claude.APIKey
 	}
-	w, err := startLocalWorker(runtimeDir, "local", path, args, readyTimeout, credentials, func(cmd *exec.Cmd, socket string) error {
-		return configure(cmd, socket, selected, credentials)
+	w, err := startLocalWorker("local", path, args, readyTimeout, credentials, func(cmd *exec.Cmd, access LocalEndpointAccess) error {
+		return configure(cmd, access, selected, credentials)
 	})
 	if err != nil {
 		return WorkerSelection{}, nil, nil, redactActionError(err, e.Runner.secretValues()...)
@@ -193,8 +190,8 @@ func (w *localWorker) Execute(ctx context.Context, job Job, sink Checkpoints) (R
 	return result, err
 }
 
-// WaitCapacity releases capacity only after a pull is held at the original
-// endpoint while the direct child is live, initially and after each outcome.
+// WaitCapacity releases capacity only after an authenticated pull is held at
+// this endpoint while the direct child is live, initially and after each outcome.
 func (w *localWorker) WaitCapacity(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, w.readyTimeout)
 	defer cancel()
@@ -248,7 +245,7 @@ func (w *localWorker) awaitReusable(ctx context.Context) (reuseErr error) {
 }
 
 func (w *localWorker) checkCapacityEndpoint() error {
-	err := w.endpoint.checkIdentity()
+	err := w.endpoint.checkAlive()
 	if err == nil {
 		return nil
 	}
@@ -323,7 +320,7 @@ func (w *localWorker) awaitHeldPull(ctx context.Context) (waitErr error) {
 }
 
 // Close drains accepted callbacks while HTTP serves, allows the direct child
-// to consume the canceled pull, then stops it if needed before closing the socket.
+// to consume the canceled pull, then stops it if needed before closing HTTPS.
 func (w *localWorker) Close() error {
 	w.reuse.Store(workerRetired)
 	w.closeOnce.Do(func() {
@@ -358,19 +355,4 @@ func (w *localWorker) Close() error {
 		w.closeErr = errors.Join(w.closeErr, coreErr, w.endpoint.Close())
 	})
 	return w.closeErr
-}
-
-func expectedLocalWorkerCancellation(err error, directStopSent bool) bool {
-	if !directStopSent {
-		return false
-	}
-	if errors.Is(err, context.Canceled) {
-		return true // Cmd.Wait can report context cancellation after a successful exit.
-	}
-	var exit *exec.ExitError
-	if !errors.As(err, &exit) {
-		return false
-	}
-	status, ok := exit.Sys().(syscall.WaitStatus)
-	return ok && status.Signaled() && (status.Signal() == syscall.SIGINT || status.Signal() == syscall.SIGKILL)
 }

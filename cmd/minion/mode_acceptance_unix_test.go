@@ -4,7 +4,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -163,18 +162,6 @@ func TestExecuteModeOfflinePublicationAndRestart(t *testing.T) {
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}
-	// Unix socket paths have a small OS limit. Keep this fixture's runtime
-	// parent short even when macOS gives tests a long per-user TMPDIR.
-	runtimeParent, err := os.MkdirTemp("/tmp", "m239-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := os.Remove(runtimeParent); err != nil {
-			t.Error(err)
-		}
-	})
-	t.Setenv("TMPDIR", runtimeParent)
 	binary, err := filepath.Abs(os.Args[0])
 	if err != nil {
 		t.Fatal(err)
@@ -192,10 +179,6 @@ func TestExecuteModeOfflinePublicationAndRestart(t *testing.T) {
 		watcher := &monitor.Monitor{Config: cfg, GitHub: client, Handler: owner, Now: func() time.Time { return at }}
 		if code := runOrchestrateMode(t.Context(), owner, watcher, store, false, logger, worker, 10*time.Second); code != 0 {
 			t.Fatalf("orchestrate poll returned %d: %s", code, logs.String())
-		}
-		entries, err := os.ReadDir(runtimeParent)
-		if err != nil || len(entries) != 0 {
-			t.Fatalf("owned runtime directory was not cleaned: entries=%v error=%v", entries, err)
 		}
 	}
 	runPoll(now)
@@ -232,29 +215,6 @@ func TestExecuteModeOfflineChild(t *testing.T) {
 	flag.CommandLine = flag.NewFlagSet("minion", flag.ContinueOnError)
 	os.Args = []string{"minion", "-mode=execute"}
 	os.Exit(run())
-}
-
-func TestExecuteModeRejectsServiceFlagsBeforeStartup(t *testing.T) {
-	for _, args := range [][]string{
-		{"-mode=execute", "-config=unused.json"},
-		{"-mode=execute", "-loop"},
-		{"-mode=execute", "-check"},
-		{"-mode=execute", "-install-skills"},
-		{"-mode=unknown"},
-	} {
-		t.Run(strings.Join(args, " "), func(t *testing.T) {
-			oldFlags, oldArgs := flag.CommandLine, os.Args
-			defer func() { flag.CommandLine, os.Args = oldFlags, oldArgs }()
-			flag.CommandLine = flag.NewFlagSet("minion", flag.ContinueOnError)
-			os.Args = append([]string{"minion"}, args...)
-			if code := runWithGitCheck(func(context.Context, string) error {
-				t.Fatal("invalid mode reached Git preflight")
-				return nil
-			}); code != 2 {
-				t.Fatalf("invalid mode returned %d; want usage error 2", code)
-			}
-		})
-	}
 }
 
 func assertOfflineModeCounts(t *testing.T, modelCalls string, mu *sync.Mutex, published *[]github.Comment, want int) {

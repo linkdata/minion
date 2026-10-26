@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -15,6 +14,15 @@ import (
 
 func testWorkerStartup(t *testing.T) WorkerStartup {
 	t.Helper()
+	core, err := NewHTTPExecutor("local")
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoint, err := ListenLocalExecution(core)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = endpoint.Close() })
 	return WorkerStartup{
 		Selection: WorkerSelection{
 			Commands: map[string]config.CommandMapping{
@@ -24,7 +32,7 @@ func testWorkerStartup(t *testing.T) WorkerStartup {
 			Critic: &RoleSettings{Provider: "claude", Model: "critic-model", Effort: "medium"},
 		},
 		WorkRoot:     t.TempDir(),
-		SocketPath:   filepath.Join(t.TempDir(), "execution.sock"),
+		Endpoint:     endpoint.Access(),
 		CodexAPIKey:  "private-codex-key",
 		ClaudeAPIKey: "private-claude-key",
 	}
@@ -41,7 +49,7 @@ func TestWorkerStartupRoundTripAndProviderKeys(t *testing.T) {
 	}
 	decoded, err := decodeWorkerStartup(bytes.NewReader(encoded))
 	if err != nil || !reflect.DeepEqual(decoded, startup) {
-		t.Fatalf("worker startup roundtrip: selection=%+v work_root=%q socket_path=%q error=%v", decoded.Selection, decoded.WorkRoot, decoded.SocketPath, err)
+		t.Fatalf("worker startup roundtrip: selection=%+v work_root=%q error=%v", decoded.Selection, decoded.WorkRoot, err)
 	}
 	runner, err := decoded.runner(nil)
 	if err != nil {
@@ -164,7 +172,10 @@ func TestEncodeWorkerStartupRejectsInvalidInput(t *testing.T) {
 		change func(*WorkerStartup)
 	}{
 		{"relative work root", func(s *WorkerStartup) { s.WorkRoot = "relative" }},
-		{"missing endpoint", func(s *WorkerStartup) { s.SocketPath = "" }},
+		{"missing endpoint", func(s *WorkerStartup) { s.Endpoint.BaseURL = "" }},
+		{"non-loopback endpoint", func(s *WorkerStartup) { s.Endpoint.BaseURL = "https://127.0.0.2:1234" }},
+		{"missing certificate", func(s *WorkerStartup) { s.Endpoint.Certificate = nil }},
+		{"missing token", func(s *WorkerStartup) { s.Endpoint.Token = "" }},
 		{"unselected", func(s *WorkerStartup) { s.Selection = WorkerSelection{} }},
 		{"unused provider key", func(s *WorkerStartup) { s.Selection.Critic = nil }},
 		{"unused native Codex key", func(s *WorkerStartup) {

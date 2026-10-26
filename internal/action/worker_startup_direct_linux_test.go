@@ -88,8 +88,8 @@ func TestSelectedWorkerStartupDirectChild(t *testing.T) {
 			if tc.nativeAuth {
 				startup.CodexNativeAPIKey, startup.CodexAccessToken = "native-startup-key", "native-startup-token"
 			}
-			worker, err := startLocalWorker(unixTestDirectory(t), "local", os.Args[0], []string{"-test.run=^TestSelectedWorkerStartupDirectChildHelper$"}, 20*time.Second, WorkerCredentials{}, func(cmd *exec.Cmd, socket string) error {
-				startup.SocketPath = socket
+			worker, err := startLocalWorker("local", os.Args[0], []string{"-test.run=^TestSelectedWorkerStartupDirectChildHelper$"}, 20*time.Second, WorkerCredentials{}, func(cmd *exec.Cmd, access LocalEndpointAccess) error {
+				startup.Endpoint = access
 				var input []byte
 				var inputErr error
 				switch {
