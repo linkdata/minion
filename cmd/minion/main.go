@@ -41,6 +41,7 @@ func run() int {
 
 func runWithGitCheck(checkGit func(context.Context, string) error) int {
 	configPath := flag.String("config", "config.local.json", "path to JSON configuration")
+	mode := flag.String("mode", "in-process", "service mode: in-process, orchestrate, or execute")
 	loop := flag.Bool("loop", false, "poll continuously; default is one cron-friendly pass")
 	check := flag.Bool("check", false, "verify Git readiness, AI settings, authentication, and repository access, then exit")
 	installSkills := flag.Bool("install-skills", false, "download configured skills for Codex and Claude, then exit")
@@ -48,6 +49,29 @@ func runWithGitCheck(checkGit func(context.Context, string) error) int {
 	logger := log.New(os.Stderr, "minion: ", log.LstdFlags|log.LUTC)
 	if flag.NArg() != 0 {
 		logger.Printf("unexpected positional arguments; use flags")
+		return 2
+	}
+	switch *mode {
+	case "in-process", "orchestrate":
+	case "execute":
+		incompatible := false
+		flag.Visit(func(f *flag.Flag) {
+			switch f.Name {
+			case "config", "loop", "check", "install-skills":
+				incompatible = true
+			}
+		})
+		if incompatible {
+			logger.Print("-mode=execute cannot be combined with -config, -loop, -check, or -install-skills")
+			return 2
+		}
+		return runExecuteMode()
+	default:
+		logger.Printf("unsupported mode %q; use in-process, orchestrate, or execute", *mode)
+		return 2
+	}
+	if *mode == "orchestrate" && !localModeAvailable {
+		logger.Print("-mode=orchestrate is unavailable on Windows until native transport is implemented")
 		return 2
 	}
 	loadedPath, err := filepath.Abs(*configPath)
@@ -142,6 +166,14 @@ func runWithGitCheck(checkGit func(context.Context, string) error) int {
 
 	orchestrator := newOrchestrator(cfg, client, store, logger, checkWorkRoot)
 	watcher := &monitor.Monitor{Config: cfg, ConfigPath: loadedPath, GitHub: client, Handler: orchestrator, Logger: logger}
+	if *mode == "orchestrate" {
+		path, err := os.Executable()
+		if err != nil {
+			logger.Printf("locate executable: %v", err)
+			return 1
+		}
+		return runOrchestrateMode(ctx, orchestrator, watcher, store, *loop, logger, path, 2*time.Minute)
+	}
 	return runMonitorLoop(ctx, watcher, store, *loop, nil, logger)
 }
 

@@ -138,13 +138,24 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		now = m.Now
 	}
 	if !now().UTC().Before(store.Data.NextInviteCheckAt) {
-		if err := m.acceptWhitelistedInvitations(ctx); err != nil {
+		deferred, err := m.acceptWhitelistedInvitations(ctx)
+		if err != nil {
 			// Invitation failures should be visible, but should not stop scans of
 			// repositories for which this account already has access.
 			m.logf("invitation check: %v", err)
 		}
 		if err := ctx.Err(); err != nil {
 			return store.Data.NextPollAt, err
+		}
+		if len(deferred) != 0 {
+			if store.Data.RepositoryCursors == nil {
+				store.Data.RepositoryCursors = make(map[string]time.Time)
+			}
+			for _, name := range deferred {
+				if _, exists := store.Data.RepositoryCursors[name]; !exists {
+					store.Data.RepositoryCursors[name] = store.Data.Cursor
+				}
+			}
 		}
 		store.Data.NextInviteCheckAt = now().UTC().Add(15 * time.Minute)
 		if err := store.Save(); err != nil {
@@ -626,12 +637,13 @@ func (m *Monitor) finishFailedJob(ctx context.Context, store *state.Store, job J
 	return store.Save()
 }
 
-func (m *Monitor) acceptWhitelistedInvitations(ctx context.Context) error {
+func (m *Monitor) acceptWhitelistedInvitations(ctx context.Context) ([]string, error) {
+	var deferred []string
 	listCtx, cancelList := context.WithTimeout(ctx, 30*time.Second)
 	invitations, listErr := m.GitHub.ListRepositoryInvitations(listCtx)
 	cancelList()
 	if invitationActionsBlocked(listErr) {
-		return listErr
+		return nil, listErr
 	}
 	actionCtx, cancelActions := context.WithTimeout(ctx, 30*time.Second)
 	defer cancelActions()
@@ -643,7 +655,7 @@ func (m *Monitor) acceptWhitelistedInvitations(ctx context.Context) error {
 	for _, invite := range invitations {
 		if err := actionCtx.Err(); err != nil {
 			failures = append(failures, err)
-			return errors.Join(failures...)
+			return deferred, errors.Join(failures...)
 		}
 		fullName := invite.Repository.FullName
 		owner, name, ok := strings.Cut(fullName, "/")
@@ -694,6 +706,10 @@ func (m *Monitor) acceptWhitelistedInvitations(ctx context.Context) error {
 			continue
 		}
 		if !monitored && (invite.Permissions == "write" || invite.Permissions == "maintain" || invite.Permissions == "admin") {
+			if m.SelectedCommands != nil {
+				// Preserve the cursor even if the config write reports an ambiguous failure.
+				deferred = append(deferred, strings.ToLower(fullName))
+			}
 			actions := m.Config.CommandNames()
 			// Persist first: an accepted invitation disappears and cannot recover a failed config write.
 			repo, err := config.AddRepository(m.ConfigPath, config.Repository{Name: fullName, ID: invite.Repository.ID, OwnerID: invite.Repository.Owner.ID, Actions: actions})
@@ -713,7 +729,7 @@ func (m *Monitor) acceptWhitelistedInvitations(ctx context.Context) error {
 		if err := m.GitHub.AcceptRepositoryInvitation(actionCtx, invite.ID); err != nil {
 			failures = append(failures, fmt.Errorf("accept %s invitation: %w", fullName, err))
 			if invitationActionsBlocked(err) {
-				return errors.Join(failures...)
+				return deferred, errors.Join(failures...)
 			}
 			continue
 		}
@@ -734,7 +750,7 @@ func (m *Monitor) acceptWhitelistedInvitations(ctx context.Context) error {
 			}
 		}
 	}
-	return errors.Join(failures...)
+	return deferred, errors.Join(failures...)
 }
 
 func invitationActionsBlocked(err error) bool {
