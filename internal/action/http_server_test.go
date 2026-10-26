@@ -936,6 +936,80 @@ func TestHTTPExecutorStoreRefusalRemainsFinalIfWorkerContinues(t *testing.T) {
 	}
 }
 
+func TestHTTPExecutorStoreRefusalWakesWatchAfterACK(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const stopBudget = 10 * time.Millisecond
+		storeErr := errors.New("parent checkpoint save refused")
+		entered, release := make(chan struct{}), make(chan struct{})
+		var releaseOnce sync.Once
+		unblock := func() { releaseOnce.Do(func() { close(release) }) }
+		defer unblock()
+		f := newHTTPServerTestWithStopServer(t, t.Context(), testJob(command.Comment), runnerExecutionCheckpoints{
+			before: func(CallCheckpoint) error { return storeErr },
+		}, func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/before" {
+					w = httpServerHeldWrite{ResponseWriter: w, entered: entered, release: release}
+				}
+				next.ServeHTTP(w, r)
+			})
+		}, func(h http.Handler) *httptest.Server { return httptest.NewTestServer(t, h) }, stopBudget)
+		f.pull(t)
+		body, err := json.Marshal(f.tx.binding)
+		if err != nil {
+			t.Fatal(err)
+		}
+		watch, err := f.server.Client().Post(f.server.URL+"/cancel", "application/json", bytes.NewReader(body))
+		if err != nil || watch.StatusCode != http.StatusOK {
+			t.Fatalf("watch admission: response=%v error=%v", watch, err)
+		}
+		defer watch.Body.Close()
+		watchDone := make(chan struct {
+			cancellation httpCancellation
+			err          error
+		}, 1)
+		go func() {
+			var cancellation httpCancellation
+			err := httpDecode(watch.Body, httpControlBytes, &cancellation)
+			watchDone <- struct {
+				cancellation httpCancellation
+				err          error
+			}{cancellation, err}
+		}()
+		ackDone := make(chan httpServerTestExchange, 1)
+		go func() { ackDone <- f.request("/before", f.call(1)) }()
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("failed checkpoint ACK did not enter its write")
+		}
+		<-f.tx.stop
+		stopUntil := f.tx.controlDeadline()
+		time.Sleep(2 * time.Millisecond)
+		select {
+		case got := <-watchDone:
+			t.Fatalf("watch preempted failed checkpoint ACK: %+v", got)
+		default:
+		}
+		unblock()
+		ack := <-ackDone
+		if ack.err != nil || ack.status != http.StatusInternalServerError || ack.ack.Failure == nil || ack.ack.Failure.Message != storeErr.Error() {
+			t.Fatalf("failed checkpoint ACK lost store refusal: %+v", ack)
+		}
+		gotWatch := <-watchDone
+		if gotWatch.err != nil || gotWatch.cancellation.Reason != "canceled" || gotWatch.cancellation.StopRemaining <= 0 || gotWatch.cancellation.StopRemaining >= stopBudget {
+			t.Fatalf("watch missed bounded stop after failed ACK: %+v", gotWatch)
+		}
+		if later := f.tx.controlDeadline(); !later.Equal(stopUntil) {
+			t.Fatalf("watch renewed stop deadline: first=%s later=%s", stopUntil, later)
+		}
+		got := f.result(t)
+		if time.Now().After(stopUntil.Add(2*time.Millisecond)) || !errors.Is(got.err, storeErr) || !errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) {
+			t.Fatalf("failed save outlived fixed stop: result=%+v error=%v deadline=%s", got.result, got.err, stopUntil)
+		}
+	})
+}
+
 func TestHTTPExecutorStatusIsIndependentAndAllowsObservationGaps(t *testing.T) {
 	var before atomic.Int32
 	f := newHTTPServerTest(t, t.Context(), testJob(command.Comment), runnerExecutionCheckpoints{before: func(CallCheckpoint) error { before.Add(1); return nil }}, func(next http.Handler) http.Handler {

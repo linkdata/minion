@@ -68,6 +68,7 @@ type httpTransaction struct {
 	transportErr       error
 	requiredControlErr error
 	checkpointErr      error
+	checkpointACK      chan struct{}
 	outcome            bool
 	result             Result
 	runErr             error
@@ -710,10 +711,13 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	callbackErr := apply()
+	var checkpointACK chan struct{}
 	if callbackErr != nil {
 		tx.mu.Lock()
 		if tx.checkpointErr == nil {
 			tx.checkpointErr = callbackErr
+			checkpointACK = make(chan struct{})
+			tx.checkpointACK = checkpointACK
 		}
 		tx.mu.Unlock()
 		tx.stopExecution(nil, false)
@@ -739,6 +743,9 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 		} else {
 			tx.stopRequiredDelivery(err)
 		}
+	}
+	if checkpointACK != nil {
+		close(checkpointACK)
 	}
 }
 
@@ -772,6 +779,7 @@ func (e *HTTPExecutor) serveCancel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	select {
+	case <-tx.stop:
 	case <-tx.ctx.Done():
 	case <-tx.done:
 	case <-r.Context().Done():
@@ -782,6 +790,23 @@ func (e *HTTPExecutor) serveCancel(w http.ResponseWriter, r *http.Request) {
 			tx.stopExecution(r.Context().Err(), true)
 		}
 		return
+	}
+	tx.mu.Lock()
+	checkpointACK := tx.checkpointACK
+	tx.mu.Unlock()
+	if checkpointACK != nil {
+		// Keep the worker's concrete store refusal ahead of the cancellation reason.
+		<-tx.stop
+		tx.mu.Lock()
+		stopContext := tx.stopContext
+		tx.mu.Unlock()
+		select {
+		case <-checkpointACK:
+		case <-stopContext.Done():
+			return
+		case <-r.Context().Done():
+			return
+		}
 	}
 	tx.mu.Lock()
 	reason := "canceled"
