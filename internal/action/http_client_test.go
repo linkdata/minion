@@ -1120,6 +1120,8 @@ func TestHTTPClientWatchDistinguishesLocalStopFromParsedReplies(t *testing.T) {
 		reason        string
 		remaining     time.Duration
 		zeroRemaining bool
+		missingField  bool
+		nullField     bool
 		readErr       error
 		want          error
 		unknown       bool
@@ -1131,6 +1133,8 @@ func TestHTTPClientWatchDistinguishesLocalStopFromParsedReplies(t *testing.T) {
 		{name: "parent deadline", reason: "deadline", want: context.DeadlineExceeded},
 		{name: "parent cancellation", reason: "canceled", want: context.Canceled},
 		{name: "expired stop remaining", reason: "canceled", zeroRemaining: true, want: context.Canceled},
+		{name: "missing stop remaining", reason: "canceled", missingField: true, unknown: true},
+		{name: "null stop remaining", reason: "deadline", nullField: true, unknown: true},
 		{name: "negative stop remaining", reason: "canceled", remaining: -time.Second, unknown: true},
 		{name: "excessive stop remaining", reason: "deadline", remaining: config.MaxActionRuntime + time.Nanosecond, unknown: true},
 		{name: "premature completed", reason: "completed", unknown: true},
@@ -1150,19 +1154,37 @@ func TestHTTPClientWatchDistinguishesLocalStopFromParsedReplies(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				if test.missingField || test.nullField {
+					var fields map[string]json.RawMessage
+					if err := json.Unmarshal(body, &fields); err != nil {
+						t.Fatal(err)
+					}
+					if test.missingField {
+						delete(fields, "stop_remaining_ns")
+					} else {
+						fields["stop_remaining_ns"] = json.RawMessage("null")
+					}
+					if body, err = json.Marshal(fields); err != nil {
+						t.Fatal(err)
+					}
+				}
 				reader = strings.NewReader(string(body))
 			}
 			transport := &httpExecutionClient{}
 			shortened := false
-			err := transport.watch(ctx, &http.Response{Body: io.NopCloser(reader)}, binding, func(time.Duration) { shortened = true })
+			var shortenedTo time.Duration
+			err := transport.watch(ctx, &http.Response{Body: io.NopCloser(reader)}, binding, func(remaining time.Duration) {
+				shortened = true
+				shortenedTo = remaining
+			})
 			if errors.Is(err, monitor.ErrExecutionOutcomeUnknown) != test.unknown || test.want != nil && !errors.Is(err, test.want) {
 				t.Fatalf("intentional stop erased a real reply or became unknown: %v", err)
 			}
 			if test.unknown && shortened {
 				t.Fatal("invalid cancellation changed the control deadline")
 			}
-			if test.zeroRemaining && !shortened {
-				t.Fatal("expired cancellation did not close the control deadline")
+			if test.zeroRemaining && (!shortened || shortenedTo != 0) {
+				t.Fatalf("expired cancellation did not close the control deadline: shortened=%t remaining=%s", shortened, shortenedTo)
 			}
 			if test.readErr != nil && err != context.Canceled || test.reason == "canceled" && err == context.Canceled {
 				t.Fatalf("local request stop and parsed parent cancellation became indistinguishable: %v", err)

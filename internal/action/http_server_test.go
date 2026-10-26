@@ -1997,17 +1997,28 @@ func TestHTTPExecutorShortStopBudgetDoesNotRenewForSerialControls(t *testing.T) 
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
 		const stopBudget = 10 * time.Millisecond
-		f := newHTTPServerTestWithStopServer(t, ctx, testJob(command.Comment), runnerExecutionCheckpoints{}, nil,
+		paid := make(chan CallUsage, 1)
+		f := newHTTPServerTestWithStopServer(t, ctx, testJob(command.Comment), runnerExecutionCheckpoints{
+			after: func(value CallCheckpoint) error { paid <- value.Call; return nil },
+		}, nil,
 			func(h http.Handler) *httptest.Server { return httptest.NewTestServer(t, h) }, stopBudget)
 		if assignment := f.pull(t); assignment.StopGrace != stopBudget {
 			t.Fatalf("assignment stop budget = %s, want %s", assignment.StopGrace, stopBudget)
 		}
+		f.ack(t, "/before", f.call(1), http.StatusOK, 1)
 		stoppedAt := time.Now()
 		cancel()
 		<-f.tx.stop
 		for sequence := uint64(1); sequence <= 2; sequence++ {
 			if sequence == 2 {
 				time.Sleep(stopBudget - 2*time.Millisecond)
+				receipt := f.call(2)
+				receipt.Checkpoint.Call.Tokens = usage.Tokens{Input: 17}
+				receipt.Checkpoint.Call.Complete = true
+				f.ack(t, "/after", receipt, http.StatusOK, 2)
+				if got := <-paid; got != receipt.Checkpoint.Call {
+					t.Fatalf("late paid receipt changed before stop expiry: got=%+v want=%+v", got, receipt.Checkpoint.Call)
+				}
 			}
 			status := Status{Version: ProtocolVersion, Identity: f.job.Identity, SourceRef: f.job.Source.Head,
 				Sequence: sequence, WorkerState: "ready", Phase: "cleanup"}

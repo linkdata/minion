@@ -185,8 +185,7 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	defer stopDeadline()
 	actionCtx, cancelAction := context.WithCancelCause(deadlineCtx)
 	defer cancelAction(context.Canceled)
-	var stopOnce sync.Once
-	startStop := func() { stopOnce.Do(func() { shortenControl(assignment.StopGrace) }) }
+	startStop := sync.OnceFunc(func() { shortenControl(assignment.StopGrace) })
 	stopOnAction := context.AfterFunc(actionCtx, startStop)
 	defer stopOnAction()
 	checkpoints.action = actionCtx
@@ -406,7 +405,7 @@ func (c *httpExecutionClient) open(ctx context.Context, kind string, data []byte
 
 func (c *httpExecutionClient) watch(ctx context.Context, response *http.Response, binding httpBinding, shortenControl func(time.Duration)) error {
 	defer response.Body.Close()
-	var cancellation httpCancellation
+	cancellation := httpCancellation{StopRemaining: -1}
 	if err := httpDecode(response.Body, httpControlBytes, &cancellation); err != nil {
 		intentionalPipe := context.Cause(ctx) == errHTTPWatchStopped && errors.Is(err, io.ErrClosedPipe)
 		if ctx.Err() != nil && (errors.Is(err, ctx.Err()) || errors.Is(err, context.Cause(ctx)) || intentionalPipe) {
