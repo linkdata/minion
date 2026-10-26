@@ -71,12 +71,12 @@ func (e *Orchestrator) WaitCapacity(ctx context.Context) error {
 	if !ok {
 		return nil
 	}
-	return redactActionError(ready.WaitCapacity(ctx), e.Runner.Codex.APIKey, e.Runner.Claude.APIKey)
+	return redactActionError(ready.WaitCapacity(ctx), e.Runner.secretValues()...)
 }
 
 func (e *Orchestrator) Execute(ctx context.Context, job monitor.Job) (resultErr error) {
 	defer func() {
-		resultErr = redactActionError(resultErr, e.Runner.Codex.APIKey, e.Runner.Claude.APIKey)
+		resultErr = redactActionError(resultErr, e.Runner.secretValues()...)
 	}()
 	acceptedAt := job.AcceptedAt
 	if acceptedAt.IsZero() {

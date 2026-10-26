@@ -22,23 +22,18 @@ func attachSelectedLocalWorker(ctx context.Context, owner *action.Orchestrator, 
 	if owner == nil || watcher == nil {
 		return nil, nil, errors.New("selected local service requires an owner and monitor")
 	}
-	selected, done, closeWorker, err := owner.AttachLocalWorker(ctx, watcher.Config, runtimeDir, path, args, readyTimeout, func(cmd *exec.Cmd, socket string, selected action.WorkerSelection) error {
-		startup := action.WorkerStartup{Selection: selected, WorkRoot: owner.WorkRoot, SocketPath: socket}
-		uses := func(provider string) bool {
-			return selected.Main.Provider == provider || selected.Critic != nil && selected.Critic.Provider == provider
-		}
-		if uses("codex") {
-			startup.CodexAPIKey = owner.Runner.Codex.APIKey
-		}
-		if uses("claude") {
-			startup.ClaudeAPIKey = owner.Runner.Claude.APIKey
+	selected, done, closeWorker, err := owner.AttachLocalWorker(ctx, watcher.Config, runtimeDir, path, args, readyTimeout, func(cmd *exec.Cmd, socket string, selected action.WorkerSelection, credentials action.WorkerCredentials) error {
+		startup := action.WorkerStartup{
+			Selection: selected, WorkRoot: owner.WorkRoot, SocketPath: socket,
+			CodexAPIKey: credentials.CodexAPIKey, CodexNativeAPIKey: credentials.CodexNativeAPIKey,
+			CodexAccessToken: credentials.CodexAccessToken, ClaudeAPIKey: credentials.ClaudeAPIKey,
 		}
 		input, err := action.EncodeWorkerStartup(startup)
 		if err != nil {
 			return fmt.Errorf("encode selected worker startup: %w", err)
 		}
 		cmd.Stdin = bytes.NewReader(input)
-		cmd.Env = selectedWorkerEnv(startup)
+		cmd.Env = selectedWorkerEnv()
 		return nil
 	})
 	if err != nil {

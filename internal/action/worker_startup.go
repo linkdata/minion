@@ -14,11 +14,13 @@ const workerStartupBytes = 8 << 20
 // WorkerStartup is trusted parent input to one selected local worker.
 // GitHub credentials stay with the parent.
 type WorkerStartup struct {
-	Selection    WorkerSelection `json:"selection"`
-	WorkRoot     string          `json:"work_root"`
-	SocketPath   string          `json:"socket_path"`
-	CodexAPIKey  string          `json:"codex_api_key,omitempty"`
-	ClaudeAPIKey string          `json:"claude_api_key,omitempty"`
+	Selection         WorkerSelection `json:"selection"`
+	WorkRoot          string          `json:"work_root"`
+	SocketPath        string          `json:"socket_path"`
+	CodexAPIKey       string          `json:"codex_api_key,omitempty"`
+	CodexNativeAPIKey string          `json:"codex_native_api_key,omitempty"`
+	CodexAccessToken  string          `json:"codex_access_token,omitempty"`
+	ClaudeAPIKey      string          `json:"claude_api_key,omitempty"`
 }
 
 func (s WorkerStartup) validate() error {
@@ -29,10 +31,14 @@ func (s WorkerStartup) validate() error {
 	if _, err := s.runner(nil); err != nil {
 		return fmt.Errorf("worker startup selection: %w", err)
 	}
+	credentials := WorkerCredentials{CodexAPIKey: s.CodexAPIKey, CodexNativeAPIKey: s.CodexNativeAPIKey, CodexAccessToken: s.CodexAccessToken, ClaudeAPIKey: s.ClaudeAPIKey}
+	if err := credentials.validate(); err != nil {
+		return err
+	}
 	selected := func(provider string) bool {
 		return s.Selection.Main.Provider == provider || s.Selection.Critic != nil && s.Selection.Critic.Provider == provider
 	}
-	if s.CodexAPIKey != "" && !selected("codex") || s.ClaudeAPIKey != "" && !selected("claude") {
+	if (s.CodexAPIKey != "" || s.CodexNativeAPIKey != "" || s.CodexAccessToken != "") && !selected("codex") || s.ClaudeAPIKey != "" && !selected("claude") {
 		return errors.New("worker startup contains a key for an unselected provider")
 	}
 	return nil
@@ -41,7 +47,7 @@ func (s WorkerStartup) validate() error {
 func (s WorkerStartup) runner(call modelCall) (*Runner, error) {
 	return NewSelectedRunner(Runner{
 		WorkRoot: s.WorkRoot,
-		Codex:    config.CodexConfig{APIKey: s.CodexAPIKey},
+		Codex:    config.CodexConfig{APIKey: s.CodexAPIKey, NativeAPIKey: s.CodexNativeAPIKey, NativeAccessToken: s.CodexAccessToken},
 		Claude:   config.ClaudeConfig{APIKey: s.ClaudeAPIKey},
 		runModel: call,
 	}, s.Selection)
@@ -73,7 +79,7 @@ func EncodeWorkerStartup(startup WorkerStartup) ([]byte, error) {
 		}
 		return true
 	}
-	if !add(startup.WorkRoot) || !add(startup.SocketPath) || !add(startup.CodexAPIKey) || !add(startup.ClaudeAPIKey) || !addRole(startup.Selection.Main) {
+	if !add(startup.WorkRoot) || !add(startup.SocketPath) || !add(startup.CodexAPIKey) || !add(startup.CodexNativeAPIKey) || !add(startup.CodexAccessToken) || !add(startup.ClaudeAPIKey) || !addRole(startup.Selection.Main) {
 		return nil, errHTTPBodyLimit
 	}
 	if startup.Selection.Critic != nil && !addRole(*startup.Selection.Critic) {

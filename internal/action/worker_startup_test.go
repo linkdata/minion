@@ -41,7 +41,7 @@ func TestWorkerStartupRoundTripAndProviderKeys(t *testing.T) {
 	}
 	decoded, err := decodeWorkerStartup(bytes.NewReader(encoded))
 	if err != nil || !reflect.DeepEqual(decoded, startup) {
-		t.Fatalf("worker startup roundtrip: decoded=%+v error=%v", decoded, err)
+		t.Fatalf("worker startup roundtrip: selection=%+v work_root=%q socket_path=%q error=%v", decoded.Selection, decoded.WorkRoot, decoded.SocketPath, err)
 	}
 	runner, err := decoded.runner(nil)
 	if err != nil {
@@ -49,6 +49,25 @@ func TestWorkerStartupRoundTripAndProviderKeys(t *testing.T) {
 	}
 	if runner.Codex.APIKey != startup.CodexAPIKey || runner.Claude.APIKey != startup.ClaudeAPIKey || runner.selection == nil || runner.WorkRoot != startup.WorkRoot {
 		t.Fatal("selected runner lost configured provider credentials, selection, or work root")
+	}
+}
+
+func TestWorkerStartupNativeCodexCredentials(t *testing.T) {
+	startup := testWorkerStartup(t)
+	startup.CodexAPIKey = ""
+	startup.CodexNativeAPIKey = "private-native-key"
+	startup.CodexAccessToken = "private-native-token"
+	encoded, err := EncodeWorkerStartup(startup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := decodeWorkerStartup(bytes.NewReader(encoded))
+	if err != nil || !reflect.DeepEqual(decoded, startup) {
+		t.Fatal("native Codex credentials changed during startup roundtrip")
+	}
+	runner, err := decoded.runner(nil)
+	if err != nil || runner.Codex.APIKey != "" || runner.Codex.NativeAPIKey != startup.CodexNativeAPIKey || runner.Codex.NativeAccessToken != startup.CodexAccessToken {
+		t.Fatal("startup runner lost selected native Codex credentials")
 	}
 }
 
@@ -89,6 +108,21 @@ func TestDecodeWorkerStartupRejectsInvalidInput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	conflictingCodex := startup
+	conflictingCodex.CodexNativeAPIKey = "private-native-key"
+	conflictingCodex.CodexAccessToken = "private-native-token"
+	conflictingCodexBytes, err := json.Marshal(conflictingCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalidNative := startup
+	invalidNative.CodexAPIKey = ""
+	invalidNative.CodexNativeAPIKey = "private key"
+	invalidNative.CodexAccessToken = "private-native-token"
+	invalidNativeBytes, err := json.Marshal(invalidNative)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, test := range []struct {
 		name string
 		data []byte
@@ -103,10 +137,18 @@ func TestDecodeWorkerStartupRejectsInvalidInput(t *testing.T) {
 		{"unselected", unselectedBytes},
 		{"incomplete", incompleteBytes},
 		{"unused provider key", unusedKeyBytes},
+		{"conflicting Codex auth", conflictingCodexBytes},
+		{"invalid native Codex auth", invalidNativeBytes},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if _, err := decodeWorkerStartup(bytes.NewReader(test.data)); err == nil || strings.Contains(err.Error(), startup.CodexAPIKey) || strings.Contains(err.Error(), startup.ClaudeAPIKey) {
-				t.Fatalf("invalid startup accepted or leaked a provider key: %v", err)
+			_, err := decodeWorkerStartup(bytes.NewReader(test.data))
+			if err == nil {
+				t.Fatal("invalid startup accepted")
+			}
+			for _, secret := range []string{startup.CodexAPIKey, startup.ClaudeAPIKey, conflictingCodex.CodexNativeAPIKey, invalidNative.CodexNativeAPIKey, invalidNative.CodexAccessToken} {
+				if strings.Contains(err.Error(), secret) {
+					t.Fatal("invalid startup error leaked a credential")
+				}
 			}
 		})
 	}
@@ -125,6 +167,13 @@ func TestEncodeWorkerStartupRejectsInvalidInput(t *testing.T) {
 		{"missing endpoint", func(s *WorkerStartup) { s.SocketPath = "" }},
 		{"unselected", func(s *WorkerStartup) { s.Selection = WorkerSelection{} }},
 		{"unused provider key", func(s *WorkerStartup) { s.Selection.Critic = nil }},
+		{"unused native Codex key", func(s *WorkerStartup) {
+			s.Selection.Main.Provider, s.Selection.Critic = "claude", nil
+			s.CodexAPIKey = ""
+			s.CodexNativeAPIKey = "private-native-key"
+		}},
+		{"conflicting Codex auth", func(s *WorkerStartup) { s.CodexNativeAPIKey = "private-native-key" }},
+		{"invalid native Codex auth", func(s *WorkerStartup) { s.CodexAPIKey, s.CodexNativeAPIKey = "", "private key" }},
 		{"oversized", func(s *WorkerStartup) { s.CodexAPIKey = strings.Repeat("x", workerStartupBytes) }},
 		{"aggregate provider keys", func(s *WorkerStartup) {
 			key := strings.Repeat("x", workerStartupBytes/2)

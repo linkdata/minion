@@ -173,7 +173,7 @@ func (c *executionCheckpoints) Review(fact ReviewCheckpoint) error {
 		}
 	}
 	result := Result{Version: fact.Version, Identity: fact.Identity, SourceRef: fact.SourceRef, Calls: fact.Calls, Refutations: fact.Refutations, CriticStopReason: fact.CriticStopReason}
-	if err := saveReviewEvidence(c.owner.WorkRoot, c.job, result, c.owner.Logger, c.owner.Runner.Codex.APIKey, c.owner.Runner.Claude.APIKey); err != nil {
+	if err := saveReviewEvidence(c.owner.WorkRoot, c.job, result, c.owner.Logger, c.owner.Runner.secretValues()...); err != nil {
 		if len(c.calls) == 0 {
 			err = preparationFailure("prepare private review ledger", err)
 		} else {

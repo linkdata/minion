@@ -43,6 +43,12 @@ type Runner struct {
 	recordReview func([]CallUsage, []Refutation, string) error
 }
 
+func (r Runner) secretValues() []string {
+	secrets := []string{r.Codex.APIKey, r.Codex.NativeAPIKey, r.Codex.NativeAccessToken, r.Claude.APIKey}
+	slices.SortFunc(secrets, func(a, b string) int { return len(b) - len(a) })
+	return secrets
+}
+
 func (r *Runner) logf(format string, args ...any) {
 	if r.Logger != nil {
 		r.Logger.Printf(format, args...)
@@ -66,7 +72,7 @@ func (r *Runner) Execute(ctx context.Context, job Job, checkpoints Checkpoints) 
 func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (result Result, resultErr error) {
 	result = Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head}
 	defer func() {
-		resultErr = redactActionError(resultErr, r.Codex.APIKey, r.Claude.APIKey)
+		resultErr = redactActionError(resultErr, r.secretValues()...)
 	}()
 	if err := job.Validate(); err != nil {
 		return result, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
@@ -221,15 +227,15 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 			var err error
 			if !reviewCurrent {
 				if review == nil {
-					review, err = freezeReviewSnapshot(ctx, workRoot, job, source, outputDir, index, configured.Codex.APIKey, configured.Claude.APIKey)
+					review, err = freezeReviewSnapshot(ctx, workRoot, job, source, outputDir, index, configured.secretValues()...)
 				} else {
 					err = review.refresh(ctx)
 				}
 				if err == nil && job.Action == command.Fix {
-					err = rejectConfiguredKeyChanges(review.changes, configured.Codex.APIKey, configured.Claude.APIKey)
+					err = rejectConfiguredKeyChanges(review.changes, configured.secretValues()...)
 				}
 				if err == nil && job.Action == command.SecurityAudit {
-					_, err = normalizeAuditArtifacts(review.artifacts, job, auditSkill, configured.Codex.APIKey, configured.Claude.APIKey)
+					_, err = normalizeAuditArtifacts(review.artifacts, job, auditSkill, configured.secretValues()...)
 				}
 				reviewCurrent = err == nil
 			}
@@ -283,7 +289,7 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 			call, err := next(ctx, request)
 			entry.Tokens, entry.Complete = call.Tokens, call.UsageComplete
 			if err == nil && request.role == roleCritic {
-				approved, hasBlockers, reviewComplete, _, parseErr := parseCritique(call.Answer, configured.Codex.APIKey, configured.Claude.APIKey)
+				approved, hasBlockers, reviewComplete, _, parseErr := parseCritique(call.Answer, configured.secretValues()...)
 				entry.Approved = parseErr == nil && approved
 				entry.NoBlockers = parseErr == nil && !hasBlockers
 				entry.HasBlockers = parseErr == nil && hasBlockers
@@ -321,7 +327,7 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 		// Collect partial reports before the outer workspace cleanup.
 		defer func() {
 			if resultErr != nil && len(result.Artifacts) == 0 {
-				files, diagnostics := collectPartialAuditArtifacts(outputDir, job, auditSkill, configured.Codex.APIKey, configured.Claude.APIKey)
+				files, diagnostics := collectPartialAuditArtifacts(outputDir, job, auditSkill, configured.secretValues()...)
 				result.Artifacts = files
 				result.Diagnostics = append(result.Diagnostics, diagnostics...)
 			}
@@ -365,7 +371,7 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 			return result, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
 		}
 	}
-	if err := rejectConfiguredKeyChanges(changes, configured.Codex.APIKey, configured.Claude.APIKey); err != nil {
+	if err := rejectConfiguredKeyChanges(changes, configured.secretValues()...); err != nil {
 		return result, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
 	}
 	result.Changes = changes
@@ -378,7 +384,7 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 		if review != nil {
 			files = review.artifacts
 		} else {
-			files, _, err = readAuditArtifacts(outputDir, false, configured.Codex.APIKey, configured.Claude.APIKey)
+			files, _, err = readAuditArtifacts(outputDir, false, configured.secretValues()...)
 			if err != nil {
 				return result, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
 			}
@@ -391,7 +397,7 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 		if err = validateAuditFiles(ctx, files, validationDir, auditSkill, tools, job.Identity.Repository, source, job.Source.Head); err != nil {
 			return result, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
 		}
-		if result.Artifacts, err = normalizeAuditArtifacts(files, job, auditSkill, configured.Codex.APIKey, configured.Claude.APIKey); err != nil {
+		if result.Artifacts, err = normalizeAuditArtifacts(files, job, auditSkill, configured.secretValues()...); err != nil {
 			return result, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
 		}
 		answer = ""

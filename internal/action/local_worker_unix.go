@@ -49,7 +49,7 @@ const (
 // startLocalWorker owns the direct child's context and command. configure
 // prepares the child command; stderr is captured for a safe startup diagnostic.
 // Job cancellation is handled by Execute.
-func startLocalWorker(runtimeDir, executorID, path string, args []string, readyTimeout time.Duration, configure func(*exec.Cmd, string) error) (*localWorker, error) {
+func startLocalWorker(runtimeDir, executorID, path string, args []string, readyTimeout time.Duration, credentials WorkerCredentials, configure func(*exec.Cmd, string) error) (*localWorker, error) {
 	if path == "" {
 		return nil, errors.New("local worker command path is required")
 	}
@@ -58,6 +58,9 @@ func startLocalWorker(runtimeDir, executorID, path string, args []string, readyT
 	}
 	executor, err := NewHTTPExecutor(executorID)
 	if err != nil {
+		return nil, err
+	}
+	if err := executor.SetWorkerCredentials(credentials); err != nil {
 		return nil, err
 	}
 	endpoint, err := ListenUnixExecution(runtimeDir, executor)
@@ -110,7 +113,7 @@ func startLocalWorker(runtimeDir, executorID, path string, args []string, readyT
 
 // AttachLocalWorker connects one selected direct child without changing the
 // default service mode. The caller watches its exit and owns the close function.
-func (e *Orchestrator) AttachLocalWorker(ctx context.Context, cfg config.Config, runtimeDir, path string, args []string, readyTimeout time.Duration, configure func(*exec.Cmd, string, WorkerSelection) error) (WorkerSelection, <-chan struct{}, func() error, error) {
+func (e *Orchestrator) AttachLocalWorker(ctx context.Context, cfg config.Config, runtimeDir, path string, args []string, readyTimeout time.Duration, configure func(*exec.Cmd, string, WorkerSelection, WorkerCredentials) error) (WorkerSelection, <-chan struct{}, func() error, error) {
 	if e.Executor != nil {
 		return WorkerSelection{}, nil, nil, errors.New("orchestrator already has an executor")
 	}
@@ -121,15 +124,29 @@ func (e *Orchestrator) AttachLocalWorker(ctx context.Context, cfg config.Config,
 	if err != nil {
 		return WorkerSelection{}, nil, nil, err
 	}
-	w, err := startLocalWorker(runtimeDir, "local", path, args, readyTimeout, func(cmd *exec.Cmd, socket string) error {
-		return configure(cmd, socket, selected)
+	credentials := WorkerCredentials{}
+	uses := func(provider string) bool {
+		return selected.Main.Provider == provider || selected.Critic != nil && selected.Critic.Provider == provider
+	}
+	if uses("codex") {
+		credentials.CodexAPIKey = e.Runner.Codex.APIKey
+		if credentials.CodexAPIKey == "" {
+			credentials.CodexNativeAPIKey = e.Runner.Codex.NativeAPIKey
+			credentials.CodexAccessToken = e.Runner.Codex.NativeAccessToken
+		}
+	}
+	if uses("claude") {
+		credentials.ClaudeAPIKey = e.Runner.Claude.APIKey
+	}
+	w, err := startLocalWorker(runtimeDir, "local", path, args, readyTimeout, credentials, func(cmd *exec.Cmd, socket string) error {
+		return configure(cmd, socket, selected, credentials)
 	})
 	if err != nil {
-		return WorkerSelection{}, nil, nil, redactActionError(err, e.Runner.Codex.APIKey, e.Runner.Claude.APIKey)
+		return WorkerSelection{}, nil, nil, redactActionError(err, e.Runner.secretValues()...)
 	}
 	if err := w.WaitCapacity(ctx); err != nil {
 		// WaitCapacity closes the child and endpoint on failure.
-		return WorkerSelection{}, nil, nil, redactActionError(err, e.Runner.Codex.APIKey, e.Runner.Claude.APIKey)
+		return WorkerSelection{}, nil, nil, redactActionError(err, e.Runner.secretValues()...)
 	}
 	e.Executor = w
 	return selected, w.exited, w.Close, nil

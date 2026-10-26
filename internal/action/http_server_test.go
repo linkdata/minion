@@ -59,8 +59,8 @@ func (c *httpDeadlineAfterCheck) Err() error {
 	return nil
 }
 
-func newHTTPServerTest(t *testing.T, ctx context.Context, job Job, sink Checkpoints, wrap func(http.Handler) http.Handler) *httpServerTest {
-	return newHTTPServerTestWithServer(t, ctx, job, sink, wrap, httptest.NewServer)
+func newHTTPServerTest(t *testing.T, ctx context.Context, job Job, sink Checkpoints, wrap func(http.Handler) http.Handler, credentials ...WorkerCredentials) *httpServerTest {
+	return newHTTPServerTestWithServer(t, ctx, job, sink, wrap, httptest.NewServer, credentials...)
 }
 
 func newHTTPServerTestInMemory(t *testing.T, ctx context.Context, job Job, sink Checkpoints) *httpServerTest {
@@ -69,11 +69,16 @@ func newHTTPServerTestInMemory(t *testing.T, ctx context.Context, job Job, sink 
 	})
 }
 
-func newHTTPServerTestWithServer(t *testing.T, ctx context.Context, job Job, sink Checkpoints, wrap func(http.Handler) http.Handler, newServer func(http.Handler) *httptest.Server) *httpServerTest {
+func newHTTPServerTestWithServer(t *testing.T, ctx context.Context, job Job, sink Checkpoints, wrap func(http.Handler) http.Handler, newServer func(http.Handler) *httptest.Server, credentials ...WorkerCredentials) *httpServerTest {
 	t.Helper()
 	executor, err := NewHTTPExecutor(job.Identity.ExecutorID)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if len(credentials) > 0 {
+		if err := executor.SetWorkerCredentials(credentials[0]); err != nil {
+			t.Fatal(err)
+		}
 	}
 	var handler http.Handler = executor
 	if wrap != nil {
@@ -145,7 +150,7 @@ func (f *httpServerTest) pull(t *testing.T) httpAssignment {
 		t.Fatalf("assignment: status=%d error=%v", response.StatusCode, err)
 	}
 	if !sameAssignmentJob(f.job, assignment.Job) || assignment.HeldFor < 0 {
-		t.Fatalf("assignment changed supplied Job or lost its remaining budget: %+v", assignment)
+		t.Fatalf("assignment changed supplied Job or lost its remaining budget: job_matches=%t budget=%s held=%s", sameAssignmentJob(f.job, assignment.Job), assignment.Job.RuntimeBudget, assignment.HeldFor)
 	}
 	return assignment
 }

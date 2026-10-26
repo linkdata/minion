@@ -18,17 +18,19 @@ import (
 
 // HTTPExecutor owns one supplied-data transaction. It does not prove worker readiness or cleanup.
 type HTTPExecutor struct {
-	mu           sync.Mutex
-	executorID   string
-	active       *httpTransaction
-	pull         bool
-	pullDone     <-chan struct{}
-	closed       bool
-	unavailable  bool
-	changed      chan struct{}
-	outcomeGrace time.Duration
-	status       Status
-	hasStatus    bool
+	mu             sync.Mutex
+	executorID     string
+	credentials    WorkerCredentials
+	credentialsSet bool
+	active         *httpTransaction
+	pull           bool
+	pullDone       <-chan struct{}
+	closed         bool
+	unavailable    bool
+	changed        chan struct{}
+	outcomeGrace   time.Duration
+	status         Status
+	hasStatus      bool
 }
 
 type httpTransaction struct {
@@ -37,14 +39,15 @@ type httpTransaction struct {
 	observation sync.Mutex
 	handlers    sync.WaitGroup
 
-	job        Job
-	started    time.Time
-	binding    httpBinding
-	sink       Checkpoints
-	ctx        context.Context
-	budget     context.Context
-	cancel     context.CancelFunc
-	stopBudget context.CancelFunc
+	job         Job
+	credentials WorkerCredentials
+	started     time.Time
+	binding     httpBinding
+	sink        Checkpoints
+	ctx         context.Context
+	budget      context.Context
+	cancel      context.CancelFunc
+	stopBudget  context.CancelFunc
 
 	ready              bool
 	delivered          bool
@@ -78,6 +81,23 @@ func NewHTTPExecutor(executorID string) (*HTTPExecutor, error) {
 	return &HTTPExecutor{executorID: executorID, changed: make(chan struct{}), outcomeGrace: httpControlTimeout}, nil
 }
 
+// SetWorkerCredentials configures assignment-only credentials before the worker pulls.
+func (e *HTTPExecutor) SetWorkerCredentials(credentials WorkerCredentials) error {
+	if e == nil {
+		return errors.New("HTTP executor is missing")
+	}
+	if err := credentials.validate(); err != nil {
+		return err
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.credentialsSet || e.active != nil || e.pull || e.closed || e.unavailable {
+		return errors.New("HTTP executor credentials cannot change after startup")
+	}
+	e.credentials, e.credentialsSet = credentials, true
+	return nil
+}
+
 func (e *HTTPExecutor) notifyLocked() {
 	close(e.changed)
 	e.changed = make(chan struct{})
@@ -105,6 +125,7 @@ func (e *HTTPExecutor) execute(ctx context.Context, job Job, sink Checkpoints, s
 		cancel()
 		return result, errors.New("HTTP executor is closed, unavailable or busy")
 	}
+	tx.credentials = e.credentials
 	e.active, e.status, e.hasStatus = tx, Status{}, false
 	if state != nil {
 		state.admitted = true
@@ -152,7 +173,10 @@ func (e *HTTPExecutor) execute(ctx context.Context, job Job, sink Checkpoints, s
 	if job.Identity.ExecutorID != e.executorID {
 		return result, fmt.Errorf("%w: HTTP executor identity differs from Job", monitor.ErrTerminalJob)
 	}
-	if httpJobBound(job) > httpJobBytes {
+	if err := tx.credentials.validateJob(job); err != nil {
+		return result, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
+	}
+	if httpAssignmentBound(job, tx.credentials) > httpJobBytes {
 		return result, fmt.Errorf("%w: conservative Job encoding bound: %w", monitor.ErrTerminalJob, errHTTPBodyLimit)
 	}
 	if err := httpExecutionContextError(actionCtx); err != nil {
@@ -324,7 +348,7 @@ poll:
 				dispatchAt := time.Now()
 				job := tx.job
 				job.RuntimeBudget = max(deadline.Sub(dispatchAt), time.Nanosecond)
-				body, err := httpEncode(httpAssignment{Job: job, HeldFor: dispatchAt.Sub(pullAt)}, httpJobBytes)
+				body, err := httpEncode(httpAssignment{Job: job, Credentials: tx.credentials, HeldFor: dispatchAt.Sub(pullAt)}, httpJobBytes)
 				if err != nil {
 					tx.mu.Unlock()
 					e.mu.Unlock()
@@ -573,6 +597,12 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 		apply = func() error {
 			tx.mu.Lock()
 			tx.result, tx.runErr = outcome.Result, errors.Join(outcome.Failure.workerErr(), tx.checkpointErr)
+			for _, diagnostic := range outcome.Result.Diagnostics {
+				if diagnostic.Code == "cleanup_failed" {
+					tx.quarantine = true
+					break
+				}
+			}
 			// A missing callback cannot be acknowledged from raw outcome claims.
 			if sequenceGap {
 				tx.runErr = errors.Join(tx.runErr, monitor.ErrExecutionOutcomeUnknown)

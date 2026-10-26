@@ -404,6 +404,80 @@ printf '%s\n' '{"method":"test/notification","params":{}}'`, 1)
 	}
 }
 
+func TestValidateUsesExplicitNativeCredentialsWithoutAmbientWorkerAuth(t *testing.T) {
+	dir := t.TempDir()
+	page := `{"id":2,"result":{"data":[{"model":"test","isDefault":true,"defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high"}]}]}}`
+	authPath := filepath.Join(dir, "native-auth")
+	script := strings.Replace(catalogueScriptFor(dir, page, ""), "#!/bin/sh\n", "#!/bin/sh\nif [ \"$1\" = app-server ] && [ ! -e "+aicli.ShellQuote(authPath)+" ]; then printf '%s,%s\\n' \"${CODEX_API_KEY-absent}\" \"${CODEX_ACCESS_TOKEN-absent}\" > "+aicli.ShellQuote(authPath)+"; fi\n", 1)
+	installFakeCodex(t, script)
+	t.Setenv("CODEX_API_KEY", "stale-ambient-key")
+	t.Setenv("CODEX_ACCESS_TOKEN", "stale-ambient-token")
+	settings := config.CodexConfig{NativeAPIKey: "selected-native-key", NativeAccessToken: "selected-native-token"}
+	resolved, err := Validate(t.Context(), settings)
+	if err != nil || resolved.Model != "test" || resolved.NativeAPIKey != settings.NativeAPIKey || resolved.NativeAccessToken != settings.NativeAccessToken {
+		t.Fatalf("native authentication discovery failed: model=%q error=%v", resolved.Model, err)
+	}
+	auth, err := os.ReadFile(authPath)
+	if err != nil || string(auth) != "selected-native-key,selected-native-token\n" {
+		t.Fatalf("native credentials did not reach discovery: %q, %v", auth, err)
+	}
+	requests, err := os.ReadFile(filepath.Join(dir, "requests"))
+	if err != nil || strings.Contains(string(requests), "account/login/start") || strings.Contains(string(requests), "selected-native-") {
+		t.Fatalf("native credentials entered app-server control requests: %q, %v", requests, err)
+	}
+	helpEnv, err := os.ReadFile(filepath.Join(dir, "help-env"))
+	if err != nil || strings.Contains(string(helpEnv), "selected-native-") || strings.Contains(string(helpEnv), "stale-ambient-") {
+		t.Fatalf("parser probes inherited authentication: %q, %v", helpEnv, err)
+	}
+}
+
+func TestValidateRedactsExplicitNativeCredentials(t *testing.T) {
+	settings := config.CodexConfig{NativeAPIKey: "native-api-secret", NativeAccessToken: "native-access-secret"}
+	for _, test := range []struct {
+		name, script string
+	}{
+		{name: "response", script: catalogueScriptFor(t.TempDir(), `{"id":2,"error":{"message":"native-api-secret native-access-secret"}}`, "")},
+		{name: "stderr", script: "#!/bin/sh\nprintf '%s\\n' 'native-api-secret native-access-secret' >&2\nexit 7\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			installFakeCodex(t, test.script)
+			_, err := Validate(t.Context(), settings)
+			if err == nil || strings.Contains(err.Error(), "native-api-secret") || strings.Contains(err.Error(), "native-access-secret") {
+				t.Fatalf("native credential escaped model discovery error: %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateRedactsAmbientNativeCredentials(t *testing.T) {
+	t.Setenv("CODEX_API_KEY", "ambient-api-secret")
+	t.Setenv("CODEX_ACCESS_TOKEN", "ambient-access-secret")
+	for _, test := range []struct {
+		name, script string
+	}{
+		{name: "response", script: `#!/bin/sh
+IFS= read -r request || exit 0
+printf '%s\n' '{"id":1,"result":{}}'
+IFS= read -r request
+IFS= read -r request
+printf '{"id":2,"error":{"message":"%s %s"}}\n' "$CODEX_API_KEY" "$CODEX_ACCESS_TOKEN"
+exec cat >/dev/null
+`},
+		{name: "stderr", script: `#!/bin/sh
+printf '%s %s\n' "$CODEX_API_KEY" "$CODEX_ACCESS_TOKEN" >&2
+exit 7
+`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			installFakeCodex(t, test.script)
+			_, err := Validate(t.Context(), config.CodexConfig{})
+			if err == nil || strings.Contains(err.Error(), "ambient-api-secret") || strings.Contains(err.Error(), "ambient-access-secret") || !strings.Contains(err.Error(), "[redacted]") {
+				t.Fatalf("ambient credential escaped model discovery error: %v", err)
+			}
+		})
+	}
+}
+
 func TestValidateRejectsFailedConfiguredLogin(t *testing.T) {
 	for _, response := range []string{
 		`{"id":0,"error":{"message":"dummy-configured-key"}}`,

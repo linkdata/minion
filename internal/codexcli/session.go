@@ -52,7 +52,7 @@ func (s *Session) Close() error {
 			*owned.path = ""
 		}
 	}
-	err = aicli.RedactError(err, s.settings.APIKey)
+	err = redactCodexError(err, s.settings)
 	if err == nil {
 		*s = Session{}
 	}

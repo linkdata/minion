@@ -17,14 +17,23 @@ import (
 	"github.com/linkdata/minion/internal/monitor"
 )
 
-func TestNativeProposalRedactsEncodedConfiguredKey(t *testing.T) {
-	for _, provider := range []string{"codex", "claude"} {
+func TestNativeProposalRedactsEncodedProviderCredential(t *testing.T) {
+	for _, auth := range []struct {
+		name, provider string
+		set            func(*Runner, string)
+	}{
+		{"codex configured", "codex", func(r *Runner, key string) { r.Codex.APIKey = key }},
+		{"codex native API key", "codex", func(r *Runner, key string) { r.Codex.NativeAPIKey = key }},
+		{"codex native access token", "codex", func(r *Runner, key string) { r.Codex.NativeAccessToken = key }},
+		{"claude configured", "claude", func(r *Runner, key string) { r.Claude.APIKey = key }},
+	} {
 		for _, tc := range []struct{ name, key string }{
 			{"quote", `fixture"secret`},
 			{"backslash", `fixture\secret`},
 			{"JSON HTML escape", "fixture<secret"},
 		} {
-			t.Run(provider+"/"+tc.name, func(t *testing.T) {
+			t.Run(auth.name+"/"+tc.name, func(t *testing.T) {
+				provider := auth.provider
 				t.Setenv("HOME", t.TempDir())
 				t.Setenv("CODEX_HOME", t.TempDir())
 				t.Setenv("CLAUDE_CONFIG_DIR", "")
@@ -65,11 +74,7 @@ done
 					}
 				})
 				runner := Runner{}
-				if provider == "codex" {
-					runner.Codex.APIKey = tc.key
-				} else {
-					runner.Claude.APIKey = tc.key
-				}
+				auth.set(&runner, tc.key)
 				result, err := runner.runNative(t.Context(), modelRun{session: &session, provider: provider, dir: t.TempDir(), prompt: mainPrompt("inert fixture"), outputSchema: mainOutputSchema})
 				if err != nil {
 					t.Fatal(err)
@@ -83,23 +88,34 @@ done
 	}
 }
 
-func TestAuditReportRedactsNULSplitConfiguredKeyBeforeCriticAndPublication(t *testing.T) {
+func TestActionRedactsOverlappingNativeCredentials(t *testing.T) {
+	runner := Runner{Codex: config.CodexConfig{NativeAPIKey: "shared-secret", NativeAccessToken: "prefix-shared-secret-suffix"}}
+	if got := redactActionText("prefix-shared-secret-suffix", runner.secretValues()...); got != "[redacted]" {
+		t.Fatalf("overlapping native credential left a fragment: %q", got)
+	}
+	if err := redactActionError(errors.New("prefix-shared-secret-suffix"), runner.secretValues()...); err == nil || err.Error() != "[redacted]" {
+		t.Fatalf("overlapping native credential escaped error: %v", err)
+	}
+}
+
+func TestAuditReportRedactsNULSplitAndNativeCredentialsBeforeCriticAndPublication(t *testing.T) {
 	job := withClaudeCritic(auditRunnerJob(t))
 	job.CriticMaxRounds = 1
 	const key = "fixture-audit-secret"
 	const splitKey = "fixture-audit-\x00secret"
+	const nativeToken = "fixture-native-token"
 	const criticKey = "fixture-critic-secret"
-	report := "Audit evidence includes " + splitKey + " and " + criticKey + ".\n"
-	want := "Audit evidence includes [redacted] and [redacted].\n"
+	report := "Audit evidence includes " + splitKey + ", " + nativeToken + ", and " + criticKey + ".\n"
+	want := "Audit evidence includes [redacted], [redacted], and [redacted].\n"
 	criticSawReports := false
-	runner := Runner{WorkRoot: t.TempDir(), Codex: config.CodexConfig{APIKey: key}, Claude: config.ClaudeConfig{APIKey: criticKey}, runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+	runner := Runner{WorkRoot: t.TempDir(), Codex: config.CodexConfig{APIKey: key, NativeAccessToken: nativeToken}, Claude: config.ClaudeConfig{APIKey: criticKey}, runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 		if request.role == roleMain {
 			for _, file := range auditArtifactsFixture(job, request.dir, report) {
 				if file.Path == "architecture.md" {
-					file.Data = []byte("Architecture includes " + splitKey + " and " + criticKey)
+					file.Data = []byte("Architecture includes " + splitKey + ", " + nativeToken + ", and " + criticKey)
 				}
 				if file.Path == "coverage-ledger.json" {
-					file.Data = []byte(strings.TrimSuffix(auditCoveredLedgerFixture, "}]") + `,"note":"fixture-audit-\u0000secret","fixture-audit-\u0073ecret":"fixture-audit-\u0073ecret","critic":"fixture-critic-secret","safe":"<safe>"}]`)
+					file.Data = []byte(strings.TrimSuffix(auditCoveredLedgerFixture, "}]") + `,"note":"fixture-audit-\u0000secret","fixture-audit-\u0073ecret":"fixture-audit-\u0073ecret","native":"fixture-native-token","critic":"fixture-critic-secret","safe":"<safe>"}]`)
 				}
 				writeFixtureFile(t, request.outputDir, file.Path, file.Data)
 			}
@@ -114,36 +130,36 @@ func TestAuditReportRedactsNULSplitConfiguredKeyBeforeCriticAndPublication(t *te
 				t.Fatal(err)
 			}
 			criticSawReports = true
-			if string(data) != want || strings.Contains(request.prompt, key) || strings.Contains(request.prompt, criticKey) || strings.Contains(request.prompt, "\x00") {
-				t.Fatalf("critic received secret: report=%q prompt=%q", data, request.prompt)
+			if string(data) != want || strings.Contains(request.prompt, key) || strings.Contains(request.prompt, nativeToken) || strings.Contains(request.prompt, criticKey) || strings.Contains(request.prompt, "\x00") {
+				t.Fatal("critic received unredacted report or prompt")
 			}
 			architecture, err := os.ReadFile(filepath.Join(dir, "architecture.md"))
-			if err != nil || string(architecture) != "Architecture includes [redacted] and [redacted]" {
-				t.Fatalf("critic received raw architecture artifact: %q, %v", architecture, err)
+			if err != nil || string(architecture) != "Architecture includes [redacted], [redacted], and [redacted]" {
+				t.Fatal("critic received unredacted architecture artifact")
 			}
 			ledger, err := os.ReadFile(filepath.Join(dir, "coverage-ledger.json"))
 			if err != nil || !redactedAuditLedger(ledger) {
-				t.Fatalf("critic received NUL-split JSON secret: %q, %v", ledger, err)
+				t.Fatal("critic received unredacted coverage ledger")
 			}
 		}
 		return aicli.Result{Answer: approvedCritiqueJSON}, nil
 	}}
 	result, err := runner.Run(t.Context(), job)
 	if err != nil || !criticSawReports || result.Answer != "" || result.Validate(job) != nil {
-		t.Fatalf("audit result: critic saw reports=%t answer=%q error=%v", criticSawReports, result.Answer, err)
+		t.Fatalf("audit result invalid: critic saw reports=%t", criticSawReports)
 	}
 	for _, file := range result.Artifacts {
-		if strings.Contains(string(file.Data), key) || strings.Contains(string(file.Data), criticKey) || strings.Contains(string(file.Data), "\x00") {
-			t.Fatalf("returned artifact contains configured key: %s", file.Path)
+		if strings.Contains(string(file.Data), key) || strings.Contains(string(file.Data), nativeToken) || strings.Contains(string(file.Data), criticKey) || strings.Contains(string(file.Data), "\x00") {
+			t.Fatalf("returned artifact contains credential: %s", file.Path)
 		}
 		if file.Path == "REPORT.md" && string(file.Data) != want {
-			t.Fatalf("returned report contains configured key: %q", file.Data)
+			t.Fatal("returned report contains unredacted credential")
 		}
-		if file.Path == "architecture.md" && string(file.Data) != "Architecture includes [redacted] and [redacted]" {
-			t.Fatalf("returned architecture artifact contains configured key: %q", file.Data)
+		if file.Path == "architecture.md" && string(file.Data) != "Architecture includes [redacted], [redacted], and [redacted]" {
+			t.Fatal("returned architecture artifact contains unredacted credential")
 		}
 		if file.Path == "coverage-ledger.json" && !redactedAuditLedger(file.Data) {
-			t.Fatalf("returned JSON artifact contains configured key: %q", file.Data)
+			t.Fatal("returned JSON artifact contains unredacted credential")
 		}
 	}
 }
@@ -218,6 +234,7 @@ func redactedAuditLedger(data []byte) bool {
 	var ledger []map[string]any
 	return json.Unmarshal(data, &ledger) == nil && len(ledger) == 1 &&
 		ledger[0]["note"] == "[redacted]" && ledger[0]["[redacted]"] == "[redacted]" &&
+		ledger[0]["native"] == "[redacted]" &&
 		ledger[0]["critic"] == "[redacted]" &&
 		ledger[0]["safe"] == "<safe>" && bytes.Contains(data, []byte("<safe>"))
 }

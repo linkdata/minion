@@ -19,6 +19,7 @@ import (
 )
 
 var errHTTPWatchStopped = errors.New("HTTP cancellation watch stopped after worker return")
+var errHTTPWorkerCleanup = errors.New("HTTP worker cleanup failed; worker is unavailable")
 
 type httpExecutionClient struct {
 	client              *http.Client
@@ -89,6 +90,9 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	if client == nil || runner == nil || !workspace.ValidIdentitySegment(executorID) {
 		return errors.New("HTTP worker requires a client, runner and valid executor identity")
 	}
+	if runner.Codex.APIKey != "" || runner.Codex.NativeAPIKey != "" || runner.Codex.NativeAccessToken != "" || runner.Claude.APIKey != "" {
+		return errors.New("HTTP worker runner must not retain provider credentials")
+	}
 	base, err := url.Parse(baseURL)
 	if err != nil || base == nil || (base.Scheme != "http" && base.Scheme != "https") || base.Hostname() == "" || base.User != nil || base.RawQuery != "" || base.ForceQuery || base.Fragment != "" || base.RawFragment != "" || base.Opaque != "" {
 		return errors.New("invalid HTTP execution base URL")
@@ -104,8 +108,9 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	transport := &httpExecutionClient{client: &configured, base: base}
 	var checkpoints *httpClientCheckpoints
 	protocolFailed := false
+	cleanupFailed := false
 	defer func() {
-		if status != nil && transport.outcomeAcknowledged && !transport.outcomeDegraded && !protocolFailed && checkpoints != nil && checkpoints.failure == nil {
+		if status != nil && transport.outcomeAcknowledged && !transport.outcomeDegraded && !protocolFailed && !cleanupFailed && checkpoints != nil && checkpoints.failure == nil {
 			*status = httpRunAcknowledged
 		}
 	}()
@@ -129,6 +134,22 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	if job.Identity.ExecutorID != executorID {
 		return httpClientUnknown("next", errors.New("assignment executor differs from pull"))
 	}
+	if err := assignment.Credentials.validateJob(job); err != nil {
+		return httpClientUnknown("next", err)
+	}
+	jobRunner := *runner
+	jobRunner.Codex.APIKey = assignment.Credentials.CodexAPIKey
+	jobRunner.Codex.NativeAPIKey = assignment.Credentials.CodexNativeAPIKey
+	jobRunner.Codex.NativeAccessToken = assignment.Credentials.CodexAccessToken
+	jobRunner.Claude.APIKey = assignment.Credentials.ClaudeAPIKey
+	assignment.Credentials = WorkerCredentials{}
+	clearCredentials := func() {
+		jobRunner.Codex.APIKey = ""
+		jobRunner.Codex.NativeAPIKey = ""
+		jobRunner.Codex.NativeAccessToken = ""
+		jobRunner.Claude.APIKey = ""
+	}
+	defer clearCredentials()
 	// Subtract transit and decoding time, but not the parent's idle long-poll.
 	elapsed := started.Sub(pullStarted)
 	if assignment.HeldFor < 0 || assignment.HeldFor > elapsed && assignment.HeldFor-elapsed > config.MaxActionRuntime {
@@ -143,6 +164,7 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	if !time.Now().Before(expires) {
 		err := errors.Join(monitor.ErrTerminalJob, context.DeadlineExceeded)
 		result := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head}
+		clearCredentials()
 		return errors.Join(err, checkpoints.outcome(result, err))
 	}
 	deadlineCtx, stopDeadline := context.WithDeadline(ctx, expires)
@@ -183,6 +205,7 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 		protocolFailed = true
 		stopWatch(errHTTPWatchStopped)
 		result := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head}
+		clearCredentials()
 		return errors.Join(err, checkpoints.outcome(result, err))
 	}
 	watchDone := make(chan error, 1)
@@ -215,7 +238,14 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	if job.RuntimeBudget <= 0 {
 		runErr = errors.Join(monitor.ErrTerminalJob, context.DeadlineExceeded)
 	} else {
-		result, runErr = runner.Execute(actionCtx, job, checkpoints)
+		result, runErr = jobRunner.Execute(actionCtx, job, checkpoints)
+	}
+	clearCredentials()
+	for _, diagnostic := range result.Diagnostics {
+		if diagnostic.Code == "cleanup_failed" {
+			cleanupFailed = true
+			break
+		}
 	}
 	if runErr == nil {
 		if err := checkpoints.status("upload", 2); err != nil {
@@ -249,6 +279,9 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	callerErr := context.Cause(ctx)
 	if errors.Is(callerErr, context.DeadlineExceeded) {
 		callerErr = errors.Join(callerErr, monitor.ErrTerminalJob)
+	}
+	if cleanupFailed {
+		runErr = errors.Join(runErr, errHTTPWorkerCleanup)
 	}
 	return errors.Join(runErr, outcomeErr, watchErr, callerErr)
 }

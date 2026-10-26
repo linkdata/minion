@@ -652,7 +652,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.comp
 			settings := config.CodexConfig{}
 			want := "dummy-environment-key,dummy-environment-access-token,absent\n"
 			if configured {
-				settings.APIKey = "dummy-configured-key"
+				settings.APIKey, settings.NativeAPIKey, settings.NativeAccessToken = "dummy-configured-key", "ignored-native-key", "ignored-native-token"
 				want = "dummy-configured-key,absent,absent\n"
 			}
 			if _, err := Run(t.Context(), t.TempDir(), "Review this checkout", false, "", settings); err != nil {
@@ -669,6 +669,127 @@ printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.comp
 				}
 			}
 		})
+	}
+}
+
+func TestRunUsesExplicitNativeCredentialsWithoutAmbientWorkerAuth(t *testing.T) {
+	fake := installFakeCodex(t, `#!/bin/sh
+printf '%s,%s\n' "${CODEX_API_KEY-absent}" "${CODEX_ACCESS_TOKEN-absent}" > "$0.auth"
+printf '%s\n' "$@" > "$0.args"
+cat > "$0.prompt"
+printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}' '{"type":"turn.completed"}'
+`)
+	t.Setenv("CODEX_API_KEY", "stale-ambient-key")
+	t.Setenv("CODEX_ACCESS_TOKEN", "stale-ambient-token")
+	settings := config.CodexConfig{NativeAPIKey: "selected-native-key", NativeAccessToken: "selected-native-token"}
+	result, err := Run(t.Context(), t.TempDir(), "Review this checkout", false, "", settings)
+	if err != nil || result.Answer != "done" {
+		t.Fatalf("explicit native Codex authentication failed: answer=%q error=%v", result.Answer, err)
+	}
+	auth, err := os.ReadFile(fake + ".auth")
+	if err != nil || string(auth) != "selected-native-key,selected-native-token\n" {
+		t.Fatalf("Codex received wrong native credentials: %q, %v", auth, err)
+	}
+	for _, suffix := range []string{".args", ".prompt"} {
+		data, err := os.ReadFile(fake + suffix)
+		if err != nil || strings.Contains(string(data), "selected-native-key") || strings.Contains(string(data), "selected-native-token") {
+			t.Fatalf("native credential reached %s: %v", suffix, err)
+		}
+	}
+}
+
+func TestRunRedactsExplicitNativeCredentials(t *testing.T) {
+	settings := config.CodexConfig{NativeAPIKey: "native-api-secret", NativeAccessToken: "native-access-secret"}
+	for _, test := range []struct {
+		name, output string
+		wantError    bool
+	}{
+		{name: "answer", output: `printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.completed","item":{"type":"agent_message","text":"native-api-secret native-access-secret"}}' '{"type":"turn.completed"}'`},
+		{name: "event error", output: `printf '%s\n' '{"type":"turn.failed","error":{"message":"native-api-secret native-access-secret"}}'`, wantError: true},
+		{name: "stderr", output: `printf '%s\n' 'native-api-secret native-access-secret' >&2; exit 1`, wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			installFakeCodex(t, "#!/bin/sh\ncat >/dev/null\n"+test.output+"\n")
+			result, err := Run(t.Context(), t.TempDir(), "task", false, "", settings)
+			if (err != nil) != test.wantError || strings.Contains(result.Answer, "native-api-secret") || strings.Contains(result.Answer, "native-access-secret") || err != nil && (strings.Contains(err.Error(), "native-api-secret") || strings.Contains(err.Error(), "native-access-secret")) {
+				t.Fatalf("native credential escaped: answer=%q error=%v", result.Answer, err)
+			}
+		})
+	}
+}
+
+func TestRunRedactsAmbientNativeCredentials(t *testing.T) {
+	t.Setenv("CODEX_API_KEY", "ambient-api-secret")
+	t.Setenv("CODEX_ACCESS_TOKEN", "ambient-access-secret")
+	for _, test := range []struct {
+		name, output string
+		wantError    bool
+	}{
+		{name: "answer", output: `printf '%s\n' '{"type":"thread.started","thread_id":"root"}'
+printf '{"type":"item.completed","item":{"type":"agent_message","text":"%s %s"}}\n' "$CODEX_API_KEY" "$CODEX_ACCESS_TOKEN"
+printf '%s\n' '{"type":"turn.completed"}'`},
+		{name: "stderr", output: `printf '%s %s\n' "$CODEX_API_KEY" "$CODEX_ACCESS_TOKEN" >&2
+exit 1`, wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			installFakeCodex(t, "#!/bin/sh\ncat >/dev/null\n"+test.output+"\n")
+			result, err := Run(t.Context(), t.TempDir(), "task", false, "", config.CodexConfig{})
+			if (err != nil) != test.wantError || strings.Contains(result.Answer, "ambient-api-secret") || strings.Contains(result.Answer, "ambient-access-secret") || err != nil && (strings.Contains(err.Error(), "ambient-api-secret") || strings.Contains(err.Error(), "ambient-access-secret")) {
+				t.Fatalf("ambient credential escaped: answer=%q error=%v", result.Answer, err)
+			}
+			if !test.wantError && result.Answer != "[redacted] [redacted]" {
+				t.Fatalf("unexpected redacted answer: %q", result.Answer)
+			}
+			if test.wantError && !strings.Contains(err.Error(), "[redacted]") {
+				t.Fatalf("stderr lost redaction marker: %v", err)
+			}
+		})
+	}
+}
+
+func TestRunDoesNotMixAmbientWithPartialExplicitNativeCredential(t *testing.T) {
+	t.Setenv("CODEX_API_KEY", "stale-ambient-key")
+	t.Setenv("CODEX_ACCESS_TOKEN", "stale-ambient-token")
+	for _, test := range []struct {
+		name     string
+		settings config.CodexConfig
+		want     string
+	}{
+		{name: "API key only", settings: config.CodexConfig{NativeAPIKey: "selected-native-key"}, want: "selected-native-key,absent\n"},
+		{name: "access token only", settings: config.CodexConfig{NativeAccessToken: "selected-native-token"}, want: "absent,selected-native-token\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fake := installFakeCodex(t, `#!/bin/sh
+printf '%s,%s\n' "${CODEX_API_KEY-absent}" "${CODEX_ACCESS_TOKEN-absent}" > "$0.auth"
+cat >/dev/null
+printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}' '{"type":"turn.completed"}'
+`)
+			result, err := Run(t.Context(), t.TempDir(), "task", false, "", test.settings)
+			if err != nil || result.Answer != "done" {
+				t.Fatalf("partial native authentication failed: answer=%q error=%v", result.Answer, err)
+			}
+			auth, err := os.ReadFile(fake + ".auth")
+			if err != nil || string(auth) != test.want {
+				t.Fatalf("ambient credential mixed with explicit native authentication: %q, %v", auth, err)
+			}
+		})
+	}
+}
+
+func TestRunDiscardsTruncatedMultiCredentialDiagnostic(t *testing.T) {
+	settings := config.CodexConfig{NativeAPIKey: "native-api-secret", NativeAccessToken: "native-access-secret"}
+	installFakeCodex(t, "#!/bin/sh\ncat >/dev/null\nprintf '%s' "+aicli.ShellQuote(strings.Repeat("x", bounded.DiagnosticBytes)+"native-api-secret native-access-secret")+" >&2\nexit 1\n")
+	_, err := Run(t.Context(), t.TempDir(), "task", false, "", settings)
+	if err == nil || !strings.Contains(err.Error(), "no further diagnostics") || strings.Contains(err.Error(), "native-api-secret") || strings.Contains(err.Error(), "native-access-secret") {
+		t.Fatalf("truncated multi-credential diagnostic escaped: %v", err)
+	}
+}
+
+func TestRedactCodexTextHidesOverlappingNativeCredentials(t *testing.T) {
+	settings := config.CodexConfig{NativeAPIKey: "shared-secret", NativeAccessToken: "prefix-shared-secret-suffix"}
+	redacted := redactCodexText("prefix-shared-secret-suffix", settings)
+	if redacted != "[redacted]" {
+		t.Fatalf("overlapping credentials left a fragment: %q", redacted)
 	}
 }
 

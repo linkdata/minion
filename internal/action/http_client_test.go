@@ -26,6 +26,34 @@ import (
 	"github.com/linkdata/minion/internal/workroot"
 )
 
+func TestRunHTTPRejectsBaseRunnerCredentialsBeforePull(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(server.Close)
+	for _, test := range []struct {
+		name   string
+		runner Runner
+	}{
+		{"configured Codex key", Runner{Codex: config.CodexConfig{APIKey: "secret"}}},
+		{"native Codex key", Runner{Codex: config.CodexConfig{NativeAPIKey: "secret"}}},
+		{"native Codex token", Runner{Codex: config.CodexConfig{NativeAccessToken: "secret"}}},
+		{"Claude key", Runner{Claude: config.ClaudeConfig{APIKey: "secret"}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := RunHTTP(t.Context(), server.Client(), server.URL, "local", &test.runner)
+			if err == nil || !strings.Contains(err.Error(), "must not retain provider credentials") {
+				t.Fatalf("RunHTTP error = %v, want credential rejection", err)
+			}
+			if got := requests.Load(); got != 0 {
+				t.Fatalf("network requests = %d, want zero", got)
+			}
+		})
+	}
+}
+
 func TestRunHTTPReportsActualObservationsAndRawPaidReceipts(t *testing.T) {
 	for _, test := range []struct {
 		name            string
@@ -309,7 +337,7 @@ func TestHTTPClientRequiresExactAcknowledgementAndNeverRetries(t *testing.T) {
 }
 
 func TestRunHTTPRejectsAssignmentBeforeWatchOrRunner(t *testing.T) {
-	for _, name := range []string{"version", "executor", "HTTP 202", "HTTP 206", "expired", "expired outcome ACK lost", "missing budget", "negative pull wait", "inflated pull wait", "trailing JSON"} {
+	for _, name := range []string{"version", "executor", "unselected credential", "mixed credential", "HTTP 202", "HTTP 206", "expired", "expired outcome ACK lost", "missing budget", "negative pull wait", "inflated pull wait", "trailing JSON"} {
 		t.Run(name, func(t *testing.T) {
 			job := testJob(command.Comment)
 			assignment := httpAssignment{Job: job}
@@ -318,6 +346,11 @@ func TestRunHTTPRejectsAssignmentBeforeWatchOrRunner(t *testing.T) {
 				assignment.Job.Version++
 			case "executor":
 				assignment.Job.Identity.ExecutorID = "foreign"
+			case "unselected credential":
+				assignment.Credentials.ClaudeAPIKey = "private-claude-key"
+			case "mixed credential":
+				assignment.Credentials.CodexAPIKey = "configured-key"
+				assignment.Credentials.CodexNativeAPIKey = "native-key"
 			case "expired", "expired outcome ACK lost":
 				assignment.Job.RuntimeBudget = time.Nanosecond
 			case "missing budget":
@@ -360,6 +393,11 @@ func TestRunHTTPRejectsAssignmentBeforeWatchOrRunner(t *testing.T) {
 			}))
 			defer server.Close()
 			err := RunHTTP(t.Context(), server.Client(), server.URL, job.Identity.ExecutorID, &Runner{runModel: forbidModel(t)})
+			for _, value := range []string{assignment.Credentials.CodexAPIKey, assignment.Credentials.CodexNativeAPIKey, assignment.Credentials.CodexAccessToken, assignment.Credentials.ClaudeAPIKey} {
+				if value != "" && err != nil && strings.Contains(err.Error(), value) {
+					t.Fatal("invalid assignment error exposed a credential")
+				}
+			}
 			if name == "expired" || name == "expired outcome ACK lost" {
 				if !errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, context.DeadlineExceeded) || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) != (name == "expired outcome ACK lost") || requests.Load() != 2 || len(outcomes) != 1 {
 					t.Fatalf("expired known assignment lost its bound no-work outcome: error=%v requests=%d outcomes=%d", err, requests.Load(), len(outcomes))
@@ -369,7 +407,7 @@ func TestRunHTTPRejectsAssignmentBeforeWatchOrRunner(t *testing.T) {
 					t.Fatalf("expired assignment fabricated work or unknown execution: %+v", outcome)
 				}
 			} else if !errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || requests.Load() != 1 || len(outcomes) != 0 {
-				t.Fatalf("invalid assignment ran or became repeatable: error=%v requests=%d", err, requests.Load())
+				t.Fatalf("invalid assignment ran or became repeatable: unknown=%t requests=%d", errors.Is(err, monitor.ErrExecutionOutcomeUnknown), requests.Load())
 			}
 		})
 	}
