@@ -533,6 +533,64 @@ func TestLocalWorkerCloseStopsHTTPSBeforeDelayedChildWait(t *testing.T) {
 	}
 }
 
+func TestLocalWorkerCloseKeepsHTTPSForRepullBetweenJobs(t *testing.T) {
+	gate := filepath.Join(t.TempDir(), "repull")
+	t.Setenv("MINION_HTTPS_REPULL_GATE", gate)
+	w := startHTTPSWorkerTest(t, "paused-repull")
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	if err := w.WaitCapacity(ctx); err != nil {
+		t.Fatal(err)
+	}
+	job := testJob(command.Comment)
+	if result, err := w.Execute(ctx, job, runnerExecutionCheckpoints{}); err != nil || !result.matchesJob(job) {
+		t.Fatalf("first assignment failed: result=%+v error=%v", result, err)
+	}
+	release := func() { _ = os.WriteFile(gate+".release", nil, 0600) }
+	t.Cleanup(release)
+	for {
+		if _, err := os.Stat(gate + ".paused"); err == nil {
+			break
+		} else if !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+		select {
+		case <-time.After(time.Millisecond):
+		case <-ctx.Done():
+			t.Fatal("worker did not pause between assignments")
+		}
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- w.Close() }()
+	for {
+		w.executor.mu.Lock()
+		stopped, changed := w.executor.closed, w.executor.changed
+		w.executor.mu.Unlock()
+		if stopped {
+			break
+		}
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			t.Fatal("worker close did not stop assignments")
+		}
+	}
+	select {
+	case <-w.endpoint.serveDone:
+		t.Fatal("HTTPS stopped before the worker could repull")
+	default:
+	}
+	release()
+	select {
+	case err := <-closed:
+		if err != nil || w.cmd.ProcessState == nil || !w.cmd.ProcessState.Success() || w.stopSent.Load() {
+			t.Fatalf("worker did not receive clean shutdown: error=%v state=%v direct-stop=%v", err, w.cmd.ProcessState, w.stopSent.Load())
+		}
+	case <-ctx.Done():
+		t.Fatal("worker did not finish clean repull shutdown")
+	}
+}
+
 func TestLocalWorkerIgnoresReapedProcessBeforeExitPublication(t *testing.T) {
 	cmd := exec.Command(os.Args[0], "-test.run=^TestLocalWorkerHTTPSHelper$")
 	cmd.Env = append(os.Environ(), "MINION_HTTPS_WORKER_TEST=", "GORACE=atexit_sleep_ms=0")
@@ -790,6 +848,24 @@ func TestLocalWorkerHTTPSHelper(t *testing.T) {
 	}
 	if mode == "known-then-exit" {
 		os.Exit(7)
+	}
+	if mode == "paused-repull" {
+		gate := os.Getenv("MINION_HTTPS_REPULL_GATE")
+		if err := os.WriteFile(gate+".paused", nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+		for {
+			if _, err := os.Stat(gate + ".release"); err == nil {
+				break
+			} else if !errors.Is(err, os.ErrNotExist) {
+				t.Fatal(err)
+			}
+			time.Sleep(time.Millisecond)
+		}
+		if err := RunHTTPLoop(t.Context(), client, access.BaseURL, "local", &Runner{}); err != nil {
+			t.Fatal(err)
+		}
+		return
 	}
 	select {}
 }

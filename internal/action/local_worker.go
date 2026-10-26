@@ -352,14 +352,22 @@ func (w *localWorker) stopDirectChild() {
 	}
 }
 
-// Close drains accepted callbacks while HTTP serves, starts HTTPS shutdown
-// with the first stop deadline, then joins the direct child.
+// Close drains accepted callbacks while HTTP serves, lets the child receive
+// idle shutdown until the first stop deadline, then joins the direct child.
 func (w *localWorker) Close() error {
 	w.reuse.Store(workerRetired)
 	w.closeOnce.Do(func() {
 		started := time.Now()
 		coreErr := w.executor.Close()
 		w.beginStop(started.Add(w.stopGrace)) // Idle fallback; an active transaction keeps its first deadline.
+		// Give a worker between assignments time to receive the canceled next pull.
+		// HTTPS must still close at the stop deadline if child reaping stalls.
+		grace := time.NewTimer(time.Until(w.stopUntil))
+		select {
+		case <-w.exited:
+		case <-grace.C:
+		}
+		grace.Stop()
 		endpointErr := w.endpoint.closeUntil(w.stopUntil)
 		<-w.exited
 		w.stopTimer.Stop()
