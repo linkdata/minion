@@ -604,7 +604,7 @@ func TestHTTPExecutorBusyAndSingleAssignment(t *testing.T) {
 	defer cancel()
 	deadline, _ := ctx.Deadline()
 	f := newHTTPServerTest(t, ctx, testJob(command.Comment), runnerExecutionCheckpoints{}, nil)
-	f.ack(t, "/next", httpPull{Version: ProtocolVersion + 1, ExecutorID: f.job.Identity.ExecutorID}, http.StatusConflict, 0)
+	f.ack(t, "/next", httpPull{Version: ProtocolVersion - 1, ExecutorID: f.job.Identity.ExecutorID}, http.StatusConflict, 0)
 	f.ack(t, "/next", httpPull{Version: ProtocolVersion, ExecutorID: "foreign"}, http.StatusConflict, 0)
 	beforePull := time.Now()
 	if assignment := f.pull(t); assignment.Job.RuntimeBudget > deadline.Sub(beforePull) {
