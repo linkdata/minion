@@ -711,7 +711,8 @@ func TestLocalWorkerHTTPSHelper(t *testing.T) {
 			t.Fatal(err)
 		}
 		if mode == "ignore-idle-cancel" {
-			select {}
+			time.Sleep(30 * time.Second)
+			t.Fatal("idle worker was not stopped")
 		}
 		return
 	}
