@@ -434,6 +434,13 @@ func TestRunHTTPRejectsAssignmentBeforeWatchOrRunner(t *testing.T) {
 				requests.Add(1)
 				switch r.URL.Path {
 				case "/next":
+					if name == "expired" || name == "expired outcome ACK lost" {
+						// A nanosecond budget can fit inside one Windows clock tick.
+						received := time.Now()
+						for time.Since(received) <= assignment.Job.RuntimeBudget {
+							time.Sleep(time.Millisecond)
+						}
+					}
 					w.Header().Set("Content-Type", "application/json")
 					if name == "HTTP 202" {
 						w.WriteHeader(http.StatusAccepted)
