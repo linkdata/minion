@@ -34,6 +34,7 @@ type localWorker struct {
 	stderr       *bounded.Tail
 	waitErr      error
 	killErr      error
+	stopOnce     sync.Once
 	stopUntil    time.Time
 	stopTimer    *time.Timer
 	closeOnce    sync.Once
@@ -332,20 +333,22 @@ func (w *localWorker) awaitHeldPull(ctx context.Context) (waitErr error) {
 // beginStop retires capacity and bounds the direct child to the HTTP stop deadline.
 func (w *localWorker) beginStop(until time.Time) {
 	w.reuse.Store(workerRetired)
-	w.stopUntil = until
-	w.stopTimer = time.AfterFunc(max(time.Until(until), 0), func() {
-		w.childMu.Lock()
-		defer w.childMu.Unlock()
-		select {
-		case <-w.exited:
-			return
-		default:
-		}
-		if err := w.cmd.Process.Kill(); err == nil {
-			w.stopSent.Store(true)
-		} else if !errors.Is(err, os.ErrProcessDone) && !errors.Is(err, syscall.ESRCH) {
-			w.killErr = fmt.Errorf("stop local worker at deadline: %w", err)
-		}
+	w.stopOnce.Do(func() {
+		w.stopUntil = until
+		w.stopTimer = time.AfterFunc(max(time.Until(until), 0), func() {
+			w.childMu.Lock()
+			defer w.childMu.Unlock()
+			select {
+			case <-w.exited:
+				return
+			default:
+			}
+			if err := w.cmd.Process.Kill(); err == nil {
+				w.stopSent.Store(true)
+			} else if !errors.Is(err, os.ErrProcessDone) && !errors.Is(err, syscall.ESRCH) {
+				w.killErr = fmt.Errorf("stop local worker at deadline: %w", err)
+			}
+		})
 	})
 }
 
@@ -357,11 +360,8 @@ func (w *localWorker) Close() error {
 		started := time.Now()
 		coreErr := w.executor.Close()
 		// Close joins the transaction, including its single stop notification.
+		w.beginStop(started.Add(w.stopGrace))
 		until := w.stopUntil
-		if until.IsZero() {
-			w.beginStop(started.Add(w.stopGrace))
-			until = w.stopUntil
-		}
 		// Give an idle child a chance to consume the closed pull before SIGINT.
 		signalUntil := started.Add(w.stopGrace - w.stopGrace/4)
 		if until.Before(signalUntil) {

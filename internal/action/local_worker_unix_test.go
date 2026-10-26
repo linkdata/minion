@@ -17,6 +17,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -700,6 +701,33 @@ func TestLocalWorkerCancellationDoesNotRenewStopDeadline(t *testing.T) {
 	}
 	if _, err := os.Lstat(w.endpoint.SocketPath()); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("stopped worker retained endpoint: %v", err)
+	}
+}
+
+func TestLocalWorkerConcurrentStopKeepsFirstDeadline(t *testing.T) {
+	w := &localWorker{}
+	first := time.Now().Add(time.Hour)
+	second := first.Add(time.Hour)
+	start := make(chan struct{})
+	var calls sync.WaitGroup
+	for _, until := range []time.Time{first, second} {
+		calls.Add(1)
+		go func() {
+			defer calls.Done()
+			<-start
+			w.beginStop(until)
+		}()
+	}
+	close(start)
+	calls.Wait()
+	t.Cleanup(func() { w.stopTimer.Stop() })
+	if !w.stopUntil.Equal(first) && !w.stopUntil.Equal(second) {
+		t.Fatalf("stop deadline was not one of the competing deadlines: %v", w.stopUntil)
+	}
+	timer, until := w.stopTimer, w.stopUntil
+	w.beginStop(time.Now().Add(-time.Second))
+	if w.stopTimer != timer || !w.stopUntil.Equal(until) {
+		t.Fatal("later stop renewed the first deadline or timer")
 	}
 }
 
