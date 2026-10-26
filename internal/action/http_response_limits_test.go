@@ -69,7 +69,7 @@ func TestHTTPControlResponseEncodedBoundary(t *testing.T) {
 						}
 					} else {
 						client := httpClientCheckpoints{transport: transport, control: t.Context(), action: t.Context(), binding: binding}
-						err = client.acknowledge(kind, []byte(`{}`), 1)
+						err = client.acknowledge(client.control, kind, []byte(`{}`), 1)
 					}
 					server.Close()
 					wantCanceled := negative || kind == "cancel"

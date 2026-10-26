@@ -63,14 +63,15 @@ func TestRunHTTPReportsActualObservationsAndRawPaidReceipts(t *testing.T) {
 		malformedStatus bool
 		afterFailure    bool
 		watchPipe       bool
+		measureAge      bool
 	}{
-		{name: "complete"},
+		{name: "complete", measureAge: true},
 		{name: "invalid signed counters", invalidCounters: true},
 		{name: "intentional held watch stop", holdWatch: true},
 		{name: "intentional held watch pipe close", holdWatch: true, watchPipe: true},
 		{name: "lost prepare observation ACK", lostStatus: "prepare"},
-		{name: "malformed prepare observation ACK", lostStatus: "prepare", malformedStatus: true},
-		{name: "paid checkpoint refusal", afterFailure: true},
+		{name: "malformed upload observation ACK", lostStatus: "upload", malformedStatus: true},
+		{name: "paid checkpoint refusal skips upload", afterFailure: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			job := testJob(command.Comment)
@@ -84,6 +85,7 @@ func TestRunHTTPReportsActualObservationsAndRawPaidReceipts(t *testing.T) {
 			var watchAdmitted atomic.Bool
 			sealed := make(chan struct{})
 			events := make(chan string, 8)
+			statusAges := make(chan time.Duration, 2)
 			after := make(chan CallUsage, 1)
 			outcome := make(chan httpOutcome, 1)
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -125,7 +127,14 @@ func TestRunHTTPReportsActualObservationsAndRawPaidReceipts(t *testing.T) {
 					if err := httpDecode(r.Body, httpControlBytes, &value); err != nil || value.Status.Validate(job) != nil || value.Status.WorkerState != "busy" {
 						t.Errorf("invalid observation: %+v error=%v", value, err)
 					}
-					if value.Status.Phase != "prepare" || value.Status.Sequence != 1 {
+					if test.measureAge {
+						statusAges <- value.Status.ProgressAge
+					}
+					want := uint64(1)
+					if value.Status.Phase == "upload" {
+						want = 2
+					}
+					if value.Status.Sequence != want {
 						t.Errorf("status sequence reused transport sequence: %+v", value)
 					}
 					requestSequence = value.Status.Sequence
@@ -198,6 +207,9 @@ func TestRunHTTPReportsActualObservationsAndRawPaidReceipts(t *testing.T) {
 					t.Errorf("worker renewed the accepted budget: %v %t", deadline, ok)
 					return aicli.Result{}, errors.New("renewed native runtime")
 				}
+				if test.measureAge {
+					time.Sleep(20 * time.Millisecond)
+				}
 				return aicli.Result{Answer: "Complete answer", Tokens: tokens, UsageComplete: true}, nil
 			}}
 			err := RunHTTP(t.Context(), &client, server.URL, job.Identity.ExecutorID, runner)
@@ -208,9 +220,21 @@ func TestRunHTTPReportsActualObservationsAndRawPaidReceipts(t *testing.T) {
 			} else if err != nil {
 				t.Fatal(err)
 			}
-			wantEvents := []string{"next", "status/prepare", "before", "after", "outcome"}
+			wantEvents := []string{"next", "status/prepare", "before", "after", "status/upload", "outcome"}
+			if test.invalidCounters || test.afterFailure {
+				wantEvents = []string{"next", "status/prepare", "before", "after", "outcome"}
+			}
 			if test.watchPipe && pipeReads.Load() != 1 {
 				t.Fatalf("held watch did not return the injected teardown pipe error: %d", pipeReads.Load())
+			}
+			if test.measureAge {
+				if len(statusAges) != 2 {
+					t.Fatalf("missing age observations: %d", len(statusAges))
+				}
+				prepareAge, uploadAge := <-statusAges, <-statusAges
+				if uploadAge < 20*time.Millisecond || uploadAge <= prepareAge {
+					t.Fatalf("upload age did not include model time: prepare=%s upload=%s", prepareAge, uploadAge)
+				}
 			}
 			if len(events) != len(wantEvents) || len(after) != 1 || len(outcome) != 1 || next.Load() != 1 || native.Load() != 1 {
 				t.Fatalf("missing transaction observations: events=%d after=%d outcome=%d pulls=%d native=%d", len(events), len(after), len(outcome), next.Load(), native.Load())
@@ -288,7 +312,7 @@ func TestRunHTTPShortStopGraceReservesFinalOutcome(t *testing.T) {
 		if err := RunHTTP(t.Context(), &client, server.URL, job.Identity.ExecutorID, runner); err != nil {
 			t.Fatal(err)
 		}
-		if statuses.Load() != 1 || len(outcomes) != 1 {
+		if statuses.Load() != 2 || len(outcomes) != 1 {
 			t.Fatalf("optional status displaced final result: statuses=%d outcomes=%d", statuses.Load(), len(outcomes))
 		}
 		outcome := <-outcomes
