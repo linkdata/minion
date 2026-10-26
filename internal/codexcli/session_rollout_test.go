@@ -158,6 +158,38 @@ exit 9
 	}
 }
 
+func TestSessionReportsAllNewRolloutsWithoutRootIdentity(t *testing.T) {
+	binary := installFakeCodex(t, `#!/bin/sh
+set -eu
+cat >/dev/null
+dir="$CODEX_HOME/sessions/$(cat "$0.day")"
+mkdir -p "$dir"
+cp "$0.root" "$dir/rollout-root.jsonl"
+cp "$0.child" "$dir/rollout-child.jsonl"
+printf '%s\n' '{"type":"item.completed","item":{"type":"collab_tool_call","tool":"spawn_agent","receiver_thread_ids":["child"]}}'
+exit 9
+`)
+	day := time.Now().Format("2006/01/02")
+	putRolloutTemplate(t, binary, "day", []byte(day))
+	putRolloutTemplate(t, binary, "root", rolloutTemplate(t, "root", "", 10))
+	putRolloutTemplate(t, binary, "child", rolloutTemplate(t, "child", "root", 20))
+	var session Session
+	if _, err := session.Run(t.Context(), t.TempDir(), "partial", false, "", config.CodexConfig{}); err == nil || session.threadID != "" {
+		t.Fatalf("missing root identity was accepted: %v, thread=%q", err, session.threadID)
+	}
+	root := filepath.Join(os.Getenv("CODEX_HOME"), "sessions", filepath.FromSlash(day))
+	err := session.Close()
+	for _, name := range []string{"rollout-root.jsonl", "rollout-child.jsonl"} {
+		path := filepath.Join(root, name)
+		if err == nil || !strings.Contains(err.Error(), path) {
+			t.Fatalf("new rollout lacked recovery path %q: %v", path, err)
+		}
+		if _, statErr := os.Lstat(path); statErr != nil {
+			t.Fatalf("unverified rollout was removed: %s: %v", path, statErr)
+		}
+	}
+}
+
 func TestSessionReportsConflictingThreadRollout(t *testing.T) {
 	for _, resumed := range []bool{false, true} {
 		name := "fresh"
@@ -388,6 +420,30 @@ func TestSessionCloseAcceptsAlreadyMissingRollout(t *testing.T) {
 	}
 	if err := session.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestSessionCloseRetriesMovedRolloutDate(t *testing.T) {
+	session, path := runOwnedRollout(t)
+	date := filepath.Dir(path)
+	moved := date + "-moved"
+	if err := os.Rename(date, moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.Close(); err == nil || !strings.Contains(err.Error(), path) || len(session.ownedRollouts) != 1 {
+		t.Fatalf("moved rollout date lost recovery path or retry state: %v, owned=%v", err, session.ownedRollouts)
+	}
+	if _, err := os.Lstat(filepath.Join(moved, filepath.Base(path))); err != nil {
+		t.Fatalf("moved rollout disappeared: %v", err)
+	}
+	if err := os.Rename(moved, date); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.Close(); err != nil {
+		t.Fatalf("cleanup retry after restoring date: %v", err)
+	}
+	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("retry left rollout: %v", err)
 	}
 }
 

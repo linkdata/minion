@@ -18,6 +18,8 @@ type ownedRollout struct {
 	info os.FileInfo
 }
 
+var errRolloutLeafMissing = errors.New("rollout file is missing")
+
 // Inventory paths in the usage discovery window, including nonregular entries.
 func rolloutPaths(ctx context.Context, home string, started time.Time) (map[string]bool, error) {
 	if err := ctx.Err(); err != nil {
@@ -96,6 +98,9 @@ func rolloutFileInfo(home, path string) (os.FileInfo, error) {
 		}
 	}
 	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, errRolloutLeafMissing
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -267,8 +272,8 @@ func (s *Session) reportUnownedNewRollouts(ctx context.Context, paths map[string
 		s.rolloutDiscoveryErr = errors.Join(s.rolloutDiscoveryErr, fmt.Errorf("codex exec: inspect new rollouts under %q: file limit exceeded", filepath.Join(s.home, "sessions")))
 		return
 	}
-	if rootID == "" && len(children) == 0 && len(spawns) == 0 {
-		// A failed call without an identity cannot distinguish its rollouts from concurrent ones.
+	if rootID == "" {
+		// Child IDs cannot identify the call's root rollout among concurrent ones.
 		for _, path := range newPaths {
 			s.rolloutDiscoveryErr = errors.Join(s.rolloutDiscoveryErr, fmt.Errorf("codex exec: rollout cleanup requires operator recovery at %q: thread identity missing", path))
 		}
@@ -350,7 +355,7 @@ func (s *Session) cleanupRollouts() error {
 	for _, path := range slices.Sorted(maps.Keys(s.ownedRollouts)) {
 		owned := s.ownedRollouts[path]
 		info, err := rolloutFileInfo(s.home, path)
-		if errors.Is(err, os.ErrNotExist) {
+		if errors.Is(err, errRolloutLeafMissing) {
 			delete(s.ownedRollouts, path)
 			continue
 		}
