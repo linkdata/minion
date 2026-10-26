@@ -104,7 +104,7 @@ func TestHostileHTTPFixPathsCannotPublish(t *testing.T) {
 				t.Fatalf("hostile fix pushed a branch: refs=%q error=%v", refs, refErr)
 			}
 			entries, readErr := os.ReadDir(workRoot)
-			if readErr != nil || len(entries) != 1 || entries[0].Name() != "outside" {
+			if readErr != nil || len(entries) != 2 || entries[0].Name() != "outside" || entries[1].Name() != "worker-diagnostics" || !entries[1].IsDir() {
 				t.Fatalf("checkout was not cleaned up: %v, %v", entries, readErr)
 			}
 		})
