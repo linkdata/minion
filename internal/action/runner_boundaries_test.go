@@ -433,19 +433,34 @@ func TestRunnerReportsOwnedAndCriticCleanupFailures(t *testing.T) {
 				return aicli.Result{Answer: "Done."}, nil
 			}}
 			result, err := runner.Run(t.Context(), job)
-			if err != nil {
-				t.Fatal(err)
+			if err != nil || result.Answer != "Done." {
+				t.Fatalf("cleanup changed accepted result: answer=%q error=%v", result.Answer, err)
 			}
 			cleanupFailures := 0
+			recoveryCount := 0
+			var recovery string
 			for _, diagnostic := range result.Diagnostics {
-				if diagnostic.Code == "cleanup_failed" {
+				switch diagnostic.Code {
+				case "cleanup_failed":
 					cleanupFailures++
 					if !strings.Contains(diagnostic.Message, "Execution workspace") {
 						t.Fatalf("cleanup reported before final retry: %+v", diagnostic)
 					}
+				case "cleanup_recovery":
+					recoveryCount++
+					recovery = diagnostic.Message
 				}
 			}
-			if cleanupFailures != 1 || strings.Contains(journal.String(), "critic snapshot cleanup retry scheduled") != critic {
+			entries, err := os.ReadDir(root)
+			if err != nil || len(entries) < 2 {
+				t.Fatalf("failed cleanup did not retain source and context: entries=%v error=%v", entries, err)
+			}
+			for _, entry := range entries {
+				if !strings.Contains(recovery, entry.Name()) || strings.Contains(journal.String(), entry.Name()) {
+					t.Fatalf("retained workspace lacks a private recovery reference: %q diagnostics=%+v journal=%q", entry.Name(), result.Diagnostics, journal.String())
+				}
+			}
+			if cleanupFailures != 1 || recoveryCount != 1 || !strings.Contains(recovery, "under the configured work root") || len(recovery) > maxDiagnosticMessageBytes || validDiagnostics(result.Diagnostics) != nil || strings.Contains(journal.String(), "critic snapshot cleanup retry scheduled") != critic {
 				t.Fatalf("cleanup failure not recorded: %+v", result.Diagnostics)
 			}
 		})

@@ -51,7 +51,7 @@ func TestWorkerDiagnosticsStayInPrivateAttemptRecord(t *testing.T) {
 	}
 	if record.Identity != job.Identity || record.SourceRef != job.Source.Head ||
 		!reflect.DeepEqual(record.WorkerReportedFailure, &httpFailure{Message: "SECRET failure\nFORGED ENTRY", Unsafe: true}) ||
-		!reflect.DeepEqual(record.WorkerReportedDiagnostics, result.Diagnostics) {
+		!reflect.DeepEqual(record.WorkerReportedDiagnostics, result.Diagnostics) || record.CleanupUnverifiedWorkRoot != "" {
 		t.Fatalf("private worker evidence changed: record=%+v", record)
 	}
 	if info, err := os.Stat(path); err != nil || !info.Mode().IsRegular() || runtime.GOOS != "windows" && info.Mode().Perm() != 0600 {
@@ -66,6 +66,34 @@ func TestWorkerDiagnosticsStayInPrivateAttemptRecord(t *testing.T) {
 	result.Diagnostics[1].Message = "different report"
 	if err := owner.retainWorkerDiagnostics(job, result, failure); !errors.Is(err, monitor.ErrTerminalJob) {
 		t.Fatalf("conflicting worker record was accepted: %v", err)
+	}
+}
+
+func TestWorkerDiagnosticsRecordUnverifiedLocalCleanupWithoutWorkerClaims(t *testing.T) {
+	job := testJob(command.Comment)
+	result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head}
+	var journal bytes.Buffer
+	owner := Orchestrator{WorkRoot: t.TempDir(), Logger: log.New(&journal, "", 0)}
+	if err := owner.retainWorkerDiagnostics(job, result, errLocalWorkerCleanupUnverified); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(owner.WorkRoot, "worker-diagnostics", job.Identity.AttemptID+".json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var record retainedWorkerDiagnostics
+	if err := json.Unmarshal(data, &record); err != nil {
+		t.Fatal(err)
+	}
+	root, err := workspace.CanonicalPath(owner.WorkRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Identity != job.Identity || record.SourceRef != job.Source.Head || record.CleanupUnverifiedWorkRoot != root || record.WorkerReportedFailure != nil || len(record.WorkerReportedDiagnostics) != 0 {
+		t.Fatalf("parent recovery scope was lost or forged worker claims: %+v", record)
+	}
+	if !strings.Contains(journal.String(), "cleanup_unverified=true") || !strings.Contains(journal.String(), "private_path=") {
+		t.Fatalf("parent recovery scope was not logged as private evidence: %q", journal.String())
 	}
 }
 

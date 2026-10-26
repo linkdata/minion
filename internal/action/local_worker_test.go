@@ -28,7 +28,7 @@ func startHTTPSWorkerTest(t *testing.T, mode string) *localWorker {
 			return err
 		}
 		cmd.Stdin = bytes.NewReader(input)
-		cmd.Env = append(os.Environ(), "MINION_HTTPS_WORKER_TEST="+mode)
+		cmd.Env = append(os.Environ(), "MINION_HTTPS_WORKER_TEST="+mode, "GORACE=atexit_sleep_ms=0")
 		return nil
 	})
 	if err != nil {
@@ -54,6 +54,9 @@ func TestLocalWorkerRequiresAuthenticatedHeldPull(t *testing.T) {
 	}
 	if err := w.Close(); err != nil || w.cmd.ProcessState == nil || !w.cmd.ProcessState.Success() || w.stopSent.Load() {
 		t.Fatalf("idle worker failed graceful close: error=%v state=%v direct-stop=%v", err, w.cmd.ProcessState, w.stopSent.Load())
+	}
+	if w.stopUntil.IsZero() {
+		t.Fatal("idle close did not set one worker stop deadline")
 	}
 }
 
@@ -134,12 +137,20 @@ func TestLocalWorkerDirectStopAndCrashAreDistinct(t *testing.T) {
 		if err := w.Close(); err != nil || !w.stopSent.Load() || w.cmd.ProcessState == nil {
 			t.Fatalf("direct stop failed: error=%v sent=%v state=%v", err, w.stopSent.Load(), w.cmd.ProcessState)
 		}
+		until := w.stopUntil
+		if until.IsZero() {
+			t.Fatal("unresponsive idle worker was stopped without a deadline")
+		}
+		w.beginStop(until.Add(time.Minute))
+		if !w.stopUntil.Equal(until) {
+			t.Fatalf("idle stop deadline was renewed: first=%v later=%v", until, w.stopUntil)
+		}
 	})
 	t.Run("crash before pull", func(t *testing.T) {
 		w := startHTTPSWorkerTest(t, "crash-before-pull")
 		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 		defer cancel()
-		if err := w.WaitCapacity(ctx); err == nil || w.cmd.ProcessState == nil || w.cmd.ProcessState.Success() {
+		if err := w.WaitCapacity(ctx); err == nil || errors.Is(err, errLocalWorkerCleanupUnverified) || w.cmd.ProcessState == nil || w.cmd.ProcessState.Success() {
 			t.Fatalf("crash became capacity or a clean stop: error=%v state=%v", err, w.cmd.ProcessState)
 		}
 	})
@@ -160,13 +171,105 @@ func TestLocalWorkerCrashAndCleanupFailureRetireCapacity(t *testing.T) {
 			if !result.matchesJob(job) || w.reuse.Load() != workerRetired || w.cmd.ProcessState == nil {
 				t.Fatalf("worker retained capacity: result=%+v error=%v state=%d process=%v", result, err, w.reuse.Load(), w.cmd.ProcessState)
 			}
-			if mode == "crash-after-job" && (!errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || !strings.Contains(err.Error(), "exited")) {
+			if mode == "crash-after-job" && (!errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || !errors.Is(err, errLocalWorkerCleanupUnverified) || !strings.Contains(err.Error(), "exited")) {
 				t.Fatalf("missing outcome became known: %v", err)
 			}
 			if mode == "cleanup-failed" && (err != nil || !w.unclean.Load() || len(result.Diagnostics) != 1 || result.Diagnostics[0].Code != "cleanup_failed") {
 				t.Fatalf("known cleanup failure was lost: result=%+v error=%v unclean=%v", result, err, w.unclean.Load())
 			}
 		})
+	}
+}
+
+func TestLocalWorkerStopKeepsHTTPDeadline(t *testing.T) {
+	for _, stop := range []string{"cancel", "close", "expiry"} {
+		t.Run(stop, func(t *testing.T) {
+			w := startHTTPSWorkerTest(t, "stall-after-job")
+			w.executor.outcomeGrace = 200 * time.Millisecond
+			wait, stopWait := context.WithTimeout(t.Context(), 5*time.Second)
+			defer stopWait()
+			if err := w.WaitCapacity(wait); err != nil {
+				t.Fatal(err)
+			}
+			job := testJob(command.Comment)
+			if stop == "expiry" {
+				job.RuntimeBudget = 1500 * time.Millisecond
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			done := make(chan httpServerTestResult, 1)
+			go func() {
+				result, err := w.Execute(ctx, job, runnerExecutionCheckpoints{})
+				done <- httpServerTestResult{result, err}
+			}()
+			tx := waitLocalWorkerDelivery(t, wait, w)
+			closed := make(chan error, 1)
+			switch stop {
+			case "cancel":
+				cancel()
+			case "close":
+				go func() { closed <- w.Close() }()
+			}
+			select {
+			case <-tx.stop:
+			case <-wait.Done():
+				t.Fatal("HTTP transaction did not start its stop deadline")
+			}
+			until := tx.controlDeadline()
+			if until.IsZero() || !w.stopUntil.Equal(until) || w.reuse.Load() != workerRetired {
+				t.Fatalf("stop did not retire worker on HTTP deadline: HTTP=%v worker=%v reuse=%d", until, w.stopUntil, w.reuse.Load())
+			}
+			w.beginStop(until.Add(time.Minute))
+			if !w.stopUntil.Equal(until) {
+				t.Fatalf("later stop renewed deadline: first=%v later=%v", until, w.stopUntil)
+			}
+			childLimit := time.NewTimer(max(time.Until(until.Add(time.Second)), 0))
+			defer childLimit.Stop()
+			select {
+			case <-w.exited:
+			case <-childLimit.C:
+				t.Fatal("direct child outlived the first stop deadline")
+			}
+			select {
+			case got := <-done:
+				if !got.result.matchesJob(job) || !errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) {
+					t.Fatalf("stopped delivered attempt changed outcome: result=%+v error=%v", got.result, got.err)
+				}
+			case <-wait.Done():
+				t.Fatal("stopped attempt did not finish")
+			}
+			if stop == "close" {
+				select {
+				case <-closed:
+				case <-wait.Done():
+					t.Fatal("service close did not join the direct child")
+				}
+			}
+			if w.cmd.ProcessState == nil || w.reuse.Load() != workerRetired {
+				t.Fatalf("stopped worker regained capacity or left direct child: process=%v reuse=%d", w.cmd.ProcessState, w.reuse.Load())
+			}
+		})
+	}
+}
+
+func waitLocalWorkerDelivery(t *testing.T, ctx context.Context, w *localWorker) *httpTransaction {
+	t.Helper()
+	ticker := time.NewTicker(2 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if tx := w.executor.transaction(); tx != nil {
+			tx.mu.Lock()
+			delivered := tx.delivered
+			tx.mu.Unlock()
+			if delivered {
+				return tx
+			}
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("local worker did not receive its assignment")
+		case <-ticker.C:
+		}
 	}
 }
 
@@ -282,6 +385,86 @@ func TestLocalWorkerDrainsPaidCallbackBeforeChildStop(t *testing.T) {
 				t.Fatalf("stop retained child or capacity: process=%v state=%d", w.cmd.ProcessState, w.reuse.Load())
 			}
 		})
+	}
+}
+
+func TestLocalWorkerShortStopRetiresWhileCallbackDrains(t *testing.T) {
+	w := startHTTPSWorkerTest(t, "drain")
+	w.executor.outcomeGrace = 100 * time.Millisecond
+	wait, stopWait := context.WithTimeout(t.Context(), 5*time.Second)
+	defer stopWait()
+	if err := w.WaitCapacity(wait); err != nil {
+		t.Fatal(err)
+	}
+	entered, release := make(chan struct{}), make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+	job := testJob(command.Comment)
+	done := make(chan httpServerTestResult, 1)
+	go func() {
+		result, err := w.Execute(t.Context(), job, runnerExecutionCheckpoints{after: func(CallCheckpoint) error {
+			close(entered)
+			<-release
+			return nil
+		}})
+		done <- httpServerTestResult{result, err}
+	}()
+	select {
+	case <-entered:
+	case <-wait.Done():
+		t.Fatal("direct child did not enter paid callback")
+	}
+	tx := w.executor.transaction()
+	if tx == nil {
+		t.Fatal("paid callback lost its transaction")
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- w.Close() }()
+	select {
+	case <-tx.stop:
+	case <-wait.Done():
+		t.Fatal("service close did not start HTTP stop")
+	}
+	until := tx.controlDeadline()
+	if until.IsZero() || !w.stopUntil.Equal(until) || w.reuse.Load() != workerRetired {
+		t.Fatalf("blocked callback kept capacity or renewed deadline: HTTP=%v worker=%v reuse=%d", until, w.stopUntil, w.reuse.Load())
+	}
+	childLimit := time.NewTimer(max(time.Until(until.Add(time.Second)), 0))
+	defer childLimit.Stop()
+	select {
+	case <-w.exited:
+	case <-childLimit.C:
+		t.Fatal("direct child outlived short HTTP stop deadline")
+	}
+	if w.cmd.ProcessState == nil || w.reuse.Load() != workerRetired {
+		t.Fatalf("unresolved callback regained capacity or kept child: process=%v reuse=%d", w.cmd.ProcessState, w.reuse.Load())
+	}
+	select {
+	case err := <-closed:
+		t.Fatalf("Close returned before entered callback drained: %v", err)
+	default:
+	}
+	if err := w.endpoint.checkAlive(); err != nil {
+		t.Fatalf("endpoint stopped before entered callback drained: %v", err)
+	}
+	close(release)
+	select {
+	case got := <-done:
+		if !got.result.matchesJob(job) || !errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) {
+			t.Fatalf("stopped callback changed unknown outcome: result=%+v error=%v", got.result, got.err)
+		}
+	case <-wait.Done():
+		t.Fatal("entered callback did not drain")
+	}
+	select {
+	case <-closed:
+	case <-wait.Done():
+		t.Fatal("Close did not join callback and endpoint")
 	}
 }
 
@@ -464,6 +647,10 @@ func TestLocalWorkerHTTPSHelper(t *testing.T) {
 	response.Body.Close()
 	if mode == "crash-after-job" {
 		os.Exit(7)
+	}
+	if mode == "stall-after-job" {
+		time.Sleep(30 * time.Second)
+		t.Fatal("stalled direct worker was not stopped")
 	}
 	result := Result{Version: ProtocolVersion, Identity: assignment.Job.Identity, SourceRef: assignment.Job.Source.Head, Answer: "known"}
 	sequence := uint64(1)

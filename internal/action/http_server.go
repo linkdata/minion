@@ -53,6 +53,7 @@ type httpTransaction struct {
 	stopContext context.Context
 	stopCancel  context.CancelFunc
 	stopUntil   time.Time
+	onStop      func(time.Time)
 
 	ready              bool
 	delivered          bool
@@ -76,8 +77,10 @@ type httpTransaction struct {
 }
 
 type httpExecutionState struct {
-	admitted bool
-	outcome  bool
+	admitted  bool
+	delivered bool
+	outcome   bool
+	onStop    func(time.Time)
 }
 
 func NewHTTPExecutor(executorID string) (*HTTPExecutor, error) {
@@ -139,6 +142,9 @@ func (e *HTTPExecutor) execute(ctx context.Context, stopBudget time.Duration, jo
 	actionCtx, cancel := context.WithCancel(budgetCtx)
 	tx := &httpTransaction{job: job, started: started, binding: httpJobBinding(job), sink: sink, ctx: actionCtx, budget: budgetCtx, cancel: cancel, stopBudget: cancelBudget, stopGrace: stopBudget,
 		stop: make(chan struct{}), done: make(chan struct{}), finished: make(chan struct{})}
+	if state != nil {
+		tx.onStop = state.onStop
+	}
 	e.mu.Lock()
 	if e.closed || e.unavailable || e.active != nil {
 		e.mu.Unlock()
@@ -168,6 +174,9 @@ func (e *HTTPExecutor) execute(ctx context.Context, stopBudget time.Duration, jo
 		}
 		tx.mu.Lock()
 		stopCancel := tx.stopCancel
+		if state != nil {
+			state.delivered = tx.delivered
+		}
 		if tx.outcome {
 			// A received outcome resolves watch ambiguity, even if its own receipt ACK was lost.
 			if state != nil {
@@ -588,6 +597,9 @@ func (tx *httpTransaction) startStopLocked(explicitClose bool) {
 	tx.stopContext, tx.stopCancel = context.WithTimeout(context.Background(), tx.stopGrace)
 	tx.stopUntil, _ = tx.stopContext.Deadline()
 	tx.stopping = true
+	if tx.onStop != nil {
+		tx.onStop(tx.stopUntil)
+	}
 	close(tx.stop)
 }
 
