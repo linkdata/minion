@@ -62,10 +62,10 @@ func TestSelectedWorkerStartupDirectChild(t *testing.T) {
 				}, Main: RoleSettings{Provider: "codex", Model: "main-1", Effort: "high"}},
 				WorkRoot: filepath.Join(base, "work"),
 			}
-			var inputErr error
-			worker, err := startLocalWorker(unixTestDirectory(t), "local", os.Args[0], []string{"-test.run=^TestSelectedWorkerStartupDirectChildHelper$"}, 20*time.Second, func(cmd *exec.Cmd, socket string) {
+			worker, err := startLocalWorker(unixTestDirectory(t), "local", os.Args[0], []string{"-test.run=^TestSelectedWorkerStartupDirectChildHelper$"}, 20*time.Second, func(cmd *exec.Cmd, socket string) error {
 				startup.SocketPath = socket
 				var input []byte
+				var inputErr error
 				switch {
 				case tc.invalidInput:
 					input = []byte("{")
@@ -75,17 +75,13 @@ func TestSelectedWorkerStartupDirectChild(t *testing.T) {
 				default:
 					input, inputErr = EncodeWorkerStartup(startup)
 				}
-				if inputErr == nil {
-					cmd.Stdin = bytes.NewReader(input)
+				if inputErr != nil {
+					return inputErr
 				}
+				cmd.Stdin = bytes.NewReader(input)
 				cmd.Env = append(os.Environ(), "MINION_STARTUP_CHILD=1", "MINION_STARTUP_BASE="+base)
+				return nil
 			})
-			if inputErr != nil {
-				if worker != nil {
-					_ = worker.Close()
-				}
-				t.Fatal(inputErr)
-			}
 			if err != nil {
 				t.Fatal(err)
 			}

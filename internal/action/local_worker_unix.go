@@ -46,10 +46,10 @@ const (
 	workerRetired
 )
 
-// startLocalWorker owns the direct child's context and command. configure sets
-// environment and stdout; stderr is captured for a safe startup diagnostic.
+// startLocalWorker owns the direct child's context and command. configure
+// prepares the child command; stderr is captured for a safe startup diagnostic.
 // Job cancellation is handled by Execute.
-func startLocalWorker(runtimeDir, executorID, path string, args []string, readyTimeout time.Duration, configure func(*exec.Cmd, string)) (*localWorker, error) {
+func startLocalWorker(runtimeDir, executorID, path string, args []string, readyTimeout time.Duration, configure func(*exec.Cmd, string) error) (*localWorker, error) {
 	if path == "" {
 		return nil, errors.New("local worker command path is required")
 	}
@@ -68,7 +68,10 @@ func startLocalWorker(runtimeDir, executorID, path string, args []string, readyT
 	cmd := exec.CommandContext(ctx, path, args...)
 	commandCancel := cmd.Cancel
 	if configure != nil {
-		configure(cmd, endpoint.SocketPath())
+		if err := configure(cmd, endpoint.SocketPath()); err != nil {
+			cancel()
+			return nil, errors.Join(fmt.Errorf("configure local worker: %w", err), endpoint.Close())
+		}
 	}
 	stderr := &bounded.Tail{}
 	cmd.Stderr = stderr
@@ -106,30 +109,30 @@ func startLocalWorker(runtimeDir, executorID, path string, args []string, readyT
 }
 
 // AttachLocalWorker connects one selected direct child without changing the
-// default service mode. The caller owns the returned close function.
-func (e *Orchestrator) AttachLocalWorker(ctx context.Context, cfg config.Config, runtimeDir, path string, args []string, readyTimeout time.Duration, configure func(*exec.Cmd, string, WorkerSelection)) (WorkerSelection, func() error, error) {
+// default service mode. The caller watches its exit and owns the close function.
+func (e *Orchestrator) AttachLocalWorker(ctx context.Context, cfg config.Config, runtimeDir, path string, args []string, readyTimeout time.Duration, configure func(*exec.Cmd, string, WorkerSelection) error) (WorkerSelection, <-chan struct{}, func() error, error) {
 	if e.Executor != nil {
-		return WorkerSelection{}, nil, errors.New("orchestrator already has an executor")
+		return WorkerSelection{}, nil, nil, errors.New("orchestrator already has an executor")
 	}
 	if configure == nil {
-		return WorkerSelection{}, nil, errors.New("local worker startup configuration is required")
+		return WorkerSelection{}, nil, nil, errors.New("local worker startup configuration is required")
 	}
 	selected, err := e.WorkerSelection(cfg)
 	if err != nil {
-		return WorkerSelection{}, nil, err
+		return WorkerSelection{}, nil, nil, err
 	}
-	w, err := startLocalWorker(runtimeDir, "local", path, args, readyTimeout, func(cmd *exec.Cmd, socket string) {
-		configure(cmd, socket, selected)
+	w, err := startLocalWorker(runtimeDir, "local", path, args, readyTimeout, func(cmd *exec.Cmd, socket string) error {
+		return configure(cmd, socket, selected)
 	})
 	if err != nil {
-		return WorkerSelection{}, nil, err
+		return WorkerSelection{}, nil, nil, redactActionError(err, e.Runner.Codex.APIKey, e.Runner.Claude.APIKey)
 	}
 	if err := w.WaitCapacity(ctx); err != nil {
 		// WaitCapacity closes the child and endpoint on failure.
-		return WorkerSelection{}, nil, redactActionError(err, e.Runner.Codex.APIKey, e.Runner.Claude.APIKey)
+		return WorkerSelection{}, nil, nil, redactActionError(err, e.Runner.Codex.APIKey, e.Runner.Claude.APIKey)
 	}
 	e.Executor = w
-	return selected, w.Close, nil
+	return selected, w.exited, w.Close, nil
 }
 
 func (w *localWorker) Execute(ctx context.Context, job Job, sink Checkpoints) (Result, error) {
@@ -178,7 +181,11 @@ func (w *localWorker) Execute(ctx context.Context, job Job, sink Checkpoints) (R
 func (w *localWorker) WaitCapacity(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, w.readyTimeout)
 	defer cancel()
-	return w.awaitReusable(ctx)
+	err := w.awaitReusable(ctx)
+	if err != nil && w.reuse.Load() == workerRetired {
+		return fmt.Errorf("%w: %w", ErrLocalWorkerUnavailable, err)
+	}
+	return err
 }
 
 func (w *localWorker) awaitReusable(ctx context.Context) (reuseErr error) {

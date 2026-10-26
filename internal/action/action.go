@@ -25,6 +25,9 @@ const maxOutputBytes = 58 << 10
 
 var errGitHubContextTooLarge = errors.New("GitHub context exceeds configured byte limit")
 
+// ErrLocalWorkerUnavailable means the selected direct worker cannot accept another Job.
+var ErrLocalWorkerUnavailable = errors.New("selected local worker unavailable")
+
 var modelLineBreaks = strings.NewReplacer(
 	"\r\n", "\n", "\r", "\n", "\v", "\n", "\f", "\n",
 	"\x1c", "\n", "\x1d", "\n", "\x1e", "\n",
