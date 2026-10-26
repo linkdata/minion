@@ -1,11 +1,15 @@
 package action
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
 	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -29,7 +33,11 @@ func testLocalEndpoint(t *testing.T) (*HTTPExecutor, *LocalEndpoint) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = endpoint.Close() })
+	t.Cleanup(func() {
+		if err := endpoint.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 	return core, endpoint
 }
 
@@ -103,6 +111,54 @@ func TestLocalEndpointPinsOriginCertificateAndAuthorizesBeforeBody(t *testing.T)
 	defer spoofClient.CloseIdleConnections()
 	if response, err := testLocalPost(t, spoofClient, spoof.URL, []byte("{}")); err == nil || response != nil || spoofedRequests.Load() != 0 {
 		t.Fatalf("replacement listener received authenticated HTTP: response=%v error=%v requests=%d", response, err, spoofedRequests.Load())
+	}
+}
+
+func TestLocalEndpointUnauthorizedUnfinishedBodyDoesNotHoldShutdown(t *testing.T) {
+	_, endpoint := testLocalEndpoint(t)
+	access := endpoint.Access()
+	u, err := url.Parse(access.BaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certificate, err := x509.ParseCertificate(access.Certificate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots := x509.NewCertPool()
+	roots.AddCert(certificate)
+	connection, err := tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, "tcp", u.Host, &tls.Config{
+		MinVersion: tls.VersionTLS13, RootCAs: roots, ServerName: "127.0.0.1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	if err := connection.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fmt.Fprintf(connection, "POST /next HTTP/1.1\r\nHost: %s\r\nAuthorization: Bearer wrong\r\nContent-Type: application/json\r\nContent-Length: 5\r\n\r\n{", u.Host); err != nil {
+		t.Fatal(err)
+	}
+	response, err := http.ReadResponse(bufio.NewReader(connection), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unfinished unauthorized body: status=%d", response.StatusCode)
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- endpoint.Close() }()
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		connection.Close()
+		<-closed
+		t.Fatal("unfinished unauthorized body held endpoint shutdown")
 	}
 }
 

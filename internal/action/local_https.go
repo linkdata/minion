@@ -107,8 +107,9 @@ func ListenLocalExecution(executor *HTTPExecutor) (*LocalEndpoint, error) {
 			values := r.Header.Values("Authorization")
 			want := "Bearer " + access.Token
 			if len(values) != 1 || len(values[0]) != len(want) || subtle.ConstantTimeCompare([]byte(values[0]), []byte(want)) != 1 {
-				// Reject from headers: a foreign local process must not reach protocol decoding.
+				// Reject from headers: a foreign local process must not reach protocol decoding or hold body drain.
 				w.Header().Set("Connection", "close")
+				_ = http.NewResponseController(w).SetReadDeadline(time.Now())
 				w.WriteHeader(http.StatusUnauthorized)
 				return
 			}
