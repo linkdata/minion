@@ -23,7 +23,7 @@ func runSelectedLocalWorker(ctx context.Context, input io.Reader, call modelCall
 	if err := runner.PreflightSelection(ctx); err != nil {
 		return err
 	}
-	// The startup copy authenticates preflight only; each assignment carries fresh credentials.
+	// Startup provider credentials are only needed for preflight; assignments carry fresh credentials.
 	startup.clearCredentials(runner)
 	client, err := NewLocalExecutionClient(startup.Endpoint)
 	if err != nil {

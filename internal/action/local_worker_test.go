@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -393,6 +394,21 @@ func TestLocalWorkerStartupFailureClosesListener(t *testing.T) {
 	if connection, err := net.DialTimeout("tcp4", address, 100*time.Millisecond); err == nil {
 		connection.Close()
 		t.Fatal("failed startup retained its listener")
+	}
+	address = ""
+	missingExecutable := filepath.Join(t.TempDir(), "missing-minion-executable")
+	if worker, err := startLocalWorker("local", missingExecutable, nil, time.Second, WorkerCredentials{}, func(_ *exec.Cmd, access LocalEndpointAccess) error {
+		address = strings.TrimPrefix(access.BaseURL, "https://")
+		return nil
+	}); worker != nil || err == nil {
+		t.Fatalf("missing executable continued: worker=%v error=%v", worker, err)
+	}
+	if address == "" {
+		t.Fatal("missing executable did not reach worker start")
+	}
+	if connection, err := net.DialTimeout("tcp4", address, 100*time.Millisecond); err == nil {
+		connection.Close()
+		t.Fatal("failed child start retained its listener")
 	}
 }
 
