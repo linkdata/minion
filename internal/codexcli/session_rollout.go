@@ -224,7 +224,7 @@ func (s *Session) admitRollouts(ctx context.Context, rootID string, started time
 	}
 }
 
-func (s *Session) reportUnownedNewRollouts(ctx context.Context, paths map[string]bool, rootID string, children []string, spawns map[string]bool) {
+func (s *Session) reportUnownedNewRollouts(ctx context.Context, paths map[string]bool, rootID string, children []string, spawns map[string]bool, conflictingID string) {
 	if err := ctx.Err(); err != nil {
 		s.rolloutScanError(err)
 		return
@@ -252,6 +252,9 @@ func (s *Session) reportUnownedNewRollouts(ctx context.Context, paths map[string
 	linked := map[string]bool{}
 	if rootID != "" {
 		linked[rootID] = true
+	}
+	if conflictingID != "" {
+		linked[conflictingID] = true
 	}
 	for _, id := range children {
 		linked[id] = true

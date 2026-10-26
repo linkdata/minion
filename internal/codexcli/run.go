@@ -224,7 +224,7 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 		if rootID != "" {
 			s.admitRollouts(ctx, rootID, started, newPaths)
 		}
-		s.reportUnownedNewRollouts(ctx, newPaths, rootID, output.children, output.spawns)
+		s.reportUnownedNewRollouts(ctx, newPaths, rootID, output.children, output.spawns, output.conflictingID)
 	}
 	defer func() {
 		if childError != nil {
@@ -371,6 +371,7 @@ type jsonlOutput struct {
 	cancel          context.CancelFunc
 	threadID        string
 	expectedID      string
+	conflictingID   string
 	tokens          *usage.Tokens
 	children        []string
 	observationOnly map[string]bool
@@ -446,12 +447,14 @@ func (o *jsonlOutput) accept(event codexEvent) {
 	switch event.Type {
 	case "thread.started":
 		if o.expectedID != "" && event.ThreadID != "" && event.ThreadID != o.expectedID {
+			o.conflictingID = event.ThreadID
 			o.stop(errors.New("Codex resumed a different thread")) //nolint:staticcheck // -- Codex is a proper noun.
 			return
 		}
 		if o.threadID == "" {
 			o.threadID = event.ThreadID
 		} else if event.ThreadID != "" && event.ThreadID != o.threadID {
+			o.conflictingID = event.ThreadID
 			o.stop(errors.New("Codex thread identity changed within one call")) //nolint:staticcheck // -- Codex is a proper noun.
 		}
 	case "turn.started":

@@ -50,14 +50,17 @@ printf '{"type":"thread.started","thread_id":"%s"}\n' "$id"
 printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}' '{"type":"turn.completed"}'
 `)
 	home := os.Getenv("CODEX_HOME")
-	day := time.Now().Format("2006/01/02")
-	putRolloutTemplate(t, binary, "day", []byte(day))
+	foreign := writeUsageRollout(t, home, "foreign", "", completedUsageTurn("foreign", "foreign-turn", "foreign-response", 99)...)
+	day, err := filepath.Rel(filepath.Join(home, "sessions"), filepath.Dir(foreign))
+	if err != nil {
+		t.Fatal(err)
+	}
+	putRolloutTemplate(t, binary, "day", []byte(filepath.ToSlash(day)))
 	putRolloutTemplate(t, binary, "root", rolloutTemplate(t, "root", "", 10))
 	putRolloutTemplate(t, binary, "child", rolloutTemplate(t, "child", "root", 20))
 	putRolloutTemplate(t, binary, "solo", []byte(`{"type":"session_meta","payload":{"id":"solo","session_id":"root","source":"exec"}}`+"\n"+strings.Join(completedUsageTurn("solo", "solo-turn", "solo-response", 30), "\n")+"\n"))
 	putRolloutTemplate(t, binary, "fresh", rolloutTemplate(t, "fresh", "", 40))
 	putRolloutTemplate(t, binary, "resume", []byte(strings.Join(completedUsageTurn("root", "resume-turn", "resume-response", 5), "\n")+"\n"))
-	foreign := writeUsageRollout(t, home, "foreign", "", completedUsageTurn("foreign", "foreign-turn", "foreign-response", 99)...)
 	preexisting := filepath.Join(home, "sessions", filepath.FromSlash(day), "older-root.jsonl")
 	if err := os.WriteFile(preexisting, rolloutTemplate(t, "root", "", 100), 0600); err != nil {
 		t.Fatal(err)
@@ -140,6 +143,64 @@ exit 9
 			_, err = os.Lstat(path)
 			if identified && !errors.Is(err, os.ErrNotExist) || !identified && err != nil {
 				t.Fatalf("partial rollout cleanup: identified=%t, err=%v", identified, err)
+			}
+		})
+	}
+}
+
+func TestSessionReportsConflictingThreadRollout(t *testing.T) {
+	for _, resumed := range []bool{false, true} {
+		name := "fresh"
+		if resumed {
+			name = "resume"
+		}
+		t.Run(name, func(t *testing.T) {
+			binary := installFakeCodex(t, `#!/bin/sh
+set -eu
+cat >/dev/null
+dir="$CODEX_HOME/sessions/$(cat "$0.day")"
+mkdir -p "$dir"
+if [ -f "$0.resume" ] && [ ! -f "$0.first" ]; then
+  : > "$0.first"
+  cp "$0.root" "$dir/rollout-root.jsonl"
+  printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}' '{"type":"turn.completed"}'
+  exit 0
+fi
+if [ ! -f "$0.resume" ]; then cp "$0.root" "$dir/rollout-root.jsonl"; fi
+cp "$0.other" "$dir/rollout-other.jsonl"
+if [ -f "$0.resume" ]; then
+  printf '%s\n' '{"type":"thread.started","thread_id":"other"}'
+else
+  printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"thread.started","thread_id":"other"}'
+fi
+`)
+			day := time.Now().Format("2006/01/02")
+			putRolloutTemplate(t, binary, "day", []byte(day))
+			putRolloutTemplate(t, binary, "root", rolloutTemplate(t, "root", "", 10))
+			putRolloutTemplate(t, binary, "other", rolloutTemplate(t, "other", "", 20))
+			if resumed {
+				putRolloutTemplate(t, binary, "resume", nil)
+			}
+			var session Session
+			source := t.TempDir()
+			if resumed {
+				if _, err := session.Run(t.Context(), source, "first", false, "", config.CodexConfig{}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := session.Run(t.Context(), source, "conflict", false, "", config.CodexConfig{}); err == nil {
+				t.Fatal("conflicting thread identity was accepted")
+			}
+			root := filepath.Join(os.Getenv("CODEX_HOME"), "sessions", filepath.FromSlash(day))
+			other := filepath.Join(root, "rollout-other.jsonl")
+			if err := session.Close(); err == nil || !strings.Contains(err.Error(), other) {
+				t.Fatalf("conflicting rollout lacked recovery path: %v", err)
+			}
+			if _, err := os.Lstat(other); err != nil {
+				t.Fatalf("conflicting rollout was removed: %v", err)
+			}
+			if _, err := os.Lstat(filepath.Join(root, "rollout-root.jsonl")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("verified root rollout remains: %v", err)
 			}
 		})
 	}
