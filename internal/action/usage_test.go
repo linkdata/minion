@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
@@ -19,6 +20,36 @@ import (
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/usage"
 )
+
+func TestSelectedUsageKeepsOriginalAttemptStartAcrossRecovery(t *testing.T) {
+	store := &usage.Store{Dir: filepath.Join(t.TempDir(), "usage")}
+	tracked := attemptFixture(&Orchestrator{Usage: store})
+	job := usageJob()
+	job.AttemptID = tracked.attemptID
+	job.AcceptedAt = time.Now().UTC().Add(-48 * time.Hour).Truncate(time.Second)
+	for range 2 {
+		finish, err := tracked.trackUsage(job)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := finish(errors.New("preparation failed before a model call")); err == nil {
+			t.Fatal("missing preparation error")
+		}
+	}
+	records, err := usage.ReadAll(store.Dir)
+	if err != nil || len(records) != 1 || !records[0].StartedAt.Equal(job.AcceptedAt) || records[0].ID != job.AttemptID {
+		t.Fatalf("recovery moved the accepted attempt to a new reporting day: records=%+v error=%v", records, err)
+	}
+	legacy := usageJob()
+	legacy.AcceptedAt = job.AcceptedAt
+	other := attemptFixture(&Orchestrator{Usage: &usage.Store{Dir: filepath.Join(t.TempDir(), "legacy")}})
+	if _, err := other.trackUsage(legacy); err != nil {
+		t.Fatal(err)
+	}
+	if !other.usageCheckpoint.record.StartedAt.After(legacy.AcceptedAt.Add(time.Hour)) {
+		t.Fatalf("legacy attempt reused original acceptance time: started=%s", other.usageCheckpoint.record.StartedAt)
+	}
+}
 
 func TestUsageDoesNotCountCanceledDispatch(t *testing.T) {
 	store := &usage.Store{Dir: filepath.Join(t.TempDir(), "usage")}

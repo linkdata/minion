@@ -40,6 +40,10 @@ func run() int {
 }
 
 func runWithGitCheck(checkGit func(context.Context, string) error) int {
+	return runWithGitCheckAt(checkGit, time.Now)
+}
+
+func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() time.Time) int {
 	configPath := flag.String("config", "config.local.json", "path to JSON configuration")
 	mode := flag.String("mode", "in-process", "service mode: in-process, orchestrate, or execute")
 	loop := flag.Bool("loop", false, "poll continuously; default is one cron-friendly pass")
@@ -124,7 +128,7 @@ func runWithGitCheck(checkGit func(context.Context, string) error) int {
 			logger.Printf("close state: %v", err)
 		}
 	}()
-	terminalRecovery := !*check && terminalRecoveryPending(store)
+	terminalRecovery := !*check && terminalRecoveryPendingAt(store, now())
 	preflight := func() bool {
 		if err := checkWorkRoot(); err != nil {
 			logger.Printf("work root: %v", err)
@@ -140,8 +144,12 @@ func runWithGitCheck(checkGit func(context.Context, string) error) int {
 		}
 		return true
 	}
-	if !terminalRecovery && !preflight() {
-		return 1
+	failedPreflight := !terminalRecovery && !preflight()
+	if failedPreflight {
+		if *check || !terminalRecoveryPendingAt(store, now()) {
+			return 1
+		}
+		terminalRecovery = true
 	}
 	token, err := githubToken(ctx)
 	if err != nil {
@@ -169,7 +177,10 @@ func runWithGitCheck(checkGit func(context.Context, string) error) int {
 
 	watcher := &monitor.Monitor{Config: cfg, ConfigPath: loadedPath, GitHub: client, Logger: logger}
 	if terminalRecovery {
-		code := recoverTerminalService(ctx, watcher, store, *loop, logger)
+		code := recoverTerminalService(ctx, watcher, store, *loop && !failedPreflight, logger)
+		if failedPreflight {
+			return 1
+		}
 		if code != 0 || !*loop || ctx.Err() != nil {
 			return code
 		}

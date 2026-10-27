@@ -46,11 +46,15 @@ func runOrchestrateMode(ctx context.Context, owner *action.Orchestrator, watcher
 }
 
 func terminalRecoveryPending(store *state.Store) bool {
+	return terminalRecoveryPendingAt(store, time.Now())
+}
+
+func terminalRecoveryPendingAt(store *state.Store, now time.Time) bool {
 	accepted := store.Data.Accepted
 	if accepted == nil {
 		return false
 	}
-	return accepted.Assigned || accepted.Terminal || store.Data.JobFailures[accepted.JobID].ModelCallStarted || !time.Now().Before(accepted.Deadline)
+	return accepted.Assigned || accepted.Terminal || store.Data.JobFailures[accepted.JobID].ModelCallStarted || !now.Before(accepted.Deadline)
 }
 
 func recoverTerminalService(ctx context.Context, watcher *monitor.Monitor, store *state.Store, loop bool, logger *log.Logger) int {

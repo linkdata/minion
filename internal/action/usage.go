@@ -49,11 +49,15 @@ func (c *usageCheckpoint) afterCall(call CallUsage) error {
 
 // trackUsage adds accounting checkpoints to this attempt-scoped receiver.
 func (e *Orchestrator) trackUsage(job monitor.Job) (func(error) error, error) {
+	startedAt := time.Now().UTC()
+	if job.AttemptID != "" && !job.AcceptedAt.IsZero() {
+		startedAt = job.AcceptedAt.UTC()
+	}
 	checkpoint := &usageCheckpoint{logf: e.logf, record: usage.Record{
 		ID: e.attemptID, JobID: job.ID, Repo: job.Repository.Name,
 		User: job.Source.Author.Login, Action: cmp.Or(job.Command.Name, string(job.Command.Action)), Number: job.Number,
 		SourceURL: sourceURL(job), Provider: e.mainProvider(), CriticProvider: e.Adversarial,
-		StartedAt: time.Now().UTC(), Status: "running", UsageComplete: true,
+		StartedAt: startedAt, Status: "running", UsageComplete: true,
 	}}
 	record := &checkpoint.record
 	main := e.roleSettings(record.Provider, nil)
