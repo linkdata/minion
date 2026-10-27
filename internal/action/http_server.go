@@ -249,7 +249,12 @@ func (e *HTTPExecutor) execute(ctx context.Context, stopBudget time.Duration, jo
 		return result, nil
 	}
 	if !delivered {
-		return result, errors.Join(httpExecutionContextError(actionCtx), transportErr)
+		// The budget stop watcher can fire before cancellation reaches actionCtx.
+		err := errors.Join(httpExecutionContextError(actionCtx), httpExecutionContextError(budgetCtx), transportErr)
+		if err == nil {
+			err = fmt.Errorf("%w: stopped before HTTP assignment", monitor.ErrRequestTransport)
+		}
+		return result, err
 	}
 	select {
 	case <-tx.done:

@@ -305,6 +305,15 @@ func TestHTTPExecutorBeforeDeliveryFailureSendsNoAssignment(t *testing.T) {
 	}
 }
 
+func TestHTTPExecutorStopBeforeAssignmentCannotSucceed(t *testing.T) {
+	f := newHTTPServerTest(t, t.Context(), testJob(command.Comment), runnerExecutionCheckpoints{}, nil)
+	f.tx.forceStop()
+	got := f.result(t)
+	if !errors.Is(got.err, monitor.ErrRequestTransport) || f.tx.delivered {
+		t.Fatalf("stopped before assignment reported success: error=%v delivered=%t", got.err, f.tx.delivered)
+	}
+}
+
 func TestHTTPExecutorCancellationDrainsBeforeDelivery(t *testing.T) {
 	for _, test := range []struct {
 		name    string
