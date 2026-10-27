@@ -859,7 +859,9 @@ func TestSelectedControlRetiresMissingTerminalSourceWithoutLosingFix(t *testing.
 					}
 					store.Data.PendingNotifications[key] = pending
 				}
-				store.Data.JobFailures[missingID] = state.JobFailure{Attempts: maxJobAttempts, NotificationKey: missingKey}
+				store.Data.JobFailures[missingID] = state.JobFailure{
+					Attempts: 1, AcceptedAt: now.Add(-3 * time.Minute), Deadline: now.Add(time.Second), NotificationKey: missingKey,
+				}
 				store.Data.JobFailures[fixID] = state.JobFailure{Attempts: maxJobAttempts, NotificationKey: fixKey}
 				store.Data.NextInviteCheckAt = now.Add(15 * time.Minute)
 				if err := store.Save(); err != nil {
@@ -944,6 +946,7 @@ func TestSelectedControlRetiresMissingTerminalSourceWithoutLosingFix(t *testing.
 				case err := <-result:
 					t.Fatalf("selected review did not start: %v", err)
 				}
+				time.Sleep(time.Second)
 				synctest.Wait()
 				if missingFetches.Load() == 0 || fixFetches.Load() < 2 {
 					t.Fatalf("terminal sources were not checked while review ran: missing=%d fix=%d",
