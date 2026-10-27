@@ -226,7 +226,7 @@ func TestSelectedRestartAfterReactionResumesOriginalAttemptAndDeadline(t *testin
 }
 
 func TestSelectedReactionFailureRetainsOriginalAcceptance(t *testing.T) {
-	at := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	at := time.Now().UTC()
 	item := selectedItem(at)
 	reactionErr := errors.New("reaction unavailable")
 	gh := &fakeGitHub{notifications: []github.Notification{testNotification(at)}, items: []github.Item{item},
@@ -238,11 +238,11 @@ func TestSelectedReactionFailureRetainsOriginalAcceptance(t *testing.T) {
 		t.Fatalf("reaction error = %v", err)
 	}
 	accepted := store.Data.Accepted
-	if accepted == nil || !next.Equal(store.Data.NextInviteCheckAt) || !time.Now().Before(accepted.RetryAt) ||
+	if accepted == nil || !next.Equal(accepted.RetryAt) || !time.Now().Before(accepted.RetryAt) ||
 		store.Data.JobFailures[accepted.JobID].Attempts != 1 || len(store.Data.Processed) != 0 {
 		t.Fatalf("reaction failure lost original acceptance: %+v", store.Data)
 	}
-	if next, err := m.RunOnce(t.Context(), store); err != nil || !next.Equal(store.Data.NextInviteCheckAt) || len(gh.reactions) != 1 {
+	if next, err := m.RunOnce(t.Context(), store); err != nil || !next.Equal(accepted.RetryAt) || len(gh.reactions) != 1 {
 		t.Fatalf("reaction retried before durable schedule: next=%s err=%v reactions=%v", next, err, gh.reactions)
 	}
 	gh.reactionErr = nil
@@ -583,6 +583,7 @@ func TestSelectedUnassignedRecoveryKeepsAcceptanceWithoutCapacity(t *testing.T) 
 	accepted := selectedAcceptance(t, at)
 	store.Data.Accepted = &accepted
 	store.Data.JobFailures[accepted.JobID] = state.JobFailure{Attempts: 2, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline}
+	store.Data.NextInviteCheckAt = at.Add(time.Hour)
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}
@@ -592,7 +593,7 @@ func TestSelectedUnassignedRecoveryKeepsAcceptanceWithoutCapacity(t *testing.T) 
 	reopened := openStateAt(t, path, at.Add(-time.Minute))
 	unavailable := errors.New("capacity unavailable")
 	handler := &capacityHandler{failAt: 1, err: unavailable}
-	m := selectedMonitor(t, at, &fakeGitHub{beforeList: func() { t.Fatal("discovered before recovery") }}, handler)
+	m := selectedMonitor(t, at, &fakeGitHub{beforeList: func() { t.Fatal("invitation checked before due time") }}, handler)
 	if _, err := m.RunOnce(t.Context(), reopened); !errors.Is(err, unavailable) {
 		t.Fatalf("capacity error = %v", err)
 	}

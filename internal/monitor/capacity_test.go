@@ -490,6 +490,53 @@ func TestRunOnceChecksInvitationDueWhenCapacityArrives(t *testing.T) {
 	})
 }
 
+func TestRunOnceAcceptedRecoveryChecksInvitationDuringCapacityWait(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		accepted := selectedAcceptance(t, now)
+		accepted.RetryAt = now.Add(-time.Second)
+		store := openState(t, now.Add(-time.Minute))
+		store.Data.Accepted = &accepted
+		store.Data.JobFailures[accepted.JobID] = state.JobFailure{Attempts: 1, AcceptedAt: now, Deadline: accepted.Deadline}
+		store.Data.NextInviteCheckAt = now.Add(time.Minute)
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		gh := &fakeGitHub{invitations: []github.Invitation{{ID: 41, Repository: github.Repository{
+			FullName: "example-owner/example-repo", ID: 1, Owner: github.User{Login: "example-owner", ID: 2},
+		}, Permissions: "write"}}}
+		handler := &heldCapacityHandler{entered: make(chan struct{}), release: make(chan struct{})}
+		m := selectedMonitor(t, now, gh, handler)
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		result := make(chan error, 1)
+		go func() { _, err := m.RunOnce(ctx, store); result <- err }()
+		<-handler.entered
+		time.Sleep(time.Minute)
+		synctest.Wait()
+		if !slices.Equal(gh.accepted, []int64{41}) || handler.waits.Load() != 1 || handler.cancels.Load() != 0 ||
+			len(gh.notificationCalls) != 0 || len(gh.reactions) != 0 || len(handler.jobs) != 0 ||
+			store.Data.Accepted == nil || store.Data.Accepted.AttemptID != accepted.AttemptID || !time.Now().Before(accepted.Deadline) {
+			t.Errorf("accepted recovery missed idle invitation or released capacity wait: invites=%v waits=%d cancels=%d state=%+v",
+				gh.accepted, handler.waits.Load(), handler.cancels.Load(), store.Data)
+		}
+		returned := false
+		select {
+		case err := <-result:
+			returned = true
+			t.Errorf("accepted recovery returned before worker readiness: %v", err)
+		default:
+		}
+		cancel()
+		synctest.Wait()
+		if !returned {
+			if err := <-result; !errors.Is(err, context.Canceled) || handler.cancels.Load() != 1 {
+				t.Fatalf("accepted capacity wait did not cancel cleanly: err=%v cancels=%d", err, handler.cancels.Load())
+			}
+		}
+	})
+}
+
 func TestRunOnceTerminalAcceptedReplyDoesNotWaitForCapacity(t *testing.T) {
 	at := time.Now().UTC().Add(-10 * time.Minute)
 	accepted := selectedAcceptance(t, at)

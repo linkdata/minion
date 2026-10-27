@@ -1153,7 +1153,7 @@ func (m *Monitor) recoverAccepted(ctx context.Context, store *state.Store) error
 		}
 		return nil
 	}
-	if err := m.waitCapacity(resumeCtx); err != nil {
+	if err := m.waitCapacityWithInvitations(resumeCtx, store); err != nil {
 		return failed("resume accepted action capacity", err)
 	}
 	if err := checkContext("resume accepted action capacity"); err != nil {
