@@ -6,11 +6,43 @@ import (
 	"net/http"
 	"path/filepath"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/state"
 )
+
+func TestTerminalIssueAndReplyLookupsHaveSeparateBudgets(t *testing.T) {
+	accepted := selectedAcceptance(t, time.Now().UTC())
+	accepted.SubjectType = "Issue"
+	accepted.SourceURL = "https://github.com/example-owner/example-repo/issues/7#issuecomment-1"
+	stop := errors.New("reply lookup reached")
+	var remaining time.Duration
+	var hasDeadline bool
+	gh := &fakeGitHub{
+		issueDetails: func(_ string, number int) (github.Issue, error) {
+			time.Sleep(8 * time.Second)
+			return github.Issue{Number: number}, nil
+		},
+		beforeVerify: func(ctx context.Context, _ bool) error {
+			deadline, ok := ctx.Deadline()
+			hasDeadline = ok
+			remaining = time.Until(deadline)
+			return stop
+		},
+	}
+	m := selectedMonitor(t, accepted.AcceptedAt, gh, nil)
+	store := &state.Store{Data: state.Data{Accepted: &accepted}}
+	synctest.Test(t, func(t *testing.T) {
+		if err := m.finishFailedJob(t.Context(), store, jobFromAccepted(accepted), time.Now(), state.JobFailure{}); !errors.Is(err, stop) {
+			t.Fatalf("reply lookup did not follow issue lookup: %v", err)
+		}
+		if !hasDeadline || remaining < 9*time.Second {
+			t.Fatalf("reply lookup inherited issue lookup's spent budget: remaining=%s", remaining)
+		}
+	})
+}
 
 func TestSelectedRecoveryReleasesDeletedSource(t *testing.T) {
 	at := time.Now().UTC()

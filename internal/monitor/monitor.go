@@ -1074,10 +1074,10 @@ func (m *Monitor) finishFailedJob(ctx context.Context, store *state.Store, job J
 		}
 	}
 	marker := job.Marker()
-	lookupCtx, cancelLookup := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-	defer cancelLookup()
 	if accepted := store.Data.Accepted; accepted != nil {
-		present, err := m.acceptedIssuePresent(lookupCtx, *accepted)
+		issueCtx, cancelIssue := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		present, err := m.acceptedIssuePresent(issueCtx, *accepted)
+		cancelIssue()
 		if err != nil {
 			return err
 		}
@@ -1086,6 +1086,8 @@ func (m *Monitor) finishFailedJob(ctx context.Context, store *state.Store, job J
 			return discardAccepted(store)
 		}
 	}
+	lookupCtx, cancelLookup := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancelLookup()
 	includeReviews := job.SubjectType == "PullRequest" && job.Command.Action == command.Review
 	replied, err := m.GitHub.HasVerifiedBotReply(lookupCtx, job.Repository.Name, job.Number, job.Source.UpdatedAt, m.Config.BotLogin, marker, includeReviews)
 	if err != nil {
