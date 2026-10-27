@@ -217,7 +217,7 @@ func TestSelectedReactionFailureRetainsOriginalAcceptance(t *testing.T) {
 	}
 }
 
-func TestSelectedPreparationFailureReleasesUnusedAcceptance(t *testing.T) {
+func TestSelectedPreparationFailureConsumesAttemptAndReleasesAcceptance(t *testing.T) {
 	at := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
 	item := selectedItem(at)
 	gh := &fakeGitHub{notifications: []github.Notification{testNotification(at)}, items: []github.Item{item},
@@ -236,19 +236,59 @@ func TestSelectedPreparationFailureReleasesUnusedAcceptance(t *testing.T) {
 		t.Fatalf("preparation error = %v", err)
 	}
 	failure := store.Data.JobFailures[jobID(item.Key, "review")]
-	if store.Data.Accepted != nil || failure.Attempts != 0 || failure.AcceptedAt.IsZero() || failure.Deadline.IsZero() || len(store.Data.Processed) != 0 {
-		t.Fatalf("unused preparation retained acceptance: %+v", store.Data)
+	if store.Data.Accepted != nil || failure.Attempts != 1 || failure.AcceptedAt.IsZero() || failure.Deadline.IsZero() || len(store.Data.Processed) != 0 {
+		t.Fatalf("failed preparation did not consume an attempt and release acceptance: %+v", store.Data)
 	}
 	retryAt := advanceToRetry(at, store)
 	m.Now = func() time.Time { return retryAt }
 	m.Handler = selectedHandler(func(job Job) error {
-		if job.AttemptID == firstAttempt || !job.AcceptedAt.Equal(failure.AcceptedAt) || !job.Deadline.Equal(failure.Deadline) {
+		if job.AttemptID == firstAttempt || !job.AcceptedAt.Equal(failure.AcceptedAt) || !job.Deadline.Equal(failure.Deadline) ||
+			store.Data.JobFailures[job.ID].Attempts != 2 {
 			t.Fatalf("preparation retry renewed original deadline: job=%+v first=%+v", job, failure)
 		}
 		return nil
 	})
 	if _, err := m.RunOnce(t.Context(), store); err != nil || len(store.Data.Processed) != 1 {
 		t.Fatalf("preparation retry failed: err=%v state=%+v", err, store.Data)
+	}
+}
+
+func TestSelectedInfrastructureFailureRefundsUnassignedAttempt(t *testing.T) {
+	at := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	item := selectedItem(at)
+	gh := &fakeGitHub{notifications: []github.Notification{testNotification(at)}, items: []github.Item{item},
+		permission: github.Permission{Permission: "write"}}
+	store := openState(t, at.Add(-time.Minute))
+	m := selectedMonitor(t, at, gh, selectedHandler(func(Job) error { return ErrRequestTransport }))
+	if _, err := m.RunOnce(t.Context(), store); !errors.Is(err, ErrRequestTransport) {
+		t.Fatalf("infrastructure error = %v", err)
+	}
+	failure := store.Data.JobFailures[jobID(item.Key, "review")]
+	if store.Data.Accepted != nil || failure.Attempts != 0 || failure.AcceptedAt.IsZero() || failure.Deadline.IsZero() ||
+		len(store.Data.Processed) != 0 || len(gh.comments) != 0 {
+		t.Fatalf("infrastructure failure consumed an unassigned attempt: %+v", store.Data)
+	}
+}
+
+func TestSelectedInterruptedTerminalFailureRefundsUnassignedAttempt(t *testing.T) {
+	at := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	item := selectedItem(at)
+	gh := &fakeGitHub{notifications: []github.Notification{testNotification(at)}, items: []github.Item{item},
+		permission: github.Permission{Permission: "write"}}
+	store := openState(t, at.Add(-time.Minute))
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	m := selectedMonitor(t, at, gh, selectedHandler(func(Job) error {
+		cancel()
+		return errors.Join(ErrTerminalJob, context.Canceled)
+	}))
+	if _, err := m.RunOnce(ctx, store); !errors.Is(err, context.Canceled) || !errors.Is(err, ErrTerminalJob) {
+		t.Fatalf("interrupted terminal error = %v", err)
+	}
+	failure := store.Data.JobFailures[jobID(item.Key, "review")]
+	if store.Data.Accepted != nil || failure.Attempts != 0 || failure.AcceptedAt.IsZero() || failure.Deadline.IsZero() ||
+		len(store.Data.Processed) != 0 || len(gh.comments) != 0 {
+		t.Fatalf("interrupted terminal failure consumed an unassigned attempt: %+v", store.Data)
 	}
 }
 

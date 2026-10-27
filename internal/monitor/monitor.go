@@ -717,6 +717,11 @@ func infrastructureFailure(err error) bool {
 	return errors.Is(err, ErrRequestTransport) || errors.As(err, &network)
 }
 
+func githubGone(err error) bool {
+	var status *github.StatusError
+	return errors.As(err, &status) && status.StatusCode == http.StatusGone
+}
+
 func (m *Monitor) actionRuntime() time.Duration {
 	runtime := time.Duration(m.Config.MaxRuntimeMinutes) * time.Minute
 	if runtime <= 0 {
@@ -854,6 +859,9 @@ func (m *Monitor) validateAcceptedSource(ctx context.Context, accepted state.Acc
 			return config.Repository{}, github.Item{}, false, ctxErr
 		}
 		if listErr != nil {
+			if githubGone(listErr) {
+				return config.Repository{}, github.Item{}, false, nil
+			}
 			return config.Repository{}, github.Item{}, false, errors.Join(fmt.Errorf("verify accepted source: %w", err), fmt.Errorf("list accepted source thread: %w", listErr))
 		}
 		for _, item := range items {
@@ -989,9 +997,11 @@ func (m *Monitor) executeSelected(ctx context.Context, store *state.Store, job J
 	outcomeUnknown := errors.Is(err, ErrExecutionOutcomeUnknown)
 	interrupted := !accepted.Assigned && !failure.ModelCallStarted && !outcomeUnknown && ctx.Err() != nil && errors.Is(err, context.Canceled) && !publicationFailure
 	switch {
+	case interrupted:
+		failure.Attempts--
 	case accepted.Assigned, failure.ModelCallStarted, outcomeUnknown, errors.Is(err, ErrTerminalJob), !time.Now().Before(job.Deadline):
 		failure.Attempts = maxJobAttempts
-	case !publicationFailure:
+	case !publicationFailure && (errors.Is(err, workroot.ErrUnsafe) || infrastructureFailure(err)):
 		failure.Attempts--
 	}
 	if failure.Attempts < 0 {
@@ -1034,6 +1044,10 @@ func (m *Monitor) finishFailedJob(ctx context.Context, store *state.Store, job J
 	includeReviews := job.SubjectType == "PullRequest" && job.Command.Action == command.Review
 	replied, err := m.GitHub.HasVerifiedBotReply(lookupCtx, job.Repository.Name, job.Number, job.Source.UpdatedAt, m.Config.BotLogin, marker, includeReviews)
 	if err != nil {
+		if store.Data.Accepted != nil && githubGone(err) {
+			m.logf("discard accepted %s: source thread was deleted", itemLocation(job.Source))
+			return discardAccepted(store)
+		}
 		return fmt.Errorf("check existing bot replies to %s: %w", itemLocation(job.Source), err)
 	}
 	if !replied {

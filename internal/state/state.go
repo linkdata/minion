@@ -52,7 +52,7 @@ type AcceptedAction struct {
 	Action          string    `json:"action"`
 	AcceptedAt      time.Time `json:"accepted_at"`
 	Deadline        time.Time `json:"deadline"`
-	RetryAt         time.Time `json:"retry_at,omitempty,omitzero"`
+	RetryAt         time.Time `json:"retry_at,omitzero"`
 	Assigned        bool      `json:"assigned"`
 	Terminal        bool      `json:"terminal,omitempty"`
 }
@@ -112,8 +112,8 @@ type JobFailure struct {
 	Attempts         int       `json:"attempts"`
 	ReplyAttempts    int       `json:"reply_attempts,omitempty"`
 	ModelCallStarted bool      `json:"model_call_started,omitempty"`
-	AcceptedAt       time.Time `json:"accepted_at,omitempty,omitzero"`
-	Deadline         time.Time `json:"deadline,omitempty,omitzero"`
+	AcceptedAt       time.Time `json:"accepted_at,omitzero"`
+	Deadline         time.Time `json:"deadline,omitzero"`
 }
 
 // Validate checks the optional original action deadline.
