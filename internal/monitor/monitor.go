@@ -89,6 +89,12 @@ type Job struct {
 	Deadline    time.Time
 }
 
+type notificationScan struct {
+	notification github.Notification
+	since        time.Time
+	key          string
+}
+
 func (j Job) Marker() string {
 	return "<!-- linkdataminion:" + j.ID + " -->"
 }
@@ -200,12 +206,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		commandSets[repo.Name] = m.availableCommands(repo)
 	}
 
-	type scan struct {
-		notification github.Notification
-		since        time.Time
-		key          string
-	}
-	var scans []scan
+	var scans []notificationScan
 	seen := make(map[string]bool)
 	var failures []error
 	stop := func(errs ...error) (time.Time, error) {
@@ -265,14 +266,14 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 					scanSince = pending.Since
 				}
 			}
-			scans = append(scans, scan{notification, scanSince, key})
+			scans = append(scans, notificationScan{notification, scanSince, key})
 		}
 	}
 	for key, pending := range store.Data.PendingNotifications {
 		if seen[key] || started.Before(pending.RetryAt) {
 			continue
 		}
-		scans = append(scans, scan{github.Notification{
+		scans = append(scans, notificationScan{github.Notification{
 			ID:         key,
 			Repository: github.Repository{ID: pending.RepositoryID, FullName: pending.Repository, Owner: github.User{ID: pending.OwnerID}},
 			Subject:    github.Subject{Type: pending.SubjectType, URL: pending.SubjectURL},
@@ -537,7 +538,13 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				}
 			}
 			if selected {
-				if err := m.executeSelected(ctx, store, job, started); err != nil {
+				for _, unaccepted := range scans[scanIndex:] {
+					rememberNotification(store, unaccepted.key, unaccepted.notification, unaccepted.since)
+				}
+				if err := saveAcceptanceState(store); err != nil {
+					return stop(err)
+				}
+				if err := m.executeSelectedWithControls(ctx, store, job, started, entry.key, items); err != nil {
 					if errors.Is(err, ErrAcceptedDiscarded) {
 						return stop() // The refused assignment retired this worker.
 					}
@@ -668,7 +675,12 @@ func earlierWake(next, invitation time.Time) time.Time {
 }
 
 func (m *Monitor) checkDueInvitations(ctx context.Context, store *state.Store, at time.Time) error {
-	if at.Before(store.Data.NextInviteCheckAt) {
+	var due bool
+	_ = store.WithLock(func() error {
+		due = !at.Before(store.Data.NextInviteCheckAt)
+		return nil
+	})
+	if !due {
 		return nil
 	}
 	deferred, err := m.acceptWhitelistedInvitations(ctx)
@@ -680,21 +692,23 @@ func (m *Monitor) checkDueInvitations(ctx context.Context, store *state.Store, a
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if len(deferred) != 0 {
-		if store.Data.RepositoryCursors == nil {
-			store.Data.RepositoryCursors = make(map[string]time.Time)
-		}
-		for _, name := range deferred {
-			if _, exists := store.Data.RepositoryCursors[name]; !exists {
-				store.Data.RepositoryCursors[name] = store.Data.Cursor
+	return store.WithLock(func() error {
+		if len(deferred) != 0 {
+			if store.Data.RepositoryCursors == nil {
+				store.Data.RepositoryCursors = make(map[string]time.Time)
+			}
+			for _, name := range deferred {
+				if _, exists := store.Data.RepositoryCursors[name]; !exists {
+					store.Data.RepositoryCursors[name] = store.Data.Cursor
+				}
 			}
 		}
-	}
-	if checkedAt := m.now().UTC(); checkedAt.After(at) {
-		at = checkedAt
-	}
-	store.Data.NextInviteCheckAt = at.Add(15 * time.Minute)
-	return store.Save()
+		if checkedAt := m.now().UTC(); checkedAt.After(at) {
+			at = checkedAt
+		}
+		store.Data.NextInviteCheckAt = at.Add(15 * time.Minute)
+		return store.Save()
+	})
 }
 
 // Keep the one capacity wait live while the monitor services invitation deadlines.
@@ -1068,16 +1082,27 @@ func assignmentMatchesAccepted(job Job, accepted state.AcceptedAction) bool {
 // RevalidateAssignment checks a prepared action against its saved reservation and live GitHub state.
 // The caller must finish this check before saving Assigned or sending the worker any assignment bytes.
 func (m *Monitor) RevalidateAssignment(ctx context.Context, store *state.Store, job Job) error {
-	if m == nil || store == nil || store.Data.Accepted == nil {
+	if m == nil || store == nil {
 		return fmt.Errorf("%w: missing accepted action before assignment", ErrAcceptanceState)
 	}
-	accepted := *store.Data.Accepted
-	failure, ok := store.Data.JobFailures[accepted.JobID]
-	if err := accepted.Validate(); err != nil || !assignmentMatchesAccepted(job, accepted) ||
-		m.SelectedExecutorID != accepted.ExecutorID || accepted.Terminal ||
-		!ok || failure.Attempts <= 0 || failure.ModelCallStarted ||
-		!failure.AcceptedAt.Equal(accepted.AcceptedAt) || !failure.Deadline.Equal(accepted.Deadline) {
-		return fmt.Errorf("%w: accepted action changed before assignment", ErrAcceptanceState)
+	var accepted state.AcceptedAction
+	var failure state.JobFailure
+	if err := store.WithLock(func() error {
+		if store.Data.Accepted == nil {
+			return fmt.Errorf("%w: missing accepted action before assignment", ErrAcceptanceState)
+		}
+		accepted = *store.Data.Accepted
+		var ok bool
+		failure, ok = store.Data.JobFailures[accepted.JobID]
+		if err := accepted.Validate(); err != nil || !assignmentMatchesAccepted(job, accepted) ||
+			m.SelectedExecutorID != accepted.ExecutorID || accepted.Terminal ||
+			!ok || failure.Attempts <= 0 || failure.ModelCallStarted ||
+			!failure.AcceptedAt.Equal(accepted.AcceptedAt) || !failure.Deadline.Equal(accepted.Deadline) {
+			return fmt.Errorf("%w: accepted action changed before assignment", ErrAcceptanceState)
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
 	if err := ctx.Err(); err != nil {
 		if time.Now().Before(accepted.Deadline) {
@@ -1089,29 +1114,31 @@ func (m *Monitor) RevalidateAssignment(ctx context.Context, store *state.Store, 
 		return context.DeadlineExceeded
 	}
 	_, _, valid, err := m.validateAcceptedSource(ctx, accepted, true)
-	if store.Data.Accepted == nil || *store.Data.Accepted != accepted || store.Data.JobFailures[accepted.JobID] != failure {
-		return fmt.Errorf("%w: accepted action changed during assignment validation", ErrAcceptanceState)
-	}
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		if time.Now().Before(accepted.Deadline) {
-			return fmt.Errorf("%w: %w", ErrAcceptedRetry, ctxErr)
+	return store.WithLock(func() error {
+		if store.Data.Accepted == nil || *store.Data.Accepted != accepted || store.Data.JobFailures[accepted.JobID] != failure {
+			return fmt.Errorf("%w: accepted action changed during assignment validation", ErrAcceptanceState)
 		}
-		return context.DeadlineExceeded
-	}
-	if !time.Now().Before(accepted.Deadline) {
-		return context.DeadlineExceeded
-	}
-	if err != nil {
-		return fmt.Errorf("%w: %w", ErrAcceptedRetry, err)
-	}
-	if !valid {
-		m.logf("discard accepted %s: source or requester is no longer valid before assignment", itemLocation(job.Source))
-		if err := discardAccepted(store); err != nil {
-			return err
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			if time.Now().Before(accepted.Deadline) {
+				return fmt.Errorf("%w: %w", ErrAcceptedRetry, ctxErr)
+			}
+			return context.DeadlineExceeded
 		}
-		return ErrAcceptedDiscarded
-	}
-	return nil
+		if !time.Now().Before(accepted.Deadline) {
+			return context.DeadlineExceeded
+		}
+		if err != nil {
+			return fmt.Errorf("%w: %w", ErrAcceptedRetry, err)
+		}
+		if !valid {
+			m.logf("discard accepted %s: source or requester is no longer valid before assignment", itemLocation(job.Source))
+			if err := discardAccepted(store); err != nil {
+				return err
+			}
+			return ErrAcceptedDiscarded
+		}
+		return nil
+	})
 }
 
 func (m *Monitor) recoverAccepted(ctx context.Context, store *state.Store) error {
@@ -1184,8 +1211,224 @@ func (m *Monitor) recoverAccepted(ctx context.Context, store *state.Store) error
 }
 
 func (m *Monitor) executeSelected(ctx context.Context, store *state.Store, job Job, at time.Time) error {
+	return m.executeSelectedWithControls(ctx, store, job, at, "", nil)
+}
+
+// Keep control work on the monitor goroutine while the selected worker executes.
+// No other action is discovered or assigned until this execution has finished.
+func (m *Monitor) executeSelectedWithControls(ctx context.Context, store *state.Store, job Job, at time.Time,
+	cachedKey string, cachedItems []github.Item) error {
+	commandSets := make(map[string]map[string]command.Action, len(m.Config.Repositories))
+	for _, configured := range m.Config.Repositories {
+		commandSets[configured.Name] = m.availableCommands(configured)
+	}
+	actionCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	done := make(chan error, 1)
 	m.logf("run %s from @%s in %s #%d", job.Command.Action, job.Source.Author.Login, job.Repository.Name, job.Number)
-	err := m.Handler.Execute(ctx, job)
+	go func() {
+		result := error(ErrExecutionOutcomeUnknown)
+		defer func() { done <- result }()
+		result = m.Handler.Execute(actionCtx, job)
+	}()
+	finish := func(err error) error { return m.completeSelected(ctx, store, job, at, err) }
+	abort := func(err error) error {
+		cancel()
+		result := <-done // The state lock and store must outlive Execute.
+		if ctx.Err() != nil {
+			return finish(result)
+		}
+		return fmt.Errorf("%w: control state: %w", ErrAcceptanceState, err)
+	}
+	select {
+	case err := <-done:
+		return finish(err)
+	default:
+	}
+	if err := m.checkDueInvitations(ctx, store, m.now().UTC()); err != nil {
+		return abort(err)
+	}
+	nextCheck := make(map[string]time.Time)
+	for {
+		var next time.Time
+		var due []notificationScan
+		_ = store.WithLock(func() error {
+			next = store.Data.NextInviteCheckAt
+			for key, pending := range store.Data.PendingNotifications {
+				checkAt := pending.RetryAt
+				if previous, checked := nextCheck[key]; checked {
+					if previous.IsZero() {
+						continue
+					}
+					if previous.After(checkAt) {
+						checkAt = previous
+					}
+				}
+				if checkAt.After(m.now().UTC()) {
+					if next.IsZero() || checkAt.Before(next) {
+						next = checkAt
+					}
+					continue
+				}
+				due = append(due, notificationScan{notification: github.Notification{
+					ID: key, Repository: github.Repository{ID: pending.RepositoryID, FullName: pending.Repository,
+						Owner: github.User{ID: pending.OwnerID}}, Subject: github.Subject{Type: pending.SubjectType, URL: pending.SubjectURL},
+					UpdatedAt: pending.UpdatedAt,
+				}, since: pending.Since, key: key})
+			}
+			return nil
+		})
+		for _, entry := range due {
+			select {
+			case err := <-done:
+				return finish(err)
+			default:
+			}
+			var items []github.Item
+			if entry.key == cachedKey {
+				items = cachedItems
+				cachedKey = "" // Retries read the current thread again.
+			}
+			checkAt := m.processTerminalNotification(ctx, store, job.ID, entry, commandSets, items)
+			nextCheck[entry.key] = checkAt
+			if !checkAt.IsZero() && (next.IsZero() || checkAt.Before(next)) {
+				next = checkAt
+			}
+		}
+		if err := ctx.Err(); err != nil {
+			return finish(<-done)
+		}
+		select {
+		case err := <-done:
+			return finish(err)
+		default:
+		}
+		if next.IsZero() {
+			next = m.now().UTC().Add(15 * time.Minute)
+		}
+		timer := time.NewTimer(next.Sub(m.now().UTC()))
+		select {
+		case err := <-done:
+			timer.Stop()
+			return finish(err)
+		case <-timer.C:
+			if err := m.checkDueInvitations(ctx, store, m.now().UTC()); err != nil {
+				return abort(err)
+			}
+		case <-ctx.Done():
+			timer.Stop()
+			return finish(<-done)
+		}
+	}
+}
+
+func (m *Monitor) processTerminalNotification(ctx context.Context, store *state.Store, activeJobID string,
+	entry notificationScan, commandSets map[string]map[string]command.Action, cachedItems []github.Item) time.Time {
+	notification := entry.notification
+	repo, ok := m.Config.Repository(notification.Repository.FullName)
+	if !ok || !repo.MatchesIdentity(notification.Repository.ID, notification.Repository.Owner.ID) ||
+		(notification.Subject.Type != "Issue" && notification.Subject.Type != "PullRequest") {
+		return time.Time{}
+	}
+	number, err := subjectNumber(notification.Subject.URL, repo.Name, notification.Subject.Type)
+	if err != nil {
+		return time.Time{}
+	}
+	live, err := m.GitHub.Repository(ctx, repo.Name)
+	if err != nil {
+		m.logf("check terminal controls in %s #%d: %v", repo.Name, number, err)
+		return m.now().UTC().Add(time.Minute)
+	}
+	if !repo.MatchesIdentity(live.ID, live.Owner.ID) {
+		return time.Time{}
+	}
+	items := cachedItems
+	if items == nil {
+		items, err = m.GitHub.ThreadItems(ctx, repo.Name, notification.Subject.Type, number, entry.since)
+		if err != nil {
+			m.logf("check terminal controls in %s #%d: %v", repo.Name, number, err)
+			return m.now().UTC().Add(time.Minute)
+		}
+	}
+	return m.processTerminalItems(ctx, store, activeJobID, repo, notification.Subject.Type, number, items, commandSets[repo.Name])
+}
+
+func (m *Monitor) processTerminalItems(ctx context.Context, store *state.Store, activeJobID string,
+	repo config.Repository, subjectType string, number int, items []github.Item, commands map[string]command.Action) time.Time {
+	var next time.Time
+	wake := func(at time.Time) {
+		if next.IsZero() || at.Before(next) {
+			next = at
+		}
+	}
+	for _, item := range items {
+		if ctx.Err() != nil {
+			return next
+		}
+		if item.Author.Login == "" || strings.EqualFold(item.Author.Login, m.Config.BotLogin) {
+			continue
+		}
+		parsed, err := command.ParseForLoginCommands(item.Body, m.Config.BotLogin, commands)
+		if err != nil {
+			continue
+		}
+		id := jobID(item.Key, parsed.Name)
+		if id == activeJobID {
+			continue
+		}
+		var terminal bool
+		var failure state.JobFailure
+		var processed bool
+		_ = store.WithLock(func() error {
+			_, processed = store.Data.Processed[id]
+			failure = store.Data.JobFailures[id]
+			terminal = !processed && (failure.Attempts >= maxJobAttempts || failure.ModelCallStarted ||
+				!failure.Deadline.IsZero() && !time.Now().Before(failure.Deadline))
+			return nil
+		})
+		if !terminal {
+			if !processed && !failure.Deadline.IsZero() {
+				wake(failure.Deadline)
+			}
+			continue
+		}
+		current, err := m.GitHub.CurrentItem(ctx, item)
+		if err != nil {
+			wake(m.now().UTC().Add(time.Minute))
+			continue
+		}
+		if item.Author.ID <= 0 || current.Author.ID != item.Author.ID ||
+			!strings.EqualFold(current.Author.Login, item.Author.Login) || current.Edited {
+			continue
+		}
+		parsed, err = command.ParseForLoginCommands(current.Body, m.Config.BotLogin, commands)
+		if err != nil || jobID(current.Key, parsed.Name) != id || !repo.AllowsAction(parsed.Name) ||
+			!repo.AllowsActor(current.Author.Login, current.Author.ID) {
+			continue
+		}
+		permission, err := m.GitHub.Permission(ctx, repo.Name, current.Author.Login)
+		if err != nil {
+			wake(m.now().UTC().Add(time.Minute))
+			continue
+		}
+		if permission.User.ID != current.Author.ID ||
+			!strings.EqualFold(permission.User.Login, current.Author.Login) ||
+			(permission.Permission != "write" && permission.Permission != "admin" && permission.Permission != "maintain") {
+			continue
+		}
+		job := Job{Repository: repo, SubjectType: subjectType, Number: number, Source: current, Command: parsed, ID: id}
+		if failure.ModelCallStarted || !failure.Deadline.IsZero() && !time.Now().Before(failure.Deadline) {
+			failure.Attempts = maxJobAttempts
+		}
+		if err := m.finishFailedJob(ctx, store, job, m.now().UTC(), failure); err != nil {
+			m.logf("terminal control in %s: %v", itemLocation(current), err)
+			wake(m.now().UTC().Add(time.Minute))
+		}
+	}
+	return next
+}
+
+func (m *Monitor) completeSelected(ctx context.Context, store *state.Store, job Job, at time.Time, err error) error {
 	if errors.Is(err, ErrAcceptanceState) {
 		return err
 	}
@@ -1263,17 +1506,22 @@ func (m *Monitor) executeSelected(ctx context.Context, store *state.Store, job J
 }
 
 func (m *Monitor) finishFailedJob(ctx context.Context, store *state.Store, job Job, at time.Time, failure state.JobFailure) error {
-	if store.Data.Accepted != nil && store.Data.Accepted.JobID != job.ID {
-		return fmt.Errorf("%w: failure reply targets a different accepted action", ErrAcceptanceState)
-	}
-	if accepted := store.Data.Accepted; accepted != nil {
+	var accepted *state.AcceptedAction
+	_ = store.WithLock(func() error {
+		if current := store.Data.Accepted; current != nil && current.JobID == job.ID {
+			copy := *current
+			accepted = &copy
+		}
+		return nil
+	})
+	if accepted != nil {
 		if _, ok := m.acceptedRepository(*accepted); !ok {
 			m.logf("discard accepted %s: repository, command, or requester is no longer eligible", itemLocation(job.Source))
-			return discardAccepted(store)
+			return store.WithLock(func() error { return discardAccepted(store) })
 		}
 	}
 	marker := job.Marker()
-	if accepted := store.Data.Accepted; accepted != nil {
+	if accepted != nil {
 		issueCtx, cancelIssue := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		present, err := m.acceptedIssuePresent(issueCtx, *accepted)
 		cancelIssue()
@@ -1282,7 +1530,7 @@ func (m *Monitor) finishFailedJob(ctx context.Context, store *state.Store, job J
 		}
 		if !present {
 			m.logf("discard accepted %s: source thread moved or was deleted", itemLocation(job.Source))
-			return discardAccepted(store)
+			return store.WithLock(func() error { return discardAccepted(store) })
 		}
 	}
 	lookupCtx, cancelLookup := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
@@ -1290,14 +1538,14 @@ func (m *Monitor) finishFailedJob(ctx context.Context, store *state.Store, job J
 	includeReviews := job.SubjectType == "PullRequest" && job.Command.Action == command.Review
 	replied, err := m.GitHub.HasVerifiedBotReply(lookupCtx, job.Repository.Name, job.Number, job.Source.UpdatedAt, m.Config.BotLogin, marker, includeReviews)
 	if err != nil {
-		if store.Data.Accepted != nil && githubResourceMovedOrGone(err) {
+		if accepted != nil && githubResourceMovedOrGone(err) {
 			m.logf("discard accepted %s: source thread moved or was deleted", itemLocation(job.Source))
-			return discardAccepted(store)
+			return store.WithLock(func() error { return discardAccepted(store) })
 		}
 		return fmt.Errorf("check existing bot replies to %s: %w", itemLocation(job.Source), err)
 	}
 	if !replied {
-		if accepted := store.Data.Accepted; accepted != nil {
+		if accepted != nil {
 			// Allow several slow GitHub reads without renewing the budget indefinitely.
 			verifyCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 150*time.Second)
 			configured, current, valid, verifyErr := m.validateAcceptedSource(verifyCtx, *accepted, false)
@@ -1310,7 +1558,7 @@ func (m *Monitor) finishFailedJob(ctx context.Context, store *state.Store, job J
 			}
 			if !valid {
 				m.logf("discard accepted %s: source or requester is no longer valid", itemLocation(job.Source))
-				return discardAccepted(store)
+				return store.WithLock(func() error { return discardAccepted(store) })
 			}
 			job.Repository, job.Source = configured, current
 		}
@@ -1332,8 +1580,10 @@ func (m *Monitor) finishFailedJob(ctx context.Context, store *state.Store, job J
 		if err != nil {
 			failure.ReplyAttempts++
 			if failure.ReplyAttempts < maxFailureReplyAttempts {
-				store.Data.JobFailures[job.ID] = failure
-				if saveErr := saveJobResult(store, store.Data.Accepted != nil); saveErr != nil {
+				if saveErr := store.WithLock(func() error {
+					store.Data.JobFailures[job.ID] = failure
+					return saveJobResult(store, accepted != nil)
+				}); saveErr != nil {
 					return errors.Join(err, saveErr)
 				}
 				return fmt.Errorf("post failure reply to %s: %w", itemLocation(job.Source), err)
@@ -1342,13 +1592,14 @@ func (m *Monitor) finishFailedJob(ctx context.Context, store *state.Store, job J
 		}
 	}
 	m.logf("stop retrying failed %s from %s", job.Command.Action, itemLocation(job.Source))
-	store.Data.Processed[job.ID] = at
-	delete(store.Data.JobFailures, job.ID)
-	selected := store.Data.Accepted != nil
-	if selected {
-		store.Data.Accepted = nil
-	}
-	return saveJobResult(store, selected)
+	return store.WithLock(func() error {
+		store.Data.Processed[job.ID] = at
+		delete(store.Data.JobFailures, job.ID)
+		if accepted != nil {
+			store.Data.Accepted = nil
+		}
+		return saveJobResult(store, accepted != nil)
+	})
 }
 
 func (m *Monitor) acceptWhitelistedInvitations(ctx context.Context) ([]string, error) {
@@ -1433,7 +1684,7 @@ func (m *Monitor) acceptWhitelistedInvitations(ctx context.Context) ([]string, e
 				failures = append(failures, fmt.Errorf("%s identity changed while registering invitation", fullName))
 				continue
 			}
-			if m.SelectedCommands == nil {
+			if m.SelectedExecutorID == "" && m.SelectedCommands == nil {
 				m.Config.Repositories = append(m.Config.Repositories, repo)
 			}
 			m.logf("added %s to monitored repositories in %s", repo.Name, m.ConfigPath)

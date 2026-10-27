@@ -314,12 +314,17 @@ func TestSelectedMissingSkillAfterAcceptanceRetainsAttemptAcrossRestart(t *testi
 	skillErr := errors.New("required skill is not installed")
 	var original state.AcceptedAction
 	m.Handler = selectedHandler(func(job Job) error {
-		if store.Data.Accepted == nil || store.Data.Accepted.AttemptID != job.AttemptID {
-			t.Fatalf("handler started without saved acceptance: %+v", store.Data.Accepted)
+		if err := store.WithLock(func() error {
+			if store.Data.Accepted == nil || store.Data.Accepted.AttemptID != job.AttemptID {
+				return fmt.Errorf("handler started without saved acceptance: %+v", store.Data.Accepted)
+			}
+			original = *store.Data.Accepted
+			return nil
+		}); err != nil {
+			return err
 		}
-		original = *store.Data.Accepted
 		if err := os.Remove(skillPath); err != nil {
-			t.Fatal(err)
+			return err
 		}
 		return skillErr
 	})
@@ -328,7 +333,8 @@ func TestSelectedMissingSkillAfterAcceptanceRetainsAttemptAcrossRestart(t *testi
 		store.Data.Accepted.AttemptID != original.AttemptID || !store.Data.Accepted.AcceptedAt.Equal(original.AcceptedAt) ||
 		!store.Data.Accepted.Deadline.Equal(original.Deadline) || store.Data.Accepted.Assigned || store.Data.Accepted.Terminal ||
 		store.Data.JobFailures[original.JobID].Attempts != 1 || store.Data.JobFailures[original.JobID].ModelCallStarted ||
-		len(store.Data.Processed) != 0 || len(store.Data.PendingNotifications) != 0 {
+		len(store.Data.Processed) != 0 || len(store.Data.PendingNotifications) != 1 ||
+		store.Data.PendingNotifications[notificationKey(gh.notifications[0])].Failures != 0 {
 		t.Fatalf("missing skill released accepted attempt: next=%s err=%v state=%+v", next, err, store.Data)
 	}
 	if err := store.Close(); err != nil {
@@ -337,7 +343,8 @@ func TestSelectedMissingSkillAfterAcceptanceRetainsAttemptAcrossRestart(t *testi
 	reopened := openStateAt(t, path, at.Add(-time.Minute))
 	if reopened.Data.Accepted == nil || reopened.Data.Accepted.AttemptID != original.AttemptID ||
 		!reopened.Data.Accepted.AcceptedAt.Equal(original.AcceptedAt) || !reopened.Data.Accepted.Deadline.Equal(original.Deadline) ||
-		reopened.Data.JobFailures[original.JobID].Attempts != 1 {
+		reopened.Data.JobFailures[original.JobID].Attempts != 1 ||
+		len(reopened.Data.PendingNotifications) != 1 {
 		t.Fatalf("restart lost accepted attempt: %+v", reopened.Data)
 	}
 	m.Handler = selectedHandler(func(Job) error { t.Fatal("missing skill reached handler after restart"); return nil })

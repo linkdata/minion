@@ -115,7 +115,14 @@ func (c *executionCheckpoints) BeforeAssignment(job Job) error {
 	if c.failure != nil {
 		return c.failure
 	}
-	if !c.acceptedAssignment(job) {
+	accepted := false
+	if c.owner != nil && c.owner.Store != nil {
+		_ = c.owner.Store.WithLock(func() error {
+			accepted = c.acceptedAssignment(job)
+			return nil
+		})
+	}
+	if !accepted {
 		return c.fail(fmt.Errorf("%w: worker assignment differs from accepted action", monitor.ErrAcceptanceState))
 	}
 	if c.AssignmentRequired() {
@@ -140,40 +147,46 @@ func (c *executionCheckpoints) BeforeAssignment(job Job) error {
 		if !time.Now().Before(c.assignmentRequest.Deadline) {
 			return c.fail(errors.Join(monitor.ErrTerminalJob, context.DeadlineExceeded))
 		}
+	}
+	return c.owner.Store.WithLock(func() error {
 		if !c.acceptedAssignment(job) {
 			return c.fail(fmt.Errorf("%w: accepted action changed during assignment revalidation", monitor.ErrAcceptanceState))
 		}
-	}
-	if c.assigned {
-		if !c.owner.Store.Data.Accepted.Assigned {
-			return c.fail(fmt.Errorf("%w: assigned action marker changed before re-pull", monitor.ErrAcceptanceState))
+		if c.assigned {
+			if !c.owner.Store.Data.Accepted.Assigned {
+				return c.fail(fmt.Errorf("%w: assigned action marker changed before re-pull", monitor.ErrAcceptanceState))
+			}
+			return nil // A disconnected pull may be retried before any bytes are sent.
 		}
-		return nil // A disconnected pull may be retried before any bytes are sent.
-	}
-	if c.owner.Store.Data.Accepted.Assigned {
-		return c.fail(fmt.Errorf("%w: accepted action was already assigned", monitor.ErrAcceptanceState))
-	}
-	c.owner.Store.Data.Accepted.Assigned = true
-	if err := c.owner.Store.Save(); err != nil {
-		return c.fail(fmt.Errorf("%w: save worker assignment: %w", monitor.ErrAcceptanceState, err))
-	}
-	c.assigned = true
-	return nil
+		if c.owner.Store.Data.Accepted.Assigned {
+			return c.fail(fmt.Errorf("%w: accepted action was already assigned", monitor.ErrAcceptanceState))
+		}
+		c.owner.Store.Data.Accepted.Assigned = true
+		if err := c.owner.Store.Save(); err != nil {
+			c.owner.Store.Data.Accepted.Assigned = false
+			return c.fail(fmt.Errorf("%w: save worker assignment: %w", monitor.ErrAcceptanceState, err))
+		}
+		c.assigned = true
+		return nil
+	})
 }
 
 func (c *executionCheckpoints) AssignmentNotDelivered() error {
 	if !c.assigned {
 		return c.failure
 	}
-	if !c.acceptedAssignment(c.job) || !c.owner.Store.Data.Accepted.Assigned {
-		return c.fail(fmt.Errorf("%w: accepted assignment changed before delivery", monitor.ErrAcceptanceState))
-	}
-	c.owner.Store.Data.Accepted.Assigned = false
-	if err := c.owner.Store.Save(); err != nil {
-		return c.fail(fmt.Errorf("%w: release undelivered assignment: %w", monitor.ErrAcceptanceState, err))
-	}
-	c.assigned = false
-	return c.failure
+	return c.owner.Store.WithLock(func() error {
+		if !c.acceptedAssignment(c.job) || !c.owner.Store.Data.Accepted.Assigned {
+			return c.fail(fmt.Errorf("%w: accepted assignment changed before delivery", monitor.ErrAcceptanceState))
+		}
+		c.owner.Store.Data.Accepted.Assigned = false
+		if err := c.owner.Store.Save(); err != nil {
+			c.owner.Store.Data.Accepted.Assigned = true
+			return c.fail(fmt.Errorf("%w: release undelivered assignment: %w", monitor.ErrAcceptanceState, err))
+		}
+		c.assigned = false
+		return c.failure
+	})
 }
 
 func (c *executionCheckpoints) BeforeCall(fact CallCheckpoint) error {
@@ -198,19 +211,24 @@ func (c *executionCheckpoints) BeforeCall(fact CallCheckpoint) error {
 		}
 	}
 	if c.owner.Store != nil {
-		failure, exists := c.owner.Store.Data.JobFailures[c.job.Identity.JobID]
-		if !failure.ModelCallStarted {
-			failure.ModelCallStarted = true
-			c.owner.Store.Data.JobFailures[c.job.Identity.JobID] = failure
-			if err := c.owner.Store.Save(); err != nil {
-				if exists {
-					failure.ModelCallStarted = false
-					c.owner.Store.Data.JobFailures[c.job.Identity.JobID] = failure
-				} else {
-					delete(c.owner.Store.Data.JobFailures, c.job.Identity.JobID)
+		if err := c.owner.Store.WithLock(func() error {
+			failure, exists := c.owner.Store.Data.JobFailures[c.job.Identity.JobID]
+			if !failure.ModelCallStarted {
+				failure.ModelCallStarted = true
+				c.owner.Store.Data.JobFailures[c.job.Identity.JobID] = failure
+				if err := c.owner.Store.Save(); err != nil {
+					if exists {
+						failure.ModelCallStarted = false
+						c.owner.Store.Data.JobFailures[c.job.Identity.JobID] = failure
+					} else {
+						delete(c.owner.Store.Data.JobFailures, c.job.Identity.JobID)
+					}
+					return c.fail(fmt.Errorf("save model call start: %w", err))
 				}
-				return c.fail(fmt.Errorf("save model call start: %w", err))
 			}
+			return nil
+		}); err != nil {
+			return err
 		}
 	}
 	call := fact.Call

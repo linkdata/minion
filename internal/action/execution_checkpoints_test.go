@@ -267,9 +267,17 @@ func TestExecutionFailedAssignmentReleaseKeepsDurableAssignment(t *testing.T) {
 	if err := f.sink.BeforeAssignment(f.job); err != nil {
 		t.Fatal(err)
 	}
+	originalCursor := store.Data.Cursor
 	store.Data.Cursor = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
 	if err := f.sink.AssignmentNotDelivered(); !errors.Is(err, monitor.ErrAcceptanceState) || !f.sink.assigned {
 		t.Fatalf("failed release lost assignment uncertainty: assigned=%t error=%v", f.sink.assigned, err)
+	}
+	if !store.Data.Accepted.Assigned {
+		t.Fatal("failed release left an undurable unassigned marker for the next state save")
+	}
+	store.Data.Cursor = originalCursor
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
 	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
@@ -309,6 +317,7 @@ func TestExecutionAssignmentRejectsMismatchAndSaveFailure(t *testing.T) {
 			if err := store.Save(); err != nil {
 				t.Fatal(err)
 			}
+			originalCursor := store.Data.Cursor
 			switch scenario {
 			case "mismatch":
 				store.Data.Accepted.AttemptID = "foreign"
@@ -320,6 +329,15 @@ func TestExecutionAssignmentRejectsMismatchAndSaveFailure(t *testing.T) {
 			err := f.sink.BeforeAssignment(f.job)
 			if !errors.Is(err, monitor.ErrAcceptanceState) || f.sink.assigned {
 				t.Fatalf("unsafe assignment was acknowledged: assigned=%t error=%v", f.sink.assigned, err)
+			}
+			if scenario == "save failure" {
+				if store.Data.Accepted.Assigned {
+					t.Fatal("failed assignment left an undurable delivery marker for the next state save")
+				}
+				store.Data.Cursor = originalCursor
+				if err := store.Save(); err != nil {
+					t.Fatal(err)
+				}
 			}
 			if releaseErr := f.sink.AssignmentNotDelivered(); !errors.Is(releaseErr, monitor.ErrAcceptanceState) {
 				t.Fatalf("uncertain assignment was released: %v", releaseErr)
