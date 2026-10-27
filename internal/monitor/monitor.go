@@ -1320,9 +1320,6 @@ func (m *Monitor) executeSelectedWithControls(ctx context.Context, store *state.
 				if unknownTerminalKey && (!relevant || unknownTerminalCheck.Before(checkAt)) {
 					checkAt = unknownTerminalCheck
 				}
-				if !checkAt.IsZero() && (pending.RetryAt.IsZero() || pending.RetryAt.Before(checkAt)) {
-					checkAt = pending.RetryAt
-				}
 				if previous, checked := nextCheck[key]; checked {
 					if previous.IsZero() {
 						continue

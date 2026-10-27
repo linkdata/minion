@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -158,10 +159,12 @@ func TestSelectedActionChecksSiblingAtJobDeadline(t *testing.T) {
 		}
 		cfg := testConfig(t)
 		cfg.MaxRuntimeMinutes = 7
+		var repoCalls atomic.Int32
 		gh := &fakeGitHub{
-			notifications: []github.Notification{testNotification(selected.UpdatedAt)},
-			items:         []github.Item{selected, sibling},
-			permission:    github.Permission{Permission: "write"},
+			notifications:    []github.Notification{testNotification(selected.UpdatedAt)},
+			items:            []github.Item{selected, sibling},
+			permission:       github.Permission{Permission: "write"},
+			beforeRepository: func() { repoCalls.Add(1) },
 			beforeComment: func() {
 				if time.Now().Before(deadline) {
 					t.Error("sibling received terminal reply before its deadline")
@@ -179,6 +182,10 @@ func TestSelectedActionChecksSiblingAtJobDeadline(t *testing.T) {
 		case <-held.entered:
 		case err := <-result:
 			t.Fatalf("RunOnce returned before Execute: %v", err)
+		}
+		synctest.Wait()
+		if got := repoCalls.Load(); got != 1 {
+			t.Fatalf("future terminal deadline caused an early repository probe: %d", got)
 		}
 		time.Sleep(time.Minute)
 		synctest.Wait()
