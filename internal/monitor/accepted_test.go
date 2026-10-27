@@ -765,3 +765,118 @@ func TestSelectedAssignmentBarrierErrorStopsWithoutReplyOrRelease(t *testing.T) 
 		t.Fatalf("ambiguous assignment was released or replied: err=%v state=%+v", err, store.Data)
 	}
 }
+
+func TestSelectedReservedThirdAttemptResumesAfterRestart(t *testing.T) {
+	at := time.Now().UTC()
+	accepted := selectedAcceptance(t, at)
+	path := filepath.Join(t.TempDir(), "state.json")
+	store := openStateAt(t, path, at.Add(-time.Minute))
+	store.Data.Accepted = &accepted
+	store.Data.JobFailures[accepted.JobID] = state.JobFailure{
+		Attempts: maxJobAttempts, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline,
+	}
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened := openStateAt(t, path, at.Add(-time.Minute))
+	gh := &fakeGitHub{permission: github.Permission{Permission: "write"}, currentItem: func(github.Item) (github.Item, error) {
+		return selectedItem(at), nil
+	}}
+	var executions int
+	m := selectedMonitor(t, at, gh, selectedHandler(func(job Job) error {
+		executions++
+		if job.AttemptID != accepted.AttemptID || !job.Deadline.Equal(accepted.Deadline) ||
+			reopened.Data.JobFailures[job.ID].Attempts != maxJobAttempts {
+			t.Fatalf("reserved third attempt changed: job=%+v state=%+v", job, reopened.Data)
+		}
+		return nil
+	}))
+	if _, err := m.RunOnce(t.Context(), reopened); err != nil || executions != 1 || len(gh.comments) != 0 ||
+		reopened.Data.Accepted != nil || len(reopened.Data.Processed) != 1 {
+		t.Fatalf("unused third attempt was terminalized: err=%v executions=%d state=%+v", err, executions, reopened.Data)
+	}
+}
+
+func TestSelectedThirdAttemptExpiryPersistsTerminalMarkerBeforeReply(t *testing.T) {
+	at := time.Now().UTC().Add(-9 * time.Minute)
+	accepted := selectedAcceptance(t, at)
+	path := filepath.Join(t.TempDir(), "state.json")
+	store := openStateAt(t, path, at.Add(-time.Minute))
+	store.Data.Accepted = &accepted
+	store.Data.JobFailures[accepted.JobID] = state.JobFailure{
+		Attempts: maxJobAttempts, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline,
+	}
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	replyErr := errors.New("failure reply unavailable")
+	gh := &fakeGitHub{permission: github.Permission{Permission: "write"}, commentErr: replyErr,
+		currentItem: func(github.Item) (github.Item, error) { return selectedItem(at), nil }}
+	m := selectedMonitor(t, at, gh, selectedHandler(func(Job) error {
+		t.Fatal("expired reservation dispatched work")
+		return nil
+	}))
+	if _, err := m.RunOnce(t.Context(), store); !errors.Is(err, replyErr) || store.Data.Accepted == nil ||
+		!store.Data.Accepted.Terminal || store.Data.JobFailures[accepted.JobID].Attempts != maxJobAttempts {
+		t.Fatalf("terminal marker was not saved before reply: err=%v state=%+v", err, store.Data)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened := openStateAt(t, path, at.Add(-time.Minute))
+	if reopened.Data.Accepted == nil || !reopened.Data.Accepted.Terminal {
+		t.Fatalf("terminal marker was lost after restart: %+v", reopened.Data)
+	}
+	reopened.Data.Accepted.RetryAt = time.Now().UTC().Add(-time.Second)
+	if err := reopened.Save(); err != nil {
+		t.Fatal(err)
+	}
+	gh.commentErr = nil
+	if _, err := m.RunOnce(t.Context(), reopened); err != nil || len(gh.comments) != 1 || reopened.Data.Accepted != nil {
+		t.Fatalf("terminal retry redispatched or missed reply: err=%v state=%+v", err, reopened.Data)
+	}
+}
+
+func TestSelectedDiscardRetainsPushedFixHead(t *testing.T) {
+	at := time.Now().UTC()
+	accepted := selectedAcceptance(t, at)
+	accepted.SubjectType, accepted.CommandName, accepted.Action = "Issue", "fix", "fix"
+	accepted.SourceURL = "https://github.com/example-owner/example-repo/issues/7#issuecomment-1"
+	accepted.JobID = jobID(accepted.SourceKey, accepted.CommandName)
+	accepted.Assigned = true
+	const expectedSHA = "0123456789abcdef0123456789abcdef01234567"
+	path := filepath.Join(t.TempDir(), "state.json")
+	store := openStateAt(t, path, at.Add(-time.Minute))
+	store.Data.Accepted = &accepted
+	store.Data.JobFailures[accepted.JobID] = state.JobFailure{
+		Attempts: 1, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline,
+	}
+	store.Data.PendingFixes[accepted.JobID] = state.PendingFix{SHA: expectedSHA}
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	gh := &fakeGitHub{permission: github.Permission{Permission: "write"}, currentItem: func(github.Item) (github.Item, error) {
+		item := selectedItem(at)
+		item.Body, item.Edited = "@linkdataminion fix", true
+		item.HTMLURL = accepted.SourceURL
+		return item, nil
+	}}
+	m := selectedMonitor(t, at, gh, selectedHandler(func(Job) error {
+		t.Fatal("terminal fix redispatched")
+		return nil
+	}))
+	if _, err := m.RunOnce(t.Context(), store); err != nil || store.Data.Accepted != nil || len(gh.comments) != 0 ||
+		store.Data.PendingFixes[accepted.JobID].SHA != expectedSHA {
+		t.Fatalf("discard lost pushed fix head: err=%v state=%+v", err, store.Data)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened := openStateAt(t, path, at.Add(-time.Minute))
+	if reopened.Data.PendingFixes[accepted.JobID].SHA != expectedSHA || len(reopened.Data.Processed) != 1 {
+		t.Fatalf("restart lost pushed fix head: %+v", reopened.Data)
+	}
+}

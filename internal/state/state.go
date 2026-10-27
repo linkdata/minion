@@ -54,6 +54,7 @@ type AcceptedAction struct {
 	Deadline        time.Time `json:"deadline"`
 	RetryAt         time.Time `json:"retry_at,omitempty,omitzero"`
 	Assigned        bool      `json:"assigned"`
+	Terminal        bool      `json:"terminal,omitempty"`
 }
 
 // Validate checks the persisted action identity and absolute runtime window.

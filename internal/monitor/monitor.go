@@ -781,7 +781,8 @@ func jobFromAccepted(accepted state.AcceptedAction) Job {
 }
 
 func (m *Monitor) terminalAccepted(ctx context.Context, store *state.Store, job Job, failure state.JobFailure) error {
-	if failure.Attempts < maxJobAttempts {
+	if !store.Data.Accepted.Terminal || failure.Attempts < maxJobAttempts {
+		store.Data.Accepted.Terminal = true
 		failure.Attempts = maxJobAttempts
 		store.Data.JobFailures[job.ID] = failure
 		if err := saveAcceptanceState(store); err != nil {
@@ -798,7 +799,6 @@ func discardAccepted(store *state.Store) error {
 	}
 	store.Data.Processed[accepted.JobID] = time.Now().UTC()
 	delete(store.Data.JobFailures, accepted.JobID)
-	delete(store.Data.PendingFixes, accepted.JobID)
 	store.Data.Accepted = nil
 	return saveAcceptanceState(store)
 }
@@ -904,7 +904,7 @@ func (m *Monitor) recoverAccepted(ctx context.Context, store *state.Store) error
 	} else if !failure.AcceptedAt.Equal(accepted.AcceptedAt) || !failure.Deadline.Equal(accepted.Deadline) {
 		return fmt.Errorf("%w: accepted action deadline differs from its first acceptance", ErrAcceptanceState)
 	}
-	if accepted.Assigned || failure.ModelCallStarted || failure.Attempts >= maxJobAttempts || !time.Now().Before(job.Deadline) {
+	if accepted.Assigned || accepted.Terminal || failure.ModelCallStarted || !time.Now().Before(job.Deadline) {
 		return m.terminalAccepted(ctx, store, job, failure)
 	}
 	if m.SelectedExecutorID == "" || m.SelectedExecutorID != accepted.ExecutorID {
@@ -990,6 +990,9 @@ func (m *Monitor) executeSelected(ctx context.Context, store *state.Store, job J
 	}
 	if failure.Attempts < 0 {
 		return fmt.Errorf("%w: selected action attempt was over-refunded", ErrAcceptanceState)
+	}
+	if failure.Attempts >= maxJobAttempts {
+		accepted.Terminal = true
 	}
 	store.Data.JobFailures[job.ID] = failure // Keep the first deadline after a proven unused attempt.
 	if failure.Attempts < maxJobAttempts && !accepted.Assigned {
