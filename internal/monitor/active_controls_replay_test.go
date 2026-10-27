@@ -262,3 +262,149 @@ func TestSelectedActionRetriesTerminalSiblingReplyWhileBlocked(t *testing.T) {
 		}
 	})
 }
+
+func TestSelectedActionChecksNewerPendingThreadBeforeRetryAt(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		selected := selectedItem(now.Add(-2 * time.Second))
+		sibling := selectedItem(now.Add(-time.Second))
+		sibling.Key, sibling.NodeID = "comment:2", "node:2"
+		sibling.HTMLURL = "https://github.com/example-owner/example-repo/pull/8#issuecomment-2"
+		siblingID := jobID(sibling.Key, "review")
+		fresh := testNotification(sibling.UpdatedAt)
+		fresh.ID = "thread-2"
+		fresh.Subject.URL = "https://api.github.com/repos/example-owner/example-repo/pulls/8"
+		oldSince := now.Add(-time.Hour)
+		retryAt := now.Add(5 * time.Minute)
+		store := openState(t, now.Add(-time.Minute))
+		store.Data.PendingNotifications[notificationKey(fresh)] = state.PendingNotification{
+			Repository: fresh.Repository.FullName, RepositoryID: 1, OwnerID: 2,
+			SubjectType: fresh.Subject.Type, SubjectURL: fresh.Subject.URL,
+			Since: oldSince, UpdatedAt: now.Add(-2 * time.Minute), RetryAt: retryAt, Failures: 2,
+		}
+		store.Data.JobFailures[siblingID] = state.JobFailure{Attempts: maxJobAttempts}
+		store.Data.NextInviteCheckAt = now.Add(15 * time.Minute)
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		cfg := testConfig(t)
+		cfg.MaxRuntimeMinutes = 7
+		var siblingSince []time.Time
+		gh := &fakeGitHub{
+			notifications: []github.Notification{testNotification(selected.UpdatedAt), fresh},
+			permission:    github.Permission{Permission: "write"},
+			threadItems: func(_ string, number int, since time.Time) ([]github.Item, error) {
+				switch number {
+				case 7:
+					return []github.Item{selected}, nil
+				case 8:
+					siblingSince = append(siblingSince, since)
+					return []github.Item{sibling}, nil
+				default:
+					return nil, fmt.Errorf("unexpected thread #%d", number)
+				}
+			},
+		}
+		held := &heldSelectedAction{entered: make(chan Job, 1), release: make(chan struct{})}
+		m := &Monitor{Config: cfg, GitHub: gh, Handler: held,
+			SelectedExecutorID: "local", SelectedCommands: map[string]bool{"review": true}}
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		result := make(chan error, 1)
+		go func() { _, err := m.RunOnce(ctx, store); result <- err }()
+		select {
+		case <-held.entered:
+		case err := <-result:
+			t.Fatalf("RunOnce returned before Execute: %v", err)
+		}
+		time.Sleep(time.Second)
+		synctest.Wait()
+		pending := store.Data.PendingNotifications[notificationKey(fresh)]
+		if len(gh.comments) != 1 || !strings.HasSuffix(gh.comments[0].Body, "\n\n<!-- linkdataminion:"+siblingID+" -->") ||
+			store.Data.Processed[siblingID].IsZero() || held.executions.Load() != 1 || store.Data.Accepted == nil ||
+			!time.Now().Before(retryAt) || len(siblingSince) == 0 || !siblingSince[0].Equal(oldSince) ||
+			pending.Failures != 2 || !pending.Since.Equal(oldSince) || !pending.UpdatedAt.Equal(fresh.UpdatedAt) {
+			t.Fatalf("newer pending thread was not checked before retry: comments=%v processed=%v executions=%d accepted=%+v since=%v pending=%+v",
+				gh.comments, store.Data.Processed[siblingID], held.executions.Load(), store.Data.Accepted, siblingSince, pending)
+		}
+		cancel()
+		synctest.Wait()
+		if err := <-result; !errors.Is(err, context.Canceled) {
+			t.Fatalf("RunOnce after cancellation: %v", err)
+		}
+	})
+}
+
+func TestSelectedReviewWorkerRepliesToTerminalFixWithoutSkill(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		selected := selectedItem(now.Add(-2 * time.Second))
+		fix := selectedItem(now.Add(-time.Second))
+		fix.Key, fix.NodeID = "comment:2", "node:2"
+		fix.Body = "@linkdataminion fix"
+		fix.HTMLURL = "https://github.com/example-owner/example-repo/pull/8#issuecomment-2"
+		fixID := jobID(fix.Key, "fix")
+		pendingNotice := testNotification(fix.UpdatedAt)
+		pendingNotice.ID = "thread-2"
+		pendingNotice.Subject.URL = "https://api.github.com/repos/example-owner/example-repo/pulls/8"
+		initial := now.Add(-time.Minute)
+		store := openState(t, initial)
+		store.Data.PendingNotifications[notificationKey(pendingNotice)] = state.PendingNotification{
+			Repository: pendingNotice.Repository.FullName, RepositoryID: 1, OwnerID: 2,
+			SubjectType: pendingNotice.Subject.Type, SubjectURL: pendingNotice.Subject.URL,
+			Since: initial, UpdatedAt: pendingNotice.UpdatedAt,
+		}
+		store.Data.JobFailures[fixID] = state.JobFailure{Attempts: maxJobAttempts}
+		store.Data.NextInviteCheckAt = now.Add(15 * time.Minute)
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		cfg := testConfig(t)
+		cfg.MaxRuntimeMinutes = 7
+		if err := os.Remove(filepath.Join(os.Getenv("HOME"), ".agents", "skills", "fix", "SKILL.md")); err != nil {
+			t.Fatal(err)
+		}
+		if installed, _ := cfg.CommandInstalled("fix"); installed {
+			t.Fatal("fix skill is still installed")
+		}
+		gh := &fakeGitHub{
+			notifications: []github.Notification{testNotification(selected.UpdatedAt)},
+			permission:    github.Permission{Permission: "write"},
+			threadItems: func(_ string, number int, _ time.Time) ([]github.Item, error) {
+				switch number {
+				case 7:
+					return []github.Item{selected}, nil
+				case 8:
+					return []github.Item{fix}, nil
+				default:
+					return nil, fmt.Errorf("unexpected thread #%d", number)
+				}
+			},
+		}
+		held := &heldSelectedAction{entered: make(chan Job, 1), release: make(chan struct{})}
+		m := &Monitor{Config: cfg, GitHub: gh, Handler: held,
+			SelectedExecutorID: "local", SelectedCommands: map[string]bool{"review": true}}
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		result := make(chan error, 1)
+		go func() { _, err := m.RunOnce(ctx, store); result <- err }()
+		select {
+		case <-held.entered:
+		case err := <-result:
+			t.Fatalf("RunOnce returned before Execute: %v", err)
+		}
+		time.Sleep(time.Second)
+		synctest.Wait()
+		if len(gh.comments) != 1 || !strings.HasSuffix(gh.comments[0].Body, "\n\n<!-- linkdataminion:"+fixID+" -->") ||
+			store.Data.Processed[fixID].IsZero() || held.executions.Load() != 1 || store.Data.Accepted == nil ||
+			len(gh.reactions) != 1 || gh.reactions[0] != selected.NodeID {
+			t.Fatalf("terminal fix was dispatched or missed: comments=%v processed=%v executions=%d accepted=%+v reactions=%v",
+				gh.comments, store.Data.Processed[fixID], held.executions.Load(), store.Data.Accepted, gh.reactions)
+		}
+		cancel()
+		synctest.Wait()
+		if err := <-result; !errors.Is(err, context.Canceled) {
+			t.Fatalf("RunOnce after cancellation: %v", err)
+		}
+	})
+}

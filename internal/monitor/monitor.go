@@ -539,6 +539,12 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			}
 			if selected {
 				for _, unaccepted := range scans[scanIndex:] {
+					if pending, exists := store.Data.PendingNotifications[unaccepted.key]; exists &&
+						unaccepted.notification.UpdatedAt.After(pending.UpdatedAt) {
+						pending.UpdatedAt = unaccepted.notification.UpdatedAt
+						pending.RetryAt = time.Time{} // A new thread update supersedes the old retry delay.
+						store.Data.PendingNotifications[unaccepted.key] = pending
+					}
 					rememberNotification(store, unaccepted.key, unaccepted.notification, unaccepted.since)
 				}
 				if err := saveAcceptanceState(store); err != nil {
@@ -796,6 +802,17 @@ func (m *Monitor) availableCommands(repo config.Repository) map[string]command.A
 		}
 	}
 	return available
+}
+
+// Control replies use configured commands even when the selected worker cannot execute them.
+func (m *Monitor) controlCommands(repo config.Repository) map[string]command.Action {
+	commands := make(map[string]command.Action, len(repo.Actions))
+	for _, name := range repo.Actions {
+		if mapping, ok := m.Config.Commands[name]; ok {
+			commands[name] = command.Action(mapping.Action)
+		}
+	}
+	return commands
 }
 
 func notificationKey(notification github.Notification) string {
@@ -1220,7 +1237,7 @@ func (m *Monitor) executeSelectedWithControls(ctx context.Context, store *state.
 	cachedKey string, cachedItems []github.Item) error {
 	commandSets := make(map[string]map[string]command.Action, len(m.Config.Repositories))
 	for _, configured := range m.Config.Repositories {
-		commandSets[configured.Name] = m.availableCommands(configured)
+		commandSets[configured.Name] = m.controlCommands(configured)
 	}
 	actionCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
