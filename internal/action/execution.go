@@ -303,7 +303,8 @@ func (c *executionCheckpoints) finish(result Result, runErr error) error {
 	if !claimedSuccess {
 		// An admitted model call may have incurred a charge even without a receipt.
 		// The parent owns this checkpoint; worker failure flags do not set retry policy.
-		if !errors.Is(runErr, monitor.ErrTerminalJob) && (c.pending != nil || c.returned != nil || len(c.calls) != 0) {
+		if !errors.Is(runErr, monitor.ErrTerminalJob) && !errors.Is(runErr, errAcceptedResultSavedForRetry) &&
+			(c.pending != nil || c.returned != nil || len(c.calls) != 0) {
 			runErr = errors.Join(runErr, monitor.ErrExecutionOutcomeUnknown)
 		}
 		// A failed AfterCall may return exactly its captured receipt after the acknowledged prefix.

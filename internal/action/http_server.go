@@ -729,6 +729,7 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 		}
 		failedOutcome = outcome.Failure != nil
 		apply = func() error {
+			var savedRetry error
 			// A successful outcome is acknowledged only after its optional parent
 			// receiver has validated and saved the complete selected attempt.
 			if !failedOutcome {
@@ -752,12 +753,18 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 				}
 				if hasReceiver {
 					if err := receiver.ReceiveCompletedResult(outcome.Result); err != nil {
-						return err
+						if !errors.Is(err, errAcceptedResultSavedForRetry) {
+							return err
+						}
+						savedRetry = err
 					}
 				}
 			}
 			tx.mu.Lock()
-			tx.result, tx.runErr = outcome.Result, errors.Join(outcome.Failure.workerErr(), tx.checkpointErr)
+			tx.result, tx.runErr = outcome.Result, errors.Join(outcome.Failure.workerErr(), tx.checkpointErr, savedRetry)
+			if savedRetry != nil {
+				tx.quarantine = true // The worker receives a failed outcome ACK.
+			}
 			for _, diagnostic := range outcome.Result.Diagnostics {
 				if diagnostic.Code == "cleanup_failed" {
 					tx.quarantine = true
@@ -774,7 +781,7 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 			tx.outcome, tx.fenced = true, true
 			close(tx.done)
 			tx.mu.Unlock()
-			return nil
+			return savedRetry
 		}
 	}
 	if err == nil {

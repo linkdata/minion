@@ -3,7 +3,9 @@ package action
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -165,6 +167,84 @@ func TestSelectedHTTPOutcomePersistsCompleteRecordBeforeACK(t *testing.T) {
 	record, err := readSavedResult(store)
 	if err != nil || !record.MatchesAccepted(*store.Data.Accepted) || !reflect.DeepEqual(record.Job, f.job) || !reflect.DeepEqual(record.Result, outcome.Result) {
 		t.Fatalf("durable original job or complete result differs: record=%+v error=%v", record, err)
+	}
+}
+
+func TestSelectedAuditUnavailableSavesResultForRecoveryWithoutACK(t *testing.T) {
+	installActionTestSkills(t, testAuditSkillURL)
+	fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
+	nodePath := os.Getenv("PATH")
+	job := testJob(command.SecurityAudit)
+	job.Identity.Repository = "o/r"
+	f, store, _ := selectedHTTPResultFixtureForJob(t, job, nil)
+	outcome := completeHTTPResult(t, f)
+	audit := completeAuditResult(f.job)
+	outcome.Result.Answer, outcome.Result.Artifacts = audit.Answer, audit.Artifacts
+	if err := outcome.Result.Validate(f.job); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", t.TempDir()) // The publishing validator disappears after model work.
+	ack := f.request("/outcome", outcome)
+	if ack.err != nil || ack.status != http.StatusInternalServerError || ack.ack.Failure == nil || ack.ack.Failure.Terminal {
+		t.Fatalf("unavailable validator received a successful or terminal ACK: %+v", ack)
+	}
+	record, err := readSavedResult(store)
+	if err != nil || !reflect.DeepEqual(record.Result, outcome.Result) {
+		t.Fatalf("unavailable validator lost the complete result: record=%+v error=%v", record, err)
+	}
+	got := f.result(t)
+	if !reflect.DeepEqual(got.result, outcome.Result) || !errors.Is(got.err, monitor.ErrPostModelPublication) ||
+		errors.Is(got.err, monitor.ErrTerminalJob) || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) {
+		t.Fatalf("saved outcome was not a known publication retry: result=%+v error=%v", got.result, got.err)
+	}
+	if err := f.tx.sink.(*executionCheckpoints).finish(got.result, got.err); !errors.Is(err, monitor.ErrPostModelPublication) ||
+		errors.Is(err, monitor.ErrTerminalJob) || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) {
+		t.Fatalf("saved outcome became terminal or unknown after checkpoint finish: %v", err)
+	}
+
+	t.Setenv("PATH", nodePath)
+	var posts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7/comments":
+			_, _ = fmt.Fprint(w, `[]`)
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
+			_, _ = fmt.Fprint(w, publicRepositoryJSON)
+		case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/issues/7/comments":
+			posts.Add(1)
+			w.WriteHeader(http.StatusCreated)
+			_, _ = fmt.Fprint(w, `{"id":1}`)
+		default:
+			t.Errorf("unexpected recovered audit request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	checkpoints := f.tx.sink.(*executionCheckpoints)
+	recovered := &Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot",
+		WorkRoot: checkpoints.owner.WorkRoot, Runner: Runner{runModel: forbidModel(t)}}
+	if err := recovered.PublishRecovered(t.Context(), checkpoints.assignmentRequest); err != nil || posts.Load() != 1 {
+		t.Fatalf("restored validator did not publish saved audit: posts=%d error=%v", posts.Load(), err)
+	}
+}
+
+func TestSelectedAuditInvalidValidatorResultDoesNotSave(t *testing.T) {
+	installActionTestSkills(t, testAuditSkillURL)
+	fakeOnPath(t, "node", "#!/bin/sh\ncase \"$2\" in -e) exit 0;; esac\nexit 9\n")
+	job := testJob(command.SecurityAudit)
+	f, store, _ := selectedHTTPResultFixtureForJob(t, job, nil)
+	outcome := completeHTTPResult(t, f)
+	audit := completeAuditResult(f.job)
+	outcome.Result.Answer, outcome.Result.Artifacts = audit.Answer, audit.Artifacts
+	if err := outcome.Result.Validate(f.job); err != nil {
+		t.Fatal(err)
+	}
+	ack := f.request("/outcome", outcome)
+	if ack.err != nil || ack.status != http.StatusInternalServerError || ack.ack.Failure == nil || !ack.ack.Failure.Terminal {
+		t.Fatalf("invalid audit validator result was not terminal: %+v", ack)
+	}
+	if _, err := store.ReadAcceptedResult(AcceptedResultMaxBytes); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("invalid audit validator result left a publishable sidecar: %v", err)
 	}
 }
 

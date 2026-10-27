@@ -20,6 +20,9 @@ const AcceptedResultMaxBytes int64 = httpJobBytes + httpOutcomeBytes + 1<<20
 
 const acceptedResultMetadataBytes = 1<<20 - 4096
 
+// Only a completed result already saved for replay can use this retry path.
+var errAcceptedResultSavedForRetry = errors.New("accepted result saved for publication retry")
+
 // AcceptedResultRecord retains the complete supplied input and validated output
 // for publication after a process restart. Accepted is the save-time identity.
 type AcceptedResultRecord struct {
@@ -151,11 +154,15 @@ func (c *executionCheckpoints) ReceiveCompletedResult(result Result) error {
 	if err == nil {
 		err = rejectPublishedRefutations(c.job, result, published)
 	}
+	var auditUnavailable error
 	if err == nil && c.job.Action == command.SecurityAudit {
 		if c.assignmentContext == nil {
 			err = errors.New("audit validation context is missing")
 		} else {
 			err = c.owner.validateAuditForPublication(c.assignmentContext, c.job, result.Artifacts)
+			if errors.Is(err, errAuditPublicationUnavailable) {
+				auditUnavailable, err = err, nil
+			}
 		}
 	}
 	if err != nil {
@@ -187,7 +194,7 @@ func (c *executionCheckpoints) ReceiveCompletedResult(result Result) error {
 	if err != nil {
 		return c.fail(fmt.Errorf("%w: encode accepted result: %w", monitor.ErrTerminalJob, err))
 	}
-	return c.owner.Store.WithLock(func() error {
+	if err := c.owner.Store.WithLock(func() error {
 		a := c.owner.Store.Data.Accepted
 		if a == nil || !record.MatchesAccepted(*a) || !jobMatchesAccepted(c.job, *a) ||
 			!requestMatchesAccepted(c.assignmentRequest, *a) || !a.Assigned || a.Terminal || !time.Now().Before(a.Deadline) {
@@ -197,7 +204,13 @@ func (c *executionCheckpoints) ReceiveCompletedResult(result Result) error {
 			return c.fail(fmt.Errorf("%w: save accepted result: %w", monitor.ErrAcceptanceState, err))
 		}
 		return nil
-	})
+	}); err != nil {
+		return err
+	}
+	if auditUnavailable != nil {
+		return c.fail(fmt.Errorf("%w: %w: audit validation unavailable: %w", errAcceptedResultSavedForRetry, monitor.ErrPostModelPublication, auditUnavailable))
+	}
+	return nil
 }
 
 var _ interface{ ReceiveCompletedResult(Result) error } = (*executionCheckpoints)(nil)

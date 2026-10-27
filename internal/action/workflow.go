@@ -67,6 +67,9 @@ func (e *Orchestrator) perform(ctx context.Context, request monitor.Job) (result
 		result, err = executor.Execute(ctx, prepared.job, checkpoints)
 		err = checkpoints.finish(result, err)
 		if err != nil {
+			if errors.Is(err, errAcceptedResultSavedForRetry) {
+				return err // Complete result awaits host validation; replay owns retention.
+			}
 			evidence := checkpoints.failureEvidence()
 			err = errors.Join(err, e.retentionForSavedResult(prepared.job, e.retainWorkerDiagnostics(prepared.job, result, err)))
 			e.logResult(prepared.job, evidence)
