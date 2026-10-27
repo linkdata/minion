@@ -387,7 +387,11 @@ func (e *Orchestrator) prepareFix(ctx context.Context, p *preparedAction) (*prep
 	if err != nil {
 		return nil, err
 	}
-	expected := e.Store.Data.PendingFixes[request.ID]
+	var expected state.PendingFix
+	_ = e.Store.WithLock(func() error {
+		expected = e.Store.Data.PendingFixes[request.ID]
+		return nil
+	})
 	remote, err := e.GitHub.Branch(ctx, fork.FullName, p.branch)
 	if err == nil {
 		if remote.Name != p.branch || expected.SHA == "" || remote.Commit.SHA != expected.SHA {
@@ -402,8 +406,10 @@ func (e *Orchestrator) prepareFix(ctx context.Context, p *preparedAction) (*prep
 		return nil, fmt.Errorf("branch %s has a pull request but no remote branch", p.branch)
 	}
 	if expected.SHA != "" {
-		delete(e.Store.Data.PendingFixes, request.ID)
-		if err := e.Store.Save(); err != nil {
+		if err := e.Store.WithLock(func() error {
+			delete(e.Store.Data.PendingFixes, request.ID)
+			return e.Store.Save()
+		}); err != nil {
 			return nil, fmt.Errorf("clear failed fork push checkpoint: %w", err)
 		}
 	}
@@ -465,8 +471,10 @@ func (e *Orchestrator) publishFix(ctx context.Context, p *preparedAction, result
 		if _, err := e.currentFixIssue(ctx, p); err != nil {
 			return err
 		}
-		e.Store.Data.PendingFixes[request.ID] = state.PendingFix{SHA: sha, Cap: published.cap}
-		return e.Store.Save()
+		return e.Store.WithLock(func() error {
+			e.Store.Data.PendingFixes[request.ID] = state.PendingFix{SHA: sha, Cap: published.cap}
+			return e.Store.Save()
+		})
 	}); err != nil {
 		if errors.Is(err, errFixIssueChanged) {
 			return e.acknowledge(ctx, request, fixIssueChangedReply)
@@ -481,7 +489,11 @@ func (e *Orchestrator) publishFix(ctx context.Context, p *preparedAction, result
 
 func (e *Orchestrator) publishFixReply(ctx context.Context, p *preparedAction) error {
 	request, repo, fork, branch := p.request, p.repository, p.fork, p.branch
-	expected := e.Store.Data.PendingFixes[request.ID]
+	var expected state.PendingFix
+	_ = e.Store.WithLock(func() error {
+		expected = e.Store.Data.PendingFixes[request.ID]
+		return nil
+	})
 	notice, err := criticCapNotice(expected.Cap)
 	if err != nil {
 		return fmt.Errorf("%w: invalid saved fix outcome: %w", monitor.ErrTerminalJob, err)

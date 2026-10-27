@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/linkdata/minion/internal/workspace"
@@ -113,6 +114,7 @@ type JobFailure struct {
 	Attempts         int       `json:"attempts"`
 	ReplyAttempts    int       `json:"reply_attempts,omitempty"`
 	ModelCallStarted bool      `json:"model_call_started,omitempty"`
+	NotificationKey  string    `json:"notification_key,omitempty"`
 	AcceptedAt       time.Time `json:"accepted_at,omitzero"`
 	Deadline         time.Time `json:"deadline,omitzero"`
 }
@@ -128,8 +130,16 @@ func (f JobFailure) Validate() error {
 type Store struct {
 	path    string
 	lock    *os.File
+	mu      sync.Mutex
 	syncDir string // Test-only extra directory for a post-rename sync failure.
 	Data    Data
+}
+
+// WithLock serializes in-process access to Data and saves while an action runs beside controls.
+func (s *Store) WithLock(fn func() error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return fn()
 }
 
 // Open loads state while holding an exclusive lock until [Store.Close].

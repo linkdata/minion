@@ -192,7 +192,7 @@ func TestFinalDiscardStopsSelectedDiscoveryUntilWorkerRestarts(t *testing.T) {
 	calls := 0
 	m.Handler = selectedHandler(func(Job) error {
 		calls++
-		if err := discardAccepted(store); err != nil {
+		if err := store.WithLock(func() error { return discardAccepted(store) }); err != nil {
 			return err
 		}
 		return ErrAcceptedDiscarded

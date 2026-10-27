@@ -1081,15 +1081,36 @@ func TestRunHTTPOutcomeACKPreservesKnownReceiptAfterWatchFailure(t *testing.T) {
 				}
 			}
 			var workerErr error
+			if test.early || test.duringOutcome {
+				// Keep fixture startup outside the watch-drain deadline.
+				gate := started
+				if test.duringOutcome {
+					gate = outcomeEntered
+				}
+				select {
+				case <-gate:
+				case workerErr = <-done:
+					finished = true
+					select {
+					case <-gate:
+					default:
+						t.Fatalf("worker returned before gated watch phase: %v", workerErr)
+					}
+				case <-time.After(30 * time.Second):
+					t.Fatal("worker did not reach gated watch phase")
+				}
+			}
 			wait := 5 * time.Second
 			if test.expiredAfterWatch {
 				wait = 30 * time.Second
 			}
-			select {
-			case workerErr = <-done:
-				finished = true
-			case <-time.After(wait):
-				t.Fatal("worker did not drain its outcome and gated watch")
+			if !finished {
+				select {
+				case workerErr = <-done:
+					finished = true
+				case <-time.After(wait):
+					t.Fatal("worker did not drain its outcome and gated watch")
+				}
 			}
 			got := parent.result(t)
 			callerFailure := test.externalCause || test.callerBeforeOutcome
