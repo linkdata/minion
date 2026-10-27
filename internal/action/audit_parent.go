@@ -43,7 +43,7 @@ func (e *Orchestrator) validateAuditForPublication(ctx context.Context, job Job,
 		return fmt.Errorf("%w: audit prerequisites: %w", errAuditPublicationUnavailable, err)
 	}
 	if err := validateAuditFiles(ctx, files, validationDir, skill, tools, job.Identity.Repository, sourceIdentity(job), job.Source.Head); err != nil {
-		if errors.Is(err, os.ErrNotExist) || errors.Is(err, os.ErrPermission) {
+		if auditValidationUnavailable(err) {
 			return fmt.Errorf("%w: audit validator execution: %w", errAuditPublicationUnavailable, err)
 		}
 		if scriptErr := checkAuditValidatorScripts(skill); scriptErr != nil {
@@ -52,4 +52,8 @@ func (e *Orchestrator) validateAuditForPublication(ctx context.Context, job Job,
 		return err
 	}
 	return nil
+}
+
+func auditValidationUnavailable(err error) bool {
+	return errors.Is(err, os.ErrNotExist) || retryableRetentionIO(err)
 }

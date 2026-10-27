@@ -46,6 +46,30 @@ func TestRetentionFailureClassification(t *testing.T) {
 				t.Fatalf("Win32 disk-full classification for %d: %v", code, err)
 			}
 		}
+		for _, code := range []syscall.Errno{32, 33} {
+			if err := retainedRecordFailure("retain record", &os.LinkError{Op: "rename", Old: "temporary", New: "record", Err: code}); !errors.Is(err, monitor.ErrPostModelPublication) || errors.Is(err, monitor.ErrTerminalJob) {
+				t.Fatalf("Win32 sharing/lock classification for %d: %v", code, err)
+			}
+		}
+	}
+}
+
+func TestWindowsPrivateRecordRenameContentionKeepsSavedResultRetryable(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Win32 rename errors")
+	}
+	job := testJob(command.Comment)
+	store, _, _ := savedRecoveryFixture(t, job, completedRecoveryResult(job))
+	e := &Orchestrator{Store: store}
+	for _, code := range []syscall.Errno{32, 33} {
+		cause := &os.LinkError{Op: "rename", Old: "temporary", New: "record", Err: code}
+		err := e.retentionForSavedResult(job, retainedRecordFailure("save private record", cause))
+		if !errors.Is(err, monitor.ErrPostModelPublication) || errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, cause) {
+			t.Fatalf("Win32 rename contention %d lost saved-result retry: %v", code, err)
+		}
+		if present, err := store.HasAcceptedResult(); err != nil || !present {
+			t.Fatalf("Win32 rename contention %d lost saved result: present=%t error=%v", code, present, err)
+		}
 	}
 }
 

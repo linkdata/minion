@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/linkdata/minion/internal/command"
@@ -190,5 +191,27 @@ func TestSavedAuditWaitsForReadablePublishingValidator(t *testing.T) {
 	}
 	if err := orchestrator.PublishRecovered(t.Context(), request); err != nil || posts != 1 {
 		t.Fatalf("restored validator did not publish saved audit: posts=%d error=%v", posts, err)
+	}
+}
+
+func TestAuditValidationHostIOClassification(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		cause error
+		retry bool
+	}{
+		{"artifact copy full", &os.PathError{Op: "write", Path: "findings.json", Err: syscall.ENOSPC}, true},
+		{"artifact copy I/O", &os.PathError{Op: "write", Path: "findings.json", Err: syscall.EIO}, true},
+		{"validator launch descriptors", &os.PathError{Op: "fork/exec", Path: "node", Err: syscall.EMFILE}, true},
+		{"validator missing", os.ErrNotExist, true},
+		{"invalid content", errors.New("audit metadata is invalid"), false},
+		{"invalid content and I/O", errors.Join(errors.New("audit metadata is invalid"), syscall.ENOSPC), false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := fmt.Errorf("audit validation: %w", test.cause)
+			if got := auditValidationUnavailable(err); got != test.retry {
+				t.Fatalf("host I/O classification = %t for %v", got, err)
+			}
+		})
 	}
 }

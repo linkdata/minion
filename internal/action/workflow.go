@@ -411,11 +411,8 @@ func (e *Orchestrator) retainAudit(ctx context.Context, p *preparedAction, files
 				return err
 			}
 			if err := os.Rename(stage, dir); err != nil {
-				if _, statErr := os.Lstat(dir); statErr != nil {
-					return errors.Join(err, statErr)
-				}
-				if checkErr := workspace.CheckUnchanged(ctx, dir, files); checkErr != nil {
-					return errors.Join(err, fmt.Errorf("retained completed audit differs from accepted result: %w", checkErr))
+				if err := completedAuditRenameFailure(ctx, dir, files, err); err != nil {
+					return err
 				}
 			}
 		}
@@ -431,6 +428,19 @@ func (e *Orchestrator) retainAudit(ctx context.Context, p *preparedAction, files
 		return errors.Join(err, os.RemoveAll(dir))
 	}
 	e.logf("audit %s #%d at %s; reports: %s", p.job.Identity.Repository, p.job.Identity.Number, p.job.Source.Head, dir)
+	return nil
+}
+
+func completedAuditRenameFailure(ctx context.Context, dir string, files []workspace.File, renameErr error) error {
+	if _, statErr := os.Lstat(dir); statErr != nil {
+		if errors.Is(statErr, os.ErrNotExist) {
+			return renameErr
+		}
+		return errors.Join(renameErr, statErr)
+	}
+	if checkErr := workspace.CheckUnchanged(ctx, dir, files); checkErr != nil {
+		return errors.Join(renameErr, fmt.Errorf("retained completed audit differs from accepted result: %w", checkErr))
+	}
 	return nil
 }
 

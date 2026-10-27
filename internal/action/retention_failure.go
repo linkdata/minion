@@ -38,8 +38,9 @@ func retryableRetentionIO(err error) bool {
 		return true
 	}
 	if runtime.GOOS == "windows" {
-		// Win32 ERROR_HANDLE_DISK_FULL, ERROR_DISK_FULL, ERROR_DISK_QUOTA_EXCEEDED.
-		return errors.Is(err, syscall.Errno(39)) || errors.Is(err, syscall.Errno(112)) || errors.Is(err, syscall.Errno(1295))
+		// Win32 sharing/lock contention and disk-full/quota errors.
+		return errors.Is(err, syscall.Errno(32)) || errors.Is(err, syscall.Errno(33)) ||
+			errors.Is(err, syscall.Errno(39)) || errors.Is(err, syscall.Errno(112)) || errors.Is(err, syscall.Errno(1295))
 	}
 	return false
 }
