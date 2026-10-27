@@ -76,12 +76,10 @@ func TestUsageSessionOverflowRetainsCurrentInvocationLowerBound(t *testing.T) {
 }
 
 func TestUsageRecordLimit(t *testing.T) {
-	if testing.Short() {
-		t.Skip("scans the actual 100000-record identity boundary")
-	}
+	const recordLimit = 1000
 	var events strings.Builder
 	events.WriteString(usageEvent("task_started", "turn") + "\n")
-	for i := range maxUsageRecords {
+	for i := range recordLimit {
 		events.WriteString(usageRecord("root", "turn", fmt.Sprint(i), 1, 0, 0) + "\n")
 	}
 	events.WriteString(usageEvent("task_complete", "turn"))
@@ -93,19 +91,19 @@ func TestUsageRecordLimit(t *testing.T) {
 		}
 		budget := int64(maxUsageScanBytes)
 		capture := &usageBoundary{valid: true, turns: map[string]bool{}}
-		got, complete, _, err := readRolloutUsageFrom(t.Context(), rolloutMeta{ID: "root", path: path}, "root", &budget, rolloutUsageMode{capture: capture})
-		if got != (usage.Tokens{Input: maxUsageRecords}) || complete == extra || err != nil {
+		got, complete, _, err := readRolloutUsageFrom(t.Context(), rolloutMeta{ID: "root", path: path}, "root", &budget, rolloutUsageMode{capture: capture, recordLimit: recordLimit})
+		if got != (usage.Tokens{Input: recordLimit}) || complete == extra || err != nil {
 			t.Fatalf("record cap: %+v complete=%t extra=%t err=%v", got, complete, extra, err)
 		}
-		if len(capture.responses) != maxUsageRecords || capture.valid == extra || !capture.prefixKnown || !capture.completed {
+		if len(capture.responses) != recordLimit || capture.valid == extra || !capture.prefixKnown || !capture.completed {
 			t.Fatalf("response cap lost bounded history or physical/lifecycle proof: responses=%d valid=%t prefixKnown=%t completed=%t", len(capture.responses), capture.valid, capture.prefixKnown, capture.completed)
 		}
 	}
 	// Logical retention limits must not stop a later trustworthy root floor.
-	appendUsageEvents(t, path, usageSnapshot(30, maxUsageRecords+17, 0, 0))
+	appendUsageEvents(t, path, usageSnapshot(30, recordLimit+17, 0, 0))
 	budget := int64(maxUsageScanBytes)
-	got, complete, _, err := readRolloutUsage(t.Context(), rolloutMeta{ID: "root", path: path}, "root", &budget)
-	if got != (usage.Tokens{Input: maxUsageRecords + 17}) || complete || err != nil {
+	got, complete, _, err := readRolloutUsageFrom(t.Context(), rolloutMeta{ID: "root", path: path}, "root", &budget, rolloutUsageMode{recordLimit: recordLimit})
+	if got != (usage.Tokens{Input: recordLimit + 17}) || complete || err != nil {
 		t.Fatalf("record cap lost later root lower bound: %+v complete=%t err=%v", got, complete, err)
 	}
 	// Losing counters must not by itself revoke known helper completion.
@@ -113,8 +111,8 @@ func TestUsageRecordLimit(t *testing.T) {
 	child := writeUsageRollout(t, t.TempDir(), "child", "root", childEvents, usageRecord("child", "turn", "one-more", 1, 0, 0), usageEvent("task_complete", "turn"))
 	boundary := int64(9)
 	budget = maxUsageScanBytes
-	got, complete, _, err = readRolloutUsage(t.Context(), rolloutMeta{ID: "child", path: child, HistoryStart: &boundary}, "root", &budget)
-	if got != (usage.Tokens{Input: maxUsageRecords}) || complete || err != nil {
+	got, complete, _, err = readRolloutUsageFrom(t.Context(), rolloutMeta{ID: "child", path: child, HistoryStart: &boundary}, "root", &budget, rolloutUsageMode{recordLimit: recordLimit})
+	if got != (usage.Tokens{Input: recordLimit}) || complete || err != nil {
 		t.Fatalf("counter-only cap revoked helper lifecycle proof: %+v complete=%t err=%v", got, complete, err)
 	}
 }
@@ -252,9 +250,7 @@ func TestUnchangedUsageRolloutRespectsExactRemainingBudget(t *testing.T) {
 }
 
 func TestUsageDiscoveryExactWalkLimitAndNextEntry(t *testing.T) {
-	if testing.Short() {
-		t.Skip("creates the actual 100000-entry discovery boundary")
-	}
+	const walkLimit = 1000
 	home := t.TempDir()
 	sessions := filepath.Join(home, "sessions")
 	if err := os.Mkdir(sessions, 0700); err != nil {
@@ -265,7 +261,7 @@ func TestUsageDiscoveryExactWalkLimitAndNextEntry(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Only directory children are visited; root.jsonl consumes one entry.
-	for i := range maxUsageWalkEntries - 1 {
+	for i := range walkLimit - 1 {
 		if err := os.WriteFile(filepath.Join(sessions, fmt.Sprintf("unrelated-%06d", i)), nil, 0600); err != nil {
 			t.Fatal(err)
 		}
@@ -277,7 +273,7 @@ func TestUsageDiscoveryExactWalkLimitAndNextEntry(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		files, ambiguous, complete := usageFiles(t.Context(), home, "root", time.Now(), known)
+		files, ambiguous, complete := usageFilesWithLimit(t.Context(), home, "root", time.Now(), known, walkLimit)
 		if complete == extra || len(files) != 1 || ambiguous["root"] || files["root"].path != path {
 			t.Fatalf("walk limit: complete=%t extra=%t files=%+v ambiguous=%v", complete, extra, files, ambiguous)
 		}
