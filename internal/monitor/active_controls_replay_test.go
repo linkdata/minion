@@ -152,6 +152,7 @@ func TestSelectedActionChecksSiblingAtJobDeadline(t *testing.T) {
 		store := openState(t, now.Add(-time.Minute))
 		store.Data.JobFailures[siblingID] = state.JobFailure{
 			Attempts: 1, AcceptedAt: now.Add(-time.Minute), Deadline: deadline,
+			NotificationKey: notificationKey(testNotification(selected.UpdatedAt)),
 		}
 		store.Data.NextInviteCheckAt = now.Add(15 * time.Minute)
 		if err := store.Save(); err != nil {
@@ -295,7 +296,7 @@ func TestSelectedActionRetriesTerminalSiblingReplyWhileBlocked(t *testing.T) {
 		sibling.HTMLURL = "https://github.com/example-owner/example-repo/pull/7#issuecomment-2"
 		siblingID := jobID(sibling.Key, "review")
 		store := openState(t, now.Add(-time.Minute))
-		store.Data.JobFailures[siblingID] = state.JobFailure{Attempts: maxJobAttempts}
+		store.Data.JobFailures[siblingID] = state.JobFailure{Attempts: maxJobAttempts, NotificationKey: notificationKey(testNotification(selected.UpdatedAt))}
 		store.Data.NextInviteCheckAt = now.Add(15 * time.Minute)
 		if err := store.Save(); err != nil {
 			t.Fatal(err)
@@ -371,7 +372,7 @@ func TestSelectedActionChecksNewerPendingThreadBeforeRetryAt(t *testing.T) {
 			SubjectType: fresh.Subject.Type, SubjectURL: fresh.Subject.URL,
 			Since: oldSince, UpdatedAt: now.Add(-2 * time.Minute), RetryAt: retryAt, Failures: 2,
 		}
-		store.Data.JobFailures[siblingID] = state.JobFailure{Attempts: maxJobAttempts}
+		store.Data.JobFailures[siblingID] = state.JobFailure{Attempts: maxJobAttempts, NotificationKey: notificationKey(fresh)}
 		store.Data.NextInviteCheckAt = now.Add(15 * time.Minute)
 		if err := store.Save(); err != nil {
 			t.Fatal(err)
@@ -443,7 +444,7 @@ func TestSelectedReviewWorkerRepliesToTerminalFixWithoutSkill(t *testing.T) {
 			SubjectType: pendingNotice.Subject.Type, SubjectURL: pendingNotice.Subject.URL,
 			Since: initial, UpdatedAt: pendingNotice.UpdatedAt,
 		}
-		store.Data.JobFailures[fixID] = state.JobFailure{Attempts: maxJobAttempts}
+		store.Data.JobFailures[fixID] = state.JobFailure{Attempts: maxJobAttempts, NotificationKey: notificationKey(pendingNotice)}
 		store.Data.NextInviteCheckAt = now.Add(15 * time.Minute)
 		if err := store.Save(); err != nil {
 			t.Fatal(err)
@@ -662,7 +663,7 @@ func TestSelectedReactionRecoveryServicesTerminalSibling(t *testing.T) {
 		initial := now.Add(-time.Minute)
 		path := filepath.Join(t.TempDir(), "state.json")
 		store := openStateAt(t, path, initial)
-		store.Data.JobFailures[siblingID] = state.JobFailure{Attempts: maxJobAttempts}
+		store.Data.JobFailures[siblingID] = state.JobFailure{Attempts: maxJobAttempts, NotificationKey: notificationKey(testNotification(selected.UpdatedAt))}
 		if err := store.Save(); err != nil {
 			t.Fatal(err)
 		}
@@ -1154,7 +1155,7 @@ func TestSelectedControlClearsResolvedScanReplyError(t *testing.T) {
 		review := selectedItem(now.Add(-time.Second))
 		id := jobID(terminal.Key, "review")
 		store := openState(t, now.Add(-time.Minute))
-		store.Data.JobFailures[id] = state.JobFailure{Attempts: maxJobAttempts}
+		store.Data.JobFailures[id] = state.JobFailure{Attempts: maxJobAttempts, NotificationKey: notificationKey(testNotification(review.UpdatedAt))}
 		store.Data.NextInviteCheckAt = now.Add(15 * time.Minute)
 		if err := store.Save(); err != nil {
 			t.Fatal(err)

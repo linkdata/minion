@@ -898,7 +898,7 @@ func rememberNotification(store *state.Store, key string, notification github.No
 
 func hasTerminalReplay(store *state.Store, key, exceptID string) bool {
 	for id, failure := range store.Data.JobFailures {
-		if id != exceptID && (failure.NotificationKey == "" || failure.NotificationKey == key) && store.Data.Processed[id].IsZero() &&
+		if id != exceptID && failure.NotificationKey == key && store.Data.Processed[id].IsZero() &&
 			(failure.Attempts >= maxJobAttempts || failure.ModelCallStarted || !failure.Deadline.IsZero()) {
 			return true
 		}
@@ -1320,11 +1320,9 @@ func (m *Monitor) executeSelected(ctx context.Context, store *state.Store, job J
 func (m *Monitor) executeSelectedWithControls(ctx context.Context, store *state.Store, job Job, at time.Time,
 	cachedKey string, cachedItems []github.Item) error {
 	terminalChecks := make(map[string]time.Time)
-	var unknownTerminalKey bool
-	var unknownTerminalCheck time.Time
 	_ = store.WithLock(func() error {
 		for id, failure := range store.Data.JobFailures {
-			if id == job.ID || !store.Data.Processed[id].IsZero() {
+			if id == job.ID || failure.NotificationKey == "" || !store.Data.Processed[id].IsZero() {
 				continue
 			}
 			if failure.Attempts >= maxJobAttempts || failure.ModelCallStarted || !failure.Deadline.IsZero() {
@@ -1335,23 +1333,16 @@ func (m *Monitor) executeSelectedWithControls(ctx context.Context, store *state.
 				if pending, ok := store.Data.PendingNotifications[failure.NotificationKey]; ok && failure.ReplyAttempts > 0 && pending.RetryAt.After(checkAt) {
 					checkAt = pending.RetryAt
 				}
-				if failure.NotificationKey == "" {
-					if !unknownTerminalKey || checkAt.Before(unknownTerminalCheck) {
-						unknownTerminalCheck = checkAt
-					}
-					unknownTerminalKey = true
-				} else {
-					previous, exists := terminalChecks[failure.NotificationKey]
-					if !exists || checkAt.Before(previous) {
-						terminalChecks[failure.NotificationKey] = checkAt
-					}
+				previous, exists := terminalChecks[failure.NotificationKey]
+				if !exists || checkAt.Before(previous) {
+					terminalChecks[failure.NotificationKey] = checkAt
 				}
 			}
 		}
 		return nil
 	})
 	commandSets := make(map[string]map[string]command.Action)
-	if unknownTerminalKey || len(terminalChecks) != 0 {
+	if len(terminalChecks) != 0 {
 		for _, configured := range m.Config.Repositories {
 			commandSets[configured.Name] = m.controlCommands(configured)
 		}
@@ -1403,16 +1394,13 @@ func (m *Monitor) executeSelectedWithControls(ctx context.Context, store *state.
 		var due []notificationScan
 		_ = store.WithLock(func() error {
 			next = store.Data.NextInviteCheckAt
-			if !unknownTerminalKey && len(terminalChecks) == 0 {
+			if len(terminalChecks) == 0 {
 				return nil
 			}
 			for key, pending := range store.Data.PendingNotifications {
 				checkAt, relevant := terminalChecks[key]
-				if !unknownTerminalKey && !relevant {
+				if !relevant {
 					continue
-				}
-				if unknownTerminalKey && (!relevant || unknownTerminalCheck.Before(checkAt)) {
-					checkAt = unknownTerminalCheck
 				}
 				if previous, checked := nextCheck[key]; checked {
 					if previous.IsZero() {

@@ -52,7 +52,7 @@ func TestRunOnceServicesControlsWhileSelectedActionExecutes(t *testing.T) {
 
 		statePath := filepath.Join(t.TempDir(), "state.json")
 		store := openStateAt(t, statePath, now.Add(-time.Minute))
-		store.Data.JobFailures[siblingID] = state.JobFailure{Attempts: maxJobAttempts}
+		store.Data.JobFailures[siblingID] = state.JobFailure{Attempts: maxJobAttempts, NotificationKey: notificationKey(secondNotice)}
 		store.Data.NextInviteCheckAt = now.Add(time.Minute)
 		if err := store.Save(); err != nil {
 			t.Fatal(err)
@@ -187,7 +187,7 @@ func TestSelectedUnknownOutcomeKeepsCompletedControlsAcrossRestart(t *testing.T)
 		siblingID := jobID(sibling.Key, "review")
 		statePath := filepath.Join(t.TempDir(), "state.json")
 		store := openStateAt(t, statePath, now.Add(-time.Minute))
-		store.Data.JobFailures[siblingID] = state.JobFailure{Attempts: maxJobAttempts}
+		store.Data.JobFailures[siblingID] = state.JobFailure{Attempts: maxJobAttempts, NotificationKey: notificationKey(testNotification(selected.UpdatedAt))}
 		store.Data.NextInviteCheckAt = now.Add(time.Minute)
 		if err := store.Save(); err != nil {
 			t.Fatal(err)
