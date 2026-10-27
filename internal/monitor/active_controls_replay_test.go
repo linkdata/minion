@@ -1505,18 +1505,19 @@ func TestSelectedControlClearsResolvedScanReplyError(t *testing.T) {
 			t.Fatal(err)
 		}
 		notice := testNotification(review.UpdatedAt)
-		gh := &fakeGitHub{
+		base := &fakeGitHub{
 			notifications: []github.Notification{notice},
 			items:         []github.Item{terminal, review},
 			permission:    github.Permission{Permission: "write"},
 		}
-		gh.beforeComment = func() {
-			if gh.commentCalls == 1 {
-				gh.commentErr = errors.New("temporary comment failure")
+		base.beforeComment = func() {
+			if base.commentCalls == 1 {
+				base.commentErr = errors.New("temporary comment failure")
 			} else {
-				gh.commentErr = nil
+				base.commentErr = nil
 			}
 		}
+		gh := &synchronizedCommentsGitHub{fakeGitHub: base}
 		held := &heldSelectedAction{entered: make(chan Job, 1), release: make(chan struct{})}
 		cfg := testConfig(t)
 		cfg.MaxRuntimeMinutes = 7
@@ -1529,6 +1530,34 @@ func TestSelectedControlClearsResolvedScanReplyError(t *testing.T) {
 		case err := <-result:
 			t.Fatalf("review did not start: %v", err)
 		}
+		synctest.Wait()
+		var retryAt, processed time.Time
+		if err := store.WithLock(func() error {
+			retryAt = store.Data.PendingNotifications[notificationKey(notice)].RetryAt
+			processed = store.Data.Processed[id]
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		calls, _ := gh.commentsSnapshot()
+		if calls != 1 || !processed.IsZero() || !retryAt.After(time.Now()) {
+			t.Fatalf("first reply failure did not retain a future retry: calls=%d processed=%v pending=%+v",
+				calls, processed, store.Data.PendingNotifications)
+		}
+		time.Sleep(retryAt.Sub(time.Now()) / 2)
+		synctest.Wait()
+		if err := store.WithLock(func() error {
+			processed = store.Data.Processed[id]
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		calls, _ = gh.commentsSnapshot()
+		if calls != 1 || !processed.IsZero() {
+			t.Fatalf("terminal reply repeated before retry time: calls=%d processed=%v",
+				calls, processed)
+		}
+		time.Sleep(retryAt.Sub(time.Now()) + time.Second)
 		synctest.Wait()
 		close(held.release)
 		synctest.Wait()

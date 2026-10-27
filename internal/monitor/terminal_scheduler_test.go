@@ -2,8 +2,11 @@ package monitor
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -280,4 +283,100 @@ func TestRunOnceCompletedScanWakesForTerminalDeadlineOrReplyRetry(t *testing.T) 
 			})
 		})
 	}
+}
+
+func TestSelectedNewerSameThreadCommandKeepsFailedReplyRetry(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		older := selectedItem(now.Add(-2 * time.Second))
+		older.Key, older.NodeID = "comment:older", "node:older"
+		older.HTMLURL = "https://github.com/example-owner/example-repo/pull/7#issuecomment-older"
+		newer := selectedItem(now.Add(-time.Second))
+		notice := testNotification(newer.UpdatedAt)
+		key := notificationKey(notice)
+		olderID := jobID(older.Key, "review")
+		newerID := jobID(newer.Key, "review")
+		statePath := filepath.Join(t.TempDir(), "state.json")
+		store := openStateAt(t, statePath, now.Add(-time.Minute))
+		store.Data.JobFailures[olderID] = state.JobFailure{
+			Attempts: maxJobAttempts, ReplyAttempts: 1, NotificationKey: key,
+		}
+		store.Data.PendingNotifications[key] = state.PendingNotification{
+			Repository: notice.Repository.FullName, RepositoryID: 1, OwnerID: 2,
+			SubjectType: notice.Subject.Type, SubjectURL: notice.Subject.URL,
+			Since: now.Add(-time.Minute), UpdatedAt: older.UpdatedAt,
+			RetryAt: now.Add(5 * time.Minute), Failures: 1,
+		}
+		store.Data.NextInviteCheckAt = now.Add(15 * time.Minute)
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		commentErr := errors.New("temporary comment failure")
+		gh := &fakeGitHub{
+			notifications: []github.Notification{notice},
+			items:         []github.Item{older, newer},
+			permission:    github.Permission{Permission: "write"},
+			commentErr:    commentErr,
+		}
+		held := &heldSelectedAction{entered: make(chan Job, 1), release: make(chan struct{})}
+		cfg := testConfig(t)
+		cfg.MaxRuntimeMinutes = 7
+		m := &Monitor{Config: cfg, GitHub: gh, Handler: held,
+			SelectedExecutorID: "local", SelectedCommands: map[string]bool{"review": true}}
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		result := make(chan error, 1)
+		go func() { _, err := m.RunOnce(ctx, store); result <- err }()
+		select {
+		case job := <-held.entered:
+			if job.ID != newerID {
+				t.Errorf("wrong command selected: got %s, want %s", job.ID, newerID)
+			}
+		case err := <-result:
+			t.Fatalf("RunOnce returned before newer Execute: %v", err)
+		}
+		synctest.Wait()
+		pending := store.Data.PendingNotifications[key]
+		failure := store.Data.JobFailures[olderID]
+		if gh.commentCalls != 1 || !store.Data.Processed[olderID].IsZero() ||
+			failure.ReplyAttempts != 2 || pending.Failures != 2 || !pending.RetryAt.After(time.Now()) ||
+			!pending.UpdatedAt.Equal(notice.UpdatedAt) {
+			t.Errorf("newer command lost older reply backoff: calls=%d processed=%v failure=%+v pending=%+v",
+				gh.commentCalls, store.Data.Processed[olderID], failure, pending)
+		}
+		if untilRetry := pending.RetryAt.Sub(time.Now()) / 2; untilRetry > 0 {
+			time.Sleep(untilRetry)
+		}
+		synctest.Wait()
+		if gh.commentCalls != 1 || !store.Data.Processed[olderID].IsZero() {
+			t.Errorf("older reply repeated before its retry time: calls=%d processed=%v retry=%s now=%s",
+				gh.commentCalls, store.Data.Processed[olderID], pending.RetryAt, time.Now())
+		}
+		close(held.release)
+		synctest.Wait()
+		if err := <-result; !errors.Is(err, commentErr) {
+			t.Errorf("RunOnce after older reply failure: %v", err)
+		}
+		if gh.commentCalls != 1 || !store.Data.Processed[olderID].IsZero() ||
+			store.Data.Processed[newerID].IsZero() || store.Data.JobFailures[olderID].ReplyAttempts != 2 ||
+			store.Data.PendingNotifications[key].Failures != pending.Failures ||
+			!store.Data.PendingNotifications[key].RetryAt.Equal(pending.RetryAt) {
+			t.Errorf("release retried or deferred older reply again: calls=%d processed=%v failures=%+v pending=%+v",
+				gh.commentCalls, store.Data.Processed, store.Data.JobFailures, store.Data.PendingNotifications)
+		}
+		stateBytes, err := os.ReadFile(statePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var saved state.Data
+		if err := json.Unmarshal(stateBytes, &saved); err != nil {
+			t.Fatal(err)
+		}
+		if saved.JobFailures[olderID].ReplyAttempts != 2 || !saved.Processed[olderID].IsZero() ||
+			saved.PendingNotifications[key].Failures != pending.Failures ||
+			!saved.PendingNotifications[key].RetryAt.Equal(pending.RetryAt) {
+			t.Errorf("older reply retry was not durable: saved failure=%+v processed=%v pending=%+v",
+				saved.JobFailures[olderID], saved.Processed[olderID], saved.PendingNotifications[key])
+		}
+	})
 }

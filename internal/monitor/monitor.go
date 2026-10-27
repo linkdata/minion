@@ -381,13 +381,24 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			}
 			return false
 		}
+		entryDeferred := false
+		deferEntry := func() error {
+			if entryDeferred {
+				return nil
+			}
+			if err := m.deferNotification(store, entry.key, notification, entry.since, started); err != nil {
+				return err
+			}
+			entryDeferred = true
+			return nil
+		}
 		items, err := m.GitHub.ThreadItems(ctx, repo.Name, notification.Subject.Type, number, entry.since)
 		if ctx.Err() != nil {
 			return stopAt(fmt.Sprintf("%s %s #%d", repo.Name, notification.Subject.Type, number), err)
 		}
 		if err != nil {
 			failures = append(failures, fmt.Errorf("%s %s #%d: %w", repo.Name, notification.Subject.Type, number, err))
-			if err := m.deferNotification(store, entry.key, notification, entry.since, started); err != nil {
+			if err := deferEntry(); err != nil {
 				return stop(err)
 			}
 			continue
@@ -533,6 +544,12 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				if err := accepted.Validate(); err != nil {
 					return stop(fmt.Errorf("accept %s: %w", itemLocation(item), err))
 				}
+				// Save an earlier reply failure's backoff before Execute can service this thread.
+				if entryFailed() {
+					if err := deferEntry(); err != nil {
+						return stop(err)
+					}
+				}
 				jobFailure.Attempts++
 				store.Data.JobFailures[job.ID] = jobFailure
 				store.Data.Accepted = accepted
@@ -669,7 +686,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 					rememberNotification(store, later.key, later.notification, later.since)
 				}
 				if entryFailed() {
-					if saveErr := m.deferNotification(store, entry.key, notification, entry.since, started); saveErr != nil {
+					if saveErr := deferEntry(); saveErr != nil {
 						return stop(err, saveErr)
 					}
 				} else {
@@ -682,7 +699,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			}
 		}
 		if entryFailed() {
-			if err := m.deferNotification(store, entry.key, notification, entry.since, started); err != nil {
+			if err := deferEntry(); err != nil {
 				return stop(err)
 			}
 		} else {
