@@ -22,18 +22,6 @@ func (e *Orchestrator) PublishRecovered(ctx context.Context, request monitor.Job
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if e.CheckWorkRoot != nil {
-		if err := e.CheckWorkRoot(); err != nil {
-			return err
-		}
-		defer func() {
-			if resultErr != nil {
-				if err := e.CheckWorkRoot(); err != nil {
-					e.logf("work root after recovered publication failure: %q", err)
-				}
-			}
-		}()
-	}
 	if e.GitHub == nil {
 		return errors.New("GitHub client is missing")
 	}
@@ -61,6 +49,18 @@ func (e *Orchestrator) PublishRecovered(ctx context.Context, request monitor.Job
 	if err != nil || acknowledged {
 		return err
 	}
+	if e.CheckWorkRoot != nil {
+		if err := e.CheckWorkRoot(); err != nil {
+			return err
+		}
+		defer func() {
+			if resultErr != nil {
+				if err := e.CheckWorkRoot(); err != nil {
+					e.logf("work root after recovered publication failure: %q", err)
+				}
+			}
+		}()
+	}
 	p := &preparedAction{request: request, job: record.Job}
 	if p.job.Action != command.Fix {
 		return e.publish(ctx, p, record.Result)
@@ -78,6 +78,9 @@ func (e *Orchestrator) publishRecoveredFix(ctx context.Context, p *preparedActio
 		return err
 	}
 	p.issueNodeID = issue.NodeID
+	if len(result.Changes) == 0 {
+		return e.publish(ctx, p, result)
+	}
 	p.repository, p.fork, err = e.fixFork(ctx, request.Repository)
 	if err != nil {
 		return err

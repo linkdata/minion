@@ -2,10 +2,12 @@ package action
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -262,7 +264,10 @@ func (e *Orchestrator) preparePublication(ctx context.Context, p *preparedAction
 		if err := e.validateAuditForPublication(ctx, p.job, result.Artifacts); err != nil {
 			return publication{}, errors.Join(fmt.Errorf("%w: invalid audit report: %w", monitor.ErrTerminalJob, err), e.retainIncompleteAudit(p, result))
 		}
-		if err := e.retainAudit(p, published.artifacts, true); err != nil {
+		if err := e.retainAudit(ctx, p, published.artifacts, true); err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return publication{}, ctxErr
+			}
 			return publication{}, fmt.Errorf("%w: retain completed audit: %w", monitor.ErrTerminalJob, err)
 		}
 	}
@@ -330,25 +335,59 @@ func (e *Orchestrator) retainIncompleteAudit(p *preparedAction, result Result) e
 		}
 		safe = append(safe, file)
 	}
-	return e.retainAudit(p, safe, false)
+	return e.retainAudit(context.Background(), p, safe, false)
 }
 
-func (e *Orchestrator) retainAudit(p *preparedAction, files []workspace.File, complete bool) error {
+func (e *Orchestrator) retainAudit(ctx context.Context, p *preparedAction, files []workspace.File, complete bool) (resultErr error) {
+	if complete {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
 	root, err := privateRecordsDir(e.WorkRoot, "audits")
 	if err != nil {
 		return err
 	}
-	prefix := "complete-"
-	if !complete {
-		prefix = "incomplete-"
+	if complete {
+		// A fixed hash keeps each accepted attempt in one portable directory.
+		identity := sha256.Sum256([]byte(p.job.Identity.JobID + "\x00" + p.job.Identity.AttemptID))
+		dir := filepath.Join(root, fmt.Sprintf("complete-%x", identity[:]))
+		if _, err := os.Lstat(dir); err == nil {
+			if err := workspace.CheckUnchanged(ctx, dir, files); err != nil {
+				return fmt.Errorf("retained completed audit differs from accepted result: %w", err)
+			}
+		} else {
+			if !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+			stage, err := os.MkdirTemp(root, ".complete-")
+			if err != nil {
+				return err
+			}
+			defer func() { resultErr = errors.Join(resultErr, os.RemoveAll(stage)) }()
+			if err := workspace.Materialize(stage, files); err != nil {
+				return err
+			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if err := os.Rename(stage, dir); err != nil {
+				if _, statErr := os.Lstat(dir); statErr != nil {
+					return errors.Join(err, statErr)
+				}
+				if checkErr := workspace.CheckUnchanged(ctx, dir, files); checkErr != nil {
+					return errors.Join(err, fmt.Errorf("retained completed audit differs from accepted result: %w", checkErr))
+				}
+			}
+		}
+		e.logf("audit %s #%d at %s; reports: %s", p.job.Identity.Repository, p.job.Identity.Number, p.job.Source.Head, dir)
+		return nil
 	}
-	dir, err := os.MkdirTemp(root, fmt.Sprintf("%s%s-%d-", prefix, strings.ReplaceAll(p.job.Identity.Repository, "/", "-"), p.job.Identity.Number))
+	dir, err := os.MkdirTemp(root, fmt.Sprintf("incomplete-%s-%d-", strings.ReplaceAll(p.job.Identity.Repository, "/", "-"), p.job.Identity.Number))
 	if err != nil {
 		return err
 	}
-	if !complete {
-		files = slices.Concat(files, []workspace.File{{Path: "INCOMPLETE.txt", Mode: workspace.Regular, Data: []byte("The audit failed. These partial artifacts are incomplete and must not be published.\n")}})
-	}
+	files = slices.Concat(files, []workspace.File{{Path: "INCOMPLETE.txt", Mode: workspace.Regular, Data: []byte("The audit failed. These partial artifacts are incomplete and must not be published.\n")}})
 	if err := workspace.Materialize(dir, files); err != nil {
 		return errors.Join(err, os.RemoveAll(dir))
 	}

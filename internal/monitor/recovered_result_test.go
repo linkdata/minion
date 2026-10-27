@@ -39,7 +39,11 @@ func (*recoveredResultHandler) WaitCapacity(context.Context) error { return nil 
 
 func storedRecoveryFixture(t *testing.T) (*state.Store, string, state.AcceptedAction, *fakeGitHub, *Monitor) {
 	t.Helper()
-	at := time.Now().UTC()
+	return storedRecoveryFixtureAt(t, time.Now().UTC())
+}
+
+func storedRecoveryFixtureAt(t *testing.T, at time.Time) (*state.Store, string, state.AcceptedAction, *fakeGitHub, *Monitor) {
+	t.Helper()
 	path := filepath.Join(t.TempDir(), "state.json")
 	store := openStateAt(t, path, at.Add(-time.Minute))
 	accepted := selectedAcceptance(t, at)
@@ -146,6 +150,37 @@ func TestStoredResultRecoveryPublishesAfterRestartWithoutWorkerSkill(t *testing.
 	}
 	if _, err := monitor.RunOnce(t.Context(), finished); err != nil || handler.publications != 1 {
 		t.Fatalf("completed result published again: err=%v publications=%d", err, handler.publications)
+	}
+}
+
+func TestStoredResultRecoveryPublishesAfterAcceptedDeadline(t *testing.T) {
+	at := time.Now().UTC().Add(-8 * time.Minute)
+	store, path, accepted, gh, monitor := storedRecoveryFixtureAt(t, at)
+	if !accepted.Deadline.Before(time.Now()) {
+		t.Fatalf("accepted deadline did not expire: %s", accepted.Deadline)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened := openStateAt(t, path, at.Add(-time.Minute))
+	monitor.Now = time.Now
+	handler := &recoveredResultHandler{publish: func(job Job) error {
+		if job.AttemptID != accepted.AttemptID || !job.Deadline.Equal(accepted.Deadline) {
+			t.Fatalf("publication lost expired accepted attempt: %+v", job)
+		}
+		return nil
+	}}
+	monitor.Handler = handler
+	if _, err := monitor.RunOnce(t.Context(), reopened); err != nil {
+		t.Fatal(err)
+	}
+	if handler.executions != 0 || handler.publications != 1 || gh.currentChecks != 1 || gh.checks != 1 ||
+		len(gh.comments) != 0 || reopened.Data.Accepted != nil ||
+		reopened.Data.Processed[accepted.JobID].IsZero() || len(reopened.Data.JobFailures) != 0 {
+		t.Fatalf("expired accepted result did not take publication path: handler=%+v github=%+v state=%+v", handler, gh, reopened.Data)
+	}
+	if present, err := reopened.HasAcceptedResult(); err != nil || present {
+		t.Fatalf("completed result kept receipt: present=%t err=%v", present, err)
 	}
 }
 

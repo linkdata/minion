@@ -113,8 +113,13 @@ func TestSelectedHTTPOutcomePersistsCompleteRecordBeforeACK(t *testing.T) {
 	store = savedStore
 	outcome := completeHTTPResult(t, f)
 	f.ack(t, "/outcome", outcome, http.StatusOK, 3)
-	if err := <-checked; err != nil {
-		t.Fatalf("successful ACK preceded durable result: %v", err)
+	select {
+	case err := <-checked:
+		if err != nil {
+			t.Fatalf("successful ACK preceded durable result: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("successful ACK did not check durable result")
 	}
 	if got := f.result(t); got.err != nil || !reflect.DeepEqual(got.result, outcome.Result) {
 		t.Fatalf("completed outcome changed: result=%+v error=%v", got.result, got.err)
