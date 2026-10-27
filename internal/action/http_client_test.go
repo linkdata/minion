@@ -976,6 +976,7 @@ func TestRunHTTPOutcomeACKPreservesKnownReceiptAfterWatchFailure(t *testing.T) {
 			parent := newHTTPServerTest(t, parentContext, f.job, f.sink, nil)
 			started := make(chan struct{})
 			outcomeEntered, watchClosed := make(chan struct{}), make(chan struct{})
+			outcomeACKClosed := make(chan struct{}, 1)
 			uploadEntered := make(chan struct{})
 			closeUpload := sync.OnceFunc(func() { close(uploadEntered) })
 			defer closeUpload()
@@ -1035,7 +1036,7 @@ func TestRunHTTPOutcomeACKPreservesKnownReceiptAfterWatchFailure(t *testing.T) {
 				}
 				if err == nil && r.URL.Path == "/outcome" && test.externalCause {
 					// post closes the actual ACK after decoding it, before RunHTTP stops its watch.
-					response.Body = httpClientCancelOnCloseBody{ReadCloser: response.Body, cancel: cancel, cause: externalCause}
+					response.Body = httpClientCancelOnCloseBody{ReadCloser: response.Body, cancel: cancel, cause: externalCause, closed: outcomeACKClosed}
 				}
 				if err == nil && r.URL.Path == "/outcome" && test.malformedACK {
 					_ = response.Body.Close()
@@ -1100,6 +1101,20 @@ func TestRunHTTPOutcomeACKPreservesKnownReceiptAfterWatchFailure(t *testing.T) {
 					t.Fatal("worker did not reach gated watch phase")
 				}
 			}
+			if test.externalCause && !finished {
+				select {
+				case <-outcomeACKClosed:
+				case workerErr = <-done:
+					finished = true
+					select {
+					case <-outcomeACKClosed:
+					default:
+						t.Fatalf("worker returned before closing outcome ACK: %v", workerErr)
+					}
+				case <-time.After(30 * time.Second):
+					t.Fatal("worker did not close outcome ACK")
+				}
+			}
 			wait := 5 * time.Second
 			if test.expiredAfterWatch {
 				wait = 30 * time.Second
@@ -1152,11 +1167,16 @@ type httpClientCancelOnCloseBody struct {
 	io.ReadCloser
 	cancel context.CancelCauseFunc
 	cause  error
+	closed chan<- struct{}
 }
 
 func (b httpClientCancelOnCloseBody) Close() error {
 	err := b.ReadCloser.Close()
 	b.cancel(b.cause)
+	select {
+	case b.closed <- struct{}{}:
+	default:
+	}
 	return err
 }
 
