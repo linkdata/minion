@@ -244,6 +244,109 @@ func TestSelectedExecuteRetriesTerminalIdentityMismatch(t *testing.T) {
 	}
 }
 
+func TestSelectedExecuteGuardsTerminalControlAgainstLiveRepositoryIdentityMismatch(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		repoID  int64
+		ownerID int64
+	}{
+		{name: "repository ID", repoID: 9, ownerID: 2},
+		{name: "owner ID", repoID: 1, ownerID: 9},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				now := time.Now().UTC()
+				selected := selectedItem(now.Add(-2 * time.Second))
+				store := openState(t, now.Add(-time.Minute))
+				terminal, id := queueTerminalControl(store, now.Add(-time.Second), 8,
+					state.JobFailure{Attempts: 1, AcceptedAt: now.Add(-time.Minute), Deadline: now.Add(30 * time.Second)},
+					now.Add(5*time.Minute))
+				store.Data.NextInviteCheckAt = now.Add(15 * time.Minute)
+				if err := store.Save(); err != nil {
+					t.Fatal(err)
+				}
+				var wrongIdentity atomic.Bool
+				var liveChecks, terminalFetches, replyCalls atomic.Int32
+				threads := terminalThreads(map[int]github.Item{7: selected, 8: terminal})
+				goodRepo := github.Repository{FullName: "example-owner/example-repo", ID: 1,
+					Owner: github.User{Login: "example-owner", ID: 2}, DefaultBranch: "main"}
+				wrongRepo := goodRepo
+				wrongRepo.ID, wrongRepo.Owner.ID = test.repoID, test.ownerID
+				gh := &fakeGitHub{
+					notifications: []github.Notification{testNotification(selected.UpdatedAt)},
+					permission:    github.Permission{Permission: "write"},
+					threadItems: func(repo string, number int, since time.Time) ([]github.Item, error) {
+						if number == 8 {
+							terminalFetches.Add(1)
+						}
+						return threads(repo, number, since)
+					},
+					beforeComment: func() { replyCalls.Add(1) },
+				}
+				gh.beforeRepository = func() {
+					liveChecks.Add(1)
+					if wrongIdentity.Load() {
+						gh.liveRepo = &wrongRepo
+					} else {
+						gh.liveRepo = &goodRepo
+					}
+				}
+				held := &heldSelectedAction{entered: make(chan Job, 1), release: make(chan struct{})}
+				released := false
+				defer func() {
+					if !released {
+						close(held.release)
+					}
+				}()
+				m := selectedMonitor(t, now, gh, held)
+				m.Now = nil
+				result := make(chan error, 1)
+				go func() { _, err := m.RunOnce(t.Context(), store); result <- err }()
+				select {
+				case job := <-held.entered:
+					if job.Source.Key != selected.Key {
+						t.Fatalf("unexpected selected action: %s", job.Source.Key)
+					}
+				case err := <-result:
+					t.Fatalf("selected Execute did not start: %v", err)
+				}
+				synctest.Wait()
+				repoChecks := liveChecks.Load()
+				wrongIdentity.Store(true)
+				time.Sleep(31 * time.Second)
+				synctest.Wait()
+				var processed time.Time
+				if err := store.WithLock(func() error {
+					processed = store.Data.Processed[id]
+					return nil
+				}); err != nil {
+					t.Fatal(err)
+				}
+				if liveChecks.Load() <= repoChecks || terminalFetches.Load() != 0 || replyCalls.Load() != 0 ||
+					!processed.IsZero() || held.executions.Load() != 1 {
+					t.Fatalf("terminal control passed changed live identity: repository checks=%d terminal fetches=%d reply calls=%d processed=%v executions=%d",
+						liveChecks.Load(), terminalFetches.Load(), replyCalls.Load(), processed, held.executions.Load())
+				}
+				close(held.release)
+				released = true
+				if err := <-result; err != nil {
+					t.Fatalf("RunOnce after selected Execute: %v", err)
+				}
+				if terminalFetches.Load() != 0 || replyCalls.Load() != 0 || !store.Data.Processed[id].IsZero() {
+					t.Fatalf("terminal control published before live identity recovery: terminal fetches=%d reply calls=%d processed=%v",
+						terminalFetches.Load(), replyCalls.Load(), store.Data.Processed[id])
+				}
+				wrongIdentity.Store(false)
+				m.serviceTerminalControls(t.Context(), store)
+				if terminalFetches.Load() != 1 || replyCalls.Load() != 1 || !terminalReplyRecorded(gh, store, id) {
+					t.Fatalf("terminal control did not recover after live identity matched: terminal fetches=%d comments=%v processed=%v",
+						terminalFetches.Load(), gh.comments, store.Data.Processed[id])
+				}
+			})
+		})
+	}
+}
+
 func TestRunOnceCompletedScanWakesForTerminalDeadlineOrReplyRetry(t *testing.T) {
 	for _, test := range []struct {
 		name    string
