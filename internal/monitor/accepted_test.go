@@ -600,6 +600,48 @@ func TestSelectedAssignedRecoveryChecksRepositoryIdentityBeforeReply(t *testing.
 	}
 }
 
+func TestSelectedTerminalRecoverySkipsRemoteLookupAfterLocalRevocation(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		change func(*Monitor)
+	}{
+		{"repository removed", func(m *Monitor) { m.Config.Repositories[0].Name = "other/repo" }},
+		{"action disabled", func(m *Monitor) { m.Config.Repositories[0].Actions = []string{"fix"} }},
+		{"actor removed", func(m *Monitor) {
+			m.Config.Repositories[0].AllowedActors = []string{"other"}
+			m.Config.Repositories[0].AllowedActorIDs = map[string]int64{"other": 9}
+		}},
+		{"command removed", func(m *Monitor) { delete(m.Config.Commands, "review") }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			at := time.Now().UTC()
+			accepted := selectedAcceptance(t, at)
+			accepted.Assigned = true
+			store := openState(t, at.Add(-time.Minute))
+			store.Data.Accepted = &accepted
+			store.Data.JobFailures[accepted.JobID] = state.JobFailure{
+				Attempts: 1, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline,
+			}
+			if err := store.Save(); err != nil {
+				t.Fatal(err)
+			}
+			gh := &fakeGitHub{beforeVerify: func(context.Context, bool) error {
+				t.Fatal("remote reply lookup preceded local eligibility check")
+				return nil
+			}}
+			m := selectedMonitor(t, at, gh, selectedHandler(func(Job) error {
+				t.Fatal("terminal action redispatched")
+				return nil
+			}))
+			test.change(m)
+			if _, err := m.RunOnce(t.Context(), store); err != nil || store.Data.Accepted != nil ||
+				len(store.Data.Processed) != 1 || len(store.Data.JobFailures) != 0 || len(gh.comments) != 0 {
+				t.Fatalf("locally ineligible action blocked recovery: err=%v state=%+v", err, store.Data)
+			}
+		})
+	}
+}
+
 func TestSelectedTerminalRecoveryRechecksSourceAndAuthority(t *testing.T) {
 	for _, test := range []struct {
 		name         string

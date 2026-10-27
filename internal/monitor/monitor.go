@@ -803,10 +803,19 @@ func discardAccepted(store *state.Store) error {
 	return saveAcceptanceState(store)
 }
 
-func (m *Monitor) validateAcceptedSource(ctx context.Context, accepted state.AcceptedAction, requireInstalled bool) (config.Repository, github.Item, bool, error) {
+func (m *Monitor) acceptedRepository(accepted state.AcceptedAction) (config.Repository, bool) {
 	repo, ok := m.Config.Repository(accepted.Repository)
 	if !ok || !repo.MatchesIdentity(accepted.RepositoryID, accepted.OwnerID) ||
 		!repo.AllowsAction(accepted.CommandName) || !repo.AllowsActor(accepted.Requester, accepted.RequesterID) {
+		return config.Repository{}, false
+	}
+	mapping, ok := m.Config.Commands[accepted.CommandName]
+	return repo, ok && mapping.Action == accepted.Action
+}
+
+func (m *Monitor) validateAcceptedSource(ctx context.Context, accepted state.AcceptedAction, requireInstalled bool) (config.Repository, github.Item, bool, error) {
+	repo, ok := m.acceptedRepository(accepted)
+	if !ok {
 		return config.Repository{}, github.Item{}, false, nil
 	}
 	var commands map[string]command.Action
@@ -821,9 +830,6 @@ func (m *Monitor) validateAcceptedSource(ctx context.Context, accepted state.Acc
 			if mapping, ok := m.Config.Commands[name]; ok {
 				commands[name] = command.Action(mapping.Action)
 			}
-		}
-		if commands[accepted.CommandName] != command.Action(accepted.Action) {
-			return config.Repository{}, github.Item{}, false, nil
 		}
 	}
 	liveRepo, err := m.GitHub.Repository(ctx, repo.Name)
@@ -1015,6 +1021,12 @@ func (m *Monitor) executeSelected(ctx context.Context, store *state.Store, job J
 func (m *Monitor) finishFailedJob(ctx context.Context, store *state.Store, job Job, at time.Time, failure state.JobFailure) error {
 	if store.Data.Accepted != nil && store.Data.Accepted.JobID != job.ID {
 		return fmt.Errorf("%w: failure reply targets a different accepted action", ErrAcceptanceState)
+	}
+	if accepted := store.Data.Accepted; accepted != nil {
+		if _, ok := m.acceptedRepository(*accepted); !ok {
+			m.logf("discard accepted %s: repository, command, or requester is no longer eligible", itemLocation(job.Source))
+			return discardAccepted(store)
+		}
 	}
 	marker := job.Marker()
 	lookupCtx, cancelLookup := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
