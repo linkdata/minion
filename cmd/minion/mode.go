@@ -27,6 +27,9 @@ func runExecuteMode() int {
 }
 
 func runOrchestrateMode(ctx context.Context, owner *action.Orchestrator, watcher *monitor.Monitor, store *state.Store, loop bool, logger *log.Logger, path string, readyTimeout time.Duration) int {
+	if terminalRecoveryPending(store) {
+		return recoverTerminalService(ctx, watcher, store, loop, logger)
+	}
 	if err := store.SyncPathAncestors(); err != nil {
 		logger.Printf("sync selected state path: %s", monitor.InertLogText(err.Error()))
 		return 1
@@ -37,4 +40,20 @@ func runOrchestrateMode(ctx context.Context, owner *action.Orchestrator, watcher
 		return 1
 	}
 	return runSelectedLocalService(ctx, watcher, store, loop, done, logger, closeWorker)
+}
+
+func terminalRecoveryPending(store *state.Store) bool {
+	accepted := store.Data.Accepted
+	if accepted == nil {
+		return false
+	}
+	return accepted.Assigned || accepted.Terminal || store.Data.JobFailures[accepted.JobID].ModelCallStarted || !time.Now().Before(accepted.Deadline)
+}
+
+func recoverTerminalService(ctx context.Context, watcher *monitor.Monitor, store *state.Store, loop bool, logger *log.Logger) int {
+	if err := store.SyncPathAncestors(); err != nil {
+		logger.Printf("sync selected state path: %s", monitor.InertLogText(err.Error()))
+		return 1
+	}
+	return runMonitorLoop(ctx, watcher, store, loop, nil, logger, true)
 }

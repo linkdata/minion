@@ -105,10 +105,6 @@ func runWithGitCheck(checkGit func(context.Context, string) error) int {
 	checkWorkRoot := func() error {
 		return checkWorkRootPath(cfg.WorkRoot)
 	}
-	if err := checkWorkRoot(); err != nil {
-		logger.Printf("work root: %v", err)
-		return 1
-	}
 	var store *state.Store
 	initial := time.Now().UTC()
 	if cfg.StartAt != "" {
@@ -128,12 +124,23 @@ func runWithGitCheck(checkGit func(context.Context, string) error) int {
 			logger.Printf("close state: %v", err)
 		}
 	}()
-	if err := checkGit(ctx, cfg.WorkRoot); err != nil {
-		logger.Printf("Git preflight: %v", err)
-		return 1
+	terminalRecovery := !*check && terminalRecoveryPending(store)
+	preflight := func() bool {
+		if err := checkWorkRoot(); err != nil {
+			logger.Printf("work root: %v", err)
+			return false
+		}
+		if err := checkGit(ctx, cfg.WorkRoot); err != nil {
+			logger.Printf("Git preflight: %v", err)
+			return false
+		}
+		if err := checkModels(ctx, &cfg, logger); err != nil {
+			logger.Printf("AI preflight: %v", err)
+			return false
+		}
+		return true
 	}
-	if err := checkModels(ctx, &cfg, logger); err != nil {
-		logger.Printf("AI preflight: %v", err)
+	if !terminalRecovery && !preflight() {
 		return 1
 	}
 	token, err := githubToken(ctx)
@@ -160,8 +167,18 @@ func runWithGitCheck(checkGit func(context.Context, string) error) int {
 		return 0
 	}
 
+	watcher := &monitor.Monitor{Config: cfg, ConfigPath: loadedPath, GitHub: client, Logger: logger}
+	if terminalRecovery {
+		code := recoverTerminalService(ctx, watcher, store, *loop, logger)
+		if code != 0 || !*loop || ctx.Err() != nil {
+			return code
+		}
+		if !preflight() {
+			return 1
+		}
+	}
 	orchestrator := newOrchestrator(cfg, client, store, logger, checkWorkRoot)
-	watcher := &monitor.Monitor{Config: cfg, ConfigPath: loadedPath, GitHub: client, Handler: orchestrator, Logger: logger}
+	watcher.Config, watcher.Handler = cfg, orchestrator
 	if *mode == "orchestrate" {
 		path, err := os.Executable()
 		if err != nil {
@@ -170,10 +187,10 @@ func runWithGitCheck(checkGit func(context.Context, string) error) int {
 		}
 		return runOrchestrateMode(ctx, orchestrator, watcher, store, *loop, logger, path, 2*time.Minute)
 	}
-	return runMonitorLoop(ctx, watcher, store, *loop, nil, logger)
+	return runMonitorLoop(ctx, watcher, store, *loop, nil, logger, false)
 }
 
-func runMonitorLoop(ctx context.Context, watcher *monitor.Monitor, store *state.Store, loop bool, workerExited <-chan struct{}, logger *log.Logger) int {
+func runMonitorLoop(ctx context.Context, watcher *monitor.Monitor, store *state.Store, loop bool, workerExited <-chan struct{}, logger *log.Logger, stopAfterAccepted bool) int {
 	for {
 		next, err := watcher.RunOnce(ctx, store)
 		if err != nil {
@@ -195,6 +212,12 @@ func runMonitorLoop(ctx context.Context, watcher *monitor.Monitor, store *state.
 				}
 			default:
 			}
+		}
+		if stopAfterAccepted && store.Data.Accepted == nil {
+			if err != nil {
+				return 1
+			}
+			return 0
 		}
 		if !loop {
 			return 0

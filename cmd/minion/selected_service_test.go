@@ -18,10 +18,38 @@ import (
 
 	"github.com/linkdata/minion/internal/action"
 	"github.com/linkdata/minion/internal/config"
+	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/state"
 )
+
+type terminalRecoveryGitHub struct {
+	monitor.GitHub
+	item  github.Item
+	reply string
+}
+
+func (g *terminalRecoveryGitHub) HasVerifiedBotReply(context.Context, string, int, time.Time, string, string, bool) (bool, error) {
+	return false, nil
+}
+
+func (g *terminalRecoveryGitHub) CurrentItem(context.Context, github.Item) (github.Item, error) {
+	return g.item, nil
+}
+
+func (g *terminalRecoveryGitHub) Repository(context.Context, string) (github.Repository, error) {
+	return github.Repository{ID: 1, Owner: github.User{ID: 2}}, nil
+}
+
+func (g *terminalRecoveryGitHub) Permission(context.Context, string, string) (github.Permission, error) {
+	return github.Permission{Permission: "write", User: g.item.Author}, nil
+}
+
+func (g *terminalRecoveryGitHub) CreateIssueComment(_ context.Context, _ string, _ int, body string) (github.Comment, error) {
+	g.reply = body
+	return github.Comment{ID: 42}, nil
+}
 
 func selectedServiceTestConfig(t *testing.T) config.Config {
 	t.Helper()
@@ -92,6 +120,67 @@ func TestAttachSelectedLocalWorkerFreezesStartupAndOwnsClose(t *testing.T) {
 				t.Fatalf("clean selected child shutdown returned %d: %s", code, logs.String())
 			}
 		})
+	}
+}
+
+func TestOrchestrateModeRecoversAssignedActionWithMissingSoleSkill(t *testing.T) {
+	isolateHostPaths(t, t.TempDir())
+	cfg := selectedServiceTestConfig(t)
+	cfg.Commands = map[string]config.CommandMapping{
+		"comment": {Action: "comment", Skills: []string{"https://github.com/example/skills/tree/main/skills/not-installed"}},
+	}
+	cfg.Repositories[0].ID, cfg.Repositories[0].OwnerID = 1, 2
+	cfg.Repositories[0].AllowedActors = []string{"writer"}
+	cfg.Repositories[0].AllowedActorIDs = map[string]int64{"writer": 7}
+	if installed, err := cfg.CommandInstalled("comment"); err != nil || installed {
+		t.Fatalf("fixture command skill must be absent: installed=%t error=%v", installed, err)
+	}
+	at := time.Now().UTC().Add(-time.Minute)
+	accepted := state.AcceptedAction{
+		JobID: "job-1", AttemptID: "attempt-1", ExecutorID: action.LocalExecutorID,
+		Repository: "owner/repo", RepositoryID: 1, OwnerID: 2,
+		SubjectType: "PullRequest", SubjectNumber: 7,
+		SourceKey: "comment:1", SourceNodeID: "source-node", SourceURL: "https://github.com/owner/repo/pull/7#issuecomment-1",
+		Requester: "writer", RequesterID: 7, CommandName: "comment", Action: "comment",
+		AcceptedAt: at, Deadline: at.Add(time.Hour), Assigned: true,
+	}
+	gh := &terminalRecoveryGitHub{item: github.Item{
+		Key: accepted.SourceKey, NodeID: accepted.SourceNodeID, HTMLURL: accepted.SourceURL,
+		Body: "@bot comment", Author: github.User{Login: accepted.Requester, ID: accepted.RequesterID},
+	}}
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	store, err := state.Open(statePath, at.Add(-time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.Data.Accepted = &accepted
+	store.Data.JobFailures[accepted.JobID] = state.JobFailure{Attempts: 1, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline}
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	logger := log.New(&logs, "", 0)
+	owner := newOrchestrator(cfg, nil, store, logger, nil)
+	watcher := &monitor.Monitor{Config: cfg, GitHub: gh, Logger: logger}
+	if code := runOrchestrateMode(t.Context(), owner, watcher, store, false, logger, "", time.Second); code != 0 {
+		t.Fatalf("assigned action required a removed skill or worker: code=%d logs=%q", code, logs.String())
+	}
+	if gh.reply == "" || !strings.Contains(gh.reply, "Minion could not complete this request") || !strings.HasSuffix(gh.reply, "<!-- linkdataminion:job-1 -->") {
+		t.Fatalf("fixed failure reply was not posted: %q", gh.reply)
+	}
+	if store.Data.Accepted != nil || store.Data.Processed[accepted.JobID].IsZero() || len(store.Data.JobFailures) != 0 || owner.Executor != nil || watcher.SelectedCommands != nil {
+		t.Fatalf("terminal completion started a worker or was not saved: %+v executor=%v selected=%v", store.Data, owner.Executor, watcher.SelectedCommands)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := state.Open(statePath, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if reopened.Data.Accepted != nil || reopened.Data.Processed[accepted.JobID].IsZero() {
+		t.Fatalf("terminal completion was not durable: %+v", reopened.Data)
 	}
 }
 
@@ -178,7 +267,7 @@ func TestSelectedLocalServiceStopsAfterWorkerLoss(t *testing.T) {
 func TestRunMonitorLoopStopsOnUncertainAcceptanceState(t *testing.T) {
 	store := &state.Store{Data: state.Data{Accepted: &state.AcceptedAction{}}}
 	var logs bytes.Buffer
-	if code := runMonitorLoop(t.Context(), &monitor.Monitor{}, store, true, nil, log.New(&logs, "", 0)); code != 1 {
+	if code := runMonitorLoop(t.Context(), &monitor.Monitor{}, store, true, nil, log.New(&logs, "", 0), false); code != 1 {
 		t.Fatalf("uncertain acceptance kept polling: code=%d logs=%q", code, logs.String())
 	}
 }

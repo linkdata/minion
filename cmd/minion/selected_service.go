@@ -58,5 +58,5 @@ func runSelectedLocalService(ctx context.Context, watcher *monitor.Monitor, stor
 			code = 1
 		}
 	}()
-	return runMonitorLoop(ctx, watcher, store, loop, done, logger)
+	return runMonitorLoop(ctx, watcher, store, loop, done, logger, false)
 }

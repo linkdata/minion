@@ -163,6 +163,39 @@ func TestExecutionAssignmentPersistsBeforeDeliveryAndReleasesUndelivered(t *test
 	}
 }
 
+func TestExecutionFailedAssignmentReleaseKeepsDurableAssignment(t *testing.T) {
+	f := newExecutionAdapterFixture(t, testJob(command.Comment))
+	path := filepath.Join(t.TempDir(), "state.json")
+	store, err := state.Open(path, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	store.Data.Accepted = acceptedForJob(f.job)
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	f.owner.Store = store
+	if err := f.sink.BeforeAssignment(f.job); err != nil {
+		t.Fatal(err)
+	}
+	store.Data.Cursor = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := f.sink.AssignmentNotDelivered(); !errors.Is(err, monitor.ErrAcceptanceState) || !f.sink.assigned {
+		t.Fatalf("failed release lost assignment uncertainty: assigned=%t error=%v", f.sink.assigned, err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := state.Open(path, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	if reopened.Data.Accepted == nil || !reopened.Data.Accepted.Assigned {
+		t.Fatalf("failed release changed durable assignment: %+v", reopened.Data.Accepted)
+	}
+}
+
 func TestExecutionAssignmentAllowsCaseOnlyRequesterChange(t *testing.T) {
 	f := newExecutionAdapterFixture(t, testJob(command.Comment))
 	store := openState(t, time.Now())

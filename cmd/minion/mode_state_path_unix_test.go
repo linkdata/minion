@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/linkdata/minion/internal/action"
+	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/state"
 )
 
@@ -55,6 +56,13 @@ func TestSelectedModeSyncsStatePathBeforeWorkerStart(t *testing.T) {
 		log.New(&output, "", 0), "", time.Second)
 	if code != 1 || !strings.Contains(output.String(), "sync selected state path:") {
 		t.Fatalf("selected mode started without path sync: code=%d log=%q", code, output.String())
+	}
+	store.Data.Accepted = &state.AcceptedAction{Assigned: true}
+	output.Reset()
+	code = runOrchestrateMode(t.Context(), &action.Orchestrator{}, &monitor.Monitor{}, store, false,
+		log.New(&output, "", 0), "", time.Second)
+	if code != 1 || !strings.Contains(output.String(), "sync selected state path:") {
+		t.Fatalf("terminal recovery saved without path sync: code=%d log=%q", code, output.String())
 	}
 	if err := os.Chmod(parent, 0o700); err != nil {
 		t.Fatal(err)
