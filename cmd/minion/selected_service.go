@@ -38,6 +38,7 @@ func attachSelectedLocalWorker(ctx context.Context, owner *action.Orchestrator, 
 		return nil, nil, err
 	}
 	watcher.Handler = owner
+	watcher.SelectedExecutorID = action.LocalExecutorID
 	watcher.SelectedCommands = make(map[string]bool, len(selected.Commands))
 	for name := range selected.Commands {
 		watcher.SelectedCommands[name] = true

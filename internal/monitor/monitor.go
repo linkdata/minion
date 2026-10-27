@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -54,6 +55,10 @@ var ErrRequestTransport = errors.New("request transport failure")
 // Without a model-call marker, retrying it consumes a job attempt even when the write error is transient.
 var ErrPostModelPublication = errors.New("post-model publication failure")
 
+// ErrAcceptanceState means the selected action's durable reservation is uncertain.
+// The caller must stop before another action can be dispatched.
+var ErrAcceptanceState = errors.New("action acceptance state failure")
+
 const (
 	maxJobAttempts          = 3
 	maxFailureReplyAttempts = 3
@@ -72,7 +77,9 @@ type Job struct {
 	Source      github.Item
 	Command     command.Command
 	ID          string
+	AttemptID   string
 	AcceptedAt  time.Time
+	Deadline    time.Time
 }
 
 func (j Job) Marker() string {
@@ -80,13 +87,23 @@ func (j Job) Marker() string {
 }
 
 type Monitor struct {
-	Config           config.Config
-	ConfigPath       string
-	GitHub           GitHub
-	Handler          ActionHandler
-	Logger           *log.Logger
-	Now              func() time.Time
-	SelectedCommands map[string]bool // Non-nil freezes discovery to the selected worker's commands.
+	Config             config.Config
+	ConfigPath         string
+	GitHub             GitHub
+	Handler            ActionHandler
+	Logger             *log.Logger
+	Now                func() time.Time
+	SelectedCommands   map[string]bool // Non-nil freezes discovery to the selected worker's commands.
+	SelectedExecutorID string          // Nonempty only while a selected local worker owns actions.
+}
+
+// NewAttemptID returns a random ID shared by acceptance and action records.
+func NewAttemptID() (string, error) {
+	var id [16]byte
+	if _, err := rand.Read(id[:]); err != nil {
+		return "", fmt.Errorf("create action attempt ID: %w", err)
+	}
+	return hex.EncodeToString(id[:]), nil
 }
 
 func (m *Monitor) logf(format string, args ...any) {
@@ -118,9 +135,13 @@ func InertLogText(s string) string {
 // It persists each completed command before advancing that repository's cursor.
 // Failed threads remain queued for retries without blocking other repositories.
 // Parent cancellation preserves earlier failures and unprocessed retry state/cursors.
-// Executions reporting parent cancellation refund their attempt unless a model call began, publication began, or the execution outcome is unknown.
+// Legacy executions reporting parent cancellation refund their attempt unless a model call began, publication began, or the execution outcome is unknown.
+// A selected worker assignment is terminal even when execution returns cancellation.
 func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, error) {
 	if err := ctx.Err(); err != nil {
+		return store.Data.NextPollAt, err
+	}
+	if err := m.recoverAccepted(ctx, store); err != nil {
 		return store.Data.NextPollAt, err
 	}
 	waitCapacity := func() error {
@@ -430,7 +451,49 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				}
 				continue
 			}
+			selected := m.SelectedExecutorID != ""
+			if selected {
+				if store.Data.Accepted != nil {
+					return stop(fmt.Errorf("%w: another selected action remains accepted", ErrAcceptanceState))
+				}
+				job.AttemptID, err = NewAttemptID()
+				if err != nil {
+					return stop(err)
+				}
+				job.AcceptedAt = time.Now().UTC()
+				runtime := time.Duration(m.Config.MaxRuntimeMinutes) * time.Minute
+				if runtime <= 0 {
+					runtime = config.DefaultMaxRuntime
+				}
+				job.Deadline = job.AcceptedAt.Add(runtime)
+				updatedAt := item.UpdatedAt
+				if updatedAt.IsZero() {
+					updatedAt = job.AcceptedAt
+				}
+				accepted := &state.AcceptedAction{
+					JobID: job.ID, AttemptID: job.AttemptID, ExecutorID: m.SelectedExecutorID,
+					Repository: repo.Name, RepositoryID: repo.ID, OwnerID: repo.OwnerID,
+					SubjectType: job.SubjectType, SubjectNumber: number,
+					SourceKey: item.Key, SourceNodeID: item.NodeID, SourceURL: item.HTMLURL, SourceUpdatedAt: updatedAt,
+					Requester: item.Author.Login, RequesterID: item.Author.ID,
+					CommandName: cmd.Name, Action: string(cmd.Action), AcceptedAt: job.AcceptedAt, Deadline: job.Deadline,
+				}
+				if err := accepted.Validate(); err != nil {
+					return stop(fmt.Errorf("accept %s: %w", itemLocation(item), err))
+				}
+				jobFailure.Attempts++
+				store.Data.JobFailures[job.ID] = jobFailure
+				store.Data.Accepted = accepted
+				if err := saveAcceptanceState(store); err != nil {
+					return stop(err)
+				}
+			}
 			err = m.GitHub.ReactEyes(ctx, item.NodeID)
+			if selected && (err != nil || ctx.Err() != nil) {
+				if saveErr := releaseUnassignedAccepted(store); saveErr != nil {
+					return stop(err, ctx.Err(), saveErr)
+				}
+			}
 			if ctx.Err() != nil {
 				return stopAt("react to "+itemLocation(item), err)
 			}
@@ -438,24 +501,38 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				failures = append(failures, fmt.Errorf("react to %s: %w", itemLocation(item), err))
 				continue
 			}
-			// Count an interrupted execution before starting it, so a crash cannot
-			// restart an expensive job forever without consuming an attempt.
-			// shortcut: retries can renew this time until #153 persists the original acceptance.
-			job.AcceptedAt = time.Now()
-			jobFailure.Attempts++
-			store.Data.JobFailures[job.ID] = jobFailure
-			if err := store.Save(); err != nil {
-				return stop(err)
+			if !selected {
+				// Count an interrupted legacy execution before starting it.
+				job.AcceptedAt = time.Now()
+				jobFailure.Attempts++
+				store.Data.JobFailures[job.ID] = jobFailure
+				if err := store.Save(); err != nil {
+					return stop(err)
+				}
 			}
 			m.logf("run %s from @%s in %s #%d", cmd.Action, item.Author.Login, repo.Name, number)
 			err = m.Handler.Execute(ctx, job)
+			if selected && errors.Is(err, ErrAcceptanceState) {
+				return stop(err)
+			}
+			assigned := false
+			if selected {
+				if store.Data.Accepted == nil || store.Data.Accepted.JobID != job.ID || store.Data.Accepted.AttemptID != job.AttemptID {
+					return stop(fmt.Errorf("%w: selected action reservation changed during execution", ErrAcceptanceState))
+				}
+				assigned = store.Data.Accepted.Assigned
+			}
 			jobFailure.ModelCallStarted = store.Data.JobFailures[job.ID].ModelCallStarted
 			if err != nil {
 				failureErr := fmt.Errorf("%s from %s: %w", cmd.Action, itemLocation(item), err)
 				publicationFailure := errors.Is(err, ErrPostModelPublication)
 				outcomeUnknown := errors.Is(err, ErrExecutionOutcomeUnknown)
-				interrupted := !jobFailure.ModelCallStarted && !outcomeUnknown && ctx.Err() != nil && errors.Is(err, context.Canceled) && !publicationFailure
+				interrupted := !assigned && !jobFailure.ModelCallStarted && !outcomeUnknown && ctx.Err() != nil && errors.Is(err, context.Canceled) && !publicationFailure
 				switch {
+				case assigned:
+					jobFailure.Attempts = maxJobAttempts
+				case selected && !jobFailure.ModelCallStarted && !outcomeUnknown && !publicationFailure && !errors.Is(err, ErrTerminalJob):
+					jobFailure.Attempts--
 				case interrupted:
 					jobFailure.Attempts--
 				case jobFailure.ModelCallStarted, outcomeUnknown, errors.Is(err, ErrTerminalJob):
@@ -468,7 +545,10 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				} else {
 					store.Data.JobFailures[job.ID] = jobFailure
 				}
-				if saveErr := store.Save(); saveErr != nil {
+				if selected && !assigned {
+					store.Data.Accepted = nil
+				}
+				if saveErr := saveJobResult(store, selected); saveErr != nil {
 					return stop(failureErr, saveErr)
 				}
 				if interrupted {
@@ -479,6 +559,9 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				if jobFailure.Attempts >= maxJobAttempts {
 					if replyErr := m.finishFailedJob(ctx, store, job, started, jobFailure); replyErr != nil {
 						failures = append(failures, replyErr)
+						if selected && store.Data.Accepted != nil {
+							return stop()
+						}
 					}
 				}
 				if ctx.Err() != nil {
@@ -491,7 +574,10 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				store.Data.Processed[job.ID] = started
 				delete(store.Data.JobFailures, job.ID)
 				delete(store.Data.PendingFixes, job.ID)
-				if err := store.Save(); err != nil {
+				if selected {
+					store.Data.Accepted = nil
+				}
+				if err := saveJobResult(store, selected); err != nil {
 					return stop(err)
 				}
 				if ctx.Err() != nil {
@@ -602,7 +688,71 @@ func infrastructureFailure(err error) bool {
 	return errors.Is(err, ErrRequestTransport) || errors.As(err, &network)
 }
 
+func saveAcceptanceState(store *state.Store) error {
+	if err := store.Save(); err != nil {
+		return fmt.Errorf("%w: %w", ErrAcceptanceState, err)
+	}
+	return nil
+}
+
+func saveJobResult(store *state.Store, selected bool) error {
+	if selected {
+		return saveAcceptanceState(store)
+	}
+	return store.Save()
+}
+
+// releaseUnassignedAccepted refunds only an action that could not have reached the worker.
+func releaseUnassignedAccepted(store *state.Store) error {
+	accepted := store.Data.Accepted
+	if accepted == nil || accepted.Assigned {
+		return fmt.Errorf("%w: cannot release an assigned or missing action", ErrAcceptanceState)
+	}
+	failure := store.Data.JobFailures[accepted.JobID]
+	if failure.Attempts <= 0 || failure.ModelCallStarted {
+		return fmt.Errorf("%w: accepted action cannot be safely refunded", ErrAcceptanceState)
+	}
+	failure.Attempts--
+	if failure == (state.JobFailure{}) {
+		delete(store.Data.JobFailures, accepted.JobID)
+	} else {
+		store.Data.JobFailures[accepted.JobID] = failure
+	}
+	store.Data.Accepted = nil
+	return saveAcceptanceState(store)
+}
+
+func (m *Monitor) recoverAccepted(ctx context.Context, store *state.Store) error {
+	accepted := store.Data.Accepted
+	if accepted == nil {
+		return nil
+	}
+	if err := accepted.Validate(); err != nil {
+		return fmt.Errorf("%w: invalid accepted action: %v", ErrAcceptanceState, err)
+	}
+	if !accepted.Assigned && !store.Data.JobFailures[accepted.JobID].ModelCallStarted {
+		return releaseUnassignedAccepted(store)
+	}
+	job := Job{
+		Repository:  config.Repository{Name: accepted.Repository, ID: accepted.RepositoryID, OwnerID: accepted.OwnerID},
+		SubjectType: accepted.SubjectType, Number: accepted.SubjectNumber,
+		Source: github.Item{Key: accepted.SourceKey, NodeID: accepted.SourceNodeID, HTMLURL: accepted.SourceURL, UpdatedAt: accepted.SourceUpdatedAt,
+			Author: github.User{Login: accepted.Requester, ID: accepted.RequesterID}},
+		Command: command.Command{Name: accepted.CommandName, Action: command.Action(accepted.Action)},
+		ID:      accepted.JobID, AttemptID: accepted.AttemptID, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline,
+	}
+	failure := store.Data.JobFailures[job.ID]
+	failure.Attempts = maxJobAttempts
+	if err := m.finishFailedJob(ctx, store, job, accepted.AcceptedAt, failure); err != nil {
+		return fmt.Errorf("recover accepted %s: %w", itemLocation(job.Source), err)
+	}
+	return nil
+}
+
 func (m *Monitor) finishFailedJob(ctx context.Context, store *state.Store, job Job, at time.Time, failure state.JobFailure) error {
+	if store.Data.Accepted != nil && store.Data.Accepted.JobID != job.ID {
+		return fmt.Errorf("%w: failure reply targets a different accepted action", ErrAcceptanceState)
+	}
 	marker := job.Marker()
 	lookupCtx, cancelLookup := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancelLookup()
@@ -626,7 +776,7 @@ func (m *Monitor) finishFailedJob(ctx context.Context, store *state.Store, job J
 			failure.ReplyAttempts++
 			if failure.ReplyAttempts < maxFailureReplyAttempts {
 				store.Data.JobFailures[job.ID] = failure
-				if saveErr := store.Save(); saveErr != nil {
+				if saveErr := saveJobResult(store, store.Data.Accepted != nil); saveErr != nil {
 					return errors.Join(err, saveErr)
 				}
 				return fmt.Errorf("post failure reply to %s: %w", itemLocation(job.Source), err)
@@ -637,7 +787,11 @@ func (m *Monitor) finishFailedJob(ctx context.Context, store *state.Store, job J
 	m.logf("stop retrying failed %s from %s", job.Command.Action, itemLocation(job.Source))
 	store.Data.Processed[job.ID] = at
 	delete(store.Data.JobFailures, job.ID)
-	return store.Save()
+	selected := store.Data.Accepted != nil
+	if selected {
+		store.Data.Accepted = nil
+	}
+	return saveJobResult(store, selected)
 }
 
 func (m *Monitor) acceptWhitelistedInvitations(ctx context.Context) ([]string, error) {

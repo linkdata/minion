@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -60,6 +62,114 @@ func TestStoreLocksAndPersistsCompletedCommands(t *testing.T) {
 	}
 	if !info.Mode().IsRegular() || runtime.GOOS == "windows" && info.Mode().Perm()&0200 == 0 || runtime.GOOS != "windows" && info.Mode().Perm() != 0600 {
 		t.Fatalf("state mode %v, want writable regular file (0600 on Unix)", info.Mode())
+	}
+}
+
+func TestStorePersistsAcrossProcessRestart(t *testing.T) {
+	initial := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	if path, ok := os.LookupEnv("MINION_STATE_RESTART_TEST"); ok {
+		store, err := Open(path, initial)
+		if err != nil {
+			t.Fatal(err)
+		}
+		store.Data.Processed["job"] = initial
+		accepted := acceptedActionFixture()
+		store.Data.Accepted = &accepted
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		return // Process exit releases the lock without Store.Close.
+	}
+	path := filepath.Join(t.TempDir(), "state.json")
+	cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestStorePersistsAcrossProcessRestart$")
+	cmd.Env = append(os.Environ(), "MINION_STATE_RESTART_TEST="+path)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("state writer process: %v\n%s", err, output)
+	}
+	store, err := Open(path, initial.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := store.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	want := acceptedActionFixture()
+	if !store.Data.Cursor.Equal(initial) || !store.Data.Processed["job"].Equal(initial) || !reflect.DeepEqual(store.Data.Accepted, &want) {
+		t.Fatalf("state lost after process exit: %+v", store.Data)
+	}
+}
+
+func acceptedActionFixture() AcceptedAction {
+	acceptedAt := time.Date(2026, 10, 9, 8, 1, 0, 0, time.UTC)
+	return AcceptedAction{
+		JobID: "job-1", AttemptID: "attempt-1", ExecutorID: "local",
+		Repository: "owner/repo", RepositoryID: 1, OwnerID: 2,
+		SubjectType: "PullRequest", SubjectNumber: 7,
+		SourceKey: "owner/repo#issue-comment:123", SourceNodeID: "node:123",
+		SourceURL: "https://github.com/owner/repo/pull/7#issuecomment-123", SourceUpdatedAt: acceptedAt.Add(-time.Minute),
+		Requester: "writer", RequesterID: 3, CommandName: "review", Action: "review",
+		AcceptedAt: acceptedAt, Deadline: acceptedAt.Add(time.Hour), Assigned: true,
+	}
+}
+
+func TestOpenRejectsInvalidAcceptedAction(t *testing.T) {
+	tests := []struct {
+		name   string
+		change func(*AcceptedAction)
+	}{
+		{"missing job", func(a *AcceptedAction) { a.JobID = "" }},
+		{"invalid attempt", func(a *AcceptedAction) { a.AttemptID = "../attempt" }},
+		{"missing executor", func(a *AcceptedAction) { a.ExecutorID = "" }},
+		{"invalid repository", func(a *AcceptedAction) { a.Repository = "../repo" }},
+		{"missing repository ID", func(a *AcceptedAction) { a.RepositoryID = 0 }},
+		{"missing owner ID", func(a *AcceptedAction) { a.OwnerID = 0 }},
+		{"invalid subject", func(a *AcceptedAction) { a.SubjectType = "Discussion" }},
+		{"missing subject number", func(a *AcceptedAction) { a.SubjectNumber = 0 }},
+		{"missing source key", func(a *AcceptedAction) { a.SourceKey = "" }},
+		{"missing source node ID", func(a *AcceptedAction) { a.SourceNodeID = "" }},
+		{"missing source timestamp", func(a *AcceptedAction) { a.SourceUpdatedAt = time.Time{} }},
+		{"missing requester", func(a *AcceptedAction) { a.Requester = "" }},
+		{"missing requester ID", func(a *AcceptedAction) { a.RequesterID = 0 }},
+		{"missing command", func(a *AcceptedAction) { a.CommandName = "" }},
+		{"unsupported action", func(a *AcceptedAction) { a.Action = "unknown" }},
+		{"wrong review subject", func(a *AcceptedAction) { a.SubjectType = "Issue" }},
+		{"wrong fix subject", func(a *AcceptedAction) { a.Action = "fix" }},
+		{"missing accepted time", func(a *AcceptedAction) { a.AcceptedAt = time.Time{} }},
+		{"nonpositive deadline", func(a *AcceptedAction) { a.Deadline = a.AcceptedAt }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			accepted := acceptedActionFixture()
+			test.change(&accepted)
+			path := filepath.Join(t.TempDir(), "state.json")
+			data, err := json.Marshal(Data{Cursor: acceptedActionFixture().AcceptedAt, Accepted: &accepted})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, data, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if store, err := Open(path, time.Now()); store != nil || err == nil || !strings.Contains(err.Error(), "invalid accepted action") {
+				t.Fatalf("Open() = %v, %v; want invalid accepted action", store, err)
+			}
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			store, err := Open(path, time.Now())
+			if err != nil {
+				t.Fatalf("invalid state retained lock: %v", err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	accepted := acceptedActionFixture()
+	accepted.SourceURL = "" // GitHub may omit a display URL.
+	if err := accepted.Validate(); err != nil {
+		t.Fatalf("optional source URL rejected: %v", err)
 	}
 }
 
@@ -122,5 +232,26 @@ func TestSaveEncodingFailurePreservesStateAndCleansTemporaryFile(t *testing.T) {
 	files, err := os.ReadDir(dir)
 	if err != nil || len(files) != 2 {
 		t.Fatalf("temporary state file retained: %v, %v", files, err)
+	}
+}
+
+func TestSaveReportsRenameFailureAndCleansTemporaryFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "occupied")
+	if err := os.Mkdir(path, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "child"), []byte("keep"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	store := Store{path: path, Data: Data{Cursor: time.Now().UTC()}}
+	if err := store.Save(); err == nil {
+		t.Fatal("Save() replaced a non-empty directory")
+	}
+	if data, err := os.ReadFile(filepath.Join(path, "child")); err != nil || string(data) != "keep" {
+		t.Fatalf("failed save changed target: %q, %v", data, err)
+	}
+	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 1 || entries[0].Name() != "occupied" {
+		t.Fatalf("temporary state file retained: %v, %v", entries, err)
 	}
 }

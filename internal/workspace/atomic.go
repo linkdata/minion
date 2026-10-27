@@ -22,7 +22,10 @@ func WriteAtomic(path string, data []byte, extraDirs ...string) (resultErr error
 			}
 		}
 	}()
-	_, writeErr := file.Write(data)
+	writeErr := file.Chmod(0o600)
+	if writeErr == nil {
+		_, writeErr = file.Write(data)
+	}
 	if writeErr == nil {
 		writeErr = file.Sync()
 	}
@@ -35,6 +38,13 @@ func WriteAtomic(path string, data []byte, extraDirs ...string) (resultErr error
 	}
 	// Root.Rename requests POSIX replacement semantics on Windows for open prior records.
 	err = root.Rename(filepath.Base(temporary), filepath.Base(path))
+	if err != nil {
+		op := "rename"
+		if linkErr, ok := err.(*os.LinkError); ok {
+			op, err = linkErr.Op, linkErr.Err
+		}
+		err = &os.LinkError{Op: op, Old: temporary, New: path, Err: err}
+	}
 	if err := errors.Join(err, root.Close()); err != nil {
 		return err
 	}

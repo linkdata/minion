@@ -39,6 +39,9 @@ type localWorker struct {
 	stopGrace    time.Duration
 }
 
+// LocalExecutorID binds the selected worker to the saved acceptance record.
+const LocalExecutorID = "local"
+
 const (
 	workerReusable int32 = iota
 	workerRunning
@@ -139,7 +142,7 @@ func (e *Orchestrator) AttachLocalWorker(ctx context.Context, cfg config.Config,
 	if uses("claude") {
 		credentials.ClaudeAPIKey = e.Runner.Claude.APIKey
 	}
-	w, err := startLocalWorker("local", path, args, readyTimeout, credentials, func(cmd *exec.Cmd, access LocalEndpointAccess) error {
+	w, err := startLocalWorker(LocalExecutorID, path, args, readyTimeout, credentials, func(cmd *exec.Cmd, access LocalEndpointAccess) error {
 		return configure(cmd, access, selected, credentials)
 	})
 	if err != nil {
@@ -150,6 +153,7 @@ func (e *Orchestrator) AttachLocalWorker(ctx context.Context, cfg config.Config,
 		return WorkerSelection{}, nil, nil, redactActionError(err, e.Runner.secretValues()...)
 	}
 	e.Executor = w
+	e.assignmentRequired = true
 	return selected, w.exited, w.Close, nil
 }
 
@@ -161,7 +165,15 @@ func (w *localWorker) Execute(ctx context.Context, job Job, sink Checkpoints) (R
 		return Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head}, fmt.Errorf("%w: local worker is busy or not ready for another assignment", monitor.ErrRequestTransport)
 	}
 	state := httpExecutionState{onStop: w.beginStop}
+	checkpoint, hasAssignmentCheckpoint := sink.(assignmentCheckpoint)
+	hasAssignmentCheckpoint = hasAssignmentCheckpoint && checkpoint.AssignmentRequired()
+	if hasAssignmentCheckpoint {
+		state.beforeDelivery = checkpoint.BeforeAssignment
+	}
 	result, err := w.executor.execute(ctx, 0, job, sink, &state)
+	if hasAssignmentCheckpoint && !state.delivered {
+		err = errors.Join(err, checkpoint.AssignmentNotDelivered())
+	}
 	w.executor.mu.Lock()
 	closed, unavailable := w.executor.closed, w.executor.unavailable
 	w.executor.mu.Unlock()

@@ -40,20 +40,21 @@ type httpTransaction struct {
 	observation sync.Mutex
 	handlers    sync.WaitGroup
 
-	job         Job
-	credentials WorkerCredentials
-	started     time.Time
-	binding     httpBinding
-	sink        Checkpoints
-	ctx         context.Context
-	budget      context.Context
-	cancel      context.CancelFunc
-	stopBudget  context.CancelFunc
-	stopGrace   time.Duration
-	stopContext context.Context
-	stopCancel  context.CancelFunc
-	stopUntil   time.Time
-	onStop      func(time.Time)
+	job            Job
+	credentials    WorkerCredentials
+	started        time.Time
+	binding        httpBinding
+	sink           Checkpoints
+	ctx            context.Context
+	budget         context.Context
+	cancel         context.CancelFunc
+	stopBudget     context.CancelFunc
+	stopGrace      time.Duration
+	stopContext    context.Context
+	stopCancel     context.CancelFunc
+	stopUntil      time.Time
+	onStop         func(time.Time)
+	beforeDelivery func(Job) error
 
 	ready              bool
 	delivered          bool
@@ -77,10 +78,11 @@ type httpTransaction struct {
 }
 
 type httpExecutionState struct {
-	admitted  bool
-	delivered bool
-	outcome   bool
-	onStop    func(time.Time)
+	admitted       bool
+	delivered      bool
+	outcome        bool
+	onStop         func(time.Time)
+	beforeDelivery func(Job) error
 }
 
 func NewHTTPExecutor(executorID string) (*HTTPExecutor, error) {
@@ -144,6 +146,7 @@ func (e *HTTPExecutor) execute(ctx context.Context, stopBudget time.Duration, jo
 		stop: make(chan struct{}), done: make(chan struct{}), finished: make(chan struct{})}
 	if state != nil {
 		tx.onStop = state.onStop
+		tx.beforeDelivery = state.beforeDelivery
 	}
 	e.mu.Lock()
 	if e.closed || e.unavailable || e.active != nil {
@@ -186,6 +189,9 @@ func (e *HTTPExecutor) execute(ctx context.Context, stopBudget time.Duration, jo
 		} else if tx.delivered {
 			runErr = errors.Join(runErr, monitor.ErrExecutionOutcomeUnknown, tx.transportErr, tx.checkpointErr, actionCtx.Err())
 			tx.quarantine = true
+		} else if tx.transportErr != nil && !errors.Is(runErr, tx.transportErr) {
+			// A pre-delivery save can finish after the canceled Execute body.
+			runErr = errors.Join(runErr, tx.transportErr)
 		}
 		if tx.requiredControlErr != nil {
 			runErr = errors.Join(runErr, monitor.ErrExecutionOutcomeUnknown, tx.requiredControlErr)
@@ -346,7 +352,7 @@ func (e *HTTPExecutor) serveNextEncoded(w http.ResponseWriter, r *http.Request, 
 	e.pullDone = r.Context().Done()
 	e.notifyLocked()
 	e.mu.Unlock()
-	var delivery *httpTransaction
+	var delivery, entered *httpTransaction
 	defer func() {
 		if delivery == nil {
 			e.mu.Lock()
@@ -354,8 +360,9 @@ func (e *HTTPExecutor) serveNextEncoded(w http.ResponseWriter, r *http.Request, 
 			e.pullDone = nil
 			e.notifyLocked()
 			e.mu.Unlock()
-		} else {
-			delivery.handlers.Done()
+		}
+		if entered != nil {
+			entered.handlers.Done()
 		}
 	}()
 poll:
@@ -410,36 +417,61 @@ poll:
 				body, err := encode(assignment)
 				e.mu.Lock()
 				tx.mu.Lock()
-				if r.Context().Err() != nil {
-					tx.mu.Unlock()
-					e.mu.Unlock()
-					return
-				}
-				if ctxErr := httpExecutionContextError(tx.ctx); ctxErr != nil {
-					tx.mu.Unlock()
-					e.mu.Unlock()
-					httpServerReject(w, "next", http.StatusConflict, httpBinding{}, 0, ctxErr)
-					return
-				}
-				if e.active != tx || e.closed || e.unavailable || tx.fenced || tx.delivered {
-					rejection := errors.New("HTTP assignment changed during encoding")
-					if e.closed {
-						rejection = context.Canceled
+				for {
+					if r.Context().Err() != nil {
+						tx.mu.Unlock()
+						e.mu.Unlock()
+						return
 					}
+					if ctxErr := httpExecutionContextError(tx.ctx); ctxErr != nil {
+						tx.mu.Unlock()
+						e.mu.Unlock()
+						httpServerReject(w, "next", http.StatusConflict, httpBinding{}, 0, ctxErr)
+						return
+					}
+					if e.active != tx || e.closed || e.unavailable || tx.fenced || tx.delivered {
+						rejection := errors.New("HTTP assignment changed before delivery")
+						if e.closed {
+							rejection = context.Canceled
+						}
+						tx.mu.Unlock()
+						e.mu.Unlock()
+						httpServerReject(w, "next", http.StatusConflict, httpBinding{}, 0, rejection)
+						return
+					}
+					if err != nil {
+						tx.mu.Unlock()
+						e.mu.Unlock()
+						tx.stopExecution(fmt.Errorf("%w: encode HTTP assignment: %w", monitor.ErrTerminalJob, err), true)
+						httpServerReject(w, "next", http.StatusInternalServerError, httpBinding{}, 0, err)
+						return
+					}
+					if tx.beforeDelivery == nil || entered != nil {
+						break
+					}
+					tx.handlers.Add(1)
+					entered = tx
+					beforeDelivery := tx.beforeDelivery
 					tx.mu.Unlock()
 					e.mu.Unlock()
-					httpServerReject(w, "next", http.StatusConflict, httpBinding{}, 0, rejection)
-					return
-				}
-				if err != nil {
-					tx.mu.Unlock()
-					e.mu.Unlock()
-					tx.stopExecution(fmt.Errorf("%w: encode HTTP assignment: %w", monitor.ErrTerminalJob, err), true)
-					httpServerReject(w, "next", http.StatusInternalServerError, httpBinding{}, 0, err)
-					return
+					saveErr := beforeDelivery(tx.job)
+					e.mu.Lock()
+					tx.mu.Lock()
+					if saveErr != nil {
+						tx.mu.Unlock()
+						e.mu.Unlock()
+						tx.stopExecution(fmt.Errorf("save HTTP assignment: %w", saveErr), true)
+						if r.Context().Err() == nil {
+							httpServerReject(w, "next", http.StatusInternalServerError, httpBinding{}, 0, saveErr)
+						}
+						return
+					}
 				}
 				tx.delivered = true
-				tx.handlers.Add(1)
+				if entered == nil {
+					tx.handlers.Add(1)
+					entered = tx
+				}
 				delivery = tx
 				tx.mu.Unlock()
 				// The assignment ACK can start another pull before this handler returns.

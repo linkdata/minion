@@ -2,8 +2,6 @@ package action
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/url"
@@ -153,14 +151,6 @@ func (e *Orchestrator) roleSettings(provider string, required []string) RoleSett
 	return role
 }
 
-func newAttemptID() (string, error) {
-	var id [16]byte
-	if _, err := rand.Read(id[:]); err != nil {
-		return "", fmt.Errorf("create action attempt ID: %w", err)
-	}
-	return hex.EncodeToString(id[:]), nil
-}
-
 func (e *Orchestrator) portableJob(ctx context.Context, p *preparedAction, title, description string) (Job, error) {
 	deadline, ok := ctx.Deadline()
 	if !ok {
@@ -182,7 +172,7 @@ func (e *Orchestrator) portableJob(ctx context.Context, p *preparedAction, title
 		Version: ProtocolVersion,
 		Identity: Identity{
 			// Local executor correlation label; remote transport authentication is #123 work.
-			JobID: request.ID, AttemptID: e.attemptID, ExecutorID: "local",
+			JobID: request.ID, AttemptID: e.attemptID, ExecutorID: LocalExecutorID,
 			Repository: request.Repository.Name, RepositoryID: request.Repository.ID, OwnerID: request.Repository.OwnerID,
 			Requester: request.Source.Author.Login, RequesterID: request.Source.Author.ID,
 			Number: request.Number, SubjectType: request.SubjectType,

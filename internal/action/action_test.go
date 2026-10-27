@@ -168,18 +168,19 @@ func TestRuntimeDeadlineUsesAcceptedTime(t *testing.T) {
 
 func TestExpiredAcceptedDeadlineStopsBeforeModel(t *testing.T) {
 	installActionTestSkills(t, testReviewSkillURL)
+	acceptedAt := time.Now().Add(-2 * time.Minute)
 	server := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Errorf("expired accepted action reached GitHub: %s", r.URL)
 		http.Error(w, "expired", http.StatusGatewayTimeout)
 	}))
 	orchestrator := &Orchestrator{
-		GitHub: testGitHub(server, "test-token"), MaxRuntime: time.Minute,
+		GitHub: testGitHub(server, "test-token"), MaxRuntime: time.Hour,
 		Commands: map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{testReviewSkillURL}}},
 		Runner:   Runner{runModel: forbidModel(t)},
 	}
 	job := monitor.Job{Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"review"}},
 		SubjectType: "PullRequest", Number: 7, ID: strings.Repeat("a", 64), Command: command.Command{Name: "review", Action: command.Review},
-		AcceptedAt: time.Now().Add(-2 * time.Minute)}
+		AcceptedAt: acceptedAt, Deadline: acceptedAt.Add(time.Minute)}
 	if err := orchestrator.Execute(t.Context(), job); !errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("expired accepted action was not terminal: %v", err)
 	}

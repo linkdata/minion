@@ -92,6 +92,7 @@ func TestExecuteModeOfflinePublicationAndRestart(t *testing.T) {
 			published = append(published, github.Comment{ID: 99, NodeID: "reply-node", Body: input.Body,
 				User: github.User{ID: 8, Login: "linkdataminion"}, CreatedAt: requestAt, UpdatedAt: requestAt})
 			mu.Unlock()
+			w.WriteHeader(http.StatusCreated)
 			_, _ = fmt.Fprint(w, `{"id":99}`)
 		case r.Method == http.MethodPost && r.URL.Path == "/graphql":
 			var input struct {

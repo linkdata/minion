@@ -1,13 +1,17 @@
 package state
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
+
+	"github.com/linkdata/minion/internal/workspace"
 )
 
 var ErrLocked = errors.New("another minion process holds the state lock")
@@ -25,6 +29,63 @@ type Data struct {
 	JobFailures          map[string]JobFailure          `json:"job_failures,omitempty"`
 	PendingNotifications map[string]PendingNotification `json:"pending_notifications,omitempty"`
 	PendingFixes         map[string]PendingFix          `json:"pending_fixes,omitempty"`
+	Accepted             *AcceptedAction                `json:"accepted,omitempty"`
+}
+
+// AcceptedAction retains the one selected action across process restarts.
+type AcceptedAction struct {
+	JobID           string    `json:"job_id"`
+	AttemptID       string    `json:"attempt_id"`
+	ExecutorID      string    `json:"executor_id"`
+	Repository      string    `json:"repository"`
+	RepositoryID    int64     `json:"repository_id"`
+	OwnerID         int64     `json:"owner_id"`
+	SubjectType     string    `json:"subject_type"`
+	SubjectNumber   int       `json:"subject_number"`
+	SourceKey       string    `json:"source_key"`
+	SourceNodeID    string    `json:"source_node_id"`
+	SourceURL       string    `json:"source_url"`
+	SourceUpdatedAt time.Time `json:"source_updated_at"`
+	Requester       string    `json:"requester"`
+	RequesterID     int64     `json:"requester_id"`
+	CommandName     string    `json:"command_name"`
+	Action          string    `json:"action"`
+	AcceptedAt      time.Time `json:"accepted_at"`
+	Deadline        time.Time `json:"deadline"`
+	Assigned        bool      `json:"assigned"`
+}
+
+// Validate checks the persisted action identity and absolute runtime window.
+func (a AcceptedAction) Validate() error {
+	for _, value := range []string{a.JobID, a.AttemptID, a.ExecutorID, strings.TrimSuffix(a.Requester, "[bot]"), a.CommandName} {
+		if !workspace.ValidIdentitySegment(value) {
+			return errors.New("accepted action identity is missing or invalid")
+		}
+	}
+	if !workspace.ValidRepository(a.Repository) || a.RepositoryID <= 0 || a.OwnerID <= 0 || a.RequesterID <= 0 || a.SubjectNumber <= 0 ||
+		(a.SubjectType != "Issue" && a.SubjectType != "PullRequest") {
+		return errors.New("accepted action repository or requester identity is invalid")
+	}
+	if a.SourceKey == "" || a.SourceNodeID == "" || a.SourceUpdatedAt.IsZero() {
+		return errors.New("accepted action source is missing")
+	}
+	switch a.Action {
+	case "review":
+		if a.SubjectType != "PullRequest" {
+			return errors.New("accepted review requires a pull request")
+		}
+	case "fix":
+		if a.SubjectType != "Issue" {
+			return errors.New("accepted fix requires an issue")
+		}
+	case "comment", "security-audit":
+	default:
+		return errors.New("accepted action is unsupported")
+	}
+	if a.AcceptedAt.IsZero() || !a.Deadline.After(a.AcceptedAt) {
+		return errors.New("accepted action deadline is invalid")
+	}
+	return nil
 }
 
 // PendingFix retains the commit and its publication caveat before a push.
@@ -109,6 +170,11 @@ func Open(path string, initialCursor time.Time) (*Store, error) {
 	if store.Data.Cursor.IsZero() {
 		return nil, errors.Join(fmt.Errorf("state cursor is missing"), store.Close())
 	}
+	if store.Data.Accepted != nil {
+		if err := store.Data.Accepted.Validate(); err != nil {
+			return nil, errors.Join(fmt.Errorf("invalid accepted action: %w", err), store.Close())
+		}
+	}
 	if store.Data.Processed == nil {
 		store.Data.Processed = map[string]time.Time{}
 	}
@@ -127,40 +193,15 @@ func Open(path string, initialCursor time.Time) (*Store, error) {
 	return store, nil
 }
 
-// Save atomically replaces state.
-func (s *Store) Save() (err error) {
-	dir := filepath.Dir(s.path)
-	f, err := os.CreateTemp(dir, ".state-*")
-	if err != nil {
-		return err
-	}
-	tmp := f.Name()
-	defer func() {
-		if removeErr := os.Remove(tmp); !errors.Is(removeErr, os.ErrNotExist) {
-			err = errors.Join(err, removeErr)
-		}
-	}()
-	encoder := json.NewEncoder(f)
+// Save atomically replaces state and reports failed durability steps.
+func (s *Store) Save() error {
+	var data bytes.Buffer
+	encoder := json.NewEncoder(&data)
 	encoder.SetIndent("", "  ")
-	err = f.Chmod(0o600)
-	if err == nil {
-		err = encoder.Encode(s.Data)
-	}
-	if err == nil {
-		err = f.Sync()
-	}
-	err = errors.Join(err, f.Close())
-	if err != nil {
-		return
-	}
-	if err := os.Rename(tmp, s.path); err != nil {
+	if err := encoder.Encode(s.Data); err != nil {
 		return err
 	}
-	if d, openErr := os.Open(dir); openErr == nil {
-		d.Sync()  //nolint:errcheck // -- Directory sync is best effort after replacement; some filesystems do not support it.
-		d.Close() //nolint:errcheck // -- The read-only directory has no pending writes; its sync is best effort.
-	}
-	return
+	return workspace.WriteAtomic(s.path, data.Bytes())
 }
 
 func (s *Store) Close() error {

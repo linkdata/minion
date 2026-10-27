@@ -24,6 +24,14 @@ type Checkpoints interface {
 	Review(ReviewCheckpoint) error
 }
 
+// assignmentCheckpoint is local to the selected worker. The acceptance record
+// must be saved before the worker receives its assignment.
+type assignmentCheckpoint interface {
+	AssignmentRequired() bool
+	BeforeAssignment(Job) error
+	AssignmentNotDelivered() error
+}
+
 // CallCheckpoint carries pinned dispatch metadata, then returned usage and parsed verdict claims.
 type CallCheckpoint struct {
 	Version   int       `json:"version"`
@@ -52,6 +60,7 @@ type executionCheckpoints struct {
 	review   ReviewCheckpoint
 	reviewed bool
 	failure  error
+	assigned bool
 }
 
 func newExecutionCheckpoints(owner *Orchestrator, job Job) *executionCheckpoints {
@@ -79,6 +88,65 @@ func (c *executionCheckpoints) fail(err error) error {
 
 func checkpointContractError() error {
 	return fmt.Errorf("%w: execution checkpoint contract violated", monitor.ErrTerminalJob)
+}
+
+func (c *executionCheckpoints) AssignmentRequired() bool {
+	return c.owner != nil && c.owner.assignmentRequired
+}
+
+func (c *executionCheckpoints) acceptedAssignment(job Job) bool {
+	if c.owner == nil || c.owner.Store == nil || c.owner.Store.Data.Accepted == nil || job.Identity != c.job.Identity {
+		return false
+	}
+	a := c.owner.Store.Data.Accepted
+	i := job.Identity
+	return a.JobID == i.JobID && a.AttemptID == i.AttemptID && a.ExecutorID == i.ExecutorID &&
+		a.Repository == i.Repository && a.RepositoryID == i.RepositoryID && a.OwnerID == i.OwnerID &&
+		a.Requester == i.Requester && a.RequesterID == i.RequesterID &&
+		a.SubjectNumber == i.Number && a.SubjectType == i.SubjectType &&
+		a.CommandName == job.Command && a.Action == string(job.Action)
+}
+
+func (c *executionCheckpoints) BeforeAssignment(job Job) error {
+	if c.failure != nil {
+		return c.failure
+	}
+	if !c.acceptedAssignment(job) {
+		return c.fail(fmt.Errorf("%w: worker assignment differs from accepted action", monitor.ErrAcceptanceState))
+	}
+	if c.assigned {
+		if !c.owner.Store.Data.Accepted.Assigned {
+			return c.fail(fmt.Errorf("%w: assigned action marker changed before re-pull", monitor.ErrAcceptanceState))
+		}
+		return nil // A disconnected pull may be retried before any bytes are sent.
+	}
+	if c.owner.Store.Data.Accepted.Assigned {
+		return c.fail(fmt.Errorf("%w: accepted action was already assigned", monitor.ErrAcceptanceState))
+	}
+	c.owner.Store.Data.Accepted.Assigned = true
+	if err := c.owner.Store.Save(); err != nil {
+		return c.fail(fmt.Errorf("%w: save worker assignment: %w", monitor.ErrAcceptanceState, err))
+	}
+	c.assigned = true
+	return nil
+}
+
+func (c *executionCheckpoints) AssignmentNotDelivered() error {
+	if c.failure != nil {
+		return c.failure
+	}
+	if !c.assigned {
+		return nil
+	}
+	if !c.acceptedAssignment(c.job) || !c.owner.Store.Data.Accepted.Assigned {
+		return c.fail(fmt.Errorf("%w: accepted assignment changed before delivery", monitor.ErrAcceptanceState))
+	}
+	c.owner.Store.Data.Accepted.Assigned = false
+	if err := c.owner.Store.Save(); err != nil {
+		return c.fail(fmt.Errorf("%w: release undelivered assignment: %w", monitor.ErrAcceptanceState, err))
+	}
+	c.assigned = false
+	return nil
 }
 
 func (c *executionCheckpoints) BeforeCall(fact CallCheckpoint) error {

@@ -182,7 +182,7 @@ func runMonitorLoop(ctx context.Context, watcher *monitor.Monitor, store *state.
 			} else {
 				logger.Printf("poll: %s", monitor.InertLogText(err.Error()))
 			}
-			if !loop || workerExited != nil && ctx.Err() == nil && errors.Is(err, action.ErrLocalWorkerUnavailable) {
+			if !loop || errors.Is(err, monitor.ErrAcceptanceState) || workerExited != nil && ctx.Err() == nil && errors.Is(err, action.ErrLocalWorkerUnavailable) {
 				return 1
 			}
 		}
