@@ -209,6 +209,21 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 	var scans []notificationScan
 	seen := make(map[string]bool)
 	var failures []error
+	terminalFailures := make(map[int]string)
+	recordTerminalFailure := func(id string, err error) {
+		if err != nil {
+			terminalFailures[len(failures)] = id
+			failures = append(failures, err)
+		}
+	}
+	clearResolvedTerminalFailures := func() {
+		for index, id := range terminalFailures {
+			if !store.Data.Processed[id].IsZero() {
+				failures[index] = nil
+				delete(terminalFailures, index)
+			}
+		}
+	}
 	stop := func(errs ...error) (time.Time, error) {
 		err := errors.Join(slices.Concat(failures, errs)...)
 		if canceled := ctx.Err(); canceled != nil && !errors.Is(err, canceled) {
@@ -329,6 +344,14 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			continue
 		}
 		firstFailure := len(failures)
+		entryFailed := func() bool {
+			for _, err := range failures[firstFailure:] {
+				if err != nil {
+					return true
+				}
+			}
+			return false
+		}
 		items, err := m.GitHub.ThreadItems(ctx, repo.Name, notification.Subject.Type, number, entry.since)
 		if ctx.Err() != nil {
 			return stopAt(fmt.Sprintf("%s %s #%d", repo.Name, notification.Subject.Type, number), err)
@@ -443,9 +466,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				jobFailure.Attempts = maxJobAttempts
 			}
 			if jobFailure.Attempts >= maxJobAttempts {
-				if err := m.finishFailedJob(ctx, store, job, started, jobFailure); err != nil {
-					failures = append(failures, err)
-				}
+				recordTerminalFailure(job.ID, m.finishFailedJob(ctx, store, job, started, jobFailure))
 				if ctx.Err() != nil {
 					return stop()
 				}
@@ -457,9 +478,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				if err := saveJobResult(store, selected); err != nil {
 					return stop(err)
 				}
-				if err := m.finishFailedJob(ctx, store, job, started, jobFailure); err != nil {
-					failures = append(failures, err)
-				}
+				recordTerminalFailure(job.ID, m.finishFailedJob(ctx, store, job, started, jobFailure))
 				continue
 			}
 			if selected {
@@ -548,7 +567,9 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				}
 			}
 			if selected {
-				if err := m.executeSelectedWithControls(ctx, store, job, started, entry.key, items); err != nil {
+				executeErr := m.executeSelectedWithControls(ctx, store, job, started, entry.key, items)
+				clearResolvedTerminalFailures()
+				if err := executeErr; err != nil {
 					if errors.Is(err, ErrAcceptedDiscarded) {
 						return stop() // The refused assignment retired this worker.
 					}
@@ -588,9 +609,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 					}
 					m.logf("%s from %s failed (attempt %d/%d): %v", cmd.Action, itemLocation(item), jobFailure.Attempts, maxJobAttempts, err)
 					if jobFailure.Attempts >= maxJobAttempts {
-						if replyErr := m.finishFailedJob(ctx, store, job, started, jobFailure); replyErr != nil {
-							failures = append(failures, replyErr)
-						}
+						recordTerminalFailure(job.ID, m.finishFailedJob(ctx, store, job, started, jobFailure))
 					}
 					if ctx.Err() != nil {
 						return stop(failureErr)
@@ -620,7 +639,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				for _, later := range scans[scanIndex+1:] {
 					rememberNotification(store, later.key, later.notification, later.since)
 				}
-				if len(failures) != firstFailure {
+				if entryFailed() {
 					if saveErr := m.deferNotification(store, entry.key, notification, entry.since, started); saveErr != nil {
 						return stop(err, saveErr)
 					}
@@ -633,11 +652,12 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				return stop(err)
 			}
 		}
-		if len(failures) != firstFailure {
+		if entryFailed() {
 			if err := m.deferNotification(store, entry.key, notification, entry.since, started); err != nil {
 				return stop(err)
 			}
-		} else if _, pending := store.Data.PendingNotifications[entry.key]; pending {
+		} else if _, pending := store.Data.PendingNotifications[entry.key]; pending &&
+			(!selectedMode || !hasTerminalReplay(store, entry.key)) {
 			delete(store.Data.PendingNotifications, entry.key)
 			if err := store.Save(); err != nil {
 				return stop(err)
@@ -825,6 +845,15 @@ func itemLocation(item github.Item) string {
 }
 
 func (m *Monitor) deferNotification(store *state.Store, key string, notification github.Notification, since, now time.Time) error {
+	pending := deferNotificationState(store, key, notification, since, now)
+	if err := store.Save(); err != nil {
+		return err
+	}
+	m.logf("retry %s %s after %s (failure %d)", pending.Repository, pending.SubjectURL, pending.RetryAt.Format(time.RFC3339), pending.Failures)
+	return nil
+}
+
+func deferNotificationState(store *state.Store, key string, notification github.Notification, since, now time.Time) state.PendingNotification {
 	pending := store.Data.PendingNotifications[key]
 	if pending.Failures < 7 {
 		pending.Failures++
@@ -840,11 +869,7 @@ func (m *Monitor) deferNotification(store *state.Store, key string, notification
 	}
 	pending.RetryAt = now.Add(time.Minute << (pending.Failures - 1))
 	store.Data.PendingNotifications[key] = pending
-	if err := store.Save(); err != nil {
-		return err
-	}
-	m.logf("retry %s %s after %s (failure %d)", pending.Repository, pending.SubjectURL, pending.RetryAt.Format(time.RFC3339), pending.Failures)
-	return nil
+	return pending
 }
 
 // rememberNotification retains a thread for replay without counting capacity loss as a failure.
@@ -861,6 +886,16 @@ func rememberNotification(store *state.Store, key string, notification github.No
 		OwnerID: notification.Repository.Owner.ID, SubjectType: notification.Subject.Type,
 		SubjectURL: notification.Subject.URL, Since: since, UpdatedAt: notification.UpdatedAt,
 	}
+}
+
+func hasTerminalReplay(store *state.Store, key string) bool {
+	for id, failure := range store.Data.JobFailures {
+		if (failure.NotificationKey == "" || failure.NotificationKey == key) && store.Data.Processed[id].IsZero() &&
+			(failure.Attempts >= maxJobAttempts || failure.ModelCallStarted || !failure.Deadline.IsZero()) {
+			return true
+		}
+	}
+	return false
 }
 
 func infrastructureFailure(err error) bool {
@@ -1241,6 +1276,9 @@ func (m *Monitor) executeSelectedWithControls(ctx context.Context, store *state.
 				if failure.Attempts >= maxJobAttempts || failure.ModelCallStarted {
 					checkAt = time.Time{}
 				}
+				if pending, ok := store.Data.PendingNotifications[failure.NotificationKey]; ok && failure.ReplyAttempts > 0 && pending.RetryAt.After(checkAt) {
+					checkAt = pending.RetryAt
+				}
 				if failure.NotificationKey == "" {
 					if !unknownTerminalKey || checkAt.Before(unknownTerminalCheck) {
 						unknownTerminalCheck = checkAt
@@ -1414,10 +1452,10 @@ func (m *Monitor) processTerminalNotification(ctx context.Context, store *state.
 			return m.now().UTC().Add(time.Minute)
 		}
 	}
-	return m.processTerminalItems(ctx, store, activeJobID, entry.key, repo, notification.Subject.Type, number, items, commandSets[repo.Name])
+	return m.processTerminalItems(ctx, store, activeJobID, entry, repo, notification.Subject.Type, number, items, commandSets[repo.Name])
 }
 
-func (m *Monitor) processTerminalItems(ctx context.Context, store *state.Store, activeJobID, notificationKey string,
+func (m *Monitor) processTerminalItems(ctx context.Context, store *state.Store, activeJobID string, entry notificationScan,
 	repo config.Repository, subjectType string, number int, items []github.Item, commands map[string]command.Action) time.Time {
 	var next time.Time
 	wake := func(at time.Time) {
@@ -1443,9 +1481,11 @@ func (m *Monitor) processTerminalItems(ctx context.Context, store *state.Store, 
 		var terminal bool
 		var failure state.JobFailure
 		var processed bool
+		var replyRetryAt time.Time
 		_ = store.WithLock(func() error {
 			_, processed = store.Data.Processed[id]
 			failure = store.Data.JobFailures[id]
+			replyRetryAt = store.Data.PendingNotifications[entry.key].RetryAt
 			terminal = !processed && (failure.Attempts >= maxJobAttempts || failure.ModelCallStarted ||
 				!failure.Deadline.IsZero() && !time.Now().Before(failure.Deadline))
 			return nil
@@ -1454,6 +1494,10 @@ func (m *Monitor) processTerminalItems(ctx context.Context, store *state.Store, 
 			if !processed && !failure.Deadline.IsZero() {
 				wake(failure.Deadline)
 			}
+			continue
+		}
+		if failure.ReplyAttempts > 0 && m.now().UTC().Before(replyRetryAt) {
+			wake(replyRetryAt)
 			continue
 		}
 		current, err := m.GitHub.CurrentItem(ctx, item)
@@ -1484,9 +1528,20 @@ func (m *Monitor) processTerminalItems(ctx context.Context, store *state.Store, 
 		if failure.ModelCallStarted || !failure.Deadline.IsZero() && !time.Now().Before(failure.Deadline) {
 			failure.Attempts = maxJobAttempts
 		}
-		failure.NotificationKey = notificationKey
-		if err := m.finishFailedJob(ctx, store, job, m.now().UTC(), failure); err != nil {
+		failure.NotificationKey = entry.key
+		if err := m.finishFailedJobWithRetry(ctx, store, job, m.now().UTC(), failure, &entry); err != nil {
 			m.logf("terminal control in %s: %v", itemLocation(current), err)
+			var retryAt time.Time
+			_ = store.WithLock(func() error {
+				if store.Data.JobFailures[id].ReplyAttempts > failure.ReplyAttempts {
+					retryAt = store.Data.PendingNotifications[entry.key].RetryAt
+				}
+				return nil
+			})
+			if !retryAt.IsZero() {
+				wake(retryAt)
+				continue
+			}
 			wake(m.now().UTC().Add(time.Minute))
 		}
 	}
@@ -1571,6 +1626,11 @@ func (m *Monitor) completeSelected(ctx context.Context, store *state.Store, job 
 }
 
 func (m *Monitor) finishFailedJob(ctx context.Context, store *state.Store, job Job, at time.Time, failure state.JobFailure) error {
+	return m.finishFailedJobWithRetry(ctx, store, job, at, failure, nil)
+}
+
+func (m *Monitor) finishFailedJobWithRetry(ctx context.Context, store *state.Store, job Job, at time.Time,
+	failure state.JobFailure, replyRetry *notificationScan) error {
 	var accepted *state.AcceptedAction
 	_ = store.WithLock(func() error {
 		if current := store.Data.Accepted; current != nil && current.JobID == job.ID {
@@ -1645,11 +1705,18 @@ func (m *Monitor) finishFailedJob(ctx context.Context, store *state.Store, job J
 		if err != nil {
 			failure.ReplyAttempts++
 			if failure.ReplyAttempts < maxFailureReplyAttempts {
+				var pending state.PendingNotification
 				if saveErr := store.WithLock(func() error {
 					store.Data.JobFailures[job.ID] = failure
+					if replyRetry != nil {
+						pending = deferNotificationState(store, replyRetry.key, replyRetry.notification, replyRetry.since, m.now().UTC())
+					}
 					return saveJobResult(store, accepted != nil)
 				}); saveErr != nil {
 					return errors.Join(err, saveErr)
+				}
+				if replyRetry != nil {
+					m.logf("retry %s %s after %s (failure %d)", pending.Repository, pending.SubjectURL, pending.RetryAt.Format(time.RFC3339), pending.Failures)
 				}
 				return fmt.Errorf("post failure reply to %s: %w", itemLocation(job.Source), err)
 			}

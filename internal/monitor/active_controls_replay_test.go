@@ -808,3 +808,240 @@ func TestSelectedRetryServicesControlsDueAtCompletion(t *testing.T) {
 		}
 	})
 }
+
+func TestSelectedReviewKeepsOlderTerminalFixForControlReply(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		fix := selectedItem(now.Add(-2 * time.Second))
+		fix.Key, fix.NodeID = "comment:old-fix", "node:old-fix"
+		fix.Body = "@linkdataminion fix"
+		fix.HTMLURL = "https://github.com/example-owner/example-repo/pull/6#issuecomment-old-fix"
+		review := selectedItem(now.Add(-time.Second))
+		fixNotice := testNotification(fix.UpdatedAt)
+		fixNotice.Subject.URL = "https://api.github.com/repos/example-owner/example-repo/pulls/6"
+		fixKey := notificationKey(fixNotice)
+		fixID := jobID(fix.Key, "fix")
+		store := openState(t, now.Add(-time.Minute))
+		store.Data.PendingNotifications[fixKey] = state.PendingNotification{
+			Repository: fixNotice.Repository.FullName, RepositoryID: 1, OwnerID: 2,
+			SubjectType: fixNotice.Subject.Type, SubjectURL: fixNotice.Subject.URL,
+			Since: now.Add(-time.Minute), UpdatedAt: fix.UpdatedAt,
+		}
+		store.Data.JobFailures[fixID] = state.JobFailure{Attempts: maxJobAttempts, NotificationKey: fixKey}
+		store.Data.NextInviteCheckAt = now.Add(15 * time.Minute)
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		gh := &fakeGitHub{
+			notifications: []github.Notification{testNotification(review.UpdatedAt)},
+			permission:    github.Permission{Permission: "write"},
+			threadItems: func(_ string, number int, _ time.Time) ([]github.Item, error) {
+				switch number {
+				case 6:
+					return []github.Item{fix}, nil
+				case 7:
+					return []github.Item{review}, nil
+				default:
+					return nil, fmt.Errorf("unexpected thread #%d", number)
+				}
+			},
+		}
+		held := &heldSelectedAction{entered: make(chan Job, 1), release: make(chan struct{})}
+		cfg := testConfig(t)
+		cfg.MaxRuntimeMinutes = 7
+		m := &Monitor{Config: cfg, GitHub: gh, Handler: held,
+			SelectedExecutorID: "local", SelectedCommands: map[string]bool{"review": true}}
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		result := make(chan error, 1)
+		go func() { _, err := m.RunOnce(ctx, store); result <- err }()
+		select {
+		case <-held.entered:
+		case err := <-result:
+			t.Fatalf("review did not start: %v", err)
+		}
+		synctest.Wait()
+		if len(gh.comments) != 1 || !strings.HasSuffix(gh.comments[0].Body, "\n\n<!-- linkdataminion:"+fixID+" -->") ||
+			store.Data.Processed[fixID].IsZero() || store.Data.Accepted == nil || held.executions.Load() != 1 {
+			t.Fatalf("older terminal fix was lost while review ran: comments=%v processed=%v accepted=%+v executions=%d",
+				gh.comments, store.Data.Processed[fixID], store.Data.Accepted, held.executions.Load())
+		}
+		cancel()
+		synctest.Wait()
+		if err := <-result; !errors.Is(err, context.Canceled) {
+			t.Fatalf("RunOnce after cancellation: %v", err)
+		}
+	})
+}
+
+func TestSelectedTerminalReplyWaitsForPersistedRetryAt(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		terminal := selectedItem(now.Add(-2 * time.Second))
+		terminal.Key, terminal.NodeID = "comment:terminal", "node:terminal"
+		terminal.HTMLURL = "https://github.com/example-owner/example-repo/pull/6#issuecomment-terminal"
+		review := selectedItem(now.Add(-time.Second))
+		notice := testNotification(terminal.UpdatedAt)
+		notice.Subject.URL = "https://api.github.com/repos/example-owner/example-repo/pulls/6"
+		key := notificationKey(notice)
+		id := jobID(terminal.Key, "review")
+		retryAt := now.Add(5 * time.Minute)
+		path := filepath.Join(t.TempDir(), "state.json")
+		store := openStateAt(t, path, now.Add(-time.Minute))
+		store.Data.PendingNotifications[key] = state.PendingNotification{
+			Repository: notice.Repository.FullName, RepositoryID: 1, OwnerID: 2,
+			SubjectType: notice.Subject.Type, SubjectURL: notice.Subject.URL,
+			Since: now.Add(-time.Minute), UpdatedAt: terminal.UpdatedAt, RetryAt: retryAt,
+		}
+		store.Data.JobFailures[id] = state.JobFailure{
+			Attempts: maxJobAttempts, ReplyAttempts: 1, NotificationKey: key,
+		}
+		store.Data.NextInviteCheckAt = now.Add(15 * time.Minute)
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		gh := &fakeGitHub{
+			notifications: []github.Notification{testNotification(review.UpdatedAt)},
+			permission:    github.Permission{Permission: "write"},
+			threadItems: func(_ string, number int, _ time.Time) ([]github.Item, error) {
+				switch number {
+				case 6:
+					return []github.Item{terminal}, nil
+				case 7:
+					return []github.Item{review}, nil
+				default:
+					return nil, fmt.Errorf("unexpected thread #%d", number)
+				}
+			},
+		}
+		allowReply := false
+		attempted := make(chan struct{})
+		var attempts atomic.Int32
+		gh.beforeComment = func() {
+			if attempts.Add(1) == 1 {
+				close(attempted)
+			}
+			if !allowReply {
+				gh.commentErr = errors.New("temporary rate limit")
+			} else {
+				gh.commentErr = nil
+			}
+		}
+		held := &heldSelectedAction{entered: make(chan Job, 1), release: make(chan struct{})}
+		cfg := testConfig(t)
+		cfg.MaxRuntimeMinutes = 7
+		m := &Monitor{Config: cfg, GitHub: gh, Handler: held,
+			SelectedExecutorID: "local", SelectedCommands: map[string]bool{"review": true}}
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		result := make(chan error, 1)
+		go func() { _, err := m.RunOnce(ctx, store); result <- err }()
+		select {
+		case <-held.entered:
+		case err := <-result:
+			t.Fatalf("review did not start: %v", err)
+		}
+		synctest.Wait()
+		time.Sleep(2 * time.Minute)
+		var processed time.Time
+		var failure state.JobFailure
+		var pending state.PendingNotification
+		if err := store.WithLock(func() error {
+			processed = store.Data.Processed[id]
+			failure = store.Data.JobFailures[id]
+			pending = store.Data.PendingNotifications[key]
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if attempts.Load() != 0 || !processed.IsZero() || failure.ReplyAttempts != 1 || !pending.RetryAt.Equal(retryAt) {
+			t.Fatalf("terminal reply retried before saved deadline: calls=%d processed=%v failure=%+v pending=%+v",
+				attempts.Load(), processed, failure, pending)
+		}
+		time.Sleep(3 * time.Minute)
+		<-attempted
+		close(held.release)
+		if err := <-result; err != nil {
+			t.Fatalf("RunOnce after active reply failure: %v", err)
+		}
+		nextRetryAt := store.Data.PendingNotifications[key].RetryAt
+		if gh.commentCalls != 1 || store.Data.JobFailures[id].ReplyAttempts != 2 ||
+			!store.Data.Processed[id].IsZero() || !nextRetryAt.After(time.Now()) {
+			t.Fatalf("active reply failure did not save its next retry: calls=%d failure=%+v processed=%v pending=%+v",
+				gh.commentCalls, store.Data.JobFailures[id], store.Data.Processed[id], store.Data.PendingNotifications[key])
+		}
+		if err := store.Close(); err != nil {
+			t.Fatal(err)
+		}
+		reopened := openStateAt(t, path, now.Add(-time.Minute))
+		if !reopened.Data.PendingNotifications[key].RetryAt.Equal(nextRetryAt) {
+			t.Fatalf("reply backoff was not durable: pending=%+v", reopened.Data.PendingNotifications[key])
+		}
+		allowReply = true
+		if _, err := m.RunOnce(t.Context(), reopened); err != nil || gh.commentCalls != 1 ||
+			reopened.Data.JobFailures[id].ReplyAttempts != 2 {
+			t.Fatalf("restart retried before saved deadline: err=%v calls=%d failure=%+v",
+				err, gh.commentCalls, reopened.Data.JobFailures[id])
+		}
+		time.Sleep(nextRetryAt.Sub(time.Now()))
+		if _, err := m.RunOnce(t.Context(), reopened); err != nil || gh.commentCalls != 2 || len(gh.comments) != 1 ||
+			!strings.HasSuffix(gh.comments[0].Body, "\n\n<!-- linkdataminion:"+id+" -->") ||
+			reopened.Data.Processed[id].IsZero() {
+			t.Fatalf("terminal reply was not posted when saved retry became due: err=%v calls=%d comments=%v processed=%v",
+				err, gh.commentCalls, gh.comments, reopened.Data.Processed[id])
+		}
+	})
+}
+
+func TestSelectedControlClearsResolvedScanReplyError(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		terminal := selectedItem(now.Add(-2 * time.Second))
+		terminal.Key, terminal.NodeID = "comment:terminal", "node:terminal"
+		review := selectedItem(now.Add(-time.Second))
+		id := jobID(terminal.Key, "review")
+		store := openState(t, now.Add(-time.Minute))
+		store.Data.JobFailures[id] = state.JobFailure{Attempts: maxJobAttempts}
+		store.Data.NextInviteCheckAt = now.Add(15 * time.Minute)
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		notice := testNotification(review.UpdatedAt)
+		gh := &fakeGitHub{
+			notifications: []github.Notification{notice},
+			items:         []github.Item{terminal, review},
+			permission:    github.Permission{Permission: "write"},
+		}
+		gh.beforeComment = func() {
+			if gh.commentCalls == 1 {
+				gh.commentErr = errors.New("temporary comment failure")
+			} else {
+				gh.commentErr = nil
+			}
+		}
+		held := &heldSelectedAction{entered: make(chan Job, 1), release: make(chan struct{})}
+		cfg := testConfig(t)
+		cfg.MaxRuntimeMinutes = 7
+		m := &Monitor{Config: cfg, GitHub: gh, Handler: held,
+			SelectedExecutorID: "local", SelectedCommands: map[string]bool{"review": true}}
+		result := make(chan error, 1)
+		go func() { _, err := m.RunOnce(t.Context(), store); result <- err }()
+		select {
+		case <-held.entered:
+		case err := <-result:
+			t.Fatalf("review did not start: %v", err)
+		}
+		synctest.Wait()
+		close(held.release)
+		synctest.Wait()
+		if err := <-result; err != nil {
+			t.Fatalf("resolved terminal reply still returned scan error: %v", err)
+		}
+		if gh.commentCalls != 2 || len(gh.comments) != 1 ||
+			!strings.HasSuffix(gh.comments[0].Body, "\n\n<!-- linkdataminion:"+id+" -->") ||
+			store.Data.Processed[id].IsZero() || len(store.Data.PendingNotifications) != 0 {
+			t.Fatalf("resolved terminal reply was lost or re-deferred: calls=%d comments=%v processed=%v pending=%+v",
+				gh.commentCalls, gh.comments, store.Data.Processed[id], store.Data.PendingNotifications)
+		}
+	})
+}
