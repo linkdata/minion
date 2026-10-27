@@ -50,6 +50,7 @@ type fakeGitHub struct {
 	reactions          []string
 	checks             int
 	repoChecks         int
+	repositoryErr      error
 	beforeRepository   func()
 	issueDetails       func(string, int) (github.Issue, error)
 	currentChecks      int
@@ -114,6 +115,9 @@ func (f *fakeGitHub) Repository(ctx context.Context, name string) (github.Reposi
 	}
 	if err := ctx.Err(); err != nil {
 		return github.Repository{}, err
+	}
+	if f.repositoryErr != nil {
+		return github.Repository{}, f.repositoryErr
 	}
 	if f.liveRepo != nil {
 		return *f.liveRepo, nil

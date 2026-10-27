@@ -720,6 +720,49 @@ func TestSelectedIssueRecoveryChecksOriginalThread(t *testing.T) {
 	}
 }
 
+func TestSelectedRecoveryChecksOriginalRepository(t *testing.T) {
+	for _, status := range []int{http.StatusMovedPermanently, http.StatusGone, http.StatusNotFound} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			at := time.Now().UTC()
+			accepted := selectedAcceptance(t, at)
+			path := filepath.Join(t.TempDir(), "state.json")
+			store := openStateAt(t, path, at.Add(-time.Minute))
+			store.Data.Accepted = &accepted
+			store.Data.JobFailures[accepted.JobID] = state.JobFailure{Attempts: 1, AcceptedAt: at, Deadline: accepted.Deadline}
+			if err := store.Save(); err != nil {
+				t.Fatal(err)
+			}
+			gh := &fakeGitHub{repositoryErr: &github.StatusError{Method: http.MethodGet,
+				Path: "/repos/example-owner/example-repo", StatusCode: status}}
+			m := selectedMonitor(t, at, gh, selectedHandler(func(Job) error {
+				t.Fatal("unavailable original repository dispatched")
+				return nil
+			}))
+			_, err := m.RunOnce(t.Context(), store)
+			if gh.repoChecks == 0 || len(gh.reactions) != 0 {
+				t.Fatalf("original repository check was bypassed: checks=%d reactions=%v", gh.repoChecks, gh.reactions)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			reopened := openStateAt(t, path, at.Add(-time.Minute))
+			if status == http.StatusNotFound {
+				var got *github.StatusError
+				if !errors.As(err, &got) || got.StatusCode != status || reopened.Data.Accepted == nil ||
+					reopened.Data.Accepted.AttemptID != accepted.AttemptID || !reopened.Data.Accepted.Deadline.Equal(accepted.Deadline) ||
+					!reopened.Data.Accepted.RetryAt.After(time.Now()) || len(reopened.Data.Processed) != 0 {
+					t.Fatalf("ambiguous repository 404 lost accepted retry: err=%v state=%+v", err, reopened.Data)
+				}
+				return
+			}
+			if _, done := reopened.Data.Processed[accepted.JobID]; err != nil || !done || reopened.Data.Accepted != nil ||
+				len(reopened.Data.JobFailures) != 0 {
+				t.Fatalf("moved or gone repository retained accepted action: err=%v state=%+v", err, reopened.Data)
+			}
+		})
+	}
+}
+
 func TestSelectedUnassignedModelMarkerRecoversAsTerminal(t *testing.T) {
 	at := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
 	store := openState(t, at.Add(-time.Minute))

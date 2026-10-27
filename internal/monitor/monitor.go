@@ -718,7 +718,7 @@ func infrastructureFailure(err error) bool {
 	return errors.Is(err, ErrRequestTransport) || errors.As(err, &network)
 }
 
-func githubThreadMovedOrGone(err error) bool {
+func githubResourceMovedOrGone(err error) bool {
 	var status *github.StatusError
 	return errors.As(err, &status) && (status.StatusCode == http.StatusMovedPermanently || status.StatusCode == http.StatusGone)
 }
@@ -831,7 +831,7 @@ func (m *Monitor) acceptedIssuePresent(ctx context.Context, accepted state.Accep
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return false, ctxErr
 	}
-	if githubThreadMovedOrGone(err) {
+	if githubResourceMovedOrGone(err) {
 		return false, nil
 	}
 	if err != nil {
@@ -860,11 +860,14 @@ func (m *Monitor) validateAcceptedSource(ctx context.Context, accepted state.Acc
 		}
 	}
 	liveRepo, err := m.GitHub.Repository(ctx, repo.Name)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return config.Repository{}, github.Item{}, false, ctxErr
+	}
+	if githubResourceMovedOrGone(err) {
+		return config.Repository{}, github.Item{}, false, nil
+	}
 	if err != nil {
 		return config.Repository{}, github.Item{}, false, fmt.Errorf("verify accepted repository identity: %w", err)
-	}
-	if err := ctx.Err(); err != nil {
-		return config.Repository{}, github.Item{}, false, err
 	}
 	if !repo.MatchesIdentity(liveRepo.ID, liveRepo.Owner.ID) {
 		return config.Repository{}, github.Item{}, false, nil
@@ -884,7 +887,7 @@ func (m *Monitor) validateAcceptedSource(ctx context.Context, accepted state.Acc
 			return config.Repository{}, github.Item{}, false, ctxErr
 		}
 		if listErr != nil {
-			if githubThreadMovedOrGone(listErr) {
+			if githubResourceMovedOrGone(listErr) {
 				return config.Repository{}, github.Item{}, false, nil
 			}
 			return config.Repository{}, github.Item{}, false, errors.Join(fmt.Errorf("verify accepted source: %w", err), fmt.Errorf("list accepted source thread: %w", listErr))
@@ -1079,7 +1082,7 @@ func (m *Monitor) finishFailedJob(ctx context.Context, store *state.Store, job J
 	includeReviews := job.SubjectType == "PullRequest" && job.Command.Action == command.Review
 	replied, err := m.GitHub.HasVerifiedBotReply(lookupCtx, job.Repository.Name, job.Number, job.Source.UpdatedAt, m.Config.BotLogin, marker, includeReviews)
 	if err != nil {
-		if store.Data.Accepted != nil && githubThreadMovedOrGone(err) {
+		if store.Data.Accepted != nil && githubResourceMovedOrGone(err) {
 			m.logf("discard accepted %s: source thread moved or was deleted", itemLocation(job.Source))
 			return discardAccepted(store)
 		}
