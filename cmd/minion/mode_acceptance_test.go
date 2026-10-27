@@ -220,8 +220,12 @@ func TestExecuteModeOfflinePublicationAndRestart(t *testing.T) {
 		t.Fatalf("first poll did not retain one unassigned acceptance: %+v", store.Data)
 	}
 	accepted := *store.Data.Accepted
-	if _, err := os.Stat(modelCalls); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("canceled poll reached model: %v", err)
+	modelData, err := os.ReadFile(modelCalls)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	if len(modelData) != 0 {
+		t.Fatalf("canceled poll reached model: %q", modelData)
 	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
