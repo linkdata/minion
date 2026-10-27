@@ -68,7 +68,9 @@ func TestStoreLocksAndPersistsCompletedCommands(t *testing.T) {
 
 func TestStorePersistsAcrossProcessRestart(t *testing.T) {
 	initial := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
-	if path, ok := os.LookupEnv("MINION_STATE_RESTART_TEST"); ok {
+	const childMarker = "minion-state-restart-child"
+	if len(os.Args) >= 3 && os.Args[len(os.Args)-2] == childMarker {
+		path := os.Args[len(os.Args)-1]
 		store, err := Open(path, initial)
 		if err != nil {
 			t.Fatal(err)
@@ -82,11 +84,18 @@ func TestStorePersistsAcrossProcessRestart(t *testing.T) {
 		}
 		return // Process exit releases the lock without Store.Close.
 	}
+	unrelated := filepath.Join(t.TempDir(), "unrelated-state.json")
+	if err := os.WriteFile(unrelated, []byte("untouched"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MINION_STATE_RESTART_TEST", unrelated)
 	path := filepath.Join(t.TempDir(), "state.json")
-	cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestStorePersistsAcrossProcessRestart$")
-	cmd.Env = append(os.Environ(), "MINION_STATE_RESTART_TEST="+path)
+	cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestStorePersistsAcrossProcessRestart$", "--", childMarker, path)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("state writer process: %v\n%s", err, output)
+	}
+	if got, err := os.ReadFile(unrelated); err != nil || string(got) != "untouched" {
+		t.Fatalf("inherited environment path changed: %q, %v", got, err)
 	}
 	store, err := Open(path, initial.Add(time.Hour))
 	if err != nil {
