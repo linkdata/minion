@@ -313,7 +313,7 @@ func TestRunOnceInterleavedRepositoriesReplayOnlyUnacceptedActions(t *testing.T)
 		t.Fatalf("capacity loss = %v", err)
 	}
 	if len(handler.jobs) != 2 || handler.jobs[0].Source.Key != "a/one:1" || handler.jobs[1].Source.Key != "b/two:2" ||
-		len(store.Data.Processed) != 2 || len(store.Data.PendingNotifications) != 1 ||
+		len(store.Data.Processed) != 2 || len(store.Data.PendingNotifications) != 3 ||
 		!store.Data.Cursor.Equal(initial) || !store.Data.RepositoryCursors[firstRepo].Equal(initial) ||
 		!store.Data.RepositoryCursors[secondRepo].Equal(initial) {
 		t.Fatalf("partial interleaved batch changed unaccepted state: jobs=%v state=%+v", handler.jobs, store.Data)
@@ -322,6 +322,7 @@ func TestRunOnceInterleavedRepositoriesReplayOnlyUnacceptedActions(t *testing.T)
 		t.Fatal(err)
 	}
 	store = openStateAt(t, path, initial)
+	gh.notifications = nil
 	handler.failAt = 0
 	clock = now.Add(time.Minute)
 	if _, err := m.RunOnce(t.Context(), store); err != nil {

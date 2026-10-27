@@ -285,7 +285,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		}
 		return scans[i].notification.UpdatedAt.Before(scans[j].notification.UpdatedAt)
 	})
-	for _, entry := range scans {
+	for scanIndex, entry := range scans {
 		if ctx.Err() != nil {
 			return stop()
 		}
@@ -606,12 +606,18 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				capacityErr = m.waitCapacity(ctx)
 			}
 			if err := capacityErr; err != nil {
+				for _, later := range scans[scanIndex+1:] {
+					rememberNotification(store, later.key, later.notification, later.since)
+				}
 				if len(failures) != firstFailure {
 					if saveErr := m.deferNotification(store, entry.key, notification, entry.since, started); saveErr != nil {
 						return stop(err, saveErr)
 					}
-				} else if saveErr := rememberNotification(store, entry.key, notification, entry.since); saveErr != nil {
-					return stop(err, saveErr)
+				} else {
+					rememberNotification(store, entry.key, notification, entry.since)
+					if saveErr := store.Save(); saveErr != nil {
+						return stop(err, saveErr)
+					}
 				}
 				return stop(err)
 			}
@@ -812,10 +818,11 @@ func (m *Monitor) deferNotification(store *state.Store, key string, notification
 	return nil
 }
 
-// rememberNotification retains the thread for replay without counting capacity loss as a failure.
-func rememberNotification(store *state.Store, key string, notification github.Notification, since time.Time) error {
+// rememberNotification retains a thread for replay without counting capacity loss as a failure.
+// The caller saves all remembered threads before returning.
+func rememberNotification(store *state.Store, key string, notification github.Notification, since time.Time) {
 	if _, exists := store.Data.PendingNotifications[key]; exists {
-		return nil
+		return
 	}
 	if store.Data.PendingNotifications == nil {
 		store.Data.PendingNotifications = make(map[string]state.PendingNotification)
@@ -825,7 +832,6 @@ func rememberNotification(store *state.Store, key string, notification github.No
 		OwnerID: notification.Repository.Owner.ID, SubjectType: notification.Subject.Type,
 		SubjectURL: notification.Subject.URL, Since: since, UpdatedAt: notification.UpdatedAt,
 	}
-	return store.Save()
 }
 
 func infrastructureFailure(err error) bool {
