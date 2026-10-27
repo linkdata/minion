@@ -1,6 +1,7 @@
 package action
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -17,6 +18,24 @@ import (
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/skills"
 )
+
+func TestCanceledSavedAuditDoesNotRetainIncompleteCopy(t *testing.T) {
+	installActionTestSkills(t, testAuditSkillURL)
+	job := testJob(command.SecurityAudit)
+	result := completeAuditResult(job)
+	store, _, request := savedRecoveryFixture(t, job, result)
+	root := t.TempDir()
+	t.Setenv("PATH", t.TempDir()) // Make the publishing validator unavailable after save.
+	e := &Orchestrator{Store: store, WorkRoot: root}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := e.preparePublication(ctx, &preparedAction{job: job, request: request}, result); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled saved audit did not preserve cancellation: %v", err)
+	}
+	if dirs, err := filepath.Glob(filepath.Join(root, "audits", "incomplete-*")); err != nil || len(dirs) != 0 {
+		t.Fatalf("saved audit was mislabeled incomplete: dirs=%v error=%v", dirs, err)
+	}
+}
 
 func TestSavedAuditWaitsForPublishingValidator(t *testing.T) {
 	installActionTestSkills(t, testAuditSkillURL)

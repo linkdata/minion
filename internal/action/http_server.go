@@ -729,7 +729,7 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 		}
 		failedOutcome = outcome.Failure != nil
 		apply = func() error {
-			var savedRetry error
+			var savedRetry, terminalResult error
 			// A successful outcome is acknowledged only after its optional parent
 			// receiver has validated and saved the complete selected attempt.
 			if !failedOutcome {
@@ -742,10 +742,13 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 					// Their delivery must be known before a complete result is saved.
 					tx.requiredACKs.Wait()
 					tx.mu.Lock()
-					prior := errors.Join(tx.checkpointErr, tx.requiredControlErr)
+					checkpointErr, controlErr := tx.checkpointErr, tx.requiredControlErr
 					tx.mu.Unlock()
-					if prior != nil {
-						return errors.Join(monitor.ErrAcceptanceState, prior)
+					if checkpointErr != nil {
+						return errors.Join(monitor.ErrAcceptanceState, checkpointErr, controlErr)
+					}
+					if controlErr != nil {
+						return errors.Join(monitor.ErrExecutionOutcomeUnknown, controlErr)
 					}
 					if err := httpExecutionContextError(tx.budget); err != nil {
 						return err
@@ -754,15 +757,21 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 				if hasReceiver {
 					if err := receiver.ReceiveCompletedResult(outcome.Result); err != nil {
 						if !errors.Is(err, errAcceptedResultSavedForRetry) {
-							return err
+							if !errors.Is(err, monitor.ErrTerminalJob) || errors.Is(err, monitor.ErrAcceptanceState) ||
+								errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+								return err
+							}
+							// The result is known but refused: retain its diagnostics without a success ACK.
+							terminalResult = err
+						} else {
+							savedRetry = err
 						}
-						savedRetry = err
 					}
 				}
 			}
 			tx.mu.Lock()
-			tx.result, tx.runErr = outcome.Result, errors.Join(outcome.Failure.workerErr(), tx.checkpointErr, savedRetry)
-			if savedRetry != nil {
+			tx.result, tx.runErr = outcome.Result, errors.Join(outcome.Failure.workerErr(), tx.checkpointErr, savedRetry, terminalResult)
+			if savedRetry != nil || terminalResult != nil {
 				tx.quarantine = true // The worker receives a failed outcome ACK.
 			}
 			for _, diagnostic := range outcome.Result.Diagnostics {
@@ -781,7 +790,7 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 			tx.outcome, tx.fenced = true, true
 			close(tx.done)
 			tx.mu.Unlock()
-			return savedRetry
+			return errors.Join(savedRetry, terminalResult)
 		}
 	}
 	if err == nil {

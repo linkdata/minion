@@ -1369,7 +1369,8 @@ func (m *Monitor) validateAcceptedSource(ctx context.Context, accepted state.Acc
 	return repo, current, true, nil
 }
 
-func assignmentMatchesAccepted(job Job, accepted state.AcceptedAction) bool {
+// AssignmentMatchesAccepted compares a selected request with its saved reservation.
+func AssignmentMatchesAccepted(job Job, accepted state.AcceptedAction) bool {
 	return job.ID == accepted.JobID && job.AttemptID == accepted.AttemptID &&
 		job.Repository.Name == accepted.Repository && job.Repository.ID == accepted.RepositoryID &&
 		job.Repository.OwnerID == accepted.OwnerID && job.SubjectType == accepted.SubjectType &&
@@ -1396,7 +1397,7 @@ func (m *Monitor) RevalidateAssignment(ctx context.Context, store *state.Store, 
 		accepted = *store.Data.Accepted
 		var ok bool
 		failure, ok = store.Data.JobFailures[accepted.JobID]
-		if err := accepted.Validate(); err != nil || !assignmentMatchesAccepted(job, accepted) ||
+		if err := accepted.Validate(); err != nil || !AssignmentMatchesAccepted(job, accepted) ||
 			m.SelectedExecutorID != accepted.ExecutorID || accepted.Terminal ||
 			!ok || failure.Attempts <= 0 || failure.ModelCallStarted ||
 			!failure.AcceptedAt.Equal(accepted.AcceptedAt) || !failure.Deadline.Equal(accepted.Deadline) {

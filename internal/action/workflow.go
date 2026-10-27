@@ -76,7 +76,9 @@ func (e *Orchestrator) perform(ctx context.Context, request monitor.Job) (result
 			if len(evidence.Calls) != 0 {
 				err = errors.Join(err, e.retentionForSavedResult(prepared.job, e.retainReviewEvidence(prepared.job, evidence)))
 			}
-			err = errors.Join(err, e.retainIncompleteAudit(prepared, result))
+			if prepared.job.Action == command.SecurityAudit {
+				err = errors.Join(err, e.retainIncompleteUnlessSaved(prepared, result))
+			}
 			if validationErr := result.validate(prepared.job, false); validationErr != nil {
 				return errors.Join(err, fmt.Errorf("%w: invalid incomplete action result: %w", monitor.ErrTerminalJob, validationErr))
 			}
@@ -274,7 +276,7 @@ func (e *Orchestrator) preparePublication(ctx context.Context, p *preparedAction
 		if err := e.validateAuditForPublication(ctx, p.job, result.Artifacts); err != nil {
 			if errors.Is(err, errAuditPublicationUnavailable) {
 				if ctxErr := ctx.Err(); ctxErr != nil {
-					return publication{}, errors.Join(ctxErr, e.retainIncompleteAudit(p, result))
+					return publication{}, errors.Join(ctxErr, e.retainIncompleteUnlessSaved(p, result))
 				}
 				return publication{}, fmt.Errorf("%w: audit validation unavailable: %w", monitor.ErrPostModelPublication, err)
 			}
@@ -300,23 +302,40 @@ func (e *Orchestrator) retentionForSavedResult(job Job, err error) error {
 	if err == nil || !errors.Is(err, monitor.ErrPostModelPublication) {
 		return err
 	}
-	var saved bool
-	if e.Store != nil {
-		if inspectErr := e.Store.WithLock(func() error {
-			if accepted := e.Store.Data.Accepted; accepted != nil && jobMatchesAccepted(job, *accepted) {
-				var checkErr error
-				saved, checkErr = e.Store.HasAcceptedResult()
-				return checkErr
-			}
-			return nil
-		}); inspectErr != nil {
-			return errors.Join(err, fmt.Errorf("%w: inspect saved result after retention failure: %w", monitor.ErrAcceptanceState, inspectErr))
-		}
+	saved, inspectErr := e.hasSavedResult(job)
+	if inspectErr != nil {
+		return errors.Join(err, fmt.Errorf("%w: inspect saved result after retention failure: %w", monitor.ErrAcceptanceState, inspectErr))
 	}
 	if !saved {
 		return errors.Join(err, monitor.ErrTerminalJob)
 	}
 	return err
+}
+
+func (e *Orchestrator) hasSavedResult(job Job) (saved bool, err error) {
+	if e.Store == nil {
+		return false, nil
+	}
+	err = e.Store.WithLock(func() error {
+		if accepted := e.Store.Data.Accepted; accepted != nil && jobMatchesAccepted(job, *accepted) {
+			var checkErr error
+			saved, checkErr = e.Store.HasAcceptedResult()
+			return checkErr
+		}
+		return nil
+	})
+	return saved, err
+}
+
+func (e *Orchestrator) retainIncompleteUnlessSaved(p *preparedAction, result Result) error {
+	saved, err := e.hasSavedResult(p.job)
+	if err != nil {
+		return fmt.Errorf("%w: inspect saved audit result: %w", monitor.ErrAcceptanceState, err)
+	}
+	if saved {
+		return nil
+	}
+	return e.retainIncompleteAudit(p, result)
 }
 
 func rejectConfiguredKeyPublication(published publication, changes []workspace.Change, keys ...string) error {
@@ -414,9 +433,7 @@ func (e *Orchestrator) retainAudit(ctx context.Context, p *preparedAction, files
 				return err
 			}
 			if err := os.Rename(stage, dir); err != nil {
-				if err := completedAuditRenameFailure(ctx, dir, files, err); err != nil {
-					return err
-				}
+				return err
 			}
 		}
 		e.logf("audit %s #%d at %s; reports: %s", p.job.Identity.Repository, p.job.Identity.Number, p.job.Source.Head, dir)
@@ -431,19 +448,6 @@ func (e *Orchestrator) retainAudit(ctx context.Context, p *preparedAction, files
 		return errors.Join(err, os.RemoveAll(dir))
 	}
 	e.logf("audit %s #%d at %s; reports: %s", p.job.Identity.Repository, p.job.Identity.Number, p.job.Source.Head, dir)
-	return nil
-}
-
-func completedAuditRenameFailure(ctx context.Context, dir string, files []workspace.File, renameErr error) error {
-	if _, statErr := os.Lstat(dir); statErr != nil {
-		if errors.Is(statErr, os.ErrNotExist) {
-			return renameErr
-		}
-		return errors.Join(renameErr, statErr)
-	}
-	if checkErr := workspace.CheckUnchanged(ctx, dir, files); checkErr != nil {
-		return errors.Join(renameErr, fmt.Errorf("retained completed audit differs from accepted result: %w", checkErr))
-	}
 	return nil
 }
 
@@ -558,7 +562,7 @@ func (e *Orchestrator) publishFix(ctx context.Context, p *preparedAction, result
 	}
 	repo, fork := p.repository, p.fork
 	if currentRepo.ID != repo.ID || currentRepo.DefaultBranch != repo.DefaultBranch || currentRepo.Private != repo.Private || currentRepo.Visibility != repo.Visibility || currentFork.ID != fork.ID || !strings.EqualFold(currentFork.FullName, fork.FullName) {
-		return errors.New("repository or fork changed during fix; refusing to push")
+		return fmt.Errorf("%w: repository or fork changed during fix; refusing to push", monitor.ErrTerminalJob)
 	}
 	if err := p.checkout.Import(ctx, p.job.Source.Head, result.Changes); err != nil {
 		if ctx.Err() != nil {
@@ -605,7 +609,7 @@ func (e *Orchestrator) publishFixReply(ctx context.Context, p *preparedAction) e
 		if existing.State != "open" || request.Source.Author.ID == 0 || existing.User.ID != request.Source.Author.ID ||
 			existing.Head.Ref != branch || existing.Head.Repo == nil || !strings.EqualFold(existing.Head.Repo.FullName, fork.FullName) ||
 			existing.Head.SHA != expected.SHA || existing.Base.Ref != repo.DefaultBranch {
-			return fmt.Errorf("branch %s has a pull request without matching requester authorship and recorded head", branch)
+			return fmt.Errorf("%w: branch %s has a pull request without matching requester authorship and recorded head", monitor.ErrTerminalJob, branch)
 		}
 		reply = fmt.Sprintf("Fix branch `%s` at `%s` has a pull request opened by @%s: %s", branch, expected.SHA, existing.User.Login, existing.HTMLURL)
 	} else {

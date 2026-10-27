@@ -84,5 +84,5 @@ func (s *Store) ClearAcceptedResult() error {
 	if err := os.Remove(s.path + ".result"); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	return workspace.SyncDirectories(filepath.Dir(s.path))
+	return s.syncAcceptedResultDir()
 }

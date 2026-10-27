@@ -76,7 +76,7 @@ func selectedHTTPResultFixtureForJob(t *testing.T, job Job, wrap func(http.Handl
 	}
 	httpFixture := newHTTPServerTest(t, t.Context(), f.job, f.sink, wrap)
 	httpFixture.pull(t)
-	if !requestMatchesAccepted(f.sink.assignmentRequest, *store.Data.Accepted) {
+	if !monitor.AssignmentMatchesAccepted(f.sink.assignmentRequest, *store.Data.Accepted) {
 		t.Fatalf("selected HTTP fixture request differs from accepted action: request=%+v accepted=%+v", f.sink.assignmentRequest, store.Data.Accepted)
 	}
 	return httpFixture, store, path
@@ -245,6 +245,26 @@ func TestSelectedAuditInvalidValidatorResultDoesNotSave(t *testing.T) {
 	}
 	if _, err := store.ReadAcceptedResult(AcceptedResultMaxBytes); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("invalid audit validator result left a publishable sidecar: %v", err)
+	}
+}
+
+func TestSelectedInvalidPublicationReturnsKnownResultWithoutSuccessACK(t *testing.T) {
+	f, store, _ := selectedHTTPResultFixture(t, nil)
+	f.tx.sink.(*executionCheckpoints).owner.Runner.Codex.APIKey = "configured-secret"
+	outcome := completeHTTPResult(t, f)
+	outcome.Result.Answer = "configured-secret"
+	outcome.Result.Diagnostics = []Diagnostic{{Code: "private", Message: "worker cleanup detail"}}
+	ack := f.request("/outcome", outcome)
+	if ack.err != nil || ack.status != http.StatusInternalServerError || ack.ack.Failure == nil || !ack.ack.Failure.Terminal {
+		t.Fatalf("invalid publication received a success ACK: %+v", ack)
+	}
+	got := f.result(t)
+	if !errors.Is(got.err, monitor.ErrTerminalJob) || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) ||
+		errors.Is(got.err, monitor.ErrAcceptanceState) || !reflect.DeepEqual(got.result, outcome.Result) {
+		t.Fatalf("known rejected result lost its diagnostics: result=%+v error=%v", got.result, got.err)
+	}
+	if present, err := store.HasAcceptedResult(); err != nil || present {
+		t.Fatalf("invalid result left a publishable receipt: present=%t error=%v", present, err)
 	}
 }
 

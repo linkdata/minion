@@ -18,7 +18,12 @@ func (e *Orchestrator) PublishRecovered(ctx context.Context, request monitor.Job
 	if e == nil || e.Store == nil {
 		return fmt.Errorf("%w: accepted result store is missing", monitor.ErrAcceptanceState)
 	}
-	defer func() { resultErr = redactActionError(resultErr, e.Runner.secretValues()...) }()
+	defer func() {
+		if terminalGitworkFailure(resultErr) {
+			resultErr = fmt.Errorf("%w: %w", monitor.ErrTerminalJob, resultErr)
+		}
+		resultErr = redactActionError(resultErr, e.Runner.secretValues()...)
+	}()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -42,7 +47,7 @@ func (e *Orchestrator) PublishRecovered(ctx context.Context, request monitor.Job
 	if err != nil {
 		return fmt.Errorf("%w: decode accepted result: %w", monitor.ErrAcceptanceState, err)
 	}
-	if !record.MatchesAccepted(accepted) || !requestMatchesAccepted(request, accepted) {
+	if !record.MatchesAccepted(accepted) || !monitor.AssignmentMatchesAccepted(request, accepted) {
 		return fmt.Errorf("%w: accepted result differs from current action", monitor.ErrAcceptanceState)
 	}
 	acknowledged, err := e.alreadyAcknowledged(ctx, request)
@@ -86,7 +91,7 @@ func (e *Orchestrator) publishRecoveredFix(ctx context.Context, p *preparedActio
 		return err
 	}
 	if !original.matches(p.repository, p.fork) {
-		return errors.New("fix destination changed since accepted result; refusing to publish")
+		return fmt.Errorf("%w: fix destination changed since accepted result; refusing to publish", monitor.ErrTerminalJob)
 	}
 	p.branch = fmt.Sprintf("minion/fix-%d-%s", request.Number, request.ID[:12])
 	p.existing, err = e.GitHub.FindPullRequestByHead(ctx, p.repository.FullName, p.repository.DefaultBranch, e.BotLogin+":"+p.branch)
@@ -103,7 +108,7 @@ func (e *Orchestrator) publishRecoveredFix(ctx context.Context, p *preparedActio
 	remote, err := e.GitHub.Branch(ctx, p.fork.FullName, p.branch)
 	if err == nil {
 		if remote.Name != p.branch || expected.SHA == "" || remote.Commit.SHA != expected.SHA {
-			return fmt.Errorf("branch %s exists without a matching recorded bot commit; refusing to reuse it", p.branch)
+			return fmt.Errorf("%w: branch %s exists without a matching recorded bot commit; refusing to reuse it", monitor.ErrTerminalJob, p.branch)
 		}
 		published, err := e.preparePublication(ctx, p, result)
 		if err != nil {

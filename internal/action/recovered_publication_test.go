@@ -359,7 +359,7 @@ func TestPublishRecoveredFixKeepsCheckpointAfterMissingBranchLookup(t *testing.T
 	t.Setenv("PATH", t.TempDir()) // An unexpected rebuild needs Git and must fail this test.
 	orchestrator := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", WorkRoot: t.TempDir(),
 		Runner: Runner{runModel: forbidModel(t)}}
-	if err := orchestrator.PublishRecovered(t.Context(), request); err == nil || !strings.Contains(err.Error(), "refusing to replace the checkpoint") ||
+	if err := orchestrator.PublishRecovered(t.Context(), request); err == nil || errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "refusing to replace the checkpoint") ||
 		replies.Load() != 0 || branchLookups.Load() != 1 || store.Data.PendingFixes[request.ID].SHA != sha {
 		t.Fatalf("missing branch lookup lost checkpoint: replies=%d checkpoint=%+v error=%v", replies.Load(), store.Data.PendingFixes[request.ID], err)
 	}
@@ -416,7 +416,7 @@ func TestPublishRecoveredFixRejectsUnrecordedBranchSHA(t *testing.T) {
 	orchestrator := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", WorkRoot: t.TempDir(),
 		Runner: Runner{runModel: forbidModel(t)}}
 	err := orchestrator.PublishRecovered(t.Context(), request)
-	if err == nil || !strings.Contains(err.Error(), "without a matching recorded bot commit") || writes.Load() != 0 {
+	if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "without a matching recorded bot commit") || writes.Load() != 0 {
 		t.Fatalf("foreign branch was reused: writes=%d error=%v", writes.Load(), err)
 	}
 }
@@ -464,7 +464,7 @@ func TestPublishRecoveredFixRejectsDestinationDrift(t *testing.T) {
 			orchestrator := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", WorkRoot: t.TempDir(),
 				Runner: Runner{runModel: forbidModel(t)}}
 			err := orchestrator.PublishRecovered(t.Context(), request)
-			if err == nil || !strings.Contains(err.Error(), "fix destination changed since accepted result") || writes.Load() != 0 {
+			if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "fix destination changed since accepted result") || writes.Load() != 0 {
 				t.Fatalf("changed destination was used: writes=%d error=%v", writes.Load(), err)
 			}
 			if present, err := store.HasAcceptedResult(); err != nil || !present {

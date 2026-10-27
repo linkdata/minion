@@ -2,6 +2,7 @@ package action
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -121,17 +122,6 @@ func jobMatchesAccepted(job Job, a state.AcceptedAction) bool {
 		job.Command == a.CommandName && string(job.Action) == a.Action
 }
 
-func requestMatchesAccepted(job monitor.Job, a state.AcceptedAction) bool {
-	return job.ID == a.JobID && job.AttemptID == a.AttemptID &&
-		job.Repository.Name == a.Repository && job.Repository.ID == a.RepositoryID && job.Repository.OwnerID == a.OwnerID &&
-		job.SubjectType == a.SubjectType && job.Number == a.SubjectNumber &&
-		job.Source.Key == a.SourceKey && job.Source.NodeID == a.SourceNodeID && job.Source.HTMLURL == a.SourceURL &&
-		job.Source.UpdatedAt.Equal(a.SourceUpdatedAt) &&
-		strings.EqualFold(job.Source.Author.Login, a.Requester) && job.Source.Author.ID == a.RequesterID &&
-		job.Command.Name == a.CommandName && string(job.Command.Action) == a.Action &&
-		job.AcceptedAt.Equal(a.AcceptedAt) && job.Deadline.Equal(a.Deadline)
-}
-
 // ReceiveCompletedResult is called only for a successful, sequence-complete
 // HTTP outcome. Selected actions save their result before the HTTP ACK.
 func (c *executionCheckpoints) ReceiveCompletedResult(result Result) error {
@@ -179,9 +169,12 @@ func (c *executionCheckpoints) ReceiveCompletedResult(result Result) error {
 	var accepted state.AcceptedAction
 	if err := c.owner.Store.WithLock(func() error {
 		a := c.owner.Store.Data.Accepted
-		if a == nil || !jobMatchesAccepted(c.job, *a) || !requestMatchesAccepted(c.assignmentRequest, *a) ||
-			!a.Assigned || a.Terminal || !time.Now().Before(a.Deadline) {
+		if a == nil || !jobMatchesAccepted(c.job, *a) || !monitor.AssignmentMatchesAccepted(c.assignmentRequest, *a) ||
+			!a.Assigned || a.Terminal {
 			return c.fail(fmt.Errorf("%w: selected action changed before result save", monitor.ErrAcceptanceState))
+		}
+		if !time.Now().Before(a.Deadline) {
+			return c.fail(errors.Join(monitor.ErrTerminalJob, context.DeadlineExceeded))
 		}
 		accepted = *a
 		return nil
@@ -207,8 +200,11 @@ func (c *executionCheckpoints) ReceiveCompletedResult(result Result) error {
 			}
 		}
 		if a == nil || !record.MatchesAccepted(*a) || !jobMatchesAccepted(c.job, *a) ||
-			!requestMatchesAccepted(c.assignmentRequest, *a) || !a.Assigned || a.Terminal || !time.Now().Before(a.Deadline) {
+			!monitor.AssignmentMatchesAccepted(c.assignmentRequest, *a) || !a.Assigned || a.Terminal {
 			return c.fail(fmt.Errorf("%w: selected action changed before result save", monitor.ErrAcceptanceState))
+		}
+		if !time.Now().Before(a.Deadline) {
+			return c.fail(errors.Join(monitor.ErrTerminalJob, context.DeadlineExceeded))
 		}
 		if err := c.owner.Store.WriteAcceptedResult(data); err != nil {
 			return c.fail(fmt.Errorf("%w: save accepted result: %w", monitor.ErrAcceptanceState, err))

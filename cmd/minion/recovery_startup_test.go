@@ -6,7 +6,9 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -141,9 +143,66 @@ func TestStartupPublishesStoredResultBeforeSelectedWorkerPreflight(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
 	present, err := store.HasAcceptedResult()
 	if err != nil || present || store.Data.Accepted != nil || store.Data.Processed[accepted.JobID].IsZero() || len(store.Data.JobFailures) != 0 {
 		t.Fatalf("recovered result was not durably completed: present=%t err=%v state=%+v", present, err, store.Data)
+	}
+	if runtime.GOOS == "windows" {
+		if err := store.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return // The next preflight uses a POSIX shell CLI fixture.
+	}
+
+	// Repeat recovery with -loop. Its later preflight resolves the default
+	// model; the worker startup must use that resolved selection.
+	store.Data.Accepted = &accepted
+	store.Data.JobFailures[accepted.JobID] = state.JobFailure{Attempts: 1, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline}
+	delete(store.Data.Processed, accepted.JobID)
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WriteAcceptedResult(data); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Main = "claude"
+	for _, name := range []string{"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy"} {
+		t.Setenv(name, "")
+	}
+	claude := `#!/bin/sh
+case " $* " in
+  *' auth status --json '*) printf '%s\n' '{"loggedIn":true}'; exit 0 ;;
+  *' --minion-unsupported-capability-probe '*) printf '%s\n' 'unknown option --minion-unsupported-capability-probe' >&2; exit 2 ;;
+  *' --resume '*)
+    next=false
+    for arg do
+      if $next; then id=$arg; break; fi
+      [ "$arg" != --resume ] || next=true
+    done
+    printf '%s\n' '{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":0,"total_cost_usd":0,"usage":{"input_tokens":0,"output_tokens":0}}'
+    printf 'No conversation found with session ID: %s\n' "$id" >&2
+    exit 1 ;;
+esac
+input=$(/bin/cat)
+case "$input" in *minion-initialize*) printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"minion-initialize","response":{"models":[{"value":"default","resolvedModel":"claude-test"}]}}}' ;; *) exit 90 ;; esac
+`
+	if err := os.WriteFile(filepath.Join(os.Getenv("PATH"), "claude"), []byte(claude), 0700); err != nil {
+		t.Fatal(err)
+	}
+	code, output = runStartupFixtureWithRun(t, cfg, func() int {
+		return runWithGitCheck(func(context.Context, string) error {
+			gitChecks++
+			return nil
+		})
+	}, "-mode=orchestrate", "-loop")
+	if code != 1 || gitChecks != 1 || !strings.Contains(output, "Claude settings: model=claude-test") ||
+		!strings.Contains(output, "start selected worker:") || strings.Contains(output, "worker main selection requires a resolved model") {
+		t.Fatalf("loop did not use resolved service config after recovery: exit=%d git_checks=%d log=%q", code, gitChecks, output)
+	}
+	if publications != 2 {
+		t.Fatalf("loop did not recover the saved result before preflight: publications=%d", publications)
 	}
 }

@@ -140,7 +140,7 @@ func TestSelectedOutcomeWaitsForRequiredACKBeforeSaving(t *testing.T) {
 	if stopCancel != nil {
 		stopCancel() // End the test's post-stop collection grace.
 	}
-	if got := f.result(t); !errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) {
+	if got := f.result(t); !errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || errors.Is(got.err, monitor.ErrAcceptanceState) {
 		t.Fatalf("failed required ACK was not an unknown outcome: %+v", got)
 	}
 	if _, err := store.ReadAcceptedResult(AcceptedResultMaxBytes); !errors.Is(err, os.ErrNotExist) {

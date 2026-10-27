@@ -171,8 +171,7 @@ func (e *Orchestrator) Execute(ctx context.Context, job monitor.Job) (resultErr 
 	}
 	deadlineErr := ctx.Err()
 	if resultErr != nil && (errors.Is(deadlineErr, context.DeadlineExceeded) ||
-		errors.Is(resultErr, gitwork.ErrTooManyFiles) ||
-		errors.Is(resultErr, gitwork.ErrDiffTooLarge) || errors.Is(resultErr, gitwork.ErrCheckoutTooLarge) || errors.Is(resultErr, gitwork.ErrUnsupportedSource) || errors.Is(resultErr, aicli.ErrOutputLimit)) {
+		terminalGitworkFailure(resultErr) || errors.Is(resultErr, aicli.ErrOutputLimit)) {
 		if errors.Is(deadlineErr, context.DeadlineExceeded) && !errors.Is(resultErr, context.DeadlineExceeded) {
 			resultErr = errors.Join(resultErr, deadlineErr)
 		}
@@ -180,6 +179,11 @@ func (e *Orchestrator) Execute(ctx context.Context, job monitor.Job) (resultErr 
 	}
 	returned = true
 	return resultErr
+}
+
+func terminalGitworkFailure(err error) bool {
+	return errors.Is(err, gitwork.ErrTooManyFiles) || errors.Is(err, gitwork.ErrDiffTooLarge) ||
+		errors.Is(err, gitwork.ErrCheckoutTooLarge) || errors.Is(err, gitwork.ErrUnsupportedSource)
 }
 
 func runtimeDeadline(acceptedAt time.Time, maxRuntime time.Duration) time.Time {

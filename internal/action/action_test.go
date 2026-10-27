@@ -434,6 +434,7 @@ func TestFixRecoversOnlyRecordedBranch(t *testing.T) {
 		oversizedNotes      bool
 		wantComment         bool
 		wantPostPublication bool
+		wantTerminal        bool
 		wantError           string
 	}{
 		{name: "recorded commit", remoteSHA: strings.Repeat("a", 40), wantComment: true},
@@ -444,9 +445,9 @@ func TestFixRecoversOnlyRecordedBranch(t *testing.T) {
 		{name: "recorded commit with oversized notes", remoteSHA: strings.Repeat("a", 40), oversizedNotes: true, wantComment: true},
 		{name: "changed branch", remoteSHA: strings.Repeat("b", 40), wantError: "without a matching recorded bot commit"},
 		{name: "PR without branch", existingUser: "writer", existingID: 7, existingSHA: strings.Repeat("a", 40), wantError: "has a pull request but no remote branch"},
-		{name: "other PR creator", wantPostPublication: true, remoteSHA: strings.Repeat("a", 40), existingUser: "other-writer", existingID: 8, existingSHA: strings.Repeat("a", 40), wantError: "without matching requester authorship"},
-		{name: "changed PR head", wantPostPublication: true, remoteSHA: strings.Repeat("a", 40), existingUser: "writer", existingID: 7, existingSHA: strings.Repeat("b", 40), wantError: "without matching requester authorship"},
-		{name: "bot PR", wantPostPublication: true, remoteSHA: strings.Repeat("a", 40), existingUser: "linkdataminion", existingID: 9, existingSHA: strings.Repeat("a", 40), wantError: "without matching requester authorship"},
+		{name: "other PR creator", wantPostPublication: true, wantTerminal: true, remoteSHA: strings.Repeat("a", 40), existingUser: "other-writer", existingID: 8, existingSHA: strings.Repeat("a", 40), wantError: "without matching requester authorship"},
+		{name: "changed PR head", wantPostPublication: true, wantTerminal: true, remoteSHA: strings.Repeat("a", 40), existingUser: "writer", existingID: 7, existingSHA: strings.Repeat("b", 40), wantError: "without matching requester authorship"},
+		{name: "bot PR", wantPostPublication: true, wantTerminal: true, remoteSHA: strings.Repeat("a", 40), existingUser: "linkdataminion", existingID: 9, existingSHA: strings.Repeat("a", 40), wantError: "without matching requester authorship"},
 		{name: "requester PR recovery", remoteSHA: strings.Repeat("a", 40), existingUser: "writer", existingID: 7, existingSHA: strings.Repeat("a", 40), wantComment: true},
 		{name: "renamed requester PR", remoteSHA: strings.Repeat("a", 40), existingUser: "new-login", existingID: 7, existingSHA: strings.Repeat("a", 40), wantComment: true},
 	} {
@@ -597,6 +598,9 @@ func TestFixRecoversOnlyRecordedBranch(t *testing.T) {
 			}
 			if errors.Is(err, monitor.ErrPostModelPublication) != tt.wantPostPublication {
 				t.Fatalf("fix() publication classification = %v, want post-publication=%t", err, tt.wantPostPublication)
+			}
+			if errors.Is(err, monitor.ErrTerminalJob) != tt.wantTerminal {
+				t.Fatalf("fix() terminal classification = %v, want terminal=%t", err, tt.wantTerminal)
 			}
 			if (commentBody != "") != tt.wantComment {
 				t.Fatalf("comment = %q, want comment=%t", commentBody, tt.wantComment)
